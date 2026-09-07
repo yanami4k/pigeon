@@ -13,8 +13,8 @@
     "verbatimModuleSyntax": true,
     "noEmitOnError": true,
     "skipLibCheck": false,
-    "types": ["node"]
+    "types": ["node"],
+    "erasableSyntaxOnly": true
   },
   "include": ["src/**/*.ts"]
 }
-
