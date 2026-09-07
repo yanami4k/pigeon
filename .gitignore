@@ -12,3 +12,7 @@ npm-debug.log*
 docs/*
 !docs/roadmap/
 
+assets/
+output/
+tmp/
+tmp_extract.txt
