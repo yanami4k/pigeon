@@ -16,3 +16,6 @@ assets/
 output/
 tmp/
 tmp_extract.txt
+
+# Local agent conventions
+AGENTS.md
