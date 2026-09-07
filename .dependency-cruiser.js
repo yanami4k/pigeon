@@ -19,6 +19,13 @@ export default {
       from: { path: "^src", pathNot: "^src/pi-runtime" },
       to: { path: "node_modules/@earendil-works" },
     },
+    {
+      name: "tui-cannot-reach-execution",
+      severity: "error",
+      comment: "TUI 只提交意图、渲染投影，不能触碰执行器（ROADMAP §2/§3.6 Actor 边界）。",
+      from: { path: "^src/tui" },
+      to: { path: "^src/execution" },
+    },
   ],
   options: {
     doNotFollow: { path: "node_modules" },
