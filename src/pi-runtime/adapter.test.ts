@@ -1,0 +1,202 @@
+// PiRuntimeAdapter 跨真实 pi-agent-core Agent seam 的测试（ROADMAP M1 完成证据）。
+// 五个场景：正常完成 / 流式中途 abort / 模型报错 / 快照可重建 / listener 韧性。
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { Value } from "typebox/value";
+import { EventEnvelopeSchema } from "../state/events.ts";
+import { PiRuntimeAdapter } from "./adapter.ts";
+import type { TurnCompletedPayload } from "./events.ts";
+import { createFakeStreamFn, createGate, type FakeStreamFn } from "./fixtures.ts";
+import type { InjectionSnapshot } from "./snapshot.ts";
+
+// 固定 createdAt 的快照工厂：保证“同一快照重建”场景里两份快照逐字节一致
+function createSnapshot(): InjectionSnapshot {
+  return {
+    version: 1,
+    model: { provider: "fake-provider", id: "fake-model-1" },
+    tools: { policy: { allow: [], deny: [] }, advertised: [] },
+    context: { systemPrompt: "你是 Pigeon 测试助手。" },
+    memory: [],
+    skills: [],
+    createdAt: 1700000000000,
+  };
+}
+
+// 等待 Adapter 观察到指定 kind 的事件（订阅真实信号，不猜时间）
+function waitForEvent(adapter: PiRuntimeAdapter, kind: string): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const unsubscribe = adapter.subscribe((event) => {
+    if (event.kind === kind) {
+      unsubscribe();
+      resolve();
+    }
+  });
+  return promise;
+}
+
+test("正常完成：事件序列完整、终态 completed、快照冻结且内容正确", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "你好！有什么可以帮你？" }] });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+
+  const result = await adapter.run("你好");
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.stopReason, "stop");
+  assert.equal(result.syntheticFailure, false);
+  assert.equal(result.errorMessage, undefined);
+  assert.deepEqual(result.advertisedTools, []);
+
+  // 完整事件序列：user 消息不产生 Pigeon 事件，assistant 消息映射为 turn 边界
+  const kinds = adapter.events().map((event) => event.kind);
+  assert.deepEqual(kinds, ["turn.started", "turn.completed", "run.ended"]);
+  // 每条事件都是合法信封（真实 EntryId/SessionId/RunId、版本、时间戳）
+  for (const event of adapter.events()) {
+    assert.ok(Value.Check(EventEnvelopeSchema, event), JSON.stringify(event));
+  }
+  const turnCompleted = adapter.events()[1];
+  assert.ok(turnCompleted);
+  const payload = turnCompleted.payload as TurnCompletedPayload;
+  assert.equal(payload.stopReason, "stop");
+  assert.equal(payload.syntheticFailure, false);
+
+  // 快照深冻结且内容与注入一致
+  const snapshot = adapter.snapshot();
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(Object.isFrozen(snapshot.model));
+  assert.ok(Object.isFrozen(snapshot.tools));
+  assert.ok(Object.isFrozen(snapshot.tools.policy));
+  assert.ok(Object.isFrozen(snapshot.tools.advertised));
+  assert.deepEqual(snapshot, createSnapshot());
+  assert.throws(() => {
+    (snapshot.model as { provider: string }).provider = "篡改";
+  }, TypeError);
+
+  await adapter.dispose();
+});
+
+test("流式中途 abort：终态 aborted，事件序列完整收尾", async () => {
+  // 门闩把模型流停在“已开始但未结束”的确定时间点，interrupt 后再放行
+  const gate = createGate();
+  const streamFn = createFakeStreamFn({
+    replies: [{ text: "这是一段足够长的流式回复。", chunkSize: 2, chunkGate: gate }],
+  });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const turnStarted = waitForEvent(adapter, "turn.started");
+
+  const runPromise = adapter.run("你好");
+  await turnStarted;
+  assert.equal(adapter.isRunning(), true);
+  // 固定姿势：abort → waitForIdle（interrupt 内部）；abort 同步生效后放行门闩让流收尾
+  const interruptPromise = adapter.interrupt();
+  gate.open();
+  await interruptPromise;
+  const result = await runPromise;
+
+  assert.equal(result.status, "aborted");
+  assert.equal(result.stopReason, "aborted");
+  assert.equal(result.syntheticFailure, false);
+
+  // 事件序列完整收尾：turn.started → turn.completed(aborted) → run.ended，无悬挂
+  const kinds = adapter.events().map((event) => event.kind);
+  assert.equal(kinds[0], "turn.started");
+  assert.ok(kinds.includes("turn.completed"));
+  assert.equal(kinds.at(-1), "run.ended");
+  assert.equal(adapter.isRunning(), false);
+
+  await adapter.dispose();
+});
+
+test("模型报错：终态 failed，errorMessage 被记录，合成消息被识别标注", async () => {
+  const streamFn = createFakeStreamFn({
+    replies: [{ text: "不会用到" }],
+    failOnCall: 1,
+    failureMessage: "模拟上游 500",
+  });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+
+  const result = await adapter.run("你好");
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.stopReason, "error");
+  assert.match(result.errorMessage ?? "", /模拟上游 500/);
+  assert.equal(result.syntheticFailure, true);
+
+  // 合成消息走正常广播路径：turn.started → turn.completed → run.ended
+  const kinds = adapter.events().map((event) => event.kind);
+  assert.deepEqual(kinds, ["turn.started", "turn.completed", "run.ended"]);
+  const turnCompleted = adapter.events()[1];
+  assert.ok(turnCompleted);
+  const payload = turnCompleted.payload as TurnCompletedPayload;
+  assert.equal(payload.stopReason, "error");
+  assert.equal(payload.syntheticFailure, true);
+  assert.match(payload.errorMessage ?? "", /模拟上游 500/);
+
+  await adapter.dispose();
+});
+
+test("快照可重建：同一 InjectionSnapshot 跑两次 Run，事件序列等价", async () => {
+  const snapshot = createSnapshot();
+
+  const streamFn1 = createFakeStreamFn({ replies: [{ text: "固定回复" }] });
+  const adapter1 = new PiRuntimeAdapter({ snapshot, streamFn: streamFn1 });
+  const result1 = await adapter1.run("你好");
+
+  const streamFn2 = createFakeStreamFn({ replies: [{ text: "固定回复" }] });
+  const adapter2 = new PiRuntimeAdapter({ snapshot, streamFn: streamFn2 });
+  const result2 = await adapter2.run("你好");
+
+  assert.equal(result1.status, "completed");
+  assert.equal(result2.status, "completed");
+  // 事件序列等价：剥掉 ID / 时间戳 / sessionId / runId 后逐条一致
+  const strip = (adapter: PiRuntimeAdapter) =>
+    adapter.events().map(({ kind, payload }) => ({ kind, payload }));
+  assert.deepEqual(strip(adapter1), strip(adapter2));
+  // 两次 Run 注入了相同的 systemPrompt 与用户消息
+  const contextOf = (streamFn: FakeStreamFn) => {
+    const call = streamFn.calls[0];
+    assert.ok(call);
+    return call.context;
+  };
+  assert.equal(contextOf(streamFn1).systemPrompt, snapshot.context.systemPrompt);
+  assert.deepEqual(
+    contextOf(streamFn1).messages.map((m) => ({ role: m.role, content: m.content })),
+    contextOf(streamFn2).messages.map((m) => ({ role: m.role, content: m.content }))
+  );
+
+  await adapter1.dispose();
+  await adapter2.dispose();
+});
+
+test("listener 韧性：抛异常的 listener 被吞掉并记录，Run 不受影响", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "正常回复" }] });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const seen: string[] = [];
+  adapter.subscribe((event) => {
+    seen.push(event.kind);
+  });
+  adapter.subscribe(() => {
+    throw new Error("listener 炸了");
+  });
+
+  const result = await adapter.run("你好");
+
+  // Run 终态不受坏 listener 影响
+  assert.equal(result.status, "completed");
+  // 坏 listener 不影响排在其前后的正常 listener
+  assert.deepEqual(seen, ["turn.started", "turn.completed", "run.ended"]);
+  // 异常被吞掉并记录：每个事件一次
+  assert.equal(adapter.listenerErrors().length, 3);
+  for (const error of adapter.listenerErrors()) {
+    assert.ok(error instanceof Error);
+    assert.equal((error as Error).message, "listener 炸了");
+  }
+  // transcript 里没有因 listener 异常产生的合成错误消息
+  const last = adapter.transcript().at(-1);
+  assert.ok(last);
+  assert.equal(last.role, "assistant");
+  if (last.role === "assistant") {
+    assert.equal(last.stopReason, "stop");
+  }
+
+  await adapter.dispose();
+});
