@@ -15,8 +15,9 @@ export default {
       severity: "error",
       comment:
         "架构约束（路线图 §3.6/约束 6）：业务代码不得直接 import @earendil-works/*，" +
+        "审计决策授权 src/tools 层包装上游工具工厂，治理边界在 src/tools/wrap.ts；" +
         "所有运行交互统一经 src/pi-runtime 的 PiRuntimeAdapter。",
-      from: { path: "^src", pathNot: "^src/pi-runtime" },
+      from: { path: "^src", pathNot: "^src/(pi-runtime|tools)" },
       to: { path: "node_modules/@earendil-works" },
     },
     {

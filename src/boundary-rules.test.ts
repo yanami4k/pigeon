@@ -1,5 +1,5 @@
 // 边界规则的元测试：防"规则还在但已经不干活了"（TS7 静默巡航 0 模块事故的教训）。
-// 断言一：真实违规会被规则抓住；断言二：巡航没有空转（模块数 > 15 且 0 违规）。
+// 断言一：真实违规会被规则抓住；断言二：tools 豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
 // 夹具写在 os.tmpdir()，不进 src/——否则主 npm run deps 会把夹具当真违规报出来。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -33,19 +33,24 @@ async function cruiseJson(targets: string[], ruleSet: NonNullable<ICruiseOptions
   return result.output;
 }
 
-test("违规会被抓住：tui→execution 与 业务层→@earendil-works", async () => {
+test("违规会被抓住：tui→execution、review→@earendil-works，tools 豁免生效", async () => {
   const ruleSet = await loadRuleSet();
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pigeon-boundary-"));
   const originalCwd = process.cwd();
   try {
-    // 夹具：镜像 src/ 目录结构，让 ^src/tui 等规则路径能匹配
+    // 夹具：镜像 src/ 目录结构，让 ^src/... 等规则路径能匹配
     mkdirSync(join(fixtureRoot, "src/tui"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/execution"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/review"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/tools"), { recursive: true });
     writeFileSync(join(fixtureRoot, "src/execution/index.ts"), "export {};\n");
     writeFileSync(
       join(fixtureRoot, "src/tui/probe.ts"),
       'import "../execution/index.ts";\nexport {};\n'
+    );
+    writeFileSync(
+      join(fixtureRoot, "src/review/probe.ts"),
+      'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = Agent;\n'
     );
     writeFileSync(
       join(fixtureRoot, "src/tools/probe.ts"),
@@ -58,14 +63,20 @@ test("违规会被抓住：tui→execution 与 业务层→@earendil-works", asy
     process.chdir(fixtureRoot);
     const output = await cruiseJson(["src"], ruleSet);
 
-    const ruleNames = new Set(output.summary.violations.map((v) => v.rule.name));
-    assert.ok(
-      ruleNames.has("tui-cannot-reach-execution"),
-      `应抓到 tui-cannot-reach-execution，实际违规：${JSON.stringify([...ruleNames])}`
+    const ruleViolations = output.summary.violations.filter(
+      (v) => v.rule.name === "pi-agent-only-via-pi-runtime"
     );
     assert.ok(
-      ruleNames.has("pi-agent-only-via-pi-runtime"),
-      `应抓到 pi-agent-only-via-pi-runtime，实际违规：${JSON.stringify([...ruleNames])}`
+      ruleViolations.some((v) => v.from.includes("src/review/probe.ts")),
+      `应抓到 src/review/probe.ts 的违规，实际违规：${JSON.stringify(ruleViolations)}`
+    );
+    assert.ok(
+      !ruleViolations.some((v) => v.from.includes("src/tools/probe.ts")),
+      `src/tools/probe.ts 应豁免，不应产生 pi-agent-only-via-pi-runtime 违规，实际违规：${JSON.stringify(ruleViolations)}`
+    );
+    assert.ok(
+      output.summary.violations.some((v) => v.rule.name === "tui-cannot-reach-execution"),
+      `应抓到 tui-cannot-reach-execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
     );
   } finally {
     process.chdir(originalCwd);
