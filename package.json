@@ -23,8 +23,12 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@types/node": "24.13.3",
     "dependency-cruiser": "18.2.0",
     "typescript": "6.0.3"
+  },
+  "overrides": {
+    "@anthropic-ai/sdk": "0.124.0"
   }
 }
