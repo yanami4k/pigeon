@@ -1,5 +1,5 @@
 // PiRuntimeAdapter 跨真实 pi-agent-core Agent seam 的测试（ROADMAP M1 完成证据）。
-// 五个场景：正常完成 / 流式中途 abort / 模型报错 / 快照可重建 / listener 韧性。
+// 六个场景：正常完成 / 流式中途 abort / 模型报错 / 快照可重建 / listener 韧性 / dispose 空跑与幂等。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
@@ -199,4 +199,17 @@ test("listener 韧性：抛异常的 listener 被吞掉并记录，Run 不受影
   }
 
   await adapter.dispose();
+});
+
+test("dispose 空跑与幂等：从未 Run 直接释放不抛不悬挂，释放后拒绝 Run，重复释放无副作用", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "不会用到" }] });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+
+  // 从未 run 过的 adapter 直接 dispose：正常 await 返回即证明不抛异常、不悬挂
+  await adapter.dispose();
+  // 幂等：第二次 dispose 同样正常返回
+  await adapter.dispose();
+
+  // 释放后的行为契约：再启动 Run 必须抛“已释放”错误
+  await assert.rejects(adapter.run("你好"), /已释放/);
 });
