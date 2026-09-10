@@ -1,5 +1,6 @@
 // 边界规则的元测试：防"规则还在但已经不干活了"（TS7 静默巡航 0 模块事故的教训）。
-// 断言一：真实违规会被规则抓住；断言二：tools 豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
+// 断言一：真实违规会被规则抓住（含 src/tools 下绕过桥接文件的 rogue 直连）；
+// 断言二：tools 单一桥接文件（wrap.ts）豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
 // 夹具写在 os.tmpdir()，不进 src/——否则主 npm run deps 会把夹具当真违规报出来。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -33,7 +34,7 @@ async function cruiseJson(targets: string[], ruleSet: NonNullable<ICruiseOptions
   return result.output;
 }
 
-test("违规会被抓住：tui→execution、review→@earendil-works，tools 豁免生效", async () => {
+test("违规会被抓住：tui→execution、review→@earendil-works、tools 下 rogue 直连；wrap.ts 桥豁免生效", async () => {
   const ruleSet = await loadRuleSet();
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pigeon-boundary-"));
   const originalCwd = process.cwd();
@@ -52,9 +53,15 @@ test("违规会被抓住：tui→execution、review→@earendil-works，tools �
       join(fixtureRoot, "src/review/probe.ts"),
       'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = Agent;\n'
     );
+    // rogue 夹具：src/tools 下绕过桥接文件直接 new Agent——收口后必须被抓
     writeFileSync(
       join(fixtureRoot, "src/tools/probe.ts"),
-      'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = Agent;\n'
+      'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = new Agent();\n'
+    );
+    // 桥接文件：src/tools/wrap.ts 是收口后唯一允许 import 上游的位置
+    writeFileSync(
+      join(fixtureRoot, "src/tools/wrap.ts"),
+      'import type { AgentTool } from "@earendil-works/pi-agent-core";\nexport type T = AgentTool;\n'
     );
     // junction 指回仓库 node_modules，让裸说明符 @earendil-works/* 可解析
     symlinkSync(join(originalCwd, "node_modules"), join(fixtureRoot, "node_modules"), "junction");
@@ -71,8 +78,12 @@ test("违规会被抓住：tui→execution、review→@earendil-works，tools �
       `应抓到 src/review/probe.ts 的违规，实际违规：${JSON.stringify(ruleViolations)}`
     );
     assert.ok(
-      !ruleViolations.some((v) => v.from.includes("src/tools/probe.ts")),
-      `src/tools/probe.ts 应豁免，不应产生 pi-agent-only-via-pi-runtime 违规，实际违规：${JSON.stringify(ruleViolations)}`
+      ruleViolations.some((v) => v.from.includes("src/tools/probe.ts")),
+      `收口后 src/tools/probe.ts（rogue 直连）应被抓，实际违规：${JSON.stringify(ruleViolations)}`
+    );
+    assert.ok(
+      !ruleViolations.some((v) => v.from.includes("src/tools/wrap.ts")),
+      `桥接文件 src/tools/wrap.ts 应豁免，实际违规：${JSON.stringify(ruleViolations)}`
     );
     assert.ok(
       output.summary.violations.some((v) => v.rule.name === "tui-cannot-reach-execution"),

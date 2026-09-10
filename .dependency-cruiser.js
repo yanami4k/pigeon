@@ -14,10 +14,10 @@ export default {
       name: "pi-agent-only-via-pi-runtime",
       severity: "error",
       comment:
-        "架构约束（路线图 §3.6/约束 6）：业务代码不得直接 import @earendil-works/*，" +
-        "审计决策授权 src/tools 层包装上游工具工厂，治理边界在 src/tools/wrap.ts；" +
-        "所有运行交互统一经 src/pi-runtime 的 PiRuntimeAdapter。",
-      from: { path: "^src", pathNot: "^src/(pi-runtime|tools)" },
+        "架构约束（路线图 §3.6/约束 6）：业务代码不得直接 import @earendil-works/*；" +
+        "src/tools 的豁免已收口为单一桥接文件 src/tools/wrap.ts（纯类型别名），" +
+        "其余 tools 文件一律经 wrap.ts 取上游类型；所有运行交互统一经 src/pi-runtime 的 PiRuntimeAdapter。",
+      from: { path: "^src", pathNot: "^src/(pi-runtime/|tools/wrap\\.ts$)" },
       to: { path: "node_modules/@earendil-works" },
     },
     {
