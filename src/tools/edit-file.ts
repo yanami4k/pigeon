@@ -19,8 +19,7 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { resolveWorkspacePath } from "./paths.ts";
-import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
-
+import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 export class EditFileError extends Error {}
 
 const AnchorSchema = Type.String({ pattern: "^\\d+#[0-9a-f]{4}$" });
@@ -65,7 +64,7 @@ export interface EditFileDetails {
 
 export function createEditFileTool(
   workspaceRoot: string
-): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> {
+): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool {
   return {
     name: "edit_file",
     label: "edit_file",
@@ -77,46 +76,65 @@ export function createEditFileTool(
     parameters: EditFileParamsSchema,
     // 写工具强制串行执行器（对齐上游 executionMode 语义 + M3 决策 2）
     executionMode: "sequential",
+    // 执行前预览（审批展示用）：与 execute 共享同一 planEdits 预检，但零副作用。
+    // 注意 TOCTOU：预览与执行是两次独立读取，快照预检在执行时仍会兜底。
+    async preview(params) {
+      const plan = await planEdits(workspaceRoot, Value.Parse(EditFileParamsSchema, params));
+      return buildEditDiff(plan.args.path, plan.split.lines, plan.applied);
+    },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<EditFileDetails>> {
       const args = Value.Parse(EditFileParamsSchema, params);
-      const resolvedPath = resolveWorkspacePath(workspaceRoot, args.path);
-      if (!(await stat(resolvedPath)).isFile()) {
-        throw new EditFileError(`不是常规文件：${args.path}`);
-      }
-      const raw = await readFile(resolvedPath, "utf8");
-      const beforeSnapshot = snapshotTag(raw);
-      if (beforeSnapshot !== args.snapshot) {
-        throw new EditFileError(
-          `快照过期：文件自读取后已变化（期望 ${args.snapshot}，实际 ${beforeSnapshot}）。` +
-            `请重新 read_file 获取最新锚点与快照后再编辑`
-        );
-      }
-      // 预检 + 内存落地（零 IO）；任一编辑失败整单抛错，文件零改动
-      const split = splitContent(raw);
-      const { lines: newLines, applied } = applyHashlineEdits(
-        split.lines,
-        args.edits as HashlineEdit[]
-      );
-      const newRaw = joinContent(newLines, split);
+      const plan = await planEdits(workspaceRoot, args);
+      const newRaw = joinContent(plan.newLines, plan.split);
       // 唯一的副作用落盘点（写前最后查一次 abort；写后不可回滚，见上游 edit 笔记 §6.3）
       signal?.throwIfAborted();
-      await writeFile(resolvedPath, newRaw, "utf8");
+      await writeFile(plan.resolvedPath, newRaw, "utf8");
 
       const afterSnapshot = snapshotTag(newRaw);
-      const diff = buildEditDiff(args.path, split.lines, applied);
-      const addedLines = applied.reduce((total, edit) => total + edit.added.length, 0);
-      const removedLines = applied.reduce((total, edit) => total + edit.removed.length, 0);
+      const diff = buildEditDiff(args.path, plan.split.lines, plan.applied);
+      const addedLines = plan.applied.reduce((total, edit) => total + edit.added.length, 0);
+      const removedLines = plan.applied.reduce((total, edit) => total + edit.removed.length, 0);
       return {
         content: [
           {
             type: "text",
             text:
-              `已在 ${args.path} 应用 ${applied.length} 处编辑（+${addedLines} −${removedLines} 行）。` +
+              `已在 ${args.path} 应用 ${plan.applied.length} 处编辑（+${addedLines} −${removedLines} 行）。` +
               `新快照 [${args.path}#${afterSnapshot}]`,
           },
         ],
-        details: { resolvedPath, beforeSnapshot, afterSnapshot, diff, addedLines, removedLines },
+        details: {
+          resolvedPath: plan.resolvedPath,
+          beforeSnapshot: plan.beforeSnapshot,
+          afterSnapshot,
+          diff,
+          addedLines,
+          removedLines,
+        },
       };
     },
   };
+}
+
+// 读 + 围栏 + 快照预检 + 内存落地（零写副作用）；任一编辑失败整单抛错，文件零改动。
+// execute 与 preview 共享同一预检路径，保证"预览所见 = 执行所得"。
+async function planEdits(workspaceRoot: string, args: EditFileParams) {
+  const resolvedPath = resolveWorkspacePath(workspaceRoot, args.path);
+  if (!(await stat(resolvedPath)).isFile()) {
+    throw new EditFileError(`不是常规文件：${args.path}`);
+  }
+  const raw = await readFile(resolvedPath, "utf8");
+  const beforeSnapshot = snapshotTag(raw);
+  if (beforeSnapshot !== args.snapshot) {
+    throw new EditFileError(
+      `快照过期：文件自读取后已变化（期望 ${args.snapshot}，实际 ${beforeSnapshot}）。` +
+        `请重新 read_file 获取最新锚点与快照后再编辑`
+    );
+  }
+  const split = splitContent(raw);
+  const { lines: newLines, applied } = applyHashlineEdits(
+    split.lines,
+    args.edits as HashlineEdit[]
+  );
+  return { args, resolvedPath, beforeSnapshot, split, newLines, applied };
 }

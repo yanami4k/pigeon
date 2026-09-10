@@ -10,3 +10,9 @@ export type PigeonAgentTool<TParameters extends TSchema, TDetails> = AgentTool<
   TDetails
 >;
 export type PigeonToolResult<TDetails> = AgentToolResult<TDetails>;
+
+// 可选能力：执行前预览（无副作用），审批闸用它给人工审批展示 diff（M3 切片 3/4）。
+// 结构检查（"preview" in tool），不要求工具必实现。
+export interface PreviewableTool {
+  preview(params: unknown): Promise<string>;
+}

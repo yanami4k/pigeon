@@ -3,7 +3,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createEditFileTool, type EditFileDetails, EditFileError } from "./edit-file.ts";
+import {
+  createEditFileTool,
+  type EditFileDetails,
+  EditFileError,
+  type EditFileParams,
+} from "./edit-file.ts";
 import { lineTag, snapshotTag } from "./hashline.ts";
 import { WorkspacePathError } from "./paths.ts";
 import { createReadFileTool } from "./read-file.ts";
@@ -177,6 +182,56 @@ test("畸形参数在 execute 入口被拒绝（schema 校验）", async () => {
         snapshot: "not-a-snapshot",
         edits: [],
       })
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("preview：产出与 execute 相同的 diff 但零副作用（文件逐字节不变）", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    const editor = createEditFileTool(root);
+    const params: EditFileParams = {
+      path: "a.ts",
+      snapshot: snapshotTag(original),
+      edits: [{ op: "replace", anchor: `2#${lineTag("beta")}`, lines: ["BETA"] }],
+    };
+    const previewDiff = await editor.preview(params);
+    assert.ok(previewDiff.includes("-beta"), previewDiff);
+    assert.ok(previewDiff.includes("+BETA"), previewDiff);
+    // 预览不落盘
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+    // 预览不消耗快照：同一快照仍可真正执行
+    const result = await editor.execute("tc-1", params);
+    assert.equal(result.details.diff, previewDiff);
+  } finally {
+    cleanup();
+  }
+});
+
+test("preview 同样做过期快照与逃逸校验", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "v1\n" });
+  try {
+    const editor = createEditFileTool(root);
+    await assert.rejects(
+      () =>
+        editor.preview({
+          path: "a.ts",
+          snapshot: snapshotTag("v0\n"),
+          edits: [{ op: "replace", anchor: `1#${lineTag("v1")}`, lines: ["x"] }],
+        }),
+      EditFileError
+    );
+    await assert.rejects(
+      () =>
+        editor.preview({
+          path: "../outside.txt",
+          snapshot: snapshotTag("v1\n"),
+          edits: [{ op: "replace", anchor: `1#${lineTag("v1")}`, lines: ["x"] }],
+        }),
+      WorkspacePathError
     );
   } finally {
     cleanup();
