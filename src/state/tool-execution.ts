@@ -21,18 +21,21 @@ export type ToolExecutionState = Static<typeof ToolExecutionStateSchema>;
 
 // 审批决定：批准/拒绝 + 批准来源 + 可选理由 + 决定时间。
 // 拒绝理由会逐字反馈给模型（spike S2a），构成模型的自我修正闭环。
+// 批准来源四类：human（运行时人工批准）/ policy:yolo（人事先批发授权，决策 4）/
+// policy:auto（prompt 模式下按 read 层规则自动放行）/ policy:deny（deny 清单自动拒绝——
+// 策略拒绝不能伪装成人工或 yolo 决定）。
 export const ToolExecutionDecisionSchema = Type.Object({
   outcome: Type.Union([Type.Literal("approved"), Type.Literal("rejected")]),
   approvedBy: Type.Union([
     Type.Literal("human"),
     Type.Literal("policy:yolo"),
+    Type.Literal("policy:auto"),
     Type.Literal("policy:deny"),
   ]),
   reason: Type.Optional(Type.String()),
   decidedAt: Type.Integer({ minimum: 0 }),
 });
 export type ToolExecutionDecision = Static<typeof ToolExecutionDecisionSchema>;
-
 export const ToolExecutionSchema = Type.Object({
   version: Type.Literal(TOOL_EXECUTION_VERSION),
   executionId: ExecutionIdSchema,
