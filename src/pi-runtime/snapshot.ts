@@ -2,15 +2,21 @@
 // 上游 pi-agent-core 在每个 Run 开始时自行拷贝 context 与 loop config（agent.js createContextSnapshot /
 // createLoopConfig），Adapter 在其之上再冻结一份治理侧快照，作为重建等价 Run 的依据。
 import { type Static, Type } from "typebox";
+import type { Migration } from "../state/migration.ts";
+import { ApprovalModeSchema } from "../tools/policy.ts";
 
-export const INJECTION_SNAPSHOT_VERSION = 1;
+// v2：ToolPolicy 增加 approvalMode（M3 决策 4，yolo = 人事先批发授权）
+export const INJECTION_SNAPSHOT_VERSION = 2;
 
-// M1 占坑：ToolPolicy 的判定语义在 M3 落地，此处仅冻结形状；允许为空集。
+// 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
+// deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
 export const ToolPolicySchema = Type.Object({
-  // 允许执行的工具名清单；空数组 = 不允许任何工具
+  // 允许广告给模型的工具名清单；空数组 = 不广告任何工具
   allow: Type.Array(Type.String()),
-  // 显式禁止的工具名清单
+  // 显式禁止的工具名清单；绝对，yolo 不豁免
   deny: Type.Array(Type.String()),
+  // 审批模式：prompt 逐次问人 / yolo 事先批发授权（账本 approvedBy 记 policy:yolo）
+  approvalMode: ApprovalModeSchema,
 });
 export type ToolPolicy = Static<typeof ToolPolicySchema>;
 
@@ -37,3 +43,19 @@ export const InjectionSnapshotSchema = Type.Object({
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
+
+// v1 → v2：ToolPolicy 补 approvalMode，默认 "prompt"（yolo 必须显式选择，见 M3 决策 4）。
+// 迁移管线（src/state/migration.ts）是通用设施、尚无集中注册表（events/receipt/candidate 均未注册），
+// 故此处只导出迁移函数，由快照冷加载方按名 "injection-snapshot" 注册使用。
+export const migrateInjectionSnapshotV1toV2: Migration = (doc) => {
+  const { tools, ...rest } = doc;
+  const { policy, ...toolsRest } = tools as { policy: Record<string, unknown> } & Record<
+    string,
+    unknown
+  >;
+  return {
+    ...rest,
+    version: INJECTION_SNAPSHOT_VERSION,
+    tools: { ...toolsRest, policy: { ...policy, approvalMode: "prompt" } },
+  };
+};

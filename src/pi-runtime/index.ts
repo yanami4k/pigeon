@@ -18,6 +18,7 @@ export {
   INJECTION_SNAPSHOT_VERSION,
   type InjectionSnapshot,
   InjectionSnapshotSchema,
+  migrateInjectionSnapshotV1toV2,
   type ToolPolicy,
   ToolPolicySchema,
 } from "./snapshot.ts";

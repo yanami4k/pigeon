@@ -7,14 +7,14 @@ import { EventEnvelopeSchema } from "../state/events.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
 import type { TurnCompletedPayload } from "./events.ts";
 import { createFakeStreamFn, createGate, type FakeStreamFn } from "./fixtures.ts";
-import type { InjectionSnapshot } from "./snapshot.ts";
+import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 
 // 固定 createdAt 的快照工厂：保证“同一快照重建”场景里两份快照逐字节一致
 function createSnapshot(): InjectionSnapshot {
   return {
-    version: 1,
+    version: INJECTION_SNAPSHOT_VERSION,
     model: { provider: "fake-provider", id: "fake-model-1" },
-    tools: { policy: { allow: [], deny: [] }, advertised: [] },
+    tools: { policy: { allow: [], deny: [], approvalMode: "prompt" }, advertised: [] },
     context: { systemPrompt: "你是 Pigeon 测试助手。" },
     memory: [],
     skills: [],
