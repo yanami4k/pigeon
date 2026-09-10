@@ -28,7 +28,7 @@ export const InjectionSnapshotSchema = Type.Object({
   }),
   tools: Type.Object({
     policy: ToolPolicySchema,
-    // 计划广告给模型的工具名清单；M1 无工具执行，恒为空数组
+    // 计划广告给模型的工具名清单；实际广告集由 Adapter 按 执行体 ∩ allow ∩ 已注册 决定（M3 起）
     advertised: Type.Array(Type.String()),
   }),
   context: Type.Object({
