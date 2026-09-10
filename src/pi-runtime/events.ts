@@ -98,10 +98,11 @@ export function normalizePiEvent(
       return envelope(ids, RuntimeEventKind.TurnCompleted, payload);
     }
     case "tool_execution_start": {
+      // args 深拷贝：上游事件对象可能被事后修改，直接引用会回溯污染已落日志的 payload
       const payload: ToolProposedPayload = {
         toolCallId: event.toolCallId,
         toolName: event.toolName,
-        args: event.args,
+        args: structuredClone(event.args),
       };
       return envelope(ids, RuntimeEventKind.ToolProposed, payload);
     }
