@@ -69,7 +69,7 @@ export interface PiRuntimeAdapterOptions {
   sessionId?: SessionId;
   // M3：工具注册表（策略判定的 tier/元数据来源）；缺省 = 空注册表（一切工具调用 fail-closed）
   registry?: ToolRegistry;
-  // M3：工具执行体清单；按快照 tools.policy.allow ∩ ¬deny 过滤后广告给模型
+  // M3：工具执行体清单；按快照 tools.policy.allow 过滤后广告给模型（deny 不过滤，闸口逐调用拒绝并留账）
   tools?: AgentTool[];
   // M3：人工审批注入点（策略判定为 prompt 时调用）；缺省时 prompt 一律 fail-closed 拒绝
   approvalHandler?: ApprovalHandler;
@@ -153,7 +153,7 @@ export class PiRuntimeAdapter {
           maxTokens: 0,
           ...options.model,
         },
-        // 广告给模型的工具集：快照 allow ∩ ¬deny ∩ 已注册
+        // 广告给模型的工具集：执行体 ∩ 快照 allow ∩ 已注册（deny 不过滤，闸口逐调用拒绝并留账）
         tools: [...this.#tools.values()],
       },
     });
