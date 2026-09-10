@@ -1,3 +1,4 @@
+export * from "./edit-file.ts";
 export * from "./hashline.ts";
 export * from "./paths.ts";
 export * from "./policy.ts";
