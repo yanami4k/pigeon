@@ -42,8 +42,9 @@ export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
   // 永远显式传入；测试注入假 streamFn，生产注入真实 provider 实现
   streamFn: StreamFn;
-  // 真实部署时补充 api/baseUrl 等模型字段；M1 假 streamFn 不需要
-  model?: Partial<Model<Api>>;
+  // 真实部署时补充 api/baseUrl 等模型元数据；provider/id 属于模型身份，
+  // 由 InjectionSnapshot 唯一提供（类型层 Omit 拒绝 + 构造器运行期兜底）
+  model?: Omit<Partial<Model<Api>>, "provider" | "id">;
   sessionId?: SessionId;
 }
 
@@ -59,6 +60,13 @@ export class PiRuntimeAdapter {
   #disposed = false;
 
   constructor(options: PiRuntimeAdapterOptions) {
+    // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
+    // 否则 spread 会让实际 Agent 模型与 InjectionSnapshot 脱钩
+    if (options.model !== undefined && ("provider" in options.model || "id" in options.model)) {
+      throw new Error(
+        "options.model 不允许携带 provider/id：模型身份由 InjectionSnapshot 唯一提供"
+      );
+    }
     // 运行期校验 + 防御性拷贝 + 深冻结：此后快照不可变
     const snapshot = Value.Parse(InjectionSnapshotSchema, options.snapshot);
     this.#snapshot = deepFreeze(structuredClone(snapshot));

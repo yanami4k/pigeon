@@ -290,3 +290,52 @@ test("事件冻结：listener 篡改事件被 TypeError 拦截，事件日志保
 
   await adapter.dispose();
 });
+
+test("模型身份守卫：options.model 携带 provider/id 直接抛错", () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "不会用到" }] });
+  const snapshot = createSnapshot();
+
+  assert.throws(
+    () =>
+      new PiRuntimeAdapter({
+        snapshot,
+        streamFn,
+        // @ts-expect-error 类型门：provider 属于快照身份，options.model 不允许携带
+        model: { provider: "evil-provider" },
+      }),
+    /模型身份/
+  );
+  assert.throws(
+    () =>
+      new PiRuntimeAdapter({
+        snapshot,
+        streamFn,
+        // @ts-expect-error 类型门：id 属于快照身份，options.model 不允许携带
+        model: { id: "evil-model" },
+      }),
+    /模型身份/
+  );
+});
+
+test("模型元数据合并：仅补 api/baseUrl 时 Agent 实际模型的身份仍来自快照", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "正常回复" }] });
+  const snapshot = createSnapshot();
+  const adapter = new PiRuntimeAdapter({
+    snapshot,
+    streamFn,
+    model: { api: "anthropic-messages", baseUrl: "https://example.invalid" },
+  });
+
+  const result = await adapter.run("你好");
+
+  assert.equal(result.status, "completed");
+  // 假 streamFn 收到的 model：身份字段来自快照，元数据字段来自 options.model
+  const call = streamFn.calls[0];
+  assert.ok(call);
+  assert.equal(call.model.provider, snapshot.model.provider);
+  assert.equal(call.model.id, snapshot.model.id);
+  assert.equal(call.model.api, "anthropic-messages");
+  assert.equal(call.model.baseUrl, "https://example.invalid");
+
+  await adapter.dispose();
+});
