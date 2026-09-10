@@ -133,9 +133,12 @@ export class PiRuntimeAdapter {
     return this.#snapshot;
   }
 
-  // Pi transcript 的拷贝（观察用途；它不是治理事实源，权威状态以事件日志为准）
+  // Pi transcript 的深拷贝（观察用途；它不是治理事实源，权威状态以事件日志为准）。
+  // 必须深拷贝：浅拷贝会与 Agent 内部共享 message/content 对象，
+  // 调用方在观察拷贝上的就地修改会污染 Agent 会话状态，进而毒化后续 Run 的上下文。
+  // 拷贝不冻结：观察方对自己的副本做变换是合法的。
   transcript(): AgentMessage[] {
-    return this.#agent.state.messages.slice();
+    return structuredClone(this.#agent.state.messages);
   }
 
   isRunning(): boolean {

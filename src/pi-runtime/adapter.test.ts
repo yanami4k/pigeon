@@ -213,3 +213,53 @@ test("dispose 空跑与幂等：从未 Run 直接释放不抛不悬挂，释放�
   // 释放后的行为契约：再启动 Run 必须抛“已释放”错误
   await assert.rejects(adapter.run("你好"), /已释放/);
 });
+
+test("transcript 隔离：观察拷贝的嵌套修改不污染 Agent 状态与后续 Run", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "原始回复" }, { text: "第二次回复" }] });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  await adapter.run("你好");
+
+  // 在观察拷贝上就地篡改嵌套的 text 内容
+  const copy = adapter.transcript();
+  const copiedAssistant = copy.find((message) => message.role === "assistant");
+  assert.ok(copiedAssistant);
+  assert.equal(copiedAssistant.role, "assistant");
+  const copiedText = copiedAssistant.content[0];
+  assert.ok(copiedText);
+  assert.equal(copiedText.type, "text");
+  if (copiedText.type !== "text") {
+    return;
+  }
+  copiedText.text = "已被篡改";
+
+  // 重新观察：拿到的是未被污染的内容
+  const fresh = adapter.transcript();
+  const freshAssistant = fresh.find((message) => message.role === "assistant");
+  assert.ok(freshAssistant);
+  assert.equal(freshAssistant.role, "assistant");
+  const freshText = freshAssistant.content[0];
+  assert.ok(freshText);
+  assert.equal(freshText.type, "text");
+  if (freshText.type === "text") {
+    assert.equal(freshText.text, "原始回复");
+  }
+
+  // 篡改不得进入 Agent 状态：第二次 Run 的上下文中助手消息仍是原文
+  const result = await adapter.run("再说一次");
+  assert.equal(result.status, "completed");
+  const secondCall = streamFn.calls[1];
+  assert.ok(secondCall);
+  const contextAssistant = secondCall.context.messages.find(
+    (message) => message.role === "assistant"
+  );
+  assert.ok(contextAssistant);
+  assert.equal(contextAssistant.role, "assistant");
+  const contextText = contextAssistant.content[0];
+  assert.ok(contextText);
+  assert.equal(contextText.type, "text");
+  if (contextText.type === "text") {
+    assert.equal(contextText.text, "原始回复");
+  }
+
+  await adapter.dispose();
+});
