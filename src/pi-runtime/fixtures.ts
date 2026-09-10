@@ -12,6 +12,7 @@ import {
   type Context,
   createAssistantMessageEventStream,
   type Model,
+  type ToolCall,
 } from "@earendil-works/pi-ai";
 
 // 逐 chunk 门闩：pump 在发每个分片前 wait()，测试用 release()/open() 精确控制流的推进时机，
@@ -59,12 +60,22 @@ export function createGate(): FakeGate {
   };
 }
 
+// 一次回复要模型发起的工具调用；id 缺省按调用序自动生成（tc-调用序-块序），
+// 模拟真实上游"每条 assistant 消息里的 toolCall id 唯一"
+export interface FakeToolCallSpec {
+  name: string;
+  args: Record<string, unknown>;
+  id?: string;
+}
+
 export interface FakeReply {
   text: string;
   // 每个 text_delta 携带的字符数；缺省整条文本一次发完
   chunkSize?: number;
   // 逐 chunk 门闩：设置后每个分片发出前都要等放行
   chunkGate?: FakeGate;
+  // 本回复携带的工具调用块；非空时 done 的 stopReason 为 toolUse
+  toolCalls?: FakeToolCallSpec[];
 }
 
 export interface FakeStreamBehavior {
@@ -98,7 +109,7 @@ export function createFakeStreamFn(behavior: FakeStreamBehavior): FakeStreamFn {
       return Promise.reject(new Error("createFakeStreamFn: 回复队列状态异常"));
     }
     const stream = createAssistantMessageEventStream();
-    void pump(stream, model, reply, options?.signal);
+    void pump(stream, model, reply, calls.length, options?.signal);
     return stream;
   };
   return Object.assign(streamFn, { calls });
@@ -108,6 +119,7 @@ async function pump(
   stream: AssistantMessageEventStream,
   model: Model<Api>,
   reply: FakeReply,
+  callIndex: number,
   signal: AbortSignal | undefined
 ): Promise<void> {
   const partial: AssistantMessage = {
@@ -121,47 +133,94 @@ async function pump(
     timestamp: Date.now(),
   };
   stream.push({ type: "start", partial });
-  const chunkSize = reply.chunkSize ?? Math.max(reply.text.length, 1);
-  const chunks: string[] = [];
-  for (let i = 0; i < reply.text.length; i += chunkSize) {
-    chunks.push(reply.text.slice(i, i + chunkSize));
+  // 提前 abort 检查：纯 toolCall 回复没有 text 分片循环，不能在分片里才第一次看中止
+  if (signal?.aborted) {
+    stream.push({ type: "error", reason: "aborted", error: finalize(partial, [], "aborted") });
+    return;
   }
-  stream.push({ type: "text_start", contentIndex: 0, partial });
-  let accumulated = "";
-  for (const chunk of chunks) {
-    if (reply.chunkGate) {
-      await reply.chunkGate.wait();
+
+  // 已完成的 content 块（text + toolCall），partial.content 随流式进度逐块推进
+  const contents: AssistantMessage["content"] = [];
+  if (reply.text.length > 0) {
+    const chunkSize = reply.chunkSize ?? reply.text.length;
+    stream.push({ type: "text_start", contentIndex: 0, partial });
+    let accumulated = "";
+    for (let i = 0; i < reply.text.length; i += chunkSize) {
+      if (reply.chunkGate) {
+        await reply.chunkGate.wait();
+      }
+      // 真实 provider 的中止响应：发出 error{reason:"aborted"}，携带 stopReason=aborted 的终态消息
+      if (signal?.aborted) {
+        stream.push({
+          type: "error",
+          reason: "aborted",
+          error: finalize(partial, [{ type: "text", text: accumulated }], "aborted"),
+        });
+        return;
+      }
+      accumulated += reply.text.slice(i, i + chunkSize);
+      partial.content = [{ type: "text", text: accumulated }];
+      stream.push({
+        type: "text_delta",
+        contentIndex: 0,
+        delta: reply.text.slice(i, i + chunkSize),
+        partial,
+      });
     }
-    // 真实 provider 的中止响应：发出 error{reason:"aborted"}，携带 stopReason=aborted 的终态消息
+    stream.push({ type: "text_end", contentIndex: 0, content: accumulated, partial });
+    contents.push({ type: "text", text: accumulated });
+  }
+
+  const toolCalls: ToolCall[] = (reply.toolCalls ?? []).map((spec, index) => ({
+    type: "toolCall",
+    id: spec.id ?? `tc-${callIndex}-${index + 1}`,
+    name: spec.name,
+    arguments: spec.args,
+  }));
+  for (const toolCall of toolCalls) {
+    const contentIndex = contents.length;
+    partial.content = [...contents, { ...toolCall, arguments: {} }];
+    stream.push({ type: "toolcall_start", contentIndex, partial });
+    // 真实 provider 以 JSON 文本流式传输参数；这里一次发完
     if (signal?.aborted) {
       stream.push({
         type: "error",
         reason: "aborted",
-        error: finalize(partial, accumulated, "aborted"),
+        error: finalize(partial, contents, "aborted"),
       });
       return;
     }
-    accumulated += chunk;
-    partial.content = [{ type: "text", text: accumulated }];
-    stream.push({ type: "text_delta", contentIndex: 0, delta: chunk, partial });
+    stream.push({
+      type: "toolcall_delta",
+      contentIndex,
+      delta: JSON.stringify(toolCall.arguments),
+      partial,
+    });
+    partial.content = [...contents, toolCall];
+    stream.push({ type: "toolcall_end", contentIndex, toolCall, partial });
+    contents.push(toolCall);
   }
-  stream.push({ type: "text_end", contentIndex: 0, content: accumulated, partial });
-  stream.push({ type: "done", reason: "stop", message: finalize(partial, accumulated, "stop") });
+  const stopReason = toolCalls.length > 0 ? "toolUse" : "stop";
+  stream.push({
+    type: "done",
+    reason: stopReason,
+    message: finalize(partial, contents, stopReason),
+  });
 }
 
 function finalize(
   partial: AssistantMessage,
-  text: string,
-  stopReason: "stop" | "aborted"
+  content: AssistantMessage["content"],
+  stopReason: "stop" | "toolUse" | "aborted"
 ): AssistantMessage {
   return {
     ...partial,
-    content: [{ type: "text", text }],
+    content,
     // 非零 usage：与上游合成失败消息（usage 全零）区分开
     usage: {
       ...zeroUsage(),
-      output: Math.max(text.length, 1),
-      totalTokens: Math.max(text.length, 1),
+      output: Math.max(JSON.stringify(content).length, 1),
+      totalTokens: Math.max(JSON.stringify(content).length, 1),
     },
     stopReason,
     timestamp: Date.now(),
