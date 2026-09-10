@@ -7,6 +7,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { JsonlLedger } from "../persistence/ledger.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
@@ -116,6 +117,8 @@ async function main(argv: string[]): Promise<void> {
     registry,
     tools: [createReadFileTool(workspaceRoot), createEditFileTool(workspaceRoot)],
     approvalHandler: createCliApprovalHandler(ask, (text) => process.stdout.write(text)),
+    // 默认账本：<工作区根>/.pigeon/ledger.jsonl（ROADMAP §3.2 调用前意图 + 调用后 Receipt）
+    ledger: new JsonlLedger(path.join(workspaceRoot, ".pigeon", "ledger.jsonl")),
   });
   try {
     await runRepl({ adapter, ask, write: (text) => process.stdout.write(text) });

@@ -21,8 +21,10 @@ import {
 import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { type JsonlLedger, LEDGER_INTENT_VERSION } from "../persistence/ledger.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import {
   advanceToolExecution,
   proposeToolExecution,
@@ -59,6 +61,9 @@ export interface RunResult {
   toolExecutions: ToolExecution[];
 }
 
+// 账本落盘口的结构类型（= JsonlLedger 的写入面）；测试注入故障包装器模拟崩溃点
+export type LedgerSink = Pick<JsonlLedger, "appendIntent" | "appendReceipt">;
+
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
   // 永远显式传入；测试注入假 streamFn，生产注入真实 provider 实现
@@ -73,6 +78,9 @@ export interface PiRuntimeAdapterOptions {
   tools?: AgentTool[];
   // M3：人工审批注入点（策略判定为 prompt 时调用）；缺省时 prompt 一律 fail-closed 拒绝
   approvalHandler?: ApprovalHandler;
+  // M3 切片 5：JSONL 账本落盘点（缺省 = 纯内存账本，不落盘）。
+  // 结构类型而非 JsonlLedger 具体类：测试可注入故障包装器模拟崩溃点
+  ledger?: LedgerSink;
   // 熔断阈值：同一 工具名+参数指纹 在同一 Run 内被阻断的次数上限（spike S4：上游无循环护栏）
   circuitBreakerThreshold?: number;
 }
@@ -92,6 +100,7 @@ export class PiRuntimeAdapter {
   readonly #tools: ReadonlyMap<string, AgentTool>;
   // ToolExecution 账本：toolCallId → 记录（M3 内存态；持久化是切片 5）
   readonly #executions = new Map<string, ToolExecution>();
+  readonly #ledger: LedgerSink | undefined;
   // 熔断计数：同一 Run 内同一 工具名+参数指纹 的连续阻断次数（spike S4：上游无循环护栏）
   readonly #blockCounts = new Map<string, number>();
   // 本次 Run 的账本 toolCallId 序列（RunResult.toolExecutions 的选取依据）
@@ -116,6 +125,7 @@ export class PiRuntimeAdapter {
     this.#registry = options.registry ?? new ToolRegistry();
     this.#approvalHandler = options.approvalHandler;
     this.#breakerThreshold = options.circuitBreakerThreshold ?? 3;
+    this.#ledger = options.ledger;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、熔断也失效（agent-loop.js:393-399）。
@@ -254,15 +264,20 @@ export class PiRuntimeAdapter {
         return;
       }
       // 账本联动：tool_execution_end 到达即 settled——被阻断者从 approval 落（决策已 rejected），
-      // 执行完毕者从 execution 落；spike S1/S2a：无论放行与否 end 事件都保证到达
+      // 执行完毕者从 execution 落；spike S1/S2a：无论放行与否 end 事件都保证到达。
+      // 例外留痕：approved 但停在 approval = intent 写盘失败被 fail-closed 阻断（从未 dispatch），
+      // 不迁移状态（审计可见的异常记录），也不产生 receipt。
       if (normalized.kind === RuntimeEventKind.ToolSettled) {
         const payload = normalized.payload as ToolSettledPayload;
         const existing = this.#executions.get(payload.toolCallId);
-        if (existing && (existing.state === "approval" || existing.state === "execution")) {
-          this.#executions.set(
-            payload.toolCallId,
-            advanceToolExecution(existing, "settled", Date.now())
-          );
+        if (
+          existing !== undefined &&
+          (existing.state === "execution" ||
+            (existing.state === "approval" && existing.decision?.outcome === "rejected"))
+        ) {
+          const settled = advanceToolExecution(existing, "settled", Date.now());
+          this.#executions.set(payload.toolCallId, settled);
+          this.#persistReceipt(settled, payload.isError);
         }
       }
       // 单一冻结点：日志与 listener 共享同一冻结对象，事件日志按治理语义不可变。
@@ -368,6 +383,8 @@ export class PiRuntimeAdapter {
         approvedBy: policy.approvalMode === "yolo" ? "policy:yolo" : "policy:auto",
         decidedAt: Date.now(),
       });
+      // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）
+      this.#persistIntent(record);
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
@@ -418,10 +435,67 @@ export class PiRuntimeAdapter {
       ...(approval.reason !== undefined ? { reason: approval.reason } : {}),
       decidedAt: Date.now(),
     });
+    // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）
+    this.#persistIntent(record);
     record = advanceToolExecution(record, "dispatch", Date.now());
     record = advanceToolExecution(record, "execution", Date.now());
     this.#executions.set(toolCallId, record);
     return undefined;
+  }
+
+  // dispatch 前持久化调用意图（ROADMAP §3.2）。写盘失败向上抛——外层 catch 转成 block，
+  // 即 fail-closed：账本写不进就不放行，未留证的副作用一律不得发生
+  #persistIntent(record: ToolExecution): void {
+    if (this.#ledger === undefined) {
+      return;
+    }
+    const decision = record.decision;
+    if (decision === undefined) {
+      throw new Error("账本 intent 缺失决定快照");
+    }
+    this.#ledger.appendIntent({
+      kind: "intent",
+      version: LEDGER_INTENT_VERSION,
+      executionId: record.executionId,
+      toolCallId: record.toolCallId,
+      toolName: record.toolName,
+      rawArgs: record.rawArgs,
+      decision,
+      at: Date.now(),
+    });
+  }
+
+  // tool_execution_end 后写 Receipt 并回填 receiptId（三层关联 executionId/toolCallId/receiptId）。
+  // executed 判据：到达 execution 阶段且执行结果无错误。M3 两个自建工具的唯一副作用都在
+  // 最后一次写盘调用（edit_file 全部预检通过才落盘），故"执行过且无错"≡副作用发生；
+  // 阻断/拒绝路径 executionStartedAt 为空 → executed=false（副作用从未发生）。
+  // 崩溃点：进程死于 end 事件前则 receipt 永不落盘——冷启动 reconcile 报 OutcomeUnknown。
+  #persistReceipt(record: ToolExecution, isError: boolean): void {
+    if (this.#ledger === undefined) {
+      return;
+    }
+    const decision = record.decision;
+    if (decision === undefined) {
+      return;
+    }
+    const executed = record.executionStartedAt !== undefined && !isError;
+    const receipt: Receipt = {
+      version: RECEIPT_VERSION,
+      id: newReceiptId(),
+      executionId: record.executionId,
+      toolCallId: record.toolCallId,
+      approvedBy: decision.approvedBy,
+      executed,
+      isError,
+      startedAt: record.executionStartedAt ?? record.proposedAt,
+      finishedAt: record.settledAt ?? Date.now(),
+      summary: executed
+        ? `${record.toolName} 执行完成`
+        : `${record.toolName} 未产生副作用（${decision.outcome === "rejected" ? "已拒绝" : "执行出错"}）`,
+    };
+    this.#ledger.appendReceipt(receipt);
+    // settled 后回填 receiptId：schema 允许的回填，不是状态迁移
+    this.#executions.set(record.toolCallId, { ...record, receiptId: receipt.id });
   }
 
   // 阻断 + 熔断（spike S4：上游无循环护栏，模型可无限重发被拦调用）。
