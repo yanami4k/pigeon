@@ -263,3 +263,30 @@ test("transcript 隔离：观察拷贝的嵌套修改不污染 Agent 状态与�
 
   await adapter.dispose();
 });
+
+test("事件冻结：listener 篡改事件被 TypeError 拦截，事件日志保持完整", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "正常回复" }] });
+  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  adapter.subscribe((event) => {
+    // 冻结对象上的写入在严格模式下抛 TypeError，被自包 try/catch 吞进 listenerErrors
+    (event.payload as Record<string, unknown>).tampered = true;
+  });
+
+  const result = await adapter.run("你好");
+
+  assert.equal(result.status, "completed");
+  // 每条归一化事件（turn.started / turn.completed / run.ended）各触发一次篡改失败
+  const errors = adapter.listenerErrors();
+  assert.equal(errors.length, 3);
+  for (const error of errors) {
+    assert.ok(error instanceof TypeError);
+  }
+  // 日志中的信封深冻结且未被污染
+  for (const event of adapter.events()) {
+    assert.ok(Object.isFrozen(event));
+    assert.ok(Object.isFrozen(event.payload));
+    assert.equal((event.payload as Record<string, unknown>).tampered, undefined);
+  }
+
+  await adapter.dispose();
+});

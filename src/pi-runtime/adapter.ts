@@ -169,7 +169,9 @@ export class PiRuntimeAdapter {
       if (!normalized) {
         return;
       }
-      this.#events.push(normalized);
+      // 单一冻结点：日志与 listener 共享同一冻结对象，事件日志按治理语义不可变。
+      // 篡改尝试在严格模式下抛 TypeError，被下方 listener 自包 try/catch 吞进 listenerErrors。
+      this.#events.push(deepFreeze(normalized));
       for (const listener of this.#listeners) {
         try {
           listener(normalized);
