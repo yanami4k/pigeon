@@ -14,11 +14,7 @@ import {
   type MaterializedSession,
   materializeSession,
 } from "../persistence/event-log.ts";
-import {
-  buildRunReplay,
-  type ReplayEvent,
-  type RunReplay,
-} from "../persistence/replay.ts";
+import { buildRunReplay, type ReplayEvent, type RunReplay } from "../persistence/replay.ts";
 import { failureBadge } from "../persistence/trace.ts";
 import { asRunId, asSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { approvalVerdict, breakerScopeLabel, shortId, summarizeArgs } from "./format.ts";
@@ -110,7 +106,9 @@ function recordDetail(record: EventRecord): string {
 }
 
 function renderEvent(event: ReplayEvent, lines: string[]): void {
-  lines.push(`${timeOf(event.record.timestamp)} ${event.record.kind} ｜ ${recordDetail(event.record)}`);
+  lines.push(
+    `${timeOf(event.record.timestamp)} ${event.record.kind} ｜ ${recordDetail(event.record)}`
+  );
   for (const annotation of event.annotations) {
     lines.push(`  标注：${annotation}`);
   }

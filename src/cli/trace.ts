@@ -4,11 +4,7 @@
 // 不触发 D8 旧账本迁移；trace 永不写事件日志与工作区。
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import {
-  JsonlEventLog,
-  listSessionIds,
-  materializeSession,
-} from "../persistence/event-log.ts";
+import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import {
   buildSessionTrace,
   failureBadge,

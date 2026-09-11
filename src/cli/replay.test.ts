@@ -1,19 +1,23 @@
 // M4 S4：CLI replay 命令（只读黑匣子时间线，D4 一次性渲染）测试——运行头终态+四分类、
 // 逐条时间戳/kind/关键字段按落盘顺序、拒绝理由逐字、崩溃残留/待对账/孤儿/撕裂尾巴如实标注、
 // 只读性（字节级零副作用证明）、响亮失败列出可选项。
-import { spawnSync } from "node:child_process";
+
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import {
-  type BreakerInput,
-  JsonlEventLog,
-  materializeSession,
-} from "../persistence/event-log.ts";
+import { type BreakerInput, JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "../pi-runtime/snapshot.ts";
@@ -407,11 +411,12 @@ test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接
     // 环境剥离 PIGEON_STREAM_FN 且不传 --stream-fn：replay 不得触碰模型接入
     const env = { ...process.env };
     delete env.PIGEON_STREAM_FN;
-    const ok = spawnSync(
-      process.execPath,
-      ["src/cli/index.ts", "replay", runId, "--root", root],
-      { cwd: repoRoot, env, encoding: "utf8", timeout: 30_000 }
-    );
+    const ok = spawnSync(process.execPath, ["src/cli/index.ts", "replay", runId, "--root", root], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+    });
     assert.equal(ok.status, 0, `回放应成功退出：${ok.stderr}`);
     assert.ok(ok.stdout.includes("回放 Run"), "子进程输出时间线报告");
     assert.ok(ok.stdout.includes(shortId(sessionId)), "报告含会话短哈希");

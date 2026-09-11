@@ -34,11 +34,7 @@ const APPROVED_BY_LABEL: Record<string, string> = {
 // 审批决定 → 人话裁决：人工区分批准/拒绝；策略来源直接给标签（不伪装成人工）
 export function approvalVerdict(decision: ToolExecutionDecision): string {
   const label = APPROVED_BY_LABEL[decision.approvedBy] ?? decision.approvedBy;
-  return label === "人工"
-    ? decision.outcome === "approved"
-      ? "人工批准"
-      : "人工拒绝"
-    : label;
+  return label === "人工" ? (decision.outcome === "approved" ? "人工批准" : "人工拒绝") : label;
 }
 
 // 熔断计数粒度 → 人话

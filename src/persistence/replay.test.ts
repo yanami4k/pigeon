@@ -115,9 +115,7 @@ test("时间线按落盘顺序：治理族与运行时事件穿插原位呈现�
         syntheticFailure: false,
       })
     );
-    eventLog.appendRuntimeEvent(
-      runtimeEvent(sessionId, runId, "run.ended", { messageCount: 2 })
-    );
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 2 }));
     eventLog.close();
 
     const replay = buildRunReplay(materializeSession(sessionsDir, sessionId), runId);
@@ -203,9 +201,7 @@ test("孤儿 Receipt/Resolution 与撕裂尾巴如实标注", () => {
       at: 1_757_000_000_004,
       runId,
     });
-    eventLog.appendRuntimeEvent(
-      runtimeEvent(sessionId, runId, "run.ended", { messageCount: 0 })
-    );
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 0 }));
     eventLog.close();
     // 模拟进程死于写盘中途：半截末行
     appendFileSync(eventLog.path, '{"version":2,"id":"entry_', "utf8");
@@ -215,7 +211,10 @@ test("孤儿 Receipt/Resolution 与撕裂尾巴如实标注", () => {
     assert.equal(replay.tornTail, true, "撕裂尾巴必须随物化结果传递到回放");
     const receipt = replay.events.find((event) => event.record.kind === "receipt");
     const resolution = replay.events.find((event) => event.record.kind === "resolution");
-    assert.ok(receipt?.annotations.some((text) => text.includes("孤儿")), "孤儿 Receipt 标注");
+    assert.ok(
+      receipt?.annotations.some((text) => text.includes("孤儿")),
+      "孤儿 Receipt 标注"
+    );
     assert.ok(
       resolution?.annotations.some((text) => text.includes("孤儿")),
       "孤儿 Resolution 标注"
@@ -233,12 +232,8 @@ test("其他 Run 的记录不混入：runId 过滤是投影的第一域", () => 
     // 两个 Run 的记录在文件里交错（重开日志追加就会产生这种布局）
     eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "turn.started", {}));
     eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "turn.started", {}));
-    eventLog.appendRuntimeEvent(
-      runtimeEvent(sessionId, runA, "run.ended", { messageCount: 1 })
-    );
-    eventLog.appendRuntimeEvent(
-      runtimeEvent(sessionId, runB, "run.ended", { messageCount: 1 })
-    );
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 1 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "run.ended", { messageCount: 1 }));
     eventLog.close();
 
     const materialized = materializeSession(sessionsDir, sessionId);
