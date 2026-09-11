@@ -65,9 +65,12 @@ function renderToolCall(call: TraceToolCall, lines: string[]): void {
   }
   if (call.resolution !== undefined) {
     const resolution = call.resolution;
+    const outcome = resolution.outcome === "executed" ? "已执行" : "未执行";
+    // M4 S5：人工确认渠道（resume 交互）无哈希证据——用户判断即证据
     lines.push(
-      `      确证：哈希自动确证${resolution.outcome === "executed" ? "已执行" : "未执行"}` +
-        `（实测现状 ${resolution.evidence.observedHash}）`
+      resolution.method === "human-confirmed"
+        ? `      确证：人工确认${outcome}（resume 对账交互）`
+        : `      确证：哈希自动确证${outcome}（实测现状 ${resolution.evidence?.observedHash ?? "证据缺失"}）`
     );
   }
   for (const breaker of call.breakers) {

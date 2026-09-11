@@ -97,11 +97,20 @@ function recordDetail(record: EventRecord): string {
         `熔断落闸：${record.toolName}（${breakerScopeLabel(record.scope)}，` +
         `连击 ${record.count}/${record.threshold}，由 ${record.toolCallId} 触发）`
       );
-    case "resolution":
+    case "resolution": {
+      const outcome = record.outcome === "executed" ? "已执行" : "未执行";
+      // M4 S5：人工确认渠道（resume 交互）无哈希证据——用户判断即证据
+      if (record.method === "human-confirmed") {
+        return `确证落账：${shortId(record.executionId)} 人工确认${outcome}（resume 对账交互）`;
+      }
       return (
-        `确证落账：${shortId(record.executionId)} 哈希自动确证` +
-        `${record.outcome === "executed" ? "已执行" : "未执行"}（实测现状 ${record.evidence.observedHash}）`
+        `确证落账：${shortId(record.executionId)} 哈希自动确证${outcome}` +
+        `（实测现状 ${record.evidence?.observedHash ?? "证据缺失"}）`
       );
+    }
+    // M4 S5：entry 族（D3 映射行）——transcript 第 runSeq 条消息（本 run 内）获得 EntryId
+    case "entry":
+      return `消息映射 ${shortId(record.id)}：run 内第 ${record.runSeq} 条（${record.role}）`;
   }
 }
 

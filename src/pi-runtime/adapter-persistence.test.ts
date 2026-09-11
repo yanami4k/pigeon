@@ -941,7 +941,7 @@ test("崩溃点①b：intent 已写、dispatch 未发生（文件仍是改前哈
     assert.equal(recovery.resolutions.length, 1);
     assert.equal(recovery.resolutions[0]?.outcome, "not-executed");
     assert.equal(recovery.resolutions[0]?.method, "hash-auto");
-    assert.equal(recovery.resolutions[0]?.evidence.observedHash, snapshotTag(original));
+    assert.equal(recovery.resolutions[0]?.evidence?.observedHash, snapshotTag(original));
     // 销账后悬账清零；模型之后可正常重提，系统未重新执行（文件逐字节不变）
     assert.equal(recovery.materialized.reconcile.unknown.length, 0);
     assert.equal(recovery.materialized.reconcile.resolved.length, 1);

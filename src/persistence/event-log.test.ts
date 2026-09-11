@@ -124,7 +124,7 @@ function makeLog(): {
   };
 }
 
-test("schema 往返：十种记录族逐一 parse 后与原值一致；未知 kind 与畸形 payload 被拒", () => {
+test("schema 往返：十一种记录族逐一 parse 后与原值一致；未知 kind 与畸形 payload 被拒", () => {
   const sessionId = newSessionId();
   const runId = newRunId();
   const envelope = {
@@ -138,6 +138,11 @@ test("schema 往返：十种记录族逐一 parse 后与原值一致；未知 ki
   const decision = makeDecisionInput({ runId });
   const breaker = makeBreakerInput(runId);
   const resolution = makeResolutionInput(runId, intent.executionId);
+  // M4 S5：人工确认确证（resume 交互渠道）——无哈希证据，用户的判断本身就是证据
+  const humanResolution = stripRunId(
+    makeResolutionInput(runId, newExecutionId(), { method: "human-confirmed" })
+  );
+  delete humanResolution.evidence;
   const records: unknown[] = [
     { ...envelope, kind: "turn.started", payload: {} },
     {
@@ -175,6 +180,13 @@ test("schema 往返：十种记录族逐一 parse 后与原值一致；未知 ki
     { ...envelope, kind: "breaker", ...stripRunId(breaker) },
     // M4 S2：哈希自动确证记录
     { ...envelope, kind: "resolution", ...stripRunId(resolution) },
+    // M4 S5：entry 族（D3 Pi 消息映射：message_end 时刻分配 EntryId，(runId, runSeq) 权威键，
+    // abort 与上游合成失败消息同样占序号）
+    { ...envelope, kind: "entry", runSeq: 1, role: "user" },
+    { ...envelope, kind: "entry", runSeq: 2, role: "assistant" },
+    { ...envelope, kind: "entry", runSeq: 3, role: "toolResult" },
+    // M4 S5：人工确认确证记录（evidence 缺省）
+    { ...envelope, kind: "resolution", ...humanResolution },
   ];
   for (const record of records) {
     assert.deepEqual(Value.Parse(EventRecordSchema, record), record);
@@ -196,6 +208,14 @@ test("schema 往返：十种记录族逐一 parse 后与原值一致；未知 ki
       kind: "tool.settled",
       payload: { toolCallId: "toolu_1", toolName: "edit_file", isError: true, errorKind: "oops" },
     })
+  );
+  // entry 畸形拒绝：runSeq 必须从 1 起（run 内 message_end 累计序号）
+  assert.throws(() =>
+    Value.Parse(EventRecordSchema, { ...envelope, kind: "entry", runSeq: 0, role: "user" })
+  );
+  // entry 畸形拒绝：role 只取三种 transcript 角色
+  assert.throws(() =>
+    Value.Parse(EventRecordSchema, { ...envelope, kind: "entry", runSeq: 1, role: "system" })
   );
 });
 
@@ -519,6 +539,106 @@ test("v1 事件文件读路径迁移：版本升到当前格式，内嵌 receipt
     const { reconcile } = materializeSession(dir, sessionId);
     assert.equal(reconcile.settled.length, 1);
     assert.equal(reconcile.unknown.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("entry 族：appendEntry 落盘并读回；信封 id 即分配的 EntryId；不进治理幂等索引", () => {
+  const { log, dir, sessionId, runId, cleanup } = makeLog();
+  try {
+    const first = log.appendEntry({ runSeq: 1, role: "user", runId });
+    const second = log.appendEntry({ runSeq: 2, role: "assistant", runId });
+    log.close();
+    // 读回：kind/runSeq/role 原样；信封 id 就是分配给该条 transcript 消息的 EntryId
+    const records = readEventLogFile(log.path);
+    assert.deepEqual(records, [first, second]);
+    assert.match(first.id, /^entry_/);
+    // entry 无 executionId：同 runSeq 重写不触发幂等冲突（序号连续性由写入方 adapter 保证）
+    const revived = new JsonlEventLog(dir, sessionId);
+    revived.appendEntry({ runSeq: 1, role: "user", runId });
+    revived.close();
+    assert.equal(readEventLogFile(log.path).filter((r) => r.kind === "entry").length, 3);
+
+    // 冷物化：entries 单列成族，不混入 runtimeEvents（五种归一化事件之外）
+    const materialized = materializeSession(dir, sessionId);
+    assert.equal(materialized.entries.length, 3);
+    assert.equal(materialized.runtimeEvents.length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolution 人工确认渠道：method=human-confirmed 无哈希证据，配对悬账归 resolved", () => {
+  const { log, dir, sessionId, runId, cleanup } = makeLog();
+  try {
+    const intent = makeIntentInput({ runId });
+    log.appendIntent(intent);
+    // resume 交互的人工确认：没有哈希三方比对证据（intent 探针缺省/文件已被第三方改动）
+    log.appendResolution({
+      executionId: intent.executionId,
+      toolCallId: intent.toolCallId,
+      toolName: intent.toolName,
+      outcome: "executed",
+      method: "human-confirmed",
+      at: 1_757_000_000_004,
+      runId,
+    });
+    log.close();
+
+    const { reconcile } = materializeSession(dir, sessionId);
+    assert.equal(reconcile.unknown.length, 0);
+    assert.equal(reconcile.resolved.length, 1);
+    assert.equal(reconcile.resolved[0]?.resolution.method, "human-confirmed");
+    assert.equal(reconcile.resolved[0]?.resolution.evidence, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("v2 事件文件读路径迁移：版本逐级升到当前格式（v3 加法式演进，旧记录逐字有效）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
+  try {
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const executionId = newExecutionId();
+    // 手工构造 v2 格式行（S2 落盘形状：resolution.method 仅 hash-auto、evidence 必填）
+    const v2Envelope = {
+      version: 2,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1_757_000_000_000,
+    };
+    const v2Resolution = {
+      ...v2Envelope,
+      kind: "resolution",
+      executionId,
+      toolCallId: "toolu_01ABC",
+      toolName: "edit_file",
+      outcome: "executed",
+      method: "hash-auto",
+      evidence: {
+        path: "a.ts",
+        beforeHash: "aaaaaaaaaaaaaaaa",
+        expectedAfterHash: "bbbbbbbbbbbbbbbb",
+        observedHash: "bbbbbbbbbbbbbbbb",
+      },
+      at: 1_757_000_000_003,
+    };
+    const v2Settled = {
+      ...v2Envelope,
+      kind: "tool.settled",
+      payload: { toolCallId: "toolu_1", toolName: "edit_file", isError: true, errorKind: "domain" },
+    };
+    const path = join(dir, `${sessionId}.jsonl`);
+    writeFileSync(path, `${JSON.stringify(v2Resolution)}\n${JSON.stringify(v2Settled)}\n`, "utf8");
+
+    const records = readEventLogFile(path);
+    assert.equal(records.length, 2);
+    assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
+    assert.equal(records[0]?.kind, "resolution");
+    assert.equal(records[1]?.kind, "tool.settled");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

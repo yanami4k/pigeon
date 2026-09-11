@@ -1,9 +1,10 @@
-// Event Log（ROADMAP §3.5 权威状态源，M4 S1/S2）：每 session 一文件 `.pigeon/sessions/sess_<ulid>.jsonl`
-// （D1），单一日志承载全部事件族——运行时事件（turn/tool/run 五种归一化事件）与治理族
-// （intent/decision/receipt，M3 账本归并而来，决策 2：不双写；S2 新增 breaker/resolution）。
+// Event Log（ROADMAP §3.5 权威状态源，M4 S1/S2/S5）：每 session 一文件 `.pigeon/sessions/sess_<ulid>.jsonl`
+// （D1），单一日志承载全部事件族——运行时事件（turn/tool/run 五种归一化事件）、entry 族
+// （D3 Pi transcript 消息映射，S5）与治理族（intent/decision/receipt，M3 账本归并而来，
+// 决策 2：不双写；S2 新增 breaker/resolution，S5 resolution 增人工确认渠道）。
 // 记录信封：version + EntryId + SessionId + RunId + 时间戳；kind 区分族，payload/字段随族。
 // 落盘策略（D2）：事件产生即同步写盘（崩溃窗口为零）；治理族写后 fsync（防断电），
-// 观察族只写不 fsync（防进程崩溃，延续 M3 现状）。
+// 观察族（运行时事件 + entry）只写不 fsync（防进程崩溃，延续 M3 现状）。
 // 冷物化 = 全量读本 session 文件 + 按 executionId 对账（reconcile），分类语义与 M3 完全一致：
 // intent 无 receipt = OutcomeUnknown（只标记留证，§3.2 禁止盲重放）；decision 即闭环（rejected）；
 // S2 新增：resolution（哈希自动确证，D5）与悬账配对归 resolved，不再滞留 unknown。
@@ -55,9 +56,11 @@ import {
 } from "./classification.ts";
 
 // Event Log 记录格式版本；迁移管线（M0 migration.ts）按 version 字段路由。
-// v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族——
-// 全部加法式（可缺省/新成员），v1 旧记录经读路径迁移链升级（见 eventLogMigrations）
-export const EVENT_LOG_VERSION = 2;
+// v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族；
+// v3（M4 S5）：新增 entry 族（D3 Pi transcript 消息映射）、resolution 增 human-confirmed
+// 人工确认渠道且 evidence 改可选——全部加法式（可缺省/新成员），旧记录经读路径迁移链
+// 逐级升级（见 eventLogMigrations）
+export const EVENT_LOG_VERSION = 3;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -95,6 +98,7 @@ export const RunEndedRecordSchema = Type.Object({
   kind: Type.Literal(RuntimeEventKind.RunEnded),
   payload: RunEndedPayloadSchema,
 });
+
 export const RuntimeEventRecordSchema = Type.Union([
   TurnStartedRecordSchema,
   TurnCompletedRecordSchema,
@@ -103,6 +107,25 @@ export const RuntimeEventRecordSchema = Type.Union([
   RunEndedRecordSchema,
 ]);
 export type RuntimeEventRecord = Static<typeof RuntimeEventRecordSchema>;
+
+// entry（M4 S5，D3 Pi entry 映射）：每条 message_end 事件落地时刻由 Pigeon 分配 EntryId——
+// 记录信封的 id 即分配给该条 transcript 消息的 EntryId。权威键是 (runId, runSeq)：
+// runSeq = run 内 message_end 累计序号（append-only 双实证保证，spike Q2/Q4）；
+// abort 与上游合成失败消息（handleRunFailure）同样占序号，冷物化重放必须计入，
+// 否则序号错位。禁忌：timestamp 永不当键（同毫秒撞车实证）；流式阶段（message_start/
+// update 浅拷贝 partial）不锚身份。观察族耐久（同步写不 fsync）；无 executionId，
+// 不进治理幂等索引
+export const EntryRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal("entry"),
+  runSeq: Type.Integer({ minimum: 1 }),
+  role: Type.Union([
+    Type.Literal("user"),
+    Type.Literal("assistant"),
+    Type.Literal("toolResult"),
+  ]),
+});
+export type EntryRecord = Static<typeof EntryRecordSchema>;
 
 // 治理族公共字段（M3 账本 intent/decision 行形状；行级 kind/version 由信封承接）
 const GOVERNANCE_PROPS = {
@@ -177,9 +200,10 @@ export const BreakerRecordSchema = Type.Object({
 });
 export type BreakerRecord = Static<typeof BreakerRecordSchema>;
 
-// resolution（M4 S2，D5 哈希自动确证）：悬账（intent 无 receipt）的确证记录。
-// 冷启动对账时读目标文件现状哈希三方比对：== 预期改后 → executed；== 改前 → not-executed；
-// 都不符（撕裂写/第三方改动）不留记录、继续滞留 OutcomeUnknown 等人工。
+// resolution（M4 S2，D5 哈希自动确证 + S5 人工确认渠道）：悬账（intent 无 receipt）的
+// 确证记录。hash-auto：冷启动对账读目标文件现状哈希三方比对——== 预期改后 → executed，
+// == 改前 → not-executed，都不符不留记录；human-confirmed（S5 resume 交互）：哈希证据
+// 不可得时由用户确认收口——用户确认 = 第三种确证渠道，对齐 ToolExecution Verified 语义。
 // 确证只销账，系统永不自动重新执行（§3.2）；按 executionId 幂等（同族重复冲突拒绝）
 export const ResolutionRecordSchema = Type.Object({
   ...ENVELOPE_PROPS,
@@ -188,22 +212,26 @@ export const ResolutionRecordSchema = Type.Object({
   toolCallId: Type.String({ minLength: 1 }),
   toolName: Type.String({ minLength: 1 }),
   outcome: Type.Union([Type.Literal("executed"), Type.Literal("not-executed")]),
-  // 确证渠道：hash-auto = 哈希三方比对自动确证；将来人工确认渠道以新字面量加入
-  method: Type.Literal("hash-auto"),
-  // 比对证据四方留证：路径 + 改前/预期改后/实测现状哈希
-  evidence: Type.Object({
-    path: Type.String({ minLength: 1 }),
-    beforeHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
-    expectedAfterHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
-    observedHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
-  }),
+  // 确证渠道：hash-auto = 哈希三方比对自动确证；human-confirmed = resume 交互人工确认
+  method: Type.Union([Type.Literal("hash-auto"), Type.Literal("human-confirmed")]),
+  // 哈希确证的四方比对证据（路径 + 改前/预期改后/实测现状）；human-confirmed 渠道
+  // 没有哈希证据——人的判断即证据，字段缺省
+  evidence: Type.Optional(
+    Type.Object({
+      path: Type.String({ minLength: 1 }),
+      beforeHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+      expectedAfterHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+      observedHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+    })
+  ),
   at: Type.Integer({ minimum: 0 }),
 });
 export type ResolutionRecord = Static<typeof ResolutionRecordSchema>;
 
-// Event Log 记录并集（grant 族不在 S2 范围，S6 以新成员加法式扩展）
+// Event Log 记录并集（M4 S5 新增 entry 族；grant 族不在 S5 范围，S6 以新成员加法式扩展）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
+  EntryRecordSchema,
   IntentRecordSchema,
   DecisionRecordSchema,
   ReceiptRecordSchema,
@@ -226,6 +254,8 @@ export type BreakerInput = Omit<
   BreakerRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
+// entry 族追加输入：业务字段（runSeq/role）+ runId；信封 id（= 分配的 EntryId）由日志盖章
+export type EntryInput = Omit<EntryRecord, "version" | "id" | "sessionId" | "kind" | "timestamp">;
 export type ResolutionInput = Omit<
   ResolutionRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
@@ -284,6 +314,8 @@ export interface MaterializedSession {
   receipts: Receipt[];
   breakers: BreakerRecord[];
   resolutions: ResolutionRecord[];
+  // entry 族（M4 S5，D3）：transcript 消息的 EntryId 映射，按落盘顺序
+  entries: EntryRecord[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
@@ -315,6 +347,9 @@ eventLogMigrations.register("event-log", 1, (doc) => ({
   version: 2,
   ...(doc.kind === "receipt" ? { receipt: migrateReceiptToCurrent(doc.receipt) } : {}),
 }));
+// v2 → v3（M4 S5）：加法式演进（新增 entry 族；resolution 增 human-confirmed 渠道、
+// evidence 改可选）——v2 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 2, (doc) => ({ ...doc, version: 3 }));
 
 // 全量读 + 校验的结果：记录集 + 撕裂尾巴标记。
 // tornTail：进程死于写盘中途的痕迹——追加协议保证每条记录以 \n 结尾，
@@ -454,6 +489,19 @@ export class JsonlEventLog {
     return record;
   }
 
+  // D3 entry 映射落盘（M4 S5）：观察族耐久（同步写不 fsync，与运行时事件同级）。
+  // 信封 id 即分配给该条 transcript 消息的 EntryId；无 executionId，不进治理幂等索引
+  appendEntry(input: EntryInput): EntryRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(EntryRecordSchema, {
+      ...this.#envelope(runId),
+      kind: "entry",
+      ...body,
+    });
+    this.#append(record, false);
+    return record;
+  }
+
   appendIntent(input: IntentInput): IntentRecord {
     const { runId, ...body } = input;
     const record = Value.Parse(IntentRecordSchema, {
@@ -570,6 +618,7 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
   const receipts: Receipt[] = [];
   const breakers: BreakerRecord[] = [];
   const resolutions: ResolutionRecord[] = [];
+  const entries: EntryRecord[] = [];
   for (const record of records) {
     if (record.kind === "intent") {
       intents.push(record);
@@ -581,6 +630,8 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
       breakers.push(record);
     } else if (record.kind === "resolution") {
       resolutions.push(record);
+    } else if (record.kind === "entry") {
+      entries.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -597,6 +648,7 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     receipts,
     breakers,
     resolutions,
+    entries,
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
