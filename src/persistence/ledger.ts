@@ -1,8 +1,10 @@
-// JSONL 执行账本（ROADMAP §3.2）：append-only，两条记录族——
-//   intent（dispatch 前写：谁在何时被批准做什么）与 receipt（tool_execution_end 后写：结果如何）。
+// JSONL 执行账本（ROADMAP §3.2）：append-only，三条记录族——
+//   intent（dispatch 前写：谁在何时被批准做什么）、decision（拒绝时写：谁因何拒绝，
+//   理由逐字留证，进程退出后不蒸发）与 receipt（tool_execution_end 后写：结果如何）。
 // M3 最小账本：同步写、单行一条 JSON；持久化 Session/Trace 是 M4。
 // 冷启动恢复 = 全量读 + 按 executionId 对账（reconcile）；intent 无 receipt = OutcomeUnknown，
-// 只标记留证，任何路径不得自动重放（§3.2 禁止盲重放）。
+// 只标记留证，任何路径不得自动重放（§3.2 禁止盲重放）；decision 即闭环（rejected），
+// 副作用不可能发生，永不入 OutcomeUnknown。
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { type Static, Type } from "typebox";
@@ -18,6 +20,7 @@ import {
 import { ToolExecutionDecisionSchema } from "../state/tool-execution.ts";
 
 export const LEDGER_INTENT_VERSION = 1;
+export const LEDGER_DECISION_VERSION = 1;
 
 // intent：调用前持久化意图（§3.2：副作用 = 稳定 ExecutionId + 调用前意图 + 调用后 Receipt）
 export const LedgerIntentSchema = Type.Object({
@@ -34,9 +37,29 @@ export const LedgerIntentSchema = Type.Object({
 });
 export type LedgerIntent = Static<typeof LedgerIntentSchema>;
 
+// decision：拒绝决定落盘（决策 4 证据链）——拒绝路径不写 intent（dispatch 前才写），
+// 若没有 decision 行，拒绝理由只活在内存里、进程退出即蒸发。形状与 LedgerIntent 对齐
+export const LedgerDecisionSchema = Type.Object({
+  kind: Type.Literal("decision"),
+  version: Type.Literal(LEDGER_DECISION_VERSION),
+  executionId: ExecutionIdSchema,
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: Type.String({ minLength: 1 }),
+  // 模型原始参数快照（与 ToolExecution.rawArgs 同源，spike S5）
+  rawArgs: Type.Unknown(),
+  // 拒绝决定快照（含 approvedBy 与逐字理由，决策 4 证据链）
+  decision: ToolExecutionDecisionSchema,
+  at: Type.Integer({ minimum: 0 }),
+});
+export type LedgerDecision = Static<typeof LedgerDecisionSchema>;
+
 // 对账报告：pairing 按 executionId
 export interface ReconcileEntry {
   intent: LedgerIntent;
+  receipt?: Receipt;
+}
+export interface RejectedEntry {
+  decision: LedgerDecision;
   receipt?: Receipt;
 }
 export interface ReconcileReport {
@@ -44,7 +67,9 @@ export interface ReconcileReport {
   settled: ReconcileEntry[];
   // intent 无 receipt：死于 dispatch/execute/receipt 任一窗口——副作用是否发生未知（OutcomeUnknown）
   unknown: ReconcileEntry[];
-  // receipt 无 intent：账本损坏或手写——如实报告，不猜测
+  // decision（拒绝）：闭环——拒绝发生于 dispatch 前，无副作用可能，永不入 OutcomeUnknown
+  rejected: RejectedEntry[];
+  // receipt 既无 intent 也无 decision：账本损坏或手写——如实报告，不猜测
   orphanReceipts: Receipt[];
 }
 
@@ -59,8 +84,10 @@ export class JsonlLedger {
   readonly #path: string;
   // 已写入的 executionId 索引（幂等判定）；构造时从磁盘恢复
   readonly #intentIds = new Set<string>();
+  readonly #decisionIds = new Set<string>();
   readonly #receiptIds = new Set<string>();
   readonly #intents: LedgerIntent[] = [];
+  readonly #decisions: LedgerDecision[] = [];
   readonly #receipts: Receipt[] = [];
 
   constructor(path: string) {
@@ -105,6 +132,16 @@ export class JsonlLedger {
     this.#intents.push(parsed);
   }
 
+  appendDecision(decision: LedgerDecision): void {
+    const parsed = Value.Parse(LedgerDecisionSchema, decision);
+    if (this.#decisionIds.has(parsed.executionId)) {
+      throw new LedgerConflictError(`重复 decision：${parsed.executionId}`);
+    }
+    appendFileSync(this.#path, `${JSON.stringify(parsed)}\n`, "utf8");
+    this.#decisionIds.add(parsed.executionId);
+    this.#decisions.push(parsed);
+  }
+
   appendReceipt(receipt: Receipt): void {
     const parsed = Value.Parse(ReceiptSchema, receipt);
     if (this.#receiptIds.has(parsed.executionId)) {
@@ -115,9 +152,16 @@ export class JsonlLedger {
     this.#receipts.push(parsed);
   }
 
-  // 冷启动对账：intent 无 receipt → OutcomeUnknown（只留证，不重放）
+  // 冷启动对账：intent 无 receipt → OutcomeUnknown（只留证，不重放）；
+  // decision（拒绝）即闭环——拒绝发生于 dispatch 前，无副作用可能，与 receipt 配对后归 rejected
   reconcile(): ReconcileReport {
     const receiptByExecution = new Map(this.#receipts.map((r) => [r.executionId, r]));
+    const rejected: RejectedEntry[] = [];
+    for (const decision of this.#decisions) {
+      const receipt = receiptByExecution.get(decision.executionId);
+      receiptByExecution.delete(decision.executionId);
+      rejected.push(receipt === undefined ? { decision } : { decision, receipt });
+    }
     const settled: ReconcileEntry[] = [];
     const unknown: ReconcileEntry[] = [];
     for (const intent of this.#intents) {
@@ -129,7 +173,7 @@ export class JsonlLedger {
         settled.push({ intent, receipt });
       }
     }
-    return { settled, unknown, orphanReceipts: [...receiptByExecution.values()] };
+    return { settled, unknown, rejected, orphanReceipts: [...receiptByExecution.values()] };
   }
 
   #ingest(record: unknown, path: string, index: number): void {
@@ -144,6 +188,15 @@ export class JsonlLedger {
       }
       this.#intentIds.add(intent.executionId);
       this.#intents.push(intent);
+      return;
+    }
+    if (kind === "decision") {
+      const decision = Value.Parse(LedgerDecisionSchema, { kind, ...fields });
+      if (this.#decisionIds.has(decision.executionId)) {
+        throw new LedgerCorruptionError(`账本损坏：重复 decision ${decision.executionId}`);
+      }
+      this.#decisionIds.add(decision.executionId);
+      this.#decisions.push(decision);
       return;
     }
     if (kind === "receipt") {

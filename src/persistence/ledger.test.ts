@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { newExecutionId, newReceiptId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
-import { JsonlLedger, LedgerConflictError, type LedgerIntent } from "./ledger.ts";
+import {
+  JsonlLedger,
+  LedgerConflictError,
+  type LedgerDecision,
+  type LedgerIntent,
+} from "./ledger.ts";
 
 function makeIntent(overrides: Partial<LedgerIntent> = {}): LedgerIntent {
   return {
@@ -16,6 +21,25 @@ function makeIntent(overrides: Partial<LedgerIntent> = {}): LedgerIntent {
     toolName: "edit_file",
     rawArgs: { path: "a.ts", edits: [] },
     decision: { outcome: "approved", approvedBy: "human", decidedAt: 1_757_000_000_001 },
+    at: 1_757_000_000_000,
+    ...overrides,
+  };
+}
+
+function makeDecision(overrides: Partial<LedgerDecision> = {}): LedgerDecision {
+  return {
+    kind: "decision",
+    version: 1,
+    executionId: newExecutionId(),
+    toolCallId: "toolu_01ABC",
+    toolName: "edit_file",
+    rawArgs: { path: "a.ts", edits: [] },
+    decision: {
+      outcome: "rejected",
+      approvedBy: "policy:deny",
+      reason: "deny 清单精确匹配",
+      decidedAt: 1_757_000_000_001,
+    },
     at: 1_757_000_000_000,
     ...overrides,
   };
@@ -77,16 +101,19 @@ test("append + 冷启动全量读：intent 与 receipt 按行持久化，新实�
   }
 });
 
-test("幂等：同一 executionId 重复写 intent/receipt 一律冲突拒绝（可检测，不静默去重）", () => {
+test("幂等：同一 executionId 重复写 intent/decision/receipt 一律冲突拒绝（可检测，不静默去重）", () => {
   const { ledger, path, cleanup } = makeLedger();
   try {
     const intent = makeIntent();
     ledger.appendIntent(intent);
     ledger.appendReceipt(makeReceipt(intent.executionId));
+    const rejected = makeDecision();
+    ledger.appendDecision(rejected);
     assert.throws(() => ledger.appendIntent(intent), LedgerConflictError);
     assert.throws(() => ledger.appendReceipt(makeReceipt(intent.executionId)), LedgerConflictError);
+    assert.throws(() => ledger.appendDecision(rejected), LedgerConflictError);
     // 冲突拒绝不产生新行
-    assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 2);
+    assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 3);
   } finally {
     cleanup();
   }
@@ -107,6 +134,60 @@ test("对账：intent 无 receipt → OutcomeUnknown（留证，不重放）；�
     assert.equal(report.unknown[0]?.receipt, undefined);
     assert.equal(report.orphanReceipts.length, 1);
     assert.deepEqual(report.orphanReceipts[0], orphan);
+  } finally {
+    cleanup();
+  }
+});
+
+test("decision 按行持久化：新实例冷启动可恢复，逐字保留拒绝理由", () => {
+  const { ledger, path, cleanup } = makeLedger();
+  try {
+    const rejected = makeDecision({
+      decision: {
+        outcome: "rejected",
+        approvedBy: "human",
+        reason: "会破坏现有逻辑",
+        decidedAt: 1_757_000_000_001,
+      },
+    });
+    ledger.appendDecision(rejected);
+
+    // 文件内容是可逐行解析的 JSONL
+    const lines = readFileSync(path, "utf8").trim().split("\n");
+    assert.equal(lines.length, 1);
+    assert.deepEqual(JSON.parse(lines[0] as string), rejected);
+
+    // 新实例冷启动恢复：rejected 归档，非 OutcomeUnknown
+    const report = new JsonlLedger(path).reconcile();
+    assert.equal(report.rejected.length, 1);
+    assert.deepEqual(report.rejected[0]?.decision, rejected);
+    assert.equal(report.rejected[0]?.decision.decision.reason, "会破坏现有逻辑");
+  } finally {
+    cleanup();
+  }
+});
+
+test("对账：decision（拒绝）归类 closed/rejected——无副作用可能，永不入 OutcomeUnknown", () => {
+  const { ledger, cleanup } = makeLedger();
+  try {
+    // ① decision 单行（end 事件前的崩溃点）：拒绝决定本身已闭环
+    const lone = makeDecision();
+    ledger.appendDecision(lone);
+    // ② decision + receipt 配对：receipt 被 decision 消费，不算孤立
+    const paired = makeDecision();
+    const pairedReceipt = makeReceipt(paired.executionId, { executed: false });
+    ledger.appendDecision(paired);
+    ledger.appendReceipt(pairedReceipt);
+
+    const report = ledger.reconcile();
+    assert.equal(report.unknown.length, 0);
+    assert.equal(report.settled.length, 0);
+    assert.equal(report.rejected.length, 2);
+    assert.deepEqual(report.rejected[0]?.decision, lone);
+    assert.equal(report.rejected[0]?.receipt, undefined);
+    assert.deepEqual(report.rejected[1]?.decision, paired);
+    assert.deepEqual(report.rejected[1]?.receipt, pairedReceipt);
+    assert.equal(report.orphanReceipts.length, 0);
   } finally {
     cleanup();
   }

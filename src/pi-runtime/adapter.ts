@@ -23,7 +23,11 @@ import {
 import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { type JsonlLedger, LEDGER_INTENT_VERSION } from "../persistence/ledger.ts";
+import {
+  type JsonlLedger,
+  LEDGER_DECISION_VERSION,
+  LEDGER_INTENT_VERSION,
+} from "../persistence/ledger.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
@@ -64,7 +68,7 @@ export interface RunResult {
 }
 
 // 账本落盘口的结构类型（= JsonlLedger 的写入面）；测试注入故障包装器模拟崩溃点
-export type LedgerSink = Pick<JsonlLedger, "appendIntent" | "appendReceipt">;
+export type LedgerSink = Pick<JsonlLedger, "appendIntent" | "appendDecision" | "appendReceipt">;
 
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
@@ -382,6 +386,7 @@ export class PiRuntimeAdapter {
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
+      this.#persistDecision(record);
       return this.#blockWithBreaker(toolName, rawArgs, decision.reason);
     }
 
@@ -411,6 +416,7 @@ export class PiRuntimeAdapter {
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
+      this.#persistDecision(record);
       return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道");
     }
     // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
@@ -438,6 +444,7 @@ export class PiRuntimeAdapter {
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
+      this.#persistDecision(record);
       return this.#blockWithBreaker(toolName, rawArgs, reason);
     }
     record = recordDecision(record, {
@@ -476,11 +483,40 @@ export class PiRuntimeAdapter {
     });
   }
 
+  // 拒绝决定落盘（决策 4 证据链：拒绝理由必须在场，进程退出后不蒸发）。
+  // 失败语义：调用已被阻断（副作用已防住），写盘失败不得改变结果——故自包 catch 进
+  // listenerErrors（代码库既有的内部异常观察口），而非上抛让外层 catch 把逐字拒绝理由
+  // 改写成"审批闸内部异常"反馈给模型。
+  #persistDecision(record: ToolExecution): void {
+    if (this.#ledger === undefined) {
+      return;
+    }
+    const decision = record.decision;
+    if (decision === undefined) {
+      throw new Error("账本 decision 缺失决定快照");
+    }
+    try {
+      this.#ledger.appendDecision({
+        kind: "decision",
+        version: LEDGER_DECISION_VERSION,
+        executionId: record.executionId,
+        toolCallId: record.toolCallId,
+        toolName: record.toolName,
+        rawArgs: record.rawArgs,
+        decision,
+        at: Date.now(),
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+  }
+
   // tool_execution_end 后写 Receipt 并回填 receiptId（三层关联 executionId/toolCallId/receiptId）。
   // executed 判据：到达 execution 阶段且执行结果无错误。M3 两个自建工具的唯一副作用都在
   // 最后一次写盘调用（edit_file 全部预检通过才落盘），故"执行过且无错"≡副作用发生；
   // 阻断/拒绝路径 executionStartedAt 为空 → executed=false（副作用从未发生）。
-  // 崩溃点：进程死于 end 事件前则 receipt 永不落盘——冷启动 reconcile 报 OutcomeUnknown。
+  // 崩溃点：进程死于 end 事件前则 receipt 永不落盘——approved 路径冷启动 reconcile 报
+  // OutcomeUnknown；rejected 路径已有 decision 行闭环，归 rejected 不入 unknown。
   #persistReceipt(record: ToolExecution, isError: boolean): void {
     if (this.#ledger === undefined) {
       return;

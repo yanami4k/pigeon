@@ -9,7 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
-import { JsonlLedger, LEDGER_INTENT_VERSION, type LedgerIntent } from "../persistence/ledger.ts";
+import {
+  JsonlLedger,
+  LEDGER_INTENT_VERSION,
+  type LedgerDecision,
+  type LedgerIntent,
+} from "../persistence/ledger.ts";
 import { asExecutionId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
@@ -48,12 +53,12 @@ function makeRegistry(): ToolRegistry {
   return registry;
 }
 
-function makeSnapshot(approvalMode: "prompt" | "yolo"): InjectionSnapshot {
+function makeSnapshot(approvalMode: "prompt" | "yolo", deny: string[] = []): InjectionSnapshot {
   return {
     version: INJECTION_SNAPSHOT_VERSION,
     model: { provider: "fake-provider", id: "fake-model-1" },
     tools: {
-      policy: { allow: ["read_file", "edit_file"], deny: [], approvalMode },
+      policy: { allow: ["read_file", "edit_file"], deny, approvalMode },
       advertised: [],
     },
     context: { systemPrompt: "你是 Pigeon 测试助手。" },
@@ -138,7 +143,7 @@ test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷启�
   }
 });
 
-test("拒绝路径也落 receipt：executed=false（副作用从未发生），approvedBy=human", async () => {
+test("人工拒绝路径：decision 落盘（理由逐字）+ receipt executed=false，对账归 rejected 非 unknown", async () => {
   const original = "x\ny\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
   const ledgerPath = join(root, "ledger.jsonl");
@@ -160,13 +165,142 @@ test("拒绝路径也落 receipt：executed=false（副作用从未发生），a
 
     await adapter.run("改文件");
     const lines = readLedgerLines(ledgerPath);
-    // 拒绝的调用：只有 receipt，没有 intent（intent 只在 dispatch 前写）
-    assert.equal(lines.length, 1);
-    assert.equal(lines[0]?.kind, "receipt");
-    const receipt = lines[0] as unknown as Receipt;
+    // 拒绝的调用：decision（拒绝理由逐字留证）+ receipt；intent 只在 dispatch 前写，拒绝路径没有
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0]?.kind, "decision");
+    assert.equal(lines[1]?.kind, "receipt");
+    assert.equal(lines[0]?.executionId, lines[1]?.executionId);
+    const persisted = lines[0] as unknown as LedgerDecision;
+    assert.equal(persisted.decision.outcome, "rejected");
+    assert.equal(persisted.decision.approvedBy, "human");
+    assert.equal(persisted.decision.reason, "不准");
+    const receipt = lines[1] as unknown as Receipt;
     assert.equal(receipt.executed, false);
     assert.equal(receipt.approvedBy, "human");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    // 冷启动对账：decision+receipt 配对归 rejected，无副作用可能，不落 OutcomeUnknown
+    const report = new JsonlLedger(ledgerPath).reconcile();
+    assert.equal(report.rejected.length, 1);
+    assert.equal(report.unknown.length, 0);
+    assert.equal(report.orphanReceipts.length, 0);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字留证", async () => {
+  const original = "x\ny\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const ledgerPath = join(root, "ledger.jsonl");
+  try {
+    const ledger = new JsonlLedger(ledgerPath);
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("prompt", ["edit_file"]),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: editCall("x\ny\n") }] },
+          { text: "好吧" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      approvalHandler: async () => ({ approved: true }),
+      ledger,
+    });
+
+    await adapter.run("改文件");
+    const lines = readLedgerLines(ledgerPath);
+    const persisted = lines.find((line) => line.kind === "decision") as unknown as LedgerDecision;
+    assert.ok(persisted, "deny 路径必须落 decision 行");
+    assert.equal(persisted.decision.outcome, "rejected");
+    assert.equal(persisted.decision.approvedBy, "policy:deny");
+    assert.equal(persisted.decision.reason, "deny 清单精确匹配，任何模式一律拒绝：edit_file");
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    const report = new JsonlLedger(ledgerPath).reconcile();
+    assert.equal(report.rejected.length, 1);
+    assert.equal(report.unknown.length, 0);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny", async () => {
+  const original = "x\ny\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const ledgerPath = join(root, "ledger.jsonl");
+  try {
+    const ledger = new JsonlLedger(ledgerPath);
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("prompt"),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: editCall("x\ny\n") }] },
+          { text: "好吧" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      // 故意不传 approvalHandler：prompt 模式 fail-closed 拒绝
+      ledger,
+    });
+
+    await adapter.run("改文件");
+    const lines = readLedgerLines(ledgerPath);
+    const persisted = lines.find((line) => line.kind === "decision") as unknown as LedgerDecision;
+    assert.ok(persisted, "fail-closed 路径必须落 decision 行");
+    assert.equal(persisted.decision.outcome, "rejected");
+    assert.equal(persisted.decision.approvedBy, "policy:deny");
+    assert.equal(persisted.decision.reason, "策略要求人工审批但未配置审批通道（fail-closed）");
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故障进 listenerErrors", async () => {
+  const original = "x\ny\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const ledgerPath = join(root, "ledger.jsonl");
+  try {
+    const real = new JsonlLedger(ledgerPath);
+    const poison = {
+      appendIntent: real.appendIntent.bind(real),
+      appendDecision: () => {
+        throw new Error("模拟磁盘写失败：decision 未落盘");
+      },
+      appendReceipt: real.appendReceipt.bind(real),
+      reconcile: real.reconcile.bind(real),
+    };
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("prompt"),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: editCall("x\ny\n") }] },
+          { text: "好吧" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      approvalHandler: async () => ({ approved: false, reason: "不准" }),
+      ledger: poison,
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "completed");
+    // 结果不变：仍按原理由阻断，文件零改动
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+    assert.equal(result.toolExecutions[0]?.decision?.outcome, "rejected");
+    assert.equal(result.toolExecutions[0]?.decision?.reason, "不准");
+    // 故障响亮记录（listenerErrors），不是静默吞掉
+    assert.ok(adapter.listenerErrors().length > 0);
 
     await adapter.dispose();
   } finally {
@@ -214,6 +348,7 @@ test("崩溃点②：execute 已跑、receipt 未写（故障注入账本）→ 
     const poisoned = new JsonlLedger(ledgerPath);
     const poison = {
       appendIntent: poisoned.appendIntent.bind(poisoned),
+      appendDecision: poisoned.appendDecision.bind(poisoned),
       appendReceipt: () => {
         throw new Error("模拟进程崩溃：receipt 未落盘");
       },
@@ -263,6 +398,7 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
       appendIntent: () => {
         throw new Error("模拟磁盘写失败");
       },
+      appendDecision: real.appendDecision.bind(real),
       appendReceipt: real.appendReceipt.bind(real),
       reconcile: real.reconcile.bind(real),
     };
