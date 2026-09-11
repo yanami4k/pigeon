@@ -1,11 +1,12 @@
-// Event Log（ROADMAP §3.5 权威状态源，M4 S1）：每 session 一文件 `.pigeon/sessions/sess_<ulid>.jsonl`
+// Event Log（ROADMAP §3.5 权威状态源，M4 S1/S2）：每 session 一文件 `.pigeon/sessions/sess_<ulid>.jsonl`
 // （D1），单一日志承载全部事件族——运行时事件（turn/tool/run 五种归一化事件）与治理族
-// （intent/decision/receipt，M3 账本归并而来，决策 2：不双写）。
+// （intent/decision/receipt，M3 账本归并而来，决策 2：不双写；S2 新增 breaker/resolution）。
 // 记录信封：version + EntryId + SessionId + RunId + 时间戳；kind 区分族，payload/字段随族。
 // 落盘策略（D2）：事件产生即同步写盘（崩溃窗口为零）；治理族写后 fsync（防断电），
 // 观察族只写不 fsync（防进程崩溃，延续 M3 现状）。
 // 冷物化 = 全量读本 session 文件 + 按 executionId 对账（reconcile），分类语义与 M3 完全一致：
-// intent 无 receipt = OutcomeUnknown（只标记留证，§3.2 禁止盲重放）；decision 即闭环（rejected）。
+// intent 无 receipt = OutcomeUnknown（只标记留证，§3.2 禁止盲重放）；decision 即闭环（rejected）；
+// S2 新增：resolution（哈希自动确证，D5）与悬账配对归 resolved，不再滞留 unknown。
 import {
   closeSync,
   existsSync,
@@ -37,11 +38,14 @@ import {
   type SessionId,
   SessionIdSchema,
 } from "../state/ids.ts";
-import { type Receipt, ReceiptSchema } from "../state/receipt.ts";
+import { MigrationRegistry } from "../state/migration.ts";
+import { migrateReceiptToCurrent, type Receipt, ReceiptSchema } from "../state/receipt.ts";
 import { ToolExecutionDecisionSchema } from "../state/tool-execution.ts";
 
-// Event Log 记录格式版本；迁移管线（M0 migration.ts）按 version 字段路由
-export const EVENT_LOG_VERSION = 1;
+// Event Log 记录格式版本；迁移管线（M0 migration.ts）按 version 字段路由。
+// v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族——
+// 全部加法式（可缺省/新成员），v1 旧记录经读路径迁移链升级（见 eventLogMigrations）
+export const EVENT_LOG_VERSION = 2;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -100,11 +104,23 @@ const GOVERNANCE_PROPS = {
   at: Type.Integer({ minimum: 0 }),
 } as const;
 
-// intent：调用前持久化意图（§3.2：副作用 = 稳定 ExecutionId + 调用前意图 + 调用后 Receipt）
+// intent：调用前持久化意图（§3.2：副作用 = 稳定 ExecutionId + 调用前意图 + 调用后 Receipt）。
+// M4 S2（D5）：写工具 intent 增 contentHashes——dispatch 准备期实测的改前哈希 +
+// 由编辑规约确定性推出的预期改后哈希（snapshotTag 格式，16 位十六进制），
+// 供冷恢复三方比对自动确证；探针不可得时缺省（缺省 = 该悬账只能留人确认）
+export const IntentContentHashesSchema = Type.Object({
+  // 工作区相对路径（模型参数原样）
+  path: Type.String({ minLength: 1 }),
+  beforeHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+  expectedAfterHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+});
+export type IntentContentHashes = Static<typeof IntentContentHashesSchema>;
+
 export const IntentRecordSchema = Type.Object({
   ...ENVELOPE_PROPS,
   kind: Type.Literal("intent"),
   ...GOVERNANCE_PROPS,
+  contentHashes: Type.Optional(IntentContentHashesSchema),
 });
 export type IntentRecord = Static<typeof IntentRecordSchema>;
 
@@ -125,12 +141,62 @@ export const ReceiptRecordSchema = Type.Object({
 });
 export type ReceiptRecord = Static<typeof ReceiptRecordSchema>;
 
-// Event Log 记录并集（grant 族不在 S1 范围，S6 以新成员加法式扩展）
+// breaker（M4 S2，D7 治理熔断子类的判据行）：熔断落闸时刻的持久化留证。
+// 独立于 decision 族的原因：事件级熔断兜底的「上游拦截」调用 hook 从未运行，
+// 没有 ToolExecution 账本/executionId 可挂靠；熔断是 Run 级治理动作而非单次审批决定。
+// 不进 executionId 幂等索引（无此键），同一 Run 多次落闸各自留行
+export const BreakerRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal("breaker"),
+  toolName: Type.String({ minLength: 1 }),
+  // 触发落闸的那次调用
+  toolCallId: Type.String({ minLength: 1 }),
+  // 计数粒度：tool = policy:deny 系绝对拒绝按工具名；fingerprint = 人工拒绝/闸内异常按参数指纹；
+  // intercepted = 事件级上游拦截连击（幽灵工具名/参数畸形）
+  scope: Type.Union([
+    Type.Literal("tool"),
+    Type.Literal("fingerprint"),
+    Type.Literal("intercepted"),
+  ]),
+  // 落闸时的连击数与阈值
+  count: Type.Integer({ minimum: 1 }),
+  threshold: Type.Integer({ minimum: 1 }),
+  at: Type.Integer({ minimum: 0 }),
+});
+export type BreakerRecord = Static<typeof BreakerRecordSchema>;
+
+// resolution（M4 S2，D5 哈希自动确证）：悬账（intent 无 receipt）的确证记录。
+// 冷启动对账时读目标文件现状哈希三方比对：== 预期改后 → executed；== 改前 → not-executed；
+// 都不符（撕裂写/第三方改动）不留记录、继续滞留 OutcomeUnknown 等人工。
+// 确证只销账，系统永不自动重新执行（§3.2）；按 executionId 幂等（同族重复冲突拒绝）
+export const ResolutionRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal("resolution"),
+  executionId: ExecutionIdSchema,
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: Type.String({ minLength: 1 }),
+  outcome: Type.Union([Type.Literal("executed"), Type.Literal("not-executed")]),
+  // 确证渠道：hash-auto = 哈希三方比对自动确证；将来人工确认渠道以新字面量加入
+  method: Type.Literal("hash-auto"),
+  // 比对证据四方留证：路径 + 改前/预期改后/实测现状哈希
+  evidence: Type.Object({
+    path: Type.String({ minLength: 1 }),
+    beforeHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+    expectedAfterHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+    observedHash: Type.String({ pattern: "^[0-9a-f]{16}$" }),
+  }),
+  at: Type.Integer({ minimum: 0 }),
+});
+export type ResolutionRecord = Static<typeof ResolutionRecordSchema>;
+
+// Event Log 记录并集（grant 族不在 S2 范围，S6 以新成员加法式扩展）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
   IntentRecordSchema,
   DecisionRecordSchema,
   ReceiptRecordSchema,
+  BreakerRecordSchema,
+  ResolutionRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -144,13 +210,19 @@ export interface ReceiptInput {
   receipt: Receipt;
   runId: RunId;
 }
+export type BreakerInput = Omit<BreakerRecord, "version" | "id" | "sessionId" | "kind" | "timestamp">;
+export type ResolutionInput = Omit<
+  ResolutionRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
 
 export class EventLogConflictError extends Error {}
 export class EventLogCorruptionError extends Error {}
 
 // 治理族 kind（幂等索引按族分立：跨族同 executionId 合法，同族重复一律冲突拒绝——M3 语义）；
-// 键是静态字面量，索引容器用 Record 而非 Map
-type GovernanceKind = "intent" | "decision" | "receipt";
+// 键是静态字面量，索引容器用 Record 而非 Map。
+// resolution 按 executionId 幂等（一次悬账只确证一次）；breaker 无 executionId 键，不进索引
+type GovernanceKind = "intent" | "decision" | "receipt" | "resolution";
 
 // 对账报告：pairing 按 executionId（分类语义与 M3 账本逐字一致）
 export interface ReconcileEntry {
@@ -161,15 +233,25 @@ export interface RejectedEntry {
   decision: DecisionRecord;
   receipt?: Receipt;
 }
+// M4 S2：悬账与确证记录的配对（D5 哈希自动确证销账）
+export interface ResolvedEntry {
+  intent: IntentRecord;
+  resolution: ResolutionRecord;
+}
 export interface ReconcileReport {
   // intent + receipt 配对完成
   settled: ReconcileEntry[];
-  // intent 无 receipt：死于 dispatch/execute/receipt 任一窗口——副作用是否发生未知（OutcomeUnknown）
+  // intent 无 receipt 且无 resolution：死于 dispatch/execute/receipt 任一窗口——
+  // 副作用是否发生未知（OutcomeUnknown）
   unknown: ReconcileEntry[];
   // decision（拒绝）：闭环——拒绝发生于 dispatch 前，无副作用可能，永不入 OutcomeUnknown
   rejected: RejectedEntry[];
+  // intent 无 receipt 但有 resolution：哈希自动确证已销账（executed / not-executed）
+  resolved: ResolvedEntry[];
   // receipt 既无 intent 也无 decision：日志损坏或手写——如实报告，不猜测
   orphanReceipts: Receipt[];
+  // resolution 找不到对应 intent：同上，如实报告
+  orphanResolutions: ResolutionRecord[];
 }
 
 // 冷物化结果：一个 session 的完整派生状态（D5：派生不落库，视图是投影）
@@ -182,11 +264,24 @@ export interface MaterializedSession {
   intents: IntentRecord[];
   decisions: DecisionRecord[];
   receipts: Receipt[];
+  breakers: BreakerRecord[];
+  resolutions: ResolutionRecord[];
   reconcile: ReconcileReport;
 }
 
+// Event Log 记录格式的迁移链（M0 管线）：v1 → v2 为加法式演进（intent 增 contentHashes、
+// settled 增 errorKind、新增 breaker/resolution 族——旧记录逐字有效，纯版本推进）；
+// receipt 载荷自带独立迁移链（state/receipt.ts），此处一并升级
+const eventLogMigrations = new MigrationRegistry();
+eventLogMigrations.register("event-log", 1, (doc) => ({
+  ...doc,
+  version: 2,
+  ...(doc.kind === "receipt" ? { receipt: migrateReceiptToCurrent(doc.receipt) } : {}),
+}));
+
 // 全量读 + 校验：进程死于写盘中途会留下半截末行——按"未持久化"容忍（torn tail）；
-// 非末行损坏说明日志被外部破坏，响亮失败
+// 非末行损坏说明日志被外部破坏，响亮失败。
+// 读路径迁移（M0 管线）：version 低于当前格式的记录先经 eventLogMigrations 逐级升级再校验
 export function readEventLogFile(path: string): EventRecord[] {
   if (!existsSync(path)) {
     return [];
@@ -207,7 +302,10 @@ export function readEventLogFile(path: string): EventRecord[] {
     }
     let record: EventRecord;
     try {
-      record = Value.Parse(EventRecordSchema, raw);
+      record =
+        typeof raw === "object" && raw !== null && "version" in raw && raw.version !== EVENT_LOG_VERSION
+          ? eventLogMigrations.migrate("event-log", raw, EVENT_LOG_VERSION, EventRecordSchema)
+          : Value.Parse(EventRecordSchema, raw);
     } catch (error) {
       throw new EventLogCorruptionError(
         `事件日志损坏：${path} 第 ${index + 1} 行校验失败：${error instanceof Error ? error.message : String(error)}`
@@ -219,8 +317,23 @@ export function readEventLogFile(path: string): EventRecord[] {
 }
 
 // 治理族记录的幂等键（executionId）；receipt 的键在载荷里
-function governanceKey(record: IntentRecord | DecisionRecord | ReceiptRecord): ExecutionId {
+function governanceKey(
+  record: IntentRecord | DecisionRecord | ReceiptRecord | ResolutionRecord
+): ExecutionId {
   return record.kind === "receipt" ? record.receipt.executionId : record.executionId;
+}
+
+// 按 executionId 幂等的治理族集合——构造器索引恢复 / appendRecord / #append 三处判定
+// 必须恒同（漏一处 = 崩溃重开后幂等失守或写盘不 fsync），故收口为唯一类型谓词
+function isExecutionKeyedGovernance(
+  record: EventRecord
+): record is IntentRecord | DecisionRecord | ReceiptRecord | ResolutionRecord {
+  return (
+    record.kind === "intent" ||
+    record.kind === "decision" ||
+    record.kind === "receipt" ||
+    record.kind === "resolution"
+  );
 }
 
 export class JsonlEventLog {
@@ -231,6 +344,7 @@ export class JsonlEventLog {
     intent: new Set<string>(),
     decision: new Set<string>(),
     receipt: new Set<string>(),
+    resolution: new Set<string>(),
   };
   // 常驻 append 句柄：治理族 fsync 与观察族写盘共用（fsync 按文件刷脏页，无需逐次重开）
   readonly #fd: number;
@@ -244,7 +358,7 @@ export class JsonlEventLog {
     }
     // 冷启动恢复幂等索引（torn tail 容忍同 M3）；重复记录 = 外部破坏，响亮失败
     for (const record of readEventLogFile(this.path)) {
-      if (record.kind === "intent" || record.kind === "decision" || record.kind === "receipt") {
+      if (isExecutionKeyedGovernance(record)) {
         const key = governanceKey(record);
         if (this.#governanceIds[record.kind].has(key)) {
           throw new EventLogCorruptionError(
@@ -305,13 +419,34 @@ export class JsonlEventLog {
     return record;
   }
 
+  // 熔断落闸留证（M4 S2，D7 治理熔断判据行）：治理族耐久（fsync），无 executionId 幂等键
+  appendBreaker(input: BreakerInput): BreakerRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(BreakerRecordSchema, {
+      ...this.#envelope(runId),
+      kind: "breaker",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // 悬账确证落盘（M4 S2，D5）：治理族耐久（fsync）+ 按 executionId 幂等（重复确证冲突拒绝）
+  appendResolution(input: ResolutionInput): ResolutionRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(ResolutionRecordSchema, {
+      ...this.#envelope(runId),
+      kind: "resolution",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
   // 迁移/外部构造记录的直通入口：全量校验 + 幂等判定 + 按族耐久写盘
   appendRecord(record: EventRecord): void {
     const parsed = Value.Parse(EventRecordSchema, record);
-    this.#append(
-      parsed,
-      parsed.kind === "intent" || parsed.kind === "decision" || parsed.kind === "receipt"
-    );
+    this.#append(parsed, isExecutionKeyedGovernance(parsed));
   }
 
   close(): void {
@@ -340,7 +475,7 @@ export class JsonlEventLog {
     if (this.#closed) {
       throw new EventLogCorruptionError("事件日志已关闭，拒绝追加");
     }
-    if (record.kind === "intent" || record.kind === "decision" || record.kind === "receipt") {
+    if (isExecutionKeyedGovernance(record)) {
       const key = governanceKey(record);
       if (this.#governanceIds[record.kind].has(key)) {
         throw new EventLogConflictError(`重复 ${record.kind}：${key}`);
@@ -366,6 +501,8 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
   const intents: IntentRecord[] = [];
   const decisions: DecisionRecord[] = [];
   const receipts: Receipt[] = [];
+  const breakers: BreakerRecord[] = [];
+  const resolutions: ResolutionRecord[] = [];
   for (const record of records) {
     if (record.kind === "intent") {
       intents.push(record);
@@ -373,6 +510,10 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
       decisions.push(record);
     } else if (record.kind === "receipt") {
       receipts.push(record.receipt);
+    } else if (record.kind === "breaker") {
+      breakers.push(record);
+    } else if (record.kind === "resolution") {
+      resolutions.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -385,18 +526,23 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     intents,
     decisions,
     receipts,
-    reconcile: reconcileRecords(intents, decisions, receipts),
+    breakers,
+    resolutions,
+    reconcile: reconcileRecords(intents, decisions, receipts, resolutions),
   };
 }
 
-// 冷启动对账（与 M3 账本 reconcile 逐字同语义）：intent 无 receipt → OutcomeUnknown
-// （只留证，不重放）；decision（拒绝）即闭环——与 receipt 配对后归 rejected
+// 冷启动对账（与 M3 账本 reconcile 逐字同语义 + S2 确证配对）：intent 无 receipt →
+// OutcomeUnknown（只留证，不重放）；decision（拒绝）即闭环——与 receipt 配对后归 rejected；
+// intent 无 receipt 但有 resolution（哈希自动确证）→ resolved（销账，不再滞留 unknown）
 export function reconcileRecords(
   intents: IntentRecord[],
   decisions: DecisionRecord[],
-  receipts: Receipt[]
+  receipts: Receipt[],
+  resolutions: ResolutionRecord[]
 ): ReconcileReport {
   const receiptByExecution = new Map(receipts.map((r) => [r.executionId, r]));
+  const resolutionByExecution = new Map(resolutions.map((r) => [r.executionId, r]));
   const rejected: RejectedEntry[] = [];
   for (const decision of decisions) {
     const receipt = receiptByExecution.get(decision.executionId);
@@ -405,14 +551,26 @@ export function reconcileRecords(
   }
   const settled: ReconcileEntry[] = [];
   const unknown: ReconcileEntry[] = [];
+  const resolved: ResolvedEntry[] = [];
   for (const intent of intents) {
     const receipt = receiptByExecution.get(intent.executionId);
     receiptByExecution.delete(intent.executionId);
-    if (receipt === undefined) {
-      unknown.push({ intent });
-    } else {
+    const resolution = resolutionByExecution.get(intent.executionId);
+    resolutionByExecution.delete(intent.executionId);
+    if (receipt !== undefined) {
       settled.push({ intent, receipt });
+    } else if (resolution !== undefined) {
+      resolved.push({ intent, resolution });
+    } else {
+      unknown.push({ intent });
     }
   }
-  return { settled, unknown, rejected, orphanReceipts: [...receiptByExecution.values()] };
+  return {
+    settled,
+    unknown,
+    rejected,
+    resolved,
+    orphanReceipts: [...receiptByExecution.values()],
+    orphanResolutions: [...resolutionByExecution.values()],
+  };
 }

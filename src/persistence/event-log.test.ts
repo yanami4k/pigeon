@@ -2,7 +2,7 @@
 // fsync 路径说明：治理族 append（intent/decision/receipt）内部走 writeSync + fsyncSync，
 // 本文件每个治理族用例都真实经过该路径；耐久性佐证 = 追加后立即用全新 fd 读文件可见内容。
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +21,9 @@ import {
 } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import {
+  type BreakerInput,
   type DecisionInput,
+  EVENT_LOG_VERSION,
   EventLogConflictError,
   EventLogCorruptionError,
   EventRecordSchema,
@@ -29,6 +31,7 @@ import {
   JsonlEventLog,
   materializeSession,
   readEventLogFile,
+  type ResolutionInput,
 } from "./event-log.ts";
 
 function makeIntentInput(
@@ -119,11 +122,11 @@ function makeLog(): {
   };
 }
 
-test("schema 往返：八种记录族逐一 parse 后与原值一致；未知 kind 与畸形 payload 被拒", () => {
+test("schema 往返：十种记录族逐一 parse 后与原值一致；未知 kind 与畸形 payload 被拒", () => {
   const sessionId = newSessionId();
   const runId = newRunId();
   const envelope = {
-    version: 1,
+    version: EVENT_LOG_VERSION,
     id: newEntryId(),
     sessionId,
     runId,
@@ -131,6 +134,8 @@ test("schema 往返：八种记录族逐一 parse 后与原值一致；未知 ki
   };
   const intent = makeIntentInput({ runId });
   const decision = makeDecisionInput({ runId });
+  const breaker = makeBreakerInput(runId);
+  const resolution = makeResolutionInput(runId, intent.executionId);
   const records: unknown[] = [
     { ...envelope, kind: "turn.started", payload: {} },
     {
@@ -148,10 +153,26 @@ test("schema 往返：八种记录族逐一 parse 后与原值一致；未知 ki
       kind: "tool.settled",
       payload: { toolCallId: "toolu_1", toolName: "edit_file", isError: false },
     },
+    // M4 S2：settled 携带错误分类（工具域错误 / 环境异常，D7 ToolExecution 级判据）
+    {
+      ...envelope,
+      kind: "tool.settled",
+      payload: { toolCallId: "toolu_2", toolName: "edit_file", isError: true, errorKind: "domain" },
+    },
     { ...envelope, kind: "run.ended", payload: { messageCount: 3 } },
     { ...envelope, kind: "intent", ...stripRunId(intent) },
+    // M4 S2：intent 携带内容哈希三元组（哈希自动确证的比对基准）
+    {
+      ...envelope,
+      kind: "intent",
+      ...stripRunId(makeIntentInput({ runId }, { contentHashes: makeContentHashes() })),
+    },
     { ...envelope, kind: "decision", ...stripRunId(decision) },
     { ...envelope, kind: "receipt", receipt: makeReceipt(intent.executionId) },
+    // M4 S2：熔断落闸记录（治理熔断子类的判据行）
+    { ...envelope, kind: "breaker", ...stripRunId(breaker) },
+    // M4 S2：哈希自动确证记录
+    { ...envelope, kind: "resolution", ...stripRunId(resolution) },
   ];
   for (const record of records) {
     assert.deepEqual(Value.Parse(EventRecordSchema, record), record);
@@ -166,10 +187,60 @@ test("schema 往返：八种记录族逐一 parse 后与原值一致；未知 ki
       payload: { toolCallId: "toolu_1", toolName: "edit_file" },
     })
   );
+  // errorKind 越界拒绝
+  assert.throws(() =>
+    Value.Parse(EventRecordSchema, {
+      ...envelope,
+      kind: "tool.settled",
+      payload: { toolCallId: "toolu_1", toolName: "edit_file", isError: true, errorKind: "oops" },
+    })
+  );
 });
 
-// IntentInput/DecisionInput 的 runId 不属于落盘行字段，往返用例剔除
-function stripRunId(input: IntentInput | DecisionInput): Record<string, unknown> {
+// M4 S2：intent 的内容哈希三元组（dispatch 前实测改前 + 确定性推出改后）
+function makeContentHashes() {
+  return {
+    path: "a.ts",
+    beforeHash: "aaaaaaaaaaaaaaaa",
+    expectedAfterHash: "bbbbbbbbbbbbbbbb",
+  };
+}
+
+function makeBreakerInput(runId: RunId, overrides: Partial<BreakerInput> = {}): BreakerInput {
+  return {
+    toolName: "edit_file",
+    toolCallId: "toolu_01ABC",
+    scope: "tool",
+    count: 3,
+    threshold: 3,
+    at: 1_757_000_000_002,
+    runId,
+    ...overrides,
+  };
+}
+
+function makeResolutionInput(
+  runId: RunId,
+  executionId: ExecutionId,
+  overrides: Partial<ResolutionInput> = {}
+): ResolutionInput {
+  return {
+    executionId,
+    toolCallId: "toolu_01ABC",
+    toolName: "edit_file",
+    outcome: "executed",
+    method: "hash-auto",
+    evidence: { ...makeContentHashes(), observedHash: "bbbbbbbbbbbbbbbb" },
+    at: 1_757_000_000_003,
+    runId,
+    ...overrides,
+  };
+}
+
+// IntentInput/DecisionInput/BreakerInput/ResolutionInput 的 runId 不属于落盘行字段，往返用例剔除
+function stripRunId(
+  input: IntentInput | DecisionInput | BreakerInput | ResolutionInput
+): Record<string, unknown> {
   const { runId: _runId, ...rest } = input;
   return rest;
 }
@@ -309,7 +380,104 @@ test("冷物化缺失文件 = 全新 session 空态（不是损坏）", () => {
     assert.equal(materialized.reconcile.settled.length, 0);
     assert.equal(materialized.reconcile.unknown.length, 0);
     assert.equal(materialized.reconcile.rejected.length, 0);
+    assert.equal(materialized.reconcile.resolved.length, 0);
     assert.equal(materialized.reconcile.orphanReceipts.length, 0);
+    assert.equal(materialized.reconcile.orphanResolutions.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolution 幂等：同一 executionId 重复确证冲突拒绝；breaker 不按 executionId 去重", () => {
+  const { log, runId, cleanup } = makeLog();
+  try {
+    const intent = makeIntentInput({ runId });
+    log.appendIntent(intent);
+    log.appendResolution(makeResolutionInput(runId, intent.executionId));
+    assert.throws(
+      () => log.appendResolution(makeResolutionInput(runId, intent.executionId)),
+      EventLogConflictError
+    );
+    // breaker 以 Run 内连击为语义（无 executionId 幂等键），同一 Run 多次落闸各自留行
+    log.appendBreaker(makeBreakerInput(runId));
+    log.appendBreaker(makeBreakerInput(runId, { toolCallId: "toolu_other" }));
+    assert.equal(readEventLogFile(log.path).filter((r) => r.kind === "breaker").length, 2);
+    log.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("冷物化对账：intent + resolution 配对归 resolved（不再滞留 unknown）；孤儿 resolution 如实报告", () => {
+  const { log, dir, sessionId, runId, cleanup } = makeLog();
+  try {
+    const resolvedIntent = makeIntentInput({ runId });
+    log.appendIntent(resolvedIntent);
+    log.appendResolution(
+      makeResolutionInput(runId, resolvedIntent.executionId, { outcome: "not-executed" })
+    );
+    // 无 resolution 的悬账仍滞留 unknown（哈希缺省或三方比对不符）
+    const stillUnknown = makeIntentInput({ runId });
+    log.appendIntent(stillUnknown);
+    // 孤儿 resolution：对应的 intent 不存在（日志损坏或手写）
+    log.appendResolution(makeResolutionInput(runId, newExecutionId()));
+    log.close();
+
+    const { reconcile } = materializeSession(dir, sessionId);
+    assert.equal(reconcile.resolved.length, 1);
+    assert.equal(reconcile.resolved[0]?.intent.executionId, resolvedIntent.executionId);
+    assert.equal(reconcile.resolved[0]?.resolution.outcome, "not-executed");
+    assert.equal(reconcile.unknown.length, 1);
+    assert.equal(reconcile.unknown[0]?.intent.executionId, stillUnknown.executionId);
+    assert.equal(reconcile.orphanResolutions.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("v1 事件文件读路径迁移：版本升到当前格式，内嵌 receipt 载荷经 receipt 链升到 v3", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
+  try {
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const executionId = newExecutionId();
+    // 手工构造 v1 格式行（S1 落盘形状：无 contentHashes/errorKind，receipt 载荷为 v2）
+    const v1Envelope = {
+      version: 1,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1_757_000_000_000,
+    };
+    const v1Intent = {
+      ...v1Envelope,
+      kind: "intent",
+      executionId,
+      toolCallId: "toolu_01ABC",
+      toolName: "edit_file",
+      rawArgs: { path: "a.ts" },
+      decision: { outcome: "approved", approvedBy: "human", decidedAt: 1_757_000_000_001 },
+      at: 1_757_000_000_000,
+    };
+    const v1Receipt = {
+      ...v1Envelope,
+      kind: "receipt",
+      receipt: { ...makeReceipt(executionId), version: 2 },
+    };
+    const path = join(dir, `${sessionId}.jsonl`);
+    writeFileSync(path, `${JSON.stringify(v1Intent)}\n${JSON.stringify(v1Receipt)}\n`, "utf8");
+
+    const records = readEventLogFile(path);
+    assert.equal(records.length, 2);
+    assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
+    const receipt = records[1];
+    assert.equal(receipt?.kind, "receipt");
+    assert.equal(receipt?.kind === "receipt" && receipt.receipt.version, RECEIPT_VERSION);
+
+    // 冷物化经同一路径：迁移后照常对账（settled 配对成功）
+    const { reconcile } = materializeSession(dir, sessionId);
+    assert.equal(reconcile.settled.length, 1);
+    assert.equal(reconcile.unknown.length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

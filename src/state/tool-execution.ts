@@ -36,6 +36,16 @@ export const ToolExecutionDecisionSchema = Type.Object({
   decidedAt: Type.Integer({ minimum: 0 }),
 });
 export type ToolExecutionDecision = Static<typeof ToolExecutionDecisionSchema>;
+
+// 工具错误分类（M4 S2，D7 ToolExecution 级判据）：domain = 工具自身域错误
+// （路径逃逸/文件不存在/hashline 锚不匹配/参数校验失败——业务失败）；
+// environment = 环境异常（磁盘/权限/文件系统调用抛错——基础设施错误）。
+// 判不出的不落该字段，冷分类落入「未知」默认桶（宁标不知道，不贴错标签）
+export const ToolErrorKindSchema = Type.Union([
+  Type.Literal("domain"),
+  Type.Literal("environment"),
+]);
+export type ToolErrorKind = Static<typeof ToolErrorKindSchema>;
 export const ToolExecutionSchema = Type.Object({
   version: Type.Literal(TOOL_EXECUTION_VERSION),
   executionId: ExecutionIdSchema,

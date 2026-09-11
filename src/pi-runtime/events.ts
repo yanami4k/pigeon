@@ -12,6 +12,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import { newEntryId, type RunId, type SessionId } from "../state/ids.ts";
+import { ToolErrorKindSchema } from "../state/tool-execution.ts";
 
 export const RuntimeEventKind = {
   TurnStarted: "turn.started",
@@ -58,6 +59,9 @@ export const ToolSettledPayloadSchema = Type.Object({
   toolCallId: Type.String({ minLength: 1 }),
   toolName: Type.String({ minLength: 1 }),
   isError: Type.Boolean(),
+  // M4 S2（D7）：工具错误的域/环境分类，由 Adapter 在工具抛出处捕获归类后 enrich；
+  // 判不出的缺省（冷分类落「未知」默认桶），上游拦截类错误由 Adapter 标 domain
+  errorKind: Type.Optional(ToolErrorKindSchema),
 });
 export type ToolSettledPayload = Static<typeof ToolSettledPayloadSchema>;
 
