@@ -542,3 +542,102 @@ test("幽灵熔断是连续语义：正常工具调用重置连击，未连续�
     cleanup();
   }
 });
+
+test("参数校验失败循环熔断：模型持续给已广告工具发畸形参数，事件级计数到阈值后 aborted", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "x\n" });
+  try {
+    // edit_file 缺 snapshot/edits：上游 validateToolArguments 在 beforeToolCall 之前拦截
+    // （agent-loop.js:399-448），审批闸/账本不可见，但 tool_execution_end 照常到达——
+    // 与幽灵工具名同属"上游拦截"路径，必须由事件级熔断收口
+    const malformedReplies = Array.from({ length: 10 }, () => ({
+      text: "",
+      toolCalls: [{ name: "edit_file", args: { path: "a.ts" } }],
+    }));
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["edit_file"], approvalMode: "yolo" }),
+      streamFn: createFakeStreamFn({ replies: [...malformedReplies, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "aborted");
+    // 事件级熔断在默认阈值 3 处开火：恰好 3 组 settled，多一组都说明熔断迟到
+    const { settled } = phantomToolEvents(adapter, "edit_file");
+    assert.equal(settled.length, 3);
+    assert.ok(settled.every((payload) => payload.isError));
+    // hook 从未运行：账本零记录，事件日志是唯一审计轨迹
+    assert.equal(result.toolExecutions.length, 0);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("deny 熔断按工具名计数：模型每轮微调参数绕行指纹，仍计数到阈值 aborted", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "x\n" });
+  try {
+    // deny 是绝对拒绝：参数改不改都照样拒，任何重试皆徒劳——故按工具名计数，
+    // 模型微调字段不能重置连击（人工拒绝相反：保留指纹计数，鼓励改参重提，见下个测试）
+    const evadingReplies = Array.from({ length: 10 }, (_, index) => ({
+      text: "",
+      toolCalls: [{ name: "read_file", args: { path: `f${index}.ts` } }],
+    }));
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({
+        allow: ["read_file"],
+        deny: ["read_file"],
+        approvalMode: "yolo",
+      }),
+      streamFn: createFakeStreamFn({ replies: [...evadingReplies, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createReadFileTool(root)],
+    });
+
+    const result = await adapter.run("读文件");
+    assert.equal(result.status, "aborted");
+    assert.equal(result.toolExecutions.length, 3);
+    for (const record of result.toolExecutions) {
+      assert.equal(record.decision?.outcome, "rejected");
+      assert.equal(record.decision?.approvedBy, "policy:deny");
+    }
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("人工拒绝保留指纹计数：模型改参重提是期望的修订循环，不触发熔断", async () => {
+  const original = "x\ny\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    // 决策 1 鼓励模型在人工拒绝后改参数重提：5 次提案参数互异、都被人拒绝，
+    // 指纹计数不累积——若误用工具名级计数，第 3 次就会被熔断中止（阈值 3 < 5）
+    const revisedReplies = Array.from({ length: 5 }, (_, index) => ({
+      text: "再改",
+      toolCalls: [{ name: "edit_file", args: editCall(original, "y", `Y${index}`, 2) }],
+    }));
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["edit_file"], approvalMode: "prompt" }),
+      streamFn: createFakeStreamFn({ replies: [...revisedReplies, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      approvalHandler: async () => ({ approved: false, reason: "再想想" }),
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "completed");
+    assert.equal(result.toolExecutions.length, 5);
+    for (const record of result.toolExecutions) {
+      assert.equal(record.decision?.outcome, "rejected");
+      assert.equal(record.decision?.approvedBy, "human");
+    }
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});

@@ -9,8 +9,9 @@
 // 5. 中断固定姿势：abort() → waitForIdle()，终态 stopReason === "aborted"，任何路径不悬挂；
 // 6. M3 治理闭环：beforeToolCall 审批闸（策略判定 → 人工审批/自动放行 → block）+
 //    ToolExecution 账本 + 熔断 + run() 互斥（决策 1/2/4，spike S2a/S4/S5）。
-// 7. 幽灵工具名（从未广告）hook 不可见：上游 prepareToolCall 在 hook 前拦截，
-//    事件级连续计数熔断兜底（tmp/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
+// 7. 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游
+//    prepareToolCall 在 hook 前拦截，事件级连续计数熔断兜底
+//    （tmp/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
 import {
   Agent,
   type AgentEvent,
@@ -107,14 +108,19 @@ export class PiRuntimeAdapter {
   // ToolExecution 账本：toolCallId → 记录（M3 内存态；持久化是切片 5）
   readonly #executions = new Map<string, ToolExecution>();
   readonly #ledger: LedgerSink | undefined;
-  // 熔断计数：同一 Run 内同一 工具名+参数指纹 的连续阻断次数（spike S4：上游无循环护栏）
+  // 熔断计数：同一 Run 内按粒度累计的阻断次数（spike S4：上游无循环护栏）。
+  // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
+  // fail-closed），参数改不改都照样拒，任何重试皆徒劳，按工具名计数；
+  // `fingerprint\n<名字>\n<参数 JSON>`：人工拒绝与闸内异常，决策 1 鼓励模型改参重提，
+  // 指纹级计数给修订循环留路（见 #blockWithBreaker 注释）。
   readonly #blockCounts = new Map<string, number>();
-  // 幽灵工具熔断（事件级）连击状态：toolName + 连续次数。模型请求"从未广告"的工具名时，
-  // 上游 prepareToolCall 在 beforeToolCall 之前以 "Tool not found" 拦截（agent-loop.js:392-399），
-  // 审批闸/账本/#blockCounts 全部不可见；但 tool_execution_end 照常发出
-  // （tmp/notfound-spike.mjs 实证：isError=true、resultText="Tool <name> not found"）。
-  // 故在 #recordAndForward 事件层计数：同名幽灵 settled 连续达 #breakerThreshold 即 abort。
-  #phantomStreak = { toolName: "", count: 0 };
+  // 上游拦截熔断（事件级）连击状态：toolName + 连续次数。两类拦截 hook 都不可见：
+  //   ① 幽灵工具名（从未广告）：prepareToolCall 以 "Tool not found" 拦截（agent-loop.js:392-399）；
+  //   ② 已广告但参数畸形：validateToolArguments 在 hook 前抛错（agent-loop.js:399-448）。
+  // 两者审批闸/账本/#blockCounts 全部不可见；但 tool_execution_end 照常发出
+  // （tmp/notfound-spike.mjs 实证：isError=true）。故判据取"settled 且 isError 且
+  // 账本无此 toolCallId 记录"——无记录 ⟺ hook 从未运行 ⟺ 被上游拦截，一并兜底。
+  #interceptedStreak = { toolName: "", count: 0 };
   // 本次 Run 的账本 toolCallId 序列（RunResult.toolExecutions 的选取依据）
   #runToolCallIds: string[] = [];
   #currentRunId: RunId | null = null;
@@ -142,7 +148,7 @@ export class PiRuntimeAdapter {
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
     // 模型重发"从未广告"工具名的幽灵循环由事件级熔断收口：tool_execution_end 照常到达事件层，
-    // #recordAndForward 按工具名连续计数、达阈值 abort（见 #phantomStreak 注释与 spike）。
+    // #recordAndForward 按工具名连续计数、达阈值 abort（见 #interceptedStreak 注释与 spike）。
     const policy = this.#snapshot.tools.policy;
     const advertised = (options.tools ?? []).filter((tool) => policy.allow.includes(tool.name));
     for (const tool of advertised) {
@@ -195,8 +201,8 @@ export class PiRuntimeAdapter {
     const runId = newRunId();
     this.#currentRunId = runId;
     this.#blockCounts.clear();
-    this.#phantomStreak.toolName = "";
-    this.#phantomStreak.count = 0;
+    this.#interceptedStreak.toolName = "";
+    this.#interceptedStreak.count = 0;
     this.#runToolCallIds = [];
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
@@ -293,7 +299,7 @@ export class PiRuntimeAdapter {
           this.#executions.set(payload.toolCallId, settled);
           this.#persistReceipt(settled, payload.isError);
         }
-        this.#countPhantomAndMaybeBreak(payload);
+        this.#countUpstreamInterceptedAndMaybeBreak(payload);
       }
       // 单一冻结点：日志与 listener 共享同一冻结对象，事件日志按治理语义不可变。
       // 篡改尝试在严格模式下抛 TypeError，被下方 listener 自包 try/catch 吞进 listenerErrors。
@@ -353,10 +359,15 @@ export class PiRuntimeAdapter {
     try {
       return await this.#governToolCallInner(context, signal);
     } catch (error) {
-      return {
-        block: true,
-        reason: `审批闸内部异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
-      };
+      // fail-closed 语义不变（异常一律转 block），但阻断必须过熔断计数（P2-1b）：
+      // 账本写盘持续失败 + 顽固模型 = 无限阻断循环。rawArgs 可能正是异常源
+      // （structuredClone 失败），故取原始参数做指纹，由 #blockWithBreaker 兜底不抛
+      return this.#blockWithBreaker(
+        context.toolCall.name,
+        context.toolCall.arguments,
+        `审批闸内部异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
+        "fingerprint"
+      );
     }
   }
 
@@ -387,7 +398,7 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, rawArgs, decision.reason);
+      return this.#blockWithBreaker(toolName, rawArgs, decision.reason, "tool");
     }
 
     // 自动放行：yolo 批发授权（policy:yolo）或 prompt 模式下 read 层（policy:auto）。
@@ -417,7 +428,7 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道");
+      return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
     }
     // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
     let diffPreview: string | undefined;
@@ -445,7 +456,7 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, rawArgs, reason);
+      return this.#blockWithBreaker(toolName, rawArgs, reason, "fingerprint");
     }
     record = recordDecision(record, {
       outcome: "approved",
@@ -546,42 +557,63 @@ export class PiRuntimeAdapter {
   }
 
   // 阻断 + 熔断（spike S4：上游无循环护栏，模型可无限重发被拦调用）。
-  // 同一 Run 内同一 工具名+参数指纹 阻断达阈值即中止整个 Run。
+  // 计数粒度按拒绝性质不对称（P2-1c 裁决）：
+  //   - "tool"：policy:deny 系绝对拒绝（deny 清单 / 无审批通道 fail-closed）——
+  //     参数改不改都照样拒，任何重试皆徒劳，按工具名计数，参数微变不能重置连击；
+  //   - "fingerprint"：人工拒绝与闸内异常——决策 1 鼓励模型改参数重提，
+  //     按 工具名+参数指纹 计数，改参后的重提不累积（修订循环是期望行为）。
+  // 同一 Run 内同一粒度 key 计数达阈值即中止整个 Run。
   // 取舍：选 agent.abort() 而非 terminate:true——terminate 只在"批次内全部 result 都 terminate"
   // 时停批次，且终态 stopReason 停在 toolUse（无"已熔断"语义）；abort 的终态是明确的 aborted。
   // 代价：abort 后本次 block 的 reason 被上游覆盖为 "Operation aborted"（agent-loop.js:410-416）。
-  #blockWithBreaker(toolName: string, rawArgs: unknown, reason: string): BeforeToolCallResult {
-    const fingerprint = `${toolName}\n${JSON.stringify(rawArgs)}`;
-    const count = (this.#blockCounts.get(fingerprint) ?? 0) + 1;
-    this.#blockCounts.set(fingerprint, count);
+  #blockWithBreaker(
+    toolName: string,
+    rawArgs: unknown,
+    reason: string,
+    scope: "tool" | "fingerprint"
+  ): BeforeToolCallResult {
+    // 畸形参数（循环引用等）序列化会抛：退化为固定串并入同一指纹桶——
+    // 宁可按工具名合并计数，也不让熔断因异常参数失效
+    let argsKey: string;
+    try {
+      argsKey = JSON.stringify(rawArgs) ?? "";
+    } catch {
+      argsKey = "<unserializable>";
+    }
+    const key = scope === "tool" ? `tool\n${toolName}` : `fingerprint\n${toolName}\n${argsKey}`;
+    const count = (this.#blockCounts.get(key) ?? 0) + 1;
+    this.#blockCounts.set(key, count);
     if (count >= this.#breakerThreshold) {
       this.#agent.abort();
     }
     return { block: true, reason };
   }
 
-  // 幽灵工具熔断（事件级，tmp/notfound-spike.mjs 实证）：模型请求"从未广告"的工具名时，
-  // 上游 prepareToolCall 在 beforeToolCall 之前以 "Tool <name> not found" 拦截
-  // （agent-loop.js:392-399）——审批闸/账本/#blockWithBreaker 全部不可见，
-  // 但 tool_execution_end 照常到达（isError=true），故在事件层兜底计数。
-  // 判据：settled 且 isError 且 toolName 不在广告集。同一工具名连续达阈值即 abort
-  // （与 hook 级熔断共用 #breakerThreshold）；任何非幽灵 settled 重置连击。
+  // 上游拦截熔断（事件级）：覆盖两类 beforeToolCall 之前的上游拦截——
+  //   ① 幽灵工具名（从未广告）：prepareToolCall 以 "Tool <name> not found" 拦截
+  //      （agent-loop.js:392-399，tmp/notfound-spike.mjs 实证 end 事件照常到达）；
+  //   ② 已广告但参数畸形：validateToolArguments 在 hook 前抛错 → immediate error result
+  //      （agent-loop.js:399-448，sequential 执行器对 immediate 结果照常发 start/end）。
+  // 判据：settled 且 isError 且 账本无此 toolCallId 记录——无记录 ⟺ hook 从未运行 ⟺
+  // 被上游拦截；它同时吞并原"toolName 不在广告集"判据（幽灵调用 hook 同样未运行）。
+  // 同一工具名连续达阈值即 abort（与 hook 级熔断共用 #breakerThreshold）；
+  // 任何 hook 跑过的 settled（含执行出错）或非错误 settled 重置连击。
   // 审计留痕：此路径 hook 从未运行，不可能有 ToolExecution 账本记录；
-  // 事件日志里的 tool.proposed/tool.settled 序列即为幽灵循环的审计轨迹。
-  #countPhantomAndMaybeBreak(payload: ToolSettledPayload): void {
-    if (payload.isError && !this.#tools.has(payload.toolName)) {
-      if (this.#phantomStreak.toolName === payload.toolName) {
-        this.#phantomStreak.count += 1;
+  // 事件日志里的 tool.proposed/tool.settled 序列即为拦截循环的审计轨迹。
+  #countUpstreamInterceptedAndMaybeBreak(payload: ToolSettledPayload): void {
+    if (payload.isError && !this.#executions.has(payload.toolCallId)) {
+      if (this.#interceptedStreak.toolName === payload.toolName) {
+        this.#interceptedStreak.count += 1;
       } else {
-        this.#phantomStreak.toolName = payload.toolName;
-        this.#phantomStreak.count = 1;
+        this.#interceptedStreak.toolName = payload.toolName;
+        this.#interceptedStreak.count = 1;
       }
-      if (this.#phantomStreak.count >= this.#breakerThreshold) {
+      if (this.#interceptedStreak.count >= this.#breakerThreshold) {
         this.#agent.abort();
       }
     } else {
-      this.#phantomStreak.toolName = "";
-      this.#phantomStreak.count = 0;
+      this.#interceptedStreak.toolName = "";
+      this.#interceptedStreak.count = 0;
     }
   }
 

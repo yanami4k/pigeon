@@ -427,3 +427,42 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
     cleanup();
   }
 });
+
+test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，计数到阈值后 aborted", async () => {
+  const original = "alpha\nbeta\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const ledgerPath = join(root, "ledger.jsonl");
+  try {
+    const real = new JsonlLedger(ledgerPath);
+    const broken = {
+      appendIntent: () => {
+        throw new Error("模拟磁盘持续写失败");
+      },
+      appendDecision: real.appendDecision.bind(real),
+      appendReceipt: real.appendReceipt.bind(real),
+      reconcile: real.reconcile.bind(real),
+    };
+    // 闸内异常 fail-closed 的阻断必须过熔断计数：否则磁盘满 + 顽固模型 = 无限阻断循环
+    const stubbornReplies = Array.from({ length: 10 }, () => ({
+      text: "再试",
+      toolCalls: [{ name: "edit_file", args: editCall(original) }],
+    }));
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("yolo"),
+      streamFn: createFakeStreamFn({ replies: [...stubbornReplies, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      ledger: broken,
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "aborted");
+    assert.equal(result.toolExecutions.length, 3);
+    // fail-closed 语义不变：intent 写不进就不放行，文件零改动
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
