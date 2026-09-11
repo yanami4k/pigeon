@@ -17,6 +17,7 @@ import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts"
 import { ToolRegistry } from "../tools/registry.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl } from "./repl.ts";
+import { runReplayCommand } from "./replay.ts";
 import { runTraceCommand } from "./trace.ts";
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）
@@ -71,9 +72,45 @@ function traceMain(argv: string[]): void {
   );
 }
 
+// pigeon replay <runId> [--session <sessionId>] [--root <dir>]：只读黑匣子时间线（M4 S4，
+// D4 一次性渲染）——不需要模型接入，永不写事件日志/工作区，绝不重新执行真实副作用
+// （只走 materializeSession 读路径，见 replay.ts）；与 trace 的链式分组治理视图相区别
+function replayMain(argv: string[]): void {
+  let runId: string | undefined;
+  let sessionId: string | undefined;
+  let root = process.cwd();
+  const usage = "用法：pigeon replay <runId> [--session <sessionId>] [--root <dir>]";
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--session") {
+      sessionId = argv[++i];
+    } else if (flag === "--root") {
+      root = argv[++i] ?? root;
+    } else if (runId === undefined && flag !== undefined && !flag.startsWith("--")) {
+      runId = flag;
+    } else {
+      throw new Error(`未知参数：${flag}（${usage}）`);
+    }
+  }
+  if (runId === undefined || sessionId === "") {
+    throw new Error(usage);
+  }
+  process.stdout.write(
+    runReplayCommand({
+      root: realpathSync(root),
+      runId,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    })
+  );
+}
+
 async function main(argv: string[]): Promise<void> {
   if (argv[0] === "trace") {
     traceMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "replay") {
+    replayMain(argv.slice(1));
     return;
   }
   let yolo = false;
