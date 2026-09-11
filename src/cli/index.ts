@@ -17,6 +17,7 @@ import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts"
 import { ToolRegistry } from "../tools/registry.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl } from "./repl.ts";
+import { runTraceCommand } from "./trace.ts";
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）
 export async function loadStreamFn(specifier: string): Promise<StreamFn> {
@@ -39,7 +40,42 @@ export async function loadStreamFn(specifier: string): Promise<StreamFn> {
   return module.default as StreamFn;
 }
 
+// pigeon trace <sessionId> [--run <runId>] [--root <dir>]：只读关联视图（M4 S3）——
+// 不需要模型接入，永不写事件日志/工作区（只走 materializeSession 读路径，见 trace.ts）
+function traceMain(argv: string[]): void {
+  let sessionId: string | undefined;
+  let runId: string | undefined;
+  let root = process.cwd();
+  const usage = "用法：pigeon trace <sessionId> [--run <runId>] [--root <dir>]";
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--run") {
+      runId = argv[++i];
+    } else if (flag === "--root") {
+      root = argv[++i] ?? root;
+    } else if (sessionId === undefined && flag !== undefined && !flag.startsWith("--")) {
+      sessionId = flag;
+    } else {
+      throw new Error(`未知参数：${flag}（${usage}）`);
+    }
+  }
+  if (sessionId === undefined || runId === "") {
+    throw new Error(usage);
+  }
+  process.stdout.write(
+    runTraceCommand({
+      root: realpathSync(root),
+      sessionId,
+      ...(runId !== undefined ? { runId } : {}),
+    })
+  );
+}
+
 async function main(argv: string[]): Promise<void> {
+  if (argv[0] === "trace") {
+    traceMain(argv.slice(1));
+    return;
+  }
   let yolo = false;
   let root = process.cwd();
   let streamFnSpec = process.env.PIGEON_STREAM_FN;

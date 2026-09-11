@@ -1,0 +1,235 @@
+// CLI trace 命令（M4 S3，D4 一次性渲染）：把会话（或单个 Run）的关联视图渲染为静态
+// 人读报告打印 stdout，可 grep/less。只读纪律：只经 materializeSession 读事件文件——
+// 不构造 JsonlEventLog（构造会建目录/开追加句柄）、不跑 recoverSession（会写确证记录）、
+// 不触发 D8 旧账本迁移；trace 永不写事件日志与工作区。
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import {
+  buildSessionTrace,
+  failureBadge,
+  type SessionTrace,
+  type TraceRun,
+  type TraceToolCall,
+} from "../persistence/trace.ts";
+import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
+
+// 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
+const ARGS_SUMMARY_LIMIT = 160;
+
+// 稳定 id 短哈希：`exec_` 等前缀 + ULID 前 8 位 + 省略号；非稳定 id（toolCallId 等）原样
+function shortId(id: string): string {
+  const match = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{8}/.exec(id);
+  return match === null ? id : `${match[0]}…`;
+}
+
+// 批准来源 → 人话（决策 4 证据链：策略决定不能伪装成人工）
+const APPROVED_BY_LABEL: Record<string, string> = {
+  human: "人工",
+  "policy:yolo": "yolo 批发授权",
+  "policy:auto": "策略自动放行",
+  "policy:deny": "策略拒绝",
+};
+
+function summarizeArgs(args: unknown): string {
+  let json: string;
+  try {
+    json = JSON.stringify(args) ?? "undefined";
+  } catch {
+    return "<不可序列化参数>";
+  }
+  return json.length <= ARGS_SUMMARY_LIMIT
+    ? json
+    : `${json.slice(0, ARGS_SUMMARY_LIMIT)}…（共 ${json.length} 字符）`;
+}
+
+function renderToolCall(call: TraceToolCall, lines: string[]): void {
+  lines.push(`    工具调用 ${call.toolCallId} [${call.toolName}]`);
+  lines.push(
+    call.proposed === undefined
+      ? "      提议参数：<tool.proposed 事件缺失（证据缺口）>"
+      : `      提议参数：${summarizeArgs(call.proposed.payload.args)}`
+  );
+  // 治理出处：intent（批准）或 decision（拒绝）；两者都没有 = 未过审批闸（上游拦截/缺口）
+  const governance = call.intent ?? call.decision;
+  if (governance === undefined) {
+    lines.push("      审批：无治理记录（未过审批闸——上游拦截或事件落盘缺口）");
+  } else {
+    const decision = governance.decision;
+    const label = APPROVED_BY_LABEL[decision.approvedBy] ?? decision.approvedBy;
+    const verdict =
+      label === "人工" ? (decision.outcome === "approved" ? "人工批准" : "人工拒绝") : label;
+    lines.push(
+      `      审批：${verdict}（${decision.approvedBy}） ｜ ${shortId(governance.executionId)}`
+    );
+    // 拒绝理由逐字呈现（决策 4 证据链；也是 M6+ 蒸馏的负样本监督信号）
+    if (decision.outcome === "rejected" && decision.reason !== undefined) {
+      lines.push(`      拒绝理由：${decision.reason}`);
+    }
+  }
+  // 哈希证据（D5 三方比对的两个静态端）：改前实测 → 预期改后
+  const hashes = call.intent?.contentHashes;
+  if (hashes !== undefined) {
+    lines.push(
+      `      哈希证据：改前 ${hashes.beforeHash} → 预期改后 ${hashes.expectedAfterHash}（${hashes.path}）`
+    );
+  }
+  if (call.receipt !== undefined) {
+    const receipt = call.receipt;
+    const outcome = receipt.executed
+      ? receipt.isError
+        ? "已执行，有错误"
+        : "已执行，无错误"
+      : "未执行（副作用未发生）";
+    let line = `      Receipt ${shortId(receipt.id)}：${outcome}`;
+    if (receipt.contentAfterHash !== undefined) {
+      const expected = call.intent?.contentHashes?.expectedAfterHash;
+      const verdict =
+        expected === undefined
+          ? ""
+          : receipt.contentAfterHash === expected
+            ? "（与预期一致）"
+            : "（与预期不符！）";
+      line += `；实测改后 ${receipt.contentAfterHash}${verdict}`;
+    }
+    lines.push(line);
+  }
+  if (call.resolution !== undefined) {
+    const resolution = call.resolution;
+    lines.push(
+      `      确证：哈希自动确证${resolution.outcome === "executed" ? "已执行" : "未执行"}` +
+        `（实测现状 ${resolution.evidence.observedHash}）`
+    );
+  }
+  for (const breaker of call.breakers) {
+    lines.push(
+      `      熔断：本调用触发落闸（${breaker.scope}，连击 ${breaker.count}/${breaker.threshold}）`
+    );
+  }
+  lines.push(`      分类：${failureBadge(call.classification?.failure)}`);
+  if (call.pendingReconcile) {
+    lines.push(
+      "      待对账：intent 已落盘但无 Receipt（OutcomeUnknown，禁止盲重放，用 resume 处理）"
+    );
+  }
+  for (const anomaly of call.anomalies) {
+    lines.push(`      异常：${anomaly}`);
+  }
+}
+
+function renderRun(run: TraceRun, lines: string[]): void {
+  const lastCompleted = [...run.turns].reverse().find((turn) => turn.completed !== undefined);
+  const stopReason = lastCompleted?.completed?.payload.stopReason;
+  let header =
+    `Run ${shortId(run.runId)} ｜ 终态 stopReason=${stopReason ?? "无（turn.completed 缺失）"}` +
+    ` ｜ 分类：${failureBadge(run.classification?.failure)}`;
+  if (!run.ended) {
+    header += " ｜ run.ended 缺失（崩溃残留可能）";
+  }
+  lines.push(header);
+  for (const anomaly of run.anomalies) {
+    lines.push(`  异常：${anomaly}`);
+  }
+  const SCOPE_LABEL: Record<string, string> = {
+    tool: "按工具名计数",
+    fingerprint: "按参数指纹计数",
+    intercepted: "上游拦截连击",
+  };
+  for (const breaker of run.breakers) {
+    lines.push(
+      `  熔断落闸：${breaker.toolName}（${SCOPE_LABEL[breaker.scope] ?? breaker.scope}，` +
+        `连击 ${breaker.count}/${breaker.threshold}，由 ${breaker.toolCallId} 触发）`
+    );
+  }
+  for (const turn of run.turns) {
+    const time =
+      turn.started === undefined
+        ? "时刻未知"
+        : new Date(turn.started.timestamp).toISOString().slice(11, 19);
+    let turnHeader = `  第 ${turn.index} 轮 ｜ ${time}(UTC)`;
+    if (turn.completed !== undefined) {
+      turnHeader += ` ｜ stopReason=${turn.completed.payload.stopReason}`;
+      if (turn.completed.payload.syntheticFailure) {
+        turnHeader += "（上游合成失败消息）";
+      }
+    } else {
+      turnHeader += " ｜ turn.completed 缺失";
+    }
+    lines.push(turnHeader);
+    for (const call of turn.toolCalls) {
+      renderToolCall(call, lines);
+    }
+  }
+}
+
+export function renderSessionTrace(trace: SessionTrace): string {
+  const toolCallCount = trace.runs.reduce((sum, run) => sum + run.toolCalls.length, 0);
+  const pendingCount = trace.runs.reduce(
+    (sum, run) => sum + run.toolCalls.filter((call) => call.pendingReconcile).length,
+    0
+  );
+  const lines: string[] = [
+    `会话 ${shortId(trace.sessionId)} ｜ Run ${trace.runs.length} 个 ｜ ` +
+      `工具调用 ${toolCallCount} 次 ｜ 待对账 ${pendingCount} 次`,
+    "",
+  ];
+  for (const [index, run] of trace.runs.entries()) {
+    if (index > 0) {
+      lines.push("");
+    }
+    renderRun(run, lines);
+  }
+  // 会话级异常项：孤儿记录如实报告（日志损坏或手写），不猜测挂接
+  if (trace.orphanReceipts.length > 0 || trace.orphanResolutions.length > 0) {
+    lines.push("");
+    lines.push("异常项：");
+    for (const { receipt, runId } of trace.orphanReceipts) {
+      lines.push(
+        `  孤儿 Receipt ${shortId(receipt.id)}（Run ${shortId(runId)}，` +
+          `executionId ${shortId(receipt.executionId)} 无对应 intent/decision）`
+      );
+    }
+    for (const resolution of trace.orphanResolutions) {
+      lines.push(
+        `  孤儿 Resolution（Run ${shortId(resolution.runId)}，` +
+          `executionId ${shortId(resolution.executionId)} 无对应 intent）`
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export interface TraceCommandOptions {
+  // 工作区根（事件日志在 <root>/.pigeon/sessions/）
+  root: string;
+  sessionId: string;
+  runId?: string;
+}
+
+// 只读渲染入口：会话不存在/Run 不存在时响亮报错并列出可选项，绝不静默产出空报告
+export function runTraceCommand(options: TraceCommandOptions): string {
+  const sessionsDir = join(options.root, ".pigeon", "sessions");
+  const sessionId = asSessionId(options.sessionId);
+  if (!existsSync(JsonlEventLog.filePathFor(sessionsDir, sessionId))) {
+    const available = existsSync(sessionsDir)
+      ? readdirSync(sessionsDir)
+          .filter((name) => name.endsWith(".jsonl") && !name.endsWith(".legacy.jsonl"))
+          .map((name) => name.slice(0, -".jsonl".length))
+      : [];
+    throw new Error(
+      `会话不存在：${options.sessionId}` +
+        (available.length > 0 ? `。已有会话：${available.join("、")}` : "（尚无会话记录）")
+    );
+  }
+  const materialized = materializeSession(sessionsDir, sessionId);
+  if (options.runId === undefined) {
+    return renderSessionTrace(buildSessionTrace(materialized));
+  }
+  const runId: RunId = asRunId(options.runId);
+  const trace = buildSessionTrace(materialized, { runId });
+  if (trace.runs.length === 0) {
+    const known = [...new Set(materialized.records.map((record) => record.runId as string))];
+    throw new Error(`该会话无 Run ${options.runId}。已有 Run：${known.join("、")}`);
+  }
+  return renderSessionTrace(trace);
+}
