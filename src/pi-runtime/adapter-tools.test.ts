@@ -302,6 +302,16 @@ test("deny 清单绝对：两种模式都拒，且不弹人工审批", async () 
       assert.equal(record.decision?.approvedBy, "policy:deny");
       // deny 不影响广告（allow 决定广告集），deny 在审批闸逐调用绝对执行并留账
       assert.deepEqual(result.advertisedTools, ["read_file"]);
+      // 阻断必须对模型可见：deny 理由逐字成为 error toolResult（P2-3 闭环——
+      // 若 deny 分支被改成放行，read_file 真实执行，toolResult 变成文件内容，此处变红）
+      const toolResult = adapter.transcript().find((message) => message.role === "toolResult");
+      assert.ok(toolResult && toolResult.role === "toolResult");
+      assert.equal(toolResult.isError, true);
+      const text = toolResult.content[0];
+      assert.ok(
+        text?.type === "text" && text.text === "deny 清单精确匹配，任何模式一律拒绝：read_file",
+        JSON.stringify(toolResult)
+      );
 
       await adapter.dispose();
     } finally {

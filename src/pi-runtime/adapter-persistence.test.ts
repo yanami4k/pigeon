@@ -220,6 +220,16 @@ test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字�
     assert.equal(persisted.decision.approvedBy, "policy:deny");
     assert.equal(persisted.decision.reason, "deny 清单精确匹配，任何模式一律拒绝：edit_file");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+    // 阻断必须对模型可见：deny 理由逐字成为 error toolResult，而非执行输出（P2-3 闭环——
+    // 若 deny 分支被改成放行，edit_file 真实执行（锚点失配预检失败），toolResult 文本变掉，此处变红）
+    const toolResult = adapter.transcript().find((message) => message.role === "toolResult");
+    assert.ok(toolResult && toolResult.role === "toolResult");
+    assert.equal(toolResult.isError, true);
+    const text = toolResult.content[0];
+    assert.ok(
+      text?.type === "text" && text.text === "deny 清单精确匹配，任何模式一律拒绝：edit_file",
+      JSON.stringify(toolResult)
+    );
 
     const report = new JsonlLedger(ledgerPath).reconcile();
     assert.equal(report.rejected.length, 1);
@@ -259,6 +269,16 @@ test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny
     assert.equal(persisted.decision.approvedBy, "policy:deny");
     assert.equal(persisted.decision.reason, "策略要求人工审批但未配置审批通道（fail-closed）");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+    // 阻断必须对模型可见：fail-closed 理由逐字成为 error toolResult（P2-3 闭环）。
+    // 模型可见理由无"（fail-closed）"后缀——落盘理由与回模型理由在 adapter.ts 是两处传参
+    const toolResult = adapter.transcript().find((message) => message.role === "toolResult");
+    assert.ok(toolResult && toolResult.role === "toolResult");
+    assert.equal(toolResult.isError, true);
+    const text = toolResult.content[0];
+    assert.ok(
+      text?.type === "text" && text.text === "策略要求人工审批但未配置审批通道",
+      JSON.stringify(toolResult)
+    );
 
     await adapter.dispose();
   } finally {
