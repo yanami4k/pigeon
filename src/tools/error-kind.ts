@@ -7,12 +7,14 @@
 import { ParseError } from "typebox/value";
 import type { ToolErrorKind } from "../state/tool-execution.ts";
 import { EditFileError } from "./edit-file.ts";
+import { HashlineError } from "./hashline.ts";
 import { WorkspacePathError } from "./paths.ts";
 import { ReadFileError } from "./read-file.ts";
 
 export function classifyToolError(error: unknown): ToolErrorKind | undefined {
   if (
     error instanceof EditFileError ||
+    error instanceof HashlineError ||
     error instanceof ReadFileError ||
     error instanceof WorkspacePathError ||
     error instanceof ParseError

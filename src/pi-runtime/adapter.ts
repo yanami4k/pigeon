@@ -32,10 +32,13 @@ import {
   advanceToolExecution,
   proposeToolExecution,
   recordDecision,
+  type ToolErrorKind,
   type ToolExecution,
 } from "../state/tool-execution.ts";
+import { classifyToolError } from "../tools/error-kind.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
+import type { ContentEvidence } from "../tools/wrap.ts";
 import {
   isSyntheticFailureMessage,
   normalizePiEvent,
@@ -68,7 +71,7 @@ export interface RunResult {
 // 测试注入故障包装器模拟崩溃点
 export type EventLogSink = Pick<
   JsonlEventLog,
-  "appendRuntimeEvent" | "appendIntent" | "appendDecision" | "appendReceipt"
+  "appendRuntimeEvent" | "appendIntent" | "appendDecision" | "appendReceipt" | "appendBreaker"
 >;
 
 export interface PiRuntimeAdapterOptions {
@@ -122,6 +125,10 @@ export class PiRuntimeAdapter {
   #interceptedStreak = { toolName: "", count: 0 };
   // 本次 Run 的账本 toolCallId 序列（RunResult.toolExecutions 的选取依据）
   #runToolCallIds: string[] = [];
+  // 工具抛错分类留证（M4 S2，D7）：toolCallId → 域/环境归类。
+  // 上游把工具异常转成 isError 结果后只剩消息字符串，错误类信息必须在抛出源头捕获
+  // （包装 execute，见 #wrapToolErrorCapture）；判不出存 undefined → settled 不落 errorKind
+  readonly #toolErrorKinds = new Map<string, ToolErrorKind | undefined>();
   #currentRunId: RunId | null = null;
   #disposed = false;
 
@@ -155,7 +162,9 @@ export class PiRuntimeAdapter {
         throw new Error(`广告的工具未在注册表登记：${tool.name}`);
       }
     }
-    this.#tools = new Map(advertised.map((tool) => [tool.name, tool]));
+    // 包装 execute 捕获错误分类（M4 S2，D7）：上游把工具异常转成 isError 结果后只剩
+    // 消息字符串，域/环境归类必须在抛出源头留证；preview/探针等可选能力随 spread 保留
+    this.#tools = new Map(advertised.map((tool) => [tool.name, this.#wrapToolErrorCapture(tool)]));
 
     this.#agent = new Agent({
       streamFn: options.streamFn,
@@ -270,6 +279,23 @@ export class PiRuntimeAdapter {
     this.#listeners.clear();
   }
 
+  // 工具执行体包装（M4 S2，D7）：捕获抛出的真实错误对象并按域/环境归类存证——
+  // 上游 agent-loop 把工具异常转成 isError 结果（createErrorToolResult）后只剩消息字符串，
+  // 错误类信息过了那道边界就不可恢复。spread 保留 preview/内容证据探针等可选能力
+  #wrapToolErrorCapture(tool: AgentTool): AgentTool {
+    return {
+      ...tool,
+      execute: async (toolCallId, params, signal, onUpdate) => {
+        try {
+          return await tool.execute(toolCallId, params, signal, onUpdate);
+        } catch (error) {
+          this.#toolErrorKinds.set(toolCallId, classifyToolError(error));
+          throw error;
+        }
+      },
+    };
+  }
+
   // Pi 事件入口：归一化 + 落日志 + 账本联动 + 转发。整个路径自包 try/catch，
   // 任何异常（含归一化自身）都只进 listenerErrors，绝不冒泡回上游毒化 Run。
   #recordAndForward(event: AgentEvent): void {
@@ -288,6 +314,15 @@ export class PiRuntimeAdapter {
       // 不迁移状态（审计可见的异常记录），也不产生 receipt。
       if (normalized.kind === RuntimeEventKind.ToolSettled) {
         const payload = normalized.payload as ToolSettledPayload;
+        // D7 错误分类 enrich（M4 S2）：优先工具抛出处捕获的归类（包装 execute 留证）；
+        // 账本无记录 ⟺ 上游拦截（参数校验失败/幽灵工具名——模型侧错误）→ domain；
+        // 判不出的真实工具错误不落字段，冷分类留「未知」默认桶
+        const errorKind =
+          this.#toolErrorKinds.get(payload.toolCallId) ??
+          (this.#executions.has(payload.toolCallId) ? undefined : "domain");
+        if (payload.isError && errorKind !== undefined) {
+          payload.errorKind = errorKind;
+        }
         // 账本联动隔离在独立 try/catch（P2-2）：receipt 写盘失败只进 listenerErrors，
         // 绝不让 settled 事件本体因此丢失——下方"事件落日志与转发无条件"是不变式
         try {
@@ -380,6 +415,7 @@ export class PiRuntimeAdapter {
       // （structuredClone 失败），故取原始参数做指纹，由 #blockWithBreaker 兜底不抛
       return this.#blockWithBreaker(
         context.toolCall.name,
+        context.toolCall.id,
         context.toolCall.arguments,
         `审批闸内部异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
         "fingerprint"
@@ -414,7 +450,7 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, rawArgs, decision.reason, "tool");
+      return this.#blockWithBreaker(toolName, toolCallId, rawArgs, decision.reason, "tool");
     }
 
     // 自动放行：yolo 批发授权（policy:yolo）或 prompt 模式下 read 层（policy:auto）。
@@ -427,7 +463,7 @@ export class PiRuntimeAdapter {
         decidedAt: Date.now(),
       });
       // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）
-      this.#persistIntent(record);
+      await this.#persistIntent(record);
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
@@ -444,7 +480,7 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
+      return this.#blockWithBreaker(toolName, toolCallId, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
     }
     // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
     let diffPreview: string | undefined;
@@ -472,7 +508,7 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, rawArgs, reason, "fingerprint");
+      return this.#blockWithBreaker(toolName, toolCallId, rawArgs, reason, "fingerprint");
     }
     record = recordDecision(record, {
       outcome: "approved",
@@ -481,7 +517,7 @@ export class PiRuntimeAdapter {
       decidedAt: Date.now(),
     });
     // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）
-    this.#persistIntent(record);
+    await this.#persistIntent(record);
     record = advanceToolExecution(record, "dispatch", Date.now());
     record = advanceToolExecution(record, "execution", Date.now());
     this.#executions.set(toolCallId, record);
@@ -489,8 +525,10 @@ export class PiRuntimeAdapter {
   }
 
   // dispatch 前持久化调用意图（ROADMAP §3.2）。写盘失败向上抛——外层 catch 转成 block，
-  // 即 fail-closed：事件日志写不进就不放行，未留证的副作用一律不得发生
-  #persistIntent(record: ToolExecution): void {
+  // 即 fail-closed：事件日志写不进就不放行，未留证的副作用一律不得发生。
+  // M4 S2（D5）：写工具 intent 携带内容哈希三元组（工具探针零副作用算出改前/预期改后）；
+  // 探针无能力或失败 → 字段缺省，该悬账冷恢复时降级为人工对账，不阻断审批流
+  async #persistIntent(record: ToolExecution): Promise<void> {
     if (this.#eventLog === undefined) {
       return;
     }
@@ -498,12 +536,27 @@ export class PiRuntimeAdapter {
     if (decision === undefined) {
       throw new Error("账本 intent 缺失决定快照");
     }
+    let contentHashes: ContentEvidence | null = null;
+    const tool = this.#tools.get(record.toolName);
+    if (
+      this.#registry.get(record.toolName)?.tier === "write" &&
+      tool !== undefined &&
+      "probeContentEvidence" in tool &&
+      typeof tool.probeContentEvidence === "function"
+    ) {
+      try {
+        contentHashes = await tool.probeContentEvidence(record.rawArgs);
+      } catch {
+        contentHashes = null;
+      }
+    }
     this.#eventLog.appendIntent({
       executionId: record.executionId,
       toolCallId: record.toolCallId,
       toolName: record.toolName,
       rawArgs: record.rawArgs,
       decision,
+      ...(contentHashes != null ? { contentHashes } : {}),
       at: Date.now(),
       runId: this.#activeRunId(),
     });
@@ -550,6 +603,23 @@ export class PiRuntimeAdapter {
       return;
     }
     const executed = record.executionStartedAt !== undefined && !isError;
+    // M4 S2（D5）：执行成功且工具具备内容证据能力时，实测目标现状哈希随 receipt 落盘
+    // （实测而非采信工具自报，撕裂写会在冷恢复三方比对中现形）；测不得则缺省
+    let contentAfterHash: string | null = null;
+    if (executed) {
+      const tool = this.#tools.get(record.toolName);
+      if (
+        tool !== undefined &&
+        "hashContentTarget" in tool &&
+        typeof tool.hashContentTarget === "function"
+      ) {
+        try {
+          contentAfterHash = tool.hashContentTarget(record.rawArgs);
+        } catch {
+          contentAfterHash = null;
+        }
+      }
+    }
     const receipt: Receipt = {
       version: RECEIPT_VERSION,
       id: newReceiptId(),
@@ -563,6 +633,7 @@ export class PiRuntimeAdapter {
       summary: executed
         ? `${record.toolName} 执行完成`
         : `${record.toolName} 未产生副作用（${decision.outcome === "rejected" ? "已拒绝" : "执行出错"}）`,
+      ...(contentAfterHash !== null ? { contentAfterHash } : {}),
     };
     this.#eventLog.appendReceipt({ receipt, runId: this.#activeRunId() });
     // settled 后回填 receiptId：schema 允许的回填，不是状态迁移
@@ -581,6 +652,7 @@ export class PiRuntimeAdapter {
   // 代价：abort 后本次 block 的 reason 被上游覆盖为 "Operation aborted"（agent-loop.js:410-416）。
   #blockWithBreaker(
     toolName: string,
+    toolCallId: string,
     rawArgs: unknown,
     reason: string,
     scope: "tool" | "fingerprint"
@@ -597,9 +669,29 @@ export class PiRuntimeAdapter {
     const count = (this.#blockCounts.get(key) ?? 0) + 1;
     this.#blockCounts.set(key, count);
     if (count >= this.#breakerThreshold) {
+      this.#persistBreaker({ toolName, toolCallId, scope, count, threshold: this.#breakerThreshold });
       this.#agent.abort();
     }
     return { block: true, reason };
+  }
+
+  // 熔断落闸留证（M4 S2，D7「治理熔断」判据行）：落闸决定已生效（abort 不可逆），
+  // 写盘失败只进 listenerErrors，绝不改变熔断行为
+  #persistBreaker(input: {
+    toolName: string;
+    toolCallId: string;
+    scope: "tool" | "fingerprint" | "intercepted";
+    count: number;
+    threshold: number;
+  }): void {
+    if (this.#eventLog === undefined) {
+      return;
+    }
+    try {
+      this.#eventLog.appendBreaker({ ...input, at: Date.now(), runId: this.#activeRunId() });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
   }
 
   // 上游拦截熔断（事件级）：覆盖两类 beforeToolCall 之前的上游拦截——
@@ -622,6 +714,13 @@ export class PiRuntimeAdapter {
         this.#interceptedStreak.count = 1;
       }
       if (this.#interceptedStreak.count >= this.#breakerThreshold) {
+        this.#persistBreaker({
+          toolName: payload.toolName,
+          toolCallId: payload.toolCallId,
+          scope: "intercepted",
+          count: this.#interceptedStreak.count,
+          threshold: this.#breakerThreshold,
+        });
         this.#agent.abort();
       }
     } else {

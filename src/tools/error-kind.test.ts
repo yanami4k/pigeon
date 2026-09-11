@@ -7,11 +7,13 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { EditFileError } from "./edit-file.ts";
 import { classifyToolError } from "./error-kind.ts";
+import { HashlineError } from "./hashline.ts";
 import { WorkspacePathError } from "./paths.ts";
 import { ReadFileError } from "./read-file.ts";
 
 test("工具域错误归 domain：hashline 编辑错误 / 读文件域错误 / 路径围栏 / 参数校验", () => {
   assert.equal(classifyToolError(new EditFileError("快照过期")), "domain");
+  assert.equal(classifyToolError(new HashlineError("锚点不匹配")), "domain");
   assert.equal(classifyToolError(new ReadFileError("offset 越界")), "domain");
   assert.equal(classifyToolError(new WorkspacePathError("路径越出工作区根")), "domain");
   // 参数校验失败：typebox Value.Parse 的 ParseError（模型给的参数不合 schema = 模型侧错误）

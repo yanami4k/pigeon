@@ -325,6 +325,7 @@ test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故�
         throw new Error("模拟磁盘写失败：decision 未落盘");
       },
       appendReceipt: eventLog.appendReceipt.bind(eventLog),
+      appendBreaker: eventLog.appendBreaker.bind(eventLog),
     };
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt"),
@@ -397,6 +398,7 @@ test("崩溃点②：execute 已跑、receipt 未写（故障注入事件日志�
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendBreaker: eventLog.appendBreaker.bind(eventLog),
       appendReceipt: () => {
         throw new Error("模拟进程崩溃：receipt 未落盘");
       },
@@ -448,6 +450,7 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
         throw new Error("模拟磁盘写失败");
       },
       appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendBreaker: eventLog.appendBreaker.bind(eventLog),
       appendReceipt: eventLog.appendReceipt.bind(eventLog),
     };
     const adapter = new PiRuntimeAdapter({
@@ -493,6 +496,7 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
         throw new Error("模拟磁盘持续写失败");
       },
       appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendBreaker: eventLog.appendBreaker.bind(eventLog),
       appendReceipt: eventLog.appendReceipt.bind(eventLog),
     };
     // 闸内异常 fail-closed 的阻断必须过熔断计数：否则磁盘满 + 顽固模型 = 无限阻断循环
@@ -531,6 +535,7 @@ test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并�
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendBreaker: eventLog.appendBreaker.bind(eventLog),
       appendReceipt: () => {
         throw new Error("模拟磁盘写失败：receipt 未落盘");
       },
@@ -628,6 +633,232 @@ test("冷物化 ≡ 活适配器状态：脚本化 Run 后事件序列与对账�
     assert.ok(materialized.records.every((r: EventRecord) => r.runId === result.runId));
 
     await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("哈希证据：intent 携带改前/预期改后哈希，receipt 携带实测改后哈希", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const { eventLog, sessionId } = makeEventLog(root);
+  try {
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("yolo"),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: editCall(original) }] },
+          { text: "完成" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      sessionId,
+      eventLog,
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "completed");
+
+    const lines = readEventLines(eventLog.path);
+    const intent = lines.find((line) => line.kind === "intent");
+    assert.ok(intent);
+    // dispatch 准备期探针：改前实测 + 预期改后确定性推出（snapshotTag 16 位十六进制）
+    assert.deepEqual(intent.contentHashes, {
+      path: "a.ts",
+      beforeHash: snapshotTag(original),
+      expectedAfterHash: snapshotTag("alpha\nBETA\ngamma\n"),
+    });
+    const receipt = (lines.find((line) => line.kind === "receipt") as { receipt: Receipt }).receipt;
+    assert.equal(receipt.contentAfterHash, snapshotTag("alpha\nBETA\ngamma\n"));
+
+    await adapter.dispose();
+    eventLog.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("域错误分类：锚点不匹配 → settled 事件携带 errorKind=domain（内存与落盘一致）", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const { eventLog, sessionId } = makeEventLog(root);
+  try {
+    // 锚点 tag 不匹配（合法格式、错误内容）→ EditFileError = 工具域错误
+    const badCall: EditFileParams = {
+      path: "a.ts",
+      snapshot: snapshotTag(original),
+      edits: [{ op: "replace", anchor: "2#0000", lines: ["BETA"] }],
+    };
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("yolo"),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: badCall }] },
+          { text: "明白" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      sessionId,
+      eventLog,
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "completed");
+    // 域错误：文件零改动
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    const live = adapter.events().find((event) => event.kind === "tool.settled");
+    assert.equal((live?.payload as ToolSettledPayload).errorKind, "domain");
+    const persisted = readEventLines(eventLog.path).find((line) => line.kind === "tool.settled");
+    assert.equal((persisted?.payload as ToolSettledPayload).errorKind, "domain");
+    // receipt：isError=true 且副作用未发生；探针因锚点预检失败降级 → intent 无哈希
+    const receipt = (readEventLines(eventLog.path).find((line) => line.kind === "receipt") as { receipt: Receipt }).receipt;
+    assert.equal(receipt.isError, true);
+    assert.equal(receipt.executed, false);
+    const intent = readEventLines(eventLog.path).find((line) => line.kind === "intent");
+    assert.equal(intent?.contentHashes, undefined);
+
+    await adapter.dispose();
+    eventLog.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("环境异常分类：写工具抛 ErrnoException → settled 事件携带 errorKind=environment", async () => {
+  const { root, cleanup } = makeWorkspace({});
+  const { eventLog, sessionId } = makeEventLog(root);
+  try {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "broken_writer",
+      description: "模拟环境异常的写工具",
+      parameters: Type.Object({}),
+      tier: "write",
+      pathConfinement: { kind: "workspace" },
+      executionMode: "sequential",
+    });
+    const brokenWriter = {
+      name: "broken_writer",
+      label: "broken_writer",
+      description: "模拟环境异常的写工具",
+      parameters: Type.Object({}),
+      execute: async () => {
+        throw Object.assign(new Error("只读文件系统"), { code: "EROFS" });
+      },
+    };
+    const snapshot = makeSnapshot("yolo");
+    snapshot.tools.policy.allow = ["broken_writer"];
+    const adapter = new PiRuntimeAdapter({
+      snapshot,
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "写", toolCalls: [{ name: "broken_writer", args: {} }] },
+          { text: "明白" },
+        ],
+      }),
+      registry,
+      tools: [brokenWriter],
+      sessionId,
+      eventLog,
+    });
+
+    const result = await adapter.run("写文件");
+    assert.equal(result.status, "completed");
+    const persisted = readEventLines(eventLog.path).find((line) => line.kind === "tool.settled");
+    assert.equal((persisted?.payload as ToolSettledPayload).errorKind, "environment");
+    // 无探针能力的写工具：intent 无哈希字段（降级为人工对账，不阻断执行）
+    const intent = readEventLines(eventLog.path).find((line) => line.kind === "intent");
+    assert.equal(intent?.contentHashes, undefined);
+
+    await adapter.dispose();
+    eventLog.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("熔断落闸留证：幽灵工具名循环 → breaker 记录落盘（scope=intercepted，计数与阈值在场）", async () => {
+  const { root, cleanup } = makeWorkspace({});
+  const { eventLog, sessionId } = makeEventLog(root);
+  try {
+    const phantomReplies = Array.from({ length: 10 }, () => ({
+      text: "试",
+      toolCalls: [{ name: "ghost_tool", args: {} }],
+    }));
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("yolo"),
+      streamFn: createFakeStreamFn({ replies: [...phantomReplies, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      sessionId,
+      eventLog,
+    });
+
+    const result = await adapter.run("调用幽灵工具");
+    assert.equal(result.status, "aborted");
+    const breaker = readEventLines(eventLog.path).find((line) => line.kind === "breaker");
+    assert.ok(breaker, "熔断落闸必须留证（D7 治理熔断判据行）");
+    assert.equal(breaker.scope, "intercepted");
+    assert.equal(breaker.toolName, "ghost_tool");
+    assert.equal(breaker.count, 3);
+    assert.equal(breaker.threshold, 3);
+    assert.equal(breaker.runId, result.runId);
+
+    await adapter.dispose();
+    eventLog.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("熔断落闸留证：deny 循环 → breaker 记录落盘（scope=tool）；人工拒绝循环 → scope=fingerprint", async () => {
+  const original = "alpha\nbeta\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const { eventLog, sessionId } = makeEventLog(root);
+  try {
+    const stubborn = Array.from({ length: 10 }, () => ({
+      text: "再试",
+      toolCalls: [{ name: "edit_file", args: editCall(original) }],
+    }));
+    const denyAdapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("yolo", ["edit_file"]),
+      streamFn: createFakeStreamFn({ replies: [...stubborn, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      sessionId,
+      eventLog,
+    });
+    const denyResult = await denyAdapter.run("改文件");
+    assert.equal(denyResult.status, "aborted");
+    await denyAdapter.dispose();
+
+    const breaker = readEventLines(eventLog.path).find((line) => line.kind === "breaker");
+    assert.ok(breaker);
+    assert.equal(breaker.scope, "tool");
+    assert.equal(breaker.toolName, "edit_file");
+    eventLog.close();
+
+    // 人工拒绝保持指纹粒度：同一参数连拒三次 → scope=fingerprint
+    const { eventLog: log2, sessionId: session2 } = makeEventLog(root);
+    const rejectAdapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("prompt"),
+      streamFn: createFakeStreamFn({ replies: [...stubborn, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      approvalHandler: async () => ({ approved: false, reason: "不准改" }),
+      sessionId: session2,
+      eventLog: log2,
+    });
+    const rejectResult = await rejectAdapter.run("改文件");
+    assert.equal(rejectResult.status, "aborted");
+    const breaker2 = readEventLines(log2.path).find((line) => line.kind === "breaker");
+    assert.ok(breaker2);
+    assert.equal(breaker2.scope, "fingerprint");
+    await rejectAdapter.dispose();
+    log2.close();
   } finally {
     cleanup();
   }
