@@ -7,6 +7,9 @@ coverage/
 .env.*
 !.env.example
 
+# Pigeon 工作区状态（Event Log / 会话文件，D1：状态跟工作区走但不入库）
+.pigeon/
+
 npm-debug.log*
 
 docs/*
