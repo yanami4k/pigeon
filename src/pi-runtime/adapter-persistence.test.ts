@@ -21,6 +21,7 @@ import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
+import type { ToolSettledPayload } from "./events.ts";
 import { createFakeStreamFn } from "./fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 
@@ -460,6 +461,63 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
     assert.equal(result.toolExecutions.length, 3);
     // fail-closed 语义不变：intent 写不进就不放行，文件零改动
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并转发，故障进 listenerErrors", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const ledgerPath = join(root, "ledger.jsonl");
+  try {
+    const real = new JsonlLedger(ledgerPath);
+    const poison = {
+      appendIntent: real.appendIntent.bind(real),
+      appendDecision: real.appendDecision.bind(real),
+      appendReceipt: () => {
+        throw new Error("模拟磁盘写失败：receipt 未落盘");
+      },
+      reconcile: real.reconcile.bind(real),
+    };
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("yolo"),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: editCall(original) }] },
+          { text: "完成" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      ledger: poison,
+    });
+    // 外部 listener：事件转发必须不受账本故障影响
+    const forwarded: string[] = [];
+    adapter.subscribe((event) => {
+      forwarded.push(event.kind);
+    });
+
+    const result = await adapter.run("改文件");
+    assert.equal(result.status, "completed");
+    // 副作用已发生、receipt 未落盘：故障响亮记录，不是静默吞掉
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
+    assert.ok(adapter.listenerErrors().length > 0);
+    // 事件日志是审计轨迹（决策 ①）：tool.settled 无条件在列，且与账本 toolCallId 对齐
+    const record = result.toolExecutions[0];
+    assert.ok(record);
+    const settled = adapter.events().find((event) => event.kind === "tool.settled");
+    assert.ok(settled, "receipt 写盘失败不得让 tool.settled 从事件日志丢失");
+    const settledPayload = settled.payload as ToolSettledPayload;
+    assert.equal(settledPayload.toolCallId, record.toolCallId);
+    assert.ok(forwarded.includes("tool.settled"), "receipt 写盘失败不得拦截事件转发");
+
+    // 冷启动对账语义不变：intent 无 receipt → OutcomeUnknown，不盲重放
+    const report = new JsonlLedger(ledgerPath).reconcile();
+    assert.equal(report.unknown.length, 1);
+    assert.equal(report.settled.length, 0);
 
     await adapter.dispose();
   } finally {

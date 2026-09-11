@@ -289,18 +289,26 @@ export class PiRuntimeAdapter {
       // 不迁移状态（审计可见的异常记录），也不产生 receipt。
       if (normalized.kind === RuntimeEventKind.ToolSettled) {
         const payload = normalized.payload as ToolSettledPayload;
-        const existing = this.#executions.get(payload.toolCallId);
-        if (
-          existing !== undefined &&
-          (existing.state === "execution" ||
-            (existing.state === "approval" && existing.decision?.outcome === "rejected"))
-        ) {
-          const settled = advanceToolExecution(existing, "settled", Date.now());
-          this.#executions.set(payload.toolCallId, settled);
-          this.#persistReceipt(settled, payload.isError);
+        // 账本联动隔离在独立 try/catch（P2-2）：receipt 写盘失败只进 listenerErrors，
+        // 绝不让 settled 事件本体因此丢失——下方"事件落日志与转发无条件"是不变式
+        try {
+          const existing = this.#executions.get(payload.toolCallId);
+          if (
+            existing !== undefined &&
+            (existing.state === "execution" ||
+              (existing.state === "approval" && existing.decision?.outcome === "rejected"))
+          ) {
+            const settled = advanceToolExecution(existing, "settled", Date.now());
+            this.#executions.set(payload.toolCallId, settled);
+            this.#persistReceipt(settled, payload.isError);
+          }
+        } catch (error) {
+          this.#listenerErrors.push(error);
         }
         this.#countUpstreamInterceptedAndMaybeBreak(payload);
       }
+      // 不变式：事件落日志与转发无条件——账本联动故障（上方已隔离）或任何其他异常
+      // 都不得让事件从 #events 或 listener 丢失（决策 ①：事件日志是审计轨迹）。
       // 单一冻结点：日志与 listener 共享同一冻结对象，事件日志按治理语义不可变。
       // 篡改尝试在严格模式下抛 TypeError，被下方 listener 自包 try/catch 吞进 listenerErrors。
       this.#events.push(deepFreeze(normalized));
