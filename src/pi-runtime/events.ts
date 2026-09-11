@@ -8,7 +8,8 @@
 // 其余事件（agent_start、turn_start/turn_end、message_update、注入消息的 message_*、
 // tool_execution_update）M1 不落 Pigeon 事件，返回 null。
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, StopReason } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { type Static, Type } from "typebox";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import { newEntryId, type RunId, type SessionId } from "../state/ids.ts";
 
@@ -21,29 +22,50 @@ export const RuntimeEventKind = {
 } as const;
 export type RuntimeEventKind = (typeof RuntimeEventKind)[keyof typeof RuntimeEventKind];
 
-export interface TurnCompletedPayload {
-  stopReason: StopReason;
+// 五种归一化事件的 payload schema（M4 S1：Event Log 按 kind 校验 payload 的唯一事实源）。
+// 类型由 schema 派生（Static），归一化写入方与持久化读取方共用同一份形状，杜绝漂移。
+
+// pi-ai 的 StopReason 字面量集合（types.d.ts）：落盘格式自有一份，不随上游改名漂移
+export const StopReasonSchema = Type.Union([
+  Type.Literal("pending"),
+  Type.Literal("stop"),
+  Type.Literal("length"),
+  Type.Literal("toolUse"),
+  Type.Literal("error"),
+  Type.Literal("aborted"),
+  Type.Literal("deferred"),
+]);
+
+export const TurnStartedPayloadSchema = Type.Object({});
+export type TurnStartedPayload = Static<typeof TurnStartedPayloadSchema>;
+
+export const TurnCompletedPayloadSchema = Type.Object({
+  stopReason: StopReasonSchema,
   // 是否为上游 handleRunFailure 合成的失败消息（agent.js: 空文本 + usage 全零 + errorMessage）
-  syntheticFailure: boolean;
-  errorMessage?: string;
-}
+  syntheticFailure: Type.Boolean(),
+  errorMessage: Type.Optional(Type.String()),
+});
+export type TurnCompletedPayload = Static<typeof TurnCompletedPayloadSchema>;
 
-export interface ToolProposedPayload {
-  toolCallId: string;
-  toolName: string;
-  args: unknown;
-}
+export const ToolProposedPayloadSchema = Type.Object({
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: Type.String({ minLength: 1 }),
+  args: Type.Unknown(),
+});
+export type ToolProposedPayload = Static<typeof ToolProposedPayloadSchema>;
 
-export interface ToolSettledPayload {
-  toolCallId: string;
-  toolName: string;
-  isError: boolean;
-}
+export const ToolSettledPayloadSchema = Type.Object({
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: Type.String({ minLength: 1 }),
+  isError: Type.Boolean(),
+});
+export type ToolSettledPayload = Static<typeof ToolSettledPayloadSchema>;
 
-export interface RunEndedPayload {
+export const RunEndedPayloadSchema = Type.Object({
   // 本次 Run 新增的消息条数；仅是生命周期事实，不含成败语义
-  messageCount: number;
-}
+  messageCount: Type.Integer({ minimum: 0 }),
+});
+export type RunEndedPayload = Static<typeof RunEndedPayloadSchema>;
 
 // 识别上游 handleRunFailure 合成的 assistant 消息：
 // 空文本内容 + usage 全零 + 携带 errorMessage，三者齐备才认定，避免误标真实模型错误消息。
