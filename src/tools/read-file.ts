@@ -12,6 +12,9 @@ import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
 // 单次默认最多返回行数，防止一次把大文件全塞进上下文
 const DEFAULT_READ_LIMIT = 2000;
 
+// 域错误类（M4 S2 错误分类判据）：offset 越界 / 目标非文件等模型侧错误，
+// 与环境异常（fs ErrnoException）区分——error-kind.ts 按类归 domain
+export class ReadFileError extends Error {}
 export const ReadFileParamsSchema = Type.Object({
   path: Type.String({ minLength: 1 }),
   // 起始行，1-based；缺省从第 1 行开始
@@ -48,7 +51,7 @@ export function createReadFileTool(
       const args = Value.Parse(ReadFileParamsSchema, params);
       const resolvedPath = resolveWorkspacePath(workspaceRoot, args.path);
       if (!(await stat(resolvedPath)).isFile()) {
-        throw new Error(`不是常规文件：${args.path}`);
+        throw new ReadFileError(`不是常规文件：${args.path}`);
       }
       const raw = await readFile(resolvedPath, "utf8");
       const snapshot = snapshotTag(raw);
@@ -69,7 +72,7 @@ export function createReadFileTool(
       }
       const offset = args.offset ?? 1;
       if (offset > totalLines) {
-        throw new Error(
+        throw new ReadFileError(
           `offset ${offset} 超出文件范围（共 ${totalLines} 行）；请给出 1-${totalLines} 之间的 offset`
         );
       }

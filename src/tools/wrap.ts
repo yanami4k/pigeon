@@ -16,3 +16,21 @@ export type PigeonToolResult<TDetails> = AgentToolResult<TDetails>;
 export interface PreviewableTool {
   preview(params: unknown): Promise<string>;
 }
+
+// 副作用内容证据（M4 S2 哈希自动确证，D5）：dispatch 准备期由写工具零副作用算出的
+// 改前/预期改后内容哈希（snapshotTag 格式），随 intent 落盘，供冷恢复三方比对
+export interface ContentEvidence {
+  // 工作区相对路径（模型参数原样）
+  path: string;
+  beforeHash: string;
+  expectedAfterHash: string;
+}
+
+// 可选能力：内容证据探针。结构检查（"probeContentEvidence" in tool），不要求工具必实现；
+// 探针/实测失败返回 null（不抛），治理层凭字段缺省把悬账降级为人工对账
+export interface ContentEvidenceTool {
+  // dispatch 前：零副作用算出改前/预期改后哈希（与 execute 共享同一预检路径）
+  probeContentEvidence(params: unknown): Promise<ContentEvidence | null>;
+  // 执行后：实测目标现状内容哈希（receipt 的 contentAfterHash 证据）
+  hashContentTarget(params: unknown): string | null;
+}

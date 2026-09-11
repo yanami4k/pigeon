@@ -237,3 +237,47 @@ test("preview 同样做过期快照与逃逸校验", async () => {
     cleanup();
   }
 });
+
+test("内容证据探针：零副作用算出改前/预期改后哈希，预期改后 ≡ 真实执行后的文件快照", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    const editor = createEditFileTool(root);
+    const params: EditFileParams = {
+      path: "a.ts",
+      snapshot: snapshotTag(original),
+      edits: [{ op: "replace", anchor: `2#${lineTag("beta")}`, lines: ["BETA"] }],
+    };
+    const probe = await editor.probeContentEvidence(params);
+    assert.ok(probe, "合法编辑规约必须给出内容证据");
+    assert.equal(probe.path, "a.ts");
+    assert.equal(probe.beforeHash, snapshotTag(original));
+    // 探针零副作用：文件逐字节不变
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+    // 预期改后哈希 ≡ 真实执行后的文件现状哈希（确定性推出，不猜）
+    await editor.execute("tc-probe", params);
+    assert.equal(probe.expectedAfterHash, editor.hashContentTarget(params));
+    assert.equal(probe.expectedAfterHash, snapshotTag("alpha\nBETA\ngamma\n"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("探针降级：快照过期 / 文件缺失 / 畸形参数 → null（治理层凭缺省降级为人工对账）", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "v1\n" });
+  try {
+    const editor = createEditFileTool(root);
+    const stale: EditFileParams = {
+      path: "a.ts",
+      snapshot: snapshotTag("v0\n"),
+      edits: [{ op: "replace", anchor: `1#${lineTag("v1")}`, lines: ["V1"] }],
+    };
+    assert.equal(await editor.probeContentEvidence(stale), null);
+    assert.equal(await editor.probeContentEvidence({ path: "missing.ts" }), null);
+    assert.equal(await editor.probeContentEvidence({}), null);
+    // 现状哈希：文件缺失 → null（不抛）
+    assert.equal(editor.hashContentTarget({ path: "missing.ts" }), null);
+  } finally {
+    cleanup();
+  }
+});

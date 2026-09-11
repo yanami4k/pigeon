@@ -7,6 +7,7 @@
 //   ④ 产出 unified-ish diff（details.diff）供审批展示（切片 4 消费）。
 // 不做：三方合并恢复（OMP session-aware recovery）、写盘原子性（env 层问题）、并发排队
 // （M3 决策 2：toolExecution 写死 sequential，任何时刻最多一个执行中的 call）。
+import { readFileSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -19,7 +20,7 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { resolveWorkspacePath } from "./paths.ts";
-import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
+import type { ContentEvidenceTool, PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 export class EditFileError extends Error {}
 
 const AnchorSchema = Type.String({ pattern: "^\\d+#[0-9a-f]{4}$" });
@@ -64,7 +65,7 @@ export interface EditFileDetails {
 
 export function createEditFileTool(
   workspaceRoot: string
-): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool {
+): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool & ContentEvidenceTool {
   return {
     name: "edit_file",
     label: "edit_file",
@@ -81,6 +82,30 @@ export function createEditFileTool(
     async preview(params) {
       const plan = await planEdits(workspaceRoot, Value.Parse(EditFileParamsSchema, params));
       return buildEditDiff(plan.args.path, plan.split.lines, plan.applied);
+    },
+    // M4 S2 内容证据探针（D5 哈希自动确证）：与 execute/preview 共享同一 planEdits 预检，
+    // 「探针所见 = 执行所得」；零副作用。探针失败（快照过期/文件缺失/参数畸形）返回 null——
+    // 治理层凭 intent 哈希缺省把悬账降级为人工对账，不阻断审批流
+    async probeContentEvidence(params) {
+      try {
+        const plan = await planEdits(workspaceRoot, Value.Parse(EditFileParamsSchema, params));
+        return {
+          path: plan.args.path,
+          beforeHash: plan.beforeSnapshot,
+          expectedAfterHash: snapshotTag(joinContent(plan.newLines, plan.split)),
+        };
+      } catch {
+        return null;
+      }
+    },
+    // 执行后实测目标现状内容哈希（receipt 的 contentAfterHash）；目标不可读返回 null
+    hashContentTarget(params) {
+      try {
+        const args = Value.Parse(EditFileParamsSchema, params);
+        return snapshotTag(readFileSync(resolveWorkspacePath(workspaceRoot, args.path), "utf8"));
+      } catch {
+        return null;
+      }
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<EditFileDetails>> {
       const args = Value.Parse(EditFileParamsSchema, params);
