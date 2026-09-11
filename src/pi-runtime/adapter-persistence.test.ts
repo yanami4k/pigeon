@@ -1,8 +1,9 @@
-// M3 切片 5：账本持久化 + 崩溃对账测试。
+// M4 S1：Event Log 持久化 + 崩溃对账测试（M3 切片 5 测试的 Event Log 改写——
+// 账本已归并进 Event Log，对账改走冷物化 materializeSession，分类语义逐字不变）。
 // 崩溃点模拟说明：上游保证 tool_execution_end 必到（spike S6），活进程内无法复现
-// "死于 end 事件前"——按任务约定用"写一半的状态目录 + 新 Store 实例对账"模拟：
-//   ① intent 已写、execute 未跑 → Store 级直接构造半态目录；
-//   ② execute 已跑、receipt 未写 → 故障注入账本（appendReceipt 抛错）+ 完整真实 Run。
+// "死于 end 事件前"——按任务约定用"写一半的事件文件 + 冷物化对账"模拟：
+//   ① intent 已写、execute 未跑 → 事件日志直写半态；
+//   ② execute 已跑、receipt 未写 → 故障注入事件日志（appendReceipt 抛错）+ 完整真实 Run。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,12 +11,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
 import {
-  JsonlLedger,
-  LEDGER_INTENT_VERSION,
-  type LedgerDecision,
-  type LedgerIntent,
-} from "../persistence/ledger.ts";
-import { asExecutionId } from "../state/ids.ts";
+  type DecisionRecord,
+  type EventRecord,
+  type IntentRecord,
+  JsonlEventLog,
+  materializeSession,
+} from "../persistence/event-log.ts";
+import { asExecutionId, newRunId, newSessionId, type SessionId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
@@ -31,6 +33,17 @@ function makeWorkspace(files: Record<string, string>): { root: string; cleanup: 
     writeFileSync(join(root, name), content);
   }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+// D1 布局下的 per-session 事件日志（<root>/.pigeon/sessions/sess_<ulid>.jsonl）
+function makeEventLog(root: string): {
+  eventLog: JsonlEventLog;
+  sessionsDir: string;
+  sessionId: SessionId;
+} {
+  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionId = newSessionId();
+  return { eventLog: new JsonlEventLog(sessionsDir, sessionId), sessionsDir, sessionId };
 }
 
 function makeRegistry(): ToolRegistry {
@@ -77,20 +90,19 @@ function editCall(content: string): EditFileParams {
   };
 }
 
-// 读账本文件的逐行 JSON
-function readLedgerLines(path: string): Array<Record<string, unknown>> {
+// 读事件文件的逐行 JSON
+function readEventLines(path: string): Array<Record<string, unknown>> {
   return readFileSync(path, "utf8")
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷启动对账配对，账本回填 receiptId", async () => {
+test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷物化对账配对，账本回填 receiptId", async () => {
   const original = "alpha\nbeta\ngamma\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, ".pigeon", "ledger.jsonl");
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
-    const ledger = new JsonlLedger(ledgerPath);
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt"),
       streamFn: createFakeStreamFn({
@@ -102,27 +114,33 @@ test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷启�
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
       approvalHandler: async () => ({ approved: true }),
-      ledger,
+      sessionId,
+      eventLog,
     });
 
     const result = await adapter.run("改文件");
     assert.equal(result.status, "completed");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
 
-    // 账本两行：intent 在 dispatch 前、receipt 在 end 后
-    const lines = readLedgerLines(ledgerPath);
-    assert.equal(lines.length, 2);
-    assert.equal(lines[0]?.kind, "intent");
-    assert.equal(lines[1]?.kind, "receipt");
-    assert.equal(lines[0]?.executionId, lines[1]?.executionId);
+    // 治理族各一行：intent 在 dispatch 前、receipt 在 end 后（文件内 intent 先于 receipt）
+    const lines = readEventLines(eventLog.path);
+    const intent = lines.find((line) => line.kind === "intent") as unknown as IntentRecord;
+    const receiptLine = lines.find((line) => line.kind === "receipt");
+    assert.ok(intent, "批准路径必须落 intent 记录");
+    assert.ok(receiptLine, "批准路径必须落 receipt 记录");
+    assert.ok(lines.indexOf(intent as never) < lines.indexOf(receiptLine as never));
+    assert.equal(intent.executionId, (receiptLine as { receipt: Receipt }).receipt.executionId);
+    // 信封：sessionId/runId 与本次 Run 一致
+    assert.equal(intent.sessionId, sessionId);
+    assert.equal(intent.runId, result.runId);
+    assert.equal(receiptLine?.runId, result.runId);
 
     // intent 携带决定快照（approvedBy 证据链）与模型原始参数
-    const intent = lines[0] as unknown as LedgerIntent;
     assert.equal(intent.decision.approvedBy, "human");
     assert.deepEqual(intent.rawArgs, editCall(original));
 
     // receipt：executed=true、approvedBy=human
-    const receipt = lines[1] as unknown as Receipt;
+    const receipt = (receiptLine as { receipt: Receipt }).receipt;
     assert.equal(receipt.version, RECEIPT_VERSION);
     assert.equal(receipt.executed, true);
     assert.equal(receipt.isError, false);
@@ -133,12 +151,13 @@ test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷启�
     assert.ok(record);
     assert.equal(record.receiptId, receipt.id);
 
-    // 冷启动对账：新实例全量读，配对 settled
-    const report = new JsonlLedger(ledgerPath).reconcile();
+    // 冷物化对账：全量读事件文件，配对 settled
+    const report = materializeSession(sessionsDir, sessionId).reconcile;
     assert.equal(report.settled.length, 1);
     assert.equal(report.unknown.length, 0);
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -147,9 +166,8 @@ test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷启�
 test("人工拒绝路径：decision 落盘（理由逐字）+ receipt executed=false，对账归 rejected 非 unknown", async () => {
   const original = "x\ny\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
-    const ledger = new JsonlLedger(ledgerPath);
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt"),
       streamFn: createFakeStreamFn({
@@ -161,32 +179,39 @@ test("人工拒绝路径：decision 落盘（理由逐字）+ receipt executed=f
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
       approvalHandler: async () => ({ approved: false, reason: "不准" }),
-      ledger,
+      sessionId,
+      eventLog,
     });
 
     await adapter.run("改文件");
-    const lines = readLedgerLines(ledgerPath);
+    const lines = readEventLines(eventLog.path);
     // 拒绝的调用：decision（拒绝理由逐字留证）+ receipt；intent 只在 dispatch 前写，拒绝路径没有
-    assert.equal(lines.length, 2);
-    assert.equal(lines[0]?.kind, "decision");
-    assert.equal(lines[1]?.kind, "receipt");
-    assert.equal(lines[0]?.executionId, lines[1]?.executionId);
-    const persisted = lines[0] as unknown as LedgerDecision;
+    const persisted = lines.find((line) => line.kind === "decision") as unknown as DecisionRecord;
+    assert.ok(persisted, "拒绝路径必须落 decision 记录");
+    assert.equal(
+      lines.filter((line) => line.kind === "intent").length,
+      0,
+      "拒绝发生于 dispatch 前，不得有 intent"
+    );
+    const receiptLine = lines.find((line) => line.kind === "receipt");
+    assert.ok(receiptLine, "拒绝路径必须落 receipt 记录（executed=false 闭环）");
+    assert.equal(persisted.executionId, (receiptLine as { receipt: Receipt }).receipt.executionId);
     assert.equal(persisted.decision.outcome, "rejected");
     assert.equal(persisted.decision.approvedBy, "human");
     assert.equal(persisted.decision.reason, "不准");
-    const receipt = lines[1] as unknown as Receipt;
+    const receipt = (receiptLine as { receipt: Receipt }).receipt;
     assert.equal(receipt.executed, false);
     assert.equal(receipt.approvedBy, "human");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
 
-    // 冷启动对账：decision+receipt 配对归 rejected，无副作用可能，不落 OutcomeUnknown
-    const report = new JsonlLedger(ledgerPath).reconcile();
+    // 冷物化对账：decision+receipt 配对归 rejected，无副作用可能，不落 OutcomeUnknown
+    const report = materializeSession(sessionsDir, sessionId).reconcile;
     assert.equal(report.rejected.length, 1);
     assert.equal(report.unknown.length, 0);
     assert.equal(report.orphanReceipts.length, 0);
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -195,9 +220,8 @@ test("人工拒绝路径：decision 落盘（理由逐字）+ receipt executed=f
 test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字留证", async () => {
   const original = "x\ny\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
-    const ledger = new JsonlLedger(ledgerPath);
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt", ["edit_file"]),
       streamFn: createFakeStreamFn({
@@ -209,13 +233,14 @@ test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字�
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
       approvalHandler: async () => ({ approved: true }),
-      ledger,
+      sessionId,
+      eventLog,
     });
 
     await adapter.run("改文件");
-    const lines = readLedgerLines(ledgerPath);
-    const persisted = lines.find((line) => line.kind === "decision") as unknown as LedgerDecision;
-    assert.ok(persisted, "deny 路径必须落 decision 行");
+    const lines = readEventLines(eventLog.path);
+    const persisted = lines.find((line) => line.kind === "decision") as unknown as DecisionRecord;
+    assert.ok(persisted, "deny 路径必须落 decision 记录");
     assert.equal(persisted.decision.outcome, "rejected");
     assert.equal(persisted.decision.approvedBy, "policy:deny");
     assert.equal(persisted.decision.reason, "deny 清单精确匹配，任何模式一律拒绝：edit_file");
@@ -231,11 +256,12 @@ test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字�
       JSON.stringify(toolResult)
     );
 
-    const report = new JsonlLedger(ledgerPath).reconcile();
+    const report = materializeSession(sessionsDir, sessionId).reconcile;
     assert.equal(report.rejected.length, 1);
     assert.equal(report.unknown.length, 0);
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -244,9 +270,8 @@ test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字�
 test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny", async () => {
   const original = "x\ny\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionId } = makeEventLog(root);
   try {
-    const ledger = new JsonlLedger(ledgerPath);
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt"),
       streamFn: createFakeStreamFn({
@@ -258,13 +283,14 @@ test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
       // 故意不传 approvalHandler：prompt 模式 fail-closed 拒绝
-      ledger,
+      sessionId,
+      eventLog,
     });
 
     await adapter.run("改文件");
-    const lines = readLedgerLines(ledgerPath);
-    const persisted = lines.find((line) => line.kind === "decision") as unknown as LedgerDecision;
-    assert.ok(persisted, "fail-closed 路径必须落 decision 行");
+    const lines = readEventLines(eventLog.path);
+    const persisted = lines.find((line) => line.kind === "decision") as unknown as DecisionRecord;
+    assert.ok(persisted, "fail-closed 路径必须落 decision 记录");
     assert.equal(persisted.decision.outcome, "rejected");
     assert.equal(persisted.decision.approvedBy, "policy:deny");
     assert.equal(persisted.decision.reason, "策略要求人工审批但未配置审批通道（fail-closed）");
@@ -281,6 +307,7 @@ test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny
     );
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -289,16 +316,15 @@ test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny
 test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故障进 listenerErrors", async () => {
   const original = "x\ny\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionId } = makeEventLog(root);
   try {
-    const real = new JsonlLedger(ledgerPath);
     const poison = {
-      appendIntent: real.appendIntent.bind(real),
+      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: () => {
         throw new Error("模拟磁盘写失败：decision 未落盘");
       },
-      appendReceipt: real.appendReceipt.bind(real),
-      reconcile: real.reconcile.bind(real),
+      appendReceipt: eventLog.appendReceipt.bind(eventLog),
     };
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt"),
@@ -311,7 +337,8 @@ test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故�
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
       approvalHandler: async () => ({ approved: false, reason: "不准" }),
-      ledger: poison,
+      sessionId,
+      eventLog: poison,
     });
 
     const result = await adapter.run("改文件");
@@ -324,56 +351,55 @@ test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故�
     assert.ok(adapter.listenerErrors().length > 0);
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
 });
 
-test("崩溃点①：intent 已写、execute 未跑（半态目录）→ 冷启动对账 OutcomeUnknown，无重放", () => {
+test("崩溃点①：intent 已写、execute 未跑（半态事件文件）→ 冷物化对账 OutcomeUnknown，无重放", () => {
   const { root, cleanup } = makeWorkspace({ "a.ts": "alpha\nbeta\n" });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
-    // 模拟进程死于 hook 放行后 / execute 前：账本里只有 intent
-    const crashed = new JsonlLedger(ledgerPath);
-    crashed.appendIntent({
-      kind: "intent",
-      version: LEDGER_INTENT_VERSION,
+    // 模拟进程死于 hook 放行后 / execute 前：事件日志里只有 intent
+    eventLog.appendIntent({
       executionId: asExecutionId("exec_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
       toolCallId: "toolu_crash1",
       toolName: "edit_file",
       rawArgs: { path: "a.ts" },
       decision: { outcome: "approved", approvedBy: "human", decidedAt: 1_757_000_000_001 },
       at: 1_757_000_000_000,
+      runId: newRunId(),
     });
+    eventLog.close();
 
-    // 新实例冷启动对账（等价于新进程）
-    const report = new JsonlLedger(ledgerPath).reconcile();
+    // 冷物化对账（等价于新进程全量读）
+    const report = materializeSession(sessionsDir, sessionId).reconcile;
     assert.equal(report.settled.length, 0);
     assert.equal(report.unknown.length, 1);
     assert.equal(report.unknown[0]?.intent.executionId, "exec_01J5Z7K8W9ABCDEFGHJKMNPQRS");
     assert.equal(report.unknown[0]?.receipt, undefined);
-    // 无重放：对账只读报告，账本与文件系统均无变化
-    assert.equal(readLedgerLines(ledgerPath).length, 1);
+    // 无重放：对账只读报告，事件文件与文件系统均无变化
+    assert.equal(readEventLines(eventLog.path).length, 1);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nbeta\n");
   } finally {
     cleanup();
   }
 });
 
-test("崩溃点②：execute 已跑、receipt 未写（故障注入账本）→ OutcomeUnknown，副作用已发生但不盲重放", async () => {
+test("崩溃点②：execute 已跑、receipt 未写（故障注入事件日志）→ OutcomeUnknown，副作用已发生但不盲重放", async () => {
   const original = "alpha\nbeta\ngamma\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
     // 故障注入：receipt 写盘即抛错，模拟进程死于 tool_execution_end 前
-    const poisoned = new JsonlLedger(ledgerPath);
     const poison = {
-      appendIntent: poisoned.appendIntent.bind(poisoned),
-      appendDecision: poisoned.appendDecision.bind(poisoned),
+      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendIntent: eventLog.appendIntent.bind(eventLog),
+      appendDecision: eventLog.appendDecision.bind(eventLog),
       appendReceipt: () => {
         throw new Error("模拟进程崩溃：receipt 未落盘");
       },
-      reconcile: poisoned.reconcile.bind(poisoned),
     };
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("yolo"),
@@ -385,25 +411,27 @@ test("崩溃点②：execute 已跑、receipt 未写（故障注入账本）→ 
       }),
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
-      ledger: poison,
+      sessionId,
+      eventLog: poison,
     });
 
     const result = await adapter.run("改文件");
     assert.equal(result.status, "completed");
     // 副作用真实发生了（文件已改），但 receipt 从未落盘
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
-    assert.equal(readLedgerLines(ledgerPath).length, 1);
+    assert.equal(readEventLines(eventLog.path).filter((line) => line.kind === "receipt").length, 0);
     // 故障被响亮记录（listenerErrors），不是静默吞掉
     assert.ok(adapter.listenerErrors().length > 0);
 
-    // 冷启动对账：intent 无 receipt → OutcomeUnknown（副作用是否发生账本无法确认）
-    const report = new JsonlLedger(ledgerPath).reconcile();
+    // 冷物化对账：intent 无 receipt → OutcomeUnknown（副作用是否发生日志无法确认）
+    const report = materializeSession(sessionsDir, sessionId).reconcile;
     assert.equal(report.unknown.length, 1);
     assert.equal(report.settled.length, 0);
-    // 无重放：对账后账本仍只有一条 intent，没有任何自动重试产生新记录
-    assert.equal(readLedgerLines(ledgerPath).length, 1);
+    // 无重放：对账后事件文件仍只有一条 intent，没有任何自动重试产生新记录
+    assert.equal(readEventLines(eventLog.path).filter((line) => line.kind === "intent").length, 1);
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -412,16 +440,15 @@ test("崩溃点②：execute 已跑、receipt 未写（故障注入账本）→ 
 test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 不发生", async () => {
   const original = "alpha\nbeta\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionId } = makeEventLog(root);
   try {
-    const real = new JsonlLedger(ledgerPath);
     const broken = {
+      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
       appendIntent: () => {
         throw new Error("模拟磁盘写失败");
       },
-      appendDecision: real.appendDecision.bind(real),
-      appendReceipt: real.appendReceipt.bind(real),
-      reconcile: real.reconcile.bind(real),
+      appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendReceipt: eventLog.appendReceipt.bind(eventLog),
     };
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("yolo"),
@@ -433,17 +460,23 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
       }),
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
-      ledger: broken,
+      sessionId,
+      eventLog: broken,
     });
 
     const result = await adapter.run("改文件");
     assert.equal(result.status, "completed");
     // 写盘失败 → 阻断，文件零改动
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
-    // 账本文件无任何记录（intent 写失败），被拦调用也不产生 receipt（从未 dispatch）
-    assert.equal(readLedgerLines(ledgerPath).length, 0);
+    // 事件文件无任何治理记录（intent 写失败），被拦调用也不产生 receipt（从未 dispatch）；
+    // 观察族事件（turn/tool）照常落盘——它们不是副作用证据
+    const lines = readEventLines(eventLog.path);
+    assert.equal(lines.filter((line) => line.kind === "intent").length, 0);
+    assert.equal(lines.filter((line) => line.kind === "receipt").length, 0);
+    assert.ok(lines.some((line) => line.kind === "tool.proposed"));
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -452,16 +485,15 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
 test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，计数到阈值后 aborted", async () => {
   const original = "alpha\nbeta\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionId } = makeEventLog(root);
   try {
-    const real = new JsonlLedger(ledgerPath);
     const broken = {
+      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
       appendIntent: () => {
         throw new Error("模拟磁盘持续写失败");
       },
-      appendDecision: real.appendDecision.bind(real),
-      appendReceipt: real.appendReceipt.bind(real),
-      reconcile: real.reconcile.bind(real),
+      appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendReceipt: eventLog.appendReceipt.bind(eventLog),
     };
     // 闸内异常 fail-closed 的阻断必须过熔断计数：否则磁盘满 + 顽固模型 = 无限阻断循环
     const stubbornReplies = Array.from({ length: 10 }, () => ({
@@ -473,7 +505,8 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
       streamFn: createFakeStreamFn({ replies: [...stubbornReplies, { text: "放弃" }] }),
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
-      ledger: broken,
+      sessionId,
+      eventLog: broken,
     });
 
     const result = await adapter.run("改文件");
@@ -483,6 +516,7 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
 
     await adapter.dispose();
+    eventLog.close();
   } finally {
     cleanup();
   }
@@ -491,16 +525,15 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
 test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并转发，故障进 listenerErrors", async () => {
   const original = "alpha\nbeta\ngamma\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const ledgerPath = join(root, "ledger.jsonl");
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
-    const real = new JsonlLedger(ledgerPath);
     const poison = {
-      appendIntent: real.appendIntent.bind(real),
-      appendDecision: real.appendDecision.bind(real),
+      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendIntent: eventLog.appendIntent.bind(eventLog),
+      appendDecision: eventLog.appendDecision.bind(eventLog),
       appendReceipt: () => {
         throw new Error("模拟磁盘写失败：receipt 未落盘");
       },
-      reconcile: real.reconcile.bind(real),
     };
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("yolo"),
@@ -512,7 +545,8 @@ test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并�
       }),
       registry: makeRegistry(),
       tools: [createEditFileTool(root)],
-      ledger: poison,
+      sessionId,
+      eventLog: poison,
     });
     // 外部 listener：事件转发必须不受账本故障影响
     const forwarded: string[] = [];
@@ -525,7 +559,8 @@ test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并�
     // 副作用已发生、receipt 未落盘：故障响亮记录，不是静默吞掉
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
     assert.ok(adapter.listenerErrors().length > 0);
-    // 事件日志是审计轨迹（决策 ①）：tool.settled 无条件在列，且与账本 toolCallId 对齐
+    // 事件日志是审计轨迹（决策 ①）：tool.settled 无条件在列（内存与落盘双侧），
+    // 且与账本 toolCallId 对齐
     const record = result.toolExecutions[0];
     assert.ok(record);
     const settled = adapter.events().find((event) => event.kind === "tool.settled");
@@ -533,11 +568,64 @@ test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并�
     const settledPayload = settled.payload as ToolSettledPayload;
     assert.equal(settledPayload.toolCallId, record.toolCallId);
     assert.ok(forwarded.includes("tool.settled"), "receipt 写盘失败不得拦截事件转发");
+    const persisted = materializeSession(sessionsDir, sessionId);
+    assert.ok(
+      persisted.runtimeEvents.some((event) => event.kind === "tool.settled"),
+      "receipt 写盘失败不得让 tool.settled 从事件文件丢失"
+    );
 
-    // 冷启动对账语义不变：intent 无 receipt → OutcomeUnknown，不盲重放
-    const report = new JsonlLedger(ledgerPath).reconcile();
-    assert.equal(report.unknown.length, 1);
-    assert.equal(report.settled.length, 0);
+    // 冷物化对账语义不变：intent 无 receipt → OutcomeUnknown，不盲重放
+    assert.equal(persisted.reconcile.unknown.length, 1);
+    assert.equal(persisted.reconcile.settled.length, 0);
+
+    await adapter.dispose();
+    eventLog.close();
+  } finally {
+    cleanup();
+  }
+});
+
+test("冷物化 ≡ 活适配器状态：脚本化 Run 后事件序列与对账结果逐一相符", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
+  try {
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot("prompt"),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改", toolCalls: [{ name: "edit_file", args: editCall(original) }] },
+          { text: "完成" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      approvalHandler: async () => ({ approved: true }),
+      sessionId,
+      eventLog,
+    });
+    const result = await adapter.run("改文件");
+    eventLog.close();
+
+    const materialized = materializeSession(sessionsDir, sessionId);
+    // 运行时事件序列 ≡ 活适配器内存事件日志（kind 与 EntryId 逐一对齐，顺序一致）
+    const live = adapter.events();
+    assert.deepEqual(
+      materialized.runtimeEvents.map((event) => [event.kind, event.id]),
+      live.map((event) => [event.kind, event.id])
+    );
+    // 治理族 ≡ 活适配器 ToolExecution 账本：settled 配对的 executionId/toolCallId/receiptId
+    const record = result.toolExecutions[0];
+    assert.ok(record);
+    assert.equal(materialized.reconcile.settled.length, 1);
+    const entry = materialized.reconcile.settled[0];
+    assert.equal(entry?.intent.executionId, record.executionId);
+    assert.equal(entry?.intent.toolCallId, record.toolCallId);
+    assert.equal(entry?.receipt?.id, record.receiptId);
+    assert.equal(materialized.reconcile.unknown.length, 0);
+    // 全部记录都属于本 session 与本次 Run
+    assert.ok(materialized.records.every((r: EventRecord) => r.sessionId === sessionId));
+    assert.ok(materialized.records.every((r: EventRecord) => r.runId === result.runId));
 
     await adapter.dispose();
   } finally {

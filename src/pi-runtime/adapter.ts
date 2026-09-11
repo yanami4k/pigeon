@@ -24,11 +24,7 @@ import {
 import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import {
-  type JsonlLedger,
-  LEDGER_DECISION_VERSION,
-  LEDGER_INTENT_VERSION,
-} from "../persistence/ledger.ts";
+import type { JsonlEventLog } from "../persistence/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
@@ -68,8 +64,12 @@ export interface RunResult {
   toolExecutions: ToolExecution[];
 }
 
-// 账本落盘口的结构类型（= JsonlLedger 的写入面）；测试注入故障包装器模拟崩溃点
-export type LedgerSink = Pick<JsonlLedger, "appendIntent" | "appendDecision" | "appendReceipt">;
+// Event Log 落盘口的结构类型（= JsonlEventLog 的写入面，M4 S1：账本归并进 Event Log，不双写）；
+// 测试注入故障包装器模拟崩溃点
+export type EventLogSink = Pick<
+  JsonlEventLog,
+  "appendRuntimeEvent" | "appendIntent" | "appendDecision" | "appendReceipt"
+>;
 
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
@@ -85,9 +85,9 @@ export interface PiRuntimeAdapterOptions {
   tools?: AgentTool[];
   // M3：人工审批注入点（策略判定为 prompt 时调用）；缺省时 prompt 一律 fail-closed 拒绝
   approvalHandler?: ApprovalHandler;
-  // M3 切片 5：JSONL 账本落盘点（缺省 = 纯内存账本，不落盘）。
-  // 结构类型而非 JsonlLedger 具体类：测试可注入故障包装器模拟崩溃点
-  ledger?: LedgerSink;
+  // M4 S1：Event Log 落盘点（缺省 = 纯内存事件序列，不落盘）。
+  // 结构类型而非 JsonlEventLog 具体类：测试可注入故障包装器模拟崩溃点
+  eventLog?: EventLogSink;
   // 熔断阈值：同一 工具名+参数指纹 在同一 Run 内被阻断的次数上限（spike S4：上游无循环护栏）
   circuitBreakerThreshold?: number;
 }
@@ -107,8 +107,7 @@ export class PiRuntimeAdapter {
   readonly #tools: ReadonlyMap<string, AgentTool>;
   // ToolExecution 账本：toolCallId → 记录（M3 内存态；持久化是切片 5）
   readonly #executions = new Map<string, ToolExecution>();
-  readonly #ledger: LedgerSink | undefined;
-  // 熔断计数：同一 Run 内按粒度累计的阻断次数（spike S4：上游无循环护栏）。
+  readonly #eventLog: EventLogSink | undefined;
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
   // fail-closed），参数改不改都照样拒，任何重试皆徒劳，按工具名计数；
   // `fingerprint\n<名字>\n<参数 JSON>`：人工拒绝与闸内异常，决策 1 鼓励模型改参重提，
@@ -143,7 +142,7 @@ export class PiRuntimeAdapter {
     this.#registry = options.registry ?? new ToolRegistry();
     this.#approvalHandler = options.approvalHandler;
     this.#breakerThreshold = options.circuitBreakerThreshold ?? 3;
-    this.#ledger = options.ledger;
+    this.#eventLog = options.eventLog;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -306,6 +305,15 @@ export class PiRuntimeAdapter {
           this.#listenerErrors.push(error);
         }
         this.#countUpstreamInterceptedAndMaybeBreak(payload);
+      }
+      // Event Log 落盘（观察族，D2：同步写不 fsync）：写失败只进 listenerErrors——
+      // 与账本联动同级的隔离，事件本体照常入内存日志并转发（下方不变式不受影响）
+      if (this.#eventLog !== undefined) {
+        try {
+          this.#eventLog.appendRuntimeEvent(normalized);
+        } catch (error) {
+          this.#listenerErrors.push(error);
+        }
       }
       // 不变式：事件落日志与转发无条件——账本联动故障（上方已隔离）或任何其他异常
       // 都不得让事件从 #events 或 listener 丢失（决策 ①：事件日志是审计轨迹）。
@@ -481,33 +489,31 @@ export class PiRuntimeAdapter {
   }
 
   // dispatch 前持久化调用意图（ROADMAP §3.2）。写盘失败向上抛——外层 catch 转成 block，
-  // 即 fail-closed：账本写不进就不放行，未留证的副作用一律不得发生
+  // 即 fail-closed：事件日志写不进就不放行，未留证的副作用一律不得发生
   #persistIntent(record: ToolExecution): void {
-    if (this.#ledger === undefined) {
+    if (this.#eventLog === undefined) {
       return;
     }
     const decision = record.decision;
     if (decision === undefined) {
       throw new Error("账本 intent 缺失决定快照");
     }
-    this.#ledger.appendIntent({
-      kind: "intent",
-      version: LEDGER_INTENT_VERSION,
+    this.#eventLog.appendIntent({
       executionId: record.executionId,
       toolCallId: record.toolCallId,
       toolName: record.toolName,
       rawArgs: record.rawArgs,
       decision,
       at: Date.now(),
+      runId: this.#activeRunId(),
     });
   }
 
   // 拒绝决定落盘（决策 4 证据链：拒绝理由必须在场，进程退出后不蒸发）。
   // 失败语义：调用已被阻断（副作用已防住），写盘失败不得改变结果——故自包 catch 进
   // listenerErrors（代码库既有的内部异常观察口），而非上抛让外层 catch 把逐字拒绝理由
-  // 改写成"审批闸内部异常"反馈给模型。
   #persistDecision(record: ToolExecution): void {
-    if (this.#ledger === undefined) {
+    if (this.#eventLog === undefined) {
       return;
     }
     const decision = record.decision;
@@ -515,15 +521,14 @@ export class PiRuntimeAdapter {
       throw new Error("账本 decision 缺失决定快照");
     }
     try {
-      this.#ledger.appendDecision({
-        kind: "decision",
-        version: LEDGER_DECISION_VERSION,
+      this.#eventLog.appendDecision({
         executionId: record.executionId,
         toolCallId: record.toolCallId,
         toolName: record.toolName,
         rawArgs: record.rawArgs,
         decision,
         at: Date.now(),
+        runId: this.#activeRunId(),
       });
     } catch (error) {
       this.#listenerErrors.push(error);
@@ -537,7 +542,7 @@ export class PiRuntimeAdapter {
   // 崩溃点：进程死于 end 事件前则 receipt 永不落盘——approved 路径冷启动 reconcile 报
   // OutcomeUnknown；rejected 路径已有 decision 行闭环，归 rejected 不入 unknown。
   #persistReceipt(record: ToolExecution, isError: boolean): void {
-    if (this.#ledger === undefined) {
+    if (this.#eventLog === undefined) {
       return;
     }
     const decision = record.decision;
@@ -559,7 +564,7 @@ export class PiRuntimeAdapter {
         ? `${record.toolName} 执行完成`
         : `${record.toolName} 未产生副作用（${decision.outcome === "rejected" ? "已拒绝" : "执行出错"}）`,
     };
-    this.#ledger.appendReceipt(receipt);
+    this.#eventLog.appendReceipt({ receipt, runId: this.#activeRunId() });
     // settled 后回填 receiptId：schema 允许的回填，不是状态迁移
     this.#executions.set(record.toolCallId, { ...record, receiptId: receipt.id });
   }
@@ -623,6 +628,15 @@ export class PiRuntimeAdapter {
       this.#interceptedStreak.toolName = "";
       this.#interceptedStreak.count = 0;
     }
+  }
+  // 治理族落盘的 runId 来源：审批闸与 tool.settled 联动只在 Run 活动窗口内发生，
+  // 窗口外调用说明时序错乱，响亮失败而非写出 runId 缺失的记录
+  #activeRunId(): RunId {
+    const runId = this.#currentRunId;
+    if (runId === null) {
+      throw new Error("治理族落盘需要活动 Run（hook/settled 联动只在 Run 窗口内发生）");
+    }
+    return runId;
   }
 
   #assertUsable(): void {

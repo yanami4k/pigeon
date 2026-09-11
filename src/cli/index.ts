@@ -7,10 +7,11 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { JsonlLedger } from "../persistence/ledger.ts";
+import { JsonlEventLog, migrateLegacyLedger } from "../persistence/index.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
+import { newSessionId } from "../state/ids.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -92,6 +93,12 @@ async function main(argv: string[]): Promise<void> {
   });
 
   const { ask, close } = createAsker(process.stdin, (text) => process.stdout.write(text));
+  // D8：M3 旧账本一次性迁移（不存在即 no-op；损坏响亮失败，启动中止）
+  const sessionsDir = path.join(workspaceRoot, ".pigeon", "sessions");
+  migrateLegacyLedger(path.join(workspaceRoot, ".pigeon", "ledger.jsonl"), sessionsDir);
+  const sessionId = newSessionId();
+  const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+
   const adapter = new PiRuntimeAdapter({
     snapshot: {
       version: INJECTION_SNAPSHOT_VERSION,
@@ -117,14 +124,17 @@ async function main(argv: string[]): Promise<void> {
     registry,
     tools: [createReadFileTool(workspaceRoot), createEditFileTool(workspaceRoot)],
     approvalHandler: createCliApprovalHandler(ask, (text) => process.stdout.write(text)),
-    // 默认账本：<工作区根>/.pigeon/ledger.jsonl（ROADMAP §3.2 调用前意图 + 调用后 Receipt）
-    ledger: new JsonlLedger(path.join(workspaceRoot, ".pigeon", "ledger.jsonl")),
+    sessionId,
+    // 默认事件日志：<工作区根>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；
+    // ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）
+    eventLog,
   });
   try {
     await runRepl({ adapter, ask, write: (text) => process.stdout.write(text) });
   } finally {
     close();
     await adapter.dispose();
+    eventLog.close();
   }
 }
 
