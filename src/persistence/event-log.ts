@@ -13,6 +13,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   writeSync,
 } from "node:fs";
@@ -30,6 +31,7 @@ import {
 } from "../pi-runtime/events.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import {
+  asSessionId,
   EntryIdSchema,
   type ExecutionId,
   ExecutionIdSchema,
@@ -273,6 +275,9 @@ export interface MaterializedSession {
   path: string;
   // 全量记录（按文件顺序）
   records: EventRecord[];
+  // 撕裂尾巴标记（D2 可见化）：文件末尾存在未完整落盘的记录残片；
+  // 残片不进 records（按未持久化容忍），但视图必须如实标注而非假装证据链完整
+  tornTail: boolean;
   runtimeEvents: RuntimeEventRecord[];
   intents: IntentRecord[];
   decisions: DecisionRecord[];
@@ -311,16 +316,25 @@ eventLogMigrations.register("event-log", 1, (doc) => ({
   ...(doc.kind === "receipt" ? { receipt: migrateReceiptToCurrent(doc.receipt) } : {}),
 }));
 
+// 全量读 + 校验的结果：记录集 + 撕裂尾巴标记。
+// tornTail：进程死于写盘中途的痕迹——追加协议保证每条记录以 \n 结尾，
+// 故「文件非空且不以 \n 结尾」或「末行不是合法 JSON」都意味着最后一次写盘未完整落盘；
+// 记录本身仍按「未持久化」容忍（不进记录集），该标记供 replay 等视图如实标注（D2 可见化）
+export interface EventLogReadResult {
+  records: EventRecord[];
+  tornTail: boolean;
+}
+
 // 全量读 + 校验：进程死于写盘中途会留下半截末行——按"未持久化"容忍（torn tail）；
 // 非末行损坏说明日志被外部破坏，响亮失败。
 // 读路径迁移（M0 管线）：version 低于当前格式的记录先经 eventLogMigrations 逐级升级再校验
-export function readEventLogFile(path: string): EventRecord[] {
+export function readEventLogFileDetailed(path: string): EventLogReadResult {
   if (!existsSync(path)) {
-    return [];
+    return { records: [], tornTail: false };
   }
-  const lines = readFileSync(path, "utf8")
-    .split("\n")
-    .filter((line) => line.length > 0);
+  const content = readFileSync(path, "utf8");
+  const lines = content.split("\n").filter((line) => line.length > 0);
+  let tornTail = content.length > 0 && !content.endsWith("\n");
   const records: EventRecord[] = [];
   for (const [index, line] of lines.entries()) {
     let raw: unknown;
@@ -328,6 +342,7 @@ export function readEventLogFile(path: string): EventRecord[] {
       raw = JSON.parse(line);
     } catch {
       if (index === lines.length - 1) {
+        tornTail = true;
         break; // torn tail：半截末行视为未写入
       }
       throw new EventLogCorruptionError(`事件日志损坏：${path} 第 ${index + 1} 行不是合法 JSON`);
@@ -348,7 +363,24 @@ export function readEventLogFile(path: string): EventRecord[] {
     }
     records.push(record);
   }
-  return records;
+  return { records, tornTail };
+}
+
+// 只取记录集的既有入口（tornTail 标记的调用方用 readEventLogFileDetailed）
+export function readEventLogFile(path: string): EventRecord[] {
+  return readEventLogFileDetailed(path).records;
+}
+
+// Session 列表 = 列目录（D1：ULID 字典序即时间序）；目录不存在 = 尚无会话（空清单），
+// 旧账本退役文件（*.legacy.jsonl，D8）与无关文件不进清单
+export function listSessionIds(dir: string): SessionId[] {
+  if (!existsSync(dir)) {
+    return [];
+  }
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".jsonl") && !name.endsWith(".legacy.jsonl"))
+    .sort()
+    .map((name) => asSessionId(name.slice(0, -".jsonl".length)));
 }
 
 // 治理族记录的幂等键（executionId）；receipt 的键在载荷里
@@ -531,7 +563,7 @@ export class JsonlEventLog {
 // 文件不存在 = 全新 session，返回空态（不是损坏）
 export function materializeSession(dir: string, sessionId: SessionId): MaterializedSession {
   const path = JsonlEventLog.filePathFor(dir, sessionId);
-  const records = readEventLogFile(path);
+  const { records, tornTail } = readEventLogFileDetailed(path);
   const runtimeEvents: RuntimeEventRecord[] = [];
   const intents: IntentRecord[] = [];
   const decisions: DecisionRecord[] = [];
@@ -558,6 +590,7 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     sessionId,
     path,
     records,
+    tornTail,
     runtimeEvents,
     intents,
     decisions,

@@ -31,7 +31,9 @@ import {
   JsonlEventLog,
   materializeSession,
   type ResolutionInput,
+  listSessionIds,
   readEventLogFile,
+  readEventLogFileDetailed,
 } from "./event-log.ts";
 
 function makeIntentInput(
@@ -332,6 +334,45 @@ test("torn tail 容忍：半截末行按「未持久化」处理；中间坏行�
     assert.throws(() => readEventLogFile(log.path), EventLogCorruptionError);
   } finally {
     cleanup();
+  }
+});
+
+test("torn tail 可见化：detailed 读取与冷物化如实报告半截末行的存在（replay 标注用）", () => {
+  const { log, dir, sessionId, runId, cleanup } = makeLog();
+  try {
+    log.appendIntent(makeIntentInput({ runId }));
+    log.close();
+    // 无撕裂：协议保证每条记录以 \n 结尾，正常文件 tornTail=false
+    assert.equal(readEventLogFileDetailed(log.path).tornTail, false);
+    assert.equal(materializeSession(dir, sessionId).tornTail, false);
+
+    // 模拟进程死于写盘中途：半截 receipt 行
+    appendFileSync(log.path, '{"version":2,"id":"entry_', "utf8");
+    const detailed = readEventLogFileDetailed(log.path);
+    assert.equal(detailed.tornTail, true, "半截末行必须可见而非静默丢弃");
+    assert.equal(detailed.records.length, 1, "半截行仍按「未持久化」丢弃，不进记录集");
+    assert.equal(materializeSession(dir, sessionId).tornTail, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("listSessionIds：列目录得会话清单（D1：ULID 字典序即时间序），忽略非会话文件", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
+  try {
+    // 空目录 / 不存在目录 → 空清单
+    assert.deepEqual(listSessionIds(dir), []);
+    assert.deepEqual(listSessionIds(join(dir, "不存在")), []);
+    const first = new JsonlEventLog(dir, newSessionId());
+    const second = new JsonlEventLog(dir, newSessionId());
+    second.close();
+    first.close();
+    // 旧账本退役文件与无关文件不进清单
+    writeFileSync(join(dir, "sess_01LEGACY0000000000000000.legacy.jsonl"), "", "utf8");
+    writeFileSync(join(dir, "README.txt"), "", "utf8");
+    assert.deepEqual(listSessionIds(dir), [first.sessionId, second.sessionId]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
