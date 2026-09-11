@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
 import { newExecutionId, newReceiptId } from "./ids.ts";
-import { MigrationRegistry } from "./migration.ts";
-import { migrateReceiptV1toV2, RECEIPT_VERSION, type Receipt, ReceiptSchema } from "./receipt.ts";
+import {
+  migrateReceiptToCurrent,
+  migrateReceiptV1toV2,
+  RECEIPT_VERSION,
+  type Receipt,
+  ReceiptSchema,
+} from "./receipt.ts";
 
 function makeReceipt(overrides: Partial<Receipt> = {}): Receipt {
   return {
@@ -53,17 +58,35 @@ test("approvedBy 缺失或越界被拒绝（批准来源是必备证据）", () 
   }
 });
 
-test("v1 → v2 迁移：补 approvedBy/toolCallId 占位，其余字段不变", () => {
-  const v2 = makeReceipt();
-  const { approvedBy: _a, toolCallId: _t, ...v1 } = v2;
-  const legacy = { ...v1, version: 1 };
+test("Receipt v3：contentAfterHash（执行后实测目标内容哈希，M4 S2）可缺省、可往返", () => {
+  const without = makeReceipt();
+  assert.ok(Value.Check(ReceiptSchema, without));
+  assert.equal(without.contentAfterHash, undefined);
+  const withHash = makeReceipt({ contentAfterHash: "0123456789abcdef" });
+  const revived: unknown = JSON.parse(JSON.stringify(withHash));
+  assert.ok(Value.Check(ReceiptSchema, revived));
+  assert.deepStrictEqual(revived, withHash);
+});
 
-  const registry = new MigrationRegistry();
-  registry.register("receipt", 1, migrateReceiptV1toV2);
-  const migrated = registry.migrate("receipt", legacy, 2, ReceiptSchema);
+test("迁移链：v1 → v3 逐级升级（v1→v2 补占位，v2→v3 仅升版本，新字段可缺省）", () => {
+  const v3 = makeReceipt();
+  const { approvedBy: _a, toolCallId: _t, ...rest } = v3;
+  const legacy = { ...rest, version: 1 };
 
-  assert.equal(migrated.version, 2);
-  assert.equal(migrated.id, v2.id);
-  assert.equal(migrated.summary, v2.summary);
+  const migrated = migrateReceiptToCurrent(legacy);
+  assert.equal(migrated.version, RECEIPT_VERSION);
+  assert.equal(migrated.id, v3.id);
+  assert.equal(migrated.summary, v3.summary);
   assert.equal(migrated.approvedBy, "policy:auto");
+  assert.equal(migrated.contentAfterHash, undefined);
+});
+
+test("迁移链：v2 → v3 仅升版本（contentAfterHash 可缺省），既有字段逐一保留", () => {
+  const { contentAfterHash: _c, ...rest } = makeReceipt();
+  const legacyV2 = { ...rest, version: 2 };
+  const migrated = migrateReceiptToCurrent(legacyV2);
+  assert.equal(migrated.version, RECEIPT_VERSION);
+  assert.equal(migrated.id, legacyV2.id);
+  assert.equal(migrated.approvedBy, "human");
+  assert.equal(migrated.summary, legacyV2.summary);
 });

@@ -2,19 +2,13 @@
 // 旧账本三记录族——intent（dispatch 前写）、decision（拒绝时写，理由逐字留证）、
 // receipt（tool_execution_end 后写）；行内无 sessionId/runId（M3 未记录），
 // 迁移时由 legacy-migration.ts 归并进 Event Log（决策 2：不双写）。
-// JsonlLedger 类已于 M4 S1 退役：所有新写入走 JsonlEventLog，此处只保留旧格式解析
-// 与 receipt v1→v2 迁移链（M0 迁移管线的首个真实跨代使用）。
+// JsonlLedger 类已于 M4 S1 退役：所有新写入走 JsonlEventLog，此处只保留旧格式解析；
+// receipt 行升级走 state/receipt.ts 装配的迁移链（M0 迁移管线的首个真实跨代使用）。
 import { existsSync, readFileSync } from "node:fs";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { ExecutionIdSchema } from "../state/ids.ts";
-import { MigrationRegistry } from "../state/migration.ts";
-import {
-  migrateReceiptV1toV2,
-  RECEIPT_VERSION,
-  type Receipt,
-  ReceiptSchema,
-} from "../state/receipt.ts";
+import { migrateReceiptToCurrent, type Receipt } from "../state/receipt.ts";
 import { ToolExecutionDecisionSchema } from "../state/tool-execution.ts";
 
 export const LEDGER_INTENT_VERSION = 1;
@@ -59,10 +53,6 @@ export interface LegacyLedgerRows {
   decisions: LedgerDecision[];
   receipts: Receipt[];
 }
-
-// receipt 行的迁移管线：v1 → v2（M0 管线的首个真实使用方，D8 迁移时经此升级）
-const receiptMigrations = new MigrationRegistry();
-receiptMigrations.register("receipt", 1, migrateReceiptV1toV2);
 
 // 解析 M3 旧账本文件：全量读 + 逐行校验。torn tail 容忍（半截末行视为未写入）；
 // 非末行损坏、未知 kind、同族重复 executionId 一律响亮失败（账本损坏不猜测）
@@ -111,7 +101,7 @@ export function readLegacyLedger(path: string): LegacyLedgerRows {
     }
     if (kind === "receipt") {
       // 经迁移管线升级到当前 Receipt 版本再校验
-      const receipt = receiptMigrations.migrate("receipt", fields, RECEIPT_VERSION, ReceiptSchema);
+      const receipt = migrateReceiptToCurrent(fields);
       if (receiptIds.has(receipt.executionId)) {
         throw new LedgerCorruptionError(`账本损坏：重复 receipt ${receipt.executionId}`);
       }
