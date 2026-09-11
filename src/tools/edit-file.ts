@@ -20,7 +20,12 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { resolveWorkspacePath } from "./paths.ts";
-import type { ContentEvidenceTool, PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
+import type {
+  ContentEvidenceTool,
+  PigeonAgentTool,
+  PigeonToolResult,
+  PreviewableTool,
+} from "./wrap.ts";
 export class EditFileError extends Error {}
 
 const AnchorSchema = Type.String({ pattern: "^\\d+#[0-9a-f]{4}$" });
@@ -65,7 +70,9 @@ export interface EditFileDetails {
 
 export function createEditFileTool(
   workspaceRoot: string
-): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool & ContentEvidenceTool {
+): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> &
+  PreviewableTool &
+  ContentEvidenceTool {
   return {
     name: "edit_file",
     label: "edit_file",

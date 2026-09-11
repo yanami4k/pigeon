@@ -4,7 +4,6 @@ import { Value } from "typebox/value";
 import { newExecutionId, newReceiptId } from "./ids.ts";
 import {
   migrateReceiptToCurrent,
-  migrateReceiptV1toV2,
   RECEIPT_VERSION,
   type Receipt,
   ReceiptSchema,

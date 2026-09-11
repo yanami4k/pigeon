@@ -718,11 +718,13 @@ test("域错误分类：锚点不匹配 → settled 事件携带 errorKind=domai
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
 
     const live = adapter.events().find((event) => event.kind === "tool.settled");
-    assert.equal((live?.payload as ToolSettledPayload).errorKind, "domain");
+    assert.equal((live?.payload as ToolSettledPayload | undefined)?.errorKind, "domain");
     const persisted = readEventLines(eventLog.path).find((line) => line.kind === "tool.settled");
-    assert.equal((persisted?.payload as ToolSettledPayload).errorKind, "domain");
+    assert.equal((persisted?.payload as ToolSettledPayload | undefined)?.errorKind, "domain");
     // receipt：isError=true 且副作用未发生；探针因锚点预检失败降级 → intent 无哈希
-    const receipt = (readEventLines(eventLog.path).find((line) => line.kind === "receipt") as { receipt: Receipt }).receipt;
+    const receipt = (
+      readEventLines(eventLog.path).find((line) => line.kind === "receipt") as { receipt: Receipt }
+    ).receipt;
     assert.equal(receipt.isError, true);
     assert.equal(receipt.executed, false);
     const intent = readEventLines(eventLog.path).find((line) => line.kind === "intent");
@@ -776,7 +778,7 @@ test("环境异常分类：写工具抛 ErrnoException → settled 事件携带 
     const result = await adapter.run("写文件");
     assert.equal(result.status, "completed");
     const persisted = readEventLines(eventLog.path).find((line) => line.kind === "tool.settled");
-    assert.equal((persisted?.payload as ToolSettledPayload).errorKind, "environment");
+    assert.equal((persisted?.payload as ToolSettledPayload | undefined)?.errorKind, "environment");
     // 无探针能力的写工具：intent 无哈希字段（降级为人工对账，不阻断执行）
     const intent = readEventLines(eventLog.path).find((line) => line.kind === "intent");
     assert.equal(intent?.contentHashes, undefined);
@@ -998,7 +1000,10 @@ test("崩溃点②b：execute 已跑、receipt 未写（文件已是改后哈希
     const governance = readEventLines(eventLog.path).filter(
       (l) => l.kind === "intent" || l.kind === "resolution" || l.kind === "receipt"
     );
-    assert.deepEqual(governance.map((l) => l.kind), ["intent", "resolution"]);
+    assert.deepEqual(
+      governance.map((l) => l.kind),
+      ["intent", "resolution"]
+    );
   } finally {
     cleanup();
   }

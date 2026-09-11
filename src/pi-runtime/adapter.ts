@@ -391,7 +391,8 @@ export class PiRuntimeAdapter {
     } else {
       status = "unknown";
     }
-    const syntheticFailure = lastAssistant !== undefined && isSyntheticFailureMessage(lastAssistant);
+    const syntheticFailure =
+      lastAssistant !== undefined && isSyntheticFailureMessage(lastAssistant);
     return {
       runId,
       status,
@@ -495,7 +496,13 @@ export class PiRuntimeAdapter {
       });
       this.#executions.set(toolCallId, record);
       this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, toolCallId, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
+      return this.#blockWithBreaker(
+        toolName,
+        toolCallId,
+        rawArgs,
+        "策略要求人工审批但未配置审批通道",
+        "tool"
+      );
     }
     // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
     let diffPreview: string | undefined;
@@ -685,7 +692,13 @@ export class PiRuntimeAdapter {
     this.#blockCounts.set(key, count);
     if (count >= this.#breakerThreshold) {
       this.#breakerTripped = true;
-      this.#persistBreaker({ toolName, toolCallId, scope, count, threshold: this.#breakerThreshold });
+      this.#persistBreaker({
+        toolName,
+        toolCallId,
+        scope,
+        count,
+        threshold: this.#breakerThreshold,
+      });
       this.#agent.abort();
     }
     return { block: true, reason };

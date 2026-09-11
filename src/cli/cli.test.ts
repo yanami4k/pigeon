@@ -7,9 +7,11 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { JsonlEventLog } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
+import { newSessionId } from "../state/ids.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
@@ -112,6 +114,74 @@ test("REPL 内联审批冒烟：先拒绝（理由逐字进 toolResult、文件�
     assert.equal(ledger[1]?.decision?.outcome, "approved");
     assert.equal(ledger[1]?.decision?.approvedBy, "human");
     assert.equal(ledger[1]?.state, "settled");
+
+    await adapter.dispose();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("D2 可见性：事件落盘失败（listenerErrors 非空）→ REPL 显式警告证据链不完整", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const root = mkdtempSync(join(tmpdir(), "pigeon-cli-"));
+  writeFileSync(join(root, "a.ts"), original);
+  const outputs: string[] = [];
+  try {
+    const editArgs: EditFileParams = {
+      path: "a.ts",
+      snapshot: snapshotTag(original),
+      edits: [{ op: "replace", anchor: `2#${lineTag("beta")}`, lines: ["BETA"] }],
+    };
+    const input = Readable.from(["改一下\n", ":quit\n"], { objectMode: false });
+    const write = (text: string) => outputs.push(text);
+    const { ask, close } = createAsker(input, write);
+    // 故障注入：receipt 写盘即抛错（模拟磁盘故障）——listenerErrors 非空
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const eventLog = new JsonlEventLog(sessionsDir, newSessionId());
+    const poison = {
+      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendIntent: eventLog.appendIntent.bind(eventLog),
+      appendDecision: eventLog.appendDecision.bind(eventLog),
+      appendReceipt: () => {
+        throw new Error("模拟磁盘写失败");
+      },
+      appendBreaker: eventLog.appendBreaker.bind(eventLog),
+    };
+    const adapter = new PiRuntimeAdapter({
+      snapshot: {
+        version: INJECTION_SNAPSHOT_VERSION,
+        model: { provider: "fake-provider", id: "fake-model-1" },
+        tools: {
+          policy: { allow: ["edit_file"], deny: [], approvalMode: "yolo" },
+          advertised: [],
+        },
+        context: { systemPrompt: "你是 Pigeon 测试助手。" },
+        memory: [],
+        skills: [],
+        createdAt: 1700000000000,
+      },
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "改一下", toolCalls: [{ name: "edit_file", args: editArgs }] },
+          { text: "已完成" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createEditFileTool(root)],
+      sessionId: eventLog.sessionId,
+      eventLog: poison,
+    });
+
+    await runRepl({ adapter, ask, write });
+    close();
+    eventLog.close();
+
+    const terminal = outputs.join("");
+    assert.ok(
+      terminal.includes("证据链不完整"),
+      `落盘失败必须显式警告（D2 可见降级）：${terminal}`
+    );
+    assert.ok(terminal.includes("1 条"), terminal);
 
     await adapter.dispose();
   } finally {

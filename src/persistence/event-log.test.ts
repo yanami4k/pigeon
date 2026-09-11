@@ -30,8 +30,8 @@ import {
   type IntentInput,
   JsonlEventLog,
   materializeSession,
-  readEventLogFile,
   type ResolutionInput,
+  readEventLogFile,
 } from "./event-log.ts";
 
 function makeIntentInput(

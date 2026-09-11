@@ -39,7 +39,10 @@ test("环境异常归 environment：文件系统调用抛出的 ErrnoException�
 test("判不出归 undefined：普通 Error / abort 信号 / 非错误值都不贴标签", () => {
   assert.equal(classifyToolError(new Error("不明错误")), undefined);
   // abort 的归类的判据在 Run 终态（stopReason=aborted），不在错误对象上
-  assert.equal(classifyToolError(new DOMException("This operation was aborted", "AbortError")), undefined);
+  assert.equal(
+    classifyToolError(new DOMException("This operation was aborted", "AbortError")),
+    undefined
+  );
   assert.equal(classifyToolError("字符串不是错误"), undefined);
   assert.equal(classifyToolError(undefined), undefined);
 });

@@ -5,8 +5,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { classifyRunOutcome, classifyToolOutcome } from "./classification.ts";
-import { JsonlEventLog, materializeSession } from "./event-log.ts";
 import {
   asExecutionId,
   newEntryId,
@@ -16,13 +14,20 @@ import {
   newSessionId,
 } from "../state/ids.ts";
 import { RECEIPT_VERSION } from "../state/receipt.ts";
+import { classifyRunOutcome, classifyToolOutcome } from "./classification.ts";
+import { JsonlEventLog, materializeSession } from "./event-log.ts";
 
 // ---------- Run 级判据（D7 表左列） ----------
 
 test("Run 级：正常收尾（stop/toolUse/deferred）不是失败 → null", () => {
   for (const stopReason of ["stop", "toolUse", "deferred"]) {
     assert.equal(
-      classifyRunOutcome({ stopReason, syntheticFailure: false, breakerTripped: false, hasTurnCompleted: true }),
+      classifyRunOutcome({
+        stopReason,
+        syntheticFailure: false,
+        breakerTripped: false,
+        hasTurnCompleted: true,
+      }),
       null
     );
   }
@@ -30,28 +35,48 @@ test("Run 级：正常收尾（stop/toolUse/deferred）不是失败 → null", (
 
 test("Run 级：aborted 无熔断记录 → 取消（用户中断）", () => {
   assert.deepEqual(
-    classifyRunOutcome({ stopReason: "aborted", syntheticFailure: false, breakerTripped: false, hasTurnCompleted: true }),
+    classifyRunOutcome({
+      stopReason: "aborted",
+      syntheticFailure: false,
+      breakerTripped: false,
+      hasTurnCompleted: true,
+    }),
     { category: "cancelled", breaker: false }
   );
 });
 
 test("Run 级：aborted 有熔断记录 → 取消的子类「治理熔断」", () => {
   assert.deepEqual(
-    classifyRunOutcome({ stopReason: "aborted", syntheticFailure: false, breakerTripped: true, hasTurnCompleted: true }),
+    classifyRunOutcome({
+      stopReason: "aborted",
+      syntheticFailure: false,
+      breakerTripped: true,
+      hasTurnCompleted: true,
+    }),
     { category: "cancelled", breaker: true }
   );
 });
 
 test("Run 级：length（输出截断）→ 业务失败", () => {
   assert.deepEqual(
-    classifyRunOutcome({ stopReason: "length", syntheticFailure: false, breakerTripped: false, hasTurnCompleted: true }),
+    classifyRunOutcome({
+      stopReason: "length",
+      syntheticFailure: false,
+      breakerTripped: false,
+      hasTurnCompleted: true,
+    }),
     { category: "business" }
   );
 });
 
 test("Run 级：syntheticFailure（provider 侧故障的合成消息）→ 基础设施错误", () => {
   assert.deepEqual(
-    classifyRunOutcome({ stopReason: "error", syntheticFailure: true, breakerTripped: false, hasTurnCompleted: true }),
+    classifyRunOutcome({
+      stopReason: "error",
+      syntheticFailure: true,
+      breakerTripped: false,
+      hasTurnCompleted: true,
+    }),
     { category: "infrastructure" }
   );
 });
@@ -62,11 +87,21 @@ test("Run 级默认桶：崩溃残留（无 turn.completed）与非合成 error 
     { category: "unknown" }
   );
   assert.deepEqual(
-    classifyRunOutcome({ stopReason: "error", syntheticFailure: false, breakerTripped: false, hasTurnCompleted: true }),
+    classifyRunOutcome({
+      stopReason: "error",
+      syntheticFailure: false,
+      breakerTripped: false,
+      hasTurnCompleted: true,
+    }),
     { category: "unknown" }
   );
   assert.deepEqual(
-    classifyRunOutcome({ stopReason: "pending", syntheticFailure: false, breakerTripped: false, hasTurnCompleted: true }),
+    classifyRunOutcome({
+      stopReason: "pending",
+      syntheticFailure: false,
+      breakerTripped: false,
+      hasTurnCompleted: true,
+    }),
     { category: "unknown" }
   );
 });
@@ -85,7 +120,10 @@ const baseTool = {
 
 test("Tool 级：成功执行与被拒绝都不是失败 → null", () => {
   assert.equal(classifyToolOutcome({ ...baseTool }), null);
-  assert.equal(classifyToolOutcome({ ...baseTool, rejected: true, hasReceipt: false, executed: false }), null);
+  assert.equal(
+    classifyToolOutcome({ ...baseTool, rejected: true, hasReceipt: false, executed: false }),
+    null
+  );
   // 哈希确证「已执行」同样销账非失败
   assert.equal(
     classifyToolOutcome({ ...baseTool, hasReceipt: false, executed: false, resolved: "executed" }),
@@ -94,10 +132,10 @@ test("Tool 级：成功执行与被拒绝都不是失败 → null", () => {
 });
 
 test("Tool 级：执行中被 abort → 取消；被熔断切断的在途调用 → 治理熔断子类", () => {
-  assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, isError: true, runAborted: true }),
-    { category: "cancelled", breaker: false }
-  );
+  assert.deepEqual(classifyToolOutcome({ ...baseTool, isError: true, runAborted: true }), {
+    category: "cancelled",
+    breaker: false,
+  });
   assert.deepEqual(
     classifyToolOutcome({ ...baseTool, isError: true, runAborted: true, runBreakerTripped: true }),
     { category: "cancelled", breaker: true }
@@ -105,19 +143,23 @@ test("Tool 级：执行中被 abort → 取消；被熔断切断的在途调用 
 });
 
 test("Tool 级：isError + 域错误 → 业务失败；isError + 环境异常 → 基础设施错误", () => {
-  assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, isError: true, errorKind: "domain" }),
-    { category: "business" }
-  );
-  assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, isError: true, errorKind: "environment" }),
-    { category: "infrastructure" }
-  );
+  assert.deepEqual(classifyToolOutcome({ ...baseTool, isError: true, errorKind: "domain" }), {
+    category: "business",
+  });
+  assert.deepEqual(classifyToolOutcome({ ...baseTool, isError: true, errorKind: "environment" }), {
+    category: "infrastructure",
+  });
 });
 
 test("Tool 级：上游拦截（无账本记录的错误 settled：参数校验失败/幽灵调用）→ 业务失败", () => {
   assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, hasReceipt: false, executed: false, isError: true, intercepted: true }),
+    classifyToolOutcome({
+      ...baseTool,
+      hasReceipt: false,
+      executed: false,
+      isError: true,
+      intercepted: true,
+    }),
     { category: "business" }
   );
 });
@@ -129,25 +171,32 @@ test("Tool 级默认桶：悬账未确证 / 无法归类的错误 / 未执行确
     { category: "unknown" }
   );
   // isError 但错误归类缺失
-  assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, isError: true }),
-    { category: "unknown" }
-  );
+  assert.deepEqual(classifyToolOutcome({ ...baseTool, isError: true }), { category: "unknown" });
   // 哈希确证「未执行」但 Run 不是被中断的 = 崩溃残留死于 intent/dispatch 窗口
   assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, hasReceipt: false, executed: false, resolved: "not-executed" }),
+    classifyToolOutcome({
+      ...baseTool,
+      hasReceipt: false,
+      executed: false,
+      resolved: "not-executed",
+    }),
     { category: "unknown" }
   );
   // executed=false 且 isError=false 且无 decision：不应出现的组合，落默认桶
-  assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, executed: false, isError: false }),
-    { category: "unknown" }
-  );
+  assert.deepEqual(classifyToolOutcome({ ...baseTool, executed: false, isError: false }), {
+    category: "unknown",
+  });
 });
 
 test("Tool 级：哈希确证「未执行」+ Run 被中断 → 取消（死于审批后/dispatch 前窗口）", () => {
   assert.deepEqual(
-    classifyToolOutcome({ ...baseTool, hasReceipt: false, executed: false, resolved: "not-executed", runAborted: true }),
+    classifyToolOutcome({
+      ...baseTool,
+      hasReceipt: false,
+      executed: false,
+      resolved: "not-executed",
+      runAborted: true,
+    }),
     { category: "cancelled", breaker: false }
   );
 });
@@ -251,7 +300,12 @@ test("冷物化输出分类：域错误调用归业务失败；上游拦截调�
     log.appendRuntimeEvent({
       ...envelope(runOk, 3),
       kind: "tool.settled",
-      payload: { toolCallId: "toolu_domain", toolName: "edit_file", isError: true, errorKind: "domain" },
+      payload: {
+        toolCallId: "toolu_domain",
+        toolName: "edit_file",
+        isError: true,
+        errorKind: "domain",
+      },
     });
     log.appendRuntimeEvent({
       ...envelope(runOk, 4),
@@ -279,7 +333,11 @@ test("冷物化输出分类：域错误调用归业务失败；上游拦截调�
       payload: { stopReason: "stop", syntheticFailure: false },
     });
     // runCrashed：只有 run.ended，无任何 turn.completed（崩溃残留）
-    log.appendRuntimeEvent({ ...envelope(runCrashed, 6), kind: "run.ended", payload: { messageCount: 1 } });
+    log.appendRuntimeEvent({
+      ...envelope(runCrashed, 6),
+      kind: "run.ended",
+      payload: { messageCount: 1 },
+    });
     log.close();
 
     const { classification } = materializeSession(dir, sessionId);

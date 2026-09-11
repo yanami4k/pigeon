@@ -56,6 +56,18 @@ export interface ReplOptions {
 export async function runRepl(options: ReplOptions): Promise<void> {
   const { adapter, ask, write } = options;
   write("Pigeon M3 最小 CLI（内联审批 REPL）。输入任务回车运行；:quit 退出。\n");
+  // D2 可见性：事件落盘失败（listenerErrors）非空时显式警告——可见降级，绝不假装证据链完整。
+  // 增量报数：同一批故障不重复刷屏，新故障出现时以累计数提醒。
+  // 启动即查一次：覆盖未来冷恢复路径（resume 复用同一出口）
+  let reportedListenerErrors = 0;
+  const warnEvidenceGaps = (): void => {
+    const count = adapter.listenerErrors().length;
+    if (count > reportedListenerErrors) {
+      write(`警告：本会话有 ${count} 条事件落盘失败，证据链不完整。\n`);
+      reportedListenerErrors = count;
+    }
+  };
+  warnEvidenceGaps();
   for (;;) {
     const line = await ask("pigeon> ");
     if (line === null) {
@@ -70,6 +82,7 @@ export async function runRepl(options: ReplOptions): Promise<void> {
     }
     try {
       const result = await adapter.run(task);
+      warnEvidenceGaps();
       write(`\n终态：${result.status}（stopReason=${result.stopReason ?? "无"}）\n`);
       if (result.errorMessage !== undefined) {
         write(`错误：${result.errorMessage}\n`);

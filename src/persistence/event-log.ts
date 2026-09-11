@@ -23,8 +23,8 @@ import {
   RunEndedPayloadSchema,
   RuntimeEventKind,
   ToolProposedPayloadSchema,
-  ToolSettledPayloadSchema,
   type ToolSettledPayload,
+  ToolSettledPayloadSchema,
   TurnCompletedPayloadSchema,
   TurnStartedPayloadSchema,
 } from "../pi-runtime/events.ts";
@@ -220,7 +220,10 @@ export interface ReceiptInput {
   receipt: Receipt;
   runId: RunId;
 }
-export type BreakerInput = Omit<BreakerRecord, "version" | "id" | "sessionId" | "kind" | "timestamp">;
+export type BreakerInput = Omit<
+  BreakerRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
 export type ResolutionInput = Omit<
   ResolutionRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
@@ -332,7 +335,10 @@ export function readEventLogFile(path: string): EventRecord[] {
     let record: EventRecord;
     try {
       record =
-        typeof raw === "object" && raw !== null && "version" in raw && raw.version !== EVENT_LOG_VERSION
+        typeof raw === "object" &&
+        raw !== null &&
+        "version" in raw &&
+        raw.version !== EVENT_LOG_VERSION
           ? eventLogMigrations.migrate("event-log", raw, EVENT_LOG_VERSION, EventRecordSchema)
           : Value.Parse(EventRecordSchema, raw);
     } catch (error) {
@@ -733,7 +739,6 @@ function classifySessionRecords(
   }
   return { runs, toolExecutions };
 }
-
 
 // 冷启动恢复（M4 S2，D5 对账流程的自动确证环节）：物化 → 对悬账（intent 无 receipt）做
 // 哈希三方比对——读目标文件现状：== 预期改后 → 确证 executed；== 改前 → 确证 not-executed
