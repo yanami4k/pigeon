@@ -12,6 +12,7 @@ import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
+import type { ToolProposedPayload, ToolSettledPayload } from "./events.ts";
 import { createFakeStreamFn, createGate } from "./fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 
@@ -80,6 +81,30 @@ function waitForEvent(adapter: PiRuntimeAdapter, kind: string): Promise<void> {
     }
   });
   return promise;
+}
+
+// 收集指定工具名在事件日志里的 proposed/settled payload。
+// payload 由自家 normalizePiEvent 落日志（同进程可信形状），命名窄化后读字段
+function phantomToolEvents(
+  adapter: PiRuntimeAdapter,
+  toolName: string
+): { proposed: ToolProposedPayload[]; settled: ToolSettledPayload[] } {
+  const proposed: ToolProposedPayload[] = [];
+  const settled: ToolSettledPayload[] = [];
+  for (const event of adapter.events()) {
+    if (event.kind === "tool.proposed") {
+      const payload = event.payload as ToolProposedPayload;
+      if (payload.toolName === toolName) {
+        proposed.push(payload);
+      }
+    } else if (event.kind === "tool.settled") {
+      const payload = event.payload as ToolSettledPayload;
+      if (payload.toolName === toolName) {
+        settled.push(payload);
+      }
+    }
+  }
+  return { proposed, settled };
 }
 
 test("yolo 模式：写工具自动放行并执行，账本 approvedBy=policy:yolo 且走到 settled", async () => {
@@ -416,6 +441,101 @@ test("账本与事件对齐：完整 Run 后时间戳逐阶段盖章，toolCallI
     assert.ok(proposed && settled);
     assert.equal((proposed.payload as { toolCallId: string }).toolCallId, record.toolCallId);
     assert.equal((settled.payload as { toolCallId: string }).toolCallId, record.toolCallId);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("幽灵工具名熔断：模型循环请求从未广告的工具名，事件级计数到阈值后 Run 以 aborted 收尾", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "x\n" });
+  try {
+    // 模型连续 10 轮请求 delete_everything 才肯收尾——确定性定界（不用定时器）：
+    // 熔断失效时 Run 会带着 10 次幽灵调用 completed，与熔断开火的 aborted 明确可区分
+    const phantomReplies = Array.from({ length: 10 }, () => ({
+      text: "",
+      toolCalls: [{ name: "delete_everything", args: { target: "/" } }],
+    }));
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "yolo" }),
+      // delete_everything 从未广告：上游在 hook 前以 not-found 拦截，
+      // 审批闸/账本/hook 级熔断全部不可见（spike tmp/notfound-spike.mjs）
+      streamFn: createFakeStreamFn({ replies: [...phantomReplies, { text: "放弃" }] }),
+      registry: makeRegistry(),
+      tools: [createReadFileTool(root)],
+    });
+
+    const result = await adapter.run("删掉一切");
+    assert.equal(result.status, "aborted");
+    // 事件级熔断在默认阈值 3 处开火：恰好 3 组幽灵 proposed/settled，多一组都说明熔断迟到
+    const phantom = phantomToolEvents(adapter, "delete_everything");
+    assert.equal(phantom.proposed.length, 3);
+    assert.equal(phantom.settled.length, 3);
+    assert.ok(phantom.settled.every((payload) => payload.isError));
+    // hook 从未运行：账本零记录，事件日志是幽灵循环的唯一审计轨迹
+    assert.equal(result.toolExecutions.length, 0);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("幽灵调用不干扰正常治理：幽灵一次后 read_file 照常放行执行，Run 完成", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "alpha\n" });
+  try {
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "yolo" }),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "试试幽灵", toolCalls: [{ name: "delete_everything", args: {} }] },
+          { text: "读文件", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+          { text: "完成" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createReadFileTool(root)],
+    });
+
+    const result = await adapter.run("走一遍");
+    assert.equal(result.status, "completed");
+    // 正常工具治理不受影响：read_file 有完整账本且走到 settled
+    assert.equal(result.toolExecutions.length, 1);
+    assert.equal(result.toolExecutions[0]?.toolName, "read_file");
+    assert.equal(result.toolExecutions[0]?.state, "settled");
+    // 幽灵调用只在事件日志留痕，不进账本
+    assert.equal(phantomToolEvents(adapter, "delete_everything").settled.length, 1);
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("幽灵熔断是连续语义：正常工具调用重置连击，未连续达阈值不中止", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "alpha\n" });
+  try {
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "yolo" }),
+      // 幽灵×2 → 正常 read_file（重置）→ 幽灵×2 → 收尾：默认阈值 3 下任何一段都不到 3
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "", toolCalls: [{ name: "delete_everything", args: {} }] },
+          { text: "", toolCalls: [{ name: "delete_everything", args: {} }] },
+          { text: "", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+          { text: "", toolCalls: [{ name: "delete_everything", args: {} }] },
+          { text: "", toolCalls: [{ name: "delete_everything", args: {} }] },
+          { text: "完成" },
+        ],
+      }),
+      registry: makeRegistry(),
+      tools: [createReadFileTool(root)],
+    });
+
+    const result = await adapter.run("走一遍");
+    assert.equal(result.status, "completed");
+    assert.equal(phantomToolEvents(adapter, "delete_everything").settled.length, 4);
 
     await adapter.dispose();
   } finally {
