@@ -174,11 +174,14 @@ test("replay 报告：运行头终态+分类，时间线严格按落盘顺序，
     const lines = output.split("\n").filter((line) => /^\d{2}:\d{2}:\d{2}\.\d{3} /.test(line));
     assert.ok(lines.length > 0, "时间线条目带毫秒时间戳");
     const kinds = lines.map((line) => line.split(" ")[1]);
-    // 上游时序：turn.completed（toolUse 轮末）先于该轮工具事件；
-    // Receipt 落盘先于 tool.settled 事件（adapter 在 settled 状态推进时先落账再发事件）
+    // 上游时序：user 消息的 message_end（entry）先于 assistant 的 turn.started；
+    // turn.completed（toolUse 轮末）先于该轮工具事件；
+    // Receipt 落盘先于 tool.settled 事件（adapter 在 settled 状态推进时先落账再发事件）。
+    // M4 S5：entry 族（D3 消息映射）是时间线的合法成员——replay 呈现全部记录
     assert.deepEqual(
       [...new Set(kinds)],
       [
+        "entry",
         "turn.started",
         "turn.completed",
         "tool.proposed",

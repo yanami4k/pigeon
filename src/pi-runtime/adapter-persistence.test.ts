@@ -328,6 +328,7 @@ test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故�
   try {
     const poison = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: () => {
         throw new Error("模拟磁盘写失败：decision 未落盘");
@@ -404,6 +405,7 @@ test("崩溃点②：execute 已跑、receipt 未写（故障注入事件日志�
     // 故障注入：receipt 写盘即抛错，模拟进程死于 tool_execution_end 前
     const poison = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: eventLog.appendDecision.bind(eventLog),
       appendBreaker: eventLog.appendBreaker.bind(eventLog),
@@ -454,6 +456,7 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
   try {
     const broken = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: () => {
         throw new Error("模拟磁盘写失败");
       },
@@ -500,6 +503,7 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
   try {
     const broken = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: () => {
         throw new Error("模拟磁盘持续写失败");
       },
@@ -541,6 +545,7 @@ test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并�
   try {
     const poison = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: eventLog.appendDecision.bind(eventLog),
       appendBreaker: eventLog.appendBreaker.bind(eventLog),
@@ -964,6 +969,7 @@ test("崩溃点②b：execute 已跑、receipt 未写（文件已是改后哈希
     // 与 S1 崩溃点②的差别：S2 的 intent 携带哈希，冷恢复可自动确证
     const poison = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: eventLog.appendDecision.bind(eventLog),
       appendReceipt: () => {

@@ -140,6 +140,7 @@ test("D2 可见性：事件落盘失败（listenerErrors 非空）→ REPL 显�
     const eventLog = new JsonlEventLog(sessionsDir, newSessionId());
     const poison = {
       appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
+      appendEntry: eventLog.appendEntry.bind(eventLog),
       appendIntent: eventLog.appendIntent.bind(eventLog),
       appendDecision: eventLog.appendDecision.bind(eventLog),
       appendReceipt: () => {

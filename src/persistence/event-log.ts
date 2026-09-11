@@ -113,16 +113,21 @@ export type RuntimeEventRecord = Static<typeof RuntimeEventRecordSchema>;
 // runSeq = run 内 message_end 累计序号（append-only 双实证保证，spike Q2/Q4）；
 // abort 与上游合成失败消息（handleRunFailure）同样占序号，冷物化重放必须计入，
 // 否则序号错位。禁忌：timestamp 永不当键（同毫秒撞车实证）；流式阶段（message_start/
-// update 浅拷贝 partial）不锚身份。观察族耐久（同步写不 fsync）；无 executionId，
-// 不进治理幂等索引
 export const EntryRecordSchema = Type.Object({
   ...ENVELOPE_PROPS,
   kind: Type.Literal("entry"),
   runSeq: Type.Integer({ minimum: 1 }),
+  // 当前 core Agent 只产生 user/assistant/toolResult 三种（spike Q2）；其余四个是
+  // 上游 harness 层消息类型（pi-agent-core AgentMessage），一并收进字面量集合：
+  // 未来启用 harness Session/compaction 时映射如实记录，不在落盘口径上造假（D3 扩展点）
   role: Type.Union([
     Type.Literal("user"),
     Type.Literal("assistant"),
     Type.Literal("toolResult"),
+    Type.Literal("custom"),
+    Type.Literal("bashExecution"),
+    Type.Literal("branchSummary"),
+    Type.Literal("compactionSummary"),
   ]),
 });
 export type EntryRecord = Static<typeof EntryRecordSchema>;

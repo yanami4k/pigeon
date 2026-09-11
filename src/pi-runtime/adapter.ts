@@ -12,6 +12,9 @@
 // 7. 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游
 //    prepareToolCall 在 hook 前拦截，事件级连续计数熔断兜底
 //    （tmp/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
+// 8. M4 S5（D3 Pi entry 映射）：每条 message_end 事件落地时刻分配 EntryId 并同步落盘
+//    entry 记录（(runId, runSeq) 权威键）；abort 与上游合成失败消息同样占序号；
+//    记录逻辑自身绝不抛（上游 listener 路径无防护，同约束 3）。
 import {
   Agent,
   type AgentEvent,
@@ -74,7 +77,12 @@ export interface RunResult {
 // 测试注入故障包装器模拟崩溃点
 export type EventLogSink = Pick<
   JsonlEventLog,
-  "appendRuntimeEvent" | "appendIntent" | "appendDecision" | "appendReceipt" | "appendBreaker"
+  | "appendRuntimeEvent"
+  | "appendEntry"
+  | "appendIntent"
+  | "appendDecision"
+  | "appendReceipt"
+  | "appendBreaker"
 >;
 
 export interface PiRuntimeAdapterOptions {
@@ -128,6 +136,10 @@ export class PiRuntimeAdapter {
   #interceptedStreak = { toolName: "", count: 0 };
   // 本次 Run 的账本 toolCallId 序列（RunResult.toolExecutions 的选取依据）
   #runToolCallIds: string[] = [];
+  // D3 entry 映射（M4 S5）：本 Run 的 message_end 累计序号——runSeq 权威键的 run 内分量。
+  // 序号推进无条件（abort/合成失败消息也占序号；写盘失败不占位重试——缺一条即留证缺口，
+  // 绝不重排后续序号），保证"entry 序 = transcript 追加序"在任何故障路径下成立
+  #runEntrySeq = 0;
   // 工具抛错分类留证（M4 S2，D7）：toolCallId → 域/环境归类。
   // 上游把工具异常转成 isError 结果后只剩消息字符串，错误类信息必须在抛出源头捕获
   // （包装 execute，见 #wrapToolErrorCapture）；判不出存 undefined → settled 不落 errorKind
@@ -218,6 +230,7 @@ export class PiRuntimeAdapter {
     this.#interceptedStreak.count = 0;
     this.#breakerTripped = false;
     this.#runToolCallIds = [];
+    this.#runEntrySeq = 0;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
     try {
@@ -309,6 +322,27 @@ export class PiRuntimeAdapter {
       const runId = this.#currentRunId;
       if (!runId) {
         return;
+      }
+      // D3 entry 映射（M4 S5）：身份只在 message_end 时刻确立（spike P1/P3：流式阶段的
+      // start/update 是浅拷贝 partial，不锚身份）。每条 message_end——含归一化不落事件的
+      // user/toolResult、abort 与上游合成失败消息——都占一个 runSeq 序号并同步落盘。
+      // 时序：上游 processEvents 先 push transcript 再 await listener（agent.js 379-420），
+      // 本回调在同一事件分派内同步落盘，先于任何后续 transcript 变更（"同于"语义的实现）。
+      // 序号推进无条件、写盘隔离 try/catch（同本函数不变式：记录逻辑自身绝不抛）——
+      // 写盘失败进 listenerErrors 留证缺口，绝不毒化 Run 或重排后续序号。
+      if (event.type === "message_end") {
+        this.#runEntrySeq += 1;
+        if (this.#eventLog !== undefined) {
+          try {
+            this.#eventLog.appendEntry({
+              runSeq: this.#runEntrySeq,
+              role: event.message.role,
+              runId,
+            });
+          } catch (error) {
+            this.#listenerErrors.push(error);
+          }
+        }
       }
       const normalized = normalizePiEvent(event, { sessionId: this.sessionId, runId });
       if (!normalized) {
