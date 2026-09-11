@@ -64,12 +64,15 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
     events.push({ record, annotations });
   }
   const classification = session.classification.runs.find((entry) => entry.runId === runId);
+  // 撕裂尾巴归属：残片只可能写在文件末条记录之后——只有拥有末条记录的 Run 才标注，
+  // 其余 Run 的时间线完整终结于文件中段，尾巴与它们无关
+  const ownsFileTail = records[records.length - 1] === session.records[session.records.length - 1];
   return {
     sessionId: session.sessionId,
     runId,
     events,
     ended,
-    tornTail: session.tornTail,
+    tornTail: session.tornTail && ownsFileTail,
     ...(classification !== undefined ? { classification } : {}),
   };
 }

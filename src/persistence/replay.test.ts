@@ -224,6 +224,26 @@ test("孤儿 Receipt/Resolution 与撕裂尾巴如实标注", () => {
   }
 });
 
+test("撕裂尾巴归属：只标注给拥有文件末条记录的 Run（残片只可能在它之后产生）", () => {
+  const { sessionsDir, sessionId, eventLog, cleanup } = makeEventLog();
+  try {
+    const runA = newRunId();
+    const runB = newRunId();
+    // runA 完整收尾后，runB 开始即「进程死亡」：文件末条记录属于 runB
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "turn.started", {}));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 1 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "turn.started", {}));
+    eventLog.close();
+    appendFileSync(eventLog.path, '{"version":2,"id":"entry_', "utf8");
+
+    const materialized = materializeSession(sessionsDir, sessionId);
+    assert.equal(buildRunReplay(materialized, runA)?.tornTail, false, "runA 末尾之后还有记录");
+    assert.equal(buildRunReplay(materialized, runB)?.tornTail, true, "runB 拥有文件尾巴");
+  } finally {
+    cleanup();
+  }
+});
+
 test("其他 Run 的记录不混入：runId 过滤是投影的第一域", () => {
   const { sessionsDir, sessionId, eventLog, cleanup } = makeEventLog();
   try {
