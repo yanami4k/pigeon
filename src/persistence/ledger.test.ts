@@ -1,15 +1,18 @@
+// M3 旧账本只读解析器（readLegacyLedger）测试：D8 迁移的唯一读取入口。
+// 写盘路径已随 JsonlLedger 退役（M4 S1 起一切写入走 JsonlEventLog），此处只保解析语义：
+// torn tail 容忍、损坏响亮失败、receipt v1→v2 迁移链、同族重复 executionId 拒绝。
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { newExecutionId, newReceiptId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import {
-  JsonlLedger,
-  LedgerConflictError,
+  LedgerCorruptionError,
   type LedgerDecision,
   type LedgerIntent,
+  readLegacyLedger,
 } from "./ledger.ts";
 
 function makeIntent(overrides: Partial<LedgerIntent> = {}): LedgerIntent {
@@ -64,172 +67,117 @@ function makeReceipt(
   };
 }
 
-function makeLedger(): { ledger: JsonlLedger; path: string; cleanup: () => void } {
+function makeLegacyFile(lines: unknown[]): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-ledger-"));
   const path = join(dir, "ledger.jsonl");
-  return {
-    ledger: new JsonlLedger(path),
+  writeFileSync(
     path,
-    cleanup: () => rmSync(dir, { recursive: true, force: true }),
-  };
+    lines.map((line) => (typeof line === "string" ? line : JSON.stringify(line))).join("\n") +
+      (lines.length > 0 ? "\n" : ""),
+    "utf8"
+  );
+  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-test("append + 冷启动全量读：intent 与 receipt 按行持久化，新实例可恢复", () => {
-  const { ledger, path, cleanup } = makeLedger();
+test("三族按行解析：intent/decision/receipt 全量读回，逐字保留拒绝理由", () => {
+  const intent = makeIntent();
+  const decision = makeDecision({
+    decision: {
+      outcome: "rejected",
+      approvedBy: "human",
+      reason: "会破坏现有逻辑",
+      decidedAt: 1_757_000_000_001,
+    },
+  });
+  const receipt = makeReceipt(intent.executionId);
+  const { path, cleanup } = makeLegacyFile([intent, decision, { kind: "receipt", ...receipt }]);
   try {
-    const intent = makeIntent();
-    const receipt = makeReceipt(intent.executionId);
-    ledger.appendIntent(intent);
-    ledger.appendReceipt(receipt);
-
-    // 文件内容是可逐行解析的 JSONL
-    const lines = readFileSync(path, "utf8").trim().split("\n");
-    assert.equal(lines.length, 2);
-    assert.deepEqual(JSON.parse(lines[0] as string), intent);
-    assert.deepEqual(JSON.parse(lines[1] as string), { kind: "receipt", ...receipt });
-
-    // 新实例冷启动恢复
-    const revived = new JsonlLedger(path);
-    const report = revived.reconcile();
-    assert.equal(report.unknown.length, 0);
-    assert.equal(report.orphanReceipts.length, 0);
-    assert.equal(report.settled.length, 1);
-    assert.deepEqual(report.settled[0]?.intent, intent);
-    assert.deepEqual(report.settled[0]?.receipt, receipt);
+    const rows = readLegacyLedger(path);
+    assert.deepEqual(rows.intents, [intent]);
+    assert.deepEqual(rows.decisions, [decision]);
+    assert.equal(rows.decisions[0]?.decision.reason, "会破坏现有逻辑");
+    assert.deepEqual(rows.receipts, [receipt]);
   } finally {
     cleanup();
   }
 });
 
-test("幂等：同一 executionId 重复写 intent/decision/receipt 一律冲突拒绝（可检测，不静默去重）", () => {
-  const { ledger, path, cleanup } = makeLedger();
+test("torn tail 容忍：半截末行按「未持久化」处理；中间坏行响亮失败", () => {
+  const intent = makeIntent();
+  const { path, cleanup } = makeLegacyFile([intent]);
   try {
-    const intent = makeIntent();
-    ledger.appendIntent(intent);
-    ledger.appendReceipt(makeReceipt(intent.executionId));
-    const rejected = makeDecision();
-    ledger.appendDecision(rejected);
-    assert.throws(() => ledger.appendIntent(intent), LedgerConflictError);
-    assert.throws(() => ledger.appendReceipt(makeReceipt(intent.executionId)), LedgerConflictError);
-    assert.throws(() => ledger.appendDecision(rejected), LedgerConflictError);
-    // 冲突拒绝不产生新行
-    assert.equal(readFileSync(path, "utf8").trim().split("\n").length, 3);
-  } finally {
-    cleanup();
-  }
-});
-
-test("对账：intent 无 receipt → OutcomeUnknown（留证，不重放）；孤立 receipt 如实报告", () => {
-  const { ledger, cleanup } = makeLedger();
-  try {
-    const orphan = makeReceipt(newExecutionId());
-    ledger.appendReceipt(orphan);
-    const crashed = makeIntent();
-    ledger.appendIntent(crashed);
-
-    const report = ledger.reconcile();
-    assert.equal(report.settled.length, 0);
-    assert.equal(report.unknown.length, 1);
-    assert.deepEqual(report.unknown[0]?.intent, crashed);
-    assert.equal(report.unknown[0]?.receipt, undefined);
-    assert.equal(report.orphanReceipts.length, 1);
-    assert.deepEqual(report.orphanReceipts[0], orphan);
-  } finally {
-    cleanup();
-  }
-});
-
-test("decision 按行持久化：新实例冷启动可恢复，逐字保留拒绝理由", () => {
-  const { ledger, path, cleanup } = makeLedger();
-  try {
-    const rejected = makeDecision({
-      decision: {
-        outcome: "rejected",
-        approvedBy: "human",
-        reason: "会破坏现有逻辑",
-        decidedAt: 1_757_000_000_001,
-      },
-    });
-    ledger.appendDecision(rejected);
-
-    // 文件内容是可逐行解析的 JSONL
-    const lines = readFileSync(path, "utf8").trim().split("\n");
-    assert.equal(lines.length, 1);
-    assert.deepEqual(JSON.parse(lines[0] as string), rejected);
-
-    // 新实例冷启动恢复：rejected 归档，非 OutcomeUnknown
-    const report = new JsonlLedger(path).reconcile();
-    assert.equal(report.rejected.length, 1);
-    assert.deepEqual(report.rejected[0]?.decision, rejected);
-    assert.equal(report.rejected[0]?.decision.decision.reason, "会破坏现有逻辑");
-  } finally {
-    cleanup();
-  }
-});
-
-test("对账：decision（拒绝）归类 closed/rejected——无副作用可能，永不入 OutcomeUnknown", () => {
-  const { ledger, cleanup } = makeLedger();
-  try {
-    // ① decision 单行（end 事件前的崩溃点）：拒绝决定本身已闭环
-    const lone = makeDecision();
-    ledger.appendDecision(lone);
-    // ② decision + receipt 配对：receipt 被 decision 消费，不算孤立
-    const paired = makeDecision();
-    const pairedReceipt = makeReceipt(paired.executionId, { executed: false });
-    ledger.appendDecision(paired);
-    ledger.appendReceipt(pairedReceipt);
-
-    const report = ledger.reconcile();
-    assert.equal(report.unknown.length, 0);
-    assert.equal(report.settled.length, 0);
-    assert.equal(report.rejected.length, 2);
-    assert.deepEqual(report.rejected[0]?.decision, lone);
-    assert.equal(report.rejected[0]?.receipt, undefined);
-    assert.deepEqual(report.rejected[1]?.decision, paired);
-    assert.deepEqual(report.rejected[1]?.receipt, pairedReceipt);
-    assert.equal(report.orphanReceipts.length, 0);
-  } finally {
-    cleanup();
-  }
-});
-
-test("torn tail 容忍：进程死于写盘中途留下的半截末行按「未持久化」处理，中间坏行报错", () => {
-  const { ledger, path, cleanup } = makeLedger();
-  try {
-    const intent = makeIntent();
-    ledger.appendIntent(intent);
-    // 模拟半截写入的 receipt 行
     appendFileSync(path, '{"kind":"receipt","version":2,"id":"rcpt_', "utf8");
+    const rows = readLegacyLedger(path);
+    assert.equal(rows.intents.length, 1);
+    assert.equal(rows.receipts.length, 0);
 
-    const report = new JsonlLedger(path).reconcile();
-    // 半截 receipt 视为不存在 → intent 落入 OutcomeUnknown
-    assert.equal(report.unknown.length, 1);
-    assert.equal(report.unknown[0]?.intent.executionId, intent.executionId);
-  } finally {
-    cleanup();
-  }
-});
-
-test("坏行（非末尾）拒绝启动：账本损坏必须响亮失败", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-ledger-"));
-  const path = join(dir, "ledger.jsonl");
-  try {
-    const intent = makeIntent();
-    appendFileSync(path, `${JSON.stringify(intent)}\n`, "utf8");
     appendFileSync(path, "这不是 JSON\n", "utf8");
     appendFileSync(path, `${JSON.stringify(makeIntent())}\n`, "utf8");
-    assert.throws(() => new JsonlLedger(path), /损坏/);
+    assert.throws(() => readLegacyLedger(path), LedgerCorruptionError);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanup();
   }
 });
 
-test("intent 记录必填字段缺失被拒绝（写入即校验）", () => {
-  const { ledger, cleanup } = makeLedger();
+test("同族重复 executionId / 未知 kind / 缺 kind 一律响亮失败（账本损坏不猜测）", () => {
+  const intent = makeIntent();
+  const { path, cleanup } = makeLegacyFile([intent, intent]);
   try {
-    const bad = { ...makeIntent(), decision: { outcome: "approved", approvedBy: "robot" } };
-    assert.throws(() => ledger.appendIntent(bad as never));
+    assert.throws(() => readLegacyLedger(path), /重复 intent/);
   } finally {
     cleanup();
+  }
+  const unknown = makeLegacyFile([{ kind: "grant", version: 1 }]);
+  try {
+    assert.throws(() => readLegacyLedger(unknown.path), /未知 kind/);
+  } finally {
+    unknown.cleanup();
+  }
+  const noKind = makeLegacyFile([{ version: 1 }]);
+  try {
+    assert.throws(() => readLegacyLedger(noKind.path), /缺少 kind/);
+  } finally {
+    noKind.cleanup();
+  }
+});
+
+test("receipt v1 行经迁移管线升级 v2：占位字段与 Receipt v1→v2 迁移语义一致", () => {
+  const executionId = newExecutionId();
+  // v1 Receipt：无 toolCallId / approvedBy（M0 占位版本，从未被真实路径持久化）
+  const legacyReceipt = {
+    kind: "receipt",
+    version: 1,
+    id: newReceiptId(),
+    executionId,
+    executed: true,
+    isError: false,
+    startedAt: 1_757_000_000_000,
+    finishedAt: 1_757_000_000_123,
+    summary: "编辑 a.ts",
+  };
+  const { path, cleanup } = makeLegacyFile([legacyReceipt]);
+  try {
+    const rows = readLegacyLedger(path);
+    assert.equal(rows.receipts.length, 1);
+    const receipt = rows.receipts[0];
+    assert.equal(receipt?.version, RECEIPT_VERSION);
+    // 迁移占位语义（state/receipt.ts migrateReceiptV1toV2）
+    assert.equal(receipt?.toolCallId, "legacy-v1");
+    assert.equal(receipt?.approvedBy, "policy:auto");
+    assert.equal(receipt?.executionId, executionId);
+  } finally {
+    cleanup();
+  }
+});
+
+test("缺失文件 = 空结果（不是损坏）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-ledger-"));
+  try {
+    const rows = readLegacyLedger(join(dir, "ledger.jsonl"));
+    assert.equal(rows.intents.length, 0);
+    assert.equal(rows.decisions.length, 0);
+    assert.equal(rows.receipts.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
