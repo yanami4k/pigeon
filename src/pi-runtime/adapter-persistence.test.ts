@@ -833,6 +833,8 @@ test("熔断落闸留证：deny 循环 → breaker 记录落盘（scope=tool）�
     });
     const denyResult = await denyAdapter.run("改文件");
     assert.equal(denyResult.status, "aborted");
+    // 活侧分类（D7）：与冷物化同一套判据——熔断落闸的 aborted Run 归治理熔断子类
+    assert.deepEqual(denyResult.failure, { category: "cancelled", breaker: true });
     await denyAdapter.dispose();
 
     const breaker = readEventLines(eventLog.path).find((line) => line.kind === "breaker");
@@ -854,6 +856,7 @@ test("熔断落闸留证：deny 循环 → breaker 记录落盘（scope=tool）�
     });
     const rejectResult = await rejectAdapter.run("改文件");
     assert.equal(rejectResult.status, "aborted");
+    assert.deepEqual(rejectResult.failure, { category: "cancelled", breaker: true });
     const breaker2 = readEventLines(log2.path).find((line) => line.kind === "breaker");
     assert.ok(breaker2);
     assert.equal(breaker2.scope, "fingerprint");

@@ -24,6 +24,7 @@ import {
   RuntimeEventKind,
   ToolProposedPayloadSchema,
   ToolSettledPayloadSchema,
+  type ToolSettledPayload,
   TurnCompletedPayloadSchema,
   TurnStartedPayloadSchema,
 } from "../pi-runtime/events.ts";
@@ -41,6 +42,13 @@ import {
 import { MigrationRegistry } from "../state/migration.ts";
 import { migrateReceiptToCurrent, type Receipt, ReceiptSchema } from "../state/receipt.ts";
 import { ToolExecutionDecisionSchema } from "../state/tool-execution.ts";
+import {
+  classifyRunOutcome,
+  classifyToolOutcome,
+  type FailureClass,
+  type RunOutcomeFacts,
+  type ToolOutcomeFacts,
+} from "./classification.ts";
 
 // Event Log 记录格式版本；迁移管线（M0 migration.ts）按 version 字段路由。
 // v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族——
@@ -267,6 +275,25 @@ export interface MaterializedSession {
   breakers: BreakerRecord[];
   resolutions: ResolutionRecord[];
   reconcile: ReconcileReport;
+  // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
+  classification: SessionClassification;
+}
+
+// Run 级失败分类（D7 左列判据）；failure=null 表示正常收尾
+export interface RunClassification {
+  runId: RunId;
+  failure: FailureClass | null;
+}
+// ToolExecution 级失败分类（D7 右列判据）；executionId=null 表示上游拦截调用（无账本记录）
+export interface ToolExecutionClassification {
+  executionId: ExecutionId | null;
+  toolCallId: string;
+  toolName: string;
+  failure: FailureClass | null;
+}
+export interface SessionClassification {
+  runs: RunClassification[];
+  toolExecutions: ToolExecutionClassification[];
 }
 
 // Event Log 记录格式的迁移链（M0 管线）：v1 → v2 为加法式演进（intent 增 contentHashes、
@@ -518,6 +545,7 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
       runtimeEvents.push(record);
     }
   }
+  const reconcile = reconcileRecords(intents, decisions, receipts, resolutions);
   return {
     sessionId,
     path,
@@ -528,7 +556,8 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     receipts,
     breakers,
     resolutions,
-    reconcile: reconcileRecords(intents, decisions, receipts, resolutions),
+    reconcile,
+    classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
 }
 
@@ -573,4 +602,132 @@ export function reconcileRecords(
     orphanReceipts: [...receiptByExecution.values()],
     orphanResolutions: [...resolutionByExecution.values()],
   };
+}
+
+// 失败四分类装配（M4 S2，D7）：判据纯函数在 classification.ts（活适配器 RunResult 共用），
+// 此处只做「事件日志 → 事实」映射。Run 事实按 runId 聚合；同 Run 多次 turn.completed 以末条
+// 为准（与活适配器 judgeTerminal 取末条 assistant 消息同口径）
+function classifySessionRecords(
+  records: EventRecord[],
+  runtimeEvents: RuntimeEventRecord[],
+  breakers: BreakerRecord[],
+  reconcile: ReconcileReport
+): SessionClassification {
+  const runOrder: RunId[] = [];
+  const runFacts = new Map<RunId, RunOutcomeFacts>();
+  const runFactsOf = (runId: RunId): RunOutcomeFacts => {
+    let facts = runFacts.get(runId);
+    if (facts === undefined) {
+      facts = { syntheticFailure: false, breakerTripped: false, hasTurnCompleted: false };
+      runFacts.set(runId, facts);
+      runOrder.push(runId);
+    }
+    return facts;
+  };
+  for (const record of records) {
+    runFactsOf(record.runId);
+  }
+  const settledByToolCall = new Map<string, ToolSettledPayload>();
+  for (const event of runtimeEvents) {
+    if (event.kind === "turn.completed") {
+      const facts = runFactsOf(event.runId);
+      facts.stopReason = event.payload.stopReason;
+      facts.syntheticFailure = event.payload.syntheticFailure;
+      facts.hasTurnCompleted = true;
+    } else if (event.kind === "tool.settled") {
+      settledByToolCall.set(event.payload.toolCallId, event.payload);
+    }
+  }
+  for (const breaker of breakers) {
+    runFactsOf(breaker.runId).breakerTripped = true;
+  }
+  const runs: RunClassification[] = runOrder.map((runId) => ({
+    runId,
+    failure: classifyRunOutcome(runFactsOf(runId)),
+  }));
+
+  const toolExecutions: ToolExecutionClassification[] = [];
+  const pushTool = (
+    executionId: ExecutionId | null,
+    toolCallId: string,
+    toolName: string,
+    runId: RunId,
+    outcome: Omit<ToolOutcomeFacts, "runAborted" | "runBreakerTripped">
+  ): void => {
+    const facts = runFacts.get(runId);
+    toolExecutions.push({
+      executionId,
+      toolCallId,
+      toolName,
+      failure: classifyToolOutcome({
+        ...outcome,
+        runAborted: facts?.stopReason === "aborted",
+        runBreakerTripped: facts?.breakerTripped ?? false,
+      }),
+    });
+  };
+  for (const { intent, receipt } of reconcile.settled) {
+    const settled = settledByToolCall.get(intent.toolCallId);
+    pushTool(intent.executionId, intent.toolCallId, intent.toolName, intent.runId, {
+      rejected: false,
+      hasReceipt: true,
+      executed: receipt?.executed ?? false,
+      isError: receipt?.isError ?? false,
+      ...(settled?.errorKind !== undefined ? { errorKind: settled.errorKind } : {}),
+      intercepted: false,
+    });
+  }
+  for (const { decision } of reconcile.rejected) {
+    pushTool(decision.executionId, decision.toolCallId, decision.toolName, decision.runId, {
+      rejected: true,
+      hasReceipt: false,
+      executed: false,
+      isError: false,
+      intercepted: false,
+    });
+  }
+  for (const { intent, resolution } of reconcile.resolved) {
+    pushTool(intent.executionId, intent.toolCallId, intent.toolName, intent.runId, {
+      rejected: false,
+      hasReceipt: false,
+      executed: false,
+      isError: false,
+      resolved: resolution.outcome,
+      intercepted: false,
+    });
+  }
+  for (const { intent } of reconcile.unknown) {
+    const settled = settledByToolCall.get(intent.toolCallId);
+    pushTool(intent.executionId, intent.toolCallId, intent.toolName, intent.runId, {
+      rejected: false,
+      hasReceipt: false,
+      executed: false,
+      isError: settled?.isError ?? false,
+      ...(settled?.errorKind !== undefined ? { errorKind: settled.errorKind } : {}),
+      intercepted: false,
+    });
+  }
+  const ledgeredToolCalls = new Set<string>();
+  for (const intent of reconcile.settled.concat(reconcile.unknown, reconcile.resolved)) {
+    ledgeredToolCalls.add(intent.intent.toolCallId);
+  }
+  for (const { decision } of reconcile.rejected) {
+    ledgeredToolCalls.add(decision.toolCallId);
+  }
+  for (const event of runtimeEvents) {
+    if (
+      event.kind === "tool.settled" &&
+      event.payload.isError &&
+      !ledgeredToolCalls.has(event.payload.toolCallId)
+    ) {
+      pushTool(null, event.payload.toolCallId, event.payload.toolName, event.runId, {
+        rejected: false,
+        hasReceipt: false,
+        executed: false,
+        isError: true,
+        intercepted: true,
+      });
+    }
+  }
+  return { runs, toolExecutions };
 }

@@ -24,6 +24,7 @@ import {
 import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { classifyRunOutcome, type FailureClass } from "../persistence/classification.ts";
 import type { JsonlEventLog } from "../persistence/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
@@ -61,6 +62,8 @@ export interface RunResult {
   errorMessage?: string;
   // 末条 assistant 消息是否为上游合成的失败消息
   syntheticFailure: boolean;
+  // 失败四分类（M4 S2，D7）：与冷物化同一套判据纯函数（classification.ts）；null = 非失败
+  failure: FailureClass | null;
   // 本次 Run 实际广告给模型的工具名单
   advertisedTools: string[];
   // 本次 Run 的 ToolExecution 账本记录（终态快照，深拷贝）
@@ -129,6 +132,8 @@ export class PiRuntimeAdapter {
   // 上游把工具异常转成 isError 结果后只剩消息字符串，错误类信息必须在抛出源头捕获
   // （包装 execute，见 #wrapToolErrorCapture）；判不出存 undefined → settled 不落 errorKind
   readonly #toolErrorKinds = new Map<string, ToolErrorKind | undefined>();
+  // 本次 Run 是否发生过熔断落闸（D7 Run 级「治理熔断」子类的活侧判据；breaker 记录是冷侧判据）
+  #breakerTripped = false;
   #currentRunId: RunId | null = null;
   #disposed = false;
 
@@ -211,6 +216,7 @@ export class PiRuntimeAdapter {
     this.#blockCounts.clear();
     this.#interceptedStreak.toolName = "";
     this.#interceptedStreak.count = 0;
+    this.#breakerTripped = false;
     this.#runToolCallIds = [];
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
@@ -385,12 +391,21 @@ export class PiRuntimeAdapter {
     } else {
       status = "unknown";
     }
+    const syntheticFailure = lastAssistant !== undefined && isSyntheticFailureMessage(lastAssistant);
     return {
       runId,
       status,
       ...(stopReason !== undefined ? { stopReason } : {}),
       ...(errorMessage !== undefined ? { errorMessage } : {}),
-      syntheticFailure: lastAssistant !== undefined && isSyntheticFailureMessage(lastAssistant),
+      syntheticFailure,
+      // M4 S2（D7）：活侧失败四分类——与冷物化同一判据纯函数；
+      // 活侧事实直接取自终态判定与 #breakerTripped（breaker 记录是冷侧对应物）
+      failure: classifyRunOutcome({
+        ...(stopReason !== undefined ? { stopReason } : {}),
+        syntheticFailure,
+        breakerTripped: this.#breakerTripped,
+        hasTurnCompleted: lastAssistant !== undefined,
+      }),
       advertisedTools,
       // 本次 Run 的账本记录终态快照（waitForIdle 之后所有 tool.settled 已处理，记录已定型）
       toolExecutions: structuredClone(
@@ -669,6 +684,7 @@ export class PiRuntimeAdapter {
     const count = (this.#blockCounts.get(key) ?? 0) + 1;
     this.#blockCounts.set(key, count);
     if (count >= this.#breakerThreshold) {
+      this.#breakerTripped = true;
       this.#persistBreaker({ toolName, toolCallId, scope, count, threshold: this.#breakerThreshold });
       this.#agent.abort();
     }
@@ -714,6 +730,7 @@ export class PiRuntimeAdapter {
         this.#interceptedStreak.count = 1;
       }
       if (this.#interceptedStreak.count >= this.#breakerThreshold) {
+        this.#breakerTripped = true;
         this.#persistBreaker({
           toolName: payload.toolName,
           toolCallId: payload.toolCallId,
