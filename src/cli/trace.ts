@@ -2,9 +2,13 @@
 // 人读报告打印 stdout，可 grep/less。只读纪律：只经 materializeSession 读事件文件——
 // 不构造 JsonlEventLog（构造会建目录/开追加句柄）、不跑 recoverSession（会写确证记录）、
 // 不触发 D8 旧账本迁移；trace 永不写事件日志与工作区。
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import {
+  JsonlEventLog,
+  listSessionIds,
+  materializeSession,
+} from "../persistence/event-log.ts";
 import {
   buildSessionTrace,
   failureBadge,
@@ -13,35 +17,7 @@ import {
   type TraceToolCall,
 } from "../persistence/trace.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
-
-// 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
-const ARGS_SUMMARY_LIMIT = 160;
-
-// 稳定 id 短哈希：`exec_` 等前缀 + ULID 前 8 位 + 省略号；非稳定 id（toolCallId 等）原样
-function shortId(id: string): string {
-  const match = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{8}/.exec(id);
-  return match === null ? id : `${match[0]}…`;
-}
-
-// 批准来源 → 人话（决策 4 证据链：策略决定不能伪装成人工）
-const APPROVED_BY_LABEL: Record<string, string> = {
-  human: "人工",
-  "policy:yolo": "yolo 批发授权",
-  "policy:auto": "策略自动放行",
-  "policy:deny": "策略拒绝",
-};
-
-function summarizeArgs(args: unknown): string {
-  let json: string;
-  try {
-    json = JSON.stringify(args) ?? "undefined";
-  } catch {
-    return "<不可序列化参数>";
-  }
-  return json.length <= ARGS_SUMMARY_LIMIT
-    ? json
-    : `${json.slice(0, ARGS_SUMMARY_LIMIT)}…（共 ${json.length} 字符）`;
-}
+import { approvalVerdict, breakerScopeLabel, shortId, summarizeArgs } from "./format.ts";
 
 function renderToolCall(call: TraceToolCall, lines: string[]): void {
   lines.push(`    工具调用 ${call.toolCallId} [${call.toolName}]`);
@@ -56,11 +32,8 @@ function renderToolCall(call: TraceToolCall, lines: string[]): void {
     lines.push("      审批：无治理记录（未过审批闸——上游拦截或事件落盘缺口）");
   } else {
     const decision = governance.decision;
-    const label = APPROVED_BY_LABEL[decision.approvedBy] ?? decision.approvedBy;
-    const verdict =
-      label === "人工" ? (decision.outcome === "approved" ? "人工批准" : "人工拒绝") : label;
     lines.push(
-      `      审批：${verdict}（${decision.approvedBy}） ｜ ${shortId(governance.executionId)}`
+      `      审批：${approvalVerdict(decision)}（${decision.approvedBy}） ｜ ${shortId(governance.executionId)}`
     );
     // 拒绝理由逐字呈现（决策 4 证据链；也是 M6+ 蒸馏的负样本监督信号）
     if (decision.outcome === "rejected" && decision.reason !== undefined) {
@@ -130,14 +103,9 @@ function renderRun(run: TraceRun, lines: string[]): void {
   for (const anomaly of run.anomalies) {
     lines.push(`  异常：${anomaly}`);
   }
-  const SCOPE_LABEL: Record<string, string> = {
-    tool: "按工具名计数",
-    fingerprint: "按参数指纹计数",
-    intercepted: "上游拦截连击",
-  };
   for (const breaker of run.breakers) {
     lines.push(
-      `  熔断落闸：${breaker.toolName}（${SCOPE_LABEL[breaker.scope] ?? breaker.scope}，` +
+      `  熔断落闸：${breaker.toolName}（${breakerScopeLabel(breaker.scope)}，` +
         `连击 ${breaker.count}/${breaker.threshold}，由 ${breaker.toolCallId} 触发）`
     );
   }
@@ -211,11 +179,7 @@ export function runTraceCommand(options: TraceCommandOptions): string {
   const sessionsDir = join(options.root, ".pigeon", "sessions");
   const sessionId = asSessionId(options.sessionId);
   if (!existsSync(JsonlEventLog.filePathFor(sessionsDir, sessionId))) {
-    const available = existsSync(sessionsDir)
-      ? readdirSync(sessionsDir)
-          .filter((name) => name.endsWith(".jsonl") && !name.endsWith(".legacy.jsonl"))
-          .map((name) => name.slice(0, -".jsonl".length))
-      : [];
+    const available = listSessionIds(sessionsDir);
     throw new Error(
       `会话不存在：${options.sessionId}` +
         (available.length > 0 ? `。已有会话：${available.join("、")}` : "（尚无会话记录）")

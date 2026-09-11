@@ -67,12 +67,13 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
     }
     events.push({ record, annotations });
   }
+  const classification = session.classification.runs.find((entry) => entry.runId === runId);
   return {
     sessionId: session.sessionId,
     runId,
     events,
     ended,
     tornTail: session.tornTail,
-    classification: session.classification.runs.find((entry) => entry.runId === runId),
+    ...(classification !== undefined ? { classification } : {}),
   };
 }
