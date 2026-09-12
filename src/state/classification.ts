@@ -25,11 +25,15 @@ export interface RunOutcomeFacts {
   // 本 Run 有熔断落闸记录（breaker 族）
   breakerTripped: boolean;
   hasTurnCompleted: boolean;
+  // run.ended（agent_end）是否在场：缺失 = 循环没有跑到终点（进程死于中途），
+  // 无论末条 turn 的 stopReason 是什么都不能判正常（M4 验收 O-1，decisions.md 023）。
+  // 活侧 RunResult 在 agent_end 之后计算，恒为 true；abort 路径上游照常发 agent_end
+  hasRunEnded: boolean;
 }
 
 export function classifyRunOutcome(facts: RunOutcomeFacts): FailureClass | null {
-  if (!facts.hasTurnCompleted) {
-    return { category: "unknown" }; // 崩溃残留
+  if (!facts.hasRunEnded || !facts.hasTurnCompleted) {
+    return { category: "unknown" }; // 崩溃残留（无 run.ended）/ 无任何 turn 收尾（D8 迁移会话）
   }
   if (facts.stopReason === "aborted") {
     return { category: "cancelled", breaker: facts.breakerTripped };

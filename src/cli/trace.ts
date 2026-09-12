@@ -151,11 +151,14 @@ export function renderSessionTrace(trace: SessionTrace): string {
     0
   );
   // 落盘缺口总数（决策 ③）：撕裂尾巴按处计（至多 1）+ 各 Run 缺失的 entry 条数
+  const unfinishedCount = trace.runs.filter((run) => !run.ended).length;
   const gapCount =
     (trace.tornTail ? 1 : 0) + trace.runs.reduce((sum, run) => sum + run.entryGaps.length, 0);
   const lines: string[] = [
     `会话 ${shortId(trace.sessionId)} ｜ Run ${trace.runs.length} 个 ｜ ` +
-      `工具调用 ${toolCallCount} 次 ｜ 待对账 ${pendingCount} 次 ｜ 落盘缺口 ${gapCount} 处`,
+      `工具调用 ${toolCallCount} 次 ｜ 待对账 ${pendingCount} 次 ｜ 落盘缺口 ${gapCount} 处` +
+      // 崩溃残留与落盘缺口分开计：前者是循环没跑完，后者是写盘失败（M4 验收 O-1）
+      (unfinishedCount > 0 ? ` ｜ 崩溃残留 ${unfinishedCount} 个 Run` : ""),
     "",
   ];
   // 撕裂尾巴无 Run 归属（末条记录是 REPL 期 grant 事件，或 --run 过滤掉了拥有者）：会话级标注

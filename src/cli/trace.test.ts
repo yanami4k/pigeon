@@ -17,7 +17,7 @@ import { JsonlEventLog } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "../pi-runtime/snapshot.ts";
-import { EVENT_ENVELOPE_VERSION } from "../state/events.ts";
+import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import {
   newEntryId,
   newExecutionId,
@@ -367,6 +367,39 @@ test("trace 报告：撕裂尾巴不归属任何 Run 时（末条是 REPL 期 gr
     const output = runTraceCommand({ root, sessionId });
     assert.ok(output.includes("落盘缺口 1 处"), output);
     assert.ok(output.includes("会话级缺口：会话文件末尾存在半截未写完的记录"), output);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trace 报告：turn.completed 在场但 run.ended 缺失的 Run 徽章为未知，会话头计崩溃残留（M4 验收 O-1）", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-trace-cli-"));
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+    const envelope = (kind: string, payload: unknown): EventEnvelope => ({
+      version: EVENT_ENVELOPE_VERSION,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1_757_000_000_000,
+      kind,
+      payload,
+    });
+    eventLog.appendRuntimeEvent(envelope("turn.started", {}));
+    eventLog.appendRuntimeEvent(
+      envelope("turn.completed", { stopReason: "toolUse", syntheticFailure: false })
+    );
+    eventLog.close();
+
+    const output = runTraceCommand({ root, sessionId });
+    assert.ok(output.includes("崩溃残留 1 个 Run"), `会话头计数\n${output}`);
+    const runHeader = output.split("\n").find((line) => line.startsWith("Run "));
+    assert.ok(runHeader !== undefined);
+    assert.ok(runHeader.includes("分类：未知"), `崩溃残留 Run 不得判正常\n${runHeader}`);
+    assert.ok(runHeader.includes("run.ended 缺失（崩溃残留可能）"), runHeader);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

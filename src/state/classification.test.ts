@@ -27,6 +27,7 @@ test("Run 级：正常收尾（stop/toolUse/deferred）不是失败 → null", (
         syntheticFailure: false,
         breakerTripped: false,
         hasTurnCompleted: true,
+        hasRunEnded: true,
       }),
       null
     );
@@ -40,6 +41,7 @@ test("Run 级：aborted 无熔断记录 → 取消（用户中断）", () => {
       syntheticFailure: false,
       breakerTripped: false,
       hasTurnCompleted: true,
+      hasRunEnded: true,
     }),
     { category: "cancelled", breaker: false }
   );
@@ -52,6 +54,7 @@ test("Run 级：aborted 有熔断记录 → 取消的子类「治理熔断」", 
       syntheticFailure: false,
       breakerTripped: true,
       hasTurnCompleted: true,
+      hasRunEnded: true,
     }),
     { category: "cancelled", breaker: true }
   );
@@ -64,6 +67,7 @@ test("Run 级：length（输出截断）→ 业务失败", () => {
       syntheticFailure: false,
       breakerTripped: false,
       hasTurnCompleted: true,
+      hasRunEnded: true,
     }),
     { category: "business" }
   );
@@ -76,6 +80,7 @@ test("Run 级：syntheticFailure（provider 侧故障的合成消息）→ 基�
       syntheticFailure: true,
       breakerTripped: false,
       hasTurnCompleted: true,
+      hasRunEnded: true,
     }),
     { category: "infrastructure" }
   );
@@ -83,7 +88,12 @@ test("Run 级：syntheticFailure（provider 侧故障的合成消息）→ 基�
 
 test("Run 级默认桶：崩溃残留（无 turn.completed）与非合成 error 都归「未知」", () => {
   assert.deepEqual(
-    classifyRunOutcome({ syntheticFailure: false, breakerTripped: false, hasTurnCompleted: false }),
+    classifyRunOutcome({
+      syntheticFailure: false,
+      breakerTripped: false,
+      hasTurnCompleted: false,
+      hasRunEnded: false,
+    }),
     { category: "unknown" }
   );
   assert.deepEqual(
@@ -92,6 +102,7 @@ test("Run 级默认桶：崩溃残留（无 turn.completed）与非合成 error 
       syntheticFailure: false,
       breakerTripped: false,
       hasTurnCompleted: true,
+      hasRunEnded: true,
     }),
     { category: "unknown" }
   );
@@ -101,9 +112,27 @@ test("Run 级默认桶：崩溃残留（无 turn.completed）与非合成 error 
       syntheticFailure: false,
       breakerTripped: false,
       hasTurnCompleted: true,
+      hasRunEnded: true,
     }),
     { category: "unknown" }
   );
+});
+
+test("Run 级：run.ended 缺失即崩溃残留 → 未知，优先于 stopReason（M4 验收 O-1）", () => {
+  // 死于收尾轮的 Run：末条 turn.completed 是 toolUse / stop，但循环没有跑到 agent_end
+  for (const stopReason of ["toolUse", "stop", "aborted"]) {
+    assert.deepEqual(
+      classifyRunOutcome({
+        stopReason,
+        syntheticFailure: false,
+        breakerTripped: false,
+        hasTurnCompleted: true,
+        hasRunEnded: false,
+      }),
+      { category: "unknown" },
+      `stopReason=${stopReason} 但无 run.ended 不得判正常/取消`
+    );
+  }
 });
 
 // ---------- ToolExecution 级判据（D7 表右列） ----------
@@ -253,6 +282,16 @@ test("冷物化输出分类：熔断取消的 Run 与其在途错误调用都被
       at: 4,
       runId,
     });
+    // abort 路径上游照常发 agent_end：run.ended 在场（否则按 O-1 归崩溃残留）
+    log.appendRuntimeEvent({
+      version: 1,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 5,
+      kind: "run.ended",
+      payload: { messageCount: 0 },
+    });
     log.close();
 
     const { classification } = materializeSession(dir, sessionId);
@@ -332,6 +371,11 @@ test("冷物化输出分类：域错误调用归业务失败；上游拦截调�
       kind: "turn.completed",
       payload: { stopReason: "stop", syntheticFailure: false },
     });
+    log.appendRuntimeEvent({
+      ...envelope(runOk, 6),
+      kind: "run.ended",
+      payload: { messageCount: 0 },
+    });
     // runCrashed：只有 run.ended，无任何 turn.completed（崩溃残留）
     log.appendRuntimeEvent({
       ...envelope(runCrashed, 6),
@@ -350,6 +394,44 @@ test("冷物化输出分类：域错误调用归业务失败；上游拦截调�
       { runId: runOk, failure: null },
       { runId: runCrashed, failure: { category: "unknown" } },
     ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("冷物化输出分类：turn.completed(stop) 在场但 run.ended 缺失 → Run 归未知，并列入 unfinishedRuns", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-classify-"));
+  const sessionId = newSessionId();
+  const crashed = newRunId();
+  const finished = newRunId();
+  try {
+    const log = new JsonlEventLog(dir, sessionId);
+    const envelope = (runId: typeof crashed, kind: string, payload: unknown) => ({
+      version: 1 as const,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1,
+      kind,
+      payload,
+    });
+    log.appendRuntimeEvent(envelope(crashed, "turn.started", {}));
+    log.appendRuntimeEvent(
+      envelope(crashed, "turn.completed", { stopReason: "stop", syntheticFailure: false })
+    );
+    log.appendRuntimeEvent(envelope(finished, "turn.started", {}));
+    log.appendRuntimeEvent(
+      envelope(finished, "turn.completed", { stopReason: "stop", syntheticFailure: false })
+    );
+    log.appendRuntimeEvent(envelope(finished, "run.ended", { messageCount: 0 }));
+    log.close();
+
+    const materialized = materializeSession(dir, sessionId);
+    assert.deepEqual(materialized.classification.runs, [
+      { runId: crashed, failure: { category: "unknown" } },
+      { runId: finished, failure: null },
+    ]);
+    assert.deepEqual(materialized.unfinishedRuns, [crashed]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

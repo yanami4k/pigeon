@@ -57,6 +57,11 @@ function describeEvidenceGaps(materialized: MaterializedSession): string[] {
   if (missingEntries > 0) {
     lines.push(`entry 映射断号：${missingEntries} 条（写盘失败留证缺口）`);
   }
+  if (materialized.unfinishedRuns.length > 0) {
+    lines.push(
+      `崩溃残留：${materialized.unfinishedRuns.length} 个 Run 无 run.ended（用 trace 或 replay 查看中断位置）`
+    );
+  }
   const orphans =
     materialized.reconcile.orphanReceipts.length + materialized.reconcile.orphanResolutions.length;
   if (orphans > 0) {
@@ -112,7 +117,7 @@ export async function runResumeCommand(options: ResumeCommandOptions): Promise<v
     write(gapLines.length === 0 ? "  剩余待对账：无，证据链完整。\n" : "  剩余待对账：无。\n");
   }
   if (gapLines.length > 0) {
-    write("  既往落盘缺口（文件形态派生）：\n");
+    write("  既往缺口（文件形态派生）：\n");
     for (const line of gapLines) {
       write(`    ${line}\n`);
     }

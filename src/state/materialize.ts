@@ -94,6 +94,9 @@ export interface MaterializedSession {
   // entry 写盘失败按 D3 不占位重试，空洞就是"这条消息的映射没落盘"的确切信号；
   // 判据只在此算一次，trace/replay/resume 三个视图消费同一份结果（活冷同判据原则）
   entryGaps: EntryGap[];
+  // 崩溃残留（M4 验收 O-1/O-3）：有记录但无 run.ended 的 Run，按首见顺序。进程死于中途的
+  // 确切信号（abort 路径上游照常发 agent_end）；resume 汇总与 trace 会话头共用本清单
+  unfinishedRuns: RunId[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
@@ -189,9 +192,35 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     grantPromoteds,
     grantConfigRemoveds,
     entryGaps: detectEntryGaps(entries, runtimeEvents),
+    unfinishedRuns: collectUnfinishedRuns(records, runtimeEvents),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
+}
+
+// 崩溃残留 Run 清单（M4 验收 O-1/O-3）：出现过任何带 runId 的记录、却没有 run.ended 的 Run。
+// 纯函数；grant 族无 runId 的记录不算 Run
+export function collectUnfinishedRuns(
+  records: readonly EventRecord[],
+  runtimeEvents: readonly RuntimeEventRecord[]
+): RunId[] {
+  const ended = new Set<RunId>();
+  for (const event of runtimeEvents) {
+    if (event.kind === "run.ended") {
+      ended.add(event.runId);
+    }
+  }
+  const seen = new Set<RunId>();
+  const unfinished: RunId[] = [];
+  for (const record of records) {
+    if (record.runId !== undefined && !seen.has(record.runId)) {
+      seen.add(record.runId);
+      if (!ended.has(record.runId)) {
+        unfinished.push(record.runId);
+      }
+    }
+  }
+  return unfinished;
 }
 
 // entry runSeq 断号检测（M4 收口决策 ③）：按 Run（首见顺序）核对序号连续性。
@@ -325,7 +354,12 @@ function classifySessionRecords(
   const runFactsOf = (runId: RunId): RunOutcomeFacts => {
     let facts = runFacts.get(runId);
     if (facts === undefined) {
-      facts = { syntheticFailure: false, breakerTripped: false, hasTurnCompleted: false };
+      facts = {
+        syntheticFailure: false,
+        breakerTripped: false,
+        hasTurnCompleted: false,
+        hasRunEnded: false,
+      };
       runFacts.set(runId, facts);
       runOrder.push(runId);
     }
@@ -345,6 +379,8 @@ function classifySessionRecords(
       facts.stopReason = event.payload.stopReason;
       facts.syntheticFailure = event.payload.syntheticFailure;
       facts.hasTurnCompleted = true;
+    } else if (event.kind === "run.ended") {
+      runFactsOf(event.runId).hasRunEnded = true;
     } else if (event.kind === "tool.settled") {
       settledByToolCall.set(event.payload.toolCallId, event.payload);
     }

@@ -469,6 +469,8 @@ export class PiRuntimeAdapter {
         syntheticFailure,
         breakerTripped: this.#breakerTripped,
         hasTurnCompleted: lastAssistant !== undefined,
+        // 活侧在 prompt() resolve 之后计算，agent_end 已发出（abort 路径同样发）
+        hasRunEnded: true,
       }),
       advertisedTools,
       // 本次 Run 的账本记录终态快照（waitForIdle 之后所有 tool.settled 已处理，记录已定型）

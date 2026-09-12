@@ -366,7 +366,7 @@ test("resume：冷恢复屏汇总既往落盘缺口（撕裂尾巴 / entry 断�
     });
     const healthyOutput = healthyOutputs.join("");
     assert.ok(healthyOutput.includes("剩余待对账：无，证据链完整。"), healthyOutput);
-    assert.ok(!healthyOutput.includes("既往落盘缺口"), healthyOutput);
+    assert.ok(!healthyOutput.includes("既往缺口"), healthyOutput);
 
     // 缺口会话：entry 断号 ×2（缺 2；run.ended 报 4 条缺 4）+ 孤儿 Receipt ×1 + 撕裂尾巴
     const sessionId = newSessionId();
@@ -396,7 +396,7 @@ test("resume：冷恢复屏汇总既往落盘缺口（撕裂尾巴 / entry 断�
     const output = outputs.join("");
     assert.ok(!output.includes("证据链完整"), `有缺口不得声称证据链完整\n${output}`);
     assert.ok(output.includes("剩余待对账：无。"), output);
-    assert.ok(output.includes("既往落盘缺口（文件形态派生）："), output);
+    assert.ok(output.includes("既往缺口（文件形态派生）："), output);
     assert.ok(output.includes("会话文件末尾撕裂写：1 处（半截记录已按未持久化丢弃）"), output);
     assert.ok(output.includes("entry 映射断号：2 条（写盘失败留证缺口）"), output);
     assert.ok(output.includes("孤儿记录：1 条（Receipt/Resolution 无对应 intent）"), output);
@@ -404,6 +404,42 @@ test("resume：冷恢复屏汇总既往落盘缺口（撕裂尾巴 / entry 断�
     const after = materializeSession(sessionsDir, sessionId);
     assert.equal(after.tornTail, true);
     assert.equal(after.resolutions.length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("resume：run.ended 缺失的崩溃残留 Run 计入既往缺口汇总，不说证据链完整（M4 验收 O-3）", async () => {
+  const { root, cleanup } = makeRoot();
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const log = new JsonlEventLog(sessionsDir, sessionId);
+    log.appendRuntimeEvent(runtimeEnvelope(sessionId, runId, RuntimeEventKind.TurnStarted, {}));
+    log.appendRuntimeEvent(
+      runtimeEnvelope(sessionId, runId, RuntimeEventKind.TurnCompleted, {
+        stopReason: "toolUse",
+        syntheticFailure: false,
+      })
+    );
+    log.close();
+
+    const outputs: string[] = [];
+    await runResumeCommand({
+      root,
+      sessionId,
+      ask: queuedAsker([]).ask,
+      write: (text) => outputs.push(text),
+      enterRepl: async () => {},
+    });
+    const output = outputs.join("");
+    assert.ok(!output.includes("证据链完整"), `崩溃残留不得声称证据链完整\n${output}`);
+    assert.ok(output.includes("既往缺口（文件形态派生）："), output);
+    assert.ok(
+      output.includes("崩溃残留：1 个 Run 无 run.ended（用 trace 或 replay 查看中断位置）"),
+      output
+    );
   } finally {
     cleanup();
   }

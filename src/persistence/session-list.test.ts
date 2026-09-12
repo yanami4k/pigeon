@@ -123,6 +123,10 @@ function writeTerminalSession(
       syntheticFailure,
     })
   );
+  // 上游对 abort / 合成失败 / 正常收尾都发 agent_end：run.ended 在场才不是崩溃残留（O-1）
+  log.appendRuntimeEvent(
+    runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 0 })
+  );
   log.close();
   return sessionId;
 }
@@ -206,6 +210,9 @@ test("失败分类汇总：取消/业务/基础设施/未知四类分别入列�
         isError: true,
         errorKind: "domain",
       })
+    );
+    log.appendRuntimeEvent(
+      runtimeEnvelope(toolFailure, runId, RuntimeEventKind.RunEnded, { messageCount: 0 })
     );
     log.close();
 
