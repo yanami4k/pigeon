@@ -115,7 +115,7 @@ test("时间线按落盘顺序：治理族与运行时事件穿插原位呈现�
         syntheticFailure: false,
       })
     );
-    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 2 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 0 }));
     eventLog.close();
 
     const replay = buildRunReplay(materializeSession(sessionsDir, sessionId), runId);
@@ -231,7 +231,7 @@ test("撕裂尾巴归属：只标注给拥有文件末条记录的 Run（残片�
     const runB = newRunId();
     // runA 完整收尾后，runB 开始即「进程死亡」：文件末条记录属于 runB
     eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "turn.started", {}));
-    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 1 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 0 }));
     eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "turn.started", {}));
     eventLog.close();
     appendFileSync(eventLog.path, '{"version":2,"id":"entry_', "utf8");
@@ -252,8 +252,8 @@ test("其他 Run 的记录不混入：runId 过滤是投影的第一域", () => 
     // 两个 Run 的记录在文件里交错（重开日志追加就会产生这种布局）
     eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "turn.started", {}));
     eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "turn.started", {}));
-    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 1 }));
-    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "run.ended", { messageCount: 1 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 0 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "run.ended", { messageCount: 0 }));
     eventLog.close();
 
     const materialized = materializeSession(sessionsDir, sessionId);
@@ -267,6 +267,43 @@ test("其他 Run 的记录不混入：runId 过滤是投影的第一域", () => 
       replayB?.events.map((event) => event.record.kind),
       ["turn.started", "run.ended"]
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("entry runSeq 断号（M4 收口决策 ③）：空洞在紧随其后的 entry 原位标注，末尾缺失标在 run.ended", () => {
+  const { sessionsDir, sessionId, eventLog, cleanup } = makeEventLog();
+  try {
+    const runId = newRunId();
+    eventLog.appendEntry({ runSeq: 1, role: "user", runId });
+    eventLog.appendEntry({ runSeq: 2, role: "assistant", runId });
+    // 第 3 条写盘失败（D3：序号照常推进，不占位重试）
+    eventLog.appendEntry({ runSeq: 4, role: "assistant", runId });
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 5 }));
+    eventLog.close();
+
+    const replay = buildRunReplay(materializeSession(sessionsDir, sessionId), runId);
+    assert.ok(replay);
+    assert.deepEqual(replay.entryGaps, [3, 5], "本 Run 的缺失序号清单随投影传递");
+    const fourth = replay.events.find(
+      (event) => event.record.kind === "entry" && event.record.runSeq === 4
+    );
+    assert.ok(fourth);
+    assert.ok(
+      fourth.annotations.some((text) => text.includes("断号") && text.includes("第 3 条")),
+      `空洞原位标注在第 4 条之前：${JSON.stringify(fourth.annotations)}`
+    );
+    const ended = replay.events.find((event) => event.record.kind === "run.ended");
+    assert.ok(ended);
+    assert.ok(
+      ended.annotations.some((text) => text.includes("断号") && text.includes("第 5 条")),
+      `末尾缺失标在 run.ended：${JSON.stringify(ended.annotations)}`
+    );
+    // 无空洞的前两条不带断号标注
+    for (const event of replay.events.slice(0, 2)) {
+      assert.deepEqual(event.annotations, []);
+    }
   } finally {
     cleanup();
   }

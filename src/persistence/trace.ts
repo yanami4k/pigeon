@@ -61,6 +61,11 @@ export interface TraceRun {
   breakers: BreakerRecord[];
   // run.ended 事件是否在场（缺失 = 崩溃残留可能）
   ended: boolean;
+  // 会话文件末尾撕裂写残片归属本 Run（M4 收口决策 ③，D2 冷侧可见化）：只有拥有文件末条
+  // 记录的 Run 才为 true（残片只可能写在它之后），口径与 replay 一致
+  tornTail: boolean;
+  // 本 Run 缺失的 entry runSeq（判据在 materializeSession，三视图同一份）
+  entryGaps: number[];
   classification?: RunClassification;
   // run 级异常（轮次边界缺口等）
   anomalies: string[];
@@ -69,6 +74,9 @@ export interface TraceRun {
 export interface SessionTrace {
   sessionId: SessionId;
   runs: TraceRun[];
+  // 文件级事实：会话文件末尾存在撕裂写残片。--run 过滤掉拥有者、或末条记录不属于任何 Run
+  // （REPL 期 grant 事件）时，Run 级 tornTail 全为 false，会话级仍如实为 true
+  tornTail: boolean;
   // Receipt 找不到对应 intent/decision（日志损坏或手写）：如实报告，附信封 runId
   orphanReceipts: Array<{ receipt: Receipt; runId: RunId }>;
   orphanResolutions: ResolutionRecord[];
@@ -105,6 +113,7 @@ export function buildSessionTrace(
   const trace: SessionTrace = {
     sessionId: session.sessionId,
     runs: [],
+    tornTail: session.tornTail,
     orphanReceipts: [],
     orphanResolutions: [],
   };
@@ -124,12 +133,16 @@ function buildRunTrace(
   pending: ReadonlySet<ExecutionId>,
   trace: SessionTrace
 ): TraceRun {
+  // 撕裂尾巴归属（与 replay.ts 同一判定）：残片只可能写在文件末条记录之后
+  const ownsFileTail = records[records.length - 1] === session.records[session.records.length - 1];
   const run: TraceRun = {
     runId,
     turns: [],
     toolCalls: [],
     breakers: [],
     ended: false,
+    tornTail: session.tornTail && ownsFileTail,
+    entryGaps: session.entryGaps.find((gap) => gap.runId === runId)?.missingSeqs ?? [],
     anomalies: [],
   };
   const callsByToolCallId = new Map<string, TraceToolCall>();

@@ -336,7 +336,7 @@ test("冷物化输出分类：域错误调用归业务失败；上游拦截调�
     log.appendRuntimeEvent({
       ...envelope(runCrashed, 6),
       kind: "run.ended",
-      payload: { messageCount: 1 },
+      payload: { messageCount: 0 },
     });
     log.close();
 

@@ -430,9 +430,20 @@ export interface MaterializedSession {
   // 固化规则升格/移除留痕（M4 收口决策 ①）：配置面动作的原始记录，不参与会话 grant 生效集
   grantPromoteds: GrantPromotedRecord[];
   grantConfigRemoveds: GrantConfigRemovedRecord[];
+  // entry runSeq 断号（M4 收口决策 ③，D2 冷侧可见化）：按 Run 汇总的缺失序号——
+  // entry 写盘失败按 D3 不占位重试，空洞就是"这条消息的映射没落盘"的确切信号；
+  // 判据只在此算一次，trace/replay/resume 三个视图消费同一份结果（活冷同判据原则）
+  entryGaps: EntryGap[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
+}
+
+export interface EntryGap {
+  runId: RunId;
+  // 缺失的 runSeq（升序）：中段空洞由相邻 entry 序号推出；末尾缺失由 run.ended.messageCount
+  // 推出（agent_end 的新增消息数 = 本 Run 的 message_end 条数，D3 同一口径）
+  missingSeqs: number[];
 }
 
 // Run 级失败分类（D7 左列判据）；failure=null 表示正常收尾
@@ -853,9 +864,65 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     grants: activeGrants(grantCreateds, grantRevokeds),
     grantPromoteds,
     grantConfigRemoveds,
+    entryGaps: detectEntryGaps(entries, runtimeEvents),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
+}
+
+// entry runSeq 断号检测（M4 收口决策 ③）：按 Run（首见顺序）核对序号连续性。
+// 中段空洞：相邻 entry 的 runSeq 跳号即缺失（D3：写盘失败不占位重试，序号照常推进）；
+// 末尾缺失：run.ended.messageCount（agent_end 新增消息数 = message_end 条数）大于已落盘的
+// 最大 runSeq 时，其后的序号全部缺失。无 run.ended 的 Run（崩溃残留）不推末尾——
+// 不知道就不猜（D7 同一精神）。纯函数，无 IO
+export function detectEntryGaps(
+  entries: readonly EntryRecord[],
+  runtimeEvents: readonly RuntimeEventRecord[]
+): EntryGap[] {
+  const runOrder: RunId[] = [];
+  const seqsByRun = new Map<RunId, number[]>();
+  for (const entry of entries) {
+    let seqs = seqsByRun.get(entry.runId);
+    if (seqs === undefined) {
+      seqs = [];
+      seqsByRun.set(entry.runId, seqs);
+      runOrder.push(entry.runId);
+    }
+    seqs.push(entry.runSeq);
+  }
+  const messageCountByRun = new Map<RunId, number>();
+  for (const event of runtimeEvents) {
+    if (event.kind === "run.ended") {
+      messageCountByRun.set(event.runId, event.payload.messageCount);
+      if (!seqsByRun.has(event.runId)) {
+        // Run 有 run.ended 却零 entry：全部映射缺失也是缺口，纳入首见顺序
+        seqsByRun.set(event.runId, []);
+        runOrder.push(event.runId);
+      }
+    }
+  }
+  const gaps: EntryGap[] = [];
+  for (const runId of runOrder) {
+    const seqs = seqsByRun.get(runId) ?? [];
+    const missing: number[] = [];
+    let expected = 1;
+    for (const seq of seqs) {
+      for (let missed = expected; missed < seq; missed++) {
+        missing.push(missed);
+      }
+      expected = Math.max(expected, seq + 1);
+    }
+    const messageCount = messageCountByRun.get(runId);
+    if (messageCount !== undefined) {
+      for (let missed = expected; missed <= messageCount; missed++) {
+        missing.push(missed);
+      }
+    }
+    if (missing.length > 0) {
+      gaps.push({ runId, missingSeqs: missing });
+    }
+  }
+  return gaps;
 }
 
 // 生效 grant 还原（决策 3b）：created 减去 revoked——revoked 集合内的 grantId 全部失效；

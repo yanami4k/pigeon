@@ -90,7 +90,7 @@ function writeHealthySession(dir: string, toolName: string): SessionId {
   log.appendIntent(makeIntentInput(runId, toolName, executionId));
   log.appendReceipt({ receipt: makeReceipt(executionId), runId });
   log.appendRuntimeEvent(
-    runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 4 })
+    runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 0 })
   );
   log.close();
   return sessionId;

@@ -26,6 +26,8 @@ export interface RunReplay {
   ended: boolean;
   // 会话文件末尾存在撕裂写残片（文件级事实，随物化结果传递）
   tornTail: boolean;
+  // 本 Run 缺失的 entry runSeq（M4 收口决策 ③：冷物化 entryGaps 的本 Run 切片；空 = 连续）
+  entryGaps: number[];
   // Run 级失败四分类（D7）；缺省 = 分类清单中无此 Run（不应出现）
   classification?: RunClassification;
 }
@@ -45,7 +47,15 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
   const orphanReceipts = new Set(session.reconcile.orphanReceipts.map((r) => r.id as string));
   const orphanResolutions = new Set(session.reconcile.orphanResolutions.map((r) => r.id as string));
 
+  // entry 断号（决策 ③）：判据在 materializeSession 算好，此处只做原位标注——
+  // 中段空洞标在紧随其后的 entry 上，末尾缺失标在 run.ended 上（两者都是"缺口的下一个可见位置"）
+  const entryGaps = session.entryGaps.find((gap) => gap.runId === runId)?.missingSeqs ?? [];
+  const missing = new Set(entryGaps);
+  const describeMissing = (seqs: number[]): string =>
+    `entry 映射断号：缺第 ${seqs.join("、")} 条（写盘失败留证缺口，D3 序号不重排）`;
+
   let ended = false;
+  let lastSeenSeq = 0;
   const events: ReplayEvent[] = [];
   for (const record of records) {
     const annotations: string[] = [];
@@ -57,9 +67,24 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
       annotations.push("孤儿记录：Receipt 找不到对应 intent/decision（日志损坏或手写）");
     } else if (record.kind === "resolution" && orphanResolutions.has(record.id)) {
       annotations.push("孤儿记录：Resolution 找不到对应 intent（日志损坏或手写）");
+    } else if (record.kind === "entry") {
+      const holes: number[] = [];
+      for (let seq = lastSeenSeq + 1; seq < record.runSeq; seq++) {
+        if (missing.has(seq)) {
+          holes.push(seq);
+        }
+      }
+      if (holes.length > 0) {
+        annotations.push(describeMissing(holes));
+      }
+      lastSeenSeq = Math.max(lastSeenSeq, record.runSeq);
     }
     if (record.kind === "run.ended") {
       ended = true;
+      const trailing = entryGaps.filter((seq) => seq > lastSeenSeq);
+      if (trailing.length > 0) {
+        annotations.push(describeMissing(trailing));
+      }
     }
     events.push({ record, annotations });
   }
@@ -73,6 +98,7 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
     events,
     ended,
     tornTail: session.tornTail && ownsFileTail,
+    entryGaps,
     ...(classification !== undefined ? { classification } : {}),
   };
 }

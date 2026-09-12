@@ -106,6 +106,14 @@ function renderRun(run: TraceRun, lines: string[]): void {
     header += " ｜ run.ended 缺失（崩溃残留可能）";
   }
   lines.push(header);
+  // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，
+  // 措辞与 replay 同口径——绝不假装证据链完整
+  if (run.tornTail) {
+    lines.push("  缺口：会话文件末尾存在半截未写完的记录（撕裂写，已按未持久化丢弃）");
+  }
+  if (run.entryGaps.length > 0) {
+    lines.push(`  缺口：entry 映射断号，缺第 ${run.entryGaps.join("、")} 条（写盘失败留证缺口）`);
+  }
   for (const anomaly of run.anomalies) {
     lines.push(`  异常：${anomaly}`);
   }
@@ -142,11 +150,21 @@ export function renderSessionTrace(trace: SessionTrace): string {
     (sum, run) => sum + run.toolCalls.filter((call) => call.pendingReconcile).length,
     0
   );
+  // 落盘缺口总数（决策 ③）：撕裂尾巴按处计（至多 1）+ 各 Run 缺失的 entry 条数
+  const gapCount =
+    (trace.tornTail ? 1 : 0) + trace.runs.reduce((sum, run) => sum + run.entryGaps.length, 0);
   const lines: string[] = [
     `会话 ${shortId(trace.sessionId)} ｜ Run ${trace.runs.length} 个 ｜ ` +
-      `工具调用 ${toolCallCount} 次 ｜ 待对账 ${pendingCount} 次`,
+      `工具调用 ${toolCallCount} 次 ｜ 待对账 ${pendingCount} 次 ｜ 落盘缺口 ${gapCount} 处`,
     "",
   ];
+  // 撕裂尾巴无 Run 归属（末条记录是 REPL 期 grant 事件，或 --run 过滤掉了拥有者）：会话级标注
+  if (trace.tornTail && !trace.runs.some((run) => run.tornTail)) {
+    lines.push(
+      "会话级缺口：会话文件末尾存在半截未写完的记录（撕裂写，已按未持久化丢弃；不归属任何 Run 时间线）"
+    );
+    lines.push("");
+  }
   for (const [index, run] of trace.runs.entries()) {
     if (index > 0) {
       lines.push("");

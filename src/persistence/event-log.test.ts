@@ -25,6 +25,7 @@ import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import {
   type BreakerInput,
   type DecisionInput,
+  detectEntryGaps,
   EVENT_LOG_VERSION,
   EventLogConflictError,
   EventLogCorruptionError,
@@ -784,6 +785,36 @@ test("grant 升格/移除留痕（M4 收口决策 ①）：grant.promoted / gran
     assert.equal(materialized.grants.length, 0);
     // 无 runId 的记录不进任何 Run 的分类事实表
     assert.equal(materialized.classification.runs.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("entry runSeq 断号冷检测（M4 收口决策 ③）：中段空洞 + run.ended.messageCount 揭示的末尾缺失", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
+  try {
+    const sessionId = newSessionId();
+    const runA = newRunId();
+    const runB = newRunId();
+    const log = new JsonlEventLog(dir, sessionId);
+    // runA：1、2、4 落盘（第 3 条写盘失败，D3 不占位重试），run.ended 报 6 条 → 末尾缺 5、6
+    log.appendEntry({ runSeq: 1, role: "user", runId: runA });
+    log.appendEntry({ runSeq: 2, role: "assistant", runId: runA });
+    log.appendEntry({ runSeq: 4, role: "assistant", runId: runA });
+    log.appendRuntimeEvent(
+      makeRuntimeEnvelope(sessionId, runA, RuntimeEventKind.RunEnded, { messageCount: 6 })
+    );
+    // runB：完整连续，无 run.ended（崩溃残留）——不因缺 run.ended 而误报
+    log.appendEntry({ runSeq: 1, role: "user", runId: runB });
+    log.appendEntry({ runSeq: 2, role: "assistant", runId: runB });
+    log.close();
+
+    const materialized = materializeSession(dir, sessionId);
+    assert.deepEqual(materialized.entryGaps, [{ runId: runA, missingSeqs: [3, 5, 6] }]);
+    // 纯函数直测：无 entry 无事件 = 无缺口；messageCount 与 entry 数相等 = 无缺口
+    assert.deepEqual(detectEntryGaps([], []), []);
+    const complete = materializeSession(dir, newSessionId());
+    assert.deepEqual(complete.entryGaps, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

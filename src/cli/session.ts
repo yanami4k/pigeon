@@ -4,7 +4,12 @@
 // resolution 治理族（human-confirmed 渠道，D5 第三种确证）——任何路径系统不自动重新执行（§3.2）。
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { JsonlEventLog, listSessionIds, recoverSession } from "../persistence/event-log.ts";
+import {
+  JsonlEventLog,
+  listSessionIds,
+  type MaterializedSession,
+  recoverSession,
+} from "../persistence/event-log.ts";
 import { listSessionSummaries, type SessionListFilters } from "../persistence/session-list.ts";
 import { asSessionId } from "../state/ids.ts";
 import { summarizeArgs } from "./format.ts";
@@ -39,6 +44,27 @@ export function runSessionListCommand(options: SessionListCommandOptions): strin
     }
   }
   return `${lines.join("\n")}\n`;
+}
+
+// 既往落盘缺口的人话清单（只呈现不修补；空数组 = 无缺口）
+function describeEvidenceGaps(materialized: MaterializedSession): string[] {
+  const lines: string[] = [];
+  if (materialized.tornTail) {
+    lines.push("会话文件末尾撕裂写：1 处（半截记录已按未持久化丢弃）");
+  }
+  const missingEntries = materialized.entryGaps.reduce(
+    (sum, gap) => sum + gap.missingSeqs.length,
+    0
+  );
+  if (missingEntries > 0) {
+    lines.push(`entry 映射断号：${missingEntries} 条（写盘失败留证缺口）`);
+  }
+  const orphans =
+    materialized.reconcile.orphanReceipts.length + materialized.reconcile.orphanResolutions.length;
+  if (orphans > 0) {
+    lines.push(`孤儿记录：${orphans} 条（Receipt/Resolution 无对应 intent）`);
+  }
+  return lines;
 }
 
 export interface ResumeCommandOptions {
@@ -81,8 +107,17 @@ export async function runResumeCommand(options: ResumeCommandOptions): Promise<v
     write("  本次自动确证（哈希比对）：无\n");
   }
   const unknowns = recovery.materialized.reconcile.unknown;
+  // D2 冷侧缺口汇总（M4 收口决策 ③）：进程内 listenerErrors 跨重启必空，既往缺口只能从文件
+  // 形态派生——撕裂尾巴 / entry 断号 / 孤儿记录；有任一缺口就不说"证据链完整"
+  const gapLines = describeEvidenceGaps(recovery.materialized);
   if (unknowns.length === 0) {
-    write("  剩余待对账：无，证据链完整。\n");
+    write(gapLines.length === 0 ? "  剩余待对账：无，证据链完整。\n" : "  剩余待对账：无。\n");
+  }
+  if (gapLines.length > 0) {
+    write("  既往落盘缺口（文件形态派生）：\n");
+    for (const line of gapLines) {
+      write(`    ${line}\n`);
+    }
   }
   // 人工确认菜单：写盘用追加模式开同一个 session 文件（治理族幂等索引由构造器恢复）
   const log = new JsonlEventLog(sessionsDir, sessionId);

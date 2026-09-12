@@ -217,6 +217,9 @@ test("abort 与上游合成失败消息同样占 runSeq 序号；跨 Run 序号�
     assert.ok(aborted?.role === "assistant" && aborted.stopReason === "aborted");
     const synthetic = transcript[5];
     assert.ok(synthetic?.role === "assistant" && synthetic.stopReason === "error");
+    // M4 收口决策 ③：正常 / abort / 合成失败三种收尾的 run.ended.messageCount 都与 entry 数
+    // 一致——冷侧断号检测在真实链路上零误报（messageCount 是末尾缺失的唯一判据）
+    assert.deepEqual(materialized.entryGaps, []);
   } finally {
     cleanup();
   }
@@ -225,7 +228,7 @@ test("abort 与上游合成失败消息同样占 runSeq 序号；跨 Run 序号�
 test("entry 写盘失败不毒化 Run：故障进 listenerErrors，事件落盘与转发照常", async () => {
   const original = "alpha\nbeta\ngamma\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  const { eventLog, sessionId } = makeEventLog(root);
+  const { eventLog, sessionsDir, sessionId } = makeEventLog(root);
   try {
     // 故障注入：entry 写盘即抛错（模拟磁盘故障）——记录逻辑自身绝不抛回上游
     const poison = {
@@ -271,6 +274,10 @@ test("entry 写盘失败不毒化 Run：故障进 listenerErrors，事件落盘�
     assert.equal(adapter.listenerErrors().length, 4);
     await adapter.dispose();
     eventLog.close();
+    // M4 收口决策 ③：活侧只进 listenerErrors 的缺口，冷侧凭 run.ended.messageCount 派生出来——
+    // 四条 entry 全部未落盘 → 缺第 1–4 条（跨进程可见化的承载点）
+    const materialized = materializeSession(sessionsDir, sessionId);
+    assert.deepEqual(materialized.entryGaps, [{ runId: result.runId, missingSeqs: [1, 2, 3, 4] }]);
   } finally {
     cleanup();
   }

@@ -1,7 +1,14 @@
 // M4 S3：CLI trace 命令（只读静态报告）测试——中文标签、id 短哈希、参数截断、
 // 分类徽章（人话）、拒绝理由逐字、待对账/异常项可见、只读性（不触碰事件日志与工作区）。
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,8 +17,11 @@ import { JsonlEventLog } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "../pi-runtime/snapshot.ts";
+import { EVENT_ENVELOPE_VERSION } from "../state/events.ts";
 import {
+  newEntryId,
   newExecutionId,
+  newGrantId,
   newRunId,
   newSessionId,
   type RunId,
@@ -278,6 +288,85 @@ test("trace 命令：会话不存在时报错并列出已有会话；--run 过�
     // 未过滤则两个 Run 都在
     const full = runTraceCommand({ root, sessionId });
     assert.equal(full.split("\n").filter((line) => line.startsWith("Run ")).length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trace 报告：撕裂尾巴与 entry 断号在 Run 头下如实标注（D2 冷侧可见化，M4 收口决策 ③）", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-trace-cli-"));
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+    eventLog.appendRuntimeEvent({
+      version: EVENT_ENVELOPE_VERSION,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1_757_000_000_000,
+      kind: "turn.started",
+      payload: {},
+    });
+    eventLog.appendEntry({ runSeq: 1, role: "user", runId });
+    eventLog.appendEntry({ runSeq: 3, role: "assistant", runId });
+    eventLog.close();
+    // 进程死于写盘中途：半截末行
+    appendFileSync(eventLog.path, '{"version":5,"id":"entry_', "utf8");
+
+    // 对照组：干净会话零缺口
+    const other = new JsonlEventLog(sessionsDir, newSessionId());
+    other.appendRuntimeEvent({
+      version: EVENT_ENVELOPE_VERSION,
+      id: newEntryId(),
+      sessionId: other.sessionId,
+      runId: newRunId(),
+      timestamp: 1_757_000_000_000,
+      kind: "turn.started",
+      payload: {},
+    });
+    other.appendEntry({ runSeq: 1, role: "user", runId: newRunId() });
+    other.close();
+    const clean = runTraceCommand({ root, sessionId: other.sessionId });
+    assert.ok(!clean.includes("撕裂写"), "干净会话不得出现撕裂标注");
+    assert.ok(!clean.includes("断号"), "干净会话不得出现断号标注");
+    assert.ok(clean.includes("落盘缺口 0 处"), clean);
+
+    const output = runTraceCommand({ root, sessionId });
+    assert.ok(output.includes("落盘缺口 2 处"), `会话头汇总缺口数\n${output}`);
+    assert.ok(
+      output.includes("缺口：会话文件末尾存在半截未写完的记录（撕裂写，已按未持久化丢弃）"),
+      `撕裂尾巴在 Run 头下标注\n${output}`
+    );
+    assert.ok(output.includes("缺口：entry 映射断号，缺第 2 条（写盘失败留证缺口）"), output);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("trace 报告：撕裂尾巴不归属任何 Run 时（末条是 REPL 期 grant 事件）在会话级标注", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-trace-cli-"));
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionId = newSessionId();
+    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+    eventLog.appendRuntimeEvent({
+      version: EVENT_ENVELOPE_VERSION,
+      id: newEntryId(),
+      sessionId,
+      runId: newRunId(),
+      timestamp: 1_757_000_000_000,
+      kind: "turn.started",
+      payload: {},
+    });
+    eventLog.appendGrantRevoked({ grantId: newGrantId(), revokedAt: 1_757_000_000_001 });
+    eventLog.close();
+    appendFileSync(eventLog.path, '{"version":5,"id":"entry_', "utf8");
+
+    const output = runTraceCommand({ root, sessionId });
+    assert.ok(output.includes("落盘缺口 1 处"), output);
+    assert.ok(output.includes("会话级缺口：会话文件末尾存在半截未写完的记录"), output);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

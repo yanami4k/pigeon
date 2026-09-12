@@ -3,7 +3,7 @@
 // 覆盖：列表渲染（安静行 + 待对账突出行 + 过滤器）、resume 自动确证报告渲染、
 // 菜单三个选择对事件文件的影响、[3] 与 EOF 留 pending、进入 REPL 的接线。
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -101,7 +101,7 @@ function writeHealthySession(sessionsDir: string, toolName: string): SessionId {
   log.appendIntent(makeIntentInput(runId, toolName, executionId));
   log.appendReceipt({ receipt: makeReceipt(executionId), runId });
   log.appendRuntimeEvent(
-    runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 4 })
+    runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 0 })
   );
   log.close();
   return sessionId;
@@ -349,6 +349,65 @@ test("resume：非法输入重问、EOF 视为先不管，仍进入 REPL；会�
       }),
       /会话不存在/
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("resume：冷恢复屏汇总既往落盘缺口（撕裂尾巴 / entry 断号 / 孤儿记录）；无缺口才说证据链完整", async () => {
+  const { root, cleanup } = makeRoot();
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    // 对照组：健康会话 → 证据链完整
+    const healthy = writeHealthySession(sessionsDir, "edit_file");
+    const healthyOutputs: string[] = [];
+    await runResumeCommand({
+      root,
+      sessionId: healthy,
+      ask: queuedAsker([]).ask,
+      write: (text) => healthyOutputs.push(text),
+      enterRepl: async () => {},
+    });
+    const healthyOutput = healthyOutputs.join("");
+    assert.ok(healthyOutput.includes("剩余待对账：无，证据链完整。"), healthyOutput);
+    assert.ok(!healthyOutput.includes("既往落盘缺口"), healthyOutput);
+
+    // 缺口会话：entry 断号 ×2（缺 2；run.ended 报 4 条缺 4）+ 孤儿 Receipt ×1 + 撕裂尾巴
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const log = new JsonlEventLog(sessionsDir, sessionId);
+    log.appendEntry({ runSeq: 1, role: "user", runId });
+    log.appendEntry({ runSeq: 3, role: "assistant", runId });
+    log.appendReceipt({ receipt: makeReceipt(newExecutionId()), runId });
+    log.appendRuntimeEvent(
+      runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 4 })
+    );
+    log.close();
+    appendFileSync(
+      JsonlEventLog.filePathFor(sessionsDir, sessionId),
+      '{"version":5,"id":"entry_',
+      "utf8"
+    );
+
+    const outputs: string[] = [];
+    await runResumeCommand({
+      root,
+      sessionId,
+      ask: queuedAsker([]).ask,
+      write: (text) => outputs.push(text),
+      enterRepl: async () => {},
+    });
+    const output = outputs.join("");
+    assert.ok(!output.includes("证据链完整"), `有缺口不得声称证据链完整\n${output}`);
+    assert.ok(output.includes("剩余待对账：无。"), output);
+    assert.ok(output.includes("既往落盘缺口（文件形态派生）："), output);
+    assert.ok(output.includes("会话文件末尾撕裂写：1 处（半截记录已按未持久化丢弃）"), output);
+    assert.ok(output.includes("entry 映射断号：2 条（写盘失败留证缺口）"), output);
+    assert.ok(output.includes("孤儿记录：1 条（Receipt/Resolution 无对应 intent）"), output);
+    // 缺口只呈现不修补：resume 后文件仍是撕裂形态之外零新增记录（无悬账 → 无 resolution）
+    const after = materializeSession(sessionsDir, sessionId);
+    assert.equal(after.tornTail, true);
+    assert.equal(after.resolutions.length, 0);
   } finally {
     cleanup();
   }

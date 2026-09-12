@@ -171,6 +171,12 @@ export function renderRunReplay(replay: RunReplay): string {
   if (replay.tornTail) {
     lines.push("会话文件末尾存在半截未写完的记录（撕裂写，已按未持久化丢弃）");
   }
+  // entry 断号尾部汇总（决策 ③）：原位标注之外再给一行总账，grep 一次可见全部缺口
+  if (replay.entryGaps.length > 0) {
+    lines.push(
+      `entry 映射断号：缺第 ${replay.entryGaps.join("、")} 条（写盘失败留证缺口，D3 序号不重排）`
+    );
+  }
   return `${lines.join("\n")}\n`;
 }
 

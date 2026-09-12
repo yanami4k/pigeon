@@ -3,7 +3,7 @@
 // 熔断挂接、id 错位异常（executionId 对上但 toolCallId 不符 / 实测哈希与预期不符）、
 // 跨 Run 同 toolCallId 的 runId 域隔离、runId 过滤。
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -254,7 +254,7 @@ test("熔断挂接：breaker 记录归 run 并回指触发调用；上游拦截�
         syntheticFailure: false,
       })
     );
-    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 2 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 0 }));
     eventLog.appendBreaker({
       toolName: "ghost_tool",
       toolCallId: "tc-1-1",
@@ -355,7 +355,7 @@ test("跨 Run 同 toolCallId：关联以 (runId, toolCallId) 为域，绝不跨 
           syntheticFailure: false,
         })
       );
-      eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 2 }));
+      eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runId, "run.ended", { messageCount: 0 }));
     }
     eventLog.close();
 
@@ -381,6 +381,37 @@ test("跨 Run 同 toolCallId：关联以 (runId, toolCallId) 为域，绝不跨 
     assert.equal(filtered.runs.length, 1);
     assert.equal(filtered.runs[0]?.runId, runB);
     assert.equal(filtered.runs[0]?.toolCalls[0]?.intent?.executionId, execB);
+  } finally {
+    cleanup();
+  }
+});
+
+test("D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴归属拥有文件末条记录的 Run；entry 断号按 Run 汇总", () => {
+  const { sessionsDir, sessionId, eventLog, cleanup } = makeEventLog();
+  try {
+    const runA = newRunId();
+    const runB = newRunId();
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "turn.started", {}));
+    eventLog.appendEntry({ runSeq: 1, role: "user", runId: runA });
+    eventLog.appendEntry({ runSeq: 3, role: "assistant", runId: runA });
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runA, "run.ended", { messageCount: 0 }));
+    eventLog.appendRuntimeEvent(runtimeEvent(sessionId, runB, "turn.started", {}));
+    eventLog.close();
+    appendFileSync(eventLog.path, '{"version":5,"id":"entry_', "utf8");
+
+    const trace = buildSessionTrace(materializeSession(sessionsDir, sessionId));
+    assert.equal(trace.tornTail, true, "文件级事实随投影传递");
+    const traceA = trace.runs.find((run) => run.runId === runA);
+    const traceB = trace.runs.find((run) => run.runId === runB);
+    assert.ok(traceA && traceB);
+    assert.equal(traceA.tornTail, false, "runA 之后还有记录，尾巴与它无关");
+    assert.equal(traceB.tornTail, true, "runB 拥有文件末条记录");
+    assert.deepEqual(traceA.entryGaps, [2]);
+    assert.deepEqual(traceB.entryGaps, []);
+    // --run 过滤掉拥有尾巴的 Run 时，会话级 tornTail 仍如实为 true
+    const onlyA = buildSessionTrace(materializeSession(sessionsDir, sessionId), { runId: runA });
+    assert.equal(onlyA.tornTail, true);
+    assert.equal(onlyA.runs[0]?.tornTail, false);
   } finally {
     cleanup();
   }

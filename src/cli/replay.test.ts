@@ -274,7 +274,7 @@ test("replay 报告：孤儿记录与撕裂尾巴如实标注", () => {
       runId,
       timestamp: 1_757_000_000_003,
       kind: "run.ended",
-      payload: { messageCount: 1 },
+      payload: { messageCount: 0 },
     });
     eventLog.close();
     // 模拟进程死于写盘中途：半截末行
@@ -434,6 +434,37 @@ test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接
     assert.notEqual(missing.status, 0, "未知 Run 必须失败退出");
     assert.ok(missing.stderr.includes("Run 不存在"));
     assert.ok(missing.stderr.includes(runId), "报错列出已有 Run 帮助定位");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("replay 报告：entry runSeq 断号原位标注 + 尾部汇总（D2 冷侧可见化，M4 收口决策 ③）", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+    eventLog.appendEntry({ runSeq: 1, role: "user", runId });
+    eventLog.appendEntry({ runSeq: 3, role: "assistant", runId });
+    eventLog.appendRuntimeEvent({
+      version: EVENT_ENVELOPE_VERSION,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1_757_000_000_003,
+      kind: "run.ended",
+      payload: { messageCount: 4 },
+    });
+    eventLog.close();
+
+    const output = runReplayCommand({ root, runId, sessionId });
+    assert.ok(output.includes("标注：entry 映射断号"), `原位标注在场\n${output}`);
+    assert.ok(output.includes("第 2 条"), output);
+    assert.ok(output.includes("第 4 条"), output);
+    assert.ok(output.includes("entry 映射断号：缺第 2、4 条"), `尾部汇总在场\n${output}`);
+    assert.ok(output.includes("写盘失败留证缺口"), output);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
