@@ -70,6 +70,9 @@ export interface FakeToolCallSpec {
 
 export interface FakeReply {
   text: string;
+  // 思考块（可选）：在文本之前以 thinking_start/thinking_delta/thinking_end 一次发完，
+  // 用于验证"thinking 增量不转发"（M2 决策 024 子裁决）等流式观察行为
+  thinking?: string;
   // 每个 text_delta 携带的字符数；缺省整条文本一次发完
   chunkSize?: number;
   // 逐 chunk 门闩：设置后每个分片发出前都要等放行
@@ -139,11 +142,36 @@ async function pump(
     return;
   }
 
-  // 已完成的 content 块（text + toolCall），partial.content 随流式进度逐块推进
+  // 已完成的 content 块（thinking + text + toolCall），partial.content 随流式进度逐块推进
   const contents: AssistantMessage["content"] = [];
+  // 思考块在文本之前（真实 provider 的块序）；一次发完，不走分片门闩
+  if (reply.thinking !== undefined && reply.thinking.length > 0) {
+    const thinkingIndex = contents.length;
+    partial.content = [{ type: "thinking", thinking: "" }];
+    stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial });
+    if (signal?.aborted) {
+      stream.push({ type: "error", reason: "aborted", error: finalize(partial, [], "aborted") });
+      return;
+    }
+    partial.content = [{ type: "thinking", thinking: reply.thinking }];
+    stream.push({
+      type: "thinking_delta",
+      contentIndex: thinkingIndex,
+      delta: reply.thinking,
+      partial,
+    });
+    stream.push({
+      type: "thinking_end",
+      contentIndex: thinkingIndex,
+      content: reply.thinking,
+      partial,
+    });
+    contents.push({ type: "thinking", thinking: reply.thinking });
+  }
   if (reply.text.length > 0) {
+    const textIndex = contents.length;
     const chunkSize = reply.chunkSize ?? reply.text.length;
-    stream.push({ type: "text_start", contentIndex: 0, partial });
+    stream.push({ type: "text_start", contentIndex: textIndex, partial });
     let accumulated = "";
     for (let i = 0; i < reply.text.length; i += chunkSize) {
       if (reply.chunkGate) {
@@ -154,20 +182,20 @@ async function pump(
         stream.push({
           type: "error",
           reason: "aborted",
-          error: finalize(partial, [{ type: "text", text: accumulated }], "aborted"),
+          error: finalize(partial, [...contents, { type: "text", text: accumulated }], "aborted"),
         });
         return;
       }
       accumulated += reply.text.slice(i, i + chunkSize);
-      partial.content = [{ type: "text", text: accumulated }];
+      partial.content = [...contents, { type: "text", text: accumulated }];
       stream.push({
         type: "text_delta",
-        contentIndex: 0,
+        contentIndex: textIndex,
         delta: reply.text.slice(i, i + chunkSize),
         partial,
       });
     }
-    stream.push({ type: "text_end", contentIndex: 0, content: accumulated, partial });
+    stream.push({ type: "text_end", contentIndex: textIndex, content: accumulated, partial });
     contents.push({ type: "text", text: accumulated });
   }
 
