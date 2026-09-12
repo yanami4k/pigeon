@@ -23,12 +23,14 @@ export function summarizeArgs(args: unknown): string {
     : `${json.slice(0, ARGS_SUMMARY_LIMIT)}…（共 ${json.length} 字符）`;
 }
 
-// 批准来源 → 人话（决策 4 证据链：策略决定不能伪装成人工）
+// 批准来源 → 人话（决策 4 证据链：策略决定不能伪装成人工；M4 S6：grant 出处如实标明）
 const APPROVED_BY_LABEL: Record<string, string> = {
   human: "人工",
   "policy:yolo": "yolo 批发授权",
   "policy:auto": "策略自动放行",
   "policy:deny": "策略拒绝",
+  "human:grant": "人工授权（会话 grant）",
+  "policy:config": "策略放行（固化配置）",
 };
 
 // 审批决定 → 人话裁决：人工区分批准/拒绝；策略来源直接给标签（不伪装成人工）

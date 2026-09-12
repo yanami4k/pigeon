@@ -607,6 +607,8 @@ export class PiRuntimeAdapter {
       toolCallId,
       args: rawArgs,
       ...(diffPreview !== undefined ? { diffPreview } : {}),
+      // 出处 run：审批提示创建 grant（[a]/[d]）时写入 grant.created 事件
+      runId: this.#activeRunId(),
     });
     if (!approval.approved) {
       const reason = approval.reason ?? "人工拒绝";

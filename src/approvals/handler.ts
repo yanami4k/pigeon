@@ -4,6 +4,8 @@
 //
 // 决策 1：审批动作只有批准/拒绝，无"人工改参数"——拒绝理由逐字反馈给模型（spike S2a），
 // 让模型自我修正后重提，而不是人替模型修参数。
+import type { RunId } from "../state/ids.ts";
+
 export interface ApprovalRequest {
   readonly toolName: string;
   readonly toolCallId: string;
@@ -11,6 +13,9 @@ export interface ApprovalRequest {
   readonly args: unknown;
   // 写工具的执行前 diff 预览（工具实现 PreviewableTool 能力时提供）
   readonly diffPreview?: string;
+  // 本次调用所在 Run（M4 S6：审批提示 [a]/[d] 创建会话 grant 时写入 grant.created
+  // 事件的出处 run——grant 在 Run 内出生，runId 恒在场）
+  readonly runId?: RunId;
 }
 
 export interface ApprovalDecision {
