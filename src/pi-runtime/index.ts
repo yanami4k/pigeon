@@ -6,6 +6,7 @@ export {
   type PiRuntimeAdapterOptions,
   type RunResult,
   type RunTerminalStatus,
+  type StreamTextDelta,
 } from "./adapter.ts";
 export { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 export {

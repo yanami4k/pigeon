@@ -15,6 +15,10 @@
 // 8. M4 S5（D3 Pi entry 映射）：每条 message_end 事件落地时刻分配 EntryId 并同步落盘
 //    entry 记录（(runId, runSeq) 权威键）；abort 与上游合成失败消息同样占序号；
 //    记录逻辑自身绝不抛（上游 listener 路径无防护，同约束 3）。
+// 9. M2 S1（决策 024）：subscribeStream 只读流式观察口——上游 message_update 携带
+//    text_delta 时把增量连同 runId 转发给订阅者；不进 Event Log、不进 events()、
+//    不锚身份（013：流式载荷是浅拷贝 partial）；thinking 增量第一版不转发；
+//    消息文本不持久化（与 M5 Session Search 一起裁决）。
 import {
   Agent,
   type AgentEvent,
@@ -77,6 +81,13 @@ export interface RunResult {
   toolExecutions: ToolExecution[];
 }
 
+// M2 S1（决策 024）：流式文本增量载荷——subscribeStream 观察口的转发单位。
+// 派生显示态、非权威状态：不持久化、不可重建、不锚身份；只有 runId 出处与增量文本
+export interface StreamTextDelta {
+  runId: RunId;
+  delta: string;
+}
+
 // Event Log 落盘口的结构类型（persistence/JsonlEventLog 的写入面满足它，M4 S1：账本归并进
 // Event Log，不双写）。只依赖 state 的输入形状，不依赖存储引擎——pi-runtime 不触达
 // persistence；测试注入故障包装器模拟崩溃点
@@ -133,6 +144,9 @@ export class PiRuntimeAdapter {
   readonly #snapshot: InjectionSnapshot;
   readonly #events: EventEnvelope[] = [];
   readonly #listeners = new Set<(event: EventEnvelope) => void>();
+  // M2 S1（决策 024）：流式文本观察口的订阅者集合（与归一化事件 listener 分离——
+  // 增量不是 Pigeon Runtime Event，不走 #events/#eventLog 路径）
+  readonly #streamListeners = new Set<(delta: StreamTextDelta) => void>();
   readonly #listenerErrors: unknown[] = [];
   readonly #unsubscribe: () => void;
   // M3 治理件：注册表（策略判定元数据）/ 审批注入点 / 熔断阈值
@@ -288,6 +302,15 @@ export class PiRuntimeAdapter {
     return () => this.#listeners.delete(listener);
   }
 
+  // 观察口（M2 S1，决策 024）：订阅流式文本增量——上游 message_update 携带 text_delta
+  // 时把增量连同 runId 转发；thinking 增量第一版不转发。派生显示态：增量不进 Event Log、
+  // 不进 events()、不锚身份，重启不可重建。与 subscribe 同不变式：listener 自包
+  // try/catch 进 listenerErrors，绝不毒化 Run
+  subscribeStream(listener: (delta: StreamTextDelta) => void): () => void {
+    this.#streamListeners.add(listener);
+    return () => this.#streamListeners.delete(listener);
+  }
+
   // 被吞掉的 listener 异常记录（含内部归一化异常）
   listenerErrors(): unknown[] {
     return this.#listenerErrors.slice();
@@ -325,6 +348,7 @@ export class PiRuntimeAdapter {
     await this.#agent.waitForIdle();
     this.#unsubscribe();
     this.#listeners.clear();
+    this.#streamListeners.clear();
   }
 
   // 工具执行体包装（M4 S2，D7）：捕获抛出的真实错误对象并按域/环境归类存证——
@@ -375,6 +399,28 @@ export class PiRuntimeAdapter {
       }
       const normalized = normalizePiEvent(event, { sessionId: this.sessionId, runId });
       if (!normalized) {
+        // 决策 024 流式观察口：message_update 携带 text_delta 时把增量连同 runId 转发给
+        // subscribeStream 订阅者——这是增量的唯一出口：不归一化（normalizePiEvent 对
+        // message_update 返回 null）、不落 Event Log、不进 #events、不锚身份（013：
+        // 流式载荷是上游浅拷贝 partial）；thinking_delta 等其他增量第一版不转发。
+        // listener 自包 try/catch（同本函数不变式：绝不毒化 Run）
+        if (
+          this.#streamListeners.size > 0 &&
+          event.type === "message_update" &&
+          event.assistantMessageEvent.type === "text_delta"
+        ) {
+          const delta: StreamTextDelta = Object.freeze({
+            runId,
+            delta: event.assistantMessageEvent.delta,
+          });
+          for (const listener of this.#streamListeners) {
+            try {
+              listener(delta);
+            } catch (error) {
+              this.#listenerErrors.push(error);
+            }
+          }
+        }
         return;
       }
       // 账本联动：tool_execution_end 到达即 settled——被阻断者从 approval 落（决策已 rejected），
