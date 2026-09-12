@@ -5,7 +5,9 @@
 // 事件日志 = <workspaceRoot>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；
 // ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）。
 // resume 复用同一 sessionId 续写（append 模式），会话文件跨进程延续
+import { existsSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
@@ -110,4 +112,26 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     workspaceRoot: deps.workspaceRoot,
   });
   return { adapter, eventLog, grantStore, configGrants };
+}
+
+// 加载用户提供的 StreamFn 模块（默认导出必须是函数）。归位装配根（M2 S2）：它是模型接入的
+// 装载件，与 buildRuntime 同属"装配"职责；cli 与 tui 两个 Actor 都从本层取，避免 Actor 互依
+export async function loadStreamFn(specifier: string): Promise<StreamFn> {
+  // 说明符判定：磁盘上存在的相对/绝对路径一律按文件加载（tmp/x.mjs 这类含分隔符的
+  // 相对路径也是文件，不能交给裸说明符解析）；否则按裸包名 import
+  const asFile = path.resolve(specifier);
+  const url = existsSync(asFile) ? pathToFileURL(asFile).href : specifier;
+  let module: Record<string, unknown>;
+  try {
+    // 动态 import 的合理例外：模块说明符来自运行期旗标/环境变量（插件加载），静态 import 无法覆盖
+    module = (await import(url)) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(
+      `无法加载 streamFn 模块 ${specifier}：${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (typeof module.default !== "function") {
+    throw new Error(`streamFn 模块 ${specifier} 没有默认导出函数`);
+  }
+  return module.default as StreamFn;
 }

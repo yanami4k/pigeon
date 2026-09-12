@@ -191,7 +191,7 @@ test("D2 可见性：事件落盘失败（listenerErrors 非空）→ REPL 显�
 });
 
 test("loadStreamFn：加载默认导出函数的模块；坏路径与缺默认导出给清晰报错", async () => {
-  const { loadStreamFn } = await import("./index.ts");
+  const { loadStreamFn } = await import("../application/runtime.ts");
   const dir = mkdtempSync(join(tmpdir(), "pigeon-streamfn-"));
   try {
     writeFileSync(join(dir, "ok.mjs"), "export default function fakeStreamFn() {}\n");

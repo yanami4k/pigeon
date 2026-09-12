@@ -6,14 +6,13 @@
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { runResumeFlow } from "../application/resume.ts";
-import { buildRuntime, type RuntimeBundle } from "../application/runtime.ts";
+import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { materializeSession } from "../persistence/event-log.ts";
 import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
-import type { StreamFn } from "../pi-runtime/index.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
@@ -22,27 +21,6 @@ import { createAsker, runRepl } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runSessionListCommand } from "./session.ts";
 import { runTraceCommand } from "./trace.ts";
-
-// 加载用户提供的 StreamFn 模块（默认导出必须是函数）
-export async function loadStreamFn(specifier: string): Promise<StreamFn> {
-  // 说明符判定：磁盘上存在的相对/绝对路径一律按文件加载（tmp/x.mjs 这类含分隔符的
-  // 相对路径也是文件，不能交给裸说明符解析）；否则按裸包名 import
-  const asFile = path.resolve(specifier);
-  const url = existsSync(asFile) ? pathToFileURL(asFile).href : specifier;
-  let module: Record<string, unknown>;
-  try {
-    // 动态 import 的合理例外：模块说明符来自运行期旗标/环境变量（插件加载），静态 import 无法覆盖
-    module = (await import(url)) as Record<string, unknown>;
-  } catch (error) {
-    throw new Error(
-      `无法加载 streamFn 模块 ${specifier}：${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  if (typeof module.default !== "function") {
-    throw new Error(`streamFn 模块 ${specifier} 没有默认导出函数`);
-  }
-  return module.default as StreamFn;
-}
 
 // pigeon trace <sessionId> [--run <runId>] [--root <dir>]：只读关联视图（M4 S3）——
 // 不需要模型接入，永不写事件日志/工作区（只走 materializeSession 读路径，见 trace.ts）
@@ -377,7 +355,7 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-// 仅作为入口直接运行时执行；被 import（如测试取 loadStreamFn）时不启动 REPL
+// 仅作为入口直接运行时执行；被 import 时不启动 REPL
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error));
