@@ -4,6 +4,12 @@
 // 不触发 D8 旧账本迁移；trace 永不写事件日志与工作区。
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+  approvalVerdict,
+  breakerScopeLabel,
+  shortId,
+  summarizeArgs,
+} from "../application/format.ts";
 import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import {
@@ -13,7 +19,6 @@ import {
   type TraceRun,
   type TraceToolCall,
 } from "../state/trace.ts";
-import { approvalVerdict, breakerScopeLabel, shortId, summarizeArgs } from "./format.ts";
 
 function renderToolCall(call: TraceToolCall, lines: string[]): void {
   lines.push(`    工具调用 ${call.toolCallId} [${call.toolName}]`);

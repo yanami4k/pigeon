@@ -65,6 +65,18 @@ export default {
       to: { path: "^src/(pi-runtime|cli|tui)/" },
     },
     {
+      name: "application-is-controller",
+      severity: "error",
+      comment:
+        "application 是 Controller 层（M2 S1，决策 025）：装配根、resume 流程与 Actor 共用措辞；" +
+        "可依赖 state / persistence / tools / approvals / pi-runtime / execution，不触达 Actor 层（cli/tui）。",
+      from: { path: "^src/application/", pathNot: "\\.test\\.ts$" },
+      to: {
+        path: "^src/",
+        pathNot: "^src/(application|state|persistence|tools|approvals|pi-runtime|execution)/",
+      },
+    },
+    {
       name: "tui-cannot-reach-execution",
       severity: "error",
       comment: "TUI 只提交意图、渲染投影，不能触碰执行器（ROADMAP §2/§3.6 Actor 边界）。",

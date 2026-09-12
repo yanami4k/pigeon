@@ -7,13 +7,18 @@
 // replay 是原始时间流——该 Run 的全部事件日志记录按落盘顺序逐条呈现，异常原位标注。
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+  approvalVerdict,
+  breakerScopeLabel,
+  shortId,
+  summarizeArgs,
+} from "../application/format.ts";
 import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import type { EventRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import { buildRunReplay, type ReplayEvent, type RunReplay } from "../state/replay.ts";
 import { failureBadge } from "../state/trace.ts";
-import { approvalVerdict, breakerScopeLabel, shortId, summarizeArgs } from "./format.ts";
 
 // 毫秒时间戳（UTC）：HH:MM:SS.mmm——时间线是黑匣子回放，毫秒序对崩溃分析有意义
 function timeOf(timestamp: number): string {

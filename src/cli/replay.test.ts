@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
+import { shortId } from "../application/format.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -37,7 +38,6 @@ import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
-import { shortId } from "./format.ts";
 import { runReplayCommand } from "./replay.ts";
 
 function makeRegistry(): ToolRegistry {

@@ -1,4 +1,6 @@
-// CLI 报告共用人话格式化助手（trace / replay 共用，单一约定，禁止各视图自造第二套措辞）。
+// Actor 报告共用人话格式化助手（trace / replay / resume 菜单等共用，单一约定，禁止各视图
+// 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
+// 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
