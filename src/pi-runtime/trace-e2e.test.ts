@@ -132,15 +132,19 @@ test("完成证据：用户请求 → 工具参数 → 审批 → Receipt → �
     );
     assert.deepEqual(t1.classification?.failure, null, "正常收尾的 Run 不是失败");
 
-    // 第 1 轮：read_file 自动放行——事件级 + 治理族全链
+    // 第 1 轮：read_file 事件级记录（决策 1 证据链分层，M4 S6 G）——只有 tool.proposed /
+    // tool.settled，无 intent / receipt 治理行；对账无悬账
     const readCall = t1.turns[0]?.toolCalls[0];
     assert.ok(readCall);
     assert.equal(readCall.toolName, "read_file");
-    assert.equal(readCall.intent?.decision.approvedBy, "policy:auto");
-    assert.equal(readCall.proposed?.payload.toolCallId, readCall.intent?.toolCallId);
-    assert.equal(readCall.receipt?.executionId, readCall.intent?.executionId);
-    assert.equal(readCall.receipt?.executed, true);
-    assert.deepEqual(readCall.classification?.failure, null);
+    assert.equal(readCall.intent, undefined, "读调用不落 intent（决策 1）");
+    assert.equal(readCall.decision, undefined);
+    assert.equal(readCall.receipt, undefined, "读调用不落 receipt（决策 1）");
+    assert.ok(readCall.proposed);
+    assert.ok(readCall.settled);
+    assert.equal(readCall.proposed.payload.toolCallId, readCall.settled.payload.toolCallId);
+    assert.equal(readCall.settled.payload.isError, false);
+    assert.equal(readCall.classification, undefined, "读调用无治理行，不进失败分类（决策 1）");
     assert.equal(readCall.pendingReconcile, false);
 
     // 第 2 轮：edit_file 人工批准——提议参数 ≡ 落账参数，Receipt 实测哈希 ≡ intent 预期改后
@@ -191,11 +195,15 @@ test("完成证据：用户请求 → 工具参数 → 审批 → Receipt → �
     const reread = t2.toolCalls[0];
     assert.ok(reread);
     assert.equal(reread.toolCallId, "tc-1-1");
-    assert.notEqual(reread.intent?.executionId, readCall.intent?.executionId);
-    assert.equal(reread.intent?.runId, run2.runId);
-    assert.equal(reread.receipt?.executionId, reread.intent?.executionId);
+    // Run 2 的读调用同为事件级：proposed/settled 在场、治理族缺省，且 runId 域不串线
+    assert.equal(reread.intent, undefined);
+    assert.equal(reread.receipt, undefined);
+    assert.ok(reread.proposed);
+    assert.ok(reread.settled);
+    assert.equal(reread.proposed.runId, run2.runId);
+    assert.equal(reread.settled.runId, run2.runId);
     // Run 1 的同名调用不被污染
-    assert.equal(readCall.intent?.runId, run1.runId);
+    assert.equal(readCall.proposed?.runId, run1.runId);
     assert.deepEqual(reread.anomalies, []);
   } finally {
     rmSync(root, { recursive: true, force: true });

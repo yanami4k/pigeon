@@ -81,3 +81,54 @@ test("每次判定都带人读理由", () => {
     }
   }
 });
+
+// M4 S6（决策 3）排律：deny 清单 → 会话 grant → 配置 grant → yolo → read 自动 → prompt。
+// grant 出处由 adapter 的 grant 匹配注入（第 4 参），policy 层只负责排律位置与理由
+test("排律：grant 命中压过 yolo / read 自动 / prompt，回指出场", () => {
+  const registry = makeRegistry();
+  const sessionHit = {
+    source: "session-grant" as const,
+    refId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+  };
+  const configHit = { source: "config-rule" as const, refId: "config:grants.json#0" };
+
+  // prompt 模式：write 层本需人工——grant 命中即免审
+  const promptPolicy = makePolicy({ approvalMode: "prompt" });
+  const granted = evaluateToolPolicy(registry, "edit_file", promptPolicy, sessionHit);
+  assert.equal(granted.kind, "auto-allow");
+  assert.deepEqual(granted.grant, sessionHit);
+  assert.match(granted.reason, /会话放权/);
+
+  // grant 压过 read 层自动放行（grant 出处优先于 policy:auto）
+  const readGranted = evaluateToolPolicy(registry, "read_file", promptPolicy, configHit);
+  assert.equal(readGranted.kind, "auto-allow");
+  assert.deepEqual(readGranted.grant, configHit);
+  assert.match(readGranted.reason, /固化规则/);
+
+  // grant 压过 yolo（出处记 grant 而非 policy:yolo——可审计"凭什么没问人"）
+  const yoloGranted = evaluateToolPolicy(
+    registry,
+    "run_tests",
+    makePolicy({ approvalMode: "yolo" }),
+    configHit
+  );
+  assert.equal(yoloGranted.kind, "auto-allow");
+  assert.deepEqual(yoloGranted.grant, configHit);
+});
+
+test("排律：deny 清单绝对压过 grant（约束 1：grant 与配置规则均不豁免 deny）", () => {
+  const registry = makeRegistry();
+  const policy = makePolicy({ deny: ["edit_file"], approvalMode: "prompt" });
+  const hit = { source: "session-grant" as const, refId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS" };
+  const decision = evaluateToolPolicy(registry, "edit_file", policy, hit);
+  assert.equal(decision.kind, "deny");
+  assert.equal(decision.grant, undefined);
+});
+
+test("排律：未注册工具 fail-closed 压过 grant（授权不扩大未注册面）", () => {
+  const registry = makeRegistry();
+  const hit = { source: "session-grant" as const, refId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS" };
+  const decision = evaluateToolPolicy(registry, "rm_rf", makePolicy(), hit);
+  assert.equal(decision.kind, "deny");
+  assert.equal(decision.grant, undefined);
+});

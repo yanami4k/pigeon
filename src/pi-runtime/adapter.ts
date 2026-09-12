@@ -29,6 +29,11 @@ import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { classifyRunOutcome, type FailureClass } from "../persistence/classification.ts";
 import type { JsonlEventLog } from "../persistence/event-log.ts";
+import {
+  type ConfigGrantRule,
+  type GrantMatchOutcome,
+  matchConfigGrants,
+} from "../persistence/grants.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
@@ -85,6 +90,14 @@ export type EventLogSink = Pick<
   | "appendBreaker"
 >;
 
+// M4 S6（决策 3）：会话 grant 匹配注入面——persistence/grants.ts 的 SessionGrantStore
+// 满足该结构；测试可注入假实现。match 纯求值（无副作用）；命中计数由 Adapter 在
+// 放行实际生效后调 noteEffectiveHit（deny 压过 grant 的求值不计命中——审计口径：命中 = 实际免审放行）
+export interface SessionGrantMatcher {
+  match(toolName: string, args: unknown): GrantMatchOutcome | null;
+  noteEffectiveHit(outcome: GrantMatchOutcome): void;
+}
+
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
   // 永远显式传入；测试注入假 streamFn，生产注入真实 provider 实现
@@ -102,6 +115,15 @@ export interface PiRuntimeAdapterOptions {
   // M4 S1：Event Log 落盘点（缺省 = 纯内存事件序列，不落盘）。
   // 结构类型而非 JsonlEventLog 具体类：测试可注入故障包装器模拟崩溃点
   eventLog?: EventLogSink;
+  // M4 S6（决策 3）：会话 grant 存储——审批提示 [a]/[d] 键创建的放权由此注入求值；
+  // 治理面运行时状态，不进 InjectionSnapshot（约束 4：grant 必须可撤销，与快照冻结矛盾）
+  sessionGrants?: SessionGrantMatcher;
+  // M4 S6（D6）：固化配置规则（.pigeon/grants.json，启动时装载、会话内冻结）；
+  // 命中记 approvedBy=policy:config，intent 回指 config:grants.json#<条目序号>
+  configGrants?: readonly ConfigGrantRule[];
+  // 目录限定匹配（pathPrefix）的 realpath 解析根；缺省 = 带 pathPrefix 的规则一律不匹配
+  // （fail-closed 到人工审批——授权判定不猜）
+  workspaceRoot?: string;
   // 熔断阈值：同一 工具名+参数指纹 在同一 Run 内被阻断的次数上限（spike S4：上游无循环护栏）
   circuitBreakerThreshold?: number;
 }
@@ -119,6 +141,10 @@ export class PiRuntimeAdapter {
   readonly #breakerThreshold: number;
   readonly #approvalHandler: ApprovalHandler | undefined;
   readonly #tools: ReadonlyMap<string, AgentTool>;
+  // M4 S6（决策 3）：grant 求值件（会话 grant 匹配 + 固化配置规则 + 目录解析根）
+  readonly #sessionGrants: SessionGrantMatcher | undefined;
+  readonly #configGrants: readonly ConfigGrantRule[];
+  readonly #workspaceRoot: string | undefined;
   // ToolExecution 账本：toolCallId → 记录（M3 内存态；持久化是切片 5）
   readonly #executions = new Map<string, ToolExecution>();
   readonly #eventLog: EventLogSink | undefined;
@@ -167,6 +193,10 @@ export class PiRuntimeAdapter {
     this.#approvalHandler = options.approvalHandler;
     this.#breakerThreshold = options.circuitBreakerThreshold ?? 3;
     this.#eventLog = options.eventLog;
+    // M4 S6（决策 3）：grant 求值件——会话 grant 优先于固化配置规则（排律第 3 档内次序）
+    this.#sessionGrants = options.sessionGrants;
+    this.#configGrants = options.configGrants ?? [];
+    this.#workspaceRoot = options.workspaceRoot;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -488,7 +518,13 @@ export class PiRuntimeAdapter {
     this.#runToolCallIds.push(toolCallId);
 
     const policy = this.#snapshot.tools.policy;
-    const decision = evaluateToolPolicy(this.#registry, toolName, policy);
+    // 排律（决策 3）：deny 清单 → 会话 grant → 配置 grant → yolo → read 自动 → prompt——
+    // 前二档收在 evaluateToolPolicy 内（deny 绝对优先，grant 不豁免）；grant 匹配在此注入：
+    // 会话 grant 优先于固化配置规则。匹配纯求值不计命中，命中计数在放行实际生效后记
+    const grantHit =
+      this.#sessionGrants?.match(toolName, rawArgs) ??
+      matchConfigGrants(this.#configGrants, this.#workspaceRoot, toolName, rawArgs);
+    const decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined);
 
     // deny 清单绝对 / 未注册 fail-closed：自动拒绝，不弹人工审批
     if (decision.kind === "deny") {
@@ -503,17 +539,35 @@ export class PiRuntimeAdapter {
       return this.#blockWithBreaker(toolName, toolCallId, rawArgs, decision.reason, "tool");
     }
 
-    // 自动放行：yolo 批发授权（policy:yolo）或 prompt 模式下 read 层（policy:auto）。
+    // 自动放行：grant 命中（human:grant / policy:config，回指出处）> yolo 批发授权
+    // （policy:yolo）> prompt 模式下 read 层（policy:auto）。
     // sequential 模式下 hook 放行即进入执行（上游无独立 execution-start 事件），
     // 故 dispatch/execution 两个时间戳在放行时一并盖章
     if (decision.kind === "auto-allow") {
+      const grant = decision.grant;
+      const approvedBy =
+        grant?.source === "session-grant"
+          ? "human:grant"
+          : grant?.source === "config-rule"
+            ? "policy:config"
+            : policy.approvalMode === "yolo"
+              ? "policy:yolo"
+              : "policy:auto";
       record = recordDecision(record, {
         outcome: "approved",
-        approvedBy: policy.approvalMode === "yolo" ? "policy:yolo" : "policy:auto",
+        approvedBy,
+        // 每次免审放行回指具体 grant/配置条目（决策 3）：可审计"这次写操作凭什么没问人"
+        ...(grant !== undefined ? { grantRef: { kind: grant.source, id: grant.refId } } : {}),
         decidedAt: Date.now(),
       });
-      // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）
-      await this.#persistIntent(record);
+      // 决策 1 证据链分层（M4 S6 G）：读层调用只留事件级记录——无副作用，intent/receipt
+      // 级持久化冗余；写/exec 层维持 §3.2 三族齐全（intent 写盘失败 = fail-closed 不放行）
+      if (this.#registry.get(toolName)?.tier !== "read") {
+        await this.#persistIntent(record);
+      }
+      if (grant !== undefined) {
+        this.#sessionGrants?.noteEffectiveHit(grant);
+      }
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
@@ -652,6 +706,11 @@ export class PiRuntimeAdapter {
   // OutcomeUnknown；rejected 路径已有 decision 行闭环，归 rejected 不入 unknown。
   #persistReceipt(record: ToolExecution, isError: boolean): void {
     if (this.#eventLog === undefined) {
+      return;
+    }
+    // 决策 1 证据链分层（M4 S6 G）：读层调用只留事件级记录——receipt 不落盘
+    // （无副作用可对账；内存账本与事件流仍完整）
+    if (this.#registry.get(record.toolName)?.tier === "read") {
       return;
     }
     const decision = record.decision;

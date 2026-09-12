@@ -115,8 +115,11 @@ test("trace 报告：中文标签、id 短哈希、审批出处、逐字拒绝�
     const { sessionId } = await scriptSession(root);
     const output = runTraceCommand({ root, sessionId });
 
-    // 审批出处三类齐备（决策 4 证据链）
-    assert.ok(output.includes("策略自动放行（policy:auto）"), "read 层自动放行必须标明出处");
+    // 审批出处三类齐备（决策 4 证据链）+ 读层事件级标注（决策 1）
+    assert.ok(
+      output.includes("审批：事件级记录（读调用按决策 1 只留事件级，不落治理族）"),
+      "read 调用必须如实标注事件级（无治理行）"
+    );
     assert.ok(output.includes("人工批准（human）"));
     assert.ok(output.includes("人工拒绝（human）"));
     // 拒绝理由逐字呈现

@@ -22,10 +22,17 @@ function renderToolCall(call: TraceToolCall, lines: string[]): void {
       ? "      提议参数：<tool.proposed 事件缺失（证据缺口）>"
       : `      提议参数：${summarizeArgs(call.proposed.payload.args)}`
   );
-  // 治理出处：intent（批准）或 decision（拒绝）；两者都没有 = 未过审批闸（上游拦截/缺口）
+  // 治理出处：intent（批准）或 decision（拒绝）；两者都没有时分两种如实呈现——
+  // 执行成功且无任何治理记录 = 读层事件级调用（决策 1：读调用只留事件级，非异常）；
+  // 其余 = 未过审批闸（上游拦截/事件落盘缺口）
   const governance = call.intent ?? call.decision;
   if (governance === undefined) {
-    lines.push("      审批：无治理记录（未过审批闸——上游拦截或事件落盘缺口）");
+    const eventLevelOnly = call.settled !== undefined && call.settled.payload.isError === false;
+    lines.push(
+      eventLevelOnly
+        ? "      审批：事件级记录（读调用按决策 1 只留事件级，不落治理族）"
+        : "      审批：无治理记录（未过审批闸——上游拦截或事件落盘缺口）"
+    );
   } else {
     const decision = governance.decision;
     lines.push(
