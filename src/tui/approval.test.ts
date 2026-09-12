@@ -45,6 +45,14 @@ class StubRuntime implements TuiRuntimeFace {
     return promise;
   }
 
+  interrupt(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  listenerErrors(): unknown[] {
+    return [];
+  }
+
   subscribe(_listener: (event: EventEnvelope) => void): () => void {
     return () => {};
   }

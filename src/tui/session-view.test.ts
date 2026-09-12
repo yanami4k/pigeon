@@ -72,6 +72,14 @@ class FakeRuntime implements TuiRuntimeFace {
     return this.listeners.size + this.streamListeners.size;
   }
 
+  interrupt(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  listenerErrors(): unknown[] {
+    return [];
+  }
+
   subscribe(listener: (event: EventEnvelope) => void): () => void {
     this.listeners.add(listener);
     return () => {

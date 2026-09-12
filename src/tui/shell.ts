@@ -25,8 +25,17 @@
 //   人工确认用面板式单键（决策 031：与 029 一致的输入语义，不引入第三种输入模式），
 //   resolution 写盘路径完全复用 application 层；对账收口后经装配方注入的 rebind
 //   换绑运行面（restoredGrants 种子在 main.ts 物化），同 sessionId 续跑。
-// - dispose 对称为后续切片留位：取消键（S5）的订阅与监听器
-//   一律进 disposers，在 start/stop 里成对出现。
+// - 取消入口（S5，裁决 032）：运行中按 Esc 触发 adapter.interrupt()（固定姿势
+//   abort → waitForIdle，注释约束 5）；Ctrl+C 不绑定取消——保留进程退出语义
+//   （main.ts 的 OS 信号处理）。模态键控优先：审批面板/恢复菜单挂起期间 Esc 与非决议键
+//   同待遇吞掉——审批挂起即 Run 阻塞在 beforeToolCall 的人工决议上，此时 interrupt
+//   会吊在挂起 Promise 上直到人按键，「取消」名不副实；模态先决议再 Esc 是唯一次序。
+//   中断飞行中重复 Esc 不再触发（不 double-abort、不悬挂）；running 清算在 handleRunEnd。
+// - 终态摘要（S5）：run() 决议后落终态行——status + stopReason + 四分类徽章（措辞复用
+//   application/format.ts 的 failureBadge，与 cli trace 同口径）+ errorMessage（若有）+
+//   syntheticFailure 标注（若有）；listenerErrors 非空时消息区增量警告（D2 可见化的
+//   TUI 投影，措辞与增量报数口径同 cli repl：启动即查 + 每次 run 收尾复查）。
+// - dispose 对称：取消键的订阅与监听器一律进 disposers，在 start/stop 里成对出现。
 import {
   Container,
   Input,
@@ -35,14 +44,13 @@ import {
   Text,
   TuiMainScreen,
 } from "@earendil-works/pi-tui";
-import { summarizeArgs } from "../application/format.ts";
+import { failureBadge, summarizeArgs } from "../application/format.ts";
 import { type GrantConfigEventSink, runGrantCommand } from "../application/grants.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
-import type { FailureClass } from "../state/classification.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { asSessionId, type RunId, type SessionId } from "../state/ids.ts";
@@ -66,6 +74,11 @@ export interface TuiRuntimeFace {
   run(input: string): Promise<RunResult>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
   subscribeStream(listener: (delta: StreamTextDelta) => void): () => void;
+  // S5 取消入口：中断当前 Run（Adapter 固定姿势 abort → waitForIdle，注释约束 5，
+  // 任何路径不悬挂；终态由并发等待的 run() 返回承载）
+  interrupt(): Promise<void>;
+  // S5 D2 可见化投影：事件落盘失败观察口（措辞与增量报数口径同 cli repl）
+  listenerErrors(): unknown[];
 }
 
 // TUI 治理命令上下文（/grants /revoke /grants save；决策 030）
@@ -101,12 +114,6 @@ export interface TuiShellOptions {
     root: string;
     rebind: (sessionId: SessionId) => TuiSessionBinding | Promise<TuiSessionBinding>;
   };
-}
-
-function failureLabel(failure: FailureClass): string {
-  return failure.category === "cancelled" && failure.breaker
-    ? "cancelled/breaker"
-    : failure.category;
 }
 
 // 消息流：每条消息一个 Text（spike 铁律——未变消息渲染 O(1) 命中缓存，流式只重折行尾巴）。
@@ -201,6 +208,11 @@ export class PigeonTuiShell implements TuiApprovalFace {
   // S4 恢复菜单：挂起中的三选一决议（面板式单键，决策 031）；与审批面板互斥——
   // 审批只发生在 Run 内，菜单只在无 Run 的 /resume 流程内（busy 不开旁路）
   private pendingMenu: { resolve: (choice: string | null) => void } | null = null;
+  // S5 取消键：中断飞行中标记——interrupt 未决议期间重复 Esc 不再触发
+  //（不 double-abort、不悬挂）；running 清算在 handleRunEnd，两者生命周期独立
+  private interrupting = false;
+  // S5 D2 可见化（同 repl 增量报数口径）：已警告过的落盘失败累计数
+  private reportedListenerErrors = 0;
 
   constructor(options: TuiShellOptions) {
     this.options = options;
@@ -220,9 +232,11 @@ export class PigeonTuiShell implements TuiApprovalFace {
   start(): void {
     if (this.started) return;
     this.started = true;
-    // 模态键控（S3 审批面板 + S4 恢复菜单）：面板/菜单挂起期间接管终端输入
-    this.disposers.push(this.tui.addInputListener((data) => this.handleModalKey(data)));
+    // 壳级键控（S3 审批面板 + S4 恢复菜单 + S5 取消键）：模态挂起期间接管终端输入
+    this.disposers.push(this.tui.addInputListener((data) => this.handleShellKey(data)));
     this.bindRuntime(this.current.runtime);
+    // D2 可见化（S5，同 repl 口径）：启动即查一次落盘失败
+    this.warnEvidenceGaps();
     this.tui.setFocus(this.input);
     this.tui.start();
     this.tui.requestRender();
@@ -265,9 +279,11 @@ export class PigeonTuiShell implements TuiApprovalFace {
         ? "state: approval | decide in panel"
         : this.resuming
           ? "state: resume | answer in message area"
-          : this.running
-            ? "state: running | input locked"
-            : "state: idle | [enter] submit"
+          : this.interrupting
+            ? "state: cancelling | input locked"
+            : this.running
+              ? "state: running | input locked"
+              : "state: idle | [enter] submit"
     );
   }
 
@@ -329,6 +345,55 @@ export class PigeonTuiShell implements TuiApprovalFace {
   noteApproval(line: string): void {
     this.flow.addSystem(line);
     this.tui.requestRender();
+  }
+
+  // 壳级键控路由：模态键控优先（决策 029/031，S5 裁决 032），其后才是取消键
+  private handleShellKey(data: string): { consume: true } | undefined {
+    if (this.handleModalKey(data) !== undefined) return { consume: true };
+    // 取消键（S5）：Esc = 裸 "\x1b"（方向键等转义序列是多字节，不会误判）；Ctrl+C 不进
+    // 本路径——不绑定取消，保留进程退出语义（main.ts 的 OS 信号处理）。仅运行中消费；
+    // 空闲 Esc 放行给 Input 组件（其 onEscape 未装配，语义为空）
+    if (data === "\x1b" && this.running) {
+      this.requestInterrupt();
+      return { consume: true };
+    }
+    return undefined;
+  }
+
+  // 取消入口（S5）：触发 adapter.interrupt()（固定姿势 abort → waitForIdle，注释约束 5）。
+  // 重复取消防御：中断飞行中不再触发——不 double-abort、不悬挂；running 清算在
+  // handleRunEnd（run() 决议承载终态），interrupt 决议只清飞行标记
+  private requestInterrupt(): void {
+    if (this.interrupting) return;
+    this.interrupting = true;
+    this.flow.addSystem("[cancel] interrupt requested; waiting for run to settle");
+    this.updateStatus();
+    this.tui.requestRender();
+    const settle = (error?: unknown): void => {
+      this.interrupting = false;
+      if (error !== undefined) {
+        // interrupt 自身抛异常（装配级故障）：如实呈现，不伪装成已取消
+        this.flow.addSystem(
+          `[cancel] interrupt failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      this.updateStatus();
+      this.tui.requestRender();
+    };
+    this.current.runtime.interrupt().then(
+      () => settle(),
+      (error: unknown) => settle(error)
+    );
+  }
+
+  // D2 可见化的 TUI 投影（S5）：事件落盘失败非空时消息区警告——措辞与 cli repl 同口径，
+  // 增量报数（同一批故障不重复刷屏，新故障以累计数提醒）；启动即查 + 每次 run 收尾复查
+  private warnEvidenceGaps(): void {
+    const count = this.current.runtime.listenerErrors().length;
+    if (count > this.reportedListenerErrors) {
+      this.flow.addSystem(`警告：本会话有 ${count} 条事件落盘失败，证据链不完整。`);
+      this.reportedListenerErrors = count;
+    }
   }
 
   // 模态键控：审批面板（S3）或恢复菜单（S4）挂起期间接管终端输入——决议键 resolve，
@@ -476,6 +541,8 @@ export class PigeonTuiShell implements TuiApprovalFace {
     this.current = { sessionId, runtime: binding.runtime };
     if (binding.grants !== undefined) this.current.grants = binding.grants;
     this.activeRunId = null;
+    // S5：落盘失败警告计数随运行面一起换绑——新面的 listenerErrors 从零起算
+    this.reportedListenerErrors = 0;
     this.title.setText(`== pigeon tui | session ${sessionId} ==`);
     this.bindRuntime(binding.runtime);
     this.tui.requestRender();
@@ -485,15 +552,21 @@ export class PigeonTuiShell implements TuiApprovalFace {
     this.running = false;
     this.activeRunId = null;
     if (result !== null) {
+      // 终态摘要（S5）：status + stopReason + 四分类徽章（failureBadge，与 cli trace
+      // 同口径）+ syntheticFailure 标注（若有）+ errorMessage（若有）
       const parts = [`== run: ${result.status}`];
       if (result.stopReason !== undefined) parts.push(`stop: ${result.stopReason}`);
-      if (result.failure !== null) parts.push(`failure: ${failureLabel(result.failure)}`);
+      parts.push(`分类：${failureBadge(result.failure)}`);
+      if (result.syntheticFailure) parts.push("(synthetic failure)");
+      if (result.errorMessage !== undefined) parts.push(`error: ${result.errorMessage}`);
       this.flow.addSystem(`${parts.join(" | ")} ==`);
     } else {
       // run() 自身抛异常（装配级故障）：如实呈现，不伪装成正常终态
       const message = error instanceof Error ? error.message : String(error);
       this.flow.addSystem(`== run: error | ${message} ==`);
     }
+    // D2 可见化（S5）：每次 run 收尾复查落盘失败（增量报数，同 repl 口径）
+    this.warnEvidenceGaps();
     this.updateStatus();
     this.tui.requestRender();
   }
