@@ -1,16 +1,22 @@
-// Pigeon TUI 入口（M2 S2 壳 + S3 审批面板与 /grants 视图）。
+// Pigeon TUI 入口（M2 S2 壳 + S3 审批面板与 /grants 视图 + S4 会话列表与恢复入口）。
 // 用法：node src/tui/main.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
 //   [--provider <名>] [--model <id>]
 // 审批 handler（决策 025 的注入点）：面板版——prompt 档在消息区渲染审批块，四键
 // [y/n/a/d] 决议（S3）；deny/grant/固化配置/yolo/read 五档在 Adapter 排律内求值，
 // 不经过 handler（src/tools/policy.ts 六档排律）。
+// 恢复入口（S4）：/resume <sessionId> 的对账流程在 application/resume.ts；本入口提供
+// rebind 工厂——按 cli resume 同一配方（restoredGrants 种子 + buildRuntime + 旧运行面
+// 释放）装配目标会话运行面，壳换绑后同 sessionId 续跑（重启 TUI 恢复已有会话的路径：
+// 重启后进 /resume）。
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
-import { buildRuntime, loadStreamFn } from "../application/runtime.ts";
+import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import type { SessionGrantStore } from "../approvals/grant-store.ts";
+import { materializeSession } from "../persistence/event-log.ts";
 import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
-import { newSessionId } from "../state/ids.ts";
+import { newSessionId, type SessionId } from "../state/ids.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { PigeonTuiShell } from "./shell.ts";
 
@@ -72,37 +78,82 @@ async function main(argv: string[]): Promise<void> {
   // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
   // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
   const faceHolder: { current: TuiApprovalFace | undefined } = { current: undefined };
-  const bundle = buildRuntime({
-    streamFn,
-    workspaceRoot,
+  const createHandler = (grants: SessionGrantStore) =>
+    createTuiApprovalHandler(grants, () => faceHolder.current);
+  // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
+  let slot: { sessionId: SessionId; bundle: RuntimeBundle } = {
     sessionId,
-    yolo: flags.yolo,
-    provider: flags.provider,
-    modelId: flags.modelId,
-    createApprovalHandler: (grants) => createTuiApprovalHandler(grants, () => faceHolder.current),
-  });
+    bundle: buildRuntime({
+      streamFn,
+      workspaceRoot,
+      sessionId,
+      yolo: flags.yolo,
+      provider: flags.provider,
+      modelId: flags.modelId,
+      createApprovalHandler: createHandler,
+    }),
+  };
   const shell = new PigeonTuiShell({
     terminal: new ProcessTerminal(),
-    runtime: bundle.adapter,
-    sessionId,
+    runtime: slot.bundle.adapter,
+    sessionId: slot.sessionId,
     logDir: path.join(workspaceRoot, ".pigeon"),
     // S3：/grants /revoke /grants save 的命令上下文（命令层在 application/grants.ts）；
     // 升格/移除留痕写本会话事件日志（M4 收口决策 ①）
     grants: {
       root: workspaceRoot,
-      store: bundle.grantStore,
-      configRules: bundle.configGrants,
-      eventLog: bundle.eventLog,
+      store: slot.bundle.grantStore,
+      configRules: slot.bundle.configGrants,
+      eventLog: slot.bundle.eventLog,
+    },
+    // S4：/sessions 会话列表（命令层在 application/session-list.ts，与 cli 同一份）
+    sessions: { root: workspaceRoot },
+    // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
+    // restoredGrants 种子（决策 3b，物化目标会话的生效 grant，静默继续有效）+
+    // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
+    // 旧运行面不受影响，壳继续留在原会话
+    resume: {
+      root: workspaceRoot,
+      rebind: (targetId) => {
+        const restoredGrants = materializeSession(
+          path.join(workspaceRoot, ".pigeon", "sessions"),
+          targetId
+        ).grants;
+        const bundle = buildRuntime({
+          streamFn,
+          workspaceRoot,
+          sessionId: targetId,
+          yolo: flags.yolo,
+          provider: flags.provider,
+          modelId: flags.modelId,
+          createApprovalHandler: createHandler,
+          restoredGrants,
+        });
+        const previous = slot;
+        slot = { sessionId: targetId, bundle };
+        void previous.bundle.adapter.dispose().finally(() => {
+          previous.bundle.eventLog.close();
+        });
+        return {
+          runtime: bundle.adapter,
+          grants: {
+            root: workspaceRoot,
+            store: bundle.grantStore,
+            configRules: bundle.configGrants,
+            eventLog: bundle.eventLog,
+          },
+        };
+      },
     },
   });
   faceHolder.current = shell;
   shell.start();
-  // 进程级退出（Ctrl+C / SIGTERM）：停壳 + 释放 adapter。注意这不是 S5 的运行取消键——
+  // 进程级退出（Ctrl+C / SIGTERM）：停壳 + 释放当前运行面。注意这不是 S5 的运行取消键——
   // 取消键是壳内输入语义，本处只处理 OS 信号
   const shutdown = (): void => {
     shell.stop();
-    void bundle.adapter.dispose().finally(() => {
-      bundle.eventLog.close();
+    void slot.bundle.adapter.dispose().finally(() => {
+      slot.bundle.eventLog.close();
       process.exit(0);
     });
   };
