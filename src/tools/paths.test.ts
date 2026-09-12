@@ -27,7 +27,11 @@ test("目录包含：目录内的文件匹配，目录外不匹配", () => {
     assert.equal(isPathInsideDir(root, "src", "src/a.ts"), true);
     assert.equal(isPathInsideDir(root, "src", "src/deep/b.ts"), true);
     assert.equal(isPathInsideDir(root, "src", "lib/c.ts"), false);
-    assert.equal(isPathInsideDir(root, "src", "srcx/a.ts"), false, "前缀相近但不相干的目录不得匹配");
+    assert.equal(
+      isPathInsideDir(root, "src", "srcx/a.ts"),
+      false,
+      "前缀相近但不相干的目录不得匹配"
+    );
     // 目录本身（相对路径为 "."）包含工作区根内一切
     assert.equal(isPathInsideDir(root, ".", "lib/c.ts"), true);
   } finally {

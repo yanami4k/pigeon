@@ -10,9 +10,11 @@ import { Value } from "typebox/value";
 import { RuntimeEventKind } from "../pi-runtime/events.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import {
+  asGrantId,
   type ExecutionId,
   newEntryId,
   newExecutionId,
+  newGrantId,
   newReceiptId,
   newRunId,
   newSessionId,
@@ -639,6 +641,113 @@ test("v2 事件文件读路径迁移：版本逐级升到当前格式（v3 加�
     assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
     assert.equal(records[0]?.kind, "resolution");
     assert.equal(records[1]?.kind, "tool.settled");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("v3 事件文件读路径迁移：纯版本推进到 v4（S6 加法式演进，旧记录逐字有效）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
+  try {
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    // 手工构造 v3 格式行（S5 落盘形状：entry 族 + human-confirmed resolution）
+    const v3Envelope = {
+      version: 3,
+      id: newEntryId(),
+      sessionId,
+      runId,
+      timestamp: 1_757_000_000_000,
+    };
+    const v3Entry = { ...v3Envelope, kind: "entry", runSeq: 1, role: "assistant" };
+    const v3Resolution = {
+      ...v3Envelope,
+      kind: "resolution",
+      executionId: newExecutionId(),
+      toolCallId: "toolu_01ABC",
+      toolName: "edit_file",
+      outcome: "not-executed",
+      method: "human-confirmed",
+      at: 1_757_000_000_003,
+    };
+    const path = join(dir, `${sessionId}.jsonl`);
+    writeFileSync(path, `${JSON.stringify(v3Entry)}\n${JSON.stringify(v3Resolution)}\n`, "utf8");
+
+    const records = readEventLogFile(path);
+    assert.equal(records.length, 2);
+    assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
+    assert.equal(records[0]?.kind, "entry");
+    assert.equal(records[1]?.kind, "resolution");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("grant 族（M4 S6，决策 3）：grant.created / grant.revoked 落盘、冷物化还原生效 grant", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
+  try {
+    const sessionId = newSessionId();
+    const runId = newRunId();
+    const log = new JsonlEventLog(dir, sessionId);
+    const createdA = log.appendGrantCreated({
+      grantId: asGrantId("grant_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
+      tool: "edit_file",
+      pathPrefix: "src",
+      createdAt: 1_757_000_000_000,
+      firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
+      runId,
+    });
+    const createdB = log.appendGrantCreated({
+      grantId: newGrantId(),
+      tool: "read_file",
+      createdAt: 1_757_000_000_001,
+      firstCall: { toolCallId: "toolu_01DEF", args: { path: "b.ts" } },
+      runId,
+    });
+    const revokedB = log.appendGrantRevoked({
+      grantId: createdB.grantId,
+      revokedAt: 1_757_000_000_002,
+      runId,
+    });
+    // REPL 时段的 /revoke 无活动 Run：runId 缺省合法（grant 是 session 级治理状态）
+    const createdC = log.appendGrantCreated({
+      grantId: newGrantId(),
+      tool: "edit_file",
+      createdAt: 1_757_000_000_003,
+      firstCall: { toolCallId: "toolu_01GHI", args: { path: "c.ts" } },
+      runId,
+    });
+    const revokedC = log.appendGrantRevoked({
+      grantId: createdC.grantId,
+      revokedAt: 1_757_000_000_004,
+    });
+    log.close();
+
+    // 耐久性佐证：全新读路径可见（治理族 writeSync + fsync 路径）
+    const lines = readFileSync(log.path, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.deepEqual(
+      lines.map((line) => line.kind),
+      ["grant.created", "grant.created", "grant.revoked", "grant.created", "grant.revoked"]
+    );
+    assert.equal(lines[0]?.version, EVENT_LOG_VERSION);
+    assert.equal(lines[4]?.runId, undefined, "REPL 时段撤销无 runId");
+
+    // 冷物化：生效 grant = created − revoked；被撤的 read_file grant 不在列
+    const materialized = materializeSession(dir, sessionId);
+    assert.equal(materialized.grantCreateds.length, 3);
+    assert.equal(materialized.grantRevokeds.length, 2);
+    assert.equal(revokedC.grantId, createdC.grantId);
+    assert.equal(materialized.grants.length, 1);
+    assert.deepEqual(
+      materialized.grants.map((grant) => [grant.grantId, grant.tool, grant.pathPrefix]),
+      [[createdA.grantId, "edit_file", "src"]]
+    );
+    assert.equal(revokedB.grantId, createdB.grantId);
+    assert.equal(materialized.grants[0]?.firstCall.toolCallId, "toolu_01ABC");
+    assert.equal(materialized.grants[0]?.createdAt, 1_757_000_000_000);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

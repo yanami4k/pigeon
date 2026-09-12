@@ -84,9 +84,14 @@ export function buildSessionTrace(
   options: TraceBuildOptions = {}
 ): SessionTrace {
   // 按 runId 分组（组内保持文件顺序）；runId 是关联的第一域——
-  // toolCallId 只保证 run 内唯一，跨 Run 可能相撞（fake/上游均如此）
+  // toolCallId 只保证 run 内唯一，跨 Run 可能相撞（fake/上游均如此）。
+  // grant 族 runId 可选（REPL 时段事件无活动 Run）——不进任何 Run 组：
+  // grant 是 session 级治理状态，/grants 是其唯一展示入口（决策 3b）
   const runRecords = new Map<RunId, EventRecord[]>();
   for (const record of session.records) {
+    if (record.runId === undefined) {
+      continue;
+    }
     const list = runRecords.get(record.runId);
     if (list === undefined) {
       runRecords.set(record.runId, [record]);

@@ -36,6 +36,7 @@ import {
   EntryIdSchema,
   type ExecutionId,
   ExecutionIdSchema,
+  GrantIdSchema,
   newEntryId,
   type RunId,
   RunIdSchema,
@@ -58,9 +59,10 @@ import {
 // Event Log 记录格式版本；迁移管线（M0 migration.ts）按 version 字段路由。
 // v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族；
 // v3（M4 S5）：新增 entry 族（D3 Pi transcript 消息映射）、resolution 增 human-confirmed
-// 人工确认渠道且 evidence 改可选——全部加法式（可缺省/新成员），旧记录经读路径迁移链
-// 逐级升级（见 eventLogMigrations）
-export const EVENT_LOG_VERSION = 3;
+// 人工确认渠道且 evidence 改可选；
+// v4（M4 S6）：新增 grant.created / grant.revoked 族（决策 3 Grant 体系）——
+// 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）
+export const EVENT_LOG_VERSION = 4;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -233,7 +235,47 @@ export const ResolutionRecordSchema = Type.Object({
 });
 export type ResolutionRecord = Static<typeof ResolutionRecordSchema>;
 
-// Event Log 记录并集（M4 S5 新增 entry 族；grant 族不在 S5 范围，S6 以新成员加法式扩展）
+// grant 族信封（M4 S6）：version + id + sessionId + 时间戳与全局信封一致，runId 可选——
+// grant 是 session 级治理状态（决策 3），不是 run 级证据；创建发生在 Run 内
+// （审批提示 [a]/[d]）时带上出处 run，REPL 时段的 /revoke 无活动 Run 则缺省
+const GRANT_ENVELOPE_PROPS = {
+  version: Type.Literal(EVENT_LOG_VERSION),
+  id: EntryIdSchema,
+  sessionId: SessionIdSchema,
+  runId: Type.Optional(RunIdSchema),
+  timestamp: Type.Integer({ minimum: 0 }),
+} as const;
+
+// grant.created（M4 S6，决策 3）：会话级放权的持久化留证——审批提示 [a]/[d] 键或
+// /grants save 升格动作的出处。firstCall 记录触发创建的那次调用（toolCallId + 模型原始参数），
+// /grants 展示与 promotedFrom 出处共用。治理族耐久（fsync），无 executionId 幂等键
+// （grantId 自带唯一性；revoke 以新事件表达，不删 created 行——事件日志 append-only）
+export const GrantCreatedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("grant.created"),
+  grantId: GrantIdSchema,
+  tool: Type.String({ minLength: 1 }),
+  // 决策 3a 目录限定：工作区相对目录（如 src）；缺省 = 工具级（不限路径）
+  pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  createdAt: Type.Integer({ minimum: 0 }),
+  firstCall: Type.Object({
+    toolCallId: Type.String({ minLength: 1 }),
+    args: Type.Unknown(),
+  }),
+});
+export type GrantCreatedRecord = Static<typeof GrantCreatedRecordSchema>;
+
+// grant.revoked（M4 S6）：/revoke <id> 的持久化留证——撤销立即生效（运行态删除 + 事件留证）。
+// 冷物化以 created − revoked 还原生效 grant 集（决策 3b：崩溃恢复静默继续有效）
+export const GrantRevokedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("grant.revoked"),
+  grantId: GrantIdSchema,
+  revokedAt: Type.Integer({ minimum: 0 }),
+});
+export type GrantRevokedRecord = Static<typeof GrantRevokedRecordSchema>;
+
+// Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
   EntryRecordSchema,
@@ -242,6 +284,8 @@ export const EventRecordSchema = Type.Union([
   ReceiptRecordSchema,
   BreakerRecordSchema,
   ResolutionRecordSchema,
+  GrantCreatedRecordSchema,
+  GrantRevokedRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -263,6 +307,15 @@ export type BreakerInput = Omit<
 export type EntryInput = Omit<EntryRecord, "version" | "id" | "sessionId" | "kind" | "timestamp">;
 export type ResolutionInput = Omit<
   ResolutionRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+// grant 族追加输入：业务字段 + runId；信封其余字段由日志盖章
+export type GrantCreatedInput = Omit<
+  GrantCreatedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type GrantRevokedInput = Omit<
+  GrantRevokedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
 
@@ -305,6 +358,14 @@ export interface ReconcileReport {
 }
 
 // 冷物化结果：一个 session 的完整派生状态（D5：派生不落库，视图是投影）
+// 生效 grant（决策 3b 冷恢复还原面）：grant.created 减去 grant.revoked 的纯派生
+export interface ActiveGrant {
+  grantId: GrantCreatedRecord["grantId"];
+  tool: string;
+  pathPrefix?: string;
+  createdAt: number;
+  firstCall: GrantCreatedRecord["firstCall"];
+}
 export interface MaterializedSession {
   sessionId: SessionId;
   path: string;
@@ -321,6 +382,11 @@ export interface MaterializedSession {
   resolutions: ResolutionRecord[];
   // entry 族（M4 S5，D3）：transcript 消息的 EntryId 映射，按落盘顺序
   entries: EntryRecord[];
+  // grant 族（M4 S6，决策 3）：created / revoked 原始记录与生效集（created − revoked，
+  // 按 createdAt 排序）——冷恢复的 grant 还原面（决策 3b：静默继续有效，/grants 唯一展示入口）
+  grantCreateds: GrantCreatedRecord[];
+  grantRevokeds: GrantRevokedRecord[];
+  grants: ActiveGrant[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
@@ -355,6 +421,9 @@ eventLogMigrations.register("event-log", 1, (doc) => ({
 // v2 → v3（M4 S5）：加法式演进（新增 entry 族；resolution 增 human-confirmed 渠道、
 // evidence 改可选）——v2 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 2, (doc) => ({ ...doc, version: 3 }));
+// v3 → v4（M4 S6）：加法式演进（新增 grant.created / grant.revoked 族）——
+// v3 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 3, (doc) => ({ ...doc, version: 4 }));
 
 // 全量读 + 校验的结果：记录集 + 撕裂尾巴标记。
 // tornTail：进程死于写盘中途的痕迹——追加协议保证每条记录以 \n 结尾，
@@ -563,6 +632,38 @@ export class JsonlEventLog {
     return record;
   }
 
+  // grant.created 落盘（M4 S6，决策 3）：治理族耐久（fsync），无 executionId 幂等键
+  appendGrantCreated(input: GrantCreatedInput): GrantCreatedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(GrantCreatedRecordSchema, {
+      version: EVENT_LOG_VERSION,
+      id: newEntryId(),
+      sessionId: this.sessionId,
+      ...(runId !== undefined ? { runId } : {}),
+      timestamp: Date.now(),
+      kind: "grant.created",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // grant.revoked 落盘（M4 S6）：治理族耐久（fsync）；撤销以新事件表达，append-only 不删 created 行
+  appendGrantRevoked(input: GrantRevokedInput): GrantRevokedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(GrantRevokedRecordSchema, {
+      version: EVENT_LOG_VERSION,
+      id: newEntryId(),
+      sessionId: this.sessionId,
+      ...(runId !== undefined ? { runId } : {}),
+      timestamp: Date.now(),
+      kind: "grant.revoked",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
   // 迁移/外部构造记录的直通入口：全量校验 + 幂等判定 + 按族耐久写盘
   appendRecord(record: EventRecord): void {
     const parsed = Value.Parse(EventRecordSchema, record);
@@ -624,6 +725,8 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
   const breakers: BreakerRecord[] = [];
   const resolutions: ResolutionRecord[] = [];
   const entries: EntryRecord[] = [];
+  const grantCreateds: GrantCreatedRecord[] = [];
+  const grantRevokeds: GrantRevokedRecord[] = [];
   for (const record of records) {
     if (record.kind === "intent") {
       intents.push(record);
@@ -637,6 +740,10 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
       resolutions.push(record);
     } else if (record.kind === "entry") {
       entries.push(record);
+    } else if (record.kind === "grant.created") {
+      grantCreateds.push(record);
+    } else if (record.kind === "grant.revoked") {
+      grantRevokeds.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -654,9 +761,31 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     breakers,
     resolutions,
     entries,
+    grantCreateds,
+    grantRevokeds,
+    grants: activeGrants(grantCreateds, grantRevokeds),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
+}
+
+// 生效 grant 还原（决策 3b）：created 减去 revoked——revoked 集合内的 grantId 全部失效；
+// 其余按 createdAt 排序原样生效（grant 对象自创建后不可变，无部分撤销）
+function activeGrants(
+  createds: GrantCreatedRecord[],
+  revokeds: GrantRevokedRecord[]
+): ActiveGrant[] {
+  const revokedIds = new Set(revokeds.map((record) => record.grantId));
+  return createds
+    .filter((record) => !revokedIds.has(record.grantId))
+    .map((record) => ({
+      grantId: record.grantId,
+      tool: record.tool,
+      ...(record.pathPrefix !== undefined ? { pathPrefix: record.pathPrefix } : {}),
+      createdAt: record.createdAt,
+      firstCall: record.firstCall,
+    }))
+    .sort((a, b) => a.createdAt - b.createdAt);
 }
 
 // 冷启动对账（与 M3 账本 reconcile 逐字同语义 + S2 确证配对）：intent 无 receipt →
@@ -722,8 +851,12 @@ function classifySessionRecords(
     }
     return facts;
   };
+  // grant 族 runId 可选（REPL 时段的放权/撤销无活动 Run）——无 runId 的记录不进
+  // 任何 Run 的事实表（grant 是 session 级状态，由 /grants 展示，决策 3b）
   for (const record of records) {
-    runFactsOf(record.runId);
+    if (record.runId !== undefined) {
+      runFactsOf(record.runId);
+    }
   }
   const settledByToolCall = new Map<string, ToolSettledPayload>();
   for (const event of runtimeEvents) {

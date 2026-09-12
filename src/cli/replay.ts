@@ -111,6 +111,14 @@ function recordDetail(record: EventRecord): string {
     // M4 S5：entry 族（D3 映射行）——transcript 第 runSeq 条消息（本 run 内）获得 EntryId
     case "entry":
       return `消息映射 ${shortId(record.id)}：run 内第 ${record.runSeq} 条（${record.role}）`;
+    // M4 S6：grant 族（决策 3）——放权/撤销留证，时间线原样呈现
+    case "grant.created": {
+      const scope =
+        record.pathPrefix !== undefined ? `，仅限目录 ${record.pathPrefix}` : "（工具级）";
+      return `放权创建 ${shortId(record.grantId)} ｜ ${record.tool}${scope} ｜ 首调 ${record.firstCall.toolCallId}`;
+    }
+    case "grant.revoked":
+      return `放权撤销 ${shortId(record.grantId)}`;
   }
 }
 

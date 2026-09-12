@@ -10,12 +10,14 @@ import { type Migration, MigrationRegistry } from "./migration.ts";
 
 export const RECEIPT_VERSION = 3;
 
-// 批准来源（与 ToolExecutionDecision.approvedBy 同枚举，决策 4）
+// 批准来源（与 ToolExecutionDecision.approvedBy 同枚举，决策 4 + M4 S6 决策 3 扩展）
 export const ReceiptApprovedBySchema = Type.Union([
   Type.Literal("human"),
   Type.Literal("policy:yolo"),
   Type.Literal("policy:auto"),
   Type.Literal("policy:deny"),
+  Type.Literal("human:grant"),
+  Type.Literal("policy:config"),
 ]);
 
 export const ReceiptSchema = Type.Object({

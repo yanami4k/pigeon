@@ -68,7 +68,10 @@ export function listSessionSummaries(
     const toolNames: string[] = [];
     const toolNameSeen = new Set<string>();
     for (const record of materialized.records) {
-      runIds.add(record.runId);
+      // grant 族 runId 可选（REPL 时段事件无活动 Run）：有 runId 才计入 Run 集合
+      if (record.runId !== undefined) {
+        runIds.add(record.runId);
+      }
       if (record.kind === "intent" || record.kind === "decision") {
         if (!toolNameSeen.has(record.toolName)) {
           toolNameSeen.add(record.toolName);
