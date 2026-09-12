@@ -1,6 +1,7 @@
 // Actor 报告共用人话格式化助手（trace / replay / resume 菜单等共用，单一约定，禁止各视图
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
+import type { FailureClass } from "../state/classification.ts";
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
@@ -39,6 +40,25 @@ const APPROVED_BY_LABEL: Record<string, string> = {
 export function approvalVerdict(decision: ToolExecutionDecision): string {
   const label = APPROVED_BY_LABEL[decision.approvedBy] ?? decision.approvedBy;
   return label === "人工" ? (decision.outcome === "approved" ? "人工批准" : "人工拒绝") : label;
+}
+
+// FailureClass → 人话徽章（D7：「用户取消」与「治理熔断」必须一眼可分）。
+// 自 state/trace.ts 归位（M2 S5，决策 032）：徽章是 Actor 共用措辞（cli trace/replay 与
+// tui 终态摘要同一口径），不是冷投影结构——state 只留判据（classification.ts），措辞归本模块
+export function failureBadge(failure: FailureClass | null | undefined): string {
+  if (failure === null || failure === undefined) {
+    return "正常";
+  }
+  switch (failure.category) {
+    case "cancelled":
+      return failure.breaker ? "治理熔断" : "取消";
+    case "business":
+      return "业务失败";
+    case "infrastructure":
+      return "基础设施错误";
+    case "unknown":
+      return "未知";
+  }
 }
 
 // 熔断计数粒度 → 人话

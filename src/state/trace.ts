@@ -5,7 +5,6 @@
 // 绝不按位置猜测；id 对得上但内容对不上（toolCallId/参数/哈希不符）挂接并标异常，
 // 对不上的一律进孤儿清单如实报告。
 
-import type { FailureClass } from "./classification.ts";
 import type {
   BreakerRecord,
   DecisionRecord,
@@ -293,22 +292,5 @@ function verifyAgainstProposed(call: TraceToolCall, toolName: string, rawArgs: u
   const ledgerArgs = JSON.stringify(rawArgs);
   if (proposedArgs !== ledgerArgs) {
     call.anomalies.push("落账参数与提议事件的模型原始参数不一致");
-  }
-}
-
-// FailureClass → 人话徽章（D7：「用户取消」与「治理熔断」必须一眼可分）
-export function failureBadge(failure: FailureClass | null | undefined): string {
-  if (failure === null || failure === undefined) {
-    return "正常";
-  }
-  switch (failure.category) {
-    case "cancelled":
-      return failure.breaker ? "治理熔断" : "取消";
-    case "business":
-      return "业务失败";
-    case "infrastructure":
-      return "基础设施错误";
-    case "unknown":
-      return "未知";
   }
 }

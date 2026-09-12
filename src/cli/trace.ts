@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   approvalVerdict,
   breakerScopeLabel,
+  failureBadge,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
@@ -14,7 +15,6 @@ import { JsonlEventLog, listSessionIds, materializeSession } from "../persistenc
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import {
   buildSessionTrace,
-  failureBadge,
   type SessionTrace,
   type TraceRun,
   type TraceToolCall,

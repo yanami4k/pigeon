@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   approvalVerdict,
   breakerScopeLabel,
+  failureBadge,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
@@ -18,7 +19,6 @@ import type { EventRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import { buildRunReplay, type ReplayEvent, type RunReplay } from "../state/replay.ts";
-import { failureBadge } from "../state/trace.ts";
 
 // 毫秒时间戳（UTC）：HH:MM:SS.mmm——时间线是黑匣子回放，毫秒序对崩溃分析有意义
 function timeOf(timestamp: number): string {
