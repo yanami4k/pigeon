@@ -18,7 +18,7 @@ import type { EventEnvelope } from "../state/events.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { asGrantId, newRunId, newSessionId, type SessionId } from "../state/ids.ts";
 import { PigeonTuiShell, type TuiRuntimeFace } from "./shell.ts";
-import { MockTerminal, screenFlat, screenText, settle } from "./testing.ts";
+import { MockTerminal, screenFlat, screenText, settle, squashSpaces } from "./testing.ts";
 
 const SESSION_ID: SessionId = newSessionId();
 const RUN_ID = newRunId();
@@ -199,8 +199,13 @@ test("未知命令与命令失败如实呈现（同 REPL 口径）", async () =>
     term.input("/blah");
     term.input("\r");
     await settle();
+    // 折行点空格会被词界折行吃掉（testing.ts squashSpaces 注释），按去空格比对
     assert.ok(
-      screenFlat(term).includes("未知命令：/blah（可用 /grants、/revoke <id>、/grants save <id>）")
+      squashSpaces(screenFlat(term)).includes(
+        squashSpaces(
+          "未知命令：/blah（可用 /sessions、/resume <sessionId>、/grants、/revoke <id>、/grants save <id>）"
+        )
+      )
     );
 
     // 语义错误：格式合法但不存在的 grant id
