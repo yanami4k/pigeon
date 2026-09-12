@@ -4,8 +4,8 @@
 // [d] 本会话允许（仅限当前调用所在目录）。决策 1：只有批准/拒绝两态，无"人工改参数"。
 // [a]/[d] 创建会话 grant：事件写盘失败 = grant 不生效（fail-closed，见 store.create）
 import { dirname } from "node:path";
+import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import type { SessionGrantStore } from "../persistence/grants.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
 
 export interface CliApprovalOptions {

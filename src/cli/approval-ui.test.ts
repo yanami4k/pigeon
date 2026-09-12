@@ -6,8 +6,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
-import { SessionGrantStore } from "../persistence/grants.ts";
 import { asRunId } from "../state/ids.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 

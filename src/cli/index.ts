@@ -7,18 +7,17 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { type ConfigGrantRule, loadGrantConfig, SessionGrantStore } from "../persistence/grants.ts";
-import {
-  type ActiveGrant,
-  JsonlEventLog,
-  materializeSession,
-  migrateLegacyLedger,
-} from "../persistence/index.ts";
-import type { SessionListFilters } from "../persistence/session-list.ts";
+import { SessionGrantStore } from "../approvals/grant-store.ts";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { loadGrantConfig } from "../persistence/grants-config.ts";
+import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
+import type { ConfigGrantRule } from "../state/grants.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import type { ActiveGrant } from "../state/materialize.ts";
+import type { SessionListFilters } from "../state/session-summary.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";

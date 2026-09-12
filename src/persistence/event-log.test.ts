@@ -7,7 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Value } from "typebox/value";
-import { RuntimeEventKind } from "../pi-runtime/events.ts";
+import {
+  type BreakerInput,
+  type DecisionInput,
+  EVENT_LOG_VERSION,
+  EventRecordSchema,
+  type IntentInput,
+  type ResolutionInput,
+} from "../state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import {
   asGrantId,
@@ -21,20 +28,15 @@ import {
   type RunId,
   type SessionId,
 } from "../state/ids.ts";
+import { detectEntryGaps } from "../state/materialize.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
+import { RuntimeEventKind } from "../state/runtime-events.ts";
 import {
-  type BreakerInput,
-  type DecisionInput,
-  detectEntryGaps,
-  EVENT_LOG_VERSION,
   EventLogConflictError,
   EventLogCorruptionError,
-  EventRecordSchema,
-  type IntentInput,
   JsonlEventLog,
   listSessionIds,
   materializeSession,
-  type ResolutionInput,
   readEventLogFile,
   readEventLogFileDetailed,
 } from "./event-log.ts";

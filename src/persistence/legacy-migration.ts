@@ -10,17 +10,17 @@
 // 可接受代价：迁移只跑一次，改名成功后旧文件不再被检测）。
 import { existsSync, renameSync } from "node:fs";
 import { Type } from "typebox";
-import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
-import { MigrationRegistry } from "../state/migration.ts";
 import {
   type DecisionRecord,
   EVENT_LOG_VERSION,
   type EventRecord,
   EventRecordSchema,
   type IntentRecord,
-  JsonlEventLog,
   type ReceiptRecord,
-} from "./event-log.ts";
+} from "../state/event-log.ts";
+import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import { MigrationRegistry } from "../state/migration.ts";
+import { JsonlEventLog } from "./event-log.ts";
 import { type LegacyLedgerRows, readLegacyLedger } from "./ledger.ts";
 
 // 迁移管线输出文档：v1 = 排好序的事件记录集

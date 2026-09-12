@@ -5,20 +5,22 @@
 // 绝不按位置猜测；id 对得上但内容对不上（toolCallId/参数/哈希不符）挂接并标异常，
 // 对不上的一律进孤儿清单如实报告。
 
-import type { ExecutionId, RunId, SessionId } from "../state/ids.ts";
-import type { Receipt } from "../state/receipt.ts";
 import type { FailureClass } from "./classification.ts";
 import type {
   BreakerRecord,
   DecisionRecord,
   EventRecord,
   IntentRecord,
-  MaterializedSession,
   ResolutionRecord,
-  RunClassification,
   RuntimeEventRecord,
-  ToolExecutionClassification,
 } from "./event-log.ts";
+import type { ExecutionId, RunId, SessionId } from "./ids.ts";
+import type {
+  MaterializedSession,
+  RunClassification,
+  ToolExecutionClassification,
+} from "./materialize.ts";
+import type { Receipt } from "./receipt.ts";
 
 export type TurnStartedRecord = Extract<RuntimeEventRecord, { kind: "turn.started" }>;
 export type TurnCompletedRecord = Extract<RuntimeEventRecord, { kind: "turn.completed" }>;

@@ -5,14 +5,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import {
   buildSessionTrace,
   failureBadge,
   type SessionTrace,
   type TraceRun,
   type TraceToolCall,
-} from "../persistence/trace.ts";
-import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
+} from "../state/trace.ts";
 import { approvalVerdict, breakerScopeLabel, shortId, summarizeArgs } from "./format.ts";
 
 function renderToolCall(call: TraceToolCall, lines: string[]): void {

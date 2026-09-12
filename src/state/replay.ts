@@ -7,8 +7,9 @@
 // 与 trace 的「链式分组治理视图」相区别：replay 是原始时间流，飞行记录仪回放。
 // 异常纪律：悬账 intent（待对账）、孤儿记录（找不到配对的 Receipt/Resolution）、
 // 撕裂尾巴、崩溃残留（无 run.ended）全部如实标注，绝不猜测修补（§3.2/§3.5）。
-import type { RunId, SessionId } from "../state/ids.ts";
-import type { EventRecord, MaterializedSession, RunClassification } from "./event-log.ts";
+import type { EventRecord } from "./event-log.ts";
+import type { RunId, SessionId } from "./ids.ts";
+import type { MaterializedSession, RunClassification } from "./materialize.ts";
 
 // 时间线上的一条记录 + 人话异常标注（空数组 = 无异常）
 export interface ReplayEvent {

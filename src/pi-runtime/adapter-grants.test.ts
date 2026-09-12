@@ -8,13 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
-import {
-  appendGrantConfigRule,
-  loadGrantConfig,
-  SessionGrantStore,
-} from "../persistence/grants.ts";
+import { appendGrantConfigRule, loadGrantConfig } from "../persistence/grants-config.ts";
 import { asGrantId, asSessionId } from "../state/ids.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";

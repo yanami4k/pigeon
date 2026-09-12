@@ -1,0 +1,120 @@
+// 会话 grant 存储（M4 S6，决策 3 + 3b）：审批提示 [a]/[d] 键创建的会话级放权的运行态。
+// 运行态以本存储为准，持久态以 grant.created / grant.revoked 事件族为准（决策 2 不双写）；
+// 不进 InjectionSnapshot（约束 4：grant 必须可撤销，与快照冻结矛盾）。匹配语义复用
+// tools/grants.ts（与固化规则同一判定）。
+import type { GrantCreatedInput, GrantRevokedInput } from "../state/event-log.ts";
+import { asGrantId, type GrantId, newGrantId, type RunId } from "../state/ids.ts";
+import type { ActiveGrant } from "../state/materialize.ts";
+import { type GrantMatchOutcome, scopeMatches } from "../tools/grants.ts";
+
+// 会话 grant 的运行态视图：命中次数是进程内派生计数（/grants 展示面，不落盘）
+export interface SessionGrantView extends ActiveGrant {
+  hitCount: number;
+}
+
+export class GrantNotFoundError extends Error {}
+
+// grant 事件落盘面（JsonlEventLog 的写入子集；返回值无关——落盘副作用才是契约）
+type GrantEventSink = {
+  appendGrantCreated(input: GrantCreatedInput): unknown;
+  appendGrantRevoked(input: GrantRevokedInput): unknown;
+};
+
+export interface SessionGrantStoreOptions {
+  // 目录限定匹配的 realpath 解析根
+  workspaceRoot: string;
+  // grant.created / grant.revoked 落盘点；缺省 = 纯内存（不留持久痕迹）
+  eventLog?: GrantEventSink;
+  // 冷恢复种子（决策 3b）：materializeSession(...).grants 的还原——崩溃后会话
+  // grant 静默继续有效，恢复屏不加确认环节（用户裁决：重复确认是纯摩擦）
+  restored?: readonly ActiveGrant[] | undefined;
+}
+
+export class SessionGrantStore {
+  readonly #workspaceRoot: string;
+  readonly #eventLog: GrantEventSink | undefined;
+  readonly #grants = new Map<GrantId, SessionGrantView>();
+
+  constructor(options: SessionGrantStoreOptions) {
+    this.#workspaceRoot = options.workspaceRoot;
+    this.#eventLog = options.eventLog;
+    for (const grant of options.restored ?? []) {
+      this.#grants.set(grant.grantId, { ...grant, hitCount: 0 });
+    }
+  }
+
+  // 审批提示 [a]/[d] 键触发：先落 grant.created 事件再入运行态——事件写盘失败
+  // 则 grant 不生效（fail-closed：免审授权必须留证后才存在）
+  create(input: {
+    tool: string;
+    pathPrefix?: string;
+    firstCall: { toolCallId: string; args: unknown };
+    runId?: RunId;
+  }): SessionGrantView {
+    const grantId = newGrantId();
+    const createdAt = Date.now();
+    this.#eventLog?.appendGrantCreated({
+      grantId,
+      tool: input.tool,
+      ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
+      createdAt,
+      firstCall: input.firstCall,
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    });
+    const grant: SessionGrantView = {
+      grantId,
+      tool: input.tool,
+      ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
+      createdAt,
+      firstCall: input.firstCall,
+      hitCount: 0,
+    };
+    this.#grants.set(grantId, grant);
+    return grant;
+  }
+
+  // /revoke <id>：先落 grant.revoked 事件再从运行态删除——撤销立即生效（免审停止），
+  // 持久痕迹 append-only；未知 id 响亮报错
+  revoke(grantId: GrantId, runId?: RunId): void {
+    if (!this.#grants.has(grantId)) {
+      throw new GrantNotFoundError(`grant 不存在或已撤销：${grantId}`);
+    }
+    this.#eventLog?.appendGrantRevoked({
+      grantId,
+      revokedAt: Date.now(),
+      ...(runId !== undefined ? { runId } : {}),
+    });
+    this.#grants.delete(grantId);
+  }
+
+  // 纯求值（无副作用）：命中计数由 noteEffectiveHit 在放行实际生效后单独记——
+  // deny 压过 grant 时不计命中（审计口径：命中 = 实际免审放行）
+  match(toolName: string, args: unknown): GrantMatchOutcome | null {
+    for (const grant of this.#grants.values()) {
+      if (scopeMatches(this.#workspaceRoot, grant.tool, grant.pathPrefix, toolName, args)) {
+        return { source: "session-grant", refId: grant.grantId };
+      }
+    }
+    return null;
+  }
+
+  // 放行生效后的命中留痕（adapter 在 decision.grant 成立时调用）
+  noteEffectiveHit(outcome: GrantMatchOutcome): void {
+    if (outcome.source !== "session-grant") {
+      return;
+    }
+    const grant = this.#grants.get(asGrantId(outcome.refId));
+    if (grant !== undefined) {
+      grant.hitCount += 1;
+    }
+  }
+
+  // 生效 grant 快照（/grants 展示）
+  list(): SessionGrantView[] {
+    return [...this.#grants.values()];
+  }
+
+  get(grantId: GrantId): SessionGrantView | undefined {
+    return this.#grants.get(grantId);
+  }
+}

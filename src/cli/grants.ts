@@ -7,17 +7,16 @@
 // （缩权先生效后留证：留证失败只少一条痕迹；反过来会让审计者误以为规则已不生效）。
 // IO 全依赖注入（write 形状同 repl.ts 的 WriteFn；此处内联结构类型以避免
 // grants ↔ repl 类型环——repl 依赖 grants 的命令上下文，方向不可逆）
-import type { GrantConfigRemovedInput, GrantPromotedInput } from "../persistence/event-log.ts";
+import { GrantNotFoundError, type SessionGrantStore } from "../approvals/grant-store.ts";
 import {
   appendGrantConfigRule,
-  type ConfigGrantRule,
   findPromotedRuleIndex,
   GrantAlreadyPromotedError,
-  GrantNotFoundError,
   loadGrantConfig,
   removeGrantConfigRule,
-  type SessionGrantStore,
-} from "../persistence/grants.ts";
+} from "../persistence/grants-config.ts";
+import type { GrantConfigRemovedInput, GrantPromotedInput } from "../state/event-log.ts";
+import type { ConfigGrantRule } from "../state/grants.ts";
 import { asGrantId, type GrantId, type SessionId } from "../state/ids.ts";
 import { shortId, summarizeArgs } from "./format.ts";
 

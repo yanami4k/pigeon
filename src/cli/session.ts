@@ -4,14 +4,12 @@
 // resolution 治理族（human-confirmed 渠道，D5 第三种确证）——任何路径系统不自动重新执行（§3.2）。
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import {
-  JsonlEventLog,
-  listSessionIds,
-  type MaterializedSession,
-  recoverSession,
-} from "../persistence/event-log.ts";
-import { listSessionSummaries, type SessionListFilters } from "../persistence/session-list.ts";
+import { recoverSession } from "../execution/recovery.ts";
+import { JsonlEventLog, listSessionIds } from "../persistence/event-log.ts";
+import { listSessionSummaries } from "../persistence/session-list.ts";
 import { asSessionId } from "../state/ids.ts";
+import type { MaterializedSession } from "../state/materialize.ts";
+import type { SessionListFilters } from "../state/session-summary.ts";
 import { summarizeArgs } from "./format.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
 

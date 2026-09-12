@@ -7,12 +7,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
 import type { ApprovalRequest } from "../approvals/handler.ts";
+import type { ToolProposedPayload, ToolSettledPayload } from "../state/runtime-events.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
-import type { ToolProposedPayload, ToolSettledPayload } from "./events.ts";
 import { createFakeStreamFn, createGate } from "./fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 

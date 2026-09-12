@@ -7,7 +7,8 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "./events.ts";
 import {
   type ExecutionId,
   newEntryId,
@@ -17,9 +18,8 @@ import {
   newSessionId,
   type RunId,
   type SessionId,
-} from "../state/ids.ts";
-import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
-import { JsonlEventLog, materializeSession } from "./event-log.ts";
+} from "./ids.ts";
+import { RECEIPT_VERSION, type Receipt } from "./receipt.ts";
 import { buildSessionTrace } from "./trace.ts";
 
 function makeEventLog(): {

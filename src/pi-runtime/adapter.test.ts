@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
 import { EventEnvelopeSchema } from "../state/events.ts";
+import type { TurnCompletedPayload } from "../state/runtime-events.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
-import type { TurnCompletedPayload } from "./events.ts";
 import { createFakeStreamFn, createGate, type FakeStreamFn } from "./fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 

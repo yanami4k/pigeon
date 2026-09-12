@@ -27,16 +27,19 @@ import {
 import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { classifyRunOutcome, type FailureClass } from "../persistence/classification.ts";
-import type { JsonlEventLog } from "../persistence/event-log.ts";
-import {
-  type ConfigGrantRule,
-  type GrantMatchOutcome,
-  matchConfigGrants,
-} from "../persistence/grants.ts";
+import { classifyRunOutcome, type FailureClass } from "../state/classification.ts";
+import type {
+  BreakerInput,
+  DecisionInput,
+  EntryInput,
+  IntentInput,
+  ReceiptInput,
+} from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
+import type { ConfigGrantRule } from "../state/grants.ts";
 import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
+import { RuntimeEventKind, type ToolSettledPayload } from "../state/runtime-events.ts";
 import {
   advanceToolExecution,
   proposeToolExecution,
@@ -45,15 +48,11 @@ import {
   type ToolExecution,
 } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
+import { type GrantMatchOutcome, matchConfigGrants } from "../tools/grants.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import type { ContentEvidence } from "../tools/wrap.ts";
-import {
-  isSyntheticFailureMessage,
-  normalizePiEvent,
-  RuntimeEventKind,
-  type ToolSettledPayload,
-} from "./events.ts";
+import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
 // Run 终态：completed / failed / aborted 之外保留 unknown——
@@ -78,19 +77,19 @@ export interface RunResult {
   toolExecutions: ToolExecution[];
 }
 
-// Event Log 落盘口的结构类型（= JsonlEventLog 的写入面，M4 S1：账本归并进 Event Log，不双写）；
-// 测试注入故障包装器模拟崩溃点
-export type EventLogSink = Pick<
-  JsonlEventLog,
-  | "appendRuntimeEvent"
-  | "appendEntry"
-  | "appendIntent"
-  | "appendDecision"
-  | "appendReceipt"
-  | "appendBreaker"
->;
+// Event Log 落盘口的结构类型（persistence/JsonlEventLog 的写入面满足它，M4 S1：账本归并进
+// Event Log，不双写）。只依赖 state 的输入形状，不依赖存储引擎——pi-runtime 不触达
+// persistence；测试注入故障包装器模拟崩溃点
+export interface EventLogSink {
+  appendRuntimeEvent(event: EventEnvelope): unknown;
+  appendEntry(input: EntryInput): unknown;
+  appendIntent(input: IntentInput): unknown;
+  appendDecision(input: DecisionInput): unknown;
+  appendReceipt(input: ReceiptInput): unknown;
+  appendBreaker(input: BreakerInput): unknown;
+}
 
-// M4 S6（决策 3）：会话 grant 匹配注入面——persistence/grants.ts 的 SessionGrantStore
+// M4 S6（决策 3）：会话 grant 匹配注入面——approvals/grant-store.ts 的 SessionGrantStore
 // 满足该结构；测试可注入假实现。match 纯求值（无副作用）；命中计数由 Adapter 在
 // 放行实际生效后调 noteEffectiveHit（deny 压过 grant 的求值不计命中——审计口径：命中 = 实际免审放行）
 export interface SessionGrantMatcher {

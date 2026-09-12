@@ -7,13 +7,8 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  type IntentInput,
-  JsonlEventLog,
-  materializeSession,
-  readEventLogFile,
-} from "../persistence/event-log.ts";
-import { RuntimeEventKind } from "../pi-runtime/events.ts";
+import { JsonlEventLog, materializeSession, readEventLogFile } from "../persistence/event-log.ts";
+import type { IntentInput } from "../state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import {
   type ExecutionId,
@@ -26,6 +21,7 @@ import {
   type SessionId,
 } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
+import { RuntimeEventKind } from "../state/runtime-events.ts";
 import { snapshotTag } from "../tools/hashline.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
 import { runResumeCommand, runSessionListCommand } from "./session.ts";

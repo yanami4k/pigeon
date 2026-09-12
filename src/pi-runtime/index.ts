@@ -7,15 +7,7 @@ export {
   type RunResult,
   type RunTerminalStatus,
 } from "./adapter.ts";
-export {
-  isSyntheticFailureMessage,
-  normalizePiEvent,
-  type RunEndedPayload,
-  RuntimeEventKind,
-  type ToolProposedPayload,
-  type ToolSettledPayload,
-  type TurnCompletedPayload,
-} from "./events.ts";
+export { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 export {
   INJECTION_SNAPSHOT_VERSION,
   type InjectionSnapshot,

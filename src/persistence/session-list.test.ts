@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RuntimeEventKind } from "../pi-runtime/events.ts";
+import type { IntentInput } from "../state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import {
   asSessionId,
@@ -21,8 +21,10 @@ import {
   type SessionId,
 } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
-import { type IntentInput, JsonlEventLog } from "./event-log.ts";
-import { listSessionSummaries, sessionCreatedAt } from "./session-list.ts";
+import { RuntimeEventKind } from "../state/runtime-events.ts";
+import { sessionCreatedAt } from "../state/session-summary.ts";
+import { JsonlEventLog } from "./event-log.ts";
+import { listSessionSummaries } from "./session-list.ts";
 
 function makeDir(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-session-list-"));

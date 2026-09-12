@@ -5,6 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { classifyRunOutcome, classifyToolOutcome } from "./classification.ts";
 import {
   asExecutionId,
   newEntryId,
@@ -12,10 +14,8 @@ import {
   newReceiptId,
   newRunId,
   newSessionId,
-} from "../state/ids.ts";
-import { RECEIPT_VERSION } from "../state/receipt.ts";
-import { classifyRunOutcome, classifyToolOutcome } from "./classification.ts";
-import { JsonlEventLog, materializeSession } from "./event-log.ts";
+} from "./ids.ts";
+import { RECEIPT_VERSION } from "./receipt.ts";
 
 // ---------- Run 级判据（D7 表左列） ----------
 

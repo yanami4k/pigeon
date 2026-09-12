@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { newRunId, newSessionId } from "../state/ids.ts";
-import { normalizePiEvent, RuntimeEventKind, type ToolProposedPayload } from "./events.ts";
+import { RuntimeEventKind, type ToolProposedPayload } from "../state/runtime-events.ts";
+import { normalizePiEvent } from "./events.ts";
 
 test("tool_execution_start：args 被深拷贝，事后修改源事件不回溯污染归一化 payload", () => {
   const sourceArgs = { path: "src/a.ts", nested: { lines: [1, 2] } };

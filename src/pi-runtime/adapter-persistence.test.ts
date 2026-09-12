@@ -10,14 +10,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
-import {
-  type DecisionRecord,
-  type EventRecord,
-  type IntentRecord,
-  JsonlEventLog,
-  materializeSession,
-  recoverSession,
-} from "../persistence/event-log.ts";
+import { recoverSession } from "../execution/recovery.ts";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import type { DecisionRecord, EventRecord, IntentRecord } from "../state/event-log.ts";
 import {
   asExecutionId,
   newEntryId,
@@ -27,11 +22,11 @@ import {
   type SessionId,
 } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
+import type { ToolSettledPayload } from "../state/runtime-events.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
-import type { ToolSettledPayload } from "./events.ts";
 import { createFakeStreamFn } from "./fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 

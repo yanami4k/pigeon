@@ -5,7 +5,7 @@
 //   - 默认桶是「未知」而非「业务失败」：宁可标「不知道」不贴错标签——
 //     标签要喂 M6+ 蒸馏，贴错 = 毒信号；
 //   - null = 非失败（正常完成 / 被拒绝的治理闭环 / 确证已执行）。
-import type { ToolErrorKind } from "../state/tool-execution.ts";
+import type { ToolErrorKind } from "./tool-execution.ts";
 
 export type FailureClass =
   // 取消；breaker=true 即子类「治理熔断」（trace 中「用户取消」与「治理熔断」必须一眼可分）
