@@ -244,9 +244,21 @@ export function screenText(term: MockTerminal): string {
   return term.screen.contentLines().join("\n");
 }
 
-// 折行敏感的整段文本断言用：行拼接无分隔（被折行的长文还原为连续串）
+// 折行敏感的整段文本断言用：行拼接无分隔（被折行的长文还原为连续串）。
+// pi-tui main-screen 渲染每行带 1 格左边距（实证：所有内容行以空格开头）——拼接前剥掉，
+// 否则折行点会拼出幻影空格
 export function screenFlat(term: MockTerminal): string {
-  return term.screen.contentLines().join("");
+  return term.screen
+    .contentLines()
+    .map((line) => line.replace(/^ /, ""))
+    .join("");
+}
+
+// 内容零丢失断言的归一化：去掉全部空格后比较。pi-tui 词界折行会吃掉折行点的空格
+//（实证：「mixed agent」折行后行间无空格），折行拼接无法还原原文空格位置；
+// 流式内容断言关心的是字素零丢失零重复，不是折行点的空格保真
+export function squashSpaces(text: string): string {
+  return text.replaceAll(" ", "");
 }
 
 export function assertWidthsWithin(term: MockTerminal, width: number): void {

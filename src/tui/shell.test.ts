@@ -18,7 +18,14 @@ import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
 import { PigeonTuiShell, type TuiRuntimeFace } from "./shell.ts";
-import { assertWidthsWithin, MockTerminal, screenFlat, screenText, settle } from "./testing.ts";
+import {
+  assertWidthsWithin,
+  MockTerminal,
+  screenFlat,
+  screenText,
+  settle,
+  squashSpaces,
+} from "./testing.ts";
 
 // ---------- 假 application 面：记录 run 提交，手动发事件/增量 ----------
 class FakeRuntime implements TuiRuntimeFace {
@@ -124,7 +131,7 @@ test("流式增量逐帧落地；CJK 混合文本宽度不错位；user 提交�
       runtime.emitDelta(chunk);
       await settle();
       assert.ok(
-        screenFlat(term).includes(accumulated),
+        squashSpaces(screenFlat(term)).includes(squashSpaces(accumulated)),
         `本帧屏幕应包含累计文本「${accumulated}」，实际：\n${screenText(term)}`
       );
       assertWidthsWithin(term, WIDTH);
@@ -308,7 +315,10 @@ test("集成：真实 PiRuntimeAdapter + fake streamFn 全链路——提交、�
       text = screenText(term);
     }
     assert.ok(text.includes("> 你好"), "user 回显");
-    assert.ok(screenFlat(term).includes(reply), `assistant 全文应落地，实际：\n${text}`);
+    assert.ok(
+      squashSpaces(screenFlat(term)).includes(squashSpaces(reply)),
+      `assistant 全文应落地，实际：\n${text}`
+    );
     assert.ok(text.includes("-- turn: stop --"), "turn 标记");
     assert.ok(text.includes("== run: completed"), "run 终态摘要");
     assertWidthsWithin(term, 70);
