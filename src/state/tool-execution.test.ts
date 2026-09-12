@@ -141,6 +141,41 @@ test("拒绝路径：approval→settled（rejected），副作用未发生也可
   assert.ok(Value.Check(ToolExecutionSchema, exec));
 });
 
+test("决定可携带 grant 出处（M4 S6）：human:grant / policy:config + grantRef 回指", () => {
+  let exec = advanceToolExecution(makeProposal(), "approval", T0 + 1);
+  exec = recordDecision(exec, {
+    outcome: "approved",
+    approvedBy: "human:grant",
+    grantRef: { kind: "session-grant", id: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS" },
+    decidedAt: T0 + 2,
+  });
+  assert.equal(exec.decision?.approvedBy, "human:grant");
+  assert.deepEqual(exec.decision?.grantRef, {
+    kind: "session-grant",
+    id: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+  });
+  assert.ok(Value.Check(ToolExecutionSchema, exec));
+
+  exec = advanceToolExecution(makeProposal(), "approval", T0 + 1);
+  exec = recordDecision(exec, {
+    outcome: "approved",
+    approvedBy: "policy:config",
+    grantRef: { kind: "config-rule", id: "config:grants.json#0" },
+    decidedAt: T0 + 2,
+  });
+  assert.ok(Value.Check(ToolExecutionSchema, exec));
+});
+
+test("grantRef 缺省依旧合法（human / policy:yolo 等无出处决定不受影响）", () => {
+  const exec = recordDecision(advanceToolExecution(makeProposal(), "approval", T0 + 1), {
+    outcome: "approved",
+    approvedBy: "human",
+    decidedAt: T0 + 2,
+  });
+  assert.equal(exec.decision?.grantRef, undefined);
+  assert.ok(Value.Check(ToolExecutionSchema, exec));
+});
+
 test("只能在 approval 状态记录决定，且决定不可改判", () => {
   const proposal = makeProposal();
   const decision = { outcome: "approved", approvedBy: "human", decidedAt: T0 + 1 } as const;

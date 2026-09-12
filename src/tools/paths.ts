@@ -24,3 +24,21 @@ export function resolveWorkspacePath(workspaceRoot: string, inputPath: string): 
   }
   return realTarget;
 }
+
+// 判定工作区相对路径 inputPath 解析后是否落在工作区相对目录 dir 之内——grant 目录限定
+// （决策 3a）的确定性匹配，与 resolveWorkspacePath 同一 realpath 机制。目录或目标不存在
+// （realpath 解析失败）→ false：授权判定不猜，不匹配回落人工审批
+export function isPathInsideDir(workspaceRoot: string, dir: string, inputPath: string): boolean {
+  let realRoot: string;
+  let realDir: string;
+  let realTarget: string;
+  try {
+    realRoot = realpathSync(workspaceRoot);
+    realDir = realpathSync(path.resolve(realRoot, dir));
+    realTarget = realpathSync(path.resolve(realRoot, inputPath));
+  } catch {
+    return false;
+  }
+  const rel = path.relative(realDir, realTarget);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}

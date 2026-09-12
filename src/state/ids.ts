@@ -81,3 +81,11 @@ const receiptId = defineIdKind<ReceiptId>("rcpt_");
 export const newReceiptId: () => ReceiptId = receiptId.create;
 export const asReceiptId: (value: string) => ReceiptId = receiptId.check;
 export const ReceiptIdSchema = receiptId.schema;
+
+// GrantId（M4 S6，决策 3）：会话级工具放权的稳定标识；grant.created/grant.revoked
+// 事件族与 intent 的 grantRef 共用
+export type GrantId = string & { readonly __brand: "GrantId" };
+const grantId = defineIdKind<GrantId>("grant_");
+export const newGrantId: () => GrantId = grantId.create;
+export const asGrantId: (value: string) => GrantId = grantId.check;
+export const GrantIdSchema = grantId.schema;
