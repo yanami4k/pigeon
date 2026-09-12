@@ -1,9 +1,9 @@
-// Pigeon TUI 入口（M2 S2）：ProcessTerminal + Application Shell（pi-tui TuiMainScreen）。
+// Pigeon TUI 入口（M2 S2 壳 + S3 审批面板与 /grants 视图）。
 // 用法：node src/tui/main.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
 //   [--provider <名>] [--model <id>]
-// 审批 handler（决策 025 的注入点）：S3 审批面板落地前注入 fail-closed 版——prompt 一律拒绝
-// 且理由如实；deny/grant/固化配置/yolo/read 五档在 Adapter 排律内求值，不经过 handler，
-// 不受影响（src/tools/policy.ts 六档排律）。
+// 审批 handler（决策 025 的注入点）：面板版——prompt 档在消息区渲染审批块，四键
+// [y/n/a/d] 决议（S3）；deny/grant/固化配置/yolo/read 五档在 Adapter 排律内求值，
+// 不经过 handler（src/tools/policy.ts 六档排律）。
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { buildRuntime, loadStreamFn } from "../application/runtime.ts";
 import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
 import { newSessionId } from "../state/ids.ts";
+import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { PigeonTuiShell } from "./shell.ts";
 
 interface TuiFlags {
@@ -68,6 +69,9 @@ async function main(argv: string[]): Promise<void> {
     path.join(workspaceRoot, ".pigeon", "sessions")
   );
   const sessionId = newSessionId();
+  // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
+  // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
+  const faceHolder: { current: TuiApprovalFace | undefined } = { current: undefined };
   const bundle = buildRuntime({
     streamFn,
     workspaceRoot,
@@ -75,18 +79,23 @@ async function main(argv: string[]): Promise<void> {
     yolo: flags.yolo,
     provider: flags.provider,
     modelId: flags.modelId,
-    // S3 审批面板落地前 fail-closed：prompt 一律拒绝，理由逐字回模型（决策 001 的闭环不中断）
-    createApprovalHandler: () => async (request) => ({
-      approved: false,
-      reason: `TUI 审批面板尚未落地（M2 S3），prompt 一律拒绝：${request.toolName}`,
-    }),
+    createApprovalHandler: (grants) => createTuiApprovalHandler(grants, () => faceHolder.current),
   });
   const shell = new PigeonTuiShell({
     terminal: new ProcessTerminal(),
     runtime: bundle.adapter,
     sessionId,
     logDir: path.join(workspaceRoot, ".pigeon"),
+    // S3：/grants /revoke /grants save 的命令上下文（命令层在 application/grants.ts）；
+    // 升格/移除留痕写本会话事件日志（M4 收口决策 ①）
+    grants: {
+      root: workspaceRoot,
+      store: bundle.grantStore,
+      configRules: bundle.configGrants,
+      eventLog: bundle.eventLog,
+    },
   });
+  faceHolder.current = shell;
   shell.start();
   // 进程级退出（Ctrl+C / SIGTERM）：停壳 + 释放 adapter。注意这不是 S5 的运行取消键——
   // 取消键是壳内输入语义，本处只处理 OS 信号
