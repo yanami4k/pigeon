@@ -1,4 +1,6 @@
 // Pigeon M3 极简 CLI 入口（决策 3：REPL 内联审批，单进程最小闭环，不依赖 M2 TUI）。
+// M2 S1（决策 025）：装配根（buildRuntime）在 application/runtime.ts，审批 handler 由本入口
+// 注入 REPL 问答版；resume 对账流程在 application/resume.ts，本文件只做参数解析与 IO 接线。
 // 用法：node src/cli/index.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
 //   --stream-fn / PIGEON_STREAM_FN：默认导出 StreamFn 的模块
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
@@ -8,23 +10,15 @@ import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { runResumeFlow } from "../application/resume.ts";
-import { SessionGrantStore } from "../approvals/grant-store.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
-import { loadGrantConfig } from "../persistence/grants-config.ts";
+import { buildRuntime, type RuntimeBundle } from "../application/runtime.ts";
+import { materializeSession } from "../persistence/event-log.ts";
 import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
-import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
-import type { ConfigGrantRule } from "../state/grants.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
-import type { ActiveGrant } from "../state/materialize.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
-import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
-import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
-import { ToolRegistry } from "../tools/registry.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import type { GrantsCommandContext } from "./grants.ts";
-import { type AskFn, createAsker, runRepl } from "./repl.ts";
+import { createAsker, runRepl } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runSessionListCommand } from "./session.ts";
 import { runTraceCommand } from "./trace.ts";
@@ -208,101 +202,6 @@ function parseModelFlags(argv: string[], usage: string): ModelFlags {
   return flags;
 }
 
-interface RuntimeDeps {
-  streamFn: StreamFn;
-  workspaceRoot: string;
-  sessionId: SessionId;
-  yolo: boolean;
-  provider: string;
-  modelId: string;
-  // REPL 问答函数（审批 handler 需要；由入口先建 asker 再注入）
-  ask: AskFn;
-  // M4 S6（D6/F）：固化配置规则——缺省时 buildRuntime 自行 loadGrantConfig；
-  // 畸形文件在此响亮失败（治理配置 fail-closed，启动中止）
-  configGrants?: readonly ConfigGrantRule[];
-  // M4 S6（决策 3b）：冷恢复种子——resume 时由 materializeSession(...).grants 还原，
-  // 会话 grant 崩溃后静默继续有效
-  restoredGrants?: readonly ActiveGrant[];
-}
-
-export interface RuntimeBundle {
-  adapter: PiRuntimeAdapter;
-  eventLog: JsonlEventLog;
-  // M4 S6：grant 运行态（审批提示 [a]/[d] 与 /grants /revoke /grants save 共用同一存储）
-  grantStore: SessionGrantStore;
-  configGrants: readonly ConfigGrantRule[];
-}
-
-// start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志。
-// 事件日志 = <workspaceRoot>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；
-// ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）。
-// resume 复用同一 sessionId 续写（append 模式），会话文件跨进程延续
-function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
-  const sessionsDir = path.join(deps.workspaceRoot, ".pigeon", "sessions");
-  const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId);
-  // F：固化配置启动时装载（畸形 → 抛错，启动中止——授权语义不明绝不静默运行）
-  const configGrants = deps.configGrants ?? loadGrantConfig(deps.workspaceRoot);
-  // 决策 3b：会话 grant 运行态——resume 时以事件日志物化结果为种子（created − revoked）
-  const grantStore = new SessionGrantStore({
-    workspaceRoot: deps.workspaceRoot,
-    eventLog,
-    restored: deps.restoredGrants,
-  });
-  const registry = new ToolRegistry();
-  registry.register({
-    name: "read_file",
-    description: "读取工作区内文件内容",
-    parameters: ReadFileParamsSchema,
-    tier: "read",
-    pathConfinement: { kind: "workspace" },
-    executionMode: "parallel",
-  });
-  registry.register({
-    name: "edit_file",
-    description: "hashline 锚定稀疏编辑",
-    parameters: EditFileParamsSchema,
-    tier: "write",
-    pathConfinement: { kind: "workspace" },
-    executionMode: "sequential",
-  });
-  const adapter = new PiRuntimeAdapter({
-    snapshot: {
-      version: INJECTION_SNAPSHOT_VERSION,
-      model: { provider: deps.provider, id: deps.modelId },
-      tools: {
-        policy: {
-          allow: ["read_file", "edit_file"],
-          deny: [],
-          approvalMode: deps.yolo ? "yolo" : "prompt",
-        },
-        advertised: ["read_file", "edit_file"],
-      },
-      context: {
-        systemPrompt:
-          "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
-          "用 edit_file 按锚点编辑。写操作可能需要人工批准。",
-      },
-      memory: [],
-      skills: [],
-      createdAt: Date.now(),
-    },
-    streamFn: deps.streamFn,
-    registry,
-    tools: [createReadFileTool(deps.workspaceRoot), createEditFileTool(deps.workspaceRoot)],
-    // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant
-    approvalHandler: createCliApprovalHandler(deps.ask, (text) => process.stdout.write(text), {
-      grants: grantStore,
-    }),
-    sessionId: deps.sessionId,
-    eventLog,
-    // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
-    sessionGrants: grantStore,
-    configGrants,
-    workspaceRoot: deps.workspaceRoot,
-  });
-  return { adapter, eventLog, grantStore, configGrants };
-}
-
 // REPL 的 grant 命令上下文（/grants 唯一展示入口 + /revoke + /grants save）
 function grantCommandsOf(
   bundle: RuntimeBundle,
@@ -394,7 +293,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           yolo: flags.yolo,
           provider: flags.provider,
           modelId: flags.modelId,
-          ask,
+          // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
+          createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           restoredGrants,
         });
         try {
@@ -460,7 +360,8 @@ async function main(argv: string[]): Promise<void> {
     yolo: flags.yolo,
     provider: flags.provider,
     modelId: flags.modelId,
-    ask,
+    // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
+    createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
   });
   try {
     await runRepl({
