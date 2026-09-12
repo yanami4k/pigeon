@@ -8,11 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
-import {
-  type EntryRecord,
-  JsonlEventLog,
-  materializeSession,
-} from "../persistence/event-log.ts";
+import { type EntryRecord, JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
