@@ -1,9 +1,11 @@
 // REPL 主循环（M3 决策 3：极简 CLI，单进程内联审批，不依赖 M2 TUI）。
 // 读任务 → adapter.run() → 打印终态摘要（status/stopReason + ToolExecution 账本概览）。
 // 同一 readline 问答函数由主循环与审批交互共享（避免双 interface 抢 stdin）。
+// M4 S6（决策 3）：斜杠命令分发给 grant 治理面（/grants /revoke /grants save）。
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import type { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
+import { type GrantsCommandContext, runGrantCommand } from "./grants.ts";
 
 // 提问函数：返回一行输入；EOF/流关闭返回 null
 export type AskFn = (prompt: string) => Promise<string | null>;
@@ -51,11 +53,16 @@ export interface ReplOptions {
   adapter: PiRuntimeAdapter;
   ask: AskFn;
   write: WriteFn;
+  // M4 S6（决策 3）：grant 命令上下文——缺省时 / 命令不可用（旧测试/最小装配不受影响）
+  grants?: GrantsCommandContext;
 }
 
 export async function runRepl(options: ReplOptions): Promise<void> {
   const { adapter, ask, write } = options;
-  write("Pigeon M3 最小 CLI（内联审批 REPL）。输入任务回车运行；:quit 退出。\n");
+  write(
+    "Pigeon M3 最小 CLI（内联审批 REPL）。输入任务回车运行；:quit 退出；" +
+      "/grants 查看放权、/revoke <id> 撤销、/grants save <id> 升格固化。\n"
+  );
   // D2 可见性：事件落盘失败（listenerErrors）非空时显式警告——可见降级，绝不假装证据链完整。
   // 增量报数：同一批故障不重复刷屏，新故障出现时以累计数提醒。
   // 启动即查一次：覆盖未来冷恢复路径（resume 复用同一出口）
@@ -78,6 +85,22 @@ export async function runRepl(options: ReplOptions): Promise<void> {
       break;
     }
     if (task === "") {
+      continue;
+    }
+    // M4 S6（决策 3）：斜杠命令——grant 治理面的唯一人机入口（/grants 唯一展示面）
+    if (task.startsWith("/")) {
+      const tokens = task
+        .slice(1)
+        .split(/\s+/)
+        .filter((token) => token.length > 0);
+      try {
+        const handled = options.grants !== undefined && runGrantCommand(tokens, options.grants);
+        if (!handled) {
+          write(`未知命令：${task}（可用 /grants、/revoke <id>、/grants save <id>）\n`);
+        }
+      } catch (error) {
+        write(`命令失败：${error instanceof Error ? error.message : String(error)}\n`);
+      }
       continue;
     }
     try {

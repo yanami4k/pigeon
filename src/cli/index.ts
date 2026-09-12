@@ -7,7 +7,13 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { JsonlEventLog, migrateLegacyLedger } from "../persistence/index.ts";
+import { type ConfigGrantRule, loadGrantConfig, SessionGrantStore } from "../persistence/grants.ts";
+import {
+  type ActiveGrant,
+  JsonlEventLog,
+  materializeSession,
+  migrateLegacyLedger,
+} from "../persistence/index.ts";
 import type { SessionListFilters } from "../persistence/session-list.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
@@ -17,6 +23,7 @@ import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts"
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
+import type { GrantsCommandContext } from "./grants.ts";
 import { type AskFn, createAsker, runRepl } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runResumeCommand, runSessionListCommand } from "./session.ts";
@@ -210,15 +217,37 @@ interface RuntimeDeps {
   modelId: string;
   // REPL 问答函数（审批 handler 需要；由入口先建 asker 再注入）
   ask: AskFn;
+  // M4 S6（D6/F）：固化配置规则——缺省时 buildRuntime 自行 loadGrantConfig；
+  // 畸形文件在此响亮失败（治理配置 fail-closed，启动中止）
+  configGrants?: readonly ConfigGrantRule[];
+  // M4 S6（决策 3b）：冷恢复种子——resume 时由 materializeSession(...).grants 还原，
+  // 会话 grant 崩溃后静默继续有效
+  restoredGrants?: readonly ActiveGrant[];
+}
+
+export interface RuntimeBundle {
+  adapter: PiRuntimeAdapter;
+  eventLog: JsonlEventLog;
+  // M4 S6：grant 运行态（审批提示 [a]/[d] 与 /grants /revoke /grants save 共用同一存储）
+  grantStore: SessionGrantStore;
+  configGrants: readonly ConfigGrantRule[];
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志。
 // 事件日志 = <workspaceRoot>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；
 // ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）。
 // resume 复用同一 sessionId 续写（append 模式），会话文件跨进程延续
-function buildRuntime(deps: RuntimeDeps): { adapter: PiRuntimeAdapter; eventLog: JsonlEventLog } {
+function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = path.join(deps.workspaceRoot, ".pigeon", "sessions");
   const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId);
+  // F：固化配置启动时装载（畸形 → 抛错，启动中止——授权语义不明绝不静默运行）
+  const configGrants = deps.configGrants ?? loadGrantConfig(deps.workspaceRoot);
+  // 决策 3b：会话 grant 运行态——resume 时以事件日志物化结果为种子（created − revoked）
+  const grantStore = new SessionGrantStore({
+    workspaceRoot: deps.workspaceRoot,
+    eventLog,
+    restored: deps.restoredGrants,
+  });
   const registry = new ToolRegistry();
   registry.register({
     name: "read_file",
@@ -260,11 +289,34 @@ function buildRuntime(deps: RuntimeDeps): { adapter: PiRuntimeAdapter; eventLog:
     streamFn: deps.streamFn,
     registry,
     tools: [createReadFileTool(deps.workspaceRoot), createEditFileTool(deps.workspaceRoot)],
-    approvalHandler: createCliApprovalHandler(deps.ask, (text) => process.stdout.write(text)),
+    // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant
+    approvalHandler: createCliApprovalHandler(deps.ask, (text) => process.stdout.write(text), {
+      grants: grantStore,
+    }),
     sessionId: deps.sessionId,
     eventLog,
+    // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
+    sessionGrants: grantStore,
+    configGrants,
+    workspaceRoot: deps.workspaceRoot,
   });
-  return { adapter, eventLog };
+  return { adapter, eventLog, grantStore, configGrants };
+}
+
+// REPL 的 grant 命令上下文（/grants 唯一展示入口 + /revoke + /grants save）
+function grantCommandsOf(
+  bundle: RuntimeBundle,
+  workspaceRoot: string,
+  sessionId: SessionId,
+  write: (text: string) => void
+): GrantsCommandContext {
+  return {
+    root: workspaceRoot,
+    store: bundle.grantStore,
+    configRules: bundle.configGrants,
+    sessionId,
+    write,
+  };
 }
 
 // pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>]
@@ -327,7 +379,13 @@ async function resumeMain(argv: string[]): Promise<void> {
       // 对账收口后进入 REPL：同一 sessionId 续写事件日志；EOF/退出走正常 finally
       enterRepl: async () => {
         const streamFn = await loadStreamFn(streamFnSpec);
-        const { adapter, eventLog } = buildRuntime({
+        // 决策 3b：grant 冷恢复种子——事件日志物化的生效 grant（created − revoked），
+        // 静默继续有效，无重复确认环节
+        const restoredGrants = materializeSession(
+          path.join(workspaceRoot, ".pigeon", "sessions"),
+          sessionId
+        ).grants;
+        const bundle = buildRuntime({
           streamFn,
           workspaceRoot,
           sessionId,
@@ -335,12 +393,18 @@ async function resumeMain(argv: string[]): Promise<void> {
           provider: flags.provider,
           modelId: flags.modelId,
           ask,
+          restoredGrants,
         });
         try {
-          await runRepl({ adapter, ask, write });
+          await runRepl({
+            adapter: bundle.adapter,
+            ask,
+            write,
+            grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
+          });
         } finally {
-          await adapter.dispose();
-          eventLog.close();
+          await bundle.adapter.dispose();
+          bundle.eventLog.close();
         }
       },
     });
@@ -387,7 +451,7 @@ async function main(argv: string[]): Promise<void> {
   };
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
-  const { adapter, eventLog } = buildRuntime({
+  const bundle = buildRuntime({
     streamFn,
     workspaceRoot,
     sessionId,
@@ -397,11 +461,16 @@ async function main(argv: string[]): Promise<void> {
     ask,
   });
   try {
-    await runRepl({ adapter, ask, write });
+    await runRepl({
+      adapter: bundle.adapter,
+      ask,
+      write,
+      grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
+    });
   } finally {
     close();
-    await adapter.dispose();
-    eventLog.close();
+    await bundle.adapter.dispose();
+    bundle.eventLog.close();
   }
 }
 
