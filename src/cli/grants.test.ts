@@ -7,12 +7,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { asSessionId } from "../state/ids.ts";
 import { matchConfigGrants } from "../tools/grants.ts";
-import { type GrantsCommandContext, runGrantCommand } from "./grants.ts";
 
 const SESSION = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRCC");
 

@@ -1,14 +1,15 @@
-// CLI grant 命令（M4 S6，决策 3 + D6）：/grants 列表、/revoke <id> 撤销、
-// /grants save <id> 升格。/grants 是 grant 的唯一展示入口（决策 3b：崩溃恢复不加
-// 特殊展示行，生效 grant 统一由本命令呈现）；升格与配置的正规写入方都是人的显式
-// 命令（约束 3：agent / 模型 / 后台流程无写 grants.json 的代码路径）。
+// grant 斜杠命令层（M4 S6 决策 3 + D6；M2 S3 决策 030 从 cli/ 归位 application/）：
+// /grants 列表、/revoke <id> 撤销、/grants save <id> 升格。cli REPL 与 tui 消息区两个
+// Actor 共用这同一份命令逻辑（025 的方向：共用逻辑住 Controller 层，Actor 互依别扭）；
+// 输出经注入的 write 回调投影到各自界面（REPL 终端 / TUI 消息区），命令层不关心落点。
+// /grants 是 grant 的唯一展示入口（决策 3b：崩溃恢复不加特殊展示行，生效 grant 统一
+// 由本命令呈现）；升格与配置的正规写入方都是人的显式命令（约束 3：agent / 模型 /
+// 后台流程无写 grants.json 的代码路径）。
 // M4 收口决策 ①：配置面动作在 Event Log 留痕——升格落 grant.promoted（扩权先留证后写配置，
 // 同 grant.created 的 fail-closed 顺序：留证失败则不扩权），移除落 grant.config-removed
 // （缩权先生效后留证：留证失败只少一条痕迹；反过来会让审计者误以为规则已不生效）。
-// IO 全依赖注入（write 形状同 repl.ts 的 WriteFn；此处内联结构类型以避免
-// grants ↔ repl 类型环——repl 依赖 grants 的命令上下文，方向不可逆）
+// IO 全依赖注入：write 是内联结构类型（一行文本回调），命令层不 import 任何 Actor。
 
-import { shortId, summarizeArgs } from "../application/format.ts";
 import { GrantNotFoundError, type SessionGrantStore } from "../approvals/grant-store.ts";
 import {
   appendGrantConfigRule,
@@ -20,6 +21,7 @@ import {
 import type { GrantConfigRemovedInput, GrantPromotedInput } from "../state/event-log.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { asGrantId, type GrantId, type SessionId } from "../state/ids.ts";
+import { shortId, summarizeArgs } from "./format.ts";
 
 // 配置面动作的留痕落盘面（JsonlEventLog 的写入子集；返回值无关——落盘副作用才是契约）
 export interface GrantConfigEventSink {
@@ -52,7 +54,7 @@ function scopeWording(pathPrefix: string | undefined): string {
 }
 
 // 解析并执行一条斜杠命令（tokens = 去掉 "/" 后的空白分词）。
-// 返回 false = 非 grant 命令（REPL 交其他分发）；语法/语义错误响亮抛错由 REPL 呈现
+// 返回 false = 非 grant 命令（Actor 交其他分发）；语法/语义错误响亮抛错由 Actor 呈现
 export function runGrantCommand(tokens: string[], ctx: GrantsCommandContext): boolean {
   const [head, ...rest] = tokens;
   if (head === "grants") {

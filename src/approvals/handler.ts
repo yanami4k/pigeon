@@ -25,3 +25,13 @@ export interface ApprovalDecision {
 }
 
 export type ApprovalHandler = (request: ApprovalRequest) => Promise<ApprovalDecision>;
+
+// 调用的路径参数：grant 目录限定只认 args.path 字符串（与 tools/grants.ts 匹配口径一致）。
+// cli 与 tui 两个审批 Actor 共用（M2 S3：单一约定，不各造一份）
+export function extractPathArg(args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null || !("path" in args)) {
+    return undefined;
+  }
+  const path: unknown = args.path;
+  return typeof path === "string" && path.length > 0 ? path : undefined;
+}

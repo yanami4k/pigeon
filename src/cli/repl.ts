@@ -4,8 +4,8 @@
 // M4 S6（决策 3）：斜杠命令分发给 grant 治理面（/grants /revoke /grants save）。
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
+import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import type { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
-import { type GrantsCommandContext, runGrantCommand } from "./grants.ts";
 
 // 提问函数：返回一行输入；EOF/流关闭返回 null
 export type AskFn = (prompt: string) => Promise<string | null>;

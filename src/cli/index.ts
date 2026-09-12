@@ -9,6 +9,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { GrantsCommandContext } from "../application/grants.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { materializeSession } from "../persistence/event-log.ts";
@@ -16,7 +17,6 @@ import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
-import type { GrantsCommandContext } from "./grants.ts";
 import { createAsker, runRepl } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runSessionListCommand } from "./session.ts";

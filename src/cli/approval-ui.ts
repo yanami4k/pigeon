@@ -5,21 +5,12 @@
 // [a]/[d] 创建会话 grant：事件写盘失败 = grant 不生效（fail-closed，见 store.create）
 import { dirname } from "node:path";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
-import type { ApprovalHandler } from "../approvals/handler.ts";
+import { type ApprovalHandler, extractPathArg } from "../approvals/handler.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
 
 export interface CliApprovalOptions {
   // M4 S6（决策 3）：会话 grant 存储——缺省时只提供 y/n 两键（测试/无放权场景）
   grants?: SessionGrantStore;
-}
-
-// 调用的路径参数：grant 目录限定只认 args.path 字符串（与 grants.ts 匹配口径一致）
-function extractPathArg(args: unknown): string | undefined {
-  if (typeof args !== "object" || args === null || !("path" in args)) {
-    return undefined;
-  }
-  const path = (args as { path: unknown }).path;
-  return typeof path === "string" && path.length > 0 ? path : undefined;
 }
 
 export function createCliApprovalHandler(

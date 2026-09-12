@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
@@ -25,7 +26,6 @@ import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
-import { type GrantsCommandContext, runGrantCommand } from "./grants.ts";
 import { type AskFn, createAsker, runRepl } from "./repl.ts";
 
 const SESSION_A = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRAA");
