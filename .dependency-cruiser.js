@@ -16,9 +16,24 @@ export default {
       comment:
         "架构约束（路线图 §3.6/约束 6）：业务代码不得直接 import @earendil-works/*；" +
         "src/tools 的豁免已收口为单一桥接文件 src/tools/wrap.ts（纯类型别名），" +
-        "其余 tools 文件一律经 wrap.ts 取上游类型；所有运行交互统一经 src/pi-runtime 的 PiRuntimeAdapter。",
-      from: { path: "^src", pathNot: "^src/(pi-runtime/|tools/wrap\\.ts$)" },
+        "其余 tools 文件一律经 wrap.ts 取上游类型；所有运行交互统一经 src/pi-runtime 的 PiRuntimeAdapter。" +
+        "src/tui 另有 tui-pi-tui-only 规则：仅允许直连 pi-tui（纯 UI 库，见该规则注释）。",
+      from: { path: "^src", pathNot: "^src/(pi-runtime/|tools/wrap\\.ts$|tui/)" },
       to: { path: "node_modules/@earendil-works" },
+    },
+    {
+      name: "tui-pi-tui-only",
+      severity: "error",
+      comment:
+        "src/tui 只允许直连 @earendil-works/pi-tui（M2 S1）：pi-tui 是纯终端 UI 库" +
+        "（S0 spike 实证依赖仅 get-east-asian-width + marked，docs/notes/spike-pi-tui.zh-CN.md），" +
+        "与 agent 运行交互无关，故豁免精确到这一个包、只限 src/tui/；pi-agent-core / pi-ai" +
+        "等上游 agent 包仍一律经 pi-runtime Adapter，tui 也不例外。",
+      from: { path: "^src/tui/", pathNot: "\\.test\\.ts$" },
+      to: {
+        path: "node_modules/@earendil-works",
+        pathNot: "node_modules/@earendil-works/pi-tui",
+      },
     },
     // ---- 目录分层（M4 收口重整，ROADMAP §4）：只约束生产代码，测试文件可跨层搭夹具 ----
     {

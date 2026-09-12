@@ -59,6 +59,16 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
       join(fixtureRoot, "src/review/probe.ts"),
       'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = Agent;\n'
     );
+    // tui 直连 pi-agent-core：tui-pi-tui-only 必须抓住（豁免只精确到 pi-tui 一个包）
+    writeFileSync(
+      join(fixtureRoot, "src/tui/agent-probe.ts"),
+      'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = Agent;\n'
+    );
+    // tui 直连 pi-tui：豁免应生效（M2 S1——pi-tui 是纯 UI 库，S0 spike 实证）
+    writeFileSync(
+      join(fixtureRoot, "src/tui/ui.ts"),
+      'import { TuiMainScreen } from "@earendil-works/pi-tui";\nexport const x = TuiMainScreen;\n'
+    );
     // rogue 夹具：src/tools 下绕过桥接文件直接 new Agent——收口后必须被抓
     writeFileSync(
       join(fixtureRoot, "src/tools/probe.ts"),
@@ -101,6 +111,18 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
     assert.ok(
       actorViolations.some((v) => v.from.includes("src/cli/probe.ts")),
       `应抓到 cli→execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
+    );
+    // tui-pi-tui-only：tui 直连 pi-agent-core 被抓；直连 pi-tui 豁免生效
+    const tuiViolations = output.summary.violations.filter(
+      (v) => v.rule.name === "tui-pi-tui-only"
+    );
+    assert.ok(
+      tuiViolations.some((v) => v.from.includes("src/tui/agent-probe.ts")),
+      `应抓到 tui 直连 pi-agent-core，实际违规：${JSON.stringify(tuiViolations)}`
+    );
+    assert.ok(
+      !output.summary.violations.some((v) => v.from.includes("src/tui/ui.ts")),
+      `tui 直连 pi-tui 应豁免，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from}`))}`
     );
   } finally {
     process.chdir(originalCwd);
