@@ -77,6 +77,14 @@ export function listSessionSummaries(
           toolNameSeen.add(record.toolName);
           toolNames.push(record.toolName);
         }
+      } else if (record.kind === "tool.proposed") {
+        // 决策 1（M4 S6 G）：读层调用只留事件级记录——toolNames 兼从 tool.proposed
+        // 派生，纯读会话同样可被 --tool 过滤找到（治理行不是工具使用的唯一证据）
+        const name = record.payload.toolName;
+        if (!toolNameSeen.has(name)) {
+          toolNameSeen.add(name);
+          toolNames.push(name);
+        }
       }
     }
     const failureClasses: SessionSummaryFailureClass[] = [];

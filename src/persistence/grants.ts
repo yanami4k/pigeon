@@ -175,6 +175,34 @@ export function appendGrantConfigRule(workspaceRoot: string, rule: ConfigGrantRu
   }
 }
 
+// 配置规则移除（/revoke config#N）：整文件重写。配置规则在会话启动时载入并冻结——
+// 移除只影响磁盘，当前会话的求值面不变（/grants 输出如实标注「下次会话生效」）
+export function removeGrantConfigRule(workspaceRoot: string, index: number): ConfigGrantRule {
+  const path = grantsConfigPath(workspaceRoot);
+  const existing = loadGrantConfig(workspaceRoot);
+  if (index < 0 || index >= existing.length) {
+    throw new GrantsConfigError(`固化规则不存在：config#${index}（共 ${existing.length} 条）`);
+  }
+  const removed = existing[index];
+  if (removed === undefined) {
+    // noUncheckedIndexedAccess：上界已检，此处仅为收窄
+    throw new GrantsConfigError(`固化规则不存在：config#${index + 1}`);
+  }
+  existing.splice(index, 1);
+  const doc = Value.Parse(GrantsConfigFileSchema, {
+    version: GRANTS_CONFIG_VERSION,
+    grants: existing,
+  });
+  writeFileSync(path, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  const fd = openSync(path, "r+");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return removed;
+}
+
 // ---- 会话 grant 存储（决策 3b：运行态权威；持久态 = grant 事件族，决策 2 不双写） ----
 
 // 会话 grant 的运行态视图：命中次数是进程内派生计数（/grants 展示面，不落盘）
@@ -197,7 +225,7 @@ export interface SessionGrantStoreOptions {
   eventLog?: GrantEventSink;
   // 冷恢复种子（决策 3b）：materializeSession(...).grants 的还原——崩溃后会话
   // grant 静默继续有效，恢复屏不加确认环节（用户裁决：重复确认是纯摩擦）
-  restored?: readonly ActiveGrant[];
+  restored?: readonly ActiveGrant[] | undefined;
 }
 
 export class SessionGrantStore {
