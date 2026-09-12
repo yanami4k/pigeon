@@ -1,5 +1,5 @@
 // 边界规则的元测试：防"规则还在但已经不干活了"（TS7 静默巡航 0 模块事故的教训）。
-// 断言一：真实违规会被规则抓住（含 src/tools 下绕过桥接文件的 rogue 直连）；
+// 断言一：真实违规会被规则抓住（cli/tui→execution、src/tools 下绕过桥接文件的 rogue 直连）；
 // 断言二：tools 单一桥接文件（wrap.ts）豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
 // 夹具写在 os.tmpdir()，不进 src/——否则主 npm run deps 会把夹具当真违规报出来。
 import assert from "node:assert/strict";
@@ -34,19 +34,25 @@ async function cruiseJson(targets: string[], ruleSet: NonNullable<ICruiseOptions
   return result.output;
 }
 
-test("违规会被抓住：tui→execution、review→@earendil-works、tools 下 rogue 直连；wrap.ts 桥豁免生效", async () => {
+test("违规会被抓住：cli/tui→execution、review→@earendil-works、tools 下 rogue 直连；wrap.ts 桥豁免生效", async () => {
   const ruleSet = await loadRuleSet();
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pigeon-boundary-"));
   const originalCwd = process.cwd();
   try {
     // 夹具：镜像 src/ 目录结构，让 ^src/... 等规则路径能匹配
     mkdirSync(join(fixtureRoot, "src/tui"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/cli"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/execution"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/review"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/tools"), { recursive: true });
     writeFileSync(join(fixtureRoot, "src/execution/index.ts"), "export {};\n");
     writeFileSync(
       join(fixtureRoot, "src/tui/probe.ts"),
+      'import "../execution/index.ts";\nexport {};\n'
+    );
+    // cli 同样不得直连 execution（M2 S1 决策 025：过渡豁免已消除）
+    writeFileSync(
+      join(fixtureRoot, "src/cli/probe.ts"),
       'import "../execution/index.ts";\nexport {};\n'
     );
     writeFileSync(
@@ -85,9 +91,16 @@ test("违规会被抓住：tui→execution、review→@earendil-works、tools �
       !ruleViolations.some((v) => v.from.includes("src/tools/wrap.ts")),
       `桥接文件 src/tools/wrap.ts 应豁免，实际违规：${JSON.stringify(ruleViolations)}`
     );
+    const actorViolations = output.summary.violations.filter(
+      (v) => v.rule.name === "actors-no-execution"
+    );
     assert.ok(
-      output.summary.violations.some((v) => v.rule.name === "tui-cannot-reach-execution"),
-      `应抓到 tui-cannot-reach-execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
+      actorViolations.some((v) => v.from.includes("src/tui/probe.ts")),
+      `应抓到 tui→execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
+    );
+    assert.ok(
+      actorViolations.some((v) => v.from.includes("src/cli/probe.ts")),
+      `应抓到 cli→execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
     );
   } finally {
     process.chdir(originalCwd);

@@ -77,10 +77,13 @@ export default {
       },
     },
     {
-      name: "tui-cannot-reach-execution",
+      name: "actors-no-execution",
       severity: "error",
-      comment: "TUI 只提交意图、渲染投影，不能触碰执行器（ROADMAP §2/§3.6 Actor 边界）。",
-      from: { path: "^src/tui" },
+      comment:
+        "Actor（cli / tui）只提交意图、渲染投影，不能触碰执行器（ROADMAP §2/§3.6 Actor 边界）；" +
+        "冷恢复等 execution 用法一律经 application Controller（M2 S1，决策 025——" +
+        "M4 记账的 cli 直连 execution 过渡豁免已随装配根抽取消除）。",
+      from: { path: "^src/(cli|tui)", pathNot: "\\.test\\.ts$" },
       to: { path: "^src/execution" },
     },
   ],

@@ -29,10 +29,7 @@ test("text_delta 增量按序到达并携带 runId；thinking 增量不转发；
   const thinking = "先想想再回答";
   const firstText = "流式增量甲乙丙丁戊己";
   const streamFn = createFakeStreamFn({
-    replies: [
-      { thinking, text: firstText, chunkSize: 2 },
-      { text: "第二次回复" },
-    ],
+    replies: [{ thinking, text: firstText, chunkSize: 2 }, { text: "第二次回复" }],
   });
   const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
   const deltas: StreamTextDelta[] = [];
@@ -47,7 +44,12 @@ test("text_delta 增量按序到达并携带 runId；thinking 增量不转发；
     assert.equal(delta.runId, first.runId);
   }
   // thinking 增量不转发（024 子裁决：第一版只转发 text_delta）
-  assert.ok(!deltas.map((d) => d.delta).join("").includes(thinking));
+  assert.ok(
+    !deltas
+      .map((d) => d.delta)
+      .join("")
+      .includes(thinking)
+  );
   assert.equal(first.status, "completed");
 
   // 退订后第二个 Run 不再收到增量
@@ -75,10 +77,7 @@ test("listener 抛异常进 listenerErrors，Run 与其他 listener 不受影响
   assert.equal(result.status, "completed");
   assert.equal(collected.join(""), text);
   // 抛出的异常被吞进 listenerErrors（每条增量一次）
-  assert.ok(
-    adapter.listenerErrors().length >= 1,
-    "listener 异常应进 listenerErrors"
-  );
+  assert.ok(adapter.listenerErrors().length >= 1, "listener 异常应进 listenerErrors");
 
   await adapter.dispose();
 });

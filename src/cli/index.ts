@@ -7,6 +7,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { runResumeFlow } from "../application/resume.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
@@ -25,7 +26,7 @@ import { createCliApprovalHandler } from "./approval-ui.ts";
 import type { GrantsCommandContext } from "./grants.ts";
 import { type AskFn, createAsker, runRepl } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
-import { runResumeCommand, runSessionListCommand } from "./session.ts";
+import { runSessionListCommand } from "./session.ts";
 import { runTraceCommand } from "./trace.ts";
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）
@@ -372,7 +373,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   };
   const { ask, close } = createAsker(process.stdin, write);
   try {
-    await runResumeCommand({
+    await runResumeFlow({
       root: workspaceRoot,
       sessionId: sessionIdArg,
       ask,
