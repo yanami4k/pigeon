@@ -8,16 +8,18 @@ import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { JsonlEventLog, migrateLegacyLedger } from "../persistence/index.ts";
+import type { SessionListFilters } from "../persistence/session-list.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
-import { newSessionId } from "../state/ids.ts";
+import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
-import { createAsker, runRepl } from "./repl.ts";
+import { type AskFn, createAsker, runRepl } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
+import { runResumeCommand, runSessionListCommand } from "./session.ts";
 import { runTraceCommand } from "./trace.ts";
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）
@@ -104,49 +106,119 @@ function replayMain(argv: string[]): void {
   );
 }
 
-async function main(argv: string[]): Promise<void> {
-  if (argv[0] === "trace") {
-    traceMain(argv.slice(1));
-    return;
+// pigeon session list [--tool <name>] [--class <cancelled|business|infrastructure|unknown>]
+//   [--since <ISO 日期|epoch 毫秒>] [--until <...>] [--root <dir>]：会话投影列表（M4 S5，D5）——
+// 只读渲染（派生不落库），不需要模型接入，永不写事件日志/工作区
+const FAILURE_CLASSES = ["cancelled", "business", "infrastructure", "unknown"] as const;
+
+// 时间边界解析：全数字 = epoch 毫秒；否则按 ISO 日期 Date.parse，解析不出响亮报错
+function parseTimeBound(flag: string, value: string | undefined): number {
+  if (value === undefined) {
+    throw new Error(`${flag} 缺少取值（ISO 日期或 epoch 毫秒）`);
   }
-  if (argv[0] === "replay") {
-    replayMain(argv.slice(1));
-    return;
+  if (/^\d+$/.test(value)) {
+    return Number(value);
   }
-  let yolo = false;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`${flag} 需要 ISO 日期或 epoch 毫秒：${value}`);
+  }
+  return parsed;
+}
+
+function sessionListMain(argv: string[]): void {
+  const filters: SessionListFilters = {};
   let root = process.cwd();
-  let streamFnSpec = process.env.PIGEON_STREAM_FN;
-  let provider = "custom";
-  let modelId = "cli";
+  const usage =
+    "用法：pigeon session list [--tool <name>] [--class <cancelled|business|infrastructure|unknown>] " +
+    "[--since <ISO 日期或 epoch 毫秒>] [--until <ISO 日期或 epoch 毫秒>] [--root <dir>]";
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--tool") {
+      const value = argv[++i];
+      if (value === undefined) {
+        throw new Error("--tool 缺少取值（工具名）");
+      }
+      filters.tool = value;
+    } else if (flag === "--class") {
+      const value = argv[++i];
+      if (value === undefined || !(FAILURE_CLASSES as readonly string[]).includes(value)) {
+        throw new Error(
+          `未知失败分类：${value ?? "（缺取值）"}（可选：${FAILURE_CLASSES.join("/")}）`
+        );
+      }
+      // 成员校验已在上面完成，此处收窄到联合类型
+      filters.class = value as (typeof FAILURE_CLASSES)[number];
+    } else if (flag === "--since") {
+      filters.since = parseTimeBound(flag, argv[++i]);
+    } else if (flag === "--until") {
+      filters.until = parseTimeBound(flag, argv[++i]);
+    } else if (flag === "--root") {
+      root = argv[++i] ?? root;
+    } else {
+      throw new Error(`未知参数：${flag}（${usage}）`);
+    }
+  }
+  process.stdout.write(runSessionListCommand({ root: realpathSync(root), filters }));
+}
+
+// 模型接入 flags（start/resume 共用一套形状；resume 另加一个位置参数 sessionId）
+interface ModelFlags {
+  yolo: boolean;
+  root: string;
+  streamFnSpec?: string;
+  provider: string;
+  modelId: string;
+}
+
+function parseModelFlags(argv: string[], usage: string): ModelFlags {
+  const flags: ModelFlags = {
+    yolo: false,
+    root: process.cwd(),
+    provider: "custom",
+    modelId: "cli",
+  };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--yolo") {
-      yolo = true;
+      flags.yolo = true;
     } else if (flag === "--root") {
-      root = argv[++i] ?? root;
+      flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
-      streamFnSpec = argv[++i];
+      const value = argv[++i];
+      if (value === undefined) {
+        throw new Error("--stream-fn 缺少取值（模块路径）");
+      }
+      flags.streamFnSpec = value;
     } else if (flag === "--provider") {
-      provider = argv[++i] ?? provider;
+      flags.provider = argv[++i] ?? flags.provider;
     } else if (flag === "--model") {
-      modelId = argv[++i] ?? modelId;
+      flags.modelId = argv[++i] ?? flags.modelId;
     } else {
-      throw new Error(
-        `未知参数：${flag}（支持 --yolo / --root / --stream-fn / --provider / --model）`
-      );
+      throw new Error(`未知参数：${flag}（${usage}）`);
     }
   }
-  if (streamFnSpec === undefined || streamFnSpec === "") {
-    throw new Error(
-      "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
-        "StreamFn 的模块（形状 (model, context, options?) => AssistantMessageEventStream，" +
-        "与测试 fixtures 的 fake streamFn 同型；provider 密钥由该模块自行从环境变量读取）"
-    );
-  }
-  const streamFn = await loadStreamFn(streamFnSpec);
-  // 工作区根：工具的路径围栏以它为准（realpath 规范化，见 paths.ts）
-  const workspaceRoot = realpathSync(root);
+  return flags;
+}
 
+interface RuntimeDeps {
+  streamFn: StreamFn;
+  workspaceRoot: string;
+  sessionId: SessionId;
+  yolo: boolean;
+  provider: string;
+  modelId: string;
+  // REPL 问答函数（审批 handler 需要；由入口先建 asker 再注入）
+  ask: AskFn;
+}
+
+// start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志。
+// 事件日志 = <workspaceRoot>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；
+// ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）。
+// resume 复用同一 sessionId 续写（append 模式），会话文件跨进程延续
+function buildRuntime(deps: RuntimeDeps): { adapter: PiRuntimeAdapter; eventLog: JsonlEventLog } {
+  const sessionsDir = path.join(deps.workspaceRoot, ".pigeon", "sessions");
+  const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId);
   const registry = new ToolRegistry();
   registry.register({
     name: "read_file",
@@ -164,23 +236,15 @@ async function main(argv: string[]): Promise<void> {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
-
-  const { ask, close } = createAsker(process.stdin, (text) => process.stdout.write(text));
-  // D8：M3 旧账本一次性迁移（不存在即 no-op；损坏响亮失败，启动中止）
-  const sessionsDir = path.join(workspaceRoot, ".pigeon", "sessions");
-  migrateLegacyLedger(path.join(workspaceRoot, ".pigeon", "ledger.jsonl"), sessionsDir);
-  const sessionId = newSessionId();
-  const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-
   const adapter = new PiRuntimeAdapter({
     snapshot: {
       version: INJECTION_SNAPSHOT_VERSION,
-      model: { provider, id: modelId },
+      model: { provider: deps.provider, id: deps.modelId },
       tools: {
         policy: {
           allow: ["read_file", "edit_file"],
           deny: [],
-          approvalMode: yolo ? "yolo" : "prompt",
+          approvalMode: deps.yolo ? "yolo" : "prompt",
         },
         advertised: ["read_file", "edit_file"],
       },
@@ -193,17 +257,147 @@ async function main(argv: string[]): Promise<void> {
       skills: [],
       createdAt: Date.now(),
     },
-    streamFn,
+    streamFn: deps.streamFn,
     registry,
-    tools: [createReadFileTool(workspaceRoot), createEditFileTool(workspaceRoot)],
-    approvalHandler: createCliApprovalHandler(ask, (text) => process.stdout.write(text)),
-    sessionId,
-    // 默认事件日志：<工作区根>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；
-    // ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）
+    tools: [createReadFileTool(deps.workspaceRoot), createEditFileTool(deps.workspaceRoot)],
+    approvalHandler: createCliApprovalHandler(deps.ask, (text) => process.stdout.write(text)),
+    sessionId: deps.sessionId,
     eventLog,
   });
+  return { adapter, eventLog };
+}
+
+// pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>]
+//   [--model <m>]：冷恢复对账（哈希自动确证 + 剩余悬账人工确认菜单）后在同一会话下续跑
+// REPL（M4 S5，D5）——Pi transcript 不恢复，模型对话上下文重新建立；后续 Run 继续写入
+// 本会话事件日志；系统永不自动重新执行（§3.2）
+async function resumeMain(argv: string[]): Promise<void> {
+  let sessionIdArg: string | undefined;
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (!arg.startsWith("--") && sessionIdArg === undefined) {
+      sessionIdArg = arg;
+      continue;
+    }
+    modelArgv.push(arg);
+    // 取值型 flag 的值也不以 -- 开头，一并带走（--yolo 无值）
+    const next = argv[i + 1];
+    if (arg !== "--yolo" && next !== undefined && !next.startsWith("--")) {
+      modelArgv.push(next);
+      i++;
+    }
+  }
+  const usage =
+    "用法：pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]";
+  if (sessionIdArg === undefined) {
+    throw new Error(usage);
+  }
+  const sessionId = asSessionId(sessionIdArg);
+  const flags = parseModelFlags(
+    modelArgv,
+    "支持 --yolo / --root / --stream-fn / --provider / --model"
+  );
+  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
+    throw new Error(
+      "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
+        "StreamFn 的模块（provider 密钥由该模块自行从环境变量读取）"
+    );
+  }
+  const streamFnSpec = flags.streamFnSpec;
+  const workspaceRoot = realpathSync(flags.root);
+  // D8：M3 旧账本一次性迁移（resume 也走，旧会话恢复前先把账本事件化）
+  migrateLegacyLedger(
+    path.join(workspaceRoot, ".pigeon", "ledger.jsonl"),
+    path.join(workspaceRoot, ".pigeon", "sessions")
+  );
+  const write = (text: string): void => {
+    process.stdout.write(text);
+  };
+  const { ask, close } = createAsker(process.stdin, write);
   try {
-    await runRepl({ adapter, ask, write: (text) => process.stdout.write(text) });
+    await runResumeCommand({
+      root: workspaceRoot,
+      sessionId: sessionIdArg,
+      ask,
+      write,
+      // 对账收口后进入 REPL：同一 sessionId 续写事件日志；EOF/退出走正常 finally
+      enterRepl: async () => {
+        const streamFn = await loadStreamFn(streamFnSpec);
+        const { adapter, eventLog } = buildRuntime({
+          streamFn,
+          workspaceRoot,
+          sessionId,
+          yolo: flags.yolo,
+          provider: flags.provider,
+          modelId: flags.modelId,
+          ask,
+        });
+        try {
+          await runRepl({ adapter, ask, write });
+        } finally {
+          await adapter.dispose();
+          eventLog.close();
+        }
+      },
+    });
+  } finally {
+    close();
+  }
+}
+
+async function main(argv: string[]): Promise<void> {
+  if (argv[0] === "trace") {
+    traceMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "replay") {
+    replayMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "session" && argv[1] === "list") {
+    sessionListMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "resume") {
+    await resumeMain(argv.slice(1));
+    return;
+  }
+  const flags = parseModelFlags(argv, "支持 --yolo / --root / --stream-fn / --provider / --model");
+  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
+    throw new Error(
+      "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
+        "StreamFn 的模块（形状 (model, context, options?) => AssistantMessageEventStream，" +
+        "与测试 fixtures 的 fake streamFn 同型；provider 密钥由该模块自行从环境变量读取）"
+    );
+  }
+  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  // 工作区根：工具的路径围栏以它为准（realpath 规范化，见 paths.ts）
+  const workspaceRoot = realpathSync(flags.root);
+  // D8：M3 旧账本一次性迁移（不存在即 no-op；损坏响亮失败，启动中止）
+  migrateLegacyLedger(
+    path.join(workspaceRoot, ".pigeon", "ledger.jsonl"),
+    path.join(workspaceRoot, ".pigeon", "sessions")
+  );
+  const write = (text: string): void => {
+    process.stdout.write(text);
+  };
+  const { ask, close } = createAsker(process.stdin, write);
+  const sessionId = newSessionId();
+  const { adapter, eventLog } = buildRuntime({
+    streamFn,
+    workspaceRoot,
+    sessionId,
+    yolo: flags.yolo,
+    provider: flags.provider,
+    modelId: flags.modelId,
+    ask,
+  });
+  try {
+    await runRepl({ adapter, ask, write });
   } finally {
     close();
     await adapter.dispose();
