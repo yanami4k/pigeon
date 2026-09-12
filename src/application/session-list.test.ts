@@ -1,5 +1,7 @@
-// M4 S5：CLI session list 命令测试（D5：列表默认安静、仅待对账突出）。
+// M4 S5：session list 命令层测试（D5：列表默认安静、仅待对账突出）。
 // M2 S1（决策 025）：resume 流程测试随流程迁入 application/resume.test.ts。
+// M2 S4：命令层自 cli/session.ts 归位 application/session-list.ts（同决策 030 方向），
+// 测试随命令层迁入；渲染口径不变。
 // 覆盖：列表渲染（安静行 + 待对账突出行 + 过滤器）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -21,7 +23,7 @@ import {
 } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
-import { runSessionListCommand } from "./session.ts";
+import { runSessionListCommand } from "./session-list.ts";
 
 function makeRoot(): { root: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-session-cmd-"));
