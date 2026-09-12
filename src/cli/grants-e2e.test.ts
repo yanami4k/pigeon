@@ -364,6 +364,11 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
     await r4.adapter.dispose();
     assert.ok(outputs4.join("").includes("（policy:config）"), "固化规则命中记 policy:config");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "STEP4\n");
+    // M4 收口决策 ①：配置命中的账本回指 = 规则的 promotedFrom.grantId（稳定身份，不是位置序号）
+    const configIntent = materializeSession(sessionsDir, SESSION_B).intents.find(
+      (intent) => intent.decision.approvedBy === "policy:config"
+    );
+    assert.deepEqual(configIntent?.decision.grantRef, { kind: "config-rule", id: grant.grantId });
   } finally {
     eventLog.close();
     rmSync(root, { recursive: true, force: true });

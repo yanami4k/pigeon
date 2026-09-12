@@ -60,9 +60,10 @@ import {
 // v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族；
 // v3（M4 S5）：新增 entry 族（D3 Pi transcript 消息映射）、resolution 增 human-confirmed
 // 人工确认渠道且 evidence 改可选；
-// v4（M4 S6）：新增 grant.created / grant.revoked 族（决策 3 Grant 体系）——
+// v4（M4 S6）：新增 grant.created / grant.revoked 族（决策 3 Grant 体系）；
+// v5（M4 收口决策 ①）：新增 grant.promoted / grant.config-removed 族（固化规则升格/移除留痕）——
 // 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）
-export const EVENT_LOG_VERSION = 4;
+export const EVENT_LOG_VERSION = 5;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -275,7 +276,36 @@ export const GrantRevokedRecordSchema = Type.Object({
 });
 export type GrantRevokedRecord = Static<typeof GrantRevokedRecordSchema>;
 
-// Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族）
+// grant.promoted（M4 收口决策 ①）：/grants save 升格的持久化留证——固化规则的稳定身份是
+// promotedFrom.grantId（与本记录 grantId 同值），intent 的 grantRef 回指它而非位置序号
+// （位置随 /revoke config#N 前移，身份不随）。扩权动作先留证后写配置（fail-closed 同 grant.created）
+export const GrantPromotedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("grant.promoted"),
+  grantId: GrantIdSchema,
+  tool: Type.String({ minLength: 1 }),
+  pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  promotedAt: Type.Integer({ minimum: 0 }),
+});
+export type GrantPromotedRecord = Static<typeof GrantPromotedRecordSchema>;
+
+// grant.config-removed（M4 收口决策 ①）：/revoke config#N 移除固化规则的持久化留证——
+// 事后可查"曾有一条规则、后来被撤了"。index 是移除时刻的展示序号，仅供人读对照；
+// 身份是 grantId。缩权动作先生效（改配置）后留证：留证失败只留下"少一条痕迹"的缺口，
+// 反过来（留证成功配置未改）会让审计者误以为规则已不生效
+export const GrantConfigRemovedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("grant.config-removed"),
+  grantId: GrantIdSchema,
+  tool: Type.String({ minLength: 1 }),
+  pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  index: Type.Integer({ minimum: 0 }),
+  removedAt: Type.Integer({ minimum: 0 }),
+});
+export type GrantConfigRemovedRecord = Static<typeof GrantConfigRemovedRecordSchema>;
+
+// Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族；
+// M4 收口新增 grant.promoted / grant.config-removed 族）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
   EntryRecordSchema,
@@ -286,6 +316,8 @@ export const EventRecordSchema = Type.Union([
   ResolutionRecordSchema,
   GrantCreatedRecordSchema,
   GrantRevokedRecordSchema,
+  GrantPromotedRecordSchema,
+  GrantConfigRemovedRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -316,6 +348,14 @@ export type GrantCreatedInput = Omit<
 >;
 export type GrantRevokedInput = Omit<
   GrantRevokedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type GrantPromotedInput = Omit<
+  GrantPromotedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type GrantConfigRemovedInput = Omit<
+  GrantConfigRemovedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
 
@@ -387,6 +427,9 @@ export interface MaterializedSession {
   grantCreateds: GrantCreatedRecord[];
   grantRevokeds: GrantRevokedRecord[];
   grants: ActiveGrant[];
+  // 固化规则升格/移除留痕（M4 收口决策 ①）：配置面动作的原始记录，不参与会话 grant 生效集
+  grantPromoteds: GrantPromotedRecord[];
+  grantConfigRemoveds: GrantConfigRemovedRecord[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
@@ -424,6 +467,9 @@ eventLogMigrations.register("event-log", 2, (doc) => ({ ...doc, version: 3 }));
 // v3 → v4（M4 S6）：加法式演进（新增 grant.created / grant.revoked 族）——
 // v3 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 3, (doc) => ({ ...doc, version: 4 }));
+// v4 → v5（M4 收口决策 ①）：加法式演进（新增 grant.promoted / grant.config-removed 族）——
+// v4 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 4, (doc) => ({ ...doc, version: 5 }));
 
 // 全量读 + 校验的结果：记录集 + 撕裂尾巴标记。
 // tornTail：进程死于写盘中途的痕迹——追加协议保证每条记录以 \n 结尾，
@@ -664,6 +710,30 @@ export class JsonlEventLog {
     return record;
   }
 
+  // grant.promoted 落盘（M4 收口决策 ①）：治理族耐久（fsync）；/grants save 先落本记录再写配置
+  appendGrantPromoted(input: GrantPromotedInput): GrantPromotedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(GrantPromotedRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "grant.promoted",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // grant.config-removed 落盘（M4 收口决策 ①）：治理族耐久（fsync）；/revoke config#N 先改配置再落本记录
+  appendGrantConfigRemoved(input: GrantConfigRemovedInput): GrantConfigRemovedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(GrantConfigRemovedRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "grant.config-removed",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
   // 迁移/外部构造记录的直通入口：全量校验 + 幂等判定 + 按族耐久写盘
   appendRecord(record: EventRecord): void {
     const parsed = Value.Parse(EventRecordSchema, record);
@@ -684,6 +754,17 @@ export class JsonlEventLog {
       id: newEntryId(),
       sessionId: this.sessionId,
       runId,
+      timestamp: Date.now(),
+    };
+  }
+
+  // grant 族信封：runId 可选（REPL 时段的配置面动作无活动 Run）
+  #grantEnvelope(runId: RunId | undefined) {
+    return {
+      version: EVENT_LOG_VERSION,
+      id: newEntryId(),
+      sessionId: this.sessionId,
+      ...(runId !== undefined ? { runId } : {}),
       timestamp: Date.now(),
     };
   }
@@ -727,6 +808,8 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
   const entries: EntryRecord[] = [];
   const grantCreateds: GrantCreatedRecord[] = [];
   const grantRevokeds: GrantRevokedRecord[] = [];
+  const grantPromoteds: GrantPromotedRecord[] = [];
+  const grantConfigRemoveds: GrantConfigRemovedRecord[] = [];
   for (const record of records) {
     if (record.kind === "intent") {
       intents.push(record);
@@ -744,6 +827,10 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
       grantCreateds.push(record);
     } else if (record.kind === "grant.revoked") {
       grantRevokeds.push(record);
+    } else if (record.kind === "grant.promoted") {
+      grantPromoteds.push(record);
+    } else if (record.kind === "grant.config-removed") {
+      grantConfigRemoveds.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -764,6 +851,8 @@ export function materializeSession(dir: string, sessionId: SessionId): Materiali
     grantCreateds,
     grantRevokeds,
     grants: activeGrants(grantCreateds, grantRevokeds),
+    grantPromoteds,
+    grantConfigRemoveds,
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };

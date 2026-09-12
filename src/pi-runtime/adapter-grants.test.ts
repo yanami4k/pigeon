@@ -228,7 +228,7 @@ test("不变式③撤销立即停免审：/revoke 后同工具调用重新弹人
   }
 });
 
-test("不变式④配置规则命中：approvedBy=policy:config，grantRef 回指 config:grants.json#<序号>", async () => {
+test("不变式④配置规则命中：approvedBy=policy:config，grantRef 回指规则的 promotedFrom.grantId（稳定身份）", async () => {
   const original = "alpha\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
   try {
@@ -271,9 +271,10 @@ test("不变式④配置规则命中：approvedBy=policy:config，grantRef 回�
     assert.equal(approvals.length, 0, "配置规则免审");
     const record = result.toolExecutions[0];
     assert.equal(record?.decision?.approvedBy, "policy:config");
+    // M4 收口决策 ①：回指稳定身份而非位置序号（序号随 /revoke config#N 前移，历史回指会漂移）
     assert.deepEqual(record?.decision?.grantRef, {
       kind: "config-rule",
-      id: "config:grants.json#0",
+      id: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
     });
     await adapter.dispose();
   } finally {

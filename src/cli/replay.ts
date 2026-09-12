@@ -119,6 +119,17 @@ function recordDetail(record: EventRecord): string {
     }
     case "grant.revoked":
       return `放权撤销 ${shortId(record.grantId)}`;
+    // M4 收口决策 ①：固化规则升格/移除留痕——配置面动作的时间线呈现
+    case "grant.promoted": {
+      const scope =
+        record.pathPrefix !== undefined ? `，仅限目录 ${record.pathPrefix}` : "（工具级）";
+      return `固化升格 ${shortId(record.grantId)} ｜ ${record.tool}${scope} → .pigeon/grants.json`;
+    }
+    case "grant.config-removed": {
+      const scope =
+        record.pathPrefix !== undefined ? `，仅限目录 ${record.pathPrefix}` : "（工具级）";
+      return `固化移除 config#${record.index} ｜ ${record.tool}${scope} ｜ 出处 grant ${shortId(record.grantId)}`;
+    }
   }
 }
 

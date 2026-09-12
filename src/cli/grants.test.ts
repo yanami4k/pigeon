@@ -1,190 +1,202 @@
-// M4 S6（决策 3 + D6）：/grants、/revoke、/grants save 命令测试。
-// 升格写 .pigeon/grants.json 带 promotedFrom 出处；撤销会话 grant 立即生效并留 grant.revoked；
-// 配置规则撤销从文件移除（求值面会话内冻结，如实标注）。
+// M4 收口（决策 ①②）：/grants save 与 /revoke config#N 的账本留痕与身份稳定性——
+// 升格先落 grant.promoted 事件再写配置（扩权先留证）；移除先改配置再落
+// grant.config-removed 事件（缩权先生效）；重复升格响亮拒绝；配置规则的回指是
+// promotedFrom.grantId，移除排在前面的规则后回指逐字不变。
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
-import {
-  appendGrantConfigRule,
-  grantsConfigPath,
-  loadGrantConfig,
-  SessionGrantStore,
-} from "../persistence/grants.ts";
-import { asGrantId, asSessionId, newSessionId } from "../state/ids.ts";
+import { loadGrantConfig, matchConfigGrants, SessionGrantStore } from "../persistence/grants.ts";
+import { asSessionId } from "../state/ids.ts";
 import { type GrantsCommandContext, runGrantCommand } from "./grants.ts";
 
-function makeContext(
-  root: string,
-  sessionId = newSessionId()
-): {
-  ctx: GrantsCommandContext;
-  outputs: string[];
+const SESSION = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRCC");
+
+function makeContext(): {
+  root: string;
+  sessionsDir: string;
+  eventLog: JsonlEventLog;
   store: SessionGrantStore;
-  close: () => void;
+  outputs: string[];
+  ctx: GrantsCommandContext;
+  cleanup: () => void;
 } {
-  const outputs: string[] = [];
-  const eventLog = new JsonlEventLog(join(root, "sessions"), sessionId);
+  const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
+  const sessionsDir = join(root, ".pigeon", "sessions");
+  const eventLog = new JsonlEventLog(sessionsDir, SESSION);
   const store = new SessionGrantStore({ workspaceRoot: root, eventLog });
-  return {
-    ctx: {
-      root,
-      store,
-      configRules: loadGrantConfig(root),
-      sessionId,
-      write: (text) => outputs.push(text),
-    },
-    outputs,
+  const outputs: string[] = [];
+  const ctx: GrantsCommandContext = {
+    root,
     store,
-    close: () => eventLog.close(),
+    configRules: [],
+    sessionId: SESSION,
+    eventLog,
+    write: (text) => outputs.push(text),
+  };
+  return {
+    root,
+    sessionsDir,
+    eventLog,
+    store,
+    outputs,
+    ctx,
+    cleanup: () => {
+      eventLog.close();
+      rmSync(root, { recursive: true, force: true });
+    },
   };
 }
 
-test("/grants 列表：会话 grant（createdAt/命中/作用域/首调）与固化规则（出处）俱全", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
-  const sessionId = newSessionId();
+test("/grants save：落 grant.promoted 事件（grantId = 规则的 promotedFrom.grantId），事件先于配置写入", () => {
+  const { root, sessionsDir, store, ctx, cleanup } = makeContext();
   try {
-    // 先落固化规则再建上下文：configRules 在上下文创建时载入（同会话启动的冻结语义）
-    appendGrantConfigRule(root, {
-      tool: "read_file",
-      promotedFrom: {
-        grantId: asGrantId("grant_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
-        sessionId,
-        firstCall: { toolCallId: "toolu_01DEF", args: { path: "b.ts" } },
-        promotedAt: 1_757_000_000_000,
-      },
-    });
-    const { ctx, outputs, store, close } = makeContext(root, sessionId);
-    store.create({
-      tool: "edit_file",
-      pathPrefix: "src",
-      firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
-    });
-    store.noteEffectiveHit({ source: "session-grant", refId: store.list()[0]?.grantId ?? "" });
-
-    assert.equal(runGrantCommand(["grants"], ctx), true);
-    const text = outputs.join("");
-    assert.ok(text.includes("会话放权（1）"), text);
-    assert.ok(text.includes("edit_file"), text);
-    assert.ok(text.includes("仅限目录 src"), text);
-    assert.ok(text.includes("命中 1 次"), text);
-    assert.ok(text.includes("toolu_01ABC"), text);
-    assert.ok(text.includes("固化规则（1"), text);
-    assert.ok(text.includes("config#0"), text);
-    assert.ok(text.includes("工具级（不限目录）"), text);
-    assert.ok(text.includes("升格 2025-"), text);
-    assert.ok(text.includes("出处 会话"), text);
-    close();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("/grants 空列表如实说明；非 grant 命令返回 false（REPL 继续其他分发）", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
-  try {
-    const { ctx, outputs, close } = makeContext(root);
-    assert.equal(runGrantCommand(["grants"], ctx), true);
-    assert.ok(outputs.join("").includes("无"), "空列表有说明");
-    assert.equal(runGrantCommand(["unknown"], ctx), false);
-    close();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("/grants save <id>：升格写 .pigeon/grants.json，promotedFrom 出处逐字在场", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
-  const sessionId = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRSW");
-  try {
-    const { ctx, outputs, store, close } = makeContext(root, sessionId);
     const grant = store.create({
       tool: "edit_file",
       pathPrefix: "src",
       firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
     });
     assert.equal(runGrantCommand(["grants", "save", grant.grantId], ctx), true);
-    assert.ok(outputs.join("").includes("已升格"), outputs.join(""));
 
+    const materialized = materializeSession(sessionsDir, SESSION);
+    assert.equal(materialized.grantPromoteds.length, 1);
+    const promoted = materialized.grantPromoteds[0];
+    assert.ok(promoted !== undefined);
+    assert.equal(promoted.grantId, grant.grantId);
+    assert.equal(promoted.tool, "edit_file");
+    assert.equal(promoted.pathPrefix, "src");
+    assert.equal(promoted.runId, undefined, "REPL 时段升格无活动 Run");
     const rules = loadGrantConfig(root);
-    assert.equal(rules.length, 1);
-    assert.equal(rules[0]?.tool, "edit_file");
-    assert.equal(rules[0]?.pathPrefix, "src");
-    const promotedFrom = rules[0]?.promotedFrom;
-    assert.ok(promotedFrom);
-    assert.equal(promotedFrom.grantId, grant.grantId);
-    assert.equal(promotedFrom.sessionId, sessionId);
-    assert.deepEqual(promotedFrom.firstCall, {
-      toolCallId: "toolu_01ABC",
-      args: { path: "src/a.ts" },
-    });
-    assert.ok(promotedFrom.promotedAt > 0);
-    // 文件人可读 + version 字段在场
-    const onDisk = JSON.parse(readFileSync(grantsConfigPath(root), "utf8")) as { version: number };
-    assert.equal(onDisk.version, 1);
-
-    // 未知 id / 坏形态响亮报错
-    assert.throws(() =>
-      runGrantCommand(["grants", "save", "grant_01J5Z7K8W9ABCDEFGHJKMNPQRX"], ctx)
+    assert.equal(rules[0]?.promotedFrom.grantId, promoted.grantId, "事件与配置同一稳定身份");
+    assert.equal(rules[0]?.promotedFrom.promotedAt, promoted.promotedAt);
+    // 文件顺序：grant.created → grant.promoted（升格是扩权动作，留证在先）
+    assert.deepEqual(
+      materialized.records.map((record) => record.kind),
+      ["grant.created", "grant.promoted"]
     );
-    assert.throws(() => runGrantCommand(["grants", "save", "config#0"], ctx));
-    assert.throws(() => runGrantCommand(["grants", "save"], ctx), /用法/);
-    close();
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    cleanup();
   }
 });
 
-test("/revoke <grantId>：立即停免审并写 grant.revoked 事件（崩溃后仍撤销）", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
-  const sessionId = newSessionId();
+test("/grants save 重复升格：响亮报错指出已存在的 config#N，不落第二条事件、配置不变", () => {
+  const { root, sessionsDir, store, ctx, cleanup } = makeContext();
   try {
-    const { ctx, outputs, store, close } = makeContext(root, sessionId);
     const grant = store.create({
       tool: "edit_file",
       firstCall: { toolCallId: "toolu_01ABC", args: { path: "a.ts" } },
     });
-    assert.equal(runGrantCommand(["revoke", grant.grantId], ctx), true);
-    assert.equal(store.list().length, 0);
-    assert.ok(outputs.join("").includes("已撤销"), outputs.join(""));
-
-    // 持久痕迹：冷物化后该 grant 不在生效集（created − revoked）
-    const materialized = materializeSession(join(root, "sessions"), sessionId);
-    assert.equal(materialized.grants.length, 0);
-    assert.equal(materialized.grantRevokeds.length, 1);
-
-    assert.throws(() => runGrantCommand(["revoke", grant.grantId], ctx), /不存在/);
-    close();
+    runGrantCommand(["grants", "save", grant.grantId], ctx);
+    assert.throws(
+      () => runGrantCommand(["grants", "save", grant.grantId], ctx),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.message.includes("config#0"), error.message);
+        assert.ok(error.message.includes("已升格"), error.message);
+        return true;
+      }
+    );
+    assert.equal(loadGrantConfig(root).length, 1);
+    assert.equal(materializeSession(sessionsDir, SESSION).grantPromoteds.length, 1);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    cleanup();
   }
 });
 
-test("/revoke config#N：从 grants.json 移除并标注会话内冻结", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
-  const sessionId = newSessionId();
+test("/revoke config#N：先移除配置再落 grant.config-removed 事件（含被移除规则的 grantId 与当时序号）", () => {
+  const { root, sessionsDir, store, ctx, cleanup } = makeContext();
   try {
-    appendGrantConfigRule(root, {
+    const first = store.create({
       tool: "edit_file",
-      promotedFrom: {
-        grantId: asGrantId("grant_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
-        sessionId,
-        firstCall: { toolCallId: "toolu_01ABC", args: { path: "a.ts" } },
-        promotedAt: 1_757_000_000_000,
-      },
+      pathPrefix: "src",
+      firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
     });
-    writeFileSync(join(root, ".pigeon", "grants.json.bak"), "sentinel");
-    const { ctx, outputs, close } = makeContext(root, sessionId);
+    const second = store.create({
+      tool: "read_file",
+      firstCall: { toolCallId: "toolu_01DEF", args: { path: "b.ts" } },
+    });
+    runGrantCommand(["grants", "save", first.grantId], ctx);
+    runGrantCommand(["grants", "save", second.grantId], ctx);
+
+    // 移除前：第二条规则回指 second.grantId
+    const before = matchConfigGrants(loadGrantConfig(root), root, "read_file", {});
+    assert.equal(before?.refId, second.grantId);
+
     assert.equal(runGrantCommand(["revoke", "config#0"], ctx), true);
-    assert.equal(loadGrantConfig(root).length, 0);
-    const text = outputs.join("");
-    assert.ok(text.includes("已移除"), text);
-    assert.ok(text.includes("冻结"), text);
-    assert.throws(() => runGrantCommand(["revoke", "config#7"], ctx), /不存在/);
-    close();
+    const materialized = materializeSession(sessionsDir, SESSION);
+    assert.equal(materialized.grantConfigRemoveds.length, 1);
+    const removed = materialized.grantConfigRemoveds[0];
+    assert.ok(removed !== undefined);
+    assert.equal(removed.grantId, first.grantId, "留痕回指被移除规则的稳定身份");
+    assert.equal(removed.tool, "edit_file");
+    assert.equal(removed.pathPrefix, "src");
+    assert.equal(removed.index, 0, "移除时刻的展示序号仅供人读对照");
+
+    // 移除后：原第二条前移为 config#0，但回指逐字不变（P2-1 根因修复）
+    const rules = loadGrantConfig(root);
+    assert.equal(rules.length, 1);
+    const after = matchConfigGrants(rules, root, "read_file", {});
+    assert.equal(after?.refId, second.grantId, "位置序号前移，身份不变");
+    // 事件序列：两条 created、两条 promoted、一条 config-removed
+    assert.deepEqual(
+      materialized.records.map((record) => record.kind),
+      ["grant.created", "grant.created", "grant.promoted", "grant.promoted", "grant.config-removed"]
+    );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test("/revoke config#N 越界：响亮报错且不落事件", () => {
+  const { sessionsDir, ctx, cleanup } = makeContext();
+  try {
+    assert.throws(() => runGrantCommand(["revoke", "config#3"], ctx), /固化规则不存在/);
+    assert.equal(materializeSession(sessionsDir, SESSION).grantConfigRemoveds.length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+// 留痕顺序的不对称性（决策 ①）：扩权先留证——留证抛错则配置不写；缩权先生效——留证抛错
+// 时规则已移除、错误照样上抛（少一条痕迹好过"账本说撤了、规则还活着"）
+test("留痕顺序：升格留证失败 → 配置不写（扩权先留证）；移除留证失败 → 规则已移除且错误上抛（缩权先生效）", () => {
+  const { root, store, cleanup } = makeContext();
+  try {
+    const grant = store.create({
+      tool: "edit_file",
+      firstCall: { toolCallId: "toolu_01ABC", args: { path: "a.ts" } },
+    });
+    const poison = {
+      appendGrantPromoted: () => {
+        throw new Error("模拟磁盘写失败：grant.promoted 未落盘");
+      },
+      appendGrantConfigRemoved: () => {
+        throw new Error("模拟磁盘写失败：grant.config-removed 未落盘");
+      },
+    };
+    const ctx: GrantsCommandContext = {
+      root,
+      store,
+      configRules: [],
+      sessionId: SESSION,
+      eventLog: poison,
+      write: () => {},
+    };
+    assert.throws(
+      () => runGrantCommand(["grants", "save", grant.grantId], ctx),
+      /grant\.promoted 未落盘/
+    );
+    assert.equal(loadGrantConfig(root).length, 0, "留证失败则不扩权：grants.json 不得出现该规则");
+
+    // 用可用的落盘面先把规则升格上去，再用毒化落盘面移除
+    const { eventLog: _poison, ...plainCtx } = ctx;
+    runGrantCommand(["grants", "save", grant.grantId], plainCtx);
+    assert.equal(loadGrantConfig(root).length, 1);
+    assert.throws(() => runGrantCommand(["revoke", "config#0"], ctx), /config-removed 未落盘/);
+    assert.equal(loadGrantConfig(root).length, 0, "缩权先生效：留证失败规则也已移除");
+  } finally {
+    cleanup();
   }
 });

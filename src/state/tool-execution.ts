@@ -40,7 +40,8 @@ export const ToolExecutionDecisionSchema = Type.Object({
   grantRef: Type.Optional(
     Type.Object({
       // session-grant：grant_<ulid>（grant.created 事件的 grantId）；
-      // config-rule：config:grants.json#<条目序号>（固化规则身份，D6）
+      // config-rule：grant_<ulid>（固化规则的 promotedFrom.grantId——M4 收口决策 ①：
+      // 位置序号随移除前移，稳定身份不随；序号只在 /grants 展示与 /revoke 输入面使用）
       kind: Type.Union([Type.Literal("session-grant"), Type.Literal("config-rule")]),
       id: Type.String({ minLength: 1 }),
     })

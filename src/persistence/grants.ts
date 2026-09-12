@@ -35,7 +35,8 @@ import type { ActiveGrant, GrantCreatedInput, GrantRevokedInput } from "./event-
 export interface GrantMatchOutcome {
   readonly source: "session-grant" | "config-rule";
   // session-grant：grant_<ulid>（grant.created 的 grantId）；
-  // config-rule：config:grants.json#<条目序号>（固化规则身份，D6）
+  // config-rule：规则的 promotedFrom.grantId（M4 收口决策 ①：稳定身份——位置序号随
+  // /revoke config#N 前移，历史回指会漂移；grantId 是 ULID，删别的规则不改它）
   readonly refId: string;
 }
 
@@ -76,16 +77,17 @@ function scopeMatches(
   return isPathInsideDir(workspaceRoot, pathPrefix, pathArg);
 }
 
-// 固化规则求值：按文件序首个命中者回指条目序号；无命中返回 null（继续排律下行）
+// 固化规则求值：按文件序首个命中者回指其稳定身份（promotedFrom.grantId）；
+// 无命中返回 null（继续排律下行）。序号只在 /grants 展示与 /revoke 输入面使用
 export function matchConfigGrants(
   rules: readonly ConfigGrantRule[],
   workspaceRoot: string | undefined,
   toolName: string,
   args: unknown
 ): GrantMatchOutcome | null {
-  for (const [index, rule] of rules.entries()) {
+  for (const rule of rules) {
     if (scopeMatches(workspaceRoot, rule.tool, rule.pathPrefix, toolName, args)) {
-      return { source: "config-rule", refId: `config:grants.json#${index}` };
+      return { source: "config-rule", refId: rule.promotedFrom.grantId };
     }
   }
   return null;
@@ -121,6 +123,14 @@ export const GrantsConfigFileSchema = Type.Object({
 });
 
 export class GrantsConfigError extends Error {}
+// 升格去重（M4 收口决策 ②）：同一会话 grant 只允许升格一次——grantId 是固化规则的稳定身份
+// （决策 ①），两条同 grantId 的规则会让账本回指失去唯一性
+export class GrantAlreadyPromotedError extends GrantsConfigError {}
+
+// 查找已由某 grant 升格而来的规则下标；-1 = 尚未升格
+export function findPromotedRuleIndex(rules: readonly ConfigGrantRule[], grantId: GrantId): number {
+  return rules.findIndex((rule) => rule.promotedFrom.grantId === grantId);
+}
 
 export function grantsConfigPath(workspaceRoot: string): string {
   return join(workspaceRoot, ".pigeon", "grants.json");
@@ -154,10 +164,17 @@ export function loadGrantConfig(workspaceRoot: string): ConfigGrantRule[] {
 }
 
 // 升格写入（/grants save 的唯一正规写入方，约束 3）：整文件重写（人可读，D6），
-// 写后 fsync——固化是权限扩大动作，断电不得丢。既有文件畸形在此响亮失败（不覆盖人的错误配置）
+// 写后 fsync——固化是权限扩大动作，断电不得丢。既有文件畸形在此响亮失败（不覆盖人的错误配置）；
+// 同 grantId 已存在则拒绝（决策 ②），拒绝时文件不改写
 export function appendGrantConfigRule(workspaceRoot: string, rule: ConfigGrantRule): void {
   const path = grantsConfigPath(workspaceRoot);
   const existing = loadGrantConfig(workspaceRoot);
+  const duplicate = findPromotedRuleIndex(existing, rule.promotedFrom.grantId);
+  if (duplicate !== -1) {
+    throw new GrantAlreadyPromotedError(
+      `grant ${rule.promotedFrom.grantId} 已升格为 config#${duplicate}，不重复固化（用 /grants 查看）`
+    );
+  }
   const doc = Value.Parse(GrantsConfigFileSchema, {
     version: GRANTS_CONFIG_VERSION,
     grants: [...existing, rule],
@@ -176,7 +193,8 @@ export function appendGrantConfigRule(workspaceRoot: string, rule: ConfigGrantRu
 }
 
 // 配置规则移除（/revoke config#N）：整文件重写。配置规则在会话启动时载入并冻结——
-// 移除只影响磁盘，当前会话的求值面不变（/grants 输出如实标注「下次会话生效」）
+// 移除只影响磁盘，当前会话的求值面不变（/grants 输出如实标注「下次会话生效」）。
+// 返回被移除的规则：调用方据其 promotedFrom.grantId 落 grant.config-removed 留痕（决策 ①）
 export function removeGrantConfigRule(workspaceRoot: string, index: number): ConfigGrantRule {
   const path = grantsConfigPath(workspaceRoot);
   const existing = loadGrantConfig(workspaceRoot);

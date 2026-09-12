@@ -2,17 +2,30 @@
 // /grants save <id> 升格。/grants 是 grant 的唯一展示入口（决策 3b：崩溃恢复不加
 // 特殊展示行，生效 grant 统一由本命令呈现）；升格与配置的正规写入方都是人的显式
 // 命令（约束 3：agent / 模型 / 后台流程无写 grants.json 的代码路径）。
+// M4 收口决策 ①：配置面动作在 Event Log 留痕——升格落 grant.promoted（扩权先留证后写配置，
+// 同 grant.created 的 fail-closed 顺序：留证失败则不扩权），移除落 grant.config-removed
+// （缩权先生效后留证：留证失败只少一条痕迹；反过来会让审计者误以为规则已不生效）。
 // IO 全依赖注入（write 形状同 repl.ts 的 WriteFn；此处内联结构类型以避免
 // grants ↔ repl 类型环——repl 依赖 grants 的命令上下文，方向不可逆）
+import type { GrantConfigRemovedInput, GrantPromotedInput } from "../persistence/event-log.ts";
 import {
   appendGrantConfigRule,
   type ConfigGrantRule,
+  findPromotedRuleIndex,
+  GrantAlreadyPromotedError,
   GrantNotFoundError,
+  loadGrantConfig,
   removeGrantConfigRule,
   type SessionGrantStore,
 } from "../persistence/grants.ts";
 import { asGrantId, type GrantId, type SessionId } from "../state/ids.ts";
 import { shortId, summarizeArgs } from "./format.ts";
+
+// 配置面动作的留痕落盘面（JsonlEventLog 的写入子集；返回值无关——落盘副作用才是契约）
+export interface GrantConfigEventSink {
+  appendGrantPromoted(input: GrantPromotedInput): unknown;
+  appendGrantConfigRemoved(input: GrantConfigRemovedInput): unknown;
+}
 
 export interface GrantsCommandContext {
   // 工作区根（.pigeon/grants.json 所在；目录限定解析根）
@@ -23,6 +36,8 @@ export interface GrantsCommandContext {
   configRules: readonly ConfigGrantRule[];
   // 本会话 sessionId（升格出处 promotedFrom.sessionId）
   sessionId: SessionId;
+  // 升格/移除留痕落盘点（决策 ①）；缺省 = 不留痕（最小装配/旧测试）
+  eventLog?: GrantConfigEventSink;
   write: (text: string) => void;
 }
 
@@ -62,7 +77,8 @@ export function runGrantCommand(tokens: string[], ctx: GrantsCommandContext): bo
 }
 
 // /grants：会话 grant（createdAt / 命中次数 / 作用域 / 首调摘要）+ 固化规则
-//（promotedAt / 出处会话与首调）。无任何生效项时如实说明
+//（promotedAt / 出处会话与首调）。无任何生效项时如实说明。
+// config#N 是展示与 /revoke 输入用的位置序号；账本回指用的身份是出处 grant（决策 ①）
 function listGrants(ctx: GrantsCommandContext): void {
   const lines: string[] = [];
   const sessionGrants = ctx.store.list();
@@ -90,7 +106,9 @@ function listGrants(ctx: GrantsCommandContext): void {
 }
 
 // /grants save <id>：升格——会话 grant → 项目配置（D6：promotedFrom 出处结构化留证）。
-// 固化规则在下次会话启动时进求值面（本会话求值冻结），输出如实标注
+// 顺序（决策 ①②）：查重（同 grantId 已固化则响亮拒绝，不留痕）→ 落 grant.promoted →
+// 写配置（留证抛错则配置不写：扩权动作没有留证就不存在）。固化规则在下次会话启动时
+// 进求值面（本会话求值冻结），输出如实标注
 function promoteGrant(ctx: GrantsCommandContext, id: string): void {
   let grantId: GrantId;
   try {
@@ -102,6 +120,20 @@ function promoteGrant(ctx: GrantsCommandContext, id: string): void {
   if (grant === undefined) {
     throw new GrantNotFoundError(`grant 不存在或已撤销：${id}（用 /grants 查看生效列表）`);
   }
+  // 查重读磁盘现状而非会话冻结的 configRules：本会话内已升格的也算
+  const existingIndex = findPromotedRuleIndex(loadGrantConfig(ctx.root), grantId);
+  if (existingIndex !== -1) {
+    throw new GrantAlreadyPromotedError(
+      `grant ${grantId} 已升格为 config#${existingIndex}，不重复固化（用 /grants 查看）`
+    );
+  }
+  const promotedAt = Date.now();
+  ctx.eventLog?.appendGrantPromoted({
+    grantId: grant.grantId,
+    tool: grant.tool,
+    ...(grant.pathPrefix !== undefined ? { pathPrefix: grant.pathPrefix } : {}),
+    promotedAt,
+  });
   appendGrantConfigRule(ctx.root, {
     tool: grant.tool,
     ...(grant.pathPrefix !== undefined ? { pathPrefix: grant.pathPrefix } : {}),
@@ -109,7 +141,7 @@ function promoteGrant(ctx: GrantsCommandContext, id: string): void {
       grantId: grant.grantId,
       sessionId: ctx.sessionId,
       firstCall: grant.firstCall,
-      promotedAt: Date.now(),
+      promotedAt,
     },
   });
   ctx.write(
@@ -118,7 +150,8 @@ function promoteGrant(ctx: GrantsCommandContext, id: string): void {
 }
 
 // /revoke <id>：会话 grant 立即停免审（grant.revoked 事件留证）；配置规则从
-// grants.json 移除——求值面会话内冻结，本次会话仍按原规则求值，如实标注
+// grants.json 移除后落 grant.config-removed 留痕（决策 ①：缩权先生效后留证）——
+// 求值面会话内冻结，本次会话仍按原规则求值，如实标注
 function revokeGrant(ctx: GrantsCommandContext, id: string): void {
   if (id.startsWith("grant_")) {
     ctx.store.revoke(asGrantId(id));
@@ -127,9 +160,18 @@ function revokeGrant(ctx: GrantsCommandContext, id: string): void {
   }
   const match = /^config#(\d+)$/.exec(id);
   if (match !== null) {
-    const removed = removeGrantConfigRule(ctx.root, Number(match[1]));
+    const index = Number(match[1]);
+    const removed = removeGrantConfigRule(ctx.root, index);
+    ctx.eventLog?.appendGrantConfigRemoved({
+      grantId: removed.promotedFrom.grantId,
+      tool: removed.tool,
+      ...(removed.pathPrefix !== undefined ? { pathPrefix: removed.pathPrefix } : {}),
+      index,
+      removedAt: Date.now(),
+    });
     ctx.write(
-      `已移除固化规则 config#${match[1]}（${removed.tool}）：求值面会话内冻结，下次会话启动起不再生效\n`
+      `已移除固化规则 config#${match[1]}（${removed.tool}，出处 grant ${shortId(removed.promotedFrom.grantId)}）：` +
+        "求值面会话内冻结，下次会话启动起不再生效\n"
     );
     return;
   }

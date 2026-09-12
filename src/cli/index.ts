@@ -315,6 +315,8 @@ function grantCommandsOf(
     store: bundle.grantStore,
     configRules: bundle.configGrants,
     sessionId,
+    // M4 收口决策 ①：升格/移除留痕写入本会话事件日志
+    eventLog: bundle.eventLog,
     write,
   };
 }

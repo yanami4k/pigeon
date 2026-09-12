@@ -13,6 +13,8 @@ import { newGrantId, newSessionId } from "../state/ids.ts";
 import type { ActiveGrant } from "./event-log.ts";
 import {
   appendGrantConfigRule,
+  findPromotedRuleIndex,
+  GrantAlreadyPromotedError,
   GrantsConfigError,
   grantsConfigPath,
   loadGrantConfig,
@@ -139,7 +141,12 @@ test("升格写入：appendGrantConfigRule 新建/追加 .pigeon/grants.json，�
     };
     appendGrantConfigRule(root, rule);
     const { pathPrefix: _omit, ...toolOnly } = rule;
-    appendGrantConfigRule(root, { ...toolOnly, tool: "read_file" });
+    // 第二条规则来自另一个 grant（同 grantId 二次升格会被去重拒绝，见决策 ② 用例）
+    appendGrantConfigRule(root, {
+      ...toolOnly,
+      tool: "read_file",
+      promotedFrom: { ...toolOnly.promotedFrom, grantId: newGrantId() },
+    });
     const rules = loadGrantConfig(root);
     assert.equal(rules.length, 2);
     assert.deepEqual(rules[0], rule);
@@ -156,17 +163,61 @@ test("升格写入：appendGrantConfigRule 新建/追加 .pigeon/grants.json，�
   }
 });
 
+test("升格去重（note-6 / 决策 ②）：同一 grantId 二次升格响亮报错并指出已存在的 config#N；文件不变", () => {
+  const { root, cleanup } = makeWorkspace();
+  try {
+    const grantId = newGrantId();
+    const rule = {
+      tool: "edit_file",
+      promotedFrom: {
+        grantId,
+        sessionId: newSessionId(),
+        firstCall: { toolCallId: "toolu_01ABC", args: { path: "a.ts" } },
+        promotedAt: 1_757_000_000_000,
+      },
+    };
+    appendGrantConfigRule(root, {
+      ...rule,
+      tool: "read_file",
+      promotedFrom: { ...rule.promotedFrom, grantId: newGrantId() },
+    });
+    appendGrantConfigRule(root, rule);
+    assert.equal(findPromotedRuleIndex(loadGrantConfig(root), grantId), 1);
+    const bytesBefore = readFileSync(grantsConfigPath(root), "utf8");
+    assert.throws(
+      () =>
+        appendGrantConfigRule(root, {
+          ...rule,
+          promotedFrom: { ...rule.promotedFrom, promotedAt: 2 },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof GrantAlreadyPromotedError);
+        assert.ok(error instanceof GrantsConfigError, "去重失败也是配置错误的子类");
+        assert.ok(error.message.includes("config#1"), error.message);
+        assert.ok(error.message.includes(grantId), error.message);
+        return true;
+      }
+    );
+    assert.equal(readFileSync(grantsConfigPath(root), "utf8"), bytesBefore, "拒绝时文件不得改写");
+    assert.equal(findPromotedRuleIndex(loadGrantConfig(root), newGrantId()), -1);
+  } finally {
+    cleanup();
+  }
+});
+
 // ---- 配置规则匹配 ----
 
-test("配置规则匹配：命中回指 config:grants.json#<序号>；目录限定外/非路径参数不命中", () => {
+test("配置规则匹配：命中回指 promotedFrom.grantId（稳定身份，M4 收口决策 ①）；目录限定外/非路径参数不命中", () => {
   const { root, cleanup } = makeWorkspace({ "src/a.ts": "a", "lib/b.ts": "b" });
   try {
+    const editGrantId = newGrantId();
+    const readGrantId = newGrantId();
     const rules = [
       {
         tool: "edit_file",
         pathPrefix: "src",
         promotedFrom: {
-          grantId: newGrantId(),
+          grantId: editGrantId,
           sessionId: newSessionId(),
           firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
           promotedAt: 1,
@@ -175,7 +226,7 @@ test("配置规则匹配：命中回指 config:grants.json#<序号>；目录限�
       {
         tool: "read_file",
         promotedFrom: {
-          grantId: newGrantId(),
+          grantId: readGrantId,
           sessionId: newSessionId(),
           firstCall: { toolCallId: "toolu_01DEF", args: { path: "b.ts" } },
           promotedAt: 2,
@@ -184,7 +235,7 @@ test("配置规则匹配：命中回指 config:grants.json#<序号>；目录限�
     ];
     assert.deepEqual(matchConfigGrants(rules, root, "edit_file", { path: "src/a.ts" }), {
       source: "config-rule",
-      refId: "config:grants.json#0",
+      refId: editGrantId,
     });
     assert.equal(matchConfigGrants(rules, root, "edit_file", { path: "lib/b.ts" }), null);
     assert.equal(matchConfigGrants(rules, root, "edit_file", { nope: 1 }), null);
@@ -192,7 +243,14 @@ test("配置规则匹配：命中回指 config:grants.json#<序号>；目录限�
     // 工具级规则（无 pathPrefix）不依赖路径解析，无路径参数也命中
     assert.deepEqual(matchConfigGrants(rules, root, "read_file", {}), {
       source: "config-rule",
-      refId: "config:grants.json#1",
+      refId: readGrantId,
+    });
+    // 回指稳定性（P2-1 根因）：删掉排在前面的规则后，剩余规则的回指逐字不变——
+    // 位置序号会前移，身份不会
+    const afterRemoval = rules.slice(1);
+    assert.deepEqual(matchConfigGrants(afterRemoval, root, "read_file", {}), {
+      source: "config-rule",
+      refId: readGrantId,
     });
     // 目录限定规则在无工作区根可解析时不得匹配（fail-closed 到人工）
     assert.equal(matchConfigGrants(rules, undefined, "edit_file", { path: "src/a.ts" }), null);
