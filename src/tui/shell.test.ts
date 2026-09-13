@@ -390,3 +390,54 @@ test("集成：真实 PiRuntimeAdapter + fake streamFn 全链路——提交、�
     rmSync(logDir, { recursive: true, force: true });
   }
 });
+
+test("渲染注入防御（决策 036）：流式文本与审批块 diff 的控制序列在 Text 边界可见化，原始字节不落终端", async () => {
+  const WIDTH = 60;
+  const { shell, runtime, term, logDir } = makeShell(WIDTH, 20);
+  try {
+    shell.start();
+    await settle();
+    // 只断言注入发生之后写出的字节：清掉启动帧，与壳自身渲染序列分开
+    term.writes.length = 0;
+
+    // 对照组：普通回显行在注入后必须原样还在
+    term.input("你好");
+    term.input("\r");
+    await settle();
+
+    // ① 模型流式文本携带 OSC 52（剪贴板劫持载荷，M2 审计 P2-1 实证穿透款）
+    runtime.emit(RuntimeEventKind.TurnStarted, {});
+    runtime.emitDelta("正常前缀\x1b]52;c;aGk=\x07正常后缀");
+    await settle();
+
+    // ② 审批块 diffPreview 携带 CSI 清屏（工作区文件内容经 edit_file 预览进入审批屏）
+    const decision = shell.askApproval({
+      toolName: "edit_file",
+      toolCallId: "tc-inject",
+      args: { path: "src/a.ts" },
+      diffPreview: "@@ -1 +1 @@\n-旧的\n\x1b[2J+伪造的审批屏",
+      runId: runtime.runId,
+    });
+    await settle();
+    term.input("y");
+    await decision;
+
+    // 原始字节流：注入的序列一字节都不许写往真实终端（pi-tui 首帧是 fullRender(false)，
+    // 本场景无宽度变化/收缩，渲染器自身不产生 2J）
+    const raw = term.writes.join("");
+    assert.ok(!raw.includes("\x1b]52"), "OSC 52 原始字节不得写往终端");
+    assert.ok(!raw.includes("\x1b[2J"), "CSI 2J 原始字节不得写往终端");
+
+    // 屏幕：序列可见化为 ␛ 标记（审计痕迹留在屏上，不静默丢弃）
+    const flat = screenFlat(term);
+    assert.ok(flat.includes("␛]52"), `OSC 52 应可见化为 ␛]52，实际：\n${screenText(term)}`);
+    assert.ok(flat.includes("␛[2J"), `CSI 2J 应可见化为 ␛[2J，实际：\n${screenText(term)}`);
+    // 对照组不受影响
+    assert.ok(flat.includes("> 你好"), "user 回显行不受影响");
+    assert.ok(screenText(term).includes("== pigeon tui | session"), "chrome 标题不受影响");
+    assertWidthsWithin(term, WIDTH);
+  } finally {
+    shell.stop();
+    rmSync(logDir, { recursive: true, force: true });
+  }
+});

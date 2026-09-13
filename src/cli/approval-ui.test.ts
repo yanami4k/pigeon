@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
+import type { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { asRunId } from "../state/ids.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
+import { runRepl, sanitizedWriter } from "./repl.ts";
 
 function makeRequest(overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
   return {
@@ -138,4 +140,50 @@ test("无 grants 存储时保持 y/N 两键形态（缺省不弹 grant 键）", 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("终端边界净化（决策 036）：审批块 diffPreview 携带 CSI 时输出可见化为 ␛，原始序列不落终端", async () => {
+  const outputs: string[] = [];
+  // 与 cli/index.ts 同一形态：write 出口经 sanitizedWriter 包装（终端边界唯一净化点）
+  const write = sanitizedWriter((text: string) => outputs.push(text));
+  const handler = createCliApprovalHandler(async () => "y", write);
+  const decision = await handler(
+    makeRequest({ diffPreview: "@@ -1 +1 @@\n-旧的\n\x1b[2J+伪造的审批屏" })
+  );
+  assert.equal(decision.approved, true);
+  const out = outputs.join("");
+  assert.ok(out.includes("␛[2J+伪造的审批屏"), `CSI 应可见化，实际：${JSON.stringify(out)}`);
+  assert.ok(!out.includes("\x1b"), "原始 ESC 字节不得写出");
+});
+
+test("终端边界净化（决策 036）：REPL 终态摘要 errorMessage 携带 CSI 时同样可见化", async () => {
+  const outputs: string[] = [];
+  const script = ["跑一下", ":quit"];
+  const write = sanitizedWriter((text: string) => outputs.push(text));
+  // REPL 只消费 adapter.run 与 adapter.listenerErrors——结构替身即足（终态决议形状同
+  // RunResult：errorMessage 是模型/上游错误文本，半信任）
+  const stub = {
+    listenerErrors: () => [],
+    run: async () => ({
+      runId: asRunId("run_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
+      status: "failed",
+      stopReason: "error",
+      syntheticFailure: false,
+      failure: { category: "infrastructure" },
+      advertisedTools: [],
+      toolExecutions: [],
+      errorMessage: "provider 炸了：\x1b[2J 屏幕已清",
+    }),
+  } as unknown as PiRuntimeAdapter;
+  await runRepl({
+    adapter: stub,
+    ask: async () => script.shift() ?? null,
+    write,
+  });
+  const out = outputs.join("");
+  assert.ok(
+    out.includes("␛[2J 屏幕已清"),
+    `errorMessage 的 CSI 应可见化，实际：${JSON.stringify(out)}`
+  );
+  assert.ok(!out.includes("\x1b"), "原始 ESC 字节不得写出");
 });

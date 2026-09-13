@@ -202,7 +202,11 @@ export class MockTerminal implements Terminal {
     this.stopped = true;
   }
   async drainInput(): Promise<void> {}
+  // 写往终端的原始字节流（未经屏幕解释）——渲染注入类测试的断言面：屏幕仿真器会
+  // 吞掉/执行控制序列，只有原始字节流能证明序列是否被写往真实终端
+  readonly writes: string[] = [];
   write(d: string): void {
+    this.writes.push(d);
     this.screen.feed(d);
   }
   get columns(): number {

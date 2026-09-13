@@ -17,9 +17,16 @@ import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts"
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
-import { createAsker, runRepl } from "./repl.ts";
+import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runTraceCommand } from "./trace.ts";
+
+// 决策 036：cli 唯一 stdout 出口——REPL 问答、审批交互、grant 命令与只读视图
+//（trace / replay / session list）全部经同一净化写；半信任内容（模型文本、审批块
+// 参数与 diff 预览、错误消息）携带的终端控制序列在边界可见化（M2 审计 P2-1）
+const writeOut = sanitizedWriter((text: string): void => {
+  process.stdout.write(text);
+});
 
 // pigeon trace <sessionId> [--run <runId>] [--root <dir>]：只读关联视图（M4 S3）——
 // 不需要模型接入，永不写事件日志/工作区（只走 materializeSession 读路径，见 trace.ts）
@@ -43,7 +50,7 @@ function traceMain(argv: string[]): void {
   if (sessionId === undefined || runId === "") {
     throw new Error(usage);
   }
-  process.stdout.write(
+  writeOut(
     runTraceCommand({
       root: realpathSync(root),
       sessionId,
@@ -75,7 +82,7 @@ function replayMain(argv: string[]): void {
   if (runId === undefined || sessionId === "") {
     throw new Error(usage);
   }
-  process.stdout.write(
+  writeOut(
     runReplayCommand({
       root: realpathSync(root),
       runId,
@@ -137,7 +144,7 @@ function sessionListMain(argv: string[]): void {
       throw new Error(`未知参数：${flag}（${usage}）`);
     }
   }
-  process.stdout.write(runSessionListCommand({ root: realpathSync(root), filters }));
+  writeOut(runSessionListCommand({ root: realpathSync(root), filters }));
 }
 
 // 模型接入 flags（start/resume 共用一套形状；resume 另加一个位置参数 sessionId）
@@ -240,9 +247,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const streamFnSpec = flags.streamFnSpec;
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
-  const write = (text: string): void => {
-    process.stdout.write(text);
-  };
+  const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   try {
     await runResumeFlow({
@@ -313,9 +318,7 @@ async function main(argv: string[]): Promise<void> {
   const streamFn = await loadStreamFn(flags.streamFnSpec);
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）+ D8 旧账本一次性迁移
   const workspaceRoot = prepareWorkspace(flags.root);
-  const write = (text: string): void => {
-    process.stdout.write(text);
-  };
+  const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
   const bundle = buildRuntime({

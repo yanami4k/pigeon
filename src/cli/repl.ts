@@ -4,12 +4,21 @@
 // M4 S6（决策 3）：斜杠命令分发给 grant 治理面（/grants /revoke /grants save）。
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
+import { sanitizeTerminalText } from "../application/format.ts";
 import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import type { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 
 // 提问函数：返回一行输入；EOF/流关闭返回 null
 export type AskFn = (prompt: string) => Promise<string | null>;
 export type WriteFn = (text: string) => void;
+
+// 终端边界净化写（决策 036）：cli 唯一 stdout 出口组合子——REPL 问答、审批交互、
+// grant 命令输出与 trace/replay/session list 只读视图全部经它写出。半信任内容
+//（模型文本、审批块参数与 diff 预览、错误消息）携带的终端控制序列在边界统一
+// 替换为可见标记 ␛/控制图形（M2 审计 P2-1），不做逐调用点修补
+export function sanitizedWriter(write: WriteFn): WriteFn {
+  return (text) => write(sanitizeTerminalText(text));
+}
 
 // 用同一条输入流构造问答函数。不用 rl.question：管道/预缓冲输入下 line 事件可能在
 // question 挂起之前全部到达并被丢弃（测试模拟 stdin 即此形态）；改为自建行队列——

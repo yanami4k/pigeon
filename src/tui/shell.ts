@@ -49,7 +49,7 @@ import {
   Text,
   TuiMainScreen,
 } from "@earendil-works/pi-tui";
-import { failureBadge, summarizeArgs } from "../application/format.ts";
+import { failureBadge, sanitizeTerminalText, summarizeArgs } from "../application/format.ts";
 import { type GrantConfigEventSink, runGrantCommand } from "../application/grants.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
@@ -128,6 +128,10 @@ export interface TuiShellOptions {
 
 // 消息流：每条消息一个 Text（spike 铁律——未变消息渲染 O(1) 命中缓存，流式只重折行尾巴）。
 // 工具行按 toolCallId 索引原位更新，一行呈现「提议 → 结果」的完整生命周期。
+// 决策 036：本类是消息区唯一 Text 创建/setText 入口，半信任内容（模型流式文本、工具
+// 参数摘要、审批块、错误消息）携带的终端控制序列在此统一净化——pi-tui 的 Text 按设计
+// 保留并直通 ANSI/OSC/APC（M2 审计 P2-1），故净化必须发生在进 Text 之前；幂等，
+// 流式累积文本每帧重净化是安全的
 class MessageFlow {
   // Container 承载任意多 Text child；ScrollView 恰好包一个 child（决策 028：main-screen 下
   // 裁剪/follow 由终端 scrollback 实现，ScrollView 声明意图并兼容 alt-screen 布局引擎）
@@ -142,7 +146,7 @@ class MessageFlow {
   }
 
   private append(text: string): Text {
-    const line = new Text(text);
+    const line = new Text(sanitizeTerminalText(text));
     this.list.addChild(line);
     return line;
   }
@@ -171,7 +175,9 @@ class MessageFlow {
   appendDelta(delta: string): void {
     if (this.streamTail === null) this.streamTail = this.append("");
     this.streamText += delta;
-    this.streamTail.setText(this.streamText);
+    // 累积文本整体重净化（幂等为前提）：跨 delta 劈开的序列在补齐帧被惰性化，
+    // 中间帧的裸 ESC 显示为 ␛ 是正常形态
+    this.streamTail.setText(sanitizeTerminalText(this.streamText));
   }
 
   // turn.completed：收尾当前流式消息（从未开过尾巴的轮次不追加任何行）
@@ -193,7 +199,7 @@ class MessageFlow {
       return;
     }
     existing.content += ` ${state}`;
-    existing.text.setText(existing.content);
+    existing.text.setText(sanitizeTerminalText(existing.content));
   }
 }
 

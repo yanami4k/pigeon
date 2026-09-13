@@ -70,3 +70,36 @@ export function breakerScopeLabel(scope: string): string {
   };
   return SCOPE_LABEL[scope] ?? scope;
 }
+
+// 终端控制序列净化（决策 036，M2 审计 P2-1）：半信任内容——模型流式文本、工具参数、
+// diff 预览里的工作区文件内容、错误消息——可能携带终端控制序列，而 pi-tui 的 Text 与
+// cli 的 stdout 都把 ESC 序列原样直通真实终端（实证：OSC 52 剪贴板劫持、OSC 8 伪装
+// 超链接、CSI 光标定位/擦除可伪造审批屏、打乱差分渲染器行跟踪）。两个 Actor 在各自
+// 终端边界（tui MessageFlow / cli sanitizedWriter）统一调用本函数。
+// 策略是「可见化，绝不静默丢弃」——控制内容以标记形态留在屏上作审计痕迹：
+//   - ESC（0x1B）→ ␛（U+241B）：CSI/OSC/DCS/APC/PM/SOS/双字符序列全部因失去 ESC
+//     引导字节而惰性化，序列其余可打印字节原样保留可见；
+//   - 其余 C0（0x00–0x1F）→ 对应控制图形（U+2400+码位），但 \n \t 保留（排版语义），
+//     \r → ␍（U+240D：CRLF 差异在 diff 中如实呈现，不许回车吞字）；
+//   - DEL（0x7F）→ ␡（U+2421）。
+// 不做 SGR 白名单：模型没有业务理由向终端发颜色，白名单只是额外攻击面。幂等——
+// 标记字符（U+2400 区段）不在 C0/DEL 区间，净化两次结果相同（流式累积 setText 每帧
+// 重净化以此为前提；序列跨 delta 劈开时，中间帧的裸 ESC 显示为 ␛ 是正常形态）。
+export function sanitizeTerminalText(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (ch === "\n" || ch === "\t") {
+      out += ch;
+    } else if (code === 0x1b) {
+      out += "␛";
+    } else if (code === 0x7f) {
+      out += "␡";
+    } else if (code < 0x20) {
+      out += String.fromCodePoint(0x2400 + code);
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
