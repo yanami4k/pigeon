@@ -145,17 +145,23 @@ async function main(argv: string[]): Promise<void> {
         };
       },
     },
+    // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
+    //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
+    onExit: release,
   });
   faceHolder.current = shell;
   shell.start();
-  // 进程级退出（Ctrl+C / SIGTERM）：停壳 + 释放当前运行面。注意这不是 S5 的运行取消键——
-  // 取消键是壳内输入语义，本处只处理 OS 信号
-  const shutdown = (): void => {
-    shell.stop();
+  // 进程级退出（OS 信号 SIGINT/SIGTERM）：停壳 + 释放当前运行面。注意这不是 S5 的
+  // 运行取消键——取消键是壳内输入语义；壳内双击 Ctrl+C / /quit 走 onExit（033）
+  function release(): void {
     void slot.bundle.adapter.dispose().finally(() => {
       slot.bundle.eventLog.close();
       process.exit(0);
     });
+  }
+  const shutdown = (): void => {
+    shell.stop();
+    release();
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

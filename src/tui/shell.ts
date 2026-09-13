@@ -31,6 +31,11 @@
 //   同待遇吞掉——审批挂起即 Run 阻塞在 beforeToolCall 的人工决议上，此时 interrupt
 //   会吊在挂起 Promise 上直到人按键，「取消」名不副实；模态先决议再 Esc 是唯一次序。
 //   中断飞行中重复 Esc 不再触发（不 double-abort、不悬挂）；running 清算在 handleRunEnd。
+// - 退出三层形态（S5+，裁决 033，omp 键位模型）：Esc 取消（032 不动）；Ctrl+C 永不取消
+//   Run——单击（非模态）清输入缓冲并留 [cleared] 提示（模态期间不清，仍计布防第一次）；
+//   双击（窗口内两次 \x03，任意模式含模态）与 /quit 走同一优雅退出——先 stop()
+//   （dispose 对称；挂起审批 fail-closed 走 APPROVAL_CANCEL_CLOSED，证据链不断）再回调
+//   注入的 onExit（main.ts 注入 dispose + process.exit；测试注入探针，绝不真退进程）。
 // - 终态摘要（S5）：run() 决议后落终态行——status + stopReason + 四分类徽章（措辞复用
 //   application/format.ts 的 failureBadge，与 cli trace 同口径）+ errorMessage（若有）+
 //   syntheticFailure 标注（若有）；listenerErrors 非空时消息区增量警告（D2 可见化的
@@ -114,6 +119,11 @@ export interface TuiShellOptions {
     root: string;
     rebind: (sessionId: SessionId) => TuiSessionBinding | Promise<TuiSessionBinding>;
   };
+  // S5+（裁决 033）：优雅退出回调——双击 Ctrl+C / /quit 触发；壳先 stop() 再回调。
+  // 注入使测试绝不真退进程；缺省 = 退出只停壳（装配方必须注入真实退出路径）
+  onExit?: () => void;
+  // 双击窗口（毫秒）：缺省 1000；测试注入小窗口断言过期语义
+  exitWindowMs?: number;
 }
 
 // 消息流：每条消息一个 Text（spike 铁律——未变消息渲染 O(1) 命中缓存，流式只重折行尾巴）。
@@ -213,6 +223,10 @@ export class PigeonTuiShell implements TuiApprovalFace {
   private interrupting = false;
   // S5 D2 可见化（同 repl 增量报数口径）：已警告过的落盘失败累计数
   private reportedListenerErrors = 0;
+  // S5+ 退出布防（裁决 033）：上一次 Ctrl+C 的墙钟时刻（窗口内再来一次即优雅退出）；
+  // exitRequested 保证退出恰好一次（stop 后输入监听已退订，重入仅作幂等防御）
+  private lastCtrlCAt: number | null = null;
+  private exitRequested = false;
 
   constructor(options: TuiShellOptions) {
     this.options = options;
@@ -347,17 +361,54 @@ export class PigeonTuiShell implements TuiApprovalFace {
     this.tui.requestRender();
   }
 
-  // 壳级键控路由：模态键控优先（决策 029/031，S5 裁决 032），其后才是取消键
+  // 壳级键控路由：退出键（Ctrl+C）最先——模态吞键语义不得吃掉退出布防（033：模态
+  // 单击仍计布防第一次）；其后模态键控（决策 029/031），最后是取消键（S5 裁决 032）
   private handleShellKey(data: string): { consume: true } | undefined {
+    if (data === "\x03") {
+      this.handleCtrlC();
+      return { consume: true };
+    }
     if (this.handleModalKey(data) !== undefined) return { consume: true };
     // 取消键（S5）：Esc = 裸 "\x1b"（方向键等转义序列是多字节，不会误判）；Ctrl+C 不进
-    // 本路径——不绑定取消，保留进程退出语义（main.ts 的 OS 信号处理）。仅运行中消费；
+    // 本路径——永不绑定取消（033），退出语义由 handleCtrlC 承载。仅运行中消费；
     // 空闲 Esc 放行给 Input 组件（其 onEscape 未装配，语义为空）
     if (data === "\x1b" && this.running) {
       this.requestInterrupt();
       return { consume: true };
     }
     return undefined;
+  }
+
+  // Ctrl+C（S5+，裁决 033）：单击布防——非模态清输入缓冲并留 [cleared] 提示（措辞与
+  // [busy]/[cancel] 同款 ASCII 括号；无历史召回语义，清空即丢弃）；模态期间不清缓冲
+  // 不留提示（029/031 吞键语义），但仍计布防第一次。窗口内第二次（任意模式含模态）
+  // 优雅退出；窗口过期则本次退化为单击并重新布防
+  private handleCtrlC(): void {
+    const now = Date.now();
+    if (
+      this.lastCtrlCAt !== null &&
+      now - this.lastCtrlCAt <= (this.options.exitWindowMs ?? 1000)
+    ) {
+      this.lastCtrlCAt = null;
+      this.requestExit();
+      return;
+    }
+    this.lastCtrlCAt = now;
+    if (this.pendingApproval === null && this.pendingMenu === null) {
+      this.input.setValue("");
+      this.flow.addSystem("[cleared] 输入已清空（再按一次 Ctrl+C 退出）");
+      this.tui.requestRender();
+    }
+  }
+
+  // 优雅退出（S5+，裁决 033）：双击 Ctrl+C 与 /quit 共用本路径——先 stop()（dispose
+  // 对称；挂起审批 fail-closed 按拒绝处理、理由逐字 APPROVAL_CANCEL_CLOSED，证据链不断；
+  // 恢复菜单按 EOF 语义回 null），再回调注入的 onExit。幂等：退出恰好一次
+  private requestExit(): void {
+    if (this.exitRequested) return;
+    this.exitRequested = true;
+    this.stop();
+    this.options.onExit?.();
   }
 
   // 取消入口（S5）：触发 adapter.interrupt()（固定姿势 abort → waitForIdle，注释约束 5）。
@@ -435,6 +486,12 @@ export class PigeonTuiShell implements TuiApprovalFace {
       .filter((token) => token.length > 0);
     const grants = this.current.grants;
     try {
+      // S5+（裁决 033）：/quit 与双击 Ctrl+C 同一优雅退出路径（busy 语义不开旁路：
+      // 运行中提交在 handleSubmit 即被拒绝，退出键仍可用）
+      if (tokens[0] === "quit") {
+        this.requestExit();
+        return;
+      }
       // S4：/sessions 会话列表——只读渲染，命令层与 cli 同一份（零新治理语义）
       if (tokens[0] === "sessions" && this.options.sessions !== undefined) {
         this.flow.addSystem(runSessionListCommand({ root: this.options.sessions.root }).trimEnd());
@@ -460,7 +517,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
         });
       if (!handled) {
         this.flow.addSystem(
-          `未知命令：${value}（可用 /sessions、/resume <sessionId>、/grants、/revoke <id>、/grants save <id>）`
+          `未知命令：${value}（可用 /quit、/sessions、/resume <sessionId>、/grants、/revoke <id>、/grants save <id>）`
         );
       }
     } catch (error) {
@@ -475,7 +532,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
     const resume = this.options.resume;
     if (resume === undefined) {
       this.flow.addSystem(
-        `未知命令：/resume（可用 /sessions、/grants、/revoke <id>、/grants save <id>）`
+        `未知命令：/resume（可用 /quit、/sessions、/grants、/revoke <id>、/grants save <id>）`
       );
       return;
     }

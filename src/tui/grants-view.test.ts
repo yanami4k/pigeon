@@ -211,7 +211,7 @@ test("未知命令与命令失败如实呈现（同 REPL 口径）", async () =>
     assert.ok(
       squashSpaces(screenFlat(term)).includes(
         squashSpaces(
-          "未知命令：/blah（可用 /sessions、/resume <sessionId>、/grants、/revoke <id>、/grants save <id>）"
+          "未知命令：/blah（可用 /quit、/sessions、/resume <sessionId>、/grants、/revoke <id>、/grants save <id>）"
         )
       )
     );
