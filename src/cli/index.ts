@@ -13,8 +13,7 @@ import type { GrantsCommandContext } from "../application/grants.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
-import { materializeSession } from "../persistence/event-log.ts";
-import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
+import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
@@ -239,12 +238,8 @@ async function resumeMain(argv: string[]): Promise<void> {
     );
   }
   const streamFnSpec = flags.streamFnSpec;
-  const workspaceRoot = realpathSync(flags.root);
-  // D8：M3 旧账本一次性迁移（resume 也走，旧会话恢复前先把账本事件化）
-  migrateLegacyLedger(
-    path.join(workspaceRoot, ".pigeon", "ledger.jsonl"),
-    path.join(workspaceRoot, ".pigeon", "sessions")
-  );
+  // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
+  const workspaceRoot = prepareWorkspace(flags.root);
   const write = (text: string): void => {
     process.stdout.write(text);
   };
@@ -259,11 +254,8 @@ async function resumeMain(argv: string[]): Promise<void> {
       enterRepl: async () => {
         const streamFn = await loadStreamFn(streamFnSpec);
         // 决策 3b：grant 冷恢复种子——事件日志物化的生效 grant（created − revoked），
-        // 静默继续有效，无重复确认环节
-        const restoredGrants = materializeSession(
-          path.join(workspaceRoot, ".pigeon", "sessions"),
-          sessionId
-        ).grants;
+        // 静默继续有效，无重复确认环节（决策 034：种子物化归 application）
+        const restoredGrants = restoreGrantSeed(workspaceRoot, sessionId);
         const bundle = buildRuntime({
           streamFn,
           workspaceRoot,
@@ -319,13 +311,8 @@ async function main(argv: string[]): Promise<void> {
     );
   }
   const streamFn = await loadStreamFn(flags.streamFnSpec);
-  // 工作区根：工具的路径围栏以它为准（realpath 规范化，见 paths.ts）
-  const workspaceRoot = realpathSync(flags.root);
-  // D8：M3 旧账本一次性迁移（不存在即 no-op；损坏响亮失败，启动中止）
-  migrateLegacyLedger(
-    path.join(workspaceRoot, ".pigeon", "ledger.jsonl"),
-    path.join(workspaceRoot, ".pigeon", "sessions")
-  );
+  // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）+ D8 旧账本一次性迁移
+  const workspaceRoot = prepareWorkspace(flags.root);
   const write = (text: string): void => {
     process.stdout.write(text);
   };

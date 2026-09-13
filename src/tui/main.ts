@@ -13,9 +13,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
-import { materializeSession } from "../persistence/event-log.ts";
-import { migrateLegacyLedger } from "../persistence/legacy-migration.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { PigeonTuiShell } from "./shell.ts";
@@ -67,13 +66,8 @@ async function main(argv: string[]): Promise<void> {
     );
   }
   const streamFn = await loadStreamFn(flags.streamFnSpec);
-  // 工作区根：工具的路径围栏以它为准（realpath 规范化，见 paths.ts）
-  const workspaceRoot = realpathSync(flags.root);
-  // D8：M3 旧账本一次性迁移（不存在即 no-op；损坏响亮失败，启动中止）
-  migrateLegacyLedger(
-    path.join(workspaceRoot, ".pigeon", "ledger.jsonl"),
-    path.join(workspaceRoot, ".pigeon", "sessions")
-  );
+  // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份
+  const workspaceRoot = prepareWorkspace(flags.root);
   const sessionId = newSessionId();
   // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
   // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
@@ -115,10 +109,7 @@ async function main(argv: string[]): Promise<void> {
     resume: {
       root: workspaceRoot,
       rebind: (targetId) => {
-        const restoredGrants = materializeSession(
-          path.join(workspaceRoot, ".pigeon", "sessions"),
-          targetId
-        ).grants;
+        const restoredGrants = restoreGrantSeed(workspaceRoot, targetId);
         const bundle = buildRuntime({
           streamFn,
           workspaceRoot,

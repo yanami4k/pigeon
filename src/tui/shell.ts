@@ -310,7 +310,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
       // 斜杠命令同样不开旁路（同一语义，命令也不插队）；/resume 对账期同口径（S4）
       this.flow.addSystem(
         this.running
-          ? "[busy] run in progress; input kept (not submitted)"
+          ? "[busy] run in progress; input kept (not submitted); exit: Ctrl+C twice"
           : "[busy] resume in progress; input kept (not submitted)"
       );
       this.tui.requestRender();
