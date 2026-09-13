@@ -157,20 +157,24 @@ class MessageFlow {
     this.append(line);
   }
 
-  // turn.started：开出新的 assistant 流式尾巴消息
+  // turn.started：只重置流式状态，不 append——尾巴懒创建（决策 035：首个 text_delta 到达时
+  // 才开出；纯工具调用轮因此不留占位子组件。pi-tui 0.84.4 的 Text("") 渲染零行
+  //（components/text.js 空文本早退），懒创建前后屏幕逐行一致，此不变式是字面性的：
+  // 尾巴存在 ⟺ 本轮已流式文本）
   openStream(): void {
-    this.streamTail = this.append("");
+    this.streamTail = null;
     this.streamText = "";
   }
 
-  // text_delta：流式生长（只 setText 尾巴；无尾巴时防御性开出——deltas 不锚身份，024）
+  // text_delta：流式生长（首个 delta 懒开出尾巴并 setText；无 turn.started 的 deltas
+  // 同样经此防御性开出——deltas 不锚身份，024）
   appendDelta(delta: string): void {
-    if (this.streamTail === null) this.openStream();
+    if (this.streamTail === null) this.streamTail = this.append("");
     this.streamText += delta;
-    this.streamTail?.setText(this.streamText);
+    this.streamTail.setText(this.streamText);
   }
 
-  // turn.completed：收尾当前流式消息
+  // turn.completed：收尾当前流式消息（从未开过尾巴的轮次不追加任何行）
   closeStream(): void {
     this.streamTail = null;
     this.streamText = "";

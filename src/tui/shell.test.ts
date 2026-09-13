@@ -221,6 +221,60 @@ test("工具调用行：工具名+参数摘要+结果状态；settled 原位更�
   }
 });
 
+test("工具调用轮（无 text_delta）不引入超出统一间距的空行；轮次标记紧随工具行（决策 035）", async () => {
+  const { shell, runtime, term, logDir } = makeShell(80, 24);
+  runtime.autoResolve = false; // run 挂起：终态摘要不插队，布局只由本轮事件决定
+  try {
+    shell.start();
+    await settle();
+    term.input("改一下文件");
+    term.input("\r");
+    await settle();
+
+    // 只发工具调用、全程无 text_delta 的一轮
+    runtime.emit(RuntimeEventKind.TurnStarted, {});
+    runtime.emit(RuntimeEventKind.ToolProposed, {
+      toolCallId: "tc-1",
+      toolName: "read_file",
+      args: { path: "src/甲.ts" },
+    });
+    runtime.emit(RuntimeEventKind.ToolSettled, {
+      toolCallId: "tc-1",
+      toolName: "read_file",
+      isError: false,
+    });
+    runtime.emit(RuntimeEventKind.TurnCompleted, {
+      stopReason: "toolUse",
+      syntheticFailure: false,
+    });
+    await settle();
+
+    const lines = term.screen.contentLines();
+    const echoRow = lines.findIndex((line) => line.includes("> 改一下文件"));
+    const toolRow = lines.findIndex((line) => line.includes("$ read_file"));
+    const markerRow = lines.findIndex((line) => line.includes("-- turn: toolUse --"));
+    assert.ok(
+      echoRow > -1 && toolRow > -1 && markerRow > -1,
+      `回显行、工具行、轮次标记都应在场：\n${lines.join("\n")}`
+    );
+    // 可观察合同：工具行两侧的间距一致——流式尾巴只在有文本的轮次占行（决策 035 懒创建）。
+    // 实证基线：pi-tui 0.84.4 的 Text("") 渲染零行（components/text.js 空文本早退），
+    // 恒开尾巴本就不产生可见空行；本用例防的回归是占位尾巴可见化（自造占位符或库升级
+    // 语义变化），届时工具行上方会多出一行而两侧间距不再相等。
+    assert.equal(
+      toolRow - echoRow,
+      markerRow - toolRow,
+      `工具行上方（回显侧）与下方（轮次标记侧）的间距应一致：\n${lines.join("\n")}`
+    );
+
+    runtime.finishAll();
+    await settle();
+  } finally {
+    shell.stop();
+    rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
 test("空输入静默忽略；运行中提交走 busy 语义：拒绝提交、保留缓冲、提示可见（决策 027）", async () => {
   const { shell, runtime, term, logDir } = makeShell(80, 24);
   runtime.autoResolve = false; // run 挂起，制造「运行中」窗口
