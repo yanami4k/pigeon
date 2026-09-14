@@ -64,10 +64,30 @@ export function normalizePiEvent(
         return null;
       }
       const message: AssistantMessage = event.message;
+      // M5 S1（决策 044）：usage 随 turn.completed 落盘——只取落盘格式自有的字段集
+      const usage = message.usage;
       const payload: TurnCompletedPayload = {
         stopReason: message.stopReason,
         syntheticFailure: isSyntheticFailureMessage(message),
         ...(message.errorMessage !== undefined ? { errorMessage: message.errorMessage } : {}),
+        ...(usage !== undefined
+          ? {
+              usage: {
+                input: usage.input,
+                output: usage.output,
+                cacheRead: usage.cacheRead,
+                cacheWrite: usage.cacheWrite,
+                totalTokens: usage.totalTokens,
+                cost: {
+                  input: usage.cost.input,
+                  output: usage.cost.output,
+                  cacheRead: usage.cost.cacheRead,
+                  cacheWrite: usage.cost.cacheWrite,
+                  total: usage.cost.total,
+                },
+              },
+            }
+          : {}),
       };
       return envelope(ids, RuntimeEventKind.TurnCompleted, payload);
     }

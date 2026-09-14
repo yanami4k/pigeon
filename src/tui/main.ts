@@ -25,6 +25,12 @@ interface TuiFlags {
   yolo: boolean;
   provider: string;
   modelId: string;
+  // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
+  persistThinking: boolean;
+  // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（缺省 500）
+  historyLimit?: number;
+  // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
+  memoryBudgetChars?: number;
 }
 
 function parseFlags(argv: string[]): TuiFlags {
@@ -34,14 +40,29 @@ function parseFlags(argv: string[]): TuiFlags {
     yolo: false,
     provider: "unknown",
     modelId: "unknown",
+    persistThinking: true,
   };
   const usage =
-    "用法：node src/tui/main.ts [--yolo] [--root <dir>] --stream-fn <模块路径> " +
+    "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
     "[--provider <名>] [--model <id>]";
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--yolo") {
       flags.yolo = true;
+    } else if (flag === "--no-persist-thinking") {
+      flags.persistThinking = false;
+    } else if (flag === "--memory-budget") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
+      }
+      flags.memoryBudgetChars = value;
+    } else if (flag === "--history-limit") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`--history-limit 需要正整数（${usage}）`);
+      }
+      flags.historyLimit = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -84,6 +105,10 @@ async function main(argv: string[]): Promise<void> {
       yolo: flags.yolo,
       provider: flags.provider,
       modelId: flags.modelId,
+      persistThinking: flags.persistThinking,
+      ...(flags.memoryBudgetChars !== undefined
+        ? { memoryBudgetChars: flags.memoryBudgetChars }
+        : {}),
       createApprovalHandler: createHandler,
     }),
   };
@@ -102,6 +127,9 @@ async function main(argv: string[]): Promise<void> {
     },
     // S4：/sessions 会话列表（命令层在 application/session-list.ts，与 cli 同一份）
     sessions: { root: workspaceRoot },
+    // M5 S2（决策 038 / 045）：/search 命令上下文与 /resume 历史渲染上限
+    search: { root: workspaceRoot },
+    ...(flags.historyLimit !== undefined ? { historyLimit: flags.historyLimit } : {}),
     // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
     // restoredGrants 种子（决策 3b，物化目标会话的生效 grant，静默继续有效）+
     // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
@@ -117,6 +145,10 @@ async function main(argv: string[]): Promise<void> {
           yolo: flags.yolo,
           provider: flags.provider,
           modelId: flags.modelId,
+          persistThinking: flags.persistThinking,
+          ...(flags.memoryBudgetChars !== undefined
+            ? { memoryBudgetChars: flags.memoryBudgetChars }
+            : {}),
           createApprovalHandler: createHandler,
           restoredGrants,
         });

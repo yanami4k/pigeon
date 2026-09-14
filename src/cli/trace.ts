@@ -7,10 +7,12 @@ import { join } from "node:path";
 import {
   approvalVerdict,
   breakerScopeLabel,
+  describeContentGaps,
   failureBadge,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
+import { contentRecordLines, loadContentRecords } from "../application/history.ts";
 import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import {
@@ -101,7 +103,12 @@ function renderToolCall(call: TraceToolCall, lines: string[]): void {
   }
 }
 
-function renderRun(run: TraceRun, lines: string[]): void {
+// 带正文渲染选项（M5 S2，决策 045）：runId → 该 Run 按消息序的正文行；缺省 = 纯治理视图
+export interface TraceRenderOptions {
+  contentByRun?: ReadonlyMap<string, readonly string[]>;
+}
+
+function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions = {}): void {
   const lastCompleted = [...run.turns].reverse().find((turn) => turn.completed !== undefined);
   const stopReason = lastCompleted?.completed?.payload.stopReason;
   let header =
@@ -111,6 +118,17 @@ function renderRun(run: TraceRun, lines: string[]): void {
     header += " ｜ run.ended 缺失（崩溃残留可能）";
   }
   lines.push(header);
+  // M5 S5（决策 044）：Run 启动快照摘要——回答"这个 Run 用的哪版模型、策略、工具、Memory 与 Skill"
+  if (run.started !== undefined) {
+    const payload = run.started.payload;
+    const tools = payload.advertisedTools.length > 0 ? payload.advertisedTools.join("、") : "无";
+    const injected = payload.memory.filter((entry) => entry.included).length;
+    lines.push(
+      `  启动快照：模型 ${payload.model.provider}/${payload.model.id} ｜ 审批模式 ${payload.policy.approvalMode} ｜ ` +
+        `工具 ${tools} ｜ Memory ${payload.memory.length} 个（注入 ${injected}） ｜ Skill ${payload.skills.length} 个 ｜ ` +
+        `system prompt ${payload.systemPromptHash.slice(0, 12)} ｜ 模型请求 ${run.llmRequestCount} 次`
+    );
+  }
   // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，
   // 措辞与 replay 同口径——绝不假装证据链完整
   if (run.tornTail) {
@@ -118,6 +136,10 @@ function renderRun(run: TraceRun, lines: string[]): void {
   }
   if (run.entryGaps.length > 0) {
     lines.push(`  缺口：entry 映射断号，缺第 ${run.entryGaps.join("、")} 条（写盘失败留证缺口）`);
+  }
+  // M5 S1（决策 037）：entry 回指的正文缺失或哈希不符
+  if (run.contentGaps.length > 0) {
+    lines.push(`  缺口：${describeContentGaps(run.contentGaps)}`);
   }
   for (const anomaly of run.anomalies) {
     lines.push(`  异常：${anomaly}`);
@@ -139,6 +161,13 @@ function renderRun(run: TraceRun, lines: string[]): void {
       if (turn.completed.payload.syntheticFailure) {
         turnHeader += "（上游合成失败消息）";
       }
+      // M5 S5（决策 044）：本轮 token 与成本（M5 前的记录无 usage 不显示）
+      const usage = turn.completed.payload.usage;
+      if (usage !== undefined) {
+        turnHeader +=
+          ` ｜ tokens 输入 ${usage.input} / 输出 ${usage.output} / 缓存读 ${usage.cacheRead} / ` +
+          `缓存写 ${usage.cacheWrite} ｜ $${usage.cost.total.toFixed(4)}`;
+      }
     } else {
       turnHeader += " ｜ turn.completed 缺失";
     }
@@ -147,9 +176,16 @@ function renderRun(run: TraceRun, lines: string[]): void {
       renderToolCall(call, lines);
     }
   }
+  const content = options.contentByRun?.get(run.runId);
+  if (content !== undefined && content.length > 0) {
+    lines.push("  正文（按消息序）：");
+    for (const text of content) {
+      lines.push(`    正文：${text}`);
+    }
+  }
 }
 
-export function renderSessionTrace(trace: SessionTrace): string {
+export function renderSessionTrace(trace: SessionTrace, options: TraceRenderOptions = {}): string {
   const toolCallCount = trace.runs.reduce((sum, run) => sum + run.toolCalls.length, 0);
   const pendingCount = trace.runs.reduce(
     (sum, run) => sum + run.toolCalls.filter((call) => call.pendingReconcile).length,
@@ -158,7 +194,8 @@ export function renderSessionTrace(trace: SessionTrace): string {
   // 落盘缺口总数（决策 ③）：撕裂尾巴按处计（至多 1）+ 各 Run 缺失的 entry 条数
   const unfinishedCount = trace.runs.filter((run) => !run.ended).length;
   const gapCount =
-    (trace.tornTail ? 1 : 0) + trace.runs.reduce((sum, run) => sum + run.entryGaps.length, 0);
+    (trace.tornTail ? 1 : 0) +
+    trace.runs.reduce((sum, run) => sum + run.entryGaps.length + run.contentGaps.length, 0);
   const lines: string[] = [
     `会话 ${shortId(trace.sessionId)} ｜ Run ${trace.runs.length} 个 ｜ ` +
       `工具调用 ${toolCallCount} 次 ｜ 待对账 ${pendingCount} 次 ｜ 落盘缺口 ${gapCount} 处` +
@@ -177,7 +214,7 @@ export function renderSessionTrace(trace: SessionTrace): string {
     if (index > 0) {
       lines.push("");
     }
-    renderRun(run, lines);
+    renderRun(run, lines, options);
   }
   // 会话级异常项：孤儿记录如实报告（日志损坏或手写），不猜测挂接
   if (trace.orphanReceipts.length > 0 || trace.orphanResolutions.length > 0) {
@@ -204,6 +241,28 @@ export interface TraceCommandOptions {
   root: string;
   sessionId: string;
   runId?: string;
+  // M5 S2（决策 045）：带正文（默认关）
+  withContent?: boolean;
+}
+
+// 按 Run 聚合正文行（entry 落盘序）：措辞与 TUI 历史投影同一份（application/history.ts）
+function contentByRunOf(
+  root: string,
+  sessionId: string,
+  entries: ReadonlyArray<{ id: string; runId: string; contentHash?: string }>
+): Map<string, string[]> {
+  const records = loadContentRecords(root, sessionId);
+  const byRun = new Map<string, string[]>();
+  for (const entry of entries) {
+    const record = records.get(entry.id);
+    if (record === undefined) {
+      continue;
+    }
+    const lines = byRun.get(entry.runId) ?? [];
+    lines.push(...contentRecordLines(record).map((line) => line.text));
+    byRun.set(entry.runId, lines);
+  }
+  return byRun;
 }
 
 // 只读渲染入口：会话不存在/Run 不存在时响亮报错并列出可选项，绝不静默产出空报告
@@ -218,8 +277,12 @@ export function runTraceCommand(options: TraceCommandOptions): string {
     );
   }
   const materialized = materializeSession(sessionsDir, sessionId);
+  const renderOptions: TraceRenderOptions =
+    options.withContent === true
+      ? { contentByRun: contentByRunOf(options.root, sessionId, materialized.entries) }
+      : {};
   if (options.runId === undefined) {
-    return renderSessionTrace(buildSessionTrace(materialized));
+    return renderSessionTrace(buildSessionTrace(materialized), renderOptions);
   }
   const runId: RunId = asRunId(options.runId);
   const trace = buildSessionTrace(materialized, { runId });
@@ -227,5 +290,5 @@ export function runTraceCommand(options: TraceCommandOptions): string {
     const known = [...new Set(materialized.records.map((record) => record.runId as string))];
     throw new Error(`该会话无 Run ${options.runId}。已有 Run：${known.join("、")}`);
   }
-  return renderSessionTrace(trace);
+  return renderSessionTrace(trace, renderOptions);
 }

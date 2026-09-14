@@ -16,9 +16,13 @@
 //    entry 记录（(runId, runSeq) 权威键）；abort 与上游合成失败消息同样占序号；
 //    记录逻辑自身绝不抛（上游 listener 路径无防护，同约束 3）。
 // 9. M2 S1（决策 024）：subscribeStream 只读流式观察口——上游 message_update 携带
-//    text_delta 时把增量连同 runId 转发给订阅者；不进 Event Log、不进 events()、
-//    不锚身份（013：流式载荷是浅拷贝 partial）；thinking 增量第一版不转发；
-//    消息文本不持久化（与 M5 Session Search 一起裁决）。
+//    text_delta / thinking_delta 时把增量连同 runId 与 kind 转发给订阅者（045 修订）；
+//    不进 Event Log、不进 events()、不锚身份（013：流式载荷是浅拷贝 partial）。
+// 10. M5 S1（决策 037）：message_end 时刻把消息深拷贝交给落盘口，正文进旁置内容文件，
+//    entry 带 contentHash 回指；turn.completed 携带 usage（044）。
+// 11. M5 S5（决策 044）：每个 Run 开始落 run.started（快照摘要），system prompt 全文每个 Adapter
+//    生命周期写一次内容记录；transformContext 只读观察每次模型调用落 llm.request（条数、角色计数、
+//    估算字符数、消息内容哈希的滚动哈希），原样返回消息数组，观察失败只进 listenerErrors。
 import {
   Agent,
   type AgentEvent,
@@ -35,13 +39,19 @@ import { classifyRunOutcome, type FailureClass } from "../state/classification.t
 import type {
   BreakerInput,
   DecisionInput,
-  EntryInput,
+  EntryAppendInput,
   IntentInput,
+  ObservationInput,
   ReceiptInput,
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { newReceiptId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import {
+  buildMessageContent,
+  type MessageContentOptions,
+  sha256Hex,
+} from "../state/message-content.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import { RuntimeEventKind, type ToolSettledPayload } from "../state/runtime-events.ts";
 import {
@@ -83,8 +93,10 @@ export interface RunResult {
 
 // M2 S1（决策 024）：流式文本增量载荷——subscribeStream 观察口的转发单位。
 // 派生显示态、非权威状态：不持久化、不可重建、不锚身份；只有 runId 出处与增量文本
+// M5 S1（045 修订）：kind 区分正文增量与思维链增量，订阅方按 kind 分段渲染
 export interface StreamTextDelta {
   runId: RunId;
+  kind: "text" | "thinking";
   delta: string;
 }
 
@@ -93,11 +105,15 @@ export interface StreamTextDelta {
 // persistence；测试注入故障包装器模拟崩溃点
 export interface EventLogSink {
   appendRuntimeEvent(event: EventEnvelope): unknown;
-  appendEntry(input: EntryInput): unknown;
+  appendEntry(input: EntryAppendInput): unknown;
   appendIntent(input: IntentInput): unknown;
   appendDecision(input: DecisionInput): unknown;
   appendReceipt(input: ReceiptInput): unknown;
   appendBreaker(input: BreakerInput): unknown;
+  // M5 观察族（决策 043 / 044）：可选——既有故障注入包装器不必实现
+  appendObservation?(input: ObservationInput): unknown;
+  // M5 S5（决策 044）：system prompt 全文写进旁置内容文件；可选，同上
+  appendSystemPrompt?(input: { runId: RunId; text: string }): unknown;
 }
 
 // M4 S6（决策 3）：会话 grant 匹配注入面——approvals/grant-store.ts 的 SessionGrantStore
@@ -136,6 +152,9 @@ export interface PiRuntimeAdapterOptions {
   workspaceRoot?: string;
   // 熔断阈值：同一 工具名+参数指纹 在同一 Run 内被阻断的次数上限（spike S4：上游无循环护栏）
   circuitBreakerThreshold?: number;
+  // M5 S5（决策 044）：llm.request 指纹的内容抽取选项——必须与落盘口的内容记录选项一致
+  // （thinking 是否持久化、单块上限），指纹才能与内容文件按哈希对上；缺省同内容记录缺省
+  messageContent?: MessageContentOptions;
 }
 
 export class PiRuntimeAdapter {
@@ -187,6 +206,10 @@ export class PiRuntimeAdapter {
   #breakerTripped = false;
   #currentRunId: RunId | null = null;
   #disposed = false;
+  // M5 S5（决策 044）：指纹内容选项、system prompt 原文哈希（冻结快照算一次）、全文是否已落内容文件
+  readonly #messageContent: MessageContentOptions;
+  readonly #systemPromptHash: string;
+  #systemPromptRecorded = false;
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -210,6 +233,8 @@ export class PiRuntimeAdapter {
     this.#sessionGrants = options.sessionGrants;
     this.#configGrants = options.configGrants ?? [];
     this.#workspaceRoot = options.workspaceRoot;
+    this.#messageContent = options.messageContent ?? {};
+    this.#systemPromptHash = sha256Hex(this.#snapshot.context.systemPrompt);
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -234,6 +259,8 @@ export class PiRuntimeAdapter {
       toolExecution: "sequential",
       // M3 审批闸（spike S2a：block 可靠，reason 逐字反馈模型）
       beforeToolCall: (context, signal) => this.#governToolCall(context, signal),
+      // M5 S5（决策 044）：实际上下文的唯一观察点——只读，原样返回（042：Memory 不经此注入）
+      transformContext: (messages) => this.#observeContext(messages),
       initialState: {
         systemPrompt: this.#snapshot.context.systemPrompt,
         model: {
@@ -276,6 +303,7 @@ export class PiRuntimeAdapter {
     this.#runEntrySeq = 0;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
+    this.#recordRunStarted(advertisedTools);
     try {
       await this.#agent.prompt(input);
       await this.#agent.waitForIdle();
@@ -302,13 +330,31 @@ export class PiRuntimeAdapter {
     return () => this.#listeners.delete(listener);
   }
 
-  // 观察口（M2 S1，决策 024）：订阅流式文本增量——上游 message_update 携带 text_delta
-  // 时把增量连同 runId 转发；thinking 增量第一版不转发。派生显示态：增量不进 Event Log、
+  // 观察口（M2 S1，决策 024）：订阅流式增量——上游 message_update 携带 text_delta /
+  // thinking_delta 时把增量连同 runId 与 kind 转发（045 修订）。派生显示态：增量不进 Event Log、
   // 不进 events()、不锚身份，重启不可重建。与 subscribe 同不变式：listener 自包
   // try/catch 进 listenerErrors，绝不毒化 Run
   subscribeStream(listener: (delta: StreamTextDelta) => void): () => void {
     this.#streamListeners.add(listener);
     return () => this.#streamListeners.delete(listener);
+  }
+
+  // 观察记录入口（M5，决策 043 / 044）：盖当前 runId 落观察族。只在 Run 活动窗口内有意义——
+  // 窗口外或未配置落盘口时跳过；写盘失败进 listenerErrors，绝不抛回调用方（观察不毒化 Run）
+  recordObservation<K extends ObservationInput["kind"]>(
+    kind: K,
+    payload: Extract<ObservationInput, { kind: K }>["payload"]
+  ): void {
+    const runId = this.#currentRunId;
+    const sink = this.#eventLog;
+    if (runId === null || sink?.appendObservation === undefined) {
+      return;
+    }
+    try {
+      sink.appendObservation({ kind, payload, runId } as ObservationInput);
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
   }
 
   // 被吞掉的 listener 异常记录（含内部归一化异常）
@@ -387,10 +433,13 @@ export class PiRuntimeAdapter {
         this.#runEntrySeq += 1;
         if (this.#eventLog !== undefined) {
           try {
+            // M5 S1（决策 037）：消息深拷贝交落盘口——上游零防御拷贝，落盘侧抽取内容块
+            // 期间不得与 Agent 持有的消息共享对象；拷贝失败与写盘失败同样只进 listenerErrors
             this.#eventLog.appendEntry({
               runSeq: this.#runEntrySeq,
               role: event.message.role,
               runId,
+              message: structuredClone(event.message),
             });
           } catch (error) {
             this.#listenerErrors.push(error);
@@ -399,19 +448,21 @@ export class PiRuntimeAdapter {
       }
       const normalized = normalizePiEvent(event, { sessionId: this.sessionId, runId });
       if (!normalized) {
-        // 决策 024 流式观察口：message_update 携带 text_delta 时把增量连同 runId 转发给
-        // subscribeStream 订阅者——这是增量的唯一出口：不归一化（normalizePiEvent 对
-        // message_update 返回 null）、不落 Event Log、不进 #events、不锚身份（013：
-        // 流式载荷是上游浅拷贝 partial）；thinking_delta 等其他增量第一版不转发。
+        // 决策 024 流式观察口：message_update 携带 text_delta / thinking_delta 时把增量连同
+        // runId 与 kind 转发给 subscribeStream 订阅者（045 修订：thinking 一并转发）——这是增量的
+        // 唯一出口：不归一化（normalizePiEvent 对 message_update 返回 null）、不落 Event Log、
+        // 不进 #events、不锚身份（013：流式载荷是上游浅拷贝 partial）；toolcall_delta 等不转发。
         // listener 自包 try/catch（同本函数不变式：绝不毒化 Run）
+        const streamEvent = event.type === "message_update" ? event.assistantMessageEvent : null;
         if (
           this.#streamListeners.size > 0 &&
-          event.type === "message_update" &&
-          event.assistantMessageEvent.type === "text_delta"
+          streamEvent !== null &&
+          (streamEvent.type === "text_delta" || streamEvent.type === "thinking_delta")
         ) {
           const delta: StreamTextDelta = Object.freeze({
             runId,
-            delta: event.assistantMessageEvent.delta,
+            kind: streamEvent.type === "text_delta" ? "text" : "thinking",
+            delta: streamEvent.delta,
           });
           for (const listener of this.#streamListeners) {
             try {
@@ -480,6 +531,74 @@ export class PiRuntimeAdapter {
     } catch (error) {
       this.#listenerErrors.push(error);
     }
+  }
+
+  // run.started 落盘（M5 S5，决策 044）：InjectionSnapshot v3 的摘要，先于本 Run 任何其他记录；
+  // system prompt 全文每个 Adapter 生命周期只写一次（写失败下个 Run 再试）。整段自包，
+  // 失败只进 listenerErrors——快照留证缺口可见，但不挡 Run 启动
+  #recordRunStarted(advertisedTools: string[]): void {
+    const runId = this.#currentRunId;
+    const sink = this.#eventLog;
+    if (runId === null || sink === undefined) {
+      return;
+    }
+    if (!this.#systemPromptRecorded && sink.appendSystemPrompt !== undefined) {
+      try {
+        sink.appendSystemPrompt({ runId, text: this.#snapshot.context.systemPrompt });
+        this.#systemPromptRecorded = true;
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+    const snapshot = this.#snapshot;
+    this.recordObservation("run.started", {
+      model: { provider: snapshot.model.provider, id: snapshot.model.id },
+      policy: {
+        allow: [...snapshot.tools.policy.allow],
+        deny: [...snapshot.tools.policy.deny],
+        approvalMode: snapshot.tools.policy.approvalMode,
+      },
+      advertisedTools,
+      systemPromptHash: this.#systemPromptHash,
+      memory: structuredClone(snapshot.memory),
+      skills: structuredClone(snapshot.skills),
+    });
+  }
+
+  // transformContext 只读观察（M5 S5，决策 044）：每次模型调用前落 llm.request——消息条数、各角色
+  // 条数、估算字符数（text 与 thinking 块长度之和）、全部消息内容哈希（037 规范序列化，与内容文件
+  // 同一抽取选项）按序以换行连接后的 sha256、system prompt 哈希。只读：不改写、不重排、不注入，
+  // 恒原样返回同一数组；观察自身任何异常只进 listenerErrors，绝不毒化 Run
+  async #observeContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+    try {
+      if (this.#currentRunId !== null) {
+        const roleCounts: Record<string, number> = {};
+        const hashes: string[] = [];
+        let estimatedChars = 0;
+        for (const message of messages) {
+          roleCounts[message.role] = (roleCounts[message.role] ?? 0) + 1;
+          const content = buildMessageContent(message, this.#messageContent);
+          hashes.push(content.contentHash);
+          for (const block of content.blocks) {
+            if (block.type === "text") {
+              estimatedChars += block.text.length;
+            } else if (block.type === "thinking") {
+              estimatedChars += block.thinking.length;
+            }
+          }
+        }
+        this.recordObservation("llm.request", {
+          messageCount: messages.length,
+          roleCounts,
+          estimatedChars,
+          messagesHash: sha256Hex(hashes.join("\n")),
+          systemPromptHash: this.#systemPromptHash,
+        });
+      }
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+    return messages;
   }
 
   // 终态判定：以末条 assistant 消息的 stopReason 为准，agent_end/prompt() resolve 均无成败语义

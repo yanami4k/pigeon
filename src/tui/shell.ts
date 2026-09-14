@@ -51,7 +51,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { failureBadge, sanitizeTerminalText, summarizeArgs } from "../application/format.ts";
 import { type GrantConfigEventSink, runGrantCommand } from "../application/grants.ts";
+import { type HistoryLine, loadSessionHistory } from "../application/history.ts";
 import { runResumeFlow } from "../application/resume.ts";
+import { runSearchCommand } from "../application/search.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
@@ -124,6 +126,10 @@ export interface TuiShellOptions {
   onExit?: () => void;
   // 双击窗口（毫秒）：缺省 1000；测试注入小窗口断言过期语义
   exitWindowMs?: number;
+  // M5 S2（决策 038）：/search 命令上下文（工作区根）；缺省时 /search 不可用
+  search?: { root: string };
+  // M5 S2（决策 045）：/resume 历史渲染的安全上限（行）；缺省 500
+  historyLimit?: number;
 }
 
 // 消息流：每条消息一个 Text（spike 铁律——未变消息渲染 O(1) 命中缓存，流式只重折行尾巴）。
@@ -132,6 +138,10 @@ export interface TuiShellOptions {
 // 参数摘要、审批块、错误消息）携带的终端控制序列在此统一净化——pi-tui 的 Text 按设计
 // 保留并直通 ANSI/OSC/APC（M2 审计 P2-1），故净化必须发生在进 Text 之前；幂等，
 // 流式累积文本每帧重净化是安全的
+// thinking 段视觉弱化（M5 S2，决策 045）：暗色由壳的受信代码在 pi-tui 补齐行宽后逐行包裹；
+// 内容在进 Text 前已经 036 净化，模型文本里的控制序列此时已惰性化，这里的 SGR 不来自模型
+const dimLine = (line: string): string => `\x1b[2m${line}\x1b[22m`;
+
 class MessageFlow {
   // Container 承载任意多 Text child；ScrollView 恰好包一个 child（决策 028：main-screen 下
   // 裁剪/follow 由终端 scrollback 实现，ScrollView 声明意图并兼容 alt-screen 布局引擎）
@@ -139,6 +149,9 @@ class MessageFlow {
   private readonly list = new Container();
   private streamTail: Text | null = null;
   private streamText = "";
+  // M5 S2（决策 045）：thinking 流式段——与正文尾巴分开，谁的增量到了谁开段（同 035 懒创建）
+  private thinkingTail: Text | null = null;
+  private thinkingText = "";
   private readonly toolLines = new Map<string, { text: Text; content: string }>();
 
   constructor() {
@@ -149,6 +162,24 @@ class MessageFlow {
     const line = new Text(sanitizeTerminalText(text));
     this.list.addChild(line);
     return line;
+  }
+
+  // 弱化段（thinking）：同样先净化，再由受信的逐行样式函数加暗色
+  private appendDim(text: string): Text {
+    const line = new Text(sanitizeTerminalText(text), 1, 1, dimLine);
+    this.list.addChild(line);
+    return line;
+  }
+
+  // 历史行（M5 S2，决策 045）：/resume 换绑后一次性渲染；thinking 行弱化，其余同实时流口径
+  addHistory(lines: readonly HistoryLine[]): void {
+    for (const line of lines) {
+      if (line.kind === "thinking") {
+        this.appendDim(line.text);
+      } else {
+        this.append(line.text);
+      }
+    }
   }
 
   // user 消息提交回显
@@ -168,11 +199,28 @@ class MessageFlow {
   openStream(): void {
     this.streamTail = null;
     this.streamText = "";
+    this.thinkingTail = null;
+    this.thinkingText = "";
+  }
+
+  // thinking_delta（M5 S2，决策 045）：思维链单独一段、~ 前缀、暗色弱化；正文段已开则先收尾，
+  // 保证段序与块序一致（真实 provider 块序：thinking 在 text 之前）
+  appendThinkingDelta(delta: string): void {
+    if (this.thinkingTail === null) {
+      this.streamTail = null;
+      this.streamText = "";
+      this.thinkingTail = this.appendDim("");
+    }
+    this.thinkingText += delta;
+    this.thinkingTail.setText(sanitizeTerminalText(`~ ${this.thinkingText}`));
   }
 
   // text_delta：流式生长（首个 delta 懒开出尾巴并 setText；无 turn.started 的 deltas
   // 同样经此防御性开出——deltas 不锚身份，024）
   appendDelta(delta: string): void {
+    // thinking 段收尾：正文另起一段
+    this.thinkingTail = null;
+    this.thinkingText = "";
     if (this.streamTail === null) this.streamTail = this.append("");
     this.streamText += delta;
     // 累积文本整体重净化（幂等为前提）：跨 delta 劈开的序列在补齐帧被惰性化，
@@ -184,6 +232,8 @@ class MessageFlow {
   closeStream(): void {
     this.streamTail = null;
     this.streamText = "";
+    this.thinkingTail = null;
+    this.thinkingText = "";
   }
 
   // tool.proposed：工具名 + 参数摘要（措辞复用 application/format.ts 的 summarizeArgs）
@@ -508,6 +558,22 @@ export class PigeonTuiShell implements TuiApprovalFace {
         this.tui.requestRender();
         return;
       }
+      // M5 S2（决策 038）：/search 内容级检索——命令层与 cli 同一份；异步扫描完成后落消息区
+      if (tokens[0] === "search" && this.options.search !== undefined) {
+        void runSearchCommand({ root: this.options.search.root, args: tokens.slice(1) }).then(
+          (text) => {
+            this.flow.addSystem(text.trimEnd());
+            this.tui.requestRender();
+          },
+          (error: unknown) => {
+            this.flow.addSystem(
+              `命令失败：${error instanceof Error ? error.message : String(error)}`
+            );
+            this.tui.requestRender();
+          }
+        );
+        return;
+      }
       // S4：/resume <sessionId> 冷恢复对账 + 换绑续跑（异步流程，见 handleResumeCommand）
       if (tokens[0] === "resume" && this.options.resume !== undefined) {
         this.handleResumeCommand(tokens[1]);
@@ -527,7 +593,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
         });
       if (!handled) {
         this.flow.addSystem(
-          `未知命令：${value}（可用 /quit、/sessions、/resume <sessionId>、/grants、/revoke <id>、/grants save <id>）`
+          `未知命令：${value}（可用 /quit、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>）`
         );
       }
     } catch (error) {
@@ -583,11 +649,33 @@ export class PigeonTuiShell implements TuiApprovalFace {
         const sessionId = asSessionId(arg);
         const binding = await resume.rebind(sessionId);
         this.rebindSession(sessionId, binding);
+        // M5 S2（决策 045）：换绑后渲染该会话全部历史（正文、thinking 与治理投影时序交织）
+        this.renderHistory(resume.root, sessionId);
       },
     }).then(
       () => finish(),
       (error: unknown) => finish(error)
     );
+  }
+
+  // 历史渲染（M5 S2，决策 045）：投影在 application/history.ts（与 cli --with-content 同一份），
+  // 壳只排版；渲染失败如实呈现，不影响已完成的换绑（续跑照常可用）
+  private renderHistory(root: string, sessionId: SessionId): void {
+    try {
+      const lines = loadSessionHistory(
+        root,
+        sessionId,
+        this.options.historyLimit !== undefined ? { limit: this.options.historyLimit } : {}
+      );
+      this.flow.addSystem(`== 历史：会话 ${sessionId}（${lines.length} 行）==`);
+      this.flow.addHistory(lines);
+      this.flow.addSystem("== 历史结束，以下为续跑 ==");
+    } catch (error) {
+      this.flow.addSystem(
+        `历史渲染失败：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    this.tui.requestRender();
   }
 
   // 恢复菜单的作答面（S4，决策 031）：提示落消息区后挂起，等 1/2/3 单键决议；
@@ -641,7 +729,12 @@ export class PigeonTuiShell implements TuiApprovalFace {
   private handleDelta(delta: StreamTextDelta): void {
     // 024：增量只认 runId 出处——非本 Run 的迟到/幽灵增量不进消息区
     if (this.activeRunId === null || delta.runId !== this.activeRunId) return;
-    this.flow.appendDelta(delta.delta);
+    // M5 S2（决策 045）：thinking 增量单独一段弱化渲染，正文增量照常生长
+    if (delta.kind === "thinking") {
+      this.flow.appendThinkingDelta(delta.delta);
+    } else {
+      this.flow.appendDelta(delta.delta);
+    }
     this.tui.requestRender();
   }
 

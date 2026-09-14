@@ -91,8 +91,12 @@ class FakeRuntime implements TuiRuntimeFace {
     for (const listener of this.listeners) listener(envelope);
   }
 
-  emitDelta(delta: string, runId: RunId = this.runId): void {
-    for (const listener of this.streamListeners) listener({ runId, delta });
+  emitDelta(
+    delta: string,
+    runId: RunId = this.runId,
+    kind: StreamTextDelta["kind"] = "text"
+  ): void {
+    for (const listener of this.streamListeners) listener({ runId, kind, delta });
   }
 }
 

@@ -34,11 +34,15 @@ function traceMain(argv: string[]): void {
   let sessionId: string | undefined;
   let runId: string | undefined;
   let root = process.cwd();
-  const usage = "用法：pigeon trace <sessionId> [--run <runId>] [--root <dir>]";
+  // M5 S2（决策 045）：--with-content 带正文（默认关）
+  let withContent = false;
+  const usage = "用法：pigeon trace <sessionId> [--run <runId>] [--with-content] [--root <dir>]";
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--run") {
       runId = argv[++i];
+    } else if (flag === "--with-content") {
+      withContent = true;
     } else if (flag === "--root") {
       root = argv[++i] ?? root;
     } else if (sessionId === undefined && flag !== undefined && !flag.startsWith("--")) {
@@ -55,6 +59,7 @@ function traceMain(argv: string[]): void {
       root: realpathSync(root),
       sessionId,
       ...(runId !== undefined ? { runId } : {}),
+      withContent,
     })
   );
 }
@@ -66,11 +71,16 @@ function replayMain(argv: string[]): void {
   let runId: string | undefined;
   let sessionId: string | undefined;
   let root = process.cwd();
-  const usage = "用法：pigeon replay <runId> [--session <sessionId>] [--root <dir>]";
+  // M5 S2（决策 045）：--with-content 带正文（默认关）
+  let withContent = false;
+  const usage =
+    "用法：pigeon replay <runId> [--session <sessionId>] [--with-content] [--root <dir>]";
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--session") {
       sessionId = argv[++i];
+    } else if (flag === "--with-content") {
+      withContent = true;
     } else if (flag === "--root") {
       root = argv[++i] ?? root;
     } else if (runId === undefined && flag !== undefined && !flag.startsWith("--")) {
@@ -87,6 +97,7 @@ function replayMain(argv: string[]): void {
       root: realpathSync(root),
       runId,
       ...(sessionId !== undefined ? { sessionId } : {}),
+      withContent,
     })
   );
 }
@@ -154,7 +165,14 @@ interface ModelFlags {
   streamFnSpec?: string;
   provider: string;
   modelId: string;
+  // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
+  persistThinking: boolean;
+  // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
+  memoryBudgetChars?: number;
 }
+
+// 无取值的开关型 flag（resume 参数切分时不吞下一个参数）
+const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking"]);
 
 function parseModelFlags(argv: string[], usage: string): ModelFlags {
   const flags: ModelFlags = {
@@ -162,11 +180,20 @@ function parseModelFlags(argv: string[], usage: string): ModelFlags {
     root: process.cwd(),
     provider: "custom",
     modelId: "cli",
+    persistThinking: true,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--yolo") {
       flags.yolo = true;
+    } else if (flag === "--no-persist-thinking") {
+      flags.persistThinking = false;
+    } else if (flag === "--memory-budget") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
+      }
+      flags.memoryBudgetChars = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -221,9 +248,9 @@ async function resumeMain(argv: string[]): Promise<void> {
       continue;
     }
     modelArgv.push(arg);
-    // 取值型 flag 的值也不以 -- 开头，一并带走（--yolo 无值）
+    // 取值型 flag 的值也不以 -- 开头，一并带走（开关型 flag 无值）
     const next = argv[i + 1];
-    if (arg !== "--yolo" && next !== undefined && !next.startsWith("--")) {
+    if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
       modelArgv.push(next);
       i++;
     }
@@ -236,7 +263,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const sessionId = asSessionId(sessionIdArg);
   const flags = parseModelFlags(
     modelArgv,
-    "支持 --yolo / --root / --stream-fn / --provider / --model"
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --root / --stream-fn / --provider / --model"
   );
   if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
     throw new Error(
@@ -268,6 +295,10 @@ async function resumeMain(argv: string[]): Promise<void> {
           yolo: flags.yolo,
           provider: flags.provider,
           modelId: flags.modelId,
+          persistThinking: flags.persistThinking,
+          ...(flags.memoryBudgetChars !== undefined
+            ? { memoryBudgetChars: flags.memoryBudgetChars }
+            : {}),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           restoredGrants,
@@ -278,6 +309,8 @@ async function resumeMain(argv: string[]): Promise<void> {
             ask,
             write,
             grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
+            // M5 S2（决策 038）：/search 内容级检索
+            search: { root: workspaceRoot },
           });
         } finally {
           await bundle.adapter.dispose();
@@ -307,7 +340,10 @@ async function main(argv: string[]): Promise<void> {
     await resumeMain(argv.slice(1));
     return;
   }
-  const flags = parseModelFlags(argv, "支持 --yolo / --root / --stream-fn / --provider / --model");
+  const flags = parseModelFlags(
+    argv,
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --root / --stream-fn / --provider / --model"
+  );
   if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
     throw new Error(
       "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
@@ -328,6 +364,10 @@ async function main(argv: string[]): Promise<void> {
     yolo: flags.yolo,
     provider: flags.provider,
     modelId: flags.modelId,
+    persistThinking: flags.persistThinking,
+    ...(flags.memoryBudgetChars !== undefined
+      ? { memoryBudgetChars: flags.memoryBudgetChars }
+      : {}),
     // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
     createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
   });
@@ -337,6 +377,8 @@ async function main(argv: string[]): Promise<void> {
       ask,
       write,
       grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
+      // M5 S2（决策 038）：/search 内容级检索
+      search: { root: workspaceRoot },
     });
   } finally {
     close();

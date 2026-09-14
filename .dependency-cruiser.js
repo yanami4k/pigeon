@@ -88,8 +88,28 @@ export default {
       from: { path: "^src/application/", pathNot: "\\.test\\.ts$" },
       to: {
         path: "^src/",
-        pathNot: "^src/(application|state|persistence|tools|approvals|pi-runtime|execution)/",
+        pathNot:
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills)/",
       },
+    },
+    {
+      name: "memory-below-controller",
+      severity: "error",
+      comment:
+        "memory（M5：Session Search 扫描器与两个 read 档工具、常驻 Memory，决策 038 / 042）" +
+        "可依赖 state / persistence / tools；不触达 pi-runtime / application / execution / Actor 层" +
+        "（022 修订）。检索目录与工作区根由装配根注入，memory 自身不做装配。",
+      from: { path: "^src/memory/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/", pathNot: "^src/(memory|state|persistence|tools)/" },
+    },
+    {
+      name: "skills-only-state-tools",
+      severity: "error",
+      comment:
+        "skills（M5 S4：Skill Catalog 扫描与 load_skill 工具，决策 043）只依赖 state 与 tools；" +
+        "读取留痕经装配根注入的回调写出，skills 自身不触达 persistence / pi-runtime / application / Actor 层。",
+      from: { path: "^src/skills/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/", pathNot: "^src/(skills|state|tools)/" },
     },
     {
       name: "actors-no-execution",

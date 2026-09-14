@@ -2,6 +2,7 @@
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { FailureClass } from "../state/classification.ts";
+import type { ContentGap } from "../state/materialize.ts";
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
@@ -59,6 +60,17 @@ export function failureBadge(failure: FailureClass | null | undefined): string {
     case "unknown":
       return "未知";
   }
+}
+
+// 正文缺口（M5 S1，决策 037）→ 人话：trace Run 头与 replay 尾部总账同一口径
+export function describeContentGaps(gaps: readonly ContentGap[]): string {
+  const detail = gaps
+    .map(
+      (gap) =>
+        `第 ${gap.runSeq} 条${gap.reason === "missing" ? "内容文件无记录" : "哈希不符（正文被改动或损坏）"}`
+    )
+    .join("；");
+  return `消息正文缺失 ${gaps.length} 条（${detail}）`;
 }
 
 // 熔断计数粒度 → 人话

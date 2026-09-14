@@ -1,7 +1,8 @@
-// M2 S1（决策 024）：subscribeStream 只读流式文本观察口测试。
-// 纪律：上游 message_update 携带 text_delta 时把增量连同 runId 转发给订阅者；
-// 不进 Event Log、不进 events()、不锚身份（013：流式载荷是上游浅拷贝 partial）；
-// thinking 增量第一版不转发；listener 自包 try/catch 进 listenerErrors，绝不毒化 Run。
+// M2 S1（决策 024）：subscribeStream 只读流式观察口测试。
+// 纪律：上游 message_update 携带 text_delta / thinking_delta 时把增量连同 runId 与 kind
+// 转发给订阅者（045 修订：thinking 一并转发）；增量不进 Event Log、不进 events()、不锚身份
+//（013：流式载荷是上游浅拷贝 partial）——正文持久化走 message_end 的内容记录（037）；
+// listener 自包 try/catch 进 listenerErrors，绝不毒化 Run。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +26,7 @@ function createSnapshot(): InjectionSnapshot {
   };
 }
 
-test("text_delta 增量按序到达并携带 runId；thinking 增量不转发；退订后不再收到", async () => {
+test("text_delta 与 thinking_delta 按序到达并携带 runId 与 kind；退订后不再收到", async () => {
   const thinking = "先想想再回答";
   const firstText = "流式增量甲乙丙丁戊己";
   const streamFn = createFakeStreamFn({
@@ -37,26 +38,27 @@ test("text_delta 增量按序到达并携带 runId；thinking 增量不转发；
 
   const first = await adapter.run("你好");
 
-  // 增量按序到达，拼接 == 完整文本；每条携带本 Run 的 runId
+  const textOf = (kind: StreamTextDelta["kind"]): string =>
+    deltas
+      .filter((d) => d.kind === kind)
+      .map((d) => d.delta)
+      .join("");
+  // 增量按序到达，按 kind 拼接 == 完整文本；每条携带本 Run 的 runId
   assert.ok(deltas.length > 1, `chunkSize=2 应产生多条增量，实际 ${deltas.length} 条`);
-  assert.equal(deltas.map((d) => d.delta).join(""), firstText);
+  assert.equal(textOf("text"), firstText);
+  // 045 修订：thinking 增量一并转发，kind 区分，thinking 在文本之前（真实块序）
+  assert.equal(textOf("thinking"), thinking);
+  assert.equal(deltas[0]?.kind, "thinking");
   for (const delta of deltas) {
     assert.equal(delta.runId, first.runId);
   }
-  // thinking 增量不转发（024 子裁决：第一版只转发 text_delta）
-  assert.ok(
-    !deltas
-      .map((d) => d.delta)
-      .join("")
-      .includes(thinking)
-  );
   assert.equal(first.status, "completed");
 
   // 退订后第二个 Run 不再收到增量
   unsubscribe();
   const second = await adapter.run("再来");
   assert.equal(second.status, "completed");
-  assert.equal(deltas.map((d) => d.delta).join(""), firstText);
+  assert.equal(textOf("text"), firstText);
 
   await adapter.dispose();
 });
@@ -82,7 +84,7 @@ test("listener 抛异常进 listenerErrors，Run 与其他 listener 不受影响
   await adapter.dispose();
 });
 
-test("流式增量不进 Event Log：会话文件零文本记录（消息文本不持久化）", async () => {
+test("流式增量不进 Event Log：会话事件文件零文本记录（正文只经 message_end 进旁置内容文件）", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-stream-log-"));
   try {
     const text = "绝不落盘的流式文本甲乙丙";

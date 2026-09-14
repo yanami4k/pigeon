@@ -24,8 +24,13 @@ export function runSessionListCommand(options: SessionListCommandOptions): strin
   const lines: string[] = [];
   for (const summary of summaries) {
     // 时间渲染：UTC（ISO 切片），跨时区确定——测试文本比对与 grep 友好
+    // M5 S5（决策 044）：有 usage 的会话追加总 token 与成本；M5 前的会话行不变
+    const usage =
+      summary.totalTokens > 0
+        ? `  ${summary.totalTokens} tokens  $${summary.totalCost.toFixed(4)}`
+        : "";
     lines.push(
-      `${new Date(summary.createdAt).toISOString().slice(0, 16).replace("T", " ")}  ${summary.runCount} 个 Run  ${summary.sessionId}`
+      `${new Date(summary.createdAt).toISOString().slice(0, 16).replace("T", " ")}  ${summary.runCount} 个 Run  ${summary.sessionId}${usage}`
     );
     if (summary.pendingReconcile > 0) {
       lines.push(`  ${summary.pendingReconcile} 条待对账（上次会话异常中断，用 resume 处理）`);

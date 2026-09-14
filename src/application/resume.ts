@@ -32,6 +32,12 @@ function describeEvidenceGaps(materialized: MaterializedSession): string[] {
   if (missingEntries > 0) {
     lines.push(`entry 映射断号：${missingEntries} 条（写盘失败留证缺口）`);
   }
+  // M5 S1（决策 037）：entry 回指的正文缺失或哈希不符
+  if (materialized.contentGaps.length > 0) {
+    lines.push(
+      `消息正文缺失：${materialized.contentGaps.length} 条（内容文件无记录或哈希不符，用 trace 查看）`
+    );
+  }
   if (materialized.unfinishedRuns.length > 0) {
     lines.push(
       `崩溃残留：${materialized.unfinishedRuns.length} 个 Run 无 run.ended（用 trace 或 replay 查看中断位置）`

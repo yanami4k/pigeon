@@ -1,12 +1,17 @@
-// 注入快照（ROADMAP M1）：Run 启动前冻结的模型/工具/权限/上下文四元组 + Memory/Skill 占位。
+// 注入快照（ROADMAP M1）：Run 启动前冻结的模型/工具/权限/上下文四元组 + Memory/Skill 冻结清单。
 // 上游 pi-agent-core 在每个 Run 开始时自行拷贝 context 与 loop config（agent.js createContextSnapshot /
 // createLoopConfig），Adapter 在其之上再冻结一份治理侧快照，作为重建等价 Run 的依据。
 import { type Static, Type } from "typebox";
+import {
+  MemoryManifestEntrySchema,
+  SkillManifestEntrySchema,
+} from "../state/injection-manifest.ts";
 import type { Migration } from "../state/migration.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
 // v2：ToolPolicy 增加 approvalMode（M3 决策 4，yolo = 人事先批发授权）
-export const INJECTION_SNAPSHOT_VERSION = 2;
+// v3（M5 S3，决策 042 / 043）：memory 与 skills 由占位数组收紧为结构化冻结清单
+export const INJECTION_SNAPSHOT_VERSION = 3;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -32,12 +37,14 @@ export const InjectionSnapshotSchema = Type.Object({
     advertised: Type.Array(Type.String()),
   }),
   context: Type.Object({
+    // 会话开始时拼好的完整 system prompt（基础提示 + 常驻 Memory 段 + Skill 目录段），冻结后不再变
     systemPrompt: Type.String(),
   }),
-  // M1 占坑：Memory 注入在 M5（transformContext）落地，此处允许为空
-  memory: Type.Array(Type.Unknown()),
-  // M1 占坑：Skill 注入同上
-  skills: Type.Array(Type.Unknown()),
+  // 常驻 Memory 冻结清单（决策 042）：注入走 system prompt 追加段，不走 transformContext；
+  // transformContext 只做只读观察（llm.request），并留给 M10 外部 Provider 的逐调用动态召回
+  memory: Type.Array(MemoryManifestEntrySchema),
+  // Skill Catalog 冻结清单（决策 043）：每个 Skill 目录下全部文件的哈希清单，load_skill 读取时比对
+  skills: Type.Array(SkillManifestEntrySchema),
   // Unix 毫秒时间戳
   createdAt: Type.Integer({ minimum: 0 }),
 });
@@ -47,6 +54,7 @@ export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
 // v1 → v2：ToolPolicy 补 approvalMode，默认 "prompt"（yolo 必须显式选择，见 M3 决策 4）。
 // 迁移管线（src/state/migration.ts）是通用设施、尚无集中注册表（events/receipt/candidate 均未注册），
 // 故此处只导出迁移函数，由快照冷加载方按名 "injection-snapshot" 注册使用。
+// 每个迁移函数只升一级，输出版本写死（不引用当前版本常量，否则常量推进后本级会跳级）
 export const migrateInjectionSnapshotV1toV2: Migration = (doc) => {
   const { tools, ...rest } = doc;
   const { policy, ...toolsRest } = tools as { policy: Record<string, unknown> } & Record<
@@ -55,7 +63,11 @@ export const migrateInjectionSnapshotV1toV2: Migration = (doc) => {
   >;
   return {
     ...rest,
-    version: INJECTION_SNAPSHOT_VERSION,
+    version: 2,
     tools: { ...toolsRest, policy: { ...policy, approvalMode: "prompt" } },
   };
 };
+
+// v2 → v3：memory / skills 由 Type.Unknown 占位数组收紧为结构化清单，版本推进不改内容——
+// 旧快照的空数组照过；非空的非结构化占位在目标 schema 校验时被拒绝（不猜着把它们转成清单）
+export const migrateInjectionSnapshotV2toV3: Migration = (doc) => ({ ...doc, version: 3 });

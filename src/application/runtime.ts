@@ -10,11 +10,25 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { loadResidentMemory } from "../memory/resident.ts";
+import {
+  createReadSessionEntryTool,
+  createSearchSessionsTool,
+  READ_SESSION_ENTRY_TOOL,
+  SEARCH_SESSIONS_TOOL,
+  sessionToolRegistrations,
+} from "../memory/search-tools.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
+import { loadSkillCatalog } from "../skills/catalog.ts";
+import {
+  createLoadSkillTool,
+  LOAD_SKILL_TOOL,
+  loadSkillRegistration,
+} from "../skills/load-skill-tool.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
@@ -38,6 +52,12 @@ export interface RuntimeDeps {
   // M4 S6（决策 3b）：冷恢复种子——resume 时由 materializeSession(...).grants 还原，
   // 会话 grant 崩溃后静默继续有效
   restoredGrants?: readonly ActiveGrant[];
+  // M5 S1（决策 045）：thinking 正文是否持久化进内容文件；缺省 true，Actor 以旗标关闭
+  persistThinking?: boolean;
+  // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
+  homeDir?: string;
+  // M5 S3（决策 042）：常驻 Memory 字符预算（缺省 8000，约 2000 token）
+  memoryBudgetChars?: number;
 }
 
 export interface RuntimeBundle {
@@ -51,7 +71,9 @@ export interface RuntimeBundle {
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = path.join(deps.workspaceRoot, ".pigeon", "sessions");
-  const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId);
+  const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId, {
+    content: { persistThinking: deps.persistThinking ?? true },
+  });
   // F：固化配置启动时装载（畸形 → 抛错，启动中止——授权语义不明绝不静默运行）
   const configGrants = deps.configGrants ?? loadGrantConfig(deps.workspaceRoot);
   // 决策 3b：会话 grant 运行态——resume 时以事件日志物化结果为种子（created − revoked）
@@ -77,30 +99,77 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
+  // M5 S2（决策 038）：Session Search 的两个 read 档工具，范围只限本项目会话目录
+  for (const registration of sessionToolRegistrations(sessionsDir)) {
+    registry.register(registration);
+  }
+  // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
+  // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
+  const residentMemory = loadResidentMemory({
+    workspaceRoot: deps.workspaceRoot,
+    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
+  });
+  const basePrompt =
+    "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
+    "用 edit_file 按锚点编辑。写操作可能需要人工批准。" +
+    "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
+    "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
+  // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
+  // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
+  const skillCatalog = loadSkillCatalog({
+    workspaceRoot: deps.workspaceRoot,
+    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+  });
+  const hasSkills = skillCatalog.skills.length > 0;
+  if (hasSkills) {
+    registry.register(loadSkillRegistration(skillCatalog));
+  }
+  const toolNames = [
+    "read_file",
+    "edit_file",
+    SEARCH_SESSIONS_TOOL,
+    READ_SESSION_ENTRY_TOOL,
+    ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
+  ];
+  const systemPrompt = [basePrompt, residentMemory.section, skillCatalog.section]
+    .filter((section) => section !== "")
+    .join("\n\n");
+  // load_skill 的读取留痕经 Adapter 盖 runId 落 skill.loaded；工具先于 Adapter 构造，故晚绑定
+  const adapterRef: { current: PiRuntimeAdapter | undefined } = { current: undefined };
   const adapter = new PiRuntimeAdapter({
     snapshot: {
       version: INJECTION_SNAPSHOT_VERSION,
       model: { provider: deps.provider, id: deps.modelId },
       tools: {
         policy: {
-          allow: ["read_file", "edit_file"],
+          allow: toolNames,
           deny: [],
           approvalMode: deps.yolo ? "yolo" : "prompt",
         },
-        advertised: ["read_file", "edit_file"],
+        advertised: toolNames,
       },
-      context: {
-        systemPrompt:
-          "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
-          "用 edit_file 按锚点编辑。写操作可能需要人工批准。",
-      },
-      memory: [],
-      skills: [],
+      context: { systemPrompt },
+      memory: residentMemory.manifest,
+      skills: skillCatalog.manifest,
       createdAt: Date.now(),
     },
     streamFn: deps.streamFn,
     registry,
-    tools: [createReadFileTool(deps.workspaceRoot), createEditFileTool(deps.workspaceRoot)],
+    tools: [
+      createReadFileTool(deps.workspaceRoot),
+      createEditFileTool(deps.workspaceRoot),
+      createSearchSessionsTool({ sessionsDir }),
+      createReadSessionEntryTool({ sessionsDir }),
+      ...(hasSkills
+        ? [
+            createLoadSkillTool({
+              catalog: skillCatalog,
+              onLoaded: (payload) => adapterRef.current?.recordObservation("skill.loaded", payload),
+            }),
+          ]
+        : []),
+    ],
     // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
     // 交互实现由 Actor 注入（决策 025）
     approvalHandler: deps.createApprovalHandler(grantStore),
@@ -110,7 +179,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     sessionGrants: grantStore,
     configGrants,
     workspaceRoot: deps.workspaceRoot,
+    // M5 S5（决策 044）：llm.request 指纹与内容文件同一抽取选项
+    messageContent: { persistThinking: deps.persistThinking ?? true },
   });
+  adapterRef.current = adapter;
   return { adapter, eventLog, grantStore, configGrants };
 }
 

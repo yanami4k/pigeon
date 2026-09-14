@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import { sanitizeTerminalText } from "../application/format.ts";
 import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
+import { runSearchCommand } from "../application/search.ts";
 import type { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 
 // 提问函数：返回一行输入；EOF/流关闭返回 null
@@ -64,6 +65,8 @@ export interface ReplOptions {
   write: WriteFn;
   // M4 S6（决策 3）：grant 命令上下文——缺省时 / 命令不可用（旧测试/最小装配不受影响）
   grants?: GrantsCommandContext;
+  // M5 S2（决策 038）：/search 命令上下文（工作区根）；缺省时 /search 不可用
+  search?: { root: string };
 }
 
 export async function runRepl(options: ReplOptions): Promise<void> {
@@ -103,9 +106,14 @@ export async function runRepl(options: ReplOptions): Promise<void> {
         .split(/\s+/)
         .filter((token) => token.length > 0);
       try {
+        // M5 S2（决策 038）：/search 内容级检索——命令层与 tui 同一份
+        if (tokens[0] === "search" && options.search !== undefined) {
+          write(await runSearchCommand({ root: options.search.root, args: tokens.slice(1) }));
+          continue;
+        }
         const handled = options.grants !== undefined && runGrantCommand(tokens, options.grants);
         if (!handled) {
-          write(`未知命令：${task}（可用 /grants、/revoke <id>、/grants save <id>）\n`);
+          write(`未知命令：${task}（可用 /search、/grants、/revoke <id>、/grants save <id>）\n`);
         }
       } catch (error) {
         write(`命令失败：${error instanceof Error ? error.message : String(error)}\n`);

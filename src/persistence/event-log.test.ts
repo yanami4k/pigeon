@@ -707,7 +707,7 @@ test("v3 事件文件读路径迁移：纯版本推进到 v4（S6 加法式演�
   }
 });
 
-test("v4 事件文件读路径迁移：纯版本推进到 v5（M4 收口加法式演进，旧记录逐字有效）", () => {
+test("v4 事件文件读路径迁移：逐级纯版本推进到当前版本（加法式演进，旧记录逐字有效）", () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
   try {
     const sessionId = newSessionId();
@@ -737,7 +737,7 @@ test("v4 事件文件读路径迁移：纯版本推进到 v5（M4 收口加法�
     writeFileSync(path, `${JSON.stringify(v4Entry)}\n${JSON.stringify(v4Grant)}\n`, "utf8");
     const records = readEventLogFile(path);
     assert.equal(records.length, 2);
-    assert.equal(EVENT_LOG_VERSION, 5);
+    assert.equal(EVENT_LOG_VERSION, 6);
     assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
     assert.equal(records[0]?.kind, "entry");
     assert.equal(records[1]?.kind, "grant.created");

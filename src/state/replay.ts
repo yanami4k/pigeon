@@ -9,7 +9,7 @@
 // 撕裂尾巴、崩溃残留（无 run.ended）全部如实标注，绝不猜测修补（§3.2/§3.5）。
 import type { EventRecord } from "./event-log.ts";
 import type { RunId, SessionId } from "./ids.ts";
-import type { MaterializedSession, RunClassification } from "./materialize.ts";
+import type { ContentGap, MaterializedSession, RunClassification } from "./materialize.ts";
 
 // 时间线上的一条记录 + 人话异常标注（空数组 = 无异常）
 export interface ReplayEvent {
@@ -29,6 +29,8 @@ export interface RunReplay {
   tornTail: boolean;
   // 本 Run 缺失的 entry runSeq（M4 收口决策 ③：冷物化 entryGaps 的本 Run 切片；空 = 连续）
   entryGaps: number[];
+  // 本 Run 的正文缺口（M5 S1，决策 037）：entry 回指的内容记录缺失或哈希不符
+  contentGaps: ContentGap[];
   // Run 级失败四分类（D7）；缺省 = 分类清单中无此 Run（不应出现）
   classification?: RunClassification;
 }
@@ -55,6 +57,10 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
   const describeMissing = (seqs: number[]): string =>
     `entry 映射断号：缺第 ${seqs.join("、")} 条（写盘失败留证缺口，D3 序号不重排）`;
 
+  // 正文缺口（M5 S1，决策 037）：原位标注在该 entry 上
+  const contentGaps = session.contentGaps.filter((gap) => gap.runId === runId);
+  const contentGapByEntry = new Map(contentGaps.map((gap) => [gap.entryId as string, gap]));
+
   let ended = false;
   let lastSeenSeq = 0;
   const events: ReplayEvent[] = [];
@@ -78,6 +84,14 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
       if (holes.length > 0) {
         annotations.push(describeMissing(holes));
       }
+      const contentGap = contentGapByEntry.get(record.id);
+      if (contentGap !== undefined) {
+        annotations.push(
+          contentGap.reason === "missing"
+            ? "消息正文缺失：内容文件无该 entry 的记录（037 哈希回指断链）"
+            : "消息正文哈希不符：内容文件记录被改动或损坏（037）"
+        );
+      }
       lastSeenSeq = Math.max(lastSeenSeq, record.runSeq);
     }
     if (record.kind === "run.ended") {
@@ -100,6 +114,7 @@ export function buildRunReplay(session: MaterializedSession, runId: RunId): RunR
     ended,
     tornTail: session.tornTail && ownsFileTail,
     entryGaps,
+    contentGaps,
     ...(classification !== undefined ? { classification } : {}),
   };
 }

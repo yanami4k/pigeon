@@ -22,6 +22,9 @@ export interface SessionSummary {
   failureClasses: SessionSummaryFailureClass[];
   // 待对账数 = 未确证的 OutcomeUnknown 悬账（intent 无 receipt 且无 resolution）
   pendingReconcile: number;
+  // M5 S5（决策 044）：本会话 turn.completed usage 的合计（M5 前的记录无 usage，计 0）
+  totalTokens: number;
+  totalCost: number;
 }
 
 // 最小过滤器（CLI --tool / --class / --since / --until 的投影层形状；多条件叠加为与）
@@ -93,6 +96,14 @@ export function summarizeSession(materialized: MaterializedSession): SessionSumm
       }
     }
   }
+  let totalTokens = 0;
+  let totalCost = 0;
+  for (const event of materialized.runtimeEvents) {
+    if (event.kind === "turn.completed" && event.payload.usage !== undefined) {
+      totalTokens += event.payload.usage.totalTokens;
+      totalCost += event.payload.usage.cost.total;
+    }
+  }
   const summary: SessionSummary = {
     sessionId,
     createdAt,
@@ -100,6 +111,8 @@ export function summarizeSession(materialized: MaterializedSession): SessionSumm
     toolNames,
     failureClasses,
     pendingReconcile: materialized.reconcile.unknown.length,
+    totalTokens,
+    totalCost,
   };
   return summary;
 }

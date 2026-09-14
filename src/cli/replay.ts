@@ -10,14 +10,17 @@ import { join } from "node:path";
 import {
   approvalVerdict,
   breakerScopeLabel,
+  describeContentGaps,
   failureBadge,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
+import { contentRecordLines, loadContentRecords } from "../application/history.ts";
 import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import type { EventRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
+import type { MessageContentRecord } from "../state/message-content.ts";
 import { buildRunReplay, type ReplayEvent, type RunReplay } from "../state/replay.ts";
 
 // 毫秒时间戳（UTC）：HH:MM:SS.mmm——时间线是黑匣子回放，毫秒序对崩溃分析有意义
@@ -57,6 +60,27 @@ function recordDetail(record: EventRecord): string {
     }
     case "run.ended":
       return `Run 结束（新增消息 ${record.payload.messageCount} 条）`;
+    // M5 观察族（决策 043 / 044）：快照摘要、上下文指纹、Skill 读取留痕
+    case "run.started": {
+      const payload = record.payload;
+      const tools = payload.advertisedTools.length > 0 ? payload.advertisedTools.join("、") : "无";
+      return (
+        `Run 启动快照 ｜ 模型 ${payload.model.provider}/${payload.model.id} ｜ ` +
+        `审批模式 ${payload.policy.approvalMode} ｜ 工具 ${tools} ｜ ` +
+        `Memory ${payload.memory.length} 个 ｜ Skill ${payload.skills.length} 个 ｜ ` +
+        `system prompt ${payload.systemPromptHash.slice(0, 12)}`
+      );
+    }
+    case "llm.request":
+      return (
+        `模型请求 ｜ 消息 ${record.payload.messageCount} 条 ｜ 约 ${record.payload.estimatedChars} 字符 ｜ ` +
+        `上下文指纹 ${record.payload.messagesHash.slice(0, 12)}`
+      );
+    case "skill.loaded":
+      return (
+        `Skill 读取 ${record.payload.name}/${record.payload.resourcePath} ｜ ${record.payload.bytes} 字节` +
+        `${record.payload.truncated ? "（已截断）" : ""} ｜ 哈希 ${record.payload.hash.slice(0, 12)}`
+      );
     case "intent": {
       let detail =
         `意图落账 ${shortId(record.executionId)} ｜ ${record.toolName}（${record.toolCallId}）｜ ` +
@@ -111,7 +135,11 @@ function recordDetail(record: EventRecord): string {
     }
     // M4 S5：entry 族（D3 映射行）——transcript 第 runSeq 条消息（本 run 内）获得 EntryId
     case "entry":
-      return `消息映射 ${shortId(record.id)}：run 内第 ${record.runSeq} 条（${record.role}）`;
+      return (
+        `消息映射 ${shortId(record.id)}：run 内第 ${record.runSeq} 条（${record.role}）` +
+        // M5 S1（决策 037）：正文回指哈希；缺省 = M5 前会话，无正文
+        (record.contentHash !== undefined ? ` ｜ 正文 ${record.contentHash.slice(0, 12)}` : "")
+      );
     // M4 S6：grant 族（决策 3）——放权/撤销留证，时间线原样呈现
     case "grant.created": {
       const scope =
@@ -134,17 +162,30 @@ function recordDetail(record: EventRecord): string {
   }
 }
 
-function renderEvent(event: ReplayEvent, lines: string[]): void {
+// 带正文渲染选项（M5 S2，决策 045）：entryId → 内容记录；缺省 = 纯治理时间线
+export interface ReplayRenderOptions {
+  content?: ReadonlyMap<string, MessageContentRecord>;
+}
+
+function renderEvent(event: ReplayEvent, lines: string[], options: ReplayRenderOptions): void {
   lines.push(
     `${timeOf(event.record.timestamp)} ${event.record.kind} ｜ ${recordDetail(event.record)}`
   );
   for (const annotation of event.annotations) {
     lines.push(`  标注：${annotation}`);
   }
+  if (event.record.kind === "entry") {
+    const record = options.content?.get(event.record.id);
+    if (record !== undefined) {
+      for (const line of contentRecordLines(record)) {
+        lines.push(`  正文：${line.text}`);
+      }
+    }
+  }
 }
 
 // 一次性静态渲染（D4：无交互步进，测试为输出文本比对）
-export function renderRunReplay(replay: RunReplay): string {
+export function renderRunReplay(replay: RunReplay, options: ReplayRenderOptions = {}): string {
   // 终态：run.ended 是否在场 + 末条 turn.completed 的 stopReason（与 trace 运行头同口径）
   const lastCompleted = [...replay.events]
     .reverse()
@@ -163,7 +204,7 @@ export function renderRunReplay(replay: RunReplay): string {
     "",
   ];
   for (const event of replay.events) {
-    renderEvent(event, lines);
+    renderEvent(event, lines, options);
   }
   // 崩溃残留与撕裂尾巴：人话标注，绝不假装证据链完整（D2 可见化）
   if (!replay.ended) {
@@ -178,6 +219,10 @@ export function renderRunReplay(replay: RunReplay): string {
       `entry 映射断号：缺第 ${replay.entryGaps.join("、")} 条（写盘失败留证缺口，D3 序号不重排）`
     );
   }
+  // M5 S1（决策 037）：正文缺口尾部总账（原位标注之外）
+  if (replay.contentGaps.length > 0) {
+    lines.push(describeContentGaps(replay.contentGaps));
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -187,11 +232,24 @@ export interface ReplayCommandOptions {
   runId: string;
   // 缺省时跨会话扫描定位 Run；歧义（同 runId 出现在多个会话）响亮失败要求消歧
   sessionId?: string;
+  // M5 S2（决策 045）：带正文（默认关）
+  withContent?: boolean;
 }
 
-function renderSession(materialized: MaterializedSession, runId: RunId): string | null {
+function renderSession(
+  materialized: MaterializedSession,
+  runId: RunId,
+  root: string,
+  withContent: boolean
+): string | null {
   const replay = buildRunReplay(materialized, runId);
-  return replay === null ? null : renderRunReplay(replay);
+  if (replay === null) {
+    return null;
+  }
+  return renderRunReplay(
+    replay,
+    withContent ? { content: loadContentRecords(root, materialized.sessionId) } : {}
+  );
 }
 
 // 只读渲染入口：Run/会话不存在或歧义时响亮报错并列出可选项，绝不静默产出空报告
@@ -208,7 +266,7 @@ export function runReplayCommand(options: ReplayCommandOptions): string {
       );
     }
     const materialized = materializeSession(sessionsDir, sessionId);
-    const rendered = renderSession(materialized, runId);
+    const rendered = renderSession(materialized, runId, options.root, options.withContent === true);
     if (rendered === null) {
       const known = [...new Set(materialized.records.map((record) => record.runId as string))];
       throw new Error(
@@ -227,7 +285,7 @@ export function runReplayCommand(options: ReplayCommandOptions): string {
     for (const known of new Set(materialized.records.map((record) => record.runId as string))) {
       knownRuns.push(`${known}（会话 ${sessionId}）`);
     }
-    const rendered = renderSession(materialized, runId);
+    const rendered = renderSession(materialized, runId, options.root, options.withContent === true);
     if (rendered !== null) {
       hits.push({ sessionId, rendered });
     }

@@ -11,10 +11,12 @@ import type {
   EventRecord,
   IntentRecord,
   ResolutionRecord,
+  RunStartedRecord,
   RuntimeEventRecord,
 } from "./event-log.ts";
 import type { ExecutionId, RunId, SessionId } from "./ids.ts";
 import type {
+  ContentGap,
   MaterializedSession,
   RunClassification,
   ToolExecutionClassification,
@@ -67,6 +69,11 @@ export interface TraceRun {
   tornTail: boolean;
   // 本 Run 缺失的 entry runSeq（判据在 materializeSession，三视图同一份）
   entryGaps: number[];
+  // 本 Run 的正文缺口（M5 S1，决策 037；判据在冷物化，三视图同一份）
+  contentGaps: ContentGap[];
+  // M5 S5（决策 044）：Run 启动快照摘要（M5 前的 Run 无）与模型请求次数（llm.request 条数）
+  started?: RunStartedRecord;
+  llmRequestCount: number;
   classification?: RunClassification;
   // run 级异常（轮次边界缺口等）
   anomalies: string[];
@@ -144,6 +151,8 @@ function buildRunTrace(
     ended: false,
     tornTail: session.tornTail && ownsFileTail,
     entryGaps: session.entryGaps.find((gap) => gap.runId === runId)?.missingSeqs ?? [],
+    contentGaps: session.contentGaps.filter((gap) => gap.runId === runId),
+    llmRequestCount: 0,
     anomalies: [],
   };
   const callsByToolCallId = new Map<string, TraceToolCall>();
@@ -212,6 +221,10 @@ function buildRunTrace(
       }
     } else if (record.kind === "run.ended") {
       run.ended = true;
+    } else if (record.kind === "run.started") {
+      run.started = record;
+    } else if (record.kind === "llm.request") {
+      run.llmRequestCount += 1;
     } else if (record.kind === "intent") {
       const call = callBucket(record.toolCallId, record.toolName);
       call.intent = record;

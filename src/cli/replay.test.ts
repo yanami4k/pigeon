@@ -180,10 +180,14 @@ test("replay 报告：运行头终态+分类，时间线严格按落盘顺序，
     // 决策 1（M4 S6 G）读层只留事件级，故 tool.settled 先于任何治理族首见；
     // 写调用的 Receipt 落盘先于其 tool.settled 事件（adapter 在 settled 状态推进时先落账再发事件）。
     // M4 S5：entry 族（D3 消息映射）是时间线的合法成员——replay 呈现全部记录
+    // M5 S5（决策 044）：run.started 先于本 Run 任何其他记录；llm.request 在 user 消息 entry 之后、
+    // assistant 的 turn.started 之前（transformContext 在模型调用前观察）
     assert.deepEqual(
       [...new Set(kinds)],
       [
+        "run.started",
         "entry",
+        "llm.request",
         "turn.started",
         "turn.completed",
         "tool.proposed",

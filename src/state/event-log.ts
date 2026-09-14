@@ -15,11 +15,16 @@ import {
   RunIdSchema,
   SessionIdSchema,
 } from "./ids.ts";
+import { type ContentSourceMessage, Sha256HexSchema } from "./message-content.ts";
 import { MigrationRegistry } from "./migration.ts";
 import { migrateReceiptToCurrent, type Receipt, ReceiptSchema } from "./receipt.ts";
 import {
+  LlmRequestPayloadSchema,
+  ObservationKind,
   RunEndedPayloadSchema,
+  RunStartedPayloadSchema,
   RuntimeEventKind,
+  SkillLoadedPayloadSchema,
   ToolProposedPayloadSchema,
   ToolSettledPayloadSchema,
   TurnCompletedPayloadSchema,
@@ -32,9 +37,11 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v3（M4 S5）：新增 entry 族（D3 Pi transcript 消息映射）、resolution 增 human-confirmed
 // 人工确认渠道且 evidence 改可选；
 // v4（M4 S6）：新增 grant.created / grant.revoked 族（决策 3 Grant 体系）；
-// v5（M4 收口决策 ①）：新增 grant.promoted / grant.config-removed 族（固化规则升格/移除留痕）——
+// v5（M4 收口决策 ①）：新增 grant.promoted / grant.config-removed 族（固化规则升格/移除留痕）；
+// v6（M5，决策 037 / 043 / 044 一次升）：entry 增 contentHash（旁置内容文件回指）、
+// turn.completed 增 usage、新增 run.started / llm.request / skill.loaded 观察族——
 // 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）
-export const EVENT_LOG_VERSION = 5;
+export const EVENT_LOG_VERSION = 6;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -82,6 +89,42 @@ export const RuntimeEventRecordSchema = Type.Union([
 ]);
 export type RuntimeEventRecord = Static<typeof RuntimeEventRecordSchema>;
 
+// 观察族（M5，决策 043 / 044）：Pigeon 自有观察记录，payload schema 唯一事实源在 ./runtime-events.ts
+export const RunStartedRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.RunStarted),
+  payload: RunStartedPayloadSchema,
+});
+export type RunStartedRecord = Static<typeof RunStartedRecordSchema>;
+export const LlmRequestRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.LlmRequest),
+  payload: LlmRequestPayloadSchema,
+});
+export type LlmRequestRecord = Static<typeof LlmRequestRecordSchema>;
+export const SkillLoadedRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.SkillLoaded),
+  payload: SkillLoadedPayloadSchema,
+});
+export type SkillLoadedRecord = Static<typeof SkillLoadedRecordSchema>;
+
+export const ObservationRecordSchema = Type.Union([
+  RunStartedRecordSchema,
+  LlmRequestRecordSchema,
+  SkillLoadedRecordSchema,
+]);
+export type ObservationRecord = Static<typeof ObservationRecordSchema>;
+
+// 观察族追加输入：kind + 对应 payload + runId；信封其余字段由日志盖章
+export type ObservationInput = {
+  [K in ObservationRecord["kind"]]: {
+    kind: K;
+    payload: Extract<ObservationRecord, { kind: K }>["payload"];
+    runId: RunId;
+  };
+}[ObservationRecord["kind"]];
+
 // entry（M4 S5，D3 Pi entry 映射）：每条 message_end 事件落地时刻由 Pigeon 分配 EntryId——
 // 记录信封的 id 即分配给该条 transcript 消息的 EntryId。权威键是 (runId, runSeq)：
 // runSeq = run 内 message_end 累计序号（append-only 双实证保证，spike Q2/Q4）；
@@ -103,6 +146,9 @@ export const EntryRecordSchema = Type.Object({
     Type.Literal("branchSummary"),
     Type.Literal("compactionSummary"),
   ]),
+  // M5 S1（决策 037）：旁置内容文件里该条消息内容块的规范序列化 sha256。缺省 = M5 前会话
+  // （无正文）；存在而内容文件无对应记录或重算不符 = 冷侧派生的正文缺口
+  contentHash: Type.Optional(Sha256HexSchema),
 });
 export type EntryRecord = Static<typeof EntryRecordSchema>;
 
@@ -279,6 +325,7 @@ export type GrantConfigRemovedRecord = Static<typeof GrantConfigRemovedRecordSch
 // M4 收口新增 grant.promoted / grant.config-removed 族）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
+  ObservationRecordSchema,
   EntryRecordSchema,
   IntentRecordSchema,
   DecisionRecordSchema,
@@ -308,6 +355,9 @@ export type BreakerInput = Omit<
 >;
 // entry 族追加输入：业务字段（runSeq/role）+ runId；信封 id（= 分配的 EntryId）由日志盖章
 export type EntryInput = Omit<EntryRecord, "version" | "id" | "sessionId" | "kind" | "timestamp">;
+// M5 S1（决策 037）：appendEntry 的入参——message 是 message_end 时刻消息的深拷贝，由日志决定
+// 落盘位置（旁置内容文件）并据此盖 contentHash；调用方不自报哈希
+export type EntryAppendInput = Omit<EntryInput, "contentHash"> & { message?: ContentSourceMessage };
 export type ResolutionInput = Omit<
   ResolutionRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
@@ -348,6 +398,9 @@ eventLogMigrations.register("event-log", 3, (doc) => ({ ...doc, version: 4 }));
 // v4 → v5（M4 收口决策 ①）：加法式演进（新增 grant.promoted / grant.config-removed 族）——
 // v4 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 4, (doc) => ({ ...doc, version: 5 }));
+// v5 → v6（M5）：加法式演进（entry 增 contentHash、turn.completed 增 usage、新增三个观察族）——
+// v5 旧记录逐字有效，纯版本推进；无 contentHash 的 entry 即"M5 前会话，无正文"
+eventLogMigrations.register("event-log", 5, (doc) => ({ ...doc, version: 6 }));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏

@@ -3,6 +3,8 @@
 // （state/event-log.ts）共用同一份形状，杜绝漂移。本文件不依赖上游类型——上游事件到
 // 这些形状的映射在 pi-runtime 完成（§2 边界规则：上游交互只经 PiRuntimeAdapter）。
 import { type Static, Type } from "typebox";
+import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
+import { Sha256HexSchema } from "./message-content.ts";
 import { ToolErrorKindSchema } from "./tool-execution.ts";
 
 export const RuntimeEventKind = {
@@ -31,11 +33,32 @@ export const StopReasonSchema = Type.Union([
 export const TurnStartedPayloadSchema = Type.Object({});
 export type TurnStartedPayload = Static<typeof TurnStartedPayloadSchema>;
 
+// M5 S1（决策 044）：一轮模型调用的 token 与成本，源自上游 AssistantMessage.usage。
+// 落盘格式自有一份（不随上游加字段漂移；cacheWrite1h / reasoning 等 provider 专有细分不收）
+const NonNegative = () => Type.Number({ minimum: 0 });
+export const TurnUsageSchema = Type.Object({
+  input: NonNegative(),
+  output: NonNegative(),
+  cacheRead: NonNegative(),
+  cacheWrite: NonNegative(),
+  totalTokens: NonNegative(),
+  cost: Type.Object({
+    input: NonNegative(),
+    output: NonNegative(),
+    cacheRead: NonNegative(),
+    cacheWrite: NonNegative(),
+    total: NonNegative(),
+  }),
+});
+export type TurnUsage = Static<typeof TurnUsageSchema>;
+
 export const TurnCompletedPayloadSchema = Type.Object({
   stopReason: StopReasonSchema,
   // 是否为上游 handleRunFailure 合成的失败消息（agent.js: 空文本 + usage 全零 + errorMessage）
   syntheticFailure: Type.Boolean(),
   errorMessage: Type.Optional(Type.String()),
+  // M5 S1（044）：加法式；M5 前的记录缺省
+  usage: Type.Optional(TurnUsageSchema),
 });
 export type TurnCompletedPayload = Static<typeof TurnCompletedPayloadSchema>;
 
@@ -61,3 +84,54 @@ export const RunEndedPayloadSchema = Type.Object({
   messageCount: Type.Integer({ minimum: 0 }),
 });
 export type RunEndedPayload = Static<typeof RunEndedPayloadSchema>;
+
+// M5 观察族（决策 043 / 044）：不是上游事件的归一化，而是 Pigeon 自己的观察记录——
+// 不进 events() 与订阅转发（归一化五族的不变式不变），只落 Event Log 供 trace / 学习闭环消费。
+// 耐久同观察族：同步写不 fsync
+export const ObservationKind = {
+  RunStarted: "run.started",
+  LlmRequest: "llm.request",
+  SkillLoaded: "skill.loaded",
+} as const;
+export type ObservationKind = (typeof ObservationKind)[keyof typeof ObservationKind];
+
+// run.started（044）：InjectionSnapshot v3 的摘要——全文不进治理日志（system prompt 全文在
+// 内容文件的 system 记录里，靠 systemPromptHash 回指）
+export const RunStartedPayloadSchema = Type.Object({
+  model: Type.Object({
+    provider: Type.String({ minLength: 1 }),
+    id: Type.String({ minLength: 1 }),
+  }),
+  policy: Type.Object({
+    allow: Type.Array(Type.String()),
+    deny: Type.Array(Type.String()),
+    approvalMode: Type.Union([Type.Literal("prompt"), Type.Literal("yolo")]),
+  }),
+  // 实际广告给模型的工具名单（§2 规则 5：记录实际暴露，不只记配置意图）
+  advertisedTools: Type.Array(Type.String()),
+  systemPromptHash: Sha256HexSchema,
+  memory: Type.Array(MemoryManifestEntrySchema),
+  skills: Type.Array(SkillManifestEntrySchema),
+});
+export type RunStartedPayload = Static<typeof RunStartedPayloadSchema>;
+
+// llm.request（044）：每次模型调用前 transformContext 的只读指纹——条数、角色计数、估算字符数、
+// 全部消息内容哈希的滚动哈希（与内容文件按哈希可对上）、system prompt 哈希
+export const LlmRequestPayloadSchema = Type.Object({
+  messageCount: Type.Integer({ minimum: 0 }),
+  roleCounts: Type.Record(Type.String(), Type.Integer({ minimum: 0 })),
+  estimatedChars: Type.Integer({ minimum: 0 }),
+  messagesHash: Sha256HexSchema,
+  systemPromptHash: Sha256HexSchema,
+});
+export type LlmRequestPayload = Static<typeof LlmRequestPayloadSchema>;
+
+// skill.loaded（043）：load_skill 每次实际读取的留痕（名、资源路径、读到内容的哈希、是否截断）
+export const SkillLoadedPayloadSchema = Type.Object({
+  name: Type.String({ minLength: 1 }),
+  resourcePath: Type.String({ minLength: 1 }),
+  hash: Sha256HexSchema,
+  bytes: Type.Integer({ minimum: 0 }),
+  truncated: Type.Boolean(),
+});
+export type SkillLoadedPayload = Static<typeof SkillLoadedPayloadSchema>;

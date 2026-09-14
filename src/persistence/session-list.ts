@@ -23,7 +23,8 @@ export function listSessionSummaries(
     if (filters.until !== undefined && createdAt > filters.until) {
       continue;
     }
-    const summary = summarizeSession(materializeSession(dir, sessionId));
+    // 冷路径不读旁置内容文件（决策 037：正文体积不进会话列表的成本）
+    const summary = summarizeSession(materializeSession(dir, sessionId, { content: false }));
     if (matchesSessionFilters(summary, filters)) {
       summaries.push(summary);
     }

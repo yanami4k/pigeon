@@ -20,8 +20,11 @@ import type {
   GrantPromotedRecord,
   GrantRevokedRecord,
   IntentRecord,
+  LlmRequestRecord,
   ResolutionRecord,
+  RunStartedRecord,
   RuntimeEventRecord,
+  SkillLoadedRecord,
 } from "./event-log.ts";
 import type { ExecutionId, RunId, SessionId } from "./ids.ts";
 import type { Receipt } from "./receipt.ts";
@@ -97,9 +100,24 @@ export interface MaterializedSession {
   // 崩溃残留（M4 验收 O-1/O-3）：有记录但无 run.ended 的 Run，按首见顺序。进程死于中途的
   // 确切信号（abort 路径上游照常发 agent_end）；resume 汇总与 trace 会话头共用本清单
   unfinishedRuns: RunId[];
+  // M5 观察族（决策 043 / 044）：按落盘顺序；不参与分类判据
+  runStarteds: RunStartedRecord[];
+  llmRequests: LlmRequestRecord[];
+  skillLoadeds: SkillLoadedRecord[];
+  // 正文缺口（M5 S1，决策 037，按 012 / 021 口径）：entry 带 contentHash 而内容文件无对应记录
+  // 或重算哈希不符。未加载内容文件（会话列表冷路径）时恒为空——不知道就不报
+  contentGaps: ContentGap[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
+}
+
+export interface ContentGap {
+  runId: RunId;
+  entryId: EntryRecord["id"];
+  runSeq: number;
+  // missing = 内容文件无该 entry 的记录；mismatch = 记录在但重算哈希与 entry 回指不符
+  reason: "missing" | "mismatch";
 }
 
 export interface EntryGap {
@@ -133,10 +151,15 @@ export interface MaterializeInput {
   path: string;
   records: EventRecord[];
   tornTail: boolean;
+  // 内容文件的 entryId → 按现有正文重算的内容哈希（persistence 读出后传入）；缺省 = 未加载内容
+  contentHashes?: ReadonlyMap<string, string>;
 }
 
 export function materializeRecords(input: MaterializeInput): MaterializedSession {
   const { sessionId, path, records, tornTail } = input;
+  const runStarteds: RunStartedRecord[] = [];
+  const llmRequests: LlmRequestRecord[] = [];
+  const skillLoadeds: SkillLoadedRecord[] = [];
   const runtimeEvents: RuntimeEventRecord[] = [];
   const intents: IntentRecord[] = [];
   const decisions: DecisionRecord[] = [];
@@ -169,6 +192,12 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       grantPromoteds.push(record);
     } else if (record.kind === "grant.config-removed") {
       grantConfigRemoveds.push(record);
+    } else if (record.kind === "run.started") {
+      runStarteds.push(record);
+    } else if (record.kind === "llm.request") {
+      llmRequests.push(record);
+    } else if (record.kind === "skill.loaded") {
+      skillLoadeds.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -193,9 +222,43 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     grantConfigRemoveds,
     entryGaps: detectEntryGaps(entries, runtimeEvents),
     unfinishedRuns: collectUnfinishedRuns(records, runtimeEvents),
+    runStarteds,
+    llmRequests,
+    skillLoadeds,
+    contentGaps: detectContentGaps(entries, input.contentHashes),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
+}
+
+// 正文缺口派生（M5 S1，决策 037）：只查带 contentHash 的 entry（无哈希 = M5 前会话，不是缺口）。
+// 比对的是内容文件按现有正文重算的哈希，而不是记录自报的 contentHash——正文被改而字段未改
+// 同样现形。contentHashes 缺省（未加载内容文件）不猜，返回空。纯函数，无 IO
+export function detectContentGaps(
+  entries: readonly EntryRecord[],
+  contentHashes: ReadonlyMap<string, string> | undefined
+): ContentGap[] {
+  if (contentHashes === undefined) {
+    return [];
+  }
+  const gaps: ContentGap[] = [];
+  for (const entry of entries) {
+    if (entry.contentHash === undefined) {
+      continue;
+    }
+    const actual = contentHashes.get(entry.id);
+    if (actual === undefined) {
+      gaps.push({ runId: entry.runId, entryId: entry.id, runSeq: entry.runSeq, reason: "missing" });
+    } else if (actual !== entry.contentHash) {
+      gaps.push({
+        runId: entry.runId,
+        entryId: entry.id,
+        runSeq: entry.runSeq,
+        reason: "mismatch",
+      });
+    }
+  }
+  return gaps;
 }
 
 // 崩溃残留 Run 清单（M4 验收 O-1/O-3）：出现过任何带 runId 的记录、却没有 run.ended 的 Run。
