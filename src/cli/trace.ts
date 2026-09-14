@@ -14,7 +14,9 @@ import {
 } from "../application/format.ts";
 import { contentRecordLines, loadContentRecords } from "../application/history.ts";
 import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import type { ChildSettledRecord, SessionHeaderRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
+import type { ChildLink } from "../state/materialize.ts";
 import {
   buildSessionTrace,
   type SessionTrace,
@@ -76,6 +78,19 @@ function renderToolCall(call: TraceToolCall, lines: string[]): void {
       line += `；实测改后 ${receipt.contentAfterHash}${verdict}`;
     }
     lines.push(line);
+    // M5.5 S5（决策 048）：exec 证据——命令、退出码、输出哈希、文件变化
+    const exec = receipt.exec;
+    if (exec !== undefined) {
+      lines.push(
+        `      命令：${exec.command}${exec.alias !== undefined ? `（短名 ${exec.alias}）` : ""} ｜ ` +
+          `退出码 ${exec.exitCode ?? "无"}${exec.timedOut ? "（超时终止）" : ""} ｜ ` +
+          `输出 ${exec.outputBytes} 字节，哈希 ${exec.outputHash.slice(0, 12)}${exec.truncated ? "（落盘为截断输出）" : ""}`
+      );
+      lines.push(
+        `      文件变化：新增 ${exec.fileChanges.added.length} / 删除 ${exec.fileChanges.removed.length} / ` +
+          `修改 ${exec.fileChanges.modified.length}${exec.fileChanges.truncated ? "（文件过多，差异不完整）" : ""}`
+      );
+    }
   }
   if (call.resolution !== undefined) {
     const resolution = call.resolution;
@@ -106,6 +121,31 @@ function renderToolCall(call: TraceToolCall, lines: string[]): void {
 // 带正文渲染选项（M5 S2，决策 045）：runId → 该 Run 按消息序的正文行；缺省 = 纯治理视图
 export interface TraceRenderOptions {
   contentByRun?: ReadonlyMap<string, readonly string[]>;
+  // M5.5 S4（决策 040）：worker 父子投影——会话头（本会话是 worker）、派出的 worker 与孤立 settled
+  workers?: {
+    header?: SessionHeaderRecord;
+    children: readonly ChildLink[];
+    orphanSettleds: readonly ChildSettledRecord[];
+  };
+}
+
+// 派出的 worker 一行：已收尾给状态与结果并给进入命令；未收尾如实标注（进程中断可能），给 resume 入口
+function renderChildLine({ spawned, settled }: ChildLink): string {
+  const base = `  ${spawned.name}（${spawned.role}）｜ 会话 ${shortId(spawned.childSessionId)}`;
+  if (settled === undefined) {
+    return (
+      `${base} ｜ 未收尾：有 child.spawned 无 child.settled（进程中断可能；` +
+      `用 resume ${spawned.childSessionId} 进入该 worker 会话对账）`
+    );
+  }
+  let line = `${base} ｜ ${settled.status} ｜ ${settled.turns} 轮`;
+  if (settled.result !== undefined) {
+    line += ` ｜ 改动 ${settled.result.changedFiles.length} 个文件 ｜ Receipt ${settled.result.receiptIds.length} 条`;
+  }
+  if (settled.error !== undefined) {
+    line += ` ｜ 原因：${settled.error}`;
+  }
+  return `${line} ｜ 进入：trace ${spawned.childSessionId}`;
 }
 
 function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions = {}): void {
@@ -203,6 +243,23 @@ export function renderSessionTrace(trace: SessionTrace, options: TraceRenderOpti
       (unfinishedCount > 0 ? ` ｜ 崩溃残留 ${unfinishedCount} 个 Run` : ""),
     "",
   ];
+  const workers = options.workers;
+  if (workers?.header !== undefined) {
+    const header = workers.header;
+    lines.splice(
+      1,
+      0,
+      `worker 会话：${header.worker.name}（${header.worker.role}）｜ 分支 ${header.workspace.branch} ｜ ` +
+        `父会话 ${header.parentSessionId}（查看：trace ${header.parentSessionId}）`
+    );
+  }
+  if (workers !== undefined && workers.children.length > 0) {
+    lines.push(`派出的 worker（${workers.children.length}）：`);
+    for (const child of workers.children) {
+      lines.push(renderChildLine(child));
+    }
+    lines.push("");
+  }
   // 撕裂尾巴无 Run 归属（末条记录是 REPL 期 grant 事件，或 --run 过滤掉了拥有者）：会话级标注
   if (trace.tornTail && !trace.runs.some((run) => run.tornTail)) {
     lines.push(
@@ -217,7 +274,12 @@ export function renderSessionTrace(trace: SessionTrace, options: TraceRenderOpti
     renderRun(run, lines, options);
   }
   // 会话级异常项：孤儿记录如实报告（日志损坏或手写），不猜测挂接
-  if (trace.orphanReceipts.length > 0 || trace.orphanResolutions.length > 0) {
+  const orphanSettleds = options.workers?.orphanSettleds ?? [];
+  if (
+    trace.orphanReceipts.length > 0 ||
+    trace.orphanResolutions.length > 0 ||
+    orphanSettleds.length > 0
+  ) {
     lines.push("");
     lines.push("异常项：");
     for (const { receipt, runId } of trace.orphanReceipts) {
@@ -230,6 +292,11 @@ export function renderSessionTrace(trace: SessionTrace, options: TraceRenderOpti
       lines.push(
         `  孤儿 Resolution（Run ${shortId(resolution.runId)}，` +
           `executionId ${shortId(resolution.executionId)} 无对应 intent）`
+      );
+    }
+    for (const settled of orphanSettleds) {
+      lines.push(
+        `  孤立 child.settled：${settled.name}（会话 ${shortId(settled.childSessionId)}）无对应 child.spawned`
       );
     }
   }
@@ -277,10 +344,17 @@ export function runTraceCommand(options: TraceCommandOptions): string {
     );
   }
   const materialized = materializeSession(sessionsDir, sessionId);
-  const renderOptions: TraceRenderOptions =
-    options.withContent === true
+  const renderOptions: TraceRenderOptions = {
+    // M5.5 S4（决策 040）：从主会话可进入 worker 会话；worker 会话回指父会话
+    workers: {
+      ...(materialized.sessionHeader !== undefined ? { header: materialized.sessionHeader } : {}),
+      children: materialized.children,
+      orphanSettleds: materialized.orphanChildSettleds,
+    },
+    ...(options.withContent === true
       ? { contentByRun: contentByRunOf(options.root, sessionId, materialized.entries) }
-      : {};
+      : {}),
+  };
   if (options.runId === undefined) {
     return renderSessionTrace(buildSessionTrace(materialized), renderOptions);
   }

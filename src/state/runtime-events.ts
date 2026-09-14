@@ -97,10 +97,31 @@ export type ObservationKind = (typeof ObservationKind)[keyof typeof ObservationK
 
 // run.started（044）：InjectionSnapshot v3 的摘要——全文不进治理日志（system prompt 全文在
 // 内容文件的 system 记录里，靠 systemPromptHash 回指）
+// M5.5 S5（决策 050）：推理档位——与上游 pi-agent-core ThinkingLevel 同一组字面量；off = 不请求推理。
+// 是成本旋钮不是权限：Run 开始定、Run 内不变（§2 规则 4 快照冻结）
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+// 字面量逐个列出：typebox 需要元组才能推出联合类型（map 生成的数组会把静态类型推成 never）
+export const ThinkingLevelSchema = Type.Union([
+  Type.Literal("off"),
+  Type.Literal("minimal"),
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("xhigh"),
+  Type.Literal("max"),
+]);
+export type ThinkingLevel = Static<typeof ThinkingLevelSchema>;
+
+export function isThinkingLevel(value: string): value is ThinkingLevel {
+  return (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
 export const RunStartedPayloadSchema = Type.Object({
   model: Type.Object({
     provider: Type.String({ minLength: 1 }),
     id: Type.String({ minLength: 1 }),
+    // M5.5 S5（决策 050）：本 Run 的推理档位（冻结快照值；M5 记录无此字段）
+    thinkingLevel: Type.Optional(ThinkingLevelSchema),
   }),
   policy: Type.Object({
     allow: Type.Array(Type.String()),

@@ -12,6 +12,8 @@ import {
 } from "./classification.ts";
 import type {
   BreakerRecord,
+  ChildSettledRecord,
+  ChildSpawnedRecord,
   DecisionRecord,
   EntryRecord,
   EventRecord,
@@ -24,6 +26,7 @@ import type {
   ResolutionRecord,
   RunStartedRecord,
   RuntimeEventRecord,
+  SessionHeaderRecord,
   SkillLoadedRecord,
 } from "./event-log.ts";
 import type { ExecutionId, RunId, SessionId } from "./ids.ts";
@@ -66,6 +69,10 @@ export interface ActiveGrant {
   grantId: GrantCreatedRecord["grantId"];
   tool: string;
   pathPrefix?: string;
+  // M5.5 S5（决策 048）：exec 档精确命令串
+  command?: string;
+  // 048 修订：经 shell 已由人确认
+  shell?: boolean;
   createdAt: number;
   firstCall: GrantCreatedRecord["firstCall"];
 }
@@ -104,12 +111,25 @@ export interface MaterializedSession {
   runStarteds: RunStartedRecord[];
   llmRequests: LlmRequestRecord[];
   skillLoadeds: SkillLoadedRecord[];
+  // M5.5 S2（决策 040）：worker 编排三族。sessionHeader 在场 = 本会话是 worker 会话；
+  // children 按 child.spawned 顺序配对 child.settled（缺 settled = 派出后未收尾，崩溃可能）；
+  // 找不到 spawned 的 settled 如实归孤立清单
+  sessionHeader?: SessionHeaderRecord;
+  childSpawneds: ChildSpawnedRecord[];
+  childSettleds: ChildSettledRecord[];
+  children: ChildLink[];
+  orphanChildSettleds: ChildSettledRecord[];
   // 正文缺口（M5 S1，决策 037，按 012 / 021 口径）：entry 带 contentHash 而内容文件无对应记录
   // 或重算哈希不符。未加载内容文件（会话列表冷路径）时恒为空——不知道就不报
   contentGaps: ContentGap[];
   reconcile: ReconcileReport;
   // 失败四分类（M4 S2，D7）：从本 session 事件现算（派生不落库；判据纯函数在 classification.ts）
   classification: SessionClassification;
+}
+
+export interface ChildLink {
+  spawned: ChildSpawnedRecord;
+  settled?: ChildSettledRecord;
 }
 
 export interface ContentGap {
@@ -171,8 +191,18 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const grantRevokeds: GrantRevokedRecord[] = [];
   const grantPromoteds: GrantPromotedRecord[] = [];
   const grantConfigRemoveds: GrantConfigRemovedRecord[] = [];
+  let sessionHeader: SessionHeaderRecord | undefined;
+  const childSpawneds: ChildSpawnedRecord[] = [];
+  const childSettleds: ChildSettledRecord[] = [];
   for (const record of records) {
-    if (record.kind === "intent") {
+    if (record.kind === "session.header") {
+      // 会话头只认首个（worker 会话只写一次）
+      sessionHeader ??= record;
+    } else if (record.kind === "child.spawned") {
+      childSpawneds.push(record);
+    } else if (record.kind === "child.settled") {
+      childSettleds.push(record);
+    } else if (record.kind === "intent") {
       intents.push(record);
     } else if (record.kind === "decision") {
       decisions.push(record);
@@ -203,7 +233,13 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     }
   }
   const reconcile = reconcileRecords(intents, decisions, receipts, resolutions);
+  const { children, orphanChildSettleds } = pairChildren(childSpawneds, childSettleds);
   return {
+    ...(sessionHeader !== undefined ? { sessionHeader } : {}),
+    childSpawneds,
+    childSettleds,
+    children,
+    orphanChildSettleds,
     sessionId,
     path,
     records,
@@ -228,6 +264,27 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     contentGaps: detectContentGaps(entries, input.contentHashes),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
+  };
+}
+
+// worker 父子配对（M5.5 S2）：按 childSessionId 配对，保持 spawned 顺序；纯函数
+export function pairChildren(
+  spawneds: readonly ChildSpawnedRecord[],
+  settleds: readonly ChildSettledRecord[]
+): { children: ChildLink[]; orphanChildSettleds: ChildSettledRecord[] } {
+  const settledById = new Map<string, ChildSettledRecord>();
+  for (const settled of settleds) {
+    if (!settledById.has(settled.childSessionId)) {
+      settledById.set(settled.childSessionId, settled);
+    }
+  }
+  const spawnedIds = new Set(spawneds.map((spawned) => spawned.childSessionId));
+  return {
+    children: spawneds.map((spawned) => {
+      const settled = settledById.get(spawned.childSessionId);
+      return settled !== undefined ? { spawned, settled } : { spawned };
+    }),
+    orphanChildSettleds: settleds.filter((settled) => !spawnedIds.has(settled.childSessionId)),
   };
 }
 
@@ -354,6 +411,8 @@ function activeGrants(
       grantId: record.grantId,
       tool: record.tool,
       ...(record.pathPrefix !== undefined ? { pathPrefix: record.pathPrefix } : {}),
+      ...(record.command !== undefined ? { command: record.command } : {}),
+      ...(record.shell === true ? { shell: true } : {}),
       createdAt: record.createdAt,
       firstCall: record.firstCall,
     }))

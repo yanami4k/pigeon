@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import {
   JsonlEventLog,
   materializeSession,
@@ -73,7 +74,9 @@ test("三角色加 thinking 落盘：内容记录与 entry 逐条对齐、哈希
           { text: "改完了" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog,
@@ -133,6 +136,7 @@ test("turn.completed 携带 usage：每轮的 token 与成本随归一化事件�
       streamFn: createFakeStreamFn({ replies: [{ text: "你好" }] }),
       sessionId,
       eventLog,
+      governance: createToolGovernance(),
     });
     await adapter.run("hi");
     await adapter.dispose();
@@ -171,6 +175,7 @@ test("thinking 持久化开关关闭：内容文件只留 thinking 的字节数�
       streamFn: createFakeStreamFn({ replies: [{ thinking: "秘密推理", text: "结论" }] }),
       sessionId,
       eventLog,
+      governance: createToolGovernance(),
     });
     await adapter.run("问");
     await adapter.dispose();

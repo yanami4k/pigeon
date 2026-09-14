@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -98,17 +99,19 @@ async function scriptSession(root: string): Promise<{ sessionId: SessionId; runI
         { text: "完成" },
       ],
     }),
-    registry: makeRegistry(),
+    governance: createToolGovernance({
+      registry: makeRegistry(),
+      approvalHandler: async ({ toolName }) => {
+        if (toolName === "edit_file") {
+          editApprovals += 1;
+          return editApprovals === 1
+            ? { approved: true }
+            : { approved: false, reason: "先别动这个文件" };
+        }
+        return { approved: true };
+      },
+    }),
     tools: [createReadFileTool(root), createEditFileTool(root)],
-    approvalHandler: async ({ toolName }) => {
-      if (toolName === "edit_file") {
-        editApprovals += 1;
-        return editApprovals === 1
-          ? { approved: true }
-          : { approved: false, reason: "先别动这个文件" };
-      }
-      return { approved: true };
-    },
     sessionId,
     eventLog,
   });
@@ -167,9 +170,11 @@ test("trace 报告：大参数截断，超长内容不完整外泄", async () =>
           { text: "好" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: true }),
+      }),
       tools: [createReadFileTool(root), createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: true }),
       sessionId,
       eventLog,
     });
@@ -258,9 +263,11 @@ test("trace 命令：会话不存在时报错并列出已有会话；--run 过�
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot(),
       streamFn: createFakeStreamFn({ replies: [{ text: "嗯" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: true }),
+      }),
       tools: [createReadFileTool(root), createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: true }),
       sessionId,
       eventLog,
     });

@@ -7,11 +7,13 @@ import {
   SkillManifestEntrySchema,
 } from "../state/injection-manifest.ts";
 import type { Migration } from "../state/migration.ts";
+import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
 // v2：ToolPolicy 增加 approvalMode（M3 决策 4，yolo = 人事先批发授权）
 // v3（M5 S3，决策 042 / 043）：memory 与 skills 由占位数组收紧为结构化冻结清单
-export const INJECTION_SNAPSHOT_VERSION = 3;
+// v4（M5.5 S5，决策 050）：model 段增加推理档位 thinkingLevel（缺省 = off，不请求推理）
+export const INJECTION_SNAPSHOT_VERSION = 4;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -30,6 +32,8 @@ export const InjectionSnapshotSchema = Type.Object({
   model: Type.Object({
     provider: Type.String({ minLength: 1 }),
     id: Type.String({ minLength: 1 }),
+    // 推理档位（决策 050）：两级来源——启动参数全局值，worker 角色配置覆盖；缺省 off
+    thinkingLevel: Type.Optional(ThinkingLevelSchema),
   }),
   tools: Type.Object({
     policy: ToolPolicySchema,
@@ -71,3 +75,6 @@ export const migrateInjectionSnapshotV1toV2: Migration = (doc) => {
 // v2 → v3：memory / skills 由 Type.Unknown 占位数组收紧为结构化清单，版本推进不改内容——
 // 旧快照的空数组照过；非空的非结构化占位在目标 schema 校验时被拒绝（不猜着把它们转成清单）
 export const migrateInjectionSnapshotV2toV3: Migration = (doc) => ({ ...doc, version: 3 });
+
+// v3 → v4：thinkingLevel 可缺省（缺省 = off），纯版本推进
+export const migrateInjectionSnapshotV3toV4: Migration = (doc) => ({ ...doc, version: 4 });

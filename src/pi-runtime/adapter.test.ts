@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
+import { createToolGovernance } from "../application/governance.ts";
 import { EventEnvelopeSchema } from "../state/events.ts";
 import type { TurnCompletedPayload } from "../state/runtime-events.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
@@ -36,7 +37,11 @@ function waitForEvent(adapter: PiRuntimeAdapter, kind: string): Promise<void> {
 
 test("正常完成：事件序列完整、终态 completed、快照冻结且内容正确", async () => {
   const streamFn = createFakeStreamFn({ replies: [{ text: "你好！有什么可以帮你？" }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
 
   const result = await adapter.run("你好");
 
@@ -80,7 +85,11 @@ test("流式中途 abort：终态 aborted，事件序列完整收尾", async () 
   const streamFn = createFakeStreamFn({
     replies: [{ text: "这是一段足够长的流式回复。", chunkSize: 2, chunkGate: gate }],
   });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   const turnStarted = waitForEvent(adapter, "turn.started");
 
   const runPromise = adapter.run("你好");
@@ -112,7 +121,11 @@ test("模型报错：终态 failed，errorMessage 被记录，合成消息被识
     failOnCall: 1,
     failureMessage: "模拟上游 500",
   });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
 
   const result = await adapter.run("你好");
 
@@ -138,11 +151,19 @@ test("快照可重建：同一 InjectionSnapshot 跑两次 Run，事件序列等
   const snapshot = createSnapshot();
 
   const streamFn1 = createFakeStreamFn({ replies: [{ text: "固定回复" }] });
-  const adapter1 = new PiRuntimeAdapter({ snapshot, streamFn: streamFn1 });
+  const adapter1 = new PiRuntimeAdapter({
+    snapshot,
+    streamFn: streamFn1,
+    governance: createToolGovernance(),
+  });
   const result1 = await adapter1.run("你好");
 
   const streamFn2 = createFakeStreamFn({ replies: [{ text: "固定回复" }] });
-  const adapter2 = new PiRuntimeAdapter({ snapshot, streamFn: streamFn2 });
+  const adapter2 = new PiRuntimeAdapter({
+    snapshot,
+    streamFn: streamFn2,
+    governance: createToolGovernance(),
+  });
   const result2 = await adapter2.run("你好");
 
   assert.equal(result1.status, "completed");
@@ -169,7 +190,11 @@ test("快照可重建：同一 InjectionSnapshot 跑两次 Run，事件序列等
 
 test("listener 韧性：抛异常的 listener 被吞掉并记录，Run 不受影响", async () => {
   const streamFn = createFakeStreamFn({ replies: [{ text: "正常回复" }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   const seen: string[] = [];
   adapter.subscribe((event) => {
     seen.push(event.kind);
@@ -203,7 +228,11 @@ test("listener 韧性：抛异常的 listener 被吞掉并记录，Run 不受影
 
 test("dispose 空跑与幂等：从未 Run 直接释放不抛不悬挂，释放后拒绝 Run，重复释放无副作用", async () => {
   const streamFn = createFakeStreamFn({ replies: [{ text: "不会用到" }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
 
   // 从未 run 过的 adapter 直接 dispose：正常 await 返回即证明不抛异常、不悬挂
   await adapter.dispose();
@@ -216,7 +245,11 @@ test("dispose 空跑与幂等：从未 Run 直接释放不抛不悬挂，释放�
 
 test("transcript 隔离：观察拷贝的嵌套修改不污染 Agent 状态与后续 Run", async () => {
   const streamFn = createFakeStreamFn({ replies: [{ text: "原始回复" }, { text: "第二次回复" }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   await adapter.run("你好");
 
   // 在观察拷贝上就地篡改嵌套的 text 内容
@@ -266,7 +299,11 @@ test("transcript 隔离：观察拷贝的嵌套修改不污染 Agent 状态与�
 
 test("事件冻结：listener 篡改事件被 TypeError 拦截，事件日志保持完整", async () => {
   const streamFn = createFakeStreamFn({ replies: [{ text: "正常回复" }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   adapter.subscribe((event) => {
     // 冻结对象上的写入在严格模式下抛 TypeError，被自包 try/catch 吞进 listenerErrors
     (event.payload as Record<string, unknown>).tampered = true;
@@ -302,6 +339,7 @@ test("模型身份守卫：options.model 携带 provider/id 直接抛错", () =>
         streamFn,
         // @ts-expect-error 类型门：provider 属于快照身份，options.model 不允许携带
         model: { provider: "evil-provider" },
+        governance: createToolGovernance(),
       }),
     /模型身份/
   );
@@ -312,6 +350,7 @@ test("模型身份守卫：options.model 携带 provider/id 直接抛错", () =>
         streamFn,
         // @ts-expect-error 类型门：id 属于快照身份，options.model 不允许携带
         model: { id: "evil-model" },
+        governance: createToolGovernance(),
       }),
     /模型身份/
   );
@@ -324,6 +363,7 @@ test("模型元数据合并：仅补 api/baseUrl 时 Agent 实际模型的身份
     snapshot,
     streamFn,
     model: { api: "anthropic-messages", baseUrl: "https://example.invalid" },
+    governance: createToolGovernance(),
   });
 
   const result = await adapter.run("你好");

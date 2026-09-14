@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createToolGovernance } from "../application/governance.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { PiRuntimeAdapter, type RunResult, type StreamTextDelta } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn, createGate } from "../pi-runtime/fixtures.ts";
@@ -306,7 +307,7 @@ test("集成：真实 Adapter 取消链路不悬挂——Esc 触发 interrupt，
   const streamFn = createFakeStreamFn({
     replies: [{ text: "这是一段足够长的流式回复，门闩停在中途。", chunkSize: 2, chunkGate: gate }],
   });
-  const adapter = new PiRuntimeAdapter({ snapshot, streamFn });
+  const adapter = new PiRuntimeAdapter({ snapshot, streamFn, governance: createToolGovernance() });
   // run.ended 真实信号：订阅等待，不猜时间
   const runEnded = Promise.withResolvers<void>();
   const unsubscribe = adapter.subscribe((event) => {

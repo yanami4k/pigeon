@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
 import { PiRuntimeAdapter, type RunResult, type StreamTextDelta } from "../pi-runtime/adapter.ts";
@@ -319,11 +320,13 @@ test("集成：真实 adapter 审批闸挂起等按键——[y] 批准后写副�
         { text: "完成" },
       ],
     }),
-    registry,
+    governance: createToolGovernance({
+      registry,
+      approvalHandler: createTuiApprovalHandler(store, () => faceHolder.current),
+      sessionGrants: store,
+      workspaceRoot: root,
+    }),
     tools: [createReadFileTool(root), createEditFileTool(root)],
-    approvalHandler: createTuiApprovalHandler(store, () => faceHolder.current),
-    sessionGrants: store,
-    workspaceRoot: root,
   });
   const shell = new PigeonTuiShell({
     terminal: term,

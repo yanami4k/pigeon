@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -82,7 +83,9 @@ test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下�
           { text: "被拦住了" },
         ],
       }),
-      registry,
+      governance: createToolGovernance({
+        registry,
+      }),
       tools: [
         createEditFileTool(root),
         createLoadSkillTool({

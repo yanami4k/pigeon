@@ -79,22 +79,18 @@ test("偏好超出预算照样全文注入；此时 Memory 全部只列文件名
   }
 });
 
-test("配置顺序优先，未列出的按文件名字典序排在其后；非 .md 文件与子目录不进 Memory", () => {
+test("装载顺序按文件名字典序（决策 050 口径，与写入顺序无关）；非 .md 文件与子目录不进 Memory", () => {
   const { root, home, cleanup } = makeDirs();
   try {
+    writeMemory(root, "c.md", "丙");
     writeMemory(root, "a.md", "甲");
     writeMemory(root, "b.md", "乙");
-    writeMemory(root, "c.md", "丙");
     writeMemory(root, "notes.txt", "不算");
     mkdirSync(join(root, ".pigeon", "memory", "sub.md"));
-    const memory = loadResidentMemory({
-      workspaceRoot: root,
-      homeDir: home,
-      order: ["c.md", "a.md"],
-    });
+    const memory = loadResidentMemory({ workspaceRoot: root, homeDir: home });
     assert.deepEqual(
       memory.manifest.map((entry) => entry.path),
-      [".pigeon/memory/c.md", ".pigeon/memory/a.md", ".pigeon/memory/b.md"]
+      [".pigeon/memory/a.md", ".pigeon/memory/b.md", ".pigeon/memory/c.md"]
     );
     assert.equal(DEFAULT_MEMORY_BUDGET_CHARS, 8000);
   } finally {

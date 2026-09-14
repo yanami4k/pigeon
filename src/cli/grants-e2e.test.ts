@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
@@ -94,14 +95,16 @@ function makeAdapter(
       createdAt: 1700000000000,
     },
     streamFn: createFakeStreamFn({ replies: replies as never }),
-    registry: makeRegistry(),
+    governance: createToolGovernance({
+      registry: makeRegistry(),
+      approvalHandler: createCliApprovalHandler(ask, write, { grants: store }),
+      sessionGrants: store,
+      configGrants: configRules,
+      workspaceRoot: root,
+    }),
     tools: [createReadFileTool(root), createEditFileTool(root)],
-    approvalHandler: createCliApprovalHandler(ask, write, { grants: store }),
     sessionId,
     eventLog,
-    sessionGrants: store,
-    configGrants: configRules,
-    workspaceRoot: root,
   });
   return { adapter, ask, close };
 }

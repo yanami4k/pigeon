@@ -4,6 +4,8 @@
 // SessionGrantStore 创建会话 grant（store.create fail-closed：grant.created 事件写盘
 // 失败则 grant 不生效，异常上抛由审批闸转阻断）；[d] 仅限 args.path 可定位目录的调用
 //（决策 3a；无 path 时提示不提供该键，仍按下则与 cli 版同语义退化为工具级，同 [a]）。
+// M5.5 S5（决策 048 及其修订）：exec 档原样显示将执行的命令串，需 shell 时标明；[a] 收窄为这条一模一样的命令串
+// （需 shell 的带 shell 标记），不提供 [d]。
 //
 // 面板交互语义（决策 029）：
 // - ApprovalHandler 是异步函数（M2 开工 5a 第 2 件）：面板把 Promise 挂起，
@@ -15,14 +17,21 @@
 //   （APPROVAL_CANCEL_BUSY）。
 // - [n] 无拒绝理由输入通道（四键单按即决议）：reason 缺省，由 Adapter 落默认文案
 //   「人工拒绝」。
-import { dirname } from "node:path";
-import { approvalVerdict } from "../application/format.ts";
+import {
+  approvalSourceLine,
+  approvalVerdict,
+  workerGrantScopeNote,
+} from "../application/format.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import {
   type ApprovalDecision,
   type ApprovalHandler,
   type ApprovalRequest,
+  commandScopeNote,
+  execCommandLine,
+  execGrantKeyLabel,
   extractPathArg,
+  grantScopeFor,
 } from "../approvals/handler.ts";
 
 // 取消路径的逐字理由（fail-closed 按拒绝处理）
@@ -43,18 +52,31 @@ export interface TuiApprovalFace {
   noteApproval(line: string): void;
 }
 
-// 审批块文本：与 cli 版同口径（工具名 + pretty JSON 参数 + diff 预览 + 四键提示）；
-// [d] 仅在调用可定位目录时提供（决策 3a）
+// 审批块文本：与 cli 版同口径（工具名 + exec 命令行 + pretty JSON 参数 + diff 预览 + 四键提示）；
+// [d] 仅在调用可定位目录时提供（决策 3a）；exec 档 [a] 为精确命令放权（决策 048 及其修订）
 export function approvalBlockText(request: ApprovalRequest): string {
-  const lines = ["—— 人工审批 ——", `工具：${request.toolName}`, "参数："];
+  const lines = ["—— 人工审批 ——"];
+  // M5.5 S3（决策 040）：worker 请求标明来源
+  const source = approvalSourceLine(request);
+  if (source !== undefined) {
+    lines.push(source);
+  }
+  lines.push(`工具：${request.toolName}`);
+  const commandLine = execCommandLine(request);
+  if (commandLine !== undefined) {
+    lines.push(commandLine);
+  }
+  lines.push("参数：");
   lines.push(JSON.stringify(request.args, null, 2) ?? "undefined");
   if (request.diffPreview !== undefined) {
     lines.push("改动预览：", request.diffPreview);
   }
   lines.push(
-    extractPathArg(request.args) !== undefined
-      ? "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
-      : "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许"
+    request.tier === "exec"
+      ? `批准执行？[y] 批准一次 / [n] 拒绝 / ${execGrantKeyLabel(request)}`
+      : extractPathArg(request.args) !== undefined
+        ? "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
+        : "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许"
   );
   return lines.join("\n");
 }
@@ -84,17 +106,26 @@ export function createTuiApprovalHandler(
       return { approved: false, reason: result.reason };
     }
     if (result.key === "a" || result.key === "d") {
-      const pathArg = extractPathArg(request.args);
+      // 与 cli 版同一份放权作用域（approvals/handler.ts grantScopeFor）
+      const scope = grantScopeFor(request, result.key);
+      if (scope === null) {
+        panel.noteApproval(verdictLine("approved", "human"));
+        panel.noteApproval("定位不到命令串，未创建放权（按批准一次处理）");
+        return { approved: true };
+      }
+      // M5.5 S3（决策 040）：放权落点跟随请求来源——worker 请求自带其会话存储
+      const target = request.grants ?? grants;
       // 与 cli 版同一份放权语义：grant.created 事件先于运行态（store.create fail-closed）
-      const grant = grants.create({
+      const grant = target.create({
         tool: request.toolName,
-        // [d]：仅限当前调用所在目录；无 path 时该键本不提供，按下退化为工具级（同 [a]）
-        ...(result.key === "d" && pathArg !== undefined ? { pathPrefix: dirname(pathArg) } : {}),
+        ...scope,
         firstCall: { toolCallId: request.toolCallId, args: request.args },
         ...(request.runId !== undefined ? { runId: request.runId } : {}),
       });
       panel.noteApproval(verdictLine("approved", "human:grant"));
-      panel.noteApproval(`已创建会话放权 ${grant.grantId}（${grant.tool}）`);
+      panel.noteApproval(
+        `已创建会话放权 ${grant.grantId}（${grant.tool}${commandScopeNote(scope)}）${workerGrantScopeNote(request)}`
+      );
       return { approved: true };
     }
     if (result.key === "y") {

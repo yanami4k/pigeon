@@ -9,12 +9,22 @@ export {
   type StreamTextDelta,
 } from "./adapter.ts";
 export { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
+export type {
+  EventLogSink,
+  GovernanceHost,
+  GovernanceRunOutcome,
+  GovernanceVerdict,
+  ToolCallProposal,
+  ToolGovernance,
+  ToolGovernanceFactory,
+} from "./governance.ts";
 export {
   INJECTION_SNAPSHOT_VERSION,
   type InjectionSnapshot,
   InjectionSnapshotSchema,
   migrateInjectionSnapshotV1toV2,
   migrateInjectionSnapshotV2toV3,
+  migrateInjectionSnapshotV3toV4,
   type ToolPolicy,
   ToolPolicySchema,
 } from "./snapshot.ts";

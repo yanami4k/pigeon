@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createToolGovernance } from "../application/governance.ts";
 import { PiRuntimeAdapter, type RunResult, type StreamTextDelta } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "../pi-runtime/snapshot.ts";
@@ -360,6 +361,7 @@ test("集成：真实 PiRuntimeAdapter + fake streamFn 全链路——提交、�
   const adapter = new PiRuntimeAdapter({
     snapshot,
     streamFn: createFakeStreamFn({ replies: [{ text: reply, chunkSize: 3 }] }),
+    governance: createToolGovernance(),
   });
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-test-"));
   const term = new MockTerminal(70, 24);

@@ -19,8 +19,11 @@ import type { SkillCatalog } from "./catalog.ts";
 export const LOAD_SKILL_TOOL = "load_skill";
 export const DEFAULT_SKILL_FILE_LIMIT_BYTES = 64 * 1024;
 
-// 域错误（模型给错名字或路径、Skill 已变更）
-export class LoadSkillError extends Error {}
+// 域错误（模型给错名字或路径、Skill 已变更）。M5.5 S5（决策 050）：带归类标记，
+// tools/error-kind.ts 读标记归 domain（tools 不反向 import 本层）
+export class LoadSkillError extends Error {
+  readonly pigeonToolErrorKind = "domain";
+}
 
 export const LoadSkillParamsSchema = Type.Object({
   name: Type.String({ minLength: 1 }),

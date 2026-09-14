@@ -226,7 +226,7 @@ test("会话列表不把内容文件当会话；会话列表冷路径可跳过�
 
 test("v5 事件文件读路径迁移到 v6：无 contentHash 的 entry 合法（M5 前会话），不派生正文缺口", () => {
   withDir((dir) => {
-    assert.equal(EVENT_LOG_VERSION, 6);
+    assert.equal(EVENT_LOG_VERSION, 7);
     const sessionId = newSessionId();
     const runId = newRunId();
     const v5Entry = {
@@ -251,7 +251,7 @@ test("v5 事件文件读路径迁移到 v6：无 contentHash 的 entry 合法（
       `${JSON.stringify(v5Entry)}\n${JSON.stringify(v5Completed)}\n`
     );
     const records = readEventLogFile(join(dir, `${sessionId}.jsonl`));
-    assert.ok(records.every((record) => record.version === 6));
+    assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
     const materialized = materializeSession(dir, sessionId);
     assert.equal(materialized.entries[0]?.contentHash, undefined);
     assert.deepEqual(materialized.contentGaps, []);

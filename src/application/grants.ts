@@ -8,6 +8,7 @@
 // M4 收口决策 ①：配置面动作在 Event Log 留痕——升格落 grant.promoted（扩权先留证后写配置，
 // 同 grant.created 的 fail-closed 顺序：留证失败则不扩权），移除落 grant.config-removed
 // （缩权先生效后留证：留证失败只少一条痕迹；反过来会让审计者误以为规则已不生效）。
+// M5.5 S5（决策 048）：exec 档的精确命令放权同一套流程——升格与移除都携带 command。
 // IO 全依赖注入：write 是内联结构类型（一行文本回调），命令层不 import 任何 Actor。
 
 import { GrantNotFoundError, type SessionGrantStore } from "../approvals/grant-store.ts";
@@ -30,7 +31,7 @@ export interface GrantConfigEventSink {
 }
 
 export interface GrantsCommandContext {
-  // 工作区根（.pigeon/grants.json 所在；目录限定解析根）
+  // 治理根（.pigeon/grants.json 所在；目录限定解析根）
   root: string;
   // 会话 grant 运行态（含命中计数）
   store: SessionGrantStore;
@@ -49,8 +50,24 @@ function formatTime(ms: number): string {
 }
 
 // 作用域措辞（唯一约定：/grants 与 trace 共用口径）
-function scopeWording(pathPrefix: string | undefined): string {
+function scopeWording(pathPrefix: string | undefined, command?: string, shell?: boolean): string {
+  if (command !== undefined) {
+    return `仅限命令 ${command}${shell === true ? "（经 shell）" : ""}`;
+  }
   return pathPrefix === undefined ? "工具级（不限目录）" : `仅限目录 ${pathPrefix}`;
+}
+
+// 放权作用域字段的原样携带（升格与移除留痕共用）
+function scopeFields(scope: { pathPrefix?: string; command?: string; shell?: boolean }): {
+  pathPrefix?: string;
+  command?: string;
+  shell?: boolean;
+} {
+  return {
+    ...(scope.pathPrefix !== undefined ? { pathPrefix: scope.pathPrefix } : {}),
+    ...(scope.command !== undefined ? { command: scope.command } : {}),
+    ...(scope.shell === true ? { shell: true } : {}),
+  };
 }
 
 // 解析并执行一条斜杠命令（tokens = 去掉 "/" 后的空白分词）。
@@ -87,7 +104,7 @@ function listGrants(ctx: GrantsCommandContext): void {
   lines.push(`会话放权（${sessionGrants.length}）：`);
   for (const grant of sessionGrants) {
     lines.push(
-      `  ${grant.grantId} ｜ ${grant.tool} ｜ ${scopeWording(grant.pathPrefix)} ｜ ` +
+      `  ${grant.grantId} ｜ ${grant.tool} ｜ ${scopeWording(grant.pathPrefix, grant.command, grant.shell)} ｜ ` +
         `创建 ${formatTime(grant.createdAt)} ｜ 命中 ${grant.hitCount} 次 ｜ ` +
         `首调 ${grant.firstCall.toolCallId}（${summarizeArgs(grant.firstCall.args)}）`
     );
@@ -95,7 +112,7 @@ function listGrants(ctx: GrantsCommandContext): void {
   lines.push(`固化规则（${ctx.configRules.length}，来自 .pigeon/grants.json）：`);
   for (const [index, rule] of ctx.configRules.entries()) {
     lines.push(
-      `  config#${index} ｜ ${rule.tool} ｜ ${scopeWording(rule.pathPrefix)} ｜ ` +
+      `  config#${index} ｜ ${rule.tool} ｜ ${scopeWording(rule.pathPrefix, rule.command, rule.shell)} ｜ ` +
         `升格 ${formatTime(rule.promotedFrom.promotedAt)} ｜ ` +
         `出处 会话 ${shortId(rule.promotedFrom.sessionId)} / grant ${shortId(rule.promotedFrom.grantId)} ｜ ` +
         `首调 ${rule.promotedFrom.firstCall.toolCallId}`
@@ -133,12 +150,12 @@ function promoteGrant(ctx: GrantsCommandContext, id: string): void {
   ctx.eventLog?.appendGrantPromoted({
     grantId: grant.grantId,
     tool: grant.tool,
-    ...(grant.pathPrefix !== undefined ? { pathPrefix: grant.pathPrefix } : {}),
+    ...scopeFields(grant),
     promotedAt,
   });
   appendGrantConfigRule(ctx.root, {
     tool: grant.tool,
-    ...(grant.pathPrefix !== undefined ? { pathPrefix: grant.pathPrefix } : {}),
+    ...scopeFields(grant),
     promotedFrom: {
       grantId: grant.grantId,
       sessionId: ctx.sessionId,
@@ -167,7 +184,7 @@ function revokeGrant(ctx: GrantsCommandContext, id: string): void {
     ctx.eventLog?.appendGrantConfigRemoved({
       grantId: removed.promotedFrom.grantId,
       tool: removed.tool,
-      ...(removed.pathPrefix !== undefined ? { pathPrefix: removed.pathPrefix } : {}),
+      ...scopeFields(removed),
       index,
       removedAt: Date.now(),
     });

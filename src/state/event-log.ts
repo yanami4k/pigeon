@@ -11,6 +11,7 @@ import {
   EntryIdSchema,
   ExecutionIdSchema,
   GrantIdSchema,
+  ReceiptIdSchema,
   type RunId,
   RunIdSchema,
   SessionIdSchema,
@@ -40,8 +41,9 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v5（M4 收口决策 ①）：新增 grant.promoted / grant.config-removed 族（固化规则升格/移除留痕）；
 // v6（M5，决策 037 / 043 / 044 一次升）：entry 增 contentHash（旁置内容文件回指）、
 // turn.completed 增 usage、新增 run.started / llm.request / skill.loaded 观察族——
-// 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）
-export const EVENT_LOG_VERSION = 6;
+// 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）；
+// v7（M5.5 S2，决策 040）：新增 session.header / child.spawned / child.settled 三族（worker 编排）
+export const EVENT_LOG_VERSION = 7;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -275,6 +277,9 @@ export const GrantCreatedRecordSchema = Type.Object({
   tool: Type.String({ minLength: 1 }),
   // 决策 3a 目录限定：工作区相对目录（如 src）；缺省 = 工具级（不限路径）
   pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  // M5.5 S5（决策 048）：exec 档精确命令串——只放行这条一模一样的命令（加法式字段）
+  command: Type.Optional(Type.String({ minLength: 1 })),
+  shell: Type.Optional(Type.Boolean()),
   createdAt: Type.Integer({ minimum: 0 }),
   firstCall: Type.Object({
     toolCallId: Type.String({ minLength: 1 }),
@@ -302,6 +307,8 @@ export const GrantPromotedRecordSchema = Type.Object({
   grantId: GrantIdSchema,
   tool: Type.String({ minLength: 1 }),
   pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  command: Type.Optional(Type.String({ minLength: 1 })),
+  shell: Type.Optional(Type.Boolean()),
   promotedAt: Type.Integer({ minimum: 0 }),
 });
 export type GrantPromotedRecord = Static<typeof GrantPromotedRecordSchema>;
@@ -316,10 +323,111 @@ export const GrantConfigRemovedRecordSchema = Type.Object({
   grantId: GrantIdSchema,
   tool: Type.String({ minLength: 1 }),
   pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  command: Type.Optional(Type.String({ minLength: 1 })),
+  shell: Type.Optional(Type.Boolean()),
   index: Type.Integer({ minimum: 0 }),
   removedAt: Type.Integer({ minimum: 0 }),
 });
 export type GrantConfigRemovedRecord = Static<typeof GrantConfigRemovedRecordSchema>;
+
+// M5.5 S2（决策 040）：worker 编排三族。worker 会话首条记 session.header（父会话、父 Run、角色、
+// 工作树）；父会话记 child.spawned（派出意图，先于建工作树落盘）与 child.settled（结构化结果）。
+// 任何文件只有一个写入者：父会话文件只由父运行面写，worker 会话文件只由该 worker 写。
+// 三族均治理族耐久（fsync），无 executionId 幂等键；信封同 grant 族（runId 可选——人以 /spawn
+// 派出时父会话无活动 Run）
+export const WorkerRoleSchema = Type.Union([
+  Type.Literal("reviewer"),
+  Type.Literal("explorer"),
+  Type.Literal("implementer"),
+  Type.Literal("tester"),
+]);
+export type WorkerRole = Static<typeof WorkerRoleSchema>;
+
+// 隔离工作区：第一版只有 git 工作树（M5.7 泛化隔离单位时加成员）
+export const WorkerWorkspaceSchema = Type.Object({
+  kind: Type.Literal("git-worktree"),
+  path: Type.String({ minLength: 1 }),
+  branch: Type.String({ minLength: 1 }),
+});
+export type WorkerWorkspace = Static<typeof WorkerWorkspaceSchema>;
+
+// 委派策略摘要：与 InjectionSnapshot.tools.policy 同形（state 是叶子层，不引 tools 的 schema）
+export const DelegatedPolicySchema = Type.Object({
+  allow: Type.Array(Type.String({ minLength: 1 })),
+  deny: Type.Array(Type.String({ minLength: 1 })),
+  approvalMode: Type.Union([Type.Literal("prompt"), Type.Literal("yolo")]),
+});
+export type DelegatedPolicy = Static<typeof DelegatedPolicySchema>;
+
+// 第一版只有轮次与墙钟两个上限（token 预算后置）
+export const WorkerLimitsSchema = Type.Object({
+  maxTurns: Type.Integer({ minimum: 1 }),
+  wallClockMs: Type.Integer({ minimum: 1 }),
+});
+export type WorkerLimits = Static<typeof WorkerLimitsSchema>;
+
+export const ChildSettledStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("failed"),
+  Type.Literal("aborted"),
+  Type.Literal("cancelled"),
+  Type.Literal("turn-limit"),
+  Type.Literal("wall-clock-limit"),
+  // 派出失败（工作树或运行面建不起来）：spawned 已落盘，以 settled 收口保证两族配对
+  Type.Literal("spawn-failed"),
+]);
+export type ChildSettledStatus = Static<typeof ChildSettledStatusSchema>;
+
+// worker 结构化结果：分支、改动文件清单（工作树内相对路径）、receipt 列表、自述摘要
+export const ChildResultSchema = Type.Object({
+  branch: Type.String({ minLength: 1 }),
+  changedFiles: Type.Array(Type.String({ minLength: 1 })),
+  receiptIds: Type.Array(ReceiptIdSchema),
+  summary: Type.String(),
+  summaryTruncated: Type.Boolean(),
+});
+export type ChildResult = Static<typeof ChildResultSchema>;
+
+export const SessionHeaderRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("session.header"),
+  parentSessionId: SessionIdSchema,
+  parentRunId: Type.Optional(RunIdSchema),
+  worker: Type.Object({ name: Type.String({ minLength: 1 }), role: WorkerRoleSchema }),
+  workspace: WorkerWorkspaceSchema,
+  startedAt: Type.Integer({ minimum: 0 }),
+});
+export type SessionHeaderRecord = Static<typeof SessionHeaderRecordSchema>;
+
+export const ChildSpawnedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("child.spawned"),
+  childSessionId: SessionIdSchema,
+  name: Type.String({ minLength: 1 }),
+  role: WorkerRoleSchema,
+  task: Type.String({ minLength: 1 }),
+  policy: DelegatedPolicySchema,
+  limits: WorkerLimitsSchema,
+  workspace: WorkerWorkspaceSchema,
+  spawnedAt: Type.Integer({ minimum: 0 }),
+});
+export type ChildSpawnedRecord = Static<typeof ChildSpawnedRecordSchema>;
+
+export const ChildSettledRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("child.settled"),
+  childSessionId: SessionIdSchema,
+  name: Type.String({ minLength: 1 }),
+  status: ChildSettledStatusSchema,
+  // 失败、派出失败时的人读原因
+  error: Type.Optional(Type.String()),
+  // 派出失败时缺省（没有可回收的工作）
+  result: Type.Optional(ChildResultSchema),
+  // 完成的模型轮次数
+  turns: Type.Integer({ minimum: 0 }),
+  settledAt: Type.Integer({ minimum: 0 }),
+});
+export type ChildSettledRecord = Static<typeof ChildSettledRecordSchema>;
 
 // Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族；
 // M4 收口新增 grant.promoted / grant.config-removed 族）
@@ -336,6 +444,9 @@ export const EventRecordSchema = Type.Union([
   GrantRevokedRecordSchema,
   GrantPromotedRecordSchema,
   GrantConfigRemovedRecordSchema,
+  SessionHeaderRecordSchema,
+  ChildSpawnedRecordSchema,
+  ChildSettledRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -379,6 +490,19 @@ export type GrantConfigRemovedInput = Omit<
   GrantConfigRemovedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
+// worker 编排三族追加输入（M5.5 S2）
+export type SessionHeaderInput = Omit<
+  SessionHeaderRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type ChildSpawnedInput = Omit<
+  ChildSpawnedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type ChildSettledInput = Omit<
+  ChildSettledRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
 
 // Event Log 记录格式的迁移链（M0 管线）：v1 → v2 为加法式演进（intent 增 contentHashes、
 // settled 增 errorKind、新增 breaker/resolution 族——旧记录逐字有效，纯版本推进）；
@@ -401,6 +525,8 @@ eventLogMigrations.register("event-log", 4, (doc) => ({ ...doc, version: 5 }));
 // v5 → v6（M5）：加法式演进（entry 增 contentHash、turn.completed 增 usage、新增三个观察族）——
 // v5 旧记录逐字有效，纯版本推进；无 contentHash 的 entry 即"M5 前会话，无正文"
 eventLogMigrations.register("event-log", 5, (doc) => ({ ...doc, version: 6 }));
+// v6 → v7（M5.5 S2）：加法式演进（新增 worker 编排三族）——v6 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 6, (doc) => ({ ...doc, version: 7 }));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏

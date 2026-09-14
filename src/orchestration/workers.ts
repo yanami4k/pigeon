@@ -1,0 +1,396 @@
+// worker 生命周期（M5.5 S2，决策 040）：同进程多 Adapter 的并行 worker 编排。对外只有 spawn / cancel /
+// status / awaitResult 四个动作与构造时注入的审批回调——这就是 §3.6 的 Job 边界，多进程与跨机器是换实现
+// 不换调用方。worker 运行面由装配根以工厂注入（本层不触达 application），worker 内部仍是工具串行与
+// run() 互斥。证据顺序：父会话先落 child.spawned（派出意图），再建工作区与运行面；worker 会话关闭后
+// 落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
+// 深度 1：本编排器所在会话自己是 worker 时拒绝再派。上限只有轮次与墙钟，超限与取消都走 interrupt。
+import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
+import type {
+  ChildResult,
+  ChildSettledInput,
+  ChildSettledStatus,
+  ChildSpawnedInput,
+  DelegatedPolicy,
+  WorkerLimits,
+  WorkerRole,
+  WorkerWorkspace,
+} from "../state/event-log.ts";
+import type { EventEnvelope } from "../state/events.ts";
+import { newSessionId, type ReceiptId, type RunId, type SessionId } from "../state/ids.ts";
+import type { ToolPolicyLike } from "../tools/policy.ts";
+import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
+import {
+  addWorktree,
+  assertWorkerName,
+  changedFiles,
+  worktreeBranchFor,
+  worktreePathFor,
+} from "./worktree.ts";
+
+export const DEFAULT_WORKER_LIMITS: WorkerLimits = { maxTurns: 40, wallClockMs: 30 * 60_000 };
+// 自述摘要进 child.settled 的上限（全文在 worker 会话的内容文件里）
+export const WORKER_SUMMARY_MAX_CHARS = 2000;
+
+export class WorkerDepthError extends Error {}
+export class WorkerSpawnError extends Error {}
+
+export type WorkerRunStatus = "completed" | "failed" | "aborted" | "unknown";
+
+// 装配根交回的 worker 运行面（PiRuntimeAdapter + 会话文件的最小操作面）
+export interface WorkerRuntimeHandle {
+  run(task: string): Promise<{ status: WorkerRunStatus; errorMessage?: string }>;
+  interrupt(): Promise<void>;
+  subscribe(listener: (event: EventEnvelope) => void): () => void;
+  receiptIds(): ReceiptId[];
+  // 末条 assistant 正文
+  summary(): string;
+  // 释放运行面并关闭 worker 会话文件
+  dispose(): Promise<void>;
+}
+
+// 汇聚到父级的审批请求：来源会话与 worker 标签恒在场
+export interface WorkerApprovalRequest extends ApprovalRequest {
+  readonly sessionId: SessionId;
+  readonly worker: { readonly name: string; readonly role: WorkerRole };
+}
+
+export interface WorkerRuntimeRequest {
+  sessionId: SessionId;
+  name: string;
+  role: WorkerRole;
+  task: string;
+  policy: DelegatedPolicy;
+  governanceRoot: string;
+  workspace: WorkerWorkspace;
+  lineage: { parentSessionId: SessionId; parentRunId?: RunId };
+  // 已带来源标签的审批入口（转发到编排器的审批回调）
+  approvalHandler: ApprovalHandler;
+}
+
+export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
+
+// 隔离工作区提供者：第一版为 git 工作树；测试注入内存实现
+export interface WorkspaceProvider {
+  plan(input: { sessionId: SessionId; name: string }): WorkerWorkspace;
+  create(workspace: WorkerWorkspace, input: { sessionId: SessionId; name: string }): void;
+  changedFiles(workspace: WorkerWorkspace): string[];
+}
+
+export function gitWorktreeWorkspaces(governanceRoot: string): WorkspaceProvider {
+  return {
+    plan: ({ sessionId, name }) => ({
+      kind: "git-worktree",
+      path: worktreePathFor(governanceRoot, sessionId, name),
+      branch: worktreeBranchFor(name),
+    }),
+    create: (_workspace, { sessionId, name }) => {
+      addWorktree({ repoRoot: governanceRoot, sessionId, name });
+    },
+    changedFiles: (workspace) => changedFiles(workspace.path),
+  };
+}
+
+// 父会话的父子两族落盘口（JsonlEventLog 满足）
+export interface ChildFamilySink {
+  appendChildSpawned(input: ChildSpawnedInput): unknown;
+  appendChildSettled(input: ChildSettledInput): unknown;
+}
+
+export interface WorkerOrchestratorOptions {
+  governanceRoot: string;
+  // 本编排器所在会话；parentSessionId 在场 = 本会话自己是 worker
+  session: { sessionId: SessionId; parentSessionId?: SessionId };
+  parentPolicy: ToolPolicyLike;
+  parentLog: ChildFamilySink;
+  createRuntime: WorkerRuntimeFactory;
+  approvals: (request: WorkerApprovalRequest) => Promise<ApprovalDecision>;
+  // 派出时父会话的活动 Run（人以 /spawn 派出时无）
+  activeRunId?: () => RunId | undefined;
+  workspaces?: WorkspaceProvider;
+  defaultLimits?: Partial<WorkerLimits>;
+  now?: () => number;
+}
+
+export interface SpawnRequest {
+  role: string;
+  task: string;
+  name?: string;
+  limits?: Partial<WorkerLimits>;
+}
+
+export type WorkerState = "running" | ChildSettledStatus;
+
+export interface WorkerStatus {
+  sessionId: SessionId;
+  name: string;
+  role: WorkerRole;
+  state: WorkerState;
+  turns: number;
+  branch: string;
+  startedAt: number;
+  workspace: WorkerWorkspace;
+}
+
+export interface WorkerOutcome {
+  sessionId: SessionId;
+  name: string;
+  role: WorkerRole;
+  status: ChildSettledStatus;
+  error?: string;
+  turns: number;
+  result?: ChildResult;
+  workspace: WorkerWorkspace;
+}
+
+interface WorkerEntry {
+  sessionId: SessionId;
+  name: string;
+  role: WorkerRole;
+  workspace: WorkerWorkspace;
+  runtime: WorkerRuntimeHandle;
+  state: WorkerState;
+  turns: number;
+  startedAt: number;
+  cancelRequested: boolean;
+  limitHit?: "turn-limit" | "wall-clock-limit";
+  done: Promise<WorkerOutcome>;
+}
+
+export class WorkerOrchestrator {
+  readonly #options: WorkerOrchestratorOptions;
+  readonly #workspaces: WorkspaceProvider;
+  readonly #now: () => number;
+  readonly #workers = new Map<SessionId, WorkerEntry>();
+  // 不改变结果的内部故障（settled 写盘失败、结果回收失败等）
+  readonly #errors: unknown[] = [];
+
+  constructor(options: WorkerOrchestratorOptions) {
+    this.#options = options;
+    this.#workspaces = options.workspaces ?? gitWorktreeWorkspaces(options.governanceRoot);
+    this.#now = options.now ?? Date.now;
+  }
+
+  spawn(request: SpawnRequest): SessionId {
+    const { session } = this.#options;
+    if (session.parentSessionId !== undefined) {
+      throw new WorkerDepthError("深度 1：worker 会话不能再派 worker");
+    }
+    if (!isWorkerRole(request.role)) {
+      throw new WorkerSpawnError(`未知角色：${request.role}（可用：${WORKER_ROLES.join("、")}）`);
+    }
+    const role = request.role;
+    const task = request.task.trim();
+    if (task === "") {
+      throw new WorkerSpawnError("任务不能为空");
+    }
+    const name = request.name ?? this.#nextName(role);
+    assertWorkerName(name);
+    if ([...this.#workers.values()].some((worker) => worker.name === name)) {
+      throw new WorkerSpawnError(`worker 名已被占用：${name}`);
+    }
+    const policy = deriveWorkerPolicy(this.#options.parentPolicy, role);
+    assertPolicySubset(policy, this.#options.parentPolicy);
+    const limits: WorkerLimits = {
+      ...DEFAULT_WORKER_LIMITS,
+      ...this.#options.defaultLimits,
+      ...request.limits,
+    };
+    const sessionId = newSessionId();
+    const workspace = this.#workspaces.plan({ sessionId, name });
+    const parentRunId = this.#options.activeRunId?.();
+    // 派出意图先落盘：写不进就不派（异常原样上抛，零工作区零运行面）
+    this.#options.parentLog.appendChildSpawned({
+      childSessionId: sessionId,
+      name,
+      role,
+      task,
+      policy,
+      limits,
+      workspace,
+      spawnedAt: this.#now(),
+      ...(parentRunId !== undefined ? { runId: parentRunId } : {}),
+    });
+    let runtime: WorkerRuntimeHandle;
+    try {
+      this.#workspaces.create(workspace, { sessionId, name });
+      runtime = this.#options.createRuntime({
+        sessionId,
+        name,
+        role,
+        task,
+        policy,
+        governanceRoot: this.#options.governanceRoot,
+        workspace,
+        lineage: {
+          parentSessionId: session.sessionId,
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
+        },
+        approvalHandler: (approval) =>
+          this.#options.approvals({ ...approval, sessionId, worker: { name, role } }),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.#appendSettled({
+        childSessionId: sessionId,
+        name,
+        status: "spawn-failed",
+        error: message,
+        turns: 0,
+      });
+      throw new WorkerSpawnError(`派出 worker ${name} 失败：${message}`, { cause: error });
+    }
+    const done = Promise.withResolvers<WorkerOutcome>();
+    const entry: WorkerEntry = {
+      sessionId,
+      name,
+      role,
+      workspace,
+      runtime,
+      state: "running",
+      turns: 0,
+      startedAt: this.#now(),
+      cancelRequested: false,
+      done: done.promise,
+    };
+    this.#workers.set(sessionId, entry);
+    this.#drive(entry, task, limits).then(done.resolve, done.reject);
+    return sessionId;
+  }
+
+  // 取消走 interrupt（abort → waitForIdle）；已收尾的 worker 无操作
+  async cancel(sessionId: SessionId): Promise<void> {
+    const entry = this.#require(sessionId);
+    if (entry.state !== "running") {
+      return;
+    }
+    entry.cancelRequested = true;
+    await entry.runtime.interrupt();
+  }
+
+  status(): WorkerStatus[] {
+    return [...this.#workers.values()].map((entry) => ({
+      sessionId: entry.sessionId,
+      name: entry.name,
+      role: entry.role,
+      state: entry.state,
+      turns: entry.turns,
+      branch: entry.workspace.branch,
+      startedAt: entry.startedAt,
+      workspace: entry.workspace,
+    }));
+  }
+
+  awaitResult(sessionId: SessionId): Promise<WorkerOutcome> {
+    return this.#require(sessionId).done;
+  }
+
+  errors(): unknown[] {
+    return this.#errors.slice();
+  }
+
+  async #drive(entry: WorkerEntry, task: string, limits: WorkerLimits): Promise<WorkerOutcome> {
+    const { runtime } = entry;
+    const stop = (reason: "turn-limit" | "wall-clock-limit") => {
+      if (entry.limitHit !== undefined || entry.cancelRequested) {
+        return;
+      }
+      entry.limitHit = reason;
+      runtime.interrupt().catch((error: unknown) => {
+        this.#errors.push(error);
+      });
+    };
+    const unsubscribe = runtime.subscribe((event) => {
+      if (event.kind === "turn.completed") {
+        entry.turns += 1;
+        if (entry.turns >= limits.maxTurns) {
+          stop("turn-limit");
+        }
+      }
+    });
+    const timer = setTimeout(() => stop("wall-clock-limit"), limits.wallClockMs);
+    let status: ChildSettledStatus;
+    let error: string | undefined;
+    try {
+      const run = await runtime.run(task);
+      if (run.status === "completed") {
+        status = "completed";
+      } else if (run.status === "aborted") {
+        status = entry.cancelRequested ? "cancelled" : (entry.limitHit ?? "aborted");
+      } else {
+        status = "failed";
+        error = run.errorMessage ?? "运行以未知终态结束";
+      }
+    } catch (caught) {
+      status = "failed";
+      error = caught instanceof Error ? caught.message : String(caught);
+    } finally {
+      clearTimeout(timer);
+      unsubscribe();
+    }
+    // 结果回收（失败与中止同样回收：工作树里可能已有部分工作）
+    let result: ChildResult | undefined;
+    try {
+      const summary = runtime.summary();
+      result = {
+        branch: entry.workspace.branch,
+        changedFiles: this.#workspaces.changedFiles(entry.workspace),
+        receiptIds: runtime.receiptIds(),
+        summary: summary.slice(0, WORKER_SUMMARY_MAX_CHARS),
+        summaryTruncated: summary.length > WORKER_SUMMARY_MAX_CHARS,
+      };
+    } catch (caught) {
+      this.#errors.push(caught);
+    }
+    try {
+      await runtime.dispose();
+    } catch (caught) {
+      this.#errors.push(caught);
+    }
+    entry.state = status;
+    const outcome: WorkerOutcome = {
+      sessionId: entry.sessionId,
+      name: entry.name,
+      role: entry.role,
+      workspace: entry.workspace,
+      status,
+      turns: entry.turns,
+      ...(error !== undefined ? { error } : {}),
+      ...(result !== undefined ? { result } : {}),
+    };
+    this.#appendSettled({
+      childSessionId: entry.sessionId,
+      name: entry.name,
+      status,
+      turns: entry.turns,
+      ...(error !== undefined ? { error } : {}),
+      ...(result !== undefined ? { result } : {}),
+    });
+    return outcome;
+  }
+
+  // settled 写盘失败不改变 worker 结果：进内部故障清单，父会话留"缺 settled"的可见缺口
+  #appendSettled(input: Omit<ChildSettledInput, "settledAt">): void {
+    try {
+      this.#options.parentLog.appendChildSettled({ ...input, settledAt: this.#now() });
+    } catch (error) {
+      this.#errors.push(error);
+    }
+  }
+
+  #require(sessionId: SessionId): WorkerEntry {
+    const entry = this.#workers.get(sessionId);
+    if (entry === undefined) {
+      throw new WorkerSpawnError(`未知 worker：${sessionId}`);
+    }
+    return entry;
+  }
+
+  #nextName(role: WorkerRole): string {
+    const taken = new Set([...this.#workers.values()].map((worker) => worker.name));
+    let index = 1;
+    while (taken.has(`${role}-${index}`)) {
+      index += 1;
+    }
+    return `${role}-${index}`;
+  }
+}

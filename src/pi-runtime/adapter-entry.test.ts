@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { EntryRecord } from "../state/event-log.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
@@ -97,7 +98,9 @@ test("entry 映射：多轮工具调用 Run 逐条落 entry，runSeq 连续且�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog,
@@ -155,7 +158,9 @@ test("abort 与上游合成失败消息同样占 runSeq 序号；跨 Run 序号�
         failOnCall: 3,
         failureMessage: "模拟上游 500",
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       sessionId,
       eventLog,
     });
@@ -250,7 +255,9 @@ test("entry 写盘失败不毒化 Run：故障进 listenerErrors，事件落盘�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog: poison,

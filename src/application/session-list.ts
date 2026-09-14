@@ -29,8 +29,17 @@ export function runSessionListCommand(options: SessionListCommandOptions): strin
       summary.totalTokens > 0
         ? `  ${summary.totalTokens} tokens  $${summary.totalCost.toFixed(4)}`
         : "";
+    // M5.5 S4（决策 040）：父子关系安静后缀（突出项仍只有待对账，015 口径）
+    const lineage =
+      summary.worker !== undefined
+        ? `  worker ${summary.worker.name}（${summary.worker.role}）← 父会话 ${summary.worker.parentSessionId}`
+        : "";
+    const children =
+      summary.children !== undefined
+        ? `  派出 worker ${summary.children.count} 个${summary.children.unsettled > 0 ? `（${summary.children.unsettled} 个未收尾）` : ""}`
+        : "";
     lines.push(
-      `${new Date(summary.createdAt).toISOString().slice(0, 16).replace("T", " ")}  ${summary.runCount} 个 Run  ${summary.sessionId}${usage}`
+      `${new Date(summary.createdAt).toISOString().slice(0, 16).replace("T", " ")}  ${summary.runCount} 个 Run  ${summary.sessionId}${usage}${lineage}${children}`
     );
     if (summary.pendingReconcile > 0) {
       lines.push(`  ${summary.pendingReconcile} 条待对账（上次会话异常中断，用 resume 处理）`);

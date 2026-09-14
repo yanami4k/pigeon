@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import type { ToolProposedPayload, ToolSettledPayload } from "../state/runtime-events.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
@@ -122,7 +123,9 @@ test("yolo 模式：写工具自动放行并执行，账本 approvedBy=policy:yo
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
     });
 
@@ -163,12 +166,14 @@ test("prompt 模式：read 层自动放行（approvedBy=policy:auto），不弹�
           { text: "读完了" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async (request) => {
+          approvalCalls.push(request);
+          return { approved: true };
+        },
+      }),
       tools: [createReadFileTool(root)],
-      approvalHandler: async (request) => {
-        approvalCalls.push(request);
-        return { approved: true };
-      },
     });
 
     const result = await adapter.run("读文件");
@@ -201,12 +206,14 @@ test("prompt 模式：write 触发审批，批准后执行；handler 收到工�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async (request) => {
+          approvalCalls.push(request);
+          return { approved: true };
+        },
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async (request) => {
-        approvalCalls.push(request);
-        return { approved: true };
-      },
     });
 
     const result = await adapter.run("改文件");
@@ -242,9 +249,11 @@ test("prompt 模式：审批拒绝 → execute 未被调用，reason 逐字进 t
           { text: "好吧" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: false, reason: "不准改这个文件" }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: false, reason: "不准改这个文件" }),
     });
 
     const result = await adapter.run("改文件");
@@ -285,12 +294,14 @@ test("deny 清单绝对：两种模式都拒，且不弹人工审批", async () 
             { text: "明白" },
           ],
         }),
-        registry: makeRegistry(),
+        governance: createToolGovernance({
+          registry: makeRegistry(),
+          approvalHandler: async () => {
+            handlerCalled = true;
+            return { approved: true };
+          },
+        }),
         tools: [createReadFileTool(root)],
-        approvalHandler: async () => {
-          handlerCalled = true;
-          return { approved: true };
-        },
       });
 
       const result = await adapter.run("读文件");
@@ -328,7 +339,9 @@ test("未广告的工具名：上游 not found 兜底，账本零记录；广告
       streamFn: createFakeStreamFn({
         replies: [{ text: "调", toolCalls: [{ name: "ghost_tool", args: {} }] }, { text: "明白" }],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createReadFileTool(root)],
     });
 
@@ -348,7 +361,9 @@ test("未广告的工具名：上游 not found 兜底，账本零记录；广告
         new PiRuntimeAdapter({
           snapshot: makeSnapshot({ allow: ["edit_file"] }),
           streamFn: createFakeStreamFn({ replies: [{ text: "x" }] }),
-          registry: new ToolRegistry(),
+          governance: createToolGovernance({
+            registry: new ToolRegistry(),
+          }),
           tools: [createEditFileTool(root)],
         }),
       /未在注册表登记/
@@ -365,6 +380,7 @@ test("run() 互斥：已有在途 Run 时第二个 run 直接抛错（决策 2�
     streamFn: createFakeStreamFn({
       replies: [{ text: "足够长的流式回复以支撑门闩。", chunkSize: 2, chunkGate: gate }],
     }),
+    governance: createToolGovernance(),
   });
   const turnStarted = waitForEvent(adapter, "turn.started");
   const first = adapter.run("你好");
@@ -393,7 +409,9 @@ test("熔断：模型坚持重发同一被拦调用，计数到阈值后 Run 以
           },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
     });
 
@@ -428,7 +446,9 @@ test("账本与事件对齐：完整 Run 后时间戳逐阶段盖章，toolCallI
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
     });
 
@@ -472,7 +492,9 @@ test("幽灵工具名熔断：模型循环请求从未广告的工具名，事�
       // delete_everything 从未广告：上游在 hook 前以 not-found 拦截，
       // 审批闸/账本/hook 级熔断全部不可见（spike tmp/notfound-spike.mjs）
       streamFn: createFakeStreamFn({ replies: [...phantomReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createReadFileTool(root)],
     });
 
@@ -504,7 +526,9 @@ test("幽灵调用不干扰正常治理：幽灵一次后 read_file 照常放行
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createReadFileTool(root)],
     });
 
@@ -539,7 +563,9 @@ test("幽灵熔断是连续语义：正常工具调用重置连击，未连续�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createReadFileTool(root)],
     });
 
@@ -566,7 +592,9 @@ test("参数校验失败循环熔断：模型持续给已广告工具发畸形�
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot({ allow: ["edit_file"], approvalMode: "yolo" }),
       streamFn: createFakeStreamFn({ replies: [...malformedReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
     });
 
@@ -601,7 +629,9 @@ test("deny 熔断按工具名计数：模型每轮微调参数绕行指纹，仍
         approvalMode: "yolo",
       }),
       streamFn: createFakeStreamFn({ replies: [...evadingReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createReadFileTool(root)],
     });
 
@@ -632,9 +662,11 @@ test("人工拒绝保留指纹计数：模型改参重提是期望的修订循�
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot({ allow: ["edit_file"], approvalMode: "prompt" }),
       streamFn: createFakeStreamFn({ replies: [...revisedReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: false, reason: "再想想" }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: false, reason: "再想想" }),
     });
 
     const result = await adapter.run("改文件");

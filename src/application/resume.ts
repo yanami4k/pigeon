@@ -54,6 +54,9 @@ function describeEvidenceGaps(materialized: MaterializedSession): string[] {
 export interface ResumeFlowOptions {
   // 工作区根（事件日志在 <root>/.pigeon/sessions/；哈希确证的读目标以它为根）
   root: string;
+  // M5.5 S4（决策 040）：哈希确证读目标的根——缺省同 root；worker 会话传其工作树
+  //（application/worker-scope.ts），否则会拿主工作区的文件去比对 worker 的写入
+  workspaceRoot?: string;
   sessionId: string;
   // 问答与输出均依赖注入（决策 025），菜单可测、交互面可替换
   ask: AskFn;
@@ -74,7 +77,7 @@ export async function runResumeFlow(options: ResumeFlowOptions): Promise<void> {
   }
   const { write, ask } = options;
   // 自动确证环节（S2，D5）：哈希三方比对，命中即写 resolution（fsync 耐久 + executionId 幂等）
-  const recovery = recoverSession(sessionsDir, sessionId, options.root);
+  const recovery = recoverSession(sessionsDir, sessionId, options.workspaceRoot ?? options.root);
   write(`会话 ${sessionId} 冷恢复对账：\n`);
   if (recovery.resolutions.length > 0) {
     write(`  本次自动确证（哈希比对）${recovery.resolutions.length} 条：\n`);

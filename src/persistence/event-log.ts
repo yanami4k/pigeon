@@ -20,6 +20,12 @@ import {
   type BreakerInput,
   type BreakerRecord,
   BreakerRecordSchema,
+  type ChildSettledInput,
+  type ChildSettledRecord,
+  ChildSettledRecordSchema,
+  type ChildSpawnedInput,
+  type ChildSpawnedRecord,
+  ChildSpawnedRecordSchema,
   type DecisionInput,
   type DecisionRecord,
   DecisionRecordSchema,
@@ -56,6 +62,9 @@ import {
   ResolutionRecordSchema,
   type RuntimeEventRecord,
   RuntimeEventRecordSchema,
+  type SessionHeaderInput,
+  type SessionHeaderRecord,
+  SessionHeaderRecordSchema,
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import {
@@ -74,7 +83,10 @@ import {
   parseMessageContentRecord,
   recomputeContentHash,
 } from "../state/message-content.ts";
+import { acquireSessionLock } from "./session-lock.ts";
 
+// M5.5 S1（决策 040）：会话打开锁冲突——另一个存活进程正在写同一会话
+export { EventLogLockedError } from "./session-lock.ts";
 export class EventLogConflictError extends Error {}
 export class EventLogCorruptionError extends Error {}
 
@@ -243,6 +255,8 @@ export class JsonlEventLog {
   #contentFd: number | null = null;
   readonly #contentOptions: MessageContentOptions;
   readonly #io: EventLogIo;
+  // M5.5 S1（决策 040）：会话打开锁的释放函数（幂等）
+  readonly #releaseLock: () => void;
   #closed = false;
 
   constructor(dir: string, sessionId: SessionId, options: JsonlEventLogOptions = {}) {
@@ -254,19 +268,27 @@ export class JsonlEventLog {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    // 冷启动恢复幂等索引（torn tail 容忍同 M3）；重复记录 = 外部破坏，响亮失败
-    for (const record of readEventLogFile(this.path)) {
-      if (isExecutionKeyedGovernance(record)) {
-        const key = governanceKey(record);
-        if (this.#governanceIds[record.kind].has(key)) {
-          throw new EventLogCorruptionError(
-            `事件日志损坏：${this.path} 重复 ${record.kind} ${key}`
-          );
+    // M5.5 S1（决策 040）：先取会话打开锁再读索引——另一个存活进程在写同一会话时响亮拒绝，
+    // 两个进程各持一份幂等索引写出重复 resolution 的路径由此关闭；构造失败时释放锁
+    this.#releaseLock = acquireSessionLock(dir, sessionId);
+    try {
+      // 冷启动恢复幂等索引（torn tail 容忍同 M3）；重复记录 = 外部破坏，响亮失败
+      for (const record of readEventLogFile(this.path)) {
+        if (isExecutionKeyedGovernance(record)) {
+          const key = governanceKey(record);
+          if (this.#governanceIds[record.kind].has(key)) {
+            throw new EventLogCorruptionError(
+              `事件日志损坏：${this.path} 重复 ${record.kind} ${key}`
+            );
+          }
+          this.#governanceIds[record.kind].add(key);
         }
-        this.#governanceIds[record.kind].add(key);
       }
+      this.#fd = openSync(this.path, "a");
+    } catch (error) {
+      this.#releaseLock();
+      throw error;
     }
-    this.#fd = openSync(this.path, "a");
   }
 
   static filePathFor(dir: string, sessionId: SessionId): string {
@@ -483,6 +505,43 @@ export class JsonlEventLog {
     this.#append(parsed, isExecutionKeyedGovernance(parsed));
   }
 
+  // M5.5 S2（决策 040）：worker 会话头——worker 会话文件的首条记录（父会话、父 Run、角色、工作树）；
+  // 治理族耐久（fsync）
+  appendSessionHeader(input: SessionHeaderInput): SessionHeaderRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(SessionHeaderRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "session.header",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // child.spawned 落盘（M5.5 S2）：派出意图先于建工作树与运行面落盘——写不进就不派（fail-closed）
+  appendChildSpawned(input: ChildSpawnedInput): ChildSpawnedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(ChildSpawnedRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "child.spawned",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // child.settled 落盘（M5.5 S2）：worker 会话关闭后写结构化结果；治理族耐久（fsync）
+  appendChildSettled(input: ChildSettledInput): ChildSettledRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(ChildSettledRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "child.settled",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
   close(): void {
     if (this.#closed) {
       return;
@@ -492,6 +551,7 @@ export class JsonlEventLog {
     if (this.#contentFd !== null) {
       closeSync(this.#contentFd);
     }
+    this.#releaseLock();
   }
 
   #envelope(runId: RunId) {

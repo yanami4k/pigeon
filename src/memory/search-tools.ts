@@ -30,8 +30,11 @@ export const DEFAULT_SEARCH_TOOL_LIMIT = 20;
 // 总字节上限：命中列表进模型上下文前的硬边界（片段约 200 字 × 20 条的量级）
 export const DEFAULT_SEARCH_TOOL_MAX_BYTES = 16 * 1024;
 
-// 域错误（模型侧给错 entryId 等）：与环境异常区分
-export class SessionToolError extends Error {}
+// 域错误（模型侧给错 entryId 等）：与环境异常区分。M5.5 S5（决策 050）：带归类标记，
+// tools/error-kind.ts 读标记归 domain（tools 不反向 import 本层）
+export class SessionToolError extends Error {
+  readonly pigeonToolErrorKind = "domain";
+}
 
 export const SearchSessionsParamsSchema = Type.Object({
   keywords: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8 }),

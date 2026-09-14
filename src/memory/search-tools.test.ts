@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -234,7 +235,9 @@ test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 t
           { text: "查到了" },
         ],
       }),
-      registry,
+      governance: createToolGovernance({
+        registry,
+      }),
       tools: [createSearchSessionsTool({ sessionsDir: dir })],
       sessionId,
       eventLog,

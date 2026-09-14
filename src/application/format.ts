@@ -8,6 +8,28 @@ import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
 const ARGS_SUMMARY_LIMIT = 160;
 
+// 审批来源行（M5.5 S3，决策 040）：worker 的审批汇聚到父级时标明来源；主会话自己的请求无来源行。
+// cli 与 tui 两个审批 Actor 共用
+export function approvalSourceLine(request: {
+  readonly sessionId?: string;
+  readonly worker?: { readonly name: string; readonly role: string };
+}): string | undefined {
+  if (request.worker === undefined) {
+    return undefined;
+  }
+  return (
+    `来源：worker ${request.worker.name}（${request.worker.role}）` +
+    (request.sessionId !== undefined ? ` ｜ 会话 ${shortId(request.sessionId)}` : "")
+  );
+}
+
+// worker 放权的作用范围注记（[a]/[d] 在 worker 请求上创建的 grant 只在该 worker 会话内生效）
+export function workerGrantScopeNote(request: {
+  readonly worker?: { readonly name: string };
+}): string {
+  return request.worker !== undefined ? `，只在 worker ${request.worker.name} 会话内生效` : "";
+}
+
 // 稳定 id 短哈希：`exec_` 等前缀 + ULID 前 8 位 + 省略号；非稳定 id（toolCallId 等）原样
 export function shortId(id: string): string {
   const match = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{8}/.exec(id);

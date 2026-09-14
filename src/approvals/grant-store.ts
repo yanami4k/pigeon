@@ -2,6 +2,8 @@
 // 运行态以本存储为准，持久态以 grant.created / grant.revoked 事件族为准（决策 2 不双写）；
 // 不进 InjectionSnapshot（约束 4：grant 必须可撤销，与快照冻结矛盾）。匹配语义复用
 // tools/grants.ts（与固化规则同一判定）。
+// M5.5 S5（决策 048 及其修订）：exec 档放权带 command——只匹配这条一模一样的命令串；带 shell 标记的才能免审
+// 一条需 shell 的命令。
 import type { GrantCreatedInput, GrantRevokedInput } from "../state/event-log.ts";
 import { asGrantId, type GrantId, newGrantId, type RunId } from "../state/ids.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
@@ -48,15 +50,22 @@ export class SessionGrantStore {
   create(input: {
     tool: string;
     pathPrefix?: string;
+    command?: string;
+    shell?: boolean;
     firstCall: { toolCallId: string; args: unknown };
     runId?: RunId;
   }): SessionGrantView {
     const grantId = newGrantId();
     const createdAt = Date.now();
+    const scope = {
+      ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
+      ...(input.command !== undefined ? { command: input.command } : {}),
+      ...(input.shell === true ? { shell: true } : {}),
+    };
     this.#eventLog?.appendGrantCreated({
       grantId,
       tool: input.tool,
-      ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
+      ...scope,
       createdAt,
       firstCall: input.firstCall,
       ...(input.runId !== undefined ? { runId: input.runId } : {}),
@@ -64,7 +73,7 @@ export class SessionGrantStore {
     const grant: SessionGrantView = {
       grantId,
       tool: input.tool,
-      ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
+      ...scope,
       createdAt,
       firstCall: input.firstCall,
       hitCount: 0,
@@ -89,9 +98,24 @@ export class SessionGrantStore {
 
   // 纯求值（无副作用）：命中计数由 noteEffectiveHit 在放行实际生效后单独记——
   // deny 压过 grant 时不计命中（审计口径：命中 = 实际免审放行）
-  match(toolName: string, args: unknown): GrantMatchOutcome | null {
+  match(
+    toolName: string,
+    args: unknown,
+    context: { needsShell?: boolean } = {}
+  ): GrantMatchOutcome | null {
     for (const grant of this.#grants.values()) {
-      if (scopeMatches(this.#workspaceRoot, grant.tool, grant.pathPrefix, toolName, args)) {
+      if (
+        scopeMatches(
+          this.#workspaceRoot,
+          grant.tool,
+          grant.pathPrefix,
+          toolName,
+          args,
+          grant.command,
+          grant.shell,
+          context.needsShell
+        )
+      ) {
         return { source: "session-grant", refId: grant.grantId };
       }
     }

@@ -2,6 +2,8 @@
 // （paths.ts realpath 机制），无自由文本模式；非路径参数或解析失败 → 不匹配，回落人工
 // 审批（授权不猜）。排律由 adapter 求值顺序承载（deny 清单 → 会话 grant → 配置 grant →
 // yolo → read 自动 → prompt），本模块只负责匹配语义。
+// M5.5 S5（决策 048 及其修订）：exec 档放权带 command——参数里的命令串与之一模一样才命中（不做前缀、
+// 不做模式，§3.9 第五条不动）；需 shell 的调用只被带 shell 标记的放权命中，旧记录缺省为 false。
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { isPathInsideDir } from "./paths.ts";
 
@@ -27,16 +29,34 @@ function extractPathArg(args: unknown): string | undefined {
   return typeof path === "string" && path.length > 0 ? path : undefined;
 }
 
-// 作用域匹配（决策 3a）：工具名精确相等 + 可选 pathPrefix 目录包含。
-// pathPrefix 规则必须有工作区根可做 realpath 解析，否则不匹配（fail-closed 到人工）
+// 取调用的命令串：精确命令放权只认 args.command 字符串
+function extractCommandArg(args: unknown): string | undefined {
+  if (typeof args !== "object" || args === null || !("command" in args)) {
+    return undefined;
+  }
+  const command = (args as { command: unknown }).command;
+  return typeof command === "string" && command.length > 0 ? command : undefined;
+}
+
+// 作用域匹配（决策 3a + 048 及其修订）：工具名精确相等 + 可选命令串精确相等 + 需 shell 时放权须带 shell 标记 +
+// 可选 pathPrefix 目录包含。pathPrefix 规则必须有工作区根可做 realpath 解析，否则不匹配（fail-closed 到人工）
 export function scopeMatches(
   workspaceRoot: string | undefined,
   tool: string,
   pathPrefix: string | undefined,
   toolName: string,
-  args: unknown
+  args: unknown,
+  command?: string,
+  grantShell?: boolean,
+  callNeedsShell?: boolean
 ): boolean {
   if (tool !== toolName) {
+    return false;
+  }
+  if (command !== undefined && extractCommandArg(args) !== command) {
+    return false;
+  }
+  if (callNeedsShell === true && grantShell !== true) {
     return false;
   }
   if (pathPrefix === undefined) {
@@ -58,10 +78,22 @@ export function matchConfigGrants(
   rules: readonly ConfigGrantRule[],
   workspaceRoot: string | undefined,
   toolName: string,
-  args: unknown
+  args: unknown,
+  callNeedsShell?: boolean
 ): GrantMatchOutcome | null {
   for (const rule of rules) {
-    if (scopeMatches(workspaceRoot, rule.tool, rule.pathPrefix, toolName, args)) {
+    if (
+      scopeMatches(
+        workspaceRoot,
+        rule.tool,
+        rule.pathPrefix,
+        toolName,
+        args,
+        rule.command,
+        rule.shell,
+        callNeedsShell
+      )
+    ) {
       return { source: "config-rule", refId: rule.promotedFrom.grantId };
     }
   }

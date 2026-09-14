@@ -159,6 +159,31 @@ function recordDetail(record: EventRecord): string {
         record.pathPrefix !== undefined ? `，仅限目录 ${record.pathPrefix}` : "（工具级）";
       return `固化移除 config#${record.index} ｜ ${record.tool}${scope} ｜ 出处 grant ${shortId(record.grantId)}`;
     }
+    // M5.5 S2（决策 040）：worker 编排三族
+    case "session.header":
+      return (
+        `worker 会话头 ｜ ${record.worker.name}（${record.worker.role}）｜ 父会话 ${shortId(record.parentSessionId)}` +
+        (record.parentRunId !== undefined ? ` ｜ 父 Run ${shortId(record.parentRunId)}` : "") +
+        ` ｜ 分支 ${record.workspace.branch}`
+      );
+    case "child.spawned": {
+      const tools = record.policy.allow.length > 0 ? record.policy.allow.join("、") : "无";
+      return (
+        `派出 worker ${record.name}（${record.role}）｜ 会话 ${shortId(record.childSessionId)} ｜ ` +
+        `分支 ${record.workspace.branch} ｜ 工具 ${tools} ｜ 审批模式 ${record.policy.approvalMode} ｜ ` +
+        `上限 ${record.limits.maxTurns} 轮 / ${Math.round(record.limits.wallClockMs / 1000)} 秒`
+      );
+    }
+    case "child.settled": {
+      let detail = `worker 收尾 ${record.name} ｜ 会话 ${shortId(record.childSessionId)} ｜ ${record.status} ｜ ${record.turns} 轮`;
+      if (record.error !== undefined) {
+        detail += ` ｜ 原因：${record.error}`;
+      }
+      if (record.result !== undefined) {
+        detail += ` ｜ 改动 ${record.result.changedFiles.length} 个文件，Receipt ${record.result.receiptIds.length} 条`;
+      }
+      return detail;
+    }
   }
 }
 

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -79,9 +80,11 @@ test("REPL 内联审批冒烟：先拒绝（理由逐字进 toolResult、文件�
           { text: "已完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: createCliApprovalHandler(ask, write),
+      }),
       tools: [createReadFileTool(root), createEditFileTool(root)],
-      approvalHandler: createCliApprovalHandler(ask, write),
     });
 
     await runRepl({ adapter, ask, write });
@@ -167,7 +170,9 @@ test("D2 可见性：事件落盘失败（listenerErrors 非空）→ REPL 显�
           { text: "已完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId: eventLog.sessionId,
       eventLog: poison,

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { newSessionId } from "../state/ids.ts";
 import { buildSessionTrace } from "../state/trace.ts";
@@ -90,17 +91,19 @@ test("完成证据：用户请求 → 工具参数 → 审批 → Receipt → �
           { text: "好" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async ({ toolName }) => {
+          if (toolName === "edit_file") {
+            editApprovals += 1;
+            return editApprovals === 1
+              ? { approved: true }
+              : { approved: false, reason: "先别动这个文件" };
+          }
+          return { approved: true };
+        },
+      }),
       tools: [createReadFileTool(root), createEditFileTool(root)],
-      approvalHandler: async ({ toolName }) => {
-        if (toolName === "edit_file") {
-          editApprovals += 1;
-          return editApprovals === 1
-            ? { approved: true }
-            : { approved: false, reason: "先别动这个文件" };
-        }
-        return { approved: true };
-      },
       sessionId,
       eventLog,
     });

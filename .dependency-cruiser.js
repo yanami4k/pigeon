@@ -89,8 +89,18 @@ export default {
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration)/",
       },
+    },
+    {
+      name: "orchestration-below-controller",
+      severity: "error",
+      comment:
+        "orchestration（M5.5：工作树管理与 worker 生命周期，决策 040）对外只暴露 spawn / cancel / status / " +
+        "awaitResult 四动作加审批回调；可依赖 application 以下各层，worker 运行面由装配根以工厂注入，" +
+        "自身不触达 application 与 Actor 层（cli/tui）。",
+      from: { path: "^src/orchestration/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/(application|cli|tui)/" },
     },
     {
       name: "memory-below-controller",

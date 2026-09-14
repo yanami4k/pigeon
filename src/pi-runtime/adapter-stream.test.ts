@@ -8,6 +8,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { newSessionId } from "../state/ids.ts";
 import { PiRuntimeAdapter, type StreamTextDelta } from "./adapter.ts";
@@ -32,7 +33,11 @@ test("text_delta 与 thinking_delta 按序到达并携带 runId 与 kind；退�
   const streamFn = createFakeStreamFn({
     replies: [{ thinking, text: firstText, chunkSize: 2 }, { text: "第二次回复" }],
   });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   const deltas: StreamTextDelta[] = [];
   const unsubscribe = adapter.subscribeStream((delta) => deltas.push(delta));
 
@@ -66,7 +71,11 @@ test("text_delta 与 thinking_delta 按序到达并携带 runId 与 kind；退�
 test("listener 抛异常进 listenerErrors，Run 与其他 listener 不受影响（同 subscribe 不变式）", async () => {
   const text = "异常侦错流式文本";
   const streamFn = createFakeStreamFn({ replies: [{ text, chunkSize: 3 }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   const collected: string[] = [];
   adapter.subscribeStream(() => {
     throw new Error("模拟订阅者故障");
@@ -97,6 +106,7 @@ test("流式增量不进 Event Log：会话事件文件零文本记录（正文�
       streamFn,
       sessionId,
       eventLog,
+      governance: createToolGovernance(),
     });
     const deltas: string[] = [];
     adapter.subscribeStream((delta) => deltas.push(delta.delta));
@@ -124,7 +134,11 @@ test("流式增量不进 Event Log：会话事件文件零文本记录（正文�
 test("events() 不含流式增量：序列仍是归一化五族，载荷无模型文本", async () => {
   const text = "不进事件序列的文本";
   const streamFn = createFakeStreamFn({ replies: [{ text, chunkSize: 1 }] });
-  const adapter = new PiRuntimeAdapter({ snapshot: createSnapshot(), streamFn });
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+  });
   const deltas: string[] = [];
   adapter.subscribeStream((delta) => deltas.push(delta.delta));
 

@@ -13,8 +13,10 @@ import type { GrantsCommandContext } from "../application/grants.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
+import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
@@ -169,6 +171,8 @@ interface ModelFlags {
   persistThinking: boolean;
   // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
   memoryBudgetChars?: number;
+  // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
+  thinkingLevel?: ThinkingLevel;
 }
 
 // 无取值的开关型 flag（resume 参数切分时不吞下一个参数）
@@ -194,6 +198,12 @@ function parseModelFlags(argv: string[], usage: string): ModelFlags {
         throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
       }
       flags.memoryBudgetChars = value;
+    } else if (flag === "--thinking") {
+      const value = argv[++i];
+      if (value === undefined || !isThinkingLevel(value)) {
+        throw new Error(`--thinking 需要推理档位（${THINKING_LEVELS.join("/")}）（${usage}）`);
+      }
+      flags.thinkingLevel = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -263,7 +273,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const sessionId = asSessionId(sessionIdArg);
   const flags = parseModelFlags(
     modelArgv,
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --root / --stream-fn / --provider / --model"
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --root / --stream-fn / --provider / --model"
   );
   if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
     throw new Error(
@@ -275,10 +285,13 @@ async function resumeMain(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
   const write = writeOut;
+  // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）
+  const scope = sessionRuntimeScope(workspaceRoot, sessionId);
   const { ask, close } = createAsker(process.stdin, write);
   try {
     await runResumeFlow({
       root: workspaceRoot,
+      workspaceRoot: scope.workspaceRoot,
       sessionId: sessionIdArg,
       ask,
       write,
@@ -290,12 +303,15 @@ async function resumeMain(argv: string[]): Promise<void> {
         const restoredGrants = restoreGrantSeed(workspaceRoot, sessionId);
         const bundle = buildRuntime({
           streamFn,
-          workspaceRoot,
+          workspaceRoot: scope.workspaceRoot,
+          governanceRoot: workspaceRoot,
+          ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
           sessionId,
           yolo: flags.yolo,
           provider: flags.provider,
           modelId: flags.modelId,
           persistThinking: flags.persistThinking,
+          ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
           ...(flags.memoryBudgetChars !== undefined
             ? { memoryBudgetChars: flags.memoryBudgetChars }
             : {}),
@@ -342,7 +358,7 @@ async function main(argv: string[]): Promise<void> {
   }
   const flags = parseModelFlags(
     argv,
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --root / --stream-fn / --provider / --model"
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --root / --stream-fn / --provider / --model"
   );
   if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
     throw new Error(
@@ -365,6 +381,7 @@ async function main(argv: string[]): Promise<void> {
     provider: flags.provider,
     modelId: flags.modelId,
     persistThinking: flags.persistThinking,
+    ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
     ...(flags.memoryBudgetChars !== undefined
       ? { memoryBudgetChars: flags.memoryBudgetChars }
       : {}),

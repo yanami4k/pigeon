@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import {
   JsonlEventLog,
   materializeSession,
@@ -84,7 +85,9 @@ function setup(replies: FakeReply[], wrapLog?: (log: JsonlEventLog) => EventLogS
   const adapter = new PiRuntimeAdapter({
     snapshot: makeSnapshot(),
     streamFn,
-    registry,
+    governance: createToolGovernance({
+      registry,
+    }),
     tools: [createEditFileTool(root)],
     sessionId,
     eventLog: wrapLog === undefined ? log : wrapLog(log),
@@ -120,7 +123,8 @@ test("run.started 每 Run 一条且先于该 Run 的其他记录；system prompt
     );
     const snapshot = makeSnapshot();
     assert.deepEqual(materialized.runStarteds[0]?.payload, {
-      model: snapshot.model,
+      // M5.5 S5（决策 050）：推理档位随 run.started 落盘，缺省记 off（未请求推理）
+      model: { ...snapshot.model, thinkingLevel: "off" },
       policy: snapshot.tools.policy,
       advertisedTools: ["edit_file"],
       systemPromptHash: sha256(SYSTEM_PROMPT),

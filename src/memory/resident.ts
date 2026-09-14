@@ -1,6 +1,7 @@
 // 常驻 Memory（M5 S3，决策 042）：两层存储、字符预算、会话开始读一次即冻结。
 //   - 用户级 ~/.pigeon/preferences.md：用户偏好，永不截断，排在最前并占用预算；
-//   - 项目级 .pigeon/memory/*.md：按配置顺序装到预算满——放得下的整份装入，预算边界上的那份
+//   - 项目级 .pigeon/memory/*.md：按文件名字典序装到预算满（M5.5 S5 决策 050 定为口径：没有配置来源，
+//     要调整先后就改文件名）——放得下的整份装入，预算边界上的那份
 //     只装入前半并标 truncated，其余不注入、只在段尾列出文件名（模型需要时用 read_file 按需读）。
 // 两层都是人可直接编辑的 markdown；M5 的写入方只有人（M8 激活候选时程序写入同一目录）。
 // 注入位置是 system prompt 追加段（装配根拼接），不走 transformContext；冻结身份是每文件 sha256
@@ -22,8 +23,6 @@ export interface ResidentMemoryOptions {
   // 用户级根；缺省 os.homedir()（测试注入临时目录）
   homeDir?: string;
   budgetChars?: number;
-  // 项目 Memory 的配置顺序（文件名）；未列出的文件按文件名字典序排在其后
-  order?: readonly string[];
 }
 
 export interface ResidentMemory {
@@ -57,17 +56,16 @@ function sliceChars(text: string, count: number): string {
   return text.slice(0, end);
 }
 
-function projectMemoryNames(workspaceRoot: string, order: readonly string[]): string[] {
+// 项目 Memory 文件清单：只认目录下的 .md 常规文件，按文件名字典序（决策 050 口径）
+function projectMemoryNames(workspaceRoot: string): string[] {
   const dir = join(workspaceRoot, ".pigeon", "memory");
   if (!existsSync(dir)) {
     return [];
   }
-  const names = readdirSync(dir, { withFileTypes: true })
+  return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
     .map((entry) => entry.name)
     .sort();
-  const listed = [...new Set(order)].filter((name) => names.includes(name));
-  return [...listed, ...names.filter((name) => !listed.includes(name))];
 }
 
 export function loadResidentMemory(options: ResidentMemoryOptions): ResidentMemory {
@@ -93,7 +91,7 @@ export function loadResidentMemory(options: ResidentMemoryOptions): ResidentMemo
   }
 
   const memoryDir = join(options.workspaceRoot, ".pigeon", "memory");
-  for (const name of projectMemoryNames(options.workspaceRoot, options.order ?? [])) {
+  for (const name of projectMemoryNames(options.workspaceRoot)) {
     const file = readMemoryFile(join(memoryDir, name), `.pigeon/memory/${name}`);
     const remaining = budgetChars - usedChars;
     const identity = { path: file.displayPath, hash: file.hash, bytes: file.bytes };

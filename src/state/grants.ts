@@ -1,6 +1,7 @@
 // 固化 grant 规则 schema（M4 S6，D6：项目级 .pigeon/grants.json，JSON + 版本化 typebox schema）。
 // 规则的稳定身份是 promotedFrom.grantId（M4 收口决策 ①）；匹配语义在 tools/grants.ts，
 // 文件读写在 persistence/grants-config.ts，会话 grant 运行态在 approvals/grant-store.ts。
+// M5.5 S5（决策 048）：exec 档规则带 command（精确命令串），加法式字段，版本不变。
 import { type Static, Type } from "typebox";
 import { GrantIdSchema, SessionIdSchema } from "./ids.ts";
 
@@ -22,6 +23,10 @@ export type PromotedFrom = Static<typeof PromotedFromSchema>;
 export const ConfigGrantRuleSchema = Type.Object({
   tool: Type.String({ minLength: 1 }),
   pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
+  // exec 档：只放行这条一模一样的命令串
+  command: Type.Optional(Type.String({ minLength: 1 })),
+  // 048 修订：经 shell 运行这条命令已由人确认（缺省 = false，旧规则不能免审需 shell 的命令）
+  shell: Type.Optional(Type.Boolean()),
   promotedFrom: PromotedFromSchema,
 });
 export type ConfigGrantRule = Static<typeof ConfigGrantRuleSchema>;

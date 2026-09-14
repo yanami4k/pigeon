@@ -8,16 +8,26 @@
 // rebind 工厂——按 cli resume 同一配方（restoredGrants 种子 + buildRuntime + 旧运行面
 // 释放）装配目标会话运行面，壳换绑后同 sessionId 续跑（重启 TUI 恢复已有会话的路径：
 // 重启后进 /resume）。
+// M5.5 S4（决策 040）：主会话与各 worker 的审批经同一队列汇聚到面板（一次一个）；每个会话运行面
+// 配一个编排器（/spawn /cancel /workers）；恢复 worker 会话时回到它自己的工作树与委派策略，
+// 且其编排器按深度 1 拒绝再派。一个窗口一个进程：退出时先取消在跑的 worker 并等其收尾记录落盘。
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import { sessionRuntimeScope } from "../application/worker-scope.ts";
+import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
+import { createApprovalQueue } from "../approvals/queue.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
+import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
-import { PigeonTuiShell } from "./shell.ts";
+import { PigeonTuiShell, type TuiWorkersFace } from "./shell.ts";
+
+// 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
+const WORKER_SHUTDOWN_GRACE_MS = 5000;
 
 interface TuiFlags {
   root: string;
@@ -31,6 +41,8 @@ interface TuiFlags {
   historyLimit?: number;
   // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
   memoryBudgetChars?: number;
+  // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理；worker 角色配置可覆盖）
+  thinkingLevel?: ThinkingLevel;
 }
 
 function parseFlags(argv: string[]): TuiFlags {
@@ -44,7 +56,7 @@ function parseFlags(argv: string[]): TuiFlags {
   };
   const usage =
     "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-    "[--provider <名>] [--model <id>]";
+    "[--provider <名>] [--model <id>] [--thinking <档位>]";
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--yolo") {
@@ -63,6 +75,12 @@ function parseFlags(argv: string[]): TuiFlags {
         throw new Error(`--history-limit 需要正整数（${usage}）`);
       }
       flags.historyLimit = value;
+    } else if (flag === "--thinking") {
+      const value = argv[++i];
+      if (value === undefined || !isThinkingLevel(value)) {
+        throw new Error(`--thinking 需要推理档位（${THINKING_LEVELS.join("/")}）（${usage}）`);
+      }
+      flags.thinkingLevel = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -87,30 +105,49 @@ async function main(argv: string[]): Promise<void> {
     );
   }
   const streamFn = await loadStreamFn(flags.streamFnSpec);
-  // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份
+  // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份；
+  // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
   const sessionId = newSessionId();
   // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
   // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
   const faceHolder: { current: TuiApprovalFace | undefined } = { current: undefined };
+  // M5.5 S3：主会话与各 worker 的审批经同一队列，一次一个
+  const approvalQueue = createApprovalQueue();
   const createHandler = (grants: SessionGrantStore) =>
-    createTuiApprovalHandler(grants, () => faceHolder.current);
-  // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
-  let slot: { sessionId: SessionId; bundle: RuntimeBundle } = {
-    sessionId,
-    bundle: buildRuntime({
+    approvalQueue.wrap(createTuiApprovalHandler(grants, () => faceHolder.current));
+  const workersFor = (bundle: RuntimeBundle, parentSessionId?: SessionId) =>
+    createSessionWorkers({
+      governanceRoot: workspaceRoot,
+      bundle,
+      // worker 请求自带其会话的放权落点；此处绑定的父会话存储只是缺省
+      approvals: createHandler(bundle.grantStore),
       streamFn,
-      workspaceRoot,
-      sessionId,
-      yolo: flags.yolo,
       provider: flags.provider,
       modelId: flags.modelId,
       persistThinking: flags.persistThinking,
-      ...(flags.memoryBudgetChars !== undefined
-        ? { memoryBudgetChars: flags.memoryBudgetChars }
-        : {}),
-      createApprovalHandler: createHandler,
-    }),
+      ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
+      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+    });
+  const mainBundle = buildRuntime({
+    streamFn,
+    workspaceRoot,
+    sessionId,
+    yolo: flags.yolo,
+    provider: flags.provider,
+    modelId: flags.modelId,
+    persistThinking: flags.persistThinking,
+    ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
+    ...(flags.memoryBudgetChars !== undefined
+      ? { memoryBudgetChars: flags.memoryBudgetChars }
+      : {}),
+    createApprovalHandler: createHandler,
+  });
+  // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
+  let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers: TuiWorkersFace } = {
+    sessionId,
+    bundle: mainBundle,
+    workers: workersFor(mainBundle),
   };
   const shell = new PigeonTuiShell({
     terminal: new ProcessTerminal(),
@@ -130,30 +167,40 @@ async function main(argv: string[]): Promise<void> {
     // M5 S2（决策 038 / 045）：/search 命令上下文与 /resume 历史渲染上限
     search: { root: workspaceRoot },
     ...(flags.historyLimit !== undefined ? { historyLimit: flags.historyLimit } : {}),
+    // M5.5 S4：/spawn /cancel /workers
+    workers: slot.workers,
     // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
     // restoredGrants 种子（决策 3b，物化目标会话的生效 grant，静默继续有效）+
     // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
     // 旧运行面不受影响，壳继续留在原会话
     resume: {
       root: workspaceRoot,
+      // M5.5 S4：worker 会话的确证读取根是其工作树
+      workspaceRootFor: (targetId) => sessionRuntimeScope(workspaceRoot, targetId).workspaceRoot,
       rebind: (targetId) => {
+        // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）
+        const scope = sessionRuntimeScope(workspaceRoot, targetId);
         const restoredGrants = restoreGrantSeed(workspaceRoot, targetId);
         const bundle = buildRuntime({
           streamFn,
-          workspaceRoot,
+          workspaceRoot: scope.workspaceRoot,
+          governanceRoot: workspaceRoot,
+          ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
           sessionId: targetId,
           yolo: flags.yolo,
           provider: flags.provider,
           modelId: flags.modelId,
           persistThinking: flags.persistThinking,
+          ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
           ...(flags.memoryBudgetChars !== undefined
             ? { memoryBudgetChars: flags.memoryBudgetChars }
             : {}),
           createApprovalHandler: createHandler,
           restoredGrants,
         });
+        const workers = workersFor(bundle, scope.parentSessionId);
         const previous = slot;
-        slot = { sessionId: targetId, bundle };
+        slot = { sessionId: targetId, bundle, workers };
         void previous.bundle.adapter.dispose().finally(() => {
           previous.bundle.eventLog.close();
         });
@@ -165,6 +212,7 @@ async function main(argv: string[]): Promise<void> {
             configRules: bundle.configGrants,
             eventLog: bundle.eventLog,
           },
+          workers,
         };
       },
     },
@@ -174,11 +222,20 @@ async function main(argv: string[]): Promise<void> {
   });
   faceHolder.current = shell;
   shell.start();
-  // 进程级退出（OS 信号 SIGINT/SIGTERM）：停壳 + 释放当前运行面。注意这不是 S5 的
-  // 运行取消键——取消键是壳内输入语义；壳内双击 Ctrl+C / /quit 走 onExit（033）
+  // 进程级退出：先取消在跑的 worker 并等其收尾记录落盘（有上限），再释放当前运行面并退进程。
+  // 壳已停止，worker 排队中的审批按拒绝处理，不会吊住取消
   function release(): void {
-    void slot.bundle.adapter.dispose().finally(() => {
-      slot.bundle.eventLog.close();
+    const current = slot;
+    void (async () => {
+      const running = current.workers.status().filter((worker) => worker.state === "running");
+      await Promise.allSettled(running.map((worker) => current.workers.cancel(worker.sessionId)));
+      await Promise.race([
+        Promise.allSettled(running.map((worker) => current.workers.awaitResult(worker.sessionId))),
+        new Promise((resolve) => setTimeout(resolve, WORKER_SHUTDOWN_GRACE_MS)),
+      ]);
+      await current.bundle.adapter.dispose();
+      current.bundle.eventLog.close();
+    })().finally(() => {
       process.exit(0);
     });
   }

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { recoverSession } from "../execution/recovery.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { DecisionRecord, EventRecord, IntentRecord } from "../state/event-log.ts";
@@ -114,9 +115,11 @@ test("批准执行路径：dispatch 前落 intent，end 后落 receipt，冷物�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: true }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: true }),
       sessionId,
       eventLog,
     });
@@ -179,9 +182,11 @@ test("人工拒绝路径：decision 落盘（理由逐字）+ receipt executed=f
           { text: "好吧" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: false, reason: "不准" }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: false, reason: "不准" }),
       sessionId,
       eventLog,
     });
@@ -233,9 +238,11 @@ test("deny 清单路径：decision 落盘 approvedBy=policy:deny，理由逐字�
           { text: "好吧" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: true }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: true }),
       sessionId,
       eventLog,
     });
@@ -283,7 +290,9 @@ test("未配置审批通道 fail-closed：decision 落盘 approvedBy=policy:deny
           { text: "好吧" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       // 故意不传 approvalHandler：prompt 模式 fail-closed 拒绝
       sessionId,
@@ -339,9 +348,11 @@ test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故�
           { text: "好吧" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: false, reason: "不准" }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: false, reason: "不准" }),
       sessionId,
       eventLog: poison,
     });
@@ -352,6 +363,10 @@ test("decision 写盘失败不改变拒绝结果：理由逐字回模型，故�
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
     assert.equal(result.toolExecutions[0]?.decision?.outcome, "rejected");
     assert.equal(result.toolExecutions[0]?.decision?.reason, "不准");
+    // 模型侧同样逐字：接缝转发的阻断理由就是 error toolResult 的文本（决策 049 接缝证据）
+    const toolResult = adapter.transcript().find((message) => message.role === "toolResult");
+    const text = toolResult?.role === "toolResult" ? toolResult.content[0] : undefined;
+    assert.ok(text?.type === "text" && text.text === "不准", JSON.stringify(toolResult));
     // 故障响亮记录（listenerErrors），不是静默吞掉
     assert.ok(adapter.listenerErrors().length > 0);
 
@@ -416,7 +431,9 @@ test("崩溃点②：execute 已跑、receipt 未写（故障注入事件日志�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog: poison,
@@ -467,7 +484,9 @@ test("账本写盘失败 = fail-closed：intent 写不进就不放行，execute 
           { text: "明白" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog: broken,
@@ -514,7 +533,9 @@ test("闸内异常循环熔断：账本持续写失败 + 模型坚持重发，�
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("yolo"),
       streamFn: createFakeStreamFn({ replies: [...stubbornReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog: broken,
@@ -556,7 +577,9 @@ test("receipt 写盘失败不吞事件：tool.settled 照常入事件日志并�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog: poison,
@@ -611,9 +634,11 @@ test("冷物化 ≡ 活适配器状态：脚本化 Run 后事件序列与对账�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: true }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: true }),
       sessionId,
       eventLog,
     });
@@ -659,7 +684,9 @@ test("哈希证据：intent 携带改前/预期改后哈希，receipt 携带实�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog,
@@ -706,7 +733,9 @@ test("域错误分类：锚点不匹配 → settled 事件携带 errorKind=domai
           { text: "明白" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog,
@@ -769,7 +798,9 @@ test("环境异常分类：写工具抛 ErrnoException → settled 事件携带 
           { text: "明白" },
         ],
       }),
-      registry,
+      governance: createToolGovernance({
+        registry,
+      }),
       tools: [brokenWriter],
       sessionId,
       eventLog,
@@ -801,7 +832,9 @@ test("熔断落闸留证：幽灵工具名循环 → breaker 记录落盘（scop
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("yolo"),
       streamFn: createFakeStreamFn({ replies: [...phantomReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog,
@@ -836,7 +869,9 @@ test("熔断落闸留证：deny 循环 → breaker 记录落盘（scope=tool）�
     const denyAdapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("yolo", ["edit_file"]),
       streamFn: createFakeStreamFn({ replies: [...stubborn, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog,
@@ -858,9 +893,11 @@ test("熔断落闸留证：deny 循环 → breaker 记录落盘（scope=tool）�
     const rejectAdapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot("prompt"),
       streamFn: createFakeStreamFn({ replies: [...stubborn, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        approvalHandler: async () => ({ approved: false, reason: "不准改" }),
+      }),
       tools: [createEditFileTool(root)],
-      approvalHandler: async () => ({ approved: false, reason: "不准改" }),
       sessionId: session2,
       eventLog: log2,
     });
@@ -980,7 +1017,9 @@ test("崩溃点②b：execute 已跑、receipt 未写（文件已是改后哈希
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createEditFileTool(root)],
       sessionId,
       eventLog: poison,

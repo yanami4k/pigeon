@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
+import { createToolGovernance } from "../application/governance.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
@@ -94,10 +95,12 @@ test("不变式①deny 压过 grant：deny 清单在，grant 命中也一律拒�
           { text: "好吧" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: store,
+        workspaceRoot: root,
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: store,
-      workspaceRoot: root,
     });
     const result = await adapter.run("改文件");
     assert.equal(result.status, "completed");
@@ -137,10 +140,12 @@ test("不变式②grant 命中：approvedBy=human:grant，intent 携带 grantRef
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: store,
+        workspaceRoot: root,
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: store,
-      workspaceRoot: root,
       eventLog,
       sessionId,
     });
@@ -198,14 +203,16 @@ test("不变式③撤销立即停免审：/revoke 后同工具调用重新弹人
           { text: "完" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: store,
+        workspaceRoot: root,
+        approvalHandler: async (request) => {
+          approvals.push(request);
+          return { approved: true };
+        },
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: store,
-      workspaceRoot: root,
-      approvalHandler: async (request) => {
-        approvals.push(request);
-        return { approved: true };
-      },
     });
     const run1 = await adapter.run("第一轮");
     assert.equal(run1.toolExecutions[0]?.decision?.approvedBy, "human:grant");
@@ -254,14 +261,16 @@ test("不变式④配置规则命中：approvedBy=policy:config，grantRef 回�
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        configGrants,
+        workspaceRoot: root,
+        approvalHandler: async (request) => {
+          approvals.push(request);
+          return { approved: true };
+        },
+      }),
       tools: [createEditFileTool(root)],
-      configGrants,
-      workspaceRoot: root,
-      approvalHandler: async (request) => {
-        approvals.push(request);
-        return { approved: true };
-      },
     });
     const result = await adapter.run("改文件");
     assert.equal(result.status, "completed");
@@ -316,14 +325,16 @@ test("不变式⑤崩溃恢复：grant.created 落盘 → 冷物化还原 → �
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: restored,
+        workspaceRoot: root,
+        approvalHandler: async (request) => {
+          approvals.push(request);
+          return { approved: true };
+        },
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: restored,
-      workspaceRoot: root,
-      approvalHandler: async (request) => {
-        approvals.push(request);
-        return { approved: true };
-      },
       sessionId,
     });
     const result = await adapter.run("改文件");
@@ -363,10 +374,12 @@ test("不变式⑦熔断独立于授权：grant 生效期间幽灵工具名连�
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot({ allow: ["edit_file"] }),
       streamFn: createFakeStreamFn({ replies: [...phantomReplies, { text: "放弃" }] }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: store,
+        workspaceRoot: root,
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: store,
-      workspaceRoot: root,
     });
     const result = await adapter.run("胡闹");
     // 事件级熔断（上游拦截连击）与 grant 授权无关——照样落闸
@@ -395,7 +408,9 @@ test("不变式⑧读层事件级裁剪（决策 1）：read_file 调用零 inte
           { text: "完" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+      }),
       tools: [createReadFileTool(root)],
       eventLog,
       sessionId,
@@ -457,14 +472,16 @@ test("目录限定 grant：目录内免审、目录外弹审批、非路径参�
           { text: "完" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: store,
+        workspaceRoot: root,
+        approvalHandler: async (request) => {
+          approvals.push(request);
+          return { approved: true };
+        },
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: store,
-      workspaceRoot: root,
-      approvalHandler: async (request) => {
-        approvals.push(request);
-        return { approved: true };
-      },
     });
     const result = await adapter.run("改文件");
     assert.equal(result.status, "completed");
@@ -509,11 +526,13 @@ test("会话 grant 优先于配置规则：同一调用两处都命中时记 hum
           { text: "完成" },
         ],
       }),
-      registry: makeRegistry(),
+      governance: createToolGovernance({
+        registry: makeRegistry(),
+        sessionGrants: store,
+        configGrants: loadGrantConfig(root),
+        workspaceRoot: root,
+      }),
       tools: [createEditFileTool(root)],
-      sessionGrants: store,
-      configGrants: loadGrantConfig(root),
-      workspaceRoot: root,
     });
     const result = await adapter.run("改文件");
     assert.equal(result.toolExecutions[0]?.decision?.approvedBy, "human:grant");

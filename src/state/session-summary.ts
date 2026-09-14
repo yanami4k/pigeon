@@ -25,6 +25,10 @@ export interface SessionSummary {
   // M5 S5（决策 044）：本会话 turn.completed usage 的合计（M5 前的记录无 usage，计 0）
   totalTokens: number;
   totalCost: number;
+  // M5.5 S4（决策 040）：本会话是 worker 时在场（会话头派生）
+  worker?: { name: string; role: string; parentSessionId: SessionId };
+  // M5.5 S4：本会话派出过 worker 时在场；unsettled = 有 child.spawned 无 child.settled
+  children?: { count: number; unsettled: number };
 }
 
 // 最小过滤器（CLI --tool / --class / --since / --until 的投影层形状；多条件叠加为与）
@@ -113,6 +117,23 @@ export function summarizeSession(materialized: MaterializedSession): SessionSumm
     pendingReconcile: materialized.reconcile.unknown.length,
     totalTokens,
     totalCost,
+    ...(materialized.sessionHeader !== undefined
+      ? {
+          worker: {
+            name: materialized.sessionHeader.worker.name,
+            role: materialized.sessionHeader.worker.role,
+            parentSessionId: materialized.sessionHeader.parentSessionId,
+          },
+        }
+      : {}),
+    ...(materialized.children.length > 0
+      ? {
+          children: {
+            count: materialized.children.length,
+            unsettled: materialized.children.filter((child) => child.settled === undefined).length,
+          },
+        }
+      : {}),
   };
   return summary;
 }

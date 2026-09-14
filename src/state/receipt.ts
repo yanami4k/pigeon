@@ -4,11 +4,13 @@
 // v2：补批准来源（决策 4，证据链）与 toolCallId（回联上游 transcript / ToolExecution 账本）。
 // v3（M4 S2 哈希自动确证）：补 contentAfterHash——执行后实测的目标内容哈希
 // （snapshotTag 格式，16 位十六进制），供冷恢复三方比对与撕裂写检测；只读工具无此字段。
+// v4（M5.5 S5，决策 048）：补 exec——exec 工具的执行证据（命令、参数数组、退出码、输出哈希与截断输出、
+// 执行前后工作树文件清单差异）；非 exec 工具无此字段。
 import { type Static, Type } from "typebox";
 import { ExecutionIdSchema, ReceiptIdSchema } from "./ids.ts";
 import { type Migration, MigrationRegistry } from "./migration.ts";
 
-export const RECEIPT_VERSION = 3;
+export const RECEIPT_VERSION = 4;
 
 // 批准来源（与 ToolExecutionDecision.approvedBy 同枚举，决策 4 + M4 S6 决策 3 扩展）
 export const ReceiptApprovedBySchema = Type.Union([
@@ -19,6 +21,32 @@ export const ReceiptApprovedBySchema = Type.Union([
   Type.Literal("human:grant"),
   Type.Literal("policy:config"),
 ]);
+
+// exec 执行证据（决策 048）：输出全文不入账，只存哈希与截断文本
+export const ReceiptExecSchema = Type.Object({
+  command: Type.String({ minLength: 1 }),
+  // 经 .pigeon/commands.json 短名展开时的短名
+  alias: Type.Optional(Type.String({ minLength: 1 })),
+  // 实际进程参数（经启动器或 shell 时是 cmd.exe / sh 的参数）
+  argv: Type.Array(Type.String()),
+  // 048 修订：是否经 cmd.exe 启动器运行 .cmd / .bat、是否以 shell 运行
+  launcher: Type.Boolean(),
+  shell: Type.Boolean(),
+  exitCode: Type.Union([Type.Integer(), Type.Null()]),
+  signal: Type.Optional(Type.String()),
+  timedOut: Type.Boolean(),
+  outputBytes: Type.Integer({ minimum: 0 }),
+  outputHash: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+  output: Type.String(),
+  truncated: Type.Boolean(),
+  fileChanges: Type.Object({
+    added: Type.Array(Type.String()),
+    removed: Type.Array(Type.String()),
+    modified: Type.Array(Type.String()),
+    truncated: Type.Boolean(),
+  }),
+});
+export type ReceiptExec = Static<typeof ReceiptExecSchema>;
 
 export const ReceiptSchema = Type.Object({
   version: Type.Literal(RECEIPT_VERSION),
@@ -40,6 +68,8 @@ export const ReceiptSchema = Type.Object({
   // M4 S2：执行后实测的目标内容哈希（snapshotTag 格式）；executed=true 且工具具备
   // 内容证据能力时在场；只读工具 / 执行失败 / 哈希不可得时缺省（缺省 ≠ 篡改）
   contentAfterHash: Type.Optional(Type.String({ pattern: "^[0-9a-f]{16}$" })),
+  // M5.5 S5：exec 工具的执行证据；进程启动过（含超时终止）即在场
+  exec: Type.Optional(ReceiptExecSchema),
 });
 
 export type Receipt = Static<typeof ReceiptSchema>;
@@ -55,13 +85,17 @@ export const migrateReceiptV1toV2: Migration = (doc) => ({
 });
 
 // v2 → v3：contentAfterHash 可缺省，纯版本推进
-export const migrateReceiptV2toV3: Migration = (doc) => ({ ...doc, version: RECEIPT_VERSION });
+export const migrateReceiptV2toV3: Migration = (doc) => ({ ...doc, version: 3 });
+
+// v3 → v4：exec 可缺省，纯版本推进
+export const migrateReceiptV3toV4: Migration = (doc) => ({ ...doc, version: 4 });
 
 // receipt 迁移链的唯一装配点：M3 旧账本读取（ledger.ts）与 Event Log 读路径
 // （event-log.ts 内嵌 receipt 载荷升级）共用同一条链，杜绝两套迁移表漂移
 const receiptMigrations = new MigrationRegistry();
 receiptMigrations.register("receipt", 1, migrateReceiptV1toV2);
 receiptMigrations.register("receipt", 2, migrateReceiptV2toV3);
+receiptMigrations.register("receipt", 3, migrateReceiptV3toV4);
 
 // 任意历史版本的 Receipt 文档 → 当前版本 + 校验
 export function migrateReceiptToCurrent(doc: unknown): Receipt {
