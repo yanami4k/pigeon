@@ -15,7 +15,14 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
-import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import { describeMcpStartup, type McpSession, startMcpSession } from "../application/mcp.ts";
+import {
+  buildRuntime,
+  disposeRuntime,
+  loadStreamFn,
+  type RuntimeBundle,
+  type RuntimeDeps,
+} from "../application/runtime.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
@@ -28,6 +35,19 @@ import { PigeonTuiShell, type TuiWorkersFace } from "./shell.ts";
 
 // 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
 const WORKER_SHUTDOWN_GRACE_MS = 5000;
+
+// M5.7 S3（决策 041）：装配前启动 MCP server；装配失败时先关掉已启动的 server 再上抛（先建后换语义不变）
+async function buildWithMcp(
+  mcp: McpSession,
+  deps: Omit<RuntimeDeps, "mcp">
+): Promise<RuntimeBundle> {
+  try {
+    return buildRuntime({ ...deps, mcp });
+  } catch (error) {
+    await mcp.close();
+    throw error;
+  }
+}
 
 interface TuiFlags {
   root: string;
@@ -129,7 +149,13 @@ async function main(argv: string[]): Promise<void> {
       ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
     });
-  const mainBundle = buildRuntime({
+  // 壳尚未接管终端：启动问题（单个 server 起不来不挡会话）与注解配置冲突（052）直接打到 stderr，
+  // 冷侧另见 run.started 的工具集摘要与 server 状态
+  const mainMcp = await startMcpSession({ governanceRoot: workspaceRoot, workspaceRoot });
+  for (const note of describeMcpStartup(mainMcp)) {
+    console.error(`[mcp] ${note}`);
+  }
+  const mainBundle = await buildWithMcp(mainMcp, {
     streamFn,
     workspaceRoot,
     sessionId,
@@ -177,11 +203,16 @@ async function main(argv: string[]): Promise<void> {
       root: workspaceRoot,
       // M5.5 S4：worker 会话的确证读取根是其工作树
       workspaceRootFor: (targetId) => sessionRuntimeScope(workspaceRoot, targetId).workspaceRoot,
-      rebind: (targetId) => {
+      rebind: async (targetId) => {
         // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）
         const scope = sessionRuntimeScope(workspaceRoot, targetId);
         const restoredGrants = restoreGrantSeed(workspaceRoot, targetId);
-        const bundle = buildRuntime({
+        // M5.7 S3：目标会话的 MCP server 以其工作区根启动（worker 会话即其工作树）
+        const mcp = await startMcpSession({
+          governanceRoot: workspaceRoot,
+          workspaceRoot: scope.workspaceRoot,
+        });
+        const bundle = await buildWithMcp(mcp, {
           streamFn,
           workspaceRoot: scope.workspaceRoot,
           governanceRoot: workspaceRoot,
@@ -201,9 +232,7 @@ async function main(argv: string[]): Promise<void> {
         const workers = workersFor(bundle, scope.parentSessionId);
         const previous = slot;
         slot = { sessionId: targetId, bundle, workers };
-        void previous.bundle.adapter.dispose().finally(() => {
-          previous.bundle.eventLog.close();
-        });
+        void disposeRuntime(previous.bundle);
         return {
           runtime: bundle.adapter,
           grants: {
@@ -233,8 +262,7 @@ async function main(argv: string[]): Promise<void> {
         Promise.allSettled(running.map((worker) => current.workers.awaitResult(worker.sessionId))),
         new Promise((resolve) => setTimeout(resolve, WORKER_SHUTDOWN_GRACE_MS)),
       ]);
-      await current.bundle.adapter.dispose();
-      current.bundle.eventLog.close();
+      await disposeRuntime(current.bundle);
     })().finally(() => {
       process.exit(0);
     });

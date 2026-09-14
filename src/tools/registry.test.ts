@@ -64,7 +64,7 @@ test("畸形路径约束被拒绝：未知 kind / 空 roots 清单", () => {
   }
 });
 
-test("parameters 必须是 typebox 对象 schema：裸对象与非对象 schema 被拒绝", () => {
+test("parameters 必须是对象 schema：无 type 的裸对象与非对象 schema 被拒绝", () => {
   const base = makeReadFileRegistration();
   const badParameters: unknown[] = [{}, Type.String(), null, undefined];
   for (const parameters of badParameters) {

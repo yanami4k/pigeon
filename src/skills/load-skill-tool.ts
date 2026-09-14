@@ -14,7 +14,12 @@ import { sha256Hex, truncateUtf8 } from "../state/message-content.ts";
 import type { SkillLoadedPayload } from "../state/runtime-events.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
-import type { SkillCatalog } from "./catalog.ts";
+import {
+  MCP_PROMPT_RESOURCE,
+  type SkillCatalog,
+  type SkillEntry,
+  type SkillPromptSource,
+} from "./catalog.ts";
 
 export const LOAD_SKILL_TOOL = "load_skill";
 export const DEFAULT_SKILL_FILE_LIMIT_BYTES = 64 * 1024;
@@ -48,7 +53,8 @@ export function createLoadSkillTool(
     label: LOAD_SKILL_TOOL,
     description:
       "按名读取会话开始时登记的 Skill：不给 resource 时读 SKILL.md，给 resource 时读该 Skill 目录下的" +
-      "资源文件（如 references/x.md）。只能读登记过的 Skill 目录内的文件；scripts 只读不执行。",
+      "资源文件（如 references/x.md）。只能读登记过的 Skill 目录内的文件；scripts 只读不执行。" +
+      "MCP server 的 prompt 只有正文，不给 resource。",
     parameters: LoadSkillParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SkillLoadedPayload>> {
@@ -59,6 +65,9 @@ export function createLoadSkillTool(
         throw new LoadSkillError(
           `未登记的 Skill：${args.name}（只认会话开始时登记的 Skill；可用：${available || "无"}）`
         );
+      }
+      if (skill.prompt !== undefined) {
+        return loadPromptSkill(skill, skill.prompt, args.resource, maxBytes, options.onLoaded);
       }
       const resource = args.resource ?? "SKILL.md";
       let realDir: string;
@@ -114,6 +123,50 @@ export function createLoadSkillTool(
       return { content: [{ type: "text", text: lines.join("\n") }], details: payload };
     },
   };
+}
+
+// M5.7 S4：MCP prompt 型 Skill——没有资源文件；经 load 重取正文（server 不可用的错误原样上抛，不改写成域错误），
+// 与会话开始时的哈希不符拒绝（下个会话生效，§2 规则 4）；大小上限与留痕同文件型
+async function loadPromptSkill(
+  skill: SkillEntry,
+  source: SkillPromptSource,
+  resource: string | undefined,
+  maxBytes: number,
+  onLoaded: ((payload: SkillLoadedPayload) => void) | undefined
+): Promise<PigeonToolResult<SkillLoadedPayload>> {
+  if (resource !== undefined && resource !== MCP_PROMPT_RESOURCE) {
+    throw new LoadSkillError(
+      `MCP prompt 没有资源文件：${resource}（Skill ${skill.name} 只有正文，不给 resource 即可）`
+    );
+  }
+  const text = await source.load();
+  const bytes = Buffer.byteLength(text);
+  const hash = sha256Hex(text);
+  const frozen = skill.files.find((file) => file.path === MCP_PROMPT_RESOURCE);
+  if (frozen === undefined || frozen.hash !== hash) {
+    throw new LoadSkillError(
+      `该 Skill 已变更：${skill.name} 的正文与会话开始时的哈希清单不符（MCP server ${source.server} 改过），下个会话生效`
+    );
+  }
+  const cut = truncateUtf8(text, maxBytes);
+  const payload: SkillLoadedPayload = {
+    name: skill.name,
+    resourcePath: MCP_PROMPT_RESOURCE,
+    hash,
+    bytes,
+    truncated: cut.truncated,
+  };
+  onLoaded?.(payload);
+  const lines = [
+    `[Skill ${skill.name}｜MCP server ${source.server} 的 prompt ${source.prompt}｜${bytes} 字节｜sha256 ${hash}]`,
+  ];
+  if (cut.truncated) {
+    lines.push(
+      `（已截断：正文 ${bytes} 字节超出 ${maxBytes} 字节上限，只返回前 ${Buffer.byteLength(cut.text)} 字节；全文哈希 ${hash}）`
+    );
+  }
+  lines.push(cut.text);
+  return { content: [{ type: "text", text: lines.join("\n") }], details: payload };
 }
 
 // 装配根注册用的元数据：read 档，路径活动范围 = 项目级与用户级两个 Skill 根

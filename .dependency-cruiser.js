@@ -89,7 +89,7 @@ export default {
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp)/",
       },
     },
     {
@@ -120,6 +120,15 @@ export default {
         "读取留痕经装配根注入的回调写出，skills 自身不触达 persistence / pi-runtime / application / Actor 层。",
       from: { path: "^src/skills/", pathNot: "\\.test\\.ts$" },
       to: { path: "^src/", pathNot: "^src/(skills|state|tools)/" },
+    },
+    {
+      name: "mcp-only-state-tools",
+      severity: "error",
+      comment:
+        "mcp（M5.7：MCP 客户端、传输与注册表映射，决策 041 / 051）只依赖 state 与 tools；" +
+        "不触达 persistence / pi-runtime / application / Actor 层，由 application 装配（022 修订）。",
+      from: { path: "^src/mcp/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/", pathNot: "^src/(mcp|state|tools)/" },
     },
     {
       name: "actors-no-execution",

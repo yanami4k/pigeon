@@ -17,12 +17,30 @@ import { JsonlEventLog, listSessionIds, materializeSession } from "../persistenc
 import type { ChildSettledRecord, SessionHeaderRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import type { ChildLink } from "../state/materialize.ts";
+import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
 import {
   buildSessionTrace,
   type SessionTrace,
   type TraceRun,
   type TraceToolCall,
 } from "../state/trace.ts";
+
+const MCP_SERVER_STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>> = {
+  idle: "未启动",
+  connected: "已连接",
+  restarting: "重启中",
+  unavailable: "不可用",
+  closed: "已关闭",
+};
+
+// 冲突项：声明 destructive 却配 read 的按 write；其余冲突是声明只读却配 write / exec，按配置
+function describeMcpConflict(entry: McpToolsetEntry): string {
+  const declared =
+    entry.declaredHint?.destructiveHint === true && entry.configuredTier === "read"
+      ? "声明 destructive"
+      : "声明只读";
+  return `${entry.name}（${declared}，配置 ${entry.configuredTier}，按 ${entry.effectiveTier}）`;
+}
 
 function renderToolCall(call: TraceToolCall, lines: string[]): void {
   lines.push(`    工具调用 ${call.toolCallId} [${call.toolName}]`);
@@ -168,6 +186,30 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
         `工具 ${tools} ｜ Memory ${payload.memory.length} 个（注入 ${injected}） ｜ Skill ${payload.skills.length} 个 ｜ ` +
         `system prompt ${payload.systemPromptHash.slice(0, 12)} ｜ 模型请求 ${run.llmRequestCount} 次`
     );
+    // M5.7 S3（决策 052）：MCP 工具集里注解与配置冲突的工具、非连接状态的 server、清单变更通知
+    const conflicts = (payload.mcpTools ?? []).filter((entry) => entry.conflict === true);
+    if (conflicts.length > 0) {
+      lines.push(`  MCP 工具集冲突：${conflicts.map(describeMcpConflict).join("、")}`);
+    }
+    for (const server of payload.mcpServers ?? []) {
+      if (server.state !== "connected") {
+        lines.push(
+          `  MCP server ${server.name} ${MCP_SERVER_STATE_LABEL[server.state]}（重启 ${server.restarts} 次` +
+            `${server.error !== undefined ? `：${server.error}` : ""}）`
+        );
+      }
+      for (const [list, label] of [
+        ["tools", "工具"],
+        ["prompts", "prompts "],
+      ] as const) {
+        const count = (server.listChanges ?? []).filter((change) => change.list === list).length;
+        if (count > 0) {
+          lines.push(
+            `  MCP server ${server.name} 发来${label}清单变更通知 ${count} 次（本会话不变，下个会话生效）`
+          );
+        }
+      }
+    }
   }
   // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，
   // 措辞与 replay 同口径——绝不假装证据链完整

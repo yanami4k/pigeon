@@ -1,6 +1,7 @@
 // worker 角色与委派策略（M5.5 S2，决策 040）：角色是参数不是执行体；worker 策略只能从父策略里挑子集——
 // allow 只缩（角色默认工具 ∩ 父 allow，再剔除父 deny），deny 只增（原样继承父 deny），审批模式不升级
 // （父 prompt 不派 yolo 子）。assertPolicySubset 是构造之外的第二道校验，派出前必过。
+import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
 import type { DelegatedPolicy, WorkerRole } from "../state/event-log.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
@@ -32,7 +33,12 @@ export function isWorkerRole(value: string): value is WorkerRole {
 
 export function deriveWorkerPolicy(parent: ToolPolicyLike, role: WorkerRole): DelegatedPolicy {
   const deny = [...new Set(parent.deny)];
-  const allow = ROLE_TOOLS[role].filter(
+  // M5.7 S4：implementer 另继承父策略里的 MCP 工具（外部写工具照样逐次审批）；其余角色不继承
+  const inherited =
+    role === "implementer"
+      ? parent.allow.filter((tool) => tool.startsWith(`${MCP_TOOL_PREFIX}__`))
+      : [];
+  const allow = [...ROLE_TOOLS[role], ...inherited].filter(
     (tool) => parent.allow.includes(tool) && !deny.includes(tool)
   );
   return { allow, deny, approvalMode: parent.approvalMode };

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "servers": {
+    "everything": {
+      "tools": {
+        "echo": { "tier": "write" },
+        "get-env": { "tier": "read" },
+        "get-sum": { "tier": "read" }
+      }
+    },
+    "filesystem": {
+      "tools": {
+        "list_allowed_directories": { "tier": "read" },
+        "list_directory": { "tier": "read", "pathConfinement": { "kind": "workspace" } },
+        "read_text_file": { "tier": "read", "pathConfinement": { "kind": "workspace" } },
+        "get_file_info": { "tier": "read", "pathConfinement": { "kind": "workspace" } },
+        "write_file": { "tier": "write" },
+        "edit_file": { "tier": "write" },
+        "create_directory": { "tier": "write" }
+      }
+    }
+  }
+}

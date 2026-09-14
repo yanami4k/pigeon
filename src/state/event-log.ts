@@ -42,8 +42,9 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v6（M5，决策 037 / 043 / 044 一次升）：entry 增 contentHash（旁置内容文件回指）、
 // turn.completed 增 usage、新增 run.started / llm.request / skill.loaded 观察族——
 // 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）；
-// v7（M5.5 S2，决策 040）：新增 session.header / child.spawned / child.settled 三族（worker 编排）
-export const EVENT_LOG_VERSION = 7;
+// v7（M5.5 S2，决策 040）：新增 session.header / child.spawned / child.settled 三族（worker 编排）；
+// v8（M5.7 S3，决策 053）：receipt 载荷升 v5（加 mcp 块），读路径把内嵌 receipt 经其迁移链升到当前版本
+export const EVENT_LOG_VERSION = 8;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -527,6 +528,13 @@ eventLogMigrations.register("event-log", 4, (doc) => ({ ...doc, version: 5 }));
 eventLogMigrations.register("event-log", 5, (doc) => ({ ...doc, version: 6 }));
 // v6 → v7（M5.5 S2）：加法式演进（新增 worker 编排三族）——v6 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 6, (doc) => ({ ...doc, version: 7 }));
+// v7 → v8（M5.7 S3，决策 053）：receipt 载荷升 v5。迁移链只在末尾按当前 schema 校验一次，内嵌 receipt 必须在链上
+// 显式升级——更早各版本的记录都经过这一步（同时补上 v6 → v7 未升级内嵌 receipt、v6 会话文件读回即报损坏的缺口）
+eventLogMigrations.register("event-log", 7, (doc) => ({
+  ...doc,
+  version: 8,
+  ...(doc.kind === "receipt" ? { receipt: migrateReceiptToCurrent(doc.receipt) } : {}),
+}));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏

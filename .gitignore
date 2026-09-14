@@ -9,6 +9,8 @@ coverage/
 
 # Pigeon 工作区状态（Event Log / 会话文件，D1：状态跟工作区走但不入库）
 .pigeon/
+# M5.7 验收夹具（decisions.md 055）：spikes/mcp-acc 下的 .pigeon/mcp.json 是入库的配置样例
+!spikes/mcp-acc/.pigeon/
 
 npm-debug.log*
 

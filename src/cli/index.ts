@@ -10,8 +10,15 @@ import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { GrantsCommandContext } from "../application/grants.ts";
+import { describeMcpStartup, type McpSession, startMcpSession } from "../application/mcp.ts";
 import { runResumeFlow } from "../application/resume.ts";
-import { buildRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import {
+  buildRuntime,
+  disposeRuntime,
+  loadStreamFn,
+  type RuntimeBundle,
+  type RuntimeDeps,
+} from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
@@ -301,7 +308,8 @@ async function resumeMain(argv: string[]): Promise<void> {
         // 决策 3b：grant 冷恢复种子——事件日志物化的生效 grant（created − revoked），
         // 静默继续有效，无重复确认环节（决策 034：种子物化归 application）
         const restoredGrants = restoreGrantSeed(workspaceRoot, sessionId);
-        const bundle = buildRuntime({
+        const mcp = await startSessionMcp(workspaceRoot, scope.workspaceRoot, write);
+        const bundle = await buildWithMcp(mcp, {
           streamFn,
           workspaceRoot: scope.workspaceRoot,
           governanceRoot: workspaceRoot,
@@ -329,13 +337,38 @@ async function resumeMain(argv: string[]): Promise<void> {
             search: { root: workspaceRoot },
           });
         } finally {
-          await bundle.adapter.dispose();
-          bundle.eventLog.close();
+          await disposeRuntime(bundle);
         }
       },
     });
   } finally {
     close();
+  }
+}
+
+// M5.7 S3（决策 041 / 052）：会话开始时启动 MCP server；启动问题与注解配置冲突如实打印（单个 server 起不来不挡会话）
+async function startSessionMcp(
+  governanceRoot: string,
+  workspaceRoot: string,
+  write: (text: string) => void
+): Promise<McpSession> {
+  const mcp = await startMcpSession({ governanceRoot, workspaceRoot });
+  for (const note of describeMcpStartup(mcp)) {
+    write(`[mcp] ${note}\n`);
+  }
+  return mcp;
+}
+
+// 装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛
+async function buildWithMcp(
+  mcp: McpSession,
+  deps: Omit<RuntimeDeps, "mcp">
+): Promise<RuntimeBundle> {
+  try {
+    return buildRuntime({ ...deps, mcp });
+  } catch (error) {
+    await mcp.close();
+    throw error;
   }
 }
 
@@ -373,7 +406,8 @@ async function main(argv: string[]): Promise<void> {
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
-  const bundle = buildRuntime({
+  const mcp = await startSessionMcp(workspaceRoot, workspaceRoot, write);
+  const bundle = await buildWithMcp(mcp, {
     streamFn,
     workspaceRoot,
     sessionId,
@@ -399,8 +433,7 @@ async function main(argv: string[]): Promise<void> {
     });
   } finally {
     close();
-    await bundle.adapter.dispose();
-    bundle.eventLog.close();
+    await disposeRuntime(bundle);
   }
 }
 

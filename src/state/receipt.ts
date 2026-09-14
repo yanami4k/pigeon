@@ -6,11 +6,13 @@
 // （snapshotTag 格式，16 位十六进制），供冷恢复三方比对与撕裂写检测；只读工具无此字段。
 // v4（M5.5 S5，决策 048）：补 exec——exec 工具的执行证据（命令、参数数组、退出码、输出哈希与截断输出、
 // 执行前后工作树文件清单差异）；非 exec 工具无此字段。
+// v5（M5.7 S3，决策 053）：补 mcp——MCP 工具的调用与返回证据（参数哈希、返回哈希与摘要、截断标记、结构化返回哈希、
+// server 主动交的证据）；非 MCP 工具无此字段。
 import { type Static, Type } from "typebox";
 import { ExecutionIdSchema, ReceiptIdSchema } from "./ids.ts";
 import { type Migration, MigrationRegistry } from "./migration.ts";
 
-export const RECEIPT_VERSION = 4;
+export const RECEIPT_VERSION = 5;
 
 // 批准来源（与 ToolExecutionDecision.approvedBy 同枚举，决策 4 + M4 S6 决策 3 扩展）
 export const ReceiptApprovedBySchema = Type.Union([
@@ -48,6 +50,33 @@ export const ReceiptExecSchema = Type.Object({
 });
 export type ReceiptExec = Static<typeof ReceiptExecSchema>;
 
+// MCP 调用证据（决策 053）：返回全文不入账，只存哈希、字节数与文本摘要；不解析返回语义
+export const ReceiptMcpSchema = Type.Object({
+  server: Type.String({ minLength: 1 }),
+  tool: Type.String({ minLength: 1 }),
+  // 发给 server 的参数按 037 规范序列化的哈希（与 intent 原始参数对得上）
+  argsHash: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+  // server 返回 isError
+  isError: Type.Boolean(),
+  resultSummary: Type.String(),
+  resultHash: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+  resultBytes: Type.Integer({ minimum: 0 }),
+  // 文本摘要是否截断（截断不支撑确定性结论，§3.3）
+  truncated: Type.Boolean(),
+  structuredHash: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$" })),
+  // server 在 structuredContent 的 evidence 键主动交的证据：未超上限原样收入 value，超上限只留 text 前缀
+  serverEvidence: Type.Optional(
+    Type.Object({
+      value: Type.Optional(Type.Unknown()),
+      text: Type.Optional(Type.String()),
+      bytes: Type.Integer({ minimum: 0 }),
+      hash: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+      truncated: Type.Boolean(),
+    })
+  ),
+});
+export type ReceiptMcp = Static<typeof ReceiptMcpSchema>;
+
 export const ReceiptSchema = Type.Object({
   version: Type.Literal(RECEIPT_VERSION),
   id: ReceiptIdSchema,
@@ -70,6 +99,8 @@ export const ReceiptSchema = Type.Object({
   contentAfterHash: Type.Optional(Type.String({ pattern: "^[0-9a-f]{16}$" })),
   // M5.5 S5：exec 工具的执行证据；进程启动过（含超时终止）即在场
   exec: Type.Optional(ReceiptExecSchema),
+  // M5.7 S3：MCP 工具的调用与返回证据；server 给出返回（含 isError 结果）即在场
+  mcp: Type.Optional(ReceiptMcpSchema),
 });
 
 export type Receipt = Static<typeof ReceiptSchema>;
@@ -90,12 +121,16 @@ export const migrateReceiptV2toV3: Migration = (doc) => ({ ...doc, version: 3 })
 // v3 → v4：exec 可缺省，纯版本推进
 export const migrateReceiptV3toV4: Migration = (doc) => ({ ...doc, version: 4 });
 
+// v4 → v5：mcp 可缺省，纯版本推进
+export const migrateReceiptV4toV5: Migration = (doc) => ({ ...doc, version: 5 });
+
 // receipt 迁移链的唯一装配点：M3 旧账本读取（ledger.ts）与 Event Log 读路径
 // （event-log.ts 内嵌 receipt 载荷升级）共用同一条链，杜绝两套迁移表漂移
 const receiptMigrations = new MigrationRegistry();
 receiptMigrations.register("receipt", 1, migrateReceiptV1toV2);
 receiptMigrations.register("receipt", 2, migrateReceiptV2toV3);
 receiptMigrations.register("receipt", 3, migrateReceiptV3toV4);
+receiptMigrations.register("receipt", 4, migrateReceiptV4toV5);
 
 // 任意历史版本的 Receipt 文档 → 当前版本 + 校验
 export function migrateReceiptToCurrent(doc: unknown): Receipt {

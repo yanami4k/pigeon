@@ -45,6 +45,7 @@ import {
   RunCommandParamsSchema,
 } from "../tools/run-command.ts";
 import { createToolGovernance } from "./governance.ts";
+import type { McpSession } from "./mcp.ts";
 
 export interface RuntimeDeps {
   streamFn: StreamFn;
@@ -79,6 +80,9 @@ export interface RuntimeDeps {
   // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受 .pigeon/commands.json 为该角色登记的
   // 命令（未登记即一条都不许）；主会话缺省，不受清单限制
   commandRole?: WorkerRole;
+  // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
+  // 缺省 = 本会话没有外部工具
+  mcp?: McpSession;
 }
 
 export interface RuntimeBundle {
@@ -87,6 +91,8 @@ export interface RuntimeBundle {
   // M4 S6：grant 运行态（审批提示 [a]/[d] 与 /grants /revoke /grants save 共用同一存储）
   grantStore: SessionGrantStore;
   configGrants: readonly ConfigGrantRule[];
+  // M5.7 S3：本运行面持有的 MCP 会话（disposeRuntime 一并关闭）
+  mcp?: McpSession;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志
@@ -154,10 +160,18 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const skillCatalog = loadSkillCatalog({
     workspaceRoot: governanceRoot,
     ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    // M5.7 S4（043 口径）：MCP server 的 prompts 以 server 为来源进同一目录
+    ...(deps.mcp !== undefined && deps.mcp.prompts.length > 0 ? { prompts: deps.mcp.prompts } : {}),
   });
   const hasSkills = skillCatalog.skills.length > 0;
   if (hasSkills) {
     registry.register(loadSkillRegistration(skillCatalog));
+  }
+  // M5.7 S3（决策 041 / 051 / 052）：MCP 工具按实际风险档注册，与内置工具同受六档排律、审批与留证
+  const mcp = deps.mcp;
+  const mcpTools = mcp?.tools ?? [];
+  for (const bridged of mcpTools) {
+    registry.register(bridged.registration);
   }
   const toolNames = [
     "read_file",
@@ -166,8 +180,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     SEARCH_SESSIONS_TOOL,
     READ_SESSION_ENTRY_TOOL,
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
+    ...mcpTools.map((bridged) => bridged.name),
   ];
-  const systemPrompt = [basePrompt, residentMemory.section, skillCatalog.section]
+  const mcpSection =
+    mcpTools.length > 0
+      ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
+        "server 不可用时这些工具会报错，改用内置工具继续。"
+      : "";
+  const systemPrompt = [basePrompt, residentMemory.section, skillCatalog.section, mcpSection]
     .filter((section) => section !== "")
     .join("\n\n");
   const delegated = deps.toolPolicy;
@@ -216,6 +236,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
             }),
           ]
         : []),
+      ...mcpTools.map((bridged) => bridged.tool),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
     governance: createToolGovernance({
@@ -232,9 +253,26 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     eventLog,
     // M5 S5（决策 044）：llm.request 指纹与内容文件同一抽取选项
     messageContent: { persistThinking: deps.persistThinking ?? true },
+    // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 run.started；无 server 时不带字段
+    ...(mcp !== undefined && mcp.connections.length > 0
+      ? { runStartedExtras: () => mcp.summary() }
+      : {}),
   });
   adapterRef.current = adapter;
-  return { adapter, eventLog, grantStore, configGrants };
+  return { adapter, eventLog, grantStore, configGrants, ...(mcp !== undefined ? { mcp } : {}) };
+}
+
+// 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话文件；前一步失败不跳过后续
+export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
+  try {
+    await bundle.adapter.dispose();
+  } finally {
+    try {
+      await bundle.mcp?.close();
+    } finally {
+      bundle.eventLog.close();
+    }
+  }
 }
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）。归位装配根（M2 S2）：它是模型接入的

@@ -429,6 +429,57 @@ function spawnPlan(
   return { program, args, verbatim: false };
 }
 
+export interface McpLaunchPlan {
+  mode: "direct" | "launcher" | "shell";
+  program: string;
+  args: string[];
+  verbatim: boolean;
+}
+
+// MCP server 启动计划（M5.7 S2，复用 048）：启动命令来自人写的 .mcp.json / .pigeon/mcp.json，参数已是数组、
+// 不经切分。非 Windows 或解析到可执行文件 = 直接 spawn；Windows 上解析到 .cmd / .bat 且参数全在保守字符集内 =
+// cmd.exe 启动器；否则以 shell 运行——配置由人写即人确认，字符集外参数加双引号，引号、百分号与换行
+// 在 cmd 里无法安全表达，直接拒绝（改用包装脚本）
+export function planMcpLaunch(input: {
+  command: string;
+  args: readonly string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+}): McpLaunchPlan {
+  const platform = input.platform ?? process.platform;
+  const args = [...input.args];
+  const scriptPath = windowsScript(input.command, input.cwd, input.env, platform);
+  if (scriptPath === undefined) {
+    return { mode: "direct", program: input.command, args, verbatim: false };
+  }
+  if (/["%]/.test(scriptPath)) {
+    throw new RunCommandError(`MCP 启动脚本路径含 cmd 无法安全表达的字符：${scriptPath}`);
+  }
+  if (args.every((arg) => LAUNCHER_ARG_PATTERN.test(arg))) {
+    return {
+      mode: "launcher",
+      program: comspecOf(input.env),
+      args: ["/d", "/s", "/c", `""${scriptPath}"${args.length > 0 ? ` ${args.join(" ")}` : ""}"`],
+      verbatim: true,
+    };
+  }
+  const quoted = args.map((arg) => {
+    if (/["%\r\n]/.test(arg)) {
+      throw new RunCommandError(
+        `MCP 启动参数含 cmd 无法安全表达的字符（引号、百分号或换行）：${arg}`
+      );
+    }
+    return LAUNCHER_ARG_PATTERN.test(arg) ? arg : `"${arg}"`;
+  });
+  return {
+    mode: "shell",
+    program: comspecOf(input.env),
+    args: ["/d", "/s", "/c", `""${scriptPath}" ${quoted.join(" ")}"`],
+    verbatim: true,
+  };
+}
+
 function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
   const changes = evidence.fileChanges;
   const route = evidence.shell ? "（经 shell）" : evidence.launcher ? "（经 cmd.exe 启动器）" : "";
@@ -460,7 +511,7 @@ function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
   return lines.join("\n");
 }
 
-function allowedEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function allowedEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
     if (value !== undefined && ENV_ALLOWLIST.has(key.toUpperCase())) {

@@ -115,6 +115,16 @@ function recordDetail(record: EventRecord): string {
       if (receipt.contentAfterHash !== undefined) {
         detail += ` ｜ 实测改后 ${receipt.contentAfterHash}`;
       }
+      // M5.7 S3（决策 053）：MCP 回执摘要——参数与返回哈希、返回字节数与截断、server 证据
+      const mcp = receipt.mcp;
+      if (mcp !== undefined) {
+        detail +=
+          ` ｜ MCP ${mcp.server}/${mcp.tool}：参数 ${mcp.argsHash.slice(0, 12)} ｜ 返回 ${mcp.resultHash.slice(0, 12)}` +
+          `（${mcp.resultBytes} 字节${mcp.truncated ? "，摘要截断" : ""}${mcp.isError ? "，server 报错" : ""}）`;
+        if (mcp.serverEvidence !== undefined) {
+          detail += ` ｜ server 证据 ${mcp.serverEvidence.hash.slice(0, 12)}${mcp.serverEvidence.truncated ? "（截断）" : ""}`;
+        }
+      }
       return detail;
     }
     case "breaker":

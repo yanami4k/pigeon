@@ -14,7 +14,7 @@ import type {
 } from "../pi-runtime/governance.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { newReceiptId } from "../state/ids.ts";
-import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
+import { RECEIPT_VERSION, type Receipt, type ReceiptMcp } from "../state/receipt.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
 import {
   advanceToolExecution,
@@ -32,6 +32,11 @@ import type { ContentEvidence } from "../tools/wrap.ts";
 function receiptExecOf(evidence: ExecEvidence): NonNullable<Receipt["exec"]> {
   const { spawned: _spawned, ...exec } = evidence;
   return exec;
+}
+
+// M5.7 S3（决策 053）：MCP 工具的证据暂存能力（mcp/registry-bridge.ts 的执行体满足）；结构检查，不要求工具必实现
+interface McpEvidenceSource {
+  takeMcpEvidence(toolCallId: string): ReceiptMcp | undefined;
 }
 
 // M4 S6（决策 3）：会话 grant 匹配注入面——approvals/grant-store.ts 的 SessionGrantStore
@@ -461,9 +466,25 @@ class GovernedToolCalls implements ToolGovernance {
         exec = undefined;
       }
     }
-    // exec 工具出错时进程可能已经跑过（超时终止、被中止）：进程启动过即按副作用可能发生记
+    // M5.7 S3（决策 053）：MCP 工具的调用与返回证据（参数哈希、返回哈希与摘要、server 证据），取一次即删；
+    // 取证失败只让字段缺省，不改变 receipt 落盘
+    let mcp: ReceiptMcp | undefined;
+    if (
+      execTool !== undefined &&
+      "takeMcpEvidence" in execTool &&
+      typeof execTool.takeMcpEvidence === "function"
+    ) {
+      try {
+        mcp = (execTool as unknown as McpEvidenceSource).takeMcpEvidence(record.toolCallId);
+      } catch {
+        mcp = undefined;
+      }
+    }
+    // exec 工具出错时进程可能已经跑过（超时终止、被中止）：进程启动过即按副作用可能发生记；
+    // MCP 工具出错但 server 已给出返回（isError 结果）：调用已到达 server，同样按副作用可能发生记
     const executed =
-      record.executionStartedAt !== undefined && (!isError || exec?.spawned === true);
+      record.executionStartedAt !== undefined &&
+      (!isError || exec?.spawned === true || mcp !== undefined);
     // M4 S2（D5）：执行成功且工具具备内容证据能力时，实测目标现状哈希随 receipt 落盘
     // （实测而非采信工具自报，撕裂写会在冷恢复三方比对中现形）；测不得则缺省
     let contentAfterHash: string | null = null;
@@ -492,10 +513,11 @@ class GovernedToolCalls implements ToolGovernance {
       startedAt: record.executionStartedAt ?? record.proposedAt,
       finishedAt: record.settledAt ?? Date.now(),
       summary: executed
-        ? `${record.toolName} 执行完成${exec !== undefined ? `（退出码 ${exec.exitCode ?? "无"}${exec.timedOut ? "，超时终止" : ""}）` : ""}`
+        ? `${record.toolName} 执行完成${exec !== undefined ? `（退出码 ${exec.exitCode ?? "无"}${exec.timedOut ? "，超时终止" : ""}）` : ""}${mcp !== undefined ? `（MCP ${mcp.server}/${mcp.tool}${mcp.isError ? "，server 报错" : ""}）` : ""}`
         : `${record.toolName} 未产生副作用（${decision.outcome === "rejected" ? "已拒绝" : "执行出错"}）`,
       ...(contentAfterHash !== null ? { contentAfterHash } : {}),
       ...(exec !== undefined ? { exec: receiptExecOf(exec) } : {}),
+      ...(mcp !== undefined ? { mcp } : {}),
     };
     eventLog.appendReceipt({ receipt, runId: this.#host.activeRunId() });
     // settled 后回填 receiptId：schema 允许的回填，不是状态迁移

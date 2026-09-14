@@ -4,6 +4,7 @@
 // 这些形状的映射在 pi-runtime 完成（§2 边界规则：上游交互只经 PiRuntimeAdapter）。
 import { type Static, Type } from "typebox";
 import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
+import { McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { Sha256HexSchema } from "./message-content.ts";
 import { ToolErrorKindSchema } from "./tool-execution.ts";
 
@@ -133,6 +134,10 @@ export const RunStartedPayloadSchema = Type.Object({
   systemPromptHash: Sha256HexSchema,
   memory: Type.Array(MemoryManifestEntrySchema),
   skills: Type.Array(SkillManifestEntrySchema),
+  // M5.7 S3（决策 052）：MCP 工具集摘要（注解线索、配置与实际档位、冲突）与 server 当前状态——
+  // 加法式不升版本；本会话没有 MCP server 时不带
+  mcpTools: Type.Optional(Type.Array(McpToolsetEntrySchema)),
+  mcpServers: Type.Optional(Type.Array(McpServerStatusSchema)),
 });
 export type RunStartedPayload = Static<typeof RunStartedPayloadSchema>;
 

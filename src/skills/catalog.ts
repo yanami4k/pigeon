@@ -10,22 +10,46 @@ import { join } from "node:path";
 import type { SkillFileManifestEntry, SkillManifestEntry } from "../state/injection-manifest.ts";
 import { sha256Hex } from "../state/message-content.ts";
 
+// M5.7 S4（决策 043 口径）：MCP server 的 prompt 作为 Skill 登记——正文在会话开始时由装配根经 getPrompt 取好，
+// 哈希清单按它算；load_skill 读取时经 load 重取并比对。skills 层只收结构类型，不触达 mcp。
+// prompt 型 Skill 只有正文，清单里的资源名固定为 prompt
+export const MCP_PROMPT_RESOURCE = "prompt";
+
+export interface SkillPromptSource {
+  server: string;
+  prompt: string;
+  // 重取正文；server 不可用时抛出的错误原样上抛
+  load(): Promise<string>;
+}
+
+export interface SkillPromptInput extends SkillPromptSource {
+  // 目录里的 Skill 名（装配根给 mcp__<server>__<prompt>）
+  name: string;
+  description?: string;
+  // 会话开始时取到的正文
+  text: string;
+}
+
 export interface SkillCatalogOptions {
   workspaceRoot: string;
   // 用户级根；缺省 os.homedir()（测试注入临时目录）
   homeDir?: string;
+  // M5.7 S4：MCP server 的 prompts（缺省无）
+  prompts?: readonly SkillPromptInput[];
 }
 
 export interface SkillEntry {
   name: string;
   description: string;
-  // Skill 目录的绝对路径（load_skill 的 realpath 围栏根）
+  // Skill 目录的绝对路径（load_skill 的 realpath 围栏根）；MCP prompt 为空串
   dir: string;
-  // 展示路径：.pigeon/skills/<目录名> 或 ~/.pigeon/skills/<目录名>
+  // 展示路径：.pigeon/skills/<目录名>、~/.pigeon/skills/<目录名> 或 mcp:<server>/<prompt>
   displayPath: string;
-  scope: "project" | "user";
-  // 开会话时的全部文件哈希清单（相对 Skill 目录，正斜杠，按码点排序）
+  scope: "project" | "user" | "mcp";
+  // 开会话时的全部文件哈希清单（相对 Skill 目录，正斜杠，按码点排序）；MCP prompt 只有正文一项
   files: SkillFileManifestEntry[];
+  // MCP prompt 的来源（scope 为 mcp 时在场）
+  prompt?: SkillPromptSource;
 }
 
 export interface SkillCatalog {
@@ -133,13 +157,28 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
   const project = scanRoot(projectRoot, "project", ".pigeon/skills");
   const user = scanRoot(userRoot, "user", "~/.pigeon/skills");
   const problems = [...project.problems, ...user.problems];
+  const mcpEntries: SkillEntry[] = (options.prompts ?? []).map((input) => ({
+    name: input.name,
+    description: input.description ?? "（无简介）",
+    dir: "",
+    displayPath: `mcp:${input.server}/${input.prompt}`,
+    scope: "mcp",
+    files: [
+      {
+        path: MCP_PROMPT_RESOURCE,
+        hash: sha256Hex(input.text),
+        bytes: Buffer.byteLength(input.text),
+      },
+    ],
+    prompt: { server: input.server, prompt: input.prompt, load: input.load },
+  }));
   const skills: SkillEntry[] = [];
   const names = new Set<string>();
-  // 项目级在前：同名时项目级优先，后到的如实记为冲突、不重复登记
-  for (const entry of [...project.entries, ...user.entries]) {
+  // 项目级在前、用户级其次、MCP prompt 最后：同名时先登记者优先，后到的如实记为冲突、不重复登记
+  for (const entry of [...project.entries, ...user.entries, ...mcpEntries]) {
     if (names.has(entry.name)) {
       problems.push(
-        `${entry.displayPath}：与已登记的同名 Skill「${entry.name}」冲突，未登记（项目级优先）`
+        `${entry.displayPath}：与已登记的同名 Skill「${entry.name}」冲突，未登记（${entry.scope === "mcp" ? "本地 Skill 优先" : "项目级优先"}）`
       );
       continue;
     }
@@ -153,9 +192,13 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
           "## Skill 目录",
           "以下 Skill 在会话开始时登记并冻结。需要时用 load_skill(name) 读取完整 SKILL.md，" +
             "再按其中提示用 load_skill(name, resource) 读取 references、templates 或 scripts" +
-            "（scripts 只读不执行）。Skill 只是操作建议，不改变任何工具权限；" +
-            "会话中修改 Skill 文件要到下个会话才生效。",
-          ...skills.map((skill) => `- ${skill.name}：${skill.description}（${skill.displayPath}）`),
+            "（scripts 只读不执行）。MCP server 的 prompt 只有正文，用 load_skill(name) 读取。" +
+            "Skill 只是操作建议，不改变任何工具权限；会话中修改 Skill 文件要到下个会话才生效。",
+          ...skills.map((skill) =>
+            skill.prompt !== undefined
+              ? `- ${skill.name}：${skill.description}（MCP server ${skill.prompt.server} 的 prompt）`
+              : `- ${skill.name}：${skill.description}（${skill.displayPath}）`
+          ),
         ].join("\n");
   return {
     skills,

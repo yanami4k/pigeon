@@ -44,7 +44,11 @@ import {
   type MessageContentOptions,
   sha256Hex,
 } from "../state/message-content.ts";
-import { RuntimeEventKind, type ToolSettledPayload } from "../state/runtime-events.ts";
+import {
+  type RunStartedPayload,
+  RuntimeEventKind,
+  type ToolSettledPayload,
+} from "../state/runtime-events.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
@@ -103,6 +107,9 @@ export interface PiRuntimeAdapterOptions {
   // M5 S5（决策 044）：llm.request 指纹的内容抽取选项——必须与落盘口的内容记录选项一致
   // （thinking 是否持久化、单块上限），指纹才能与内容文件按哈希对上；缺省同内容记录缺省
   messageContent?: MessageContentOptions;
+  // M5.7 S3（决策 052）：run.started 的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
+  // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
+  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
 }
 
 export class PiRuntimeAdapter {
@@ -133,6 +140,7 @@ export class PiRuntimeAdapter {
   readonly #messageContent: MessageContentOptions;
   readonly #systemPromptHash: string;
   #systemPromptRecorded = false;
+  readonly #runStartedExtras: PiRuntimeAdapterOptions["runStartedExtras"];
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -148,6 +156,7 @@ export class PiRuntimeAdapter {
     this.sessionId = options.sessionId ?? newSessionId();
 
     this.#eventLog = options.eventLog;
+    this.#runStartedExtras = options.runStartedExtras;
     this.#messageContent = options.messageContent ?? {};
     this.#systemPromptHash = sha256Hex(this.#snapshot.context.systemPrompt);
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
@@ -474,6 +483,13 @@ export class PiRuntimeAdapter {
       }
     }
     const snapshot = this.#snapshot;
+    // 附加摘要取失败只进 listenerErrors：该 Run 的 run.started 缺 MCP 字段，不挡 Run 启动
+    let extras: Pick<RunStartedPayload, "mcpTools" | "mcpServers"> = {};
+    try {
+      extras = this.#runStartedExtras?.() ?? {};
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
     this.recordObservation("run.started", {
       model: {
         provider: snapshot.model.provider,
@@ -489,6 +505,7 @@ export class PiRuntimeAdapter {
       systemPromptHash: this.#systemPromptHash,
       memory: structuredClone(snapshot.memory),
       skills: structuredClone(snapshot.skills),
+      ...extras,
     });
   }
 

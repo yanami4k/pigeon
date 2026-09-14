@@ -45,7 +45,8 @@ const ToolRegistrationMetaSchema = Type.Object({
 export interface ToolRegistration {
   readonly name: string;
   readonly description: string;
-  // typebox 对象 schema：模型可见的参数形状；M3 工具一律对象参数（对齐上游 AgentTool）
+  // 对象 schema：模型可见的参数形状；M3 工具一律对象参数（对齐上游 AgentTool）；
+  // M5.7 起也接受 MCP 工具原样透传的 JSON Schema（type 为 object）
   readonly parameters: TSchema;
   readonly tier: ToolRiskTier;
   readonly pathConfinement: PathConfinement;
@@ -53,6 +54,20 @@ export interface ToolRegistration {
 }
 
 export class ToolRegistryError extends Error {}
+
+// 对象形参数 schema：typebox 对象，或 type 为 object 的原生 JSON Schema（M5.7 S2：MCP 工具的 inputSchema
+// 原样透传——上游按 JSON Schema 关键字校验参数、原样发给 provider，不依赖 typebox 的类型标记）
+function isObjectParameters(schema: unknown): boolean {
+  if (IsObject(schema)) {
+    return true;
+  }
+  return (
+    typeof schema === "object" &&
+    schema !== null &&
+    !Array.isArray(schema) &&
+    (schema as Record<string, unknown>).type === "object"
+  );
+}
 
 export class ToolRegistry {
   readonly #tools = new Map<string, ToolRegistration>();
@@ -68,9 +83,9 @@ export class ToolRegistry {
           : "（无名）";
       throw new ToolRegistryError(`畸形工具注册：${name}`);
     }
-    if (!IsObject(registration.parameters)) {
+    if (!isObjectParameters(registration.parameters)) {
       throw new ToolRegistryError(
-        `工具 ${registration.name} 的 parameters 必须是 typebox 对象 schema`
+        `工具 ${registration.name} 的 parameters 必须是对象 schema（typebox 对象或 type 为 object 的 JSON Schema）`
       );
     }
     if (this.#tools.has(registration.name)) {

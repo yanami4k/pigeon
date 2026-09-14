@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "everything": {
+      "command": "npx",
+      "args": ["--no", "mcp-server-everything", "stdio"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["--no", "mcp-server-filesystem"]
+    }
+  }
+}
