@@ -81,7 +81,7 @@ export function approvalBlockText(request: ApprovalRequest): string {
   return lines.join("\n");
 }
 
-// 决议措辞复用 application/format.ts 的 approvalVerdict（人话单一约定，不造第二套）；
+// 决议措辞复用 application/format.ts 的 approvalVerdict（通俗措辞单一约定，不造第二套）；
 // 它只读 approvedBy/outcome，decidedAt 为占位
 function verdictLine(
   outcome: "approved" | "rejected",

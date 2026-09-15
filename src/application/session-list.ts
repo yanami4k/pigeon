@@ -14,7 +14,7 @@ export interface SessionListCommandOptions {
 }
 
 // 只读渲染入口（投影层在 session-list.ts；此处只做安静排版：一会话一行，
-// pendingReconcile > 0 才追加突出行——D5 唯一 actionable 项，人话 + 动作提示，无徽章图标）
+// pendingReconcile > 0 才追加突出行——D5 唯一 actionable 项，通俗措辞 + 动作提示，无徽章图标）
 export function runSessionListCommand(options: SessionListCommandOptions): string {
   const sessionsDir = join(options.root, ".pigeon", "sessions");
   const summaries = listSessionSummaries(sessionsDir, options.filters ?? {});

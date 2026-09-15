@@ -16,6 +16,7 @@ import type {
   ChildSpawnedRecord,
   DecisionRecord,
   EntryRecord,
+  EvalVerifiedRecord,
   EventRecord,
   GrantConfigRemovedRecord,
   GrantCreatedRecord,
@@ -111,6 +112,8 @@ export interface MaterializedSession {
   runStarteds: RunStartedRecord[];
   llmRequests: LlmRequestRecord[];
   skillLoadeds: SkillLoadedRecord[];
+  // M6.5 S3（决策 058）：Eval 验证器判决（按落盘顺序）；不参与分类判据
+  evalVerifieds: EvalVerifiedRecord[];
   // M5.5 S2（决策 040）：worker 编排三族。sessionHeader 在场 = 本会话是 worker 会话；
   // children 按 child.spawned 顺序配对 child.settled（缺 settled = 派出后未收尾，崩溃可能）；
   // 找不到 spawned 的 settled 如实归孤立清单
@@ -180,6 +183,7 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const runStarteds: RunStartedRecord[] = [];
   const llmRequests: LlmRequestRecord[] = [];
   const skillLoadeds: SkillLoadedRecord[] = [];
+  const evalVerifieds: EvalVerifiedRecord[] = [];
   const runtimeEvents: RuntimeEventRecord[] = [];
   const intents: IntentRecord[] = [];
   const decisions: DecisionRecord[] = [];
@@ -228,6 +232,8 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       llmRequests.push(record);
     } else if (record.kind === "skill.loaded") {
       skillLoadeds.push(record);
+    } else if (record.kind === "eval.verified") {
+      evalVerifieds.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -261,6 +267,7 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     runStarteds,
     llmRequests,
     skillLoadeds,
+    evalVerifieds,
     contentGaps: detectContentGaps(entries, input.contentHashes),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),

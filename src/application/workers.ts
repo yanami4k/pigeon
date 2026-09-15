@@ -3,8 +3,11 @@
 // M5.7 S4（决策 054）：治理根有 MCP 配置时，worker 以其工作树为工作区根启动自己的 MCP server（roots 即工作树）；
 // 启动是异步的，运行面在 run 时就绪——订阅先于就绪时暂存、就绪后接上，就绪前取消即按中止收尾。
 // 没有 MCP 配置时仍同步装配，行为与 M5.5 相同（会话头写不进在派出时即报错）。
+// M6.5 S1（决策 056）：装配内核抽出为 openRuntimeSurface，worker 工厂与 headless 运行共用——
+// headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import type { MemoryRoot } from "../memory/resident.ts";
 import { ROLE_THINKING_LEVELS } from "../orchestration/roles.ts";
 import type {
   WorkerRuntimeFactory,
@@ -14,7 +17,8 @@ import type {
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import type { WorkerRole } from "../state/event-log.ts";
+import type { SkillRoot } from "../skills/catalog.ts";
+import type { DelegatedPolicy, SessionHeaderInput, WorkerRole } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { ReceiptId, SessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
@@ -74,68 +78,154 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
   });
 }
 
+// 装配内核的输入：worker 与 headless 共用
+interface RuntimeSurface {
+  sessionId: SessionId;
+  governanceRoot: string;
+  workspaceRoot: string;
+  streamFn: StreamFn;
+  provider: string;
+  modelId: string;
+  yolo: boolean;
+  // 委派策略（worker）；缺省 = 全部内置工具，审批模式按 yolo 旗标
+  policy?: DelegatedPolicy;
+  // worker 角色：run_command 套 .pigeon/commands.json 的角色清单；缺省 = 不套清单
+  role?: WorkerRole;
+  approvalHandler?: ApprovalHandler;
+  // worker 会话头；缺省 = 普通会话（headless）
+  header?: SessionHeaderInput;
+  thinkingLevel?: ThinkingLevel;
+  homeDir?: string;
+  persistThinking?: boolean;
+  memoryBudgetChars?: number;
+  skillRoots?: readonly SkillRoot[];
+  memoryRoots?: readonly MemoryRoot[];
+  // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
+  startMcp?: () => Promise<McpSession>;
+}
+
 export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRuntimeFactory {
   return (request): WorkerRuntimeHandle => {
     const thinkingLevel =
       (deps.roleThinkingLevels ?? ROLE_THINKING_LEVELS)[request.role] ?? deps.thinkingLevel;
-    const runtimeDeps: Omit<RuntimeDeps, "mcp"> = {
-      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
-      streamFn: deps.streamFnFor(request),
-      workspaceRoot: request.workspace.path,
-      governanceRoot: request.governanceRoot,
-      toolPolicy: request.policy,
-      // M5.5 S5（决策 048）：run_command 按角色套 .pigeon/commands.json 的允许清单
-      commandRole: request.role,
+    const startMcp = deps.startMcp;
+    return openRuntimeSurface({
       sessionId: request.sessionId,
-      yolo: request.policy.approvalMode === "yolo",
+      governanceRoot: request.governanceRoot,
+      workspaceRoot: request.workspace.path,
+      streamFn: deps.streamFnFor(request),
       provider: deps.provider,
       modelId: deps.modelId,
-      // M5.5 S3（决策 040）：审批经编排器汇聚到父级；放权落点挂 worker 自己的 grant 存储——
-      // [a]/[d] 创建的会话 grant 写进 worker 会话文件，只在该 worker 内生效，随其结束作废
-      createApprovalHandler: (workerGrants) => (approval) =>
-        request.approvalHandler({ ...approval, grants: workerGrants }),
+      yolo: request.policy.approvalMode === "yolo",
+      policy: request.policy,
+      // M5.5 S5（决策 048）：run_command 按角色套 .pigeon/commands.json 的允许清单
+      role: request.role,
+      approvalHandler: request.approvalHandler,
+      header: {
+        parentSessionId: request.lineage.parentSessionId,
+        ...(request.lineage.parentRunId !== undefined
+          ? { parentRunId: request.lineage.parentRunId }
+          : {}),
+        worker: { name: request.name, role: request.role },
+        workspace: request.workspace,
+        startedAt: Date.now(),
+      },
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
       ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
       ...(deps.persistThinking !== undefined ? { persistThinking: deps.persistThinking } : {}),
-    };
-    // MCP 配置畸形在此响亮失败（派出失败）
-    const startMcp =
-      deps.startMcp ??
-      (loadMcpConfig(request.governanceRoot).servers.length > 0
-        ? (target: WorkerRuntimeRequest) =>
-            startMcpSession({
-              governanceRoot: target.governanceRoot,
-              workspaceRoot: target.workspace.path,
-            })
-        : undefined);
-    if (startMcp === undefined) {
-      return readyHandle(openWorkerBundle(request, runtimeDeps));
-    }
-    return pendingHandle(
-      startMcp(request).then(async (mcp) => {
-        try {
-          return openWorkerBundle(request, { ...runtimeDeps, mcp });
-        } catch (error) {
-          await mcp.close();
-          throw error;
-        }
-      })
-    );
+      ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
+    });
   };
 }
 
-// 装配运行面并写 worker 会话头；会话头写不进即关会话文件并上抛
-function openWorkerBundle(request: WorkerRuntimeRequest, runtimeDeps: RuntimeDeps): RuntimeBundle {
+export interface DetachedRuntimeRequest {
+  sessionId: SessionId;
+  governanceRoot: string;
+  workspaceRoot: string;
+  streamFn: StreamFn;
+  provider: string;
+  modelId: string;
+  yolo: boolean;
+  thinkingLevel?: ThinkingLevel;
+  homeDir?: string;
+  persistThinking?: boolean;
+  memoryBudgetChars?: number;
+  skillRoots?: readonly SkillRoot[];
+  memoryRoots?: readonly MemoryRoot[];
+  startMcp?: () => Promise<McpSession>;
+}
+
+// M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
+export function createDetachedRuntime(request: DetachedRuntimeRequest): WorkerRuntimeHandle {
+  return openRuntimeSurface(request);
+}
+
+function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
+  const runtimeDeps: Omit<RuntimeDeps, "mcp"> = {
+    ...(surface.thinkingLevel !== undefined ? { thinkingLevel: surface.thinkingLevel } : {}),
+    streamFn: surface.streamFn,
+    workspaceRoot: surface.workspaceRoot,
+    governanceRoot: surface.governanceRoot,
+    ...(surface.policy !== undefined ? { toolPolicy: surface.policy } : {}),
+    ...(surface.role !== undefined ? { commandRole: surface.role } : {}),
+    sessionId: surface.sessionId,
+    yolo: surface.yolo,
+    provider: surface.provider,
+    modelId: surface.modelId,
+    // M5.5 S3（决策 040）：审批经编排器汇聚到父级；放权落点挂 worker 自己的 grant 存储——
+    // [a]/[d] 创建的会话 grant 写进 worker 会话文件，只在该 worker 内生效，随其结束作废
+    ...(surface.approvalHandler !== undefined
+      ? {
+          createApprovalHandler: (workerGrants) => {
+            const handler = surface.approvalHandler as ApprovalHandler;
+            return (approval) => handler({ ...approval, grants: workerGrants });
+          },
+        }
+      : {}),
+    ...(surface.homeDir !== undefined ? { homeDir: surface.homeDir } : {}),
+    ...(surface.persistThinking !== undefined ? { persistThinking: surface.persistThinking } : {}),
+    ...(surface.memoryBudgetChars !== undefined
+      ? { memoryBudgetChars: surface.memoryBudgetChars }
+      : {}),
+    ...(surface.skillRoots !== undefined ? { skillRoots: surface.skillRoots } : {}),
+    ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
+  };
+  // MCP 配置畸形在此响亮失败（派出失败）
+  const startMcp =
+    surface.startMcp ??
+    (loadMcpConfig(surface.governanceRoot).servers.length > 0
+      ? () =>
+          startMcpSession({
+            governanceRoot: surface.governanceRoot,
+            workspaceRoot: surface.workspaceRoot,
+          })
+      : undefined);
+  if (startMcp === undefined) {
+    return readyHandle(openBundle(surface.header, runtimeDeps));
+  }
+  return pendingHandle(
+    startMcp().then(async (mcp) => {
+      try {
+        return openBundle(surface.header, { ...runtimeDeps, mcp });
+      } catch (error) {
+        await mcp.close();
+        throw error;
+      }
+    })
+  );
+}
+
+// 装配运行面；worker 另写会话头，写不进即关会话文件并上抛
+function openBundle(
+  header: SessionHeaderInput | undefined,
+  runtimeDeps: RuntimeDeps
+): RuntimeBundle {
   const bundle = buildRuntime(runtimeDeps);
+  if (header === undefined) {
+    return bundle;
+  }
   try {
-    bundle.eventLog.appendSessionHeader({
-      parentSessionId: request.lineage.parentSessionId,
-      ...(request.lineage.parentRunId !== undefined
-        ? { parentRunId: request.lineage.parentRunId }
-        : {}),
-      worker: { name: request.name, role: request.role },
-      workspace: request.workspace,
-      startedAt: Date.now(),
-    });
+    bundle.eventLog.appendSessionHeader(header);
   } catch (error) {
     bundle.eventLog.close();
     throw error;

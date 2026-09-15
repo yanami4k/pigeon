@@ -19,7 +19,7 @@ export type AskFn = (prompt: string) => Promise<string | null>;
 // 输出函数（与 cli/repl.ts 的 WriteFn 结构同型）
 export type WriteFn = (text: string) => void;
 
-// 既往落盘缺口的人话清单（只呈现不修补；空数组 = 无缺口）
+// 既往落盘缺口的通俗措辞清单（只呈现不修补；空数组 = 无缺口）
 function describeEvidenceGaps(materialized: MaterializedSession): string[] {
   const lines: string[] = [];
   if (materialized.tornTail) {

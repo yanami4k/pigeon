@@ -6,10 +6,12 @@
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
-import { realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { evalVerdictLabel, failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
+import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import { describeMcpStartup, type McpSession, startMcpSession } from "../application/mcp.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import {
@@ -22,6 +24,8 @@ import {
 import { runSessionListCommand } from "../application/session-list.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
+import { runEval } from "../eval/runner.ts";
+import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
@@ -372,7 +376,213 @@ async function buildWithMcp(
   }
 }
 
+// pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] [--provider <p>]
+//   [--model <m>] [--max-turns <N>] [--wall-clock <毫秒>] [--json]：headless 运行（M6.5 S1，决策 056）——
+// 进程内 API runHeadless 的薄壳；任务描述缺省从 stdin 读；无审批通道，prompt 档 fail-closed；
+// --json 退出时打印一行结构化结果；退出码按终态映射（HEADLESS_EXIT_CODES，1 为参数与装配错误）
+async function runMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--json]（任务描述缺省从 stdin 读）";
+  let task: string | undefined;
+  let json = false;
+  let maxTurns: number | undefined;
+  let wallClockMs: number | undefined;
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (arg === "--json") {
+      json = true;
+    } else if (arg === "--max-turns" || arg === "--wall-clock") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`${arg} 需要正整数（${usage}）`);
+      }
+      if (arg === "--max-turns") {
+        maxTurns = value;
+      } else {
+        wallClockMs = value;
+      }
+    } else if (!arg.startsWith("--") && task === undefined) {
+      task = arg;
+    } else {
+      modelArgv.push(arg);
+      const next = argv[i + 1];
+      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
+        modelArgv.push(next);
+        i++;
+      }
+    }
+  }
+  const flags = parseModelFlags(modelArgv, usage);
+  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
+    throw new Error(`未配置模型接入：请用 --stream-fn <模块路径>（${usage}）`);
+  }
+  if (task === undefined) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    }
+    task = Buffer.concat(chunks).toString("utf8");
+  }
+  task = task.trim();
+  if (task === "") {
+    throw new Error(`任务描述为空（${usage}）`);
+  }
+  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  const workspaceRoot = prepareWorkspace(flags.root);
+  const result = await runHeadless({
+    task,
+    governanceRoot: workspaceRoot,
+    workspaceRoot,
+    streamFn,
+    yolo: flags.yolo,
+    provider: flags.provider,
+    modelId: flags.modelId,
+    persistThinking: flags.persistThinking,
+    ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+    ...(flags.memoryBudgetChars !== undefined
+      ? { memoryBudgetChars: flags.memoryBudgetChars }
+      : {}),
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(wallClockMs !== undefined ? { wallClockMs } : {}),
+  });
+  if (json) {
+    // JSON.stringify 转义全部 C0 控制字符，一行输出不携带终端控制序列
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } else {
+    writeOut(
+      `会话 ${result.sessionId} ｜ 终态 ${result.status} ｜ 分类：${failureBadge(result.failure)} ｜ ` +
+        `${result.turns} 轮 ｜ 工具调用 ${result.toolCalls} 次 ｜ 需审批 ${result.approvalsNeeded} 次 ｜ ` +
+        `token ${result.usage.totalTokens}${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
+    );
+  }
+  process.exitCode = HEADLESS_EXIT_CODES[result.status];
+}
+
+// pigeon eval <任务目录> --out <输出目录> [--runs N] --stream-fn <模块路径> [--yolo] [--thinking <档位>]
+//   [--provider <p>] [--model <m>] [--skill <eval/skills/<name> 目录>] [--conditions none,candidate,approved]：
+// Eval 冒烟（M6.5 S4，决策 059 / 060）——任务目录可以是任务集或单个任务；Skill 目录缺省取任务集同级 skills/ 下
+// 唯一的那个；三个条件的 skillRoots 分别为空、<skill>/candidate、<skill>/approved；results.jsonl 与 report.md
+// 写在输出目录，实验会话在输出目录的 .pigeon/ 下；重跑同一输出目录跳过已有的行
+async function evalMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval <任务目录> --out <输出目录> [--runs N] --stream-fn <模块路径> [--yolo] " +
+    "[--thinking <档位>] [--skill <Skill 目录>] [--conditions none,candidate,approved]";
+  let tasksDir: string | undefined;
+  let outDir: string | undefined;
+  let runs = 3;
+  let skillDir: string | undefined;
+  let conditions: EvalCondition[] | undefined;
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (arg === "--out") {
+      outDir = argv[++i];
+    } else if (arg === "--skill") {
+      skillDir = argv[++i];
+    } else if (arg === "--runs") {
+      runs = Number(argv[++i]);
+      if (!Number.isInteger(runs) || runs < 1) {
+        throw new Error(`--runs 需要正整数（${usage}）`);
+      }
+    } else if (arg === "--conditions") {
+      const values = (argv[++i] ?? "").split(",").filter((value) => value !== "");
+      const unknown = values.filter(
+        (value) => !(EVAL_CONDITIONS as readonly string[]).includes(value)
+      );
+      if (values.length === 0 || unknown.length > 0) {
+        throw new Error(`--conditions 只接受 ${EVAL_CONDITIONS.join("/")}（${usage}）`);
+      }
+      conditions = values as EvalCondition[];
+    } else if (!arg.startsWith("--") && tasksDir === undefined) {
+      tasksDir = arg;
+    } else {
+      modelArgv.push(arg);
+      const next = argv[i + 1];
+      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
+        modelArgv.push(next);
+        i++;
+      }
+    }
+  }
+  if (tasksDir === undefined || outDir === undefined || outDir === "") {
+    throw new Error(usage);
+  }
+  const flags = parseModelFlags(modelArgv, usage);
+  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
+    throw new Error(`未配置模型接入：请用 --stream-fn <模块路径>（${usage}）`);
+  }
+  const tasks = loadEvalTasks(tasksDir);
+  if (tasks.length === 0) {
+    throw new Error(`任务目录下没有任务：${tasksDir}`);
+  }
+  const resolvedSkill = path.resolve(skillDir ?? defaultSkillDir(tasksDir));
+  // 展示路径取 eval/ 所在目录的相对路径（如 eval/skills/<name>/candidate），随 run.started 的 Skill 清单落盘
+  const labelBase = path.dirname(path.dirname(path.dirname(resolvedSkill)));
+  const rootOf = (stage: "candidate" | "approved") => {
+    const dir = path.join(resolvedSkill, stage);
+    return { path: dir, label: path.relative(labelBase, dir).split(path.sep).join("/") };
+  };
+  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  const summary = await runEval({
+    tasks,
+    skill: { candidate: rootOf("candidate"), approved: rootOf("approved") },
+    outDir,
+    runs,
+    streamFn,
+    yolo: flags.yolo,
+    provider: flags.provider,
+    modelId: flags.modelId,
+    ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+    ...(conditions !== undefined ? { conditions } : {}),
+    onResult: (line) => {
+      writeOut(
+        `[eval] ${line.taskId} ｜ ${line.condition} ｜ 第 ${line.attempt} 次 ｜ ${line.status} ｜ ` +
+          `${evalVerdictLabel(line.verdict)}${line.falsePositive ? "（误报）" : ""} ｜ ${line.turns} 轮 ｜ ` +
+          `token ${line.usage.totalTokens} ｜ 会话 ${line.sessionId}${line.error !== undefined ? ` ｜ ${line.error}` : ""}\n`
+      );
+    },
+  });
+  writeOut(
+    `[eval] 完成：本次运行 ${summary.ran} 次，跳过已有 ${summary.skipped} 次；` +
+      `结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`
+  );
+}
+
+// 缺省 Skill 目录：任务集同级 skills/ 下唯一的子目录
+function defaultSkillDir(tasksDir: string): string {
+  const resolved = path.resolve(tasksDir);
+  const tasksRoot = existsSync(path.join(resolved, "task.json"))
+    ? path.dirname(resolved)
+    : resolved;
+  const skillsRoot = path.join(path.dirname(tasksRoot), "skills");
+  const names = existsSync(skillsRoot)
+    ? readdirSync(skillsRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+    : [];
+  if (names.length !== 1) {
+    throw new Error(`无法确定 Skill 目录：${skillsRoot} 下应恰有一个子目录，请用 --skill 指定`);
+  }
+  return path.join(skillsRoot, names[0] ?? "");
+}
+
 async function main(argv: string[]): Promise<void> {
+  if (argv[0] === "eval") {
+    await evalMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "run") {
+    await runMain(argv.slice(1));
+    return;
+  }
   if (argv[0] === "trace") {
     traceMain(argv.slice(1));
     return;

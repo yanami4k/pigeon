@@ -1,4 +1,4 @@
-// Actor 报告共用人话格式化助手（trace / replay / resume 菜单等共用，单一约定，禁止各视图
+// Actor 报告共用通俗措辞格式化助手（trace / replay / resume 菜单等共用，单一约定，禁止各视图
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { FailureClass } from "../state/classification.ts";
@@ -49,7 +49,7 @@ export function summarizeArgs(args: unknown): string {
     : `${json.slice(0, ARGS_SUMMARY_LIMIT)}…（共 ${json.length} 字符）`;
 }
 
-// 批准来源 → 人话（决策 4 证据链：策略决定不能伪装成人工；M4 S6：grant 出处如实标明）
+// 批准来源 → 通俗措辞（决策 4 证据链：策略决定不能伪装成人工；M4 S6：grant 出处如实标明）
 const APPROVED_BY_LABEL: Record<string, string> = {
   human: "人工",
   "policy:yolo": "yolo 批发授权",
@@ -59,13 +59,13 @@ const APPROVED_BY_LABEL: Record<string, string> = {
   "policy:config": "策略放行（固化配置）",
 };
 
-// 审批决定 → 人话裁决：人工区分批准/拒绝；策略来源直接给标签（不伪装成人工）
+// 审批决定 → 通俗措辞裁决：人工区分批准/拒绝；策略来源直接给标签（不伪装成人工）
 export function approvalVerdict(decision: ToolExecutionDecision): string {
   const label = APPROVED_BY_LABEL[decision.approvedBy] ?? decision.approvedBy;
   return label === "人工" ? (decision.outcome === "approved" ? "人工批准" : "人工拒绝") : label;
 }
 
-// FailureClass → 人话徽章（D7：「用户取消」与「治理熔断」必须一眼可分）。
+// FailureClass → 通俗措辞徽章（D7：「用户取消」与「治理熔断」必须一眼可分）。
 // 自 state/trace.ts 归位（M2 S5，决策 032）：徽章是 Actor 共用措辞（cli trace/replay 与
 // tui 终态摘要同一口径），不是冷投影结构——state 只留判据（classification.ts），措辞归本模块
 export function failureBadge(failure: FailureClass | null | undefined): string {
@@ -84,7 +84,12 @@ export function failureBadge(failure: FailureClass | null | undefined): string {
   }
 }
 
-// 正文缺口（M5 S1，决策 037）→ 人话：trace Run 头与 replay 尾部总账同一口径
+// Eval 验证器三值判决（M6.5 S3，决策 058）→ 通俗措辞：trace Run 头、replay 时间线与 Eval 报告同一口径
+export function evalVerdictLabel(verdict: "pass" | "fail" | "undetermined"): string {
+  return verdict === "pass" ? "通过" : verdict === "fail" ? "失败" : "未判定";
+}
+
+// 正文缺口（M5 S1，决策 037）→ 通俗措辞：trace Run 头与 replay 尾部总账同一口径
 export function describeContentGaps(gaps: readonly ContentGap[]): string {
   const detail = gaps
     .map(
@@ -95,7 +100,7 @@ export function describeContentGaps(gaps: readonly ContentGap[]): string {
   return `消息正文缺失 ${gaps.length} 条（${detail}）`;
 }
 
-// 熔断计数粒度 → 人话
+// 熔断计数粒度 → 通俗措辞
 export function breakerScopeLabel(scope: string): string {
   const SCOPE_LABEL: Record<string, string> = {
     tool: "按工具名计数",

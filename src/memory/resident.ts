@@ -18,11 +18,20 @@ export const DEFAULT_MEMORY_BUDGET_CHARS = 8000;
 export const CHARS_PER_TOKEN_ESTIMATE = 4;
 export const PREFERENCES_DISPLAY_PATH = "~/.pigeon/preferences.md";
 
+// M6.5（决策 059）：显式 Memory 根；label 是清单里的展示前缀
+export interface MemoryRoot {
+  path: string;
+  label: string;
+}
+
 export interface ResidentMemoryOptions {
   workspaceRoot: string;
   // 用户级根；缺省 os.homedir()（测试注入临时目录）
   homeDir?: string;
   budgetChars?: number;
+  // M6.5（决策 059）：在场时只读这些目录下的 .md（空数组 = 不注入任何 Memory），不读治理根的 .pigeon/memory，
+  // 也不读用户级偏好——对照实验里 Memory 不是变量，任何一层都不能漏进来
+  roots?: readonly MemoryRoot[];
 }
 
 export interface ResidentMemory {
@@ -56,9 +65,8 @@ function sliceChars(text: string, count: number): string {
   return text.slice(0, end);
 }
 
-// 项目 Memory 文件清单：只认目录下的 .md 常规文件，按文件名字典序（决策 050 口径）
-function projectMemoryNames(workspaceRoot: string): string[] {
-  const dir = join(workspaceRoot, ".pigeon", "memory");
+// Memory 目录的文件清单：只认目录下的 .md 常规文件，按文件名字典序（决策 050 口径）
+function memoryNames(dir: string): string[] {
   if (!existsSync(dir)) {
     return [];
   }
@@ -76,7 +84,11 @@ export function loadResidentMemory(options: ResidentMemoryOptions): ResidentMemo
   let usedChars = 0;
 
   const preferencesPath = join(options.homeDir ?? homedir(), ".pigeon", "preferences.md");
-  if (existsSync(preferencesPath) && statSync(preferencesPath).isFile()) {
+  if (
+    options.roots === undefined &&
+    existsSync(preferencesPath) &&
+    statSync(preferencesPath).isFile()
+  ) {
     // 偏好永不截断：全文注入，并占用预算（预算不够时项目 Memory 让位）
     const file = readMemoryFile(preferencesPath, PREFERENCES_DISPLAY_PATH);
     parts.push(`### 用户偏好（${file.displayPath}）\n${file.content.trimEnd()}`);
@@ -90,9 +102,17 @@ export function loadResidentMemory(options: ResidentMemoryOptions): ResidentMemo
     usedChars += file.content.length;
   }
 
-  const memoryDir = join(options.workspaceRoot, ".pigeon", "memory");
-  for (const name of projectMemoryNames(options.workspaceRoot)) {
-    const file = readMemoryFile(join(memoryDir, name), `.pigeon/memory/${name}`);
+  const roots = options.roots ?? [
+    { path: join(options.workspaceRoot, ".pigeon", "memory"), label: ".pigeon/memory" },
+  ];
+  const files = roots.flatMap((root) =>
+    memoryNames(root.path).map((name) => ({
+      absolute: join(root.path, name),
+      display: `${root.label}/${name}`,
+    }))
+  );
+  for (const { absolute, display } of files) {
+    const file = readMemoryFile(absolute, display);
     const remaining = budgetChars - usedChars;
     const identity = { path: file.displayPath, hash: file.hash, bytes: file.bytes };
     if (file.content.length <= remaining) {

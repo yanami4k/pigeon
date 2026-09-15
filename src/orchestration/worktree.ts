@@ -3,7 +3,7 @@
 // 分支 pigeon/<name>（同名分支已存在时由 git 响亮拒绝）。git 经参数数组直接调用，不经 shell；
 // 名字先按白名单校验再进参数，杜绝被当成选项或路径穿越。合并由人用 git 完成，本模块不合并。
 import { execFileSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { SessionId } from "../state/ids.ts";
 
 export class WorktreeError extends Error {}
@@ -46,8 +46,11 @@ export function worktreeBranchFor(name: string): string {
 }
 
 export interface AddWorktreeInput {
-  // 主仓库根（= 治理根）
+  // 主仓库根：工作树与分支建在它上面
   repoRoot: string;
+  // M6.5 S2（决策 057）：工作树目录所在的治理根（放在其 .pigeon/worktrees 下）；缺省同仓库根（主会话派 worker）。
+  // Eval 的治理根是输出目录，与仓库根分开
+  governanceRoot?: string;
   sessionId: SessionId;
   name: string;
   // 起点提交；缺省 HEAD
@@ -60,7 +63,7 @@ export function addWorktree(input: AddWorktreeInput): WorktreeHandle {
   if (baseRef.startsWith("-")) {
     throw new WorktreeError(`起点提交不合法：${baseRef}`);
   }
-  const path = worktreePathFor(input.repoRoot, input.sessionId, input.name);
+  const path = worktreePathFor(input.governanceRoot ?? input.repoRoot, input.sessionId, input.name);
   const branch = worktreeBranchFor(input.name);
   runGit(input.repoRoot, ["worktree", "add", "-b", branch, path, baseRef]);
   return { name: input.name, sessionId: input.sessionId, path, branch };
@@ -73,6 +76,24 @@ export function removeWorktree(input: { repoRoot: string; path: string; force?: 
     ...(input.force === true ? ["--force"] : []),
     resolve(input.path),
   ]);
+}
+
+// 删除 worker 分支（M6.5 S2：Eval 每次运行收尾清理工作树与分支）；只接受 pigeon/<合法 worker 名>
+export function deleteBranch(input: { repoRoot: string; branch: string }): void {
+  const name = input.branch.startsWith("pigeon/") ? input.branch.slice("pigeon/".length) : "";
+  assertWorkerName(name);
+  runGit(input.repoRoot, ["branch", "-D", input.branch]);
+}
+
+// 路径所在仓库的主仓库根（M6.5 S2：任务 repo 为 "." 时）——从工作树里调用同样返回主检出，
+// 工作树与分支都建在主仓库上
+export function mainRepoRoot(path: string): string {
+  const commonDir = runGit(path, [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]).trim();
+  return dirname(resolve(commonDir));
 }
 
 // git worktree list --porcelain：空行分隔的块，每块 worktree / HEAD / branch|detached 行

@@ -1,4 +1,4 @@
-// 边界规则的元测试：防"规则还在但已经不干活了"（TS7 静默巡航 0 模块事故的教训）。
+// 边界规则的元测试：防"规则还在但已经不执行任务了"（TS7 静默巡航 0 模块事故的教训）。
 // 断言一：真实违规会被规则抓住（cli/tui→execution、src/tools 下绕过桥接文件的 rogue 直连）；
 // 断言二：tools 单一桥接文件（wrap.ts）豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
 // 夹具写在 os.tmpdir()，不进 src/——否则主 npm run deps 会把夹具当真违规报出来。
@@ -45,6 +45,7 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
     mkdirSync(join(fixtureRoot, "src/execution"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/review"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/tools"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/eval"), { recursive: true });
     writeFileSync(join(fixtureRoot, "src/execution/index.ts"), "export {};\n");
     writeFileSync(
       join(fixtureRoot, "src/tui/probe.ts"),
@@ -54,6 +55,11 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
     writeFileSync(
       join(fixtureRoot, "src/cli/probe.ts"),
       'import "../execution/index.ts";\nexport {};\n'
+    );
+    // eval 不得触达 Actor 层（M6.5，eval-below-actors，022 修订）
+    writeFileSync(
+      join(fixtureRoot, "src/eval/probe.ts"),
+      'import "../cli/probe.ts";\nexport {};\n'
     );
     writeFileSync(
       join(fixtureRoot, "src/review/probe.ts"),
@@ -111,6 +117,12 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
     assert.ok(
       actorViolations.some((v) => v.from.includes("src/cli/probe.ts")),
       `应抓到 cli→execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
+    );
+    assert.ok(
+      output.summary.violations.some(
+        (v) => v.rule.name === "eval-below-actors" && v.from.includes("src/eval/probe.ts")
+      ),
+      `应抓到 eval→cli，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from}`))}`
     );
     // tui-pi-tui-only：tui 直连 pi-agent-core 被抓；直连 pi-tui 豁免生效
     const tuiViolations = output.summary.violations.filter(

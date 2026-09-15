@@ -233,7 +233,7 @@ test("replay 报告：崩溃残留 Run 标注「记录到此中断」+ 待对账
     const { sessionId, runId } = writeCrashResidue(root);
     const output = runReplayCommand({ root, runId, sessionId });
     assert.ok(output.includes("分类：未知"), "崩溃残留落未知桶");
-    assert.ok(output.includes("记录到此中断（崩溃可能）"), "崩溃残留人话标注");
+    assert.ok(output.includes("记录到此中断（崩溃可能）"), "崩溃残留通俗措辞标注");
     assert.ok(output.includes("待对账"), "悬账 intent 标注待对账");
     assert.ok(output.includes("OutcomeUnknown"));
   } finally {
@@ -292,7 +292,7 @@ test("replay 报告：孤儿记录与撕裂尾巴如实标注", () => {
     assert.ok(output.includes("孤儿记录"), "孤儿 Receipt 标注在场");
     assert.ok(output.includes("撕裂写"), "撕裂尾巴标注在场");
     assert.ok(output.includes("熔断落闸"), "熔断记录在场");
-    assert.ok(output.includes("按参数指纹计数"), "熔断计数粒度人话");
+    assert.ok(output.includes("按参数指纹计数"), "熔断计数粒度通俗措辞");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

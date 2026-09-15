@@ -8,6 +8,7 @@ import {
   approvalVerdict,
   breakerScopeLabel,
   describeContentGaps,
+  evalVerdictLabel,
   failureBadge,
   shortId,
   summarizeArgs,
@@ -210,6 +211,22 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
         }
       }
     }
+  }
+  // M6.5 S3（决策 058）：Eval 验证器判决——回答"这次跑的判决是什么、凭哪份输出"
+  if (run.verified !== undefined) {
+    const verified = run.verified.payload;
+    let line =
+      `  验证判决：任务 ${verified.taskId} ｜ ${evalVerdictLabel(verified.verdict)} ｜ ` +
+      `退出码 ${verified.exitCode ?? "无"}${verified.timedOut ? "（超时）" : ""} ｜ ` +
+      `耗时 ${verified.durationMs} 毫秒 ｜ 输出 ${verified.outputBytes} 字节 sha256 ${verified.outputHash.slice(0, 12)}` +
+      `${verified.truncated ? "（截断）" : ""} ｜ 回填资产 ${verified.assets.length} 个`;
+    if (verified.error !== undefined) {
+      line += ` ｜ ${verified.error}`;
+    }
+    if (verified.falsePositive) {
+      line += " ｜ 自报完成但验证失败（误报）";
+    }
+    lines.push(line);
   }
   // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，
   // 措辞与 replay 同口径——绝不假装证据链完整

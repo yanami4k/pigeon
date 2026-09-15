@@ -20,6 +20,7 @@ import { type ContentSourceMessage, Sha256HexSchema } from "./message-content.ts
 import { MigrationRegistry } from "./migration.ts";
 import { migrateReceiptToCurrent, type Receipt, ReceiptSchema } from "./receipt.ts";
 import {
+  EvalVerifiedPayloadSchema,
   LlmRequestPayloadSchema,
   ObservationKind,
   RunEndedPayloadSchema,
@@ -43,8 +44,9 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // turn.completed 增 usage、新增 run.started / llm.request / skill.loaded 观察族——
 // 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）；
 // v7（M5.5 S2，决策 040）：新增 session.header / child.spawned / child.settled 三族（worker 编排）；
-// v8（M5.7 S3，决策 053）：receipt 载荷升 v5（加 mcp 块），读路径把内嵌 receipt 经其迁移链升到当前版本
-export const EVENT_LOG_VERSION = 8;
+// v8（M5.7 S3，决策 053）：receipt 载荷升 v5（加 mcp 块），读路径把内嵌 receipt 经其迁移链升到当前版本；
+// v9（M6.5 S3，决策 058）：新增 eval.verified 观察族（加法式）
+export const EVENT_LOG_VERSION = 9;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -111,11 +113,19 @@ export const SkillLoadedRecordSchema = Type.Object({
   payload: SkillLoadedPayloadSchema,
 });
 export type SkillLoadedRecord = Static<typeof SkillLoadedRecordSchema>;
+// M6.5 S3（决策 058）：Eval 验证器判决，落在该次运行的会话文件里
+export const EvalVerifiedRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.EvalVerified),
+  payload: EvalVerifiedPayloadSchema,
+});
+export type EvalVerifiedRecord = Static<typeof EvalVerifiedRecordSchema>;
 
 export const ObservationRecordSchema = Type.Union([
   RunStartedRecordSchema,
   LlmRequestRecordSchema,
   SkillLoadedRecordSchema,
+  EvalVerifiedRecordSchema,
 ]);
 export type ObservationRecord = Static<typeof ObservationRecordSchema>;
 
@@ -535,6 +545,9 @@ eventLogMigrations.register("event-log", 7, (doc) => ({
   version: 8,
   ...(doc.kind === "receipt" ? { receipt: migrateReceiptToCurrent(doc.receipt) } : {}),
 }));
+
+// v8 → v9（M6.5 S3，决策 058）：加法式演进（新增 eval.verified 观察族）——v8 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 8, (doc) => ({ ...doc, version: 9 }));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏

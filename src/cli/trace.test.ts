@@ -1,5 +1,5 @@
 // M4 S3：CLI trace 命令（只读静态报告）测试——中文标签、id 短哈希、参数截断、
-// 分类徽章（人话）、拒绝理由逐字、待对账/异常项可见、只读性（不触碰事件日志与工作区）。
+// 分类徽章（通俗措辞）、拒绝理由逐字、待对账/异常项可见、只读性（不触碰事件日志与工作区）。
 import assert from "node:assert/strict";
 import {
   appendFileSync,
@@ -141,7 +141,7 @@ test("trace 报告：中文标签、id 短哈希、审批出处、逐字拒绝�
     assert.ok(output.includes("哈希证据：改前"), "写调用必须展示哈希证据");
     assert.ok(output.includes("实测改后"));
     assert.ok(output.includes("（与预期一致）"));
-    // 分类徽章（人话）
+    // 分类徽章（通俗措辞）
     assert.ok(output.includes("分类：正常"));
     // id 短哈希：完整 ULID 不出现在报告里，短形在
     assert.ok(!output.includes(sessionId), "会话 id 必须短哈希");

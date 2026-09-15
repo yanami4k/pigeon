@@ -67,6 +67,11 @@
 | 053 | Receipt 加第三个证据块 mcp：参数与返回哈希、截断标记、serverEvidence 约定；治理链不动 | M5.7 开工第 3 件 | M5.7 |
 | 054 | 隔离单位接口已由 M5.5 的 WorkspaceProvider 满足；形状封顶三种，领域隔离归工具链 | M5.7 开工第 4 件 | M5.7 |
 | 055 | M5.7 验收用两个官方参考 server：filesystem 走真实链路，everything 走协议一致性 | M5.7 开工第 5 件 | M5.7 |
+| 056 | headless 运行入口：进程内 API 加 `pigeon run` 薄壳；无人值守审批只有 yolo 或 fail-closed；需审批次数从回执反推 | M6.5 开工第 1 件 | M6.5 |
+| 057 | Eval 任务目录格式：一任务一目录、快照为 git 引用经工作树、验证器由 runner 在收工后独立运行 | M6.5 开工第 2 件 | M6.5 |
+| 058 | 验证器接口：退出码三值判决加可选 JSON、误成功取"自报完成但验证失败"、判决记 eval.verified 观察族 | M6.5 开工第 3 件 | M6.5 |
+| 059 | 冒烟对照：候选 Skill 放暂存目录、headless 传 skillRoots 切三条件、Skill 从真实失败手写、任务集含 holdout | M6.5 开工第 4 件 | M6.5 |
+| 060 | Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库 | M6.5 开工第 5、6 件 | M6.5 |
 
 ## 条目
 
@@ -226,6 +231,7 @@
 - 详情：docs/decisions/m4-module-layout-decisions.md。
 - 修订（2026-09-13，M5 施工，038 / 043）：分层规则新增 memory-below-controller（memory/ 只依赖 state / persistence / tools）与 skills-only-state-tools（skills/ 只依赖 state / tools）；application-is-controller 放行 memory 与 skills。
 - 修订（2026-09-14，M5.7 施工，041 / 051）：分层规则新增 mcp-only-state-tools（mcp/ 只依赖 state / tools，不触达 persistence / pi-runtime / application / Actor 层，由 application 装配）；application-is-controller 放行 mcp。
+- 修订（2026-09-14，M6.5 施工，046 / 057）：分层规则新增 eval-below-actors（eval/ 可依赖 state / persistence / tools / orchestration / application 及以下，不触达 Actor 层，由 cli 调用）；application-is-controller 不放行 eval，Controller 不反向依赖评测层；边界元测试补 eval→cli 探针。
 
 ### 023 崩溃残留 Run 恒为未知；resume 与 trace 计崩溃残留（事实）
 
@@ -402,11 +408,12 @@
 - 详情：docs/decisions/m5-decisions.md；证据 docs/audits/2026-09-13-m5-ba94b53.md（S2 渲染部分与真实链路验收）。
 - 落地（2026-09-13）：历史安全上限按渲染行计，默认 500；单条渲染上限默认 4000 字符；thinking 段在 036 净化之后由壳的受信逐行样式函数加暗色。thinking 映射实测（Kimi For Coding，anthropic-messages 线路）：不设推理档位时只有 text 块；reasoning=medium 时流出 thinking_start / thinking_delta / thinking_end，终态块为 thinking 与 text，usage 带 reasoning 计数——思维链映射为标准 thinking 块，前提是请求带推理档位。Adapter 与装配根目前不设推理档位，生产路径要看到 thinking 需由 streamFn 传入档位（验收探针 spikes/m5-reasoning-stream-fn.mjs 如此做）；推理档位配置未裁决。OpenAI 兼容端点对现用 key 返回 401，reasoning_content 那条线路未实测。
 
-### 046 Eval 自建薄 runner，任务格式对齐公开基准，外部 harness 只作可选适配（设计）
+### 046 Eval 自建薄 runner，任务格式对齐公开基准，外部 harness 只作可选适配（事实）
 
 - 结论：M6.5 / M9 的 Eval 用自建薄 runner，不引入外部评测框架（promptfoo、Inspect AI 等）作主干。runner 四件事：读任务目录、准备仓库快照、经 headless 运行入口跑 Pigeon 若干次、调确定性验证器并从账本出 JSONL 结果。三向对照（无 Skill / 候选 / 已批准）靠 042 / 043 的注入冻结开关；指标全部从 Event Log 算：成功率与误成功率来自验证器回执，工具调用与审批次数来自事件族与治理族，恢复结果来自 resolution，成本来自 044 的 usage。统计按 M9 规范（per-task 三元结果、pairwise delta、Wilson 区间、McNemar exact）自写；报告先出 markdown 表。任务目录格式对齐公开基准（说明 + 验证脚本 + 环境声明，Terminal-Bench 形态），公开任务可导入；Terminal-Bench / SWE-bench 适配器为可选项。M6.5 在本机工作树跑，容器隔离随 exec 沙箱考虑。headless 入口与 M5.5 worker 共用。
 - 理由：Pigeon 的 Eval 是"学习有没有带来提升"的对照实验，外部框架面向输入到输出、读不到账本、默认 LLM 打分（§3.8 禁止当判决），主干上帮不上；公开基准 harness 只测完成率测不了学习增益；runner 核心是 headless 入口，M5.5 反正要做；M9 统计规范已明确到公式，自写比在他人断言体系里绕更清楚；任务格式对齐公开基准保住可比性又不让外部成主干依赖；§2 第 6 条：上游与外部都缺"测学习增益"这个语义。先例：SWE-bench / Terminal-Bench 都是自家 harness 加数据集、agent 经适配器接入；Claude Code plugin eval 是自带 JSON 套件的小 runner。局限：无报告界面；M6.5 样本量只能证"可测"，显著性靠 M9 的区间与配对检验；外部工具现状以联网核实为准。粗估 M6.5 阶段约 500 行加测试。
-- 锚点：ROADMAP §M6.5 既定方向、§M9；施工落地后补 src/eval/、src/application/（headless 入口）。
+- 锚点：src/eval/（task.ts、snapshot.ts、verify.ts、runner.ts、results.ts、report.ts）、src/application/headless.ts、src/cli/index.ts（run 与 eval 子命令）、eval/tasks/、eval/skills/、docs/audits/eval/；ROADMAP §M6.5、§M9；证据 docs/audits/2026-09-14-m6-5-8e76567.md。
+- 落地（2026-09-14，M6.5）：统计只做 per-task 三元结果与 pairwise delta，Wilson 区间与 McNemar exact 留 M9；外部 harness 适配器未做。
 - 详情：docs/decisions/m5-5-orchestration-decisions.md。
 
 ### 047 文档规范：audit / decision / spikes 入库，notes 本地；探针脚本入库 spikes/（事实）
@@ -472,3 +479,45 @@
 - 理由：filesystem 有真副作用且与 Pigeon 自有读写工具功能重叠，正好验证"外部会写盘的工具被同等治理"；everything 是协议测试专用，覆盖注解、prompts、resources、长任务与故障面；只用其一各缺一半；memory 这次不需要。MCP server 只提供可调用的操作，何时调、能否调、留什么账全在 Pigeon，server 看不见审批与账本。
 - 锚点：ROADMAP §M5.7 完成证据；package.json（devDependencies 锁 2026.8.31）、spikes/mcp-acc/（.mcp.json、.pigeon/mcp.json 夹具，run-everything.mjs 自动化剧本，run-filesystem.mjs 真实链路剧本）、src/tools/run-command.ts（planMcpLaunch 复用 048 启动器）、src/mcp/transport.ts；证据 docs/audits/2026-09-14-m5-7-d99d693.md。
 - 详情：docs/decisions/m5-7-decisions.md。
+
+### 056 headless 运行入口：进程内 API 加 `pigeon run` 薄壳；无人值守审批只有 yolo 或 fail-closed；需审批次数从回执反推（事实）
+
+- 结论：headless 入口分两层。进程内 API 复用 M5.5 的 worker 运行面工厂（createWorkerRuntimeFactory），以无父会话的方式装出完整运行面跑到收尾，带轮次与墙钟上限，供 Eval runner 与将来的脚本流水线调用；cli 新子命令 `pigeon run` 只是它的薄壳：任务描述从参数或 stdin 读，沿用 --root、--stream-fn、--yolo、--thinking，加 --max-turns、--wall-clock 与 --json（退出时打印一行结构化结果：sessionId、runId、终态、失败分类、轮次、usage、需审批次数），退出码按终态映射。每次运行是一个普通会话，账本、trace、search 照旧。无人值守下的审批只有三种合法形态且由参数决定：缺省 prompt 模式下一律 fail-closed 拒绝（006 既有）；显式 --yolo；grants.json 固化规则加 yolo。"有人在场时会被问几次"不新增记录，从回执反推：write 与 exec 档且 approvedBy 为 policy:yolo 的调用数，即 M9 的"审批次数"指标来源。
+- 理由：无人值守时"问人"这一档没有人可问，fail-closed 是唯一诚实的落法，yolo 是人的显式拨档；worker 工厂已是不经 Actor 的完整运行面，API 几乎现成；子命令壳给人和外部 harness 适配器用，API 给 runner 用，两者分离避免 runner 起子进程。先例：Claude Code 的 `claude -p` 与 Codex 的 `codex exec`，一段提示、跑完退出、可选 JSON 输出。复杂度约 API 80 行、壳 120 行、测试 150 行。
+- 锚点：src/application/headless.ts（runHeadless、summarizeRunMetrics、HEADLESS_EXIT_CODES）、src/application/workers.ts（openRuntimeSurface 装配内核、createDetachedRuntime）、src/application/runtime.ts（createApprovalHandler 可缺省、skillRoots / memoryRoots）、src/cli/index.ts（run 子命令）；测试 src/application/headless.test.ts、src/cli/run-cli.test.ts；ROADMAP §M6.5。
+- 落地（2026-09-14）：worker 工厂的请求形状要求父会话与角色，headless 与它共用抽出的装配内核（不写 session.header、run_command 不套角色清单、不传审批通道），worker 路径行为不变；终态除四种 Run 终态外有 turn-limit / wall-clock-limit / token-limit（累计 totalTokens 达上限即中止）；退出码 completed 0、failed 2、aborted 3、unknown 4、turn-limit 5、wall-clock-limit 6、token-limit 7，1 为参数与装配错误；结果另带工具调用数与耗时，全部从 Event Log 算。
+- 详情：docs/decisions/m6-5-decisions.md。
+
+### 057 Eval 任务目录格式：一任务一目录、快照为 git 引用经工作树、验证器由 runner 在收工后独立运行（事实）
+
+- 结论：任务放在仓库 `eval/tasks/<id>/`，入库，一任务一目录：task.md 任务说明、task.json 元数据（id、说明文件、repo 与 ref、预算 maxTurns / wallClockMs / 可选 token 上限、验证器命令与超时、tags、holdout 标记）、verify 脚本、README（测什么能力、来源与许可）。代码快照以 git 引用给出（仓库加提交号），runner 用 M5.5 的 WorkspaceProvider 从该提交开工作树，零新机制；M6.5 的任务直接用 Pigeon 自己的仓库在锁定提交上。验证器由 runner 在 agent 收工后作为独立子进程在工作区内执行，带超时，模型看不见也改不了；验证脚本只看工作区最终文件，不依赖模型留下的临时状态。公开基准（Terminal-Bench 目录形态、SWE-bench 总表形态）导入时转成同一布局。
+- 理由：说明、快照、验证器三件套是公开基准的共同点，差别只在快照怎么给；git 引用与工作树隔离同一机制，比复制目录与镜像都轻且确定；验证器由 runner 跑是 §3.3 与"确定性验证器"的落法，模型自己跑的测试只是它的反馈不是判决；自托管在本仓库的任务真实且免费。复杂度约 schema 与加载器 100 行、快照准备 40 行、验证器执行 60 行、测试 100 行。
+- 锚点：src/eval/task.ts（EvalTaskSchema、loadEvalTask / loadEvalTasks）、src/eval/snapshot.ts（prepareTaskWorkspace）、src/orchestration/workers.ts（WorkspaceProvider 的 baseRef、gitWorktreeWorkspaces 分传仓库根与治理根）、src/orchestration/worktree.ts（addWorktree 治理根、deleteBranch、mainRepoRoot）、eval/tasks/、.gitignore（资产例外）、.dependency-cruiser.js（eval-below-actors）；测试 src/eval/task.test.ts、src/eval/snapshot.test.ts、src/eval/snapshot-stale.test.ts（崩溃残留续跑前清理）；ROADMAP §M6.5。
+- 落地（2026-09-14）：task.json 带 version；repo.path 为 "." 时取主仓库根；id 与目录名一致、最长 24；验证资产放 assets/ 下按工作区相对路径排布，不得越出工作区根；验证器命令为参数数组，`{TASK_DIR}` 替换为任务目录；工作树开在治理根（输出目录）的 .pigeon/worktrees 下，worker 名 `<taskId>-<condition>-<n>`，挂 node_modules 目录联接，跑完先拆联接再删工作树与分支；首批任务集 8 个在 8e76567 上。
+- 详情：docs/decisions/m6-5-decisions.md。
+
+### 058 验证器接口：退出码三值判决加可选 JSON、误成功取"自报完成但验证失败"、判决记 eval.verified 观察族（事实）
+
+- 结论：验证器返回以退出码为主：0 通过、非 0 失败、超时或脚本自身崩溃为"未判定"，三值直接对上 M9 的 per-task 三元结果；stdout 最后一行若是 JSON 则原样记进结果供报告展示子项，字段不约束。误成功分两层：第一层"agent 自报完成但验证器失败"记为误报，自报完成由账本现成信息判定（末轮 assistant 消息以正常 stop 结束且无未闭合的工具错误），不让模型输出特殊标记；第二层任务可选带反向断言脚本（如未改测试文件、未删文件），反向断言失败即使正向通过也判失败并标"越界"，M6.5 只做第一层、留第二层接口。验证器自身的证据记一条观察族 eval.verified（任务 id、命令、退出码、输出哈希与截断输出、耗时、三值结论），落在该次运行的会话文件里，trace 可见，形态同 exec 回执但不是工具调用。
+- 理由：成功率与误成功率两个指标全靠验证器，返回形状与误成功定义必须先定死；三值而非二值是 §3.3 "缺失结果不得支撑确定性结论"与 M9 统计规范的直接要求；判决落账本才能让 trace 回答"这次跑的判决是什么"，也让 M7 拿到干净的结果标签；公开基准都是退出码判决加测试日志，"误成功"是路线图自提的指标，按最小可算的定义来。复杂度约验证器执行与三值判定 60 行、记录族 40 行、误报判定 30 行、测试 100 行。
+- 锚点：src/eval/verify.ts（restoreAssets、runVerifier、judgeVerdict、selfReportedDone、verifyTaskRun）、src/state/runtime-events.ts（EvalVerifiedPayloadSchema）、src/state/event-log.ts（v9、eval.verified 族）、src/state/materialize.ts（evalVerifieds）、src/state/trace.ts 与 src/cli/trace.ts（Run 头验证判决）、src/cli/replay.ts、src/application/format.ts（evalVerdictLabel）；测试 src/eval/verify.test.ts；ROADMAP §M6.5。
+- 落地（2026-09-14）：Event Log 升 v9 加法式；未判定包括超时、被信号终止、验证器拉不起来与回填失败；输出按到达顺序计字节与哈希，只留尾部 16 KiB；首参 node 换成当前 Node 可执行文件，超时终止整棵进程树；自报完成的判据为 run.ended 在场、末轮正常 stop 且非合成失败、每个提议的工具调用都已落定、末个工具结果不是错误；运行面没装起来（无 runId）时照样判决但不落 eval.verified。
+- 详情：docs/decisions/m6-5-decisions.md。
+- 修订（2026-09-14）：验证器的输入资产以任务目录为准：验证用的测试文件与脚本放在任务目录里，runner 在跑验证器前先把它们覆盖写回工作区，工作区里被 agent 改动或删除的同名文件不作数；"验证脚本只看工作区最终文件"精确为"只看回填后的工作区"。理由：yolo 下 agent 可以改掉或删掉测试让验证通过，第一层误报判定抓不到；回填是 SWE-bench 评测时才打测试补丁的同一做法，约 30 行；按路径 deny 是新治理语义、反向断言是事后发现，均不取。
+
+### 059 冒烟对照：候选 Skill 放暂存目录、headless 传 skillRoots 切三条件、Skill 从真实失败手写、任务集含 holdout（事实）
+
+- 结论：候选 Skill 放独立暂存目录 `.pigeon/candidates/skills/<name>/`，缺省不加载，与 §3.4 "候选默认进持久化暂存区"一致；M8 的激活即把目录搬进 .pigeon/skills 并落记录。三向对照（无 Skill、候选、已批准）由 headless API 的 skillRoots 参数切换：空、只含暂存目录、只含正式目录；043 的哈希清单随之进 run.started，事后可证每次跑用的是哪一版。M6.5 的"候选"与"已批准"是同一份文件在两个位置，该对照验证注入管线，"无对有"才验证经验效果。Skill 由人手写，内容从 M5 与 M5.5 审计里模型真实踩过的坑提炼（如 Windows 上 .cmd 的处理、改动后先跑对应测试文件再收工），不经自动管线，这正是 M6.5 "手工编写"的定义；自动提炼按 §5 顺序在 M6（Reviewer 出候选）与 M7（对比式蒸馏）做，手写 Skill 届时成为对照基线。任务集 5 到 10 个，全部在 Pigeon 自己的仓库锁定提交上，其中 2 到 3 个标 holdout，写 Skill 时不看，holdout 上的指标变化才说明经验会迁移而非背题。每任务每条件跑 3 次，成本由 044 的 usage 算出进报告。
+- 理由：M6.5 原文"在蒸馏链全自动完成前先证明论断可测、不依赖 M5.5 或 M6"，runner、任务集、指标是 M7 到 M9 反正要用的设施，手写 Skill 是它的第一个使用者；若人写的经验都测不出变化，自动生成要先回头看指标。暂存目录优于前言 status 字段：与 §3.4 字面一致，激活动作可见。holdout 是评测的标准做法。复杂度约暂存目录与 skillRoots 参数 60 行、runner 条件循环 80 行，任务与 Skill 是内容编写约一天。
+- 锚点：src/skills/catalog.ts（SkillRoot 显式根）、src/memory/resident.ts（MemoryRoot 显式根）、src/application/headless.ts（skillRoots / memoryRoots）、src/eval/runner.ts（skillRootsFor、条件循环）、eval/skills/pigeon-coding-pitfalls/、eval/tasks/；测试 src/skills/catalog-roots.test.ts、src/application/headless.test.ts、src/eval/runner.test.ts；ROADMAP §M6.5。
+- 落地（2026-09-14）：Skill Catalog 显式根在场时只扫给定的根（空数组不登记任何本地 Skill），根目录自身有 SKILL.md 即一个 Skill，展示路径为给定标签；`.pigeon/candidates/skills/` 缺省不加载、显式列出才加载；显式 Memory 根在场时连用户级偏好也不读；runner 按"第几次 → 任务 → 条件"交错。
+- 详情：docs/decisions/m6-5-decisions.md。
+- 修订（2026-09-14）：Eval 用的候选与已批准 Skill 放入库的 `eval/skills/<name>/candidate/` 与 `eval/skills/<name>/approved/`，runner 三个条件的 skillRoots 直接指向它们，memoryRoots 三个条件一律为空；`.pigeon/candidates/skills/` 仍是日常使用的暂存区约定，M8 的激活动作不变。理由：.gitignore 忽略整个 .pigeon/，否则 results.jsonl 与 report.md 入库而被对照的 Skill 不在仓库里，只能靠 run.started 的哈希对上；Memory 不是本轮实验变量。
+
+### 060 Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库（事实）
+
+- 结论：每次 Eval 运行一个目录 `docs/audits/eval/<日期>-<基线号>/`。results.jsonl 入库，每次运行一行：任务 id、条件、第几次、sessionId、runId、三值判决、是否误报、轮次、工具调用数、需审批次数、usage、耗时、失败分类，是 M9 统计的原始数据。report.md 入库：任务乘条件的成功率表、误报、成本、holdout 单列；M6.5 只做 per-task 三元结果与 pairwise delta，Wilson 区间与 McNemar exact 在 M9 补。实验会话文件落该目录下的 `.pigeon/`（独立治理根，被 .gitignore 的 .pigeon/ 规则忽略，本地保留供 trace / replay 以 --root 回查），不与日常会话混放。runner 的输出目录参数决定三样落点；工作区仍是从任务快照开出的工作树。此条顺带处理 M6.5 前置第 6 件"会话数膨胀"：实验会话不进日常会话列表，015 的重审推迟到日常会话数真实变多时。
+- 理由：047 文档规范下证据进 docs/audits、运行时数据不入库；结果表几十 KB 且必须可复算，会话文件几十 MB 且既有审计已接受"号在、文件在本机"的形态；独立治理根让几十个实验会话不污染日常列表，比现在就改会话列表的读法便宜且正确。复杂度约结果写出与报告生成 150 行，目录约定零代码。
+- 锚点：src/eval/results.ts（EvalResultLine、EVAL_RESULT_FIELDS、readResultLines）、src/eval/runner.ts（runEval）、src/eval/report.ts（renderEvalReport）、src/cli/index.ts（eval 子命令）、docs/audits/eval/2026-09-14-8e76567/；测试 src/eval/runner.test.ts、src/eval/report.test.ts；ROADMAP §M6.5。
+- 落地（2026-09-14）：结果行另带 holdout、终态与出错时的 error；每次运行结束立即追加一行，重跑同一输出目录跳过已有的（任务、条件、第几次）；报告另列按条件汇总的成本与过程、运行异常清单。
+- 详情：docs/decisions/m6-5-decisions.md。

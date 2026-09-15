@@ -10,7 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { loadResidentMemory } from "../memory/resident.ts";
+import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
 import {
   createReadSessionEntryTool,
   createSearchSessionsTool,
@@ -24,7 +24,7 @@ import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
-import { loadSkillCatalog } from "../skills/catalog.ts";
+import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
 import {
   createLoadSkillTool,
   LOAD_SKILL_TOOL,
@@ -61,8 +61,9 @@ export interface RuntimeDeps {
   provider: string;
   modelId: string;
   // 审批 handler 由 Actor 注入（决策 025）：工厂收 grantStore——审批提示的 [a]/[d]
-  // 放权键需要它；cli 传 REPL 问答版，将来的 tui 传面板版
-  createApprovalHandler: (grants: SessionGrantStore) => ApprovalHandler;
+  // 放权键需要它；cli 传 REPL 问答版，将来的 tui 传面板版。
+  // M6.5 S1（决策 056）：缺省 = 无审批通道，prompt 档一律 fail-closed 拒绝并落 decision（006）——headless 运行如此
+  createApprovalHandler?: (grants: SessionGrantStore) => ApprovalHandler;
   // M4 S6（D6/F）：固化配置规则——缺省时 buildRuntime 自行 loadGrantConfig；
   // 畸形文件在此响亮失败（治理配置 fail-closed，启动中止）
   configGrants?: readonly ConfigGrantRule[];
@@ -83,6 +84,10 @@ export interface RuntimeDeps {
   // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
   // 缺省 = 本会话没有外部工具
   mcp?: McpSession;
+  // M6.5（决策 059）：显式 Skill 根与 Memory 根——在场时只用给定的根（空数组 = 不注入），不扫治理根与用户级目录；
+  // Eval 三条件由 skillRoots 切换，memoryRoots 一律为空
+  skillRoots?: readonly SkillRoot[];
+  memoryRoots?: readonly MemoryRoot[];
 }
 
 export interface RuntimeBundle {
@@ -148,6 +153,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     workspaceRoot: governanceRoot,
     ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
     ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
+    ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
   });
   const basePrompt =
     "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
@@ -162,6 +168,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
     // M5.7 S4（043 口径）：MCP server 的 prompts 以 server 为来源进同一目录
     ...(deps.mcp !== undefined && deps.mcp.prompts.length > 0 ? { prompts: deps.mcp.prompts } : {}),
+    ...(deps.skillRoots !== undefined ? { roots: deps.skillRoots } : {}),
   });
   const hasSkills = skillCatalog.skills.length > 0;
   if (hasSkills) {
@@ -242,8 +249,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     governance: createToolGovernance({
       registry,
       // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
-      // 交互实现由 Actor 注入（决策 025）
-      approvalHandler: deps.createApprovalHandler(grantStore),
+      // 交互实现由 Actor 注入（决策 025）；无审批通道时不传，prompt 档 fail-closed
+      ...(deps.createApprovalHandler !== undefined
+        ? { approvalHandler: deps.createApprovalHandler(grantStore) }
+        : {}),
       // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
       sessionGrants: grantStore,
       configGrants,

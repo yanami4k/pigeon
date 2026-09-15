@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "tool-error-codes",
+  "instructions": "task.md",
+  "repo": { "path": ".", "ref": "8e76567038c83cb34ad4ebaf4501afc3c10a0cbb" },
+  "budget": { "maxTurns": 30, "wallClockMs": 900000 },
+  "verifier": { "command": ["node", "{TASK_DIR}/verify.mjs"], "timeoutMs": 180000 },
+  "assets": ["src/tools/error-kind-codes.eval.test.ts"],
+  "tags": ["error-classification"],
+  "holdout": false
+}

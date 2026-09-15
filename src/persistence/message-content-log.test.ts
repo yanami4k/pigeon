@@ -226,7 +226,7 @@ test("会话列表不把内容文件当会话；会话列表冷路径可跳过�
 
 test("v5 事件文件读路径迁移到 v6：无 contentHash 的 entry 合法（M5 前会话），不派生正文缺口", () => {
   withDir((dir) => {
-    assert.equal(EVENT_LOG_VERSION, 8);
+    assert.equal(EVENT_LOG_VERSION, 9);
     const sessionId = newSessionId();
     const runId = newRunId();
     const v5Entry = {

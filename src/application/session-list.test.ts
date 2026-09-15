@@ -128,7 +128,7 @@ test("session list：安静行（时间 + Run 数 + 会话 id），仅待对账�
     assert.ok(output.includes(healthy));
     assert.ok(output.includes(crashed.sessionId));
     assert.match(output, /1 个 Run/);
-    // 待对账突出行：逐字措辞（D5 人话 + 动作提示），且只出现在崩溃会话那一行附近
+    // 待对账突出行：逐字措辞（D5 通俗措辞 + 动作提示），且只出现在崩溃会话那一行附近
     assert.ok(output.includes("1 条待对账（上次会话异常中断，用 resume 处理）"));
     const pendingLine = output.split("\n").find((line) => line.includes("条待对账"));
     assert.ok(pendingLine !== undefined);

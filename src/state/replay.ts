@@ -11,7 +11,7 @@ import type { EventRecord } from "./event-log.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import type { ContentGap, MaterializedSession, RunClassification } from "./materialize.ts";
 
-// 时间线上的一条记录 + 人话异常标注（空数组 = 无异常）
+// 时间线上的一条记录 + 通俗措辞异常标注（空数组 = 无异常）
 export interface ReplayEvent {
   record: EventRecord;
   annotations: string[];

@@ -131,6 +131,19 @@ export default {
       to: { path: "^src/", pathNot: "^src/(mcp|state|tools)/" },
     },
     {
+      name: "eval-below-actors",
+      severity: "error",
+      comment:
+        "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057）可依赖 state / persistence / " +
+        "tools / orchestration / application 及以下；不触达 Actor 层（cli/tui），由 cli 调用（022 修订）。",
+      from: { path: "^src/eval/", pathNot: "\\.test\\.ts$" },
+      to: {
+        path: "^src/",
+        pathNot:
+          "^src/(eval|application|orchestration|pi-runtime|approvals|execution|memory|skills|mcp|persistence|tools|state)/",
+      },
+    },
+    {
       name: "actors-no-execution",
       severity: "error",
       comment:

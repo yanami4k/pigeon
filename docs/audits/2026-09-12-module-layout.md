@@ -1,7 +1,7 @@
 # 模块布局归位：施工记录与验证证据
 
 - 日期：2026-09-12
-- 仓库：`D:/code/pigeon-harness`
+- 仓库：`pigeon-harness`
 - 基线：`dev` @ `aef8877`（M4 收口决策 ①②③ 已提交）
 - 依据：docs/decisions/m4-module-layout-decisions.md（选项 c 有限重整）
 - 提交：`5f14d63 Move schemas, materialization and projections into layered directories`（51 文件，+1838 / −1627，git 识别重命名 7 个）；`5f14d63 Update roadmap state flows and module map to the as-built layout`（ROADMAP §4 两段）

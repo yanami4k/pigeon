@@ -93,6 +93,8 @@ export const ObservationKind = {
   RunStarted: "run.started",
   LlmRequest: "llm.request",
   SkillLoaded: "skill.loaded",
+  // M6.5 S3（决策 058）：Eval 验证器判决
+  EvalVerified: "eval.verified",
 } as const;
 export type ObservationKind = (typeof ObservationKind)[keyof typeof ObservationKind];
 
@@ -161,3 +163,39 @@ export const SkillLoadedPayloadSchema = Type.Object({
   truncated: Type.Boolean(),
 });
 export type SkillLoadedPayload = Static<typeof SkillLoadedPayloadSchema>;
+
+// eval.verified（M6.5 S3，决策 058 含修订）：runner 收工后回填验证资产、在工作区独立执行验证器的判决。
+// 三值：pass（退出码 0）/ fail（非 0）/ undetermined（超时、被信号终止或拉不起来——缺失的结果不支撑确定性结论，§3.3）。
+// 形态同 exec 回执（命令、退出码、输出哈希与截断输出），但不是工具调用，不进治理族
+export const EvalVerdictSchema = Type.Union([
+  Type.Literal("pass"),
+  Type.Literal("fail"),
+  Type.Literal("undetermined"),
+]);
+export type EvalVerdict = Static<typeof EvalVerdictSchema>;
+
+export const EvalVerifiedPayloadSchema = Type.Object({
+  taskId: Type.String({ minLength: 1 }),
+  // 实际执行的参数数组（任务目录占位已替换）
+  command: Type.Array(Type.String()),
+  exitCode: Type.Union([Type.Integer(), Type.Null()]),
+  signal: Type.Optional(Type.String()),
+  timedOut: Type.Boolean(),
+  // 验证器自身故障（拉不起进程、回填失败）
+  error: Type.Optional(Type.String()),
+  durationMs: Type.Integer({ minimum: 0 }),
+  // 输出全文不入账：stdout 与 stderr 按到达顺序的字节数与哈希，只留尾部截断文本
+  outputBytes: Type.Integer({ minimum: 0 }),
+  outputHash: Sha256HexSchema,
+  output: Type.String(),
+  truncated: Type.Boolean(),
+  verdict: EvalVerdictSchema,
+  // stdout 尾行是 JSON 对象或数组时原样收入，字段不约束
+  details: Type.Optional(Type.Unknown()),
+  // 验证前从任务目录回填的资产（工作区相对路径）
+  assets: Type.Array(Type.String()),
+  // 误报第一层：agent 自报完成（从账本判定）且判决为 fail
+  selfReportedDone: Type.Boolean(),
+  falsePositive: Type.Boolean(),
+});
+export type EvalVerifiedPayload = Static<typeof EvalVerifiedPayloadSchema>;

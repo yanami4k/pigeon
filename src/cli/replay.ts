@@ -11,6 +11,7 @@ import {
   approvalVerdict,
   breakerScopeLabel,
   describeContentGaps,
+  evalVerdictLabel,
   failureBadge,
   shortId,
   summarizeArgs,
@@ -33,7 +34,7 @@ const ERROR_KIND_LABEL: Record<string, string> = {
   environment: "环境异常",
 };
 
-// 单条记录的关键字段摘要（kind 各自的要点，人话）
+// 单条记录的关键字段摘要（kind 各自的要点，通俗措辞）
 function recordDetail(record: EventRecord): string {
   switch (record.kind) {
     case "turn.started":
@@ -81,6 +82,15 @@ function recordDetail(record: EventRecord): string {
         `Skill 读取 ${record.payload.name}/${record.payload.resourcePath} ｜ ${record.payload.bytes} 字节` +
         `${record.payload.truncated ? "（已截断）" : ""} ｜ 哈希 ${record.payload.hash.slice(0, 12)}`
       );
+    // M6.5 S3（决策 058）：Eval 验证器判决
+    case "eval.verified": {
+      const payload = record.payload;
+      return (
+        `验证判决 ｜ 任务 ${payload.taskId} ｜ ${evalVerdictLabel(payload.verdict)} ｜ ` +
+        `退出码 ${payload.exitCode ?? "无"}${payload.timedOut ? "（超时）" : ""} ｜ ` +
+        `输出 sha256 ${payload.outputHash.slice(0, 12)}${payload.falsePositive ? " ｜ 自报完成但验证失败（误报）" : ""}`
+      );
+    }
     case "intent": {
       let detail =
         `意图落账 ${shortId(record.executionId)} ｜ ${record.toolName}（${record.toolCallId}）｜ ` +
@@ -241,7 +251,7 @@ export function renderRunReplay(replay: RunReplay, options: ReplayRenderOptions 
   for (const event of replay.events) {
     renderEvent(event, lines, options);
   }
-  // 崩溃残留与撕裂尾巴：人话标注，绝不假装证据链完整（D2 可见化）
+  // 崩溃残留与撕裂尾巴：通俗措辞标注，绝不假装证据链完整（D2 可见化）
   if (!replay.ended) {
     lines.push("记录到此中断（崩溃可能）：本 Run 无 run.ended 事件");
   }

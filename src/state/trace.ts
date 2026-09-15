@@ -8,6 +8,7 @@
 import type {
   BreakerRecord,
   DecisionRecord,
+  EvalVerifiedRecord,
   EventRecord,
   IntentRecord,
   ResolutionRecord,
@@ -44,7 +45,7 @@ export interface TraceToolCall {
   classification?: ToolExecutionClassification;
   // OutcomeUnknown 待对账：intent 已落盘但无 Receipt 且未确证（§3.2 禁止盲重放）
   pendingReconcile: boolean;
-  // 人话异常说明（id 错位 / 参数不一致 / 哈希不符 / 事件缺口）
+  // 通俗措辞异常说明（id 错位 / 参数不一致 / 哈希不符 / 事件缺口）
   anomalies: string[];
 }
 
@@ -74,6 +75,8 @@ export interface TraceRun {
   // M5 S5（决策 044）：Run 启动快照摘要（M5 前的 Run 无）与模型请求次数（llm.request 条数）
   started?: RunStartedRecord;
   llmRequestCount: number;
+  // M6.5 S3（决策 058）：Eval 验证器判决（非 Eval 运行无）；同一 Run 多次验证取最后一条
+  verified?: EvalVerifiedRecord;
   classification?: RunClassification;
   // run 级异常（轮次边界缺口等）
   anomalies: string[];
@@ -223,6 +226,8 @@ function buildRunTrace(
       run.ended = true;
     } else if (record.kind === "run.started") {
       run.started = record;
+    } else if (record.kind === "eval.verified") {
+      run.verified = record;
     } else if (record.kind === "llm.request") {
       run.llmRequestCount += 1;
     } else if (record.kind === "intent") {

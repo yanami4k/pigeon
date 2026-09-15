@@ -195,13 +195,13 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
       上游边界规则（含 src/tui 的 pi-tui 精确豁免）+ 目录分层规则（M2 S1 起含 application
       Controller 层；cli/tui 不得依赖 execution），测试文件可跨层搭夹具；事实：.dependency-cruiser.js）
 
-已建（M0–M5.7 as-built，2026-09-14 回写）——依赖方向自下而上：
+已建（M0–M6.5 as-built，2026-09-14 回写）——依赖方向自下而上：
 ├─ state/             叶子，不依赖任何其他目录、无 IO：稳定 id、ToolExecution 状态机、
 │                     Receipt（M5.5 起 v4，含 exec 证据；M5.7 起 v5，含 mcp 证据）、事件信封与运行时事件
 │                     载荷 schema（M5.7 起 run.started 带 MCP 工具集摘要与 server 状态）、
 │                     Event Log 记录族 schema（M5 起 v6，含 run.started / llm.request / skill.loaded
 │                     观察族；M5.5 起 v7，含 session.header / child.spawned / child.settled worker 编排族；
-│                     M5.7 起 v8，读路径把内嵌 receipt 升到当前版本）
+│                     M5.7 起 v8，读路径把内嵌 receipt 升到当前版本；M6.5 起 v9，含 eval.verified 观察族）
 │                     与读路径迁移链、消息内容记录与规范序列化哈希（037）、Memory / Skill 注入清单
 │                     schema、推理档位字面量、失败四分类判据（活冷共用）、冷物化与对账（纯函数，
 │                     含正文缺口与父子配对）、trace / replay / session 摘要投影、固化 grant 规则与
@@ -255,13 +255,18 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     恢复范围、workers-commands.ts /spawn /cancel /workers 命令层（M5.5）；mcp.ts MCP 会话
 │                     装配（读配置、并发启动、映射工具、取 prompt 正文、run.started 摘要与启动提示）与
 │                     disposeRuntime 统一释放（M5.7，worker 以其工作树为工作区根启动自己的 MCP 会话）；
+│                     headless.ts 无父会话运行入口，与 worker 共用装配内核（M6.5，decisions.md 056）；
 │                     可依赖 state / persistence / tools / approvals / pi-runtime / execution / memory /
 │                     skills / orchestration / mcp，不触达 Actor 层
+├─ eval/              依赖 application 及以下，不触达 Actor 层（M6.5，decisions.md 046 / 057–060）：task.json 任务目录
+│                     加载、从任务 ref 开工作树的快照准备、验证资产回填与退出码三值验证器（eval.verified）、
+│                     三条件 runner（skillRoots 切换）、results.jsonl 与 report.md；由 cli 的 eval 子命令调用
 └─ cli/               Actor：REPL 内联审批（四键）、/grants /revoke /grants save、trace /
                       replay / session list 只读渲染、resume 的参数解析与 IO 接线；装配根与
                       resume 流程在 application/（M2 S1，025——M4 记账的 cli 直连 execution
                       过渡豁免已消除）；cli 不得依赖 execution，只经 application；M5.5 起 trace
-                      从主会话列出并进入 worker 会话，resume worker 会话回到其工作树
+                      从主会话列出并进入 worker 会话，resume worker 会话回到其工作树；M6.5 起 run（headless）
+                      与 eval 子命令
 
 占位（export {}，按里程碑填充）：
 ├─ context/           上下文规划（M5 以 system prompt 冻结段与 transformContext 只读观察落地，
@@ -269,7 +274,6 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 ├─ review/            M6 后台 Reviewer 和 Candidate 暂存
 ├─ distillation/      M7 Episode、Outcome 和对比式经验提炼
 ├─ replay/            M8 沙箱回放验证（区别于 state/replay 的只读重建，decisions.md 014）
-├─ eval/              M6.5 / M9 评测数据、指标和报告
 └─ tui/               M2 Pigeon 自有 TUI（S1 骨架）：唯一允许直连 pi-tui 的目录
                       （tui-pi-tui-only 精确豁免，spike 判过 decisions.md 026）；
                       继承 cli 的治理投影；不得触达 execution
@@ -678,7 +682,30 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - 至少一条完整链路：Trace → 失败 → 手工 Candidate → 审批 → 重跑 → 指标变化；改善与证伪都计为有效证据；
 - 业务成败由确定性验证器判定，LLM 只用于轨迹诊断。
 
-既定方向（decisions.md 046）：Eval 用自建薄 runner，不引入外部评测框架作主干。runner 只做四件事：读任务目录、准备仓库快照、经 headless 运行入口跑 Pigeon 若干次、调验证器并从账本出 JSONL 结果；三向对照靠 042 / 043 的注入冻结开关；指标全部从 Event Log 算（验证器回执、tool 事件、审批与恢复记录、044 的 usage）；统计按 M9 规范自写；报告先出 markdown 表不做界面。任务目录格式对齐公开基准（说明 + 验证脚本 + 环境声明，Terminal-Bench 形态），公开任务可导入；Terminal-Bench / SWE-bench 适配器为可选项，让 Pigeon 作为 agent 接入以取得可对比分数，不影响主角。M6.5 在本机工作树跑不做容器隔离；容器隔离随 exec 沙箱一并考虑。headless 运行入口与 M5.5 worker 共用。
+既定方向（decisions.md 046）：Eval 用自建薄 runner，不引入外部评测框架作主干。runner 只做四件事：读任务目录、准备仓库快照、经 headless 运行入口跑 Pigeon 若干次、调验证器并从账本出 JSONL 结果；三向对照靠 042 / 043 的注入冻结开关；指标全部从 Event Log 算（验证器回执、tool 事件、审批与恢复记录、044 的 usage）；统计按 M9 规范自写；报告先出 markdown 表不做界面。任务目录格式对齐公开基准（说明 + 验证脚本 + 环境声明，Terminal-Bench 形态），公开任务可导入；Terminal-Bench / SWE-bench 适配器为可选项，让 Pigeon 作为 agent 接入以取得可对比分数，不影响主角。M6.5 在本机工作树跑不做容器隔离；容器隔离随 exec 沙箱一并考虑。headless 运行入口（decisions.md 056）：进程内 API 复用 M5.5 的 worker 运行面工厂，`pigeon run` 子命令是它的薄壳（任务描述、--yolo、--max-turns、--wall-clock、--json、退出码按终态映射）；无人值守下的审批只有 prompt 加 fail-closed 拒绝、显式 yolo、固化规则加 yolo 三种合法形态；"需审批次数"从回执反推（write / exec 档且 approvedBy 为 policy:yolo 的调用数），不新增记录。任务目录格式（decisions.md 057）：`eval/tasks/<id>/` 一任务一目录，task.md 说明、task.json 元数据（repo 与 ref、预算、验证器命令与超时、tags、holdout）、verify 脚本、README；快照为 git 引用经 WorkspaceProvider 开工作树；验证器由 runner 在收工后作为独立子进程执行，只看工作区最终文件。验证器接口（decisions.md 058）：退出码三值判决（0 通过、非 0 失败、超时或崩溃为未判定）加可选 JSON 尾行；误成功第一层为"agent 自报完成但验证失败"，第二层反向断言脚本留接口；判决记观察族 eval.verified 落在该次运行的会话文件里。验证资产由 runner 在验证前从任务目录回填工作区（058 修订）。冒烟对照（decisions.md 059）：候选 Skill 放暂存目录 `.pigeon/candidates/skills/`，headless API 以 skillRoots 切换无 / 候选 / 已批准三条件；Skill 由人从真实失败手写，自动提炼归 M6 与 M7；任务集 5 到 10 个在本仓库锁定提交上，2 到 3 个标 holdout，每任务每条件跑 3 次。Eval 用的 Skill 放入库的 `eval/skills/<name>/{candidate,approved}/`，skillRoots 直接指向；memoryRoots 为空（059 修订）。结果落点（decisions.md 060）：每次运行一个目录 `docs/audits/eval/<日期>-<基线号>/`，results.jsonl 与 report.md 入库，实验会话文件落该目录下独立治理根 `.pigeon/` 不入库、不进日常会话列表；015 的会话列表重审推迟到日常会话数真实变多时。
+
+交付（事实，2026-09-14 回写，锚点 src/eval/、src/application/、src/skills/、src/memory/、src/orchestration/、src/state/、src/cli/、eval/）：
+
+- S0：源码注释措辞统一；`src/migration-completeness.test.ts` 扫描全部 `*_VERSION` 常量并对每个版本化 schema 从 v1 逐级迁移校验（架构审计建议第 2 条）。
+- S1 headless 入口（056）：`application/headless.ts` 与 worker 共用抽出的装配内核，无父会话、无角色、无审批通道（prompt 档 fail-closed），带轮次 / 墙钟 / token 上限，结果从 Event Log 算；`pigeon run` 子命令（--json、退出码映射）；Skill Catalog 与常驻 Memory 支持显式根。
+- S2 任务目录与快照（057）：`eval/task.ts` 加载器，`eval/snapshot.ts` 从任务 ref 开工作树（仓库根与治理根分传、baseRef、`<taskId>-<condition>-<n>`、node_modules 联接、跑完清理、崩溃残留续跑前清理）；分层规则 eval-below-actors（022 修订）。
+- S3 验证器（058 含修订）：`eval/verify.ts` 回填验证资产后独立子进程判决，退出码三值、尾行 JSON、误报第一层；Event Log 升 v9 加 eval.verified，trace Run 头与 replay 显示。
+- S4 runner 与结果（059、060 含修订）：`eval/runner.ts` 三条件 skillRoots、memoryRoots 为空、交错执行、续跑跳过；`eval/report.ts` 成功率表、holdout 单列、三元结果、pairwise delta、成本；`pigeon eval` 子命令。
+- S5 内容：`eval/tasks/` 8 个任务（3 个 holdout）在 8e76567 上，每个实测参考改法前红后绿；`eval/skills/pigeon-coding-pitfalls/candidate/` 从审计里模型真实失误手写。
+
+完成证据（事实）：
+
+- 业务成败由确定性验证器判定：`eval/verify.test.ts`（三值、回填防改测试、误报、eval.verified 落盘与 trace）；变异超时改判失败、去回填均精确变红。
+- 冒烟链路：Kimi For Coding 上 none、candidate、approved 各 24 次运行，results.jsonl 与 report.md 在 docs/audits/eval/2026-09-14-8e76567/；成功率 none 24/24、candidate 23/24（误报 1）、approved 21/24（误报 2），candidate 与 approved 的 SKILL.md 逐字节一致；本配置下未测出改善（基线触顶）：任务集对该模型触顶，论断可测、未被支持；实测到的区分信号是成本与过程（有 Skill 的条件平均多约 3 轮、多约 4 次工具调用）。
+- 门禁与变异：`npm run verify` 534 测试全绿，dependency-cruiser 256 模块零违规；八处承重变异全部精确变红；证据 docs/audits/2026-09-14-m6-5-8e76567.md。
+
+已知边界与偏差（如实登记）：
+
+- approved 条件在项目负责人审阅通过后补跑，与前两个条件没有交错执行。
+- SKILL.md 把编辑失败说成计入熔断，与实现不符（熔断只有治理阻断同一 key 累计满 3 次与上游拦截同一工具连续 3 次两类）；为保持 candidate 与 approved 逐字节一致本轮不改，下一版 Skill 修正。
+- 任务集对当前模型触顶，成功率没有区分度；M9 的任务集需让无 Skill 基线明显低于满分。
+- 样本只证可测，不做显著性结论；反向断言、容器隔离、外部 harness 适配器未做。
+- runner 单进程顺序执行；本机内存不足时进程可能被终止，以续跑恢复。
 
 ### M7：整棵会话树的对比式经验提炼
 

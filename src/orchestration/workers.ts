@@ -69,22 +69,40 @@ export interface WorkerRuntimeRequest {
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
 
-// 隔离工作区提供者：第一版为 git 工作树；测试注入内存实现
+// 隔离工作区提供者：第一版为 git 工作树；测试注入内存实现。
+// M6.5 S2（决策 057）：baseRef 为起点提交（Eval 任务的 ref），缺省 HEAD
+export interface WorkspaceProviderInput {
+  sessionId: SessionId;
+  name: string;
+  baseRef?: string;
+}
+
 export interface WorkspaceProvider {
-  plan(input: { sessionId: SessionId; name: string }): WorkerWorkspace;
-  create(workspace: WorkerWorkspace, input: { sessionId: SessionId; name: string }): void;
+  plan(input: WorkspaceProviderInput): WorkerWorkspace;
+  create(workspace: WorkerWorkspace, input: WorkspaceProviderInput): void;
   changedFiles(workspace: WorkerWorkspace): string[];
 }
 
-export function gitWorktreeWorkspaces(governanceRoot: string): WorkspaceProvider {
+// 仓库根与治理根分开传（M6.5 S2）：工作树与分支建在仓库根上，目录放在治理根的 .pigeon/worktrees 下。
+// 主会话派 worker 时两者同为主仓库根；Eval 的治理根是输出目录
+export function gitWorktreeWorkspaces(roots: {
+  repoRoot: string;
+  governanceRoot: string;
+}): WorkspaceProvider {
   return {
     plan: ({ sessionId, name }) => ({
       kind: "git-worktree",
-      path: worktreePathFor(governanceRoot, sessionId, name),
+      path: worktreePathFor(roots.governanceRoot, sessionId, name),
       branch: worktreeBranchFor(name),
     }),
-    create: (_workspace, { sessionId, name }) => {
-      addWorktree({ repoRoot: governanceRoot, sessionId, name });
+    create: (_workspace, { sessionId, name, baseRef }) => {
+      addWorktree({
+        repoRoot: roots.repoRoot,
+        governanceRoot: roots.governanceRoot,
+        sessionId,
+        name,
+        ...(baseRef !== undefined ? { baseRef } : {}),
+      });
     },
     changedFiles: (workspace) => changedFiles(workspace.path),
   };
@@ -166,7 +184,12 @@ export class WorkerOrchestrator {
 
   constructor(options: WorkerOrchestratorOptions) {
     this.#options = options;
-    this.#workspaces = options.workspaces ?? gitWorktreeWorkspaces(options.governanceRoot);
+    this.#workspaces =
+      options.workspaces ??
+      gitWorktreeWorkspaces({
+        repoRoot: options.governanceRoot,
+        governanceRoot: options.governanceRoot,
+      });
     this.#now = options.now ?? Date.now;
   }
 
