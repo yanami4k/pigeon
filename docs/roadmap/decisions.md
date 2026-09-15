@@ -74,6 +74,7 @@
 | 060 | Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库 | M6.5 开工第 5、6 件 | M6.5 |
 | 061 | 编辑格式对照：只加一组 replace 式编辑工具，hashline 基线复用 M6.5 冒烟无 Skill 24 次；锚点容错搁置 | 编辑格式对照裁决 2026-09-15 | Eval / 编辑工具 |
 | 062 | 编辑工具默认改用 replace，hashline 保留为可选并留作后续优化方向 | 编辑格式对照裁决 2026-09-15 第 2 件 | 编辑工具 |
+| 063 | 失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做 | 失控止损裁决 2026-09-15 | 运行时 / 无人值守 |
 
 ## 条目
 
@@ -542,3 +543,10 @@
 - 锚点：src/tools/edit-mode.ts（DEFAULT_EDIT_MODE 为 replace、LEGACY_RESULT_EDIT_MODE）、src/eval/results.ts、src/eval/runner.ts、src/eval/compare.ts、src/eval/report.ts（旧结果行按 hashline 补齐）、src/application/workers.ts（worker 工厂接受编辑模式）；测试 src/application/runtime-edit-mode.test.ts；ROADMAP §4、§M3 编辑工具条目；证据 docs/audits/2026-09-15-edit-format-81e37bc.md（S4 节）。
 - 落地（2026-09-15）：依赖缺省 hashline 的既有测试改为显式传 hashline，断言不删；已知边界：旧会话历史里有 hashline 格式的读取输出，resume 后模型拿到的是 replace 版工具；eval/skills/pigeon-coding-pitfalls/ 第 1 节讲 hashline 用法，在新缺省下已不适用，本轮不改。
 - 详情：docs/decisions/edit-format-decisions.md 裁决第 4 条。
+
+### 063 失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做（事实）
+
+- 结论：单轮输出上限缺省 16,384 token，可配置（cli、tui、headless、`pigeon run`、`pigeon eval` 以参数覆盖，worker 继承父运行面的值），由 Pigeon 在装配层包装 streamFn、以 maxTokens 传入，模型定义值更小时取更小者；上限值写进注入快照的 model 段（加法式升版），事后可证每次运行用的上限。system prompt 在两种编辑模式下都加一句截断引导：工具调用若因输出上限未执行，把改动拆成几次较小的调用重发，不要原样重发；单次编辑只改需要改的那一段。流式重复检测与提前掐断本轮不做，以 Eval 结果行的撞输出上限轮数观察失控频率，明显上升时再议。
+- 理由：两次 Eval 保留的 1,396 轮中正常轮次输出最大 3,406 token，超过 4,000 的只有 2 轮失控且恰为模型上限 32,768；按约每秒 46 token，16,384 把失控一次的最长耗时从约 11.8 分钟降到约 6 分钟，相对正常最大轮次留约 4.8 倍余量，项目负责人明确要求正常输出不得被截断。上游对 length 停止的消息不执行其中工具调用并提示重发，截断不会造成残缺写入；固定文案不可改，静态 prompt 指引对缓存友好，动态插入提示只能以 user 角色出现，与 042 冲突。生成中途 abort 会结束整个 Run，合成 length 停止原因会改写证据，失控样本只有 2 个且集中在同一位置，重复检测的误报代价高于收益。
+- 锚点：src/pi-runtime/output-limit.ts（streamFn 包装）；src/application/runtime.ts（装配、`TRUNCATION_GUIDANCE`、快照 model 段）；src/pi-runtime/snapshot.ts（注入快照 v5）；src/state/runtime-events.ts 与 src/pi-runtime/adapter.ts（run.started 的 model 摘要）；src/application/workers.ts（worker 继承）；src/application/headless.ts、src/eval/runner.ts、src/cli/index.ts、src/tui/main.ts（`maxOutputTokens` 与 `--max-output-tokens`）；测试 src/pi-runtime/output-limit.test.ts、src/application/runtime-output-limit.test.ts、src/application/workers-output-limit.test.ts、src/application/runtime-edit-mode.test.ts、src/application/output-limit-truncation-e2e.test.ts。
+- 详情：docs/decisions/output-limit-decisions.md；施工与验证证据：docs/audits/2026-09-15-output-limit-7818dee.md。

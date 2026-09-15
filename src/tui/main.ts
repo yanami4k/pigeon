@@ -63,6 +63,8 @@ interface TuiFlags {
   memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理；worker 角色配置可覆盖）
   thinkingLevel?: ThinkingLevel;
+  // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384；worker 继承父运行面的值）
+  maxOutputTokens?: number;
 }
 
 function parseFlags(argv: string[]): TuiFlags {
@@ -76,7 +78,7 @@ function parseFlags(argv: string[]): TuiFlags {
   };
   const usage =
     "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-    "[--provider <名>] [--model <id>] [--thinking <档位>]";
+    "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>]";
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--yolo") {
@@ -101,6 +103,12 @@ function parseFlags(argv: string[]): TuiFlags {
         throw new Error(`--thinking 需要推理档位（${THINKING_LEVELS.join("/")}）（${usage}）`);
       }
       flags.thinkingLevel = value;
+    } else if (flag === "--max-output-tokens") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`--max-output-tokens 需要正整数（${usage}）`);
+      }
+      flags.maxOutputTokens = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -167,6 +175,7 @@ async function main(argv: string[]): Promise<void> {
     ...(flags.memoryBudgetChars !== undefined
       ? { memoryBudgetChars: flags.memoryBudgetChars }
       : {}),
+    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     createApprovalHandler: createHandler,
   });
   // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
@@ -225,6 +234,9 @@ async function main(argv: string[]): Promise<void> {
           ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
           ...(flags.memoryBudgetChars !== undefined
             ? { memoryBudgetChars: flags.memoryBudgetChars }
+            : {}),
+          ...(flags.maxOutputTokens !== undefined
+            ? { maxOutputTokens: flags.maxOutputTokens }
             : {}),
           createApprovalHandler: createHandler,
           restoredGrants,

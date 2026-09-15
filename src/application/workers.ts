@@ -41,6 +41,8 @@ export interface WorkerRuntimeDeps {
   startMcp?: (request: WorkerRuntimeRequest) => Promise<McpSession>;
   // 决策 061 / 062：编辑模式（缺省 replace）
   editMode?: EditMode;
+  // 决策 063：单轮输出上限（缺省 16,384）
+  maxOutputTokens?: number;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -57,6 +59,9 @@ export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor
 
 // 按会话装配编排器（M5.5 S4）：Actor 只拿四动作面，不触达 orchestration 的构造细节
 export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrator {
+  // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
+  const maxOutputTokens =
+    deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
   return new WorkerOrchestrator({
     governanceRoot: deps.governanceRoot,
     session: {
@@ -78,6 +83,7 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
         : {}),
       ...(deps.startMcp !== undefined ? { startMcp: deps.startMcp } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     }),
   });
 }
@@ -106,6 +112,8 @@ interface RuntimeSurface {
   memoryRoots?: readonly MemoryRoot[];
   // 决策 061：编辑模式（缺省 hashline）
   editMode?: EditMode;
+  // 决策 063：单轮输出上限（缺省 16,384）
+  maxOutputTokens?: number;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
 }
@@ -141,6 +149,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.persistThinking !== undefined ? { persistThinking: deps.persistThinking } : {}),
       ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
+      ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
     });
   };
 }
@@ -160,6 +169,7 @@ export interface DetachedRuntimeRequest {
   skillRoots?: readonly SkillRoot[];
   memoryRoots?: readonly MemoryRoot[];
   editMode?: EditMode;
+  maxOutputTokens?: number;
   startMcp?: () => Promise<McpSession>;
 }
 
@@ -198,6 +208,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.skillRoots !== undefined ? { skillRoots: surface.skillRoots } : {}),
     ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
+    ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）
   const startMcp =

@@ -38,6 +38,8 @@ export interface RunEvalOptions {
   streamFn: StreamFn;
   yolo: boolean;
   thinking?: ThinkingLevel;
+  // 决策 063：单轮输出上限（缺省 16,384）
+  maxOutputTokens?: number;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -198,6 +200,9 @@ async function runOnce(
       memoryRoots: [],
       editMode,
       ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
+      ...(options.maxOutputTokens !== undefined
+        ? { maxOutputTokens: options.maxOutputTokens }
+        : {}),
       ...(options.provider !== undefined ? { provider: options.provider } : {}),
       ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
       ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),

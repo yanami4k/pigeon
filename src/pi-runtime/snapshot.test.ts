@@ -1,5 +1,5 @@
 // 注入快照 schema 与迁移链测试（M1 起；M5 S3 升 v3：memory 字段结构化为冻结清单，决策 042；
-// M5.5 S5 升 v4：model 段增加推理档位，决策 050）。
+// M5.5 S5 升 v4：model 段增加推理档位，决策 050；升 v5：model 段增加单轮输出上限，决策 063）。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
@@ -11,6 +11,7 @@ import {
   migrateInjectionSnapshotV1toV2,
   migrateInjectionSnapshotV2toV3,
   migrateInjectionSnapshotV3toV4,
+  migrateInjectionSnapshotV4toV5,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -35,20 +36,23 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 1, migrateInjectionSnapshotV1toV2);
   migrations.register("injection-snapshot", 2, migrateInjectionSnapshotV2toV3);
   migrations.register("injection-snapshot", 3, migrateInjectionSnapshotV3toV4);
+  migrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
   return migrations;
 }
 
-test("v4 快照（结构化 memory 清单 + 可选推理档位）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 4);
+test("v5 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限）JSON 往返后校验通过", () => {
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 5);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
   assert.deepStrictEqual(revived, snapshot);
   const withThinking = { ...snapshot, model: { ...snapshot.model, thinkingLevel: "high" } };
   assert.ok(Value.Check(InjectionSnapshotSchema, withThinking));
+  const withOutputLimit = { ...snapshot, model: { ...snapshot.model, maxOutputTokens: 16_384 } };
+  assert.ok(Value.Check(InjectionSnapshotSchema, withOutputLimit));
 });
 
-test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推理档位的快照被拒绝", () => {
+test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推理档位、非正整数输出上限的快照被拒绝", () => {
   const snapshot = makeSnapshot();
   const missingMode = {
     ...snapshot,
@@ -73,9 +77,17 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
       model: { ...snapshot.model, thinkingLevel: "turbo" },
     })
   );
+  for (const maxOutputTokens of [0, 1.5]) {
+    assert.ok(
+      !Value.Check(InjectionSnapshotSchema, {
+        ...snapshot,
+        model: { ...snapshot.model, maxOutputTokens },
+      })
+    );
+  }
 });
 
-test("v1 → v2 → v3 → v4 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位缺省", () => {
+test("v1 → v2 → v3 → v4 → v5 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位与输出上限缺省", () => {
   const current = { ...makeSnapshot(), memory: [] };
   const { approvalMode: _, ...policyV1 } = current.tools.policy;
   const v1 = { ...current, version: 1, tools: { ...current.tools, policy: policyV1 } };
@@ -86,9 +98,10 @@ test("v1 → v2 → v3 → v4 迁移链：补 approvalMode 默认 prompt，旧�
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 4);
+  assert.equal(migrated.version, 5);
   assert.equal(migrated.tools.policy.approvalMode, "prompt");
   assert.equal(migrated.model.thinkingLevel, undefined);
+  assert.equal(migrated.model.maxOutputTokens, undefined);
   assert.deepEqual(migrated, current);
 });
 

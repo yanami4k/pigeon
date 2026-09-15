@@ -10,10 +10,16 @@ import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { REPLACE_EDIT_DESCRIPTION } from "../tools/replace-edit.ts";
 import { runHeadless } from "./headless.ts";
 
-// hashline 模式下的逐字基准（与决策 061 之前的装配结果一致）
+// 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加
+const TRUNCATION_GUIDANCE =
+  "工具调用若因输出上限未执行，把改动拆成几次较小的调用重发，不要原样重发；单次编辑只改需要改的那一段。";
+
+// hashline 模式下的逐字基准：编辑句与决策 061 之前一致，其后追加截断引导（决策 063）
 const HASHLINE_PROMPT =
   "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
-  "用 edit_file 按锚点编辑。写操作可能需要人工批准。" +
+  "用 edit_file 按锚点编辑。" +
+  TRUNCATION_GUIDANCE +
+  "写操作可能需要人工批准。" +
   "用 run_command 运行命令（不经 shell，不支持管道与 && 串联；每条命令都要人工批准）。" +
   "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
   "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
@@ -65,7 +71,14 @@ async function advertised(editMode: EditMode | undefined) {
   }
 }
 
-test("编辑模式显式 hashline：system prompt、edit_file 与 read_file 的描述和参数与决策 061 之前逐字一致", async () => {
+test("两种编辑模式的 system prompt 都包含截断后拆小引导（决策 063）", async () => {
+  for (const editMode of ["hashline", "replace"] as const) {
+    const { systemPrompt } = await advertised(editMode);
+    assert.ok(systemPrompt?.includes(TRUNCATION_GUIDANCE), `${editMode}：${systemPrompt}`);
+  }
+});
+
+test("编辑模式显式 hashline：edit_file 与 read_file 的描述和参数与决策 061 之前逐字一致；system prompt 的 hashline 编辑句不变并追加截断引导", async () => {
   const { systemPrompt, edit, read } = await advertised("hashline");
   assert.equal(systemPrompt, HASHLINE_PROMPT);
   assert.equal(edit?.description, HASHLINE_EDIT_DESCRIPTION);

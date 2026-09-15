@@ -23,6 +23,7 @@ import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
 import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
 import {
@@ -92,7 +93,13 @@ export interface RuntimeDeps {
   memoryRoots?: readonly MemoryRoot[];
   // 决策 061：编辑模式，缺省 hashline（缺省时装配出的工具与 system prompt 逐字不变）
   editMode?: EditMode;
+  // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
+  maxOutputTokens?: number;
 }
+
+// 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
+export const TRUNCATION_GUIDANCE =
+  "工具调用若因输出上限未执行，把改动拆成几次较小的调用重发，不要原样重发；单次编辑只改需要改的那一段。";
 
 export interface RuntimeBundle {
   adapter: PiRuntimeAdapter;
@@ -108,6 +115,10 @@ export interface RuntimeBundle {
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 061：编辑工具按模式装配，工具名都叫 edit_file；hashline 分支与 061 之前逐字一致
   const replaceMode = (deps.editMode ?? DEFAULT_EDIT_MODE) === "replace";
+  const maxOutputTokens = deps.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) {
+    throw new Error(`单轮输出上限需要正整数：${maxOutputTokens}`);
+  }
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
   const sessionsDir = path.join(governanceRoot, ".pigeon", "sessions");
   const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId, {
@@ -168,6 +179,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       "用 edit_file 按锚点编辑。";
   const basePrompt =
     editSentence +
+    TRUNCATION_GUIDANCE +
     "写操作可能需要人工批准。" +
     "用 run_command 运行命令（不经 shell，不支持管道与 && 串联；每条命令都要人工批准）。" +
     "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
@@ -226,6 +238,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         provider: deps.provider,
         id: deps.modelId,
         ...(deps.thinkingLevel !== undefined ? { thinkingLevel: deps.thinkingLevel } : {}),
+        maxOutputTokens,
       },
       tools: { policy, advertised: policy.allow },
       context: { systemPrompt },
@@ -233,7 +246,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
     },
-    streamFn: deps.streamFn,
+    // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
+    streamFn: limitOutputTokens(deps.streamFn, maxOutputTokens),
     tools: [
       replaceMode
         ? createReadFileTool(deps.workspaceRoot, { editMode: "replace" })

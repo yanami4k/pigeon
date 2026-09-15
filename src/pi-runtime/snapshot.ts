@@ -13,7 +13,8 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v2：ToolPolicy 增加 approvalMode（M3 决策 4，yolo = 人事先批发授权）
 // v3（M5 S3，决策 042 / 043）：memory 与 skills 由占位数组收紧为结构化冻结清单
 // v4（M5.5 S5，决策 050）：model 段增加推理档位 thinkingLevel（缺省 = off，不请求推理）
-export const INJECTION_SNAPSHOT_VERSION = 4;
+// v5（决策 063）：model 段增加单轮输出上限 maxOutputTokens（事后可证每次运行用的上限）
+export const INJECTION_SNAPSHOT_VERSION = 5;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -34,6 +35,8 @@ export const InjectionSnapshotSchema = Type.Object({
     id: Type.String({ minLength: 1 }),
     // 推理档位（决策 050）：两级来源——启动参数全局值，worker 角色配置覆盖；缺省 off
     thinkingLevel: Type.Optional(ThinkingLevelSchema),
+    // 单轮输出上限（决策 063）：装配层包装 streamFn 传入的 maxTokens 配置值；v4 之前的快照缺省
+    maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
   tools: Type.Object({
     policy: ToolPolicySchema,
@@ -78,3 +81,6 @@ export const migrateInjectionSnapshotV2toV3: Migration = (doc) => ({ ...doc, ver
 
 // v3 → v4：thinkingLevel 可缺省（缺省 = off），纯版本推进
 export const migrateInjectionSnapshotV3toV4: Migration = (doc) => ({ ...doc, version: 4 });
+
+// v4 → v5：maxOutputTokens 可缺省，纯版本推进
+export const migrateInjectionSnapshotV4toV5: Migration = (doc) => ({ ...doc, version: 5 });

@@ -59,6 +59,8 @@ export interface HeadlessRunOptions {
   sessionId?: SessionId;
   // 决策 061：编辑模式，缺省 hashline
   editMode?: EditMode;
+  // 决策 063：单轮输出上限（缺省 16,384）
+  maxOutputTokens?: number;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
 }
@@ -100,6 +102,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),
     ...(options.memoryRoots !== undefined ? { memoryRoots: options.memoryRoots } : {}),
     ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
+    ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
   });
   let limitHit: "turn-limit" | "wall-clock-limit" | "token-limit" | undefined;

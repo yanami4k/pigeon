@@ -495,6 +495,9 @@ export class PiRuntimeAdapter {
         provider: snapshot.model.provider,
         id: snapshot.model.id,
         thinkingLevel: snapshot.model.thinkingLevel ?? "off",
+        ...(snapshot.model.maxOutputTokens !== undefined
+          ? { maxOutputTokens: snapshot.model.maxOutputTokens }
+          : {}),
       },
       policy: {
         allow: [...snapshot.tools.policy.allow],

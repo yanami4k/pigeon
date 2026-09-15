@@ -79,6 +79,8 @@ export interface FakeReply {
   chunkGate?: FakeGate;
   // 本回复携带的工具调用块；非空时 done 的 stopReason 为 toolUse
   toolCalls?: FakeToolCallSpec[];
+  // 模拟撞输出上限：done 的 stopReason 为 length（上游对 length 停止的消息不执行其中的工具调用）
+  stopReason?: "length";
 }
 
 export interface FakeStreamBehavior {
@@ -228,7 +230,7 @@ async function pump(
     stream.push({ type: "toolcall_end", contentIndex, toolCall, partial });
     contents.push(toolCall);
   }
-  const stopReason = toolCalls.length > 0 ? "toolUse" : "stop";
+  const stopReason = reply.stopReason ?? (toolCalls.length > 0 ? "toolUse" : "stop");
   stream.push({
     type: "done",
     reason: stopReason,
@@ -239,7 +241,7 @@ async function pump(
 function finalize(
   partial: AssistantMessage,
   content: AssistantMessage["content"],
-  stopReason: "stop" | "toolUse" | "aborted"
+  stopReason: "stop" | "toolUse" | "length" | "aborted"
 ): AssistantMessage {
   return {
     ...partial,

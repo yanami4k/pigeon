@@ -191,6 +191,8 @@ interface ModelFlags {
   memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
   thinkingLevel?: ThinkingLevel;
+  // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384）
+  maxOutputTokens?: number;
 }
 
 // 无取值的开关型 flag（resume 参数切分时不吞下一个参数）
@@ -222,6 +224,12 @@ function parseModelFlags(argv: string[], usage: string): ModelFlags {
         throw new Error(`--thinking 需要推理档位（${THINKING_LEVELS.join("/")}）（${usage}）`);
       }
       flags.thinkingLevel = value;
+    } else if (flag === "--max-output-tokens") {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`--max-output-tokens 需要正整数（${usage}）`);
+      }
+      flags.maxOutputTokens = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -291,7 +299,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const sessionId = asSessionId(sessionIdArg);
   const flags = parseModelFlags(
     modelArgv,
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --root / --stream-fn / --provider / --model"
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model"
   );
   if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
     throw new Error(
@@ -333,6 +341,9 @@ async function resumeMain(argv: string[]): Promise<void> {
           ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
           ...(flags.memoryBudgetChars !== undefined
             ? { memoryBudgetChars: flags.memoryBudgetChars }
+            : {}),
+          ...(flags.maxOutputTokens !== undefined
+            ? { maxOutputTokens: flags.maxOutputTokens }
             : {}),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
@@ -390,7 +401,7 @@ async function buildWithMcp(
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -460,6 +471,7 @@ async function runMain(argv: string[]): Promise<void> {
       : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
+    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
   });
   if (json) {
     // JSON.stringify 转义全部 C0 控制字符，一行输出不携带终端控制序列
@@ -482,7 +494,8 @@ async function runMain(argv: string[]): Promise<void> {
 async function evalMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval <任务目录> --out <输出目录> [--runs N] --stream-fn <模块路径> [--yolo] " +
-    "[--thinking <档位>] [--skill <Skill 目录>] [--conditions none,candidate,approved] [--edit-mode hashline|replace]";
+    "[--thinking <档位>] [--skill <Skill 目录>] [--conditions none,candidate,approved] [--edit-mode hashline|replace] " +
+    "[--max-output-tokens <n>]";
   let tasksDir: string | undefined;
   let outDir: string | undefined;
   let runs = 3;
@@ -557,6 +570,7 @@ async function evalMain(argv: string[]): Promise<void> {
     ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
     ...(conditions !== undefined ? { conditions } : {}),
     ...(editMode !== undefined ? { editMode } : {}),
+    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     onResult: (line) => {
       writeOut(
         `[eval] ${line.taskId} ｜ ${line.condition} ｜ ${line.editMode ?? LEGACY_RESULT_EDIT_MODE} ｜ 第 ${line.attempt} 次 ｜ ${line.status} ｜ ` +
@@ -664,7 +678,7 @@ async function main(argv: string[]): Promise<void> {
   }
   const flags = parseModelFlags(
     argv,
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --root / --stream-fn / --provider / --model"
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model"
   );
   if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
     throw new Error(
@@ -692,6 +706,7 @@ async function main(argv: string[]): Promise<void> {
     ...(flags.memoryBudgetChars !== undefined
       ? { memoryBudgetChars: flags.memoryBudgetChars }
       : {}),
+    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
     createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
   });
