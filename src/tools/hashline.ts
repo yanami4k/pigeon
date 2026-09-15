@@ -155,7 +155,8 @@ function resolveEdit(
   if (end < anchor) {
     throw new HashlineError(`edits[${index}] 的 endAnchor 在 anchor 之前，范围倒置`);
   }
-  const removed = lines.slice(anchor, end + 1);
+  // insertAfter 只在锚点行之后插入，不删除任何行；锚点行只决定位置（范围仍占锚点行，供重叠检测）
+  const removed = edit.op === "insertAfter" ? [] : lines.slice(anchor, end + 1);
   const added = edit.op === "delete" ? [] : edit.lines;
   return { start: anchor, end, removed, added };
 }
@@ -191,7 +192,11 @@ export function buildEditDiff(
   applied: readonly AppliedEdit[]
 ): string {
   const hunks = applied.map((edit) => {
-    const contextBefore = oldLines.slice(Math.max(0, edit.startLine - 3), edit.startLine - 1);
+    // insertAfter 的上文含锚点行本身（锚点行及其前 1 行）；replace / delete 的上文是被改范围之前 2 行
+    const contextBefore =
+      edit.kind === "insertAfter"
+        ? oldLines.slice(Math.max(0, edit.startLine - 2), edit.startLine)
+        : oldLines.slice(Math.max(0, edit.startLine - 3), edit.startLine - 1);
     const contextAfter = oldLines.slice(edit.endLine, edit.endLine + 2);
     const body = [
       ...contextBefore.map((line) => ` ${line}`),

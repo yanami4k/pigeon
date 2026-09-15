@@ -12,6 +12,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { sha256Hex, truncateUtf8 } from "../state/message-content.ts";
 import type { SkillLoadedPayload } from "../state/runtime-events.ts";
+import { isOutsideRelative } from "../tools/paths.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import {
@@ -83,7 +84,8 @@ export function createLoadSkillTool(
         throw new LoadSkillError(`资源不存在：${resource}（Skill ${skill.name}）`);
       }
       const relative = path.relative(realDir, realTarget);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      // 与工作区路径围栏同一越界口径：名字以两个点开头的合法资源（..notes.md）不算越界
+      if (isOutsideRelative(relative)) {
         throw new LoadSkillError(
           `路径越出 Skill 目录（含符号链接或目录联接逃逸）：${resource}（Skill ${skill.name}）`
         );

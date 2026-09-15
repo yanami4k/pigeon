@@ -113,6 +113,32 @@ test("路径约束：../ 与目录联接逃逸出 Skill 目录一律拒绝（去
   }
 });
 
+test("路径约束：名字以 .. 开头的合法资源（..notes.md）照常读取；../ 与目录联接逃逸仍拒绝", async () => {
+  const { tool, loaded, cleanup } = makeSkill((skillDir, base) => {
+    writeFile(join(skillDir, "..notes.md"), "两个点开头的笔记");
+    symlinkSync(join(base, "outside"), join(skillDir, "linked"), "junction");
+  });
+  try {
+    const notes = await tool.execute("t1", { name: "deploy", resource: "..notes.md" });
+    assert.match(textOf(notes), /两个点开头的笔记/);
+    assert.equal(notes.details.resourcePath, "..notes.md");
+    await assert.rejects(
+      tool.execute("t2", { name: "deploy", resource: "../../../../outside/secret.md" }),
+      /越出 Skill 目录/
+    );
+    await assert.rejects(
+      tool.execute("t3", { name: "deploy", resource: "linked/secret.md" }),
+      /越出 Skill 目录/
+    );
+    assert.deepEqual(
+      loaded.map((entry) => entry.resourcePath),
+      ["..notes.md"]
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test("大小约束：单文件超 64 KiB 可见截断并带全文哈希（去大小上限变红）", async () => {
   const big = "大".repeat(30000);
   const { tool, loaded, cleanup } = makeSkill((skillDir) => {

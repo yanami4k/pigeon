@@ -44,9 +44,16 @@ export function summarizeArgs(args: unknown): string {
   } catch {
     return "<不可序列化参数>";
   }
-  return json.length <= ARGS_SUMMARY_LIMIT
-    ? json
-    : `${json.slice(0, ARGS_SUMMARY_LIMIT)}…（共 ${json.length} 字符）`;
+  if (json.length <= ARGS_SUMMARY_LIMIT) {
+    return json;
+  }
+  // 切点不劈开代理对：切点前一个码元是高位代理时少取一个码元，被劈开的字符整个落到截断部分之外
+  let cut = ARGS_SUMMARY_LIMIT;
+  const before = json.charCodeAt(cut - 1);
+  if (before >= 0xd800 && before <= 0xdbff) {
+    cut -= 1;
+  }
+  return `${json.slice(0, cut)}…（共 ${json.length} 字符）`;
 }
 
 // 批准来源 → 通俗措辞（决策 4 证据链：策略决定不能伪装成人工；M4 S6：grant 出处如实标明）
