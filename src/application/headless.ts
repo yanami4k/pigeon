@@ -14,6 +14,7 @@ import type { FailureClass } from "../state/classification.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import type { ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
+import type { EditMode } from "../tools/edit-mode.ts";
 import type { McpSession } from "./mcp.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
@@ -56,6 +57,8 @@ export interface HeadlessRunOptions {
   homeDir?: string;
   persistThinking?: boolean;
   sessionId?: SessionId;
+  // 决策 061：编辑模式，缺省 hashline
+  editMode?: EditMode;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
 }
@@ -96,6 +99,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       : {}),
     ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),
     ...(options.memoryRoots !== undefined ? { memoryRoots: options.memoryRoots } : {}),
+    ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
   });
   let limitHit: "turn-limit" | "wall-clock-limit" | "token-limit" | undefined;

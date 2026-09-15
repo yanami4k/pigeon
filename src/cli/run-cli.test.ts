@@ -75,6 +75,9 @@ test("pigeon run：--yolo --json 跑通假 streamFn 任务，退出码 0，末�
       streamFn,
       "--yolo",
       "--json",
+      // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+      "--edit-mode",
+      "hashline",
     ]);
     assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
     const result = lastJsonLine(child.stdout);
@@ -96,7 +99,10 @@ test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-c
   try {
     writeFileSync(join(root, "a.ts"), ORIGINAL);
     const streamFn = writeStreamFnModule(root, editReplies);
-    const child = runCli(["run", "--root", root, "--stream-fn", streamFn, "--json"], "改 beta\n");
+    const child = runCli(
+      ["run", "--root", root, "--stream-fn", streamFn, "--json", "--edit-mode", "hashline"],
+      "改 beta\n"
+    );
     assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
     const result = lastJsonLine(child.stdout);
     assert.equal(result.approvalsNeeded, 0);

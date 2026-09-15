@@ -133,6 +133,8 @@ test("Eval runner：三个条件与 skillRoots 一一对应，results 行字段�
       streamFn: skillSensitiveStreamFn(),
       yolo: true,
       homeDir: home,
+      // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+      editMode: "hashline" as const,
     };
     const first = await runEval(options);
     assert.equal(first.ran, 6);

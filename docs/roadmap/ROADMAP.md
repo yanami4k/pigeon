@@ -209,7 +209,7 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     mcp 证据计算（M5.7）
 ├─ tools/             只依赖 state：Tool Registry（M5.7 起接受原样透传的 JSON Schema 参数）、Tool Policy
 │                     排律、路径围栏、grant 确定性匹配（M5.5 起含精确命令串）、read_file / edit_file
-│                     （hashline）、run_command（exec 档，不经 shell，048）与 MCP server 启动计划
+│                     （缺省 replace，可选 hashline，062）、run_command（exec 档，不经 shell，048）与 MCP server 启动计划
 │                     （复用 048 启动器，M5.7）、错误归类（先读错误对象标记，050）；
 │                     wrap.ts 是上游类型唯一桥接
 ├─ persistence/       只依赖 state（state 的存储实现）：JSONL Event Log 读写器（每会话一文件、
@@ -426,7 +426,7 @@ MVP 累计 28 天；v0.2 在 MVP 之后追加 49 天，完整路线合计 77 天
 - 已批准请求与实际执行参数的完整性绑定；
 - 执行 ID、最小 Receipt、幂等和 `OutcomeUnknown` 对账；
 - 用统一 `ToolExecution` 生命周期承载 proposal、approval、dispatch、execution、settled 和 verification；
-- 编辑工具参考 oh-my-pi 的 hashline 锚定与稀疏编辑格式：按内容哈希寻址行，避免行号漂移导致误改，降低模型编辑文件的摩擦。
+- 编辑工具：hashline（参考 oh-my-pi 的锚定与稀疏编辑格式，按内容哈希寻址行）作为可选编辑模式保留；缺省改为 replace（原文替换，原文须在文件里恰好出现一次），依据 decisions.md 062。hashline 的优化（锚点容错、回传新锚点、字符串补丁、过期恢复与块操作）留作后续方向，有使用方时再盘。
 
 完成证据：
 

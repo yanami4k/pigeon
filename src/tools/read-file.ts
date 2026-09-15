@@ -5,6 +5,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { EditMode } from "./edit-mode.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
 import { resolveWorkspacePath } from "./paths.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
@@ -35,16 +36,25 @@ export interface ReadFileDetails {
   returnedLines: number;
 }
 
+export interface ReadFileToolOptions {
+  // 决策 061：replace 编辑模式下输出不带行标签与快照标签，每行 `行号| 内容`；缺省 hashline 输出不变
+  editMode?: EditMode;
+}
+
 export function createReadFileTool(
-  workspaceRoot: string
+  workspaceRoot: string,
+  options: ReadFileToolOptions = {}
 ): PigeonAgentTool<typeof ReadFileParamsSchema, ReadFileDetails> {
+  const replaceMode = options.editMode === "replace";
   return {
     name: "read_file",
     label: "read_file",
-    description:
-      "读取工作区内文本文件。输出每行带锚点前缀 N#TAG（N 为行号，TAG 为内容哈希），" +
-      "头部 [PATH#TAG] 是全文件快照。edit_file 编辑时必须使用本工具给出的锚点与快照；" +
-      "文件被截断时按提示的 offset 继续读取。",
+    description: replaceMode
+      ? "读取工作区内文本文件。输出每行形如「行号| 内容」，头部 [PATH] 给出总行数与窗口。" +
+        "edit_file 的 old_string 取自内容部分，不要带行号前缀；文件被截断时按提示的 offset 继续读取。"
+      : "读取工作区内文本文件。输出每行带锚点前缀 N#TAG（N 为行号，TAG 为内容哈希），" +
+        "头部 [PATH#TAG] 是全文件快照。edit_file 编辑时必须使用本工具给出的锚点与快照；" +
+        "文件被截断时按提示的 offset 继续读取。",
     parameters: ReadFileParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ReadFileDetails>> {
@@ -59,7 +69,12 @@ export function createReadFileTool(
       const totalLines = lines.length;
       if (totalLines === 0) {
         return {
-          content: [{ type: "text", text: `[${args.path}#${snapshot}] 空文件` }],
+          content: [
+            {
+              type: "text",
+              text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 空文件`,
+            },
+          ],
           details: {
             resolvedPath,
             snapshot,
@@ -80,7 +95,9 @@ export function createReadFileTool(
       const end = Math.min(offset + limit - 1, totalLines);
       const window = lines.slice(offset - 1, end);
       const body = window
-        .map((line, index) => `${offset + index}#${lineTag(line)}| ${line}`)
+        .map((line, index) =>
+          replaceMode ? `${offset + index}| ${line}` : `${offset + index}#${lineTag(line)}| ${line}`
+        )
         .join("\n");
       const remaining = totalLines - end;
       const hint =
@@ -89,7 +106,7 @@ export function createReadFileTool(
         content: [
           {
             type: "text",
-            text: `[${args.path}#${snapshot}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${body}${hint}`,
+            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${body}${hint}`,
           },
         ],
         details: {

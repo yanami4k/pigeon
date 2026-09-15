@@ -36,9 +36,11 @@ import type { SessionId } from "../state/ids.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
+import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
+import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace-edit.ts";
 import {
   createRunCommandTool,
   RUN_COMMAND_TOOL,
@@ -88,6 +90,8 @@ export interface RuntimeDeps {
   // Eval 三条件由 skillRoots 切换，memoryRoots 一律为空
   skillRoots?: readonly SkillRoot[];
   memoryRoots?: readonly MemoryRoot[];
+  // 决策 061：编辑模式，缺省 hashline（缺省时装配出的工具与 system prompt 逐字不变）
+  editMode?: EditMode;
 }
 
 export interface RuntimeBundle {
@@ -102,6 +106,8 @@ export interface RuntimeBundle {
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
+  // 决策 061：编辑工具按模式装配，工具名都叫 edit_file；hashline 分支与 061 之前逐字一致
+  const replaceMode = (deps.editMode ?? DEFAULT_EDIT_MODE) === "replace";
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
   const sessionsDir = path.join(governanceRoot, ".pigeon", "sessions");
   const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId, {
@@ -128,8 +134,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   });
   registry.register({
     name: "edit_file",
-    description: "hashline 锚定稀疏编辑",
-    parameters: EditFileParamsSchema,
+    description: replaceMode ? "原文替换编辑" : "hashline 锚定稀疏编辑",
+    parameters: replaceMode ? ReplaceEditParamsSchema : EditFileParamsSchema,
     tier: "write",
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
@@ -155,9 +161,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
     ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
   });
+  const editSentence = replaceMode
+    ? "你是 Pigeon 编程助手。用 read_file 读取文件（每行形如「行号| 内容」），" +
+      "用 edit_file 按原文替换编辑（old_string 须与文件原文逐字一致且在文件里恰好出现一次，不要带行号前缀）。"
+    : "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
+      "用 edit_file 按锚点编辑。";
   const basePrompt =
-    "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
-    "用 edit_file 按锚点编辑。写操作可能需要人工批准。" +
+    editSentence +
+    "写操作可能需要人工批准。" +
     "用 run_command 运行命令（不经 shell，不支持管道与 && 串联；每条命令都要人工批准）。" +
     "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
     "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
@@ -224,8 +235,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     },
     streamFn: deps.streamFn,
     tools: [
-      createReadFileTool(deps.workspaceRoot),
-      createEditFileTool(deps.workspaceRoot),
+      replaceMode
+        ? createReadFileTool(deps.workspaceRoot, { editMode: "replace" })
+        : createReadFileTool(deps.workspaceRoot),
+      replaceMode
+        ? createReplaceEditTool(deps.workspaceRoot)
+        : createEditFileTool(deps.workspaceRoot),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
         commands: commandsConfig.commands,

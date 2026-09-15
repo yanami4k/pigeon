@@ -42,6 +42,8 @@ test("装配根：注入审批 handler 的 bundle 跑通 prompt 模式写调用�
       yolo: false,
       provider: "fake-provider",
       modelId: "fake-model-1",
+      // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+      editMode: "hashline",
       createApprovalHandler: (grants) => {
         factoryGrants = grants;
         return async () => {

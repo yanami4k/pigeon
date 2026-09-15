@@ -53,6 +53,8 @@ test("headless：yolo 下跑到收尾，结构化结果齐全；需审批次数�
       streamFn: readThenEdit(),
       yolo: true,
       homeDir: home,
+      // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+      editMode: "hashline",
     });
     assert.equal(result.status, "completed");
     assert.equal(result.failure, null);
@@ -83,6 +85,7 @@ test("headless：prompt 模式无审批通道一律 fail-closed——写调用�
       streamFn: readThenEdit(),
       yolo: false,
       homeDir: home,
+      editMode: "hashline",
     });
     assert.equal(result.status, "completed");
     assert.equal(result.approvalsNeeded, 0);

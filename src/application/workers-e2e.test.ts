@@ -50,6 +50,8 @@ test("并行 worker：两个 implementer 各写自己的工作树，主工作区
         provider: "fake-provider",
         modelId: "fake-model-1",
         homeDir,
+        // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+        editMode: "hashline",
         streamFnFor: (request) =>
           createFakeStreamFn({
             replies: [

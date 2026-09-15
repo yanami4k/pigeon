@@ -72,6 +72,8 @@
 | 058 | 验证器接口：退出码三值判决加可选 JSON、误成功取"自报完成但验证失败"、判决记 eval.verified 观察族 | M6.5 开工第 3 件 | M6.5 |
 | 059 | 冒烟对照：候选 Skill 放暂存目录、headless 传 skillRoots 切三条件、Skill 从真实失败手写、任务集含 holdout | M6.5 开工第 4 件 | M6.5 |
 | 060 | Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库 | M6.5 开工第 5、6 件 | M6.5 |
+| 061 | 编辑格式对照：只加一组 replace 式编辑工具，hashline 基线复用 M6.5 冒烟无 Skill 24 次；锚点容错搁置 | 编辑格式对照裁决 2026-09-15 | Eval / 编辑工具 |
+| 062 | 编辑工具默认改用 replace，hashline 保留为可选并留作后续优化方向 | 编辑格式对照裁决 2026-09-15 第 2 件 | 编辑工具 |
 
 ## 条目
 
@@ -521,3 +523,22 @@
 - 锚点：src/eval/results.ts（EvalResultLine、EVAL_RESULT_FIELDS、readResultLines）、src/eval/runner.ts（runEval）、src/eval/report.ts（renderEvalReport）、src/cli/index.ts（eval 子命令）、docs/audits/eval/2026-09-14-8e76567/；测试 src/eval/runner.test.ts、src/eval/report.test.ts；ROADMAP §M6.5。
 - 落地（2026-09-14）：结果行另带 holdout、终态与出错时的 error；每次运行结束立即追加一行，重跑同一输出目录跳过已有的（任务、条件、第几次）；报告另列按条件汇总的成本与过程、运行异常清单。
 - 详情：docs/decisions/m6-5-decisions.md。
+
+### 061 编辑格式对照：只加一组 replace 式编辑工具，hashline 基线复用 M6.5 冒烟无 Skill 24 次；锚点容错搁置（事实）
+
+- 结论：M6.5 冒烟里 edit_file 报错率 21.5%（209 次调用 45 次报错，大头是锚点行号不对与锚点格式错），为判断"对 Kimi 与本仓库这类小改任务，hashline 与 replace 哪种编辑摩擦更小"，只加一组 replace 式编辑工具（给出原文与新文、原文在文件里必须恰好出现一次）与 hashline 对照。Eval 条件在 Skill 维度之外加编辑模式维度，运行面按编辑模式装配编辑工具，缺省仍为 hashline；比较以过程指标为主：编辑报错率与报错分类、轮次、输出 token、输出上限截断次数，成功率顺带列出。锚点容错（按唯一标签重定位、窗口查找、报错给候选）、仿 oh-my-pi 新形态、按模型选编辑模式本轮不做，锚点容错搁置到对照结果出来后再议；编辑工具默认是否改用 replace，按对照数据另行裁决。
+- 理由：成功率在现有任务集上已触顶，过程指标仍能区分编辑方式；外部测评结论有分歧，而本仓库编辑工具的设计出处 oh-my-pi 已对 Kimi 等模型默认改用 replace，事前证据指向 replace 在本组合上不差于 hashline，一组对照即可回答核心问题；锚点容错的前提是继续使用 hashline，先定去留再定规则可避免白做；多组对照中仿新形态工作量大且对 Kimi 不看好。
+- 修订（同日）：只跑 replace 一组，hashline 基线复用 M6.5 冒烟无 Skill 条件的 24 次运行，不在新版本上重跑；两组之间的 harness 版本差与时间先后差异作为已知局限写进审计与报告，hashline 基线的过程指标用与新一组相同的代码从保留的会话账本复算。
+- 修订（同日）：replace 式编辑工具口径参照 str_replace 惯例——原文恰好出现一次、精确匹配不做空白宽松、不带快照参数、工具名沿用 edit_file、replace 模式下 read_file 每行为 `行号| 内容` 不带标签、成功回执与 hashline 版对齐不回传 diff。理由：对照的是编辑方式本身，工具名、回执形状与治理接入保持一致，差异只落在参数形态与寻址方式上；read_file 去掉标签避免模型把前缀抄进原文。
+- 锚点：src/tools/edit-mode.ts（EditMode）、src/tools/replace-edit.ts（replace 式 edit_file：唯一匹配、保留 BOM 与行尾、预览与内容证据）、src/tools/read-file.ts（replace 模式输出 `行号| 内容`）、src/application/runtime.ts 与 src/application/headless.ts、src/application/workers.ts（编辑模式装配与透传）、src/eval/process.ts（过程指标汇总与编辑报错分类）、src/eval/results.ts 与 src/eval/runner.ts（运行键加编辑模式，结果行加 editMode / harnessRef / process）、src/eval/compare.ts 与 src/cli/index.ts（`pigeon eval compare`、`--edit-mode`）、src/orchestration/worktree.ts（describeHead）、docs/audits/eval/2026-09-15-81e37bc/；测试 src/tools/replace-edit.test.ts、src/tools/read-file-replace.test.ts、src/application/replace-edit-e2e.test.ts、src/application/runtime-edit-mode.test.ts、src/eval/process.test.ts、src/eval/compare.test.ts；ROADMAP 编辑工具参考条目不动；证据 docs/audits/2026-09-15-edit-format-81e37bc.md。
+- 落地（2026-09-15）：Event Log schema 未改，编辑模式靠结果行与 run.started 已有的 system prompt 哈希、工具集摘要区分；缺省 hashline 时发给模型的 system prompt、edit_file 与 read_file 的描述和参数逐字不变；过程指标按 tool.settled 计各工具调用与报错、按 stopReason 为 length 计撞输出上限轮数，编辑报错按报错文案的稳定前缀分类（口径见审计）；hashline 基线的过程指标由同一汇总函数从保留的会话账本复算，无 Skill 24 次复算为 edit_file 调用 66、报错 16、撞输出上限 0。
+- 详情：docs/decisions/edit-format-decisions.md。
+- 后续：缺省编辑模式的裁决见 062。
+
+### 062 编辑工具默认改用 replace，hashline 保留为可选并留作后续优化方向（事实）
+
+- 结论：编辑工具的缺省编辑模式改为 replace，hashline 保留为可选编辑模式（cli、tui、headless、worker、`pigeon run` 与 `pigeon eval` 不指定编辑模式时一律为 replace，`--edit-mode hashline` 仍可用）；hashline 当前维持现有严格规则；锚点容错、编辑后回传新锚点、参数改为字符串补丁、参考 oh-my-pi 的过期恢复与块操作等 hashline 优化本轮不做，留作后续优化方向，在有使用方（接入行号定位能力强的模型、大文件或大块移动类任务、并行编排下文件被外部改动）时再盘，优化后以 Eval 对照验证。Eval 旧结果行没有编辑模式字段的仍按 hashline 读，不跟随缺省值。resume 沿用当前缺省值，不追溯原会话的编辑模式（Event Log schema 不改）。
+- 理由：061 对照（条件 none，Kimi For Coding，各 24 次）编辑报错率 hashline 24.2%（66 次调用 16 次报错）、replace 4.7%（64 次 3 次）；按运行算至少出一次编辑错误的运行 9/24 对 2/24。成功率都是 24/24，未测出差异；replace 平均多 1.5 轮、总 token 多约 15%，多出部分集中在一道题的命令循环。设计出处 oh-my-pi 也对 Kimi 等模型默认用 replace。hashline 的主要报错是锚点格式错与锚点未命中，replace 下这两类不再出现。局限：单一模型、8 道小改题、两组 harness 版本与运行时间不同；以后接入其他模型或 M9 任务集建成后复核。
+- 锚点：src/tools/edit-mode.ts（DEFAULT_EDIT_MODE 为 replace、LEGACY_RESULT_EDIT_MODE）、src/eval/results.ts、src/eval/runner.ts、src/eval/compare.ts、src/eval/report.ts（旧结果行按 hashline 补齐）、src/application/workers.ts（worker 工厂接受编辑模式）；测试 src/application/runtime-edit-mode.test.ts；ROADMAP §4、§M3 编辑工具条目；证据 docs/audits/2026-09-15-edit-format-81e37bc.md（S4 节）。
+- 落地（2026-09-15）：依赖缺省 hashline 的既有测试改为显式传 hashline，断言不删；已知边界：旧会话历史里有 hashline 格式的读取输出，resume 后模型拿到的是 replace 版工具；eval/skills/pigeon-coding-pitfalls/ 第 1 节讲 hashline 用法，在新缺省下已不适用，本轮不改。
+- 详情：docs/decisions/edit-format-decisions.md 裁决第 4 条。

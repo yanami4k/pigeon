@@ -1,6 +1,7 @@
 // Eval 报告（M6.5 S4，决策 060）：report.md 只由 results.jsonl 的行决定，可复算，入库。M6.5 只做 per-task 三元结果
 // 与 pairwise delta，按 M9 统计规范不报裸胜率——成功率表逐任务列出；Wilson 区间与 McNemar exact 在 M9 补。
 // holdout 任务单列：写 Skill 时没看过它们，holdout 上的变化才说明经验会迁移而非背题。
+import { LEGACY_RESULT_EDIT_MODE } from "../tools/edit-mode.ts";
 import type { EvalResultLine } from "./results.ts";
 import { EVAL_CONDITIONS, type EvalCondition } from "./task.ts";
 
@@ -69,6 +70,7 @@ export function renderEvalReport(lines: readonly EvalResultLine[]): string {
     "",
     `- 运行：${lines.length} 次；任务 ${taskIds.length} 个（其中 holdout ${holdoutIds.length} 个）；每任务每条件最多 ${maxAttempt} 次`,
     "- 条件：none = 无 Skill，candidate = 候选 Skill，approved = 已批准 Skill；三者只有 skillRoots 不同，memoryRoots 一律为空",
+    `- 编辑模式：${[...new Set(lines.map((line) => line.editMode ?? LEGACY_RESULT_EDIT_MODE))].join(" / ") || "—"}`,
     "- 判决：确定性验证器的退出码三值（通过 / 失败 / 未判定）；误报 = agent 自报完成但验证失败",
     "- 统计口径：per-task 三元结果与 pairwise delta；Wilson 区间与 McNemar exact 在 M9 补",
     "",

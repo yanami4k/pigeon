@@ -6,14 +6,18 @@
 // 每次运行结束立即追加一行 results.jsonl；重跑同一输出目录时已有的（任务、条件、第几次）跳过，全部结束后重写 report.md。
 import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { runHeadless } from "../application/headless.ts";
+import { describeHead } from "../orchestration/worktree.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { FailureClass } from "../state/classification.ts";
-import { newSessionId } from "../state/ids.ts";
+import { asRunId, newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
+import { DEFAULT_EDIT_MODE, type EditMode, LEGACY_RESULT_EDIT_MODE } from "../tools/edit-mode.ts";
+import { emptyProcessMetrics, type ProcessMetrics, summarizeProcess } from "./process.ts";
 import { renderEvalReport } from "./report.ts";
-import { type EvalResultLine, readResultLines } from "./results.ts";
+import { type EvalResultLine, type HarnessRef, readResultLines } from "./results.ts";
 import { prepareTaskWorkspace, releaseStaleWorkspaces } from "./snapshot.ts";
 import { EVAL_CONDITIONS, type EvalCondition, type LoadedEvalTask } from "./task.ts";
 import { verifyTaskRun } from "./verify.ts";
@@ -38,8 +42,21 @@ export interface RunEvalOptions {
   modelId?: string;
   homeDir?: string;
   conditions?: readonly EvalCondition[];
+  // 决策 061：编辑模式（单值，缺省 hashline）；运行键为（任务、条件、编辑模式、第几次）
+  editMode?: EditMode;
+  // harness 版本：缺省取本源码所在仓库的 HEAD 短号与是否有未提交改动（测试注入）
+  harnessRef?: HarnessRef;
   // 每次运行写完结果行后回调（进度输出）
   onResult?: (line: EvalResultLine) => void;
+}
+
+// 本源码所在仓库（Pigeon）的版本；读不到时如实记 unknown
+function currentHarnessRef(): HarnessRef {
+  try {
+    return describeHead(fileURLToPath(new URL(".", import.meta.url)));
+  } catch {
+    return { commit: "unknown", dirty: false };
+  }
 }
 
 export interface RunEvalSummary {
@@ -78,16 +95,24 @@ export async function runEval(options: RunEvalOptions): Promise<RunEvalSummary> 
     releaseStaleWorkspaces({ governanceRoot: outDir, repoRoot });
   }
   const conditions = options.conditions ?? EVAL_CONDITIONS;
+  const editMode = options.editMode ?? DEFAULT_EDIT_MODE;
+  const harnessRef = options.harnessRef ?? currentHarnessRef();
   let ran = 0;
   let skipped = 0;
   for (let attempt = 1; attempt <= options.runs; attempt += 1) {
     for (const task of options.tasks) {
       for (const condition of conditions) {
-        if (done.has(lineKey({ taskId: task.spec.id, condition, attempt }))) {
+        if (done.has(lineKey({ taskId: task.spec.id, condition, editMode, attempt }))) {
           skipped += 1;
           continue;
         }
-        const line = await runOnce(options, outDir, task, condition, attempt);
+        const line = await runOnce(
+          options,
+          { outDir, editMode, harnessRef },
+          task,
+          condition,
+          attempt
+        );
         appendFileSync(resultsFile, `${JSON.stringify(line)}\n`);
         ran += 1;
         options.onResult?.(line);
@@ -99,8 +124,16 @@ export async function runEval(options: RunEvalOptions): Promise<RunEvalSummary> 
   return { lines, ran, skipped, resultsFile, reportFile };
 }
 
-function lineKey(line: Pick<EvalResultLine, "taskId" | "condition" | "attempt">): string {
-  return `${line.taskId}\n${line.condition}\n${line.attempt}`;
+function lineKey(
+  line: Pick<EvalResultLine, "taskId" | "condition" | "editMode" | "attempt">
+): string {
+  return `${line.taskId}\n${line.condition}\n${line.editMode ?? LEGACY_RESULT_EDIT_MODE}\n${line.attempt}`;
+}
+
+interface RunContext {
+  outDir: string;
+  editMode: EditMode;
+  harnessRef: HarnessRef;
 }
 
 function failureClassLabel(failure: FailureClass | null): string | null {
@@ -118,18 +151,21 @@ function message(error: unknown): string {
 
 async function runOnce(
   options: RunEvalOptions,
-  outDir: string,
+  context: RunContext,
   task: LoadedEvalTask,
   condition: EvalCondition,
   attempt: number
 ): Promise<EvalResultLine> {
+  const { outDir, editMode, harnessRef } = context;
   const sessionId = newSessionId();
-  const base = {
+  const base: ErrorLineBase = {
     taskId: task.spec.id,
     condition,
+    editMode,
     attempt,
     holdout: task.spec.holdout,
     sessionId,
+    harnessRef,
   };
   let prepared: ReturnType<typeof prepareTaskWorkspace>;
   try {
@@ -160,6 +196,7 @@ async function runOnce(
         : {}),
       skillRoots: skillRootsFor(condition, options.skill),
       memoryRoots: [],
+      editMode,
       ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
       ...(options.provider !== undefined ? { provider: options.provider } : {}),
       ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
@@ -179,8 +216,22 @@ async function runOnce(
         ? `eval.verified 未落盘：${verified.recordError}`
         : undefined,
     ].filter((entry): entry is string => entry !== undefined);
+    // 过程指标：与复算既有运行同一个汇总函数；账本读不出时如实记空并写进 error
+    let process: ProcessMetrics;
+    try {
+      process = summarizeProcess({
+        sessionsDir: path.join(outDir, ".pigeon", "sessions"),
+        sessionId,
+        editMode,
+        ...(run.runId !== undefined ? { runId: asRunId(run.runId) } : {}),
+      });
+    } catch (error) {
+      process = emptyProcessMetrics(editMode);
+      errors.push(`过程指标汇总失败：${message(error)}`);
+    }
     line = {
       ...base,
+      process,
       runId: run.runId ?? null,
       status: run.status,
       verdict: verified.verdict,
@@ -207,12 +258,15 @@ async function runOnce(
   return line;
 }
 
-function errorLine(
-  base: Pick<EvalResultLine, "taskId" | "condition" | "attempt" | "holdout" | "sessionId">,
-  error: string
-): EvalResultLine {
+type ErrorLineBase = Pick<
+  EvalResultLine,
+  "taskId" | "condition" | "attempt" | "holdout" | "sessionId"
+> & { editMode: EditMode; harnessRef: HarnessRef };
+
+function errorLine(base: ErrorLineBase, error: string): EvalResultLine {
   return {
     ...base,
+    process: emptyProcessMetrics(base.editMode),
     runId: null,
     status: "error",
     verdict: "undetermined",

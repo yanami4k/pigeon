@@ -80,6 +80,8 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
         provider: "fake-provider",
         modelId: "fake-model-1",
         homeDir,
+        // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+        editMode: "hashline",
         streamFnFor: (request) =>
           createFakeStreamFn({
             replies: [

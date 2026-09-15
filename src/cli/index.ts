@@ -6,7 +6,7 @@
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { evalVerdictLabel, failureBadge } from "../application/format.ts";
@@ -24,11 +24,18 @@ import {
 import { runSessionListCommand } from "../application/session-list.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
+import { renderEditModeComparison } from "../eval/compare.ts";
 import { runEval } from "../eval/runner.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
+import {
+  EDIT_MODES,
+  type EditMode,
+  isEditMode,
+  LEGACY_RESULT_EDIT_MODE,
+} from "../tools/edit-mode.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
@@ -388,6 +395,7 @@ async function runMain(argv: string[]): Promise<void> {
   let json = false;
   let maxTurns: number | undefined;
   let wallClockMs: number | undefined;
+  let editMode: EditMode | undefined;
   const modelArgv: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -396,6 +404,8 @@ async function runMain(argv: string[]): Promise<void> {
     }
     if (arg === "--json") {
       json = true;
+    } else if (arg === "--edit-mode") {
+      editMode = parseEditMode(argv[++i], usage);
     } else if (arg === "--max-turns" || arg === "--wall-clock") {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 1) {
@@ -440,6 +450,7 @@ async function runMain(argv: string[]): Promise<void> {
     workspaceRoot,
     streamFn,
     yolo: flags.yolo,
+    ...(editMode !== undefined ? { editMode } : {}),
     provider: flags.provider,
     modelId: flags.modelId,
     persistThinking: flags.persistThinking,
@@ -471,12 +482,13 @@ async function runMain(argv: string[]): Promise<void> {
 async function evalMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval <任务目录> --out <输出目录> [--runs N] --stream-fn <模块路径> [--yolo] " +
-    "[--thinking <档位>] [--skill <Skill 目录>] [--conditions none,candidate,approved]";
+    "[--thinking <档位>] [--skill <Skill 目录>] [--conditions none,candidate,approved] [--edit-mode hashline|replace]";
   let tasksDir: string | undefined;
   let outDir: string | undefined;
   let runs = 3;
   let skillDir: string | undefined;
   let conditions: EvalCondition[] | undefined;
+  let editMode: EditMode | undefined;
   const modelArgv: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -492,6 +504,8 @@ async function evalMain(argv: string[]): Promise<void> {
       if (!Number.isInteger(runs) || runs < 1) {
         throw new Error(`--runs 需要正整数（${usage}）`);
       }
+    } else if (arg === "--edit-mode") {
+      editMode = parseEditMode(argv[++i], usage);
     } else if (arg === "--conditions") {
       const values = (argv[++i] ?? "").split(",").filter((value) => value !== "");
       const unknown = values.filter(
@@ -542,9 +556,10 @@ async function evalMain(argv: string[]): Promise<void> {
     modelId: flags.modelId,
     ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
     ...(conditions !== undefined ? { conditions } : {}),
+    ...(editMode !== undefined ? { editMode } : {}),
     onResult: (line) => {
       writeOut(
-        `[eval] ${line.taskId} ｜ ${line.condition} ｜ 第 ${line.attempt} 次 ｜ ${line.status} ｜ ` +
+        `[eval] ${line.taskId} ｜ ${line.condition} ｜ ${line.editMode ?? LEGACY_RESULT_EDIT_MODE} ｜ 第 ${line.attempt} 次 ｜ ${line.status} ｜ ` +
           `${evalVerdictLabel(line.verdict)}${line.falsePositive ? "（误报）" : ""} ｜ ${line.turns} 轮 ｜ ` +
           `token ${line.usage.totalTokens} ｜ 会话 ${line.sessionId}${line.error !== undefined ? ` ｜ ${line.error}` : ""}\n`
       );
@@ -554,6 +569,50 @@ async function evalMain(argv: string[]): Promise<void> {
     `[eval] 完成：本次运行 ${summary.ran} 次，跳过已有 ${summary.skipped} 次；` +
       `结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`
   );
+}
+
+// --edit-mode 取值（决策 061）：单值 hashline 或 replace
+function parseEditMode(value: string | undefined, usage: string): EditMode {
+  if (value === undefined || !isEditMode(value)) {
+    throw new Error(`--edit-mode 只接受 ${EDIT_MODES.join("/")}（${usage}）`);
+  }
+  return value;
+}
+
+// pigeon eval compare --baseline <目录> --candidate <目录> [--condition none] [--out <文件>]：编辑模式对照报告
+// （决策 061）——两个 Eval 输出目录按编辑模式汇总与逐任务对比，缺省写到候选目录下的 compare.md
+function evalCompareMain(argv: string[]): void {
+  const usage =
+    "用法：pigeon eval compare --baseline <目录> --candidate <目录> [--condition none] [--out <文件>]";
+  let baselineDir: string | undefined;
+  let candidateDir: string | undefined;
+  let condition: EvalCondition = "none";
+  let outFile: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--baseline") {
+      baselineDir = argv[++i];
+    } else if (arg === "--candidate") {
+      candidateDir = argv[++i];
+    } else if (arg === "--condition") {
+      const value = argv[++i];
+      if (value === undefined || !(EVAL_CONDITIONS as readonly string[]).includes(value)) {
+        throw new Error(`--condition 只接受 ${EVAL_CONDITIONS.join("/")}（${usage}）`);
+      }
+      condition = value as EvalCondition;
+    } else if (arg === "--out") {
+      outFile = argv[++i];
+    } else {
+      throw new Error(`未知参数：${arg}（${usage}）`);
+    }
+  }
+  if (baselineDir === undefined || candidateDir === undefined) {
+    throw new Error(usage);
+  }
+  const report = renderEditModeComparison({ baselineDir, candidateDir, condition });
+  const target = outFile ?? path.join(candidateDir, "compare.md");
+  writeFileSync(target, report);
+  writeOut(`[eval compare] 报告 ${target}\n`);
 }
 
 // 缺省 Skill 目录：任务集同级 skills/ 下唯一的子目录
@@ -575,6 +634,10 @@ function defaultSkillDir(tasksDir: string): string {
 }
 
 async function main(argv: string[]): Promise<void> {
+  if (argv[0] === "eval" && argv[1] === "compare") {
+    evalCompareMain(argv.slice(2));
+    return;
+  }
   if (argv[0] === "eval") {
     await evalMain(argv.slice(1));
     return;

@@ -53,6 +53,8 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
       yolo: false,
       provider: "fake-provider",
       modelId: "fake-model-1",
+      // 剧本按 hashline 参数编辑（决策 062 起缺省为 replace，这里显式指定）
+      editMode: "hashline",
       createApprovalHandler: () => async () => {
         handlerCalls += 1;
         return { approved: false, reason: "不应弹审批" };

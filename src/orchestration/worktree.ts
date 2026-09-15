@@ -96,6 +96,13 @@ export function mainRepoRoot(path: string): string {
   return dirname(resolve(commonDir));
 }
 
+// 路径所在仓库的 HEAD 短号与工作区是否有未提交改动（决策 061：Eval 结果行记 harness 版本；忽略文件不计）
+export function describeHead(path: string): { commit: string; dirty: boolean } {
+  const commit = runGit(path, ["rev-parse", "--short", "HEAD"]).trim();
+  const dirty = runGit(path, ["status", "--porcelain"]).trim() !== "";
+  return { commit, dirty };
+}
+
 // git worktree list --porcelain：空行分隔的块，每块 worktree / HEAD / branch|detached 行
 export function listWorktrees(repoRoot: string): WorktreeEntry[] {
   const output = runGit(repoRoot, ["worktree", "list", "--porcelain"]);

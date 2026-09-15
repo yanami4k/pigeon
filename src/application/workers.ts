@@ -22,6 +22,7 @@ import type { DelegatedPolicy, SessionHeaderInput, WorkerRole } from "../state/e
 import type { EventEnvelope } from "../state/events.ts";
 import type { ReceiptId, SessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
+import type { EditMode } from "../tools/edit-mode.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
 
@@ -38,6 +39,8 @@ export interface WorkerRuntimeDeps {
   // M5.7 S4（决策 054）：worker 的 MCP 会话启动器——缺省在治理根有 MCP 配置时以 worker 工作树为工作区根启动；
   // 测试注入内存传输
   startMcp?: (request: WorkerRuntimeRequest) => Promise<McpSession>;
+  // 决策 061 / 062：编辑模式（缺省 replace）
+  editMode?: EditMode;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -74,6 +77,7 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
         ? { roleThinkingLevels: deps.roleThinkingLevels }
         : {}),
       ...(deps.startMcp !== undefined ? { startMcp: deps.startMcp } : {}),
+      ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
     }),
   });
 }
@@ -100,6 +104,8 @@ interface RuntimeSurface {
   memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
   memoryRoots?: readonly MemoryRoot[];
+  // 决策 061：编辑模式（缺省 hashline）
+  editMode?: EditMode;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
 }
@@ -134,6 +140,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
       ...(deps.persistThinking !== undefined ? { persistThinking: deps.persistThinking } : {}),
       ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
+      ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
     });
   };
 }
@@ -152,6 +159,7 @@ export interface DetachedRuntimeRequest {
   memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
   memoryRoots?: readonly MemoryRoot[];
+  editMode?: EditMode;
   startMcp?: () => Promise<McpSession>;
 }
 
@@ -189,6 +197,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       : {}),
     ...(surface.skillRoots !== undefined ? { skillRoots: surface.skillRoots } : {}),
     ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
+    ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）
   const startMcp =
