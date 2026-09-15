@@ -14,7 +14,7 @@
 - spike 事实（tmp/notfound-spike.mjs）：not-found 时 tool_execution_start/end 照常发出（isError=true），hook 调用 0 次，无人工 abort 则循环永续
 - 方案选型：A（事件级计数，复用熔断框架）vs B（shouldStopAfterTurn 扫 transcript 兜底）；选 A，因为事件事实成立，B 不需要
 - 实现要点：判据 settled+isError+不在广告集；同名连续计数（非幽灵事件清零）达共享阈值（3）→ abort；审计轨迹 = 事件日志 tool.proposed/tool.settled 序列
-- 已知代价及裁决：幽灵路径无 ToolExecution 账本（hook 未运行，无决策可记、零副作用无账可对）——裁决"不重要、不动"，M4 事件日志落盘后轨迹自动持久化
+- 已知代价及裁决：幽灵路径无 ToolExecution 账本（hook 未运行，无决策可记、零副作用无账可对）——裁决不处理，M4 事件日志落盘后轨迹自动持久化
 
 ## 决策 ②：拒绝决定落盘 = 新增 decision 记录族（已实施，ac2de7e）
 
@@ -30,6 +30,6 @@
 ## 遗留清单更新
 
 - 技术遗留：清零
-- 验收缺口：真实模型链路未端到端验证（fake streamFn only；CLI 需用户手写 --stream-fn 插件；anthropic-sdk override 验证按用户决定搁置——不接 Anthropic）
-- 工程项：dev/main 均未推送（dev HEAD ac2de7e）；docs/decisions、docs/audits、docs/notes 纯本地（既定决策）
+- 验收缺口：真实模型链路未端到端验证（fake streamFn only；CLI 需用户手写 --stream-fn 插件；anthropic-sdk override 验证按项目负责人裁决搁置——不接 Anthropic）
+- 工程项：dev/main 均未推送（dev HEAD ac2de7e）；当时 docs/decisions、docs/audits、docs/notes 均只在本地（decisions.md 047 起 decisions 与 audits 入库）
 - 顺延：模式识别安全扫描 → M6；per-tool shared/exclusive 并发 → M4+；下一里程碑 M4

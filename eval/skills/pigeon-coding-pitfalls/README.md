@@ -16,6 +16,12 @@ M6.5 Eval 冒烟对照用的手写 Skill（decisions.md 059 与其修订）。
 
 写作时未查看任务集，holdout 任务对 Skill 作者不可见。
 
+## 适用范围与已知问题
+
+- 本 Skill 写于 hashline 为缺省编辑模式时。第 1 节（read_file 的 `N#TAG` 锚点，edit_file 的 anchor、snapshot、lines 与 op）只适用于 `--edit-mode hashline`；decisions.md 062 起缺省编辑模式为 replace，第 1 节在缺省模式下不适用。
+- 第 1 节"同一调用连续被拦 3 次会中止整个运行"与实现不符：编辑失败是工具执行报错，不计入熔断；熔断只针对治理阻断（同一 key 在一个 Run 内累计满 3 次）与上游拦截（工具不存在或参数不合 schema，同一工具连续 3 次）。
+- `candidate/` 与 `approved/` 下的 SKILL.md 是 M6.5 冒烟实际注入的版本，哈希记录在该次运行的会话启动快照与 docs/audits/2026-09-14-m6-5-8e76567.md 中，保持原样不改。后续评测如需适配 replace 的版本，另建 Skill 目录并重新审阅。
+
 ## 许可
 
 随本仓库。

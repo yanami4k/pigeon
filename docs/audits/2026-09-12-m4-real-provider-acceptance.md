@@ -3,7 +3,7 @@
 - 基线：`dev` @ `5f14d63`（M4 收口修复 + 模块归位 + 路线图回写全部提交，已推送 origin/dev）
 - Provider：Kimi For Coding（`https://api.kimi.com/coding`，pi-ai `streamSimple` anthropic-messages 线路，模型 `kimi-for-coding`）；插件沿用 M3 验收的 `tmp/real-stream-fn.mjs`（gitignored，密钥只经环境变量 `KIMI_API_KEY` 读取，本文档与日志均不含密钥）
 - 驱动：`tmp/acc-driver.mjs`（起 CLI 子进程，按"等 stdout 正则 → 写 stdin 一行"交互，支持定时 SIGKILL 模拟崩溃）；各路径脚本 `tmp/acc-run-*.mjs`；原始终端日志 `tmp/acc-*.log`；工作区 `tmp/acc-a`、`tmp/acc-c`、`tmp/acc-d`、`tmp/ws-approve`（全部 gitignored，保留为证据）
-- 覆盖面（交接文档 §4 第 2 步 + 收口新增）：多 Run + entry 族 ✔、[a] / [d] / /grants save / /revoke 全流程 ✔、新进程命中固化规则 ✔、/revoke config#N 留痕与历史回指不漂移 ✔、真实进程崩溃 + resume 续跑 ✔、trace / replay / session list 真实渲染 ✔、D8 旧账本迁移 ✔
+- 覆盖面（M4 收口待办中的真实链路验收项 + 收口新增）：多 Run + entry 族 ✔、[a] / [d] / /grants save / /revoke 全流程 ✔、新进程命中固化规则 ✔、/revoke config#N 留痕与历史回指不漂移 ✔、真实进程崩溃 + resume 续跑 ✔、trace / replay / session list 真实渲染 ✔、D8 旧账本迁移 ✔
 - 结论：功能路径全部通过；验收暴露两处判据与措辞缺陷（O-1、O-3，P2），已在同日修复并复验（见末节）；O-2 为模型行为
 - `git status --short` 全程为空，未 commit 任何东西
 

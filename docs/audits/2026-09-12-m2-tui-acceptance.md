@@ -2,7 +2,7 @@
 
 收口 ROADMAP §M2 完成证据第 3 条：「自动化测试和一次人工终端验收分别记录」。本次用真实 Kimi
 模型在真实 ConPTY 子进程里驱动 TUI（`node src/tui/main.ts --stream-fn tmp/real-stream-fn.mjs`）
-跑六条剧本。本文件不入库（docs/audits/ 按用户决策保持本地）。零生产代码改动；HEAD 仍为
+跑六条剧本。零生产代码改动；HEAD 仍为
 75bcb4d，`npm test` 全绿 305/305（本次复跑确认）。
 
 ## 环境与基建

@@ -2,11 +2,11 @@
 
 - 定位：进入 M4 前对"M3 证据链如何演进"的裁决记录；上游决策见 m3-key-decisions.md、m3-leftover-fixes-decisions.md
 - 裁决人：项目负责人；方式：逐件盘问后裁决
-- 关联：ROADMAP §M4、§3.2（副作用不能盲目重放）、docs/audits/2026-09-11-m3-review.md（本地）
+- 关联：ROADMAP §M4、§3.2（副作用不能盲目重放）、docs/audits/2026-09-11-m3-review.md
 
 ## 背景
 
-M3 交付了单次执行账本（JSONL 三记录族：intent/decision/receipt）。M4 要落完整 Event Log。用户提问"证据链对 Trace/Eval 有帮助吗，真的需要挂满吗"，盘问后形成以下裁决。
+M3 交付了单次执行账本（JSONL 三记录族：intent/decision/receipt）。M4 要落完整 Event Log。围绕"证据链对 Trace 与 Eval 的价值、是否需要对所有调用全量记录"逐件盘问后形成以下裁决。
 
 ## 决策 1：证据链按副作用分层——写调用挂满三族，读调用降为事件级
 

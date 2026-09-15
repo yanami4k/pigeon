@@ -1,7 +1,7 @@
 # 编辑格式对照施工审计与验证证据（基线 81e37bc）
 
 - 日期：2026-09-15
-- 施工位置：工作树 `.claude/worktrees/edit-format-compare`（分支 worktree-edit-format-compare），自 81e37bc 开出；裁决文档（decisions.md 061、docs/decisions/edit-format-decisions.md）与代码同一工作树
+- 施工位置：隔离 git 工作树（分支 worktree-edit-format-compare），自 81e37bc 开出；裁决文档（decisions.md 061、docs/decisions/edit-format-decisions.md）与代码同一工作树
 - 依据：决策 061 及两条同日修订，切片 S0–S3
 - 按 decisions.md 047 入库，只追加不覆盖
 

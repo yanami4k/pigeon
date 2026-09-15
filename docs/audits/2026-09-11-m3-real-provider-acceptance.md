@@ -1,11 +1,11 @@
 # M3 真实模型链路端到端验收（2026-09-11）
 
-收口缺口：M3 CLI 此前只用 fake streamFn 测试，真实模型链路未端到端验证。本次用真实 provider 跑通三条验收路径 + 冷启动对账。本文件不入库（docs/audits/ 按用户决策保持本地）。
+收口缺口：M3 CLI 此前只用 fake streamFn 测试，真实模型链路未端到端验证。本次用真实 provider 跑通三条验收路径 + 冷启动对账。
 
 ## Provider 与模型
 
-- 凭据侦察（值均已掩码）：`DASHSCOPE_API_KEY=sk-ws-…`、`KIMI_API_KEY=sk-kim…`、`OPENAI_API_KEY=K_CODE…`（非标格式）、`CONTEXT7/FIGMA/TAVILY_API_KEY`（非 LLM）；无 `MOONSHOT_API_KEY`/`ANTHROPIC_API_KEY`。~/.omp/agent/config.yml 显示用户日常用 kimi-code/k3（即 Kimi For Coding 订阅）。
-- 用户中途指令：改用其提供的 Kimi key（仅经环境变量 `KIMI_API_KEY` 传入，不落任何文件/日志/本文档）。
+- 凭据侦察：环境中存在 DashScope、Kimi 与 OpenAI 兼容 provider 的密钥变量，以及若干非 LLM 服务的密钥变量（值与片段均不入文档）；无 `MOONSHOT_API_KEY`/`ANTHROPIC_API_KEY`。
+- 验收改用 Kimi key（仅经环境变量 `KIMI_API_KEY` 传入，不落任何文件/日志/本文档）。
 - 端点探测：`https://api.moonshot.cn/v1/models` 与 `https://api.moonshot.ai/v1/models` 对该 key 均 401 `Invalid Authentication` → 按既定顺序落到 Kimi For Coding 订阅端点 `https://api.kimi.com/coding`（anthropic-messages 线路），探针 `POST /v1/messages`（model=kimi-for-coding, max_tokens=8）返回 200。
 - **实际使用**：pi-ai `streamSimple`（`@earendil-works/pi-ai/api/anthropic-messages`），模型 `kimi-for-coding`（Kimi K2.7 Code，元数据取自 pi-ai 目录 `providers/kimi-coding.models`，含 `compat.allowEmptySignature/forceAdaptiveThinking`）。StreamFn 插件：`tmp/real-stream-fn.mjs`（gitignored），忽略 CLI 传入的快照占位 model，注入目录真实 Model + `options.apiKey`。
 - **顺带落地一个延期决策**：M1 登记的「@anthropic-ai/sdk override 0.124.0 首次真实使用前需验证」本次首次实战——三轮完整运行（含流式 thinking、工具调用、多轮 agent loop）无任何 SDK 层错误，override 在运行期工作正常。
@@ -82,7 +82,7 @@ Kimi For Coding 为订阅额度（不按 token 单价计费）；CLI 不打印 u
 
 ## 偏差与诚实记录
 
-- provider 偏差：最初侦察选定 DashScope（OpenAI 兼容），用户中途改令用其 Kimi key；OpenAI 兼容端点 401 后按预案走 kimi-coding anthropic-messages 线路，与用户指令一致。
+- provider 偏差：最初侦察选定 DashScope（OpenAI 兼容），随后按项目负责人指定改用 Kimi key；OpenAI 兼容端点 401 后按预案走 kimi-coding anthropic-messages 线路。
 - 模型行为：三轮均一次成功，模型严格按 `read_file → edit_file` 顺序调用、锚点/快照标签逐字正确，无幻觉工具名、无重试；未需要调整任务措辞。
 - 施工返工（均未消耗 API token）：①插件初版从 `providers/kimi-coding` 导入 `KIMI_CODING_MODELS`（正确路径是 `providers/kimi-coding.models`），CLI 加载即报错退出，未发起 API 调用；②对账脚本把 `ReconcileReport.unknown` 误写成 `outcomeUnknown`，修正后重跑。
 - `tmp/`（插件、三个工作区、对账脚本）全部 gitignored，未 commit 任何东西；`git status --short` 为空。

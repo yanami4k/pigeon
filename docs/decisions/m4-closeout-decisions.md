@@ -36,7 +36,7 @@
 ## 决策 ④：验收观察 O-1 / O-3 = 崩溃残留 Run 恒为未知，resume 与 trace 计崩溃残留（2026-09-12 验收后）
 
 - 缺口：真实链路验收中三个死于中途的 Run（有 turn.completed 但无 run.ended）在 trace 里显示"分类：正常 ｜ run.ended 缺失（崩溃残留可能）"；resume 对其说"证据链完整"。D7 Run 级判据只看末条 turn.completed 的 stopReason，没把 run.ended 当事实输入；resume 缺口汇总只数撕裂尾巴 / entry 断号 / 孤儿三类。
-- 用户判断："这三条肯定有问题吧"——我最初把它们降为观察，是定级错误；O-1、O-3 定 P2 修，O-2（模型写入带前导空格的内容，harness 逐字落账执行）维持为模型行为不判缺陷。
+- 定级修订：这三条验收观察最初被登记为观察项，复审认定是定级错误；O-1、O-3 定 P2 修，O-2（模型写入带前导空格的内容，harness 逐字落账执行）维持为模型行为不判缺陷。
 - 方案：RunOutcomeFacts 加 hasRunEnded，缺失即未知且优先于 stopReason；活侧恒传 true（RunResult 在 agent_end 之后计算；abort 路径上游照常发 agent_end，D8 迁移会话本就未知）。冷物化加 unfinishedRuns 单一判据源；resume 汇总加"崩溃残留：N 个 Run 无 run.ended（用 trace 或 replay 查看中断位置）"，标题从"既往落盘缺口"改"既往缺口"（崩溃残留不是写盘失败）；trace 会话头加"崩溃残留 N 个 Run"，与落盘缺口分开计。
 - 测试先行：四个红测试（判据 / 冷物化 unfinishedRuns / resume 措辞 / trace 徽章与计数）；既有五个夹具因缺 run.ended 被新判据如实判未知，按真实链路形态补 run.ended（abort 也发 agent_end）而非放宽判据。
 - 索引：decisions.md 023。

@@ -1,5 +1,5 @@
-// 一次性验收用真实 StreamFn（tmp/ 不入库）：Kimi For Coding 订阅端点 + pi-ai anthropic-messages streamSimple。
-// 背景：用户指定 KIMI_API_KEY；api.moonshot.cn/.ai 的 OpenAI 兼容端点对该 key 均 401，
+// 真实链路验收用 StreamFn：Kimi For Coding 订阅端点 + pi-ai anthropic-messages streamSimple。
+// 背景：密钥经环境变量 KIMI_API_KEY 提供；api.moonshot.cn/.ai 的 OpenAI 兼容端点对该 key 均 401，
 // 按既定顺序落到 Kimi For Coding（api.kimi.com/coding，anthropic-messages 线路，模型目录见
 // pi-ai providers/data/kimi-coding.json）。密钥只从环境变量读，不落任何文件。
 // 形状同 pi-agent-core StreamFn：(model, context, options?) => AssistantMessageEventStream。
