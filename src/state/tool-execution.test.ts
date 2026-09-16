@@ -195,6 +195,36 @@ test("approvedBy 枚举之外的值被 schema 拒绝（防止伪造批准来源�
   assert.ok(!Value.Check(ToolExecutionSchema, bad));
 });
 
+test("决定可携带理由来源（决策 066）：人写 / 系统默认通过，缺省合法，枚举外的值被拒绝", () => {
+  let exec = advanceToolExecution(makeProposal(), "approval", T0 + 1);
+  exec = recordDecision(exec, {
+    outcome: "rejected",
+    approvedBy: "human",
+    reason: "这个文件不该动",
+    reasonSource: "human",
+    decidedAt: T0 + 2,
+  });
+  assert.equal(exec.decision?.reasonSource, "human");
+  assert.ok(Value.Check(ToolExecutionSchema, exec));
+
+  let fallback = advanceToolExecution(makeProposal(), "approval", T0 + 1);
+  fallback = recordDecision(fallback, {
+    outcome: "rejected",
+    approvedBy: "human",
+    reason: "人工拒绝",
+    reasonSource: "system-default",
+    decidedAt: T0 + 2,
+  });
+  assert.ok(Value.Check(ToolExecutionSchema, fallback));
+
+  // 缺省：066 之前的记录无此字段，照旧合法
+  assert.equal(approvedAt("settled").decision?.reasonSource, undefined);
+  assert.ok(Value.Check(ToolExecutionSchema, approvedAt("settled")));
+
+  const bad = { ...exec, decision: { ...exec.decision, reasonSource: "guessed" } };
+  assert.ok(!Value.Check(ToolExecutionSchema, bad));
+});
+
 test("settled 后关联 receiptId：合法 rcpt_ 标识通过，坏标识被拒绝", () => {
   const exec = approvedAt("settled");
   const linked = { ...exec, receiptId: newReceiptId() };

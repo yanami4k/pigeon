@@ -142,6 +142,26 @@ test("无 grants 存储时保持 y/N 两键形态（缺省不弹 grant 键）", 
   }
 });
 
+test("拒绝理由来源（决策 066）：输入了理由标人写；留空不带理由（由治理层落默认文案并标系统默认）", async () => {
+  const answers = ["n", "别动测试目录"];
+  const withReason = createCliApprovalHandler(
+    async () => answers.shift() ?? "",
+    () => {}
+  );
+  assert.deepEqual(await withReason(makeRequest()), {
+    approved: false,
+    reason: "别动测试目录",
+    reasonSource: "human",
+  });
+
+  const blank = ["n", "   "];
+  const withoutReason = createCliApprovalHandler(
+    async () => blank.shift() ?? "",
+    () => {}
+  );
+  assert.deepEqual(await withoutReason(makeRequest()), { approved: false });
+});
+
 test("终端边界净化（决策 036）：审批块 diffPreview 携带 CSI 时输出可见化为 ␛，原始序列不落终端", async () => {
   const outputs: string[] = [];
   // 与 cli/index.ts 同一形态：write 出口经 sanitizedWriter 包装（终端边界唯一净化点）

@@ -47,6 +47,11 @@ export const ToolExecutionDecisionSchema = Type.Object({
     })
   ),
   reason: Type.Optional(Type.String()),
+  // 理由来源（决策 066）：human = 人写（TUI [r] 拒绝并说明、CLI 输入了理由）；
+  // system-default = 系统兜底文案（TUI [n] 单按拒绝、CLI 留空、策略自动拒绝）。
+  // 006 把逐字拒绝理由定为负样本监督信号，来源字段让学习侧能把真实理由与兜底文案分开。
+  // 加法式可选字段，不升 Event Log 版本（口径同 052）：066 之前的记录无此字段
+  reasonSource: Type.Optional(Type.Union([Type.Literal("human"), Type.Literal("system-default")])),
   decidedAt: Type.Integer({ minimum: 0 }),
 });
 export type ToolExecutionDecision = Static<typeof ToolExecutionDecisionSchema>;

@@ -59,7 +59,7 @@ export const InjectionSnapshotSchema = Type.Object({
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
 
 // v1 → v2：ToolPolicy 补 approvalMode，默认 "prompt"（yolo 必须显式选择，见 M3 决策 4）。
-// 迁移管线（src/state/migration.ts）是通用设施、尚无集中注册表（events/receipt/candidate 均未注册），
+// 迁移管线（src/state/migration.ts）是通用设施，各 schema 各自持有注册表；快照没有常驻注册表，
 // 故此处只导出迁移函数，由快照冷加载方按名 "injection-snapshot" 注册使用。
 // 每个迁移函数只升一级，输出版本写死（不引用当前版本常量，否则常量推进后本级会跳级）
 export const migrateInjectionSnapshotV1toV2: Migration = (doc) => {

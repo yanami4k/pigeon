@@ -17,7 +17,11 @@ import {
   summarizeArgs,
 } from "../application/format.ts";
 import { contentRecordLines, loadContentRecords } from "../application/history.ts";
-import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import {
+  listSessionIds,
+  materializeSession,
+  sessionEventFilePath,
+} from "../persistence/session-read.ts";
 import type { EventRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
@@ -303,7 +307,7 @@ export function runReplayCommand(options: ReplayCommandOptions): string {
   const runId = asRunId(options.runId);
   if (options.sessionId !== undefined) {
     const sessionId: SessionId = asSessionId(options.sessionId);
-    if (!existsSync(JsonlEventLog.filePathFor(sessionsDir, sessionId))) {
+    if (!existsSync(sessionEventFilePath(sessionsDir, sessionId))) {
       const available = listSessionIds(sessionsDir);
       throw new Error(
         `会话不存在：${options.sessionId}` +

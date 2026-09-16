@@ -220,6 +220,8 @@ class GovernedToolCalls implements ToolGovernance {
         outcome: "rejected",
         approvedBy: "policy:deny",
         reason: decision.reason,
+        // 决策 066：策略自动拒绝的理由是系统文案，非人写
+        reasonSource: "system-default",
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
@@ -270,6 +272,8 @@ class GovernedToolCalls implements ToolGovernance {
         outcome: "rejected",
         approvedBy: "policy:deny",
         reason: "策略要求人工审批但未配置审批通道（fail-closed）",
+        // 决策 066：策略兜底文案，非人写
+        reasonSource: "system-default",
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
@@ -307,10 +311,15 @@ class GovernedToolCalls implements ToolGovernance {
     });
     if (!approval.approved) {
       const reason = approval.reason ?? "人工拒绝";
+      // 决策 066：理由来源——handler 明说的优先（TUI [r]、CLI 输入了理由标人写）；
+      // 未明说时按有无理由推定，不带理由的拒绝落默认文案并标系统默认（TUI [n]、CLI 留空）
+      const reasonSource =
+        approval.reasonSource ?? (approval.reason !== undefined ? "human" : "system-default");
       record = recordDecision(record, {
         outcome: "rejected",
         approvedBy: "human",
         reason,
+        reasonSource,
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
@@ -320,7 +329,9 @@ class GovernedToolCalls implements ToolGovernance {
     record = recordDecision(record, {
       outcome: "approved",
       approvedBy: "human",
-      ...(approval.reason !== undefined ? { reason: approval.reason } : {}),
+      ...(approval.reason !== undefined
+        ? { reason: approval.reason, reasonSource: approval.reasonSource ?? "human" }
+        : {}),
       decidedAt: Date.now(),
     });
     // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）

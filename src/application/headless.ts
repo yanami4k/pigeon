@@ -15,6 +15,7 @@ import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import type { ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
+import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
@@ -90,8 +91,9 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     governanceRoot: options.governanceRoot,
     workspaceRoot: options.workspaceRoot,
     streamFn: options.streamFn,
-    provider: options.provider ?? "custom",
-    modelId: options.modelId ?? "headless",
+    // 决策 067：三个入口的模型占位缺省统一为同一常量（真实模型元数据由 streamFn 插件提供）
+    provider: options.provider ?? DEFAULT_MODEL_PLACEHOLDER.provider,
+    modelId: options.modelId ?? DEFAULT_MODEL_PLACEHOLDER.modelId,
     yolo: options.yolo,
     ...(options.thinking !== undefined ? { thinkingLevel: options.thinking } : {}),
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),

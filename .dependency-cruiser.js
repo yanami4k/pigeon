@@ -65,19 +65,22 @@ export default {
       to: { path: "^src/", pathNot: "^src/(approvals|state|tools)/" },
     },
     {
-      name: "pi-runtime-no-storage-or-actors",
+      name: "pi-runtime-only-state-tools",
       severity: "error",
       comment:
-        "pi-runtime 经结构类型接收落盘口（EventLogSink），不得依赖 persistence / execution；也不得依赖 Actor 层。",
+        "pi-runtime（Adapter 与 ToolGovernance 接口）只依赖 state 与 tools（022 修订：改允许清单）：" +
+        "经结构类型接收落盘口（EventLogSink），不触达 persistence / execution，也不触达 Actor 层与其他上层目录。",
       from: { path: "^src/pi-runtime/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/(persistence|execution|cli|tui)/" },
+      to: { path: "^src/", pathNot: "^src/(pi-runtime|state|tools)/" },
     },
     {
-      name: "execution-no-runtime-or-actors",
+      name: "execution-only-state-persistence-tools",
       severity: "error",
-      comment: "execution（恢复、未来的 Durable Executor）不依赖 pi-runtime 与 Actor 层。",
+      comment:
+        "execution（冷恢复、未来的 Durable Executor）只依赖 state、persistence 与 tools" +
+        "（022 修订：改允许清单）：不触达 pi-runtime、Actor 层与其他上层目录。",
       from: { path: "^src/execution/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/(pi-runtime|cli|tui)/" },
+      to: { path: "^src/", pathNot: "^src/(execution|state|persistence|tools)/" },
     },
     {
       name: "application-is-controller",
@@ -97,10 +100,28 @@ export default {
       severity: "error",
       comment:
         "orchestration（M5.5：工作树管理与 worker 生命周期，决策 040）对外只暴露 spawn / cancel / status / " +
-        "awaitResult 四动作加审批回调；可依赖 application 以下各层，worker 运行面由装配根以工厂注入，" +
-        "自身不触达 application 与 Actor 层（cli/tui）。",
+        "awaitResult 四动作加审批回调；只依赖 state、tools、approvals、memory、mcp（022 修订：改允许清单），" +
+        "worker 运行面由装配根以工厂注入，自身不触达 application 与 Actor 层（cli/tui）。",
       from: { path: "^src/orchestration/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/(application|cli|tui)/" },
+      to: {
+        path: "^src/",
+        pathNot: "^src/(orchestration|state|tools|approvals|memory|mcp)/",
+      },
+    },
+    {
+      name: "placeholders-only-state-tools",
+      severity: "error",
+      comment:
+        "占位目录（context / review / distillation / replay）暂按最小允许清单约束：只依赖 state 与 tools" +
+        "（022 修订）。review/ 在 M6 开工时按需另裁放行范围。",
+      from: {
+        path: "^src/(context|review|distillation|replay)/",
+        pathNot: "\\.test\\.ts$",
+      },
+      to: {
+        path: "^src/",
+        pathNot: "^src/(context|review|distillation|replay|state|tools)/",
+      },
     },
     {
       name: "memory-below-controller",
@@ -161,6 +182,24 @@ export default {
         "会改文件的入口（D8 旧账本迁移、grants.json 读写）一律经 application（M2 审计 note-1，决策 034）。",
       from: { path: "^src/(cli|tui)", pathNot: "\\.test\\.ts$" },
       to: { path: "^src/persistence/(legacy-migration|grants-config)\\.ts$" },
+    },
+    {
+      name: "actors-not-each-other",
+      severity: "error",
+      comment:
+        "两个 Actor（cli / tui）互不引用（022 修订）：共用逻辑一律下沉到 application 命令层，" +
+        "否则一个 Actor 的渲染细节会经另一个 Actor 反向扩散。",
+      from: { path: "^src/(cli|tui)/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/(cli|tui)/", pathNot: "^src/$1/" },
+    },
+    {
+      name: "actors-no-event-log-direct",
+      severity: "error",
+      comment:
+        "Actor（cli / tui）不直连事件日志读写器 persistence/event-log.ts（022 修订）：" +
+        "只读物化一律经 persistence/session-read.ts 的只读面，避免 Actor 侧构造出会建目录、开追加句柄的写入实例。",
+      from: { path: "^src/(cli|tui)/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/persistence/event-log\\.ts$" },
     },
   ],
   options: {

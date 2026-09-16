@@ -14,7 +14,11 @@ import {
   summarizeArgs,
 } from "../application/format.ts";
 import { contentRecordLines, loadContentRecords } from "../application/history.ts";
-import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import {
+  listSessionIds,
+  materializeSession,
+  sessionEventFilePath,
+} from "../persistence/session-read.ts";
 import type { ChildSettledRecord, SessionHeaderRecord } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import type { ChildLink } from "../state/materialize.ts";
@@ -395,7 +399,7 @@ function contentByRunOf(
 export function runTraceCommand(options: TraceCommandOptions): string {
   const sessionsDir = join(options.root, ".pigeon", "sessions");
   const sessionId = asSessionId(options.sessionId);
-  if (!existsSync(JsonlEventLog.filePathFor(sessionsDir, sessionId))) {
+  if (!existsSync(sessionEventFilePath(sessionsDir, sessionId))) {
     const available = listSessionIds(sessionsDir);
     throw new Error(
       `会话不存在：${options.sessionId}` +

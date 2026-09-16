@@ -49,6 +49,9 @@ export interface ApprovalDecision {
   readonly approved: boolean;
   // 拒绝时必填更佳：理由逐字成为模型可见的 error toolResult
   readonly reason?: string;
+  // 理由来源（决策 066）：human = 人写（TUI [r]、CLI 输入了理由）；缺省时治理层按
+  // 有无理由推定（有理由 = 人写，无理由 = 系统兜底文案），记入决定记录供学习侧区分
+  readonly reasonSource?: "human" | "system-default";
 }
 
 export type ApprovalHandler = (request: ApprovalRequest) => Promise<ApprovalDecision>;

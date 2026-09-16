@@ -1,7 +1,8 @@
 // 单次运行的过程指标（决策 061）：从会话账本（事件日志加内容文件）汇总——各工具的调用数与报错数（按 tool.settled 计，
 // 被上游拦截、没有执行的调用同样落定并计入）、撞输出上限的轮数（turn.completed 的 stopReason 为 length）、
 // 编辑报错分类计数。runner 写结果行与复算既有运行的过程指标用同一个函数。
-// 编辑报错分类按 toolResult 报错文案的稳定前缀判定：
+// 编辑报错分类按 toolResult 报错文案的稳定前缀判定；前缀与两个编辑工具的抛错处共用同一批导出常量
+// （tools/edit-mode.ts、tools/hashline.ts、tools/replace-edit.ts），工具文案改动会同步到这里而非静默落"其他"：
 //   两种模式共用——输出上限截断：`Tool call "edit_file" was not executed: the response hit the output token limit`；
 //     无变化：`编辑没有产生任何实际变化`；
 //   hashline——参数校验失败：`Validation failed for tool "edit_file"`；锚点未命中：`edits[i] 的 anchor|endAnchor 未命中`；
@@ -14,7 +15,9 @@ import {
   readMessageContentFileDetailed,
 } from "../persistence/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
-import type { EditMode } from "../tools/edit-mode.ts";
+import { EDIT_NO_CHANGE_PREFIX, type EditMode } from "../tools/edit-mode.ts";
+import { HASHLINE_ANCHOR_MISS_MARK, HASHLINE_OUT_OF_RANGE_MARK } from "../tools/hashline.ts";
+import { REPLACE_NOT_FOUND_PREFIX, REPLACE_NOT_UNIQUE_PREFIX } from "../tools/replace-edit.ts";
 
 export interface ToolCallCounts {
   calls: number;
@@ -48,32 +51,38 @@ export const EDIT_ERROR_LABELS: Readonly<Record<string, string>> = {
 };
 
 const OUTPUT_LIMIT_PREFIX = `Tool call "${EDIT_TOOL_NAME}" was not executed: the response hit the output token limit`;
-const NO_CHANGE_PREFIX = "编辑没有产生任何实际变化";
+// hashline 的锚点类报错文案由抛错处模板生成，判据用同一批常量拼回：edits[i] 的 anchor|endAnchor <标记>
+const ANCHOR_MISS_PATTERN = new RegExp(
+  `^edits\\[\\d+\\] 的 (?:anchor|endAnchor) ${HASHLINE_ANCHOR_MISS_MARK}`
+);
+const OUT_OF_RANGE_PATTERN = new RegExp(
+  `^edits\\[\\d+\\] 的 (?:anchor|endAnchor) ${HASHLINE_OUT_OF_RANGE_MARK}`
+);
 
 export function classifyEditError(mode: EditMode, text: string): string {
   const message = text.trimStart();
   if (message.startsWith(OUTPUT_LIMIT_PREFIX)) {
     return "output-limit";
   }
-  if (message.startsWith(NO_CHANGE_PREFIX)) {
+  if (message.startsWith(EDIT_NO_CHANGE_PREFIX)) {
     return "no-change";
   }
   if (mode === "hashline") {
     if (message.startsWith(`Validation failed for tool "${EDIT_TOOL_NAME}"`)) {
       return "schema";
     }
-    if (/^edits\[\d+\] 的 (?:anchor|endAnchor) 未命中/.test(message)) {
+    if (ANCHOR_MISS_PATTERN.test(message)) {
       return "anchor-miss";
     }
-    if (/^edits\[\d+\] 的 (?:anchor|endAnchor) 越界/.test(message)) {
+    if (OUT_OF_RANGE_PATTERN.test(message)) {
       return "line-out-of-range";
     }
     return "other";
   }
-  if (message.startsWith("未找到 old_string")) {
+  if (message.startsWith(REPLACE_NOT_FOUND_PREFIX)) {
     return "not-found";
   }
-  if (message.startsWith("old_string 不唯一")) {
+  if (message.startsWith(REPLACE_NOT_UNIQUE_PREFIX)) {
     return "not-unique";
   }
   return "other";

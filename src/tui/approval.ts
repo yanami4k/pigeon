@@ -15,8 +15,9 @@
 //   按拒绝处理、理由逐字回模型（决策 001 的自我修正闭环不断）：壳停止
 //   （APPROVAL_CANCEL_CLOSED）、面板未装配（APPROVAL_CANCEL_DETACHED）、并发审批防御
 //   （APPROVAL_CANCEL_BUSY）。
-// - [n] 无拒绝理由输入通道（四键单按即决议）：reason 缺省，由 Adapter 落默认文案
-//   「人工拒绝」。
+// - [n] 单按即拒绝、不带理由：reason 缺省，由治理层落默认文案「人工拒绝」并记为系统默认。
+// - [r]（决策 066）：拒绝并说明——打开理由行（Esc 回面板不算拒绝，回车提交），理由逐字回模型
+//   并在决定记录里记为人写。
 import {
   approvalSourceLine,
   approvalVerdict,
@@ -41,8 +42,12 @@ export const APPROVAL_CANCEL_BUSY = "已有另一审批进行中，本次调用�
 
 export type ApprovalPanelKey = "y" | "n" | "a" | "d";
 
-// 面板决议：四键之一；cancel = 面板未能完成交互（壳停止/并发防御），携带逐字理由
-export type ApprovalPanelResult = { key: ApprovalPanelKey } | { key: "cancel"; reason: string };
+// 面板决议：四键之一；r = 拒绝并说明（决策 066，携带人写理由）；
+// cancel = 面板未能完成交互（壳停止/并发防御），携带逐字理由
+export type ApprovalPanelResult =
+  | { key: ApprovalPanelKey }
+  | { key: "r"; reason: string }
+  | { key: "cancel"; reason: string };
 
 // 面板面：PigeonTuiShell 实现——渲染审批块、挂起等四键、回显结果行。
 // 装配顺序上 handler 先于 shell 构造（buildRuntime 收 handler 工厂），故工厂收 face
@@ -73,10 +78,10 @@ export function approvalBlockText(request: ApprovalRequest): string {
   }
   lines.push(
     request.tier === "exec"
-      ? `批准执行？[y] 批准一次 / [n] 拒绝 / ${execGrantKeyLabel(request)}`
+      ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
       : extractPathArg(request.args) !== undefined
-        ? "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
-        : "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许"
+        ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
+        : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许"
   );
   return lines.join("\n");
 }
@@ -132,7 +137,12 @@ export function createTuiApprovalHandler(
       panel.noteApproval(verdictLine("approved", "human"));
       return { approved: true };
     }
-    // [n]：无拒绝理由输入通道，Adapter 落默认文案「人工拒绝」
+    // [r]（决策 066）：拒绝并说明——理由逐字回模型，记为人写
+    if (result.key === "r") {
+      panel.noteApproval(verdictLine("rejected", "human"));
+      return { approved: false, reason: result.reason, reasonSource: "human" };
+    }
+    // [n]：单按即拒绝，不带理由；治理层落默认文案「人工拒绝」并记为系统默认
     panel.noteApproval(verdictLine("rejected", "human"));
     return { approved: false };
   };

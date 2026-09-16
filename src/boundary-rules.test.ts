@@ -1,5 +1,6 @@
 // 边界规则的元测试：防"规则还在但已经不执行任务了"（TS7 静默巡航 0 模块事故的教训）。
-// 断言一：真实违规会被规则抓住（cli/tui→execution、src/tools 下绕过桥接文件的 rogue 直连）；
+// 断言一：真实违规会被规则抓住（cli/tui→execution、src/tools 下绕过桥接文件的 rogue 直连、
+// pi-runtime→application、cli→tui、Actor 直连 persistence/event-log.ts）；
 // 断言二：tools 单一桥接文件（wrap.ts）豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
 // 夹具写在 os.tmpdir()，不进 src/——否则主 npm run deps 会把夹具当真违规报出来。
 import assert from "node:assert/strict";
@@ -34,7 +35,7 @@ async function cruiseJson(targets: string[], ruleSet: NonNullable<ICruiseOptions
   return result.output;
 }
 
-test("违规会被抓住：cli/tui→execution、review→@earendil-works、tools 下 rogue 直连；wrap.ts 桥豁免生效", async () => {
+test("违规会被抓住：cli/tui→execution、review→@earendil-works、tools 下 rogue 直连、pi-runtime→application、cli→tui、Actor 直连 event-log.ts；wrap.ts 桥豁免生效", async () => {
   const ruleSet = await loadRuleSet();
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pigeon-boundary-"));
   const originalCwd = process.cwd();
@@ -46,7 +47,27 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
     mkdirSync(join(fixtureRoot, "src/review"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/tools"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/eval"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/application"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/pi-runtime"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/persistence"), { recursive: true });
     writeFileSync(join(fixtureRoot, "src/execution/index.ts"), "export {};\n");
+    writeFileSync(join(fixtureRoot, "src/application/index.ts"), "export {};\n");
+    writeFileSync(join(fixtureRoot, "src/persistence/event-log.ts"), "export {};\n");
+    // pi-runtime 允许清单（022 修订）：只许 state 与 tools，引用 application 必须被抓
+    writeFileSync(
+      join(fixtureRoot, "src/pi-runtime/probe.ts"),
+      'import "../application/index.ts";\nexport {};\n'
+    );
+    // 两个 Actor 互不引用（022 修订）：cli→tui 必须被抓
+    writeFileSync(
+      join(fixtureRoot, "src/cli/tui-probe.ts"),
+      'import "../tui/ui.ts";\nexport {};\n'
+    );
+    // Actor 只经只读面读会话（022 修订）：直连 persistence/event-log.ts 必须被抓
+    writeFileSync(
+      join(fixtureRoot, "src/cli/event-log-probe.ts"),
+      'import "../persistence/event-log.ts";\nexport {};\n'
+    );
     writeFileSync(
       join(fixtureRoot, "src/tui/probe.ts"),
       'import "../execution/index.ts";\nexport {};\n'
@@ -123,6 +144,31 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
         (v) => v.rule.name === "eval-below-actors" && v.from.includes("src/eval/probe.ts")
       ),
       `应抓到 eval→cli，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from}`))}`
+    );
+    // pi-runtime 允许清单：引用 application 被抓
+    assert.ok(
+      output.summary.violations.some(
+        (v) =>
+          v.rule.name === "pi-runtime-only-state-tools" &&
+          v.from.includes("src/pi-runtime/probe.ts")
+      ),
+      `应抓到 pi-runtime→application，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
+    );
+    // 两个 Actor 互不引用
+    assert.ok(
+      output.summary.violations.some(
+        (v) => v.rule.name === "actors-not-each-other" && v.from.includes("src/cli/tui-probe.ts")
+      ),
+      `应抓到 cli→tui，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
+    );
+    // Actor 直连事件日志读写器
+    assert.ok(
+      output.summary.violations.some(
+        (v) =>
+          v.rule.name === "actors-no-event-log-direct" &&
+          v.from.includes("src/cli/event-log-probe.ts")
+      ),
+      `应抓到 Actor 直连 persistence/event-log.ts，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
     );
     // tui-pi-tui-only：tui 直连 pi-agent-core 被抓；直连 pi-tui 豁免生效
     const tuiViolations = output.summary.violations.filter(

@@ -75,6 +75,10 @@
 | 061 | 编辑格式对照：只加一组 replace 式编辑工具，hashline 基线复用 M6.5 冒烟无 Skill 24 次；锚点容错搁置 | 编辑格式对照裁决 2026-09-15 | Eval / 编辑工具 |
 | 062 | 编辑工具默认改用 replace，hashline 保留为可选并留作后续优化方向 | 编辑格式对照裁决 2026-09-15 第 2 件 | 编辑工具 |
 | 063 | 失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做 | 失控止损裁决 2026-09-15 | 运行时 / 无人值守 |
+| 064 | Reviewer 复用 worker 编排：工作区加"无工作区"成员、补只读快照工具、候选由 Controller 从收尾结果落盘，另加 `pigeon review` 薄壳 | M6 前置第 1 件 | M6 |
+| 065 | 候选暂存：正文按哈希不可变写入暂存目录，状态由账本记录现算，改内容即新候选并标记取代 | M6 前置第 2 件 | M6 |
+| 066 | TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本 | M6 前置第 3 件 | M6 前置 |
+| 067 | tui/shell.ts 按职责拆五个文件；抽启动参数与会话运行面两个装配模块，三入口模型占位缺省统一、cli 补 PIGEON_STREAM_FN 回退 | M6 前置第 4 件 | M6 前置 |
 
 ## 条目
 
@@ -145,7 +149,7 @@
 
 - 结论：放行按 deny → 会话 grant → 固化规则 → yolo → read 自动 → prompt 求值；审批提示四键 [y/n/a/d]；会话 grant 可带目录限定，崩溃恢复后静默续命；升格只能由人经 /grants save，带 promotedFrom 出处；五条不可破约束见 ROADMAP §3.9。
 - 理由：逐调用询问与批发 yolo 之间需要中间档；信任的自然形态是"这个工具在这个范围"；权限扩大必须有可审计的外部批准主体（§3.1）。
-- 锚点：src/tools/policy.ts、src/tools/grants.ts、src/approvals/grant-store.ts、src/cli/grants.ts、src/cli/approval-ui.ts；ROADMAP §3.9。
+- 锚点：src/tools/policy.ts、src/tools/grants.ts、src/approvals/grant-store.ts、src/application/grants.ts、src/cli/approval-ui.ts；ROADMAP §3.9。
 - 详情：docs/decisions/m4-pre-decisions.md。
 
 ### 011 Event Log 每会话一文件（事实）
@@ -180,7 +184,7 @@
 
 - 结论：session 聚合状态每次从 Event Log 现算；列表默认只给时间与 Run 数，唯一突出项是待对账；冷恢复读目标文件现状哈希与 intent 的改前、预期改后比对，匹配即写 resolution 销账，不匹配留人三选一；任何路径不自动重执行。
 - 理由：无第二套事实（§3.5）；待对账是唯一 actionable 项；确证只销账不重放（§3.2）。
-- 锚点：src/state/session-summary.ts、src/execution/recovery.ts、src/cli/session.ts。
+- 锚点：src/state/session-summary.ts、src/execution/recovery.ts、src/application/session-list.ts。
 - 详情：docs/decisions/m4-design-decisions.md。
 
 ### 016 grants.json 项目级、版本化 schema（事实）
@@ -209,21 +213,21 @@
 
 - 结论：配置规则命中的账本回指用规则的 promotedFrom.grantId，位置序号只作展示与 /revoke 输入；/grants save 落 grant.promoted，/revoke config#N 落 grant.config-removed；Event Log 版本 4→5 纯版本推进。留痕顺序不对称：扩权先留证后生效，缩权先生效后留证。
 - 理由：位置序号随移除前移，历史回指会漂移；稳定身份已在文件里；留证失败时宁可少一条痕迹，不可让账本说"已撤"而规则仍在生效。
-- 锚点：src/tools/grants.ts、src/cli/grants.ts、src/state/event-log.ts；ROADMAP §3.9 留证段。
+- 锚点：src/tools/grants.ts、src/application/grants.ts、src/state/event-log.ts；ROADMAP §3.9 留证段。
 - 详情：docs/decisions/m4-closeout-decisions.md。
 
 ### 020 同一 grant 只允许升格一次（事实）
 
 - 结论：/grants save 时若文件里已有同 promotedFrom.grantId 的规则，响亮报错并指出已存在的序号，文件不改写。
 - 理由：019 以 grantId 为身份，重复规则会让身份不唯一；语义重复（不同 grant 同范围）是噪声不是歧义，不去重以保留各自出处。
-- 锚点：src/persistence/grants-config.ts、src/cli/grants.ts。
+- 锚点：src/persistence/grants-config.ts、src/application/grants.ts。
 - 详情：docs/decisions/m4-closeout-decisions.md。
 
 ### 021 D2 冷视图三处全补，措辞精确化（事实）
 
 - 结论：entry 断号判据放进冷物化（末尾缺失由 run.ended.messageCount 推出，无 run.ended 的崩溃残留不推）；trace 在 Run 头下标注撕裂尾巴与断号并在会话头计数；replay 原位标注加尾部总账；resume 汇总既往缺口，有缺口不说"证据链完整"。D2 措辞改为"进程内即时警告 + 冷侧文件形态派生标注"。
 - 理由：trace 缺标注直接违反"绝不假装证据链完整"；启动即查进程内数组跨重启恒空，字面承诺不成立。
-- 锚点：src/state/materialize.ts、src/state/trace.ts、src/cli/trace.ts、src/cli/replay.ts、src/cli/session.ts。
+- 锚点：src/state/materialize.ts、src/state/trace.ts、src/cli/trace.ts、src/cli/replay.ts、src/application/resume.ts。
 - 详情：docs/decisions/m4-closeout-decisions.md。
 
 ### 022 模块归位：有限重整与六条分层规则（事实）
@@ -235,12 +239,13 @@
 - 修订（2026-09-13，M5 施工，038 / 043）：分层规则新增 memory-below-controller（memory/ 只依赖 state / persistence / tools）与 skills-only-state-tools（skills/ 只依赖 state / tools）；application-is-controller 放行 memory 与 skills。
 - 修订（2026-09-14，M5.7 施工，041 / 051）：分层规则新增 mcp-only-state-tools（mcp/ 只依赖 state / tools，不触达 persistence / pi-runtime / application / Actor 层，由 application 装配）；application-is-controller 放行 mcp。
 - 修订（2026-09-14，M6.5 施工，046 / 057）：分层规则新增 eval-below-actors（eval/ 可依赖 state / persistence / tools / orchestration / application 及以下，不触达 Actor 层，由 cli 调用）；application-is-controller 不放行 eval，Controller 不反向依赖评测层；边界元测试补 eval→cli 探针。
+- 修订（2026-09-16，健康修整）：pi-runtime、execution、orchestration 三条规则由"只列禁止目标"改为允许清单（pi-runtime 只依赖 state / tools；execution 只依赖 state / persistence / tools；orchestration 只依赖 state / tools / approvals / memory / mcp）；新增 actors-not-each-other（cli 与 tui 互不引用，共用逻辑下沉 application）、actors-no-event-log-direct（Actor 只经 persistence/session-read.ts 的只读面读会话，不直连 event-log.ts）与 placeholders-only-state-tools（context / review / distillation / replay 暂只依赖 state / tools，review 的放行范围 M6 开工另裁）；边界元测试补 pi-runtime→application、cli→tui、Actor→event-log.ts 三个探针。
 
 ### 023 崩溃残留 Run 恒为未知；resume 与 trace 计崩溃残留（事实）
 
 - 结论：Run 级失败分类的事实新增 hasRunEnded；run.ended 缺失即"未知"，优先于末条 turn.completed 的 stopReason（017 判据表修订）。冷物化新增 unfinishedRuns 清单（有记录但无 run.ended 的 Run），resume 恢复屏在既往缺口里列"崩溃残留：N 个 Run 无 run.ended"，有则不说"证据链完整"；trace 会话头加"崩溃残留 N 个 Run"计数，与落盘缺口分开计。
 - 理由：真实链路验收中三个死于中途的 Run 被判"正常"，只靠头部标注提示，`--class unknown` 找不到它们，resume 还声称证据链完整，同时违反 017"不确定就不贴标签"与 012"绝不假装证据链完整"。abort 路径上游照常发 agent_end，所以"无 run.ended"只出现在真崩溃与 D8 迁移会话，判据不会误伤取消。
-- 锚点：src/state/classification.ts、src/state/materialize.ts、src/cli/session.ts、src/cli/trace.ts；ROADMAP §4 状态流。
+- 锚点：src/state/classification.ts、src/state/materialize.ts、src/application/resume.ts、src/cli/trace.ts；ROADMAP §4 状态流。
 - 详情：docs/decisions/m4-closeout-decisions.md 决策 ④；证据 docs/audits/2026-09-12-m4-real-provider-acceptance.md 复验段。
 
 ### 024 Adapter 提供只读流式文本观察口；消息文本不持久化（事实）
@@ -550,3 +555,33 @@
 - 理由：两次 Eval 保留的 1,396 轮中正常轮次输出最大 3,406 token，超过 4,000 的只有 2 轮失控且恰为模型上限 32,768；按约每秒 46 token，16,384 把失控一次的最长耗时从约 11.8 分钟降到约 6 分钟，相对正常最大轮次留约 4.8 倍余量，项目负责人明确要求正常输出不得被截断。上游对 length 停止的消息不执行其中工具调用并提示重发，截断不会造成残缺写入；固定文案不可改，静态 prompt 指引对缓存友好，动态插入提示只能以 user 角色出现，与 042 冲突。生成中途 abort 会结束整个 Run，合成 length 停止原因会改写证据，失控样本只有 2 个且集中在同一位置，重复检测的误报代价高于收益。
 - 锚点：src/pi-runtime/output-limit.ts（streamFn 包装）；src/application/runtime.ts（装配、`TRUNCATION_GUIDANCE`、快照 model 段）；src/pi-runtime/snapshot.ts（注入快照 v5）；src/state/runtime-events.ts 与 src/pi-runtime/adapter.ts（run.started 的 model 摘要）；src/application/workers.ts（worker 继承）；src/application/headless.ts、src/eval/runner.ts、src/cli/index.ts、src/tui/main.ts（`maxOutputTokens` 与 `--max-output-tokens`）；测试 src/pi-runtime/output-limit.test.ts、src/application/runtime-output-limit.test.ts、src/application/workers-output-limit.test.ts、src/application/runtime-edit-mode.test.ts、src/application/output-limit-truncation-e2e.test.ts。
 - 详情：docs/decisions/output-limit-decisions.md；施工与验证证据：docs/audits/2026-09-15-output-limit-7818dee.md。
+
+### 064 Reviewer 复用 worker 编排：工作区加"无工作区"成员、补只读快照工具、候选由 Controller 从收尾结果落盘，另加 `pigeon review` 薄壳（设计）
+
+- 结论：后台 Reviewer 复用 M5.5 的 worker 编排与四动作接口。工作区类型以加法式联合新增"无工作区"成员（054 的形状封顶口径不变），Reviewer 不开工作树；reviewer 角色补只读的本次运行快照工具（对话、Trace、Receipt），不给任何写档工具；worker 收尾结果允许携带结构化内容，候选由 Controller 从收尾结果落盘，模型侧只产出结论。另加 `pigeon review <sessionId>` 薄壳，复用 headless 装配内核，供事后补审冷会话与实验会话。
+- 理由：ROADMAP §M6 与术语段已把 Reviewer 定为只读、无工作树的 worker，复用既有编排可直接获得会话文件、派出与收尾配对记录、取消、trace 入口与冷恢复；"模型交结果、程序落盘"使 Reviewer 天然只读，避免新增写档工具带来的审批通道与策略子集问题，也不新增放权语义（039 后的方向）。进程内直跑与 §3.5 冲突，独立进程重演 040 已否决的多进程代价。先例：oh-my-pi 的 task 以结构化结果交回；Claude Code 子代理独立上下文加工具白名单、结果回交主会话；Hermes 后台 review 的产物先落待审目录、由 harness 写入。
+- 锚点：施工落地后补（预计 src/state/event-log.ts 工作区联合、src/orchestration/roles.ts、src/orchestration/workers.ts 收尾结果、src/review/、src/cli/index.ts review 子命令）。
+- 待裁决：触发时机；纳入自动审阅的会话范围；模型路由缺省与摘要格式；Reviewer 预算与并发上限；只读快照工具绑定冻结副本还是全目录；记录族复用 child.* 还是另开 review.*。
+- 详情：docs/decisions/m6-prep-decisions.md。
+
+### 065 候选暂存：正文按哈希不可变写入暂存目录，状态由账本记录现算，改内容即新候选并标记取代（设计）
+
+- 结论：候选正文写入 `.pigeon/candidates/<种类>/<名字>-<内容哈希>/`，写入后不可变；同哈希即同候选（天然去重）；内容修订产生新候选并在记录中标记取代关系。候选状态不落在候选目录里，由账本记录现算。M6 阶段状态只走到提出、已扫描、证据已核，回放验证与审批归 M8。安全扫描用确定性规则（不可见字符、注入与外泄模式、可执行脚本目录标记），模型筛查只作建议不作判决。账本新增提出与筛查两族记录；批准、拒绝、激活归 M8，本轮不新增审批或放权语义。
+- 理由：§3.5 要求 Candidate 状态能从 Event Log 与快照重新物化且 Controller 是唯一权威写入者，把可变状态写进候选文件会制造第二事实源；正文不可变与会话文件只追加同构，账本记录可直接供 M7 与 M9 消费；§8 禁止后台流程写 grants.json，Policy 候选按 §M8 与 Skill 路径物理分离。
+- 锚点：施工落地后补（预计 src/state/candidate.ts v2、src/state/event-log.ts 候选记录族、src/review/）。
+- 待裁决：候选 schema v2 字段集与是否新增"扫描拒收"状态；Policy 候选是否只出文本；Memory 候选粒度；扫描命中是丢弃还是暂存标记；是否提供只读候选列表命令。
+- 详情：docs/decisions/m6-prep-decisions.md。
+
+### 066 TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本（事实）
+
+- 结论：TUI 审批面板保留 [n] 单按拒绝，新增 [r] 拒绝并说明——打开理由行，Esc 回面板不算拒绝，回车提交，理由逐字回模型；双击 Ctrl+C 的退出布防在理由行期间照旧生效。决定记录加可选的理由来源字段（人写 / 系统默认），加法式加入、不升 Event Log 版本（口径同 052），迁移完整性机检同步覆盖；CLI 留空理由同样标为系统默认。
+- 理由：006 把逐字拒绝理由定为蒸馏的负样本监督信号，而 TUI 恒落默认文案、CLI 留空也落同一文案，账本无法区分真实理由与兜底文案，M7 会学到噪声。来源字段解决数据可信，[r] 提供真实信号，两者都不新增审批语义；[r] 相对 029 的四键单按为加法式修订，不改原有手感。先例：Claude Code 与 Codex 的审批交互均把"拒绝"与"拒绝并说明"分为两个动作。
+- 锚点：src/tui/modal.ts（理由行输入模式与按键路由）、src/tui/approval.ts（[r] 键与面板提示）、src/tui/shell.ts（理由行提交）、src/cli/approval-ui.ts（留空与人写的标注）、src/approvals/handler.ts（ApprovalDecision.reasonSource）、src/state/tool-execution.ts（决定记录字段）、src/application/governance.ts（三处拒绝分支落来源）；测试 src/tui/approval-reason.test.ts、src/application/approval-reason-source.test.ts、src/state/tool-execution.test.ts、src/cli/approval-ui.test.ts、src/migration-completeness.test.ts。
+- 详情：docs/decisions/m6-prep-decisions.md。
+
+### 067 tui/shell.ts 按职责拆五个文件；抽启动参数与会话运行面两个装配模块，三入口模型占位缺省统一、cli 补 PIGEON_STREAM_FN 回退（事实）
+
+- 结论：tui/shell.ts 按职责拆为消息流、模态与按键、斜杠命令、worker 视图、resume 视图五个文件，壳本体保留布局、启停、提交与事件渲染并重新导出原有公开符号（测试导入不变，零行为变化）。新增启动参数模块与会话运行面模块：前者统一三个入口的参数解析，后者统一新建与 resume 的装配（作用域、grant 种子、MCP 启动、运行面构建），并作为 M6 挂后台 Reviewer 调度的落点。三入口的模型占位缺省统一为同一常量（provider 与 model 均为 custom），真实模型元数据由 streamFn 插件提供，历史会话标签不做映射；cli 补 `PIGEON_STREAM_FN` 回退，使行为与既有报错文案一致。不给 cli 与 headless 装 worker 编排器。施工顺序：先拆分（零行为变化），再落 066 的理由行（只改模态文件），装配收拢与前两者不相干可并行。
+- 理由：shell.ts 已 937 行，M6 的 Reviewer 视图与候选面板会使其破千行，先拆出落点再加；三入口缺省漂移（custom/cli、unknown/unknown、custom/headless）会进注入快照与 run.started，使同一模型按入口分成三组，影响 Eval 与学习侧按模型分组；`PIGEON_STREAM_FN` 只有 tui 读取而 cli 报错文案称支持，属实现与文案不一致的缺陷。
+- 锚点：src/tui/message-flow.ts、src/tui/modal.ts、src/tui/commands.ts、src/tui/workers-view.ts、src/tui/resume-view.ts 与瘦身后的 src/tui/shell.ts；src/application/launch-flags.ts 与 src/application/session-runtime.ts；接线方 src/cli/index.ts、src/tui/main.ts、src/application/headless.ts；测试 src/application/launch-flags.test.ts、src/application/session-runtime.test.ts 与 tui 既有 10 个测试文件（断言未改）。
+- 详情：docs/decisions/m6-prep-decisions.md。

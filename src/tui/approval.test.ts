@@ -115,9 +115,9 @@ test("审批块渲染工具名/参数/diff/四键提示；[y] resolve 批准一�
     assert.ok(text.includes("@@ -1 +1 @@ -alpha +STEP1"), text);
     assert.ok(
       screenFlat(term).includes(
-        "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
+        "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
       ),
-      `四键提示与 cli 版同口径（折行后拼接还原）\n${text}`
+      `按键提示与 cli 版同口径，含 [r] 拒绝并说明（折行后拼接还原）\n${text}`
     );
     assert.ok(text.includes("state: approval"), `审批期间状态栏\n${text}`);
 
@@ -205,7 +205,9 @@ test("[d] 无 path 时不提供该键；仍按下与 cli 版同语义退化为�
     await settle();
     const text = screenText(term);
     assert.ok(
-      screenFlat(term).includes("批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许"),
+      screenFlat(term).includes(
+        "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许"
+      ),
       `无 path 时提示不含 [d]\n${text}`
     );
     assert.ok(!text.includes("[d]"), text);

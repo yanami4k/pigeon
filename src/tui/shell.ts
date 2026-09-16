@@ -1,6 +1,11 @@
 // Application Shell（M2 S2，ROADMAP §M2 交付第 1 件）：pi-tui ProcessTerminal + TuiMainScreen
 // 驱动的最小壳——消息区（每消息一个 Text）+ 底行输入区 + 纯 ASCII chrome（标题/状态栏）。
 //
+// 决策 067 拆分（零行为变化）：消息流在 message-flow.ts，审批面板与按键路由在 modal.ts，
+// 斜杠命令分发在 commands.ts，worker 命令与状态行在 workers-view.ts，resume / 历史 / 换绑在
+// resume-view.ts；本文件保留布局、启停、提交与事件渲染，并重新导出原有公开符号（导入方不变）。
+// 运行中、恢复中、待审批、退出布防等状态一律由本壳持有，子模块经窄接口读写，不各自存一份。
+//
 // 边界与纪律：
 // - TUI 只通过 Application API 提交意图（ROADMAP §M2 完成证据）：输入提交唯一通道是
 //   TuiRuntimeFace.run()，绝不直连上游 Agent；PiRuntimeAdapter 结构满足该面。
@@ -16,76 +21,60 @@
 //   （内容超高流入回卷，差分渲染器重写尾部）；包装声明意图，alt-screen 布局引擎下自动生效。
 // - busy 语义（决策 027）：运行中提交被拒绝——保留输入缓冲、消息区留 [busy] 提示、不进队列；
 //   斜杠命令同样不开旁路。
-// - 审批面板（S3，决策 029）：ApprovalHandler 挂起等四键 [y/n/a/d]，addInputListener 接管
-//   按键，其余输入一律吞掉；壳停止时挂起的审批 fail-closed 按拒绝处理（理由逐字）。
+// - 审批面板（S3，决策 029）、恢复菜单（S4，决策 031）、取消键（S5 裁决 032）与退出三层形态
+//   （S5+ 裁决 033）的交互语义见 modal.ts；壳停止时挂起的审批 fail-closed 按拒绝处理（理由逐字）。
 // - 斜杠命令（S3，决策 030）：/grants /revoke /grants save 走 application/grants.ts 的
 //   命令层（与 cli REPL 同一份），输出经 write 回调投影到消息区——零新增治理语义。
-// - 会话列表与恢复入口（S4）：/sessions 走 application/session-list.ts 命令层（与 cli
-//   同一份渲染口径）；/resume <sessionId> 走 application/resume.ts 的 runResumeFlow——
-//   人工确认用面板式单键（决策 031：与 029 一致的输入语义，不引入第三种输入模式），
-//   resolution 写盘路径完全复用 application 层；对账收口后经装配方注入的 rebind
-//   换绑运行面（restoredGrants 种子在 main.ts 物化），同 sessionId 续跑。
-// - 取消入口（S5，裁决 032）：运行中按 Esc 触发 adapter.interrupt()（固定姿势
-//   abort → waitForIdle，注释约束 5）；Ctrl+C 不绑定取消——保留进程退出语义
-//   （main.ts 的 OS 信号处理）。模态键控优先：审批面板/恢复菜单挂起期间 Esc 与非决议键
-//   同待遇吞掉——审批挂起即 Run 阻塞在 beforeToolCall 的人工决议上，此时 interrupt
-//   会吊在挂起 Promise 上直到人按键，「取消」名不副实；模态先决议再 Esc 是唯一次序。
-//   中断飞行中重复 Esc 不再触发（不 double-abort、不悬挂）；running 清算在 handleRunEnd。
-// - 退出三层形态（S5+，裁决 033，omp 键位模型）：Esc 取消（032 不动）；Ctrl+C 永不取消
-//   Run——单击（非模态）清输入缓冲并留 [cleared] 提示（模态期间不清，仍计布防第一次）；
-//   双击（窗口内两次 \x03，任意模式含模态）与 /quit 走同一优雅退出——先 stop()
-//   （dispose 对称；挂起审批 fail-closed 走 APPROVAL_CANCEL_CLOSED，证据链不断）再回调
-//   注入的 onExit（main.ts 注入 dispose + process.exit；测试注入探针，绝不真退进程）。
 // - 终态摘要（S5）：run() 决议后落终态行——status + stopReason + 四分类徽章（措辞复用
 //   application/format.ts 的 failureBadge，与 cli trace 同口径）+ errorMessage（若有）+
 //   syntheticFailure 标注（若有）；listenerErrors 非空时消息区增量警告（D2 可见化的
 //   TUI 投影，措辞与增量报数口径同 cli repl：启动即查 + 每次 run 收尾复查）。
 // - dispose 对称：取消键的订阅与监听器一律进 disposers，在 start/stop 里成对出现。
-import {
-  Container,
-  Input,
-  ScrollView,
-  type Terminal,
-  Text,
-  TuiMainScreen,
-} from "@earendil-works/pi-tui";
-import { failureBadge, sanitizeTerminalText, summarizeArgs } from "../application/format.ts";
-import { type GrantConfigEventSink, runGrantCommand } from "../application/grants.ts";
-import { type HistoryLine, loadSessionHistory } from "../application/history.ts";
-import { runResumeFlow } from "../application/resume.ts";
-import { runSearchCommand } from "../application/search.ts";
-import { runSessionListCommand } from "../application/session-list.ts";
-import {
-  parseSpawnCommand,
-  renderWorkerOutcome,
-  renderWorkersStatus,
-  resolveWorkerRef,
-  type SpawnRequest,
-  WORKER_COMMANDS_HINT,
-  type WorkerOutcome,
-  type WorkerStatus,
-  workerStateLabel,
-  workerStatusBar,
-} from "../application/workers-commands.ts";
-import type { SessionGrantStore } from "../approvals/grant-store.ts";
+import { Input, type Terminal, Text, TuiMainScreen } from "@earendil-works/pi-tui";
+import { failureBadge, summarizeArgs } from "../application/format.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import type { ConfigGrantRule } from "../state/grants.ts";
-import { asSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import type { RunId, SessionId } from "../state/ids.ts";
 import type {
   ToolProposedPayload,
   ToolSettledPayload,
   TurnCompletedPayload,
 } from "../state/runtime-events.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
+import type { ApprovalPanelResult, TuiApprovalFace } from "./approval.ts";
 import {
-  APPROVAL_CANCEL_BUSY,
-  APPROVAL_CANCEL_CLOSED,
-  type ApprovalPanelResult,
-  approvalBlockText,
-  type TuiApprovalFace,
-} from "./approval.ts";
+  type CommandsHost,
+  handleSlashCommand as dispatchSlashCommand,
+  type TuiGrantsContext,
+} from "./commands.ts";
+import { MessageFlow } from "./message-flow.ts";
+import {
+  askApprovalPanel,
+  askMenuChoice as askMenuChoiceModal,
+  closePendingModals,
+  handleShellKey,
+  type ModalHost,
+  type PendingApproval,
+  type PendingMenu,
+} from "./modal.ts";
+import {
+  handleResumeCommand as dispatchResumeCommand,
+  type ResumeOptions,
+  type ResumeViewHost,
+  type SessionBinding,
+} from "./resume-view.ts";
+import {
+  handleCancelCommand,
+  handleSpawnCommand,
+  refreshWorkers as refreshWorkersView,
+  showWorkersStatus,
+  type TuiWorkersFace,
+  type WorkersViewHost,
+} from "./workers-view.ts";
+
+export type { TuiGrantsContext } from "./commands.ts";
+export type { TuiWorkersFace } from "./workers-view.ts";
 
 // Application API 面：TUI 提交意图与订阅投影的唯一通道（决策 025 的实体）。
 // 结构类型——PiRuntimeAdapter 直接满足；测试注入假实现断言「只经 application API」。
@@ -100,31 +89,8 @@ export interface TuiRuntimeFace {
   listenerErrors(): unknown[];
 }
 
-// TUI 治理命令上下文（/grants /revoke /grants save；决策 030）
-export interface TuiGrantsContext {
-  root: string;
-  store: SessionGrantStore;
-  configRules: readonly ConfigGrantRule[];
-  eventLog?: GrantConfigEventSink;
-}
-
-// /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文。装配由调用方（main.ts）
-// 完成——restoredGrants 种子物化、buildRuntime、旧运行面释放都在壳外；壳只换绑投影
-export interface TuiSessionBinding {
-  runtime: TuiRuntimeFace;
-  grants?: TuiGrantsContext;
-  // M5.5 S4：目标会话的 worker 编排面（worker 会话的编排面按深度 1 拒绝再派）
-  workers?: TuiWorkersFace;
-}
-
-// M5.5 S4（决策 040）：worker 编排面——orchestration 的四动作（WorkerOrchestrator 结构满足）。
-// 壳只提交意图与投影状态：派出、取消、状态、等结果
-export interface TuiWorkersFace {
-  spawn(request: SpawnRequest): SessionId;
-  cancel(sessionId: SessionId): Promise<void>;
-  status(): WorkerStatus[];
-  awaitResult(sessionId: SessionId): Promise<WorkerOutcome>;
-}
+// /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文（形状定义在 resume-view.ts）
+export type TuiSessionBinding = SessionBinding<TuiRuntimeFace, TuiGrantsContext, TuiWorkersFace>;
 
 export interface TuiShellOptions {
   terminal: Terminal;
@@ -140,12 +106,7 @@ export interface TuiShellOptions {
   // S4：/resume <sessionId> 恢复入口——对账流程在 application/resume.ts（写盘路径唯一）；
   // rebind 由装配方注入：对账收口后按目标 sessionId 重建运行面（restoredGrants 种子）
   // 并释放旧运行面；缺省 = /resume 不可用
-  resume?: {
-    root: string;
-    rebind: (sessionId: SessionId) => TuiSessionBinding | Promise<TuiSessionBinding>;
-    // M5.5 S4：目标会话的确证读取根（worker 会话 = 其工作树）；缺省 = root
-    workspaceRootFor?: (sessionId: SessionId) => string;
-  };
+  resume?: ResumeOptions<TuiSessionBinding>;
   // S5+（裁决 033）：优雅退出回调——双击 Ctrl+C / /quit 触发；壳先 stop() 再回调。
   // 注入使测试绝不真退进程；缺省 = 退出只停壳（装配方必须注入真实退出路径）
   onExit?: () => void;
@@ -161,135 +122,21 @@ export interface TuiShellOptions {
   workerRefreshMs?: number;
 }
 
-// 消息流：每条消息一个 Text（spike 铁律——未变消息渲染 O(1) 命中缓存，流式只重折行尾巴）。
-// 工具行按 toolCallId 索引原位更新，一行呈现「提议 → 结果」的完整生命周期。
-// 决策 036：本类是消息区唯一 Text 创建/setText 入口，半信任内容（模型流式文本、工具
-// 参数摘要、审批块、错误消息）携带的终端控制序列在此统一净化——pi-tui 的 Text 按设计
-// 保留并直通 ANSI/OSC/APC（M2 审计 P2-1），故净化必须发生在进 Text 之前；幂等，
-// 流式累积文本每帧重净化是安全的
-// thinking 段视觉弱化（M5 S2，决策 045）：暗色由壳的受信代码在 pi-tui 补齐行宽后逐行包裹；
-// 内容在进 Text 前已经 036 净化，模型文本里的控制序列此时已惰性化，这里的 SGR 不来自模型
-const dimLine = (line: string): string => `\x1b[2m${line}\x1b[22m`;
-
-class MessageFlow {
-  // Container 承载任意多 Text child；ScrollView 恰好包一个 child（决策 028：main-screen 下
-  // 裁剪/follow 由终端 scrollback 实现，ScrollView 声明意图并兼容 alt-screen 布局引擎）
-  readonly view: ScrollView;
-  private readonly list = new Container();
-  private streamTail: Text | null = null;
-  private streamText = "";
-  // M5 S2（决策 045）：thinking 流式段——与正文尾巴分开，谁的增量到了谁开段（同 035 懒创建）
-  private thinkingTail: Text | null = null;
-  private thinkingText = "";
-  private readonly toolLines = new Map<string, { text: Text; content: string }>();
-
-  constructor() {
-    this.view = new ScrollView(this.list, { follow: "end", primary: true });
-  }
-
-  private append(text: string): Text {
-    const line = new Text(sanitizeTerminalText(text));
-    this.list.addChild(line);
-    return line;
-  }
-
-  // 弱化段（thinking）：同样先净化，再由受信的逐行样式函数加暗色
-  private appendDim(text: string): Text {
-    const line = new Text(sanitizeTerminalText(text), 1, 1, dimLine);
-    this.list.addChild(line);
-    return line;
-  }
-
-  // 历史行（M5 S2，决策 045）：/resume 换绑后一次性渲染；thinking 行弱化，其余同实时流口径
-  addHistory(lines: readonly HistoryLine[]): void {
-    for (const line of lines) {
-      if (line.kind === "thinking") {
-        this.appendDim(line.text);
-      } else {
-        this.append(line.text);
-      }
-    }
-  }
-
-  // user 消息提交回显
-  addUserEcho(text: string): void {
-    this.append(`> ${text}`);
-  }
-
-  // 系统行：busy 提示、run 终态摘要等（chrome 之外的壳自体消息）
-  addSystem(line: string): void {
-    this.append(line);
-  }
-
-  // turn.started：只重置流式状态，不 append——尾巴懒创建（决策 035：首个 text_delta 到达时
-  // 才开出；纯工具调用轮因此不留占位子组件。pi-tui 0.84.4 的 Text("") 渲染零行
-  //（components/text.js 空文本早退），懒创建前后屏幕逐行一致，此不变式是字面性的：
-  // 尾巴存在 ⟺ 本轮已流式文本）
-  openStream(): void {
-    this.streamTail = null;
-    this.streamText = "";
-    this.thinkingTail = null;
-    this.thinkingText = "";
-  }
-
-  // thinking_delta（M5 S2，决策 045）：思维链单独一段、~ 前缀、暗色弱化；正文段已开则先收尾，
-  // 保证段序与块序一致（真实 provider 块序：thinking 在 text 之前）
-  appendThinkingDelta(delta: string): void {
-    if (this.thinkingTail === null) {
-      this.streamTail = null;
-      this.streamText = "";
-      this.thinkingTail = this.appendDim("");
-    }
-    this.thinkingText += delta;
-    this.thinkingTail.setText(sanitizeTerminalText(`~ ${this.thinkingText}`));
-  }
-
-  // text_delta：流式生长（首个 delta 懒开出尾巴并 setText；无 turn.started 的 deltas
-  // 同样经此防御性开出——deltas 不锚身份，024）
-  appendDelta(delta: string): void {
-    // thinking 段收尾：正文另起一段
-    this.thinkingTail = null;
-    this.thinkingText = "";
-    if (this.streamTail === null) this.streamTail = this.append("");
-    this.streamText += delta;
-    // 累积文本整体重净化（幂等为前提）：跨 delta 劈开的序列在补齐帧被惰性化，
-    // 中间帧的裸 ESC 显示为 ␛ 是正常形态
-    this.streamTail.setText(sanitizeTerminalText(this.streamText));
-  }
-
-  // turn.completed：收尾当前流式消息（从未开过尾巴的轮次不追加任何行）
-  closeStream(): void {
-    this.streamTail = null;
-    this.streamText = "";
-    this.thinkingTail = null;
-    this.thinkingText = "";
-  }
-
-  // tool.proposed：工具名 + 参数摘要（措辞复用 application/format.ts 的 summarizeArgs）
-  addToolCall(toolCallId: string, line: string): void {
-    this.toolLines.set(toolCallId, { text: this.append(line), content: line });
-  }
-
-  // tool.settled：在原行追加结果状态（参数摘要保持可见）；settled 先到则如实落整行
-  settleToolCall(toolCallId: string, line: string, state: string): void {
-    const existing = this.toolLines.get(toolCallId);
-    if (existing === undefined) {
-      this.addToolCall(toolCallId, `${line} ${state}`);
-      return;
-    }
-    existing.content += ` ${state}`;
-    existing.text.setText(sanitizeTerminalText(existing.content));
-  }
-}
-
-export class PigeonTuiShell implements TuiApprovalFace {
+export class PigeonTuiShell
+  implements
+    TuiApprovalFace,
+    ModalHost,
+    CommandsHost,
+    WorkersViewHost,
+    ResumeViewHost<TuiSessionBinding>
+{
   private readonly options: TuiShellOptions;
   private readonly tui: TuiMainScreen;
   private readonly flow = new MessageFlow();
   private readonly statusLine = new Text("");
   // M5.5 S4（决策 040）：worker 状态行（无 worker 时空文本，零行）与刷新定时器（有 worker 在跑才开）
   private readonly workerStatusLine = new Text("");
-  private workerTimer: ReturnType<typeof setInterval> | null = null;
+  private workerTimerHandle: ReturnType<typeof setInterval> | null = null;
   private readonly input = new Input();
   private readonly title: Text;
   // 当前会话上下文（S4）：/resume 换绑整体替换——运行面、治理上下文、sessionId 一体，
@@ -311,10 +158,12 @@ export class PigeonTuiShell implements TuiApprovalFace {
   private resuming = false;
   // S3 审批面板：挂起中的审批决议（resolve 四键或 cancel）；串行不变量（决策 002）下
   // 同时最多一个，非空即面板期间
-  private pendingApproval: { resolve: (result: ApprovalPanelResult) => void } | null = null;
+  private pendingApprovalState: PendingApproval | null = null;
   // S4 恢复菜单：挂起中的三选一决议（面板式单键，决策 031）；与审批面板互斥——
   // 审批只发生在 Run 内，菜单只在无 Run 的 /resume 流程内（busy 不开旁路）
-  private pendingMenu: { resolve: (choice: string | null) => void } | null = null;
+  private pendingMenuState: PendingMenu | null = null;
+  // 决策 066：理由行输入模式——[r] 打开后按键归输入区，回车提交理由，Esc 回面板（不算拒绝）
+  private reasonModeOn = false;
   // S5 取消键：中断飞行中标记——interrupt 未决议期间重复 Esc 不再触发
   //（不 double-abort、不悬挂）；running 清算在 handleRunEnd，两者生命周期独立
   private interrupting = false;
@@ -322,7 +171,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
   private reportedListenerErrors = 0;
   // S5+ 退出布防（裁决 033）：上一次 Ctrl+C 的墙钟时刻（窗口内再来一次即优雅退出）；
   // exitRequested 保证退出恰好一次（stop 后输入监听已退订，重入仅作幂等防御）
-  private lastCtrlCAt: number | null = null;
+  private lastCtrlCAtValue: number | null = null;
   private exitRequested = false;
 
   constructor(options: TuiShellOptions) {
@@ -346,9 +195,9 @@ export class PigeonTuiShell implements TuiApprovalFace {
     if (this.started) return;
     this.started = true;
     // 壳级键控（S3 审批面板 + S4 恢复菜单 + S5 取消键）：模态挂起期间接管终端输入
-    this.disposers.push(this.tui.addInputListener((data) => this.handleShellKey(data)));
+    this.disposers.push(this.tui.addInputListener((data) => handleShellKey(this, data)));
     this.bindRuntime(this.current.runtime);
-    this.refreshWorkers();
+    refreshWorkersView(this);
     // D2 可见化（S5，同 repl 口径）：启动即查一次落盘失败
     this.warnEvidenceGaps();
     this.tui.setFocus(this.input);
@@ -366,23 +215,13 @@ export class PigeonTuiShell implements TuiApprovalFace {
   }
 
   stop(): void {
-    // fail-closed（决策 029）：壳停止时挂起的审批按拒绝处理（理由逐字），不吊死 Run
-    if (this.pendingApproval !== null) {
-      const pending = this.pendingApproval;
-      this.pendingApproval = null;
-      pending.resolve({ key: "cancel", reason: APPROVAL_CANCEL_CLOSED });
-    }
-    // 恢复菜单挂起中停止：按 EOF 语义回 null（流程把悬账原样保留，不写错误确证）
-    if (this.pendingMenu !== null) {
-      const pending = this.pendingMenu;
-      this.pendingMenu = null;
-      pending.resolve(null);
-    }
+    // fail-closed（决策 029）：壳停止时挂起的审批按拒绝处理、恢复菜单按 EOF 语义回 null
+    closePendingModals(this);
     for (const dispose of this.disposers.splice(0)) dispose();
     for (const dispose of this.runtimeDisposers.splice(0)) dispose();
-    if (this.workerTimer !== null) {
-      clearInterval(this.workerTimer);
-      this.workerTimer = null;
+    if (this.workerTimerHandle !== null) {
+      clearInterval(this.workerTimerHandle);
+      this.workerTimerHandle = null;
     }
     if (this.started) {
       this.started = false;
@@ -390,10 +229,10 @@ export class PigeonTuiShell implements TuiApprovalFace {
     }
   }
 
-  private updateStatus(): void {
+  updateStatus(): void {
     // 状态栏纯 ASCII；审批/恢复菜单期间输入归模态键控，busy 与 resume 期间输入锁定
     this.statusLine.setText(
-      this.pendingApproval !== null
+      this.pendingApprovalState !== null
         ? "state: approval | decide in panel"
         : this.resuming
           ? "state: resume | answer in message area"
@@ -406,8 +245,21 @@ export class PigeonTuiShell implements TuiApprovalFace {
   }
 
   private handleSubmit(value: string): void {
-    // 空输入（纯空白）：静默忽略——不回显、不提交、不提示
+    // 空输入（纯空白）：静默忽略——不回显、不提交、不提示（理由行同口径：留在理由行继续编辑）
     if (value.trim() === "") return;
+    // 理由行提交（决策 066）：本次回车是拒绝理由而非任务提交——理由逐字回模型，审批就此决议
+    if (this.reasonModeOn) {
+      const reason = value.trim();
+      this.input.setValue("");
+      this.reasonModeOn = false;
+      const approval = this.pendingApprovalState;
+      this.pendingApprovalState = null;
+      this.flow.addSystem(`拒绝理由：${reason}`);
+      this.updateStatus();
+      this.tui.requestRender();
+      approval?.resolve({ key: "r", reason });
+      return;
+    }
     if (this.running || this.resuming) {
       // busy 语义（决策 027）：拒绝提交而非排队——排队意味着未设计的意图顺序/持久化语义；
       // 保留输入缓冲让人决定重提时机，拒绝痕迹留在消息区（可见，不静默）。
@@ -425,7 +277,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
     if (value.startsWith("/")) {
       this.input.setValue("");
       this.flow.addUserEcho(value);
-      this.handleSlashCommand(value);
+      dispatchSlashCommand(this, value);
       this.tui.requestRender();
       return;
     }
@@ -443,25 +295,10 @@ export class PigeonTuiShell implements TuiApprovalFace {
     );
   }
 
-  // ---- S3 审批面板（TuiApprovalFace 实现）----
+  // ---- S3 审批面板（TuiApprovalFace 实现；交互语义在 modal.ts）----
 
-  // 渲染审批块并挂起等四键；返回面板决议。串行不变量（决策 002）下同一会话同时最多
-  // 一个待审批调用——重入是上游/装配 bug，防御性 fail-closed（按拒绝处理），绝不排队
   askApproval(request: ApprovalRequest): Promise<ApprovalPanelResult> {
-    // M5.5 S4：壳已停止——排队中轮到的审批（worker 的请求）不再渲染到已停的界面上吊死，
-    // 与停止时挂起的审批同一 fail-closed 口径（决策 029）
-    if (!this.started) {
-      return Promise.resolve({ key: "cancel", reason: APPROVAL_CANCEL_CLOSED });
-    }
-    if (this.pendingApproval !== null) {
-      return Promise.resolve({ key: "cancel", reason: APPROVAL_CANCEL_BUSY });
-    }
-    this.flow.addSystem(approvalBlockText(request));
-    const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
-    this.pendingApproval = { resolve };
-    this.updateStatus();
-    this.tui.requestRender();
-    return promise;
+    return askApprovalPanel(this, request);
   }
 
   // 审批结果回显（handler 在决议后调用：裁决行 / 已创建放权行）
@@ -470,50 +307,150 @@ export class PigeonTuiShell implements TuiApprovalFace {
     this.tui.requestRender();
   }
 
-  // 壳级键控路由：退出键（Ctrl+C）最先——模态吞键语义不得吃掉退出布防（033：模态
-  // 单击仍计布防第一次）；其后模态键控（决策 029/031），最后是取消键（S5 裁决 032）
-  private handleShellKey(data: string): { consume: true } | undefined {
-    if (data === "\x03") {
-      this.handleCtrlC();
-      return { consume: true };
-    }
-    if (this.handleModalKey(data) !== undefined) return { consume: true };
-    // 取消键（S5）：Esc = 裸 "\x1b"（方向键等转义序列是多字节，不会误判）；Ctrl+C 不进
-    // 本路径——永不绑定取消（033），退出语义由 handleCtrlC 承载。仅运行中消费；
-    // 空闲 Esc 放行给 Input 组件（其 onEscape 未装配，语义为空）
-    if (data === "\x1b" && this.running) {
-      this.requestInterrupt();
-      return { consume: true };
-    }
-    return undefined;
+  // ---- 子模块窄接口（状态本体在本壳，子模块只读写不持有）----
+
+  isStarted(): boolean {
+    return this.started;
   }
 
-  // Ctrl+C（S5+，裁决 033）：单击布防——非模态清输入缓冲并留 [cleared] 提示（措辞与
-  // [busy]/[cancel] 同款 ASCII 括号；无历史召回语义，清空即丢弃）；模态期间不清缓冲
-  // 不留提示（029/031 吞键语义），但仍计布防第一次。窗口内第二次（任意模式含模态）
-  // 优雅退出；窗口过期则本次退化为单击并重新布防
-  private handleCtrlC(): void {
-    const now = Date.now();
-    if (
-      this.lastCtrlCAt !== null &&
-      now - this.lastCtrlCAt <= (this.options.exitWindowMs ?? 1000)
-    ) {
-      this.lastCtrlCAt = null;
-      this.requestExit();
-      return;
-    }
-    this.lastCtrlCAt = now;
-    if (this.pendingApproval === null && this.pendingMenu === null) {
-      this.input.setValue("");
-      this.flow.addSystem("[cleared] 输入已清空（再按一次 Ctrl+C 退出）");
-      this.tui.requestRender();
-    }
+  isRunning(): boolean {
+    return this.running;
   }
+
+  pendingApproval(): PendingApproval | null {
+    return this.pendingApprovalState;
+  }
+
+  setPendingApproval(pending: PendingApproval | null): void {
+    this.pendingApprovalState = pending;
+  }
+
+  pendingMenu(): PendingMenu | null {
+    return this.pendingMenuState;
+  }
+
+  setPendingMenu(pending: PendingMenu | null): void {
+    this.pendingMenuState = pending;
+  }
+
+  lastCtrlCAt(): number | null {
+    return this.lastCtrlCAtValue;
+  }
+
+  setLastCtrlCAt(at: number | null): void {
+    this.lastCtrlCAtValue = at;
+  }
+
+  reasonMode(): boolean {
+    return this.reasonModeOn;
+  }
+
+  setReasonMode(on: boolean): void {
+    this.reasonModeOn = on;
+  }
+
+  exitWindowMs(): number {
+    return this.options.exitWindowMs ?? 1000;
+  }
+
+  addSystem(line: string): void {
+    this.flow.addSystem(line);
+  }
+
+  addHistoryLines(lines: Parameters<MessageFlow["addHistory"]>[0]): void {
+    this.flow.addHistory(lines);
+  }
+
+  clearInput(): void {
+    this.input.setValue("");
+  }
+
+  render(): void {
+    this.tui.requestRender();
+  }
+
+  sessionId(): SessionId {
+    return this.current.sessionId;
+  }
+
+  grants(): TuiGrantsContext | undefined {
+    return this.current.grants;
+  }
+
+  workers(): TuiWorkersFace | undefined {
+    return this.current.workers;
+  }
+
+  sessionsRoot(): string | undefined {
+    return this.options.sessions?.root;
+  }
+
+  searchRoot(): string | undefined {
+    return this.options.search?.root;
+  }
+
+  resumeConfigured(): boolean {
+    return this.options.resume !== undefined;
+  }
+
+  resumeOptions(): ResumeOptions<TuiSessionBinding> | undefined {
+    return this.options.resume;
+  }
+
+  historyLimit(): number | undefined {
+    return this.options.historyLimit;
+  }
+
+  hasRunningWorkers(): boolean {
+    return this.current.workers?.status().some((worker) => worker.state === "running") === true;
+  }
+
+  setResuming(resuming: boolean): void {
+    this.resuming = resuming;
+  }
+
+  setWorkerStatusLine(text: string): void {
+    this.workerStatusLine.setText(text);
+  }
+
+  workerTimer(): ReturnType<typeof setInterval> | null {
+    return this.workerTimerHandle;
+  }
+
+  setWorkerTimer(timer: ReturnType<typeof setInterval> | null): void {
+    this.workerTimerHandle = timer;
+  }
+
+  workerRefreshMs(): number {
+    return this.options.workerRefreshMs ?? 1000;
+  }
+
+  askMenuChoice(prompt: string): Promise<string | null> {
+    return askMenuChoiceModal(this, prompt);
+  }
+
+  spawnCommand(workers: TuiWorkersFace, raw: string): void {
+    handleSpawnCommand(this, workers, raw);
+  }
+
+  cancelCommand(workers: TuiWorkersFace, ref: string | undefined): void {
+    handleCancelCommand(this, workers, ref);
+  }
+
+  workersStatusCommand(workers: TuiWorkersFace): void {
+    showWorkersStatus(this, workers);
+  }
+
+  resumeCommand(arg: string | undefined): void {
+    dispatchResumeCommand(this, arg);
+  }
+
+  // ---- 退出与取消（键位路由在 modal.ts）----
 
   // 优雅退出（S5+，裁决 033）：双击 Ctrl+C 与 /quit 共用本路径——先 stop()（dispose
   // 对称；挂起审批 fail-closed 按拒绝处理、理由逐字 APPROVAL_CANCEL_CLOSED，证据链不断；
   // 恢复菜单按 EOF 语义回 null），再回调注入的 onExit。幂等：退出恰好一次
-  private requestExit(): void {
+  requestExit(): void {
     if (this.exitRequested) return;
     this.exitRequested = true;
     this.stop();
@@ -523,7 +460,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
   // 取消入口（S5）：触发 adapter.interrupt()（固定姿势 abort → waitForIdle，注释约束 5）。
   // 重复取消防御：中断飞行中不再触发——不 double-abort、不悬挂；running 清算在
   // handleRunEnd（run() 决议承载终态），interrupt 决议只清飞行标记
-  private requestInterrupt(): void {
+  requestInterrupt(): void {
     if (this.interrupting) return;
     this.interrupting = true;
     this.flow.addSystem("[cancel] interrupt requested; waiting for run to settle");
@@ -556,298 +493,9 @@ export class PigeonTuiShell implements TuiApprovalFace {
     }
   }
 
-  // 模态键控：审批面板（S3）或恢复菜单（S4）挂起期间接管终端输入——决议键 resolve，
-  // 其余一律吞掉（决策 029/031 简单语义：普通输入忽略，不进缓冲、不提交、不回显；
-  // 输入区里已有的内容不动，模态关闭后继续编辑）。两者互斥（审批只在 Run 内，
-  // 菜单只在无 Run 的 /resume 流程内），同挂起是装配 bug，审批优先
-  private handleModalKey(data: string): { consume: true } | undefined {
-    const approval = this.pendingApproval;
-    if (approval !== null) {
-      const key = data.toLowerCase();
-      if (key === "y" || key === "n" || key === "a" || key === "d") {
-        this.pendingApproval = null;
-        this.updateStatus();
-        approval.resolve({ key });
-      }
-      return { consume: true };
-    }
-    const menu = this.pendingMenu;
-    if (menu !== null) {
-      // 恢复菜单（决策 031）：面板式单键决议——1/2/3 键即答案，与审批四键同款语义；
-      // 转义序列等多字节输入不决议（静默吞掉，避免方向键刷出重复提示）
-      if (data === "1" || data === "2" || data === "3") {
-        this.pendingMenu = null;
-        this.updateStatus();
-        menu.resolve(data);
-      }
-      return { consume: true };
-    }
-    return undefined;
-  }
-
-  // 斜杠命令分发（S3/S4）：grant 命令层在 application/grants.ts（决策 030）、会话列表在
-  // application/session-list.ts、恢复流程在 application/resume.ts——全部与 cli 同一份逻辑；
-  // 语法/语义错误响亮呈现（同 REPL 口径），未知命令如实说明
-  private handleSlashCommand(value: string): void {
-    const tokens = value
-      .slice(1)
-      .split(/\s+/)
-      .filter((token) => token.length > 0);
-    const grants = this.current.grants;
-    try {
-      // S5+（裁决 033）：/quit 与双击 Ctrl+C 同一优雅退出路径（busy 语义不开旁路：
-      // 运行中提交在 handleSubmit 即被拒绝，退出键仍可用）
-      if (tokens[0] === "quit") {
-        this.requestExit();
-        return;
-      }
-      // S4：/sessions 会话列表——只读渲染，命令层与 cli 同一份（零新治理语义）
-      if (tokens[0] === "sessions" && this.options.sessions !== undefined) {
-        this.flow.addSystem(runSessionListCommand({ root: this.options.sessions.root }).trimEnd());
-        this.tui.requestRender();
-        return;
-      }
-      // M5 S2（决策 038）：/search 内容级检索——命令层与 cli 同一份；异步扫描完成后落消息区
-      if (tokens[0] === "search" && this.options.search !== undefined) {
-        void runSearchCommand({ root: this.options.search.root, args: tokens.slice(1) }).then(
-          (text) => {
-            this.flow.addSystem(text.trimEnd());
-            this.tui.requestRender();
-          },
-          (error: unknown) => {
-            this.flow.addSystem(
-              `命令失败：${error instanceof Error ? error.message : String(error)}`
-            );
-            this.tui.requestRender();
-          }
-        );
-        return;
-      }
-      // M5.5 S4（决策 040）：worker 编排命令——解析与排版在 application/workers-commands.ts
-      const workers = this.current.workers;
-      if (workers !== undefined && tokens[0] === "spawn") {
-        this.handleSpawnCommand(workers, value.trim().slice("/spawn".length));
-        return;
-      }
-      if (workers !== undefined && tokens[0] === "cancel") {
-        this.handleCancelCommand(workers, tokens[1]);
-        return;
-      }
-      if (workers !== undefined && tokens[0] === "workers") {
-        this.flow.addSystem(renderWorkersStatus(workers.status()));
-        this.refreshWorkers();
-        return;
-      }
-      // S4：/resume <sessionId> 冷恢复对账 + 换绑续跑（异步流程，见 handleResumeCommand）
-      if (tokens[0] === "resume" && this.options.resume !== undefined) {
-        this.handleResumeCommand(tokens[1]);
-        return;
-      }
-      const handled =
-        grants !== undefined &&
-        runGrantCommand(tokens, {
-          root: grants.root,
-          store: grants.store,
-          configRules: grants.configRules,
-          sessionId: this.current.sessionId,
-          ...(grants.eventLog !== undefined ? { eventLog: grants.eventLog } : {}),
-          write: (text) => {
-            this.flow.addSystem(text.trimEnd());
-          },
-        });
-      if (!handled) {
-        this.flow.addSystem(
-          `未知命令：${value}（可用 /quit、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}）`
-        );
-      }
-    } catch (error) {
-      this.flow.addSystem(`命令失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  // ---- M5.5 S4 worker 编排命令 ----
-
-  // /spawn <角色> [--name <名>] "<任务>"：派出即回显，收尾摘要经 awaitResult 投影到消息区。
-  // 解析与派出的异常由 handleSlashCommand 统一呈现为「命令失败」
-  private handleSpawnCommand(workers: TuiWorkersFace, raw: string): void {
-    const request = parseSpawnCommand(raw);
-    const sessionId = workers.spawn(request);
-    const spawned = workers.status().find((worker) => worker.sessionId === sessionId);
-    this.flow.addSystem(
-      `已派出 worker ${spawned?.name ?? sessionId}（${request.role}）｜ 会话 ${sessionId} ｜ ` +
-        `分支 ${spawned?.branch ?? "未知"}`
-    );
-    this.refreshWorkers();
-    workers.awaitResult(sessionId).then(
-      (outcome) => {
-        if (!this.started) return;
-        this.flow.addSystem(renderWorkerOutcome(outcome));
-        this.refreshWorkers();
-        this.tui.requestRender();
-      },
-      (error: unknown) => {
-        if (!this.started) return;
-        this.flow.addSystem(
-          `worker ${sessionId} 收尾异常：${error instanceof Error ? error.message : String(error)}`
-        );
-        this.refreshWorkers();
-        this.tui.requestRender();
-      }
-    );
-  }
-
-  // /cancel <worker 名或会话 id>：走编排器的 cancel（interrupt）；收尾摘要由 spawn 时挂的 awaitResult 落
-  private handleCancelCommand(workers: TuiWorkersFace, ref: string | undefined): void {
-    if (ref === undefined) {
-      this.flow.addSystem("用法：/cancel <worker 名或会话 id>");
-      return;
-    }
-    const target = resolveWorkerRef(workers.status(), ref);
-    if (target.state !== "running") {
-      this.flow.addSystem(
-        `worker ${target.name} 已收尾（${workerStateLabel(target.state)}），无需取消`
-      );
-      return;
-    }
-    this.flow.addSystem(`[cancel] worker ${target.name} interrupt requested`);
-    workers.cancel(target.sessionId).then(
-      () => {
-        this.refreshWorkers();
-        this.tui.requestRender();
-      },
-      (error: unknown) => {
-        this.flow.addSystem(
-          `取消 worker ${target.name} 失败：${error instanceof Error ? error.message : String(error)}`
-        );
-        this.tui.requestRender();
-      }
-    );
-  }
-
-  // worker 状态行：状态栏下方一行纯 ASCII；有 worker 在跑时定时刷新（轮次在变），全部收尾即停表
-  private refreshWorkers(): void {
-    const workers = this.current.workers?.status() ?? [];
-    this.workerStatusLine.setText(workerStatusBar(workers));
-    const running = workers.some((worker) => worker.state === "running");
-    if (running && this.started && this.workerTimer === null) {
-      this.workerTimer = setInterval(() => {
-        this.refreshWorkers();
-        this.tui.requestRender();
-      }, this.options.workerRefreshMs ?? 1000);
-      this.workerTimer.unref();
-    } else if (!running && this.workerTimer !== null) {
-      clearInterval(this.workerTimer);
-      this.workerTimer = null;
-    }
-  }
-
-  // /resume <sessionId>（S4）：对账流程在 application/resume.ts（自动确证报告 → 剩余悬账
-  // 人工确认 → human-confirmed resolution 落盘——写盘路径唯一，壳不另起）；人工确认用
-  // 面板式单键（决策 031）；enterRepl 钩子 = 换绑运行面续跑（同 sessionId 续写会话文件）
-  private handleResumeCommand(arg: string | undefined): void {
-    const resume = this.options.resume;
-    if (resume === undefined) {
-      this.flow.addSystem(
-        `未知命令：/resume（可用 /quit、/sessions、/grants、/revoke <id>、/grants save <id>）`
-      );
-      return;
-    }
-    if (arg === undefined) {
-      this.flow.addSystem("用法：/resume <sessionId>");
-      return;
-    }
-    // 恢复当前会话会让恢复流程与运行中日志同文件双写（两个 JsonlEventLog 实例写一个
-    // 文件，幂等索引分叉）——且语义上无意义（人就活在该会话里）：响亮拒绝
-    if (arg === this.current.sessionId) {
-      this.flow.addSystem(`已在会话 ${arg} 中，无需恢复`);
-      return;
-    }
-    // M5.5 S4（决策 040）：worker 的收尾记录写在当前会话文件里——有 worker 在跑时换绑会让它们
-    // 写向已关闭的会话，响亮拒绝
-    if (this.current.workers?.status().some((worker) => worker.state === "running") === true) {
-      this.flow.addSystem("有 worker 仍在运行：先 /cancel 或等其收尾，再 /resume");
-      return;
-    }
-    // worker 会话的确证读取根是它自己的工作树（装配方注入解析；父会话或工作树缺失时拒绝）
-    let workspaceRoot: string | undefined;
-    try {
-      workspaceRoot = resume.workspaceRootFor?.(asSessionId(arg));
-    } catch (error) {
-      this.flow.addSystem(`恢复失败：${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    this.resuming = true;
-    this.updateStatus();
-    this.tui.requestRender();
-    const finish = (error?: unknown): void => {
-      this.resuming = false;
-      if (error !== undefined) {
-        this.flow.addSystem(`恢复失败：${error instanceof Error ? error.message : String(error)}`);
-      }
-      this.updateStatus();
-      this.tui.requestRender();
-    };
-    void runResumeFlow({
-      root: resume.root,
-      ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
-      sessionId: arg,
-      // 问答注入（决策 025 同形）：菜单提示落消息区，面板式单键捕获作答
-      ask: (prompt) => this.askMenuChoice(prompt),
-      write: (text) => {
-        this.flow.addSystem(text.trimEnd());
-        this.tui.requestRender();
-      },
-      // 对账收口后续跑：换绑运行面（restoredGrants 种子与新运行面的装配在壳外的
-      // rebind 工厂，同 cli resume 的 enterRepl 配方）；壳已停止则换绑无意义
-      enterRepl: async () => {
-        if (!this.started) return;
-        const sessionId = asSessionId(arg);
-        const binding = await resume.rebind(sessionId);
-        this.rebindSession(sessionId, binding);
-        // M5 S2（决策 045）：换绑后渲染该会话全部历史（正文、thinking 与治理投影时序交织）
-        this.renderHistory(resume.root, sessionId);
-      },
-    }).then(
-      () => finish(),
-      (error: unknown) => finish(error)
-    );
-  }
-
-  // 历史渲染（M5 S2，决策 045）：投影在 application/history.ts（与 cli --with-content 同一份），
-  // 壳只排版；渲染失败如实呈现，不影响已完成的换绑（续跑照常可用）
-  private renderHistory(root: string, sessionId: SessionId): void {
-    try {
-      const lines = loadSessionHistory(
-        root,
-        sessionId,
-        this.options.historyLimit !== undefined ? { limit: this.options.historyLimit } : {}
-      );
-      this.flow.addSystem(`== 历史：会话 ${sessionId}（${lines.length} 行）==`);
-      this.flow.addHistory(lines);
-      this.flow.addSystem("== 历史结束，以下为续跑 ==");
-    } catch (error) {
-      this.flow.addSystem(
-        `历史渲染失败：${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-    this.tui.requestRender();
-  }
-
-  // 恢复菜单的作答面（S4，决策 031）：提示落消息区后挂起，等 1/2/3 单键决议；
-  // 壳停止时按 EOF 语义回 null（流程把悬账原样保留，不写错误确证）
-  private askMenuChoice(prompt: string): Promise<string | null> {
-    if (!this.started) return Promise.resolve(null);
-    this.flow.addSystem(prompt.trimEnd());
-    const { promise, resolve } = Promise.withResolvers<string | null>();
-    this.pendingMenu = { resolve };
-    this.updateStatus();
-    this.tui.requestRender();
-    return promise;
-  }
-
   // 换绑（S4）：会话上下文一体替换（sessionId + 运行面 + 治理上下文），chrome 标题跟进，
   // 运行面订阅先退旧再订新；消息区内容保留（对账报告与重建说明是恢复的证据链呈现）
-  private rebindSession(sessionId: SessionId, binding: TuiSessionBinding): void {
+  rebindSession(sessionId: SessionId, binding: TuiSessionBinding): void {
     this.current = { sessionId, runtime: binding.runtime };
     if (binding.grants !== undefined) this.current.grants = binding.grants;
     if (binding.workers !== undefined) this.current.workers = binding.workers;
@@ -856,7 +504,7 @@ export class PigeonTuiShell implements TuiApprovalFace {
     this.reportedListenerErrors = 0;
     this.title.setText(`== pigeon tui | session ${sessionId} ==`);
     this.bindRuntime(binding.runtime);
-    this.refreshWorkers();
+    refreshWorkersView(this);
     this.tui.requestRender();
   }
 

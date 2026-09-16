@@ -3,6 +3,12 @@
 // 仓库不依赖 @oh-my-pi/hashline。核心思想：把"复述旧文本"改成"引用已见内容"，
 // 锚点 `N#TAG` = 行号 + 该行内容哈希，行号漂移或内容变化都会导致 tag 不匹配而拒绝。
 import { createHash } from "node:crypto";
+import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
+
+// 锚点类报错文案的稳定标记：抛错处模板与 Eval 的编辑报错分类（eval/process.ts）共用，
+// 改文案时两侧一起动，分类不会静默落"其他"
+export const HASHLINE_ANCHOR_MISS_MARK = "未命中";
+export const HASHLINE_OUT_OF_RANGE_MARK = "越界";
 
 export class HashlineError extends Error {}
 
@@ -136,7 +142,7 @@ export function applyHashlineEdits(
   }
   // 预检三：必须有实际变化（"替换后内容不变"是错误，模型可能搞错了特殊字符）
   if (next.length === lines.length && next.every((line, i) => line === lines[i])) {
-    throw new HashlineError("编辑没有产生任何实际变化");
+    throw new HashlineError(EDIT_NO_CHANGE_PREFIX);
   }
   return { lines: next, applied };
 }
@@ -171,13 +177,13 @@ function checkAnchor(
   const { line, tag } = parseAnchor(anchor);
   if (line > lines.length) {
     throw new HashlineError(
-      `edits[${index}] 的 ${role} 越界：第 ${line} 行不存在（共 ${lines.length} 行）`
+      `edits[${index}] 的 ${role} ${HASHLINE_OUT_OF_RANGE_MARK}：第 ${line} 行不存在（共 ${lines.length} 行）`
     );
   }
   const actual = lineTag(lines[line - 1] as string);
   if (actual !== tag) {
     throw new HashlineError(
-      `edits[${index}] 的 ${role} 未命中：第 ${line} 行当前标签为 ${actual}，` +
+      `edits[${index}] 的 ${role} ${HASHLINE_ANCHOR_MISS_MARK}：第 ${line} 行当前标签为 ${actual}，` +
         `锚点是 ${tag}——文件可能已变化，请重新 read_file 获取最新锚点`
     );
   }

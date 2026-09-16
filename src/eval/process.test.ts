@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { newEntryId, newRunId, newSessionId } from "../state/ids.ts";
+import { EDIT_NO_CHANGE_PREFIX } from "../tools/edit-mode.ts";
+import { HASHLINE_ANCHOR_MISS_MARK, HASHLINE_OUT_OF_RANGE_MARK } from "../tools/hashline.ts";
+import { REPLACE_NOT_FOUND_PREFIX, REPLACE_NOT_UNIQUE_PREFIX } from "../tools/replace-edit.ts";
 import { classifyEditError, summarizeProcess } from "./process.ts";
 
 const OUTPUT_LIMIT =
@@ -69,16 +72,16 @@ test("过程指标：构造的会话账本上各工具调用与报错、撞输�
       "tc-3",
       "edit_file",
       true,
-      "edits[0] 的 endAnchor 未命中：第 48 行当前标签为 737d，锚点是 c4f8——文件可能已变化，请重新 read_file 获取最新锚点"
+      `edits[0] 的 endAnchor ${HASHLINE_ANCHOR_MISS_MARK}：第 48 行当前标签为 737d，锚点是 c4f8——文件可能已变化，请重新 read_file 获取最新锚点`
     );
     call(
       runId,
       "tc-4",
       "edit_file",
       true,
-      "edits[1] 的 anchor 越界：第 1694 行不存在（共 214 行）"
+      `edits[1] 的 anchor ${HASHLINE_OUT_OF_RANGE_MARK}：第 1694 行不存在（共 214 行）`
     );
-    call(runId, "tc-5", "edit_file", true, "编辑没有产生任何实际变化");
+    call(runId, "tc-5", "edit_file", true, EDIT_NO_CHANGE_PREFIX);
     event(runId, "turn.completed", { stopReason: "toolUse", syntheticFailure: false });
     event(runId, "turn.started", {});
     call(runId, "tc-6", "edit_file", true, OUTPUT_LIMIT);
@@ -102,7 +105,7 @@ test("过程指标：构造的会话账本上各工具调用与报错、撞输�
     event(runId, "turn.completed", { stopReason: "stop", syntheticFailure: false });
     event(runId, "run.ended", { messageCount: 12 });
     // 同一会话里的另一个 Run 不计入
-    call(otherRun, "tc-x", "edit_file", true, "编辑没有产生任何实际变化");
+    call(otherRun, "tc-x", "edit_file", true, EDIT_NO_CHANGE_PREFIX);
     event(otherRun, "turn.completed", { stopReason: "length", syntheticFailure: false });
     log.close();
 
@@ -132,23 +135,29 @@ test("编辑报错分类：replace 侧按原文未找到、原文不唯一、无
   assert.equal(
     classifyEditError(
       "replace",
-      "未找到 old_string：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀"
+      `${REPLACE_NOT_FOUND_PREFIX}：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀`
     ),
     "not-found"
   );
   assert.equal(
     classifyEditError(
       "replace",
-      "old_string 不唯一：在 a.ts 中出现 2 次（起始行 3、9），请加上下文使其唯一"
+      `${REPLACE_NOT_UNIQUE_PREFIX}：在 a.ts 中出现 2 次（起始行 3、9），请加上下文使其唯一`
     ),
     "not-unique"
   );
   assert.equal(
-    classifyEditError("replace", "编辑没有产生任何实际变化：old_string 与 new_string 相同"),
+    classifyEditError("replace", `${EDIT_NO_CHANGE_PREFIX}：old_string 与 new_string 相同`),
     "no-change"
   );
   assert.equal(classifyEditError("replace", OUTPUT_LIMIT), "output-limit");
-  assert.equal(classifyEditError("replace", "edits[0] 的 anchor 未命中：第 1 行"), "other");
+  assert.equal(
+    classifyEditError("replace", `edits[0] 的 anchor ${HASHLINE_ANCHOR_MISS_MARK}：第 1 行`),
+    "other"
+  );
   assert.equal(classifyEditError("replace", 'Validation failed for tool "edit_file":'), "other");
-  assert.equal(classifyEditError("hashline", "未找到 old_string：请重新 read_file"), "other");
+  assert.equal(
+    classifyEditError("hashline", `${REPLACE_NOT_FOUND_PREFIX}：请重新 read_file`),
+    "other"
+  );
 });

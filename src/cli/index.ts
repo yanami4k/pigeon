@@ -12,23 +12,21 @@ import { pathToFileURL } from "node:url";
 import { evalVerdictLabel, failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
-import { describeMcpStartup, type McpSession, startMcpSession } from "../application/mcp.ts";
-import { runResumeFlow } from "../application/resume.ts";
 import {
-  buildRuntime,
-  disposeRuntime,
-  loadStreamFn,
-  type RuntimeBundle,
-  type RuntimeDeps,
-} from "../application/runtime.ts";
+  parseLaunchFlags,
+  resolveStreamFnSpec,
+  VALUELESS_FLAGS,
+} from "../application/launch-flags.ts";
+import { runResumeFlow } from "../application/resume.ts";
+import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
+import { openSessionRuntime } from "../application/session-runtime.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
-import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
+import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
 import { runEval } from "../eval/runner.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
-import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import {
   EDIT_MODES,
@@ -178,76 +176,8 @@ function sessionListMain(argv: string[]): void {
   writeOut(runSessionListCommand({ root: realpathSync(root), filters }));
 }
 
-// 模型接入 flags（start/resume 共用一套形状；resume 另加一个位置参数 sessionId）
-interface ModelFlags {
-  yolo: boolean;
-  root: string;
-  streamFnSpec?: string;
-  provider: string;
-  modelId: string;
-  // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
-  persistThinking: boolean;
-  // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
-  memoryBudgetChars?: number;
-  // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
-  thinkingLevel?: ThinkingLevel;
-  // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384）
-  maxOutputTokens?: number;
-}
-
-// 无取值的开关型 flag（resume 参数切分时不吞下一个参数）
-const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking"]);
-
-function parseModelFlags(argv: string[], usage: string): ModelFlags {
-  const flags: ModelFlags = {
-    yolo: false,
-    root: process.cwd(),
-    provider: "custom",
-    modelId: "cli",
-    persistThinking: true,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === "--yolo") {
-      flags.yolo = true;
-    } else if (flag === "--no-persist-thinking") {
-      flags.persistThinking = false;
-    } else if (flag === "--memory-budget") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
-      }
-      flags.memoryBudgetChars = value;
-    } else if (flag === "--thinking") {
-      const value = argv[++i];
-      if (value === undefined || !isThinkingLevel(value)) {
-        throw new Error(`--thinking 需要推理档位（${THINKING_LEVELS.join("/")}）（${usage}）`);
-      }
-      flags.thinkingLevel = value;
-    } else if (flag === "--max-output-tokens") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`--max-output-tokens 需要正整数（${usage}）`);
-      }
-      flags.maxOutputTokens = value;
-    } else if (flag === "--root") {
-      flags.root = argv[++i] ?? flags.root;
-    } else if (flag === "--stream-fn") {
-      const value = argv[++i];
-      if (value === undefined) {
-        throw new Error("--stream-fn 缺少取值（模块路径）");
-      }
-      flags.streamFnSpec = value;
-    } else if (flag === "--provider") {
-      flags.provider = argv[++i] ?? flags.provider;
-    } else if (flag === "--model") {
-      flags.modelId = argv[++i] ?? flags.modelId;
-    } else {
-      throw new Error(`未知参数：${flag}（${usage}）`);
-    }
-  }
-  return flags;
-}
+// 模型接入 flags：解析在 application/launch-flags.ts（决策 067，与 tui、headless 同一份、
+// 同一批缺省；含 PIGEON_STREAM_FN 回退）。resume 的参数切分用其导出的 VALUELESS_FLAGS
 
 // REPL 的 grant 命令上下文（/grants 唯一展示入口 + /revoke + /grants save）
 function grantCommandsOf(
@@ -297,17 +227,10 @@ async function resumeMain(argv: string[]): Promise<void> {
     throw new Error(usage);
   }
   const sessionId = asSessionId(sessionIdArg);
-  const flags = parseModelFlags(
-    modelArgv,
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model"
-  );
-  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
-    throw new Error(
-      "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
-        "StreamFn 的模块（provider 密钥由该模块自行从环境变量读取）"
-    );
-  }
-  const streamFnSpec = flags.streamFnSpec;
+  const modelUsage =
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model";
+  const flags = parseLaunchFlags(modelArgv, { usage: modelUsage });
+  const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
   const write = writeOut;
@@ -324,30 +247,19 @@ async function resumeMain(argv: string[]): Promise<void> {
       // 对账收口后进入 REPL：同一 sessionId 续写事件日志；EOF/退出走正常 finally
       enterRepl: async () => {
         const streamFn = await loadStreamFn(streamFnSpec);
-        // 决策 3b：grant 冷恢复种子——事件日志物化的生效 grant（created − revoked），
-        // 静默继续有效，无重复确认环节（决策 034：种子物化归 application）
-        const restoredGrants = restoreGrantSeed(workspaceRoot, sessionId);
-        const mcp = await startSessionMcp(workspaceRoot, scope.workspaceRoot, write);
-        const bundle = await buildWithMcp(mcp, {
-          streamFn,
-          workspaceRoot: scope.workspaceRoot,
+        // 作用域、grant 冷恢复种子（决策 3b）、MCP 启动与装配都在 application/session-runtime.ts
+        //（决策 067，与 tui 的 /resume 换绑同一份）
+        const { bundle } = await openSessionRuntime({
           governanceRoot: workspaceRoot,
-          ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
           sessionId,
-          yolo: flags.yolo,
-          provider: flags.provider,
-          modelId: flags.modelId,
-          persistThinking: flags.persistThinking,
-          ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
-          ...(flags.memoryBudgetChars !== undefined
-            ? { memoryBudgetChars: flags.memoryBudgetChars }
-            : {}),
-          ...(flags.maxOutputTokens !== undefined
-            ? { maxOutputTokens: flags.maxOutputTokens }
-            : {}),
+          streamFn,
+          flags,
+          restoreGrants: true,
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
-          restoredGrants,
+          onMcpNote: (note) => {
+            write(`[mcp] ${note}\n`);
+          },
         });
         try {
           await runRepl({
@@ -365,32 +277,6 @@ async function resumeMain(argv: string[]): Promise<void> {
     });
   } finally {
     close();
-  }
-}
-
-// M5.7 S3（决策 041 / 052）：会话开始时启动 MCP server；启动问题与注解配置冲突如实打印（单个 server 起不来不挡会话）
-async function startSessionMcp(
-  governanceRoot: string,
-  workspaceRoot: string,
-  write: (text: string) => void
-): Promise<McpSession> {
-  const mcp = await startMcpSession({ governanceRoot, workspaceRoot });
-  for (const note of describeMcpStartup(mcp)) {
-    write(`[mcp] ${note}\n`);
-  }
-  return mcp;
-}
-
-// 装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛
-async function buildWithMcp(
-  mcp: McpSession,
-  deps: Omit<RuntimeDeps, "mcp">
-): Promise<RuntimeBundle> {
-  try {
-    return buildRuntime({ ...deps, mcp });
-  } catch (error) {
-    await mcp.close();
-    throw error;
   }
 }
 
@@ -438,10 +324,7 @@ async function runMain(argv: string[]): Promise<void> {
       }
     }
   }
-  const flags = parseModelFlags(modelArgv, usage);
-  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
-    throw new Error(`未配置模型接入：请用 --stream-fn <模块路径>（${usage}）`);
-  }
+  const flags = parseLaunchFlags(modelArgv, { usage });
   if (task === undefined) {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) {
@@ -453,7 +336,7 @@ async function runMain(argv: string[]): Promise<void> {
   if (task === "") {
     throw new Error(`任务描述为空（${usage}）`);
   }
-  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const workspaceRoot = prepareWorkspace(flags.root);
   const result = await runHeadless({
     task,
@@ -542,10 +425,7 @@ async function evalMain(argv: string[]): Promise<void> {
   if (tasksDir === undefined || outDir === undefined || outDir === "") {
     throw new Error(usage);
   }
-  const flags = parseModelFlags(modelArgv, usage);
-  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
-    throw new Error(`未配置模型接入：请用 --stream-fn <模块路径>（${usage}）`);
-  }
+  const flags = parseLaunchFlags(modelArgv, { usage });
   const tasks = loadEvalTasks(tasksDir);
   if (tasks.length === 0) {
     throw new Error(`任务目录下没有任务：${tasksDir}`);
@@ -557,7 +437,7 @@ async function evalMain(argv: string[]): Promise<void> {
     const dir = path.join(resolvedSkill, stage);
     return { path: dir, label: path.relative(labelBase, dir).split(path.sep).join("/") };
   };
-  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const summary = await runEval({
     tasks,
     skill: { candidate: rootOf("candidate"), approved: rootOf("approved") },
@@ -676,39 +556,26 @@ async function main(argv: string[]): Promise<void> {
     await resumeMain(argv.slice(1));
     return;
   }
-  const flags = parseModelFlags(
-    argv,
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model"
-  );
-  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
-    throw new Error(
-      "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
-        "StreamFn 的模块（形状 (model, context, options?) => AssistantMessageEventStream，" +
-        "与测试 fixtures 的 fake streamFn 同型；provider 密钥由该模块自行从环境变量读取）"
-    );
-  }
-  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  const startUsage =
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model";
+  const flags = parseLaunchFlags(argv, { usage: startUsage });
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）+ D8 旧账本一次性迁移
   const workspaceRoot = prepareWorkspace(flags.root);
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
-  const mcp = await startSessionMcp(workspaceRoot, workspaceRoot, write);
-  const bundle = await buildWithMcp(mcp, {
-    streamFn,
-    workspaceRoot,
+  // 会话运行面装配（决策 067）：MCP 启动、作用域与装配失败收口都在 application/session-runtime.ts
+  const { bundle } = await openSessionRuntime({
+    governanceRoot: workspaceRoot,
     sessionId,
-    yolo: flags.yolo,
-    provider: flags.provider,
-    modelId: flags.modelId,
-    persistThinking: flags.persistThinking,
-    ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
-    ...(flags.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: flags.memoryBudgetChars }
-      : {}),
-    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+    streamFn,
+    flags,
     // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
     createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
+    onMcpNote: (note) => {
+      write(`[mcp] ${note}\n`);
+    },
   });
   try {
     await runRepl({

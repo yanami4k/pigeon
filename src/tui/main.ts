@@ -11,128 +11,37 @@
 // M5.5 S4（决策 040）：主会话与各 worker 的审批经同一队列汇聚到面板（一次一个）；每个会话运行面
 // 配一个编排器（/spawn /cancel /workers）；恢复 worker 会话时回到它自己的工作树与委派策略，
 // 且其编排器按深度 1 拒绝再派。一个窗口一个进程：退出时先取消在跑的 worker 并等其收尾记录落盘。
-import { realpathSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
-import { describeMcpStartup, type McpSession, startMcpSession } from "../application/mcp.ts";
 import {
-  buildRuntime,
-  disposeRuntime,
-  loadStreamFn,
-  type RuntimeBundle,
-  type RuntimeDeps,
-} from "../application/runtime.ts";
+  type LaunchFlags,
+  parseLaunchFlags,
+  resolveStreamFnSpec,
+} from "../application/launch-flags.ts";
+import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import { openSessionRuntime } from "../application/session-runtime.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { createSessionWorkers } from "../application/workers.ts";
-import { prepareWorkspace, restoreGrantSeed } from "../application/workspace.ts";
+import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
-import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { PigeonTuiShell, type TuiWorkersFace } from "./shell.ts";
 
 // 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
 const WORKER_SHUTDOWN_GRACE_MS = 5000;
 
-// M5.7 S3（决策 041）：装配前启动 MCP server；装配失败时先关掉已启动的 server 再上抛（先建后换语义不变）
-async function buildWithMcp(
-  mcp: McpSession,
-  deps: Omit<RuntimeDeps, "mcp">
-): Promise<RuntimeBundle> {
-  try {
-    return buildRuntime({ ...deps, mcp });
-  } catch (error) {
-    await mcp.close();
-    throw error;
-  }
-}
-
-interface TuiFlags {
-  root: string;
-  streamFnSpec: string | undefined;
-  yolo: boolean;
-  provider: string;
-  modelId: string;
-  // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
-  persistThinking: boolean;
-  // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（缺省 500）
-  historyLimit?: number;
-  // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
-  memoryBudgetChars?: number;
-  // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理；worker 角色配置可覆盖）
-  thinkingLevel?: ThinkingLevel;
-  // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384；worker 继承父运行面的值）
-  maxOutputTokens?: number;
-}
-
-function parseFlags(argv: string[]): TuiFlags {
-  const flags: TuiFlags = {
-    root: process.cwd(),
-    streamFnSpec: process.env.PIGEON_STREAM_FN,
-    yolo: false,
-    provider: "unknown",
-    modelId: "unknown",
-    persistThinking: true,
-  };
-  const usage =
-    "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-    "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>]";
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === "--yolo") {
-      flags.yolo = true;
-    } else if (flag === "--no-persist-thinking") {
-      flags.persistThinking = false;
-    } else if (flag === "--memory-budget") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
-      }
-      flags.memoryBudgetChars = value;
-    } else if (flag === "--history-limit") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`--history-limit 需要正整数（${usage}）`);
-      }
-      flags.historyLimit = value;
-    } else if (flag === "--thinking") {
-      const value = argv[++i];
-      if (value === undefined || !isThinkingLevel(value)) {
-        throw new Error(`--thinking 需要推理档位（${THINKING_LEVELS.join("/")}）（${usage}）`);
-      }
-      flags.thinkingLevel = value;
-    } else if (flag === "--max-output-tokens") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`--max-output-tokens 需要正整数（${usage}）`);
-      }
-      flags.maxOutputTokens = value;
-    } else if (flag === "--root") {
-      flags.root = argv[++i] ?? flags.root;
-    } else if (flag === "--stream-fn") {
-      flags.streamFnSpec = argv[++i];
-    } else if (flag === "--provider") {
-      flags.provider = argv[++i] ?? flags.provider;
-    } else if (flag === "--model") {
-      flags.modelId = argv[++i] ?? flags.modelId;
-    } else {
-      throw new Error(`未知参数：${flag}（${usage}）`);
-    }
-  }
-  return flags;
-}
+// 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
+// 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
+const USAGE =
+  "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>]";
 
 async function main(argv: string[]): Promise<void> {
-  const flags = parseFlags(argv);
-  if (flags.streamFnSpec === undefined || flags.streamFnSpec === "") {
-    throw new Error(
-      "未配置模型接入：请用 --stream-fn <模块路径> 或环境变量 PIGEON_STREAM_FN 指定一个默认导出 " +
-        "StreamFn 的模块（provider 密钥由该模块自行从环境变量读取）"
-    );
-  }
-  const streamFn = await loadStreamFn(flags.streamFnSpec);
+  const flags: LaunchFlags = parseLaunchFlags(argv, { usage: USAGE, historyLimit: true });
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
@@ -159,25 +68,18 @@ async function main(argv: string[]): Promise<void> {
     });
   // 壳尚未接管终端：启动问题（单个 server 起不来不挡会话）与注解配置冲突（052）直接打到 stderr，
   // 冷侧另见 run.started 的工具集摘要与 server 状态
-  const mainMcp = await startMcpSession({ governanceRoot: workspaceRoot, workspaceRoot });
-  for (const note of describeMcpStartup(mainMcp)) {
-    console.error(`[mcp] ${note}`);
-  }
-  const mainBundle = await buildWithMcp(mainMcp, {
-    streamFn,
-    workspaceRoot,
-    sessionId,
-    yolo: flags.yolo,
-    provider: flags.provider,
-    modelId: flags.modelId,
-    persistThinking: flags.persistThinking,
-    ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
-    ...(flags.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: flags.memoryBudgetChars }
-      : {}),
-    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
-    createApprovalHandler: createHandler,
-  });
+  const mainBundle = (
+    await openSessionRuntime({
+      governanceRoot: workspaceRoot,
+      sessionId,
+      streamFn,
+      flags,
+      createApprovalHandler: createHandler,
+      onMcpNote: (note) => {
+        console.error(`[mcp] ${note}`);
+      },
+    })
+  ).bundle;
   // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
   let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers: TuiWorkersFace } = {
     sessionId,
@@ -213,35 +115,18 @@ async function main(argv: string[]): Promise<void> {
       // M5.5 S4：worker 会话的确证读取根是其工作树
       workspaceRootFor: (targetId) => sessionRuntimeScope(workspaceRoot, targetId).workspaceRoot,
       rebind: async (targetId) => {
-        // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）
-        const scope = sessionRuntimeScope(workspaceRoot, targetId);
-        const restoredGrants = restoreGrantSeed(workspaceRoot, targetId);
-        // M5.7 S3：目标会话的 MCP server 以其工作区根启动（worker 会话即其工作树）
-        const mcp = await startMcpSession({
+        // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）；
+        // 决策 3b：固化 grant 种子物化。两者与 MCP 启动一并在 session-runtime.ts（与 cli resume 同一份）
+        const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
-          workspaceRoot: scope.workspaceRoot,
-        });
-        const bundle = await buildWithMcp(mcp, {
-          streamFn,
-          workspaceRoot: scope.workspaceRoot,
-          governanceRoot: workspaceRoot,
-          ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
           sessionId: targetId,
-          yolo: flags.yolo,
-          provider: flags.provider,
-          modelId: flags.modelId,
-          persistThinking: flags.persistThinking,
-          ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
-          ...(flags.memoryBudgetChars !== undefined
-            ? { memoryBudgetChars: flags.memoryBudgetChars }
-            : {}),
-          ...(flags.maxOutputTokens !== undefined
-            ? { maxOutputTokens: flags.maxOutputTokens }
-            : {}),
+          streamFn,
+          flags,
           createApprovalHandler: createHandler,
-          restoredGrants,
+          restoreGrants: true,
         });
-        const workers = workersFor(bundle, scope.parentSessionId);
+        const bundle = opened.bundle;
+        const workers = workersFor(bundle, opened.scope.parentSessionId);
         const previous = slot;
         slot = { sessionId: targetId, bundle, workers };
         void disposeRuntime(previous.bundle);

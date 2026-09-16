@@ -241,7 +241,13 @@ const CASES: VersionedSchemaCase[] = [
       toolCallId: "tc-1",
       toolName: "edit_file",
       rawArgs: {},
-      decision: { ...decisionV1, outcome: "rejected", reason: "不改" },
+      // 决策 066：理由来源字段随拒绝决定一起过迁移链与当前 schema 校验（加法式可选字段）
+      decision: {
+        ...decisionV1,
+        outcome: "rejected",
+        reason: "不改",
+        reasonSource: "human",
+      },
       at: 0,
     }),
     migrate: validateOnly(LedgerDecisionSchema),

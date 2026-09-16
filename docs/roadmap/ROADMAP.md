@@ -205,11 +205,13 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     与读路径迁移链、消息内容记录与规范序列化哈希（037）、Memory / Skill 注入清单
 │                     schema、推理档位字面量、失败四分类判据（活冷共用）、冷物化与对账（纯函数，
 │                     含正文缺口与父子配对）、trace / replay / session 摘要投影、固化 grant 规则与
-│                     commands.json schema、MCP 配置 schema 与合并判据、注解与配置冲突的更严规则、
+│                     commands.json schema、Candidate schema（candidate.ts，M6 候选暂存的状态与来源）、
+│                     MCP 配置 schema 与合并判据、注解与配置冲突的更严规则、
 │                     mcp 证据计算（M5.7）
 ├─ tools/             只依赖 state：Tool Registry（M5.7 起接受原样透传的 JSON Schema 参数）、Tool Policy
 │                     排律、路径围栏、grant 确定性匹配（M5.5 起含精确命令串）、read_file / edit_file
-│                     （缺省 replace，可选 hashline，062）、run_command（exec 档，不经 shell，048）与 MCP server 启动计划
+│                     （缺省 replace，可选 hashline，062；模式字面量在 edit-mode.ts，两套实现在
+│                     replace-edit.ts 与 hashline.ts）、run_command（exec 档，不经 shell，048）与 MCP server 启动计划
 │                     （复用 048 启动器，M5.7）、错误归类（先读错误对象标记，050）；
 │                     wrap.ts 是上游类型唯一桥接
 ├─ persistence/       只依赖 state（state 的存储实现）：JSONL Event Log 读写器（每会话一文件、
@@ -234,7 +236,7 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     退避重启且有上限、超上限或启动失败 fail-closed 报环境错误、roots 广告为工作区根）、
 │                     自有 stdio 传输（按 048 启动计划 spawn）、工具映射进注册表（mcp__<server>__<工具> 命名、
 │                     按实际档位注册、执行时暂存 mcp 证据）
-├─ pi-runtime/        依赖 state / tools / approvals，不触达 persistence / execution / Actor 层：
+├─ pi-runtime/        依赖 state / tools，不触达 persistence / execution / Actor 层：
 │                     PiRuntimeAdapter（注入快照、事件归一化、entry 映射、流式观察、推理档位交给
 │                     上游）与 ToolGovernance 接口；beforeToolCall 只转发 decide 并原样交回理由，
 │                     tool_execution_end 转发 settle；上游唯一入口。M4 记账的"治理编排住在
@@ -256,27 +258,36 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     装配（读配置、并发启动、映射工具、取 prompt 正文、run.started 摘要与启动提示）与
 │                     disposeRuntime 统一释放（M5.7，worker 以其工作树为工作区根启动自己的 MCP 会话）；
 │                     headless.ts 无父会话运行入口，与 worker 共用装配内核（M6.5，decisions.md 056）；
+│                     session-list.ts 会话列表命令层与 grants.ts 固化规则命令层（cli 与 tui 共用同一份
+│                     查询与排版）、workspace.ts 工作区准备与固化 grant 种子恢复；
 │                     可依赖 state / persistence / tools / approvals / pi-runtime / execution / memory /
 │                     skills / orchestration / mcp，不触达 Actor 层
 ├─ eval/              依赖 application 及以下，不触达 Actor 层（M6.5，decisions.md 046 / 057–060）：task.json 任务目录
 │                     加载、从任务 ref 开工作树的快照准备、验证资产回填与退出码三值验证器（eval.verified）、
 │                     三条件 runner（skillRoots 切换）、results.jsonl 与 report.md；由 cli 的 eval 子命令调用
-└─ cli/               Actor：REPL 内联审批（四键）、/grants /revoke /grants save、trace /
-                      replay / session list 只读渲染、resume 的参数解析与 IO 接线；装配根与
-                      resume 流程在 application/（M2 S1，025——M4 记账的 cli 直连 execution
-                      过渡豁免已消除）；cli 不得依赖 execution，只经 application；M5.5 起 trace
-                      从主会话列出并进入 worker 会话，resume worker 会话回到其工作树；M6.5 起 run（headless）
-                      与 eval 子命令
+├─ cli/               Actor：REPL 内联审批（四键）、/grants /revoke /grants save、trace /
+│                     replay / session list 只读渲染、resume 的参数解析与 IO 接线；装配根与
+│                     resume 流程在 application/（M2 S1，025——M4 记账的 cli 直连 execution
+│                     过渡豁免已消除）；cli 不得依赖 execution，只经 application；M5.5 起 trace
+│                     从主会话列出并进入 worker 会话，resume worker 会话回到其工作树；M6.5 起 run（headless）
+│                     与 eval 子命令。除 application 外另有两处直接依赖：repl.ts 取 pi-runtime 的
+│                     PiRuntimeAdapter 类型，approval-ui.ts 取 approvals 的审批接口与会话 grant 运行态
+└─ tui/               Actor：M2 Pigeon 自有 TUI，唯一允许直连 pi-tui 的目录（tui-pi-tui-only
+                      精确豁免，spike 判过 decisions.md 026）；继承 cli 的治理投影，不得触达
+                      execution；依赖 application（装配根、治理命令、历史、resume、搜索、会话列表、
+                      worker 命令层）与 state，另有两处直接依赖：shell.ts 取 pi-runtime 的运行结果与
+                      流式增量类型，approval.ts 与 main.ts 取 approvals 的审批接口、队列与会话
+                      grant 运行态
 
 占位（export {}，按里程碑填充）：
 ├─ context/           上下文规划（M5 以 system prompt 冻结段与 transformContext 只读观察落地，
 │                     本目录仍空）
 ├─ review/            M6 后台 Reviewer 和 Candidate 暂存
 ├─ distillation/      M7 Episode、Outcome 和对比式经验提炼
-├─ replay/            M8 沙箱回放验证（区别于 state/replay 的只读重建，decisions.md 014）
-└─ tui/               M2 Pigeon 自有 TUI（S1 骨架）：唯一允许直连 pi-tui 的目录
-                      （tui-pi-tui-only 精确豁免，spike 判过 decisions.md 026）；
-                      继承 cli 的治理投影；不得触达 execution
+└─ replay/            M8 沙箱回放验证（区别于 state/replay 的只读重建，decisions.md 014）
+
+占位目录暂按最小允许清单约束：只允许依赖 state 与 tools（placeholders-only-state-tools）；
+review/ 在 M6 开工时按需另裁放行范围。
 ```
 
 上图是逻辑模块图，物理形态是一个 npm package 下的 `src/` 目录。拆成多包 monorepo 的唯一触发条件是出现需要独立版本化/发布的产物，本轮不做。
@@ -288,7 +299,7 @@ Run（整体生命周期，事实：src/pi-runtime/adapter.ts RunTerminalStatus�
 Running → completed / failed / aborted / unknown
 
 Run 终态只描述循环如何收尾，不描述成败。成败由失败四分类（decisions.md 017 判据表，
-src/persistence/classification.ts，活侧与冷侧共用同一纯函数）给出：
+src/state/classification.ts，活侧与冷侧共用同一纯函数）给出：
   取消（子类：治理熔断，靠 breaker 记录区分） / 业务失败 / 基础设施错误 / 未知
 默认桶是「未知」：宁可标不知道，不贴错标签（标签要喂 M6+ 蒸馏）。
 崩溃残留恒为未知：run.ended（agent_end）缺失即循环没有跑完，无论末条 turn 的
@@ -409,7 +420,7 @@ MVP 累计 28 天；v0.2 在 MVP 之后追加 49 天，完整路线合计 77 天
 - 崩溃残留不进会话列表（031 偏差；2026-09-13 裁决维持 015"唯一突出项是待对账"，靠 `--class unknown` 与 resume 屏呈现）。
 - TUI [n] 拒绝无理由通道，负样本信号在 TUI 路径退化（029 修订，M6 前置）。
 - 运行中不能 `/quit`（027 busy 不开旁路），退出用双击 Ctrl+C，[busy] 提示已说明。
-- 工具调用轮在消息区留一个空行（观感，登记不动）；/grants 长输出在真实终端曾观察到重复行（待验，见审计 note-3）。
+- 工具调用轮在消息区留一个空行（观感，登记不动）：已关闭，见 035；/grants 长输出在真实终端曾观察到重复行（待验，见审计 note-3）：已关闭，判为不可复现，见 m2 裁决记录。
 
 ### M3：Coding 工具与治理闭环
 
@@ -504,9 +515,9 @@ MVP 累计 28 天；v0.2 在 MVP 之后追加 49 天，完整路线合计 77 天
 
 已知边界与偏差（如实登记）：
 
-- 推理档位未配置：Kimi For Coding 只在请求带推理档位时返回 thinking 块，生产装配不设档位，TUI 的 thinking 只在 streamFn 自行传档位时出现；是否把推理档位纳入快照与配置待裁决。
+- 推理档位未配置：Kimi For Coding 只在请求带推理档位时返回 thinking 块，生产装配不设档位，TUI 的 thinking 只在 streamFn 自行传档位时出现；是否把推理档位纳入快照与配置待裁决：已关闭，见 050（档位进快照并可配）。
 - 常驻 Memory 的"配置顺序"尚无配置来源，缺省按文件名字典序。
-- read_session_entry 与 load_skill 的域错误不进 tools/error-kind.ts 判据（分层所限），失败调用冷分类落"未知"。
+- read_session_entry 与 load_skill 的域错误不进 tools/error-kind.ts 判据（分层所限），失败调用冷分类落"未知"：已关闭，见 050（错误对象归类标记）。
 - OpenAI 兼容端点经 reasoning_content 映射 thinking 的线路未实测（现用 key 对该端点 401）。
 - 索引不做：全文扫描在真实数据下单次超过约 2 秒再盘（038）。
 

@@ -423,7 +423,9 @@ test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接
     // 环境剥离 PIGEON_STREAM_FN 且不传 --stream-fn：replay 不得触碰模型接入
     const env = { ...process.env };
     delete env.PIGEON_STREAM_FN;
-    const ok = spawnSync(process.execPath, ["src/cli/index.ts", "replay", runId, "--root", root], {
+    // 入口用绝对路径：不依赖进程 cwd 落在仓库根（cwd 仍给仓库根，供子进程解析 node_modules）
+    const cliEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
+    const ok = spawnSync(process.execPath, [cliEntry, "replay", runId, "--root", root], {
       cwd: repoRoot,
       env,
       encoding: "utf8",
@@ -434,11 +436,12 @@ test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接
     assert.ok(ok.stdout.includes(shortId(sessionId)), "报告含会话短哈希");
 
     // 未知 Run：非零退出 + 响亮报错列出可选项
-    const missing = spawnSync(
-      process.execPath,
-      ["src/cli/index.ts", "replay", newRunId(), "--root", root],
-      { cwd: repoRoot, env, encoding: "utf8", timeout: 30_000 }
-    );
+    const missing = spawnSync(process.execPath, [cliEntry, "replay", newRunId(), "--root", root], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+    });
     assert.notEqual(missing.status, 0, "未知 Run 必须失败退出");
     assert.ok(missing.stderr.includes("Run 不存在"));
     assert.ok(missing.stderr.includes(runId), "报错列出已有 Run 帮助定位");

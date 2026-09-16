@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
 import {
   type AppliedEdit,
   buildEditDiff,
@@ -26,6 +27,10 @@ import type {
 } from "./wrap.ts";
 
 // 域错误（模型给的原文不对、不唯一或无变化）；带归类标记，tools/error-kind.ts 读标记归 domain
+// 报错文案的稳定前缀：抛错处与 Eval 的编辑报错分类（eval/process.ts）共用同一常量
+export const REPLACE_NOT_FOUND_PREFIX = "未找到 old_string";
+export const REPLACE_NOT_UNIQUE_PREFIX = "old_string 不唯一";
+
 export class ReplaceEditError extends Error {
   readonly pigeonToolErrorKind = "domain";
 }
@@ -129,7 +134,7 @@ async function planReplace(workspaceRoot: string, args: ReplaceEditParams) {
   const oldString = args.old_string.replaceAll("\r\n", "\n");
   const newString = args.new_string.replaceAll("\r\n", "\n");
   if (oldString === newString) {
-    throw new ReplaceEditError("编辑没有产生任何实际变化：old_string 与 new_string 相同");
+    throw new ReplaceEditError(`${EDIT_NO_CHANGE_PREFIX}：old_string 与 new_string 相同`);
   }
   const positions: number[] = [];
   for (
@@ -142,13 +147,13 @@ async function planReplace(workspaceRoot: string, args: ReplaceEditParams) {
   const first = positions[0];
   if (first === undefined) {
     throw new ReplaceEditError(
-      "未找到 old_string：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀"
+      `${REPLACE_NOT_FOUND_PREFIX}：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀`
     );
   }
   if (positions.length > 1) {
     const startLines = positions.map((position) => lineNumberAt(text, position));
     throw new ReplaceEditError(
-      `old_string 不唯一：在 ${args.path} 中出现 ${positions.length} 次（起始行 ${startLines.join("、")}），` +
+      `${REPLACE_NOT_UNIQUE_PREFIX}：在 ${args.path} 中出现 ${positions.length} 次（起始行 ${startLines.join("、")}），` +
         "请加上下文使其唯一"
     );
   }

@@ -62,7 +62,10 @@ export function createCliApprovalHandler(
         // 无放权通道时 a/d 不具语义——按拒绝流程走（理由可空，由 Adapter 落默认文案）
         const reasonInput = await ask("拒绝理由（可空，将逐字反馈给模型）：");
         const reason = reasonInput?.trim() ?? "";
-        return reason === "" ? { approved: false } : { approved: false, reason };
+        // 决策 066：输入了理由记为人写；留空不带理由，由治理层落默认文案并记为系统默认
+        return reason === ""
+          ? { approved: false }
+          : { approved: false, reason, reasonSource: "human" };
       }
       // 与 tui 版同一份放权作用域（approvals/handler.ts grantScopeFor）
       const scope = grantScopeFor(request, normalized);
@@ -87,7 +90,7 @@ export function createCliApprovalHandler(
     }
     const reasonInput = await ask("拒绝理由（可空，将逐字反馈给模型）：");
     const reason = reasonInput?.trim() ?? "";
-    // 空理由按 undefined 传，由 Adapter 落到默认文案
-    return reason === "" ? { approved: false } : { approved: false, reason };
+    // 空理由按 undefined 传，由治理层落默认文案并记为系统默认；有理由记为人写（决策 066）
+    return reason === "" ? { approved: false } : { approved: false, reason, reasonSource: "human" };
   };
 }
