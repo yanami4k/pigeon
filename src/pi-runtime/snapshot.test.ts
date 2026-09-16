@@ -12,6 +12,7 @@ import {
   migrateInjectionSnapshotV2toV3,
   migrateInjectionSnapshotV3toV4,
   migrateInjectionSnapshotV4toV5,
+  migrateInjectionSnapshotV5toV6,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -37,11 +38,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 2, migrateInjectionSnapshotV2toV3);
   migrations.register("injection-snapshot", 3, migrateInjectionSnapshotV3toV4);
   migrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
+  migrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
   return migrations;
 }
 
-test("v5 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 5);
+test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 6);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -87,7 +89,7 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
   }
 });
 
-test("v1 → v2 → v3 → v4 → v5 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位与输出上限缺省", () => {
+test("v1 → v2 → v3 → v4 → v5 → v6 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限与审阅配置缺省", () => {
   const current = { ...makeSnapshot(), memory: [] };
   const { approvalMode: _, ...policyV1 } = current.tools.policy;
   const v1 = { ...current, version: 1, tools: { ...current.tools, policy: policyV1 } };
@@ -98,7 +100,8 @@ test("v1 → v2 → v3 → v4 → v5 迁移链：补 approvalMode 默认 prompt�
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 5);
+  assert.equal(migrated.version, 6);
+  assert.equal(migrated.review, undefined);
   assert.equal(migrated.tools.policy.approvalMode, "prompt");
   assert.equal(migrated.model.thinkingLevel, undefined);
   assert.equal(migrated.model.maxOutputTokens, undefined);

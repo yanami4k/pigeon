@@ -508,6 +508,8 @@ export class PiRuntimeAdapter {
       systemPromptHash: this.#systemPromptHash,
       memory: structuredClone(snapshot.memory),
       skills: structuredClone(snapshot.skills),
+      // M6（决策 064）：后台审阅配置随 run.started 落盘（只在主会话快照里在场）
+      ...(snapshot.review !== undefined ? { review: { ...snapshot.review } } : {}),
       ...extras,
     });
   }

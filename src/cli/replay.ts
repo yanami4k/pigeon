@@ -22,7 +22,7 @@ import {
   materializeSession,
   sessionEventFilePath,
 } from "../persistence/session-read.ts";
-import type { EventRecord } from "../state/event-log.ts";
+import { type EventRecord, isGitWorktreeWorkspace } from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import type { MessageContentRecord } from "../state/message-content.ts";
@@ -95,6 +95,27 @@ function recordDetail(record: EventRecord): string {
         `输出 sha256 ${payload.outputHash.slice(0, 12)}${payload.falsePositive ? " ｜ 自报完成但验证失败（误报）" : ""}`
       );
     }
+    // M6（决策 064）：后台审阅因上一次未收尾而跳过
+    case "review.skipped":
+      return `审阅跳过 ｜ 触发 ${record.payload.trigger === "turns" ? "按轮次" : "Run 结束"} ｜ ${record.payload.reason === "exit" ? "会话退出，取消排队中或进行中的审阅" : "上一次审阅未收尾"}`;
+    // M6（决策 065）：审阅结果不可解析、候选提出与筛查
+    case "review.unparsable":
+      return `审阅结果不可解析 ｜ 审阅会话 ${shortId(record.payload.reviewSessionId)} ｜ ${record.payload.reason}`;
+    case "candidate.proposed": {
+      const candidate = record.candidate;
+      return (
+        `候选提出 ｜ ${candidate.kind}/${candidate.name} ｜ 哈希 ${candidate.contentHash.slice(0, 12)} ｜ ` +
+        `判断强度 ${candidate.strength} ｜ ${candidate.summary}` +
+        (candidate.supersedes !== undefined ? ` ｜ 取代 ${candidate.supersedes.slice(0, 12)}` : "")
+      );
+    }
+    case "candidate.screened":
+      return (
+        `候选筛查 ｜ ${record.candidateKind}/${record.name} ｜ 扫描器 v${record.scannerVersion} ｜ ` +
+        (record.hits.length > 0
+          ? `命中 ${record.hits.length} 项（拒收）：${record.hits.map((hit) => hit.rule).join("、")}`
+          : "无命中")
+      );
     case "intent": {
       let detail =
         `意图落账 ${shortId(record.executionId)} ｜ ${record.toolName}（${record.toolCallId}）｜ ` +
@@ -188,13 +209,15 @@ function recordDetail(record: EventRecord): string {
       return (
         `worker 会话头 ｜ ${record.worker.name}（${record.worker.role}）｜ 父会话 ${shortId(record.parentSessionId)}` +
         (record.parentRunId !== undefined ? ` ｜ 父 Run ${shortId(record.parentRunId)}` : "") +
-        ` ｜ 分支 ${record.workspace.branch}`
+        // M6（决策 064）：无工作区的 worker（Reviewer）没有分支
+        ` ｜ ${isGitWorktreeWorkspace(record.workspace) ? `分支 ${record.workspace.branch}` : "无工作区"}`
       );
     case "child.spawned": {
       const tools = record.policy.allow.length > 0 ? record.policy.allow.join("、") : "无";
       return (
         `派出 worker ${record.name}（${record.role}）｜ 会话 ${shortId(record.childSessionId)} ｜ ` +
-        `分支 ${record.workspace.branch} ｜ 工具 ${tools} ｜ 审批模式 ${record.policy.approvalMode} ｜ ` +
+        `${isGitWorktreeWorkspace(record.workspace) ? `分支 ${record.workspace.branch}` : "无工作区"} ｜ ` +
+        `工具 ${tools} ｜ 审批模式 ${record.policy.approvalMode} ｜ ` +
         `上限 ${record.limits.maxTurns} 轮 / ${Math.round(record.limits.wallClockMs / 1000)} 秒`
       );
     }
@@ -204,7 +227,7 @@ function recordDetail(record: EventRecord): string {
         detail += ` ｜ 原因：${record.error}`;
       }
       if (record.result !== undefined) {
-        detail += ` ｜ 改动 ${record.result.changedFiles.length} 个文件，Receipt ${record.result.receiptIds.length} 条`;
+        detail += ` ｜ 改动 ${(record.result.changedFiles ?? []).length} 个文件，Receipt ${record.result.receiptIds.length} 条`;
       }
       return detail;
     }

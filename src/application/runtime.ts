@@ -25,6 +25,7 @@ import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
+import { createReviewTools, reviewToolRegistrations } from "../review/tools.ts";
 import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
 import {
   createLoadSkillTool,
@@ -35,6 +36,12 @@ import type { WorkerRole } from "../state/event-log.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
+import {
+  REVIEW_ENTRY_TOOL,
+  REVIEW_SNAPSHOT_TOOL,
+  type ReviewConfig,
+  type ReviewTarget,
+} from "../state/review.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -95,6 +102,10 @@ export interface RuntimeDeps {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
   maxOutputTokens?: number;
+  // M6（决策 064）：后台审阅配置——只有 cli / tui 主会话传入，冻结进注入快照并随 run.started 落盘
+  review?: ReviewConfig;
+  // M6（决策 064 子裁决 ⑤）：Reviewer 运行面的审阅目标——在场时注册两个只读快照工具并绑定到被审 Run
+  reviewTarget?: ReviewTarget;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -109,6 +120,8 @@ export interface RuntimeBundle {
   configGrants: readonly ConfigGrantRule[];
   // M5.7 S3：本运行面持有的 MCP 会话（disposeRuntime 一并关闭）
   mcp?: McpSession;
+  // M6：释放运行面前先执行的附加释放动作（后台审阅调度的退订与收尾）；按登记顺序执行，失败不挡后续
+  disposers?: Array<() => Promise<void>>;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志
@@ -164,6 +177,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   for (const registration of sessionToolRegistrations(sessionsDir)) {
     registry.register(registration);
   }
+  // M6（决策 064 子裁决 ⑤）：Reviewer 运行面注册两个只读快照工具，作用域绑定被审 Run
+  const reviewTarget = deps.reviewTarget;
+  if (reviewTarget !== undefined) {
+    for (const registration of reviewToolRegistrations()) {
+      registry.register(registration);
+    }
+  }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
   const residentMemory = loadResidentMemory({
@@ -211,6 +231,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     READ_SESSION_ENTRY_TOOL,
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
+    ...(reviewTarget !== undefined ? [REVIEW_SNAPSHOT_TOOL, REVIEW_ENTRY_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -245,6 +266,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       memory: residentMemory.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
+      ...(deps.review !== undefined ? { review: { ...deps.review } } : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: limitOutputTokens(deps.streamFn, maxOutputTokens),
@@ -273,6 +295,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ]
         : []),
       ...mcpTools.map((bridged) => bridged.tool),
+      ...(reviewTarget !== undefined ? createReviewTools({ sessionsDir, ...reviewTarget }) : []),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
     governance: createToolGovernance({
@@ -302,6 +325,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
 
 // 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话文件；前一步失败不跳过后续
 export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
+  for (const dispose of bundle.disposers?.splice(0) ?? []) {
+    try {
+      await dispose();
+    } catch {
+      // 附加释放失败不挡运行面释放（审阅是后台附属，不得拖住主会话收尾）
+    }
+  }
   try {
     await bundle.adapter.dispose();
   } finally {

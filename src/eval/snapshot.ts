@@ -6,7 +6,7 @@ import { existsSync, readdirSync, rmdirSync, symlinkSync, unlinkSync } from "nod
 import path from "node:path";
 import { gitWorktreeWorkspaces } from "../orchestration/workers.ts";
 import { deleteBranch, removeWorktree, worktreeBranchFor } from "../orchestration/worktree.ts";
-import type { WorkerWorkspace } from "../state/event-log.ts";
+import { type GitWorktreeWorkspace, isGitWorktreeWorkspace } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { EvalCondition, LoadedEvalTask } from "./task.ts";
 
@@ -21,7 +21,8 @@ export interface PrepareTaskWorkspaceInput {
 
 export interface PreparedTaskWorkspace {
   name: string;
-  workspace: WorkerWorkspace;
+  // Eval 的工作区恒为 git 工作树（prepareTaskWorkspace 里以运行期断言收口）
+  workspace: GitWorktreeWorkspace;
   // 删除工作树与分支；幂等
   release(): void;
 }
@@ -37,8 +38,17 @@ export function prepareTaskWorkspace(input: PrepareTaskWorkspaceInput): Prepared
     repoRoot: task.repoRoot,
     governanceRoot: input.governanceRoot,
   });
-  const request = { sessionId: input.sessionId, name, baseRef: task.spec.repo.ref };
+  // Eval 的工作区恒为 git 工作树（任务快照从 ref 开出）；角色按 implementer 规划（M6 起 plan 收角色）
+  const request = {
+    sessionId: input.sessionId,
+    name,
+    role: "implementer" as const,
+    baseRef: task.spec.repo.ref,
+  };
   const workspace = provider.plan(request);
+  if (!isGitWorktreeWorkspace(workspace)) {
+    throw new Error("Eval 任务快照必须是 git 工作树工作区");
+  }
   provider.create(workspace, request);
   const link = path.join(workspace.path, "node_modules");
   const target = path.join(task.repoRoot, "node_modules");

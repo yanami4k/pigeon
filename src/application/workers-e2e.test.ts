@@ -104,7 +104,11 @@ test("并行 worker：两个 implementer 各写自己的工作树，主工作区
       // worker 会话：会话头记父会话；写操作 intent / receipt 齐全，无悬账
       const worker = materializeSession(sessionsDir, id);
       assert.equal(worker.sessionHeader?.parentSessionId, parentId);
-      assert.equal(worker.sessionHeader?.workspace.branch, `pigeon/${name}`);
+      const workerWorkspace = worker.sessionHeader?.workspace;
+      assert.equal(
+        workerWorkspace?.kind === "git-worktree" ? workerWorkspace.branch : undefined,
+        `pigeon/${name}`
+      );
       assert.equal(worker.intents.length, 1);
       assert.equal(worker.receipts.length, 1);
       assert.equal(worker.reconcile.unknown.length, 0);

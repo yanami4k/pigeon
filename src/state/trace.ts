@@ -5,13 +5,18 @@
 // 绝不按位置猜测；id 对得上但内容对不上（toolCallId/参数/哈希不符）挂接并标异常，
 // 对不上的一律进孤儿清单如实报告。
 
+import { type ProjectedCandidate, projectCandidates } from "./candidate-status.ts";
 import type {
   BreakerRecord,
+  CandidateProposedRecord,
+  CandidateScreenedRecord,
   DecisionRecord,
   EvalVerifiedRecord,
   EventRecord,
   IntentRecord,
   ResolutionRecord,
+  ReviewSkippedRecord,
+  ReviewUnparsableRecord,
   RunStartedRecord,
   RuntimeEventRecord,
 } from "./event-log.ts";
@@ -77,6 +82,10 @@ export interface TraceRun {
   llmRequestCount: number;
   // M6.5 S3（决策 058）：Eval 验证器判决（非 Eval 运行无）；同一 Run 多次验证取最后一条
   verified?: EvalVerifiedRecord;
+  // M6（决策 064 / 065）：本 Run 的候选（提出与筛查配对、状态现算）、审阅跳过与审阅结果不可解析记录
+  candidates: ProjectedCandidate[];
+  reviewSkips: ReviewSkippedRecord[];
+  reviewUnparsables: ReviewUnparsableRecord[];
   classification?: RunClassification;
   // run 级异常（轮次边界缺口等）
   anomalies: string[];
@@ -156,8 +165,13 @@ function buildRunTrace(
     entryGaps: session.entryGaps.find((gap) => gap.runId === runId)?.missingSeqs ?? [],
     contentGaps: session.contentGaps.filter((gap) => gap.runId === runId),
     llmRequestCount: 0,
+    candidates: [],
+    reviewSkips: [],
+    reviewUnparsables: [],
     anomalies: [],
   };
+  const candidateProposeds: CandidateProposedRecord[] = [];
+  const candidateScreeneds: CandidateScreenedRecord[] = [];
   const callsByToolCallId = new Map<string, TraceToolCall>();
   const callsByExecutionId = new Map<ExecutionId, TraceToolCall>();
 
@@ -228,6 +242,14 @@ function buildRunTrace(
       run.started = record;
     } else if (record.kind === "eval.verified") {
       run.verified = record;
+    } else if (record.kind === "candidate.proposed") {
+      candidateProposeds.push(record);
+    } else if (record.kind === "candidate.screened") {
+      candidateScreeneds.push(record);
+    } else if (record.kind === "review.skipped") {
+      run.reviewSkips.push(record);
+    } else if (record.kind === "review.unparsable") {
+      run.reviewUnparsables.push(record);
     } else if (record.kind === "llm.request") {
       run.llmRequestCount += 1;
     } else if (record.kind === "intent") {
@@ -291,6 +313,7 @@ function buildRunTrace(
       call.classification = entry;
     }
   }
+  run.candidates = projectCandidates({ candidateProposeds, candidateScreeneds });
   return run;
 }
 

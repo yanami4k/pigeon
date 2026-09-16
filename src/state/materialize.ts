@@ -12,6 +12,8 @@ import {
 } from "./classification.ts";
 import type {
   BreakerRecord,
+  CandidateProposedRecord,
+  CandidateScreenedRecord,
   ChildSettledRecord,
   ChildSpawnedRecord,
   DecisionRecord,
@@ -25,6 +27,8 @@ import type {
   IntentRecord,
   LlmRequestRecord,
   ResolutionRecord,
+  ReviewSkippedRecord,
+  ReviewUnparsableRecord,
   RunStartedRecord,
   RuntimeEventRecord,
   SessionHeaderRecord,
@@ -114,6 +118,12 @@ export interface MaterializedSession {
   skillLoadeds: SkillLoadedRecord[];
   // M6.5 S3（决策 058）：Eval 验证器判决（按落盘顺序）；不参与分类判据
   evalVerifieds: EvalVerifiedRecord[];
+  // M6（决策 064）：后台审阅因上一次未收尾而跳过的记录
+  reviewSkippeds: ReviewSkippedRecord[];
+  reviewUnparsables: ReviewUnparsableRecord[];
+  // M6（决策 065）：候选提出与筛查两族（候选状态由二者现算，见 candidate-status.ts）
+  candidateProposeds: CandidateProposedRecord[];
+  candidateScreeneds: CandidateScreenedRecord[];
   // M5.5 S2（决策 040）：worker 编排三族。sessionHeader 在场 = 本会话是 worker 会话；
   // children 按 child.spawned 顺序配对 child.settled（缺 settled = 派出后未收尾，崩溃可能）；
   // 找不到 spawned 的 settled 如实归孤立清单
@@ -184,6 +194,10 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const llmRequests: LlmRequestRecord[] = [];
   const skillLoadeds: SkillLoadedRecord[] = [];
   const evalVerifieds: EvalVerifiedRecord[] = [];
+  const reviewSkippeds: ReviewSkippedRecord[] = [];
+  const reviewUnparsables: ReviewUnparsableRecord[] = [];
+  const candidateProposeds: CandidateProposedRecord[] = [];
+  const candidateScreeneds: CandidateScreenedRecord[] = [];
   const runtimeEvents: RuntimeEventRecord[] = [];
   const intents: IntentRecord[] = [];
   const decisions: DecisionRecord[] = [];
@@ -234,6 +248,14 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       skillLoadeds.push(record);
     } else if (record.kind === "eval.verified") {
       evalVerifieds.push(record);
+    } else if (record.kind === "review.skipped") {
+      reviewSkippeds.push(record);
+    } else if (record.kind === "review.unparsable") {
+      reviewUnparsables.push(record);
+    } else if (record.kind === "candidate.proposed") {
+      candidateProposeds.push(record);
+    } else if (record.kind === "candidate.screened") {
+      candidateScreeneds.push(record);
     } else {
       runtimeEvents.push(record);
     }
@@ -268,6 +290,10 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     llmRequests,
     skillLoadeds,
     evalVerifieds,
+    reviewSkippeds,
+    reviewUnparsables,
+    candidateProposeds,
+    candidateScreeneds,
     contentGaps: detectContentGaps(entries, input.contentHashes),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),

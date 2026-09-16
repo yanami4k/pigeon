@@ -51,7 +51,10 @@ test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；�
       startMcp: async (request) => {
         const session = await startMcpSession({
           governanceRoot: request.governanceRoot,
-          workspaceRoot: request.workspace.path,
+          workspaceRoot:
+            request.workspace.kind === "git-worktree"
+              ? request.workspace.path
+              : request.governanceRoot,
           config: CONFIG,
           createTransport: () => {
             const { fixture, clientTransport } = createFixtureServer({
@@ -104,7 +107,11 @@ test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；�
     await handle.dispose();
     assert.equal(sessions[0]?.connections[0]?.state, "closed");
     const worker = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
-    assert.equal(worker.sessionHeader?.workspace.path, workspacePath);
+    const headerWorkspace = worker.sessionHeader?.workspace;
+    assert.equal(
+      headerWorkspace?.kind === "git-worktree" ? headerWorkspace.path : undefined,
+      workspacePath
+    );
     assert.equal(worker.receipts[0]?.mcp?.tool, "note");
   } finally {
     rmSync(base, { recursive: true, force: true });

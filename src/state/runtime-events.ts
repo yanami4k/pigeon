@@ -6,6 +6,7 @@ import { type Static, Type } from "typebox";
 import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
 import { McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { Sha256HexSchema } from "./message-content.ts";
+import { ReviewConfigSchema } from "./review.ts";
 import { ToolErrorKindSchema } from "./tool-execution.ts";
 
 export const RuntimeEventKind = {
@@ -95,6 +96,10 @@ export const ObservationKind = {
   SkillLoaded: "skill.loaded",
   // M6.5 S3（决策 058）：Eval 验证器判决
   EvalVerified: "eval.verified",
+  // M6（决策 064 子裁决 ①）：上一次审阅未收尾时跳过本次触发的记录
+  ReviewSkipped: "review.skipped",
+  // M6（决策 065）：Reviewer 的收尾结果不可解析（不落任何候选文件）
+  ReviewUnparsable: "review.unparsable",
 } as const;
 export type ObservationKind = (typeof ObservationKind)[keyof typeof ObservationKind];
 
@@ -142,6 +147,8 @@ export const RunStartedPayloadSchema = Type.Object({
   // 加法式不升版本；本会话没有 MCP server 时不带
   mcpTools: Type.Optional(Type.Array(McpToolsetEntrySchema)),
   mcpServers: Type.Optional(Type.Array(McpServerStatusSchema)),
+  // M6（决策 064）：本会话的后台审阅配置（冻结快照值；只在 cli / tui 主会话在场，加法式可缺省）
+  review: Type.Optional(ReviewConfigSchema),
 });
 export type RunStartedPayload = Static<typeof RunStartedPayloadSchema>;
 
@@ -201,3 +208,19 @@ export const EvalVerifiedPayloadSchema = Type.Object({
   falsePositive: Type.Boolean(),
 });
 export type EvalVerifiedPayload = Static<typeof EvalVerifiedPayloadSchema>;
+
+// review.skipped（M6，决策 064 子裁决 ①④ 及修订）：按轮次触发遇忙跳过，或会话退出时取消排队中与进行中的审阅，各留一条记录
+export const ReviewSkippedPayloadSchema = Type.Object({
+  trigger: Type.Union([Type.Literal("turns"), Type.Literal("run-end")]),
+  // 064 修订：跳过原因——busy = 按轮次触发时上一次审阅未收尾；exit = 会话退出或释放时取消了排队中或进行中的审阅。
+  // 可缺省，缺省视为 busy
+  reason: Type.Optional(Type.Union([Type.Literal("busy"), Type.Literal("exit")])),
+});
+export type ReviewSkippedPayload = Static<typeof ReviewSkippedPayloadSchema>;
+
+// review.unparsable（M6，决策 065）：Reviewer 收尾结果解析或校验失败，记一条、不落任何文件
+export const ReviewUnparsablePayloadSchema = Type.Object({
+  reviewSessionId: Type.String({ minLength: 1 }),
+  reason: Type.String(),
+});
+export type ReviewUnparsablePayload = Static<typeof ReviewUnparsablePayloadSchema>;

@@ -23,8 +23,9 @@ import {
   migrateInjectionSnapshotV2toV3,
   migrateInjectionSnapshotV3toV4,
   migrateInjectionSnapshotV4toV5,
+  migrateInjectionSnapshotV5toV6,
 } from "./pi-runtime/snapshot.ts";
-import { CANDIDATE_VERSION, CandidateSchema } from "./state/candidate.ts";
+import { CANDIDATE_VERSION, migrateCandidateToCurrent } from "./state/candidate.ts";
 import { COMMANDS_CONFIG_VERSION, CommandsConfigFileSchema } from "./state/commands.ts";
 import { EVENT_LOG_VERSION, parseEventRecord } from "./state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, EventEnvelopeSchema } from "./state/events.ts";
@@ -64,6 +65,7 @@ snapshotMigrations.register("injection-snapshot", 1, migrateInjectionSnapshotV1t
 snapshotMigrations.register("injection-snapshot", 2, migrateInjectionSnapshotV2toV3);
 snapshotMigrations.register("injection-snapshot", 3, migrateInjectionSnapshotV3toV4);
 snapshotMigrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
+snapshotMigrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
 
 const receiptV1 = () => ({
   version: 1,
@@ -178,7 +180,7 @@ const CASES: VersionedSchemaCase[] = [
       createdAt: 0,
       updatedAt: 0,
     }),
-    migrate: validateOnly(CandidateSchema),
+    migrate: migrateCandidateToCurrent,
   },
   {
     constant: "TOOL_EXECUTION_VERSION",

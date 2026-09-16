@@ -5,9 +5,11 @@
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
 import type { StreamFn } from "../pi-runtime/index.ts";
+import type { ReviewBudget, ReviewGate } from "../review/scheduler.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { describeMcpStartup, type McpSession, startMcpSession } from "./mcp.ts";
+import { attachReviewScheduler, type ReviewAttachment } from "./review-runtime.ts";
 import { buildRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
 import { restoreGrantSeed } from "./workspace.ts";
@@ -37,11 +39,24 @@ export interface OpenSessionRuntimeRequest {
   onMcpNote?: (note: string) => void;
   // 缺省按治理根与作用域工作区根启动真实 MCP 会话；测试注入替身
   startMcp?: (scope: { governanceRoot: string; workspaceRoot: string }) => Promise<McpSession>;
+  // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
+  homeDir?: string;
+  // M6（决策 064）：后台审阅——只有 cli / tui 主会话传入；配置冻结进注入快照，enabled 时挂调度器
+  review?: {
+    enabled: boolean;
+    everyTurns: number;
+    gate?: ReviewGate;
+    budget?: Partial<ReviewBudget>;
+    // Reviewer 的模型接入；缺省继承主会话
+    streamFn?: StreamFn;
+  };
 }
 
 export interface OpenedSessionRuntime {
   bundle: RuntimeBundle;
   scope: SessionRuntimeScope;
+  // 挂了后台审阅时在场（运行面释放时一并停止，见 RuntimeBundle.disposers）
+  review?: ReviewAttachment;
 }
 
 export async function openSessionRuntime(
@@ -87,9 +102,32 @@ export async function openSessionRuntime(
         ? { createApprovalHandler: request.createApprovalHandler }
         : {}),
       ...(restoredGrants !== undefined ? { restoredGrants } : {}),
+      ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
+      ...(request.review !== undefined
+        ? { review: { enabled: request.review.enabled, everyTurns: request.review.everyTurns } }
+        : {}),
       mcp,
     });
-    return { bundle, scope };
+    // M6（决策 064）：只有新建或恢复的主会话挂审阅（worker 会话作用域不挂，Reviewer 自身会话由 worker 工厂装配）
+    const review =
+      request.review?.enabled === true && scope.parentSessionId === undefined
+        ? attachReviewScheduler({
+            bundle,
+            governanceRoot: request.governanceRoot,
+            config: { enabled: true, everyTurns: request.review.everyTurns },
+            streamFn: request.review.streamFn ?? request.streamFn,
+            provider: request.flags.provider,
+            modelId: request.flags.modelId,
+            persistThinking: request.flags.persistThinking,
+            ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
+            ...(request.review.gate !== undefined ? { gate: request.review.gate } : {}),
+            ...(request.review.budget !== undefined ? { budget: request.review.budget } : {}),
+          })
+        : undefined;
+    if (review !== undefined) {
+      bundle.disposers = [...(bundle.disposers ?? []), () => review.stop()];
+    }
+    return { bundle, scope, ...(review !== undefined ? { review } : {}) };
   } catch (error) {
     // 装配失败：已启动的 server 必须关掉，否则留下孤儿进程（先建后换的收口约束）
     await mcp.close();

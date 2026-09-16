@@ -44,7 +44,7 @@ test("读路径迁移：v6 记录里的 v3 receipt 与 v7 记录里的 v4 receip
     const path = join(dir, `${sessionId}.jsonl`);
     writeFileSync(path, `${JSON.stringify(v6)}\n${JSON.stringify(v7)}\n`, "utf8");
     const records = readEventLogFile(path);
-    assert.equal(EVENT_LOG_VERSION, 9);
+    assert.equal(EVENT_LOG_VERSION, 10);
     assert.equal(records.length, 2);
     for (const record of records) {
       assert.equal(record.version, EVENT_LOG_VERSION);

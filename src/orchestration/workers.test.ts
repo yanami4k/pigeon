@@ -96,7 +96,7 @@ function setup(
       branch: `pigeon/${name}`,
     }),
     create: (workspace) => {
-      journal.push(`create ${workspace.branch}`);
+      journal.push(`create ${workspace.kind === "git-worktree" ? workspace.branch : "none"}`);
       if (overrides.failCreate === true) {
         throw new Error("工作树建不起来");
       }

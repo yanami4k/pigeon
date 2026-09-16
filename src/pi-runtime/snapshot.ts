@@ -7,6 +7,7 @@ import {
   SkillManifestEntrySchema,
 } from "../state/injection-manifest.ts";
 import type { Migration } from "../state/migration.ts";
+import { ReviewConfigSchema } from "../state/review.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
@@ -14,7 +15,8 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v3（M5 S3，决策 042 / 043）：memory 与 skills 由占位数组收紧为结构化冻结清单
 // v4（M5.5 S5，决策 050）：model 段增加推理档位 thinkingLevel（缺省 = off，不请求推理）
 // v5（决策 063）：model 段增加单轮输出上限 maxOutputTokens（事后可证每次运行用的上限）
-export const INJECTION_SNAPSHOT_VERSION = 5;
+// v6（M6，决策 064）：顶层增加审阅配置 review（开关与轮次间隔，会话开始时冻结）
+export const INJECTION_SNAPSHOT_VERSION = 6;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -54,6 +56,8 @@ export const InjectionSnapshotSchema = Type.Object({
   skills: Type.Array(SkillManifestEntrySchema),
   // Unix 毫秒时间戳
   createdAt: Type.Integer({ minimum: 0 }),
+  // 后台审阅配置（M6，决策 064 子裁决 ①）：只在 cli / tui 主会话在场；worker、headless 与 Eval 会话缺省
+  review: Type.Optional(ReviewConfigSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
@@ -84,3 +88,6 @@ export const migrateInjectionSnapshotV3toV4: Migration = (doc) => ({ ...doc, ver
 
 // v4 → v5：maxOutputTokens 可缺省，纯版本推进
 export const migrateInjectionSnapshotV4toV5: Migration = (doc) => ({ ...doc, version: 5 });
+
+// v5 → v6：review 可缺省，纯版本推进
+export const migrateInjectionSnapshotV5toV6: Migration = (doc) => ({ ...doc, version: 6 });

@@ -653,7 +653,7 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - 需要参数的 prompt 不进目录；resources 读取、sampling、elicitation、HTTP 鉴权与 OAuth 按开工范围不做。
 - 验收工作区根目录不放 package.json：npx 按最近的 package.json 定前缀。
 
-### M6：受限后台 Reviewer
+### M6：受限后台 Reviewer——as-built（2026-09-16 回写，决策 064、065）
 
 目标：主 Agent 完成若干轮交互或工具调用后，异步判断是否值得形成经验候选。Reviewer 使用独立 Agent 实例和一次性的 `ReviewRun`，读取主 Session 的不可变快照，不创建 lane、不向主 Session 写入分析消息。M6 不阻塞 M6.5 的最小评测。
 
@@ -676,6 +676,23 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - 所有产物都停留在 Candidate 状态。
 
 说明：缓存复用取决于具体模型提供方。Pigeon 只保证不破坏主会话前缀和缓存可用性，不把“必然命中缓存”作为产品承诺。
+
+交付（事实，锚点 src/review/、src/application/、src/orchestration/、src/state/、src/persistence/、src/pi-runtime/、src/cli/、src/tui/）：
+
+- 接入形态（064）：Reviewer 复用 worker 编排，是无工作区的 reviewer worker。工作区联合以加法式新增"无工作区"成员，派出与收尾复用 child.* 两族；收尾结果可携带结构化内容，候选由 Controller 解析落盘，Reviewer 不持有任何写工具。角色表新增可选的模型接入覆盖列，四个角色缺省留空、继承主会话。
+- 冻结快照与白名单（064 子裁决 ⑤）：`review/snapshot.ts` 把被审的那一次 Run 物化成冻结快照（对话增量加少量前情、Trace 投影、Receipt 摘要）；单条正文超过 2,000 字符头尾保留并标注省略字符数，整份超过 24,000 字符从最早处丢弃并标注省略条数，省略处保留条目号。reviewer 白名单只有 `review_snapshot` 与 `review_entry` 两个 read 档工具，作用域绑定被审 Run，参数里没有会话或 Run 入口；两者不在主会话工具清单里，按"只读且绑定父会话自己的 Run"豁免子集约束，父策略的 deny 照旧生效。
+- 调度（064 子裁决 ①②④）：`review/scheduler.ts` 缺省每 8 轮触发一次，Run 结束固定补一次；`--review-every <N>`（0 表示只在 Run 结束审）与 `--no-review` 只在 cli REPL / resume 与 tui 接受；配置冻结进注入快照（v6）并随 run.started 落盘。全局同时只跑 1 个审阅：按轮次触发遇忙则跳过并落 review.skipped 观察；Run 结束补审遇忙则排队（064 修订，每会话最多一个，新请求覆盖旧请求），上一次审阅收尾后立即执行；会话退出或释放时取消排队中与进行中的审阅，落一条原因为退出的 review.skipped（可选 reason 字段区分忙与退出，缺省视为忙）；预算 12 轮、3 分钟、40,000 token（worker 上限新增可选 token 项与 token-limit 收尾状态），超限按中止、不产出候选。挂载点在 `application/session-runtime.ts`，只挂 cli 与 tui 的主会话；worker、headless、Eval 与 Reviewer 自身会话不挂。
+- 候选暂存（065）：候选 schema v2 只放不可变元数据，状态不入 schema、由 candidate.proposed 与 candidate.screened 两族现算（已提出 / 已扫描 / 扫描拒收）；正文按内容哈希原子写入 `.pigeon/candidates/<种类>/<名字>-<哈希前 16 位>/`，同哈希跳过，同名改内容即新候选并标记取代；Skill 为 SKILL.md、Memory 为整个 markdown 文件、Policy 只写自然语言建议。Reviewer 结果不可解析时只落 review.unparsable 观察、不落文件。v1 候选从无写入方，迁移成"由 v1 迁移"的保留形状，不编造字段。
+- 扫描（065 子裁决 ④）：`review/scan.ts` 确定性规则——不可见字符（Unicode Tags、零宽、双向控制、变体选择符）、注入短语、外泄模式（curl / wget、密钥形态、可疑 URL）、可执行脚本目录；命中照常暂存并标拒收，扫描器版本随筛查记录落盘。
+- 入口（064、065 子裁决 ⑤）：`pigeon review <sessionId> [--run <runId>]` 对冷会话手动补审（与自动审阅同一派发器，Reviewer 自身会话拒审）；`pigeon candidates [--all]` 跨会话只读列出候选，缺省隐藏扫描拒收项。trace 与 replay 同步呈现候选、跳过与不可解析记录。
+- 已知边界：辅助模型 digest 路由、经验覆盖度与自洽性筛查、模型筛查标注的实际产出未做（筛查记录已留可选字段）；证据核验状态未落地（M6 状态只走到已扫描 / 扫描拒收）；cli REPL 退出时会取消在跑的审阅。
+
+完成证据对照：
+
+- 不能调用终端、消息、浏览器、任意文件写入或 Coding 写工具：reviewer 委派策略只有两个只读快照工具，Reviewer 会话 run.started 的广告集逐条断言只有这两个（`review/tools.test.ts`、`application/review-runtime.test.ts`）。
+- 不修改主 Session 和当前 RunSnapshot：Reviewer 只经冻结快照读取，写入主会话文件的只有 Controller 落的 child.* 两族、候选两族与审阅观察，不写消息与 entry；主会话注入快照在会话开始时冻结，审阅不改它。
+- 崩溃、超时或输出畸形不影响主 Run：调度器吞掉派出与收尾异常，Reviewer 模型接入抛错时主 Run 照常完成；超预算以上限状态收尾不产出候选；输出畸形只落 review.unparsable（`review/scheduler.test.ts`、`application/review-runtime.test.ts`、`review/candidates.test.ts`）。
+- 所有产物都停留在 Candidate 状态：候选只写暂存目录（缺省不加载），状态最高到已扫描，批准与激活归 M8。
 
 ### M6.5：Eval 冒烟
 

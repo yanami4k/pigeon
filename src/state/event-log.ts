@@ -7,6 +7,7 @@
 // persistence/event-log.ts，冷物化与对账在 state/materialize.ts。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { CandidateKindSchema, ReviewerCandidateSchema, ScanHitSchema } from "./candidate.ts";
 import {
   EntryIdSchema,
   ExecutionIdSchema,
@@ -23,6 +24,8 @@ import {
   EvalVerifiedPayloadSchema,
   LlmRequestPayloadSchema,
   ObservationKind,
+  ReviewSkippedPayloadSchema,
+  ReviewUnparsablePayloadSchema,
   RunEndedPayloadSchema,
   RunStartedPayloadSchema,
   RuntimeEventKind,
@@ -45,8 +48,11 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // 全部加法式（可缺省/新成员），旧记录经读路径迁移链逐级升级（见 eventLogMigrations）；
 // v7（M5.5 S2，决策 040）：新增 session.header / child.spawned / child.settled 三族（worker 编排）；
 // v8（M5.7 S3，决策 053）：receipt 载荷升 v5（加 mcp 块），读路径把内嵌 receipt 经其迁移链升到当前版本；
-// v9（M6.5 S3，决策 058）：新增 eval.verified 观察族（加法式）
-export const EVENT_LOG_VERSION = 9;
+// v9（M6.5 S3，决策 058）：新增 eval.verified 观察族（加法式）；
+// v10（M6，决策 064 / 065）：工作区联合新增"无工作区"成员、child.settled 的结果放宽（无工作区无分支与
+// 改动文件）并可携带结构化内容、worker 上限加可选 token 项与 token-limit 收尾状态、新增 review.skipped 观察族、
+// 新增候选提出与候选筛查两族（加法式）
+export const EVENT_LOG_VERSION = 10;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -120,12 +126,28 @@ export const EvalVerifiedRecordSchema = Type.Object({
   payload: EvalVerifiedPayloadSchema,
 });
 export type EvalVerifiedRecord = Static<typeof EvalVerifiedRecordSchema>;
+// M6（决策 064 子裁决 ①）：后台审阅因上一次未收尾而跳过本次触发，落在被审主会话的会话文件里
+export const ReviewSkippedRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.ReviewSkipped),
+  payload: ReviewSkippedPayloadSchema,
+});
+export type ReviewSkippedRecord = Static<typeof ReviewSkippedRecordSchema>;
+// M6（决策 065）：Reviewer 收尾结果不可解析
+export const ReviewUnparsableRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.ReviewUnparsable),
+  payload: ReviewUnparsablePayloadSchema,
+});
+export type ReviewUnparsableRecord = Static<typeof ReviewUnparsableRecordSchema>;
 
 export const ObservationRecordSchema = Type.Union([
   RunStartedRecordSchema,
   LlmRequestRecordSchema,
   SkillLoadedRecordSchema,
   EvalVerifiedRecordSchema,
+  ReviewSkippedRecordSchema,
+  ReviewUnparsableRecordSchema,
 ]);
 export type ObservationRecord = Static<typeof ObservationRecordSchema>;
 
@@ -354,13 +376,24 @@ export const WorkerRoleSchema = Type.Union([
 ]);
 export type WorkerRole = Static<typeof WorkerRoleSchema>;
 
-// 隔离工作区：第一版只有 git 工作树（M5.7 泛化隔离单位时加成员）
-export const WorkerWorkspaceSchema = Type.Object({
+// 隔离工作区：git 工作树（M5.5）与"无工作区"（M6，决策 064）——Reviewer 只读、不开工作树。
+// 加法式联合，054 的形状封顶口径不变：git-worktree 成员逐字不动，旧记录读取不变
+export const GitWorktreeWorkspaceSchema = Type.Object({
   kind: Type.Literal("git-worktree"),
   path: Type.String({ minLength: 1 }),
   branch: Type.String({ minLength: 1 }),
 });
+export const NoWorkspaceSchema = Type.Object({ kind: Type.Literal("none") });
+export const WorkerWorkspaceSchema = Type.Union([GitWorktreeWorkspaceSchema, NoWorkspaceSchema]);
 export type WorkerWorkspace = Static<typeof WorkerWorkspaceSchema>;
+export type GitWorktreeWorkspace = Static<typeof GitWorktreeWorkspaceSchema>;
+
+// 类型谓词：只有 git 工作树形状才有路径与分支（无工作区的 worker 两者皆无）
+export function isGitWorktreeWorkspace(
+  workspace: WorkerWorkspace
+): workspace is GitWorktreeWorkspace {
+  return workspace.kind === "git-worktree";
+}
 
 // 委派策略摘要：与 InjectionSnapshot.tools.policy 同形（state 是叶子层，不引 tools 的 schema）
 export const DelegatedPolicySchema = Type.Object({
@@ -370,10 +403,11 @@ export const DelegatedPolicySchema = Type.Object({
 });
 export type DelegatedPolicy = Static<typeof DelegatedPolicySchema>;
 
-// 第一版只有轮次与墙钟两个上限（token 预算后置）
+// 轮次与墙钟两个上限；M6（决策 064 子裁决 ④）加可选的累计 token 上限（Reviewer 专设预算用，缺省不限）
 export const WorkerLimitsSchema = Type.Object({
   maxTurns: Type.Integer({ minimum: 1 }),
   wallClockMs: Type.Integer({ minimum: 1 }),
+  maxTokens: Type.Optional(Type.Integer({ minimum: 1 })),
 });
 export type WorkerLimits = Static<typeof WorkerLimitsSchema>;
 
@@ -384,18 +418,23 @@ export const ChildSettledStatusSchema = Type.Union([
   Type.Literal("cancelled"),
   Type.Literal("turn-limit"),
   Type.Literal("wall-clock-limit"),
+  // M6（决策 064 子裁决 ④）：累计 token 达到上限而中止
+  Type.Literal("token-limit"),
   // 派出失败（工作树或运行面建不起来）：spawned 已落盘，以 settled 收口保证两族配对
   Type.Literal("spawn-failed"),
 ]);
 export type ChildSettledStatus = Static<typeof ChildSettledStatusSchema>;
 
-// worker 结构化结果：分支、改动文件清单（工作树内相对路径）、receipt 列表、自述摘要
+// worker 结构化结果：分支、改动文件清单（工作树内相对路径）、receipt 列表、自述摘要。
+// M6（决策 064）：无工作区的 worker（Reviewer）没有分支与改动文件，两项改可缺省；
+// structured 承载模型交回的结构化内容（候选由 Controller 据此落盘，模型侧只产出结论）
 export const ChildResultSchema = Type.Object({
-  branch: Type.String({ minLength: 1 }),
-  changedFiles: Type.Array(Type.String({ minLength: 1 })),
+  branch: Type.Optional(Type.String({ minLength: 1 })),
+  changedFiles: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   receiptIds: Type.Array(ReceiptIdSchema),
   summary: Type.String(),
   summaryTruncated: Type.Boolean(),
+  structured: Type.Optional(Type.Unknown()),
 });
 export type ChildResult = Static<typeof ChildResultSchema>;
 
@@ -440,6 +479,39 @@ export const ChildSettledRecordSchema = Type.Object({
 });
 export type ChildSettledRecord = Static<typeof ChildSettledRecordSchema>;
 
+// 候选提出（M6，决策 065）：Controller 从 Reviewer 收尾结果落盘候选后写入被审主会话的会话文件——
+// 不可变元数据全文（种类、名字、哈希、来源、摘要、判断强度、扫描结果、取代关系）加审阅所用模型与用量。
+// runId 是被审的那一次 Run；候选状态由本族与筛查族现算，不写进候选目录
+export const CandidateProposedRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal("candidate.proposed"),
+  candidate: ReviewerCandidateSchema,
+  model: Type.Object({
+    provider: Type.String({ minLength: 1 }),
+    id: Type.String({ minLength: 1 }),
+  }),
+  usage: Type.Optional(
+    Type.Object({
+      turns: Type.Integer({ minimum: 0 }),
+      totalTokens: Type.Integer({ minimum: 0 }),
+    })
+  ),
+});
+export type CandidateProposedRecord = Static<typeof CandidateProposedRecordSchema>;
+
+// 候选筛查（M6，决策 065）：确定性扫描器版本与命中项；模型筛查只作建议标注（不参与判决）
+export const CandidateScreenedRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal("candidate.screened"),
+  candidateKind: CandidateKindSchema,
+  name: Type.String({ minLength: 1 }),
+  contentHash: Sha256HexSchema,
+  scannerVersion: Type.String({ minLength: 1 }),
+  hits: Type.Array(ScanHitSchema),
+  modelNote: Type.Optional(Type.String()),
+});
+export type CandidateScreenedRecord = Static<typeof CandidateScreenedRecordSchema>;
+
 // Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族；
 // M4 收口新增 grant.promoted / grant.config-removed 族）
 export const EventRecordSchema = Type.Union([
@@ -458,6 +530,8 @@ export const EventRecordSchema = Type.Union([
   SessionHeaderRecordSchema,
   ChildSpawnedRecordSchema,
   ChildSettledRecordSchema,
+  CandidateProposedRecordSchema,
+  CandidateScreenedRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -549,6 +623,10 @@ eventLogMigrations.register("event-log", 7, (doc) => ({
 // v8 → v9（M6.5 S3，决策 058）：加法式演进（新增 eval.verified 观察族）——v8 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 8, (doc) => ({ ...doc, version: 9 }));
 
+// v9 → v10（M6，决策 064 / 065）：加法式演进（工作区联合加"无工作区"、child.settled 结果放宽并可带结构化内容、
+// 新增候选两族）——v9 旧记录逐字有效（git-worktree 工作区与带分支的结果仍通过当前 schema），纯版本推进
+eventLogMigrations.register("event-log", 9, (doc) => ({ ...doc, version: 10 }));
+
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏
 export function parseEventRecord(raw: unknown): EventRecord {
@@ -559,3 +637,13 @@ export function parseEventRecord(raw: unknown): EventRecord {
     ? eventLogMigrations.migrate("event-log", raw, EVENT_LOG_VERSION, EventRecordSchema)
     : Value.Parse(EventRecordSchema, raw);
 }
+
+// 候选两族追加输入（M6）：业务字段 + runId；信封其余字段由日志盖章
+export type CandidateProposedInput = Omit<
+  CandidateProposedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type CandidateScreenedInput = Omit<
+  CandidateScreenedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;

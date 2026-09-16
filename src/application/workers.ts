@@ -8,7 +8,11 @@
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
-import { ROLE_THINKING_LEVELS } from "../orchestration/roles.ts";
+import {
+  ROLE_MODEL_OVERRIDES,
+  ROLE_THINKING_LEVELS,
+  type RoleModelOverride,
+} from "../orchestration/roles.ts";
 import type {
   WorkerRuntimeFactory,
   WorkerRuntimeHandle,
@@ -21,6 +25,7 @@ import type { SkillRoot } from "../skills/catalog.ts";
 import type { DelegatedPolicy, SessionHeaderInput, WorkerRole } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { ReceiptId, SessionId } from "../state/ids.ts";
+import type { ReviewTarget } from "../state/review.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
@@ -43,6 +48,10 @@ export interface WorkerRuntimeDeps {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
   maxOutputTokens?: number;
+  // M6（决策 064 子裁决 ③）：角色的模型接入覆盖列（缺省取 roles.ts 的角色表，第一版四个角色都留空）
+  roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
+  // 覆盖列里 streamFnSpec 对应的已加载插件：装配层按表预加载后传入（工厂同步，不在此处做 IO）
+  roleStreamFns?: Readonly<Partial<Record<WorkerRole, StreamFn>>>;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -84,6 +93,10 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
       ...(deps.startMcp !== undefined ? { startMcp: deps.startMcp } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(deps.roleModelOverrides !== undefined
+        ? { roleModelOverrides: deps.roleModelOverrides }
+        : {}),
+      ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
     }),
   });
 }
@@ -114,6 +127,8 @@ interface RuntimeSurface {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
   maxOutputTokens?: number;
+  // M6（决策 064）：Reviewer 的审阅目标
+  reviewTarget?: ReviewTarget;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
 }
@@ -123,13 +138,19 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     const thinkingLevel =
       (deps.roleThinkingLevels ?? ROLE_THINKING_LEVELS)[request.role] ?? deps.thinkingLevel;
     const startMcp = deps.startMcp;
+    // M6（决策 064）：无工作区的 worker（Reviewer）以治理根为工作区根——它只读账本，不碰工作区文件
+    const workspaceRoot =
+      request.workspace.kind === "git-worktree" ? request.workspace.path : request.governanceRoot;
+    // M6（决策 064 子裁决 ③）：角色的模型接入覆盖——缺省继承主会话
+    const override = (deps.roleModelOverrides ?? ROLE_MODEL_OVERRIDES)[request.role];
+    const roleStreamFn = deps.roleStreamFns?.[request.role];
     return openRuntimeSurface({
       sessionId: request.sessionId,
       governanceRoot: request.governanceRoot,
-      workspaceRoot: request.workspace.path,
-      streamFn: deps.streamFnFor(request),
-      provider: deps.provider,
-      modelId: deps.modelId,
+      workspaceRoot,
+      streamFn: roleStreamFn ?? deps.streamFnFor(request),
+      provider: override?.provider ?? deps.provider,
+      modelId: override?.modelId ?? deps.modelId,
       yolo: request.policy.approvalMode === "yolo",
       policy: request.policy,
       // M5.5 S5（决策 048）：run_command 按角色套 .pigeon/commands.json 的允许清单
@@ -150,6 +171,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
+      ...(request.review !== undefined ? { reviewTarget: request.review } : {}),
     });
   };
 }
@@ -209,6 +231,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
+    ...(surface.reviewTarget !== undefined ? { reviewTarget: surface.reviewTarget } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）
   const startMcp =
@@ -270,6 +293,25 @@ function summaryOf(bundle: RuntimeBundle): string {
     .trim();
 }
 
+// M6（决策 064）：模型交回的结构化内容——末条 assistant 正文（可带 ```json 围栏）能解析成对象时在场；
+// 解析不了即视为没有结构化结果（由消费方判定"结果不可解析"），不抛
+export function structuredResultOf(text: string): unknown {
+  const trimmed = text.trim();
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
+  const body = fenced?.[1] ?? trimmed;
+  if (!body.startsWith("{")) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   const { adapter } = bundle;
   return {
@@ -278,6 +320,7 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     subscribe: (listener) => adapter.subscribe(listener),
     receiptIds: () => receiptIdsOf(bundle),
     summary: () => summaryOf(bundle),
+    structured: () => structuredResultOf(summaryOf(bundle)),
     dispose: () => disposeRuntime(bundle),
   };
 }
@@ -325,6 +368,7 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
     },
     receiptIds: () => (bundle !== undefined ? receiptIdsOf(bundle) : []),
     summary: () => (bundle !== undefined ? summaryOf(bundle) : ""),
+    structured: () => (bundle !== undefined ? structuredResultOf(summaryOf(bundle)) : undefined),
     dispose: async () => {
       const current = await settled.catch(() => undefined);
       if (current !== undefined) {

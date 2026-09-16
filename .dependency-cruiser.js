@@ -92,7 +92,7 @@ export default {
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|review)/",
       },
     },
     {
@@ -112,16 +112,26 @@ export default {
       name: "placeholders-only-state-tools",
       severity: "error",
       comment:
-        "占位目录（context / review / distillation / replay）暂按最小允许清单约束：只依赖 state 与 tools" +
-        "（022 修订）。review/ 在 M6 开工时按需另裁放行范围。",
+        "占位目录（context / distillation / replay）暂按最小允许清单约束：只依赖 state 与 tools" +
+        "（022 修订）。review/ 已在 M6 开工时放行到自己的清单，见 review-below-controller。",
       from: {
-        path: "^src/(context|review|distillation|replay)/",
+        path: "^src/(context|distillation|replay)/",
         pathNot: "\\.test\\.ts$",
       },
       to: {
         path: "^src/",
-        pathNot: "^src/(context|review|distillation|replay|state|tools)/",
+        pathNot: "^src/(context|distillation|replay|state|tools)/",
       },
+    },
+    {
+      name: "review-below-controller",
+      severity: "error",
+      comment:
+        "review（M6：Run 冻结快照、只读审阅工具、调度器、候选落盘与扫描，决策 064 / 065）" +
+        "只依赖 state、tools 与 persistence 的只读物化：它读账本、产候选文件，不触达 pi-runtime、" +
+        "application 与 Actor 层——调度与装配由 application 注入。",
+      from: { path: "^src/review/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/", pathNot: "^src/(review|state|tools|persistence)/" },
     },
     {
       name: "memory-below-controller",

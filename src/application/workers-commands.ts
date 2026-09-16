@@ -63,7 +63,8 @@ export function renderWorkersStatus(workers: readonly WorkerStatus[]): string {
     ...workers.map(
       (worker) =>
         `  ${worker.name}（${worker.role}）｜ ${workerStateLabel(worker.state)} ｜ ${worker.turns} 轮 ｜ ` +
-        `分支 ${worker.branch} ｜ 会话 ${worker.sessionId}`
+        // M6（决策 064）：无工作区的 worker（Reviewer）没有分支
+        `${worker.branch !== undefined ? `分支 ${worker.branch}` : "无工作区"} ｜ 会话 ${worker.sessionId}`
     ),
   ].join("\n");
 }
@@ -92,10 +93,12 @@ export function renderWorkerOutcome(outcome: WorkerOutcome): string {
   }
   const result = outcome.result;
   if (result !== undefined) {
-    const files = result.changedFiles;
+    const files = result.changedFiles ?? [];
     lines.push(
-      `  分支 ${result.branch} ｜ 改动 ${files.length} 个文件${files.length > 0 ? `：${files.join("、")}` : ""} ｜ ` +
-        `Receipt ${result.receiptIds.length} 条`
+      result.branch !== undefined
+        ? `  分支 ${result.branch} ｜ 改动 ${files.length} 个文件${files.length > 0 ? `：${files.join("、")}` : ""} ｜ ` +
+            `Receipt ${result.receiptIds.length} 条`
+        : `  只读审阅（无工作区、无改动）｜ Receipt ${result.receiptIds.length} 条`
     );
     if (result.summary !== "") {
       lines.push(
@@ -104,7 +107,9 @@ export function renderWorkerOutcome(outcome: WorkerOutcome): string {
     }
   }
   lines.push(
-    `  工作树 ${outcome.workspace.path}：改动未提交，审阅与合并由人用 git 完成（trace ${outcome.sessionId} 查看证据链）`
+    outcome.workspace.kind === "git-worktree"
+      ? `  工作树 ${outcome.workspace.path}：改动未提交，审阅与合并由人用 git 完成（trace ${outcome.sessionId} 查看证据链）`
+      : `  无工作区：只读审阅不产生文件改动（trace ${outcome.sessionId} 查看证据链）`
   );
   return lines.join("\n");
 }

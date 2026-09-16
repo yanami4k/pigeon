@@ -20,6 +20,12 @@ import {
   type BreakerInput,
   type BreakerRecord,
   BreakerRecordSchema,
+  type CandidateProposedInput,
+  type CandidateProposedRecord,
+  CandidateProposedRecordSchema,
+  type CandidateScreenedInput,
+  type CandidateScreenedRecord,
+  CandidateScreenedRecordSchema,
   type ChildSettledInput,
   type ChildSettledRecord,
   ChildSettledRecordSchema,
@@ -536,6 +542,30 @@ export class JsonlEventLog {
     const record = Value.Parse(ChildSettledRecordSchema, {
       ...this.#grantEnvelope(runId),
       kind: "child.settled",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // 候选提出（M6，决策 065）：候选文件写好后落盘；治理族耐久（fsync）
+  appendCandidateProposed(input: CandidateProposedInput): CandidateProposedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(CandidateProposedRecordSchema, {
+      ...this.#envelope(runId),
+      kind: "candidate.proposed",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // 候选筛查（M6，决策 065）：确定性扫描结果；治理族耐久（fsync）
+  appendCandidateScreened(input: CandidateScreenedInput): CandidateScreenedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(CandidateScreenedRecordSchema, {
+      ...this.#envelope(runId),
+      kind: "candidate.screened",
       ...body,
     });
     this.#append(record, true);

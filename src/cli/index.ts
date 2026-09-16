@@ -9,15 +9,18 @@
 import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { runCandidatesCommand } from "../application/candidates-list.ts";
 import { evalVerdictLabel, failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import {
   parseLaunchFlags,
   resolveStreamFnSpec,
+  reviewConfigOf,
   VALUELESS_FLAGS,
 } from "../application/launch-flags.ts";
 import { runResumeFlow } from "../application/resume.ts";
+import { runManualReview } from "../application/review-command.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
@@ -201,6 +204,81 @@ function grantCommandsOf(
 //   [--model <m>]：冷恢复对账（哈希自动确证 + 剩余悬账人工确认菜单）后在同一会话下续跑
 // REPL（M4 S5，D5）——Pi transcript 不恢复，模型对话上下文重新建立；后续 Run 继续写入
 // 本会话事件日志；系统永不自动重新执行（§3.2）
+// pigeon review <sessionId> [--run <runId>] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]：
+// 手动补审（M6 S4，决策 064）——对冷会话补一次后台审阅，完成后落盘候选；worker、headless 与 Eval 会话
+// 不自动审，需要时用它补。与自动审阅同一派发器，派出与收尾记进被审会话
+async function reviewMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon review <sessionId> [--run <runId>] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]";
+  let sessionIdArg: string | undefined;
+  let runIdArg: string | undefined;
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (arg === "--run") {
+      runIdArg = argv[++i];
+      if (runIdArg === undefined) {
+        throw new Error(`--run 缺少取值（${usage}）`);
+      }
+      continue;
+    }
+    if (!arg.startsWith("--") && sessionIdArg === undefined) {
+      sessionIdArg = arg;
+      continue;
+    }
+    modelArgv.push(arg);
+    const next = argv[i + 1];
+    if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
+      modelArgv.push(next);
+      i++;
+    }
+  }
+  if (sessionIdArg === undefined) {
+    throw new Error(usage);
+  }
+  const flags = parseLaunchFlags(modelArgv, { usage });
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
+  const governanceRoot = prepareWorkspace(flags.root);
+  const summary = await runManualReview({
+    governanceRoot,
+    sessionId: sessionIdArg,
+    ...(runIdArg !== undefined ? { runId: runIdArg } : {}),
+    streamFn,
+    provider: flags.provider,
+    modelId: flags.modelId,
+    persistThinking: flags.persistThinking,
+  });
+  writeOut(
+    `补审 会话 ${summary.sessionId} ｜ ${summary.runId} ｜ 审阅会话 ${summary.reviewSessionId} ｜ ` +
+      `收尾 ${summary.status} ｜ 新候选 ${summary.candidatesWritten} 个` +
+      (summary.duplicates > 0 ? ` ｜ 重复跳过 ${summary.duplicates} 个` : "") +
+      (summary.unparsable !== undefined ? ` ｜ 结果不可解析：${summary.unparsable}` : "") +
+      (summary.error !== undefined ? ` ｜ 原因：${summary.error}` : "") +
+      `\n查看：pigeon trace ${summary.sessionId}；候选：pigeon candidates\n`
+  );
+}
+
+// pigeon candidates [--all] [--root <dir>]：只读列出候选（M6 S4，决策 065 子裁决 ⑤），缺省隐藏扫描拒收项
+function candidatesMain(argv: string[]): void {
+  const usage = "用法：pigeon candidates [--all] [--root <dir>]";
+  let root = process.cwd();
+  let all = false;
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--all") {
+      all = true;
+    } else if (flag === "--root") {
+      root = argv[++i] ?? root;
+    } else {
+      throw new Error(`未知参数：${flag}（${usage}）`);
+    }
+  }
+  writeOut(runCandidatesCommand({ root: realpathSync(root), all }));
+}
+
 async function resumeMain(argv: string[]): Promise<void> {
   let sessionIdArg: string | undefined;
   const modelArgv: string[] = [];
@@ -228,8 +306,8 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
   const sessionId = asSessionId(sessionIdArg);
   const modelUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model";
-  const flags = parseLaunchFlags(modelArgv, { usage: modelUsage });
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --root / --stream-fn / --provider / --model";
+  const flags = parseLaunchFlags(modelArgv, { usage: modelUsage, review: true });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
@@ -255,6 +333,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           streamFn,
           flags,
           restoreGrants: true,
+          // M6（决策 064）：主会话挂后台审阅（worker 会话作用域在装配内部排除）
+          review: reviewConfigOf(flags),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
@@ -556,9 +636,18 @@ async function main(argv: string[]): Promise<void> {
     await resumeMain(argv.slice(1));
     return;
   }
+  // M6（决策 064 / 065）：手动补审与候选列表
+  if (argv[0] === "review") {
+    await reviewMain(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "candidates") {
+    candidatesMain(argv.slice(1));
+    return;
+  }
   const startUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --root / --stream-fn / --provider / --model";
-  const flags = parseLaunchFlags(argv, { usage: startUsage });
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --root / --stream-fn / --provider / --model";
+  const flags = parseLaunchFlags(argv, { usage: startUsage, review: true });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）+ D8 旧账本一次性迁移
   const workspaceRoot = prepareWorkspace(flags.root);
@@ -571,6 +660,8 @@ async function main(argv: string[]): Promise<void> {
     sessionId,
     streamFn,
     flags,
+    // M6（决策 064）：主会话挂后台审阅
+    review: reviewConfigOf(flags),
     // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
     createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
     onMcpNote: (note) => {

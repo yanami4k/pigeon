@@ -19,7 +19,11 @@ import {
   materializeSession,
   sessionEventFilePath,
 } from "../persistence/session-read.ts";
-import type { ChildSettledRecord, SessionHeaderRecord } from "../state/event-log.ts";
+import {
+  type ChildSettledRecord,
+  isGitWorktreeWorkspace,
+  type SessionHeaderRecord,
+} from "../state/event-log.ts";
 import { asRunId, asSessionId, type RunId } from "../state/ids.ts";
 import type { ChildLink } from "../state/materialize.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
@@ -36,6 +40,13 @@ const MCP_SERVER_STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>>
   restarting: "重启中",
   unavailable: "不可用",
   closed: "已关闭",
+};
+
+// 候选状态的通俗措辞（M6 只走到提出、已扫描、扫描拒收）
+const CANDIDATE_STATUS_LABEL: Readonly<Record<string, string>> = {
+  Proposed: "已提出",
+  SecurityScanned: "已扫描",
+  ScanRejected: "扫描拒收",
 };
 
 // 冲突项：声明 destructive 却配 read 的按 write；其余冲突是声明只读却配 write / exec，按配置
@@ -163,7 +174,7 @@ function renderChildLine({ spawned, settled }: ChildLink): string {
   }
   let line = `${base} ｜ ${settled.status} ｜ ${settled.turns} 轮`;
   if (settled.result !== undefined) {
-    line += ` ｜ 改动 ${settled.result.changedFiles.length} 个文件 ｜ Receipt ${settled.result.receiptIds.length} 条`;
+    line += ` ｜ 改动 ${(settled.result.changedFiles ?? []).length} 个文件 ｜ Receipt ${settled.result.receiptIds.length} 条`;
   }
   if (settled.error !== undefined) {
     line += ` ｜ 原因：${settled.error}`;
@@ -231,6 +242,29 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
       line += " ｜ 自报完成但验证失败（误报）";
     }
     lines.push(line);
+  }
+  // M6（决策 064 / 065）：后台审阅的产出与异常——候选（状态由账本现算）、跳过、结果不可解析
+  for (const projected of run.candidates) {
+    const { candidate } = projected;
+    lines.push(
+      `  候选 ${candidate.kind}/${candidate.name} ｜ ${CANDIDATE_STATUS_LABEL[projected.status] ?? projected.status} ｜ ` +
+        `哈希 ${candidate.contentHash.slice(0, 12)} ｜ 判断强度 ${candidate.strength} ｜ 审阅会话 ${candidate.source.reviewSessionId}` +
+        (projected.screened !== undefined && projected.screened.hits.length > 0
+          ? ` ｜ 命中：${projected.screened.hits.map((hit) => hit.rule).join("、")}`
+          : "")
+    );
+  }
+  for (const skip of run.reviewSkips) {
+    lines.push(
+      skip.payload.reason === "exit"
+        ? `  审阅跳过：会话退出，取消了${skip.payload.trigger === "turns" ? "按轮次触发" : "Run 结束补审"}的排队中或进行中审阅`
+        : `  审阅跳过：${skip.payload.trigger === "turns" ? "按轮次触发" : "Run 结束触发"}时上一次审阅未收尾`
+    );
+  }
+  for (const unparsable of run.reviewUnparsables) {
+    lines.push(
+      `  审阅结果不可解析：审阅会话 ${unparsable.payload.reviewSessionId} ｜ ${unparsable.payload.reason}`
+    );
   }
   // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，
   // 措辞与 replay 同口径——绝不假装证据链完整
@@ -312,7 +346,8 @@ export function renderSessionTrace(trace: SessionTrace, options: TraceRenderOpti
     lines.splice(
       1,
       0,
-      `worker 会话：${header.worker.name}（${header.worker.role}）｜ 分支 ${header.workspace.branch} ｜ ` +
+      `worker 会话：${header.worker.name}（${header.worker.role}）｜ ` +
+        `${isGitWorktreeWorkspace(header.workspace) ? `分支 ${header.workspace.branch}` : "无工作区"} ｜ ` +
         `父会话 ${header.parentSessionId}（查看：trace ${header.parentSessionId}）`
     );
   }

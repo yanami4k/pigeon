@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
+import { REVIEW_ENTRY_TOOL, REVIEW_SNAPSHOT_TOOL } from "../state/review.ts";
 import { assertPolicySubset, deriveWorkerPolicy, WorkerPolicyError } from "./roles.ts";
 
 const FULL = ["read_file", "edit_file", SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL];
@@ -13,9 +14,10 @@ test("委派策略：父策略齐全时按角色给默认工具，审批模式�
     deny: [],
     approvalMode: "prompt",
   });
+  // M6（决策 064 子裁决 ⑤）：reviewer 只拿绑定被审 Run 的两个只读快照工具，不再给跨会话检索
   assert.deepEqual(deriveWorkerPolicy(parent, "reviewer").allow, [
-    SEARCH_SESSIONS_TOOL,
-    READ_SESSION_ENTRY_TOOL,
+    REVIEW_SNAPSHOT_TOOL,
+    REVIEW_ENTRY_TOOL,
   ]);
   assert.deepEqual(deriveWorkerPolicy(parent, "explorer").allow, [
     "read_file",

@@ -18,6 +18,7 @@ import {
   type LaunchFlags,
   parseLaunchFlags,
   resolveStreamFnSpec,
+  reviewConfigOf,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
@@ -37,10 +38,14 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
   "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>]";
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--review-every <N>] [--no-review]";
 
 async function main(argv: string[]): Promise<void> {
-  const flags: LaunchFlags = parseLaunchFlags(argv, { usage: USAGE, historyLimit: true });
+  const flags: LaunchFlags = parseLaunchFlags(argv, {
+    usage: USAGE,
+    historyLimit: true,
+    review: true,
+  });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
@@ -74,6 +79,8 @@ async function main(argv: string[]): Promise<void> {
       sessionId,
       streamFn,
       flags,
+      // M6（决策 064）：主会话挂后台审阅
+      review: reviewConfigOf(flags),
       createApprovalHandler: createHandler,
       onMcpNote: (note) => {
         console.error(`[mcp] ${note}`);
@@ -122,6 +129,8 @@ async function main(argv: string[]): Promise<void> {
           sessionId: targetId,
           streamFn,
           flags,
+          // 恢复的主会话同样挂审阅；worker 会话作用域在装配内部排除
+          review: reviewConfigOf(flags),
           createApprovalHandler: createHandler,
           restoreGrants: true,
         });

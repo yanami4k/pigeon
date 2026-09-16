@@ -17,6 +17,7 @@ import type {
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type ReceiptId, type RunId, type SessionId } from "../state/ids.ts";
+import type { ReviewTarget } from "../state/review.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
 import {
@@ -44,6 +45,9 @@ export interface WorkerRuntimeHandle {
   receiptIds(): ReceiptId[];
   // 末条 assistant 正文
   summary(): string;
+  // M6（决策 064）：模型交回的结构化内容（末条 assistant 正文能解析成对象时在场）；
+  // 不实现即视为没有结构化结果，既有 worker 行为不变
+  structured?(): unknown;
   // 释放运行面并关闭 worker 会话文件
   dispose(): Promise<void>;
 }
@@ -65,6 +69,8 @@ export interface WorkerRuntimeRequest {
   lineage: { parentSessionId: SessionId; parentRunId?: RunId };
   // 已带来源标签的审批入口（转发到编排器的审批回调）
   approvalHandler: ApprovalHandler;
+  // M6（决策 064）：Reviewer 的审阅目标（被审 Run 与增量起点）；只读快照工具据此绑定作用域
+  review?: ReviewTarget;
 }
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
@@ -74,6 +80,8 @@ export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRunt
 export interface WorkspaceProviderInput {
   sessionId: SessionId;
   name: string;
+  // M6（决策 064）：角色决定是否需要隔离工作区——Reviewer 只读，规划为"无工作区"
+  role: WorkerRole;
   baseRef?: string;
 }
 
@@ -90,12 +98,19 @@ export function gitWorktreeWorkspaces(roots: {
   governanceRoot: string;
 }): WorkspaceProvider {
   return {
-    plan: ({ sessionId, name }) => ({
-      kind: "git-worktree",
-      path: worktreePathFor(roots.governanceRoot, sessionId, name),
-      branch: worktreeBranchFor(name),
-    }),
-    create: (_workspace, { sessionId, name, baseRef }) => {
+    plan: ({ sessionId, name, role }) =>
+      role === "reviewer"
+        ? { kind: "none" }
+        : {
+            kind: "git-worktree",
+            path: worktreePathFor(roots.governanceRoot, sessionId, name),
+            branch: worktreeBranchFor(name),
+          },
+    create: (workspace, { sessionId, name, baseRef }) => {
+      // 无工作区：不开工作树、不建分支（收尾也无需清理）
+      if (workspace.kind === "none") {
+        return;
+      }
       addWorktree({
         repoRoot: roots.repoRoot,
         governanceRoot: roots.governanceRoot,
@@ -104,7 +119,8 @@ export function gitWorktreeWorkspaces(roots: {
         ...(baseRef !== undefined ? { baseRef } : {}),
       });
     },
-    changedFiles: (workspace) => changedFiles(workspace.path),
+    changedFiles: (workspace) =>
+      workspace.kind === "git-worktree" ? changedFiles(workspace.path) : [],
   };
 }
 
@@ -134,6 +150,8 @@ export interface SpawnRequest {
   task: string;
   name?: string;
   limits?: Partial<WorkerLimits>;
+  // M6（决策 064）：派 reviewer 时的审阅目标
+  review?: ReviewTarget;
 }
 
 export type WorkerState = "running" | ChildSettledStatus;
@@ -144,7 +162,8 @@ export interface WorkerStatus {
   role: WorkerRole;
   state: WorkerState;
   turns: number;
-  branch: string;
+  // 无工作区的 worker（Reviewer）没有分支
+  branch?: string;
   startedAt: number;
   workspace: WorkerWorkspace;
 }
@@ -170,7 +189,8 @@ interface WorkerEntry {
   turns: number;
   startedAt: number;
   cancelRequested: boolean;
-  limitHit?: "turn-limit" | "wall-clock-limit";
+  limitHit?: "turn-limit" | "wall-clock-limit" | "token-limit";
+  tokens: number;
   done: Promise<WorkerOutcome>;
 }
 
@@ -219,7 +239,7 @@ export class WorkerOrchestrator {
       ...request.limits,
     };
     const sessionId = newSessionId();
-    const workspace = this.#workspaces.plan({ sessionId, name });
+    const workspace = this.#workspaces.plan({ sessionId, name, role });
     const parentRunId = this.#options.activeRunId?.();
     // 派出意图先落盘：写不进就不派（异常原样上抛，零工作区零运行面）
     this.#options.parentLog.appendChildSpawned({
@@ -235,7 +255,7 @@ export class WorkerOrchestrator {
     });
     let runtime: WorkerRuntimeHandle;
     try {
-      this.#workspaces.create(workspace, { sessionId, name });
+      this.#workspaces.create(workspace, { sessionId, name, role });
       runtime = this.#options.createRuntime({
         sessionId,
         name,
@@ -250,6 +270,7 @@ export class WorkerOrchestrator {
         },
         approvalHandler: (approval) =>
           this.#options.approvals({ ...approval, sessionId, worker: { name, role } }),
+        ...(request.review !== undefined ? { review: request.review } : {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -273,6 +294,7 @@ export class WorkerOrchestrator {
       turns: 0,
       startedAt: this.#now(),
       cancelRequested: false,
+      tokens: 0,
       done: done.promise,
     };
     this.#workers.set(sessionId, entry);
@@ -297,7 +319,7 @@ export class WorkerOrchestrator {
       role: entry.role,
       state: entry.state,
       turns: entry.turns,
-      branch: entry.workspace.branch,
+      ...(entry.workspace.kind === "git-worktree" ? { branch: entry.workspace.branch } : {}),
       startedAt: entry.startedAt,
       workspace: entry.workspace,
     }));
@@ -313,7 +335,7 @@ export class WorkerOrchestrator {
 
   async #drive(entry: WorkerEntry, task: string, limits: WorkerLimits): Promise<WorkerOutcome> {
     const { runtime } = entry;
-    const stop = (reason: "turn-limit" | "wall-clock-limit") => {
+    const stop = (reason: "turn-limit" | "wall-clock-limit" | "token-limit") => {
       if (entry.limitHit !== undefined || entry.cancelRequested) {
         return;
       }
@@ -325,8 +347,13 @@ export class WorkerOrchestrator {
     const unsubscribe = runtime.subscribe((event) => {
       if (event.kind === "turn.completed") {
         entry.turns += 1;
+        // M6（决策 064 子裁决 ④）：累计 token 上限（取 turn.completed 的用量；缺省不限）
+        const usage = (event.payload as { usage?: { totalTokens?: number } } | undefined)?.usage;
+        entry.tokens += usage?.totalTokens ?? 0;
         if (entry.turns >= limits.maxTurns) {
           stop("turn-limit");
+        } else if (limits.maxTokens !== undefined && entry.tokens >= limits.maxTokens) {
+          stop("token-limit");
         }
       }
     });
@@ -354,12 +381,19 @@ export class WorkerOrchestrator {
     let result: ChildResult | undefined;
     try {
       const summary = runtime.summary();
+      // M6（决策 064）：无工作区的 worker 没有分支与改动文件；结构化结果在场时随收尾一并回收
+      const structured = runtime.structured?.();
       result = {
-        branch: entry.workspace.branch,
-        changedFiles: this.#workspaces.changedFiles(entry.workspace),
+        ...(entry.workspace.kind === "git-worktree"
+          ? {
+              branch: entry.workspace.branch,
+              changedFiles: this.#workspaces.changedFiles(entry.workspace),
+            }
+          : {}),
         receiptIds: runtime.receiptIds(),
         summary: summary.slice(0, WORKER_SUMMARY_MAX_CHARS),
         summaryTruncated: summary.length > WORKER_SUMMARY_MAX_CHARS,
+        ...(structured !== undefined ? { structured } : {}),
       };
     } catch (caught) {
       this.#errors.push(caught);

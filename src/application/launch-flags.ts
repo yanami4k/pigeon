@@ -3,13 +3,15 @@
 // 按入口分成三组，影响 Eval 与学习侧按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
+import { DEFAULT_REVIEW_EVERY_TURNS } from "../review/scheduler.ts";
+import type { ReviewConfig } from "../state/review.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
-export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking"]);
+export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking", "--no-review"]);
 
 export interface LaunchFlags {
   root: string;
@@ -28,6 +30,10 @@ export interface LaunchFlags {
   maxOutputTokens?: number;
   // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（仅 TUI 接受）
   historyLimit?: number;
+  // M6（决策 064 子裁决 ①）：后台审阅开关（--no-review 关闭，缺省开）与轮次间隔（--review-every <N>，
+  // 0 = 只在 Run 结束审；缺省取调度器常量）。只有 cli REPL / resume 与 tui 接受
+  review: boolean;
+  reviewEvery?: number;
 }
 
 export interface ParseLaunchFlagsOptions {
@@ -39,6 +45,8 @@ export interface ParseLaunchFlagsOptions {
   cwd?: string;
   // 是否接受 --history-limit（只有 TUI 有历史渲染）
   historyLimit?: boolean;
+  // 是否接受后台审阅参数（只有 cli / tui 的主会话挂审阅；run 与 eval 不接受）
+  review?: boolean;
 }
 
 export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOptions): LaunchFlags {
@@ -50,6 +58,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     provider: DEFAULT_MODEL_PLACEHOLDER.provider,
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
+    review: true,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
   const fromEnv = env.PIGEON_STREAM_FN;
@@ -86,6 +95,14 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--history-limit 需要正整数（${usage}）`);
       }
       flags.historyLimit = value;
+    } else if (flag === "--no-review" && options.review === true) {
+      flags.review = false;
+    } else if (flag === "--review-every" && options.review === true) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`--review-every 需要非负整数（0 表示只在 Run 结束审）（${usage}）`);
+      }
+      flags.reviewEvery = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -114,4 +131,9 @@ export function resolveStreamFnSpec(flags: LaunchFlags, usage: string): string {
     );
   }
   return flags.streamFnSpec;
+}
+
+// 后台审阅配置（决策 064 子裁决 ①）：由启动参数得出，会话开始时冻结进注入快照
+export function reviewConfigOf(flags: LaunchFlags): ReviewConfig {
+  return { enabled: flags.review, everyTurns: flags.reviewEvery ?? DEFAULT_REVIEW_EVERY_TURNS };
 }
