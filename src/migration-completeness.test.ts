@@ -24,6 +24,7 @@ import {
   migrateInjectionSnapshotV3toV4,
   migrateInjectionSnapshotV4toV5,
   migrateInjectionSnapshotV5toV6,
+  migrateInjectionSnapshotV6toV7,
 } from "./pi-runtime/snapshot.ts";
 import { CANDIDATE_VERSION, migrateCandidateToCurrent } from "./state/candidate.ts";
 import { COMMANDS_CONFIG_VERSION, CommandsConfigFileSchema } from "./state/commands.ts";
@@ -66,6 +67,7 @@ snapshotMigrations.register("injection-snapshot", 2, migrateInjectionSnapshotV2t
 snapshotMigrations.register("injection-snapshot", 3, migrateInjectionSnapshotV3toV4);
 snapshotMigrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
 snapshotMigrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
+snapshotMigrations.register("injection-snapshot", 6, migrateInjectionSnapshotV6toV7);
 
 const receiptV1 = () => ({
   version: 1,

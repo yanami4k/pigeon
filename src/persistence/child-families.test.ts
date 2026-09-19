@@ -143,8 +143,8 @@ test("v6 事件文件读路径迁移到 v7：纯版本推进，旧记录逐字�
     const path = join(dir, `${sessionId}.jsonl`);
     writeFileSync(path, `${JSON.stringify(v6Grant)}\n`, "utf8");
     const records = readEventLogFile(path);
-    assert.equal(EVENT_LOG_VERSION, 10);
-    assert.equal(records[0]?.version, 10);
+    assert.equal(EVENT_LOG_VERSION, 11);
+    assert.equal(records[0]?.version, 11);
     assert.equal(records[0]?.kind, "grant.created");
   } finally {
     rmSync(dir, { recursive: true, force: true });

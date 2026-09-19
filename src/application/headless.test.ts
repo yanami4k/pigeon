@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { runHeadless } from "./headless.ts";
 
@@ -117,6 +118,15 @@ test("headless：轮次上限触发中止，终态 turn-limit", async () => {
     });
     assert.equal(result.status, "turn-limit");
     assert.ok(result.turns >= 2, String(result.turns));
+    // M7（决策 072）：撞上限写进本会话账本，标签由账本现算为失败
+    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
+    assert.deepEqual(
+      session.limitHits.map((record) => record.payload.limit),
+      ["turn-limit"]
+    );
+    const limitRun = session.limitHits[0]?.runId;
+    assert.ok(limitRun !== undefined);
+    assert.equal(labelAttempt(attemptOutcomeFacts(session, limitRun)), "Failed");
   } finally {
     cleanup();
   }

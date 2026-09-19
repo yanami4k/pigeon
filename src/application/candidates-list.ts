@@ -39,7 +39,7 @@ export function runCandidatesCommand(options: CandidatesCommandOptions): string 
       candidate.name,
       candidate.contentHash.slice(0, 12),
       STATUS_LABEL[status] ?? status,
-      `来源 会话 ${candidate.source.sessionId} ｜ ${candidate.source.runId} ｜ 审阅 ${candidate.source.reviewSessionId}`,
+      `来源 会话 ${candidate.source.sessionId} ｜ ${candidate.source.runId} ｜ 产出会话 ${candidate.source.producerSessionId}`,
       new Date(candidate.createdAt).toISOString(),
     ].join(" ｜ ")
   );

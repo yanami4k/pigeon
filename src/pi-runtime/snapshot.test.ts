@@ -13,6 +13,7 @@ import {
   migrateInjectionSnapshotV3toV4,
   migrateInjectionSnapshotV4toV5,
   migrateInjectionSnapshotV5toV6,
+  migrateInjectionSnapshotV6toV7,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -39,11 +40,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 3, migrateInjectionSnapshotV3toV4);
   migrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
   migrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
+  migrations.register("injection-snapshot", 6, migrateInjectionSnapshotV6toV7);
   return migrations;
 }
 
 test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 6);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 7);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -89,7 +91,7 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
   }
 });
 
-test("v1 → v2 → v3 → v4 → v5 → v6 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限与审阅配置缺省", () => {
+test("v1 → v2 → v3 → v4 → v5 → v6 → v7 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限、审阅配置、验证命令与重试次数缺省", () => {
   const current = { ...makeSnapshot(), memory: [] };
   const { approvalMode: _, ...policyV1 } = current.tools.policy;
   const v1 = { ...current, version: 1, tools: { ...current.tools, policy: policyV1 } };
@@ -100,8 +102,10 @@ test("v1 → v2 → v3 → v4 → v5 → v6 迁移链：补 approvalMode 默认 
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 6);
+  assert.equal(migrated.version, 7);
   assert.equal(migrated.review, undefined);
+  assert.equal(migrated.verify, undefined);
+  assert.equal(migrated.retryOnFail, undefined);
   assert.equal(migrated.tools.policy.approvalMode, "prompt");
   assert.equal(migrated.model.thinkingLevel, undefined);
   assert.equal(migrated.model.maxOutputTokens, undefined);
@@ -118,4 +122,23 @@ test("v2 → v3：非结构化的旧 memory 占位不能冒充冻结清单，迁
       InjectionSnapshotSchema
     )
   );
+});
+
+// M7 S3 / S6（决策 071 / 079）：v7 顶层加验证命令配置与失败自动分叉重试次数，按会话冻结
+test("v7 快照：可选的验证命令配置与失败自动分叉重试次数；缺省合法；v6 快照纯版本推进", () => {
+  const snapshot = makeSnapshot();
+  assert.ok(
+    Value.Check(InjectionSnapshotSchema, {
+      ...snapshot,
+      verify: { command: "npm test", timeoutMs: 1000 },
+      retryOnFail: 2,
+    })
+  );
+  assert.ok(
+    !Value.Check(InjectionSnapshotSchema, { ...snapshot, verify: { command: "", timeoutMs: 1 } })
+  );
+  assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, retryOnFail: -1 }));
+  const v6 = { ...makeSnapshot(), version: 6 };
+  const migrated = registry().migrate("injection-snapshot", v6, 7, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v6, version: 7 });
 });

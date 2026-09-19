@@ -67,6 +67,8 @@ export interface ReplOptions {
   grants?: GrantsCommandContext;
   // M5 S2（决策 038）：/search 命令上下文（工作区根）；缺省时 /search 不可用
   search?: { root: string };
+  // M7（决策 079）：/fork 手动分叉（命令层在 application/fork-command.ts，与 tui 同一份）；缺省时不可用
+  fork?: (args: string) => Promise<string>;
 }
 
 export async function runRepl(options: ReplOptions): Promise<void> {
@@ -109,6 +111,10 @@ export async function runRepl(options: ReplOptions): Promise<void> {
         // M5 S2（决策 038）：/search 内容级检索——命令层与 tui 同一份
         if (tokens[0] === "search" && options.search !== undefined) {
           write(await runSearchCommand({ root: options.search.root, args: tokens.slice(1) }));
+          continue;
+        }
+        if (tokens[0] === "fork" && options.fork !== undefined) {
+          write(`${await options.fork(task.slice("/fork".length))}\n`);
           continue;
         }
         const handled = options.grants !== undefined && runGrantCommand(tokens, options.grants);

@@ -92,7 +92,7 @@ export default {
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|review)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|review|distillation)/",
       },
     },
     {
@@ -112,15 +112,15 @@ export default {
       name: "placeholders-only-state-tools",
       severity: "error",
       comment:
-        "占位目录（context / distillation / replay）暂按最小允许清单约束：只依赖 state 与 tools" +
-        "（022 修订）。review/ 已在 M6 开工时放行到自己的清单，见 review-below-controller。",
+        "占位目录（context / replay）暂按最小允许清单约束：只依赖 state 与 tools" +
+        "（022 修订）。review/ 与 distillation/ 已放行到各自的清单，见 review-below-controller 与 distillation-below-controller。",
       from: {
-        path: "^src/(context|distillation|replay)/",
+        path: "^src/(context|replay)/",
         pathNot: "\\.test\\.ts$",
       },
       to: {
         path: "^src/",
-        pathNot: "^src/(context|distillation|replay|state|tools)/",
+        pathNot: "^src/(context|replay|state|tools)/",
       },
     },
     {
@@ -132,6 +132,16 @@ export default {
         "application 与 Actor 层——调度与装配由 application 注入。",
       from: { path: "^src/review/", pathNot: "\\.test\\.ts$" },
       to: { path: "^src/", pathNot: "^src/(review|state|tools|persistence)/" },
+    },
+    {
+      name: "distillation-below-controller",
+      severity: "error",
+      comment:
+        "distillation（M7：提炼器的对比快照、只读工具、任务说明与候选落盘，决策 074 / 076）" +
+        "只依赖 state、tools、persistence 的只读物化与 review 的截断和暂存口径；不触达 pi-runtime、" +
+        "orchestration、application 与 Actor 层——派发、调度与装配由 application 注入。",
+      from: { path: "^src/distillation/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/", pathNot: "^src/(distillation|review|state|tools|persistence)/" },
     },
     {
       name: "memory-below-controller",

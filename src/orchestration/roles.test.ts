@@ -36,7 +36,7 @@ test("委派策略：父策略没有的工具角色拿不到；父 deny 原样�
   const denied = deriveWorkerPolicy(denyingParent, "implementer");
   assert.deepEqual(denied.allow, ["read_file"]);
   assert.deepEqual(denied.deny, ["edit_file"]);
-  assert.doesNotThrow(() => assertPolicySubset(denied, denyingParent));
+  assert.doesNotThrow(() => assertPolicySubset(denied, denyingParent, "implementer"));
 });
 
 test("子集校验：扩 allow、丢 deny、审批模式升级一律拒绝", () => {
@@ -45,19 +45,26 @@ test("子集校验：扩 allow、丢 deny、审批模式升级一律拒绝", () 
     () =>
       assertPolicySubset(
         { allow: ["read_file", "edit_file"], deny: ["edit_file"], approvalMode: "prompt" },
-        parent
+        parent,
+        "implementer"
       ),
     WorkerPolicyError
   );
   assert.throws(
-    () => assertPolicySubset({ allow: ["read_file"], deny: [], approvalMode: "prompt" }, parent),
+    () =>
+      assertPolicySubset(
+        { allow: ["read_file"], deny: [], approvalMode: "prompt" },
+        parent,
+        "implementer"
+      ),
     WorkerPolicyError
   );
   assert.throws(
     () =>
       assertPolicySubset(
         { allow: ["read_file"], deny: ["edit_file"], approvalMode: "yolo" },
-        parent
+        parent,
+        "implementer"
       ),
     WorkerPolicyError
   );

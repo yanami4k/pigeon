@@ -5,6 +5,7 @@
 // 落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
 // 深度 1：本编排器所在会话自己是 worker 时拒绝再派。上限只有轮次与墙钟，超限与取消都走 interrupt。
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
+import type { DistillTarget } from "../state/distill.ts";
 import type {
   ChildResult,
   ChildSettledInput,
@@ -48,6 +49,10 @@ export interface WorkerRuntimeHandle {
   // M6（决策 064）：模型交回的结构化内容（末条 assistant 正文能解析成对象时在场）；
   // 不实现即视为没有结构化结果，既有 worker 行为不变
   structured?(): unknown;
+  // M7（决策 072）：上限中止前把撞到的上限写进 worker 自己的账本（run.limit-hit）；不实现即不留痕
+  recordLimitHit?(limit: "turn-limit" | "wall-clock-limit" | "token-limit"): void;
+  // M7（决策 077 / 079）：从已有消息续跑（分叉续跑）；不实现即不支持
+  continueRun?(): Promise<{ status: WorkerRunStatus; errorMessage?: string }>;
   // 释放运行面并关闭 worker 会话文件
   dispose(): Promise<void>;
 }
@@ -71,6 +76,8 @@ export interface WorkerRuntimeRequest {
   approvalHandler: ApprovalHandler;
   // M6（决策 064）：Reviewer 的审阅目标（被审 Run 与增量起点）；只读快照工具据此绑定作用域
   review?: ReviewTarget;
+  // M7（决策 074）：提炼器的提炼目标（一组尝试）；只读工具据此绑定作用域
+  distill?: DistillTarget;
 }
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
@@ -99,7 +106,8 @@ export function gitWorktreeWorkspaces(roots: {
 }): WorkspaceProvider {
   return {
     plan: ({ sessionId, name, role }) =>
-      role === "reviewer"
+      // M7（决策 074）：提炼器与 Reviewer 一样只读、无工作区
+      role === "reviewer" || role === "distiller"
         ? { kind: "none" }
         : {
             kind: "git-worktree",
@@ -152,6 +160,10 @@ export interface SpawnRequest {
   limits?: Partial<WorkerLimits>;
   // M6（决策 064）：派 reviewer 时的审阅目标
   review?: ReviewTarget;
+  // M7（决策 074）：派 distiller 时的提炼目标（必填）
+  distill?: DistillTarget;
+  // M7（决策 069）：并行派发同一任务时的共享任务标识，写入派出记录
+  taskKey?: string;
 }
 
 export type WorkerState = "running" | ChildSettledStatus;
@@ -226,13 +238,16 @@ export class WorkerOrchestrator {
     if (task === "") {
       throw new WorkerSpawnError("任务不能为空");
     }
+    if (role === "distiller" && request.distill === undefined) {
+      throw new WorkerSpawnError("提炼器必须绑定提炼目标（一组尝试），不能直接派出");
+    }
     const name = request.name ?? this.#nextName(role);
     assertWorkerName(name);
     if ([...this.#workers.values()].some((worker) => worker.name === name)) {
       throw new WorkerSpawnError(`worker 名已被占用：${name}`);
     }
     const policy = deriveWorkerPolicy(this.#options.parentPolicy, role);
-    assertPolicySubset(policy, this.#options.parentPolicy);
+    assertPolicySubset(policy, this.#options.parentPolicy, role);
     const limits: WorkerLimits = {
       ...DEFAULT_WORKER_LIMITS,
       ...this.#options.defaultLimits,
@@ -247,6 +262,7 @@ export class WorkerOrchestrator {
       name,
       role,
       task,
+      ...(request.taskKey !== undefined ? { taskKey: request.taskKey } : {}),
       policy,
       limits,
       workspace,
@@ -271,6 +287,7 @@ export class WorkerOrchestrator {
         approvalHandler: (approval) =>
           this.#options.approvals({ ...approval, sessionId, worker: { name, role } }),
         ...(request.review !== undefined ? { review: request.review } : {}),
+        ...(request.distill !== undefined ? { distill: request.distill } : {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -340,6 +357,12 @@ export class WorkerOrchestrator {
         return;
       }
       entry.limitHit = reason;
+      // 先留痕再中止：上限中止在运行终态上表现为中止，标签靠这条记录判失败（072）
+      try {
+        runtime.recordLimitHit?.(reason);
+      } catch (error) {
+        this.#errors.push(error);
+      }
       runtime.interrupt().catch((error: unknown) => {
         this.#errors.push(error);
       });

@@ -71,8 +71,12 @@ export interface BuildRunSnapshotInput {
   totalChars?: number;
 }
 
-// 单条正文：头尾保留，中间标注省略字符数（省略处不伪装成完整正文）
-function clampText(text: string, limit: number): { text: string; truncated: boolean } {
+// 单条正文：头尾保留，中间标注省略字符数（省略处不伪装成完整正文）。M7 提炼器沿用同一口径，回查工具名由调用方给
+export function clampText(
+  text: string,
+  limit: number,
+  entryTool = "review_entry"
+): { text: string; truncated: boolean } {
   if (text.length <= limit) {
     return { text, truncated: false };
   }
@@ -80,13 +84,16 @@ function clampText(text: string, limit: number): { text: string; truncated: bool
   const tail = limit - head;
   const omitted = text.length - limit;
   return {
-    text: `${text.slice(0, head)}…（省略 ${omitted} 字符，用 review_entry 按条目号回查原文）…${text.slice(text.length - tail)}`,
+    text: `${text.slice(0, head)}…（省略 ${omitted} 字符，用 ${entryTool} 按条目号回查原文）…${text.slice(text.length - tail)}`,
     truncated: true,
   };
 }
 
 // 正文块 → 人读文本：与账本里的落盘截断标记一并带出（§3.3：截断内容不得支撑确定性结论）
-function renderBlocks(record: MessageContentRecord): { text: string; storedTruncated: boolean } {
+export function renderBlocks(record: MessageContentRecord): {
+  text: string;
+  storedTruncated: boolean;
+} {
   const parts: string[] = [];
   let storedTruncated = false;
   for (const block of record.blocks) {

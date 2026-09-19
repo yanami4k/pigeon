@@ -17,6 +17,12 @@ import {
 import { join } from "node:path";
 import { Value } from "typebox/value";
 import {
+  type AttemptVerifiedInput,
+  type AttemptVerifiedRecord,
+  AttemptVerifiedRecordSchema,
+  type BranchHeaderInput,
+  type BranchHeaderRecord,
+  BranchHeaderRecordSchema,
   type BreakerInput,
   type BreakerRecord,
   BreakerRecordSchema,
@@ -35,6 +41,9 @@ import {
   type DecisionInput,
   type DecisionRecord,
   DecisionRecordSchema,
+  type DistillSkippedInput,
+  type DistillSkippedRecord,
+  DistillSkippedRecordSchema,
   type EntryAppendInput,
   type EntryRecord,
   EntryRecordSchema,
@@ -68,6 +77,9 @@ import {
   ResolutionRecordSchema,
   type RuntimeEventRecord,
   RuntimeEventRecordSchema,
+  type SessionForkedInput,
+  type SessionForkedRecord,
+  SessionForkedRecordSchema,
   type SessionHeaderInput,
   type SessionHeaderRecord,
   SessionHeaderRecordSchema,
@@ -264,6 +276,10 @@ export class JsonlEventLog {
   // M5.5 S1（决策 040）：会话打开锁的释放函数（幂等）
   readonly #releaseLock: () => void;
   #closed = false;
+  // M7（决策 077）：条目落盘后的监听（会话树写穿）；监听抛错一律吞掉，不影响落盘
+  readonly #entryListeners = new Set<
+    (record: EntryRecord, content?: MessageContentRecord) => void
+  >();
 
   constructor(dir: string, sessionId: SessionId, options: JsonlEventLogOptions = {}) {
     this.sessionId = sessionId;
@@ -324,12 +340,29 @@ export class JsonlEventLog {
   // 死于两次写盘之间只会留下"内容在、entry 缺"（entry 断号判据负责），绝不出现"entry 回指
   // 一条从未写出的正文"之外的静默状态。内容写失败不挡 entry：entry 照写并回指，冷侧据此派生
   // 正文缺失缺口，写失败原样上抛由调用方进 listenerErrors（D2 同一口径）
+  // M7（决策 077）：订阅条目落盘（写穿会话树）；返回退订函数
+  onEntry(listener: (record: EntryRecord, content?: MessageContentRecord) => void): () => void {
+    this.#entryListeners.add(listener);
+    return () => this.#entryListeners.delete(listener);
+  }
+
+  #notifyEntry(record: EntryRecord, content?: MessageContentRecord): void {
+    for (const listener of this.#entryListeners) {
+      try {
+        listener(record, content);
+      } catch {
+        // 写穿是派生缓存：监听故障不影响账本
+      }
+    }
+  }
+
   appendEntry(input: EntryAppendInput): EntryRecord {
     const { runId, message, ...body } = input;
     const envelope = this.#envelope(runId);
     if (message === undefined) {
       const record = Value.Parse(EntryRecordSchema, { ...envelope, kind: "entry", ...body });
       this.#append(record, false);
+      this.#notifyEntry(record);
       return record;
     }
     const content = buildMessageContent(message, this.#contentOptions);
@@ -358,6 +391,7 @@ export class JsonlEventLog {
     if (contentError !== null) {
       throw contentError;
     }
+    this.#notifyEntry(record, contentRecord);
     return record;
   }
 
@@ -569,6 +603,54 @@ export class JsonlEventLog {
       ...body,
     });
     this.#append(record, true);
+    return record;
+  }
+
+  // M7（决策 071）：通用验证记录——观察族耐久（同步写不 fsync，同 eval.verified）
+  appendAttemptVerified(input: AttemptVerifiedInput): AttemptVerifiedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(AttemptVerifiedRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "attempt.verified",
+      ...body,
+    });
+    this.#append(record, false);
+    return record;
+  }
+
+  // M7（决策 077）：分叉记录——先于建树与分支续跑落盘，写不进就不分叉；治理族耐久（fsync）
+  appendSessionForked(input: SessionForkedInput): SessionForkedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(SessionForkedRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "session.forked",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // M7（决策 077）：分支会话头——分支会话文件的首条记录；治理族耐久（fsync）
+  appendBranchHeader(input: BranchHeaderInput): BranchHeaderRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(BranchHeaderRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "branch.header",
+      ...body,
+    });
+    this.#append(record, true);
+    return record;
+  }
+
+  // M7（决策 074）：提炼跳过记录——观察族耐久
+  appendDistillSkipped(input: DistillSkippedInput): DistillSkippedRecord {
+    const { runId, ...body } = input;
+    const record = Value.Parse(DistillSkippedRecordSchema, {
+      ...this.#grantEnvelope(runId),
+      kind: "distill.skipped",
+      ...body,
+    });
+    this.#append(record, false);
     return record;
   }
 

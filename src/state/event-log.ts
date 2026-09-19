@@ -7,7 +7,13 @@
 // persistence/event-log.ts，冷物化与对账在 state/materialize.ts。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { CandidateKindSchema, ReviewerCandidateSchema, ScanHitSchema } from "./candidate.ts";
+import {
+  CandidateKindSchema,
+  migrateCandidateToCurrent,
+  OutcomeLabelSchema,
+  ReviewerCandidateSchema,
+  ScanHitSchema,
+} from "./candidate.ts";
 import {
   EntryIdSchema,
   ExecutionIdSchema,
@@ -21,12 +27,14 @@ import { type ContentSourceMessage, Sha256HexSchema } from "./message-content.ts
 import { MigrationRegistry } from "./migration.ts";
 import { migrateReceiptToCurrent, type Receipt, ReceiptSchema } from "./receipt.ts";
 import {
+  EvalVerdictSchema,
   EvalVerifiedPayloadSchema,
   LlmRequestPayloadSchema,
   ObservationKind,
   ReviewSkippedPayloadSchema,
   ReviewUnparsablePayloadSchema,
   RunEndedPayloadSchema,
+  RunLimitHitPayloadSchema,
   RunStartedPayloadSchema,
   RuntimeEventKind,
   SkillLoadedPayloadSchema,
@@ -34,6 +42,7 @@ import {
   ToolSettledPayloadSchema,
   TurnCompletedPayloadSchema,
   TurnStartedPayloadSchema,
+  WorkspaceCheckpointPayloadSchema,
 } from "./runtime-events.ts";
 import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 
@@ -51,8 +60,10 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v9（M6.5 S3，决策 058）：新增 eval.verified 观察族（加法式）；
 // v10（M6，决策 064 / 065）：工作区联合新增"无工作区"成员、child.settled 的结果放宽（无工作区无分支与
 // 改动文件）并可携带结构化内容、worker 上限加可选 token 项与 token-limit 收尾状态、新增 review.skipped 观察族、
-// 新增候选提出与候选筛查两族（加法式）
-export const EVENT_LOG_VERSION = 10;
+// 新增候选提出与候选筛查两族（加法式）；
+// v11（M7，决策 069 / 071 / 072 / 075 / 077 / 078）：child.spawned 加可选共享任务标识，新增通用验证、分叉、分支会话头、
+// 提炼跳过四族与工作区快照、撞上限、树写穿失败三个观察族，候选提出内嵌的候选升 v3（加法式）
+export const EVENT_LOG_VERSION = 11;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -140,6 +151,20 @@ export const ReviewUnparsableRecordSchema = Type.Object({
   payload: ReviewUnparsablePayloadSchema,
 });
 export type ReviewUnparsableRecord = Static<typeof ReviewUnparsableRecordSchema>;
+// M7（决策 078）：工作区快照与条目号的对应
+export const WorkspaceCheckpointRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.WorkspaceCheckpoint),
+  payload: WorkspaceCheckpointPayloadSchema,
+});
+export type WorkspaceCheckpointRecord = Static<typeof WorkspaceCheckpointRecordSchema>;
+// M7（决策 072）：本 Run 因上限被中止
+export const RunLimitHitRecordSchema = Type.Object({
+  ...ENVELOPE_PROPS,
+  kind: Type.Literal(ObservationKind.RunLimitHit),
+  payload: RunLimitHitPayloadSchema,
+});
+export type RunLimitHitRecord = Static<typeof RunLimitHitRecordSchema>;
 
 export const ObservationRecordSchema = Type.Union([
   RunStartedRecordSchema,
@@ -148,6 +173,8 @@ export const ObservationRecordSchema = Type.Union([
   EvalVerifiedRecordSchema,
   ReviewSkippedRecordSchema,
   ReviewUnparsableRecordSchema,
+  WorkspaceCheckpointRecordSchema,
+  RunLimitHitRecordSchema,
 ]);
 export type ObservationRecord = Static<typeof ObservationRecordSchema>;
 
@@ -373,6 +400,8 @@ export const WorkerRoleSchema = Type.Union([
   Type.Literal("explorer"),
   Type.Literal("implementer"),
   Type.Literal("tester"),
+  // M7（决策 074）：提炼器——只读、无工作区，作用域绑定一组尝试
+  Type.Literal("distiller"),
 ]);
 export type WorkerRole = Static<typeof WorkerRoleSchema>;
 
@@ -456,6 +485,8 @@ export const ChildSpawnedRecordSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   role: WorkerRoleSchema,
   task: Type.String({ minLength: 1 }),
+  // M7（决策 069）：并行派发同一任务的多个 worker 共享的任务标识（同任务认定只按显式标识）；单派缺省
+  taskKey: Type.Optional(Type.String({ minLength: 1 })),
   policy: DelegatedPolicySchema,
   limits: WorkerLimitsSchema,
   workspace: WorkerWorkspaceSchema,
@@ -512,6 +543,96 @@ export const CandidateScreenedRecordSchema = Type.Object({
 });
 export type CandidateScreenedRecord = Static<typeof CandidateScreenedRecordSchema>;
 
+// 通用验证记录（M7，决策 071）：尝试收尾后由程序作为独立子进程在该尝试的工作区执行配置的验证命令，模型看不到；
+// 三值口径同 058。落在哪个会话文件由写入方的单写者约束决定（worker 尝试落父会话，普通会话落自身），
+// target 指明对应的会话与 Run；信封 Run 可缺省（父会话无活动 Run 时）。观察族耐久（同步写不 fsync）
+export const AttemptVerifiedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("attempt.verified"),
+  target: Type.Object({ sessionId: SessionIdSchema, runId: RunIdSchema }),
+  // 实际执行的参数数组
+  command: Type.Array(Type.String()),
+  exitCode: Type.Union([Type.Integer(), Type.Null()]),
+  signal: Type.Optional(Type.String()),
+  timedOut: Type.Boolean(),
+  // 验证命令自身故障（拉不起进程、工作区不存在）
+  error: Type.Optional(Type.String()),
+  durationMs: Type.Integer({ minimum: 0 }),
+  outputBytes: Type.Integer({ minimum: 0 }),
+  outputHash: Sha256HexSchema,
+  output: Type.String(),
+  truncated: Type.Boolean(),
+  // 执行验证的工作区（尝试所在的工作树或工作区根）
+  workspace: Type.String({ minLength: 1 }),
+  verdict: EvalVerdictSchema,
+  verifiedAt: Type.Integer({ minimum: 0 }),
+});
+export type AttemptVerifiedRecord = Static<typeof AttemptVerifiedRecordSchema>;
+
+// 分叉点：来源会话里某次 Run 的条目号（含该条，之后的消息不进分支）
+export const ForkPointSchema = Type.Object({
+  runId: RunIdSchema,
+  runSeq: Type.Integer({ minimum: 1 }),
+});
+export type ForkPoint = Static<typeof ForkPointSchema>;
+
+// 分叉点快照引用：分叉点之前最近的快照提交与其 ref
+export const CheckpointRefSchema = Type.Object({
+  ref: Type.String({ minLength: 1 }),
+  commit: Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" }),
+});
+export type CheckpointRef = Static<typeof CheckpointRefSchema>;
+
+export const ForkTriggerSchema = Type.Union([
+  Type.Literal("manual"),
+  Type.Literal("retry-on-fail"),
+]);
+export type ForkTrigger = Static<typeof ForkTriggerSchema>;
+
+// 分叉记录（M7，决策 077）：写进来源会话文件，先于建树与分支续跑落盘——会话树的权威来源。
+// 新分支标识即分支会话号（分支作为新的 Pigeon 会话续跑）。治理族耐久（fsync）
+export const SessionForkedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("session.forked"),
+  forkPoint: ForkPointSchema,
+  branchSessionId: SessionIdSchema,
+  checkpoint: CheckpointRefSchema,
+  trigger: ForkTriggerSchema,
+  forkedAt: Type.Integer({ minimum: 0 }),
+});
+export type SessionForkedRecord = Static<typeof SessionForkedRecordSchema>;
+
+// 分支会话头（M7，决策 077 / 079）：分支会话文件的首条记录，指向来源会话与分叉点；分支恒在独立工作树里续跑。
+// 与 worker 会话头分开：分支不是委派，没有父子角色与委派策略
+export const BranchHeaderRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("branch.header"),
+  sourceSessionId: SessionIdSchema,
+  forkPoint: ForkPointSchema,
+  checkpoint: CheckpointRefSchema,
+  workspace: GitWorktreeWorkspaceSchema,
+  trigger: ForkTriggerSchema,
+  startedAt: Type.Integer({ minimum: 0 }),
+});
+export type BranchHeaderRecord = Static<typeof BranchHeaderRecordSchema>;
+
+// 提炼跳过（M7，决策 074 未裁细节的保守缺省）：一组尝试不满足自动提炼条件（全成功、全失败、成败两侧凑不齐）时留痕；
+// 写进触发提炼的会话文件（并行派发的父会话、分叉的来源会话）。观察族耐久
+export const DistillSkippedRecordSchema = Type.Object({
+  ...GRANT_ENVELOPE_PROPS,
+  kind: Type.Literal("distill.skipped"),
+  taskKey: Type.Optional(Type.String({ minLength: 1 })),
+  reason: Type.Union([
+    Type.Literal("all-passed"),
+    Type.Literal("all-failed"),
+    Type.Literal("no-contrast"),
+  ]),
+  attempts: Type.Array(
+    Type.Object({ sessionId: SessionIdSchema, runId: RunIdSchema, label: OutcomeLabelSchema })
+  ),
+});
+export type DistillSkippedRecord = Static<typeof DistillSkippedRecordSchema>;
+
 // Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族；
 // M4 收口新增 grant.promoted / grant.config-removed 族）
 export const EventRecordSchema = Type.Union([
@@ -532,6 +653,10 @@ export const EventRecordSchema = Type.Union([
   ChildSettledRecordSchema,
   CandidateProposedRecordSchema,
   CandidateScreenedRecordSchema,
+  AttemptVerifiedRecordSchema,
+  SessionForkedRecordSchema,
+  BranchHeaderRecordSchema,
+  DistillSkippedRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -627,6 +752,28 @@ eventLogMigrations.register("event-log", 8, (doc) => ({ ...doc, version: 9 }));
 // 新增候选两族）——v9 旧记录逐字有效（git-worktree 工作区与带分支的结果仍通过当前 schema），纯版本推进
 eventLogMigrations.register("event-log", 9, (doc) => ({ ...doc, version: 10 }));
 
+// v10 → v11（M7）：加法式演进（派出记录可选任务标识、新增四族与两个观察族）；候选提出内嵌的 v2 候选经候选迁移链升 v3——
+// 迁移链只在末尾按当前 schema 校验一次，内嵌候选必须在链上显式升级（同 v7 → v8 的内嵌 receipt）。
+// 另按 065 修订改写结构化结果不可解析记录里记产出会话的字段名（v10 记的 reviewSessionId 原样搬到 producerSessionId，
+// 值不变）——该族是 M6 已入库的形状，旧记录必须真的改写，不能只改 schema
+eventLogMigrations.register("event-log", 10, (doc) => ({
+  ...doc,
+  version: 11,
+  ...(doc.kind === "candidate.proposed"
+    ? { candidate: migrateCandidateToCurrent(doc.candidate) }
+    : {}),
+  ...(doc.kind === "review.unparsable" ? { payload: renameProducerField(doc.payload) } : {}),
+}));
+
+// 不可解析记录的 payload：旧名在场即搬到新名，其余字段原样；已是新名的原样返回
+function renameProducerField(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || !("reviewSessionId" in payload)) {
+    return payload;
+  }
+  const { reviewSessionId, ...rest } = payload as Record<string, unknown>;
+  return { ...rest, producerSessionId: reviewSessionId };
+}
+
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏
 export function parseEventRecord(raw: unknown): EventRecord {
@@ -645,5 +792,23 @@ export type CandidateProposedInput = Omit<
 >;
 export type CandidateScreenedInput = Omit<
   CandidateScreenedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+
+// M7 四族追加输入：业务字段 + 可选 runId；信封其余字段由日志盖章
+export type AttemptVerifiedInput = Omit<
+  AttemptVerifiedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type SessionForkedInput = Omit<
+  SessionForkedRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type BranchHeaderInput = Omit<
+  BranchHeaderRecord,
+  "version" | "id" | "sessionId" | "kind" | "timestamp"
+>;
+export type DistillSkippedInput = Omit<
+  DistillSkippedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;

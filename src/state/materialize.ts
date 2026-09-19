@@ -11,12 +11,15 @@ import {
   type ToolOutcomeFacts,
 } from "./classification.ts";
 import type {
+  AttemptVerifiedRecord,
+  BranchHeaderRecord,
   BreakerRecord,
   CandidateProposedRecord,
   CandidateScreenedRecord,
   ChildSettledRecord,
   ChildSpawnedRecord,
   DecisionRecord,
+  DistillSkippedRecord,
   EntryRecord,
   EvalVerifiedRecord,
   EventRecord,
@@ -29,10 +32,13 @@ import type {
   ResolutionRecord,
   ReviewSkippedRecord,
   ReviewUnparsableRecord,
+  RunLimitHitRecord,
   RunStartedRecord,
   RuntimeEventRecord,
+  SessionForkedRecord,
   SessionHeaderRecord,
   SkillLoadedRecord,
+  WorkspaceCheckpointRecord,
 } from "./event-log.ts";
 import type { ExecutionId, RunId, SessionId } from "./ids.ts";
 import type { Receipt } from "./receipt.ts";
@@ -124,6 +130,14 @@ export interface MaterializedSession {
   // M6（决策 065）：候选提出与筛查两族（候选状态由二者现算，见 candidate-status.ts）
   candidateProposeds: CandidateProposedRecord[];
   candidateScreeneds: CandidateScreenedRecord[];
+  // M7（决策 071 / 072 / 074 / 077 / 078）：通用验证、撞上限、工作区快照、分叉、提炼跳过、树写穿失败（按落盘顺序）；
+  // branchHeader 在场 = 本会话是分叉出来的分支会话
+  attemptVerifieds: AttemptVerifiedRecord[];
+  limitHits: RunLimitHitRecord[];
+  checkpoints: WorkspaceCheckpointRecord[];
+  sessionForkeds: SessionForkedRecord[];
+  distillSkippeds: DistillSkippedRecord[];
+  branchHeader?: BranchHeaderRecord;
   // M5.5 S2（决策 040）：worker 编排三族。sessionHeader 在场 = 本会话是 worker 会话；
   // children 按 child.spawned 顺序配对 child.settled（缺 settled = 派出后未收尾，崩溃可能）；
   // 找不到 spawned 的 settled 如实归孤立清单
@@ -198,6 +212,12 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const reviewUnparsables: ReviewUnparsableRecord[] = [];
   const candidateProposeds: CandidateProposedRecord[] = [];
   const candidateScreeneds: CandidateScreenedRecord[] = [];
+  const attemptVerifieds: AttemptVerifiedRecord[] = [];
+  const limitHits: RunLimitHitRecord[] = [];
+  const checkpoints: WorkspaceCheckpointRecord[] = [];
+  const sessionForkeds: SessionForkedRecord[] = [];
+  const distillSkippeds: DistillSkippedRecord[] = [];
+  let branchHeader: BranchHeaderRecord | undefined;
   const runtimeEvents: RuntimeEventRecord[] = [];
   const intents: IntentRecord[] = [];
   const decisions: DecisionRecord[] = [];
@@ -256,6 +276,19 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       candidateProposeds.push(record);
     } else if (record.kind === "candidate.screened") {
       candidateScreeneds.push(record);
+    } else if (record.kind === "attempt.verified") {
+      attemptVerifieds.push(record);
+    } else if (record.kind === "run.limit-hit") {
+      limitHits.push(record);
+    } else if (record.kind === "workspace.checkpoint") {
+      checkpoints.push(record);
+    } else if (record.kind === "session.forked") {
+      sessionForkeds.push(record);
+    } else if (record.kind === "distill.skipped") {
+      distillSkippeds.push(record);
+    } else if (record.kind === "branch.header") {
+      // 分支会话头只认首个
+      branchHeader ??= record;
     } else {
       runtimeEvents.push(record);
     }
@@ -264,6 +297,12 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const { children, orphanChildSettleds } = pairChildren(childSpawneds, childSettleds);
   return {
     ...(sessionHeader !== undefined ? { sessionHeader } : {}),
+    ...(branchHeader !== undefined ? { branchHeader } : {}),
+    attemptVerifieds,
+    limitHits,
+    checkpoints,
+    sessionForkeds,
+    distillSkippeds,
     childSpawneds,
     childSettleds,
     children,
@@ -298,6 +337,22 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
   };
+}
+
+// 快照与条目号的对应（M7，决策 078）：某次 Run 在条目号 runSeq（含）之前最近的快照——该 Run 内 afterRunSeq 不大于
+// runSeq 的最后一条。只看同一 Run：分叉点所在 Run 之前的 Run 的快照由调用方按 Run 顺序回退查找。纯函数
+export function checkpointAtOrBefore(
+  session: Pick<MaterializedSession, "checkpoints">,
+  runId: RunId,
+  runSeq: number
+): WorkspaceCheckpointRecord["payload"] | undefined {
+  let found: WorkspaceCheckpointRecord["payload"] | undefined;
+  for (const record of session.checkpoints) {
+    if (record.runId === runId && record.payload.afterRunSeq <= runSeq) {
+      found = record.payload;
+    }
+  }
+  return found;
 }
 
 // worker 父子配对（M5.5 S2）：按 childSessionId 配对，保持 spawned 顺序；纯函数
@@ -353,6 +408,14 @@ export function detectContentGaps(
 
 // 崩溃残留 Run 清单（M4 验收 O-1/O-3）：出现过任何带 runId 的记录、却没有 run.ended 的 Run。
 // 纯函数；grant 族无 runId 的记录不算 Run
+// 引用型记录（M7）：候选两族与不可解析记录可能引用别的会话甚至别的治理根里的 Run（提炼宿主会话），
+// 不凭空在本会话造出 Run；同会话的引用（M6 审阅）本会话自有其他记录，不受影响
+const REFERENCE_KINDS: ReadonlySet<string> = new Set([
+  "candidate.proposed",
+  "candidate.screened",
+  "review.unparsable",
+]);
+
 export function collectUnfinishedRuns(
   records: readonly EventRecord[],
   runtimeEvents: readonly RuntimeEventRecord[]
@@ -366,7 +429,11 @@ export function collectUnfinishedRuns(
   const seen = new Set<RunId>();
   const unfinished: RunId[] = [];
   for (const record of records) {
-    if (record.runId !== undefined && !seen.has(record.runId)) {
+    if (
+      record.runId !== undefined &&
+      !REFERENCE_KINDS.has(record.kind) &&
+      !seen.has(record.runId)
+    ) {
       seen.add(record.runId);
       if (!ended.has(record.runId)) {
         unfinished.push(record.runId);
@@ -523,7 +590,7 @@ function classifySessionRecords(
   // grant 族 runId 可选（REPL 时段的放权/撤销无活动 Run）——无 runId 的记录不进
   // 任何 Run 的事实表（grant 是 session 级状态，由 /grants 展示，决策 3b）
   for (const record of records) {
-    if (record.runId !== undefined) {
+    if (record.runId !== undefined && !REFERENCE_KINDS.has(record.kind)) {
       runFactsOf(record.runId);
     }
   }

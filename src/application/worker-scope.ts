@@ -23,7 +23,18 @@ export function sessionRuntimeScope(
   if (!existsSync(JsonlEventLog.filePathFor(dir, sessionId))) {
     return { workspaceRoot: governanceRoot };
   }
-  const header = materializeSession(dir, sessionId, { content: false }).sessionHeader;
+  const session = materializeSession(dir, sessionId, { content: false });
+  // M7（决策 077）：分支会话回到它自己的工作树（主会话形态，不是委派）
+  const branch = session.branchHeader;
+  if (branch !== undefined) {
+    if (!existsSync(branch.workspace.path)) {
+      throw new Error(
+        `分支工作树已不存在：${branch.workspace.path}（分支 ${branch.workspace.branch} 仍可用 git 查看）`
+      );
+    }
+    return { workspaceRoot: branch.workspace.path };
+  }
+  const header = session.sessionHeader;
   if (header === undefined) {
     return { workspaceRoot: governanceRoot };
   }

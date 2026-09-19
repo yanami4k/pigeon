@@ -14,19 +14,27 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
+import { createSessionAttemptRunner } from "../application/attempt-group.ts";
+import { runForkCommand } from "../application/fork-command.ts";
 import {
   type LaunchFlags,
   parseLaunchFlags,
   resolveStreamFnSpec,
   reviewConfigOf,
+  verifyConfigOf,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
-import { openSessionRuntime } from "../application/session-runtime.ts";
+import { type OpenedSessionRuntime, openSessionRuntime } from "../application/session-runtime.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
-import { createSessionWorkers } from "../application/workers.ts";
+import {
+  createSessionWorkers,
+  createWorkerRuntimeFactory,
+  sessionWorkerRuntimeFactory,
+} from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
+import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { PigeonTuiShell, type TuiWorkersFace } from "./shell.ts";
@@ -38,13 +46,19 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
   "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--review-every <N>] [--no-review]";
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--review-every <N>] [--no-review] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>]";
 
 async function main(argv: string[]): Promise<void> {
+  // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
+  for (const warning of probeUpstreamVersions().warnings) {
+    console.error(warning);
+  }
   const flags: LaunchFlags = parseLaunchFlags(argv, {
     usage: USAGE,
     historyLimit: true,
     review: true,
+    verify: true,
+    retry: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份；
@@ -58,8 +72,12 @@ async function main(argv: string[]): Promise<void> {
   const approvalQueue = createApprovalQueue();
   const createHandler = (grants: SessionGrantStore) =>
     approvalQueue.wrap(createTuiApprovalHandler(grants, () => faceHolder.current));
-  const workersFor = (bundle: RuntimeBundle, parentSessionId?: SessionId) =>
-    createSessionWorkers({
+  const workersFor = (
+    opened: OpenedSessionRuntime,
+    parentSessionId?: SessionId
+  ): TuiWorkersFace => {
+    const { bundle } = opened;
+    const deps = {
       governanceRoot: workspaceRoot,
       bundle,
       // worker 请求自带其会话的放权落点；此处绑定的父会话存储只是缺省
@@ -70,28 +88,67 @@ async function main(argv: string[]): Promise<void> {
       persistThinking: flags.persistThinking,
       ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-    });
+    };
+    const orchestrator = createSessionWorkers(deps);
+    const verify = verifyConfigOf(flags);
+    return {
+      spawn: (request) => orchestrator.spawn(request),
+      cancel: (id) => orchestrator.cancel(id),
+      status: () => orchestrator.status(),
+      awaitResult: (id) => orchestrator.awaitResult(id),
+      // M7（决策 069 / 074）：并行同任务派发只在主会话提供（worker 会话按深度 1 不能再派）
+      ...(parentSessionId === undefined
+        ? {
+            spawnAttempts: createSessionAttemptRunner({
+              orchestrator,
+              governanceRoot: workspaceRoot,
+              hostLog: bundle.eventLog,
+              parentPolicy: bundle.adapter.snapshot().tools.policy,
+              createRuntime: sessionWorkerRuntimeFactory(deps),
+              ...(verify !== undefined ? { verify } : {}),
+            }),
+            // M7（决策 079）：/fork 手动分叉
+            fork: (args: string) =>
+              runForkCommand({
+                governanceRoot: workspaceRoot,
+                opened,
+                args,
+                run: {
+                  streamFn,
+                  provider: flags.provider,
+                  modelId: flags.modelId,
+                  yolo: flags.yolo,
+                  persistThinking: flags.persistThinking,
+                  ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+                  ...(verify !== undefined ? { verify } : {}),
+                },
+              }),
+          }
+        : {}),
+    };
+  };
   // 壳尚未接管终端：启动问题（单个 server 起不来不挡会话）与注解配置冲突（052）直接打到 stderr，
   // 冷侧另见 run.started 的工具集摘要与 server 状态
-  const mainBundle = (
-    await openSessionRuntime({
-      governanceRoot: workspaceRoot,
-      sessionId,
-      streamFn,
-      flags,
-      // M6（决策 064）：主会话挂后台审阅
-      review: reviewConfigOf(flags),
-      createApprovalHandler: createHandler,
-      onMcpNote: (note) => {
-        console.error(`[mcp] ${note}`);
-      },
-    })
-  ).bundle;
+  const mainOpened = await openSessionRuntime({
+    governanceRoot: workspaceRoot,
+    sessionId,
+    streamFn,
+    flags,
+    // M6（决策 064）：主会话挂后台审阅
+    review: reviewConfigOf(flags),
+    ...verifyOption(flags),
+    ...attemptOptions(flags, streamFn),
+    createApprovalHandler: createHandler,
+    onMcpNote: (note) => {
+      console.error(`[mcp] ${note}`);
+    },
+  });
+  const mainBundle = mainOpened.bundle;
   // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
   let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers: TuiWorkersFace } = {
     sessionId,
     bundle: mainBundle,
-    workers: workersFor(mainBundle),
+    workers: workersFor(mainOpened),
   };
   const shell = new PigeonTuiShell({
     terminal: new ProcessTerminal(),
@@ -131,11 +188,13 @@ async function main(argv: string[]): Promise<void> {
           flags,
           // 恢复的主会话同样挂审阅；worker 会话作用域在装配内部排除
           review: reviewConfigOf(flags),
+          ...verifyOption(flags),
+          ...attemptOptions(flags, streamFn),
           createApprovalHandler: createHandler,
           restoreGrants: true,
         });
         const bundle = opened.bundle;
-        const workers = workersFor(bundle, opened.scope.parentSessionId);
+        const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
         slot = { sessionId: targetId, bundle, workers };
         void disposeRuntime(previous.bundle);
@@ -187,4 +246,37 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
+}
+
+// M7（决策 071）：会话级验证命令（未配置时不传）
+function verifyOption(flags: LaunchFlags): {
+  verify?: NonNullable<ReturnType<typeof verifyConfigOf>>;
+} {
+  const verify = verifyConfigOf(flags);
+  return verify !== undefined ? { verify } : {};
+}
+
+// M7（决策 079 / 074）：失败自动分叉重试次数与叶子验证后的提炼器运行面
+function attemptOptions(
+  flags: LaunchFlags,
+  streamFn: Parameters<typeof createWorkerRuntimeFactory>[0]["streamFnFor"] extends (
+    ...args: never[]
+  ) => infer S
+    ? S
+    : never
+): {
+  retryOnFail?: number;
+  distill: { createRuntime: ReturnType<typeof createWorkerRuntimeFactory> };
+} {
+  return {
+    ...(flags.retryOnFail !== undefined ? { retryOnFail: flags.retryOnFail } : {}),
+    distill: {
+      createRuntime: createWorkerRuntimeFactory({
+        streamFnFor: () => streamFn,
+        provider: flags.provider,
+        modelId: flags.modelId,
+        persistThinking: flags.persistThinking,
+      }),
+    },
+  };
 }

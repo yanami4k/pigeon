@@ -79,6 +79,19 @@
 | 065 | 候选暂存：正文按哈希不可变写入暂存目录，状态由账本记录现算，改内容即新候选并标记取代 | M6 前置第 2 件 | M6 |
 | 066 | TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本 | M6 前置第 3 件 | M6 前置 |
 | 067 | tui/shell.ts 按职责拆五个文件；抽启动参数与会话运行面两个装配模块，三入口模型占位缺省统一、cli 补 PIGEON_STREAM_FN 回退 | M6 前置第 4 件 | M6 前置 |
+| 068 | 对比素材：同任务独立尝试与会话树分叉都做，先比对后分叉；分叉基于上游 Session 存储，Pigeon 补写穿与分叉续跑，账本为唯一权威 | M7 前置第 1 件 | M7 |
+| 069 | 同任务认定用显式任务标识：Eval 用任务编号，并行派发同一任务时生成共享标识写入派出记录 | M7 前置第 2 件 | M7 |
+| 070 | Episode 边界按来源定：同任务比对取尝试会话首个 Run，分叉取分叉点到叶子、共享前缀只算一次 | M7 前置第 3 件 | M7 |
+| 071 | Eval 之外的成功判定：配置验证命令，尝试收尾后由程序独立执行并落通用验证记录，未配置标未知 | M7 前置第 4 件 | M7 |
+| 072 | 五个标签边界：成功只认验证通过；撞上限与熔断算失败；人主动取消算放弃；放弃与基础设施错误不进成败对比 | M7 前置第 5 件 | M7 |
+| 073 | Run 内局部对只取人写拒绝理由与域错误后成功重试，只产出教训候选 | M7 前置第 6 件 | M7 |
+| 074 | 提炼器复用 worker 机制新增角色，并行同任务收尾后与分叉叶子验证后自动触发，另有 `pigeon distill`；预算单设、共用全局并发闸 | M7 前置第 7 件 | M7 |
+| 075 | 候选升 v3，加法式新增对比来源块 | M7 前置第 8 件 | M7 |
+| 076 | 提炼器输入沿用 M6 截断，每侧 24,000 字符，共享前缀与任务描述只喂一次，独立尝试不做分歧步对齐 | M7 前置第 9 件 | M7 |
+| 077 | 会话树在分叉发生时才建立：账本先记分叉记录，树放 `.pigeon/trees/` 为可重建的派生缓存，写穿不阻塞主循环 | M7 前置第 10 件 | M7 |
+| 078 | 文件变化后用 git 底层命令生成快照挂到 `refs/pigeon/checkpoints/`，分叉从快照开独立工作树，非 git 工作区报错 | M7 前置第 11 件 | M7 |
+| 079 | 分叉由人手动发起，另有缺省关闭的 `--retry-on-fail <K>` 失败自动分叉重试 | M7 前置第 12 件 | M7 |
+| 080 | 运行时内部故障不进账本，改为按故障类别去重的标准错误告警 | M7 收口 | M7 |
 
 ## 条目
 
@@ -375,6 +388,7 @@
 - 详情：docs/decisions/m5-5-orchestration-decisions.md。
 - 修订（2026-09-14，M5.7 收口）：带 MCP 配置的 worker 装配失败按 worker 失败收尾，落 child.spawned 与 child.settled 两条记录。
 - 修订（2026-09-16，M6）：reviewer 角色的两个只读快照工具（review_snapshot、review_entry）豁免"子策略必须在父 allow 里"的子集校验；它们只读、作用域只限父会话自己的那一次 Run、不在主会话工具清单里；父策略禁用清单照旧生效，其余工具照常受子集校验。锚点 src/orchestration/roles.ts（SCOPED_REVIEW_TOOLS 与委派子集构造、子集校验）。
+- 修订（2026-09-19，M7 收口）：提炼器角色的两个只读工具（提炼快照、提炼条目）按同一口径豁免子集校验；同时第二道校验改为按角色取豁免集合，不再用合并集合。理由：第二道校验的意义是发放侧写错也能拦住，若它比发放侧更宽，拦不住的恰是发放侧最易犯的错（新增只读角色时把工具发串），而角色还会继续增加。
 
 ### 041 外部工具链只经 MCP 接入，内部工具直接注册；新增 M5.7（事实）
 
@@ -574,6 +588,9 @@
 - 锚点：src/state/candidate.ts（候选 schema v2 与 v1 迁移）、src/state/candidate-status.ts（状态现算）、src/state/event-log.ts（candidate.proposed / candidate.screened 两族与 review.unparsable 观察族）、src/state/materialize.ts 与 src/state/trace.ts（投影同步）、src/persistence/event-log.ts（两族落盘）；src/review/scan.ts（确定性扫描）、src/review/candidates.ts（解析、按哈希原子落盘、去重、取代）；src/application/candidates-list.ts 与 src/cli/index.ts（pigeon candidates）；测试 src/review/scan.test.ts、src/review/candidates.test.ts、src/state/candidate.test.ts、src/state/trace-review.test.ts、src/migration-completeness.test.ts。
 - 修订（2026-09-16，M6 开工前五件子裁决）：① 候选 schema 升 v2 只放写一次即不可变的元数据——种类（Memory / Skill / Policy）、名字、内容哈希与字节数、来源（会话号、Run 号、审阅会话号、来源条目号清单、来源内容摘要哈希）、一句话摘要、Reviewer 判断强度（只表判断强度，不表权限或生效资格）、扫描结果（扫描器版本与命中项）、取代关系；正文按种类各自格式（Skill 用 SKILL.md、Memory 用 markdown 文件、Policy 用文本），状态不入 schema、由账本现算；状态枚举新增"扫描拒收"。§6 草案里的成败分支字段归 M7、验证回执字段归 M8，本轮不加。② Policy 候选在 M6 只出自然语言建议加来源条目，不落结构化规则。③ Memory 候选以完整 markdown 文件为粒度，激活时整文件放入 memory 目录，不做段落追加。④ 扫描命中的候选暂存并标记拒收，永不参与激活、缺省不出现在列表里；暂存目录本就缺省不加载。⑤ 提供只读命令 `pigeon candidates` 列出候选（种类、名字、哈希前缀、状态、来源与时间），缺省隐藏拒收项；TUI 候选面板作为必要时的演进方向，本轮不做。
 - 理由（子裁决）：元数据与正文分离使 schema 稳定，M7 与 M8 各自补字段时互不牵连；结构化的 Policy 候选唯一好处是便于自动套用，而 §8 恰恰禁止后台流程写 grants.json，且 M8 尚无消费方；整文件粒度让激活成为一次原子放置，与 042 的"按文件装载、人可直接编辑"对齐，段落追加会与人工编辑冲突且难回滚；命中内容的原始素材本就在会话账本里，丢弃候选正文并不能消除它，反而失去复查与改进扫描规则的素材；候选是 M6 的产出，没有列表则无法评估成果，而 TUI 面板会撑大本轮改动面。
+- 修订（2026-09-19，M7 收口）：结构化结果不可解析记录族的产出会话字段一并改为同一中性命名，在 v10 → v11 迁移中改写。该族为 M6 已入库形状，提炼器出同类问题时写入同一族，保留审阅命名会与候选侧不一致；v11 尚未入库，此时改写零额外迁移成本。
+- 修订（2026-09-19，M7 收口）：候选来源里记产出会话的字段改为中性命名（原名以审阅命名，现同时承载提炼器会话），在 v2 → v3 迁移中一并改写，产出方类别仍由来源字段区分。理由：v3 尚未入库、迁移本就要跑一遍，此时改名零额外成本；M8 将加入验证器一类产出方，届时仍以审阅命名会是第三层误导。
+- 修订（2026-09-19，M7 收口）：候选提出、候选筛查与结构化结果不可解析三族属引用型记录——它们引用的 Run 在被提炼或被审阅的会话里（可能在另一个治理根下），投影时不在宿主会话中造出 Run。理由：造出的会是没有开始与结束记录的残缺 Run，会被会话列表与 trace 显示为崩溃残留，污染 012、021 定下的可见性信号；宿主会话里"提炼或审阅发生过"已由有始有终的派出与收尾记录表达。
 - 详情：docs/decisions/m6-prep-decisions.md。
 
 ### 066 TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本（事实）
@@ -589,3 +606,107 @@
 - 理由：shell.ts 已 937 行，M6 的 Reviewer 视图与候选面板会使其破千行，先拆出落点再加；三入口缺省漂移（custom/cli、unknown/unknown、custom/headless）会进注入快照与 run.started，使同一模型按入口分成三组，影响 Eval 与学习侧按模型分组；`PIGEON_STREAM_FN` 只有 tui 读取而 cli 报错文案称支持，属实现与文案不一致的缺陷。
 - 锚点：src/tui/message-flow.ts、src/tui/modal.ts、src/tui/commands.ts、src/tui/workers-view.ts、src/tui/resume-view.ts 与瘦身后的 src/tui/shell.ts；src/application/launch-flags.ts 与 src/application/session-runtime.ts；接线方 src/cli/index.ts、src/tui/main.ts、src/application/headless.ts；测试 src/application/launch-flags.test.ts、src/application/session-runtime.test.ts 与 tui 既有 10 个测试文件（断言未改）。
 - 详情：docs/decisions/m6-prep-decisions.md。
+
+### 068 对比素材：同任务独立尝试与会话树分叉都做，先比对后分叉；分叉基于上游 Session 存储，Pigeon 补写穿与分叉续跑，账本为唯一权威（事实）
+
+- 结论：M7 的对比素材有两类，均在本里程碑完成，施工顺序为先同任务比对、后分叉。同任务独立尝试指同一任务的多次独立运行（Eval 同任务多次运行、并行派发同一任务的多个 worker）；分叉指会话树上从同一分叉点长出的多条分支。会话树以上游 pi-agent-core 0.84.4 的 `Session`、`JsonlSessionRepo` 与 `buildSessionContext` 为存储与上下文还原基础，由 Pigeon 补运行写穿与分叉续跑接线；Pigeon Event Log 仍是唯一权威事实源，会话树为派生结构。契约测试对象为 core 0.84.4 的 v4 JSONL 格式，使用上游 `createSessionBackendConformance`。
+- 理由：Pigeon 持久化数据中原本没有会话树（entry 只有线性序号，resume 从零重建上下文），上游会话层有真实实现但把 Agent 运行接入会话树的 AgentHarness 为桩实现，主要工作量在接线而非存储。两类素材互补：独立尝试回答整体做法差在哪，分叉回答从哪一步走岔。外部先例 ExpeL、AutoGuide、ETO 的成败对比对均来自同一任务的独立多次尝试，先做比对可最早获得可验证的对比产出。
+- 锚点：src/pi-runtime/session-tree.ts（上游 Session / JsonlSessionRepo / buildSessionContext 只经 pi-runtime 引用；树存储、通道、账本投影）、src/pi-runtime/upstream-version.ts（启动时上游版本探测与告警）、src/application/session-tree.ts（由账本重建、实时写穿、进程内共享树句柄）、src/application/fork.ts（分叉与续跑）；测试 src/pi-runtime/session-tree-conformance.test.ts（createSessionBackendConformance，core 0.84.4 v4 JSONL）、src/pi-runtime/session-tree.test.ts、src/pi-runtime/upstream-version.test.ts、src/application/fork.test.ts。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 069 同任务认定用显式任务标识：Eval 用任务编号，并行派发同一任务时生成共享标识写入派出记录（事实）
+
+- 结论：同任务只按显式任务标识认定。Eval 用任务编号；并行派发同一任务的多个 worker 时生成共享任务标识，加法式写入派出记录；普通会话不自动归组，需要对比时走分叉。
+- 理由：按任务原文哈希认定对措辞差异过于敏感，模型判断引入不可复现的噪声；显式标识在两个现成来源处都能零歧义获得。
+- 锚点：src/state/event-log.ts（child.spawned 可选 taskKey，Event Log v11）、src/orchestration/workers.ts（SpawnRequest.taskKey）、src/application/attempt-group.ts（并行同任务派发、共享任务标识生成）、src/application/workers-commands.ts、src/tui/workers-view.ts 与 src/tui/main.ts（/spawn --attempts）、src/application/distill-command.ts（--task 按派出记录找宿主会话、--eval-results 按任务编号成组）；测试 src/state/contrast-records.test.ts、src/persistence/contrast-families.test.ts、src/application/attempt-group.test.ts、src/application/workers-commands.test.ts、src/application/distill-command.test.ts。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 070 Episode 边界按来源定：同任务比对取尝试会话首个 Run，分叉取分叉点到叶子、共享前缀只算一次（事实）
+
+- 结论：同任务比对的 Episode 取尝试会话的首个 Run；分叉的 Episode 取分叉点到叶子的路径，共享前缀单独记录、只算一次；恢复后追加的 Run 不计入。
+- 理由：尝试会话首个 Run 与一次任务尝试一一对应，恢复追加的 Run 已掺入人的后续干预；共享前缀按分支数重复计入会使相同步骤被重复强化，与 §M7 完成证据冲突。
+- 锚点：src/state/episode.ts（firstRunOf、buildTaskAttempt、buildForkGroup、selectContrast）、src/distillation/target.ts（提炼目标组装与强制提炼的单侧选取）；测试 src/state/episode.test.ts。
+- 修订（2026-09-19，M7 收口）：一组同任务尝试里有多个成功或多个失败时，每侧只取一个进对比——成功侧取总轮数最少的，失败侧取最早收尾的，其余尝试记入候选对比来源块的其余同组尝试。理由：判据确定、结果可复现，未选中的尝试有据可查，将来判据改动可按来源块重新提炼。全配对（成功与失败的每个组合各提炼一次）被否决：成本按乘积增长，且同一条做法会被反复强化，与本条"共享前缀只算一次"的取向冲突；由模型自选对比对被否决，因其不可复现。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 071 Eval 之外的成功判定：配置验证命令，尝试收尾后由程序独立执行并落通用验证记录，未配置标未知（事实）
+
+- 结论：任务或会话可配置验证命令；尝试收尾后由程序作为独立子进程在该次尝试的工作区执行，三值口径同 058，结果落通用验证观察记录。未配置验证命令则标未知。人工确认暂不做。
+- 理由：成功只认确定性验证是 §M7 完成证据"当前叶子没有验证时不会被标为成功"的直接落实；由模型自己运行的验证命令其证据受模型控制，不取；独立执行与 Eval 验证器同构，零新概念。
+- 锚点：src/execution/check-command.ts（独立子进程、超时终止进程树、尾部截断与哈希、三值判决；与 Eval 验证器共用）、src/eval/verify.ts、src/state/attempt-config.ts、src/state/event-log.ts（attempt.verified）、src/application/attempt-verify.ts、src/application/launch-flags.ts（--verify-command / --verify-timeout）、src/application/session-runtime.ts、src/application/headless-core.ts、src/application/attempt-group.ts、src/pi-runtime/snapshot.ts（注入快照 v7）、src/state/runtime-events.ts 与 src/pi-runtime/adapter.ts（run.started 的 verify）；测试 src/execution/check-command.test.ts、src/application/attempt-verify.test.ts、src/pi-runtime/snapshot.test.ts、src/eval/verify.test.ts。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 072 五个标签边界：成功只认验证通过；撞上限与熔断算失败；人主动取消算放弃；放弃与基础设施错误不进成败对比（事实）
+
+- 结论：成功只认验证通过，验证结论压过运行终态。失败为验证失败，或无验证但属业务失败、撞任一上限、治理熔断。放弃为人主动取消（熔断不算）。基础设施错误取失败分类中的基础设施错误。未知为缺运行结束记录、有悬账、验证未判定、无验证且正常完成。放弃与基础设施错误不进成败对比。
+- 理由：撞上限与熔断说明做法本身走不通，属于可学习的失败；人主动取消与基础设施错误不反映做法优劣，混入对比会污染信号；无验证而正常完成不等于做对，标未知避免把未证实的结果当成功样本。
+- 锚点：src/state/outcome-label.ts（labelAttempt、attemptOutcomeFacts）、src/state/runtime-events.ts 与 src/state/event-log.ts（run.limit-hit 观察族）、src/orchestration/workers.ts 与 src/application/headless-core.ts（撞上限先留痕再中止）；测试 src/state/outcome-label.test.ts、src/orchestration/workers.test.ts、src/application/headless.test.ts。
+- 修订（2026-09-19，M7 收口）：新增撞上限观察族。上限中止在运行终态上只表现为中止，与人主动取消无法区分，缺此记录会把撞上限误判为放弃，与本条"撞上限算失败"冲突。
+- 修订（2026-09-19，M7 收口）：账本完整性优先于验证结论——缺运行结束记录或有悬账时一律标未知，即使验证结论为通过。原条目只定了"验证结论压过运行终态"，未定它与未知条件的先后。理由：标未知不判失败，只是不进对比；而进入对比的尝试必须轨迹完整，否则提炼出的做法可能缺步骤，这类错误比少一个样本更难发现。按崩溃与悬账分别定性的方案被否决：判据增多会使每新增一种账本异常都要重裁。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 073 Run 内局部对只取人写拒绝理由与域错误后成功重试，只产出教训候选（事实）
+
+- 结论：Run 内局部对纳入提炼，但只取两种：理由来源为人写的拒绝，与域错误后紧跟的成功重试；只产出教训候选。系统默认文案、策略拒绝、环境异常与无理由来源字段的旧记录不用。
+- 理由：人写的拒绝理由是 006 定的负样本监督信号，066 的理由来源字段正是为区分真实理由与兜底文案而设；产出限定为教训，满足 §M7"失败分支只产生失败案例"。
+- 锚点：src/state/episode.ts（collectLocalPairs）、src/distillation/snapshot.ts（局部对按侧单列）、src/distillation/candidates.ts（只由失败侧支撑的条目只能是教训）；测试 src/state/episode.test.ts、src/distillation/snapshot.test.ts、src/distillation/candidates.test.ts。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 074 提炼器复用 worker 机制新增角色，并行同任务收尾后与分叉叶子验证后自动触发，另有 `pigeon distill`；预算单设、共用全局并发闸（事实）
+
+- 结论：提炼器复用 worker 机制，作为新增角色：只读、无工作区，只读工具作用域绑定一组尝试；候选走 M6 的暂存、扫描与账本链路。并行同任务全部收尾后、分叉叶子完成验证后自动触发；另有 `pigeon distill`，可指定任务标识或 Eval 结果目录，只读读取其他治理根下的会话。Eval 不自动触发。预算单设，缺省 16 轮、5 分钟、80,000 token，均可配；与 Reviewer 共用全局并发闸。
+- 理由：064 已验证 worker 机制可承载只读、无工作区的后台角色，复用即获得派出与收尾配对、取消、trace 入口与冷恢复；与 Reviewer 合并会让单次运行审阅与跨尝试对比两种输入形态混在一个角色里。Eval 批量运行以测量为目的，提炼的时机与花费由人以 `pigeon distill` 指定结果目录显式发起。对比输入是两侧加共享前缀，预算按 Reviewer 的量级放大。
+- 锚点：src/state/distill.ts（工具名与提炼目标）、src/orchestration/roles.ts（distiller 角色与 SCOPED_DISTILL_TOOLS）、src/orchestration/workers.ts（无工作区规划、提炼目标必填）、src/distillation/tools.ts、src/distillation/prompt.ts、src/distillation/candidates.ts、src/application/distill-runtime.ts（派发器、预算 16 轮 / 5 分钟 / 80,000 token、共用全局并发闸排队）、src/application/attempt-group.ts（并行同任务全部收尾后自动触发）、src/application/fork.ts（distillForkGroup，叶子验证后自动触发）、src/application/distill-command.ts 与 src/cli/index.ts（pigeon distill）、src/application/runtime.ts（提炼器运行面注册只读工具）、.dependency-cruiser.js（distillation-below-controller）；测试 src/orchestration/distiller-role.test.ts、src/application/attempt-group.test.ts、src/application/distill-command.test.ts、src/application/fork.test.ts、src/application/fork-session.test.ts。
+- 修订（2026-09-19，M7 收口）：§M7"失败分支不会被写成长期事实"的落地口径为三条——只有失败侧证据支撑的条目不得产出流程或步骤集，只能是教训；这类条目不得落成 Memory 种类的候选，教训落 Policy 种类（自然语言建议加来源条目，同 065）；提炼结果逐项校验，单项不合格只丢该项并留痕，不使整份作废。理由：Memory 每次会话都装载进 system prompt，把一次失败里观察到的结论放进去等于让未经证实的结论影响其后所有会话；教训落 Policy 候选仍须经 M8 验证与审批才能激活，不影响运行；整份作废会使一次提炼因模型的单项笔误全部丢失，且失败是静默的。
+- 修订（2026-09-19，M7 收口）：一组同任务尝试全为成功或全为失败时不自动提炼，记一条带原因的提炼跳过记录；`pigeon distill --force` 保留人工口子，全失败时只取最早收尾的失败侧且只产出教训，全成功时取总轮数最少的成功侧。理由：单来源提炼由 M6 的 Reviewer 承担（按轮次与 Run 结束触发），M7 的增量价值在对比；放开单侧自动提炼会与 Reviewer 产出重复候选、各吃一份预算，而候选的语义级去重尚未具备。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 075 候选升 v3，加法式新增对比来源块（事实）
+
+- 结论：候选 schema 升 v3，v2 字段不变，加法式新增对比来源块：成功侧与失败侧各自的尝试引用（治理根、会话、Run、条目范围）、分叉共享前缀范围、各侧标签与验证记录引用、产物形态（教训 / 流程 / 步骤集）。单来源候选该块为空。
+- 理由：065 已预留"成败分支字段归 M7"；独立字段块使 M8 回放验证与 M9 评测可直接按来源取证，写进正文则需要解析，另建候选种类会让激活链路分叉。
+- 锚点：src/state/candidate.ts（候选 v3、OutcomeLabelSchema、AttemptRefSchema、ContrastSourceSchema、v2 → v3 迁移）、src/state/event-log.ts（v10 → v11 升级候选提出内嵌的候选）、src/review/candidates.ts（stageCandidate 暂存口径复用）、src/distillation/candidates.ts（对比来源块落盘）、src/state/materialize.ts（引用型记录不在宿主会话造 Run）；测试 src/state/candidate.test.ts、src/state/contrast-records.test.ts、src/distillation/candidates.test.ts、src/migration-completeness.test.ts。
+- 修订（2026-09-19，M7 收口）：对比来源块不记 Trace 与 Receipt 的标识，二者由会话与 Run 现算。理由同 015、038：能从权威事实现算的派生量不另存副本，否则多出一份可能过期的证据；会话、Run 与条目范围已能唯一定位这段证据，Trace 是该区间的投影、Receipt 挂在具体工具调用上。ROADMAP §M7 相应措辞一并对齐。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 076 提炼器输入沿用 M6 截断，每侧 24,000 字符，共享前缀与任务描述只喂一次，独立尝试不做分歧步对齐（事实）
+
+- 结论：沿用 M6 的单条工具结果截断口径；每侧上限 24,000 字符，超出从最早处丢弃并标注；任务描述只喂一次；分叉场景以分叉点为界，共享前缀只喂一次；独立尝试不做分歧步对齐。提炼器模型沿用角色表的模型接入覆盖列。
+- 理由：98 个真实会话中一次完整尝试正文中位约 19,800 字符、p90 约 51,300 字符，89% 为工具结果，按条截断后每侧 24,000 字符可覆盖大多数尝试；独立尝试的步骤序列本不对应，强行对齐易产生伪分歧点，分叉场景的分歧点则天然确定。
+- 锚点：src/distillation/snapshot.ts（DISTILL_SIDE_MAX_CHARS、任务描述与共享前缀只喂一次）、src/review/snapshot.ts（clampText、renderBlocks 复用 M6 截断口径）、src/distillation/tools.ts（distill_snapshot / distill_entry 作用域）、src/application/workers.ts（角色表覆盖列对提炼器生效）；测试 src/distillation/snapshot.test.ts。
+- 修订（2026-09-19，M7 收口）：24,000 字符为每侧上限，共享前缀另设 12,000 字符上限（原条目未定前缀的算法，实现按段各给一份）。理由：两侧是对照物本身，削任一侧都使对比失真；前缀是背景，削它最安全。最坏总量由约 72,000 字符降至约 60,000，给提炼器的推理与产出留出余量。按总量封顶再等比削两侧的方案被否决：长的一侧通常是失败侧，恰是教训最密集处。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 077 会话树在分叉发生时才建立：账本先记分叉记录，树放 `.pigeon/trees/` 为可重建的派生缓存，写穿不阻塞主循环（事实）
+
+- 结论：会话树在分叉发生时才建立。账本先记分叉记录（分叉点的 Run 与序号、新分支标识、分叉点快照引用），再把分叉点之前的历史导入树，此后该会话实时写穿。树文件放治理根 `.pigeon/trees/`，为派生缓存，不 fsync、不阻塞主循环，可由账本重建。施工补写穿耗时基准。
+- 理由：不分叉的会话零额外写入；账本中的分叉记录是会话树的权威来源，树文件丢失或损坏只需重建，不形成第二事实源（§3.5）。与 037 否决"启用上游会话存储"不冲突：037 否决的是以上游会话文件承载正文事实，此处树文件不承载任何权威状态，可由账本与内容文件重建，性质同 038 的可重建缓存口径，也不构成 009 所禁的双写；上游会话模块按 §2 只经 src/pi-runtime 引用。
+- 锚点：src/state/event-log.ts（session.forked、branch.header）、src/persistence/event-log.ts（onEntry、appendSessionForked、appendBranchHeader）、src/pi-runtime/session-tree.ts、src/application/session-tree.ts（acquireSessionTree、rebuildSessionTree、attachTreeWriteThrough、bindSessionTree、runTreeRebuildCommand）、src/application/fork.ts（prepareFork、runForkBranch）、src/pi-runtime/adapter.ts（initialMessages、continueRun）、src/application/workers.ts 与 src/application/headless-core.ts（分支续跑装配）、src/application/worker-scope.ts（分支会话回到自己的工作树）、src/cli/index.ts（pigeon tree rebuild）；测试 src/application/fork.test.ts、src/application/fork-session.test.ts、src/persistence/contrast-families.test.ts；写穿耗时基准 spikes/m7-tree-write-bench.ts。
+- 修订（2026-09-19，M7 收口）：分支会话的首条记录用独立的分支会话头族，不复用 worker 会话头。分叉与委派是两种父子关系，068 的事实已区分二者；合并为一族需靠标记位在投影与查询时分流，省下的一个族会在读侧还回去。
+- 修订（2026-09-19，M7 收口）：写穿失败不记账本观察族，改走 080 的去重标准错误告警，原结论中的"失败只记观察记录"随之作废（不影响"失败不影响运行"）。理由：会话树是可重建的派生缓存，写穿失败的后果是树落后于账本，可由重建入口随时补齐，不需要事后从账本取证；Event Log v11 尚未入库，此时去掉记录族为零迁移成本。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 078 文件变化后用 git 底层命令生成快照挂到 `refs/pigeon/checkpoints/`，分叉从快照开独立工作树，非 git 工作区报错（事实）
+
+- 结论：仅在写操作或命令确实改变文件后，用 git 底层命令在临时索引上生成快照提交，挂到 `refs/pigeon/checkpoints/<会话>/`，不触碰用户的工作区、暂存区与分支。分叉时从分叉点之前最近的快照开独立工作树续跑。非 git 工作区发起分叉时明确报错，不降级。
+- 理由：只退对话不退文件会让分支在错误的文件状态上续跑，靠回执反推无法覆盖命令产生的改动；每轮快照在无改动轮次上是纯开销。临时索引加独立 ref 使快照对用户的 git 操作不可见，独立工作树沿用 M5.5 的 WorkspaceProvider。
+- 锚点：src/orchestration/checkpoint.ts（临时索引 write-tree / commit-tree / update-ref、改前基线、非 git 报错）、src/application/checkpoints.ts（写档与命令档工具前后挂载、条目号对应）、src/state/runtime-events.ts（workspace.checkpoint）、src/state/materialize.ts（checkpointAtOrBefore）、src/application/fork.ts（resolveForkCheckpoint、从快照开独立工作树）、src/pi-runtime/adapter.ts（entrySeq）、src/application/runtime.ts（toolTiers）；测试 src/orchestration/checkpoint.test.ts、src/application/checkpoints.test.ts、src/application/fork.test.ts。
+- 修订（2026-09-19，M7 收口）：快照与条目号的对应关系落在独立的快照观察族（ref、提交、树、改前基线、工具调用号与对应条目号），不挂进回执。回执写在快照之前、且有自己的迁移链，快照失败或工作区不是 git 时也不应牵动回执。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 079 分叉由人手动发起，另有缺省关闭的 `--retry-on-fail <K>` 失败自动分叉重试（事实）
+
+- 结论：cli 与 tui 主会话支持手动分叉。另有可选的失败自动分叉重试 `--retry-on-fail <K>`，缺省 0 即关闭，按会话冻结并随注入快照与 run.started 落盘；尝试被标为失败时从本次任务开始处分叉重试，最多 K 次，不注入任何提示，共用预算与全局并发闸。适用主会话与 `pigeon run`；并行同任务派发不叠加此项。智能选择分叉点不做。
+- 理由：从任务开始处分叉使分叉点确定；不注入提示是为避免与 042 冲突，并避免两条分支的差异混入"是否看到提示"；缺省关闭使额外的尝试花费由人显式开启。并行同任务派发本身已产生多次独立尝试，不再叠加。
+- 锚点：src/application/fork-command.ts（/fork 与 --at 定位）、src/cli/repl.ts 与 src/cli/index.ts、src/tui/commands.ts、src/tui/workers-view.ts 与 src/tui/main.ts（手动分叉入口）、src/application/launch-flags.ts（--retry-on-fail）、src/application/fork.ts（runRetryOnFail）、src/application/headless.ts（pigeon run 失败自动分叉重试）、src/application/session-runtime.ts（主会话后台重试）、src/pi-runtime/snapshot.ts 与 src/pi-runtime/adapter.ts（retryOnFail 冻结并随 run.started 落盘）；测试 src/application/fork-session.test.ts、src/application/fork.test.ts。
+- 修订（2026-09-19，M7 收口）：手动分叉的形态为主会话斜杠命令 `/fork [--at <条目号> | --at <Run 号前缀>:<条目号>] ["新输入"]`，cli REPL 与 tui 共用一份实现；缺省分叉点为最近一次 Run 的任务开始处；分叉点落在助手消息上时必须给新输入。理由：与 029 以来主会话操作走斜杠命令的手感一致；两种 `--at` 格式分别覆盖本次 Run 内定位与跨 Run 定位；缺省值对应最常见意图。独立的冷会话分叉子命令不做：resume 后 `/fork` 已可达成，多一个入口即多一套参数解析与错误路径。
+- 详情：docs/decisions/m7-prep-decisions.md。
+
+### 080 运行时内部故障不进账本，改为按故障类别去重的标准错误告警（事实）
+
+- 结论：后台组件的内部故障（快照生成失败、提炼候选落盘失败这类）不新增账本记录族，改为向标准错误输出告警：文案说明后果，一次运行里同一类故障只说一次，故障类别取错误类型与摘要、不含一次性内容（临时索引路径等）。口径与上游版本探测的启动告警一致。账本只记运行事实，运行时诊断不是运行事实。
+- 理由：039 之后账本的新消费者优先是学习闭环与并行编排，不再以证据链更完整为由新增记录族；这类故障不改变运行事实，也不被任何冷路径消费，落账本只会增加记录族与迁移负担。但故障完全静默同样不可接受——快照缺失会让之后从该点分叉回退到更早的快照，候选落盘失败会让一次提炼无声消失，二者都需要人当场看见。去重是必要的：同一类故障往往每次工具调用都复发，不去重会刷屏盖住正常输出。
+- 锚点：src/application/warnings.ts（去重告警器与故障类别）、src/application/checkpoints.ts 与 src/application/distill-runtime.ts（接上告警）；测试 src/application/closeout-fixes.test.ts。
+- 适用范围：会话树写穿失败一并按本条处理（077 修订），不再记账本观察族。
+- 已知边界：tui 在壳接管终端后收到的标准错误告警可能干扰渲染。
+- 详情：docs/audits/2026-09-16-m7-9f440fe.md 收口修复一节。

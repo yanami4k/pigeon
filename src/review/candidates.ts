@@ -64,7 +64,7 @@ export interface PersistCandidatesInput {
   sessionsDir: string;
   sink: CandidateSink;
   structured: unknown;
-  source: { sessionId: SessionId; runId: RunId; reviewSessionId: SessionId };
+  source: { sessionId: SessionId; runId: RunId; producerSessionId: SessionId };
   model: { provider: string; id: string };
   usage?: { turns: number; totalTokens: number };
   now?: () => number;
@@ -86,12 +86,12 @@ const BODY_FILE: Readonly<Record<CandidateKind, (name: string) => string>> = {
 
 export const CANDIDATES_DIR = path.join(".pigeon", "candidates");
 
-function sha256(text: string): string {
+export function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 // 来源内容摘要：支撑条目在账本里的正文回指哈希，按条目号排序后拼接取 sha256（缺回指的条目记为空串）
-function sourceDigest(
+export function sourceDigest(
   sessionsDir: string,
   sessionId: SessionId,
   runId: RunId,
@@ -149,64 +149,48 @@ export function persistReviewerCandidates(input: PersistCandidatesInput): Persis
     input.sink.appendObservation({
       kind: "review.unparsable",
       runId: input.source.runId,
-      payload: { reviewSessionId: input.source.reviewSessionId, reason },
+      payload: { producerSessionId: input.source.producerSessionId, reason },
     });
     return { written: [], duplicates: 0, unparsable: reason };
   }
   const written: ReviewerCandidate[] = [];
   let duplicates = 0;
   for (const item of input.structured.candidates) {
-    const contentHash = sha256(item.content);
-    const kindDir = path.join(input.governanceRoot, CANDIDATES_DIR, item.kind);
-    const finalDir = path.join(kindDir, `${item.name}-${contentHash.slice(0, 16)}`);
-    // 同哈希即同候选：已存在则跳过（不写文件、不重复记账）
-    if (existsSync(finalDir)) {
-      duplicates += 1;
-      continue;
-    }
-    const bodyFile = BODY_FILE[item.kind](item.name);
-    const scan = scanCandidateFiles({ [bodyFile]: item.content });
-    const supersedes = latestSameName(kindDir, item.name, contentHash);
-    const candidate: ReviewerCandidate = {
-      version: CANDIDATE_VERSION,
-      origin: "reviewer",
+    const candidate = stageCandidate({
+      governanceRoot: input.governanceRoot,
       kind: item.kind,
       name: item.name,
-      contentHash,
-      bytes: Buffer.byteLength(item.content, "utf8"),
-      source: {
-        sessionId: input.source.sessionId,
-        runId: input.source.runId,
-        reviewSessionId: input.source.reviewSessionId,
-        entryRunSeqs: item.sourceRunSeqs,
-        contentDigest: sourceDigest(
-          input.sessionsDir,
-          input.source.sessionId,
-          input.source.runId,
-          item.sourceRunSeqs
-        ),
-      },
-      summary: item.summary,
-      strength: item.strength,
-      scan,
-      ...(supersedes !== undefined ? { supersedes } : {}),
-      createdAt: now(),
-    };
-    // 原子写入：同级临时目录写好再整体改名
-    mkdirSync(kindDir, { recursive: true });
-    const tempDir = path.join(kindDir, `.${item.name}-${randomBytes(6).toString("hex")}.tmp`);
-    mkdirSync(tempDir);
-    try {
-      writeFileSync(path.join(tempDir, bodyFile), item.content, "utf8");
-      writeFileSync(
-        path.join(tempDir, "candidate.json"),
-        `${JSON.stringify(candidate, null, 2)}\n`,
-        "utf8"
-      );
-      renameSync(tempDir, finalDir);
-    } catch (error) {
-      rmSync(tempDir, { recursive: true, force: true });
-      throw error;
+      content: item.content,
+      build: (facts) => ({
+        version: CANDIDATE_VERSION,
+        origin: "reviewer",
+        kind: item.kind,
+        name: item.name,
+        contentHash: facts.contentHash,
+        bytes: facts.bytes,
+        source: {
+          sessionId: input.source.sessionId,
+          runId: input.source.runId,
+          producerSessionId: input.source.producerSessionId,
+          entryRunSeqs: item.sourceRunSeqs,
+          contentDigest: sourceDigest(
+            input.sessionsDir,
+            input.source.sessionId,
+            input.source.runId,
+            item.sourceRunSeqs
+          ),
+        },
+        summary: item.summary,
+        strength: item.strength,
+        scan: facts.scan,
+        ...(facts.supersedes !== undefined ? { supersedes: facts.supersedes } : {}),
+        createdAt: now(),
+      }),
+    });
+    // 同哈希即同候选：已存在则跳过（不写文件、不重复记账）
+    if (candidate === undefined) {
+      duplicates += 1;
+      continue;
     }
     input.sink.appendCandidateProposed({
       runId: input.source.runId,
@@ -218,11 +202,61 @@ export function persistReviewerCandidates(input: PersistCandidatesInput): Persis
       runId: input.source.runId,
       candidateKind: item.kind,
       name: item.name,
-      contentHash,
-      scannerVersion: scan.scannerVersion,
-      hits: scan.hits,
+      contentHash: candidate.contentHash,
+      scannerVersion: candidate.scan.scannerVersion,
+      hits: candidate.scan.hits,
     });
     written.push(candidate);
   }
   return { written, duplicates };
+}
+
+export interface StageCandidateInput {
+  governanceRoot: string;
+  kind: CandidateKind;
+  name: string;
+  content: string;
+  // 由写盘事实（哈希、字节数、扫描结果、取代关系）组装元数据
+  build: (facts: {
+    contentHash: string;
+    bytes: number;
+    scan: ReviewerCandidate["scan"];
+    supersedes?: string;
+  }) => ReviewerCandidate;
+}
+
+// 暂存一份候选（M6 落盘口径，M7 提炼器复用）：按正文哈希定目录，同哈希已存在返回 undefined（不写文件）；
+// 确定性扫描后组装元数据，先写同级临时目录再整体改名
+export function stageCandidate(input: StageCandidateInput): ReviewerCandidate | undefined {
+  const contentHash = sha256(input.content);
+  const kindDir = path.join(input.governanceRoot, CANDIDATES_DIR, input.kind);
+  const finalDir = path.join(kindDir, `${input.name}-${contentHash.slice(0, 16)}`);
+  if (existsSync(finalDir)) {
+    return undefined;
+  }
+  const bodyFile = BODY_FILE[input.kind](input.name);
+  const scan = scanCandidateFiles({ [bodyFile]: input.content });
+  const supersedes = latestSameName(kindDir, input.name, contentHash);
+  const candidate = input.build({
+    contentHash,
+    bytes: Buffer.byteLength(input.content, "utf8"),
+    scan,
+    ...(supersedes !== undefined ? { supersedes } : {}),
+  });
+  mkdirSync(kindDir, { recursive: true });
+  const tempDir = path.join(kindDir, `.${input.name}-${randomBytes(6).toString("hex")}.tmp`);
+  mkdirSync(tempDir);
+  try {
+    writeFileSync(path.join(tempDir, bodyFile), input.content, "utf8");
+    writeFileSync(
+      path.join(tempDir, "candidate.json"),
+      `${JSON.stringify(candidate, null, 2)}\n`,
+      "utf8"
+    );
+    renameSync(tempDir, finalDir);
+  } catch (error) {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw error;
+  }
+  return candidate;
 }

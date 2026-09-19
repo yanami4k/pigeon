@@ -3,6 +3,7 @@
 // （state/event-log.ts）共用同一份形状，杜绝漂移。本文件不依赖上游类型——上游事件到
 // 这些形状的映射在 pi-runtime 完成（§2 边界规则：上游交互只经 PiRuntimeAdapter）。
 import { type Static, Type } from "typebox";
+import { RetryOnFailSchema, VerifyConfigSchema } from "./attempt-config.ts";
 import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
 import { McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { Sha256HexSchema } from "./message-content.ts";
@@ -100,6 +101,10 @@ export const ObservationKind = {
   ReviewSkipped: "review.skipped",
   // M6（决策 065）：Reviewer 的收尾结果不可解析（不落任何候选文件）
   ReviewUnparsable: "review.unparsable",
+  // M7（决策 078）：写操作或命令确实改变文件后生成的工作区快照，与条目号的对应关系
+  WorkspaceCheckpoint: "workspace.checkpoint",
+  // M7（决策 072）：尝试因轮次、墙钟或 token 上限被中止（上限中止在运行终态上表现为中止，标签据此判失败）
+  RunLimitHit: "run.limit-hit",
 } as const;
 export type ObservationKind = (typeof ObservationKind)[keyof typeof ObservationKind];
 
@@ -149,6 +154,9 @@ export const RunStartedPayloadSchema = Type.Object({
   mcpServers: Type.Optional(Type.Array(McpServerStatusSchema)),
   // M6（决策 064）：本会话的后台审阅配置（冻结快照值；只在 cli / tui 主会话在场，加法式可缺省）
   review: Type.Optional(ReviewConfigSchema),
+  // M7（决策 071 / 079）：本会话的验证命令与失败自动分叉重试次数（冻结快照值，加法式可缺省）
+  verify: Type.Optional(VerifyConfigSchema),
+  retryOnFail: Type.Optional(RetryOnFailSchema),
 });
 export type RunStartedPayload = Static<typeof RunStartedPayloadSchema>;
 
@@ -218,9 +226,34 @@ export const ReviewSkippedPayloadSchema = Type.Object({
 });
 export type ReviewSkippedPayload = Static<typeof ReviewSkippedPayloadSchema>;
 
-// review.unparsable（M6，决策 065）：Reviewer 收尾结果解析或校验失败，记一条、不落任何文件
+// workspace.checkpoint（M7，决策 078）：git 底层命令在临时索引上生成的快照提交，挂在 refs/pigeon/checkpoints/<会话>/ 下。
+// afterRunSeq 是该工具调用的结果消息在本 Run 的条目号：分叉点（含）之前最近的快照即 afterRunSeq 不大于分叉序号的最后一条；
+// baseCommit 是本会话首个快照的改前基线（首次改动之前的工作区状态），分叉点早于首次改动时取它
+const GitObjectIdSchema = Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" });
+export const WorkspaceCheckpointPayloadSchema = Type.Object({
+  ref: Type.String({ minLength: 1 }),
+  commit: GitObjectIdSchema,
+  tree: GitObjectIdSchema,
+  baseCommit: Type.Optional(GitObjectIdSchema),
+  toolCallId: Type.String({ minLength: 1 }),
+  afterRunSeq: Type.Integer({ minimum: 1 }),
+});
+export type WorkspaceCheckpointPayload = Static<typeof WorkspaceCheckpointPayloadSchema>;
+
+// run.limit-hit（M7，决策 072）：本 Run 因上限被中止
+export const RunLimitHitPayloadSchema = Type.Object({
+  limit: Type.Union([
+    Type.Literal("turn-limit"),
+    Type.Literal("wall-clock-limit"),
+    Type.Literal("token-limit"),
+  ]),
+});
+export type RunLimitHitPayload = Static<typeof RunLimitHitPayloadSchema>;
+
+// review.unparsable（M6，决策 065）：审阅器或提炼器的收尾结果解析或校验失败，记一条、不落任何文件。
+// producerSessionId 与候选来源同一个中性命名（065 修订）：产出该结果的会话
 export const ReviewUnparsablePayloadSchema = Type.Object({
-  reviewSessionId: Type.String({ minLength: 1 }),
+  producerSessionId: Type.String({ minLength: 1 }),
   reason: Type.String(),
 });
 export type ReviewUnparsablePayload = Static<typeof ReviewUnparsablePayloadSchema>;

@@ -22,6 +22,8 @@ class FakeRuntime implements WorkerRuntimeHandle {
   readonly receipt: ReceiptId = newReceiptId();
   interrupted = false;
   disposed = false;
+  // M7（决策 072）：上限中止前经运行面写进 worker 自己账本的上限
+  readonly limitHits: string[] = [];
   readonly #interrupt = Promise.withResolvers<void>();
   readonly behavior: Behavior;
   readonly journal: string[];
@@ -57,6 +59,10 @@ class FakeRuntime implements WorkerRuntimeHandle {
       await new Promise((resolve) => setImmediate(resolve));
     }
     return { status: "aborted" };
+  }
+
+  recordLimitHit(limit: string): void {
+    this.limitHits.push(limit);
   }
 
   async interrupt(): Promise<void> {
@@ -185,12 +191,22 @@ test("轮次上限：达到上限中止，以 turn-limit 收尾", async () => {
   assert.equal(outcome.turns >= 3, true);
   assert.equal(runtimes.get(id)?.interrupted, true);
   assert.equal(runtimes.get(id)?.disposed, true);
+  // M7（决策 072）：撞上限先留痕（写进 worker 自己的账本），标签据此判失败而非放弃
+  assert.deepEqual(runtimes.get(id)?.limitHits, ["turn-limit"]);
 });
 
 test("墙钟上限：超时中止，以 wall-clock-limit 收尾", async () => {
   const { orchestrator } = setup({ behavior: "hang" });
   const id = orchestrator.spawn({ role: "explorer", task: "看看", limits: { wallClockMs: 30 } });
   assert.equal((await orchestrator.awaitResult(id)).status, "wall-clock-limit");
+});
+
+test("人主动取消不留撞上限痕迹（取消算放弃，上限才算失败）", async () => {
+  const { orchestrator, runtimes } = setup({ behavior: "hang" });
+  const id = orchestrator.spawn({ role: "explorer", task: "看看" });
+  await orchestrator.cancel(id);
+  await orchestrator.awaitResult(id);
+  assert.deepEqual(runtimes.get(id)?.limitHits, []);
 });
 
 test("cancel：走 interrupt，以 cancelled 收尾；已收尾再取消无操作", async () => {

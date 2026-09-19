@@ -7,13 +7,18 @@ export type { SpawnRequest, WorkerOutcome, WorkerStatus } from "../orchestration
 export class WorkerCommandError extends Error {}
 
 export const SPAWN_USAGE =
-  '用法：/spawn <角色> [--name <名>] "<任务>"（角色：reviewer / explorer / implementer / tester）';
+  '用法：/spawn <角色> [--name <名> | --attempts <N>] "<任务>"（角色：explorer / implementer / tester；--attempts 并行派发同一任务的 N 个尝试）';
 
 // 未知命令提示里追加的 worker 命令清单（装配了编排面时才出现）
 export const WORKER_COMMANDS_HINT = '、/spawn <角色> "<任务>"、/cancel <worker>、/workers';
 
 // raw = 去掉 "/spawn" 之后的原文；任务可带英文或中文引号，也可不带
-export function parseSpawnCommand(raw: string): { role: string; task: string; name?: string } {
+export function parseSpawnCommand(raw: string): {
+  role: string;
+  task: string;
+  name?: string;
+  attempts?: number;
+} {
   let rest = raw.trim();
   const roleMatch = /^(\S+)\s*/.exec(rest);
   const role = roleMatch?.[1];
@@ -22,10 +27,29 @@ export function parseSpawnCommand(raw: string): { role: string; task: string; na
   }
   rest = rest.slice(roleMatch[0].length);
   let name: string | undefined;
-  const nameMatch = /^--name\s+(\S+)\s*/.exec(rest);
-  if (nameMatch !== null) {
-    name = nameMatch[1];
-    rest = rest.slice(nameMatch[0].length);
+  let attempts: number | undefined;
+  for (;;) {
+    const nameMatch = /^--name\s+(\S+)\s*/.exec(rest);
+    if (nameMatch !== null) {
+      name = nameMatch[1];
+      rest = rest.slice(nameMatch[0].length);
+      continue;
+    }
+    // M7（决策 069）：并行派发同一任务的 N 个尝试（至少 2），共享任务标识
+    const attemptsMatch = /^--attempts\s+(\S+)\s*/.exec(rest);
+    if (attemptsMatch !== null) {
+      const value = Number(attemptsMatch[1]);
+      if (!Number.isInteger(value) || value < 2) {
+        throw new WorkerCommandError(`--attempts 需要不小于 2 的整数（${SPAWN_USAGE}）`);
+      }
+      attempts = value;
+      rest = rest.slice(attemptsMatch[0].length);
+      continue;
+    }
+    break;
+  }
+  if (attempts !== undefined && name !== undefined) {
+    throw new WorkerCommandError(`--attempts 派出多个尝试，不能共用 --name（${SPAWN_USAGE}）`);
   }
   let task = rest.trim();
   const quoted =
@@ -36,7 +60,12 @@ export function parseSpawnCommand(raw: string): { role: string; task: string; na
   if (task === "") {
     throw new WorkerCommandError(SPAWN_USAGE);
   }
-  return { role, task, ...(name !== undefined ? { name } : {}) };
+  return {
+    role,
+    task,
+    ...(name !== undefined ? { name } : {}),
+    ...(attempts !== undefined ? { attempts } : {}),
+  };
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -47,6 +76,7 @@ const STATE_LABEL: Record<string, string> = {
   cancelled: "已取消",
   "turn-limit": "达到轮次上限",
   "wall-clock-limit": "达到墙钟上限",
+  "token-limit": "达到 token 上限",
   "spawn-failed": "派出失败",
 };
 
@@ -121,4 +151,36 @@ export function resolveWorkerRef(workers: readonly WorkerStatus[], ref: string):
     throw new WorkerCommandError(`未知 worker：${ref}（用 /workers 查看）`);
   }
   return found;
+}
+
+// M7（决策 069 / 074）：并行同任务派发的收尾摘要——各尝试标签、提炼结果或跳过原因
+export function renderAttemptGroupOutcome(result: {
+  taskKey: string;
+  attempts: ReadonlyArray<{ sessionId: string; label: string }>;
+  skip?: string;
+  distill?: {
+    distillSessionId: string;
+    status: string;
+    persisted?: {
+      written: ReadonlyArray<{ kind: string; name: string }>;
+      rejected: readonly unknown[];
+    };
+  };
+}): string {
+  const lines = [
+    `== 并行尝试收尾 ｜ 任务标识 ${result.taskKey} ==`,
+    ...result.attempts.map((attempt) => `  会话 ${attempt.sessionId} ｜ ${attempt.label}`),
+  ];
+  if (result.skip !== undefined) {
+    lines.push(`  不提炼：${result.skip}（已记提炼跳过）`);
+  } else if (result.distill !== undefined) {
+    const written = result.distill.persisted?.written ?? [];
+    lines.push(
+      `  提炼 ${result.distill.distillSessionId} ｜ ${workerStateLabel(result.distill.status)} ｜ 候选 ${written.length} 个` +
+        (written.length > 0
+          ? `：${written.map((item) => `${item.kind}/${item.name}`).join("、")}`
+          : "")
+    );
+  }
+  return lines.join("\n");
 }

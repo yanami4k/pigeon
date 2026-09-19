@@ -3,6 +3,7 @@
 // 本模块只做壳侧投影；定时器与状态行组件由壳持有，经窄接口读写。
 import {
   parseSpawnCommand,
+  renderAttemptGroupOutcome,
   renderWorkerOutcome,
   renderWorkersStatus,
   resolveWorkerRef,
@@ -21,6 +22,14 @@ export interface TuiWorkersFace {
   cancel(sessionId: SessionId): Promise<void>;
   status(): WorkerStatus[];
   awaitResult(sessionId: SessionId): Promise<WorkerOutcome>;
+  // M7（决策 069 / 074）：并行派发同一任务的 N 个尝试，全部收尾后验证、选对并自动提炼；主会话才有
+  spawnAttempts?(request: {
+    role: string;
+    task: string;
+    count: number;
+  }): Promise<Parameters<typeof renderAttemptGroupOutcome>[0]>;
+  // M7（决策 079）：/fork 手动分叉（主会话才有；命令层在 application/fork-command.ts）
+  fork?(args: string): Promise<string>;
 }
 
 // 壳侧窄接口：worker 视图需要的壳动作与壳持有的状态
@@ -43,6 +52,30 @@ export function handleSpawnCommand(
   raw: string
 ): void {
   const request = parseSpawnCommand(raw);
+  if (request.attempts !== undefined) {
+    if (workers.spawnAttempts === undefined) {
+      host.addSystem("当前会话不支持并行同任务派发（worker 会话不能再派）");
+      return;
+    }
+    host.addSystem(`并行派出 ${request.attempts} 个尝试（${request.role}）：${request.task}`);
+    workers.spawnAttempts({ role: request.role, task: request.task, count: request.attempts }).then(
+      (result) => {
+        if (!host.isStarted()) return;
+        host.addSystem(renderAttemptGroupOutcome(result));
+        refreshWorkers(host);
+        host.render();
+      },
+      (error: unknown) => {
+        if (!host.isStarted()) return;
+        host.addSystem(
+          `并行尝试收尾异常：${error instanceof Error ? error.message : String(error)}`
+        );
+        host.render();
+      }
+    );
+    refreshWorkers(host);
+    return;
+  }
   const sessionId = workers.spawn(request);
   const spawned = workers.status().find((worker) => worker.sessionId === sessionId);
   host.addSystem(

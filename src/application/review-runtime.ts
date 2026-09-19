@@ -113,7 +113,7 @@ export function createReviewDispatcher(options: ReviewDispatcherOptions): Review
       sessionsDir,
       sink: options.parentLog,
       structured: outcome.result?.structured,
-      source: { sessionId, runId, reviewSessionId: outcome.sessionId },
+      source: { sessionId, runId, producerSessionId: outcome.sessionId },
       model: { provider: model.provider, id: model.id },
       usage: { turns: outcome.turns, totalTokens },
     });

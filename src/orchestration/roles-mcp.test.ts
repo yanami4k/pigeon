@@ -13,7 +13,7 @@ test("委派策略：implementer 继承父策略里的 MCP 工具，其余角色
   };
   const implementer = deriveWorkerPolicy(parent, "implementer");
   assert.deepEqual(implementer.allow, ["read_file", "edit_file", "mcp__fs__write_file"]);
-  assert.doesNotThrow(() => assertPolicySubset(implementer, parent));
+  assert.doesNotThrow(() => assertPolicySubset(implementer, parent, "implementer"));
   assert.deepEqual(deriveWorkerPolicy(parent, "explorer").allow, ["read_file"]);
   // 只读快照工具豁免父策略子集约束（它们只读且绑定父会话自己的 Run）；MCP 工具不继承
   assert.deepEqual(deriveWorkerPolicy(parent, "reviewer").allow, [

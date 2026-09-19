@@ -73,6 +73,21 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     }
     // M5.5 S4（决策 040）：worker 编排命令——解析与排版在 application/workers-commands.ts
     const workers = host.workers();
+    // M7（决策 079）：/fork 手动分叉——分支在独立工作树里续跑，跑完回报
+    if (workers?.fork !== undefined && tokens[0] === "fork") {
+      host.addSystem("分叉中：分支在独立工作树里续跑，完成后回报");
+      void workers.fork(value.trim().slice("/fork".length)).then(
+        (text) => {
+          host.addSystem(text);
+          host.render();
+        },
+        (error: unknown) => {
+          host.addSystem(`分叉失败：${error instanceof Error ? error.message : String(error)}`);
+          host.render();
+        }
+      );
+      return;
+    }
     if (workers !== undefined && tokens[0] === "spawn") {
       host.spawnCommand(workers, value.trim().slice("/spawn".length));
       return;

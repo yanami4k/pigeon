@@ -4,15 +4,23 @@
 // 并作为 M6 挂后台 Reviewer 调度的落点。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
+
+import { materializeSession } from "../persistence/session-read.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import type { ReviewBudget, ReviewGate } from "../review/scheduler.ts";
-import type { SessionId } from "../state/ids.ts";
+import type { VerifyConfig } from "../state/attempt-config.ts";
+import type { RunId, SessionId } from "../state/ids.ts";
+import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
+import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
+import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
+import { type DistillWiring, runRetryOnFail } from "./fork.ts";
 import { describeMcpStartup, type McpSession, startMcpSession } from "./mcp.ts";
 import { attachReviewScheduler, type ReviewAttachment } from "./review-runtime.ts";
 import { buildRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
+import { bindSessionTree, type SessionTreeBinding } from "./session-tree.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
-import { restoreGrantSeed } from "./workspace.ts";
+import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
 // 装配需要的运行参数（launch-flags.ts 的子集：解析出来直接传进来）
 export interface SessionRuntimeFlags {
@@ -50,6 +58,12 @@ export interface OpenSessionRuntimeRequest {
     // Reviewer 的模型接入；缺省继承主会话
     streamFn?: StreamFn;
   };
+  // M7（决策 071）：会话级验证命令——冻结进注入快照；配置时挂 Run 结束后的独立验证
+  verify?: VerifyConfig;
+  // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照；主会话在尝试标为失败后后台分叉重试）
+  retryOnFail?: number;
+  // 叶子验证完成后的自动提炼（提炼器运行面工厂与全局并发闸）；缺省不提炼
+  distill?: DistillWiring;
 }
 
 export interface OpenedSessionRuntime {
@@ -57,6 +71,14 @@ export interface OpenedSessionRuntime {
   scope: SessionRuntimeScope;
   // 挂了后台审阅时在场（运行面释放时一并停止，见 RuntimeBundle.disposers）
   review?: ReviewAttachment;
+  // 配置了验证命令时在场（运行面释放前等在跑的验证收尾）
+  verification?: AttemptVerification;
+  // M7（决策 078）：git 工作区的主会话在场（分叉入口据此取快照器）
+  checkpoints?: CheckpointAttachment;
+  // M7（决策 077）：会话树绑定（已在树里的会话实时写穿；分叉入口在分叉后调 ensureAttached）
+  tree?: SessionTreeBinding;
+  // M7（决策 079）：后台失败自动分叉重试（开启时在场）
+  retry?: { idle(): Promise<void>; errors(): unknown[] };
 }
 
 export async function openSessionRuntime(
@@ -106,6 +128,8 @@ export async function openSessionRuntime(
       ...(request.review !== undefined
         ? { review: { enabled: request.review.enabled, everyTurns: request.review.everyTurns } }
         : {}),
+      ...(request.verify !== undefined ? { verify: { ...request.verify } } : {}),
+      ...(request.retryOnFail !== undefined ? { retryOnFail: request.retryOnFail } : {}),
       mcp,
     });
     // M6（决策 064）：只有新建或恢复的主会话挂审阅（worker 会话作用域不挂，Reviewer 自身会话由 worker 工厂装配）
@@ -127,7 +151,133 @@ export async function openSessionRuntime(
     if (review !== undefined) {
       bundle.disposers = [...(bundle.disposers ?? []), () => review.stop()];
     }
-    return { bundle, scope, ...(review !== undefined ? { review } : {}) };
+    // M7（决策 078）：主会话在 git 工作区里打快照（写或命令确实改变文件后）；worker 会话不挂
+    const checkpoints =
+      scope.parentSessionId === undefined
+        ? attachCheckpoints({ bundle, workspaceRoot: scope.workspaceRoot })
+        : undefined;
+    if (checkpoints !== undefined) {
+      bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
+    }
+    // M7（决策 077）：已在树里的会话（恢复的分支或来源会话）接上实时写穿；worker 会话不进树
+    const tree =
+      scope.parentSessionId === undefined
+        ? bindSessionTree({ bundle, governanceRoot: request.governanceRoot })
+        : undefined;
+    if (tree !== undefined) {
+      await tree.ensureAttached();
+      bundle.disposers = [
+        ...(bundle.disposers ?? []),
+        async () => {
+          await tree.idle();
+          tree.stop();
+        },
+      ];
+    }
+    // M7（决策 079）：主会话一次尝试标为失败后，后台从任务开始处分叉重试（最多 K 次），叶子验证后自动提炼
+    const retryErrors: unknown[] = [];
+    const retryPending = new Set<Promise<void>>();
+    const retries = request.retryOnFail ?? 0;
+    const startRetry = (runId: RunId): void => {
+      if (retries <= 0 || scope.parentSessionId !== undefined) {
+        return;
+      }
+      const dir = sessionsDirOf(request.governanceRoot);
+      const session = materializeSession(dir, request.sessionId, { content: false });
+      if (labelAttempt(attemptOutcomeFacts(session, runId)) !== "Failed") {
+        return;
+      }
+      const startMcp = request.startMcp;
+      const task = runRetryOnFail({
+        governanceRoot: request.governanceRoot,
+        sourceSessionId: request.sessionId,
+        sourceLog: bundle.eventLog,
+        runId,
+        retries,
+        // 复用本会话运行面已挂的快照器实例（同一会话只能有一个实例，否则序号会撞车）
+        ...(checkpoints !== undefined ? { checkpointer: checkpoints.checkpointer } : {}),
+        run: {
+          streamFn: request.streamFn,
+          provider: request.flags.provider,
+          modelId: request.flags.modelId,
+          yolo: request.flags.yolo,
+          persistThinking: request.flags.persistThinking,
+          ...(request.flags.thinkingLevel !== undefined
+            ? { thinking: request.flags.thinkingLevel }
+            : {}),
+          ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
+          ...(request.verify !== undefined ? { verify: request.verify } : {}),
+          ...(startMcp !== undefined
+            ? {
+                startMcp: () =>
+                  startMcp({
+                    governanceRoot: request.governanceRoot,
+                    workspaceRoot: scope.workspaceRoot,
+                  }),
+              }
+            : {}),
+        },
+        ...(request.distill !== undefined ? { distill: request.distill } : {}),
+      })
+        .then(() => tree?.ensureAttached())
+        .catch((error: unknown) => {
+          retryErrors.push(error);
+        });
+      retryPending.add(task);
+      task.finally(() => retryPending.delete(task)).catch(() => {});
+    };
+    // M7（决策 071）：Run 结束后在工作区根独立执行验证命令，结果落本会话的通用验证记录
+    const verification =
+      request.verify !== undefined
+        ? attachAttemptVerification({
+            bundle,
+            config: request.verify,
+            workspaceRoot: scope.workspaceRoot,
+            onVerified: (record) => startRetry(record.target.runId),
+          })
+        : undefined;
+    // 未配置验证命令时，在 Run 结束后按账本现算的标签判断（撞上限、熔断、业务失败）
+    const unsubscribeRetry =
+      request.verify === undefined && retries > 0
+        ? bundle.adapter.subscribe((event) => {
+            if (event.kind === "run.ended") {
+              startRetry(event.runId);
+            }
+          })
+        : undefined;
+    const retry =
+      retries > 0
+        ? {
+            idle: async () => {
+              await verification?.idle();
+              while (retryPending.size > 0) {
+                await Promise.allSettled([...retryPending]);
+              }
+            },
+            errors: () => [...retryErrors],
+          }
+        : undefined;
+    if (retry !== undefined) {
+      bundle.disposers = [
+        ...(bundle.disposers ?? []),
+        async () => {
+          unsubscribeRetry?.();
+          await retry.idle();
+        },
+      ];
+    }
+    if (verification !== undefined) {
+      bundle.disposers = [...(bundle.disposers ?? []), () => verification.stop()];
+    }
+    return {
+      bundle,
+      scope,
+      ...(review !== undefined ? { review } : {}),
+      ...(verification !== undefined ? { verification } : {}),
+      ...(checkpoints !== undefined ? { checkpoints } : {}),
+      ...(tree !== undefined ? { tree } : {}),
+      ...(retry !== undefined ? { retry } : {}),
+    };
   } catch (error) {
     // 装配失败：已启动的 server 必须关掉，否则留下孤儿进程（先建后换的收口约束）
     await mcp.close();

@@ -32,13 +32,19 @@ test("单 Run 视图带候选、审阅跳过与不可解析记录；cli trace �
     log.appendCandidateProposed({
       runId,
       candidate: {
-        version: 2,
+        version: 3,
         origin: "reviewer",
         kind: "skill",
         name: "read-before-edit",
         contentHash: HASH,
         bytes: 12,
-        source: { sessionId, runId, reviewSessionId, entryRunSeqs: [1], contentDigest: HASH },
+        source: {
+          sessionId,
+          runId,
+          producerSessionId: reviewSessionId,
+          entryRunSeqs: [1],
+          contentDigest: HASH,
+        },
         summary: "改之前先读",
         strength: 0.7,
         scan: { scannerVersion: "1", hits: [] },
@@ -63,7 +69,7 @@ test("单 Run 视图带候选、审阅跳过与不可解析记录；cli trace �
     log.appendObservation({
       kind: "review.unparsable",
       runId,
-      payload: { reviewSessionId, reason: "审阅没有交回结构化结果" },
+      payload: { producerSessionId: reviewSessionId, reason: "审阅没有交回结构化结果" },
     });
     log.close();
 
@@ -79,7 +85,8 @@ test("单 Run 视图带候选、审阅跳过与不可解析记录；cli trace �
     assert.ok(text.includes("候选 skill/read-before-edit"), text);
     assert.ok(text.includes("扫描拒收"), text);
     assert.ok(text.includes("审阅跳过"), text);
-    assert.ok(text.includes("审阅结果不可解析"), text);
+    assert.ok(text.includes("结构化结果不可解析"), text);
+    assert.ok(text.includes("产出会话"), text);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

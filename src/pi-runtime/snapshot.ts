@@ -2,6 +2,7 @@
 // 上游 pi-agent-core 在每个 Run 开始时自行拷贝 context 与 loop config（agent.js createContextSnapshot /
 // createLoopConfig），Adapter 在其之上再冻结一份治理侧快照，作为重建等价 Run 的依据。
 import { type Static, Type } from "typebox";
+import { RetryOnFailSchema, VerifyConfigSchema } from "../state/attempt-config.ts";
 import {
   MemoryManifestEntrySchema,
   SkillManifestEntrySchema,
@@ -16,7 +17,8 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v4（M5.5 S5，决策 050）：model 段增加推理档位 thinkingLevel（缺省 = off，不请求推理）
 // v5（决策 063）：model 段增加单轮输出上限 maxOutputTokens（事后可证每次运行用的上限）
 // v6（M6，决策 064）：顶层增加审阅配置 review（开关与轮次间隔，会话开始时冻结）
-export const INJECTION_SNAPSHOT_VERSION = 6;
+// v7（M7，决策 071 / 079）：顶层增加验证命令配置 verify 与失败自动分叉重试次数 retryOnFail（按会话冻结）
+export const INJECTION_SNAPSHOT_VERSION = 7;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -58,6 +60,10 @@ export const InjectionSnapshotSchema = Type.Object({
   createdAt: Type.Integer({ minimum: 0 }),
   // 后台审阅配置（M6，决策 064 子裁决 ①）：只在 cli / tui 主会话在场；worker、headless 与 Eval 会话缺省
   review: Type.Optional(ReviewConfigSchema),
+  // 会话级验证命令（M7，决策 071）：尝试收尾后由程序在工作区独立执行；未配置缺省（标签为未知）
+  verify: Type.Optional(VerifyConfigSchema),
+  // 失败自动分叉重试次数（M7，决策 079）：缺省即 0（关闭）
+  retryOnFail: Type.Optional(RetryOnFailSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
@@ -91,3 +97,6 @@ export const migrateInjectionSnapshotV4toV5: Migration = (doc) => ({ ...doc, ver
 
 // v5 → v6：review 可缺省，纯版本推进
 export const migrateInjectionSnapshotV5toV6: Migration = (doc) => ({ ...doc, version: 6 });
+
+// v6 → v7：verify 与 retryOnFail 可缺省，纯版本推进
+export const migrateInjectionSnapshotV6toV7: Migration = (doc) => ({ ...doc, version: 7 });

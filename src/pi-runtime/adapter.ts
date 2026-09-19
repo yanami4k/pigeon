@@ -110,6 +110,8 @@ export interface PiRuntimeAdapterOptions {
   // M5.7 S3（决策 052）：run.started 的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
   // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
   runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+  // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
+  initialMessages?: AgentMessage[];
 }
 
 export class PiRuntimeAdapter {
@@ -212,6 +214,10 @@ export class PiRuntimeAdapter {
         },
         // 广告给模型的工具集：执行体 ∩ 快照 allow ∩ 已注册（deny 不过滤，闸口逐调用拒绝并留账）
         tools: [...tools.values()],
+        // M7（决策 077）：分叉续跑的初始消息（深拷贝，不与调用方共享对象）
+        ...(options.initialMessages !== undefined
+          ? { messages: structuredClone(options.initialMessages) }
+          : {}),
       },
     });
     // 内部订阅挂一次，覆盖 Adapter 整个生命周期；回调绝不抛异常
@@ -222,6 +228,16 @@ export class PiRuntimeAdapter {
 
   // 启动一次 Run 并等待其彻底收尾；返回终态判定结果。
   async run(input: string): Promise<RunResult> {
+    return this.#runWith(() => this.#agent.prompt(input));
+  }
+
+  // M7（决策 077 / 079）：不给新输入，从已有消息续跑（上游 continue：末条消息须是用户消息或工具结果）——
+  // 分叉续跑与失败自动分叉重试用，不注入任何提示
+  async continueRun(): Promise<RunResult> {
+    return this.#runWith(() => this.#agent.continue());
+  }
+
+  async #runWith(start: () => Promise<void>): Promise<RunResult> {
     this.#assertUsable();
     // 决策 2：run() 互斥——任何时刻最多一个待审批/执行中的 call
     if (this.#currentRunId !== null) {
@@ -235,7 +251,7 @@ export class PiRuntimeAdapter {
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
     this.#recordRunStarted(advertisedTools);
     try {
-      await this.#agent.prompt(input);
+      await start();
       await this.#agent.waitForIdle();
       return this.#judgeTerminal(runId, advertisedTools);
     } finally {
@@ -308,6 +324,11 @@ export class PiRuntimeAdapter {
   // 拷贝不冻结：观察方对自己的副本做变换是合法的。
   transcript(): AgentMessage[] {
     return structuredClone(this.#agent.state.messages);
+  }
+
+  // M7（决策 078）：本 Run 已分配的最后一个条目号（message_end 累计序号）；Run 之外为 0
+  entrySeq(): number {
+    return this.#currentRunId === null ? 0 : this.#runEntrySeq;
   }
 
   isRunning(): boolean {
@@ -510,6 +531,9 @@ export class PiRuntimeAdapter {
       skills: structuredClone(snapshot.skills),
       // M6（决策 064）：后台审阅配置随 run.started 落盘（只在主会话快照里在场）
       ...(snapshot.review !== undefined ? { review: { ...snapshot.review } } : {}),
+      // M7（决策 071 / 079）：验证命令与失败自动分叉重试次数随 run.started 落盘
+      ...(snapshot.verify !== undefined ? { verify: { ...snapshot.verify } } : {}),
+      ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
       ...extras,
     });
   }

@@ -10,25 +10,32 @@ import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { runCandidatesCommand } from "../application/candidates-list.ts";
+import { renderDistillReport, runDistillCommand } from "../application/distill-command.ts";
+import { runForkCommand } from "../application/fork-command.ts";
 import { evalVerdictLabel, failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import {
+  type LaunchFlags,
   parseLaunchFlags,
   resolveStreamFnSpec,
   reviewConfigOf,
   VALUELESS_FLAGS,
+  verifyConfigOf,
 } from "../application/launch-flags.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { runManualReview } from "../application/review-command.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
+import { runTreeRebuildCommand } from "../application/session-tree.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
+import { createWorkerRuntimeFactory } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
 import { runEval } from "../eval/runner.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
+import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import {
@@ -262,6 +269,45 @@ async function reviewMain(argv: string[]): Promise<void> {
 }
 
 // pigeon candidates [--all] [--root <dir>]：只读列出候选（M6 S4，决策 065 子裁决 ⑤），缺省隐藏扫描拒收项
+// pigeon distill (--task <任务标识> | --eval-results <目录>) [--force] --stream-fn <模块路径> [--provider <p>] [--model <m>]：
+// 手动提炼（M7 S4，决策 074）——与自动触发同一派发器与选对规则；Eval 结果目录只读读取
+async function distillMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon distill (--task <任务标识> | --eval-results <目录>) [--force] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]";
+  let taskKey: string | undefined;
+  let evalResults: string | undefined;
+  let force = false;
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--task") {
+      taskKey = argv[++i];
+    } else if (arg === "--eval-results") {
+      evalResults = argv[++i];
+    } else if (arg === "--force") {
+      force = true;
+    } else if (arg !== undefined) {
+      modelArgv.push(arg);
+    }
+  }
+  const flags = parseLaunchFlags(modelArgv, { usage });
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
+  const root = prepareWorkspace(flags.root);
+  const result = await runDistillCommand({
+    root,
+    ...(taskKey !== undefined ? { taskKey } : {}),
+    ...(evalResults !== undefined ? { evalResults } : {}),
+    force,
+    createRuntime: createWorkerRuntimeFactory({
+      streamFnFor: () => streamFn,
+      provider: flags.provider,
+      modelId: flags.modelId,
+      persistThinking: flags.persistThinking,
+    }),
+  });
+  writeOut(`${renderDistillReport(result)}\n`);
+}
+
 function candidatesMain(argv: string[]): void {
   const usage = "用法：pigeon candidates [--all] [--root <dir>]";
   let root = process.cwd();
@@ -306,8 +352,13 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
   const sessionId = asSessionId(sessionIdArg);
   const modelUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --root / --stream-fn / --provider / --model";
-  const flags = parseLaunchFlags(modelArgv, { usage: modelUsage, review: true });
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+  const flags = parseLaunchFlags(modelArgv, {
+    usage: modelUsage,
+    review: true,
+    verify: true,
+    retry: true,
+  });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
@@ -327,7 +378,7 @@ async function resumeMain(argv: string[]): Promise<void> {
         const streamFn = await loadStreamFn(streamFnSpec);
         // 作用域、grant 冷恢复种子（决策 3b）、MCP 启动与装配都在 application/session-runtime.ts
         //（决策 067，与 tui 的 /resume 换绑同一份）
-        const { bundle } = await openSessionRuntime({
+        const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
           sessionId,
           streamFn,
@@ -335,12 +386,15 @@ async function resumeMain(argv: string[]): Promise<void> {
           restoreGrants: true,
           // M6（决策 064）：主会话挂后台审阅（worker 会话作用域在装配内部排除）
           review: reviewConfigOf(flags),
+          ...verifyOption(flags),
+          ...attemptOptions(flags, streamFn),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
             write(`[mcp] ${note}\n`);
           },
         });
+        const { bundle } = opened;
         try {
           await runRepl({
             adapter: bundle.adapter,
@@ -349,6 +403,8 @@ async function resumeMain(argv: string[]): Promise<void> {
             grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
             // M5 S2（决策 038）：/search 内容级检索
             search: { root: workspaceRoot },
+            // M7（决策 079）：/fork 手动分叉
+            fork: forkHandlerOf(opened, workspaceRoot, flags, streamFn),
           });
         } finally {
           await disposeRuntime(bundle);
@@ -367,7 +423,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -404,7 +460,7 @@ async function runMain(argv: string[]): Promise<void> {
       }
     }
   }
-  const flags = parseLaunchFlags(modelArgv, { usage });
+  const flags = parseLaunchFlags(modelArgv, { usage, verify: true, retry: true });
   if (task === undefined) {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) {
@@ -435,6 +491,9 @@ async function runMain(argv: string[]): Promise<void> {
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+    ...verifyOption(flags),
+    // M7（决策 079）：失败自动分叉重试；叶子验证后自动提炼
+    ...attemptOptions(flags, streamFn),
   });
   if (json) {
     // JSON.stringify 转义全部 C0 控制字符，一行输出不携带终端控制序列
@@ -443,7 +502,8 @@ async function runMain(argv: string[]): Promise<void> {
     writeOut(
       `会话 ${result.sessionId} ｜ 终态 ${result.status} ｜ 分类：${failureBadge(result.failure)} ｜ ` +
         `${result.turns} 轮 ｜ 工具调用 ${result.toolCalls} 次 ｜ 需审批 ${result.approvalsNeeded} 次 ｜ ` +
-        `token ${result.usage.totalTokens}${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
+        `token ${result.usage.totalTokens}${result.retries !== undefined ? ` ｜ 重试 ${result.retries.map((retry) => retry.label).join("、")}` : ""} ｜ 标签 ${result.label}${result.verification !== undefined ? `（验证 ${result.verification.verdict}）` : ""}` +
+        `${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
     );
   }
   process.exitCode = HEADLESS_EXIT_CODES[result.status];
@@ -608,6 +668,10 @@ function defaultSkillDir(tasksDir: string): string {
 }
 
 async function main(argv: string[]): Promise<void> {
+  // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警
+  for (const warning of probeUpstreamVersions().warnings) {
+    process.stderr.write(`${warning}\n`);
+  }
   if (argv[0] === "eval" && argv[1] === "compare") {
     evalCompareMain(argv.slice(2));
     return;
@@ -641,13 +705,38 @@ async function main(argv: string[]): Promise<void> {
     await reviewMain(argv.slice(1));
     return;
   }
+  // M7（决策 077）：由账本重建会话树
+  if (argv[0] === "tree" && argv[1] === "rebuild") {
+    const sessionArg = argv[2];
+    if (sessionArg === undefined) {
+      throw new Error("用法：pigeon tree rebuild <sessionId> [--root <dir>]");
+    }
+    const rootIndex = argv.indexOf("--root");
+    const root = prepareWorkspace(
+      rootIndex >= 0 ? (argv[rootIndex + 1] ?? process.cwd()) : process.cwd()
+    );
+    writeOut(
+      `${await runTreeRebuildCommand({ governanceRoot: root, sessionId: asSessionId(sessionArg) })}\n`
+    );
+    return;
+  }
+  // M7（决策 074）：手动提炼
+  if (argv[0] === "distill") {
+    await distillMain(argv.slice(1));
+    return;
+  }
   if (argv[0] === "candidates") {
     candidatesMain(argv.slice(1));
     return;
   }
   const startUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --root / --stream-fn / --provider / --model";
-  const flags = parseLaunchFlags(argv, { usage: startUsage, review: true });
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+  const flags = parseLaunchFlags(argv, {
+    usage: startUsage,
+    review: true,
+    verify: true,
+    retry: true,
+  });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）+ D8 旧账本一次性迁移
   const workspaceRoot = prepareWorkspace(flags.root);
@@ -655,19 +744,22 @@ async function main(argv: string[]): Promise<void> {
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
   // 会话运行面装配（决策 067）：MCP 启动、作用域与装配失败收口都在 application/session-runtime.ts
-  const { bundle } = await openSessionRuntime({
+  const opened = await openSessionRuntime({
     governanceRoot: workspaceRoot,
     sessionId,
     streamFn,
     flags,
     // M6（决策 064）：主会话挂后台审阅
     review: reviewConfigOf(flags),
+    ...verifyOption(flags),
+    ...attemptOptions(flags, streamFn),
     // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
     createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
     onMcpNote: (note) => {
       write(`[mcp] ${note}\n`);
     },
   });
+  const { bundle } = opened;
   try {
     await runRepl({
       adapter: bundle.adapter,
@@ -676,6 +768,8 @@ async function main(argv: string[]): Promise<void> {
       grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
       // M5 S2（决策 038）：/search 内容级检索
       search: { root: workspaceRoot },
+      // M7（决策 079）：/fork 手动分叉
+      fork: forkHandlerOf(opened, workspaceRoot, flags, streamFn),
     });
   } finally {
     close();
@@ -689,4 +783,57 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
+}
+
+// M7（决策 071）：会话级验证命令（未配置时不传）
+function verifyOption(flags: LaunchFlags): {
+  verify?: NonNullable<ReturnType<typeof verifyConfigOf>>;
+} {
+  const verify = verifyConfigOf(flags);
+  return verify !== undefined ? { verify } : {};
+}
+
+// M7（决策 079 / 074）：失败自动分叉重试次数与叶子验证后的提炼器运行面（与主会话同一模型接入）
+function attemptOptions(
+  flags: LaunchFlags,
+  streamFn: Awaited<ReturnType<typeof loadStreamFn>>
+): {
+  retryOnFail?: number;
+  distill: { createRuntime: ReturnType<typeof createWorkerRuntimeFactory> };
+} {
+  return {
+    ...(flags.retryOnFail !== undefined ? { retryOnFail: flags.retryOnFail } : {}),
+    distill: {
+      createRuntime: createWorkerRuntimeFactory({
+        streamFnFor: () => streamFn,
+        provider: flags.provider,
+        modelId: flags.modelId,
+        persistThinking: flags.persistThinking,
+      }),
+    },
+  };
+}
+
+// M7（决策 079）：/fork 手动分叉——分支沿用本会话的模型接入、审批模式与验证命令
+function forkHandlerOf(
+  opened: Awaited<ReturnType<typeof openSessionRuntime>>,
+  governanceRoot: string,
+  flags: LaunchFlags,
+  streamFn: Awaited<ReturnType<typeof loadStreamFn>>
+): (args: string) => Promise<string> {
+  return (args) =>
+    runForkCommand({
+      governanceRoot,
+      opened,
+      args,
+      run: {
+        streamFn,
+        provider: flags.provider,
+        modelId: flags.modelId,
+        yolo: flags.yolo,
+        persistThinking: flags.persistThinking,
+        ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+        ...verifyOption(flags),
+      },
+    });
 }

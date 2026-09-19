@@ -248,7 +248,7 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
     const { candidate } = projected;
     lines.push(
       `  候选 ${candidate.kind}/${candidate.name} ｜ ${CANDIDATE_STATUS_LABEL[projected.status] ?? projected.status} ｜ ` +
-        `哈希 ${candidate.contentHash.slice(0, 12)} ｜ 判断强度 ${candidate.strength} ｜ 审阅会话 ${candidate.source.reviewSessionId}` +
+        `哈希 ${candidate.contentHash.slice(0, 12)} ｜ 判断强度 ${candidate.strength} ｜ 产出会话 ${candidate.source.producerSessionId}` +
         (projected.screened !== undefined && projected.screened.hits.length > 0
           ? ` ｜ 命中：${projected.screened.hits.map((hit) => hit.rule).join("、")}`
           : "")
@@ -263,7 +263,7 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
   }
   for (const unparsable of run.reviewUnparsables) {
     lines.push(
-      `  审阅结果不可解析：审阅会话 ${unparsable.payload.reviewSessionId} ｜ ${unparsable.payload.reason}`
+      `  结构化结果不可解析：产出会话 ${unparsable.payload.producerSessionId} ｜ ${unparsable.payload.reason}`
     );
   }
   // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，

@@ -173,7 +173,7 @@ test("审阅完成：合法结构化结果落成候选文件，被审主会话�
     const main = materializeSession(run.sessionsDir, run.sessionId, { content: false });
     assert.equal(main.candidateProposeds.length, 1);
     assert.equal(
-      main.candidateProposeds[0]?.candidate.source.reviewSessionId,
+      main.candidateProposeds[0]?.candidate.source.producerSessionId,
       main.childSpawneds[0]?.childSessionId
     );
     assert.equal(main.candidateProposeds[0]?.model.provider, "custom");

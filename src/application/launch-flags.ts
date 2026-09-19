@@ -4,11 +4,15 @@
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 import { DEFAULT_REVIEW_EVERY_TURNS } from "../review/scheduler.ts";
+import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { ReviewConfig } from "../state/review.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
+
+// M7（决策 071）：验证命令缺省超时（5 分钟）
+export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
 export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking", "--no-review"]);
@@ -34,6 +38,12 @@ export interface LaunchFlags {
   // 0 = 只在 Run 结束审；缺省取调度器常量）。只有 cli REPL / resume 与 tui 接受
   review: boolean;
   reviewEvery?: number;
+  // M7（决策 071）：--verify-command <命令> 与 --verify-timeout <毫秒>——尝试收尾后由程序独立执行的验证命令；
+  // cli REPL / resume、tui 与 pigeon run 接受
+  verifyCommand?: string;
+  verifyTimeoutMs?: number;
+  // M7（决策 079）：--retry-on-fail <K> 失败自动分叉重试次数（缺省 0 关闭）；cli REPL / resume、tui 与 pigeon run 接受
+  retryOnFail?: number;
 }
 
 export interface ParseLaunchFlagsOptions {
@@ -47,6 +57,10 @@ export interface ParseLaunchFlagsOptions {
   historyLimit?: boolean;
   // 是否接受后台审阅参数（只有 cli / tui 的主会话挂审阅；run 与 eval 不接受）
   review?: boolean;
+  // 是否接受验证命令参数（cli / tui 主会话与 pigeon run；eval 沿用 task.json 的验证器，不接受）
+  verify?: boolean;
+  // 是否接受 --retry-on-fail（cli / tui 主会话与 pigeon run）
+  retry?: boolean;
 }
 
 export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOptions): LaunchFlags {
@@ -103,6 +117,24 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--review-every 需要非负整数（0 表示只在 Run 结束审）（${usage}）`);
       }
       flags.reviewEvery = value;
+    } else if (flag === "--verify-command" && options.verify === true) {
+      const value = argv[++i];
+      if (value === undefined || value.trim() === "") {
+        throw new Error(`--verify-command 缺少取值（一行命令）（${usage}）`);
+      }
+      flags.verifyCommand = value;
+    } else if (flag === "--verify-timeout" && options.verify === true) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`--verify-timeout 需要正整数（毫秒）（${usage}）`);
+      }
+      flags.verifyTimeoutMs = value;
+    } else if (flag === "--retry-on-fail" && options.retry === true) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`--retry-on-fail 需要非负整数（0 表示关闭）（${usage}）`);
+      }
+      flags.retryOnFail = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -136,4 +168,15 @@ export function resolveStreamFnSpec(flags: LaunchFlags, usage: string): string {
 // 后台审阅配置（决策 064 子裁决 ①）：由启动参数得出，会话开始时冻结进注入快照
 export function reviewConfigOf(flags: LaunchFlags): ReviewConfig {
   return { enabled: flags.review, everyTurns: flags.reviewEvery ?? DEFAULT_REVIEW_EVERY_TURNS };
+}
+
+// 验证命令配置（决策 071）：由启动参数得出，会话开始时冻结进注入快照；未给命令即未配置
+export function verifyConfigOf(flags: LaunchFlags): VerifyConfig | undefined {
+  if (flags.verifyCommand === undefined) {
+    return undefined;
+  }
+  return {
+    command: flags.verifyCommand,
+    timeoutMs: flags.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+  };
 }

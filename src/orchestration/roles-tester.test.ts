@@ -11,7 +11,7 @@ test("tester 角色：父策略允许时拿到 read_file 与 run_command；父�
   };
   const tester = deriveWorkerPolicy(full, "tester");
   assert.deepEqual(tester.allow, ["read_file", "run_command"]);
-  assert.doesNotThrow(() => assertPolicySubset(tester, full));
+  assert.doesNotThrow(() => assertPolicySubset(tester, full, "tester"));
 
   const noExec = { allow: ["read_file", "edit_file"], deny: [], approvalMode: "prompt" as const };
   assert.deepEqual(deriveWorkerPolicy(noExec, "tester").allow, ["read_file"]);

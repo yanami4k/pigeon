@@ -10,6 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { createDistillTools, distillToolRegistrations } from "../distillation/tools.ts";
 import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
 import {
   createReadSessionEntryTool,
@@ -22,7 +23,7 @@ import { loadCommandsConfig } from "../persistence/commands-config.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
-import type { StreamFn } from "../pi-runtime/index.ts";
+import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
 import { createReviewTools, reviewToolRegistrations } from "../review/tools.ts";
@@ -32,6 +33,8 @@ import {
   LOAD_SKILL_TOOL,
   loadSkillRegistration,
 } from "../skills/load-skill-tool.ts";
+import type { VerifyConfig } from "../state/attempt-config.ts";
+import { DISTILL_ENTRY_TOOL, DISTILL_SNAPSHOT_TOOL, type DistillTarget } from "../state/distill.ts";
 import type { WorkerRole } from "../state/event-log.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
@@ -106,6 +109,13 @@ export interface RuntimeDeps {
   review?: ReviewConfig;
   // M6（决策 064 子裁决 ⑤）：Reviewer 运行面的审阅目标——在场时注册两个只读快照工具并绑定到被审 Run
   reviewTarget?: ReviewTarget;
+  // M7（决策 074）：提炼器运行面的提炼目标——在场时注册两个只读工具并绑定到这组尝试
+  distillTarget?: DistillTarget;
+  // M7（决策 071 / 079）：会话级验证命令与失败自动分叉重试次数——冻结进注入快照并随 run.started 落盘
+  verify?: VerifyConfig;
+  retryOnFail?: number;
+  // M7（决策 077）：分叉续跑的 Agent 初始消息
+  initialMessages?: AgentMessage[];
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -120,6 +130,8 @@ export interface RuntimeBundle {
   configGrants: readonly ConfigGrantRule[];
   // M5.7 S3：本运行面持有的 MCP 会话（disposeRuntime 一并关闭）
   mcp?: McpSession;
+  // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
+  toolTiers: ReadonlyMap<string, "read" | "write" | "exec">;
   // M6：释放运行面前先执行的附加释放动作（后台审阅调度的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
 }
@@ -184,6 +196,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       registry.register(registration);
     }
   }
+  const distillTarget = deps.distillTarget;
+  if (distillTarget !== undefined) {
+    for (const registration of distillToolRegistrations()) {
+      registry.register(registration);
+    }
+  }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
   const residentMemory = loadResidentMemory({
@@ -232,6 +250,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
     ...(reviewTarget !== undefined ? [REVIEW_SNAPSHOT_TOOL, REVIEW_ENTRY_TOOL] : []),
+    ...(distillTarget !== undefined ? [DISTILL_SNAPSHOT_TOOL, DISTILL_ENTRY_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -267,6 +286,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
       ...(deps.review !== undefined ? { review: { ...deps.review } } : {}),
+      ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
+      ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: limitOutputTokens(deps.streamFn, maxOutputTokens),
@@ -296,6 +317,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         : []),
       ...mcpTools.map((bridged) => bridged.tool),
       ...(reviewTarget !== undefined ? createReviewTools({ sessionsDir, ...reviewTarget }) : []),
+      ...(distillTarget !== undefined ? createDistillTools(distillTarget) : []),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
     governance: createToolGovernance({
@@ -318,9 +340,20 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(mcp !== undefined && mcp.connections.length > 0
       ? { runStartedExtras: () => mcp.summary() }
       : {}),
+    ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
   });
   adapterRef.current = adapter;
-  return { adapter, eventLog, grantStore, configGrants, ...(mcp !== undefined ? { mcp } : {}) };
+  const toolTiers = new Map(
+    registry.list().map((registration) => [registration.name, registration.tier])
+  );
+  return {
+    adapter,
+    eventLog,
+    grantStore,
+    configGrants,
+    toolTiers,
+    ...(mcp !== undefined ? { mcp } : {}),
+  };
 }
 
 // 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话文件；前一步失败不跳过后续

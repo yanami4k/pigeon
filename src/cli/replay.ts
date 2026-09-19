@@ -100,7 +100,7 @@ function recordDetail(record: EventRecord): string {
       return `审阅跳过 ｜ 触发 ${record.payload.trigger === "turns" ? "按轮次" : "Run 结束"} ｜ ${record.payload.reason === "exit" ? "会话退出，取消排队中或进行中的审阅" : "上一次审阅未收尾"}`;
     // M6（决策 065）：审阅结果不可解析、候选提出与筛查
     case "review.unparsable":
-      return `审阅结果不可解析 ｜ 审阅会话 ${shortId(record.payload.reviewSessionId)} ｜ ${record.payload.reason}`;
+      return `结构化结果不可解析 ｜ 产出会话 ${shortId(record.payload.producerSessionId)} ｜ ${record.payload.reason}`;
     case "candidate.proposed": {
       const candidate = record.candidate;
       return (
@@ -231,6 +231,33 @@ function recordDetail(record: EventRecord): string {
       }
       return detail;
     }
+    // M7（决策 071 / 072 / 074 / 077 / 078）：验证、快照、撞上限、分叉、分支会话头、提炼跳过
+    case "attempt.verified":
+      return (
+        `尝试验证 ｜ 会话 ${shortId(record.target.sessionId)} Run ${shortId(record.target.runId)} ｜ ` +
+        `${evalVerdictLabel(record.verdict)} ｜ 退出码 ${record.exitCode ?? "无"}${record.timedOut ? "（超时）" : ""} ｜ ` +
+        `命令 ${record.command.join(" ")} ｜ ${record.durationMs} 毫秒`
+      );
+    case "workspace.checkpoint":
+      return (
+        `工作区快照 ${record.payload.commit.slice(0, 12)} ｜ 对应条目 ${record.payload.afterRunSeq} ｜ ` +
+        `工具调用 ${record.payload.toolCallId}`
+      );
+    case "run.limit-hit":
+      return `撞上限中止 ｜ ${record.payload.limit}`;
+    case "session.forked":
+      return (
+        `分叉 ｜ 分叉点 Run ${shortId(record.forkPoint.runId)} 第 ${record.forkPoint.runSeq} 条 ｜ ` +
+        `分支会话 ${shortId(record.branchSessionId)} ｜ 快照 ${record.checkpoint.commit.slice(0, 12)} ｜ ` +
+        `${record.trigger === "manual" ? "手动" : "失败自动重试"}`
+      );
+    case "branch.header":
+      return (
+        `分支会话头 ｜ 来源会话 ${shortId(record.sourceSessionId)} ｜ 分叉点第 ${record.forkPoint.runSeq} 条 ｜ ` +
+        `分支 ${record.workspace.branch}`
+      );
+    case "distill.skipped":
+      return `提炼跳过 ｜ ${record.reason} ｜ 尝试 ${record.attempts.map((attempt) => attempt.label).join("、")}`;
   }
 }
 

@@ -115,3 +115,19 @@ test("/cancel 定位：按名或会话 id；未知报错", () => {
   assert.equal(resolveWorkerRef([worker], worker.sessionId), worker);
   assert.throws(() => resolveWorkerRef([worker], "nope"), WorkerCommandError);
 });
+
+// M7（决策 069）：并行派发同一任务的多个尝试（共享任务标识）
+test("/spawn --attempts <N>：解析尝试次数（至少 2），可与 --name 以外的写法共存；非法取值报用法", () => {
+  assert.deepEqual(parseSpawnCommand('implementer --attempts 2 "把 a.txt 改成 new"'), {
+    role: "implementer",
+    task: "把 a.txt 改成 new",
+    attempts: 2,
+  });
+  assert.throws(() => parseSpawnCommand('implementer --attempts 1 "x"'), /--attempts/);
+  assert.throws(() => parseSpawnCommand('implementer --attempts abc "x"'), /--attempts/);
+  assert.throws(
+    () => parseSpawnCommand('implementer --attempts 2 --name a "x"'),
+    /--attempts/,
+    "多个尝试不能共用一个名字"
+  );
+});

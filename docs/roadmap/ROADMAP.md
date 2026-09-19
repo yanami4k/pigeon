@@ -748,7 +748,7 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - `EpisodeBuilder` 从共同祖先切分独立尝试，共享前缀只计算一次；
 - `OutcomeLabeler` 标记 `Passed`、`Failed`、`Abandoned`、`Unknown` 和 `InfrastructureError`；
 - `ContrastiveDistiller` 提炼步骤、前置条件、失败案例和适用范围；
-- Candidate 保存原始 Entry、Branch、Trace、Receipt 和内容摘要。
+- Candidate 保存原始 Entry、Branch 与内容摘要；Trace 与 Receipt 由会话与 Run 现算，不另存副本（decisions.md 075 修订）。
 - 对比机制锚定 ExpeL：成败分支成对比较后抽象，而非单轨迹总结；
 - 蒸馏产物分三形态——lesson（教训）、workflow（流程）、procedure（步骤集）——不压成单一摘要；
 - `SkillCandidate` 内部结构参考 W2S 的 Skill-IR 分解（routing / workflow backbone / semantics / attachments），仅作内部结构参考；
@@ -768,6 +768,16 @@ Outcome 判断优先级：
 - 失败分支只产生 failure case，不会被写成长期事实；
 - 摘要只用于定位，最终证据来自原始节点和工具结果；
 - 相同共享前缀不会因分支数量被重复强化。
+
+既定方向（decisions.md 068–079）：
+
+- 前提修正：Pigeon 持久化数据中原本没有会话树（entry 只有线性序号，resume 从零重建上下文，未实现分叉）；上游 pi-agent-core 0.84.4 提供会话树存储、分支上下文还原与后端契约测试，但把 Agent 运行接入会话树的 AgentHarness 为桩实现。"通过 Pi 公开 Session API 读取完整树"由 Pigeon 补写穿与分叉续跑接线实现；契约测试对象为 core 0.84.4 的 v4 JSONL 格式，使用上游 `createSessionBackendConformance`（非 pi-coding-agent 文档中的 v3 格式）。
+- 对比素材两类，均在本里程碑完成，先比对后分叉（068）：同任务独立尝试（Eval 同任务多次运行、并行派发同一任务的多个 worker），与上游 Session 树上的分叉。Pigeon Event Log 仍是唯一权威事实源，会话树是派生结构。
+- 同任务认定用显式任务标识（069）；Episode 边界按来源定：同任务比对取尝试会话的首个 Run，分叉取分叉点到叶子的路径，共享前缀只算一次（070）。
+- Eval 之外的成功判定由程序在尝试收尾后独立执行配置的验证命令并落通用验证记录（071）；五个标签的判定边界见 072，成功只认验证通过，放弃与基础设施错误不进成败对比。
+- Run 内局部对只取人写的拒绝理由与域错误后成功重试，只产出教训（073）。
+- 提炼器复用 worker 机制作为新角色，并行同任务全部收尾后与分叉叶子验证后自动触发，另有 `pigeon distill`（074）；候选升 v3 加对比来源块（075）；输入沿用 M6 截断口径并按对比结构裁剪（076）。
+- 会话树在分叉发生时才建立，账本记分叉记录，树为可重建的派生缓存（077）；分叉时文件经 git 快照回到分叉点、在独立工作树中续跑（078）；分叉由人手动发起，失败自动分叉重试为缺省关闭的可选项（079）。
 
 ### M8：Candidate 验证、审批与激活
 

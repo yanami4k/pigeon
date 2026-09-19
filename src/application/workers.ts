@@ -20,9 +20,16 @@ import type {
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
-import type { StreamFn } from "../pi-runtime/index.ts";
+import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
-import type { DelegatedPolicy, SessionHeaderInput, WorkerRole } from "../state/event-log.ts";
+import type { VerifyConfig } from "../state/attempt-config.ts";
+import type { DistillTarget } from "../state/distill.ts";
+import type {
+  BranchHeaderInput,
+  DelegatedPolicy,
+  SessionHeaderInput,
+  WorkerRole,
+} from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { ReceiptId, SessionId } from "../state/ids.ts";
 import type { ReviewTarget } from "../state/review.ts";
@@ -68,9 +75,6 @@ export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor
 
 // 按会话装配编排器（M5.5 S4）：Actor 只拿四动作面，不触达 orchestration 的构造细节
 export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrator {
-  // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
-  const maxOutputTokens =
-    deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
   return new WorkerOrchestrator({
     governanceRoot: deps.governanceRoot,
     session: {
@@ -80,24 +84,32 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
     parentPolicy: deps.bundle.adapter.snapshot().tools.policy,
     parentLog: deps.bundle.eventLog,
     approvals: deps.approvals,
-    createRuntime: createWorkerRuntimeFactory({
-      streamFnFor: () => deps.streamFn,
-      provider: deps.provider,
-      modelId: deps.modelId,
-      ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-      ...(deps.persistThinking !== undefined ? { persistThinking: deps.persistThinking } : {}),
-      ...(deps.thinkingLevel !== undefined ? { thinkingLevel: deps.thinkingLevel } : {}),
-      ...(deps.roleThinkingLevels !== undefined
-        ? { roleThinkingLevels: deps.roleThinkingLevels }
-        : {}),
-      ...(deps.startMcp !== undefined ? { startMcp: deps.startMcp } : {}),
-      ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
-      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-      ...(deps.roleModelOverrides !== undefined
-        ? { roleModelOverrides: deps.roleModelOverrides }
-        : {}),
-      ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
-    }),
+    createRuntime: sessionWorkerRuntimeFactory(deps),
+  });
+}
+
+// 会话 worker 的运行面工厂（M7：并行同任务派发的提炼器与尝试共用同一份模型接入与角色覆盖）
+export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRuntimeFactory {
+  // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
+  const maxOutputTokens =
+    deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
+  return createWorkerRuntimeFactory({
+    streamFnFor: () => deps.streamFn,
+    provider: deps.provider,
+    modelId: deps.modelId,
+    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    ...(deps.persistThinking !== undefined ? { persistThinking: deps.persistThinking } : {}),
+    ...(deps.thinkingLevel !== undefined ? { thinkingLevel: deps.thinkingLevel } : {}),
+    ...(deps.roleThinkingLevels !== undefined
+      ? { roleThinkingLevels: deps.roleThinkingLevels }
+      : {}),
+    ...(deps.startMcp !== undefined ? { startMcp: deps.startMcp } : {}),
+    ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(deps.roleModelOverrides !== undefined
+      ? { roleModelOverrides: deps.roleModelOverrides }
+      : {}),
+    ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
   });
 }
 
@@ -129,8 +141,19 @@ interface RuntimeSurface {
   maxOutputTokens?: number;
   // M6（决策 064）：Reviewer 的审阅目标
   reviewTarget?: ReviewTarget;
+  // M7（决策 074）：提炼器的提炼目标
+  distillTarget?: DistillTarget;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
+  // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
+  verify?: VerifyConfig;
+  // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照）
+  retryOnFail?: number;
+  // M7（决策 077）：分支会话头与分叉续跑的初始消息
+  branchHeader?: BranchHeaderInput;
+  initialMessages?: AgentMessage[];
+  // 运行面装起来后的回调（挂快照与会话树写穿）
+  onBundle?: (bundle: RuntimeBundle) => void;
 }
 
 export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRuntimeFactory {
@@ -172,6 +195,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
       ...(request.review !== undefined ? { reviewTarget: request.review } : {}),
+      ...(request.distill !== undefined ? { distillTarget: request.distill } : {}),
     });
   };
 }
@@ -193,6 +217,12 @@ export interface DetachedRuntimeRequest {
   editMode?: EditMode;
   maxOutputTokens?: number;
   startMcp?: () => Promise<McpSession>;
+  // M7（决策 071）：会话级验证命令冻结进注入快照
+  verify?: VerifyConfig;
+  retryOnFail?: number;
+  branchHeader?: BranchHeaderInput;
+  initialMessages?: AgentMessage[];
+  onBundle?: (bundle: RuntimeBundle) => void;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -232,6 +262,10 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
     ...(surface.reviewTarget !== undefined ? { reviewTarget: surface.reviewTarget } : {}),
+    ...(surface.distillTarget !== undefined ? { distillTarget: surface.distillTarget } : {}),
+    ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
+    ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
+    ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）
   const startMcp =
@@ -243,13 +277,18 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
             workspaceRoot: surface.workspaceRoot,
           })
       : undefined);
+  const open = (deps: RuntimeDeps): RuntimeBundle => {
+    const bundle = openBundle(surface.header, deps, surface.branchHeader);
+    surface.onBundle?.(bundle);
+    return bundle;
+  };
   if (startMcp === undefined) {
-    return readyHandle(openBundle(surface.header, runtimeDeps));
+    return readyHandle(open(runtimeDeps));
   }
   return pendingHandle(
     startMcp().then(async (mcp) => {
       try {
-        return openBundle(surface.header, { ...runtimeDeps, mcp });
+        return open({ ...runtimeDeps, mcp });
       } catch (error) {
         await mcp.close();
         throw error;
@@ -261,14 +300,21 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
 // 装配运行面；worker 另写会话头，写不进即关会话文件并上抛
 function openBundle(
   header: SessionHeaderInput | undefined,
-  runtimeDeps: RuntimeDeps
+  runtimeDeps: RuntimeDeps,
+  branchHeader?: BranchHeaderInput
 ): RuntimeBundle {
   const bundle = buildRuntime(runtimeDeps);
-  if (header === undefined) {
+  if (header === undefined && branchHeader === undefined) {
     return bundle;
   }
   try {
-    bundle.eventLog.appendSessionHeader(header);
+    if (header !== undefined) {
+      bundle.eventLog.appendSessionHeader(header);
+    }
+    // M7（决策 077）：分支会话文件的首条记录
+    if (branchHeader !== undefined) {
+      bundle.eventLog.appendBranchHeader(branchHeader);
+    }
   } catch (error) {
     bundle.eventLog.close();
     throw error;
@@ -293,25 +339,38 @@ function summaryOf(bundle: RuntimeBundle): string {
     .trim();
 }
 
-// M6（决策 064）：模型交回的结构化内容——末条 assistant 正文（可带 ```json 围栏）能解析成对象时在场；
+// M6（决策 064）：模型交回的结构化内容——末条 assistant 正文（可带 ```json 围栏，M7 起允许围栏前后有文字）能解析成对象时在场；
 // 解析不了即视为没有结构化结果（由消费方判定"结果不可解析"），不抛
 export function structuredResultOf(text: string): unknown {
+  const asObject = (body: string): unknown => {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? parsed
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const trimmed = text.trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(trimmed);
-  const body = fenced?.[1] ?? trimmed;
-  if (!body.startsWith("{")) {
+  // M7：模型常在结果前写分析文字再给 json 围栏——取最后一个能解析成对象的围栏块
+  const fenced = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/g)]
+    .map((match) => asObject(match[1] ?? ""))
+    .filter((value) => value !== undefined);
+  if (fenced.length > 0) {
+    return fenced.at(-1);
+  }
+  if (trimmed.startsWith("```")) {
     return undefined;
   }
-  try {
-    const parsed: unknown = JSON.parse(body);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? parsed
-      : undefined;
-  } catch {
-    return undefined;
+  const whole = asObject(trimmed);
+  if (whole !== undefined) {
+    return whole;
   }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  return start >= 0 && end > start ? asObject(trimmed.slice(start, end + 1)) : undefined;
 }
-
 function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   const { adapter } = bundle;
   return {
@@ -321,6 +380,8 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     receiptIds: () => receiptIdsOf(bundle),
     summary: () => summaryOf(bundle),
     structured: () => structuredResultOf(summaryOf(bundle)),
+    recordLimitHit: (limit) => adapter.recordObservation("run.limit-hit", { limit }),
+    continueRun: () => adapter.continueRun(),
     dispose: () => disposeRuntime(bundle),
   };
 }
@@ -369,6 +430,14 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
     receiptIds: () => (bundle !== undefined ? receiptIdsOf(bundle) : []),
     summary: () => (bundle !== undefined ? summaryOf(bundle) : ""),
     structured: () => (bundle !== undefined ? structuredResultOf(summaryOf(bundle)) : undefined),
+    recordLimitHit: (limit) => bundle?.adapter.recordObservation("run.limit-hit", { limit }),
+    continueRun: async () => {
+      const current = await settled;
+      if (interruptedEarly) {
+        return { status: "aborted" };
+      }
+      return current.adapter.continueRun();
+    },
     dispose: async () => {
       const current = await settled.catch(() => undefined);
       if (current !== undefined) {

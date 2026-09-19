@@ -17,7 +17,7 @@ function fixture() {
   const sessionsDir = join(root, ".pigeon", "sessions");
   const sessionId = newSessionId();
   const log = new JsonlEventLog(sessionsDir, sessionId);
-  const source = { sessionId, runId: newRunId(), reviewSessionId: newSessionId() };
+  const source = { sessionId, runId: newRunId(), producerSessionId: newSessionId() };
   const persist = (structured: unknown) =>
     persistReviewerCandidates({
       governanceRoot: root,
@@ -50,7 +50,7 @@ const skill = (content: string) => ({
   sourceRunSeqs: [1, 2],
 });
 
-test("合法结果：按种类写入 <名字>-<哈希>/，元数据为 v2，提出与筛查两族各一条", () => {
+test("合法结果：按种类写入 <名字>-<哈希>/，元数据为当前版本（v3，单来源不带对比来源块），提出与筛查两族各一条", () => {
   const f = fixture();
   try {
     const result = f.persist({
@@ -64,7 +64,8 @@ test("合法结果：按种类写入 <名字>-<哈希>/，元数据为 v2，提�
     const dir = join(skillDir, dirs[0] ?? "");
     assert.ok(existsSync(join(dir, "SKILL.md")), "Skill 正文为 SKILL.md");
     const meta = JSON.parse(readFileSync(join(dir, "candidate.json"), "utf8"));
-    assert.equal(meta.version, 2);
+    assert.equal(meta.version, 3);
+    assert.equal(meta.contrast, undefined);
     assert.equal(meta.kind, "skill");
     assert.equal(meta.status, undefined, "状态不入元数据，由账本现算");
     assert.deepEqual(meta.source.entryRunSeqs, [1, 2]);
