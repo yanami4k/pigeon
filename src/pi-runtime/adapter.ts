@@ -534,6 +534,8 @@ export class PiRuntimeAdapter {
       // M7（决策 071 / 079）：验证命令与失败自动分叉重试次数随 run.started 落盘
       ...(snapshot.verify !== undefined ? { verify: { ...snapshot.verify } } : {}),
       ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
+      // M8（决策 087）：本次尝试的预算随 run.started 落盘——回放据此沿用同一预算
+      ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
       ...extras,
     });
   }

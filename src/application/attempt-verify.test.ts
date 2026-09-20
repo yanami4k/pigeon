@@ -31,11 +31,16 @@ test("启动参数：--verify-command 与 --verify-timeout 解析；缺省超时
     usage: "u",
     verify: true,
   });
-  assert.deepEqual(verifyConfigOf(flags), { command: "npm test", timeoutMs: 5000 });
+  assert.deepEqual(verifyConfigOf(flags), {
+    command: "npm test",
+    timeoutMs: 5000,
+    source: "flag",
+  });
   const defaults = parseLaunchFlags(["--verify-command", "npm test"], { usage: "u", verify: true });
   assert.deepEqual(verifyConfigOf(defaults), {
     command: "npm test",
     timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS,
+    source: "flag",
   });
   assert.equal(verifyConfigOf(parseLaunchFlags([], { usage: "u", verify: true })), undefined);
   assert.throws(() => parseLaunchFlags(["--verify-timeout", "0"], { usage: "u", verify: true }));

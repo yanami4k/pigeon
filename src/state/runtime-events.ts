@@ -3,7 +3,7 @@
 // （state/event-log.ts）共用同一份形状，杜绝漂移。本文件不依赖上游类型——上游事件到
 // 这些形状的映射在 pi-runtime 完成（§2 边界规则：上游交互只经 PiRuntimeAdapter）。
 import { type Static, Type } from "typebox";
-import { RetryOnFailSchema, VerifyConfigSchema } from "./attempt-config.ts";
+import { AttemptBudgetSchema, RetryOnFailSchema, VerifyConfigSchema } from "./attempt-config.ts";
 import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
 import { McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { Sha256HexSchema } from "./message-content.ts";
@@ -157,6 +157,8 @@ export const RunStartedPayloadSchema = Type.Object({
   // M7（决策 071 / 079）：本会话的验证命令与失败自动分叉重试次数（冻结快照值，加法式可缺省）
   verify: Type.Optional(VerifyConfigSchema),
   retryOnFail: Type.Optional(RetryOnFailSchema),
+  // M8（决策 087）：本次尝试的预算（冻结快照值，加法式可缺省）——回放据此沿用同一预算，不得放宽
+  budget: Type.Optional(AttemptBudgetSchema),
 });
 export type RunStartedPayload = Static<typeof RunStartedPayloadSchema>;
 

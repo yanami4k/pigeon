@@ -20,6 +20,7 @@ import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { AgentMessage } from "../pi-runtime/index.ts";
 import type { SessionTree } from "../pi-runtime/session-tree.ts";
 import type { ReviewGate } from "../review/scheduler.ts";
+import { resolveCheckpointBefore } from "../state/checkpoint-ref.ts";
 import { buildForkGroup, selectContrast } from "../state/episode.ts";
 import type {
   CheckpointRef,
@@ -28,8 +29,8 @@ import type {
   GitWorktreeWorkspace,
 } from "../state/event-log.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
-import type { MaterializedSession } from "../state/materialize.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
+import { type AutoVerifyWiring, autoVerifyCandidates } from "./auto-verify.ts";
 import { createDistillDispatcher, type DistillOutcome } from "./distill-runtime.ts";
 import { type HeadlessRunOptions, runHeadlessOnce } from "./headless-core.ts";
 import {
@@ -43,35 +44,9 @@ import { sessionsDirOf } from "./workspace.ts";
 
 export class ForkError extends Error {}
 
-// 分叉点之前最近的快照：同一 Run 内不晚于分叉条目的最后一个；没有则取更早 Run 的最后一个；
-// 仍没有则说明分叉点早于首次改动——取首个快照的改前基线；整个会话都没改过文件时返回 undefined（由调用方取现状快照）
-export function resolveForkCheckpoint(
-  session: MaterializedSession,
-  forkPoint: ForkPoint
-): { commit: string; ref?: string } | undefined {
-  const runOrder: RunId[] = [];
-  for (const record of session.records) {
-    if (record.kind === "entry" && !runOrder.includes(record.runId)) {
-      runOrder.push(record.runId);
-    }
-  }
-  const forkRunIndex = runOrder.indexOf(forkPoint.runId);
-  let best: { commit: string; ref: string } | undefined;
-  for (const record of session.checkpoints) {
-    const runIndex = runOrder.indexOf(record.runId);
-    const before =
-      runIndex < forkRunIndex ||
-      (record.runId === forkPoint.runId && record.payload.afterRunSeq <= forkPoint.runSeq);
-    if (runIndex >= 0 && before) {
-      best = { commit: record.payload.commit, ref: record.payload.ref };
-    }
-  }
-  if (best !== undefined) {
-    return best;
-  }
-  const base = session.checkpoints.find((record) => record.payload.baseCommit !== undefined);
-  return base?.payload.baseCommit !== undefined ? { commit: base.payload.baseCommit } : undefined;
-}
+// 分叉点之前最近的快照：判据是纯函数，随 M8 回放共用下沉到 state/checkpoint-ref.ts；
+// 此处保留原名转出，调用方与测试不变
+export const resolveForkCheckpoint = resolveCheckpointBefore;
 
 export interface ForkRequest {
   governanceRoot: string;
@@ -265,6 +240,8 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
 export interface DistillWiring {
   createRuntime: WorkerRuntimeFactory;
   gate?: ReviewGate;
+  // M8（决策 086）：提炼落库后自动验证新候选；缺省关（开关由 Actor 显式拨）
+  autoVerify?: AutoVerifyWiring;
 }
 
 // 分叉组提炼：来源侧与从同一分叉点长出的全部分支成组，选对后提炼；记录写回来源会话文件
@@ -274,7 +251,7 @@ export async function distillForkGroup(input: {
   sourceLog?: JsonlEventLog;
   forkPoint: ForkPoint;
   distill: DistillWiring;
-}): Promise<{ distill?: DistillOutcome; skip?: string }> {
+}): Promise<{ distill?: DistillOutcome; skip?: string; errors: unknown[] }> {
   const dir = sessionsDirOf(input.governanceRoot);
   const source = materializeSession(dir, input.sourceSessionId, { content: false });
   const branches = source.sessionForkeds
@@ -286,7 +263,7 @@ export async function distillForkGroup(input: {
     .map((record) => materializeSession(dir, record.branchSessionId, { content: false }))
     .filter((branch) => branch.branchHeader !== undefined);
   if (branches.length === 0) {
-    return { skip: "no-contrast" };
+    return { skip: "no-contrast", errors: [] };
   }
   const group = buildForkGroup({ governanceRoot: input.governanceRoot, source, branches });
   const selection = selectContrast(group.attempts);
@@ -302,7 +279,7 @@ export async function distillForkGroup(input: {
           label: attempt.label,
         })),
       });
-      return { skip: selection.skip };
+      return { skip: selection.skip, errors: [] };
     }
     const dispatcher = createDistillDispatcher({
       governanceRoot: input.governanceRoot,
@@ -312,7 +289,7 @@ export async function distillForkGroup(input: {
       createRuntime: input.distill.createRuntime,
       ...(input.distill.gate !== undefined ? { gate: input.distill.gate } : {}),
     });
-    const distill = await dispatcher.distill(
+    const distilled = await dispatcher.distill(
       contrastTarget({
         kind: "fork",
         selection,
@@ -324,7 +301,11 @@ export async function distillForkGroup(input: {
         },
       })
     );
-    return { distill };
+    // M8（决策 086）：分叉叶子验证完成后自动提炼；开着自动验证时把刚落库的候选一并验掉。
+    // 自动验证的内部故障要交出去（M8 收口补遗：此前整个返回值被丢掉，错误清单无人收，
+    // 与并行派发那条路径 push 进错误清单的口径也不一致）
+    const auto = await autoVerifyCandidates(input.distill.autoVerify, distilled.persisted);
+    return { distill: distilled, errors: auto.errors };
   } finally {
     if (ownsLog) {
       log.close();
@@ -336,6 +317,8 @@ export interface RetryOutcome {
   retries: ForkBranchResult[];
   distill?: DistillOutcome;
   skip?: string;
+  // 提炼与自动验证过程里的内部故障：不吞掉，交给调用方按 080 的口径告警
+  errors: unknown[];
 }
 
 // 失败自动分叉重试（079）：从本次任务开始处分叉，最多 K 次，某次不再是失败即停；叶子验证完成后自动提炼
@@ -369,7 +352,7 @@ export async function runRetryOnFail(input: {
   }
   const leaf = results.at(-1);
   if (input.distill === undefined || leaf === undefined || !leaf.verified) {
-    return { retries: results };
+    return { retries: results, errors: [] };
   }
   const distilled = await distillForkGroup({
     governanceRoot: input.governanceRoot,

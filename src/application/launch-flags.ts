@@ -3,6 +3,7 @@
 // 按入口分成三组，影响 Eval 与学习侧按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
+import { loadVerifyConfig } from "../persistence/verify-config.ts";
 import { DEFAULT_REVIEW_EVERY_TURNS } from "../review/scheduler.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { ReviewConfig } from "../state/review.ts";
@@ -15,7 +16,12 @@ export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom"
 export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
-export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking", "--no-review"]);
+export const VALUELESS_FLAGS = new Set([
+  "--yolo",
+  "--no-persist-thinking",
+  "--no-review",
+  "--auto-verify",
+]);
 
 export interface LaunchFlags {
   root: string;
@@ -44,6 +50,9 @@ export interface LaunchFlags {
   verifyTimeoutMs?: number;
   // M7（决策 079）：--retry-on-fail <K> 失败自动分叉重试次数（缺省 0 关闭）；cli REPL / resume、tui 与 pigeon run 接受
   retryOnFail?: number;
+  // M8（决策 086）：--auto-verify 无人值守时自动验证新落库的候选（缺省关）。
+  // 一次验证是四组各 N 次真执行，开销与一轮 Eval 同量级，故必须由人显式拨开
+  autoVerify: boolean;
 }
 
 export interface ParseLaunchFlagsOptions {
@@ -73,6 +82,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
     review: true,
+    autoVerify: false,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
   const fromEnv = env.PIGEON_STREAM_FN;
@@ -109,6 +119,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--history-limit 需要正整数（${usage}）`);
       }
       flags.historyLimit = value;
+    } else if (flag === "--auto-verify" && options.verify === true) {
+      flags.autoVerify = true;
     } else if (flag === "--no-review" && options.review === true) {
       flags.review = false;
     } else if (flag === "--review-every" && options.review === true) {
@@ -178,5 +190,16 @@ export function verifyConfigOf(flags: LaunchFlags): VerifyConfig | undefined {
   return {
     command: flags.verifyCommand,
     timeoutMs: flags.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
+    source: "flag",
   };
+}
+
+// 验证命令的三级来源（M8 S1，决策 081）：启动参数 > 项目配置（.pigeon/verify.json）> 未配置。
+// 启动参数在场时整条配置取启动参数——两级逐字段混合会让"这次尝试用的是哪条命令、多长超时"
+// 取决于两份来源的组合，事后不可读。项目配置畸形一律响亮失败，不静默降级为未配置。
+export function resolveVerifyConfig(
+  flags: LaunchFlags,
+  governanceRoot: string
+): VerifyConfig | undefined {
+  return verifyConfigOf(flags) ?? loadVerifyConfig(governanceRoot, DEFAULT_VERIFY_TIMEOUT_MS);
 }

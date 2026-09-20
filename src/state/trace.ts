@@ -8,8 +8,11 @@
 import { type ProjectedCandidate, projectCandidates } from "./candidate-status.ts";
 import type {
   BreakerRecord,
+  CandidateActivatedRecord,
+  CandidateDecidedRecord,
   CandidateProposedRecord,
   CandidateScreenedRecord,
+  CandidateVerifiedRecord,
   DecisionRecord,
   EvalVerifiedRecord,
   EventRecord,
@@ -172,6 +175,10 @@ function buildRunTrace(
   };
   const candidateProposeds: CandidateProposedRecord[] = [];
   const candidateScreeneds: CandidateScreenedRecord[] = [];
+  // M8（决策 089）：候选三族同样进本 Run 的候选投影——trace 里的候选状态与 pigeon candidates 一致
+  const candidateVerifieds: CandidateVerifiedRecord[] = [];
+  const candidateDecideds: CandidateDecidedRecord[] = [];
+  const candidateActivateds: CandidateActivatedRecord[] = [];
   const callsByToolCallId = new Map<string, TraceToolCall>();
   const callsByExecutionId = new Map<ExecutionId, TraceToolCall>();
 
@@ -246,6 +253,12 @@ function buildRunTrace(
       candidateProposeds.push(record);
     } else if (record.kind === "candidate.screened") {
       candidateScreeneds.push(record);
+    } else if (record.kind === "candidate.verified") {
+      candidateVerifieds.push(record);
+    } else if (record.kind === "candidate.decided") {
+      candidateDecideds.push(record);
+    } else if (record.kind === "candidate.activated") {
+      candidateActivateds.push(record);
     } else if (record.kind === "review.skipped") {
       run.reviewSkips.push(record);
     } else if (record.kind === "review.unparsable") {
@@ -313,7 +326,13 @@ function buildRunTrace(
       call.classification = entry;
     }
   }
-  run.candidates = projectCandidates({ candidateProposeds, candidateScreeneds });
+  run.candidates = projectCandidates({
+    candidateProposeds,
+    candidateScreeneds,
+    candidateVerifieds,
+    candidateDecideds,
+    candidateActivateds,
+  });
   return run;
 }
 

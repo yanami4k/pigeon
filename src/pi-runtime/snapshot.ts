@@ -2,7 +2,11 @@
 // 上游 pi-agent-core 在每个 Run 开始时自行拷贝 context 与 loop config（agent.js createContextSnapshot /
 // createLoopConfig），Adapter 在其之上再冻结一份治理侧快照，作为重建等价 Run 的依据。
 import { type Static, Type } from "typebox";
-import { RetryOnFailSchema, VerifyConfigSchema } from "../state/attempt-config.ts";
+import {
+  AttemptBudgetSchema,
+  RetryOnFailSchema,
+  VerifyConfigSchema,
+} from "../state/attempt-config.ts";
 import {
   MemoryManifestEntrySchema,
   SkillManifestEntrySchema,
@@ -18,7 +22,9 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v5（决策 063）：model 段增加单轮输出上限 maxOutputTokens（事后可证每次运行用的上限）
 // v6（M6，决策 064）：顶层增加审阅配置 review（开关与轮次间隔，会话开始时冻结）
 // v7（M7，决策 071 / 079）：顶层增加验证命令配置 verify 与失败自动分叉重试次数 retryOnFail（按会话冻结）
-export const INJECTION_SNAPSHOT_VERSION = 7;
+// v8（M8，决策 081 / 087）：顶层增加本次尝试的预算 budget（轮次、墙钟与 token 上限），verify 增来源字段——
+// 回放必须沿用被验证那次尝试的预算且不得放宽，预算因此必须在账本里可得（M7 之前只有 worker 尝试的派出记录有）
+export const INJECTION_SNAPSHOT_VERSION = 8;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -64,6 +70,8 @@ export const InjectionSnapshotSchema = Type.Object({
   verify: Type.Optional(VerifyConfigSchema),
   // 失败自动分叉重试次数（M7，决策 079）：缺省即 0（关闭）
   retryOnFail: Type.Optional(RetryOnFailSchema),
+  // 本次尝试的预算（M8，决策 087）：回放沿用它，不得放宽；各项缺省即该项不设限
+  budget: Type.Optional(AttemptBudgetSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
@@ -100,3 +108,6 @@ export const migrateInjectionSnapshotV5toV6: Migration = (doc) => ({ ...doc, ver
 
 // v6 → v7：verify 与 retryOnFail 可缺省，纯版本推进
 export const migrateInjectionSnapshotV6toV7: Migration = (doc) => ({ ...doc, version: 7 });
+
+// v7 → v8：budget 与 verify.source 均可缺省，纯版本推进——v7 旧快照逐字有效（缺预算 = 当时没记，不补不猜）
+export const migrateInjectionSnapshotV7toV8: Migration = (doc) => ({ ...doc, version: 8 });

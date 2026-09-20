@@ -13,7 +13,7 @@ Pigeon 是基于 Pi Agent Core 构建的 Coding Agent Harness。它卖两样东�
 
 - Pi Agent Core 负责底层 Agent 循环；
 - Pigeon 负责 Session、运行状态、Coding 工具、上下文、记忆、Skill、并行 worker 编排、工具治理、人工审批、执行 Receipt、崩溃恢复、Trace、Replay 和 Eval；
-- Pigeon 可以从运行经验中生成 Memory、Skill 或 Policy 候选，但候选不能直接获得执行权；
+- Pigeon 可以从运行经验中生成 Memory 或 Skill 候选，但候选不能直接获得执行权（Policy 种类自 094 起停止产出，仅保留读取旧记录的兼容）；
 - 学习不等于授权，测试通过也不等于自动授权。
 
 叙事与验收的主角是并行编排（§M5.5）与学习闭环（§M7 到 §M9）。治理只在两个场景露面：崩溃或中断之后能对账、能恢复；学到东西之后能审、能回滚。演示顺序按此安排；里程碑排期以尽早让两个主角出场为准，治理管道不再单独立项，只随主角所需补齐（decisions.md 039）。
@@ -29,7 +29,7 @@ Episode Builder + Outcome Labeler
     ↓
 Background Reviewer / Contrastive Distiller
     ↓
-Memory Candidate / Skill Candidate / Policy Candidate
+Memory Candidate / Skill Candidate
     ↓
 安全扫描 + 证据检查 + 回放验证 + 人工审批
     ↓
@@ -47,7 +47,7 @@ Memory Candidate / Skill Candidate / Policy Candidate
 | 执行器只执行 | Durable Executor / Sandbox 接收有界请求 | ToolPolicy、审批与实际参数绑定、派发后不盲重放 |
 | 工具是状态流 | `ToolExecution` 统一 proposal 到 verification | `toolCallId`、`executionId`、`receiptId` 三层关联和确定性验证 |
 | 长任务有界执行 | Tool、Reviewer、Subagent 共享取消、预算和有界输出约束 | 父子 Run 权限子集、Session Tree 学习和对比式蒸馏 |
-| 视图是投影 | Trace、Receipt、TUI、Eval、Replay 来自同一状态 | Memory/Skill/Policy Candidate 的验证、审批和后续 Session 激活 |
+| 视图是投影 | Trace、Receipt、TUI、Eval、Replay 来自同一状态 | Memory/Skill Candidate 的验证、审批和后续 Session 激活 |
 
 ## 2. 依赖与所有权边界
 
@@ -79,7 +79,7 @@ pi-agent-core Agent
 1. Pigeon 业务代码不得散落直接调用 Pi Agent；所有运行交互统一经过 `PiRuntimeAdapter`。
 2. Adapter 不读取或修改 Pi 的私有字段，不依赖未公开内部事件。
 3. Adapter 负责注入、事件归一化和执行治理结果，但不自行决定权限。
-4. 当前 Run 使用不可变注入快照；运行中产生的新 Memory、Skill 或 Policy 只能从后续 Session 开始生效。
+4. 当前 Run 使用不可变注入快照；运行中产生的新 Memory 或 Skill 只能从后续 Session 开始生效。
 5. Trace 必须记录最终实际暴露给 Agent 的工具、上下文、记忆和 Skill 版本摘要，不能只记录配置意图。
 
 ### TUI 边界
@@ -116,7 +116,6 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 - Memory 和 Skill 不能授予工具权限；
 - Eval 分数和 Candidate 置信度不能授予工具权限；
 - Background Reviewer 不能充当批准者；
-- Policy Candidate 必须通过独立验证和人类审批才能激活；
 - 权限扩大必须有可审计的外部批准主体。
 
 ### 3.2 副作用不能盲目重放
@@ -663,7 +662,7 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - 主 Session 的不可变对话、Trace 和 Receipt 快照；
 - 精确的 Reviewer 工具白名单；
 - 同模型完整快照与辅助模型 digest 路由策略；
-- Memory、Skill、Policy Candidate 暂存；
+- Memory、Skill Candidate 暂存；
 - 重复、提示词注入、外泄模式和不可见 Unicode 扫描。
 - 经验覆盖度与内部自洽性筛查（参考 W2S 的 coverage/consistency 检查；LLM 仅作筛查，判决归确定性验证与人工审批，见 §3.8）。
 - 前置（decisions.md 029 修订）：TUI 审批面板的 [n] 是单键拒绝，理由恒为默认文案，decision 记录的逐字拒绝理由只有 cli 路径齐全；接入蒸馏前补 TUI 拒绝理由通道，或在 Episode 标注上按来源 Actor 区分负样本信号强度，不得把 TUI 路径的默认文案当作人类给出的理由。
@@ -682,7 +681,7 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - 接入形态（064）：Reviewer 复用 worker 编排，是无工作区的 reviewer worker。工作区联合以加法式新增"无工作区"成员，派出与收尾复用 child.* 两族；收尾结果可携带结构化内容，候选由 Controller 解析落盘，Reviewer 不持有任何写工具。角色表新增可选的模型接入覆盖列，四个角色缺省留空、继承主会话。
 - 冻结快照与白名单（064 子裁决 ⑤）：`review/snapshot.ts` 把被审的那一次 Run 物化成冻结快照（对话增量加少量前情、Trace 投影、Receipt 摘要）；单条正文超过 2,000 字符头尾保留并标注省略字符数，整份超过 24,000 字符从最早处丢弃并标注省略条数，省略处保留条目号。reviewer 白名单只有 `review_snapshot` 与 `review_entry` 两个 read 档工具，作用域绑定被审 Run，参数里没有会话或 Run 入口；两者不在主会话工具清单里，按"只读且绑定父会话自己的 Run"豁免子集约束，父策略的 deny 照旧生效。
 - 调度（064 子裁决 ①②④）：`review/scheduler.ts` 缺省每 8 轮触发一次，Run 结束固定补一次；`--review-every <N>`（0 表示只在 Run 结束审）与 `--no-review` 只在 cli REPL / resume 与 tui 接受；配置冻结进注入快照（v6）并随 run.started 落盘。全局同时只跑 1 个审阅：按轮次触发遇忙则跳过并落 review.skipped 观察；Run 结束补审遇忙则排队（064 修订，每会话最多一个，新请求覆盖旧请求），上一次审阅收尾后立即执行；会话退出或释放时取消排队中与进行中的审阅，落一条原因为退出的 review.skipped（可选 reason 字段区分忙与退出，缺省视为忙）；预算 12 轮、3 分钟、40,000 token（worker 上限新增可选 token 项与 token-limit 收尾状态），超限按中止、不产出候选。挂载点在 `application/session-runtime.ts`，只挂 cli 与 tui 的主会话；worker、headless、Eval 与 Reviewer 自身会话不挂。
-- 候选暂存（065）：候选 schema v2 只放不可变元数据，状态不入 schema、由 candidate.proposed 与 candidate.screened 两族现算（已提出 / 已扫描 / 扫描拒收）；正文按内容哈希原子写入 `.pigeon/candidates/<种类>/<名字>-<哈希前 16 位>/`，同哈希跳过，同名改内容即新候选并标记取代；Skill 为 SKILL.md、Memory 为整个 markdown 文件、Policy 只写自然语言建议。Reviewer 结果不可解析时只落 review.unparsable 观察、不落文件。v1 候选从无写入方，迁移成"由 v1 迁移"的保留形状，不编造字段。
+- 候选暂存（065）：候选 schema v2 只放不可变元数据，状态不入 schema、由 candidate.proposed 与 candidate.screened 两族现算（已提出 / 已扫描 / 扫描拒收）；正文按内容哈希原子写入 `.pigeon/candidates/<种类>/<名字>-<哈希前 16 位>/`，同哈希跳过，同名改内容即新候选并标记取代；Skill 为 SKILL.md、Memory 为整个 markdown 文件（Policy 形态自 094 起停止产出，旧候选仍可读、可列，但不可批准、不可激活）。Reviewer 结果不可解析时只落 review.unparsable 观察、不落文件。v1 候选从无写入方，迁移成"由 v1 迁移"的保留形状，不编造字段。
 - 扫描（065 子裁决 ④）：`review/scan.ts` 确定性规则——不可见字符（Unicode Tags、零宽、双向控制、变体选择符）、注入短语、外泄模式（curl / wget、密钥形态、可疑 URL）、可执行脚本目录；命中照常暂存并标拒收，扫描器版本随筛查记录落盘。
 - 入口（064、065 子裁决 ⑤）：`pigeon review <sessionId> [--run <runId>]` 对冷会话手动补审（与自动审阅同一派发器，Reviewer 自身会话拒审）；`pigeon candidates [--all]` 跨会话只读列出候选，缺省隐藏扫描拒收项。trace 与 replay 同步呈现候选、跳过与不可解析记录。
 - 已知边界：辅助模型 digest 路由、经验覆盖度与自洽性筛查、模型筛查标注的实际产出未做（筛查记录已留可选字段）；证据核验状态未落地（M6 状态只走到已扫描 / 扫描拒收）；cli REPL 退出时会取消在跑的审阅。
@@ -786,12 +785,12 @@ Outcome 判断优先级：
 交付：
 
 - Candidate diff、来源链和安全扫描结果；
-- Skill/Policy 的双回放验证：正回放（失败分支 + 经验应当变好）+ 负回放（成功兄弟分支 + 经验不应变差），堵"经验拟合来源 Trace"的循环论证；
+- Memory/Skill 的双回放验证：正回放（失败分支 + 经验应当变好）+ 负回放（成功兄弟分支 + 经验不应变差），堵"经验拟合来源 Trace"的循环论证；
 - 回放判定：N 次（3–5）+ Wilson 置信区间；pass@k 与 pass^k 分开报告，单次通过不构成证据；
 - 命名边界（decisions.md 014）：M4 的 `pigeon replay` 与 state/replay 是只读重建，永不执行副作用；本里程碑的回放验证是沙箱重执行，落在 replay/ 目录，命令与类型另起名字，不复用 replay 一词；
 - 验证 Receipt 和环境摘要；
 - 人工批准、拒绝、撤销和 supersede；
-- 已激活 Memory、Skill、Policy 的不可变版本；
+- 已激活 Memory、Skill 的不可变版本；
 - 下一 Session 才使用新版本。
 
 完成证据：
@@ -799,7 +798,19 @@ Outcome 判断优先级：
 - Candidate 不能通过数据库字段修改或内部工具调用跳过审批；
 - 批准内容与最终激活内容摘要一致；
 - 验证环境变化时旧批准失效或要求重新确认；
-- Policy Candidate 的激活路径与普通 Skill 写入路径物理分离。
+- 激活器在代码层面不得依赖放权写入模块，由分层规则机检（取代原"Policy Candidate 的激活路径与普通 Skill 写入路径物理分离"，见 094）。
+
+既定方向（decisions.md 081–093）：
+
+- 措辞修正：本里程碑的回放验证是在独立工作树中的重执行，隔离手段为固化命令规则而非沙箱——代码中尚无沙箱实现，048 已将其后置；容器沙箱排入 M9 前置（083）。
+- 成败判定的前提是验证命令可得：改为项目级配置，人配一次本项目所有会话继承，不做自动推断（081）。
+- 执行体复用 worker 编排新增验证器角色，起点用 M7 的快照回到任务开始处，统计沿用 Eval 结果行；命名仍守 014（082）。回放单设并发闸，预算与模型沿用被验证那次尝试，不得放宽（087）。
+- 判定为三值——通过、未测出、回归——加大效应门槛，四组固定 N 全跑不中途停，pass@k 与 pass^k 分开报，Wilson 区间进回执但不作判据（084）。回归不可批准，未测出可由人显式批准并标注未经回放证实（092）。
+- 回放在临时治理根中按正常格式装载经验，走与真激活相同的装载路径（085）；触发缺省人工，另给无人值守的自动开关（086）。
+- 审批走 CLI 子命令，TUI 只提示待审数量（088）；账本新增验证回执、决定、激活三族，决定族带动作与理由来源字段（089）。
+- 激活路径永不自动改放权文件或命令规则，由分层规则机检钉死（090；Policy 形态随 094 停止产出，其只读建议文件与专属规则一并删除）。
+- 环境摘要记全，批准失效只看模型、经验集合内容哈希、预算参数、验证命令四项封闭清单（091）。
+- 激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构（093）。
 
 ### M9：Eval 与可测量改进
 
@@ -820,6 +831,11 @@ Outcome 判断优先级：
 - 至少有一条完整链路：Trace → 失败 → Candidate → 验证 → 审批 → 重跑 → 指标改善；
 - 业务成功由确定性验证器判断，LLM Eval 只诊断轨迹；
 - 不把单次成功或 Judge 偏好写成稳定能力结论。
+
+前置（decisions.md 083）：
+
+- 执行隔离：本里程碑的批量运行量级远超 M8，须在开工前裁定沙箱形态并落地。已调研的可落地路径见 docs/decisions/m8-prep-decisions.md；选型前先跑三个探针——容器 exec 的单次往返延迟、WSL2 内虚拟化设备是否可见、跨边界调用的退出码保真度。固化命令规则只缩小开口，不提供断网与文件白名单。
+- 素材覆盖面：M7 的对比素材来自 Eval、并行派发与失败重试三条路径，日常会话天然不产生同任务的多次尝试；题源与 holdout 的裁定须一并考虑这一限制。
 
 ### M10：外部 Memory Provider（v2 候选，本轮不做）
 
@@ -899,7 +915,7 @@ M6.5 之后的自动蒸馏、回放验证与完整 Eval 是 Pigeon 的差异化�
 - 让 Memory、Skill 或外部 Provider 直接修改 Tool Policy；
 - 根据当前叶子、摘要或模型自评自动认定成功；
 - 对结果未知的副作用工具自动重试；
-- 在当前 Session 内热替换长期 Memory、Skill 或 Policy；
+- 在当前 Session 内热替换长期 Memory 或 Skill；
 - 把 Eval 高分直接转化为权限扩大；
 - 给"一批工具长期放行"的捷径：批量放开只能走 yolo（短寿命），长期放开只能逐工具固化（每条独立带出处、独立可撤销）；
 - 允许 agent、模型、Reviewer 或任何后台流程写 grants.json，或在快照里冻结 grant。

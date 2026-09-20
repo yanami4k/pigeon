@@ -11,9 +11,9 @@ import { type CandidateSink, sourceDigest, stageCandidate } from "../review/cand
 import {
   type AttemptRef,
   CANDIDATE_VERSION,
-  CandidateKindSchema,
   CandidateNameSchema,
   type ContrastSource,
+  ProducibleCandidateKindSchema,
   type ReviewerCandidate,
 } from "../state/candidate.ts";
 import type { DistillAttemptScope, DistillTarget } from "../state/distill.ts";
@@ -24,7 +24,7 @@ const RunSeqsSchema = Type.Array(Type.Integer({ minimum: 1 }));
 
 // 提炼器交回的结构化结果（与 prompt.ts 的输出格式同源）
 export const DistillerItemSchema = Type.Object({
-  kind: CandidateKindSchema,
+  kind: ProducibleCandidateKindSchema,
   name: CandidateNameSchema,
   summary: Type.String({ minLength: 1, maxLength: 300 }),
   strength: Type.Number({ minimum: 0, maximum: 1 }),

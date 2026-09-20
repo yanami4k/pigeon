@@ -24,8 +24,9 @@ import { materializeSession } from "../persistence/session-read.ts";
 import {
   CANDIDATE_VERSION,
   type CandidateKind,
-  CandidateKindSchema,
   CandidateNameSchema,
+  isProducibleCandidateKind,
+  ProducibleCandidateKindSchema,
   type ReviewerCandidate,
 } from "../state/candidate.ts";
 import type {
@@ -40,7 +41,7 @@ import { scanCandidateFiles } from "./scan.ts";
 export const ReviewerResultSchema = Type.Object({
   candidates: Type.Array(
     Type.Object({
-      kind: CandidateKindSchema,
+      kind: ProducibleCandidateKindSchema,
       name: CandidateNameSchema,
       summary: Type.String({ minLength: 1, maxLength: 300 }),
       strength: Type.Number({ minimum: 0, maximum: 1 }),
@@ -78,7 +79,8 @@ export interface PersistCandidatesResult {
   unparsable?: string;
 }
 
-const BODY_FILE: Readonly<Record<CandidateKind, (name: string) => string>> = {
+// 候选正文的文件名（按种类）：暂存目录与 M8 的详情视图、回放取正文共用同一份约定
+export const BODY_FILE: Readonly<Record<CandidateKind, (name: string) => string>> = {
   skill: () => "SKILL.md",
   memory: (name) => `${name}.md`,
   policy: () => "SUGGESTION.txt",
@@ -227,7 +229,25 @@ export interface StageCandidateInput {
 
 // 暂存一份候选（M6 落盘口径，M7 提炼器复用）：按正文哈希定目录，同哈希已存在返回 undefined（不写文件）；
 // 确定性扫描后组装元数据，先写同级临时目录再整体改名
+// 候选目录名与正文路径（治理根相对）：身份是正文哈希，目录名取其前 16 位
+export function candidateDirName(name: string, contentHash: string): string {
+  return `${name}-${contentHash.slice(0, 16)}`;
+}
+
+export function candidateBodyPath(kind: CandidateKind, name: string, contentHash: string): string {
+  return path.join(
+    CANDIDATES_DIR,
+    kind,
+    candidateDirName(name, contentHash),
+    BODY_FILE[kind](name)
+  );
+}
+
 export function stageCandidate(input: StageCandidateInput): ReviewerCandidate | undefined {
+  // 决策 094：写侧只认 Memory 与 Skill；policy 取值只为读旧候选而保留
+  if (!isProducibleCandidateKind(input.kind)) {
+    throw new Error(`候选种类 ${input.kind} 已停止产出（决策 094）：只能落 memory 或 skill`);
+  }
   const contentHash = sha256(input.content);
   const kindDir = path.join(input.governanceRoot, CANDIDATES_DIR, input.kind);
   const finalDir = path.join(kindDir, `${input.name}-${contentHash.slice(0, 16)}`);

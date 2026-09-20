@@ -17,6 +17,7 @@ export const WORKER_ROLES: readonly WorkerRole[] = [
   "implementer",
   "tester",
   "distiller",
+  "verifier",
 ];
 
 // 角色默认工具（ROADMAP §M5.5 角色表）；tester 的 run_command 另受 .pigeon/commands.json 角色清单限定（048）
@@ -29,6 +30,10 @@ export const ROLE_TOOLS: Readonly<Record<WorkerRole, readonly string[]>> = {
   tester: ["read_file", "run_command"],
   // M7（决策 074）：提炼器只读这组尝试的冻结对比快照与按侧回查原文，不给任何写、终端与跨会话检索工具
   distiller: [DISTILL_SNAPSHOT_TOOL, DISTILL_ENTRY_TOOL],
+  // M8（决策 082 / 083）：验证器在独立工作树里重执行被验证那次尝试，故拿的是写代码那一组工具；
+  // 命令档工具另受 .pigeon/commands.json 的 verifier 清单限定（083：只在固化命令规则内放行）——
+  // 这不是隔离，放行一条脚本命令即等于放行该脚本能做的一切，网络亦不受限，真正的断网与文件白名单归 M9 沙箱
+  verifier: ["read_file", "edit_file", "run_command"],
 };
 
 // 角色表的推理档位列（决策 050）：在场即覆盖启动参数的全局值，缺省继承全局。第一版四个角色都继承

@@ -15,29 +15,55 @@ import { type Migration, MigrationRegistry } from "./migration.ts";
 
 export const CANDIDATE_VERSION = 3;
 
-// 状态机（ROADMAP §4）；M6 新增 ScanRejected：确定性扫描命中，永不参与激活
-// Proposed → SecurityScanned | ScanRejected → EvidenceChecked → ReplayValidated / ValidationFailed
-//          → AwaitingApproval → Active / Rejected / Superseded
+// 状态机（ROADMAP §4）；M6 新增 ScanRejected：确定性扫描命中，永不参与激活。
+// M8（决策 084 / 089 / 092 / 093）补齐回放验证之后的全部状态：验证是三值——通过（ReplayValidated）、
+// 未测出（ReplayInconclusive）、回归（ReplayRegressed）；决定族给出已批准（Approved）、已拒绝（Rejected）、
+// 已撤销（Revoked）、已取代（Superseded）；复制到治理根正常目录后为已激活（Active）。
+// Proposed → SecurityScanned | ScanRejected
+//          → ReplayValidated | ReplayInconclusive | ReplayRegressed
+//          → Approved → Active → Revoked ／ Rejected ／ Superseded
+// 回归不可批准（092），翻案只能靠重验；未测出可由人显式批准，激活记录另带"未经回放证实"标记。
+// 状态不入本 schema（由账本现算，state/candidate-status.ts），故新增成员不动 CANDIDATE_VERSION。
+// EvidenceChecked / ValidationFailed / AwaitingApproval 是 M6 之前写下的中间态，无写入方，保留不删（历史值可读）
 export const CandidateStatusSchema = Type.Union([
   Type.Literal("Proposed"),
   Type.Literal("SecurityScanned"),
   Type.Literal("ScanRejected"),
   Type.Literal("EvidenceChecked"),
   Type.Literal("ReplayValidated"),
+  Type.Literal("ReplayInconclusive"),
+  Type.Literal("ReplayRegressed"),
   Type.Literal("ValidationFailed"),
   Type.Literal("AwaitingApproval"),
+  Type.Literal("Approved"),
   Type.Literal("Active"),
+  Type.Literal("Revoked"),
   Type.Literal("Rejected"),
   Type.Literal("Superseded"),
 ]);
 export type CandidateStatus = Static<typeof CandidateStatusSchema>;
 
+// 候选种类（读侧）：policy 取值保留，只为读取 094 之前已入库的旧候选与旧记录——
+// 删值会让那些数据不可读，违反加法式原则。写侧一律只认 ProducibleCandidateKindSchema。
 export const CandidateKindSchema = Type.Union([
   Type.Literal("memory"),
   Type.Literal("skill"),
   Type.Literal("policy"),
 ]);
 export type CandidateKind = Static<typeof CandidateKindSchema>;
+
+// 可产出的候选种类（写侧，决策 094）：提炼器与审阅器只产 Memory 与 Skill。
+// Policy 的原定位是经人审批后影响工具权限的唯一通道，逐层收窄后只剩一个没有任何读取方的目录，
+// 对模型完全不可见；留着的成本是每次改候选 schema、动激活路径或写产出规则都要多考虑一种形态。
+export const ProducibleCandidateKindSchema = Type.Union([
+  Type.Literal("memory"),
+  Type.Literal("skill"),
+]);
+export type ProducibleCandidateKind = Static<typeof ProducibleCandidateKindSchema>;
+
+export function isProducibleCandidateKind(kind: CandidateKind): kind is ProducibleCandidateKind {
+  return kind === "memory" || kind === "skill";
+}
 
 // 候选名：目录名的一部分，限小写字母、数字与短横线
 export const CandidateNameSchema = Type.String({ pattern: "^[a-z0-9][a-z0-9-]{0,63}$" });

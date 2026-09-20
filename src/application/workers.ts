@@ -22,12 +22,13 @@ import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
-import type { VerifyConfig } from "../state/attempt-config.ts";
+import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { DistillTarget } from "../state/distill.ts";
 import type {
   BranchHeaderInput,
   DelegatedPolicy,
   SessionHeaderInput,
+  WorkerLimits,
   WorkerRole,
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
@@ -149,11 +150,23 @@ interface RuntimeSurface {
   verify?: VerifyConfig;
   // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照）
   retryOnFail?: number;
+  // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
+  budget?: AttemptBudget;
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   // 运行面装起来后的回调（挂快照与会话树写穿）
   onBundle?: (bundle: RuntimeBundle) => void;
+}
+
+// M8（决策 087）：派出记录的上限即该 worker 尝试的预算——两者同一组值，冻结进注入快照后回放才能沿用。
+// 缺省项原样缺省：缺省 = 该项不设限，回放沿用同样的不设限，不是放宽
+export function budgetOfLimits(limits: WorkerLimits): AttemptBudget {
+  return {
+    maxTurns: limits.maxTurns,
+    wallClockMs: limits.wallClockMs,
+    ...(limits.maxTokens !== undefined ? { maxTokens: limits.maxTokens } : {}),
+  };
 }
 
 export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRuntimeFactory {
@@ -194,6 +207,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
+      ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
       ...(request.review !== undefined ? { reviewTarget: request.review } : {}),
       ...(request.distill !== undefined ? { distillTarget: request.distill } : {}),
     });
@@ -220,6 +234,8 @@ export interface DetachedRuntimeRequest {
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
   retryOnFail?: number;
+  // M8（决策 087）：本次尝试的预算冻结进注入快照
+  budget?: AttemptBudget;
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -265,6 +281,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.distillTarget !== undefined ? { distillTarget: surface.distillTarget } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
+    ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）

@@ -22,10 +22,10 @@ export function distillerTask(target: DistillTarget): string {
     "- workflow（流程）：成功侧整体做法的顺序；",
     "- procedure（步骤集）：成功侧可以照做的具体步骤。",
     "规则：只由失败侧支撑的条目只能是 lesson，且种类不能是 memory；workflow 与 procedure 必须引用成功侧条目。",
-    "种类：skill 写完整的 SKILL.md（开头带 name 与 description 的 frontmatter）；memory 写完整的 markdown 文件；policy 只写自然语言建议。",
+    "种类只有两种：skill 写完整的 SKILL.md（开头带 name 与 description 的 frontmatter）；memory 写完整的 markdown 文件。",
     "只对本次任务成立、没有把握或摘要里看不出原文依据的，不要提。",
     "最后只输出一个 JSON 对象，不要任何其他文字，格式如下：",
-    '{"candidates":[{"kind":"memory|skill|policy","name":"小写字母数字与短横线","summary":"一句话摘要","strength":0.0到1.0之间的判断强度,"form":"lesson|workflow|procedure","content":"正文","evidence":{"successful":[成功侧条目号],"failed":[失败侧条目号]}}]}',
+    '{"candidates":[{"kind":"memory|skill","name":"小写字母数字与短横线","summary":"一句话摘要","strength":0.0到1.0之间的判断强度,"form":"lesson|workflow|procedure","content":"正文","evidence":{"successful":[成功侧条目号],"failed":[失败侧条目号]}}]}',
     '没有值得沉淀的内容时输出 {"candidates":[]}。',
   ].join("\n");
 }

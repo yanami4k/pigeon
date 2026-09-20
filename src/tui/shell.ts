@@ -120,6 +120,10 @@ export interface TuiShellOptions {
   workers?: TuiWorkersFace;
   // worker 状态行刷新间隔（毫秒，有 worker 在跑时生效）；缺省 1000
   workerRefreshMs?: number;
+  // M8 S6（决策 088）：待审候选数量。审批走 CLI 子命令，TUI 只在状态行提示这个数字、不做面板——
+  // 候选审批是离线决策、内容为长文，塞进快节奏的在线上下文会把该慢的决定做快。
+  // 注入一个取数函数（缺省 = 不提示）；壳每次刷新状态行时取一次，取数抛错按"不提示"处理
+  pendingCandidates?: () => number;
 }
 
 export class PigeonTuiShell
@@ -231,7 +235,7 @@ export class PigeonTuiShell
 
   updateStatus(): void {
     // 状态栏纯 ASCII；审批/恢复菜单期间输入归模态键控，busy 与 resume 期间输入锁定
-    this.statusLine.setText(
+    const base =
       this.pendingApprovalState !== null
         ? "state: approval | decide in panel"
         : this.resuming
@@ -240,8 +244,19 @@ export class PigeonTuiShell
             ? "state: cancelling | input locked"
             : this.running
               ? "state: running | input locked"
-              : "state: idle | [enter] submit"
-    );
+              : "state: idle | [enter] submit";
+    this.statusLine.setText(`${base}${this.pendingCandidatesHint()}`);
+  }
+
+  // M8 S6（决策 088）：待审候选只在状态行提示数量，审批动作一律走 pigeon candidates 子命令。
+  // 取数失败不影响状态行（它只是提示），按不提示处理
+  private pendingCandidatesHint(): string {
+    try {
+      const pending = this.options.pendingCandidates?.() ?? 0;
+      return pending > 0 ? ` | candidates: ${pending} pending (pigeon candidates)` : "";
+    } catch {
+      return "";
+    }
   }
 
   private handleSubmit(value: string): void {

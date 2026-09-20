@@ -23,10 +23,15 @@ import {
   firstRunOf,
   selectContrast,
 } from "../state/episode.ts";
-import type { DistillSkippedInput, WorkerLimits } from "../state/event-log.ts";
+import type {
+  CandidateVerifiedRecord,
+  DistillSkippedInput,
+  WorkerLimits,
+} from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { type AttemptVerificationSink, verifyAttempt } from "./attempt-verify.ts";
+import { type AutoVerifyWiring, autoVerifyCandidates } from "./auto-verify.ts";
 import {
   createDistillDispatcher,
   type DistillDispatcher,
@@ -50,6 +55,8 @@ export interface AttemptGroupInput {
   verify?: VerifyConfig;
   // 缺省不自动提炼（只验证与记账）
   distill?: DistillDispatcher;
+  // M8（决策 086）：提炼落库后自动验证新候选；缺省关（开关由 Actor 显式拨）
+  autoVerify?: AutoVerifyWiring;
   // 缺省生成
   taskKey?: string;
   // 派出后（收尾前）回报派出的会话，供 Actor 回显
@@ -63,6 +70,8 @@ export interface AttemptGroupResult {
   selection: ContrastSelection;
   skip?: ContrastSkipReason;
   distill?: DistillOutcome;
+  // M8（决策 086）：自动验证落下的回执（开关关着时为空）
+  verified?: CandidateVerifiedRecord[];
   // 派发过程里的内部故障（验证记录落盘失败等）：与主会话挂载同口径，不吞掉
   errors: unknown[];
 }
@@ -151,7 +160,18 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
     };
   }
   const distill = await input.distill.distill(contrastTarget({ kind: "task", taskKey, selection }));
-  return { taskKey, outcomes: settled, attempts, selection, distill, errors };
+  // M8（决策 086）：无人值守时把刚落库的候选自动验一遍；缺省关
+  const auto = await autoVerifyCandidates(input.autoVerify, distill.persisted);
+  errors.push(...auto.errors);
+  return {
+    taskKey,
+    outcomes: settled,
+    attempts,
+    selection,
+    distill,
+    ...(auto.records.length > 0 ? { verified: auto.records } : {}),
+    errors,
+  };
 }
 
 export interface SessionAttemptRunnerDeps {
@@ -162,6 +182,8 @@ export interface SessionAttemptRunnerDeps {
   createRuntime: WorkerRuntimeFactory;
   verify?: VerifyConfig;
   gate?: ReviewGate;
+  // M8（决策 086）：无人值守自动验证；缺省关
+  autoVerify?: AutoVerifyWiring;
 }
 
 // 按会话装配并行同任务派发（tui /spawn --attempts 的落点）：同一编排器派尝试，专用派发器派提炼器
@@ -185,6 +207,7 @@ export function createSessionAttemptRunner(
       task: request.task,
       count: request.count,
       ...(deps.verify !== undefined ? { verify: deps.verify } : {}),
+      ...(deps.autoVerify !== undefined ? { autoVerify: deps.autoVerify } : {}),
       distill,
     });
 }

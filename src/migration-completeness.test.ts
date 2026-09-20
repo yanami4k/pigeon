@@ -25,7 +25,9 @@ import {
   migrateInjectionSnapshotV4toV5,
   migrateInjectionSnapshotV5toV6,
   migrateInjectionSnapshotV6toV7,
+  migrateInjectionSnapshotV7toV8,
 } from "./pi-runtime/snapshot.ts";
+import { VERIFY_CONFIG_VERSION, VerifyConfigFileSchema } from "./state/attempt-config.ts";
 import { CANDIDATE_VERSION, migrateCandidateToCurrent } from "./state/candidate.ts";
 import { COMMANDS_CONFIG_VERSION, CommandsConfigFileSchema } from "./state/commands.ts";
 import { EVENT_LOG_VERSION, parseEventRecord } from "./state/event-log.ts";
@@ -68,6 +70,7 @@ snapshotMigrations.register("injection-snapshot", 3, migrateInjectionSnapshotV3t
 snapshotMigrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
 snapshotMigrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
 snapshotMigrations.register("injection-snapshot", 6, migrateInjectionSnapshotV6toV7);
+snapshotMigrations.register("injection-snapshot", 7, migrateInjectionSnapshotV7toV8);
 
 const receiptV1 = () => ({
   version: 1,
@@ -169,6 +172,12 @@ const CASES: VersionedSchemaCase[] = [
     current: MCP_CONFIG_VERSION,
     v1: () => ({ version: 1, servers: {} }),
     migrate: validateOnly(McpConfigFileSchema),
+  },
+  {
+    constant: "VERIFY_CONFIG_VERSION",
+    current: VERIFY_CONFIG_VERSION,
+    v1: () => ({ version: 1, command: "npm test" }),
+    migrate: validateOnly(VerifyConfigFileSchema),
   },
   {
     constant: "CANDIDATE_VERSION",

@@ -111,7 +111,7 @@ test("账本到树消息：按 Run 内第几条助手消息对应第几次 turn.
   const runId = newRunId();
   const entryIds = [newEntryId(), newEntryId(), newEntryId(), newEntryId()];
   const envelope = (timestamp: number) => ({
-    version: 11,
+    version: 12,
     id: newEntryId(),
     sessionId,
     runId,

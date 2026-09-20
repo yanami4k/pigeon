@@ -87,12 +87,14 @@ export default {
       severity: "error",
       comment:
         "application 是 Controller 层（M2 S1，决策 025）：装配根、resume 流程与 Actor 共用措辞；" +
-        "可依赖 state / persistence / tools / approvals / pi-runtime / execution，不触达 Actor 层（cli/tui）。",
+        "可依赖 state / persistence / tools / approvals / pi-runtime / execution 与各下层能力目录" +
+        "（memory / skills / orchestration / mcp / review / distillation / replay / activation），" +
+        "不触达 Actor 层（cli/tui）。",
       from: { path: "^src/application/", pathNot: "\\.test\\.ts$" },
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|review|distillation)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|review|distillation|replay|activation)/",
       },
     },
     {
@@ -112,15 +114,43 @@ export default {
       name: "placeholders-only-state-tools",
       severity: "error",
       comment:
-        "占位目录（context / replay）暂按最小允许清单约束：只依赖 state 与 tools" +
-        "（022 修订）。review/ 与 distillation/ 已放行到各自的清单，见 review-below-controller 与 distillation-below-controller。",
+        "占位目录（context）暂按最小允许清单约束：只依赖 state 与 tools（022 修订）。" +
+        "review/、distillation/ 与 replay/ 已放行到各自的清单，见 review-below-controller、" +
+        "distillation-below-controller 与 replay-below-controller。",
       from: {
-        path: "^src/(context|replay)/",
+        path: "^src/context/",
         pathNot: "\\.test\\.ts$",
       },
       to: {
         path: "^src/",
-        pathNot: "^src/(context|replay|state|tools)/",
+        pathNot: "^src/(context|state|tools)/",
+      },
+    },
+    {
+      name: "replay-below-controller",
+      severity: "error",
+      comment:
+        "replay（M8：回放判定与统计、验证环境摘要与失效判据、回放材料的临时治理根，决策 084 / 085 / 091）" +
+        "只依赖 state、tools、persistence 的只读物化与 activation 的落点与写入口径：" +
+        "回放的经验装载必须与真激活走同一条路径，故复用 activation，不自己另写一份落点。" +
+        "不触达 pi-runtime、orchestration、application 与 Actor 层——派发、调度与装配由 application 注入。" +
+        "命名守决策 014：本目录的重执行不复用 replay 一词（类型与命令一律叫 rerun / verify），" +
+        "M4 的 pigeon replay 与 state/replay.ts 仍是只读重建。",
+      from: { path: "^src/replay/", pathNot: "\\.test\\.ts$" },
+      to: { path: "^src/", pathNot: "^src/(replay|state|tools|persistence|activation)/" },
+    },
+    {
+      name: "activation-only-state",
+      severity: "error",
+      comment:
+        "activation（M8 S7：候选激活的落点、写入、漂移与撤销，决策 090 / 093）只依赖 state 与 " +
+        "persistence 的整文件原子替换。这条同时是决策 090 的机检：放权写入模块" +
+        "（persistence/grants-config.ts、application/grants.ts）与审批层不在允许清单里，" +
+        "激活器在代码层面够不着它们。决策 094 删掉 Policy 形态后，这条是 §M8 完成证据里留下的那条不变式。",
+      from: { path: "^src/activation/", pathNot: "\\.test\\.ts$" },
+      to: {
+        path: "^src/",
+        pathNot: "^src/(activation|state)/|^src/persistence/atomic-write\\.ts$",
       },
     },
     {

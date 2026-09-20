@@ -78,6 +78,9 @@ export interface WorkerRuntimeRequest {
   review?: ReviewTarget;
   // M7（决策 074）：提炼器的提炼目标（一组尝试）；只读工具据此绑定作用域
   distill?: DistillTarget;
+  // M8（决策 087）：本 worker 的上限（与派出记录同一组值）——装配层据此把预算冻结进注入快照，
+  // 回放才能沿用被验证那次尝试的预算
+  limits?: WorkerLimits;
 }
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
@@ -286,6 +289,7 @@ export class WorkerOrchestrator {
         },
         approvalHandler: (approval) =>
           this.#options.approvals({ ...approval, sessionId, worker: { name, role } }),
+        limits,
         ...(request.review !== undefined ? { review: request.review } : {}),
         ...(request.distill !== undefined ? { distill: request.distill } : {}),
       });

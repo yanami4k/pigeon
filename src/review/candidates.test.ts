@@ -1,6 +1,7 @@
 // 候选落盘（M6 S3，决策 065 及其子裁决）：解析 Reviewer 的结构化收尾结果（解析失败只记一条"结果不可解析"、
 // 不落任何文件）；按内容哈希写入 .pigeon/candidates/<种类>/<名字>-<哈希>/，写入后不可变、同哈希跳过；
-// Policy 只写自然语言建议；Memory 以整文件为粒度；扫描命中照常暂存并标拒收；同名改内容即新候选并标取代。
+// 产出形态只有 Memory 与 Skill（决策 094）；Memory 以整文件为粒度；扫描命中照常暂存并标拒收；
+// 同名改内容即新候选并标取代。
 // 提出与筛查两族记录写进被审主会话的会话文件，候选状态由这两族现算。
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -140,7 +141,7 @@ test("扫描命中：正文照常暂存，筛查记录带命中项，状态为�
   }
 });
 
-test("按种类的正文：Memory 整文件、Policy 只写自然语言建议", () => {
+test("按种类的正文：Memory 整文件、Skill 是标准目录下的 SKILL.md", () => {
   const f = fixture();
   try {
     f.persist({
@@ -153,14 +154,6 @@ test("按种类的正文：Memory 整文件、Policy 只写自然语言建议", 
           content: "# 项目事实\n\n测试用 node --test。",
           sourceRunSeqs: [1],
         },
-        {
-          kind: "policy",
-          name: "allow-test-command",
-          summary: "测试命令可放权",
-          strength: 0.4,
-          content: "建议把 node --test 升格为固化放权。",
-          sourceRunSeqs: [2],
-        },
       ],
     });
     const memoryDir = readdirSync(join(f.root, ".pigeon", "candidates", "memory"))[0] ?? "";
@@ -171,11 +164,30 @@ test("按种类的正文：Memory 整文件、Policy 只写自然语言建议", 
       ),
       "# 项目事实\n\n测试用 node --test。"
     );
-    const policyDir = readdirSync(join(f.root, ".pigeon", "candidates", "policy"))[0] ?? "";
-    const policyFiles = readdirSync(
-      join(f.root, ".pigeon", "candidates", "policy", policyDir)
-    ).sort();
-    assert.deepEqual(policyFiles, ["SUGGESTION.txt", "candidate.json"]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// 决策 094：产出形态只剩 Memory 与 Skill，写侧一律拒收 policy
+test("产出形态收敛：审阅结果里出现 policy 即整体不可解析，不落任何文件", () => {
+  const f = fixture();
+  try {
+    const result = f.persist({
+      candidates: [
+        {
+          kind: "policy",
+          name: "allow-test-command",
+          summary: "测试命令可放权",
+          strength: 0.4,
+          content: "建议把 node --test 升格为固化放权。",
+          sourceRunSeqs: [2],
+        },
+      ],
+    });
+    assert.equal(result.written.length, 0);
+    assert.match(result.unparsable ?? "", /结构化结果不符合格式/);
+    assert.equal(existsSync(join(f.root, ".pigeon", "candidates", "policy")), false);
   } finally {
     f.cleanup();
   }

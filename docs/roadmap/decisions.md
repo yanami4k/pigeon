@@ -92,6 +92,20 @@
 | 078 | 文件变化后用 git 底层命令生成快照挂到 `refs/pigeon/checkpoints/`，分叉从快照开独立工作树，非 git 工作区报错 | M7 前置第 11 件 | M7 |
 | 079 | 分叉由人手动发起，另有缺省关闭的 `--retry-on-fail <K>` 失败自动分叉重试 | M7 前置第 12 件 | M7 |
 | 080 | 运行时内部故障不进账本，改为按故障类别去重的标准错误告警 | M7 收口 | M7 |
+| 081 | 验证命令改为项目级配置：人配一次本项目所有会话继承，启动参数可覆盖，不做自动推断 | M8 前置第 1 件 | M8 |
+| 082 | 回放执行体复用 worker 机制新增验证器角色，起点用快照回到任务开始处，统计沿用 Eval 结果行 | M8 前置第 2 件 | M8 |
+| 083 | 回放权限形态用固化命令规则，容器沙箱排入 M9 前置并先跑三个探针 | M8 前置第 3 件 | M8 |
+| 084 | 回放判定为三值加大效应门槛，四组固定 N 全跑不中途停，区间只进回执不作判据 | M8 前置第 4 件 | M8 |
+| 085 | 回放在临时治理根里按正常格式装载经验，走与真激活相同的装载路径 | M8 前置第 5 件 | M8 |
+| 086 | 回放缺省人工触发 `pigeon verify`，另给显式开关供无人值守时自动验证 | M8 前置第 6 件 | M8 |
+| 087 | 回放单设并发闸缺省 1 可配；每次回放的预算与模型沿用被验证那次尝试 | M8 前置第 7 件 | M8 |
+| 088 | 候选审批走 CLI 子命令，TUI 只在状态行提示待审数量 | M8 前置第 8 件 | M8 |
+| 089 | 候选新增三个记录族：验证回执、带动作与理由来源的决定、激活 | M8 前置第 9 件 | M8 |
+| 090 | Policy 候选只落只读建议文件，永不自动改放权文件，物理分离由分层规则机检 | M8 前置第 10 件 | M8 |
+| 091 | 验证回执摘要记全，批准失效只看模型、经验集合哈希、预算、验证命令四项封闭清单 | M8 前置第 11 件 | M8 |
+| 092 | 回归的候选一律不可批准；未测出可人工批准但理由必填，激活记录标注未经回放证实 | M8 前置第 12 件 | M8 |
+| 093 | 激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构 | M8 前置第 13 件 | M8 |
+| 094 | Policy 候选停止产出并删除其激活机制，枚举值仅保留读旧记录；机检收敛为激活器不得依赖放权写入模块 | M8 收口 | M8 |
 
 ## 条目
 
@@ -710,3 +724,107 @@
 - 适用范围：会话树写穿失败一并按本条处理（077 修订），不再记账本观察族。
 - 已知边界：tui 在壳接管终端后收到的标准错误告警可能干扰渲染。
 - 详情：docs/audits/2026-09-16-m7-9f440fe.md 收口修复一节。
+
+### 081 验证命令改为项目级配置：人配一次本项目所有会话继承，启动参数可覆盖，不做自动推断（设计）
+
+- 结论：验证命令与超时改为项目级配置文件，人配一次后本项目所有会话继承，启动参数仍可覆盖单次运行；不做自动推断（例如从包管理脚本猜测测试命令）。Eval 继续用任务目录里的验证器。
+- 理由：日常会话不配验证命令即一律标未知，M7 的对比与 M8 的回放判定都取不到成败；配置文件机制在命令规则、放权、MCP 三处已有先例，零新概念。自动推断的风险不对称：推断出的命令若未覆盖本次改动却照常通过，会把失败尝试标成成功，污染学习素材的标签，而 072 的口径是宁可标未知、不可标错。
+- 锚点：src/state/attempt-config.ts（VERIFY_CONFIG_VERSION、配置文件 schema、来源字段）、src/persistence/verify-config.ts（.pigeon/verify.json 只读加载，畸形响亮失败）、src/application/launch-flags.ts（resolveVerifyConfig 三级来源）、src/pi-runtime/snapshot.ts（v8 按会话冻结）、src/cli/index.ts 与 src/tui/main.ts（入口接线）；测试 src/persistence/verify-config.test.ts、src/application/launch-flags-verify.test.ts、src/migration-completeness.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 082 回放执行体复用 worker 机制新增验证器角色，起点用快照回到任务开始处，统计沿用 Eval 结果行（设计）
+
+- 结论：回放验证复用 worker 编排新增验证器角色，在独立工作树中真执行；起点用 M7 的快照回到任务开始处，成败由验证命令判定，统计沿用 Eval 结果行的形状（任务、条件、次序）。命名遵守 014：M4 的只读重建仍叫 replay，回放验证另起名字。
+- 理由：回放所需的三样能力 M7 已具备（从任务起点分叉、独立工作树、验证命令判成败），剩余增量只有装载经验与重复 N 次。Eval runner 按任务目录组织，把会话分支转成任务会丢掉分叉点之前的上下文，转换本身即失真来源。
+- 锚点：src/replay/plan.ts（从账本解出任务、起点提交、预算、模型与工具集；四条都拿不到即拒绝回放）、src/application/rerun.ts（验证器 worker、独立工作树、会话文件收回宿主、工作树释放）、src/orchestration/roles.ts（verifier 角色与工具上限）、src/orchestration/workers.ts（工作树起点提交写进派出记录）、src/state/checkpoint-ref.ts（任务开始处之前最近的快照）、src/state/event-log.ts（git 工作树的 baseCommit）；测试 src/replay/plan.test.ts、src/application/rerun.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 083 回放权限形态用固化命令规则，容器沙箱排入 M9 前置并先跑三个探针（设计）
+
+- 结论：M8 的回放在独立工作树中运行，命令档工具只在预先固化的命令规则内放行，规则外直接拒绝、不询问人；不引入沙箱。容器沙箱明确排入 M9 前置（而非含糊后置），选型前先跑三个探针：容器 exec 的单次往返延迟、WSL2 内虚拟化设备是否可见、跨边界调用的退出码保真度。
+- 理由：M8 的价值是判据，把容器隔离纳入会使重心偏移，且"工作副本放哪"一项就牵涉挂载开销、拷贝进出与快照配合，需单独一轮裁决。同时须明确：固化命令规则是缩小开口而非隔离——放行一条脚本命令即放行该脚本能做的一切，网络亦不受限；真正的断网与文件白名单只有沙箱能提供，而无人值守的大批量回放迟早需要它。
+- 锚点：src/orchestration/roles.ts（ROLE_TOOLS.verifier）、src/application/rerun.ts（verifierParentPolicy 与被验证那次尝试的工具集取交集）、src/application/runtime.ts（commandRole → .pigeon/commands.json 的角色允许清单）、src/tools/run-command.ts（清单外一律拒绝）；测试 src/application/verifier-commands.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md，含沙箱选型调研与宿主平台的可行路径。
+
+### 084 回放判定为三值加大效应门槛，四组固定 N 全跑不中途停，区间只进回执不作判据（设计）
+
+- 结论：判定四组——失败分支带经验与不带经验、成功兄弟分支带经验与不带经验——每组固定 N 次（缺省 5），不中途查看结果决定是否继续。结论为三值：通过（正回放呈大效应且负回放无回归）、未测出（差异未达门槛）、回归（负回放显示变差）。pass@k 与 pass^k 分开报告，Wilson 区间计入验证回执但不作判据。N 可配，低于 3 禁用。
+- 理由：N=5 时置信区间宽到只有极端分布才不重叠，以区间不重叠为判据实质就是大效应门槛，却披着统计外观，不如直接写明。中途查看再决定是否续跑会抬高假阳性率，除非引入序贯检验修正，不值得。"未测出"必须与"无效"分开：候选无效与该任务集测不出差异是两回事，同 Eval 基线触顶时的结论口径。
+- 锚点：src/replay/verdict.ts（四组统计、pass@k 与 pass^k 分开算、Wilson 区间只进回执、三值加大效应门槛、少跑即拒绝出结论）、src/application/verify-command.ts（四组交错跑满 N 次）；测试 src/replay/verdict.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 085 回放在临时治理根里按正常格式装载经验，走与真激活相同的装载路径（设计）
+
+- 结论：回放时在该次运行的工作区内造临时治理根，把候选正文按种类的正常格式放入（Memory 为 markdown 文件、Skill 为标准目录、Policy 为文本），走与真激活完全相同的装载路径；宿主的经验目录一个字节都不写。多条经验联合验证时向临时治理根多放文件即可。
+- 理由：§M8 完成证据要求批准内容与最终激活内容摘要一致，前提是验证形态与激活形态同为一条路径。运行面注入会造出第二条装载路径，两条路径在装载顺序、前言解析、并存时的位置等细节上的差异最难发现，因为两边都能跑通。真激活后撤销的方案在崩溃时会留下已激活的经验，与"不能跳过审批"的完成证据冲突。
+- 锚点：src/replay/materials.ts（回放工作区内造临时治理根、固化命令规则与放权规则随行、宿主经验目录只读、经验集合明细）、src/activation/paths.ts 与 src/activation/experience.ts、src/activation/policy.ts（与真激活同一条落点与写入）；测试 src/replay/materials.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 086 回放缺省人工触发 `pigeon verify`，另给显式开关供无人值守时自动验证（设计）
+
+- 结论：回放验证缺省由人显式触发（`pigeon verify`），另提供开关在无人值守运行时自动验证落库的候选。
+- 理由：按 084 的口径一条候选要跑 4×N 次完整运行，无人值守一夜产出的候选可达数十条，全自动即为数小时的模型花费且发生在人不知情时。候选目前也没有语义级去重，自动验证会把成本花在内容相近的候选上；待 M8 运行一段时间、重复率可观测后再议是否改为缺省开启。
+- 锚点：src/cli/index.ts（pigeon verify）、src/application/verify-command.ts（前置校验、四组编排、回执落盘）、src/application/auto-verify.ts（无人值守开关与去重告警）、src/application/launch-flags.ts（--auto-verify，缺省关）、src/application/attempt-group.ts 与 src/application/fork.ts（自动触发挂点）。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 087 回放单设并发闸缺省 1 可配；每次回放的预算与模型沿用被验证那次尝试（设计）
+
+- 结论：回放单设并发闸，缺省并发 1、可配置调高，不与 Reviewer 及提炼器共用的闸合并。每次回放运行的预算（轮数、墙钟、token 上限）与模型接入一律沿用被验证那次尝试，不得放宽。
+- 理由：回放是重执行，单条候选可占用数十分钟，若与只读的审阅、提炼共用一个闸会把轻量后台长时间堵死；瓶颈主要在模型接口与磁盘而非 CPU，故保留调高并发的口子。预算若放宽，成功率提升将来自预算而非经验，且这种失效隐蔽——指标确实变好，结论却是错的；同理模型必须一致，换模型重跑测的就不是经验。
+- 锚点：src/application/rerun.ts（effectiveLimits 逐项核对放宽即拒、回放单设并发闸）、src/application/workers.ts（派出上限冻结为本次尝试预算）、src/application/headless-core.ts 与 src/application/runtime.ts、src/pi-runtime/adapter.ts（预算进注入快照 v8 与 run.started）；测试 src/application/rerun.test.ts、src/replay/plan.test.ts、src/pi-runtime/snapshot.test.ts。
+- 修订（2026-09-20，M8 收口）：回放的模型、预算与工具集三者都必须与被验证那次尝试一致，任一放宽即拒绝。工具集原不在本条约束内（083 只要求命令档收口），但若回放能使用原尝试没有的工具，通过率变化就可能来自工具而非经验——例如原尝试无命令工具、跑不了测试，回放有命令工具并据此改对，判定会把结果错误归功于该条经验。三者是同一不变式的三个面；日后新增同类维度（如 MCP 服务器）按本条推定。
+- 修订（2026-09-20，M8 收口）：两侧尝试的模型或预算不一致时拒绝验证，并指明是哪一项不一致，不提供强制开关。理由不止于环境摘要只有一份：两侧环境不同则对比本身不成立，差异中混入了模型或预算差异，判定结果无意义；此类偏差的表现是数字正常而含义错误，一旦提供开关必会在赶工时被使用，且该回执在账本中与正常回执无异，M9 的整体测量也无法分辨。此类候选改走人工批准加必填理由。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 088 候选审批走 CLI 子命令，TUI 只在状态行提示待审数量（设计）
+
+- 结论：批准、拒绝、撤销、取代四个动作与候选详情查看均落 CLI 子命令；TUI 只在状态行提示待审数量，不做审批面板。
+- 理由：候选审批要读候选正文、diff、来源链、扫描结果与四组回放回执，是长文离线决策；TUI 的模态面板是为"单个工具调用批或不批"这类在线短决策设计的（029），长文塞进面板只能截断或滚动。候选躺在暂存目录里，审批不必打断会话；CLI 形态也便于与 `pigeon verify` 串联或批量处理。将来确有需要再补面板，届时已有实际使用经验。
+- 锚点：src/cli/index.ts（candidates show / approve / reject / revoke / supersede 子命令）、src/application/candidates-list.ts（列表、详情、与落点的行级 diff、待审数量）、src/tui/shell.ts 与 src/tui/main.ts（状态行只提示待审数量）；测试 src/application/candidates-view.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 089 候选新增三个记录族：验证回执、带动作与理由来源的决定、激活（设计）
+
+- 结论：账本新增三族——验证回执（四组通过次数、三值结论、区间、环境摘要、各次运行的会话号）；决定族（批准、拒绝、撤销、取代合成一族，带动作字段与理由来源字段，来源取值为人写或系统默认，同 066）；激活族（哪个版本在何时生效）。候选状态仍由账本现算，不落候选目录（065 不变）。
+- 理由：分族依形状而非依动作数量——批准与拒绝的记录形状相同，拆族只是重复 schema；验证回执与激活事实与之毫无共同字段，合并则需大量可选字段并在投影处到处判空。拒绝理由的来源字段尤为必要：006 把人写的拒绝理由定为负样本监督信号，候选被拒的理由直接说明这条经验错在哪，是提炼侧最有价值的素材之一，缺来源字段则无法与系统默认文案区分。
+- 锚点：src/state/event-log.ts（三族 schema 与 v11 → v12 加法式迁移）、src/persistence/event-log.ts（三个追加方法，治理族 fsync）、src/state/materialize.ts（三族进物化结果）、src/state/candidate.ts（状态枚举补齐）、src/state/candidate-status.ts（五族现算候选状态）、src/state/trace.ts 与 src/cli/replay.ts（只读视图渲染）；测试 src/persistence/candidate-families.test.ts、src/state/candidate-status-m8.test.ts、src/migration-completeness.test.ts。
+- 修订（2026-09-20，M8 收口）：三族改为写进执行该命令的会话自己的文件，不写候选的来源会话；候选状态改由跨会话收集三族后按时间取最后一条现算。原落点会让审批与验证在来源会话仍被另一进程持锁时无法进行（候选的来源会话通常就是还在运行的那个），而排他的会话锁是单写者约束的实现手段，不应绕过。新形态下每个会话文件仍只有一个写入者。
+- 已知边界（2026-09-20）：候选状态的跨会话聚合为全治理根扫描，代价随会话总数线性增长，`pigeon candidates`、批准与启动告警三条路径都会走。沿用 038 对 Session Search 的同一口径：不预先建索引，待 `pigeon candidates` 在真实数据下超过约 2 秒再设计按内容哈希判过期的可重建缓存；"只扫最近若干会话"一类的范围限制被否决，它会在某天静默漏掉旧候选的状态。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 090 Policy 候选只落只读建议文件，永不自动改放权文件，物理分离由分层规则机检（设计）
+
+- 结论：Policy 候选批准后只落成只读的建议文件，目录与 Skill、Memory 分离，模型可在 system prompt 中看到该建议；激活路径永不自动修改放权文件或命令规则，权限变更仍由人手动编辑。激活器在代码层面不得依赖放权写入模块，由分层规则机检钉死。
+- 理由：§8 禁止后台流程写放权文件，§M8 完成证据要求 Policy 的激活路径与 Skill 写入路径物理分离。生成权限补丁再由人点确认的方案被否决：人对机器生成的 diff 的实际审查强度低于亲手编辑，工具审批处已出现同类现象（单按拒绝导致账本充满默认文案，故有 066）。完成证据要的是"不能绕过"而非"承诺不绕"，故以机检而非约定落实。
+- 锚点（随 094 收敛后）：src/activation/experience.ts 与 src/activation/paths.ts（落点只剩 Skill 与 Memory 两类）、.dependency-cruiser.js（activation-only-state 把放权写入模块挡在激活层的依赖之外，这是本条留下的那条不变式）；测试 src/activation/activate.test.ts（激活路径永不触碰放权文件与命令规则）、src/activation-boundary.test.ts（规则真会抓人、真实 src 零违规）。原锚点里的 src/activation/policy.ts 与 policy-activation-isolated 规则已随 094 删除。
+- 修订（2026-09-19，M8 收口）：本条随 094 作废——Policy 候选停止产出，其只读建议文件、独立写入模块与专属分层规则一并删除；保留的是"激活器不得依赖放权写入模块"这条机检。结论中"模型可在 system prompt 中看到该建议"在实现中从未接通，核验时发现无任何模块读取该落点。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 091 验证回执摘要记全，批准失效只看模型、经验集合哈希、预算、验证命令四项封闭清单（设计）
+
+- 结论：验证回执记全环境摘要——模型标识与版本、harness 提交号、Node 与平台、被验证尝试的预算参数、验证命令、同时装载的经验集合内容哈希、四组通过次数与三值结论、各次运行的会话号。批准失效的判据只看一份封闭清单的四项：模型标识、经验集合内容哈希、预算参数、验证命令；任一变化则批准失效、要求重验。清单之外的项只记录、不参与判定，增删清单须单独裁决。
+- 理由：全项严格失效不可用——harness 提交号几乎每日变动，会使所有批准长期处于待重验状态，最终导致该机制被关闭。开放式分级判断同样被否决：判据一多，每新增一项环境信息都要重裁（同 072 修订处的取舍）。清单四项的共同点是一变则该次验证结论不再适用：模型换了经验未必仍有效，同时装载的经验集合变了可能互相干扰，预算或验证命令变了则判据本身已变。
+- 锚点：src/state/event-log.ts（验证环境摘要 schema）、src/replay/environment.ts（经验集合内容哈希、封闭四项清单判据）、src/application/verify-command.ts（摘要组装、两侧模型与预算必须一致）、src/application/candidate-decision.ts（批准前比对经验集合）、src/application/activation-notes.ts（会话启动时的失效告警）；测试 src/replay/environment.test.ts、src/application/activation-notes.test.ts。
+- 修订（2026-09-20，M8 收口）：封闭清单中的"预算参数"包含单轮输出上限（063），与轮次、墙钟、token 三项上限同列。理由：063 已把该上限写入注入快照以便事后可证，且实测撞上限会改变模型行为（须把编辑拆小重发），属会影响结果的运行参数；不计入则可能出现上限被大幅调低、模型频繁截断重发而既有批准照旧有效的情况。该值是配置缺省、变动频率低，与提交号一类高频变化项不同，计入不会造成批准频繁失效。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 092 回归的候选一律不可批准；未测出可人工批准但理由必填，激活记录标注未经回放证实（设计）
+
+- 结论：判定为回归的候选一律不可批准，翻案只能靠重验推翻，不接受以理由覆盖。判定为未测出的候选可由人显式批准，但理由必填且来源记为人写；其激活记录标注未经回放证实，供 M9 的整体测量单独分组观察。
+- 理由：负回放是唯一可直接观测到"经验有害"的证据，若可被一句理由覆盖，堵循环论证的这道门即失效。未测出一刀切禁止则会排除价值不体现在单任务通过率上的经验（例如促使改动后运行项目自带检查这类降低返工率的做法），而 Eval 基线触顶的经历表明未测出常常源于任务集而非候选本身。
+- 锚点：src/application/candidate-decision.ts（扫描拒收与回归一律不可批准、未测出与未验证须人写理由、激活记录标注未经回放证实）、src/state/event-log.ts（决定族的理由来源字段）；测试 src/application/candidate-decision.test.ts、src/application/approval-bypass.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 093 激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构（设计）
+
+- 结论：批准后把候选正文按种类复制到治理根的正常目录，人仍可直接编辑（042、043 的可编辑性不变）。激活记录存内容哈希；会话启动时比对现状与哈希，不一致则标注该经验已脱离批准版本，但不阻止使用。撤销为移走文件并记录，不追溯既往会话。取代为新版本激活加取代关系，与 065 的候选取代同构。
+- 理由：按哈希从不可变暂存目录装载或复制后锁只读，都会推翻 042 与 043 定下的"经验按文件装载、人可直接编辑"；完成证据中"批准内容与激活内容摘要一致"约束的是激活那一刻，不应读成禁止人后续编辑。以可见性而非锁定处理漂移，与项目对悬账、崩溃残留、截断标注的一贯做法一致。
+- 锚点：src/activation/activate.ts（复制到正常目录、写盘后回读比对、漂移判定、撤销移走文件）、src/application/candidate-decision.ts（决定先落盘再动文件、撤销先留证后移文件）、src/application/activation-notes.ts（启动时比对哈希并标注已脱离批准版本，不阻止使用）、src/application/candidates-list.ts（列表与详情里的漂移标注）；测试 src/activation/activate.test.ts、src/application/candidate-decision.test.ts、src/application/activation-notes.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。
+
+### 094 Policy 候选停止产出并删除其激活机制，枚举值仅保留读旧记录；机检收敛为激活器不得依赖放权写入模块（设计）
+
+- 结论：提炼器与审阅器不再产出 Policy 候选，产出形态只剩 Memory 与 Skill；删除 Policy 的落点目录、独立写入模块、为其新增的分层规则，以及验证路径上对 Policy 的特判分支。候选 schema 的种类枚举保留 Policy 取值，仅为读取已入库的旧候选，写侧一律拒绝。保留"激活器不得依赖放权写入模块"的分层规则，删除"Policy 与 Skill 写入模块互不引用"的规则。ROADMAP 相应改为两类候选，§M8 完成证据中的物理分离一条改写为前述机检。
+- 理由：Policy 的原定位是经人审批后影响工具权限的唯一通道，但 039 的方向转向、§8 禁止后台写放权文件、065 限定其只出自然语言、090 再定其永不自动改规则，逐层收窄后它与 Memory 的差别仅剩目录；施工核验进一步发现现有实现中无任何模块读取 Policy 落点，即它对模型完全不可见，连"建议文字"的作用也未接通。留存的成本是持续的——每次改候选 schema、动激活路径或写提炼器产出规则都要多考虑一种形态；而将来命令规则确需建议通道时，新增种类是一次加法式改动，加回比留着便宜。真实验收中提炼器稳定选择 Policy 形态，说明三类的语义边界对模型本就模糊，收敛为两类可望提升提炼质量。枚举值不删是因为 v3 已入库且本地已有该种类候选，删值会使旧数据不可读，违反加法式原则。
+- 锚点：src/state/candidate.ts（种类枚举保留 policy 取值只为读旧记录，另出只含 memory 与 skill 的可产出种类）、src/review/candidates.ts 与 src/distillation/candidates.ts（结果 schema 收窄，落盘写侧拒收已停止产出的种类）、src/review/prompt.ts 与 src/distillation/prompt.ts（产出规则改为两类）、src/activation/paths.ts 与 src/activation/experience.ts（落点表只剩两类，Policy 的独立写入模块删除）、src/application/candidate-decision.ts（批准前按种类拦下，判据在决定记录之前）、src/application/candidates-list.ts（旧候选照常列出与展示，并说明它没有激活落点）、.dependency-cruiser.js（删 policy-activation-isolated，保留 activation-only-state）；测试 src/application/legacy-policy-candidate.test.ts、src/activation/activate.test.ts、src/review/candidates.test.ts、src/activation-boundary.test.ts。
+- 详情：docs/decisions/m8-prep-decisions.md。

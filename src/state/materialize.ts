@@ -14,8 +14,11 @@ import type {
   AttemptVerifiedRecord,
   BranchHeaderRecord,
   BreakerRecord,
+  CandidateActivatedRecord,
+  CandidateDecidedRecord,
   CandidateProposedRecord,
   CandidateScreenedRecord,
+  CandidateVerifiedRecord,
   ChildSettledRecord,
   ChildSpawnedRecord,
   DecisionRecord,
@@ -130,6 +133,10 @@ export interface MaterializedSession {
   // M6（决策 065）：候选提出与筛查两族（候选状态由二者现算，见 candidate-status.ts）
   candidateProposeds: CandidateProposedRecord[];
   candidateScreeneds: CandidateScreenedRecord[];
+  // M8（决策 089）：候选验证回执、决定与激活三族（按落盘顺序）——候选状态由它们与前两族现算
+  candidateVerifieds: CandidateVerifiedRecord[];
+  candidateDecideds: CandidateDecidedRecord[];
+  candidateActivateds: CandidateActivatedRecord[];
   // M7（决策 071 / 072 / 074 / 077 / 078）：通用验证、撞上限、工作区快照、分叉、提炼跳过、树写穿失败（按落盘顺序）；
   // branchHeader 在场 = 本会话是分叉出来的分支会话
   attemptVerifieds: AttemptVerifiedRecord[];
@@ -212,6 +219,9 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const reviewUnparsables: ReviewUnparsableRecord[] = [];
   const candidateProposeds: CandidateProposedRecord[] = [];
   const candidateScreeneds: CandidateScreenedRecord[] = [];
+  const candidateVerifieds: CandidateVerifiedRecord[] = [];
+  const candidateDecideds: CandidateDecidedRecord[] = [];
+  const candidateActivateds: CandidateActivatedRecord[] = [];
   const attemptVerifieds: AttemptVerifiedRecord[] = [];
   const limitHits: RunLimitHitRecord[] = [];
   const checkpoints: WorkspaceCheckpointRecord[] = [];
@@ -276,6 +286,12 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       candidateProposeds.push(record);
     } else if (record.kind === "candidate.screened") {
       candidateScreeneds.push(record);
+    } else if (record.kind === "candidate.verified") {
+      candidateVerifieds.push(record);
+    } else if (record.kind === "candidate.decided") {
+      candidateDecideds.push(record);
+    } else if (record.kind === "candidate.activated") {
+      candidateActivateds.push(record);
     } else if (record.kind === "attempt.verified") {
       attemptVerifieds.push(record);
     } else if (record.kind === "run.limit-hit") {
@@ -333,6 +349,9 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     reviewUnparsables,
     candidateProposeds,
     candidateScreeneds,
+    candidateVerifieds,
+    candidateDecideds,
+    candidateActivateds,
     contentGaps: detectContentGaps(entries, input.contentHashes),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
@@ -414,6 +433,10 @@ const REFERENCE_KINDS: ReadonlySet<string> = new Set([
   "candidate.proposed",
   "candidate.screened",
   "review.unparsable",
+  // M8：验证、决定与激活三族写在发起命令自己的会话文件里，信封 Run 若在场也指向别的会话
+  "candidate.verified",
+  "candidate.decided",
+  "candidate.activated",
 ]);
 
 export function collectUnfinishedRuns(

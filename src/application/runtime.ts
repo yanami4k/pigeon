@@ -33,7 +33,7 @@ import {
   LOAD_SKILL_TOOL,
   loadSkillRegistration,
 } from "../skills/load-skill-tool.ts";
-import type { VerifyConfig } from "../state/attempt-config.ts";
+import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import { DISTILL_ENTRY_TOOL, DISTILL_SNAPSHOT_TOOL, type DistillTarget } from "../state/distill.ts";
 import type { WorkerRole } from "../state/event-log.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
@@ -114,6 +114,8 @@ export interface RuntimeDeps {
   // M7（决策 071 / 079）：会话级验证命令与失败自动分叉重试次数——冻结进注入快照并随 run.started 落盘
   verify?: VerifyConfig;
   retryOnFail?: number;
+  // M8（决策 087）：本次尝试的预算——冻结进注入快照并随 run.started 落盘，回放据此沿用同一预算
+  budget?: AttemptBudget;
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
 }
@@ -288,6 +290,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(deps.review !== undefined ? { review: { ...deps.review } } : {}),
       ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
+      ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: limitOutputTokens(deps.streamFn, maxOutputTokens),

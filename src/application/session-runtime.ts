@@ -219,7 +219,11 @@ export async function openSessionRuntime(
         },
         ...(request.distill !== undefined ? { distill: request.distill } : {}),
       })
-        .then(() => tree?.ensureAttached())
+        .then(async (outcome) => {
+          // M8 收口补遗：提炼与自动验证的内部故障并进本会话的重试错误清单，与并行派发同口径
+          retryErrors.push(...outcome.errors);
+          await tree?.ensureAttached();
+        })
         .catch((error: unknown) => {
           retryErrors.push(error);
         });

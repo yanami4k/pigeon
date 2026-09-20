@@ -96,6 +96,20 @@ export function mainRepoRoot(path: string): string {
   return dirname(resolve(commonDir));
 }
 
+// 把一个 ref 解析成完整提交号（M8，决策 082）：worker 工作树建好后起点提交进派出记录，
+// 回放据此精确回到"任务开始处"。解析不出（空仓库、ref 不存在）返回 undefined，由调用方决定是否降级
+export function resolveCommit(repoRoot: string, ref: string): string | undefined {
+  if (ref.startsWith("-")) {
+    throw new WorktreeError(`起点提交不合法：${ref}`);
+  }
+  try {
+    const commit = runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).trim();
+    return commit === "" ? undefined : commit;
+  } catch {
+    return undefined;
+  }
+}
+
 // 路径所在仓库的 HEAD 短号与工作区是否有未提交改动（决策 061：Eval 结果行记 harness 版本；忽略文件不计）
 export function describeHead(path: string): { commit: string; dirty: boolean } {
   const commit = runGit(path, ["rev-parse", "--short", "HEAD"]).trim();

@@ -33,6 +33,20 @@ function timeOf(timestamp: number): string {
   return new Date(timestamp).toISOString().slice(11, 23);
 }
 
+// M8（决策 084 / 089）：三值结论与四个决定动作的展示措辞
+const VERIFICATION_CONCLUSION_LABEL: Record<string, string> = {
+  passed: "通过",
+  inconclusive: "未测出",
+  regressed: "回归",
+};
+
+const DECISION_ACTION_LABEL: Record<string, string> = {
+  approve: "批准",
+  reject: "拒绝",
+  revoke: "撤销",
+  supersede: "取代",
+};
+
 const ERROR_KIND_LABEL: Record<string, string> = {
   domain: "工具域错误",
   environment: "环境异常",
@@ -115,6 +129,27 @@ function recordDetail(record: EventRecord): string {
         (record.hits.length > 0
           ? `命中 ${record.hits.length} 项（拒收）：${record.hits.map((hit) => hit.rule).join("、")}`
           : "无命中")
+      );
+    // M8（决策 089）：候选验证回执、决定与激活
+    case "candidate.verified": {
+      const arms = record.arms.map((arm) => `${arm.arm} ${arm.passes}/${arm.runs}`).join("｜");
+      return (
+        `候选验证 ｜ ${record.candidateKind}/${record.name} ｜ 哈希 ${record.contentHash.slice(0, 12)} ｜ ` +
+        `${VERIFICATION_CONCLUSION_LABEL[record.conclusion]} ｜ 每组 ${record.n} 次 ｜ ${arms} ｜ ` +
+        `正回放差 ${record.positiveDelta.toFixed(2)} ｜ 负回放差 ${record.negativeDelta.toFixed(2)}`
+      );
+    }
+    case "candidate.decided":
+      return (
+        `候选决定 ｜ ${record.candidateKind}/${record.name} ｜ 哈希 ${record.contentHash.slice(0, 12)} ｜ ` +
+        `${DECISION_ACTION_LABEL[record.action]} ｜ 理由（${record.reasonSource === "human" ? "人写" : "系统默认"}）：${record.reason}` +
+        (record.supersededBy !== undefined ? ` ｜ 被 ${record.supersededBy.slice(0, 12)} 取代` : "")
+      );
+    case "candidate.activated":
+      return (
+        `候选激活 ｜ ${record.candidateKind}/${record.name} ｜ 落点 ${record.path} ｜ ` +
+        `内容 ${record.activatedHash.slice(0, 12)}` +
+        (record.unverified ? " ｜ 未经回放证实" : "")
       );
     case "intent": {
       let detail =

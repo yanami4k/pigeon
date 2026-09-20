@@ -14,14 +14,20 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
+import {
+  activationStartupWarnings,
+  startupEnvironmentOf,
+} from "../application/activation-notes.ts";
 import { createSessionAttemptRunner } from "../application/attempt-group.ts";
+import { autoVerifyWiring } from "../application/auto-verify.ts";
+import { pendingApprovalCount } from "../application/candidates-list.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import {
   type LaunchFlags,
   parseLaunchFlags,
   resolveStreamFnSpec,
+  resolveVerifyConfig,
   reviewConfigOf,
-  verifyConfigOf,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "../application/session-runtime.ts";
@@ -39,6 +45,28 @@ import { newSessionId, type SessionId } from "../state/ids.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { PigeonTuiShell, type TuiWorkersFace } from "./shell.ts";
 
+// M8 S6（决策 088）：待审数量的取数缓存。状态行每次刷新都会问一次，而取数要把整个会话目录物化一遍；
+// 不缓存会让每一次按键都扫一遍账本。缓存窗口内直接给上一次的数，取数抛错时沿用上一次的数（状态行只是提示）
+const PENDING_COUNT_TTL_MS = 5000;
+
+function pendingCandidatesCounter(governanceRoot: string): () => number {
+  let cached = 0;
+  let readAt = 0;
+  return () => {
+    const now = Date.now();
+    if (now - readAt < PENDING_COUNT_TTL_MS) {
+      return cached;
+    }
+    readAt = now;
+    try {
+      cached = pendingApprovalCount(governanceRoot);
+    } catch {
+      // 账本读不动时不改数字：状态行是提示，不该因为它把壳搞崩
+    }
+    return cached;
+  };
+}
+
 // 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
 const WORKER_SHUTDOWN_GRACE_MS = 5000;
 
@@ -46,7 +74,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
   "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--review-every <N>] [--no-review] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>]";
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--review-every <N>] [--no-review] [--verify-command <命令>] [--verify-timeout <毫秒>] [--auto-verify] [--retry-on-fail <K>]";
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -64,6 +92,14 @@ async function main(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
+  // M8（决策 091 / 093）：已激活经验的漂移与批准失效——壳接管终端前打到 stderr，不阻止启动。
+  // 环境由 application 层统一构造（M8 收口修复：此前硬传空预算，必然每次都报一次假失效）
+  for (const note of activationStartupWarnings(
+    workspaceRoot,
+    startupEnvironmentOf(flags, workspaceRoot)
+  )) {
+    console.error(note);
+  }
   const sessionId = newSessionId();
   // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
   // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
@@ -90,7 +126,7 @@ async function main(argv: string[]): Promise<void> {
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
     };
     const orchestrator = createSessionWorkers(deps);
-    const verify = verifyConfigOf(flags);
+    const verify = resolveVerifyConfig(flags, workspaceRoot);
     return {
       spawn: (request) => orchestrator.spawn(request),
       cancel: (id) => orchestrator.cancel(id),
@@ -106,6 +142,17 @@ async function main(argv: string[]): Promise<void> {
               parentPolicy: bundle.adapter.snapshot().tools.policy,
               createRuntime: sessionWorkerRuntimeFactory(deps),
               ...(verify !== undefined ? { verify } : {}),
+              // M8（决策 086）：--auto-verify 开着时自动验证新落库的候选
+              ...(flags.autoVerify && verify !== undefined
+                ? {
+                    autoVerify: autoVerifyWiring(
+                      workspaceRoot,
+                      verify,
+                      streamFn,
+                      flags.persistThinking
+                    ),
+                  }
+                : {}),
             }),
             // M7（决策 079）：/fork 手动分叉
             fork: (args: string) =>
@@ -136,7 +183,7 @@ async function main(argv: string[]): Promise<void> {
     flags,
     // M6（决策 064）：主会话挂后台审阅
     review: reviewConfigOf(flags),
-    ...verifyOption(flags),
+    ...verifyOption(flags, workspaceRoot),
     ...attemptOptions(flags, streamFn),
     createApprovalHandler: createHandler,
     onMcpNote: (note) => {
@@ -170,6 +217,8 @@ async function main(argv: string[]): Promise<void> {
     ...(flags.historyLimit !== undefined ? { historyLimit: flags.historyLimit } : {}),
     // M5.5 S4：/spawn /cancel /workers
     workers: slot.workers,
+    // M8 S6（决策 088）：状态行提示待审候选数量；审批动作走 pigeon candidates 子命令
+    pendingCandidates: pendingCandidatesCounter(workspaceRoot),
     // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
     // restoredGrants 种子（决策 3b，物化目标会话的生效 grant，静默继续有效）+
     // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
@@ -188,7 +237,7 @@ async function main(argv: string[]): Promise<void> {
           flags,
           // 恢复的主会话同样挂审阅；worker 会话作用域在装配内部排除
           review: reviewConfigOf(flags),
-          ...verifyOption(flags),
+          ...verifyOption(flags, workspaceRoot),
           ...attemptOptions(flags, streamFn),
           createApprovalHandler: createHandler,
           restoreGrants: true,
@@ -248,11 +297,14 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   });
 }
 
-// M7（决策 071）：会话级验证命令（未配置时不传）
-function verifyOption(flags: LaunchFlags): {
-  verify?: NonNullable<ReturnType<typeof verifyConfigOf>>;
+// M7（决策 071）/ M8（决策 081）：会话级验证命令——启动参数 > 项目配置 > 未配置（未配置时不传）
+function verifyOption(
+  flags: LaunchFlags,
+  governanceRoot: string
+): {
+  verify?: NonNullable<ReturnType<typeof resolveVerifyConfig>>;
 } {
-  const verify = verifyConfigOf(flags);
+  const verify = resolveVerifyConfig(flags, governanceRoot);
   return verify !== undefined ? { verify } : {};
 }
 

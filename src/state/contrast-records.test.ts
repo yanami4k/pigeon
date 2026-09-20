@@ -26,7 +26,7 @@ const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
 test("Event Log 升到 v11", () => {
-  assert.equal(EVENT_LOG_VERSION, 11);
+  assert.equal(EVENT_LOG_VERSION, 12);
 });
 
 test("069：派出记录可带共享任务标识；缺省仍合法（旧派出记录不受影响）", () => {
@@ -158,7 +158,7 @@ test("072 依据：撞上限观察与提炼跳过记录", () => {
   assert.ok(!Value.Check(EventRecordSchema, { ...skipped, reason: "whatever" }));
 });
 
-test("v10 记录经迁移链升到 v11：派出记录不带任务标识、候选提出内嵌的 v2 候选升 v3", () => {
+test("v10 记录经迁移链升到当前版本：派出记录不带任务标识、候选提出内嵌的 v2 候选升 v3", () => {
   const sessionId = newSessionId();
   const runId = newRunId();
   const spawned = parseEventRecord({
@@ -176,7 +176,7 @@ test("v10 记录经迁移链升到 v11：派出记录不带任务标识、候选
     workspace: WORKTREE,
     spawnedAt: 1,
   });
-  assert.equal(spawned.version, 11);
+  assert.equal(spawned.version, EVENT_LOG_VERSION);
   const proposed = parseEventRecord({
     version: 10,
     id: newEntryId(),
@@ -206,7 +206,7 @@ test("v10 记录经迁移链升到 v11：派出记录不带任务标识、候选
     },
     model: { provider: "p", id: "m" },
   });
-  assert.equal(proposed.version, 11);
+  assert.equal(proposed.version, EVENT_LOG_VERSION);
   assert.equal(proposed.kind, "candidate.proposed");
   if (proposed.kind === "candidate.proposed") {
     assert.equal(proposed.candidate.version, CANDIDATE_VERSION);
@@ -219,7 +219,7 @@ test("v10 记录经迁移链升到 v11：派出记录不带任务标识、候选
 
 // 决策 065 修订：产出会话字段在候选侧与不可解析记录族用同一个中性名；
 // 该族是 M6 已入库的形状，迁移必须真的改写旧记录
-test("v10 的不可解析记录经迁移链升到 v11：产出会话字段改名、值不变、旧名不再保留", () => {
+test("v10 的不可解析记录经迁移链升到当前版本：产出会话字段改名、值不变、旧名不再保留", () => {
   const sessionId = newSessionId();
   const runId = newRunId();
   const producer = newSessionId();
@@ -232,7 +232,7 @@ test("v10 的不可解析记录经迁移链升到 v11：产出会话字段改名
     kind: "review.unparsable",
     payload: { reviewSessionId: producer, reason: "审阅没有交回结构化结果" },
   });
-  assert.equal(record.version, 11);
+  assert.equal(record.version, EVENT_LOG_VERSION);
   assert.equal(record.kind, "review.unparsable");
   if (record.kind === "review.unparsable") {
     assert.equal(record.payload.producerSessionId, producer, "值不变");

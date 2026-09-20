@@ -14,6 +14,7 @@ import {
   migrateInjectionSnapshotV4toV5,
   migrateInjectionSnapshotV5toV6,
   migrateInjectionSnapshotV6toV7,
+  migrateInjectionSnapshotV7toV8,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -41,11 +42,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 4, migrateInjectionSnapshotV4toV5);
   migrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
   migrations.register("injection-snapshot", 6, migrateInjectionSnapshotV6toV7);
+  migrations.register("injection-snapshot", 7, migrateInjectionSnapshotV7toV8);
   return migrations;
 }
 
 test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 7);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 8);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -91,7 +93,7 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
   }
 });
 
-test("v1 → v2 → v3 → v4 → v5 → v6 → v7 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限、审阅配置、验证命令与重试次数缺省", () => {
+test("v1 → v2 → … → v8 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限、审阅配置、验证命令、重试次数与预算缺省", () => {
   const current = { ...makeSnapshot(), memory: [] };
   const { approvalMode: _, ...policyV1 } = current.tools.policy;
   const v1 = { ...current, version: 1, tools: { ...current.tools, policy: policyV1 } };
@@ -102,8 +104,9 @@ test("v1 → v2 → v3 → v4 → v5 → v6 → v7 迁移链：补 approvalMode 
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 7);
+  assert.equal(migrated.version, 8);
   assert.equal(migrated.review, undefined);
+  assert.equal(migrated.budget, undefined);
   assert.equal(migrated.verify, undefined);
   assert.equal(migrated.retryOnFail, undefined);
   assert.equal(migrated.tools.policy.approvalMode, "prompt");
@@ -139,6 +142,31 @@ test("v7 快照：可选的验证命令配置与失败自动分叉重试次数�
   );
   assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, retryOnFail: -1 }));
   const v6 = { ...makeSnapshot(), version: 6 };
-  const migrated = registry().migrate("injection-snapshot", v6, 7, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v6, version: 7 });
+  const migrated = registry().migrate("injection-snapshot", v6, 8, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v6, version: 8 });
+});
+
+// M8 S1 / S3（决策 081 / 087）：v8 顶层加本次尝试的预算，验证命令加来源字段
+test("v8 快照：预算三项与验证命令来源可选；非正整数预算被拒；v7 快照纯版本推进", () => {
+  const snapshot = makeSnapshot();
+  assert.ok(
+    Value.Check(InjectionSnapshotSchema, {
+      ...snapshot,
+      budget: { maxTurns: 40, wallClockMs: 1_800_000, maxTokens: 100_000 },
+      verify: { command: "npm test", timeoutMs: 1000, source: "project" },
+    })
+  );
+  assert.ok(Value.Check(InjectionSnapshotSchema, { ...snapshot, budget: {} }));
+  for (const budget of [{ maxTurns: 0 }, { wallClockMs: -1 }, { maxTokens: 1.5 }]) {
+    assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, budget }));
+  }
+  assert.ok(
+    !Value.Check(InjectionSnapshotSchema, {
+      ...snapshot,
+      verify: { command: "npm test", timeoutMs: 1, source: "guess" },
+    })
+  );
+  const v7 = { ...makeSnapshot(), version: 7 };
+  const migrated = registry().migrate("injection-snapshot", v7, 8, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v7, version: 8 });
 });

@@ -127,6 +127,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
+    // M8（决策 087）：本次运行的预算冻结进注入快照——回放据此沿用同一预算，不得放宽
+    budget: {
+      ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+      ...(options.wallClockMs !== undefined ? { wallClockMs: options.wallClockMs } : {}),
+      ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+    },
     ...(options.branchHeader !== undefined ? { branchHeader: options.branchHeader } : {}),
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
