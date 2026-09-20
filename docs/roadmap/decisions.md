@@ -106,6 +106,7 @@
 | 092 | 回归的候选一律不可批准；未测出可人工批准但理由必填，激活记录标注未经回放证实 | M8 前置第 12 件 | M8 |
 | 093 | 激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构 | M8 前置第 13 件 | M8 |
 | 094 | Policy 候选停止产出并删除其激活机制，枚举值仅保留读旧记录；机检收敛为激活器不得依赖放权写入模块 | M8 收口 | M8 |
+| 095 | 跨进程锁统一撞锁即拒绝不排队，报错须说明占用者与其动作；回放的跨进程全局上限留到 M9 | 并发收口 | M8 |
 
 ## 条目
 
@@ -697,6 +698,7 @@
 - 理由：不分叉的会话零额外写入；账本中的分叉记录是会话树的权威来源，树文件丢失或损坏只需重建，不形成第二事实源（§3.5）。与 037 否决"启用上游会话存储"不冲突：037 否决的是以上游会话文件承载正文事实，此处树文件不承载任何权威状态，可由账本与内容文件重建，性质同 038 的可重建缓存口径，也不构成 009 所禁的双写；上游会话模块按 §2 只经 src/pi-runtime 引用。
 - 锚点：src/state/event-log.ts（session.forked、branch.header）、src/persistence/event-log.ts（onEntry、appendSessionForked、appendBranchHeader）、src/pi-runtime/session-tree.ts、src/application/session-tree.ts（acquireSessionTree、rebuildSessionTree、attachTreeWriteThrough、bindSessionTree、runTreeRebuildCommand）、src/application/fork.ts（prepareFork、runForkBranch）、src/pi-runtime/adapter.ts（initialMessages、continueRun）、src/application/workers.ts 与 src/application/headless-core.ts（分支续跑装配）、src/application/worker-scope.ts（分支会话回到自己的工作树）、src/cli/index.ts（pigeon tree rebuild）；测试 src/application/fork.test.ts、src/application/fork-session.test.ts、src/persistence/contrast-families.test.ts；写穿耗时基准 spikes/m7-tree-write-bench.ts。
 - 修订（2026-09-19，M7 收口）：分支会话的首条记录用独立的分支会话头族，不复用 worker 会话头。分叉与委派是两种父子关系，068 的事实已区分二者；合并为一族需靠标记位在投影与查询时分流，省下的一个族会在读侧还回去。
+- 修订（2026-09-20，并发收口）：会话树的跨进程保护只加在重建侧（按根会话号取锁，取不到明确报错），写穿侧不取锁。理由：写穿每批取锁只能防单批被撕开，挡不住真正的错乱来源——重建把树整棵换掉后，写穿仍按内存中的旧序号继续追加；撞锁即拒会使该批写穿被丢，而写穿失败只告警不入账本（080），等于把"可能错乱"换成"确定丢几批"；树是派生缓存，错乱可由重建补齐。另：写穿位于主循环热路径，为只在人工重建时出现的场景引入每批一次的跨进程文件系统开销，代价与收益不成比例。前提条件：若日后写穿改为对树做增量更新而非尾部追加，本取舍须重新裁决。
 - 修订（2026-09-19，M7 收口）：写穿失败不记账本观察族，改走 080 的去重标准错误告警，原结论中的"失败只记观察记录"随之作废（不影响"失败不影响运行"）。理由：会话树是可重建的派生缓存，写穿失败的后果是树落后于账本，可由重建入口随时补齐，不需要事后从账本取证；Event Log v11 尚未入库，此时去掉记录族为零迁移成本。
 - 详情：docs/decisions/m7-prep-decisions.md。
 
@@ -828,3 +830,9 @@
 - 理由：Policy 的原定位是经人审批后影响工具权限的唯一通道，但 039 的方向转向、§8 禁止后台写放权文件、065 限定其只出自然语言、090 再定其永不自动改规则，逐层收窄后它与 Memory 的差别仅剩目录；施工核验进一步发现现有实现中无任何模块读取 Policy 落点，即它对模型完全不可见，连"建议文字"的作用也未接通。留存的成本是持续的——每次改候选 schema、动激活路径或写提炼器产出规则都要多考虑一种形态；而将来命令规则确需建议通道时，新增种类是一次加法式改动，加回比留着便宜。真实验收中提炼器稳定选择 Policy 形态，说明三类的语义边界对模型本就模糊，收敛为两类可望提升提炼质量。枚举值不删是因为 v3 已入库且本地已有该种类候选，删值会使旧数据不可读，违反加法式原则。
 - 锚点：src/state/candidate.ts（种类枚举保留 policy 取值只为读旧记录，另出只含 memory 与 skill 的可产出种类）、src/review/candidates.ts 与 src/distillation/candidates.ts（结果 schema 收窄，落盘写侧拒收已停止产出的种类）、src/review/prompt.ts 与 src/distillation/prompt.ts（产出规则改为两类）、src/activation/paths.ts 与 src/activation/experience.ts（落点表只剩两类，Policy 的独立写入模块删除）、src/application/candidate-decision.ts（批准前按种类拦下，判据在决定记录之前）、src/application/candidates-list.ts（旧候选照常列出与展示，并说明它没有激活落点）、.dependency-cruiser.js（删 policy-activation-isolated，保留 activation-only-state）；测试 src/application/legacy-policy-candidate.test.ts、src/activation/activate.test.ts、src/review/candidates.test.ts、src/activation-boundary.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
+
+### 095 跨进程锁统一撞锁即拒绝不排队，报错须说明占用者与其动作；回放的跨进程全局上限留到 M9（设计）
+
+- 结论：本项目的四把跨进程锁（会话打开锁、候选操作锁、会话树重建锁、放权配置锁）统一采用撞锁即拒绝、不排队的口径；报错信息须说明占用者及其正在进行的动作（例如"该候选正在验证中"），而非仅提示锁被占用。回放的跨进程全局上限本轮不做，留到 M9 与批量运行的资源口径一并裁定。
+- 理由：四把锁行为一致才可被预期，混用拒绝与排队会使人无法判断命令是在等待还是已挂起；排队需配套超时、重试上限与死锁检测，为毫秒级的读改写操作引入这套机制不成比例。持锁时间长的只有候选验证（四组交错串行，N=5 时约 15 至 40 分钟），撞上概率不低，故要求报错文案指明占用动作，使人能判断重试时机。跨进程上限属资源约束而非正确性约束——每条候选各有其锁，不会互相写坏；批量运行成为常态是 M9 的事，此时设计上限是猜需求。
+- 锚点：src/persistence/exclusive-lock.ts（临时文件加硬链接建锁、撞锁即拒）、src/persistence/session-lock.ts（同口径）、src/application/candidate-lookup.ts 与 src/application/candidate-decision.ts（候选操作锁）、src/application/session-tree.ts（重建锁）、src/persistence/grants-config.ts（放权配置锁）；证据 docs/audits/2026-09-20-concurrency-a4a5ca8.md。

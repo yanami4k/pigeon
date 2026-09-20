@@ -12,7 +12,6 @@
 //   - 已停止产出的种类（094）：没有激活落点、不进任何装载路径，回放测不出差别，
 //     这类旧候选既不可批准也不可激活，不值得烧二十次运行换一个必然的未测出；
 //   - 两侧尝试的模型标识或预算不一致：环境摘要只有一份，记谁都会把另一侧说错（091）。
-import path from "node:path";
 import { describeHead, resolveCommit } from "../orchestration/worktree.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
@@ -36,6 +35,7 @@ import type {
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import {
   buildCandidateIndex,
+  candidateLockPath,
   type LocatedCandidate,
   readCandidateBody,
   resolveCandidate,
@@ -83,23 +83,18 @@ export async function verifyCandidate(
   const entry = resolveCandidate(index, options.selector);
   const { candidate } = entry;
   assertVerifiable(entry);
-  // 同一条候选同一时刻只许一次验证（M8 收口补遗）：人工触发与无人值守自动验证可能同时跑同一条候选，
+  // 同一条候选同一时刻只许一件事：人工触发与无人值守自动验证可能同时跑同一条候选，
   // 四组工作树名只由候选哈希、组别与序号决定，撞车会同时毁掉两次验证的工作树，还会落两条回执。
-  // 锁按候选内容哈希取，跨进程有效且不可重入
+  // 锁按候选内容哈希取，跨进程有效且不可重入，与四个决定动作共用同一把
   const release = acquireExclusiveLock(
-    verifyLockPath(options.governanceRoot, candidate.contentHash),
-    `候选 ${candidate.kind}/${candidate.name}（${candidate.contentHash.slice(0, 12)}）正在被另一次验证占用`
+    candidateLockPath(options.governanceRoot, candidate.contentHash),
+    `候选 ${candidate.kind}/${candidate.name}（${candidate.contentHash.slice(0, 12)}）正在被另一次验证或审批占用`
   );
   try {
     return await runVerification(options, entry, now, n);
   } finally {
     release();
   }
-}
-
-// 候选验证锁的落点：治理根下的 .pigeon/verify-locks/<内容哈希>.lock
-export function verifyLockPath(governanceRoot: string, contentHash: string): string {
-  return path.join(governanceRoot, ".pigeon", "verify-locks", `${contentHash}.lock`);
 }
 
 async function runVerification(

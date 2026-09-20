@@ -9,8 +9,9 @@
 // v5（M5.7 S3，决策 053）：补 mcp——MCP 工具的调用与返回证据（参数哈希、返回哈希与摘要、截断标记、结构化返回哈希、
 // server 主动交的证据）；非 MCP 工具无此字段。
 import { type Static, Type } from "typebox";
-import { ExecutionIdSchema, ReceiptIdSchema } from "./ids.ts";
+import { ExecutionIdSchema, newReceiptId, ReceiptIdSchema } from "./ids.ts";
 import { type Migration, MigrationRegistry } from "./migration.ts";
+import type { ToolExecution } from "./tool-execution.ts";
 
 export const RECEIPT_VERSION = 5;
 
@@ -104,6 +105,68 @@ export const ReceiptSchema = Type.Object({
 });
 
 export type Receipt = Static<typeof ReceiptSchema>;
+
+// 暂存的 exec 证据：就是 receipt 里的 exec，外加一个只用于 executed 判定的进程启动标记。
+// 不从 tools/ 取类型——state 是叶子层，这里按结构描述即可
+export interface StagedExecEvidence extends ReceiptExec {
+  spawned?: boolean;
+}
+
+// receipt 的 exec 字段：暂存证据去掉进程启动标记（它只服务 executed 判定，不进账本）
+function receiptExecOf(evidence: StagedExecEvidence): ReceiptExec {
+  const { spawned: _spawned, ...exec } = evidence;
+  return exec;
+}
+
+// 一次调用收尾时的回执组装（M4 S2 / M5.5 S5 / M5.7 S3）：纯函数，证据由调用方取好再传进来。
+//
+// executed 判据：到达 execution 阶段且执行结果无错误。M3 两个自建工具的唯一副作用都在最后一次
+// 写盘调用（edit_file 全部预检通过才落盘），故"执行过且无错"≡副作用发生；阻断与拒绝路径
+// executionStartedAt 为空 → executed=false（副作用从未发生）。两个例外按"副作用可能发生"记：
+// exec 工具出错时进程可能已经跑过（超时终止、被中止），MCP 工具出错但 server 已给出返回。
+//
+// hashAfter 只在 executed 为真时调用（实测目标现状哈希，测不得给 null）：没发生的副作用不必去测，
+// 这个顺序是判据的一部分，不是调用方的自由。
+export function buildReceipt(input: {
+  record: ToolExecution;
+  decision: NonNullable<ToolExecution["decision"]>;
+  isError: boolean;
+  exec?: StagedExecEvidence;
+  mcp?: ReceiptMcp;
+  hashAfter?: () => string | null;
+  now?: () => number;
+}): Receipt {
+  const { record, decision, isError, exec, mcp } = input;
+  const executed =
+    record.executionStartedAt !== undefined &&
+    (!isError || exec?.spawned === true || mcp !== undefined);
+  const contentAfterHash = executed ? (input.hashAfter?.() ?? null) : null;
+  const execNote =
+    exec !== undefined
+      ? `（退出码 ${exec.exitCode ?? "无"}${exec.timedOut ? "，超时终止" : ""}）`
+      : "";
+  const mcpNote =
+    mcp !== undefined
+      ? `（MCP ${mcp.server}/${mcp.tool}${mcp.isError ? "，server 报错" : ""}）`
+      : "";
+  return {
+    version: RECEIPT_VERSION,
+    id: newReceiptId(),
+    executionId: record.executionId,
+    toolCallId: record.toolCallId,
+    approvedBy: decision.approvedBy,
+    executed,
+    isError,
+    startedAt: record.executionStartedAt ?? record.proposedAt,
+    finishedAt: record.settledAt ?? (input.now ?? Date.now)(),
+    summary: executed
+      ? `${record.toolName} 执行完成${execNote}${mcpNote}`
+      : `${record.toolName} 未产生副作用（${decision.outcome === "rejected" ? "已拒绝" : "执行出错"}）`,
+    ...(contentAfterHash !== null ? { contentAfterHash } : {}),
+    ...(exec !== undefined ? { exec: receiptExecOf(exec) } : {}),
+    ...(mcp !== undefined ? { mcp } : {}),
+  };
+}
 
 // v1 → v2：补 approvedBy / toolCallId。注意：v1 Receipt 从未被任何代码路径持久化
 // （M0 仅为 schema 占位，首个写入方是 M3 切片 5 的 JSONL 账本，直接写 v2），

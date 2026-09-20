@@ -2,6 +2,7 @@
 // 与会话锁的区别是它不可重入——人工触发与无人值守自动验证可能在同一个进程里同时跑同一条候选，
 // 会话锁的同进程重入在这里正好是漏洞。
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +81,51 @@ test("独占锁：报错文案带上调用方给的说明与锁文件路径", ()
         /候选 abc123 正在被另一次验证占用/.test(String(error)) && String(error).includes(path)
     );
     release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 另一个进程紧盯锁文件，数有多少次读到“存在但不是完整的持有者记录”。
+// 停止信号用一个哨兵文件；另设兜底期限，父进程异常退出时子进程不会挂住
+const POLLER = [
+  'const fs = require("node:fs");',
+  "const [lockPath, stopPath, outPath] = process.argv.slice(1);",
+  "let torn = 0;",
+  "let seen = 0;",
+  "const deadline = Date.now() + 30000;",
+  "while (!fs.existsSync(stopPath) && Date.now() < deadline) {",
+  "  let raw;",
+  '  try { raw = fs.readFileSync(lockPath, "utf8"); } catch { continue; }',
+  "  seen += 1;",
+  "  try {",
+  "    const parsed = JSON.parse(raw);",
+  '    if (typeof parsed.pid !== "number") { torn += 1; }',
+  "  } catch { torn += 1; }",
+  "}",
+  'fs.writeFileSync(outPath, JSON.stringify({ torn, seen }), "utf8");',
+].join("\n");
+
+test("建锁原子性：锁文件一出现就是完整内容，另一个进程读不到半截锁", async () => {
+  const root = dir();
+  try {
+    const path = join(root, "a.lock");
+    const stopPath = join(root, "stop");
+    const outPath = join(root, "seen.json");
+    const poller = spawn(process.execPath, ["-e", POLLER, path, stopPath, outPath], {
+      stdio: "ignore",
+    });
+    const exited = new Promise<void>((resolve) => poller.on("exit", () => resolve()));
+    // 反复取放同一把锁：建锁若分“先创建空文件、再写内容”两步，这中间的 0 字节窗口就会被读到，
+    // 而读到的一方会把它判为损坏锁直接接管——于是两个进程同时认为自己持锁
+    for (let i = 0; i < 400; i += 1) {
+      acquireExclusiveLock(path, "夹具")();
+    }
+    writeFileSync(stopPath, "", "utf8");
+    await exited;
+    const observed = JSON.parse(readFileSync(outPath, "utf8")) as { torn: number; seen: number };
+    assert.ok(observed.seen > 0, "子进程至少要读到过这把锁，否则这条用例什么都没测");
+    assert.equal(observed.torn, 0, "锁文件不该有任何一刻是不完整的");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

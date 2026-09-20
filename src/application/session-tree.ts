@@ -12,6 +12,7 @@ import {
   readEventLogFile,
   readMessageContentFileDetailed,
 } from "../persistence/event-log.ts";
+import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import {
   ledgerTreeMessages,
   openSessionTree,
@@ -112,17 +113,33 @@ export function acquireSessionTree(input: {
   return tree;
 }
 
-// 由账本重建树：删掉旧树文件后整棵重新导入；替换进程内共享句柄
+// 一棵树上的重建锁：按根会话号取，跨进程有效
+export function treeLockPath(governanceRoot: string, rootSessionId: SessionId): string {
+  return path.join(governanceRoot, ".pigeon", "tree-locks", `${rootSessionId}.lock`);
+}
+
+// 由账本重建树：删掉旧树文件后整棵重新导入；替换进程内共享句柄。
+// 取锁再删（并发缺口修复）：重建是"先删整棵再重导"，而另一个进程的写穿队列可能正在追加同一棵树。
+// 树文件本身没有任何跨进程保护，写穿失败又只告警不进账本（080），撞上就是树错乱且无人知晓。
+// 只锁重建侧不锁写穿侧：见本次审计里的取舍说明
 export async function rebuildSessionTree(input: {
   governanceRoot: string;
   rootSessionId: SessionId;
 }): Promise<SessionTree> {
-  const existing = await acquireSessionTree(input);
-  await existing.remove();
-  openTrees.delete(treeKey(input));
-  const tree = await acquireSessionTree(input);
-  await importSessionIntoTree(tree, input.governanceRoot, input.rootSessionId, TREE_MAIN_LANE);
-  return tree;
+  const release = acquireExclusiveLock(
+    treeLockPath(input.governanceRoot, input.rootSessionId),
+    `会话树 ${input.rootSessionId} 正被另一个进程写入或重建：等它收尾后再重建`
+  );
+  try {
+    const existing = await acquireSessionTree(input);
+    await existing.remove();
+    openTrees.delete(treeKey(input));
+    const tree = await acquireSessionTree(input);
+    await importSessionIntoTree(tree, input.governanceRoot, input.rootSessionId, TREE_MAIN_LANE);
+    return tree;
+  } finally {
+    release();
+  }
 }
 
 export interface SessionTreeBinding {

@@ -21,6 +21,13 @@ import { sessionsDirOf } from "./workspace.ts";
 
 export class CandidateLookupError extends Error {}
 
+// 一条候选上的互斥锁：验证与四个决定动作（批准 / 拒绝 / 撤销 / 取代）共用这一把。
+// 它们都会改动这条候选的账本记录或落点文件，谁都不能与另一件并行——两个进程同时批准与撤销时，
+// 决定记录的先后随机，而落点文件可能被删除那一方赢在最后，状态投影却按最后一条决定算出已激活
+export function candidateLockPath(governanceRoot: string, contentHash: string): string {
+  return path.join(governanceRoot, ".pigeon", "candidate-locks", `${contentHash}.lock`);
+}
+
 export interface LocatedCandidate extends ProjectedCandidate {
   // 候选提出与筛查两族所在的会话。验证、决定与激活三族不一定在同一个文件里——
   // 来源会话可能正被另一个进程写着，审批与验证命令便写进自己的会话文件（M8 收口修复）

@@ -1,91 +1,144 @@
+// 回执组装的直测（随该段判据下沉到 state 补齐）：此前 executed 判据只被端到端用例间接覆盖，
+// "出错但进程已经启动过"与"出错但 server 已给出返回"这两个例外分支没有任何断言——
+// 它们正是"副作用可能已经发生"的那两种情形，判错会让审计把发生过的副作用记成没发生。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Value } from "typebox/value";
-import { newExecutionId, newReceiptId } from "./ids.ts";
-import {
-  migrateReceiptToCurrent,
-  RECEIPT_VERSION,
-  type Receipt,
-  ReceiptSchema,
-} from "./receipt.ts";
+import { newExecutionId } from "./ids.ts";
+import { buildReceipt, type ReceiptMcp, type StagedExecEvidence } from "./receipt.ts";
+import type { ToolExecution } from "./tool-execution.ts";
 
-function makeReceipt(overrides: Partial<Receipt> = {}): Receipt {
+const DECISION = { outcome: "approved", approvedBy: "human", decidedAt: 150 } as const;
+const REJECTED = { outcome: "rejected", approvedBy: "policy:deny", decidedAt: 150 } as const;
+
+// 用可选字段显式带 undefined 的写法构造"没进入执行阶段"等形态（exactOptionalPropertyTypes 下要显式放开）
+type RecordOverrides = { [K in keyof ToolExecution]?: ToolExecution[K] | undefined };
+
+function record(overrides: RecordOverrides = {}): ToolExecution {
   return {
-    version: RECEIPT_VERSION,
-    id: newReceiptId(),
+    version: 1,
     executionId: newExecutionId(),
-    toolCallId: "toolu_01ABC",
-    // 审批来源（决策 4：human / policy:yolo / policy:auto / policy:deny）
-    approvedBy: "human",
-    executed: true,
-    isError: false,
-    startedAt: 1_757_000_000_000,
-    finishedAt: 1_757_000_000_123,
-    summary: "写入 src/state/ids.ts",
+    toolCallId: "toolu_1",
+    toolName: "run_command",
+    rawArgs: { command: "npm test" },
+    state: "settled",
+    proposedAt: 100,
+    executionStartedAt: 200,
+    settledAt: 300,
     ...overrides,
-  };
+  } as ToolExecution;
 }
 
-test("Receipt JSON 往返后深度相等且校验通过", () => {
-  const receipt = makeReceipt();
-  const revived: unknown = JSON.parse(JSON.stringify(receipt));
-  assert.ok(Value.Check(ReceiptSchema, revived));
-  assert.deepStrictEqual(revived, receipt);
+const EXEC: StagedExecEvidence = {
+  command: "npm test",
+  argv: ["npm", "test"],
+  launcher: false,
+  shell: false,
+  exitCode: 1,
+  timedOut: false,
+  outputBytes: 2,
+  outputHash: "0".repeat(64),
+  output: "ko",
+  truncated: false,
+  fileChanges: { added: [], removed: [], modified: [], truncated: false },
+};
+
+const MCP: ReceiptMcp = {
+  server: "s",
+  tool: "t",
+  argsHash: "1".repeat(64),
+  isError: true,
+  resultSummary: "坏了",
+  resultHash: "2".repeat(64),
+  resultBytes: 3,
+  truncated: false,
+};
+
+test("executed：执行过且无错即算副作用发生", () => {
+  assert.equal(
+    buildReceipt({ record: record(), decision: DECISION, isError: false }).executed,
+    true
+  );
 });
 
-test("executed=false 的回执（Rejected/参数非法/执行前取消）合法", () => {
-  const receipt = makeReceipt({ executed: false, summary: "审批拒绝，副作用未发生" });
-  assert.ok(Value.Check(ReceiptSchema, receipt));
+test("executed：从未进入执行阶段的一律记没发生", () => {
+  const receipt = buildReceipt({
+    record: record({ executionStartedAt: undefined }),
+    decision: REJECTED,
+    isError: false,
+  });
+  assert.equal(receipt.executed, false);
+  assert.match(receipt.summary, /未产生副作用（已拒绝）/);
 });
 
-test("executed 非布尔被拒绝", () => {
-  const bad = { ...makeReceipt(), executed: "yes" };
-  assert.ok(!Value.Check(ReceiptSchema, bad));
+test("executed：出错时默认记没发生，摘要说明是执行出错", () => {
+  const receipt = buildReceipt({ record: record(), decision: DECISION, isError: true });
+  assert.equal(receipt.executed, false);
+  assert.match(receipt.summary, /未产生副作用（执行出错）/);
 });
 
-test("version 不符被拒绝", () => {
-  const bad = { ...makeReceipt(), version: RECEIPT_VERSION + 1 };
-  assert.ok(!Value.Check(ReceiptSchema, bad));
+test("executed：出错但进程已经启动过（超时终止、被中止）按可能发生记", () => {
+  const receipt = buildReceipt({
+    record: record(),
+    decision: DECISION,
+    isError: true,
+    exec: { ...EXEC, spawned: true, timedOut: true },
+  });
+  assert.equal(receipt.executed, true, "进程跑过就可能已经产生副作用");
+  assert.match(receipt.summary, /退出码 1，超时终止/);
 });
 
-test("approvedBy 缺失或越界被拒绝（批准来源是必备证据）", () => {
-  const { approvedBy: _, ...missing } = makeReceipt();
-  assert.ok(!Value.Check(ReceiptSchema, missing));
-  assert.ok(!Value.Check(ReceiptSchema, makeReceipt({ approvedBy: "robot" as never })));
-  for (const approvedBy of ["human", "policy:yolo", "policy:auto", "policy:deny"] as const) {
-    assert.ok(Value.Check(ReceiptSchema, makeReceipt({ approvedBy })), approvedBy);
-  }
+test("executed：出错但 server 已给出返回，同样按可能发生记", () => {
+  const receipt = buildReceipt({ record: record(), decision: DECISION, isError: true, mcp: MCP });
+  assert.equal(receipt.executed, true);
+  assert.match(receipt.summary, /MCP s\/t，server 报错/);
 });
 
-test("Receipt v3：contentAfterHash（执行后实测目标内容哈希，M4 S2）可缺省、可往返", () => {
-  const without = makeReceipt();
-  assert.ok(Value.Check(ReceiptSchema, without));
-  assert.equal(without.contentAfterHash, undefined);
-  const withHash = makeReceipt({ contentAfterHash: "0123456789abcdef" });
-  const revived: unknown = JSON.parse(JSON.stringify(withHash));
-  assert.ok(Value.Check(ReceiptSchema, revived));
-  assert.deepStrictEqual(revived, withHash);
+test("exec 证据：进程启动标记只服务判定，不进回执", () => {
+  const receipt = buildReceipt({
+    record: record(),
+    decision: DECISION,
+    isError: false,
+    exec: { ...EXEC, spawned: true },
+  });
+  assert.ok(receipt.exec !== undefined);
+  assert.equal("spawned" in receipt.exec, false);
 });
 
-test("迁移链：v1 → v3 逐级升级（v1→v2 补占位，v2→v3 仅升版本，新字段可缺省）", () => {
-  const v3 = makeReceipt();
-  const { approvedBy: _a, toolCallId: _t, ...rest } = v3;
-  const legacy = { ...rest, version: 1 };
+test("现状哈希：只在副作用可能发生时才去测，测不得则缺省", () => {
+  let calls = 0;
+  const hashAfter = () => {
+    calls += 1;
+    return "a".repeat(16);
+  };
+  const done = buildReceipt({ record: record(), decision: DECISION, isError: false, hashAfter });
+  assert.equal(done.contentAfterHash, "a".repeat(16));
+  assert.equal(calls, 1);
 
-  const migrated = migrateReceiptToCurrent(legacy);
-  assert.equal(migrated.version, RECEIPT_VERSION);
-  assert.equal(migrated.id, v3.id);
-  assert.equal(migrated.summary, v3.summary);
-  assert.equal(migrated.approvedBy, "policy:auto");
-  assert.equal(migrated.contentAfterHash, undefined);
+  const never = buildReceipt({
+    record: record({ executionStartedAt: undefined }),
+    decision: REJECTED,
+    isError: false,
+    hashAfter,
+  });
+  assert.equal(never.contentAfterHash, undefined, "没发生的副作用不去测");
+  assert.equal(calls, 1, "也不该调用测量函数");
+
+  const unmeasurable = buildReceipt({
+    record: record(),
+    decision: DECISION,
+    isError: false,
+    hashAfter: () => null,
+  });
+  assert.equal(unmeasurable.contentAfterHash, undefined, "测不得就缺省，不写 null 进回执");
 });
 
-test("迁移链：v2 → v3 仅升版本（contentAfterHash 可缺省），既有字段逐一保留", () => {
-  const { contentAfterHash: _c, ...rest } = makeReceipt();
-  const legacyV2 = { ...rest, version: 2 };
-  const migrated = migrateReceiptToCurrent(legacyV2);
-  assert.equal(migrated.version, RECEIPT_VERSION);
-  assert.equal(migrated.id, legacyV2.id);
-  assert.equal(migrated.approvedBy, "human");
-  assert.equal(migrated.summary, legacyV2.summary);
+test("时间：起点回退到提出时刻，收尾缺省用当下", () => {
+  const receipt = buildReceipt({
+    record: record({ executionStartedAt: undefined, settledAt: undefined }),
+    decision: REJECTED,
+    isError: false,
+    now: () => 999,
+  });
+  assert.equal(receipt.startedAt, 100);
+  assert.equal(receipt.finishedAt, 999);
 });

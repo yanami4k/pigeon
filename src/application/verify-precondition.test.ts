@@ -11,7 +11,8 @@ import { MIN_RERUN_N, RerunCountError } from "../replay/verdict.ts";
 import { stageCandidate } from "../review/candidates.ts";
 import { CANDIDATE_VERSION } from "../state/candidate.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
-import { verifyCandidate, verifyLockPath } from "./verify-command.ts";
+import { candidateLockPath } from "./candidate-lookup.ts";
+import { verifyCandidate } from "./verify-command.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
 function root(): string {
@@ -108,7 +109,7 @@ test("互斥：同一条候选已有一次验证在跑时，第二次直接被�
     log.close();
 
     const release = acquireExclusiveLock(
-      verifyLockPath(dir, candidate.contentHash),
+      candidateLockPath(dir, candidate.contentHash),
       "夹具占位：另一次验证在跑"
     );
     try {

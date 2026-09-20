@@ -3,7 +3,7 @@
 // 都解析不了视为没有结构化结果，不抛。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { structuredResultOf } from "./workers.ts";
+import { structuredResultOf } from "./structured-result.ts";
 
 test("整段 JSON 与只有围栏的回复照旧解析", () => {
   assert.deepEqual(structuredResultOf('{"candidates":[]}'), { candidates: [] });

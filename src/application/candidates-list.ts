@@ -11,6 +11,7 @@ import {
   isProducibleCandidateKind,
 } from "../state/candidate.ts";
 import type { CandidateVerifiedRecord } from "../state/event-log.ts";
+import { lineDiff } from "../state/line-diff.ts";
 import { activationDrift } from "./candidate-decision.ts";
 import {
   buildCandidateIndex,
@@ -277,7 +278,8 @@ function decisionSection(entry: LocatedCandidate): string {
   return lines.join("\n");
 }
 
-// 行级 diff（审批展示用，非 git apply 格式）：最长公共子序列，超大文件退化为整体替换展示
+// 落点与候选正文的差异段（审批展示用，非 git apply 格式）：算法在 state/line-diff.ts，
+// 这里只决定上限与文案——超大文件不逐行比，退化为整体替换展示
 const DIFF_MAX_LINES = 2000;
 
 export function diffSection(before: string | undefined, after: string): string {
@@ -292,47 +294,5 @@ export function diffSection(before: string | undefined, after: string): string {
   if (oldLines.length > DIFF_MAX_LINES || newLines.length > DIFF_MAX_LINES) {
     return `（两侧各 ${oldLines.length} / ${newLines.length} 行，超出逐行对比上限，按整体替换看待）`;
   }
-  return renderLineDiff(oldLines, newLines).join("\n");
-}
-
-function renderLineDiff(oldLines: readonly string[], newLines: readonly string[]): string[] {
-  const rows = oldLines.length;
-  const columns = newLines.length;
-  // lcs[i][j] = oldLines[i..] 与 newLines[j..] 的最长公共子序列长度
-  const lcs: number[][] = Array.from({ length: rows + 1 }, () =>
-    new Array<number>(columns + 1).fill(0)
-  );
-  for (let i = rows - 1; i >= 0; i--) {
-    for (let j = columns - 1; j >= 0; j--) {
-      const row = lcs[i] as number[];
-      const next = lcs[i + 1] as number[];
-      row[j] =
-        oldLines[i] === newLines[j]
-          ? (next[j + 1] as number) + 1
-          : Math.max(next[j] as number, row[j + 1] as number);
-    }
-  }
-  const out: string[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < rows && j < columns) {
-    if (oldLines[i] === newLines[j]) {
-      out.push(` ${oldLines[i]}`);
-      i++;
-      j++;
-    } else if ((lcs[i + 1]?.[j] ?? 0) >= (lcs[i]?.[j + 1] ?? 0)) {
-      out.push(`-${oldLines[i]}`);
-      i++;
-    } else {
-      out.push(`+${newLines[j]}`);
-      j++;
-    }
-  }
-  for (; i < rows; i++) {
-    out.push(`-${oldLines[i]}`);
-  }
-  for (; j < columns; j++) {
-    out.push(`+${newLines[j]}`);
-  }
-  return out;
+  return lineDiff(oldLines, newLines).join("\n");
 }

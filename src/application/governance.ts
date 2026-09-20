@@ -12,9 +12,9 @@ import type {
   ToolGovernance,
   ToolGovernanceFactory,
 } from "../pi-runtime/governance.ts";
+import { type BreakerScope, breakerCountKey, InterceptStreak } from "../state/breaker.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
-import { newReceiptId } from "../state/ids.ts";
-import { RECEIPT_VERSION, type Receipt, type ReceiptMcp } from "../state/receipt.ts";
+import { buildReceipt, type ReceiptMcp } from "../state/receipt.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
 import {
   advanceToolExecution,
@@ -27,12 +27,6 @@ import { evaluateToolPolicy } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import type { CommandInspection, ExecEvidence, ExecEvidenceTool } from "../tools/run-command.ts";
 import type { ContentEvidence } from "../tools/wrap.ts";
-
-// receipt 的 exec 证据：暂存证据去掉进程启动标记（它只用于 executed 判定）
-function receiptExecOf(evidence: ExecEvidence): NonNullable<Receipt["exec"]> {
-  const { spawned: _spawned, ...exec } = evidence;
-  return exec;
-}
 
 // M5.7 S3（决策 053）：MCP 工具的证据暂存能力（mcp/registry-bridge.ts 的执行体满足）；结构检查，不要求工具必实现
 interface McpEvidenceSource {
@@ -98,7 +92,7 @@ class GovernedToolCalls implements ToolGovernance {
   // 两者审批闸/账本/#blockCounts 全部不可见；但 tool_execution_end 照常发出
   // （spikes/notfound-spike.mjs 实证：isError=true）。故判据取"settled 且 isError 且
   // 账本无此 toolCallId 记录"——无记录 ⟺ hook 从未运行 ⟺ 被上游拦截，一并兜底。
-  #interceptedStreak = { toolName: "", count: 0 };
+  readonly #interceptedStreak = new InterceptStreak();
   // 本次 Run 的账本 toolCallId 序列（RunResult.toolExecutions 的选取依据）
   #runToolCallIds: string[] = [];
   // 本次 Run 是否发生过熔断落闸（D7 Run 级「治理熔断」子类的活侧判据；breaker 记录是冷侧判据）
@@ -123,8 +117,7 @@ class GovernedToolCalls implements ToolGovernance {
 
   beginRun(): void {
     this.#blockCounts.clear();
-    this.#interceptedStreak.toolName = "";
-    this.#interceptedStreak.count = 0;
+    this.#interceptedStreak.reset();
     this.#breakerTripped = false;
     this.#runToolCallIds = [];
   }
@@ -491,45 +484,31 @@ class GovernedToolCalls implements ToolGovernance {
         mcp = undefined;
       }
     }
-    // exec 工具出错时进程可能已经跑过（超时终止、被中止）：进程启动过即按副作用可能发生记；
-    // MCP 工具出错但 server 已给出返回（isError 结果）：调用已到达 server，同样按副作用可能发生记
-    const executed =
-      record.executionStartedAt !== undefined &&
-      (!isError || exec?.spawned === true || mcp !== undefined);
-    // M4 S2（D5）：执行成功且工具具备内容证据能力时，实测目标现状哈希随 receipt 落盘
-    // （实测而非采信工具自报，撕裂写会在冷恢复三方比对中现形）；测不得则缺省
-    let contentAfterHash: string | null = null;
-    if (executed) {
-      const tool = this.#host.tools.get(record.toolName);
-      if (
-        tool !== undefined &&
-        "hashContentTarget" in tool &&
-        typeof tool.hashContentTarget === "function"
-      ) {
-        try {
-          contentAfterHash = tool.hashContentTarget(record.rawArgs);
-        } catch {
-          contentAfterHash = null;
-        }
-      }
-    }
-    const receipt: Receipt = {
-      version: RECEIPT_VERSION,
-      id: newReceiptId(),
-      executionId: record.executionId,
-      toolCallId: record.toolCallId,
-      approvedBy: decision.approvedBy,
-      executed,
+    // 组装判据在 state/receipt.ts（executed 判据、摘要文案、exec/mcp 字段取舍）；
+    // 这一层只负责把证据取到手，以及在 executed 为真时去实测目标现状哈希
+    // （M4 S2 / D5：实测而非采信工具自报，撕裂写会在冷恢复三方比对中现形；测不得则缺省）
+    const receipt = buildReceipt({
+      record,
+      decision,
       isError,
-      startedAt: record.executionStartedAt ?? record.proposedAt,
-      finishedAt: record.settledAt ?? Date.now(),
-      summary: executed
-        ? `${record.toolName} 执行完成${exec !== undefined ? `（退出码 ${exec.exitCode ?? "无"}${exec.timedOut ? "，超时终止" : ""}）` : ""}${mcp !== undefined ? `（MCP ${mcp.server}/${mcp.tool}${mcp.isError ? "，server 报错" : ""}）` : ""}`
-        : `${record.toolName} 未产生副作用（${decision.outcome === "rejected" ? "已拒绝" : "执行出错"}）`,
-      ...(contentAfterHash !== null ? { contentAfterHash } : {}),
-      ...(exec !== undefined ? { exec: receiptExecOf(exec) } : {}),
+      ...(exec !== undefined ? { exec } : {}),
       ...(mcp !== undefined ? { mcp } : {}),
-    };
+      hashAfter: () => {
+        const tool = this.#host.tools.get(record.toolName);
+        if (
+          tool === undefined ||
+          !("hashContentTarget" in tool) ||
+          typeof tool.hashContentTarget !== "function"
+        ) {
+          return null;
+        }
+        try {
+          return tool.hashContentTarget(record.rawArgs);
+        } catch {
+          return null;
+        }
+      },
+    });
     eventLog.appendReceipt({ receipt, runId: this.#host.activeRunId() });
     // settled 后回填 receiptId：schema 允许的回填，不是状态迁移
     this.#executions.set(record.toolCallId, { ...record, receiptId: receipt.id });
@@ -550,17 +529,9 @@ class GovernedToolCalls implements ToolGovernance {
     toolCallId: string,
     rawArgs: unknown,
     reason: string,
-    scope: "tool" | "fingerprint"
+    scope: BreakerScope
   ): GovernanceVerdict {
-    // 畸形参数（循环引用等）序列化会抛：退化为固定串并入同一指纹桶——
-    // 宁可按工具名合并计数，也不让熔断因异常参数失效
-    let argsKey: string;
-    try {
-      argsKey = JSON.stringify(rawArgs) ?? "";
-    } catch {
-      argsKey = "<unserializable>";
-    }
-    const key = scope === "tool" ? `tool\n${toolName}` : `fingerprint\n${toolName}\n${argsKey}`;
+    const key = breakerCountKey(scope, toolName, rawArgs);
     const count = (this.#blockCounts.get(key) ?? 0) + 1;
     this.#blockCounts.set(key, count);
     if (count >= this.#breakerThreshold) {
@@ -609,27 +580,18 @@ class GovernedToolCalls implements ToolGovernance {
   // 审计留痕：此路径 hook 从未运行，不可能有 ToolExecution 账本记录；
   // 事件日志里的 tool.proposed/tool.settled 序列即为拦截循环的审计轨迹。
   #countUpstreamInterceptedAndMaybeBreak(payload: ToolSettledPayload): void {
-    if (payload.isError && !this.#executions.has(payload.toolCallId)) {
-      if (this.#interceptedStreak.toolName === payload.toolName) {
-        this.#interceptedStreak.count += 1;
-      } else {
-        this.#interceptedStreak.toolName = payload.toolName;
-        this.#interceptedStreak.count = 1;
-      }
-      if (this.#interceptedStreak.count >= this.#breakerThreshold) {
-        this.#breakerTripped = true;
-        this.#persistBreaker({
-          toolName: payload.toolName,
-          toolCallId: payload.toolCallId,
-          scope: "intercepted",
-          count: this.#interceptedStreak.count,
-          threshold: this.#breakerThreshold,
-        });
-        this.#host.abort();
-      }
-    } else {
-      this.#interceptedStreak.toolName = "";
-      this.#interceptedStreak.count = 0;
+    const intercepted = payload.isError && !this.#executions.has(payload.toolCallId);
+    const count = this.#interceptedStreak.observe(payload.toolName, intercepted);
+    if (count >= this.#breakerThreshold) {
+      this.#breakerTripped = true;
+      this.#persistBreaker({
+        toolName: payload.toolName,
+        toolCallId: payload.toolCallId,
+        scope: "intercepted",
+        count,
+        threshold: this.#breakerThreshold,
+      });
+      this.#host.abort();
     }
   }
 }

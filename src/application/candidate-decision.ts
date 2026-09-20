@@ -21,6 +21,7 @@ import {
   revokeExperience,
 } from "../activation/activate.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
+import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import { projectedExperienceSet } from "../replay/materials.ts";
 import { isProducibleCandidateKind } from "../state/candidate.ts";
 import type {
@@ -31,6 +32,7 @@ import type {
 import { newSessionId } from "../state/ids.ts";
 import {
   buildCandidateIndex,
+  candidateLockPath,
   type LocatedCandidate,
   readCandidateBody,
   resolveCandidate,
@@ -66,14 +68,28 @@ export interface DecideCandidateResult {
 
 export function decideCandidate(input: DecideCandidateInput): DecideCandidateResult {
   const now = input.now ?? Date.now;
-  const index = buildCandidateIndex(input.governanceRoot);
-  const entry = resolveCandidate(index, input.selector);
-  const { candidate } = entry;
+  // 第一次定位只为把选择器解成内容哈希——锁路径按哈希取，不先解就不知道该锁哪一把
+  const located = resolveCandidate(buildCandidateIndex(input.governanceRoot), input.selector);
+  const { candidate } = located;
+  // 同一条候选同一时刻只许一件事：与验证共用按内容哈希取的那把锁。
+  // 两个进程同时批准与撤销同一条候选时，两条决定记录的先后随机，落点文件可能被删除那一方赢在最后，
+  // 而状态投影按"最后一条决定"算出已激活——文件没了，状态却说它激活着。
+  // 取锁排在任何写入之前（连会话文件都还没开），异常路径由 finally 放锁
+  const release = acquireExclusiveLock(
+    candidateLockPath(input.governanceRoot, candidate.contentHash),
+    `候选 ${candidate.kind}/${candidate.name}（${candidate.contentHash.slice(0, 12)}）正在被另一次验证或审批占用`
+  );
   // 决定与激活写进本次命令自己的会话文件（M8 收口修复）：候选的来源会话可能正被另一个
   // 会话进程写着，去抢它的写入锁会让"活会话期间批不了候选"。候选状态本就由账本现算，
   // 三族落在哪个文件不影响投影（buildCandidateIndex 跨会话收集），单写者约束也因此一字未动。
   const log = new JsonlEventLog(sessionsDirOf(input.governanceRoot), newSessionId());
   try {
+    // 取锁之后按内容哈希重新算一遍状态：上面那次定位发生在取锁之前，
+    // 那段窗口里别人可能刚批准或刚撤销过这条候选，拿旧投影去判闸等于没锁
+    const entry = resolveCandidate(
+      buildCandidateIndex(input.governanceRoot),
+      candidate.contentHash
+    );
     switch (input.action) {
       case "approve":
         return approve(input, entry, log, now);
@@ -96,6 +112,7 @@ export function decideCandidate(input: DecideCandidateInput): DecideCandidateRes
     }
   } finally {
     log.close();
+    release();
   }
 }
 
