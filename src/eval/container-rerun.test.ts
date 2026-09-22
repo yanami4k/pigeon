@@ -190,14 +190,6 @@ test("任务源上的回放验证：四组照原尝试的尺子在任务源重�
     const log = new JsonlEventLog(sessionsDirOf(host), producer);
     const runId = newRunId();
     log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-    log.appendCandidateScreened({
-      runId,
-      candidateKind: "skill",
-      name: SKILL,
-      contentHash: candidate.contentHash,
-      scannerVersion: candidate.scan.scannerVersion,
-      hits: [],
-    });
     log.close();
 
     // 回放用的模型：system prompt 里看得到这条经验就改文件，看不到就不改；记下每次调用的温度与 system prompt

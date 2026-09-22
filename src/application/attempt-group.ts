@@ -1,6 +1,6 @@
 // 并行同任务派发（M7 S4，决策 069 / 071 / 074）：一次派出同一任务的多个 worker，生成共享任务标识写入派出记录；
 // 每个尝试收尾后由程序在该尝试的工作树里独立执行验证命令（未配置则不跑，标签为未知），结果落宿主会话的通用验证记录；
-// 全部收尾后按账本现算标签选对（每侧只取一个），凑成成败两侧即自动派提炼器，否则留一条带原因的提炼跳过记录。
+// 全部收尾后按账本现算标签选对（每侧只取一个），凑成成败两侧即自动派提炼器，否则把不提炼的原因随结果交回。
 // 失败自动分叉重试不叠加在并行同任务派发上（决策 079）。
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -23,11 +23,7 @@ import {
   firstRunOf,
   selectContrast,
 } from "../state/episode.ts";
-import type {
-  CandidateVerifiedRecord,
-  DistillSkippedInput,
-  WorkerLimits,
-} from "../state/event-log.ts";
+import type { CandidateVerifiedRecord, WorkerLimits } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { type AttemptVerificationSink, verifyAttempt } from "./attempt-verify.ts";
@@ -41,7 +37,6 @@ import {
 export interface AttemptGroupHost extends AttemptVerificationSink {
   // 宿主会话号：验证记录落在这里，现算标签时读它作为额外来源
   readonly sessionId: SessionId;
-  appendDistillSkipped(input: DistillSkippedInput): unknown;
 }
 
 export interface AttemptGroupInput {
@@ -138,18 +133,8 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
     );
   }
   const selection = selectContrast(attempts);
+  // 不提炼的原因随返回值交给调用方（决策 128：不再落提炼跳过记录）
   if (selection.skip !== undefined || input.distill === undefined) {
-    if (selection.skip !== undefined) {
-      input.hostLog.appendDistillSkipped({
-        taskKey,
-        reason: selection.skip,
-        attempts: attempts.map((attempt) => ({
-          sessionId: attempt.sessionId,
-          runId: attempt.runId,
-          label: attempt.label,
-        })),
-      });
-    }
     return {
       taskKey,
       outcomes: settled,

@@ -1,4 +1,4 @@
-// M7 S1 落盘面：通用验证记录、分叉记录、分支会话头、提炼跳过记录经 JsonlEventLog 写入并冷物化分拣；
+// M7 S1 落盘面：通用验证记录、分叉记录、分支会话头经 JsonlEventLog 写入并冷物化分拣；
 // 快照观察与撞上限观察走观察族入口；派出记录的共享任务标识随 child.spawned 落盘。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -11,7 +11,7 @@ import { JsonlEventLog, materializeSession } from "./event-log.ts";
 
 const COMMIT = "a".repeat(40);
 
-test("通用验证、分叉、分支会话头、提炼跳过四族落盘并冷物化；快照与撞上限走观察族", () => {
+test("通用验证、分叉、分支会话头三族落盘并冷物化；快照与撞上限走观察族", () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-contrast-"));
   try {
     const sessionId = newSessionId();
@@ -75,11 +75,6 @@ test("通用验证、分叉、分支会话头、提炼跳过四族落盘并冷�
       trigger: "retry-on-fail",
       forkedAt: 3,
     });
-    log.appendDistillSkipped({
-      taskKey: "task_01",
-      reason: "all-failed",
-      attempts: [{ sessionId, runId, label: "Failed" }],
-    });
     log.close();
 
     const branchLog = new JsonlEventLog(dir, branchSessionId);
@@ -100,7 +95,6 @@ test("通用验证、分叉、分支会话头、提炼跳过四族落盘并冷�
     assert.equal(session.attemptVerifieds.length, 1);
     assert.equal(session.attemptVerifieds[0]?.verdict, "pass");
     assert.equal(session.sessionForkeds[0]?.branchSessionId, branchSessionId);
-    assert.equal(session.distillSkippeds[0]?.reason, "all-failed");
     assert.equal(session.classification.runs.length, 1, "无信封 Run 的新族不凭空造 Run");
 
     // 快照与条目号的对应可从账本查到：分叉点之前（含）最近的快照

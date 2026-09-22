@@ -94,7 +94,7 @@ test("无验证但正常完成算未知；验证未判定算未知；分类为�
 
 function base(sessionId = newSessionId(), runId: RunId = newRunId()) {
   return (timestamp: number) => ({
-    version: 13 as const,
+    version: 14 as const,
     id: newEntryId(),
     sessionId,
     runId,
@@ -123,7 +123,7 @@ test("账本现算：撞上限观察、熔断、悬账、验证记录（取最�
 
   const verified = (verdict: "pass" | "fail", timestamp: number) =>
     ({
-      version: 13,
+      version: 14,
       id: newEntryId(),
       sessionId,
       timestamp,
@@ -198,7 +198,7 @@ test("账本现算：验证记录可来自另一个会话文件（worker 尝试�
     path: "p",
     records: [
       {
-        version: 13,
+        version: 14,
         id: newEntryId(),
         sessionId: parentId,
         timestamp: 3,

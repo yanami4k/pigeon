@@ -229,9 +229,9 @@ export default {
       severity: "error",
       comment:
         "Actor（cli / tui）对 persistence 只许只读物化（materializeSession / listSessionIds / filePathFor）；" +
-        "会改文件的入口（D8 旧账本迁移、grants.json 读写）一律经 application（M2 审计 note-1，决策 034）。",
+        "会改文件的入口（grants.json 读写）一律经 application（M2 审计 note-1，决策 034）。",
       from: { path: "^src/(cli|tui)", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/persistence/(legacy-migration|grants-config)\\.ts$" },
+      to: { path: "^src/persistence/grants-config\\.ts$" },
     },
     {
       name: "actors-not-each-other",

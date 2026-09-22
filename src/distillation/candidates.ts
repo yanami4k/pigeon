@@ -241,14 +241,6 @@ export function persistDistillerCandidates(input: PersistDistillerInput): Persis
       model: { ...input.model },
       ...(input.usage !== undefined ? { usage: { ...input.usage } } : {}),
     });
-    input.sink.appendCandidateScreened({
-      runId: input.hostRunId,
-      candidateKind: item.kind,
-      name: item.name,
-      contentHash: candidate.contentHash,
-      scannerVersion: candidate.scan.scannerVersion,
-      hits: candidate.scan.hits,
-    });
     written.push(candidate);
   }
   if (rejected.length > 0) {

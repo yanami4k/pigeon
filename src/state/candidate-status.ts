@@ -1,5 +1,6 @@
 // 候选状态投影（M6，决策 065；M8 S2，决策 089 / 092 / 093）：候选状态不入元数据、不写进候选目录，
-// 由账本的五族现算——提出、筛查（M6）与验证回执、决定、激活（M8）。
+// 由账本的四族现算——提出（M6）与验证回执、决定、激活（M8）。扫描结论读提出记录内嵌的扫描结果
+// （决策 128：单独的筛查族与内嵌结果逐字重复，已退役）。
 //
 // 判定顺序（先到先得，前一条命中即定）：
 //   1. 扫描拒收：确定性扫描有命中，永不参与激活，压过之后的一切记录（含误落的批准与激活记录）——
@@ -7,21 +8,19 @@
 //   2. 已取代：同名新候选的元数据回指本哈希，或决定族记了取代动作（093 与 065 同构）；
 //   3. 决定族的最后一条：拒绝 / 撤销 / 批准（批准后有激活记录即已激活，否则已批准）；
 //   4. 验证回执的最后一条：通过 / 未测出 / 回归三值各一态；
-//   5. 筛查无命中即已扫描，只有提出记录即已提出。
+//   5. 其余即已扫描（提出记录必带扫描结果，扫描无命中才会走到这里）。
 // 取"最后一条"而非"第一条"：决定与验证都可以重来（回归翻案只能靠重验，092），现状由最新一条表达。
 import type { CandidateStatus, ReviewerCandidate } from "./candidate.ts";
 import type {
   CandidateActivatedRecord,
   CandidateDecidedRecord,
   CandidateProposedRecord,
-  CandidateScreenedRecord,
   CandidateVerifiedRecord,
 } from "./event-log.ts";
 
-// 投影输入：物化会话里的五族（MaterializedSession 满足）
+// 投影输入：物化会话里的四族（MaterializedSession 满足）
 export interface CandidateProjectionSource {
   candidateProposeds: readonly CandidateProposedRecord[];
-  candidateScreeneds: readonly CandidateScreenedRecord[];
   candidateVerifieds: readonly CandidateVerifiedRecord[];
   candidateDecideds: readonly CandidateDecidedRecord[];
   candidateActivateds: readonly CandidateActivatedRecord[];
@@ -31,7 +30,6 @@ export interface ProjectedCandidate {
   candidate: ReviewerCandidate;
   status: CandidateStatus;
   proposed: CandidateProposedRecord;
-  screened?: CandidateScreenedRecord;
   // M8：最后一条验证回执、决定与激活记录（在场时）
   verified?: CandidateVerifiedRecord;
   decided?: CandidateDecidedRecord;
@@ -108,21 +106,19 @@ export function projectCandidates(
       decideds: session.candidateDecideds,
       activateds: session.candidateActivateds,
     };
-    const screened = byHash(session.candidateScreeneds);
     const verified = byHash(pool.verifieds);
     const decided = byHash(pool.decideds);
     const activated = byHash(pool.activateds);
     return {
       candidate: proposed.candidate,
       status: statusOf({
-        screened,
+        scanHits: proposed.candidate.scan.hits.length,
         verified,
         decided,
         activated,
         superseded: superseded.has(contentHash),
       }),
       proposed,
-      ...(screened !== undefined ? { screened } : {}),
       ...(verified !== undefined ? { verified } : {}),
       ...(decided !== undefined ? { decided } : {}),
       ...(activated !== undefined ? { activated } : {}),
@@ -131,13 +127,13 @@ export function projectCandidates(
 }
 
 function statusOf(input: {
-  screened: CandidateScreenedRecord | undefined;
+  scanHits: number;
   verified: CandidateVerifiedRecord | undefined;
   decided: CandidateDecidedRecord | undefined;
   activated: CandidateActivatedRecord | undefined;
   superseded: boolean;
 }): CandidateStatus {
-  if (input.screened !== undefined && input.screened.hits.length > 0) {
+  if (input.scanHits > 0) {
     return "ScanRejected";
   }
   if (input.superseded) {
@@ -165,5 +161,5 @@ function statusOf(input: {
         return "ReplayRegressed";
     }
   }
-  return input.screened === undefined ? "Proposed" : "SecurityScanned";
+  return "SecurityScanned";
 }

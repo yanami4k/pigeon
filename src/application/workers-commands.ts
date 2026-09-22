@@ -172,7 +172,7 @@ export function renderAttemptGroupOutcome(result: {
     ...result.attempts.map((attempt) => `  会话 ${attempt.sessionId} ｜ ${attempt.label}`),
   ];
   if (result.skip !== undefined) {
-    lines.push(`  不提炼：${result.skip}（已记提炼跳过）`);
+    lines.push(`  不提炼：${result.skip}`);
   } else if (result.distill !== undefined) {
     const written = result.distill.persisted?.written ?? [];
     lines.push(

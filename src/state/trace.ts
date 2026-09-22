@@ -11,7 +11,6 @@ import type {
   CandidateActivatedRecord,
   CandidateDecidedRecord,
   CandidateProposedRecord,
-  CandidateScreenedRecord,
   CandidateVerifiedRecord,
   DecisionRecord,
   EvalVerifiedRecord,
@@ -85,7 +84,7 @@ export interface TraceRun {
   llmRequestCount: number;
   // M6.5 S3（决策 058）：Eval 验证器判决（非 Eval 运行无）；同一 Run 多次验证取最后一条
   verified?: EvalVerifiedRecord;
-  // M6（决策 064 / 065）：本 Run 的候选（提出与筛查配对、状态现算）、审阅跳过与审阅结果不可解析记录
+  // M6（决策 064 / 065）：本 Run 的候选（状态由提出记录与后续决定现算）、审阅跳过与审阅结果不可解析记录
   candidates: ProjectedCandidate[];
   reviewSkips: ReviewSkippedRecord[];
   reviewUnparsables: ReviewUnparsableRecord[];
@@ -174,7 +173,6 @@ function buildRunTrace(
     anomalies: [],
   };
   const candidateProposeds: CandidateProposedRecord[] = [];
-  const candidateScreeneds: CandidateScreenedRecord[] = [];
   // M8（决策 089）：候选三族同样进本 Run 的候选投影——trace 里的候选状态与 pigeon candidates 一致
   const candidateVerifieds: CandidateVerifiedRecord[] = [];
   const candidateDecideds: CandidateDecidedRecord[] = [];
@@ -251,8 +249,6 @@ function buildRunTrace(
       run.verified = record;
     } else if (record.kind === "candidate.proposed") {
       candidateProposeds.push(record);
-    } else if (record.kind === "candidate.screened") {
-      candidateScreeneds.push(record);
     } else if (record.kind === "candidate.verified") {
       candidateVerifieds.push(record);
     } else if (record.kind === "candidate.decided") {
@@ -328,7 +324,6 @@ function buildRunTrace(
   }
   run.candidates = projectCandidates({
     candidateProposeds,
-    candidateScreeneds,
     candidateVerifieds,
     candidateDecideds,
     candidateActivateds,

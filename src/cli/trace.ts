@@ -249,8 +249,8 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
     lines.push(
       `  候选 ${candidate.kind}/${candidate.name} ｜ ${CANDIDATE_STATUS_LABEL[projected.status] ?? projected.status} ｜ ` +
         `哈希 ${candidate.contentHash.slice(0, 12)} ｜ 判断强度 ${candidate.strength} ｜ 产出会话 ${candidate.source.producerSessionId}` +
-        (projected.screened !== undefined && projected.screened.hits.length > 0
-          ? ` ｜ 命中：${projected.screened.hits.map((hit) => hit.rule).join("、")}`
+        (candidate.scan.hits.length > 0
+          ? ` ｜ 命中：${candidate.scan.hits.map((hit) => hit.rule).join("、")}`
           : "")
     );
   }

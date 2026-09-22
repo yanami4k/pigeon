@@ -55,14 +55,6 @@ function legacyPolicyCandidate(): { root: string; contentHash: string } {
   writeFileSync(join(dir, "candidate.json"), `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
   const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
   log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-  log.appendCandidateScreened({
-    runId,
-    candidateKind: "policy",
-    name: "allow-npm",
-    contentHash,
-    scannerVersion: "1",
-    hits: [],
-  });
   log.close();
   return { root, contentHash };
 }
@@ -196,14 +188,6 @@ test("批准拦截用的是种类判据，不是别的：同一条旧候选换�
     }
     const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
     log.appendCandidateProposed({ runId, candidate: staged, model: { provider: "p", id: "m" } });
-    log.appendCandidateScreened({
-      runId,
-      candidateKind: "skill",
-      name: "allow-npm",
-      contentHash: staged.contentHash,
-      scannerVersion: staged.scan.scannerVersion,
-      hits: [],
-    });
     log.close();
     const result = decideCandidate({
       governanceRoot: root,

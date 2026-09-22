@@ -35,9 +35,6 @@ import {
   type CandidateProposedInput,
   type CandidateProposedRecord,
   CandidateProposedRecordSchema,
-  type CandidateScreenedInput,
-  type CandidateScreenedRecord,
-  CandidateScreenedRecordSchema,
   type CandidateVerifiedInput,
   type CandidateVerifiedRecord,
   CandidateVerifiedRecordSchema,
@@ -50,24 +47,15 @@ import {
   type DecisionInput,
   type DecisionRecord,
   DecisionRecordSchema,
-  type DistillSkippedInput,
-  type DistillSkippedRecord,
-  DistillSkippedRecordSchema,
   type EntryAppendInput,
   type EntryRecord,
   EntryRecordSchema,
   EVENT_LOG_VERSION,
   type EventRecord,
   EventRecordSchema,
-  type GrantConfigRemovedInput,
-  type GrantConfigRemovedRecord,
-  GrantConfigRemovedRecordSchema,
   type GrantCreatedInput,
   type GrantCreatedRecord,
   GrantCreatedRecordSchema,
-  type GrantPromotedInput,
-  type GrantPromotedRecord,
-  GrantPromotedRecordSchema,
   type GrantRevokedInput,
   type GrantRevokedRecord,
   GrantRevokedRecordSchema,
@@ -78,6 +66,7 @@ import {
   type ObservationRecord,
   ObservationRecordSchema,
   parseEventRecord,
+  RETIRED_EVENT_KINDS,
   type ReceiptInput,
   type ReceiptRecord,
   ReceiptRecordSchema,
@@ -151,7 +140,9 @@ export interface EventLogReadResult {
 
 // 全量读 + 校验：进程死于写盘中途会留下半截末行——按"未持久化"容忍（torn tail）；
 // 非末行损坏说明日志被外部破坏，响亮失败。
-// 读路径迁移（M0 管线）：version 低于当前格式的记录先经 eventLogMigrations 逐级升级再校验
+// 读路径迁移（M0 管线）：version 低于当前格式的记录先经 eventLogMigrations 逐级升级再校验。
+// 决策 128：已退役种类的记录在校验之前跳过——任何版本都跳过，不算损坏，不进记录集
+//（因而也不进任何视图与执行编号重复检测）
 export function readEventLogFileDetailed(path: string): EventLogReadResult {
   if (!existsSync(path)) {
     return { records: [], tornTail: false };
@@ -171,6 +162,9 @@ export function readEventLogFileDetailed(path: string): EventLogReadResult {
       }
       throw new EventLogCorruptionError(`事件日志损坏：${path} 第 ${index + 1} 行不是合法 JSON`);
     }
+    if (isRetiredRecord(raw)) {
+      continue;
+    }
     let record: EventRecord;
     try {
       record = parseEventRecord(raw);
@@ -182,6 +176,16 @@ export function readEventLogFileDetailed(path: string): EventLogReadResult {
     records.push(record);
   }
   return { records, tornTail };
+}
+
+function isRetiredRecord(raw: unknown): boolean {
+  return (
+    typeof raw === "object" &&
+    raw !== null &&
+    "kind" in raw &&
+    typeof raw.kind === "string" &&
+    RETIRED_EVENT_KINDS.has(raw.kind)
+  );
 }
 
 // 只取记录集的既有入口（tornTail 标记的调用方用 readEventLogFileDetailed）
@@ -524,30 +528,6 @@ export class JsonlEventLog {
     return record;
   }
 
-  // grant.promoted 落盘（M4 收口决策 ①）：治理族耐久（fsync）；/grants save 先落本记录再写配置
-  appendGrantPromoted(input: GrantPromotedInput): GrantPromotedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(GrantPromotedRecordSchema, {
-      ...this.#grantEnvelope(runId),
-      kind: "grant.promoted",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
-  // grant.config-removed 落盘（M4 收口决策 ①）：治理族耐久（fsync）；/revoke config#N 先改配置再落本记录
-  appendGrantConfigRemoved(input: GrantConfigRemovedInput): GrantConfigRemovedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(GrantConfigRemovedRecordSchema, {
-      ...this.#grantEnvelope(runId),
-      kind: "grant.config-removed",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
   // 迁移/外部构造记录的直通入口：全量校验 + 幂等判定 + 按族耐久写盘
   appendRecord(record: EventRecord): void {
     const parsed = Value.Parse(EventRecordSchema, record);
@@ -597,18 +577,6 @@ export class JsonlEventLog {
     const record = Value.Parse(CandidateProposedRecordSchema, {
       ...this.#envelope(runId),
       kind: "candidate.proposed",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
-  // 候选筛查（M6，决策 065）：确定性扫描结果；治理族耐久（fsync）
-  appendCandidateScreened(input: CandidateScreenedInput): CandidateScreenedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(CandidateScreenedRecordSchema, {
-      ...this.#envelope(runId),
-      kind: "candidate.screened",
       ...body,
     });
     this.#append(record, true);
@@ -686,18 +654,6 @@ export class JsonlEventLog {
       ...body,
     });
     this.#append(record, true);
-    return record;
-  }
-
-  // M7（决策 074）：提炼跳过记录——观察族耐久
-  appendDistillSkipped(input: DistillSkippedInput): DistillSkippedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(DistillSkippedRecordSchema, {
-      ...this.#grantEnvelope(runId),
-      kind: "distill.skipped",
-      ...body,
-    });
-    this.#append(record, false);
     return record;
   }
 

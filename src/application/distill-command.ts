@@ -151,16 +151,8 @@ export async function runDistillCommand(input: DistillCommandInput): Promise<Dis
             ? forcedSelection(group.attempts)
             : undefined;
       if (chosen === undefined) {
+        // 跳过原因只进命令报告（决策 128：不再落提炼跳过记录）
         const reason = selection.skip ?? "no-contrast";
-        hostLog.appendDistillSkipped({
-          taskKey: group.key,
-          reason,
-          attempts: group.attempts.map((attempt) => ({
-            sessionId: attempt.sessionId,
-            runId: attempt.runId,
-            label: attempt.label,
-          })),
-        });
         reports.push({ key: group.key, attempts: group.attempts, skip: reason });
         continue;
       }

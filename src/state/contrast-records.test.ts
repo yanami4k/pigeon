@@ -1,5 +1,5 @@
 // M7 S1 数据层（决策 069 / 071 / 075 / 077 / 078）：Event Log v11 加法式新增——派出记录的共享任务标识、
-// 通用验证记录、分叉记录与分支会话头、工作区快照观察、撞上限观察、提炼跳过记录；候选 v3 加对比来源块。
+// 通用验证记录、分叉记录与分支会话头、工作区快照观察、撞上限观察、提炼跳过记录（决策 128 已退役）；候选 v3 加对比来源块。
 // 旧记录（v10）逐字有效，经读路径迁移链升到当前版本。
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -26,7 +26,7 @@ const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
 test("Event Log 升到 v11", () => {
-  assert.equal(EVENT_LOG_VERSION, 13);
+  assert.equal(EVENT_LOG_VERSION, 14);
 });
 
 test("069：派出记录可带共享任务标识；缺省仍合法（旧派出记录不受影响）", () => {
@@ -154,8 +154,8 @@ test("072 依据：撞上限观察与提炼跳过记录", () => {
     reason: "all-passed",
     attempts: [{ sessionId: newSessionId(), runId: newRunId(), label: "Passed" }],
   };
-  assert.ok(Value.Check(EventRecordSchema, skipped));
-  assert.ok(!Value.Check(EventRecordSchema, { ...skipped, reason: "whatever" }));
+  // 决策 128：提炼跳过已退役，不在当前记录并集里（旧文件里的这种记录由读取边界跳过）
+  assert.ok(!Value.Check(EventRecordSchema, skipped));
 });
 
 test("v10 记录经迁移链升到当前版本：派出记录不带任务标识、候选提出内嵌的 v2 候选升 v3", () => {
@@ -243,4 +243,20 @@ test("v10 的不可解析记录经迁移链升到当前版本：产出会话字�
     );
   }
   assert.ok(Value.Check(EventRecordSchema, record), "迁移后通过当前 schema");
+});
+
+// 决策 128：v13 → v14 只退役四族（由读取边界跳过），保留下来的记录纯版本推进、正文逐字不变
+test("v13 记录经迁移链升到 v14：纯版本推进，其余字段逐字不变", () => {
+  const v13 = {
+    version: 13,
+    id: newEntryId(),
+    sessionId: newSessionId(),
+    runId: newRunId(),
+    timestamp: 1,
+    kind: "run.limit-hit",
+    payload: { limit: "token-limit" },
+  };
+  const record = parseEventRecord(structuredClone(v13));
+  assert.equal(EVENT_LOG_VERSION, 14);
+  assert.deepEqual(record, { ...v13, version: 14 });
 });

@@ -150,7 +150,7 @@ test("关闭审阅：不派出任何 Reviewer", async () => {
   }
 });
 
-test("审阅完成：合法结构化结果落成候选文件，被审主会话记提出与筛查两族（模型与用量在场）", async () => {
+test("审阅完成：合法结构化结果落成候选文件，被审主会话记候选提出（模型与用量在场）", async () => {
   const candidate = {
     kind: "memory",
     name: "project-facts",
@@ -178,7 +178,6 @@ test("审阅完成：合法结构化结果落成候选文件，被审主会话�
     );
     assert.equal(main.candidateProposeds[0]?.model.provider, "custom");
     assert.equal(main.candidateProposeds[0]?.usage?.turns, 1);
-    assert.equal(main.candidateScreeneds.length, 1);
   } finally {
     await run.cleanup();
   }

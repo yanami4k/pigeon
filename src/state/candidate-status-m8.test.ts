@@ -1,5 +1,6 @@
 // 候选状态投影（M8 S2，决策 089 / 092 / 093）：验证、决定与激活三族进来后的状态现算。
 // 状态仍不落候选目录：任何一条状态都必须能由账本重放出来。
+// 决策 128：扫描结论只读候选提出记录内嵌的扫描结果，不再有单独的筛查族。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ReviewerCandidate } from "./candidate.ts";
@@ -12,7 +13,6 @@ import type {
   CandidateActivatedRecord,
   CandidateDecidedRecord,
   CandidateProposedRecord,
-  CandidateScreenedRecord,
   CandidateVerifiedRecord,
   VerificationConclusion,
 } from "./event-log.ts";
@@ -22,7 +22,9 @@ const SESSION = newSessionId();
 const RUN = newRunId();
 const hashOf = (seed: string): string => seed.repeat(64).slice(0, 64);
 
-function candidate(hash: string, supersedes?: string): ReviewerCandidate {
+type ScanHits = ReviewerCandidate["scan"]["hits"];
+
+function candidate(hash: string, supersedes?: string, hits: ScanHits = []): ReviewerCandidate {
   return {
     version: 3,
     origin: "reviewer",
@@ -39,41 +41,26 @@ function candidate(hash: string, supersedes?: string): ReviewerCandidate {
     },
     summary: "改之前先读",
     strength: 0.5,
-    scan: { scannerVersion: "1", hits: [] },
+    scan: { scannerVersion: "1", hits },
     ...(supersedes !== undefined ? { supersedes } : {}),
     createdAt: 1,
   };
 }
 
 const envelope = () => ({
-  version: 13 as const,
+  version: 14 as const,
   id: newEntryId(),
   sessionId: SESSION,
   runId: RUN,
   timestamp: 1,
 });
 
-function proposed(hash: string, supersedes?: string): CandidateProposedRecord {
+function proposed(hash: string, supersedes?: string, hits: ScanHits = []): CandidateProposedRecord {
   return {
     ...envelope(),
     kind: "candidate.proposed",
-    candidate: candidate(hash, supersedes),
+    candidate: candidate(hash, supersedes, hits),
     model: { provider: "p", id: "m" },
-  };
-}
-
-function screened(
-  hash: string,
-  hits: CandidateScreenedRecord["hits"] = []
-): CandidateScreenedRecord {
-  return {
-    ...envelope(),
-    kind: "candidate.screened",
-    candidateKind: "skill",
-    name: "read-before-edit",
-    contentHash: hash,
-    scannerVersion: "1",
-    hits,
   };
 }
 
@@ -141,7 +128,6 @@ function activated(hash: string, unverified = false): CandidateActivatedRecord {
 function source(partial: Partial<CandidateProjectionSource>): CandidateProjectionSource {
   return {
     candidateProposeds: [],
-    candidateScreeneds: [],
     candidateVerifieds: [],
     candidateDecideds: [],
     candidateActivateds: [],
@@ -162,7 +148,6 @@ test("状态机：三值验证结论各自现算成一个状态", () => {
     const projected = projectCandidates(
       source({
         candidateProposeds: [proposed(A)],
-        candidateScreeneds: [screened(A)],
         candidateVerifieds: [verified(A, conclusion)],
       })
     );
@@ -174,7 +159,6 @@ test("状态机：三值验证结论各自现算成一个状态", () => {
 test("状态机：批准后未激活是已批准，激活后是已激活；撤销与拒绝各自成态", () => {
   const approved = source({
     candidateProposeds: [proposed(A)],
-    candidateScreeneds: [screened(A)],
     candidateVerifieds: [verified(A, "passed")],
     candidateDecideds: [decided(A, "approve")],
   });
@@ -201,7 +185,6 @@ test("状态机：批准后未激活是已批准，激活后是已激活；撤�
 test("状态机：同名新候选带取代关系时旧候选现算为已取代，取代动作同构", () => {
   const byNewCandidate = source({
     candidateProposeds: [proposed(A), proposed(B, A)],
-    candidateScreeneds: [screened(A), screened(B)],
   });
   const projected = projectCandidates(byNewCandidate, {
     supersededHashes: collectSupersededHashes([byNewCandidate]),
@@ -211,7 +194,6 @@ test("状态机：同名新候选带取代关系时旧候选现算为已取代�
   // 取代也可由决定族直接表达（093：与 065 的候选取代同构）
   const byDecision = source({
     candidateProposeds: [proposed(A)],
-    candidateScreeneds: [screened(A)],
     candidateDecideds: [decided(A, "supersede", { supersededBy: B })],
   });
   assert.equal(projectCandidates(byDecision)[0]?.status, "Superseded");
@@ -220,8 +202,7 @@ test("状态机：同名新候选带取代关系时旧候选现算为已取代�
 test("状态机：扫描拒收压过一切后续记录——永不参与激活", () => {
   const projected = projectCandidates(
     source({
-      candidateProposeds: [proposed(A)],
-      candidateScreeneds: [screened(A, [{ rule: "injection", detail: "命中" }])],
+      candidateProposeds: [proposed(A, undefined, [{ rule: "injection", detail: "命中" }])],
       candidateVerifieds: [verified(A, "passed")],
       candidateDecideds: [decided(A, "approve")],
       candidateActivateds: [activated(A)],
@@ -234,7 +215,6 @@ test("状态机：未测出经人工批准激活时带未经回放证实标记",
   const projected = projectCandidates(
     source({
       candidateProposeds: [proposed(A)],
-      candidateScreeneds: [screened(A)],
       candidateVerifieds: [verified(A, "inconclusive")],
       candidateDecideds: [decided(A, "approve")],
       candidateActivateds: [activated(A, true)],
@@ -242,4 +222,19 @@ test("状态机：未测出经人工批准激活时带未经回放证实标记",
   );
   assert.equal(projected[0]?.status, "Active");
   assert.equal(projected[0]?.activated?.unverified, true);
+});
+
+test("状态机：只有提出记录时按内嵌扫描结果现算——无命中即已扫描，有命中即扫描拒收", () => {
+  assert.equal(
+    projectCandidates(source({ candidateProposeds: [proposed(A)] }))[0]?.status,
+    "SecurityScanned"
+  );
+  assert.equal(
+    projectCandidates(
+      source({
+        candidateProposeds: [proposed(A, undefined, [{ rule: "exfiltration", detail: "命中" }])],
+      })
+    )[0]?.status,
+    "ScanRejected"
+  );
 });

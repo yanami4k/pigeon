@@ -98,14 +98,6 @@ test("互斥：同一条候选已有一次验证在跑时，第二次直接被�
     }
     const log = new JsonlEventLog(sessionsDirOf(dir), sessionId);
     log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-    log.appendCandidateScreened({
-      runId,
-      candidateKind: "skill",
-      name: "read-before-edit",
-      contentHash: candidate.contentHash,
-      scannerVersion: candidate.scan.scannerVersion,
-      hits: [],
-    });
     log.close();
 
     const release = acquireExclusiveLock(

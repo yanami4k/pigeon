@@ -29,7 +29,7 @@ export function candidateLockPath(governanceRoot: string, contentHash: string): 
 }
 
 export interface LocatedCandidate extends ProjectedCandidate {
-  // 候选提出与筛查两族所在的会话。验证、决定与激活三族不一定在同一个文件里——
+  // 候选提出记录所在的会话。验证、决定与激活三族不一定在同一个文件里——
   // 来源会话可能正被另一个进程写着，审批与验证命令便写进自己的会话文件（M8 收口修复）
   hostSessionId: SessionId;
 }

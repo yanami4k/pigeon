@@ -112,24 +112,20 @@ function recordDetail(record: EventRecord): string {
     // M6（决策 064）：后台审阅因上一次未收尾而跳过
     case "review.skipped":
       return `审阅跳过 ｜ 触发 ${record.payload.trigger === "turns" ? "按轮次" : "Run 结束"} ｜ ${record.payload.reason === "exit" ? "会话退出，取消排队中或进行中的审阅" : "上一次审阅未收尾"}`;
-    // M6（决策 065）：审阅结果不可解析、候选提出与筛查
+    // M6（决策 065）：审阅结果不可解析与候选提出（扫描结果随提出记录内嵌呈现，决策 128）
     case "review.unparsable":
       return `结构化结果不可解析 ｜ 产出会话 ${shortId(record.payload.producerSessionId)} ｜ ${record.payload.reason}`;
     case "candidate.proposed": {
       const candidate = record.candidate;
       return (
         `候选提出 ｜ ${candidate.kind}/${candidate.name} ｜ 哈希 ${candidate.contentHash.slice(0, 12)} ｜ ` +
-        `判断强度 ${candidate.strength} ｜ ${candidate.summary}` +
+        `判断强度 ${candidate.strength} ｜ ${candidate.summary} ｜ 扫描器 v${candidate.scan.scannerVersion} ｜ ` +
+        (candidate.scan.hits.length > 0
+          ? `命中 ${candidate.scan.hits.length} 项（拒收）：${candidate.scan.hits.map((hit) => hit.rule).join("、")}`
+          : "无命中") +
         (candidate.supersedes !== undefined ? ` ｜ 取代 ${candidate.supersedes.slice(0, 12)}` : "")
       );
     }
-    case "candidate.screened":
-      return (
-        `候选筛查 ｜ ${record.candidateKind}/${record.name} ｜ 扫描器 v${record.scannerVersion} ｜ ` +
-        (record.hits.length > 0
-          ? `命中 ${record.hits.length} 项（拒收）：${record.hits.map((hit) => hit.rule).join("、")}`
-          : "无命中")
-      );
     // M8（决策 089）：候选验证回执、决定与激活
     case "candidate.verified": {
       const arms = record.arms.map((arm) => `${arm.arm} ${arm.passes}/${arm.runs}`).join("｜");
@@ -228,17 +224,6 @@ function recordDetail(record: EventRecord): string {
     }
     case "grant.revoked":
       return `放权撤销 ${shortId(record.grantId)}`;
-    // M4 收口决策 ①：固化规则升格/移除留痕——配置面动作的时间线呈现
-    case "grant.promoted": {
-      const scope =
-        record.pathPrefix !== undefined ? `，仅限目录 ${record.pathPrefix}` : "（工具级）";
-      return `固化升格 ${shortId(record.grantId)} ｜ ${record.tool}${scope} → .pigeon/grants.json`;
-    }
-    case "grant.config-removed": {
-      const scope =
-        record.pathPrefix !== undefined ? `，仅限目录 ${record.pathPrefix}` : "（工具级）";
-      return `固化移除 config#${record.index} ｜ ${record.tool}${scope} ｜ 出处 grant ${shortId(record.grantId)}`;
-    }
     // M5.5 S2（决策 040）：worker 编排三族
     case "session.header":
       return (
@@ -266,7 +251,7 @@ function recordDetail(record: EventRecord): string {
       }
       return detail;
     }
-    // M7（决策 071 / 072 / 074 / 077 / 078）：验证、快照、撞上限、分叉、分支会话头、提炼跳过
+    // M7（决策 071 / 072 / 077 / 078）：验证、快照、撞上限、分叉、分支会话头
     case "attempt.verified":
       return (
         `尝试验证 ｜ 会话 ${shortId(record.target.sessionId)} Run ${shortId(record.target.runId)} ｜ ` +
@@ -291,8 +276,6 @@ function recordDetail(record: EventRecord): string {
         `分支会话头 ｜ 来源会话 ${shortId(record.sourceSessionId)} ｜ 分叉点第 ${record.forkPoint.runSeq} 条 ｜ ` +
         `分支 ${record.workspace.branch}`
       );
-    case "distill.skipped":
-      return `提炼跳过 ｜ ${record.reason} ｜ 尝试 ${record.attempts.map((attempt) => attempt.label).join("、")}`;
   }
 }
 

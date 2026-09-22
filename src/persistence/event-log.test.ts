@@ -192,27 +192,6 @@ test("schema 往返：十三种记录族逐一 parse 后与原值一致；未知
     { ...envelope, kind: "entry", runSeq: 3, role: "toolResult" },
     // M4 S5：人工确认确证记录（evidence 缺省）
     { ...envelope, kind: "resolution", ...humanResolution },
-    // M4 收口决策 ①：固化规则升格/移除留痕（grantId = 规则的 promotedFrom.grantId 稳定身份；
-    // runId 可选——REPL 时段无活动 Run）
-    {
-      ...envelope,
-      kind: "grant.promoted",
-      grantId: newGrantId(),
-      tool: "edit_file",
-      pathPrefix: "src",
-      promotedAt: 1_757_000_000_005,
-    },
-    {
-      version: EVENT_LOG_VERSION,
-      id: newEntryId(),
-      sessionId,
-      timestamp: 1_757_000_000_006,
-      kind: "grant.config-removed",
-      grantId: newGrantId(),
-      tool: "edit_file",
-      index: 0,
-      removedAt: 1_757_000_000_006,
-    },
   ];
   for (const record of records) {
     assert.deepEqual(Value.Parse(EventRecordSchema, record), record);
@@ -737,56 +716,10 @@ test("v4 事件文件读路径迁移：逐级纯版本推进到当前版本（�
     writeFileSync(path, `${JSON.stringify(v4Entry)}\n${JSON.stringify(v4Grant)}\n`, "utf8");
     const records = readEventLogFile(path);
     assert.equal(records.length, 2);
-    assert.equal(EVENT_LOG_VERSION, 13);
+    assert.equal(EVENT_LOG_VERSION, 14);
     assert.ok(records.every((record) => record.version === EVENT_LOG_VERSION));
     assert.equal(records[0]?.kind, "entry");
     assert.equal(records[1]?.kind, "grant.created");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("grant 升格/移除留痕（M4 收口决策 ①）：grant.promoted / grant.config-removed 落盘并冷物化", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-eventlog-"));
-  try {
-    const sessionId = newSessionId();
-    const log = new JsonlEventLog(dir, sessionId);
-    const grantId = newGrantId();
-    const promoted = log.appendGrantPromoted({
-      grantId,
-      tool: "edit_file",
-      pathPrefix: "src",
-      promotedAt: 1_757_000_000_000,
-    });
-    const removed = log.appendGrantConfigRemoved({
-      grantId,
-      tool: "edit_file",
-      pathPrefix: "src",
-      index: 0,
-      removedAt: 1_757_000_000_001,
-    });
-    log.close();
-    assert.equal(promoted.kind, "grant.promoted");
-    assert.equal(removed.kind, "grant.config-removed");
-    // 耐久性佐证：全新读路径可见（治理族 writeSync + fsync 路径）
-    const lines = readFileSync(log.path, "utf8")
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    assert.deepEqual(
-      lines.map((line) => line.kind),
-      ["grant.promoted", "grant.config-removed"]
-    );
-    assert.equal(lines[0]?.runId, undefined, "REPL 时段动作无 runId");
-    const materialized = materializeSession(dir, sessionId);
-    assert.equal(materialized.grantPromoteds.length, 1);
-    assert.equal(materialized.grantPromoteds[0]?.grantId, grantId);
-    assert.equal(materialized.grantConfigRemoveds.length, 1);
-    assert.equal(materialized.grantConfigRemoveds[0]?.index, 0);
-    // 会话 grant 生效集不受固化留痕影响（升格/移除是配置面动作，不是会话 grant 的创建/撤销）
-    assert.equal(materialized.grants.length, 0);
-    // 无 runId 的记录不进任何 Run 的分类事实表
-    assert.equal(materialized.classification.runs.length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

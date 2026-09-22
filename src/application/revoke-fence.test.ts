@@ -50,14 +50,6 @@ function activated(): { root: string; sessionId: SessionId; contentHash: string 
   }
   const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
   log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-  log.appendCandidateScreened({
-    runId,
-    candidateKind: "skill",
-    name: "read-before-edit",
-    contentHash: candidate.contentHash,
-    scannerVersion: candidate.scan.scannerVersion,
-    hits: [],
-  });
   log.close();
   decideCandidate({
     governanceRoot: root,

@@ -267,20 +267,13 @@ export async function distillForkGroup(input: {
   }
   const group = buildForkGroup({ governanceRoot: input.governanceRoot, source, branches });
   const selection = selectContrast(group.attempts);
+  // 不提炼的原因随返回值交给调用方（决策 128：不再落提炼跳过记录，也就不必为此打开来源会话文件）
+  if (selection.skip !== undefined) {
+    return { skip: selection.skip, errors: [] };
+  }
   const ownsLog = input.sourceLog === undefined;
   const log = input.sourceLog ?? new JsonlEventLog(dir, input.sourceSessionId);
   try {
-    if (selection.skip !== undefined) {
-      log.appendDistillSkipped({
-        reason: selection.skip,
-        attempts: group.attempts.map((attempt) => ({
-          sessionId: attempt.sessionId,
-          runId: attempt.runId,
-          label: attempt.label,
-        })),
-      });
-      return { skip: selection.skip, errors: [] };
-    }
     const dispatcher = createDistillDispatcher({
       governanceRoot: input.governanceRoot,
       hostSessionId: input.sourceSessionId,

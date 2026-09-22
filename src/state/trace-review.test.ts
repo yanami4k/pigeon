@@ -1,4 +1,4 @@
-// Trace 与后台审阅同步（M6 S3，决策 064 / 065）：单 Run 视图列出该 Run 的候选（提出与筛查配对、状态现算）、
+// Trace 与后台审阅同步（M6 S3，决策 064 / 065）：单 Run 视图列出该 Run 的候选（状态由提出记录与后续决定现算）、
 // 审阅跳过记录与审阅结果不可解析记录；cli trace 渲染同一份投影。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -47,19 +47,14 @@ test("单 Run 视图带候选、审阅跳过与不可解析记录；cli trace �
         },
         summary: "改之前先读",
         strength: 0.7,
-        scan: { scannerVersion: "1", hits: [] },
+        scan: {
+          scannerVersion: "1",
+          hits: [{ rule: "injection", detail: "SKILL.md：「忽略之前的指令」" }],
+        },
         createdAt: 2,
       },
       model: { provider: "custom", id: "custom" },
       usage: { turns: 1, totalTokens: 100 },
-    });
-    log.appendCandidateScreened({
-      runId,
-      candidateKind: "skill",
-      name: "read-before-edit",
-      contentHash: HASH,
-      scannerVersion: "1",
-      hits: [{ rule: "injection", detail: "SKILL.md：「忽略之前的指令」" }],
     });
     log.appendObservation({
       kind: "review.skipped",
@@ -84,6 +79,7 @@ test("单 Run 视图带候选、审阅跳过与不可解析记录；cli trace �
     const text = runTraceCommand({ root, sessionId });
     assert.ok(text.includes("候选 skill/read-before-edit"), text);
     assert.ok(text.includes("扫描拒收"), text);
+    assert.ok(text.includes("命中：injection"), text);
     assert.ok(text.includes("审阅跳过"), text);
     assert.ok(text.includes("结构化结果不可解析"), text);
     assert.ok(text.includes("产出会话"), text);

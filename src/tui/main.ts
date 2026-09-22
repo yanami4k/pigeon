@@ -202,13 +202,11 @@ async function main(argv: string[]): Promise<void> {
     runtime: slot.bundle.adapter,
     sessionId: slot.sessionId,
     logDir: path.join(workspaceRoot, ".pigeon"),
-    // S3：/grants /revoke /grants save 的命令上下文（命令层在 application/grants.ts）；
-    // 升格/移除留痕写本会话事件日志（M4 收口决策 ①）
+    // S3：/grants /revoke /grants save 的命令上下文（命令层在 application/grants.ts）
     grants: {
       root: workspaceRoot,
       store: slot.bundle.grantStore,
       configRules: slot.bundle.configGrants,
-      eventLog: slot.bundle.eventLog,
     },
     // S4：/sessions 会话列表（命令层在 application/session-list.ts，与 cli 同一份）
     sessions: { root: workspaceRoot },
@@ -253,7 +251,6 @@ async function main(argv: string[]): Promise<void> {
             root: workspaceRoot,
             store: bundle.grantStore,
             configRules: bundle.configGrants,
-            eventLog: bundle.eventLog,
           },
           workers,
         };

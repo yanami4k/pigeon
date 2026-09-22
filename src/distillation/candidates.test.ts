@@ -72,7 +72,7 @@ const item = (overrides: Record<string, unknown>) => ({
   ...overrides,
 });
 
-test("合法结果：步骤集取成功侧为来源、教训取失败侧为来源，v3 元数据带对比来源块，提出与筛查两族落在宿主会话", () => {
+test("合法结果：步骤集取成功侧为来源、教训取失败侧为来源，v3 元数据带对比来源块，提出记录落在宿主会话", () => {
   const { root, ok, bad, host, target } = setup();
   try {
     const log = new JsonlEventLog(join(root, ".pigeon", "sessions"), host);
@@ -127,7 +127,6 @@ test("合法结果：步骤集取成功侧为来源、教训取失败侧为来�
     assert.equal(meta.contrast.form, "procedure");
     const session = materializeSession(join(root, ".pigeon", "sessions"), host);
     assert.equal(session.candidateProposeds.length, 2);
-    assert.equal(session.candidateScreeneds.length, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -54,14 +54,6 @@ function activated(): { root: string; contentHash: string } {
   }
   const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
   log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-  log.appendCandidateScreened({
-    runId,
-    candidateKind: "skill",
-    name: "read-before-edit",
-    contentHash: candidate.contentHash,
-    scannerVersion: candidate.scan.scannerVersion,
-    hits: [],
-  });
   log.appendCandidateVerified({
     runId,
     candidateKind: "skill",
@@ -202,14 +194,6 @@ test("启动告警：未经回放证实的经验每次启动都说一次", () =>
     }
     const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
     log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-    log.appendCandidateScreened({
-      runId,
-      candidateKind: "memory",
-      name: "note",
-      contentHash: candidate.contentHash,
-      scannerVersion: candidate.scan.scannerVersion,
-      hits: [],
-    });
     log.close();
     decideCandidate({
       governanceRoot: root,

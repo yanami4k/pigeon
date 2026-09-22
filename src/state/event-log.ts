@@ -1,7 +1,7 @@
 // Event Log 记录族 schema（ROADMAP §3.5 权威状态源；M4 S1/S2/S5/S6 + 收口）：
 // 单一日志承载全部事件族——运行时事件（turn/tool/run 五种归一化事件）、entry 族
 // （D3 Pi transcript 消息映射）、治理族（intent/decision/receipt，M3 账本归并而来，
-// 决策 2 不双写；breaker/resolution）与 grant 族（created/revoked/promoted/config-removed）。
+// 决策 2 不双写；breaker/resolution）与 grant 族（created/revoked）。
 // 记录信封：version + EntryId + SessionId + RunId + 时间戳；kind 区分族，payload/字段随族。
 // 本文件只定义形状与读路径迁移链；存储引擎（JSONL 读写、fsync、幂等索引）在
 // persistence/event-log.ts，冷物化与对账在 state/materialize.ts。
@@ -11,9 +11,7 @@ import { AttemptBudgetSchema, VerifyConfigSchema } from "./attempt-config.ts";
 import {
   CandidateKindSchema,
   migrateCandidateToCurrent,
-  OutcomeLabelSchema,
   ReviewerCandidateSchema,
-  ScanHitSchema,
 } from "./candidate.ts";
 import {
   EntryIdSchema,
@@ -68,7 +66,18 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // git 工作树工作区加可选起点提交 baseCommit，run.started 载荷加可选预算块、验证命令加来源字段——
 // 全部加法式（新成员 / 可缺省字段），v11 旧记录逐字有效
 // v13（M9）：run.started 载荷的 model 段加可选采样温度——加法式，v12 旧记录逐字有效
-export const EVENT_LOG_VERSION = 13;
+// v14（决策 128）：退役候选筛查、提炼跳过、固化升格与固化移除四族（无读者或与别的记录逐字重复）——
+// 停写并移出记录并集；旧会话文件里的这四种记录由读取边界按 RETIRED_EVENT_KINDS 跳过，其余记录逐字有效
+export const EVENT_LOG_VERSION = 14;
+
+// 已退役的记录种类（决策 128）：读取边界在 schema 校验之前按本清单跳过——任何版本都跳过，不算损坏，
+// 也不进入任何视图与执行编号重复检测
+export const RETIRED_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "candidate.screened",
+  "distill.skipped",
+  "grant.promoted",
+  "grant.config-removed",
+]);
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -363,38 +372,6 @@ export const GrantRevokedRecordSchema = Type.Object({
 });
 export type GrantRevokedRecord = Static<typeof GrantRevokedRecordSchema>;
 
-// grant.promoted（M4 收口决策 ①）：/grants save 升格的持久化留证——固化规则的稳定身份是
-// promotedFrom.grantId（与本记录 grantId 同值），intent 的 grantRef 回指它而非位置序号
-// （位置随 /revoke config#N 前移，身份不随）。扩权动作先留证后写配置（fail-closed 同 grant.created）
-export const GrantPromotedRecordSchema = Type.Object({
-  ...GRANT_ENVELOPE_PROPS,
-  kind: Type.Literal("grant.promoted"),
-  grantId: GrantIdSchema,
-  tool: Type.String({ minLength: 1 }),
-  pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
-  command: Type.Optional(Type.String({ minLength: 1 })),
-  shell: Type.Optional(Type.Boolean()),
-  promotedAt: Type.Integer({ minimum: 0 }),
-});
-export type GrantPromotedRecord = Static<typeof GrantPromotedRecordSchema>;
-
-// grant.config-removed（M4 收口决策 ①）：/revoke config#N 移除固化规则的持久化留证——
-// 事后可查"曾有一条规则、后来被撤了"。index 是移除时刻的展示序号，仅供人读对照；
-// 身份是 grantId。缩权动作先生效（改配置）后留证：留证失败只留下"少一条痕迹"的缺口，
-// 反过来（留证成功配置未改）会让审计者误以为规则已不生效
-export const GrantConfigRemovedRecordSchema = Type.Object({
-  ...GRANT_ENVELOPE_PROPS,
-  kind: Type.Literal("grant.config-removed"),
-  grantId: GrantIdSchema,
-  tool: Type.String({ minLength: 1 }),
-  pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
-  command: Type.Optional(Type.String({ minLength: 1 })),
-  shell: Type.Optional(Type.Boolean()),
-  index: Type.Integer({ minimum: 0 }),
-  removedAt: Type.Integer({ minimum: 0 }),
-});
-export type GrantConfigRemovedRecord = Static<typeof GrantConfigRemovedRecordSchema>;
-
 // M5.5 S2（决策 040）：worker 编排三族。worker 会话首条记 session.header（父会话、父 Run、角色、
 // 工作树）；父会话记 child.spawned（派出意图，先于建工作树落盘）与 child.settled（结构化结果）。
 // 任何文件只有一个写入者：父会话文件只由父运行面写，worker 会话文件只由该 worker 写。
@@ -523,7 +500,7 @@ export type ChildSettledRecord = Static<typeof ChildSettledRecordSchema>;
 
 // 候选提出（M6，决策 065）：Controller 从 Reviewer 收尾结果落盘候选后写入被审主会话的会话文件——
 // 不可变元数据全文（种类、名字、哈希、来源、摘要、判断强度、扫描结果、取代关系）加审阅所用模型与用量。
-// runId 是被审的那一次 Run；候选状态由本族与筛查族现算，不写进候选目录
+// runId 是被审的那一次 Run；候选状态由本族与验证、决定、激活三族现算（扫描结论读本族内嵌的扫描结果），不写进候选目录
 export const CandidateProposedRecordSchema = Type.Object({
   ...ENVELOPE_PROPS,
   kind: Type.Literal("candidate.proposed"),
@@ -540,19 +517,6 @@ export const CandidateProposedRecordSchema = Type.Object({
   ),
 });
 export type CandidateProposedRecord = Static<typeof CandidateProposedRecordSchema>;
-
-// 候选筛查（M6，决策 065）：确定性扫描器版本与命中项；模型筛查只作建议标注（不参与判决）
-export const CandidateScreenedRecordSchema = Type.Object({
-  ...ENVELOPE_PROPS,
-  kind: Type.Literal("candidate.screened"),
-  candidateKind: CandidateKindSchema,
-  name: Type.String({ minLength: 1 }),
-  contentHash: Sha256HexSchema,
-  scannerVersion: Type.String({ minLength: 1 }),
-  hits: Type.Array(ScanHitSchema),
-  modelNote: Type.Optional(Type.String()),
-});
-export type CandidateScreenedRecord = Static<typeof CandidateScreenedRecordSchema>;
 
 // 通用验证记录（M7，决策 071）：尝试收尾后由程序作为独立子进程在该尝试的工作区执行配置的验证命令，模型看不到；
 // 三值口径同 058。落在哪个会话文件由写入方的单写者约束决定（worker 尝试落父会话，普通会话落自身），
@@ -627,25 +591,8 @@ export const BranchHeaderRecordSchema = Type.Object({
 });
 export type BranchHeaderRecord = Static<typeof BranchHeaderRecordSchema>;
 
-// 提炼跳过（M7，决策 074 未裁细节的保守缺省）：一组尝试不满足自动提炼条件（全成功、全失败、成败两侧凑不齐）时留痕；
-// 写进触发提炼的会话文件（并行派发的父会话、分叉的来源会话）。观察族耐久
-export const DistillSkippedRecordSchema = Type.Object({
-  ...GRANT_ENVELOPE_PROPS,
-  kind: Type.Literal("distill.skipped"),
-  taskKey: Type.Optional(Type.String({ minLength: 1 })),
-  reason: Type.Union([
-    Type.Literal("all-passed"),
-    Type.Literal("all-failed"),
-    Type.Literal("no-contrast"),
-  ]),
-  attempts: Type.Array(
-    Type.Object({ sessionId: SessionIdSchema, runId: RunIdSchema, label: OutcomeLabelSchema })
-  ),
-});
-export type DistillSkippedRecord = Static<typeof DistillSkippedRecordSchema>;
-
 // ── M8：候选验证、决定与激活三族（决策 089） ──────────────────────────────────────────
-// 三族都写进候选的来源会话文件（与候选提出、候选筛查同一个文件，单写者约束不变），信封 Run 可缺省
+// 三族都写进候选的来源会话文件（与候选提出同一个文件，单写者约束不变），信封 Run 可缺省
 // （审批发生在任何 Run 之外）。候选状态仍由账本现算，不写进候选目录（§3.5 一个权威状态源）。
 
 // 回放的四组（决策 084）：失败侧与成功侧各跑带经验与不带经验两组，固定 N 全跑不中途停。
@@ -839,7 +786,7 @@ export const CandidateActivatedRecordSchema = Type.Object({
 export type CandidateActivatedRecord = Static<typeof CandidateActivatedRecordSchema>;
 
 // Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族；
-// M4 收口新增 grant.promoted / grant.config-removed 族）
+// 决策 128 退役的四族不在并集里，见 RETIRED_EVENT_KINDS）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
   ObservationRecordSchema,
@@ -851,20 +798,16 @@ export const EventRecordSchema = Type.Union([
   ResolutionRecordSchema,
   GrantCreatedRecordSchema,
   GrantRevokedRecordSchema,
-  GrantPromotedRecordSchema,
-  GrantConfigRemovedRecordSchema,
   SessionHeaderRecordSchema,
   ChildSpawnedRecordSchema,
   ChildSettledRecordSchema,
   CandidateProposedRecordSchema,
-  CandidateScreenedRecordSchema,
   CandidateVerifiedRecordSchema,
   CandidateDecidedRecordSchema,
   CandidateActivatedRecordSchema,
   AttemptVerifiedRecordSchema,
   SessionForkedRecordSchema,
   BranchHeaderRecordSchema,
-  DistillSkippedRecordSchema,
 ]);
 export type EventRecord = Static<typeof EventRecordSchema>;
 
@@ -898,14 +841,6 @@ export type GrantCreatedInput = Omit<
 >;
 export type GrantRevokedInput = Omit<
   GrantRevokedRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-export type GrantPromotedInput = Omit<
-  GrantPromotedRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-export type GrantConfigRemovedInput = Omit<
-  GrantConfigRemovedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
 // worker 编排三族追加输入（M5.5 S2）
@@ -980,6 +915,10 @@ eventLogMigrations.register("event-log", 11, (doc) => ({ ...doc, version: 12 }))
 // v12 → v13（M9）：加法式演进（run.started 的 model 段加可选采样温度）——v12 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 12, (doc) => ({ ...doc, version: 13 }));
 
+// v13 → v14（决策 128）：退役四族。退役种类在读取边界已被跳过，走到这里的都是保留下来的记录——
+// 逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 13, (doc) => ({ ...doc, version: 14 }));
+
 // 不可解析记录的 payload：旧名在场即搬到新名，其余字段原样；已是新名的原样返回
 function renameProducerField(payload: unknown): unknown {
   if (typeof payload !== "object" || payload === null || !("reviewSessionId" in payload)) {
@@ -1000,17 +939,13 @@ export function parseEventRecord(raw: unknown): EventRecord {
     : Value.Parse(EventRecordSchema, raw);
 }
 
-// 候选两族追加输入（M6）：业务字段 + runId；信封其余字段由日志盖章
+// 候选提出追加输入（M6）：业务字段 + runId；信封其余字段由日志盖章
 export type CandidateProposedInput = Omit<
   CandidateProposedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
-export type CandidateScreenedInput = Omit<
-  CandidateScreenedRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
 
-// M7 四族追加输入：业务字段 + 可选 runId；信封其余字段由日志盖章
+// M7 三族追加输入：业务字段 + 可选 runId；信封其余字段由日志盖章
 export type AttemptVerifiedInput = Omit<
   AttemptVerifiedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
@@ -1021,10 +956,6 @@ export type SessionForkedInput = Omit<
 >;
 export type BranchHeaderInput = Omit<
   BranchHeaderRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-export type DistillSkippedInput = Omit<
-  DistillSkippedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;
 

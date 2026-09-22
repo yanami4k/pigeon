@@ -27,7 +27,7 @@ interface Fixture {
   contentHash: string;
 }
 
-// 一个已扫描（无命中）的候选，落在暂存目录并在账本里留下提出与筛查两族
+// 一个已扫描（无命中）的候选，落在暂存目录并在账本里留下提出记录
 function fixture(
   options: { conclusion?: VerificationConclusion; kind?: CandidateKind } = {}
 ): Fixture {
@@ -65,14 +65,6 @@ function fixture(
   }
   const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
   log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-  log.appendCandidateScreened({
-    runId,
-    candidateKind: kind,
-    name: "read-before-edit",
-    contentHash: candidate.contentHash,
-    scannerVersion: candidate.scan.scannerVersion,
-    hits: [],
-  });
   if (options.conclusion !== undefined) {
     log.appendCandidateVerified({
       runId,
@@ -247,14 +239,6 @@ test("批准：扫描拒收的候选不可批准——永不参与激活", () =>
     }
     const log = new JsonlEventLog(sessionsDirOf(root), sessionId);
     log.appendCandidateProposed({ runId, candidate, model: { provider: "p", id: "m" } });
-    log.appendCandidateScreened({
-      runId,
-      candidateKind: "memory",
-      name: "bad",
-      contentHash: candidate.contentHash,
-      scannerVersion: candidate.scan.scannerVersion,
-      hits: candidate.scan.hits,
-    });
     log.close();
     assert.ok(candidate.scan.hits.length > 0, "夹具本身要真的命中扫描规则");
     assert.throws(

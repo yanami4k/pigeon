@@ -2,7 +2,7 @@
 // 不落任何文件）；按内容哈希写入 .pigeon/candidates/<种类>/<名字>-<哈希>/，写入后不可变、同哈希跳过；
 // 产出形态只有 Memory 与 Skill（决策 094）；Memory 以整文件为粒度；扫描命中照常暂存并标拒收；
 // 同名改内容即新候选并标取代。
-// 提出与筛查两族记录写进被审主会话的会话文件，候选状态由这两族现算。
+// 提出记录写进被审主会话的会话文件，候选状态由它内嵌的扫描结果与后续决定现算。
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,7 +51,7 @@ const skill = (content: string) => ({
   sourceRunSeqs: [1, 2],
 });
 
-test("合法结果：按种类写入 <名字>-<哈希>/，元数据为当前版本（v3，单来源不带对比来源块），提出与筛查两族各一条", () => {
+test("合法结果：按种类写入 <名字>-<哈希>/，元数据为当前版本（v3，单来源不带对比来源块），提出记录一条", () => {
   const f = fixture();
   try {
     const result = f.persist({
@@ -73,7 +73,6 @@ test("合法结果：按种类写入 <名字>-<哈希>/，元数据为当前版�
 
     const session = materializeSession(f.sessionsDir, f.sessionId, { content: false });
     assert.equal(session.candidateProposeds.length, 1);
-    assert.equal(session.candidateScreeneds.length, 1);
     assert.equal(session.candidateProposeds[0]?.model.provider, "custom");
     assert.equal(session.candidateProposeds[0]?.usage?.totalTokens, 1200);
     const [projected] = projectCandidates(session);
@@ -116,7 +115,7 @@ test("结果不可解析：不落任何文件，只记一条结果不可解析",
   }
 });
 
-test("扫描命中：正文照常暂存，筛查记录带命中项，状态为扫描拒收", () => {
+test("扫描命中：正文照常暂存，提出记录内嵌命中项，状态为扫描拒收", () => {
   const f = fixture();
   try {
     f.persist({
@@ -134,7 +133,7 @@ test("扫描命中：正文照常暂存，筛查记录带命中项，状态为�
     const dirs = readdirSync(join(f.root, ".pigeon", "candidates", "memory"));
     assert.equal(dirs.length, 1, "命中不丢正文");
     const session = materializeSession(f.sessionsDir, f.sessionId, { content: false });
-    assert.ok((session.candidateScreeneds[0]?.hits.length ?? 0) > 0);
+    assert.ok((session.candidateProposeds[0]?.candidate.scan.hits.length ?? 0) > 0);
     assert.equal(projectCandidates(session)[0]?.status, "ScanRejected");
   } finally {
     f.cleanup();

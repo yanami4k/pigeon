@@ -5,8 +5,8 @@
 //   同哈希已存在则跳过（不写文件、不重复记账），天然去重。同名不同哈希即新候选，元数据标记取代旧哈希。
 // - 正文：Skill 为 SKILL.md、Memory 为整个 markdown 文件、Policy 只写自然语言建议（SUGGESTION.txt）。
 // - 原子：先写同级临时目录，再整体改名为最终目录；改名失败时清掉临时目录。
-// - 扫描：确定性规则逐个文件扫描，命中照常暂存，筛查记录带命中项（状态由账本现算为扫描拒收）。
-// - 记账：候选文件写好后，依次在被审主会话的会话文件里落 candidate.proposed 与 candidate.screened。
+// - 扫描：确定性规则逐个文件扫描，命中照常暂存，扫描结果内嵌在元数据里（状态由账本现算为扫描拒收）。
+// - 记账：候选文件写好后，在被审主会话的会话文件里落 candidate.proposed（决策 128：筛查记录已退役）。
 import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -29,11 +29,7 @@ import {
   ProducibleCandidateKindSchema,
   type ReviewerCandidate,
 } from "../state/candidate.ts";
-import type {
-  CandidateProposedInput,
-  CandidateScreenedInput,
-  ObservationInput,
-} from "../state/event-log.ts";
+import type { CandidateProposedInput, ObservationInput } from "../state/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import { scanCandidateFiles } from "./scan.ts";
 
@@ -55,7 +51,6 @@ export type ReviewerResult = Static<typeof ReviewerResultSchema>;
 // 被审主会话的会话文件（JsonlEventLog 满足）
 export interface CandidateSink {
   appendCandidateProposed(input: CandidateProposedInput): unknown;
-  appendCandidateScreened(input: CandidateScreenedInput): unknown;
   appendObservation(input: ObservationInput): unknown;
 }
 
@@ -199,14 +194,6 @@ export function persistReviewerCandidates(input: PersistCandidatesInput): Persis
       candidate,
       model: { ...input.model },
       ...(input.usage !== undefined ? { usage: { ...input.usage } } : {}),
-    });
-    input.sink.appendCandidateScreened({
-      runId: input.source.runId,
-      candidateKind: item.kind,
-      name: item.name,
-      contentHash: candidate.contentHash,
-      scannerVersion: candidate.scan.scannerVersion,
-      hits: candidate.scan.hits,
     });
     written.push(candidate);
   }

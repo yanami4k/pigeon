@@ -2,7 +2,7 @@
 // - 并行派发同一任务的多个 worker 共享任务标识，写入派出记录；
 // - 每个尝试收尾后由程序在该尝试的工作树里独立执行验证命令，结果落父会话的通用验证记录；
 // - 全部收尾后自动选对并派提炼器（无工作区、预算缺省 16 轮 / 5 分钟 / 80,000 token），候选 v3 落暂存目录；
-// - 全成功或全失败时不提炼，留一条带原因的提炼跳过记录；
+// - 全成功或全失败时不提炼，原因随结果交回；
 // - 提炼与 Reviewer 共用全局并发闸：闸忙时等上一个收尾再派；
 // - 宿主会话里引用被提炼尝试的记录不凭空造出 Run（不误报崩溃残留）。
 import assert from "node:assert/strict";
@@ -177,7 +177,7 @@ test("一成一败：共享任务标识、各自工作树里独立验证、自�
     assert.equal(candidate?.origin, "distiller");
     assert.equal(candidate?.contrast?.successful[0]?.label, "Passed");
     assert.equal(candidate?.contrast?.failed[0]?.label, "Failed");
-    assert.equal(host.candidateScreeneds[0]?.hits.length, 0);
+    assert.equal(candidate?.scan.hits.length, 0);
     assert.deepEqual(host.unfinishedRuns, [], "引用型记录不凭空造 Run");
     assert.equal(readdirSync(join(repo, ".pigeon", "candidates", "skill")).length, 1);
   } finally {
@@ -185,7 +185,7 @@ test("一成一败：共享任务标识、各自工作树里独立验证、自�
   }
 });
 
-test("全成功：不提炼，留一条带原因的提炼跳过记录", async () => {
+test("全成功：不提炼，跳过原因与参与的尝试随结果交回", async () => {
   const { repo, home, cleanup } = repoWithCheck();
   try {
     const { hostId, hostLog, factory, parentPolicy, orchestrator } = setup(repo, home, {});
@@ -210,10 +210,11 @@ test("全成功：不提炼，留一条带原因的提炼跳过记录", async ()
     hostLog.close();
     assert.equal(result.skip, "all-passed");
     assert.equal(result.distill, undefined);
+    assert.deepEqual(
+      result.attempts.map((attempt) => attempt.label),
+      ["Passed", "Passed"]
+    );
     const host = materializeSession(join(repo, ".pigeon", "sessions"), hostId);
-    assert.equal(host.distillSkippeds[0]?.reason, "all-passed");
-    assert.equal(host.distillSkippeds[0]?.taskKey, result.taskKey);
-    assert.equal(host.distillSkippeds[0]?.attempts.length, 2);
     assert.equal(host.childSpawneds.filter((record) => record.role === "distiller").length, 0);
   } finally {
     cleanup();

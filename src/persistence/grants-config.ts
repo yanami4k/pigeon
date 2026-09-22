@@ -121,7 +121,7 @@ export function appendGrantConfigRule(
 
 // 配置规则移除（/revoke config#N）：整文件原子替换。配置规则在会话启动时载入并冻结——
 // 移除只影响磁盘，当前会话的求值面不变（/grants 输出如实标注「下次会话生效」）。
-// 返回被移除的规则：调用方据其 promotedFrom.grantId 落 grant.config-removed 留痕（决策 ①）
+// 返回被移除的规则：调用方据其工具与出处 grant 向人报告移除了哪一条
 export function removeGrantConfigRule(
   governanceRoot: string,
   index: number,

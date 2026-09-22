@@ -204,7 +204,7 @@ test("快照直接放进提炼器的首轮输入（121）：不调任何工具�
   }
 });
 
-test("全失败：缺省不提炼并留跳过记录；--force 只取失败侧，只产出教训", async () => {
+test("全失败：缺省不提炼，跳过原因写进命令报告；--force 只取失败侧，只产出教训", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-distill-force-"));
   const evalDir = mkdtempSync(join(tmpdir(), "pigeon-distill-force-eval-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-distill-force-home-"));
@@ -219,8 +219,8 @@ test("全失败：缺省不提炼并留跳过记录；--force 只取失败侧，
       gate: createReviewGate(),
     });
     assert.equal(skipped.groups[0]?.skip, "all-failed");
+    assert.match(renderDistillReport(skipped), /不提炼：all-failed/);
     const skipHost = materializeSession(join(root, ".pigeon", "sessions"), skipped.hostSessionId);
-    assert.equal(skipHost.distillSkippeds[0]?.reason, "all-failed");
     assert.equal(skipHost.childSpawneds.length, 0);
 
     const lessonReply = {

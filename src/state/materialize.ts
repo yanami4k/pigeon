@@ -17,18 +17,14 @@ import type {
   CandidateActivatedRecord,
   CandidateDecidedRecord,
   CandidateProposedRecord,
-  CandidateScreenedRecord,
   CandidateVerifiedRecord,
   ChildSettledRecord,
   ChildSpawnedRecord,
   DecisionRecord,
-  DistillSkippedRecord,
   EntryRecord,
   EvalVerifiedRecord,
   EventRecord,
-  GrantConfigRemovedRecord,
   GrantCreatedRecord,
-  GrantPromotedRecord,
   GrantRevokedRecord,
   IntentRecord,
   LlmRequestRecord,
@@ -111,9 +107,6 @@ export interface MaterializedSession {
   grantCreateds: GrantCreatedRecord[];
   grantRevokeds: GrantRevokedRecord[];
   grants: ActiveGrant[];
-  // 固化规则升格/移除留痕（M4 收口决策 ①）：配置面动作的原始记录，不参与会话 grant 生效集
-  grantPromoteds: GrantPromotedRecord[];
-  grantConfigRemoveds: GrantConfigRemovedRecord[];
   // entry runSeq 断号（M4 收口决策 ③，D2 冷侧可见化）：按 Run 汇总的缺失序号——
   // entry 写盘失败按 D3 不占位重试，空洞就是"这条消息的映射没落盘"的确切信号；
   // 判据只在此算一次，trace/replay/resume 三个视图消费同一份结果（活冷同判据原则）
@@ -130,20 +123,18 @@ export interface MaterializedSession {
   // M6（决策 064）：后台审阅因上一次未收尾而跳过的记录
   reviewSkippeds: ReviewSkippedRecord[];
   reviewUnparsables: ReviewUnparsableRecord[];
-  // M6（决策 065）：候选提出与筛查两族（候选状态由二者现算，见 candidate-status.ts）
+  // M6（决策 065）：候选提出（候选状态由它与 M8 三族现算，见 candidate-status.ts）
   candidateProposeds: CandidateProposedRecord[];
-  candidateScreeneds: CandidateScreenedRecord[];
-  // M8（决策 089）：候选验证回执、决定与激活三族（按落盘顺序）——候选状态由它们与前两族现算
+  // M8（决策 089）：候选验证回执、决定与激活三族（按落盘顺序）——候选状态由它们与候选提出现算
   candidateVerifieds: CandidateVerifiedRecord[];
   candidateDecideds: CandidateDecidedRecord[];
   candidateActivateds: CandidateActivatedRecord[];
-  // M7（决策 071 / 072 / 074 / 077 / 078）：通用验证、撞上限、工作区快照、分叉、提炼跳过、树写穿失败（按落盘顺序）；
+  // M7（决策 071 / 072 / 074 / 077 / 078）：通用验证、撞上限、工作区快照、分叉、树写穿失败（按落盘顺序）；
   // branchHeader 在场 = 本会话是分叉出来的分支会话
   attemptVerifieds: AttemptVerifiedRecord[];
   limitHits: RunLimitHitRecord[];
   checkpoints: WorkspaceCheckpointRecord[];
   sessionForkeds: SessionForkedRecord[];
-  distillSkippeds: DistillSkippedRecord[];
   branchHeader?: BranchHeaderRecord;
   // M5.5 S2（决策 040）：worker 编排三族。sessionHeader 在场 = 本会话是 worker 会话；
   // children 按 child.spawned 顺序配对 child.settled（缺 settled = 派出后未收尾，崩溃可能）；
@@ -218,7 +209,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const reviewSkippeds: ReviewSkippedRecord[] = [];
   const reviewUnparsables: ReviewUnparsableRecord[] = [];
   const candidateProposeds: CandidateProposedRecord[] = [];
-  const candidateScreeneds: CandidateScreenedRecord[] = [];
   const candidateVerifieds: CandidateVerifiedRecord[] = [];
   const candidateDecideds: CandidateDecidedRecord[] = [];
   const candidateActivateds: CandidateActivatedRecord[] = [];
@@ -226,7 +216,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const limitHits: RunLimitHitRecord[] = [];
   const checkpoints: WorkspaceCheckpointRecord[] = [];
   const sessionForkeds: SessionForkedRecord[] = [];
-  const distillSkippeds: DistillSkippedRecord[] = [];
   let branchHeader: BranchHeaderRecord | undefined;
   const runtimeEvents: RuntimeEventRecord[] = [];
   const intents: IntentRecord[] = [];
@@ -237,8 +226,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const entries: EntryRecord[] = [];
   const grantCreateds: GrantCreatedRecord[] = [];
   const grantRevokeds: GrantRevokedRecord[] = [];
-  const grantPromoteds: GrantPromotedRecord[] = [];
-  const grantConfigRemoveds: GrantConfigRemovedRecord[] = [];
   let sessionHeader: SessionHeaderRecord | undefined;
   const childSpawneds: ChildSpawnedRecord[] = [];
   const childSettleds: ChildSettledRecord[] = [];
@@ -266,10 +253,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       grantCreateds.push(record);
     } else if (record.kind === "grant.revoked") {
       grantRevokeds.push(record);
-    } else if (record.kind === "grant.promoted") {
-      grantPromoteds.push(record);
-    } else if (record.kind === "grant.config-removed") {
-      grantConfigRemoveds.push(record);
     } else if (record.kind === "run.started") {
       runStarteds.push(record);
     } else if (record.kind === "llm.request") {
@@ -284,8 +267,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       reviewUnparsables.push(record);
     } else if (record.kind === "candidate.proposed") {
       candidateProposeds.push(record);
-    } else if (record.kind === "candidate.screened") {
-      candidateScreeneds.push(record);
     } else if (record.kind === "candidate.verified") {
       candidateVerifieds.push(record);
     } else if (record.kind === "candidate.decided") {
@@ -300,8 +281,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       checkpoints.push(record);
     } else if (record.kind === "session.forked") {
       sessionForkeds.push(record);
-    } else if (record.kind === "distill.skipped") {
-      distillSkippeds.push(record);
     } else if (record.kind === "branch.header") {
       // 分支会话头只认首个
       branchHeader ??= record;
@@ -318,7 +297,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     limitHits,
     checkpoints,
     sessionForkeds,
-    distillSkippeds,
     childSpawneds,
     childSettleds,
     children,
@@ -337,8 +315,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     grantCreateds,
     grantRevokeds,
     grants: activeGrants(grantCreateds, grantRevokeds),
-    grantPromoteds,
-    grantConfigRemoveds,
     entryGaps: detectEntryGaps(entries, runtimeEvents),
     unfinishedRuns: collectUnfinishedRuns(records, runtimeEvents),
     runStarteds,
@@ -348,7 +324,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     reviewSkippeds,
     reviewUnparsables,
     candidateProposeds,
-    candidateScreeneds,
     candidateVerifieds,
     candidateDecideds,
     candidateActivateds,
@@ -427,11 +402,10 @@ export function detectContentGaps(
 
 // 崩溃残留 Run 清单（M4 验收 O-1/O-3）：出现过任何带 runId 的记录、却没有 run.ended 的 Run。
 // 纯函数；grant 族无 runId 的记录不算 Run
-// 引用型记录（M7）：候选两族与不可解析记录可能引用别的会话甚至别的治理根里的 Run（提炼宿主会话），
+// 引用型记录（M7）：候选提出与不可解析记录可能引用别的会话甚至别的治理根里的 Run（提炼宿主会话），
 // 不凭空在本会话造出 Run；同会话的引用（M6 审阅）本会话自有其他记录，不受影响
 const REFERENCE_KINDS: ReadonlySet<string> = new Set([
   "candidate.proposed",
-  "candidate.screened",
   "review.unparsable",
   // M8：验证、决定与激活三族写在发起命令自己的会话文件里，信封 Run 若在场也指向别的会话
   "candidate.verified",

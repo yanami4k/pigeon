@@ -1,8 +1,17 @@
 // 工作区准备与恢复种子（M2 审计 note-1）：两个 Actor 入口共用的启动装配——
-// prepareWorkspace = realpath 规范化 + D8 旧账本一次性迁移；restoreGrantSeed = 物化目标会话的
+// prepareWorkspace = realpath 规范化（决策 128 删除了 M3 旧账本一次性转换）；restoreGrantSeed = 物化目标会话的
 // 生效 grant（created − revoked，决策 3b）作 buildRuntime 的 restoredGrants 种子。
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,17 +19,18 @@ import { JsonlEventLog } from "../persistence/event-log.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import { prepareWorkspace, restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
-test("prepareWorkspace：返回 realpath 规范化的根，并把旧账本一次性迁移归档（D8）", () => {
+test("prepareWorkspace：返回 realpath 规范化的根，不再触碰 M3 旧账本（决策 128）", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-workspace-"));
   try {
     mkdirSync(join(root, ".pigeon"), { recursive: true });
-    // 空账本：迁移管线归档退役（改名 *.legacy.jsonl），不落事件文件
-    writeFileSync(join(root, ".pigeon", "ledger.jsonl"), "", "utf8");
+    const legacyLine = '{"kind":"intent"}\n';
+    writeFileSync(join(root, ".pigeon", "ledger.jsonl"), legacyLine, "utf8");
     const workspaceRoot = prepareWorkspace(root);
     assert.equal(workspaceRoot, realpathSync(root));
-    assert.equal(existsSync(join(root, ".pigeon", "ledger.jsonl")), false, "旧账本应已改名退役");
-    assert.ok(existsSync(join(root, ".pigeon", "ledger.legacy.jsonl")), "归档文件应在");
-    // 重跑 no-op（一次性）
+    // 旧账本原样留在原处：不改名、不转换、不建会话目录
+    assert.equal(readFileSync(join(root, ".pigeon", "ledger.jsonl"), "utf8"), legacyLine);
+    assert.deepEqual(readdirSync(join(root, ".pigeon")), ["ledger.jsonl"]);
+    assert.equal(existsSync(join(root, ".pigeon", "sessions")), false);
     assert.equal(prepareWorkspace(root), workspaceRoot);
     assert.equal(sessionsDirOf(workspaceRoot), join(workspaceRoot, ".pigeon", "sessions"));
   } finally {

@@ -2,7 +2,7 @@
 //（决策 030）、会话列表在 application/session-list.ts、检索在 application/search.ts、恢复流程在
 // application/resume.ts——全部与 cli 同一份逻辑；语法/语义错误响亮呈现（同 REPL 口径），
 // 未知命令如实说明。worker 与 resume 的具体动作由壳转交给对应视图模块。
-import { type GrantConfigEventSink, runGrantCommand } from "../application/grants.ts";
+import { runGrantCommand } from "../application/grants.ts";
 import { runSearchCommand } from "../application/search.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { WORKER_COMMANDS_HINT } from "../application/workers-commands.ts";
@@ -16,7 +16,6 @@ export interface TuiGrantsContext {
   root: string;
   store: SessionGrantStore;
   configRules: readonly ConfigGrantRule[];
-  eventLog?: GrantConfigEventSink;
 }
 
 // 壳侧窄接口：命令分发需要的当前会话上下文与壳动作
@@ -112,7 +111,6 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         store: grants.store,
         configRules: grants.configRules,
         sessionId: host.sessionId(),
-        ...(grants.eventLog !== undefined ? { eventLog: grants.eventLog } : {}),
         write: (text) => {
           host.addSystem(text.trimEnd());
         },
