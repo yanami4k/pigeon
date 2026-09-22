@@ -137,6 +137,15 @@ export const RunStartedPayloadSchema = Type.Object({
     thinkingLevel: Type.Optional(ThinkingLevelSchema),
     // 决策 063：本 Run 的单轮输出上限（冻结快照值；加法式可缺省，决策 063 之前的记录无此字段）
     maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+    // M9：本 Run 的采样温度（冻结快照值；加法式可缺省——缺省 = 未设，由 provider 决定）
+    temperature: Type.Optional(Type.Number({ minimum: 0, maximum: 2 })),
+    // M9：请求了温度但未生效（推理开启时上游不把温度交给 provider）——如实记请求值与原因，不记成温度
+    temperatureIgnored: Type.Optional(
+      Type.Object({
+        requested: Type.Number({ minimum: 0, maximum: 2 }),
+        reason: Type.Literal("reasoning-enabled"),
+      })
+    ),
   }),
   policy: Type.Object({
     allow: Type.Array(Type.String()),
@@ -146,6 +155,8 @@ export const RunStartedPayloadSchema = Type.Object({
   // 实际广告给模型的工具名单（§2 规则 5：记录实际暴露，不只记配置意图）
   advertisedTools: Type.Array(Type.String()),
   systemPromptHash: Sha256HexSchema,
+  // M9：任务源给的工作方式指令原文（冻结快照值；已含在 system prompt 里，单列供回放与冻结项核对；缺省 = 没有）
+  taskDirective: Type.Optional(Type.String({ minLength: 1 })),
   memory: Type.Array(MemoryManifestEntrySchema),
   skills: Type.Array(SkillManifestEntrySchema),
   // M5.7 S3（决策 052）：MCP 工具集摘要（注解线索、配置与实际档位、冲突）与 server 当前状态——

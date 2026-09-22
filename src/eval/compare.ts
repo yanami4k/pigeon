@@ -14,7 +14,12 @@ import {
   type ProcessMetrics,
   summarizeProcess,
 } from "./process.ts";
-import { type EvalResultLine, type HarnessRef, readResultLines } from "./results.ts";
+import {
+  type EvalResultLine,
+  effectiveResultLines,
+  type HarnessRef,
+  readResultLines,
+} from "./results.ts";
 import type { EvalCondition } from "./task.ts";
 
 const DASH = "—";
@@ -41,7 +46,8 @@ interface Group {
 
 function loadGroup(name: string, dir: string, condition: EvalCondition): Group {
   const sessionsDir = path.join(dir, ".pigeon", "sessions");
-  const lines = readResultLines(path.join(dir, "results.jsonl"))
+  // 读侧口径与报告一致：同键取最后一条非错误行
+  const lines = effectiveResultLines(readResultLines(path.join(dir, "results.jsonl")))
     .filter((line) => line.condition === condition)
     .map((line): CompareLine => {
       const editMode = line.editMode ?? LEGACY_RESULT_EDIT_MODE;

@@ -55,6 +55,9 @@ export async function runHeadless(options: HeadlessRetryOptions): Promise<Headle
       ...(options.maxOutputTokens !== undefined
         ? { maxOutputTokens: options.maxOutputTokens }
         : {}),
+      // 重试沿用来源尝试的采样温度与工作方式指令（087 修订、110）：换了就不是同一把尺子
+      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
       ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
       ...(options.verify !== undefined ? { verify: options.verify } : {}),
       ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),

@@ -69,7 +69,8 @@ export function autoVerifyWiring(
       repoRoot: mainRepoRoot(governanceRoot),
       verify,
       // 与 pigeon verify 共用同一份依赖构造：模型标识、推理档位与单轮输出上限一律沿用被验证那次尝试
-      runtimeFactoryFor: (model) => verifierRuntimeFactory({ model, streamFn, persistThinking }),
+      runtimeFactoryFor: (sampling) =>
+        verifierRuntimeFactory({ ...sampling, streamFn, persistThinking }),
     },
   };
 }

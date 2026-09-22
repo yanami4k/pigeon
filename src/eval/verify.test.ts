@@ -12,7 +12,7 @@ import { runTraceCommand } from "../cli/trace.ts";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { LoadedEvalTask } from "./task.ts";
-import { runVerifier, verifyTaskRun } from "./verify.ts";
+import { localJudge, runVerifier, verifierCommand, verifyTaskRun } from "./verify.ts";
 
 const VERIFY_SCRIPT = [
   'import { existsSync, readFileSync } from "node:fs";',
@@ -138,8 +138,9 @@ test("误报第一层与 eval.verified：自报完成但验证失败记误报，
       memoryRoots: [],
     });
     const verified = await verifyTaskRun({
-      task,
-      workspaceRoot: workspace,
+      taskId: task.spec.id,
+      judge: localJudge(task, workspace),
+      commandHint: verifierCommand(task),
       governanceRoot,
       sessionId: run.sessionId,
       ...(run.runId !== undefined ? { runId: run.runId } : {}),
@@ -182,8 +183,9 @@ test("误报第一层与 eval.verified：自报完成但验证失败记误报，
     });
     assert.equal(limited.status, "turn-limit");
     const limitedVerified = await verifyTaskRun({
-      task,
-      workspaceRoot: workspace,
+      taskId: task.spec.id,
+      judge: localJudge(task, workspace),
+      commandHint: verifierCommand(task),
       governanceRoot,
       sessionId: limited.sessionId,
       ...(limited.runId !== undefined ? { runId: limited.runId } : {}),

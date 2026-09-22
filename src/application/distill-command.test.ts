@@ -12,7 +12,7 @@ import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { createReviewGate } from "../review/scheduler.ts";
 import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
-import { runDistillCommand } from "./distill-command.ts";
+import { renderDistillReport, runDistillCommand } from "./distill-command.ts";
 import { createWorkerRuntimeFactory } from "./workers.ts";
 
 const HASH = "0".repeat(64);
@@ -144,6 +144,59 @@ test("--eval-results：按任务编号成组，只读读取结果目录，候选
     assert.equal(candidate?.contrast?.failed[0]?.sessionId, fail.sessionId);
     assert.deepEqual(host.unfinishedRuns, []);
     assert.equal(readdirSync(join(root, ".pigeon", "candidates", "skill")).length, 1);
+  } finally {
+    for (const dir of [root, evalDir, home]) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("快照直接放进提炼器的首轮输入（121）：不调任何工具也看得到两侧原文；空结果附理由时照实交回", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-distill-first-"));
+  const evalDir = mkdtempSync(join(tmpdir(), "pigeon-distill-eval-"));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-distill-home-"));
+  try {
+    const pass = evalAttempt(evalDir, "pass");
+    const fail = evalAttempt(evalDir, "fail");
+    writeResults(evalDir, [pass, fail]);
+    const firstInputs: string[] = [];
+    const reply = {
+      candidates: [],
+      emptyReason: { read: ["successful", "failed"], why: "两侧只差一句回复" },
+    };
+    const result = await runDistillCommand({
+      root,
+      evalResults: evalDir,
+      createRuntime: createWorkerRuntimeFactory({
+        provider: "fake-provider",
+        modelId: "fake-model",
+        homeDir: home,
+        streamFnFor: () => (model, context, options) => {
+          firstInputs.push(JSON.stringify(context.messages[0] ?? {}));
+          return createFakeStreamFn({ replies: [{ text: JSON.stringify(reply) }] })(
+            model,
+            context,
+            options
+          );
+        },
+      }),
+      gate: createReviewGate(),
+    });
+    // 首轮输入里就有快照：两侧的侧头与各自的原文（pass / fail 两条回复）
+    const first = firstInputs[0] ?? "";
+    const firstText =
+      (JSON.parse(first) as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? "";
+    assert.ok(firstText.includes("修 bug"), "首轮输入里有任务描述");
+    assert.match(firstText, /--- 成功侧[^\n]*---\n\[第 2 条 assistant\]\npass/);
+    assert.match(firstText, /--- 失败侧[^\n]*---\n\[第 2 条 assistant\]\nfail/);
+    const persisted = result.groups[0]?.distill?.persisted;
+    assert.equal(persisted?.unparsable, undefined);
+    assert.deepEqual(persisted?.emptyReason, reply.emptyReason);
+    // 人读报告逐组写出空结果的理由
+    assert.match(
+      renderDistillReport(result),
+      /fix-a ｜ 尝试 [^｜]+｜ 提炼 completed ｜ 候选 0 个 ｜ 空结果（读了 successful、failed）：两侧只差一句回复/
+    );
   } finally {
     for (const dir of [root, evalDir, home]) {
       rmSync(dir, { recursive: true, force: true });

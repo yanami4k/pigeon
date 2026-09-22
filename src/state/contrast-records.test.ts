@@ -26,7 +26,7 @@ const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
 test("Event Log 升到 v11", () => {
-  assert.equal(EVENT_LOG_VERSION, 12);
+  assert.equal(EVENT_LOG_VERSION, 13);
 });
 
 test("069：派出记录可带共享任务标识；缺省仍合法（旧派出记录不受影响）", () => {

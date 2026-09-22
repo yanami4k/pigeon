@@ -159,9 +159,11 @@ test("一成一败：共享任务标识、各自工作树里独立验证、自�
     assert.ok(distiller !== undefined);
     assert.deepEqual(distiller.workspace, { kind: "none" });
     assert.deepEqual(distiller.limits, DEFAULT_DISTILL_BUDGET);
-    assert.equal(DEFAULT_DISTILL_BUDGET.maxTurns, 16);
-    assert.equal(DEFAULT_DISTILL_BUDGET.wallClockMs, 300_000);
-    assert.equal(DEFAULT_DISTILL_BUDGET.maxTokens, 80_000);
+    // 121：轮数 40，墙钟按 40/16 同比放宽到 12.5 分钟
+    assert.equal(DEFAULT_DISTILL_BUDGET.maxTurns, 40);
+    assert.equal(DEFAULT_DISTILL_BUDGET.wallClockMs, 750_000);
+    // 120：提炼器不设 token 上限（上下文每轮重送，按累计 token 设限在长尝试上读不完两侧材料）；轮数与墙钟仍设
+    assert.equal("maxTokens" in DEFAULT_DISTILL_BUDGET, false);
     const distillSession = materializeSession(
       join(repo, ".pigeon", "sessions"),
       distiller.childSessionId

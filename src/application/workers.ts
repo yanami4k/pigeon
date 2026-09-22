@@ -37,6 +37,7 @@ import type { ReviewTarget } from "../state/review.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
 
@@ -57,6 +58,9 @@ export interface WorkerRuntimeDeps {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
   maxOutputTokens?: number;
+  // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
+  temperature?: number;
+  taskDirective?: string;
   // M6（决策 064 子裁决 ③）：角色的模型接入覆盖列（缺省取 roles.ts 的角色表，第一版四个角色都留空）
   roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
   // 覆盖列里 streamFnSpec 对应的已加载插件：装配层按表预加载后传入（工厂同步，不在此处做 IO）
@@ -120,6 +124,8 @@ interface RuntimeSurface {
   sessionId: SessionId;
   governanceRoot: string;
   workspaceRoot: string;
+  // 决策 098：执行端；缺省为 workspaceRoot 上的本地实现
+  workspaceHost?: WorkspaceHost;
   streamFn: StreamFn;
   provider: string;
   modelId: string;
@@ -141,6 +147,10 @@ interface RuntimeSurface {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
   maxOutputTokens?: number;
+  // M9：采样温度（缺省不设）——目前只有无父会话的运行面（headless 与 Eval）会给；worker 不继承
+  temperature?: number;
+  // M9：任务源给的系统指令（追加进 system prompt 并随之冻结）；同上，只有无父会话的运行面会给
+  taskDirective?: string;
   // M6（决策 064）：Reviewer 的审阅目标
   reviewTarget?: ReviewTarget;
   // M7（决策 074）：提炼器的提炼目标
@@ -208,6 +218,8 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
+      ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
+      ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
       ...(request.review !== undefined ? { reviewTarget: request.review } : {}),
       ...(request.distill !== undefined ? { distillTarget: request.distill } : {}),
@@ -231,6 +243,8 @@ export interface DetachedRuntimeRequest {
   memoryRoots?: readonly MemoryRoot[];
   editMode?: EditMode;
   maxOutputTokens?: number;
+  temperature?: number;
+  taskDirective?: string;
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
@@ -252,6 +266,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.thinkingLevel !== undefined ? { thinkingLevel: surface.thinkingLevel } : {}),
     streamFn: surface.streamFn,
     workspaceRoot: surface.workspaceRoot,
+    ...(surface.workspaceHost !== undefined ? { workspaceHost: surface.workspaceHost } : {}),
     governanceRoot: surface.governanceRoot,
     ...(surface.policy !== undefined ? { toolPolicy: surface.policy } : {}),
     ...(surface.role !== undefined ? { commandRole: surface.role } : {}),
@@ -278,6 +293,8 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
+    ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
+    ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
     ...(surface.reviewTarget !== undefined ? { reviewTarget: surface.reviewTarget } : {}),
     ...(surface.distillTarget !== undefined ? { distillTarget: surface.distillTarget } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),

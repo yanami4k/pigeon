@@ -43,7 +43,9 @@ import {
 import {
   createRerunDispatcher,
   effectiveLimits,
+  type RerunDispatcher,
   type RerunDispatcherOptions,
+  type RerunOutcome,
   VerifyPreconditionError,
 } from "./rerun.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -53,11 +55,20 @@ export { VerifyPreconditionError } from "./rerun.ts";
 
 export interface VerifyCandidateOptions {
   governanceRoot: string;
-  repoRoot: string;
+  // 宿主 git 回放（缺省路径）所需：主仓库根与验证器运行面工厂。注入了回放派发器时可缺省
+  repoRoot?: string;
   // 候选选择器：内容哈希前缀或 种类/名字
   selector: string;
   verify: VerifyConfig;
-  runtimeFactoryFor: RerunDispatcherOptions["runtimeFactoryFor"];
+  runtimeFactoryFor?: RerunDispatcherOptions["runtimeFactoryFor"];
+  // M9：回放派发器（容器任务源上的回放由调用方注入）；缺省在宿主 git 工作树里回放
+  dispatcherFor?: (input: { nameSeed: string; hostSessionId: SessionId }) => RerunDispatcher;
+  // M9：回放计划解析（容器尝试没有 git 起点，由调用方按任务源给出）；缺省按 git 起点解
+  planFor?: (ref: AttemptRef) => AttemptPlan;
+  // M9：回执环境里的 harness 版本；缺省取主仓库 HEAD
+  harness?: VerificationEnvironment["harness"];
+  // M9：同时进行的回放数（缺省 1）。发起次序仍按交错次序，回执里的回放按（第几次、组别）排序
+  concurrency?: number;
   n?: number;
   effectThreshold?: number;
   gate?: RerunDispatcherOptions["gate"];
@@ -118,13 +129,15 @@ async function runVerification(
     );
   }
   const body = readCandidateBody(options.governanceRoot, entry);
-  const planFor = (ref: AttemptRef): AttemptPlan =>
-    resolveAttemptPlan({
-      sessionsDir: sessionsDirOf(ref.governanceRoot),
-      sessionId: ref.sessionId,
-      runId: ref.runId,
-      resolveBranchTip: (branch) => resolveCommit(options.repoRoot, branch),
-    });
+  const planFor =
+    options.planFor ??
+    ((ref: AttemptRef): AttemptPlan =>
+      resolveAttemptPlan({
+        sessionsDir: sessionsDirOf(ref.governanceRoot),
+        sessionId: ref.sessionId,
+        runId: ref.runId,
+        resolveBranchTip: (branch) => resolveCommit(requireRepoRoot(options), branch),
+      }));
   const failedPlan = planFor(failedRef);
   const successfulPlan = planFor(successfulRef);
   assertComparable(failedPlan, successfulPlan);
@@ -133,43 +146,61 @@ async function runVerification(
   // 候选的来源会话可能正被另一个会话进程写着，去抢它的写入锁会让活会话期间验不了候选；
   // 候选状态本就由账本现算，三族落在哪个文件不影响投影
   const verifySessionId = newSessionId();
-  const dispatcher = createRerunDispatcher({
-    governanceRoot: options.governanceRoot,
-    repoRoot: options.repoRoot,
-    hostSessionId: verifySessionId,
-    hostLog: hostLogProxy(options.governanceRoot, verifySessionId),
-    nameSeed: candidate.contentHash,
-    runtimeFactoryFor: options.runtimeFactoryFor,
-    verify: options.verify,
-    ...(options.gate !== undefined ? { gate: options.gate } : {}),
-    ...(options.keepWorktree !== undefined ? { keepWorktree: options.keepWorktree } : {}),
-  });
+  const dispatcher =
+    options.dispatcherFor?.({ nameSeed: candidate.contentHash, hostSessionId: verifySessionId }) ??
+    createRerunDispatcher({
+      governanceRoot: options.governanceRoot,
+      repoRoot: requireRepoRoot(options),
+      hostSessionId: verifySessionId,
+      hostLog: hostLogProxy(options.governanceRoot, verifySessionId),
+      nameSeed: candidate.contentHash,
+      runtimeFactoryFor: requireRuntimeFactory(options),
+      verify: options.verify,
+      ...(options.gate !== undefined ? { gate: options.gate } : {}),
+      ...(options.keepWorktree !== undefined ? { keepWorktree: options.keepWorktree } : {}),
+    });
   const candidateBody = {
     kind: candidate.kind,
     name: candidate.name,
     content: body,
     contentHash: candidate.contentHash,
   };
-  const runs: RerunRun[] = [];
-  let withExperiences: LoadedExperience[] | undefined;
-  let withSetHash: string | undefined;
-  // 交错跑：第 1 次的四组、第 2 次的四组……
+  // 交错次序：第 1 次的四组、第 2 次的四组……；并行时按这个次序发起，回执里按同一次序排列
+  const order: Array<{ arm: RerunArm; index: number }> = [];
   for (let index2 = 1; index2 <= n; index2++) {
     for (const arm of RERUN_ARMS) {
-      const outcome = await dispatcher.rerun({
-        arm,
-        index: index2,
-        plan: arm.startsWith("failed") ? failedPlan : successfulPlan,
-        ...(arm.endsWith("-with") ? { candidate: candidateBody } : {}),
-      });
-      runs.push(outcome.run);
-      options.onRerun?.(outcome.run);
-      if (arm.endsWith("-with")) {
-        withExperiences ??= outcome.experiences;
-        withSetHash ??= outcome.experienceSetHash;
-      }
+      order.push({ arm, index: index2 });
     }
   }
+  const outcomes: RerunOutcome[] = new Array(order.length);
+  const concurrency = options.concurrency ?? 1;
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new VerifyPreconditionError(`回放并行数需要正整数：${concurrency}`);
+  }
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    for (;;) {
+      const position = next;
+      next += 1;
+      const slot = order[position];
+      if (slot === undefined) {
+        return;
+      }
+      const outcome = await dispatcher.rerun({
+        arm: slot.arm,
+        index: slot.index,
+        plan: slot.arm.startsWith("failed") ? failedPlan : successfulPlan,
+        ...(slot.arm.endsWith("-with") ? { candidate: candidateBody } : {}),
+      });
+      outcomes[position] = outcome;
+      options.onRerun?.(outcome.run);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, order.length) }, () => lane()));
+  const runs: RerunRun[] = outcomes.map((outcome) => outcome.run);
+  const firstWith = outcomes.find((_, position) => order[position]?.arm.endsWith("-with"));
+  const withExperiences: LoadedExperience[] | undefined = firstWith?.experiences;
+  const withSetHash: string | undefined = firstWith?.experienceSetHash;
   const judgement = judgeReruns({
     runs: runs.map((run) => ({ arm: run.arm as RerunArm, index: run.index, verdict: run.verdict })),
     n,
@@ -178,7 +209,7 @@ async function runVerification(
   const experiences = withExperiences ?? [];
   const environment: VerificationEnvironment = {
     model: failedPlan.model,
-    harness: describeHead(options.repoRoot),
+    harness: options.harness ?? describeHead(requireRepoRoot(options)),
     runtime: { node: process.version, platform: process.platform },
     budget: effectiveLimits(failedPlan.budget),
     verify: options.verify,
@@ -205,6 +236,26 @@ async function runVerification(
   } finally {
     log.close();
   }
+}
+
+function requireRepoRoot(options: VerifyCandidateOptions): string {
+  if (options.repoRoot === undefined) {
+    throw new VerifyPreconditionError(
+      "宿主 git 回放需要主仓库根：未给 repoRoot，也没有注入回放派发器与计划解析"
+    );
+  }
+  return options.repoRoot;
+}
+
+function requireRuntimeFactory(
+  options: VerifyCandidateOptions
+): RerunDispatcherOptions["runtimeFactoryFor"] {
+  if (options.runtimeFactoryFor === undefined) {
+    throw new VerifyPreconditionError(
+      "宿主 git 回放需要验证器运行面工厂：未给，也没有注入回放派发器"
+    );
+  }
+  return options.runtimeFactoryFor;
 }
 
 function assertVerifiable(entry: LocatedCandidate): void {

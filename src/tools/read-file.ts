@@ -2,12 +2,12 @@
 // 输出与 edit_file 协同（M3 切片 2）：头部带全文件快照标签 [PATH#TAG]，每行带 hashline 锚点
 // N#TAG——edit_file 的快照预检与锚点寻址完全消费这里给出的标签。
 // 行为参考 harness/tools/read 笔记：offset 1-based；窗口截断时给出下一窗口提示。
-import { readFile, stat } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { EditMode } from "./edit-mode.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
-import { resolveWorkspacePath } from "./paths.ts";
+import { asWorkspaceHost } from "./local-host.ts";
+import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
 
 // 单次默认最多返回行数，防止一次把大文件全塞进上下文
@@ -26,7 +26,7 @@ export const ReadFileParamsSchema = Type.Object({
 export type ReadFileParams = Static<typeof ReadFileParamsSchema>;
 
 export interface ReadFileDetails {
-  // 解析并围栏后的真实绝对路径
+  // 解析并围栏后的规范路径（本地为宿主绝对路径，容器工作区为容器内路径）
   resolvedPath: string;
   // 全文件快照标签：edit_file 的 snapshot 参数来源
   snapshot: string;
@@ -41,10 +41,12 @@ export interface ReadFileToolOptions {
   editMode?: EditMode;
 }
 
+// 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读取；工具不判断自己在哪
 export function createReadFileTool(
-  workspaceRoot: string,
+  workspace: string | WorkspaceHost,
   options: ReadFileToolOptions = {}
 ): PigeonAgentTool<typeof ReadFileParamsSchema, ReadFileDetails> {
+  const host = asWorkspaceHost(workspace);
   const replaceMode = options.editMode === "replace";
   return {
     name: "read_file",
@@ -59,11 +61,11 @@ export function createReadFileTool(
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ReadFileDetails>> {
       const args = Value.Parse(ReadFileParamsSchema, params);
-      const resolvedPath = resolveWorkspacePath(workspaceRoot, args.path);
-      if (!(await stat(resolvedPath)).isFile()) {
+      const resolvedPath = await host.resolveExisting(args.path);
+      if (!(await host.isFile(resolvedPath))) {
         throw new ReadFileError(`不是常规文件：${args.path}`);
       }
-      const raw = await readFile(resolvedPath, "utf8");
+      const raw = await host.readText(resolvedPath);
       const snapshot = snapshotTag(raw);
       const { lines } = splitContent(raw);
       const totalLines = lines.length;

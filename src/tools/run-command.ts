@@ -11,12 +11,10 @@
 // 治理层判定。执行证据（命令、实际进程参数、是否经启动器、是否经 shell、退出码、输出哈希与截断输出、执行前后工作树
 // 文件清单差异）按 toolCallId 暂存，receipt 落盘时由治理层取走。
 // .pigeon/commands.json 的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
-import path from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { createLocalWorkspaceHost, windowsScript } from "./local-host.ts";
+import type { HostExecPlan, HostFileSnapshot, WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
 export const RUN_COMMAND_TOOL = "run_command";
@@ -48,9 +46,6 @@ const ENV_ALLOWLIST = new Set([
   "LC_CTYPE",
   "TERM",
 ]);
-
-// 文件清单不跟进的目录：版本库元数据与依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接）
-const SKIPPED_DIRS = new Set([".git", "node_modules"]);
 
 // 不带引号时出现即视为 shell 语法
 const SHELL_CHARS = new Set(["|", ";", "&", "<", ">", "`"]);
@@ -131,6 +126,9 @@ export interface ExecEvidenceTool {
 
 export interface RunCommandOptions {
   workspaceRoot: string;
+  // 决策 098：执行端——缺省为 workspaceRoot 上的本地实现；容器工作区由装配方注入容器实现。
+  // 工具只调接口：平台、工作目录、进程终止与文件清单都由实现决定
+  host?: WorkspaceHost;
   // 短名 → 命令串（.pigeon/commands.json）
   commands?: Readonly<Record<string, string>>;
   // 在场 = 只允许清单内的短名或其展开命令（tester 等角色）
@@ -139,7 +137,7 @@ export interface RunCommandOptions {
   maxOutputBytes?: number;
   // 环境变量来源（缺省 process.env；只透传白名单）
   env?: NodeJS.ProcessEnv;
-  // 平台（缺省 process.platform；决定 .cmd / .bat 解析与 shell 程序）
+  // 平台（缺省 process.platform；决定 .cmd / .bat 解析与 shell 程序）；只对缺省的本地执行端生效，注入 host 时以 host 为准
   platform?: NodeJS.Platform;
 }
 
@@ -210,8 +208,14 @@ export function createRunCommandTool(
 ): PigeonAgentTool<typeof RunCommandParamsSchema, ExecEvidence> &
   PreviewableTool &
   ExecEvidenceTool {
-  const root = options.workspaceRoot;
-  const platform = options.platform ?? process.platform;
+  const host =
+    options.host ??
+    createLocalWorkspaceHost(
+      options.workspaceRoot,
+      options.platform !== undefined ? { platform: options.platform } : {}
+    );
+  const root = host.root;
+  const platform = host.platform;
   const timeoutMs = options.timeoutMs ?? DEFAULT_RUN_COMMAND_TIMEOUT_MS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_BYTES;
   const env = allowedEnv(options.env ?? process.env);
@@ -261,7 +265,7 @@ export function createRunCommandTool(
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    const scriptPath = windowsScript(argv[0] ?? "", root, env, platform);
+    const scriptPath = host.findLauncherScript(argv[0] ?? "", env);
     if (scriptPath === undefined) {
       return { ...base, mode: "direct", needsShell: false, argv };
     }
@@ -343,9 +347,9 @@ export function createRunCommandTool(
         );
       }
       const plan = spawnPlan(inspection, env, platform);
-      const before = snapshotFiles(root);
-      const run = await runProcess(plan, { cwd: root, env, timeoutMs, maxOutputBytes, signal });
-      const after = snapshotFiles(root);
+      const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+      const run = await host.exec(plan, { env, timeoutMs, maxOutputBytes, signal });
+      const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
       const evidence: ExecEvidence = {
         command,
         ...(alias !== undefined ? { alias } : {}),
@@ -385,12 +389,7 @@ export function createRunCommandTool(
   };
 }
 
-interface SpawnPlan {
-  program: string;
-  args: string[];
-  // Windows 下按原样拼接命令行（cmd.exe 的引号规则不同于 CreateProcess 的参数转义）
-  verbatim: boolean;
-}
+type SpawnPlan = HostExecPlan;
 
 function comspecOf(env: NodeJS.ProcessEnv): string {
   return Object.entries(env).find(([key]) => key.toUpperCase() === "COMSPEC")?.[1] ?? "cmd.exe";
@@ -521,206 +520,7 @@ export function allowedEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
-interface ProcessRun {
-  spawned: boolean;
-  spawnError?: NodeJS.ErrnoException;
-  exitCode: number | null;
-  signal?: string;
-  timedOut: boolean;
-  outputBytes: number;
-  outputHash: string;
-  output: string;
-}
-
-function runProcess(
-  plan: SpawnPlan,
-  options: {
-    cwd: string;
-    env: NodeJS.ProcessEnv;
-    timeoutMs: number;
-    maxOutputBytes: number;
-    signal: AbortSignal | undefined;
-  }
-): Promise<ProcessRun> {
-  const hash = createHash("sha256");
-  const head: Buffer[] = [];
-  let headBytes = 0;
-  let outputBytes = 0;
-  let timedOut = false;
-  const finish = (
-    partial: Omit<ProcessRun, "outputBytes" | "outputHash" | "output" | "timedOut">
-  ) => ({
-    ...partial,
-    timedOut,
-    outputBytes,
-    outputHash: hash.digest("hex"),
-    output: Buffer.concat(head).toString("utf8"),
-  });
-  return new Promise((resolve) => {
-    let settled = false;
-    // 只决议一次且只在决议时收尾：启动失败时 error 与 close 两个事件都会到达，哈希只能 digest 一次
-    const settle = (build: () => ProcessRun) => {
-      if (!settled) {
-        settled = true;
-        resolve(build());
-      }
-    };
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(plan.program, plan.args, {
-        cwd: options.cwd,
-        env: options.env,
-        shell: false,
-        windowsHide: true,
-        windowsVerbatimArguments: plan.verbatim,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      settle(() =>
-        finish({ spawned: false, spawnError: error as NodeJS.ErrnoException, exitCode: null })
-      );
-      return;
-    }
-    const collect = (chunk: Buffer) => {
-      hash.update(chunk);
-      outputBytes += chunk.length;
-      if (headBytes < options.maxOutputBytes) {
-        const piece = chunk.subarray(0, options.maxOutputBytes - headBytes);
-        head.push(piece);
-        headBytes += piece.length;
-      }
-    };
-    child.stdout?.on("data", collect);
-    child.stderr?.on("data", collect);
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, options.timeoutMs);
-    const onAbort = () => child.kill();
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    const cleanup = () => {
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", onAbort);
-    };
-    child.on("error", (error: NodeJS.ErrnoException) => {
-      cleanup();
-      settle(() => finish({ spawned: child.pid !== undefined, spawnError: error, exitCode: null }));
-    });
-    child.on("close", (code, signal) => {
-      cleanup();
-      settle(() =>
-        finish({
-          spawned: true,
-          exitCode: code,
-          ...(signal !== null ? { signal } : {}),
-        })
-      );
-    });
-  });
-}
-
-// Windows 下程序解析到的 .cmd / .bat 路径（非 Windows 或解析到可执行文件时返回 undefined）：
-// 显式带 .cmd / .bat 扩展名的按工作区根与 PATH 定位；不带扩展名的按工作区根、PATH 逐目录找，
-// 同一目录里 .exe / .com 优先（与 PATHEXT 的缺省次序一致）
-function windowsScript(
-  program: string,
-  root: string,
-  env: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform
-): string | undefined {
-  if (platform !== "win32" || program === "") {
-    return undefined;
-  }
-  const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
-  const lower = program.toLowerCase();
-  const hasSeparator = program.includes("/") || program.includes("\\");
-  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
-    if (hasSeparator) {
-      return path.resolve(root, program);
-    }
-    for (const dir of [root, ...pathValue.split(path.delimiter)]) {
-      const candidate = path.join(dir, program);
-      if (dir !== "" && existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    return undefined;
-  }
-  if (hasSeparator || path.extname(program) !== "") {
-    return undefined;
-  }
-  for (const dir of [root, ...pathValue.split(path.delimiter)]) {
-    if (dir === "") {
-      continue;
-    }
-    if (
-      [".exe", ".com"].some((extension) => existsSync(path.join(dir, `${program}${extension}`)))
-    ) {
-      return undefined;
-    }
-    for (const extension of [".cmd", ".bat"]) {
-      const candidate = path.join(dir, `${program}${extension}`);
-      if (existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
-  return undefined;
-}
-
-interface FileSnapshot {
-  files: Map<string, string>;
-  truncated: boolean;
-}
-
-// 工作树文件清单：相对路径 → 大小与修改时间签名；跳过符号链接、目录联接与 SKIPPED_DIRS
-function snapshotFiles(root: string): FileSnapshot {
-  const files = new Map<string, string>();
-  let truncated = false;
-  const walk = (dir: string): void => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (truncated) {
-        return;
-      }
-      const full = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        if (!SKIPPED_DIRS.has(entry.name)) {
-          walk(full);
-        }
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      if (files.size >= FILE_SNAPSHOT_LIMIT) {
-        truncated = true;
-        return;
-      }
-      try {
-        const stat = statSync(full);
-        files.set(
-          path.relative(root, full).split(path.sep).join("/"),
-          `${stat.size}:${stat.mtimeMs}`
-        );
-      } catch {
-        // 执行期间被删除的文件：按不存在处理
-      }
-    }
-  };
-  walk(root);
-  return { files, truncated };
-}
-
-function diffFiles(before: FileSnapshot, after: FileSnapshot): FileChanges {
+function diffFiles(before: HostFileSnapshot, after: HostFileSnapshot): FileChanges {
   return {
     added: [...after.files.keys()].filter((file) => !before.files.has(file)).sort(),
     removed: [...before.files.keys()].filter((file) => !after.files.has(file)).sort(),

@@ -519,6 +519,12 @@ export class PiRuntimeAdapter {
         ...(snapshot.model.maxOutputTokens !== undefined
           ? { maxOutputTokens: snapshot.model.maxOutputTokens }
           : {}),
+        ...(snapshot.model.temperature !== undefined
+          ? { temperature: snapshot.model.temperature }
+          : {}),
+        ...(snapshot.model.temperatureIgnored !== undefined
+          ? { temperatureIgnored: { ...snapshot.model.temperatureIgnored } }
+          : {}),
       },
       policy: {
         allow: [...snapshot.tools.policy.allow],
@@ -527,6 +533,9 @@ export class PiRuntimeAdapter {
       },
       advertisedTools,
       systemPromptHash: this.#systemPromptHash,
+      ...(snapshot.context.taskDirective !== undefined
+        ? { taskDirective: snapshot.context.taskDirective }
+        : {}),
       memory: structuredClone(snapshot.memory),
       skills: structuredClone(snapshot.skills),
       // M6（决策 064）：后台审阅配置随 run.started 落盘（只在主会话快照里在场）

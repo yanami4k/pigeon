@@ -37,9 +37,18 @@ export const DistillerItemSchema = Type.Object({
   }),
 });
 
+// 空结果的理由（121）：读过的侧与判断理由
+export const DistillerEmptyReasonSchema = Type.Object({
+  read: Type.Array(Type.Union([Type.Literal("successful"), Type.Literal("failed")])),
+  why: Type.String({ minLength: 1, maxLength: 2000 }),
+});
+export type DistillerEmptyReason = Static<typeof DistillerEmptyReasonSchema>;
+
 // 外层形状：candidates 数组；逐项按 DistillerItemSchema 校验，单项不合格只丢弃该项
 export const DistillerResultSchema = Type.Object({
   candidates: Type.Array(DistillerItemSchema),
+  // 121：空结果必须附理由——读了哪几侧、为什么判断没有可学的
+  emptyReason: Type.Optional(DistillerEmptyReasonSchema),
 });
 export type DistillerResult = Static<typeof DistillerResultSchema>;
 type DistillerItem = Static<typeof DistillerItemSchema>;
@@ -64,6 +73,23 @@ export interface PersistDistillerResult {
   duplicates: number;
   rejected: Array<{ name: string; reason: string }>;
   unparsable?: string;
+  // 合格的空结果：提炼器交代的理由（原文也在提炼器会话里）
+  emptyReason?: DistillerEmptyReason;
+}
+
+// 空结果的理由不合格时返回原因：必须附理由，且存在的侧都要读过
+function emptyReasonProblem(target: DistillTarget, raw: unknown): string | undefined {
+  if (!Value.Check(DistillerEmptyReasonSchema, raw)) {
+    return "空结果必须附理由（读了哪几侧、为什么判断没有可学的）";
+  }
+  const read = new Set(raw.read);
+  if (target.successful !== undefined && !read.has("successful")) {
+    return "空结果的理由里没有读成功侧";
+  }
+  if (target.failed !== undefined && !read.has("failed")) {
+    return "空结果的理由里没有读失败侧";
+  }
+  return undefined;
 }
 
 function refOf(scope: DistillAttemptScope): AttemptRef {
@@ -110,6 +136,19 @@ export function persistDistillerCandidates(input: PersistDistillerInput): Persis
       payload: { producerSessionId: input.distillSessionId, reason },
     });
     return { written: [], duplicates: 0, rejected: [], unparsable: reason };
+  }
+  if (envelope.candidates.length === 0) {
+    const raw = (envelope as { emptyReason?: unknown }).emptyReason;
+    const problem = emptyReasonProblem(target, raw);
+    if (problem !== undefined) {
+      input.sink.appendObservation({
+        kind: "review.unparsable",
+        runId: input.hostRunId,
+        payload: { producerSessionId: input.distillSessionId, reason: problem },
+      });
+      return { written: [], duplicates: 0, rejected: [], unparsable: problem };
+    }
+    return { written: [], duplicates: 0, rejected: [], emptyReason: raw as DistillerEmptyReason };
   }
   const written: ReviewerCandidate[] = [];
   const rejected: PersistDistillerResult["rejected"] = [];

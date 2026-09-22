@@ -9,6 +9,7 @@ import {
   persistDistillerCandidates,
 } from "../distillation/candidates.ts";
 import { distillerTask } from "../distillation/prompt.ts";
+import { buildDistillSnapshot, renderDistillSnapshot } from "../distillation/snapshot.ts";
 import {
   type ChildFamilySink,
   WorkerOrchestrator,
@@ -24,11 +25,12 @@ import type { RunId, SessionId } from "../state/ids.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { dedupedWarner, failureDetail } from "./warnings.ts";
 
-// 提炼器预算（决策 074）：16 轮、5 分钟、80,000 token；超限按中止处理、不产出候选；各项可配
-export const DEFAULT_DISTILL_BUDGET: Required<WorkerLimits> = {
-  maxTurns: 16,
-  wallClockMs: 5 * 60_000,
-  maxTokens: 80_000,
+// 提炼器预算（决策 074；120、121 修订）：40 轮、12.5 分钟（按 40/16 同比放宽），不设 token 上限；超限按中止处理、
+// 不产出候选；各项可配。提炼器每轮都把整段上下文重送一遍，按累计 token 设限在长尝试（SWE-bench 规模）上几轮就用完；
+// 16 轮在这类尝试上常常读不完两侧材料
+export const DEFAULT_DISTILL_BUDGET: WorkerLimits = {
+  maxTurns: 40,
+  wallClockMs: 12.5 * 60_000,
 };
 
 export interface DistillDispatcherOptions {
@@ -141,7 +143,8 @@ export function createDistillDispatcher(options: DistillDispatcherOptions): Dist
         const runId = hostRunIdOf(target);
         const distillSessionId = orchestrator.spawn({
           role: "distiller",
-          task: distillerTask(target),
+          // 121：冻结对比快照直接放进首轮输入
+          task: distillerTask(target, renderDistillSnapshot(buildDistillSnapshot(target))),
           limits: budget,
           distill: target,
         });

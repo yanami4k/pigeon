@@ -34,7 +34,7 @@ class Ledger {
   add(record: Record<string, unknown>, runId?: RunId): void {
     this.#clock += 1;
     this.records.push({
-      version: 12,
+      version: 13,
       id: newEntryId(),
       sessionId: this.sessionId,
       ...(runId !== undefined ? { runId } : {}),

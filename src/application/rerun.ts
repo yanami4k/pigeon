@@ -114,8 +114,20 @@ export function verifierParentPolicy(
 // 此前两处各写一份、都漏了推理档位——档位解出来了却没传下去，实际落回角色表或全局缺省。
 // 同一个模型换推理档位就是换了尺子，而档位在失效判据的封闭四项清单里属于"只记录不判定"，
 // 两头落空就成了没人管的变量。
+// 回放沿用原尝试的"尺子"：模型参数（含推理档位、输出上限、采样温度）与工作方式指令（087 修订的推定、110）
+export type RerunSampling = Pick<AttemptPlan, "model" | "taskDirective">;
+
+export function rerunSamplingOf(plan: AttemptPlan): RerunSampling {
+  return {
+    model: plan.model,
+    ...(plan.taskDirective !== undefined ? { taskDirective: plan.taskDirective } : {}),
+  };
+}
+
 export function verifierRuntimeDeps(input: {
   model: AttemptPlan["model"];
+  // 原尝试的工作方式指令（087 修订的推定：与模型同属"换了就是换尺子"的一类）
+  taskDirective?: string;
   streamFn: StreamFn;
   persistThinking: boolean;
 }): WorkerRuntimeDeps {
@@ -129,11 +141,15 @@ export function verifierRuntimeDeps(input: {
     // 档位已由 assertThinkingLevelReproducible 收窄到已知取值
     thinkingLevel: model.thinkingLevel as ThinkingLevel,
     ...(model.maxOutputTokens !== undefined ? { maxOutputTokens: model.maxOutputTokens } : {}),
+    // 采样温度与工作方式指令沿用原尝试（087 修订、110）；失效判定的封闭清单（091）暂未纳入温度，是已知缺口
+    ...(model.temperature !== undefined ? { temperature: model.temperature } : {}),
+    ...(input.taskDirective !== undefined ? { taskDirective: input.taskDirective } : {}),
   };
 }
 
 export function verifierRuntimeFactory(input: {
   model: AttemptPlan["model"];
+  taskDirective?: string;
   streamFn: StreamFn;
   persistThinking: boolean;
 }): WorkerRuntimeFactory {
@@ -192,7 +208,8 @@ export interface RerunDispatcherOptions {
   // 被验证候选的内容哈希：四组的工作树与分支名共用它作种子（基线组同样是在验证这个候选）
   nameSeed: string;
   // 按被验证那次尝试的模型标识装出验证器运行面（模型接入由 Actor 注入）
-  runtimeFactoryFor: (model: AttemptPlan["model"]) => WorkerRuntimeFactory;
+  // 入参是计划里"决定尺子"的那一组（模型参数与工作方式指令）整体交出：调用方原样转给验证器运行面，拆开传就会漏
+  runtimeFactoryFor: (sampling: RerunSampling) => WorkerRuntimeFactory;
   verify: VerifyConfig;
   gate?: ReviewGate;
   // 收尾后是否移走工作树与分支；缺省移走（会话文件已收回宿主）
@@ -291,7 +308,7 @@ export function createRerunDispatcher(options: RerunDispatcherOptions): RerunDis
           parentPolicy: verifierParentPolicy(plan.approvalMode, plan.tools),
           parentLog: options.hostLog,
           approvals: async () => ({ approved: false, reason: "回放没有审批通道" }),
-          createRuntime: options.runtimeFactoryFor(plan.model),
+          createRuntime: options.runtimeFactoryFor(rerunSamplingOf(plan)),
           workspaces: fixedWorkspace(workspace),
           defaultLimits: limits,
         });

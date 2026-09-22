@@ -25,6 +25,7 @@ import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
+import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
 import { createReviewTools, reviewToolRegistrations } from "../review/tools.ts";
 import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
@@ -48,6 +49,7 @@ import {
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
+import { asWorkspaceHost } from "../tools/local-host.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -57,12 +59,17 @@ import {
   RUN_COMMAND_TOOL,
   RunCommandParamsSchema,
 } from "../tools/run-command.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { createToolGovernance } from "./governance.ts";
 import type { McpSession } from "./mcp.ts";
 
 export interface RuntimeDeps {
   streamFn: StreamFn;
   workspaceRoot: string;
+  // 决策 098：执行端——三个工作区工具（read_file / edit_file / run_command）经它读写与执行；缺省为 workspaceRoot 上的
+  // 本地实现。容器工作区注入容器实现，此时 workspaceRoot 只是宿主侧的占位目录。按路径限定的放权以宿主路径判定，
+  // 在这类工作区下暂不支持：带审批通道或装了 pathPrefix 固化规则时装配即报错，不让规则静默失配
+  workspaceHost?: WorkspaceHost;
   // M5.5 S1（决策 040）：治理根——.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在；
   // 缺省同工作区根。worker 的工作区根是自己的 git 工作树，治理根恒为主仓库根
   governanceRoot?: string;
@@ -105,6 +112,11 @@ export interface RuntimeDeps {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
   maxOutputTokens?: number;
+  // M9：任务源给的系统指令（如外部基准的工作方式指令）——原样追加为 system prompt 的一段，随整段 system prompt
+  // 冻结进注入快照（run.started 记其哈希，全文在内容文件的 system 记录里）。只说工作方式，不含任务内容；缺省不加
+  taskDirective?: string;
+  // M9：采样温度——装配层包装 streamFn 传入，并写进注入快照 model 段；缺省不设（由 provider 决定）
+  temperature?: number;
   // M6（决策 064）：后台审阅配置——只有 cli / tui 主会话传入，冻结进注入快照并随 run.started 落盘
   review?: ReviewConfig;
   // M6（决策 064 子裁决 ⑤）：Reviewer 运行面的审阅目标——在场时注册两个只读快照工具并绑定到被审 Run
@@ -146,13 +158,40 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) {
     throw new Error(`单轮输出上限需要正整数：${maxOutputTokens}`);
   }
+  if (
+    deps.temperature !== undefined &&
+    !(Number.isFinite(deps.temperature) && deps.temperature >= 0 && deps.temperature <= 2)
+  ) {
+    throw new Error(`采样温度需要 0 到 2 之间的数：${deps.temperature}`);
+  }
+  // 推理开启时上游不把温度交给 provider（二者在该线路上互斥）：请求值如实记成"未生效"，也不再往下传
+  const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
+  const appliedTemperature = reasoningEnabled ? undefined : deps.temperature;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
+  const workspaceHost = deps.workspaceHost ?? asWorkspaceHost(deps.workspaceRoot);
+  // 护栏（M9）：按路径限定的放权（会话 grant 的目录限定、固化规则的 pathPrefix）以宿主路径判定，对非本地的工作区
+  // 只会静默失配。路径放权在这类工作区下暂不支持：带审批通道的交互场景直接拒绝装配（审批面板的 [d] 就是目录放权）
+  if (deps.workspaceHost !== undefined && deps.createApprovalHandler !== undefined) {
+    throw new Error(
+      "容器工作区暂不支持交互审批：按路径限定的放权以宿主路径判定，在容器工作区下会静默失配；" +
+        "目前只支持无审批通道的无人值守运行"
+    );
+  }
   const sessionsDir = path.join(governanceRoot, ".pigeon", "sessions");
   const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId, {
     content: { persistThinking: deps.persistThinking ?? true },
   });
   // F：固化配置启动时装载（畸形 → 抛错，启动中止——授权语义不明绝不静默运行）
   const configGrants = deps.configGrants ?? loadGrantConfig(governanceRoot);
+  if (deps.workspaceHost !== undefined) {
+    const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
+    if (scoped.length > 0) {
+      throw new Error(
+        `容器工作区暂不支持按路径限定的放权规则：${scoped.map((rule) => `${rule.tool}（${rule.pathPrefix}）`).join("、")}——` +
+          "它们以宿主路径判定，在容器工作区下只会静默失配；请移除这些规则或改用本地工作区"
+      );
+    }
+  }
   // M5.5 S5（决策 048）：可选的命令短名与角色允许清单（畸形 → 抛错，启动中止）
   const commandsConfig = loadCommandsConfig(governanceRoot);
   // 决策 3b：会话 grant 运行态——resume 时以事件日志物化结果为种子（created − revoked）
@@ -259,7 +298,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
         "server 不可用时这些工具会报错，改用内置工具继续。"
       : "";
-  const systemPrompt = [basePrompt, residentMemory.section, skillCatalog.section, mcpSection]
+  const systemPrompt = [
+    basePrompt,
+    residentMemory.section,
+    skillCatalog.section,
+    mcpSection,
+    deps.taskDirective ?? "",
+  ]
     .filter((section) => section !== "")
     .join("\n\n");
   const delegated = deps.toolPolicy;
@@ -281,9 +326,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         id: deps.modelId,
         ...(deps.thinkingLevel !== undefined ? { thinkingLevel: deps.thinkingLevel } : {}),
         maxOutputTokens,
+        ...(appliedTemperature !== undefined ? { temperature: appliedTemperature } : {}),
+        ...(deps.temperature !== undefined && appliedTemperature === undefined
+          ? {
+              temperatureIgnored: {
+                requested: deps.temperature,
+                reason: "reasoning-enabled" as const,
+              },
+            }
+          : {}),
       },
       tools: { policy, advertised: policy.allow },
-      context: { systemPrompt },
+      context: {
+        systemPrompt,
+        ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
+      },
       memory: residentMemory.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
@@ -293,16 +350,20 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
-    streamFn: limitOutputTokens(deps.streamFn, maxOutputTokens),
+    streamFn: limitOutputTokens(
+      appliedTemperature !== undefined
+        ? fixTemperature(deps.streamFn, appliedTemperature)
+        : deps.streamFn,
+      maxOutputTokens
+    ),
     tools: [
       replaceMode
-        ? createReadFileTool(deps.workspaceRoot, { editMode: "replace" })
-        : createReadFileTool(deps.workspaceRoot),
-      replaceMode
-        ? createReplaceEditTool(deps.workspaceRoot)
-        : createEditFileTool(deps.workspaceRoot),
+        ? createReadFileTool(workspaceHost, { editMode: "replace" })
+        : createReadFileTool(workspaceHost),
+      replaceMode ? createReplaceEditTool(workspaceHost) : createEditFileTool(workspaceHost),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
+        host: workspaceHost,
         commands: commandsConfig.commands,
         ...(deps.commandRole !== undefined
           ? { allowlist: commandsConfig.roles[deps.commandRole] ?? [] }

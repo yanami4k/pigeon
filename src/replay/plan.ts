@@ -39,7 +39,17 @@ export interface AttemptPlan {
   startSource: AttemptStartSource;
   budget: AttemptBudget;
   budgetSource: AttemptBudgetSource;
-  model: { provider: string; id: string; thinkingLevel?: string; maxOutputTokens?: number };
+  // temperature：原尝试请求的采样温度（生效的，或推理开启时请求了但未生效的那个值——回放照原样请求，
+  // 同一推理档位下结果同样生效或同样不生效）；原尝试没设就不带
+  model: {
+    provider: string;
+    id: string;
+    thinkingLevel?: string;
+    maxOutputTokens?: number;
+    temperature?: number;
+  };
+  // 原尝试的工作方式指令原文（任务源给的；回放拼进同一位置）；原尝试没有就不带
+  taskDirective?: string;
   approvalMode: "prompt" | "yolo";
   // 被验证那次尝试实际拿到的工具名单（run.started 的冻结策略）：回放按它取交集，
   // 不给回放比原尝试多的工具——多一件工具与多一点预算是同一类失效，成功率的变化会来自工具而非经验
@@ -95,6 +105,9 @@ export function resolveAttemptPlan(input: ResolveAttemptPlanInput): AttemptPlan 
 
   const start = resolveStart(input, session, spawned?.workspace ?? header?.workspace);
   const model = started.payload.model;
+  // 采样温度（087 修订的推定、110）：run.started 有这条记录就取得到——字段在场即当时请求的值，不在场即当时没设
+  // （温度自 Event Log v13 起才可设，更早的记录一律是没设）。没有 run.started 在上面已拒绝
+  const temperature = model.temperature ?? model.temperatureIgnored?.requested;
   return {
     sessionId: input.sessionId,
     runId: input.runId,
@@ -108,7 +121,11 @@ export function resolveAttemptPlan(input: ResolveAttemptPlanInput): AttemptPlan 
       id: model.id,
       ...(model.thinkingLevel !== undefined ? { thinkingLevel: model.thinkingLevel } : {}),
       ...(model.maxOutputTokens !== undefined ? { maxOutputTokens: model.maxOutputTokens } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
     },
+    ...(started.payload.taskDirective !== undefined
+      ? { taskDirective: started.payload.taskDirective }
+      : {}),
     approvalMode: started.payload.policy.approvalMode,
     tools: [...started.payload.policy.allow],
   };

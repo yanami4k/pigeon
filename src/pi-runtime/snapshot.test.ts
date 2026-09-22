@@ -15,6 +15,7 @@ import {
   migrateInjectionSnapshotV5toV6,
   migrateInjectionSnapshotV6toV7,
   migrateInjectionSnapshotV7toV8,
+  migrateInjectionSnapshotV8toV9,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -43,11 +44,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 5, migrateInjectionSnapshotV5toV6);
   migrations.register("injection-snapshot", 6, migrateInjectionSnapshotV6toV7);
   migrations.register("injection-snapshot", 7, migrateInjectionSnapshotV7toV8);
+  migrations.register("injection-snapshot", 8, migrateInjectionSnapshotV8toV9);
   return migrations;
 }
 
 test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 8);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 9);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -104,7 +106,7 @@ test("v1 → v2 → … → v8 迁移链：补 approvalMode 默认 prompt，旧�
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 8);
+  assert.equal(migrated.version, 9);
   assert.equal(migrated.review, undefined);
   assert.equal(migrated.budget, undefined);
   assert.equal(migrated.verify, undefined);
@@ -142,8 +144,8 @@ test("v7 快照：可选的验证命令配置与失败自动分叉重试次数�
   );
   assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, retryOnFail: -1 }));
   const v6 = { ...makeSnapshot(), version: 6 };
-  const migrated = registry().migrate("injection-snapshot", v6, 8, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v6, version: 8 });
+  const migrated = registry().migrate("injection-snapshot", v6, 9, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v6, version: 9 });
 });
 
 // M8 S1 / S3（决策 081 / 087）：v8 顶层加本次尝试的预算，验证命令加来源字段
@@ -167,6 +169,29 @@ test("v8 快照：预算三项与验证命令来源可选；非正整数预算�
     })
   );
   const v7 = { ...makeSnapshot(), version: 7 };
-  const migrated = registry().migrate("injection-snapshot", v7, 8, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v7, version: 8 });
+  const migrated = registry().migrate("injection-snapshot", v7, 9, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v7, version: 9 });
+});
+
+test("v9 快照：采样温度可选、取值 0 到 2；v8 快照纯版本推进", () => {
+  const snapshot = makeSnapshot();
+  for (const temperature of [0, 0.7, 2]) {
+    assert.ok(
+      Value.Check(InjectionSnapshotSchema, {
+        ...snapshot,
+        model: { ...snapshot.model, temperature },
+      })
+    );
+  }
+  for (const temperature of [-0.1, 2.1, "0"]) {
+    assert.ok(
+      !Value.Check(InjectionSnapshotSchema, {
+        ...snapshot,
+        model: { ...snapshot.model, temperature },
+      })
+    );
+  }
+  const v8 = { ...makeSnapshot(), version: 8 };
+  const migrated = registry().migrate("injection-snapshot", v8, 9, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v8, version: 9 });
 });

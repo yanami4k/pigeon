@@ -6,8 +6,6 @@
 //   ④ 预检在内存完成、零写副作用，审批预览 diff、内容证据探针与执行共享同一段预检；
 //   ⑤ 成功回执与 hashline 版形状对齐（"已在 X 应用 1 处替换（+a −b 行）"），不回传 diff 或锚点。
 // 工具名沿用 edit_file，写档、串行执行、工作区路径围栏与 hashline 版一致。
-import { readFileSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
@@ -18,7 +16,8 @@ import {
   snapshotTag,
   splitContent,
 } from "./hashline.ts";
-import { resolveWorkspacePath } from "./paths.ts";
+import { asWorkspaceHost } from "./local-host.ts";
+import type { WorkspaceHost } from "./workspace-host.ts";
 import type {
   ContentEvidenceTool,
   PigeonAgentTool,
@@ -58,11 +57,13 @@ export const REPLACE_EDIT_DESCRIPTION =
   "old_string 须与文件原文逐字一致（含缩进与空白，不带行号前缀），且在文件里恰好出现一次，" +
   "出现多次时加上前后文使其唯一；old_string 与 new_string 相同会被拒绝。";
 
+// 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
 export function createReplaceEditTool(
-  workspaceRoot: string
+  workspace: string | WorkspaceHost
 ): PigeonAgentTool<typeof ReplaceEditParamsSchema, ReplaceEditDetails> &
   PreviewableTool &
   ContentEvidenceTool {
+  const host = asWorkspaceHost(workspace);
   return {
     name: "edit_file",
     label: "edit_file",
@@ -70,13 +71,13 @@ export function createReplaceEditTool(
     parameters: ReplaceEditParamsSchema,
     executionMode: "sequential",
     async preview(params) {
-      const plan = await planReplace(workspaceRoot, Value.Parse(ReplaceEditParamsSchema, params));
+      const plan = await planReplace(host, Value.Parse(ReplaceEditParamsSchema, params));
       return buildEditDiff(plan.args.path, plan.oldLines, [plan.applied]);
     },
     // 内容证据探针（M4 D5 哈希自动确证）：与执行同一段预检；失败返回 null，治理层降级为人工对账
     async probeContentEvidence(params) {
       try {
-        const plan = await planReplace(workspaceRoot, Value.Parse(ReplaceEditParamsSchema, params));
+        const plan = await planReplace(host, Value.Parse(ReplaceEditParamsSchema, params));
         return {
           path: plan.args.path,
           beforeHash: plan.beforeSnapshot,
@@ -89,16 +90,16 @@ export function createReplaceEditTool(
     hashContentTarget(params) {
       try {
         const args = Value.Parse(ReplaceEditParamsSchema, params);
-        return snapshotTag(readFileSync(resolveWorkspacePath(workspaceRoot, args.path), "utf8"));
+        return snapshotTag(host.readTextSync(args.path));
       } catch {
         return null;
       }
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<ReplaceEditDetails>> {
       const args = Value.Parse(ReplaceEditParamsSchema, params);
-      const plan = await planReplace(workspaceRoot, args);
+      const plan = await planReplace(host, args);
       signal?.throwIfAborted();
-      await writeFile(plan.resolvedPath, plan.newRaw, "utf8");
+      await host.writeText(plan.resolvedPath, plan.newRaw);
       const addedLines = plan.applied.added.length;
       const removedLines = plan.applied.removed.length;
       return {
@@ -122,12 +123,12 @@ export function createReplaceEditTool(
 }
 
 // 读 + 围栏 + 唯一匹配预检 + 内存落地（零写副作用）
-async function planReplace(workspaceRoot: string, args: ReplaceEditParams) {
-  const resolvedPath = resolveWorkspacePath(workspaceRoot, args.path);
-  if (!(await stat(resolvedPath)).isFile()) {
+async function planReplace(host: WorkspaceHost, args: ReplaceEditParams) {
+  const resolvedPath = await host.resolveExisting(args.path);
+  if (!(await host.isFile(resolvedPath))) {
     throw new ReplaceEditError(`不是常规文件：${args.path}`);
   }
-  const raw = await readFile(resolvedPath, "utf8");
+  const raw = await host.readText(resolvedPath);
   const split = splitContent(raw);
   const text =
     split.lines.join("\n") + (split.trailingNewline && split.lines.length > 0 ? "\n" : "");

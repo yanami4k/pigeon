@@ -18,6 +18,7 @@ import type { MaterializedSession } from "../state/materialize.ts";
 import { attemptOutcomeFacts, labelAttempt, type OutcomeLabel } from "../state/outcome-label.ts";
 import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
@@ -49,6 +50,8 @@ export interface HeadlessRunOptions {
   task: string;
   governanceRoot: string;
   workspaceRoot: string;
+  // 决策 098：执行端；缺省为 workspaceRoot 上的本地实现（容器工作区由调用方注入，workspaceRoot 为宿主侧占位目录）
+  workspaceHost?: WorkspaceHost;
   streamFn: StreamFn;
   yolo: boolean;
   provider?: string;
@@ -68,6 +71,10 @@ export interface HeadlessRunOptions {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
   maxOutputTokens?: number;
+  // M9：采样温度（缺省不设）；冻结进注入快照并随 run.started 落盘
+  temperature?: number;
+  // M9：任务源给的系统指令——追加进 system prompt 并随之冻结；任务说明（task）不受影响
+  taskDirective?: string;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令——冻结进注入快照；尝试收尾后在工作区独立执行并落本会话的通用验证记录
@@ -103,12 +110,28 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
 }
 
 export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
+  // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 只是宿主侧占位目录。分叉（失败自动重试、分支会话）要在它上面
+  // 打 git 快照，会话验证命令要在它里面执行——在占位目录上做只会得到假结果，装配前一律拒绝
+  if (options.workspaceHost !== undefined) {
+    const unsupported = [
+      (options.retryOnFail ?? 0) > 0 ? "失败自动分叉重试" : undefined,
+      options.verify !== undefined ? "会话验证命令" : undefined,
+      options.branchHeader !== undefined ? "分支会话" : undefined,
+    ].filter((entry): entry is string => entry !== undefined);
+    if (unsupported.length > 0) {
+      throw new Error(
+        `容器工作区暂不支持${unsupported.join("、")}：它们作用在宿主侧的工作区目录上，` +
+          "而容器执行端下那只是占位目录；目前只支持单次无人值守运行、由任务源判分"
+      );
+    }
+  }
   const sessionId = options.sessionId ?? newSessionId();
   const startedAt = Date.now();
   const handle = createDetachedRuntime({
     sessionId,
     governanceRoot: options.governanceRoot,
     workspaceRoot: options.workspaceRoot,
+    ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
     streamFn: options.streamFn,
     // 决策 067：三个入口的模型占位缺省统一为同一常量（真实模型元数据由 streamFn 插件提供）
     provider: options.provider ?? DEFAULT_MODEL_PLACEHOLDER.provider,
@@ -124,6 +147,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.memoryRoots !== undefined ? { memoryRoots: options.memoryRoots } : {}),
     ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
     ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
+    ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+    ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),

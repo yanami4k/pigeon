@@ -191,7 +191,13 @@ export function renderDistillReport(result: DistillCommandResult): string {
         (written.length > 0
           ? `：${written.map((item) => `${item.kind}/${item.name}（${item.contrast?.form ?? ""}）`).join("、")}`
           : "") +
-        (rejected.length > 0 ? ` ｜ 丢弃 ${rejected.length} 项` : "")
+        (rejected.length > 0 ? ` ｜ 丢弃 ${rejected.length} 项` : "") +
+        (group.distill?.persisted?.emptyReason !== undefined
+          ? ` ｜ 空结果（读了 ${group.distill.persisted.emptyReason.read.join("、")}）：${group.distill.persisted.emptyReason.why}`
+          : "") +
+        (group.distill?.persisted?.unparsable !== undefined
+          ? ` ｜ 不合格式：${group.distill.persisted.unparsable}`
+          : "")
     );
   }
   return lines.join("\n");

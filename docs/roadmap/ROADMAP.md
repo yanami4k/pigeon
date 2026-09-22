@@ -212,7 +212,8 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     （缺省 replace，可选 hashline，062；模式字面量在 edit-mode.ts，两套实现在
 │                     replace-edit.ts 与 hashline.ts）、run_command（exec 档，不经 shell，048）与 MCP server 启动计划
 │                     （复用 048 启动器，M5.7）、错误归类（先读错误对象标记，050）；
-│                     wrap.ts 是上游类型唯一桥接
+│                     执行端接口 workspace-host.ts 与本地实现 local-host.ts（M9，098：三个工作区工具只调接口，
+│                     不判断自己在哪执行；含写保护包装）；wrap.ts 是上游类型唯一桥接
 ├─ persistence/       只依赖 state（state 的存储实现）：JSONL Event Log 读写器（每会话一文件、
 │                     治理族 fsync、幂等索引、撕裂尾巴容忍、M5.5 起会话打开锁）、旁置内容文件
 │                     <sessionId>.messages.jsonl 读写（M5，037：先内容后 entry）、materializeSession =
@@ -222,7 +223,8 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     放权落点与风险分层）、审批排队、会话 grant 运行态存储
 ├─ execution/         依赖 state / persistence / tools，不触达 pi-runtime 与 Actor 层：冷恢复
 │                     recoverSession（哈希自动确证，唯一会写 resolution 的恢复动作）；
-│                     Durable Executor 待第二个真实执行体出现再抽（§3.6）
+│                     执行端接口的容器实现 container-host.ts（M9，098：经 docker CLI 进容器读写与执行，
+│                     超时与中止一律重启整个容器）；Durable Executor 待第二个真实执行体出现再抽（§3.6）
 ├─ memory/            依赖 state / persistence / tools，不触达 pi-runtime / application / execution /
 │                     Actor 层（M5，decisions.md 038 / 042）：内容级 Session Search 扫描器与
 │                     search_sessions / read_session_entry 两个 read 档工具、常驻 Memory 两层读取与
@@ -263,7 +265,9 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     skills / orchestration / mcp，不触达 Actor 层
 ├─ eval/              依赖 application 及以下，不触达 Actor 层（M6.5，decisions.md 046 / 057–060）：task.json 任务目录
 │                     加载、从任务 ref 开工作树的快照准备、验证资产回填与退出码三值验证器（eval.verified）、
-│                     三条件 runner（skillRoots 切换）、results.jsonl 与 report.md；由 cli 的 eval 子命令调用
+│                     三条件 runner（skillRoots 切换）、results.jsonl 与 report.md；由 cli 的 eval 子命令调用；
+│                     M9（102）起 runner 只认任务源接口 task-source.ts——自造冒烟题 local-source.ts 与外部基准
+│                     swebench-source.ts 各一个实现，可并行，错误行不占续跑键
 ├─ cli/               Actor：REPL 内联审批（四键）、/grants /revoke /grants save、trace /
 │                     replay / session list 只读渲染、resume 的参数解析与 IO 接线；装配根与
 │                     resume 流程在 application/（M2 S1，025——M4 记账的 cli 直连 execution
@@ -840,6 +844,13 @@ Outcome 判断优先级：
 - 执行隔离由容器提供，且与评测环境合一：外部基准的实例镜像内工作区已处在基准提交、依赖已装好，agent 进容器干活、完事取 diff 交官方判据判分。容器由此同时承担隔离与评测环境两职，原定的沙箱选型（083）并入本项。
 - 只替换不并存：工具不感知工作区形状，抽出执行端接口，本地与容器各一份实现，快照与分叉挂同一层（096、098）。
 - 统计口径：每题每条件跑一次、预算优先投向题数，二值配对用 McNemar 精确检验；回放验证仍按四组各 N 次，两处口径不同是设计（101）。
+
+第一阶段结论（decisions.md 119–124）：
+
+- 评测管道可信：判据经标准答案自检、三处答案泄漏（联网取上游修复版、镜像内 git 历史、未固定采样）已堵并量化（泄漏抬高约 18 个百分点），最终基线 50 题两轮通过 31 与 34，同条件噪声为 50 对翻转 7 题。
+- 学习闭环第一版按原设计运行后判定不可用，四个根因见 123；主张一改为"同一代码库上越用越省"。
+- 随后的浪费分析（审计第十五节）显示"越用越省"在知名仓库上无可测余量，第二版暂缓（124）。测量集无经验基线停在 70/99 道，逐题落盘可续跑。
+- 下一步：工程收尾（入库、README、可用性、许可证），再用同一套浪费分析在模型不熟且结构复杂的候选仓库上先量浪费，有余量再决定第二版。
 
 ### M10：外部 Memory Provider（v2 候选，本轮不做）
 

@@ -237,3 +237,45 @@ test("逐项校验：单项不合格（种类不存在、缺字段）只丢弃�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("空结果必须附理由（121）：写明读了哪几侧、为什么没有可学的；缺理由或漏报某一侧按不合格式留痕，有理由的空结果照实交回", () => {
+  const { root, bad, host, target } = setup();
+  try {
+    const log = new JsonlEventLog(join(root, ".pigeon", "sessions"), host);
+    const persist = (structured: unknown) =>
+      persistDistillerCandidates({
+        governanceRoot: root,
+        sink: log,
+        target,
+        distillSessionId: newSessionId(),
+        structured,
+        model: { provider: "p", id: "m" },
+        hostRunId: bad.runId,
+      });
+    const why = "两侧做法一致，差别只在测试是否恰好通过";
+    const explained = persist({
+      candidates: [],
+      emptyReason: { read: ["successful", "failed"], why },
+    });
+    assert.equal(explained.unparsable, undefined);
+    assert.deepEqual(explained.emptyReason, { read: ["successful", "failed"], why });
+    assert.equal(explained.written.length, 0);
+    // 缺理由、漏报一侧、理由为空：都不算合格的空结果
+    const bare = persist({ candidates: [] });
+    assert.match(bare.unparsable ?? "", /空结果必须附理由/);
+    const oneSide = persist({ candidates: [], emptyReason: { read: ["failed"], why } });
+    assert.match(oneSide.unparsable ?? "", /没有读成功侧/);
+    const blank = persist({
+      candidates: [],
+      emptyReason: { read: ["successful", "failed"], why: "" },
+    });
+    assert.match(blank.unparsable ?? "", /空结果必须附理由/);
+    log.close();
+    assert.equal(
+      materializeSession(join(root, ".pigeon", "sessions"), host).reviewUnparsables.length,
+      3
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

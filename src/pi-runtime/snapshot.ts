@@ -24,7 +24,10 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v7（M7，决策 071 / 079）：顶层增加验证命令配置 verify 与失败自动分叉重试次数 retryOnFail（按会话冻结）
 // v8（M8，决策 081 / 087）：顶层增加本次尝试的预算 budget（轮次、墙钟与 token 上限），verify 增来源字段——
 // 回放必须沿用被验证那次尝试的预算且不得放宽，预算因此必须在账本里可得（M7 之前只有 worker 尝试的派出记录有）
-export const INJECTION_SNAPSHOT_VERSION = 8;
+// v9（M9）：model 段增加采样温度 temperature（评测固定采样；缺省 = 未设，由 provider 决定）与"请求了但未生效"的
+// temperatureIgnored（推理开启时上游不把温度交给 provider），context 段增加任务源给的工作方式指令 taskDirective（原文，
+// 已拼进 systemPrompt；单列是为了回放与冻结项核对能取到原文）。v9 尚未入库，三个字段一次加齐、均可缺省
+export const INJECTION_SNAPSHOT_VERSION = 9;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -47,6 +50,15 @@ export const InjectionSnapshotSchema = Type.Object({
     thinkingLevel: Type.Optional(ThinkingLevelSchema),
     // 单轮输出上限（决策 063）：装配层包装 streamFn 传入的 maxTokens 配置值；v4 之前的快照缺省
     maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+    // 采样温度（M9）：装配层包装 streamFn 传入；缺省 = 未设。v8 之前的快照缺省
+    temperature: Type.Optional(Type.Number({ minimum: 0, maximum: 2 })),
+    // 请求了温度但未生效（推理开启）：如实记下请求值与原因，不记成 temperature
+    temperatureIgnored: Type.Optional(
+      Type.Object({
+        requested: Type.Number({ minimum: 0, maximum: 2 }),
+        reason: Type.Literal("reasoning-enabled"),
+      })
+    ),
   }),
   tools: Type.Object({
     policy: ToolPolicySchema,
@@ -56,6 +68,8 @@ export const InjectionSnapshotSchema = Type.Object({
   context: Type.Object({
     // 会话开始时拼好的完整 system prompt（基础提示 + 常驻 Memory 段 + Skill 目录段），冻结后不再变
     systemPrompt: Type.String(),
+    // 任务源给的工作方式指令原文（已追加在 systemPrompt 末尾；缺省 = 没有）
+    taskDirective: Type.Optional(Type.String({ minLength: 1 })),
   }),
   // 常驻 Memory 冻结清单（决策 042）：注入走 system prompt 追加段，不走 transformContext；
   // transformContext 只做只读观察（llm.request），并留给 M10 外部 Provider 的逐调用动态召回
@@ -111,3 +125,6 @@ export const migrateInjectionSnapshotV6toV7: Migration = (doc) => ({ ...doc, ver
 
 // v7 → v8：budget 与 verify.source 均可缺省，纯版本推进——v7 旧快照逐字有效（缺预算 = 当时没记，不补不猜）
 export const migrateInjectionSnapshotV7toV8: Migration = (doc) => ({ ...doc, version: 8 });
+
+// v8 → v9：temperature 可缺省（缺省 = 当时没设），纯版本推进
+export const migrateInjectionSnapshotV8toV9: Migration = (doc) => ({ ...doc, version: 9 });

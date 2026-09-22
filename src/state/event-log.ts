@@ -67,7 +67,8 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v12（M8，决策 081 / 082 / 087 / 089）：新增候选验证回执、候选决定、候选激活三族，worker 角色加 verifier，
 // git 工作树工作区加可选起点提交 baseCommit，run.started 载荷加可选预算块、验证命令加来源字段——
 // 全部加法式（新成员 / 可缺省字段），v11 旧记录逐字有效
-export const EVENT_LOG_VERSION = 12;
+// v13（M9）：run.started 载荷的 model 段加可选采样温度——加法式，v12 旧记录逐字有效
+export const EVENT_LOG_VERSION = 13;
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
 const ENVELOPE_PROPS = {
@@ -724,6 +725,8 @@ export const VerificationEnvironmentSchema = Type.Object(
         id: Type.String({ minLength: 1 }),
         thinkingLevel: Type.Optional(Type.String({ minLength: 1 })),
         maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+        // M9：回放沿用的采样温度（原尝试设过才在场；加法式，与 run.started 模型段同口径）
+        temperature: Type.Optional(Type.Number({ minimum: 0, maximum: 2 })),
       },
       { additionalProperties: false }
     ),
@@ -973,6 +976,9 @@ eventLogMigrations.register("event-log", 10, (doc) => ({
 // v11 → v12（M8）：加法式演进（新增候选三族、角色加 verifier、工作区加可选起点提交、
 // run.started 载荷加可选预算块与验证命令来源）——v11 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 11, (doc) => ({ ...doc, version: 12 }));
+
+// v12 → v13（M9）：加法式演进（run.started 的 model 段加可选采样温度）——v12 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 12, (doc) => ({ ...doc, version: 13 }));
 
 // 不可解析记录的 payload：旧名在场即搬到新名，其余字段原样；已是新名的原样返回
 function renameProducerField(payload: unknown): unknown {

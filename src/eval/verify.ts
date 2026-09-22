@@ -19,6 +19,7 @@ import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import { type LoadedEvalTask, TASK_DIR_TOKEN } from "./task.ts";
+import type { JudgeCommand } from "./task-source.ts";
 
 // 截断输出只留尾部（测试日志的结论在末尾）；上限与执行核心同一常量
 export { CHECK_OUTPUT_LIMIT_BYTES as VERIFIER_OUTPUT_LIMIT_BYTES } from "../execution/check-command.ts";
@@ -53,42 +54,84 @@ export function verifierCommand(task: LoadedEvalTask): string[] {
 
 export { judgeVerdict };
 
-// M7 S3（决策 071）：执行核心下沉到 execution/check-command.ts，与会话级验证命令共用；本函数只负责回填与环境变量
-export async function runVerifier(
+// 自造题的判据命令（决策 102 的本地实现）：先回填验证资产，再给出在工作区执行的验证器命令
+export function localJudge(
+  task: LoadedEvalTask,
+  workspaceRoot: string,
+  options: RunVerifierOptions = {}
+): () => Promise<JudgeCommand> {
+  return async () => {
+    let assets: string[] = [];
+    if (options.restoreFirst !== false) {
+      try {
+        assets = restoreAssets(task, workspaceRoot);
+      } catch (error) {
+        throw new Error(
+          `回填验证资产失败：${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+    return {
+      command: verifierCommand(task),
+      cwd: workspaceRoot,
+      timeoutMs: task.spec.verifier.timeoutMs,
+      env: { ...process.env, PIGEON_EVAL_TASK_DIR: task.dir },
+      assets,
+    };
+  };
+}
+
+// 执行判据命令（M7 S3，决策 071：执行核心在 execution/check-command.ts，与会话级验证命令共用）。
+// 备料失败、判据自身出错的约定退出码都记未判定——缺失的结果不支撑确定性结论
+export async function runJudge(
+  judge: () => Promise<JudgeCommand>,
+  commandHint: readonly string[]
+): Promise<VerifierOutcome> {
+  const startedAt = Date.now();
+  let spec: JudgeCommand;
+  try {
+    spec = await judge();
+  } catch (error) {
+    return {
+      ...finishCheck({
+        command: [...commandHint],
+        startedAt,
+        collected: collector(),
+        exitCode: null,
+        timedOut: false,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+      assets: [],
+    };
+  }
+  const outcome = await runCheckCommand({
+    command: spec.command,
+    cwd: spec.cwd,
+    timeoutMs: spec.timeoutMs,
+    ...(spec.env !== undefined ? { env: spec.env } : {}),
+  });
+  // 拉不起来的措辞沿用验证器口径
+  let error = outcome.error?.replace(/^命令拉不起来：/, "验证器拉不起来：");
+  if (
+    error === undefined &&
+    outcome.exitCode !== null &&
+    spec.undeterminedExitCodes?.includes(outcome.exitCode) === true
+  ) {
+    error = `判据自身出错（退出码 ${outcome.exitCode}）`;
+  }
+  return {
+    ...outcome,
+    ...(error !== undefined ? { error, verdict: judgeVerdict({ ...outcome, error }) } : {}),
+    assets: spec.assets,
+  };
+}
+
+export function runVerifier(
   task: LoadedEvalTask,
   workspaceRoot: string,
   options: RunVerifierOptions = {}
 ): Promise<VerifierOutcome> {
-  const command = verifierCommand(task);
-  const startedAt = Date.now();
-  let assets: string[] = [];
-  if (options.restoreFirst !== false) {
-    try {
-      assets = restoreAssets(task, workspaceRoot);
-    } catch (error) {
-      const message = `回填验证资产失败：${error instanceof Error ? error.message : String(error)}`;
-      return {
-        ...finishCheck({
-          command,
-          startedAt,
-          collected: collector(),
-          exitCode: null,
-          timedOut: false,
-          error: message,
-        }),
-        assets,
-      };
-    }
-  }
-  const outcome = await runCheckCommand({
-    command,
-    cwd: workspaceRoot,
-    timeoutMs: task.spec.verifier.timeoutMs,
-    env: { ...process.env, PIGEON_EVAL_TASK_DIR: task.dir },
-  });
-  // 拉不起来的措辞沿用验证器口径
-  const error = outcome.error?.replace(/^命令拉不起来：/, "验证器拉不起来：");
-  return { ...outcome, ...(error !== undefined ? { error } : {}), assets };
+  return runJudge(localJudge(task, workspaceRoot, options), verifierCommand(task));
 }
 
 // 自报完成（从账本判定，不让模型输出特殊标记）
@@ -121,8 +164,10 @@ export function selfReportedDone(session: MaterializedSession, runId: RunId): bo
 }
 
 export interface VerifyTaskRunInput {
-  task: LoadedEvalTask;
-  workspaceRoot: string;
+  taskId: string;
+  // 判据命令由任务源给出（决策 102）；commandHint 是备料失败时记进验证记录的命令
+  judge: () => Promise<JudgeCommand>;
+  commandHint: readonly string[];
   // 该次运行的治理根（会话文件在其 .pigeon/sessions 下）
   governanceRoot: string;
   sessionId: SessionId;
@@ -139,7 +184,7 @@ export interface VerificationResult extends VerifierOutcome {
 }
 
 export async function verifyTaskRun(input: VerifyTaskRunInput): Promise<VerificationResult> {
-  const outcome = await runVerifier(input.task, input.workspaceRoot);
+  const outcome = await runJudge(input.judge, input.commandHint);
   const sessionsDir = path.join(input.governanceRoot, ".pigeon", "sessions");
   const session = materializeSession(sessionsDir, input.sessionId, { content: false });
   const done = input.runId !== undefined && selfReportedDone(session, input.runId);
@@ -154,7 +199,7 @@ export async function verifyTaskRun(input: VerifyTaskRunInput): Promise<Verifica
           kind: "eval.verified",
           runId: input.runId,
           payload: {
-            taskId: input.task.spec.id,
+            taskId: input.taskId,
             command: outcome.command,
             exitCode: outcome.exitCode,
             ...(outcome.signal !== undefined ? { signal: outcome.signal } : {}),

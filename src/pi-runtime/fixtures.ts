@@ -81,6 +81,9 @@ export interface FakeReply {
   toolCalls?: FakeToolCallSpec[];
   // 模拟撞输出上限：done 的 stopReason 为 length（上游对 length 停止的消息不执行其中的工具调用）
   stopReason?: "length";
+  // 模拟 provider 在流里以错误收尾（连接中断、服务端报错）：start 之后直接发 error 事件，
+  // 终态消息 stopReason 为 error 且 usage 非零——与上游的合成失败消息（请求层抛错、usage 全零）是两条路
+  streamError?: string;
 }
 
 export interface FakeStreamBehavior {
@@ -141,6 +144,15 @@ async function pump(
   // 提前 abort 检查：纯 toolCall 回复没有 text 分片循环，不能在分片里才第一次看中止
   if (signal?.aborted) {
     stream.push({ type: "error", reason: "aborted", error: finalize(partial, [], "aborted") });
+    return;
+  }
+
+  if (reply.streamError !== undefined) {
+    stream.push({
+      type: "error",
+      reason: "error",
+      error: { ...finalize(partial, [], "error"), errorMessage: reply.streamError },
+    });
     return;
   }
 
@@ -241,7 +253,7 @@ async function pump(
 function finalize(
   partial: AssistantMessage,
   content: AssistantMessage["content"],
-  stopReason: "stop" | "toolUse" | "length" | "aborted"
+  stopReason: "stop" | "toolUse" | "length" | "aborted" | "error"
 ): AssistantMessage {
   return {
     ...partial,

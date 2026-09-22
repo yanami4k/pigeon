@@ -18,6 +18,7 @@ export type {
   ToolGovernance,
   ToolGovernanceFactory,
 } from "./governance.ts";
+export { isContextOverflowError } from "./overflow.ts";
 export {
   INJECTION_SNAPSHOT_VERSION,
   type InjectionSnapshot,

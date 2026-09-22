@@ -11,6 +11,7 @@
 | `spike-pi-tui/part-*.mjs` | pi-tui 渲染性能（A5a / A5b）、ConPTY 真实终端、光标与 resize | docs/spikes/spike-pi-tui.zh-CN.md |
 | `tui-acc/` | TUI 真实链路验收：ConPTY 桥 `PtyHost.cs`、驱动 `tui-driver*.mjs`、七个剧本 `run-*.mjs` | docs/audits/2026-09-12-m2-tui-acceptance.md |
 | `real-stream-fn.mjs`、`acc-driver.mjs`、`acc-run-*.mjs` | cli 真实模型链路验收（M3 / M4） | docs/audits/*-real-provider-acceptance.md |
+| `key-failover.mjs`、`key-failover.selfcheck.mjs` | `real-stream-fn.mjs` 的备用 key 逻辑（可选的 `KIMI_API_KEY_2`）：限额类错误才切 key 并保持使用，两个都撞限额时退避 5、15、45 秒，认证失败等配置问题不切；告警与错误文本不含 key。自检脱网运行：`node spikes/key-failover.selfcheck.mjs` | docs/audits/2026-09-20-m9-pipeline-c63a0bf.md |
 | `m5-thinking-probe.mjs` | Kimi For Coding 不设 / 设推理档位时是否返回 thinking 块（决策 045） | docs/audits/2026-09-13-m5-ba94b53.md |
 | `m5-reasoning-stream-fn.mjs`、`tui-acc/run-m5.mjs`、`tui-acc/run-m5c.mjs` | M5 TUI 真实链路验收：Memory 冻结与下个会话生效、load_skill 读取与拒绝、/search 与两个检索工具、/resume 历史渲染与 thinking | docs/audits/2026-09-13-m5-ba94b53.md |
 | `tui-acc/run-m55.mjs` | M5.5 TUI 真实链路验收：两个 worker 并行写各自工作树与审批来源、run_command 精确命令放权、强杀后恢复 worker 会话与深度 1、两个窗口恢复同一会话被拒 | docs/audits/2026-09-13-m5-5-8ac7266.md |

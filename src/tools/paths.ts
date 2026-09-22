@@ -5,6 +5,9 @@ import path from "node:path";
 
 export class WorkspacePathError extends Error {}
 
+// 目标不存在（其余围栏错误——越界、不可读——仍是父类）：调用方据此区分"没有这个文件"与"解析不了"
+export class WorkspacePathNotFoundError extends WorkspacePathError {}
+
 // path.relative 的结果是否表示越界：恰好是 ..、以 .. 加路径分隔符开头、或是绝对路径（win32 跨盘符时给出绝对路径）。
 // 只看"以 .. 开头"会把名字本身以两个点开头的合法文件或目录（..notes.txt、..cache/）误判为越界。
 // 路径围栏与 Skill 资源围栏共用这一口径
@@ -21,8 +24,11 @@ export function resolveWorkspacePath(workspaceRoot: string, inputPath: string): 
   let realTarget: string;
   try {
     realTarget = realpathSync(resolved);
-  } catch {
-    throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    throw code === "ENOENT" || code === "ENOTDIR"
+      ? new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`)
+      : new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
   }
   // path.relative 判包含关系：win32 下大小写不敏感，越界时为 .. 加分隔符开头或给出绝对路径
   const rel = path.relative(realRoot, realTarget);

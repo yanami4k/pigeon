@@ -7,8 +7,6 @@
 //   ④ 产出 unified-ish diff（details.diff）供审批展示（切片 4 消费）。
 // 不做：三方合并恢复（OMP session-aware recovery）、写盘原子性（env 层问题）、并发排队
 // （M3 决策 2：toolExecution 写死 sequential，任何时刻最多一个执行中的 call）。
-import { readFileSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -19,7 +17,8 @@ import {
   snapshotTag,
   splitContent,
 } from "./hashline.ts";
-import { resolveWorkspacePath } from "./paths.ts";
+import { asWorkspaceHost } from "./local-host.ts";
+import type { WorkspaceHost } from "./workspace-host.ts";
 import type {
   ContentEvidenceTool,
   PigeonAgentTool,
@@ -68,11 +67,13 @@ export interface EditFileDetails {
   removedLines: number;
 }
 
+// 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
 export function createEditFileTool(
-  workspaceRoot: string
+  workspace: string | WorkspaceHost
 ): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> &
   PreviewableTool &
   ContentEvidenceTool {
+  const host = asWorkspaceHost(workspace);
   return {
     name: "edit_file",
     label: "edit_file",
@@ -87,7 +88,7 @@ export function createEditFileTool(
     // 执行前预览（审批展示用）：与 execute 共享同一 planEdits 预检，但零副作用。
     // 注意 TOCTOU：预览与执行是两次独立读取，快照预检在执行时仍会兜底。
     async preview(params) {
-      const plan = await planEdits(workspaceRoot, Value.Parse(EditFileParamsSchema, params));
+      const plan = await planEdits(host, Value.Parse(EditFileParamsSchema, params));
       return buildEditDiff(plan.args.path, plan.split.lines, plan.applied);
     },
     // M4 S2 内容证据探针（D5 哈希自动确证）：与 execute/preview 共享同一 planEdits 预检，
@@ -95,7 +96,7 @@ export function createEditFileTool(
     // 治理层凭 intent 哈希缺省把悬账降级为人工对账，不阻断审批流
     async probeContentEvidence(params) {
       try {
-        const plan = await planEdits(workspaceRoot, Value.Parse(EditFileParamsSchema, params));
+        const plan = await planEdits(host, Value.Parse(EditFileParamsSchema, params));
         return {
           path: plan.args.path,
           beforeHash: plan.beforeSnapshot,
@@ -109,18 +110,18 @@ export function createEditFileTool(
     hashContentTarget(params) {
       try {
         const args = Value.Parse(EditFileParamsSchema, params);
-        return snapshotTag(readFileSync(resolveWorkspacePath(workspaceRoot, args.path), "utf8"));
+        return snapshotTag(host.readTextSync(args.path));
       } catch {
         return null;
       }
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<EditFileDetails>> {
       const args = Value.Parse(EditFileParamsSchema, params);
-      const plan = await planEdits(workspaceRoot, args);
+      const plan = await planEdits(host, args);
       const newRaw = joinContent(plan.newLines, plan.split);
       // 唯一的副作用落盘点（写前最后查一次 abort；写后不可回滚，见上游 edit 笔记 §6.3）
       signal?.throwIfAborted();
-      await writeFile(plan.resolvedPath, newRaw, "utf8");
+      await host.writeText(plan.resolvedPath, newRaw);
 
       const afterSnapshot = snapshotTag(newRaw);
       const diff = buildEditDiff(args.path, plan.split.lines, plan.applied);
@@ -150,12 +151,12 @@ export function createEditFileTool(
 
 // 读 + 围栏 + 快照预检 + 内存落地（零写副作用）；任一编辑失败整单抛错，文件零改动。
 // execute 与 preview 共享同一预检路径，保证"预览所见 = 执行所得"。
-async function planEdits(workspaceRoot: string, args: EditFileParams) {
-  const resolvedPath = resolveWorkspacePath(workspaceRoot, args.path);
-  if (!(await stat(resolvedPath)).isFile()) {
+async function planEdits(host: WorkspaceHost, args: EditFileParams) {
+  const resolvedPath = await host.resolveExisting(args.path);
+  if (!(await host.isFile(resolvedPath))) {
     throw new EditFileError(`不是常规文件：${args.path}`);
   }
-  const raw = await readFile(resolvedPath, "utf8");
+  const raw = await host.readText(resolvedPath);
   const beforeSnapshot = snapshotTag(raw);
   if (beforeSnapshot !== args.snapshot) {
     throw new EditFileError(

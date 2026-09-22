@@ -8,7 +8,7 @@
 //   未配置时清晰报错退出，不静默失败。
 import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   activationStartupWarnings,
   startupEnvironmentOf,
@@ -41,14 +41,18 @@ import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { createWorkerRuntimeFactory } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
-import { runEval } from "../eval/runner.ts";
+import { createTaskSourceRerunDispatcher, taskSourcePlanFor } from "../eval/container-rerun.ts";
+import { localTaskSource } from "../eval/local-source.ts";
+import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
+import { swebenchTaskSource, swebenchTemperature } from "../eval/swebench-source.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
-import { mainRepoRoot } from "../orchestration/worktree.ts";
+import { describeHead, mainRepoRoot } from "../orchestration/worktree.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { MIN_RERUN_N } from "../replay/verdict.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import {
+  DEFAULT_EDIT_MODE,
   EDIT_MODES,
   type EditMode,
   isEditMode,
@@ -504,8 +508,8 @@ async function verifyMain(argv: string[]): Promise<void> {
     ...(effectThreshold !== undefined ? { effectThreshold } : {}),
     keepWorktree,
     // 模型标识、推理档位与单轮输出上限都沿用被验证那次尝试（M8 收口补遗：收口成同一份依赖构造）
-    runtimeFactoryFor: (model) =>
-      verifierRuntimeFactory({ model, streamFn, persistThinking: flags.persistThinking }),
+    runtimeFactoryFor: (sampling) =>
+      verifierRuntimeFactory({ ...sampling, streamFn, persistThinking: flags.persistThinking }),
     onRerun: (run) => {
       writeOut(
         `[verify] ${run.arm} #${run.index} ｜ ${evalVerdictLabel(run.verdict)} ｜ ${run.status} ｜ ` +
@@ -772,7 +776,7 @@ async function evalMain(argv: string[]): Promise<void> {
   if (tasksDir === undefined || outDir === undefined || outDir === "") {
     throw new Error(usage);
   }
-  const flags = parseLaunchFlags(modelArgv, { usage });
+  const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
   const tasks = loadEvalTasks(tasksDir);
   if (tasks.length === 0) {
     throw new Error(`任务目录下没有任务：${tasksDir}`);
@@ -786,7 +790,7 @@ async function evalMain(argv: string[]): Promise<void> {
   };
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const summary = await runEval({
-    tasks,
+    source: localTaskSource(tasks),
     skill: { candidate: rootOf("candidate"), approved: rootOf("approved") },
     outDir,
     runs,
@@ -798,6 +802,7 @@ async function evalMain(argv: string[]): Promise<void> {
     ...(conditions !== undefined ? { conditions } : {}),
     ...(editMode !== undefined ? { editMode } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+    ...(flags.temperature !== undefined ? { temperature: flags.temperature } : {}),
     onResult: (line) => {
       writeOut(
         `[eval] ${line.taskId} ｜ ${line.condition} ｜ ${line.editMode ?? LEGACY_RESULT_EDIT_MODE} ｜ 第 ${line.attempt} 次 ｜ ${line.status} ｜ ` +
@@ -810,6 +815,264 @@ async function evalMain(argv: string[]): Promise<void> {
     `[eval] 完成：本次运行 ${summary.ran} 次，跳过已有 ${summary.skipped} 次；` +
       `结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`
   );
+}
+
+// pigeon eval swebench --dataset <JSONL> --out <输出目录> --work-dir <判分工作目录> --python <解释器> --stream-fn <模块路径>
+//   [--instances a,b,c] [--concurrency N] [--max-turns N] [--wall-clock-min N] [--container-memory <如 3g>] [--yolo] …：
+// 外部基准跑批（M9，决策 097 / 102）——任务源换成 SWE-bench Verified，其余与 pigeon eval 同一个 runner：只跑无经验条件，
+// 每题一次；agent 在该实例的评测容器里干活，收工取 diff 交官方判分器；重跑同一输出目录只补跑没有结果的题
+async function evalSwebenchMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval swebench --dataset <JSONL> --out <输出目录> --work-dir <判分工作目录> --python <解释器> " +
+    "--stream-fn <模块路径> [--instances a,b,c] [--concurrency N] [--temperature <0-2，缺省 0>] [--max-turns N] [--wall-clock-min N] " +
+    "[--container-memory <上限>] [--judge-script <路径>] [--judge-proxy <地址|gateway:端口>] [--edit-mode hashline|replace] [--yolo]";
+  const values = new Map<string, string>();
+  const own = new Set([
+    "--dataset",
+    "--out",
+    "--work-dir",
+    "--python",
+    "--instances",
+    "--concurrency",
+    "--max-turns",
+    "--wall-clock-min",
+    "--container-memory",
+    "--judge-script",
+    "--judge-proxy",
+    "--edit-mode",
+  ]);
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (own.has(arg)) {
+      const value = argv[++i];
+      if (value === undefined) {
+        throw new Error(`${arg} 需要取值（${usage}）`);
+      }
+      values.set(arg, value);
+    } else {
+      modelArgv.push(arg);
+      const next = argv[i + 1];
+      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
+        modelArgv.push(next);
+        i++;
+      }
+    }
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") {
+      throw new Error(`缺 ${name}（${usage}）`);
+    }
+    return value;
+  };
+  const positive = (name: string, fallback: number): number => {
+    const raw = values.get(name);
+    if (raw === undefined) {
+      return fallback;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`${name} 需要正整数（${usage}）`);
+    }
+    return value;
+  };
+  const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
+  const editModeValue = values.get("--edit-mode");
+  const memory = values.get("--container-memory");
+  const source = swebenchTaskSource({
+    datasetFile: required("--dataset"),
+    workDir: required("--work-dir"),
+    python: required("--python"),
+    judgeScript:
+      values.get("--judge-script") ??
+      fileURLToPath(new URL("../../eval/swebench/judge.py", import.meta.url)),
+    budget: {
+      maxTurns: positive("--max-turns", 80),
+      wallClockMs: positive("--wall-clock-min", 20) * 60_000,
+    },
+    ...(values.has("--instances")
+      ? {
+          instanceIds: required("--instances")
+            .split(",")
+            .filter((id) => id !== ""),
+        }
+      : {}),
+    ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
+    // 只作用于判分阶段的评测容器；agent 的工作区容器不受影响
+    ...(values.has("--judge-proxy") ? { judgeProxy: required("--judge-proxy") } : {}),
+  });
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
+  const summary = await runEval({
+    source,
+    outDir: required("--out"),
+    runs: 1,
+    conditions: ["none"],
+    concurrency: positive("--concurrency", 1),
+    streamFn,
+    yolo: flags.yolo,
+    provider: flags.provider,
+    modelId: flags.modelId,
+    ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+    ...(editModeValue !== undefined ? { editMode: parseEditMode(editModeValue, usage) } : {}),
+    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+    // 110：外部基准缺省固定温度 0，要改必须显式传 --temperature
+    temperature: swebenchTemperature(flags.temperature),
+    // 各路共用一个工作队列；模型服务持续不可用时暂停再取题，用满暂停次数就停止（退出码 3，之后同目录续跑）
+    outage: { ...DEFAULT_OUTAGE },
+    onResult: (line) => {
+      writeOut(
+        `[eval] ${line.taskId} ｜ ${line.status} ｜ ${evalVerdictLabel(line.verdict)} ｜ ${line.turns} 轮 ｜ ` +
+          `token ${line.usage.totalTokens} ｜ ${Math.round((line.wallMs ?? 0) / 1000)} 秒 ｜ 会话 ${line.sessionId}` +
+          `${line.error !== undefined ? ` ｜ ${line.error}` : ""}\n`
+      );
+    },
+  });
+  writeOut(
+    `[eval] 完成：本次运行 ${summary.ran} 次，跳过已有 ${summary.skipped} 次；` +
+      `结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`
+  );
+  if (summary.stopped !== undefined) {
+    writeOut(`[eval] 已停止取新题：${summary.stopped}\n`);
+    process.exitCode = 3;
+  }
+}
+
+// pigeon eval swebench-verify（M9）：对外部基准跑批里提炼出的候选做回放验证。被验证的尝试在容器工作区里跑的，
+// 没有宿主 git 工作树可开：回放由任务源对同一实例重新准备环境、照原尝试的尺子重跑、用任务源的判据命令判分；
+// 四组、固定 N、三值结论与回执同 pigeon verify（084、089）。候选所在的治理根即 --root
+async function evalSwebenchVerifyMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval swebench-verify --root <候选所在的治理根> --candidate <哈希前缀|种类/名字> --dataset <JSONL> " +
+    "--work-dir <判分工作目录> --python <解释器> --stream-fn <模块路径> [--n N（缺省 5）] [--effect 0-1（缺省 0.4）] " +
+    "[--concurrency N] [--edit-mode hashline|replace] [--container-memory <上限>] [--judge-script <路径>] " +
+    "[--judge-proxy <地址|gateway:端口>]";
+  const own = new Set([
+    "--root",
+    "--candidate",
+    "--dataset",
+    "--work-dir",
+    "--python",
+    "--n",
+    "--effect",
+    "--concurrency",
+    "--edit-mode",
+    "--container-memory",
+    "--judge-script",
+    "--judge-proxy",
+  ]);
+  const values = new Map<string, string>();
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) {
+      continue;
+    }
+    if (own.has(arg)) {
+      const value = argv[++i];
+      if (value === undefined) {
+        throw new Error(`${arg} 需要取值（${usage}）`);
+      }
+      values.set(arg, value);
+    } else {
+      modelArgv.push(arg);
+      const next = argv[i + 1];
+      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
+        modelArgv.push(next);
+        i++;
+      }
+    }
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") {
+      throw new Error(`缺 ${name}（${usage}）`);
+    }
+    return value;
+  };
+  const numberOf = (name: string): number | undefined => {
+    const raw = values.get(name);
+    if (raw === undefined) {
+      return undefined;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      throw new Error(`${name} 需要数值（${usage}）`);
+    }
+    return value;
+  };
+  const flags = parseLaunchFlags(modelArgv, { usage });
+  const memory = values.get("--container-memory");
+  const source = swebenchTaskSource({
+    datasetFile: required("--dataset"),
+    workDir: required("--work-dir"),
+    python: required("--python"),
+    judgeScript:
+      values.get("--judge-script") ??
+      fileURLToPath(new URL("../../eval/swebench/judge.py", import.meta.url)),
+    // 实例自带的预算在回放里不用：回放沿用原尝试冻结的预算
+    budget: { maxTurns: 100, wallClockMs: 20 * 60_000 },
+    ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
+    ...(values.has("--judge-proxy") ? { judgeProxy: required("--judge-proxy") } : {}),
+  });
+  const governanceRoot = prepareWorkspace(required("--root"));
+  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
+  const editModeValue = values.get("--edit-mode");
+  const editMode =
+    editModeValue !== undefined ? parseEditMode(editModeValue, usage) : DEFAULT_EDIT_MODE;
+  let harness: { commit: string; dirty: boolean };
+  try {
+    harness = describeHead(fileURLToPath(new URL(".", import.meta.url)));
+  } catch {
+    harness = { commit: "unknown", dirty: false };
+  }
+  const n = numberOf("--n");
+  const effect = numberOf("--effect");
+  const concurrency = numberOf("--concurrency");
+  const { record, errors } = await verifyCandidate({
+    governanceRoot,
+    selector: required("--candidate"),
+    // 回执环境里的判据：任务源的判分命令（数据集与判分脚本），超时取判分的缺省上限
+    verify: {
+      command: `任务源 ${source.name} 的判分命令（数据集 ${required("--dataset")}）`,
+      timeoutMs: 40 * 60_000,
+    },
+    harness,
+    planFor: taskSourcePlanFor(source.name),
+    dispatcherFor: ({ nameSeed }) =>
+      createTaskSourceRerunDispatcher({
+        hostGovernanceRoot: governanceRoot,
+        source,
+        streamFn,
+        editMode,
+        nameSeed,
+      }),
+    ...(n !== undefined ? { n } : {}),
+    ...(effect !== undefined ? { effectThreshold: effect } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    onRerun: (run) => {
+      writeOut(
+        `[verify] ${run.arm} #${run.index} ｜ ${evalVerdictLabel(run.verdict)} ｜ ${run.status} ｜ ${run.turns} 轮 ｜ ` +
+          `token ${run.totalTokens} ｜ ${Math.round(run.durationMs / 1000)} 秒 ｜ 会话 ${run.sessionId}` +
+          `${run.error !== undefined ? ` ｜ ${run.error}` : ""}\n`
+      );
+    },
+  });
+  writeOut(
+    `[verify] 结论：${record.conclusion}（正回放差 ${record.positiveDelta.toFixed(2)}，负回放差 ${record.negativeDelta.toFixed(2)}，` +
+      `每组 ${record.n} 次，门槛 ${record.effectThreshold}）；回执 ${record.id}\n`
+  );
+  for (const arm of record.arms) {
+    writeOut(`[verify] ${JSON.stringify(arm)}\n`);
+  }
+  for (const error of errors) {
+    process.stderr.write(
+      `[verify] 内部故障：${error instanceof Error ? error.message : String(error)}\n`
+    );
+  }
 }
 
 // --edit-mode 取值（决策 061）：单值 hashline 或 replace
@@ -881,6 +1144,14 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "compare") {
     evalCompareMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "swebench-verify") {
+    await evalSwebenchVerifyMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "swebench") {
+    await evalSwebenchMain(argv.slice(2));
     return;
   }
   if (argv[0] === "eval") {

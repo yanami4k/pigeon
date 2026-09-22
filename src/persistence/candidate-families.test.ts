@@ -166,7 +166,7 @@ test("候选三族：v11 会话文件经迁移链升到当前版本，旧记录�
     const path = join(dir, `${sessionId}.jsonl`);
     writeFileSync(path, `${JSON.stringify(v11)}\n`, "utf8");
     const records = readEventLogFile(path);
-    assert.equal(EVENT_LOG_VERSION, 12);
+    assert.equal(EVENT_LOG_VERSION, 13);
     assert.equal(records[0]?.version, EVENT_LOG_VERSION);
     assert.equal(records[0]?.kind, "attempt.verified");
   } finally {

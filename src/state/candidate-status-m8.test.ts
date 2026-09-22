@@ -46,7 +46,7 @@ function candidate(hash: string, supersedes?: string): ReviewerCandidate {
 }
 
 const envelope = () => ({
-  version: 12 as const,
+  version: 13 as const,
   id: newEntryId(),
   sessionId: SESSION,
   runId: RUN,
