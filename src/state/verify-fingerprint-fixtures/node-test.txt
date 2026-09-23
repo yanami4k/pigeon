@@ -1,0 +1,48 @@
+[31m✖ 合取：全过才通过 [90m(2.2503ms)[39m[39m
+[32m✔ 合取：空清单无法判定 [90m(0.2365ms)[39m[39m
+▶ 分步反馈
+  [31m✖ 失败步骤附输出末尾 [90m(0.2027ms)[39m[39m
+[31m✖ 分步反馈 [90m(0.5068ms)[39m[39m
+[34mℹ tests 3[39m
+[34mℹ suites 1[39m
+[34mℹ pass 1[39m
+[34mℹ fail 2[39m
+[34mℹ cancelled 0[39m
+[34mℹ skipped 0[39m
+[34mℹ todo 0[39m
+[34mℹ duration_ms 1562.2327[39m
+
+[31m✖ failing tests:[39m
+
+test at src\state\zz-probe.test.ts:5:1
+[31m✖ 合取：全过才通过 [90m(2.2503ms)[39m[39m
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  'fail' !== 'pass'
+  
+      at TestContext.<anonymous> [90m(file:///D:/code/pigeon-harness/.claude/worktrees/structured-memory/[39msrc/state/zz-probe.test.ts:6:10[90m)[39m
+  [90m    at Test.runInAsyncScope (node:async_hooks:214:14)[39m
+  [90m    at Test.run (node:internal/test_runner/test:1106:25)[39m
+  [90m    at Test.start (node:internal/test_runner/test:1003:17)[39m
+  [90m    at startSubtestAfterBootstrap (node:internal/test_runner/harness:358:17)[39m {
+    generatedMessage: [33mtrue[39m,
+    code: [32m'ERR_ASSERTION'[39m,
+    actual: [32m'fail'[39m,
+    expected: [32m'pass'[39m,
+    operator: [32m'strictEqual'[39m,
+    diff: [32m'simple'[39m
+  }
+
+test at src\state\zz-probe.test.ts:14:3
+[31m✖ 失败步骤附输出末尾 [90m(0.2027ms)[39m[39m
+  Error: 缺少输出末尾
+      at TestContext.<anonymous> [90m(file:///D:/code/pigeon-harness/.claude/worktrees/structured-memory/[39msrc/state/zz-probe.test.ts:15:11[90m)[39m
+  [90m    at Test.runInAsyncScope (node:async_hooks:214:14)[39m
+  [90m    at Test.run (node:internal/test_runner/test:1106:25)[39m
+  [90m    at Test.start (node:internal/test_runner/test:1003:17)[39m
+  [90m    at node:internal/test_runner/test:1516:71[39m
+  [90m    at node:internal/per_context/primordials:466:82[39m
+      at new Promise (<anonymous>)
+  [90m    at new SafePromise (node:internal/per_context/primordials:435:3)[39m
+  [90m    at node:internal/per_context/primordials:466:9[39m
+      at Array.map (<anonymous>)

@@ -1,0 +1,5 @@
+
+  [31merror[39m state-is-leaf: [1msrc/state/zz-probe.ts[22m → [1msrc/application/format.ts[22m
+[31m
+x 1 dependency violations (1 errors, 0 warnings). 430 modules, 3136 dependencies cruised.
+[39m

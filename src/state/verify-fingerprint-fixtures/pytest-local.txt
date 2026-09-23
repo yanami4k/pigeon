@@ -1,0 +1,43 @@
+[1m============================= test session starts =============================[0m
+platform win32 -- Python 3.13.2, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\22895\.claude\jobs\f9706aa6\tmp\pyfmt
+collected 5 items
+
+tests\strands\agent\test_demo.py [32m.[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31m                                   [100%][0m
+
+================================== FAILURES ===================================
+[31m[1m__________________________ test_registry_keeps_tools __________________________[0m
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_registry_keeps_tools[39;49;00m():[90m[39;49;00m
+        tools = [][90m[39;49;00m
+>       [94massert[39;49;00m tools == [[33m"[39;49;00m[33mx[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+[1m[31mE       AssertionError: assert [] == ['x'][0m
+[1m[31mE         [0m
+[1m[31mE         Right contains one more item: [0m[33m'[39;49;00m[33mx[39;49;00m[33m'[39;49;00m[90m[39;49;00m[0m
+[1m[31mE         Use -v to get more diff[0m
+
+[1m[31mtests\strands\agent\test_demo.py[0m:10: AssertionError
+[31m[1m_________________________ test_values_are_positive[2] _________________________[0m
+
+value = 2
+
+    [0m[37m@pytest[39;49;00m.mark.parametrize([33m"[39;49;00m[33mvalue[39;49;00m[33m"[39;49;00m, [[94m1[39;49;00m, [94m2[39;49;00m])[90m[39;49;00m
+    [94mdef[39;49;00m[90m [39;49;00m[92mtest_values_are_positive[39;49;00m(value):[90m[39;49;00m
+>       [94massert[39;49;00m value == [94m1[39;49;00m[90m[39;49;00m
+[1m[31mE       assert 2 == 1[0m
+
+[1m[31mtests\strands\agent\test_demo.py[0m:15: AssertionError
+[31m[1m____________________ TestAgentLoop.test_stops_on_end_turn _____________________[0m
+
+self = <test_demo.TestAgentLoop object at 0x000001D6D01BA350>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_stops_on_end_turn[39;49;00m([96mself[39;49;00m):[90m[39;49;00m
+>       [94mraise[39;49;00m [96mRuntimeError[39;49;00m([33m"[39;49;00m[33mloop did not stop[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+[1m[31mE       RuntimeError: loop did not stop[0m
+
+[1m[31mtests\strands\agent\test_demo.py[0m:20: RuntimeError
+[36m[1m=========================== short test summary info ===========================[0m
+[31mFAILED[0m tests/strands/agent/test_demo.py::[1mtest_registry_keeps_tools[0m - AssertionError: assert [] == ['x']
+[31mFAILED[0m tests/strands/agent/test_demo.py::[1mtest_values_are_positive[2][0m - assert 2 == 1
+[31mFAILED[0m tests/strands/agent/test_demo.py::[1mTestAgentLoop::test_stops_on_end_turn[0m - RuntimeError: loop did not stop
+[31m========================= [31m[1m3 failed[0m, [32m2 passed[0m[31m in 0.39s[0m[31m =========================[0m

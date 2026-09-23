@@ -1,0 +1,17 @@
+[96msrc/state/zz-probe.ts[0m:[93m1[0m:[93m10[0m - [91merror[0m[90m TS2305: [0mModule '"../application/format.ts"' has no exported member 'formatSessionLine'.
+
+[7m1[0m import { formatSessionLine } from "../application/format.ts";
+[7m [0m [91m         ~~~~~~~~~~~~~~~~~[0m
+
+[96msrc/state/zz-probe.ts[0m:[93m2[0m:[93m6[0m - [91merror[0m[90m TS2322: [0mType 'string' is not assignable to type 'number'.
+
+[7m2[0m let  unused: number = "s";
+[7m [0m [91m     ~~~~~~[0m
+
+[96msrc/state/zz-probe.ts[0m:[93m5[0m:[93m24[0m - [91merror[0m[90m TS2304: [0mCannot find name 'missingDigits'.
+
+[7m5[0m   return count.toFixed(missingDigits);
+[7m [0m [91m                       ~~~~~~~~~~~~~[0m
+
+
+Found 3 errors in the same file, starting at: src/state/zz-probe.ts[90m:1[0m

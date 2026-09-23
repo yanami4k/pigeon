@@ -1,0 +1,3 @@
+[1msrc\strands\agent\demo.py[0m[36m:[0m1[36m:[0m8[36m:[0m [1m[31mF401[0m [[36m*[0m] `os` imported but unused
+Found 1 error.
+[[36m*[0m] 1 fixable with the `--fix` option.
