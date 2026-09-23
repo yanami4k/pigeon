@@ -12,6 +12,50 @@ import {
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
 
+test("探针被杀（内存上限或超时，退出码 137）记为环境错误：不算父败或本败、不再做后续探针、清单单列且待定处理", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-facts-env-"));
+  try {
+    const dir = join(base, "human");
+    const commitAll = toyRepo(dir);
+    const start = commitAll({ "src/base.txt": "base\n" }, "Start");
+    // 父提交上没有 fix.txt 时，这个测试以 137 退出（模拟容器内存超限被杀）
+    const runaway = commitAll(
+      {
+        "src/fix.txt": "fixed\n",
+        "src/fix.test.sh": "[ -f src/fix.txt ] || exit 137\n",
+      },
+      "Fix runaway"
+    );
+    const human = gitHumanRepo(dir);
+    const refRoot = join(base, "ref");
+    mkdirSync(refRoot);
+    const reference = new ReferenceWorkspace(localStreamShell(refRoot));
+    await reference.init(human.bundle(runaway), runaway);
+    const facts = await collectStreamFacts({
+      human,
+      runtime: toyRuntime,
+      reference,
+      rangeStart: start,
+      rangeEnd: runaway,
+      options: { testTimeoutMs: 30_000 },
+    });
+    const c = facts.commits[0];
+    assert.equal(c?.probe, undefined, "不记父败或本败");
+    assert.match(c?.environmentError ?? "", /父提交探针被杀（退出码 137）/);
+    assert.equal(c?.formatOnly, undefined, "不再做后续探针");
+    assert.deepEqual(
+      facts.probes.map((p) => [p.kind, p.environmentError]),
+      [["parent", true]]
+    );
+    assert.throws(
+      () => manifestFromFacts({ human, runtime: toyRuntime, rangeStart: start, facts }),
+      /探针环境错误.*待定/
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("取事实与出清单：题、红测试对、只有格式、维护步、套用在合成仓库上端到端判对，探针原始记录随附", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-facts-"));
   try {

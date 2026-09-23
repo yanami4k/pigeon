@@ -161,6 +161,7 @@ interface CheckpointLine {
   probe?: TestProbe;
   nextPasses?: boolean;
   formatOnly?: boolean;
+  environmentError?: string;
   probes: ProbeRecord[];
 }
 
@@ -193,8 +194,16 @@ export interface ProbeRecord {
   exitCode: number | null;
   timedOut: boolean;
   passed: boolean;
+  // 被杀（内存上限或超时，退出码 137）：这次探针不作判定
+  environmentError: boolean;
   outputTail: string;
 }
+
+// 探针被杀：该提交记为环境错误，不再做其余探针
+class ProbeEnvironmentError extends Error {}
+
+// 容器内被 KILL 信号结束（内存上限触发的 OOM，或墙钟超时由 timeout 杀掉）
+const KILLED_EXIT = 137;
 
 function tail(text: string, max = 2000): string {
   return text.length <= max ? text : text.slice(text.length - max);
@@ -234,6 +243,7 @@ export async function collectStreamFacts(input: {
         throw new Error(`依赖切换失败（${base}）：${tail(sync.output, 500)}`);
     }
     const r = await reference.ws.run(runtime.testCommand(tests), options.testTimeoutMs);
+    const killed = r.exitCode === KILLED_EXIT || r.timedOut;
     const passed = r.exitCode === 0 && !r.timedOut;
     probes.push({
       sha,
@@ -243,8 +253,17 @@ export async function collectStreamFacts(input: {
       exitCode: r.exitCode,
       timedOut: r.timedOut,
       passed,
+      environmentError: killed,
       outputTail: tail(r.output),
     });
+    if (killed) {
+      const label = { parent: "父提交", commit: "本提交", next: "下一提交", format: "格式化" }[
+        kind
+      ];
+      throw new ProbeEnvironmentError(
+        `${label}探针被杀（退出码 ${r.exitCode}${r.timedOut ? "，超时" : ""}），测试 ${tests.join("、")}`
+      );
+    }
     return passed;
   };
 
@@ -264,6 +283,7 @@ export async function collectStreamFacts(input: {
       if (saved.probe !== undefined) facts.probe = saved.probe;
       if (saved.nextPasses !== undefined) facts.nextPasses = saved.nextPasses;
       if (saved.formatOnly !== undefined) facts.formatOnly = saved.formatOnly;
+      if (saved.environmentError !== undefined) facts.environmentError = saved.environmentError;
       probes.push(...saved.probes);
       log(`[${i + 1}/${range.length}] ${c.sha.slice(0, 9)} 取自断点`);
       continue;
@@ -288,31 +308,43 @@ export async function collectStreamFacts(input: {
       .filter((f) => kinds.get(f.path) === "test" && f.status !== "D")
       .map((f) => f.path);
     const touchesSource = files.some((f) => kinds.get(f.path) === "source");
-    if (tests.length > 0) {
-      const parentPasses = await runTests(c.sha, "parent", c.parent, c.sha, overlay, tests);
-      const commitPasses = await runTests(c.sha, "commit", c.sha, c.sha, [], tests);
-      facts.probe = { parentFails: !parentPasses, commitPasses };
-      const next = range[i + 1];
-      if (!commitPasses && next !== undefined) {
-        const testOps = overlay.filter((o) => o.kind === "test" || o.kind === "testaux");
-        facts.nextPasses = await runTests(c.sha, "next", next.sha, c.sha, testOps, tests);
+    try {
+      if (tests.length > 0) {
+        const parentPasses = await runTests(c.sha, "parent", c.parent, c.sha, overlay, tests);
+        const commitPasses = await runTests(c.sha, "commit", c.sha, c.sha, [], tests);
+        facts.probe = { parentFails: !parentPasses, commitPasses };
+        const next = range[i + 1];
+        if (!commitPasses && next !== undefined) {
+          const testOps = overlay.filter((o) => o.kind === "test" || o.kind === "testaux");
+          facts.nextPasses = await runTests(c.sha, "next", next.sha, c.sha, testOps, tests);
+        }
       }
+      const isTask = facts.probe?.parentFails === true && facts.probe.commitPasses;
+      if (touchesSource && !isTask)
+        facts.formatOnly = await formatOnly(reference, runtime, c, files, probes);
+    } catch (error) {
+      if (!(error instanceof ProbeEnvironmentError)) throw error;
+      // 环境错误的提交不留任何判定
+      delete facts.probe;
+      delete facts.nextPasses;
+      delete facts.formatOnly;
+      facts.environmentError = error.message;
     }
-    const isTask = facts.probe?.parentFails === true && facts.probe.commitPasses;
-    if (touchesSource && !isTask)
-      facts.formatOnly = await formatOnly(reference, runtime, c, files, probes);
     log(
       `[${i + 1}/${range.length}] ${c.sha.slice(0, 9)} ${
         facts.probe === undefined
           ? "无测试"
           : `父${facts.probe.parentFails ? "败" : "过"} 本${facts.probe.commitPasses ? "过" : "败"}`
-      }${facts.formatOnly === true ? " 只有格式" : ""}  ${facts.subject.slice(0, 60)}`
+      }${facts.formatOnly === true ? " 只有格式" : ""}${
+        facts.environmentError !== undefined ? ` 环境错误：${facts.environmentError}` : ""
+      }  ${facts.subject.slice(0, 60)}`
     );
     if (options.checkpointFile !== undefined) {
       const line: CheckpointLine = { sha: c.sha, probes: probes.slice(probesBefore) };
       if (facts.probe !== undefined) line.probe = facts.probe;
       if (facts.nextPasses !== undefined) line.nextPasses = facts.nextPasses;
       if (facts.formatOnly !== undefined) line.formatOnly = facts.formatOnly;
+      if (facts.environmentError !== undefined) line.environmentError = facts.environmentError;
       appendFileSync(options.checkpointFile, `${JSON.stringify(line)}\n`);
     }
   }
@@ -341,6 +373,7 @@ async function formatOnly(
     exitCode: r.exitCode,
     timedOut: r.timedOut,
     passed: same,
+    environmentError: false,
     outputTail: tail(r.output),
   });
   return same;

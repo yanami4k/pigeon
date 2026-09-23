@@ -34,6 +34,8 @@ export interface CommitFacts {
   nextPasses?: boolean;
   // 改了源代码的非题提交才有：对父提交跑格式化后是否与本提交逐字一致
   formatOnly?: boolean;
+  // 探针因内存上限或超时被杀（退出码 137）：记为环境错误，不作父败或本败判定
+  environmentError?: string;
 }
 
 export interface RepoProfile {
@@ -273,6 +275,15 @@ export function composeStreamManifest(input: {
   const { profile, commits } = input;
   const last = commits.at(-1);
   if (last === undefined) throw new Error("提交区间为空");
+  // 探针环境错误的提交不能定性：单列出来，处理方式待定之前不出清单
+  const envErrors = commits.filter((c) => c.environmentError !== undefined);
+  if (envErrors.length > 0) {
+    throw new Error(
+      `探针环境错误的提交，处理方式待定：${envErrors
+        .map((c) => `${c.sha.slice(0, 9)}（${c.environmentError}）`)
+        .join("；")}`
+    );
+  }
   const classified = commits.map((c) => classify(profile, c));
   const drafts: Draft[] = [];
   for (let i = 0; i < classified.length; i++) {

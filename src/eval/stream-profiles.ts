@@ -80,11 +80,12 @@ export const strandsProfile: RepoProfile = {
   },
   // 按其 CI 定义（python-test-lint.yml 与 pyproject 的 hatch 脚本）：格式检查、ruff、mypy、单测；
   // 单测只跑 tests/，需要网络的 tests_integ 不在其内。被测包以源码目录直接导入（不做可编辑安装），
-  // 测量副本里跑的才是副本自己的代码
+  // 测量副本里跑的才是副本自己的代码。仓库给 pytest 设了每条 90 秒的单测超时，这里只把超时的结束方式改为 thread：
+  // 缺省的信号方式打断不了异步循环里失控的用例（窗口内有一条在父提交上失控、4 分钟内吃满 4 GB）
   gateCommand: [
     "sh",
     "-c",
-    'cd strands-py && ruff format --check && ruff check && mypy ./src ./tests_typing && PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider',
+    'cd strands-py && ruff format --check && ruff check && mypy ./src ./tests_typing && PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider -o timeout_method=thread',
   ],
 };
 
@@ -187,14 +188,14 @@ export const strandsRuntime: StreamRepoRuntime = {
   testCommand: (tests) => [
     "sh",
     "-c",
-    'cd strands-py && PYTHONPATH="$PWD/src" python -m pytest -q -p no:cacheprovider "$@"',
+    'cd strands-py && PYTHONPATH="$PWD/src" python -m pytest -q -p no:cacheprovider -o timeout_method=thread "$@"',
     "sh",
     ...inStrands(tests),
   ],
   junitTestCommand: (tests, junitPath) => [
     "sh",
     "-c",
-    'cd strands-py && j="$1"; shift; PYTHONPATH="$PWD/src" python -m pytest -q -p no:cacheprovider -o junit_family=xunit1 --junitxml="$j" "$@"',
+    'cd strands-py && j="$1"; shift; PYTHONPATH="$PWD/src" python -m pytest -q -p no:cacheprovider -o timeout_method=thread -o junit_family=xunit1 --junitxml="$j" "$@"',
     "sh",
     junitPath,
     ...inStrands(tests),

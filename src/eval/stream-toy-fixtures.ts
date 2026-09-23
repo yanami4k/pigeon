@@ -39,7 +39,8 @@ export const toyRuntime: StreamRepoRuntime = {
     format: null,
     layer: null,
   },
-  testCommand: (tests) => ["sh", "-c", 'for t; do sh "$t" || exit 1; done', "sh", ...tests],
+  // 退出码原样传出（被杀的 137 不能被改成 1）
+  testCommand: (tests) => ["sh", "-c", 'for t; do sh "$t" || exit $?; done', "sh", ...tests],
   junitTestCommand: (tests, junitPath) => ["sh", "-c", JUNIT_SCRIPT, "sh", junitPath, ...tests],
   junitRelativeBase: "",
   formatCommand: (files) => [
