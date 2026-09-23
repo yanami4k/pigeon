@@ -4,24 +4,19 @@
 // 续跑（078 / 077）：从分叉点之前最近的快照开独立工作树（沿用工作树管理），以 buildSessionContext 还原的分支消息作为
 // Agent 初始状态；分支是新的 Pigeon 会话，会话头指向来源会话与分叉点。分叉点末条是用户消息或工具结果时不给新输入直接续跑，
 // 末条是助手消息时必须给新输入。非 git 工作区发起分叉明确报错，不降级，也不留任何记录。
-// 失败自动分叉重试（079）：尝试标为失败时从本次任务开始处（该 Run 第 1 条）分叉重试，最多 K 次，不注入任何提示；
-// 叶子验证完成后自动提炼这组分叉（来源侧与各分支共享同一前缀，只喂一次）。
+// 失败自动分叉重试（079）：尝试标为失败时从本次任务开始处（该 Run 第 1 条）分叉重试，最多 K 次，不注入任何提示。
 
-import { contrastTarget } from "../distillation/target.ts";
 import {
   type Checkpointer,
   createCheckpointer,
   isGitWorkspace,
   NotGitWorkspaceError,
 } from "../orchestration/checkpoint.ts";
-import type { WorkerRuntimeFactory } from "../orchestration/workers.ts";
 import { addWorktree, mainRepoRoot } from "../orchestration/worktree.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { AgentMessage } from "../pi-runtime/index.ts";
 import type { SessionTree } from "../pi-runtime/session-tree.ts";
-import type { ReviewGate } from "../review/scheduler.ts";
 import { resolveCheckpointBefore } from "../state/checkpoint-ref.ts";
-import { buildForkGroup, selectContrast } from "../state/episode.ts";
 import type {
   CheckpointRef,
   ForkPoint,
@@ -30,8 +25,6 @@ import type {
 } from "../state/event-log.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
-import { type AutoVerifyWiring, autoVerifyCandidates } from "./auto-verify.ts";
-import { createDistillDispatcher, type DistillOutcome } from "./distill-runtime.ts";
 import { type HeadlessRunOptions, runHeadlessOnce } from "./headless-core.ts";
 import {
   acquireSessionTree,
@@ -237,84 +230,11 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
   };
 }
 
-export interface DistillWiring {
-  createRuntime: WorkerRuntimeFactory;
-  gate?: ReviewGate;
-  // M8（决策 086）：提炼落库后自动验证新候选；缺省关（开关由 Actor 显式拨）
-  autoVerify?: AutoVerifyWiring;
-}
-
-// 分叉组提炼：来源侧与从同一分叉点长出的全部分支成组，选对后提炼；记录写回来源会话文件
-export async function distillForkGroup(input: {
-  governanceRoot: string;
-  sourceSessionId: SessionId;
-  sourceLog?: JsonlEventLog;
-  forkPoint: ForkPoint;
-  distill: DistillWiring;
-}): Promise<{ distill?: DistillOutcome; skip?: string; errors: unknown[] }> {
-  const dir = sessionsDirOf(input.governanceRoot);
-  const source = materializeSession(dir, input.sourceSessionId, { content: false });
-  const branches = source.sessionForkeds
-    .filter(
-      (record) =>
-        record.forkPoint.runId === input.forkPoint.runId &&
-        record.forkPoint.runSeq === input.forkPoint.runSeq
-    )
-    .map((record) => materializeSession(dir, record.branchSessionId, { content: false }))
-    .filter((branch) => branch.branchHeader !== undefined);
-  if (branches.length === 0) {
-    return { skip: "no-contrast", errors: [] };
-  }
-  const group = buildForkGroup({ governanceRoot: input.governanceRoot, source, branches });
-  const selection = selectContrast(group.attempts);
-  // 不提炼的原因随返回值交给调用方（决策 128：不再落提炼跳过记录，也就不必为此打开来源会话文件）
-  if (selection.skip !== undefined) {
-    return { skip: selection.skip, errors: [] };
-  }
-  const ownsLog = input.sourceLog === undefined;
-  const log = input.sourceLog ?? new JsonlEventLog(dir, input.sourceSessionId);
-  try {
-    const dispatcher = createDistillDispatcher({
-      governanceRoot: input.governanceRoot,
-      hostSessionId: input.sourceSessionId,
-      hostLog: log,
-      parentPolicy: { allow: [], deny: [], approvalMode: "prompt" },
-      createRuntime: input.distill.createRuntime,
-      ...(input.distill.gate !== undefined ? { gate: input.distill.gate } : {}),
-    });
-    const distilled = await dispatcher.distill(
-      contrastTarget({
-        kind: "fork",
-        selection,
-        sharedPrefix: { governanceRoot: input.governanceRoot, ...group.sharedPrefix },
-        task: {
-          governanceRoot: input.governanceRoot,
-          sessionId: input.sourceSessionId,
-          runId: input.forkPoint.runId,
-        },
-      })
-    );
-    // M8（决策 086）：分叉叶子验证完成后自动提炼；开着自动验证时把刚落库的候选一并验掉。
-    // 自动验证的内部故障要交出去（M8 收口补遗：此前整个返回值被丢掉，错误清单无人收，
-    // 与并行派发那条路径 push 进错误清单的口径也不一致）
-    const auto = await autoVerifyCandidates(input.distill.autoVerify, distilled.persisted);
-    return { distill: distilled, errors: auto.errors };
-  } finally {
-    if (ownsLog) {
-      log.close();
-    }
-  }
-}
-
 export interface RetryOutcome {
   retries: ForkBranchResult[];
-  distill?: DistillOutcome;
-  skip?: string;
-  // 提炼与自动验证过程里的内部故障：不吞掉，交给调用方按 080 的口径告警
-  errors: unknown[];
 }
 
-// 失败自动分叉重试（079）：从本次任务开始处分叉，最多 K 次，某次不再是失败即停；叶子验证完成后自动提炼
+// 失败自动分叉重试（079）：从本次任务开始处分叉，最多 K 次，某次不再是失败即停
 export async function runRetryOnFail(input: {
   governanceRoot: string;
   sourceSessionId: SessionId;
@@ -324,7 +244,6 @@ export async function runRetryOnFail(input: {
   run: ForkRunOptions;
   // 来源会话的运行面还在时传入它的快照器实例（同一会话只能有一个实例）
   checkpointer?: Checkpointer;
-  distill?: DistillWiring;
 }): Promise<RetryOutcome> {
   const forkPoint: ForkPoint = { runId: input.runId, runSeq: 1 };
   const results: ForkBranchResult[] = [];
@@ -343,16 +262,5 @@ export async function runRetryOnFail(input: {
       break;
     }
   }
-  const leaf = results.at(-1);
-  if (input.distill === undefined || leaf === undefined || !leaf.verified) {
-    return { retries: results, errors: [] };
-  }
-  const distilled = await distillForkGroup({
-    governanceRoot: input.governanceRoot,
-    sourceSessionId: input.sourceSessionId,
-    ...(input.sourceLog !== undefined ? { sourceLog: input.sourceLog } : {}),
-    forkPoint,
-    distill: input.distill,
-  });
-  return { retries: results, ...distilled };
+  return { retries: results };
 }

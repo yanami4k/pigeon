@@ -1,6 +1,6 @@
 // 退役记录种类（决策 128）：候选筛查、提炼跳过、固化升格、固化移除四种记录停写并移出记录并集。
 // 旧会话文件里的这四种记录在读取边界、schema 校验之前跳过——任何版本都跳过，不算损坏，
-// 不进记录集，因而也不出现在物化、候选状态、trace、replay 与执行编号幂等索引里。
+// 不进记录集，因而也不出现在物化、trace、replay 与执行编号幂等索引里。
 // 夹具：每种各取首次引入时的版本与最后写入时的 v13 各一条，外加一条形状残缺的，
 // 与保留下来的记录混排在同一个会话文件里读回。
 import assert from "node:assert/strict";
@@ -10,7 +10,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runReplayCommand } from "../cli/replay.ts";
 import { runTraceCommand } from "../cli/trace.ts";
-import { projectCandidates } from "../state/candidate-status.ts";
 import { EVENT_LOG_VERSION, RETIRED_EVENT_KINDS } from "../state/event-log.ts";
 import {
   newEntryId,
@@ -194,15 +193,9 @@ for (const kind of Object.keys(RETIRED_FIXTURES)) {
   });
 }
 
-test("退役记录不出现在任何视图里：候选状态、trace 与 replay 都只读保留下来的记录", () => {
+test("退役记录不出现在任何视图里：trace 与 replay 都只读保留下来的记录", () => {
   const file = writeSessionFile(Object.keys(RETIRED_FIXTURES));
   try {
-    const session = materializeSession(file.sessionsDir, file.sessionId);
-    assert.equal(
-      projectCandidates(session)[0]?.status,
-      "SecurityScanned",
-      "带命中的旧筛查记录不影响状态"
-    );
     const trace = runTraceCommand({ root: file.root, sessionId: file.sessionId });
     assert.ok(!trace.includes("命中"), trace);
     assert.ok(!trace.includes(file.phantomRunId), trace);

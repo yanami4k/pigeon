@@ -153,34 +153,13 @@ export function resolveWorkerRef(workers: readonly WorkerStatus[], ref: string):
   return found;
 }
 
-// M7（决策 069 / 074）：并行同任务派发的收尾摘要——各尝试标签、提炼结果或跳过原因
+// M7（决策 069）：并行同任务派发的收尾摘要——各尝试的会话与标签
 export function renderAttemptGroupOutcome(result: {
   taskKey: string;
   attempts: ReadonlyArray<{ sessionId: string; label: string }>;
-  skip?: string;
-  distill?: {
-    distillSessionId: string;
-    status: string;
-    persisted?: {
-      written: ReadonlyArray<{ kind: string; name: string }>;
-      rejected: readonly unknown[];
-    };
-  };
 }): string {
-  const lines = [
+  return [
     `== 并行尝试收尾 ｜ 任务标识 ${result.taskKey} ==`,
     ...result.attempts.map((attempt) => `  会话 ${attempt.sessionId} ｜ ${attempt.label}`),
-  ];
-  if (result.skip !== undefined) {
-    lines.push(`  不提炼：${result.skip}`);
-  } else if (result.distill !== undefined) {
-    const written = result.distill.persisted?.written ?? [];
-    lines.push(
-      `  提炼 ${result.distill.distillSessionId} ｜ ${workerStateLabel(result.distill.status)} ｜ 候选 ${written.length} 个` +
-        (written.length > 0
-          ? `：${written.map((item) => `${item.kind}/${item.name}`).join("、")}`
-          : "")
-    );
-  }
-  return lines.join("\n");
+  ].join("\n");
 }

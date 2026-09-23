@@ -1,5 +1,5 @@
 // 主会话的分叉接线（M7 S6，决策 077 / 079）：
-// - --retry-on-fail 解析、按会话冻结；主会话一次尝试验证为失败后在后台从任务开始处分叉重试，叶子验证后自动提炼；
+// - --retry-on-fail 解析、按会话冻结；主会话一次尝试验证为失败后在后台从任务开始处分叉重试；
 // - 分叉后来源会话此后的 Run 实时写穿进会话树，与由账本重建的结果一致；恢复一个已在树里的会话同样接上写穿；
 // - 手动分叉命令 /fork [--at <条目号> | --at <Run 号前缀>:<条目号>] ["新输入"]：缺省分叉点是最近一次 Run 的任务开始处。
 import assert from "node:assert/strict";
@@ -11,7 +11,6 @@ import { test } from "node:test";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { openSessionTree, TREE_MAIN_LANE } from "../pi-runtime/session-tree.ts";
-import { createReviewGate } from "../review/scheduler.ts";
 import { newSessionId } from "../state/ids.ts";
 import { parseForkCommand, resolveForkPoint, runForkCommand } from "./fork-command.ts";
 import { parseLaunchFlags } from "./launch-flags.ts";
@@ -19,7 +18,6 @@ import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import { rebuildSessionTree } from "./session-tree.ts";
-import { createWorkerRuntimeFactory } from "./workers.ts";
 
 const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
@@ -81,7 +79,7 @@ test("启动参数：--retry-on-fail 取非负整数，缺省 0；未允许的�
   assert.throws(() => parseLaunchFlags(["--retry-on-fail", "1"], { usage: "u" }), /未知参数/);
 });
 
-test("主会话 --retry-on-fail 1：失败后后台分叉重试、叶子验证后自动提炼；分叉后来源会话的新 Run 实时写穿，与重建一致", async () => {
+test("主会话 --retry-on-fail 1：失败后后台分叉重试；分叉后来源会话的新 Run 实时写穿，与重建一致", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const sessionId = newSessionId();
@@ -94,19 +92,6 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试、叶子验证�
         { text: "第二个问题的回答" },
       ],
     });
-    const lesson = {
-      candidates: [
-        {
-          kind: "skill",
-          name: "verify-target",
-          summary: "核对目标文本",
-          strength: 0.5,
-          form: "lesson",
-          content: "---\nname: verify-target\ndescription: 教训\n---\n核对目标文本\n",
-          evidence: { failed: [2] },
-        },
-      ],
-    };
     const opened = await openSessionRuntime({
       governanceRoot: dir,
       sessionId,
@@ -116,15 +101,6 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试、叶子验证�
       homeDir: home,
       verify: { command: `${NODE} check.mjs`, timeoutMs: 30_000 },
       retryOnFail: 1,
-      distill: {
-        createRuntime: createWorkerRuntimeFactory({
-          provider: "custom",
-          modelId: "custom",
-          homeDir: home,
-          streamFnFor: () => createFakeStreamFn({ replies: [{ text: JSON.stringify(lesson) }] }),
-        }),
-        gate: createReviewGate(),
-      },
     });
     let branchId: string | undefined;
     try {
@@ -136,7 +112,6 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试、叶子验证�
       branchId = afterRetry.sessionForkeds[0]?.branchSessionId;
       assert.ok(branchId !== undefined, "失败后分叉重试");
       assert.equal(afterRetry.sessionForkeds[0]?.trigger, "retry-on-fail");
-      assert.equal(afterRetry.candidateProposeds[0]?.candidate.contrast?.form, "lesson");
       // 分叉后来源会话继续：新 Run 实时写穿进 main 通道
       await opened.bundle.adapter.run("再问一个问题");
       await opened.tree?.idle();

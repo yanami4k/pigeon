@@ -1,47 +1,34 @@
 // worker 角色与委派策略（M5.5 S2，决策 040）：角色是参数不是执行体；worker 策略只能从父策略里挑子集——
 // allow 只缩（角色默认工具 ∩ 父 allow，再剔除父 deny），deny 只增（原样继承父 deny），审批模式不升级
-// （父 prompt 不派 yolo 子）。assertPolicySubset 是构造之外的第二道校验，派出前必过，豁免集合按角色取（040 修订）。
+// （父 prompt 不派 yolo 子）。assertPolicySubset 是构造之外的第二道校验，派出前必过。
+// 第一版学习闭环退役（决策 137 / 158）：reviewer、distiller、verifier 三个角色停用、不再派出；
+// 账本里的角色取值（WorkerRoleSchema）保留，旧会话记录照常读取。
 import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
-import { DISTILL_ENTRY_TOOL, DISTILL_SNAPSHOT_TOOL } from "../state/distill.ts";
 import type { DelegatedPolicy, WorkerRole } from "../state/event-log.ts";
-import { REVIEW_ENTRY_TOOL, REVIEW_SNAPSHOT_TOOL } from "../state/review.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 
 export class WorkerPolicyError extends Error {}
 
-export const WORKER_ROLES: readonly WorkerRole[] = [
-  "reviewer",
-  "explorer",
-  "implementer",
-  "tester",
-  "distiller",
-  "verifier",
-];
+// 可派出的角色（写入侧）：账本角色取值的子集
+export type ActiveWorkerRole = Extract<WorkerRole, "explorer" | "implementer" | "tester">;
+
+export const WORKER_ROLES: readonly ActiveWorkerRole[] = ["explorer", "implementer", "tester"];
 
 // 角色默认工具（ROADMAP §M5.5 角色表）；tester 的 run_command 另受 .pigeon/commands.json 角色清单限定（048）
-export const ROLE_TOOLS: Readonly<Record<WorkerRole, readonly string[]>> = {
-  // M6（决策 064 子裁决 ⑤）：Reviewer 只读被审的那一次 Run 的冻结快照，不做跨会话检索；
-  // 白名单只有这两个只读工具，任何写档、终端、消息与浏览器工具一律不在其中
-  reviewer: [REVIEW_SNAPSHOT_TOOL, REVIEW_ENTRY_TOOL],
+export const ROLE_TOOLS: Readonly<Record<ActiveWorkerRole, readonly string[]>> = {
   explorer: ["read_file", SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL],
   implementer: ["read_file", "edit_file"],
   tester: ["read_file", "run_command"],
-  // M7（决策 074）：提炼器只读这组尝试的冻结对比快照与按侧回查原文，不给任何写、终端与跨会话检索工具
-  distiller: [DISTILL_SNAPSHOT_TOOL, DISTILL_ENTRY_TOOL],
-  // M8（决策 082 / 083）：验证器在独立工作树里重执行被验证那次尝试，故拿的是写代码那一组工具；
-  // 命令档工具另受 .pigeon/commands.json 的 verifier 清单限定（083：只在固化命令规则内放行）——
-  // 这不是隔离，放行一条脚本命令即等于放行该脚本能做的一切，网络亦不受限，真正的断网与文件白名单归 M9 沙箱
-  verifier: ["read_file", "edit_file", "run_command"],
 };
 
-// 角色表的推理档位列（决策 050）：在场即覆盖启动参数的全局值，缺省继承全局。第一版四个角色都继承
+// 角色表的推理档位列（决策 050）：在场即覆盖启动参数的全局值，缺省继承全局。现有角色都继承
 export const ROLE_THINKING_LEVELS: Readonly<Partial<Record<WorkerRole, ThinkingLevel>>> = {};
 
 // 角色表的模型接入覆盖列（M6，决策 064 子裁决 ③）：在场即覆盖主会话的模型接入与标识，缺省继承。
 // streamFnSpec 是插件模块说明符，由装配层预先加载成 StreamFn（工厂本身同步，不在此处做 IO）；
-// provider 与 modelId 只是身份标签，进注入快照与 run.started。第一版四个角色都留空
+// provider 与 modelId 只是身份标签，进注入快照与 run.started。现有角色都留空
 export interface RoleModelOverride {
   streamFnSpec?: string;
   provider?: string;
@@ -50,26 +37,14 @@ export interface RoleModelOverride {
 
 export const ROLE_MODEL_OVERRIDES: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>> = {};
 
-export function isWorkerRole(value: string): value is WorkerRole {
+export function isWorkerRole(value: string): value is ActiveWorkerRole {
   return (WORKER_ROLES as readonly string[]).includes(value);
 }
 
-// M6（决策 064 子裁决 ⑤）：绑定被审 Run 的只读快照工具。它们不在主会话的工具清单里（主会话不需要读自己的快照），
-// 只读、不写任何东西、作用域只限父会话自己的那一次 Run，故不受"子策略必须在父 allow 里"的约束；
-// 父策略的 deny 照旧生效，其余工具一律照常受子集约束
-export const SCOPED_REVIEW_TOOLS: readonly string[] = [REVIEW_SNAPSHOT_TOOL, REVIEW_ENTRY_TOOL];
-
-// M7（决策 074）：提炼器的两个只读工具与审阅快照工具同构——只读、作用域只限一组尝试、不在主会话工具清单里，
-// 同样豁免子集约束；父策略的 deny 照旧生效
-export const SCOPED_DISTILL_TOOLS: readonly string[] = [DISTILL_SNAPSHOT_TOOL, DISTILL_ENTRY_TOOL];
-
-// 按角色豁免的作用域只读工具：只有对应角色能拿到
-const SCOPED_ROLE_TOOLS: Readonly<Partial<Record<WorkerRole, readonly string[]>>> = {
-  reviewer: SCOPED_REVIEW_TOOLS,
-  distiller: SCOPED_DISTILL_TOOLS,
-};
-
-export function deriveWorkerPolicy(parent: ToolPolicyLike, role: WorkerRole): DelegatedPolicy {
+export function deriveWorkerPolicy(
+  parent: ToolPolicyLike,
+  role: ActiveWorkerRole
+): DelegatedPolicy {
   const deny = [...new Set(parent.deny)];
   // M5.7 S4：implementer 另继承父策略里的 MCP 工具（外部写工具照样逐次审批）；其余角色不继承
   const inherited =
@@ -77,24 +52,15 @@ export function deriveWorkerPolicy(parent: ToolPolicyLike, role: WorkerRole): De
       ? parent.allow.filter((tool) => tool.startsWith(`${MCP_TOOL_PREFIX}__`))
       : [];
   const allow = [...ROLE_TOOLS[role], ...inherited].filter(
-    (tool) =>
-      (parent.allow.includes(tool) || (SCOPED_ROLE_TOOLS[role]?.includes(tool) ?? false)) &&
-      !deny.includes(tool)
+    (tool) => parent.allow.includes(tool) && !deny.includes(tool)
   );
   return { allow, deny, approvalMode: parent.approvalMode };
 }
 
-// 第二道校验（决策 040 修订）：豁免集合按角色取，与发放侧同一张表——Reviewer 只豁免审阅的两个只读工具，
-// 提炼器只豁免提炼的两个。用合并集合会让第二道校验比发放侧更宽，拦不住发放侧最易犯的错
-// （新增只读角色时把作用域工具发串），而角色还会继续增加。
-export function assertPolicySubset(
-  child: ToolPolicyLike,
-  parent: ToolPolicyLike,
-  role: WorkerRole
-): void {
-  const exempt = SCOPED_ROLE_TOOLS[role] ?? [];
+// 第二道校验（决策 040 修订）：子策略的 allow 必须全在父 allow 里且不碰父 deny
+export function assertPolicySubset(child: ToolPolicyLike, parent: ToolPolicyLike): void {
   const widened = child.allow.filter(
-    (tool) => (!parent.allow.includes(tool) && !exempt.includes(tool)) || parent.deny.includes(tool)
+    (tool) => !parent.allow.includes(tool) || parent.deny.includes(tool)
   );
   if (widened.length > 0) {
     throw new WorkerPolicyError(`worker 策略超出父策略：${widened.join("、")}`);

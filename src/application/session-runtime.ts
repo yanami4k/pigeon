@@ -1,22 +1,19 @@
 // 会话运行面装配（决策 067）：新建与 resume 走同一条路——作用域解析（worker 会话回到它自己的
 // 工作树与委派策略）、固化 grant 种子物化、MCP 会话启动与启动提示、运行面构建。
-// cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份，
-// 并作为 M6 挂后台 Reviewer 调度的落点。
+// cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
 
 import { materializeSession } from "../persistence/session-read.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import type { ReviewBudget, ReviewGate } from "../review/scheduler.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
-import { type DistillWiring, runRetryOnFail } from "./fork.ts";
+import { runRetryOnFail } from "./fork.ts";
 import { describeMcpStartup, type McpSession, startMcpSession } from "./mcp.ts";
-import { attachReviewScheduler, type ReviewAttachment } from "./review-runtime.ts";
 import { buildRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
 import { bindSessionTree, type SessionTreeBinding } from "./session-tree.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
@@ -49,28 +46,15 @@ export interface OpenSessionRuntimeRequest {
   startMcp?: (scope: { governanceRoot: string; workspaceRoot: string }) => Promise<McpSession>;
   // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
-  // M6（决策 064）：后台审阅——只有 cli / tui 主会话传入；配置冻结进注入快照，enabled 时挂调度器
-  review?: {
-    enabled: boolean;
-    everyTurns: number;
-    gate?: ReviewGate;
-    budget?: Partial<ReviewBudget>;
-    // Reviewer 的模型接入；缺省继承主会话
-    streamFn?: StreamFn;
-  };
   // M7（决策 071）：会话级验证命令——冻结进注入快照；配置时挂 Run 结束后的独立验证
   verify?: VerifyConfig;
   // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照；主会话在尝试标为失败后后台分叉重试）
   retryOnFail?: number;
-  // 叶子验证完成后的自动提炼（提炼器运行面工厂与全局并发闸）；缺省不提炼
-  distill?: DistillWiring;
 }
 
 export interface OpenedSessionRuntime {
   bundle: RuntimeBundle;
   scope: SessionRuntimeScope;
-  // 挂了后台审阅时在场（运行面释放时一并停止，见 RuntimeBundle.disposers）
-  review?: ReviewAttachment;
   // 配置了验证命令时在场（运行面释放前等在跑的验证收尾）
   verification?: AttemptVerification;
   // M7（决策 078）：git 工作区的主会话在场（分叉入口据此取快照器）
@@ -125,32 +109,10 @@ export async function openSessionRuntime(
         : {}),
       ...(restoredGrants !== undefined ? { restoredGrants } : {}),
       ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
-      ...(request.review !== undefined
-        ? { review: { enabled: request.review.enabled, everyTurns: request.review.everyTurns } }
-        : {}),
       ...(request.verify !== undefined ? { verify: { ...request.verify } } : {}),
       ...(request.retryOnFail !== undefined ? { retryOnFail: request.retryOnFail } : {}),
       mcp,
     });
-    // M6（决策 064）：只有新建或恢复的主会话挂审阅（worker 会话作用域不挂，Reviewer 自身会话由 worker 工厂装配）
-    const review =
-      request.review?.enabled === true && scope.parentSessionId === undefined
-        ? attachReviewScheduler({
-            bundle,
-            governanceRoot: request.governanceRoot,
-            config: { enabled: true, everyTurns: request.review.everyTurns },
-            streamFn: request.review.streamFn ?? request.streamFn,
-            provider: request.flags.provider,
-            modelId: request.flags.modelId,
-            persistThinking: request.flags.persistThinking,
-            ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
-            ...(request.review.gate !== undefined ? { gate: request.review.gate } : {}),
-            ...(request.review.budget !== undefined ? { budget: request.review.budget } : {}),
-          })
-        : undefined;
-    if (review !== undefined) {
-      bundle.disposers = [...(bundle.disposers ?? []), () => review.stop()];
-    }
     // M7（决策 078）：主会话在 git 工作区里打快照（写或命令确实改变文件后）；worker 会话不挂
     const checkpoints =
       scope.parentSessionId === undefined
@@ -174,7 +136,7 @@ export async function openSessionRuntime(
         },
       ];
     }
-    // M7（决策 079）：主会话一次尝试标为失败后，后台从任务开始处分叉重试（最多 K 次），叶子验证后自动提炼
+    // M7（决策 079）：主会话一次尝试标为失败后，后台从任务开始处分叉重试（最多 K 次）
     const retryErrors: unknown[] = [];
     const retryPending = new Set<Promise<void>>();
     const retries = request.retryOnFail ?? 0;
@@ -217,11 +179,8 @@ export async function openSessionRuntime(
               }
             : {}),
         },
-        ...(request.distill !== undefined ? { distill: request.distill } : {}),
       })
-        .then(async (outcome) => {
-          // M8 收口补遗：提炼与自动验证的内部故障并进本会话的重试错误清单，与并行派发同口径
-          retryErrors.push(...outcome.errors);
+        .then(async () => {
           await tree?.ensureAttached();
         })
         .catch((error: unknown) => {
@@ -276,7 +235,6 @@ export async function openSessionRuntime(
     return {
       bundle,
       scope,
-      ...(review !== undefined ? { review } : {}),
       ...(verification !== undefined ? { verification } : {}),
       ...(checkpoints !== undefined ? { checkpoints } : {}),
       ...(tree !== undefined ? { tree } : {}),

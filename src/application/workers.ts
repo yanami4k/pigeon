@@ -23,7 +23,6 @@ import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
-import type { DistillTarget } from "../state/distill.ts";
 import type {
   BranchHeaderInput,
   DelegatedPolicy,
@@ -33,7 +32,6 @@ import type {
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { ReceiptId, SessionId } from "../state/ids.ts";
-import type { ReviewTarget } from "../state/review.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
@@ -151,10 +149,6 @@ interface RuntimeSurface {
   temperature?: number;
   // M9：任务源给的系统指令（追加进 system prompt 并随之冻结）；同上，只有无父会话的运行面会给
   taskDirective?: string;
-  // M6（决策 064）：Reviewer 的审阅目标
-  reviewTarget?: ReviewTarget;
-  // M7（决策 074）：提炼器的提炼目标
-  distillTarget?: DistillTarget;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
@@ -187,7 +181,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     const thinkingLevel =
       (deps.roleThinkingLevels ?? ROLE_THINKING_LEVELS)[request.role] ?? deps.thinkingLevel;
     const startMcp = deps.startMcp;
-    // M6（决策 064）：无工作区的 worker（Reviewer）以治理根为工作区根——它只读账本，不碰工作区文件
+    // 无工作区形状只属于已退役的只读角色（决策 137）；万一出现即以治理根为工作区根
     const workspaceRoot =
       request.workspace.kind === "git-worktree" ? request.workspace.path : request.governanceRoot;
     // M6（决策 064 子裁决 ③）：角色的模型接入覆盖——缺省继承主会话
@@ -223,8 +217,6 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
       ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
-      ...(request.review !== undefined ? { reviewTarget: request.review } : {}),
-      ...(request.distill !== undefined ? { distillTarget: request.distill } : {}),
     });
   };
 }
@@ -299,8 +291,6 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
-    ...(surface.reviewTarget !== undefined ? { reviewTarget: surface.reviewTarget } : {}),
-    ...(surface.distillTarget !== undefined ? { distillTarget: surface.distillTarget } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),

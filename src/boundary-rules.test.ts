@@ -35,7 +35,7 @@ async function cruiseJson(targets: string[], ruleSet: NonNullable<ICruiseOptions
   return result.output;
 }
 
-test("违规会被抓住：cli/tui→execution、review→@earendil-works、tools 下 rogue 直连、pi-runtime→application、cli→tui、Actor 直连 event-log.ts；wrap.ts 桥豁免生效", async () => {
+test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tools 下 rogue 直连、pi-runtime→application、cli→tui、Actor 直连 event-log.ts；wrap.ts 桥豁免生效", async () => {
   const ruleSet = await loadRuleSet();
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pigeon-boundary-"));
   const originalCwd = process.cwd();
@@ -44,7 +44,7 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
     mkdirSync(join(fixtureRoot, "src/tui"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/cli"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/execution"), { recursive: true });
-    mkdirSync(join(fixtureRoot, "src/review"), { recursive: true });
+    mkdirSync(join(fixtureRoot, "src/memory"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/tools"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/eval"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/application"), { recursive: true });
@@ -83,7 +83,7 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
       'import "../cli/probe.ts";\nexport {};\n'
     );
     writeFileSync(
-      join(fixtureRoot, "src/review/probe.ts"),
+      join(fixtureRoot, "src/memory/probe.ts"),
       'import { Agent } from "@earendil-works/pi-agent-core";\nexport const x = Agent;\n'
     );
     // tui 直连 pi-agent-core：tui-pi-tui-only 必须抓住（豁免只精确到 pi-tui 一个包）
@@ -117,8 +117,8 @@ test("违规会被抓住：cli/tui→execution、review→@earendil-works、tool
       (v) => v.rule.name === "pi-agent-only-via-pi-runtime"
     );
     assert.ok(
-      ruleViolations.some((v) => v.from.includes("src/review/probe.ts")),
-      `应抓到 src/review/probe.ts 的违规，实际违规：${JSON.stringify(ruleViolations)}`
+      ruleViolations.some((v) => v.from.includes("src/memory/probe.ts")),
+      `应抓到 src/memory/probe.ts 的违规，实际违规：${JSON.stringify(ruleViolations)}`
     );
     assert.ok(
       ruleViolations.some((v) => v.from.includes("src/tools/probe.ts")),

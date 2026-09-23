@@ -88,13 +88,12 @@ export default {
       comment:
         "application 是 Controller 层（M2 S1，决策 025）：装配根、resume 流程与 Actor 共用措辞；" +
         "可依赖 state / persistence / tools / approvals / pi-runtime / execution 与各下层能力目录" +
-        "（memory / skills / orchestration / mcp / review / distillation / replay / activation），" +
-        "不触达 Actor 层（cli/tui）。",
+        "（memory / skills / orchestration / mcp / replay），不触达 Actor 层（cli/tui）。",
       from: { path: "^src/application/", pathNot: "\\.test\\.ts$" },
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|review|distillation|replay|activation)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|replay)/",
       },
     },
     {
@@ -115,8 +114,7 @@ export default {
       severity: "error",
       comment:
         "占位目录（context）暂按最小允许清单约束：只依赖 state 与 tools（022 修订）。" +
-        "review/、distillation/ 与 replay/ 已放行到各自的清单，见 review-below-controller、" +
-        "distillation-below-controller 与 replay-below-controller。",
+        "replay/ 已放行到自己的清单，见 replay-below-controller。",
       from: {
         path: "^src/context/",
         pathNot: "\\.test\\.ts$",
@@ -130,48 +128,12 @@ export default {
       name: "replay-below-controller",
       severity: "error",
       comment:
-        "replay（M8：回放判定与统计、验证环境摘要与失效判据、回放材料的临时治理根，决策 084 / 085 / 091）" +
-        "只依赖 state、tools、persistence 的只读物化与 activation 的落点与写入口径：" +
-        "回放的经验装载必须与真激活走同一条路径，故复用 activation，不自己另写一份落点。" +
-        "不触达 pi-runtime、orchestration、application 与 Actor 层——派发、调度与装配由 application 注入。" +
-        "命名守决策 014：本目录的重执行不复用 replay 一词（类型与命令一律叫 rerun / verify），" +
+        "replay（回放计划与重跑的一致性核对，决策 087 / 156）只依赖 state、tools 与 persistence 的只读物化；" +
+        "它只从账本解出原尝试的任务、起点、预算、模型与工具名单并核对重跑不得放宽，不执行任何东西。" +
+        "不触达 pi-runtime、orchestration、application 与 Actor 层——执行由调用方承担。" +
         "M4 的 pigeon replay 与 state/replay.ts 仍是只读重建。",
       from: { path: "^src/replay/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/", pathNot: "^src/(replay|state|tools|persistence|activation)/" },
-    },
-    {
-      name: "activation-only-state",
-      severity: "error",
-      comment:
-        "activation（M8 S7：候选激活的落点、写入、漂移与撤销，决策 090 / 093）只依赖 state 与 " +
-        "persistence 的整文件原子替换。这条同时是决策 090 的机检：放权写入模块" +
-        "（persistence/grants-config.ts、application/grants.ts）与审批层不在允许清单里，" +
-        "激活器在代码层面够不着它们。决策 094 删掉 Policy 形态后，这条是 §M8 完成证据里留下的那条不变式。",
-      from: { path: "^src/activation/", pathNot: "\\.test\\.ts$" },
-      to: {
-        path: "^src/",
-        pathNot: "^src/(activation|state)/|^src/persistence/atomic-write\\.ts$",
-      },
-    },
-    {
-      name: "review-below-controller",
-      severity: "error",
-      comment:
-        "review（M6：Run 冻结快照、只读审阅工具、调度器、候选落盘与扫描，决策 064 / 065）" +
-        "只依赖 state、tools 与 persistence 的只读物化：它读账本、产候选文件，不触达 pi-runtime、" +
-        "application 与 Actor 层——调度与装配由 application 注入。",
-      from: { path: "^src/review/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/", pathNot: "^src/(review|state|tools|persistence)/" },
-    },
-    {
-      name: "distillation-below-controller",
-      severity: "error",
-      comment:
-        "distillation（M7：提炼器的对比快照、只读工具、任务说明与候选落盘，决策 074 / 076）" +
-        "只依赖 state、tools、persistence 的只读物化与 review 的截断和暂存口径；不触达 pi-runtime、" +
-        "orchestration、application 与 Actor 层——派发、调度与装配由 application 注入。",
-      from: { path: "^src/distillation/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/", pathNot: "^src/(distillation|review|state|tools|persistence)/" },
+      to: { path: "^src/", pathNot: "^src/(replay|state|tools|persistence)/" },
     },
     {
       name: "memory-below-controller",
@@ -205,7 +167,7 @@ export default {
       name: "eval-below-actors",
       severity: "error",
       comment:
-        "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057；M9：任务源上的回放验证）可依赖 state / persistence / replay / " +
+        "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057）可依赖 state / persistence / replay / " +
         "tools / orchestration / application 及以下；不触达 Actor 层（cli/tui），由 cli 调用（022 修订）。",
       from: { path: "^src/eval/", pathNot: "\\.test\\.ts$" },
       to: {

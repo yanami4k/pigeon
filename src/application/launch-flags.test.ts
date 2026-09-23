@@ -101,27 +101,11 @@ test("开关与取值型参数照常解析：--yolo / --no-persist-thinking / --
   assert.equal(flags.maxOutputTokens, 2048);
 });
 
-test("后台审阅参数（决策 064）：缺省开启、间隔缺省；--review-every 取非负整数、--no-review 关闭；只在允许的入口接受", () => {
-  const defaults = parseLaunchFlags([], { usage: USAGE, env: {}, review: true });
-  assert.equal(defaults.review, true);
-  assert.equal(defaults.reviewEvery, undefined, "缺省间隔由调度器常量给出");
-
-  const onlyEnd = parseLaunchFlags(["--review-every", "0"], {
-    usage: USAGE,
-    env: {},
-    review: true,
-  });
-  assert.equal(onlyEnd.reviewEvery, 0, "0 表示只在 Run 结束审");
-  const off = parseLaunchFlags(["--no-review"], { usage: USAGE, env: {}, review: true });
-  assert.equal(off.review, false);
-  assert.throws(
-    () => parseLaunchFlags(["--review-every", "-1"], { usage: USAGE, env: {}, review: true }),
-    /--review-every/
-  );
-  // run / eval 等入口不接受审阅参数：按未知参数响亮失败
-  assert.throws(() => parseLaunchFlags(["--no-review"], { usage: USAGE, env: {} }), /未知参数/);
-  assert.throws(
-    () => parseLaunchFlags(["--review-every", "4"], { usage: USAGE, env: {} }),
-    /未知参数/
-  );
+test("审阅与自动验证参数已随第一版学习闭环退役（决策 137）：--no-review、--review-every、--auto-verify 按未知参数响亮失败", () => {
+  for (const argv of [["--no-review"], ["--review-every", "4"], ["--auto-verify"]]) {
+    assert.throws(
+      () => parseLaunchFlags(argv, { usage: USAGE, env: {}, verify: true, retry: true }),
+      /未知参数/
+    );
+  }
 });

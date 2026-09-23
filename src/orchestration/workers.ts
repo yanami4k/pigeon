@@ -5,7 +5,6 @@
 // 落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
 // 深度 1：本编排器所在会话自己是 worker 时拒绝再派。上限只有轮次与墙钟，超限与取消都走 interrupt。
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
-import type { DistillTarget } from "../state/distill.ts";
 import type {
   ChildResult,
   ChildSettledInput,
@@ -18,7 +17,6 @@ import type {
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type ReceiptId, type RunId, type SessionId } from "../state/ids.ts";
-import type { ReviewTarget } from "../state/review.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
 import {
@@ -76,10 +74,6 @@ export interface WorkerRuntimeRequest {
   lineage: { parentSessionId: SessionId; parentRunId?: RunId };
   // 已带来源标签的审批入口（转发到编排器的审批回调）
   approvalHandler: ApprovalHandler;
-  // M6（决策 064）：Reviewer 的审阅目标（被审 Run 与增量起点）；只读快照工具据此绑定作用域
-  review?: ReviewTarget;
-  // M7（决策 074）：提炼器的提炼目标（一组尝试）；只读工具据此绑定作用域
-  distill?: DistillTarget;
   // M8（决策 087）：本 worker 的上限（与派出记录同一组值）——装配层据此把预算冻结进注入快照，
   // 回放才能沿用被验证那次尝试的预算
   limits?: WorkerLimits;
@@ -92,7 +86,6 @@ export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRunt
 export interface WorkspaceProviderInput {
   sessionId: SessionId;
   name: string;
-  // M6（决策 064）：角色决定是否需要隔离工作区——Reviewer 只读，规划为"无工作区"
   role: WorkerRole;
   baseRef?: string;
 }
@@ -110,20 +103,13 @@ export function gitWorktreeWorkspaces(roots: {
   governanceRoot: string;
 }): WorkspaceProvider {
   return {
-    plan: ({ sessionId, name, role }) =>
-      // M7（决策 074）：提炼器与 Reviewer 一样只读、无工作区
-      role === "reviewer" || role === "distiller"
-        ? { kind: "none" }
-        : {
-            kind: "git-worktree",
-            path: worktreePathFor(roots.governanceRoot, sessionId, name),
-            branch: worktreeBranchFor(name),
-          },
-    create: (workspace, { sessionId, name, baseRef }) => {
-      // 无工作区：不开工作树、不建分支（收尾也无需清理）
-      if (workspace.kind === "none") {
-        return;
-      }
+    // 无工作区形状只属于已退役的只读角色（决策 137），现有角色一律开 git 工作树
+    plan: ({ sessionId, name }) => ({
+      kind: "git-worktree",
+      path: worktreePathFor(roots.governanceRoot, sessionId, name),
+      branch: worktreeBranchFor(name),
+    }),
+    create: (_workspace, { sessionId, name, baseRef }) => {
       addWorktree({
         repoRoot: roots.repoRoot,
         governanceRoot: roots.governanceRoot,
@@ -163,10 +149,6 @@ export interface SpawnRequest {
   task: string;
   name?: string;
   limits?: Partial<WorkerLimits>;
-  // M6（决策 064）：派 reviewer 时的审阅目标
-  review?: ReviewTarget;
-  // M7（决策 074）：派 distiller 时的提炼目标（必填）
-  distill?: DistillTarget;
   // M7（决策 069）：并行派发同一任务时的共享任务标识，写入派出记录
   taskKey?: string;
 }
@@ -243,16 +225,13 @@ export class WorkerOrchestrator {
     if (task === "") {
       throw new WorkerSpawnError("任务不能为空");
     }
-    if (role === "distiller" && request.distill === undefined) {
-      throw new WorkerSpawnError("提炼器必须绑定提炼目标（一组尝试），不能直接派出");
-    }
     const name = request.name ?? this.#nextName(role);
     assertWorkerName(name);
     if ([...this.#workers.values()].some((worker) => worker.name === name)) {
       throw new WorkerSpawnError(`worker 名已被占用：${name}`);
     }
     const policy = deriveWorkerPolicy(this.#options.parentPolicy, role);
-    assertPolicySubset(policy, this.#options.parentPolicy, role);
+    assertPolicySubset(policy, this.#options.parentPolicy);
     const limits: WorkerLimits = {
       ...DEFAULT_WORKER_LIMITS,
       ...this.#options.defaultLimits,
@@ -292,8 +271,6 @@ export class WorkerOrchestrator {
         approvalHandler: (approval) =>
           this.#options.approvals({ ...approval, sessionId, worker: { name, role } }),
         limits,
-        ...(request.review !== undefined ? { review: request.review } : {}),
-        ...(request.distill !== undefined ? { distill: request.distill } : {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

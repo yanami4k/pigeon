@@ -10,7 +10,6 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { createDistillTools, distillToolRegistrations } from "../distillation/tools.ts";
 import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
 import {
   createReadSessionEntryTool,
@@ -27,7 +26,6 @@ import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
-import { createReviewTools, reviewToolRegistrations } from "../review/tools.ts";
 import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
 import {
   createLoadSkillTool,
@@ -35,17 +33,10 @@ import {
   loadSkillRegistration,
 } from "../skills/load-skill-tool.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
-import { DISTILL_ENTRY_TOOL, DISTILL_SNAPSHOT_TOOL, type DistillTarget } from "../state/distill.ts";
 import type { WorkerRole } from "../state/event-log.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
-import {
-  REVIEW_ENTRY_TOOL,
-  REVIEW_SNAPSHOT_TOOL,
-  type ReviewConfig,
-  type ReviewTarget,
-} from "../state/review.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -117,12 +108,6 @@ export interface RuntimeDeps {
   taskDirective?: string;
   // M9：采样温度——装配层包装 streamFn 传入，并写进注入快照 model 段；缺省不设（由 provider 决定）
   temperature?: number;
-  // M6（决策 064）：后台审阅配置——只有 cli / tui 主会话传入，冻结进注入快照并随 run.started 落盘
-  review?: ReviewConfig;
-  // M6（决策 064 子裁决 ⑤）：Reviewer 运行面的审阅目标——在场时注册两个只读快照工具并绑定到被审 Run
-  reviewTarget?: ReviewTarget;
-  // M7（决策 074）：提炼器运行面的提炼目标——在场时注册两个只读工具并绑定到这组尝试
-  distillTarget?: DistillTarget;
   // M7（决策 071 / 079）：会话级验证命令与失败自动分叉重试次数——冻结进注入快照并随 run.started 落盘
   verify?: VerifyConfig;
   retryOnFail?: number;
@@ -232,19 +217,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   for (const registration of sessionToolRegistrations(sessionsDir)) {
     registry.register(registration);
   }
-  // M6（决策 064 子裁决 ⑤）：Reviewer 运行面注册两个只读快照工具，作用域绑定被审 Run
-  const reviewTarget = deps.reviewTarget;
-  if (reviewTarget !== undefined) {
-    for (const registration of reviewToolRegistrations()) {
-      registry.register(registration);
-    }
-  }
-  const distillTarget = deps.distillTarget;
-  if (distillTarget !== undefined) {
-    for (const registration of distillToolRegistrations()) {
-      registry.register(registration);
-    }
-  }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
   const residentMemory = loadResidentMemory({
@@ -292,8 +264,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     READ_SESSION_ENTRY_TOOL,
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
-    ...(reviewTarget !== undefined ? [REVIEW_SNAPSHOT_TOOL, REVIEW_ENTRY_TOOL] : []),
-    ...(distillTarget !== undefined ? [DISTILL_SNAPSHOT_TOOL, DISTILL_ENTRY_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -346,7 +316,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       memory: residentMemory.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
-      ...(deps.review !== undefined ? { review: { ...deps.review } } : {}),
       ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
@@ -383,8 +352,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ]
         : []),
       ...mcpTools.map((bridged) => bridged.tool),
-      ...(reviewTarget !== undefined ? createReviewTools({ sessionsDir, ...reviewTarget }) : []),
-      ...(distillTarget !== undefined ? createDistillTools(distillTarget) : []),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
     governance: createToolGovernance({

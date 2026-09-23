@@ -9,14 +9,6 @@
 import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  activationStartupWarnings,
-  startupEnvironmentOf,
-} from "../application/activation-notes.ts";
-import { autoVerifyWiring } from "../application/auto-verify.ts";
-import { decideCandidate } from "../application/candidate-decision.ts";
-import { runCandidateShowCommand, runCandidatesCommand } from "../application/candidates-list.ts";
-import { renderDistillReport, runDistillCommand } from "../application/distill-command.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import { evalVerdictLabel, failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
@@ -27,33 +19,24 @@ import {
   resolveRepairRounds,
   resolveStreamFnSpec,
   resolveVerifyConfig,
-  reviewConfigOf,
   VALUELESS_FLAGS,
 } from "../application/launch-flags.ts";
-import { verifierRuntimeFactory } from "../application/rerun.ts";
 import { runResumeFlow } from "../application/resume.ts";
-import { runManualReview } from "../application/review-command.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
 import { runTreeRebuildCommand } from "../application/session-tree.ts";
-import { verifyCandidate } from "../application/verify-command.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
-import { createWorkerRuntimeFactory } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
-import { createTaskSourceRerunDispatcher, taskSourcePlanFor } from "../eval/container-rerun.ts";
 import { localTaskSource } from "../eval/local-source.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
 import { swebenchTaskSource, swebenchTemperature } from "../eval/swebench-source.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
-import { describeHead, mainRepoRoot } from "../orchestration/worktree.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
-import { MIN_RERUN_N } from "../replay/verdict.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import {
-  DEFAULT_EDIT_MODE,
   EDIT_MODES,
   type EditMode,
   isEditMode,
@@ -224,315 +207,6 @@ function grantCommandsOf(
 //   [--model <m>]：冷恢复对账（哈希自动确证 + 剩余悬账人工确认菜单）后在同一会话下续跑
 // REPL（M4 S5，D5）——Pi transcript 不恢复，模型对话上下文重新建立；后续 Run 继续写入
 // 本会话事件日志；系统永不自动重新执行（§3.2）
-// pigeon review <sessionId> [--run <runId>] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]：
-// 手动补审（M6 S4，决策 064）——对冷会话补一次后台审阅，完成后落盘候选；worker、headless 与 Eval 会话
-// 不自动审，需要时用它补。与自动审阅同一派发器，派出与收尾记进被审会话
-async function reviewMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon review <sessionId> [--run <runId>] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]";
-  let sessionIdArg: string | undefined;
-  let runIdArg: string | undefined;
-  const modelArgv: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg === "--run") {
-      runIdArg = argv[++i];
-      if (runIdArg === undefined) {
-        throw new Error(`--run 缺少取值（${usage}）`);
-      }
-      continue;
-    }
-    if (!arg.startsWith("--") && sessionIdArg === undefined) {
-      sessionIdArg = arg;
-      continue;
-    }
-    modelArgv.push(arg);
-    const next = argv[i + 1];
-    if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
-      modelArgv.push(next);
-      i++;
-    }
-  }
-  if (sessionIdArg === undefined) {
-    throw new Error(usage);
-  }
-  const flags = parseLaunchFlags(modelArgv, { usage });
-  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
-  const governanceRoot = prepareWorkspace(flags.root);
-  const summary = await runManualReview({
-    governanceRoot,
-    sessionId: sessionIdArg,
-    ...(runIdArg !== undefined ? { runId: runIdArg } : {}),
-    streamFn,
-    provider: flags.provider,
-    modelId: flags.modelId,
-    persistThinking: flags.persistThinking,
-  });
-  writeOut(
-    `补审 会话 ${summary.sessionId} ｜ ${summary.runId} ｜ 审阅会话 ${summary.reviewSessionId} ｜ ` +
-      `收尾 ${summary.status} ｜ 新候选 ${summary.candidatesWritten} 个` +
-      (summary.duplicates > 0 ? ` ｜ 重复跳过 ${summary.duplicates} 个` : "") +
-      (summary.unparsable !== undefined ? ` ｜ 结果不可解析：${summary.unparsable}` : "") +
-      (summary.error !== undefined ? ` ｜ 原因：${summary.error}` : "") +
-      `\n查看：pigeon trace ${summary.sessionId}；候选：pigeon candidates\n`
-  );
-}
-
-// pigeon candidates [--all] [--root <dir>]：只读列出候选（M6 S4，决策 065 子裁决 ⑤），缺省隐藏扫描拒收项
-// pigeon distill (--task <任务标识> | --eval-results <目录>) [--force] --stream-fn <模块路径> [--provider <p>] [--model <m>]：
-// 手动提炼（M7 S4，决策 074）——与自动触发同一派发器与选对规则；Eval 结果目录只读读取
-async function distillMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon distill (--task <任务标识> | --eval-results <目录>) [--force] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>]";
-  let taskKey: string | undefined;
-  let evalResults: string | undefined;
-  let force = false;
-  const modelArgv: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--task") {
-      taskKey = argv[++i];
-    } else if (arg === "--eval-results") {
-      evalResults = argv[++i];
-    } else if (arg === "--force") {
-      force = true;
-    } else if (arg !== undefined) {
-      modelArgv.push(arg);
-    }
-  }
-  const flags = parseLaunchFlags(modelArgv, { usage });
-  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
-  const root = prepareWorkspace(flags.root);
-  const result = await runDistillCommand({
-    root,
-    ...(taskKey !== undefined ? { taskKey } : {}),
-    ...(evalResults !== undefined ? { evalResults } : {}),
-    force,
-    createRuntime: createWorkerRuntimeFactory({
-      streamFnFor: () => streamFn,
-      provider: flags.provider,
-      modelId: flags.modelId,
-      persistThinking: flags.persistThinking,
-    }),
-  });
-  writeOut(`${renderDistillReport(result)}\n`);
-}
-
-// M6（决策 065）列表 + M8 S6（决策 088）详情与四个审批动作。
-// 审批走 CLI 子命令而非 TUI 面板：候选审批是离线决策、内容为长文，与在线短决策的工具审批形态不同，
-// 混进同一界面会把该慢的决定塞进快节奏上下文
-const CANDIDATE_ACTIONS = ["approve", "reject", "revoke", "supersede"] as const;
-
-function candidatesMain(argv: string[]): void {
-  const usage =
-    "用法：pigeon candidates [--all] [--root <dir>]\n" +
-    "      pigeon candidates show <哈希前缀|种类/名字> [--root <dir>]\n" +
-    "      pigeon candidates approve|reject|revoke <哈希前缀|种类/名字> [--reason <理由>] [--root <dir>]\n" +
-    "      pigeon candidates supersede <哈希前缀|种类/名字> --by <新候选完整哈希> [--reason <理由>] [--root <dir>]";
-  const sub = argv[0];
-  if (sub === "show") {
-    const { selector, root } = parseCandidateArgs(argv.slice(1), usage);
-    writeOut(runCandidateShowCommand({ root: realpathSync(root), selector }));
-    return;
-  }
-  if (sub !== undefined && (CANDIDATE_ACTIONS as readonly string[]).includes(sub)) {
-    const action = sub as (typeof CANDIDATE_ACTIONS)[number];
-    const parsed = parseCandidateArgs(argv.slice(1), usage, { reason: true, by: true });
-    const result = decideCandidate({
-      governanceRoot: realpathSync(parsed.root),
-      selector: parsed.selector,
-      action,
-      ...(parsed.reason !== undefined ? { reason: parsed.reason } : {}),
-      ...(parsed.by !== undefined ? { supersededBy: parsed.by } : {}),
-    });
-    const lines = [
-      `${action} ｜ ${result.decision.candidateKind}/${result.decision.name} ｜ ${result.decision.contentHash.slice(0, 12)}`,
-      `理由（${result.decision.reasonSource === "human" ? "人写" : "系统默认"}）：${result.decision.reason}`,
-    ];
-    if (result.activation !== undefined) {
-      lines.push(
-        `已激活：${result.activation.path}` +
-          (result.activation.unverified ? "（未经回放证实）" : "") +
-          " ｜ 下一个会话开始装载（本会话的注入快照已冻结）"
-      );
-    }
-    if (action === "revoke" && result.path !== undefined) {
-      lines.push(`已移走落点：${result.path}（不追溯既往会话）`);
-    }
-    writeOut(`${lines.join("\n")}\n`);
-    return;
-  }
-  let root = process.cwd();
-  let all = false;
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === "--all") {
-      all = true;
-    } else if (flag === "--root") {
-      root = argv[++i] ?? root;
-    } else {
-      throw new Error(`未知参数：${flag}（${usage}）`);
-    }
-  }
-  writeOut(runCandidatesCommand({ root: realpathSync(root), all }));
-}
-
-interface CandidateArgs {
-  selector: string;
-  root: string;
-  reason?: string;
-  by?: string;
-}
-
-function parseCandidateArgs(
-  argv: string[],
-  usage: string,
-  accepts: { reason?: boolean; by?: boolean } = {}
-): CandidateArgs {
-  const parsed: CandidateArgs = { selector: "", root: process.cwd() };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === "--root") {
-      parsed.root = argv[++i] ?? parsed.root;
-    } else if (flag === "--reason" && accepts.reason === true) {
-      const value = argv[++i];
-      if (value === undefined) {
-        throw new Error(`--reason 缺少取值（${usage}）`);
-      }
-      parsed.reason = value;
-    } else if (flag === "--by" && accepts.by === true) {
-      const value = argv[++i];
-      if (value === undefined) {
-        throw new Error(`--by 缺少取值（新候选的完整内容哈希）（${usage}）`);
-      }
-      parsed.by = value;
-    } else if (parsed.selector === "" && flag !== undefined && !flag.startsWith("--")) {
-      parsed.selector = flag;
-    } else {
-      throw new Error(`未知参数：${flag}（${usage}）`);
-    }
-  }
-  if (parsed.selector === "") {
-    throw new Error(`缺少候选选择器（内容哈希前缀或 种类/名字）（${usage}）`);
-  }
-  return parsed;
-}
-
-// pigeon verify <选择器>（M8 S6，决策 086）：人工触发一次回放验证——四组各跑 N 次真执行，
-// 出三值结论并落一条验证回执。需要模型接入（回放是真跑），验证命令按 081 的三级来源解出。
-// 无人值守的自动验证是另一个开关（决策 086），不在这里。
-// pigeon verify 的参数解析（M8 收口补遗：抽出来单测，次数下限在这一层就判）
-export interface VerifyArgs {
-  selector: string;
-  n?: number;
-  effectThreshold?: number;
-  keepWorktree: boolean;
-  // 余下交给通用启动参数解析的部分（模型接入、验证命令等）
-  modelArgv: string[];
-}
-
-export function parseVerifyArgs(argv: string[], usage: string): VerifyArgs {
-  let selector: string | undefined;
-  let n: number | undefined;
-  let effectThreshold: number | undefined;
-  let keepWorktree = false;
-  const modelArgv: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === "--n") {
-      const value = Number(argv[++i]);
-      // 下限在这里就判（M8 收口补遗）：低于下限的次数不该先跑掉四组回放再报错
-      if (!Number.isInteger(value) || value < MIN_RERUN_N) {
-        throw new Error(`--n 需要不小于 ${MIN_RERUN_N} 的整数（${usage}）`);
-      }
-      n = value;
-    } else if (flag === "--effect") {
-      const value = Number(argv[++i]);
-      if (!Number.isFinite(value) || value <= 0 || value > 1) {
-        throw new Error(`--effect 需要 (0, 1] 之间的小数（${usage}）`);
-      }
-      effectThreshold = value;
-    } else if (flag === "--keep-worktree") {
-      keepWorktree = true;
-    } else if (flag?.startsWith("--") === true) {
-      modelArgv.push(flag);
-      const next = argv[i + 1];
-      if (!VALUELESS_FLAGS.has(flag) && next !== undefined && !next.startsWith("--")) {
-        modelArgv.push(next);
-        i++;
-      }
-    } else if (selector === undefined && flag !== undefined) {
-      selector = flag;
-    } else {
-      throw new Error(`未知参数：${flag}（${usage}）`);
-    }
-  }
-  if (selector === undefined) {
-    throw new Error(`缺少候选选择器（内容哈希前缀或 种类/名字）（${usage}）`);
-  }
-  return {
-    selector,
-    ...(n !== undefined ? { n } : {}),
-    ...(effectThreshold !== undefined ? { effectThreshold } : {}),
-    keepWorktree,
-    modelArgv,
-  };
-}
-
-async function verifyMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon verify <哈希前缀|种类/名字> [--n <每组次数>] [--effect <大效应门槛>] " +
-    "[--keep-worktree] [--root <dir>] [--stream-fn <模块路径>] [--provider <p>] [--model <m>] " +
-    "[--verify-command <命令>] [--verify-timeout <毫秒>]";
-  const { selector, n, effectThreshold, keepWorktree, modelArgv } = parseVerifyArgs(argv, usage);
-  const flags = parseLaunchFlags(modelArgv, { usage, verify: true });
-  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
-  const governanceRoot = prepareWorkspace(flags.root);
-  const verify = resolveVerifyConfig(flags, governanceRoot);
-  if (verify === undefined) {
-    throw new Error(
-      "未配置验证命令：回放靠它判成败，没有它跑多少次都只能标未知。" +
-        "请在 .pigeon/verify.json 里配置，或用 --verify-command 指定"
-    );
-  }
-  const result = await verifyCandidate({
-    governanceRoot,
-    repoRoot: mainRepoRoot(governanceRoot),
-    selector,
-    verify,
-    ...(n !== undefined ? { n } : {}),
-    ...(effectThreshold !== undefined ? { effectThreshold } : {}),
-    keepWorktree,
-    // 模型标识、推理档位与单轮输出上限都沿用被验证那次尝试（M8 收口补遗：收口成同一份依赖构造）
-    runtimeFactoryFor: (sampling) =>
-      verifierRuntimeFactory({ ...sampling, streamFn, persistThinking: flags.persistThinking }),
-    onRerun: (run) => {
-      writeOut(
-        `[verify] ${run.arm} #${run.index} ｜ ${evalVerdictLabel(run.verdict)} ｜ ${run.status} ｜ ` +
-          `${run.turns} 轮 ｜ 会话 ${run.sessionId}\n`
-      );
-    },
-  });
-  const record = result.record;
-  writeOut(
-    [
-      `结论：${record.conclusion} ｜ 每组 ${record.n} 次 ｜ 大效应门槛 ${record.effectThreshold}`,
-      `正回放差 ${record.positiveDelta.toFixed(2)} ｜ 负回放差 ${record.negativeDelta.toFixed(2)}`,
-      ...record.arms.map((arm) => `  ${arm.arm}：${arm.passes}/${arm.runs}`),
-      `回执已落账本：${record.id}（pigeon candidates show ${record.contentHash.slice(0, 12)} 看全文）`,
-    ].join("\n")
-  );
-  writeOut("\n");
-  for (const error of result.errors) {
-    process.stderr.write(
-      `验证告警：${error instanceof Error ? error.message : String(error)}（不改变结论）\n`
-    );
-  }
-}
-
 async function resumeMain(argv: string[]): Promise<void> {
   let sessionIdArg: string | undefined;
   const modelArgv: string[] = [];
@@ -560,18 +234,15 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
   const sessionId = asSessionId(sessionIdArg);
   const modelUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --verify-command / --verify-timeout / --auto-verify / --retry-on-fail / --root / --stream-fn / --provider / --model";
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
   const flags = parseLaunchFlags(modelArgv, {
     usage: modelUsage,
-    review: true,
     verify: true,
     retry: true,
   });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
-  // M8（决策 091 / 093）：恢复会话同样要先说一次已激活经验的漂移与批准失效
-  emitActivationNotes(workspaceRoot, flags);
   const write = writeOut;
   // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）
   const scope = sessionRuntimeScope(workspaceRoot, sessionId);
@@ -594,10 +265,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           streamFn,
           flags,
           restoreGrants: true,
-          // M6（决策 064）：主会话挂后台审阅（worker 会话作用域在装配内部排除）
-          review: reviewConfigOf(flags),
           ...verifyOption(flags, workspaceRoot),
-          ...attemptOptions(flags, streamFn, workspaceRoot),
+          ...retryOption(flags),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
@@ -705,7 +374,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试；叶子验证后自动提炼
-    ...attemptOptions(flags, streamFn, workspaceRoot),
+    ...retryOption(flags),
     ...(repairRounds > 0 ? { repairRounds } : {}),
   });
   if (json) {
@@ -944,141 +613,6 @@ async function evalSwebenchMain(argv: string[]): Promise<void> {
   }
 }
 
-// pigeon eval swebench-verify（M9）：对外部基准跑批里提炼出的候选做回放验证。被验证的尝试在容器工作区里跑的，
-// 没有宿主 git 工作树可开：回放由任务源对同一实例重新准备环境、照原尝试的尺子重跑、用任务源的判据命令判分；
-// 四组、固定 N、三值结论与回执同 pigeon verify（084、089）。候选所在的治理根即 --root
-async function evalSwebenchVerifyMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval swebench-verify --root <候选所在的治理根> --candidate <哈希前缀|种类/名字> --dataset <JSONL> " +
-    "--work-dir <判分工作目录> --python <解释器> --stream-fn <模块路径> [--n N（缺省 5）] [--effect 0-1（缺省 0.4）] " +
-    "[--concurrency N] [--edit-mode hashline|replace] [--container-memory <上限>] [--judge-script <路径>] " +
-    "[--judge-proxy <地址|gateway:端口>]";
-  const own = new Set([
-    "--root",
-    "--candidate",
-    "--dataset",
-    "--work-dir",
-    "--python",
-    "--n",
-    "--effect",
-    "--concurrency",
-    "--edit-mode",
-    "--container-memory",
-    "--judge-script",
-    "--judge-proxy",
-  ]);
-  const values = new Map<string, string>();
-  const modelArgv: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === undefined) {
-      continue;
-    }
-    if (own.has(arg)) {
-      const value = argv[++i];
-      if (value === undefined) {
-        throw new Error(`${arg} 需要取值（${usage}）`);
-      }
-      values.set(arg, value);
-    } else {
-      modelArgv.push(arg);
-      const next = argv[i + 1];
-      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
-        modelArgv.push(next);
-        i++;
-      }
-    }
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") {
-      throw new Error(`缺 ${name}（${usage}）`);
-    }
-    return value;
-  };
-  const numberOf = (name: string): number | undefined => {
-    const raw = values.get(name);
-    if (raw === undefined) {
-      return undefined;
-    }
-    const value = Number(raw);
-    if (!Number.isFinite(value)) {
-      throw new Error(`${name} 需要数值（${usage}）`);
-    }
-    return value;
-  };
-  const flags = parseLaunchFlags(modelArgv, { usage });
-  const memory = values.get("--container-memory");
-  const source = swebenchTaskSource({
-    datasetFile: required("--dataset"),
-    workDir: required("--work-dir"),
-    python: required("--python"),
-    judgeScript:
-      values.get("--judge-script") ??
-      fileURLToPath(new URL("../../eval/swebench/judge.py", import.meta.url)),
-    // 实例自带的预算在回放里不用：回放沿用原尝试冻结的预算
-    budget: { maxTurns: 100, wallClockMs: 20 * 60_000 },
-    ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
-    ...(values.has("--judge-proxy") ? { judgeProxy: required("--judge-proxy") } : {}),
-  });
-  const governanceRoot = prepareWorkspace(required("--root"));
-  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
-  const editModeValue = values.get("--edit-mode");
-  const editMode =
-    editModeValue !== undefined ? parseEditMode(editModeValue, usage) : DEFAULT_EDIT_MODE;
-  let harness: { commit: string; dirty: boolean };
-  try {
-    harness = describeHead(fileURLToPath(new URL(".", import.meta.url)));
-  } catch {
-    harness = { commit: "unknown", dirty: false };
-  }
-  const n = numberOf("--n");
-  const effect = numberOf("--effect");
-  const concurrency = numberOf("--concurrency");
-  const { record, errors } = await verifyCandidate({
-    governanceRoot,
-    selector: required("--candidate"),
-    // 回执环境里的判据：任务源的判分命令（数据集与判分脚本），超时取判分的缺省上限
-    verify: {
-      command: `任务源 ${source.name} 的判分命令（数据集 ${required("--dataset")}）`,
-      timeoutMs: 40 * 60_000,
-    },
-    harness,
-    planFor: taskSourcePlanFor(source.name),
-    dispatcherFor: ({ nameSeed }) =>
-      createTaskSourceRerunDispatcher({
-        hostGovernanceRoot: governanceRoot,
-        source,
-        streamFn,
-        editMode,
-        nameSeed,
-      }),
-    ...(n !== undefined ? { n } : {}),
-    ...(effect !== undefined ? { effectThreshold: effect } : {}),
-    ...(concurrency !== undefined ? { concurrency } : {}),
-    onRerun: (run) => {
-      writeOut(
-        `[verify] ${run.arm} #${run.index} ｜ ${evalVerdictLabel(run.verdict)} ｜ ${run.status} ｜ ${run.turns} 轮 ｜ ` +
-          `token ${run.totalTokens} ｜ ${Math.round(run.durationMs / 1000)} 秒 ｜ 会话 ${run.sessionId}` +
-          `${run.error !== undefined ? ` ｜ ${run.error}` : ""}\n`
-      );
-    },
-  });
-  writeOut(
-    `[verify] 结论：${record.conclusion}（正回放差 ${record.positiveDelta.toFixed(2)}，负回放差 ${record.negativeDelta.toFixed(2)}，` +
-      `每组 ${record.n} 次，门槛 ${record.effectThreshold}）；回执 ${record.id}\n`
-  );
-  for (const arm of record.arms) {
-    writeOut(`[verify] ${JSON.stringify(arm)}\n`);
-  }
-  for (const error of errors) {
-    process.stderr.write(
-      `[verify] 内部故障：${error instanceof Error ? error.message : String(error)}\n`
-    );
-  }
-}
-
-// --edit-mode 取值（决策 061）：单值 hashline 或 replace
 function parseEditMode(value: string | undefined, usage: string): EditMode {
   if (value === undefined || !isEditMode(value)) {
     throw new Error(`--edit-mode 只接受 ${EDIT_MODES.join("/")}（${usage}）`);
@@ -1149,10 +683,6 @@ async function main(argv: string[]): Promise<void> {
     evalCompareMain(argv.slice(2));
     return;
   }
-  if (argv[0] === "eval" && argv[1] === "swebench-verify") {
-    await evalSwebenchVerifyMain(argv.slice(2));
-    return;
-  }
   if (argv[0] === "eval" && argv[1] === "swebench") {
     await evalSwebenchMain(argv.slice(2));
     return;
@@ -1181,11 +711,6 @@ async function main(argv: string[]): Promise<void> {
     await resumeMain(argv.slice(1));
     return;
   }
-  // M6（决策 064 / 065）：手动补审与候选列表
-  if (argv[0] === "review") {
-    await reviewMain(argv.slice(1));
-    return;
-  }
   // M7（决策 077）：由账本重建会话树
   if (argv[0] === "tree" && argv[1] === "rebuild") {
     const sessionArg = argv[2];
@@ -1201,33 +726,16 @@ async function main(argv: string[]): Promise<void> {
     );
     return;
   }
-  // M7（决策 074）：手动提炼
-  if (argv[0] === "distill") {
-    await distillMain(argv.slice(1));
-    return;
-  }
-  if (argv[0] === "candidates") {
-    candidatesMain(argv.slice(1));
-    return;
-  }
-  // M8（决策 086）：人工触发回放验证
-  if (argv[0] === "verify") {
-    await verifyMain(argv.slice(1));
-    return;
-  }
   const startUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --review-every / --no-review / --verify-command / --verify-timeout / --auto-verify / --retry-on-fail / --root / --stream-fn / --provider / --model";
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
-    review: true,
     verify: true,
     retry: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）
   const workspaceRoot = prepareWorkspace(flags.root);
-  // M8（决策 091 / 093）：已激活经验的漂移与批准失效，会话开始前如实说一次（不阻止使用）
-  emitActivationNotes(workspaceRoot, flags);
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
@@ -1237,10 +745,8 @@ async function main(argv: string[]): Promise<void> {
     sessionId,
     streamFn,
     flags,
-    // M6（决策 064）：主会话挂后台审阅
-    review: reviewConfigOf(flags),
     ...verifyOption(flags, workspaceRoot),
-    ...attemptOptions(flags, streamFn, workspaceRoot),
+    ...retryOption(flags),
     // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
     createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
     onMcpNote: (note) => {
@@ -1273,18 +779,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   });
 }
 
-// M8（决策 091 / 093）：启动告警打到 stderr——与上游版本探测同一口径，不进账本、不阻止启动。
-// 环境由 application 层的 startupEnvironmentOf 统一构造（M8 收口修复：两个入口此前各自硬传空预算）
-function emitActivationNotes(governanceRoot: string, flags: LaunchFlags): void {
-  for (const note of activationStartupWarnings(
-    governanceRoot,
-    startupEnvironmentOf(flags, governanceRoot)
-  )) {
-    process.stderr.write(`${note}
-`);
-  }
-}
-
 // 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、是否撤回（预算耗尽而提前撤回另行标注）
 function repairSummary(
   repair: NonNullable<Awaited<ReturnType<typeof runHeadless>>["repair"]>
@@ -1312,36 +806,9 @@ function verifyOption(
   return verify !== undefined ? { verify } : {};
 }
 
-// M7（决策 079 / 074）：失败自动分叉重试次数与叶子验证后的提炼器运行面（与主会话同一模型接入）；
-// M8（决策 086）：--auto-verify 开着且验证命令可得时，提炼落库后自动把新候选验一遍
-function attemptOptions(
-  flags: LaunchFlags,
-  streamFn: Awaited<ReturnType<typeof loadStreamFn>>,
-  governanceRoot: string
-): {
-  retryOnFail?: number;
-  distill: {
-    createRuntime: ReturnType<typeof createWorkerRuntimeFactory>;
-    autoVerify?: ReturnType<typeof autoVerifyWiring>;
-  };
-} {
-  const verify = resolveVerifyConfig(flags, governanceRoot);
-  return {
-    ...(flags.retryOnFail !== undefined ? { retryOnFail: flags.retryOnFail } : {}),
-    distill: {
-      createRuntime: createWorkerRuntimeFactory({
-        streamFnFor: () => streamFn,
-        provider: flags.provider,
-        modelId: flags.modelId,
-        persistThinking: flags.persistThinking,
-      }),
-      ...(flags.autoVerify && verify !== undefined
-        ? {
-            autoVerify: autoVerifyWiring(governanceRoot, verify, streamFn, flags.persistThinking),
-          }
-        : {}),
-    },
-  };
+// M7（决策 079）：失败自动分叉重试次数
+function retryOption(flags: LaunchFlags): { retryOnFail?: number } {
+  return flags.retryOnFail !== undefined ? { retryOnFail: flags.retryOnFail } : {};
 }
 
 // M7（决策 079）：/fork 手动分叉——分支沿用本会话的模型接入、审批模式与验证命令

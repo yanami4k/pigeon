@@ -1,12 +1,10 @@
 // 启动参数（决策 067）：cli、tui 与 headless 共用一份模型与运行参数解析，缺省值单一来源。
 // 背景：三个入口此前各写一份，模型占位缺省已漂移成三种（进注入快照与 run.started，会把同一模型
-// 按入口分成三组，影响 Eval 与学习侧按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
+// 按入口分成三组，影响 Eval 按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
-import { DEFAULT_REVIEW_EVERY_TURNS } from "../review/scheduler.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
-import type { ReviewConfig } from "../state/review.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
@@ -16,12 +14,7 @@ export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom"
 export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
-export const VALUELESS_FLAGS = new Set([
-  "--yolo",
-  "--no-persist-thinking",
-  "--no-review",
-  "--auto-verify",
-]);
+export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking"]);
 
 export interface LaunchFlags {
   root: string;
@@ -42,10 +35,6 @@ export interface LaunchFlags {
   temperature?: number;
   // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（仅 TUI 接受）
   historyLimit?: number;
-  // M6（决策 064 子裁决 ①）：后台审阅开关（--no-review 关闭，缺省开）与轮次间隔（--review-every <N>，
-  // 0 = 只在 Run 结束审；缺省取调度器常量）。只有 cli REPL / resume 与 tui 接受
-  review: boolean;
-  reviewEvery?: number;
   // M7（决策 071）：--verify-command <命令> 与 --verify-timeout <毫秒>——尝试收尾后由程序独立执行的验证命令；
   // cli REPL / resume、tui 与 pigeon run 接受
   verifyCommand?: string;
@@ -54,9 +43,6 @@ export interface LaunchFlags {
   retryOnFail?: number;
   // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
   repairRounds?: number;
-  // M8（决策 086）：--auto-verify 无人值守时自动验证新落库的候选（缺省关）。
-  // 一次验证是四组各 N 次真执行，开销与一轮 Eval 同量级，故必须由人显式拨开
-  autoVerify: boolean;
 }
 
 export interface ParseLaunchFlagsOptions {
@@ -70,8 +56,6 @@ export interface ParseLaunchFlagsOptions {
   historyLimit?: boolean;
   // 是否接受 --temperature（只有把它交给运行面的 Eval 入口；其余入口当作未知参数，不静默忽略）
   temperature?: boolean;
-  // 是否接受后台审阅参数（只有 cli / tui 的主会话挂审阅；run 与 eval 不接受）
-  review?: boolean;
   // 是否接受验证命令参数（cli / tui 主会话与 pigeon run；eval 沿用 task.json 的验证器，不接受）
   verify?: boolean;
   // 是否接受 --retry-on-fail（cli / tui 主会话与 pigeon run）
@@ -89,8 +73,6 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     provider: DEFAULT_MODEL_PLACEHOLDER.provider,
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
-    review: true,
-    autoVerify: false,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
   const fromEnv = env.PIGEON_STREAM_FN;
@@ -140,16 +122,6 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--history-limit 需要正整数（${usage}）`);
       }
       flags.historyLimit = value;
-    } else if (flag === "--auto-verify" && options.verify === true) {
-      flags.autoVerify = true;
-    } else if (flag === "--no-review" && options.review === true) {
-      flags.review = false;
-    } else if (flag === "--review-every" && options.review === true) {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--review-every 需要非负整数（0 表示只在 Run 结束审）（${usage}）`);
-      }
-      flags.reviewEvery = value;
     } else if (flag === "--verify-command" && options.verify === true) {
       const value = argv[++i];
       if (value === undefined || value.trim() === "") {
@@ -202,11 +174,6 @@ export function resolveStreamFnSpec(flags: LaunchFlags, usage: string): string {
     );
   }
   return flags.streamFnSpec;
-}
-
-// 后台审阅配置（决策 064 子裁决 ①）：由启动参数得出，会话开始时冻结进注入快照
-export function reviewConfigOf(flags: LaunchFlags): ReviewConfig {
-  return { enabled: flags.review, everyTurns: flags.reviewEvery ?? DEFAULT_REVIEW_EVERY_TURNS };
 }
 
 // 验证命令配置（决策 071）：由启动参数得出，会话开始时冻结进注入快照；未给命令即未配置

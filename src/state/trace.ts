@@ -5,13 +5,8 @@
 // 绝不按位置猜测；id 对得上但内容对不上（toolCallId/参数/哈希不符）挂接并标异常，
 // 对不上的一律进孤儿清单如实报告。
 
-import { type ProjectedCandidate, projectCandidates } from "./candidate-status.ts";
 import type {
   BreakerRecord,
-  CandidateActivatedRecord,
-  CandidateDecidedRecord,
-  CandidateProposedRecord,
-  CandidateVerifiedRecord,
   DecisionRecord,
   EvalVerifiedRecord,
   EventRecord,
@@ -84,8 +79,7 @@ export interface TraceRun {
   llmRequestCount: number;
   // M6.5 S3（决策 058）：Eval 验证器判决（非 Eval 运行无）；同一 Run 多次验证取最后一条
   verified?: EvalVerifiedRecord;
-  // M6（决策 064 / 065）：本 Run 的候选（状态由提出记录与后续决定现算）、审阅跳过与审阅结果不可解析记录
-  candidates: ProjectedCandidate[];
+  // M6（决策 064 / 065）：审阅跳过与审阅结果不可解析记录
   reviewSkips: ReviewSkippedRecord[];
   reviewUnparsables: ReviewUnparsableRecord[];
   classification?: RunClassification;
@@ -167,16 +161,10 @@ function buildRunTrace(
     entryGaps: session.entryGaps.find((gap) => gap.runId === runId)?.missingSeqs ?? [],
     contentGaps: session.contentGaps.filter((gap) => gap.runId === runId),
     llmRequestCount: 0,
-    candidates: [],
     reviewSkips: [],
     reviewUnparsables: [],
     anomalies: [],
   };
-  const candidateProposeds: CandidateProposedRecord[] = [];
-  // M8（决策 089）：候选三族同样进本 Run 的候选投影——trace 里的候选状态与 pigeon candidates 一致
-  const candidateVerifieds: CandidateVerifiedRecord[] = [];
-  const candidateDecideds: CandidateDecidedRecord[] = [];
-  const candidateActivateds: CandidateActivatedRecord[] = [];
   const callsByToolCallId = new Map<string, TraceToolCall>();
   const callsByExecutionId = new Map<ExecutionId, TraceToolCall>();
 
@@ -247,14 +235,6 @@ function buildRunTrace(
       run.started = record;
     } else if (record.kind === "eval.verified") {
       run.verified = record;
-    } else if (record.kind === "candidate.proposed") {
-      candidateProposeds.push(record);
-    } else if (record.kind === "candidate.verified") {
-      candidateVerifieds.push(record);
-    } else if (record.kind === "candidate.decided") {
-      candidateDecideds.push(record);
-    } else if (record.kind === "candidate.activated") {
-      candidateActivateds.push(record);
     } else if (record.kind === "review.skipped") {
       run.reviewSkips.push(record);
     } else if (record.kind === "review.unparsable") {
@@ -322,12 +302,6 @@ function buildRunTrace(
       call.classification = entry;
     }
   }
-  run.candidates = projectCandidates({
-    candidateProposeds,
-    candidateVerifieds,
-    candidateDecideds,
-    candidateActivateds,
-  });
   return run;
 }
 

@@ -4,7 +4,7 @@
 //   新分支是新的 Pigeon 会话，会话头指向来源会话与分叉点；用户工作区不受影响；
 // - 由账本重建树：删掉树文件后重建，各通道的路径与写穿结果一致；
 // - 非 git 工作区发起分叉明确报错，不降级、不留分叉记录；写穿失败只告警、不进账本，不影响运行；
-// - --retry-on-fail：尝试标为失败时从本次任务开始处分叉重试（不注入任何提示），叶子验证完成后自动提炼。
+// - --retry-on-fail：尝试标为失败时从本次任务开始处分叉重试（不注入任何提示）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -22,7 +22,6 @@ import { NotGitWorkspaceError } from "../orchestration/checkpoint.ts";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { openSessionTree, TREE_MAIN_LANE } from "../pi-runtime/session-tree.ts";
-import { createReviewGate } from "../review/scheduler.ts";
 import { newSessionId } from "../state/ids.ts";
 import { runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless.ts";
@@ -34,7 +33,6 @@ import {
   rebuildSessionTree,
   runTreeRebuildCommand,
 } from "./session-tree.ts";
-import { createWorkerRuntimeFactory } from "./workers.ts";
 
 const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
@@ -292,25 +290,12 @@ test("写穿失败：向标准错误告警一次（说明可重建补齐），�
   }
 });
 
-test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注入提示），叶子验证完成后自动提炼，失败分支只产出教训", async () => {
+test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注入提示）", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const model = createFakeStreamFn({
       replies: [edit("wrong\n"), { text: "改好了" }, edit("new\n"), { text: "这次对了" }],
     });
-    const distilled = {
-      candidates: [
-        {
-          kind: "skill",
-          name: "check-target-text",
-          summary: "写入前核对目标文本",
-          strength: 0.5,
-          form: "lesson",
-          content: "---\nname: check-target-text\ndescription: 教训\n---\n写之前核对目标文本\n",
-          evidence: { failed: [2] },
-        },
-      ],
-    };
     const result = await runHeadless({
       task: "把 a.txt 改成 new",
       governanceRoot: dir,
@@ -321,15 +306,6 @@ test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注
       startMcp: noMcp,
       verify: VERIFY,
       retryOnFail: 1,
-      distill: {
-        createRuntime: createWorkerRuntimeFactory({
-          provider: "custom",
-          modelId: "custom",
-          homeDir: home,
-          streamFnFor: () => createFakeStreamFn({ replies: [{ text: JSON.stringify(distilled) }] }),
-        }),
-        gate: createReviewGate(),
-      },
     });
     assert.equal(result.label, "Failed");
     assert.equal(result.retries?.length, 1);
@@ -342,12 +318,7 @@ test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注
     assert.equal(forked?.forkPoint.runSeq, 1, "从本次任务开始处分叉");
     const retryCall = model.calls[2]?.context.messages ?? [];
     assert.equal(retryCall.length, 1, "重试不注入任何提示");
-    const candidate = source.candidateProposeds[0]?.candidate;
-    assert.ok(candidate !== undefined, "叶子验证完成后自动提炼");
-    assert.equal(candidate.contrast?.form, "lesson");
-    assert.equal(candidate.contrast?.failed[0]?.sessionId, result.sessionId);
-    assert.deepEqual(candidate.contrast?.sharedPrefix?.to, 1);
-    assert.equal(candidate.contrast?.successful[0]?.sessionId, forked?.branchSessionId);
+    assert.equal(result.retries?.[0]?.branchSessionId, forked?.branchSessionId);
     assert.deepEqual(source.unfinishedRuns, []);
   } finally {
     cleanup();

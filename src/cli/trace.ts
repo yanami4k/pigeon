@@ -42,12 +42,6 @@ const MCP_SERVER_STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>>
   closed: "已关闭",
 };
 
-// 候选状态的通俗措辞（M6 只走到已扫描、扫描拒收）
-const CANDIDATE_STATUS_LABEL: Readonly<Record<string, string>> = {
-  SecurityScanned: "已扫描",
-  ScanRejected: "扫描拒收",
-};
-
 // 冲突项：声明 destructive 却配 read 的按 write；其余冲突是声明只读却配 write / exec，按配置
 function describeMcpConflict(entry: McpToolsetEntry): string {
   const declared =
@@ -242,17 +236,7 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
     }
     lines.push(line);
   }
-  // M6（决策 064 / 065）：后台审阅的产出与异常——候选（状态由账本现算）、跳过、结果不可解析
-  for (const projected of run.candidates) {
-    const { candidate } = projected;
-    lines.push(
-      `  候选 ${candidate.kind}/${candidate.name} ｜ ${CANDIDATE_STATUS_LABEL[projected.status] ?? projected.status} ｜ ` +
-        `哈希 ${candidate.contentHash.slice(0, 12)} ｜ 判断强度 ${candidate.strength} ｜ 产出会话 ${candidate.source.producerSessionId}` +
-        (candidate.scan.hits.length > 0
-          ? ` ｜ 命中：${candidate.scan.hits.map((hit) => hit.rule).join("、")}`
-          : "")
-    );
-  }
+  // M6（决策 064 / 065）：后台审阅的异常——跳过、结果不可解析
   for (const skip of run.reviewSkips) {
     lines.push(
       skip.payload.reason === "exit"

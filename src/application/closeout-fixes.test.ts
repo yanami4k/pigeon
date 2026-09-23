@@ -2,7 +2,7 @@
 // 一、快照 ref 序号竞态：同一会话在运行时只能存在一个快照器实例（序号计数在实例内存里），分叉入口复用运行面已挂的实例；
 //     update-ref 另加旧值守卫（新建用创建语义），并发写同号时明确失败而不是静默覆盖。
 // 二、并行同任务派发里验证记录落盘失败被吞：与主会话挂载同口径，进错误清单。
-// 三、快照器与提炼派发器的内部故障无人读：向标准错误输出告警，同一类故障只说一次，文案说明后果。
+// 三、快照器的内部故障无人读：向标准错误输出告警，同一类故障只说一次，文案说明后果。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -20,10 +20,8 @@ import { createCheckpointer } from "../orchestration/checkpoint.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { createReviewGate } from "../review/scheduler.ts";
 import { newSessionId } from "../state/ids.ts";
 import { runAttemptGroup } from "./attempt-group.ts";
-import { createDistillDispatcher } from "./distill-runtime.ts";
 import { runForkCommand } from "./fork-command.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
@@ -281,82 +279,6 @@ test("快照器内部故障：向标准错误告警一次，文案说明后果�
       renameSync(parked, gitDir);
       await disposeRuntime(opened.bundle);
     }
-  } finally {
-    cleanup();
-  }
-});
-
-test("提炼派发器内部故障：候选落盘失败向标准错误告警一次，同时进错误清单", async () => {
-  const { dir, home, cleanup } = repo("pigeon-distill-warn-");
-  try {
-    const hostId = newSessionId();
-    const hostLog = new JsonlEventLog(join(dir, ".pigeon", "sessions"), hostId);
-    const distilled = JSON.stringify({
-      candidates: [
-        {
-          kind: "skill",
-          name: "verify-target",
-          summary: "核对目标文本",
-          strength: 0.5,
-          form: "procedure",
-          content: "---\nname: verify-target\ndescription: 核对目标文本\n---\n核对目标文本\n",
-          evidence: { successful: [2], failed: [2] },
-        },
-      ],
-    });
-    const factory = createWorkerRuntimeFactory({
-      provider: "fake-provider",
-      modelId: "fake-model",
-      homeDir: home,
-      streamFnFor: (request) =>
-        request.role === "distiller"
-          ? createFakeStreamFn({ replies: [{ text: distilled }] })
-          : createFakeStreamFn({
-              replies: [
-                edit("old\n", request.name === "implementer-1" ? "new\n" : "wrong\n"),
-                { text: "改好了" },
-              ],
-            }),
-    });
-    const parentPolicy = {
-      allow: ["read_file", "edit_file"],
-      deny: [],
-      approvalMode: "yolo" as const,
-    };
-    const orchestrator = new WorkerOrchestrator({
-      governanceRoot: dir,
-      session: { sessionId: hostId },
-      parentPolicy,
-      parentLog: hostLog,
-      createRuntime: factory,
-      approvals: async () => ({ approved: true }),
-    });
-    const dispatcher = createDistillDispatcher({
-      governanceRoot: dir,
-      hostSessionId: hostId,
-      hostLog: withFailingAppend(hostLog, "appendCandidateProposed", "候选记账失败"),
-      parentPolicy,
-      createRuntime: factory,
-      gate: createReviewGate(),
-    });
-    const { lines } = await captureStderr(() =>
-      runAttemptGroup({
-        orchestrator,
-        governanceRoot: dir,
-        hostLog,
-        role: "implementer",
-        task: "把 a.txt 改成 new",
-        count: 2,
-        verify: { command: `${NODE} check.mjs`, timeoutMs: 30_000 },
-        distill: dispatcher,
-      })
-    );
-    hostLog.close();
-    const warnings = lines.filter((line) => line.startsWith("经验提炼告警："));
-    assert.equal(warnings.length, 1, `告警一次：${warnings.join(" | ")}`);
-    assert.match(warnings[0] ?? "", /候选记账失败/);
-    assert.match(warnings[0] ?? "", /这次提炼的候选没有落库/);
-    assert.ok(dispatcher.errors().length > 0, "落盘失败进错误清单");
   } finally {
     cleanup();
   }
