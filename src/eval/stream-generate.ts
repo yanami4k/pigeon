@@ -47,6 +47,10 @@ export function probesPathFor(outFile: string): string {
   return outFile.replace(/(\.json)?$/, ".probes.json");
 }
 
+export function checkpointPathFor(outFile: string): string {
+  return outFile.replace(/(\.json)?$/, ".facts.jsonl");
+}
+
 export async function generateStreamManifest(
   options: GenerateManifestOptions
 ): Promise<StreamManifest> {
@@ -79,7 +83,12 @@ export async function generateStreamManifest(
       reference,
       rangeStart: options.rangeStart,
       rangeEnd,
-      options: { testTimeoutMs: options.testTimeoutMs ?? 600_000, log },
+      // 断点文件与清单同目录：同一条命令重跑即从断点续测
+      options: {
+        testTimeoutMs: options.testTimeoutMs ?? 600_000,
+        log,
+        checkpointFile: checkpointPathFor(options.outFile),
+      },
     });
     const manifest = manifestFromFacts({
       human,

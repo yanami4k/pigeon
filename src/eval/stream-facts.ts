@@ -2,12 +2,14 @@
 // 再交给 stream-manifest.ts 的纯规则出清单。判题只在容器里做（Windows 上有平台差异）。
 // 探针所在的参考工作区装着人的完整历史——它只用于出题，不是 agent 的工作区，看得到未来无妨。
 import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import {
   type CommitFacts,
   type CommitFileChange,
   composeStreamManifest,
   type HumanFileOp,
   type StreamManifest,
+  type TestProbe,
 } from "./stream-manifest.ts";
 import type { StreamRepoRuntime } from "./stream-profiles.ts";
 import { type StreamShell, StreamWorkspace, shellQuote } from "./stream-workspace.ts";
@@ -149,6 +151,32 @@ export interface ProbeOptions {
   testTimeoutMs: number;
   // 进度回报（可选）
   log?: (line: string) => void;
+  // 断点文件（可选）：每测完一个提交即追加一行；重来时已测的提交直接取回，不再跑探针
+  checkpointFile?: string;
+}
+
+// 断点文件的一行：一个提交测得的探针结论与原始记录
+interface CheckpointLine {
+  sha: string;
+  probe?: TestProbe;
+  nextPasses?: boolean;
+  formatOnly?: boolean;
+  probes: ProbeRecord[];
+}
+
+function readCheckpoint(file: string | undefined): Map<string, CheckpointLine> {
+  const out = new Map<string, CheckpointLine>();
+  if (file === undefined || !existsSync(file)) return out;
+  for (const raw of readFileSync(file, "utf8").split("\n")) {
+    if (raw.trim() === "") continue;
+    try {
+      const line = JSON.parse(raw) as CheckpointLine;
+      out.set(line.sha, line);
+    } catch {
+      // 进程死于写到一半的末行：该提交重测
+    }
+  }
+  return out;
 }
 
 export interface CollectedFacts {
@@ -188,6 +216,7 @@ export async function collectStreamFacts(input: {
   const range = human.firstParentLog(input.rangeStart, input.rangeEnd);
   const probes: ProbeRecord[] = [];
   const commits: CommitFacts[] = [];
+  const done = readCheckpoint(options.checkpointFile);
 
   const runTests = async (
     sha: string,
@@ -230,6 +259,16 @@ export async function collectStreamFacts(input: {
       files,
     };
     commits.push(facts);
+    const saved = done.get(c.sha);
+    if (saved !== undefined) {
+      if (saved.probe !== undefined) facts.probe = saved.probe;
+      if (saved.nextPasses !== undefined) facts.nextPasses = saved.nextPasses;
+      if (saved.formatOnly !== undefined) facts.formatOnly = saved.formatOnly;
+      probes.push(...saved.probes);
+      log(`[${i + 1}/${range.length}] ${c.sha.slice(0, 9)} 取自断点`);
+      continue;
+    }
+    const probesBefore = probes.length;
     if (profile.resetReason(facts) !== null) {
       log(`[${i + 1}/${range.length}] ${c.sha.slice(0, 9)} 重置点`);
       continue;
@@ -269,6 +308,13 @@ export async function collectStreamFacts(input: {
           : `父${facts.probe.parentFails ? "败" : "过"} 本${facts.probe.commitPasses ? "过" : "败"}`
       }${facts.formatOnly === true ? " 只有格式" : ""}  ${facts.subject.slice(0, 60)}`
     );
+    if (options.checkpointFile !== undefined) {
+      const line: CheckpointLine = { sha: c.sha, probes: probes.slice(probesBefore) };
+      if (facts.probe !== undefined) line.probe = facts.probe;
+      if (facts.nextPasses !== undefined) line.nextPasses = facts.nextPasses;
+      if (facts.formatOnly !== undefined) line.formatOnly = facts.formatOnly;
+      appendFileSync(options.checkpointFile, `${JSON.stringify(line)}\n`);
+    }
   }
   return { commits, probes };
 }

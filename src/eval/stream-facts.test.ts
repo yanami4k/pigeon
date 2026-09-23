@@ -89,6 +89,31 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
       'Add feature\n\nWith a body\n\n--- src/feat.test.sh ---\ngrep -q "feature" src/feat.txt\n'
     );
     assert.deepEqual(manifest.steps[1]?.mergedCommits, [red, fix]);
+
+    // 断点续测：有断点文件时，已测的提交直接取回，不再动参考工作区
+    const checkpoint = join(base, "facts.jsonl");
+    const first = await collectStreamFacts({
+      human,
+      runtime: toyRuntime,
+      reference,
+      rangeStart: start,
+      rangeEnd: docs,
+      options: { testTimeoutMs: 30_000, checkpointFile: checkpoint },
+    });
+    const untouchable = new ReferenceWorkspace({
+      root: refRoot,
+      sh: () => Promise.reject(new Error("已测的提交不该再动参考工作区")),
+    });
+    const again = await collectStreamFacts({
+      human,
+      runtime: toyRuntime,
+      reference: untouchable,
+      rangeStart: start,
+      rangeEnd: docs,
+      options: { testTimeoutMs: 30_000, checkpointFile: checkpoint },
+    });
+    assert.deepEqual(again.commits, first.commits);
+    assert.deepEqual(again.probes, first.probes);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
