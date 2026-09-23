@@ -67,6 +67,8 @@ test("报告：曲线表、终点、次要指标与补跑提示", () => {
   assert.match(md, /\| 3 \| 套用 \| 80\.0% \| 70\.0% \|/);
   assert.match(md, /终点（按条数）：no-gate 80\.0%；minimal 70\.0%/);
   assert.match(md, /\| no-gate \| 1\/2 \| 0 \| 1 \|/);
+  // 用量按未命中输入、缓存命中、输出分列（额度不计缓存命中的部分）：夹具每行 10 / 0 / 5，三行合计
+  assert.match(md, /\| no-gate \| 1\/2 \|.*\| 30 \/ 0 \/ 15 \|/);
   assert.match(md, /没做出来 1/);
   assert.match(md, /回归 1/);
   assert.match(md, /no-gate 与 minimal：终点相差 10\.0 个百分点/);

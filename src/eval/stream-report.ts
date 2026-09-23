@@ -161,7 +161,7 @@ export function renderStreamReport(
 
     out.push("### 次要指标（第一遍）", "");
     out.push(
-      "| 条件 | 判定通过 | 撤回 | 回归 | 终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token | 墙钟（分） | 限额暂停 |"
+      "| 条件 | 判定通过 | 撤回 | 回归 | 终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 |"
     );
     out.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
     const attributionLines: string[] = [];
@@ -176,9 +176,11 @@ export function renderStreamReport(
           last?.quality?.typeErrors ?? "—"
         } | ${last?.quality?.formatErrors ?? "—"} | ${last?.quality?.layerViolations ?? "—"} | ${sum(
           rows.map((l) => l.turns)
-        )} | ${sum(rows.map((l) => l.usage.totalTokens))} | ${(
-          sum(rows.map((l) => l.wallMs)) / 60_000
-        ).toFixed(1)} | ${sum(rows.map((l) => l.limitPauses.length))} |`
+        )} | ${sum(rows.map((l) => l.usage.input))} / ${sum(rows.map((l) => l.usage.cacheRead))} / ${sum(
+          rows.map((l) => l.usage.output)
+        )} | ${(sum(rows.map((l) => l.wallMs)) / 60_000).toFixed(
+          1
+        )} | ${sum(rows.map((l) => l.limitPauses.length))} |`
       );
       const counts = new Map<FailureAttribution, number>();
       for (const r of rows) {

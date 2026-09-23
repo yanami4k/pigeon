@@ -514,7 +514,7 @@ async function evalMain(argv: string[]): Promise<void> {
 async function evalStreamManifestMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> " +
-    "--image <镜像> --out <清单文件> [--test-timeout-sec N]";
+    "--image <镜像> --out <清单文件> [--test-timeout-sec N] [--container-memory <上限>]";
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -547,6 +547,9 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
     image: required("--image"),
     outFile: required("--out"),
     testTimeoutMs: timeoutSec * 1000,
+    ...(values.has("--container-memory")
+      ? { containerRunArgs: ["--memory", required("--container-memory")] }
+      : {}),
     log: (line) => process.stderr.write(`${line}\n`),
   });
   process.stdout.write(`${summarizeManifest(manifest)}\n`);

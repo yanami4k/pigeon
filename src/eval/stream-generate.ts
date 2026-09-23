@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
-import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
+import { assertKeepsWorkspaceOffline, WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import {
   collectStreamFacts,
   gitHumanRepo,
@@ -37,6 +37,8 @@ export interface GenerateManifestOptions {
   // 清单输出路径；探针记录写到同目录的 <名>.probes.json
   outFile: string;
   docker?: readonly string[];
+  // docker run 的附加参数（内存上限等）；不得含打开网络的选项
+  containerRunArgs?: readonly string[];
   testTimeoutMs?: number;
   log?: (line: string) => void;
 }
@@ -49,6 +51,7 @@ export async function generateStreamManifest(
   options: GenerateManifestOptions
 ): Promise<StreamManifest> {
   const docker = options.docker ?? ["docker"];
+  assertKeepsWorkspaceOffline(options.containerRunArgs ?? []);
   const log = options.log ?? (() => {});
   const human = gitHumanRepo(options.repoDir);
   const rangeEnd = human.resolve(options.rangeEnd);
@@ -57,7 +60,12 @@ export async function generateStreamManifest(
     image: options.image,
     name: container,
     docker,
-    runArgs: [...WORKSPACE_NETWORK_ARGS, "--label", "pigeon.stream-probe=1"],
+    runArgs: [
+      ...WORKSPACE_NETWORK_ARGS,
+      "--label",
+      "pigeon.stream-probe=1",
+      ...(options.containerRunArgs ?? []),
+    ],
   });
   try {
     const reference = new ReferenceWorkspace(
