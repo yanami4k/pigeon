@@ -93,7 +93,7 @@ test("验证器三值判决：退出码 0 通过、非 0 失败、超时与拉�
     const crashed = await runVerifier(missing, makeWorkspace(join(root, "m"), "42\n"));
     assert.equal(crashed.verdict, "undetermined");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -115,7 +115,7 @@ test("验证资产回填：agent 删掉或改掉测试文件后，验证器仍�
     assert.equal(tamperedResult.verdict, "fail");
     assert.deepEqual(tamperedResult.assets, ["checks/expected.txt"]);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -195,7 +195,7 @@ test("误报第一层与 eval.verified：自报完成但验证失败记误报，
     assert.equal(limitedVerified.falsePositive, false);
     assert.ok(existsSync(join(workspace, "checks", "expected.txt")));
   } finally {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

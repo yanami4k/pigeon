@@ -220,7 +220,12 @@ test("写保护包装：受保护路径解析失败而原因不是「不存在�
 });
 
 test("本地执行端的路径解析：不存在抛「不存在」子类，越界抛普通围栏错误（二者可区分）", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-host-notfound-"));
+  // 越界目标必须真实存在（realpath 解析失败会先判"不存在"）：在独立临时目录里建出工作区与其同级的 outside.txt，
+  // 不依赖系统临时目录里的残留文件
+  const base = mkdtempSync(join(tmpdir(), "pigeon-host-notfound-"));
+  const root = join(base, "ws");
+  mkdirSync(root);
+  writeFileSync(join(base, "outside.txt"), "o");
   try {
     const host = createLocalWorkspaceHost(root);
     assert.throws(() => host.readTextSync("nope.txt"), WorkspacePathNotFoundError);
@@ -230,6 +235,6 @@ test("本地执行端的路径解析：不存在抛「不存在」子类，越�
         error instanceof WorkspacePathError && !(error instanceof WorkspacePathNotFoundError)
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(base, { recursive: true, force: true });
   }
 });

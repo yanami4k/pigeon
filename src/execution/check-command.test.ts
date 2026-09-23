@@ -10,7 +10,10 @@ import { judgeVerdict, runCheckCommand, shellCommand } from "./check-command.ts"
 
 function workspace(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-check-"));
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    dir,
+    cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
+  };
 }
 
 const NODE = `"${process.execPath}"`;
