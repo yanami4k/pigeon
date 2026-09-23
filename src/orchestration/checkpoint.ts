@@ -6,7 +6,7 @@
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
@@ -43,11 +43,16 @@ const IDENTITY = {
   GIT_COMMITTER_EMAIL: "pigeon@localhost",
 };
 
+// 列表类命令（ls-tree、ls-files）在大仓库里输出可达数十 MiB：缺省 1 MiB 的上限会报 ENOBUFS，
+// 抛在写回之后即工作区只恢复一半
+const GIT_MAX_BUFFER = 256 * 1024 * 1024;
+
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string): string {
   try {
     return execFileSync("git", args, {
       cwd,
       encoding: "utf8",
+      maxBuffer: GIT_MAX_BUFFER,
       stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
       ...(input !== undefined ? { input } : {}),
@@ -77,6 +82,21 @@ export function checkpointRefPrefix(sessionId: SessionId): string {
   return `${CHECKPOINT_REF_PREFIX}${sessionId}/`;
 }
 
+// 这个会话在 git 里是否已有快照 ref（账本里的快照记录可能因进程崩在 ref 写入之后而缺失）
+export function hasCheckpointRefs(workspaceRoot: string, sessionId: SessionId): boolean {
+  if (!isGitWorkspace(workspaceRoot)) {
+    return false;
+  }
+  return (
+    git(workspaceRoot, [
+      "for-each-ref",
+      "--count=1",
+      "--format=%(refname)",
+      checkpointRefPrefix(sessionId),
+    ]).trim() !== ""
+  );
+}
+
 export function createCheckpointer(input: {
   workspaceRoot: string;
   sessionId: SessionId;
@@ -103,6 +123,9 @@ export function createCheckpointer(input: {
       ? git(workspaceRoot, ["rev-parse", `${previous}^{tree}`]).trim()
       : undefined;
   let baseTree: string | undefined;
+  // 首次改动之前记基线失败：之后看到的树已是改后的，不能当改前基线——此后不再产出改前基线，
+  // 撤回因此走"没有起点"的显式报错，而不是恢复到一个改到一半的状态
+  let baseLost = false;
 
   // 工作区当前文件树：临时索引上 add -A（排除治理目录）再 write-tree
   const currentTree = (): string => {
@@ -172,14 +195,31 @@ export function createCheckpointer(input: {
 
   return {
     beforeChange: () => {
-      if (lastTree === undefined && baseTree === undefined) {
-        baseTree = currentTree();
+      if (lastTree === undefined && baseTree === undefined && !baseLost) {
+        try {
+          baseTree = currentTree();
+        } catch (error) {
+          baseLost = true;
+          throw error;
+        }
       }
     },
     afterChange: () => {
       const tree = currentTree();
       const reference = lastTree ?? baseTree;
       if (reference === undefined) {
+        if (baseLost) {
+          // 基线丢了：现状照样打成快照（不带改前基线），账本因此留下"有快照、无改前基线"，续跑也认得出起点丢失
+          const commit = commitTree(
+            tree,
+            headCommit(),
+            `pigeon checkpoint ${sessionId} #${counter + 1}`
+          );
+          const ref = nextRef(commit);
+          previous = commit;
+          lastTree = tree;
+          return { ref, commit, tree };
+        }
         // 没有记过基线：把现状当基线，本次不算改变
         baseTree = tree;
         return undefined;
@@ -188,7 +228,7 @@ export function createCheckpointer(input: {
         return undefined;
       }
       let baseCommit: string | undefined;
-      if (previous === undefined && baseTree !== undefined) {
+      if (previous === undefined && baseTree !== undefined && !baseLost) {
         baseCommit = commitTree(baseTree, headCommit(), `pigeon checkpoint ${sessionId} base`);
       }
       const commit = commitTree(
@@ -217,10 +257,12 @@ export function createCheckpointer(input: {
 // 原地恢复到某个快照提交（决策 142：回炉到上限仍失败即撤回到这一步起点）。范围与快照相同：受跟踪的文件，
 // 加上未跟踪且未被忽略的文件（忽略规则以还原后的为准）；被忽略的文件与治理目录不动。只写工作树：用户的 HEAD、暂存区与分支一律不碰——
 // 目标内容经临时索引写回。范围限在工作区根之下（工作区根可以是仓库的子目录）。
-// 顺序：先把目标里的文件（含 .gitignore）逐个写回，再按还原后的忽略规则列出范围内的文件、删掉目标里没有的——
-// 删除集若按改动后的忽略规则算，agent 删掉的忽略规则会让原本被忽略的依赖目录被当作多余文件删掉，
-// agent 新增的忽略规则会让被它隐藏的新文件漏删。
-// 可重复执行：已经一致时再执行一次结果不变，进程崩溃在恢复中途时再执行一次即可
+// 顺序：先把目标里的文件（含 .gitignore）逐个写回，再删掉目标里没有的 .gitignore（agent 新建的），
+// 最后按还原后的忽略规则列出范围内的文件、删掉目标里没有的——删除集若按改动后的忽略规则算，
+// agent 删掉的忽略规则会让原本被忽略的依赖目录被当作多余文件删掉，agent 新增的忽略规则会让被它隐藏的新文件漏删。
+// 不在范围内：.git/info/exclude 与全局忽略配置（不进快照），agent 改了它们时删除集照改后的算。
+// 写回用真实索引的副本做单树合并并刷新文件状态：内容没变的文件不重写（保留修改时间，不因文件被占用而失败）。
+// 可重复执行：已经一致时再执行一次结果不变
 export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void {
   if (!isGitWorkspace(workspaceRoot)) {
     throw new NotGitWorkspaceError(`工作区不是 git 工作区，不能恢复快照：${workspaceRoot}`);
@@ -231,17 +273,54 @@ export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void 
   const target = split(git(workspaceRoot, ["ls-tree", "-r", "-z", "--name-only", commit])).filter(
     (name) => !governance(name)
   );
+  const targetSet = new Set(target);
   if (target.length > 0) {
     const indexFile = join(tmpdir(), `pigeon-restore-index-${randomBytes(8).toString("hex")}`);
     try {
+      const realIndex = git(workspaceRoot, [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+      ]).trim();
+      if (existsSync(realIndex)) {
+        copyFileSync(realIndex, indexFile);
+      }
       const env = { GIT_INDEX_FILE: indexFile };
-      git(workspaceRoot, ["read-tree", commit], env);
+      // 单树合并：与真实索引内容相同的条目沿用其文件状态；再刷新，内容没变而状态过期的条目也不再被当作改过
+      git(workspaceRoot, ["read-tree", "-m", commit], env);
+      try {
+        git(workspaceRoot, ["update-index", "-q", "--refresh"], env);
+      } catch {
+        // 有条目需要更新时 --refresh 以非零退出；这正是接下来要写回的那些文件
+      }
       git(workspaceRoot, ["checkout-index", "-f", "-z", "--stdin"], env, `${target.join("\0")}\0`);
     } finally {
       rmSync(indexFile, { force: true });
     }
   }
-  const targetSet = new Set(target);
+  // agent 新建的 .gitignore（目标里没有）先删掉，它们不该影响下面的删除集；只删所在目录未被忽略的——
+  // 被忽略目录里的 .gitignore（如依赖目录自带的）不在范围内。由浅到深处理，外层删掉后内层按新规则判断
+  const extraIgnores = split(
+    git(workspaceRoot, ["ls-files", "-z", "--others", "--", ":(glob)**/.gitignore"])
+  )
+    .filter((name) => !governance(name) && !targetSet.has(name))
+    .sort((left, right) => left.split("/").length - right.split("/").length);
+  for (const name of extraIgnores) {
+    const file = join(workspaceRoot, name);
+    const dir = name.includes("/") ? name.slice(0, name.lastIndexOf("/") + 1) : "";
+    if (dir === "") {
+      rmSync(file, { force: true });
+      continue;
+    }
+    // 目录是否被忽略要按外层规则判断：check-ignore 会把目录自己的 .gitignore（如内容为 *）也算进去，
+    // 所以先拿掉它再判断；目录被外层规则忽略（依赖目录之类）即原样写回
+    const content = readFileSync(file);
+    rmSync(file, { force: true });
+    if (isIgnored(workspaceRoot, dir)) {
+      writeFileSync(file, content);
+    }
+  }
   const current = split(
     git(workspaceRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
   );
@@ -249,13 +328,40 @@ export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void 
     if (governance(name) || targetSet.has(name)) {
       continue;
     }
-    // 未跟踪的嵌套仓库列成"目录/"：整个删掉；目标里有文件落在它下面时不动（那些文件已写回）
+    // 未跟踪的目录条目（嵌套仓库列成"目录/"）：起点里就有（快照以 gitlink 收进、名字不带斜杠）即不动；
+    // 目标里有文件落在它下面时也不动（那些文件已写回）；其余整个删掉
     if (name.endsWith("/")) {
-      if (!target.some((file) => file.startsWith(name))) {
-        rmSync(join(workspaceRoot, name), { recursive: true, force: true });
+      if (targetSet.has(name.slice(0, -1)) || target.some((file) => file.startsWith(name))) {
+        continue;
       }
+      removeEntry(join(workspaceRoot, name.slice(0, -1)));
       continue;
     }
     rmSync(join(workspaceRoot, name), { force: true });
   }
+}
+
+// 目录路径是否被忽略（按当前工作区里的忽略规则）
+function isIgnored(workspaceRoot: string, dir: string): boolean {
+  try {
+    git(workspaceRoot, ["check-ignore", "-q", "--", dir]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 删掉一个目录条目：真目录才递归删；符号链接或 junction 只删链接本身，不碰它指向的内容
+function removeEntry(path: string): void {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    rmSync(path, { force: true });
+    return;
+  }
+  rmSync(path, { recursive: true, force: true });
 }

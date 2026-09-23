@@ -11,17 +11,20 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { summarizeProcess } from "../eval/process.ts";
-import { restoreWorkspaceTo } from "../orchestration/checkpoint.ts";
+import { createCheckpointer, restoreWorkspaceTo } from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import { buildTaskAttempt } from "../state/episode.ts";
+import { newSessionId } from "../state/ids.ts";
 import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
 import { repairStepOutcome } from "../state/repair-step.ts";
 import { runHeadless } from "./headless.ts";
@@ -279,6 +282,9 @@ test("回炉三轮都失败：按快照撤回，快照范围内与第一个 Run 
   try {
     const before = scopeState(repo.root);
     const head = git(repo.root, ["rev-parse", "HEAD"]).trim();
+    // 治理目录里一个未被忽略、目标树里没有的文件：恢复若不过滤治理目录就会把它当作多余文件删掉
+    mkdirSync(join(repo.root, ".pigeon"), { recursive: true });
+    writeFileSync(join(repo.root, ".pigeon", "probe.txt"), "治理目录探针\n");
     const streamFn = createFakeStreamFn({
       replies: [
         {
@@ -313,8 +319,8 @@ test("回炉三轮都失败：按快照撤回，快照范围内与第一个 Run 
       budgetExhausted: false,
       restored: true,
     });
-    // 治理目录不在恢复范围内：会话文件（未被忽略）没被当作多余文件删掉
-    assert.ok(existsSync(join(repo.root, ".pigeon", "sessions")));
+    // 治理目录不在恢复范围内：探针文件（未被忽略、目标树里没有）原样还在
+    assert.equal(readFileSync(join(repo.root, ".pigeon", "probe.txt"), "utf8"), "治理目录探针\n");
     assert.equal(result.label, "Failed");
     assert.equal(streamFn.calls.length, 9, "首次 3 次调用加三轮各 2 次，不开第四轮");
     // 快照范围内逐字一致：改过的受跟踪文件还原、新建的未跟踪文件删掉
@@ -671,6 +677,8 @@ test("恢复：agent 删掉忽略规则后，原本被忽略的依赖目录不�
     const start = commitAll(repo.root, "忽略依赖目录");
     mkdirSync(join(repo.root, "node_modules", "dep"), { recursive: true });
     writeFileSync(join(repo.root, "node_modules", "dep", "index.js"), "依赖\n");
+    // 依赖目录自带的 .gitignore：在被忽略的目录里，不算 agent 新建的忽略文件
+    writeFileSync(join(repo.root, "node_modules", "dep", ".gitignore"), "*.log\n");
     const before = scopeState(repo.root);
     // agent 删掉了 node_modules/ 这条忽略规则
     writeFileSync(join(repo.root, ".gitignore"), "build/\n");
@@ -678,6 +686,10 @@ test("恢复：agent 删掉忽略规则后，原本被忽略的依赖目录不�
     assert.equal(
       readFileSync(join(repo.root, "node_modules", "dep", "index.js"), "utf8"),
       "依赖\n"
+    );
+    assert.equal(
+      readFileSync(join(repo.root, "node_modules", "dep", ".gitignore"), "utf8"),
+      "*.log\n"
     );
     assert.equal(readFileSync(join(repo.root, ".gitignore"), "utf8"), "build/\nnode_modules/\n");
     assert.deepEqual(scopeState(repo.root), before);
@@ -736,12 +748,20 @@ test("恢复：agent 删掉的受跟踪文件被写回", () => {
   }
 });
 
-test("回炉反馈的附加内容注入点抛错：告警一次、以空附加照常回炉，这一步按最后一次验证收尾", async () => {
+test("回炉反馈的附加内容注入点每轮都抛错：只告警一次、以空附加照常回炉，这一步按最后一次验证收尾", async () => {
   const repo = makeRepo();
   try {
     const streamFn = createFakeStreamFn({
-      replies: [edit("bug", "half"), done(), edit("half", "fixed"), done("修好了")],
+      replies: [
+        edit("bug", "w1"),
+        done(),
+        edit("w1", "half"),
+        done(),
+        edit("half", "fixed"),
+        done("修好了"),
+      ],
     });
+    let appendixCalls = 0;
     const { result, lines } = await captureStderr(() =>
       runHeadless({
         task: "把 a.txt 修好",
@@ -753,12 +773,13 @@ test("回炉反馈的附加内容注入点抛错：告警一次、以空附加�
         verify: VERIFY,
         repairRounds: 3,
         repairAppendix: () => {
+          appendixCalls += 1;
           throw new Error("记忆索引读不出：坏文件");
         },
       })
     );
     assert.deepEqual(result.repair, {
-      rounds: 1,
+      rounds: 2,
       verdict: "pass",
       closed: true,
       reverted: false,
@@ -767,11 +788,14 @@ test("回炉反馈的附加内容注入点抛错：告警一次、以空附加�
     });
     assert.equal(result.label, "Passed");
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "fixed\n");
+    assert.equal(appendixCalls, 2, "两轮回炉各调用一次注入点");
     const warnings = lines.filter((line) => line.startsWith("回炉反馈附加内容告警："));
-    assert.equal(warnings.length, 1, lines.join(""));
-    assert.match(warnings[0] ?? "", /本轮反馈不带附加内容，回炉照常进行/);
-    const feedback = lastUserText(streamFn.calls[2]);
-    assert.ok(feedback.trimEnd().endsWith(REPAIR_FEEDBACK_INSTRUCTION), feedback);
+    assert.equal(warnings.length, 1, `同一类故障只告警一次：${lines.join("")}`);
+    assert.match(warnings[0] ?? "", /出错的轮次反馈不带附加内容，回炉照常进行/);
+    for (const call of [streamFn.calls[2], streamFn.calls[4]]) {
+      const feedback = lastUserText(call);
+      assert.ok(feedback.trimEnd().endsWith(REPAIR_FEEDBACK_INSTRUCTION), feedback);
+    }
   } finally {
     repo.cleanup();
   }
@@ -874,8 +898,10 @@ test("回炉途中出现异常：结果仍带回炉字段并标明这一步未�
     });
     assert.equal(result.status, "failed");
     assert.match(result.errorMessage ?? "", /运行面故障/);
+    // 回炉那一轮没开起来：轮数按账本的推法（Run 数减 1）为 0
+    assert.equal(sessionOf(repo.root, result.sessionId).runStarteds.length, 1);
     assert.deepEqual(result.repair, {
-      rounds: 1,
+      rounds: 0,
       verdict: "fail",
       closed: false,
       reverted: false,
@@ -982,6 +1008,13 @@ test("墙钟预算计入验证耗时：Run 内没到点、验证期间到点，�
       wallClockMs: 5000,
     });
     const session = sessionOf(repo.root, result.sessionId);
+    // 会话确实读到了（否则下面"没有撞上限记录"恒真）：一个 Run、一条失败的验证记录
+    assert.equal(session.runStarteds.length, 1);
+    assert.deepEqual(
+      session.attemptVerifieds.map((record) => record.verdict),
+      ["fail"]
+    );
+    assert.equal(result.status, "completed", "首个 Run 以完成收尾，不是被墙钟中止");
     assert.equal(session.limitHits.length, 0, "首个 Run 在墙钟到点之前正常收尾");
     assert.equal(streamFn.calls.length, 2, "不开回炉轮");
     assert.equal(result.repair?.rounds, 0);
@@ -989,6 +1022,189 @@ test("墙钟预算计入验证耗时：Run 内没到点、验证期间到点，�
     assert.equal(result.repair?.reverted, true);
     assert.deepEqual(scopeState(repo.root), before);
   } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：起点前就有的未跟踪嵌套仓库原样保留，其 .git、提交与未提交的改动完好", () => {
+  const repo = makeRepo();
+  try {
+    const sub = join(repo.root, "sub");
+    mkdirSync(sub);
+    git(sub, ["init", "-q", "-b", "main"]);
+    git(sub, ["config", "user.email", "pigeon@example.invalid"]);
+    git(sub, ["config", "user.name", "pigeon-test"]);
+    writeFileSync(join(sub, "x.txt"), "嵌套仓库里提交过的\n");
+    git(sub, ["add", "."]);
+    git(sub, ["commit", "-q", "-m", "嵌套仓库的提交"]);
+    const subHead = git(sub, ["rev-parse", "HEAD"]).trim();
+    writeFileSync(join(sub, "wip.txt"), "嵌套仓库里未提交的\n");
+    // 起点：真实快照器在首次改动前记下的基线（嵌套仓库以 gitlink 收进，名字不带斜杠）
+    const checkpointer = createCheckpointer({
+      workspaceRoot: repo.root,
+      sessionId: newSessionId(),
+    });
+    checkpointer.beforeChange();
+    writeFileSync(join(repo.root, "a.txt"), "w1\n");
+    const snapshot = checkpointer.afterChange();
+    const base = snapshot?.baseCommit;
+    assert.ok(base !== undefined);
+    assert.ok(git(repo.root, ["ls-tree", "-r", "--name-only", base]).split("\n").includes("sub"));
+    restoreWorkspaceTo(repo.root, base);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+    assert.ok(existsSync(join(sub, ".git")), "嵌套仓库的 .git 还在");
+    assert.equal(git(sub, ["rev-parse", "HEAD"]).trim(), subHead, "嵌套仓库的提交完好");
+    assert.equal(readFileSync(join(sub, "wip.txt"), "utf8"), "嵌套仓库里未提交的\n");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：agent 新建的自忽略目录（目录内 .gitignore 为 *）一次恢复即被删掉", () => {
+  const repo = makeRepo();
+  try {
+    const start = git(repo.root, ["rev-parse", "HEAD"]).trim();
+    const before = scopeState(repo.root);
+    mkdirSync(join(repo.root, ".pytest_cache", "v", "cache"), { recursive: true });
+    writeFileSync(join(repo.root, ".pytest_cache", ".gitignore"), "*\n");
+    writeFileSync(join(repo.root, ".pytest_cache", "v", "cache", "lastfailed"), "{}\n");
+    restoreWorkspaceTo(repo.root, start);
+    assert.equal(existsSync(join(repo.root, ".pytest_cache", ".gitignore")), false);
+    assert.equal(existsSync(join(repo.root, ".pytest_cache", "v", "cache", "lastfailed")), false);
+    assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：内容没变的文件不重写，修改时间不变", () => {
+  const repo = makeRepo();
+  try {
+    const start = git(repo.root, ["rev-parse", "HEAD"]).trim();
+    const old = new Date("2020-01-01T00:00:00Z");
+    // 修改时间与索引里记的不同、内容相同：只有刷新过文件状态，写回才会跳过它
+    utimesSync(join(repo.root, "make-extra.mjs"), old, old);
+    writeFileSync(join(repo.root, "a.txt"), "w1\n");
+    restoreWorkspaceTo(repo.root, start);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+    assert.equal(statSync(join(repo.root, "make-extra.mjs")).mtimeMs, old.getTime());
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("首次记基线失败后撤回：不恢复到改到一半的状态，报起点丢失；续跑时从账本同样认得出", async () => {
+  const repo = makeRepo();
+  const gitDir = join(repo.root, ".git");
+  const parked = join(repo.root, ".git-parked");
+  // agent 的第一条命令：把 .git 挪回来并改文件——提议时（记基线）工作区不是 git 工作区，落定时（打快照）又是了
+  writeFileSync(
+    join(repo.root, "unpark.mjs"),
+    [
+      'import { renameSync, writeFileSync } from "node:fs";',
+      'renameSync(".git-parked", ".git");',
+      'writeFileSync("a.txt", "w1\\n");',
+    ].join("\n")
+  );
+  commitAll(repo.root, "加 unpark.mjs");
+  try {
+    const { result, lines } = await captureStderr(() =>
+      runHeadless({
+        task: "把 a.txt 修好",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn: createFakeStreamFn({
+          replies: [
+            {
+              text: "先跑个命令",
+              toolCalls: [{ name: "run_command", args: { command: `${NODE} unpark.mjs` } }],
+            },
+            done(),
+            edit("w1", "w2"),
+            done(),
+          ],
+        }),
+        yolo: true,
+        homeDir: repo.home,
+        verify: VERIFY,
+        repairRounds: 1,
+        onBundle: () => renameSync(gitDir, parked),
+      })
+    );
+    assert.equal(existsSync(gitDir), true, "命令已把 .git 挪回");
+    assert.equal(result.repair?.reverted, true);
+    assert.equal(result.repair?.restored, false);
+    assert.match(result.repair?.restoreError ?? "", /起点丢失|没有撤回起点/);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "w2\n", "不恢复到改到一半的状态");
+    assert.ok(
+      lines.some((line) => line.startsWith("回炉告警：")),
+      lines.join("")
+    );
+    // 账本里有快照记录，但没有改前基线
+    const session = sessionOf(repo.root, result.sessionId);
+    assert.ok(session.checkpoints.length > 0);
+    assert.equal(
+      session.checkpoints.some((record) => record.payload.baseCommit !== undefined),
+      false
+    );
+    // 续跑：新进程里没有前一进程的快照故障清单，仍从账本认出起点丢失，不动工作区
+    assert.deepEqual(
+      restoreStepStart({
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        sessionId: result.sessionId,
+      }),
+      { restored: false, startLost: true }
+    );
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "w2\n");
+  } finally {
+    if (existsSync(parked)) {
+      renameSync(parked, gitDir);
+    }
+    repo.cleanup();
+  }
+});
+
+test("撤回时恢复抛错：报 restored 为 false 并带原因，告警写明工作区可能只恢复了一部分", async () => {
+  const repo = makeRepo();
+  const gitDir = join(repo.root, ".git");
+  const parked = join(repo.root, ".git-parked");
+  // 验证门：最后一次验证时把 .git 挪走，接下来的恢复必定抛错（真实故障）
+  writeFileSync(
+    join(repo.root, "gate-park.mjs"),
+    [
+      'import { readFileSync, renameSync } from "node:fs";',
+      'if (readFileSync("a.txt", "utf8") === "w2\\n") renameSync(".git", ".git-parked");',
+      "process.exit(1);",
+    ].join("\n")
+  );
+  commitAll(repo.root, "加 gate-park.mjs");
+  try {
+    const { result, lines } = await captureStderr(() =>
+      runHeadless({
+        task: "把 a.txt 修好",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn: createFakeStreamFn({
+          replies: [edit("bug", "w1"), done(), edit("w1", "w2"), done()],
+        }),
+        yolo: true,
+        homeDir: repo.home,
+        verify: { command: `${NODE} gate-park.mjs`, timeoutMs: 30_000 },
+        repairRounds: 1,
+      })
+    );
+    assert.equal(result.repair?.reverted, true);
+    assert.equal(result.repair?.restored, false);
+    assert.match(result.repair?.restoreError ?? "", /撤回时恢复工作区失败/);
+    assert.equal(result.errorMessage, result.repair?.restoreError);
+    const warnings = lines.filter((line) => line.startsWith("回炉告警："));
+    assert.equal(warnings.length, 1, lines.join(""));
+    assert.match(warnings[0] ?? "", /工作区可能只恢复了一部分/);
+  } finally {
+    if (existsSync(parked)) {
+      renameSync(parked, gitDir);
+    }
     repo.cleanup();
   }
 });

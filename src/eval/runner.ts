@@ -373,8 +373,11 @@ async function runOnce(
       !refused &&
       deterministic === undefined &&
       (run.failure?.category === "infrastructure" || run.status === "failed");
+    // 回炉撤回而工作区没恢复成：工作区既不是这一步起点、也不是 agent 的最后结果，判分没有意义——
+    // 不判分，记错误行（不占续跑键，重跑时补跑）
+    const restoreFailed = !refused && !providerFailed && run.repair?.restoreError !== undefined;
     const verified =
-      providerFailed || refused
+      providerFailed || refused || restoreFailed
         ? undefined
         : await verifyTaskRun({
             taskId: instance.id,
@@ -405,7 +408,8 @@ async function runOnce(
       errors.push(`过程指标汇总失败：${message(error)}`);
     }
     // 错误行口径（决策 101 ①：未完成不计为模型失败）：模型服务故障（失败分类为基础设施）或判据设施自身出错
-    // （备料失败、拉不起来、约定的出错退出码）时，这次运行没有产出可用结果——记 error，不占续跑键，重跑时补跑。
+    // （备料失败、拉不起来、约定的出错退出码）或回炉撤回时工作区没恢复成时，这次运行没有产出可用结果——
+    // 记 error，不占续跑键，重跑时补跑。
     // 验证器超时不在此列：可能正是任务改坏了代码，属于这次运行的真实结果
     const testProgress = parseTestProgress(verified?.details);
     const limitStatus = LIMIT_STATUSES.find((status) => status === run.status);
@@ -413,7 +417,9 @@ async function runOnce(
       ? "模型服务故障"
       : verified?.error !== undefined
         ? "判据设施出错"
-        : undefined;
+        : restoreFailed
+          ? "回炉撤回时工作区未恢复"
+          : undefined;
     line = {
       ...base,
       process,

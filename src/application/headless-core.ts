@@ -294,7 +294,16 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       if (done.restored) {
         return { restored: true };
       }
-      // 没有起点：快照没出过故障即这一步一次文件都没改过，无需恢复；出过故障即起点丢了，工作区未恢复
+      // 有快照却没有改前基线：起点丢失（账本可见，续跑同样认得出来）
+      if (done.startLost === true) {
+        const restoreError = "快照记录里没有改前基线，撤回起点丢失，工作区未恢复";
+        warn(
+          new Error("回炉撤回起点丢失"),
+          `回炉告警：${restoreError}（这一步记为已撤回，但工作区仍是最后一轮修改后的样子）`
+        );
+        return { restored: false, restoreError };
+      }
+      // 没有任何快照：本进程快照没出过故障即这一步一次文件都没改过，无需恢复；出过故障即起点丢了，工作区未恢复
       const snapshotError = attachment?.errors()[0];
       if (snapshotError === undefined) {
         return { restored: false };
@@ -306,9 +315,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       );
       return { restored: false, restoreError };
     } catch (error) {
-      // 账本已能推出撤回；恢复可重复执行，续跑时再执行一次即可
+      // 账本已能推出撤回；恢复可重复执行，由调用方决定是否再执行一次
       const restoreError = `撤回时恢复工作区失败（可重复执行恢复）：${failureDetail(error)}`;
-      warn(error, `回炉告警：${restoreError}`);
+      warn(error, `回炉告警：${restoreError}（工作区可能只恢复了一部分）`);
       return { restored: false, restoreError };
     }
   };
@@ -391,7 +400,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       } catch (error) {
         warn(
           error,
-          `回炉反馈附加内容告警：注入点出错：${failureDetail(error)}（本轮反馈不带附加内容，回炉照常进行）`
+          `回炉反馈附加内容告警：注入点出错：${failureDetail(error)}（出错的轮次反馈不带附加内容，回炉照常进行）`
         );
       }
       run = await handle.run(
@@ -446,6 +455,10 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   }
   const session = materializeSession(sessionsDir, sessionId, { content: false });
   const metrics = summarizeRunMetrics(session);
+  // 未收尾时轮数按账本的推法取（Run 数减 1）：回炉那一轮若没开起来，不算用了一轮
+  if (repair !== undefined && !repair.closed) {
+    repair = { ...repair, rounds: Math.max(0, session.runStarteds.length - 1) };
+  }
   return {
     sessionId,
     status,
