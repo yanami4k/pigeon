@@ -41,7 +41,7 @@ import {
 // 缓存文件格式版本：对不上即整份作废重建（缓存可重建，不做迁移）
 export const STRUCTURED_MEMORY_CACHE_VERSION = 1;
 // 派生规则标记：改了"什么算摩擦、门槛怎么划"时推进，旧缓存随之作废、按新规则对全部历史重算
-export const STRUCTURED_MEMORY_RULES_TAG = "2026-09-23.2";
+export const STRUCTURED_MEMORY_RULES_TAG = "2026-09-23.3";
 
 export function structuredMemoryCachePath(governanceRoot: string): string {
   return join(governanceRoot, ".pigeon", "cache", "structured-memory.json");
@@ -140,7 +140,14 @@ function snapshotChanges(
   const events: FileChangeEvent[] = [];
   for (const pair of checkpointPairsOf(session)) {
     const files = lines(
-      runStructuredMemoryGit(workspace, ["diff", "--name-only", "--no-renames", pair.from, pair.to])
+      runStructuredMemoryGit(workspace, [
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--relative",
+        pair.from,
+        pair.to,
+      ])
     );
     if (files.length > 0) {
       events.push({ at: pair.at, files });
@@ -150,27 +157,27 @@ function snapshotChanges(
 }
 
 // 开工时已是脏状态的文件：首个快照的改前基线是"开工时的工作区"挂在当时 HEAD 之下的提交，两者之差即未提交的改动
-// （例如跑批器预置进工作区、尚未提交的人写测试）。没有快照或取不到时为空
+// （例如跑批器预置进工作区、尚未提交的人写测试）。没有改前基线（没有快照）或 git 取不到时返回 undefined（未知）
 function dirtyAtStart(
   session: Pick<MaterializedSession, "checkpoints">,
-  workspace: string | undefined
-): string[] {
+  workspace: string
+): string[] | undefined {
   const base = session.checkpoints.find((record) => record.payload.baseCommit !== undefined)
     ?.payload.baseCommit;
-  if (base === undefined || workspace === undefined || !existsSync(workspace)) {
-    return [];
+  if (base === undefined) {
+    return undefined;
   }
-  return lines(
-    runStructuredMemoryGit(workspace, [
-      "diff-tree",
-      "--no-commit-id",
-      "--name-only",
-      "--no-renames",
-      "-r",
-      "--root",
-      base,
-    ])
-  );
+  const output = runStructuredMemoryGit(workspace, [
+    "diff-tree",
+    "--no-commit-id",
+    "--name-only",
+    "--no-renames",
+    "--relative",
+    "-r",
+    "--root",
+    base,
+  ]);
+  return output === undefined ? undefined : lines(output);
 }
 
 // 账本里的题面原文：首个 Run 的第一条用户消息（旁置内容文件里的正文）；取不到返回 undefined
@@ -191,24 +198,30 @@ function taskTextOf(
   return first?.blocks.map((block) => (block.type === "text" ? block.text : "")).join("");
 }
 
-// 一个会话派生出的事实（事件文件物化不读正文；题面原文另从内容文件取）
-export function deriveSessionFacts(governanceRoot: string, sessionId: SessionId): FrictionFact[] {
+// 一个会话派生出的事实（事件文件物化不读正文；题面原文另从内容文件取）。工作区已不在、或取不到改前基线时，
+// 题面测试文件认定不全：这一会话不产出测试步的红转绿（其他步照常、撤回照记），结果标为不完整、不写进缓存，下次再算
+export function deriveSessionFacts(
+  governanceRoot: string,
+  sessionId: SessionId
+): { facts: FrictionFact[]; complete: boolean } {
   const session = materializeSession(sessionsDirOf(governanceRoot), sessionId, { content: false });
   const workspace = session.attemptVerifieds.find(
     (record) => record.target.sessionId === sessionId
   )?.workspace;
   if (repairRoundsOf(session) === 0 || workspace === undefined) {
-    return [];
+    return { facts: [], complete: true };
   }
+  const present = existsSync(workspace);
+  const dirty = present ? dirtyAtStart(session, workspace) : undefined;
   const task = taskTextOf(governanceRoot, session);
-  return deriveSessionFrictions(session, {
-    snapshotChanges: snapshotChanges(session, workspace),
-    dirtyAtStart: dirtyAtStart(session, workspace),
+  const facts = deriveSessionFrictions(session, {
+    snapshotChanges: present ? snapshotChanges(session, workspace) : [],
+    dirtyAtStart: dirty ?? [],
     taskFiles:
-      task !== undefined && existsSync(workspace)
-        ? taskReferencedFiles(task, workspaceProbe(workspace))
-        : [],
+      task !== undefined && present ? taskReferencedFiles(task, workspaceProbe(workspace)) : [],
+    taskTestsUnknown: dirty === undefined,
   });
+  return { facts, complete: dirty !== undefined };
 }
 
 // 读取全部事实：缓存命中的会话沿用，签名对不上或新出现的会话按账本重算，账本里已没有的会话丢掉；有变化才回写缓存
@@ -223,6 +236,8 @@ export function loadStructuredMemory(
   let derived = 0;
   let reused = 0;
   let changed = !existsSync(cachePath);
+  // 派生结果不完整的会话：本次照用，但不写进缓存
+  const uncached: FrictionFact[] = [];
   for (const sessionId of listSessionIds(dir)) {
     const stat = statSync(join(dir, `${sessionId}.jsonl`));
     const cached = cache.sessions[sessionId];
@@ -231,13 +246,14 @@ export function loadStructuredMemory(
       reused += 1;
       continue;
     }
-    next.sessions[sessionId] = {
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      facts: deriveSessionFacts(governanceRoot, sessionId),
-    };
+    const result = deriveSessionFacts(governanceRoot, sessionId);
     derived += 1;
     changed = true;
+    if (!result.complete) {
+      uncached.push(...result.facts);
+      continue;
+    }
+    next.sessions[sessionId] = { size: stat.size, mtimeMs: stat.mtimeMs, facts: result.facts };
   }
   if (Object.keys(cache.sessions).some((sessionId) => next.sessions[sessionId] === undefined)) {
     changed = true;
@@ -249,7 +265,7 @@ export function loadStructuredMemory(
       writeFileAtomic(cachePath, `${JSON.stringify(next)}\n`);
     });
   }
-  const facts = Object.values(next.sessions).flatMap((entry) => entry.facts);
+  const facts = [...Object.values(next.sessions).flatMap((entry) => entry.facts), ...uncached];
   facts.sort((left, right) => left.at - right.at);
   return { facts, derived, reused };
 }

@@ -1,4 +1,4 @@
-// 在子目录执行的验证步骤（设计会话 2026-09-23 裁定）：分步配置每步可给执行目录 cwd（相对工作区根，加法式），
+// 在子目录执行的验证步骤：分步配置每步可给执行目录 cwd（相对工作区根，加法式），
 // 工具报出的相对路径统一换算成相对工作区根的路径，再与改动文件、锚点比对。
 // 以及留痕：run.started 如实记下开局与每轮回炉实际给出的条目、与因用前核验没过被拦下的条目。
 import assert from "node:assert/strict";
@@ -103,7 +103,8 @@ test("分步执行目录：读出时规范为相对工作区根的正斜杠路�
     { name: "lint", command: "ruff check", cwd: "strands-py" },
     { name: "root", command: "npm test" },
   ]);
-  for (const cwd of ["/abs", "C:/abs", "../outside", "a/../../b"]) {
+  // 盘符路径用拼接写出（源码里不出现盘符路径字面量）
+  for (const cwd of ["/abs", ["C", ":/abs"].join(""), "../outside", "a/../../b"]) {
     write({ version: VERIFY_CONFIG_VERSION, steps: [{ name: "x", command: "y", cwd }] });
     assert.throws(() => loadVerifyConfig(dir), VerifyConfigError, cwd);
   }

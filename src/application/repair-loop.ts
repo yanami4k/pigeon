@@ -86,7 +86,7 @@ function stepFeedbackLines(steps: readonly VerifyStepResult[]): string[] {
   for (const step of [...failed, ...undetermined]) {
     lines.push(
       "",
-      `【${step.name}】退出码：${step.exitCode ?? "无"}`,
+      `【${step.name}${step.cwd !== undefined ? ` @ ${step.cwd}` : ""}】退出码：${step.exitCode ?? "无"}`,
       tailHeading(step.truncated),
       nonEmpty(step.output)
     );

@@ -42,6 +42,44 @@ export interface StepFingerprints {
   kind: VerifyStepKind;
   recognized: boolean;
   fingerprints: Fingerprint[];
+  // 失败清单可能不全：同键去重后仍超过上限而被截断，或输出显示测试运行被中断（收集错误、提前停止、文件级失败）。
+  // 此时不能凭"某条不在清单里"认定它已修好
+  incomplete: boolean;
+}
+
+// 测试运行被中断、清单不全的迹象：pytest 的中断与收集错误、-x / --maxfail 提前停止
+const INTERRUPTED = /\bInterrupted\b|during collection|stopping after \d+ failures?/i;
+// node:test 的文件级失败：失败项名就是测试文件（文件没能加载或整体出错）
+const TEST_FILE_NAME = /\.(test|spec)\.[cm]?[jt]sx?$/;
+
+function incompleteList(lines: readonly string[], fingerprints: readonly Fingerprint[]): boolean {
+  return (
+    lines.some((line) => INTERRUPTED.test(line)) ||
+    fingerprints.some(
+      (entry) =>
+        (entry.tool === "pytest" && entry.test === undefined) ||
+        (entry.tool === "node-test" && entry.test !== undefined && TEST_FILE_NAME.test(entry.test))
+    )
+  );
+}
+
+// 同一步里指纹键相同的多行报错合为一个指纹，名字合并
+function dedupeByKey(stepName: string, fingerprints: readonly Fingerprint[]): Fingerprint[] {
+  const byKey = new Map<string, Fingerprint>();
+  for (const entry of fingerprints) {
+    const key = fingerprintKey(stepName, entry);
+    const existing = byKey.get(key);
+    if (existing === undefined) {
+      byKey.set(key, { ...entry, names: [...entry.names] });
+      continue;
+    }
+    for (const name of entry.names) {
+      if (!existing.names.includes(name)) {
+        existing.names.push(name);
+      }
+    }
+  }
+  return [...byKey.values()];
 }
 
 // 同一步最多保留的指纹数：一处断链可能带出成百上千条同类报错
@@ -323,13 +361,17 @@ export function parseStepOutput(step: {
 }): StepFingerprints {
   const lines = stripAnsi(step.output).split("\n");
   for (const [tool, parse] of PARSERS) {
-    const fingerprints = parse(lines);
-    if (fingerprints.length > 0) {
+    const parsed = parse(lines);
+    if (parsed.length > 0) {
+      // 先同键去重、再截到上限
+      const fingerprints = dedupeByKey(step.name, parsed);
       return {
         tool,
         kind: TOOL_KIND[tool],
         recognized: true,
         fingerprints: fingerprints.slice(0, MAX_FINGERPRINTS_PER_STEP),
+        incomplete:
+          fingerprints.length > MAX_FINGERPRINTS_PER_STEP || incompleteList(lines, fingerprints),
       };
     }
   }
@@ -337,6 +379,7 @@ export function parseStepOutput(step: {
     kind: kindByKeywords(step.name, step.command),
     recognized: false,
     fingerprints: [{ tool: "unrecognized", names: [] }],
+    incomplete: true,
   };
 }
 

@@ -105,7 +105,7 @@ test('失败清单不全（输出截断或指纹达上限）时不凭"不在清�
   assert.equal(first?.at, 3_000, "甲在整步通过那次才算修好");
   // 指纹达上限的清单同样不全
   const many = Array.from(
-    { length: MAX_FINGERPRINTS_PER_STEP },
+    { length: MAX_FINGERPRINTS_PER_STEP + 1 },
     (_, index) => [`src/t${index}.test.ts`, `用例${index}`] as [string, string]
   );
   const capped = deriveSessionFrictions(
@@ -116,6 +116,64 @@ test('失败清单不全（输出截断或指纹达上限）时不凭"不在清�
     ])
   );
   assert.equal(capped.find((fact) => fact.fingerprint.test === "甲")?.at, 3_000);
+});
+
+const pytestFailed = (entries: Array<[file: string, name: string]>): string =>
+  [
+    "=========================== short test summary info ============================",
+    ...entries.map(([file, name]) => `FAILED ${file}::${name} - assert False`),
+    `========================= ${entries.length} failed in 0.10s =========================`,
+  ].join("\n");
+
+test('测试运行被中断（收集错误、提前停止、文件级失败）时清单不全，不认"已修好"，只认整步通过', () => {
+  const interrupted: string[] = [
+    // pytest：某个导入被改坏、收集中断
+    [
+      "==================================== ERRORS ====================================",
+      "_______________________ ERROR collecting tests/test_b.py ________________________",
+      "ImportError while importing test module",
+      "=========================== short test summary info ============================",
+      "ERROR tests/test_b.py",
+      "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!",
+      "=============================== 1 error in 0.12s ===============================",
+    ].join("\n"),
+    // pytest -x / --maxfail：第一个失败即停
+    [
+      "=========================== short test summary info ============================",
+      "FAILED tests/test_c.py::test_other - assert False",
+      "!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "========================= 1 failed in 0.10s =========================",
+    ].join("\n"),
+  ];
+  for (const output of interrupted) {
+    const facts = deriveSessionFrictions(
+      sessionOf([
+        [{ name: "测试", verdict: "fail", output: pytestFailed([["tests/test_a.py", "test_a"]]) }],
+        [{ name: "测试", verdict: "fail", output }],
+        [pass("测试")],
+      ])
+    );
+    assert.equal(
+      facts.find((fact) => fact.fingerprint.test === "test_a")?.at,
+      3_000,
+      output.split("\n")[4] ?? output
+    );
+  }
+  // node:test 的文件级失败：失败项名就是测试文件
+  const fileLevel = deriveSessionFrictions(
+    sessionOf([
+      [{ name: "测试", verdict: "fail", output: nodeTests([["src/a.test.ts", "甲"]]) }],
+      [
+        {
+          name: "测试",
+          verdict: "fail",
+          output: nodeTests([["src/b.test.ts", "src/b.test.ts"]]),
+        },
+      ],
+      [pass("测试")],
+    ])
+  );
+  assert.equal(fileLevel.find((fact) => fact.fingerprint.test === "甲")?.at, 3_000);
 });
 
 test("按指纹逐个追踪：待修期间新出现的失败另行追踪；闭合一段之后同一次验证里新变红的也记", () => {

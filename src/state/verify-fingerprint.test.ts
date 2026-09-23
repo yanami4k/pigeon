@@ -217,6 +217,17 @@ test("指纹键：同一步名、同一工具、同一错误码或规则或测�
   );
 });
 
+test("同键先去重、再截断：同一文件同一错误码的多行报错合为一个指纹（名字合并），不占上限、不算清单不全", () => {
+  const lines = Array.from(
+    { length: MAX_FINGERPRINTS_PER_STEP + 5 },
+    (_, index) => `src/a.ts(${index + 1},1): error TS2304: Cannot find name 'x${index}'.`
+  ).join("\n");
+  const parsed = parseStepOutput({ name: "类型", command: "tsc", output: lines });
+  assert.equal(parsed.fingerprints.length, 1);
+  assert.equal(parsed.fingerprints[0]?.names.length, MAX_FINGERPRINTS_PER_STEP + 5);
+  assert.equal(parsed.incomplete, false);
+});
+
 test("同一步的指纹数有上限：超出的只保留前若干个（防止一处断链带出成百上千条）", () => {
   const lines = Array.from(
     { length: MAX_FINGERPRINTS_PER_STEP + 15 },
@@ -224,4 +235,5 @@ test("同一步的指纹数有上限：超出的只保留前若干个（防止�
   ).join("\n");
   const parsed = parseStepOutput({ name: "类型", command: "tsc", output: lines });
   assert.equal(parsed.fingerprints.length, MAX_FINGERPRINTS_PER_STEP);
+  assert.equal(parsed.incomplete, true, "截掉了不同键的指纹：清单不全");
 });

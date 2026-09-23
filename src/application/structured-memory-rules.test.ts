@@ -5,7 +5,12 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildMemoryEntries, loadStructuredMemory } from "../memory/structured-store.ts";
-import { taskReferencedFiles, workspaceProbe } from "../memory/structured-workspace.ts";
+import {
+  runStructuredMemoryGit,
+  StructuredMemoryGitTimeoutError,
+  taskReferencedFiles,
+  workspaceProbe,
+} from "../memory/structured-workspace.ts";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { SessionId } from "../state/ids.ts";
@@ -129,6 +134,8 @@ test('回炉挑选：未识别的指纹不参加"指纹对上"那一档，只参
       repairing(["lint"])
     );
     assert.deepEqual(next.runStarteds[1]?.payload.structuredMemory?.repair, []);
+    // 这一轮没有任何候选，自然也没有被拦下的
+    assert.equal(next.runStarteds[1]?.payload.structuredMemory?.repairBlocked, undefined);
   } finally {
     repo.cleanup();
   }
@@ -251,6 +258,220 @@ test("事实字段损坏（时间越界）导致成文出错：开局与回炉�
     assert.ok(lines[0]?.includes("不推送结构化记忆"), lines[0]);
     assert.deepEqual(next.result.structuredMemory?.opening, []);
     assert.deepEqual(next.result.structuredMemory?.repair, [[]]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+// 合成一条挂在给定文件上的事实（报错文件同为该文件、不带名字，核验只看文件在不在）
+function syntheticFact(repo: MemoryRepo, file: string, stepName: string, at: number): FrictionFact {
+  const fingerprint = { tool: "tsc" as const, code: "TS2304", file, names: [] };
+  return {
+    kind: "regression",
+    sessionId: "01ZZZZZZZZZZZZZZZZZZZZZZZZ" as SessionId,
+    stepName,
+    stepKind: "type",
+    fingerprint,
+    fingerprintKey: fingerprintKey(stepName, fingerprint),
+    at,
+    workspace: repo.root,
+    changedAtRed: [file],
+    repairFiles: [file],
+  };
+}
+
+test('固定挑选：不受"最多 2 条"限制，数量由调用方定', async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    const facts = ["甲", "乙", "丙"].map((name, index) =>
+      syntheticFact(repo, "src/a.ts", name, 1_000 + index)
+    );
+    const ids = buildMemoryEntries(facts).map((entry) => entry.id);
+    assert.equal(ids.length, 3);
+    const given = await step(repo, "调整", [finished()], {
+      fixed: { opening: ids },
+      phases: { load: () => facts },
+    });
+    assert.deepEqual(given.runStarteds[0]?.payload.structuredMemory?.opening, ids);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("固定挑选：指定条目成文后超出字符预算即响亮报错，不静默截断", async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    const facts = ["一", "二", "三", "四"].map((name, index) =>
+      syntheticFact(repo, "src/a.ts", name.repeat(300), 1_000 + index)
+    );
+    const ids = buildMemoryEntries(facts).map((entry) => entry.id);
+    await assert.rejects(
+      step(repo, "调整", [finished()], {
+        fixed: { opening: ids },
+        phases: { load: () => facts },
+      }),
+      /超出字符预算/
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('被拦下只记"按挑选规则本会给出、但核验没过"的：名额之外核验不过的不记', async () => {
+  const repo = makeMemoryRepo({
+    ...FILES,
+    "src/p1.ts": "p1\n",
+    "src/p2.ts": "p2\n",
+    "src/p3.ts": "p3\n",
+    "src/p4.ts": "p4\n",
+  });
+  try {
+    // 四次红转绿，报错分别在 p1..p4 里、名字 n1..n4，都挂在 a.ts 上；p4 最新
+    for (const index of [1, 2, 3, 4]) {
+      await step(
+        repo,
+        "以往",
+        [
+          edits(
+            ["src/a.ts", "export", `export /* ${index} */`],
+            [`src/p${index}.ts`, `p${index}`, `p${index} TYPE_BAD:n${index}`]
+          ),
+          finished(),
+          edits([`src/p${index}.ts`, ` TYPE_BAD:n${index}`, ` n${index} ok`]),
+          finished("修好了"),
+        ],
+        { enabled: false },
+        repairing(["类型"])
+      );
+      repo.commit(`落地 ${index}`);
+    }
+    const onA = buildMemoryEntries(loadStructuredMemory(repo.root).facts).filter(
+      (entry) => entry.anchor === "src/a.ts"
+    );
+    const idOf = (index: number) =>
+      onA.find((entry) => entry.fingerprint.file === `src/p${index}.ts`)?.id;
+    // 最新的 p4 与最旧的 p1 都核验不过（名字没了）
+    repo.write("src/p4.ts", "p4\n");
+    repo.write("src/p1.ts", "p1\n");
+    repo.commit("名字没了");
+    const next = await step(repo, "改 src/a.ts", [finished()], {});
+    const memory = next.runStarteds[0]?.payload.structuredMemory;
+    // 按核验前的次序前两组是 p4、p3：p4 被拦下；p1 在名额之外，不记
+    assert.deepEqual(memory?.openingBlocked, [idOf(4)]);
+    assert.equal(memory?.opening.length, 2);
+    assert.ok(!memory?.opening.includes(idOf(1) ?? ""));
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("MCP 摘要抛错时，回炉 Run 的结构化记忆留痕仍在", async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    const next = await step(
+      repo,
+      "调整",
+      [
+        edits(["src/b.ts", "helper;", "helper; // TYPE_BAD:helper"]),
+        finished(),
+        edits(["src/b.ts", " // TYPE_BAD:helper", ""]),
+        finished("修好了"),
+      ],
+      {},
+      {
+        ...repairing(["类型"]),
+        startMcp: async () => ({
+          tools: [],
+          prompts: [],
+          problems: [],
+          connections: [{} as never],
+          summary: () => {
+            throw new Error("MCP 摘要取不到");
+          },
+          close: async () => {},
+        }),
+      }
+    );
+    assert.equal(next.runStarteds[1]?.payload.mcpTools, undefined);
+    assert.deepEqual(next.runStarteds[1]?.payload.structuredMemory?.repair, []);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('git 子进程超时：抛可识别的超时错误；推送时按"这次不给"处理并去重告警，运行照常完成', async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    assert.throws(
+      () => runStructuredMemoryGit(repo.root, ["log", "--oneline"], 1),
+      StructuredMemoryGitTimeoutError
+    );
+    const lines: string[] = [];
+    const timedOut = (): never => {
+      throw new StructuredMemoryGitTimeoutError("git ls-files 超过 30000 毫秒未返回");
+    };
+    const next = await step(
+      repo,
+      "改 src/a.ts",
+      [
+        edits(["src/b.ts", "helper;", "helper; // TYPE_BAD:helper"]),
+        finished(),
+        edits(["src/b.ts", " // TYPE_BAD:helper", ""]),
+        finished("修好了"),
+      ],
+      {
+        warn: (line) => lines.push(line),
+        phases: {
+          probe: (root) => ({ ...workspaceProbe(root), tracked: timedOut, renamedSince: timedOut }),
+          load: () => [syntheticFact(repo, "src/b.ts", "类型", Date.now() - 1_000)],
+        },
+      },
+      repairing(["类型"])
+    );
+    assert.equal(next.result.repair?.verdict, "pass");
+    assert.ok(lines.length >= 1 && lines.every((line) => line.includes("不推送结构化记忆")));
+    assert.equal(
+      new Set(lines.map((line) => line.slice(0, 12))).size,
+      lines.length,
+      "同类只告警一次"
+    );
+    assert.deepEqual(next.result.structuredMemory?.opening, []);
+    assert.deepEqual(next.result.structuredMemory?.repair, [[]]);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("派生失败后本次运行内不再重试：各轮回炉直接不给", async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    let calls = 0;
+    const lines: string[] = [];
+    const next = await step(
+      repo,
+      "改 src/a.ts",
+      [
+        edits(["src/b.ts", "helper;", "helper; // TYPE_BAD:helper"]),
+        finished(),
+        finished("还没修"),
+        edits(["src/b.ts", " // TYPE_BAD:helper", ""]),
+        finished("修好了"),
+      ],
+      {
+        warn: (line) => lines.push(line),
+        phases: {
+          load: () => {
+            calls += 1;
+            throw new Error("派生超时");
+          },
+        },
+      },
+      repairing(["类型"], 3)
+    );
+    assert.equal(next.result.repair?.rounds, 2);
+    assert.equal(calls, 1, "开局失败一次后，两轮回炉都不再重试");
+    assert.equal(lines.length, 1);
+    assert.deepEqual(next.result.structuredMemory?.repair, [[], []]);
   } finally {
     repo.cleanup();
   }

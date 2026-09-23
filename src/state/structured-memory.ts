@@ -16,7 +16,6 @@ import { lastGateVerificationOf, repairRoundsOf, repairStepOutcome } from "./rep
 import {
   type Fingerprint,
   fingerprintKey,
-  MAX_FINGERPRINTS_PER_STEP,
   parseStepOutput,
   type StepFingerprints,
   type VerifyStepKind,
@@ -249,7 +248,7 @@ function parseVerification(
       ...(command !== undefined ? { command } : {}),
       output: step.output,
     });
-    const partial = step.truncated || parsed.fingerprints.length >= MAX_FINGERPRINTS_PER_STEP;
+    const partial = step.truncated || parsed.incomplete;
     // 报错路径统一为相对工作区根（在子目录里执行的步骤补上执行目录）
     const located = parsed.fingerprints.map((entry) => ({
       ...entry,
@@ -269,7 +268,10 @@ function parseVerification(
 // 某步在一次验证里算作摩擦的指纹。无法判断就不猜：测试步输出无法解析、或步骤类型未知且输出无法解析，都不算；
 // 测试步只算题面以外的失败用例（题面测试文件见 deriveSessionFrictions）；格式、类型、分层、代码检查一律算
 // （按关键字认出类型、但输出无法解析的，记未识别指纹）
-function countedFingerprints(step: ParsedStep, taskTestFiles: ReadonlySet<string>): Fingerprint[] {
+function countedFingerprints(
+  step: ParsedStep,
+  taskTestFiles: ReadonlySet<string> | undefined
+): Fingerprint[] {
   if (step.verdict !== "fail") {
     return [];
   }
@@ -278,6 +280,10 @@ function countedFingerprints(step: ParsedStep, taskTestFiles: ReadonlySet<string
   }
   if (step.parsed.kind !== "test") {
     return step.parsed.fingerprints;
+  }
+  // 题面测试文件认定不全：无法判断哪些失败属题面
+  if (taskTestFiles === undefined) {
+    return [];
   }
   return step.parsed.fingerprints.filter(
     (entry) => entry.file === undefined || !taskTestFiles.has(entry.file)
@@ -322,6 +328,8 @@ export interface DeriveOptions {
   dirtyAtStart?: readonly string[];
   // 题面直接指到的文件（由调用方从账本里的题面原文按开局挑选的同一套规则解析）
   taskFiles?: readonly string[];
+  // 题面测试文件认定不全（工作区不在、取不到改前基线）：无法判断哪些测试属题面，测试步不记红转绿
+  taskTestsUnknown?: boolean;
 }
 
 // 一个会话（回炉开启的一步）派生出的全部摩擦事实；回炉未开启返回空
@@ -388,7 +396,10 @@ export function deriveSessionFrictions(
       if (step === undefined) {
         continue;
       }
-      for (const fingerprint of countedFingerprints(step, taskTestFiles)) {
+      for (const fingerprint of countedFingerprints(
+        step,
+        options.taskTestsUnknown === true ? undefined : taskTestFiles
+      )) {
         const key = fingerprintKey(name, fingerprint);
         if (!open.has(key)) {
           open.set(key, { index, fingerprint });

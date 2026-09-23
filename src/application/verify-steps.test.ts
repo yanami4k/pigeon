@@ -233,11 +233,22 @@ test("回炉反馈：分步配置下写明哪几步失败并附各失败步的�
       { name: "格式", exitCode: 0, verdict: "pass", output: "fmt 通过的输出", truncated: false },
       { name: "类型", exitCode: 2, verdict: "fail", output: "TS2322 在 a.ts", truncated: false },
       { name: "测试", exitCode: 1, verdict: "fail", output: "✖ adds numbers", truncated: true },
+      {
+        name: "子测试",
+        exitCode: 1,
+        verdict: "fail",
+        output: "FAILED tests/test_x.py::t",
+        truncated: false,
+        cwd: "strands-py",
+      },
     ],
     round: 1,
     maxRounds: 3,
   });
-  assert.ok(feedback.includes("失败的步骤：类型、测试"), feedback);
+  assert.ok(feedback.includes("失败的步骤：类型、测试、子测试"), feedback);
+  // 设了执行目录的步写明目录，报错路径相对它
+  assert.ok(feedback.includes("【子测试 @ strands-py】"), feedback);
+  assert.ok(feedback.includes("【类型】"), feedback);
   assert.ok(feedback.includes("TS2322 在 a.ts"), feedback);
   assert.ok(feedback.includes("✖ adds numbers"), feedback);
   assert.ok(!feedback.includes("fmt 通过的输出"), feedback);

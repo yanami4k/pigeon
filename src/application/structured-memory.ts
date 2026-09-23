@@ -14,8 +14,10 @@ import {
   failingFingerprints,
   type MemoryPick,
   type MemorySelection,
+  type RenderedMemory,
   renderOpeningSection,
   renderRepairAppendix,
+  StructuredMemoryBudgetError,
   selectFixed,
   selectOpening,
   selectRepair,
@@ -49,6 +51,8 @@ export interface StructuredMemoryPhases {
   selectOpening: typeof selectOpening;
   selectRepair: typeof selectRepair;
   selectFixed: typeof selectFixed;
+  // 工作区探针（改名追踪、改动幅度、受跟踪文件）
+  probe: (root: string) => WorkspaceProbe;
   // 核验
   check: EntryChecker;
 }
@@ -154,6 +158,7 @@ const DEFAULT_PHASES: StructuredMemoryPhases = {
   selectRepair,
   selectFixed,
   check: checkEntry,
+  probe: workspaceProbe,
 };
 
 type FaultPhase = "派生" | "缓存读写" | "挑选" | "核验";
@@ -206,25 +211,31 @@ export function createStructuredMemoryPush(input: {
     );
   };
 
-  // 以往会话的记忆条目（当前会话的事实不参与）；首次用到时加载，失败下次再试
+  // 以往会话的记忆条目（当前会话的事实不参与）；首次用到时加载。加载失败即本次运行内不再重试（避免每轮回炉
+  // 都同步阻塞、吃掉墙钟预算），后续各处直接不给
+  let loadFailure: PhaseError | undefined;
   const loadEntries = (): MemoryEntry[] => {
     if (entries !== undefined) {
       return entries;
+    }
+    if (loadFailure !== undefined) {
+      throw loadFailure;
     }
     let facts: FrictionFact[];
     try {
       facts = phases.load(input.governanceRoot);
     } catch (error) {
-      throw new PhaseError(
+      loadFailure = new PhaseError(
         error instanceof StructuredMemoryCacheError ? "缓存读写" : "派生",
         error
       );
+      throw loadFailure;
     }
     entries = buildMemoryEntries(facts.filter((fact) => fact.sessionId !== input.sessionId));
     return entries;
   };
   const probeOf = (): WorkspaceProbe => {
-    probe ??= workspaceProbe(input.workspaceRoot);
+    probe ??= phases.probe(input.workspaceRoot);
     return probe;
   };
   const check: EntryChecker = (entry, workspace) => {
@@ -238,29 +249,39 @@ export function createStructuredMemoryPush(input: {
 
   return {
     opening(task) {
-      const manifest = (chosen: MemorySelection): StructuredMemoryManifest => ({
+      const manifest = (
+        given: readonly MemoryPick[],
+        blocked: readonly string[]
+      ): StructuredMemoryManifest => ({
         enabled,
         selection,
-        opening: ids(chosen.picks),
-        ...(chosen.blocked.length > 0 ? { openingBlocked: [...chosen.blocked] } : {}),
+        opening: ids(given),
+        ...(blocked.length > 0 ? { openingBlocked: [...blocked] } : {}),
       });
       if (!enabled) {
-        return { section: "", manifest: manifest(NOTHING) };
+        return { section: "", manifest: manifest([], []) };
       }
       try {
         const loaded = loadEntries();
         if (options.fixed !== undefined) {
-          // 固定挑选的编号开局时一次核对（含回炉那一组）：不存在即调用方配置有误，响亮失败
-          const known = new Set(loaded.map((entry) => entry.id));
+          // 固定挑选开局时一次核对（含回炉那一组）：编号不存在、或成文后超出字符预算，即调用方配置有误，响亮失败
+          const byId = new Map(loaded.map((entry) => [entry.id, entry]));
           const unknown = [
             ...(options.fixed.opening ?? []),
             ...(options.fixed.repair ?? []),
-          ].filter((id) => !known.has(id));
+          ].filter((id) => !byId.has(id));
           if (unknown.length > 0) {
             throw new FixedSelectionError(
               `固定挑选指定的记忆条目不存在：${[...new Set(unknown)].join("、")}`
             );
           }
+          const picksOf = (list: readonly string[] | undefined): MemoryPick[] =>
+            [...new Set(list ?? [])].map((id) => ({
+              entry: byId.get(id) as MemoryEntry,
+              changedLines: 0,
+            }));
+          renderOpeningSection(picksOf(options.fixed.opening), { strict: true });
+          renderRepairAppendix(picksOf(options.fixed.repair), { strict: true });
         }
         const workspace = probeOf();
         const chosen =
@@ -274,16 +295,18 @@ export function createStructuredMemoryPush(input: {
                   workspace,
                   check
                 );
-        const section = renderOpeningSection(chosen.picks);
-        summary.opening = ids(chosen.picks);
+        const rendered = renderOpeningSection(chosen.picks, {
+          strict: options.fixed !== undefined,
+        });
+        summary.opening = ids(rendered.given);
         summary.openingBlocked = [...chosen.blocked];
-        return { section, manifest: manifest(chosen) };
+        return { section: rendered.text, manifest: manifest(rendered.given, chosen.blocked) };
       } catch (error) {
-        if (error instanceof FixedSelectionError) {
+        if (error instanceof FixedSelectionError || error instanceof StructuredMemoryBudgetError) {
           throw error;
         }
         report(error, "本次开局");
-        return { section: "", manifest: manifest(NOTHING) };
+        return { section: "", manifest: manifest([], []) };
       }
     },
     repairAppendix(context) {
@@ -295,7 +318,7 @@ export function createStructuredMemoryPush(input: {
         return undefined;
       }
       let chosen: MemorySelection = NOTHING;
-      let text = "";
+      let rendered: RenderedMemory = { text: "", given: [] };
       try {
         const loaded = loadEntries();
         const workspace = probeOf();
@@ -319,16 +342,16 @@ export function createStructuredMemoryPush(input: {
                 check
               );
         // 成文也在兜底之内：事实字段损坏导致成文出错时，这一轮一条不给
-        text = renderRepairAppendix(chosen.picks);
+        rendered = renderRepairAppendix(chosen.picks, { strict: options.fixed !== undefined });
       } catch (error) {
         report(error, `第 ${context.round} 轮回炉`);
         chosen = NOTHING;
-        text = "";
+        rendered = { text: "", given: [] };
       }
-      summary.repair.push(ids(chosen.picks));
+      summary.repair.push(ids(rendered.given));
       summary.repairBlocked.push([...chosen.blocked]);
-      pendingRepair = { given: ids(chosen.picks), blocked: [...chosen.blocked] };
-      return text === "" ? undefined : text;
+      pendingRepair = { given: ids(rendered.given), blocked: [...chosen.blocked] };
+      return rendered.text === "" ? undefined : rendered.text;
     },
     takeRepairIds() {
       const taken = pendingRepair;

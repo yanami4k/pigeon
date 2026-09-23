@@ -14,20 +14,24 @@ export const STRUCTURED_MEMORY_GIT_TIMEOUT_MS = 30_000;
 export class StructuredMemoryGitTimeoutError extends Error {}
 
 // 执行一条 git 命令：失败返回 undefined（查不到）；超时抛错
-export function runStructuredMemoryGit(root: string, args: string[]): string | undefined {
+export function runStructuredMemoryGit(
+  root: string,
+  args: string[],
+  timeoutMs: number = STRUCTURED_MEMORY_GIT_TIMEOUT_MS
+): string | undefined {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", ["-c", "core.quotePath=false", ...args], {
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
       maxBuffer: 64 * 1024 * 1024,
-      timeout: STRUCTURED_MEMORY_GIT_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
   } catch (error) {
     if ((error as { code?: unknown }).code === "ETIMEDOUT") {
       throw new StructuredMemoryGitTimeoutError(
-        `git ${args[0] ?? ""} 超过 ${STRUCTURED_MEMORY_GIT_TIMEOUT_MS} 毫秒未返回`
+        `git ${args[0] ?? ""} 超过 ${timeoutMs} 毫秒未返回`
       );
     }
     return undefined;
@@ -74,6 +78,7 @@ export function workspaceProbe(root: string): WorkspaceProbe {
       "--diff-filter=R",
       "-M",
       "--name-status",
+      "--relative",
       "--format=%x01%ct",
     ]);
     for (const line of (log ?? "").split(/\r?\n/)) {

@@ -90,27 +90,56 @@ function verifiedTop(
   check: EntryChecker,
   taken: Set<string>
 ): MemorySelection {
-  const checked: MemoryPick[] = [];
-  const blocked: string[] = [];
   const recent = [...candidates]
     .sort((left, right) => right.latest.at - left.latest.at)
     .slice(0, CANDIDATE_LIMIT);
+  // 同一指纹只给一条，跨种类也一样：按指纹分组，组内核验后挑代表——红转绿优先（带修法），同种类取最近一次，再比改动幅度
+  const groups = new Map<string, MemoryEntry[]>();
   for (const entry of recent) {
-    const result = check(entry, probe);
-    if (result.ok) {
-      checked.push({ entry, changedLines: result.changedLines });
-    } else {
-      blocked.push(entry.id);
+    if (taken.has(entry.fingerprintKey)) {
+      continue;
     }
+    groups.set(entry.fingerprintKey, [...(groups.get(entry.fingerprintKey) ?? []), entry]);
   }
-  // 同一指纹只给一条，跨种类也一样：先在同指纹的候选里挑代表——红转绿优先（带修法），同种类取最近一次，再比改动幅度
   const representative = new Map<string, MemoryPick>();
-  for (const pick of checked) {
-    const current = representative.get(pick.entry.fingerprintKey);
-    if (current === undefined || betterRepresentative(pick, current)) {
-      representative.set(pick.entry.fingerprintKey, pick);
+  // 整组都没过核验的组：记组头（按同一偏好排在最前的那条），再看它是否落在名额之内
+  const failedHeads = new Map<string, MemoryEntry>();
+  for (const [key, members] of groups) {
+    for (const entry of members) {
+      const result = check(entry, probe);
+      if (!result.ok) {
+        continue;
+      }
+      const pick = { entry, changedLines: result.changedLines };
+      const current = representative.get(key);
+      if (current === undefined || betterRepresentative(pick, current)) {
+        representative.set(key, pick);
+      }
+    }
+    if (!representative.has(key)) {
+      const head = [...members].sort((left, right) =>
+        betterRepresentative({ entry: left, changedLines: 0 }, { entry: right, changedLines: 0 })
+          ? -1
+          : 1
+      )[0];
+      if (head !== undefined) {
+        failedHeads.set(key, head);
+      }
     }
   }
+  // 被拦下：按核验前的次序（最近出现、出现次数、编号）排组，前 limit 组里整组没过核验的，即"本会给出但被拦下"
+  const blocked = [...groups.keys()]
+    .map((key) => representative.get(key)?.entry ?? failedHeads.get(key))
+    .filter((entry): entry is MemoryEntry => entry !== undefined)
+    .sort(
+      (left, right) =>
+        right.latest.at - left.latest.at ||
+        right.count - left.count ||
+        left.id.localeCompare(right.id)
+    )
+    .slice(0, Math.max(0, limit))
+    .filter((entry) => !representative.has(entry.fingerprintKey))
+    .map((entry) => entry.id);
   const ranked = [...representative.values()].sort(
     (left, right) =>
       left.changedLines - right.changedLines ||
@@ -275,35 +304,62 @@ export function renderEntry(entry: MemoryEntry): string {
   return text.length > ENTRY_TEXT_LIMIT ? `${text.slice(0, ENTRY_TEXT_LIMIT - 1)}…` : text;
 }
 
-// 开局段落（拼进系统提示，与常驻 Memory 分开计预算）；没有条目为空串
-export function renderOpeningSection(picks: readonly MemoryPick[]): string {
+// 固定挑选的条目成文后超出字符预算：调用方指定的内容放不下，响亮失败，不静默截断
+export class StructuredMemoryBudgetError extends Error {}
+
+// 成文的结果：段落文字与实际成文给出的条目（放不下的整条不给，留痕只记给出的）
+export interface RenderedMemory {
+  text: string;
+  given: MemoryPick[];
+}
+
+// 按字符预算逐条放入；strict（固定挑选）时有放不下的即抛 StructuredMemoryBudgetError
+function renderWithin(
+  header: readonly string[],
+  picks: readonly MemoryPick[],
+  strict: boolean
+): RenderedMemory {
   if (picks.length === 0) {
-    return "";
+    return { text: "", given: [] };
   }
-  return clip(
-    [
-      "## 结构化记忆",
-      `以下是程序从本项目以往运行记录中取出的${STRUCTURED_MEMORY_DISCLAIMER}。`,
-      ...picks.map((pick) => `- ${renderEntry(pick.entry)}`),
-    ].join("\n")
+  const lines = [...header];
+  const given: MemoryPick[] = [];
+  for (const pick of picks) {
+    const line = `- ${renderEntry(pick.entry)}`;
+    if ([...lines, line].join("\n").length > STRUCTURED_MEMORY_BUDGET_CHARS) {
+      if (strict) {
+        throw new StructuredMemoryBudgetError(
+          `固定挑选指定的记忆条目成文后超出字符预算 ${STRUCTURED_MEMORY_BUDGET_CHARS}：${pick.entry.id}`
+        );
+      }
+      continue;
+    }
+    lines.push(line);
+    given.push(pick);
+  }
+  return given.length === 0 ? { text: "", given } : { text: lines.join("\n"), given };
+}
+
+// 开局段落（拼进系统提示，与常驻 Memory 分开计预算）；没有条目为空串
+export function renderOpeningSection(
+  picks: readonly MemoryPick[],
+  options: { strict?: boolean } = {}
+): RenderedMemory {
+  return renderWithin(
+    ["## 结构化记忆", `以下是程序从本项目以往运行记录中取出的${STRUCTURED_MEMORY_DISCLAIMER}。`],
+    picks,
+    options.strict === true
   );
 }
 
 // 回炉附加内容（附在回炉反馈之后）；没有条目为空串
-export function renderRepairAppendix(picks: readonly MemoryPick[]): string {
-  if (picks.length === 0) {
-    return "";
-  }
-  return clip(
-    [
-      `相关的结构化记忆（${STRUCTURED_MEMORY_DISCLAIMER}）：`,
-      ...picks.map((pick) => `- ${renderEntry(pick.entry)}`),
-    ].join("\n")
+export function renderRepairAppendix(
+  picks: readonly MemoryPick[],
+  options: { strict?: boolean } = {}
+): RenderedMemory {
+  return renderWithin(
+    [`相关的结构化记忆（${STRUCTURED_MEMORY_DISCLAIMER}）：`],
+    picks,
+    options.strict === true
   );
-}
-
-function clip(text: string): string {
-  return text.length > STRUCTURED_MEMORY_BUDGET_CHARS
-    ? `${text.slice(0, STRUCTURED_MEMORY_BUDGET_CHARS - 1)}…`
-    : text;
 }
