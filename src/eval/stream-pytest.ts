@@ -1,9 +1,16 @@
 // pytest 的韧性运行（strands 的探针、全量测量与人的基准共用）：一个卡死或失控的用例不能让同一次运行里其余用例的结果丢失。
 //   写出了 junit 报告：以报告为准（pytest 在报告写完后若因残留线程或事件循环不退出，外壳会等几秒后杀掉它，结果不受影响）；
 //   报告写出前就被杀（容器内存上限、墙钟）：从 -v 的逐行进度里收回已完成的用例，把正在跑、没有结果的那条记为失败
-//   （卡死），再以 --deselect 排除两者续跑剩下的；没有任何进展即停下，记为未完成。
+//   （卡死），再以 --deselect 排除两者续跑剩下的；没有任何进展即停下，记为未完成；
+//   conftest 导入失败（pytest 在收集前整次中止、不写报告，--continue-on-collection-errors 管不到）：该 conftest 所在目录下
+//   的测试文件各记一条"文件::<collection>"失败，其余文件去掉它们续跑——与单个文件收集出错同一口径。
 // 用例集由调用方固定（人的基准），这里只负责把能拿到的逐用例结果都拿到。
-import { type CaseOutcome, parseJunitCases, type TestCaseResult } from "./stream-measure.ts";
+import {
+  type CaseOutcome,
+  parseJunitCases,
+  relativeTestPath,
+  type TestCaseResult,
+} from "./stream-measure.ts";
 
 export interface VerboseProgress {
   completed: { nodeid: string; outcome: CaseOutcome }[];
@@ -63,6 +70,15 @@ export interface PytestRun {
   output: string;
 }
 
+// 一次运行：跑哪些测试文件（相对 pytest 的运行目录）、排除哪些用例
+export interface PytestAttempt {
+  tests: readonly string[];
+  deselect: readonly string[];
+}
+
+// conftest 导入失败的报错（ImportError 与语法错误等都报成这一句），取出 conftest 的路径
+const CONFTEST_FAILURE = /ImportError while loading conftest '([^']+)'/;
+
 export interface ResilientOutcome {
   cases: TestCaseResult[];
   // 卡死、被记为失败的用例
@@ -74,8 +90,8 @@ export interface ResilientOutcome {
 }
 
 export async function runPytestResilient(
-  run: (deselect: readonly string[]) => Promise<PytestRun>,
-  options: { root: string; relativeBase: string; maxAttempts?: number }
+  run: (attempt: PytestAttempt) => Promise<PytestRun>,
+  options: { root: string; relativeBase: string; tests: readonly string[]; maxAttempts?: number }
 ): Promise<ResilientOutcome> {
   const prefix = options.relativeBase === "" ? "" : `${options.relativeBase.replace(/\/+$/, "")}/`;
   const byId = new Map<string, TestCaseResult>();
@@ -83,11 +99,12 @@ export async function runPytestResilient(
   const stuck: string[] = [];
   const outputs: string[] = [];
   const maxAttempts = options.maxAttempts ?? 20;
+  let tests = [...options.tests];
   let complete = false;
   let attempts = 0;
   while (attempts < maxAttempts) {
     attempts++;
-    const r = await run([...deselect]);
+    const r = await run({ tests: [...tests], deselect: [...deselect] });
     outputs.push(r.output);
     if (r.junit !== null) {
       for (const c of parseJunitCases(r.junit, options.root, options.relativeBase, "pytest")) {
@@ -95,6 +112,24 @@ export async function runPytestResilient(
       }
       complete = true;
       break;
+    }
+    const conftest = CONFTEST_FAILURE.exec(r.output)?.[1];
+    if (conftest !== undefined) {
+      const rel = relativeTestPath(conftest, `${options.root}/${options.relativeBase}`);
+      const dir = rel.slice(0, rel.lastIndexOf("/") + 1);
+      const affected = tests.filter((t) => t.replace(/\\/g, "/").startsWith(dir));
+      // 出错的 conftest 不在请求的文件之上：再跑也一样
+      if (affected.length === 0) break;
+      for (const t of affected) {
+        const id = `${prefix}${t}::<collection>`;
+        byId.set(id, { id, file: `${prefix}${t}`, outcome: "failed" });
+      }
+      tests = tests.filter((t) => !affected.includes(t));
+      if (tests.length === 0) {
+        complete = true;
+        break;
+      }
+      continue;
     }
     const progress = parseVerboseProgress(r.output);
     for (const c of progress.completed) {

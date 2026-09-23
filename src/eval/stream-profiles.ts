@@ -275,7 +275,7 @@ export const strandsRuntime: StreamRepoRuntime = {
     const junit = `${options.scratch}/pigeon-cases-junit.xml`;
     const limitSec = Math.max(1, Math.floor(options.timeoutMs / 1000));
     const out = await runPytestResilient(
-      async (deselect) => {
+      async (attempt) => {
         const r = await ws.run(
           [
             "sh",
@@ -284,8 +284,8 @@ export const strandsRuntime: StreamRepoRuntime = {
             "sh",
             junit,
             String(limitSec),
-            ...inStrands(tests),
-            ...deselect.flatMap((d) => ["--deselect", d]),
+            ...attempt.tests,
+            ...attempt.deselect.flatMap((d) => ["--deselect", d]),
           ],
           options.timeoutMs + 60_000,
           options.cwd
@@ -297,7 +297,7 @@ export const strandsRuntime: StreamRepoRuntime = {
           output: r.output,
         };
       },
-      { root: options.cwd ?? ws.root, relativeBase: "strands-py" }
+      { root: options.cwd ?? ws.root, relativeBase: "strands-py", tests: inStrands(tests) }
     );
     return {
       cases: out.cases,

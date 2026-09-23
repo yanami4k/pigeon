@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type PytestRun, parseVerboseProgress, runPytestResilient } from "./stream-pytest.ts";
+import {
+  type PytestAttempt,
+  type PytestRun,
+  parseVerboseProgress,
+  runPytestResilient,
+} from "./stream-pytest.ts";
 
 // pytest -v 的实际输出形状：一行"nodeid 结果 [进度]"；超时横幅会把卡住那条的结果挤到若干行之后
 const FINISHED = [
@@ -53,7 +58,7 @@ const junit = (cases: [string, "passed" | "failed"][]) =>
     .join("")}</testsuite></testsuites>`;
 
 test("韧性运行：写出报告即以报告为准；报告写出前被杀，收回已完成的、卡住的记超时失败，排除两者续跑剩下的", async () => {
-  const calls: (readonly string[])[] = [];
+  const calls: PytestAttempt[] = [];
   const runs: PytestRun[] = [
     {
       exitCode: 137,
@@ -74,13 +79,16 @@ test("韧性运行：写出报告即以报告为准；报告写出前被杀，�
     },
   ];
   const out = await runPytestResilient(
-    async (deselect) => {
-      calls.push(deselect);
+    async (attempt) => {
+      calls.push(attempt);
       return runs.shift() as PytestRun;
     },
-    { root: "/measure", relativeBase: "strands-py" }
+    { root: "/measure", relativeBase: "strands-py", tests: ["tests/a/test_x.py"] }
   );
-  assert.deepEqual(calls, [[], ["tests/a/test_x.py::test_one", "tests/a/test_x.py::test_stuck"]]);
+  assert.deepEqual(
+    calls.map((c) => c.deselect),
+    [[], ["tests/a/test_x.py::test_one", "tests/a/test_x.py::test_stuck"]]
+  );
   assert.deepEqual(
     out.cases.map((c) => [c.id, c.outcome]),
     [
@@ -102,9 +110,73 @@ test("韧性运行：被杀且没有任何进展（例如收集阶段就被杀�
       n++;
       return { exitCode: 137, timedOut: false, junit: null, output: "collecting ..." };
     },
-    { root: "/measure", relativeBase: "strands-py" }
+    { root: "/measure", relativeBase: "strands-py", tests: ["tests/a/test_x.py"] }
   );
   assert.equal(n, 1);
   assert.equal(out.complete, false);
   assert.deepEqual(out.cases, []);
+});
+
+test("韧性运行：conftest 导入失败时整次中止、不写报告——该目录下的测试文件各记一条收集失败，其余文件去掉它们续跑", async () => {
+  const calls: PytestAttempt[] = [];
+  const runs: PytestRun[] = [
+    {
+      exitCode: 4,
+      timedOut: false,
+      junit: null,
+      output:
+        "ImportError while loading conftest '/measure/strands-py/tests/a/conftest.py'.\n" +
+        "tests/a/conftest.py:9: in <module>\nE   ImportError: cannot import name '_compat'\n",
+    },
+    {
+      exitCode: 0,
+      timedOut: false,
+      junit: `<testsuites><testsuite name="pytest"><testcase classname="tests.b.test_y" file="tests/b/test_y.py" name="test_y"/></testsuite></testsuites>`,
+      output: "",
+    },
+  ];
+  const out = await runPytestResilient(
+    async (attempt) => {
+      calls.push(attempt);
+      return runs.shift() as PytestRun;
+    },
+    {
+      root: "/measure",
+      relativeBase: "strands-py",
+      tests: ["tests/a/test_x.py", "tests/b/test_y.py", "tests/a/deep/test_z.py"],
+    }
+  );
+  assert.deepEqual(
+    calls.map((c) => c.tests),
+    [["tests/a/test_x.py", "tests/b/test_y.py", "tests/a/deep/test_z.py"], ["tests/b/test_y.py"]]
+  );
+  assert.deepEqual(
+    out.cases.map((c) => [c.id, c.outcome]),
+    [
+      ["strands-py/tests/a/test_x.py::<collection>", "failed"],
+      ["strands-py/tests/a/deep/test_z.py::<collection>", "failed"],
+      ["strands-py/tests/b/test_y.py::test_y", "passed"],
+    ]
+  );
+  assert.equal(out.complete, true);
+  // 请求的文件全在出错的目录下：不再续跑，全部记收集失败即完整
+  let n = 0;
+  const all = await runPytestResilient(
+    async () => {
+      n++;
+      return {
+        exitCode: 4,
+        timedOut: false,
+        junit: null,
+        output: "ImportError while loading conftest 'tests\\a\\conftest.py'.\n",
+      };
+    },
+    { root: "/measure", relativeBase: "strands-py", tests: ["tests/a/test_x.py"] }
+  );
+  assert.equal(n, 1);
+  assert.equal(all.complete, true);
+  assert.deepEqual(
+    all.cases.map((c) => [c.id, c.outcome]),
+    [["strands-py/tests/a/test_x.py::<collection>", "failed"]]
+  );
 });
