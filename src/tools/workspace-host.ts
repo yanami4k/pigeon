@@ -81,6 +81,16 @@ export interface WorkspaceHost {
   // 删掉 agent 新建的一切（含被忽略的），开工时已被忽略的路径一概不动。容器实现提供；宿主侧仍由 checkpoint.ts 负责
   markStepStart?(): Promise<StepStartMark>;
   restoreStepStart?(mark: StepStartMark): Promise<void>;
+  // 只读的 git 查询（结构化记忆核验用：读文件之外，列出受跟踪的文件、追踪一个文件跨改名的历史），
+  // 路径一律相对工作区根、正斜杠。容器实现提供；本地工作区待结构化记忆接入时补
+  listTracked?(): Promise<string[]>;
+  // 该文件的提交历史（新在前，跨改名追踪），每项给出提交与该提交上的路径；limit 为最多几条；不受跟踪即空
+  fileHistory?(path: string, limit?: number): Promise<FileHistoryEntry[]>;
+}
+
+export interface FileHistoryEntry {
+  commit: string;
+  path: string;
 }
 
 // 写保护命中——域错误（模型可以换个文件改），带归类标记
