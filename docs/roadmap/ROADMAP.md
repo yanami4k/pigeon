@@ -324,10 +324,10 @@ settled 只表示执行过程到达终态；verification 的推进器（确定�
 OutcomeUnknown 先归属到具体 ExecutionId（intent 无 receipt 且无 resolution），
 再由 Run 聚合。Run 的状态不代替工具调用状态。
 
-Candidate（设计，M6+）:
-Proposed → SecurityScanned → EvidenceChecked
-         → ReplayValidated / ValidationFailed
-         → AwaitingApproval → Active / Rejected / Superseded
+Candidate（M6 起；状态由账本现算，decisions.md 065、084、092、093、128）:
+提出（扫描结果随提出记录一并写入）→ SecurityScanned / ScanRejected
+         → ReplayValidated / ReplayInconclusive / ReplayRegressed
+         → Approved → Active → Revoked ／ Rejected ／ Superseded
 ```
 
 ## 5. 分阶段路线图

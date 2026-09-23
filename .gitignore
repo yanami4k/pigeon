@@ -14,7 +14,8 @@ coverage/
 
 npm-debug.log*
 
-# 文档规范（decisions.md 047）：roadmap / audit / decision / spikes 入库；notes 是本地交接与学习材料
+# 文档规范（decisions.md 047、130）：roadmap / audit / spikes 入库；decisions 是本地裁决详情，notes 是本地交接与学习材料
+docs/decisions/
 docs/notes/
 
 assets/
