@@ -113,6 +113,8 @@ export interface PiRuntimeAdapterOptions {
   // 决策 134：本 Run 的结构化记忆留痕（快照里冻结的开局留痕，加上本 Run 作为回炉轮收到与被拦下的条目）——
   // 与 MCP 摘要分开取，一边抛错不连带另一边
   runStartedMemory?: () => Pick<RunStartedPayload, "structuredMemory">;
+  // 这一步的起点（容器工作区、回炉开启时由执行端记下）：每个 Run 开始时取一次写进 run.started；缺省或取到 undefined 不带
+  runStartedStepStart?: () => RunStartedPayload["stepStart"];
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
   initialMessages?: AgentMessage[];
 }
@@ -147,6 +149,7 @@ export class PiRuntimeAdapter {
   #systemPromptRecorded = false;
   readonly #runStartedExtras: PiRuntimeAdapterOptions["runStartedExtras"];
   readonly #runStartedMemory: PiRuntimeAdapterOptions["runStartedMemory"];
+  readonly #runStartedStepStart: PiRuntimeAdapterOptions["runStartedStepStart"];
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -164,6 +167,7 @@ export class PiRuntimeAdapter {
     this.#eventLog = options.eventLog;
     this.#runStartedExtras = options.runStartedExtras;
     this.#runStartedMemory = options.runStartedMemory;
+    this.#runStartedStepStart = options.runStartedStepStart;
     this.#messageContent = options.messageContent ?? {};
     this.#systemPromptHash = sha256Hex(this.#snapshot.context.systemPrompt);
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
@@ -523,6 +527,7 @@ export class PiRuntimeAdapter {
     } catch (error) {
       this.#listenerErrors.push(error);
     }
+    const stepStart = this.#runStartedStepStart?.();
     this.recordObservation("run.started", {
       model: {
         provider: snapshot.model.provider,
@@ -568,6 +573,7 @@ export class PiRuntimeAdapter {
         : {}),
       ...extras,
       ...memory,
+      ...(stepStart !== undefined ? { stepStart: { ...stepStart } } : {}),
     });
   }
 

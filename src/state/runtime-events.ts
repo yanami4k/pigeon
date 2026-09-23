@@ -134,6 +134,9 @@ export function isThinkingLevel(value: string): value is ThinkingLevel {
   return (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
+// git 对象号（SHA-1 或 SHA-256）
+const GitObjectIdSchema = Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" });
+
 export const RunStartedPayloadSchema = Type.Object({
   model: Type.Object({
     provider: Type.String({ minLength: 1 }),
@@ -178,6 +181,12 @@ export const RunStartedPayloadSchema = Type.Object({
   // 回炉轮数（决策 142 / 143；冻结快照值，只在开启时在场）：一步里的每次 Run 都带同一个值，
   // 撤回由它与这一步最后一次验证记录推出（state/repair-step.ts），不另记
   repairRounds: Type.Optional(RepairRoundsSchema),
+  // 这一步的起点（决策 154②；加法式可缺省）：工作区在执行端另一侧（容器）时，回炉开启下执行端在第一个 Run 之前记下的
+  // 起点提交与"开工时的树"挂在它之下的提交；一步里的每个 Run 同值。两者之差即开工时的脏文件（跑批器预置、尚未提交的人写测试），
+  // 结构化记忆派生据此认定题面测试——本地工作区由快照记录的改前基线给出，不带本字段。旧记录没有时按未知处理
+  stepStart: Type.Optional(
+    Type.Object({ commit: GitObjectIdSchema, baseCommit: Type.Optional(GitObjectIdSchema) })
+  ),
   // 结构化记忆（决策 134 / 157；加法式可缺省）：开关、挑选方式、开局给了哪几条（冻结快照值，每个 Run 同值），
   // 以及本 Run 作为回炉轮收到了哪几条（只在回炉 Run 上在场）。没有接入结构化记忆的入口（REPL、TUI、worker）不带
   structuredMemory: Type.Optional(
@@ -251,7 +260,6 @@ export type EvalVerifiedPayload = Static<typeof EvalVerifiedPayloadSchema>;
 // workspace.checkpoint（M7，决策 078）：git 底层命令在临时索引上生成的快照提交，挂在 refs/pigeon/checkpoints/<会话>/ 下。
 // afterRunSeq 是该工具调用的结果消息在本 Run 的条目号：分叉点（含）之前最近的快照即 afterRunSeq 不大于分叉序号的最后一条；
 // baseCommit 是本会话首个快照的改前基线（首次改动之前的工作区状态），分叉点早于首次改动时取它
-const GitObjectIdSchema = Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" });
 export const WorkspaceCheckpointPayloadSchema = Type.Object({
   ref: Type.String({ minLength: 1 }),
   commit: GitObjectIdSchema,

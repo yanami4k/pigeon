@@ -161,6 +161,8 @@ interface RuntimeSurface {
   repairRounds?: number;
   // 决策 134 / 157：结构化记忆（只有 headless 在接入时给）——开局段落与留痕、回炉轮条目的取走口
   structuredMemory?: RuntimeDeps["structuredMemory"];
+  // 这一步的起点（只有 headless 在容器工作区开启回炉时给），写进每个 Run 的 run.started
+  stepStart?: RuntimeDeps["stepStart"];
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -251,6 +253,8 @@ export interface DetachedRuntimeRequest {
   repairRounds?: number;
   // 决策 134 / 157：结构化记忆的开局段落与留痕、回炉轮条目的取走口（只有 headless 在接入时给）
   structuredMemory?: RuntimeDeps["structuredMemory"];
+  // 这一步的起点（只有 headless 在容器工作区开启回炉时给），写进每个 Run 的 run.started
+  stepStart?: RuntimeDeps["stepStart"];
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -302,6 +306,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.structuredMemory !== undefined
       ? { structuredMemory: surface.structuredMemory }
       : {}),
+    ...(surface.stepStart !== undefined ? { stepStart: surface.stepStart } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）

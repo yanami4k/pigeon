@@ -147,13 +147,17 @@ function snapshotChanges(
 }
 
 // 开工时已是脏状态的文件：首个快照的改前基线是"开工时的工作区"挂在当时 HEAD 之下的提交，两者之差即未提交的改动
-// （例如跑批器预置进工作区、尚未提交的人写测试）。没有改前基线（没有快照）或 git 取不到时返回 undefined（未知）
+// （例如跑批器预置进工作区、尚未提交的人写测试）。工作区在容器里时没有快照，改由 run.started 里执行端记下的起点给出
+// "开工时的树"，同形。两者都没有（旧记录）或 git 取不到时返回 undefined（未知）
 function dirtyAtStart(
-  session: Pick<MaterializedSession, "checkpoints">,
+  session: Pick<MaterializedSession, "checkpoints" | "runStarteds">,
   access: WorkspaceAccess
 ): string[] | undefined {
-  const base = session.checkpoints.find((record) => record.payload.baseCommit !== undefined)
-    ?.payload.baseCommit;
+  const base =
+    session.checkpoints.find((record) => record.payload.baseCommit !== undefined)?.payload
+      .baseCommit ??
+    session.runStarteds.find((record) => record.payload.stepStart?.baseCommit !== undefined)
+      ?.payload.stepStart?.baseCommit;
   if (base === undefined) {
     return undefined;
   }

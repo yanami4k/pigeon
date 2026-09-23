@@ -81,3 +81,67 @@ test("容器里的结构化记忆：首轮类型检查变红、回炉修好即�
     repo.cleanup();
   }
 });
+
+test("容器里的测试步：题面以外的已有测试被改坏、回炉修好记红转绿；跑批器预置未提交的题面测试首轮失败、回炉通过不记", async () => {
+  const repo = makeMemoryRepo({
+    "src/a.ts": "export const a = 1; // A_OK\n",
+    "src/d.ts": "export const d = 0;\n",
+    // 已提交、此刻通过的已有测试：a.ts 失去 A_OK 即失败
+    "src/other.test.ts": "// FAILS_UNLESS src/a.ts A_OK other works\n",
+  });
+  // 跑批器在开工前预置进容器工作区、尚未提交的题面测试（题面文字没有提到它）
+  repo.write("src/preset.test.ts", "// FAILS_UNLESS src/d.ts DONE preset works\n");
+  const docker = localDockerHost(repo.root);
+  const governance = mkdtempSync(join(tmpdir(), "pigeon-memory-job-"));
+  try {
+    const result = await runHeadless({
+      task: "把 d 的功能补上",
+      governanceRoot: governance,
+      workspaceRoot: join(governance, "workspace"),
+      workspaceHost: docker.host,
+      streamFn: createFakeStreamFn({
+        replies: [
+          edits(["src/a.ts", "// A_OK", "// changed"]),
+          finished(),
+          edits(["src/a.ts", "// changed", "// A_OK"], ["src/d.ts", "= 0;", "= 0; // DONE"]),
+          finished("修好了"),
+        ],
+      }),
+      yolo: true,
+      homeDir: repo.home,
+      verify: memoryVerifyConfig(["测试"]),
+      repairRounds: 2,
+      structuredMemory: { enabled: false },
+    });
+    assert.deepEqual([result.repair?.rounds, result.repair?.verdict], [1, "pass"]);
+    const session = materializeSession(join(governance, ".pigeon", "sessions"), result.sessionId, {
+      content: false,
+    });
+    // 首轮两条测试都红，且都是经执行端在容器里验证的
+    const firstOutput = session.attemptVerifieds[0]?.steps?.[0]?.output ?? "";
+    assert.ok(firstOutput.includes("✖ other works") && firstOutput.includes("✖ preset works"));
+    assert.ok(session.attemptVerifieds.every((record) => record.workspace === docker.host.root));
+    // 起点记进 run.started：每个 Run 同值，开工时的树与起点提交之差即预置的测试
+    const marks = session.runStarteds.map((record) => record.payload.stepStart);
+    assert.equal(marks.length, 2);
+    assert.ok(marks.every((mark) => mark?.baseCommit !== undefined));
+    assert.deepEqual(marks[1], marks[0]);
+    const facts = loadStructuredMemory(governance, {
+      persist: false,
+      accessFor: () => hostWorkspaceAccess(docker.host),
+    }).facts;
+    const testFacts = facts.filter((fact) => fact.stepKind === "test");
+    assert.ok(
+      testFacts.some((fact) => JSON.stringify(fact.fingerprint).includes("other works")),
+      "题面以外的已有测试记红转绿"
+    );
+    assert.ok(
+      facts.every((fact) => !JSON.stringify(fact.fingerprint).includes("preset")),
+      "预置的题面测试不记"
+    );
+  } finally {
+    docker.cleanup();
+    rmSync(governance, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    repo.cleanup();
+  }
+});

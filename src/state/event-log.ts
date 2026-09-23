@@ -66,7 +66,7 @@ import { VerifyStepResultSchema } from "./verify-steps.ts";
 // 六种记录停写并移出记录并集（旧回放的结果记录类型随候选验证记录一起移除），照决策 128 由读取边界跳过；
 // run.started 载荷去掉审阅配置字段（非严格对象，旧记录里的该字段读取时忽略）。其余记录逐字有效
 // v17（决策 134 / 157 / 159）：通用验证记录加可选的各步结论，run.started 载荷的验证命令加可选分步、另加可选的
-// 结构化记忆推送留痕——加法式，v16 旧记录逐字有效
+// 结构化记忆推送留痕与可选的这一步起点（容器工作区的起点提交与开工时的树）——加法式，v16 旧记录逐字有效
 export const EVENT_LOG_VERSION = 17;
 
 // 已退役的记录种类：读取边界在 schema 校验之前按本清单跳过——任何版本都跳过，不算损坏，
@@ -699,7 +699,7 @@ eventLogMigrations.register("event-log", 14, (doc) => ({ ...doc, version: 15 }))
 eventLogMigrations.register("event-log", 15, (doc) => ({ ...doc, version: 16 }));
 
 // v16 → v17（决策 134 / 157 / 159）：加法式演进（验证记录加可选各步结论、run.started 的验证命令加可选分步、
-// run.started 加可选结构化记忆留痕）——v16 旧记录逐字有效，纯版本推进
+// run.started 加可选结构化记忆留痕与可选的这一步起点）——v16 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 16, (doc) => ({ ...doc, version: 17 }));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；

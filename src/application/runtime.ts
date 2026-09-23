@@ -38,7 +38,7 @@ import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { StructuredMemoryManifest } from "../state/injection-manifest.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
-import type { ThinkingLevel } from "../state/runtime-events.ts";
+import type { RunStartedPayload, ThinkingLevel } from "../state/runtime-events.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { asWorkspaceHost } from "../tools/local-host.ts";
@@ -124,6 +124,8 @@ export interface RuntimeDeps {
     // 这一轮回炉给出的与因核验没过被拦下的条目
     takeRepairIds?: () => { given: string[]; blocked: string[] } | undefined;
   };
+  // 这一步的起点（容器工作区、回炉开启时由执行端记下）：每个 Run 开始时取一次写进 run.started
+  stepStart?: () => RunStartedPayload["stepStart"];
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
 }
@@ -407,6 +409,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 run.started；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
     ...(runStartedMemory !== undefined ? { runStartedMemory } : {}),
+    ...(deps.stepStart !== undefined ? { runStartedStepStart: deps.stepStart } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
   });
   adapterRef.current = adapter;

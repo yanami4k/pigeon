@@ -254,6 +254,20 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
     ...(repairRounds > 0 ? { repairRounds } : {}),
+    // 容器工作区的起点记进每个 Run 的 run.started（结构化记忆派生据它认定开工时的脏文件）；本地工作区由快照给出
+    ...(repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined
+      ? {
+          stepStart: () =>
+            stepStart === undefined
+              ? undefined
+              : {
+                  commit: stepStart.commit,
+                  ...(stepStart.baseCommit !== undefined
+                    ? { baseCommit: stepStart.baseCommit }
+                    : {}),
+                },
+        }
+      : {}),
     ...(memory !== undefined && opening !== undefined
       ? {
           structuredMemory: {
