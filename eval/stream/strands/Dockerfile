@@ -40,4 +40,11 @@ RUN set -e; \
     printf '#!/bin/sh\nexec /opt/venvs/end/bin/python /opt/stream/stream_env.py select "$@"\n' > /opt/stream/select-env; \
     chmod +x /opt/stream/select-env
 ENV PATH=/opt/venv/bin:$PATH
+# 容器里的一切命令（探针、判题、全量测量、人的基准、验证门、agent 的工具调用、撤回时的 git 操作）都以非 root 用户执行：
+# 部分用例依赖"写不了无权限的路径"，以 root 跑会判错。工作区、测量副本目录与 /opt（切换依赖组合时替换 /opt/venv 链接）归它所有
+RUN useradd --create-home --uid 10001 stream \
+ && mkdir -p /testbed /measure \
+ && chown stream:stream /testbed /measure /opt \
+ && chown -h stream:stream /opt/venv
+USER stream
 WORKDIR /testbed

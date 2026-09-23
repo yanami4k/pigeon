@@ -228,7 +228,8 @@ export class StreamWorkspace {
     return result.stdoutBytes;
   }
 
-  // 建测量副本：从 HEAD 克隆到 measureRoot，依赖目录以链接接上；返回副本路径
+  // 建测量副本：从 HEAD 克隆到 measureRoot，依赖目录以链接接上；返回副本路径。只清空副本目录里的内容、不删目录本身：
+  // 容器里以非 root 用户执行，镜像预建好归它所有的副本目录，它未必能写上级目录
   async prepareMeasureCopy(measureRoot: string, depsLinks: readonly string[]): Promise<string> {
     const links = depsLinks
       .map(
@@ -239,7 +240,8 @@ export class StreamWorkspace {
     await this.must(
       [
         "set -e",
-        'rm -rf -- "$1"',
+        'mkdir -p -- "$1"',
+        'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +',
         `git -c core.autocrlf=false clone -q --no-hardlinks ${shellQuote(this.root)} "$1"`,
         links,
       ].join("\n"),

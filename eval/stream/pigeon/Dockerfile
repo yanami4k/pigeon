@@ -10,4 +10,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json /opt/stream/
 RUN cd /opt/stream && npm ci --no-audit --no-fund && mkdir -p /testbed && mv node_modules /testbed/node_modules
+# 容器里的一切命令都以非 root 用户执行（与 strands 镜像同一约定）：工作区与测量副本目录归它所有，依赖目录只读即可
+RUN useradd --create-home --uid 10001 stream \
+ && mkdir -p /measure \
+ && chown stream:stream /testbed /measure
+USER stream
 WORKDIR /testbed

@@ -196,9 +196,12 @@ describe("流工作区（本机 sh 真跑同一批脚本）", { concurrency: tru
       );
       assert.equal(readFileSync(join(copy, "t/h.test.ts"), "utf8"), "human\n");
       assert.ok(!existsSync(join(root, "t")));
-      // 重建副本会先清空旧副本
+      // 重建副本会先清空旧副本（含以点开头的文件）；副本目录本身保留，非 root 用户不必能写它的上级目录
+      writeFileSync(join(copy, ".stale"), "old\n");
       await ws.prepareMeasureCopy(copy, []);
       assert.ok(!existsSync(join(copy, "t")));
+      assert.ok(!existsSync(join(copy, ".stale")));
+      assert.equal(readFileSync(join(copy, "a.txt"), "utf8"), "two\n");
     })
   );
 
