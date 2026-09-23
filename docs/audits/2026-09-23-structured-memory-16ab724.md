@@ -209,7 +209,7 @@
 ### （五）全量验证（分步执行）
 
 - 提交 ecf35cd：四步分开执行，`npm run lint`、`npm run check`、`npm run deps`（446 个模块无违规）通过；测试步 `node --test --test-concurrency=2 "src/**/*.test.ts"` 共 1031 条，通过 1029，失败 0，跳过 2。
-- 提交 6587c19：`npm run lint`、`npm run check`、`npm run deps` 通过；结构化记忆与验证分步相关的测试文件单独执行全部通过（`structured-memory.test.ts`、`verify-fingerprint.test.ts`、`structured-memory-task.test.ts`、`structured-memory-rules.test.ts`、`verify-steps.test.ts`、`structured-memory-push.test.ts`、`structured-memory-derive.test.ts`、`structured-memory-store.test.ts`、`structured-memory-cwd.test.ts`、`structured-memory-switch.test.ts`、`runner-repair.test.ts`）。全量测试步未执行：执行条件为空闲内存不低于 3.5 GB，等待期间未满足，等待任务被终止。
+- 提交 6587c19：`npm run lint`、`npm run check`、`npm run deps` 通过；结构化记忆与验证分步相关的测试文件单独执行全部通过（`structured-memory.test.ts`、`verify-fingerprint.test.ts`、`structured-memory-task.test.ts`、`structured-memory-rules.test.ts`、`verify-steps.test.ts`、`structured-memory-push.test.ts`、`structured-memory-derive.test.ts`、`structured-memory-store.test.ts`、`structured-memory-cwd.test.ts`、`structured-memory-switch.test.ts`、`runner-repair.test.ts`）。全量测试步未在该提交上执行。
 
 ### （六）扫描
 
@@ -223,4 +223,52 @@
 - 开工时脏文件取的是首个快照改前基线的父提交，即第一次改动落定时的 HEAD，不是开跑时的 HEAD；下列情况捕不到：被忽略的覆盖文件、开跑后才覆盖的文件、agent 第一个改动命令就提交的情况，以及快照失败或没有改动的会话（后两种按二处理为认定不全）。
 - 依赖条件：跑批器须每步落地提交，否则前面各步改过的测试会一直被当成题面测试；覆盖文件先提交进 HEAD 时只能靠题面指到的文件认定，要求题面里的测试路径相对工作区根、写在首条用户消息里，并落在内容块上限（64 KiB）之内。
 - 缓存签名只看大小与修改时间，签名相符而内容与账本不一致时不重算。
-- 提交 822d675 的说明含过程用语，待回炉合并后变基时改写（不用交互式命令）。
+
+## 十一、第三轮补修（基于 6587c19）
+
+提交：1287fa2（代码与用例），以及记录本节的提交。本节更正与上文不一致之处，以本节为准。
+
+### （一）题面直接写出的路径（更正十之二）
+
+- 派生认定题面测试时，题面里直接写出的路径不要求当前受跟踪：事后被改名、删除或从未入库的，照样算题面测试（宁可题面集合大、记得少）。题面所附代码中导入语句解析出的文件仍只取受跟踪的。开局挑选仍只留受跟踪的文件。
+- 派生规则标记推进为 `2026-09-23.4`。
+
+### （二）回炉两档的被拦下名额
+
+- 第二档可记的被拦下条数为：名额减去第一档已给出的条数，再减去第一档已被拦下的条数；两档合计不超过名额。
+
+### （三）工作区探针遇 git 超时即锁定
+
+- 一个探针内某次 git 调用超时后，后续查询不再调用 git，直接抛出同一个超时错误。
+- git 超时单独成类，告警为"工作区 git 超时"，不再按所在阶段分成"挑选""核验"两类，同一次运行只告警一次。
+
+### （四）注释与断言
+
+- `state/structured-memory.ts` 模块头与相关注释改为现行口径（失败清单不全、题面测试认定不全 `taskTestsUnknown`）；`memory/structured-workspace.ts` 模块头补题面路径不要求受跟踪与探针锁定两条。
+- git 超时用例改为断言告警恰好一行；原先恒真的断言换成对开局给出条目的实际核对。
+
+### （五）新增用例与变异
+
+新增用例：`structured-memory.test.ts` 把中断迹象拆成三条单一迹象的用例（`Interrupted`、`during collection`、不带测试名的 `ERROR`）；`structured-memory-task.test.ts` 加 4 条（题面点名的测试文件事后改名、没有改前基线、git 取不到开工时的脏文件、工作区是仓库子目录）；`structured-memory-rules.test.ts` 加 2 条（第二档被拦下名额、探针锁定）。
+
+| # | 变异 | 精确变红的用例 |
+|---|---|---|
+| m1 | 派生时题面路径仍要求受跟踪 | `题面测试：题面点名的测试文件事后被改名、不再受跟踪，全量重算时仍算题面、不记事实` |
+| m2 | 第二档不扣第一档已被拦下的条数 | `回炉两档合计的被拦下名额：第二档扣掉第一档已被拦下的条数` |
+| m3a | 去掉 `Interrupted` 迹象 | `中断迹象之一：pytest 的 Interrupted` |
+| m3b | 去掉 `during collection` 迹象 | `中断迹象之一：during collection` |
+| m3c | 不带测试名的 `ERROR` 不算清单不全 | `中断迹象之一：不带测试名的 ERROR（收集错误）` |
+| m4 | 没有改前基线时按"开工时无脏文件"处理 | `没有改前基线（这一步一次文件都没改）…` |
+| m5 | git 取不到脏文件时按"无脏文件"处理 | `git 取不到开工时的脏文件（改前基线已被回收）…` |
+| m6 | `diff-tree` 去掉 `--relative` | `工作区是仓库的子目录：…（--relative）…` |
+| m7 | 去掉探针锁定 | `工作区探针遇到 git 超时即锁定：后续查询不再调用 git，直接按取不到处理` |
+
+每个变异单独施加、单独执行相关测试文件，均只有所列用例变红，撤回后全部通过。
+
+### （六）验证
+
+- 提交 1287fa2：`npm run lint`、`npm run check`、`npm run deps` 通过；结构化记忆与验证分步相关的测试文件单独执行全部通过（67 条）。全量测试步未在该提交上执行。
+
+### （七）已知限制（补充）
+
+- 评测跑批器在每题结束时释放工作区：这类会话派生时取不到改前基线与开工时的脏文件，测试步的红转绿一律不产出，且因认定不全不写缓存，每次加载都重算。定点对照与连续流实验的工作区保留、经执行宿主访问，不走这一路径。
