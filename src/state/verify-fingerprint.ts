@@ -47,14 +47,18 @@ export interface StepFingerprints {
   incomplete: boolean;
 }
 
-// 测试运行被中断、清单不全的迹象：pytest 的中断与收集错误、-x / --maxfail 提前停止
-const INTERRUPTED = /\bInterrupted\b|during collection|stopping after \d+ failures?/i;
+// 测试运行被中断、清单不全的迹象：pytest 的中断、收集错误、-x / --maxfail 提前停止
+const INTERRUPTED_SIGNS = [
+  /\bInterrupted\b/,
+  /during collection/i,
+  /stopping after \d+ failures?/i,
+] as const;
 // node:test 的文件级失败：失败项名就是测试文件（文件没能加载或整体出错）
 const TEST_FILE_NAME = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
 function incompleteList(lines: readonly string[], fingerprints: readonly Fingerprint[]): boolean {
   return (
-    lines.some((line) => INTERRUPTED.test(line)) ||
+    lines.some((line) => INTERRUPTED_SIGNS.some((sign) => sign.test(line))) ||
     fingerprints.some(
       (entry) =>
         (entry.tool === "pytest" && entry.test === undefined) ||

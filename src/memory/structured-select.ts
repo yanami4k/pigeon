@@ -88,7 +88,9 @@ function verifiedTop(
   probe: WorkspaceProbe,
   limit: number,
   check: EntryChecker,
-  taken: Set<string>
+  taken: Set<string>,
+  // 被拦下的名额（缺省同 limit；回炉第二档再扣掉第一档已被拦下的条数）
+  blockedLimit: number = limit
 ): MemorySelection {
   const recent = [...candidates]
     .sort((left, right) => right.latest.at - left.latest.at)
@@ -137,7 +139,7 @@ function verifiedTop(
         right.count - left.count ||
         left.id.localeCompare(right.id)
     )
-    .slice(0, Math.max(0, limit))
+    .slice(0, Math.max(0, blockedLimit))
     .filter((entry) => !representative.has(entry.fingerprintKey))
     .map((entry) => entry.id);
   const ranked = [...representative.values()].sort(
@@ -236,7 +238,14 @@ export function selectRepair(
   );
   const taken = new Set<string>();
   const first = verifiedTop(matched, probe, limit, check, taken);
-  const second = verifiedTop(byFile, probe, limit - first.picks.length, check, taken);
+  const second = verifiedTop(
+    byFile,
+    probe,
+    limit - first.picks.length,
+    check,
+    taken,
+    limit - first.picks.length - first.blocked.length
+  );
   return {
     picks: [...first.picks, ...second.picks],
     blocked: [...first.blocked, ...second.blocked],

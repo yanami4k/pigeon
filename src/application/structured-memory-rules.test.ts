@@ -359,7 +359,9 @@ test('被拦下只记"按挑选规则本会给出、但核验没过"的：名额
     // 按核验前的次序前两组是 p4、p3：p4 被拦下；p1 在名额之外，不记
     assert.deepEqual(memory?.openingBlocked, [idOf(4)]);
     assert.equal(memory?.opening.length, 2);
-    assert.ok(!memory?.opening.includes(idOf(1) ?? ""));
+    // 给出的是名额内核验通过的 p3 与名额外补上的 p2（p1 核验不过、也不在名额内）
+    assert.ok(idOf(2) !== undefined && idOf(3) !== undefined);
+    assert.deepEqual([...(memory?.opening ?? [])].sort(), [idOf(2), idOf(3)].sort());
   } finally {
     repo.cleanup();
   }
@@ -429,12 +431,9 @@ test('git 子进程超时：抛可识别的超时错误；推送时按"这次不
       repairing(["类型"])
     );
     assert.equal(next.result.repair?.verdict, "pass");
-    assert.ok(lines.length >= 1 && lines.every((line) => line.includes("不推送结构化记忆")));
-    assert.equal(
-      new Set(lines.map((line) => line.slice(0, 12))).size,
-      lines.length,
-      "同类只告警一次"
-    );
+    // 开局与回炉的超时同属一类，只告警一次
+    assert.equal(lines.length, 1, lines.join(" | "));
+    assert.ok(lines[0]?.includes("不推送结构化记忆"), lines[0]);
     assert.deepEqual(next.result.structuredMemory?.opening, []);
     assert.deepEqual(next.result.structuredMemory?.repair, [[]]);
   } finally {
@@ -475,4 +474,83 @@ test("派生失败后本次运行内不再重试：各轮回炉直接不给", as
   } finally {
     repo.cleanup();
   }
+});
+
+// 合成一条类型检查事实：错误码、报错文件与名字可指定（名字不在文件里即核验不过）
+function typeFact(
+  repo: MemoryRepo,
+  code: string,
+  file: string,
+  names: string[],
+  at: number
+): FrictionFact {
+  const fingerprint = { tool: "tsc" as const, code, file, names };
+  return {
+    kind: "regression",
+    sessionId: "01ZZZZZZZZZZZZZZZZZZZZZZZZ" as SessionId,
+    stepName: "类型",
+    stepKind: "type",
+    fingerprint,
+    fingerprintKey: fingerprintKey("类型", fingerprint),
+    at,
+    workspace: repo.root,
+    changedAtRed: [file],
+    repairFiles: [file],
+  };
+}
+
+test("回炉两档合计的被拦下名额：第二档扣掉第一档已被拦下的条数", async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    const now = Date.now() - 60_000;
+    // 第一档：与本次报错指纹对上的两组（a.ts、z.ts 上的 TS2304），名字都不在，核验都不过
+    const firstA = typeFact(repo, "TS2304", "src/a.ts", ["gone"], now + 4);
+    const firstZ = typeFact(repo, "TS2304", "src/z.ts", ["gone"], now + 3);
+    // 第二档：挂在报错文件 a.ts 上的另两组，一组过、一组不过
+    const secondOk = typeFact(repo, "TS2322", "src/a.ts", [], now + 2);
+    const secondBad = typeFact(repo, "TS2345", "src/a.ts", ["gone"], now + 1);
+    const facts = [firstA, firstZ, secondOk, secondBad];
+    const idOf = (fact: FrictionFact) =>
+      buildMemoryEntries(facts).find(
+        (entry) =>
+          entry.fingerprintKey === fact.fingerprintKey && entry.anchor === fact.fingerprint.file
+      )?.id;
+    const next = await step(
+      repo,
+      "调整",
+      [
+        edits(
+          ["src/a.ts", "= 1;", "= 1; // TYPE_BAD:alpha"],
+          ["src/z.ts", "= 0;", "= 0; // TYPE_BAD:beta"]
+        ),
+        finished(),
+        edits(["src/a.ts", " // TYPE_BAD:alpha", ""], ["src/z.ts", " // TYPE_BAD:beta", ""]),
+        finished("修好了"),
+      ],
+      { phases: { load: () => facts } },
+      repairing(["类型"])
+    );
+    const memory = next.runStarteds[1]?.payload.structuredMemory;
+    assert.deepEqual(memory?.repair, [idOf(secondOk)]);
+    assert.deepEqual(
+      [...(memory?.repairBlocked ?? [])].sort(),
+      [idOf(firstA), idOf(firstZ)].sort()
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("工作区探针遇到 git 超时即锁定：后续查询不再调用 git，直接按取不到处理", () => {
+  let calls = 0;
+  const probe = workspaceProbe("/repo", {
+    run: () => {
+      calls += 1;
+      throw new StructuredMemoryGitTimeoutError("git log 超过 30000 毫秒未返回");
+    },
+  });
+  assert.throws(() => probe.renamedSince("src/a.ts", 0), StructuredMemoryGitTimeoutError);
+  assert.throws(() => probe.tracked(), StructuredMemoryGitTimeoutError);
+  assert.throws(() => probe.changedLinesSince("src/a.ts", 0), StructuredMemoryGitTimeoutError);
+  assert.equal(calls, 1);
 });

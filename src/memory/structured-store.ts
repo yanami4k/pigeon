@@ -41,7 +41,7 @@ import {
 // 缓存文件格式版本：对不上即整份作废重建（缓存可重建，不做迁移）
 export const STRUCTURED_MEMORY_CACHE_VERSION = 1;
 // 派生规则标记：改了"什么算摩擦、门槛怎么划"时推进，旧缓存随之作废、按新规则对全部历史重算
-export const STRUCTURED_MEMORY_RULES_TAG = "2026-09-23.3";
+export const STRUCTURED_MEMORY_RULES_TAG = "2026-09-23.4";
 
 export function structuredMemoryCachePath(governanceRoot: string): string {
   return join(governanceRoot, ".pigeon", "cache", "structured-memory.json");
@@ -218,7 +218,9 @@ export function deriveSessionFacts(
     snapshotChanges: present ? snapshotChanges(session, workspace) : [],
     dirtyAtStart: dirty ?? [],
     taskFiles:
-      task !== undefined && present ? taskReferencedFiles(task, workspaceProbe(workspace)) : [],
+      task !== undefined && present
+        ? taskReferencedFiles(task, workspaceProbe(workspace), { mentionedUntracked: true })
+        : [],
     taskTestsUnknown: dirty === undefined,
   });
   return { facts, complete: dirty !== undefined };

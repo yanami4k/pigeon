@@ -29,6 +29,7 @@ import {
   StructuredMemoryCacheError,
 } from "../memory/structured-store.ts";
 import {
+  StructuredMemoryGitTimeoutError,
   taskReferencedFiles,
   type WorkspaceProbe,
   workspaceProbe,
@@ -161,7 +162,7 @@ const DEFAULT_PHASES: StructuredMemoryPhases = {
   probe: workspaceProbe,
 };
 
-type FaultPhase = "派生" | "缓存读写" | "挑选" | "核验";
+type FaultPhase = "派生" | "缓存读写" | "挑选" | "核验" | "工作区 git 超时";
 
 class PhaseError extends Error {
   readonly phase: FaultPhase;
@@ -199,7 +200,14 @@ export function createStructuredMemoryPush(input: {
   let probe: WorkspaceProbe | undefined;
 
   const report = (error: unknown, when: string): void => {
-    const phase = error instanceof PhaseError ? error.phase : "挑选";
+    // git 超时不论出在哪个阶段都算同一类（探针锁定后各处都会抛同一个超时错误）
+    const cause = error instanceof PhaseError ? error.cause : error;
+    const phase: FaultPhase =
+      cause instanceof StructuredMemoryGitTimeoutError
+        ? "工作区 git 超时"
+        : error instanceof PhaseError
+          ? error.phase
+          : "挑选";
     if (warned.has(phase)) {
       return;
     }

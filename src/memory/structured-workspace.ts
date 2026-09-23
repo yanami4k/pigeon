@@ -62,7 +62,27 @@ interface RenameRecord {
   to: string;
 }
 
-export function workspaceProbe(root: string): WorkspaceProbe {
+// options.run：git 执行器（缺省 runStructuredMemoryGit，测试注入）。本探针一旦遇到 git 超时即锁定：后续查询不再调用 git，
+// 直接抛出同一个超时错误（按"取不到"处理），避免每轮回炉都同步阻塞、吃掉墙钟预算
+export function workspaceProbe(
+  root: string,
+  options: { run?: (args: string[]) => string | undefined } = {}
+): WorkspaceProbe {
+  const run = options.run ?? ((args: string[]) => runStructuredMemoryGit(root, args));
+  let timedOut: StructuredMemoryGitTimeoutError | undefined;
+  const git = (args: string[]): string | undefined => {
+    if (timedOut !== undefined) {
+      throw timedOut;
+    }
+    try {
+      return run(args);
+    } catch (error) {
+      if (error instanceof StructuredMemoryGitTimeoutError) {
+        timedOut = error;
+      }
+      throw error;
+    }
+  };
   let trackedFiles: Set<string> | undefined;
   let renames: RenameRecord[] | undefined;
   // 版本历史里的全部改名（按时间正序），一次读出
@@ -72,7 +92,7 @@ export function workspaceProbe(root: string): WorkspaceProbe {
     }
     const collected: RenameRecord[] = [];
     let at = 0;
-    const log = runStructuredMemoryGit(root, [
+    const log = git([
       "log",
       "--reverse",
       "--diff-filter=R",
@@ -125,21 +145,13 @@ export function workspaceProbe(root: string): WorkspaceProbe {
             0
           );
       return (
-        sum(
-          runStructuredMemoryGit(root, [
-            "log",
-            sinceArg(since),
-            "--numstat",
-            "--format=",
-            "--",
-            file,
-          ])
-        ) + sum(runStructuredMemoryGit(root, ["diff", "--numstat", "HEAD", "--", file]))
+        sum(git(["log", sinceArg(since), "--numstat", "--format=", "--", file])) +
+        sum(git(["diff", "--numstat", "HEAD", "--", file]))
       );
     },
     tracked: () => {
       trackedFiles ??= new Set(
-        (runStructuredMemoryGit(root, ["ls-files", "--cached"]) ?? "")
+        (git(["ls-files", "--cached"]) ?? "")
           .split(/\r?\n/)
           .filter((file) => file !== "" && !file.startsWith(".pigeon/"))
       );
@@ -230,15 +242,21 @@ function resolvePython(
 }
 
 // 题面直接指到的仓库内文件：出现的路径，加上所附代码里导入语句解析出的文件（按出现顺序、去重；只留受跟踪的）
-export function taskReferencedFiles(task: string, probe: WorkspaceProbe): string[] {
+// options.mentionedUntracked：题面直接写出的路径不要求当前受跟踪（派生认定题面测试时用——该文件事后可能已改名或删除，
+// 宁可题面集合大、记得少）；开局挑选缺省只留受跟踪的
+export function taskReferencedFiles(
+  task: string,
+  probe: WorkspaceProbe,
+  options: { mentionedUntracked?: boolean } = {}
+): string[] {
   const tracked = probe.tracked();
   const found: string[] = [];
-  const add = (file: string) => {
-    if (tracked.has(file) && !found.includes(file)) {
+  const add = (file: string, anyFile = false) => {
+    if ((anyFile || tracked.has(file)) && !found.includes(file)) {
       found.push(file);
     }
   };
-  // 提到的路径都可作所附代码的基准（题面附的测试文件在这一步开始时可能还不在仓库里），受跟踪的才算指到
+  // 提到的路径都可作所附代码的基准（题面附的测试文件在这一步开始时可能还不在仓库里）
   const mentions: Mention[] = [];
   for (const match of task.matchAll(PATH_TOKEN)) {
     const file = insideWorkspace(match[0], probe.root);
@@ -248,7 +266,7 @@ export function taskReferencedFiles(task: string, probe: WorkspaceProbe): string
     if (file.includes("/")) {
       mentions.push({ index: match.index ?? 0, file });
     }
-    add(file);
+    add(file, options.mentionedUntracked === true);
   }
   const baseAt = (index: number): string | undefined =>
     mentions.filter((mention) => mention.index < index).at(-1)?.file;

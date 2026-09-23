@@ -176,6 +176,46 @@ test('测试运行被中断（收集错误、提前停止、文件级失败）�
   assert.equal(fileLevel.find((fact) => fact.fingerprint.test === "甲")?.at, 3_000);
 });
 
+// 只含一种中断迹象的输出：V1 测试甲失败，V2 出现该迹象（清单里没有甲），V3 全过——甲只能在 V3 认定修好
+function onlyAtThirdWith(output: string): number | undefined {
+  const facts = deriveSessionFrictions(
+    sessionOf([
+      [{ name: "测试", verdict: "fail", output: pytestFailed([["tests/test_a.py", "test_a"]]) }],
+      [{ name: "测试", verdict: "fail", output }],
+      [pass("测试")],
+    ])
+  );
+  return facts.find((fact) => fact.fingerprint.test === "test_a")?.at;
+}
+
+test("中断迹象之一：pytest 的 Interrupted", () => {
+  const output = [
+    "=========================== short test summary info ============================",
+    "FAILED tests/test_c.py::test_other - assert False",
+    "!!!!!!!!!!!!!!!!!!!!!!!!! Interrupted: KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!",
+    "========================= 1 failed in 0.10s =========================",
+  ].join("\n");
+  assert.equal(onlyAtThirdWith(output), 3_000);
+});
+
+test("中断迹象之一：pytest 的 during collection", () => {
+  const output = [
+    "=========================== short test summary info ============================",
+    "FAILED tests/test_c.py::test_other - assert False",
+    "================ 1 failed, 1 error during collection in 0.12s ================",
+  ].join("\n");
+  assert.equal(onlyAtThirdWith(output), 3_000);
+});
+
+test("中断迹象之一：pytest 不带测试名的 ERROR（收集错误）", () => {
+  const output = [
+    "=========================== short test summary info ============================",
+    "ERROR tests/test_b.py",
+    "=============================== 1 error in 0.12s ===============================",
+  ].join("\n");
+  assert.equal(onlyAtThirdWith(output), 3_000);
+});
+
 test("按指纹逐个追踪：待修期间新出现的失败另行追踪；闭合一段之后同一次验证里新变红的也记", () => {
   // V1 甲失败；V2 甲、乙都失败；V3 全过 → 记甲、乙两条
   const types = deriveSessionFrictions(
