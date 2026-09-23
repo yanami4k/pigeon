@@ -133,7 +133,7 @@ export interface RuntimeBundle {
   mcp?: McpSession;
   // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
   toolTiers: ReadonlyMap<string, "read" | "write" | "exec">;
-  // M6：释放运行面前先执行的附加释放动作（后台审阅调度的退订与收尾）；按登记顺序执行，失败不挡后续
+  // M6：释放运行面前先执行的附加释放动作（快照器、会话树写穿、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
 }
 
@@ -396,7 +396,7 @@ export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
     try {
       await dispose();
     } catch {
-      // 附加释放失败不挡运行面释放（审阅是后台附属，不得拖住主会话收尾）
+      // 附加释放失败不挡运行面释放（附加动作都是后台附属，不得拖住主会话收尾）
     }
   }
   try {

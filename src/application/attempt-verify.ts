@@ -64,7 +64,7 @@ export interface AttachAttemptVerificationOptions {
   bundle: RuntimeBundle;
   config: VerifyConfig;
   workspaceRoot: string;
-  // 一次尝试验证完成（记录已落盘）后的附加处理——失败自动分叉重试与分叉叶子提炼的挂点；抛错只进错误清单
+  // 一次尝试验证完成（记录已落盘）后的附加处理——失败自动分叉重试的挂点；抛错只进错误清单
   onVerified?: (record: AttemptVerifiedRecord) => void | Promise<void>;
 }
 

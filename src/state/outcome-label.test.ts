@@ -1,6 +1,6 @@
 // 五个标签由账本现算（M7 S1，决策 072）：成功只认验证通过，验证结论压过运行终态；撞上限与熔断算失败；
 // 人主动取消算放弃；基础设施错误取失败分类；缺运行结束、有悬账、验证未判定、无验证且正常完成一律未知。
-// 纯函数，不落盘，口径同 065 的候选状态现算。
+// 纯函数，不落盘。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { EventRecord } from "./event-log.ts";

@@ -92,7 +92,7 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
   });
 }
 
-// 会话 worker 的运行面工厂（M7：并行同任务派发的提炼器与尝试共用同一份模型接入与角色覆盖）
+// 会话 worker 的运行面工厂（同一会话派出的 worker 共用同一份模型接入与角色覆盖）
 export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRuntimeFactory {
   // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
   const maxOutputTokens =

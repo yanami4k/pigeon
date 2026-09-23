@@ -3,7 +3,7 @@
 //   - 项目级 .pigeon/memory/*.md：按文件名字典序装到预算满（M5.5 S5 决策 050 定为口径：没有配置来源，
 //     要调整先后就改文件名）——放得下的整份装入，预算边界上的那份
 //     只装入前半并标 truncated，其余不注入、只在段尾列出文件名（模型需要时用 read_file 按需读）。
-// 两层都是人可直接编辑的 markdown；M5 的写入方只有人（M8 激活候选时程序写入同一目录）。
+// 两层都是人可直接编辑的 markdown，写入方只有人（第一版候选激活曾由程序写入同一目录，已随决策 137 退役）。
 // 注入位置是 system prompt 追加段（装配根拼接），不走 transformContext；冻结身份是每文件 sha256
 // 与字节数，写进 InjectionSnapshot v3 的 memory 清单。预算单位是字符（约 4 字符 1 token），
 // 实际 token 消耗由 turn.completed 的 usage 事后校准（044）。

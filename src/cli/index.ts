@@ -373,7 +373,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     ...verifyOption(flags, workspaceRoot),
-    // M7（决策 079）：失败自动分叉重试；叶子验证后自动提炼
+    // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
     ...(repairRounds > 0 ? { repairRounds } : {}),
   });

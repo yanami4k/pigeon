@@ -22,7 +22,7 @@ export interface TuiWorkersFace {
   cancel(sessionId: SessionId): Promise<void>;
   status(): WorkerStatus[];
   awaitResult(sessionId: SessionId): Promise<WorkerOutcome>;
-  // M7（决策 069 / 074）：并行派发同一任务的 N 个尝试，全部收尾后验证、选对并自动提炼；主会话才有
+  // M7（决策 069）：并行派发同一任务的 N 个尝试，各自收尾后验证，全部收尾后交回各尝试的标签；主会话才有
   spawnAttempts?(request: {
     role: string;
     task: string;

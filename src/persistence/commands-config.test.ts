@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { isWorkerRole } from "../orchestration/roles.ts";
 import { CommandsConfigError, commandsConfigPath, loadCommandsConfig } from "./commands-config.ts";
 
 function withConfig(content: string | undefined, run: (root: string) => void): void {
@@ -37,6 +38,26 @@ test("commands 配置：缺失为空；合法文件载入短名与角色清单",
       });
     }
   );
+});
+
+// 决策 158 ②：verifier、reviewer 已停用，但角色名仍是账本里的合法取值——项目配置里写了它们照样能读，只是不再起作用
+test("commands 配置：roles 里写了已停用的 verifier、reviewer 照常载入，这两个角色不会被派出", () => {
+  withConfig(
+    JSON.stringify({
+      version: 1,
+      commands: { test: "node --test" },
+      roles: { tester: ["test"], verifier: ["test"], reviewer: [] },
+    }),
+    (root) => {
+      assert.deepEqual(loadCommandsConfig(root).roles, {
+        tester: ["test"],
+        verifier: ["test"],
+        reviewer: [],
+      });
+    }
+  );
+  assert.equal(isWorkerRole("verifier"), false);
+  assert.equal(isWorkerRole("reviewer"), false);
 });
 
 test("commands 配置：畸形与语义不明一律响亮失败", () => {

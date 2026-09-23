@@ -52,7 +52,7 @@ function registry(): MigrationRegistry {
   return migrations;
 }
 
-test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
+test("当前版本快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限）JSON 往返后校验通过", () => {
   assert.equal(INJECTION_SNAPSHOT_VERSION, 11);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));

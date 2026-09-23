@@ -1,6 +1,5 @@
-// 独占锁（M8 收口补遗，决策 086）：同一条候选同一时刻只允许一次验证在跑。
-// 与会话锁的区别是它不可重入——人工触发与无人值守自动验证可能在同一个进程里同时跑同一条候选，
-// 会话锁的同进程重入在这里正好是漏洞。
+// 独占锁（M8 收口补遗）：同一份被保护的文件同一时刻只允许一个持有者（现为固化放权配置与会话树）。
+// 与会话锁的区别是它不可重入——同一个进程里的两处可能同时改同一份文件，会话锁的同进程重入在这里正好是漏洞。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -17,10 +16,10 @@ test("独占锁：同一把锁不可重入——同进程再取也拒绝", () =>
   const root = dir();
   try {
     const path = join(root, "a.lock");
-    const release = acquireExclusiveLock(path, "候选 a 正在验证");
-    assert.throws(() => acquireExclusiveLock(path, "候选 a 正在验证"), ExclusiveLockError);
+    const release = acquireExclusiveLock(path, "配置 a 正在写入");
+    assert.throws(() => acquireExclusiveLock(path, "配置 a 正在写入"), ExclusiveLockError);
     release();
-    assert.doesNotThrow(() => acquireExclusiveLock(path, "候选 a 正在验证")());
+    assert.doesNotThrow(() => acquireExclusiveLock(path, "配置 a 正在写入")());
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -74,11 +73,11 @@ test("独占锁：报错文案带上调用方给的说明与锁文件路径", ()
   const root = dir();
   try {
     const path = join(root, "a.lock");
-    const release = acquireExclusiveLock(path, "候选 abc123 正在被另一次验证占用");
+    const release = acquireExclusiveLock(path, "配置 abc123 正在被另一次写入占用");
     assert.throws(
-      () => acquireExclusiveLock(path, "候选 abc123 正在被另一次验证占用"),
+      () => acquireExclusiveLock(path, "配置 abc123 正在被另一次写入占用"),
       (error: unknown) =>
-        /候选 abc123 正在被另一次验证占用/.test(String(error)) && String(error).includes(path)
+        /配置 abc123 正在被另一次写入占用/.test(String(error)) && String(error).includes(path)
     );
     release();
   } finally {

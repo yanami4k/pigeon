@@ -12,7 +12,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runReplayCommand } from "../cli/replay.ts";
-import { runTraceCommand } from "../cli/trace.ts";
 import { EVENT_LOG_VERSION, RETIRED_EVENT_KINDS } from "../state/event-log.ts";
 import {
   newEntryId,
@@ -22,6 +21,7 @@ import {
   type RunId,
   type SessionId,
 } from "../state/ids.ts";
+import { buildSessionTrace } from "../state/trace.ts";
 import { JsonlEventLog, materializeSession, readEventLogFile } from "./event-log.ts";
 
 const HASH = "a".repeat(64);
@@ -382,33 +382,20 @@ test("run.started 的审阅配置字段已删除：带该字段的旧记录照�
   }
 });
 
-test("退役记录不出现在任何视图里：trace 与 replay 都只读保留下来的记录", () => {
+test("退役记录不进任何视图：trace 只列出保留记录的那一个 Run，replay 找不到只出现在退役记录里的 Run", () => {
   const file = writeSessionFile(Object.keys(RETIRED_FIXTURES));
   try {
-    const trace = runTraceCommand({ root: file.root, sessionId: file.sessionId });
-    for (const text of ["命中", "候选", "审阅", "不可解析", file.phantomRunId]) {
-      assert.ok(!trace.includes(text), `trace 不应出现「${text}」：\n${trace}`);
-    }
+    const trace = buildSessionTrace(materializeSession(file.sessionsDir, file.sessionId));
+    assert.deepEqual(
+      trace.runs.map((run) => run.runId),
+      [file.runId]
+    );
     const replay = runReplayCommand({
       root: file.root,
       sessionId: file.sessionId,
       runId: file.runId,
     });
-    for (const text of [
-      "候选筛查",
-      "提炼跳过",
-      "固化升格",
-      "固化移除",
-      "拒收",
-      "候选提出",
-      "候选验证",
-      "候选决定",
-      "候选激活",
-      "审阅跳过",
-      "不可解析",
-    ]) {
-      assert.ok(!replay.includes(text), `replay 不应出现「${text}」：\n${replay}`);
-    }
+    assert.match(replay, /事件 3 条/, "时间线只含保留下来的三条记录");
     assert.throws(
       () =>
         runReplayCommand({

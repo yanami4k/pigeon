@@ -1,6 +1,6 @@
 // 放权配置写入的互斥（并发缺口修复）：追加与移除都是"读出整份、改数组、原子写回"。
 // 原子写只保证文件不撕裂，不保证不丢更新——两个窗口同时固化放权时，后写的那份是基于旧内容算出来的，
-// 会把先写的那条整份覆盖掉。改为写前按配置文件取一把跨进程锁，撞上即明确拒绝（与会话锁、候选锁同口径）。
+// 会把先写的那条整份覆盖掉。改为写前按配置文件取一把跨进程锁，撞上即明确拒绝（与会话锁同口径）。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
