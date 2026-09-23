@@ -88,8 +88,31 @@ export const strandsProfile: RepoProfile = {
   ],
 };
 
+// 次要指标里的一项机检：跑命令，从输出里数出错误条数；数不出时命令成功记 0、失败记 null（未知）
+export interface QualityCheck {
+  command: string[];
+  pattern: RegExp;
+}
+
+export function countQuality(
+  check: QualityCheck,
+  output: string,
+  exitCode: number | null
+): number | null {
+  const counted = [...output.matchAll(new RegExp(check.pattern.source, "g"))];
+  if (counted.length === 0) return exitCode === 0 ? 0 : null;
+  // 带捕获组的写法取数字（如"Found 3 errors"），否则按出现次数计（如逐条的"error TS2345"）
+  return counted[0]?.[1] !== undefined ? Number(counted[0][1]) : counted.length;
+}
+
 // 仓库在容器里怎么跑：判题、全量测量、格式化比对、依赖目录与环境切换。命令都在工作区根执行
 export interface StreamRepoRuntime {
+  // 次要指标（145）：类型错误、格式错误、分层违规；仓库没有的一项为 null
+  quality: {
+    type: QualityCheck | null;
+    format: QualityCheck | null;
+    layer: QualityCheck | null;
+  };
   profile: RepoProfile;
   // 只要退出码：给定测试文件全部通过即 0
   testCommand(tests: readonly string[]): string[];
@@ -107,6 +130,14 @@ export interface StreamRepoRuntime {
 
 export const pigeonRuntime: StreamRepoRuntime = {
   profile: pigeonProfile,
+  quality: {
+    type: { command: ["node_modules/.bin/tsc", "--noEmit", "-p", "."], pattern: /error TS\d+/ },
+    format: { command: ["node_modules/.bin/biome", "format", "."], pattern: /Found (\d+) errors?/ },
+    layer: {
+      command: ["node_modules/.bin/depcruise", "src"],
+      pattern: /(\d+) dependency violations?/,
+    },
+  },
   testCommand: (tests) => ["node", "--test", ...tests],
   junitTestCommand: (tests, junitPath) => [
     "node",
@@ -142,6 +173,17 @@ const inStrands = (tests: readonly string[]) =>
 
 export const strandsRuntime: StreamRepoRuntime = {
   profile: strandsProfile,
+  quality: {
+    type: {
+      command: ["sh", "-c", "cd strands-py && mypy ./src ./tests_typing"],
+      pattern: /Found (\d+) errors?/,
+    },
+    format: {
+      command: ["sh", "-c", "cd strands-py && ruff format --check ."],
+      pattern: /(\d+) files? would be reformatted/,
+    },
+    layer: null,
+  },
   testCommand: (tests) => [
     "sh",
     "-c",

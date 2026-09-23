@@ -198,11 +198,17 @@ export class StreamWorkspace {
     return this.head();
   }
 
-  // 回到本步起点（即 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件；被忽略的文件（依赖目录）不动
-  async rollback(): Promise<void> {
-    await this.must("git reset -q --hard HEAD && git clean -fdq", "回到本步起点", {
+  // 回到本步起点（缺省为 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件；被忽略的文件（依赖目录）不动
+  async rollback(to = "HEAD"): Promise<void> {
+    await this.must('git reset -q --hard "$1" && git clean -fdq', "回到本步起点", {
+      args: [to],
       timeoutMs: 300_000,
     });
+  }
+
+  // agent 在容器里也可能自己提交：把 HEAD 挪回本步起点、改动留在工作区，此后的恢复、判定与落地都相对起点
+  async normalizeTo(base: string): Promise<void> {
+    await this.must('git reset -q --soft "$1"', "把 HEAD 挪回本步起点", { args: [base] });
   }
 
   // 工作区是否与 HEAD 逐字一致（被跟踪文件与未忽略的未跟踪文件）
@@ -258,6 +264,59 @@ export class StreamWorkspace {
         ...(op.op === "write" ? { stdin: read(op.path) } : {}),
       });
     }
+  }
+
+  // 相对 HEAD 有改动的路径（含删除与未忽略的未跟踪文件）；untracked 表示 HEAD 里没有它
+  async changedPaths(): Promise<{ path: string; untracked: boolean }[]> {
+    const r = await this.must("git status --porcelain=v1 -z --untracked-files=all", "读取改动");
+    const parts = r.stdout.split("\x00");
+    const out: { path: string; untracked: boolean }[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const entry = parts[i] ?? "";
+      if (entry.length < 4) continue;
+      const code = entry.slice(0, 2);
+      out.push({ path: entry.slice(3), untracked: code === "??" || code.includes("A") });
+      // 改名项后面跟着原路径
+      if (code.startsWith("R") || code.startsWith("C")) i++;
+    }
+    return out;
+  }
+
+  // 把给定路径恢复成 HEAD 里的版本
+  async restoreFromHead(paths: readonly string[]): Promise<void> {
+    if (paths.length === 0) return;
+    await this.must('git checkout -q HEAD -- "$@"', "从本步起点恢复文件", { args: paths });
+  }
+
+  // 目录里（缺省为工作区根）被跟踪文件的 blob 哈希
+  async trackedBlobs(dir?: string): Promise<Map<string, string>> {
+    const r = await this.must("git ls-files -s -z", "读取被跟踪文件", {
+      ...(dir !== undefined ? { cwd: dir } : {}),
+    });
+    const out = new Map<string, string>();
+    for (const entry of r.stdout.split("\x00")) {
+      const tab = entry.indexOf("\t");
+      if (tab < 0) continue;
+      const [, blob = ""] = entry.slice(0, tab).split(" ");
+      out.set(entry.slice(tab + 1), blob);
+    }
+    return out;
+  }
+
+  // 把人的文件同步进目录：只写 blob 与目录里被跟踪版本不同（或缺失）的文件；返回写入的路径
+  async syncHumanFilesAt(
+    dir: string,
+    entries: readonly { path: string; blob: string; kind: HumanFileOp["kind"] }[],
+    read: (path: string) => Buffer
+  ): Promise<string[]> {
+    const tracked = await this.trackedBlobs(dir);
+    const stale = entries.filter((e) => tracked.get(e.path) !== e.blob);
+    await this.applyHumanFilesAt(
+      dir,
+      stale.map((e) => ({ path: e.path, op: "write", kind: e.kind })),
+      read
+    );
+    return stale.map((e) => e.path);
   }
 
   // 读取工作区里的一个文件（测量报告等）

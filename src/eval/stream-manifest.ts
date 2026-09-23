@@ -60,6 +60,8 @@ export interface StreamStep {
   // 红测试对合并时的两个提交（先红后修），commit 为后者
   mergedCommits?: readonly string[];
   subject: string;
+  // 提交信息全文（红测试对为两段相接）；落地时程序以它提交（148）
+  message: string;
   // 题：提交信息加测试文件全文；维护步：提交信息；其余为 null
   prompt: string | null;
   // 由程序从人的提交里写入工作区的文件：测试、测试辅助、环境文件；套用步为该提交的全部相关文件
@@ -157,7 +159,12 @@ type Draft = Omit<StreamStep, "seq">;
 
 function draftOne(c: Classified, profile: RepoProfile, read: ReadHumanFile): Draft {
   const { commit } = c;
-  const base = { commit: commit.sha, parent: commit.parent, subject: commit.subject };
+  const base = {
+    commit: commit.sha,
+    parent: commit.parent,
+    subject: commit.subject,
+    message: commit.message.trimEnd(),
+  };
   const reset = profile.resetReason(commit);
   if (reset !== null) {
     return { ...base, kind: "reset", prompt: null, humanFiles: [], judgeTests: [], reason: reset };
@@ -242,6 +249,7 @@ function draftRedPair(head: Classified, fix: Classified, read: ReadHumanFile): D
     parent: head.commit.parent,
     mergedCommits: [head.commit.sha, fix.commit.sha],
     subject: fix.commit.subject,
+    message: `${head.commit.message.trimEnd()}\n\n${fix.commit.message.trimEnd()}`,
     prompt: buildTaskPrompt(
       `${head.commit.message.trimEnd()}\n\n${fix.commit.message.trimEnd()}`,
       contents

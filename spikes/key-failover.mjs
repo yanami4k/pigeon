@@ -10,39 +10,10 @@
 //     内容已经开始往外发之后的错误无法重放，原样交回；
 //   - 每次切换与退避向标准错误输出一行告警（第几个 key、发生了什么）；告警与交回的错误文本里都不出现 key 及其任何片段。
 
-export const BACKOFF_DELAYS_MS = [5_000, 15_000, 45_000];
+// 限额识别口径、去 key 与退避间隔只留一份，在 src/eval/model-limits.ts（延续式跑批的网关同用）
+import { BACKOFF_DELAYS_MS, isQuotaError, scrubKeys } from "../src/eval/model-limits.ts";
 
-const AUTH_PATTERN =
-  /^(401|403)\b|authentication|unauthorized|invalid[ _-]?api[ _-]?key|permission[ _-]denied|forbidden/i;
-// 不收"exceeded"这类宽词：上下文超长（context length exceeded）是请求问题，不是限额
-const QUOTA_PATTERN =
-  /^429\b|rate[ _-]?limit|too many requests|quota|insufficient[ _-]?(balance|quota|credit)|限额|额度|配额|余额不足|频率限制|请求过于频繁/i;
-
-// 响应体明说是用量上限或额度用完：即便状态码是 403 也是限额（Kimi For Coding 的 5 小时窗口就是 403 permission_error）
-const EXPLICIT_QUOTA_PATTERN = /usage limit|quota will reset|额度已用完|用量上限/i;
-
-// 限额类错误：先认明说的用量上限，再排除认证类（401/403 的响应体里也可能出现 limit 一类字眼）
-export function isQuotaError(message) {
-  const text = String(message ?? "");
-  if (EXPLICIT_QUOTA_PATTERN.test(text)) {
-    return true;
-  }
-  if (AUTH_PATTERN.test(text)) {
-    return false;
-  }
-  return QUOTA_PATTERN.test(text);
-}
-
-// 文本里不得出现 key：逐个替换成占位
-export function scrubKeys(text, keys) {
-  let out = String(text ?? "");
-  for (const key of keys) {
-    if (key) {
-      out = out.split(key).join("[key]");
-    }
-  }
-  return out;
-}
+export { BACKOFF_DELAYS_MS, isQuotaError, scrubKeys };
 
 export function createKeyFailover({
   keys,

@@ -38,6 +38,7 @@ import {
 import { EVAL_CONDITIONS, type EvalCondition } from "./task.ts";
 import type { EvalInstance, PreparedInstance, TaskSource } from "./task-source.ts";
 import { verifyTaskRun } from "./verify.ts";
+import { runWorkQueue } from "./work-queue.ts";
 
 export { EVAL_RESULT_FIELDS, type EvalResultLine } from "./results.ts";
 
@@ -107,7 +108,7 @@ export interface OutageOptions {
 }
 
 // 本源码所在仓库（Pigeon）的版本；读不到时如实记 unknown
-function currentHarnessRef(): HarnessRef {
+export function currentHarnessRef(): HarnessRef {
   try {
     return describeHead(fileURLToPath(new URL(".", import.meta.url)));
   } catch {
@@ -206,7 +207,6 @@ export async function runEval(options: RunEvalOptions): Promise<RunEvalSummary> 
     }
   }
   let ran = 0;
-  let next = 0;
   // 断供状态：连续故障计数、已暂停次数、进行中的暂停、停止原因
   const outage = options.outage;
   const sleep =
@@ -244,28 +244,19 @@ export async function runEval(options: RunEvalOptions): Promise<RunEvalSummary> 
       pause = undefined;
     });
   };
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      while (pause !== undefined) {
-        await pause;
-      }
-      if (stopped !== undefined) {
-        return;
-      }
-      const job = jobs[next];
-      next += 1;
-      if (job === undefined) {
-        return;
-      }
+  await runWorkQueue(
+    jobs,
+    concurrency,
+    async (job) => {
       const line = await runOnce(options, { outDir, editMode, harnessRef }, job);
       // 每次运行结束立即落盘：进程中途死掉，已完成的行不丢
       appendFileSync(resultsFile, `${JSON.stringify(line)}\n`);
       ran += 1;
       noteOutage(line);
       options.onResult?.(line);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
+    },
+    { paused: () => pause, stopped: () => stopped }
+  );
   const lines = readResultLines(resultsFile);
   // 报告按读侧口径：同键取最后一条非错误行
   writeFileSync(

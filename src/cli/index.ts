@@ -36,14 +36,18 @@ import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
 import { localTaskSource } from "../eval/local-source.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
+import { runStreamExperiment } from "../eval/stream-experiment.ts";
 import {
   assembleImageContext,
   generateStreamManifest,
   STREAM_RUNTIMES,
   summarizeManifest,
 } from "../eval/stream-generate.ts";
+import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
+import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { swebenchTaskSource, swebenchTemperature } from "../eval/swebench-source.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
+import { DEFAULT_GATEWAY_MODEL_ID } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
@@ -548,6 +552,139 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
   process.stdout.write(`${summarizeManifest(manifest)}\n`);
 }
 
+// pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
+//   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
+//   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
+//   [--container-memory <上限>] [--yolo]：
+// 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地或撤回、全量测量、写结果行；
+// 四个条件的模型请求都经跑批进程内置的网关（决策 155），真 key 取自 KIMI_API_KEY 与可选的 KIMI_API_KEY_2；
+// 同一输出目录重跑即从断点续跑
+async function evalStreamMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
+    "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
+    "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
+    "[--container-memory <上限>] [--yolo]";
+  const own = new Set([
+    "--manifest",
+    "--repo",
+    "--image",
+    "--out",
+    "--conditions",
+    "--streams",
+    "--attempts",
+    "--concurrency",
+    "--max-steps",
+    "--max-turns",
+    "--wall-clock-min",
+    "--model-id",
+    "--mini-python",
+    "--container-memory",
+  ]);
+  const values = new Map<string, string>();
+  const modelArgv: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    if (own.has(arg)) {
+      const value = argv[++i];
+      if (value === undefined) throw new Error(`${arg} 需要取值（${usage}）`);
+      values.set(arg, value);
+    } else {
+      modelArgv.push(arg);
+      const next = argv[i + 1];
+      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
+        modelArgv.push(next);
+        i++;
+      }
+    }
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
+    return value;
+  };
+  const positive = (name: string): number | undefined => {
+    const raw = values.get(name);
+    if (raw === undefined) return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1) throw new Error(`${name} 需要正整数（${usage}）`);
+    return value;
+  };
+  const list = (name: string) =>
+    values.has(name)
+      ? required(name)
+          .split(",")
+          .filter((x) => x !== "")
+      : undefined;
+  const conditions = list("--conditions") ?? [];
+  for (const c of conditions) {
+    if (!(STREAM_CONDITIONS as readonly string[]).includes(c)) {
+      throw new Error(`未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}）`);
+    }
+  }
+  if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
+  const needsPigeon = conditions.some((c) => c !== "minimal");
+  const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
+  const keys = [process.env.KIMI_API_KEY, process.env.KIMI_API_KEY_2].filter(
+    (k): k is string => k !== undefined && k !== ""
+  );
+  if (keys.length === 0) throw new Error("缺少 KIMI_API_KEY 环境变量：网关的真 key 从这里取");
+  const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
+  const pigeon = needsPigeon
+    ? {
+        yolo: flags.yolo,
+        provider: "kimi-coding",
+        modelId,
+        // 与外部基准同一口径：缺省固定温度 0
+        temperature: swebenchTemperature(flags.temperature),
+        ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+        ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+      }
+    : undefined;
+  const streams = list("--streams");
+  const attempts = positive("--attempts");
+  const concurrency = positive("--concurrency");
+  const maxSteps = positive("--max-steps");
+  const memory = values.get("--container-memory");
+  const miniPython = values.get("--mini-python");
+  const summary = await runStreamExperiment({
+    gateway: { keys, modelId },
+    manifestFile: required("--manifest"),
+    repoDir: required("--repo"),
+    image: required("--image"),
+    outDir: required("--out"),
+    conditions: conditions as StreamCondition[],
+    budget: {
+      maxTurns: positive("--max-turns") ?? DEFAULT_STEP_BUDGET.maxTurns,
+      wallClockMs:
+        (positive("--wall-clock-min") ?? DEFAULT_STEP_BUDGET.wallClockMs / 60_000) * 60_000,
+    },
+    ...(pigeon !== undefined ? { pigeon } : {}),
+    ...(miniPython !== undefined
+      ? {
+          minimalCommand: [
+            miniPython,
+            fileURLToPath(new URL("../../eval/stream/mini/run_mini.py", import.meta.url)),
+          ],
+        }
+      : {}),
+    ...(streams !== undefined ? { streams } : {}),
+    ...(attempts !== undefined ? { attempts } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
+    ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
+    log: (line) => writeOut(`[stream] ${line}\n`),
+  });
+  for (const job of summary.jobs) {
+    writeOut(
+      `[stream] ${job.key}：完成到第 ${job.completedTo ?? "—"} 步${job.stopped !== undefined ? `；停止：${job.stopped}` : ""}\n`
+    );
+  }
+  writeOut(`[stream] 结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`);
+  if (summary.jobs.some((j) => j.stopped !== undefined)) process.exitCode = 3;
+}
+
 // pigeon eval stream-image-context --repo-profile pigeon|strands --repo <人的仓库> --out <目录> [--lock-rev <提交>]：
 // 组装延续式跑批工作区镜像的构建上下文（决策 148），之后 docker build <目录>
 function evalStreamImageContextMain(argv: string[]): void {
@@ -769,6 +906,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "compare") {
     evalCompareMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "stream") {
+    await evalStreamMain(argv.slice(2));
     return;
   }
   if (argv[0] === "eval" && argv[1] === "stream-image-context") {

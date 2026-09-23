@@ -9,6 +9,12 @@ export {
   type StreamTextDelta,
 } from "./adapter.ts";
 export { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
+export {
+  DEFAULT_GATEWAY_MODEL_ID,
+  GATEWAY_PLACEHOLDER_KEY,
+  gatewayStreamFn,
+  gatewayUpstreamBaseUrl,
+} from "./gateway-stream.ts";
 export type {
   EventLogSink,
   GovernanceHost,

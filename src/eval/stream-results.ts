@@ -1,0 +1,141 @@
+// 延续式实验的结果行（决策 145、142、143、144；第 20 条）：每条流、每个条件、每一步一行，逐行追加到 results.jsonl，
+// 与外部基准跑批同一种落盘与续跑做法（写完即追加；撕裂的末行读时丢弃；按键取断点）。
+// 被限额打断的一步整题作废、不留行（144），因此这里没有错误行：有行即该步已完成。
+// 回炉三字段（用了几轮回炉、最终验证结论、是否撤回）的名字以回炉施工为准，合并时对齐。
+import { existsSync, readFileSync } from "node:fs";
+import type { TurnUsage } from "../state/runtime-events.ts";
+import type { HarnessRef } from "./results.ts";
+import type { FailureAttribution } from "./stream-attribution.ts";
+import type { StreamStepKind } from "./stream-manifest.ts";
+import type { CountPassRate } from "./stream-measure.ts";
+
+export type StreamCondition = "full" | "no-memory" | "no-gate" | "minimal";
+
+export const STREAM_CONDITIONS: readonly StreamCondition[] = [
+  "full",
+  "no-memory",
+  "no-gate",
+  "minimal",
+];
+
+// 结果：题与维护步按判定记 passed / failed；套用步记 applied；跳过步记 skipped
+export type StreamStepOutcome = "passed" | "failed" | "applied" | "skipped";
+
+export interface LimitPauseRecord {
+  // 5h / weekly / monthly / concurrency
+  kind: string;
+  startedAt: string;
+  endedAt: string | null;
+}
+
+export interface StreamResultLine {
+  repo: string;
+  stream: string;
+  condition: StreamCondition;
+  attempt: number;
+  seq: number;
+  kind: StreamStepKind;
+  commit: string;
+  outcome: StreamStepOutcome;
+  // 本步结束后工作区的 HEAD（落地后的新提交，撤回或跳过时为本步起点）；续跑时据此核对容器
+  head: string;
+  // 本步是否做了判定（题与维护步为 true）
+  judged: boolean;
+  // 回炉：未开回炉的条件为 null
+  repairRounds: number | null;
+  reverted: boolean;
+  finalVerdict: "pass" | "fail" | null;
+  // 全量测试通过率（跳过步沿用上一步，没有测量时为 null）
+  fullPassRate: { byCount: CountPassRate; byTask: CountPassRate } | null;
+  regressions: number | null;
+  quality: {
+    typeErrors: number | null;
+    formatErrors: number | null;
+    layerViolations: number | null;
+  } | null;
+  // agent 的终态（没跑 agent 的步为 null）
+  status: string | null;
+  turns: number;
+  usage: TurnUsage;
+  // agent 用时；整步用时
+  agentWallMs: number;
+  wallMs: number;
+  attribution: FailureAttribution | null;
+  limitPauses: LimitPauseRecord[];
+  harnessRef: HarnessRef;
+  error?: string;
+}
+
+export const STREAM_RESULT_FIELDS = [
+  "repo",
+  "stream",
+  "condition",
+  "attempt",
+  "seq",
+  "kind",
+  "commit",
+  "outcome",
+  "head",
+  "judged",
+  "repairRounds",
+  "reverted",
+  "finalVerdict",
+  "fullPassRate",
+  "regressions",
+  "quality",
+  "status",
+  "turns",
+  "usage",
+  "agentWallMs",
+  "wallMs",
+  "attribution",
+  "limitPauses",
+  "harnessRef",
+] as const;
+
+export interface StreamJobId {
+  stream: string;
+  condition: StreamCondition;
+  attempt: number;
+}
+
+export function streamJobKey(job: StreamJobId): string {
+  return `${job.stream}|${job.condition}|${job.attempt}`;
+}
+
+// 读结果行：撕裂的末行（进程死于写到一半）与空行丢弃
+export function readStreamResults(file: string): StreamResultLine[] {
+  if (!existsSync(file)) return [];
+  const out: StreamResultLine[] = [];
+  for (const raw of readFileSync(file, "utf8").split("\n")) {
+    if (raw.trim() === "") continue;
+    try {
+      out.push(JSON.parse(raw) as StreamResultLine);
+    } catch {
+      // 撕裂的行
+    }
+  }
+  return out;
+}
+
+export function lastCompletedStep(
+  lines: readonly StreamResultLine[],
+  job: StreamJobId
+): StreamResultLine | undefined {
+  const key = streamJobKey(job);
+  let last: StreamResultLine | undefined;
+  for (const line of lines) {
+    if (streamJobKey(line) !== key) continue;
+    if (last === undefined || line.seq > last.seq) last = line;
+  }
+  return last;
+}
+
+export const ZERO_USAGE: TurnUsage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};

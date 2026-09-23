@@ -28,6 +28,10 @@ export interface HumanRepo {
   resolve(rev: string): string;
   // 含 rev 可达历史的 bundle（单一分支）
   bundle(rev: string): Buffer;
+  // 某提交里的全部文件及其 blob 哈希
+  tree(sha: string): { path: string; blob: string }[];
+  // 父提交到本提交在给定路径里的新增行（不含 diff 头）
+  addedLines(parent: string, sha: string, paths: readonly string[]): string[];
 }
 
 export function gitHumanRepo(dir: string): HumanRepo {
@@ -75,6 +79,24 @@ export function gitHumanRepo(dir: string): HumanRepo {
         });
     },
     show: (sha, path) => git(["show", `${sha}:${path}`]),
+    tree(sha) {
+      // -z 输出为"<mode> <type> <blob>\t<路径>\0"
+      return text(["ls-tree", "-r", "-z", sha])
+        .split("\x00")
+        .filter((l) => l !== "")
+        .map((l) => {
+          const tab = l.indexOf("\t");
+          const [, , blob = ""] = l.slice(0, tab).split(" ");
+          return { path: l.slice(tab + 1), blob };
+        });
+    },
+    addedLines(parent, sha, paths) {
+      if (paths.length === 0) return [];
+      return text(["diff", "--no-renames", "--unified=0", parent, sha, "--", ...paths])
+        .split("\n")
+        .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+        .map((l) => l.slice(1));
+    },
     resolve: (rev) => text(["rev-parse", "--verify", `${rev}^{commit}`]).trim(),
     bundle(rev) {
       const sha = text(["rev-parse", "--verify", `${rev}^{commit}`]).trim();
