@@ -36,7 +36,7 @@ import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
 import { localTaskSource } from "../eval/local-source.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
-import { runStreamExperiment } from "../eval/stream-experiment.ts";
+import { runStreamBaselines, runStreamExperiment } from "../eval/stream-experiment.ts";
 import {
   assembleImageContext,
   generateStreamManifest,
@@ -511,6 +511,58 @@ async function evalMain(argv: string[]): Promise<void> {
 // pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> --image <镜像> --out <清单文件>
 //   [--test-timeout-sec N]：延续式实验出题（决策 127、141、153）——在断网的参考容器里逐提交测判题探针与格式化比对，
 // 按写死的规则出流清单；清单与探针原始记录各存一个文件
+// pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录>
+//   [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）] [--streams s1,s2]：
+// 提前单独算全量测量的人的基准——每路一个独立的参考容器，按提交落盘，同一目录重跑即续算；eval stream 以 --baseline 读取
+async function evalStreamBaselineMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录> " +
+    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2]";
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const value = argv[i + 1];
+    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
+      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
+    }
+    values.set(arg, value);
+    i++;
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
+    return value;
+  };
+  const concurrency = Number(values.get("--concurrency") ?? "1");
+  if (!Number.isInteger(concurrency) || concurrency < 1)
+    throw new Error(`--concurrency 需要正整数（${usage}）`);
+  const streams = values
+    .get("--streams")
+    ?.split(",")
+    .filter((x) => x !== "");
+  const summary = await runStreamBaselines({
+    manifestFile: required("--manifest"),
+    repoDir: required("--repo"),
+    image: required("--image"),
+    outDir: required("--out"),
+    concurrency,
+    containerRunArgs: ["--memory", values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY],
+    ...(streams !== undefined ? { streams } : {}),
+    log: (line) =>
+      process.stderr.write(`[baseline] ${new Date().toISOString()} ${line}
+`),
+  });
+  process.stdout.write(
+    `人的基准：共 ${summary.total} 个提交，本次算 ${summary.computed} 个，此前已落盘 ${summary.cached} 个，` +
+      `出错 ${summary.failed.length} 个
+`
+  );
+  for (const f of summary.failed)
+    process.stdout.write(`  ${f.commit}：${f.error.slice(0, 300)}
+`);
+  if (summary.failed.length > 0) process.exitCode = 1;
+}
+
 async function evalStreamManifestMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> " +
@@ -559,7 +611,7 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
 //   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
-//   [--container-memory <上限>（缺省 2g）] [--yolo]：
+//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--yolo]：
 // 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地或撤回、全量测量、写结果行；
 // 四个条件的模型请求都经跑批进程内置的网关（决策 155），真 key 取自 KIMI_API_KEY 与可选的 KIMI_API_KEY_2；
 // 同一输出目录重跑即从断点续跑
@@ -570,7 +622,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
     "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-    "[--container-memory <上限，缺省 2g>] [--yolo]";
+    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--yolo]";
   const own = new Set([
     "--manifest",
     "--repo",
@@ -586,6 +638,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--model-id",
     "--mini-python",
     "--container-memory",
+    "--baseline",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -655,6 +708,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   // 作业容器与参考容器缺省 2g：人的基准逐遍记录内存峰值，超过上限的 75% 即告警
   const memory = values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY;
   const miniPython = values.get("--mini-python");
+  const baselineDir = values.get("--baseline");
   const summary = await runStreamExperiment({
     gateway: { keys, modelId },
     manifestFile: required("--manifest"),
@@ -681,6 +735,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     containerRunArgs: ["--memory", memory],
+    ...(baselineDir !== undefined ? { baselineDir } : {}),
     // 带时间戳：试跑时据此把每步的耗时与内存采样对上
     log: (line) => writeOut(`[stream] ${new Date().toISOString()} ${line}\n`),
   });
@@ -922,6 +977,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "stream-image-context") {
     evalStreamImageContextMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "stream-baseline") {
+    await evalStreamBaselineMain(argv.slice(2));
     return;
   }
   if (argv[0] === "eval" && argv[1] === "stream-manifest") {

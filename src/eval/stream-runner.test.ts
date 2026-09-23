@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import type { GatewayMeter } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
+import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
@@ -499,5 +500,75 @@ test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、�
     assert.match(warnings[0] ?? "", /内存告警.*第 1 遍.*1526 MiB.*1907 MiB 的 75%/);
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("人的基准提前单独算：只取要全量测量的步的提交、按提交落盘、多路分摊；重跑时已算的跳过；跑批直接读、不再现算；出错的提交记下后接着算", async () => {
+  const t = await toy();
+  try {
+    const targets = baselineTargets({ manifest: t.manifest, human: t.human, runtime: toyRuntime });
+    const upToA = ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"];
+    assert.deepEqual(
+      targets.map((x) => [x.commit, x.seqs, x.tests]),
+      [
+        [t.commits[1], [1], upToA],
+        [t.commits[2], [2], upToA],
+        [t.commits[4], [4], upToA],
+        [
+          t.commits[5],
+          [5],
+          ["src/a.test.sh", "src/b.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+        ],
+      ]
+    );
+    let runs = 0;
+    const counting = {
+      ...toyRuntime,
+      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+        runs++;
+        return toyRuntime.runCases(...args);
+      },
+    };
+    const end = t.commits[5] ?? "";
+    const references = await Promise.all(
+      [0, 1].map(async (i) => {
+        const root = join(t.base, `baseline-ref-${i}`);
+        mkdirSync(root);
+        const ws = new ReferenceWorkspace(localStreamShell(root));
+        await ws.init(t.human.bundle(end), end);
+        return new ReferenceCases({
+          reference: ws,
+          runtime: counting,
+          cacheDir: join(t.base, "baseline"),
+        });
+      })
+    );
+    const first = await computeBaselines({ targets, references });
+    assert.deepEqual([first.total, first.computed, first.cached, first.failed], [4, 4, 0, []]);
+    assert.equal(runs, 8, "每个提交跑两遍");
+    const again = await computeBaselines({ targets, references });
+    assert.deepEqual([again.computed, again.cached], [0, 4]);
+    assert.equal(runs, 8, "已落盘的不再跑");
+    // 跑批读同一目录：全量测量不再现算人的基准
+    const [reading] = references;
+    assert.ok(reading !== undefined);
+    const summary = await runStreams(
+      options(t, { agents: { pigeon: scriptedAgent(() => undefined) }, reference: reading })
+    );
+    assert.equal(runs, 8);
+    const rows = readStreamResults(summary.resultsFile);
+    assert.equal(rows.at(-1)?.fullPassRate?.byCount.total, 4);
+    assert.equal(rows.at(-1)?.fullPassRate?.humanRuns.length, 2);
+    const broken = await computeBaselines({
+      targets: [
+        { commit: "0000000000000000000000000000000000000000", tests: [], seqs: [9] },
+        ...targets,
+      ],
+      references,
+    });
+    assert.equal(broken.failed.length, 1);
+    assert.equal(broken.cached, 4);
+  } finally {
+    rmSync(t.base, { recursive: true, force: true });
   }
 });

@@ -420,6 +420,18 @@ async function restoreTests(
   );
 }
 
+// 某提交上人写的全部测试文件：全量测量与提前单独算的人的基准用同一份，两边的用例集一致
+export function humanTestsAt(
+  human: HumanRepo,
+  runtime: StreamRepoRuntime,
+  commit: string
+): string[] {
+  return human
+    .tree(commit)
+    .filter((e) => runtime.profile.classifyFile(e.path) === "test")
+    .map((e) => e.path);
+}
+
 interface Measurement {
   fullPassRate: NonNullable<StreamResultLine["fullPassRate"]>;
   regressions: number;
@@ -444,7 +456,7 @@ async function measure(
     .filter((e) => e.kind === "test" || e.kind === "testaux");
   await ws.syncHumanFilesAt(copy, tree, (p) => options.human.show(step.commit, p));
   await syncEnv(options, ws, copy);
-  const tests = tree.filter((e) => e.kind === "test").map((e) => e.path);
+  const tests = humanTestsAt(options.human, runtime, step.commit);
   // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例在分母里、计为未通过
   const run = await runtime.runCases(ws, tests, {
     timeoutMs: options.measureTimeoutMs ?? 1_800_000,
@@ -730,6 +742,11 @@ export class ReferenceCases implements HumanReferenceCases {
     this.cgroupDir = input.cgroupDir ?? "/sys/fs/cgroup";
     this.warn = input.warn ?? ((m) => console.error(m));
     mkdirSync(this.cacheDir, { recursive: true });
+  }
+
+  // 这个提交的基准是否已落盘（提前单独算过的直接读）
+  has(commit: string): boolean {
+    return existsSync(path.join(this.cacheDir, `${commit}.json`));
   }
 
   casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline> {

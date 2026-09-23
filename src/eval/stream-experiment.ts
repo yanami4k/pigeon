@@ -10,9 +10,11 @@ import { type ModelGateway, startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
 import { currentHarnessRef } from "./runner.ts";
 import { commandStepAgent, type PigeonStepAgentOptions, pigeonStepAgent } from "./stream-agents.ts";
+import { type BaselineSummary, baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
 import type { StreamManifest } from "./stream-manifest.ts";
+import type { StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";
 import {
   dockerStreamEnvs,
@@ -50,16 +52,23 @@ export interface StreamExperimentOptions {
   minimalCommand?: readonly string[];
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
+  // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
+  baselineDir?: string;
   log?: (line: string) => void;
+}
+
+function readManifest(file: string): { manifest: StreamManifest; runtime: StreamRepoRuntime } {
+  const manifest = JSON.parse(readFileSync(file, "utf8")) as StreamManifest;
+  const runtimeName = RUNTIME_BY_REPO[manifest.repo];
+  const runtime = runtimeName === undefined ? undefined : STREAM_RUNTIMES[runtimeName];
+  if (runtime === undefined) throw new Error(`清单的仓库 ${manifest.repo} 没有对应的运行方式`);
+  return { manifest, runtime };
 }
 
 export async function runStreamExperiment(
   options: StreamExperimentOptions
 ): Promise<RunStreamsSummary> {
-  const manifest = JSON.parse(readFileSync(options.manifestFile, "utf8")) as StreamManifest;
-  const runtimeName = RUNTIME_BY_REPO[manifest.repo];
-  const runtime = runtimeName === undefined ? undefined : STREAM_RUNTIMES[runtimeName];
-  if (runtime === undefined) throw new Error(`清单的仓库 ${manifest.repo} 没有对应的运行方式`);
+  const { manifest, runtime } = readManifest(options.manifestFile);
   const docker = options.docker ?? ["docker"];
   const outDir = path.resolve(options.outDir);
   const human = gitHumanRepo(options.repoDir);
@@ -130,7 +139,10 @@ export async function runStreamExperiment(
       reference: new ReferenceCases({
         reference: referenceWs,
         runtime,
-        cacheDir: path.join(outDir, "reference"),
+        cacheDir:
+          options.baselineDir !== undefined
+            ? path.resolve(options.baselineDir)
+            : path.join(outDir, "reference"),
       }),
       outDir,
       conditions: options.conditions,
@@ -147,5 +159,66 @@ export async function runStreamExperiment(
   } finally {
     await removeWorkspaceContainer(referenceName, docker).catch(() => {});
     await liveGateway.close();
+  }
+}
+
+export interface StreamBaselineOptions {
+  manifestFile: string;
+  repoDir: string;
+  image: string;
+  // 基准目录：每个提交一个结果文件，同一目录重跑即续算
+  outDir: string;
+  // 路数：每路一个独立的参考容器
+  concurrency?: number;
+  streams?: readonly string[];
+  docker?: readonly string[];
+  containerRunArgs?: readonly string[];
+  log?: (line: string) => void;
+}
+
+// 提前单独算人的基准：起 N 个参考容器（与作业的参考容器分开），按提交分摊，结束后移除
+export async function runStreamBaselines(options: StreamBaselineOptions): Promise<BaselineSummary> {
+  const { manifest, runtime } = readManifest(options.manifestFile);
+  const docker = options.docker ?? ["docker"];
+  const outDir = path.resolve(options.outDir);
+  const human = gitHumanRepo(options.repoDir);
+  const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
+  const lanes = Math.max(1, options.concurrency ?? 1);
+  const names = Array.from({ length: lanes }, (_, i) => `${prefix}-baseline-${i + 1}`);
+  const targets = baselineTargets({
+    manifest,
+    human,
+    runtime,
+    ...(options.streams !== undefined ? { streams: options.streams } : {}),
+  });
+  try {
+    const references = await Promise.all(
+      names.map(async (name) => {
+        await removeWorkspaceContainer(name, docker);
+        await startWorkspaceContainer({
+          image: options.image,
+          name,
+          docker,
+          runArgs: [
+            ...WORKSPACE_NETWORK_ARGS,
+            "--label",
+            `pigeon.stream=${prefix}`,
+            ...(options.containerRunArgs ?? []),
+          ],
+        });
+        const ws = new ReferenceWorkspace(
+          dockerStreamShell({ container: name, root: STREAM_CONTAINER_ROOT, docker })
+        );
+        await ws.init(human.bundle(manifest.rangeEnd), manifest.rangeEnd);
+        return new ReferenceCases({ reference: ws, runtime, cacheDir: outDir });
+      })
+    );
+    return await computeBaselines({
+      targets,
+      references,
+      ...(options.log !== undefined ? { log: options.log } : {}),
+    });
+  } finally {
+    for (const name of names) await removeWorkspaceContainer(name, docker).catch(() => {});
   }
 }
