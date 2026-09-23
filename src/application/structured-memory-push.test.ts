@@ -143,7 +143,12 @@ test("开局：只按题面指到的文件挑选——题面里的路径、所�
       selection: "auto",
       opening: [onA.id],
     });
-    assert.deepEqual(byPath.result.structuredMemory, { opening: [onA.id], repair: [] });
+    assert.deepEqual(byPath.result.structuredMemory, {
+      opening: [onA.id],
+      openingBlocked: [],
+      repair: [],
+      repairBlocked: [],
+    });
     // 题面所附测试代码里的相对导入（以所附文件为基准）
     const byImport = await newStep(
       repo,
@@ -269,7 +274,9 @@ test("回炉：报错指纹对上的优先，其次是挂在本次报错涉及�
     ]);
     assert.deepEqual(step.result.structuredMemory, {
       opening: [],
+      openingBlocked: [],
       repair: [[typeEntry.id, formatEntry.id]],
+      repairBlocked: [[]],
     });
   } finally {
     repo.cleanup();
@@ -332,7 +339,12 @@ test("开关：关闭时开局与回炉都不推送，run.started 记下关闭",
       selection: "auto",
       opening: [],
     });
-    assert.deepEqual(step.result.structuredMemory, { opening: [], repair: [[]] });
+    assert.deepEqual(step.result.structuredMemory, {
+      opening: [],
+      openingBlocked: [],
+      repair: [[]],
+      repairBlocked: [[]],
+    });
   } finally {
     repo.cleanup();
   }

@@ -12,6 +12,7 @@ import {
   type EntryChecker,
   failingFingerprints,
   type MemoryPick,
+  type MemorySelection,
   renderOpeningSection,
   renderRepairAppendix,
   selectFixed,
@@ -67,16 +68,27 @@ export interface StructuredMemoryOpening {
 
 export interface StructuredMemorySummary {
   opening: string[];
-  // 每轮回炉给了哪几条（按轮次）
+  // 开局挑出来、但用前核验没过而被拦下的
+  openingBlocked: string[];
+  // 每轮回炉给了哪几条、被拦下哪几条（按轮次）
   repair: string[][];
+  repairBlocked: string[][];
 }
+
+// 一轮回炉交给下一个 Run 的 run.started 的留痕
+export interface RepairHandoff {
+  given: string[];
+  blocked: string[];
+}
+
+const NOTHING: MemorySelection = { picks: [], blocked: [] };
 
 export interface StructuredMemoryPush {
   opening(task: string | undefined): StructuredMemoryOpening;
   // 回炉附加内容：挑选并成文，同时把这一轮给的条目登记给下一个 Run 的 run.started
   repairAppendix: RepairAppendix;
   // 下一个 Run 开始时取走这一轮回炉给的条目（只取一次）
-  takeRepairIds(): string[] | undefined;
+  takeRepairIds(): RepairHandoff | undefined;
   summary(): StructuredMemorySummary;
 }
 
@@ -165,8 +177,13 @@ export function createStructuredMemoryPush(input: {
   const selection: StructuredMemorySelection = options.fixed !== undefined ? "fixed" : "auto";
   const warn = options.warn ?? stderrWarn;
   const warned = new Set<FaultPhase>();
-  const summary: StructuredMemorySummary = { opening: [], repair: [] };
-  let pendingRepair: string[] | undefined;
+  const summary: StructuredMemorySummary = {
+    opening: [],
+    openingBlocked: [],
+    repair: [],
+    repairBlocked: [],
+  };
+  let pendingRepair: RepairHandoff | undefined;
   let entries: MemoryEntry[] | undefined;
   let probe: WorkspaceProbe | undefined;
 
@@ -215,43 +232,46 @@ export function createStructuredMemoryPush(input: {
 
   return {
     opening(task) {
-      const manifest = (opening: string[]): StructuredMemoryManifest => ({
+      const manifest = (chosen: MemorySelection): StructuredMemoryManifest => ({
         enabled,
         selection,
-        opening,
+        opening: ids(chosen.picks),
+        ...(chosen.blocked.length > 0 ? { openingBlocked: [...chosen.blocked] } : {}),
       });
       if (!enabled) {
-        return { section: "", manifest: manifest([]) };
+        return { section: "", manifest: manifest(NOTHING) };
       }
       try {
         const loaded = loadEntries();
         const workspace = probeOf();
-        const picks =
+        const chosen =
           options.fixed !== undefined
             ? phases.selectFixed(loaded, options.fixed.opening ?? [], workspace, check)
             : task === undefined
-              ? []
+              ? NOTHING
               : phases.selectOpening(
                   loaded,
                   taskReferencedFiles(task, workspace),
                   workspace,
                   check
                 );
-        summary.opening = ids(picks);
-        return { section: renderOpeningSection(picks), manifest: manifest(ids(picks)) };
+        summary.opening = ids(chosen.picks);
+        summary.openingBlocked = [...chosen.blocked];
+        return { section: renderOpeningSection(chosen.picks), manifest: manifest(chosen) };
       } catch (error) {
         report(error, "本次开局");
-        return { section: "", manifest: manifest([]) };
+        return { section: "", manifest: manifest(NOTHING) };
       }
     },
     repairAppendix(context) {
       if (!enabled) {
         // 关闭时每轮都记"一条也没给"，留痕与开启时同形
         summary.repair.push([]);
-        pendingRepair = [];
+        summary.repairBlocked.push([]);
+        pendingRepair = { given: [], blocked: [] };
         return undefined;
       }
-      let picks: MemoryPick[] = [];
+      let chosen: MemorySelection = NOTHING;
       try {
         const loaded = loadEntries();
         const workspace = probeOf();
@@ -265,7 +285,7 @@ export function createStructuredMemoryPush(input: {
             truncated: context.outcome.truncated,
           },
         ];
-        picks =
+        chosen =
           options.fixed !== undefined
             ? phases.selectFixed(loaded, options.fixed.repair ?? [], workspace, check)
             : phases.selectRepair(
@@ -276,11 +296,12 @@ export function createStructuredMemoryPush(input: {
               );
       } catch (error) {
         report(error, `第 ${context.round} 轮回炉`);
-        picks = [];
+        chosen = NOTHING;
       }
-      summary.repair.push(ids(picks));
-      pendingRepair = ids(picks);
-      const text = renderRepairAppendix(picks);
+      summary.repair.push(ids(chosen.picks));
+      summary.repairBlocked.push([...chosen.blocked]);
+      pendingRepair = { given: ids(chosen.picks), blocked: [...chosen.blocked] };
+      const text = renderRepairAppendix(chosen.picks);
       return text === "" ? undefined : text;
     },
     takeRepairIds() {
@@ -290,7 +311,9 @@ export function createStructuredMemoryPush(input: {
     },
     summary: () => ({
       opening: [...summary.opening],
+      openingBlocked: [...summary.openingBlocked],
       repair: summary.repair.map((round) => [...round]),
+      repairBlocked: summary.repairBlocked.map((round) => [...round]),
     }),
   };
 }

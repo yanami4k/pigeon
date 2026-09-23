@@ -18,7 +18,7 @@ import {
   type StepFingerprints,
   type VerifyStepKind,
 } from "./verify-fingerprint.ts";
-import { LEGACY_VERIFY_STEP_NAME, recordStepsOf } from "./verify-steps.ts";
+import { LEGACY_VERIFY_STEP_NAME, recordStepsOf, underStepCwd } from "./verify-steps.ts";
 
 export type FrictionKind = "regression" | "reverted";
 
@@ -73,6 +73,18 @@ export function workspaceRelative(file: string, workspace: string | undefined): 
     return normalized.slice(root.length + 1);
   }
   return normalized;
+}
+
+// 工具在某一步里报出的路径 → 相对工作区根的路径：绝对路径按工作区相对化；相对路径是相对这一步的执行目录报的，补上执行目录
+export function reportedPathOf(
+  file: string,
+  workspace: string,
+  stepCwd: string | undefined
+): string {
+  const normalized = file.trim().replace(/\\/g, "/");
+  return /^([A-Za-z]:)?\//.test(normalized)
+    ? workspaceRelative(normalized, workspace)
+    : underStepCwd(normalized, stepCwd);
 }
 
 // 本会话的快照链：首个快照对比它的改前基线，之后每个对比上一个
@@ -171,13 +183,15 @@ function parseVerification(
       ...(command !== undefined ? { command } : {}),
       output: step.output,
     });
-    // 报错路径统一为相对工作区
+    // 报错路径统一为相对工作区根（在子目录里执行的步骤补上执行目录）
     parsed.fingerprints = parsed.fingerprints.map((entry) => ({
       ...entry,
       ...(entry.file !== undefined
-        ? { file: workspaceRelative(entry.file, record.workspace) }
+        ? { file: reportedPathOf(entry.file, record.workspace, step.cwd) }
         : {}),
-      ...(entry.to !== undefined ? { to: workspaceRelative(entry.to, record.workspace) } : {}),
+      ...(entry.to !== undefined
+        ? { to: reportedPathOf(entry.to, record.workspace, step.cwd) }
+        : {}),
     }));
     steps.set(step.name, { name: step.name, verdict: step.verdict, parsed });
   }

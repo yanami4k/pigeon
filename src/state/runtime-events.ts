@@ -184,6 +184,8 @@ export const RunStartedPayloadSchema = Type.Object({
     Type.Object({
       ...StructuredMemoryManifestSchema.properties,
       repair: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      // 这一轮回炉挑出来、但用前核验没过而被拦下的条目（只在回炉 Run 上、有被拦下的时在场）
+      repairBlocked: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
     })
   ),
 });

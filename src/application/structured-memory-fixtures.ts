@@ -52,6 +52,19 @@ if (step === "格式") {
     out.push("ℹ tests " + failing.length, "ℹ fail " + failing.length, "", "✖ failing tests:", "");
     for (const test of failing) out.push("test at " + test.file.split("/").join("\\") + ":1:1", "✖ " + test.name + " (1.5ms)", "  AssertionError [ERR_ASSERTION]: 失败", "");
   }
+} else if (step === "子测试") {
+  // pytest 风格：*.py 里每行 "# FAILS_UNLESS <文件> <标记> <测试名>"，路径都相对本步的执行目录
+  const failing = [];
+  for (const file of files.filter((name) => name.endsWith(".py"))) {
+    for (const match of read(file).matchAll(/# FAILS_UNLESS (\S+) (\S+) (\S+)/g)) {
+      if (!read(match[1]).includes(match[2])) failing.push({ file, name: match[3] });
+    }
+  }
+  if (failing.length > 0) {
+    out.push("=========================== short test summary info ============================");
+    for (const test of failing) out.push("FAILED " + test.file + "::" + test.name + " - AssertionError: assert False");
+    out.push("========================= " + failing.length + " failed, 1 passed in 0.10s =========================");
+  }
 } else if (step === "构建") {
   for (const file of files) if (read(file).includes("BUILD_BAD")) out.push("make: *** [all] Error 2 (" + file + ")");
 } else if (step === "集成测试") {
@@ -71,8 +84,17 @@ copyFileSync(from, to);
 
 export const MEMORY_STEP_NAMES = ["格式", "类型", "测试", "分层", "构建", "集成测试"] as const;
 
-export function memoryVerifyConfig(names: readonly string[] = MEMORY_STEP_NAMES): VerifyConfig {
-  const steps = names.map((name) => ({ name, command: `${NODE} v.mjs ${name}` }));
+// 步骤可以给执行目录（相对工作区根）：脚本从该目录往上找 v.mjs，扫描与报出的路径都相对该目录
+export function memoryVerifyConfig(
+  names: ReadonlyArray<string | { name: string; cwd: string }> = MEMORY_STEP_NAMES
+): VerifyConfig {
+  const steps = names.map((item) => {
+    if (typeof item === "string") {
+      return { name: item, command: `${NODE} v.mjs ${item}` };
+    }
+    const up = "../".repeat(item.cwd.split("/").length);
+    return { name: item.name, command: `${NODE} ${up}v.mjs ${item.name}`, cwd: item.cwd };
+  });
   return { command: verifyStepsDisplay(steps), steps, timeoutMs: 60_000, source: "flag" };
 }
 

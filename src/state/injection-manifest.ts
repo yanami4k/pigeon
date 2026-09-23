@@ -45,5 +45,7 @@ export const StructuredMemoryManifestSchema = Type.Object({
   // auto 由程序按题面与报错挑选；fixed 由调用方指定条目（定点对照，决策 157）
   selection: StructuredMemorySelectionSchema,
   opening: Type.Array(Type.String({ minLength: 1 })),
+  // 开局挑出来、但用前核验没过而被拦下的条目（没有被拦下的即缺省）
+  openingBlocked: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 });
 export type StructuredMemoryManifest = Static<typeof StructuredMemoryManifestSchema>;

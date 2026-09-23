@@ -121,7 +121,8 @@ export interface RuntimeDeps {
   structuredMemory?: {
     section: string;
     manifest: StructuredMemoryManifest;
-    takeRepairIds?: () => string[] | undefined;
+    // 这一轮回炉给出的与因核验没过被拦下的条目
+    takeRepairIds?: () => { given: string[]; blocked: string[] } | undefined;
   };
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
@@ -309,7 +310,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           return {
             ...(mcpSummary !== undefined ? mcpSummary.summary() : {}),
             ...(repair !== undefined && structuredMemory !== undefined
-              ? { structuredMemory: { ...structuredClone(structuredMemory.manifest), repair } }
+              ? {
+                  structuredMemory: {
+                    ...structuredClone(structuredMemory.manifest),
+                    repair: [...repair.given],
+                    ...(repair.blocked.length > 0 ? { repairBlocked: [...repair.blocked] } : {}),
+                  },
+                }
               : {}),
           };
         };

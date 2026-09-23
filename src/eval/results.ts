@@ -121,10 +121,13 @@ export interface EvalResultLine {
     restored: boolean;
     restoreError?: string;
   };
-  // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条（条目编号）；未接入时缺省
+  // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条（条目编号），以及各处挑出来但用前核验没过、
+  // 被拦下的条目；未接入时缺省
   structuredMemory?: {
     opening: string[];
+    openingBlocked: string[];
     repair: string[][];
+    repairBlocked: string[][];
   };
   error?: string;
 }

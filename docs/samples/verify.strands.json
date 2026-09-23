@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "steps": [
+    { "name": "代码检查", "command": "ruff check", "cwd": "strands-py" },
+    { "name": "类型", "command": "mypy ./src ./tests_typing", "cwd": "strands-py" },
+    { "name": "测试", "command": "pytest tests", "cwd": "strands-py" }
+  ],
+  "timeoutMs": 900000
+}

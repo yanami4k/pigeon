@@ -462,7 +462,9 @@ async function runOnce(
         ? {
             structuredMemory: {
               opening: [...run.structuredMemory.opening],
+              openingBlocked: [...run.structuredMemory.openingBlocked],
               repair: run.structuredMemory.repair.map((round) => [...round]),
+              repairBlocked: run.structuredMemory.repairBlocked.map((round) => [...round]),
             },
           }
         : {}),

@@ -12,6 +12,9 @@ export type VerifyConfigSource = Static<typeof VerifyConfigSourceSchema>;
 export const VerifyStepSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 200 }),
   command: Type.String({ minLength: 1, maxLength: 4000 }),
+  // 在哪个目录下执行（相对工作区根、正斜杠，不得越出工作区；加法式可缺省，缺省即工作区根）。
+  // 工具报出的相对路径据此换算成相对工作区根的路径
+  cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
 });
 export type VerifyStep = Static<typeof VerifyStepSchema>;
 

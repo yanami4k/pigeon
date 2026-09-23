@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
-import { workspaceRelative } from "../state/structured-memory.ts";
+import { reportedPathOf, workspaceRelative } from "../state/structured-memory.ts";
 import {
   describeFingerprint,
   type Fingerprint,
@@ -308,6 +308,12 @@ export interface MemoryPick {
 
 export type EntryChecker = (entry: MemoryEntry, probe: WorkspaceProbe) => EntryCheck;
 
+// 一次挑选的结果：给出的条目，与参与核验而没过、被拦下的条目编号（跑批器据此判断这一组是否真的拿到了记忆）
+export interface MemorySelection {
+  picks: MemoryPick[];
+  blocked: string[];
+}
+
 // 核验、排序（改动越少越前，其次越新越前、出现越多越前）、同一指纹只留一条，取前 limit 条
 function verifiedTop(
   candidates: readonly MemoryEntry[],
@@ -315,8 +321,9 @@ function verifiedTop(
   limit: number,
   check: EntryChecker,
   taken: Set<string>
-): MemoryPick[] {
+): MemorySelection {
   const checked: MemoryPick[] = [];
+  const blocked: string[] = [];
   const recent = [...candidates]
     .sort((left, right) => right.latest.at - left.latest.at)
     .slice(0, CANDIDATE_LIMIT);
@@ -324,6 +331,8 @@ function verifiedTop(
     const result = check(entry, probe);
     if (result.ok) {
       checked.push({ entry, changedLines: result.changedLines });
+    } else {
+      blocked.push(entry.id);
     }
   }
   checked.sort(
@@ -342,7 +351,7 @@ function verifiedTop(
     taken.add(key);
     picks.push(pick);
   }
-  return picks;
+  return { picks, blocked };
 }
 
 // 锚点的当前路径：按版本历史追踪事发以来的改名
@@ -357,7 +366,7 @@ export function selectOpening(
   probe: WorkspaceProbe,
   check: EntryChecker = checkEntry,
   limit: number = STRUCTURED_MEMORY_LIMIT
-): MemoryPick[] {
+): MemorySelection {
   const files = new Set(referencedFiles);
   const candidates = entries.filter((entry) => files.has(currentAnchor(entry, probe)));
   return verifiedTop(candidates, probe, limit, check, new Set());
@@ -376,10 +385,10 @@ export function failingFingerprints(
         fingerprint: {
           ...fingerprint,
           ...(fingerprint.file !== undefined
-            ? { file: workspaceRelative(fingerprint.file, workspace) }
+            ? { file: reportedPathOf(fingerprint.file, workspace, step.cwd) }
             : {}),
           ...(fingerprint.to !== undefined
-            ? { to: workspaceRelative(fingerprint.to, workspace) }
+            ? { to: reportedPathOf(fingerprint.to, workspace, step.cwd) }
             : {}),
         },
       }))
@@ -393,7 +402,7 @@ export function selectRepair(
   probe: WorkspaceProbe,
   check: EntryChecker = checkEntry,
   limit: number = STRUCTURED_MEMORY_LIMIT
-): MemoryPick[] {
+): MemorySelection {
   const keys = new Set(failing.map((entry) => fingerprintKey(entry.stepName, entry.fingerprint)));
   const files = new Set(
     failing.flatMap((entry) =>
@@ -408,18 +417,24 @@ export function selectRepair(
   );
   const taken = new Set<string>();
   const first = verifiedTop(matched, probe, limit, check, taken);
-  return [...first, ...verifiedTop(byFile, probe, limit - first.length, check, taken)];
+  const second = verifiedTop(byFile, probe, limit - first.picks.length, check, taken);
+  return {
+    picks: [...first.picks, ...second.picks],
+    blocked: [...first.blocked, ...second.blocked],
+  };
 }
 
-// 固定挑选（决策 157）：调用方指定的条目按给定顺序取出（不存在的编号略过），核验与正式挑选相同
+// 固定挑选（决策 157）：调用方指定的条目按给定顺序取出，核验与正式挑选相同；核验没过的记为被拦下，
+// 视图里不存在的编号既未给出也不算被拦下
 export function selectFixed(
   entries: readonly MemoryEntry[],
   ids: readonly string[],
   probe: WorkspaceProbe,
   check: EntryChecker = checkEntry
-): MemoryPick[] {
+): MemorySelection {
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const picks: MemoryPick[] = [];
+  const blocked: string[] = [];
   for (const id of ids) {
     const entry = byId.get(id);
     if (entry === undefined) {
@@ -428,9 +443,11 @@ export function selectFixed(
     const result = check(entry, probe);
     if (result.ok) {
       picks.push({ entry, changedLines: result.changedLines });
+    } else {
+      blocked.push(entry.id);
     }
   }
-  return picks;
+  return { picks, blocked };
 }
 
 // ---- 推送文字 ----

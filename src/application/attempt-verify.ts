@@ -4,6 +4,7 @@
 // - attachAttemptVerification：主会话挂载——订阅 run.ended，Run 结束后在工作区根执行；验证在后台跑，
 //   失败只进内部错误清单，不改变 Run 结果；释放运行面前等在跑的验证收尾（其记录写进本会话文件）。
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import {
   CHECK_OUTPUT_LIMIT_BYTES,
   type CheckOutcome,
@@ -50,21 +51,28 @@ async function runVerifySteps(
   workspace: string
 ): Promise<{ outcome: CheckOutcome; steps: VerifyStepResult[] }> {
   const startedAt = Date.now();
-  const outcomes: Array<{ name: string; command: string; outcome: CheckOutcome }> = [];
+  const outcomes: Array<{ name: string; command: string; cwd?: string; outcome: CheckOutcome }> =
+    [];
   for (const step of verifyStepsOf(config)) {
     const outcome = await runCheckCommand({
       ...shellCommand(step.command),
-      cwd: workspace,
+      cwd: step.cwd !== undefined ? join(workspace, step.cwd) : workspace,
       timeoutMs: config.timeoutMs,
     });
-    outcomes.push({ name: step.name, command: step.command, outcome });
+    outcomes.push({
+      name: step.name,
+      command: step.command,
+      ...(step.cwd !== undefined ? { cwd: step.cwd } : {}),
+      outcome,
+    });
   }
-  const steps: VerifyStepResult[] = outcomes.map(({ name, outcome }) => ({
+  const steps: VerifyStepResult[] = outcomes.map(({ name, cwd, outcome }) => ({
     name,
     exitCode: outcome.exitCode,
     verdict: outcome.verdict,
     output: outcome.output,
     truncated: outcome.truncated,
+    ...(cwd !== undefined ? { cwd } : {}),
   }));
   const verdict = combineStepVerdicts(steps.map((step) => step.verdict));
   const firstFailed = steps.find((step) => step.verdict === "fail");

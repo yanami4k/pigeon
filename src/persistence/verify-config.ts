@@ -11,7 +11,7 @@ import {
   VerifyConfigFileSchema,
   type VerifyStep,
 } from "../state/attempt-config.ts";
-import { verifyStepsDisplay } from "../state/verify-steps.ts";
+import { normalizeStepCwd, verifyStepsDisplay } from "../state/verify-steps.ts";
 
 export class VerifyConfigError extends Error {}
 
@@ -33,7 +33,14 @@ export function loadVerifyConfig(
   }
   const timeoutMs = file.timeoutMs ?? defaultTimeoutMs;
   if (file.steps !== undefined) {
-    const steps = file.steps.map((step) => ({ name: step.name, command: step.command }));
+    const steps = file.steps.map((step) => {
+      const cwd = normalizeStepCwd(step.cwd);
+      return {
+        name: step.name,
+        command: step.command,
+        ...(typeof cwd === "string" ? { cwd } : {}),
+      };
+    });
     return { command: verifyStepsDisplay(steps), timeoutMs, source: "project", steps };
   }
   return { command: file.command ?? "", timeoutMs, source: "project" };
@@ -83,6 +90,11 @@ function readVerifyConfigFile(governanceRoot: string): VerifyConfigFile | undefi
   for (const step of file.steps ?? []) {
     if (step.name.trim() === "" || step.command.trim() === "") {
       throw new VerifyConfigError(`verify 配置的分步名或命令是空白：${path}`);
+    }
+    if (normalizeStepCwd(step.cwd) === null) {
+      throw new VerifyConfigError(
+        `verify 配置的分步执行目录须是工作区内的相对路径：${step.name}：${step.cwd ?? ""}：${path}`
+      );
     }
     if (names.has(step.name)) {
       throw new VerifyConfigError(`verify 配置的分步名重复：${step.name}：${path}`);
