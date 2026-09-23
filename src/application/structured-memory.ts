@@ -10,6 +10,7 @@
 import {
   checkEntry,
   type EntryChecker,
+  FixedSelectionError,
   failingFingerprints,
   type MemoryPick,
   type MemorySelection,
@@ -18,9 +19,6 @@ import {
   selectFixed,
   selectOpening,
   selectRepair,
-  taskReferencedFiles,
-  type WorkspaceProbe,
-  workspaceProbe,
 } from "../memory/structured-select.ts";
 import {
   buildMemoryEntries,
@@ -28,6 +26,11 @@ import {
   type MemoryEntry,
   StructuredMemoryCacheError,
 } from "../memory/structured-store.ts";
+import {
+  taskReferencedFiles,
+  type WorkspaceProbe,
+  workspaceProbe,
+} from "../memory/structured-workspace.ts";
 import type { SessionId } from "../state/ids.ts";
 import type {
   StructuredMemoryManifest,
@@ -67,6 +70,8 @@ export interface StructuredMemoryOpening {
 }
 
 export interface StructuredMemorySummary {
+  // 开关状态（区分"关闭"与"开启但一条没给"）
+  enabled: boolean;
   opening: string[];
   // 开局挑出来、但用前核验没过而被拦下的
   openingBlocked: string[];
@@ -178,6 +183,7 @@ export function createStructuredMemoryPush(input: {
   const warn = options.warn ?? stderrWarn;
   const warned = new Set<FaultPhase>();
   const summary: StructuredMemorySummary = {
+    enabled,
     opening: [],
     openingBlocked: [],
     repair: [],
@@ -243,6 +249,19 @@ export function createStructuredMemoryPush(input: {
       }
       try {
         const loaded = loadEntries();
+        if (options.fixed !== undefined) {
+          // 固定挑选的编号开局时一次核对（含回炉那一组）：不存在即调用方配置有误，响亮失败
+          const known = new Set(loaded.map((entry) => entry.id));
+          const unknown = [
+            ...(options.fixed.opening ?? []),
+            ...(options.fixed.repair ?? []),
+          ].filter((id) => !known.has(id));
+          if (unknown.length > 0) {
+            throw new FixedSelectionError(
+              `固定挑选指定的记忆条目不存在：${[...new Set(unknown)].join("、")}`
+            );
+          }
+        }
         const workspace = probeOf();
         const chosen =
           options.fixed !== undefined
@@ -255,10 +274,14 @@ export function createStructuredMemoryPush(input: {
                   workspace,
                   check
                 );
+        const section = renderOpeningSection(chosen.picks);
         summary.opening = ids(chosen.picks);
         summary.openingBlocked = [...chosen.blocked];
-        return { section: renderOpeningSection(chosen.picks), manifest: manifest(chosen) };
+        return { section, manifest: manifest(chosen) };
       } catch (error) {
+        if (error instanceof FixedSelectionError) {
+          throw error;
+        }
         report(error, "本次开局");
         return { section: "", manifest: manifest(NOTHING) };
       }
@@ -272,6 +295,7 @@ export function createStructuredMemoryPush(input: {
         return undefined;
       }
       let chosen: MemorySelection = NOTHING;
+      let text = "";
       try {
         const loaded = loadEntries();
         const workspace = probeOf();
@@ -294,14 +318,16 @@ export function createStructuredMemoryPush(input: {
                 workspace,
                 check
               );
+        // 成文也在兜底之内：事实字段损坏导致成文出错时，这一轮一条不给
+        text = renderRepairAppendix(chosen.picks);
       } catch (error) {
         report(error, `第 ${context.round} 轮回炉`);
         chosen = NOTHING;
+        text = "";
       }
       summary.repair.push(ids(chosen.picks));
       summary.repairBlocked.push([...chosen.blocked]);
       pendingRepair = { given: ids(chosen.picks), blocked: [...chosen.blocked] };
-      const text = renderRepairAppendix(chosen.picks);
       return text === "" ? undefined : text;
     },
     takeRepairIds() {
@@ -310,6 +336,7 @@ export function createStructuredMemoryPush(input: {
       return taken;
     },
     summary: () => ({
+      enabled,
       opening: [...summary.opening],
       openingBlocked: [...summary.openingBlocked],
       repair: summary.repair.map((round) => [...round]),

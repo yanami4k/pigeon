@@ -793,7 +793,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   });
 }
 
-// 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、是否撤回（预算耗尽而提前撤回另行标注）
 // 决策 134：结构化记忆给了哪几条（开局一组、回炉每轮一组）
 function structuredMemorySummaryText(
   summary: NonNullable<Awaited<ReturnType<typeof runHeadless>>["structuredMemory"]>,
@@ -831,6 +830,7 @@ function memoryListMain(argv: string[]): void {
   writeOut(json ? `${JSON.stringify(listing)}\n` : renderStructuredMemoryList(listing));
 }
 
+// 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、是否撤回（预算耗尽而提前撤回另行标注）
 function repairSummary(
   repair: NonNullable<Awaited<ReturnType<typeof runHeadless>>["repair"]>
 ): string {

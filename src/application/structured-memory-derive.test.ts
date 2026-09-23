@@ -78,7 +78,7 @@ const FIX_ALL = edits(
   ["src/d.ts", "= 0;", "= 0; // DONE"]
 );
 
-test("红转绿：格式、类型、分层、他处测试失败后修好各记一条；本步新增的题面测试一开始不过不记；测试步输出无法解析不记，非测试步记未识别", async () => {
+test("红转绿：格式、类型、分层、他处测试失败后修好各记一条；本步新增的题面测试一开始不过不记；测试步或类型未知的步骤输出无法解析不记", async () => {
   const repo = makeMemoryRepo(BASE_FILES);
   try {
     const session = await runStep(repo, [
@@ -100,15 +100,6 @@ test("红转绿：格式、类型、分层、他处测试失败后修好各记�
           tool: "dependency-cruiser",
           what: "layer-rule",
           file: "src/state/x.ts",
-          names: [],
-        },
-        {
-          kind: "regression",
-          step: "构建",
-          stepKind: "unknown",
-          tool: "unrecognized",
-          what: null,
-          file: null,
           names: [],
         },
         {

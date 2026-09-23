@@ -20,7 +20,7 @@ test at src\state\zz-probe.test.ts:5:1
   
   'fail' !== 'pass'
   
-      at TestContext.<anonymous> [90m(file:///D:/code/pigeon-harness/.claude/worktrees/structured-memory/[39msrc/state/zz-probe.test.ts:6:10[90m)[39m
+      at TestContext.<anonymous> [90m(file:///repo/[39msrc/state/zz-probe.test.ts:6:10[90m)[39m
   [90m    at Test.runInAsyncScope (node:async_hooks:214:14)[39m
   [90m    at Test.run (node:internal/test_runner/test:1106:25)[39m
   [90m    at Test.start (node:internal/test_runner/test:1003:17)[39m
@@ -36,7 +36,7 @@ test at src\state\zz-probe.test.ts:5:1
 test at src\state\zz-probe.test.ts:14:3
 [31m✖ 失败步骤附输出末尾 [90m(0.2027ms)[39m[39m
   Error: 缺少输出末尾
-      at TestContext.<anonymous> [90m(file:///D:/code/pigeon-harness/.claude/worktrees/structured-memory/[39msrc/state/zz-probe.test.ts:15:11[90m)[39m
+      at TestContext.<anonymous> [90m(file:///repo/[39msrc/state/zz-probe.test.ts:15:11[90m)[39m
   [90m    at Test.runInAsyncScope (node:async_hooks:214:14)[39m
   [90m    at Test.run (node:internal/test_runner/test:1106:25)[39m
   [90m    at Test.start (node:internal/test_runner/test:1003:17)[39m

@@ -124,6 +124,8 @@ export interface EvalResultLine {
   // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条（条目编号），以及各处挑出来但用前核验没过、
   // 被拦下的条目；未接入时缺省
   structuredMemory?: {
+    // 开关状态：区分"关闭"与"开启但一条没给"
+    enabled: boolean;
     opening: string[];
     openingBlocked: string[];
     repair: string[][];

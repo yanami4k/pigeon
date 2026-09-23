@@ -289,6 +289,7 @@ test("评测跑批接入结构化记忆：结果行带开局给了哪几条、�
     assert.ok(row !== undefined);
     // 输出目录里还没有以往的摩擦：开局与第 1 轮回炉都没给
     assert.deepEqual(row.structuredMemory, {
+      enabled: true,
       opening: [],
       openingBlocked: [],
       repair: [[]],

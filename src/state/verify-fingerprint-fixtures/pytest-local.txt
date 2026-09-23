@@ -1,6 +1,6 @@
 [1m============================= test session starts =============================[0m
 platform win32 -- Python 3.13.2, pytest-9.1.1, pluggy-1.6.0
-rootdir: C:\Users\22895\.claude\jobs\f9706aa6\tmp\pyfmt
+rootdir: /repo
 collected 5 items
 
 tests\strands\agent\test_demo.py [32m.[0m[31mF[0m[32m.[0m[31mF[0m[31mF[0m[31m                                   [100%][0m

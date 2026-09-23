@@ -8,12 +8,14 @@
 // 改动文件的取法：编辑工具调用（intent 的路径参数，且回执为已执行、未出错）、命令执行回执里的文件变化，外加调用方从快照之间的
 // 差异算出的文件（git 在 IO 层，本模块只收结果）；三者按时间合并。工具报错、围栏拒绝、每步改动摘要与读过哪些文件都不记。
 // 纯函数，无 IO。
-import type { SessionId } from "./ids.ts";
+import { Type } from "typebox";
+import { type SessionId, SessionIdSchema } from "./ids.ts";
 import type { MaterializedSession } from "./materialize.ts";
 import { lastGateVerificationOf, repairRoundsOf, repairStepOutcome } from "./repair-step.ts";
 import {
   type Fingerprint,
   fingerprintKey,
+  MAX_FINGERPRINTS_PER_STEP,
   parseStepOutput,
   type StepFingerprints,
   type VerifyStepKind,
@@ -22,23 +24,65 @@ import { LEGACY_VERIFY_STEP_NAME, recordStepsOf, underStepCwd } from "./verify-s
 
 export type FrictionKind = "regression" | "reverted";
 
+// 合法的毫秒时间戳（Date 能表示的范围），缓存里读回的事实据此校验
+const TimestampSchema = Type.Integer({ minimum: 0, maximum: 8_640_000_000_000_000 });
+
+const FingerprintSchema = Type.Object({
+  tool: Type.Union(
+    [
+      "tsc",
+      "mypy",
+      "dependency-cruiser",
+      "biome",
+      "ruff",
+      "node-test",
+      "pytest",
+      "unrecognized",
+    ].map((tool) => Type.Literal(tool))
+  ),
+  code: Type.Optional(Type.String()),
+  rule: Type.Optional(Type.String()),
+  test: Type.Optional(Type.String()),
+  file: Type.Optional(Type.String()),
+  to: Type.Optional(Type.String()),
+  names: Type.Array(Type.String()),
+});
+
+// 一条摩擦事实（缓存按本 schema 校验，不符即整份重建）
+export const FrictionFactSchema = Type.Object({
+  kind: Type.Union([Type.Literal("regression"), Type.Literal("reverted")]),
+  sessionId: SessionIdSchema,
+  stepName: Type.String({ minLength: 1 }),
+  stepKind: Type.Union(
+    ["type", "test", "format", "lint", "layer", "unknown"].map((kind) => Type.Literal(kind))
+  ),
+  fingerprint: FingerprintSchema,
+  // 指纹键（步名、工具、错误码或规则或测试名、文件），合并用
+  fingerprintKey: Type.String({ minLength: 1 }),
+  // 事发时刻：红转绿为转绿那次验证的时间，撤回为最后一次验证的时间（改动幅度从这里起算）
+  at: TimestampSchema,
+  // 执行验证的工作区（绝对路径；改动文件与报错路径都相对它）
+  workspace: Type.String({ minLength: 1 }),
+  // 红转绿：变红那次验证的时间、变红时本步已改动的文件、之后回炉各轮补改的文件
+  redAt: Type.Optional(TimestampSchema),
+  changedAtRed: Type.Optional(Type.Array(Type.String())),
+  repairFiles: Type.Optional(Type.Array(Type.String())),
+  // 撤回：本步尝试改动过的文件
+  attemptedFiles: Type.Optional(Type.Array(Type.String())),
+});
+
 export interface FrictionFact {
   kind: FrictionKind;
   sessionId: SessionId;
   stepName: string;
   stepKind: VerifyStepKind;
   fingerprint: Fingerprint;
-  // 指纹键（步名、工具、错误码或规则或测试名、文件），合并用
   fingerprintKey: string;
-  // 事发时刻：红转绿为转绿那次验证的时间，撤回为最后一次验证的时间（改动幅度从这里起算）
   at: number;
-  // 执行验证的工作区（绝对路径；改动文件与报错路径都相对它）
   workspace: string;
-  // 红转绿：变红那次验证的时间、变红时本步已改动的文件、之后回炉各轮补改的文件
   redAt?: number;
   changedAtRed?: string[];
   repairFiles?: string[];
-  // 撤回：本步尝试改动过的文件
   attemptedFiles?: string[];
 }
 
@@ -161,6 +205,27 @@ interface ParsedStep {
   name: string;
   verdict: "pass" | "fail" | "undetermined";
   parsed: StepFingerprints;
+  // 失败清单可能不全：输出被截断，或指纹数达到上限。此时不能凭"某条不在清单里"认定它已修好
+  partial: boolean;
+}
+
+// 同一次验证里指纹键相同的多行报错合为一个指纹，名字合并（出现次数按验证失败事件计，不按报错行数）
+function dedupeFingerprints(stepName: string, fingerprints: readonly Fingerprint[]): Fingerprint[] {
+  const byKey = new Map<string, Fingerprint>();
+  for (const entry of fingerprints) {
+    const key = fingerprintKey(stepName, entry);
+    const existing = byKey.get(key);
+    if (existing === undefined) {
+      byKey.set(key, { ...entry, names: [...entry.names] });
+      continue;
+    }
+    for (const name of entry.names) {
+      if (!existing.names.includes(name)) {
+        existing.names.push(name);
+      }
+    }
+  }
+  return [...byKey.values()];
 }
 
 interface ParsedVerification {
@@ -183,8 +248,9 @@ function parseVerification(
       ...(command !== undefined ? { command } : {}),
       output: step.output,
     });
+    const partial = step.truncated || parsed.fingerprints.length >= MAX_FINGERPRINTS_PER_STEP;
     // 报错路径统一为相对工作区根（在子目录里执行的步骤补上执行目录）
-    parsed.fingerprints = parsed.fingerprints.map((entry) => ({
+    const located = parsed.fingerprints.map((entry) => ({
       ...entry,
       ...(entry.file !== undefined
         ? { file: reportedPathOf(entry.file, record.workspace, step.cwd) }
@@ -193,43 +259,46 @@ function parseVerification(
         ? { to: reportedPathOf(entry.to, record.workspace, step.cwd) }
         : {}),
     }));
-    steps.set(step.name, { name: step.name, verdict: step.verdict, parsed });
+    parsed.fingerprints = dedupeFingerprints(step.name, located);
+    steps.set(step.name, { name: step.name, verdict: step.verdict, parsed, partial });
   }
   return { at: record.timestamp, workspace: record.workspace, steps };
 }
 
-// 某步变红时算作摩擦的指纹：测试步只算题面以外（本步没有新增或修改过的测试文件）的失败用例，输出无法解析即不算；
-// 其余类型一律算（无法解析的记未识别指纹）
-function countedFingerprints(step: ParsedStep, stepFiles: ReadonlySet<string>): Fingerprint[] {
+// 某步在一次验证里算作摩擦的指纹。无法判断就不猜：测试步输出无法解析、或步骤类型未知且输出无法解析，都不算；
+// 测试步只算题面以外的失败用例（题面测试文件见 deriveSessionFrictions）；格式、类型、分层、代码检查一律算
+// （按关键字认出类型、但输出无法解析的，记未识别指纹）
+function countedFingerprints(step: ParsedStep, taskTestFiles: ReadonlySet<string>): Fingerprint[] {
   if (step.verdict !== "fail") {
+    return [];
+  }
+  if (!step.parsed.recognized && (step.parsed.kind === "test" || step.parsed.kind === "unknown")) {
     return [];
   }
   if (step.parsed.kind !== "test") {
     return step.parsed.fingerprints;
   }
-  if (!step.parsed.recognized) {
-    return [];
-  }
   return step.parsed.fingerprints.filter(
-    (entry) => entry.file === undefined || !stepFiles.has(entry.file)
+    (entry) => entry.file === undefined || !taskTestFiles.has(entry.file)
   );
 }
 
-// 这一步在这次验证里是否已把这些指纹修好：非测试步看整步通过；测试步看这些用例不再失败（输出须能解析，否则不算修好）
-function resolved(step: ParsedStep | undefined, open: readonly Fingerprint[]): boolean {
+// 这一次验证里，待修的哪些指纹已修好：整步通过即全部修好；测试步输出完整（未截断、未达指纹上限）且能解析时，
+// 不在失败清单里的即修好；其余情况一条都不认
+function resolvedKeys(step: ParsedStep | undefined, open: ReadonlyMap<string, unknown>): string[] {
   if (step === undefined || step.verdict === "undetermined") {
-    return false;
+    return [];
   }
   if (step.verdict === "pass") {
-    return true;
+    return [...open.keys()];
   }
-  if (step.parsed.kind !== "test" || !step.parsed.recognized) {
-    return false;
+  if (step.parsed.kind !== "test" || !step.parsed.recognized || step.partial) {
+    return [];
   }
   const failing = new Set(
     step.parsed.fingerprints.map((entry) => fingerprintKey(step.name, entry))
   );
-  return open.every((entry) => !failing.has(fingerprintKey(step.name, entry)));
+  return [...open.keys()].filter((key) => !failing.has(key));
 }
 
 // 本会话里验证门写下的各步命令（取自 run.started 冻结的验证配置），供识别不了工具时按命令推断步骤类型
@@ -248,6 +317,10 @@ function stepCommands(session: Pick<MaterializedSession, "runStarteds">): Map<st
 export interface DeriveOptions {
   // 调用方从快照之间的差异算出的文件改动（没有快照或 git 不可用时缺省）
   snapshotChanges?: readonly FileChangeEvent[];
+  // 开工时已是脏状态的文件：首个快照的改前基线相对 HEAD 的差异（例如跑批器预置、尚未提交的人写测试）
+  dirtyAtStart?: readonly string[];
+  // 题面直接指到的文件（由调用方从账本里的题面原文按开局挑选的同一套规则解析）
+  taskFiles?: readonly string[];
 }
 
 // 一个会话（回炉开启的一步）派生出的全部摩擦事实；回炉未开启返回空
@@ -275,46 +348,50 @@ export function deriveSessionFrictions(
   const commands = stepCommands(session);
   const verifications = gates.map((record) => parseVerification(record, commands));
   const stepFiles = new Set(filesIn(changes, undefined, undefined));
+  // 题面测试文件：本步改动过的文件、开工时已是脏状态的文件、题面直接指到的文件三者的并集——其中的测试失败都属题面，不记
+  const taskTestFiles = new Set([
+    ...stepFiles,
+    ...(options.dirtyAtStart ?? []).map((file) => workspaceRelative(file, workspace)),
+    ...(options.taskFiles ?? []).map((file) => workspaceRelative(file, workspace)),
+  ]);
   const facts: FrictionFact[] = [];
 
-  // 红转绿：按步名逐次扫描，一段"变红到转绿"记一次
+  // 红转绿：按步名、按指纹键逐次追踪。某指纹变红即开始待修，其后第一次认定修好即记一条；
+  // 待修期间新出现的题面以外的失败另行追踪，同一次验证里修好旧的与新变红的互不影响
   const stepNames = [...new Set(verifications.flatMap((entry) => [...entry.steps.keys()]))];
   for (const name of stepNames) {
-    let open: { index: number; fingerprints: Fingerprint[] } | undefined;
+    const open = new Map<string, { index: number; fingerprint: Fingerprint }>();
     for (const [index, verification] of verifications.entries()) {
       const step = verification.steps.get(name);
-      if (open !== undefined) {
-        if (!resolved(step, open.fingerprints)) {
+      for (const key of resolvedKeys(step, open)) {
+        const pending = open.get(key);
+        if (pending === undefined) {
           continue;
         }
-        const red = verifications[open.index] as ParsedVerification;
-        const changedAtRed = filesIn(changes, undefined, red.at);
-        const repairFiles = filesIn(changes, red.at, verification.at);
-        const kind = red.steps.get(name)?.parsed.kind ?? "unknown";
-        for (const fingerprint of open.fingerprints) {
-          facts.push({
-            kind: "regression",
-            sessionId: session.sessionId,
-            stepName: name,
-            stepKind: kind,
-            fingerprint,
-            fingerprintKey: fingerprintKey(name, fingerprint),
-            at: verification.at,
-            workspace: verification.workspace,
-            redAt: red.at,
-            changedAtRed,
-            repairFiles,
-          });
-        }
-        open = undefined;
-        continue;
+        open.delete(key);
+        const red = verifications[pending.index] as ParsedVerification;
+        facts.push({
+          kind: "regression",
+          sessionId: session.sessionId,
+          stepName: name,
+          stepKind: red.steps.get(name)?.parsed.kind ?? "unknown",
+          fingerprint: pending.fingerprint,
+          fingerprintKey: key,
+          at: verification.at,
+          workspace: verification.workspace,
+          redAt: red.at,
+          changedAtRed: filesIn(changes, undefined, red.at),
+          repairFiles: filesIn(changes, red.at, verification.at),
+        });
       }
       if (step === undefined) {
         continue;
       }
-      const counted = countedFingerprints(step, stepFiles);
-      if (counted.length > 0) {
-        open = { index, fingerprints: counted };
+      for (const fingerprint of countedFingerprints(step, taskTestFiles)) {
+        const key = fingerprintKey(name, fingerprint);
+        if (!open.has(key)) {
+          open.set(key, { index, fingerprint });
+        }
       }
     }
   }

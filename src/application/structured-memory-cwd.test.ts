@@ -177,6 +177,7 @@ test("留痕：run.started 如实记下开局与每轮回炉实际给出的条�
     assert.deepEqual(fixed.runStarteds[1]?.payload.structuredMemory?.repair, []);
     assert.deepEqual(fixed.runStarteds[1]?.payload.structuredMemory?.repairBlocked, [onB.id]);
     assert.deepEqual(fixed.result.structuredMemory, {
+      enabled: true,
       opening: [],
       openingBlocked: [onA.id],
       repair: [[]],

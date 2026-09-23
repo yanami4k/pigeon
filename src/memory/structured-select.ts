@@ -6,10 +6,8 @@
 //   分层违规的两端模块文件仍存在。文件都按版本历史里的改名追踪。任一不过即不给。事发以来锚点文件的改动幅度只用于排序，
 //   改得越少越靠前；不按"多久没被用到"淘汰。同一指纹只给一条。
 // 不解析代码：导入语句按文本匹配、名字按文本查找。
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, posix } from "node:path";
-import { reportedPathOf, workspaceRelative } from "../state/structured-memory.ts";
+
+import { reportedPathOf } from "../state/structured-memory.ts";
 import {
   describeFingerprint,
   type Fingerprint,
@@ -18,6 +16,7 @@ import {
 } from "../state/verify-fingerprint.ts";
 import type { VerifyStepResult } from "../state/verify-steps.ts";
 import type { MemoryEntry } from "./structured-store.ts";
+import type { WorkspaceProbe } from "./structured-workspace.ts";
 
 // 开局与回炉各自最多给几条（决策 135）
 export const STRUCTURED_MEMORY_LIMIT = 2;
@@ -28,241 +27,6 @@ const ENTRY_TEXT_LIMIT = 400;
 const CANDIDATE_LIMIT = 50;
 
 export const STRUCTURED_MEMORY_DISCLAIMER = "过去发生的事实，仅供参考；与当前代码冲突时以代码为准";
-
-// 工作区的 git 查询（改名追踪、改动幅度、仓库文件清单）；不是 git 工作区或 git 不可用时各查询按"查不到"处理
-export interface WorkspaceProbe {
-  root: string;
-  exists(file: string): boolean;
-  read(file: string): string | undefined;
-  // 事发以来（毫秒时间戳）这个文件被改名成了什么（沿改名链走到底）；没改过名返回原路径
-  renamedSince(file: string, since: number): string;
-  // 事发以来这个文件改了多少行（已提交的加未提交的）
-  changedLinesSince(file: string, since: number): number;
-  // 仓库里的文件清单（相对工作区根、正斜杠）
-  files(): readonly string[];
-}
-
-function runGit(root: string, args: string[]): string | undefined {
-  try {
-    return execFileSync("git", args, {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-function sinceArg(since: number): string {
-  return `--since=@${Math.max(0, Math.floor(since / 1000) - 1)}`;
-}
-
-interface RenameRecord {
-  // 提交时间（秒）
-  at: number;
-  from: string;
-  to: string;
-}
-
-export function workspaceProbe(root: string): WorkspaceProbe {
-  let fileList: string[] | undefined;
-  let renames: RenameRecord[] | undefined;
-  // 版本历史里的全部改名（按时间正序），一次读出
-  const renameLog = (): RenameRecord[] => {
-    if (renames !== undefined) {
-      return renames;
-    }
-    renames = [];
-    let at = 0;
-    const log = runGit(root, [
-      "log",
-      "--reverse",
-      "--diff-filter=R",
-      "-M",
-      "--name-status",
-      "--format=%x01%ct",
-    ]);
-    for (const line of (log ?? "").split(/\r?\n/)) {
-      if (line.startsWith("\u0001")) {
-        at = Number.parseInt(line.slice(1), 10) || 0;
-        continue;
-      }
-      const [status, from, to] = line.split("\t");
-      if (status?.startsWith("R") === true && from !== undefined && to !== undefined) {
-        renames.push({ at, from, to });
-      }
-    }
-    return renames;
-  };
-  const exists = (file: string): boolean => {
-    const full = join(root, file);
-    return existsSync(full) && statSync(full).isFile();
-  };
-  return {
-    root,
-    exists,
-    read: (file) => (exists(file) ? readFileSync(join(root, file), "utf8") : undefined),
-    renamedSince: (file, since) => {
-      const floor = Math.floor(since / 1000) - 1;
-      let current = file;
-      for (const rename of renameLog()) {
-        if (rename.at >= floor && rename.from === current) {
-          current = rename.to;
-        }
-      }
-      return current;
-    },
-    changedLinesSince: (file, since) => {
-      const sum = (text: string | undefined): number =>
-        (text ?? "")
-          .split(/\r?\n/)
-          .map((line) => line.split("\t"))
-          .reduce(
-            (total, [added, removed]) =>
-              total +
-              (Number.parseInt(added ?? "", 10) || 0) +
-              (Number.parseInt(removed ?? "", 10) || 0),
-            0
-          );
-      return (
-        sum(runGit(root, ["log", sinceArg(since), "--numstat", "--format=", "--", file])) +
-        sum(runGit(root, ["diff", "--numstat", "HEAD", "--", file]))
-      );
-    },
-    files: () => {
-      fileList ??= (runGit(root, ["ls-files", "--cached", "--others", "--exclude-standard"]) ?? "")
-        .split(/\r?\n/)
-        .filter((file) => file !== "" && !file.startsWith(".pigeon/"));
-      return fileList;
-    },
-  };
-}
-
-// ---- 题面指到的文件 ----
-
-// 路径样的记号：ASCII 路径字符组成、以扩展名结尾；中文与标点天然断开记号
-const PATH_TOKEN = /[\w@.\\/-]*[\w@-]\.[A-Za-z0-9]{1,8}/g;
-const JS_IMPORT = [
-  /\bfrom\s+["']([^"'\n]+)["']/g,
-  /\bimport\s+["']([^"'\n]+)["']/g,
-  /\bimport\s*\(\s*["']([^"'\n]+)["']\s*\)/g,
-  /\brequire\s*\(\s*["']([^"'\n]+)["']\s*\)/g,
-];
-const PY_FROM_IMPORT = /^\s*from\s+(\.*[\w.]*)\s+import\b/gm;
-const PY_IMPORT = /^\s*import\s+([\w.]+(?:\s*,\s*[\w.]+)*)/gm;
-const JS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
-
-interface Mention {
-  index: number;
-  file: string;
-}
-
-// 相对导入：以所附代码所在文件（题面里在它之前最近提到的那个文件）为基准；带扩展名的原样，不带的补常见扩展名与 index
-function resolveRelative(
-  probe: WorkspaceProbe,
-  baseFile: string | undefined,
-  spec: string
-): string[] {
-  const base = baseFile !== undefined ? posix.dirname(baseFile) : ".";
-  const joined = posix.normalize(posix.join(base, spec));
-  if (joined.startsWith("..")) {
-    return [];
-  }
-  const candidates = [
-    joined,
-    ...JS_EXTENSIONS.map((extension) => `${joined}${extension}`),
-    ...JS_EXTENSIONS.map((extension) => `${joined}/index${extension}`),
-    // TS 里 .js 后缀的导入指向同名 .ts
-    ...(joined.endsWith(".js") ? [`${joined.slice(0, -3)}.ts`, `${joined.slice(0, -3)}.tsx`] : []),
-  ];
-  return candidates.filter((file) => probe.exists(file)).slice(0, 1);
-}
-
-// Python 点号模块：a.b.c → 仓库里以 a/b/c.py 或 a/b/c/__init__.py 结尾的文件（相对导入以基准文件所在目录起算）
-function resolvePython(
-  probe: WorkspaceProbe,
-  baseFile: string | undefined,
-  spec: string
-): string[] {
-  const dots = /^\.*/.exec(spec)?.[0].length ?? 0;
-  const modulePath = spec
-    .slice(dots)
-    .split(".")
-    .filter((part) => part !== "")
-    .join("/");
-  if (dots > 0) {
-    let dir = baseFile !== undefined ? posix.dirname(baseFile) : ".";
-    for (let level = 1; level < dots; level += 1) {
-      dir = posix.dirname(dir);
-    }
-    const target = modulePath === "" ? dir : posix.join(dir, modulePath);
-    return [`${target}.py`, `${target}/__init__.py`]
-      .filter((file) => probe.exists(file))
-      .slice(0, 1);
-  }
-  if (modulePath === "") {
-    return [];
-  }
-  const suffixes = [`${modulePath}.py`, `${modulePath}/__init__.py`];
-  return probe
-    .files()
-    .filter((file) => suffixes.some((suffix) => file === suffix || file.endsWith(`/${suffix}`)));
-}
-
-// 题面直接指到的仓库内文件：出现的路径，加上所附代码里导入语句解析出的文件（按出现顺序、去重）
-export function taskReferencedFiles(task: string, probe: WorkspaceProbe): string[] {
-  const found: string[] = [];
-  const add = (file: string) => {
-    if (!found.includes(file)) {
-      found.push(file);
-    }
-  };
-  // 提到的路径都可作所附代码的基准（题面附的测试文件在这一步开始时可能还不在工作区里），存在的才算指到
-  const mentions: Mention[] = [];
-  for (const match of task.matchAll(PATH_TOKEN)) {
-    const file = workspaceRelative(match[0], probe.root);
-    if (file === "" || file.startsWith("../") || !file.includes("/")) {
-      if (file !== "" && probe.exists(file)) {
-        add(file);
-      }
-      continue;
-    }
-    mentions.push({ index: match.index ?? 0, file });
-    if (probe.exists(file)) {
-      add(file);
-    }
-  }
-  const baseAt = (index: number): string | undefined =>
-    mentions.filter((mention) => mention.index < index).at(-1)?.file;
-  for (const pattern of JS_IMPORT) {
-    for (const match of task.matchAll(pattern)) {
-      const spec = match[1] ?? "";
-      if (spec.startsWith(".")) {
-        for (const file of resolveRelative(probe, baseAt(match.index ?? 0), spec)) {
-          add(file);
-        }
-      } else if (probe.exists(spec)) {
-        add(spec);
-      }
-    }
-  }
-  for (const match of task.matchAll(PY_FROM_IMPORT)) {
-    for (const file of resolvePython(probe, baseAt(match.index ?? 0), match[1] ?? "")) {
-      add(file);
-    }
-  }
-  for (const match of task.matchAll(PY_IMPORT)) {
-    for (const spec of (match[1] ?? "").split(",")) {
-      for (const file of resolvePython(probe, baseAt(match.index ?? 0), spec.trim())) {
-        add(file);
-      }
-    }
-  }
-  return found;
-}
 
 // ---- 用前核验 ----
 
@@ -288,9 +52,13 @@ export function checkEntry(entry: MemoryEntry, probe: WorkspaceProbe): EntryChec
     if (content === undefined) {
       return { ok: false, reason: `报错所在文件已不存在：${fingerprint.file}`, changedLines: 0 };
     }
-    const missing = fingerprint.names.find((name) => !content.includes(name));
-    if (missing !== undefined) {
-      return { ok: false, reason: `名字 ${missing} 已不在 ${errorFile} 里`, changedLines: 0 };
+    // 同一指纹合并了几处报错的名字：任一仍在即算通过
+    if (fingerprint.names.length > 0 && !fingerprint.names.some((name) => content.includes(name))) {
+      return {
+        ok: false,
+        reason: `名字 ${fingerprint.names.join("、")} 都已不在 ${errorFile} 里`,
+        changedLines: 0,
+      };
     }
   }
   if (fingerprint.to !== undefined && !probe.exists(probe.renamedSince(fingerprint.to, since))) {
@@ -335,7 +103,15 @@ function verifiedTop(
       blocked.push(entry.id);
     }
   }
-  checked.sort(
+  // 同一指纹只给一条，跨种类也一样：先在同指纹的候选里挑代表——红转绿优先（带修法），同种类取最近一次，再比改动幅度
+  const representative = new Map<string, MemoryPick>();
+  for (const pick of checked) {
+    const current = representative.get(pick.entry.fingerprintKey);
+    if (current === undefined || betterRepresentative(pick, current)) {
+      representative.set(pick.entry.fingerprintKey, pick);
+    }
+  }
+  const ranked = [...representative.values()].sort(
     (left, right) =>
       left.changedLines - right.changedLines ||
       right.entry.latest.at - left.entry.latest.at ||
@@ -343,15 +119,24 @@ function verifiedTop(
       left.entry.id.localeCompare(right.entry.id)
   );
   const picks: MemoryPick[] = [];
-  for (const pick of checked) {
-    const key = `${pick.entry.kind}\u0000${pick.entry.fingerprintKey}`;
-    if (picks.length >= limit || taken.has(key)) {
+  for (const pick of ranked) {
+    if (picks.length >= limit || taken.has(pick.entry.fingerprintKey)) {
       continue;
     }
-    taken.add(key);
+    taken.add(pick.entry.fingerprintKey);
     picks.push(pick);
   }
   return { picks, blocked };
+}
+
+function betterRepresentative(candidate: MemoryPick, current: MemoryPick): boolean {
+  if (candidate.entry.kind !== current.entry.kind) {
+    return candidate.entry.kind === "regression";
+  }
+  if (candidate.entry.latest.at !== current.entry.latest.at) {
+    return candidate.entry.latest.at > current.entry.latest.at;
+  }
+  return candidate.changedLines < current.changedLines;
 }
 
 // 锚点的当前路径：按版本历史追踪事发以来的改名
@@ -403,7 +188,12 @@ export function selectRepair(
   check: EntryChecker = checkEntry,
   limit: number = STRUCTURED_MEMORY_LIMIT
 ): MemorySelection {
-  const keys = new Set(failing.map((entry) => fingerprintKey(entry.stepName, entry.fingerprint)));
+  // 未识别的指纹没有错误码、测试名与文件，谈不上"对上"：只参加"涉及文件"那一档
+  const keys = new Set(
+    failing
+      .filter((entry) => entry.fingerprint.tool !== "unrecognized")
+      .map((entry) => fingerprintKey(entry.stepName, entry.fingerprint))
+  );
   const files = new Set(
     failing.flatMap((entry) =>
       [entry.fingerprint.file, entry.fingerprint.to].filter(
@@ -424,8 +214,11 @@ export function selectRepair(
   };
 }
 
-// 固定挑选（决策 157）：调用方指定的条目按给定顺序取出，核验与正式挑选相同；核验没过的记为被拦下，
-// 视图里不存在的编号既未给出也不算被拦下
+// 固定挑选指定了视图里不存在的编号：调用方配置有误，响亮失败
+export class FixedSelectionError extends Error {}
+
+// 固定挑选（决策 157）：调用方指定的条目按给定顺序取出（同一编号去重，数量由调用方定、不受"最多 2 条"限制），
+// 核验与正式挑选相同，核验没过的记为被拦下；指定的编号不存在即抛 FixedSelectionError
 export function selectFixed(
   entries: readonly MemoryEntry[],
   ids: readonly string[],
@@ -435,10 +228,10 @@ export function selectFixed(
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const picks: MemoryPick[] = [];
   const blocked: string[] = [];
-  for (const id of ids) {
+  for (const id of new Set(ids)) {
     const entry = byId.get(id);
     if (entry === undefined) {
-      continue;
+      throw new FixedSelectionError(`固定挑选指定的记忆条目不存在：${id}`);
     }
     const result = check(entry, probe);
     if (result.ok) {

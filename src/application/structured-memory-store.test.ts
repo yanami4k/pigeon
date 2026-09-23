@@ -122,6 +122,27 @@ test("缓存：与账本不一致时以账本为准——签名对不上的会�
   }
 });
 
+test("缓存：事实按真实 schema 校验——某条事实的时间字段损坏（签名仍相符）即整份重建，结果与账本一致", async () => {
+  const repo = makeMemoryRepo(FILES);
+  try {
+    const sessionId = await step(repo, BREAK_AND_FIX);
+    const truth = loadStructuredMemory(repo.root);
+    const cachePath = structuredMemoryCachePath(repo.root);
+    const cache = JSON.parse(readFileSync(cachePath, "utf8")) as {
+      sessions: Record<string, { facts: Array<Record<string, unknown>> }>;
+    };
+    const fact = cache.sessions[sessionId]?.facts[0];
+    assert.ok(fact !== undefined);
+    fact.at = "昨天";
+    writeFileSync(cachePath, JSON.stringify(cache));
+    const reloaded = loadStructuredMemory(repo.root);
+    assert.equal(reloaded.derived, 1);
+    assert.deepEqual(reloaded.facts, truth.facts);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("合并与计数：同一文件、同一指纹的多条合并为一条，附出现次数，以最近一次为准；按锚点展开", async () => {
   const repo = makeMemoryRepo(FILES);
   try {

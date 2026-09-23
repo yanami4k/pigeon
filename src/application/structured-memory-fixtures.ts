@@ -5,7 +5,9 @@
 // - 分层：含 LAYER_BAD:<被依赖端> 的文件 → 依赖巡航的 error layer-rule: 文件 → 被依赖端；
 // - 测试：*.test.ts 里每行 "// FAILS_UNLESS <文件> <标记> <测试名>"：<文件> 不含 <标记> 即该测试失败（node:test spec 汇总）；
 // - 构建：含 BUILD_BAD 的文件 → 无法解析的输出（非测试步）；
-// - 集成测试：含 ITEST_BAD 的文件 → 无法解析的输出（测试步）。
+// - 集成测试：含 ITEST_BAD 的文件 → 无法解析的输出（测试步）；
+// - lint：含 LINT_BAD 的文件 → 无法解析的输出（按关键字认作代码检查步）；
+// - 子测试：*.py 里每行 "# FAILS_UNLESS <文件> <标记> <测试名>" → pytest 短汇总（路径相对本步执行目录）。
 // 有报错即退出 1，否则退出 0。
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -65,6 +67,9 @@ if (step === "格式") {
     for (const test of failing) out.push("FAILED " + test.file + "::" + test.name + " - AssertionError: assert False");
     out.push("========================= " + failing.length + " failed, 1 passed in 0.10s =========================");
   }
+} else if (step === "lint") {
+  // 类型按关键字认作代码检查，输出无法解析（记未识别指纹）
+  for (const file of files) if (read(file).includes("LINT_BAD")) out.push("internal linter crash while visiting a node");
 } else if (step === "构建") {
   for (const file of files) if (read(file).includes("BUILD_BAD")) out.push("make: *** [all] Error 2 (" + file + ")");
 } else if (step === "集成测试") {

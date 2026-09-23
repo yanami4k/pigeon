@@ -299,26 +299,25 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           approvalMode: delegated.approvalMode,
         }
       : { allow: toolNames, deny: [], approvalMode: deps.yolo ? "yolo" : "prompt" };
-  // run.started 的附加摘要：MCP 工具集与 server 状态（有 server 时），加上本 Run 作为回炉轮收到的结构化记忆条目
+  // run.started 的附加摘要：MCP 工具集与 server 状态（有 server 时）
   const mcpSummary = mcp !== undefined && mcp.connections.length > 0 ? mcp : undefined;
+  const runStartedExtras = mcpSummary !== undefined ? () => mcpSummary.summary() : undefined;
+  // 本 Run 作为回炉轮收到与被拦下的结构化记忆条目（与 MCP 摘要分开取，一边抛错不连带另一边）
   const takeRepairIds = structuredMemory?.takeRepairIds;
-  const runStartedExtras =
-    mcpSummary === undefined && takeRepairIds === undefined
+  const runStartedMemory =
+    structuredMemory === undefined || takeRepairIds === undefined
       ? undefined
       : () => {
-          const repair = takeRepairIds?.();
-          return {
-            ...(mcpSummary !== undefined ? mcpSummary.summary() : {}),
-            ...(repair !== undefined && structuredMemory !== undefined
-              ? {
-                  structuredMemory: {
-                    ...structuredClone(structuredMemory.manifest),
-                    repair: [...repair.given],
-                    ...(repair.blocked.length > 0 ? { repairBlocked: [...repair.blocked] } : {}),
-                  },
-                }
-              : {}),
-          };
+          const repair = takeRepairIds();
+          return repair === undefined
+            ? {}
+            : {
+                structuredMemory: {
+                  ...structuredClone(structuredMemory.manifest),
+                  repair: [...repair.given],
+                  ...(repair.blocked.length > 0 ? { repairBlocked: [...repair.blocked] } : {}),
+                },
+              };
         };
   // load_skill 的读取留痕经 Adapter 盖 runId 落 skill.loaded；工具先于 Adapter 构造，故晚绑定
   const adapterRef: { current: PiRuntimeAdapter | undefined } = { current: undefined };
@@ -407,6 +406,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     messageContent: { persistThinking: deps.persistThinking ?? true },
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 run.started；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
+    ...(runStartedMemory !== undefined ? { runStartedMemory } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
   });
   adapterRef.current = adapter;

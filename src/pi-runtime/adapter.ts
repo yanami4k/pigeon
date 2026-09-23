@@ -108,9 +108,11 @@ export interface PiRuntimeAdapterOptions {
   // （thinking 是否持久化、单块上限），指纹才能与内容文件按哈希对上；缺省同内容记录缺省
   messageContent?: MessageContentOptions;
   // M5.7 S3（决策 052）：run.started 的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
-  // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp。
-  // 决策 134：另可带本 Run 的结构化记忆留痕（快照里冻结的开局那几条，加上本 Run 作为回炉轮收到的那几条）
-  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers" | "structuredMemory">;
+  // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
+  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+  // 决策 134：本 Run 的结构化记忆留痕（快照里冻结的开局留痕，加上本 Run 作为回炉轮收到与被拦下的条目）——
+  // 与 MCP 摘要分开取，一边抛错不连带另一边
+  runStartedMemory?: () => Pick<RunStartedPayload, "structuredMemory">;
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
   initialMessages?: AgentMessage[];
 }
@@ -144,6 +146,7 @@ export class PiRuntimeAdapter {
   readonly #systemPromptHash: string;
   #systemPromptRecorded = false;
   readonly #runStartedExtras: PiRuntimeAdapterOptions["runStartedExtras"];
+  readonly #runStartedMemory: PiRuntimeAdapterOptions["runStartedMemory"];
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -160,6 +163,7 @@ export class PiRuntimeAdapter {
 
     this.#eventLog = options.eventLog;
     this.#runStartedExtras = options.runStartedExtras;
+    this.#runStartedMemory = options.runStartedMemory;
     this.#messageContent = options.messageContent ?? {};
     this.#systemPromptHash = sha256Hex(this.#snapshot.context.systemPrompt);
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
@@ -507,9 +511,15 @@ export class PiRuntimeAdapter {
     }
     const snapshot = this.#snapshot;
     // 附加摘要取失败只进 listenerErrors：该 Run 的 run.started 缺 MCP 字段，不挡 Run 启动
-    let extras: Pick<RunStartedPayload, "mcpTools" | "mcpServers" | "structuredMemory"> = {};
+    let extras: Pick<RunStartedPayload, "mcpTools" | "mcpServers"> = {};
     try {
       extras = this.#runStartedExtras?.() ?? {};
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+    let memory: Pick<RunStartedPayload, "structuredMemory"> = {};
+    try {
+      memory = this.#runStartedMemory?.() ?? {};
     } catch (error) {
       this.#listenerErrors.push(error);
     }
@@ -557,6 +567,7 @@ export class PiRuntimeAdapter {
           }
         : {}),
       ...extras,
+      ...memory,
     });
   }
 

@@ -7,24 +7,36 @@
 //   "这次不给"处理（决策 136 的平移口径）。
 // - 挂：每条事实挂在若干文件上（state/structured-memory.ts 的 frictionAnchors），按锚点展开；同一锚点、同一种摩擦、
 //   同一指纹的多条合并为一条，附出现次数，细节以最近一次为准。
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { writeFileAtomic } from "../persistence/atomic-write.ts";
-import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import {
+  JsonlEventLog,
+  listSessionIds,
+  materializeSession,
+  readMessageContentFileDetailed,
+} from "../persistence/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { MaterializedSession } from "../state/materialize.ts";
+import { repairRoundsOf } from "../state/repair-step.ts";
 import {
   checkpointPairsOf,
   deriveSessionFrictions,
   type FileChangeEvent,
   type FrictionFact,
+  FrictionFactSchema,
   type FrictionKind,
   frictionAnchors,
 } from "../state/structured-memory.ts";
 import type { Fingerprint, VerifyStepKind } from "../state/verify-fingerprint.ts";
+import {
+  runStructuredMemoryGit,
+  taskReferencedFiles,
+  workspaceProbe,
+} from "./structured-workspace.ts";
 
 // 缓存文件格式版本：对不上即整份作废重建（缓存可重建，不做迁移）
 export const STRUCTURED_MEMORY_CACHE_VERSION = 1;
@@ -39,7 +51,7 @@ function sessionsDirOf(governanceRoot: string): string {
   return join(governanceRoot, ".pigeon", "sessions");
 }
 
-// 缓存形状：只做宽校验（事实本身由本模块写入）；形状不符即整份重建
+// 缓存形状：事实按真实 schema 校验（时间字段须是合法时间戳等）；形状不符即整份重建
 export const StructuredMemoryCacheFileSchema = Type.Object({
   version: Type.Literal(STRUCTURED_MEMORY_CACHE_VERSION),
   rules: Type.String(),
@@ -48,7 +60,7 @@ export const StructuredMemoryCacheFileSchema = Type.Object({
     Type.Object({
       size: Type.Integer({ minimum: 0 }),
       mtimeMs: Type.Number(),
-      facts: Type.Array(Type.Unknown()),
+      facts: Type.Array(FrictionFactSchema),
     })
   ),
 });
@@ -113,16 +125,11 @@ function readCache(path: string): CacheFile {
   return cache.rules === STRUCTURED_MEMORY_RULES_TAG ? cache : emptyCache();
 }
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-    windowsHide: true,
-  });
+function lines(text: string | undefined): string[] {
+  return (text ?? "").split(/\r?\n/).filter((line) => line.trim() !== "");
 }
 
-// 相邻快照之间改了哪些文件（取法之三）；git 不可用、快照提交已被回收时略过
+// 相邻快照之间改了哪些文件（取法之三）；git 不可用、快照提交已被回收时略过（git 超时照常抛出）
 function snapshotChanges(
   session: Parameters<typeof checkpointPairsOf>[0],
   workspace: string | undefined
@@ -132,27 +139,76 @@ function snapshotChanges(
   }
   const events: FileChangeEvent[] = [];
   for (const pair of checkpointPairsOf(session)) {
-    try {
-      const files = git(workspace, ["diff", "--name-only", "--no-renames", pair.from, pair.to])
-        .split(/\r?\n/)
-        .filter((file) => file.trim() !== "");
-      if (files.length > 0) {
-        events.push({ at: pair.at, files });
-      }
-    } catch {
-      // 快照不可得：这一来源略过，账本里的另两种取法照用
+    const files = lines(
+      runStructuredMemoryGit(workspace, ["diff", "--name-only", "--no-renames", pair.from, pair.to])
+    );
+    if (files.length > 0) {
+      events.push({ at: pair.at, files });
     }
   }
   return events;
 }
 
-// 一个会话派生出的事实（物化不读正文）
+// 开工时已是脏状态的文件：首个快照的改前基线是"开工时的工作区"挂在当时 HEAD 之下的提交，两者之差即未提交的改动
+// （例如跑批器预置进工作区、尚未提交的人写测试）。没有快照或取不到时为空
+function dirtyAtStart(
+  session: Pick<MaterializedSession, "checkpoints">,
+  workspace: string | undefined
+): string[] {
+  const base = session.checkpoints.find((record) => record.payload.baseCommit !== undefined)
+    ?.payload.baseCommit;
+  if (base === undefined || workspace === undefined || !existsSync(workspace)) {
+    return [];
+  }
+  return lines(
+    runStructuredMemoryGit(workspace, [
+      "diff-tree",
+      "--no-commit-id",
+      "--name-only",
+      "--no-renames",
+      "-r",
+      "--root",
+      base,
+    ])
+  );
+}
+
+// 账本里的题面原文：首个 Run 的第一条用户消息（旁置内容文件里的正文）；取不到返回 undefined
+function taskTextOf(
+  governanceRoot: string,
+  session: Pick<MaterializedSession, "sessionId" | "runStarteds">
+): string | undefined {
+  const firstRun = session.runStarteds[0]?.runId;
+  if (firstRun === undefined) {
+    return undefined;
+  }
+  const content = readMessageContentFileDetailed(
+    JsonlEventLog.contentFilePathFor(sessionsDirOf(governanceRoot), session.sessionId)
+  );
+  const first = content.records
+    .filter((record) => record.runId === firstRun && record.role === "user")
+    .sort((left, right) => left.runSeq - right.runSeq)[0];
+  return first?.blocks.map((block) => (block.type === "text" ? block.text : "")).join("");
+}
+
+// 一个会话派生出的事实（事件文件物化不读正文；题面原文另从内容文件取）
 export function deriveSessionFacts(governanceRoot: string, sessionId: SessionId): FrictionFact[] {
   const session = materializeSession(sessionsDirOf(governanceRoot), sessionId, { content: false });
   const workspace = session.attemptVerifieds.find(
     (record) => record.target.sessionId === sessionId
   )?.workspace;
-  return deriveSessionFrictions(session, { snapshotChanges: snapshotChanges(session, workspace) });
+  if (repairRoundsOf(session) === 0 || workspace === undefined) {
+    return [];
+  }
+  const task = taskTextOf(governanceRoot, session);
+  return deriveSessionFrictions(session, {
+    snapshotChanges: snapshotChanges(session, workspace),
+    dirtyAtStart: dirtyAtStart(session, workspace),
+    taskFiles:
+      task !== undefined && existsSync(workspace)
+        ? taskReferencedFiles(task, workspaceProbe(workspace))
+        : [],
+  });
 }
 
 // 读取全部事实：缓存命中的会话沿用，签名对不上或新出现的会话按账本重算，账本里已没有的会话丢掉；有变化才回写缓存

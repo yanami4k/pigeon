@@ -144,6 +144,7 @@ test("开局：只按题面指到的文件挑选——题面里的路径、所�
       opening: [onA.id],
     });
     assert.deepEqual(byPath.result.structuredMemory, {
+      enabled: true,
       opening: [onA.id],
       openingBlocked: [],
       repair: [],
@@ -193,38 +194,36 @@ test("开局：Python 导入语句按点号模块解析到仓库内文件", asyn
 test("开局：最多 2 条；同一指纹只给一条", async () => {
   const repo = makeMemoryRepo(FILES);
   try {
-    // 一次红转绿带三个不同指纹（三个名字），都挂在 a.ts 与 b.ts 上
+    // 先后三次摩擦都挂在 a.ts 上：格式（最早）、分层，最后一次类型检查同时挂在 a.ts 与 b.ts 上（最新、事后两文件都没再改）
     await history(repo, [
-      edits(
-        ["src/a.ts", "= 1;", "= 2;"],
-        ["src/b.ts", "helper;", "helper; // TYPE_BAD:one TYPE_BAD:two TYPE_BAD:three"]
-      ),
-      finished(),
-      edits(["src/b.ts", " // TYPE_BAD:one TYPE_BAD:two TYPE_BAD:three", " // one two three ok"]),
-      finished("修好了"),
-    ]);
-    // 三个名字同一错误码、同一文件：指纹键相同，合并为一条；再造两条不同指纹的
-    await history(repo, [
-      edits(["src/a.ts", "= 2;", "= 3; // FMT_BAD"]),
+      edits(["src/a.ts", "= 1;", "= 2; // FMT_BAD"]),
       finished(),
       edits(["src/a.ts", " // FMT_BAD", ""]),
       finished("修好了"),
     ]);
     await history(repo, [
-      edits(["src/a.ts", "= 3;", "= 4; // LAYER_BAD:src/layer/y.ts"]),
+      edits(["src/a.ts", "= 2;", "= 3; // LAYER_BAD:src/layer/y.ts"]),
       finished(),
       edits(["src/a.ts", " // LAYER_BAD:src/layer/y.ts", ""]),
       finished("修好了"),
     ]);
-    const onA = entriesOf(repo).filter((entry) => entry.anchor === "src/a.ts");
-    assert.equal(onA.length, 3);
+    await history(repo, [
+      edits(["src/a.ts", "= 3;", "= 4;"], ["src/b.ts", "helper;", "helper; // TYPE_BAD:helper"]),
+      finished(),
+      edits(["src/b.ts", " // TYPE_BAD:helper", " // helper ok"]),
+      finished("修好了"),
+    ]);
+    const all = entriesOf(repo);
+    const typeIds = all.filter((entry) => entry.stepName === "类型").map((entry) => entry.id);
+    const layerOnA = all.find((entry) => entry.anchor === "src/a.ts" && entry.stepName === "分层");
+    assert.equal(typeIds.length, 2, "类型检查那条挂在两个锚点上：排序后前两位是同一指纹");
+    assert.ok(layerOnA !== undefined);
     const step = await newStep(repo, "改 src/a.ts 与 src/b.ts", {});
     const opening = step.runStarteds[0]?.payload.structuredMemory?.opening ?? [];
+    // 最多 2 条；同一指纹只给一条，第二条让给下一个指纹（分层；格式那条事后 a.ts 被改得更多，排在后面）
     assert.equal(opening.length, 2);
-    // 两条的指纹各不相同（a.ts 与 b.ts 上的同一指纹只给一条）
-    const all = entriesOf(repo);
-    const keys = opening.map((id) => all.find((entry) => entry.id === id)?.fingerprintKey);
-    assert.equal(new Set(keys).size, 2);
+    assert.equal(opening.filter((id) => typeIds.includes(id)).length, 1);
+    assert.equal(opening[1], layerOnA.id);
   } finally {
     repo.cleanup();
   }
@@ -273,6 +272,7 @@ test("回炉：报错指纹对上的优先，其次是挂在本次报错涉及�
       formatEntry.id,
     ]);
     assert.deepEqual(step.result.structuredMemory, {
+      enabled: true,
       opening: [],
       openingBlocked: [],
       repair: [[typeEntry.id, formatEntry.id]],
@@ -340,6 +340,7 @@ test("开关：关闭时开局与回炉都不推送，run.started 记下关闭",
       opening: [],
     });
     assert.deepEqual(step.result.structuredMemory, {
+      enabled: false,
       opening: [],
       openingBlocked: [],
       repair: [[]],
