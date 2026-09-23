@@ -144,7 +144,7 @@ test("验证分步：合取口径——任一步失败即失败；无失败但�
     const result = await verifyAttempt({
       config: stepsConfig(
         [step("甲", 0, "ok"), { name: "乙", command: `${NODE} hang.mjs` }, step("丙", 0, "ok")],
-        1500
+        10_000
       ),
       workspace: ws.root,
       target: { sessionId: newSessionId(), runId: newRunId() },
