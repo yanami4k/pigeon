@@ -29,6 +29,8 @@ import {
   StructuredMemoryCacheError,
 } from "../memory/structured-store.ts";
 import {
+  hostWorkspaceAccess,
+  localWorkspaceAccess,
   StructuredMemoryGitTimeoutError,
   taskReferencedFiles,
   type WorkspaceProbe,
@@ -42,6 +44,7 @@ import type {
 import type { FrictionFact } from "../state/structured-memory.ts";
 import { describeFingerprint } from "../state/verify-fingerprint.ts";
 import { LEGACY_VERIFY_STEP_NAME, type VerifyStepResult } from "../state/verify-steps.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import type { RepairAppendix } from "./repair-loop.ts";
 
 // 可替换的阶段实现（测试以抛错的实现模拟各类故障）
@@ -176,15 +179,37 @@ function stderrWarn(line: string): void {
   process.stderr.write(`${line}\n`);
 }
 
+// 工作区在执行端另一侧（容器）时：探针、派生里的工作区查询与核验都经执行端在容器里做。以往会话的验证记录里记的工作区
+// 是执行端的工作区根（同一作业的各步共用一个容器），据此认出经执行端访问
+function hostPhases(host: WorkspaceHost): Pick<StructuredMemoryPhases, "load" | "probe"> {
+  const access = hostWorkspaceAccess(host);
+  return {
+    load: (governanceRoot) =>
+      loadStructuredMemory(governanceRoot, {
+        accessFor: (workspace) =>
+          workspace === host.root ? access : localWorkspaceAccess(workspace),
+      }).facts,
+    probe: () => access.probe(),
+  };
+}
+
 export function createStructuredMemoryPush(input: {
   governanceRoot: string;
   workspaceRoot: string;
+  // 工作区在执行端另一侧（容器）时给出；workspaceRoot 此时只是宿主侧占位目录
+  workspaceHost?: WorkspaceHost;
   sessionId: SessionId;
   options: StructuredMemoryOptions;
 }): StructuredMemoryPush {
   const { options } = input;
   const enabled = options.enabled ?? true;
-  const phases: StructuredMemoryPhases = { ...DEFAULT_PHASES, ...options.phases };
+  const phases: StructuredMemoryPhases = {
+    ...DEFAULT_PHASES,
+    ...(input.workspaceHost?.runSync !== undefined ? hostPhases(input.workspaceHost) : {}),
+    ...options.phases,
+  };
+  // 报错里的路径相对哪里：容器工作区为执行端的工作区根
+  const workspaceRoot = input.workspaceHost?.root ?? input.workspaceRoot;
   const selection: StructuredMemorySelection = options.fixed !== undefined ? "fixed" : "auto";
   const warn = options.warn ?? stderrWarn;
   const warned = new Set<FaultPhase>();
@@ -243,7 +268,7 @@ export function createStructuredMemoryPush(input: {
     return entries;
   };
   const probeOf = (): WorkspaceProbe => {
-    probe ??= phases.probe(input.workspaceRoot);
+    probe ??= phases.probe(workspaceRoot);
     return probe;
   };
   const check: EntryChecker = (entry, workspace) => {
@@ -345,7 +370,7 @@ export function createStructuredMemoryPush(input: {
             ? phases.selectFixed(loaded, options.fixed.repair ?? [], workspace, check)
             : phases.selectRepair(
                 loaded,
-                failingFingerprints(steps, input.workspaceRoot),
+                failingFingerprints(steps, workspaceRoot),
                 workspace,
                 check
               );

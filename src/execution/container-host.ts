@@ -40,6 +40,17 @@ const IGNORED_LIST = [
 ];
 // 一次 rm 的参数条数上限：避免撞上命令行长度限制
 const REMOVE_BATCH = 200;
+// "开工时的树"的提交：复制真实索引到临时索引，在其上 add -A 写成树，以起点提交（$1）为父提交；打印新提交
+const START_TREE_SCRIPT = [
+  "set -e",
+  'idx="$(git rev-parse --git-path index)"; tmp="$idx.pigeon-start"; rm -f "$tmp"',
+  '[ -f "$idx" ] && cp "$idx" "$tmp"',
+  'export GIT_INDEX_FILE="$tmp"',
+  "git add -A",
+  'tree="$(git write-tree)"',
+  'rm -f "$tmp"',
+  'git -c user.name=pigeon -c user.email=pigeon@localhost commit-tree "$tree" -p "$1" -m "pigeon step start"',
+].join("\n");
 
 export interface ContainerHostOptions {
   // 容器名或 id（须已在运行）
@@ -340,6 +351,22 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return { files, truncated };
     },
     findLauncherScript: () => undefined,
+    runSync(argv, timeoutMs) {
+      const result = spawnSync(dockerProgram, execArgs(false, argv), {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: SYNC_READ_MAX_BYTES,
+      });
+      const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+      if (result.error !== undefined && !timedOut) {
+        throw new ContainerHostError(`docker 拉不起来：${result.error.message}`);
+      }
+      const stderr = result.stderr?.toString("utf8") ?? "";
+      if (!timedOut && daemonFailure({ exitCode: result.status, stderr })) {
+        throw new ContainerHostError(`容器不可用：${stderr.trim()}`);
+      }
+      return { exitCode: result.status, stdout: result.stdout ?? Buffer.alloc(0), timedOut };
+    },
     async listTracked() {
       return (await must(["git", "ls-files", "-z"], "列出受跟踪的文件"))
         .toString("utf8")
@@ -371,8 +398,16 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         });
     },
     async markStepStart() {
-      const head = await must(["git", "rev-parse", "--verify", "HEAD"], "取起点提交");
-      return { commit: head.toString("utf8").trim(), ignored: await ignoredPaths() };
+      const commit = (await must(["git", "rev-parse", "--verify", "HEAD"], "取起点提交"))
+        .toString("utf8")
+        .trim();
+      // "开工时的树"：在临时索引上 add -A（不含被忽略的）写成树，挂在起点提交之下；不动真实索引与工作区
+      const base = await must(["sh", "-c", START_TREE_SCRIPT, "sh", commit], "记下开工时的树");
+      return {
+        commit,
+        ignored: await ignoredPaths(),
+        baseCommit: base.toString("utf8").trim(),
+      };
     },
     async restoreStepStart(mark) {
       const exists = await helper(
@@ -396,6 +431,13 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         await must(
           ["rm", "-rf", "--", ...added.slice(i, i + REMOVE_BATCH)],
           "删除 agent 新建的被忽略路径"
+        );
+      }
+      // 开工时未提交的改动（跑批器预置的人写测试等）还原为开工时的样子：检出开工时的树，再取消暂存
+      if (mark.baseCommit !== undefined) {
+        await must(
+          ["sh", "-c", 'git checkout -q "$1" -- . && git reset -q', "sh", mark.baseCommit],
+          "还原开工时未提交的改动"
         );
       }
     },

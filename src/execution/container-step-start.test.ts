@@ -42,8 +42,25 @@ test("回到这一步起点：回到起点提交（agent 自己的提交也撤�
   try {
     const start = git(root, "rev-parse", "HEAD");
     assert.ok(host.markStepStart !== undefined && host.restoreStepStart !== undefined);
+    // 开工时已有未提交的改动（跑批器预置的人写测试）：起点另记一个"开工时的树"挂在 HEAD 下的提交，
+    // 它与 HEAD 之差即开工时的脏文件（结构化记忆认定题面测试用）
+    put(root, { "tests/preset.test.py": "def test_x():\n    pass\n" });
     const mark = await host.markStepStart();
     assert.equal(mark.commit, start);
+    assert.equal(git(root, "rev-parse", `${mark.baseCommit}^`), start);
+    assert.equal(
+      git(
+        root,
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        mark.baseCommit ?? ""
+      ),
+      "tests/preset.test.py"
+    );
+    assert.equal(git(root, "status", "--porcelain"), "?? tests/", "记起点不动工作区与索引");
     assert.deepEqual([...mark.ignored].sort(), ["build/", "pre.log"]);
     // agent 在这一步里：改已跟踪文件并自己提交，再改一次不提交；新建未跟踪文件与目录；新建被忽略的文件与目录；
     // 往开工时已被忽略的目录里加文件；删掉一个已跟踪文件
@@ -69,7 +86,12 @@ test("回到这一步起点：回到起点提交（agent 自己的提交也撤�
     assert.equal(readFileSync(join(root, "pre.log"), "utf8"), "old log\n");
     assert.ok(existsSync(join(root, "build/keep.o")));
     assert.ok(existsSync(join(root, "build/more.o")));
-    assert.equal(git(root, "status", "--porcelain"), "");
+    // 开工时预置、尚未提交的文件回到开工时的样子（未跟踪）
+    assert.equal(
+      readFileSync(join(root, "tests/preset.test.py"), "utf8"),
+      "def test_x():\n    pass\n"
+    );
+    assert.equal(git(root, "status", "--porcelain"), "?? tests/");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

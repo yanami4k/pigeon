@@ -214,6 +214,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       ? createStructuredMemoryPush({
           governanceRoot: options.governanceRoot,
           workspaceRoot: options.workspaceRoot,
+          ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
           sessionId,
           options: options.structuredMemory,
         })

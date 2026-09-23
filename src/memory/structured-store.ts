@@ -33,9 +33,9 @@ import {
 } from "../state/structured-memory.ts";
 import type { Fingerprint, VerifyStepKind } from "../state/verify-fingerprint.ts";
 import {
-  runStructuredMemoryGit,
+  localWorkspaceAccess,
   taskReferencedFiles,
-  workspaceProbe,
+  type WorkspaceAccess,
 } from "./structured-workspace.ts";
 
 // 缓存文件格式版本：对不上即整份作废重建（缓存可重建，不做迁移）
@@ -132,22 +132,12 @@ function lines(text: string | undefined): string[] {
 // 相邻快照之间改了哪些文件（取法之三）；git 不可用、快照提交已被回收时略过（git 超时照常抛出）
 function snapshotChanges(
   session: Parameters<typeof checkpointPairsOf>[0],
-  workspace: string | undefined
+  access: WorkspaceAccess
 ): FileChangeEvent[] {
-  if (workspace === undefined || !existsSync(workspace)) {
-    return [];
-  }
   const events: FileChangeEvent[] = [];
   for (const pair of checkpointPairsOf(session)) {
     const files = lines(
-      runStructuredMemoryGit(workspace, [
-        "diff",
-        "--name-only",
-        "--no-renames",
-        "--relative",
-        pair.from,
-        pair.to,
-      ])
+      access.git(["diff", "--name-only", "--no-renames", "--relative", pair.from, pair.to])
     );
     if (files.length > 0) {
       events.push({ at: pair.at, files });
@@ -160,14 +150,14 @@ function snapshotChanges(
 // （例如跑批器预置进工作区、尚未提交的人写测试）。没有改前基线（没有快照）或 git 取不到时返回 undefined（未知）
 function dirtyAtStart(
   session: Pick<MaterializedSession, "checkpoints">,
-  workspace: string
+  access: WorkspaceAccess
 ): string[] | undefined {
   const base = session.checkpoints.find((record) => record.payload.baseCommit !== undefined)
     ?.payload.baseCommit;
   if (base === undefined) {
     return undefined;
   }
-  const output = runStructuredMemoryGit(workspace, [
+  const output = access.git([
     "diff-tree",
     "--no-commit-id",
     "--name-only",
@@ -200,9 +190,11 @@ function taskTextOf(
 
 // 一个会话派生出的事实（事件文件物化不读正文；题面原文另从内容文件取）。工作区已不在、或取不到改前基线时，
 // 题面测试文件认定不全：这一会话不产出测试步的红转绿（其他步照常、撤回照记），结果标为不完整、不写进缓存，下次再算
+// accessFor：按验证记录里的工作区路径取访问方式（缺省本地；工作区在容器里时经执行端）
 export function deriveSessionFacts(
   governanceRoot: string,
-  sessionId: SessionId
+  sessionId: SessionId,
+  accessFor: (workspace: string) => WorkspaceAccess = localWorkspaceAccess
 ): { facts: FrictionFact[]; complete: boolean } {
   const session = materializeSession(sessionsDirOf(governanceRoot), sessionId, { content: false });
   const workspace = session.attemptVerifieds.find(
@@ -211,15 +203,16 @@ export function deriveSessionFacts(
   if (repairRoundsOf(session) === 0 || workspace === undefined) {
     return { facts: [], complete: true };
   }
-  const present = existsSync(workspace);
-  const dirty = present ? dirtyAtStart(session, workspace) : undefined;
+  const access = accessFor(workspace);
+  const present = access.present();
+  const dirty = present ? dirtyAtStart(session, access) : undefined;
   const task = taskTextOf(governanceRoot, session);
   const facts = deriveSessionFrictions(session, {
-    snapshotChanges: present ? snapshotChanges(session, workspace) : [],
+    snapshotChanges: present ? snapshotChanges(session, access) : [],
     dirtyAtStart: dirty ?? [],
     taskFiles:
       task !== undefined && present
-        ? taskReferencedFiles(task, workspaceProbe(workspace), { mentionedUntracked: true })
+        ? taskReferencedFiles(task, access.probe(), { mentionedUntracked: true })
         : [],
     taskTestsUnknown: dirty === undefined,
   });
@@ -229,7 +222,7 @@ export function deriveSessionFacts(
 // 读取全部事实：缓存命中的会话沿用，签名对不上或新出现的会话按账本重算，账本里已没有的会话丢掉；有变化才回写缓存
 export function loadStructuredMemory(
   governanceRoot: string,
-  options: { persist?: boolean } = {}
+  options: { persist?: boolean; accessFor?: (workspace: string) => WorkspaceAccess } = {}
 ): StructuredMemoryLoad {
   const cachePath = structuredMemoryCachePath(governanceRoot);
   const cache = cacheIo(() => readCache(cachePath));
@@ -248,7 +241,7 @@ export function loadStructuredMemory(
       reused += 1;
       continue;
     }
-    const result = deriveSessionFacts(governanceRoot, sessionId);
+    const result = deriveSessionFacts(governanceRoot, sessionId, options.accessFor);
     derived += 1;
     changed = true;
     if (!result.complete) {

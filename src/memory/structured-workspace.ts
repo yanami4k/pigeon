@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { workspaceRelative } from "../state/structured-memory.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 
 // git 子进程的超时（毫秒）
 export const STRUCTURED_MEMORY_GIT_TIMEOUT_MS = 30_000;
@@ -63,11 +64,16 @@ interface RenameRecord {
   to: string;
 }
 
-// options.run：git 执行器（缺省 runStructuredMemoryGit，测试注入）。本探针一旦遇到 git 超时即锁定：后续查询不再调用 git，
+// options.run：git 执行器（缺省 runStructuredMemoryGit，测试注入）；options.exists / read：文件在不在、读文件（缺省本地
+// 文件系统；工作区在容器里时经执行端）。本探针一旦遇到 git 超时即锁定：后续查询不再调用 git，
 // 直接抛出同一个超时错误（按"取不到"处理），避免每轮回炉都同步阻塞、吃掉墙钟预算
 export function workspaceProbe(
   root: string,
-  options: { run?: (args: string[]) => string | undefined } = {}
+  options: {
+    run?: (args: string[]) => string | undefined;
+    exists?: (file: string) => boolean;
+    read?: (file: string) => string | undefined;
+  } = {}
 ): WorkspaceProbe {
   const run = options.run ?? ((args: string[]) => runStructuredMemoryGit(root, args));
   let timedOut: StructuredMemoryGitTimeoutError | undefined;
@@ -115,14 +121,19 @@ export function workspaceProbe(
     renames = collected;
     return renames;
   };
-  const exists = (file: string): boolean => {
-    const full = join(root, file);
-    return existsSync(full) && statSync(full).isFile();
-  };
+  const exists =
+    options.exists ??
+    ((file: string): boolean => {
+      const full = join(root, file);
+      return existsSync(full) && statSync(full).isFile();
+    });
+  const read =
+    options.read ??
+    ((file: string) => (exists(file) ? readFileSync(join(root, file), "utf8") : undefined));
   return {
     root,
     exists,
-    read: (file) => (exists(file) ? readFileSync(join(root, file), "utf8") : undefined),
+    read,
     renamedSince: (file, since) => {
       const floor = Math.floor(since / 1000) - 1;
       let current = file;
@@ -158,6 +169,64 @@ export function workspaceProbe(
       );
       return trackedFiles;
     },
+  };
+}
+
+// ---- 工作区访问：本地，或经执行端（工作区在容器里） ----
+
+// 派生、挑选与核验对一个工作区要做的事：它在不在、在里面跑 git、取探针
+export interface WorkspaceAccess {
+  root: string;
+  present(): boolean;
+  // 失败返回 undefined（查不到）；超时抛 StructuredMemoryGitTimeoutError
+  git(args: string[]): string | undefined;
+  probe(): WorkspaceProbe;
+}
+
+export function localWorkspaceAccess(root: string): WorkspaceAccess {
+  return {
+    root,
+    present: () => existsSync(root),
+    git: (args) => runStructuredMemoryGit(root, args),
+    probe: () => workspaceProbe(root),
+  };
+}
+
+// 经执行端访问容器里的工作区：git、文件在不在与读文件都在容器的工作区根执行（同步）
+export function hostWorkspaceAccess(
+  host: WorkspaceHost,
+  timeoutMs: number = STRUCTURED_MEMORY_GIT_TIMEOUT_MS
+): WorkspaceAccess {
+  const runSync = host.runSync?.bind(host);
+  if (runSync === undefined) {
+    throw new Error("这个执行端不提供同步执行，结构化记忆无法经它访问工作区");
+  }
+  // 以 - 开头的相对路径前加 ./，免得被命令当成选项
+  const arg = (file: string) => (file.startsWith("-") ? `./${file}` : file);
+  const git = (args: string[]): string | undefined => {
+    const result = runSync(["git", "-c", "core.quotePath=false", ...args], timeoutMs);
+    if (result.timedOut) {
+      throw new StructuredMemoryGitTimeoutError(
+        `git ${args[0] ?? ""} 超过 ${timeoutMs} 毫秒未返回`
+      );
+    }
+    return result.exitCode === 0 ? result.stdout.toString("utf8") : undefined;
+  };
+  const exists = (file: string) => runSync(["test", "-f", arg(file)], timeoutMs).exitCode === 0;
+  return {
+    root: host.root,
+    present: () => runSync(["test", "-d", "."], timeoutMs).exitCode === 0,
+    git,
+    probe: () =>
+      workspaceProbe(host.root, {
+        run: git,
+        exists,
+        read: (file) => {
+          if (!exists(file)) return undefined;
+          const result = runSync(["cat", "--", arg(file)], timeoutMs);
+          return result.exitCode === 0 ? result.stdout.toString("utf8") : undefined;
+        },
+      }),
   };
 }
 

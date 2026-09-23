@@ -48,6 +48,9 @@ export interface HostFileSnapshot {
 export interface StepStartMark {
   commit: string;
   ignored: string[];
+  // "开工时的树"挂在起点提交之下的提交（含开工时未提交的改动，如跑批器预置的人写测试；不含被忽略的文件）：
+  // 撤回时据它把这些改动还原，结构化记忆据它与起点提交之差认定开工时的脏文件
+  baseCommit?: string;
 }
 
 // 快照引用（占位）：实现自定的不透明标识（宿主为独立 GIT_DIR 里的提交，容器为容器内同构提交加镜像提交）
@@ -86,6 +89,15 @@ export interface WorkspaceHost {
   listTracked?(): Promise<string[]>;
   // 该文件的提交历史（新在前，跨改名追踪），每项给出提交与该提交上的路径；limit 为最多几条；不受跟踪即空
   fileHistory?(path: string, limit?: number): Promise<FileHistoryEntry[]>;
+  // 同步执行一条命令（在工作区根，不经 shell）：结构化记忆的探针与派生是同步的，经它在容器里查文件与跑 git。
+  // 超时记 timedOut；执行端本身不可用时抛错
+  runSync?(argv: readonly string[], timeoutMs: number): HostSyncResult;
+}
+
+export interface HostSyncResult {
+  exitCode: number | null;
+  stdout: Buffer;
+  timedOut: boolean;
 }
 
 export interface FileHistoryEntry {

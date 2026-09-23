@@ -42,6 +42,17 @@ test("执行端的 git 查询：受跟踪的文件（不含未跟踪与被忽略
     ]);
     assert.deepEqual(await host.fileHistory("src/new.py", 1), [{ commit: c3, path: "src/new.py" }]);
     assert.deepEqual(await host.fileHistory("nope.py"), []);
+    // 同步执行（结构化记忆的探针是同步的）：在工作区根执行，退出码与标准输出原样带回
+    assert.ok(host.runSync !== undefined);
+    const listed = host.runSync(["git", "ls-files"], 30_000);
+    assert.equal(listed.exitCode, 0);
+    assert.equal(listed.timedOut, false);
+    assert.deepEqual(listed.stdout.toString("utf8").trim().split("\n"), [
+      ".gitignore",
+      "src/new.py",
+    ]);
+    assert.equal(host.runSync(["test", "-f", "run.log"], 30_000).exitCode, 0);
+    assert.equal(host.runSync(["test", "-f", "missing"], 30_000).exitCode, 1);
   } finally {
     cleanup();
     rmSync(base, { recursive: true, force: true });
