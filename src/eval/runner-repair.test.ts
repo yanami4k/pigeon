@@ -261,7 +261,35 @@ test("评测跑批缺省关闭回炉：结果行不带回炉字段，首次失�
     const [row] = rowsOf(fixture.out);
     assert.ok(row !== undefined);
     assert.equal("repair" in row, false);
+    assert.equal("structuredMemory" in row, false, "未接入结构化记忆时行形状不变");
     assert.equal(row.verdict, "fail");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("评测跑批接入结构化记忆：结果行带开局给了哪几条、每轮回炉给了哪几条", async () => {
+  const fixture = makeFixture();
+  try {
+    const tasks = loadEvalTasks(join(fixture.repo, "eval", "tasks"));
+    await runEval({
+      source: localTaskSource(tasks),
+      outDir: fixture.out,
+      runs: 1,
+      streamFn: fixOnFeedbackStreamFn(),
+      yolo: true,
+      homeDir: fixture.home,
+      conditions: ["none"],
+      editMode: "replace",
+      verify: { command: `${NODE} gate.mjs`, timeoutMs: 30_000 },
+      repairRounds: 3,
+      structuredMemory: { enabled: true },
+    });
+    const [row] = rowsOf(fixture.out);
+    assert.ok(row !== undefined);
+    // 输出目录里还没有以往的摩擦：开局与第 1 轮回炉都没给
+    assert.deepEqual(row.structuredMemory, { opening: [], repair: [[]] });
+    assert.equal(row.verdict, "pass");
   } finally {
     fixture.cleanup();
   }

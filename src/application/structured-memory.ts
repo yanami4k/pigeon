@@ -33,6 +33,7 @@ import type {
   StructuredMemorySelection,
 } from "../state/injection-manifest.ts";
 import type { FrictionFact } from "../state/structured-memory.ts";
+import { describeFingerprint } from "../state/verify-fingerprint.ts";
 import { LEGACY_VERIFY_STEP_NAME, type VerifyStepResult } from "../state/verify-steps.ts";
 import type { RepairAppendix } from "./repair-loop.ts";
 
@@ -77,6 +78,57 @@ export interface StructuredMemoryPush {
   // 下一个 Run 开始时取走这一轮回炉给的条目（只取一次）
   takeRepairIds(): string[] | undefined;
   summary(): StructuredMemorySummary;
+}
+
+// pigeon memory list（只读）：列出当前项目的记忆条目——锚点、指纹、次数、来源会话，另附此刻的用前核验结果。
+// 从账本现算、不回写缓存，不写账本与工作区
+export interface StructuredMemoryListing {
+  id: string;
+  anchor: string;
+  kind: "regression" | "reverted";
+  step: string;
+  fingerprint: string;
+  names: string[];
+  count: number;
+  sessions: string[];
+  lastAt: number;
+  check: { ok: boolean; reason?: string };
+}
+
+export function listStructuredMemory(governanceRoot: string): StructuredMemoryListing[] {
+  const entries = buildMemoryEntries(
+    loadStructuredMemory(governanceRoot, { persist: false }).facts
+  );
+  const probe = workspaceProbe(governanceRoot);
+  return entries.map((entry) => {
+    const result = checkEntry(entry, probe);
+    return {
+      id: entry.id,
+      anchor: entry.anchor,
+      kind: entry.kind,
+      step: entry.stepName,
+      fingerprint: describeFingerprint(entry.fingerprint),
+      names: [...entry.fingerprint.names],
+      count: entry.count,
+      sessions: [...entry.sessions],
+      lastAt: entry.latest.at,
+      check: { ok: result.ok, ...(result.reason !== undefined ? { reason: result.reason } : {}) },
+    };
+  });
+}
+
+export function renderStructuredMemoryList(listing: readonly StructuredMemoryListing[]): string {
+  if (listing.length === 0) {
+    return "本项目还没有结构化记忆。\n";
+  }
+  const lines = listing.map(
+    (item) =>
+      `${item.id} ｜ 锚点 ${item.anchor} ｜ ${item.kind === "regression" ? "红转绿" : "撤回"} ｜ ` +
+      `「${item.step}」${item.fingerprint}${item.names.length > 0 ? `（${item.names.join("、")}）` : ""} ｜ ` +
+      `${item.count} 次 ｜ 最近 ${new Date(item.lastAt).toISOString()} ｜ 来源会话 ${item.sessions.join("、")} ｜ ` +
+      `核验${item.check.ok ? "通过" : `不过：${item.check.reason ?? ""}`}`
+  );
+  return `${lines.join("\n")}\n共 ${listing.length} 条\n`;
 }
 
 const DEFAULT_PHASES: StructuredMemoryPhases = {

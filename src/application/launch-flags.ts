@@ -3,6 +3,7 @@
 // 按入口分成三组，影响 Eval 按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
+import { loadStructuredMemoryEnabled } from "../persistence/structured-memory-config.ts";
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
@@ -14,7 +15,11 @@ export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom"
 export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
-export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking"]);
+export const VALUELESS_FLAGS = new Set([
+  "--yolo",
+  "--no-persist-thinking",
+  "--no-structured-memory",
+]);
 
 export interface LaunchFlags {
   root: string;
@@ -43,6 +48,8 @@ export interface LaunchFlags {
   retryOnFail?: number;
   // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
   repairRounds?: number;
+  // 决策 134：--no-structured-memory 关闭结构化记忆（开局与回炉都不推送）；只有 pigeon run 接受
+  structuredMemory?: false;
 }
 
 export interface ParseLaunchFlagsOptions {
@@ -146,6 +153,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--repair-rounds 需要非负整数（0 表示关闭）（${usage}）`);
       }
       flags.repairRounds = value;
+    } else if (flag === "--no-structured-memory" && options.repair === true) {
+      flags.structuredMemory = false;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -202,4 +211,12 @@ export function resolveVerifyConfig(
 // 参数给 0 即关闭，压过项目配置；轮数与验证命令分别取来源，缺验证命令时由运行入口启动报错
 export function resolveRepairRounds(flags: LaunchFlags, governanceRoot: string): number {
   return flags.repairRounds ?? loadProjectRepairRounds(governanceRoot) ?? 0;
+}
+
+// 结构化记忆开关的来源（决策 134）：启动参数（--no-structured-memory）> 项目配置（.pigeon/structured-memory.json）> 开启
+export function resolveStructuredMemoryEnabled(
+  flags: LaunchFlags,
+  governanceRoot: string
+): boolean {
+  return flags.structuredMemory ?? loadStructuredMemoryEnabled(governanceRoot) ?? true;
 }

@@ -156,7 +156,10 @@ export function deriveSessionFacts(governanceRoot: string, sessionId: SessionId)
 }
 
 // 读取全部事实：缓存命中的会话沿用，签名对不上或新出现的会话按账本重算，账本里已没有的会话丢掉；有变化才回写缓存
-export function loadStructuredMemory(governanceRoot: string): StructuredMemoryLoad {
+export function loadStructuredMemory(
+  governanceRoot: string,
+  options: { persist?: boolean } = {}
+): StructuredMemoryLoad {
   const cachePath = structuredMemoryCachePath(governanceRoot);
   const cache = cacheIo(() => readCache(cachePath));
   const dir = sessionsDirOf(governanceRoot);
@@ -183,7 +186,8 @@ export function loadStructuredMemory(governanceRoot: string): StructuredMemoryLo
   if (Object.keys(cache.sessions).some((sessionId) => next.sessions[sessionId] === undefined)) {
     changed = true;
   }
-  if (changed) {
+  // 只读调用方（列出命令）不回写缓存
+  if (changed && options.persist !== false) {
     cacheIo(() => {
       mkdirSync(dirname(cachePath), { recursive: true });
       writeFileAtomic(cachePath, `${JSON.stringify(next)}\n`);

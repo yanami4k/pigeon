@@ -46,6 +46,10 @@ import { MCP_CONFIG_VERSION, McpConfigFileSchema } from "./state/mcp-config.ts";
 import { MESSAGE_CONTENT_VERSION, MessageContentRecordSchema } from "./state/message-content.ts";
 import { MigrationRegistry } from "./state/migration.ts";
 import { migrateReceiptToCurrent, RECEIPT_VERSION } from "./state/receipt.ts";
+import {
+  STRUCTURED_MEMORY_CONFIG_VERSION,
+  StructuredMemoryConfigFileSchema,
+} from "./state/structured-memory-config.ts";
 import { TOOL_EXECUTION_VERSION, ToolExecutionSchema } from "./state/tool-execution.ts";
 
 interface VersionedSchemaCase {
@@ -190,6 +194,12 @@ const CASES: VersionedSchemaCase[] = [
     current: STRUCTURED_MEMORY_CACHE_VERSION,
     v1: () => ({ version: 1, rules: "r", sessions: {} }),
     migrate: validateOnly(StructuredMemoryCacheFileSchema),
+  },
+  {
+    constant: "STRUCTURED_MEMORY_CONFIG_VERSION",
+    current: STRUCTURED_MEMORY_CONFIG_VERSION,
+    v1: () => ({ version: 1, enabled: false }),
+    migrate: validateOnly(StructuredMemoryConfigFileSchema),
   },
   {
     constant: "TOOL_EXECUTION_VERSION",

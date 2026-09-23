@@ -13,6 +13,7 @@ import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runHeadless } from "../application/headless.ts";
+import type { StructuredMemoryOptions } from "../application/structured-memory.ts";
 import { describeHead } from "../orchestration/worktree.ts";
 import { isContextOverflowError, type StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
@@ -64,6 +65,9 @@ export interface RunEvalOptions {
   // 与任务源的判据不是一回事：回炉结束（含撤回）后判据照常判分。只支持本地 git 工作区（容器任务源启动即报错）
   verify?: VerifyConfig;
   repairRounds?: number;
+  // 决策 134 / 157：结构化记忆（开关与固定挑选）——给了才接入。缺省不接入：本跑批的治理根是整批共用的输出目录，
+  // 缺省接入会让后面的题拿到前面题的记忆、改变既有评测的条件
+  structuredMemory?: StructuredMemoryOptions;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -361,6 +365,9 @@ async function runOnce(
       ...(options.repairRounds !== undefined && options.repairRounds > 0
         ? { repairRounds: options.repairRounds }
         : {}),
+      ...(options.structuredMemory !== undefined
+        ? { structuredMemory: options.structuredMemory }
+        : {}),
     });
     // 模型服务故障的运行不判分：没有可用结果，重跑时整次补跑。两条路都算——请求层抛错（上游合成失败消息，
     // 失败分类为基础设施）与流内以错误收尾（连接中断、服务端报错：终态 failed，失败分类落在未知）
@@ -450,6 +457,15 @@ async function runOnce(
         : {}),
       // 决策 142 / 143：回炉开启时在场——用了几轮、最终验证结论、是否撤回（及是否因预算耗尽提前撤回）
       ...(run.repair !== undefined ? { repair: { ...run.repair } } : {}),
+      // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条
+      ...(run.structuredMemory !== undefined
+        ? {
+            structuredMemory: {
+              opening: [...run.structuredMemory.opening],
+              repair: run.structuredMemory.repair.map((round) => [...round]),
+            },
+          }
+        : {}),
       ...(refused
         ? { error: [`内容审核拒答（不补跑、不计入成败统计）`, ...errors].join("；") }
         : infrastructure !== undefined
