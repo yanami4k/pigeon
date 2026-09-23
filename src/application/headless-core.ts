@@ -27,11 +27,12 @@ import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-eve
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
-import { attachCheckpoints } from "./checkpoints.ts";
+import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { buildRepairFeedback, type RepairAppendix, restoreStepStart } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
+import { dedupedWarner, failureDetail } from "./warnings.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
 export type HeadlessStatus =
@@ -125,10 +126,19 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
 }
 
 export interface HeadlessRepairSummary {
+  // 用了几轮回炉（首个 Run 不算）
   rounds: number;
+  // 这一步最后一次验证门的结论；没验证过（运行面没装起来、回炉途中出错）时缺省
   verdict?: EvalVerdict;
+  // 这一步是否收尾：通过、无法判定、撤回为收尾；回炉途中出现异常或没有 Run 可验证为未收尾（续跑时整步重做）
+  closed: boolean;
   reverted: boolean;
+  // 撤回是否因预算先于轮数用尽而提前；轮数与预算同时用满记为轮数用满
   budgetExhausted: boolean;
+  // 撤回时工作区是否真的恢复了；一次文件都没改过（没有快照起点）时为 false 且不带 restoreError
+  restored: boolean;
+  // 恢复没做成的原因：恢复抛错，或快照出过故障而没有撤回起点
+  restoreError?: string;
 }
 
 // 回炉的启动前检查（决策 142 / 143）：设定不成立即启动报错，不装配运行面
@@ -182,6 +192,10 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   const startedAt = Date.now();
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
+  // 快照挂载：撤回时据它的内部错误清单区分"一次文件都没改过"与"快照出过故障、没有起点"
+  let attachment: CheckpointAttachment | undefined;
+  // 回炉的运行时诊断（注入点出错、撤回没做成）：标准错误、按类别去重，不进账本
+  const warn = dedupedWarner();
   const handle = createDetachedRuntime({
     sessionId,
     governanceRoot: options.governanceRoot,
@@ -227,6 +241,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       ) {
         const checkpoints = attachCheckpoints({ bundle, workspaceRoot: options.workspaceRoot });
         if (checkpoints !== undefined) {
+          attachment = checkpoints;
           bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
         }
       }
@@ -265,12 +280,43 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let errorMessage: string | undefined;
   let verification: HeadlessRunResult["verification"];
   let repair: HeadlessRepairSummary | undefined;
+  // 回炉进度：途中出现异常时据此给出未收尾的回炉结果
+  let rounds = 0;
+  let lastVerdict: EvalVerdict | undefined;
+  // 撤回：恢复到这一步起点，并如实给出恢复是否做成
+  const restoreForRevert = (): Pick<HeadlessRepairSummary, "restored" | "restoreError"> => {
+    try {
+      const done = restoreStepStart({
+        governanceRoot: options.governanceRoot,
+        workspaceRoot: options.workspaceRoot,
+        sessionId,
+      });
+      if (done.restored) {
+        return { restored: true };
+      }
+      // 没有起点：快照没出过故障即这一步一次文件都没改过，无需恢复；出过故障即起点丢了，工作区未恢复
+      const snapshotError = attachment?.errors()[0];
+      if (snapshotError === undefined) {
+        return { restored: false };
+      }
+      const restoreError = `快照出过故障，没有撤回起点，工作区未恢复：${failureDetail(snapshotError)}`;
+      warn(
+        new Error("回炉撤回没有起点"),
+        `回炉告警：${restoreError}（这一步记为已撤回，但工作区仍是最后一轮修改后的样子）`
+      );
+      return { restored: false, restoreError };
+    } catch (error) {
+      // 账本已能推出撤回；恢复可重复执行，续跑时再执行一次即可
+      const restoreError = `撤回时恢复工作区失败（可重复执行恢复）：${failureDetail(error)}`;
+      warn(error, `回炉告警：${restoreError}`);
+      return { restored: false, restoreError };
+    }
+  };
   try {
     let run =
       options.continueFromHistory === true && handle.continueRun !== undefined
         ? await handle.continueRun()
         : await handle.run(options.task);
-    let rounds = 0;
     for (;;) {
       status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
       errorMessage = run.errorMessage;
@@ -283,8 +329,15 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         break;
       }
       // 回炉：在同一会话里、释放之前验证（运行面没装起来、没有 Run 时不验证，这一步结束）
+      // 没有 Run 可验证：这一步未收尾（账本里最后一个 Run 也没有验证记录）
       if (liveBundle === undefined || run.runId === undefined) {
-        repair = { rounds, reverted: false, budgetExhausted: false };
+        repair = {
+          rounds,
+          closed: false,
+          reverted: false,
+          budgetExhausted: false,
+          restored: false,
+        };
         break;
       }
       const verified = await verifyAttempt({
@@ -295,34 +348,52 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         envelopeRunId: run.runId,
       });
       const { verdict } = verified.outcome;
+      lastVerdict = verdict;
       verification = { verdict, recorded: verified.record !== undefined };
       // 通过即结束；无法判定不回炉，按现有口径记为未知
       if (verdict !== "fail") {
-        repair = { rounds, verdict, reverted: false, budgetExhausted: false };
+        repair = {
+          rounds,
+          verdict,
+          closed: true,
+          reverted: false,
+          budgetExhausted: false,
+          restored: false,
+        };
         break;
       }
-      // 修满 N 轮或预算耗尽仍失败：恢复到这一步第一个 Run 之前的状态，这一步记为失败
-      const budgetExhausted = limitHit !== undefined;
-      if (rounds >= repairRounds || budgetExhausted) {
-        repair = { rounds, verdict, reverted: true, budgetExhausted };
-        try {
-          restoreStepStart({
-            governanceRoot: options.governanceRoot,
-            workspaceRoot: options.workspaceRoot,
-            sessionId,
-          });
-        } catch (error) {
-          // 账本已能推出撤回；恢复可重复执行，续跑时再执行一次即可
-          errorMessage = `撤回时恢复工作区失败（可重复执行恢复）：${error instanceof Error ? error.message : String(error)}`;
+      // 修满 N 轮或预算耗尽仍失败：恢复到这一步第一个 Run 之前的状态，这一步记为失败。
+      // 预算只在先于轮数用尽时算提前撤回；轮数与预算同时用满记为轮数用满
+      if (rounds >= repairRounds || limitHit !== undefined) {
+        const restore = restoreForRevert();
+        repair = {
+          rounds,
+          verdict,
+          closed: true,
+          reverted: true,
+          budgetExhausted: limitHit !== undefined && rounds < repairRounds,
+          ...restore,
+        };
+        if (restore.restoreError !== undefined) {
+          errorMessage = restore.restoreError;
         }
         break;
       }
       rounds += 1;
-      const appendix = options.repairAppendix?.({
-        round: rounds,
-        maxRounds: repairRounds,
-        outcome: verified.outcome,
-      });
+      // 注入点出错不拖垮这一步：告警后以空附加内容照常回炉（不进账本）
+      let appendix: string | undefined;
+      try {
+        appendix = options.repairAppendix?.({
+          round: rounds,
+          maxRounds: repairRounds,
+          outcome: verified.outcome,
+        });
+      } catch (error) {
+        warn(
+          error,
+          `回炉反馈附加内容告警：注入点出错：${failureDetail(error)}（本轮反馈不带附加内容，回炉照常进行）`
+        );
+      }
       run = await handle.run(
         buildRepairFeedback({
           command: options.verify.command,
@@ -336,6 +407,17 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   } catch (error) {
     status = "failed";
     errorMessage = error instanceof Error ? error.message : String(error);
+    // 回炉途中出现异常：仍给回炉结果，标明这一步未收尾，调用方不致误以为回炉关闭
+    if (repairRounds > 0 && repair === undefined) {
+      repair = {
+        rounds,
+        ...(lastVerdict !== undefined ? { verdict: lastVerdict } : {}),
+        closed: false,
+        reverted: false,
+        budgetExhausted: false,
+        restored: false,
+      };
+    }
   } finally {
     clearTimeout(timer);
     unsubscribe();

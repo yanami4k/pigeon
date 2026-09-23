@@ -131,8 +131,10 @@ test("评测跑批开启回炉：结果行带回炉轮数、验证门最终结�
     assert.deepEqual(row.repair, {
       rounds: 1,
       verdict: "pass",
+      closed: true,
       reverted: false,
       budgetExhausted: false,
+      restored: false,
     });
     assert.equal(row.verdict, "pass", "回炉修好后判据判通过");
     assert.equal(row.turns, 3, "轮次按整步汇总：首次 1 轮，回炉一轮 2 轮");
@@ -176,8 +178,11 @@ test("评测跑批回炉撤回：结果行记已撤回；误报按整步最后�
     assert.deepEqual(row.repair, {
       rounds: 1,
       verdict: "fail",
+      closed: true,
       reverted: true,
       budgetExhausted: false,
+      // 这一步一次文件都没改过（改文件的工具调用出错）：没有快照起点，无需恢复
+      restored: false,
     });
     assert.equal(row.verdict, "fail");
     assert.equal(row.falsePositive, true, "这一步最后一个 Run 自报完成而判据判失败，即误报");

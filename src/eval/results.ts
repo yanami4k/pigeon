@@ -110,12 +110,16 @@ export interface EvalResultLine {
   // M9：整次运行的墙钟耗时（环境准备、agent 运行、判分与清理）。新写的行必带；此前写下的行缺省，读侧容忍
   wallMs?: number;
   // 决策 142 / 143：回炉开启时在场——用了几轮、这一步里验证门的最终结论（不是判据的判决）、是否撤回、
-  // 撤回是否因预算耗尽而提前。回炉关闭时缺省，行形状与此前一致
+  // 撤回是否因预算先于轮数用尽而提前、这一步是否收尾、撤回时工作区是否真的恢复（没恢复成时附原因）。
+  // 回炉关闭时缺省，行形状与此前一致
   repair?: {
     rounds: number;
     verdict?: EvalVerdict;
+    closed: boolean;
     reverted: boolean;
     budgetExhausted: boolean;
+    restored: boolean;
+    restoreError?: string;
   };
   error?: string;
 }

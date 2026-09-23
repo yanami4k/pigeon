@@ -9,12 +9,15 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { summarizeProcess } from "../eval/process.ts";
+import { restoreWorkspaceTo } from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -65,7 +68,8 @@ function makeRepo(): Repo {
   writeFileSync(join(root, "a.txt"), "bug\n");
   writeFileSync(join(root, "check.mjs"), CHECK_SCRIPT);
   writeFileSync(join(root, "make-extra.mjs"), MAKE_EXTRA_SCRIPT);
-  writeFileSync(join(root, ".gitignore"), "build/\n.pigeon/\n");
+  // 治理目录 .pigeon/ 不设成忽略：恢复与快照对治理目录的过滤因此真正被测到
+  writeFileSync(join(root, ".gitignore"), "build/\n");
   git(root, ["add", "."]);
   git(root, ["commit", "-q", "-m", "init"]);
   return {
@@ -148,8 +152,10 @@ test("回炉一轮修好：第一次验证失败、反馈发回同一会话，�
     assert.deepEqual(result.repair, {
       rounds: 1,
       verdict: "pass",
+      closed: true,
       reverted: false,
       budgetExhausted: false,
+      restored: false,
     });
     assert.equal(result.verification?.verdict, "pass");
     assert.equal(result.label, "Passed");
@@ -176,6 +182,16 @@ test("回炉一轮修好：第一次验证失败、反馈发回同一会话，�
     );
     assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).label, "Passed");
     assert.equal(result.turns, 4, "指标按整步汇总：两次 Run 共 4 轮");
+    // 对比尝试的轮次与过程指标同样按整步：两次 Run 各一次 edit_file
+    assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).turns, 4);
+    assert.equal(
+      summarizeProcess({
+        sessionsDir: join(repo.root, ".pigeon", "sessions"),
+        sessionId: result.sessionId,
+        editMode: "replace",
+      }).tools.edit_file?.calls,
+      2
+    );
     assert.deepEqual(repairStepOutcome(session), {
       rounds: 1,
       verdict: "pass",
@@ -292,9 +308,13 @@ test("回炉三轮都失败：按快照撤回，快照范围内与第一个 Run 
     assert.deepEqual(result.repair, {
       rounds: 3,
       verdict: "fail",
+      closed: true,
       reverted: true,
       budgetExhausted: false,
+      restored: true,
     });
+    // 治理目录不在恢复范围内：会话文件（未被忽略）没被当作多余文件删掉
+    assert.ok(existsSync(join(repo.root, ".pigeon", "sessions")));
     assert.equal(result.label, "Failed");
     assert.equal(streamFn.calls.length, 9, "首次 3 次调用加三轮各 2 次，不开第四轮");
     // 快照范围内逐字一致：改过的受跟踪文件还原、新建的未跟踪文件删掉
@@ -433,8 +453,10 @@ test("验证无法判定（超时）：不进入回炉，按现有口径记为�
     assert.deepEqual(result.repair, {
       rounds: 0,
       verdict: "undetermined",
+      closed: true,
       reverted: false,
       budgetExhausted: false,
+      restored: false,
     });
     assert.equal(result.label, "Unknown");
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "half\n", "无法判定不撤回");
@@ -469,6 +491,7 @@ test("预算耗尽：回炉各轮与首次共用同一个总预算，耗尽即�
     });
     assert.equal(result.repair?.budgetExhausted, true);
     assert.equal(result.repair?.reverted, true);
+    assert.equal(result.repair?.restored, true);
     assert.equal(result.repair?.rounds, 1, "预算耗尽在第 1 轮回炉，不再开第 2 轮");
     assert.equal(result.repair?.verdict, "fail");
     assert.equal(result.label, "Failed");
@@ -615,6 +638,356 @@ test("回炉轮数的来源：启动参数优先于项目验证配置，缺省�
       () => parseLaunchFlags(["--repair-rounds", "3"], { usage, verify: true }),
       /--repair-rounds|未知/
     );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+// 截获标准错误（去重告警走这里）
+async function captureStderr<T>(run: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const lines: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: unknown) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: await run(), lines };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+function commitAll(root: string, message: string): string {
+  git(root, ["add", "."]);
+  git(root, ["commit", "-q", "-m", message]);
+  return git(root, ["rev-parse", "HEAD"]).trim();
+}
+
+test("恢复：agent 删掉忽略规则后，原本被忽略的依赖目录不被当作多余文件删掉", () => {
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo.root, ".gitignore"), "build/\nnode_modules/\n");
+    const start = commitAll(repo.root, "忽略依赖目录");
+    mkdirSync(join(repo.root, "node_modules", "dep"), { recursive: true });
+    writeFileSync(join(repo.root, "node_modules", "dep", "index.js"), "依赖\n");
+    const before = scopeState(repo.root);
+    // agent 删掉了 node_modules/ 这条忽略规则
+    writeFileSync(join(repo.root, ".gitignore"), "build/\n");
+    restoreWorkspaceTo(repo.root, start);
+    assert.equal(
+      readFileSync(join(repo.root, "node_modules", "dep", "index.js"), "utf8"),
+      "依赖\n"
+    );
+    assert.equal(readFileSync(join(repo.root, ".gitignore"), "utf8"), "build/\nnode_modules/\n");
+    assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：agent 新增忽略规则后，被它隐藏的新文件一次恢复即被删掉", () => {
+  const repo = makeRepo();
+  try {
+    const start = git(repo.root, ["rev-parse", "HEAD"]).trim();
+    const before = scopeState(repo.root);
+    // agent 新建 secret.txt，又加了一条规则把它藏起来
+    writeFileSync(join(repo.root, "secret.txt"), "agent 新建\n");
+    writeFileSync(join(repo.root, ".gitignore"), "build/\nsecret.txt\n");
+    restoreWorkspaceTo(repo.root, start);
+    assert.equal(existsSync(join(repo.root, "secret.txt")), false);
+    assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：agent 新建的未跟踪目录（含嵌套仓库）被整个删掉", () => {
+  const repo = makeRepo();
+  try {
+    const start = git(repo.root, ["rev-parse", "HEAD"]).trim();
+    const before = scopeState(repo.root);
+    mkdirSync(join(repo.root, "nested"), { recursive: true });
+    git(join(repo.root, "nested"), ["init", "-q"]);
+    writeFileSync(join(repo.root, "nested", "f.txt"), "嵌套仓库里的文件\n");
+    mkdirSync(join(repo.root, "newdir", "deep"), { recursive: true });
+    writeFileSync(join(repo.root, "newdir", "deep", "g.txt"), "新目录里的文件\n");
+    restoreWorkspaceTo(repo.root, start);
+    assert.equal(existsSync(join(repo.root, "nested")), false);
+    assert.equal(existsSync(join(repo.root, "newdir", "deep", "g.txt")), false);
+    assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：agent 删掉的受跟踪文件被写回", () => {
+  const repo = makeRepo();
+  try {
+    const start = git(repo.root, ["rev-parse", "HEAD"]).trim();
+    const before = scopeState(repo.root);
+    rmSync(join(repo.root, "a.txt"));
+    rmSync(join(repo.root, "make-extra.mjs"));
+    restoreWorkspaceTo(repo.root, start);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+    assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("回炉反馈的附加内容注入点抛错：告警一次、以空附加照常回炉，这一步按最后一次验证收尾", async () => {
+  const repo = makeRepo();
+  try {
+    const streamFn = createFakeStreamFn({
+      replies: [edit("bug", "half"), done(), edit("half", "fixed"), done("修好了")],
+    });
+    const { result, lines } = await captureStderr(() =>
+      runHeadless({
+        task: "把 a.txt 修好",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn,
+        yolo: true,
+        homeDir: repo.home,
+        verify: VERIFY,
+        repairRounds: 3,
+        repairAppendix: () => {
+          throw new Error("记忆索引读不出：坏文件");
+        },
+      })
+    );
+    assert.deepEqual(result.repair, {
+      rounds: 1,
+      verdict: "pass",
+      closed: true,
+      reverted: false,
+      budgetExhausted: false,
+      restored: false,
+    });
+    assert.equal(result.label, "Passed");
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "fixed\n");
+    const warnings = lines.filter((line) => line.startsWith("回炉反馈附加内容告警："));
+    assert.equal(warnings.length, 1, lines.join(""));
+    assert.match(warnings[0] ?? "", /本轮反馈不带附加内容，回炉照常进行/);
+    const feedback = lastUserText(streamFn.calls[2]);
+    assert.ok(feedback.trimEnd().endsWith(REPAIR_FEEDBACK_INSTRUCTION), feedback);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("撤回而这一步一次文件都没改过：记为已撤回，restored 为 false、不带原因，也不告警", async () => {
+  const repo = makeRepo();
+  try {
+    const { result, lines } = await captureStderr(() =>
+      runHeadless({
+        task: "把 a.txt 修好",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn: createFakeStreamFn({ replies: [done("没改"), done("还是没改")] }),
+        yolo: true,
+        homeDir: repo.home,
+        verify: VERIFY,
+        repairRounds: 1,
+      })
+    );
+    assert.deepEqual(result.repair, {
+      rounds: 1,
+      verdict: "fail",
+      closed: true,
+      reverted: true,
+      budgetExhausted: false,
+      restored: false,
+    });
+    assert.equal(result.errorMessage, undefined);
+    assert.equal(
+      lines.some((line) => line.startsWith("回炉告警：")),
+      false
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("撤回而快照出过故障、没有起点：明确报出 restoreError 并告警，不静默记为撤回", async () => {
+  const repo = makeRepo();
+  const gitDir = join(repo.root, ".git");
+  const parked = join(repo.root, ".git-parked");
+  try {
+    const { result, lines } = await captureStderr(() =>
+      runHeadless({
+        task: "把 a.txt 修好",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn: createFakeStreamFn({
+          replies: [edit("bug", "w1"), done(), edit("w1", "w2"), done()],
+        }),
+        yolo: true,
+        homeDir: repo.home,
+        verify: VERIFY,
+        repairRounds: 1,
+        // 快照挂上之后工作区不再是 git 工作区：快照生成必定失败（真实故障，不是桩）
+        onBundle: () => renameSync(gitDir, parked),
+      })
+    );
+    assert.equal(result.repair?.reverted, true);
+    assert.equal(result.repair?.restored, false);
+    assert.match(result.repair?.restoreError ?? "", /快照出过故障，没有撤回起点/);
+    assert.equal(result.errorMessage, result.repair?.restoreError);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "w2\n", "工作区未恢复");
+    const warnings = lines.filter((line) => line.startsWith("回炉告警："));
+    assert.equal(warnings.length, 1, lines.join(""));
+    assert.match(warnings[0] ?? "", /工作区仍是最后一轮修改后的样子/);
+  } finally {
+    if (existsSync(parked)) {
+      renameSync(parked, gitDir);
+    }
+    repo.cleanup();
+  }
+});
+
+test("回炉途中出现异常：结果仍带回炉字段并标明这一步未收尾，不撤回", async () => {
+  const repo = makeRepo();
+  try {
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn: createFakeStreamFn({ replies: [edit("bug", "half"), done()] }),
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 3,
+      // 回炉第一轮开跑时运行面抛错
+      onBundle: (bundle) => {
+        const run = bundle.adapter.run.bind(bundle.adapter);
+        let calls = 0;
+        bundle.adapter.run = (async (task: string) => {
+          calls += 1;
+          if (calls === 2) {
+            throw new Error("运行面故障");
+          }
+          return run(task);
+        }) as typeof bundle.adapter.run;
+      },
+    });
+    assert.equal(result.status, "failed");
+    assert.match(result.errorMessage ?? "", /运行面故障/);
+    assert.deepEqual(result.repair, {
+      rounds: 1,
+      verdict: "fail",
+      closed: false,
+      reverted: false,
+      budgetExhausted: false,
+      restored: false,
+    });
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "half\n", "未收尾不撤回");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("轮数与预算同时用满：记为轮数用满，不算预算耗尽提前撤回", async () => {
+  const repo = makeRepo();
+  try {
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn: createFakeStreamFn({
+        replies: [edit("bug", "w1"), done(), edit("w1", "w2"), done()],
+      }),
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 1,
+      // 首次 2 轮加回炉一轮 2 轮，恰好用满总轮次
+      maxTurns: 4,
+    });
+    assert.equal(result.turns, 4);
+    assert.equal(result.repair?.rounds, 1);
+    assert.equal(result.repair?.reverted, true);
+    assert.equal(result.repair?.budgetExhausted, false);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("token 预算整步共用：首次与回炉一轮各自都没到上限，合起来到了即不再回炉、提前撤回", async () => {
+  const repo = makeRepo();
+  try {
+    const before = scopeState(repo.root);
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn: createFakeStreamFn({
+        replies: [
+          edit("bug", "w1"),
+          done(),
+          { text: "想".repeat(1100) },
+          edit("w1", "fixed"),
+          done(),
+        ],
+      }),
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 3,
+      maxTokens: 1200,
+    });
+    const session = sessionOf(repo.root, result.sessionId);
+    const [firstRun, secondRun] = session.runStarteds.map((record) => record.runId);
+    const tokensOf = (runId: unknown) =>
+      session.runtimeEvents
+        .filter((event) => event.kind === "turn.completed" && event.runId === runId)
+        .reduce(
+          (sum, event) =>
+            sum + ((event.payload as { usage?: { totalTokens?: number } }).usage?.totalTokens ?? 0),
+          0
+        );
+    assert.ok(tokensOf(firstRun) < 1200, String(tokensOf(firstRun)));
+    assert.ok(tokensOf(secondRun) < 1200, String(tokensOf(secondRun)));
+    assert.equal(session.runStarteds.length, 2, "不开第 2 轮回炉");
+    assert.equal(result.repair?.rounds, 1);
+    assert.equal(result.repair?.budgetExhausted, true);
+    assert.equal(result.repair?.reverted, true);
+    assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("墙钟预算计入验证耗时：Run 内没到点、验证期间到点，即不再回炉、提前撤回", async () => {
+  const repo = makeRepo();
+  try {
+    const before = scopeState(repo.root);
+    const streamFn = createFakeStreamFn({
+      replies: [edit("bug", "w1"), done(), edit("w1", "fixed"), done()],
+    });
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn,
+      yolo: true,
+      homeDir: repo.home,
+      // 验证命令本身就比墙钟预算长
+      verify: {
+        command: `${NODE} -e "setTimeout(() => process.exit(1), 9000)"`,
+        timeoutMs: 30_000,
+      },
+      repairRounds: 3,
+      wallClockMs: 5000,
+    });
+    const session = sessionOf(repo.root, result.sessionId);
+    assert.equal(session.limitHits.length, 0, "首个 Run 在墙钟到点之前正常收尾");
+    assert.equal(streamFn.calls.length, 2, "不开回炉轮");
+    assert.equal(result.repair?.rounds, 0);
+    assert.equal(result.repair?.budgetExhausted, true);
+    assert.equal(result.repair?.reverted, true);
+    assert.deepEqual(scopeState(repo.root), before);
   } finally {
     repo.cleanup();
   }

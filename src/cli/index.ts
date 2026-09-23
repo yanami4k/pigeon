@@ -1291,7 +1291,13 @@ function repairSummary(
 ): string {
   return (
     `回炉 ${repair.rounds} 轮 ｜ 最终验证 ${repair.verdict ?? "未验证"}` +
-    (repair.reverted ? ` ｜ 已撤回${repair.budgetExhausted ? "（预算耗尽提前撤回）" : ""}` : "")
+    (repair.closed ? "" : " ｜ 这一步未收尾") +
+    (repair.reverted
+      ? ` ｜ 已撤回${repair.budgetExhausted ? "（预算耗尽提前撤回）" : ""}` +
+        (repair.restored
+          ? ""
+          : `（工作区未恢复${repair.restoreError !== undefined ? "" : "：没有改动"}）`)
+      : "")
   );
 }
 

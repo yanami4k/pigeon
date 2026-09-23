@@ -215,10 +215,12 @@ export function createCheckpointer(input: {
 }
 
 // 原地恢复到某个快照提交（决策 142：回炉到上限仍失败即撤回到这一步起点）。范围与快照相同：受跟踪的文件，
-// 加上未跟踪且未被忽略的文件；被忽略的文件与治理目录不动。只写工作树：用户的 HEAD、暂存区与分支一律不碰——
+// 加上未跟踪且未被忽略的文件（忽略规则以还原后的为准）；被忽略的文件与治理目录不动。只写工作树：用户的 HEAD、暂存区与分支一律不碰——
 // 目标内容经临时索引写回。范围限在工作区根之下（工作区根可以是仓库的子目录）。
-// 可重复执行：先删掉范围内目标里没有的文件，再把目标里的文件逐个写回；已经一致时再执行一次结果不变，
-// 进程崩溃在恢复中途时再执行一次即可
+// 顺序：先把目标里的文件（含 .gitignore）逐个写回，再按还原后的忽略规则列出范围内的文件、删掉目标里没有的——
+// 删除集若按改动后的忽略规则算，agent 删掉的忽略规则会让原本被忽略的依赖目录被当作多余文件删掉，
+// agent 新增的忽略规则会让被它隐藏的新文件漏删。
+// 可重复执行：已经一致时再执行一次结果不变，进程崩溃在恢复中途时再执行一次即可
 export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void {
   if (!isGitWorkspace(workspaceRoot)) {
     throw new NotGitWorkspaceError(`工作区不是 git 工作区，不能恢复快照：${workspaceRoot}`);
@@ -226,30 +228,34 @@ export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void 
   const split = (text: string): string[] => text.split("\0").filter((name) => name !== "");
   const governance = (name: string): boolean => name === ".pigeon" || name.startsWith(".pigeon/");
   // 路径一律相对工作区根（ls-tree 与 ls-files 在子目录里只列该子树，路径相对当前目录）
-  const target = split(git(workspaceRoot, ["ls-tree", "-r", "-z", "--name-only", commit]));
+  const target = split(git(workspaceRoot, ["ls-tree", "-r", "-z", "--name-only", commit])).filter(
+    (name) => !governance(name)
+  );
+  if (target.length > 0) {
+    const indexFile = join(tmpdir(), `pigeon-restore-index-${randomBytes(8).toString("hex")}`);
+    try {
+      const env = { GIT_INDEX_FILE: indexFile };
+      git(workspaceRoot, ["read-tree", commit], env);
+      git(workspaceRoot, ["checkout-index", "-f", "-z", "--stdin"], env, `${target.join("\0")}\0`);
+    } finally {
+      rmSync(indexFile, { force: true });
+    }
+  }
   const targetSet = new Set(target);
   const current = split(
     git(workspaceRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
   );
   for (const name of current) {
-    if (!targetSet.has(name) && !governance(name)) {
-      rmSync(join(workspaceRoot, name), { force: true });
+    if (governance(name) || targetSet.has(name)) {
+      continue;
     }
-  }
-  if (target.length === 0) {
-    return;
-  }
-  const indexFile = join(tmpdir(), `pigeon-restore-index-${randomBytes(8).toString("hex")}`);
-  try {
-    const env = { GIT_INDEX_FILE: indexFile };
-    git(workspaceRoot, ["read-tree", commit], env);
-    git(
-      workspaceRoot,
-      ["checkout-index", "-f", "-z", "--stdin"],
-      env,
-      `${target.filter((name) => !governance(name)).join("\0")}\0`
-    );
-  } finally {
-    rmSync(indexFile, { force: true });
+    // 未跟踪的嵌套仓库列成"目录/"：整个删掉；目标里有文件落在它下面时不动（那些文件已写回）
+    if (name.endsWith("/")) {
+      if (!target.some((file) => file.startsWith(name))) {
+        rmSync(join(workspaceRoot, name), { recursive: true, force: true });
+      }
+      continue;
+    }
+    rmSync(join(workspaceRoot, name), { force: true });
   }
 }
