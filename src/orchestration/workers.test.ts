@@ -4,7 +4,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ChildSettledInput, ChildSpawnedInput, WorkerWorkspace } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import { newReceiptId, newSessionId, type ReceiptId, type SessionId } from "../state/ids.ts";
+import {
+  newReceiptId,
+  newRunId,
+  newSessionId,
+  type ReceiptId,
+  type RunId,
+  type SessionId,
+} from "../state/ids.ts";
 import {
   WorkerDepthError,
   WorkerOrchestrator,
@@ -15,7 +22,7 @@ import {
   type WorkspaceProvider,
 } from "./workers.ts";
 
-type Behavior = "complete" | "hang" | "endless-turns";
+type Behavior = "complete" | "hang" | "endless-turns" | "complete-at-limit";
 
 class FakeRuntime implements WorkerRuntimeHandle {
   readonly listeners = new Set<(event: EventEnvelope) => void>();
@@ -24,6 +31,9 @@ class FakeRuntime implements WorkerRuntimeHandle {
   disposed = false;
   // M7（决策 072）：上限中止前经运行面写进 worker 自己账本的上限
   readonly limitHits: string[] = [];
+  // 每条撞上限记录落在哪次 Run 上
+  readonly limitRunIds: Array<RunId | undefined> = [];
+  readonly runId: RunId = newRunId();
   readonly #interrupt = Promise.withResolvers<void>();
   readonly behavior: Behavior;
   readonly journal: string[];
@@ -44,25 +54,35 @@ class FakeRuntime implements WorkerRuntimeHandle {
     }
   }
 
-  async run(): Promise<{ status: "completed" | "aborted" }> {
+  async run(): Promise<{ status: "completed" | "aborted"; runId: RunId }> {
     this.journal.push("run");
+    const runId = this.runId;
     if (this.behavior === "complete") {
       this.#emitTurn();
-      return { status: "completed" };
+      return { status: "completed", runId };
+    }
+    // 第三轮恰好用满上限：中止请求到达时模型已自然收尾，终态仍是完成
+    if (this.behavior === "complete-at-limit") {
+      this.#emitTurn();
+      this.#emitTurn();
+      this.#emitTurn();
+      return { status: "completed", runId };
     }
     if (this.behavior === "hang") {
       await this.#interrupt.promise;
-      return { status: "aborted" };
+      return { status: "aborted", runId };
     }
     while (!this.interrupted) {
       this.#emitTurn();
       await new Promise((resolve) => setImmediate(resolve));
     }
-    return { status: "aborted" };
+    return { status: "aborted", runId };
   }
 
-  recordLimitHit(limit: string): void {
+  recordLimitHit(limit: string, runId?: RunId): void {
+    this.journal.push("limit-hit");
     this.limitHits.push(limit);
+    this.limitRunIds.push(runId);
   }
 
   async interrupt(): Promise<void> {
@@ -191,8 +211,27 @@ test("轮次上限：达到上限中止，以 turn-limit 收尾", async () => {
   assert.equal(outcome.turns >= 3, true);
   assert.equal(runtimes.get(id)?.interrupted, true);
   assert.equal(runtimes.get(id)?.disposed, true);
-  // M7（决策 072）：撞上限先留痕（写进 worker 自己的账本），标签据此判失败而非放弃
+  // M7（决策 072）：撞上限写进 worker 自己的账本，标签据此判失败而非放弃；
+  // 072 修订：运行确以中止收尾后才写，记录落在被中止的那次 Run 上
   assert.deepEqual(runtimes.get(id)?.limitHits, ["turn-limit"]);
+  assert.deepEqual(runtimes.get(id)?.limitRunIds, [runtimes.get(id)?.runId]);
+});
+
+test("轮次上限恰好用满而自然收尾：以 completed 收尾，不写撞上限记录", async () => {
+  const { orchestrator, runtimes } = setup({ behavior: "complete-at-limit" });
+  const id = orchestrator.spawn({ role: "explorer", task: "看看", limits: { maxTurns: 3 } });
+  const outcome = await orchestrator.awaitResult(id);
+  assert.equal(outcome.status, "completed");
+  assert.equal(outcome.turns, 3);
+  assert.deepEqual(runtimes.get(id)?.limitHits, []);
+});
+
+test("墙钟上限中止同样在收尾后写撞上限记录", async () => {
+  const { orchestrator, runtimes } = setup({ behavior: "hang" });
+  const id = orchestrator.spawn({ role: "explorer", task: "看看", limits: { wallClockMs: 30 } });
+  await orchestrator.awaitResult(id);
+  assert.deepEqual(runtimes.get(id)?.limitHits, ["wall-clock-limit"]);
+  assert.deepEqual(runtimes.get(id)?.limitRunIds, [runtimes.get(id)?.runId]);
 });
 
 test("墙钟上限：超时中止，以 wall-clock-limit 收尾", async () => {

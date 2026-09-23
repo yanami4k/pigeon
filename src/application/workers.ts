@@ -383,7 +383,7 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     receiptIds: () => receiptIdsOf(bundle),
     summary: () => summaryOf(bundle),
     structured: () => structuredResultOf(summaryOf(bundle)),
-    recordLimitHit: (limit) => adapter.recordObservation("run.limit-hit", { limit }),
+    recordLimitHit: (limit, runId) => adapter.recordObservation("run.limit-hit", { limit }, runId),
     continueRun: () => adapter.continueRun(),
     dispose: () => disposeRuntime(bundle),
   };
@@ -433,7 +433,8 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
     receiptIds: () => (bundle !== undefined ? receiptIdsOf(bundle) : []),
     summary: () => (bundle !== undefined ? summaryOf(bundle) : ""),
     structured: () => (bundle !== undefined ? structuredResultOf(summaryOf(bundle)) : undefined),
-    recordLimitHit: (limit) => bundle?.adapter.recordObservation("run.limit-hit", { limit }),
+    recordLimitHit: (limit, runId) =>
+      bundle?.adapter.recordObservation("run.limit-hit", { limit }, runId),
     continueRun: async () => {
       const current = await settled;
       if (interruptedEarly) {

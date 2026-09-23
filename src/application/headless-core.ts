@@ -177,8 +177,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       return;
     }
     limitHit = reason;
-    // M7（决策 072）：先把撞到的上限写进本会话账本，再中止
-    handle.recordLimitHit?.(reason);
+    // 只发中止请求；撞上限记录等运行确以中止收尾后再写（072 修订）。
     // 中止失败不改变结果：run 以当时的终态收尾
     handle.interrupt().catch(() => {});
   };
@@ -209,6 +208,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         : await handle.run(options.task);
     status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
     errorMessage = run.errorMessage;
+    // M7（决策 072）：撞上限写进本会话账本，标签据此判失败；072 修订：只在运行确以中止收尾时写——
+    // 中止请求到达前模型已自然收尾（恰好用满最后一轮）的运行终态是完成，不写
+    if (run.status === "aborted" && limitHit !== undefined) {
+      handle.recordLimitHit?.(limitHit, run.runId);
+    }
   } catch (error) {
     status = "failed";
     errorMessage = error instanceof Error ? error.message : String(error);

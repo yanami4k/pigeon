@@ -287,11 +287,12 @@ export class PiRuntimeAdapter {
 
   // 观察记录入口（M5，决策 043 / 044）：盖当前 runId 落观察族。只在 Run 活动窗口内有意义——
   // 窗口外或未配置落盘口时跳过；写盘失败进 listenerErrors，绝不抛回调用方（观察不毒化 Run）
+  // runId 缺省取当前 Run；Run 收尾之后补记（如确以中止收尾后的撞上限记录）时由调用方显式给出
   recordObservation<K extends ObservationInput["kind"]>(
     kind: K,
-    payload: Extract<ObservationInput, { kind: K }>["payload"]
+    payload: Extract<ObservationInput, { kind: K }>["payload"],
+    runId: RunId | null = this.#currentRunId
   ): void {
-    const runId = this.#currentRunId;
     const sink = this.#eventLog;
     if (runId === null || sink?.appendObservation === undefined) {
       return;

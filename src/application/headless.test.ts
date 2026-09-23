@@ -125,8 +125,34 @@ test("headless：轮次上限触发中止，终态 turn-limit", async () => {
       ["turn-limit"]
     );
     const limitRun = session.limitHits[0]?.runId;
+    assert.equal(limitRun, result.runId, "记录落在被中止的那次 Run 上");
     assert.ok(limitRun !== undefined);
     assert.equal(labelAttempt(attemptOutcomeFacts(session, limitRun)), "Failed");
+  } finally {
+    cleanup();
+  }
+});
+
+// 072 修订：只有运行确实因上限被中止才写撞上限记录；恰好用满最后一轮、自然收尾的运行不写
+test("headless：最后一轮恰好用满上限而自然收尾——终态 completed，不写撞上限记录，标签不判失败", async () => {
+  const { root, home, cleanup } = makeWorkspace();
+  try {
+    const result = await runHeadless({
+      task: "答一句",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn: createFakeStreamFn({ replies: [{ text: "完成" }] }),
+      yolo: true,
+      maxTurns: 1,
+      homeDir: home,
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(result.turns, 1);
+    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
+    assert.deepEqual(session.limitHits, []);
+    assert.ok(result.runId !== undefined);
+    // 未配验证命令、正常完成 → 未知（072）；不因撞上限判失败
+    assert.equal(labelAttempt(attemptOutcomeFacts(session, result.runId)), "Unknown");
   } finally {
     cleanup();
   }

@@ -40,7 +40,8 @@ export type WorkerRunStatus = "completed" | "failed" | "aborted" | "unknown";
 
 // 装配根交回的 worker 运行面（PiRuntimeAdapter + 会话文件的最小操作面）
 export interface WorkerRuntimeHandle {
-  run(task: string): Promise<{ status: WorkerRunStatus; errorMessage?: string }>;
+  // runId：本次运行的 Run（运行面装起来并真正开跑时在场）；撞上限记录据此落在被中止的那次 Run 上
+  run(task: string): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
   interrupt(): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
   receiptIds(): ReceiptId[];
@@ -49,10 +50,11 @@ export interface WorkerRuntimeHandle {
   // M6（决策 064）：模型交回的结构化内容（末条 assistant 正文能解析成对象时在场）；
   // 不实现即视为没有结构化结果，既有 worker 行为不变
   structured?(): unknown;
-  // M7（决策 072）：上限中止前把撞到的上限写进 worker 自己的账本（run.limit-hit）；不实现即不留痕
-  recordLimitHit?(limit: "turn-limit" | "wall-clock-limit" | "token-limit"): void;
+  // M7（决策 072）：把撞到的上限写进 worker 自己的账本（run.limit-hit）；不实现即不留痕。
+  // 072 修订：只在运行确以中止收尾后调用，runId 指明被中止的那次 Run
+  recordLimitHit?(limit: "turn-limit" | "wall-clock-limit" | "token-limit", runId?: RunId): void;
   // M7（决策 077 / 079）：从已有消息续跑（分叉续跑）；不实现即不支持
-  continueRun?(): Promise<{ status: WorkerRunStatus; errorMessage?: string }>;
+  continueRun?(): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
   // 释放运行面并关闭 worker 会话文件
   dispose(): Promise<void>;
 }
@@ -361,12 +363,7 @@ export class WorkerOrchestrator {
         return;
       }
       entry.limitHit = reason;
-      // 先留痕再中止：上限中止在运行终态上表现为中止，标签靠这条记录判失败（072）
-      try {
-        runtime.recordLimitHit?.(reason);
-      } catch (error) {
-        this.#errors.push(error);
-      }
+      // 只发中止请求；撞上限记录等运行确以中止收尾后再写（072 修订）
       runtime.interrupt().catch((error: unknown) => {
         this.#errors.push(error);
       });
@@ -393,6 +390,15 @@ export class WorkerOrchestrator {
         status = "completed";
       } else if (run.status === "aborted") {
         status = entry.cancelRequested ? "cancelled" : (entry.limitHit ?? "aborted");
+        // 072 修订：上限中止在运行终态上只表现为中止，标签靠这条记录判失败；
+        // 中止请求到达前模型已自然收尾（恰好用满最后一轮）的运行不走到这里，不写
+        if (entry.limitHit !== undefined && !entry.cancelRequested) {
+          try {
+            runtime.recordLimitHit?.(entry.limitHit, run.runId);
+          } catch (caught) {
+            this.#errors.push(caught);
+          }
+        }
       } else {
         status = "failed";
         error = run.errorMessage ?? "运行以未知终态结束";
