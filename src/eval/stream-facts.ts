@@ -11,7 +11,7 @@ import {
   type StreamManifest,
   type TestProbe,
 } from "./stream-manifest.ts";
-import type { StreamRepoRuntime } from "./stream-profiles.ts";
+import { allPassed, type StreamRepoRuntime } from "./stream-profiles.ts";
 import { type StreamShell, StreamWorkspace, shellQuote } from "./stream-workspace.ts";
 
 export interface RangeCommit {
@@ -191,84 +191,49 @@ export interface ProbeRecord {
   kind: "parent" | "commit" | "next" | "format";
   base: string;
   tests: readonly string[];
-  exitCode: number | null;
-  timedOut: boolean;
   passed: boolean;
-  // 被杀（内存上限或超时，退出码 137）：这次探针不作判定
+  // 没拿到全部用例的结果（报告写出前被杀、续跑也没有进展）：这次探针不作判定
   environmentError: boolean;
+  // 判题探针的逐用例结果（f2p 由父提交与本提交的两次对照得出）；卡死、被记为失败的用例另列
+  passedCases?: string[];
+  failedCases?: string[];
+  stuck?: string[];
+  // 格式化比对的命令退出码
+  exitCode?: number | null;
   outputTail: string;
 }
 
-// 探针被杀：该提交记为环境错误，不再做其余探针
+// 探针没拿到全部结果：该提交记为环境错误，不再做其余探针
 class ProbeEnvironmentError extends Error {}
-
-// 容器内被 KILL 信号结束（内存上限触发的 OOM，或墙钟超时由 timeout 杀掉）
-const KILLED_EXIT = 137;
 
 function tail(text: string, max = 2000): string {
   return text.length <= max ? text : text.slice(text.length - max);
 }
 
 // 逐提交取事实。探针按规则需要才测：带测试改动的提交测父与本身；本身也不过的再测下一个提交（红测试对）；
-// 改了源代码且不成题的测格式化比对。重置点不测
+// 改了源代码且不成题的测格式化比对。重置点不测。可多路并行：每路独占一个参考工作区，各提交的探针互不依赖
+// （"下一提交"的探针只检出下一个提交的代码，不依赖它的判定）；结果按提交顺序放回，断点随每个提交测完写入
 export async function collectStreamFacts(input: {
   human: HumanRepo;
   runtime: StreamRepoRuntime;
-  reference: ReferenceWorkspace;
+  references: readonly ReferenceWorkspace[];
   rangeStart: string;
   rangeEnd: string;
   options: ProbeOptions;
 }): Promise<CollectedFacts> {
-  const { human, runtime, reference, options } = input;
+  const { human, runtime, options } = input;
+  if (input.references.length === 0) throw new Error("至少需要一个参考工作区");
   const profile = runtime.profile;
   const log = options.log ?? (() => {});
   const range = human.firstParentLog(input.rangeStart, input.rangeEnd);
-  const probes: ProbeRecord[] = [];
-  const commits: CommitFacts[] = [];
   const done = readCheckpoint(options.checkpointFile);
 
-  const runTests = async (
-    sha: string,
-    kind: ProbeRecord["kind"],
-    base: string,
-    overlayFrom: string,
-    overlay: readonly HumanFileOp[],
-    tests: readonly string[]
-  ): Promise<boolean> => {
-    await reference.checkout(base);
-    await reference.ws.applyHumanFiles(overlay, (p) => human.show(overlayFrom, p));
-    if (runtime.envSyncCommand !== null) {
-      const sync = await reference.ws.run(runtime.envSyncCommand, 120_000);
-      if (sync.exitCode !== 0)
-        throw new Error(`依赖切换失败（${base}）：${tail(sync.output, 500)}`);
-    }
-    const r = await reference.ws.run(runtime.testCommand(tests), options.testTimeoutMs);
-    const killed = r.exitCode === KILLED_EXIT || r.timedOut;
-    const passed = r.exitCode === 0 && !r.timedOut;
-    probes.push({
-      sha,
-      kind,
-      base,
-      tests,
-      exitCode: r.exitCode,
-      timedOut: r.timedOut,
-      passed,
-      environmentError: killed,
-      outputTail: tail(r.output),
-    });
-    if (killed) {
-      const label = { parent: "父提交", commit: "本提交", next: "下一提交", format: "格式化" }[
-        kind
-      ];
-      throw new ProbeEnvironmentError(
-        `${label}探针被杀（退出码 ${r.exitCode}${r.timedOut ? "，超时" : ""}），测试 ${tests.join("、")}`
-      );
-    }
-    return passed;
-  };
-
-  for (let i = 0; i < range.length; i++) {
+  const processCommit = async (
+    i: number,
+    reference: ReferenceWorkspace
+  ): Promise<{ facts: CommitFacts; probes: ProbeRecord[] }> => {
     const c = range[i] as RangeCommit;
+    const probes: ProbeRecord[] = [];
     const files = human.changes(c.parent, c.sha);
     const facts: CommitFacts = {
       sha: c.sha,
@@ -277,22 +242,62 @@ export async function collectStreamFacts(input: {
       message: c.message,
       files,
     };
-    commits.push(facts);
     const saved = done.get(c.sha);
     if (saved !== undefined) {
       if (saved.probe !== undefined) facts.probe = saved.probe;
       if (saved.nextPasses !== undefined) facts.nextPasses = saved.nextPasses;
       if (saved.formatOnly !== undefined) facts.formatOnly = saved.formatOnly;
       if (saved.environmentError !== undefined) facts.environmentError = saved.environmentError;
-      probes.push(...saved.probes);
       log(`[${i + 1}/${range.length}] ${c.sha.slice(0, 9)} 取自断点`);
-      continue;
+      return { facts, probes: saved.probes };
     }
-    const probesBefore = probes.length;
     if (profile.resetReason(facts) !== null) {
       log(`[${i + 1}/${range.length}] ${c.sha.slice(0, 9)} 重置点`);
-      continue;
+      return { facts, probes };
     }
+
+    const runTests = async (
+      kind: ProbeRecord["kind"],
+      base: string,
+      overlay: readonly HumanFileOp[],
+      tests: readonly string[]
+    ): Promise<boolean> => {
+      await reference.checkout(base);
+      await reference.ws.applyHumanFiles(overlay, (p) => human.show(c.sha, p));
+      if (runtime.envSyncCommand !== null) {
+        const sync = await reference.ws.run(runtime.envSyncCommand, 120_000);
+        if (sync.exitCode !== 0)
+          throw new Error(`依赖切换失败（${base}）：${tail(sync.output, 500)}`);
+      }
+      // 判定一律看逐用例结果，不看退出码（pytest 写完报告后可能不退出、被外壳杀掉）
+      const run = await runtime.runCases(reference.ws, tests, {
+        timeoutMs: options.testTimeoutMs,
+        scratch: `${reference.ws.root}/.git`,
+      });
+      const passed = allPassed(run);
+      probes.push({
+        sha: c.sha,
+        kind,
+        base,
+        tests,
+        passed,
+        environmentError: !run.complete,
+        passedCases: run.cases.filter((x) => x.outcome === "passed").map((x) => x.id),
+        failedCases: run.cases.filter((x) => x.outcome === "failed").map((x) => x.id),
+        stuck: run.stuck,
+        outputTail: tail(run.output),
+      });
+      if (!run.complete) {
+        const label = { parent: "父提交", commit: "本提交", next: "下一提交", format: "格式化" }[
+          kind
+        ];
+        throw new ProbeEnvironmentError(
+          `${label}探针没拿到全部用例的结果（被杀且续跑没有进展），测试 ${tests.join("、")}`
+        );
+      }
+      return passed;
+    };
+
     const kinds = new Map(files.map((f) => [f.path, profile.classifyFile(f.path)]));
     const overlay: HumanFileOp[] = files
       .filter((f) => {
@@ -310,13 +315,13 @@ export async function collectStreamFacts(input: {
     const touchesSource = files.some((f) => kinds.get(f.path) === "source");
     try {
       if (tests.length > 0) {
-        const parentPasses = await runTests(c.sha, "parent", c.parent, c.sha, overlay, tests);
-        const commitPasses = await runTests(c.sha, "commit", c.sha, c.sha, [], tests);
+        const parentPasses = await runTests("parent", c.parent, overlay, tests);
+        const commitPasses = await runTests("commit", c.sha, [], tests);
         facts.probe = { parentFails: !parentPasses, commitPasses };
         const next = range[i + 1];
         if (!commitPasses && next !== undefined) {
           const testOps = overlay.filter((o) => o.kind === "test" || o.kind === "testaux");
-          facts.nextPasses = await runTests(c.sha, "next", next.sha, c.sha, testOps, tests);
+          facts.nextPasses = await runTests("next", next.sha, testOps, tests);
         }
       }
       const isTask = facts.probe?.parentFails === true && facts.probe.commitPasses;
@@ -340,15 +345,32 @@ export async function collectStreamFacts(input: {
       }  ${facts.subject.slice(0, 60)}`
     );
     if (options.checkpointFile !== undefined) {
-      const line: CheckpointLine = { sha: c.sha, probes: probes.slice(probesBefore) };
+      const line: CheckpointLine = { sha: c.sha, probes };
       if (facts.probe !== undefined) line.probe = facts.probe;
       if (facts.nextPasses !== undefined) line.nextPasses = facts.nextPasses;
       if (facts.formatOnly !== undefined) line.formatOnly = facts.formatOnly;
       if (facts.environmentError !== undefined) line.environmentError = facts.environmentError;
       appendFileSync(options.checkpointFile, `${JSON.stringify(line)}\n`);
     }
-  }
-  return { commits, probes };
+    return { facts, probes };
+  };
+
+  const results: { facts: CommitFacts; probes: ProbeRecord[] }[] = new Array(range.length);
+  let next = 0;
+  await Promise.all(
+    input.references.map(async (reference) => {
+      for (;;) {
+        const i = next;
+        next += 1;
+        if (i >= range.length) return;
+        results[i] = await processCommit(i, reference);
+      }
+    })
+  );
+  return {
+    commits: results.map((r) => r.facts),
+    probes: results.flatMap((r) => r.probes),
+  };
 }
 
 async function formatOnly(
@@ -371,7 +393,6 @@ async function formatOnly(
     base: c.parent,
     tests: paths,
     exitCode: r.exitCode,
-    timedOut: r.timedOut,
     passed: same,
     environmentError: false,
     outputTail: tail(r.output),

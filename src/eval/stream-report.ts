@@ -5,6 +5,7 @@
 // 终点指流清单里该流的最后一步；没跑到那一步（试跑或中途停止）的记为未跑完，不参与补跑比较。
 import { ATTRIBUTION_LABELS, type FailureAttribution } from "./stream-attribution.ts";
 import {
+  MEMORY_WARN_RATIO,
   STREAM_CONDITIONS,
   type StreamCondition,
   type StreamResultLine,
@@ -36,6 +37,39 @@ const KIND_LABELS: Record<string, string> = {
 
 function pct(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)}%`;
+}
+
+const mib = (bytes: number) => `${Math.round(bytes / 1048576)} MiB`;
+
+// 人的基准（每步全量跑的多遍）：内存峰值的最大值与其上限、单遍最长墙钟、最慢的用例
+export function baselineFacts(lines: readonly StreamResultLine[]): string {
+  let peak: { bytes: number; limit: number | null; seq: number } | null = null;
+  let longestMs = 0;
+  let slowest: { id: string; seconds: number } | null = null;
+  for (const l of lines) {
+    const f = l.fullPassRate;
+    if (f === null) continue;
+    for (const r of f.humanRuns ?? []) {
+      if (r.peakBytes !== null && (peak === null || r.peakBytes > peak.bytes)) {
+        peak = { bytes: r.peakBytes, limit: r.limitBytes, seq: l.seq };
+      }
+      longestMs = Math.max(longestMs, r.wallMs);
+    }
+    const s = f.humanSlowest ?? null;
+    if (s !== null && (slowest === null || s.seconds > slowest.seconds)) slowest = s;
+  }
+  const peakText =
+    peak === null
+      ? "内存峰值未测得"
+      : `内存峰值最大 ${mib(peak.bytes)}（第 ${peak.seq} 步` +
+        (peak.limit === null
+          ? "，容器未设上限）"
+          : `，上限 ${mib(peak.limit)}${peak.bytes > peak.limit * MEMORY_WARN_RATIO ? `，超过上限的 ${MEMORY_WARN_RATIO * 100}%` : ""}）`);
+  const slowText =
+    slowest === null
+      ? "最慢用例未测得"
+      : `最慢用例 ${slowest.id}（${slowest.seconds.toFixed(1)} 秒）`;
+  return `${peakText}；单遍最长 ${(longestMs / 60_000).toFixed(1)} 分；${slowText}`;
 }
 
 function conditionsIn(lines: readonly StreamResultLine[]): StreamCondition[] {
@@ -158,6 +192,17 @@ export function renderStreamReport(
       })
       .join("；");
     out.push(`终点（按条数）：${endText}`, "");
+    // 对照口径 A（分母为人的代码上收集出的全部用例）与人的代码上时过时不过的用例数，取第一遍的末步
+    const endA = conditions
+      .map((c) => {
+        const last = ofStream.find((l) => l.condition === c && l.seq === s.lastSeq);
+        return last?.fullPassRate === null || last === undefined
+          ? `${c} 未跑完`
+          : `${c} ${pct(last.fullPassRate.byCountCollected.rate)}（人的代码上时过时不过 ${last.fullPassRate.humanFlaky} 条）`;
+      })
+      .join("；");
+    out.push(`终点对照（按条数，分母为人收集出的全部用例）：${endA}`, "");
+    out.push(`人的基准：${baselineFacts(ofStream)}`, "");
 
     out.push("### 次要指标（第一遍）", "");
     out.push(

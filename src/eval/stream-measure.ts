@@ -11,6 +11,8 @@ export interface TestCaseResult {
   // 相对工作区根的测试文件路径；报告里没有文件信息时为 null
   file: string | null;
   outcome: CaseOutcome;
+  // 报告里的用例耗时（秒）；没有时缺省
+  seconds?: number;
 }
 
 const ENTITIES: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
@@ -44,19 +46,60 @@ export function relativeTestPath(file: string, root: string, relativeBase = ""):
   return `${norm(relativeBase)}/${f.replace(/^\.\//, "")}`;
 }
 
+export type JunitStyle = "node" | "pytest";
+
+// pytest（xunit1）用例的标识：与 pytest 的 nodeid 一致——文件::类::用例（类名由 classname 去掉模块路径得到，
+// 嵌套类逐层用 :: 连接）；收集失败的条目 classname 为空、name 为模块名，记为"文件::<collection>"——
+// 文件取 file（pytest 9 起才有），没有时由模块名换算
+function pytestCase(
+  a: Map<string, string>,
+  root: string,
+  relativeBase: string
+): { id: string; file: string } {
+  const name = a.get("name") ?? "";
+  const classname = a.get("classname") ?? "";
+  const fileAttr = a.get("file");
+  const prefix = relativeBase === "" ? "" : `${relativeBase.replace(/\/+$/, "")}/`;
+  if (classname === "" || fileAttr === undefined) {
+    const file =
+      fileAttr !== undefined
+        ? relativeTestPath(fileAttr, root, relativeBase)
+        : `${prefix}${(classname !== "" ? classname : name).replace(/\./g, "/")}.py`;
+    return { id: `${file}::<collection>`, file };
+  }
+  const file = relativeTestPath(fileAttr, root, relativeBase);
+  const module = file.slice(prefix.length).replace(/\.py$/, "").replace(/\//g, ".");
+  const cls = classname.startsWith(`${module}.`) ? classname.slice(module.length + 1) : "";
+  const parts = [file, ...(cls === "" ? [] : cls.split(".")), name];
+  return { id: parts.join("::"), file };
+}
+
 // 解析 junit 报告。失败与出错（含测试文件加载失败，两种报告器都记成一条出错用例）一律记 failed
-export function parseJunitCases(xml: string, root: string, relativeBase = ""): TestCaseResult[] {
+export function parseJunitCases(
+  xml: string,
+  root: string,
+  relativeBase = "",
+  style: JunitStyle = "node"
+): TestCaseResult[] {
   const body = xml.replace(/<!--[\s\S]*?-->/g, "");
   const tag = /<(\/?)(testsuite|testcase|failure|error|skipped)\b([^>]*?)(\/?)>/g;
   const suites: string[] = [];
   const out: TestCaseResult[] = [];
-  let open: { name: string; file: string | null; key: string; outcome: CaseOutcome } | null = null;
+  let open: {
+    name: string;
+    file: string | null;
+    key: string;
+    id?: string;
+    outcome: CaseOutcome;
+    seconds?: number;
+  } | null = null;
   const finish = () => {
     if (open === null) return;
     out.push({
-      id: `${open.key}::${[...suites, open.name].join("::")}`,
+      id: open.id ?? `${open.key}::${[...suites, open.name].join("::")}`,
       file: open.file,
       outcome: open.outcome,
+      ...(open.seconds !== undefined ? { seconds: open.seconds } : {}),
     });
     open = null;
   };
@@ -73,14 +116,27 @@ export function parseJunitCases(xml: string, root: string, relativeBase = ""): T
         continue;
       }
       const a = attrs(rest);
-      const fileAttr = a.get("file");
-      const file = fileAttr === undefined ? null : relativeTestPath(fileAttr, root, relativeBase);
-      open = {
-        name: a.get("name") ?? "",
-        file,
-        key: file ?? a.get("classname") ?? "",
-        outcome: "passed",
-      };
+      if (style === "pytest") {
+        const c = pytestCase(a, root, relativeBase);
+        open = {
+          name: a.get("name") ?? "",
+          file: c.file,
+          key: c.file,
+          id: c.id,
+          outcome: "passed",
+        };
+      } else {
+        const fileAttr = a.get("file");
+        const file = fileAttr === undefined ? null : relativeTestPath(fileAttr, root, relativeBase);
+        open = {
+          name: a.get("name") ?? "",
+          file,
+          key: file ?? a.get("classname") ?? "",
+          outcome: "passed",
+        };
+      }
+      const time = Number(a.get("time"));
+      if (a.has("time") && Number.isFinite(time)) open.seconds = time;
       if (selfClosing === "/") finish();
       continue;
     }

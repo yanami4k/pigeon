@@ -12,17 +12,17 @@ import {
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
 
-test("探针被杀（内存上限或超时，退出码 137）记为环境错误：不算父败或本败、不再做后续探针、清单单列且待定处理", async () => {
+test("探针在报告写出前被杀、拿不到全部用例的结果：记为环境错误，不算父败或本败、不再做后续探针、清单单列且待定处理", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-facts-env-"));
   try {
     const dir = join(base, "human");
     const commitAll = toyRepo(dir);
     const start = commitAll({ "src/base.txt": "base\n" }, "Start");
-    // 父提交上没有 fix.txt 时，这个测试以 137 退出（模拟容器内存超限被杀）
+    // 父提交上没有 fix.txt 时，这个测试把写报告的外壳杀掉（模拟容器内存超限，报告没写完）
     const runaway = commitAll(
       {
         "src/fix.txt": "fixed\n",
-        "src/fix.test.sh": "[ -f src/fix.txt ] || exit 137\n",
+        "src/fix.test.sh": "[ -f src/fix.txt ] || kill -9 $PPID\n",
       },
       "Fix runaway"
     );
@@ -34,14 +34,14 @@ test("探针被杀（内存上限或超时，退出码 137）记为环境错误�
     const facts = await collectStreamFacts({
       human,
       runtime: toyRuntime,
-      reference,
+      references: [reference],
       rangeStart: start,
       rangeEnd: runaway,
       options: { testTimeoutMs: 30_000 },
     });
     const c = facts.commits[0];
     assert.equal(c?.probe, undefined, "不记父败或本败");
-    assert.match(c?.environmentError ?? "", /父提交探针被杀（退出码 137）/);
+    assert.match(c?.environmentError ?? "", /父提交探针没拿到全部用例的结果/);
     assert.equal(c?.formatOnly, undefined, "不再做后续探针");
     assert.deepEqual(
       facts.probes.map((p) => [p.kind, p.environmentError]),
@@ -87,7 +87,7 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
     const facts = await collectStreamFacts({
       human,
       runtime: toyRuntime,
-      reference,
+      references: [reference],
       rangeStart: start,
       rangeEnd: docs,
       options: { testTimeoutMs: 30_000 },
@@ -139,7 +139,7 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
     const first = await collectStreamFacts({
       human,
       runtime: toyRuntime,
-      reference,
+      references: [reference],
       rangeStart: start,
       rangeEnd: docs,
       options: { testTimeoutMs: 30_000, checkpointFile: checkpoint },
@@ -151,7 +151,7 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
     const again = await collectStreamFacts({
       human,
       runtime: toyRuntime,
-      reference: untouchable,
+      references: [untouchable],
       rangeStart: start,
       rangeEnd: docs,
       options: { testTimeoutMs: 30_000, checkpointFile: checkpoint },

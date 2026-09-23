@@ -18,7 +18,11 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     finalVerdict: null,
     fullPassRate: {
       byCount: { passed: 3, total: 4, rate: 0.75 },
+      byCountCollected: { passed: 3, total: 5, rate: 0.6 },
       byTask: { passed: 1, total: 1, rate: 1 },
+      humanFlaky: 0,
+      humanRuns: [{ peakBytes: 500 * 1048576, limitBytes: 2048 * 1048576, wallMs: 60_000 }],
+      humanSlowest: { id: "src/a.test.ts::slow", seconds: 3.5 },
     },
     regressions: 0,
     quality: { typeErrors: 0, formatErrors: 0, layerViolations: 0 },

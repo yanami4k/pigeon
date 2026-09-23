@@ -1,5 +1,8 @@
 // 两个被测仓库的出题配置（决策 141、152、153）：文件归类、重置点与验证门命令，开跑前写死。
 import type { CommitFacts, RepoProfile, StreamFileKind } from "./stream-manifest.ts";
+import { parseJunitCases, type TestCaseResult } from "./stream-measure.ts";
+import { runPytestResilient } from "./stream-pytest.ts";
+import type { StreamWorkspace } from "./stream-workspace.ts";
 
 const PIGEON_ENV_FILES = new Set([
   "package.json",
@@ -80,12 +83,22 @@ export const strandsProfile: RepoProfile = {
   },
   // 按其 CI 定义（python-test-lint.yml 与 pyproject 的 hatch 脚本）：格式检查、ruff、mypy、单测；
   // 单测只跑 tests/，需要网络的 tests_integ 不在其内。被测包以源码目录直接导入（不做可编辑安装），
-  // 测量副本里跑的才是副本自己的代码。仓库给 pytest 设了每条 90 秒的单测超时，这里只把超时的结束方式改为 thread：
-  // 缺省的信号方式打断不了异步循环里失控的用例（窗口内有一条在父提交上失控、4 分钟内吃满 4 GB）
+  // 测量副本里跑的才是副本自己的代码。单测一步：
+  //   --continue-on-collection-errors：一个文件收集出错不中断整次运行，其余用例照常跑（缺省会一条都不跑）；
+  //   pytest 在报告写完后若因残留线程或事件循环不退出，外壳等 5 秒后杀掉它；通过与否看报告里有没有失败或出错的用例（不依赖计数属性）；
+  //   简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈
   gateCommand: [
     "sh",
     "-c",
-    'cd strands-py && ruff format --check && ruff check && mypy ./src ./tests_typing && PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider -o timeout_method=thread',
+    [
+      "cd strands-py && ruff format --check && ruff check && mypy ./src ./tests_typing &&",
+      'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
+      '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors',
+      '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
+      'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
+      'wait "$p" 2>/dev/null; true; } &&',
+      '[ -s "$j" ] && ! grep -Eq \'<(failure|error)[ />]\' "$j"',
+    ].join(" "),
   ],
 };
 
@@ -106,6 +119,28 @@ export function countQuality(
   return counted[0]?.[1] !== undefined ? Number(counted[0][1]) : counted.length;
 }
 
+// 跑一组测试文件得到的逐用例结果
+export interface CaseRun {
+  cases: TestCaseResult[];
+  // 卡死、被记为失败的用例
+  stuck: string[];
+  // 全部用例都有结果（写出了报告）；否则只拿到了部分
+  complete: boolean;
+  output: string;
+}
+
+export interface RunCasesOptions {
+  timeoutMs: number;
+  // 在哪个目录跑（缺省工作区根）；报告与中间文件放在 scratch 目录
+  cwd?: string;
+  scratch: string;
+}
+
+// 这组用例是否全部通过：有结果、全有结果、没有失败（跳过不算失败）
+export function allPassed(run: CaseRun): boolean {
+  return run.complete && run.cases.length > 0 && run.cases.every((c) => c.outcome !== "failed");
+}
+
 // 仓库在容器里怎么跑：判题、全量测量、格式化比对、依赖目录与环境切换。命令都在工作区根执行
 export interface StreamRepoRuntime {
   // 次要指标（145）：类型错误、格式错误、分层违规；仓库没有的一项为 null
@@ -115,12 +150,12 @@ export interface StreamRepoRuntime {
     layer: QualityCheck | null;
   };
   profile: RepoProfile;
-  // 只要退出码：给定测试文件全部通过即 0
-  testCommand(tests: readonly string[]): string[];
-  // 全量测量：同上，另把 junit 报告写到 junitPath
-  junitTestCommand(tests: readonly string[], junitPath: string): string[];
-  // junit 报告里相对路径的起算目录（相对仓库根）
-  junitRelativeBase: string;
+  // 跑给定测试文件、取逐用例结果：判题、探针、全量测量与人的基准共用。判定一律看逐用例结果，不看退出码
+  runCases(
+    ws: StreamWorkspace,
+    tests: readonly string[],
+    options: RunCasesOptions
+  ): Promise<CaseRun>;
   // 格式化（只做格式与 import 整理，不含 lint 自动修复），就地改写给定文件
   formatCommand(files: readonly string[]): string[];
   // 预装在工作区根、被 .gitignore 忽略的依赖目录；测量副本以链接接上
@@ -128,6 +163,38 @@ export interface StreamRepoRuntime {
   // 写入人的环境文件后执行：按当前依赖声明离线切换到对应的冻结依赖组合；没有则为 null
   envSyncCommand: readonly string[] | null;
 }
+
+async function readOrNull(ws: StreamWorkspace, file: string): Promise<string | null> {
+  try {
+    const text = (await ws.readFile(file)).toString("utf8");
+    return text.trim() === "" ? null : text;
+  } catch {
+    return null;
+  }
+}
+
+// 跑一次、读 node 形式的 junit 报告（本仓库与测试用的合成仓库）
+export async function runJunitOnce(
+  ws: StreamWorkspace,
+  command: (junitPath: string) => string[],
+  options: RunCasesOptions
+): Promise<CaseRun> {
+  const junit = `${options.scratch}/pigeon-cases-junit.xml`;
+  await ws.run(["rm", "-f", junit], 30_000, options.cwd);
+  const r = await ws.run(command(junit), options.timeoutMs, options.cwd);
+  const xml = await readOrNull(ws, junit);
+  // 报告写完才算完整：进程在写报告途中被杀会留下没有结尾的文件
+  const complete = xml?.includes("</testsuites>") === true && !r.timedOut;
+  return {
+    cases: xml === null ? [] : parseJunitCases(xml, options.cwd ?? ws.root, "", "node"),
+    stuck: [],
+    complete,
+    output: r.output,
+  };
+}
+
+// 本仓库单条用例的超时：卡死的用例在这里记失败，不拖到整次运行的墙钟（探针、判题、全量测量、人的基准同一个）
+export const PIGEON_TEST_TIMEOUT_MS = 120_000;
 
 export const pigeonRuntime: StreamRepoRuntime = {
   profile: pigeonProfile,
@@ -139,15 +206,22 @@ export const pigeonRuntime: StreamRepoRuntime = {
       pattern: /(\d+) dependency violations?/,
     },
   },
-  testCommand: (tests) => ["node", "--test", ...tests],
-  junitTestCommand: (tests, junitPath) => [
-    "node",
-    "--test",
-    "--test-reporter=junit",
-    `--test-reporter-destination=${junitPath}`,
-    ...tests,
-  ],
-  junitRelativeBase: "",
+  runCases: (ws, tests, options) =>
+    runJunitOnce(
+      ws,
+      (junit) => [
+        "node",
+        "--test",
+        `--test-timeout=${PIGEON_TEST_TIMEOUT_MS}`,
+        "--test-reporter=junit",
+        `--test-reporter-destination=${junit}`,
+        // 标准输出另留一份逐条报告：失败归因要从报错文案里取找不到的文件与名字
+        "--test-reporter=spec",
+        "--test-reporter-destination=stdout",
+        ...tests,
+      ],
+      options
+    ),
   formatCommand: (files) => [
     "node_modules/.bin/biome",
     "check",
@@ -172,6 +246,18 @@ export const STRANDS_ENV_VARIANTS: readonly { name: string; commit: string }[] =
 const inStrands = (tests: readonly string[]) =>
   tests.map((t) => (t.startsWith(STRANDS_ROOT) ? t.slice(STRANDS_ROOT.length) : t));
 
+// strands 跑一组测试的外壳：pytest 在后台跑，外壳每秒看一次——报告写出后等 5 秒杀掉（残留线程或事件循环会让它不退出），
+// 到墙钟也杀掉（外层的 timeout 只杀得到外壳，杀不到后台的 pytest）。-v 的逐行进度供被杀时收回已完成的用例
+export const STRANDS_PYTEST_SCRIPT = [
+  'cd strands-py && j="$1"; lim="$2"; shift 2; rm -f "$j";',
+  'PYTHONPATH="$PWD/src" python -m pytest -v -p no:cacheprovider --continue-on-collection-errors',
+  '-o junit_family=xunit1 --junitxml="$j" "$@" & p=$!; t=0;',
+  'while kill -0 "$p" 2>/dev/null; do',
+  'if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi;',
+  'if [ "$t" -ge "$lim" ]; then kill -9 "$p" 2>/dev/null; break; fi;',
+  'sleep 1; t=$((t + 1)); done; wait "$p" 2>/dev/null',
+].join(" ");
+
 export const strandsRuntime: StreamRepoRuntime = {
   profile: strandsProfile,
   quality: {
@@ -185,22 +271,41 @@ export const strandsRuntime: StreamRepoRuntime = {
     },
     layer: null,
   },
-  testCommand: (tests) => [
-    "sh",
-    "-c",
-    'cd strands-py && PYTHONPATH="$PWD/src" python -m pytest -q -p no:cacheprovider -o timeout_method=thread "$@"',
-    "sh",
-    ...inStrands(tests),
-  ],
-  junitTestCommand: (tests, junitPath) => [
-    "sh",
-    "-c",
-    'cd strands-py && j="$1"; shift; PYTHONPATH="$PWD/src" python -m pytest -q -p no:cacheprovider -o timeout_method=thread -o junit_family=xunit1 --junitxml="$j" "$@"',
-    "sh",
-    junitPath,
-    ...inStrands(tests),
-  ],
-  junitRelativeBase: "strands-py",
+  async runCases(ws, tests, options) {
+    const junit = `${options.scratch}/pigeon-cases-junit.xml`;
+    const limitSec = Math.max(1, Math.floor(options.timeoutMs / 1000));
+    const out = await runPytestResilient(
+      async (deselect) => {
+        const r = await ws.run(
+          [
+            "sh",
+            "-c",
+            STRANDS_PYTEST_SCRIPT,
+            "sh",
+            junit,
+            String(limitSec),
+            ...inStrands(tests),
+            ...deselect.flatMap((d) => ["--deselect", d]),
+          ],
+          options.timeoutMs + 60_000,
+          options.cwd
+        );
+        return {
+          exitCode: r.exitCode,
+          timedOut: r.timedOut,
+          junit: await readOrNull(ws, junit),
+          output: r.output,
+        };
+      },
+      { root: options.cwd ?? ws.root, relativeBase: "strands-py" }
+    );
+    return {
+      cases: out.cases,
+      stuck: out.stuck,
+      complete: out.complete,
+      output: out.outputs.join("\n"),
+    };
+  },
   formatCommand: (files) => [
     "sh",
     "-c",

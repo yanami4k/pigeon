@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { endValues, renderStreamReport, rerunHints } from "./stream-report.ts";
+import { baselineFacts, endValues, renderStreamReport, rerunHints } from "./stream-report.ts";
 import { sampleLine } from "./stream-result-fixtures.ts";
 import type { StreamResultLine } from "./stream-results.ts";
 
@@ -17,7 +17,14 @@ function line(
   return sampleLine({
     condition,
     seq,
-    fullPassRate: { byCount: rate(...byCount), byTask: rate(1, 1) },
+    fullPassRate: {
+      byCount: rate(...byCount),
+      byCountCollected: rate(byCount[0], byCount[1] + 1),
+      byTask: rate(1, 1),
+      humanFlaky: 0,
+      humanRuns: [],
+      humanSlowest: null,
+    },
     ...extra,
   });
 }
@@ -73,4 +80,50 @@ test("报告：曲线表、终点、次要指标与补跑提示", () => {
   assert.match(md, /回归 1/);
   assert.match(md, /no-gate 与 minimal：终点相差 10\.0 个百分点/);
   assert.doesNotMatch(md, /提示补跑/);
+});
+
+test("人的基准：取各步各遍内存峰值的最大值与其上限，超过上限的 75% 时标出；单遍最长墙钟；最慢用例", () => {
+  const MiB = 1048576;
+  const withBaseline = (
+    seq: number,
+    runs: { peakBytes: number | null; limitBytes: number | null; wallMs: number }[],
+    slowest: { id: string; seconds: number } | null
+  ) =>
+    sampleLine({
+      seq,
+      fullPassRate: {
+        byCount: rate(1, 1),
+        byCountCollected: rate(1, 1),
+        byTask: rate(1, 1),
+        humanFlaky: 0,
+        humanRuns: runs,
+        humanSlowest: slowest,
+      },
+    });
+  const lines = [
+    withBaseline(
+      1,
+      [
+        { peakBytes: 900 * MiB, limitBytes: 2048 * MiB, wallMs: 240_000 },
+        { peakBytes: 1600 * MiB, limitBytes: 2048 * MiB, wallMs: 300_000 },
+      ],
+      { id: "t.py::a", seconds: 12.5 }
+    ),
+    withBaseline(2, [{ peakBytes: 1000 * MiB, limitBytes: 2048 * MiB, wallMs: 200_000 }], {
+      id: "t.py::b",
+      seconds: 40.25,
+    }),
+  ];
+  assert.equal(
+    baselineFacts(lines),
+    "内存峰值最大 1600 MiB（第 1 步，上限 2048 MiB，超过上限的 75%）；单遍最长 5.0 分；最慢用例 t.py::b（40.3 秒）"
+  );
+  assert.equal(
+    baselineFacts([withBaseline(1, [{ peakBytes: null, limitBytes: null, wallMs: 60_000 }], null)]),
+    "内存峰值未测得；单遍最长 1.0 分；最慢用例未测得"
+  );
+  assert.match(
+    renderStreamReport(lines, { title: "t", streams: [{ id: "s1", lastSeq: 2 }] }),
+    /人的基准：内存峰值最大 1600 MiB/
+  );
 });

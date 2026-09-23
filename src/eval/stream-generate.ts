@@ -40,6 +40,8 @@ export interface GenerateManifestOptions {
   // docker run 的附加参数（内存上限等）；不得含打开网络的选项
   containerRunArgs?: readonly string[];
   testTimeoutMs?: number;
+  // 并行的参考容器数（缺省 1）
+  concurrency?: number;
   log?: (line: string) => void;
 }
 
@@ -59,28 +61,38 @@ export async function generateStreamManifest(
   const log = options.log ?? (() => {});
   const human = gitHumanRepo(options.repoDir);
   const rangeEnd = human.resolve(options.rangeEnd);
-  const container = `pigeon-stream-probe-${options.runtime.profile.name}-${process.pid}-${Date.now()}`;
-  await startWorkspaceContainer({
-    image: options.image,
-    name: container,
-    docker,
-    runArgs: [
-      ...WORKSPACE_NETWORK_ARGS,
-      "--label",
-      "pigeon.stream-probe=1",
-      ...(options.containerRunArgs ?? []),
-    ],
-  });
+  const lanes = options.concurrency ?? 1;
+  const containers = Array.from(
+    { length: lanes },
+    (_, k) =>
+      `pigeon-stream-probe-${options.runtime.profile.name}-${process.pid}-${Date.now()}-${k}`
+  );
   try {
-    const reference = new ReferenceWorkspace(
-      dockerStreamShell({ container, root: STREAM_WORKSPACE_ROOT, docker })
-    );
-    log(`参考容器 ${container} 就绪，装入人的历史至 ${rangeEnd.slice(0, 9)}`);
-    await reference.init(human.bundle(rangeEnd), rangeEnd);
+    const bundle = human.bundle(rangeEnd);
+    const references: ReferenceWorkspace[] = [];
+    for (const container of containers) {
+      await startWorkspaceContainer({
+        image: options.image,
+        name: container,
+        docker,
+        runArgs: [
+          ...WORKSPACE_NETWORK_ARGS,
+          "--label",
+          "pigeon.stream-probe=1",
+          ...(options.containerRunArgs ?? []),
+        ],
+      });
+      const reference = new ReferenceWorkspace(
+        dockerStreamShell({ container, root: STREAM_WORKSPACE_ROOT, docker })
+      );
+      await reference.init(bundle, rangeEnd);
+      references.push(reference);
+      log(`参考容器 ${container} 就绪，装入人的历史至 ${rangeEnd.slice(0, 9)}`);
+    }
     const facts = await collectStreamFacts({
       human,
       runtime: options.runtime,
-      reference,
+      references,
       rangeStart: options.rangeStart,
       rangeEnd,
       // 断点文件与清单同目录：同一条命令重跑即从断点续测
@@ -90,6 +102,8 @@ export async function generateStreamManifest(
         checkpointFile: checkpointPathFor(options.outFile),
       },
     });
+    // 探针记录先写：出清单报错（例如有探针环境错误待定）时也留得下
+    writeFileSync(probesPathFor(options.outFile), `${JSON.stringify(facts.probes, null, 2)}\n`);
     const manifest = manifestFromFacts({
       human,
       runtime: options.runtime,
@@ -97,10 +111,11 @@ export async function generateStreamManifest(
       facts,
     });
     writeFileSync(options.outFile, `${JSON.stringify(manifest, null, 2)}\n`);
-    writeFileSync(probesPathFor(options.outFile), `${JSON.stringify(facts.probes, null, 2)}\n`);
     return manifest;
   } finally {
-    await removeWorkspaceContainer(container, docker).catch(() => {});
+    for (const container of containers) {
+      await removeWorkspaceContainer(container, docker).catch(() => {});
+    }
   }
 }
 

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RepoProfile, StreamFileKind } from "./stream-manifest.ts";
-import type { StreamRepoRuntime } from "./stream-profiles.ts";
+import { runJunitOnce, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamEnvFactory } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { StreamWorkspace } from "./stream-workspace.ts";
@@ -21,11 +21,11 @@ export const toyProfile: RepoProfile = {
 };
 
 const JUNIT_SCRIPT = [
-  'out="$1"; shift',
+  'out="$1"; shift; exec 3>&1',
   "{",
   '  echo "<testsuites>"',
   "  for t; do",
-  '    if sh "$t" >/dev/null 2>&1; then echo "<testcase name=\\"case\\" file=\\"$t\\"/>";',
+  '    if sh "$t" >&3 2>&1; then echo "<testcase name=\\"case\\" file=\\"$t\\"/>";',
   '    else echo "<testcase name=\\"case\\" file=\\"$t\\"><failure message=\\"x\\"/></testcase>"; fi',
   "  done",
   '  echo "</testsuites>"',
@@ -39,10 +39,8 @@ export const toyRuntime: StreamRepoRuntime = {
     format: null,
     layer: null,
   },
-  // 退出码原样传出（被杀的 137 不能被改成 1）
-  testCommand: (tests) => ["sh", "-c", 'for t; do sh "$t" || exit $?; done', "sh", ...tests],
-  junitTestCommand: (tests, junitPath) => ["sh", "-c", JUNIT_SCRIPT, "sh", junitPath, ...tests],
-  junitRelativeBase: "",
+  runCases: (ws, tests, options) =>
+    runJunitOnce(ws, (junit) => ["sh", "-c", JUNIT_SCRIPT, "sh", junit, ...tests], options),
   formatCommand: (files) => [
     "sh",
     "-c",

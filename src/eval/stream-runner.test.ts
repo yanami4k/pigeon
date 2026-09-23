@@ -9,6 +9,7 @@ import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
+  compareRuns,
   ReferenceCases,
   runStreams,
   type StepAgent,
@@ -30,7 +31,7 @@ interface Toy {
 
 // 人的历史：起点 → 题 A（新建 a，并把已有的 base 测试改成也依赖 a）→ 维护步 → 只改文档（跳过）
 // → 只改测试（套用，base 测试不再依赖 a）→ 题 B（依赖 a）。keep 测试此后人不再改
-async function toy(): Promise<Toy> {
+async function toy(aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`): Promise<Toy> {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-runner-"));
   const dir = join(base, "human");
   const commit = toyRepo(dir);
@@ -45,7 +46,7 @@ async function toy(): Promise<Toy> {
   const c1 = commit(
     {
       "src/a.txt": "alpha\n",
-      "src/a.test.sh": `${NEEDS_A}grep -q alpha src/a.txt\n`,
+      "src/a.test.sh": aTest,
       "src/base.test.sh": "grep -q base src/base.txt && [ -f src/a.txt ]\n",
     },
     "Add alpha\n\nCreate src/a.txt"
@@ -259,6 +260,30 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("一次全量测量在报告写出前被杀、一条结果都没拿到：分母仍是人的代码上通过的全部用例，全部计为未通过", async () => {
+    // a 的测试在没有 a.txt 时把跑测试的外壳杀掉：人的代码上照常通过，被撤回了题 A 的 agent 代码上整次测量拿不到报告
+    const t = await toy("[ -f src/a.txt ] || kill -9 $PPID\ngrep -q alpha src/a.txt\n");
+    try {
+      const agent = scriptedAgent((input) => {
+        const root = input.target.root;
+        if (input.step.seq === 1) {
+          write(root, { "src/a.txt": "wrong\n" });
+          return { repair: { rounds: 3, finalVerdict: "fail" } };
+        }
+        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
+        return { repair: { rounds: 0, finalVerdict: "pass" } };
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, conditions: ["full"], maxSteps: 2 })
+      );
+      const r2 = readStreamResults(summary.resultsFile)[1];
+      assert.deepEqual(r2?.fullPassRate?.byCount, { passed: 0, total: 3, rate: 0 });
+      assert.deepEqual(r2?.fullPassRate?.byCountCollected, { passed: 0, total: 3, rate: 0 });
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("被打断的一步整题作废不留行，续跑从导出的流历史接着做；试跑只跑每条流前 K 步", async () => {
     const t = await toy();
     try {
@@ -332,9 +357,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       let hits = 0;
       const agent = scriptedAgent((input) => {
         const root = input.target.root;
-        const m = meters.get(
-          input.job.stream + "|" + input.job.condition + "|" + input.job.attempt
-        ) ?? {
+        const m = meters.get(`${input.job.stream}|${input.job.condition}|${input.job.attempt}`) ?? {
           requests: 0,
           input: 0,
           output: 0,
@@ -397,4 +420,84 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       rmSync(t.base, { recursive: true, force: true });
     }
   });
+});
+
+test("人的基准在报告写出前被杀、拿不全用例：报错停下，不以缺了用例的基准缩小分母", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-baseline-"));
+  try {
+    const commit = toyRepo(join(base, "human"))(
+      { "src/ok.test.sh": "true\n", "src/k.test.sh": "kill -9 $PPID\n" },
+      "Start"
+    );
+    const human = gitHumanRepo(join(base, "human"));
+    mkdirSync(join(base, "ref"));
+    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+    await ws.init(human.bundle(commit), commit);
+    const reference = new ReferenceCases({
+      reference: ws,
+      runtime: toyRuntime,
+      cacheDir: join(base, "cache"),
+    });
+    await assert.rejects(
+      reference.casesAt(commit, ["src/ok.test.sh", "src/k.test.sh"]),
+      /人的基准没拿到全部用例的结果/
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("人的基准多遍比对：每遍都通过的进分母 B；结果前后不一或某遍缺席的记为时过时不过；收集出的用例取各遍并集；最慢用例", () => {
+  const c = (id: string, outcome: "passed" | "failed", seconds?: number) => ({
+    id,
+    file: "t.py",
+    outcome,
+    ...(seconds !== undefined ? { seconds } : {}),
+  });
+  const baseline = compareRuns([
+    [c("a", "passed", 1.5), c("b", "passed"), c("c", "passed", 9), c("d", "failed")],
+    [c("a", "passed", 2), c("b", "failed"), c("d", "failed"), c("e", "passed", 3)],
+  ]);
+  assert.deepEqual(baseline.slowest, { id: "c", seconds: 9 });
+  assert.deepEqual(baseline.passing, ["a"]);
+  assert.deepEqual([...baseline.flaky].sort(), ["b", "c", "e"]);
+  assert.deepEqual(baseline.cases.map((x) => x.id).sort(), ["a", "b", "c", "d", "e"]);
+});
+
+test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、上限与墙钟；峰值超过上限的 75% 即告警", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-memory-"));
+  try {
+    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
+    const human = gitHumanRepo(join(base, "human"));
+    mkdirSync(join(base, "ref"));
+    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+    await ws.init(human.bundle(commit), commit);
+    // 假的 cgroup：占用 1,700,000,000 字节，其中页缓存 100,000,000，上限 2,000,000,000
+    const cgroup = join(base, "cgroup");
+    mkdirSync(cgroup);
+    writeFileSync(join(cgroup, "memory.current"), "1700000000\n");
+    writeFileSync(join(cgroup, "memory.stat"), "anon 1500000000\nfile 100000000\n");
+    writeFileSync(join(cgroup, "memory.max"), "2000000000\n");
+    const warnings: string[] = [];
+    const reference = new ReferenceCases({
+      reference: ws,
+      runtime: toyRuntime,
+      cacheDir: join(base, "cache"),
+      cgroupDir: cgroup.replace(/\\/g, "/"),
+      warn: (m) => warnings.push(m),
+    });
+    const baseline = await reference.casesAt(commit, ["src/ok.test.sh"]);
+    assert.deepEqual(
+      baseline.runs.map((r) => [r.peakBytes, r.limitBytes]),
+      [
+        [1_600_000_000, 2_000_000_000],
+        [1_600_000_000, 2_000_000_000],
+      ]
+    );
+    assert.ok(baseline.runs.every((r) => r.wallMs >= 0));
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0] ?? "", /内存告警.*第 1 遍.*1526 MiB.*1907 MiB 的 75%/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

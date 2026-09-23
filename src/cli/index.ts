@@ -514,7 +514,7 @@ async function evalMain(argv: string[]): Promise<void> {
 async function evalStreamManifestMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> " +
-    "--image <镜像> --out <清单文件> [--test-timeout-sec N] [--container-memory <上限>]";
+    "--image <镜像> --out <清单文件> [--test-timeout-sec N] [--container-memory <上限>] [--concurrency N]";
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -550,6 +550,7 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
     ...(values.has("--container-memory")
       ? { containerRunArgs: ["--memory", required("--container-memory")] }
       : {}),
+    ...(values.has("--concurrency") ? { concurrency: Number(required("--concurrency")) } : {}),
     log: (line) => process.stderr.write(`${line}\n`),
   });
   process.stdout.write(`${summarizeManifest(manifest)}\n`);
@@ -558,16 +559,18 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
 //   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
-//   [--container-memory <上限>] [--yolo]：
+//   [--container-memory <上限>（缺省 2g）] [--yolo]：
 // 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地或撤回、全量测量、写结果行；
 // 四个条件的模型请求都经跑批进程内置的网关（决策 155），真 key 取自 KIMI_API_KEY 与可选的 KIMI_API_KEY_2；
 // 同一输出目录重跑即从断点续跑
+const STREAM_CONTAINER_MEMORY = "2g";
+
 async function evalStreamMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
     "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-    "[--container-memory <上限>] [--yolo]";
+    "[--container-memory <上限，缺省 2g>] [--yolo]";
   const own = new Set([
     "--manifest",
     "--repo",
@@ -649,7 +652,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   const attempts = positive("--attempts");
   const concurrency = positive("--concurrency");
   const maxSteps = positive("--max-steps");
-  const memory = values.get("--container-memory");
+  // 作业容器与参考容器缺省 2g：人的基准逐遍记录内存峰值，超过上限的 75% 即告警
+  const memory = values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY;
   const miniPython = values.get("--mini-python");
   const summary = await runStreamExperiment({
     gateway: { keys, modelId },
@@ -676,7 +680,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(attempts !== undefined ? { attempts } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),
-    ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
+    containerRunArgs: ["--memory", memory],
     // 带时间戳：试跑时据此把每步的耗时与内存采样对上
     log: (line) => writeOut(`[stream] ${new Date().toISOString()} ${line}\n`),
   });

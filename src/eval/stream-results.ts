@@ -45,8 +45,17 @@ export interface StreamResultLine {
   repairRounds: number | null;
   reverted: boolean;
   finalVerdict: "pass" | "fail" | null;
-  // 全量测试通过率（跳过步沿用上一步，没有测量时为 null）
-  fullPassRate: { byCount: CountPassRate; byTask: CountPassRate } | null;
+  // 全量测试通过率（跳过步沿用上一步，没有测量时为 null）。主指标 byCount 的分母为人的代码上每遍都通过的用例（B，
+  // 145 修订）；byCountCollected 的分母为人的代码上收集出的全部用例（A，对照）；humanFlaky 为人的代码上时过时不过的用例数；
+  // humanRuns 为人的基准每一遍的内存峰值与墙钟，humanSlowest 为其中耗时最长的用例
+  fullPassRate: {
+    byCount: CountPassRate;
+    byCountCollected: CountPassRate;
+    byTask: CountPassRate;
+    humanFlaky: number;
+    humanRuns: BaselineRunFacts[];
+    humanSlowest: { id: string; seconds: number } | null;
+  } | null;
   regressions: number | null;
   quality: {
     typeErrors: number | null;
@@ -64,6 +73,15 @@ export interface StreamResultLine {
   limitPauses: LimitPauseRecord[];
   harnessRef: HarnessRef;
   error?: string;
+}
+
+// 人的基准内存峰值超过容器上限的这一比例即告警：说明作业容器的上限可能不够
+export const MEMORY_WARN_RATIO = 0.75;
+
+export interface BaselineRunFacts {
+  peakBytes: number | null;
+  limitBytes: number | null;
+  wallMs: number;
 }
 
 export const STREAM_RESULT_FIELDS = [

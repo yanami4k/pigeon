@@ -32,40 +32,61 @@ const NODE_JUNIT = `<?xml version="1.0" encoding="utf-8"?>
 </testsuites>`;
 
 // pytest -o junit_family=xunit1 的输出形状：用例带相对运行目录的 file；收集失败为 classname 为空的出错用例
-const PYTEST_JUNIT = `<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="4" time="1.2"><testcase classname="tests.strands.test_a" file="tests/strands/test_a.py" line="3" name="test_ok" time="0.001" /><testcase classname="tests.strands.test_a.TestX" file="tests/strands/test_a.py" line="9" name="test_fail[p-1]" time="0.002"><failure message="assert 1 == 2">E   assert 1 == 2</failure></testcase><testcase classname="tests.strands.test_a" file="tests/strands/test_a.py" line="20" name="test_skip" time="0"><skipped type="pytest.skip" message="later">skip</skipped></testcase><testcase classname="" name="tests.strands.test_broken" time="0"><error message="collection failure">ImportError: cannot import name 'X'</error></testcase></testsuite></testsuites>`;
+// （pytest 9 起也带 file，更早的版本没有）
+const PYTEST_JUNIT = `<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="4" time="1.2"><testcase classname="tests.strands.test_a" file="tests/strands/test_a.py" line="3" name="test_ok" time="0.001" /><testcase classname="tests.strands.test_a.TestX" file="tests/strands/test_a.py" line="9" name="test_fail[p-1]" time="0.002"><failure message="assert 1 == 2">E   assert 1 == 2</failure></testcase><testcase classname="tests.strands.test_a" file="tests/strands/test_a.py" line="20" name="test_skip" time="0"><skipped type="pytest.skip" message="later">skip</skipped></testcase><testcase classname="" name="tests.strands.test_broken" time="0"><error message="collection failure">ImportError: cannot import name 'X'</error></testcase><testcase classname="" name="tests.strands.test_gone" file="tests/strands/test_gone.py" time="0.000"><error message="collection failure">ModuleNotFoundError</error></testcase></testsuite></testsuites>`;
 
-test("junit 解析（node 报告器）：路径相对工作区根、describe 进入标识、实体解码、跳过与加载失败", () => {
+test("junit 解析（node 报告器）：路径相对工作区根、describe 进入标识、实体解码、跳过与加载失败、用例耗时", () => {
   const cases = parseJunitCases(NODE_JUNIT, "/measure");
   assert.deepEqual(cases, [
-    { id: "src/one.test.ts::a ok", file: "src/one.test.ts", outcome: "passed" },
-    { id: "src/one.test.ts::b <fail>", file: "src/one.test.ts", outcome: "failed" },
-    { id: "src/one.test.ts::grp::c", file: "src/one.test.ts", outcome: "passed" },
-    { id: "src/one.test.ts::grp::d", file: "src/one.test.ts", outcome: "skipped" },
-    { id: "src/two.test.ts::two.test.ts", file: "src/two.test.ts", outcome: "failed" },
+    { id: "src/one.test.ts::a ok", file: "src/one.test.ts", outcome: "passed", seconds: 0.004 },
+    {
+      id: "src/one.test.ts::b <fail>",
+      file: "src/one.test.ts",
+      outcome: "failed",
+      seconds: 0.0004,
+    },
+    { id: "src/one.test.ts::grp::c", file: "src/one.test.ts", outcome: "passed", seconds: 0.0004 },
+    { id: "src/one.test.ts::grp::d", file: "src/one.test.ts", outcome: "skipped", seconds: 0.0001 },
+    {
+      id: "src/two.test.ts::two.test.ts",
+      file: "src/two.test.ts",
+      outcome: "failed",
+      seconds: 0.33,
+    },
   ]);
 });
 
-test("junit 解析（pytest xunit1）：相对路径补上运行目录在仓库里的位置，收集失败记为失败", () => {
-  const cases = parseJunitCases(PYTEST_JUNIT, "/measure", "strands-py");
+test("junit 解析（pytest xunit1）：标识与 pytest 的 nodeid 一致（文件::类::用例），收集失败按模块换算出文件、记为失败", () => {
+  const cases = parseJunitCases(PYTEST_JUNIT, "/measure", "strands-py", "pytest");
   assert.deepEqual(
     cases.map((c) => [c.id, c.file, c.outcome]),
     [
       [
-        "strands-py/tests/strands/test_a.py::pytest::test_ok",
+        "strands-py/tests/strands/test_a.py::test_ok",
         "strands-py/tests/strands/test_a.py",
         "passed",
       ],
       [
-        "strands-py/tests/strands/test_a.py::pytest::test_fail[p-1]",
+        "strands-py/tests/strands/test_a.py::TestX::test_fail[p-1]",
         "strands-py/tests/strands/test_a.py",
         "failed",
       ],
       [
-        "strands-py/tests/strands/test_a.py::pytest::test_skip",
+        "strands-py/tests/strands/test_a.py::test_skip",
         "strands-py/tests/strands/test_a.py",
         "skipped",
       ],
-      ["::pytest::tests.strands.test_broken", null, "failed"],
+      [
+        "strands-py/tests/strands/test_broken.py::<collection>",
+        "strands-py/tests/strands/test_broken.py",
+        "failed",
+      ],
+      // pytest 9 给收集失败的条目也写 file
+      [
+        "strands-py/tests/strands/test_gone.py::<collection>",
+        "strands-py/tests/strands/test_gone.py",
+        "failed",
+      ],
     ]
   );
 });

@@ -27,16 +27,12 @@ import {
 } from "./stream-attribution.ts";
 import type { HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { type StreamManifest, type StreamStep, stepsOf } from "./stream-manifest.ts";
-import {
-  countPassRate,
-  parseJunitCases,
-  type TestCaseResult,
-  taskPassRate,
-} from "./stream-measure.ts";
-import { countQuality, type StreamRepoRuntime } from "./stream-profiles.ts";
+import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measure.ts";
+import { allPassed, countQuality, type StreamRepoRuntime } from "./stream-profiles.ts";
 import { renderStreamReport } from "./stream-report.ts";
 import {
   lastCompletedStep,
+  MEMORY_WARN_RATIO,
   readStreamResults,
   type StreamCondition,
   type StreamJobId,
@@ -132,8 +128,42 @@ export interface StreamEnvFactory {
 }
 
 // 人的代码在某提交上跑给定测试的用例结果（全量测量的基准）
+export interface HumanBaseline {
+  // 各遍收集出的用例的并集（A 口径的分母）
+  cases: TestCaseResult[];
+  // 每一遍都通过的用例
+  passing: string[];
+  // 各遍结果不一致（时过时不过）的用例
+  flaky: string[];
+  // 每一遍的内存峰值与墙钟（容器内按 cgroup 采样；取不到为 null）
+  runs: BaselineRun[];
+  // 各遍里耗时最长的用例
+  slowest: { id: string; seconds: number } | null;
+}
+
+export interface BaselineRun {
+  // 这一遍期间容器内存占用的峰值（不含可回收的页缓存），字节
+  peakBytes: number | null;
+  // 容器内存上限，字节；未设上限为 null
+  limitBytes: number | null;
+  wallMs: number;
+}
+
+// 在容器里每秒采样一次 cgroup 的内存占用（memory.current 减去页缓存 file），直到停止文件出现；
+// 先采样后检查，至少采一次。不在 cgroup v2 容器里（读不到文件）即不输出
+const MEMORY_SAMPLER = [
+  's="$1"; g="$2"; m="";',
+  "while :; do",
+  'c=$(cat "$g/memory.current" 2>/dev/null) || break;',
+  'f=$(awk \'$1=="file"{print $2}\' "$g/memory.stat" 2>/dev/null);',
+  '[ -z "$f" ] && f=0; u=$((c - f)); if [ -z "$m" ] || [ "$u" -gt "$m" ]; then m=$u; fi;',
+  '[ -f "$s" ] && break; sleep 1;',
+  "done;",
+  '[ -n "$m" ] && echo "peak $m" && echo "max $(cat "$g/memory.max" 2>/dev/null)"; true',
+].join(" ");
+
 export interface HumanReferenceCases {
-  casesAt(commit: string, tests: readonly string[]): Promise<TestCaseResult[]>;
+  casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline>;
 }
 
 export class StepInterruptedError extends Error {
@@ -415,17 +445,23 @@ async function measure(
   await ws.syncHumanFilesAt(copy, tree, (p) => options.human.show(step.commit, p));
   await syncEnv(options, ws, copy);
   const tests = tree.filter((e) => e.kind === "test").map((e) => e.path);
-  const junit = `${copy}/.git/stream-junit.xml`;
-  await ws.run(runtime.junitTestCommand(tests, junit), options.measureTimeoutMs ?? 1_800_000, copy);
-  let xml = "";
-  try {
-    xml = (await ws.readFile(junit)).toString("utf8");
-  } catch {
-    // 测试进程没写出报告（整体崩溃）：agent 这边一条通过的都没有
-  }
-  const agentCases = parseJunitCases(xml, copy, runtime.junitRelativeBase);
-  const humanCases = await options.reference.casesAt(step.commit, tests);
-  const humanPassing = new Set(humanCases.filter((c) => c.outcome === "passed").map((c) => c.id));
+  // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例在分母里、计为未通过
+  const run = await runtime.runCases(ws, tests, {
+    timeoutMs: options.measureTimeoutMs ?? 1_800_000,
+    cwd: copy,
+    scratch: `${copy}/.git`,
+  });
+  const agentCases = run.cases;
+  // 分母固定在人这一侧（不在 agent 的代码上现收）：B 为人的代码上每遍都通过的用例，A 为人的代码上收集出的全部用例；
+  // 时过时不过的单独计数（不进 B）
+  const human = await options.reference.casesAt(step.commit, tests);
+  const humanPassing = new Set(human.passing);
+  const humanCollected = new Set(human.cases.map((c) => c.id));
+  const humanCasesB = human.cases.map((c) =>
+    humanPassing.has(c.id)
+      ? c
+      : { ...c, outcome: c.outcome === "passed" ? ("failed" as const) : c.outcome }
+  );
   const nowPassing = new Set(agentCases.filter((c) => c.outcome === "passed").map((c) => c.id));
   let regressions = 0;
   for (const id of state.agentPassing) {
@@ -433,7 +469,7 @@ async function measure(
   }
   state.agentPassing = nowPassing;
   const tasks = steps.filter((s) => s.kind === "task" && s.seq <= step.seq);
-  const byTask = taskPassRate(tasks, humanCases, agentCases);
+  const byTask = taskPassRate(tasks, humanCasesB, agentCases);
   const quality = async (check: StreamRepoRuntime["quality"]["type"]) => {
     if (check === null) return null;
     const r = await ws.run(check.command, 900_000, copy);
@@ -442,7 +478,11 @@ async function measure(
   return {
     fullPassRate: {
       byCount: countPassRate(humanPassing, agentCases),
+      byCountCollected: countPassRate(humanCollected, agentCases),
       byTask: { passed: byTask.passed, total: byTask.total, rate: byTask.rate },
+      humanFlaky: human.flaky.length,
+      humanRuns: human.runs,
+      humanSlowest: human.slowest,
     },
     regressions,
     quality: {
@@ -551,14 +591,23 @@ async function runStep(
     await ws.normalizeTo(state.head);
     await restoreTests(options, ws, step);
     await syncEnv(options, ws);
-    const command =
-      step.kind === "task"
-        ? options.runtime.testCommand(step.judgeTests)
-        : [...options.manifest.gateCommand];
-    const judgement = await ws.run(command, options.judgeTimeoutMs ?? 1_800_000);
+    // 题：判题测试的逐用例结果（不看退出码）；维护步：验证门
+    if (step.kind === "task") {
+      const run = await options.runtime.runCases(ws, step.judgeTests, {
+        timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
+        scratch: `${ws.root}/.git`,
+      });
+      passed = allPassed(run);
+      judgeOutput = run.output;
+    } else {
+      const judgement = await ws.run(
+        [...options.manifest.gateCommand],
+        options.judgeTimeoutMs ?? 1_800_000
+      );
+      passed = judgement.exitCode === 0 && !judgement.timedOut;
+      judgeOutput = judgement.output;
+    }
     judged = true;
-    passed = judgement.exitCode === 0 && !judgement.timedOut;
-    judgeOutput = judgement.output;
     // 154：回炉开启且最后一次验证失败即已撤回
     reverted = spec.revert && result.repair?.finalVerdict === "fail";
     if (reverted) {
@@ -651,12 +700,16 @@ export function dockerStreamEnvs(input: {
   };
 }
 
-// 人的基准：在装有人的完整历史的参考工作区里检出该提交、跑同一批测试；结果按提交缓存到磁盘，各条件共用
+// 人的基准：在装有人的完整历史的参考工作区里检出该提交、跑同一批测试，跑 repeat 遍（缺省 2）逐条比对——每遍都通过的
+// 进 B 口径的分母，各遍结果不一致的标为时过时不过；第一遍收集出的全部用例即 A 口径的分母。结果按提交缓存到磁盘，各条件共用
 export class ReferenceCases implements HumanReferenceCases {
   private readonly reference: ReferenceWorkspace;
   private readonly runtime: StreamRepoRuntime;
   private readonly cacheDir: string;
   private readonly timeoutMs: number;
+  private readonly repeat: number;
+  private readonly cgroupDir: string;
+  private readonly warn: (message: string) => void;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(input: {
@@ -664,36 +717,126 @@ export class ReferenceCases implements HumanReferenceCases {
     runtime: StreamRepoRuntime;
     cacheDir: string;
     timeoutMs?: number;
+    repeat?: number;
+    // 容器内 cgroup v2 的目录（测试时指向假的目录）；告警出口缺省为标准错误
+    cgroupDir?: string;
+    warn?: (message: string) => void;
   }) {
     this.reference = input.reference;
     this.runtime = input.runtime;
     this.cacheDir = input.cacheDir;
     this.timeoutMs = input.timeoutMs ?? 1_800_000;
+    this.repeat = Math.max(1, input.repeat ?? 2);
+    this.cgroupDir = input.cgroupDir ?? "/sys/fs/cgroup";
+    this.warn = input.warn ?? ((m) => console.error(m));
     mkdirSync(this.cacheDir, { recursive: true });
   }
 
-  casesAt(commit: string, tests: readonly string[]): Promise<TestCaseResult[]> {
+  casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
     // 参考工作区只有一份：各作业的请求排队依次做
     const run = this.queue.then(() => this.compute(commit, tests));
     this.queue = run.catch(() => {});
     return run;
   }
 
-  private async compute(commit: string, tests: readonly string[]): Promise<TestCaseResult[]> {
+  private async compute(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
     const file = path.join(this.cacheDir, `${commit}.json`);
-    if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8")) as TestCaseResult[];
+    if (existsSync(file)) {
+      const saved = JSON.parse(readFileSync(file, "utf8")) as HumanBaseline;
+      return { ...saved, runs: saved.runs ?? [], slowest: saved.slowest ?? null };
+    }
     const ws = this.reference.ws;
     await this.reference.checkout(commit);
     if (this.runtime.envSyncCommand !== null) {
       const sync = await ws.run(this.runtime.envSyncCommand, 120_000);
       if (sync.exitCode !== 0) throw new Error(`参考工作区依赖切换失败（${commit}）`);
     }
-    const junit = `${ws.root}/.git/stream-junit.xml`;
-    await ws.run(["rm", "-f", junit], 30_000);
-    await ws.run(this.runtime.junitTestCommand(tests, junit), this.timeoutMs);
-    const xml = (await ws.readFile(junit)).toString("utf8");
-    const cases = parseJunitCases(xml, ws.root, this.runtime.junitRelativeBase);
-    writeAtomic(file, JSON.stringify(cases));
-    return cases;
+    const runs: TestCaseResult[][] = [];
+    const meta: BaselineRun[] = [];
+    for (let k = 0; k < this.repeat; k++) {
+      const started = Date.now();
+      const {
+        result: run,
+        peakBytes,
+        limitBytes,
+      } = await this.sampleMemory(() =>
+        this.runtime.runCases(ws, tests, {
+          timeoutMs: this.timeoutMs,
+          scratch: `${ws.root}/.git`,
+        })
+      );
+      meta.push({ peakBytes, limitBytes, wallMs: Date.now() - started });
+      if (peakBytes !== null && limitBytes !== null && peakBytes > limitBytes * MEMORY_WARN_RATIO) {
+        const mib = (b: number) => Math.round(b / 1048576);
+        this.warn(
+          `【内存告警】人的基准 ${commit} 第 ${k + 1} 遍：容器内存峰值 ${mib(peakBytes)} MiB，` +
+            `超过上限 ${mib(limitBytes)} MiB 的 ${MEMORY_WARN_RATIO * 100}%，作业容器的内存上限可能不够`
+        );
+      }
+      // 人这一侧拿不全就没有可信的分母：报错停下，不以缺了用例的基准静默缩小分母
+      if (!run.complete) {
+        throw new Error(
+          `人的基准没拿到全部用例的结果（${commit}，第 ${k + 1} 遍）：${run.output.slice(-500)}`
+        );
+      }
+      runs.push(run.cases);
+    }
+    const baseline = { ...compareRuns(runs), runs: meta };
+    writeAtomic(file, JSON.stringify(baseline));
+    return baseline;
   }
+
+  // 做 work 的同时在参考容器里采样内存，返回期间的峰值与上限
+  private async sampleMemory<T>(
+    work: () => Promise<T>
+  ): Promise<{ result: T; peakBytes: number | null; limitBytes: number | null }> {
+    const ws = this.reference.ws;
+    const stop = `${ws.root}/.git/pigeon-memory-stop`;
+    await ws.run(["rm", "-f", stop], 30_000);
+    const sampler = ws.run(
+      ["sh", "-c", MEMORY_SAMPLER, "sh", stop, this.cgroupDir],
+      this.timeoutMs * 2 + 600_000
+    );
+    let result: T;
+    try {
+      result = await work();
+    } finally {
+      await ws.run(["touch", stop], 30_000);
+    }
+    const out = (await sampler).output;
+    const peak = /^peak (\d+)$/m.exec(out)?.[1];
+    const max = /^max (\d+)$/m.exec(out)?.[1];
+    return {
+      result,
+      peakBytes: peak !== undefined ? Number(peak) : null,
+      limitBytes: max !== undefined ? Number(max) : null,
+    };
+  }
+}
+
+// 多遍结果逐条比对：每遍都通过的为 passing；在某一遍缺席或结果与别遍不同的为 flaky；cases 取各遍收集出的并集；
+// slowest 为各遍里耗时最长的用例
+export function compareRuns(
+  runs: readonly (readonly TestCaseResult[])[]
+): Omit<HumanBaseline, "runs"> {
+  const all = new Map<string, TestCaseResult>();
+  for (const r of runs) for (const c of r) if (!all.has(c.id)) all.set(c.id, c);
+  const outcomes = runs.map((r) => new Map(r.map((c) => [c.id, c.outcome])));
+  const ids = new Set(runs.flatMap((r) => r.map((c) => c.id)));
+  const passing: string[] = [];
+  const flaky: string[] = [];
+  for (const id of ids) {
+    const seen = outcomes.map((m) => m.get(id));
+    if (seen.every((o) => o === "passed")) passing.push(id);
+    else if (new Set(seen).size > 1) flaky.push(id);
+  }
+  let slowest: HumanBaseline["slowest"] = null;
+  for (const r of runs) {
+    for (const c of r) {
+      if (c.seconds !== undefined && (slowest === null || c.seconds > slowest.seconds)) {
+        slowest = { id: c.id, seconds: c.seconds };
+      }
+    }
+  }
+  return { cases: [...all.values()], passing, flaky, slowest };
 }
