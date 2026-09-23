@@ -62,15 +62,20 @@ export function verifyConfigFile(
   return { version: 1, steps, timeoutMs };
 }
 
-// 由分步派生的一行验证命令（交 sh -c）：各步全跑、各带标题，任一步失败即不通过（与分步验证"各步全跑、各出结论"
-// 同一口径）。回炉的验证与维护步的验证门都用它
+// 由分步派生的一行验证命令（交 sh -c）：各步全跑、各带标题，没过的步另打一行"== 步名 未通过 =="，任一步失败即
+// 不通过（与分步验证"各步全跑、各出结论"同一口径）。回炉的验证、维护步的验证门与开跑前置检查都用它
 export function verifyScript(steps: readonly StreamVerifyStep[]): string {
   const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   const parts = steps.map(
     (s) =>
-      `printf '== %s ==\\n' ${quote(s.name)}; ( ${s.cwd !== undefined ? `cd ${quote(s.cwd)} && ` : ""}${s.command} ) || s=1;`
+      `printf '== %s ==\\n' ${quote(s.name)}; ( ${s.cwd !== undefined ? `cd ${quote(s.cwd)} && ` : ""}${s.command} ) || { s=1; printf '== %s 未通过 ==\\n' ${quote(s.name)}; };`
   );
   return ["s=0;", ...parts, 'exit "$s"'].join(" ");
+}
+
+// 从验证命令的输出里取出没过的步
+export function failedStepsOf(output: string): string[] {
+  return [...output.matchAll(/^== (.+) 未通过 ==$/gm)].map((m) => m[1] as string);
 }
 
 export function gateFromSteps(steps: readonly StreamVerifyStep[]): string[] {

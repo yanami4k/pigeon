@@ -31,6 +31,7 @@ import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measu
 import {
   allPassed,
   countQuality,
+  failedStepsOf,
   type StreamRepoRuntime,
   verifyConfigFile,
   verifyScript,
@@ -152,6 +153,15 @@ export interface HumanBaseline {
   runs: BaselineRun[];
   // 各遍里耗时最长的用例
   slowest: { id: string; seconds: number } | null;
+}
+
+// 人的代码在某提交上跑验证门的结果（开跑前置检查：人的代码过不了验证门的步要清零或逐个定夺）
+export interface GateCheck {
+  passed: boolean;
+  // 没过的步（验证命令里"== 步名 未通过 =="的行）
+  failedSteps: string[];
+  wallMs: number;
+  outputTail: string;
 }
 
 export interface BaselineRun {
@@ -783,6 +793,37 @@ export class ReferenceCases implements HumanReferenceCases {
   casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
     // 参考工作区只有一份：各作业的请求排队依次做
     const run = this.queue.then(() => this.compute(commit, tests));
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  // 这个提交上人的代码是否已跑过验证门（开跑前置检查）
+  hasGate(commit: string): boolean {
+    return existsSync(path.join(this.cacheDir, `${commit}.gate.json`));
+  }
+
+  // 开跑前置检查：人的代码在这个提交上跑验证门。结果按提交落盘，与基准同一排队
+  gateAt(commit: string, command: readonly string[]): Promise<GateCheck> {
+    const run = this.queue.then(async (): Promise<GateCheck> => {
+      const file = path.join(this.cacheDir, `${commit}.gate.json`);
+      if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8")) as GateCheck;
+      const ws = this.reference.ws;
+      await this.reference.checkout(commit);
+      if (this.runtime.envSyncCommand !== null) {
+        const sync = await ws.run(this.runtime.envSyncCommand, 120_000);
+        if (sync.exitCode !== 0) throw new Error(`参考工作区依赖切换失败（${commit}）`);
+      }
+      const started = Date.now();
+      const r = await ws.run(command, this.timeoutMs);
+      const check: GateCheck = {
+        passed: r.exitCode === 0 && !r.timedOut,
+        failedSteps: failedStepsOf(r.output),
+        wallMs: Date.now() - started,
+        outputTail: r.output.slice(-4000),
+      };
+      writeAtomic(file, JSON.stringify(check));
+      return check;
+    });
     this.queue = run.catch(() => {});
     return run;
   }

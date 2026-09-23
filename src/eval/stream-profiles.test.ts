@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   allPassed,
+  failedStepsOf,
   gateFromSteps,
   PIGEON_TEST_TIMEOUT_MS,
   PIGEON_VERIFY_STEPS,
@@ -313,6 +314,7 @@ test("验证门由分步派生：各步全跑、各自带标题，任一步失�
     ];
     const failing = await ws.run(gateFromSteps(steps), 60_000);
     assert.notEqual(failing.exitCode, 0);
+    assert.deepEqual(failedStepsOf(failing.output), ["二"]);
     assert.match(
       failing.output,
       /== 一 ==[\s\S]*first-ran[\s\S]*== 二 ==[\s\S]*== 三 ==[\s\S]*in-sub/

@@ -44,19 +44,31 @@ export function baselineTargets(input: {
 
 export interface BaselineSummary {
   total: number;
-  // 本次算的与此前已落盘的
+  // 本次算的与此前已落盘的（按用例基准计；只做验证门检查时按验证门计）
   computed: number;
   cached: number;
   failed: { commit: string; error: string }[];
+  // 开跑前置检查：人的代码在验证门上没过的提交与没过的步（做了验证门检查时在场）
+  gateFailures: { commit: string; seqs: number[]; failedSteps: string[]; outputTail: string }[];
 }
+
+// 算什么：人的基准（用例）、开跑前置检查（人的代码逐步跑验证门），或两者
+export type BaselineCheck = "cases" | "gate" | "both";
 
 // 每一路一个参考工作区：哪一路空了就取下一个提交。一个提交出错记下来、接着算其余的
 export async function computeBaselines(input: {
   targets: readonly BaselineTarget[];
   references: readonly ReferenceCases[];
   log?: (line: string) => void;
+  check?: BaselineCheck;
+  // 验证门命令（做验证门检查时必需）
+  gateCommand?: readonly string[];
 }): Promise<BaselineSummary> {
   const log = input.log ?? (() => {});
+  const check = input.check ?? "cases";
+  const cases = check !== "gate";
+  const gate = check !== "cases";
+  if (gate && input.gateCommand === undefined) throw new Error("做验证门检查却没有验证门命令");
   const free = [...input.references];
   if (free.length === 0) throw new Error("没有参考工作区");
   const summary: BaselineSummary = {
@@ -64,22 +76,44 @@ export async function computeBaselines(input: {
     computed: 0,
     cached: 0,
     failed: [],
+    gateFailures: [],
   };
-  const pending = input.targets.filter((t) => {
-    const cached = input.references.some((r) => r.has(t.commit));
-    if (cached) summary.cached++;
-    return !cached;
-  });
+  const done = (t: BaselineTarget) =>
+    input.references.some((r) => (cases ? r.has(t.commit) : r.hasGate(t.commit)));
+  for (const t of input.targets) if (done(t)) summary.cached++;
   log(
-    `人的基准：共 ${summary.total} 个提交，已落盘 ${summary.cached} 个，本次算 ${pending.length} 个`
+    `人的基准（${check}）：共 ${summary.total} 个提交，已落盘 ${summary.cached} 个，本次算 ${summary.total - summary.cached} 个`
   );
-  await runWorkQueue(pending, free.length, async (target) => {
+  // 已落盘的也过一遍：验证门的结果从落盘文件读回，汇总才完整
+  await runWorkQueue(input.targets, free.length, async (target) => {
     const reference = free.pop();
     if (reference === undefined) throw new Error("参考工作区不够分");
+    const fresh = !done(target);
     try {
-      const baseline = await reference.casesAt(target.commit, target.tests);
-      summary.computed++;
-      log(describe(target, baseline, summary.cached + summary.computed, summary.total));
+      if (cases) {
+        const baseline = await reference.casesAt(target.commit, target.tests);
+        if (fresh) {
+          summary.computed++;
+          log(describe(target, baseline, summary.cached + summary.computed, summary.total));
+        }
+      }
+      if (gate) {
+        const result = await reference.gateAt(target.commit, input.gateCommand ?? []);
+        if (!cases && fresh) summary.computed++;
+        if (!result.passed) {
+          summary.gateFailures.push({
+            commit: target.commit,
+            seqs: target.seqs,
+            failedSteps: result.failedSteps,
+            outputTail: result.outputTail,
+          });
+        }
+        if (fresh) {
+          log(
+            `验证门 ${target.commit}（步 ${target.seqs.join(",")}）：${result.passed ? "通过" : `未通过（${result.failedSteps.join("、") || "无法判定"}）`}，${(result.wallMs / 60_000).toFixed(1)} 分`
+          );
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       summary.failed.push({ commit: target.commit, error: message });

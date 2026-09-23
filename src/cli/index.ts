@@ -512,12 +512,13 @@ async function evalMain(argv: string[]): Promise<void> {
 //   [--test-timeout-sec N]：延续式实验出题（决策 127、141、153）——在断网的参考容器里逐提交测判题探针与格式化比对，
 // 按写死的规则出流清单；清单与探针原始记录各存一个文件
 // pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录>
-//   [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）] [--streams s1,s2]：
-// 提前单独算全量测量的人的基准——每路一个独立的参考容器，按提交落盘，同一目录重跑即续算；eval stream 以 --baseline 读取
+//   [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）] [--streams s1,s2] [--check cases|gate|both]：
+// 提前单独算全量测量的人的基准——每路一个独立的参考容器，按提交落盘，同一目录重跑即续算；eval stream 以 --baseline 读取。
+// 同时做开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与步（--check 缺省两者都做）
 async function evalStreamBaselineMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录> " +
-    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2]";
+    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2] [--check cases|gate|both]";
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -540,27 +541,36 @@ async function evalStreamBaselineMain(argv: string[]): Promise<void> {
     .get("--streams")
     ?.split(",")
     .filter((x) => x !== "");
+  const check = values.get("--check") ?? "both";
+  if (check !== "cases" && check !== "gate" && check !== "both")
+    throw new Error(`--check 只能是 cases、gate 或 both（${usage}）`);
   const summary = await runStreamBaselines({
     manifestFile: required("--manifest"),
     repoDir: required("--repo"),
     image: required("--image"),
     outDir: required("--out"),
     concurrency,
+    check,
     containerRunArgs: ["--memory", values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY],
     ...(streams !== undefined ? { streams } : {}),
-    log: (line) =>
-      process.stderr.write(`[baseline] ${new Date().toISOString()} ${line}
-`),
+    log: (line) => process.stderr.write(`[baseline] ${new Date().toISOString()} ${line}\n`),
   });
   process.stdout.write(
-    `人的基准：共 ${summary.total} 个提交，本次算 ${summary.computed} 个，此前已落盘 ${summary.cached} 个，` +
-      `出错 ${summary.failed.length} 个
-`
+    `人的基准（${check}）：共 ${summary.total} 个提交，本次算 ${summary.computed} 个，` +
+      `此前已落盘 ${summary.cached} 个，出错 ${summary.failed.length} 个\n`
   );
-  for (const f of summary.failed)
-    process.stdout.write(`  ${f.commit}：${f.error.slice(0, 300)}
-`);
-  if (summary.failed.length > 0) process.exitCode = 1;
+  for (const f of summary.failed) process.stdout.write(`  ${f.commit}：${f.error.slice(0, 300)}\n`);
+  if (check !== "cases") {
+    process.stdout.write(
+      `开跑前置检查：人的代码上验证门没过的提交 ${summary.gateFailures.length} 个\n`
+    );
+    for (const g of summary.gateFailures) {
+      process.stdout.write(
+        `  ${g.commit}（步 ${g.seqs.join(",")}）：${g.failedSteps.join("、") || "无法判定"}\n`
+      );
+    }
+  }
+  if (summary.failed.length > 0 || summary.gateFailures.length > 0) process.exitCode = 1;
 }
 
 async function evalStreamManifestMain(argv: string[]): Promise<void> {

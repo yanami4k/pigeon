@@ -8,6 +8,7 @@ import { LimitController } from "./model-limits.ts";
 import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
+import { gateFromSteps } from "./stream-profiles.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
   compareRuns,
@@ -592,6 +593,22 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
     });
     assert.equal(broken.failed.length, 1);
     assert.equal(broken.cached, 4);
+    // 开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与没过的步；重跑时从落盘结果读回、不再跑
+    const gateCommand = gateFromSteps([{ name: "有 b", command: "test -f src/b.txt" }]);
+    const order = (list: { commit: string }[]) =>
+      list.map((g) => t.commits.indexOf(g.commit)).sort((a, b) => a - b);
+    const gated = await computeBaselines({ targets, references, check: "gate", gateCommand });
+    assert.deepEqual(order(gated.gateFailures), [1, 2, 4]);
+    assert.ok(gated.gateFailures.every((g) => g.failedSteps.join() === "有 b"));
+    assert.equal(gated.computed, 4);
+    const gatedAgain = await computeBaselines({
+      targets,
+      references,
+      check: "gate",
+      gateCommand: ["sh", "-c", "exit 1"],
+    });
+    assert.deepEqual(order(gatedAgain.gateFailures), [1, 2, 4], "已落盘的验证门结果直接读回");
+    assert.equal(gatedAgain.cached, 4);
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }

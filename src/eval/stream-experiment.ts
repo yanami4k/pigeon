@@ -10,11 +10,16 @@ import { type ModelGateway, startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
 import { currentHarnessRef } from "./runner.ts";
 import { commandStepAgent, type PigeonStepAgentOptions, pigeonStepAgent } from "./stream-agents.ts";
-import { type BaselineSummary, baselineTargets, computeBaselines } from "./stream-baseline.ts";
+import {
+  type BaselineCheck,
+  type BaselineSummary,
+  baselineTargets,
+  computeBaselines,
+} from "./stream-baseline.ts";
 import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
 import type { StreamManifest } from "./stream-manifest.ts";
-import type { StreamRepoRuntime } from "./stream-profiles.ts";
+import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";
 import {
   dockerStreamEnvs,
@@ -173,6 +178,8 @@ export interface StreamBaselineOptions {
   streams?: readonly string[];
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
+  // 算什么：人的基准（用例）、开跑前置检查（人的代码逐步跑验证门），或两者（缺省）
+  check?: BaselineCheck;
   log?: (line: string) => void;
 }
 
@@ -216,6 +223,8 @@ export async function runStreamBaselines(options: StreamBaselineOptions): Promis
     return await computeBaselines({
       targets,
       references,
+      check: options.check ?? "both",
+      gateCommand: gateFromSteps(runtime.verifySteps),
       ...(options.log !== undefined ? { log: options.log } : {}),
     });
   } finally {
