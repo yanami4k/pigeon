@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "steps": [
+    { "name": "格式", "command": "npm run lint" },
+    { "name": "类型", "command": "npm run check" },
+    { "name": "测试", "command": "npm run test" },
+    { "name": "分层", "command": "npm run deps" }
+  ],
+  "timeoutMs": 600000
+}

@@ -11,6 +11,7 @@ import {
 import {
   MemoryManifestEntrySchema,
   SkillManifestEntrySchema,
+  StructuredMemoryManifestSchema,
 } from "../state/injection-manifest.ts";
 import type { Migration } from "../state/migration.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
@@ -30,7 +31,9 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v10（决策 142 / 143）：顶层增加回炉轮数 repairRounds（只在开启时在场；按会话冻结）
 // v11（决策 137）：删除 v6 引入的顶层审阅配置 review（第一版学习闭环退役）。对象非严格，
 // 旧快照里的该字段读取时忽略；版本推进只为让版本号对应形状
-export const INJECTION_SNAPSHOT_VERSION = 11;
+// v12（决策 134 / 157 / 159）：顶层增加结构化记忆的开局留痕 structuredMemory（开关、挑选方式、开局给了哪几条；
+// 段落本身已拼进 systemPrompt），verify 增可选命名分步——均可缺省
+export const INJECTION_SNAPSHOT_VERSION = 12;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -91,6 +94,8 @@ export const InjectionSnapshotSchema = Type.Object({
   budget: Type.Optional(AttemptBudgetSchema),
   // 回炉轮数（决策 142 / 143）：只在开启时在场；缺省即关闭
   repairRounds: Type.Optional(RepairRoundsSchema),
+  // 结构化记忆的开局留痕（决策 134 / 157）：与常驻 Memory 分开计预算、分开留痕；缺省即本入口不接入结构化记忆
+  structuredMemory: Type.Optional(StructuredMemoryManifestSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
@@ -139,3 +144,6 @@ export const migrateInjectionSnapshotV9toV10: Migration = (doc) => ({ ...doc, ve
 
 // v10 → v11：审阅配置字段从 schema 删除，旧快照里的该字段原样留着、读取时忽略（不改写、不猜），纯版本推进
 export const migrateInjectionSnapshotV10toV11: Migration = (doc) => ({ ...doc, version: 11 });
+
+// v11 → v12：structuredMemory 与 verify.steps 可缺省（缺省 = 未接入结构化记忆、单条验证命令），纯版本推进
+export const migrateInjectionSnapshotV11toV12: Migration = (doc) => ({ ...doc, version: 12 });

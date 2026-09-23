@@ -30,3 +30,20 @@ export const SkillManifestEntrySchema = Type.Object({
   files: Type.Array(SkillFileManifestEntrySchema),
 });
 export type SkillManifestEntry = Static<typeof SkillManifestEntrySchema>;
+
+// 结构化记忆的推送留痕（决策 134 / 157）：开关、挑选方式与开局给了哪几条（条目编号）。
+// 开局那几条随注入快照冻结、每个 Run 的 run.started 同值；回炉那几条只记在该轮回炉 Run 的 run.started 上
+export const StructuredMemorySelectionSchema = Type.Union([
+  Type.Literal("auto"),
+  Type.Literal("fixed"),
+]);
+export type StructuredMemorySelection = Static<typeof StructuredMemorySelectionSchema>;
+
+export const StructuredMemoryManifestSchema = Type.Object({
+  // 关闭时两处都不推送（"去掉记忆"条件）
+  enabled: Type.Boolean(),
+  // auto 由程序按题面与报错挑选；fixed 由调用方指定条目（定点对照，决策 157）
+  selection: StructuredMemorySelectionSchema,
+  opening: Type.Array(Type.String({ minLength: 1 })),
+});
+export type StructuredMemoryManifest = Static<typeof StructuredMemoryManifestSchema>;

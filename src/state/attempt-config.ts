@@ -8,12 +8,22 @@ import { type Static, Type } from "typebox";
 export const VerifyConfigSourceSchema = Type.Union([Type.Literal("flag"), Type.Literal("project")]);
 export type VerifyConfigSource = Static<typeof VerifyConfigSourceSchema>;
 
+// 验证的一个命名分步（决策 159）：步名与一行命令（经系统 shell 执行）
+export const VerifyStepSchema = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 200 }),
+  command: Type.String({ minLength: 1, maxLength: 4000 }),
+});
+export type VerifyStep = Static<typeof VerifyStepSchema>;
+
 // 验证命令：人配置的一行命令（经系统 shell 执行），带超时。
-// M8（决策 081）：加法式新增来源字段——M7 写下的旧快照没有该字段，读取时不补、不猜
+// M8（决策 081）：加法式新增来源字段——M7 写下的旧快照没有该字段，读取时不补、不猜。
+// 决策 159：加法式新增命名分步——在场时各步全跑、各出结论，command 只是各步的展示串（不再整条执行），
+// 超时按每步各自计时；缺省即单条命令的旧配置，视为只有一步
 export const VerifyConfigSchema = Type.Object({
   command: Type.String({ minLength: 1 }),
   timeoutMs: Type.Integer({ minimum: 1 }),
   source: Type.Optional(VerifyConfigSourceSchema),
+  steps: Type.Optional(Type.Array(VerifyStepSchema, { minItems: 1 })),
 });
 export type VerifyConfig = Static<typeof VerifyConfigSchema>;
 
@@ -38,9 +48,11 @@ export type AttemptBudget = Static<typeof AttemptBudgetSchema>;
 // 写入方只有人（手工编辑），读取在 persistence/verify-config.ts；超时缺省由 application 层补齐
 export const VERIFY_CONFIG_VERSION = 1;
 
+// 决策 159：command 与 steps 二选一（读取时校验）；steps 加法式可缺省，v1 旧文件逐字有效，不升版本
 export const VerifyConfigFileSchema = Type.Object({
   version: Type.Literal(VERIFY_CONFIG_VERSION),
-  command: Type.String({ minLength: 1, maxLength: 4000 }),
+  command: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
+  steps: Type.Optional(Type.Array(VerifyStepSchema, { minItems: 1, maxItems: 20 })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
   // 回炉轮数（决策 142 / 143）：启动参数优先；缺省 0 即关闭。加法式可缺省，v1 旧文件逐字有效，不升版本
   repairRounds: Type.Optional(Type.Integer({ minimum: 0 })),

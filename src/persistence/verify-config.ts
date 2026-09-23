@@ -9,7 +9,9 @@ import {
   VERIFY_CONFIG_VERSION,
   type VerifyConfigFile,
   VerifyConfigFileSchema,
+  type VerifyStep,
 } from "../state/attempt-config.ts";
+import { verifyStepsDisplay } from "../state/verify-steps.ts";
 
 export class VerifyConfigError extends Error {}
 
@@ -20,20 +22,21 @@ export function verifyConfigPath(governanceRoot: string): string {
   return join(governanceRoot, ".pigeon", "verify.json");
 }
 
-// 项目级验证命令；未配置返回 undefined
+// 项目级验证命令；未配置返回 undefined。命名分步（决策 159）在场时 command 为各步的展示串，超时按每步各自计时
 export function loadVerifyConfig(
   governanceRoot: string,
   defaultTimeoutMs: number = DEFAULT_PROJECT_VERIFY_TIMEOUT_MS
-): { command: string; timeoutMs: number; source: "project" } | undefined {
+): { command: string; timeoutMs: number; source: "project"; steps?: VerifyStep[] } | undefined {
   const file = readVerifyConfigFile(governanceRoot);
   if (file === undefined) {
     return undefined;
   }
-  return {
-    command: file.command,
-    timeoutMs: file.timeoutMs ?? defaultTimeoutMs,
-    source: "project",
-  };
+  const timeoutMs = file.timeoutMs ?? defaultTimeoutMs;
+  if (file.steps !== undefined) {
+    const steps = file.steps.map((step) => ({ name: step.name, command: step.command }));
+    return { command: verifyStepsDisplay(steps), timeoutMs, source: "project", steps };
+  }
+  return { command: file.command ?? "", timeoutMs, source: "project" };
 }
 
 // 项目级回炉轮数（决策 142 / 143）；文件缺失或未写该字段返回 undefined
@@ -67,8 +70,24 @@ function readVerifyConfigFile(governanceRoot: string): VerifyConfigFile | undefi
     );
   }
   const file = raw as VerifyConfigFile;
-  if (file.command.trim() === "") {
+  // 决策 159：单条命令与命名分步二选一
+  if ((file.command === undefined) === (file.steps === undefined)) {
+    throw new VerifyConfigError(
+      `verify 配置须在 command（单条命令）与 steps（命名分步）中恰好给出一项：${path}`
+    );
+  }
+  if (file.command !== undefined && file.command.trim() === "") {
     throw new VerifyConfigError(`verify 配置的命令是空白：${path}`);
+  }
+  const names = new Set<string>();
+  for (const step of file.steps ?? []) {
+    if (step.name.trim() === "" || step.command.trim() === "") {
+      throw new VerifyConfigError(`verify 配置的分步名或命令是空白：${path}`);
+    }
+    if (names.has(step.name)) {
+      throw new VerifyConfigError(`verify 配置的分步名重复：${step.name}：${path}`);
+    }
+    names.add(step.name);
   }
   return file;
 }

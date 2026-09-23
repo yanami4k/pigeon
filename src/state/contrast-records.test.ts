@@ -25,8 +25,8 @@ const LIMITS = { maxTurns: 10, wallClockMs: 1000 };
 const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
-test("Event Log 当前为 v16（v11 加法式新增 M7 各族，v14 退役四族，v15 加回炉轮数，v16 退役第一版学习闭环六族）", () => {
-  assert.equal(EVENT_LOG_VERSION, 16);
+test("Event Log 当前为 v17（v11 加法式新增 M7 各族，v14 退役四族，v15 加回炉轮数，v16 退役第一版学习闭环六族，v17 加验证分步与结构化记忆留痕）", () => {
+  assert.equal(EVENT_LOG_VERSION, 17);
 });
 
 test("069：派出记录可带共享任务标识；缺省仍合法（旧派出记录不受影响）", () => {
@@ -178,8 +178,8 @@ test("v10 记录经迁移链升到当前版本：派出记录不带任务标识�
   assert.deepEqual(spawned, { ...v10, version: EVENT_LOG_VERSION });
 });
 
-// 决策 128 / 137：v13 → v14 与 v15 → v16 只退役若干族（由读取边界跳过），保留下来的记录纯版本推进、正文逐字不变
-test("v13 记录经迁移链升到当前版本：v14、v15、v16 都是纯版本推进，其余字段逐字不变", () => {
+// 决策 128 / 137：v13 → v14 与 v15 → v16 只退役若干族（由读取边界跳过），v16 → v17 为加法式，保留下来的记录纯版本推进、正文逐字不变
+test("v13 记录经迁移链升到当前版本：v14、v15、v16、v17 都是纯版本推进，其余字段逐字不变", () => {
   const v13 = {
     version: 13,
     id: newEntryId(),
@@ -190,6 +190,6 @@ test("v13 记录经迁移链升到当前版本：v14、v15、v16 都是纯版本
     payload: { limit: "token-limit" },
   };
   const record = parseEventRecord(structuredClone(v13));
-  assert.equal(EVENT_LOG_VERSION, 16);
+  assert.equal(EVENT_LOG_VERSION, 17);
   assert.deepEqual(record, { ...v13, version: EVENT_LOG_VERSION });
 });

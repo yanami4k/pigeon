@@ -36,6 +36,7 @@ import {
   WorkspaceCheckpointPayloadSchema,
 } from "./runtime-events.ts";
 import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
+import { VerifyStepResultSchema } from "./verify-steps.ts";
 
 // Event Log 记录格式版本；迁移管线（M0 migration.ts）按 version 字段路由。
 // v2（M4 S2）：intent 增 contentHashes、tool.settled 增 errorKind、新增 breaker/resolution 族；
@@ -64,7 +65,9 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v16（决策 137 / 158）：第一版学习闭环退役——候选提出、候选验证、候选决定、候选激活、审阅跳过与审阅结果不可解析
 // 六种记录停写并移出记录并集（旧回放的结果记录类型随候选验证记录一起移除），照决策 128 由读取边界跳过；
 // run.started 载荷去掉审阅配置字段（非严格对象，旧记录里的该字段读取时忽略）。其余记录逐字有效
-export const EVENT_LOG_VERSION = 16;
+// v17（决策 134 / 157 / 159）：通用验证记录加可选的各步结论，run.started 载荷的验证命令加可选分步、另加可选的
+// 结构化记忆推送留痕——加法式，v16 旧记录逐字有效
+export const EVENT_LOG_VERSION = 17;
 
 // 已退役的记录种类：读取边界在 schema 校验之前按本清单跳过——任何版本都跳过，不算损坏，
 // 也不进入任何视图与执行编号重复检测；旧会话文件不改写
@@ -513,6 +516,9 @@ export const AttemptVerifiedRecordSchema = Type.Object({
   workspace: Type.String({ minLength: 1 }),
   verdict: EvalVerdictSchema,
   verifiedAt: Type.Integer({ minimum: 0 }),
+  // 决策 159：分步配置下的各步结论（加法式可缺省）。在场时整体结论为各步合取、退出码取第一个失败步骤的、
+  // 输出为各步输出按步分段后的末尾；单条命令配置不带（读取时视为一步，见 state/verify-steps.ts）
+  steps: Type.Optional(Type.Array(VerifyStepResultSchema, { minItems: 1 })),
 });
 export type AttemptVerifiedRecord = Static<typeof AttemptVerifiedRecordSchema>;
 
@@ -691,6 +697,10 @@ eventLogMigrations.register("event-log", 14, (doc) => ({ ...doc, version: 15 }))
 // v15 → v16（决策 137 / 158）：退役六族。退役种类在读取边界已被跳过，走到这里的都是保留下来的记录；
 // run.started 里旧的审阅配置字段由非严格对象忽略——逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 15, (doc) => ({ ...doc, version: 16 }));
+
+// v16 → v17（决策 134 / 157 / 159）：加法式演进（验证记录加可选各步结论、run.started 的验证命令加可选分步、
+// run.started 加可选结构化记忆留痕）——v16 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 16, (doc) => ({ ...doc, version: 17 }));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏

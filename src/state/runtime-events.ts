@@ -9,7 +9,11 @@ import {
   RetryOnFailSchema,
   VerifyConfigSchema,
 } from "./attempt-config.ts";
-import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
+import {
+  MemoryManifestEntrySchema,
+  SkillManifestEntrySchema,
+  StructuredMemoryManifestSchema,
+} from "./injection-manifest.ts";
 import { McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { Sha256HexSchema } from "./message-content.ts";
 import { ToolErrorKindSchema } from "./tool-execution.ts";
@@ -174,6 +178,14 @@ export const RunStartedPayloadSchema = Type.Object({
   // 回炉轮数（决策 142 / 143；冻结快照值，只在开启时在场）：一步里的每次 Run 都带同一个值，
   // 撤回由它与这一步最后一次验证记录推出（state/repair-step.ts），不另记
   repairRounds: Type.Optional(RepairRoundsSchema),
+  // 结构化记忆（决策 134 / 157；加法式可缺省）：开关、挑选方式、开局给了哪几条（冻结快照值，每个 Run 同值），
+  // 以及本 Run 作为回炉轮收到了哪几条（只在回炉 Run 上在场）。没有接入结构化记忆的入口（REPL、TUI、worker）不带
+  structuredMemory: Type.Optional(
+    Type.Object({
+      ...StructuredMemoryManifestSchema.properties,
+      repair: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+    })
+  ),
 });
 export type RunStartedPayload = Static<typeof RunStartedPayloadSchema>;
 

@@ -402,6 +402,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           round: rounds,
           maxRounds: repairRounds,
           outcome: verified.outcome,
+          ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
         });
       } catch (error) {
         warn(
@@ -413,6 +414,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         buildRepairFeedback({
           command: options.verify.command,
           outcome: verified.outcome,
+          ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
           round: rounds,
           maxRounds: repairRounds,
           ...(appendix !== undefined ? { appendix } : {}),

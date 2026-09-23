@@ -18,6 +18,7 @@ import {
   migrateInjectionSnapshotV8toV9,
   migrateInjectionSnapshotV9toV10,
   migrateInjectionSnapshotV10toV11,
+  migrateInjectionSnapshotV11toV12,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -49,11 +50,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 8, migrateInjectionSnapshotV8toV9);
   migrations.register("injection-snapshot", 9, migrateInjectionSnapshotV9toV10);
   migrations.register("injection-snapshot", 10, migrateInjectionSnapshotV10toV11);
+  migrations.register("injection-snapshot", 11, migrateInjectionSnapshotV11toV12);
   return migrations;
 }
 
 test("当前版本快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 11);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 12);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -244,7 +246,7 @@ test("v11 快照：审阅配置字段已删除，带该字段的 v6 至 v10 旧�
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 11);
+  assert.equal(migrated.version, INJECTION_SNAPSHOT_VERSION);
   assert.deepEqual(migrated.model, v10.model, "其余字段逐字不变");
   assert.deepEqual(migrated.context, v10.context);
   for (const version of [6, 9, 10]) {
@@ -260,4 +262,29 @@ test("v11 快照：审阅配置字段已删除，带该字段的 v6 至 v10 旧�
       `v${version} 快照带审阅配置仍可迁到当前版本`
     );
   }
+});
+
+// 决策 134 / 157 / 159：v12 顶层加结构化记忆的开局留痕、verify 加可选命名分步；v11 快照纯版本推进
+test("v12 快照：结构化记忆留痕与验证分步可选；v11 快照纯版本推进", () => {
+  const snapshot = makeSnapshot();
+  assert.ok(
+    Value.Check(InjectionSnapshotSchema, {
+      ...snapshot,
+      structuredMemory: { enabled: true, selection: "auto", opening: ["mem_1"] },
+      verify: {
+        command: "[格式] npm run lint",
+        timeoutMs: 1000,
+        steps: [{ name: "格式", command: "npm run lint" }],
+      },
+    })
+  );
+  assert.ok(
+    !Value.Check(InjectionSnapshotSchema, {
+      ...snapshot,
+      structuredMemory: { enabled: true, selection: "other", opening: [] },
+    })
+  );
+  const v11 = { ...makeSnapshot(), version: 11 };
+  const migrated = registry().migrate("injection-snapshot", v11, 12, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v11, version: 12 });
 });
