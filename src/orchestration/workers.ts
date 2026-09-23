@@ -161,7 +161,7 @@ export interface WorkerStatus {
   role: WorkerRole;
   state: WorkerState;
   turns: number;
-  // 无工作区的 worker（Reviewer）没有分支
+  // 无工作区的 worker 没有分支（只读的 Reviewer 已退役，决策 137；现有角色一律开工作树）
   branch?: string;
   startedAt: number;
   workspace: WorkerWorkspace;

@@ -39,9 +39,9 @@ test("/spawn 解析：角色 + 可选 --name + 带引号或不带引号的任务
     task: "看看目录结构",
     name: "look",
   });
-  assert.deepEqual(parseSpawnCommand("reviewer “审一遍改动”"), {
-    role: "reviewer",
-    task: "审一遍改动",
+  assert.deepEqual(parseSpawnCommand("tester “跑一遍测试”"), {
+    role: "tester",
+    task: "跑一遍测试",
   });
   assert.throws(() => parseSpawnCommand(""), WorkerCommandError);
   assert.throws(() => parseSpawnCommand("implementer"), WorkerCommandError);

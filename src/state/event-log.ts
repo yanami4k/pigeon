@@ -411,7 +411,7 @@ export const DelegatedPolicySchema = Type.Object({
 });
 export type DelegatedPolicy = Static<typeof DelegatedPolicySchema>;
 
-// 轮次与墙钟两个上限；M6（决策 064 子裁决 ④）加可选的累计 token 上限（Reviewer 专设预算用，缺省不限）
+// 轮次与墙钟两个上限；M6（决策 064 子裁决 ④）加可选的累计 token 上限（当初为 Reviewer 专设，现对所有 worker 通用；缺省不限）
 export const WorkerLimitsSchema = Type.Object({
   maxTurns: Type.Integer({ minimum: 1 }),
   wallClockMs: Type.Integer({ minimum: 1 }),
@@ -434,8 +434,8 @@ export const ChildSettledStatusSchema = Type.Union([
 export type ChildSettledStatus = Static<typeof ChildSettledStatusSchema>;
 
 // worker 结构化结果：分支、改动文件清单（工作树内相对路径）、receipt 列表、自述摘要。
-// M6（决策 064）：无工作区的 worker（Reviewer）没有分支与改动文件，两项改可缺省；
-// structured 承载模型交回的结构化内容（候选由 Controller 据此落盘，模型侧只产出结论）
+// M6（决策 064）：无工作区的 worker（已退役的 Reviewer，决策 137）没有分支与改动文件，两项改可缺省；
+// structured 承载模型交回的结构化内容（第一版用于候选落盘，候选链已退役；字段保留，旧记录照常读取）
 export const ChildResultSchema = Type.Object({
   branch: Type.Optional(Type.String({ minLength: 1 })),
   changedFiles: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),

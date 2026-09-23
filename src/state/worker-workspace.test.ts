@@ -1,5 +1,6 @@
 // worker 工作区联合（M6 S0，决策 064）：加法式新增"无工作区"成员（054 的形状封顶口径不变）。
 // git-worktree 成员逐字不动，旧记录读取不变；收尾结果的分支与改动文件对无工作区的 worker 缺省。
+// 只读、无工作区的 Reviewer 已退役（决策 137），这里守的是它的旧记录照常可读。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
@@ -41,10 +42,13 @@ test("收尾结果：无工作区时分支与改动文件缺省，可携带结�
     summaryTruncated: false,
     structured: { candidates: [{ kind: "skill", name: "anchors" }] },
   };
-  assert.ok(Value.Check(ChildResultSchema, reviewerResult), "无工作区结果可缺分支与改动文件");
+  assert.ok(
+    Value.Check(ChildResultSchema, reviewerResult),
+    "已退役 Reviewer 的旧结果（无工作区）可缺分支与改动文件"
+  );
 });
 
-test("派出记录：无工作区成员随记录一同落盘，读路径按当前版本校验通过", () => {
+test("派出记录：已退役 Reviewer 的旧记录（无工作区成员、reviewer 角色）读路径按当前版本校验通过", () => {
   const record = {
     version: EVENT_LOG_VERSION,
     id: newEntryId(),

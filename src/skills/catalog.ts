@@ -44,7 +44,8 @@ export interface SkillCatalogOptions {
   // M5.7 S4：MCP server 的 prompts（缺省无）
   prompts?: readonly SkillPromptInput[];
   // M6.5（决策 059）：在场时只扫这些根，不扫治理根的 .pigeon/skills 与用户级目录（空数组 = 不登记任何本地 Skill）；
-  // 根目录自身有 SKILL.md 即一个 Skill，否则按子目录登记。暂存目录 .pigeon/candidates/skills/ 缺省不加载，
+  // 根目录自身有 SKILL.md 即一个 Skill，否则按子目录登记。第一版候选暂存目录 .pigeon/candidates/skills/
+  // （候选链已退役，决策 137；磁盘上的旧目录是用户数据，不删）缺省不加载，
   // 只在这里显式列出时加载
   roots?: readonly SkillRoot[];
 }

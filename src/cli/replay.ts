@@ -177,7 +177,7 @@ function recordDetail(record: EventRecord): string {
       return (
         `worker 会话头 ｜ ${record.worker.name}（${record.worker.role}）｜ 父会话 ${shortId(record.parentSessionId)}` +
         (record.parentRunId !== undefined ? ` ｜ 父 Run ${shortId(record.parentRunId)}` : "") +
-        // M6（决策 064）：无工作区的 worker（Reviewer）没有分支
+        // 无工作区的 worker 没有分支（已退役的 Reviewer 旧会话，决策 137）
         ` ｜ ${isGitWorktreeWorkspace(record.workspace) ? `分支 ${record.workspace.branch}` : "无工作区"}`
       );
     case "child.spawned": {

@@ -51,7 +51,7 @@ export function sessionRuntimeScope(
       `父会话 ${header.parentSessionId} 没有派出 ${sessionId} 的记录（无法还原委派策略，拒绝恢复）`
     );
   }
-  // M6（决策 064）：无工作区的 worker（Reviewer）只读账本，作用域根即治理根，没有工作树可检查
+  // M6（决策 064）：无工作区的 worker（已退役的 Reviewer，决策 137；只剩旧会话）只读账本，作用域根即治理根，没有工作树可检查
   if (header.workspace.kind === "none") {
     return {
       workspaceRoot: governanceRoot,

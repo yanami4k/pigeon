@@ -93,7 +93,7 @@ export function renderWorkersStatus(workers: readonly WorkerStatus[]): string {
     ...workers.map(
       (worker) =>
         `  ${worker.name}（${worker.role}）｜ ${workerStateLabel(worker.state)} ｜ ${worker.turns} 轮 ｜ ` +
-        // M6（决策 064）：无工作区的 worker（Reviewer）没有分支
+        // 无工作区的 worker 没有分支（只读的 Reviewer 已退役，决策 137；形状仍可能出现在旧记录里）
         `${worker.branch !== undefined ? `分支 ${worker.branch}` : "无工作区"} ｜ 会话 ${worker.sessionId}`
     ),
   ].join("\n");
