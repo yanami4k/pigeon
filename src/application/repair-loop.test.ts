@@ -19,7 +19,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { summarizeProcess } from "../eval/process.ts";
-import { createCheckpointer, restoreWorkspaceTo } from "../orchestration/checkpoint.ts";
+import {
+  createCheckpointer,
+  readStartIgnored,
+  restoreWorkspaceTo,
+} from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -326,14 +330,14 @@ test("回炉三轮都失败：按快照撤回，快照范围内与第一个 Run 
     // 快照范围内逐字一致：改过的受跟踪文件还原、新建的未跟踪文件删掉
     assert.deepEqual(scopeState(repo.root), before);
     assert.equal(existsSync(join(repo.root, "extra.txt")), false);
-    // 范围外：被忽略的文件不动；用户的 HEAD 不动
-    assert.equal(readFileSync(join(repo.root, "build", "out.txt"), "utf8"), "构建产物\n");
+    // 被忽略的文件按开工忽略清单判定（决策 154 修订）：build/ 是 agent 在这一步里造出的，整个清掉；用户的 HEAD 不动
+    assert.equal(existsSync(join(repo.root, "build")), false);
     assert.equal(git(repo.root, ["rev-parse", "HEAD"]).trim(), head);
     // 账本不新增记录：回炉开启且最后一次验证为失败即推出已撤回
     const session = sessionOf(repo.root, result.sessionId);
     assert.equal(session.runStarteds.length, 4);
     assert.deepEqual(repairStepOutcome(session), { rounds: 3, verdict: "fail", reverted: true });
-    // 恢复可重复执行：崩溃在最后一次验证之后、恢复之前时，续跑再执行一次即可
+    // 恢复可重复执行：再执行一次，结果相同
     const again = restoreStepStart({
       governanceRoot: repo.root,
       workspaceRoot: repo.root,
@@ -1060,18 +1064,193 @@ test("恢复：起点前就有的未跟踪嵌套仓库原样保留，其 .git、
   }
 });
 
+// 真实快照器走一步：开工时记基线与开工忽略清单；agent 改完后（再改一下 a.txt，保证有改动）取改前基线
+function beginStep(root: string) {
+  const sessionId = newSessionId();
+  const checkpointer = createCheckpointer({ workspaceRoot: root, sessionId });
+  checkpointer.beforeChange();
+  return {
+    sessionId,
+    // 撤回：清单从仓库里的 ref 取回（不靠进程内存），交给恢复
+    revert: (): void => {
+      writeFileSync(join(root, "a.txt"), "agent 改过\n");
+      const base = checkpointer.afterChange()?.baseCommit;
+      assert.ok(base !== undefined, "首个快照带改前基线");
+      restoreWorkspaceTo(root, base, readStartIgnored(root, sessionId));
+    },
+  };
+}
+
+// 在工作区里写一个文件（目录按需建）
+function put(root: string, name: string, content: string): void {
+  mkdirSync(join(root, name, ".."), { recursive: true });
+  writeFileSync(join(root, name), content);
+}
+
 test("恢复：agent 新建的自忽略目录（目录内 .gitignore 为 *）一次恢复即被删掉", () => {
   const repo = makeRepo();
   try {
-    const start = git(repo.root, ["rev-parse", "HEAD"]).trim();
     const before = scopeState(repo.root);
-    mkdirSync(join(repo.root, ".pytest_cache", "v", "cache"), { recursive: true });
-    writeFileSync(join(repo.root, ".pytest_cache", ".gitignore"), "*\n");
-    writeFileSync(join(repo.root, ".pytest_cache", "v", "cache", "lastfailed"), "{}\n");
-    restoreWorkspaceTo(repo.root, start);
-    assert.equal(existsSync(join(repo.root, ".pytest_cache", ".gitignore")), false);
-    assert.equal(existsSync(join(repo.root, ".pytest_cache", "v", "cache", "lastfailed")), false);
+    const step = beginStep(repo.root);
+    put(repo.root, ".pytest_cache/.gitignore", "*\n");
+    put(repo.root, ".pytest_cache/v/cache/lastfailed", "{}\n");
+    step.revert();
+    assert.equal(existsSync(join(repo.root, ".pytest_cache")), false);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
     assert.deepEqual(scopeState(repo.root), before);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：起点前就有的自忽略目录（.venv、.pytest_cache，根目录规则没列它们）原样保留", () => {
+  const repo = makeRepo();
+  try {
+    put(repo.root, ".venv/.gitignore", "*\n");
+    put(repo.root, ".venv/lib/x.py", "print('venv')\n");
+    put(repo.root, ".pytest_cache/.gitignore", "*\n");
+    put(repo.root, ".pytest_cache/v/cache/lastfailed", "{}\n");
+    const step = beginStep(repo.root);
+    // agent 在这一步里往 .venv 里装了个新包
+    put(repo.root, ".venv/lib/new.py", "print('new')\n");
+    step.revert();
+    assert.equal(readFileSync(join(repo.root, ".venv", ".gitignore"), "utf8"), "*\n");
+    assert.equal(readFileSync(join(repo.root, ".venv", "lib", "x.py"), "utf8"), "print('venv')\n");
+    assert.equal(readFileSync(join(repo.root, ".pytest_cache", ".gitignore"), "utf8"), "*\n");
+    assert.equal(
+      readFileSync(join(repo.root, ".pytest_cache", "v", "cache", "lastfailed"), "utf8"),
+      "{}\n"
+    );
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：未跟踪的根目录 .gitignore 经 .git/info/exclude 被忽略、护着 .env，撤回后两者都在", () => {
+  const repo = makeRepo();
+  try {
+    git(repo.root, ["rm", "-q", "--cached", ".gitignore"]);
+    git(repo.root, ["commit", "-q", "-m", "不跟踪 .gitignore"]);
+    writeFileSync(join(repo.root, ".git", "info", "exclude"), ".gitignore\n");
+    writeFileSync(join(repo.root, ".gitignore"), "build/\n.env\n");
+    writeFileSync(join(repo.root, ".env"), "SECRET=1\n");
+    const step = beginStep(repo.root);
+    step.revert();
+    assert.equal(readFileSync(join(repo.root, ".gitignore"), "utf8"), "build/\n.env\n");
+    assert.equal(readFileSync(join(repo.root, ".env"), "utf8"), "SECRET=1\n");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：agent 新建带忽略规则的包并构建出被忽略的产物，暂存与不暂存都一次清掉", () => {
+  for (const staged of [false, true]) {
+    const repo = makeRepo();
+    try {
+      const before = scopeState(repo.root);
+      const step = beginStep(repo.root);
+      put(repo.root, "newpkg/.gitignore", "/target\n");
+      put(repo.root, "newpkg/src/lib.rs", "fn main() {}\n");
+      put(repo.root, "newpkg/target/debug/app", "二进制\n");
+      if (staged) {
+        git(repo.root, ["add", "newpkg"]);
+      }
+      step.revert();
+      assert.equal(existsSync(join(repo.root, "newpkg", ".gitignore")), false, `暂存=${staged}`);
+      assert.equal(existsSync(join(repo.root, "newpkg", "src", "lib.rs")), false, `暂存=${staged}`);
+      assert.equal(existsSync(join(repo.root, "newpkg", "target")), false, `暂存=${staged}`);
+      if (!staged) {
+        assert.deepEqual(scopeState(repo.root), before);
+      }
+    } finally {
+      repo.cleanup();
+    }
+  }
+});
+
+test("恢复：开工已有被忽略的 logs/app.log，agent 新建 logs/new.txt——只删 new.txt", () => {
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo.root, ".gitignore"), "build/\n*.log\n");
+    commitAll(repo.root, "忽略日志");
+    put(repo.root, "logs/app.log", "开工前的日志\n");
+    const step = beginStep(repo.root);
+    put(repo.root, "logs/new.txt", "agent 新建\n");
+    step.revert();
+    assert.equal(readFileSync(join(repo.root, "logs", "app.log"), "utf8"), "开工前的日志\n");
+    assert.equal(existsSync(join(repo.root, "logs", "new.txt")), false);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：开工已有被忽略的 node_modules/，agent 往里加了文件——整个 node_modules/ 不动", () => {
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo.root, ".gitignore"), "build/\nnode_modules/\n");
+    commitAll(repo.root, "忽略依赖目录");
+    put(repo.root, "node_modules/dep/index.js", "依赖\n");
+    const step = beginStep(repo.root);
+    put(repo.root, "node_modules/added/index.js", "agent 装的\n");
+    step.revert();
+    assert.equal(
+      readFileSync(join(repo.root, "node_modules", "dep", "index.js"), "utf8"),
+      "依赖\n"
+    );
+    assert.equal(
+      readFileSync(join(repo.root, "node_modules", "added", "index.js"), "utf8"),
+      "agent 装的\n"
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：agent 执行 git add 暂存了一个嵌套仓库（gitlink）——撤回时整个删掉，不抛错", () => {
+  const repo = makeRepo();
+  try {
+    const before = scopeState(repo.root);
+    const step = beginStep(repo.root);
+    const sub = join(repo.root, "vendored");
+    mkdirSync(sub);
+    git(sub, ["init", "-q", "-b", "main"]);
+    git(sub, ["config", "user.email", "pigeon@example.invalid"]);
+    git(sub, ["config", "user.name", "pigeon-test"]);
+    writeFileSync(join(sub, "x.txt"), "嵌套\n");
+    git(sub, ["add", "."]);
+    git(sub, ["commit", "-q", "-m", "嵌套仓库"]);
+    git(repo.root, ["add", "vendored"]);
+    assert.ok(
+      git(repo.root, ["ls-files", "--stage", "vendored"]).startsWith("160000"),
+      "已暂存为 gitlink"
+    );
+    step.revert();
+    assert.equal(existsSync(sub), false);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+    assert.deepEqual(
+      Object.keys(scopeState(repo.root)).filter((name) => name !== "vendored"),
+      Object.keys(before)
+    );
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：真实索引里留着未解决的冲突（agent 合并冲突）时照样恢复成功", () => {
+  const repo = makeRepo();
+  try {
+    git(repo.root, ["switch", "-q", "-c", "other"]);
+    writeFileSync(join(repo.root, "a.txt"), "other\n");
+    commitAll(repo.root, "other 分支");
+    git(repo.root, ["switch", "-q", "main"]);
+    writeFileSync(join(repo.root, "a.txt"), "mainline\n");
+    commitAll(repo.root, "main 分支");
+    const step = beginStep(repo.root);
+    assert.throws(() => git(repo.root, ["merge", "-q", "other"]), "合并冲突");
+    assert.ok(git(repo.root, ["ls-files", "--unmerged"]).trim() !== "", "真实索引里有冲突");
+    step.revert();
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "mainline\n");
   } finally {
     repo.cleanup();
   }
@@ -1134,7 +1313,7 @@ test("首次记基线失败后撤回：不恢复到改到一半的状态，报�
     assert.equal(existsSync(gitDir), true, "命令已把 .git 挪回");
     assert.equal(result.repair?.reverted, true);
     assert.equal(result.repair?.restored, false);
-    assert.match(result.repair?.restoreError ?? "", /起点丢失|没有撤回起点/);
+    assert.match(result.repair?.restoreError ?? "", /起点丢失/);
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "w2\n", "不恢复到改到一半的状态");
     assert.ok(
       lines.some((line) => line.startsWith("回炉告警：")),
@@ -1205,6 +1384,114 @@ test("撤回时恢复抛错：报 restored 为 false 并带原因，告警写明
     if (existsSync(parked)) {
       renameSync(parked, gitDir);
     }
+    repo.cleanup();
+  }
+});
+
+test("开工忽略清单缺失：退回保守做法（被忽略的一律不删）并告警，撤回照常", async () => {
+  const repo = makeRepo();
+  // 验证门：删掉所有开工忽略清单 ref，再判失败（模拟旧快照或清单丢失）
+  writeFileSync(
+    join(repo.root, "gate-drop-list.mjs"),
+    [
+      'import { execFileSync } from "node:child_process";',
+      'const refs = execFileSync("git", ["for-each-ref", "--format=%(refname)", "refs/pigeon/start-ignored/"], { encoding: "utf8" });',
+      'for (const ref of refs.split("\\n").filter(Boolean)) execFileSync("git", ["update-ref", "-d", ref]);',
+      "process.exit(1);",
+    ].join("\n")
+  );
+  // agent 跑测试时生成的自忽略缓存目录
+  writeFileSync(
+    join(repo.root, "make-cache.mjs"),
+    [
+      'import { mkdirSync, writeFileSync } from "node:fs";',
+      'mkdirSync(".pytest_cache", { recursive: true });',
+      'writeFileSync(".pytest_cache/.gitignore", "*\\n");',
+    ].join("\n")
+  );
+  commitAll(repo.root, "加 gate-drop-list.mjs 与 make-cache.mjs");
+  // 开工前就有的自忽略目录：保守做法下同样不能被连带删掉
+  put(repo.root, ".venv/.gitignore", "*\n");
+  put(repo.root, ".venv/lib/x.py", "print('venv')\n");
+  try {
+    const { result, lines } = await captureStderr(() =>
+      runHeadless({
+        task: "把 a.txt 修好",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn: createFakeStreamFn({
+          replies: [
+            {
+              text: "跑一下测试",
+              toolCalls: [
+                {
+                  name: "run_command",
+                  args: {
+                    command: `${NODE} make-cache.mjs`,
+                  },
+                },
+              ],
+            },
+            edit("bug", "w1"),
+            done(),
+            done("还是不行"),
+          ],
+        }),
+        yolo: true,
+        homeDir: repo.home,
+        verify: { command: `${NODE} gate-drop-list.mjs`, timeoutMs: 30_000 },
+        repairRounds: 1,
+      })
+    );
+    assert.equal(result.repair?.reverted, true);
+    assert.equal(result.repair?.restored, true);
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+    // 保守做法的后果：agent 新建的被忽略目录没清理；开工前就有的被忽略内容不动
+    assert.equal(existsSync(join(repo.root, ".pytest_cache", ".gitignore")), true);
+    assert.equal(readFileSync(join(repo.root, ".venv", "lib", "x.py"), "utf8"), "print('venv')\n");
+    const warnings = lines.filter((line) => line.startsWith("回炉告警："));
+    assert.equal(warnings.length, 1, lines.join(""));
+    assert.match(warnings[0] ?? "", /开工忽略清单缺失，agent 新建的被忽略文件未清理/);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("进程重启后撤回（直接调用 restoreStepStart）：从仓库取回开工忽略清单，按清单清理", async () => {
+  const repo = makeRepo();
+  try {
+    // 开工前就有的自忽略目录
+    put(repo.root, ".venv/.gitignore", "*\n");
+    put(repo.root, ".venv/lib/x.py", "print('venv')\n");
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn: createFakeStreamFn({
+        replies: [edit("bug", "w1"), done(), edit("w1", "w2"), done()],
+      }),
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 1,
+    });
+    assert.equal(result.repair?.restored, true);
+    // 模拟"最后一次验证之后、恢复之前"崩溃留下的现场：agent 的改动与它新建的被忽略目录都还在
+    writeFileSync(join(repo.root, "a.txt"), "w2\n");
+    put(repo.root, ".pytest_cache/.gitignore", "*\n");
+    put(repo.root, ".pytest_cache/v/cache/lastfailed", "{}\n");
+    // 新进程：没有任何进程内状态，只凭账本与仓库
+    const done2 = restoreStepStart({
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      sessionId: result.sessionId,
+    });
+    assert.equal(done2.restored, true);
+    assert.equal(done2.startIgnoredMissing, undefined, "取到了持久化的开工忽略清单");
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "bug\n");
+    assert.equal(existsSync(join(repo.root, ".pytest_cache")), false, "agent 新建的被忽略目录清掉");
+    assert.equal(readFileSync(join(repo.root, ".venv", "lib", "x.py"), "utf8"), "print('venv')\n");
+  } finally {
     repo.cleanup();
   }
 });

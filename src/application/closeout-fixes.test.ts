@@ -150,7 +150,12 @@ test("分叉复用运行面已挂的快照器：分叉前后的快照 ref 编号
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const own = git(dir, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/pigeon/"])
+    // 只数快照 ref（开工忽略清单另挂在 refs/pigeon/start-ignored/ 下，不是快照）
+    const own = git(dir, [
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/pigeon/checkpoints/",
+    ])
       .split(/\r?\n/)
       .filter((line) => line.includes(sessionId));
     assert.equal(own.length, 3, `来源会话应有三个快照 ref：${own.join(" / ")}`);

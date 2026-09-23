@@ -6,7 +6,7 @@
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, type Dirent, existsSync, lstatSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
@@ -202,6 +202,11 @@ export function createCheckpointer(input: {
           baseLost = true;
           throw error;
         }
+        try {
+          recordStartIgnored(workspaceRoot, sessionId);
+        } catch {
+          // 记不下开工忽略清单不影响基线：撤回时取不到清单，退回保守做法并告警
+        }
       }
     },
     afterChange: () => {
@@ -254,16 +259,73 @@ export function createCheckpointer(input: {
   };
 }
 
-// 原地恢复到某个快照提交（决策 142：回炉到上限仍失败即撤回到这一步起点）。范围与快照相同：受跟踪的文件，
-// 加上未跟踪且未被忽略的文件（忽略规则以还原后的为准）；被忽略的文件与治理目录不动。只写工作树：用户的 HEAD、暂存区与分支一律不碰——
-// 目标内容经临时索引写回。范围限在工作区根之下（工作区根可以是仓库的子目录）。
-// 顺序：先把目标里的文件（含 .gitignore）逐个写回，再删掉目标里没有的 .gitignore（agent 新建的），
-// 最后按还原后的忽略规则列出范围内的文件、删掉目标里没有的——删除集若按改动后的忽略规则算，
-// agent 删掉的忽略规则会让原本被忽略的依赖目录被当作多余文件删掉，agent 新增的忽略规则会让被它隐藏的新文件漏删。
-// 不在范围内：.git/info/exclude 与全局忽略配置（不进快照），agent 改了它们时删除集照改后的算。
-// 写回用真实索引的副本做单树合并并刷新文件状态：内容没变的文件不重写（保留修改时间，不因文件被占用而失败）。
+// 开工忽略清单（决策 154 修订）：快照不含被忽略的文件，撤回时无从区分被忽略的东西是开工前就有、还是 agent 新弄出来的。
+// 所以每一步开工记基线时，另记一份当时已被忽略的路径清单（ls-files --others --ignored --exclude-standard --directory），
+// 存成 git 对象挂在该会话专用的 ref 上——与快照同在仓库里，进程崩溃后撤回不靠进程内存也能取回
+export const IGNORED_LIST_REF_PREFIX = "refs/pigeon/start-ignored/";
+
+export function startIgnoredRef(sessionId: SessionId): string {
+  return `${IGNORED_LIST_REF_PREFIX}${sessionId}`;
+}
+
+function listIgnored(workspaceRoot: string): string {
+  return git(workspaceRoot, [
+    "ls-files",
+    "-z",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--directory",
+  ]);
+}
+
+// 记下开工忽略清单；这个会话已经记过就不覆盖（续跑时看到的已不是开工时的样子）
+function recordStartIgnored(workspaceRoot: string, sessionId: SessionId): void {
+  const ref = startIgnoredRef(sessionId);
+  try {
+    git(workspaceRoot, ["rev-parse", "--verify", "-q", ref]);
+    return;
+  } catch {
+    // 还没有记过
+  }
+  const blob = git(
+    workspaceRoot,
+    ["hash-object", "-w", "--stdin"],
+    undefined,
+    listIgnored(workspaceRoot)
+  ).trim();
+  git(workspaceRoot, ["update-ref", ref, blob]);
+}
+
+// 取回开工忽略清单；没有记过（旧快照，或清单丢失）返回 undefined
+export function readStartIgnored(
+  workspaceRoot: string,
+  sessionId: SessionId
+): string[] | undefined {
+  let text: string;
+  try {
+    text = git(workspaceRoot, ["cat-file", "blob", startIgnoredRef(sessionId)]);
+  } catch {
+    return undefined;
+  }
+  return text.split("\0").filter((name) => name !== "");
+}
+
+// 原地恢复到某个快照提交（决策 142：回炉到上限仍失败即撤回到这一步起点）。"逐字一致"的范围与快照相同：受跟踪的文件，
+// 加上未跟踪且未被忽略的文件；治理目录不动。只写工作树：用户的 HEAD、暂存区与分支一律不碰——目标内容经临时索引写回。
+// 范围限在工作区根之下（工作区根可以是仓库的子目录）。
+// 写回：真实索引的副本做单树合并并刷新文件状态，内容没变的文件不重写（保留修改时间，不因文件被占用而失败）；
+// 真实索引里有未解决的冲突时单树合并做不了，退回按目标提交新建临时索引、全部重写。
+// 删除集（决策 154 修订）：给了开工忽略清单时，现存的全部未跟踪路径（含被忽略的）与已暂存却不在目标里的条目都是候选；
+// 在目标里、是治理目录、或是开工时就被忽略的，一律不动，其余删掉——agent 新弄出来的被忽略文件因此也清掉。
+// 含受保护路径的目录不整删，逐层下探，只删不受保护的部分。开工时已被忽略的内容若在这一步里被改动或删除，不在恢复范围内。
+// 没给清单时退回保守做法：现存被忽略的路径一律不删，只删未被忽略且不在目标里的（由调用方告警）。
 // 可重复执行：已经一致时再执行一次结果不变
-export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void {
+export function restoreWorkspaceTo(
+  workspaceRoot: string,
+  commit: string,
+  startIgnored?: readonly string[]
+): void {
   if (!isGitWorkspace(workspaceRoot)) {
     throw new NotGitWorkspaceError(`工作区不是 git 工作区，不能恢复快照：${workspaceRoot}`);
   }
@@ -275,83 +337,107 @@ export function restoreWorkspaceTo(workspaceRoot: string, commit: string): void 
   );
   const targetSet = new Set(target);
   if (target.length > 0) {
-    const indexFile = join(tmpdir(), `pigeon-restore-index-${randomBytes(8).toString("hex")}`);
-    try {
-      const realIndex = git(workspaceRoot, [
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "index",
-      ]).trim();
-      if (existsSync(realIndex)) {
-        copyFileSync(realIndex, indexFile);
-      }
-      const env = { GIT_INDEX_FILE: indexFile };
-      // 单树合并：与真实索引内容相同的条目沿用其文件状态；再刷新，内容没变而状态过期的条目也不再被当作改过
-      git(workspaceRoot, ["read-tree", "-m", commit], env);
-      try {
-        git(workspaceRoot, ["update-index", "-q", "--refresh"], env);
-      } catch {
-        // 有条目需要更新时 --refresh 以非零退出；这正是接下来要写回的那些文件
-      }
-      git(workspaceRoot, ["checkout-index", "-f", "-z", "--stdin"], env, `${target.join("\0")}\0`);
-    } finally {
-      rmSync(indexFile, { force: true });
-    }
+    writeBack(workspaceRoot, commit, target);
   }
-  // agent 新建的 .gitignore（目标里没有）先删掉，它们不该影响下面的删除集；只删所在目录未被忽略的——
-  // 被忽略目录里的 .gitignore（如依赖目录自带的）不在范围内。由浅到深处理，外层删掉后内层按新规则判断
-  const extraIgnores = split(
-    git(workspaceRoot, ["ls-files", "-z", "--others", "--", ":(glob)**/.gitignore"])
-  )
-    .filter((name) => !governance(name) && !targetSet.has(name))
-    .sort((left, right) => left.split("/").length - right.split("/").length);
-  for (const name of extraIgnores) {
-    const file = join(workspaceRoot, name);
-    const dir = name.includes("/") ? name.slice(0, name.lastIndexOf("/") + 1) : "";
-    if (dir === "") {
-      rmSync(file, { force: true });
-      continue;
-    }
-    // 目录是否被忽略要按外层规则判断：check-ignore 会把目录自己的 .gitignore（如内容为 *）也算进去，
-    // 所以先拿掉它再判断；目录被外层规则忽略（依赖目录之类）即原样写回
-    const content = readFileSync(file);
-    rmSync(file, { force: true });
-    if (isIgnored(workspaceRoot, dir)) {
-      writeFileSync(file, content);
-    }
-  }
-  const current = split(
-    git(workspaceRoot, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+  // 开工忽略清单：目录条目下面若还列了别的条目（目录里只有被忽略的文件时 git 两者都列），按逐个文件保护；
+  // 否则这个目录是按规则整体被忽略的（如 node_modules/），整棵子树都保护
+  const ignored = startIgnored ?? [];
+  const ignoredFiles = new Set(ignored.filter((name) => !name.endsWith("/")));
+  const ignoredDirs = ignored.filter(
+    (name) =>
+      name.endsWith("/") && !ignored.some((other) => other !== name && other.startsWith(name))
   );
-  for (const name of current) {
-    if (governance(name) || targetSet.has(name)) {
-      continue;
+  const isProtected = (name: string): boolean =>
+    governance(name) ||
+    targetSet.has(name) ||
+    // 起点里的嵌套仓库以 gitlink 收进，名字不带斜杠，而未跟踪列表里带斜杠
+    (name.endsWith("/") && targetSet.has(name.slice(0, -1))) ||
+    ignoredFiles.has(name) ||
+    ignoredDirs.some((dir) => name === dir || name.startsWith(dir));
+  // 目录下是否有要保留的东西：目标里的文件、开工时就被忽略的路径
+  const holdsKept = (dir: string): boolean =>
+    target.some((file) => file.startsWith(dir)) ||
+    ignored.some((name) => name !== dir && name.startsWith(dir));
+  const visit = (name: string): void => {
+    if (isProtected(name)) {
+      return;
     }
-    // 未跟踪的目录条目（嵌套仓库列成"目录/"）：起点里就有（快照以 gitlink 收进、名字不带斜杠）即不动；
-    // 目标里有文件落在它下面时也不动（那些文件已写回）；其余整个删掉
-    if (name.endsWith("/")) {
-      if (targetSet.has(name.slice(0, -1)) || target.some((file) => file.startsWith(name))) {
-        continue;
+    if (name.endsWith("/") && holdsKept(name)) {
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(join(workspaceRoot, name), { withFileTypes: true });
+      } catch {
+        return;
       }
-      removeEntry(join(workspaceRoot, name.slice(0, -1)));
-      continue;
+      for (const entry of entries) {
+        visit(
+          entry.isDirectory() && !entry.isSymbolicLink()
+            ? `${name}${entry.name}/`
+            : `${name}${entry.name}`
+        );
+      }
+      return;
     }
-    rmSync(join(workspaceRoot, name), { force: true });
+    removeEntry(join(workspaceRoot, name.endsWith("/") ? name.slice(0, -1) : name));
+  };
+  const untracked = split(
+    git(workspaceRoot, [
+      "ls-files",
+      "-z",
+      "--others",
+      // 没有开工忽略清单：被忽略的一律不碰。此时不能折叠目录——--directory 不看目录里面，目录本身没被忽略就整个列出，
+      // 里面全是被忽略的文件（如自带 * 的 .venv/）也会被连带删掉；逐个列出未被忽略的文件
+      ...(startIgnored === undefined ? ["--exclude-standard"] : ["--directory"]),
+    ])
+  );
+  // 已暂存却不在目标里的条目（agent 执行 git add 暂存的文件或嵌套仓库）；有冲突时同一路径列多次
+  const staged = [...new Set(split(git(workspaceRoot, ["ls-files", "-z", "--cached"])))].filter(
+    (name) => !targetSet.has(name)
+  );
+  for (const name of [...untracked, ...staged]) {
+    visit(name);
   }
 }
 
-// 目录路径是否被忽略（按当前工作区里的忽略规则）
-function isIgnored(workspaceRoot: string, dir: string): boolean {
+// 把目标提交的文件写回工作树（经临时索引，不碰真实索引）
+function writeBack(workspaceRoot: string, commit: string, target: readonly string[]): void {
+  const indexFile = join(tmpdir(), `pigeon-restore-index-${randomBytes(8).toString("hex")}`);
   try {
-    git(workspaceRoot, ["check-ignore", "-q", "--", dir]);
-    return true;
-  } catch {
-    return false;
+    const env = { GIT_INDEX_FILE: indexFile };
+    const realIndex = git(workspaceRoot, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "index",
+    ]).trim();
+    let merged = false;
+    if (existsSync(realIndex)) {
+      copyFileSync(realIndex, indexFile);
+      try {
+        // 单树合并：与真实索引内容相同的条目沿用其文件状态
+        git(workspaceRoot, ["read-tree", "-m", commit], env);
+        merged = true;
+      } catch {
+        // 真实索引里有未解决的冲突等：单树合并做不了，下面退回新建临时索引
+        rmSync(indexFile, { force: true });
+      }
+    }
+    if (!merged) {
+      git(workspaceRoot, ["read-tree", commit], env);
+    }
+    try {
+      // 刷新：内容没变而文件状态过期（或新建索引里没有文件状态）的条目不再被当作改过
+      git(workspaceRoot, ["update-index", "-q", "--refresh"], env);
+    } catch {
+      // 有条目需要更新时 --refresh 以非零退出；这正是接下来要写回的那些文件
+    }
+    git(workspaceRoot, ["checkout-index", "-f", "-z", "--stdin"], env, `${target.join("\0")}\0`);
+  } finally {
+    rmSync(indexFile, { force: true });
   }
 }
 
-// 删掉一个目录条目：真目录才递归删；符号链接或 junction 只删链接本身，不碰它指向的内容
+// 删掉一个条目：真目录才递归删；符号链接或 junction 只删链接本身，不碰它指向的内容；文件与已暂存的 gitlink 同样按 lstat 处理
 function removeEntry(path: string): void {
   let stat: ReturnType<typeof lstatSync>;
   try {

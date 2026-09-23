@@ -292,6 +292,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         sessionId,
       });
       if (done.restored) {
+        if (done.startIgnoredMissing === true) {
+          warn(
+            new Error("开工忽略清单缺失"),
+            "回炉告警：开工忽略清单缺失，agent 新建的被忽略文件未清理（撤回照常，被忽略的文件一律没动）"
+          );
+        }
         return { restored: true };
       }
       // 有快照却没有改前基线：起点丢失（账本可见，续跑同样认得出来）
