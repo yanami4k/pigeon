@@ -1,6 +1,6 @@
-# 结构化记忆：验证分步、摩擦派生、存与挂、推送与用前核验（决策 129 至 136、157、159，基线 16ab724）
+# 结构化记忆：验证分步、摩擦派生、存与挂、推送与用前核验（决策 129 至 136、157、159，基线 25805bb）
 
-基线：repair-loop 分支 16ab724（回炉已变基到 main 988438b，尚未合并）。隔离 git 工作树（分支 structured-memory）。
+基线：`retire-v1-rebased` 的头 25805bb（第一版学习闭环退役已变基到回炉 0716cc0 之上，尚未合并）。施工时的基线为 repair-loop 分支 16ab724，变基经过见文末一节。
 范围：headless 路径（`pigeon run` 与评测跑批经 `runHeadless`）。REPL、TUI 与 worker 路径不接入结构化记忆。第一版学习闭环的删除、跑批器与定点对照、从账本学习题面与文件的关联均不在范围内。没有新增账本记录种类，模型不参与记忆的产出或挑选。
 回炉（决策 142、143、154 及 154 修订）中的撤回恢复顺序、回炉附加内容注入点的异常兜底与 repair 结果字段不在本分支改动范围内；注入点调用处只把 `options.repairAppendix` 换成先取调用方的、缺省取结构化记忆的 `repairAppendix`，并多传一个可选的各步结论。
 
@@ -19,7 +19,7 @@
 - 配置格式（`.pigeon/verify.json`，版本仍为 1，加法式）：`command`（单条命令）与 `steps`（命名分步）二选一，两者都给或都不给、步名或命令为空白、步名重复均响亮失败。`steps` 为 `[{ "name": 步名, "command": 一行命令 }]`，1 至 20 步；`timeoutMs` 按每步各自计时。读取后的 `VerifyConfig` 带 `steps`，`command` 为展示串 `[步名] 命令；[步名] 命令`（分步时不再整条执行）。
 - 执行（`application/attempt-verify.ts`）：各步依次经系统 shell 执行、各出三值结论，前一步失败不跳过后续。整体结论为各步合取（`state/verify-steps.ts` 的 `combineStepVerdicts`）：任一步失败即失败；无失败但有步无法判定即无法判定；全过才通过；没有步骤算无法判定。整体退出码取第一个失败步骤的，通过为 0，无法判定为空；整体输出为各步输出按步分段（`== [步名] 结论（退出码 n）==`）后的末尾 16 KiB；整体输出哈希为各步输出哈希按顺序串起来的哈希；`command` 记各步命令行。
 - 单条命令的旧配置照旧执行一次，记录不带各步字段；读取时 `recordStepsOf` 还原成名为"验证"的一步。
-- 账本字段：`attempt.verified` 加可选 `steps: [{ name, exitCode, verdict, output, truncated }]`（输出末尾各自 16 KiB）。`run.started` 载荷里冻结的 `verify` 带可选 `steps`。`EVENT_LOG_VERSION` 15 → 16，迁移为纯版本推进（与下文 `structuredMemory` 字段同一版）；各测试文件里钉版本的断言与夹具同步改为 16。
+- 账本字段：`attempt.verified` 加可选 `steps: [{ name, exitCode, verdict, output, truncated }]`（输出末尾各自 16 KiB）。`run.started` 载荷里冻结的 `verify` 带可选 `steps`。`EVENT_LOG_VERSION` 16 → 17，迁移为纯版本推进（与下文 `structuredMemory` 字段同一版）；各测试文件里钉版本的断言与夹具同步改为 16。
 - 回炉反馈（`application/repair-loop.ts`）：带各步结论时写"失败的步骤：甲、乙"，有则另列"无法判定的步骤"与"已通过的步骤"，逐个附失败与无法判定步骤的退出码与输出末尾；不附通过步骤的输出。单条命令配置的反馈格式与基线逐字相同。
 - 本仓库四步配置样例 `docs/samples/verify.json`：格式 `npm run lint`、类型 `npm run check`、测试 `npm run test`、分层 `npm run deps`，超时每步 600000 毫秒。测试把样例放进临时治理根的 `.pigeon/verify.json` 经同一读取口径读出，核对四步命令与 `package.json` 的 `verify` 按 `&&` 切开的四段逐一相同、顺序相同。本机使用时由人复制到 `.pigeon/verify.json`。
 
@@ -59,7 +59,7 @@
 ## 四、推送与挑选（134、135、157）
 
 - 时机：只在开局与回炉两处由程序推送，没有模型自取的查询工具。
-  - 开局：`runHeadlessOnce` 在装配运行面之前挑选，段落作为系统提示里常驻 Memory 之后的独立一段（`## 结构化记忆`），字符预算 1200、每条上限 400，与常驻 Memory 的预算分开；开局留痕 `{ enabled, selection, opening }` 冻结进注入快照（`INJECTION_SNAPSHOT_VERSION` 10 → 11，纯版本推进），每个 Run 的 `run.started` 同值带上。分叉续跑不给新输入时没有题面，不挑。
+  - 开局：`runHeadlessOnce` 在装配运行面之前挑选，段落作为系统提示里常驻 Memory 之后的独立一段（`## 结构化记忆`），字符预算 1200、每条上限 400，与常驻 Memory 的预算分开；开局留痕 `{ enabled, selection, opening }` 冻结进注入快照（`INJECTION_SNAPSHOT_VERSION` 11 → 12，纯版本推进），每个 Run 的 `run.started` 同值带上。分叉续跑不给新输入时没有题面，不挑。
   - 回炉：经回炉附加内容注入点，附在回炉反馈之后（调用方另给了 `repairAppendix` 时以调用方的为准）；该轮回炉 Run 的 `run.started.structuredMemory.repair` 记给了哪几条（经 `runStartedExtras` 在该 Run 开始时取走）。
 - 开局挑选（`memory/structured-select.ts`）：题面直接指到的文件 = 题面里出现的路径（ASCII 路径字符组成、以扩展名结尾的记号，存在于工作区的才算），加上所附代码中导入语句解析出的仓库内文件——JS/TS 的 `from`、`import "…"`、`import(…)`、`require(…)` 相对导入以题面里在它之前最近提到的路径所在目录为基准（该文件在这一步开始时可以还不存在），补常见扩展名与 `index`，`.js` 后缀兼查同名 `.ts`；Python 的 `from a.b import`、`import a.b` 解析为仓库里以 `a/b.py` 或 `a/b/__init__.py` 结尾的文件，点号相对导入以基准文件目录起算。取当前锚点落在这些文件上的记忆，最多 2 条；指不到或其上没有记忆就不给。
 - 回炉挑选：用与派生相同的解析取本次失败各步的指纹。第一档为指纹键相同（同一步、同一工具、同一错误码或测试名或规则、同一文件）的记忆，第二档为当前锚点落在本次报错涉及文件（报错文件、分层被依赖端）上的其余记忆；合计最多 2 条，第一档在前。
@@ -136,7 +136,7 @@
 - 同一指纹只给一条，跨种类也一样：同指纹的候选里红转绿优先，同种类取最近一次，再比改动幅度；合并键里保留种类。
 - 名字核验：同一指纹合并了几处报错的名字时，任一仍在报错所在文件里即算通过。
 - 回炉挑选里未识别指纹不参加"指纹对上"那一档，只参加"涉及文件"那一档。
-- 留痕：开局留痕加 `openingBlocked`，回炉 Run 的 `run.started.structuredMemory` 加 `repairBlocked`，记挑出来但用前核验没过、被拦下的条目；headless 结果与评测结果行的 `structuredMemory` 加 `enabled`、`openingBlocked`、`repairBlocked`。字段同属账本 v16 的加法式改动。
+- 留痕：开局留痕加 `openingBlocked`，回炉 Run 的 `run.started.structuredMemory` 加 `repairBlocked`，记挑出来但用前核验没过、被拦下的条目；headless 结果与评测结果行的 `structuredMemory` 加 `enabled`、`openingBlocked`、`repairBlocked`。字段同属账本 v17 的加法式改动。
 - 固定挑选：同一编号去重，数量由调用方定、不受"最多 2 条"限制；指定的编号在视图里不存在时，开局即抛错、运行不开始。
 - 题面指到的文件：路径先归一化，含 `..` 段或跑出工作区的丢弃，只保留受跟踪（`git ls-files --cached`）的文件；记号可带盘符。工作区探针与题面文件解析移到 `src/memory/structured-workspace.ts`。
 - 回炉附加内容的成文挪进记忆模块自己的兜底里，出错时这一轮不给并去重告警。
@@ -213,7 +213,7 @@
 
 ### （六）扫描
 
-- 本分支新增与改动的全部文件（`git diff 16ab724..HEAD` 的新增行）及本审计：盘符路径、用户目录、过程措辞（会话称谓、任务说明文件、转述人的原话等）零命中。
+- 本分支新增与改动的全部文件（`git diff 25805bb..HEAD` 的新增行）及本审计：盘符路径、用户目录、过程措辞（会话称谓、任务说明文件、转述人的原话等）零命中。
 - 夹具中的本地路径已替换为 `/repo` 占位（`node-test.txt` 的 `file:///repo/...`，`pytest-local.txt` 的 `rootdir: /repo`），解析结果不变。
 - 测试里用于校验"盘符绝对路径即拒绝"的输入以拼接写出，源码不含盘符路径字面量。
 
@@ -272,3 +272,12 @@
 ### （七）已知限制（补充）
 
 - 评测跑批器在每题结束时释放工作区：这类会话派生时取不到改前基线与开工时的脏文件，测试步的红转绿一律不产出，且因认定不全不写缓存，每次加载都重算。定点对照与连续流实验的工作区保留、经执行宿主访问，不走这一路径。
+
+## 变基到退役之上
+
+本分支原基于 repair-loop 的 16ab724 施工。回炉与第一版学习闭环退役先后变基（回炉的头 0716cc0，退役变基后的头 25805bb），本分支自己的 14 个提交以 `git rebase --onto 25805bb 16ab724` 挪到 25805bb 之上；提交内容不变，只处理冲突：
+
+- 回炉文件（快照、repair-loop、headless-core 的回炉循环）以 0716cc0 为准。headless-core 保留回炉的 try/catch（注入点出错告警后以空附加内容照常回炉），其中调用的是本地变量 `repairAppendix`（显式注入与结构化记忆推送二选一），并照旧传入各步结论 `steps`。
+- 与退役冲突的，以退役的删除为准：候选与审阅相关的测试文件、`--no-review` 与 `--auto-verify` 两个启动开关、候选验证命令、启动告警函数、迁移完整性里的候选版本一项、账本里旧的"不可解析记录改名"函数，均不恢复。
+- 版本顺延：退役已占用账本 v16、快照 v11，本分支的加法式演进顺延为账本 v17（验证记录加各步结论、`run.started` 的验证命令加分步、结构化记忆留痕）、快照 v12（结构化记忆开局留痕、验证分步）。补 v16 → v17 与 v11 → v12 两条迁移登记（纯版本推进），测试里钉版本的断言与写死版本号的记录样例同步到 v17 / v12，本审计相应文字同步。
+- 一条提交说明去掉了末尾的"after review"。本审计由 `…-16ab724.md` 改名为 `…-25805bb.md`，仓库内没有别处引用旧文件名。
