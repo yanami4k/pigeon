@@ -25,7 +25,7 @@ const LIMITS = { maxTurns: 10, wallClockMs: 1000 };
 const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
-test("Event Log 升到 v11", () => {
+test("Event Log 当前为 v14（v11 加法式新增 M7 各族，v14 退役四族）", () => {
   assert.equal(EVENT_LOG_VERSION, 14);
 });
 
@@ -132,7 +132,7 @@ test("078：快照观察——ref、提交、树、改前基线、所在工具�
   );
 });
 
-test("072 依据：撞上限观察与提炼跳过记录", () => {
+test("072 依据：撞上限观察；提炼跳过已退役（决策 128）", () => {
   assert.ok(
     Value.Check(EventRecordSchema, {
       ...envelope(),

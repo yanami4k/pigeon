@@ -2,13 +2,21 @@
 // - --task <key>：在本治理根里找到派出这组尝试的宿主会话，选对后提炼，记录写回该宿主会话；
 // - --eval-results <dir>：只读读取 Eval 结果目录（另一个治理根）下的会话，按任务编号成组；
 //   候选暂存到本治理根，记录写进本治理根新建的宿主会话，结果目录一个字节不改；
-// - 全成功或全失败的组缺省不提炼并留跳过记录；--force 强制提炼，全失败时只取失败侧、只产出教训。
+// - 全成功或全失败的组缺省不提炼，跳过原因写进命令报告；--force 强制提炼，全失败时只取失败侧、只产出教训。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { createReviewGate } from "../review/scheduler.ts";
 import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
@@ -220,8 +228,12 @@ test("全失败：缺省不提炼，跳过原因写进命令报告；--force 只
     });
     assert.equal(skipped.groups[0]?.skip, "all-failed");
     assert.match(renderDistillReport(skipped), /不提炼：all-failed/);
-    const skipHost = materializeSession(join(root, ".pigeon", "sessions"), skipped.hostSessionId);
-    assert.equal(skipHost.childSpawneds.length, 0);
+    // 全部组都跳过：没有任何记录要写，不建宿主会话文件（也就不留下 0 条记录的空会话）
+    assert.equal(
+      existsSync(join(root, ".pigeon", "sessions", `${skipped.hostSessionId}.jsonl`)),
+      false
+    );
+    assert.deepEqual(listSessionIds(join(root, ".pigeon", "sessions")), []);
 
     const lessonReply = {
       candidates: [

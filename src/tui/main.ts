@@ -89,7 +89,7 @@ async function main(argv: string[]): Promise<void> {
     retry: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
-  // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 cli 入口同一份；
+  // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
   // M8（决策 091 / 093）：已激活经验的漂移与批准失效——壳接管终端前打到 stderr，不阻止启动。

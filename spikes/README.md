@@ -15,7 +15,7 @@
 | `m5-thinking-probe.mjs` | Kimi For Coding 不设 / 设推理档位时是否返回 thinking 块（决策 045） | docs/audits/2026-09-13-m5-ba94b53.md |
 | `m5-reasoning-stream-fn.mjs`、`tui-acc/run-m5.mjs`、`tui-acc/run-m5c.mjs` | M5 TUI 真实链路验收：Memory 冻结与下个会话生效、load_skill 读取与拒绝、/search 与两个检索工具、/resume 历史渲染与 thinking | docs/audits/2026-09-13-m5-ba94b53.md |
 | `tui-acc/run-m55.mjs` | M5.5 TUI 真实链路验收：两个 worker 并行写各自工作树与审批来源、run_command 精确命令放权、强杀后恢复 worker 会话与深度 1、两个窗口恢复同一会话被拒 | docs/audits/2026-09-13-m5-5-8ac7266.md |
-| `reconcile-check.mjs`、`notfound-spike.mjs`、`probe-note2-layout.mjs`、`pty-probe.js` | 单点探针：对账检查、上游拦截幽灵工具、消息区离屏布局、PTY 输入 | 对应审计文件 |
+| `notfound-spike.mjs`、`probe-note2-layout.mjs`、`pty-probe.js` | 单点探针：上游拦截幽灵工具、消息区离屏布局、PTY 输入 | 对应审计文件 |
 
 脚本按原有目录层级放置，`../src` 与 `../../src` 的相对引用保持有效；从仓库根目录运行。这些脚本原先位于本地 `tmp/`，docs/audits 下的历史审计文档按只追加不覆盖原则保留当时的 `tmp/...` 路径，对应本目录同名文件。所有运行产出（日志、截屏文本、`acc-*` 与 `tui-acc/ws-*` 工作区、会话文件）统一写到 `tmp/`，该目录被忽略；脚本里出现的 `tmp/...` 路径都是产出位置，不是脚本位置。
 

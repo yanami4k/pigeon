@@ -187,8 +187,7 @@ export const migrateReceiptV3toV4: Migration = (doc) => ({ ...doc, version: 4 })
 // v4 → v5：mcp 可缺省，纯版本推进
 export const migrateReceiptV4toV5: Migration = (doc) => ({ ...doc, version: 5 });
 
-// receipt 迁移链的唯一装配点：M3 旧账本读取（ledger.ts）与 Event Log 读路径
-// （event-log.ts 内嵌 receipt 载荷升级）共用同一条链，杜绝两套迁移表漂移
+// receipt 迁移链的唯一装配点：Event Log 读路径（event-log.ts 内嵌 receipt 载荷升级）经由这里升级
 const receiptMigrations = new MigrationRegistry();
 receiptMigrations.register("receipt", 1, migrateReceiptV1toV2);
 receiptMigrations.register("receipt", 2, migrateReceiptV2toV3);

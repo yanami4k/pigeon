@@ -528,7 +528,8 @@ export class JsonlEventLog {
     return record;
   }
 
-  // 迁移/外部构造记录的直通入口：全量校验 + 幂等判定 + 按族耐久写盘
+  // 外部构造记录的直通入口：全量校验 + 幂等判定 + 按族耐久写盘。
+  // 旧账本转换删除后（决策 128）已无生产调用方，只剩测试用它直写观察记录
   appendRecord(record: EventRecord): void {
     const parsed = Value.Parse(EventRecordSchema, record);
     this.#append(parsed, isExecutionKeyedGovernance(parsed));

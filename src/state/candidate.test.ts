@@ -71,20 +71,23 @@ test("v2 元数据 JSON 往返后深度相等且校验通过；来源会话号�
   );
 });
 
-test("状态机：原有 9 个字面量与新增的扫描拒收都被接受，状态机外字面量被拒绝", () => {
+test("状态机：现算产出的状态都被接受，已删去的四个旧字面量与状态机外字面量被拒绝", () => {
   for (const status of [
-    "Proposed",
     "SecurityScanned",
     "ScanRejected",
-    "EvidenceChecked",
     "ReplayValidated",
-    "ValidationFailed",
-    "AwaitingApproval",
+    "ReplayInconclusive",
+    "ReplayRegressed",
+    "Approved",
     "Active",
+    "Revoked",
     "Rejected",
     "Superseded",
   ]) {
     assert.ok(Value.Check(CandidateStatusSchema, status), `status ${status} 应合法`);
+  }
+  for (const removed of ["Proposed", "EvidenceChecked", "ValidationFailed", "AwaitingApproval"]) {
+    assert.ok(!Value.Check(CandidateStatusSchema, removed), `status ${removed} 已删去`);
   }
   assert.ok(!Value.Check(CandidateStatusSchema, "AutoActivated"));
 });

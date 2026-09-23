@@ -1,5 +1,5 @@
 // 迁移完整性机检（架构审计建议第 2 条，M6.5 S0）：枚举全部版本化 schema，对每一个从 v1 构造最小文档，
-// 经各自的迁移链逐级升到当前版本并通过当前 schema 校验。三处迁移注册表（Event Log、Receipt、旧账本）
+// 经各自的迁移链逐级升到当前版本并通过当前 schema 校验。两处迁移注册表（Event Log、Receipt）
 // 与快照迁移函数保持分散，机检集中在本文件。另扫描 src 生产代码里的 `*_VERSION = N` 常量，
 // 任何新增的版本化 schema 未在下表登记即变红——"每个版本化 schema 都有 v1 到当前的完整迁移链"由此成立。
 import assert from "node:assert/strict";
@@ -10,12 +10,6 @@ import { fileURLToPath } from "node:url";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { EVAL_TASK_VERSION, EvalTaskSchema } from "./eval/task.ts";
-import {
-  LEDGER_DECISION_VERSION,
-  LEDGER_INTENT_VERSION,
-  LedgerDecisionSchema,
-  LedgerIntentSchema,
-} from "./persistence/ledger.ts";
 import {
   INJECTION_SNAPSHOT_VERSION,
   InjectionSnapshotSchema,
@@ -230,42 +224,6 @@ const CASES: VersionedSchemaCase[] = [
       holdout: false,
     }),
     migrate: validateOnly(EvalTaskSchema),
-  },
-  {
-    constant: "LEDGER_INTENT_VERSION",
-    current: LEDGER_INTENT_VERSION,
-    v1: () => ({
-      kind: "intent",
-      version: 1,
-      executionId: newExecutionId(),
-      toolCallId: "tc-1",
-      toolName: "edit_file",
-      rawArgs: {},
-      decision: decisionV1,
-      at: 0,
-    }),
-    migrate: validateOnly(LedgerIntentSchema),
-  },
-  {
-    constant: "LEDGER_DECISION_VERSION",
-    current: LEDGER_DECISION_VERSION,
-    v1: () => ({
-      kind: "decision",
-      version: 1,
-      executionId: newExecutionId(),
-      toolCallId: "tc-1",
-      toolName: "edit_file",
-      rawArgs: {},
-      // 决策 066：理由来源字段随拒绝决定一起过迁移链与当前 schema 校验（加法式可选字段）
-      decision: {
-        ...decisionV1,
-        outcome: "rejected",
-        reason: "不改",
-        reasonSource: "human",
-      },
-      at: 0,
-    }),
-    migrate: validateOnly(LedgerDecisionSchema),
   },
 ];
 

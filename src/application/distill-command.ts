@@ -2,8 +2,8 @@
 // - --task <key>：在本治理根里找派出记录带该任务标识的宿主会话（并行同任务派发的父会话），记录写回该会话；
 //   宿主会话正被另一进程持有时按会话锁响亮失败；
 // - --eval-results <dir>：Eval 结果目录是另一个治理根，只读读取其会话文件，按任务编号成组（同任务认定用任务编号，决策 069）；
-//   本治理根新建一个宿主会话承载派出、候选与跳过记录，候选暂存到本治理根，结果目录不写任何东西；
-// - 全成功或全失败的组缺省不提炼、留跳过记录；--force 强制提炼：全失败只取最早收尾的失败侧（只产出教训），全成功取总轮数最少的成功侧。
+//   本治理根新建一个宿主会话承载派出与候选记录（全部组都跳过时不建会话文件），候选暂存到本治理根，结果目录不写任何东西；
+// - 全成功或全失败的组缺省不提炼，跳过原因只进命令报告；--force 强制提炼：全失败只取最早收尾的失败侧（只产出教训），全成功取总轮数最少的成功侧。
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { contrastTarget, forcedSelection } from "../distillation/target.ts";
@@ -20,7 +20,11 @@ import {
 import type { WorkerLimits } from "../state/event-log.ts";
 import { asRunId, asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
-import { createDistillDispatcher, type DistillOutcome } from "./distill-runtime.ts";
+import {
+  createDistillDispatcher,
+  type DistillDispatcher,
+  type DistillOutcome,
+} from "./distill-runtime.ts";
 
 export interface DistillCommandInput {
   // 本治理根（暂存目录与宿主会话所在）
@@ -128,19 +132,27 @@ export async function runDistillCommand(input: DistillCommandInput): Promise<Dis
     groups = evalGroups(path.resolve(input.evalResults as string));
     hostSessionId = newSessionId();
   }
-  // 宿主会话正被另一进程持有时，会话锁在此响亮失败
-  const hostLog = new JsonlEventLog(sessionsDirOf(input.root), hostSessionId);
+  // 宿主会话与派发器延迟到第一组真要提炼时才打开：全部组都跳过时没有任何记录要写，
+  // 不建宿主会话文件。宿主会话正被另一进程持有时，会话锁在打开处响亮失败
+  const opened: { hostLog?: JsonlEventLog; dispatcher?: DistillDispatcher } = {};
+  const openDispatcher = (): DistillDispatcher => {
+    if (opened.dispatcher === undefined) {
+      const hostLog = new JsonlEventLog(sessionsDirOf(input.root), hostSessionId);
+      opened.hostLog = hostLog;
+      opened.dispatcher = createDistillDispatcher({
+        governanceRoot: input.root,
+        hostSessionId,
+        hostLog,
+        // 提炼器只拿两个豁免子集约束的只读工具；父策略不放任何工具、不放宽审批
+        parentPolicy: { allow: [], deny: [], approvalMode: "prompt" },
+        createRuntime: input.createRuntime,
+        ...(input.gate !== undefined ? { gate: input.gate } : {}),
+        ...(input.budget !== undefined ? { budget: input.budget } : {}),
+      });
+    }
+    return opened.dispatcher;
+  };
   try {
-    const dispatcher = createDistillDispatcher({
-      governanceRoot: input.root,
-      hostSessionId,
-      hostLog,
-      // 提炼器只拿两个豁免子集约束的只读工具；父策略不放任何工具、不放宽审批
-      parentPolicy: { allow: [], deny: [], approvalMode: "prompt" },
-      createRuntime: input.createRuntime,
-      ...(input.gate !== undefined ? { gate: input.gate } : {}),
-      ...(input.budget !== undefined ? { budget: input.budget } : {}),
-    });
     const reports: DistillGroupReport[] = [];
     for (const group of groups) {
       const selection = selectContrast(group.attempts);
@@ -156,14 +168,14 @@ export async function runDistillCommand(input: DistillCommandInput): Promise<Dis
         reports.push({ key: group.key, attempts: group.attempts, skip: reason });
         continue;
       }
-      const distill = await dispatcher.distill(
+      const distill = await openDispatcher().distill(
         contrastTarget({ kind: "task", taskKey: group.key, selection: chosen })
       );
       reports.push({ key: group.key, attempts: group.attempts, distill });
     }
     return { hostSessionId, groups: reports };
   } finally {
-    hostLog.close();
+    opened.hostLog?.close();
   }
 }
 

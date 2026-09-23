@@ -1,6 +1,6 @@
 // Candidate（ROADMAP §4 Candidate 流）：学习产物的暂存形态。
-// Agent 不能自我授权（§3.1）：Candidate 必须走完状态机、经人工审批（AwaitingApproval → Active）后才生效；
-// M6 只走到提出、已扫描（或扫描拒收），回放验证与审批归 M8。
+// Agent 不能自我授权（§3.1）：Candidate 必须走完状态机、经人工审批（Approved → Active）后才生效；
+// M6 只走到已扫描（或扫描拒收），回放验证与审批归 M8。
 //
 // v2（M6，决策 065 子裁决 ①）：只放写一次即不可变的元数据——种类、名字、内容哈希与字节数、来源四项、
 // 一句话摘要、判断强度、扫描结果、取代关系。状态不入 schema，由账本现算（提出记录内嵌扫描结果，决策 128；§3.5：
@@ -19,22 +19,18 @@ export const CANDIDATE_VERSION = 3;
 // M8（决策 084 / 089 / 092 / 093）补齐回放验证之后的全部状态：验证是三值——通过（ReplayValidated）、
 // 未测出（ReplayInconclusive）、回归（ReplayRegressed）；决定族给出已批准（Approved）、已拒绝（Rejected）、
 // 已撤销（Revoked）、已取代（Superseded）；复制到治理根正常目录后为已激活（Active）。
-// Proposed → SecurityScanned | ScanRejected
+// SecurityScanned | ScanRejected（提出即带扫描结果，决策 128）
 //          → ReplayValidated | ReplayInconclusive | ReplayRegressed
 //          → Approved → Active → Revoked ／ Rejected ／ Superseded
 // 回归不可批准（092），翻案只能靠重验；未测出可由人显式批准，激活记录另带"未经回放证实"标记。
 // 状态不入本 schema（由账本现算，state/candidate-status.ts），故新增成员不动 CANDIDATE_VERSION。
-// EvidenceChecked / ValidationFailed / AwaitingApproval 是 M6 之前写下的中间态，无写入方，保留不删（历史值可读）
+// 状态现算只产出下列成员；无写入方的 Proposed、EvidenceChecked、ValidationFailed、AwaitingApproval 已删去（决策 128 复核）
 export const CandidateStatusSchema = Type.Union([
-  Type.Literal("Proposed"),
   Type.Literal("SecurityScanned"),
   Type.Literal("ScanRejected"),
-  Type.Literal("EvidenceChecked"),
   Type.Literal("ReplayValidated"),
   Type.Literal("ReplayInconclusive"),
   Type.Literal("ReplayRegressed"),
-  Type.Literal("ValidationFailed"),
-  Type.Literal("AwaitingApproval"),
   Type.Literal("Approved"),
   Type.Literal("Active"),
   Type.Literal("Revoked"),

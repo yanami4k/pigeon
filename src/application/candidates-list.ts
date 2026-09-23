@@ -21,15 +21,11 @@ import {
 } from "./candidate-lookup.ts";
 
 const STATUS_LABEL: Readonly<Record<CandidateStatus, string>> = {
-  Proposed: "已提出",
   SecurityScanned: "已扫描",
   ScanRejected: "扫描拒收",
-  EvidenceChecked: "已核证据",
   ReplayValidated: "回放通过",
   ReplayInconclusive: "回放未测出",
   ReplayRegressed: "回放回归",
-  ValidationFailed: "验证失败",
-  AwaitingApproval: "待批准",
   Approved: "已批准",
   Active: "已激活",
   Revoked: "已撤销",

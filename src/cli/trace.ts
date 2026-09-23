@@ -1,7 +1,7 @@
 // CLI trace 命令（M4 S3，D4 一次性渲染）：把会话（或单个 Run）的关联视图渲染为静态
 // 人读报告打印 stdout，可 grep/less。只读纪律：只经 materializeSession 读事件文件——
-// 不构造 JsonlEventLog（构造会建目录/开追加句柄）、不跑 recoverSession（会写确证记录）、
-// 不触发 D8 旧账本迁移；trace 永不写事件日志与工作区。
+// 不构造 JsonlEventLog（构造会建目录/开追加句柄）、不跑 recoverSession（会写确证记录）；
+// trace 永不写事件日志与工作区。
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -42,9 +42,8 @@ const MCP_SERVER_STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>>
   closed: "已关闭",
 };
 
-// 候选状态的通俗措辞（M6 只走到提出、已扫描、扫描拒收）
+// 候选状态的通俗措辞（M6 只走到已扫描、扫描拒收）
 const CANDIDATE_STATUS_LABEL: Readonly<Record<string, string>> = {
-  Proposed: "已提出",
   SecurityScanned: "已扫描",
   ScanRejected: "扫描拒收",
 };

@@ -129,7 +129,7 @@ function makeLog(): {
   };
 }
 
-test("schema 往返：十三种记录族逐一 parse 后与原值一致；未知 kind 与畸形 payload 被拒", () => {
+test("schema 往返：清单里的各记录族逐一 parse 后与原值一致；未知 kind 与畸形 payload 被拒", () => {
   const sessionId = newSessionId();
   const runId = newRunId();
   const envelope = {

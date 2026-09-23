@@ -567,7 +567,7 @@ async function resumeMain(argv: string[]): Promise<void> {
     retry: true,
   });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
-  // 工作区准备（决策 034）：realpath 规范化 + D8 旧账本一次性迁移，与 tui 入口同一份
+  // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
   // M8（决策 091 / 093）：恢复会话同样要先说一次已激活经验的漂移与批准失效
   emitActivationNotes(workspaceRoot, flags);
@@ -1219,7 +1219,7 @@ async function main(argv: string[]): Promise<void> {
     retry: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
-  // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）+ D8 旧账本一次性迁移
+  // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）
   const workspaceRoot = prepareWorkspace(flags.root);
   // M8（决策 091 / 093）：已激活经验的漂移与批准失效，会话开始前如实说一次（不阻止使用）
   emitActivationNotes(workspaceRoot, flags);
