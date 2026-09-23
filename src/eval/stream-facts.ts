@@ -14,6 +14,9 @@ import {
 import { allPassed, type StreamRepoRuntime } from "./stream-profiles.ts";
 import { type StreamShell, StreamWorkspace, shellQuote } from "./stream-workspace.ts";
 
+// 探针上失败的用例再跑几次（与 strands 的 CI 同样是两次）
+export const PROBE_RERUNS = 2;
+
 export interface RangeCommit {
   sha: string;
   parent: string;
@@ -28,6 +31,8 @@ export interface HumanRepo {
   changes(parent: string, sha: string): CommitFileChange[];
   show(sha: string, path: string): Buffer;
   resolve(rev: string): string;
+  // 提交时间（提交者日期），UTC 的 RFC 3339（到秒）
+  commitDate(rev: string): string;
   // 含 rev 可达历史的 bundle（单一分支）
   bundle(rev: string): Buffer;
   // 某提交里的全部文件及其 blob 哈希
@@ -100,6 +105,10 @@ export function gitHumanRepo(dir: string): HumanRepo {
         .map((l) => l.slice(1));
     },
     resolve: (rev) => text(["rev-parse", "--verify", `${rev}^{commit}`]).trim(),
+    commitDate: (rev) =>
+      new Date(text(["log", "-1", "--format=%cI", `${rev}^{commit}`]).trim())
+        .toISOString()
+        .replace(/\.\d{3}Z$/, "Z"),
     bundle(rev) {
       const sha = text(["rev-parse", "--verify", `${rev}^{commit}`]).trim();
       const ref = `refs/pigeon-stream/bundle-${sha}`;
@@ -270,9 +279,12 @@ export async function collectStreamFacts(input: {
           throw new Error(`依赖切换失败（${base}）：${tail(sync.output, 500)}`);
       }
       // 判定一律看逐用例结果，不看退出码（pytest 写完报告后可能不退出、被外壳杀掉）
+      // 失败的用例重跑两次、其间通过即算通过：本提交上时过时不过的用例不致判成"本提交也不过"，
+      // 父提交上要每次都失败才算父败（strands 的运行方式本就带 --reruns 2）
       const run = await runtime.runCases(reference.ws, tests, {
         timeoutMs: options.testTimeoutMs,
         scratch: `${reference.ws.root}/.git`,
+        rerunFailed: PROBE_RERUNS,
       });
       const passed = allPassed(run);
       probes.push({

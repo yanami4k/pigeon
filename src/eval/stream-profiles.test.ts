@@ -9,6 +9,7 @@ import {
   PIGEON_TEST_TIMEOUT_MS,
   PIGEON_VERIFY_STEPS,
   pigeonRuntime,
+  STRANDS_PYTEST_SCRIPT,
   STRANDS_VERIFY_STEPS,
   strandsProfile,
   strandsRuntime,
@@ -28,7 +29,7 @@ while [ $# -gt 0 ]; do
     --junitxml=*) j="\${1#--junitxml=}";;
     --continue-on-collection-errors) cont=1;;
     --deselect) shift; des="$des$1 ";;
-    -o|-p) shift;;
+    -o|-p|--reruns) shift;;
     -*) ;;
     *) if [ -d "$1" ]; then for x in "$1"/test_*.py; do files="$files $x"; done; else files="$files $1"; fi;;
   esac
@@ -185,6 +186,63 @@ test("pigeon 逐用例结果：报告之外，输出里留有测试加载失败�
   }
 });
 
+test("pigeon 逐用例结果：要求重跑时（探针），有失败的测试文件重跑至多两次，其间通过即算通过；恒失败的仍记失败", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-node-rerun-"));
+  try {
+    mkdirSync(join(base, ".git"));
+    // 第一次跑时留下标记并失败，之后通过：时过时不过
+    writeFileSync(
+      join(base, "flaky.test.ts"),
+      [
+        'import { existsSync, writeFileSync } from "node:fs";',
+        'import { test } from "node:test";',
+        'test("flaky", () => {',
+        '  if (!existsSync("marker")) { writeFileSync("marker", "1"); throw new Error("first time"); }',
+        "});",
+        'test("stable", () => {});',
+        'test("later", { skip: true }, () => {});',
+      ].join("\n")
+    );
+    writeFileSync(
+      join(base, "broken.test.ts"),
+      'import { test } from "node:test";\ntest("always", () => { throw new Error("no"); });\n'
+    );
+    const inner = localStreamShell(base);
+    const ws = new StreamWorkspace({
+      root: base,
+      sh: (script, options) => inner.sh(`unset NODE_TEST_CONTEXT\n${script}`, options),
+    });
+    const tests = ["flaky.test.ts", "broken.test.ts"];
+    const once = await pigeonRuntime.runCases(ws, tests, {
+      timeoutMs: 60_000,
+      scratch: `${base}/.git`,
+    });
+    const sorted = (run: { cases: { id: string; outcome: string }[] }) =>
+      run.cases.map((c) => [c.id, c.outcome]).sort();
+    assert.deepEqual(sorted(once), [
+      ["broken.test.ts::always", "failed"],
+      ["flaky.test.ts::flaky", "failed"],
+      ["flaky.test.ts::later", "skipped"],
+      ["flaky.test.ts::stable", "passed"],
+    ]);
+    rmSync(join(base, "marker"));
+    const retried = await pigeonRuntime.runCases(ws, tests, {
+      timeoutMs: 60_000,
+      scratch: `${base}/.git`,
+      rerunFailed: 2,
+    });
+    assert.deepEqual(sorted(retried), [
+      ["broken.test.ts::always", "failed"],
+      ["flaky.test.ts::flaky", "passed"],
+      ["flaky.test.ts::later", "skipped"],
+      ["flaky.test.ts::stable", "passed"],
+    ]);
+    assert.equal(retried.complete, true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("pigeon 逐用例结果：单条用例带 120 秒超时，卡死的用例记失败、不拖到整次运行的墙钟", async () => {
   const commands: string[][] = [];
   const ws = {
@@ -219,6 +277,9 @@ test("分步验证：本仓库四步（格式、类型、测试、分层），�
     ]
   );
   assert.match(STRANDS_VERIFY_STEPS[2]?.command ?? "", /--continue-on-collection-errors/);
+  // 与其 CI 一致：失败的用例重跑两次（验证门与逐用例运行——探针、判题、全量测量、人的基准——同一口径）
+  assert.match(STRANDS_VERIFY_STEPS[2]?.command ?? "", /--reruns 2/);
+  assert.match(STRANDS_PYTEST_SCRIPT, /--reruns 2/);
   // 与其 CI 的 lint 作业一致：只做 ruff check，不做格式检查
   assert.equal(STRANDS_VERIFY_STEPS[0]?.command, "ruff check");
   // 类型测试目录在窗口中途才加入：没有它的提交上只查 ./src（写死两个目录会让人的代码也过不了验证门）

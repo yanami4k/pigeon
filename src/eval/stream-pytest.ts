@@ -31,6 +31,8 @@ const OUTCOMES: Record<string, CaseOutcome> = {
 const SECTION_END = /^=+ (FAILURES|ERRORS|warnings summary|short test summary info|PASSES)\b/;
 const WITH_OUTCOME = /^(\S+?\.py::.+?) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s|$)/;
 const NODE_START = /^\S+?\.py::/;
+// --reruns 的重跑：这一次失败、还会再跑，最终结果在其后的行里
+const RERUN = /^(\S+?\.py::.+?) RERUN(?:\s|$)/;
 const BARE_OUTCOME = /^(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s|$)/;
 
 export function parseVerboseProgress(output: string): VerboseProgress {
@@ -39,6 +41,11 @@ export function parseVerboseProgress(output: string): VerboseProgress {
   for (const raw of output.split("\n")) {
     const line = raw.replace(/\r$/, "");
     if (SECTION_END.test(line)) break;
+    const again = RERUN.exec(line);
+    if (again !== null) {
+      pending = again[1] as string;
+      continue;
+    }
     const full = WITH_OUTCOME.exec(line);
     if (full !== null) {
       completed.push({

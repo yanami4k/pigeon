@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -29,6 +29,56 @@ test("镜像构建上下文（本仓库）：Dockerfile 与指定提交的 packa
     assert.match(readFileSync(join(out, "Dockerfile"), "utf8"), /npm ci/);
   } finally {
     rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("镜像构建上下文（strands）：Dockerfile、stream_env.py、各组合起始提交的 pyproject，与各组合起始提交的日期（UTC，按它只取当时已发布的依赖）", () => {
+  const out = mkdtempSync(join(tmpdir(), "pigeon-stream-ctx-"));
+  const repo = mkdtempSync(join(tmpdir(), "pigeon-stream-ctx-repo-"));
+  try {
+    const git = (args: string[], env: Record<string, string> = {}) =>
+      execFileSync("git", args, {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, ...env },
+      }).trim();
+    git(["init", "-q"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "user.email", "t@example.invalid"]);
+    mkdirSync(join(repo, "strands-py"));
+    const commitAt = (content: string, date: string) => {
+      writeFileSync(join(repo, "strands-py", "pyproject.toml"), content);
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "c"], { GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date });
+      return git(["rev-parse", "HEAD"]);
+    };
+    const early = commitAt("early\n", "2026-08-19T07:59:40-04:00");
+    const late = commitAt("late\n", "2026-09-10T21:15:49-04:00");
+    const written = assembleImageContext({
+      profileName: "strands",
+      repoDir: repo,
+      outDir: out,
+      variants: [
+        { name: "end", commit: late },
+        { name: "V0", commit: early },
+      ],
+    });
+    assert.deepEqual(written, [
+      "Dockerfile",
+      "stream_env.py",
+      "pyproject-end.toml",
+      "pyproject-V0.toml",
+      "env-dates.txt",
+    ]);
+    assert.equal(readFileSync(join(out, "pyproject-V0.toml"), "utf8"), "early\n");
+    assert.equal(
+      readFileSync(join(out, "env-dates.txt"), "utf8"),
+      "end 2026-09-11T01:15:49Z\nV0 2026-08-19T11:59:40Z\n"
+    );
+    assert.match(readFileSync(join(out, "Dockerfile"), "utf8"), /--exclude-newer/);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
   }
 });
 

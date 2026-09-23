@@ -14,5 +14,7 @@ RUN cd /opt/stream && npm ci --no-audit --no-fund && mkdir -p /testbed && mv nod
 RUN useradd --create-home --uid 10001 stream \
  && mkdir -p /measure \
  && chown stream:stream /testbed /measure
+# Node 按容器内存给的堆上限（2g 容器约 1.1 GB）不够本仓库的 tsc：所有 Node 进程（含 agent 自己跑的）统一放宽到 1.5 GB
+ENV NODE_OPTIONS=--max-old-space-size=1536
 USER stream
 WORKDIR /testbed

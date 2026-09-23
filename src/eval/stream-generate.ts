@@ -121,12 +121,15 @@ export async function generateStreamManifest(
 
 // 组装工作区镜像的构建上下文（之后 docker build <目录>）：
 //   pigeon：Dockerfile 加人的仓库里最新一份 package.json 与锁文件（lockRev，缺省 HEAD）；
-//   strands：Dockerfile、stream_env.py、五套版本约束，加各组合起始提交的 strands-py/pyproject.toml
+//   strands：Dockerfile、stream_env.py，加各组合起始提交的 strands-py/pyproject.toml 与起始提交的日期（env-dates.txt，
+//   每行"组合 日期"；构建时每套组合只取该日期之前已发布的依赖）
 export function assembleImageContext(input: {
   profileName: string;
   repoDir: string;
   outDir: string;
   lockRev?: string;
+  // strands 的依赖组合与起始提交（缺省为写死的五套；测试用合成仓库时注入）
+  variants?: readonly { name: string; commit: string }[];
 }): string[] {
   const human = gitHumanRepo(input.repoDir);
   const assets = new URL("../../eval/stream/", import.meta.url);
@@ -148,13 +151,14 @@ export function assembleImageContext(input: {
   if (input.profileName === "strands") {
     copyAsset("strands", "Dockerfile");
     copyAsset("strands", "stream_env.py");
-    for (const v of STRANDS_ENV_VARIANTS) {
-      copyAsset("strands", `constraints-${v.name}.txt`);
+    const variants = input.variants ?? STRANDS_ENV_VARIANTS;
+    for (const v of variants) {
       put(
         `pyproject-${v.name}.toml`,
         human.show(human.resolve(v.commit), "strands-py/pyproject.toml")
       );
     }
+    put("env-dates.txt", variants.map((v) => `${v.name} ${human.commitDate(v.commit)}\n`).join(""));
     return written;
   }
   throw new Error(`未知的仓库配置：${input.profileName}`);

@@ -84,14 +84,23 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
     mkdirSync(refRoot);
     const reference = new ReferenceWorkspace(localStreamShell(refRoot));
     await reference.init(human.bundle(docs), docs);
+    // 探针对失败的用例要求重跑（时过时不过的用例不致把题判错）
+    const reruns: (number | undefined)[] = [];
     const facts = await collectStreamFacts({
       human,
-      runtime: toyRuntime,
+      runtime: {
+        ...toyRuntime,
+        runCases: (ws, tests, options) => {
+          reruns.push(options.rerunFailed);
+          return toyRuntime.runCases(ws, tests, options);
+        },
+      },
       references: [reference],
       rangeStart: start,
       rangeEnd: docs,
       options: { testTimeoutMs: 30_000 },
     });
+    assert.ok(reruns.length > 0 && reruns.every((r) => r === 2));
 
     const byShaFacts = new Map(facts.commits.map((c) => [c.sha, c]));
     assert.deepEqual(byShaFacts.get(task)?.probe, { parentFails: true, commitPasses: true });

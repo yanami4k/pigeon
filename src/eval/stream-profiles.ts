@@ -29,6 +29,7 @@ export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
 // strands 三步，按其 CI 定义（python-test-lint.yml 与 pyproject 的 hatch 脚本），都在 strands-py 下执行。单测只跑 tests/，
 // 需要网络的 tests_integ 不在其内；被测包以源码目录直接导入（不做可编辑安装），测量副本里跑的才是副本自己的代码。单测一步：
 //   --continue-on-collection-errors：一个文件收集出错不中断整次运行，其余用例照常跑（缺省会一条都不跑）；
+//   --reruns 2：与其 CI 一致，失败的用例重跑两次，其间通过即算通过（时过时不过的用例不因一次失败判错）；
 //   pytest 在报告写完后若因残留线程或事件循环不退出，外壳等 5 秒后杀掉它；通过与否看报告里有没有失败或出错的用例
 //   （不依赖计数属性）；简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈
 // mypy 的检查范围随历史变化：类型测试目录 tests_typing 在窗口中途才加入（其 CI 自那时起才检查它），之前只查 ./src
@@ -44,7 +45,7 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
     cwd: "strands-py",
     command: [
       'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
-      '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors',
+      '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors --reruns 2',
       '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
       'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
       'wait "$p" 2>/dev/null; true; } &&',
@@ -188,6 +189,9 @@ export interface RunCasesOptions {
   // 在哪个目录跑（缺省工作区根）；报告与中间文件放在 scratch 目录
   cwd?: string;
   scratch: string;
+  // 失败的用例再跑几次、其间通过即算通过（探针用，免得时过时不过的用例把题判错）。strands 一律带 --reruns 2
+  // （其 CI 的做法），不看这一项；本仓库只在给了这一项时重跑
+  rerunFailed?: number;
 }
 
 // 这组用例是否全部通过：有结果、全有结果、没有失败（跳过不算失败）
@@ -260,22 +264,39 @@ export const pigeonRuntime: StreamRepoRuntime = {
       pattern: /(\d+) dependency violations?/,
     },
   },
-  runCases: (ws, tests, options) =>
-    runJunitOnce(
-      ws,
-      (junit) => [
-        "node",
-        "--test",
-        `--test-timeout=${PIGEON_TEST_TIMEOUT_MS}`,
-        "--test-reporter=junit",
-        `--test-reporter-destination=${junit}`,
-        // 标准输出另留一份逐条报告：失败归因要从报错文案里取找不到的文件与名字
-        "--test-reporter=spec",
-        "--test-reporter-destination=stdout",
-        ...tests,
-      ],
-      options
-    ),
+  async runCases(ws, tests, options) {
+    const once = (files: readonly string[]) =>
+      runJunitOnce(
+        ws,
+        (junit) => [
+          "node",
+          "--test",
+          `--test-timeout=${PIGEON_TEST_TIMEOUT_MS}`,
+          "--test-reporter=junit",
+          `--test-reporter-destination=${junit}`,
+          // 标准输出另留一份逐条报告：失败归因要从报错文案里取找不到的文件与名字
+          "--test-reporter=spec",
+          "--test-reporter-destination=stdout",
+          ...files,
+        ],
+        options
+      );
+    const run = await once(tests);
+    // 要求重跑时（探针）：有失败用例的测试文件再跑，其间通过的用例改记通过；其余用例的结果不动
+    for (let k = 0; k < (options.rerunFailed ?? 0); k++) {
+      const failedFiles = [
+        ...new Set(run.cases.filter((c) => c.outcome === "failed").map((c) => c.file)),
+      ].filter((f): f is string => f !== null);
+      if (failedFiles.length === 0) break;
+      const again = await once(failedFiles);
+      const passed = new Set(again.cases.filter((c) => c.outcome === "passed").map((c) => c.id));
+      run.cases = run.cases.map((c) =>
+        c.outcome === "failed" && passed.has(c.id) ? { ...c, outcome: "passed" } : c
+      );
+      run.output = `${run.output}\n${again.output}`;
+    }
+    return run;
+  },
   formatCommand: (files) => [
     "node_modules/.bin/biome",
     "check",
@@ -304,7 +325,7 @@ const inStrands = (tests: readonly string[]) =>
 // 到墙钟也杀掉（外层的 timeout 只杀得到外壳，杀不到后台的 pytest）。-v 的逐行进度供被杀时收回已完成的用例
 export const STRANDS_PYTEST_SCRIPT = [
   'cd strands-py && j="$1"; lim="$2"; shift 2; rm -f "$j";',
-  'PYTHONPATH="$PWD/src" python -m pytest -v -p no:cacheprovider --continue-on-collection-errors',
+  'PYTHONPATH="$PWD/src" python -m pytest -v -p no:cacheprovider --continue-on-collection-errors --reruns 2',
   '-o junit_family=xunit1 --junitxml="$j" "$@" & p=$!; t=0;',
   'while kill -0 "$p" 2>/dev/null; do',
   'if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi;',

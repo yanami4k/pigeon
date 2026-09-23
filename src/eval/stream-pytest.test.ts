@@ -48,6 +48,29 @@ test("-v 进度解析：被杀时最后一条只有标识没有结果，即卡�
   );
 });
 
+test("-v 进度解析：--reruns 的 RERUN 行不算完成，以其后的最终结果为准；重跑途中被杀，这条即正在跑的", () => {
+  const rerun = [
+    "tests/a/test_x.py::test_flaky RERUN [ 50%]",
+    "tests/a/test_x.py::test_flaky PASSED [ 50%]",
+    "tests/a/test_x.py::test_bad RERUN [100%]",
+    "tests/a/test_x.py::test_bad RERUN [100%]",
+    "tests/a/test_x.py::test_bad FAILED [100%]",
+  ].join("\n");
+  assert.deepEqual(parseVerboseProgress(rerun), {
+    completed: [
+      { nodeid: "tests/a/test_x.py::test_flaky", outcome: "passed" },
+      { nodeid: "tests/a/test_x.py::test_bad", outcome: "failed" },
+    ],
+    running: null,
+  });
+  assert.equal(
+    parseVerboseProgress(
+      "tests/a/test_x.py::test_one PASSED [ 50%]\ntests/a/test_x.py::test_hang RERUN [100%]\n"
+    ).running,
+    "tests/a/test_x.py::test_hang"
+  );
+});
+
 const junit = (cases: [string, "passed" | "failed"][]) =>
   `<testsuites><testsuite name="pytest">${cases
     .map(([name, o]) =>
