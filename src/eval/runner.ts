@@ -16,6 +16,7 @@ import { runHeadless } from "../application/headless.ts";
 import { describeHead } from "../orchestration/worktree.ts";
 import { isContextOverflowError, type StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
+import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { FailureClass } from "../state/classification.ts";
 import { asRunId, newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
@@ -59,6 +60,10 @@ export interface RunEvalOptions {
   maxOutputTokens?: number;
   // M9：采样温度（缺省不设）；评测固定采样时由调用方给出，冻结进每次运行的注入快照
   temperature?: number;
+  // 决策 142 / 143：回炉——每次运行的验证命令与回炉轮数（缺省不给即关闭）。验证命令是这一步里的验证门，
+  // 与任务源的判据不是一回事：回炉结束（含撤回）后判据照常判分。只支持本地 git 工作区（容器任务源启动即报错）
+  verify?: VerifyConfig;
+  repairRounds?: number;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -352,6 +357,10 @@ async function runOnce(
       ...(options.provider !== undefined ? { provider: options.provider } : {}),
       ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
       ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+      ...(options.verify !== undefined ? { verify: options.verify } : {}),
+      ...(options.repairRounds !== undefined && options.repairRounds > 0
+        ? { repairRounds: options.repairRounds }
+        : {}),
     });
     // 模型服务故障的运行不判分：没有可用结果，重跑时整次补跑。两条路都算——请求层抛错（上游合成失败消息，
     // 失败分类为基础设施）与流内以错误收尾（连接中断、服务端报错：终态 failed，失败分类落在未知）
@@ -433,6 +442,8 @@ async function runOnce(
       ...(infrastructure === undefined && deterministic !== undefined
         ? { deterministicError: deterministic }
         : {}),
+      // 决策 142 / 143：回炉开启时在场——用了几轮、最终验证结论、是否撤回（及是否因预算耗尽提前撤回）
+      ...(run.repair !== undefined ? { repair: { ...run.repair } } : {}),
       ...(refused
         ? { error: [`内容审核拒答（不补跑、不计入成败统计）`, ...errors].join("；") }
         : infrastructure !== undefined

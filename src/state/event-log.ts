@@ -68,7 +68,8 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v13（M9）：run.started 载荷的 model 段加可选采样温度——加法式，v12 旧记录逐字有效
 // v14（决策 128）：退役候选筛查、提炼跳过、固化升格与固化移除四族（无读者或与别的记录逐字重复）——
 // 停写并移出记录并集；旧会话文件里的这四种记录由读取边界按 RETIRED_EVENT_KINDS 跳过，其余记录逐字有效
-export const EVENT_LOG_VERSION = 14;
+// v15（决策 142 / 143）：run.started 载荷加可选回炉轮数——加法式，v14 旧记录逐字有效
+export const EVENT_LOG_VERSION = 15;
 
 // 已退役的记录种类（决策 128）：读取边界在 schema 校验之前按本清单跳过——任何版本都跳过，不算损坏，
 // 也不进入任何视图与执行编号重复检测
@@ -918,6 +919,9 @@ eventLogMigrations.register("event-log", 12, (doc) => ({ ...doc, version: 13 }))
 // v13 → v14（决策 128）：退役四族。退役种类在读取边界已被跳过，走到这里的都是保留下来的记录——
 // 逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 13, (doc) => ({ ...doc, version: 14 }));
+
+// v14 → v15（决策 142 / 143）：加法式演进（run.started 加可选回炉轮数）——v14 旧记录逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 14, (doc) => ({ ...doc, version: 15 }));
 
 // 不可解析记录的 payload：旧名在场即搬到新名，其余字段原样；已是新名的原样返回
 function renameProducerField(payload: unknown): unknown {

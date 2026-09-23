@@ -546,6 +546,8 @@ export class PiRuntimeAdapter {
       ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
       // M8（决策 087）：本次尝试的预算随 run.started 落盘——回放据此沿用同一预算
       ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
+      // 决策 142 / 143：回炉轮数随 run.started 落盘（一步里的每次 Run 同值）
+      ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
       ...extras,
     });
   }

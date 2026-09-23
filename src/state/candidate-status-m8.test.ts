@@ -48,7 +48,7 @@ function candidate(hash: string, supersedes?: string, hits: ScanHits = []): Revi
 }
 
 const envelope = () => ({
-  version: 14 as const,
+  version: 15 as const,
   id: newEntryId(),
   sessionId: SESSION,
   runId: RUN,

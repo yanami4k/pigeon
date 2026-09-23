@@ -20,6 +20,10 @@ export type VerifyConfig = Static<typeof VerifyConfigSchema>;
 // 失败自动分叉重试次数：0 为关闭（缺省）
 export const RetryOnFailSchema = Type.Integer({ minimum: 0 });
 
+// 回炉轮数（决策 142 / 143）：验证不过就在同一会话里接着修，最多修这么多轮。只在开启时冻结（至少 1）；
+// 缺省即关闭，快照与 run.started 都不带
+export const RepairRoundsSchema = Type.Integer({ minimum: 1 });
+
 // 本次尝试的预算（M8，决策 087）：回放必须沿用被验证那次尝试的预算，不得放宽——预算因此必须在账本里可得。
 // 四项均可缺省：缺省即"该项不设限"，回放沿用同样的不设限，不是放宽。
 // maxOutputTokens 与模型标识一起记在 run.started 的 model 段，不重复进本块。
@@ -38,5 +42,7 @@ export const VerifyConfigFileSchema = Type.Object({
   version: Type.Literal(VERIFY_CONFIG_VERSION),
   command: Type.String({ minLength: 1, maxLength: 4000 }),
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
+  // 回炉轮数（决策 142 / 143）：启动参数优先；缺省 0 即关闭。加法式可缺省，v1 旧文件逐字有效，不升版本
+  repairRounds: Type.Optional(Type.Integer({ minimum: 0 })),
 });
 export type VerifyConfigFile = Static<typeof VerifyConfigFileSchema>;

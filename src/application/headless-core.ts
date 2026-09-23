@@ -5,8 +5,14 @@
 // 结果全部从 Event Log 算（046）：轮次、工具调用数、usage、失败分类，以及需审批次数——从回执反推：
 // write 与 exec 档且 approvedBy 为 policy:yolo 的调用数（只有 write / exec 档落 receipt，read 档不计），
 // 即"有人在场时会被问几次"。
+// 回炉（决策 142 / 143 / 147）：开启时一次 Run 结束后，在同一会话里、释放运行面之前跑验证命令——通过即结束；
+// 失败即把失败反馈作为新一轮输入开一个新 Run 接着修，最多 N 轮；无法判定不回炉、记为未知。修满 N 轮或预算耗尽仍失败，
+// 按快照把工作区恢复到这一步第一个 Run 之前的状态，这一步记为失败。各轮与首次共用同一个总预算（轮次、墙钟与 token；
+// 验证命令的耗时也算在墙钟里）。一步的成败以最后一次验证为准；账本不新增记录，撤回由 run.started 里冻结的回炉轮数
+// 与最后一次验证记录推出（state/repair-step.ts）。
 import path from "node:path";
 import type { MemoryRoot } from "../memory/resident.ts";
+import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
@@ -16,6 +22,7 @@ import type { BranchHeaderInput } from "../state/event-log.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import { attemptOutcomeFacts, labelAttempt, type OutcomeLabel } from "../state/outcome-label.ts";
+import { lastStepRunOf, stepRunsOf } from "../state/repair-step.ts";
 import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
@@ -23,6 +30,7 @@ import { verifyAttempt } from "./attempt-verify.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
+import { buildRepairFeedback, type RepairAppendix, restoreStepStart } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
@@ -81,6 +89,11 @@ export interface HeadlessRunOptions {
   verify?: VerifyConfig;
   // M7（决策 079）：失败自动分叉重试次数——冻结进注入快照并随 run.started 落盘（重试本身由 headless.ts 叠加）
   retryOnFail?: number;
+  // 决策 142 / 143：回炉轮数，缺省 0 即关闭；开启时冻结进注入快照并随 run.started 落盘。
+  // 须配验证命令、不得与失败自动分叉重试同开、须在本地 git 工作区（要按快照撤回）
+  repairRounds?: number;
+  // 回炉反馈的附加内容注入点（缺省为空；结构化记忆将来从这里附加）
+  repairAppendix?: RepairAppendix;
   // M7（决策 077）：分叉续跑——分支会话头、由会话树还原的初始消息、不给新输入从已有消息续跑
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -107,9 +120,49 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   // M7（决策 071 / 072）：验证结论（配置了验证命令且运行面装起来时在场）与由账本现算的标签
   verification?: { verdict: EvalVerdict; recorded: boolean };
   label: OutcomeLabel;
+  // 决策 142 / 143：回炉开启时在场——用了几轮、最后一次验证的结论、是否撤回、撤回是否因预算耗尽而提前
+  repair?: HeadlessRepairSummary;
+}
+
+export interface HeadlessRepairSummary {
+  rounds: number;
+  verdict?: EvalVerdict;
+  reverted: boolean;
+  budgetExhausted: boolean;
+}
+
+// 回炉的启动前检查（决策 142 / 143）：设定不成立即启动报错，不装配运行面
+function assertRepairSetup(options: HeadlessRunOptions): number {
+  const rounds = options.repairRounds ?? 0;
+  if (!Number.isInteger(rounds) || rounds < 0) {
+    throw new Error(`回炉轮数需要非负整数：${rounds}`);
+  }
+  if (rounds === 0) {
+    return 0;
+  }
+  if (options.verify === undefined) {
+    throw new Error(
+      `设了回炉轮数（${rounds}）却没有验证命令：回炉靠验证结论决定修不修、撤不撤，` +
+        "请用 --verify-command 或项目验证配置（.pigeon/verify.json）给出验证命令"
+    );
+  }
+  if ((options.retryOnFail ?? 0) > 0) {
+    throw new Error(
+      "回炉与失败自动分叉重试不能同时开启：回炉在同一会话里接着修、到上限撤回，" +
+        "失败重试从任务起点另开分支重做，两者对同一次失败各有一套处理，叠加后这一步的成败与撤回无法判定"
+    );
+  }
+  if (options.workspaceHost !== undefined || !isGitWorkspace(options.workspaceRoot)) {
+    throw new Error(
+      "开启回炉却没有可用快照：回炉修不好时要按快照把工作区恢复到这一步起点，" +
+        "目前只支持本地 git 工作区（容器执行端的恢复能力尚未提供）"
+    );
+  }
+  return rounds;
 }
 
 export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
+  const repairRounds = assertRepairSetup(options);
   // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 只是宿主侧占位目录。分叉（失败自动重试、分支会话）要在它上面
   // 打 git 快照，会话验证命令要在它里面执行——在占位目录上做只会得到假结果，装配前一律拒绝
   if (options.workspaceHost !== undefined) {
@@ -127,6 +180,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   }
   const sessionId = options.sessionId ?? newSessionId();
   const startedAt = Date.now();
+  // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
+  let liveBundle: RuntimeBundle | undefined;
   const handle = createDetachedRuntime({
     sessionId,
     governanceRoot: options.governanceRoot,
@@ -152,6 +207,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
+    ...(repairRounds > 0 ? { repairRounds } : {}),
     // M8（决策 087）：本次运行的预算冻结进注入快照——回放据此沿用同一预算，不得放宽
     budget: {
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
@@ -161,8 +217,14 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.branchHeader !== undefined ? { branchHeader: options.branchHeader } : {}),
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
-      // M7（决策 078）：会分叉的会话（开了失败自动重试的尝试、分支会话）在 git 工作区里打快照
-      if ((options.retryOnFail ?? 0) > 0 || options.branchHeader !== undefined) {
+      liveBundle = bundle;
+      // M7（决策 078）：会分叉的会话（开了失败自动重试的尝试、分支会话）在 git 工作区里打快照；
+      // 决策 142：开启回炉时强制打快照——首个快照的改前基线就是撤回的起点
+      if (
+        (options.retryOnFail ?? 0) > 0 ||
+        options.branchHeader !== undefined ||
+        repairRounds > 0
+      ) {
         const checkpoints = attachCheckpoints({ bundle, workspaceRoot: options.workspaceRoot });
         if (checkpoints !== undefined) {
           bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
@@ -201,17 +263,75 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       : undefined;
   let status: HeadlessStatus;
   let errorMessage: string | undefined;
+  let verification: HeadlessRunResult["verification"];
+  let repair: HeadlessRepairSummary | undefined;
   try {
-    const run =
+    let run =
       options.continueFromHistory === true && handle.continueRun !== undefined
         ? await handle.continueRun()
         : await handle.run(options.task);
-    status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
-    errorMessage = run.errorMessage;
-    // M7（决策 072）：撞上限写进本会话账本，标签据此判失败；072 修订：只在运行确以中止收尾时写——
-    // 中止请求到达前模型已自然收尾（恰好用满最后一轮）的运行终态是完成，不写
-    if (run.status === "aborted" && limitHit !== undefined) {
-      handle.recordLimitHit?.(limitHit, run.runId);
+    let rounds = 0;
+    for (;;) {
+      status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
+      errorMessage = run.errorMessage;
+      // M7（决策 072）：撞上限写进本会话账本，标签据此判失败；072 修订：只在运行确以中止收尾时写——
+      // 中止请求到达前模型已自然收尾（恰好用满最后一轮）的运行终态是完成，不写
+      if (run.status === "aborted" && limitHit !== undefined) {
+        handle.recordLimitHit?.(limitHit, run.runId);
+      }
+      if (repairRounds === 0 || options.verify === undefined) {
+        break;
+      }
+      // 回炉：在同一会话里、释放之前验证（运行面没装起来、没有 Run 时不验证，这一步结束）
+      if (liveBundle === undefined || run.runId === undefined) {
+        repair = { rounds, reverted: false, budgetExhausted: false };
+        break;
+      }
+      const verified = await verifyAttempt({
+        config: options.verify,
+        workspace: options.workspaceRoot,
+        target: { sessionId, runId: run.runId },
+        sink: liveBundle.eventLog,
+        envelopeRunId: run.runId,
+      });
+      const { verdict } = verified.outcome;
+      verification = { verdict, recorded: verified.record !== undefined };
+      // 通过即结束；无法判定不回炉，按现有口径记为未知
+      if (verdict !== "fail") {
+        repair = { rounds, verdict, reverted: false, budgetExhausted: false };
+        break;
+      }
+      // 修满 N 轮或预算耗尽仍失败：恢复到这一步第一个 Run 之前的状态，这一步记为失败
+      const budgetExhausted = limitHit !== undefined;
+      if (rounds >= repairRounds || budgetExhausted) {
+        repair = { rounds, verdict, reverted: true, budgetExhausted };
+        try {
+          restoreStepStart({
+            governanceRoot: options.governanceRoot,
+            workspaceRoot: options.workspaceRoot,
+            sessionId,
+          });
+        } catch (error) {
+          // 账本已能推出撤回；恢复可重复执行，续跑时再执行一次即可
+          errorMessage = `撤回时恢复工作区失败（可重复执行恢复）：${error instanceof Error ? error.message : String(error)}`;
+        }
+        break;
+      }
+      rounds += 1;
+      const appendix = options.repairAppendix?.({
+        round: rounds,
+        maxRounds: repairRounds,
+        outcome: verified.outcome,
+      });
+      run = await handle.run(
+        buildRepairFeedback({
+          command: options.verify.command,
+          outcome: verified.outcome,
+          round: rounds,
+          maxRounds: repairRounds,
+          ...(appendix !== undefined ? { appendix } : {}),
+        })
+      );
     }
   } catch (error) {
     status = "failed";
@@ -225,9 +345,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   const metricsBefore = summarizeRunMetrics(
     materializeSession(sessionsDir, sessionId, { content: false })
   );
-  // M7（决策 071）：尝试收尾后在工作区独立执行验证命令（运行面没装起来、没有 Run 时不跑）
-  let verification: HeadlessRunResult["verification"];
-  if (options.verify !== undefined && metricsBefore.runId !== undefined) {
+  // M7（决策 071）：尝试收尾后在工作区独立执行验证命令（运行面没装起来、没有 Run 时不跑）；
+  // 回炉开启时验证已在释放之前做过，不再跑
+  if (repairRounds === 0 && options.verify !== undefined && metricsBefore.runId !== undefined) {
     const log = new JsonlEventLog(sessionsDir, sessionId);
     try {
       const verified = await verifyAttempt({
@@ -249,6 +369,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     status,
     ...metrics,
     ...(verification !== undefined ? { verification } : {}),
+    ...(repair !== undefined ? { repair } : {}),
     label:
       metrics.runId !== undefined
         ? labelAttempt(attemptOutcomeFacts(session, metrics.runId))
@@ -267,7 +388,8 @@ const ZERO_USAGE: TurnUsage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-// 单 Run 会话的指标（冷侧，只读 Event Log）：取首个 Run
+// 单次运行会话的指标（冷侧，只读 Event Log）：取首个 Run；回炉开启时按整步（同一会话里的全部 Run）汇总，
+// runId 仍是首个 Run（一步的身份）
 export function summarizeRunMetrics(session: MaterializedSession): HeadlessRunMetrics {
   const runId = session.runStarteds[0]?.runId ?? session.runtimeEvents[0]?.runId;
   if (runId === undefined) {
@@ -279,11 +401,12 @@ export function summarizeRunMetrics(session: MaterializedSession): HeadlessRunMe
       usage: structuredClone(ZERO_USAGE),
     };
   }
+  const stepRuns = new Set(stepRunsOf(session, runId));
   const usage = structuredClone(ZERO_USAGE);
   let turns = 0;
   let toolCalls = 0;
   for (const record of session.runtimeEvents) {
-    if (record.runId !== runId) {
+    if (!stepRuns.has(record.runId)) {
       continue;
     }
     if (record.kind === "turn.completed") {
@@ -309,11 +432,14 @@ export function summarizeRunMetrics(session: MaterializedSession): HeadlessRunMe
   const approvalsNeeded = session.records.filter(
     (record) =>
       record.kind === "receipt" &&
-      record.runId === runId &&
+      record.runId !== undefined &&
+      stepRuns.has(record.runId) &&
       record.receipt.approvedBy === "policy:yolo"
   ).length;
-  // 分类 null = 正常收尾；只有物化结果里找不到这个 Run 时才落"未知"
-  const classified = session.classification.runs.find((entry) => entry.runId === runId);
+  // 分类 null = 正常收尾；只有物化结果里找不到这个 Run 时才落"未知"。回炉时取整步最后一个 Run 的分类：
+  // 这一步怎么收尾看最后一轮，中间轮次不决定
+  const lastRun = lastStepRunOf(session, runId);
+  const classified = session.classification.runs.find((entry) => entry.runId === lastRun);
   return {
     runId,
     failure: classified !== undefined ? classified.failure : { category: "unknown" },

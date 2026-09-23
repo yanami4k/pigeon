@@ -16,6 +16,7 @@ import {
   migrateInjectionSnapshotV6toV7,
   migrateInjectionSnapshotV7toV8,
   migrateInjectionSnapshotV8toV9,
+  migrateInjectionSnapshotV9toV10,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -45,11 +46,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 6, migrateInjectionSnapshotV6toV7);
   migrations.register("injection-snapshot", 7, migrateInjectionSnapshotV7toV8);
   migrations.register("injection-snapshot", 8, migrateInjectionSnapshotV8toV9);
+  migrations.register("injection-snapshot", 9, migrateInjectionSnapshotV9toV10);
   return migrations;
 }
 
 test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 9);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 10);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -106,7 +108,8 @@ test("v1 → v2 → … → v8 迁移链：补 approvalMode 默认 prompt，旧�
     INJECTION_SNAPSHOT_VERSION,
     InjectionSnapshotSchema
   );
-  assert.equal(migrated.version, 9);
+  assert.equal(migrated.version, INJECTION_SNAPSHOT_VERSION);
+  assert.equal(migrated.repairRounds, undefined);
   assert.equal(migrated.review, undefined);
   assert.equal(migrated.budget, undefined);
   assert.equal(migrated.verify, undefined);
@@ -144,8 +147,13 @@ test("v7 快照：可选的验证命令配置与失败自动分叉重试次数�
   );
   assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, retryOnFail: -1 }));
   const v6 = { ...makeSnapshot(), version: 6 };
-  const migrated = registry().migrate("injection-snapshot", v6, 9, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v6, version: 9 });
+  const migrated = registry().migrate(
+    "injection-snapshot",
+    v6,
+    INJECTION_SNAPSHOT_VERSION,
+    InjectionSnapshotSchema
+  );
+  assert.deepStrictEqual(migrated, { ...v6, version: INJECTION_SNAPSHOT_VERSION });
 });
 
 // M8 S1 / S3（决策 081 / 087）：v8 顶层加本次尝试的预算，验证命令加来源字段
@@ -169,8 +177,13 @@ test("v8 快照：预算三项与验证命令来源可选；非正整数预算�
     })
   );
   const v7 = { ...makeSnapshot(), version: 7 };
-  const migrated = registry().migrate("injection-snapshot", v7, 9, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v7, version: 9 });
+  const migrated = registry().migrate(
+    "injection-snapshot",
+    v7,
+    INJECTION_SNAPSHOT_VERSION,
+    InjectionSnapshotSchema
+  );
+  assert.deepStrictEqual(migrated, { ...v7, version: INJECTION_SNAPSHOT_VERSION });
 });
 
 test("v9 快照：采样温度可选、取值 0 到 2；v8 快照纯版本推进", () => {
@@ -192,6 +205,23 @@ test("v9 快照：采样温度可选、取值 0 到 2；v8 快照纯版本推进
     );
   }
   const v8 = { ...makeSnapshot(), version: 8 };
-  const migrated = registry().migrate("injection-snapshot", v8, 9, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v8, version: 9 });
+  const migrated = registry().migrate(
+    "injection-snapshot",
+    v8,
+    INJECTION_SNAPSHOT_VERSION,
+    InjectionSnapshotSchema
+  );
+  assert.deepStrictEqual(migrated, { ...v8, version: INJECTION_SNAPSHOT_VERSION });
+});
+
+// 决策 142 / 143：v10 顶层加回炉轮数，只在开启时在场（至少 1）
+test("v10 快照：回炉轮数可选、至少 1；v9 快照纯版本推进", () => {
+  const snapshot = makeSnapshot();
+  assert.ok(Value.Check(InjectionSnapshotSchema, { ...snapshot, repairRounds: 3 }));
+  for (const repairRounds of [0, -1, 1.5]) {
+    assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, repairRounds }));
+  }
+  const v9 = { ...makeSnapshot(), version: 9 };
+  const migrated = registry().migrate("injection-snapshot", v9, 10, InjectionSnapshotSchema);
+  assert.deepStrictEqual(migrated, { ...v9, version: 10 });
 });

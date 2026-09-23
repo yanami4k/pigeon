@@ -5,10 +5,14 @@
 //   3. 无验证：撞任一上限 → 失败；治理熔断 → 失败；人主动取消 → 放弃；基础设施错误单列；业务失败 → 失败；
 //      正常完成与分类为未知的 → 未知（无验证而正常完成不等于做对）。
 // 放弃与基础设施错误不进成败对比（由对比方过滤，本文件只贴标签）。纯函数，无 IO。
+// 回炉（决策 142 / 143）：一步跨同一会话里的若干个 Run，事实按整步取——验证门结论只取整步最后一个 Run 的，
+// 运行结束、失败分类与撞上限取整步最后一个 Run，悬账计整步；中间轮次的失败不算这一步失败。
+// 最后一个 Run 没有验证门记录时这一步未收尾，现算为未知（决策 154 修订）。
 import type { OutcomeLabel } from "./candidate.ts";
 import type { FailureClass } from "./classification.ts";
 import type { RunId } from "./ids.ts";
 import type { MaterializedSession } from "./materialize.ts";
+import { lastGateVerificationOf, repairRoundsOf, stepRunsOf } from "./repair-step.ts";
 import type { EvalVerdict } from "./runtime-events.ts";
 
 export type { OutcomeLabel } from "./candidate.ts";
@@ -62,25 +66,35 @@ export function attemptOutcomeFacts(
   runId: RunId,
   options: AttemptFactsOptions = {}
 ): AttemptOutcomeFacts {
-  const hasRunEnded = session.runtimeEvents.some(
-    (event) => event.kind === "run.ended" && event.runId === runId
-  );
-  const pendingCount = session.reconcile.unknown.filter(
-    (entry) => entry.intent.runId === runId
+  // 整步：回炉开启时是同一会话里的全部 Run，否则就是这个 Run 本身
+  const runs = stepRunsOf(session, runId);
+  const inStep = new Set(runs);
+  const lastRun = runs.at(-1) ?? runId;
+  // 回炉开启时这一步以最后一个 Run 的验证收尾：最后一个 Run 没有验证记录即未收尾（崩溃在其验证落盘之前），
+  // 与缺运行结束记录同样现算为未知——不能让上一轮的失败验证替这一步下结论（决策 154 修订）
+  const stepClosed =
+    repairRoundsOf(session) === 0 || lastGateVerificationOf(session, lastRun) !== undefined;
+  const hasRunEnded =
+    stepClosed &&
+    session.runtimeEvents.some((event) => event.kind === "run.ended" && event.runId === lastRun);
+  const pendingCount = session.reconcile.unknown.filter((entry) =>
+    inStep.has(entry.intent.runId)
   ).length;
   const failure =
-    session.classification.runs.find((entry) => entry.runId === runId)?.failure ?? null;
-  const limitHit = session.limitHits.some((record) => record.runId === runId);
+    session.classification.runs.find((entry) => entry.runId === lastRun)?.failure ?? null;
+  const limitHit = session.limitHits.some((record) => record.runId === lastRun);
+  // 验证门记录只认这一步最后一个 Run 的（中间轮的失败验证不决定整步）；判据的 eval.verified 在一步收尾后
+  // 挂在这一步的身份（首个 Run）上，按整步收
   const verdicts: Array<{ at: number; verdict: EvalVerdict }> = [];
   for (const source of [session, ...(options.verificationSources ?? [])]) {
     for (const record of source.attemptVerifieds) {
-      if (record.target.sessionId === session.sessionId && record.target.runId === runId) {
+      if (record.target.sessionId === session.sessionId && record.target.runId === lastRun) {
         verdicts.push({ at: record.timestamp, verdict: record.verdict });
       }
     }
   }
   for (const record of session.evalVerifieds) {
-    if (record.runId === runId) {
+    if (inStep.has(record.runId)) {
       verdicts.push({ at: record.timestamp, verdict: record.payload.verdict });
     }
   }

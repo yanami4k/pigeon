@@ -4,6 +4,7 @@
 import { type Static, Type } from "typebox";
 import {
   AttemptBudgetSchema,
+  RepairRoundsSchema,
   RetryOnFailSchema,
   VerifyConfigSchema,
 } from "../state/attempt-config.ts";
@@ -27,7 +28,8 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v9（M9）：model 段增加采样温度 temperature（评测固定采样；缺省 = 未设，由 provider 决定）与"请求了但未生效"的
 // temperatureIgnored（推理开启时上游不把温度交给 provider），context 段增加任务源给的工作方式指令 taskDirective（原文，
 // 已拼进 systemPrompt；单列是为了回放与冻结项核对能取到原文）。v9 尚未入库，三个字段一次加齐、均可缺省
-export const INJECTION_SNAPSHOT_VERSION = 9;
+// v10（决策 142 / 143）：顶层增加回炉轮数 repairRounds（只在开启时在场；按会话冻结）
+export const INJECTION_SNAPSHOT_VERSION = 10;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -86,6 +88,8 @@ export const InjectionSnapshotSchema = Type.Object({
   retryOnFail: Type.Optional(RetryOnFailSchema),
   // 本次尝试的预算（M8，决策 087）：回放沿用它，不得放宽；各项缺省即该项不设限
   budget: Type.Optional(AttemptBudgetSchema),
+  // 回炉轮数（决策 142 / 143）：只在开启时在场；缺省即关闭
+  repairRounds: Type.Optional(RepairRoundsSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
@@ -128,3 +132,6 @@ export const migrateInjectionSnapshotV7toV8: Migration = (doc) => ({ ...doc, ver
 
 // v8 → v9：temperature 可缺省（缺省 = 当时没设），纯版本推进
 export const migrateInjectionSnapshotV8toV9: Migration = (doc) => ({ ...doc, version: 9 });
+
+// v9 → v10：repairRounds 可缺省（缺省 = 回炉关闭），纯版本推进
+export const migrateInjectionSnapshotV9toV10: Migration = (doc) => ({ ...doc, version: 10 });

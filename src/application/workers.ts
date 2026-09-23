@@ -163,6 +163,8 @@ interface RuntimeSurface {
   retryOnFail?: number;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
   budget?: AttemptBudget;
+  // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
+  repairRounds?: number;
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -251,6 +253,8 @@ export interface DetachedRuntimeRequest {
   retryOnFail?: number;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
   budget?: AttemptBudget;
+  // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
+  repairRounds?: number;
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -300,6 +304,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
+    ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）

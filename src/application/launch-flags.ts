@@ -3,7 +3,7 @@
 // 按入口分成三组，影响 Eval 与学习侧按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
-import { loadVerifyConfig } from "../persistence/verify-config.ts";
+import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import { DEFAULT_REVIEW_EVERY_TURNS } from "../review/scheduler.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { ReviewConfig } from "../state/review.ts";
@@ -52,6 +52,8 @@ export interface LaunchFlags {
   verifyTimeoutMs?: number;
   // M7（决策 079）：--retry-on-fail <K> 失败自动分叉重试次数（缺省 0 关闭）；cli REPL / resume、tui 与 pigeon run 接受
   retryOnFail?: number;
+  // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
+  repairRounds?: number;
   // M8（决策 086）：--auto-verify 无人值守时自动验证新落库的候选（缺省关）。
   // 一次验证是四组各 N 次真执行，开销与一轮 Eval 同量级，故必须由人显式拨开
   autoVerify: boolean;
@@ -74,6 +76,8 @@ export interface ParseLaunchFlagsOptions {
   verify?: boolean;
   // 是否接受 --retry-on-fail（cli / tui 主会话与 pigeon run）
   retry?: boolean;
+  // 是否接受 --repair-rounds（只有 pigeon run）
+  repair?: boolean;
 }
 
 export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOptions): LaunchFlags {
@@ -164,6 +168,12 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--retry-on-fail 需要非负整数（0 表示关闭）（${usage}）`);
       }
       flags.retryOnFail = value;
+    } else if (flag === "--repair-rounds" && options.repair === true) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`--repair-rounds 需要非负整数（0 表示关闭）（${usage}）`);
+      }
+      flags.repairRounds = value;
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {
@@ -219,4 +229,10 @@ export function resolveVerifyConfig(
   governanceRoot: string
 ): VerifyConfig | undefined {
   return verifyConfigOf(flags) ?? loadVerifyConfig(governanceRoot, DEFAULT_VERIFY_TIMEOUT_MS);
+}
+
+// 回炉轮数的来源（决策 142 / 143）：启动参数 > 项目验证配置（.pigeon/verify.json 的 repairRounds）> 0（关闭）。
+// 参数给 0 即关闭，压过项目配置；轮数与验证命令分别取来源，缺验证命令时由运行入口启动报错
+export function resolveRepairRounds(flags: LaunchFlags, governanceRoot: string): number {
+  return flags.repairRounds ?? loadProjectRepairRounds(governanceRoot) ?? 0;
 }

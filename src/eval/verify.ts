@@ -18,6 +18,7 @@ import {
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
+import { lastStepRunOf } from "../state/repair-step.ts";
 import { type LoadedEvalTask, TASK_DIR_TOKEN } from "./task.ts";
 import type { JudgeCommand } from "./task-source.ts";
 
@@ -187,7 +188,9 @@ export async function verifyTaskRun(input: VerifyTaskRunInput): Promise<Verifica
   const outcome = await runJudge(input.judge, input.commandHint);
   const sessionsDir = path.join(input.governanceRoot, ".pigeon", "sessions");
   const session = materializeSession(sessionsDir, input.sessionId, { content: false });
-  const done = input.runId !== undefined && selfReportedDone(session, input.runId);
+  // 回炉（决策 142 / 143）：自报完成看这一步最后一个 Run——一步怎么收尾看最后一轮，eval.verified 仍挂在这一步的身份上
+  const done =
+    input.runId !== undefined && selfReportedDone(session, lastStepRunOf(session, input.runId));
   const falsePositive = done && outcome.verdict === "fail";
   let recorded = false;
   let recordError: string | undefined;

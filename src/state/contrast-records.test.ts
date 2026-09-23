@@ -25,8 +25,8 @@ const LIMITS = { maxTurns: 10, wallClockMs: 1000 };
 const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
-test("Event Log 当前为 v14（v11 加法式新增 M7 各族，v14 退役四族）", () => {
-  assert.equal(EVENT_LOG_VERSION, 14);
+test("Event Log 当前为 v15（v11 加法式新增 M7 各族，v14 退役四族，v15 加回炉轮数）", () => {
+  assert.equal(EVENT_LOG_VERSION, 15);
 });
 
 test("069：派出记录可带共享任务标识；缺省仍合法（旧派出记录不受影响）", () => {
@@ -246,7 +246,7 @@ test("v10 的不可解析记录经迁移链升到当前版本：产出会话字�
 });
 
 // 决策 128：v13 → v14 只退役四族（由读取边界跳过），保留下来的记录纯版本推进、正文逐字不变
-test("v13 记录经迁移链升到 v14：纯版本推进，其余字段逐字不变", () => {
+test("v13 记录经迁移链升到当前版本：v14、v15 都是纯版本推进，其余字段逐字不变", () => {
   const v13 = {
     version: 13,
     id: newEntryId(),
@@ -257,6 +257,6 @@ test("v13 记录经迁移链升到 v14：纯版本推进，其余字段逐字不
     payload: { limit: "token-limit" },
   };
   const record = parseEventRecord(structuredClone(v13));
-  assert.equal(EVENT_LOG_VERSION, 14);
-  assert.deepEqual(record, { ...v13, version: 14 });
+  assert.equal(EVENT_LOG_VERSION, 15);
+  assert.deepEqual(record, { ...v13, version: EVENT_LOG_VERSION });
 });

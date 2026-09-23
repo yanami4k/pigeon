@@ -24,6 +24,7 @@ import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import {
   type LaunchFlags,
   parseLaunchFlags,
+  resolveRepairRounds,
   resolveStreamFnSpec,
   resolveVerifyConfig,
   reviewConfigOf,
@@ -632,7 +633,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -669,7 +670,7 @@ async function runMain(argv: string[]): Promise<void> {
       }
     }
   }
-  const flags = parseLaunchFlags(modelArgv, { usage, verify: true, retry: true });
+  const flags = parseLaunchFlags(modelArgv, { usage, verify: true, retry: true, repair: true });
   if (task === undefined) {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) {
@@ -683,6 +684,8 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const workspaceRoot = prepareWorkspace(flags.root);
+  // 决策 142 / 143：回炉轮数——启动参数 > 项目验证配置 > 关闭；设定不成立由 runHeadless 启动报错
+  const repairRounds = resolveRepairRounds(flags, workspaceRoot);
   const result = await runHeadless({
     task,
     governanceRoot: workspaceRoot,
@@ -703,6 +706,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试；叶子验证后自动提炼
     ...attemptOptions(flags, streamFn, workspaceRoot),
+    ...(repairRounds > 0 ? { repairRounds } : {}),
   });
   if (json) {
     // JSON.stringify 转义全部 C0 控制字符，一行输出不携带终端控制序列
@@ -712,6 +716,7 @@ async function runMain(argv: string[]): Promise<void> {
       `会话 ${result.sessionId} ｜ 终态 ${result.status} ｜ 分类：${failureBadge(result.failure)} ｜ ` +
         `${result.turns} 轮 ｜ 工具调用 ${result.toolCalls} 次 ｜ 需审批 ${result.approvalsNeeded} 次 ｜ ` +
         `token ${result.usage.totalTokens}${result.retries !== undefined ? ` ｜ 重试 ${result.retries.map((retry) => retry.label).join("、")}` : ""} ｜ 标签 ${result.label}${result.verification !== undefined ? `（验证 ${result.verification.verdict}）` : ""}` +
+        `${result.repair !== undefined ? ` ｜ ${repairSummary(result.repair)}` : ""}` +
         `${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
     );
   }
@@ -1278,6 +1283,16 @@ function emitActivationNotes(governanceRoot: string, flags: LaunchFlags): void {
     process.stderr.write(`${note}
 `);
   }
+}
+
+// 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、是否撤回（预算耗尽而提前撤回另行标注）
+function repairSummary(
+  repair: NonNullable<Awaited<ReturnType<typeof runHeadless>>["repair"]>
+): string {
+  return (
+    `回炉 ${repair.rounds} 轮 ｜ 最终验证 ${repair.verdict ?? "未验证"}` +
+    (repair.reverted ? ` ｜ 已撤回${repair.budgetExhausted ? "（预算耗尽提前撤回）" : ""}` : "")
+  );
 }
 
 // M7（决策 071）/ M8（决策 081）：会话级验证命令——启动参数 > 项目配置 > 未配置（未配置时不传）

@@ -128,6 +128,8 @@ export interface RuntimeDeps {
   retryOnFail?: number;
   // M8（决策 087）：本次尝试的预算——冻结进注入快照并随 run.started 落盘，回放据此沿用同一预算
   budget?: AttemptBudget;
+  // 决策 142 / 143：回炉轮数（只在开启时给）——冻结进注入快照并随 run.started 落盘
+  repairRounds?: number;
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
 }
@@ -348,6 +350,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
+      ...(deps.repairRounds !== undefined ? { repairRounds: deps.repairRounds } : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: limitOutputTokens(

@@ -25,6 +25,24 @@ export function loadVerifyConfig(
   governanceRoot: string,
   defaultTimeoutMs: number = DEFAULT_PROJECT_VERIFY_TIMEOUT_MS
 ): { command: string; timeoutMs: number; source: "project" } | undefined {
+  const file = readVerifyConfigFile(governanceRoot);
+  if (file === undefined) {
+    return undefined;
+  }
+  return {
+    command: file.command,
+    timeoutMs: file.timeoutMs ?? defaultTimeoutMs,
+    source: "project",
+  };
+}
+
+// 项目级回炉轮数（决策 142 / 143）；文件缺失或未写该字段返回 undefined
+export function loadProjectRepairRounds(governanceRoot: string): number | undefined {
+  return readVerifyConfigFile(governanceRoot)?.repairRounds;
+}
+
+// 读取并校验 .pigeon/verify.json；缺失返回 undefined，畸形响亮失败
+function readVerifyConfigFile(governanceRoot: string): VerifyConfigFile | undefined {
   const path = verifyConfigPath(governanceRoot);
   if (!existsSync(path)) {
     return undefined;
@@ -52,9 +70,5 @@ export function loadVerifyConfig(
   if (file.command.trim() === "") {
     throw new VerifyConfigError(`verify 配置的命令是空白：${path}`);
   }
-  return {
-    command: file.command,
-    timeoutMs: file.timeoutMs ?? defaultTimeoutMs,
-    source: "project",
-  };
+  return file;
 }

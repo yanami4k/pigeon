@@ -15,6 +15,7 @@ import {
   readMessageContentFileDetailed,
 } from "../persistence/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
+import { stepRunsOf } from "../state/repair-step.ts";
 import { EDIT_NO_CHANGE_PREFIX, type EditMode } from "../tools/edit-mode.ts";
 import { HASHLINE_ANCHOR_MISS_MARK, HASHLINE_OUT_OF_RANGE_MARK } from "../tools/hashline.ts";
 import { REPLACE_NOT_FOUND_PREFIX, REPLACE_NOT_UNIQUE_PREFIX } from "../tools/replace-edit.ts";
@@ -111,12 +112,18 @@ export function summarizeProcess(input: SummarizeProcessInput): ProcessMetrics {
   if (runId === undefined) {
     return metrics;
   }
+  // 回炉（决策 142 / 143）：一步跨若干个 Run，过程指标按整步汇总
+  const stepRuns = new Set(stepRunsOf(session, runId));
   const errorText = new Map<string, string>();
   const content = readMessageContentFileDetailed(
     JsonlEventLog.contentFilePathFor(input.sessionsDir, input.sessionId)
   );
   for (const record of content.records) {
-    if (record.runId === runId && record.role === "toolResult" && record.toolCallId !== undefined) {
+    if (
+      stepRuns.has(record.runId) &&
+      record.role === "toolResult" &&
+      record.toolCallId !== undefined
+    ) {
       errorText.set(
         record.toolCallId,
         record.blocks.map((block) => (block.type === "text" ? block.text : "")).join("")
@@ -124,7 +131,7 @@ export function summarizeProcess(input: SummarizeProcessInput): ProcessMetrics {
     }
   }
   for (const record of session.runtimeEvents) {
-    if (record.runId !== runId) {
+    if (!stepRuns.has(record.runId)) {
       continue;
     }
     if (record.kind === "turn.completed" && record.payload.stopReason === "length") {

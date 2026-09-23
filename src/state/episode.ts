@@ -10,6 +10,7 @@ import type { ForkPoint } from "./event-log.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import type { MaterializedSession } from "./materialize.ts";
 import { attemptOutcomeFacts, labelAttempt } from "./outcome-label.ts";
+import { lastStepRunOf, stepRunsOf } from "./repair-step.ts";
 
 export interface Attempt extends AttemptRef {
   // 本尝试的模型轮次数（选成功侧用）
@@ -68,10 +69,13 @@ export function buildTaskAttempt(input: TaskAttemptInput): Attempt {
   }
   const sources = input.verificationSources ?? [];
   const lastSeq = lastRunSeqOf(session, runId);
+  // 回炉（决策 142 / 143）：一步跨若干个 Run，轮次按整步计、收尾取整步最后一个 Run；标签由 attemptOutcomeFacts 按整步现算。
+  // 尝试引用（runId 与条目范围）仍指向首个 Run：一次尝试的引用只容得下一个 Run
+  const stepRuns = new Set(stepRunsOf(session, runId));
   let turns = 0;
   let endedAt: number | undefined;
   for (const event of session.runtimeEvents) {
-    if (event.runId !== runId) {
+    if (event.runId === undefined || !stepRuns.has(event.runId)) {
       continue;
     }
     if (event.kind === "turn.completed") {
@@ -97,18 +101,21 @@ export function buildTaskAttempt(input: TaskAttemptInput): Attempt {
   };
 }
 
-// 验证记录引用：在哪个会话文件、哪条记录（取时间最晚的一条，与标签现算同口径）
+// 验证记录引用：在哪个会话文件、哪条记录（取时间最晚的一条，与标签现算同口径；回炉时验证门记录只认
+// 整步最后一个 Run 的，判据的 eval.verified 按整步收）
 function latestVerification(
   session: MaterializedSession,
   runId: RunId,
   sources: readonly MaterializedSession[]
 ): AttemptRef["verification"] {
   let best: { at: number; ref: NonNullable<AttemptRef["verification"]> } | undefined;
+  const stepRuns = new Set(stepRunsOf(session, runId));
+  const lastRun = lastStepRunOf(session, runId);
   for (const source of [session, ...sources]) {
     for (const record of source.attemptVerifieds) {
       if (
         record.target.sessionId === session.sessionId &&
-        record.target.runId === runId &&
+        record.target.runId === lastRun &&
         (best === undefined || record.timestamp >= best.at)
       ) {
         best = { at: record.timestamp, ref: { sessionId: source.sessionId, recordId: record.id } };
@@ -116,7 +123,7 @@ function latestVerification(
     }
   }
   for (const record of session.evalVerifieds) {
-    if (record.runId === runId && (best === undefined || record.timestamp >= best.at)) {
+    if (stepRuns.has(record.runId) && (best === undefined || record.timestamp >= best.at)) {
       best = { at: record.timestamp, ref: { sessionId: session.sessionId, recordId: record.id } };
     }
   }
