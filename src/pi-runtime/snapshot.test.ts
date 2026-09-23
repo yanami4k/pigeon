@@ -17,6 +17,7 @@ import {
   migrateInjectionSnapshotV7toV8,
   migrateInjectionSnapshotV8toV9,
   migrateInjectionSnapshotV9toV10,
+  migrateInjectionSnapshotV10toV11,
 } from "./snapshot.ts";
 
 const HASH = "a".repeat(64);
@@ -47,11 +48,12 @@ function registry(): MigrationRegistry {
   migrations.register("injection-snapshot", 7, migrateInjectionSnapshotV7toV8);
   migrations.register("injection-snapshot", 8, migrateInjectionSnapshotV8toV9);
   migrations.register("injection-snapshot", 9, migrateInjectionSnapshotV9toV10);
+  migrations.register("injection-snapshot", 10, migrateInjectionSnapshotV10toV11);
   return migrations;
 }
 
 test("v6 快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限 + 可选审阅配置）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 10);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 11);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -221,16 +223,31 @@ test("v10 快照：回炉轮数可选、至少 1；v9 快照纯版本推进", ()
     assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, repairRounds }));
   }
   const v9 = { ...makeSnapshot(), version: 9 };
-  const migrated = registry().migrate("injection-snapshot", v9, 10, InjectionSnapshotSchema);
-  assert.deepStrictEqual(migrated, { ...v9, version: 10 });
+  const migrated = registry().migrate(
+    "injection-snapshot",
+    v9,
+    INJECTION_SNAPSHOT_VERSION,
+    InjectionSnapshotSchema
+  );
+  assert.deepStrictEqual(migrated, { ...v9, version: INJECTION_SNAPSHOT_VERSION });
 });
 
-// 决策 137：审阅配置字段已从快照 schema 删除；对象非严格，v6 至 v10 快照里的该字段读取时忽略，版本不变
-test("审阅配置字段已删除：带该字段的旧快照照常通过校验与迁移链", () => {
+// 决策 137：v11 从快照 schema 删除审阅配置字段；对象非严格，v6 至 v10 快照里的该字段读取时忽略
+test("v11 快照：审阅配置字段已删除，带该字段的 v6 至 v10 旧快照照常通过迁移链；v10 → v11 纯版本推进", () => {
   const review = { enabled: true, everyTurns: 4 };
   const withReview = { ...makeSnapshot(), review };
   assert.ok(Value.Check(InjectionSnapshotSchema, withReview), "当前版本快照带旧字段仍合法");
-  for (const version of [6, 9]) {
+  const v10 = { ...makeSnapshot(), version: 10, review };
+  const migrated = registry().migrate(
+    "injection-snapshot",
+    structuredClone(v10),
+    INJECTION_SNAPSHOT_VERSION,
+    InjectionSnapshotSchema
+  );
+  assert.equal(migrated.version, 11);
+  assert.deepEqual(migrated.model, v10.model, "其余字段逐字不变");
+  assert.deepEqual(migrated.context, v10.context);
+  for (const version of [6, 9, 10]) {
     const old = { ...makeSnapshot(), version, review };
     assert.doesNotThrow(
       () =>

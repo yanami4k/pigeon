@@ -166,6 +166,8 @@ export default {
     {
       name: "eval-below-actors",
       severity: "error",
+      // replay 的放行保留：swebench-verify 删除后 eval 暂无引用，但跑批器以后做单步重跑时要调用
+      // replay/fidelity.ts 的一致性核对（决策 156）
       comment:
         "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057）可依赖 state / persistence / replay / " +
         "tools / orchestration / application 及以下；不触达 Actor 层（cli/tui），由 cli 调用（022 修订）。",

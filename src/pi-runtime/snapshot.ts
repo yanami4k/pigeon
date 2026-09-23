@@ -28,7 +28,9 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // temperatureIgnored（推理开启时上游不把温度交给 provider），context 段增加任务源给的工作方式指令 taskDirective（原文，
 // 已拼进 systemPrompt；单列是为了回放与冻结项核对能取到原文）。v9 尚未入库，三个字段一次加齐、均可缺省
 // v10（决策 142 / 143）：顶层增加回炉轮数 repairRounds（只在开启时在场；按会话冻结）
-export const INJECTION_SNAPSHOT_VERSION = 10;
+// v11（决策 137）：删除 v6 引入的顶层审阅配置 review（第一版学习闭环退役）。对象非严格，
+// 旧快照里的该字段读取时忽略；版本推进只为让版本号对应形状
+export const INJECTION_SNAPSHOT_VERSION = 11;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -79,8 +81,8 @@ export const InjectionSnapshotSchema = Type.Object({
   skills: Type.Array(SkillManifestEntrySchema),
   // Unix 毫秒时间戳
   createdAt: Type.Integer({ minimum: 0 }),
-  // 决策 137：后台审阅配置字段（v6 引入）已删除。本对象非严格（未设 additionalProperties: false），
-  // 旧快照里的 review 字段读取时忽略，版本不变
+  // 决策 137：后台审阅配置字段（v6 引入）在 v11 删除。本对象非严格（未设 additionalProperties: false），
+  // 旧快照里的 review 字段读取时忽略
   // 会话级验证命令（M7，决策 071）：尝试收尾后由程序在工作区独立执行；未配置缺省（标签为未知）
   verify: Type.Optional(VerifyConfigSchema),
   // 失败自动分叉重试次数（M7，决策 079）：缺省即 0（关闭）
@@ -134,3 +136,6 @@ export const migrateInjectionSnapshotV8toV9: Migration = (doc) => ({ ...doc, ver
 
 // v9 → v10：repairRounds 可缺省（缺省 = 回炉关闭），纯版本推进
 export const migrateInjectionSnapshotV9toV10: Migration = (doc) => ({ ...doc, version: 10 });
+
+// v10 → v11：审阅配置字段从 schema 删除，旧快照里的该字段原样留着、读取时忽略（不改写、不猜），纯版本推进
+export const migrateInjectionSnapshotV10toV11: Migration = (doc) => ({ ...doc, version: 11 });
