@@ -188,7 +188,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       );
       assert.match(
         agent.calls[0]?.prompt ?? "",
-        /^Add alpha\n\nCreate src\/a\.txt\n\n--- src\/a\.test\.sh ---/
+        /^src\/a\.test\.sh\nsrc\/base\.test\.sh\n\nAdd alpha\n\nCreate src\/a\.txt\n\n--- src\/a\.test\.sh ---/
       );
       const last = rows.at(-1);
       assert.deepEqual(last?.fullPassRate?.byCount, { passed: 4, total: 4, rate: 1 });
@@ -240,7 +240,9 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         const root = input.target.root;
         if (input.step.seq === 1) {
           write(root, { "src/a.txt": "wrong\n" });
-          return { repair: { rounds: 3, finalVerdict: "fail" } };
+          return {
+            repair: { rounds: 2, finalVerdict: "fail", reverted: true, budgetExhausted: true },
+          };
         }
         if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
         if (input.step.seq === 5) write(root, { "src/b.txt": "beta\n" });
@@ -252,8 +254,20 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const rows = readStreamResults(summary.resultsFile);
       const [r1, r2, , , r5] = rows;
       assert.deepEqual(
-        [r1?.outcome, r1?.reverted, r1?.repairRounds, r1?.finalVerdict, r1?.attribution],
-        ["failed", true, 3, "fail", "not-done"]
+        [
+          r1?.outcome,
+          r1?.reverted,
+          r1?.repairRounds,
+          r1?.finalVerdict,
+          r1?.repairBudgetExhausted,
+          r1?.attribution,
+        ],
+        ["failed", true, 2, "fail", true, "not-done"]
+      );
+      assert.equal(
+        r2?.repairBudgetExhausted,
+        false,
+        "开回炉的条件、回炉照常收尾：预算没有先于轮数用尽"
       );
       assert.equal(r1?.head, t.commits[0], "撤回后工作区回到本步起点");
       assert.deepEqual(

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { commandStepAgent, pigeonStepAgent, STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
@@ -27,7 +29,7 @@ function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAg
     condition: CONDITION_SPECS.minimal,
     target: { container: "box", root: "/testbed" },
     budget: { maxTurns: 150, wallClockMs: 60_000 },
-    gateCommand: ["true"],
+    verify: { command: "true", timeoutMs: 60_000 },
     workDir,
     ...overrides,
   };
@@ -114,18 +116,90 @@ test("命令式 agent：限额暂停即杀掉启动器，记为被打断（整�
   }
 });
 
-test("Pigeon agent：开回炉的条件在回炉合入前明确报错，不假装能跑", async () => {
+// 容器以在本机执行命令的假 docker 代替：工作区是真实 git 仓库，a.txt 起初为 bug
+function containerWorkspace(dir: string) {
+  const testbed = join(dir, "testbed");
+  mkdirSync(testbed);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: testbed, encoding: "utf8" });
+  git("init", "-q");
+  git("config", "user.name", "t");
+  git("config", "user.email", "t@example.invalid");
+  git("config", "core.autocrlf", "false");
+  writeFileSync(join(testbed, "a.txt"), "bug\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "start");
+  return { testbed, ...localDockerHost(testbed) };
+}
+
+const editTo = (from: string, to: string) => ({
+  text: `把 ${from} 改成 ${to}`,
+  toolCalls: [
+    { name: "edit_file", args: { path: "a.txt", old_string: `${from}\n`, new_string: `${to}\n` } },
+  ],
+});
+
+test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修满轮数仍失败即撤回到这一步起点，结果带回回炉字段", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
   try {
     const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({ replies: [{ text: "不该被调用" }] }),
+      streamFn: createFakeStreamFn({
+        replies: [
+          editTo("bug", "w1"),
+          { text: "好了" },
+          editTo("w1", "w2"),
+          { text: "好了" },
+          editTo("w2", "w3"),
+          { text: "好了" },
+          editTo("w3", "w4"),
+          { text: "好了" },
+        ],
+      }),
       yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
     });
-    await assert.rejects(
-      agent.run(input(dir, { condition: CONDITION_SPECS.full })),
-      /回炉尚未合入/
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: { command: "grep -qx fixed a.txt", timeoutMs: 60_000 },
+      })
     );
+    assert.deepEqual(out.repair, {
+      rounds: 3,
+      finalVerdict: "fail",
+      reverted: true,
+      budgetExhausted: false,
+    });
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("Pigeon agent：不开回炉的条件不验证、不撤回，结果不带回炉字段", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const agent = pigeonStepAgent({
+      streamFn: createFakeStreamFn({ replies: [editTo("bug", "w1"), { text: "好了" }] }),
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    });
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS["no-gate"],
+        target: { container: "box", root: ws.containerRoot },
+        verify: { command: "grep -qx fixed a.txt", timeoutMs: 60_000 },
+      })
+    );
+    assert.equal(out.repair, null);
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w1\n");
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });

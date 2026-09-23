@@ -20,6 +20,7 @@ test("结果行字段清单：第 20 条要求的字段都在（回炉三字段�
     "repairRounds",
     "reverted",
     "finalVerdict",
+    "repairBudgetExhausted",
     "fullPassRate",
     "regressions",
     "quality",

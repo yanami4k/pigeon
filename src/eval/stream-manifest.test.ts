@@ -193,7 +193,7 @@ test("题：题面为提交信息原文加测试文件全文；判题集为本�
   assert.deepEqual(step?.judgeTests, ["src/a.test.ts"]);
   assert.equal(
     step?.prompt,
-    "subject c1\n\nbody c1\n\n--- src/a.test.ts ---\ncontent of src/a.test.ts at c1\n"
+    "src/a.test.ts\n\nsubject c1\n\nbody c1\n\n--- src/a.test.ts ---\ncontent of src/a.test.ts at c1\n"
   );
   assert.deepEqual(step?.humanFiles, [
     { path: "src/a.test.ts", op: "write", kind: "test" },
@@ -239,7 +239,7 @@ test("红测试对：先红后修的相邻提交合为一题，父提交取先�
   assert.deepEqual(pair?.judgeTests, ["src/x.test.ts", "src/y.test.ts"]);
   assert.ok(
     pair?.prompt?.startsWith(
-      "subject red\n\nbody red\n\nsubject fix\n\nbody fix\n\n--- src/x.test.ts ---"
+      "src/x.test.ts\nsrc/y.test.ts\n\nsubject red\n\nbody red\n\nsubject fix\n\nbody fix\n\n--- src/x.test.ts ---"
     )
   );
   assert.equal(m.steps[1]?.seq, 2);
@@ -365,10 +365,13 @@ test("strands 不碰被测包的提交跳过，只改 strands-py 测试的提交
   );
 });
 
-test("题面生成：无测试文件时只有提交信息，末尾统一一个换行", () => {
+test("题面生成：开头每行一个测试文件路径（全文被截断时路径仍在），再接提交信息与各测试全文；无测试文件时只有提交信息", () => {
   assert.equal(buildTaskPrompt("msg\n\n", []), "msg\n");
   assert.equal(
-    buildTaskPrompt("msg", [{ path: "a.test.ts", content: "x\n\n" }]),
-    "msg\n\n--- a.test.ts ---\nx\n"
+    buildTaskPrompt("msg", [
+      { path: "src/a.test.ts", content: "x\n\n" },
+      { path: "src/b.test.ts", content: "y" },
+    ]),
+    "src/a.test.ts\nsrc/b.test.ts\n\nmsg\n\n--- src/a.test.ts ---\nx\n\n--- src/b.test.ts ---\ny\n"
   );
 });

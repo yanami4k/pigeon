@@ -37,11 +37,7 @@ export interface PigeonStepAgentOptions {
 export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
   return {
     async run(input): Promise<StepAgentResult> {
-      if (input.condition.repairRounds > 0) {
-        throw new Error(
-          `条件 ${input.condition.name} 需要回炉（${input.condition.repairRounds} 轮），回炉尚未合入，本条件暂不能跑`
-        );
-      }
+      const repairRounds = input.condition.repairRounds;
       const streamFn =
         input.modelBaseUrl !== undefined && options.streamFnFor !== undefined
           ? options.streamFnFor(input.modelBaseUrl)
@@ -70,6 +66,17 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
         skillRoots: [],
         memoryRoots: [],
         taskDirective: STREAM_WORK_DIRECTIVE,
+        // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点
+        ...(repairRounds > 0
+          ? {
+              verify: {
+                command: input.verify.command,
+                timeoutMs: input.verify.timeoutMs,
+                source: "project" as const,
+              },
+              repairRounds,
+            }
+          : {}),
         ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
         ...(options.maxOutputTokens !== undefined
           ? { maxOutputTokens: options.maxOutputTokens }
@@ -92,7 +99,21 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
         turns: run.turns,
         usage: run.usage,
         wallMs: run.durationMs,
-        repair: null,
+        repair:
+          run.repair === undefined
+            ? null
+            : {
+                rounds: run.repair.rounds,
+                finalVerdict:
+                  run.repair.verdict === "pass" || run.repair.verdict === "fail"
+                    ? run.repair.verdict
+                    : null,
+                reverted: run.repair.reverted,
+                budgetExhausted: run.repair.budgetExhausted,
+                ...(run.repair.restoreError !== undefined
+                  ? { restoreError: run.repair.restoreError }
+                  : {}),
+              },
         ...(providerFailed
           ? { interrupted: `模型服务故障（终态 ${run.status}）：${run.errorMessage ?? ""}` }
           : {}),

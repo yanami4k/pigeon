@@ -61,14 +61,19 @@ export function verifyConfigFile(
   return { version: 1, steps, timeoutMs };
 }
 
-// 由分步派生的验证门：各步全跑、各带标题，任一步失败即不通过（与分步验证"各步全跑、各出结论"同一口径）
-export function gateFromSteps(steps: readonly StreamVerifyStep[]): string[] {
+// 由分步派生的一行验证命令（交 sh -c）：各步全跑、各带标题，任一步失败即不通过（与分步验证"各步全跑、各出结论"
+// 同一口径）。回炉的验证与维护步的验证门都用它
+export function verifyScript(steps: readonly StreamVerifyStep[]): string {
   const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   const parts = steps.map(
     (s) =>
       `printf '== %s ==\\n' ${quote(s.name)}; ( ${s.cwd !== undefined ? `cd ${quote(s.cwd)} && ` : ""}${s.command} ) || s=1;`
   );
-  return ["sh", "-c", ["s=0;", ...parts, 'exit "$s"'].join(" ")];
+  return ["s=0;", ...parts, 'exit "$s"'].join(" ");
+}
+
+export function gateFromSteps(steps: readonly StreamVerifyStep[]): string[] {
+  return ["sh", "-c", verifyScript(steps)];
 }
 
 const PIGEON_ENV_FILES = new Set([

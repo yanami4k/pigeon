@@ -45,6 +45,8 @@ export interface StreamResultLine {
   repairRounds: number | null;
   reverted: boolean;
   finalVerdict: "pass" | "fail" | null;
+  // 回炉撤回是否因预算先于轮数用尽；未开回炉为 null
+  repairBudgetExhausted: boolean | null;
   // 全量测试通过率（跳过步沿用上一步，没有测量时为 null）。主指标 byCount 的分母为人的代码上每遍都通过的用例（B，
   // 145 修订）；byCountCollected 的分母为人的代码上收集出的全部用例（A，对照）；humanFlaky 为人的代码上时过时不过的用例数；
   // humanRuns 为人的基准每一遍的内存峰值与墙钟，humanSlowest 为其中耗时最长的用例
@@ -98,6 +100,7 @@ export const STREAM_RESULT_FIELDS = [
   "repairRounds",
   "reverted",
   "finalVerdict",
+  "repairBudgetExhausted",
   "fullPassRate",
   "regressions",
   "quality",

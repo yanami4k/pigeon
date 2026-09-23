@@ -8,6 +8,8 @@ import { join } from "node:path";
 import {
   CHECK_OUTPUT_LIMIT_BYTES,
   type CheckOutcome,
+  collector,
+  finishCheck,
   runCheckCommand,
   shellCommand,
 } from "../execution/check-command.ts";
@@ -19,7 +21,49 @@ import {
   type VerifyStepResult,
   verifyStepsOf,
 } from "../state/verify-steps.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import type { RuntimeBundle } from "./runtime.ts";
+
+// 经执行端验证时取回的输出上限：取全量再按本地同一口径留尾部、计字节数与哈希（执行端只留开头）
+const HOST_VERIFY_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+// 执行一行验证命令：给了执行端即经它在其工作区根执行（容器工作区），cwd 为相对工作区根的子目录；否则在本地子进程执行。
+// 经执行端时超时与拉不起来按未判定，与本地同一口径
+async function runVerifyCommand(
+  command: string,
+  workspace: string,
+  cwd: string | undefined,
+  timeoutMs: number,
+  host: WorkspaceHost | undefined
+): Promise<CheckOutcome> {
+  if (host === undefined) {
+    return runCheckCommand({
+      ...shellCommand(command),
+      cwd: cwd !== undefined ? join(workspace, cwd) : workspace,
+      timeoutMs,
+    });
+  }
+  const startedAt = Date.now();
+  const line = cwd !== undefined ? `cd '${cwd.replace(/'/g, "'\\''")}' && ${command}` : command;
+  const argv = ["sh", "-c", line];
+  const result = await host.exec(
+    { program: "sh", args: ["-c", line], verbatim: false },
+    { env: {}, timeoutMs, maxOutputBytes: HOST_VERIFY_OUTPUT_BYTES, signal: undefined }
+  );
+  const collected = collector();
+  collected.push(Buffer.from(result.output, "utf8"), true);
+  return finishCheck({
+    command: argv,
+    startedAt,
+    collected,
+    exitCode: result.spawned ? result.exitCode : null,
+    ...(result.signal !== undefined ? { signal: result.signal } : {}),
+    timedOut: result.timedOut,
+    ...(result.spawnError !== undefined
+      ? { error: `命令拉不起来：${result.spawnError.message}` }
+      : {}),
+  });
+}
 
 export interface AttemptVerificationSink {
   appendAttemptVerified(input: AttemptVerifiedInput): AttemptVerifiedRecord;
@@ -33,6 +77,8 @@ export interface VerifyAttemptInput {
   sink: AttemptVerificationSink;
   // 写记录时的信封 Run（写进尝试自己的会话文件时即该 Run；父会话无活动 Run 时缺省）
   envelopeRunId?: RunId;
+  // 工作区在执行端另一侧（容器）时经它执行；workspace 此时记执行端的工作区根
+  host?: WorkspaceHost;
 }
 
 export interface VerifyAttemptResult {
@@ -48,17 +94,20 @@ export interface VerifyAttemptResult {
 // 整体结论为各步合取；整体退出码取第一个失败步骤的（通过为 0，无法判定为空）；整体输出为各步输出按步分段后的末尾
 async function runVerifySteps(
   config: VerifyConfig,
-  workspace: string
+  workspace: string,
+  host: WorkspaceHost | undefined
 ): Promise<{ outcome: CheckOutcome; steps: VerifyStepResult[] }> {
   const startedAt = Date.now();
   const outcomes: Array<{ name: string; command: string; cwd?: string; outcome: CheckOutcome }> =
     [];
   for (const step of verifyStepsOf(config)) {
-    const outcome = await runCheckCommand({
-      ...shellCommand(step.command),
-      cwd: step.cwd !== undefined ? join(workspace, step.cwd) : workspace,
-      timeoutMs: config.timeoutMs,
-    });
+    const outcome = await runVerifyCommand(
+      step.command,
+      workspace,
+      step.cwd,
+      config.timeoutMs,
+      host
+    );
     outcomes.push({
       name: step.name,
       command: step.command,
@@ -119,15 +168,17 @@ async function runVerifySteps(
 export async function verifyAttempt(input: VerifyAttemptInput): Promise<VerifyAttemptResult> {
   const stepped =
     input.config.steps !== undefined
-      ? await runVerifySteps(input.config, input.workspace)
+      ? await runVerifySteps(input.config, input.workspace, input.host)
       : undefined;
   const outcome =
     stepped?.outcome ??
-    (await runCheckCommand({
-      ...shellCommand(input.config.command),
-      cwd: input.workspace,
-      timeoutMs: input.config.timeoutMs,
-    }));
+    (await runVerifyCommand(
+      input.config.command,
+      input.workspace,
+      undefined,
+      input.config.timeoutMs,
+      input.host
+    ));
   const steps = stepped?.steps;
   try {
     const record = input.sink.appendAttemptVerified({
@@ -158,7 +209,7 @@ export interface AttachAttemptVerificationOptions {
   bundle: RuntimeBundle;
   config: VerifyConfig;
   workspaceRoot: string;
-  // 一次尝试验证完成（记录已落盘）后的附加处理——失败自动分叉重试的挂点；抛错只进错误清单
+  // 一次尝试验证完成（记录已落盘）后的附加处理——失败自动分叉重试与分叉叶子提炼的挂点；抛错只进错误清单
   onVerified?: (record: AttemptVerifiedRecord) => void | Promise<void>;
 }
 

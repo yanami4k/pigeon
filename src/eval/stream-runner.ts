@@ -33,6 +33,7 @@ import {
   countQuality,
   type StreamRepoRuntime,
   verifyConfigFile,
+  verifyScript,
 } from "./stream-profiles.ts";
 import { renderStreamReport } from "./stream-report.ts";
 import {
@@ -87,8 +88,8 @@ export interface StepAgentInput {
   condition: ConditionSpec;
   target: AgentTarget;
   budget: StepBudget;
-  // 验证门命令（开回炉的条件用它回炉）
-  gateCommand: readonly string[];
+  // 开回炉的条件按它验证：由这条流的分步验证派生的一行命令（交 sh -c，在工作区根执行）与超时
+  verify: { command: string; timeoutMs: number };
   // 宿主上给这个作业用的目录（会话账本等）
   workDir: string;
   // 经网关时，这个作业的模型接入地址（决策 155）
@@ -106,8 +107,15 @@ export interface StepAgentResult {
   turns: number;
   usage: TurnUsage;
   wallMs: number;
-  // 开回炉的条件：用了几轮、最后一次验证结论；未开回炉为 null
-  repair: { rounds: number; finalVerdict: "pass" | "fail" } | null;
+  // 开回炉的条件：用了几轮、最后一次验证结论（无法判定为 null）、是否撤回、撤回是否因预算先于轮数用尽、
+  // 撤回时工作区没恢复成的原因；未开回炉为 null
+  repair: {
+    rounds: number;
+    finalVerdict: "pass" | "fail" | null;
+    reverted?: boolean;
+    budgetExhausted?: boolean;
+    restoreError?: string;
+  } | null;
   // 这一步被打断（模型服务故障、限额）：整题作废、不留行
   interrupted?: string;
 }
@@ -552,6 +560,7 @@ async function runStep(
       repairRounds: null,
       reverted: false,
       finalVerdict: null,
+      repairBudgetExhausted: null,
       fullPassRate: state.previous?.fullPassRate ?? null,
       regressions: 0,
       quality: state.previous?.quality ?? null,
@@ -585,7 +594,10 @@ async function runStep(
         condition: spec,
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
-        gateCommand: options.manifest.gateCommand,
+        verify: {
+          command: verifyScript(options.runtime.verifySteps),
+          timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
+        },
         workDir: jobDir,
         ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
       });
@@ -661,6 +673,13 @@ async function runStep(
     repairRounds: result?.repair?.rounds ?? null,
     reverted,
     finalVerdict: result?.repair?.finalVerdict ?? null,
+    repairBudgetExhausted:
+      result?.repair === null || result?.repair === undefined
+        ? null
+        : (result.repair.budgetExhausted ?? false),
+    ...(result?.repair?.restoreError !== undefined
+      ? { error: `回炉撤回时工作区未恢复（跑批器已按本步起点复原）：${result.repair.restoreError}` }
+      : {}),
     fullPassRate: measured.fullPassRate,
     regressions: measured.regressions,
     quality: measured.quality,

@@ -6,26 +6,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { createContainerWorkspaceHost, StepStartLostError } from "./container-host.ts";
-
-// 假 docker：exec 在本机执行（-w 给出的目录即容器内工作区），其余子命令直接成功
-const LOCAL_DOCKER = `
-import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2);
-if (args[0] !== "exec") process.exit(0);
-let i = 1;
-let cwd = process.cwd();
-let interactive = false;
-for (;;) {
-  if (args[i] === "-i") { interactive = true; i++; continue; }
-  if (args[i] === "-w") { cwd = args[i + 1]; i += 2; continue; }
-  if (args[i] === "-e") { i += 2; continue; }
-  break;
-}
-const [program, ...rest] = args.slice(i + 1);
-const r = spawnSync(program, rest, { cwd, stdio: [interactive ? "inherit" : "ignore", "inherit", "inherit"] });
-process.exit(r.status ?? 1);
-`;
+import { StepStartLostError } from "./container-host.ts";
+import { localDockerHost } from "./local-docker-fixtures.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -51,13 +33,7 @@ function fixture() {
   git(root, "commit", "-q", "-m", "start");
   // 开工时已被忽略的：整个 build/ 目录与一个 .log 文件
   put(root, { "build/keep.o": "obj\n", "pre.log": "old log\n" });
-  const script = join(base, "docker.mjs");
-  writeFileSync(script, LOCAL_DOCKER);
-  const host = createContainerWorkspaceHost({
-    container: "box",
-    root: root.replace(/\\/g, "/"),
-    docker: [process.execPath, script],
-  });
+  const { host } = localDockerHost(root);
   return { base, root, host };
 }
 

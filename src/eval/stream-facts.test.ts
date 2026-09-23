@@ -130,7 +130,7 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
     assert.equal(manifest.rangeStart, start);
     assert.equal(
       manifest.steps[0]?.prompt,
-      'Add feature\n\nWith a body\n\n--- src/feat.test.sh ---\ngrep -q "feature" src/feat.txt\n'
+      'src/feat.test.sh\n\nAdd feature\n\nWith a body\n\n--- src/feat.test.sh ---\ngrep -q "feature" src/feat.txt\n'
     );
     assert.deepEqual(manifest.steps[1]?.mergedCommits, [red, fix]);
 
