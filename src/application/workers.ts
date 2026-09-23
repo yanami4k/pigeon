@@ -159,6 +159,8 @@ interface RuntimeSurface {
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
   repairRounds?: number;
+  // 决策 134 / 157：结构化记忆（只有 headless 在接入时给）——开局段落与留痕、回炉轮条目的取走口
+  structuredMemory?: RuntimeDeps["structuredMemory"];
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -247,6 +249,8 @@ export interface DetachedRuntimeRequest {
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
   repairRounds?: number;
+  // 决策 134 / 157：结构化记忆的开局段落与留痕、回炉轮条目的取走口（只有 headless 在接入时给）
+  structuredMemory?: RuntimeDeps["structuredMemory"];
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -295,6 +299,9 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
+    ...(surface.structuredMemory !== undefined
+      ? { structuredMemory: surface.structuredMemory }
+      : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）

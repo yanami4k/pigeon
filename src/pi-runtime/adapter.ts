@@ -108,8 +108,9 @@ export interface PiRuntimeAdapterOptions {
   // （thinking 是否持久化、单块上限），指纹才能与内容文件按哈希对上；缺省同内容记录缺省
   messageContent?: MessageContentOptions;
   // M5.7 S3（决策 052）：run.started 的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
-  // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
-  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+  // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp。
+  // 决策 134：另可带本 Run 的结构化记忆留痕（快照里冻结的开局那几条，加上本 Run 作为回炉轮收到的那几条）
+  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers" | "structuredMemory">;
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
   initialMessages?: AgentMessage[];
 }
@@ -506,7 +507,7 @@ export class PiRuntimeAdapter {
     }
     const snapshot = this.#snapshot;
     // 附加摘要取失败只进 listenerErrors：该 Run 的 run.started 缺 MCP 字段，不挡 Run 启动
-    let extras: Pick<RunStartedPayload, "mcpTools" | "mcpServers"> = {};
+    let extras: Pick<RunStartedPayload, "mcpTools" | "mcpServers" | "structuredMemory"> = {};
     try {
       extras = this.#runStartedExtras?.() ?? {};
     } catch (error) {
@@ -546,6 +547,15 @@ export class PiRuntimeAdapter {
       ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
       // 决策 142 / 143：回炉轮数随 run.started 落盘（一步里的每次 Run 同值）
       ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
+      // 决策 134 / 157：结构化记忆的开局留痕随 run.started 落盘（附加摘要里带了本 Run 的回炉留痕时以它为准）
+      ...(snapshot.structuredMemory !== undefined
+        ? {
+            structuredMemory: {
+              ...snapshot.structuredMemory,
+              opening: [...snapshot.structuredMemory.opening],
+            },
+          }
+        : {}),
       ...extras,
     });
   }

@@ -32,6 +32,11 @@ import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { buildRepairFeedback, type RepairAppendix, restoreStepStart } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
+import {
+  createStructuredMemoryPush,
+  type StructuredMemoryOptions,
+  type StructuredMemorySummary,
+} from "./structured-memory.ts";
 import { dedupedWarner, failureDetail } from "./warnings.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
@@ -95,6 +100,9 @@ export interface HeadlessRunOptions {
   repairRounds?: number;
   // 回炉反馈的附加内容注入点（缺省为空；结构化记忆将来从这里附加）
   repairAppendix?: RepairAppendix;
+  // 决策 134 / 157：结构化记忆——给了即接入（开关、固定挑选）：开局按题面挑选拼进系统提示，回炉时附在反馈之后
+  // （调用方另给了回炉附加内容时以调用方的为准）。缺省不接入
+  structuredMemory?: StructuredMemoryOptions;
   // M7（决策 077）：分叉续跑——分支会话头、由会话树还原的初始消息、不给新输入从已有消息续跑
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -123,6 +131,8 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   label: OutcomeLabel;
   // 决策 142 / 143：回炉开启时在场——用了几轮、最后一次验证的结论、是否撤回、撤回是否因预算耗尽而提前
   repair?: HeadlessRepairSummary;
+  // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条
+  structuredMemory?: StructuredMemorySummary;
 }
 
 export interface HeadlessRepairSummary {
@@ -189,6 +199,19 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     }
   }
   const sessionId = options.sessionId ?? newSessionId();
+  // 决策 134：结构化记忆的开局挑选在装配之前做——段落要拼进系统提示并随注入快照冻结。题面即本次任务说明；
+  // 分叉续跑不给新输入，没有题面
+  const memory =
+    options.structuredMemory !== undefined
+      ? createStructuredMemoryPush({
+          governanceRoot: options.governanceRoot,
+          workspaceRoot: options.workspaceRoot,
+          sessionId,
+          options: options.structuredMemory,
+        })
+      : undefined;
+  const opening = memory?.opening(options.continueFromHistory === true ? undefined : options.task);
+  const repairAppendix = options.repairAppendix ?? memory?.repairAppendix;
   const startedAt = Date.now();
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
@@ -222,6 +245,15 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
     ...(repairRounds > 0 ? { repairRounds } : {}),
+    ...(memory !== undefined && opening !== undefined
+      ? {
+          structuredMemory: {
+            section: opening.section,
+            manifest: opening.manifest,
+            takeRepairIds: memory.takeRepairIds,
+          },
+        }
+      : {}),
     // M8（决策 087）：本次运行的预算冻结进注入快照——回放据此沿用同一预算，不得放宽
     budget: {
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
@@ -398,7 +430,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       // 注入点出错不拖垮这一步：告警后以空附加内容照常回炉（不进账本）
       let appendix: string | undefined;
       try {
-        appendix = options.repairAppendix?.({
+        appendix = repairAppendix?.({
           round: rounds,
           maxRounds: repairRounds,
           outcome: verified.outcome,
@@ -473,6 +505,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...metrics,
     ...(verification !== undefined ? { verification } : {}),
     ...(repair !== undefined ? { repair } : {}),
+    ...(memory !== undefined ? { structuredMemory: memory.summary() } : {}),
     label:
       metrics.runId !== undefined
         ? labelAttempt(attemptOutcomeFacts(session, metrics.runId))

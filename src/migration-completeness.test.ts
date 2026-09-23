@@ -11,6 +11,10 @@ import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { EVAL_TASK_VERSION, EvalTaskSchema } from "./eval/task.ts";
 import {
+  STRUCTURED_MEMORY_CACHE_VERSION,
+  StructuredMemoryCacheFileSchema,
+} from "./memory/structured-store.ts";
+import {
   INJECTION_SNAPSHOT_VERSION,
   InjectionSnapshotSchema,
   migrateInjectionSnapshotV1toV2,
@@ -179,6 +183,13 @@ const CASES: VersionedSchemaCase[] = [
     current: VERIFY_CONFIG_VERSION,
     v1: () => ({ version: 1, command: "npm test" }),
     migrate: validateOnly(VerifyConfigFileSchema),
+  },
+  {
+    // 结构化记忆缓存（决策 132）：可删可重建，版本对不上即整份重建、不做迁移；登记 v1 形状
+    constant: "STRUCTURED_MEMORY_CACHE_VERSION",
+    current: STRUCTURED_MEMORY_CACHE_VERSION,
+    v1: () => ({ version: 1, rules: "r", sessions: {} }),
+    migrate: validateOnly(StructuredMemoryCacheFileSchema),
   },
   {
     constant: "TOOL_EXECUTION_VERSION",
