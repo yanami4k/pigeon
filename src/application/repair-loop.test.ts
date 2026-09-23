@@ -1,6 +1,7 @@
 // 回炉（决策 142 / 143 / 147）：headless 路径上验证不过就在同一会话里接着修，到上限或预算耗尽仍失败即按快照撤回。
 // 真实 git 仓库 + 真实装配根 + 可编排的假模型。验证命令是仓库里的 check.mjs：a.txt 内容为 fixed 时退出 0，否则退出 1。
-// "逐字一致"的范围是快照覆盖的范围：受跟踪的文件，加上未跟踪且未被忽略的文件；被忽略的文件与治理目录不在范围内。
+// "逐字一致"的范围是快照覆盖的范围：受跟踪的文件，加上未跟踪且未被忽略的文件；治理目录不在范围内。
+// 被忽略的文件按开工忽略清单判定（决策 154 修订）：开工前就有的不动，agent 在这一步里新弄出来的清掉。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -51,7 +52,7 @@ const CHECK_SCRIPT = [
   "}",
 ].join("\n");
 
-// 造一个未跟踪文件（在快照范围内）和一个被忽略的文件（不在范围内）
+// 造一个未跟踪文件（在快照范围内）和一个被忽略的文件（agent 在这一步里新造的，撤回时清掉）
 const MAKE_EXTRA_SCRIPT = [
   'import { mkdirSync, writeFileSync } from "node:fs";',
   'writeFileSync("extra.txt", "agent 新建\\n");',
@@ -1493,5 +1494,95 @@ test("进程重启后撤回（直接调用 restoreStepStart）：从仓库取回
     assert.equal(readFileSync(join(repo.root, ".venv", "lib", "x.py"), "utf8"), "print('venv')\n");
   } finally {
     repo.cleanup();
+  }
+});
+
+test("恢复：开工前的未跟踪目录被 agent 改成嵌套仓库并暂存为 gitlink——下探后只删 agent 弄出来的，目标里的文件与开工时被忽略的文件都在", () => {
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo.root, ".gitignore"), "build/\n.env\n");
+    commitAll(repo.root, "忽略 .env");
+    put(repo.root, "tools/a.py", "print('tool')\n");
+    put(repo.root, "tools/.env", "TOKEN=1\n");
+    const step = beginStep(repo.root);
+    const tools = join(repo.root, "tools");
+    git(tools, ["init", "-q", "-b", "main"]);
+    git(tools, ["config", "user.email", "pigeon@example.invalid"]);
+    git(tools, ["config", "user.name", "pigeon-test"]);
+    git(tools, ["add", "a.py"]);
+    git(tools, ["commit", "-q", "-m", "agent 在 tools 里提交"]);
+    git(repo.root, ["add", "tools"]);
+    assert.ok(
+      git(repo.root, ["ls-files", "--stage", "tools"]).startsWith("160000"),
+      "已暂存为 gitlink"
+    );
+    step.revert();
+    assert.equal(readFileSync(join(tools, "a.py"), "utf8"), "print('tool')\n");
+    assert.equal(readFileSync(join(tools, ".env"), "utf8"), "TOKEN=1\n");
+    assert.equal(existsSync(join(tools, ".git")), false, "agent 建的 .git 清掉");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('恢复：开工前就有"文件变目录"的未暂存改动——索引里的旧文件条目不致把整个目录删掉', () => {
+  const repo = makeRepo();
+  try {
+    writeFileSync(join(repo.root, ".gitignore"), "build/\n.env\n");
+    writeFileSync(join(repo.root, "foo"), "原来是个文件\n");
+    commitAll(repo.root, "foo 是文件");
+    // 开工前：foo 已被改成目录（未暂存），里面一个普通文件、一个被忽略的文件
+    rmSync(join(repo.root, "foo"));
+    put(repo.root, "foo/a.py", "print('foo')\n");
+    put(repo.root, "foo/.env", "TOKEN=2\n");
+    const step = beginStep(repo.root);
+    step.revert();
+    assert.equal(readFileSync(join(repo.root, "foo", "a.py"), "utf8"), "print('foo')\n");
+    assert.equal(readFileSync(join(repo.root, "foo", ".env"), "utf8"), "TOKEN=2\n");
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：空目录一律不删——开工前就有的空目录保留，agent 新建的空目录也留下", () => {
+  const repo = makeRepo();
+  try {
+    mkdirSync(join(repo.root, "empty-before"));
+    const step = beginStep(repo.root);
+    mkdirSync(join(repo.root, "empty-new"));
+    step.revert();
+    assert.equal(existsSync(join(repo.root, "empty-before")), true);
+    assert.equal(existsSync(join(repo.root, "empty-new")), true);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("恢复：开工前已有未跟踪的 notes/a.md（与被忽略的 notes/x.log），agent 新建 notes/b.md——只删 b.md", () => {
+  // 两种开工状态：notes/ 里带或不带被忽略的文件。不带时，只有"目录下有目标里的文件"这一条能让恢复下探
+  for (const withLog of [true, false]) {
+    const repo = makeRepo();
+    try {
+      writeFileSync(join(repo.root, ".gitignore"), "build/\n*.log\n");
+      commitAll(repo.root, "忽略日志");
+      put(repo.root, "notes/a.md", "开工前的笔记\n");
+      if (withLog) {
+        put(repo.root, "notes/x.log", "开工前的日志\n");
+      }
+      const step = beginStep(repo.root);
+      put(repo.root, "notes/b.md", "agent 新建\n");
+      step.revert();
+      assert.equal(
+        readFileSync(join(repo.root, "notes", "a.md"), "utf8"),
+        "开工前的笔记\n",
+        `带日志=${withLog}`
+      );
+      assert.equal(existsSync(join(repo.root, "notes", "b.md")), false, `带日志=${withLog}`);
+      if (withLog) {
+        assert.equal(readFileSync(join(repo.root, "notes", "x.log"), "utf8"), "开工前的日志\n");
+      }
+    } finally {
+      repo.cleanup();
+    }
   }
 });

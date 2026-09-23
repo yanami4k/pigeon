@@ -354,31 +354,76 @@ export function restoreWorkspaceTo(
     (name.endsWith("/") && targetSet.has(name.slice(0, -1))) ||
     ignoredFiles.has(name) ||
     ignoredDirs.some((dir) => name === dir || name.startsWith(dir));
-  // 目录下是否有要保留的东西：目标里的文件、开工时就被忽略的路径
+  // 保守做法（没有开工忽略清单）下，被忽略与否按当前规则现查：下探到的被忽略文件不删
+  const conservative = startIgnored === undefined;
+  const ignoredNow = (name: string): boolean => {
+    try {
+      git(workspaceRoot, ["check-ignore", "-q", "--no-index", "--", name]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const holdsIgnoredNow = (dir: string): boolean =>
+    split(
+      git(workspaceRoot, [
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--",
+        dir,
+      ])
+    ).length > 0;
+  // 目录下是否有要保留的东西：目标里的文件、开工时就被忽略的路径（保守做法下为当前被忽略的路径）
   const holdsKept = (dir: string): boolean =>
     target.some((file) => file.startsWith(dir)) ||
-    ignored.some((name) => name !== dir && name.startsWith(dir));
-  const visit = (name: string): void => {
-    if (isProtected(name)) {
+    ignored.some((name) => name !== dir && name.startsWith(dir)) ||
+    (conservative && holdsIgnoredNow(dir));
+  // descended：是下探进目录后看到的路径（保守做法下这类路径要现查是否被忽略；顶层候选本就只含未被忽略的）
+  const visit = (name: string, descended = false): void => {
+    if (isProtected(name) || (conservative && descended && ignoredNow(name))) {
       return;
     }
-    if (name.endsWith("/") && holdsKept(name)) {
+    if (name.endsWith("/")) {
       let entries: Dirent[];
       try {
         entries = readdirSync(join(workspaceRoot, name), { withFileTypes: true });
       } catch {
+        // 读不了（如是链接）：按链接或文件处理
+        removeEntry(join(workspaceRoot, name.slice(0, -1)));
+        return;
+      }
+      // 空目录一律不删：开工前就有的空目录因此保留；agent 新建的空目录留下，无害
+      if (entries.length === 0) {
+        return;
+      }
+      if (!holdsKept(name)) {
+        removeEntry(join(workspaceRoot, name.slice(0, -1)));
         return;
       }
       for (const entry of entries) {
         visit(
           entry.isDirectory() && !entry.isSymbolicLink()
             ? `${name}${entry.name}/`
-            : `${name}${entry.name}`
+            : `${name}${entry.name}`,
+          true
         );
       }
       return;
     }
-    removeEntry(join(workspaceRoot, name.endsWith("/") ? name.slice(0, -1) : name));
+    removeEntry(join(workspaceRoot, name));
+  };
+  // 磁盘上是真目录（不是链接）
+  const isRealDir = (name: string): boolean => {
+    try {
+      const stat = lstatSync(join(workspaceRoot, name));
+      return stat.isDirectory() && !stat.isSymbolicLink();
+    } catch {
+      return false;
+    }
   };
   const untracked = split(
     git(workspaceRoot, [
@@ -387,13 +432,16 @@ export function restoreWorkspaceTo(
       "--others",
       // 没有开工忽略清单：被忽略的一律不碰。此时不能折叠目录——--directory 不看目录里面，目录本身没被忽略就整个列出，
       // 里面全是被忽略的文件（如自带 * 的 .venv/）也会被连带删掉；逐个列出未被忽略的文件
-      ...(startIgnored === undefined ? ["--exclude-standard"] : ["--directory"]),
+      ...(startIgnored === undefined
+        ? ["--exclude-standard"]
+        : ["--directory", "--no-empty-directory"]),
     ])
   );
-  // 已暂存却不在目标里的条目（agent 执行 git add 暂存的文件或嵌套仓库）；有冲突时同一路径列多次
-  const staged = [...new Set(split(git(workspaceRoot, ["ls-files", "-z", "--cached"])))].filter(
-    (name) => !targetSet.has(name)
-  );
+  // 已暂存却不在目标里的条目（agent 执行 git add 暂存的文件或嵌套仓库，或"文件变目录"的未暂存改动留下的旧条目）；
+  // 有冲突时同一路径列多次。磁盘上是真目录的按目录走下探——其下可能有目标里的文件或开工时就被忽略的文件
+  const staged = [...new Set(split(git(workspaceRoot, ["ls-files", "-z", "--cached"])))]
+    .filter((name) => !targetSet.has(name))
+    .map((name) => (isRealDir(name) ? `${name}/` : name));
   for (const name of [...untracked, ...staged]) {
     visit(name);
   }
@@ -445,9 +493,10 @@ function removeEntry(path: string): void {
   } catch {
     return;
   }
+  // 重试：Windows 上文件可能被别的进程短暂占用
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    rmSync(path, { force: true });
+    rmSync(path, { force: true, maxRetries: 5, retryDelay: 100 });
     return;
   }
-  rmSync(path, { recursive: true, force: true });
+  rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
