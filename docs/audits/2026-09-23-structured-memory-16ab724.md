@@ -1,0 +1,115 @@
+# 结构化记忆：验证分步、摩擦派生、存与挂、推送与用前核验（决策 129 至 136、157、159，基线 16ab724）
+
+基线：repair-loop 分支 16ab724（回炉已变基到 main 988438b，尚未合并）。分支 `structured-memory`，工作树 `.claude/worktrees/structured-memory`。
+范围：headless 路径（`pigeon run` 与评测跑批经 `runHeadless`）。REPL、TUI 与 worker 路径不接入结构化记忆。第一版学习闭环的删除、跑批器与定点对照、从账本学习题面与文件的关联均不在范围内。没有新增账本记录种类，模型不参与记忆的产出或挑选。
+回炉分支正在补修的三处（恢复顺序、回炉附加内容注入点调用处的异常兜底、repair 结果字段）未改动；注入点调用处只把 `options.repairAppendix` 换成先取调用方的、缺省取结构化记忆的 `repairAppendix`，并多传一个可选的各步结论。
+
+## 零、施工中请设计会话裁定的五处（2026-09-23）
+
+| # | 问题 | 裁定 |
+|---|---|---|
+| 1 | 测试步输出无法解析时是否记红转绿 | 不记（无法判断是否题面测试）；被撤回的尝试照记，失败步指纹写"未识别"。node:test 与 pytest 解析器须用本仓库与 strands 的真实输出各做夹具 |
+| 2 | 锚点与名字核验 | 三类文件（报错所在、变红时已改、回炉补改）都作锚点，合并键为锚点加指纹，挑选时同一指纹只给一条。名字核验收紧：不论从哪个锚点挑出，都核对报错里的名字仍在报错所在文件里（改名追踪），且锚点文件仍在；规则名不参与；分层违规核两端模块文件仍在。另补用例与变异（见七之 f） |
+| 3 | 步骤类型怎么定 | 先按哪个解析器识别出输出，识别不了再看步名与命令关键字；配置不加类型字段 |
+| 4 | 本仓库四步配置的落点 | 不把 `.pigeon/verify.json` 入库、不改 `.gitignore`；四步配置作为入库样例 `docs/samples/verify.json`，等价性测试读样例 |
+| 5 | 分步超时；REPL/TUI 开局 | 超时按每步各自计时；REPL/TUI 开局没有题面，不推送 |
+
+## 一、验证分步（159）
+
+- 配置格式（`.pigeon/verify.json`，版本仍为 1，加法式）：`command`（单条命令）与 `steps`（命名分步）二选一，两者都给或都不给、步名或命令为空白、步名重复均响亮失败。`steps` 为 `[{ "name": 步名, "command": 一行命令 }]`，1 至 20 步；`timeoutMs` 按每步各自计时。读取后的 `VerifyConfig` 带 `steps`，`command` 为展示串 `[步名] 命令；[步名] 命令`（分步时不再整条执行）。
+- 执行（`application/attempt-verify.ts`）：各步依次经系统 shell 执行、各出三值结论，前一步失败不跳过后续。整体结论为各步合取（`state/verify-steps.ts` 的 `combineStepVerdicts`）：任一步失败即失败；无失败但有步无法判定即无法判定；全过才通过；没有步骤算无法判定。整体退出码取第一个失败步骤的，通过为 0，无法判定为空；整体输出为各步输出按步分段（`== [步名] 结论（退出码 n）==`）后的末尾 16 KiB；整体输出哈希为各步输出哈希按顺序串起来的哈希；`command` 记各步命令行。
+- 单条命令的旧配置照旧执行一次，记录不带各步字段；读取时 `recordStepsOf` 还原成名为"验证"的一步。
+- 账本字段：`attempt.verified` 加可选 `steps: [{ name, exitCode, verdict, output, truncated }]`（输出末尾各自 16 KiB）。`run.started` 载荷里冻结的 `verify` 带可选 `steps`。`EVENT_LOG_VERSION` 15 → 16，迁移为纯版本推进（与下文 `structuredMemory` 字段同一版）；各测试文件里钉版本的断言与夹具同步改为 16。
+- 回炉反馈（`application/repair-loop.ts`）：带各步结论时写"失败的步骤：甲、乙"，有则另列"无法判定的步骤"与"已通过的步骤"，逐个附失败与无法判定步骤的退出码与输出末尾；不附通过步骤的输出。单条命令配置的反馈格式与基线逐字相同。
+- 本仓库四步配置样例 `docs/samples/verify.json`：格式 `npm run lint`、类型 `npm run check`、测试 `npm run test`、分层 `npm run deps`，超时每步 600000 毫秒。测试把样例放进临时治理根的 `.pigeon/verify.json` 经同一读取口径读出，核对四步命令与 `package.json` 的 `verify` 按 `&&` 切开的四段逐一相同、顺序相同。本机使用时由人复制到 `.pigeon/verify.json`。
+
+## 二、记什么（131）
+
+- 位置：`state/structured-memory.ts`（纯函数，无 IO）。只对回炉开启的会话派生（一个会话即一步）。
+- 红转绿：按步名逐次扫描这一步的验证记录（只取 `target.sessionId` 为本会话的），某步在一次验证里算作摩擦的指纹非空即"变红"，其后第一次"修好"即记一次、每个指纹展开为一条事实。算作摩擦的指纹：测试步只取文件不在"本步改动过的文件"里的失败用例（本步新增或修改的测试文件属于题面），测试步输出无法解析即不算；格式、类型、分层以及识别不出类型的步骤一律算，无法解析的记一条未识别指纹。"修好"：非测试步为该步通过；测试步为该步通过，或输出能解析且变红时那些用例都不在失败清单里。无法判定不算修好。
+- 每条红转绿事实记：步名、步骤类型、指纹、指纹键、变红那次验证的时间、转绿那次验证的时间（事发时刻）、变红时本步已改动的文件、之后回炉各轮补改的文件、工作区。报错里带的名字随指纹存（见三）。
+- 被撤回的尝试：`repair-step.ts` 的 `repairStepOutcome` 推为已撤回（154 修订：最后一个 Run 有验证记录且为失败）时，取最后一个 Run 的最后一次验证，对每个失败步的每个指纹（无法解析的记未识别）记一条：步名、指纹、本步尝试改动过的文件、最后一次验证的时间。
+- 不记：工具报错与围栏拒绝、每步改动摘要、读过哪些文件；回炉未开启的会话一条不记。
+- 改动文件的取法（三种按时间合并）：① 编辑调用：`intent` 的 `toolName` 为 `edit_file` 时取原始参数里的 `path`，仅当同一 `executionId` 的回执为已执行且未出错；② 命令执行回执 `receipt.exec.fileChanges` 的新增、删除、修改；③ 快照之间的差异：`memory/structured-store.ts` 对本会话相邻快照（首个对比改前基线）执行 `git diff --name-only --no-renames`，git 不可用或快照提交已被回收时略过这一来源。时间取回执记录与快照记录的落盘时间；路径统一为相对工作区的正斜杠路径；治理目录 `.pigeon/` 下的变化剔除。
+
+### 报错指纹（`state/verify-fingerprint.ts`，各工具解析集中于此）
+
+| 工具 | 识别依据 | 指纹 | 名字 |
+|---|---|---|---|
+| tsc | `file(l,c): error TSnnnn:` 与彩色的 `file:l:c - error TSnnnn:` | 错误码、文件 | 消息里单引号内的标识符，去掉 `string`、`number` 等基本类型名 |
+| mypy | `file:line: error: 消息  [错误码]` | 错误码、文件 | 消息里双引号内的标识符，去掉 `str`、`int`、`Any` 等内置与 typing 名 |
+| 依赖巡航 | 须有 `n dependency violations` 汇总行；`error 规则: 甲 → 乙` | 规则名、两端模块 | 无 |
+| biome | `file:l:c 规则名 … ━`；整文件格式差异 `file format ━` 记规则 `format` | 规则名、文件 | 无 |
+| ruff | 完整格式"规则码 [*] 消息"加下一行 ` --> file:l:c`；简洁格式 `file:l:c: 规则码` | 规则名、文件 | 无 |
+| node:test | spec 输出末尾 `✖ failing tests:` 汇总里的 `test at file:l:c` 与下一行 `✖ 测试名 (耗时)` | 测试名（叶子名）、测试文件 | 测试名 |
+| pytest | 须有 `short test summary info` 或以 failed/error 结尾的汇总行；`FAILED/ERROR file.py::节点[参数] - 消息` | 节点名（`类::函数[参数]`）、测试文件 | 测试函数名（去掉类与参数） |
+
+- 先去掉终端颜色序列，再按上表顺序逐个试，第一个取到指纹的即该步工具；同一步最多保留 20 个指纹。都取不到即未识别：记一条 `{ tool: "unrecognized" }`，不猜。
+- 步骤类型：tsc、mypy 为类型；依赖巡航为分层；biome 为格式；ruff 为代码检查；node:test、pytest 为测试。识别不了时按步名与命令关键字推断（测试、test、pytest、jest 等 → 测试；类型、tsc、mypy、check 等 → 类型；分层、depcruise、deps → 分层；格式、format、biome → 格式；lint、ruff、eslint → 代码检查），都不中为未知（按非测试步处理）。
+- 指纹键：步名、工具、错误码或规则名或测试名、报错文件、分层被依赖端；行号与报错措辞不进键。
+- 夹具（`src/state/verify-fingerprint-fixtures/`，原样保留颜色码）：本仓库对临时坏文件实跑的 tsc（彩色与 `--pretty false`）、biome、依赖巡航、node:test 输出；strands 容器实跑的 pytest 输出（取自跑批器草稿区 `experiment-signal.log` 第 76 至 153 行）；本机 Python 3.13 venv（ruff 0.16.x、mypy 2.x、pytest 9.1.1）对仿 strands 布局小项目的 pytest、ruff（完整与简洁）、mypy 输出。
+
+## 三、存与挂（132、133）
+
+- 不单独存储：`memory/structured-store.ts` 的 `loadStructuredMemory` 逐个会话文件物化（不读正文）后派生事实。
+- 缓存：`<治理根>/.pigeon/cache/structured-memory.json`（治理目录不入库），形如 `{ version: 1, rules: 规则标记, sessions: { 会话号: { size, mtimeMs, facts } } }`。按会话文件 `sessions/<会话号>.jsonl` 的大小与修改时间判定是否变动：签名一致沿用，不一致或新出现的按账本重算，账本里已没有的会话丢掉；有变化才回写（整文件原子替换）。缓存文件不存在、不是合法 JSON、形状不符、格式版本或派生规则标记（`STRUCTURED_MEMORY_RULES_TAG`，改了"什么算摩擦"时推进）对不上，一律整份重建。删掉缓存文件即可重建，结果与删前相同（有用例）。缓存读写本身的 IO 故障抛 `StructuredMemoryCacheError`，调用方按"缓存读写"类故障处理（见五）。
+- 挂：每条事实按 `frictionAnchors` 展开到若干锚点文件：红转绿为报错所在文件、分层被依赖端、变红时已改文件、回炉补改文件；撤回为报错所在文件与尝试改动过的文件。同一锚点、同一种摩擦、同一指纹键的多条合并为一条（`buildMemoryEntries`），附出现次数、来源会话（按首次出现顺序），细节以最近一次为准。条目编号 `mem_` 加上"锚点、种类、指纹键"的 sha256 前 12 位，同样的事实重算编号不变。
+- 改名：锚点经版本历史追踪（`git log --reverse --diff-filter=R -M --name-status`，取事发时刻起的改名，沿链走到底），挑选与核验都用追踪后的当前路径；只在工作区里挪动、未进版本历史的改名追踪不到，按文件不存在处理。不解析代码，不挂函数或行号。
+
+## 四、推送与挑选（134、135、157）
+
+- 时机：只在开局与回炉两处由程序推送，没有模型自取的查询工具。
+  - 开局：`runHeadlessOnce` 在装配运行面之前挑选，段落作为系统提示里常驻 Memory 之后的独立一段（`## 结构化记忆`），字符预算 1200、每条上限 400，与常驻 Memory 的预算分开；开局留痕 `{ enabled, selection, opening }` 冻结进注入快照（`INJECTION_SNAPSHOT_VERSION` 10 → 11，纯版本推进），每个 Run 的 `run.started` 同值带上。分叉续跑不给新输入时没有题面，不挑。
+  - 回炉：经回炉附加内容注入点，附在回炉反馈之后（调用方另给了 `repairAppendix` 时以调用方的为准）；该轮回炉 Run 的 `run.started.structuredMemory.repair` 记给了哪几条（经 `runStartedExtras` 在该 Run 开始时取走）。
+- 开局挑选（`memory/structured-select.ts`）：题面直接指到的文件 = 题面里出现的路径（ASCII 路径字符组成、以扩展名结尾的记号，存在于工作区的才算），加上所附代码中导入语句解析出的仓库内文件——JS/TS 的 `from`、`import "…"`、`import(…)`、`require(…)` 相对导入以题面里在它之前最近提到的路径所在目录为基准（该文件在这一步开始时可以还不存在），补常见扩展名与 `index`，`.js` 后缀兼查同名 `.ts`；Python 的 `from a.b import`、`import a.b` 解析为仓库里以 `a/b.py` 或 `a/b/__init__.py` 结尾的文件，点号相对导入以基准文件目录起算。取当前锚点落在这些文件上的记忆，最多 2 条；指不到或其上没有记忆就不给。
+- 回炉挑选：用与派生相同的解析取本次失败各步的指纹。第一档为指纹键相同（同一步、同一工具、同一错误码或测试名或规则、同一文件）的记忆，第二档为当前锚点落在本次报错涉及文件（报错文件、分层被依赖端）上的其余记忆；合计最多 2 条，第一档在前。
+- 两处都：候选按最近出现排序后最多取 50 条核验；核验通过的按"事发以来锚点文件改动行数"升序，其次最近出现、出现次数、编号；同一种摩擦的同一指纹键只给一条。只取以往会话的事实，当前会话自己的记录不参与。
+- 固定挑选（157）：`structuredMemory.fixed = { opening?: 编号[], repair?: 编号[] }`，给了即不再按题面与报错挑选（空数组即一条都不给），按给定顺序取出存在的条目，核验、成文、拼接位置与留痕与正式使用相同，`selection` 记为 `fixed`。
+- 开关（16）：`pigeon run` 的 `--no-structured-memory` > 项目配置 `.pigeon/structured-memory.json`（`{ "version": 1, "enabled": false }`，畸形响亮失败）> 开启。关闭时两处都不推送，`run.started` 记 `{ enabled: false, selection, opening: [] }`，每轮回炉记空清单。
+- 接入口径：`runHeadless` 只在调用方给了 `structuredMemory` 选项时接入；`pigeon run` 总是给（带开关）；评测跑批 `runEval` 的 `structuredMemory` 选项缺省不接入——其治理根是整批共用的输出目录，缺省接入会让后面的题拿到前面题的记忆。
+- 推送文字（每条一两句）样例：
+  - 开局段落：`## 结构化记忆` / `以下是程序从本项目以往运行记录中取出的过去发生的事实，仅供参考；与当前代码冲突时以代码为准。` / `- [mem_55b4c0a98980] 过去发生的事实，仅供参考；与当前代码冲突时以代码为准：2026-09-23 的一步里改动 src/a.ts、src/b.ts 后，「类型」检查报 tsc TS2304 @ src/b.ts（涉及 helper），随后补改 src/b.ts 才通过。`
+  - 回炉附加：`相关的结构化记忆（过去发生的事实，仅供参考；与当前代码冲突时以代码为准）：` 后接同样格式的条目。
+  - 撤回条目：`… 2026-09-23 的一步尝试改动 src/b.ts、src/d.ts、src/e.ts，「类型」检查一直报 tsc TS2304 @ src/b.ts（涉及 helper），修到上限仍未通过、改动已撤回。`；出现多次时句末加"同类出现过 N 次。"。文件超过 3 个写"等 N 个文件"。
+
+## 五、用前核验与故障（136、20）
+
+- 核验（`checkEntry`）：锚点文件（改名追踪后）存在；指纹带报错文件时，该文件（改名追踪后）存在，且报错里的名字（类型检查的标识符、测试名）都能在其中以文本找到——与记忆是从哪个锚点挑出无关；分层违规的被依赖端（改名追踪后）存在。任一不过即不给。改动幅度 = 事发以来 `git log --since --numstat` 与 `git diff --numstat HEAD` 对锚点文件的增删行数之和，只用于排序。不按"多久没被用到"淘汰。规则名不参与核验。
+- 故障：派生、缓存读写、挑选、核验出错即这次不给（开局出错不给开局段落；某轮回炉出错那一轮不附），按类向标准错误告警，同一次运行里同一类只报一次，文案 `结构化记忆告警：<类>出错（<原因>）；<本次开局|第 n 轮回炉>不推送结构化记忆，运行照常完成、结论不受影响（同类故障本次运行不再重复告警）`；运行照常完成，不写账本。加载失败下次用到时再试。
+
+## 六、可观测
+
+- 账本：每个 Run 的 `run.started.structuredMemory` 记开关、挑选方式、开局给了哪几条；回炉 Run 另记该轮给了哪几条。
+- `HeadlessRunResult.structuredMemory = { opening: 编号[], repair: 编号[][] }`（每轮一组）；`pigeon run` 的结果行加"结构化记忆 开局 …，回炉 第 n 轮 …"或"结构化记忆 关闭"，`--json` 原样带该字段。评测结果行在接入时带同名字段。
+- 只读命令 `pigeon memory list [--root <dir>] [--json]`：列出编号、锚点、种类、步名、指纹、名字、次数、最近时间、来源会话，以及此刻的核验结果（通过或不过的原因）。从账本现算，不回写缓存，不写账本与工作区。
+
+## 七、测试与验证
+
+新增测试文件：`src/application/verify-steps.test.ts`（8）、`src/state/verify-fingerprint.test.ts`（9）、`src/application/structured-memory-derive.test.ts`（5）、`src/application/structured-memory-store.test.ts`（4）、`src/application/structured-memory-push.test.ts`（13）、`src/application/structured-memory-switch.test.ts`（2）；`src/eval/runner-repair.test.ts` 加 1 条；`src/pi-runtime/snapshot.test.ts` 加 1 条（v11）并把 v10 用例的迁移目标改为当前版本；`src/migration-completeness.test.ts` 登记快照 v10 → v11、`STRUCTURED_MEMORY_CACHE_VERSION`、`STRUCTURED_MEMORY_CONFIG_VERSION`。结构化记忆用例的历史均由真实 headless 回炉流程写进账本：真实 git 仓库、假模型脚本化回复、分步验证脚本按源码标记输出各工具真实格式的报错（`src/application/structured-memory-fixtures.ts`）。
+
+### npm run verify
+
+- 第一次（提交 c700d61）：lint、check 通过；test 共 1027 条，通过 1024，失败 1 条：`验证分步：合取口径——任一步失败即失败；无失败但有步无法判定即无法判定；全过才通过`。原因：用例把每步超时设为 1500 毫秒，全量并行负载下第一步（一个正常退出的 node 子进程）也超时，结论变为无法判定。该文件单跑 8 条全过。提交 9c076fa 把该用例的每步超时改为 10000 毫秒（挂起脚本仍睡 60 秒），单跑 8 条全过。deps 因 test 失败未执行。
+- 第二次（提交 9c076fa）：运行中因本机内存紧张被宿主中止（不是命令失败），测试阶段未跑完；按约定未自行重跑。
+- 其后单独执行：`npm run lint`（去掉测试夹具里一处多余的 `String.raw` 后零提示）、`npm run check`、`npm run deps`（441 个模块无违规）均通过。
+- 结论：全量 `npm run verify` 在最终提交上尚未完整跑通一次，待内存允许时重跑。
+
+### 变异反向验证（每条改动后跑相关测试文件，记录变红用例，随即 `git checkout` 还原）
+
+| # | 变异 | 跑的文件 | 精确变红的用例 |
+|---|---|---|---|
+| a | 测试步的失败用例不再按"本步改动过的文件"过滤（题面测试也记为摩擦） | structured-memory-derive.test.ts（5 条，红 2） | `红转绿：格式、类型、分层、他处测试失败后修好各记一条；本步新增的题面测试一开始不过不记；测试步输出无法解析不记，非测试步记未识别`；`红转绿：他处测试所在的测试文件若在本步被修改过，即算题面、不记` |
+| b | `STRUCTURED_MEMORY_LIMIT` 2 → 3 | structured-memory-push.test.ts（13 条，红 2） | `开局：最多 2 条；同一指纹只给一条`；`排序：事发以来锚点文件改得越少越靠前；超出上限的是改得最多的那条` |
+| c | 去掉名字核验（名字查找恒不缺） | structured-memory-push.test.ts（13 条，红 1） | `核验：报错里的名字在报错所在文件里找不到即不给——从变红时改过的文件那个锚点挑出来的也一样` |
+| d | 缓存里有该会话即沿用、不比对签名（与账本不一致时信缓存） | structured-memory-store.test.ts（4 条，红 1） | `缓存：与账本不一致时以账本为准——签名对不上的会话按账本重算、缓存里多出的会话丢掉` |
+| e | 固定挑选时段落不进系统提示，改为拼在题面前面 | structured-memory-push.test.ts（13 条，红 1） | `固定挑选：调用方指定开局与回炉给哪几条（或一条都不给），推送路径与正式使用相同——同样拼进系统提示，不进题面` |
+| f | （设计会话追加）只在报错文件就是锚点时才核名字 | structured-memory-push.test.ts（13 条，红 1） | `核验：报错里的名字在报错所在文件里找不到即不给——从变红时改过的文件那个锚点挑出来的也一样` |
+
+## 八、已知限制（事实）
+
+- 快照差异这一改动文件来源依赖 git 与快照提交仍在；取不到时只用账本里的两种取法。
+- 报错路径按验证命令的工作目录（工作区根）相对化；在子目录里执行的工具（如 `cd strands-py && pytest`）报出的路径相对子目录，未做前缀补全，这类指纹的文件与本步改动文件、锚点文件可能对不上。
+- 名字按文本查找：模板字符串拼出的测试名、被格式化拆行的标识符会被判为找不到而不给。
+- 改名追踪只认版本历史里的改名（`git log -M`），未提交的改名按文件不存在处理。
+- 同一步的指纹最多保留 20 个；候选最多核验 50 条（按最近出现）。
+- 开局挑选在 REPL、TUI 与 worker 路径上不接入；评测跑批缺省不接入。

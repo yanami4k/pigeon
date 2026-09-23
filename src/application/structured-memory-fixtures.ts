@@ -62,7 +62,7 @@ process.exit(out.length > 0 ? 1 : 0);
 `;
 
 // 复制模板文件：node mk.mjs <模板> <目标>（模拟 agent 用命令新建文件，走命令回执的文件变化）
-const MAKE_SCRIPT = String.raw`import { copyFileSync, mkdirSync } from "node:fs";
+const MAKE_SCRIPT = `import { copyFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 const [from, to] = process.argv.slice(2);
 mkdirSync(dirname(to), { recursive: true });
