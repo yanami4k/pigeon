@@ -674,7 +674,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),
     ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
-    log: (line) => writeOut(`[stream] ${line}\n`),
+    // 带时间戳：试跑时据此把每步的耗时与内存采样对上
+    log: (line) => writeOut(`[stream] ${new Date().toISOString()} ${line}\n`),
   });
   for (const job of summary.jobs) {
     writeOut(
