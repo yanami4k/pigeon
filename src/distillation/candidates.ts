@@ -8,8 +8,8 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { type CandidateSink, sourceDigest, stageCandidate } from "../review/candidates.ts";
+import type { AttemptRef } from "../state/attempt-ref.ts";
 import {
-  type AttemptRef,
   CANDIDATE_VERSION,
   CandidateNameSchema,
   type ContrastSource,

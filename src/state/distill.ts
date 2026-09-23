@@ -1,7 +1,7 @@
 // 提炼器的只读工具名与提炼目标（M7 S4，决策 074 / 076）：常量与类型放 state 叶子层，编排层的角色表、装配根与
 // distillation 层的工具实现共用同一份，不引入反向依赖。两个工具的作用域只限一组尝试（成功侧、失败侧、
 // 分叉共享前缀与任务描述所在的那条），参数里没有会话或 Run 入口。
-import type { AttemptRef, OutcomeLabel } from "./candidate.ts";
+import type { AttemptRef, OutcomeLabel } from "./attempt-ref.ts";
 import type { RunId, SessionId } from "./ids.ts";
 
 export const DISTILL_SNAPSHOT_TOOL = "distill_snapshot";

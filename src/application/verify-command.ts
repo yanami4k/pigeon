@@ -25,7 +25,8 @@ import {
   type RerunArm,
 } from "../replay/verdict.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
-import { type AttemptRef, isProducibleCandidateKind } from "../state/candidate.ts";
+import type { AttemptRef } from "../state/attempt-ref.ts";
+import { isProducibleCandidateKind } from "../state/candidate.ts";
 import type {
   CandidateVerifiedRecord,
   LoadedExperience,

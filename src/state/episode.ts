@@ -5,7 +5,7 @@
 // - 选对（未裁细节的保守缺省）：只有成功与失败进对比，每侧只取一个——成功侧取总轮数最少，失败侧取最早收尾，
 //   其余尝试只记在 others 里；全成功、全失败或凑不齐两侧时给出跳过原因；
 // - Run 内局部对：只取理由来源为人写的拒绝，与域错误后紧跟的同工具成功重试（只产出教训候选）。
-import type { AttemptRef, OutcomeLabel } from "./candidate.ts";
+import type { AttemptRef, OutcomeLabel } from "./attempt-ref.ts";
 import type { ForkPoint } from "./event-log.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import type { MaterializedSession } from "./materialize.ts";

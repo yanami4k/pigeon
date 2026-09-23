@@ -22,7 +22,7 @@ import { materializeSession } from "../persistence/event-log.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { seedRerunRoot } from "../replay/materials.ts";
 import { type AttemptPlan, resolveAttemptPlan } from "../replay/plan.ts";
-import type { AttemptRef } from "../state/candidate.ts";
+import type { AttemptRef } from "../state/attempt-ref.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { EditMode } from "../tools/edit-mode.ts";

@@ -1,7 +1,7 @@
 // 提炼目标组装（M7 S4，决策 070 / 074 / 075）：把选好的对比对（或强制提炼时的单侧）组装成提炼器的作用域。
 // 纯函数；选对规则在 state/episode.ts。强制提炼（pigeon distill --force，未裁细节的保守缺省）：
 // 全失败取最早收尾的一次、只产出教训；全成功取总轮数最少的一次。
-import type { AttemptRef } from "../state/candidate.ts";
+import type { AttemptRef } from "../state/attempt-ref.ts";
 import type { DistillAttemptScope, DistillTarget } from "../state/distill.ts";
 import type { Attempt, ContrastSelection } from "../state/episode.ts";
 

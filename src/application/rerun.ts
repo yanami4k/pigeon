@@ -29,6 +29,15 @@ import {
 import { addWorktree, deleteBranch, removeWorktree } from "../orchestration/worktree.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
+import {
+  AttemptFidelityError,
+  type AttemptSampling,
+  effectiveLimits as checkedLimits,
+  assertThinkingLevelReproducible as checkThinkingLevel,
+  intersectAttemptTools,
+  reproducedRuntime,
+  samplingOf,
+} from "../replay/fidelity.ts";
 import { seedRerunRoot } from "../replay/materials.ts";
 import type { AttemptPlan } from "../replay/plan.ts";
 import type { RerunArm } from "../replay/verdict.ts";
@@ -42,7 +51,6 @@ import type {
   WorkerLimits,
 } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
-import { isThinkingLevel, type ThinkingLevel } from "../state/runtime-events.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
 import { acquireGate } from "./distill-runtime.ts";
@@ -59,38 +67,15 @@ export function createRerunGate(limit: number = DEFAULT_RERUN_CONCURRENCY): Revi
 
 export const sharedRerunGate: ReviewGate = createRerunGate();
 
-export class BudgetWidenedError extends Error {}
+export { BudgetWidenedError } from "../replay/fidelity.ts";
 
 // 验证的前置不满足（模型、预算、推理档位、候选形态等）：定义在这一层，
 // verify-command 转出同名导出，避免两层互相引用
 export class VerifyPreconditionError extends Error {}
 
-// 被验证那次尝试的预算 → 这次回放实际用的上限。
-// 原尝试没设的项按 worker 编排的缺省收紧（收紧只会让结论偏保守，放宽则会让成功率的提升来自预算而非经验）。
-// 传入 requested 时逐项核对：任何一项比原尝试宽即拒绝。
+// 被验证那次尝试的预算 → 这次回放实际用的上限（核对在 replay/fidelity.ts）；原尝试没设的项按 worker 编排的缺省收紧
 export function effectiveLimits(budget: AttemptBudget, requested?: WorkerLimits): WorkerLimits {
-  const limits: WorkerLimits = requested ?? {
-    maxTurns: budget.maxTurns ?? DEFAULT_WORKER_LIMITS.maxTurns,
-    wallClockMs: budget.wallClockMs ?? DEFAULT_WORKER_LIMITS.wallClockMs,
-    ...(budget.maxTokens !== undefined ? { maxTokens: budget.maxTokens } : {}),
-  };
-  const widened: string[] = [];
-  if (budget.maxTurns !== undefined && limits.maxTurns > budget.maxTurns) {
-    widened.push(`轮次上限 ${limits.maxTurns} > ${budget.maxTurns}`);
-  }
-  if (budget.wallClockMs !== undefined && limits.wallClockMs > budget.wallClockMs) {
-    widened.push(`墙钟上限 ${limits.wallClockMs} > ${budget.wallClockMs}`);
-  }
-  if (budget.maxTokens !== undefined && (limits.maxTokens ?? Infinity) > budget.maxTokens) {
-    widened.push(`token 上限 ${limits.maxTokens ?? "不设限"} > ${budget.maxTokens}`);
-  }
-  if (widened.length > 0) {
-    throw new BudgetWidenedError(
-      `回放预算比被验证那次尝试宽：${widened.join("、")}。` +
-        "预算放宽后成功率的提升将来自预算而非经验，且这种失效隐蔽，故一律拒绝"
-    );
-  }
-  return limits;
+  return checkedLimits(budget, DEFAULT_WORKER_LIMITS, requested);
 }
 
 // 验证器的父策略（083 / 087）：审批模式与工具集都沿用被验证那次尝试。
@@ -101,10 +86,8 @@ export function verifierParentPolicy(
   approvalMode: "prompt" | "yolo",
   attemptTools?: readonly string[]
 ): ToolPolicyLike {
-  const ceiling = [...ROLE_TOOLS.verifier];
   return {
-    allow:
-      attemptTools === undefined ? ceiling : ceiling.filter((tool) => attemptTools.includes(tool)),
+    allow: intersectAttemptTools(ROLE_TOOLS.verifier, attemptTools),
     deny: [],
     approvalMode,
   };
@@ -115,13 +98,10 @@ export function verifierParentPolicy(
 // 同一个模型换推理档位就是换了尺子，而档位在失效判据的封闭四项清单里属于"只记录不判定"，
 // 两头落空就成了没人管的变量。
 // 回放沿用原尝试的"尺子"：模型参数（含推理档位、输出上限、采样温度）与工作方式指令（087 修订的推定、110）
-export type RerunSampling = Pick<AttemptPlan, "model" | "taskDirective">;
+export type RerunSampling = AttemptSampling;
 
 export function rerunSamplingOf(plan: AttemptPlan): RerunSampling {
-  return {
-    model: plan.model,
-    ...(plan.taskDirective !== undefined ? { taskDirective: plan.taskDirective } : {}),
-  };
+  return samplingOf(plan);
 }
 
 export function verifierRuntimeDeps(input: {
@@ -131,19 +111,12 @@ export function verifierRuntimeDeps(input: {
   streamFn: StreamFn;
   persistThinking: boolean;
 }): WorkerRuntimeDeps {
-  const { model } = input;
-  assertThinkingLevelReproducible(model);
+  const runtime = withPreconditionError(() => reproducedRuntime(input));
   return {
     streamFnFor: () => input.streamFn,
-    provider: model.provider,
-    modelId: model.id,
     persistThinking: input.persistThinking,
-    // 档位已由 assertThinkingLevelReproducible 收窄到已知取值
-    thinkingLevel: model.thinkingLevel as ThinkingLevel,
-    ...(model.maxOutputTokens !== undefined ? { maxOutputTokens: model.maxOutputTokens } : {}),
-    // 采样温度与工作方式指令沿用原尝试（087 修订、110）；失效判定的封闭清单（091）暂未纳入温度，是已知缺口
-    ...(model.temperature !== undefined ? { temperature: model.temperature } : {}),
-    ...(input.taskDirective !== undefined ? { taskDirective: input.taskDirective } : {}),
+    // 失效判定的封闭清单（091）暂未纳入温度，是已知缺口
+    ...runtime,
   };
 }
 
@@ -156,15 +129,19 @@ export function verifierRuntimeFactory(input: {
   return createWorkerRuntimeFactory(verifierRuntimeDeps(input));
 }
 
-// 推理档位必须能原样重放：认不出或没记下来的一律拒绝验证，不按缺省算。
-// M5.5 之后的每条 run.started 都会写下档位（缺省写成 off），故这条只会在数据损坏或更早的记录上触发
+// 推理档位必须能原样重放（核对在 replay/fidelity.ts）；验证命令一侧仍报前置不满足
 export function assertThinkingLevelReproducible(model: AttemptPlan["model"]): void {
-  const level = model.thinkingLevel;
-  if (level === undefined || !isThinkingLevel(level)) {
-    throw new VerifyPreconditionError(
-      `被验证那次尝试的推理档位${level === undefined ? "没有记下来" : `认不出来（${level}）`}：` +
-        "回放必须沿用它，按缺省算等于换了一把尺子，故拒绝验证"
-    );
+  withPreconditionError(() => checkThinkingLevel(model));
+}
+
+function withPreconditionError<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (error instanceof AttemptFidelityError) {
+      throw new VerifyPreconditionError(error.message);
+    }
+    throw error;
   }
 }
 

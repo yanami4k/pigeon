@@ -9,7 +9,8 @@
 // v3（M7，决策 075）：v2 字段不变，加法式新增对比来源块（成败两侧尝试引用、共享前缀、标签与验证记录引用、产物形态）；
 // 来源新增"提炼器"——对提炼候选，source 的会话与 Run 取主证据一侧，producerSessionId 为提炼器会话；单来源候选不带该块。
 import { type Static, Type } from "typebox";
-import { EntryIdSchema, RunIdSchema, SessionIdSchema } from "./ids.ts";
+import { AttemptRefSchema } from "./attempt-ref.ts";
+import { RunIdSchema, SessionIdSchema } from "./ids.ts";
 import { Sha256HexSchema } from "./message-content.ts";
 import { type Migration, MigrationRegistry } from "./migration.ts";
 
@@ -79,35 +80,6 @@ export const ScanResultSchema = Type.Object({
   scannerVersion: Type.String({ minLength: 1 }),
   hits: Type.Array(ScanHitSchema),
 });
-
-// 五个标签（决策 072）：由账本现算，写进对比来源块的是提炼当时的现算结果
-export const OutcomeLabelSchema = Type.Union([
-  Type.Literal("Passed"),
-  Type.Literal("Failed"),
-  Type.Literal("Abandoned"),
-  Type.Literal("Unknown"),
-  Type.Literal("InfrastructureError"),
-]);
-export type OutcomeLabel = Static<typeof OutcomeLabelSchema>;
-
-// 对比来源块里的一次尝试引用：治理根、会话、Run、条目范围、标签、验证记录引用（在哪个会话文件、哪条记录）
-export const AttemptRefSchema = Type.Object(
-  {
-    governanceRoot: Type.String({ minLength: 1 }),
-    sessionId: SessionIdSchema,
-    runId: RunIdSchema,
-    entryRange: Type.Object({
-      from: Type.Integer({ minimum: 1 }),
-      to: Type.Integer({ minimum: 1 }),
-    }),
-    label: OutcomeLabelSchema,
-    verification: Type.Optional(
-      Type.Object({ sessionId: SessionIdSchema, recordId: EntryIdSchema })
-    ),
-  },
-  { additionalProperties: false }
-);
-export type AttemptRef = Static<typeof AttemptRefSchema>;
 
 // 对比来源块（决策 075）：产物形态为教训、流程或步骤集；分叉场景另记共享前缀的范围（只算一次）；
 // 其余同组尝试只记在 others 里（每侧只取一个进对比）

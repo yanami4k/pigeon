@@ -16,7 +16,6 @@ import type { ObservationInput } from "../state/event-log.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import { runHeadless } from "./headless.ts";
 import type { McpSession } from "./mcp.ts";
-import { rerunSamplingOf, verifierRuntimeDeps } from "./rerun.ts";
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
@@ -89,53 +88,6 @@ test("回放计划：从原尝试的 run.started 取出温度与工作方式指�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("验证器运行面：计划里的温度与工作方式指令原样传下去；计划里没有就不设", () => {
-  const streamFn = createFakeStreamFn({ replies: [{ text: "ok" }] });
-  const deps = verifierRuntimeDeps({
-    model: { provider: "p", id: "m", thinkingLevel: "off", temperature: 0 },
-    taskDirective: "Your task is to fix the issue.",
-    streamFn,
-    persistThinking: true,
-  });
-  assert.equal(deps.temperature, 0);
-  assert.equal(deps.taskDirective, "Your task is to fix the issue.");
-  const plain = verifierRuntimeDeps({
-    model: { provider: "p", id: "m", thinkingLevel: "off" },
-    streamFn,
-    persistThinking: true,
-  });
-  assert.equal("temperature" in plain, false);
-  assert.equal("taskDirective" in plain, false);
-});
-
-test("回放派发器交给验证器运行面的是计划里的整组采样参数：模型参数与工作方式指令一起，缺哪样就不带哪样", () => {
-  const base = {
-    sessionId: newSessionId(),
-    runId: newRunId(),
-    task: "t",
-    startCommit: "a".repeat(40),
-    startSource: "given" as const,
-    budget: { maxTurns: 1 },
-    budgetSource: "run-started" as const,
-    approvalMode: "yolo" as const,
-    tools: [],
-  };
-  assert.deepEqual(
-    rerunSamplingOf({
-      ...base,
-      model: { provider: "p", id: "m", thinkingLevel: "off", temperature: 0 },
-      taskDirective: "D",
-    }),
-    {
-      model: { provider: "p", id: "m", thinkingLevel: "off", temperature: 0 },
-      taskDirective: "D",
-    }
-  );
-  assert.deepEqual(rerunSamplingOf({ ...base, model: { provider: "p", id: "m" } }), {
-    model: { provider: "p", id: "m" },
-  });
 });
 
 test("外部基准的采样温度缺省固定为 0；显式给出的值原样沿用", () => {

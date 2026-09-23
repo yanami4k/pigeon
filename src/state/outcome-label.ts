@@ -8,14 +8,14 @@
 // 回炉（决策 142 / 143）：一步跨同一会话里的若干个 Run，事实按整步取——验证门结论只取整步最后一个 Run 的，
 // 运行结束、失败分类与撞上限取整步最后一个 Run，悬账计整步；中间轮次的失败不算这一步失败。
 // 最后一个 Run 没有验证门记录时这一步未收尾，现算为未知（决策 154 修订）。
-import type { OutcomeLabel } from "./candidate.ts";
+import type { OutcomeLabel } from "./attempt-ref.ts";
 import type { FailureClass } from "./classification.ts";
 import type { RunId } from "./ids.ts";
 import type { MaterializedSession } from "./materialize.ts";
 import { lastGateVerificationOf, repairRoundsOf, stepRunsOf } from "./repair-step.ts";
 import type { EvalVerdict } from "./runtime-events.ts";
 
-export type { OutcomeLabel } from "./candidate.ts";
+export type { OutcomeLabel } from "./attempt-ref.ts";
 
 export interface AttemptOutcomeFacts {
   hasRunEnded: boolean;

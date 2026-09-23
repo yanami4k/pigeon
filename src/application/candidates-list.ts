@@ -5,11 +5,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { activationPathFor } from "../activation/activate.ts";
-import {
-  type AttemptRef,
-  type CandidateStatus,
-  isProducibleCandidateKind,
-} from "../state/candidate.ts";
+import type { AttemptRef } from "../state/attempt-ref.ts";
+import { type CandidateStatus, isProducibleCandidateKind } from "../state/candidate.ts";
 import type { CandidateVerifiedRecord } from "../state/event-log.ts";
 import { lineDiff } from "../state/line-diff.ts";
 import { activationDrift } from "./candidate-decision.ts";

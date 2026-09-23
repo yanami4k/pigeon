@@ -12,7 +12,8 @@ import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { stageCandidate } from "../review/candidates.ts";
-import { type AttemptRef, CANDIDATE_VERSION } from "../state/candidate.ts";
+import type { AttemptRef } from "../state/attempt-ref.ts";
+import { CANDIDATE_VERSION } from "../state/candidate.ts";
 import { asRunId, asSessionId, newRunId, newSessionId } from "../state/ids.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
