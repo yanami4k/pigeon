@@ -22,7 +22,7 @@ import {
   type WorkspaceProvider,
 } from "./workers.ts";
 
-type Behavior = "complete" | "hang" | "endless-turns" | "complete-at-limit";
+type Behavior = "complete" | "hang" | "endless-turns" | "complete-at-limit" | "slow-abort";
 
 class FakeRuntime implements WorkerRuntimeHandle {
   readonly listeners = new Set<(event: EventEnvelope) => void>();
@@ -35,6 +35,8 @@ class FakeRuntime implements WorkerRuntimeHandle {
   readonly limitRunIds: Array<RunId | undefined> = [];
   readonly runId: RunId = newRunId();
   readonly #interrupt = Promise.withResolvers<void>();
+  // slow-abort：中止请求到达后运行不立即收尾，等测试放行
+  readonly #release = Promise.withResolvers<void>();
   readonly behavior: Behavior;
   readonly journal: string[];
 
@@ -68,6 +70,11 @@ class FakeRuntime implements WorkerRuntimeHandle {
       this.#emitTurn();
       return { status: "completed", runId };
     }
+    if (this.behavior === "slow-abort") {
+      await this.#interrupt.promise;
+      await this.#release.promise;
+      return { status: "aborted", runId };
+    }
     if (this.behavior === "hang") {
       await this.#interrupt.promise;
       return { status: "aborted", runId };
@@ -88,6 +95,16 @@ class FakeRuntime implements WorkerRuntimeHandle {
   async interrupt(): Promise<void> {
     this.interrupted = true;
     this.#interrupt.resolve();
+  }
+
+  // 等第一次中止请求到达
+  interruptRequested(): Promise<void> {
+    return this.#interrupt.promise;
+  }
+
+  // 放行 slow-abort 的运行，以中止收尾
+  finishAbort(): void {
+    this.#release.resolve();
   }
 
   receiptIds(): ReceiptId[] {
@@ -204,7 +221,7 @@ test("深度 1：worker 会话里的编排器拒绝再派，零落盘零工作�
 });
 
 test("轮次上限：达到上限中止，以 turn-limit 收尾", async () => {
-  const { orchestrator, runtimes } = setup({ behavior: "endless-turns" });
+  const { orchestrator, journal, runtimes } = setup({ behavior: "endless-turns" });
   const id = orchestrator.spawn({ role: "explorer", task: "看看", limits: { maxTurns: 3 } });
   const outcome = await orchestrator.awaitResult(id);
   assert.equal(outcome.status, "turn-limit");
@@ -215,6 +232,11 @@ test("轮次上限：达到上限中止，以 turn-limit 收尾", async () => {
   // 072 修订：运行确以中止收尾后才写，记录落在被中止的那次 Run 上
   assert.deepEqual(runtimes.get(id)?.limitHits, ["turn-limit"]);
   assert.deepEqual(runtimes.get(id)?.limitRunIds, [runtimes.get(id)?.runId]);
+  // 撞上限记录写在运行返回之后、释放运行面（关闭 worker 会话文件）之前
+  assert.deepEqual(
+    journal.filter((entry) => ["run", "limit-hit", "dispose"].includes(entry)),
+    ["run", "limit-hit", "dispose"]
+  );
 });
 
 test("轮次上限恰好用满而自然收尾：以 completed 收尾，不写撞上限记录", async () => {
@@ -246,6 +268,20 @@ test("人主动取消不留撞上限痕迹（取消算放弃，上限才算失�
   await orchestrator.cancel(id);
   await orchestrator.awaitResult(id);
   assert.deepEqual(runtimes.get(id)?.limitHits, []);
+});
+
+test("撞上限后又被人主动取消：以 cancelled 收尾，不写撞上限记录", async () => {
+  const { orchestrator, runtimes } = setup({ behavior: "slow-abort" });
+  const id = orchestrator.spawn({ role: "explorer", task: "看看", limits: { wallClockMs: 10 } });
+  const runtime = runtimes.get(id);
+  assert.ok(runtime);
+  // 墙钟上限先触发并发出中止请求；运行收尾之前人又取消
+  await runtime.interruptRequested();
+  await orchestrator.cancel(id);
+  runtime.finishAbort();
+  const outcome = await orchestrator.awaitResult(id);
+  assert.equal(outcome.status, "cancelled");
+  assert.deepEqual(runtime.limitHits, []);
 });
 
 test("cancel：走 interrupt，以 cancelled 收尾；已收尾再取消无操作", async () => {
