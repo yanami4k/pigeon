@@ -28,7 +28,12 @@ import {
 import type { HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { type StreamManifest, type StreamStep, stepsOf } from "./stream-manifest.ts";
 import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measure.ts";
-import { allPassed, countQuality, type StreamRepoRuntime } from "./stream-profiles.ts";
+import {
+  allPassed,
+  countQuality,
+  type StreamRepoRuntime,
+  verifyConfigFile,
+} from "./stream-profiles.ts";
 import { renderStreamReport } from "./stream-report.ts";
 import {
   lastCompletedStep,
@@ -308,6 +313,13 @@ async function runStreamJob(
   const steps = limitSteps(stepsOf(options.manifest, job.stream), options.maxSteps);
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });
+  // 分步验证配置写进这个作业的治理根（Pigeon 在宿主进程内运行，项目配置从治理根读；不写进容器工作区，
+  // 免得被当成 agent 的改动落地提交）
+  mkdirSync(path.join(jobDir, ".pigeon"), { recursive: true });
+  writeAtomic(
+    path.join(jobDir, ".pigeon", "verify.json"),
+    `${JSON.stringify(verifyConfigFile(options.runtime.verifySteps, options.judgeTimeoutMs ?? 1_800_000), null, 2)}\n`
+  );
   const bundleFile = path.join(jobDir, "history.bundle");
   const passingFile = (seq: number) => path.join(jobDir, `passing-${seq}.json`);
   const lines = readStreamResults(resultsFile);

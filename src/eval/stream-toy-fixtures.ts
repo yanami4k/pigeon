@@ -34,6 +34,7 @@ const JUNIT_SCRIPT = [
 
 export const toyRuntime: StreamRepoRuntime = {
   profile: toyProfile,
+  verifySteps: [{ name: "测试", command: 'for t in src/*.test.sh; do sh "$t" || exit 1; done' }],
   quality: {
     type: { command: ["sh", "-c", "grep -rh TYPE-ERROR src || true"], pattern: /TYPE-ERROR/ },
     format: null,

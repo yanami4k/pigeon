@@ -4,6 +4,73 @@ import { parseJunitCases, type TestCaseResult } from "./stream-measure.ts";
 import { runPytestResilient } from "./stream-pytest.ts";
 import type { StreamWorkspace } from "./stream-workspace.ts";
 
+// 本仓库单条用例的超时：卡死的用例在这里记失败，不拖到整次运行的墙钟（探针、判题、全量测量、人的基准与验证门同一个）
+export const PIGEON_TEST_TIMEOUT_MS = 120_000;
+
+// 验证的一个命名分步：一行命令（经 sh 执行），可指定在工作区根下的哪个目录执行。形状与 .pigeon/verify.json 的
+// 分步验证配置一致；跑批器把它写进每个作业的治理根，回炉按它逐步验证；验证门（维护步的判定）由同一份分步派生
+export interface StreamVerifyStep {
+  name: string;
+  command: string;
+  cwd?: string;
+}
+
+// 本仓库四步：各步与 package.json 里的同名脚本一致（清单范围内每个提交的脚本逐字相同），测试步另加单用例超时
+export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
+  { name: "格式", command: "npm run lint" },
+  { name: "类型", command: "npm run check" },
+  {
+    name: "测试",
+    command: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} "src/**/*.test.ts"`,
+  },
+  { name: "分层", command: "npm run deps" },
+];
+
+// strands 三步，按其 CI 定义（python-test-lint.yml 与 pyproject 的 hatch 脚本），都在 strands-py 下执行。单测只跑 tests/，
+// 需要网络的 tests_integ 不在其内；被测包以源码目录直接导入（不做可编辑安装），测量副本里跑的才是副本自己的代码。单测一步：
+//   --continue-on-collection-errors：一个文件收集出错不中断整次运行，其余用例照常跑（缺省会一条都不跑）；
+//   pytest 在报告写完后若因残留线程或事件循环不退出，外壳等 5 秒后杀掉它；通过与否看报告里有没有失败或出错的用例
+//   （不依赖计数属性）；简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈
+// mypy 的检查范围随历史变化：类型测试目录 tests_typing 在窗口中途才加入（其 CI 自那时起才检查它），之前只查 ./src
+const STRANDS_MYPY = "mypy ./src $(test -d tests_typing && echo ./tests_typing)";
+
+export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
+  // 其 CI 的 lint 作业只跑 hatch fmt --linter --check（ruff check 与 mypy），不做格式检查：人的代码并非处处按
+  // ruff format 排版，加上格式检查会让人的代码也过不了验证门（格式偏差另计入次要指标）
+  { name: "ruff", command: "ruff check", cwd: "strands-py" },
+  { name: "mypy", command: STRANDS_MYPY, cwd: "strands-py" },
+  {
+    name: "pytest",
+    cwd: "strands-py",
+    command: [
+      'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
+      '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors',
+      '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
+      'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
+      'wait "$p" 2>/dev/null; true; } &&',
+      '[ -s "$j" ] && ! grep -Eq \'<(failure|error)[ />]\' "$j"',
+    ].join(" "),
+  },
+];
+
+// .pigeon/verify.json 的内容：分步验证配置（version 1，steps 与单条 command 二选一）
+export function verifyConfigFile(
+  steps: readonly StreamVerifyStep[],
+  timeoutMs: number
+): { version: 1; steps: readonly StreamVerifyStep[]; timeoutMs: number } {
+  return { version: 1, steps, timeoutMs };
+}
+
+// 由分步派生的验证门：各步全跑、各带标题，任一步失败即不通过（与分步验证"各步全跑、各出结论"同一口径）
+export function gateFromSteps(steps: readonly StreamVerifyStep[]): string[] {
+  const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+  const parts = steps.map(
+    (s) =>
+      `printf '== %s ==\\n' ${quote(s.name)}; ( ${s.cwd !== undefined ? `cd ${quote(s.cwd)} && ` : ""}${s.command} ) || s=1;`
+  );
+  return ["sh", "-c", ["s=0;", ...parts, 'exit "$s"'].join(" ")];
+}
+
 const PIGEON_ENV_FILES = new Set([
   "package.json",
   "package-lock.json",
@@ -41,7 +108,7 @@ export const pigeonProfile: RepoProfile = {
       ? `改动 ${commit.files.length} 个文件，逾 ${PIGEON_RESET_FILE_LIMIT} 个`
       : null;
   },
-  gateCommand: ["npm", "run", "verify"],
+  gateCommand: gateFromSteps(PIGEON_VERIFY_STEPS),
 };
 
 const STRANDS_ROOT = "strands-py/";
@@ -81,25 +148,7 @@ export const strandsProfile: RepoProfile = {
     }
     return null;
   },
-  // 按其 CI 定义（python-test-lint.yml 与 pyproject 的 hatch 脚本）：格式检查、ruff、mypy、单测；
-  // 单测只跑 tests/，需要网络的 tests_integ 不在其内。被测包以源码目录直接导入（不做可编辑安装），
-  // 测量副本里跑的才是副本自己的代码。单测一步：
-  //   --continue-on-collection-errors：一个文件收集出错不中断整次运行，其余用例照常跑（缺省会一条都不跑）；
-  //   pytest 在报告写完后若因残留线程或事件循环不退出，外壳等 5 秒后杀掉它；通过与否看报告里有没有失败或出错的用例（不依赖计数属性）；
-  //   简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈
-  gateCommand: [
-    "sh",
-    "-c",
-    [
-      "cd strands-py && ruff format --check && ruff check && mypy ./src ./tests_typing &&",
-      'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
-      '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors',
-      '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
-      'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
-      'wait "$p" 2>/dev/null; true; } &&',
-      '[ -s "$j" ] && ! grep -Eq \'<(failure|error)[ />]\' "$j"',
-    ].join(" "),
-  ],
+  gateCommand: gateFromSteps(STRANDS_VERIFY_STEPS),
 };
 
 // 次要指标里的一项机检：跑命令，从输出里数出错误条数；数不出时命令成功记 0、失败记 null（未知）
@@ -150,6 +199,8 @@ export interface StreamRepoRuntime {
     layer: QualityCheck | null;
   };
   profile: RepoProfile;
+  // 分步验证：写进每个作业治理根的 .pigeon/verify.json，开回炉的条件按它逐步验证
+  verifySteps: readonly StreamVerifyStep[];
   // 跑给定测试文件、取逐用例结果：判题、探针、全量测量与人的基准共用。判定一律看逐用例结果，不看退出码
   runCases(
     ws: StreamWorkspace,
@@ -193,11 +244,9 @@ export async function runJunitOnce(
   };
 }
 
-// 本仓库单条用例的超时：卡死的用例在这里记失败，不拖到整次运行的墙钟（探针、判题、全量测量、人的基准同一个）
-export const PIGEON_TEST_TIMEOUT_MS = 120_000;
-
 export const pigeonRuntime: StreamRepoRuntime = {
   profile: pigeonProfile,
+  verifySteps: PIGEON_VERIFY_STEPS,
   quality: {
     type: { command: ["node_modules/.bin/tsc", "--noEmit", "-p", "."], pattern: /error TS\d+/ },
     format: { command: ["node_modules/.bin/biome", "format", "."], pattern: /Found (\d+) errors?/ },
@@ -260,9 +309,10 @@ export const STRANDS_PYTEST_SCRIPT = [
 
 export const strandsRuntime: StreamRepoRuntime = {
   profile: strandsProfile,
+  verifySteps: STRANDS_VERIFY_STEPS,
   quality: {
     type: {
-      command: ["sh", "-c", "cd strands-py && mypy ./src ./tests_typing"],
+      command: ["sh", "-c", `cd strands-py && ${STRANDS_MYPY}`],
       pattern: /Found (\d+) errors?/,
     },
     format: {

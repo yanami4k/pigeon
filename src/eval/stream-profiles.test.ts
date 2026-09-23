@@ -5,10 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   allPassed,
+  gateFromSteps,
   PIGEON_TEST_TIMEOUT_MS,
+  PIGEON_VERIFY_STEPS,
   pigeonRuntime,
+  STRANDS_VERIFY_STEPS,
   strandsProfile,
   strandsRuntime,
+  verifyConfigFile,
 } from "./stream-profiles.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { StreamWorkspace } from "./stream-workspace.ts";
@@ -194,6 +198,72 @@ test("pigeon 逐用例结果：单条用例带 120 秒超时，卡死的用例�
   await pigeonRuntime.runCases(ws, ["src/a.test.ts"], { timeoutMs: 60_000, scratch: "/w/.git" });
   assert.equal(PIGEON_TEST_TIMEOUT_MS, 120_000);
   assert.ok(commands.some((c) => c[0] === "node" && c.includes("--test-timeout=120000")));
+});
+
+test("分步验证：本仓库四步（格式、类型、测试、分层），测试步带 120 秒单用例超时；strands 三步（ruff、mypy、pytest）都在 strands-py 下执行", () => {
+  assert.deepEqual(
+    PIGEON_VERIFY_STEPS.map((s) => s.name),
+    ["格式", "类型", "测试", "分层"]
+  );
+  assert.equal(
+    PIGEON_VERIFY_STEPS.find((s) => s.name === "测试")?.command,
+    'node --test --test-timeout=120000 "src/**/*.test.ts"'
+  );
+  assert.ok(PIGEON_VERIFY_STEPS.every((s) => s.cwd === undefined));
+  assert.deepEqual(
+    STRANDS_VERIFY_STEPS.map((s) => [s.name, s.cwd]),
+    [
+      ["ruff", "strands-py"],
+      ["mypy", "strands-py"],
+      ["pytest", "strands-py"],
+    ]
+  );
+  assert.match(STRANDS_VERIFY_STEPS[2]?.command ?? "", /--continue-on-collection-errors/);
+  // 与其 CI 的 lint 作业一致：只做 ruff check，不做格式检查
+  assert.equal(STRANDS_VERIFY_STEPS[0]?.command, "ruff check");
+  // 类型测试目录在窗口中途才加入：没有它的提交上只查 ./src（写死两个目录会让人的代码也过不了验证门）
+  assert.equal(
+    STRANDS_VERIFY_STEPS[1]?.command,
+    "mypy ./src $(test -d tests_typing && echo ./tests_typing)"
+  );
+  assert.deepEqual(strandsRuntime.quality.type?.command, [
+    "sh",
+    "-c",
+    `cd strands-py && ${STRANDS_VERIFY_STEPS[1]?.command}`,
+  ]);
+  // 写进 .pigeon/verify.json 的形状：与分步验证配置同一形状（version、steps、timeoutMs）
+  assert.deepEqual(verifyConfigFile(STRANDS_VERIFY_STEPS, 1_800_000), {
+    version: 1,
+    steps: STRANDS_VERIFY_STEPS,
+    timeoutMs: 1_800_000,
+  });
+});
+
+test("验证门由分步派生：各步全跑、各自带标题，任一步失败即不通过（失败之后的步照样跑）", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-gate-"));
+  try {
+    mkdirSync(join(base, "sub"));
+    writeFileSync(join(base, "sub", "marker.txt"), "in-sub\n");
+    const ws = new StreamWorkspace(localStreamShell(base));
+    const steps = [
+      { name: "一", command: "echo first-ran" },
+      { name: "二", command: "exit 3" },
+      { name: "三", command: "cat marker.txt", cwd: "sub" },
+    ];
+    const failing = await ws.run(gateFromSteps(steps), 60_000);
+    assert.notEqual(failing.exitCode, 0);
+    assert.match(
+      failing.output,
+      /== 一 ==[\s\S]*first-ran[\s\S]*== 二 ==[\s\S]*== 三 ==[\s\S]*in-sub/
+    );
+    const passing = await ws.run(
+      gateFromSteps([steps[0], steps[2]].filter((s) => s !== undefined)),
+      60_000
+    );
+    assert.equal(passing.exitCode, 0);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("strands 验证门：一个测试文件导入失败时不通过，反馈里既有出错的文件，也有其余文件里失败的用例", async () => {

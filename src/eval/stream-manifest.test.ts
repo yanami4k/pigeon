@@ -14,6 +14,8 @@ import {
 import {
   classifyPigeonFile,
   classifyStrandsFile,
+  gateFromSteps,
+  PIGEON_VERIFY_STEPS,
   pigeonProfile,
   strandsProfile,
 } from "./stream-profiles.ts";
@@ -298,7 +300,7 @@ test("重置点切流：重置步的提交为下一条流的起点，重置步�
     { id: "s2", startCommit: "move", firstSeq: 3, lastSeq: 4 },
   ]);
   assert.equal(m.rangeEnd, "c");
-  assert.deepEqual(m.gateCommand, ["npm", "run", "verify"]);
+  assert.deepEqual(m.gateCommand, gateFromSteps(PIGEON_VERIFY_STEPS));
 });
 
 test("本仓库文件归类：测试、测试辅助、机检配置随源代码、环境文件、其余", () => {

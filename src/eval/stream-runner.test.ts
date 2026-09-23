@@ -195,6 +195,16 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       assert.deepEqual(last?.fullPassRate?.byTask, { passed: 2, total: 2, rate: 1 });
       assert.deepEqual(last?.quality, { typeErrors: 0, formatErrors: null, layerViolations: null });
       assert.equal(rows[2]?.head, rows[1]?.head, "跳过步不落地");
+      // 分步验证配置写进作业的治理根，形状与 .pigeon/verify.json 一致
+      assert.deepEqual(
+        JSON.parse(
+          readFileSync(
+            join(t.base, "out", "streams", "s1-no-gate-1", ".pigeon", "verify.json"),
+            "utf8"
+          )
+        ),
+        { version: 1, steps: toyRuntime.verifySteps, timeoutMs: 1_800_000 }
+      );
       assert.deepEqual(rows[2]?.fullPassRate, rows[1]?.fullPassRate, "跳过步沿用上一步的测量");
       // 落地的历史：起点之上一步一个提交，提交信息为人的提交信息，改动的测试被恢复、自建的测试保留
       const bundle = readFileSync(join(t.base, "out", "streams", "s1-no-gate-1", "history.bundle"));
