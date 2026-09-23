@@ -236,19 +236,6 @@ function renderRun(run: TraceRun, lines: string[], options: TraceRenderOptions =
     }
     lines.push(line);
   }
-  // M6（决策 064 / 065）：后台审阅的异常——跳过、结果不可解析
-  for (const skip of run.reviewSkips) {
-    lines.push(
-      skip.payload.reason === "exit"
-        ? `  审阅跳过：会话退出，取消了${skip.payload.trigger === "turns" ? "按轮次触发" : "Run 结束补审"}的排队中或进行中审阅`
-        : `  审阅跳过：${skip.payload.trigger === "turns" ? "按轮次触发" : "Run 结束触发"}时上一次审阅未收尾`
-    );
-  }
-  for (const unparsable of run.reviewUnparsables) {
-    lines.push(
-      `  结构化结果不可解析：产出会话 ${unparsable.payload.producerSessionId} ｜ ${unparsable.payload.reason}`
-    );
-  }
   // D2 冷侧缺口（M4 收口决策 ③）：撕裂尾巴与 entry 断号在 Run 头下如实标注，
   // 措辞与 replay 同口径——绝不假装证据链完整
   if (run.tornTail) {

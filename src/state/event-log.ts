@@ -7,12 +7,6 @@
 // persistence/event-log.ts，冷物化与对账在 state/materialize.ts。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { AttemptBudgetSchema, VerifyConfigSchema } from "./attempt-config.ts";
-import {
-  CandidateKindSchema,
-  migrateCandidateToCurrent,
-  ReviewerCandidateSchema,
-} from "./candidate.ts";
 import {
   EntryIdSchema,
   ExecutionIdSchema,
@@ -30,8 +24,6 @@ import {
   EvalVerifiedPayloadSchema,
   LlmRequestPayloadSchema,
   ObservationKind,
-  ReviewSkippedPayloadSchema,
-  ReviewUnparsablePayloadSchema,
   RunEndedPayloadSchema,
   RunLimitHitPayloadSchema,
   RunStartedPayloadSchema,
@@ -69,15 +61,26 @@ import { ToolExecutionDecisionSchema } from "./tool-execution.ts";
 // v14（决策 128）：退役候选筛查、提炼跳过、固化升格与固化移除四族（无读者或与别的记录逐字重复）——
 // 停写并移出记录并集；旧会话文件里的这四种记录由读取边界按 RETIRED_EVENT_KINDS 跳过，其余记录逐字有效
 // v15（决策 142 / 143）：run.started 载荷加可选回炉轮数——加法式，v14 旧记录逐字有效
-export const EVENT_LOG_VERSION = 15;
+// v16（决策 137 / 158）：第一版学习闭环退役——候选提出、候选验证、候选决定、候选激活、审阅跳过与审阅结果不可解析
+// 六种记录停写并移出记录并集（旧回放的结果记录类型随候选验证记录一起移除），照决策 128 由读取边界跳过；
+// run.started 载荷去掉审阅配置字段（非严格对象，旧记录里的该字段读取时忽略）。其余记录逐字有效
+export const EVENT_LOG_VERSION = 16;
 
-// 已退役的记录种类（决策 128）：读取边界在 schema 校验之前按本清单跳过——任何版本都跳过，不算损坏，
-// 也不进入任何视图与执行编号重复检测
+// 已退役的记录种类：读取边界在 schema 校验之前按本清单跳过——任何版本都跳过，不算损坏，
+// 也不进入任何视图与执行编号重复检测；旧会话文件不改写
 export const RETIRED_EVENT_KINDS: ReadonlySet<string> = new Set([
+  // 决策 128：无读者或与别的记录逐字重复
   "candidate.screened",
   "distill.skipped",
   "grant.promoted",
   "grant.config-removed",
+  // 决策 137 / 158：第一版学习闭环退役
+  "candidate.proposed",
+  "candidate.verified",
+  "candidate.decided",
+  "candidate.activated",
+  "review.skipped",
+  "review.unparsable",
 ]);
 
 // 记录信封公共字段（D 系列决策：version + ids + sessionId + runId + timestamp）
@@ -152,20 +155,6 @@ export const EvalVerifiedRecordSchema = Type.Object({
   payload: EvalVerifiedPayloadSchema,
 });
 export type EvalVerifiedRecord = Static<typeof EvalVerifiedRecordSchema>;
-// M6（决策 064 子裁决 ①）：后台审阅因上一次未收尾而跳过本次触发，落在被审主会话的会话文件里
-export const ReviewSkippedRecordSchema = Type.Object({
-  ...ENVELOPE_PROPS,
-  kind: Type.Literal(ObservationKind.ReviewSkipped),
-  payload: ReviewSkippedPayloadSchema,
-});
-export type ReviewSkippedRecord = Static<typeof ReviewSkippedRecordSchema>;
-// M6（决策 065）：Reviewer 收尾结果不可解析
-export const ReviewUnparsableRecordSchema = Type.Object({
-  ...ENVELOPE_PROPS,
-  kind: Type.Literal(ObservationKind.ReviewUnparsable),
-  payload: ReviewUnparsablePayloadSchema,
-});
-export type ReviewUnparsableRecord = Static<typeof ReviewUnparsableRecordSchema>;
 // M7（决策 078）：工作区快照与条目号的对应
 export const WorkspaceCheckpointRecordSchema = Type.Object({
   ...ENVELOPE_PROPS,
@@ -186,8 +175,6 @@ export const ObservationRecordSchema = Type.Union([
   LlmRequestRecordSchema,
   SkillLoadedRecordSchema,
   EvalVerifiedRecordSchema,
-  ReviewSkippedRecordSchema,
-  ReviewUnparsableRecordSchema,
   WorkspaceCheckpointRecordSchema,
   RunLimitHitRecordSchema,
 ]);
@@ -380,6 +367,8 @@ export type GrantRevokedRecord = Static<typeof GrantRevokedRecordSchema>;
 // 派出时父会话无活动 Run）
 // M8（决策 082）：新增验证器角色——在独立工作树中重执行被验证那次尝试；
 // 它的命令档工具只在固化命令规则内放行（083）
+// 决策 137 / 158：reviewer、distiller、verifier 已停用、不再派出；取值保留，旧会话文件与项目命令配置里记着它们，
+// 删值会使其读不出。可派出的角色见 orchestration/roles.ts
 export const WorkerRoleSchema = Type.Union([
   Type.Literal("reviewer"),
   Type.Literal("explorer"),
@@ -392,7 +381,8 @@ export const WorkerRoleSchema = Type.Union([
 export type WorkerRole = Static<typeof WorkerRoleSchema>;
 
 // 隔离工作区：git 工作树（M5.5）与"无工作区"（M6，决策 064）——Reviewer 只读、不开工作树。
-// 加法式联合，054 的形状封顶口径不变：git-worktree 成员逐字不动，旧记录读取不变
+// 加法式联合，054 的形状封顶口径不变：git-worktree 成员逐字不动，旧记录读取不变。
+// 决策 137 之后不再产生无工作区（只读角色已退役），该成员只为读取旧记录保留
 // M8（决策 082）：加可选起点提交——回放必须回到"任务开始处"，工作树的起点提交是它唯一精确的记法。
 // v11 之前的派出记录没有该字段，回放回退到分支尖端并在回执里如实标注
 export const GitWorktreeWorkspaceSchema = Type.Object({
@@ -499,26 +489,6 @@ export const ChildSettledRecordSchema = Type.Object({
 });
 export type ChildSettledRecord = Static<typeof ChildSettledRecordSchema>;
 
-// 候选提出（M6，决策 065）：Controller 从 Reviewer 收尾结果落盘候选后写入被审主会话的会话文件——
-// 不可变元数据全文（种类、名字、哈希、来源、摘要、判断强度、扫描结果、取代关系）加审阅所用模型与用量。
-// runId 是被审的那一次 Run；候选状态由本族与验证、决定、激活三族现算（扫描结论读本族内嵌的扫描结果），不写进候选目录
-export const CandidateProposedRecordSchema = Type.Object({
-  ...ENVELOPE_PROPS,
-  kind: Type.Literal("candidate.proposed"),
-  candidate: ReviewerCandidateSchema,
-  model: Type.Object({
-    provider: Type.String({ minLength: 1 }),
-    id: Type.String({ minLength: 1 }),
-  }),
-  usage: Type.Optional(
-    Type.Object({
-      turns: Type.Integer({ minimum: 0 }),
-      totalTokens: Type.Integer({ minimum: 0 }),
-    })
-  ),
-});
-export type CandidateProposedRecord = Static<typeof CandidateProposedRecordSchema>;
-
 // 通用验证记录（M7，决策 071）：尝试收尾后由程序作为独立子进程在该尝试的工作区执行配置的验证命令，模型看不到；
 // 三值口径同 058。落在哪个会话文件由写入方的单写者约束决定（worker 尝试落父会话，普通会话落自身），
 // target 指明对应的会话与 Run；信封 Run 可缺省（父会话无活动 Run 时）。观察族耐久（同步写不 fsync）
@@ -592,202 +562,8 @@ export const BranchHeaderRecordSchema = Type.Object({
 });
 export type BranchHeaderRecord = Static<typeof BranchHeaderRecordSchema>;
 
-// ── M8：候选验证、决定与激活三族（决策 089） ──────────────────────────────────────────
-// 三族都写进候选的来源会话文件（与候选提出同一个文件，单写者约束不变），信封 Run 可缺省
-// （审批发生在任何 Run 之外）。候选状态仍由账本现算，不写进候选目录（§3.5 一个权威状态源）。
-
-// 回放的四组（决策 084）：失败侧与成功侧各跑带经验与不带经验两组，固定 N 全跑不中途停。
-// 正回放看失败侧带经验是否变好，负回放看成功侧带经验是否变差
-export const RerunArmSchema = Type.Union([
-  Type.Literal("failed-baseline"),
-  Type.Literal("failed-with"),
-  Type.Literal("successful-baseline"),
-  Type.Literal("successful-with"),
-]);
-export type RerunArm = Static<typeof RerunArmSchema>;
-
-// 单次回放运行：会话号（决策 091 要求记全各次运行的会话号）、落在哪个治理根、三值判决与过程指标。
-// 运行本身没跑起来（开工作树失败、装配失败）时判决为 undetermined 并带 error
-export const RerunRunSchema = Type.Object(
-  {
-    arm: RerunArmSchema,
-    index: Type.Integer({ minimum: 1 }),
-    sessionId: SessionIdSchema,
-    // 该次回放的临时治理根（经验按正常格式放在其 .pigeon 下，与真激活同一条装载路径）
-    governanceRoot: Type.String({ minLength: 1 }),
-    verdict: EvalVerdictSchema,
-    status: Type.String({ minLength: 1 }),
-    turns: Type.Integer({ minimum: 0 }),
-    totalTokens: Type.Integer({ minimum: 0 }),
-    durationMs: Type.Integer({ minimum: 0 }),
-    error: Type.Optional(Type.String()),
-  },
-  { additionalProperties: false }
-);
-export type RerunRun = Static<typeof RerunRunSchema>;
-
-// 一组的统计（决策 084）：pass@k 与 pass^k 分开算并按 k 逐项列出；Wilson 区间算出来进回执但不参与判定
-export const RerunArmStatsSchema = Type.Object(
-  {
-    arm: RerunArmSchema,
-    runs: Type.Integer({ minimum: 0 }),
-    passes: Type.Integer({ minimum: 0 }),
-    passRate: Type.Number({ minimum: 0, maximum: 1 }),
-    // 下标 k-1 对应 k = 1..runs
-    passAtK: Type.Array(Type.Number({ minimum: 0, maximum: 1 })),
-    passPowK: Type.Array(Type.Number({ minimum: 0, maximum: 1 })),
-    wilson: Type.Object(
-      {
-        low: Type.Number({ minimum: 0, maximum: 1 }),
-        high: Type.Number({ minimum: 0, maximum: 1 }),
-      },
-      { additionalProperties: false }
-    ),
-  },
-  { additionalProperties: false }
-);
-export type RerunArmStats = Static<typeof RerunArmStatsSchema>;
-
-// 装载进回放的一条经验（决策 091）：经验集合内容哈希由这些条目算出，是批准失效四项判据之一
-export const LoadedExperienceSchema = Type.Object(
-  {
-    kind: CandidateKindSchema,
-    name: Type.String({ minLength: 1 }),
-    contentHash: Sha256HexSchema,
-    bytes: Type.Integer({ minimum: 0 }),
-    // 本次被验证的候选自身（带经验两组里恰有一条为真）
-    candidate: Type.Boolean(),
-  },
-  { additionalProperties: false }
-);
-export type LoadedExperience = Static<typeof LoadedExperienceSchema>;
-
-// 验证环境摘要（决策 091）：记全——模型标识与版本、harness 提交号、Node 与平台、预算参数、验证命令、
-// 同时装载的经验集合内容哈希与明细。批准失效只看封闭四项清单：模型标识、经验集合内容哈希、预算参数、
-// 验证命令（判据实现在 replay/environment.ts）；清单外的项（Node、平台、harness 提交号、超时）只记录不判定。
-export const VerificationEnvironmentSchema = Type.Object(
-  {
-    model: Type.Object(
-      {
-        provider: Type.String({ minLength: 1 }),
-        id: Type.String({ minLength: 1 }),
-        thinkingLevel: Type.Optional(Type.String({ minLength: 1 })),
-        maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
-        // M9：回放沿用的采样温度（原尝试设过才在场；加法式，与 run.started 模型段同口径）
-        temperature: Type.Optional(Type.Number({ minimum: 0, maximum: 2 })),
-      },
-      { additionalProperties: false }
-    ),
-    // Pigeon 仓库 HEAD 短号与是否有未提交改动（与 Eval 结果行同一口径，决策 061）
-    harness: Type.Object(
-      { commit: Type.String({ minLength: 1 }), dirty: Type.Boolean() },
-      { additionalProperties: false }
-    ),
-    runtime: Type.Object(
-      { node: Type.String({ minLength: 1 }), platform: Type.String({ minLength: 1 }) },
-      { additionalProperties: false }
-    ),
-    budget: AttemptBudgetSchema,
-    verify: VerifyConfigSchema,
-    experienceSetHash: Sha256HexSchema,
-    experiences: Type.Array(LoadedExperienceSchema),
-  },
-  { additionalProperties: false }
-);
-export type VerificationEnvironment = Static<typeof VerificationEnvironmentSchema>;
-
-// 三值结论（决策 084）：通过 / 未测出 / 回归。回归一律不可批准（092）
-export const VerificationConclusionSchema = Type.Union([
-  Type.Literal("passed"),
-  Type.Literal("inconclusive"),
-  Type.Literal("regressed"),
-]);
-export type VerificationConclusion = Static<typeof VerificationConclusionSchema>;
-
-// 验证回执（决策 089 第一族）：一次 pigeon verify 的完整结论与证据。治理族耐久（fsync）——
-// 批准与激活以它为前提，写不进就当作没验过
-export const CandidateVerifiedRecordSchema = Type.Object({
-  ...GRANT_ENVELOPE_PROPS,
-  kind: Type.Literal("candidate.verified"),
-  candidateKind: CandidateKindSchema,
-  name: Type.String({ minLength: 1 }),
-  contentHash: Sha256HexSchema,
-  conclusion: VerificationConclusionSchema,
-  // 每组固定跑几次（决策 084：缺省 5，可配，低于 3 直接拒绝）
-  n: Type.Integer({ minimum: 3 }),
-  // 大效应门槛：正回放通过率提升达到它才算通过，成功侧下降达到它即回归
-  effectThreshold: Type.Number({ minimum: 0, maximum: 1 }),
-  // 失败侧与成功侧的"带经验减不带经验"通过率差
-  positiveDelta: Type.Number({ minimum: -1, maximum: 1 }),
-  negativeDelta: Type.Number({ minimum: -1, maximum: 1 }),
-  arms: Type.Array(RerunArmStatsSchema),
-  runs: Type.Array(RerunRunSchema),
-  environment: VerificationEnvironmentSchema,
-  verifiedAt: Type.Integer({ minimum: 0 }),
-});
-export type CandidateVerifiedRecord = Static<typeof CandidateVerifiedRecordSchema>;
-
-// 决定的动作（决策 089 第二族）：批准、拒绝、撤销、取代合成一族，用动作字段区分
-export const CandidateDecisionActionSchema = Type.Union([
-  Type.Literal("approve"),
-  Type.Literal("reject"),
-  Type.Literal("revoke"),
-  Type.Literal("supersede"),
-]);
-export type CandidateDecisionAction = Static<typeof CandidateDecisionActionSchema>;
-
-// 理由来源（同决策 066）：人写 / 系统默认——单按拒绝会让账本充满默认文案，来源字段让事后能分开看
-export const DecisionReasonSourceSchema = Type.Union([
-  Type.Literal("human"),
-  Type.Literal("system-default"),
-]);
-export type DecisionReasonSource = Static<typeof DecisionReasonSourceSchema>;
-
-// 候选决定（决策 089 第二族）：治理族耐久（fsync）。
-// 未测出的候选可由人显式批准，此时理由必填且来源必须是人写（决策 092，判据在 application 层）
-export const CandidateDecidedRecordSchema = Type.Object({
-  ...GRANT_ENVELOPE_PROPS,
-  kind: Type.Literal("candidate.decided"),
-  candidateKind: CandidateKindSchema,
-  name: Type.String({ minLength: 1 }),
-  contentHash: Sha256HexSchema,
-  action: CandidateDecisionActionSchema,
-  reason: Type.String(),
-  reasonSource: DecisionReasonSourceSchema,
-  // 取代：接替它的新候选哈希（与 065 的候选取代同构）
-  supersededBy: Type.Optional(Sha256HexSchema),
-  // 批准所依据的验证回执；从未验证过就批准时缺省
-  verification: Type.Optional(
-    Type.Object(
-      { recordId: EntryIdSchema, conclusion: VerificationConclusionSchema },
-      { additionalProperties: false }
-    )
-  ),
-  decidedAt: Type.Integer({ minimum: 0 }),
-});
-export type CandidateDecidedRecord = Static<typeof CandidateDecidedRecordSchema>;
-
-// 候选激活（决策 089 第三族 / 093）：按种类复制到治理根的正常目录后落盘。治理族耐久（fsync）。
-// activatedHash 是写盘后重算的落点内容哈希——"批准内容与最终激活内容摘要一致"由它与 contentHash 相等钉死；
-// 启动时再拿它与落点现状比对，不一致即标注"已脱离批准版本"，不阻止使用（093：人仍可直接编辑）
-export const CandidateActivatedRecordSchema = Type.Object({
-  ...GRANT_ENVELOPE_PROPS,
-  kind: Type.Literal("candidate.activated"),
-  candidateKind: CandidateKindSchema,
-  name: Type.String({ minLength: 1 }),
-  contentHash: Sha256HexSchema,
-  // 落点（治理根相对路径，正斜杠）
-  path: Type.String({ minLength: 1 }),
-  activatedHash: Sha256HexSchema,
-  // 未经回放证实（决策 092）：结论为未测出时由人显式批准激活，此处标记为真
-  unverified: Type.Boolean(),
-  decisionId: EntryIdSchema,
-  activatedAt: Type.Integer({ minimum: 0 }),
-});
-export type CandidateActivatedRecord = Static<typeof CandidateActivatedRecordSchema>;
-
 // Event Log 记录并集（M4 S5 新增 entry 族；M4 S6 新增 grant.created / grant.revoked 族；
-// 决策 128 退役的四族不在并集里，见 RETIRED_EVENT_KINDS）
+// 决策 128 与决策 137 退役的各族不在并集里，见 RETIRED_EVENT_KINDS）
 export const EventRecordSchema = Type.Union([
   RuntimeEventRecordSchema,
   ObservationRecordSchema,
@@ -802,10 +578,6 @@ export const EventRecordSchema = Type.Union([
   SessionHeaderRecordSchema,
   ChildSpawnedRecordSchema,
   ChildSettledRecordSchema,
-  CandidateProposedRecordSchema,
-  CandidateVerifiedRecordSchema,
-  CandidateDecidedRecordSchema,
-  CandidateActivatedRecordSchema,
   AttemptVerifiedRecordSchema,
   SessionForkedRecordSchema,
   BranchHeaderRecordSchema,
@@ -896,18 +668,10 @@ eventLogMigrations.register("event-log", 8, (doc) => ({ ...doc, version: 9 }));
 // 新增候选两族）——v9 旧记录逐字有效（git-worktree 工作区与带分支的结果仍通过当前 schema），纯版本推进
 eventLogMigrations.register("event-log", 9, (doc) => ({ ...doc, version: 10 }));
 
-// v10 → v11（M7）：加法式演进（派出记录可选任务标识、新增四族与两个观察族）；候选提出内嵌的 v2 候选经候选迁移链升 v3——
-// 迁移链只在末尾按当前 schema 校验一次，内嵌候选必须在链上显式升级（同 v7 → v8 的内嵌 receipt）。
-// 另按 065 修订改写结构化结果不可解析记录里记产出会话的字段名（v10 记的 reviewSessionId 原样搬到 producerSessionId，
-// 值不变）——该族是 M6 已入库的形状，旧记录必须真的改写，不能只改 schema
-eventLogMigrations.register("event-log", 10, (doc) => ({
-  ...doc,
-  version: 11,
-  ...(doc.kind === "candidate.proposed"
-    ? { candidate: migrateCandidateToCurrent(doc.candidate) }
-    : {}),
-  ...(doc.kind === "review.unparsable" ? { payload: renameProducerField(doc.payload) } : {}),
-}));
+// v10 → v11（M7）：加法式演进（派出记录可选任务标识、新增四族与两个观察族）——纯版本推进。
+// 此前这一步还升级候选提出内嵌的候选、改写不可解析记录的产出会话字段名；两种记录已退役（决策 137），
+// 在读取边界即被跳过，走不到这里，相应分支随之删除
+eventLogMigrations.register("event-log", 10, (doc) => ({ ...doc, version: 11 }));
 
 // v11 → v12（M8）：加法式演进（新增候选三族、角色加 verifier、工作区加可选起点提交、
 // run.started 载荷加可选预算块与验证命令来源）——v11 旧记录逐字有效，纯版本推进
@@ -923,14 +687,9 @@ eventLogMigrations.register("event-log", 13, (doc) => ({ ...doc, version: 14 }))
 // v14 → v15（决策 142 / 143）：加法式演进（run.started 加可选回炉轮数）——v14 旧记录逐字有效，纯版本推进
 eventLogMigrations.register("event-log", 14, (doc) => ({ ...doc, version: 15 }));
 
-// 不可解析记录的 payload：旧名在场即搬到新名，其余字段原样；已是新名的原样返回
-function renameProducerField(payload: unknown): unknown {
-  if (typeof payload !== "object" || payload === null || !("reviewSessionId" in payload)) {
-    return payload;
-  }
-  const { reviewSessionId, ...rest } = payload as Record<string, unknown>;
-  return { ...rest, producerSessionId: reviewSessionId };
-}
+// v15 → v16（决策 137 / 158）：退役六族。退役种类在读取边界已被跳过，走到这里的都是保留下来的记录；
+// run.started 里旧的审阅配置字段由非严格对象忽略——逐字有效，纯版本推进
+eventLogMigrations.register("event-log", 15, (doc) => ({ ...doc, version: 16 }));
 
 // 读路径迁移入口：version 低于当前格式的记录逐级升级并按当前 schema 校验；
 // 当前版本的记录直接校验。校验失败原样上抛，由读取方（persistence）定性为日志损坏
@@ -943,12 +702,6 @@ export function parseEventRecord(raw: unknown): EventRecord {
     : Value.Parse(EventRecordSchema, raw);
 }
 
-// 候选提出追加输入（M6）：业务字段 + runId；信封其余字段由日志盖章
-export type CandidateProposedInput = Omit<
-  CandidateProposedRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-
 // M7 三族追加输入：业务字段 + 可选 runId；信封其余字段由日志盖章
 export type AttemptVerifiedInput = Omit<
   AttemptVerifiedRecord,
@@ -960,19 +713,5 @@ export type SessionForkedInput = Omit<
 >;
 export type BranchHeaderInput = Omit<
   BranchHeaderRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-
-// M8 三族追加输入（决策 089）：业务字段 + 可选 runId；信封其余字段由日志盖章
-export type CandidateVerifiedInput = Omit<
-  CandidateVerifiedRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-export type CandidateDecidedInput = Omit<
-  CandidateDecidedRecord,
-  "version" | "id" | "sessionId" | "kind" | "timestamp"
->;
-export type CandidateActivatedInput = Omit<
-  CandidateActivatedRecord,
   "version" | "id" | "sessionId" | "kind" | "timestamp"
 >;

@@ -33,20 +33,6 @@ function timeOf(timestamp: number): string {
   return new Date(timestamp).toISOString().slice(11, 23);
 }
 
-// M8（决策 084 / 089）：三值结论与四个决定动作的展示措辞
-const VERIFICATION_CONCLUSION_LABEL: Record<string, string> = {
-  passed: "通过",
-  inconclusive: "未测出",
-  regressed: "回归",
-};
-
-const DECISION_ACTION_LABEL: Record<string, string> = {
-  approve: "批准",
-  reject: "拒绝",
-  revoke: "撤销",
-  supersede: "取代",
-};
-
 const ERROR_KIND_LABEL: Record<string, string> = {
   domain: "工具域错误",
   environment: "环境异常",
@@ -109,44 +95,6 @@ function recordDetail(record: EventRecord): string {
         `输出 sha256 ${payload.outputHash.slice(0, 12)}${payload.falsePositive ? " ｜ 自报完成但验证失败（误报）" : ""}`
       );
     }
-    // M6（决策 064）：后台审阅因上一次未收尾而跳过
-    case "review.skipped":
-      return `审阅跳过 ｜ 触发 ${record.payload.trigger === "turns" ? "按轮次" : "Run 结束"} ｜ ${record.payload.reason === "exit" ? "会话退出，取消排队中或进行中的审阅" : "上一次审阅未收尾"}`;
-    // M6（决策 065）：审阅结果不可解析与候选提出（扫描结果随提出记录内嵌呈现，决策 128）
-    case "review.unparsable":
-      return `结构化结果不可解析 ｜ 产出会话 ${shortId(record.payload.producerSessionId)} ｜ ${record.payload.reason}`;
-    case "candidate.proposed": {
-      const candidate = record.candidate;
-      return (
-        `候选提出 ｜ ${candidate.kind}/${candidate.name} ｜ 哈希 ${candidate.contentHash.slice(0, 12)} ｜ ` +
-        `判断强度 ${candidate.strength} ｜ ${candidate.summary} ｜ 扫描器 v${candidate.scan.scannerVersion} ｜ ` +
-        (candidate.scan.hits.length > 0
-          ? `命中 ${candidate.scan.hits.length} 项（拒收）：${candidate.scan.hits.map((hit) => hit.rule).join("、")}`
-          : "无命中") +
-        (candidate.supersedes !== undefined ? ` ｜ 取代 ${candidate.supersedes.slice(0, 12)}` : "")
-      );
-    }
-    // M8（决策 089）：候选验证回执、决定与激活
-    case "candidate.verified": {
-      const arms = record.arms.map((arm) => `${arm.arm} ${arm.passes}/${arm.runs}`).join("｜");
-      return (
-        `候选验证 ｜ ${record.candidateKind}/${record.name} ｜ 哈希 ${record.contentHash.slice(0, 12)} ｜ ` +
-        `${VERIFICATION_CONCLUSION_LABEL[record.conclusion]} ｜ 每组 ${record.n} 次 ｜ ${arms} ｜ ` +
-        `正回放差 ${record.positiveDelta.toFixed(2)} ｜ 负回放差 ${record.negativeDelta.toFixed(2)}`
-      );
-    }
-    case "candidate.decided":
-      return (
-        `候选决定 ｜ ${record.candidateKind}/${record.name} ｜ 哈希 ${record.contentHash.slice(0, 12)} ｜ ` +
-        `${DECISION_ACTION_LABEL[record.action]} ｜ 理由（${record.reasonSource === "human" ? "人写" : "系统默认"}）：${record.reason}` +
-        (record.supersededBy !== undefined ? ` ｜ 被 ${record.supersededBy.slice(0, 12)} 取代` : "")
-      );
-    case "candidate.activated":
-      return (
-        `候选激活 ｜ ${record.candidateKind}/${record.name} ｜ 落点 ${record.path} ｜ ` +
-        `内容 ${record.activatedHash.slice(0, 12)}` +
-        (record.unverified ? " ｜ 未经回放证实" : "")
-      );
     case "intent": {
       let detail =
         `意图落账 ${shortId(record.executionId)} ｜ ${record.toolName}（${record.toolCallId}）｜ ` +

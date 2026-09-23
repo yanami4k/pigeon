@@ -1,10 +1,10 @@
 // M7 S1 数据层（决策 069 / 071 / 075 / 077 / 078）：Event Log v11 加法式新增——派出记录的共享任务标识、
-// 通用验证记录、分叉记录与分支会话头、工作区快照观察、撞上限观察、提炼跳过记录（决策 128 已退役）；候选 v3 加对比来源块。
+// 通用验证记录、分叉记录与分支会话头、工作区快照观察、撞上限观察、提炼跳过记录（决策 128 已退役）；
+// 候选 v3 的对比来源块随候选提出记录一起退役（决策 137）。
 // 旧记录（v10）逐字有效，经读路径迁移链升到当前版本。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
-import { CANDIDATE_VERSION } from "./candidate.ts";
 import { EVENT_LOG_VERSION, EventRecordSchema, parseEventRecord } from "./event-log.ts";
 import { newEntryId, newRunId, newSessionId } from "./ids.ts";
 
@@ -25,8 +25,8 @@ const LIMITS = { maxTurns: 10, wallClockMs: 1000 };
 const POLICY = { allow: ["read_file"], deny: [], approvalMode: "prompt" };
 const WORKTREE = { kind: "git-worktree", path: "/w", branch: "pigeon/w" };
 
-test("Event Log 当前为 v15（v11 加法式新增 M7 各族，v14 退役四族，v15 加回炉轮数）", () => {
-  assert.equal(EVENT_LOG_VERSION, 15);
+test("Event Log 当前为 v16（v11 加法式新增 M7 各族，v14 退役四族，v15 加回炉轮数，v16 退役第一版学习闭环六族）", () => {
+  assert.equal(EVENT_LOG_VERSION, 16);
 });
 
 test("069：派出记录可带共享任务标识；缺省仍合法（旧派出记录不受影响）", () => {
@@ -158,13 +158,11 @@ test("072 依据：撞上限观察；提炼跳过已退役（决策 128）", () 
   assert.ok(!Value.Check(EventRecordSchema, skipped));
 });
 
-test("v10 记录经迁移链升到当前版本：派出记录不带任务标识、候选提出内嵌的 v2 候选升 v3", () => {
-  const sessionId = newSessionId();
-  const runId = newRunId();
-  const spawned = parseEventRecord({
+test("v10 记录经迁移链升到当前版本：派出记录不带任务标识，v10 → v11 是纯版本推进", () => {
+  const v10 = {
     version: 10,
     id: newEntryId(),
-    sessionId,
+    sessionId: newSessionId(),
     timestamp: 1,
     kind: "child.spawned",
     childSessionId: newSessionId(),
@@ -175,78 +173,13 @@ test("v10 记录经迁移链升到当前版本：派出记录不带任务标识�
     limits: LIMITS,
     workspace: WORKTREE,
     spawnedAt: 1,
-  });
-  assert.equal(spawned.version, EVENT_LOG_VERSION);
-  const proposed = parseEventRecord({
-    version: 10,
-    id: newEntryId(),
-    sessionId,
-    runId,
-    timestamp: 1,
-    kind: "candidate.proposed",
-    candidate: {
-      version: 2,
-      origin: "reviewer",
-      kind: "skill",
-      name: "read-before-edit",
-      contentHash: HASH,
-      bytes: 1,
-      source: {
-        sessionId,
-        runId,
-        // v10 的内嵌候选是 v2 形状，产出会话字段还是旧名（065 修订前）
-        reviewSessionId: newSessionId(),
-        entryRunSeqs: [1],
-        contentDigest: HASH,
-      },
-      summary: "改之前先读",
-      strength: 0.5,
-      scan: { scannerVersion: "1", hits: [] },
-      createdAt: 1,
-    },
-    model: { provider: "p", id: "m" },
-  });
-  assert.equal(proposed.version, EVENT_LOG_VERSION);
-  assert.equal(proposed.kind, "candidate.proposed");
-  if (proposed.kind === "candidate.proposed") {
-    assert.equal(proposed.candidate.version, CANDIDATE_VERSION);
-    assert.equal(proposed.candidate.contrast, undefined, "单来源候选的对比来源块为空");
-    const source = proposed.candidate.source as unknown as Record<string, unknown>;
-    assert.ok(!("reviewSessionId" in source), "内嵌候选的产出会话字段一并改名");
-    assert.equal(typeof source.producerSessionId, "string");
-  }
+  };
+  const spawned = parseEventRecord(structuredClone(v10));
+  assert.deepEqual(spawned, { ...v10, version: EVENT_LOG_VERSION });
 });
 
-// 决策 065 修订：产出会话字段在候选侧与不可解析记录族用同一个中性名；
-// 该族是 M6 已入库的形状，迁移必须真的改写旧记录
-test("v10 的不可解析记录经迁移链升到当前版本：产出会话字段改名、值不变、旧名不再保留", () => {
-  const sessionId = newSessionId();
-  const runId = newRunId();
-  const producer = newSessionId();
-  const record = parseEventRecord({
-    version: 10,
-    id: newEntryId(),
-    sessionId,
-    runId,
-    timestamp: 1,
-    kind: "review.unparsable",
-    payload: { reviewSessionId: producer, reason: "审阅没有交回结构化结果" },
-  });
-  assert.equal(record.version, EVENT_LOG_VERSION);
-  assert.equal(record.kind, "review.unparsable");
-  if (record.kind === "review.unparsable") {
-    assert.equal(record.payload.producerSessionId, producer, "值不变");
-    assert.equal(record.payload.reason, "审阅没有交回结构化结果");
-    assert.ok(
-      !("reviewSessionId" in (record.payload as unknown as Record<string, unknown>)),
-      "旧名不再保留"
-    );
-  }
-  assert.ok(Value.Check(EventRecordSchema, record), "迁移后通过当前 schema");
-});
-
-// 决策 128：v13 → v14 只退役四族（由读取边界跳过），保留下来的记录纯版本推进、正文逐字不变
-test("v13 记录经迁移链升到当前版本：v14、v15 都是纯版本推进，其余字段逐字不变", () => {
+// 决策 128 / 137：v13 → v14 与 v15 → v16 只退役若干族（由读取边界跳过），保留下来的记录纯版本推进、正文逐字不变
+test("v13 记录经迁移链升到当前版本：v14、v15、v16 都是纯版本推进，其余字段逐字不变", () => {
   const v13 = {
     version: 13,
     id: newEntryId(),
@@ -257,6 +190,6 @@ test("v13 记录经迁移链升到当前版本：v14、v15 都是纯版本推进
     payload: { limit: "token-limit" },
   };
   const record = parseEventRecord(structuredClone(v13));
-  assert.equal(EVENT_LOG_VERSION, 15);
+  assert.equal(EVENT_LOG_VERSION, 16);
   assert.deepEqual(record, { ...v13, version: EVENT_LOG_VERSION });
 });

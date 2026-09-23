@@ -14,10 +14,6 @@ import type {
   AttemptVerifiedRecord,
   BranchHeaderRecord,
   BreakerRecord,
-  CandidateActivatedRecord,
-  CandidateDecidedRecord,
-  CandidateProposedRecord,
-  CandidateVerifiedRecord,
   ChildSettledRecord,
   ChildSpawnedRecord,
   DecisionRecord,
@@ -29,8 +25,6 @@ import type {
   IntentRecord,
   LlmRequestRecord,
   ResolutionRecord,
-  ReviewSkippedRecord,
-  ReviewUnparsableRecord,
   RunLimitHitRecord,
   RunStartedRecord,
   RuntimeEventRecord,
@@ -120,15 +114,6 @@ export interface MaterializedSession {
   skillLoadeds: SkillLoadedRecord[];
   // M6.5 S3（决策 058）：Eval 验证器判决（按落盘顺序）；不参与分类判据
   evalVerifieds: EvalVerifiedRecord[];
-  // M6（决策 064）：后台审阅因上一次未收尾而跳过的记录
-  reviewSkippeds: ReviewSkippedRecord[];
-  reviewUnparsables: ReviewUnparsableRecord[];
-  // M6（决策 065）：候选提出（候选状态由它与 M8 三族现算，见 candidate-status.ts）
-  candidateProposeds: CandidateProposedRecord[];
-  // M8（决策 089）：候选验证回执、决定与激活三族（按落盘顺序）——候选状态由它们与候选提出现算
-  candidateVerifieds: CandidateVerifiedRecord[];
-  candidateDecideds: CandidateDecidedRecord[];
-  candidateActivateds: CandidateActivatedRecord[];
   // M7（决策 071 / 072 / 074 / 077 / 078）：通用验证、撞上限、工作区快照、分叉、树写穿失败（按落盘顺序）；
   // branchHeader 在场 = 本会话是分叉出来的分支会话
   attemptVerifieds: AttemptVerifiedRecord[];
@@ -206,12 +191,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
   const llmRequests: LlmRequestRecord[] = [];
   const skillLoadeds: SkillLoadedRecord[] = [];
   const evalVerifieds: EvalVerifiedRecord[] = [];
-  const reviewSkippeds: ReviewSkippedRecord[] = [];
-  const reviewUnparsables: ReviewUnparsableRecord[] = [];
-  const candidateProposeds: CandidateProposedRecord[] = [];
-  const candidateVerifieds: CandidateVerifiedRecord[] = [];
-  const candidateDecideds: CandidateDecidedRecord[] = [];
-  const candidateActivateds: CandidateActivatedRecord[] = [];
   const attemptVerifieds: AttemptVerifiedRecord[] = [];
   const limitHits: RunLimitHitRecord[] = [];
   const checkpoints: WorkspaceCheckpointRecord[] = [];
@@ -261,18 +240,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
       skillLoadeds.push(record);
     } else if (record.kind === "eval.verified") {
       evalVerifieds.push(record);
-    } else if (record.kind === "review.skipped") {
-      reviewSkippeds.push(record);
-    } else if (record.kind === "review.unparsable") {
-      reviewUnparsables.push(record);
-    } else if (record.kind === "candidate.proposed") {
-      candidateProposeds.push(record);
-    } else if (record.kind === "candidate.verified") {
-      candidateVerifieds.push(record);
-    } else if (record.kind === "candidate.decided") {
-      candidateDecideds.push(record);
-    } else if (record.kind === "candidate.activated") {
-      candidateActivateds.push(record);
     } else if (record.kind === "attempt.verified") {
       attemptVerifieds.push(record);
     } else if (record.kind === "run.limit-hit") {
@@ -321,12 +288,6 @@ export function materializeRecords(input: MaterializeInput): MaterializedSession
     llmRequests,
     skillLoadeds,
     evalVerifieds,
-    reviewSkippeds,
-    reviewUnparsables,
-    candidateProposeds,
-    candidateVerifieds,
-    candidateDecideds,
-    candidateActivateds,
     contentGaps: detectContentGaps(entries, input.contentHashes),
     reconcile,
     classification: classifySessionRecords(records, runtimeEvents, breakers, reconcile),
@@ -402,17 +363,6 @@ export function detectContentGaps(
 
 // 崩溃残留 Run 清单（M4 验收 O-1/O-3）：出现过任何带 runId 的记录、却没有 run.ended 的 Run。
 // 纯函数；grant 族无 runId 的记录不算 Run
-// 引用型记录（M7）：候选提出与不可解析记录可能引用别的会话甚至别的治理根里的 Run（提炼宿主会话），
-// 不凭空在本会话造出 Run；同会话的引用（M6 审阅）本会话自有其他记录，不受影响
-const REFERENCE_KINDS: ReadonlySet<string> = new Set([
-  "candidate.proposed",
-  "review.unparsable",
-  // M8：验证、决定与激活三族写在发起命令自己的会话文件里，信封 Run 若在场也指向别的会话
-  "candidate.verified",
-  "candidate.decided",
-  "candidate.activated",
-]);
-
 export function collectUnfinishedRuns(
   records: readonly EventRecord[],
   runtimeEvents: readonly RuntimeEventRecord[]
@@ -426,11 +376,7 @@ export function collectUnfinishedRuns(
   const seen = new Set<RunId>();
   const unfinished: RunId[] = [];
   for (const record of records) {
-    if (
-      record.runId !== undefined &&
-      !REFERENCE_KINDS.has(record.kind) &&
-      !seen.has(record.runId)
-    ) {
+    if (record.runId !== undefined && !seen.has(record.runId)) {
       seen.add(record.runId);
       if (!ended.has(record.runId)) {
         unfinished.push(record.runId);
@@ -587,7 +533,7 @@ function classifySessionRecords(
   // grant 族 runId 可选（REPL 时段的放权/撤销无活动 Run）——无 runId 的记录不进
   // 任何 Run 的事实表（grant 是 session 级状态，由 /grants 展示，决策 3b）
   for (const record of records) {
-    if (record.runId !== undefined && !REFERENCE_KINDS.has(record.kind)) {
+    if (record.runId !== undefined) {
       runFactsOf(record.runId);
     }
   }

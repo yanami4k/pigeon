@@ -26,18 +26,6 @@ import {
   type BreakerInput,
   type BreakerRecord,
   BreakerRecordSchema,
-  type CandidateActivatedInput,
-  type CandidateActivatedRecord,
-  CandidateActivatedRecordSchema,
-  type CandidateDecidedInput,
-  type CandidateDecidedRecord,
-  CandidateDecidedRecordSchema,
-  type CandidateProposedInput,
-  type CandidateProposedRecord,
-  CandidateProposedRecordSchema,
-  type CandidateVerifiedInput,
-  type CandidateVerifiedRecord,
-  CandidateVerifiedRecordSchema,
   type ChildSettledInput,
   type ChildSettledRecord,
   ChildSettledRecordSchema,
@@ -566,56 +554,6 @@ export class JsonlEventLog {
     const record = Value.Parse(ChildSettledRecordSchema, {
       ...this.#grantEnvelope(runId),
       kind: "child.settled",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
-  // 候选提出（M6，决策 065）：候选文件写好后落盘；治理族耐久（fsync）
-  appendCandidateProposed(input: CandidateProposedInput): CandidateProposedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(CandidateProposedRecordSchema, {
-      ...this.#envelope(runId),
-      kind: "candidate.proposed",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
-  // 候选验证回执（M8，决策 089）：一次 pigeon verify 的完整结论与证据；治理族耐久（fsync）——
-  // 批准与激活以它为前提，写不进就当作没验过
-  appendCandidateVerified(input: CandidateVerifiedInput): CandidateVerifiedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(CandidateVerifiedRecordSchema, {
-      ...this.#grantEnvelope(runId),
-      kind: "candidate.verified",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
-  // 候选决定（M8，决策 089）：批准、拒绝、撤销、取代合成一族；治理族耐久（fsync）——
-  // 决定先落盘再动文件，写不进就不生效（激活是扩权动作，fail-closed 同 grant.created）
-  appendCandidateDecided(input: CandidateDecidedInput): CandidateDecidedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(CandidateDecidedRecordSchema, {
-      ...this.#grantEnvelope(runId),
-      kind: "candidate.decided",
-      ...body,
-    });
-    this.#append(record, true);
-    return record;
-  }
-
-  // 候选激活（M8，决策 089 / 093）：复制到治理根正常目录后落盘；治理族耐久（fsync）
-  appendCandidateActivated(input: CandidateActivatedInput): CandidateActivatedRecord {
-    const { runId, ...body } = input;
-    const record = Value.Parse(CandidateActivatedRecordSchema, {
-      ...this.#grantEnvelope(runId),
-      kind: "candidate.activated",
       ...body,
     });
     this.#append(record, true);

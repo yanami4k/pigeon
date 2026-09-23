@@ -13,7 +13,6 @@ import {
   SkillManifestEntrySchema,
 } from "../state/injection-manifest.ts";
 import type { Migration } from "../state/migration.ts";
-import { ReviewConfigSchema } from "../state/review.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
@@ -80,8 +79,8 @@ export const InjectionSnapshotSchema = Type.Object({
   skills: Type.Array(SkillManifestEntrySchema),
   // Unix 毫秒时间戳
   createdAt: Type.Integer({ minimum: 0 }),
-  // 后台审阅配置（M6，决策 064 子裁决 ①）：只在 cli / tui 主会话在场；worker、headless 与 Eval 会话缺省
-  review: Type.Optional(ReviewConfigSchema),
+  // 决策 137：后台审阅配置字段（v6 引入）已删除。本对象非严格（未设 additionalProperties: false），
+  // 旧快照里的 review 字段读取时忽略，版本不变
   // 会话级验证命令（M7，决策 071）：尝试收尾后由程序在工作区独立执行；未配置缺省（标签为未知）
   verify: Type.Optional(VerifyConfigSchema),
   // 失败自动分叉重试次数（M7，决策 079）：缺省即 0（关闭）

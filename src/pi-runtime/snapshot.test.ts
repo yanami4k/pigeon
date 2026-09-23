@@ -97,7 +97,7 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
   }
 });
 
-test("v1 → v2 → … → v8 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限、审阅配置、验证命令、重试次数与预算缺省", () => {
+test("v1 → v2 → … → v8 迁移链：补 approvalMode 默认 prompt，旧快照的空占位数组照过，推理档位、输出上限、验证命令、重试次数与预算缺省", () => {
   const current = { ...makeSnapshot(), memory: [] };
   const { approvalMode: _, ...policyV1 } = current.tools.policy;
   const v1 = { ...current, version: 1, tools: { ...current.tools, policy: policyV1 } };
@@ -110,7 +110,6 @@ test("v1 → v2 → … → v8 迁移链：补 approvalMode 默认 prompt，旧�
   );
   assert.equal(migrated.version, INJECTION_SNAPSHOT_VERSION);
   assert.equal(migrated.repairRounds, undefined);
-  assert.equal(migrated.review, undefined);
   assert.equal(migrated.budget, undefined);
   assert.equal(migrated.verify, undefined);
   assert.equal(migrated.retryOnFail, undefined);
@@ -224,4 +223,24 @@ test("v10 快照：回炉轮数可选、至少 1；v9 快照纯版本推进", ()
   const v9 = { ...makeSnapshot(), version: 9 };
   const migrated = registry().migrate("injection-snapshot", v9, 10, InjectionSnapshotSchema);
   assert.deepStrictEqual(migrated, { ...v9, version: 10 });
+});
+
+// 决策 137：审阅配置字段已从快照 schema 删除；对象非严格，v6 至 v10 快照里的该字段读取时忽略，版本不变
+test("审阅配置字段已删除：带该字段的旧快照照常通过校验与迁移链", () => {
+  const review = { enabled: true, everyTurns: 4 };
+  const withReview = { ...makeSnapshot(), review };
+  assert.ok(Value.Check(InjectionSnapshotSchema, withReview), "当前版本快照带旧字段仍合法");
+  for (const version of [6, 9]) {
+    const old = { ...makeSnapshot(), version, review };
+    assert.doesNotThrow(
+      () =>
+        registry().migrate(
+          "injection-snapshot",
+          structuredClone(old),
+          INJECTION_SNAPSHOT_VERSION,
+          InjectionSnapshotSchema
+        ),
+      `v${version} 快照带审阅配置仍可迁到当前版本`
+    );
+  }
 });

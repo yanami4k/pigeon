@@ -12,8 +12,6 @@ import type {
   EventRecord,
   IntentRecord,
   ResolutionRecord,
-  ReviewSkippedRecord,
-  ReviewUnparsableRecord,
   RunStartedRecord,
   RuntimeEventRecord,
 } from "./event-log.ts";
@@ -79,9 +77,6 @@ export interface TraceRun {
   llmRequestCount: number;
   // M6.5 S3（决策 058）：Eval 验证器判决（非 Eval 运行无）；同一 Run 多次验证取最后一条
   verified?: EvalVerifiedRecord;
-  // M6（决策 064 / 065）：审阅跳过与审阅结果不可解析记录
-  reviewSkips: ReviewSkippedRecord[];
-  reviewUnparsables: ReviewUnparsableRecord[];
   classification?: RunClassification;
   // run 级异常（轮次边界缺口等）
   anomalies: string[];
@@ -161,8 +156,6 @@ function buildRunTrace(
     entryGaps: session.entryGaps.find((gap) => gap.runId === runId)?.missingSeqs ?? [],
     contentGaps: session.contentGaps.filter((gap) => gap.runId === runId),
     llmRequestCount: 0,
-    reviewSkips: [],
-    reviewUnparsables: [],
     anomalies: [],
   };
   const callsByToolCallId = new Map<string, TraceToolCall>();
@@ -235,10 +228,6 @@ function buildRunTrace(
       run.started = record;
     } else if (record.kind === "eval.verified") {
       run.verified = record;
-    } else if (record.kind === "review.skipped") {
-      run.reviewSkips.push(record);
-    } else if (record.kind === "review.unparsable") {
-      run.reviewUnparsables.push(record);
     } else if (record.kind === "llm.request") {
       run.llmRequestCount += 1;
     } else if (record.kind === "intent") {

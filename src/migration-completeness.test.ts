@@ -24,7 +24,6 @@ import {
   migrateInjectionSnapshotV9toV10,
 } from "./pi-runtime/snapshot.ts";
 import { VERIFY_CONFIG_VERSION, VerifyConfigFileSchema } from "./state/attempt-config.ts";
-import { CANDIDATE_VERSION, migrateCandidateToCurrent } from "./state/candidate.ts";
 import { COMMANDS_CONFIG_VERSION, CommandsConfigFileSchema } from "./state/commands.ts";
 import { EVENT_LOG_VERSION, parseEventRecord } from "./state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, EventEnvelopeSchema } from "./state/events.ts";
@@ -176,20 +175,6 @@ const CASES: VersionedSchemaCase[] = [
     current: VERIFY_CONFIG_VERSION,
     v1: () => ({ version: 1, command: "npm test" }),
     migrate: validateOnly(VerifyConfigFileSchema),
-  },
-  {
-    constant: "CANDIDATE_VERSION",
-    current: CANDIDATE_VERSION,
-    v1: () => ({
-      version: 1,
-      id: "cand-1",
-      status: "Proposed",
-      sourceRef: "sess",
-      summary: "",
-      createdAt: 0,
-      updatedAt: 0,
-    }),
-    migrate: migrateCandidateToCurrent,
   },
   {
     constant: "TOOL_EXECUTION_VERSION",

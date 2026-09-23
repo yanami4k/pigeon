@@ -12,7 +12,6 @@ import {
 import { MemoryManifestEntrySchema, SkillManifestEntrySchema } from "./injection-manifest.ts";
 import { McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { Sha256HexSchema } from "./message-content.ts";
-import { ReviewConfigSchema } from "./review.ts";
 import { ToolErrorKindSchema } from "./tool-execution.ts";
 
 export const RuntimeEventKind = {
@@ -94,7 +93,8 @@ export const RunEndedPayloadSchema = Type.Object({
 export type RunEndedPayload = Static<typeof RunEndedPayloadSchema>;
 
 // M5 观察族（决策 043 / 044）：不是上游事件的归一化，而是 Pigeon 自己的观察记录——
-// 不进 events() 与订阅转发（归一化五族的不变式不变），只落 Event Log 供 trace / 学习闭环消费。
+// 不进 events() 与订阅转发（归一化五族的不变式不变），只落 Event Log 供 trace 与冷侧消费。
+// 审阅跳过与审阅结果不可解析两种已随第一版学习闭环退役（决策 137），读取时按退役种类跳过。
 // 耐久同观察族：同步写不 fsync
 export const ObservationKind = {
   RunStarted: "run.started",
@@ -102,10 +102,6 @@ export const ObservationKind = {
   SkillLoaded: "skill.loaded",
   // M6.5 S3（决策 058）：Eval 验证器判决
   EvalVerified: "eval.verified",
-  // M6（决策 064 子裁决 ①）：上一次审阅未收尾时跳过本次触发的记录
-  ReviewSkipped: "review.skipped",
-  // M6（决策 065）：Reviewer 的收尾结果不可解析（不落任何候选文件）
-  ReviewUnparsable: "review.unparsable",
   // M7（决策 078）：写操作或命令确实改变文件后生成的工作区快照，与条目号的对应关系
   WorkspaceCheckpoint: "workspace.checkpoint",
   // M7（决策 072）：尝试因轮次、墙钟或 token 上限被中止（上限中止在运行终态上表现为中止，标签据此判失败）
@@ -168,8 +164,8 @@ export const RunStartedPayloadSchema = Type.Object({
   // 加法式不升版本；本会话没有 MCP server 时不带
   mcpTools: Type.Optional(Type.Array(McpToolsetEntrySchema)),
   mcpServers: Type.Optional(Type.Array(McpServerStatusSchema)),
-  // M6（决策 064）：本会话的后台审阅配置（冻结快照值；只在 cli / tui 主会话在场，加法式可缺省）
-  review: Type.Optional(ReviewConfigSchema),
+  // 决策 137：后台审阅配置字段已删除。本对象非严格（未设 additionalProperties: false），
+  // v10 至 v15 旧记录里的 review 字段读取时忽略
   // M7（决策 071 / 079）：本会话的验证命令与失败自动分叉重试次数（冻结快照值，加法式可缺省）
   verify: Type.Optional(VerifyConfigSchema),
   retryOnFail: Type.Optional(RetryOnFailSchema),
@@ -238,15 +234,6 @@ export const EvalVerifiedPayloadSchema = Type.Object({
 });
 export type EvalVerifiedPayload = Static<typeof EvalVerifiedPayloadSchema>;
 
-// review.skipped（M6，决策 064 子裁决 ①④ 及修订）：按轮次触发遇忙跳过，或会话退出时取消排队中与进行中的审阅，各留一条记录
-export const ReviewSkippedPayloadSchema = Type.Object({
-  trigger: Type.Union([Type.Literal("turns"), Type.Literal("run-end")]),
-  // 064 修订：跳过原因——busy = 按轮次触发时上一次审阅未收尾；exit = 会话退出或释放时取消了排队中或进行中的审阅。
-  // 可缺省，缺省视为 busy
-  reason: Type.Optional(Type.Union([Type.Literal("busy"), Type.Literal("exit")])),
-});
-export type ReviewSkippedPayload = Static<typeof ReviewSkippedPayloadSchema>;
-
 // workspace.checkpoint（M7，决策 078）：git 底层命令在临时索引上生成的快照提交，挂在 refs/pigeon/checkpoints/<会话>/ 下。
 // afterRunSeq 是该工具调用的结果消息在本 Run 的条目号：分叉点（含）之前最近的快照即 afterRunSeq 不大于分叉序号的最后一条；
 // baseCommit 是本会话首个快照的改前基线（首次改动之前的工作区状态），分叉点早于首次改动时取它
@@ -270,11 +257,3 @@ export const RunLimitHitPayloadSchema = Type.Object({
   ]),
 });
 export type RunLimitHitPayload = Static<typeof RunLimitHitPayloadSchema>;
-
-// review.unparsable（M6，决策 065）：审阅器或提炼器的收尾结果解析或校验失败，记一条、不落任何文件。
-// producerSessionId 与候选来源同一个中性命名（065 修订）：产出该结果的会话
-export const ReviewUnparsablePayloadSchema = Type.Object({
-  producerSessionId: Type.String({ minLength: 1 }),
-  reason: Type.String(),
-});
-export type ReviewUnparsablePayload = Static<typeof ReviewUnparsablePayloadSchema>;
