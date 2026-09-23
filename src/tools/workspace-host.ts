@@ -44,6 +44,12 @@ export interface HostFileSnapshot {
   truncated: boolean;
 }
 
+// 这一步的起点（决策 154②）：开工时的提交与当时已被忽略的路径（git 的 --directory 形式，目录带结尾斜杠）
+export interface StepStartMark {
+  commit: string;
+  ignored: string[];
+}
+
 // 快照引用（占位）：实现自定的不透明标识（宿主为独立 GIT_DIR 里的提交，容器为容器内同构提交加镜像提交）
 export interface WorkspaceSnapshotRef {
   id: string;
@@ -71,6 +77,10 @@ export interface WorkspaceHost {
   // 尚未迁到本接口；容器实现未提供。迁移时两个实现各自落在这两个方法上，调用方不得判断工作区形状
   snapshot?(): Promise<WorkspaceSnapshotRef>;
   fork?(ref: WorkspaceSnapshotRef): Promise<WorkspaceHost>;
+  // 回到这一步起点（决策 154②）：开工时记下当前提交与已被忽略的路径；撤回时回到该提交（agent 自己的提交一并撤掉），
+  // 删掉 agent 新建的一切（含被忽略的），开工时已被忽略的路径一概不动。容器实现提供；宿主侧仍由 checkpoint.ts 负责
+  markStepStart?(): Promise<StepStartMark>;
+  restoreStepStart?(mark: StepStartMark): Promise<void>;
 }
 
 // 写保护命中——域错误（模型可以换个文件改），带归类标记

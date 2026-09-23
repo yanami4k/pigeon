@@ -25,6 +25,22 @@ export class ContainerHostError extends Error {
   readonly pigeonToolErrorKind = "environment";
 }
 
+// 撤回时起点提交已不在库里（例如 agent 改写历史后被回收）：不做部分恢复，交调用方按撤回失败处理
+export class StepStartLostError extends Error {}
+
+// 已被忽略的路径清单：--directory 让整个被忽略的目录只占一项（带结尾斜杠），开工时已在其中的一概不动
+const IGNORED_LIST = [
+  "git",
+  "ls-files",
+  "-z",
+  "--others",
+  "--ignored",
+  "--exclude-standard",
+  "--directory",
+];
+// 一次 rm 的参数条数上限：避免撞上命令行长度限制
+const REMOVE_BATCH = 200;
+
 export interface ContainerHostOptions {
   // 容器名或 id（须已在运行）
   container: string;
@@ -110,6 +126,23 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     }
     return realRoot;
   };
+
+  // 在工作区根执行一个辅助命令，失败即抛环境错误；返回标准输出
+  const must = async (command: string[], what: string): Promise<Buffer> => {
+    const result = await helper(execArgs(false, command));
+    if (daemonFailure(result)) {
+      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+    }
+    if (result.exitCode !== 0) {
+      throw new ContainerHostError(`${what}失败：${result.stderr.trim()}`);
+    }
+    return result.stdout;
+  };
+  const ignoredPaths = async (): Promise<string[]> =>
+    (await must(IGNORED_LIST, "列出被忽略的路径"))
+      .toString("utf8")
+      .split("\0")
+      .filter((p) => p !== "");
 
   const restart = async (): Promise<void> => {
     const result = await helper([...dockerPrefix, "restart", "-t", "0", options.container]);
@@ -307,6 +340,35 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return { files, truncated };
     },
     findLauncherScript: () => undefined,
+    async markStepStart() {
+      const head = await must(["git", "rev-parse", "--verify", "HEAD"], "取起点提交");
+      return { commit: head.toString("utf8").trim(), ignored: await ignoredPaths() };
+    },
+    async restoreStepStart(mark) {
+      const exists = await helper(
+        execArgs(false, ["git", "cat-file", "-e", `${mark.commit}^{commit}`])
+      );
+      if (daemonFailure(exists)) {
+        throw new ContainerHostError(`容器不可用：${exists.stderr.trim()}`);
+      }
+      if (exists.exitCode !== 0) {
+        throw new StepStartLostError(`这一步的起点提交 ${mark.commit} 已不在库里，无法撤回`);
+      }
+      // 回到起点提交并删掉未跟踪的文件与目录（不带 -x：被忽略的留给下面按开工时的清单处理）
+      await must(
+        ["sh", "-c", 'git reset -q --hard "$1" && git clean -fdq', "sh", mark.commit],
+        "回到起点提交"
+      );
+      // agent 新建的被忽略路径：现在被忽略、开工时不在清单里的
+      const kept = new Set(mark.ignored);
+      const added = (await ignoredPaths()).filter((p) => !kept.has(p));
+      for (let i = 0; i < added.length; i += REMOVE_BATCH) {
+        await must(
+          ["rm", "-rf", "--", ...added.slice(i, i + REMOVE_BATCH)],
+          "删除 agent 新建的被忽略路径"
+        );
+      }
+    },
   };
 }
 
