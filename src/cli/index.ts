@@ -36,6 +36,12 @@ import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
 import { localTaskSource } from "../eval/local-source.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
+import {
+  assembleImageContext,
+  generateStreamManifest,
+  STREAM_RUNTIMES,
+  summarizeManifest,
+} from "../eval/stream-generate.ts";
 import { swebenchTaskSource, swebenchTemperature } from "../eval/swebench-source.ts";
 import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
@@ -498,6 +504,79 @@ async function evalMain(argv: string[]): Promise<void> {
   );
 }
 
+// pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> --image <镜像> --out <清单文件>
+//   [--test-timeout-sec N]：延续式实验出题（决策 127、141、153）——在断网的参考容器里逐提交测判题探针与格式化比对，
+// 按写死的规则出流清单；清单与探针原始记录各存一个文件
+async function evalStreamManifestMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> " +
+    "--image <镜像> --out <清单文件> [--test-timeout-sec N]";
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const value = argv[i + 1];
+    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
+      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
+    }
+    values.set(arg, value);
+    i++;
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
+    return value;
+  };
+  const runtime = STREAM_RUNTIMES[required("--repo-profile")];
+  if (runtime === undefined) throw new Error(`--repo-profile 只能是 pigeon 或 strands（${usage}）`);
+  const [rangeStart, rangeEnd] = required("--range").split("..");
+  if (rangeStart === undefined || rangeStart === "" || rangeEnd === undefined || rangeEnd === "") {
+    throw new Error(`--range 形如 <起点>..<终点>（${usage}）`);
+  }
+  const timeoutSec = Number(values.get("--test-timeout-sec") ?? "600");
+  if (!Number.isInteger(timeoutSec) || timeoutSec < 1)
+    throw new Error(`--test-timeout-sec 需要正整数（${usage}）`);
+  const manifest = await generateStreamManifest({
+    repoDir: required("--repo"),
+    runtime,
+    rangeStart,
+    rangeEnd,
+    image: required("--image"),
+    outFile: required("--out"),
+    testTimeoutMs: timeoutSec * 1000,
+    log: (line) => process.stderr.write(`${line}\n`),
+  });
+  process.stdout.write(`${summarizeManifest(manifest)}\n`);
+}
+
+// pigeon eval stream-image-context --repo-profile pigeon|strands --repo <人的仓库> --out <目录> [--lock-rev <提交>]：
+// 组装延续式跑批工作区镜像的构建上下文（决策 148），之后 docker build <目录>
+function evalStreamImageContextMain(argv: string[]): void {
+  const usage =
+    "用法：pigeon eval stream-image-context --repo-profile pigeon|strands --repo <人的仓库> --out <目录> [--lock-rev <提交>]";
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i += 2) {
+    const arg = argv[i];
+    const value = argv[i + 1];
+    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
+      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
+    }
+    values.set(arg, value);
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
+    return value;
+  };
+  const lockRev = values.get("--lock-rev");
+  const written = assembleImageContext({
+    profileName: required("--repo-profile"),
+    repoDir: required("--repo"),
+    outDir: required("--out"),
+    ...(lockRev !== undefined ? { lockRev } : {}),
+  });
+  process.stdout.write(`${written.join("\n")}\n`);
+}
+
 // pigeon eval swebench --dataset <JSONL> --out <输出目录> --work-dir <判分工作目录> --python <解释器> --stream-fn <模块路径>
 //   [--instances a,b,c] [--concurrency N] [--max-turns N] [--wall-clock-min N] [--container-memory <如 3g>] [--yolo] …：
 // 外部基准跑批（M9，决策 097 / 102）——任务源换成 SWE-bench Verified，其余与 pigeon eval 同一个 runner：只跑无经验条件，
@@ -690,6 +769,14 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "compare") {
     evalCompareMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "stream-image-context") {
+    evalStreamImageContextMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "stream-manifest") {
+    await evalStreamManifestMain(argv.slice(2));
     return;
   }
   if (argv[0] === "eval" && argv[1] === "swebench") {

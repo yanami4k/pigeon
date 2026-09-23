@@ -323,7 +323,7 @@ function dockerOnce(
   docker: readonly string[],
   args: readonly string[],
   timeoutMs: number,
-  input?: string
+  input?: string | Buffer
 ): Promise<HelperResult> {
   const [program = "docker", ...prefix] = docker;
   return new Promise((resolve, reject) => {
@@ -334,7 +334,8 @@ function dockerOnce(
     if (input !== undefined) {
       // 容器侧提前退出时写端会报 EPIPE：结果以退出码为准
       child.stdin?.on("error", () => {});
-      child.stdin?.end(input, "utf8");
+      if (typeof input === "string") child.stdin?.end(input, "utf8");
+      else child.stdin?.end(input);
     }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -411,27 +412,32 @@ export async function listContainersByLabel(
     .filter((line) => line !== "");
 }
 
-// 在容器内执行一条辅助命令并收下全部输出（任务源取 diff、建基线用）
+// 在容器内执行一条辅助命令并收下全部输出（任务源取 diff、建基线用；延续式跑批经 stdin 送入人的文件与起点历史）
 export async function containerExec(input: {
   container: string;
   command: readonly string[];
   workdir?: string;
   docker?: readonly string[];
   timeoutMs?: number;
-}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  // 送入命令标准输入的内容（可为二进制）
+  stdin?: string | Buffer;
+}): Promise<{ exitCode: number | null; stdout: string; stdoutBytes: Buffer; stderr: string }> {
   const result = await dockerOnce(
     input.docker ?? ["docker"],
     [
       "exec",
+      ...(input.stdin !== undefined ? ["-i"] : []),
       ...(input.workdir !== undefined ? ["-w", input.workdir] : []),
       input.container,
       ...input.command,
     ],
-    input.timeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS
+    input.timeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS,
+    input.stdin
   );
   return {
     exitCode: result.exitCode,
     stdout: result.stdout.toString("utf8"),
+    stdoutBytes: result.stdout,
     stderr: result.stderr,
   };
 }

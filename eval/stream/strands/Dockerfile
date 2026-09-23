@@ -1,0 +1,36 @@
+# 延续式跑批：strands-py 流的工作区镜像（决策 148、152）。
+# 构建上下文由 `pigeon eval stream-image-context --repo-profile strands` 组装：本文件、stream_env.py、
+# 五套冻结依赖的版本约束（constraints-<组合>.txt）与各组合起始提交的 pyproject（pyproject-<组合>.toml）。
+# 第一阶段联网把五套依赖解析并编译成 wheel 仓；第二阶段只从 wheel 仓离线安装（--no-index），
+# 因此有了第一阶段的产物即可断网重建。工作区容器运行时恒为无网络（104）。
+
+FROM python:3.13-slim-bookworm AS wheels
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential portaudio19-dev git \
+ && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir "packaging>=24"
+COPY . /opt/stream/
+RUN set -e; cd /opt/stream; \
+    for v in end V3 V2 V1 V0; do \
+      python stream_env.py requirements pyproject-$v.toml > reqs-$v.txt; \
+      pip wheel --no-cache-dir --wheel-dir /wheels -c constraints-$v.txt -r reqs-$v.txt; \
+    done
+
+FROM python:3.13-slim-bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git libportaudio2 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=wheels /wheels /wheels
+COPY --from=wheels /opt/stream /opt/stream
+RUN set -e; \
+    for v in end V3 V2 V1 V0; do \
+      python -m venv /opt/venvs/$v; \
+      /opt/venvs/$v/bin/pip install --no-cache-dir --no-index --find-links /wheels \
+        -c /opt/stream/constraints-$v.txt -r /opt/stream/reqs-$v.txt; \
+      /opt/venvs/$v/bin/pip freeze > /opt/venvs/$v/freeze.txt; \
+    done; \
+    ln -s /opt/venvs/end /opt/venv; \
+    printf '#!/bin/sh\nexec /opt/venvs/end/bin/python /opt/stream/stream_env.py select "$@"\n' > /opt/stream/select-env; \
+    chmod +x /opt/stream/select-env
+ENV PATH=/opt/venv/bin:$PATH
+WORKDIR /testbed
