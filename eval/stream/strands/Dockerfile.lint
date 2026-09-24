@@ -1,0 +1,14 @@
+# 延续式跑批：strands-py 工作区镜像 v5 = v4 加一层按提交解析的 lint 环境（见 build-lint.sh）。运行环境逐字不变，
+# 故人的用例基准在 v4 与 v5 上等价；检查门结果不等价（lint 环境变了）。
+# 构建上下文：本文件、build-lint.sh、stream_env.py、lint/<提交>.toml、lint-dates.txt。构建时联网
+ARG BASE=pigeon-stream-strands:v4
+FROM ${BASE}
+USER root
+COPY stream_env.py build-lint.sh lint-dates.txt /opt/stream/
+COPY lint/ /opt/stream/lint/
+# 各套之间同一版本的包文件以硬链接共用（缓存与环境同在 /opt/lint 之下、同一文件系统），装完清掉缓存：
+# 体积约为各套所用包版本的并集，而不是套数乘以单套大小
+RUN UV_NO_CACHE=false UV_LINK_MODE=hardlink UV_CACHE_DIR=/opt/lint/.uv-cache sh /opt/stream/build-lint.sh \
+ && rm -rf /opt/lint/.uv-cache \
+ && chown -R stream:stream /opt/lint/sets /opt/stream/lint-map.txt /opt/stream/select-lint
+USER stream

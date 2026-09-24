@@ -29,6 +29,9 @@ VENVS = "/opt/venvs"
 LINTS = "/opt/lint"
 LINK = "/opt/venv"
 LINT_LINK = "/opt/lint/current"
+# v5 起：lint 环境按每个提交自己的提交时间解析（人的 CI 每次按当时能装到的最新版本装依赖），解析结果相同的合为一套
+LINT_SETS = "/opt/lint/sets"
+LINT_MAP = "/opt/stream/lint-map.txt"
 HERE = os.path.dirname(os.path.abspath(__file__))
 # 运行环境不装的静态检查工具：它们只在 lint 环境里（Python 3.10）
 LINT_ONLY = {"ruff", "mypy"}
@@ -106,8 +109,27 @@ def switch(link, target):
 
 def use(v):
     switch(LINK, os.path.join(VENVS, v))
-    switch(LINT_LINK, os.path.join(LINTS, v))
+    # 有按提交的 lint 映射（v5 起）时，lint 环境只按"该步人的提交"切（select-lint），不随运行环境切
+    if not os.path.exists(LINT_MAP):
+        switch(LINT_LINK, os.path.join(LINTS, v))
     print(v)
+    return 0
+
+
+def select_lint(commit):
+    """按该步人的提交切 lint 环境：映射表每行"提交 套名"，套名即 /opt/lint/sets/ 下的目录。"""
+    sets = {}
+    with open(LINT_MAP, encoding="utf-8") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) == 2:
+                sets[parts[0]] = parts[1]
+    name = sets.get(commit) or next((s for c, s in sets.items() if c.startswith(commit)), None)
+    if name is None:
+        print(f"lint 映射里没有提交 {commit}", file=sys.stderr)
+        return 3
+    switch(LINT_LINK, os.path.join(LINT_SETS, name))
+    print(name)
     return 0
 
 
@@ -143,5 +165,10 @@ if __name__ == "__main__":
         sys.exit(0)
     if len(args) == 2 and args[0] == "select":
         sys.exit(select(args[1]))
-    print("用法：stream_env.py requirements <pyproject.toml> [runtime|lint] | select <pyproject.toml>", file=sys.stderr)
+    if len(args) == 2 and args[0] == "select-lint":
+        sys.exit(select_lint(args[1]))
+    print(
+        "用法：stream_env.py requirements <pyproject.toml> [runtime|lint] | select <pyproject.toml> | select-lint <提交>",
+        file=sys.stderr,
+    )
     sys.exit(2)

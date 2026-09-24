@@ -439,15 +439,24 @@ async function runStreamJob(
   }
 }
 
+// 切依赖：运行环境按工作区里的依赖声明选；lint 环境按该步人的提交选（148 修订，不看 agent 改过的依赖声明）
 async function syncEnv(
   options: RunStreamsOptions,
   ws: StreamWorkspace,
+  humanCommit: string,
   cwd?: string
 ): Promise<void> {
   const command = options.runtime.envSyncCommand;
-  if (command === null) return;
-  const r = await ws.run(command, 120_000, cwd);
-  if (r.exitCode !== 0) throw new Error(`依赖切换失败：${r.output.slice(-500)}`);
+  if (command !== null) {
+    const r = await ws.run(command, 120_000, cwd);
+    if (r.exitCode !== 0) throw new Error(`依赖切换失败：${r.output.slice(-500)}`);
+  }
+  const lint = options.runtime.lintSyncCommand?.(humanCommit);
+  if (lint !== undefined) {
+    const r = await ws.run(lint, 120_000, cwd);
+    if (r.exitCode !== 0)
+      throw new Error(`lint 环境切换失败（${humanCommit}）：${r.output.slice(-500)}`);
+  }
 }
 
 // agent 不许改测试（第 6 条）：它动过的测试与测试辅助文件，本步由程序写入的恢复成人的版本，其余恢复成本步起点的版本；
@@ -518,7 +527,7 @@ async function measure(
       return kind === "test" || kind === "testaux" ? kind : null;
     }
   );
-  await syncEnv(options, ws, copy);
+  await syncEnv(options, ws, step.commit, copy);
   const tests = humanTestsAt(options.human, runtime, step.commit);
   // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例在分母里、计为未通过
   const run = await runtime.runCases(ws, tests, {
@@ -617,7 +626,7 @@ async function runStep(
     };
   }
   await ws.applyHumanFiles(step.humanFiles, (p) => options.human.show(step.commit, p));
-  await syncEnv(options, ws);
+  await syncEnv(options, ws, step.commit);
   let result: StepAgentResult | null = null;
   let judged = false;
   let passed = false;
@@ -688,7 +697,7 @@ async function runStep(
     }
     await ws.normalizeTo(state.head);
     await restoreTests(options, ws, step);
-    await syncEnv(options, ws);
+    await syncEnv(options, ws, step.commit);
     // 题：判题测试的逐用例结果（不看退出码）；维护步：验证门
     if (step.kind === "task") {
       const run = await options.runtime.runCases(ws, step.judgeTests, {
@@ -834,6 +843,16 @@ export const EQUIVALENT_BASELINE_COMMANDS: ReadonlyMap<string, string> = new Map
   ["448eea1b5f30a457", "e5c99abd87a6bf24"],
 ]);
 
+// 镜像等价表（旧镜像 ID → 新镜像 ID），只用于人的用例基准：列入的镜像运行环境逐字相同、只差 lint 层，
+// 跑用例用的是运行环境，逐用例结果不受影响；检查门结果要用 lint 环境，不按镜像等价
+export const EQUIVALENT_CASE_IMAGES: ReadonlyMap<string, string> = new Map([
+  // strands v4 → v5：v5 只在 v4 之上多一层按提交解析的 lint 环境（148 修订）
+  [
+    "sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6",
+    "sha256:c543a4eaf23f465b494e56a1ef825673796611a52ac5f85f73daad1e02fb1148",
+  ],
+]);
+
 function sameIdentity(saved: unknown, want: BaselineIdentity): boolean {
   const s = saved as Partial<BaselineIdentity> | undefined;
   return s !== undefined && s.image === want.image && s.command === want.command;
@@ -845,19 +864,20 @@ function readIdentified<T>(
   file: string,
   want: BaselineIdentity,
   equivalent: ReadonlyMap<string, string>,
-  hangFree: (saved: T) => boolean
+  hangFree: (saved: T) => boolean,
+  // 镜像等价表（旧镜像 ID → 新镜像 ID）：只有运行环境逐字相同的镜像才列入，只用于人的用例基准
+  equivalentImages: ReadonlyMap<string, string> = new Map()
 ): T | undefined {
   if (!existsSync(file)) return undefined;
   try {
     const saved = JSON.parse(readFileSync(file, "utf8")) as T & { identity?: unknown };
     if (sameIdentity(saved.identity, want)) return saved;
     const s = saved.identity as Partial<BaselineIdentity> | undefined;
-    const viaTable =
-      s !== undefined &&
-      s.image === want.image &&
-      s.command !== undefined &&
-      equivalent.get(s.command) === want.command;
-    return viaTable && hangFree(saved) ? saved : undefined;
+    if (s === undefined || s.image === undefined || s.command === undefined) return undefined;
+    const imageOk = s.image === want.image || equivalentImages.get(s.image) === want.image;
+    const commandOk =
+      s.command === want.command || (equivalent.get(s.command) === want.command && hangFree(saved));
+    return imageOk && commandOk ? saved : undefined;
   } catch {
     return undefined;
   }
@@ -872,6 +892,7 @@ export class ReferenceCases implements HumanReferenceCases {
   private readonly cacheDir: string;
   private readonly image: string;
   private readonly equivalent: ReadonlyMap<string, string>;
+  private readonly equivalentImages: ReadonlyMap<string, string>;
   private readonly timeoutMs: number;
   private readonly repeat: number;
   private readonly cgroupDir: string;
@@ -884,8 +905,9 @@ export class ReferenceCases implements HumanReferenceCases {
     cacheDir: string;
     // 参考容器所用镜像的标识（镜像 ID）：缓存身份之一
     image: string;
-    // 等价摘要表（缺省 EQUIVALENT_BASELINE_COMMANDS）
+    // 等价摘要表（缺省 EQUIVALENT_BASELINE_COMMANDS）与用例基准的镜像等价表（缺省 EQUIVALENT_CASE_IMAGES）
     equivalentCommands?: ReadonlyMap<string, string>;
+    equivalentImages?: ReadonlyMap<string, string>;
     timeoutMs?: number;
     repeat?: number;
     // 容器内 cgroup v2 的目录（测试时指向假的目录）；告警出口缺省为标准错误
@@ -897,6 +919,7 @@ export class ReferenceCases implements HumanReferenceCases {
     this.cacheDir = input.cacheDir;
     this.image = input.image;
     this.equivalent = input.equivalentCommands ?? EQUIVALENT_BASELINE_COMMANDS;
+    this.equivalentImages = input.equivalentImages ?? EQUIVALENT_CASE_IMAGES;
     this.timeoutMs = input.timeoutMs ?? 1_800_000;
     this.repeat = Math.max(1, input.repeat ?? 2);
     this.cgroupDir = input.cgroupDir ?? "/sys/fs/cgroup";
@@ -924,7 +947,8 @@ export class ReferenceCases implements HumanReferenceCases {
       path.join(this.cacheDir, `${commit}.json`),
       this.casesIdentity(),
       this.equivalent,
-      (saved) => this.casesHangFree(saved)
+      (saved) => this.casesHangFree(saved),
+      this.equivalentImages
     );
   }
 
@@ -967,6 +991,12 @@ export class ReferenceCases implements HumanReferenceCases {
       if (this.runtime.envSyncCommand !== null) {
         const sync = await ws.run(this.runtime.envSyncCommand, 120_000);
         if (sync.exitCode !== 0) throw new Error(`参考工作区依赖切换失败（${commit}）`);
+      }
+      // lint 环境按被检查的提交切换（与正式跑时"按该步人的提交"同一口径）
+      const lint = this.runtime.lintSyncCommand?.(commit);
+      if (lint !== undefined) {
+        const sync = await ws.run(lint, 120_000);
+        if (sync.exitCode !== 0) throw new Error(`参考工作区 lint 环境切换失败（${commit}）`);
       }
       const started = Date.now();
       const r = await ws.run(command, this.timeoutMs);

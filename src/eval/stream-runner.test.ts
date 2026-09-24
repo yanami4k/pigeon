@@ -537,6 +537,30 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("lint 环境按该步人的提交切换：agent 运行前已切到该步人的提交，不看 agent 改过的依赖声明", async () => {
+    const t = await toy();
+    try {
+      // 切换命令把收到的提交号写进标记文件；agent 运行时读它
+      const runtime = {
+        ...toyRuntime,
+        lintSyncCommand: (commit: string) => ["sh", "-c", `echo ${commit} > .git/pigeon-lint`],
+      };
+      const seen: [string, string][] = [];
+      const agent = scriptedAgent((input) => {
+        const marker = readFileSync(join(input.target.root, ".git", "pigeon-lint"), "utf8").trim();
+        seen.push([input.step.commit, marker]);
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
+      assert.equal(seen.length, 2);
+      for (const [commit, marker] of seen) assert.equal(marker, commit);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("结果行记下验证前还原人写测试的次数：取步结果的 repair.humanTestRestores；未开回炉的条件为 null", async () => {
     const t = await toy();
     try {
@@ -767,6 +791,13 @@ test("人的基准与开跑前检查的缓存带身份（镜像、跑用例的�
     assert.equal(at("sha256:aaa").hasGate(commit, fail), false);
     assert.equal(at("sha256:bbb").hasGate(commit, pass), false);
     assert.equal((await at("sha256:aaa").gateAt(commit, fail)).passed, false, "命令不同：重跑");
+    // 开跑前检查按被检查的提交切 lint 环境
+    const linting = {
+      ...counting,
+      lintSyncCommand: (c: string) => ["sh", "-c", `echo ${c} > .git/pigeon-lint`],
+    };
+    await at("sha256:ccc", linting).gateAt(commit, pass);
+    assert.equal(readFileSync(join(base, "ref", ".git", "pigeon-lint"), "utf8").trim(), commit);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -844,6 +875,55 @@ test("等价摘要：旧摘要在等价表里且结果没有挂起迹象的读�
       JSON.stringify({ ...check, passed: false, identity: { image, command: "old-gate" } })
     );
     assert.equal(reference.hasGate(commit, gate), false, "检查门没通过：不按等价读回");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("镜像等价只用于人的用例基准：旧镜像的用例基准按镜像等价表读回，检查门结果不按镜像等价、重算；不在表里的镜像重算", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-image-equivalent-"));
+  try {
+    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
+    const human = gitHumanRepo(join(base, "human"));
+    mkdirSync(join(base, "ref"));
+    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+    await ws.init(human.bundle(commit), commit);
+    const cacheDir = join(base, "cache");
+    const gate = ["sh", "-c", "exit 0"];
+    const reference = new ReferenceCases({
+      reference: ws,
+      runtime: toyRuntime,
+      cacheDir,
+      image: "sha256:new",
+      equivalentImages: new Map([["sha256:old", "sha256:new"]]),
+    });
+    const casesCommand = commandDigest(toyRuntime.casesCommand);
+    const gateCommand = commandDigest(JSON.stringify(gate));
+    const cases = (image: string) =>
+      JSON.stringify({
+        cases: [],
+        passing: [],
+        flaky: [],
+        slowest: null,
+        runs: [],
+        stuck: [],
+        identity: { image, command: casesCommand },
+      });
+    writeFileSync(join(cacheDir, `${commit}.json`), cases("sha256:old"));
+    assert.equal(reference.has(commit), true, "旧镜像的用例基准按镜像等价读回");
+    writeFileSync(join(cacheDir, `${commit}.json`), cases("sha256:other"));
+    assert.equal(reference.has(commit), false, "不在镜像等价表里：重算");
+    writeFileSync(
+      join(cacheDir, `${commit}.gate.json`),
+      JSON.stringify({
+        passed: true,
+        failedSteps: [],
+        wallMs: 1,
+        outputTail: "",
+        identity: { image: "sha256:old", command: gateCommand },
+      })
+    );
+    assert.equal(reference.hasGate(commit, gate), false, "检查门结果不按镜像等价");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

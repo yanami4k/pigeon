@@ -242,6 +242,8 @@ export interface StreamRepoRuntime {
   depsLinks: readonly string[];
   // 写入人的环境文件后执行：按当前依赖声明离线切换到对应的冻结依赖组合；没有则为 null
   envSyncCommand: readonly string[] | null;
+  // 按"该步人的提交"切 lint 环境（ruff、mypy 等静态检查所用）：不看 agent 改过的依赖声明。没有按提交的 lint 环境即缺省
+  lintSyncCommand?: (commit: string) => readonly string[];
 }
 
 async function readOrNull(ws: StreamWorkspace, file: string): Promise<string | null> {
@@ -417,4 +419,6 @@ export const strandsRuntime: StreamRepoRuntime = {
   depsLinks: [],
   // 镜像里的选择脚本：按 strands-py/pyproject.toml 选第一套满足约束的冻结依赖，切换 /opt/venv 链接
   envSyncCommand: ["/opt/stream/select-env", "strands-py/pyproject.toml"],
+  // v5 镜像起：lint 环境按每个提交自己的提交时间解析，这里按该步人的提交切换（148 修订）
+  lintSyncCommand: (commit) => ["/opt/stream/select-lint", commit],
 };
