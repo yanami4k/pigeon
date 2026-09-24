@@ -73,9 +73,17 @@ const CHANGED_SINCE_START_SCRIPT = [
 // 它们；标记要以参数给路径才生效，--stdin 读入的路径不带标记操作；两种标记一次只认最后一个，分两次去），再检出
 // （换成了目录的也由检出换回文件）、取消暂存；全程不执行钩子
 const UNMARK = "git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-index";
+// agent 留下的未解决冲突（merge、stash pop 等）先收成干净的索引：去掉进行中的合并状态，冲突路径按工作区里的样子暂存，
+// 否则去标记会报 Unable to mark file、这一步被当成服务故障
+const SETTLE_CONFLICTS = [
+  'gd="$(g rev-parse --git-dir)";',
+  'rm -f -- "$gd/MERGE_HEAD" "$gd/MERGE_MSG" "$gd/MERGE_MODE" "$gd/AUTO_MERGE" "$gd/CHERRY_PICK_HEAD" "$gd/REVERT_HEAD" &&',
+  "g diff -z --name-only --diff-filter=U | xargs -0 -r git -c core.hooksPath=/dev/null -c core.fsmonitor=false add -A -- &&",
+].join(" ");
 const RESTORE_FROM_START_SCRIPT = [
   SAFE_GIT,
   'base="$1"; shift;',
+  SETTLE_CONFLICTS,
   `g ls-files -z -- "$@" | xargs -0 -r ${UNMARK} --no-skip-worktree -- &&`,
   `g ls-files -z -- "$@" | xargs -0 -r ${UNMARK} --no-assume-unchanged -- &&`,
   'g checkout -q "$base" -- "$@" && g reset -q -- "$@"',

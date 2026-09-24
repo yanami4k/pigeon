@@ -168,3 +168,32 @@ test("验证前还原受保护的文件：改动、删除、改名、换成目�
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("验证前还原受保护的文件：agent 留下未解决的合并冲突也照样还原，不报错", async () => {
+  const { base, root, host } = fixture();
+  try {
+    put(root, { "tests/test_a.py": "human a\n" });
+    git(root, "add", "-A");
+    git(root, "commit", "-q", "-m", "human tests");
+    assert.ok(host.markStepStart !== undefined && host.restoreProtectedFromStepStart !== undefined);
+    const mark = await host.markStepStart();
+    git(root, "checkout", "-q", "-b", "side");
+    put(root, { "tests/test_a.py": "side\n" });
+    git(root, "commit", "-qam", "side");
+    git(root, "checkout", "-q", "-");
+    put(root, { "tests/test_a.py": "main\n" });
+    git(root, "commit", "-qam", "main");
+    try {
+      git(root, "merge", "-q", "side");
+    } catch {
+      // 冲突即非零退出
+    }
+    assert.ok(existsSync(join(root, ".git", "MERGE_HEAD")), "确有进行中的合并");
+    const restored = await host.restoreProtectedFromStepStart(mark, (p) => p.startsWith("tests/"));
+    assert.deepEqual(restored, ["tests/test_a.py"]);
+    assert.equal(readFileSync(join(root, "tests", "test_a.py"), "utf8"), "human a\n");
+    assert.equal(existsSync(join(root, ".git", "MERGE_HEAD")), false, "合并状态已清");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
