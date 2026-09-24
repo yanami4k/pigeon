@@ -445,6 +445,32 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("维护步用这条流的分步验证判定（与回炉、开跑前检查同一套），不用清单里冻结的验证命令", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
+        return undefined;
+      });
+      // 清单里冻结的命令必然失败；分步验证照常能过
+      const manifest = { ...t.manifest, gateCommand: ["sh", "-c", "exit 1"] };
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, manifest, maxSteps: 2 })
+      );
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.seq, r.kind, r.outcome]),
+        [
+          [1, "task", "passed"],
+          [2, "maintenance", "passed"],
+        ]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("结果行记下验证前还原人写测试的次数：取步结果的 repair.humanTestRestores；未开回炉的条件为 null", async () => {
     const t = await toy();
     try {

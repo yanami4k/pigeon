@@ -32,6 +32,7 @@ import {
   allPassed,
   countQuality,
   failedStepsOf,
+  gateFromSteps,
   type StreamRepoRuntime,
   type StreamVerifyStep,
   verifyConfigFile,
@@ -685,8 +686,10 @@ async function runStep(
       passed = allPassed(run);
       judgeOutput = run.output;
     } else {
+      // 维护步：这条流的分步验证（与回炉的验证、开跑前检查同一套），不用清单里冻结的验证命令——
+      // 两者一旦不一致，维护步的判定就与 agent 在回炉里被验证的不是同一件事
       const judgement = await ws.run(
-        [...options.manifest.gateCommand],
+        gateFromSteps(options.runtime.verifySteps),
         options.judgeTimeoutMs ?? 1_800_000
       );
       passed = judgement.exitCode === 0 && !judgement.timedOut;
