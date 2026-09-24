@@ -49,6 +49,7 @@ import {
   MEMORY_WARN_RATIO,
   readStreamResults,
   type StreamCondition,
+  type StreamGatewayFacts,
   type StreamJobId,
   type StreamResultLine,
   streamJobKey,
@@ -110,10 +111,11 @@ export interface StepAgentInput {
   humanTestFiles?: ReadonlySet<string>;
 }
 
-// 网关对跑批器露出的两样：作业的接入地址、作业的计量
+// 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值
 export interface StreamModelGateway {
   jobBaseUrl(job: string): string;
   meter(job: string): GatewayMeter;
+  resetPeak(job: string): void;
 }
 
 export interface StepAgentResult {
@@ -752,6 +754,7 @@ async function runStep(
     commit: step.commit,
     harnessRef: options.harnessRef,
     limitPauses: [],
+    gateway: null,
     humanFailsGate: step.humanFailsGate === true,
     runIdentity: options.runIdentity ?? null,
     agentSettings: options.agentSettings?.[spec.agent] ?? null,
@@ -795,6 +798,7 @@ async function runStep(
   }
   let agentChangedDeps: boolean | null = null;
   let result: StepAgentResult | null = null;
+  let gatewayFacts: StreamGatewayFacts | null = null;
   let judged = false;
   let passed = false;
   let judgeOutput = "";
@@ -809,6 +813,7 @@ async function runStep(
     // 也不看 agent 自己报没报被打断）
     const signalsBefore = options.limits?.signals ?? 0;
     const before = options.gateway?.meter(key);
+    options.gateway?.resetPeak(key);
     try {
       result = await agent.run({
         job,
@@ -858,6 +863,11 @@ async function runStep(
     if (delta !== undefined) {
       // 四个条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
       const d = delta;
+      gatewayFacts = {
+        queueMs: d.queueMs,
+        accountRequests: d.accountRequests,
+        peakInFlight: d.peakInFlight,
+      };
       result = {
         ...result,
         turns: d.requests,
@@ -959,6 +969,7 @@ async function runStep(
     agentWallMs: result?.wallMs ?? 0,
     wallMs: Date.now() - started,
     attribution,
+    gateway: gatewayFacts,
   };
 }
 

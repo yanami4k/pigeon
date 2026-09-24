@@ -33,7 +33,13 @@ export interface StreamRunIdentity {
       };
     };
   };
-  info: { concurrency: number; harness: HarnessRef };
+  // 只记不比：路数、账号数与各账号并发上限（加账号前写下的身份头没有后两项）
+  info: {
+    concurrency: number;
+    accounts?: number;
+    accountConcurrency?: number[];
+    harness: HarnessRef;
+  };
 }
 
 // 稳定序列化：对象键排序

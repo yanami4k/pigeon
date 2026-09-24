@@ -35,6 +35,7 @@ import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
 import { localTaskSource } from "../eval/local-source.ts";
+import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
 import { runStreamBaselines, runStreamExperiment } from "../eval/stream-experiment.ts";
 import {
@@ -639,7 +640,8 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>]：
 // 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地或撤回、全量测量、写结果行；
 // 无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
-// 四个条件的模型请求都经跑批进程内置的网关（决策 155），真 key 取自 KIMI_API_KEY 与可选的 KIMI_API_KEY_2；
+// 四个条件的模型请求都经跑批进程内置的网关（决策 155）；一个 key 一个账号：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3…
+// 依次为后续账号，各账号并发上限取 KIMI_API_KEY_<编号>_CONCURRENCY（缺省 2）；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
@@ -711,10 +713,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
   const needsPigeon = conditions.some((c) => c !== "minimal");
   const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
-  const keys = [process.env.KIMI_API_KEY, process.env.KIMI_API_KEY_2].filter(
-    (k): k is string => k !== undefined && k !== ""
-  );
-  if (keys.length === 0) throw new Error("缺少 KIMI_API_KEY 环境变量：网关的真 key 从这里取");
+  const accounts = gatewayAccountsFromEnv(process.env);
   const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
   const pigeon = needsPigeon
     ? {
@@ -735,7 +734,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   const miniPython = values.get("--mini-python");
   const baselineDir = values.get("--baseline");
   const summary = await runStreamExperiment({
-    gateway: { keys, modelId },
+    gateway: { accounts, modelId },
     manifestFile: required("--manifest"),
     repoDir: required("--repo"),
     image: required("--image"),

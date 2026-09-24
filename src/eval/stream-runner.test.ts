@@ -413,8 +413,15 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             cacheRead: 0,
             cacheWrite: 0,
             upstreamFailures: 0,
+            queueMs: 0,
+            peakInFlight: 0,
+            accountRequests: [0, 0],
           }),
         }),
+        resetPeak: (job: string) => {
+          const m = meters.get(job);
+          if (m !== undefined) meters.set(job, { ...m, peakInFlight: 0 });
+        },
       };
       let hits = 0;
       const agent = scriptedAgent((input) => {
@@ -426,12 +433,19 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           cacheRead: 0,
           cacheWrite: 0,
           upstreamFailures: 0,
+          queueMs: 0,
+          peakInFlight: 0,
+          accountRequests: [0, 0],
         };
         meters.set(`${input.job.stream}|${input.job.condition}|${input.job.attempt}`, {
           ...m,
           requests: m.requests + 2,
           input: m.input + 100,
           output: m.output + 10,
+          queueMs: m.queueMs + 30,
+          // 峰值不重记就会沿步累加：跑批器每步开始时 resetPeak
+          peakInFlight: m.peakInFlight + 1,
+          accountRequests: [(m.accountRequests[0] ?? 0) + 1, (m.accountRequests[1] ?? 0) + 1],
         });
         assert.equal(input.modelBaseUrl, "http://gateway/j/s1|no-gate|1");
         if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
@@ -464,6 +478,9 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       );
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
+      // 网关的排队时间、各账号请求数与在途峰值按步取差记到结果行上
+      assert.deepEqual(rows[0]?.gateway, { queueMs: 30, accountRequests: [1, 1], peakInFlight: 1 });
+      assert.deepEqual(rows[1]?.gateway, { queueMs: 30, accountRequests: [1, 1], peakInFlight: 1 });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -1014,10 +1031,14 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         cacheRead: 0,
         cacheWrite: 0,
         upstreamFailures: 0,
+        queueMs: 0,
+        peakInFlight: 0,
+        accountRequests: [0],
       };
       const gateway = {
         jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
         meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+        resetPeak: () => {},
       };
       // 第 1 步的前四次各遇到一种情况，都写下会判错的改动、且除自报那次外都不报被打断；第五次正常完成
       const attempts = new Map<string, number>();
@@ -1193,10 +1214,14 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         cacheRead: 0,
         cacheWrite: 0,
         upstreamFailures: 0,
+        queueMs: 0,
+        peakInFlight: 0,
+        accountRequests: [0],
       };
       const gateway = {
         jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
         meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+        resetPeak: () => {},
       };
       // 每次尝试都遇到一次上游故障
       const agent = scriptedAgent((input) => {

@@ -12,7 +12,7 @@ import {
   gatewayUpstreamBaseUrl,
 } from "../pi-runtime/index.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
-import { type ModelGateway, startModelGateway } from "./model-gateway.ts";
+import { type GatewayAccount, type ModelGateway, startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
 import { currentHarnessRef } from "./runner.ts";
 import { commandStepAgent, type PigeonStepAgentOptions, pigeonStepAgent } from "./stream-agents.ts";
@@ -57,7 +57,7 @@ export interface StreamExperimentOptions {
   maxSteps?: number;
   budget: StepBudget;
   // 四个条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里
-  gateway: { keys: readonly string[]; modelId: string };
+  gateway: { accounts: readonly GatewayAccount[]; modelId: string };
   // Pigeon 各条件的运行参数（模型接入由网关给；放权固定为无人值守，见 streamPigeonOptions）；缺省则这些条件的作业停止并说明
   pigeon?: StreamPigeonOptions;
   // 最简 agent 的启动器命令；缺省则该条件的作业停止并说明
@@ -203,7 +203,13 @@ export async function runStreamExperiment(
         ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
       },
     },
-    info: { concurrency: options.concurrency ?? 4, harness: currentHarnessRef() },
+    // 路数与账号数只记不比：换机器、加账号后可以续跑
+    info: {
+      concurrency: options.concurrency ?? 4,
+      accounts: options.gateway.accounts.length,
+      accountConcurrency: options.gateway.accounts.map((a) => a.concurrency),
+      harness: currentHarnessRef(),
+    },
   });
   // 控制器与网关互相引用：控制器探测经网关的上游，网关把限额信号交给控制器
   let gateway: ModelGateway | undefined;
@@ -213,7 +219,7 @@ export async function runStreamExperiment(
   });
   gateway = await startModelGateway({
     upstreamBaseUrl: await gatewayUpstreamBaseUrl(modelId),
-    keys: options.gateway.keys,
+    accounts: options.gateway.accounts,
     limits,
     probeRequest: {
       path: "/v1/messages",

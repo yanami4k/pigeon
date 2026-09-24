@@ -447,6 +447,84 @@ test("Pigeon agent：一步期间来了限额信号即中止在途的运行（�
   }
 });
 
+// 计数的模型接入：记下每次请求带给模型的工具名、同时在途的请求数峰值；每次请求至少在途 20 毫秒，并行的请求必然重叠
+function countingStreamFn(inner: StreamFn) {
+  const seen = { calls: 0, inFlight: 0, peak: 0, tools: new Set<string>() };
+  const fn: StreamFn = async (model, context, options) => {
+    seen.calls += 1;
+    seen.inFlight += 1;
+    seen.peak = Math.max(seen.peak, seen.inFlight);
+    for (const tool of context.tools ?? []) seen.tools.add(tool.name);
+    await new Promise((r) => setTimeout(r, 20));
+    const stream = await inner(model, context, options);
+    void stream.result().finally(() => {
+      seen.inFlight -= 1;
+    });
+    return stream;
+  };
+  return { fn, seen };
+}
+
+// 三个 Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具
+const PIGEON_STREAM_TOOLS = [
+  "edit_file",
+  "read_file",
+  "read_session_entry",
+  "run_command",
+  "search_sessions",
+];
+
+for (const condition of ["full", "no-memory", "no-gate"] as const) {
+  test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用与回炉），工具清单里没有派生 agent 或 worker 的工具`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+    const ws = containerWorkspace(dir);
+    try {
+      const counting = countingStreamFn(
+        createFakeStreamFn({
+          replies: [
+            {
+              text: "",
+              toolCalls: [
+                { name: "read_file", args: { path: "a.txt" } },
+                {
+                  name: "edit_file",
+                  args: { path: "a.txt", old_string: "bug\n", new_string: "w1\n" },
+                },
+              ],
+            },
+            { text: "好了" },
+            editTo("w1", "w2"),
+            { text: "好了" },
+            editTo("w2", "w3"),
+            { text: "好了" },
+            editTo("w3", "w4"),
+            { text: "好了" },
+          ],
+        })
+      );
+      const agent = pigeonStepAgent({
+        streamFn: counting.fn,
+        yolo: true,
+        docker: ws.docker,
+        homeDir: join(dir, "home"),
+      });
+      await agent.run(
+        input(join(dir, "job"), {
+          condition: CONDITION_SPECS[condition],
+          target: { container: "box", root: ws.containerRoot },
+          verify: FIXED_GATE,
+        })
+      );
+      assert.equal(counting.seen.calls, condition === "no-gate" ? 2 : 8);
+      assert.equal(counting.seen.peak, 1);
+      assert.deepEqual([...counting.seen.tools].sort(), PIGEON_STREAM_TOOLS);
+    } finally {
+      ws.cleanup();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    }
+  });
+}
+
 test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);

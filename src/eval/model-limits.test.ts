@@ -136,36 +136,20 @@ test("额度暂停：总等待逾 6 小时即停止；每月额度直接停止�
   await assert.rejects(monthly.ready(), /每月额度用完/);
 });
 
-test("并发受限：先降一路（下限 1），已是 1 路仍受限则暂停；告警去重", async () => {
+test("路数固定：限额信号不再降路（并发受限由网关按账号降上限）；全部账号并发受限报来时整批暂停", async () => {
   const clock = manualClock();
-  const warnings: string[] = [];
   const limits = new LimitController({
     probe: async () => true,
     sleep: clock.sleep,
     now: clock.now,
-    warn: (w) => warnings.push(w),
+    warn: () => {},
     slots: 2,
   });
   const a = await limits.acquire();
-  const b = await limits.acquire();
-  let third = false;
-  const c = limits.acquire().then((release) => {
-    third = true;
-    return release;
-  });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(third, false, "满额时排队");
   limits.onLimit("concurrency");
-  assert.equal(limits.slots, 1);
-  a();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(third, false, "降路后仍要等占用降到 1 路以下");
-  b();
-  const releaseC = await c;
-  assert.equal(third, true);
-  releaseC();
-  limits.onLimit("concurrency");
+  assert.equal(limits.slots, 2);
   assert.equal(limits.state, "paused");
-  assert.equal(limits.slots, 1);
-  assert.equal(warnings.filter((w) => w.includes("降为 1 路")).length, 1);
+  assert.equal(limits.pausesSince(0)[0]?.kind, "concurrency");
+  assert.equal(limits.signals, 1);
+  a();
 });

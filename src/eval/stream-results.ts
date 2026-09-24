@@ -82,8 +82,17 @@ export interface StreamResultLine {
   wallMs: number;
   attribution: FailureAttribution | null;
   limitPauses: LimitPauseRecord[];
+  // 经网关时本步的模型请求：等空闲账号的累计毫秒、各账号成功转发的次数（下标 0 为账号 1，不记 key）、
+  // 同时在途的请求数峰值；没跑 agent 或不经网关为 null
+  gateway: StreamGatewayFacts | null;
   harnessRef: HarnessRef;
   error?: string;
+}
+
+export interface StreamGatewayFacts {
+  queueMs: number;
+  accountRequests: number[];
+  peakInFlight: number;
 }
 
 // 人的基准内存峰值超过容器上限的这一比例即告警：说明作业容器的上限可能不够
@@ -125,6 +134,7 @@ export const STREAM_RESULT_FIELDS = [
   "wallMs",
   "attribution",
   "limitPauses",
+  "gateway",
   "harnessRef",
 ] as const;
 
