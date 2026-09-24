@@ -613,12 +613,15 @@ export async function containerExec(input: {
   timeoutMs?: number;
   // 送入命令标准输入的内容（可为二进制）
   stdin?: string | Buffer;
+  // 以哪个用户执行（缺省为镜像的用户）
+  user?: string;
 }): Promise<{ exitCode: number | null; stdout: string; stdoutBytes: Buffer; stderr: string }> {
   const result = await dockerOnce(
     input.docker ?? ["docker"],
     [
       "exec",
       ...(input.stdin !== undefined ? ["-i"] : []),
+      ...(input.user !== undefined ? ["-u", input.user] : []),
       ...(input.workdir !== undefined ? ["-w", input.workdir] : []),
       input.container,
       ...input.command,

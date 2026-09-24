@@ -11,6 +11,7 @@ import {
   PIGEON_FLAKY_TEST,
   PIGEON_TEST_TIMEOUT_MS,
   PIGEON_VERIFY_STEPS,
+  PYTEST_CONFIG_DIR_ENV,
   pigeonRuntime,
   STRANDS_PYTEST_SCRIPT,
   STRANDS_VERIFY_STEPS,
@@ -19,7 +20,7 @@ import {
   verifyConfigFile,
 } from "./stream-profiles.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
-import { StreamWorkspace } from "./stream-workspace.ts";
+import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
 
 // 假的 python -m pytest，按 pytest 对这几种情形的行为出结果（逐条 -v 进度、xunit1 报告）：
 //   测试文件里有 import-error 即收集失败；不带 --continue-on-collection-errors 时整次中断、只报收集错误；
@@ -114,13 +115,18 @@ function fakeStrands(tests: Record<string, string>): { base: string; ws: StreamW
   for (const [name, content] of Object.entries(tests)) {
     writeFileSync(join(root, "strands-py", "tests", name), content);
   }
-  // 跑批器在跑 pytest 之前写好的人的配置（缺省一份空的）
-  mkdirSync(join(root, ".git", "pigeon-human-pytest"));
-  writeFileSync(join(root, ".git", "pigeon-human-pytest", "pytest.ini"), "[pytest]\n");
+  // 跑批器在跑 pytest 之前写好的人的配置（缺省一份空的）：容器里在 root 所有的目录，本机测试由环境变量指到临时目录
+  const config = join(base, "human-pytest");
+  mkdirSync(config);
+  writeFileSync(join(config, "pytest.ini"), "[pytest]\n");
   const inner = localStreamShell(root);
   const ws = new StreamWorkspace({
     root,
-    sh: (script, options) => inner.sh(`export PATH="${posix(bin)}:$PATH"\n${script}`, options),
+    sh: (script, options) =>
+      inner.sh(
+        `export PATH="${posix(bin)}:$PATH" ${PYTEST_CONFIG_DIR_ENV}="${posix(config)}"\n${script}`,
+        options
+      ),
   });
   return { base, ws };
 }
@@ -495,7 +501,7 @@ test("跑用例（判题、全量测量、人的基准）一律用人的 pytest 
     try {
       writeFileSync(join(ws.root, "strands-py", name), content);
       // 跑批器写人的配置：人的树里是一份普通的 pyproject（带 pytest 段）
-      await strandsRuntime.pinTestConfig?.(ws, ws.root, async (p) =>
+      await strandsRuntime.pinTestConfig?.(ws, async (p) =>
         p === "strands-py/pyproject.toml"
           ? Buffer.from("[tool.pytest.ini_options]\naddopts = -q\n")
           : undefined
@@ -513,7 +519,7 @@ test("跑用例（判题、全量测量、人的基准）一律用人的 pytest 
         `agent 的 ${name} 不起作用`
       );
       const used = readFileSync(join(ws.root, ".git", "pigeon-cases-junit.xml.cfg"), "utf8").trim();
-      assert.match(used, /\.git\/pigeon-human-pytest\/pyproject\.toml$/);
+      assert.match(used, /human-pytest\/pyproject\.toml$/);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -525,6 +531,9 @@ test("验证门的 pytest 步同样用人的配置：agent 的 pytest 配置让�
     const { base, ws } = fakeStrands({ "test_ok.py": "test_a fail\n" });
     try {
       writeFileSync(join(ws.root, "strands-py", name), content);
+      // 旧的放法（工作区 .git 下）agent 写得到：写在那里的配置不被读
+      mkdirSync(join(ws.root, ".git", "pigeon-human-pytest"), { recursive: true });
+      writeFileSync(join(ws.root, ".git", "pigeon-human-pytest", "pytest.ini"), content);
       const gate = await ws.run(gateFromSteps(strandsRuntime.verifySteps), 60_000);
       assert.notEqual(gate.exitCode, 0, `agent 的 ${name} 不能让失败的用例消失`);
       assert.deepEqual(failedStepsOf(gate.output), ["pytest"]);
@@ -534,10 +543,41 @@ test("验证门的 pytest 步同样用人的配置：agent 的 pytest 配置让�
   }
   const { base, ws } = fakeStrands({ "test_ok.py": "test_a pass\n" });
   try {
-    rmSync(join(ws.root, ".git", "pigeon-human-pytest"), { recursive: true, force: true });
+    rmSync(join(base, "human-pytest"), { recursive: true, force: true });
     const gate = await ws.run(gateFromSteps(strandsRuntime.verifySteps), 60_000);
     assert.notEqual(gate.exitCode, 0);
     assert.match(gate.output, /缺人的 pytest 配置/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("人的 pytest 配置以 root 写到容器里 agent 不可写的位置（/opt/stream/human-pytest），不写进工作区", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-pin-root-"));
+  try {
+    const log = join(base, "docker.log");
+    const fake = join(base, "docker.mjs");
+    writeFileSync(
+      fake,
+      [
+        'import { appendFileSync } from "node:fs";',
+        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+      ].join("\n")
+    );
+    const ws = new StreamWorkspace(
+      dockerStreamShell({ container: "box", root: "/testbed", docker: [process.execPath, fake] })
+    );
+    await strandsRuntime.pinTestConfig?.(ws, async (p) =>
+      p === "strands-py/pyproject.toml" ? Buffer.from("[tool.pytest.ini_options]\n") : undefined
+    );
+    const calls = readFileSync(log, "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as string[]);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-i", "-u", "0"]);
+    assert.ok(calls[0]?.join(" ").includes("/opt/stream/human-pytest"));
+    assert.ok(!calls[0]?.join(" ").includes("/testbed/"), "不写进工作区");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

@@ -560,7 +560,7 @@ async function syncEnv(
   };
   if (command !== null) check("依赖环境", await ws.run(command, 120_000, cwd));
   // 测试配置同样按人在该步的版本（agent 改的 pytest 配置不起作用）
-  await runtime.pinTestConfig?.(ws, cwd ?? ws.root, async (p) => {
+  await runtime.pinTestConfig?.(ws, async (p) => {
     try {
       return options.human.show(humanCommit, p);
     } catch {
@@ -619,22 +619,22 @@ async function restoreTests(
     step.humanFiles.filter((f) => human.has(f.path)),
     (p) => options.human.show(step.commit, p)
   );
-  // 测试辅助文件（conftest 一类，改变用例的收集与执行）只许是人的：人在该步树里没有的一律删掉——判题之前生效，
-  // 也就不会落地；被忽略路径下的也算（agent 可以改 .gitignore）。测量副本另按人的集合同步（见 measure）
-  const humanAux = new Set(
-    options.human
-      .tree(step.commit)
-      .filter((e) => profile.classifyFile(e.path) === "testaux")
-      .map((e) => e.path)
-  );
-  const present = new Set([
-    ...(await ws.trackedBlobs()).keys(),
-    ...(await ws.changedPaths()).map((c) => c.path),
-    ...(await ws.ignoredPaths()),
-  ]);
-  await ws.removePaths(
-    [...present].filter((p) => profile.classifyFile(p) === "testaux" && !humanAux.has(p))
-  );
+  // 会被测试框架自动加载、改变人写测试的收集与执行的文件（strands 的 conftest.py）：不在人在该步树里、且所在目录的
+  // 子树里有人在该步的测试文件的，判题之前删掉，也就不会落地；只作用于 agent 自己测试目录的保留。其余测试辅助（helper
+  // 模块、数据文件、__init__.py 等）是 agent 自己测试的依赖，不动。候选逐个文件列出（被忽略的也算：agent 可以改
+  // .gitignore 藏它）。测量副本另按人的测试集合同步（见 measure）
+  const helper = options.runtime.autoloadedTestHelper;
+  if (helper !== undefined) {
+    const tree = options.human.tree(step.commit).map((e) => e.path);
+    const inTree = new Set(tree);
+    const humanTests = tree.filter((p) => profile.classifyFile(p) === "test");
+    const covers = (dir: string) =>
+      dir === "" || dir === "." || humanTests.some((t) => t.startsWith(`${dir}/`));
+    const stray = (await ws.filesNamed(helper)).filter(
+      (p) => !inTree.has(p) && covers(path.posix.dirname(p))
+    );
+    await ws.removePaths(stray);
+  }
 }
 
 // 某提交上人写的全部测试文件：全量测量与提前单独算的人的基准用同一份，两边的用例集一致

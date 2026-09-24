@@ -26,6 +26,8 @@ export interface ShellOptions {
   timeoutMs?: number;
   // 在哪个目录执行；缺省为工作区根
   cwd?: string;
+  // 以 root 执行（写 agent 不可写的位置，例如人的 pytest 配置）；本机测试实现照常以当前用户执行
+  asRoot?: boolean;
 }
 
 export interface StreamShell {
@@ -50,6 +52,7 @@ export function dockerStreamShell(input: {
         ...(input.docker !== undefined ? { docker: input.docker } : {}),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
         ...(options.stdin !== undefined ? { stdin: options.stdin } : {}),
+        ...(options.asRoot === true ? { user: "0" } : {}),
       });
     },
   };
@@ -321,13 +324,19 @@ export class StreamWorkspace {
     return out;
   }
 
-  // 被忽略的未跟踪路径（整个被忽略的目录只列目录本身、以 / 结尾，不往下展开）
-  async ignoredPaths(): Promise<string[]> {
+  // 工作区里叫这个名字的全部文件：被跟踪的、未跟踪的与被忽略的，逐个文件列出（被忽略的目录也往下展开，不折叠成目录）
+  async filesNamed(name: string): Promise<string[]> {
+    const spec = `:(glob)**/${name}`;
     const r = await this.must(
-      "git ls-files -z --others --ignored --exclude-standard --directory",
-      "读取被忽略的文件"
+      [
+        'git ls-files -z -- "$1"',
+        'git ls-files -z --others --exclude-standard -- "$1"',
+        'git ls-files -z --others --ignored --exclude-standard -- "$1"',
+      ].join(" && "),
+      `列出 ${name}`,
+      { args: [spec] }
     );
-    return r.stdout.split("\x00").filter((p) => p !== "");
+    return [...new Set(r.stdout.split("\x00").filter((p) => p !== ""))];
   }
 
   // 去掉索引里全部条目的 skip-worktree 与 assume-unchanged 标记：agent 设了这些标记的文件，git status 看不到它的改动、
@@ -393,6 +402,15 @@ export class StreamWorkspace {
       read
     );
     return stale.map((e) => e.path);
+  }
+
+  // 以 root 执行一段脚本（跑批器写 agent 不可写的位置）；失败即抛错
+  async asRoot(
+    script: string,
+    what: string,
+    options: Omit<ShellOptions, "asRoot"> = {}
+  ): Promise<void> {
+    await this.must(script, what, { ...options, asRoot: true });
   }
 
   // 写一个文件（绝对路径，例如工作区 .git 下的临时文件；不经 git）

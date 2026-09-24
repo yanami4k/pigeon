@@ -570,15 +570,16 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("agent 新建的 conftest 不影响判题与测量：判题前删掉人在该步树里没有的测试辅助文件（根目录与子目录的都删），测量副本同样没有，也不落地", async () => {
+  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删），测量副本同样没有，也不落地", async () => {
     const t = await toy();
     try {
       // 玩具版的 conftest：用例脚本先加载它（相当于 pytest 加载 conftest），里面把 sh 换成恒成功的函数即可让任何用例"通过"
-      const hooks = ["src/conftest.sh", "src/sub/conftest.sh"];
+      const hooks = ["src/conftest.sh"];
       const load = `for c in ${hooks.join(" ")}; do [ -f "$c" ] && . "./$c"; done\n`;
       const seen: { where: string; present: string[] }[] = [];
       const runtime: typeof toyRuntime = {
         ...toyRuntime,
+        autoloadedTestHelper: "conftest.sh",
         profile: {
           ...toyRuntime.profile,
           classifyFile: (path: string) =>
@@ -619,7 +620,6 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             // 根目录的这份还被 agent 写进了 .gitignore：git status 看不到它
             ".gitignore": "/src/conftest.sh\n",
             "src/conftest.sh": hijack,
-            "src/sub/conftest.sh": hijack,
           });
         }
         return undefined;
@@ -697,6 +697,65 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
         ]
       );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("agent 自己测试的辅助文件保留：helper、__init__、数据文件与只作用于自己测试目录的 conftest 都不删，后续验证门照常通过；被忽略的 __pycache__/ 与 agent 在 .gitignore 里写的整目录不让作业停下", async () => {
+    const t = await toy();
+    try {
+      // 与 strands 相仿：src 下除用例与已知源文件外都归测试辅助
+      const runtime: typeof toyRuntime = {
+        ...toyRuntime,
+        autoloadedTestHelper: "conftest.sh",
+        profile: {
+          ...toyRuntime.profile,
+          classifyFile: (p: string) =>
+            p.startsWith("src/agent/") || p.includes("__pycache__") || p.endsWith("conftest.sh")
+              ? "testaux"
+              : toyRuntime.profile.classifyFile(p),
+        },
+      };
+      const own = [
+        "src/agent/conftest.sh",
+        "src/agent/helper.aux",
+        "src/agent/__init__.aux",
+        "src/agent/data.aux",
+      ];
+      let atStep2: string[] | undefined;
+      const agent = scriptedAgent((input) => {
+        const root = input.target.root;
+        if (input.step.seq === 1) {
+          write(root, {
+            "src/a.txt": "alpha\n",
+            ".gitignore": "__pycache__/\nsrc/cachedir/\n",
+            "src/__pycache__/a.cpython-310.pyc": "x",
+            "src/cachedir/deep/conftest.sh": "true\n",
+            ...Object.fromEntries(own.map((f) => [f, "ok=1\n"])),
+            // agent 自己的用例依赖自己的 helper：helper 被删，验证门即不过
+            "src/agent.test.sh": '. src/agent/helper.aux && [ "$ok" = 1 ]\n',
+          });
+        }
+        if (input.step.seq === 2) {
+          atStep2 = own.filter((f) => existsSync(join(root, f)));
+          write(root, { "src/base.txt": "base v2\n" });
+        }
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+      );
+      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }], "作业没有停下");
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.seq, r.kind, r.outcome]),
+        [
+          [1, "task", "passed"],
+          [2, "maintenance", "passed"],
+        ]
+      );
+      assert.deepEqual(atStep2, own, "agent 自己的辅助文件都在");
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -853,15 +912,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
   test("测试配置按人在该步的版本写入：agent 运行前、判题前与测量副本里写的都是人的文件，不是 agent 改过的", async () => {
     const t = await toy();
     try {
-      const pinned: { root: string; content: string }[] = [];
+      const pinned: string[] = [];
       const runtime = {
         ...toyRuntime,
-        pinTestConfig: async (
-          _ws: unknown,
-          root: string,
-          read: (p: string) => Promise<Buffer | undefined>
-        ) => {
-          pinned.push({ root, content: (await read("src/base.txt"))?.toString("utf8") ?? "" });
+        pinTestConfig: async (_ws: unknown, read: (p: string) => Promise<Buffer | undefined>) => {
+          pinned.push((await read("src/base.txt"))?.toString("utf8") ?? "");
         },
       };
       const agent = scriptedAgent((input) => {
@@ -872,15 +927,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       });
       await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
       // agent 运行前、判题前、测量副本各写一次
-      assert.equal(pinned.length, 3);
-      assert.ok(
-        pinned.every((p) => p.content === "base\n"),
-        JSON.stringify(pinned)
-      );
-      assert.ok(
-        pinned.some((p) => p.root.includes("measure")),
-        "测量副本里也写了"
-      );
+      assert.deepEqual(pinned, ["base\n", "base\n", "base\n"]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

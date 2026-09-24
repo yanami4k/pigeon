@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
+  dockerStreamShell,
   STREAM_COMMITTER,
   StreamWorkspace,
   shellQuote,
@@ -249,6 +250,37 @@ test("清理测量与判题的产物：测量副本目录清空（目录本身�
     assert.notEqual(left.exitCode, 0, "验证门的报告已删");
     assert.equal(existsSync(join(root, ".git", "pigeon-cases-junit.xml")), false);
     assert.deepEqual(readdirSync(measure), []);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("容器里的 root 操作：跑批器写 agent 不可写的位置时以 docker exec -u 0 执行，平常的命令不带", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-root-"));
+  try {
+    const log = join(base, "docker.log");
+    const fake = join(base, "docker.mjs");
+    writeFileSync(
+      fake,
+      [
+        'import { appendFileSync } from "node:fs";',
+        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+      ].join("\n")
+    );
+    const ws = new StreamWorkspace(
+      dockerStreamShell({ container: "box", root: "/testbed", docker: [process.execPath, fake] })
+    );
+    await ws.asRoot("true", "root 操作");
+    await ws.head().catch(() => undefined);
+    const calls = readFileSync(log, "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as string[]);
+    assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-u", "0", "-w"]);
+    assert.ok(
+      calls.slice(1).every((c) => !c.includes("-u")),
+      JSON.stringify(calls)
+    );
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
