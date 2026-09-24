@@ -172,7 +172,10 @@ function miniIdentityOf(python: string): {
   }
 }
 
-function readManifest(file: string): { manifest: StreamManifest; runtime: StreamRepoRuntime } {
+export function readManifest(file: string): {
+  manifest: StreamManifest;
+  runtime: StreamRepoRuntime;
+} {
   const manifest = JSON.parse(readFileSync(file, "utf8")) as StreamManifest;
   const runtimeName = RUNTIME_BY_REPO[manifest.repo];
   const runtime = runtimeName === undefined ? undefined : STREAM_RUNTIMES[runtimeName];

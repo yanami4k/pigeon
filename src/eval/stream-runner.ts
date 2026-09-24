@@ -125,6 +125,8 @@ export interface StepAgentInput {
   autoloadedTestHelper?: string;
   humanTests?: readonly string[];
   humanTree?: readonly string[];
+  // 定点对照的单步重跑（决策 157）：结构化记忆开启、挑选固定为这几条（空即一条不给），走正常推送路径；流中不给
+  structuredMemoryFixed?: { opening: readonly string[]; repair: readonly string[] };
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守
@@ -789,8 +791,8 @@ async function agentChangedDeclaration(
 // agent 不许改测试（决策 148）：它动过的测试与测试辅助文件，本步由程序写入的恢复成人的版本，其余恢复成本步起点的版本；
 // 它新建的测试文件保留（全量测量只跑人写的测试）。把测试或测试辅助文件改了名的（暂存的改名）：改名后的路径删掉，
 // 原路径另作一项、恢复成本步起点的版本
-async function restoreTests(
-  options: RunStreamsOptions,
+export async function restoreTests(
+  options: Pick<RunStreamsOptions, "runtime" | "human">,
   ws: StreamWorkspace,
   step: StreamStep
 ): Promise<void> {
