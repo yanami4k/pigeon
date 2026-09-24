@@ -51,6 +51,18 @@ const START_TREE_SCRIPT = [
   'rm -f "$tmp"',
   'git -c user.name=pigeon -c user.email=pigeon@localhost commit-tree "$tree" -p "$1" -m "pigeon step start"',
 ].join("\n");
+// 与开工时的树（$1）相比，现在被改动、删除或换了类型的文件（不含新建的）：同样在临时索引上 add -A 写成树再比，
+// 不动真实索引与工作区；路径以 NUL 分隔
+const CHANGED_SINCE_START_SCRIPT = [
+  "set -e",
+  'idx="$(git rev-parse --git-path index)"; tmp="$idx.pigeon-now"; rm -f "$tmp"',
+  '[ -f "$idx" ] && cp "$idx" "$tmp"',
+  'export GIT_INDEX_FILE="$tmp"',
+  "git add -A",
+  'tree="$(git write-tree)"',
+  'rm -f "$tmp"',
+  'git diff-tree -r -z --name-only --no-renames --diff-filter=MDT "$1" "$tree"',
+].join("\n");
 
 export interface ContainerHostOptions {
   // 容器名或 id（须已在运行）
@@ -440,6 +452,35 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           "还原开工时未提交的改动"
         );
       }
+    },
+    async restoreProtectedFromStepStart(mark, isProtected) {
+      if (mark.baseCommit === undefined) {
+        throw new StepStartLostError("这一步的起点没有开工时的树，无法还原受保护的文件");
+      }
+      const changed = (
+        await must(
+          ["sh", "-c", CHANGED_SINCE_START_SCRIPT, "sh", mark.baseCommit],
+          "比对开工时的树"
+        )
+      )
+        .toString("utf8")
+        .split("\0")
+        .filter((p) => p !== "" && isProtected(p));
+      // 检出开工时的版本再取消暂存：与撤回时还原开工时未提交改动的做法一致
+      for (let i = 0; i < changed.length; i += REMOVE_BATCH) {
+        await must(
+          [
+            "sh",
+            "-c",
+            'base="$1"; shift; git checkout -q "$base" -- "$@" && git reset -q -- "$@"',
+            "sh",
+            mark.baseCommit,
+            ...changed.slice(i, i + REMOVE_BATCH),
+          ],
+          "还原受保护的文件"
+        );
+      }
+      return changed;
     },
   };
 }

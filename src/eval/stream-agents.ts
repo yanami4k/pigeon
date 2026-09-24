@@ -33,11 +33,21 @@ export interface PigeonStepAgentOptions {
   provider?: string;
   modelId?: string;
   homeDir?: string;
+  // 人写的测试与测试辅助文件（按这条流的运行方式归类）：开回炉的条件在每次验证之前把 agent 对它们的改动还原成
+  // 这一步开工时的版本（开工时的树已含跑批器预置的人写测试），agent 不能靠改测试让验证通过
+  humanTestFile?: (path: string) => boolean;
 }
 
-export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
+// Pigeon 步的结果：回炉字段另带"agent 改过人写测试"的计数——有几次验证之前发现并还原了 agent 对人写测试的改动
+export interface PigeonStepAgentResult extends StepAgentResult {
+  repair: (NonNullable<StepAgentResult["repair"]> & { humanTestRestores?: number }) | null;
+}
+
+export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
+  run(input: Parameters<StepAgent["run"]>[0]): Promise<PigeonStepAgentResult>;
+} {
   return {
-    async run(input): Promise<StepAgentResult> {
+    async run(input): Promise<PigeonStepAgentResult> {
       const repairRounds = input.condition.repairRounds;
       const streamFn =
         input.modelBaseUrl !== undefined && options.streamFnFor !== undefined
@@ -82,6 +92,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
                 source: "project" as const,
               },
               repairRounds,
+              ...(options.humanTestFile !== undefined
+                ? { protectedFiles: options.humanTestFile }
+                : {}),
             }
           : {}),
         ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
@@ -119,6 +132,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
                 budgetExhausted: run.repair.budgetExhausted,
                 ...(run.repair.restoreError !== undefined
                   ? { restoreError: run.repair.restoreError }
+                  : {}),
+                ...(run.repair.protectedRestores !== undefined
+                  ? { humanTestRestores: run.repair.protectedRestores }
                   : {}),
               },
         ...(providerFailed

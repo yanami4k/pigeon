@@ -100,6 +100,9 @@ export interface HeadlessRunOptions {
   repairRounds?: number;
   // 回炉反馈的附加内容注入点（缺省为空；结构化记忆将来从这里附加）
   repairAppendix?: RepairAppendix;
+  // 验证前还原的受保护文件（如人写的测试与测试辅助文件）：给了即在每次回炉验证（首轮与各轮）之前，
+  // 经执行端把 agent 改动或删除过的受保护文件恢复成这一步开工时的版本，再验证。须执行端能按起点还原（容器）
+  protectedFiles?: (path: string) => boolean;
   // 决策 134 / 157：结构化记忆——给了即接入（开关、固定挑选）：开局按题面挑选拼进系统提示，回炉时附在反馈之后
   // （调用方另给了回炉附加内容时以调用方的为准）。缺省不接入
   structuredMemory?: StructuredMemoryOptions;
@@ -149,6 +152,8 @@ export interface HeadlessRepairSummary {
   restored: boolean;
   // 恢复没做成的原因：恢复抛错，或快照出过故障而没有撤回起点
   restoreError?: string;
+  // 给了受保护文件时：有几次验证之前发现 agent 改过受保护文件并将其还原（每次验证至多计 1）
+  protectedRestores?: number;
 }
 
 // 回炉的启动前检查（决策 142 / 143）：设定不成立即启动报错，不装配运行面
@@ -183,6 +188,11 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
   } else if (!isGitWorkspace(options.workspaceRoot)) {
     throw new Error(
       "开启回炉却没有可用快照：回炉修不好时要按快照把工作区恢复到这一步起点，目前只支持本地 git 工作区"
+    );
+  }
+  if (options.protectedFiles !== undefined && host?.restoreProtectedFromStepStart === undefined) {
+    throw new Error(
+      "给了受保护文件却无法在验证前还原：这个执行端不提供按这一步起点还原文件的能力（目前只有容器执行端提供）"
     );
   }
   return rounds;
@@ -340,6 +350,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let lastVerdict: EvalVerdict | undefined;
   // 执行端另一侧的工作区：这一步的起点在第一个 Run 之前由执行端记下
   let stepStart: StepStartMark | undefined;
+  // 验证前发现 agent 改过受保护文件并还原的次数
+  let protectedRestores = 0;
   // 撤回：恢复到这一步起点，并如实给出恢复是否做成
   const restoreForRevert = async (): Promise<
     Pick<HeadlessRepairSummary, "restored" | "restoreError">
@@ -428,6 +440,20 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           restored: false,
         };
         break;
+      }
+      // 受保护文件（人写的测试等）在验证前恢复成开工时的版本：agent 对它们的改动不进验证
+      if (options.protectedFiles !== undefined) {
+        const host = options.workspaceHost;
+        if (stepStart === undefined || host?.restoreProtectedFromStepStart === undefined) {
+          throw new Error("没有记下这一步的起点，无法在验证前还原受保护的文件");
+        }
+        const restored = await host.restoreProtectedFromStepStart(
+          stepStart,
+          options.protectedFiles
+        );
+        if (restored.length > 0) {
+          protectedRestores += 1;
+        }
       }
       const verified = await verifyAttempt({
         config: options.verify,
@@ -541,6 +567,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   // 未收尾时轮数按账本的推法取（Run 数减 1）：回炉那一轮若没开起来，不算用了一轮
   if (repair !== undefined && !repair.closed) {
     repair = { ...repair, rounds: Math.max(0, session.runStarteds.length - 1) };
+  }
+  if (repair !== undefined && options.protectedFiles !== undefined) {
+    repair = { ...repair, protectedRestores };
   }
   return {
     sessionId,

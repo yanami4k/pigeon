@@ -565,6 +565,30 @@ test("启动即报错：设了回炉轮数却没有验证命令", async () => {
   }
 });
 
+test("启动即报错：给了受保护文件，执行端却不能按这一步起点还原（本地工作区）", async () => {
+  const repo = makeRepo();
+  try {
+    const streamFn = createFakeStreamFn({ replies: [done()] });
+    await assert.rejects(
+      runHeadless({
+        task: "t",
+        governanceRoot: repo.root,
+        workspaceRoot: repo.root,
+        streamFn,
+        yolo: true,
+        homeDir: repo.home,
+        verify: VERIFY,
+        repairRounds: 3,
+        protectedFiles: () => true,
+      }),
+      /受保护文件.*无法在验证前还原/
+    );
+    assert.equal(streamFn.calls.length, 0);
+  } finally {
+    repo.cleanup();
+  }
+});
+
 test("启动即报错：回炉与失败自动分叉重试同时开启", async () => {
   const repo = makeRepo();
   try {
