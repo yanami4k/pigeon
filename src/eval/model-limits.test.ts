@@ -153,3 +153,20 @@ test("路数固定：限额信号不再降路（并发受限由网关按账号�
   assert.equal(limits.signals, 1);
   a();
 });
+
+test("停止信号：与每月额度用完同一路径——计一次信号、通知在途的看守、状态为已停止，之后取新步即报停止原因；重复收到不再计", async () => {
+  const limits = new LimitController({ probe: async () => true, slots: 2, warn: () => {} });
+  let notified = 0;
+  limits.subscribe(() => {
+    notified += 1;
+  });
+  limits.shutdown("收到 SIGTERM");
+  assert.equal(limits.state, "stopped");
+  assert.equal(limits.signals, 1);
+  assert.equal(notified, 1);
+  await assert.rejects(limits.ready(), /收到 SIGTERM/);
+  await assert.rejects(limits.acquire(), /收到 SIGTERM/);
+  limits.shutdown("又一次");
+  assert.equal(limits.signals, 1);
+  assert.equal(notified, 1);
+});

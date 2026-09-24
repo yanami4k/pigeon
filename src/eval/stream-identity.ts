@@ -3,7 +3,7 @@
 // 与已写的不同即拒绝，避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降、跑批器代码
 // 版本另记在每条结果行上）。结果行带 core 的摘要，据此认出每行属于哪一次身份
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { HarnessRef } from "./results.ts";
 import type { StepBudget } from "./stream-runner.ts";
@@ -85,7 +85,9 @@ export function checkOrWriteIdentity(outDir: string, identity: StreamRunIdentity
       `输出目录里已有跑批结果（${leftovers.join("、")}）却没有 identity.json，认不出它们属于哪一次身份，拒绝续跑：请换一个空的输出目录`
     );
   }
-  writeFileSync(file, `${JSON.stringify({ ...identity, digest }, null, 2)}\n`);
+  // 先写临时文件再改名：写到一半被杀不会留下读不出的身份头（那样续跑会一直被拒）
+  writeFileSync(`${file}.tmp`, `${JSON.stringify({ ...identity, digest }, null, 2)}\n`);
+  renameSync(`${file}.tmp`, file);
   return digest;
 }
 

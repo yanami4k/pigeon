@@ -68,6 +68,8 @@ export interface StreamExperimentOptions {
   // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
   baselineDir?: string;
   log?: (line: string) => void;
+  // 停止信号（CLI 收到 SIGTERM 时触发，reason 为说明）：交给限额控制器收尾
+  shutdownSignal?: AbortSignal;
 }
 
 export type StreamPigeonOptions = Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor" | "yolo">;
@@ -218,6 +220,12 @@ export async function runStreamExperiment(
     probe: () => gateway?.probe() ?? Promise.resolve(false),
     slots: options.concurrency ?? 4,
   });
+  const shutdown = options.shutdownSignal;
+  if (shutdown !== undefined) {
+    const onShutdown = () => limits.shutdown(String(shutdown.reason ?? "收到停止信号"));
+    if (shutdown.aborted) onShutdown();
+    else shutdown.addEventListener("abort", onShutdown, { once: true });
+  }
   gateway = await startModelGateway({
     upstreamBaseUrl: await gatewayUpstreamBaseUrl(modelId),
     accounts: options.gateway.accounts,
@@ -278,6 +286,7 @@ export async function runStreamExperiment(
         prefix,
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
+        ...(options.log !== undefined ? { log: options.log } : {}),
       }),
       agents,
       reference: new ReferenceCases({
@@ -463,4 +472,33 @@ export async function runStreamBaselines(options: StreamBaselineOptions): Promis
   } finally {
     for (const name of names) await removeWorkspaceContainer(name, docker).catch(() => {});
   }
+}
+
+// 停止信号的硬时限：低于 systemd 单元的 TimeoutStopSec（120 秒），在它发 SIGKILL 之前自行退出
+export const SHUTDOWN_GRACE_MS = 90_000;
+
+// SIGTERM（systemd 停服或整机关机）：第一次交给 stop 收尾（在途的步作废、不再取新步），并设硬时限——正在判题或测量的步
+// 到时收不完即直接退出，与进程崩溃同一续跑口径（结果行写在流历史与会话清单之后，断点仍指向上一个完成步）；再收到一次
+// 即立即退出。返回卸下处理器的函数
+export function installTerminationHandler(
+  target: NodeJS.EventEmitter,
+  stop: (reason: string) => void,
+  exit: (code: number) => void,
+  graceMs = SHUTDOWN_GRACE_MS
+): () => void {
+  let timer: NodeJS.Timeout | undefined;
+  const onTerm = () => {
+    if (timer !== undefined) {
+      exit(143);
+      return;
+    }
+    stop("收到 SIGTERM：在途的步作废，跑批停下（已完成的步保留，之后在同一输出目录续跑）");
+    timer = setTimeout(() => exit(143), graceMs);
+    timer.unref();
+  };
+  target.on("SIGTERM", onTerm);
+  return () => {
+    target.off("SIGTERM", onTerm);
+    if (timer !== undefined) clearTimeout(timer);
+  };
 }

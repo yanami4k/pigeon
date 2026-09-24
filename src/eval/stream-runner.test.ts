@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -1378,6 +1379,73 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       assert.match(summary.jobs[0]?.stopped ?? "", /连续 4 次被打断/);
       assert.equal(agent.calls.length, 4);
       assert.deepEqual(readStreamResults(summary.resultsFile), []);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("停止信号（SIGTERM）：在途的一步作废、不留行，作业停下并说明；已完成的步保留，同一输出目录续跑从作废的那步重做", async () => {
+    const t = await toy();
+    try {
+      const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        // 第 2 步做到一半收到停止信号：已改的工作区作废
+        if (input.step.seq === 2 && agent.calls.length === 2) {
+          write(input.target.root, { "src/base.txt": "half\n" });
+          limits.shutdown("收到 SIGTERM");
+        }
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, maxSteps: 2, limits })
+      );
+      assert.match(summary.jobs[0]?.stopped ?? "", /收到 SIGTERM/);
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => r.seq),
+        [1],
+        "作废的第 2 步不留行"
+      );
+      assert.equal(agent.calls.length, 2, "停下后不再重做");
+      // 续跑：从第 2 步起重做，起点是第 1 步结束时的树
+      let seenAtRedo: string | undefined;
+      const resumed = scriptedAgent((input) => {
+        seenAtRedo = readFileSync(join(input.target.root, "src", "base.txt"), "utf8");
+        return undefined;
+      });
+      const again = await runStreams(options(t, { agents: { pigeon: resumed }, maxSteps: 2 }));
+      assert.deepEqual(
+        readStreamResults(again.resultsFile).map((r) => r.seq),
+        [1, 2]
+      );
+      assert.deepEqual(
+        resumed.calls.map((c) => c.step.seq),
+        [2]
+      );
+      assert.notEqual(seenAtRedo, "half\n", "作废那步的改动没有带进重做");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("结果文件末尾留着写到一半的行（进程被杀）：续跑前隔开它，之后追加的结果行照常读得出", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        return undefined;
+      });
+      const first = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+      appendFileSync(first.resultsFile, '{"stream":"s1","condition":"no-g');
+      const again = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      assert.deepEqual(
+        readStreamResults(again.resultsFile).map((r) => r.seq),
+        [1, 2]
+      );
+      assert.deepEqual(
+        agent.calls.map((c) => c.step.seq),
+        [1, 2]
+      );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { effectivePigeonSettings, imageIdOf, streamPigeonOptions } from "./stream-experiment.ts";
+import {
+  effectivePigeonSettings,
+  imageIdOf,
+  installTerminationHandler,
+  streamPigeonOptions,
+} from "./stream-experiment.ts";
 
 test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数", () => {
   assert.equal(streamPigeonOptions({ provider: "kimi-coding", modelId: "m" }).yolo, true);
@@ -65,4 +71,40 @@ test("镜像 ID：经典存储下取 config 摘要；containerd 镜像存储下�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("SIGTERM：第一次交给控制器收尾并设硬时限，到时仍没退出即以 143 退出；再收到一次立即退出；卸下后不再响应", async () => {
+  const target = new EventEmitter();
+  const stops: string[] = [];
+  const exits: number[] = [];
+  const dispose = installTerminationHandler(
+    target,
+    (reason) => stops.push(reason),
+    (code) => exits.push(code),
+    50
+  );
+  target.emit("SIGTERM");
+  assert.equal(stops.length, 1);
+  assert.match(stops[0] ?? "", /SIGTERM.*作废/);
+  assert.deepEqual(exits, [], "收尾期间不立即退出");
+  await new Promise((r) => setTimeout(r, 120));
+  assert.deepEqual(exits, [143], "硬时限到即退出");
+  target.emit("SIGTERM");
+  assert.deepEqual(exits, [143, 143], "再收到一次立即退出");
+  assert.equal(stops.length, 1, "只收尾一次");
+  dispose();
+  target.emit("SIGTERM");
+  assert.deepEqual(exits, [143, 143]);
+  // 收尾在时限内完成、卸下处理器：硬时限不再触发
+  const late: number[] = [];
+  const again = installTerminationHandler(
+    target,
+    () => {},
+    (code) => late.push(code),
+    50
+  );
+  target.emit("SIGTERM");
+  again();
+  await new Promise((r) => setTimeout(r, 120));
+  assert.deepEqual(late, []);
 });

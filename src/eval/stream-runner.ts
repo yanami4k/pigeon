@@ -4,6 +4,7 @@
 // 判定（题：判题测试；维护步：验证门）→ 落地提交或撤回（撤回后该步留空，后续照常往下做）→ 在另一份副本上做全量测量 →
 // 失败归因 → 导出流历史 → 写结果行。被打断的一步整题作废、回到本步起点、不留结果行（144）；崩溃后从结果行与导出的
 // 流历史续跑。agent 怎么跑（Pigeon 在进程内、最简 agent 在宿主上）与模型怎么接入都在 StepAgent 之后，跑批器不感知。
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -310,6 +311,14 @@ export function jobDirName(job: StreamJobId): string {
   return `${job.stream}-${job.condition}-${job.attempt}`;
 }
 
+// 结果行逐行追加：进程死于写到一半（例如停服超时被 SIGKILL）会留下没有换行的半行，之后追加的整行会接在它后面、
+// 一起读不出来。开跑前补一个换行把它隔开（读时照常丢弃这半行）
+export function sealTornTail(file: string): void {
+  if (!existsSync(file)) return;
+  const content = readFileSync(file);
+  if (content.length > 0 && content[content.length - 1] !== 0x0a) appendFileSync(file, "\n");
+}
+
 function writeAtomic(file: string, content: Buffer | string): void {
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, content);
@@ -319,6 +328,7 @@ function writeAtomic(file: string, content: Buffer | string): void {
 export async function runStreams(options: RunStreamsOptions): Promise<RunStreamsSummary> {
   mkdirSync(options.outDir, { recursive: true });
   const resultsFile = path.join(options.outDir, "results.jsonl");
+  sealTornTail(resultsFile);
   const reportFile = path.join(options.outDir, "report.md");
   const streamIds = options.streams ?? options.manifest.streams.map((s) => s.id);
   for (const id of streamIds) {
@@ -988,7 +998,10 @@ async function runStep(
 export const STREAM_CONTAINER_ROOT = "/testbed";
 export const STREAM_MEASURE_ROOT = "/measure";
 
-// 每个作业一个断网容器；续跑时不复用残留容器，一律由镜像加导出的流历史重建
+// 每个作业一个断网容器。续跑时（进程被杀、整机重启之后）先接管已存在的流容器：停止的启动、仍在运行的重启（清掉上次
+// 留下的进程），核对它用的是当前镜像、库里有上一个完成步的提交，再把工作区回到那个提交（在途步的改动一律作废，
+// 与作废重做同一口径；会话由续跑时的清理移出治理根）。这样续跑的作业与没中断的作业一样保留容器里的被忽略文件等状态。
+// 没有残留容器、镜像不同或核对不上时，由镜像加导出的流历史重建
 export function dockerStreamEnvs(input: {
   image: string;
   human: HumanRepo;
@@ -996,11 +1009,44 @@ export function dockerStreamEnvs(input: {
   prefix: string;
   docker?: readonly string[];
   runArgs?: readonly string[];
+  // 容器内的工作区根（缺省 /testbed；本机测试指到临时目录）
+  root?: string;
+  log?: (line: string) => void;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
+  const root = input.root ?? STREAM_CONTAINER_ROOT;
+  let imageId: string | undefined;
+  const envOf = (container: string, ws: StreamWorkspace): StreamEnvironment => ({
+    ws,
+    target: { container, root },
+    measureRoot: STREAM_MEASURE_ROOT,
+    dispose: () => removeWorkspaceContainer(container, docker),
+  });
   return {
     async open(job, init) {
       const container = `${input.prefix}-${jobDirName(job)}`;
+      if (init.resume !== undefined) {
+        const found = await containerStatus(container, docker);
+        imageId ??= await imageIdAsync(input.image, docker);
+        if (found !== null && found.image === imageId) {
+          try {
+            await dockerCommand(docker, [
+              found.status === "running" ? "restart" : "start",
+              container,
+            ]);
+            const ws = new StreamWorkspace(dockerStreamShell({ container, root, docker }));
+            await ws.takeOver(init.resume.head);
+            input.log?.(
+              `[${container}] 接管已存在的容器（原为 ${found.status}），回到第 ${init.resume.head.slice(0, 9)} 提交`
+            );
+            return envOf(container, ws);
+          } catch (error) {
+            input.log?.(
+              `[${container}] 接管已存在的容器失败，改由流历史重建：${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+      }
       await removeWorkspaceContainer(container, docker);
       await startWorkspaceContainer({
         image: input.image,
@@ -1013,9 +1059,7 @@ export function dockerStreamEnvs(input: {
           ...(input.runArgs ?? []),
         ],
       });
-      const ws = new StreamWorkspace(
-        dockerStreamShell({ container, root: STREAM_CONTAINER_ROOT, docker })
-      );
+      const ws = new StreamWorkspace(dockerStreamShell({ container, root, docker }));
       try {
         if (init.resume !== undefined)
           await ws.restoreFromBundle(init.resume.bundle, init.resume.head);
@@ -1024,14 +1068,50 @@ export function dockerStreamEnvs(input: {
         await removeWorkspaceContainer(container, docker).catch(() => {});
         throw error;
       }
-      return {
-        ws,
-        target: { container, root: STREAM_CONTAINER_ROOT },
-        measureRoot: STREAM_MEASURE_ROOT,
-        dispose: () => removeWorkspaceContainer(container, docker),
-      };
+      return envOf(container, ws);
     },
   };
+}
+
+function dockerCommand(docker: readonly string[], args: readonly string[]): Promise<string> {
+  const [program = "docker", ...pre] = docker;
+  return new Promise((resolve, reject) => {
+    execFile(
+      program,
+      [...pre, ...args],
+      { timeout: 120_000, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error !== null)
+          reject(new Error(`docker ${args[0]} 失败：${String(stderr).trim() || error.message}`));
+        else resolve(String(stdout));
+      }
+    );
+  });
+}
+
+// 容器的状态与所用镜像 ID；不存在为 null
+async function containerStatus(
+  container: string,
+  docker: readonly string[]
+): Promise<{ status: string; image: string } | null> {
+  try {
+    const out = (
+      await dockerCommand(docker, [
+        "inspect",
+        "--format",
+        "{{.State.Status}}|{{.Image}}",
+        container,
+      ])
+    ).trim();
+    const [status = "", image = ""] = out.split("|");
+    return status === "" ? null : { status, image };
+  } catch {
+    return null;
+  }
+}
+
+async function imageIdAsync(image: string, docker: readonly string[]): Promise<string> {
+  return (await dockerCommand(docker, ["image", "inspect", "--format", "{{.Id}}", image])).trim();
 }
 
 // 缓存结果的身份：镜像标识（镜像 ID，不用可变的标签）与命令摘要（人的基准为跑用例的方式，开跑前检查为检查门命令）

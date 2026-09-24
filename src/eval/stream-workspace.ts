@@ -244,6 +244,15 @@ export class StreamWorkspace {
     });
   }
 
+  // 接管续跑时已存在的工作区：库里须有上一个完成步的提交（没有即抛错，由调用方改为重建），再回到它——在途步的改动
+  // 与作废重做同一口径地丢掉，被忽略的文件留着（与没中断的作业一样）
+  async takeOver(head: string): Promise<void> {
+    await this.must('git cat-file -e "$1^{commit}"', `核对上一个完成步的提交 ${head}`, {
+      args: [head],
+    });
+    await this.rollback(head);
+  }
+
   // 工作区是否与 HEAD 逐字一致（被跟踪文件与未忽略的未跟踪文件）
   async isClean(): Promise<boolean> {
     const status = await this.must(

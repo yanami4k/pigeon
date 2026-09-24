@@ -38,6 +38,7 @@ import { localTaskSource } from "../eval/local-source.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
 import {
+  installTerminationHandler,
   runStreamBaselines,
   runStreamExperiment,
   runStreamTrialExperiment,
@@ -783,7 +784,18 @@ async function evalStreamMain(argv: string[], trial = false): Promise<void> {
     );
     return;
   }
+  // SIGTERM（systemd 停服、整机关机）：在途的步作废、不再取新步，硬时限内自行退出
+  const shutdown = new AbortController();
+  const removeTermHandler = installTerminationHandler(
+    process,
+    (reason) => {
+      writeOut(`[stream] ${reason}\n`);
+      shutdown.abort(reason);
+    },
+    (code) => process.exit(code)
+  );
   const summary = await runStreamExperiment({
+    shutdownSignal: shutdown.signal,
     gateway: { accounts, modelId },
     manifestFile: required("--manifest"),
     repoDir: required("--repo"),
@@ -805,7 +817,7 @@ async function evalStreamMain(argv: string[], trial = false): Promise<void> {
     ...(baselineDir !== undefined ? { baselineDir } : {}),
     // 带时间戳：试跑时据此把每步的耗时与内存采样对上
     log: (line) => writeOut(`[stream] ${new Date().toISOString()} ${line}\n`),
-  });
+  }).finally(removeTermHandler);
   for (const job of summary.jobs) {
     writeOut(
       `[stream] ${job.key}：完成到第 ${job.completedTo ?? "—"} 步${job.stopped !== undefined ? `；停止：${job.stopped}` : ""}\n`
