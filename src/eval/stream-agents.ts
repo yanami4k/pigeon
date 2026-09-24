@@ -145,6 +145,14 @@ export interface CommandStepAgentOptions {
   };
 }
 
+// 密钥类变量的名字：真 key 只在跑批进程内置的网关里，启动器只拿到网关地址与占位 key
+const SECRET_ENV = /(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|AUTH)/i;
+
+// 启动器的环境：宿主环境去掉密钥类变量
+export function launcherEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !SECRET_ENV.test(name)));
+}
+
 export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
   return {
     async run(input): Promise<StepAgentResult> {
@@ -170,6 +178,7 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
       const [program = "", ...args] = options.command;
       const ended = await new Promise<"done" | "timeout" | "paused">((resolve, reject) => {
         const child = spawn(program, [...args, requestFile, resultFile], {
+          env: launcherEnv(),
           stdio: ["ignore", "ignore", "inherit"],
           windowsHide: true,
           detached: process.platform !== "win32",

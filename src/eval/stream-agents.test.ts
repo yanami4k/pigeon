@@ -117,6 +117,50 @@ test("命令式 agent：限额暂停即杀掉启动器，记为被打断（整�
   }
 });
 
+test("命令式 agent：启动器的环境里没有密钥类变量（真 key 只在网关里），普通变量照常", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const planted = {
+    KIMI_API_KEY: "secret-one",
+    KIMI_API_KEY_2: "secret-two",
+    ANTHROPIC_API_KEY: "secret-three",
+    SOME_SERVICE_TOKEN: "secret-four",
+    PIGEON_TEST_PLAIN: "plain",
+  };
+  const saved = Object.fromEntries(Object.keys(planted).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, planted);
+  try {
+    const dump = join(dir, "dump.mjs");
+    writeFileSync(
+      dump,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[3], JSON.stringify({ status: 'completed', turns: 1, env: process.env }));",
+      ].join("\n")
+    );
+    await commandStepAgent({ command: [process.execPath, dump] }).run(input(dir));
+    const seen = JSON.parse(
+      readFileSync(join(dir, "minimal", "step-7", "result.json"), "utf8")
+    ) as { env: Record<string, string> };
+    const names = Object.keys(seen.env);
+    for (const secret of [
+      "KIMI_API_KEY",
+      "KIMI_API_KEY_2",
+      "ANTHROPIC_API_KEY",
+      "SOME_SERVICE_TOKEN",
+    ])
+      assert.ok(!names.includes(secret), `${secret} 不应进入启动器的环境`);
+    assert.ok(!JSON.stringify(seen.env).includes("secret-"), "任何变量的值里都不带密钥");
+    assert.equal(seen.env.PIGEON_TEST_PLAIN, "plain");
+    assert.ok(names.some((n) => n.toUpperCase() === "PATH"));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("命令式 agent：状态没变、只来了限额信号（例如并发受限只降路）也立即杀掉启动器，由订阅通知、不等轮询", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   try {
