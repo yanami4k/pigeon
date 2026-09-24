@@ -77,7 +77,9 @@ export async function humanPytestConfig(
 
 // pytest 命令的开头：找到跑批器写好的人的配置（没有即报错退出，不退回工作区里的配置）
 const PINNED_PYTEST_CONFIG = `c=$(ls -d "${PYTEST_CONFIG_DIR_SH}"/* 2>/dev/null | head -n 1); [ -n "$c" ] || { echo "缺人的 pytest 配置（跑批器应先写入）" >&2; exit 2; };`;
-const PINNED_PYTEST_ARGS = '-c "$c" --rootdir "$PWD"';
+// --confcutdir 指回 strands-py：配置文件放到工作区之外后，pytest 缺省的 confcutdir 变成配置所在目录，工作区根（strands-py
+// 之外）与测量副本根下的 conftest 会被加载；显式指回 rootdir，保持原来的加载边界
+const PINNED_PYTEST_ARGS = '-c "$c" --rootdir "$PWD" --confcutdir "$PWD"';
 const strandsTimeoutArgs = (seconds: string) =>
   `--timeout ${seconds} --timeout-method signal --rerun-except Timeout`;
 

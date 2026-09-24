@@ -1038,14 +1038,17 @@ export function commandDigest(command: string): string {
 // 按等价读回；其余一律重算。现在的外壳再改，表里的新摘要即对不上，须重新审视。strands 跑用例的外壳两处变化：
 //   1c1bd1a 起显式带 --timeout、--timeout-method signal 与 --rerun-except Timeout：只在用例挂起时起作用（仓库配置本就是
 //     90 秒 signal 超时；不同处只在超时失败的用例不再重跑），没有卡住或超时用例的结果，逐用例结果不受影响；
-//   其后 pytest 改以 -c 指定人在该步的配置、--rootdir 固定为 strands-py：人的代码上两种跑法用的是同一份人的配置、
-//     rootdir 同为 strands-py，只是配置的来源从工作区换成外部指定，逐用例结果不受影响。
+//   其后 pytest 改以 -c 指定人在该步的配置（配置写在工作区之外，由 root 写入）、--rootdir 与 --confcutdir 都固定为
+//     strands-py：人的代码上几种跑法用的是同一份人的配置，rootdir 与 conftest 的加载边界都是 strands-py，只是配置文件的
+//     位置不同，逐用例结果不受影响。
 // strands 的检查门结果随 lint 层重建（v6）一律重算，表里不再列检查门命令
 export const EQUIVALENT_BASELINE_COMMANDS: EquivalencePairs = [
   // strands 跑用例的外壳：1c1bd1a 之前的
-  ["da2746ca28858993", "70f10b887f6bfdc1"],
+  ["da2746ca28858993", "7d0b7803e11a57b5"],
   // strands 跑用例的外壳：1c1bd1a 起、改用人的 pytest 配置之前的
-  ["47c962cd27b0eefe", "70f10b887f6bfdc1"],
+  ["47c962cd27b0eefe", "7d0b7803e11a57b5"],
+  // strands 跑用例的外壳：改用人的 pytest 配置、配置写在工作区 .git 下的
+  ["70f10b887f6bfdc1", "7d0b7803e11a57b5"],
 ];
 
 // 等价表：（旧, 新）对的列表；同一个旧值可以对多个新值

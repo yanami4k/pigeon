@@ -30,7 +30,7 @@ import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
 //   收到的超时参数写进报告旁的 .args 文件，供核对各处用的超时值
 const FAKE_PYTEST = `#!/bin/sh
 shift 2
-j=""; cont=0; des=" "; files=""; to=""; tm=""; rx=""; cfg=""
+j=""; cont=0; des=" "; files=""; to=""; tm=""; rx=""; cfg=""; ccd=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --junitxml=*) j="\${1#--junitxml=}";;
@@ -41,6 +41,7 @@ while [ $# -gt 0 ]; do
     --rerun-except) shift; rx="$1";;
     -c) shift; cfg="$1";;
     --rootdir) shift;;
+    --confcutdir) shift; ccd="$1";;
     -o|-p|--reruns) shift;;
     -*) ;;
     *) if [ -d "$1" ]; then for x in "$1"/test_*.py; do files="$files $x"; done; else files="$files $1"; fi;;
@@ -52,6 +53,8 @@ echo "$to $tm $rx" > "$j.args"
 if [ -z "$cfg" ]; then for f in pytest.ini pyproject.toml; do [ -f "$f" ] && { cfg="$f"; break; }; done; fi
 echo "$cfg" > "$j.cfg"
 if [ -n "$cfg" ] && grep -q "addopts *= *.*-k nothing" "$cfg"; then files=""; fi
+# 没给 --confcutdir 时，上级目录（工作区根）的 conftest 也会被加载；里面带 skip-all 即一条都不跑
+if [ -z "$ccd" ] && [ -f ../conftest.py ] && grep -q skip-all ../conftest.py; then files=""; fi
 body=""; broken=""
 for f in $files; do
   if grep -q import-error "$f"; then
@@ -578,6 +581,29 @@ test("人的 pytest 配置以 root 写到容器里 agent 不可写的位置（/o
     assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-i", "-u", "0"]);
     assert.ok(calls[0]?.join(" ").includes("/opt/stream/human-pytest"));
     assert.ok(!calls[0]?.join(" ").includes("/testbed/"), "不写进工作区");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("conftest 的加载边界保持在 strands-py：工作区根放一个让用例全部跳过的 conftest，跑用例与验证门都不加载它", async () => {
+  const { base, ws } = fakeStrands({ "test_ok.py": "test_a pass\ntest_b fail\n" });
+  try {
+    writeFileSync(join(ws.root, "conftest.py"), "# skip-all\n");
+    const run = await strandsRuntime.runCases(ws, ["strands-py/tests/test_ok.py"], {
+      timeoutMs: 60_000,
+      scratch: `${ws.root}/.git`,
+    });
+    assert.deepEqual(
+      run.cases.map((c) => [c.id, c.outcome]),
+      [
+        ["strands-py/tests/test_ok.py::test_a", "passed"],
+        ["strands-py/tests/test_ok.py::test_b", "failed"],
+      ]
+    );
+    const gate = await ws.run(gateFromSteps(strandsRuntime.verifySteps), 60_000);
+    assert.notEqual(gate.exitCode, 0, "验证门照样不过");
+    assert.deepEqual(failedStepsOf(gate.output), ["pytest"]);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

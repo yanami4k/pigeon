@@ -1712,7 +1712,11 @@ test("等价表里的新摘要就是当前 strands 跑用例外壳的摘要（�
   const gate = commandDigest(JSON.stringify(gateFromSteps(strandsRuntime.verifySteps)));
   const pairs = [...EQUIVALENT_BASELINE_COMMANDS];
   assert.deepEqual(new Set(pairs.map(([, b]) => b)), new Set([cases]));
-  assert.deepEqual(pairs.map(([a]) => a).sort(), ["47c962cd27b0eefe", "da2746ca28858993"]);
+  assert.deepEqual(pairs.map(([a]) => a).sort(), [
+    "47c962cd27b0eefe",
+    "70f10b887f6bfdc1",
+    "da2746ca28858993",
+  ]);
   assert.ok(pairs.every(([a, b]) => a !== gate && b !== gate));
 });
 
