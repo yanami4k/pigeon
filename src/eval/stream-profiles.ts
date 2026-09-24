@@ -75,6 +75,18 @@ export async function humanPytestConfig(
   return { name: "pytest.ini", content: Buffer.from("[pytest]\n") };
 }
 
+// 写人的配置之前核对容器里的权限（以 root 执行）：/opt 带粘滞位、/opt/stream 归 root 且组与其他用户不可写——否则 agent
+// 能改名或替换放配置的目录（例如误用了没有只读 lint 层的旧镜像），报错停下，不写。放配置的目录另由写入脚本收成只读
+export function optPermissionCheck(opt = "/opt", stream = "/opt/stream"): string {
+  const fail = (why: string) =>
+    `{ echo "容器里的权限不对，不写人的 pytest 配置：${why}" >&2; exit 3; }`;
+  return [
+    `[ -k "${opt}" ] || ${fail(`${opt} 没有粘滞位`)};`,
+    `[ "$(stat -c %u "${stream}")" = 0 ] || ${fail(`${stream} 不归 root`)};`,
+    `[ -z "$(find "${stream}" -maxdepth 0 -perm /022)" ] || ${fail(`${stream} 组或其他用户可写`)};`,
+  ].join(" ");
+}
+
 // pytest 命令的开头：找到跑批器写好的人的配置（没有即报错退出，不退回工作区里的配置）
 const PINNED_PYTEST_CONFIG = `c=$(ls -d "${PYTEST_CONFIG_DIR_SH}"/* 2>/dev/null | head -n 1); [ -n "$c" ] || { echo "缺人的 pytest 配置（跑批器应先写入）" >&2; exit 2; };`;
 // --confcutdir 指回 strands-py：配置文件放到工作区之外后，pytest 缺省的 confcutdir 变成配置所在目录，工作区根（strands-py
@@ -494,7 +506,8 @@ export const strandsRuntime: StreamRepoRuntime = {
   async pinTestConfig(ws, read) {
     const config = await humanPytestConfig(read);
     await ws.asRoot(
-      `d="${PYTEST_CONFIG_DIR_SH}"; rm -rf -- "$d" && mkdir -p -- "$d" && cat > "$d/$1" && chmod -R a+rX,go-w -- "$d"`,
+      `if [ -z "\${${PYTEST_CONFIG_DIR_ENV}:-}" ]; then ${optPermissionCheck()} fi; ` +
+        `d="${PYTEST_CONFIG_DIR_SH}"; rm -rf -- "$d" && mkdir -p -- "$d" && cat > "$d/$1" && chmod -R a+rX,go-w -- "$d"`,
       "写人的 pytest 配置",
       { args: [config.name], stdin: config.content }
     );

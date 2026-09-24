@@ -8,6 +8,7 @@ import {
   failedStepsOf,
   gateFromSteps,
   humanPytestConfig,
+  optPermissionCheck,
   PIGEON_FLAKY_TEST,
   PIGEON_TEST_TIMEOUT_MS,
   PIGEON_VERIFY_STEPS,
@@ -581,6 +582,7 @@ test("人的 pytest 配置以 root 写到容器里 agent 不可写的位置（/o
     assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-i", "-u", "0"]);
     assert.ok(calls[0]?.join(" ").includes("/opt/stream/human-pytest"));
     assert.ok(!calls[0]?.join(" ").includes("/testbed/"), "不写进工作区");
+    assert.ok(calls[0]?.join(" ").includes('[ -k "/opt" ]'), "写之前核对 /opt 的粘滞位与属主");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -604,6 +606,22 @@ test("conftest 的加载边界保持在 strands-py：工作区根放一个让用
     const gate = await ws.run(gateFromSteps(strandsRuntime.verifySteps), 60_000);
     assert.notEqual(gate.exitCode, 0, "验证门照样不过");
     assert.deepEqual(failedStepsOf(gate.output), ["pytest"]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("写人的 pytest 配置之前核对容器里的权限：/opt 没有粘滞位或 /opt/stream 不归 root 即报错停下", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-opt-check-"));
+  try {
+    mkdirSync(join(base, "stream"));
+    const ws = new StreamWorkspace(localStreamShell(base));
+    const r = await ws.run(
+      ["sh", "-c", optPermissionCheck(posix(base), `${posix(base)}/stream`)],
+      30_000
+    );
+    assert.equal(r.exitCode, 3);
+    assert.match(r.output, /容器里的权限不对，不写人的 pytest 配置：.* 没有粘滞位/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
