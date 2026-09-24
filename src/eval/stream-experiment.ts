@@ -1,5 +1,6 @@
 // 延续式实验的装配（第三至六节）：读流清单，按仓库选运行方式，起一个装有人的完整历史的参考容器算全量测量的基准，
 // 按条件接入 agent，交给跑批器；结束后移除参考容器。
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -70,6 +71,16 @@ export function streamPigeonOptions(
   pigeon: StreamPigeonOptions
 ): Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor"> {
   return { ...pigeon, yolo: true };
+}
+
+// 镜像的标识：镜像 ID（内容摘要），不用可变的标签——同一标签重建后 ID 即变，已落盘的人的基准不再复用
+export function imageIdOf(image: string, docker: readonly string[]): string {
+  const [program = "docker", ...pre] = docker;
+  const id = execFileSync(program, [...pre, "image", "inspect", "--format", "{{.Id}}", image], {
+    encoding: "utf8",
+  }).trim();
+  if (id === "") throw new Error(`取不到镜像 ${image} 的 ID`);
+  return id;
 }
 
 function readManifest(file: string): { manifest: StreamManifest; runtime: StreamRepoRuntime } {
@@ -159,6 +170,7 @@ export async function runStreamExperiment(
       reference: new ReferenceCases({
         reference: referenceWs,
         runtime,
+        image: imageIdOf(options.image, docker),
         cacheDir:
           options.baselineDir !== undefined
             ? path.resolve(options.baselineDir)
@@ -207,6 +219,7 @@ export async function runStreamBaselines(options: StreamBaselineOptions): Promis
   const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const lanes = Math.max(1, options.concurrency ?? 1);
   const names = Array.from({ length: lanes }, (_, i) => `${prefix}-baseline-${i + 1}`);
+  const imageId = imageIdOf(options.image, docker);
   const targets = baselineTargets({
     manifest,
     human,
@@ -232,7 +245,7 @@ export async function runStreamBaselines(options: StreamBaselineOptions): Promis
           dockerStreamShell({ container: name, root: STREAM_CONTAINER_ROOT, docker })
         );
         await ws.init(human.bundle(manifest.rangeEnd), manifest.rangeEnd);
-        return new ReferenceCases({ reference: ws, runtime, cacheDir: outDir });
+        return new ReferenceCases({ reference: ws, runtime, cacheDir: outDir, image: imageId });
       })
     );
     return await computeBaselines({

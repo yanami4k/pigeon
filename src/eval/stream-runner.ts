@@ -4,6 +4,7 @@
 // 判定（题：判题测试；维护步：验证门）→ 落地提交或撤回（撤回后该步留空，后续照常往下做）→ 在另一份副本上做全量测量 →
 // 失败归因 → 导出流历史 → 写结果行。被打断的一步整题作废、回到本步起点、不留结果行（144）；崩溃后从结果行与导出的
 // 流历史续跑。agent 怎么跑（Pigeon 在进程内、最简 agent 在宿主上）与模型怎么接入都在 StepAgent 之后，跑批器不感知。
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -799,12 +800,40 @@ export function dockerStreamEnvs(input: {
   };
 }
 
+// 缓存结果的身份：镜像标识（镜像 ID，不用可变的标签）与命令摘要（人的基准为跑用例的方式，开跑前检查为检查门命令）
+export interface BaselineIdentity {
+  image: string;
+  command: string;
+}
+
+export function commandDigest(command: string): string {
+  return createHash("sha256").update(command).digest("hex").slice(0, 16);
+}
+
+function sameIdentity(saved: unknown, want: BaselineIdentity): boolean {
+  const s = saved as Partial<BaselineIdentity> | undefined;
+  return s !== undefined && s.image === want.image && s.command === want.command;
+}
+
+// 读落盘结果：文件不在、读不出或身份不符（没有身份的旧文件同样算不符）都当作没有
+function readIdentified<T>(file: string, want: BaselineIdentity): T | undefined {
+  if (!existsSync(file)) return undefined;
+  try {
+    const saved = JSON.parse(readFileSync(file, "utf8")) as T & { identity?: unknown };
+    return sameIdentity(saved.identity, want) ? saved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // 人的基准：在装有人的完整历史的参考工作区里检出该提交、跑同一批测试，跑 repeat 遍（缺省 2）逐条比对——每遍都通过的
-// 进 B 口径的分母，各遍结果不一致的标为时过时不过；第一遍收集出的全部用例即 A 口径的分母。结果按提交缓存到磁盘，各条件共用
+// 进 B 口径的分母，各遍结果不一致的标为时过时不过；第一遍收集出的全部用例即 A 口径的分母。结果按提交缓存到磁盘，各条件共用；
+// 缓存带身份（镜像与命令摘要），身份不符即重算
 export class ReferenceCases implements HumanReferenceCases {
   private readonly reference: ReferenceWorkspace;
   private readonly runtime: StreamRepoRuntime;
   private readonly cacheDir: string;
+  private readonly image: string;
   private readonly timeoutMs: number;
   private readonly repeat: number;
   private readonly cgroupDir: string;
@@ -815,6 +844,8 @@ export class ReferenceCases implements HumanReferenceCases {
     reference: ReferenceWorkspace;
     runtime: StreamRepoRuntime;
     cacheDir: string;
+    // 参考容器所用镜像的标识（镜像 ID）：缓存身份之一
+    image: string;
     timeoutMs?: number;
     repeat?: number;
     // 容器内 cgroup v2 的目录（测试时指向假的目录）；告警出口缺省为标准错误
@@ -824,6 +855,7 @@ export class ReferenceCases implements HumanReferenceCases {
     this.reference = input.reference;
     this.runtime = input.runtime;
     this.cacheDir = input.cacheDir;
+    this.image = input.image;
     this.timeoutMs = input.timeoutMs ?? 1_800_000;
     this.repeat = Math.max(1, input.repeat ?? 2);
     this.cgroupDir = input.cgroupDir ?? "/sys/fs/cgroup";
@@ -831,9 +863,19 @@ export class ReferenceCases implements HumanReferenceCases {
     mkdirSync(this.cacheDir, { recursive: true });
   }
 
-  // 这个提交的基准是否已落盘（提前单独算过的直接读）
+  private casesIdentity(): BaselineIdentity {
+    return { image: this.image, command: commandDigest(this.runtime.casesCommand) };
+  }
+
+  private gateIdentity(command: readonly string[]): BaselineIdentity {
+    return { image: this.image, command: commandDigest(JSON.stringify(command)) };
+  }
+
+  // 这个提交的基准是否已落盘且身份相符（提前单独算过的直接读）
   has(commit: string): boolean {
-    return existsSync(path.join(this.cacheDir, `${commit}.json`));
+    return (
+      readIdentified(path.join(this.cacheDir, `${commit}.json`), this.casesIdentity()) !== undefined
+    );
   }
 
   casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
@@ -843,16 +885,23 @@ export class ReferenceCases implements HumanReferenceCases {
     return run;
   }
 
-  // 这个提交上人的代码是否已跑过验证门（开跑前置检查）
-  hasGate(commit: string): boolean {
-    return existsSync(path.join(this.cacheDir, `${commit}.gate.json`));
+  // 这个提交上人的代码是否已用这条检查门命令跑过（开跑前置检查），且身份相符
+  hasGate(commit: string, command: readonly string[]): boolean {
+    return (
+      readIdentified(
+        path.join(this.cacheDir, `${commit}.gate.json`),
+        this.gateIdentity(command)
+      ) !== undefined
+    );
   }
 
   // 开跑前置检查：人的代码在这个提交上跑验证门。结果按提交落盘，与基准同一排队
   gateAt(commit: string, command: readonly string[]): Promise<GateCheck> {
     const run = this.queue.then(async (): Promise<GateCheck> => {
       const file = path.join(this.cacheDir, `${commit}.gate.json`);
-      if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8")) as GateCheck;
+      const identity = this.gateIdentity(command);
+      const saved = readIdentified<GateCheck>(file, identity);
+      if (saved !== undefined) return saved;
       const ws = this.reference.ws;
       await this.reference.checkout(commit);
       if (this.runtime.envSyncCommand !== null) {
@@ -867,7 +916,7 @@ export class ReferenceCases implements HumanReferenceCases {
         wallMs: Date.now() - started,
         outputTail: r.output.slice(-4000),
       };
-      writeAtomic(file, JSON.stringify(check));
+      writeAtomic(file, JSON.stringify({ ...check, identity }));
       return check;
     });
     this.queue = run.catch(() => {});
@@ -876,8 +925,9 @@ export class ReferenceCases implements HumanReferenceCases {
 
   private async compute(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
     const file = path.join(this.cacheDir, `${commit}.json`);
-    if (existsSync(file)) {
-      const saved = JSON.parse(readFileSync(file, "utf8")) as HumanBaseline;
+    const identity = this.casesIdentity();
+    const saved = readIdentified<HumanBaseline>(file, identity);
+    if (saved !== undefined) {
       return { ...saved, runs: saved.runs ?? [], slowest: saved.slowest ?? null };
     }
     const ws = this.reference.ws;
@@ -917,7 +967,7 @@ export class ReferenceCases implements HumanReferenceCases {
       runs.push(run.cases);
     }
     const baseline = { ...compareRuns(runs), runs: meta };
-    writeAtomic(file, JSON.stringify(baseline));
+    writeAtomic(file, JSON.stringify({ ...baseline, identity }));
     return baseline;
   }
 

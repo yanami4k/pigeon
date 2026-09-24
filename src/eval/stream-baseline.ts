@@ -79,7 +79,9 @@ export async function computeBaselines(input: {
     gateFailures: [],
   };
   const done = (t: BaselineTarget) =>
-    input.references.some((r) => (cases ? r.has(t.commit) : r.hasGate(t.commit)));
+    input.references.some((r) =>
+      cases ? r.has(t.commit) : r.hasGate(t.commit, input.gateCommand ?? [])
+    );
   for (const t of input.targets) if (done(t)) summary.cached++;
   log(
     `人的基准（${check}）：共 ${summary.total} 个提交，已落盘 ${summary.cached} 个，本次算 ${summary.total - summary.cached} 个`

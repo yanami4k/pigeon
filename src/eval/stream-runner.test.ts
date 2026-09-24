@@ -91,6 +91,7 @@ async function toy(aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`): Promise<Toy> 
     reference: referenceWs,
     runtime: toyRuntime,
     cacheDir: join(base, "reference-cache"),
+    image: "test-image",
   });
   return { base, human, manifest, reference, commits: [start, c1, c2, c3, c4, c5] };
 }
@@ -624,6 +625,7 @@ test("人的基准在报告写出前被杀、拿不全用例：报错停下，�
       reference: ws,
       runtime: toyRuntime,
       cacheDir: join(base, "cache"),
+      image: "test-image",
     });
     await assert.rejects(
       reference.casesAt(commit, ["src/ok.test.sh", "src/k.test.sh"]),
@@ -651,6 +653,60 @@ test("人的基准多遍比对：每遍都通过的进分母 B；结果前后不
   assert.deepEqual(baseline.cases.map((x) => x.id).sort(), ["a", "b", "c", "d", "e"]);
 });
 
+test("人的基准与开跑前检查的缓存带身份（镜像、跑用例的方式、检查门命令）：身份相同才复用，变了或没有身份的旧文件一律重算", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+  try {
+    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
+    const human = gitHumanRepo(join(base, "human"));
+    mkdirSync(join(base, "ref"));
+    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+    await ws.init(human.bundle(commit), commit);
+    let runs = 0;
+    const counting = {
+      ...toyRuntime,
+      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+        runs++;
+        return toyRuntime.runCases(...args);
+      },
+    };
+    const cacheDir = join(base, "cache");
+    const at = (image: string, runtime = counting) =>
+      new ReferenceCases({ reference: ws, runtime, cacheDir, image });
+    const tests = ["src/ok.test.sh"];
+    await at("sha256:aaa").casesAt(commit, tests);
+    assert.equal(runs, 2);
+    assert.equal(at("sha256:aaa").has(commit), true);
+    await at("sha256:aaa").casesAt(commit, tests);
+    assert.equal(runs, 2, "身份相同：直接读回");
+    // 镜像变了
+    assert.equal(at("sha256:bbb").has(commit), false);
+    await at("sha256:bbb").casesAt(commit, tests);
+    assert.equal(runs, 4, "镜像不同：重算");
+    // 跑用例的方式变了（例如单条超时或外壳改了）
+    const otherWay = { ...counting, casesCommand: `${counting.casesCommand} --timeout 1` };
+    assert.equal(at("sha256:bbb", otherWay).has(commit), false);
+    await at("sha256:bbb", otherWay).casesAt(commit, tests);
+    assert.equal(runs, 6, "跑用例的方式不同：重算");
+    // 没有身份的旧文件
+    const file = join(cacheDir, `${commit}.json`);
+    const { identity: _dropped, ...legacy } = JSON.parse(readFileSync(file, "utf8")) as {
+      identity?: unknown;
+    };
+    writeFileSync(file, JSON.stringify(legacy));
+    assert.equal(at("sha256:bbb", otherWay).has(commit), false, "没有身份：不复用");
+    // 开跑前检查：检查门命令变了即重算
+    const pass = ["sh", "-c", "exit 0"];
+    const fail = ["sh", "-c", "exit 1"];
+    assert.equal((await at("sha256:aaa").gateAt(commit, pass)).passed, true);
+    assert.equal(at("sha256:aaa").hasGate(commit, pass), true);
+    assert.equal(at("sha256:aaa").hasGate(commit, fail), false);
+    assert.equal(at("sha256:bbb").hasGate(commit, pass), false);
+    assert.equal((await at("sha256:aaa").gateAt(commit, fail)).passed, false, "命令不同：重跑");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、上限与墙钟；峰值超过上限的 75% 即告警", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-memory-"));
   try {
@@ -670,6 +726,7 @@ test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、�
       reference: ws,
       runtime: toyRuntime,
       cacheDir: join(base, "cache"),
+      image: "test-image",
       cgroupDir: cgroup.replace(/\\/g, "/"),
       warn: (m) => warnings.push(m),
     });
@@ -736,6 +793,7 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
           reference: ws,
           runtime: counting,
           cacheDir: join(t.base, "baseline"),
+          image: "test-image",
         });
       })
     );
@@ -778,14 +836,18 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
     assert.deepEqual(order(gated.gateFailures), [1, 2, 4]);
     assert.ok(gated.gateFailures.every((g) => g.failedSteps.join() === "有 b"));
     assert.equal(gated.computed, 4);
-    const gatedAgain = await computeBaselines({
+    const gatedAgain = await computeBaselines({ targets, references, check: "gate", gateCommand });
+    assert.deepEqual(order(gatedAgain.gateFailures), [1, 2, 4], "同一条命令：已落盘的结果直接读回");
+    assert.deepEqual([gatedAgain.cached, gatedAgain.computed], [4, 0]);
+    // 检查门命令变了：落盘结果的身份不符，全部重跑
+    const regated = await computeBaselines({
       targets,
       references,
       check: "gate",
       gateCommand: ["sh", "-c", "exit 1"],
     });
-    assert.deepEqual(order(gatedAgain.gateFailures), [1, 2, 4], "已落盘的验证门结果直接读回");
-    assert.equal(gatedAgain.cached, 4);
+    assert.deepEqual(order(regated.gateFailures), [1, 2, 4, 5]);
+    assert.deepEqual([regated.cached, regated.computed], [0, 4]);
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }

@@ -228,6 +228,8 @@ export interface StreamRepoRuntime {
   profile: RepoProfile;
   // 分步验证：写进每个作业治理根的 .pigeon/verify.json，开回炉的条件按它逐步验证
   verifySteps: readonly StreamVerifyStep[];
+  // 跑用例的方式（命令模板与单条超时等）：人的基准缓存的身份之一，改了它，已落盘的基准不再复用
+  casesCommand: string;
   // 跑给定测试文件、取逐用例结果：判题、探针、全量测量与人的基准共用。判定一律看逐用例结果，不看退出码
   runCases(
     ws: StreamWorkspace,
@@ -274,6 +276,7 @@ export async function runJunitOnce(
 export const pigeonRuntime: StreamRepoRuntime = {
   profile: pigeonProfile,
   verifySteps: PIGEON_VERIFY_STEPS,
+  casesCommand: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} --test-reporter=junit --test-reporter=spec <测试文件…>`,
   quality: {
     type: { command: ["node_modules/.bin/tsc", "--noEmit", "-p", "."], pattern: /error TS\d+/ },
     format: { command: ["node_modules/.bin/biome", "format", "."], pattern: /Found (\d+) errors?/ },
@@ -356,6 +359,7 @@ export const STRANDS_PYTEST_SCRIPT = [
 export const strandsRuntime: StreamRepoRuntime = {
   profile: strandsProfile,
   verifySteps: STRANDS_VERIFY_STEPS,
+  casesCommand: `${STRANDS_PYTEST_SCRIPT} [单条超时缺省 ${STRANDS_CASE_TIMEOUT_SEC} 秒]`,
   quality: {
     type: {
       command: ["sh", "-c", `cd strands-py && ${STRANDS_MYPY}`],
