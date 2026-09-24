@@ -237,3 +237,9 @@ v3 上对人的代码实跑验证门暴露的三件环境问题（第二节末�
   - `src/eval/stream-agents.test.ts`：`Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数`。假 docker 容器加真实 git 仓库；开工前预置未提交的人写测试 `check.sh`（要求 `a.txt` 为 fixed）；agent 把 `a.txt` 改为 w1，同时把测试断言改为 w1，此后每轮回炉都再改一次测试。结果：回炉 3 轮、最终失败、已撤回、还原 4 次，撤回后 `a.txt` 与 `check.sh` 都回到开工时的内容。
   - `src/application/repair-loop.test.ts`：`启动即报错：给了受保护文件，执行端却不能按这一步起点还原（本地工作区）`。
 - 变异：headless 在验证前不还原（还原结果恒为空）→ 上述 stream-agents 用例精确变红，其余 Pigeon agent 用例通过；撤回后通过。
+
+### M1 与 M3 的验证（提交 9768405，四步分开执行）
+
+- `biome check .`（408 个文件）、`tsc -p tsconfig.json --noEmit`、`dependency-cruiser src`（422 个模块无违规）通过。
+- 测试步 `node --test --test-concurrency=2 "src/**/*.test.ts"`：共 1023 条，通过 1021，失败 0，跳过 2。
+- M1 提交 5dd4166 里 strands 用例的写法有一处类型错误（数组下标取值可能为空），在 9768405 中改正；5dd4166 本身未通过类型检查。
