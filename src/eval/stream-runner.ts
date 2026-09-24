@@ -297,7 +297,7 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function jobDirName(job: StreamJobId): string {
+export function jobDirName(job: StreamJobId): string {
   return `${job.stream}-${job.condition}-${job.attempt}`;
 }
 
@@ -535,8 +535,8 @@ export class EnvSelectionError extends Error {
 
 // 切依赖（148 修订）：运行环境与 lint 环境都按该步人的提交选——运行方式给了依赖声明文件时，把人在该步的
 // 这份声明写到工作区 .git 下的临时位置再交给切换命令，不看 agent 改过的；没给则按工作区里的声明（envSyncCommand）
-async function syncEnv(
-  options: RunStreamsOptions,
+export async function syncEnv(
+  options: Pick<RunStreamsOptions, "runtime" | "human">,
   ws: StreamWorkspace,
   humanCommit: string,
   cwd?: string

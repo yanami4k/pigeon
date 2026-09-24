@@ -37,6 +37,7 @@ import {
   type StepAgent,
   type StepBudget,
 } from "./stream-runner.ts";
+import { runStreamTrial, type StreamTrialSummary } from "./stream-trial.ts";
 import { dockerStreamShell } from "./stream-workspace.ts";
 
 // 清单里的仓库名 → 运行方式
@@ -307,6 +308,93 @@ export async function runStreamExperiment(
     });
   } finally {
     await removeWorkspaceContainer(referenceName, docker).catch(() => {});
+    await liveGateway.close();
+  }
+}
+
+export interface StreamTrialExperimentOptions {
+  manifestFile: string;
+  repoDir: string;
+  image: string;
+  outDir: string;
+  // 要试跑的步（清单里的步序）
+  steps: readonly number[];
+  conditions: readonly StreamCondition[];
+  budget: StepBudget;
+  concurrency: number;
+  gateway: { accounts: readonly GatewayAccount[]; modelId: string };
+  pigeon?: StreamPigeonOptions;
+  minimalCommand?: readonly string[];
+  containerRunArgs?: readonly string[];
+  docker?: readonly string[];
+  log?: (line: string) => void;
+}
+
+// 预算校准的试跑（147 修订）：与正式跑同一套网关、限额控制器、容器与两种 agent，只是每步各自从人在父提交上的代码起跑
+export async function runStreamTrialExperiment(
+  options: StreamTrialExperimentOptions
+): Promise<StreamTrialSummary> {
+  const { manifest, runtime } = readManifest(options.manifestFile);
+  const docker = options.docker ?? ["docker"];
+  const outDir = path.resolve(options.outDir);
+  const human = gitHumanRepo(options.repoDir);
+  const prefix = `pigeon-trial-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
+  const modelId = options.gateway.modelId;
+  let gateway: ModelGateway | undefined;
+  const limits = new LimitController({
+    probe: () => gateway?.probe() ?? Promise.resolve(false),
+    slots: options.concurrency,
+  });
+  gateway = await startModelGateway({
+    upstreamBaseUrl: await gatewayUpstreamBaseUrl(modelId),
+    accounts: options.gateway.accounts,
+    limits,
+    probeRequest: {
+      path: "/v1/messages",
+      body: { model: modelId, max_tokens: 1, messages: [{ role: "user", content: "回一个字" }] },
+    },
+  });
+  const liveGateway = gateway;
+  try {
+    const agents: Partial<Record<"pigeon" | "minimal", StepAgent>> = {};
+    if (options.pigeon !== undefined) {
+      agents.pigeon = pigeonStepAgent({
+        ...streamPigeonOptions(options.pigeon),
+        docker,
+        streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId),
+        limits,
+      });
+    }
+    if (options.minimalCommand !== undefined) {
+      agents.minimal = commandStepAgent({
+        command: options.minimalCommand,
+        docker,
+        model: modelId,
+        limits,
+      });
+    }
+    return await runStreamTrial({
+      manifest,
+      human,
+      runtime,
+      steps: options.steps,
+      conditions: options.conditions,
+      budget: options.budget,
+      concurrency: options.concurrency,
+      outDir,
+      envs: dockerStreamEnvs({
+        image: options.image,
+        human,
+        prefix,
+        docker,
+        ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
+      }),
+      agents,
+      gateway: liveGateway,
+      limits,
+      ...(options.log !== undefined ? { log: options.log } : {}),
+    });
+  } finally {
     await liveGateway.close();
   }
 }
