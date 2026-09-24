@@ -2,6 +2,7 @@
 export type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 // PiRuntimeAdapter 公开面桶文件；fixtures.ts 是测试设施，不从这里导出。
 export {
+  DEFAULT_THINKING_LEVEL,
   PiRuntimeAdapter,
   type PiRuntimeAdapterOptions,
   type RunResult,
@@ -24,6 +25,7 @@ export type {
   ToolGovernance,
   ToolGovernanceFactory,
 } from "./governance.ts";
+export { DEFAULT_MAX_OUTPUT_TOKENS } from "./output-limit.ts";
 export { isContextOverflowError } from "./overflow.ts";
 export {
   INJECTION_SNAPSHOT_VERSION,

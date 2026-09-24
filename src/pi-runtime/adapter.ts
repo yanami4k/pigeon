@@ -55,6 +55,8 @@ import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import type { EventLogSink, ToolGovernance, ToolGovernanceFactory } from "./governance.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
+// 推理档位的缺省：快照里没给即 off（不请求推理）
+export const DEFAULT_THINKING_LEVEL = "off";
 export type { EventLogSink } from "./governance.ts";
 
 // Run 终态：completed / failed / aborted 之外保留 unknown——
@@ -207,7 +209,7 @@ export class PiRuntimeAdapter {
       initialState: {
         systemPrompt: this.#snapshot.context.systemPrompt,
         // M5.5 S5（决策 050）：推理档位随快照冻结；缺省 off = 不请求推理
-        thinkingLevel: this.#snapshot.model.thinkingLevel ?? "off",
+        thinkingLevel: this.#snapshot.model.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
         model: {
           id: this.#snapshot.model.id,
           name: this.#snapshot.model.id,
@@ -532,7 +534,7 @@ export class PiRuntimeAdapter {
       model: {
         provider: snapshot.model.provider,
         id: snapshot.model.id,
-        thinkingLevel: snapshot.model.thinkingLevel ?? "off",
+        thinkingLevel: snapshot.model.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
         ...(snapshot.model.maxOutputTokens !== undefined
           ? { maxOutputTokens: snapshot.model.maxOutputTokens }
           : {}),

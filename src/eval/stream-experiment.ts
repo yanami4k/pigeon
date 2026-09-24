@@ -5,7 +5,12 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
-import { gatewayStreamFn, gatewayUpstreamBaseUrl } from "../pi-runtime/index.ts";
+import {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_THINKING_LEVEL,
+  gatewayStreamFn,
+  gatewayUpstreamBaseUrl,
+} from "../pi-runtime/index.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type ModelGateway, startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
@@ -72,6 +77,18 @@ export function streamPigeonOptions(
   pigeon: StreamPigeonOptions
 ): Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor"> {
   return { ...pigeon, yolo: true };
+}
+
+// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位与单轮输出上限记运行时的缺省值（off、16,384），
+// 不记 null；温度没给即由服务端决定，记 null
+export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
+  return {
+    provider: pigeon.provider ?? "kimi-coding",
+    modelId: pigeon.modelId ?? modelId,
+    temperature: pigeon.temperature ?? null,
+    thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
+    maxOutputTokens: pigeon.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+  };
 }
 
 // 镜像的标识：镜像 ID（内容摘要），不用可变的标签——同一标签重建后 ID 即变，已落盘的人的基准不再复用
@@ -143,15 +160,7 @@ export async function runStreamExperiment(
   // 身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：开跑前写入或比对，不一致即拒绝续跑——在起网关与容器之前做
   const imageId = imageIdOf(options.image, docker);
   const pigeonSettings =
-    options.pigeon === undefined
-      ? undefined
-      : {
-          provider: options.pigeon.provider ?? "kimi-coding",
-          modelId: options.pigeon.modelId ?? modelId,
-          temperature: options.pigeon.temperature ?? null,
-          thinking: options.pigeon.thinking ?? null,
-          maxOutputTokens: options.pigeon.maxOutputTokens ?? null,
-        };
+    options.pigeon === undefined ? undefined : effectivePigeonSettings(options.pigeon, modelId);
   const miniSettings =
     options.minimalCommand === undefined
       ? undefined
