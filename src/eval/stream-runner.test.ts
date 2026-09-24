@@ -661,6 +661,27 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("交给 agent 的人写测试集是人在该步树里的测试与测试辅助文件，不含 agent 早先步骤落地的自己的测试", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1)
+          write(input.target.root, { "src/a.txt": "alpha\n", "src/agent.test.sh": "true\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      assert.deepEqual(
+        agent.calls.map((c) => [...(c.humanTestFiles ?? [])].sort()),
+        [
+          ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+          ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+        ]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("测量与判题的产物用完即清：下一步开始时，工作区里没有判题报告，测量副本目录是空的", async () => {
     const t = await toy();
     try {

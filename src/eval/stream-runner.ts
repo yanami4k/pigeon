@@ -106,6 +106,8 @@ export interface StepAgentInput {
   workDir: string;
   // 经网关时，这个作业的模型接入地址（决策 155）
   modelBaseUrl?: string;
+  // 人在这一步的树里的测试与测试辅助文件：回炉验证前只还原（并计数）这些，agent 早先步骤落地的自己的测试不算
+  humanTestFiles?: ReadonlySet<string>;
 }
 
 // 网关对跑批器露出的两样：作业的接入地址、作业的计量
@@ -821,6 +823,15 @@ async function runStep(
           timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
         },
         workDir: jobDir,
+        humanTestFiles: new Set(
+          options.human
+            .tree(step.commit)
+            .map((e) => e.path)
+            .filter((p) => {
+              const kind = options.runtime.profile.classifyFile(p);
+              return kind === "test" || kind === "testaux";
+            })
+        ),
         ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
       });
     } finally {

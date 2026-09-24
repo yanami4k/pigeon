@@ -513,6 +513,69 @@ test("Pigeon agent：验证前把人写测试还原成开工时的版本——ag
   }
 });
 
+test("Pigeon agent：回炉验证前只还原并计数人在这一步的测试；agent 早先落地的自己的测试随它改，不还原、不计数", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
+  // 开工时已落地：人写的 check.sh 与 agent 早先步骤写的 agent_check.sh（按归类两者都是测试）
+  writeFileSync(join(ws.testbed, "check.sh"), "grep -qx fixed a.txt\n");
+  writeFileSync(join(ws.testbed, "agent_check.sh"), "grep -qx fixed a.txt\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "tests");
+  try {
+    const agent = pigeonStepAgent({
+      streamFn: createFakeStreamFn({
+        replies: [
+          {
+            text: "修代码，也改自己早先的测试",
+            toolCalls: [
+              {
+                name: "edit_file",
+                args: { path: "a.txt", old_string: "bug\n", new_string: "fixed\n" },
+              },
+              {
+                name: "edit_file",
+                args: {
+                  path: "agent_check.sh",
+                  old_string: "grep -qx fixed a.txt\n",
+                  new_string: "grep -q fixed a.txt\n",
+                },
+              },
+            ],
+          },
+          { text: "好了" },
+        ],
+      }),
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+      humanTestFile: (file) => file.endsWith("check.sh"),
+    });
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: {
+          steps: [{ name: "测试", command: "sh check.sh" }],
+          command: "sh check.sh",
+          timeoutMs: 60_000,
+        },
+        humanTestFiles: new Set(["check.sh"]),
+      })
+    );
+    assert.equal(out.repair?.finalVerdict, "pass");
+    assert.equal(out.repair?.humanTestRestores, 0);
+    assert.equal(
+      readFileSync(join(ws.testbed, "agent_check.sh"), "utf8"),
+      "grep -q fixed a.txt\n",
+      "agent 自己的测试保留它的改动"
+    );
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
 test("Pigeon agent：不开回炉的条件不验证、不撤回，结果不带回炉字段", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);

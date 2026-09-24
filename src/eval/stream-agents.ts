@@ -128,9 +128,12 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                   source: "project" as const,
                 },
                 repairRounds,
-                ...(options.humanTestFile !== undefined
-                  ? { protectedFiles: options.humanTestFile }
-                  : {}),
+                // 跑批器给了人在这一步的测试集就只认它（agent 早先落地的自己的测试不还原、不计数），否则按归类
+                ...(input.humanTestFiles !== undefined
+                  ? { protectedFiles: (p: string) => input.humanTestFiles?.has(p) === true }
+                  : options.humanTestFile !== undefined
+                    ? { protectedFiles: options.humanTestFile }
+                    : {}),
               }
             : {}),
           ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
