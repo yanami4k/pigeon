@@ -6,6 +6,9 @@ import type { StreamWorkspace } from "./stream-workspace.ts";
 
 // 本仓库单条用例的超时：卡死的用例在这里记失败，不拖到整次运行的墙钟（探针、判题、全量测量、人的基准与验证门同一个）
 export const PIGEON_TEST_TIMEOUT_MS = 120_000;
+// 本仓库验证门测试步与全量测量都跳过的一条用例（名字前缀，按 node 的 --test-skip-pattern 匹配）：它连续生成两个会话 ID
+// 并断言两者按字典序排列，而同一毫秒内生成的 ULID 随机部分不保证单调，人的代码上也时过时不过，判不出 agent 的代码好坏
+export const PIGEON_FLAKY_TEST = "listSessionIds：列目录得会话清单（D1：ULID 字典序即时间序）";
 
 // 验证的一个命名分步：一行命令（经 sh 执行），可指定在工作区根下的哪个目录执行。形状与 .pigeon/verify.json 的
 // 分步验证配置一致；跑批器把它写进每个作业的治理根，回炉按它逐步验证；验证门（维护步的判定）由同一份分步派生
@@ -15,15 +18,16 @@ export interface StreamVerifyStep {
   cwd?: string;
 }
 
-// 本仓库四步：与 package.json 里的同名脚本 lint、check、test、deps 等价（清单范围内每个提交的这几个脚本逐字相同），
+// 本仓库流三步（159 修订）：与 package.json 里的同名脚本 check、test、deps 等价（清单范围内每个提交的这几个脚本逐字相同），
 // 但写成显式命令、不经 npm run——验证门不能随 agent 改 package.json 而放松。工具取依赖目录里的可执行文件
-// （npm run 同样是把它放进 PATH 再执行）；测试步另加单用例超时
+// （npm run 同样是把它放进 PATH 再执行）；测试步另加单用例超时，并跳过那条时过时不过的用例。
+// 实验中不含格式步（lint 脚本的 biome check）：人的代码在不少中间提交上没过格式检查，与 strands 同样处理——
+// 格式偏差用 biome check 另算、计入次要指标，不进验证门、不反馈给 agent。日常使用本仓库的验证配置仍为四步
 export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
-  { name: "格式", command: "node_modules/.bin/biome check ." },
   { name: "类型", command: "node_modules/.bin/tsc -p tsconfig.json --noEmit" },
   {
     name: "测试",
-    command: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} "src/**/*.test.ts"`,
+    command: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} --test-skip-pattern="${PIGEON_FLAKY_TEST}" "src/**/*.test.ts"`,
   },
   { name: "分层", command: "node_modules/.bin/dependency-cruiser src" },
 ];
@@ -282,10 +286,11 @@ export async function runJunitOnce(
 export const pigeonRuntime: StreamRepoRuntime = {
   profile: pigeonProfile,
   verifySteps: PIGEON_VERIFY_STEPS,
-  casesCommand: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} --test-reporter=junit --test-reporter=spec <测试文件…>`,
+  casesCommand: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} --test-skip-pattern=${PIGEON_FLAKY_TEST} --test-reporter=junit --test-reporter=spec <测试文件…>`,
   quality: {
     type: { command: ["node_modules/.bin/tsc", "--noEmit", "-p", "."], pattern: /error TS\d+/ },
-    format: { command: ["node_modules/.bin/biome", "format", "."], pattern: /Found (\d+) errors?/ },
+    // 格式偏差：与原先验证门里的格式步同一条命令（biome check），只计入次要指标
+    format: { command: ["node_modules/.bin/biome", "check", "."], pattern: /Found (\d+) errors?/ },
     layer: {
       command: ["node_modules/.bin/depcruise", "src"],
       pattern: /(\d+) dependency violations?/,
@@ -299,6 +304,7 @@ export const pigeonRuntime: StreamRepoRuntime = {
           "node",
           "--test",
           `--test-timeout=${PIGEON_TEST_TIMEOUT_MS}`,
+          `--test-skip-pattern=${PIGEON_FLAKY_TEST}`,
           "--test-reporter=junit",
           `--test-reporter-destination=${junit}`,
           // 标准输出另留一份逐条报告：失败归因要从报错文案里取找不到的文件与名字

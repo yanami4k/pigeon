@@ -7,6 +7,7 @@ import {
   allPassed,
   failedStepsOf,
   gateFromSteps,
+  PIGEON_FLAKY_TEST,
   PIGEON_TEST_TIMEOUT_MS,
   PIGEON_VERIFY_STEPS,
   pigeonRuntime,
@@ -308,18 +309,42 @@ test("pigeon 逐用例结果：单条用例带 120 秒超时，卡死的用例�
   assert.ok(commands.some((c) => c[0] === "node" && c.includes("--test-timeout=120000")));
 });
 
-test("分步验证：本仓库四步（格式、类型、测试、分层），测试步带 120 秒单用例超时；strands 三步（ruff、mypy、pytest）都在 strands-py 下执行", () => {
+test("pigeon：那条时过时不过的用例（同一毫秒内的 ULID 随机部分不保证单调）在验证门测试步与全量测量里都跳过", async () => {
+  assert.equal(PIGEON_FLAKY_TEST, "listSessionIds：列目录得会话清单（D1：ULID 字典序即时间序）");
+  const gate = PIGEON_VERIFY_STEPS.find((s) => s.name === "测试")?.command ?? "";
+  assert.ok(gate.includes(`--test-skip-pattern="${PIGEON_FLAKY_TEST}"`), gate);
+  const commands: string[][] = [];
+  const ws = {
+    root: "/w",
+    run: async (command: readonly string[]) => {
+      commands.push([...command]);
+      return { exitCode: 0, timedOut: false, output: "" };
+    },
+    readFile: async () => Buffer.from(""),
+  } as unknown as StreamWorkspace;
+  await pigeonRuntime.runCases(ws, ["src/a.test.ts"], { timeoutMs: 60_000, scratch: "/w/.git" });
+  assert.ok(
+    commands.some((c) => c[0] === "node" && c.includes(`--test-skip-pattern=${PIGEON_FLAKY_TEST}`))
+  );
+});
+
+test("分步验证：本仓库流三步（类型、测试、分层；格式另计为次要指标），测试步带 120 秒单用例超时；strands 三步（ruff、mypy、pytest）都在 strands-py 下执行", () => {
   assert.deepEqual(
     PIGEON_VERIFY_STEPS.map((s) => s.name),
-    ["格式", "类型", "测试", "分层"]
+    ["类型", "测试", "分层"]
   );
+  // 实验中验证门不含格式步（159 修订）：格式偏差用 biome check 另算，计入次要指标、不反馈给 agent
+  assert.deepEqual(pigeonRuntime.quality.format?.command, [
+    "node_modules/.bin/biome",
+    "check",
+    ".",
+  ]);
   // 显式命令，不经 npm run 脚本（agent 改 package.json 就能放松验证门）；与清单范围内各提交的同名脚本逐字等价
   assert.deepEqual(
     PIGEON_VERIFY_STEPS.map((s) => s.command),
     [
-      "node_modules/.bin/biome check .",
       "node_modules/.bin/tsc -p tsconfig.json --noEmit",
-      'node --test --test-timeout=120000 "src/**/*.test.ts"',
+      `node --test --test-timeout=120000 --test-skip-pattern="${PIGEON_FLAKY_TEST}" "src/**/*.test.ts"`,
       "node_modules/.bin/dependency-cruiser src",
     ]
   );
