@@ -8,10 +8,12 @@ import { LimitController } from "./model-limits.ts";
 import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
-import { gateFromSteps } from "./stream-profiles.ts";
+import { gateFromSteps, strandsRuntime } from "./stream-profiles.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
+  commandDigest,
   compareRuns,
+  EQUIVALENT_BASELINE_COMMANDS,
   ReferenceCases,
   runStreams,
   type StepAgent,
@@ -705,6 +707,91 @@ test("人的基准与开跑前检查的缓存带身份（镜像、跑用例的�
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("等价摘要：旧摘要在等价表里且结果没有挂起迹象的读回；在表里但有卡住用例、检查门没通过的，以及不在表里的，一律重算", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-equivalent-"));
+  try {
+    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
+    const human = gitHumanRepo(join(base, "human"));
+    mkdirSync(join(base, "ref"));
+    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+    await ws.init(human.bundle(commit), commit);
+    const cacheDir = join(base, "cache");
+    const image = "sha256:aaa";
+    const gate = ["sh", "-c", "exit 0"];
+    const equivalentCommands = new Map([
+      ["old-cases", commandDigest(toyRuntime.casesCommand)],
+      ["old-gate", commandDigest(JSON.stringify(gate))],
+    ]);
+    const reference = new ReferenceCases({
+      reference: ws,
+      runtime: toyRuntime,
+      cacheDir,
+      image,
+      equivalentCommands,
+    });
+    const casesFile = join(cacheDir, `${commit}.json`);
+    const gateFile = join(cacheDir, `${commit}.gate.json`);
+    const baseline = (extra: object) => ({
+      cases: [{ id: "src/ok.test.sh::case", file: "src/ok.test.sh", outcome: "passed" }],
+      passing: ["src/ok.test.sh::case"],
+      flaky: [],
+      slowest: { id: "src/ok.test.sh::case", seconds: 1 },
+      runs: [{ peakBytes: null, limitBytes: null, wallMs: 1000 }],
+      ...extra,
+    });
+    // 旧摘要在表里、没有挂起迹象（旧文件没有 stuck 字段：最慢用例与每遍墙钟都远低于上限）：按等价读回
+    writeFileSync(
+      casesFile,
+      JSON.stringify(baseline({ identity: { image, command: "old-cases" } }))
+    );
+    assert.equal(reference.has(commit), true);
+    // 旧摘要在表里，但有卡住的用例：重算
+    writeFileSync(
+      casesFile,
+      JSON.stringify(
+        baseline({ identity: { image, command: "old-cases" }, stuck: ["src/ok.test.sh::case"] })
+      )
+    );
+    assert.equal(reference.has(commit), false, "有卡住用例：不按等价读回");
+    // 旧文件没有 stuck 字段，但最慢用例达到了单条超时：同样重算
+    writeFileSync(
+      casesFile,
+      JSON.stringify(
+        baseline({
+          identity: { image, command: "old-cases" },
+          slowest: { id: "src/ok.test.sh::case", seconds: 95 },
+        })
+      )
+    );
+    assert.equal(reference.has(commit), false, "有超时迹象：不按等价读回");
+    // 不在表里：重算
+    writeFileSync(casesFile, JSON.stringify(baseline({ identity: { image, command: "other" } })));
+    assert.equal(reference.has(commit), false);
+    // 开跑前检查：旧摘要在表里且通过的读回；没通过的重算
+    const check = { failedSteps: [], wallMs: 1, outputTail: "" };
+    writeFileSync(
+      gateFile,
+      JSON.stringify({ ...check, passed: true, identity: { image, command: "old-gate" } })
+    );
+    assert.equal(reference.hasGate(commit, gate), true);
+    writeFileSync(
+      gateFile,
+      JSON.stringify({ ...check, passed: false, identity: { image, command: "old-gate" } })
+    );
+    assert.equal(reference.hasGate(commit, gate), false, "检查门没通过：不按等价读回");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("等价表里的新摘要就是当前 strands 外壳与检查门命令的摘要：外壳一改，这条用例即提醒重新审视等价", () => {
+  const current = new Set([
+    commandDigest(strandsRuntime.casesCommand),
+    commandDigest(JSON.stringify(gateFromSteps(strandsRuntime.verifySteps))),
+  ]);
+  assert.deepEqual(new Set(EQUIVALENT_BASELINE_COMMANDS.values()), current);
 });
 
 test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、上限与墙钟；峰值超过上限的 75% 即告警", async () => {

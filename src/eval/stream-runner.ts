@@ -34,6 +34,7 @@ import {
   countQuality,
   failedStepsOf,
   gateFromSteps,
+  STRANDS_CASE_TIMEOUT_SEC,
   type StreamRepoRuntime,
   type StreamVerifyStep,
   verifyConfigFile,
@@ -811,17 +812,41 @@ export function commandDigest(command: string): string {
   return createHash("sha256").update(command).digest("hex").slice(0, 16);
 }
 
+// 等价摘要表：旧命令摘要 → 新命令摘要。身份里的摘要在表里、且该结果没有任何挂起迹象（见 hangFree），按等价读回；
+// 其余一律重算。strands 两条：fbbb959 之前的外壳与检查门命令，与现在的只差显式的 --timeout、--timeout-method signal
+// 与 --rerun-except Timeout。这三者只在用例挂起时起作用（仓库配置本就是 90 秒 signal 超时；不同处只在超时失败的用例
+// 不再重跑），没有卡住或超时用例的结果，逐用例结果不受影响。现在的外壳或检查门命令再改，表里的新摘要即对不上，须重新审视
+export const EQUIVALENT_BASELINE_COMMANDS: ReadonlyMap<string, string> = new Map([
+  // strands 跑用例的外壳
+  ["da2746ca28858993", "47c962cd27b0eefe"],
+  // strands 检查门命令
+  ["448eea1b5f30a457", "e5c99abd87a6bf24"],
+]);
+
 function sameIdentity(saved: unknown, want: BaselineIdentity): boolean {
   const s = saved as Partial<BaselineIdentity> | undefined;
   return s !== undefined && s.image === want.image && s.command === want.command;
 }
 
-// 读落盘结果：文件不在、读不出或身份不符（没有身份的旧文件同样算不符）都当作没有
-function readIdentified<T>(file: string, want: BaselineIdentity): T | undefined {
+// 读落盘结果：身份相符即读回；镜像相同、命令摘要按等价表对得上、且结果没有挂起迹象的也读回；
+// 文件不在、读不出、没有身份（旧文件）或身份不符都当作没有
+function readIdentified<T>(
+  file: string,
+  want: BaselineIdentity,
+  equivalent: ReadonlyMap<string, string>,
+  hangFree: (saved: T) => boolean
+): T | undefined {
   if (!existsSync(file)) return undefined;
   try {
     const saved = JSON.parse(readFileSync(file, "utf8")) as T & { identity?: unknown };
-    return sameIdentity(saved.identity, want) ? saved : undefined;
+    if (sameIdentity(saved.identity, want)) return saved;
+    const s = saved.identity as Partial<BaselineIdentity> | undefined;
+    const viaTable =
+      s !== undefined &&
+      s.image === want.image &&
+      s.command !== undefined &&
+      equivalent.get(s.command) === want.command;
+    return viaTable && hangFree(saved) ? saved : undefined;
   } catch {
     return undefined;
   }
@@ -835,6 +860,7 @@ export class ReferenceCases implements HumanReferenceCases {
   private readonly runtime: StreamRepoRuntime;
   private readonly cacheDir: string;
   private readonly image: string;
+  private readonly equivalent: ReadonlyMap<string, string>;
   private readonly timeoutMs: number;
   private readonly repeat: number;
   private readonly cgroupDir: string;
@@ -847,6 +873,8 @@ export class ReferenceCases implements HumanReferenceCases {
     cacheDir: string;
     // 参考容器所用镜像的标识（镜像 ID）：缓存身份之一
     image: string;
+    // 等价摘要表（缺省 EQUIVALENT_BASELINE_COMMANDS）
+    equivalentCommands?: ReadonlyMap<string, string>;
     timeoutMs?: number;
     repeat?: number;
     // 容器内 cgroup v2 的目录（测试时指向假的目录）；告警出口缺省为标准错误
@@ -857,6 +885,7 @@ export class ReferenceCases implements HumanReferenceCases {
     this.runtime = input.runtime;
     this.cacheDir = input.cacheDir;
     this.image = input.image;
+    this.equivalent = input.equivalentCommands ?? EQUIVALENT_BASELINE_COMMANDS;
     this.timeoutMs = input.timeoutMs ?? 1_800_000;
     this.repeat = Math.max(1, input.repeat ?? 2);
     this.cgroupDir = input.cgroupDir ?? "/sys/fs/cgroup";
@@ -872,11 +901,35 @@ export class ReferenceCases implements HumanReferenceCases {
     return { image: this.image, command: commandDigest(JSON.stringify(command)) };
   }
 
+  // 用例基准没有挂起迹象：记了卡住的用例即为空；没记的（旧文件）以最慢用例未达单条超时、每遍墙钟未达外层上限为证
+  private casesHangFree(saved: HumanBaseline & { stuck?: string[] }): boolean {
+    if (saved.stuck !== undefined && saved.stuck.length > 0) return false;
+    if ((saved.slowest?.seconds ?? 0) >= STRANDS_CASE_TIMEOUT_SEC) return false;
+    return (saved.runs ?? []).every((r) => r.wallMs < this.timeoutMs);
+  }
+
+  private readCases(commit: string): HumanBaseline | undefined {
+    return readIdentified<HumanBaseline & { stuck?: string[] }>(
+      path.join(this.cacheDir, `${commit}.json`),
+      this.casesIdentity(),
+      this.equivalent,
+      (saved) => this.casesHangFree(saved)
+    );
+  }
+
+  // 检查门结果按等价读回的前提：通过（没通过的可能正是超时或挂起所致）
+  private readGate(commit: string, command: readonly string[]): GateCheck | undefined {
+    return readIdentified<GateCheck>(
+      path.join(this.cacheDir, `${commit}.gate.json`),
+      this.gateIdentity(command),
+      this.equivalent,
+      (saved) => saved.passed
+    );
+  }
+
   // 这个提交的基准是否已落盘且身份相符（提前单独算过的直接读）
   has(commit: string): boolean {
-    return (
-      readIdentified(path.join(this.cacheDir, `${commit}.json`), this.casesIdentity()) !== undefined
-    );
+    return this.readCases(commit) !== undefined;
   }
 
   casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
@@ -888,12 +941,7 @@ export class ReferenceCases implements HumanReferenceCases {
 
   // 这个提交上人的代码是否已用这条检查门命令跑过（开跑前置检查），且身份相符
   hasGate(commit: string, command: readonly string[]): boolean {
-    return (
-      readIdentified(
-        path.join(this.cacheDir, `${commit}.gate.json`),
-        this.gateIdentity(command)
-      ) !== undefined
-    );
+    return this.readGate(commit, command) !== undefined;
   }
 
   // 开跑前置检查：人的代码在这个提交上跑验证门。结果按提交落盘，与基准同一排队
@@ -901,7 +949,7 @@ export class ReferenceCases implements HumanReferenceCases {
     const run = this.queue.then(async (): Promise<GateCheck> => {
       const file = path.join(this.cacheDir, `${commit}.gate.json`);
       const identity = this.gateIdentity(command);
-      const saved = readIdentified<GateCheck>(file, identity);
+      const saved = this.readGate(commit, command);
       if (saved !== undefined) return saved;
       const ws = this.reference.ws;
       await this.reference.checkout(commit);
@@ -927,7 +975,7 @@ export class ReferenceCases implements HumanReferenceCases {
   private async compute(commit: string, tests: readonly string[]): Promise<HumanBaseline> {
     const file = path.join(this.cacheDir, `${commit}.json`);
     const identity = this.casesIdentity();
-    const saved = readIdentified<HumanBaseline>(file, identity);
+    const saved = this.readCases(commit);
     if (saved !== undefined) {
       return { ...saved, runs: saved.runs ?? [], slowest: saved.slowest ?? null };
     }
@@ -939,6 +987,8 @@ export class ReferenceCases implements HumanReferenceCases {
     }
     const runs: TestCaseResult[][] = [];
     const meta: BaselineRun[] = [];
+    // 各遍里卡住、被记为失败的用例（并集）：落盘供日后判断这份基准有没有挂起迹象
+    const stuck = new Set<string>();
     for (let k = 0; k < this.repeat; k++) {
       const started = Date.now();
       const {
@@ -966,9 +1016,10 @@ export class ReferenceCases implements HumanReferenceCases {
         );
       }
       runs.push(run.cases);
+      for (const id of run.stuck) stuck.add(id);
     }
     const baseline = { ...compareRuns(runs), runs: meta };
-    writeAtomic(file, JSON.stringify({ ...baseline, identity }));
+    writeAtomic(file, JSON.stringify({ ...baseline, stuck: [...stuck], identity }));
     return baseline;
   }
 
