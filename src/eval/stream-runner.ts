@@ -955,7 +955,7 @@ export function commandDigest(command: string): string {
 }
 
 // 等价摘要表：旧命令摘要 → 新命令摘要。身份里的摘要在表里、且该结果没有任何挂起迹象（见 hangFree），按等价读回；
-// 其余一律重算。strands 两条：fbbb959 之前的外壳与检查门命令，与现在的只差显式的 --timeout、--timeout-method signal
+// 其余一律重算。strands 两条：bd917c2 之前的外壳与检查门命令，与现在的只差显式的 --timeout、--timeout-method signal
 // 与 --rerun-except Timeout。这三者只在用例挂起时起作用（仓库配置本就是 90 秒 signal 超时；不同处只在超时失败的用例
 // 不再重跑），没有卡住或超时用例的结果，逐用例结果不受影响。现在的外壳或检查门命令再改，表里的新摘要即对不上，须重新审视
 export const EQUIVALENT_BASELINE_COMMANDS: ReadonlyMap<string, string> = new Map([
