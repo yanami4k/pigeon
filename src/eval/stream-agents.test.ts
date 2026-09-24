@@ -525,6 +525,112 @@ for (const condition of ["full", "no-memory", "no-gate"] as const) {
   });
 }
 
+test("Pigeon agent：开工前已来了限额信号（起点记好之后、第一轮之前）即一轮都不跑；验证进行中来了信号，验证一结束即停、不回炉不撤回", async () => {
+  // 开工前：控制器已是暂停状态
+  {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+    const ws = containerWorkspace(dir);
+    try {
+      const inner = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
+      const agent = pigeonStepAgent({
+        streamFn: inner,
+        yolo: true,
+        docker: ws.docker,
+        homeDir: join(dir, "home"),
+        limits: { state: "paused", signals: 1 },
+      });
+      const out = await agent.run(
+        input(join(dir, "job"), {
+          condition: CONDITION_SPECS.full,
+          target: { container: "box", root: ws.containerRoot },
+          verify: FIXED_GATE,
+        })
+      );
+      assert.equal(out.status, "aborted");
+      assert.match(out.interrupted ?? "", /限额信号/);
+      assert.equal(inner.calls.length, 0, "一轮都没跑");
+    } finally {
+      ws.cleanup();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    }
+  }
+  // 验证进行中
+  {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+    const ws = containerWorkspace(dir);
+    try {
+      // 每轮都改错：第 4 次验证（修满 3 轮后的最后一次）不过即要撤回——中止在这次验证中途到达
+      const inner = createFakeStreamFn({
+        replies: [
+          editTo("bug", "w1"),
+          { text: "好了" },
+          editTo("w1", "w2"),
+          { text: "好了" },
+          editTo("w2", "w3"),
+          { text: "好了" },
+          editTo("w3", "w4"),
+          { text: "好了" },
+        ],
+      });
+      const listeners = new Set<() => void>();
+      const limits = {
+        state: "running",
+        signals: 0,
+        subscribe(listener: () => void) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      };
+      const agent = pigeonStepAgent({
+        streamFn: inner,
+        yolo: true,
+        docker: ws.docker,
+        homeDir: join(dir, "home"),
+        limits,
+      });
+      const counter = join(ws.testbed, ".git", "verify-count");
+      const running = agent.run(
+        input(join(dir, "job"), {
+          condition: CONDITION_SPECS.full,
+          target: { container: "box", root: ws.containerRoot },
+          verify: {
+            steps: [
+              {
+                name: "验证",
+                command: "echo x >> .git/verify-count; sleep 2; grep -qx fixed a.txt",
+              },
+            ],
+            command: "echo x >> .git/verify-count; sleep 2; grep -qx fixed a.txt",
+            timeoutMs: 60_000,
+          },
+        })
+      );
+      const verifies = () =>
+        existsSync(counter)
+          ? readFileSync(counter, "utf8")
+              .split("\n")
+              .filter((l) => l).length
+          : 0;
+      while (verifies() < 4) await new Promise((r) => setTimeout(r, 50));
+      limits.signals += 1;
+      for (const l of [...listeners]) l();
+      const out = await running;
+      assert.equal(out.status, "aborted");
+      assert.match(out.interrupted ?? "", /限额信号/);
+      assert.equal(inner.calls.length, 8, "验证之后没有再回炉");
+      assert.equal(out.repair, null);
+      assert.equal(
+        readFileSync(join(ws.testbed, "a.txt"), "utf8"),
+        "w4\n",
+        "没有撤回（由跑批器作废）"
+      );
+    } finally {
+      ws.cleanup();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    }
+  }
+});
+
 test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);

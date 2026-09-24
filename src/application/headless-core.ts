@@ -350,7 +350,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   };
   options.abortSignal?.addEventListener("abort", onAbort, { once: true });
   if (options.abortSignal?.aborted === true) onAbort();
-  let status: HeadlessStatus;
+  let status: HeadlessStatus = "unknown";
   let errorMessage: string | undefined;
   let verification: HeadlessRunResult["verification"];
   let repair: HeadlessRepairSummary | undefined;
@@ -423,11 +423,14 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     if (repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined) {
       stepStart = await options.workspaceHost.markStepStart();
     }
-    let run =
-      options.continueFromHistory === true && handle.continueRun !== undefined
+    // 开工前已被外部中止（记起点的空档里到达）：一轮都不跑
+    let run = externallyAborted
+      ? undefined
+      : options.continueFromHistory === true && handle.continueRun !== undefined
         ? await handle.continueRun()
         : await handle.run(options.task);
-    for (;;) {
+    if (run === undefined) status = "aborted";
+    while (run !== undefined) {
       status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
       errorMessage = run.errorMessage;
       // 外部中止：这一步由调用方作废，不验证、不回炉、不撤回
@@ -480,6 +483,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       const { verdict } = verified.outcome;
       lastVerdict = verdict;
       verification = { verdict, recorded: verified.record !== undefined };
+      // 验证进行中来了外部中止：验证一结束即停，不回炉、不撤回
+      if (externallyAborted) {
+        status = "aborted";
+        break;
+      }
       // 通过即结束；无法判定不回炉，按现有口径记为未知
       if (verdict !== "fail") {
         repair = {
@@ -566,7 +574,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   );
   // M7（决策 071）：尝试收尾后在工作区独立执行验证命令（运行面没装起来、没有 Run 时不跑）；
   // 回炉开启时验证已在释放之前做过，不再跑
-  if (repairRounds === 0 && options.verify !== undefined && metricsBefore.runId !== undefined) {
+  if (
+    repairRounds === 0 &&
+    options.verify !== undefined &&
+    metricsBefore.runId !== undefined &&
+    !externallyAborted
+  ) {
     const log = new JsonlEventLog(sessionsDir, sessionId);
     try {
       const verified = await verifyAttempt({
