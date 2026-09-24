@@ -44,6 +44,9 @@ function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAg
   };
 }
 
+// 假 docker：不管参数，清理残留进程时一律回报"这一轮找到 0 个"（本机没有这些用例用的容器）
+const NO_RESIDUE = [process.execPath, "-e", "process.stdout.write('0\\n')"];
+
 test("命令式 agent：请求文件带题面、工作说明、容器与预算，结果文件读回终态、轮数与用量", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   try {
@@ -57,15 +60,16 @@ test("命令式 agent：请求文件带题面、工作说明、容器与预算�
         "writeFileSync(result, JSON.stringify({ status: 'completed', turns: r.maxTurns - 140, usage: { input: 7, output: 3, totalTokens: 10 } }));",
       ].join("\n")
     );
-    const agent = commandStepAgent({ command: [process.execPath, launcher] });
+    const agent = commandStepAgent({ command: [process.execPath, launcher], docker: NO_RESIDUE });
     const out = await agent.run(input(dir));
     assert.deepEqual(
       [out.status, out.turns, out.usage.totalTokens, out.usage.input, out.repair],
       ["completed", 10, 10, 7, null]
     );
-    const request = JSON.parse(
+    const { stepMarker, ...request } = JSON.parse(
       readFileSync(join(dir, "minimal", "step-7", "request.json"), "utf8")
     );
+    assert.match(stepMarker, /^pigeon-step-[0-9a-f]{16}$/);
     assert.deepEqual(request, {
       prompt: "do it",
       directive: STREAM_WORK_DIRECTIVE,
@@ -73,7 +77,7 @@ test("命令式 agent：请求文件带题面、工作说明、容器与预算�
       root: "/testbed",
       maxTurns: 150,
       wallClockMs: 60_000,
-      docker: ["docker"],
+      docker: NO_RESIDUE,
       modelBaseUrl: null,
       model: null,
     });
@@ -87,7 +91,11 @@ test("命令式 agent：墙钟用满连同进程一起杀掉，记 wall-clock-li
   try {
     const hang = join(dir, "hang.mjs");
     writeFileSync(hang, "setInterval(() => {}, 1000);\n");
-    const slow = commandStepAgent({ command: [process.execPath, hang], graceMs: 0 });
+    const slow = commandStepAgent({
+      command: [process.execPath, hang],
+      graceMs: 0,
+      docker: NO_RESIDUE,
+    });
     const timed = await slow.run(input(dir, { budget: { maxTurns: 1, wallClockMs: 300 } }));
     assert.equal(timed.status, "wall-clock-limit");
     const cut = join(dir, "cut.mjs");
@@ -98,9 +106,10 @@ test("命令式 agent：墙钟用满连同进程一起杀掉，记 wall-clock-li
         "writeFileSync(process.argv[3], JSON.stringify({ status: 'failed', turns: 2, interrupted: '限额' }));",
       ].join("\n")
     );
-    const interrupted = await commandStepAgent({ command: [process.execPath, cut] }).run(
-      input(dir)
-    );
+    const interrupted = await commandStepAgent({
+      command: [process.execPath, cut],
+      docker: NO_RESIDUE,
+    }).run(input(dir));
     assert.equal(interrupted.interrupted, "限额");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -113,13 +122,74 @@ test("命令式 agent：限额暂停即杀掉启动器，记为被打断（整�
     const hang = join(dir, "hang.mjs");
     writeFileSync(hang, "setInterval(() => {}, 1000);\n");
     const limits = { state: "running" };
-    const agent = commandStepAgent({ command: [process.execPath, hang], limits });
+    const agent = commandStepAgent({
+      command: [process.execPath, hang],
+      limits,
+      docker: NO_RESIDUE,
+    });
     setTimeout(() => {
       limits.state = "paused";
     }, 200);
     const out = await agent.run(input(dir));
     assert.equal(out.interrupted, "限额信号：最简 agent 已中止");
     assert.ok(out.wallMs < 30_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("命令式 agent：这一步在容器里启动的进程都带本步标记，启动器结束（含被杀）后按标记清掉、确认没有残留", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  try {
+    // 假 docker：记下每次调用的参数；清理脚本的输出为"还剩几个"，这里恒为 0
+    const log = join(dir, "docker.log");
+    const fakeDocker = join(dir, "docker.mjs");
+    writeFileSync(
+      fakeDocker,
+      [
+        'import { appendFileSync } from "node:fs";',
+        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+        'process.stdout.write("0\\n");',
+      ].join("\n")
+    );
+    const done = join(dir, "done.mjs");
+    writeFileSync(
+      done,
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.argv[3], JSON.stringify({ status: 'completed', turns: 1 }));",
+      ].join("\n")
+    );
+    const hang = join(dir, "hang.mjs");
+    writeFileSync(hang, "setInterval(() => {}, 1000);\n");
+    const docker = [process.execPath, fakeDocker];
+    const request = () =>
+      JSON.parse(readFileSync(join(dir, "minimal", "step-7", "request.json"), "utf8")) as {
+        stepMarker: string;
+      };
+    const cleanups = () =>
+      readFileSync(log, "utf8")
+        .split("\n")
+        .filter((l) => l !== "")
+        .map((l) => JSON.parse(l) as string[])
+        .filter((a) => a[0] === "exec");
+    // 正常结束
+    await commandStepAgent({ command: [process.execPath, done], docker }).run(input(dir));
+    const first = request().stepMarker;
+    assert.match(first, /^pigeon-step-/);
+    assert.ok(cleanups().some((a) => a.includes("box") && a.includes(first)));
+    // 墙钟用满被杀：同样清理，且换了新的标记
+    const before = cleanups().length;
+    await commandStepAgent({ command: [process.execPath, hang], docker, graceMs: 0 }).run(
+      input(dir, { budget: { maxTurns: 1, wallClockMs: 300 } })
+    );
+    const second = request().stepMarker;
+    assert.notEqual(second, first);
+    assert.ok(
+      cleanups()
+        .slice(before)
+        .some((a) => a.includes(second))
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -145,7 +215,9 @@ test("命令式 agent：启动器的环境里没有密钥类变量（真 key 只
         "writeFileSync(process.argv[3], JSON.stringify({ status: 'completed', turns: 1, env: process.env }));",
       ].join("\n")
     );
-    await commandStepAgent({ command: [process.execPath, dump] }).run(input(dir));
+    await commandStepAgent({ command: [process.execPath, dump], docker: NO_RESIDUE }).run(
+      input(dir)
+    );
     const seen = JSON.parse(
       readFileSync(join(dir, "minimal", "step-7", "result.json"), "utf8")
     ) as { env: Record<string, string> };
@@ -183,7 +255,12 @@ test("命令式 agent：状态没变、只来了限额信号（例如并发受�
         return () => listeners.delete(listener);
       },
     };
-    const agent = commandStepAgent({ command: [process.execPath, hang], limits, graceMs: 0 });
+    const agent = commandStepAgent({
+      command: [process.execPath, hang],
+      limits,
+      graceMs: 0,
+      docker: NO_RESIDUE,
+    });
     setTimeout(() => {
       limits.signals += 1;
       for (const listener of listeners) listener();

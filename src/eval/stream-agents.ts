@@ -2,7 +2,8 @@
 //   Pigeon（完整、去掉记忆、去掉验证门与回退）：与外部基准同一条路——进程内经 headless 入口运行，执行端为该流的容器；
 //   最简 agent（099）：宿主上的独立进程，经请求文件拿到题面、容器与预算，命令在该流的容器里执行，结果写回结果文件。
 // 模型接入由各自的 stream-fn / 启动器配置决定；限额的统一处理（第 17、18 条）待定后接在这一层之下。
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { runHeadless } from "../application/headless.ts";
@@ -173,6 +174,42 @@ export function launcherEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return Object.fromEntries(Object.entries(env).filter(([name]) => !SECRET_ENV.test(name)));
 }
 
+// 清掉容器里带本步标记的进程，输出这一轮找到并杀掉的个数（清理命令自身不带标记，不会杀到自己）
+const KILL_MARKED = [
+  'm="PIGEON_STEP_MARKER=$1"; n=0',
+  "for p in /proc/[0-9]*; do",
+  '  pid=$(basename "$p"); [ "$pid" = "$$" ] && continue',
+  '  if { tr "\\000" "\\n" < "$p/environ"; } 2>/dev/null | grep -qx "$m"; then kill -9 "$pid" 2>/dev/null; n=$((n + 1)); fi',
+  "done",
+  'echo "$n"',
+].join("\n");
+
+// 一步结束后清掉最简 agent 在容器里启动、仍在运行的进程：反复清到一轮里找不到为止；清不净（或清理本身失败）返回 false
+async function clearMarkedProcesses(
+  docker: readonly string[],
+  container: string,
+  marker: string
+): Promise<boolean> {
+  const [program = "docker", ...pre] = docker;
+  for (let round = 0; round < 5; round++) {
+    const found = await new Promise<number | null>((resolve) => {
+      execFile(
+        program,
+        [...pre, "exec", container, "sh", "-c", KILL_MARKED, "sh", marker],
+        { timeout: 60_000, windowsHide: true },
+        (error, stdout) => {
+          const n = Number.parseInt(String(stdout).trim(), 10);
+          resolve(error !== null || Number.isNaN(n) ? null : n);
+        }
+      );
+    });
+    if (found === null) return false;
+    if (found === 0) return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
 export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
   return {
     async run(input): Promise<StepAgentResult> {
@@ -180,6 +217,8 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
       mkdirSync(dir, { recursive: true });
       const requestFile = path.join(dir, "request.json");
       const resultFile = path.join(dir, "result.json");
+      // 本步标记：启动器在容器里执行的每条命令都带上它（环境变量 PIGEON_STEP_MARKER），结束后据此清掉残留进程
+      const marker = `pigeon-step-${randomBytes(8).toString("hex")}`;
       writeFileSync(
         requestFile,
         JSON.stringify({
@@ -192,6 +231,7 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
           docker: options.docker ?? ["docker"],
           modelBaseUrl: input.modelBaseUrl ?? null,
           model: options.model ?? null,
+          stepMarker: marker,
         })
       );
       const started = Date.now();
@@ -245,6 +285,19 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
           resolve(why);
         });
       });
+      // 不论怎么结束（正常收尾、墙钟到、限额被杀），先清掉它在容器里留下的进程、确认没有残留，再交回判题与落地
+      if (
+        !(await clearMarkedProcesses(options.docker ?? ["docker"], input.target.container, marker))
+      ) {
+        return {
+          status: "aborted",
+          turns: 0,
+          usage: ZERO_USAGE,
+          wallMs: Date.now() - started,
+          repair: null,
+          interrupted: "最简 agent 在容器里的进程清理不净：这一步作废",
+        };
+      }
       const wallMs = Date.now() - started;
       if (ended === "paused") {
         return {

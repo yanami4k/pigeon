@@ -46,6 +46,9 @@ def main() -> int:
     env_config.pop("environment_class", None)
     env_config["cwd"] = request["root"]
     env_config["executable"] = (request.get("docker") or ["docker"])[0]
+    # 本步标记：在容器里执行的每条命令都带上它，跑批器据此在这一步结束后清掉残留进程
+    if request.get("stepMarker"):
+        env_config["env"] = {**env_config.get("env", {}), "PIGEON_STEP_MARKER": request["stepMarker"]}
     model_config = dict(config["model"])
     model_config["model_name"] = f"anthropic/{request['model']}"
     model_config["model_kwargs"] = {
