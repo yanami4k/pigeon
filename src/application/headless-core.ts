@@ -75,6 +75,8 @@ export interface HeadlessRunOptions {
   wallClockMs?: number;
   // 累计 totalTokens 达到即中止（usage 取自 turn.completed）
   maxTokens?: number;
+  // 外部中止（调用方的限额看守等）：在途的运行立即中止、不再回炉，终态记 aborted，不写撞上限记录
+  abortSignal?: AbortSignal;
   skillRoots?: readonly SkillRoot[];
   memoryRoots?: readonly MemoryRoot[];
   memoryBudgetChars?: number;
@@ -341,6 +343,13 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     options.wallClockMs !== undefined
       ? setTimeout(() => stop("wall-clock-limit"), options.wallClockMs)
       : undefined;
+  let externallyAborted = false;
+  const onAbort = () => {
+    externallyAborted = true;
+    handle.interrupt().catch(() => {});
+  };
+  options.abortSignal?.addEventListener("abort", onAbort, { once: true });
+  if (options.abortSignal?.aborted === true) onAbort();
   let status: HeadlessStatus;
   let errorMessage: string | undefined;
   let verification: HeadlessRunResult["verification"];
@@ -421,6 +430,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     for (;;) {
       status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
       errorMessage = run.errorMessage;
+      // 外部中止：这一步由调用方作废，不验证、不回炉、不撤回
+      if (externallyAborted) {
+        status = "aborted";
+        break;
+      }
       // M7（决策 072）：撞上限写进本会话账本，标签据此判失败；072 修订：只在运行确以中止收尾时写——
       // 中止请求到达前模型已自然收尾（恰好用满最后一轮）的运行终态是完成，不写
       if (run.status === "aborted" && limitHit !== undefined) {
@@ -511,6 +525,10 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           `回炉反馈附加内容告警：注入点出错：${failureDetail(error)}（出错的轮次反馈不带附加内容，回炉照常进行）`
         );
       }
+      if (externallyAborted) {
+        status = "aborted";
+        break;
+      }
       run = await handle.run(
         buildRepairFeedback({
           command: options.verify.command,
@@ -539,6 +557,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   } finally {
     clearTimeout(timer);
     unsubscribe();
+    options.abortSignal?.removeEventListener("abort", onAbort);
     await handle.dispose();
   }
   const sessionsDir = path.join(options.governanceRoot, ".pigeon", "sessions");

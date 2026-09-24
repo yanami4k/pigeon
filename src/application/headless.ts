@@ -35,6 +35,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
       ...(options.wallClockMs !== undefined ? { wallClockMs: options.wallClockMs } : {}),
       ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+      ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
       ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
       ...(options.persistThinking !== undefined
         ? { persistThinking: options.persistThinking }

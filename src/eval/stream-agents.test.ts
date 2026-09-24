@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,7 +14,8 @@ import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { buildMemoryEntries, loadStructuredMemory } from "../memory/structured-store.ts";
 import { hostWorkspaceAccess } from "../memory/structured-workspace.ts";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
-import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
+import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
+import type { StreamFn } from "../pi-runtime/index.ts";
 import { commandStepAgent, pigeonStepAgent, STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
@@ -336,6 +337,68 @@ test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修�
       reverted: true,
       budgetExhausted: false,
     });
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("Pigeon agent：一步期间来了限额信号即中止在途的运行（不跑满、不验证、不回炉），报被打断交给跑批器作废重做", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const gate = createGate();
+    const inner = createFakeStreamFn({
+      replies: [{ text: "还在想", chunkSize: 1, chunkGate: gate }, editTo("bug", "fixed")],
+    });
+    let started: () => void = () => {};
+    const firstCall = new Promise<void>((r) => {
+      started = r;
+    });
+    const streamFn: StreamFn = (model, context, opts) => {
+      started();
+      return inner(model, context, opts);
+    };
+    // 假的限额控制器：只有状态、信号计数与订阅
+    const listeners = new Set<() => void>();
+    const limits = {
+      state: "running",
+      signals: 0,
+      subscribe(listener: () => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const agent = pigeonStepAgent({
+      streamFn,
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+      limits,
+    });
+    const running = agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: {
+          steps: [{ name: "验证", command: "touch verified.flag; exit 1" }],
+          command: "touch verified.flag; exit 1",
+          timeoutMs: 60_000,
+        },
+      })
+    );
+    await firstCall;
+    // 模型还在回复（被门闩卡住）时来了限额信号
+    limits.signals += 1;
+    for (const l of [...listeners]) l();
+    gate.open();
+    const out = await running;
+    assert.equal(out.status, "aborted");
+    assert.match(out.interrupted ?? "", /限额信号/);
+    assert.equal(out.repair, null);
+    assert.equal(inner.calls.length, 1, "中止后不再请求模型");
+    assert.equal(existsSync(join(ws.testbed, "verified.flag")), false, "不验证");
     assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
   } finally {
     ws.cleanup();

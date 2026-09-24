@@ -37,6 +37,37 @@ export interface PigeonStepAgentOptions {
   // 人写的测试与测试辅助文件（按这条流的运行方式归类）：开回炉的条件在每次验证之前把 agent 对它们的改动还原成
   // 这一步开工时的版本（开工时的树已含跑批器预置的人写测试），agent 不能靠改测试让验证通过
   humanTestFile?: (path: string) => boolean;
+  // 限额控制器：这一步期间有任何限额信号（暂停、停止）即中止在途的运行——这一步反正要作废重做，不必跑满
+  // （与最简 agent 同一做法：订阅即时通知，另以 500 毫秒轮询兜底）
+  limits?: LimitWatch;
+}
+
+// 限额看守要看的：控制器的状态、信号计数与订阅
+export interface LimitWatch {
+  readonly state: string;
+  readonly signals?: number;
+  subscribe?(listener: () => void): () => void;
+}
+
+// 这一步开始后一有限额信号就调用 onSignal；返回停止看守的函数
+function watchLimits(limits: LimitWatch | undefined, onSignal: () => void): () => void {
+  if (limits === undefined) return () => {};
+  const signalsAtStart = limits.signals ?? 0;
+  let fired = false;
+  const check = () => {
+    if (fired) return;
+    if (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart) {
+      fired = true;
+      onSignal();
+    }
+  };
+  const unsubscribe = limits.subscribe?.(check);
+  const timer = setInterval(check, 500);
+  check();
+  return () => {
+    clearInterval(timer);
+    unsubscribe?.();
+  };
 }
 
 // Pigeon 步的结果：回炉字段另带"agent 改过人写测试"的计数——有几次验证之前发现并还原了 agent 对人写测试的改动
@@ -64,49 +95,67 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
       // 容器工作区下宿主侧只是占位目录：账本与治理按它登记，工具不经它读写
       const placeholder = path.join(input.workDir, "workspace");
       mkdirSync(placeholder, { recursive: true });
-      const run = await runHeadless({
-        task: input.prompt,
-        governanceRoot: input.workDir,
-        workspaceRoot: placeholder,
-        workspaceHost: host,
-        streamFn,
-        yolo: options.yolo,
-        sessionId: newSessionId(),
-        maxTurns: input.budget.maxTurns,
-        wallClockMs: input.budget.wallClockMs,
-        skillRoots: [],
-        memoryRoots: [],
-        taskDirective: STREAM_WORK_DIRECTIVE,
-        // 结构化记忆（134、157）：完整条件开启、按题面与报错正常挑选（固定挑选只用于定点对照的单步重跑）；
-        // 去掉记忆的条件关闭。事实取自治理根里的以往会话，治理根即作业目录（条件 × 流 × 遍次各一个，见跑批器），
-        // 记忆因此只在同一条流里沿步累积，不跨条件、遍次或流串用
-        structuredMemory: input.condition.memory ? {} : { enabled: false },
-        // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点。
-        // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
-        // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取
-        ...(repairRounds > 0
-          ? {
-              verify: {
-                command: verifyStepsDisplay(input.verify.steps),
-                steps: input.verify.steps.map((s) => ({ ...s })),
-                timeoutMs: input.verify.timeoutMs,
-                source: "project" as const,
-              },
-              repairRounds,
-              ...(options.humanTestFile !== undefined
-                ? { protectedFiles: options.humanTestFile }
-                : {}),
-            }
-          : {}),
-        ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
-        ...(options.maxOutputTokens !== undefined
-          ? { maxOutputTokens: options.maxOutputTokens }
-          : {}),
-        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-        ...(options.provider !== undefined ? { provider: options.provider } : {}),
-        ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
-        ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
-      });
+      const abort = new AbortController();
+      const stopWatch = watchLimits(options.limits, () => abort.abort());
+      let run: Awaited<ReturnType<typeof runHeadless>>;
+      try {
+        run = await runHeadless({
+          task: input.prompt,
+          governanceRoot: input.workDir,
+          workspaceRoot: placeholder,
+          workspaceHost: host,
+          streamFn,
+          yolo: options.yolo,
+          sessionId: newSessionId(),
+          maxTurns: input.budget.maxTurns,
+          wallClockMs: input.budget.wallClockMs,
+          skillRoots: [],
+          memoryRoots: [],
+          taskDirective: STREAM_WORK_DIRECTIVE,
+          // 结构化记忆（134、157）：完整条件开启、按题面与报错正常挑选（固定挑选只用于定点对照的单步重跑）；
+          // 去掉记忆的条件关闭。事实取自治理根里的以往会话，治理根即作业目录（条件 × 流 × 遍次各一个，见跑批器），
+          // 记忆因此只在同一条流里沿步累积，不跨条件、遍次或流串用
+          structuredMemory: input.condition.memory ? {} : { enabled: false },
+          // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点。
+          // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
+          // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取
+          ...(repairRounds > 0
+            ? {
+                verify: {
+                  command: verifyStepsDisplay(input.verify.steps),
+                  steps: input.verify.steps.map((s) => ({ ...s })),
+                  timeoutMs: input.verify.timeoutMs,
+                  source: "project" as const,
+                },
+                repairRounds,
+                ...(options.humanTestFile !== undefined
+                  ? { protectedFiles: options.humanTestFile }
+                  : {}),
+              }
+            : {}),
+          ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
+          ...(options.maxOutputTokens !== undefined
+            ? { maxOutputTokens: options.maxOutputTokens }
+            : {}),
+          ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+          ...(options.provider !== undefined ? { provider: options.provider } : {}),
+          ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
+          ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+          abortSignal: abort.signal,
+        });
+      } finally {
+        stopWatch();
+      }
+      if (abort.signal.aborted) {
+        return {
+          status: "aborted",
+          turns: run.turns,
+          usage: run.usage,
+          wallMs: run.durationMs,
+          repair: null,
+          interrupted: "限额信号：Pigeon 已中止",
+        };
+      }
       // 与外部基准同一判法：内容审核拒答与确定性错误照常判分；其余以错误收尾的算模型服务故障，这一步作废重做
       const refused = run.status === "failed" && isContentRefusal(run.errorMessage);
       const deterministic =
