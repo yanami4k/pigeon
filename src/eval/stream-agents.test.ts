@@ -38,7 +38,8 @@ function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAg
     prompt: "do it",
     condition: CONDITION_SPECS.minimal,
     target: { container: "box", root: "/testbed" },
-    budget: { maxTurns: 150, wallClockMs: 60_000 },
+    // 墙钟给宽：机器负载高时回炉几轮的用例也跑得完；要测预算的用例显式给预算
+    budget: { maxTurns: 150, wallClockMs: 600_000 },
     verify: { steps: [{ name: "验证", command: "true" }], command: "true", timeoutMs: 60_000 },
     workDir,
     ...overrides,
@@ -77,7 +78,7 @@ test("命令式 agent：请求文件带题面、工作说明、容器与预算�
       container: "box",
       root: "/testbed",
       maxTurns: 150,
-      wallClockMs: 60_000,
+      wallClockMs: 600_000,
       docker: NO_RESIDUE,
       modelBaseUrl: null,
       model: null,

@@ -99,11 +99,17 @@ export function shellQuote(word: string): string {
 // timeout 命令被 KILL 信号杀掉时的退出码
 const TIMEOUT_KILLED = 137;
 
+// 维护步验证门写在容器里的报告（strands 的验证门步写到这里）
+export const GATE_REPORT = "/tmp/pigeon-gate-junit.xml";
+
 export class StreamWorkspace {
   private readonly shell: StreamShell;
+  private readonly gateReport: string;
 
-  constructor(shell: StreamShell) {
+  // gateReport 只供本机测试改到各自的临时路径（本机 /tmp 为各用例共用）
+  constructor(shell: StreamShell, options: { gateReport?: string } = {}) {
     this.shell = shell;
+    this.gateReport = options.gateReport ?? GATE_REPORT;
   }
 
   get root(): string {
@@ -279,7 +285,7 @@ export class StreamWorkspace {
     await this.must(
       [
         'if [ -d "$1" ]; then find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi',
-        `rm -f ${shellQuote(`${this.root}/.git/pigeon-cases-junit.xml`)} /tmp/pigeon-gate-junit.xml`,
+        `rm -f ${shellQuote(`${this.root}/.git/pigeon-cases-junit.xml`)} ${shellQuote(this.gateReport)}`,
       ].join("\n"),
       "清理测量与判题的产物",
       { args: [measureRoot], timeoutMs: 120_000 }

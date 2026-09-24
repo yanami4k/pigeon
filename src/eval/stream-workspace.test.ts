@@ -242,8 +242,9 @@ test("清理测量与判题的产物：测量副本目录清空（目录本身�
     mkdirSync(join(measure, "copy"), { recursive: true });
     writeFileSync(join(measure, "copy", "report.xml"), "x");
     writeFileSync(join(root, ".git", "pigeon-cases-junit.xml"), "x");
-    const ws = new StreamWorkspace(localStreamShell(root));
-    const gate = "/tmp/pigeon-gate-junit.xml";
+    // 本用例自己的报告路径：不碰各用例共用的 /tmp/pigeon-gate-junit.xml
+    const gate = `${root.replace(/\\/g, "/")}/gate-junit.xml`;
+    const ws = new StreamWorkspace(localStreamShell(root), { gateReport: gate });
     await ws.run(["sh", "-c", `echo x > ${gate}`], 10_000);
     await ws.clearArtifacts(measure);
     const left = await ws.run(["sh", "-c", `test -e ${gate}`], 10_000);
