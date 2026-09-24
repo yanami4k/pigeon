@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { renderEntry } from "../memory/structured-select.ts";
 import { buildMemoryEntries, type MemoryEntry } from "../memory/structured-store.ts";
-import { BudgetWidenedError } from "../replay/fidelity.ts";
+import { AttemptFidelityError } from "../replay/fidelity.ts";
 import type { AttemptPlan } from "../replay/plan.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import type { FrictionFact } from "../state/structured-memory.ts";
@@ -16,9 +16,15 @@ import { chooseIrrelevant, StepStartMissingError, sliceHistory } from "./fixed-p
 import {
   assertRerunFidelity,
   FidelityRejectedError,
+  givenMatches,
   offTaskRedOf,
   rerunBudget,
 } from "./fixed-point-rerun.ts";
+import {
+  appendFixedPointRow,
+  type FixedPointRow,
+  readFixedPointRows,
+} from "./fixed-point-results.ts";
 
 const AT = Date.UTC(2026, 8, 20, 8, 0, 0);
 
@@ -96,6 +102,36 @@ test("无关记忆：不取本步相关文件（题面指到的、本步改动�
   assert.equal(
     chooseIrrelevant([relevant], [relevant, sibling, onTask], new Set())?.get(relevant.id)?.id,
     onTask.id
+  );
+});
+
+test("无关记忆按整条事实排除：一条事实展开成几条条目，只要有一条的锚点落在本步相关文件上，同一指纹的条目全不取（它们的成文都写着那个文件）", () => {
+  const { byAnchor } = entries();
+  const relevant = byAnchor.get("src/a.ts") as MemoryEntry;
+  // F3：util 的测试回归，变红时已改的文件里有本步题面指到的 src/core.ts
+  const f3 = buildMemoryEntries([
+    fact("测试", testFp("src/u.test.ts", "u works"), ["src/core.ts", "src/u.ts"], ["src/u.ts"]),
+  ]);
+  const onUtil = f3.find((e) => e.anchor === "src/u.ts") as MemoryEntry;
+  assert.match(renderEntry(onUtil), /src\/core\.ts/, "它的成文里写着 core.ts");
+  assert.equal(chooseIrrelevant([relevant], [onUtil], new Set(["src/core.ts"]), f3), null);
+  // 被换条目涉及的文件同样按整条事实排除：F4 变红时改过被换那条的补改文件 src/a.ts
+  const f4 = buildMemoryEntries([
+    fact("测试", testFp("src/v.test.ts", "v works"), ["src/a.ts", "src/v.ts"], ["src/v.ts"]),
+  ]);
+  const onV = f4.find((e) => e.anchor === "src/v.ts") as MemoryEntry;
+  assert.equal(chooseIrrelevant([relevant], [onV], new Set(), f4), null);
+});
+
+test("无关记忆先同种类：被换的是撤回类就只取撤回类，没有同种类的候选即该组缺失", () => {
+  const { byAnchor } = entries();
+  const regression = byAnchor.get("src/c.ts") as MemoryEntry;
+  const reverted: MemoryEntry = { ...(byAnchor.get("src/a.ts") as MemoryEntry), kind: "reverted" };
+  assert.equal(chooseIrrelevant([reverted], [regression], new Set()), null);
+  const otherReverted: MemoryEntry = { ...regression, kind: "reverted" };
+  assert.equal(
+    chooseIrrelevant([reverted], [regression, otherReverted], new Set())?.get(reverted.id),
+    otherReverted
   );
 });
 
@@ -234,10 +270,11 @@ function plan(overrides: Partial<AttemptPlan> = {}): AttemptPlan {
   };
 }
 
-test("一致性核对：重跑照搬原尝试即通过；预算收紧也通过", () => {
+test("一致性核对：重跑照搬原尝试即通过；预算收紧同样拒绝（预算与流中相同）", () => {
   assert.doesNotThrow(() => assertRerunFidelity(plan(), plan()));
-  assert.doesNotThrow(() =>
-    assertRerunFidelity(plan(), plan({ budget: { maxTurns: 100, wallClockMs: 600_000 } }))
+  assert.throws(
+    () => assertRerunFidelity(plan(), plan({ budget: { maxTurns: 100, wallClockMs: 600_000 } })),
+    FidelityRejectedError
   );
 });
 
@@ -272,16 +309,52 @@ test("一致性核对：预算放宽、多一件工具、换模型、换推理�
   }
 });
 
-test("一致性核对：调用方要的预算比原尝试宽即拒绝；不给即照搬", () => {
+test("一致性核对：重跑的预算照搬原尝试；原尝试的预算不是跑批器的形态（缺轮数或墙钟、带 token 上限）即拒绝", () => {
   assert.deepEqual(rerunBudget(plan()), { maxTurns: 150, wallClockMs: 600_000 });
+  assert.throws(() => rerunBudget(plan({ budget: { maxTurns: 150 } })), AttemptFidelityError);
   assert.throws(
-    () => rerunBudget(plan(), { maxTurns: 151, wallClockMs: 600_000 }),
-    BudgetWidenedError
+    () => rerunBudget(plan({ budget: { maxTurns: 150, wallClockMs: 600_000, maxTokens: 9 } })),
+    AttemptFidelityError
   );
-  assert.deepEqual(rerunBudget(plan(), { maxTurns: 100, wallClockMs: 60_000 }), {
-    maxTurns: 100,
-    wallClockMs: 60_000,
+});
+
+test("给出与指定核对：开局与每一轮回炉都逐条相同才算一致；被拦下、少给、多给、不是固定挑选都算不一致", () => {
+  const fixed = { opening: ["m1"], repair: ["m2"] };
+  const given = (opening: string[], repair: string[][], selection: string | null = "fixed") => ({
+    selection,
+    opening,
+    repair,
   });
+  assert.equal(givenMatches(given(["m1"], [["m2"], ["m2"]]), fixed), true);
+  assert.equal(givenMatches(given(["m1"], []), fixed), true, "没进回炉只看开局");
+  assert.equal(givenMatches(given([], [["m2"]]), fixed), false);
+  assert.equal(givenMatches(given(["m1"], [["m2"], []]), fixed), false);
+  assert.equal(givenMatches(given(["m1", "m3"], []), fixed), false);
+  assert.equal(givenMatches(given(["m1"], [], "auto"), fixed), false);
+});
+
+test("撕裂行续跑：末行没有换行且解析不了的先截掉再追加；末行完整只是缺换行的补上换行", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-fp-torn-"));
+  try {
+    const file = join(dir, "results.jsonl");
+    const row = (pass: number) =>
+      ({ eventId: "s1-3", group: "none", pass }) as unknown as FixedPointRow;
+    writeFileSync(file, `${JSON.stringify(row(1))}\n{"eventId":"s1-3","gro`);
+    appendFixedPointRow(file, row(2));
+    assert.deepEqual(
+      readFixedPointRows(file).map((r) => r.pass),
+      [1, 2]
+    );
+    assert.ok(readFileSync(file, "utf8").endsWith("\n"));
+    writeFileSync(file, JSON.stringify(row(1)));
+    appendFixedPointRow(file, row(2));
+    assert.deepEqual(
+      readFixedPointRows(file).map((r) => r.pass),
+      [1, 2]
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("流历史切片：只留起点可达的提交，带上指定的开工时的树（沿用原引用名）；取不到或不在起点之前即报错", () => {

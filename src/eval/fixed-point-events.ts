@@ -35,7 +35,8 @@ import {
 } from "../memory/structured-workspace.ts";
 import { listSessionIds, materializeSession } from "../persistence/session-read.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
-import { ledgerFileChanges } from "../state/structured-memory.ts";
+import { repairRoundsOf, repairStepOutcome } from "../state/repair-step.ts";
+import { frictionAnchors, ledgerFileChanges } from "../state/structured-memory.ts";
 import { describeFingerprint } from "../state/verify-fingerprint.ts";
 import { recordStepsOf } from "../state/verify-steps.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
@@ -43,12 +44,7 @@ import type { HumanRepo } from "./stream-facts.ts";
 import type { StreamManifest, StreamStep } from "./stream-manifest.ts";
 import type { StreamRepoRuntime } from "./stream-profiles.ts";
 import { readStreamResults, type StreamResultLine, streamJobKey } from "./stream-results.ts";
-import {
-  CONDITION_SPECS,
-  type StreamEnvFactory,
-  type StreamEnvironment,
-  syncEnv,
-} from "./stream-runner.ts";
+import { type StreamEnvFactory, type StreamEnvironment, syncEnv } from "./stream-runner.ts";
 
 export const FIXED_POINT_GROUPS = ["memory", "irrelevant", "none"] as const;
 export type FixedPointGroup = (typeof FIXED_POINT_GROUPS)[number];
@@ -294,26 +290,39 @@ function itemOf(entry: MemoryEntry): MemoryItem {
   };
 }
 
-// 带无关记忆组的取法（157、139）：每条被换的条目换成一条取自其他文件的真实记忆——候选须核验通过，锚点不在 excluded
-// （本步题面指到的文件与本步改动的文件）里，不与任何被换条目同锚点或同指纹（同指纹即同一件事，成文相同）；
-// 取成文长度与被换条目最接近者，平手按编号取最小；同一事件里不重复取同一条、也不取同指纹的两条。
-// 有一条找不到候选即返回 null（该组缺失）
+// 带无关记忆组的取法（157、139）：每条被换的条目换成一条取自其他文件的真实记忆。
+// - 按整条事实排除：一条事实按锚点展开成几条同指纹的条目，成文相同，都写着报错文件、变红时已改的文件与补改文件。
+//   某个指纹只要有任何一条展开的锚点（all 里同指纹的全部条目，与各自最近一次事实的锚点）落在 excluded（本步题面指到的
+//   文件、本步改动的文件）或被换条目涉及的文件里，这个指纹下的条目全部不取；与被换条目同指纹的也不取（同一件事）。
+// - 候选须核验通过（pool），且与被换条目同一种类（红转绿或撤回）；取成文长度最接近者，平手按编号取最小；
+//   同一事件里不重复取同一条、也不取同指纹的两条。有一条找不到候选即返回 null（该组缺失）
 export function chooseIrrelevant(
   relevant: readonly MemoryEntry[],
   pool: readonly MemoryEntry[],
-  excluded: ReadonlySet<string>
+  excluded: ReadonlySet<string>,
+  all: readonly MemoryEntry[] = pool
 ): Map<string, MemoryEntry> | null {
-  const anchors = new Set(relevant.map((e) => e.anchor));
+  const anchorsByKey = new Map<string, Set<string>>();
+  for (const e of [...all, ...pool, ...relevant]) {
+    const set = anchorsByKey.get(e.fingerprintKey) ?? new Set<string>();
+    set.add(e.anchor);
+    for (const a of frictionAnchors(e.latest)) set.add(a);
+    anchorsByKey.set(e.fingerprintKey, set);
+  }
   const keys = new Set(relevant.map((e) => e.fingerprintKey));
-  const candidates = pool.filter(
-    (e) => !excluded.has(e.anchor) && !anchors.has(e.anchor) && !keys.has(e.fingerprintKey)
+  const involved = new Set(
+    relevant.flatMap((e) => [...(anchorsByKey.get(e.fingerprintKey) ?? [])])
   );
+  const blocked = (key: string) =>
+    keys.has(key) ||
+    [...(anchorsByKey.get(key) ?? [])].some((a) => excluded.has(a) || involved.has(a));
+  const candidates = pool.filter((e) => !blocked(e.fingerprintKey));
   const usedKeys = new Set<string>();
   const chosen = new Map<string, MemoryEntry>();
   for (const entry of relevant) {
     const length = renderEntry(entry).length;
     const best = candidates
-      .filter((c) => !usedKeys.has(c.fingerprintKey))
+      .filter((c) => c.kind === entry.kind && !usedKeys.has(c.fingerprintKey))
       .map((c) => ({ c, gap: Math.abs(renderEntry(c).length - length) }))
       .sort((a, b) => a.gap - b.gap || (a.c.id < b.c.id ? -1 : a.c.id > b.c.id ? 1 : 0))[0];
     if (best === undefined) return null;
@@ -493,14 +502,15 @@ async function pickAt(
     const gates = original.attemptVerifieds
       .filter((g) => g.target.sessionId === input.stepSession)
       .sort((a, b) => a.timestamp - b.timestamp);
-    const rounds = Math.max(0, original.runStarteds.length - 1);
+    // 实际用了几轮回炉与回炉上限，都取 repair-step 的共用口径
+    const rounds = repairStepOutcome(original)?.rounds ?? 0;
     for (let round = 1; round <= rounds; round++) {
       const gate = gates[round - 1];
       if (gate === undefined)
         throw new Error(`第 ${step.seq} 步第 ${round} 轮回炉之前没有验证记录`);
       push.repairAppendix({
         round,
-        maxRounds: CONDITION_SPECS["no-memory"].repairRounds,
+        maxRounds: repairRoundsOf(original),
         outcome: {
           command: [...gate.command],
           exitCode: gate.exitCode,
@@ -547,7 +557,7 @@ async function pickAt(
       ...ledgerFileChanges(original, workspace).flatMap((e) => e.files),
     ]);
     const pool = entries.filter((e) => checkEntry(e, probe).ok);
-    const replaced = chooseIrrelevant(relevant, pool, excluded);
+    const replaced = chooseIrrelevant(relevant, pool, excluded, entries);
     const memory: FixedSelection = {
       opening: [...summary.opening],
       repair: [...new Set(repair.flatMap((r) => r.ids))],

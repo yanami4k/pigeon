@@ -1,12 +1,13 @@
 // 定点对照的事件认定与单步重跑（决策 139、156、157）：真的 Pigeon（假模型、在本机执行命令的假 docker）跑出的一遍
 // "去掉记忆"整流为输入，一份夹具各用例共用
 import assert from "node:assert/strict";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import { acquireExclusiveLock, ExclusiveLockError } from "../persistence/exclusive-lock.ts";
 import type { FakeReply } from "../pi-runtime/fixtures.ts";
-import { BudgetWidenedError, type ReproducedRuntime } from "../replay/fidelity.ts";
+import type { ReproducedRuntime } from "../replay/fidelity.ts";
 import {
   type FixedPointEventList,
   identifyEvents,
@@ -175,6 +176,7 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
   });
 
   test("无关记忆：取自其他文件的真实记忆，锚点不在本步题面指到的与本步改动的文件里，不与被换条目同指纹；时机与被换条目相同", () => {
+    assert.equal(events.events.length, 2, "有事件可查，不空转");
     for (const event of events.events) {
       const step = toy.manifest.steps.find((s) => s.seq === event.seq);
       const changed = new Set([
@@ -256,12 +258,20 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
     assert.equal(r4("memory")?.firstVerify.failed, true);
     assert.equal(r4("memory")?.repairRounds, 1);
     assert.equal(r4("memory")?.outcome, "passed");
-    // 记忆被用上：带记忆组在给出之后、下一次验证之前改了补改文件 src/core.ts；无关记忆的补改文件没动；不带组不适用
+    // 记忆被用上：三组都按带记忆组指定的条目（补改文件 src/core.ts）与时间窗口算——三组都在窗口里改了 core.ts
     assert.equal(r3("memory")?.memoryUsed, true);
     assert.deepEqual(r3("memory")?.memoryUsedFiles, ["src/core.ts"]);
-    assert.equal(r3("irrelevant")?.memoryUsed, false);
-    assert.equal(r3("none")?.memoryUsed, null);
+    assert.equal(r3("irrelevant")?.memoryUsed, true);
+    assert.equal(r3("none")?.memoryUsed, true);
     assert.equal(r4("memory")?.memoryUsed, true);
+    // 实际给出的与该组指定的一致
+    assert.ok(rows.every((r) => r.givenMatchesFixed));
+    // 回炉判据：第 3 步没进回炉；第 4 步进了回炉，给出记忆那一轮之后的第 2 次验证不再变红
+    assert.equal(r3("memory")?.repairVerify.entered, false);
+    assert.deepEqual(
+      [r4("memory")?.repairVerify.entered, r4("memory")?.repairVerify.offTaskRed],
+      [true, false]
+    );
     // 每遍起点与流中该步开工时一致；治理根里恰是第 1 到 k−1 步的会话、各遍各一个
     assert.equal(seen.length, 6);
     for (const s of seen) {
@@ -343,18 +353,97 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
     }
   });
 
-  test("一致性核对：要的预算比原尝试宽即拒绝、一遍都不跑；运行面与原尝试不同（换推理档位）即拒绝、不写结果行；事件清单须出自同一份整流输出", async () => {
-    const opened = toy.envs.opened.length;
-    await assert.rejects(
-      runFixedPoint(
-        options({
-          outDir: join(toy.base, "out-wide"),
-          budget: { maxTurns: 151, wallClockMs: 600_000 },
-          agentFor: rerunAgent([], [], () => []),
-        })
-      ),
-      BudgetWidenedError
+  test("首轮判定只用首轮之前的事实：agent 回炉时改了题面以外的人写测试，这一遍仍记为首轮变红；回炉判据看第 2 次验证；记忆被用上的时间窗口不错位", async () => {
+    const cheat = {
+      text: "改测试",
+      toolCalls: [
+        {
+          name: "edit_file",
+          args: {
+            path: "src/core.test.ts",
+            old_string: "CORE_OK core works",
+            new_string: "CORE2_OK core works",
+          },
+        },
+      ],
+    };
+    // 不带组第 4 步：首轮前删了 core 的标记（core 的测试在题面以外变红）并改了 core 的测试（验证前被还原）；
+    // 回炉时再改 core 的测试、补回 core
+    const cheating = (): FakeReply[] => [
+      {
+        text: "改一下",
+        toolCalls: [...(noMemoryReplies(4)[0]?.toolCalls ?? []), ...(cheat.toolCalls ?? [])],
+      },
+      { text: "好了" },
+      {
+        text: "再改",
+        toolCalls: [
+          ...(cheat.toolCalls ?? []),
+          {
+            name: "edit_file",
+            args: {
+              path: "src/core.ts",
+              old_string: "core = 1; //",
+              new_string: "core = 1; // CORE_OK",
+            },
+          },
+        ],
+      },
+      { text: "好了" },
+    ];
+    const a = await runFixedPoint(
+      options({
+        events: only(["s1-4"]),
+        outDir: join(toy.base, "out-cheat"),
+        groups: ["none"],
+        passes: 1,
+        agentFor: rerunAgent([], [], cheating),
+      })
     );
+    assert.deepEqual(a.stopped, []);
+    const [cheated] = readFixedPointRows(a.resultsFile);
+    assert.equal(
+      cheated?.firstVerify.offTaskRed,
+      true,
+      "core 的测试不因 agent 改过它而算作题面测试"
+    );
+    assert.deepEqual(
+      [cheated?.repairVerify.entered, cheated?.repairVerify.offTaskRed],
+      [true, false]
+    );
+    assert.equal(cheated?.memoryUsed, true, "不带组的基线：回炉那一轮里改了补改文件 core.ts");
+    // 带记忆组第 3 步：首轮前什么都没改（题面测试失败、进回炉），回炉时才改 core.ts——开局给的记忆不算用上
+    const late = (): FakeReply[] => [{ text: "先看看" }, ...(RIGHT_FIRST_TIME[3] ?? [])];
+    const b = await runFixedPoint(
+      options({
+        events: only(["s1-3"]),
+        outDir: join(toy.base, "out-late"),
+        groups: ["memory"],
+        passes: 1,
+        agentFor: rerunAgent([], [], late),
+      })
+    );
+    assert.deepEqual(b.stopped, []);
+    const [lateRow] = readFixedPointRows(b.resultsFile);
+    assert.equal(lateRow?.firstVerify.failed, true);
+    assert.equal(lateRow?.firstVerify.offTaskRed, false, "只是题面测试没过");
+    assert.equal(lateRow?.memoryUsed, false);
+  });
+
+  test("一致性核对：运行面与原尝试不同（换推理档位）即拒绝、不写结果行；事件清单须出自同一份整流输出；同一输出目录被另一进程占用即拒绝", async () => {
+    const opened = toy.envs.opened.length;
+    const locked = join(toy.base, "out-locked");
+    mkdirSync(locked, { recursive: true });
+    const release = acquireExclusiveLock(join(locked, ".fixed-point.lock"), "占用");
+    try {
+      await assert.rejects(
+        runFixedPoint(options({ outDir: locked, agentFor: rerunAgent([], [], () => []) })),
+        (error: unknown) =>
+          error instanceof ExclusiveLockError && /另一个定点对照进程/.test(String(error))
+      );
+    } finally {
+      release();
+    }
     assert.equal(toy.envs.opened.length, opened, "一个环境都没开");
     const tampered: FixedPointEventList = {
       ...events,

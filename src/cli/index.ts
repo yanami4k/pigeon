@@ -730,15 +730,15 @@ async function evalFixedPointEventsMain(argv: string[]): Promise<void> {
 
 // pigeon eval stream-fixed-point --manifest <清单> --repo <人的仓库> --image <镜像> --no-memory <无记忆整流的输出目录>
 //   --events <事件清单> --out <输出目录> [--concurrency N（缺省 2）] [--passes N（缺省 5）] [--groups memory,irrelevant,none]
-//   [--model-id <模型>（须与原尝试相同，缺省 kimi-for-coding）] [--max-turns N] [--wall-clock-min N] [--container-memory <上限>]：
+//   [--model-id <模型>（须与原尝试相同，缺省 kimi-for-coding）] [--container-memory <上限>]：
 // 定点对照的单步重跑——每个事件、每组各若干遍，从该步起点跑完整的一步（agent、分步验证门、回炉、撤回），预算、模型、推理档位、
-// 工具名单照搬原尝试（--max-turns / --wall-clock-min 只能收紧，放宽即拒绝）；模型请求经网关（账号同 eval stream）。
+// 工具名单照搬原尝试（预算与流中相同，不接受另给）；模型请求经网关（账号同 eval stream）。
 // 结果写 <输出目录>/results.jsonl 与 report.md；同一输出目录重跑即按"事件 × 组 × 遍次"续跑
 async function evalFixedPointMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-fixed-point --manifest <清单> --repo <人的仓库> --image <镜像> --no-memory <无记忆整流的输出目录> " +
     "--events <事件清单> --out <输出目录> [--concurrency N] [--passes N] [--groups memory,irrelevant,none] " +
-    "[--model-id <模型>] [--max-turns N] [--wall-clock-min N] [--container-memory <上限>]";
+    "[--model-id <模型>] [--container-memory <上限>]";
   const args = fixedPointArgs(
     argv,
     usage,
@@ -753,8 +753,6 @@ async function evalFixedPointMain(argv: string[]): Promise<void> {
       "--passes",
       "--groups",
       "--model-id",
-      "--max-turns",
-      "--wall-clock-min",
       "--container-memory",
     ])
   );
@@ -763,11 +761,6 @@ async function evalFixedPointMain(argv: string[]): Promise<void> {
     if (!(FIXED_POINT_GROUPS as readonly string[]).includes(g)) {
       throw new Error(`未知的组 ${g}（可选 ${FIXED_POINT_GROUPS.join("、")}）`);
     }
-  }
-  const maxTurns = args.positive("--max-turns");
-  const wallMin = args.positive("--wall-clock-min");
-  if ((maxTurns === undefined) !== (wallMin === undefined)) {
-    throw new Error(`--max-turns 与 --wall-clock-min 要么都给、要么都不给（${usage}）`);
   }
   const concurrency = args.positive("--concurrency");
   const passes = args.positive("--passes");
@@ -789,9 +782,6 @@ async function evalFixedPointMain(argv: string[]): Promise<void> {
     ...(groups !== undefined ? { groups: groups as FixedPointGroup[] } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(passes !== undefined ? { passes } : {}),
-    ...(maxTurns !== undefined && wallMin !== undefined
-      ? { budget: { maxTurns, wallClockMs: wallMin * 60_000 } }
-      : {}),
     log: (line) => writeOut(`[fixed-point] ${new Date().toISOString()} ${line}\n`),
   });
   writeOut(

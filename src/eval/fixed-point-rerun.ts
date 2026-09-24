@@ -2,25 +2,18 @@
 // （上一步落地的提交加该步的人写测试，与流中该步开工时一致），治理根里放第 1 到 k−1 步的会话副本，按完整条件跑完整的一步：
 // agent、分步验证门、回炉（3 轮）、撤回，预算与原尝试相同；模型请求经本地网关、计量与限额处理与流中一致。
 // 三组的差别只在结构化记忆的固定挑选（157），推送路径与正式使用同一条。
-// 一致性核对（156）：从原尝试的 run.started 解出预算、模型、推理档位、工具名单与工作方式指令，重跑照搬；
-// 调用方要的预算比原尝试宽即拒绝；每遍跑完再按重跑自己的 run.started 核对一次，任何一项放宽或不同即拒绝、不写结果行。
+// 一致性核对（156）：从原尝试的 run.started 解出预算、模型、推理档位、工具名单与工作方式指令，重跑照搬（预算与流中相同，
+// 不接受调用方另给）；每遍跑完再按重跑自己的 run.started 核对一次，任何一项不同即拒绝、不写结果行。
 // 各遍互不可见：每遍一个独立的治理根副本；被打断的一遍整遍作废（会话移出、从起点重来），与流中的作废规则相同。
 // 结果写结果行（158：不新增账本记录），按"事件 × 组 × 遍次"断点续跑。
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { hostWorkspaceAccess, taskReferencedFiles } from "../memory/structured-workspace.ts";
+import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import { materializeSession } from "../persistence/session-read.ts";
 import {
   AttemptFidelityError,
   assertThinkingLevelReproducible,
-  effectiveLimits,
   intersectAttemptTools,
   type ReproducedRuntime,
   reproducedRuntime,
@@ -28,6 +21,7 @@ import {
 } from "../replay/fidelity.ts";
 import { type AttemptPlan, resolveAttemptPlan } from "../replay/plan.ts";
 import type { SessionId } from "../state/ids.ts";
+import { repairRoundsOf, repairStepOutcome } from "../state/repair-step.ts";
 import { ledgerFileChanges, reportedPathOf } from "../state/structured-memory.ts";
 import { describeFingerprint, parseStepOutput } from "../state/verify-fingerprint.ts";
 import { recordStepsOf, type VerifyStepResult } from "../state/verify-steps.ts";
@@ -47,9 +41,12 @@ import {
 } from "./fixed-point-events.ts";
 import { renderFixedPointReport } from "./fixed-point-report.ts";
 import {
+  appendFixedPointRow,
   type FirstVerify,
   type FixedPointRow,
   fixedPointKey,
+  type OffTaskVerdict,
+  type RepairVerify,
   readFixedPointRows,
 } from "./fixed-point-results.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
@@ -67,7 +64,6 @@ import {
 import { type StreamGatewayFacts, ZERO_USAGE } from "./stream-results.ts";
 import {
   CONDITION_SPECS,
-  DEFAULT_STEP_BUDGET,
   MAX_BARE_INTERRUPTIONS,
   restoreTests,
   SIGNALLED_VOID_STOP,
@@ -93,16 +89,15 @@ export class FidelityRejectedError extends Error {
 
 // ---------- 一致性核对 ----------
 
-// 重跑实际用的预算：照搬原尝试；调用方要了预算即逐项核对，比原尝试宽即拒绝
-export function rerunBudget(original: AttemptPlan, requested?: StepBudget): StepBudget {
-  const limits = effectiveLimits(
-    original.budget,
-    DEFAULT_STEP_BUDGET,
-    requested !== undefined
-      ? { maxTurns: requested.maxTurns, wallClockMs: requested.wallClockMs }
-      : undefined
-  );
-  return { maxTurns: limits.maxTurns, wallClockMs: limits.wallClockMs };
+// 重跑实际用的预算：与原尝试完全相同（预算与流中相同）；原尝试的预算不是跑批器的形态即拒绝
+export function rerunBudget(original: AttemptPlan): StepBudget {
+  const { maxTurns, wallClockMs, maxTokens } = original.budget;
+  if (maxTurns === undefined || wallClockMs === undefined || maxTokens !== undefined) {
+    throw new AttemptFidelityError(
+      "原尝试的预算不是跑批器的形态（轮数与墙钟上限、不设 token 上限）：重跑无法照搬，故拒绝"
+    );
+  }
+  return { maxTurns, wallClockMs };
 }
 
 // 重跑的运行面照搬原尝试（推理档位认不出即拒绝）；工作方式指令须与跑批器的一致
@@ -114,18 +109,21 @@ export function rerunRuntime(original: AttemptPlan): ReproducedRuntime {
   return runtime;
 }
 
-// 跑完后按重跑自己的 run.started 核对：预算不宽于原尝试，工具不多于原尝试，模型、推理档位、温度、输出上限、
-// 工作方式指令与题面逐项相同
+// 跑完后按重跑自己的 run.started 核对：预算与原尝试相同，工具不多于原尝试，模型、推理档位、温度、输出上限、
+// 工作方式指令、题面与放权方式逐项相同
 export function assertRerunFidelity(original: AttemptPlan, rerun: AttemptPlan): void {
   const problems: string[] = [];
-  try {
-    effectiveLimits(original.budget, DEFAULT_STEP_BUDGET, {
-      maxTurns: rerun.budget.maxTurns ?? Number.POSITIVE_INFINITY,
-      wallClockMs: rerun.budget.wallClockMs ?? Number.POSITIVE_INFINITY,
-      ...(rerun.budget.maxTokens !== undefined ? { maxTokens: rerun.budget.maxTokens } : {}),
-    });
-  } catch (error) {
-    problems.push(error instanceof Error ? error.message : String(error));
+  const ob = original.budget;
+  const rb = rerun.budget;
+  if (
+    ob.maxTurns !== rb.maxTurns ||
+    ob.wallClockMs !== rb.wallClockMs ||
+    ob.maxTokens !== rb.maxTokens
+  ) {
+    problems.push(
+      `预算与原尝试不同：轮数 ${rb.maxTurns}、墙钟 ${rb.wallClockMs}、token ${rb.maxTokens}，` +
+        `原尝试 ${ob.maxTurns}、${ob.wallClockMs}、${ob.maxTokens}`
+    );
   }
   const extra = rerun.tools.filter(
     (t) => !intersectAttemptTools(rerun.tools, original.tools).includes(t)
@@ -160,14 +158,14 @@ export function assertRerunFidelity(original: AttemptPlan, rerun: AttemptPlan): 
 
 // ---------- 首轮验证 ----------
 
-// 首轮验证是否在题面以外的检查上变红（131 口径）：taskTestFiles 为题面测试文件（本步改动的文件、开工时已在工作区的
+// 某次验证是否在题面以外的检查上变红（131 口径）：taskTestFiles 为题面测试文件（本步改动的文件、开工时已在工作区的
 // 文件、题面直接指到的文件三者的并集）；认定不全时为 undefined，测试步一律判不清
 export function offTaskRedOf(input: {
   steps: readonly VerifyStepResult[];
   commands: ReadonlyMap<string, string>;
   workspace: string;
   taskTestFiles: ReadonlySet<string> | undefined;
-}): Pick<FirstVerify, "offTaskRed" | "offTaskFailures" | "undetermined"> {
+}): OffTaskVerdict {
   const failures: string[] = [];
   const undetermined: string[] = [];
   for (const step of input.steps) {
@@ -230,8 +228,6 @@ export interface FixedPointOptions {
   groups?: readonly FixedPointGroup[];
   passes?: number;
   concurrency?: number;
-  // 调用方要的预算（缺省照搬原尝试）；比原尝试宽即拒绝
-  budget?: StepBudget;
   judgeTimeoutMs?: number;
   limits?: LimitController;
   gateway?: StreamModelGateway;
@@ -269,6 +265,19 @@ function message(error: unknown): string {
 
 export async function runFixedPoint(options: FixedPointOptions): Promise<FixedPointSummary> {
   mkdirSync(options.outDir, { recursive: true });
+  // 同一输出目录同一时刻只许一个进程写（结果行、各遍治理根）：撞锁即拒绝，报出占用者
+  const release = acquireExclusiveLock(
+    path.join(options.outDir, ".fixed-point.lock"),
+    "这个输出目录正被另一个定点对照进程使用"
+  );
+  try {
+    return await runLocked(options);
+  } finally {
+    release();
+  }
+}
+
+async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary> {
   const resultsFile = path.join(options.outDir, "results.jsonl");
   const reportFile = path.join(options.outDir, "report.md");
   const groups = options.groups ?? FIXED_POINT_GROUPS;
@@ -301,7 +310,7 @@ export async function runFixedPoint(options: FixedPointOptions): Promise<FixedPo
     if (original.task !== (step.prompt ?? step.message).trim()) {
       throw new AttemptFidelityError(`事件 ${event.id} 的原尝试题面与清单不同，拒绝重跑`);
     }
-    const budget = rerunBudget(original, options.budget);
+    const budget = rerunBudget(original);
     const runtime = rerunRuntime(original);
     prepared.set(event.id, {
       event,
@@ -339,7 +348,7 @@ export async function runFixedPoint(options: FixedPointOptions): Promise<FixedPo
     const key = fixedPointKey({ eventId: job.prep.event.id, group: job.group, pass: job.pass });
     try {
       const row = await runPassWithVoids(options, job.prep, job.group, job.pass, job.fixed);
-      appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
+      appendFixedPointRow(resultsFile, row);
       written += 1;
       options.log?.(
         `[${key}] 首轮题面以外变红 ${String(row.firstVerify.offTaskRed)}，回炉 ${row.repairRounds ?? "—"} 轮，${row.outcome}`
@@ -351,7 +360,7 @@ export async function runFixedPoint(options: FixedPointOptions): Promise<FixedPo
   });
   writeFileSync(
     reportFile,
-    renderFixedPointReport(options.events, readFixedPointRows(resultsFile), { groups, passes })
+    renderFixedPointReport(options.events, readFixedPointRows(resultsFile), { passes })
   );
   return { resultsFile, reportFile, written, existing, stopped, missing };
 }
@@ -450,6 +459,16 @@ async function runPass(
     const priorIds = new Set(sessionIdsOf(path.join(dir, ".pigeon", "sessions")));
     const { ws } = env;
     const meterKey = `fixed-point|${event.id}|${group}|${pass}`;
+    // 人在这一步的测试与测试辅助文件：验证前被还原的受保护文件
+    const humanTests = new Set(
+      options.human
+        .tree(step.commit)
+        .map((e) => e.path)
+        .filter((p) => {
+          const kind = options.runtime.profile.classifyFile(p);
+          return kind === "test" || kind === "testaux";
+        })
+    );
     const release = await options.limits?.acquire();
     const signalsBefore = options.limits?.signals ?? 0;
     const before: GatewayMeter | undefined = options.gateway?.meter(meterKey);
@@ -469,15 +488,7 @@ async function runPass(
           timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
         },
         workDir: dir,
-        humanTestFiles: new Set(
-          options.human
-            .tree(step.commit)
-            .map((e) => e.path)
-            .filter((p) => {
-              const kind = options.runtime.profile.classifyFile(p);
-              return kind === "test" || kind === "testaux";
-            })
-        ),
+        humanTestFiles: humanTests,
         structuredMemoryFixed: fixed,
         ...(options.gateway !== undefined
           ? { modelBaseUrl: options.gateway.jobBaseUrl(meterKey) }
@@ -537,8 +548,9 @@ async function runPass(
       })
     );
     const host = options.hostFor(env.target);
-    const firstVerify = firstVerifyOf(session, sessionId, host, step);
+    const verdicts = verdictsOf(session, sessionId, host, step, humanTests);
     const used = memoryUsedOf(session, sessionId, event);
+    const given = givenOf(session);
     // 判定与流中同一口径：恢复 agent 动过的测试后，题跑判题测试、维护步跑验证门
     await ws.normalizeTo(event.startHead);
     await restoreTests(options, ws, step);
@@ -565,8 +577,10 @@ async function runPass(
       group,
       pass,
       sessionId,
-      given: givenOf(session),
-      firstVerify,
+      given,
+      givenMatchesFixed: givenMatches(given, fixed),
+      firstVerify: verdicts.first,
+      repairVerify: verdicts.repair,
       repairRounds: result.repair?.rounds ?? null,
       finalVerdict: result.repair?.finalVerdict ?? null,
       reverted,
@@ -589,18 +603,32 @@ async function runPass(
 
 type Session = ReturnType<typeof materializeSession>;
 
-// 实际给出的条目：首个 Run 的开局那几条，与各回炉轮 Run 的回炉那几条
+// 实际给出的条目：首个 Run 的开局那几条，与各回炉轮 Run 的回炉那几条（回炉未开启即没有回炉轮）
 function givenOf(session: Session): FixedPointRow["given"] {
   const first = session.runStarteds[0]?.payload.structuredMemory;
   return {
     selection: first?.selection ?? null,
     opening: [...(first?.opening ?? [])],
-    repair: session.runStarteds
-      .slice(1)
-      .map((r) => [
-        ...((r.payload.structuredMemory as { repair?: string[] } | undefined)?.repair ?? []),
-      ]),
+    repair:
+      repairRoundsOf(session) === 0
+        ? []
+        : session.runStarteds
+            .slice(1)
+            .map((r) => [
+              ...((r.payload.structuredMemory as { repair?: string[] } | undefined)?.repair ?? []),
+            ]),
   };
+}
+
+// 实际给出的与指定的是否一致：开局逐条相同，每一轮回炉都与指定的回炉条目逐条相同（用前核验没过而被拦下即不一致）
+export function givenMatches(given: FixedPointRow["given"], fixed: FixedSelection): boolean {
+  const same = (a: readonly string[], b: readonly string[]) =>
+    a.length === b.length && a.every((x, i) => x === b[i]);
+  return (
+    given.selection === "fixed" &&
+    same(given.opening, fixed.opening) &&
+    given.repair.every((round) => same(round, fixed.repair))
+  );
 }
 
 function gatesOf(session: Session, sessionId: string) {
@@ -609,21 +637,33 @@ function gatesOf(session: Session, sessionId: string) {
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
-// 首轮验证：整体是否不过，是否在题面以外的检查上变红。题面测试文件与派生同一口径：本步改动的文件（账本）、
-// 开工时已在工作区的文件（开工时的树相对起点提交的差异）、题面直接指到的文件（mentionedUntracked）
-function firstVerifyOf(
+// 首轮验证（开局事件的判据）与回炉后的下一次验证（回炉事件的判据，决策 164）。题面测试文件与派生同一口径，
+// 但只用这次验证之前的事实：本步到这次验证为止改动的文件（账本；验证前会被还原的人写受保护测试不算，agent 改过它们
+// 也不因此成为题面文件）、开工时已在工作区的文件（开工时的树相对起点提交的差异）、题面直接指到的文件（mentionedUntracked）
+function verdictsOf(
   session: Session,
   sessionId: string,
   host: WorkspaceHost,
-  step: StreamStep
-): FirstVerify {
-  const gate = gatesOf(session, sessionId)[0];
-  if (gate === undefined) {
+  step: StreamStep,
+  protectedFiles: ReadonlySet<string>
+): { first: FirstVerify; repair: RepairVerify } {
+  const gates = gatesOf(session, sessionId);
+  const first = gates[0];
+  const notEntered: RepairVerify = {
+    entered: false,
+    offTaskRed: null,
+    offTaskFailures: [],
+    undetermined: [],
+  };
+  if (first === undefined) {
     return {
-      failed: null,
-      offTaskRed: null,
-      offTaskFailures: [],
-      undetermined: ["（没有验证记录）"],
+      first: {
+        failed: null,
+        offTaskRed: null,
+        offTaskFailures: [],
+        undetermined: ["（没有验证记录）"],
+      },
+      repair: notEntered,
     };
   }
   const access = hostWorkspaceAccess(host);
@@ -642,52 +682,75 @@ function firstVerifyOf(
           "--root",
           base,
         ]);
-  const taskTestFiles =
-    dirty === undefined
-      ? undefined
-      : new Set([
-          ...ledgerFileChanges(session, gate.workspace).flatMap((e) => e.files),
-          ...dirty.split(/\r?\n/).filter((l) => l.trim() !== ""),
-          ...taskReferencedFiles(step.prompt ?? step.message, access.probe(), {
-            mentionedUntracked: true,
-          }),
-        ]);
+  const mentioned = taskReferencedFiles(step.prompt ?? step.message, access.probe(), {
+    mentionedUntracked: true,
+  });
+  const changes = ledgerFileChanges(session, first.workspace);
   const commands = new Map<string, string>();
   for (const s of session.runStarteds[0]?.payload.verify?.steps ?? [])
     commands.set(s.name, s.command);
-  return {
-    failed: gate.verdict === "fail" ? true : gate.verdict === "pass" ? false : null,
-    ...offTaskRedOf({
+  const judge = (gate: (typeof gates)[number]): OffTaskVerdict => {
+    const taskTestFiles =
+      dirty === undefined
+        ? undefined
+        : new Set([
+            ...changes
+              .filter((e) => e.at <= gate.timestamp)
+              .flatMap((e) => e.files)
+              .filter((f) => !protectedFiles.has(f)),
+            ...dirty.split(/\r?\n/).filter((l) => l.trim() !== ""),
+            ...mentioned,
+          ]);
+    return offTaskRedOf({
       steps: recordStepsOf(gate),
       commands,
       workspace: gate.workspace,
       taskTestFiles,
-    }),
+    });
+  };
+  const rounds = repairStepOutcome(session)?.rounds ?? 0;
+  const entered = first.verdict === "fail" && rounds >= 1;
+  const second = gates[1];
+  return {
+    first: {
+      failed: first.verdict === "fail" ? true : first.verdict === "pass" ? false : null,
+      ...judge(first),
+    },
+    repair: !entered
+      ? notEntered
+      : second === undefined
+        ? {
+            entered: true,
+            offTaskRed: null,
+            offTaskFailures: [],
+            undetermined: ["（没有第 2 次验证）"],
+          }
+        : { entered: true, ...judge(second) },
   };
 }
 
-// 记忆是否被用上：开局给的红转绿条目，看首轮验证之前；第 r 轮回炉给的，看第 r 次验证之后、下一次验证之前（或会话结束）。
-// 这一窗口里 agent 改了条目记下的补改文件之一即算用上
+// 记忆是否被用上（139）：三组同一口径——按带记忆组指定的红转绿条目（开局的与回炉的），在带记忆组本会给出它们的时间
+// 窗口里看 agent 是否改了条目的补改文件：开局条目看首轮验证之前，回炉条目看每一轮回炉（第 r 次验证之后、下一次验证
+// 之前或会话结束）。不带组与无关组的这一指标即基线
 function memoryUsedOf(
   session: Session,
   sessionId: string,
   event: FixedPointEvent
 ): { used: boolean | null; files: string[] } {
-  const items = new Map(
-    [...event.relevant, ...(event.irrelevant ?? []).map((x) => x.item)].map((i) => [i.id, i])
-  );
+  const memory = event.fixed.memory;
+  if (memory === null) return { used: null, files: [] };
+  const items = new Map(event.relevant.map((i) => [i.id, i]));
   const gates = gatesOf(session, sessionId);
-  const workspace = gates[0]?.workspace;
-  const changes = ledgerFileChanges(session, workspace);
-  const given = givenOf(session);
+  const changes = ledgerFileChanges(session, gates[0]?.workspace);
+  const rounds = repairRoundsOf(session) === 0 ? 0 : (repairStepOutcome(session)?.rounds ?? 0);
   const windows: { ids: string[]; after: number; upTo: number }[] = [
     {
-      ids: given.opening,
+      ids: memory.opening,
       after: Number.NEGATIVE_INFINITY,
       upTo: gates[0]?.timestamp ?? Number.POSITIVE_INFINITY,
     },
-    ...given.repair.map((ids, i) => ({
-      ids,
+    ...Array.from({ length: rounds }, (_, i) => ({
+      ids: memory.repair,
       after: gates[i]?.timestamp ?? Number.POSITIVE_INFINITY,
       upTo: gates[i + 1]?.timestamp ?? Number.POSITIVE_INFINITY,
     })),

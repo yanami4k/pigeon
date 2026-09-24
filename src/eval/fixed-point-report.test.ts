@@ -1,4 +1,5 @@
-// 定点对照的汇总（决策 139）：按事件配对的变红比例差、帮倒忙的事件数、无关记忆对照、用上比例；判不清与缺失单列
+// 定点对照的汇总（决策 139、164）：主判据按记忆给出时机拆开分开报；按键去重、遍次上限、组别取自结果文件；
+// 实际给出与指定不一致的遍次不进配对；"用上"三组并列
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
@@ -6,12 +7,17 @@ import type {
   FixedPointEventList,
   FixedPointGroup,
 } from "./fixed-point-events.ts";
-import { eventStats, renderFixedPointReport } from "./fixed-point-report.ts";
+import { criterionStats, renderFixedPointReport } from "./fixed-point-report.ts";
 import type { FixedPointRow } from "./fixed-point-results.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 
-function event(id: string, irrelevantMissing = false): FixedPointEvent {
-  const sel = { opening: ["m1"], repair: [] };
+function event(
+  id: string,
+  timing: { opening: boolean; repair: boolean },
+  irrelevantMissing = false
+): FixedPointEvent {
+  const opening = timing.opening ? ["m1"] : [];
+  const repair = timing.repair ? ["m2"] : [];
   return {
     id,
     stream: "s1",
@@ -23,22 +29,26 @@ function event(id: string, irrelevantMissing = false): FixedPointEvent {
     priorStepStarts: [],
     stepSession: "s",
     firstRunId: "r",
-    picked: { opening: ["m1"], repair: [] },
+    picked: { opening, repair: timing.repair ? [{ round: 1, ids: repair }] : [] },
     relevant: [],
     irrelevant: irrelevantMissing ? null : [],
     fixed: {
-      memory: sel,
-      irrelevant: irrelevantMissing ? null : { opening: ["x1"], repair: [] },
+      memory: { opening, repair },
+      irrelevant: irrelevantMissing
+        ? null
+        : { opening: opening.map(() => "x1"), repair: repair.map(() => "x2") },
       none: { opening: [], repair: [] },
     },
   };
 }
 
+// first：首轮是否题面以外变红；repair：undefined 为没进回炉，否则为回炉后下一次验证是否题面以外变红
 function row(
   eventId: string,
   group: FixedPointGroup,
   pass: number,
-  red: boolean | null,
+  first: boolean | null,
+  repair?: boolean | null,
   extra: Partial<FixedPointRow> = {}
 ): FixedPointRow {
   return {
@@ -49,13 +59,23 @@ function row(
     pass,
     sessionId: `sess-${eventId}-${group}-${pass}`,
     given: { selection: "fixed", opening: [], repair: [] },
+    givenMatchesFixed: true,
     firstVerify: {
-      failed: red,
-      offTaskRed: red,
+      failed: repair !== undefined ? true : first,
+      offTaskRed: first,
       offTaskFailures: [],
-      undetermined: red === null ? ["测试"] : [],
+      undetermined: first === null ? ["测试"] : [],
     },
-    repairRounds: red === true ? 1 : 0,
+    repairVerify:
+      repair === undefined
+        ? { entered: false, offTaskRed: null, offTaskFailures: [], undetermined: [] }
+        : {
+            entered: true,
+            offTaskRed: repair,
+            offTaskFailures: [],
+            undetermined: repair === null ? ["测试"] : [],
+          },
+    repairRounds: repair === undefined ? 0 : 1,
     finalVerdict: "pass",
     reverted: false,
     outcome: "passed",
@@ -73,59 +93,105 @@ function row(
   };
 }
 
+// s1-3：只在开局挑到；s1-4：只在回炉挑到；s1-5：两个时机都挑到（无关组缺失）
 const LIST: FixedPointEventList = {
   version: 1,
   repo: "memtoy",
   noMemory: { attempt: 1, streams: [] },
-  events: [event("s1-3"), event("s1-4", true)],
+  events: [
+    event("s1-3", { opening: true, repair: false }),
+    event("s1-4", { opening: false, repair: true }),
+    event("s1-5", { opening: true, repair: true }, true),
+  ],
   scanned: [],
 };
 
-// 事件 3：带记忆 1/4 变红（另 1 遍判不清），不带 3/5，无关 2/5；事件 4：带记忆 3/5，不带 1/5（帮倒忙），无关组缺失
 const ROWS: FixedPointRow[] = [
+  // s1-3 开局：带记忆 1/4 变红（另 1 遍判不清），不带 3/5，无关 2/5
   ...[true, false, false, false, null].map((r, i) =>
-    row("s1-3", "memory", i + 1, r, { memoryUsed: i < 2 })
+    row("s1-3", "memory", i + 1, r, undefined, { memoryUsed: i < 2 })
   ),
-  ...[true, true, true, false, false].map((r, i) => row("s1-3", "none", i + 1, r)),
-  ...[true, true, false, false, false].map((r, i) => row("s1-3", "irrelevant", i + 1, r)),
   ...[true, true, true, false, false].map((r, i) =>
-    row("s1-4", "memory", i + 1, r, { memoryUsed: false })
+    row("s1-3", "none", i + 1, r, undefined, { memoryUsed: i < 1 })
   ),
-  ...[true, false, false, false, false].map((r, i) => row("s1-4", "none", i + 1, r)),
+  ...[true, true, false, false, false].map((r, i) => row("s1-3", "irrelevant", i + 1, r)),
+  // s1-4 回炉：带记忆 4 遍进回炉、回炉后 1 遍仍红；首轮都红（不进开局判据）。不带 2 遍进回炉、都仍红
+  ...[false, false, true, false].map((r, i) => row("s1-4", "memory", i + 1, true, r)),
+  row("s1-4", "memory", 5, false),
+  ...[true, true].map((r, i) => row("s1-4", "none", i + 1, true, r)),
+  ...[3, 4, 5].map((p) => row("s1-4", "none", p, false)),
+  // s1-5 两个时机：开局带记忆 0/5、不带 2/5；回炉只有带记忆组有进回炉的遍次（不带组没有）→ 回炉判据缺失
+  ...[0, 1, 2, 3, 4].map((i) => row("s1-5", "memory", i + 1, false, i === 0 ? false : undefined)),
+  ...[true, true, false, false, false].map((r, i) => row("s1-5", "none", i + 1, r)),
 ];
 
-test("汇总：变红比例按判得清的遍次算；配对差为带记忆减不带，无关对照差为无关减不带", () => {
-  const stats = eventStats(LIST, ROWS, ["memory", "irrelevant", "none"]);
-  const [e3, e4] = stats;
-  assert.equal(e3?.groups.memory?.redRate, 1 / 4);
-  assert.equal(e3?.groups.memory?.undetermined, 1);
-  assert.equal(e3?.groups.none?.redRate, 3 / 5);
-  assert.ok(Math.abs((e3?.pairedDiff ?? 0) - (1 / 4 - 3 / 5)) < 1e-12);
-  assert.ok(Math.abs((e3?.irrelevantDiff ?? 0) - (2 / 5 - 3 / 5)) < 1e-12);
-  assert.ok(Math.abs((e4?.pairedDiff ?? 0) - (3 / 5 - 1 / 5)) < 1e-12);
-  assert.equal(e4?.irrelevantDiff, null);
-  assert.equal(e3?.groups.memory?.meanRepairRounds, 1 / 5);
+const approx = (a: number | null | undefined, b: number) =>
+  assert.ok(a !== null && a !== undefined && Math.abs(a - b) < 1e-12, `${a} ≈ ${b}`);
+
+test("主判据按时机拆开：只在回炉给记忆的事件不进开局判据；两个时机都有的事件两边都计入", () => {
+  const opening = criterionStats(LIST, ROWS, "opening", 5);
+  const repair = criterionStats(LIST, ROWS, "repair", 5);
+  assert.deepEqual(
+    opening.map((s) => s.eventId),
+    ["s1-3", "s1-5"]
+  );
+  assert.deepEqual(
+    repair.map((s) => s.eventId),
+    ["s1-4", "s1-5"]
+  );
+  approx(opening[0]?.pairedDiff, 1 / 4 - 3 / 5);
+  approx(opening[0]?.irrelevantDiff, 2 / 5 - 3 / 5);
+  approx(opening[1]?.pairedDiff, 0 - 2 / 5);
 });
 
-test("汇总：报告列出配对差均值、帮倒忙的事件数、无关组缺失的事件数、用上比例与判不清的遍次", () => {
-  const text = renderFixedPointReport(LIST, ROWS, {
-    groups: ["memory", "irrelevant", "none"],
-    passes: 5,
-  });
-  const mean = ((1 / 4 - 3 / 5 + (3 / 5 - 1 / 5)) / 2) * 100;
-  assert.match(
-    text,
-    new RegExp(`按事件配对的均值（百分点） \\| ${mean > 0 ? "\\+" : ""}${mean.toFixed(1)} \\|`)
+test("回炉判据只取进入回炉的遍次，按事件、按组算比例后配对；某组没有进入回炉的遍次即该事件缺失、不补值", () => {
+  const [e4, e5] = criterionStats(LIST, ROWS, "repair", 5);
+  assert.equal(e4?.groups.memory?.eligible, 4);
+  assert.equal(e4?.groups.none?.eligible, 2);
+  approx(e4?.pairedDiff, 1 / 4 - 1);
+  assert.equal(e5?.groups.none?.eligible, 0);
+  assert.equal(e5?.pairedDiff, null);
+});
+
+test("结果行按事件 × 组 × 遍次去重、只计遍次号不超过遍数的；实际给出与指定不一致的遍次不进配对、单列计数", () => {
+  const extra = [
+    row("s1-3", "memory", 1, false), // 重复键：留先写的（变红）
+    row("s1-3", "memory", 6, true), // 超出遍数
+    row("s1-3", "none", 6, true),
+  ];
+  const [e3] = criterionStats(LIST, [...ROWS, ...extra], "opening", 5);
+  approx(e3?.groups.memory?.redRate, 1 / 4);
+  const mismatched = ROWS.map((r) =>
+    r.eventId === "s1-3" && r.group === "memory" && r.pass === 1
+      ? { ...r, givenMatchesFixed: false }
+      : r
   );
-  assert.match(text, /帮倒忙的事件数（带记忆组变红比例高于不带组） \| 1 \|/);
-  assert.match(text, /带记忆组变红比例低于不带组的事件数 \| 1 \|/);
+  const [m3] = criterionStats(LIST, mismatched, "opening", 5);
+  approx(m3?.groups.memory?.redRate, 0);
+  assert.match(
+    renderFixedPointReport(LIST, mismatched, { passes: 5 }),
+    /实际给出与指定不一致的遍次（不进配对） \| 1 \|/
+  );
+});
+
+test("报告：两类判据各自的配对差均值、帮倒忙事件数与无关对照分开列；组别取自结果文件；用上三组并列", () => {
+  const text = renderFixedPointReport(LIST, ROWS, { passes: 5 });
+  const opening = text.slice(text.indexOf("## 开局事件"), text.indexOf("## 回炉事件"));
+  const repair = text.slice(text.indexOf("## 回炉事件"), text.indexOf("## 辅助指标"));
+  const openingMean = ((1 / 4 - 3 / 5 + (0 - 2 / 5)) / 2) * 100;
+  assert.match(opening, new RegExp(`按事件配对的均值（百分点） \\| ${openingMean.toFixed(1)} \\|`));
+  assert.match(opening, /帮倒忙的事件数（带记忆组变红比例高于不带组） \| 0 \|/);
+  assert.match(repair, /可配对的事件（带记忆与不带两组都有判得清的遍次） \| 1 \|/);
+  assert.match(repair, /缺失的事件（某组没有判得清的回炉遍次，不补值） \| 1 \|/);
+  assert.match(repair, /按事件配对的均值（百分点） \| -75\.0 \|/);
   assert.match(text, /带无关记忆组缺失的事件数（找不到候选） \| 1 \|/);
-  assert.match(text, /记忆被用上的比例（带记忆组，可判定的遍次） \| 2\/10（20\.0%） \|/);
-  assert.match(text, /首轮变红判不清的遍次 \| 1 \|/);
-  assert.match(text, /结果行 \| 25 \/ 25 \|/);
-  assert.match(
-    text,
-    /\| s1-3 \| 3 \| 开局 \| 1\/4（25\.0%） \| 3\/5（60\.0%） \| 2\/5（40\.0%） \| -35\.0 \| -20\.0 \|/
+  assert.match(text, /\| 记忆被用上 \| 2\/5（40\.0%） \| — \| 1\/5（20\.0%） \|/);
+  assert.match(text, /带记忆减不带的"用上"比例差（百分点）：\+20\.0/);
+  // 组别取自结果文件：只有两组的结果也照样出这两列
+  const twoGroups = renderFixedPointReport(
+    LIST,
+    ROWS.filter((r) => r.group !== "irrelevant"),
+    { passes: 5 }
   );
-  assert.match(text, /每一轮回炉都给/);
+  assert.match(twoGroups, /\| 事件 \| 步 \| 带记忆变红 \| 不带变红 \|/);
 });

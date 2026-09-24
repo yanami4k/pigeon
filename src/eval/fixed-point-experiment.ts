@@ -18,7 +18,7 @@ import { currentHarnessRef } from "./runner.ts";
 import { pigeonStepAgent } from "./stream-agents.ts";
 import { readManifest, streamPigeonOptions } from "./stream-experiment.ts";
 import { gitHumanRepo } from "./stream-facts.ts";
-import { dockerStreamEnvs, type StepBudget } from "./stream-runner.ts";
+import { dockerStreamEnvs } from "./stream-runner.ts";
 
 function prefixOf(kind: string, outPath: string): string {
   return `pigeon-${kind}-${createHash("sha256").update(path.resolve(outPath)).digest("hex").slice(0, 8)}`;
@@ -78,8 +78,6 @@ export interface FixedPointExperimentOptions {
   concurrency?: number;
   passes?: number;
   groups?: readonly FixedPointGroup[];
-  // 调用方要的预算（缺省照搬原尝试；比原尝试宽即拒绝）
-  budget?: StepBudget;
   // 模型请求经网关（155）：上游模型须与原尝试的模型相同
   gateway: { accounts: readonly GatewayAccount[]; modelId: string };
   docker?: readonly string[];
@@ -155,7 +153,6 @@ export async function runFixedPointExperiment(
       ...(options.groups !== undefined ? { groups: options.groups } : {}),
       ...(options.passes !== undefined ? { passes: options.passes } : {}),
       ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
-      ...(options.budget !== undefined ? { budget: options.budget } : {}),
       limits,
       gateway: liveGateway,
       harnessRef: currentHarnessRef(),
