@@ -482,7 +482,7 @@ export const strandsRuntime: StreamRepoRuntime = {
   depsLinks: [],
   // 镜像里的选择脚本：按 strands-py/pyproject.toml 选第一套满足约束的冻结依赖，切换 /opt/venv 链接
   envSyncCommand: ["/opt/stream/select-env", "strands-py/pyproject.toml"],
-  // 应修 8：跑批器切环境按人在该步的依赖声明，不按 agent 改过的 pyproject
+  // 148 修订：跑批器切环境按人在该步的依赖声明，不按 agent 改过的 pyproject
   envDeclarationFile: "strands-py/pyproject.toml",
   envSyncFor: (file) => ["/opt/stream/select-env", file],
   // v5 镜像起：lint 环境按每个提交自己的提交时间解析，这里按该步人的提交切换（148 修订）

@@ -11,7 +11,7 @@ import {
   streamJobKey,
 } from "./stream-results.ts";
 
-test("结果行字段清单：第 20 条要求的字段都在（回炉三字段、两种通过率、回归、机检、轮数与用量、归因、限额暂停）", () => {
+test("结果行字段清单：要求的字段都在（回炉三字段、两种通过率、回归、机检、轮数与用量、归因、限额暂停）", () => {
   for (const field of [
     "seq",
     "kind",

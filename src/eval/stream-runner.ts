@@ -268,11 +268,11 @@ export interface RunStreamsOptions {
   log?: (line: string) => void;
   // 告警（缺省写标准错误输出）
   warn?: (line: string) => void;
-  // 限额统一处理（第 17 条）：每步前等放行、agent 运行时占一路；这一步撞上限额即作废、恢复后重做
+  // 限额统一处理（决策 144、155）：每步前等放行、agent 运行时占一路；这一步撞上限额即作废、恢复后重做
   limits?: LimitController;
   // 经网关时：轮数与 token 一律取网关的按作业计量，四个条件同一口径
   gateway?: StreamModelGateway;
-  // 身份头的摘要与各 agent 的参数：原样记进每条结果行（应修 9、顺手做第 3 条）
+  // 身份头的摘要与各 agent 的参数：原样记进每条结果行（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）
   runIdentity?: string;
   agentSettings?: Partial<Record<ConditionSpec["agent"], Record<string, unknown>>>;
 }
@@ -472,7 +472,7 @@ async function runStreamJob(
           row = await runStep(options, job, spec, agent, env, steps, step, state, jobDir);
           break;
         } catch (error) {
-          // 这一步作废（144、M2）：已回到本步起点、不留行，等放行后重做同一步
+          // 这一步作废（决策 144、160）：已回到本步起点、不留行，等放行后重做同一步
           if (!(error instanceof StepInterruptedError)) throw error;
           quarantineSessions(
             options.outDir,
@@ -529,7 +529,7 @@ export class EnvSelectionError extends Error {
   override name = "EnvSelectionError";
 }
 
-// 切依赖（应修 8、148 修订）：运行环境与 lint 环境都按该步人的提交选——运行方式给了依赖声明文件时，把人在该步的
+// 切依赖（148 修订）：运行环境与 lint 环境都按该步人的提交选——运行方式给了依赖声明文件时，把人在该步的
 // 这份声明写到工作区 .git 下的临时位置再交给切换命令，不看 agent 改过的；没给则按工作区里的声明（envSyncCommand）
 async function syncEnv(
   options: RunStreamsOptions,
@@ -583,7 +583,7 @@ async function agentChangedDeclaration(
   }
 }
 
-// agent 不许改测试（第 6 条）：它动过的测试与测试辅助文件，本步由程序写入的恢复成人的版本，其余恢复成本步起点的版本；
+// agent 不许改测试（决策 148）：它动过的测试与测试辅助文件，本步由程序写入的恢复成人的版本，其余恢复成本步起点的版本；
 // 它新建的测试文件保留（全量测量只跑人写的测试）。把测试或测试辅助文件改了名的（暂存的改名）：改名后的路径删掉，
 // 原路径另作一项、恢复成本步起点的版本
 async function restoreTests(
@@ -801,7 +801,7 @@ async function runStep(
   } else {
     const key = streamJobKey(job);
     const release = await options.limits?.acquire();
-    // 这一步开始时的限额信号数与本作业的计量（含上游故障数）：结束时比较，有变化即作废（M2，不看是哪种 agent、
+    // 这一步开始时的限额信号数与本作业的计量（含上游故障数）：结束时比较，有变化即作废（决策 144、160，不看是哪种 agent、
     // 也不看 agent 自己报没报被打断）
     const signalsBefore = options.limits?.signals ?? 0;
     const before = options.gateway?.meter(key);

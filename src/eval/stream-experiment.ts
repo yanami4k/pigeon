@@ -140,7 +140,7 @@ export async function runStreamExperiment(
   const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const referenceName = `${prefix}-reference`;
   const modelId = options.gateway.modelId;
-  // 身份头（应修 9）：开跑前写入或比对，不一致即拒绝续跑——在起网关与容器之前做
+  // 身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：开跑前写入或比对，不一致即拒绝续跑——在起网关与容器之前做
   const imageId = imageIdOf(options.image, docker);
   const pigeonSettings =
     options.pigeon === undefined

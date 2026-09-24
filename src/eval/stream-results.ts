@@ -1,7 +1,6 @@
-// 延续式实验的结果行（决策 145、142、143、144；第 20 条）：每条流、每个条件、每一步一行，逐行追加到 results.jsonl，
+// 延续式实验的结果行（决策 145、142、143、144）：每条流、每个条件、每一步一行，逐行追加到 results.jsonl，
 // 与外部基准跑批同一种落盘与续跑做法（写完即追加；撕裂的末行读时丢弃；按键取断点）。
 // 被限额打断的一步整题作废、不留行（144），因此这里没有错误行：有行即该步已完成。
-// 回炉三字段（用了几轮回炉、最终验证结论、是否撤回）的名字以回炉施工为准，合并时对齐。
 import { existsSync, readFileSync } from "node:fs";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import type { HarnessRef } from "./results.ts";
