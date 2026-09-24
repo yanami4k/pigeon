@@ -622,6 +622,45 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("还原人写测试防绕过：agent 给已落地的人写测试设 skip-worktree 或 assume-unchanged 再改，照样还原；跑批器自己的 git 操作不执行 agent 放进 .git/hooks 的钩子", async () => {
+    for (const flag of ["--skip-worktree", "--assume-unchanged"]) {
+      const t = await toy();
+      try {
+        const marker = join(t.base, "hook-ran").replace(/\\/g, "/");
+        const agent = scriptedAgent((input) => {
+          const root = input.target.root;
+          if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
+          if (input.step.seq === 2) {
+            // 维护步：把 a 改坏，再让第 1 步落地的人写测试 a.test.sh 恒过、并对 git 隐藏这处改动
+            write(root, { "src/a.txt": "wrong\n" });
+            git(root, "update-index", flag, "src/a.test.sh");
+            write(root, { "src/a.test.sh": "true\n" });
+            mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+            for (const hook of ["post-commit", "post-checkout", "post-index-change"]) {
+              writeFileSync(join(root, ".git", "hooks", hook), `#!/bin/sh\ntouch "${marker}"\n`, {
+                mode: 0o755,
+              });
+            }
+          }
+          return undefined;
+        });
+        const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+        const rows = readStreamResults(summary.resultsFile);
+        assert.deepEqual(
+          rows.map((r) => [r.seq, r.kind, r.outcome]),
+          [
+            [1, "task", "passed"],
+            [2, "maintenance", "failed"],
+          ],
+          `${flag}：隐藏的改动被还原，改坏的 a 判为不过`
+        );
+        assert.equal(existsSync(marker), false, `${flag}：agent 的钩子没有被执行`);
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("测量与判题的产物用完即清：下一步开始时，工作区里没有判题报告，测量副本目录是空的", async () => {
     const t = await toy();
     try {

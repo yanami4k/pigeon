@@ -64,6 +64,13 @@ export const STREAM_COMMITTER = { name: "pigeon-stream", email: "stream@pigeon.i
 
 const BUNDLE_PATH = ".git/pigeon-start.bundle";
 
+// 跑批器自己的 git 操作不受 agent 能改的 git 设置左右：不执行 .git/hooks 里的钩子、不跑 fsmonitor 程序（环境变量里的
+// 设置优先于仓库的 .git/config）。只加在工作区内部操作上，agent 与判题的命令照旧
+const SAFE_GIT_ENV =
+  "export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false";
+const UNMARK_INDEX =
+  "git ls-files -z | xargs -0 -r git update-index --no-skip-worktree -- && git ls-files -z | xargs -0 -r git update-index --no-assume-unchanged --";
+
 export interface CommandOutcome {
   exitCode: number | null;
   timedOut: boolean;
@@ -99,7 +106,7 @@ export class StreamWorkspace {
     what: string,
     options: ShellOptions = {}
   ): Promise<ShellResult> {
-    const result = await this.shell.sh(script, options);
+    const result = await this.shell.sh(`${SAFE_GIT_ENV}\n${script}`, options);
     if (result.exitCode !== 0) {
       throw new StreamWorkspaceError(
         `${what}失败（退出码 ${result.exitCode}）：${result.stderr.trim() || result.stdout.trim()}`
@@ -200,10 +207,14 @@ export class StreamWorkspace {
 
   // 回到本步起点（缺省为 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件；被忽略的文件（依赖目录）不动
   async rollback(to = "HEAD"): Promise<void> {
-    await this.must('git reset -q --hard "$1" && git clean -fdq', "回到本步起点", {
-      args: [to],
-      timeoutMs: 300_000,
-    });
+    await this.must(
+      `${UNMARK_INDEX} && git reset -q --hard "$1" && git clean -fdq`,
+      "回到本步起点",
+      {
+        args: [to],
+        timeoutMs: 300_000,
+      }
+    );
   }
 
   // agent 在容器里也可能自己提交：把 HEAD 挪回本步起点、改动留在工作区，此后的恢复、判定与落地都相对起点
@@ -317,6 +328,12 @@ export class StreamWorkspace {
       "读取被忽略的文件"
     );
     return r.stdout.split("\x00").filter((p) => p !== "");
+  }
+
+  // 去掉索引里全部条目的 skip-worktree 与 assume-unchanged 标记：agent 设了这些标记的文件，git status 看不到它的改动、
+  // 检出与 reset --hard 也会跳过它。标记要以参数给路径、两种标记分两次去（一次只认最后一个）
+  async unmarkIndex(): Promise<void> {
+    await this.must(UNMARK_INDEX, "去掉索引标记");
   }
 
   // 删掉给定路径（连同暂存区里的记录）；不在的忽略

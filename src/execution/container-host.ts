@@ -53,16 +53,33 @@ const START_TREE_SCRIPT = [
 ].join("\n");
 // 与开工时的树（$1）相比，现在被改动、删除或换了类型的文件（不含新建的）：同样在临时索引上 add -A 写成树再比，
 // 不动真实索引与工作区；路径以 NUL 分隔
+// agent 能改的 git 设置不得影响跑批器自己的 git 操作：不执行 .git/hooks 里的钩子，不跑 fsmonitor 程序
+const SAFE_GIT = 'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; };';
+// 相对开工时的树改过的路径：临时索引从开工时的树读起（不沿用工作区索引，agent 在里面设的 skip-worktree 与
+// assume-unchanged 标记因此不起作用），再把工作区全部加进来比较
 const CHANGED_SINCE_START_SCRIPT = [
   "set -e",
-  'idx="$(git rev-parse --git-path index)"; tmp="$idx.pigeon-now"; rm -f "$tmp"',
-  '[ -f "$idx" ] && cp "$idx" "$tmp"',
+  SAFE_GIT,
+  'idx="$(g rev-parse --git-path index)"; tmp="$idx.pigeon-now"; rm -f "$tmp"',
   'export GIT_INDEX_FILE="$tmp"',
-  "git add -A",
-  'tree="$(git write-tree)"',
+  'g read-tree "$1"',
+  "g add -A",
+  'tree="$(g write-tree)"',
   'rm -f "$tmp"',
-  'git diff-tree -r -z --name-only --no-renames --diff-filter=MDT "$1" "$tree"',
+  'g diff-tree -r -z --name-only --no-renames --diff-filter=MDT "$1" "$tree"',
 ].join("\n");
+
+// 把给定路径还原成开工时的版本：先去掉工作区索引里这些路径的 skip-worktree 与 assume-unchanged 标记（否则检出会跳过
+// 它们；标记要以参数给路径才生效，--stdin 读入的路径不带标记操作；两种标记一次只认最后一个，分两次去），再检出
+// （换成了目录的也由检出换回文件）、取消暂存；全程不执行钩子
+const UNMARK = "git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-index";
+const RESTORE_FROM_START_SCRIPT = [
+  SAFE_GIT,
+  'base="$1"; shift;',
+  `g ls-files -z -- "$@" | xargs -0 -r ${UNMARK} --no-skip-worktree -- &&`,
+  `g ls-files -z -- "$@" | xargs -0 -r ${UNMARK} --no-assume-unchanged -- &&`,
+  'g checkout -q "$base" -- "$@" && g reset -q -- "$@"',
+].join(" ");
 
 export interface ContainerHostOptions {
   // 容器名或 id（须已在运行）
@@ -472,7 +489,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           [
             "sh",
             "-c",
-            'base="$1"; shift; git checkout -q "$base" -- "$@" && git reset -q -- "$@"',
+            RESTORE_FROM_START_SCRIPT,
             "sh",
             mark.baseCommit,
             ...changed.slice(i, i + REMOVE_BATCH),

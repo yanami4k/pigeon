@@ -596,6 +596,8 @@ async function restoreTests(
     const kind = profile.classifyFile(p);
     return kind === "test" || kind === "testaux";
   };
+  // agent 设了 skip-worktree 或 assume-unchanged 的文件对 git status 隐身：先去掉标记再看改动
+  await ws.unmarkIndex();
   const all = await ws.changedPaths();
   const changed = all.filter((c) => isTest(c.path));
   const human = new Set(
