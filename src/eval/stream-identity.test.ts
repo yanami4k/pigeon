@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -64,5 +64,19 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
     assert.throws(() => checkOrWriteIdentity(dir, identity({ maxSteps: 5 })), /maxSteps/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("身份头：输出目录里已有结果、报告、作业目录或隔离目录却没有 identity.json，拒绝续跑、不补写身份头", () => {
+  for (const leftover of ["results.jsonl", "report.md", "streams", "voided"]) {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+    try {
+      if (leftover.includes(".")) writeFileSync(join(dir, leftover), "");
+      else mkdirSync(join(dir, leftover));
+      assert.throws(() => checkOrWriteIdentity(dir, identity()), /没有 identity\.json/);
+      assert.equal(existsSync(join(dir, "identity.json")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
