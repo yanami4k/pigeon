@@ -1,7 +1,8 @@
 // 延续式跑批的身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：输出目录下的 identity.json。core 为参与比对的身份——仓库、清单摘要、镜像标识、预算、
 // 条件、试跑的每流步数、两种 agent 的模型与推理参数（最简 agent 另记 mini-swe-agent 与 litellm 的版本），续跑时任何一项
 // 与已写的不同即拒绝，避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降、跑批器代码
-// 版本另记在每条结果行上）。结果行带 core 的摘要，据此认出每行属于哪一次身份
+// 版本另记在每条结果行上；续跑时路数、账号数或各账号并发上限有变即在 infoLog 追加一条）。结果行带 core 的摘要，
+// 据此认出每行属于哪一次身份
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -62,12 +63,32 @@ export function identityFile(outDir: string): string {
   return path.join(outDir, "identity.json");
 }
 
-// 首次写入身份头；已有的与这次的 core 逐项比对，不同即抛错并列出不同的项。返回 core 的摘要
-export function checkOrWriteIdentity(outDir: string, identity: StreamRunIdentity): string {
+// 身份头文件里 info 的变更记录：续跑时路数、账号数或各账号并发上限与最近一条不同即追加一条（带起始时刻），
+// 结果行 gateway.accountRequests 的长度据此对上当时的账号数。info 与这些记录都不参与身份比对
+export interface StreamInfoChange {
+  since: string;
+  info: StreamRunIdentity["info"];
+}
+
+// 比较 info 时不看跑批器代码版本（它另记在每条结果行上）
+function infoShape(info: StreamRunIdentity["info"]): string {
+  const { harness: _harness, ...rest } = info;
+  return canonical(rest);
+}
+
+// 首次写入身份头；已有的与这次的 core 逐项比对，不同即抛错并列出不同的项；一致而 info 有变即追加一条变更记录。
+// 返回 core 的摘要
+export function checkOrWriteIdentity(
+  outDir: string,
+  identity: StreamRunIdentity,
+  now: () => Date = () => new Date()
+): string {
   const file = identityFile(outDir);
   const digest = identityDigest(identity.core);
   if (existsSync(file)) {
-    const saved = JSON.parse(readFileSync(file, "utf8")) as StreamRunIdentity;
+    const saved = JSON.parse(readFileSync(file, "utf8")) as StreamRunIdentity & {
+      infoLog?: StreamInfoChange[];
+    };
     const differ = (
       Object.keys({ ...saved.core, ...identity.core }) as (keyof StreamRunIdentity["core"])[]
     ).filter((k) => canonical(saved.core[k]) !== canonical(identity.core[k]));
@@ -75,6 +96,14 @@ export function checkOrWriteIdentity(outDir: string, identity: StreamRunIdentity
       throw new Error(
         `输出目录的身份与这次不一致（${differ.join("、")}），拒绝续跑：不同仓库、预算、镜像、模型设定或试跑与正式的结果不能混在同一目录`
       );
+    }
+    const latest = saved.infoLog?.at(-1)?.info ?? saved.info;
+    if (infoShape(latest) !== infoShape(identity.info)) {
+      const infoLog = [
+        ...(saved.infoLog ?? []),
+        { since: now().toISOString(), info: identity.info },
+      ];
+      writeFileSync(file, `${JSON.stringify({ ...saved, infoLog }, null, 2)}\n`);
     }
     return digest;
   }

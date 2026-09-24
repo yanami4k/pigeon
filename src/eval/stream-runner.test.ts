@@ -1378,6 +1378,61 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("一步等空闲账号累计超过 30 秒即作废重做（与上游故障同一口径、不看 agent 种类）；恰为 30 秒不作废", async () => {
+    const t = await toy();
+    try {
+      const meters = new Map<string, GatewayMeter>();
+      const zero: GatewayMeter = {
+        requests: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        upstreamFailures: 0,
+        queueMs: 0,
+        peakInFlight: 0,
+        accountRequests: [0],
+      };
+      const gateway = {
+        jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
+        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+        resetPeak: () => {},
+      };
+      // 第一次尝试排队 31 秒，第二次 30 秒
+      const waits = [31_000, 30_000];
+      const agent = scriptedAgent((input) => {
+        const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
+        const m = meters.get(key) ?? zero;
+        meters.set(key, {
+          ...m,
+          requests: m.requests + 1,
+          queueMs: m.queueMs + (waits.shift() ?? 0),
+        });
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        return undefined;
+      });
+      const log: string[] = [];
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          maxSteps: 1,
+          gateway,
+          log: (line) => log.push(line),
+        })
+      );
+      assert.equal(agent.calls.length, 2, "第一次作废、重做一次");
+      assert.ok(
+        log.some((l) => /等空闲账号累计 31 秒（超过 30 秒）/.test(l)),
+        log.join("\n")
+      );
+      const rows = readStreamResults(summary.resultsFile);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.gateway?.queueMs, 30_000, "结果行只记没作废的那次");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("agent 连续自报被打断、期间没有任何限额信号或上游故障：重做三次后停下作业并说明，不无限重做", async () => {
     const t = await toy();
     try {

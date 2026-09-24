@@ -67,6 +67,51 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
   }
 });
 
+test("身份头：续跑时账号数、各账号并发或路数变了即在 infoLog 追加一条带起始时刻的记录（不参与比对、摘要不变）；只换跑批器代码不追加", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+  try {
+    const withAccounts = (accountConcurrency: number[], commit = "h1"): StreamRunIdentity => ({
+      ...identity(),
+      info: {
+        concurrency: 4,
+        accounts: accountConcurrency.length,
+        accountConcurrency,
+        harness: { commit, dirty: false },
+      },
+    });
+    const read = () => JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+    const first = checkOrWriteIdentity(dir, withAccounts([2]));
+    assert.equal(read().infoLog, undefined);
+    assert.equal(checkOrWriteIdentity(dir, withAccounts([2], "h2")), first);
+    assert.equal(read().infoLog, undefined, "只换跑批器代码：不追加");
+    const at = new Date("2026-09-25T00:00:00Z");
+    assert.equal(
+      checkOrWriteIdentity(dir, withAccounts([2, 3]), () => at),
+      first,
+      "加账号不改身份摘要"
+    );
+    assert.deepEqual(read().infoLog, [
+      { since: at.toISOString(), info: withAccounts([2, 3]).info },
+    ]);
+    assert.deepEqual(read().info.accountConcurrency, [2], "最初的 info 保留");
+    checkOrWriteIdentity(dir, withAccounts([2, 3]));
+    assert.equal(read().infoLog.length, 1, "与最近一条相同：不重复追加");
+    checkOrWriteIdentity(dir, withAccounts([2, 1]));
+    assert.deepEqual(
+      read().infoLog.map(
+        (c: { info: { accountConcurrency: number[] } }) => c.info.accountConcurrency
+      ),
+      [
+        [2, 3],
+        [2, 1],
+      ]
+    );
+    assert.equal(read().digest, first);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("身份头：输出目录里已有结果、报告、作业目录或隔离目录却没有 identity.json，拒绝续跑、不补写身份头", () => {
   for (const leftover of ["results.jsonl", "report.md", "streams", "voided"]) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));

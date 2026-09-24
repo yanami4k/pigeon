@@ -271,7 +271,7 @@ export interface CommandStepAgentOptions {
   graceMs?: number;
   // 模型名（启动器按它向网关发请求）
   model?: string;
-  // 限额控制器：这一步期间有任何限额信号（暂停、停止、并发受限降路）即杀掉启动器——这一步反正要作废重做。
+  // 限额控制器：这一步期间有任何限额信号（全部账号都不可用时的整批暂停或停止）即杀掉启动器——这一步反正要作废重做。
   // 订阅即时通知，另以 500 毫秒轮询兜底
   limits?: {
     readonly state: string;

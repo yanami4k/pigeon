@@ -286,7 +286,7 @@ test("命令式 agent：启动器的环境里没有密钥类变量（真 key 只
   }
 });
 
-test("命令式 agent：状态没变、只来了限额信号（例如并发受限只降路）也立即杀掉启动器，由订阅通知、不等轮询", async () => {
+test("命令式 agent：状态没变、只来了限额信号（例如整批暂停后账号随即恢复，看守读到的状态仍是运行）也立即杀掉启动器，由订阅通知、不等轮询", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   try {
     const hang = join(dir, "hang.mjs");

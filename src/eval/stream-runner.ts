@@ -22,7 +22,7 @@ import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
-import type { LimitController } from "./model-limits.ts";
+import { type LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
 import type { HarnessRef } from "./results.ts";
 import {
   attributeFailure,
@@ -220,7 +220,7 @@ export interface HumanReferenceCases {
 
 // agent 自报被打断、期间却没有任何限额信号或上游故障：最多重做这么多次
 export const MAX_BARE_INTERRUPTIONS = 3;
-// 同一步因限额信号或上游故障被作废：累计到前一个数先向标准错误告警，到后一个数停下作业，免得无止境重做
+// 同一步因限额信号、上游故障或排队超时被作废：累计到前一个数先向标准错误告警，到后一个数停下作业，免得无止境重做
 export const SIGNALLED_VOID_WARN = 5;
 export const SIGNALLED_VOID_STOP = 10;
 
@@ -548,7 +548,9 @@ async function runStreamJob(
                 `[${streamJobKey(job)}] 第 ${step.seq} 步因限额信号或上游故障已累计作废 ${signalledVoids} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这个作业`
               );
             }
-            log(`第 ${step.seq} 步撞上限额或上游故障，作废，恢复后重做：${error.message}`);
+            log(
+              `第 ${step.seq} 步撞上限额、上游故障或排队超时，作废，恢复后重做：${error.message}`
+            );
             continue;
           }
           bareInterruptions += 1;
@@ -901,17 +903,23 @@ async function runStep(
         : undefined;
     const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
     const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
-    if (signalled || upstreamFailed || result.interrupted !== undefined) {
+    // 等空闲账号累计超过 QUEUE_VOID_MS：有账号受限（退避、停用或降了上限），这一步受了限额事件的影响，与上游故障
+    // 同一口径作废重做（不看 agent 种类）
+    const queued = (delta?.queueMs ?? 0) > QUEUE_VOID_MS;
+    if (signalled || upstreamFailed || queued || result.interrupted !== undefined) {
       // 作废重做：连同这次尝试在库里留下的痕迹（agent 的提交所在的 reflog、ORIG_HEAD、本步的开工树引用）一并丢掉
       await ws.discardAttempt(state.head, step.seq - 1);
       const why = [
         signalled ? "期间出现限额信号" : undefined,
         upstreamFailed ? `本作业的上游故障 ${delta?.upstreamFailures} 次` : undefined,
+        queued
+          ? `等空闲账号累计 ${Math.round((delta?.queueMs ?? 0) / 1000)} 秒（超过 ${QUEUE_VOID_MS / 1000} 秒）`
+          : undefined,
         result.interrupted !== undefined ? `agent 报被打断：${result.interrupted}` : undefined,
       ].filter((x) => x !== undefined);
       throw new StepInterruptedError(
         `第 ${step.seq} 步作废：${why.join("；")}`,
-        signalled || upstreamFailed
+        signalled || upstreamFailed || queued
       );
     }
     if (delta !== undefined) {

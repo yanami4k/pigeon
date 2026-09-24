@@ -237,6 +237,8 @@ export async function runStreamExperiment(
   });
   const liveGateway = gateway;
   try {
+    // 开跑前逐账号探测一次（极小请求）：任一账号认证失败即拒绝开跑并报出账号编号
+    await liveGateway.preflight();
     await removeWorkspaceContainer(referenceName, docker);
     await startWorkspaceContainer({
       image: options.image,
@@ -318,6 +320,7 @@ export async function runStreamExperiment(
   } finally {
     await removeWorkspaceContainer(referenceName, docker).catch(() => {});
     await liveGateway.close();
+    limits.close();
   }
 }
 
