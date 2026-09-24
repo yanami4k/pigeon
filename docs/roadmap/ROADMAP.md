@@ -200,11 +200,14 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     载荷 schema（M5.7 起 run.started 带 MCP 工具集摘要与 server 状态）、
 │                     Event Log 记录族 schema（M5 起 v6，含 run.started / llm.request / skill.loaded
 │                     观察族；M5.5 起 v7，含 session.header / child.spawned / child.settled worker 编排族；
-│                     M5.7 起 v8，读路径把内嵌 receipt 升到当前版本；M6.5 起 v9，含 eval.verified 观察族）
+│                     M5.7 起 v8，读路径把内嵌 receipt 升到当前版本；M6.5 起 v9，含 eval.verified 观察族；
+│                     M9 起逐版推进至 v17：剪去无读者记录与第一版学习闭环的记录族（128、137，读取时跳过），
+│                     验证记录加分步结论、run.started 加结构化记忆留痕与容器起点（159、161））
 │                     与读路径迁移链、消息内容记录与规范序列化哈希（037）、Memory / Skill 注入清单
 │                     schema、推理档位字面量、失败四分类判据（活冷共用）、冷物化与对账（纯函数，
 │                     含正文缺口与父子配对）、trace / replay / session 摘要投影、固化 grant 规则与
-│                     commands.json schema、Candidate schema（candidate.ts，M6 候选暂存的状态与来源）、
+│                     commands.json schema、成败标签与尝试引用（attempt-ref.ts；原 Candidate schema 随 137 退役）、
+│                     结构化记忆的派生与指纹解析（131 至 136）、
 │                     MCP 配置 schema 与合并判据、注解与配置冲突的更严规则、
 │                     mcp 证据计算（M5.7）
 ├─ tools/             只依赖 state：Tool Registry（M5.7 起接受原样透传的 JSON Schema 参数）、Tool Policy
@@ -283,14 +286,13 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
                       grant 运行态
 
 占位（export {}，按里程碑填充）：
-├─ context/           上下文规划（M5 以 system prompt 冻结段与 transformContext 只读观察落地，
-│                     本目录仍空）
-├─ review/            M6 后台 Reviewer 和 Candidate 暂存
-├─ distillation/      M7 Episode、Outcome 和对比式经验提炼
-└─ replay/            M8 沙箱回放验证（区别于 state/replay 的只读重建，decisions.md 014）
+└─ context/           上下文规划（M5 以 system prompt 冻结段与 transformContext 只读观察落地，
+                      本目录仍空）
 
-占位目录暂按最小允许清单约束：只允许依赖 state 与 tools（placeholders-only-state-tools）；
-review/ 在 M6 开工时按需另裁放行范围。
+占位目录暂按最小允许清单约束：只允许依赖 state 与 tools（placeholders-only-state-tools）。
+review/、distillation/、activation/ 随第一版学习闭环退役删除（decisions.md 137、158）；
+replay/ 不再是占位，现为回放的一致性核对（plan.ts 量尺提取、fidelity.ts 放宽即拒），
+决策 156 保留、供跑批器的单步重跑调用，区别于 state/replay 的只读重建（decisions.md 014）。
 ```
 
 上图是逻辑模块图，物理形态是一个 npm package 下的 `src/` 目录。拆成多包 monorepo 的唯一触发条件是出现需要独立版本化/发布的产物，本轮不做。
@@ -324,7 +326,7 @@ settled 只表示执行过程到达终态；verification 的推进器（确定�
 OutcomeUnknown 先归属到具体 ExecutionId（intent 无 receipt 且无 resolution），
 再由 Run 聚合。Run 的状态不代替工具调用状态。
 
-Candidate（M6 起；状态由账本现算，decisions.md 065、084、092、093、128）:
+Candidate（M6 起，已随第一版学习闭环退役，decisions.md 137；旧记录读取时跳过，以下保留为历史）:
 提出（扫描结果随提出记录一并写入）→ SecurityScanned / ScanRejected
          → ReplayValidated / ReplayInconclusive / ReplayRegressed
          → Approved → Active → Revoked ／ Rejected ／ Superseded
@@ -892,6 +894,8 @@ Outcome 判断优先级：
 - 接入任何云 Provider 前必须明确数据外发范围和用户同意。
 
 ## 6. 核心数据模型草案
+
+以下 SkillCandidate 为第一版学习闭环的草案，已随其退役（decisions.md 137），保留为历史；现行学习产物为程序从账本派生的结构化记忆（§1、§3.4）。
 
 ```ts
 interface SkillCandidate {
