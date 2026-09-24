@@ -53,7 +53,8 @@ import {
 import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
-// 四个条件（126 修订、140）：记忆尚未建，完整 Pigeon 的记忆开关暂时等同于关闭
+// 四个条件（126 修订、140）：完整 Pigeon 开回炉、撤回与结构化记忆；去掉记忆只关结构化记忆；去掉验证门与回退两者都不开；
+// 最简 agent 另走启动器
 export interface ConditionSpec {
   name: StreamCondition;
   agent: "pigeon" | "minimal";

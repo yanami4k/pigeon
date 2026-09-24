@@ -104,7 +104,7 @@
 - `strands/constraints-{end,V3,V2,V1,V0}.txt`：产率测量时冻结的五套依赖，作 Linux 上重新解析的版本约束；已去掉可编辑安装行、strands 自身与只在 Windows 上存在的包（`pywin32`、`pywin32-ctypes`）。各组合的起始提交写在 `stream-profiles.ts` 的 `STRANDS_ENV_VARIANTS`。
 - `strands/stream_env.py`：从 pyproject 推出依赖（本体、`all` 与 `bidi-all` 可选依赖递归展开、hatch-test 与 hatch-static-analysis 环境的依赖），与按约束选组合；判断口径与产率测量的 envcheck 相同，平台标记取容器自身。
 
-本轮未构建镜像、未在容器里生成清单：本机 Docker 的数据盘待迁出系统盘，迁移前不拉取、不构建。
+本轮未构建镜像、未在容器里生成清单。
 
 ## 六、测试
 
@@ -160,7 +160,7 @@
 | no-gate（去掉验证门与回退） | Pigeon | 0 | 否 | 关 |
 | minimal（最简 agent） | mini-swe-agent | 0 | 否 | 关 |
 
-回炉由另一施工进行；回炉合入前，开回炉的两个条件在 agent 接入处明确报错，作业停止并写明原因。回炉三字段在结果行里名为 `repairRounds`、`finalVerdict`、`reverted`，合并时与回炉施工对齐。撤回按 154 的推断口径：条件开启撤回且回炉最后一次验证失败即撤回。
+回炉按决策 142、143 与 154 接入（容器上的回炉见回炉一侧的审计）。回炉字段在结果行里名为 `repairRounds`、`finalVerdict`、`reverted`。撤回按 154 的推断口径：条件开启撤回且回炉最后一次验证失败即撤回。
 
 每一步的流程：
 
