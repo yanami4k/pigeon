@@ -136,8 +136,13 @@ export interface CommandStepAgentOptions {
   graceMs?: number;
   // 模型名（启动器按它向网关发请求）
   model?: string;
-  // 限额控制器：暂停即杀掉启动器
-  limits?: { readonly state: string };
+  // 限额控制器：这一步期间有任何限额信号（暂停、停止、并发受限降路）即杀掉启动器——这一步反正要作废重做。
+  // 订阅即时通知，另以 500 毫秒轮询兜底
+  limits?: {
+    readonly state: string;
+    readonly signals?: number;
+    subscribe?(listener: () => void): () => void;
+  };
 }
 
 export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
@@ -187,12 +192,20 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
           () => kill("timeout"),
           input.budget.wallClockMs + (options.graceMs ?? 30_000)
         );
-        const watch = setInterval(() => {
-          if (options.limits !== undefined && options.limits.state !== "running") kill("paused");
-        }, 500);
+        const limits = options.limits;
+        const signalsAtStart = limits?.signals ?? 0;
+        const check = () => {
+          if (limits === undefined) return;
+          if (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart)
+            kill("paused");
+        };
+        const unsubscribe = limits?.subscribe?.(check);
+        const watch = setInterval(check, 500);
+        check();
         const done = () => {
           clearTimeout(timer);
           clearInterval(watch);
+          unsubscribe?.();
         };
         child.on("error", (error) => {
           done();
@@ -211,7 +224,7 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
           usage: ZERO_USAGE,
           wallMs,
           repair: null,
-          interrupted: "限额暂停：最简 agent 已中止",
+          interrupted: "限额信号：最简 agent 已中止",
         };
       }
       const timedOut = ended === "timeout";

@@ -110,8 +110,35 @@ test("命令式 agent：限额暂停即杀掉启动器，记为被打断（整�
       limits.state = "paused";
     }, 200);
     const out = await agent.run(input(dir));
-    assert.equal(out.interrupted, "限额暂停：最简 agent 已中止");
+    assert.equal(out.interrupted, "限额信号：最简 agent 已中止");
     assert.ok(out.wallMs < 30_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("命令式 agent：状态没变、只来了限额信号（例如并发受限只降路）也立即杀掉启动器，由订阅通知、不等轮询", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  try {
+    const hang = join(dir, "hang.mjs");
+    writeFileSync(hang, "setInterval(() => {}, 1000);\n");
+    const listeners = new Set<() => void>();
+    const limits = {
+      state: "running",
+      signals: 0,
+      subscribe(listener: () => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const agent = commandStepAgent({ command: [process.execPath, hang], limits, graceMs: 0 });
+    setTimeout(() => {
+      limits.signals += 1;
+      for (const listener of listeners) listener();
+    }, 200);
+    const out = await agent.run(input(dir, { budget: { maxTurns: 1, wallClockMs: 5_000 } }));
+    assert.equal(out.interrupted, "限额信号：最简 agent 已中止");
+    assert.equal(listeners.size, 0, "一步结束即退订");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

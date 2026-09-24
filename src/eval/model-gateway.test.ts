@@ -110,6 +110,7 @@ test("网关：按作业前缀转发、注入真 key、流式原样透传并按�
         output: 42,
         cacheRead: 30,
         cacheWrite: 0,
+        upstreamFailures: 0,
       });
       assert.deepEqual(g.meter("other"), {
         requests: 0,
@@ -117,6 +118,7 @@ test("网关：按作业前缀转发、注入真 key、流式原样透传并按�
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
+        upstreamFailures: 0,
       });
     }
   );
@@ -229,6 +231,7 @@ test("网关：Pigeon 的模型接入经网关走通上游 SDK——路径、真
         output: 5,
         cacheRead: 0,
         cacheWrite: 0,
+        upstreamFailures: 0,
       });
     }
   );
@@ -250,6 +253,37 @@ test("网关：探测发极小请求，上游 200 即恢复；非 200 为未恢�
           ["/v1/messages", '{"max_tokens":1}'],
         ]
       );
+    }
+  );
+});
+
+test("网关：上游 5xx 记为出事作业的上游故障、不算限额；403 并发受限与 403 额度记为限额信号", async () => {
+  await withGateway(
+    [
+      {
+        status: 503,
+        body: '{"type":"error","error":{"type":"overloaded_error","message":"busy"}}',
+      },
+      { status: 403, body: "too many concurrent requests" },
+      { status: 403, body: "usage limit reached, quota will reset in 5 hours" },
+    ],
+    async (g, _up, l) => {
+      const r1 = await post(g, "s1|minimal|1");
+      assert.equal(r1.status, 503);
+      await r1.text();
+      assert.equal(g.meter("s1|minimal|1").upstreamFailures, 1);
+      assert.equal(g.meter("s1|full|1").upstreamFailures, 0, "别的作业不受影响");
+      assert.equal(l.signals, 0, "5xx 不是限额");
+      const r2 = await post(g, "s1|minimal|1");
+      assert.equal(r2.status, 403);
+      await r2.text();
+      assert.deepEqual([l.signals, l.slots, l.state], [1, 3, "running"]);
+      const r3 = await post(g, "s1|minimal|1");
+      assert.equal(r3.status, 403);
+      await r3.text();
+      assert.deepEqual([l.signals, l.state], [2, "paused"]);
+      // 403 只进限额信号，不算上游故障
+      assert.equal(g.meter("s1|minimal|1").upstreamFailures, 1);
     }
   );
 });

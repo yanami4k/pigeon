@@ -189,8 +189,17 @@ export interface HumanReferenceCases {
   casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline>;
 }
 
+// agent 自报被打断、期间却没有任何限额信号或上游故障：最多重做这么多次
+export const MAX_BARE_INTERRUPTIONS = 3;
+
+// 一步作废：signalled 为这一步期间出现过限额信号或本作业的上游故障（无论 agent 怎么报），否则是 agent 自报被打断
 export class StepInterruptedError extends Error {
   override name = "StepInterruptedError";
+  readonly signalled: boolean;
+  constructor(message: string, signalled: boolean) {
+    super(message);
+    this.signalled = signalled;
+  }
 }
 
 export interface RunStreamsOptions {
@@ -384,23 +393,28 @@ async function runStreamJob(
       log(`第 ${step.seq} 步（${step.kind}）${step.subject.slice(0, 60)}`);
       const epochAtStart = limits?.epoch ?? 0;
       let row: StreamResultLine;
+      // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
+      let bareInterruptions = 0;
       for (;;) {
         await limits?.ready();
-        const signals = limits?.signals ?? 0;
         try {
           row = await runStep(options, job, spec, agent, env, steps, step, state, jobDir);
           break;
         } catch (error) {
-          // 这一步撞上了限额（暂停或降路）：已回到本步起点、不留行，等放行后重做同一步（144）
-          if (
-            error instanceof StepInterruptedError &&
-            limits !== undefined &&
-            limits.signals !== signals
-          ) {
-            log(`第 ${step.seq} 步撞上限额，作废，恢复后重做`);
+          // 这一步作废（144、M2）：已回到本步起点、不留行，等放行后重做同一步
+          if (!(error instanceof StepInterruptedError)) throw error;
+          if (error.signalled) {
+            bareInterruptions = 0;
+            log(`第 ${step.seq} 步撞上限额或上游故障，作废，恢复后重做：${error.message}`);
             continue;
           }
-          throw error;
+          bareInterruptions += 1;
+          if (bareInterruptions > MAX_BARE_INTERRUPTIONS) {
+            throw new Error(
+              `第 ${step.seq} 步连续 ${bareInterruptions} 次被打断，期间没有限额信号或上游故障：停下作业（${error.message}）`
+            );
+          }
+          log(`第 ${step.seq} 步被打断，作废重做（第 ${bareInterruptions} 次）：${error.message}`);
         }
       }
       row.limitPauses = limits?.pausesSince(epochAtStart) ?? [];
@@ -596,8 +610,11 @@ async function runStep(
     head = await ws.land(step.message);
   } else {
     const key = streamJobKey(job);
-    const before = options.gateway?.meter(key);
     const release = await options.limits?.acquire();
+    // 这一步开始时的限额信号数与本作业的计量（含上游故障数）：结束时比较，有变化即作废（M2，不看是哪种 agent、
+    // 也不看 agent 自己报没报被打断）
+    const signalsBefore = options.limits?.signals ?? 0;
+    const before = options.gateway?.meter(key);
     try {
       result = await agent.run({
         job,
@@ -616,9 +633,27 @@ async function runStep(
     } finally {
       release?.();
     }
-    if (options.gateway !== undefined && before !== undefined) {
+    const delta =
+      options.gateway !== undefined && before !== undefined
+        ? meterDelta(options.gateway.meter(key), before)
+        : undefined;
+    const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
+    const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
+    if (signalled || upstreamFailed || result.interrupted !== undefined) {
+      await ws.rollback(state.head);
+      const why = [
+        signalled ? "期间出现限额信号" : undefined,
+        upstreamFailed ? `本作业的上游故障 ${delta?.upstreamFailures} 次` : undefined,
+        result.interrupted !== undefined ? `agent 报被打断：${result.interrupted}` : undefined,
+      ].filter((x) => x !== undefined);
+      throw new StepInterruptedError(
+        `第 ${step.seq} 步作废：${why.join("；")}`,
+        signalled || upstreamFailed
+      );
+    }
+    if (delta !== undefined) {
       // 四个条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
-      const d = meterDelta(options.gateway.meter(key), before);
+      const d = delta;
       result = {
         ...result,
         turns: d.requests,
@@ -631,10 +666,6 @@ async function runStep(
           totalTokens: d.input + d.output + d.cacheRead + d.cacheWrite,
         },
       };
-    }
-    if (result.interrupted !== undefined) {
-      await ws.rollback(state.head);
-      throw new StepInterruptedError(`第 ${step.seq} 步被打断，整题作废：${result.interrupted}`);
     }
     await ws.normalizeTo(state.head);
     await restoreTests(options, ws, step);

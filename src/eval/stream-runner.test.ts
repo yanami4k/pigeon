@@ -328,7 +328,12 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       });
       const first = await runStreams(options(t, { agents: { pigeon: flaky }, maxSteps: 4 }));
       assert.equal(first.jobs[0]?.completedTo, 1);
-      assert.match(first.jobs[0]?.stopped ?? "", /第 2 步被打断，整题作废：模型服务故障/);
+      // 没有限额信号的被打断：作废重做，连续超过上限才停下作业
+      assert.match(
+        first.jobs[0]?.stopped ?? "",
+        /第 2 步连续 4 次被打断.*agent 报被打断：模型服务故障/
+      );
+      assert.equal(flaky.calls.filter((c) => c.step.seq === 2).length, 4);
       assert.deepEqual(
         readStreamResults(first.resultsFile).map((r) => r.seq),
         [1]
@@ -377,7 +382,14 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const gateway = {
         jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
         meter: (job: string) => ({
-          ...(meters.get(job) ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+          ...(meters.get(job) ?? {
+            requests: 0,
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            upstreamFailures: 0,
+          }),
         }),
       };
       let hits = 0;
@@ -389,6 +401,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           output: 0,
           cacheRead: 0,
           cacheWrite: 0,
+          upstreamFailures: 0,
         };
         meters.set(`${input.job.stream}|${input.job.condition}|${input.job.attempt}`, {
           ...m,
@@ -427,6 +440,98 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       );
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("限额与上游故障一律作废重做：一步期间出现并发受限、额度暂停、本作业的上游故障，或 agent 自报被打断，不论 agent 报没报、哪种 agent，这一步都回到起点重做、不判分", async () => {
+    const t = await toy();
+    try {
+      const limits = new LimitController({
+        probe: async () => true,
+        slots: 2,
+        sleep: () => new Promise((r) => setTimeout(r, 5)),
+        warn: () => {},
+      });
+      const meters = new Map<string, GatewayMeter>();
+      const zero: GatewayMeter = {
+        requests: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        upstreamFailures: 0,
+      };
+      const gateway = {
+        jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
+        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+      };
+      // 第 1 步的前四次各遇到一种情况，都写下会判错的改动、且除自报那次外都不报被打断；第五次正常完成
+      const attempts = new Map<string, number>();
+      const make = () =>
+        scriptedAgent((input) => {
+          const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
+          const root = input.target.root;
+          if (input.step.seq !== 1) return undefined;
+          const n = (attempts.get(key) ?? 0) + 1;
+          attempts.set(key, n);
+          if (n <= 4) write(root, { "src/a.txt": "wrong\n" });
+          if (n === 1) limits.onLimit("concurrency");
+          if (n === 2) {
+            const m = meters.get(key) ?? zero;
+            meters.set(key, { ...m, upstreamFailures: m.upstreamFailures + 1 });
+          }
+          if (n === 3) limits.onLimit("5h");
+          if (n === 4) return { interrupted: "模型服务故障" };
+          if (n === 5) write(root, { "src/a.txt": "alpha\n" });
+          return undefined;
+        });
+      const mini = make();
+      const pigeon = make();
+      const summary = await runStreams(
+        options(t, {
+          agents: { minimal: mini, pigeon },
+          conditions: ["minimal", "no-gate"],
+          maxSteps: 1,
+          concurrency: 1,
+          limits,
+          gateway,
+        })
+      );
+      assert.deepEqual(
+        summary.jobs.map((j) => [j.key, j.completedTo, j.stopped]),
+        [
+          ["s1|minimal|1", 1, undefined],
+          ["s1|no-gate|1", 1, undefined],
+        ]
+      );
+      const rows = readStreamResults(summary.resultsFile);
+      // 每个作业只留一行、判为通过：前四次都作废了，没有按"wrong"判分
+      assert.deepEqual(
+        rows.map((r) => [r.condition, r.seq, r.outcome]),
+        [
+          ["minimal", 1, "passed"],
+          ["no-gate", 1, "passed"],
+        ]
+      );
+      assert.deepEqual([mini.calls.length, pigeon.calls.length], [5, 5]);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("agent 连续自报被打断、期间没有任何限额信号或上游故障：重做三次后停下作业并说明，不无限重做", async () => {
+    const t = await toy();
+    try {
+      const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
+      const agent = scriptedAgent(() => ({ interrupted: "模型服务故障" }));
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, maxSteps: 1, limits })
+      );
+      assert.match(summary.jobs[0]?.stopped ?? "", /连续 4 次被打断/);
+      assert.equal(agent.calls.length, 4);
+      assert.deepEqual(readStreamResults(summary.resultsFile), []);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

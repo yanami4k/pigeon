@@ -92,6 +92,7 @@ export class LimitController {
   private resolveResumed: (() => void) | undefined;
   private rejectResumed: ((error: Error) => void) | undefined;
   private readonly warned = new Set<string>();
+  private readonly listeners = new Set<() => void>();
   private readonly options: LimitControllerOptions;
 
   constructor(options: LimitControllerOptions) {
@@ -109,6 +110,24 @@ export class LimitController {
     (this.options.warn ?? ((l: string) => process.stderr.write(`[限额] ${l}\n`)))(line);
   }
 
+  // 订阅限额信号与状态变化（在途步骤的看守据此立即中止，不必等轮询）；返回退订函数
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notify(): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        // 看守自己的故障不影响限额处理
+      }
+    }
+  }
+
   // 上游报来限额信号
   onLimit(kind: LimitKind): void {
     if (this.state === "stopped") return;
@@ -117,17 +136,16 @@ export class LimitController {
       this.stop(
         "每月额度用完：跑批停下，额度恢复前不再发请求（已完成的步保留，之后在同一输出目录续跑）"
       );
-      return;
-    }
-    if (kind === "concurrency" && this.slots > 1) {
+    } else if (kind === "concurrency" && this.slots > 1) {
       this.slots -= 1;
       this.warn(
         `concurrency-${this.slots}`,
-        `模型服务报并发受限：并行降为 ${this.slots} 路（被打断的那一步作废重做）`
+        `模型服务报并发受限：并行降为 ${this.slots} 路（在途的步骤作废重做）`
       );
-      return;
+    } else {
+      this.pause(kind);
     }
-    this.pause(kind);
+    this.notify();
   }
 
   private stop(reason: string): void {

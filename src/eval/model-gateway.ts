@@ -21,6 +21,9 @@ export interface GatewayMeter {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  // 这个作业的请求遇到的上游故障次数：上游 5xx、转发时连不上上游、200 之后中途断流。跑批器一步前后比较它，
+  // 有变化即这一步作废重做（与限额信号同一口径，不看 agent 自己怎么处理这次故障）
+  upstreamFailures: number;
 }
 
 export interface ModelGatewayOptions {
@@ -67,7 +70,7 @@ function anthropicError(type: string, message: string): string {
 }
 
 function emptyMeter(): GatewayMeter {
-  return { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  return { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, upstreamFailures: 0 };
 }
 
 async function readAll(req: http.IncomingMessage): Promise<Buffer> {
@@ -78,7 +81,7 @@ async function readAll(req: http.IncomingMessage): Promise<Buffer> {
 
 // 从响应正文里读用量：SSE 取 message_start 的输入与缓存、message_delta 的输出（累计值，取最后一次）；
 // 非流式取正文的 usage
-function usageOf(text: string): Omit<GatewayMeter, "requests"> {
+function usageOf(text: string): Omit<GatewayMeter, "requests" | "upstreamFailures"> {
   const out = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const take = (usage: Record<string, unknown> | undefined, final: boolean) => {
     if (usage === undefined) return;
@@ -190,75 +193,86 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     });
     let limited = new Set<number>();
     let backoffs = 0;
-    for (;;) {
-      const index = active;
-      const key = keys[index] as string;
-      const upstream = await fetch(`${options.upstreamBaseUrl}${rest}`, {
-        method: req.method ?? "POST",
-        headers: upstreamHeaders(req.headers, key),
-        ...(body.length > 0 ? { body: new Uint8Array(body) } : {}),
-        signal: abort.signal,
-      });
-      if (upstream.status === 429) {
-        await upstream.body?.cancel();
-        limited.add(index);
-        const other = keys.findIndex((_, i) => !limited.has(i));
-        if (other !== -1) {
-          if (active === index) {
-            active = other;
-            warn(
-              `${label(index)}撞频率限制，切换到${label(other)}，后续请求保持使用${label(other)}`
-            );
+    // 连不上上游或中途断流记为这个作业的上游故障；客户端自己断开（agent 撞上限被中止等）不算
+    try {
+      await forward();
+    } catch (error) {
+      if (!abort.signal.aborted) meterOf(job).upstreamFailures += 1;
+      throw error;
+    }
+
+    async function forward(): Promise<void> {
+      for (;;) {
+        const index = active;
+        const key = keys[index] as string;
+        const upstream = await fetch(`${options.upstreamBaseUrl}${rest}`, {
+          method: req.method ?? "POST",
+          headers: upstreamHeaders(req.headers, key),
+          ...(body.length > 0 ? { body: new Uint8Array(body) } : {}),
+          signal: abort.signal,
+        });
+        if (upstream.status === 429) {
+          await upstream.body?.cancel();
+          limited.add(index);
+          const other = keys.findIndex((_, i) => !limited.has(i));
+          if (other !== -1) {
+            if (active === index) {
+              active = other;
+              warn(
+                `${label(index)}撞频率限制，切换到${label(other)}，后续请求保持使用${label(other)}`
+              );
+            }
+            continue;
           }
+          if (backoffs >= delays.length) {
+            options.limits.onLimit("rate-limit");
+            send(
+              res,
+              429,
+              anthropicError("rate_limit_error", `退避 ${delays.length} 次后仍撞频率限制：整批暂停`)
+            );
+            return;
+          }
+          await backoff(backoffs);
+          backoffs += 1;
+          limited = new Set();
           continue;
         }
-        if (backoffs >= delays.length) {
-          options.limits.onLimit("rate-limit");
-          send(
-            res,
-            429,
-            anthropicError("rate_limit_error", `退避 ${delays.length} 次后仍撞频率限制：整批暂停`)
-          );
+        if (upstream.status !== 200) {
+          const text = await upstream.text();
+          const failure = classifyUpstreamFailure(upstream.status, text);
+          if (failure.kind !== "auth" && failure.kind !== "other")
+            options.limits.onLimit(failure.kind);
+          if (upstream.status >= 500) meterOf(job).upstreamFailures += 1;
+          res.writeHead(upstream.status, {
+            "content-type": upstream.headers.get("content-type") ?? "application/json",
+          });
+          res.end(scrubKeys(text, keys));
           return;
         }
-        await backoff(backoffs);
-        backoffs += 1;
-        limited = new Set();
-        continue;
-      }
-      if (upstream.status !== 200) {
-        const text = await upstream.text();
-        const failure = classifyUpstreamFailure(upstream.status, text);
-        if (failure.kind !== "auth" && failure.kind !== "other")
-          options.limits.onLimit(failure.kind);
-        res.writeHead(upstream.status, {
-          "content-type": upstream.headers.get("content-type") ?? "application/json",
+        const headers: Record<string, string> = {};
+        upstream.headers.forEach((value, name) => {
+          if (!DROP_RESPONSE_HEADERS.has(name)) headers[name] = value;
         });
-        res.end(scrubKeys(text, keys));
+        res.writeHead(200, headers);
+        const meter = meterOf(job);
+        meter.requests += 1;
+        const decoder = new TextDecoder();
+        let text = "";
+        if (upstream.body !== null) {
+          for await (const chunk of upstream.body) {
+            res.write(chunk);
+            text += decoder.decode(chunk as Uint8Array, { stream: true });
+          }
+        }
+        res.end();
+        const usage = usageOf(text);
+        meter.input += usage.input;
+        meter.output += usage.output;
+        meter.cacheRead += usage.cacheRead;
+        meter.cacheWrite += usage.cacheWrite;
         return;
       }
-      const headers: Record<string, string> = {};
-      upstream.headers.forEach((value, name) => {
-        if (!DROP_RESPONSE_HEADERS.has(name)) headers[name] = value;
-      });
-      res.writeHead(200, headers);
-      const meter = meterOf(job);
-      meter.requests += 1;
-      const decoder = new TextDecoder();
-      let text = "";
-      if (upstream.body !== null) {
-        for await (const chunk of upstream.body) {
-          res.write(chunk);
-          text += decoder.decode(chunk as Uint8Array, { stream: true });
-        }
-      }
-      res.end();
-      const usage = usageOf(text);
-      meter.input += usage.input;
-      meter.output += usage.output;
-      meter.cacheRead += usage.cacheRead;
-      meter.cacheWrite += usage.cacheWrite;
-      return;
     }
   };
 
@@ -308,5 +322,6 @@ export function meterDelta(after: GatewayMeter, before: GatewayMeter): GatewayMe
     output: after.output - before.output,
     cacheRead: after.cacheRead - before.cacheRead,
     cacheWrite: after.cacheWrite - before.cacheWrite,
+    upstreamFailures: after.upstreamFailures - before.upstreamFailures,
   };
 }
