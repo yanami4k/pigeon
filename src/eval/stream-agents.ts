@@ -62,10 +62,13 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
         sessionId: newSessionId(),
         maxTurns: input.budget.maxTurns,
         wallClockMs: input.budget.wallClockMs,
-        // 结构化记忆尚未建：开关打开时暂时等同于关闭
         skillRoots: [],
         memoryRoots: [],
         taskDirective: STREAM_WORK_DIRECTIVE,
+        // 结构化记忆（134、157）：完整条件开启、按题面与报错正常挑选（固定挑选只用于定点对照的单步重跑）；
+        // 去掉记忆的条件关闭。事实取自治理根里的以往会话，治理根即作业目录（条件 × 流 × 遍次各一个，见跑批器），
+        // 记忆因此只在同一条流里沿步累积，不跨条件、遍次或流串用
+        structuredMemory: input.condition.memory ? {} : { enabled: false },
         // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点
         ...(repairRounds > 0
           ? {

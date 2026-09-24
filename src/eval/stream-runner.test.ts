@@ -613,3 +613,38 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
     rmSync(t.base, { recursive: true, force: true });
   }
 });
+
+test("治理根按条件 × 流 × 遍次隔离：同一作业各步共用一个（记忆沿流累积），不同条件、不同遍次各用各的", async () => {
+  const t = await toy();
+  try {
+    const agent = scriptedAgent(() => undefined);
+    await runStreams(
+      options(t, {
+        agents: { pigeon: agent },
+        conditions: ["full", "no-memory"],
+        attempts: 2,
+        maxSteps: 2,
+        concurrency: 1,
+      })
+    );
+    const roots = new Map<string, Set<string>>();
+    for (const call of agent.calls) {
+      const key = `${call.job.stream}|${call.job.condition}|${call.job.attempt}`;
+      roots.set(key, (roots.get(key) ?? new Set()).add(call.workDir));
+    }
+    // 每个作业的两步（题、维护步）都调了 agent，且共用一个治理根
+    assert.equal(agent.calls.length, 8);
+    assert.deepEqual(
+      [...roots.values()].map((set) => set.size),
+      [1, 1, 1, 1]
+    );
+    // 四个作业的治理根两两不同：条件不同或遍次不同都不串用
+    const distinct = new Set([...roots.values()].map((set) => [...set][0]));
+    assert.equal(distinct.size, 4);
+    const of = (key: string) => [...(roots.get(key) ?? [])][0];
+    assert.notEqual(of("s1|full|1"), of("s1|full|2"), "两个遍次的治理根不同");
+    assert.notEqual(of("s1|full|1"), of("s1|no-memory|1"), "两个条件的治理根不同");
+  } finally {
+    rmSync(t.base, { recursive: true, force: true });
+  }
+});

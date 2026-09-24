@@ -329,6 +329,8 @@ async function runStreamJob(
   const segment = options.manifest.streams.find((s) => s.id === job.stream);
   if (segment === undefined) throw new Error(`清单里没有流 ${job.stream}`);
   const steps = limitSteps(stepsOf(options.manifest, job.stream), options.maxSteps);
+  // 作业目录即 agent 的治理根：条件 × 流 × 遍次各一个。结构化记忆从治理根里的以往会话派生，
+  // 所以只在同一条流里沿步累积，不跨条件、遍次或流串用；目录名必须同时含这三者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });
   // 分步验证配置写进这个作业的治理根（Pigeon 在宿主进程内运行，项目配置从治理根读；不写进容器工作区，

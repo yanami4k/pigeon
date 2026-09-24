@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { commandStepAgent, pigeonStepAgent, STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
@@ -202,4 +203,41 @@ test("Pigeon agent：不开回炉的条件不验证、不撤回，结果不带�
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
+});
+
+test("Pigeon agent：完整条件接入结构化记忆（开启、按题面与报错正常挑选），去掉记忆的条件关闭", async () => {
+  const seen: Record<string, { enabled: boolean; selection: string } | undefined> = {};
+  for (const condition of ["full", "no-memory"] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+    const ws = containerWorkspace(dir);
+    try {
+      const agent = pigeonStepAgent({
+        streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
+        yolo: true,
+        docker: ws.docker,
+        homeDir: join(dir, "home"),
+      });
+      const workDir = join(dir, "job");
+      const out = await agent.run(
+        input(workDir, {
+          condition: CONDITION_SPECS[condition],
+          target: { container: "box", root: ws.containerRoot },
+          verify: { command: "grep -qx fixed a.txt", timeoutMs: 60_000 },
+        })
+      );
+      assert.equal(out.repair?.finalVerdict, "pass");
+      const sessions = join(workDir, ".pigeon", "sessions");
+      const [sessionId] = listSessionIds(sessions);
+      assert.ok(sessionId !== undefined);
+      const memory = materializeSession(sessions, sessionId, { content: false }).runStarteds[0]
+        ?.payload.structuredMemory;
+      seen[condition] =
+        memory === undefined ? undefined : { enabled: memory.enabled, selection: memory.selection };
+    } finally {
+      ws.cleanup();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    }
+  }
+  assert.deepEqual(seen.full, { enabled: true, selection: "auto" });
+  assert.notEqual(seen["no-memory"]?.enabled, true);
 });
