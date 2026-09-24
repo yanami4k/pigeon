@@ -4,12 +4,65 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { gatewayStreamFn } from "../pi-runtime/index.ts";
 import {
+  type GatewayClock,
   gatewayAccountsFromEnv,
   type ModelGateway,
   meterDelta,
   startModelGateway,
 } from "./model-gateway.ts";
-import { LimitController } from "./model-limits.ts";
+import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
+
+// 可控时钟：短于 autoBelowMs 的定时在下一轮事件循环即触发，其余等 advance 拨到；virtual 为真时 now 只随 advance 走，
+// 否则为真实时间加上拨快的量。set 记下每次定时的毫秒数
+function testClock(options: { autoBelowMs?: number; virtual?: boolean } = {}) {
+  const autoBelowMs = options.autoBelowMs ?? 60_000;
+  let offset = 0;
+  const timers: { at: number; ms: number; fn: () => void; live: boolean }[] = [];
+  const set: number[] = [];
+  const clock: GatewayClock = {
+    now: () => (options.virtual === true ? 0 : Date.now()) + offset,
+    setTimer(ms, fn) {
+      set.push(ms);
+      if (ms < autoBelowMs) {
+        const t = setImmediate(fn);
+        return () => clearImmediate(t);
+      }
+      const t = { at: clock.now() + ms, ms, fn, live: true };
+      timers.push(t);
+      return () => {
+        t.live = false;
+      };
+    },
+  };
+  return {
+    clock,
+    set,
+    // 未到的手动定时（毫秒数）
+    pending: () => timers.filter((t) => t.live).map((t) => t.ms),
+    // 拨快 ms，依次触发到期的定时
+    async advance(ms: number) {
+      offset += ms;
+      for (;;) {
+        const due = timers
+          .filter((t) => t.live && t.at <= clock.now())
+          .sort((a, b) => a.at - b.at)[0];
+        if (due === undefined) return;
+        due.live = false;
+        due.fn();
+        await new Promise((r) => setImmediate(r));
+      }
+    },
+  };
+}
+
+// 等到条件成立（最多 3 秒）
+async function until(cond: () => boolean, what = "条件") {
+  const deadline = Date.now() + 3000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`等不到${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 interface Scripted {
   status: number;
@@ -76,10 +129,9 @@ async function withGateway(
     upstreamBaseUrl: up.url,
     accounts: keys.map((key) => ({ key, concurrency: 2 })),
     limits: l,
-    recoverySleep: () => new Promise(() => {}),
     probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
     backoffDelaysMs: [1, 1],
-    sleep: () => Promise.resolve(),
+    clock: testClock().clock,
     warn: () => {},
   });
   try {
@@ -90,11 +142,17 @@ async function withGateway(
   }
 }
 
-function post(g: ModelGateway, job: string, headers: Record<string, string> = {}) {
+function post(
+  g: ModelGateway,
+  job: string,
+  headers: Record<string, string> = {},
+  signal?: AbortSignal
+) {
   return fetch(`${g.jobBaseUrl(job)}/v1/messages`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": "placeholder", ...headers },
     body: JSON.stringify({ stream: true }),
+    ...(signal !== undefined ? { signal } : {}),
   });
 }
 
@@ -157,30 +215,40 @@ test("网关（单账号）：429 在该账号上逐级退避后重试；退避�
   );
 });
 
-test("网关：额度 403 交给控制器暂停，暂停期间直接 529 不打上游；认证 403 原样交回不暂停；交回的正文里没有 key", async () => {
+test("网关：额度 403 交给控制器暂停，暂停期间直接 529 不打上游；交回的正文里没有 key", async () => {
   await withGateway(
     [
-      { status: 403, body: "forbidden: bad key key-one" },
       {
         status: 403,
-        body: '{"error":{"type":"permission_error","message":"usage limit reached, quota will reset soon"}}',
+        body: '{"error":{"type":"permission_error","message":"usage limit reached for key-one, quota will reset soon"}}',
       },
     ],
     async (g, up, l) => {
-      const auth = await post(g, "j");
-      assert.equal(auth.status, 403);
-      assert.equal(await auth.text(), "forbidden: bad key [key]");
-      assert.equal(l.state, "running");
       const quota = await post(g, "j");
       assert.equal(quota.status, 403);
+      assert.doesNotMatch(await quota.text(), /key-one/);
       assert.equal(l.state, "paused");
       assert.equal(l.pausesSince(0)[0]?.kind, "5h");
       const blocked = await post(g, "j");
       assert.equal(blocked.status, 529);
       assert.match(await blocked.text(), /网关暂停/);
-      assert.equal(up.seen.length, 2, "暂停期间不打上游");
+      assert.equal(up.seen.length, 1, "暂停期间不打上游");
     }
   );
+});
+
+test("网关（单账号）：认证 403 交回（正文不含 key）、记为上游故障，该账号停用；唯一的账号停用即整批停下", async () => {
+  await withGateway([{ status: 403, body: "forbidden: bad key key-one" }], async (g, up, l) => {
+    const auth = await post(g, "j");
+    assert.equal(auth.status, 403);
+    assert.equal(await auth.text(), "forbidden: bad key [key]");
+    assert.equal(g.meter("j").upstreamFailures, 1, "这一步按上游故障作废重做，不以认证错误判题");
+    assert.equal(g.accountStatus()[0]?.down, "auth");
+    assert.equal(l.state, "stopped");
+    assert.match(l.stopReason ?? "", /认证失败/);
+    assert.equal((await post(g, "j")).status, 529);
+    assert.equal(up.seen.length, 1);
+  });
 });
 
 const ANTHROPIC_SSE = [
@@ -294,24 +362,32 @@ test("网关（单账号）：上游 5xx 记为出事作业的上游故障、不
   );
 });
 
-// 按 key 回应的假上游：每个 key 一个回应函数（可以返回一个等放行才完成的回应），记下各 key 的在途峰值
-async function keyedUpstream(respond: Record<string, (n: number) => Scripted | Promise<Scripted>>) {
+type Respond = (n: number, probe: boolean) => Scripted | Promise<Scripted>;
+
+// 按 key 回应的假上游：每个 key 一个回应函数（可以返回一个等放行才完成的回应；第二个参数说明是不是探测请求），
+// 记下各 key 收到的请求（seen 为非探测请求，probes 为探测请求）、在途数与在途峰值、探测的在途峰值
+async function keyedUpstream(respond: Record<string, Respond>) {
   const seen: string[] = [];
+  const probes: string[] = [];
   const inFlight = new Map<string, number>();
   const peak = new Map<string, number>();
+  const probeInFlight = new Map<string, number>();
+  const probePeak = new Map<string, number>();
   const counts = new Map<string, number>();
+  const bump = (m: Map<string, number>, key: string, d: number) =>
+    m.set(key, (m.get(key) ?? 0) + d).get(key) ?? 0;
   const server = http.createServer(async (req, res) => {
-    for await (const _ of req) {
-      // 读完请求体
-    }
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
+    const probe = Buffer.concat(chunks).toString("utf8").includes('"max_tokens":1');
     const key = (req.headers["x-api-key"] as string | undefined) ?? "";
-    seen.push(key);
-    const n = (counts.get(key) ?? 0) + 1;
-    counts.set(key, n);
-    inFlight.set(key, (inFlight.get(key) ?? 0) + 1);
-    peak.set(key, Math.max(peak.get(key) ?? 0, inFlight.get(key) ?? 0));
-    const next = await (respond[key]?.(n) ?? { status: 500, body: "没有这个 key" });
-    inFlight.set(key, (inFlight.get(key) ?? 1) - 1);
+    (probe ? probes : seen).push(key);
+    const n = bump(counts, key, 1);
+    peak.set(key, Math.max(peak.get(key) ?? 0, bump(inFlight, key, 1)));
+    if (probe) probePeak.set(key, Math.max(probePeak.get(key) ?? 0, bump(probeInFlight, key, 1)));
+    const next = await (respond[key]?.(n, probe) ?? { status: 500, body: "没有这个 key" });
+    bump(inFlight, key, -1);
+    if (probe) bump(probeInFlight, key, -1);
     res.writeHead(next.status, { "content-type": "application/json" });
     res.end(next.body);
   });
@@ -319,7 +395,10 @@ async function keyedUpstream(respond: Record<string, (n: number) => Scripted | P
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     seen,
+    probes,
+    inFlight,
     peak,
+    probePeak,
     close: () =>
       new Promise<void>((r) => {
         server.closeAllConnections();
@@ -329,30 +408,37 @@ async function keyedUpstream(respond: Record<string, (n: number) => Scripted | P
 }
 
 async function withAccounts(
-  respond: Record<string, (n: number) => Scripted | Promise<Scripted>>,
+  respond: Record<string, Respond>,
   accounts: { key: string; concurrency: number }[],
   run: (
     g: ModelGateway,
     up: Awaited<ReturnType<typeof keyedUpstream>>,
     l: LimitController,
-    warnings: string[]
-  ) => Promise<void>
+    warnings: string[],
+    clock: ReturnType<typeof testClock>
+  ) => Promise<void>,
+  gatewayOptions: { backoffDelaysMs?: number[]; virtual?: boolean; autoBelowMs?: number } = {}
 ) {
   const up = await keyedUpstream(respond);
   const l = limits();
   const warnings: string[] = [];
+  const clock = testClock({
+    ...(gatewayOptions.virtual !== undefined ? { virtual: gatewayOptions.virtual } : {}),
+    ...(gatewayOptions.autoBelowMs !== undefined
+      ? { autoBelowMs: gatewayOptions.autoBelowMs }
+      : {}),
+  });
   const g = await startModelGateway({
     upstreamBaseUrl: up.url,
     accounts,
     limits: l,
     probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
-    backoffDelaysMs: [1, 1],
-    sleep: () => Promise.resolve(),
-    recoverySleep: () => new Promise(() => {}),
+    backoffDelaysMs: gatewayOptions.backoffDelaysMs ?? [1, 1],
+    clock: clock.clock,
     warn: (w) => warnings.push(w),
   });
   try {
-    await run(g, up, l, warnings);
+    await run(g, up, l, warnings, clock);
   } finally {
     await g.close();
     await up.close();
@@ -383,7 +469,7 @@ test("多账号：一个账号 429 退避用满即该账号暂时不可用、请
   );
 });
 
-test("多账号：一个账号额度 403 只停该账号，同一请求透明换号重试；全部账号额度用完才整批暂停；探测恢复通过的账号", async () => {
+test("多账号：一个账号额度 403 只停该账号，同一请求透明换号重试；全部账号额度用完才整批暂停；单独探测恢复一个账号即立即恢复整批", async () => {
   let aQuota = true;
   await withAccounts(
     { "key-a": () => (aQuota ? QUOTA : OK), "key-b": (n) => (n === 1 ? OK : QUOTA) },
@@ -391,7 +477,7 @@ test("多账号：一个账号额度 403 只停该账号，同一请求透明换
       { key: "key-a", concurrency: 2 },
       { key: "key-b", concurrency: 2 },
     ],
-    async (g, up, l) => {
+    async (g, up, l, _w, clock) => {
       const r1 = await post(g, "j");
       assert.equal(r1.status, 200, "账号 1 额度用完：换到账号 2，客户端看不到");
       assert.deepEqual(up.seen, ["key-a", "key-b"]);
@@ -403,9 +489,17 @@ test("多账号：一个账号额度 403 只停该账号，同一请求透明换
       assert.equal(l.pausesSince(0)[0]?.kind, "5h");
       assert.equal((await post(g, "j")).status, 529, "暂停期间直接拒绝");
       aQuota = false;
-      assert.equal(await g.probe(), true, "账号 1 恢复即探测通过");
+      // 控制器的探测不探正在单独探测的账号：一个请求也不发
+      assert.equal(await g.probe(), false);
+      assert.deepEqual(up.probes, []);
+      // 各账号单独探测的第一个间隔到了：账号 1 通过即恢复，控制器随即恢复整批（控制器自己的探测永远不醒）
+      await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
+      await until(() => up.probes.length === 2, "两个账号各探一次");
+      await until(() => l.state === "running", "整批恢复");
       assert.equal(g.accountStatus()[0]?.down, null);
       assert.equal(g.accountStatus()[1]?.down, "5h", "没通过探测的账号仍不可用");
+      assert.notEqual(l.pausesSince(0)[0]?.endedAt, null);
+      assert.equal((await post(g, "j")).status, 200);
     }
   );
 });
@@ -520,5 +614,598 @@ test("账号配置：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3… 依次为
     () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_3: "c" }),
     /KIMI_API_KEY_2/,
     "编号不连续即报错，免得漏掉账号"
+  );
+});
+
+test("账号配置：账号数超过上限、并发变量指向不存在的账号、KIMI_API_KEY_1 都响亮报错，不静默忽略", () => {
+  const nine: Record<string, string> = { KIMI_API_KEY: "k1" };
+  for (let n = 2; n <= 9; n++) nine[`KIMI_API_KEY_${n}`] = `k${n}`;
+  assert.equal(gatewayAccountsFromEnv(nine).length, 9);
+  assert.throws(
+    () => gatewayAccountsFromEnv({ ...nine, KIMI_API_KEY_10: "k10" }),
+    /KIMI_API_KEY_10.*至多 9 个/
+  );
+  assert.throws(
+    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_12: "x" }),
+    /至多 9 个/,
+    "远超上限的编号也报错，不因跳号检查只查到上限而漏掉"
+  );
+  assert.throws(
+    () =>
+      gatewayAccountsFromEnv({
+        KIMI_API_KEY: "a",
+        KIMI_API_KEY_2: "b",
+        KIMI_API_KEY_3_CONCURRENCY: "4",
+      }),
+    /KIMI_API_KEY_3_CONCURRENCY.*没有账号 3/
+  );
+  assert.throws(
+    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_1: "b" }),
+    /KIMI_API_KEY_1/
+  );
+  assert.throws(
+    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_02: "b" }),
+    /写法不对/
+  );
+  // 空值等于没设：不报错
+  assert.equal(
+    gatewayAccountsFromEnv({
+      KIMI_API_KEY: "a",
+      KIMI_API_KEY_5: "",
+      KIMI_API_KEY_5_CONCURRENCY: "",
+    }).length,
+    1
+  );
+});
+
+// ---- 复核补修（98efa60 之后）----
+
+const RATE: Scripted = { status: 429, body: "rate limited" };
+const CONCURRENT: Scripted = { status: 403, body: "too many concurrent requests" };
+
+// 回 429 头与半截正文后停住的上游：hang 等客户端断开，drop 随即断开连接
+async function stallingUpstream(mode: "hang" | "drop") {
+  let got = 0;
+  const server = http.createServer((req, res) => {
+    got += 1;
+    req.resume();
+    res.writeHead(429, { "content-type": "application/json" });
+    res.write('{"error":{"type":"rate_limit_error","message":"');
+    if (mode === "drop") setTimeout(() => res.socket?.destroy(), 30);
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    got: () => got,
+    close: () =>
+      new Promise<void>((r) => {
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
+}
+
+test("在途计数不泄漏：读 429 错误正文时客户端中止、或上游在错误正文中途断开，账号在途与作业在途都归零", async () => {
+  for (const mode of ["hang", "drop"] as const) {
+    const up = await stallingUpstream(mode);
+    const g = await startModelGateway({
+      upstreamBaseUrl: up.url,
+      accounts: [{ key: "key-one", concurrency: 1 }],
+      limits: limits(),
+      probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+      clock: testClock().clock,
+      warn: () => {},
+    });
+    try {
+      const client = new AbortController();
+      const pending = post(g, "j", {}, client.signal).then(
+        (r) => r.status,
+        () => "aborted"
+      );
+      await until(() => up.got() === 1, "上游收到请求");
+      if (mode === "hang") {
+        // 等网关读到响应头、进入读错误正文
+        await new Promise((r) => setTimeout(r, 80));
+        client.abort();
+        assert.equal(await pending, "aborted");
+      } else {
+        assert.equal(await pending, 502, "上游中途断开：交回 502");
+      }
+      await until(
+        () => g.accountStatus()[0]?.inFlight === 0 && g.jobInFlight("j") === 0,
+        `${mode}：在途归零`
+      );
+      assert.equal(
+        g.meter("j").upstreamFailures,
+        mode === "drop" ? 1 : 0,
+        "上游断开记上游故障，客户端自己中止不记"
+      );
+    } finally {
+      await g.close();
+      await up.close();
+    }
+  }
+});
+
+test("429 退避按轮次推进：同时在途的两路一起撞 429 只退避一次（5 秒），不跳级；冷却结束后的重试成功", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  await withAccounts(
+    { "key-a": (n) => (n <= 2 ? new Promise<Scripted>((r) => held.push(r)) : OK) },
+    [{ key: "key-a", concurrency: 2 }],
+    async (g, up, l, _w, clock) => {
+      const both = [post(g, "j1"), post(g, "j2")];
+      await until(() => held.length === 2, "两路都在途");
+      for (const r of held.splice(0)) r(RATE);
+      await until(() => clock.pending().includes(5_000), "5 秒冷却");
+      await new Promise((r) => setTimeout(r, 50));
+      assert.deepEqual(clock.set, [5_000], "只开一轮 5 秒冷却，没有 15 秒");
+      assert.equal(g.accountStatus()[0]?.cooling, true);
+      await clock.advance(5_000);
+      for (const r of await Promise.all(both)) assert.equal(r.status, 200);
+      assert.deepEqual(clock.set, [5_000]);
+      assert.equal(up.seen.length, 4);
+      assert.equal(l.state, "running");
+    },
+    { backoffDelaysMs: [5_000, 15_000, 45_000], virtual: true, autoBelowMs: 0 }
+  );
+});
+
+test("429 退避级数：冷却开始前派出的请求在冷却中成功，不把级数归零——冷却结束后再撞即升到 15 秒", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  const script: (Scripted | "hold")[] = ["hold", "hold", RATE, OK];
+  await withAccounts(
+    {
+      "key-a": () => {
+        const next = script.shift() ?? OK;
+        return next === "hold" ? new Promise<Scripted>((r) => held.push(r)) : next;
+      },
+    },
+    [{ key: "key-a", concurrency: 2 }],
+    async (g, _up, _l, _w, clock) => {
+      const p1 = post(g, "j1");
+      const p2 = post(g, "j2");
+      await until(() => held.length === 2, "两路都在途");
+      held.pop()?.(RATE);
+      await until(() => clock.pending().includes(5_000), "5 秒冷却");
+      held.pop()?.(OK);
+      await until(() => g.accountStatus()[0]?.inFlight === 0, "冷却前派出的请求成功");
+      await clock.advance(5_000);
+      await until(() => clock.pending().includes(15_000), "升到 15 秒");
+      assert.deepEqual(clock.set, [5_000, 15_000]);
+      await clock.advance(15_000);
+      for (const r of await Promise.all([p1, p2])) assert.equal(r.status, 200);
+    },
+    { backoffDelaysMs: [5_000, 15_000, 45_000], virtual: true, autoBelowMs: 0 }
+  );
+});
+
+test("429 退避时长（可控时钟）：单账号两路一直撞 429，依次退避 5、15、45 秒，第 65 秒仍撞才判不可用并整批暂停，不会在约 5 秒时暂停", async () => {
+  await withAccounts(
+    { "key-a": () => RATE },
+    [{ key: "key-a", concurrency: 2 }],
+    async (g, _up, l, _w, clock) => {
+      const both = [post(g, "j1"), post(g, "j2")];
+      const cools: number[] = [];
+      let elapsed = 0;
+      for (;;) {
+        await until(
+          () => l.state !== "running" || clock.pending().some((ms) => ms < 60_000),
+          "下一轮冷却或暂停"
+        );
+        if (l.state !== "running") break;
+        const ms = clock.pending().find((m) => m < 60_000) ?? 0;
+        cools.push(ms);
+        await clock.advance(ms);
+        elapsed += ms;
+      }
+      assert.deepEqual(cools, [5_000, 15_000, 45_000]);
+      assert.equal(elapsed, 65_000, "45 秒退避之后仍撞才暂停");
+      assert.equal(l.state, "paused");
+      assert.equal(l.pausesSince(0)[0]?.kind, "rate-limit");
+      for (const r of await Promise.all(both)) assert.equal(r.status, 429);
+    },
+    { backoffDelaysMs: [5_000, 15_000, 45_000], virtual: true, autoBelowMs: 0 }
+  );
+});
+
+test("冷却定时器带代次号：账号恢复之后开始的新冷却，不被恢复前那一轮的旧定时器提前结束", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  await withAccounts(
+    {
+      "key-a": (n, probe) =>
+        probe ? OK : n <= 2 ? new Promise<Scripted>((r) => held.push(r)) : RATE,
+    },
+    [{ key: "key-a", concurrency: 2 }],
+    async (g, up, l, _w, clock) => {
+      const p1 = post(g, "j");
+      const p2 = post(g, "j");
+      await until(() => held.length === 2, "两路都在途");
+      held.shift()?.(RATE);
+      await until(() => g.accountStatus()[0]?.cooling === true, "第一轮冷却（10 分钟）");
+      held.shift()?.(QUOTA);
+      await until(() => l.state === "paused", "额度用完、整批暂停");
+      assert.equal((await p1).status, 429);
+      assert.equal((await p2).status, 403);
+      // 5 分钟：单独探测通过，账号恢复、整批恢复；旧冷却的定时器（第 10 分钟到）仍在
+      await clock.advance(5 * 60_000);
+      await until(() => l.state === "running", "整批恢复");
+      const p3 = post(g, "j");
+      await until(() => up.seen.length === 3, "恢复后的请求撞 429");
+      await until(() => g.accountStatus()[0]?.cooling === true, "新一轮冷却（到第 15 分钟）");
+      // 第 10 分钟：旧定时器到点，不得结束新的冷却
+      await clock.advance(5 * 60_000);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(g.accountStatus()[0]?.cooling, true, "旧定时器不结束新冷却");
+      assert.equal(up.seen.length, 3, "冷却中不派请求");
+      await clock.advance(5 * 60_000);
+      assert.equal((await p3).status, 429);
+    },
+    { backoffDelaysMs: [10 * 60_000], virtual: true }
+  );
+});
+
+test("探测占额度：探测占该账号一个在途位子，满了等空出；探测在途时新请求排队", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  const probeHeld: ((s: Scripted) => void)[] = [];
+  await withAccounts(
+    {
+      "key-a": (n, probe) =>
+        probe
+          ? new Promise<Scripted>((r) => probeHeld.push(r))
+          : n === 1
+            ? new Promise<Scripted>((r) => held.push(r))
+            : OK,
+    },
+    [{ key: "key-a", concurrency: 1 }],
+    async (g, up) => {
+      const p1 = post(g, "j");
+      await until(() => held.length === 1, "第一个请求在途");
+      const pre = g.preflight();
+      await new Promise((r) => setTimeout(r, 80));
+      assert.deepEqual(up.probes, [], "账号满着：探测等空出");
+      held.shift()?.(OK);
+      assert.equal((await p1).status, 200);
+      await until(() => probeHeld.length === 1, "探测发出");
+      assert.equal(g.accountStatus()[0]?.inFlight, 1, "探测计入在途");
+      const p2 = post(g, "j");
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal(up.seen.length, 1, "探测占着唯一的位子：新请求排队");
+      probeHeld.shift()?.(OK);
+      await pre;
+      assert.equal((await p2).status, 200);
+      assert.equal(up.peak.get("key-a"), 1, "上游看到的在途从不超过上限");
+    }
+  );
+});
+
+test("探测占额度：同一账号同一时刻只有一路探测——开跑前探测与控制器探测同时进行也只发一路，结果共用", async () => {
+  const probeHeld: ((s: Scripted) => void)[] = [];
+  const respond: Respond = (_n, probe) =>
+    probe ? new Promise<Scripted>((r) => probeHeld.push(r)) : OK;
+  await withAccounts(
+    { "key-a": respond, "key-b": respond },
+    [
+      { key: "key-a", concurrency: 2 },
+      { key: "key-b", concurrency: 2 },
+    ],
+    async (g, up) => {
+      const all = Promise.all([g.preflight(), g.probe(), g.probe()]);
+      await until(() => probeHeld.length === 2, "两个账号各一路探测");
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal(up.probes.length, 2);
+      assert.deepEqual([up.probePeak.get("key-a"), up.probePeak.get("key-b")], [1, 1]);
+      for (const r of probeHeld.splice(0)) r(OK);
+      const [, a, b] = await all;
+      assert.deepEqual([a, b], [true, true]);
+      assert.deepEqual(
+        [...up.probes].sort(),
+        ["key-a", "key-b"],
+        "全部可用时每个账号都探，不只第一个"
+      );
+    }
+  );
+});
+
+test("控制器的探测：全部账号都可用时每个账号都探，不只探第一个", async () => {
+  await withAccounts(
+    { "key-a": () => RATE, "key-b": () => OK },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+    ],
+    async (g, up) => {
+      assert.equal(await g.probe(), true, "账号 1 撞频率限制、账号 2 通过：整体通过");
+      assert.deepEqual([...up.probes].sort(), ["key-a", "key-b"]);
+    }
+  );
+});
+
+test("探测占额度：暂停期间控制器的探测跳过正在单独探测的账号；单独探测时该账号的在途（请求加探测）不超过上限，探测至多一路", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  const probeHeld: ((s: Scripted) => void)[] = [];
+  await withAccounts(
+    {
+      "key-a": (n, probe) =>
+        probe
+          ? new Promise<Scripted>((r) => probeHeld.push(r))
+          : n === 1
+            ? new Promise<Scripted>((r) => held.push(r))
+            : QUOTA,
+      "key-b": (_n, probe) => (probe ? new Promise<Scripted>((r) => probeHeld.push(r)) : QUOTA),
+    },
+    [
+      { key: "key-a", concurrency: 2 },
+      { key: "key-b", concurrency: 1 },
+    ],
+    async (g, up, l, _w, clock) => {
+      const p1 = post(g, "j1");
+      await until(() => held.length === 1, "账号 1 上有一个在途请求");
+      assert.equal((await post(g, "j2")).status, 403);
+      assert.equal(l.state, "paused");
+      for (let i = 0; i < 3; i++) assert.equal(await g.probe(), false);
+      assert.deepEqual(up.probes, [], "控制器不探正在单独探测的账号");
+      await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
+      await until(() => probeHeld.length === 2, "两个账号的单独探测发出");
+      assert.equal(await g.probe(), false);
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal(up.probes.length, 2, "探测在途时控制器也不另探");
+      assert.deepEqual(
+        g.accountStatus().map((a) => a.inFlight),
+        [2, 1],
+        "探测计入在途"
+      );
+      assert.deepEqual([up.peak.get("key-a"), up.peak.get("key-b")], [2, 1], "不超过各账号上限");
+      assert.deepEqual([up.probePeak.get("key-a"), up.probePeak.get("key-b")], [1, 1]);
+      for (const r of probeHeld.splice(0)) r(OK);
+      await until(() => l.state === "running", "单独探测通过即恢复整批");
+      held.shift()?.(OK);
+      assert.equal((await p1).status, 200);
+    }
+  );
+});
+
+test("认证失败：开跑前逐账号探测，坏 key 混在正常 key 中即拒绝开跑并报出账号编号（不含 key）", async () => {
+  await withAccounts(
+    {
+      "key-a": () => OK,
+      "key-b": () => ({ status: 401, body: '{"error":{"message":"invalid api key key-b"}}' }),
+      "key-c": () => ({ status: 403, body: "forbidden" }),
+      "key-d": () => QUOTA,
+    },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+      { key: "key-c", concurrency: 1 },
+      { key: "key-d", concurrency: 1 },
+    ],
+    async (g, up) => {
+      await assert.rejects(g.preflight(), (e: Error) => {
+        assert.match(e.message, /账号 2、3 认证失败/);
+        assert.doesNotMatch(e.message, /key-/);
+        return true;
+      });
+      assert.equal(up.probes.length, 4, "逐账号各探一次");
+    }
+  );
+  await withAccounts(
+    { "key-a": () => OK, "key-b": () => QUOTA },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+    ],
+    async (g, _up, _l, warnings) => {
+      await g.preflight();
+      assert.ok(
+        warnings.some((w) => /账号 2开跑前探测未通过/.test(w)),
+        "额度类只告警，开跑后照常处理"
+      );
+    }
+  );
+});
+
+test("认证失败：运行中 key 被吊销——该请求记为上游故障（这一步作废重做），账号停用且不探测恢复，其余账号照常", async () => {
+  await withAccounts(
+    {
+      "key-a": (n) => (n === 1 ? OK : { status: 401, body: "invalid api key key-a" }),
+      "key-b": () => OK,
+    },
+    [
+      { key: "key-a", concurrency: 2 },
+      { key: "key-b", concurrency: 2 },
+    ],
+    async (g, up, l, warnings, clock) => {
+      assert.equal((await post(g, "s1|full|1")).status, 200);
+      const revoked = await post(g, "s1|full|1");
+      assert.equal(revoked.status, 401);
+      assert.equal(await revoked.text(), "invalid api key [key]");
+      assert.equal(g.meter("s1|full|1").upstreamFailures, 1);
+      assert.equal(g.accountStatus()[0]?.down, "auth");
+      assert.deepEqual([l.state, l.signals], ["running", 0]);
+      assert.equal((await post(g, "s1|full|1")).status, 200);
+      assert.deepEqual(up.seen, ["key-a", "key-a", "key-b"]);
+      await clock.advance(24 * 60 * 60_000);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.deepEqual(up.probes, [], "认证失败的账号不探测恢复");
+      assert.ok(warnings.some((w) => /账号 1认证失败.*需人工/.test(w)));
+      assert.ok(warnings.every((w) => !w.includes("key-")));
+    }
+  );
+});
+
+test("403 并发：按派发时的上限判定——同时受限的几路只降一次上限、不判不可用，各等 3 秒后重试；上限 1 时派出的再受限才不可用", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  const HOLD = "hold" as const;
+  const script: (Scripted | typeof HOLD)[] = [HOLD, HOLD, HOLD, OK, OK, OK, HOLD, HOLD, OK, OK];
+  await withAccounts(
+    {
+      "key-a": () => {
+        const next = script.shift() ?? CONCURRENT;
+        return next === HOLD ? new Promise<Scripted>((r) => held.push(r)) : next;
+      },
+    },
+    [{ key: "key-a", concurrency: 3 }],
+    async (g, _up, l, _w, clock) => {
+      const status = () => [g.accountStatus()[0]?.cap, g.accountStatus()[0]?.down, l.state];
+      const waiting = (n: number) => clock.pending().filter((ms) => ms === 3_000).length === n;
+      // 上限 3 时派出的三路一起受限：上限只降一次（到 2）
+      const three = [post(g, "j1"), post(g, "j2"), post(g, "j3")];
+      await until(() => held.length === 3, "三路都在途");
+      for (const r of held.splice(0)) r(CONCURRENT);
+      await until(() => waiting(3), "三路各等 3 秒");
+      assert.deepEqual(status(), [2, null, "running"]);
+      await clock.advance(3_000);
+      for (const r of await Promise.all(three)) assert.equal(r.status, 200);
+      // 上限 2 时派出的两路：第一路回来降到 1，第二路回来时上限已是 1，但它是在上限 2 时派出的，不判不可用
+      const two = [post(g, "j1"), post(g, "j2")];
+      await until(() => held.length === 2, "两路都在途");
+      for (const r of held.splice(0)) r(CONCURRENT);
+      await until(() => waiting(2), "两路各等 3 秒");
+      assert.deepEqual(status(), [1, null, "running"]);
+      await clock.advance(3_000);
+      for (const r of await Promise.all(two)) assert.equal(r.status, 200);
+      // 上限 1 时派出的再受限：该账号不可用
+      const last = await post(g, "j1");
+      assert.equal(last.status, 403);
+      assert.deepEqual(status(), [1, "concurrency", "paused"]);
+    },
+    { virtual: true, autoBelowMs: 0 }
+  );
+});
+
+test("排队中的请求被客户端中止即刻出队：作业在途即时归零、resetPeak 不受残留影响，排队时间不再累加、不记到下一步", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  await withAccounts(
+    { "key-a": (n) => (n === 1 ? new Promise<Scripted>((r) => held.push(r)) : OK) },
+    [{ key: "key-a", concurrency: 1 }],
+    async (g, up) => {
+      const p1 = post(g, "j1");
+      await until(() => held.length === 1, "占满唯一的位子");
+      const client = new AbortController();
+      const p2 = post(g, "j2", {}, client.signal).catch(() => "aborted");
+      await until(() => g.jobInFlight("j2") === 1, "第二个请求排队");
+      await new Promise((r) => setTimeout(r, 40));
+      assert.ok(g.meter("j2").queueMs >= 30, "仍在排队的请求已等的时间实时计入");
+      client.abort();
+      assert.equal(await p2, "aborted");
+      await until(() => g.jobInFlight("j2") === 0, "出队");
+      g.resetPeak("j2");
+      assert.equal(g.meter("j2").peakInFlight, 0);
+      const queued = g.meter("j2").queueMs;
+      held.shift()?.(OK);
+      assert.equal((await p1).status, 200);
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal(up.seen.length, 1, "中止的请求不再派出");
+      assert.equal(g.meter("j2").queueMs, queued, "排队时间不再累加");
+      assert.equal(g.accountStatus()[0]?.inFlight, 0);
+    }
+  );
+});
+
+test("收尾：close() 取消冷却、单独探测与上限回升的定时，跑完后进程不因定时器多挂", async () => {
+  const live = new Set<object>();
+  const clock: GatewayClock = {
+    now: Date.now,
+    setTimer(ms, fn) {
+      const token = {};
+      live.add(token);
+      const t = setTimeout(() => {
+        live.delete(token);
+        fn();
+      }, ms);
+      return () => {
+        live.delete(token);
+        clearTimeout(t);
+      };
+    },
+  };
+  const up = await keyedUpstream({
+    "key-a": () => RATE,
+    "key-b": () => QUOTA,
+    "key-c": (n) => (n === 1 ? CONCURRENT : OK),
+  });
+  const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const g = await startModelGateway({
+    upstreamBaseUrl: up.url,
+    accounts: [
+      { key: "key-a", concurrency: 2 },
+      { key: "key-b", concurrency: 2 },
+      { key: "key-c", concurrency: 2 },
+    ],
+    limits: limits(),
+    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+    concurrencyRetryDelayMs: 1,
+    clock,
+    warn: () => {},
+  });
+  try {
+    assert.equal((await post(g, "j")).status, 200);
+    // 账号 1 冷却 5 秒、账号 2 等 5 分钟探测、账号 3 等 30 分钟回升上限
+    assert.ok(live.size >= 3, `应有三个未到的定时，实有 ${live.size}`);
+  } finally {
+    await g.close();
+    await up.close();
+  }
+  assert.equal(live.size, 0, "close() 取消全部定时");
+  assert.equal(
+    process.getActiveResourcesInfo().filter((r) => r === "Timeout").length,
+    before,
+    "没有多出的计时器"
+  );
+});
+
+test("上限回升：因 403 并发降下的上限每 30 分钟回升 1，最多回到配置值", async () => {
+  await withAccounts(
+    { "key-a": (n) => (n <= 2 ? CONCURRENT : OK) },
+    [{ key: "key-a", concurrency: 3 }],
+    async (g, _up, _l, warnings, clock) => {
+      assert.equal((await post(g, "j")).status, 200);
+      assert.equal(g.accountStatus()[0]?.cap, 1);
+      await clock.advance(30 * 60_000);
+      assert.equal(g.accountStatus()[0]?.cap, 2);
+      await clock.advance(30 * 60_000);
+      assert.equal(g.accountStatus()[0]?.cap, 3);
+      await clock.advance(5 * 60 * 60_000);
+      assert.equal(g.accountStatus()[0]?.cap, 3, "不超过配置值");
+      assert.deepEqual(clock.pending(), [], "回到配置值即不再定时");
+      assert.ok(warnings.some((w) => /账号 1并发上限回升为 3/.test(w)));
+    }
+  );
+});
+
+test("每月额度：单独探测中发现已转为每月额度的账号停止探测；最后一个能恢复的账号转为每月额度即整批停下", async () => {
+  await withAccounts(
+    {
+      "key-a": (_n, probe) =>
+        probe ? { status: 403, body: "monthly usage limit reached" } : QUOTA,
+      "key-b": () => OK,
+    },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+    ],
+    async (g, up, l, _w, clock) => {
+      assert.equal((await post(g, "j")).status, 200);
+      assert.equal(g.accountStatus()[0]?.down, "5h");
+      await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
+      await until(() => g.accountStatus()[0]?.down === "monthly", "转为每月额度");
+      await clock.advance(24 * 60 * 60_000);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.deepEqual(up.probes, ["key-a"], "之后不再探测");
+      assert.equal(l.state, "running");
+    }
+  );
+  await withAccounts(
+    {
+      "key-a": (_n, probe) =>
+        probe ? { status: 403, body: "monthly usage limit reached" } : QUOTA,
+    },
+    [{ key: "key-a", concurrency: 1 }],
+    async (g, _up, l, _w, clock) => {
+      assert.equal((await post(g, "j")).status, 403);
+      assert.equal(l.state, "paused");
+      await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
+      await until(() => l.state === "stopped", "整批停下");
+      assert.match(l.stopReason ?? "", /每月额度/);
+    }
   );
 });

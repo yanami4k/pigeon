@@ -39,6 +39,7 @@ test("上游失败分类：429 为频率限制；403 按文案分并发、每月
   });
   assert.deepEqual(classifyUpstreamFailure(403, "并发请求数超过上限"), { kind: "concurrency" });
   assert.deepEqual(classifyUpstreamFailure(403, "forbidden"), { kind: "auth" });
+  assert.deepEqual(classifyUpstreamFailure(401, "invalid x-api-key"), { kind: "auth" });
   assert.deepEqual(classifyUpstreamFailure(500, "boom"), { kind: "other" });
 });
 
@@ -179,4 +180,59 @@ test("停止信号：与每月额度用完同一路径——计一次信号、�
   assert.equal(limits.signals, 2);
   assert.equal(notified, 2);
   assert.equal(limits.shutdownReason, "收到 SIGTERM");
+});
+
+test("网关通知账号恢复（recovered）即立即恢复整批、记下暂停止点；旧的探测循环醒来不替之后的新暂停收尾", async () => {
+  const clock = manualClock();
+  let probes = 0;
+  const limits = new LimitController({
+    probe: async () => {
+      probes++;
+      return true;
+    },
+    sleep: clock.sleep,
+    now: clock.now,
+    warn: () => {},
+    slots: 2,
+  });
+  limits.onLimit("5h");
+  const ready = limits.ready();
+  limits.recovered();
+  await ready;
+  assert.equal(limits.state, "running");
+  assert.equal(limits.pausesSince(0)[0]?.endedAt, new Date(0).toISOString());
+  assert.equal(probes, 0, "不等下一轮探测");
+  limits.recovered();
+  assert.equal(limits.state, "running", "运行中通知恢复无副作用");
+  // 新开一次暂停：第一次暂停的探测循环先醒（同一时刻排在前面），不得探测、不得结束新的暂停
+  limits.onLimit("weekly");
+  await clock.tick();
+  assert.equal(limits.state, "paused");
+  assert.equal(probes, 0, "旧循环醒来即退出");
+  await clock.tick();
+  assert.equal(limits.state, "running", "新暂停由它自己的循环探测恢复");
+  assert.equal(probes, 1);
+});
+
+test("认证失败：全部账号都不会自行恢复且其中有认证失败即停下，原因说明需人工处理 key", async () => {
+  const limits = new LimitController({ probe: async () => true, slots: 2, warn: () => {} });
+  limits.onLimit("auth");
+  assert.equal(limits.state, "stopped");
+  await assert.rejects(limits.ready(), /认证失败.*key/);
+});
+
+test("收尾：缺省计时下，暂停中的探测定时在恢复、停下或 close() 时取消，进程不因它多挂", async () => {
+  const timeouts = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const before = timeouts();
+  const limits = new LimitController({ probe: async () => false, slots: 2, warn: () => {} });
+  limits.onLimit("5h");
+  assert.equal(timeouts(), before + 1, "暂停中有一个探测定时");
+  limits.recovered();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(timeouts(), before, "恢复即取消");
+  limits.onLimit("5h");
+  assert.equal(timeouts(), before + 1);
+  limits.close();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(timeouts(), before, "close() 取消");
 });

@@ -1,16 +1,21 @@
 // 跑批进程内置的模型网关（决策 155）：只听回环地址，说 Anthropic Messages 协议，四个条件的模型请求都经它转发。
 //   接入：每个作业用独立路径前缀 /j/<作业>/，网关据此把用量归到作业上；agent 进程与容器只拿到网关地址，真 key 只在网关里注入；
 //   账号：一个 key 一个账号，各有并发上限（缺省 2）；请求挑在途占比最低的可用账号，全满则排队（排队时间记到作业上，
-//        计入该步墙钟）；同一账号内不轮换 key；
-//   429：该账号逐级退避（退避期间请求可换到别的账号），退避用满仍撞即该账号暂时不可用、请求换号；
-//   403 额度：只停该账号、请求换号透明重试；403 并发：降该账号的并发上限后重试，已是 1 仍受限即该账号暂时不可用；
-//        认证类原样交回；
-//   暂时不可用的账号按 5 至 30 分钟的间隔单独探测、通过即恢复；每月额度用完的账号不再恢复；
-//   全部账号都不可用：交给限额控制器整批暂停（全是每月额度则停下），控制器的探测经这里逐个探测账号；
+//        计入该步墙钟；客户端中止即出队）；同一账号内不轮换 key；每次派发记下当时的退避轮次与该账号的上限；
+//   429：该账号按退避轮次逐级退避（5、15、45 秒）：只有本轮派出的请求（冷却结束之后派出）再撞 429 才升级，同时在途的
+//        几路一起撞只算一次；退避期间请求可换到别的账号；45 秒退避之后仍撞即该账号暂时不可用、请求换号；
+//   403 额度：只停该账号、请求换号透明重试；403 并发：降该账号的并发上限、稍候重试，只有在上限已是 1 时派出的请求
+//        仍受限才判该账号暂时不可用；降下的上限每 30 分钟回升 1，直到配置值；
+//   401 与认证类 403：该账号停用（不探测恢复，需人工处理），这次请求原样交回并记为本作业的上游故障（这一步作废重做）；
+//        开跑前逐账号探测一次，任一账号认证失败即拒绝开跑；
+//   暂时不可用的账号按 5 至 30 分钟的间隔单独探测（探测占该账号一个在途位子，同一账号只有这一路探测者），通过即恢复；
+//        暂停中有账号恢复即通知限额控制器立即恢复整批；每月额度用完或认证失败的账号不再探测；
+//   全部账号都不可用：交给限额控制器整批暂停（都不会自行恢复则停下），控制器的探测只探没在单独探测的账号；
 //   暂停或停止期间：直接以 529 拒绝，不打上游——在途 agent 的下一次模型调用即失败，这一步作废、恢复后重做；
 //   流式响应：错误在响应头阶段分类；200 之后原样透传，中途断流也原样透传（由 agent 一侧按失败处理），同时从事件流里
 //   读出用量按作业计量（请求数即轮数、输入与输出 token、各账号的请求数、排队时间、在途峰值）。交回客户端与告警的
 //   任何文本里都不出现 key，账号只以编号出现。
+//   计时（退避、探测间隔、重试等待、上限回升）都经可注入的时钟；close() 取消全部未到的定时。
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -28,10 +33,10 @@ export interface GatewayMeter {
   output: number;
   cacheRead: number;
   cacheWrite: number;
-  // 这个作业的请求遇到的上游故障次数：上游 5xx、转发时连不上上游、200 之后中途断流。跑批器一步前后比较它，
-  // 有变化即这一步作废重做（与限额信号同一口径，不看 agent 自己怎么处理这次故障）
+  // 这个作业的请求遇到的上游故障次数：上游 5xx、转发时连不上上游、200 之后中途断流、账号认证失败。跑批器一步前后
+  // 比较它，有变化即这一步作废重做（与限额信号同一口径，不看 agent 自己怎么处理这次故障）
   upstreamFailures: number;
-  // 这个作业的请求等空闲账号的累计毫秒
+  // 这个作业的请求等空闲账号的累计毫秒（含此刻仍在排队的请求已等的时间）
   queueMs: number;
   // 这个作业同时在途的模型请求数的峰值（自上次 resetPeak 起）
   peakInFlight: number;
@@ -46,18 +51,45 @@ export interface GatewayAccount {
 }
 
 export const DEFAULT_ACCOUNT_CONCURRENCY = 2;
-const MAX_ACCOUNTS = 9;
+export const MAX_ACCOUNTS = 9;
+// 403 并发受限降上限之后、重试之前的等待
+export const CONCURRENCY_RETRY_DELAY_MS = 3_000;
+// 因 403 并发降下的上限每隔这么久回升 1，直到配置值
+export const CAP_REGROW_MS = 30 * 60_000;
 
-// 从环境变量取账号：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3… 依次为后续账号（编号须连续）；
-// 各账号并发上限取 KIMI_API_KEY_<编号>_CONCURRENCY，缺省 2
+// 从环境变量取账号：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3… 依次为后续账号（编号须连续，至多 MAX_ACCOUNTS 个）；
+// 各账号并发上限取 KIMI_API_KEY_<编号>_CONCURRENCY，缺省 2。跳号、超出上限、并发变量指向不存在的账号都响亮报错，
+// 不静默忽略
 export function gatewayAccountsFromEnv(env: Record<string, string | undefined>): GatewayAccount[] {
   const keyVar = (n: number) => (n === 1 ? "KIMI_API_KEY" : `KIMI_API_KEY_${n}`);
-  const present = (n: number) => (env[keyVar(n)] ?? "") !== "";
-  if (!present(1)) throw new Error("缺少 KIMI_API_KEY 环境变量：网关的真 key 从这里取");
-  let count = 1;
-  while (count < MAX_ACCOUNTS && present(count + 1)) count += 1;
-  for (let n = count + 2; n <= MAX_ACCOUNTS; n++) {
-    if (present(n)) throw new Error(`设了 ${keyVar(n)} 却缺 ${keyVar(count + 1)}：账号编号须连续`);
+  const present = (name: string) => (env[name] ?? "") !== "";
+  if (!present("KIMI_API_KEY"))
+    throw new Error("缺少 KIMI_API_KEY 环境变量：网关的真 key 从这里取");
+  const numbered = new Set<number>([1]);
+  const concurrencyFor: number[] = [];
+  for (const name of Object.keys(env)) {
+    if (!present(name)) continue;
+    const match = /^KIMI_API_KEY_(\d+)(_CONCURRENCY)?$/.exec(name);
+    if (match === null) continue;
+    const n = Number(match[1]);
+    if (String(n) !== match[1] || n < 1)
+      throw new Error(`${name}：账号编号写法不对（应为 1、2、3…）`);
+    if (match[2] !== undefined) concurrencyFor.push(n);
+    else if (n === 1) throw new Error("设了 KIMI_API_KEY_1：账号 1 的 key 取 KIMI_API_KEY");
+    else numbered.add(n);
+  }
+  const count = Math.max(...numbered);
+  if (count > MAX_ACCOUNTS) {
+    throw new Error(`设了 ${keyVar(count)}：账号至多 ${MAX_ACCOUNTS} 个`);
+  }
+  for (let n = 2; n < count; n++) {
+    if (!numbered.has(n))
+      throw new Error(`设了 ${keyVar(count)} 却缺 ${keyVar(n)}：账号编号须连续`);
+  }
+  for (const n of concurrencyFor) {
+    if (n > count) {
+      throw new Error(`设了 KIMI_API_KEY_${n}_CONCURRENCY 却没有账号 ${n}（共 ${count} 个账号）`);
+    }
   }
   const accounts: GatewayAccount[] = [];
   for (let n = 1; n <= count; n++) {
@@ -70,6 +102,20 @@ export function gatewayAccountsFromEnv(env: Record<string, string | undefined>):
   return accounts;
 }
 
+// 网关的计时：现在几点、ms 毫秒之后调用 fn（返回取消函数）
+export interface GatewayClock {
+  now(): number;
+  setTimer(ms: number, fn: () => void): () => void;
+}
+
+const REAL_CLOCK: GatewayClock = {
+  now: Date.now,
+  setTimer: (ms, fn) => {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  },
+};
+
 export interface ModelGatewayOptions {
   // 上游的 Anthropic Messages 基址（不带末尾斜杠），如 https://host/coding
   upstreamBaseUrl: string;
@@ -78,10 +124,10 @@ export interface ModelGatewayOptions {
   // 探测用的极小请求
   probeRequest: { path: string; body: unknown };
   backoffDelaysMs?: readonly number[];
-  sleep?: (ms: number) => Promise<void>;
-  // 暂时不可用的账号单独探测的间隔等待（缺省按 5 至 30 分钟的探测间隔真实等待）
-  recoverySleep?: (ms: number) => Promise<void>;
-  now?: () => number;
+  concurrencyRetryDelayMs?: number;
+  capRegrowMs?: number;
+  // 缺省为真实时钟（退避按 5、15、45 秒，探测按 5 至 30 分钟真实等待）
+  clock?: GatewayClock;
   warn?: (line: string) => void;
 }
 
@@ -90,6 +136,8 @@ export interface AccountStatus {
   account: number;
   cap: number;
   inFlight: number;
+  // 正在 429 退避
+  cooling: boolean;
   // 不可用的原因；可用为 null
   down: LimitKind | null;
 }
@@ -98,10 +146,14 @@ export interface ModelGateway {
   baseUrl: string;
   jobBaseUrl(job: string): string;
   meter(job: string): GatewayMeter;
+  // 这个作业此刻在途（含排队）的模型请求数
+  jobInFlight(job: string): number;
   // 在途峰值从这个作业当前的在途数重新记（跑批器在每一步开始时调用）
   resetPeak(job: string): void;
   accountStatus(): AccountStatus[];
-  // 逐个探测不可用（每月额度除外）的账号，通过的恢复；有账号可用即 true
+  // 开跑前逐账号探测一次：任一账号认证失败即抛错并报出账号编号
+  preflight(): Promise<void>;
+  // 控制器的探测：探没在单独探测的账号（每月额度用完与认证失败的除外），通过的恢复；有账号探测通过即 true
   probe(): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -144,15 +196,37 @@ function emptyMeter(accounts: number): GatewayMeter {
 
 interface AccountState {
   key: string;
+  // 配置的并发上限；cap 为当前上限（403 并发会降、隔一段时间回升）
+  configCap: number;
   cap: number;
+  // 在途请求数，含探测
   inFlight: number;
-  // 429 退避级数：成功一次即归零
+  // 429 退避级数：本轮派出的请求成功一次即归零
   level: number;
+  // 退避轮次：每开始一次冷却、每恢复一次可用都加一，兼作冷却定时器的代次号——只有本轮的定时器能结束冷却
+  round: number;
   // 正在退避：退避期间不派新请求
   cooling: boolean;
   down: LimitKind | null;
+  // 正在单独探测恢复（这时它是该账号唯一的探测者）
   recovering: boolean;
+  // 正在进行的探测：同一账号同一时刻至多一路，其余复用它的结果
+  probing: Promise<ProbeOutcome> | undefined;
+  // 上限回升的定时
+  regrow: (() => void) | undefined;
 }
+
+// 一次派发：账号、派发时的退避轮次与该账号的并发上限
+interface Slot {
+  index: number;
+  round: number;
+  cap: number;
+}
+
+type ProbeOutcome = "ok" | "fail" | LimitKind;
+
+// 每月额度用完与认证失败的账号不会自行恢复，不探测
+const permanent = (down: LimitKind | null) => down === "monthly" || down === "auth";
 
 async function readAll(req: http.IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -207,20 +281,24 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     .filter((a) => a.key !== "")
     .map((a) => ({
       key: a.key,
+      configCap: Math.max(1, a.concurrency),
       cap: Math.max(1, a.concurrency),
       inFlight: 0,
       level: 0,
+      round: 0,
       cooling: false,
       down: null,
       recovering: false,
+      probing: undefined,
+      regrow: undefined,
     }));
   if (accounts.length === 0) throw new Error("网关至少需要一个账号");
   const keys = accounts.map((a) => a.key);
   const delays = options.backoffDelaysMs ?? BACKOFF_DELAYS_MS;
-  const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-  const sleep = options.sleep ?? realSleep;
-  const recoverySleep = options.recoverySleep ?? realSleep;
-  const now = options.now ?? Date.now;
+  const concurrencyRetryDelayMs = options.concurrencyRetryDelayMs ?? CONCURRENCY_RETRY_DELAY_MS;
+  const capRegrowMs = options.capRegrowMs ?? CAP_REGROW_MS;
+  const clock = options.clock ?? REAL_CLOCK;
+  const now = () => clock.now();
   const warn = options.warn ?? ((line: string) => process.stderr.write(`[网关] ${line}\n`));
   const warned = new Set<string>();
   const warnOnce = (id: string, line: string) => {
@@ -240,11 +318,67 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
   };
   const label = (i: number) => `账号 ${i + 1}`;
   let closed = false;
-  // 等空闲账号的请求（先来先派）
+  // 关闭时中止探测请求
+  const closing = new AbortController();
+
+  // 定时：全部登记在案，close() 一并取消；等待中的 delay 在关闭时提前返回
+  const timers = new Set<() => void>();
+  const wakeOnClose = new Set<() => void>();
+  const later = (ms: number, fn: () => void): (() => void) => {
+    let cancel = () => {};
+    const stop = () => {
+      timers.delete(stop);
+      cancel();
+    };
+    cancel = clock.setTimer(ms, () => {
+      timers.delete(stop);
+      if (!closed) fn();
+    });
+    timers.add(stop);
+    return stop;
+  };
+  const delay = (ms: number, signal?: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      if (closed || signal?.aborted === true) {
+        resolve();
+        return;
+      }
+      const finish = () => {
+        stop();
+        wakeOnClose.delete(finish);
+        signal?.removeEventListener("abort", finish);
+        resolve();
+      };
+      const stop = later(ms, finish);
+      wakeOnClose.add(finish);
+      signal?.addEventListener("abort", finish, { once: true });
+    });
+
+  // 等空闲账号的请求（先来先派）：每次有位子空出即全部唤醒重挑；客户端中止的即刻出队
   const queue: (() => void)[] = [];
   const pump = () => {
     for (const wake of queue.splice(0)) wake();
   };
+  const nextPump = (signal?: AbortSignal) =>
+    new Promise<boolean>((resolve) => {
+      if (signal?.aborted === true) {
+        resolve(false);
+        return;
+      }
+      const onAbort = () => {
+        const i = queue.indexOf(wake);
+        if (i !== -1) queue.splice(i, 1);
+        resolve(false);
+      };
+      const wake = () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(true);
+      };
+      queue.push(wake);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  // 此刻仍在排队的请求：计量读出时把已等的时间算进去
+  const waits = new Set<{ job: string; since: number }>();
 
   const usable = () => accounts.some((a) => a.down === null);
   // 挑在途占比最低的空闲账号（同占比取编号小的）；没有则 -1
@@ -258,99 +392,183 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     }
     return best;
   };
-  // 占一个账号的位子；没有可用账号（全部不可用或整批已暂停）返回 -1。排队的时间记到作业上
-  const acquire = async (job: string): Promise<number> => {
-    let waitedFrom: number | undefined;
-    for (;;) {
-      if (options.limits.state !== "running" || !usable()) {
-        if (waitedFrom !== undefined) meterOf(job).queueMs += now() - waitedFrom;
-        return -1;
+  // 占一个账号的位子；没有可用账号（全部不可用或整批已暂停）为 none，客户端中止为 aborted。排队的时间记到作业上
+  const acquire = async (job: string, signal: AbortSignal): Promise<Slot | "none" | "aborted"> => {
+    let wait: { job: string; since: number } | undefined;
+    try {
+      for (;;) {
+        if (signal.aborted) return "aborted";
+        if (closed || options.limits.state !== "running" || !usable()) return "none";
+        const index = pick();
+        if (index !== -1) {
+          const account = accounts[index] as AccountState;
+          account.inFlight += 1;
+          return { index, round: account.round, cap: account.cap };
+        }
+        if (wait === undefined) {
+          wait = { job, since: now() };
+          waits.add(wait);
+        }
+        if (!(await nextPump(signal))) return "aborted";
       }
-      const index = pick();
-      if (index !== -1) {
-        if (waitedFrom !== undefined) meterOf(job).queueMs += now() - waitedFrom;
-        (accounts[index] as AccountState).inFlight += 1;
-        return index;
+    } finally {
+      if (wait !== undefined) {
+        waits.delete(wait);
+        meterOf(job).queueMs += now() - wait.since;
       }
-      waitedFrom ??= now();
-      await new Promise<void>((resolve) => queue.push(resolve));
     }
   };
   const release = (index: number) => {
     (accounts[index] as AccountState).inFlight -= 1;
     pump();
   };
-  const cool = (index: number, ms: number) => {
-    const account = accounts[index] as AccountState;
+
+  // 429：只有本轮派出的请求才推进退避（派出之后该账号已开始新一轮冷却或已恢复，这次 429 属于处理过的那一轮）；
+  // 45 秒退避之后仍撞即该账号暂时不可用
+  const backoff = (slot: Slot) => {
+    const account = accounts[slot.index] as AccountState;
+    if (account.down !== null || slot.round !== account.round) return;
+    if (account.level >= delays.length) {
+      takeDown(slot.index, "rate-limit");
+      return;
+    }
+    const ms = delays[account.level] ?? 0;
+    warnOnce(
+      `backoff-${slot.index}-${account.level}`,
+      `${label(slot.index)}撞频率限制，第 ${account.level + 1} 次退避 ${Math.round(ms / 1000)} 秒（上限 ${delays.length} 次）；退避期间请求派给其他账号`
+    );
+    account.level += 1;
+    account.round += 1;
     account.cooling = true;
-    void sleep(ms).then(() => {
+    const round = account.round;
+    later(ms, () => {
+      if (account.round !== round) return;
       account.cooling = false;
       pump();
     });
   };
 
-  const probeAccount = async (index: number): Promise<boolean> => {
-    try {
-      const r = await fetch(`${options.upstreamBaseUrl}${options.probeRequest.path}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "anthropic-version": "2023-06-01",
-          "x-api-key": (accounts[index] as AccountState).key,
-        },
-        body: JSON.stringify(options.probeRequest.body),
-      });
-      await r.body?.cancel();
-      return r.status === 200;
-    } catch {
-      return false;
+  // 403 并发：降该账号的上限（派出之后没降过才降），隔一段时间回升 1，直到配置值
+  const lowerCap = (slot: Slot) => {
+    const account = accounts[slot.index] as AccountState;
+    if (account.cap !== slot.cap || account.cap <= 1) return;
+    account.cap -= 1;
+    warn(
+      `${label(slot.index)}报并发受限：该账号并发上限降为 ${account.cap}，稍候重试；每 ${Math.round(capRegrowMs / 60_000)} 分钟回升 1，直到 ${account.configCap}`
+    );
+    account.regrow?.();
+    account.regrow = later(capRegrowMs, () => regrow(slot.index));
+  };
+  const regrow = (index: number) => {
+    const account = accounts[index] as AccountState;
+    account.regrow = undefined;
+    if (account.cap >= account.configCap) return;
+    if (account.down === null) {
+      account.cap += 1;
+      warn(`${label(index)}并发上限回升为 ${account.cap}`);
+      pump();
     }
+    if (account.cap < account.configCap) account.regrow = later(capRegrowMs, () => regrow(index));
+  };
+
+  // 探测一个账号：占该账号一个在途位子（满了等空出），同一账号同一时刻至多一路探测，其余复用它的结果
+  const probeAccount = (index: number): Promise<ProbeOutcome> => {
+    const account = accounts[index] as AccountState;
+    account.probing ??= (async (): Promise<ProbeOutcome> => {
+      while (!closed && account.inFlight >= account.cap) await nextPump();
+      if (closed) return "fail";
+      account.inFlight += 1;
+      try {
+        const r = await fetch(`${options.upstreamBaseUrl}${options.probeRequest.path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": account.key,
+          },
+          body: JSON.stringify(options.probeRequest.body),
+          signal: closing.signal,
+        });
+        if (r.status === 200) {
+          await r.body?.cancel();
+          return "ok";
+        }
+        const failure = classifyUpstreamFailure(r.status, await r.text());
+        return failure.kind === "other" ? "fail" : failure.kind;
+      } catch {
+        return "fail";
+      } finally {
+        account.probing = undefined;
+        release(index);
+      }
+    })();
+    return account.probing;
   };
   const restore = (index: number) => {
     const account = accounts[index] as AccountState;
-    if (account.down === null) return;
+    if (account.down === null || permanent(account.down)) return;
     account.down = null;
     account.level = 0;
+    account.round += 1;
     account.cooling = false;
     warn(`${label(index)}探测通过，恢复可用`);
+    // 整批暂停中有账号恢复：立即恢复整批，不等控制器的下一轮探测
+    options.limits.recovered();
     pump();
   };
-  // 暂时不可用的账号单独探测，通过即恢复；每月额度用完的不探测
+  // 按探测结果处理：通过即恢复；认证失败或每月额度用完即转为不再恢复。通过为 true
+  const settleProbe = (index: number, outcome: ProbeOutcome): boolean => {
+    if (outcome === "ok") {
+      restore(index);
+      return true;
+    }
+    if (permanent(outcome as LimitKind)) takeDown(index, outcome as LimitKind);
+    return false;
+  };
+  // 暂时不可用的账号单独探测，通过即恢复；每月额度用完与认证失败的不探测（探测中转为这两种即停止）
   const recover = async (index: number) => {
     const account = accounts[index] as AccountState;
-    if (account.recovering || account.down === "monthly") return;
+    if (account.recovering) return;
     account.recovering = true;
     try {
-      for (let i = 0; !closed && account.down !== null; i++) {
-        await recoverySleep(PROBE_SCHEDULE_MS[Math.min(i, PROBE_SCHEDULE_MS.length - 1)] ?? 0);
-        if (closed || account.down === null) return;
-        if (await probeAccount(index)) restore(index);
+      for (let i = 0; !closed && account.down !== null && !permanent(account.down); i++) {
+        await delay(PROBE_SCHEDULE_MS[Math.min(i, PROBE_SCHEDULE_MS.length - 1)] ?? 0);
+        if (closed || account.down === null || permanent(account.down)) return;
+        settleProbe(index, await probeAccount(index));
       }
     } finally {
       account.recovering = false;
     }
   };
-  // 账号不可用：还有可用账号即只停它、请求换号；全部不可用即交给控制器整批暂停（全是每月额度则停下）
+  const downLine = (index: number, kind: LimitKind) => {
+    const who = label(index);
+    if (kind === "monthly") return `${who}每月额度用完：不再使用`;
+    if (kind === "auth") return `${who}认证失败：停用，不探测恢复，需人工检查它的 key`;
+    const why =
+      kind === "rate-limit"
+        ? "退避用满仍撞频率限制"
+        : kind === "concurrency"
+          ? "并发上限已是 1 仍受限"
+          : "额度用完";
+    return `${who}${why}，暂时不可用；按 5 至 30 分钟的间隔探测恢复`;
+  };
+  // 账号不可用：还有可用账号即只停它、请求换号；全部不可用即交给控制器整批暂停，都不会自行恢复则停下
   const takeDown = (index: number, kind: LimitKind) => {
     const account = accounts[index] as AccountState;
+    // 已经不可用的，只有转为不会自行恢复的原因才改记
+    if (account.down === kind || (account.down !== null && !permanent(kind))) return;
     account.down = kind;
     account.cooling = false;
-    if (usable()) {
-      warn(
-        kind === "monthly"
-          ? `${label(index)}每月额度用完：不再使用，请求换到其他账号`
-          : `${label(index)}${kind === "rate-limit" ? "退避用满仍撞频率限制" : kind === "concurrency" ? "并发上限已是 1 仍受限" : "额度用完"}，暂时不可用，请求换到其他账号；按 5 至 30 分钟的间隔探测恢复`
-      );
-      void recover(index);
-      return;
-    }
-    // 整批暂停的原因：全部账号都是每月额度用完则停下；最后倒下的账号是每月额度时，取另一个能恢复的账号的原因
-    const recoverable = accounts.find((a) => a.down !== "monthly");
-    options.limits.onLimit(
-      recoverable === undefined ? "monthly" : kind === "monthly" ? (recoverable.down ?? kind) : kind
-    );
-    for (const [i, a] of accounts.entries()) {
-      if (a.down !== "monthly") void recover(i);
+    warn(`${downLine(index, kind)}${usable() ? "，请求换到其他账号" : ""}`);
+    if (!permanent(kind)) void recover(index);
+    if (!usable()) {
+      const recoverable = accounts.find((a) => !permanent(a.down));
+      if (recoverable === undefined) {
+        options.limits.onLimit(accounts.some((a) => a.down === "auth") ? "auth" : "monthly");
+      } else if (options.limits.state === "running") {
+        // 整批暂停的原因：最后倒下的账号不会自行恢复时，取一个能恢复的账号的原因
+        options.limits.onLimit(permanent(kind) ? (recoverable.down ?? kind) : kind);
+      }
     }
     pump();
   };
@@ -415,8 +633,9 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
       // 最近一次上游的非 200 回应：全部账号都不可用时原样交回它
       let last: { status: number; contentType: string; text: string } | undefined;
       for (;;) {
-        const index = await acquire(job);
-        if (index === -1) {
+        const slot = await acquire(job, abort.signal);
+        if (slot === "aborted") return;
+        if (slot === "none") {
           if (last === undefined || options.limits.state === "running") paused(res);
           else {
             res.writeHead(last.status, { "content-type": last.contentType });
@@ -424,72 +643,56 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
           }
           return;
         }
+        const index = slot.index;
         const account = accounts[index] as AccountState;
-        let upstream: Response;
+        // 位子在这次尝试结束时一定释放：读错误正文时客户端中止或上游断开也不漏
+        let released = false;
+        const free = () => {
+          if (released) return;
+          released = true;
+          release(index);
+        };
         try {
-          upstream = await fetch(`${options.upstreamBaseUrl}${rest}`, {
+          const upstream = await fetch(`${options.upstreamBaseUrl}${rest}`, {
             method: req.method ?? "POST",
             headers: upstreamHeaders(req.headers, account.key),
             ...(body.length > 0 ? { body: new Uint8Array(body) } : {}),
             signal: abort.signal,
           });
-        } catch (error) {
-          release(index);
-          throw error;
-        }
-        if (upstream.status === 429) {
-          last = {
-            status: 429,
-            contentType: upstream.headers.get("content-type") ?? "application/json",
-            text: await upstream.text(),
-          };
-          release(index);
-          if (account.level >= delays.length) takeDown(index, "rate-limit");
-          else {
-            const ms = delays[account.level] ?? 0;
-            warnOnce(
-              `backoff-${index}-${account.level}`,
-              `${label(index)}撞频率限制，第 ${account.level + 1} 次退避 ${Math.round(ms / 1000)} 秒（上限 ${delays.length} 次）；退避期间请求派给其他账号`
-            );
-            account.level += 1;
-            cool(index, ms);
+          if (upstream.status !== 200) {
+            const contentType = upstream.headers.get("content-type") ?? "application/json";
+            const text = await upstream.text();
+            free();
+            const failure = classifyUpstreamFailure(upstream.status, text);
+            if (failure.kind === "rate-limit") {
+              last = { status: upstream.status, contentType, text };
+              backoff(slot);
+              continue;
+            }
+            if (failure.kind === "concurrency") {
+              last = { status: upstream.status, contentType, text };
+              if (slot.cap <= 1) takeDown(index, "concurrency");
+              else {
+                lowerCap(slot);
+                await delay(concurrencyRetryDelayMs, abort.signal);
+                if (abort.signal.aborted) return;
+              }
+              continue;
+            }
+            if (failure.kind === "auth") {
+              // 认证失败：停用该账号，这次请求交回、记为上游故障——这一步作废重做，不以认证错误判题
+              takeDown(index, "auth");
+              meterOf(job).upstreamFailures += 1;
+            } else if (failure.kind !== "other") {
+              last = { status: upstream.status, contentType, text };
+              takeDown(index, failure.kind);
+              continue;
+            } else if (upstream.status >= 500) meterOf(job).upstreamFailures += 1;
+            res.writeHead(upstream.status, { "content-type": contentType });
+            res.end(scrubKeys(text, keys));
+            return;
           }
-          continue;
-        }
-        if (upstream.status !== 200) {
-          const text = await upstream.text();
-          release(index);
-          const failure = classifyUpstreamFailure(upstream.status, text);
-          if (failure.kind === "concurrency") {
-            last = {
-              status: upstream.status,
-              contentType: upstream.headers.get("content-type") ?? "application/json",
-              text,
-            };
-            if (account.cap > 1) {
-              account.cap -= 1;
-              warn(`${label(index)}报并发受限：该账号并发上限降为 ${account.cap}，请求重试`);
-            } else takeDown(index, "concurrency");
-            continue;
-          }
-          if (failure.kind !== "auth" && failure.kind !== "other") {
-            last = {
-              status: upstream.status,
-              contentType: upstream.headers.get("content-type") ?? "application/json",
-              text,
-            };
-            takeDown(index, failure.kind);
-            continue;
-          }
-          if (upstream.status >= 500) meterOf(job).upstreamFailures += 1;
-          res.writeHead(upstream.status, {
-            "content-type": upstream.headers.get("content-type") ?? "application/json",
-          });
-          res.end(scrubKeys(text, keys));
-          return;
-        }
-        account.level = 0;
-        try {
+          if (slot.round === account.round) account.level = 0;
           const headers: Record<string, string> = {};
           upstream.headers.forEach((value, name) => {
             if (!DROP_RESPONSE_HEADERS.has(name)) headers[name] = value;
@@ -512,10 +715,10 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
           meter.output += usage.output;
           meter.cacheRead += usage.cacheRead;
           meter.cacheWrite += usage.cacheWrite;
+          return;
         } finally {
-          release(index);
+          free();
         }
-        return;
       }
     }
   };
@@ -535,26 +738,50 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     jobBaseUrl: (job) => `${baseUrl}/j/${encodeURIComponent(job)}`,
     meter: (job) => {
       const m = meterOf(job);
-      return { ...m, accountRequests: [...m.accountRequests] };
+      let queueMs = m.queueMs;
+      for (const w of waits) if (w.job === job) queueMs += now() - w.since;
+      return { ...m, queueMs, accountRequests: [...m.accountRequests] };
     },
+    jobInFlight: (job) => jobInFlight.get(job) ?? 0,
     resetPeak: (job) => {
       meterOf(job).peakInFlight = jobInFlight.get(job) ?? 0;
     },
     accountStatus: () =>
-      accounts.map((a, i) => ({ account: i + 1, cap: a.cap, inFlight: a.inFlight, down: a.down })),
+      accounts.map((a, i) => ({
+        account: i + 1,
+        cap: a.cap,
+        inFlight: a.inFlight,
+        cooling: a.cooling,
+        down: a.down,
+      })),
+    async preflight() {
+      const outcomes = await Promise.all(accounts.map((_, i) => probeAccount(i)));
+      const bad = outcomes.flatMap((o, i) => (o === "auth" ? [i + 1] : []));
+      if (bad.length > 0) {
+        throw new Error(
+          `账号 ${bad.join("、")} 认证失败（开跑前逐账号探测）：拒绝开跑，请检查对应的 key`
+        );
+      }
+      for (const [i, o] of outcomes.entries()) {
+        if (o !== "ok") warn(`${label(i)}开跑前探测未通过（${o}），开跑后按常规处理`);
+      }
+    },
     async probe() {
-      const candidates = accounts.map((a, i) => ({ a, i })).filter(({ a }) => a.down !== "monthly");
-      if (candidates.every(({ a }) => a.down === null)) {
-        return candidates.length > 0 && (await probeAccount(candidates[0]?.i ?? 0));
-      }
-      for (const { a, i } of candidates) {
-        if (a.down !== null && (await probeAccount(i))) restore(i);
-      }
-      return usable();
+      // 正在单独探测的账号由它自己的探测负责（同一账号只有一路探测者），恢复时即通知控制器；这里只探其余的
+      const candidates = accounts
+        .map((a, i) => ({ a, i }))
+        .filter(({ a }) => !permanent(a.down) && !a.recovering);
+      const outcomes = await Promise.all(
+        candidates.map(async ({ i }) => settleProbe(i, await probeAccount(i)))
+      );
+      return outcomes.some(Boolean);
     },
     close: () =>
       new Promise<void>((resolve) => {
         closed = true;
+        closing.abort();
+        for (const stop of [...timers]) stop();
+        for (const finish of [...wakeOnClose]) finish();
         pump();
         server.closeAllConnections();
         server.close(() => resolve());
