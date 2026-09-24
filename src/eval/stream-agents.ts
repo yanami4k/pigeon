@@ -15,7 +15,12 @@ import { verifyStepsDisplay } from "../state/verify-steps.ts";
 import { deterministicErrorOf, isContentRefusal } from "./runner.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
-import { STEP_START_REFS } from "./stream-workspace.ts";
+import {
+  dockerStreamShell,
+  removeCoveringHelpers,
+  STEP_START_REFS,
+  StreamWorkspace,
+} from "./stream-workspace.ts";
 
 // 工作方式指令：与外部基准同一句的写法（对齐公开最简实现的措辞），把"修 issue"换成"实现用户消息里描述的改动"。
 // 四个条件共用；它属于被测条件，改它等于换条件
@@ -130,6 +135,26 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                   source: "project" as const,
                 },
                 repairRounds,
+                // 每次验证前按与判题前同一规则删掉 agent 放的、覆盖人写测试的自动加载辅助文件（conftest）
+                ...(input.autoloadedTestHelper !== undefined && input.humanTests !== undefined
+                  ? {
+                      beforeVerify: async () => {
+                        const ws = new StreamWorkspace(
+                          dockerStreamShell({
+                            container: input.target.container,
+                            root: input.target.root,
+                            ...(options.docker !== undefined ? { docker: options.docker } : {}),
+                          })
+                        );
+                        await removeCoveringHelpers(
+                          ws,
+                          input.autoloadedTestHelper as string,
+                          (p) => input.humanTestFiles?.has(p) === true,
+                          input.humanTests ?? []
+                        );
+                      },
+                    }
+                  : {}),
                 // 跑批器给了人在这一步的测试集就只认它（agent 早先落地的自己的测试不还原、不计数），否则按归类
                 ...(input.humanTestFiles !== undefined
                   ? { protectedFiles: (p: string) => input.humanTestFiles?.has(p) === true }

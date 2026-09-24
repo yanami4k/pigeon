@@ -15,6 +15,7 @@ import { describe, test } from "node:test";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
   dockerStreamShell,
+  removeCoveringHelpers,
   STREAM_COMMITTER,
   StreamWorkspace,
   shellQuote,
@@ -282,6 +283,63 @@ test("容器里的 root 操作：跑批器写 agent 不可写的位置时以 doc
       calls.slice(1).every((c) => !c.includes("-u")),
       JSON.stringify(calls)
     );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("删覆盖人写测试的自动加载辅助文件：按文件系统列（嵌套的 git 仓库里的也删），名叫 conftest 的目录整个删、符号链接只删链接本身；agent 自己目录的与人的保留", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-"));
+  try {
+    const root = join(base, "ws");
+    const put = (p: string, content = "x\n") => {
+      mkdirSync(join(root, p, ".."), { recursive: true });
+      writeFileSync(join(root, p), content);
+    };
+    git(base, "init", "-q", "ws");
+    put("tests/unit/test_a.sh");
+    put("tests/conftest.sh", "human\n");
+    put("tests/unit/conftest.sh", "agent\n");
+    // 嵌套的 git 仓库（外层 git 看不到里面的文件）
+    git(root, "init", "-q", "tests/deep");
+    put("tests/deep/test_b.sh");
+    put("tests/deep/conftest.sh", "agent\n");
+    // 名叫 conftest.sh 的目录
+    mkdirSync(join(root, "tests", "unit", "more", "conftest.sh"), { recursive: true });
+    put("tests/unit/more/test_c.sh");
+    put("tests/unit/more/conftest.sh/inner", "x\n");
+    // agent 自己的测试目录
+    put("own/conftest.sh", "agent\n");
+    put("own/test_own.sh");
+    const target = join(base, "outside.sh");
+    writeFileSync(target, "outside\n");
+    const symlinks = process.platform !== "win32";
+    if (symlinks) execFileSync("ln", ["-s", target, join(root, "tests", "unit", "more", "linked")]);
+    const ws = new StreamWorkspace(localStreamShell(root));
+    const human = ["tests/unit/test_a.sh", "tests/deep/test_b.sh", "tests/unit/more/test_c.sh"];
+    const removed = await removeCoveringHelpers(
+      ws,
+      "conftest.sh",
+      (p) => p === "tests/conftest.sh" || human.includes(p),
+      human
+    );
+    assert.deepEqual(removed.sort(), [
+      "tests/deep/conftest.sh",
+      "tests/unit/conftest.sh",
+      "tests/unit/more/conftest.sh",
+    ]);
+    assert.equal(existsSync(join(root, "tests", "conftest.sh")), true, "人的保留");
+    assert.equal(existsSync(join(root, "own", "conftest.sh")), true, "agent 自己目录的保留");
+    assert.equal(existsSync(join(root, "tests", "unit", "more", "conftest.sh")), false);
+    assert.equal(readFileSync(target, "utf8"), "outside\n", "符号链接指向的文件不动");
+    // 空格、非 ASCII 与根目录下的路径
+    put("有 空格/test_d.sh");
+    put("有 空格/conftest.sh", "agent\n");
+    put("conftest.sh", "agent at root\n");
+    const again = await removeCoveringHelpers(ws, "conftest.sh", (p) => p === "tests/conftest.sh", [
+      "有 空格/test_d.sh",
+    ]);
+    assert.deepEqual(again.sort(), ["conftest.sh", "有 空格/conftest.sh"]);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

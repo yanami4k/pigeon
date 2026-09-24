@@ -31,6 +31,11 @@ for (;;) {
 let [program, ...rest] = args.slice(i + 1);
 // 容器里的 /bin/sh 在 Windows 宿主上对应 PATH 里的 sh
 if (program === "/bin/sh" && process.platform === "win32") program = "sh";
+// Windows 宿主上 PATH 里的 find、timeout 会先命中系统自带的同名程序：sh -c 的脚本前把 coreutils 所在的 /usr/bin 提到最前
+// （容器里本来就是 coreutils）
+if (process.platform === "win32" && (program === "sh" || program === "/bin/sh") && rest[0] === "-c") {
+  rest[1] = 'export PATH="/usr/bin:$PATH"\\n' + rest[1];
+}
 const r = spawnSync(program, rest, { cwd, stdio: [interactive ? "inherit" : "ignore", "inherit", "inherit"] });
 if (r.error) { process.stderr.write("OCI runtime exec failed: exec failed: " + r.error.message + ": no such file or directory\\n"); process.exit(127); }
 process.exit(r.status ?? 1);

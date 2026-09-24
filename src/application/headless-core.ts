@@ -105,6 +105,9 @@ export interface HeadlessRunOptions {
   // 验证前还原的受保护文件（如人写的测试与测试辅助文件）：给了即在每次回炉验证（首轮与各轮）之前，
   // 经执行端把 agent 改动或删除过的受保护文件恢复成这一步开工时的版本，再验证。须执行端能按起点还原（容器）
   protectedFiles?: (path: string) => boolean;
+  // 每次验证（首轮与各轮回炉）之前、还原受保护文件之后调用：调用方借此清掉 agent 放的、会改变验证结果的文件
+  // （例如覆盖人写测试的 conftest）
+  beforeVerify?: () => Promise<void>;
   // 决策 134 / 157：结构化记忆——给了即接入（开关、固定挑选）：开局按题面挑选拼进系统提示，回炉时附在反馈之后
   // （调用方另给了回炉附加内容时以调用方的为准）。缺省不接入
   structuredMemory?: StructuredMemoryOptions;
@@ -472,6 +475,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           protectedRestores += 1;
         }
       }
+      await options.beforeVerify?.();
       const verified = await verifyAttempt({
         config: options.verify,
         workspace: options.workspaceHost?.root ?? options.workspaceRoot,

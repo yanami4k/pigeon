@@ -343,19 +343,22 @@ export class StreamWorkspace {
     return out;
   }
 
-  // 工作区里叫这个名字的全部文件：被跟踪的、未跟踪的与被忽略的，逐个文件列出（被忽略的目录也往下展开，不折叠成目录）
-  async filesNamed(name: string): Promise<string[]> {
-    const spec = `:(glob)**/${name}`;
-    const r = await this.must(
-      [
-        'git ls-files -z -- "$1"',
-        'git ls-files -z --others --exclude-standard -- "$1"',
-        'git ls-files -z --others --ignored --exclude-standard -- "$1"',
-      ].join(" && "),
-      `列出 ${name}`,
-      { args: [spec] }
-    );
-    return [...new Set(r.stdout.split("\x00").filter((p) => p !== ""))];
+  // 工作区里叫这个名字的全部路径（文件、目录、符号链接本身），按文件系统逐个列出：不看 git（被忽略的、嵌套的 git 仓库里的
+  // 都列到），不跟随符号链接，跳过工作区根的 .git。返回相对工作区根的路径
+  async pathsNamed(name: string): Promise<string[]> {
+    const r = await this.must('find . -path ./.git -prune -o -name "$1" -print0', `列出 ${name}`, {
+      args: [name],
+    });
+    return r.stdout
+      .split("\x00")
+      .filter((p) => p !== "")
+      .map((p) => p.replace(/^\.\//, ""));
+  }
+
+  // 删掉给定路径：文件、整个目录，或符号链接本身（不跟随）；不在的忽略
+  async removeTrees(paths: readonly string[]): Promise<void> {
+    if (paths.length === 0) return;
+    await this.must('rm -rf -- "$@"', "删除文件", { args: paths });
   }
 
   // 去掉索引里全部条目的 skip-worktree 与 assume-unchanged 标记：agent 设了这些标记的文件，git status 看不到它的改动、
@@ -441,4 +444,27 @@ export class StreamWorkspace {
   async readFile(path: string): Promise<Buffer> {
     return (await this.must('cat -- "$1"', `读取 ${path}`, { args: [path] })).stdoutBytes;
   }
+}
+
+// 会被测试框架自动加载、改变人写测试收集与执行的辅助文件（strands 的 conftest.py）：不在人在该步树里、且所在目录的
+// 子树里有人在该步测试文件的，删掉；只作用于 agent 自己测试目录的保留。判题之前（跑批器）与每次回炉验证之前（Pigeon）
+// 同一规则。返回删掉的路径
+export async function removeCoveringHelpers(
+  ws: StreamWorkspace,
+  name: string,
+  inHumanTree: (path: string) => boolean,
+  humanTests: readonly string[]
+): Promise<string[]> {
+  const covers = (dir: string) =>
+    dir === "" || dir === "." || humanTests.some((t) => t.startsWith(`${dir}/`));
+  const stray = (await ws.pathsNamed(name)).filter(
+    (p) => !inHumanTree(p) && covers(posixDirname(p))
+  );
+  await ws.removeTrees(stray);
+  return stray;
+}
+
+function posixDirname(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i < 0 ? "." : p.slice(0, i);
 }

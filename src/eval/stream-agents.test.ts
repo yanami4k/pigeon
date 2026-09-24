@@ -681,6 +681,68 @@ test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）
   }
 });
 
+test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写测试的 conftest——验证照样失败，修满轮数后撤回", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
+  mkdirSync(join(ws.testbed, "tests"));
+  writeFileSync(join(ws.testbed, "tests", "check.sh"), "grep -qx fixed a.txt\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "human test");
+  // agent 每轮都放一个让 sh 恒成功的 conftest（相当于把失败的用例跳过），再把代码改错
+  const cheat = (from: string, to: string) => ({
+    text: "放 conftest",
+    toolCalls: [
+      {
+        name: "run_command",
+        args: { command: "printf 'sh() { return 0; }\\n' > tests/conftest.sh" },
+      },
+      {
+        name: "edit_file",
+        args: { path: "a.txt", old_string: `${from}\n`, new_string: `${to}\n` },
+      },
+    ],
+  });
+  try {
+    const agent = pigeonStepAgent({
+      streamFn: createFakeStreamFn({
+        replies: [
+          cheat("bug", "w1"),
+          { text: "好了" },
+          cheat("w1", "w2"),
+          { text: "好了" },
+          cheat("w2", "w3"),
+          { text: "好了" },
+          cheat("w3", "w4"),
+          { text: "好了" },
+        ],
+      }),
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    });
+    const load = "[ -f tests/conftest.sh ] && . ./tests/conftest.sh; sh tests/check.sh";
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: { steps: [{ name: "测试", command: load }], command: load, timeoutMs: 60_000 },
+        humanTestFiles: new Set(["tests/check.sh"]),
+        autoloadedTestHelper: "conftest.sh",
+        humanTests: ["tests/check.sh"],
+      })
+    );
+    assert.deepEqual(
+      [out.repair?.rounds, out.repair?.finalVerdict, out.repair?.reverted],
+      [3, "fail", true]
+    );
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
 test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);

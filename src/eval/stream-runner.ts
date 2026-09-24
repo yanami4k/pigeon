@@ -55,7 +55,12 @@ import {
   streamJobKey,
   ZERO_USAGE,
 } from "./stream-results.ts";
-import { type CommandOutcome, dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
+import {
+  type CommandOutcome,
+  dockerStreamShell,
+  removeCoveringHelpers,
+  StreamWorkspace,
+} from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
 // 四个条件（126 修订、140）：完整 Pigeon 开回炉、撤回与结构化记忆；去掉记忆只关结构化记忆；去掉验证门与回退两者都不开；
@@ -109,6 +114,10 @@ export interface StepAgentInput {
   modelBaseUrl?: string;
   // 人在这一步的树里的测试与测试辅助文件：回炉验证前只还原（并计数）这些，agent 早先步骤落地的自己的测试不算
   humanTestFiles?: ReadonlySet<string>;
+  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）与人在这一步的测试文件：回炉验证前按与判题前同一规则
+  // 删掉 agent 放的、覆盖人写测试的这类文件
+  autoloadedTestHelper?: string;
+  humanTests?: readonly string[];
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值
@@ -628,12 +637,7 @@ async function restoreTests(
     const tree = options.human.tree(step.commit).map((e) => e.path);
     const inTree = new Set(tree);
     const humanTests = tree.filter((p) => profile.classifyFile(p) === "test");
-    const covers = (dir: string) =>
-      dir === "" || dir === "." || humanTests.some((t) => t.startsWith(`${dir}/`));
-    const stray = (await ws.filesNamed(helper)).filter(
-      (p) => !inTree.has(p) && covers(path.posix.dirname(p))
-    );
-    await ws.removePaths(stray);
+    await removeCoveringHelpers(ws, helper, (p) => inTree.has(p), humanTests);
   }
 }
 
@@ -837,6 +841,12 @@ async function runStep(
               return kind === "test" || kind === "testaux";
             })
         ),
+        ...(options.runtime.autoloadedTestHelper !== undefined
+          ? {
+              autoloadedTestHelper: options.runtime.autoloadedTestHelper,
+              humanTests: humanTestsAt(options.human, options.runtime, step.commit),
+            }
+          : {}),
         ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
       });
     } finally {
