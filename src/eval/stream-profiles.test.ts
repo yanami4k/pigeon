@@ -313,10 +313,17 @@ test("分步验证：本仓库四步（格式、类型、测试、分层），�
     PIGEON_VERIFY_STEPS.map((s) => s.name),
     ["格式", "类型", "测试", "分层"]
   );
-  assert.equal(
-    PIGEON_VERIFY_STEPS.find((s) => s.name === "测试")?.command,
-    'node --test --test-timeout=120000 "src/**/*.test.ts"'
+  // 显式命令，不经 npm run 脚本（agent 改 package.json 就能放松验证门）；与清单范围内各提交的同名脚本逐字等价
+  assert.deepEqual(
+    PIGEON_VERIFY_STEPS.map((s) => s.command),
+    [
+      "node_modules/.bin/biome check .",
+      "node_modules/.bin/tsc -p tsconfig.json --noEmit",
+      'node --test --test-timeout=120000 "src/**/*.test.ts"',
+      "node_modules/.bin/dependency-cruiser src",
+    ]
   );
+  assert.ok(PIGEON_VERIFY_STEPS.every((s) => !/\bnpm\b/.test(s.command)));
   assert.ok(PIGEON_VERIFY_STEPS.every((s) => s.cwd === undefined));
   assert.deepEqual(
     STRANDS_VERIFY_STEPS.map((s) => [s.name, s.cwd]),

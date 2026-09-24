@@ -218,6 +218,12 @@ v3 上对人的代码实跑验证门暴露的三件环境问题（第二节末�
 
 用例"延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数"。变异：调用方的值覆盖固定值，用例精确变红（得到 false）。
 
+### 本仓库流的验证门不走 npm run 脚本（顺手做）
+
+本仓库流的四步验证原先是 `npm run lint`、`npm run check`、`npm run deps` 与测试命令，agent 改 package.json 里的脚本就能放松验证门。修法：写成与这几个脚本等价的显式命令——`node_modules/.bin/biome check .`、`node_modules/.bin/tsc -p tsconfig.json --noEmit`、`node --test --test-timeout=120000 "src/**/*.test.ts"`、`node_modules/.bin/dependency-cruiser src`。清单范围的首尾提交上这四个脚本逐字相同；工具取依赖目录里的可执行文件（npm run 同样是把它放进 PATH），在 v4 镜像里核对过三者都在且能执行。
+
+用例：分步验证用例断言四步的命令逐字等于上述显式命令、都不含 npm。变异：格式一步改回 `npm run lint`，用例精确变红。
+
 ## 十五、复核补修：分步验证接到 Pigeon（M1）
 
 - 现状：分步配置写进了作业治理根的 `.pigeon/verify.json`，但 `runHeadless` 不读它；Pigeon 步 agent 传给 headless 的是 `verifyScript()` 拼成的一条命令，没有 `steps` 与 `cwd`。验证记录因此只有一个旧式步，指纹解析只认第一个工具，strands 各步在 `strands-py/` 下执行、报错路径缺前缀，回炉反馈按整条输出截尾。

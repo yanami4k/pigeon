@@ -15,15 +15,17 @@ export interface StreamVerifyStep {
   cwd?: string;
 }
 
-// 本仓库四步：各步与 package.json 里的同名脚本一致（清单范围内每个提交的脚本逐字相同），测试步另加单用例超时
+// 本仓库四步：与 package.json 里的同名脚本 lint、check、test、deps 等价（清单范围内每个提交的这几个脚本逐字相同），
+// 但写成显式命令、不经 npm run——验证门不能随 agent 改 package.json 而放松。工具取依赖目录里的可执行文件
+// （npm run 同样是把它放进 PATH 再执行）；测试步另加单用例超时
 export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
-  { name: "格式", command: "npm run lint" },
-  { name: "类型", command: "npm run check" },
+  { name: "格式", command: "node_modules/.bin/biome check ." },
+  { name: "类型", command: "node_modules/.bin/tsc -p tsconfig.json --noEmit" },
   {
     name: "测试",
     command: `node --test --test-timeout=${PIGEON_TEST_TIMEOUT_MS} "src/**/*.test.ts"`,
   },
-  { name: "分层", command: "npm run deps" },
+  { name: "分层", command: "node_modules/.bin/dependency-cruiser src" },
 ];
 
 // strands 三步，按其 CI 定义（python-test-lint.yml 与 pyproject 的 hatch 脚本），都在 strands-py 下执行。单测只跑 tests/，
