@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -21,6 +22,7 @@ import type { GatewayMeter } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
 import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
+import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
 import {
   composeStreamManifest,
   markHumanGateFailures,
@@ -31,6 +33,7 @@ import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
   commandDigest,
   compareRuns,
+  DEFAULT_STEP_BUDGET,
   EQUIVALENT_BASELINE_COMMANDS,
   ReferenceCases,
   runStreams,
@@ -1429,6 +1432,85 @@ test("等价摘要：旧摘要在等价表里且结果没有挂起迹象的读�
       JSON.stringify({ ...check, passed: false, identity: { image, command: "old-gate" } })
     );
     assert.equal(reference.hasGate(commit, gate), false, "检查门没通过：不按等价读回");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("换根目录：同一份清单、人的基准、检查门结果与身份头整体搬到别的目录下照样读回——落盘内容里没有本机路径，身份只看镜像 ID、命令摘要与清单内容", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-relocate-"));
+  try {
+    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
+    const human = gitHumanRepo(join(base, "human"));
+    const gate = ["sh", "-c", "exit 0"];
+    const tests = ["src/ok.test.sh"];
+    let runs = 0;
+    const counting = {
+      ...toyRuntime,
+      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+        runs++;
+        return toyRuntime.runCases(...args);
+      },
+    };
+    const referenceAt = async (root: string) => {
+      mkdirSync(join(root, "ref"), { recursive: true });
+      const ws = new ReferenceWorkspace(localStreamShell(join(root, "ref")));
+      await ws.init(human.bundle(commit), commit);
+      return new ReferenceCases({
+        reference: ws,
+        runtime: counting,
+        cacheDir: join(root, "data", "baselines"),
+        image: "sha256:img",
+      });
+    };
+    // 原位置：算人的基准与检查门，写清单与身份头
+    const a = join(base, "a");
+    const first = await referenceAt(a);
+    await first.casesAt(commit, tests);
+    await first.gateAt(commit, gate);
+    const computed = runs;
+    mkdirSync(join(a, "data", "out"), { recursive: true });
+    writeFileSync(join(a, "data", "manifest.json"), JSON.stringify({ repo: "toy", steps: [] }));
+    const identity = {
+      core: {
+        repo: "toy",
+        manifestDigest: manifestDigestOf(join(a, "data", "manifest.json")),
+        image: "sha256:img",
+        budget: DEFAULT_STEP_BUDGET,
+        conditions: ["no-gate"],
+        maxSteps: null,
+        agents: {},
+      },
+      info: { concurrency: 1, harness: { commit: "h", dirty: false } },
+    };
+    const digest = checkOrWriteIdentity(join(a, "data", "out"), identity);
+    for (const f of readdirSync(join(a, "data", "baselines"))) {
+      const text = readFileSync(join(a, "data", "baselines", f), "utf8");
+      assert.ok(
+        !text.includes(base.replace(/\\/g, "/")) && !text.includes(base),
+        `${f} 里没有本机路径`
+      );
+    }
+    // 整体搬到另一个根目录下
+    const b = join(base, "elsewhere", "deeper", "b");
+    cpSync(join(a, "data"), join(b, "data"), { recursive: true });
+    const moved = await referenceAt(b);
+    assert.equal(moved.has(commit), true, "人的基准读回");
+    assert.equal(moved.hasGate(commit, gate), true, "检查门结果读回");
+    await moved.casesAt(commit, tests);
+    assert.equal(runs, computed, "没有重算");
+    assert.equal(manifestDigestOf(join(b, "data", "manifest.json")), identity.core.manifestDigest);
+    assert.equal(
+      checkOrWriteIdentity(join(b, "data", "out"), {
+        ...identity,
+        core: {
+          ...identity.core,
+          manifestDigest: manifestDigestOf(join(b, "data", "manifest.json")),
+        },
+      }),
+      digest,
+      "身份头比对通过"
+    );
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
