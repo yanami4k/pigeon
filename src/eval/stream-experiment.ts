@@ -91,8 +91,32 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
   };
 }
 
-// 镜像的标识：镜像 ID（内容摘要），不用可变的标签——同一标签重建后 ID 即变，已落盘的人的基准不再复用
+// Docker 的镜像存储：经典存储（overlay2 等）下镜像 ID 为 config 摘要；containerd 镜像存储下 {{.Id}} 取到的是 manifest
+// 摘要，同一个镜像两种存储下 ID 不同。人的基准、镜像等价表与身份头记的都是经典存储下的 config 摘要
+export function imageStoreOf(docker: readonly string[]): { driver: string; containerd: boolean } {
+  const [program = "docker", ...pre] = docker;
+  const out = execFileSync(
+    program,
+    [...pre, "info", "--format", "{{.Driver}}|{{json .DriverStatus}}"],
+    {
+      encoding: "utf8",
+    }
+  ).trim();
+  const bar = out.indexOf("|");
+  const driver = bar < 0 ? out : out.slice(0, bar);
+  return { driver, containerd: out.includes("io.containerd.snapshotter") };
+}
+
+// 镜像的标识：镜像 ID（内容摘要），不用可变的标签——同一标签重建后 ID 即变，已落盘的人的基准不再复用。
+// containerd 镜像存储下取到的 ID 与已记下的对不上：响亮报错，不静默地换一套 ID
 export function imageIdOf(image: string, docker: readonly string[]): string {
+  const store = imageStoreOf(docker);
+  if (store.containerd) {
+    throw new Error(
+      `Docker 用的是 containerd 镜像存储（${store.driver}）：镜像 ID 取到的是 manifest 摘要，与经典存储下记录的 config 摘要` +
+        "（人的基准、镜像等价表、身份头）对不上。请把 Docker 改回经典存储（daemon.json 里 features.containerd-snapshotter 设为 false）后再跑"
+    );
+  }
   const [program = "docker", ...pre] = docker;
   const id = execFileSync(program, [...pre, "image", "inspect", "--format", "{{.Id}}", image], {
     encoding: "utf8",
