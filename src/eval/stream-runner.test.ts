@@ -547,10 +547,20 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
       ]
     );
     let runs = 0;
+    // 人的基准与全量测量不另给单条超时，用运行方式的缺省值（与验证门、判题同一口径；探针另给更短的）
+    const caseTimeouts: (number | undefined)[] = [];
     const counting = {
       ...toyRuntime,
       runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
         runs++;
+        caseTimeouts.push(args[2].caseTimeoutSec);
+        return toyRuntime.runCases(...args);
+      },
+    };
+    const measuring = {
+      ...toyRuntime,
+      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+        caseTimeouts.push(args[2].caseTimeoutSec);
         return toyRuntime.runCases(...args);
       },
     };
@@ -578,9 +588,15 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
     const [reading] = references;
     assert.ok(reading !== undefined);
     const summary = await runStreams(
-      options(t, { agents: { pigeon: scriptedAgent(() => undefined) }, reference: reading })
+      options(t, {
+        agents: { pigeon: scriptedAgent(() => undefined) },
+        reference: reading,
+        runtime: measuring,
+      })
     );
     assert.equal(runs, 8);
+    assert.ok(caseTimeouts.length > 8, "基准与全量测量都跑过");
+    assert.ok(caseTimeouts.every((t) => t === undefined));
     const rows = readStreamResults(summary.resultsFile);
     assert.equal(rows.at(-1)?.fullPassRate?.byCount.total, 4);
     assert.equal(rows.at(-1)?.fullPassRate?.humanRuns.length, 2);

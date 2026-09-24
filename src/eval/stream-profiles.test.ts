@@ -21,21 +21,28 @@ import { StreamWorkspace } from "./stream-workspace.ts";
 
 // 假的 python -m pytest，按 pytest 对这几种情形的行为出结果（逐条 -v 进度、xunit1 报告）：
 //   测试文件里有 import-error 即收集失败；不带 --continue-on-collection-errors 时整次中断、只报收集错误；
-//   其余每行"用例名 pass|fail|hang"，hang 即卡死（不再输出、不写报告）；--deselect 的用例不跑
+//   其余每行"用例名 pass|fail|hang|slow"，hang 即卡死、超时也打断不了（不再输出、不写报告）；slow 是会挂住、
+//   但能被单条超时打断的用例：只有给了 signal 方式的超时且超时失败不重跑（--rerun-except Timeout）时，才按超时判失败、
+//   接着跑下一条，否则同 hang（带 --reruns 时，超时失败的重跑里超时不再生效）；--deselect 的用例不跑。
+//   收到的超时参数写进报告旁的 .args 文件，供核对各处用的超时值
 const FAKE_PYTEST = `#!/bin/sh
 shift 2
-j=""; cont=0; des=" "; files=""
+j=""; cont=0; des=" "; files=""; to=""; tm=""; rx=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --junitxml=*) j="\${1#--junitxml=}";;
     --continue-on-collection-errors) cont=1;;
     --deselect) shift; des="$des$1 ";;
+    --timeout) shift; to="$1";;
+    --timeout-method) shift; tm="$1";;
+    --rerun-except) shift; rx="$1";;
     -o|-p|--reruns) shift;;
     -*) ;;
     *) if [ -d "$1" ]; then for x in "$1"/test_*.py; do files="$files $x"; done; else files="$files $1"; fi;;
   esac
   shift
 done
+echo "$to $tm $rx" > "$j.args"
 body=""; broken=""
 for f in $files; do
   if grep -q import-error "$f"; then
@@ -58,6 +65,14 @@ for f in $files; do
     id="$f::$name"
     case "$des" in *" $id "*) continue;; esac
     printf '%s ' "$id"
+    if [ "$outcome" = slow ]; then
+      if [ -n "$to" ] && [ "$tm" = signal ] && [ "$rx" = Timeout ]; then
+        echo "FAILED"
+        body="$body<testcase classname=\\"$m\\" file=\\"$f\\" name=\\"$name\\"><failure message=\\"Failed: Timeout &gt;$to.0s\\"/></testcase>"
+        continue
+      fi
+      outcome=hang
+    fi
     if [ "$outcome" = hang ]; then echo; exec sleep 60; fi
     if [ "$outcome" = pass ]; then
       echo "PASSED"
@@ -150,6 +165,40 @@ test("strands 逐用例结果：一条用例卡死到墙钟被杀，已完成的
     assert.deepEqual(run.stuck, ["strands-py/tests/test_x.py::test_stuck"]);
     assert.equal(run.complete, true);
     assert.equal(allPassed(run), false);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("strands 逐用例结果：挂住的用例按单条超时（signal）判失败、照常写报告，不进卡死清单也不重跑；缺省 90 秒，探针给 30 秒", async () => {
+  const { base, ws } = fakeStrands({
+    "test_x.py": "test_one pass\ntest_slow slow\ntest_three pass\n",
+  });
+  try {
+    const args = async () =>
+      (await ws.run(["sh", "-c", "cat .git/pigeon-cases-junit.xml.args"], 10_000)).output.trim();
+    for (const [caseTimeoutSec, expected] of [
+      [undefined, "90 signal Timeout"],
+      [30, "30 signal Timeout"],
+    ] as const) {
+      const run = await strandsRuntime.runCases(ws, ["strands-py/tests/test_x.py"], {
+        timeoutMs: 20_000,
+        scratch: `${ws.root}/.git`,
+        ...(caseTimeoutSec !== undefined ? { caseTimeoutSec } : {}),
+      });
+      assert.deepEqual(
+        run.cases.map((c) => [c.id, c.outcome]),
+        [
+          ["strands-py/tests/test_x.py::test_one", "passed"],
+          ["strands-py/tests/test_x.py::test_slow", "failed"],
+          ["strands-py/tests/test_x.py::test_three", "passed"],
+        ]
+      );
+      // 一次运行就写出了报告：超时失败的用例由报告给出，不是兜底路径收回的卡死
+      assert.deepEqual(run.stuck, []);
+      assert.equal(run.complete, true);
+      assert.equal(await args(), expected);
+    }
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -281,6 +330,16 @@ test("分步验证：本仓库四步（格式、类型、测试、分层），�
   // 与其 CI 一致：失败的用例重跑两次（验证门与逐用例运行——探针、判题、全量测量、人的基准——同一口径）
   assert.match(STRANDS_VERIFY_STEPS[2]?.command ?? "", /--reruns 2/);
   assert.match(STRANDS_PYTEST_SCRIPT, /--reruns 2/);
+  // 单条超时用 signal 方式，超时失败的用例不重跑（带 --reruns 时重跑里超时不再生效，会挂到墙钟）：
+  // 验证门 90 秒（与其仓库配置一致，也与全量测量、人的基准同一口径）；外壳的超时值由调用方给
+  assert.match(
+    STRANDS_VERIFY_STEPS[2]?.command ?? "",
+    /--timeout 90 --timeout-method signal --rerun-except Timeout/
+  );
+  assert.match(
+    STRANDS_PYTEST_SCRIPT,
+    /--timeout "\$ct" --timeout-method signal --rerun-except Timeout/
+  );
   // 与其 CI 的 lint 作业一致：只做 ruff check，不做格式检查
   assert.equal(STRANDS_VERIFY_STEPS[0]?.command, "ruff check");
   // 类型测试目录在窗口中途才加入：没有它的提交上只查 ./src（写死两个目录会让人的代码也过不了验证门）

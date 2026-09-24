@@ -16,6 +16,9 @@ import { type StreamShell, StreamWorkspace, shellQuote } from "./stream-workspac
 
 // 探针上失败的用例再跑几次（与 strands 的 CI 同样是两次）
 export const PROBE_RERUNS = 2;
+// 探针的单条用例超时（秒）：比判题、测量与人的基准的 90 秒短——人的基准里最慢的用例只有 4 秒，挂住的用例
+// （例如父提交缺少本提交的改动时）早些判失败，清单更快
+export const PROBE_CASE_TIMEOUT_SEC = 30;
 
 export interface RangeCommit {
   sha: string;
@@ -285,6 +288,7 @@ export async function collectStreamFacts(input: {
         timeoutMs: options.testTimeoutMs,
         scratch: `${reference.ws.root}/.git`,
         rerunFailed: PROBE_RERUNS,
+        caseTimeoutSec: PROBE_CASE_TIMEOUT_SEC,
       });
       const passed = allPassed(run);
       probes.push({

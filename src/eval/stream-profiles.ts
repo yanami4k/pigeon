@@ -31,9 +31,16 @@ export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
 //   --continue-on-collection-errors：一个文件收集出错不中断整次运行，其余用例照常跑（缺省会一条都不跑）；
 //   --reruns 2：与其 CI 一致，失败的用例重跑两次，其间通过即算通过（时过时不过的用例不因一次失败判错）；
 //   pytest 在报告写完后若因残留线程或事件循环不退出，外壳等 5 秒后杀掉它；通过与否看报告里有没有失败或出错的用例
-//   （不依赖计数属性）；简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈
+//   （不依赖计数属性）；简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈；
+//   单条超时：其仓库配置为 90 秒、signal 方式，这里显式写死同一值（验证门、判题、全量测量与人的基准同一口径），
+//   并以 --rerun-except Timeout 让超时失败的用例不再重跑——带 --reruns 时，超时失败的用例在重跑里挂住后超时不再生效，
+//   会一直挂到外层上限。这是与其 CI 唯一的差别：超时失败的用例不重跑，其余失败照常重跑两次
 // mypy 的检查范围随历史变化：类型测试目录 tests_typing 在窗口中途才加入（其 CI 自那时起才检查它），之前只查 ./src
 const STRANDS_MYPY = "mypy ./src $(test -d tests_typing && echo ./tests_typing)";
+
+export const STRANDS_CASE_TIMEOUT_SEC = 90;
+const strandsTimeoutArgs = (seconds: string) =>
+  `--timeout ${seconds} --timeout-method signal --rerun-except Timeout`;
 
 export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
   // 其 CI 的 lint 作业只跑 hatch fmt --linter --check（ruff check 与 mypy），不做格式检查：人的代码并非处处按
@@ -46,6 +53,7 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
     command: [
       'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
       '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors --reruns 2',
+      strandsTimeoutArgs(String(STRANDS_CASE_TIMEOUT_SEC)),
       '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
       'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
       'wait "$p" 2>/dev/null; true; } &&',
@@ -197,6 +205,9 @@ export interface RunCasesOptions {
   // 失败的用例再跑几次、其间通过即算通过（探针用，免得时过时不过的用例把题判错）。strands 一律带 --reruns 2
   // （其 CI 的做法），不看这一项；本仓库只在给了这一项时重跑
   rerunFailed?: number;
+  // 单条用例的超时秒数（strands，signal 方式，超时失败不重跑）：缺省 STRANDS_CASE_TIMEOUT_SEC，即判题、全量测量与
+  // 人的基准同一口径；探针给得更短。本仓库用 node 自己的单用例超时，不看这一项
+  caseTimeoutSec?: number;
 }
 
 // 这组用例是否全部通过：有结果、全有结果、没有失败（跳过不算失败）
@@ -328,9 +339,11 @@ const inStrands = (tests: readonly string[]) =>
 
 // strands 跑一组测试的外壳：pytest 在后台跑，外壳每秒看一次——报告写出后等 5 秒杀掉（残留线程或事件循环会让它不退出），
 // 到墙钟也杀掉（外层的 timeout 只杀得到外壳，杀不到后台的 pytest）。-v 的逐行进度供被杀时收回已完成的用例
+// （兜底：卡在超时打断不了的地方时）。参数：报告路径、墙钟秒数、单条超时秒数，其后为测试文件与 --deselect
 export const STRANDS_PYTEST_SCRIPT = [
-  'cd strands-py && j="$1"; lim="$2"; shift 2; rm -f "$j";',
+  'cd strands-py && j="$1"; lim="$2"; ct="$3"; shift 3; rm -f "$j";',
   'PYTHONPATH="$PWD/src" python -m pytest -v -p no:cacheprovider --continue-on-collection-errors --reruns 2',
+  strandsTimeoutArgs('"$ct"'),
   '-o junit_family=xunit1 --junitxml="$j" "$@" & p=$!; t=0;',
   'while kill -0 "$p" 2>/dev/null; do',
   'if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi;',
@@ -365,6 +378,7 @@ export const strandsRuntime: StreamRepoRuntime = {
             "sh",
             junit,
             String(limitSec),
+            String(options.caseTimeoutSec ?? STRANDS_CASE_TIMEOUT_SEC),
             ...attempt.tests,
             ...attempt.deselect.flatMap((d) => ["--deselect", d]),
           ],
