@@ -17,7 +17,7 @@ import type { LimitController } from "./model-limits.ts";
 import type { HumanRepo } from "./stream-facts.ts";
 import type { StreamManifest, StreamStep } from "./stream-manifest.ts";
 import { type StreamRepoRuntime, verifyConfigFile, verifyScript } from "./stream-profiles.ts";
-import type { StreamCondition } from "./stream-results.ts";
+import type { StreamCondition, StreamGatewayFacts } from "./stream-results.ts";
 import {
   CONDITION_SPECS,
   type StepAgent,
@@ -52,6 +52,8 @@ export interface TrialRow {
   finalVerdict?: "pass" | "fail" | null;
   reverted?: boolean;
   budgetExhausted?: boolean | null;
+  // 与正式结果行同形：等空闲账号的累计毫秒、各账号成功转发的次数、同时在途的请求数峰值；不经网关为 null
+  gateway?: StreamGatewayFacts | null;
   memory?: {
     enabled: boolean | null;
     opening: string[];
@@ -296,6 +298,14 @@ export async function runStreamTrial(options: StreamTrialOptions): Promise<Strea
           finalVerdict: result.repair?.finalVerdict ?? null,
           reverted: result.repair?.reverted ?? false,
           budgetExhausted: result.repair?.budgetExhausted ?? null,
+          gateway:
+            delta !== undefined
+              ? {
+                  queueMs: delta.queueMs,
+                  accountRequests: delta.accountRequests,
+                  peakInFlight: delta.peakInFlight,
+                }
+              : null,
           ...(spec.agent === "pigeon" ? { memory: facts.memory } : {}),
         };
         appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);

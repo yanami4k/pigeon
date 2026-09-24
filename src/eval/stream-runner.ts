@@ -88,9 +88,9 @@ export interface StepBudget {
   wallClockMs: number;
 }
 
-// 每步预算（147 校准）：试跑 10 步的轮数与墙钟各取第 90 百分位乘 1.5，且分别不低于 150 轮、30 分钟，得 150 轮、46 分钟；
-// 四个条件同额，回炉的消耗计入其中
-export const DEFAULT_STEP_BUDGET: StepBudget = { maxTurns: 150, wallClockMs: 46 * 60_000 };
+// 每步预算（147 校准）：在正式实验的服务器上以完整 Pigeon 试跑 10 步，轮数与墙钟各取第 90 百分位（78 轮、约 14.3 分钟）
+// 乘 1.5，且分别不低于 150 轮、30 分钟，两项都由下限起作用，得 150 轮、30 分钟；四个条件同额，回炉的消耗计入其中
+export const DEFAULT_STEP_BUDGET: StepBudget = { maxTurns: 150, wallClockMs: 30 * 60_000 };
 
 // agent 的命令在哪里执行
 export interface AgentTarget {

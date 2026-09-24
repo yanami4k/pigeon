@@ -23,7 +23,7 @@ const row = (turns: number, minutes: number, over: Partial<TrialRow> = {}): Tria
 });
 
 test("建议预算：轮数与墙钟各取第 90 百分位（最近秩法）、乘 1.5，不低于 150 轮与 30 分钟；以完整 Pigeon 条件为准，出错的步不计", () => {
-  // 与已定下的校准同一组数：10 步里第 90 百分位为 82 轮、30.4 分钟 → 150 轮、46 分钟
+  // 一组墙钟超过下限的数：10 步里第 90 百分位为 82 轮、30.4 分钟 → 150 轮、46 分钟
   const calibrated = [15, 24, 30, 40, 44, 51, 60, 70, 82, 90].map((t, i) =>
     row(t, [7, 8, 10, 12, 15, 17, 20, 25, 30.4, 33][i] ?? 0)
   );
@@ -124,7 +124,14 @@ test("试跑：每步从人在父提交上的代码起跑，按条件各跑一�
         calls.push(input);
         const key = input.modelBaseUrl?.split("/j/")[1] ?? "";
         const m = meters.get(key) ?? zero;
-        meters.set(key, { ...m, requests: m.requests + turns, input: m.input + 100 });
+        meters.set(key, {
+          ...m,
+          requests: m.requests + turns,
+          input: m.input + 100,
+          queueMs: m.queueMs + 40,
+          peakInFlight: 1,
+          accountRequests: [0, (m.accountRequests[1] ?? 0) + turns],
+        });
         // 起跑时工作区是人在父提交上的代码，本步的人写测试已写入
         const hasTest = existsSync(join(input.target.root, "src", "a.test.sh"));
         if (input.step.seq === 1 && !hasTest) throw new Error("本步的人写测试没有写入");
@@ -172,6 +179,18 @@ test("试跑：每步从人在父提交上的代码起跑，按条件各跑一�
       ]
     );
     assert.equal(calls.length, 5, "被打断的一次作废重做");
+    // gateway 列与正式结果行同形，取本步的网关计量
+    assert.deepEqual(
+      rows
+        .map((r) => [r.seq, r.condition, r.gateway])
+        .sort((a, b) => String(a).localeCompare(String(b))),
+      [
+        [1, "minimal", { queueMs: 40, accountRequests: [0, 11], peakInFlight: 1 }],
+        [1, "no-gate", { queueMs: 40, accountRequests: [0, 7], peakInFlight: 1 }],
+        [2, "minimal", { queueMs: 40, accountRequests: [0, 11], peakInFlight: 1 }],
+        [2, "no-gate", { queueMs: 40, accountRequests: [0, 7], peakInFlight: 1 }],
+      ]
+    );
     assert.deepEqual(summary.recommendation, {
       condition: "all",
       samples: 4,

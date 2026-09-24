@@ -11,7 +11,7 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
     repo: "strands-py",
     manifestDigest: "abc",
     image: "sha256:img",
-    budget: { maxTurns: 150, wallClockMs: 46 * 60_000 },
+    budget: { maxTurns: 150, wallClockMs: 30 * 60_000 },
     conditions: ["full", "minimal"],
     maxSteps: null,
     agents: {
@@ -34,8 +34,8 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
   info: { concurrency: 4, harness: { commit: "h1", dirty: false } },
 });
 
-test("正式跑批的预算缺省为每步 150 轮、46 分钟（147 校准）", () => {
-  assert.deepEqual(DEFAULT_STEP_BUDGET, { maxTurns: 150, wallClockMs: 46 * 60_000 });
+test("正式跑批的预算缺省为每步 150 轮、30 分钟（147 校准）", () => {
+  assert.deepEqual(DEFAULT_STEP_BUDGET, { maxTurns: 150, wallClockMs: 30 * 60_000 });
 });
 
 test("身份头：首次写入；续跑时身份一致放行（路数与跑批器代码版本只记不比），不一致即拒绝并列出不同的项", () => {
