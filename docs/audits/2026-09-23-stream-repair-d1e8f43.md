@@ -225,21 +225,21 @@ v3 上对人的代码实跑验证门暴露的三件环境问题（第二节末�
 - 用例（`src/eval/stream-agents.test.ts`，假 docker 容器加真实 git 仓库）：`Pigeon agent：分步验证原样接到 headless——三步在 strands-py 下各出结论；pytest 失败、回炉修好，事实锚点带 strands-py/ 前缀，下一步开局挑中并在容器里核验通过`。首轮三步在 `strands-py` 下各出结论（格式、类型通过，子测试失败）；回炉那一轮的反馈写"失败的步骤：子测试""已通过的步骤：格式、类型"并附 pytest 输出末尾，不含单条命令式的"验证命令："；回炉一轮修好；派生的事实锚点为 `strands-py/src/pkg/mod.py`；下一步题面指到该文件，开局挑中这一条且没有被用前核验拦下。改动之前该用例为红（回炉轮数与结论实际为 3、fail，期望 1、pass）。原有三条 Pigeon agent 用例的验证改为带一步的分步配置。
 - 变异：Pigeon 步 agent 退回单条命令（`command: input.verify.command`，不传 `steps`）→ 上述用例精确变红，其余 Pigeon agent 用例通过；撤回后通过。
 
-## 十四、复核补修：回炉验证前还原人写的测试（M3）
+## 十六、复核补修：回炉验证前还原人写的测试（M3）
 
 - 现状：容器模式下 agent 可以改人写的测试与测试辅助文件，使验证在自己的代码上通过；跑批器只在 agent 收尾之后、判题之前还原测试，回炉的各次验证看到的是 agent 改过的测试。
 - 修法：
   - 执行端接口 `WorkspaceHost` 增加可选的 `restoreProtectedFromStepStart(mark, isProtected)`，容器实现：在临时索引上 `add -A` 把当前工作区写成树，与开工时的树（`stepStart.baseCommit`，已含跑批器预置、未提交的人写测试）比较，取被改动、删除或换了类型的文件（不含新建的），其中 `isProtected` 认定受保护的，从开工时的树检出后取消暂存；返回还原了的路径。不动真实索引。
   - headless 增加选项 `protectedFiles`（判定函数）：回炉开启时，每次验证（首轮与各轮回炉）之前经执行端还原受保护文件，再验证；回炉结果带 `protectedRestores`，为验证之前发现并还原了改动的次数（每次验证至多计 1）。给了该选项而执行端不能按起点还原（本地工作区）即启动报错。
   - Pigeon 步 agent 增加选项 `humanTestFile`，交给 headless 的 `protectedFiles`；`eval stream` 按这条流运行方式的 `classifyFile` 传入（测试与测试辅助文件）。步 agent 的结果 `repair` 带 `humanTestRestores`（结果类型 `PigeonStepAgentResult`，可赋给 `StepAgentResult`）。
-- 未做：结果行的"agent 改过人写测试"一列。结果行由跑批器写（`stream-runner.ts` 与 `stream-results.ts`），本节不动这两个文件；接入时取步 agent 结果的 `repair.humanTestRestores`。
+- 结果行一列（整理进本分支时补上）：结果行增加 `humanTestRestores`，取步结果的 `repair.humanTestRestores`，即验证之前发现 agent 改过人写测试并还原的次数；开了回炉而 agent 没有给出时记 0，未开回炉的条件与跳过步为 null。用例"结果行记下验证前还原人写测试的次数：取步结果的 repair.humanTestRestores；未开回炉的条件为 null"；变异：结果行恒写 null，用例精确变红（完整条件那一行得到 null）。
 - 用例：
   - `src/eval/stream-agents.test.ts`：`Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数`。假 docker 容器加真实 git 仓库；开工前预置未提交的人写测试 `check.sh`（要求 `a.txt` 为 fixed）；agent 把 `a.txt` 改为 w1，同时把测试断言改为 w1，此后每轮回炉都再改一次测试。结果：回炉 3 轮、最终失败、已撤回、还原 4 次，撤回后 `a.txt` 与 `check.sh` 都回到开工时的内容。
   - `src/application/repair-loop.test.ts`：`启动即报错：给了受保护文件，执行端却不能按这一步起点还原（本地工作区）`。
 - 变异：headless 在验证前不还原（还原结果恒为空）→ 上述 stream-agents 用例精确变红，其余 Pigeon agent 用例通过；撤回后通过。
 
-### M1 与 M3 的验证（提交 9768405，四步分开执行）
+### M1 与 M3 的验证（四步分开执行，在并行施工的分支上、整理进本分支之前）
 
 - `biome check .`（408 个文件）、`tsc -p tsconfig.json --noEmit`、`dependency-cruiser src`（422 个模块无违规）通过。
 - 测试步 `node --test --test-concurrency=2 "src/**/*.test.ts"`：共 1023 条，通过 1021，失败 0，跳过 2。
-- M1 提交 5dd4166 里 strands 用例的写法有一处类型错误（数组下标取值可能为空），在 9768405 中改正；5dd4166 本身未通过类型检查。
+- 整理进本分支时，M1 的半成品提交与 M1 提交合为一个（90c4f67），M1 里 strands 用例一处类型错误（数组下标取值可能为空）的改正随之并入 M1，M3（f6fd30e）不再含这处改动；每个提交单独都通过类型检查。整理后的全量验证见后文。

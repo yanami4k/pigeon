@@ -445,6 +445,36 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("结果行记下验证前还原人写测试的次数：取步结果的 repair.humanTestRestores；未开回炉的条件为 null", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        return input.condition.repairRounds > 0
+          ? { repair: { rounds: 1, finalVerdict: "pass", humanTestRestores: 2 } }
+          : undefined;
+      });
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          conditions: ["full", "no-gate"],
+          maxSteps: 1,
+          concurrency: 1,
+        })
+      );
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.condition, r.humanTestRestores]),
+        [
+          ["full", 2],
+          ["no-gate", null],
+        ]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("限额与上游故障一律作废重做：一步期间出现并发受限、额度暂停、本作业的上游故障，或 agent 自报被打断，不论 agent 报没报、哪种 agent，这一步都回到起点重做、不判分", async () => {
     const t = await toy();
     try {

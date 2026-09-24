@@ -17,6 +17,7 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     reverted: false,
     finalVerdict: null,
     repairBudgetExhausted: null,
+    humanTestRestores: null,
     fullPassRate: {
       byCount: { passed: 3, total: 4, rate: 0.75 },
       byCountCollected: { passed: 3, total: 5, rate: 0.6 },

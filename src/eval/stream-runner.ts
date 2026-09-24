@@ -118,6 +118,8 @@ export interface StepAgentResult {
     reverted?: boolean;
     budgetExhausted?: boolean;
     restoreError?: string;
+    // 验证之前发现 agent 改过人写测试并还原的次数（容器模式的 Pigeon 给出；缺省按 0 记）
+    humanTestRestores?: number;
   } | null;
   // 这一步被打断（模型服务故障、限额）：整题作废、不留行
   interrupted?: string;
@@ -589,6 +591,7 @@ async function runStep(
       reverted: false,
       finalVerdict: null,
       repairBudgetExhausted: null,
+      humanTestRestores: null,
       fullPassRate: state.previous?.fullPassRate ?? null,
       regressions: 0,
       quality: state.previous?.quality ?? null,
@@ -723,6 +726,10 @@ async function runStep(
       result?.repair === null || result?.repair === undefined
         ? null
         : (result.repair.budgetExhausted ?? false),
+    humanTestRestores:
+      result?.repair === null || result?.repair === undefined
+        ? null
+        : (result.repair.humanTestRestores ?? 0),
     ...(result?.repair?.restoreError !== undefined
       ? { error: `回炉撤回时工作区未恢复（跑批器已按本步起点复原）：${result.repair.restoreError}` }
       : {}),
