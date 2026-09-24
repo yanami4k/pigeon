@@ -537,6 +537,72 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("依赖环境按人在该步的依赖声明选：agent 改了声明文件，切环境仍用人的版本；结果行记下 agent 改了依赖声明", async () => {
+    const t = await toy();
+    try {
+      // 以 src/base.txt 充当依赖声明文件；切环境的命令把收到的声明内容追加进工作区的记录
+      const runtime = {
+        ...toyRuntime,
+        envDeclarationFile: "src/base.txt",
+        envSyncFor: (file: string) => ["sh", "-c", `cat "${file}" >> .git/decl-log`],
+      };
+      const agent = scriptedAgent((input) => {
+        const root = input.target.root;
+        if (input.step.seq === 1)
+          write(root, { "src/a.txt": "alpha\n", "src/base.txt": "base agent\n" });
+        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+      );
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.seq, r.agentChangedDeps]),
+        [
+          [1, true],
+          [2, false],
+        ]
+      );
+      const [wsDir] = readdirSync(join(t.base, "envs", "ws"));
+      const log = readFileSync(join(t.base, "envs", "ws", wsDir ?? "", ".git", "decl-log"), "utf8")
+        .split("\n")
+        .filter((l) => l !== "");
+      // 每次切环境（agent 之前、agent 之后）用的都是人在该步的声明，从来不是 agent 改过的
+      assert.deepEqual(log, ["base", "base", "base v2", "base v2"]);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("找不到可用的依赖组合：这一步作废、记下原因，作业照常往下走，不停掉", async () => {
+    const t = await toy();
+    try {
+      const runtime = {
+        ...toyRuntime,
+        envDeclarationFile: "src/base.txt",
+        envSyncFor: () => ["sh", "-c", "echo 没有满足当前 pyproject 的依赖组合 >&2; exit 3"],
+      };
+      const agent = scriptedAgent(() => undefined);
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+      );
+      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }]);
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.seq, r.outcome, r.judged]),
+        [
+          [1, "skipped", false],
+          [2, "skipped", false],
+        ]
+      );
+      assert.ok(rows.every((r) => /依赖环境选择失败/.test(r.error ?? "")));
+      assert.equal(agent.calls.length, 0);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("lint 环境按该步人的提交切换：agent 运行前已切到该步人的提交，不看 agent 改过的依赖声明", async () => {
     const t = await toy();
     try {

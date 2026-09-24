@@ -439,23 +439,52 @@ async function runStreamJob(
   }
 }
 
-// 切依赖：运行环境按工作区里的依赖声明选；lint 环境按该步人的提交选（148 修订，不看 agent 改过的依赖声明）
+// 依赖环境选不出来（没有满足该步依赖声明的组合、lint 映射里没有该提交）：这一步作废，作业照常往下走
+export class EnvSelectionError extends Error {
+  override name = "EnvSelectionError";
+}
+
+// 切依赖（应修 8、148 修订）：运行环境与 lint 环境都按该步人的提交选——运行方式给了依赖声明文件时，把人在该步的
+// 这份声明写到工作区 .git 下的临时位置再交给切换命令，不看 agent 改过的；没给则按工作区里的声明（envSyncCommand）
 async function syncEnv(
   options: RunStreamsOptions,
   ws: StreamWorkspace,
   humanCommit: string,
   cwd?: string
 ): Promise<void> {
-  const command = options.runtime.envSyncCommand;
+  const runtime = options.runtime;
+  let command = runtime.envSyncCommand;
+  if (runtime.envDeclarationFile !== undefined && runtime.envSyncFor !== undefined) {
+    const declared = `${ws.root}/.git/pigeon-human-env-declaration`;
+    await ws.writeFile(declared, options.human.show(humanCommit, runtime.envDeclarationFile));
+    command = runtime.envSyncFor(declared);
+  }
   if (command !== null) {
     const r = await ws.run(command, 120_000, cwd);
-    if (r.exitCode !== 0) throw new Error(`依赖切换失败：${r.output.slice(-500)}`);
+    if (r.exitCode !== 0)
+      throw new EnvSelectionError(`依赖环境选择失败（${humanCommit}）：${r.output.slice(-500)}`);
   }
-  const lint = options.runtime.lintSyncCommand?.(humanCommit);
+  const lint = runtime.lintSyncCommand?.(humanCommit);
   if (lint !== undefined) {
     const r = await ws.run(lint, 120_000, cwd);
     if (r.exitCode !== 0)
-      throw new Error(`lint 环境切换失败（${humanCommit}）：${r.output.slice(-500)}`);
+      throw new EnvSelectionError(`lint 环境选择失败（${humanCommit}）：${r.output.slice(-500)}`);
+  }
+}
+
+// agent 是否改了依赖声明文件（与人在该步的版本不同，含删掉）；运行方式没有依赖声明为 null
+async function agentChangedDeclaration(
+  options: RunStreamsOptions,
+  ws: StreamWorkspace,
+  humanCommit: string
+): Promise<boolean | null> {
+  const file = options.runtime.envDeclarationFile;
+  if (file === undefined) return null;
+  const human = options.human.show(humanCommit, file);
+  try {
+    return !(await ws.readFile(`${ws.root}/${file}`)).equals(human);
+  } catch {
+    return true;
   }
 }
 
@@ -601,32 +630,44 @@ async function runStep(
     harnessRef: options.harnessRef,
     limitPauses: [],
   };
+  // 不做、不判的一行：跳过步，或因依赖环境选不出来而作废的步（回到本步起点、记下原因、沿用上一步的测量）
+  const notRun = (error?: string): StreamResultLine => ({
+    ...base,
+    outcome: "skipped",
+    head: state.head,
+    judged: false,
+    repairRounds: null,
+    reverted: false,
+    finalVerdict: null,
+    repairBudgetExhausted: null,
+    humanTestRestores: null,
+    agentChangedDeps: null,
+    fullPassRate: state.previous?.fullPassRate ?? null,
+    regressions: 0,
+    quality: state.previous?.quality ?? null,
+    status: null,
+    turns: 0,
+    usage: ZERO_USAGE,
+    agentWallMs: 0,
+    wallMs: Date.now() - started,
+    attribution: null,
+    ...(error !== undefined ? { error } : {}),
+  });
+  const voided = async (error: EnvSelectionError) => {
+    await ws.rollback(state.head);
+    return notRun(`${error.message}（这一步作废）`);
+  };
   // 回到本步起点：上一步结束时的 HEAD
   await ws.rollback(state.head);
-  if (step.kind === "skip" || step.kind === "reset") {
-    return {
-      ...base,
-      outcome: "skipped",
-      head: state.head,
-      judged: false,
-      repairRounds: null,
-      reverted: false,
-      finalVerdict: null,
-      repairBudgetExhausted: null,
-      humanTestRestores: null,
-      fullPassRate: state.previous?.fullPassRate ?? null,
-      regressions: 0,
-      quality: state.previous?.quality ?? null,
-      status: null,
-      turns: 0,
-      usage: ZERO_USAGE,
-      agentWallMs: 0,
-      wallMs: Date.now() - started,
-      attribution: null,
-    };
-  }
+  if (step.kind === "skip" || step.kind === "reset") return notRun();
   await ws.applyHumanFiles(step.humanFiles, (p) => options.human.show(step.commit, p));
-  await syncEnv(options, ws, step.commit);
+  try {
+    await syncEnv(options, ws, step.commit);
+  } catch (error) {
+    if (error instanceof EnvSelectionError) return voided(error);
+    throw error;
+  }
+  let agentChangedDeps: boolean | null = null;
   let result: StepAgentResult | null = null;
   let judged = false;
   let passed = false;
@@ -695,9 +736,15 @@ async function runStep(
         },
       };
     }
+    agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
     await ws.normalizeTo(state.head);
     await restoreTests(options, ws, step);
-    await syncEnv(options, ws, step.commit);
+    try {
+      await syncEnv(options, ws, step.commit);
+    } catch (error) {
+      if (error instanceof EnvSelectionError) return voided(error);
+      throw error;
+    }
     // 题：判题测试的逐用例结果（不看退出码）；维护步：验证门
     if (step.kind === "task") {
       const run = await options.runtime.runCases(ws, step.judgeTests, {
@@ -756,6 +803,7 @@ async function runStep(
       result?.repair === null || result?.repair === undefined
         ? null
         : (result.repair.humanTestRestores ?? 0),
+    agentChangedDeps,
     ...(result?.repair?.restoreError !== undefined
       ? { error: `回炉撤回时工作区未恢复（跑批器已按本步起点复原）：${result.repair.restoreError}` }
       : {}),

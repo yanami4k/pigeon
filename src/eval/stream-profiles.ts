@@ -244,6 +244,10 @@ export interface StreamRepoRuntime {
   envSyncCommand: readonly string[] | null;
   // 按"该步人的提交"切 lint 环境（ruff、mypy 等静态检查所用）：不看 agent 改过的依赖声明。没有按提交的 lint 环境即缺省
   lintSyncCommand?: (commit: string) => readonly string[];
+  // 依赖声明文件（相对工作区根）与"按给定的声明文件切运行环境"的命令：跑批器切环境时用人在该步的声明（写到工作区外的
+  // 临时位置再交给它），不用 agent 改过的；两者都给了才生效，否则退回 envSyncCommand
+  envDeclarationFile?: string;
+  envSyncFor?: (declarationFile: string) => readonly string[];
 }
 
 async function readOrNull(ws: StreamWorkspace, file: string): Promise<string | null> {
@@ -419,6 +423,9 @@ export const strandsRuntime: StreamRepoRuntime = {
   depsLinks: [],
   // 镜像里的选择脚本：按 strands-py/pyproject.toml 选第一套满足约束的冻结依赖，切换 /opt/venv 链接
   envSyncCommand: ["/opt/stream/select-env", "strands-py/pyproject.toml"],
+  // 应修 8：跑批器切环境按人在该步的依赖声明，不按 agent 改过的 pyproject
+  envDeclarationFile: "strands-py/pyproject.toml",
+  envSyncFor: (file) => ["/opt/stream/select-env", file],
   // v5 镜像起：lint 环境按每个提交自己的提交时间解析，这里按该步人的提交切换（148 修订）
   lintSyncCommand: (commit) => ["/opt/stream/select-lint", commit],
 };

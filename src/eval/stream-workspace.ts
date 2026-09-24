@@ -346,6 +346,11 @@ export class StreamWorkspace {
     return stale.map((e) => e.path);
   }
 
+  // 写一个文件（绝对路径，例如工作区 .git 下的临时文件；不经 git）
+  async writeFile(path: string, content: Buffer): Promise<void> {
+    await this.must('cat > "$1"', `写入 ${path}`, { args: [path], stdin: content });
+  }
+
   // 读取工作区里的一个文件（测量报告等）
   async readFile(path: string): Promise<Buffer> {
     return (await this.must('cat -- "$1"', `读取 ${path}`, { args: [path] })).stdoutBytes;
