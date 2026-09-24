@@ -22,7 +22,11 @@ import {
 import { type AttemptPlan, resolveAttemptPlan } from "../replay/plan.ts";
 import type { SessionId } from "../state/ids.ts";
 import { repairRoundsOf, repairStepOutcome } from "../state/repair-step.ts";
-import { ledgerFileChanges, reportedPathOf } from "../state/structured-memory.ts";
+import {
+  type FileChangeEvent,
+  ledgerFileChanges,
+  reportedPathOf,
+} from "../state/structured-memory.ts";
 import { describeFingerprint, parseStepOutput } from "../state/verify-fingerprint.ts";
 import { recordStepsOf, type VerifyStepResult } from "../state/verify-steps.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
@@ -210,6 +214,25 @@ export function offTaskRedOf(input: {
     offTaskFailures: failures,
     undetermined,
   };
+}
+
+// 某次验证的题面测试文件（131 修订①，只用这次验证之前的事实）：本步到这次验证为止改动的文件（验证前会被还原的
+// 人写受保护测试不算）、开工时已在工作区的文件、题面直接指到的文件三者的并集
+export function taskTestFilesAt(input: {
+  changes: readonly FileChangeEvent[];
+  at: number;
+  protectedFiles: ReadonlySet<string>;
+  dirtyAtStart: readonly string[];
+  mentioned: readonly string[];
+}): Set<string> {
+  return new Set([
+    ...input.changes
+      .filter((e) => e.at <= input.at)
+      .flatMap((e) => e.files)
+      .filter((f) => !input.protectedFiles.has(f)),
+    ...input.dirtyAtStart,
+    ...input.mentioned,
+  ]);
 }
 
 // ---------- 重跑 ----------
@@ -693,14 +716,13 @@ function verdictsOf(
     const taskTestFiles =
       dirty === undefined
         ? undefined
-        : new Set([
-            ...changes
-              .filter((e) => e.at <= gate.timestamp)
-              .flatMap((e) => e.files)
-              .filter((f) => !protectedFiles.has(f)),
-            ...dirty.split(/\r?\n/).filter((l) => l.trim() !== ""),
-            ...mentioned,
-          ]);
+        : taskTestFilesAt({
+            changes,
+            at: gate.timestamp,
+            protectedFiles,
+            dirtyAtStart: dirty.split(/\r?\n/).filter((l) => l.trim() !== ""),
+            mentioned,
+          });
     return offTaskRedOf({
       steps: recordStepsOf(gate),
       commands,

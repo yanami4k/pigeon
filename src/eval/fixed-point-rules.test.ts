@@ -19,6 +19,7 @@ import {
   givenMatches,
   offTaskRedOf,
   rerunBudget,
+  taskTestFilesAt,
 } from "./fixed-point-rerun.ts";
 import {
   appendFixedPointRow,
@@ -251,6 +252,20 @@ test("首轮变红口径：判不清的不算变红——测试输出无法解�
     taskTestFiles: tasks,
   });
   assert.equal(r3.offTaskRed, null);
+});
+
+test("某次验证的题面测试文件只用这次验证之前的事实：之后才改的文件不算，验证前被还原的人写受保护测试不因 agent 改过而算", () => {
+  const files = taskTestFilesAt({
+    changes: [
+      { at: 1, files: ["src/mine.test.ts", "src/core.test.ts"] },
+      { at: 5, files: ["src/late.test.ts"] },
+    ],
+    at: 3,
+    protectedFiles: new Set(["src/core.test.ts"]),
+    dirtyAtStart: ["src/other.test.ts"],
+    mentioned: ["src/other.ts"],
+  });
+  assert.deepEqual([...files].sort(), ["src/mine.test.ts", "src/other.test.ts", "src/other.ts"]);
 });
 
 function plan(overrides: Partial<AttemptPlan> = {}): AttemptPlan {
