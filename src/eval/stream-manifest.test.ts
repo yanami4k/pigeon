@@ -336,6 +336,8 @@ test("strands 文件归类：只看 strands-py，集成测试不参与", () => {
   assert.equal(classifyStrandsFile("strands-py/tests_typing/test_hooks.py"), "testaux");
   assert.equal(classifyStrandsFile("strands-py/tests_integ/test_mcp.py"), "other");
   assert.equal(classifyStrandsFile("strands-py/pyproject.toml"), "env");
+  // pytest 根目录下的 conftest 对全部用例生效
+  assert.equal(classifyStrandsFile("strands-py/conftest.py"), "testaux");
   assert.equal(classifyStrandsFile("strands-ts/src/agent.ts"), "other");
   assert.equal(classifyStrandsFile("harness-py/src/harness/x.py"), "other");
 });

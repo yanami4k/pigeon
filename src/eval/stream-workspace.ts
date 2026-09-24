@@ -310,6 +310,15 @@ export class StreamWorkspace {
     return out;
   }
 
+  // 被忽略的未跟踪路径（整个被忽略的目录只列目录本身、以 / 结尾，不往下展开）
+  async ignoredPaths(): Promise<string[]> {
+    const r = await this.must(
+      "git ls-files -z --others --ignored --exclude-standard --directory",
+      "读取被忽略的文件"
+    );
+    return r.stdout.split("\x00").filter((p) => p !== "");
+  }
+
   // 删掉给定路径（连同暂存区里的记录）；不在的忽略
   async removePaths(paths: readonly string[]): Promise<void> {
     if (paths.length === 0) return;

@@ -581,6 +581,22 @@ async function restoreTests(
     step.humanFiles.filter((f) => human.has(f.path)),
     (p) => options.human.show(step.commit, p)
   );
+  // 测试辅助文件（conftest 一类，改变用例的收集与执行）只许是人的：人在该步树里没有的一律删掉——判题之前生效，
+  // 也就不会落地；被忽略路径下的也算（agent 可以改 .gitignore）。测量副本另按人的集合同步（见 measure）
+  const humanAux = new Set(
+    options.human
+      .tree(step.commit)
+      .filter((e) => profile.classifyFile(e.path) === "testaux")
+      .map((e) => e.path)
+  );
+  const present = new Set([
+    ...(await ws.trackedBlobs()).keys(),
+    ...(await ws.changedPaths()).map((c) => c.path),
+    ...(await ws.ignoredPaths()),
+  ]);
+  await ws.removePaths(
+    [...present].filter((p) => profile.classifyFile(p) === "testaux" && !humanAux.has(p))
+  );
 }
 
 // 某提交上人写的全部测试文件：全量测量与提前单独算的人的基准用同一份，两边的用例集一致

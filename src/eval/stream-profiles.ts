@@ -142,6 +142,8 @@ export function classifyStrandsFile(path: string): StreamFileKind {
   if (!path.startsWith(STRANDS_ROOT)) return "other";
   const rel = path.slice(STRANDS_ROOT.length);
   if (rel === "pyproject.toml") return "env";
+  // pytest 根目录下的 conftest 对全部用例生效，与 tests/ 下的同属测试辅助
+  if (rel === "conftest.py") return "testaux";
   if (rel.startsWith("src/")) return rel.endsWith(".py") ? "source" : "other";
   if (rel.startsWith("tests/")) {
     const name = rel.slice(rel.lastIndexOf("/") + 1);
