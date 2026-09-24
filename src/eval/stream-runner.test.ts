@@ -571,75 +571,81 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删），测量副本同样没有，也不落地", async () => {
-    const t = await toy();
-    try {
-      // 玩具版的 conftest：用例脚本先加载它（相当于 pytest 加载 conftest），里面把 sh 换成恒成功的函数即可让任何用例"通过"
-      const hooks = ["src/conftest.sh"];
-      const load = `for c in ${hooks.join(" ")}; do [ -f "$c" ] && . "./$c"; done\n`;
-      const seen: { where: string; present: string[] }[] = [];
-      const runtime: typeof toyRuntime = {
-        ...toyRuntime,
-        autoloadedTestHelper: "conftest.sh",
-        profile: {
-          ...toyRuntime.profile,
-          classifyFile: (path: string) =>
-            path.startsWith("src/") && path.endsWith("conftest.sh")
-              ? "testaux"
-              : toyRuntime.profile.classifyFile(path),
-        },
-        runCases: (ws, tests, opts) => {
-          const root = opts.cwd ?? ws.root;
-          seen.push({
-            where: opts.cwd === undefined ? "judge" : "measure",
-            present: hooks.filter((h) => existsSync(join(root, h))),
-          });
-          return runJunitOnce(
-            ws,
-            (junit) => [
-              "sh",
-              "-c",
-              `cd "${root}"; ${load}${toyRuntime.casesCommand}`,
-              "sh",
-              junit,
-              ...tests,
-            ],
-            opts
-          );
-        },
-      };
-      let atStep2: string[] | undefined;
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 2) {
-          atStep2 = hooks.filter((h) => existsSync(join(input.target.root, h)));
-          write(input.target.root, { "src/base.txt": "base v2\n" });
-        }
-        if (input.step.seq === 1) {
-          const hijack = "sh() { return 0; }\n";
-          write(input.target.root, {
-            "src/a.txt": "wrong\n",
-            // 根目录的这份还被 agent 写进了 .gitignore：git status 看不到它
-            ".gitignore": "/src/conftest.sh\n",
-            "src/conftest.sh": hijack,
-          });
-        }
-        return undefined;
-      });
-      const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
-      );
-      const rows = readStreamResults(summary.resultsFile);
-      assert.equal(rows[0]?.outcome, "failed", "错的实现不因 agent 的 conftest 判为通过");
-      assert.ok(seen.some((s) => s.where === "judge"));
-      assert.ok(seen.some((s) => s.where === "measure"));
-      assert.deepEqual(
-        seen.filter((s) => s.present.length > 0),
-        [],
-        "判题与测量时都没有 agent 新建的 conftest"
-      );
-      assert.deepEqual(atStep2, [], "conftest 没有落地，下一步开始时不在工作区里");
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
+  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删，单个文件或整个目录被忽略都一样），测量副本同样没有，也不落地", async () => {
+    for (const ignore of ["/src/conftest.sh\n", "src/\n"]) {
+      const t = await toy();
+      try {
+        // 玩具版的 conftest：用例脚本先加载它（相当于 pytest 加载 conftest），里面把 sh 换成恒成功的函数即可让任何用例"通过"
+        const hooks = ["src/conftest.sh"];
+        const load = `for c in ${hooks.join(" ")}; do [ -f "$c" ] && . "./$c"; done\n`;
+        const seen: { where: string; present: string[] }[] = [];
+        const runtime: typeof toyRuntime = {
+          ...toyRuntime,
+          autoloadedTestHelper: "conftest.sh",
+          profile: {
+            ...toyRuntime.profile,
+            classifyFile: (path: string) =>
+              path.startsWith("src/") && path.endsWith("conftest.sh")
+                ? "testaux"
+                : toyRuntime.profile.classifyFile(path),
+          },
+          runCases: (ws, tests, opts) => {
+            const root = opts.cwd ?? ws.root;
+            seen.push({
+              where: opts.cwd === undefined ? "judge" : "measure",
+              present: hooks.filter((h) => existsSync(join(root, h))),
+            });
+            return runJunitOnce(
+              ws,
+              (junit) => [
+                "sh",
+                "-c",
+                `cd "${root}"; ${load}${toyRuntime.casesCommand}`,
+                "sh",
+                junit,
+                ...tests,
+              ],
+              opts
+            );
+          },
+        };
+        let atStep2: string[] | undefined;
+        const agent = scriptedAgent((input) => {
+          if (input.step.seq === 2) {
+            atStep2 = hooks.filter((h) => existsSync(join(input.target.root, h)));
+            write(input.target.root, { "src/base.txt": "base v2\n" });
+          }
+          if (input.step.seq === 1) {
+            const hijack = "sh() { return 0; }\n";
+            write(input.target.root, {
+              "src/a.txt": "wrong\n",
+              // 这份还被 agent 写进了 .gitignore（这个文件本身，或它所在的整个目录）：git status 看不到它
+              ".gitignore": ignore,
+              "src/conftest.sh": hijack,
+            });
+          }
+          return undefined;
+        });
+        const summary = await runStreams(
+          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+        );
+        const rows = readStreamResults(summary.resultsFile);
+        assert.equal(
+          rows[0]?.outcome,
+          "failed",
+          `${ignore}：错的实现不因 agent 的 conftest 判为通过`
+        );
+        assert.ok(seen.some((s) => s.where === "judge"));
+        assert.ok(seen.some((s) => s.where === "measure"));
+        assert.deepEqual(
+          seen.filter((s) => s.present.length > 0),
+          [],
+          `${ignore}：判题与测量时都没有 agent 新建的 conftest`
+        );
+        assert.deepEqual(atStep2, [], `${ignore}：conftest 没有落地，下一步开始时不在工作区里`);
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
     }
   });
 

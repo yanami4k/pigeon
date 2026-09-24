@@ -12,7 +12,7 @@ function workspace(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-check-"));
   return {
     dir,
-    cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
+    cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }),
   };
 }
 

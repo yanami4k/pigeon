@@ -2,7 +2,7 @@
 import type { CommitFacts, RepoProfile, StreamFileKind } from "./stream-manifest.ts";
 import { parseJunitCases, type TestCaseResult } from "./stream-measure.ts";
 import { runPytestResilient } from "./stream-pytest.ts";
-import type { StreamWorkspace } from "./stream-workspace.ts";
+import { GATE_REPORT, type StreamWorkspace } from "./stream-workspace.ts";
 
 // 本仓库单条用例的超时：卡死的用例在这里记失败，不拖到整次运行的墙钟（探针、判题、全量测量、人的基准与验证门同一个）
 export const PIGEON_TEST_TIMEOUT_MS = 120_000;
@@ -105,7 +105,7 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
     cwd: "strands-py",
     command: [
       PINNED_PYTEST_CONFIG,
-      'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
+      `j=${GATE_REPORT} && rm -f "$j" &&`,
       '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors --reruns 2',
       PINNED_PYTEST_ARGS,
       strandsTimeoutArgs(String(STRANDS_CASE_TIMEOUT_SEC)),

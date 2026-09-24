@@ -557,12 +557,12 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
   }
-  // 验证进行中
-  {
+  // 验证进行中：第 2 次验证（后面还能回炉）与第 4 次验证（修满 3 轮后的最后一次，不过即要撤回）
+  for (const at of [2, 4]) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     try {
-      // 每轮都改错：第 4 次验证（修满 3 轮后的最后一次）不过即要撤回——中止在这次验证中途到达
+      // 每轮都改错；中止在第 at 次验证中途到达
       const inner = createFakeStreamFn({
         replies: [
           editTo("bug", "w1"),
@@ -614,18 +614,19 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
               .split("\n")
               .filter((l) => l).length
           : 0;
-      while (verifies() < 4) await new Promise((r) => setTimeout(r, 50));
+      while (verifies() < at) await new Promise((r) => setTimeout(r, 50));
       limits.signals += 1;
       for (const l of [...listeners]) l();
       const out = await running;
       assert.equal(out.status, "aborted");
       assert.match(out.interrupted ?? "", /限额信号/);
-      assert.equal(inner.calls.length, 8, "验证之后没有再回炉");
+      assert.equal(verifies(), at, `第 ${at} 次：验证之后没有再回炉、再验证`);
+      assert.equal(inner.calls.length, 2 * at, `第 ${at} 次：没有再调模型`);
       assert.equal(out.repair, null);
       assert.equal(
         readFileSync(join(ws.testbed, "a.txt"), "utf8"),
-        "w4\n",
-        "没有撤回（由跑批器作废）"
+        `w${at}\n`,
+        `第 ${at} 次：没有撤回（由跑批器作废）`
       );
     } finally {
       ws.cleanup();
@@ -1013,5 +1014,70 @@ test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py
     docker.cleanup();
     rmSync(workDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     repo.cleanup();
+  }
+});
+
+test("Pigeon agent：这一步在容器里执行的每条命令都带本步标记，步结束后按同一标记清理残留进程；清不净即报被打断，这一步作废", async () => {
+  for (const [what, answer] of [
+    ["清净了", "0"],
+    ["每轮都还剩一个", "1"],
+  ] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+    const ws = containerWorkspace(dir);
+    try {
+      // 包一层假 docker：记下每次调用的参数；清理命令固定回答 answer，其余转给本机假 docker
+      const log = join(dir, "docker.log");
+      const wrapper = join(dir, "docker-wrapper.mjs");
+      writeFileSync(
+        wrapper,
+        [
+          'import { appendFileSync } from "node:fs";',
+          'import { spawnSync } from "node:child_process";',
+          "const args = process.argv.slice(2);",
+          `appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");`,
+          `if (args.some((a) => a.includes("PIGEON_STEP_MARKER=$1"))) { process.stdout.write(${JSON.stringify(`${answer}\n`)}); process.exit(0); }`,
+          `const r = spawnSync(${JSON.stringify(ws.docker[0])}, [${JSON.stringify(ws.docker[1])}, ...args], { stdio: "inherit" });`,
+          "process.exit(r.status ?? 1);",
+        ].join("\n")
+      );
+      const out = await pigeonStepAgent({
+        streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
+        yolo: true,
+        docker: [process.execPath, wrapper],
+        homeDir: join(dir, "home"),
+      }).run(
+        input(join(dir, "job"), {
+          target: { container: "box", root: ws.containerRoot },
+          verify: FIXED_GATE,
+        })
+      );
+      const calls = readFileSync(log, "utf8")
+        .split("\n")
+        .filter((l) => l !== "")
+        .map((l) => JSON.parse(l) as string[]);
+      const kills = calls.filter((a) => a.some((x) => x.includes("PIGEON_STEP_MARKER=$1")));
+      const marker = kills[0]?.at(-1) ?? "";
+      assert.match(marker, /^pigeon-step-[0-9a-f]{16}$/, `${what}：清理按本步标记`);
+      const work = calls.filter((a) => a[0] === "exec" && !kills.includes(a));
+      assert.ok(work.length > 0, `${what}：这一步在容器里执行过命令`);
+      for (const a of work) {
+        assert.ok(
+          a.includes(`PIGEON_STEP_MARKER=${marker}`),
+          `${what}：每条命令都带标记 ${a.join(" ")}`
+        );
+      }
+      if (answer === "0") {
+        assert.equal(out.status, "completed", what);
+        assert.equal(out.interrupted, undefined, what);
+        assert.equal(kills.length, 1, `${what}：一轮清净即停`);
+      } else {
+        assert.equal(out.status, "aborted", what);
+        assert.match(out.interrupted ?? "", /清理不净/, what);
+        assert.equal(kills.length, 5, `${what}：清理的轮数`);
+      }
+    } finally {
+      ws.cleanup();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    }
   }
 });

@@ -93,9 +93,13 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           : options.streamFn;
       if (streamFn === undefined)
         throw new Error("Pigeon agent 没有模型接入：既无网关地址也无固定的 stream-fn");
+      // 本步标记：Pigeon 在容器里执行的每条命令都带上它（与最简 agent 同一做法），步结束后据此清掉残留的后台进程，
+      // 免得它们在步与步之间重新生成被删的 conftest 等文件
+      const marker = `pigeon-step-${randomBytes(8).toString("hex")}`;
       const host = createContainerWorkspaceHost({
         container: input.target.container,
         root: input.target.root,
+        env: { PIGEON_STEP_MARKER: marker },
         stepStartRef: `${STEP_START_REFS}/${input.job.stream}/${input.step.seq}`,
         ...(options.docker !== undefined ? { docker: options.docker } : {}),
       });
@@ -175,6 +179,18 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
         });
       } finally {
         stopWatch();
+      }
+      if (
+        !(await clearMarkedProcesses(options.docker ?? ["docker"], input.target.container, marker))
+      ) {
+        return {
+          status: "aborted",
+          turns: run.turns,
+          usage: run.usage,
+          wallMs: run.durationMs,
+          repair: null,
+          interrupted: "Pigeon 在容器里的进程清理不净：这一步作废",
+        };
       }
       if (abort.signal.aborted) {
         return {
@@ -263,7 +279,7 @@ const KILL_MARKED = [
   'echo "$n"',
 ].join("\n");
 
-// 一步结束后清掉最简 agent 在容器里启动、仍在运行的进程：反复清到一轮里找不到为止；清不净（或清理本身失败）返回 false
+// 一步结束后清掉 agent（最简 agent 与 Pigeon）在容器里启动、仍在运行的进程：反复清到一轮里找不到为止；清不净（或清理本身失败）返回 false
 async function clearMarkedProcesses(
   docker: readonly string[],
   container: string,
