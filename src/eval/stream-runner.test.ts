@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -1293,6 +1294,70 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       assert.deepEqual(readStreamResults(summary.resultsFile), []);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("agent 留下未解决的冲突（merge 或 stash pop）：作废回滚与落地前的整理都不因此停下作业，重做与后续照常", async () => {
+    const conflict = {
+      merge(root: string) {
+        const g = (...a: string[]) =>
+          execFileSync("git", ["-c", "user.name=a", "-c", "user.email=a@x", ...a], { cwd: root });
+        g("checkout", "-q", "-b", "side");
+        write(root, { "src/a.txt": "side\n" });
+        g("add", "-A");
+        g("commit", "-qm", "side");
+        g("checkout", "-q", "-");
+        write(root, { "src/a.txt": "main\n" });
+        g("add", "-A");
+        g("commit", "-qm", "main");
+        try {
+          g("merge", "-q", "side");
+        } catch {
+          // 冲突即非零退出
+        }
+      },
+      stashPop(root: string) {
+        const g = (...a: string[]) =>
+          execFileSync("git", ["-c", "user.name=a", "-c", "user.email=a@x", ...a], { cwd: root });
+        write(root, { "src/a.txt": "stashed\n" });
+        g("add", "-A");
+        g("stash", "-q");
+        write(root, { "src/a.txt": "committed\n" });
+        g("add", "-A");
+        g("commit", "-qm", "x");
+        try {
+          g("stash", "pop", "-q");
+        } catch {
+          // 冲突即非零退出
+        }
+      },
+    };
+    for (const [how, make] of Object.entries(conflict)) {
+      for (const voided of [true, false]) {
+        const t = await toy();
+        try {
+          let attempts = 0;
+          const agent = scriptedAgent((input) => {
+            if (input.step.seq !== 1) return undefined;
+            attempts += 1;
+            if (attempts === 1) {
+              make(input.target.root);
+              return voided ? { interrupted: "模型服务故障" } : undefined;
+            }
+            write(input.target.root, { "src/a.txt": "alpha\n" });
+            return undefined;
+          });
+          const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+          assert.deepEqual(
+            summary.jobs,
+            [{ key: "s1|no-gate|1", completedTo: 1 }],
+            `${how}${voided ? "后作废" : "后照常收工"}：作业没有停下`
+          );
+          assert.equal(attempts, voided ? 2 : 1);
+        } finally {
+          rmSync(t.base, { recursive: true, force: true });
+        }
+      }
     }
   });
 

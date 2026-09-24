@@ -71,8 +71,14 @@ const BUNDLE_PATH = ".git/pigeon-start.bundle";
 // 设置优先于仓库的 .git/config）。只加在工作区内部操作上，agent 与判题的命令照旧
 const SAFE_GIT_ENV =
   "export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false";
-const UNMARK_INDEX =
-  "git ls-files -z | xargs -0 -r git update-index --no-skip-worktree -- && git ls-files -z | xargs -0 -r git update-index --no-assume-unchanged --";
+// 把 agent 留下的未解决冲突（merge、cherry-pick、revert、stash pop）收成干净的索引：去掉进行中的合并状态，冲突路径按
+// 工作区里的样子暂存。之后去标记、reset 都不会因为冲突条目报错（Unable to mark file、合并中不能 soft reset）
+const SETTLE_INDEX = [
+  'g="$(git rev-parse --git-dir)"',
+  'rm -f -- "$g/MERGE_HEAD" "$g/MERGE_MSG" "$g/MERGE_MODE" "$g/AUTO_MERGE" "$g/CHERRY_PICK_HEAD" "$g/REVERT_HEAD"',
+  "git diff -z --name-only --diff-filter=U | xargs -0 -r git add -A --",
+].join(" && ");
+const UNMARK_INDEX = `${SETTLE_INDEX} && git ls-files -z | xargs -0 -r git update-index --no-skip-worktree -- && git ls-files -z | xargs -0 -r git update-index --no-assume-unchanged --`;
 
 export interface CommandOutcome {
   exitCode: number | null;
@@ -222,7 +228,9 @@ export class StreamWorkspace {
 
   // agent 在容器里也可能自己提交：把 HEAD 挪回本步起点、改动留在工作区，此后的恢复、判定与落地都相对起点
   async normalizeTo(base: string): Promise<void> {
-    await this.must('git reset -q --soft "$1"', "把 HEAD 挪回本步起点", { args: [base] });
+    await this.must(`${SETTLE_INDEX} && git reset -q --soft "$1"`, "把 HEAD 挪回本步起点", {
+      args: [base],
+    });
   }
 
   // 工作区是否与 HEAD 逐字一致（被跟踪文件与未忽略的未跟踪文件）
