@@ -36,6 +36,7 @@ import {
   countQuality,
   failedStepsOf,
   gateFromSteps,
+  pinTestConfigFromTree,
   STRANDS_CASE_TIMEOUT_SEC,
   type StreamRepoRuntime,
   type StreamVerifyStep,
@@ -554,6 +555,14 @@ async function syncEnv(
     );
   };
   if (command !== null) check("依赖环境", await ws.run(command, 120_000, cwd));
+  // 测试配置同样按人在该步的版本（agent 改的 pytest 配置不起作用）
+  await runtime.pinTestConfig?.(ws, cwd ?? ws.root, async (p) => {
+    try {
+      return options.human.show(humanCommit, p);
+    } catch {
+      return undefined;
+    }
+  });
   const lint = runtime.lintSyncCommand?.(humanCommit);
   if (lint !== undefined) check("lint 环境", await ws.run(lint, 120_000, cwd));
 }
@@ -1001,16 +1010,19 @@ export function commandDigest(command: string): string {
   return createHash("sha256").update(command).digest("hex").slice(0, 16);
 }
 
-// 等价摘要表：旧命令摘要 → 新命令摘要。身份里的摘要在表里、且该结果没有任何挂起迹象（见 hangFree），按等价读回；
-// 其余一律重算。strands 两条：bd917c2 之前的外壳与检查门命令，与现在的只差显式的 --timeout、--timeout-method signal
-// 与 --rerun-except Timeout。这三者只在用例挂起时起作用（仓库配置本就是 90 秒 signal 超时；不同处只在超时失败的用例
-// 不再重跑），没有卡住或超时用例的结果，逐用例结果不受影响。现在的外壳或检查门命令再改，表里的新摘要即对不上，须重新审视
-export const EQUIVALENT_BASELINE_COMMANDS: ReadonlyMap<string, string> = new Map([
-  // strands 跑用例的外壳
-  ["da2746ca28858993", "47c962cd27b0eefe"],
-  // strands 检查门命令
-  ["448eea1b5f30a457", "e5c99abd87a6bf24"],
-]);
+// 等价摘要表：（旧命令摘要, 新命令摘要）。身份里的摘要与当前摘要成对列在表里、且该结果没有任何挂起迹象（见 hangFree），
+// 按等价读回；其余一律重算。现在的外壳再改，表里的新摘要即对不上，须重新审视。strands 跑用例的外壳两处变化：
+//   bd917c2 起显式带 --timeout、--timeout-method signal 与 --rerun-except Timeout：只在用例挂起时起作用（仓库配置本就是
+//     90 秒 signal 超时；不同处只在超时失败的用例不再重跑），没有卡住或超时用例的结果，逐用例结果不受影响；
+//   其后 pytest 改以 -c 指定人在该步的配置、--rootdir 固定为 strands-py：人的代码上两种跑法用的是同一份人的配置、
+//     rootdir 同为 strands-py，只是配置的来源从工作区换成外部指定，逐用例结果不受影响。
+// strands 的检查门结果随 lint 层重建（v6）一律重算，表里不再列检查门命令
+export const EQUIVALENT_BASELINE_COMMANDS: EquivalencePairs = [
+  // strands 跑用例的外壳：bd917c2 之前的
+  ["da2746ca28858993", "70f10b887f6bfdc1"],
+  // strands 跑用例的外壳：bd917c2 起、改用人的 pytest 配置之前的
+  ["47c962cd27b0eefe", "70f10b887f6bfdc1"],
+];
 
 // 等价表：（旧, 新）对的列表；同一个旧值可以对多个新值
 export type EquivalencePairs = Iterable<readonly [string, string]>;
@@ -1046,7 +1058,7 @@ function sameIdentity(saved: unknown, want: BaselineIdentity): boolean {
 function readIdentified<T>(
   file: string,
   want: BaselineIdentity,
-  equivalent: ReadonlyMap<string, string>,
+  equivalent: EquivalencePairs,
   hangFree: (saved: T) => boolean,
   // 镜像等价表：只有运行环境逐字相同的镜像才列入，只用于人的用例基准
   equivalentImages: EquivalencePairs = []
@@ -1060,7 +1072,8 @@ function readIdentified<T>(
     const imageOk =
       s.image === want.image || listedAsEquivalent(equivalentImages, s.image, want.image);
     const commandOk =
-      s.command === want.command || (equivalent.get(s.command) === want.command && hangFree(saved));
+      s.command === want.command ||
+      (listedAsEquivalent(equivalent, s.command, want.command) && hangFree(saved));
     return imageOk && commandOk ? saved : undefined;
   } catch {
     return undefined;
@@ -1075,7 +1088,7 @@ export class ReferenceCases implements HumanReferenceCases {
   private readonly runtime: StreamRepoRuntime;
   private readonly cacheDir: string;
   private readonly image: string;
-  private readonly equivalent: ReadonlyMap<string, string>;
+  private readonly equivalent: EquivalencePairs;
   private readonly equivalentImages: EquivalencePairs;
   private readonly timeoutMs: number;
   private readonly repeat: number;
@@ -1090,7 +1103,7 @@ export class ReferenceCases implements HumanReferenceCases {
     // 参考容器所用镜像的标识（镜像 ID）：缓存身份之一
     image: string;
     // 等价摘要表（缺省 EQUIVALENT_BASELINE_COMMANDS）与用例基准的镜像等价表（缺省 EQUIVALENT_CASE_IMAGES）
-    equivalentCommands?: ReadonlyMap<string, string>;
+    equivalentCommands?: EquivalencePairs;
     equivalentImages?: EquivalencePairs;
     timeoutMs?: number;
     repeat?: number;
@@ -1182,6 +1195,7 @@ export class ReferenceCases implements HumanReferenceCases {
         const sync = await ws.run(lint, 120_000);
         if (sync.exitCode !== 0) throw new Error(`参考工作区 lint 环境切换失败（${commit}）`);
       }
+      await pinTestConfigFromTree(this.runtime, ws);
       const started = Date.now();
       const r = await ws.run(command, this.timeoutMs);
       const check: GateCheck = {
@@ -1210,6 +1224,7 @@ export class ReferenceCases implements HumanReferenceCases {
       const sync = await ws.run(this.runtime.envSyncCommand, 120_000);
       if (sync.exitCode !== 0) throw new Error(`参考工作区依赖切换失败（${commit}）`);
     }
+    await pinTestConfigFromTree(this.runtime, ws);
     const runs: TestCaseResult[][] = [];
     const meta: BaselineRun[] = [];
     // 各遍里卡住、被记为失败的用例（并集）：落盘供日后判断这份基准有没有挂起迹象

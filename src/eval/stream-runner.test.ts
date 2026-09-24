@@ -770,6 +770,42 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("测试配置按人在该步的版本写入：agent 运行前、判题前与测量副本里写的都是人的文件，不是 agent 改过的", async () => {
+    const t = await toy();
+    try {
+      const pinned: { root: string; content: string }[] = [];
+      const runtime = {
+        ...toyRuntime,
+        pinTestConfig: async (
+          _ws: unknown,
+          root: string,
+          read: (p: string) => Promise<Buffer | undefined>
+        ) => {
+          pinned.push({ root, content: (await read("src/base.txt"))?.toString("utf8") ?? "" });
+        },
+      };
+      const agent = scriptedAgent((input) => {
+        // agent 改了"配置"文件
+        if (input.step.seq === 1)
+          write(input.target.root, { "src/a.txt": "alpha\n", "src/base.txt": "agent 的配置\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
+      // agent 运行前、判题前、测量副本各写一次
+      assert.equal(pinned.length, 3);
+      assert.ok(
+        pinned.every((p) => p.content === "base\n"),
+        JSON.stringify(pinned)
+      );
+      assert.ok(
+        pinned.some((p) => p.root.includes("measure")),
+        "测量副本里也写了"
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("lint 环境按该步人的提交切换：agent 运行前已切到该步人的提交，不看 agent 改过的依赖声明", async () => {
     const t = await toy();
     try {
@@ -1392,12 +1428,13 @@ test("镜像等价只用于人的用例基准：旧镜像的用例基准按镜�
   }
 });
 
-test("等价表里的新摘要就是当前 strands 外壳与检查门命令的摘要：外壳一改，这条用例即提醒重新审视等价", () => {
-  const current = new Set([
-    commandDigest(strandsRuntime.casesCommand),
-    commandDigest(JSON.stringify(gateFromSteps(strandsRuntime.verifySteps))),
-  ]);
-  assert.deepEqual(new Set(EQUIVALENT_BASELINE_COMMANDS.values()), current);
+test("等价表里的新摘要就是当前 strands 跑用例外壳的摘要（含改用人的 pytest 配置之前的两个旧摘要）：外壳一改，这条用例即提醒重新审视等价；检查门命令不在表里", () => {
+  const cases = commandDigest(strandsRuntime.casesCommand);
+  const gate = commandDigest(JSON.stringify(gateFromSteps(strandsRuntime.verifySteps)));
+  const pairs = [...EQUIVALENT_BASELINE_COMMANDS];
+  assert.deepEqual(new Set(pairs.map(([, b]) => b)), new Set([cases]));
+  assert.deepEqual(pairs.map(([a]) => a).sort(), ["47c962cd27b0eefe", "da2746ca28858993"]);
+  assert.ok(pairs.every(([a, b]) => a !== gate && b !== gate));
 });
 
 test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、上限与墙钟；峰值超过上限的 75% 即告警", async () => {

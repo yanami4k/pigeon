@@ -11,7 +11,7 @@ import {
   type StreamManifest,
   type TestProbe,
 } from "./stream-manifest.ts";
-import { allPassed, type StreamRepoRuntime } from "./stream-profiles.ts";
+import { allPassed, pinTestConfigFromTree, type StreamRepoRuntime } from "./stream-profiles.ts";
 import { type StreamShell, StreamWorkspace, shellQuote } from "./stream-workspace.ts";
 
 // 探针上失败的用例再跑几次（与 strands 的 CI 同样是两次）
@@ -281,6 +281,7 @@ export async function collectStreamFacts(input: {
         if (sync.exitCode !== 0)
           throw new Error(`依赖切换失败（${base}）：${tail(sync.output, 500)}`);
       }
+      await pinTestConfigFromTree(runtime, reference.ws);
       // 判定一律看逐用例结果，不看退出码（pytest 写完报告后可能不退出、被外壳杀掉）
       // 失败的用例重跑两次、其间通过即算通过：本提交上时过时不过的用例不致判成"本提交也不过"，
       // 父提交上要每次都失败才算父败（strands 的运行方式本就带 --reruns 2）

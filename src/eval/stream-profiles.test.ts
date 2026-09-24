@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,6 +7,7 @@ import {
   allPassed,
   failedStepsOf,
   gateFromSteps,
+  humanPytestConfig,
   PIGEON_FLAKY_TEST,
   PIGEON_TEST_TIMEOUT_MS,
   PIGEON_VERIFY_STEPS,
@@ -28,7 +29,7 @@ import { StreamWorkspace } from "./stream-workspace.ts";
 //   收到的超时参数写进报告旁的 .args 文件，供核对各处用的超时值
 const FAKE_PYTEST = `#!/bin/sh
 shift 2
-j=""; cont=0; des=" "; files=""; to=""; tm=""; rx=""
+j=""; cont=0; des=" "; files=""; to=""; tm=""; rx=""; cfg=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --junitxml=*) j="\${1#--junitxml=}";;
@@ -37,6 +38,8 @@ while [ $# -gt 0 ]; do
     --timeout) shift; to="$1";;
     --timeout-method) shift; tm="$1";;
     --rerun-except) shift; rx="$1";;
+    -c) shift; cfg="$1";;
+    --rootdir) shift;;
     -o|-p|--reruns) shift;;
     -*) ;;
     *) if [ -d "$1" ]; then for x in "$1"/test_*.py; do files="$files $x"; done; else files="$files $1"; fi;;
@@ -44,6 +47,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo "$to $tm $rx" > "$j.args"
+# 没给 -c 时像 pytest 一样在当前目录找配置；配置里的 addopts 带 -k nothing 即一条都不跑
+if [ -z "$cfg" ]; then for f in pytest.ini pyproject.toml; do [ -f "$f" ] && { cfg="$f"; break; }; done; fi
+echo "$cfg" > "$j.cfg"
+if [ -n "$cfg" ] && grep -q "addopts *= *.*-k nothing" "$cfg"; then files=""; fi
 body=""; broken=""
 for f in $files; do
   if grep -q import-error "$f"; then
@@ -107,6 +114,9 @@ function fakeStrands(tests: Record<string, string>): { base: string; ws: StreamW
   for (const [name, content] of Object.entries(tests)) {
     writeFileSync(join(root, "strands-py", "tests", name), content);
   }
+  // 跑批器在跑 pytest 之前写好的人的配置（缺省一份空的）
+  mkdirSync(join(root, ".git", "pigeon-human-pytest"));
+  writeFileSync(join(root, ".git", "pigeon-human-pytest", "pytest.ini"), "[pytest]\n");
   const inner = localStreamShell(root);
   const ws = new StreamWorkspace({
     root,
@@ -431,6 +441,103 @@ test("strands 验证门：一个测试文件导入失败时不通过，反馈里
     assert.notEqual(r.exitCode, 0);
     assert.match(r.output, /ERROR tests\/test_broken\.py/);
     assert.match(r.output, /tests\/test_ok\.py::test_b FAILED/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("人的 pytest 配置按 pytest 自己的先后取：pytest.ini 有即用；pyproject.toml、tox.ini、setup.cfg 要含 pytest 段；一份都没有给空的 pytest.ini", async () => {
+  const from = (files: Record<string, string>) => async (p: string) =>
+    files[p] === undefined ? undefined : Buffer.from(files[p] as string);
+  const pick = async (files: Record<string, string>) => {
+    const c = await humanPytestConfig(from(files));
+    return [c.name, c.content.toString("utf8")];
+  };
+  assert.deepEqual(
+    await pick({
+      "strands-py/pytest.ini": "",
+      "strands-py/pyproject.toml": "[tool.pytest.ini_options]\naddopts = -q\n",
+    }),
+    ["pytest.ini", ""]
+  );
+  assert.deepEqual(
+    await pick({
+      "strands-py/pyproject.toml": "[project]\nname = 'x'\n",
+      "strands-py/tox.ini": "[pytest]\naddopts = -q\n",
+    }),
+    ["tox.ini", "[pytest]\naddopts = -q\n"]
+  );
+  assert.deepEqual(
+    await pick({
+      "strands-py/pyproject.toml": "[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
+    }),
+    ["pyproject.toml", "[tool.pytest.ini_options]\ntestpaths = ['tests']\n"]
+  );
+  assert.deepEqual(await pick({ "strands-py/setup.cfg": "[tool:pytest]\n" }), [
+    "setup.cfg",
+    "[tool:pytest]\n",
+  ]);
+  assert.deepEqual(await pick({ "strands-py/setup.cfg": "[metadata]\n" }), [
+    "pytest.ini",
+    "[pytest]\n",
+  ]);
+});
+
+// agent 在工作区里写的 pytest 配置：让任何用例都不跑（相当于 addopts="-k 不相干"）
+const AGENT_PYTEST_CONFIGS: Record<string, string> = {
+  "pytest.ini": "[pytest]\naddopts = -k nothing\n",
+  "pyproject.toml": "[tool.pytest.ini_options]\naddopts = -k nothing\n",
+};
+
+test("跑用例（判题、全量测量、人的基准）一律用人的 pytest 配置：agent 新建的 pytest.ini 或 pyproject 里的 pytest 段不起作用", async () => {
+  for (const [name, content] of Object.entries(AGENT_PYTEST_CONFIGS)) {
+    const { base, ws } = fakeStrands({ "test_ok.py": "test_a pass\ntest_b fail\n" });
+    try {
+      writeFileSync(join(ws.root, "strands-py", name), content);
+      // 跑批器写人的配置：人的树里是一份普通的 pyproject（带 pytest 段）
+      await strandsRuntime.pinTestConfig?.(ws, ws.root, async (p) =>
+        p === "strands-py/pyproject.toml"
+          ? Buffer.from("[tool.pytest.ini_options]\naddopts = -q\n")
+          : undefined
+      );
+      const run = await strandsRuntime.runCases(ws, ["strands-py/tests/test_ok.py"], {
+        timeoutMs: 60_000,
+        scratch: `${ws.root}/.git`,
+      });
+      assert.deepEqual(
+        run.cases.map((c) => [c.id, c.outcome]),
+        [
+          ["strands-py/tests/test_ok.py::test_a", "passed"],
+          ["strands-py/tests/test_ok.py::test_b", "failed"],
+        ],
+        `agent 的 ${name} 不起作用`
+      );
+      const used = readFileSync(join(ws.root, ".git", "pigeon-cases-junit.xml.cfg"), "utf8").trim();
+      assert.match(used, /\.git\/pigeon-human-pytest\/pyproject\.toml$/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("验证门的 pytest 步同样用人的配置：agent 的 pytest 配置让用例都不跑也骗不过验证门；没写人的配置即报错不通过", async () => {
+  for (const [name, content] of Object.entries(AGENT_PYTEST_CONFIGS)) {
+    const { base, ws } = fakeStrands({ "test_ok.py": "test_a fail\n" });
+    try {
+      writeFileSync(join(ws.root, "strands-py", name), content);
+      const gate = await ws.run(gateFromSteps(strandsRuntime.verifySteps), 60_000);
+      assert.notEqual(gate.exitCode, 0, `agent 的 ${name} 不能让失败的用例消失`);
+      assert.deepEqual(failedStepsOf(gate.output), ["pytest"]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+  const { base, ws } = fakeStrands({ "test_ok.py": "test_a pass\n" });
+  try {
+    rmSync(join(ws.root, ".git", "pigeon-human-pytest"), { recursive: true, force: true });
+    const gate = await ws.run(gateFromSteps(strandsRuntime.verifySteps), 60_000);
+    assert.notEqual(gate.exitCode, 0);
+    assert.match(gate.output, /缺人的 pytest 配置/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

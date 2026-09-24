@@ -45,6 +45,37 @@ export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
 const STRANDS_MYPY = "mypy ./src $(test -d tests_typing && echo ./tests_typing)";
 
 export const STRANDS_CASE_TIMEOUT_SEC = 90;
+
+// pytest 一律用人在该步的配置（与"agent 不许改人写测试"同一口径）：agent 在工作区里新建或修改的 pytest.ini、tox.ini、
+// setup.cfg 与 pyproject.toml 的 pytest 段一概不起作用。跑批器在判题、全量测量、人的基准与验证门之前，按 pytest 自己
+// 找配置的先后从人的树里取出那一份，原名写到工作区 .git 下这个目录（不在工作树里），pytest 以 -c 指定它、--rootdir
+// 固定为 strands-py。pyproject.toml 的其余部分不替换（依赖环境本来就按人的声明选）
+export const STRANDS_PYTEST_CONFIG_DIR = ".git/pigeon-human-pytest";
+const STRANDS_PYTEST_CONFIGS: readonly { name: string; section: RegExp | null }[] = [
+  { name: "pytest.ini", section: null },
+  { name: "pyproject.toml", section: /^\[tool\.pytest\.ini_options\]/m },
+  { name: "tox.ini", section: /^\[pytest\]/m },
+  { name: "setup.cfg", section: /^\[tool:pytest\]/m },
+];
+
+// 人的树里 pytest 会用的那份配置（pytest.ini 有即用，其余要含 pytest 段）；一份都没有则给一份空的 pytest.ini
+export async function humanPytestConfig(
+  read: (path: string) => Promise<Buffer | undefined>
+): Promise<{ name: string; content: Buffer }> {
+  for (const c of STRANDS_PYTEST_CONFIGS) {
+    const content = await read(`${STRANDS_ROOT}${c.name}`);
+    if (content === undefined) continue;
+    if (c.section === null || c.section.test(content.toString("utf8"))) {
+      return { name: c.name, content };
+    }
+  }
+  return { name: "pytest.ini", content: Buffer.from("[pytest]\n") };
+}
+
+// pytest 命令的开头：找到跑批器写好的人的配置（没有即报错退出，不退回工作区里的配置）
+const PINNED_PYTEST_CONFIG =
+  'c=$(ls -d "$PWD"/../.git/pigeon-human-pytest/* 2>/dev/null | head -n 1); [ -n "$c" ] || { echo "缺人的 pytest 配置（跑批器应先写入）" >&2; exit 2; };';
+const PINNED_PYTEST_ARGS = '-c "$c" --rootdir "$PWD"';
 const strandsTimeoutArgs = (seconds: string) =>
   `--timeout ${seconds} --timeout-method signal --rerun-except Timeout`;
 
@@ -57,8 +88,10 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
     name: "pytest",
     cwd: "strands-py",
     command: [
+      PINNED_PYTEST_CONFIG,
       'j=/tmp/pigeon-gate-junit.xml && rm -f "$j" &&',
       '{ PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors --reruns 2',
+      PINNED_PYTEST_ARGS,
       strandsTimeoutArgs(String(STRANDS_CASE_TIMEOUT_SEC)),
       '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
       'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
@@ -250,6 +283,12 @@ export interface StreamRepoRuntime {
   envSyncCommand: readonly string[] | null;
   // 按"该步人的提交"切 lint 环境（ruff、mypy 等静态检查所用）：不看 agent 改过的依赖声明。没有按提交的 lint 环境即缺省
   lintSyncCommand?: (commit: string) => readonly string[];
+  // 把人在该步的测试配置写到 root（工作区根或测量副本根）下固定位置，测试命令只认这一份；read 按仓库相对路径取人的文件
+  pinTestConfig?: (
+    ws: StreamWorkspace,
+    root: string,
+    read: (path: string) => Promise<Buffer | undefined>
+  ) => Promise<void>;
   // 依赖声明文件（相对工作区根）与"按给定的声明文件切运行环境"的命令：跑批器切环境时用人在该步的声明（写到工作区外的
   // 临时位置再交给它），不用 agent 改过的；两者都给了才生效，否则退回 envSyncCommand
   envDeclarationFile?: string;
@@ -361,7 +400,9 @@ const inStrands = (tests: readonly string[]) =>
 // （兜底：卡在超时打断不了的地方时）。参数：报告路径、墙钟秒数、单条超时秒数，其后为测试文件与 --deselect
 export const STRANDS_PYTEST_SCRIPT = [
   'cd strands-py && j="$1"; lim="$2"; ct="$3"; shift 3; rm -f "$j";',
+  PINNED_PYTEST_CONFIG,
   'PYTHONPATH="$PWD/src" python -m pytest -v -p no:cacheprovider --continue-on-collection-errors --reruns 2',
+  PINNED_PYTEST_ARGS,
   strandsTimeoutArgs('"$ct"'),
   '-o junit_family=xunit1 --junitxml="$j" "$@" & p=$!; t=0;',
   'while kill -0 "$p" 2>/dev/null; do',
@@ -369,6 +410,16 @@ export const STRANDS_PYTEST_SCRIPT = [
   'if [ "$t" -ge "$lim" ]; then kill -9 "$p" 2>/dev/null; break; fi;',
   'sleep 1; t=$((t + 1)); done; wait "$p" 2>/dev/null',
 ].join(" ");
+
+// 参考工作区检出的就是人的树：测试配置从工作区里取
+export async function pinTestConfigFromTree(
+  runtime: StreamRepoRuntime,
+  ws: StreamWorkspace
+): Promise<void> {
+  await runtime.pinTestConfig?.(ws, ws.root, (p) =>
+    ws.readFile(`${ws.root}/${p}`).catch(() => undefined)
+  );
+}
 
 export const strandsRuntime: StreamRepoRuntime = {
   profile: strandsProfile,
@@ -436,4 +487,11 @@ export const strandsRuntime: StreamRepoRuntime = {
   envSyncFor: (file) => ["/opt/stream/select-env", file],
   // v5 镜像起：lint 环境按每个提交自己的提交时间解析，这里按该步人的提交切换（148 修订）
   lintSyncCommand: (commit) => ["/opt/stream/select-lint", commit],
+  async pinTestConfig(ws, root, read) {
+    const config = await humanPytestConfig(read);
+    const dir = `${root}/${STRANDS_PYTEST_CONFIG_DIR}`;
+    const r = await ws.run(["sh", "-c", 'rm -rf -- "$1" && mkdir -p -- "$1"', "sh", dir], 60_000);
+    if (r.exitCode !== 0) throw new Error(`写人的 pytest 配置失败：${r.output.slice(-300)}`);
+    await ws.writeFile(`${dir}/${config.name}`, config.content);
+  },
 };
