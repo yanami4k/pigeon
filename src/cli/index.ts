@@ -773,11 +773,14 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   if (summary.jobs.some((j) => j.stopped !== undefined)) process.exitCode = 3;
 }
 
-// pigeon eval stream-image-context --repo-profile pigeon|strands --repo <人的仓库> --out <目录> [--lock-rev <提交>]：
-// 组装延续式跑批工作区镜像的构建上下文（决策 148），之后 docker build <目录>
+// pigeon eval stream-image-context --repo-profile pigeon|strands|strands-lint --repo <人的仓库> --out <目录>
+//   [--lock-rev <提交>] [--manifest <清单>（strands-lint 必给）]：
+// 组装延续式跑批工作区镜像的构建上下文（决策 148），之后 docker build <目录>；strands-lint 为 strands 基础镜像之上的
+// lint 层（按清单里要测的每个提交解析），docker build -f Dockerfile.lint <目录>
 function evalStreamImageContextMain(argv: string[]): void {
   const usage =
-    "用法：pigeon eval stream-image-context --repo-profile pigeon|strands --repo <人的仓库> --out <目录> [--lock-rev <提交>]";
+    "用法：pigeon eval stream-image-context --repo-profile pigeon|strands|strands-lint --repo <人的仓库> --out <目录> " +
+    "[--lock-rev <提交>] [--manifest <清单>]";
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i += 2) {
     const arg = argv[i];
@@ -793,11 +796,15 @@ function evalStreamImageContextMain(argv: string[]): void {
     return value;
   };
   const lockRev = values.get("--lock-rev");
+  const manifestFile = values.get("--manifest");
   const written = assembleImageContext({
     profileName: required("--repo-profile"),
     repoDir: required("--repo"),
     outDir: required("--out"),
     ...(lockRev !== undefined ? { lockRev } : {}),
+    ...(manifestFile !== undefined
+      ? { manifest: JSON.parse(readFileSync(manifestFile, "utf8")) as StreamManifest }
+      : {}),
   });
   process.stdout.write(`${written.join("\n")}\n`);
 }

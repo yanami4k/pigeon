@@ -123,11 +123,26 @@ export async function generateStreamManifest(
 //   pigeon：Dockerfile 加人的仓库里最新一份 package.json 与锁文件（lockRev，缺省 HEAD）；
 //   strands：Dockerfile、stream_env.py，加各组合起始提交的 strands-py/pyproject.toml 与起始提交的日期（env-dates.txt，
 //   每行"组合 日期"；构建时每套组合只取该日期之前已发布的依赖）
+// strands lint 层要解析的提交（148 补记"lint 按提交解析"）：各流题、维护步与套用步的提交——人的基准、开跑前检查与
+// 判题都按"该步人的提交"选 lint 环境；按清单顺序去重，跳过与重置沿用上一步、不在其内
+export function strandsLintCommits(manifest: StreamManifest): string[] {
+  const out = new Set<string>();
+  for (const seg of manifest.streams) {
+    for (const step of stepsOf(manifest, seg.id)) {
+      if (step.kind === "task" || step.kind === "maintenance" || step.kind === "apply")
+        out.add(step.commit);
+    }
+  }
+  return [...out];
+}
+
 export function assembleImageContext(input: {
   profileName: string;
   repoDir: string;
   outDir: string;
   lockRev?: string;
+  // strands-lint：要测哪些提交取自这份清单
+  manifest?: StreamManifest;
   // strands 的依赖组合与起始提交（缺省为写死的五套；测试用合成仓库时注入）
   variants?: readonly { name: string; commit: string }[];
 }): string[] {
@@ -136,6 +151,7 @@ export function assembleImageContext(input: {
   mkdirSync(input.outDir, { recursive: true });
   const written: string[] = [];
   const put = (name: string, content: Buffer | string) => {
+    mkdirSync(path.dirname(path.join(input.outDir, name)), { recursive: true });
     writeFileSync(path.join(input.outDir, name), content);
     written.push(name);
   };
@@ -159,6 +175,17 @@ export function assembleImageContext(input: {
       );
     }
     put("env-dates.txt", variants.map((v) => `${v.name} ${human.commitDate(v.commit)}\n`).join(""));
+    return written;
+  }
+  if (input.profileName === "strands-lint") {
+    // lint 层（在 strands 基础镜像之上构建）：每个要测的提交一份 pyproject 与它的提交时间，构建时按提交时间解析
+    if (input.manifest === undefined) throw new Error("strands-lint 需要 --manifest <清单>");
+    copyAsset("strands", "Dockerfile.lint");
+    copyAsset("strands", "build-lint.sh");
+    copyAsset("strands", "stream_env.py");
+    const commits = strandsLintCommits(input.manifest);
+    for (const c of commits) put(`lint/${c}.toml`, human.show(c, "strands-py/pyproject.toml"));
+    put("lint-dates.txt", commits.map((c) => `${c} ${human.commitDate(c)}\n`).join(""));
     return written;
   }
   throw new Error(`未知的仓库配置：${input.profileName}`);

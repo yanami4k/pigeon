@@ -1,6 +1,10 @@
-# 延续式跑批：strands-py 工作区镜像 v5 = v4 加一层按提交解析的 lint 环境（见 build-lint.sh）。运行环境逐字不变，
-# 故人的用例基准在 v4 与 v5 上等价；检查门结果不等价（lint 环境变了）。
-# 构建上下文：本文件、build-lint.sh、stream_env.py、lint/<提交>.toml、lint-dates.txt。构建时联网
+# 延续式跑批：strands-py 工作区镜像的 lint 层（148 补记"lint 按提交解析"）= 基础镜像（v4）加按提交解析的 lint 环境
+# （见 build-lint.sh）。运行环境逐字不变，故人的用例基准与基础镜像等价；检查门结果不等价（lint 环境变了）。
+# 构建上下文由 `pigeon eval stream-image-context --repo-profile strands-lint --manifest <清单>` 组装：本文件、build-lint.sh、
+# stream_env.py、要测的每个提交的 lint/<提交>.toml 与 lint-dates.txt。构建时联网：docker build -f Dockerfile.lint <目录>
+# lint 环境对 agent 只读：套装、映射表与切换脚本归 root 且不可写；stream 用户只能切换自己名下的 /opt/lint/current 链接。
+# /opt 与 /opt/lint 改归 root 并带粘滞位（1777）：stream 用户仍可在其中新建与替换自己的链接（/opt/venv、/opt/lint/current），
+# 但不能改名或删除 root 的条目（/opt/lint/sets、/opt/venvs、/opt/stream 等），也就换不掉套装本身
 ARG BASE=pigeon-stream-strands:v4
 FROM ${BASE}
 USER root
@@ -10,5 +14,8 @@ COPY lint/ /opt/stream/lint/
 # 体积约为各套所用包版本的并集，而不是套数乘以单套大小
 RUN UV_NO_CACHE=false UV_LINK_MODE=hardlink UV_CACHE_DIR=/opt/lint/.uv-cache sh /opt/stream/build-lint.sh \
  && rm -rf /opt/lint/.uv-cache \
- && chown -R stream:stream /opt/lint/sets /opt/stream/lint-map.txt /opt/stream/select-lint
+ && chown -R root:root /opt/lint/sets /opt/stream \
+ && chmod -R go-w /opt/lint/sets /opt/stream \
+ && chown root:root /opt /opt/lint \
+ && chmod 1777 /opt /opt/lint
 USER stream
