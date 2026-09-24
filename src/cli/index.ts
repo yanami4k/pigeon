@@ -6,7 +6,7 @@
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
-import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runForkCommand } from "../application/fork-command.ts";
@@ -43,6 +43,7 @@ import {
   STREAM_RUNTIMES,
   summarizeManifest,
 } from "../eval/stream-generate.ts";
+import { markHumanGateFailures, type StreamManifest } from "../eval/stream-manifest.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { swebenchTaskSource, swebenchTemperature } from "../eval/swebench-source.ts";
@@ -518,7 +519,8 @@ async function evalMain(argv: string[]): Promise<void> {
 async function evalStreamBaselineMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录> " +
-    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2] [--check cases|gate|both]";
+    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2] [--check cases|gate|both] " +
+    "[--mark-manifest <写出的清单>]";
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -569,6 +571,19 @@ async function evalStreamBaselineMain(argv: string[]): Promise<void> {
         `  ${g.commit}（步 ${g.seqs.join(",")}）：${g.failedSteps.join("、") || "无法判定"}\n`
       );
     }
+  }
+  // 给清单打标记：人的代码没过验证门的步记 humanFailsGate（这些步照常跑，只作标记）
+  const markTo = values.get("--mark-manifest");
+  if (markTo !== undefined && check !== "cases" && summary.failed.length === 0) {
+    const manifest = JSON.parse(readFileSync(required("--manifest"), "utf8")) as StreamManifest;
+    const marked = markHumanGateFailures(
+      manifest,
+      summary.gateFailures.map((g) => g.commit)
+    );
+    writeFileSync(markTo, `${JSON.stringify(marked, null, 2)}\n`);
+    process.stdout.write(
+      `清单已打标记：${marked.steps.filter((s) => s.humanFailsGate === true).length} 步记为人的代码没过验证门，写到 ${markTo}\n`
+    );
   }
   if (summary.failed.length > 0 || summary.gateFailures.length > 0) process.exitCode = 1;
 }

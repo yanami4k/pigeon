@@ -15,7 +15,11 @@ import type { GatewayMeter } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
 import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
-import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
+import {
+  composeStreamManifest,
+  markHumanGateFailures,
+  type StreamManifest,
+} from "./stream-manifest.ts";
 import { gateFromSteps, strandsRuntime } from "./stream-profiles.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
@@ -651,6 +655,43 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
       assert.equal(seen.length, 2);
       for (const [commit, marker] of seen) assert.equal(marker, commit);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("人的代码没过检查门的步：清单按预检结果打标记（其余去掉），结果行照抄这一列，步照常跑", async () => {
+    const t = await toy();
+    try {
+      const [s1, s2] = t.manifest.steps;
+      assert.ok(s1 !== undefined && s2 !== undefined);
+      const stale = {
+        ...t.manifest,
+        steps: t.manifest.steps.map((s) => (s.seq === 1 ? { ...s, humanFailsGate: true } : s)),
+      };
+      const marked = markHumanGateFailures(stale, [s2.commit]);
+      assert.deepEqual(
+        marked.steps.slice(0, 2).map((s) => [s.seq, s.humanFailsGate]),
+        [
+          [1, undefined],
+          [2, true],
+        ]
+      );
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, manifest: marked, maxSteps: 2 })
+      );
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => [r.seq, r.humanFailsGate, r.judged]),
+        [
+          [1, false, true],
+          [2, true, true],
+        ]
+      );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

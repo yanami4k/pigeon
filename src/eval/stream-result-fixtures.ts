@@ -19,6 +19,7 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     repairBudgetExhausted: null,
     humanTestRestores: null,
     agentChangedDeps: null,
+    humanFailsGate: false,
     fullPassRate: {
       byCount: { passed: 3, total: 4, rate: 0.75 },
       byCountCollected: { passed: 3, total: 5, rate: 0.6 },

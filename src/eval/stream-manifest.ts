@@ -71,6 +71,26 @@ export interface StreamStep {
   // 判题用的测试集（题才有；维护步只用验证门判）
   judgeTests: readonly string[];
   reason: string;
+  // 开跑前置检查里人的代码在这一步没过验证门（人当时的代码就坏了）：这一步照常跑、照常判，
+  // 只作标记，供之后分析与挑定点对照的事件时识别
+  humanFailsGate?: boolean;
+}
+
+// 按开跑前置检查的结果给清单打标记：人的代码没过验证门的提交，对应的题与维护步记 humanFailsGate；其余步去掉这一标记
+export function markHumanGateFailures(
+  manifest: StreamManifest,
+  failedCommits: readonly string[]
+): StreamManifest {
+  const failed = new Set(failedCommits);
+  return {
+    ...manifest,
+    steps: manifest.steps.map((s) => {
+      const { humanFailsGate: _old, ...rest } = s;
+      return (s.kind === "task" || s.kind === "maintenance") && failed.has(s.commit)
+        ? { ...rest, humanFailsGate: true }
+        : rest;
+    }),
+  };
 }
 
 export interface StreamSegment {

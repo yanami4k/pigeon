@@ -637,6 +637,7 @@ async function runStep(
     commit: step.commit,
     harnessRef: options.harnessRef,
     limitPauses: [],
+    humanFailsGate: step.humanFailsGate === true,
   };
   // 不做、不判的一行：跳过步，或因依赖环境选不出来而作废的步（回到本步起点、记下原因、沿用上一步的测量）
   const notRun = (error?: string): StreamResultLine => ({
