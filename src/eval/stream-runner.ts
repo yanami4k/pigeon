@@ -9,8 +9,10 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -202,6 +204,32 @@ export interface HumanReferenceCases {
 // agent 自报被打断、期间却没有任何限额信号或上游故障：最多重做这么多次
 export const MAX_BARE_INTERRUPTIONS = 3;
 
+// 治理根里的会话文件（会话账本与旁置的正文文件）
+function sessionFilesOf(jobDir: string): string[] {
+  const dir = path.join(jobDir, ".pigeon", "sessions");
+  return existsSync(dir) ? readdirSync(dir).sort() : [];
+}
+
+// 清掉一次作废的尝试留在治理根里的痕迹：不在 keep 里的会话文件移到输出目录下、治理根之外的隔离目录（保留备查），
+// 结构化记忆缓存删掉、下次由其余会话重建——重做时会话检索与结构化记忆都看不到作废的尝试，与从零开始的最简 agent 对等
+function quarantineSessions(
+  outDir: string,
+  job: StreamJobId,
+  jobDir: string,
+  keep: ReadonlySet<string>,
+  label: string
+): number {
+  const dir = path.join(jobDir, ".pigeon", "sessions");
+  const stray = sessionFilesOf(jobDir).filter((f) => !keep.has(f));
+  if (stray.length > 0) {
+    const target = path.join(outDir, "voided", jobDirName(job), label);
+    mkdirSync(target, { recursive: true });
+    for (const file of stray) renameSync(path.join(dir, file), path.join(target, file));
+  }
+  rmSync(path.join(jobDir, ".pigeon", "cache"), { recursive: true, force: true });
+  return stray.length;
+}
+
 // 一步作废：signalled 为这一步期间出现过限额信号或本作业的上游故障（无论 agent 怎么报），否则是 agent 自报被打断
 export class StepInterruptedError extends Error {
   override name = "StepInterruptedError";
@@ -364,6 +392,8 @@ async function runStreamJob(
   );
   const bundleFile = path.join(jobDir, "history.bundle");
   const passingFile = (seq: number) => path.join(jobDir, `passing-${seq}.json`);
+  // 每步完成时治理根里的会话文件清单：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出
+  const sessionsFile = (seq: number) => path.join(jobDir, `sessions-${seq}.json`);
   const lines = readStreamResults(resultsFile);
   const last = lastCompletedStep(lines, job);
   const remaining = steps.filter((s) => last === undefined || s.seq > last.seq);
@@ -379,6 +409,23 @@ async function runStreamJob(
       : {}),
   });
   try {
+    // 进程死在一步中途（被杀、整机重启）时，那次尝试的会话还在治理根里；续跑重做这一步之前同样移出
+    const committed =
+      last === undefined
+        ? new Set<string>()
+        : existsSync(sessionsFile(last.seq))
+          ? new Set(JSON.parse(readFileSync(sessionsFile(last.seq), "utf8")) as string[])
+          : undefined;
+    if (committed !== undefined) {
+      const moved = quarantineSessions(
+        options.outDir,
+        job,
+        jobDir,
+        committed,
+        `resume-after-${last?.seq ?? 0}-${Date.now()}`
+      );
+      if (moved > 0) log(`续跑：上次中断的一步留下 ${moved} 个会话文件，已移出治理根`);
+    }
     const jobRows = lines.filter((l) => streamJobKey(l) === streamJobKey(job));
     const bySeq = new Map(steps.map((s) => [s.seq, s]));
     const state: JobState = {
@@ -408,14 +455,24 @@ async function runStreamJob(
       let row: StreamResultLine;
       // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
       let bareInterruptions = 0;
+      let attempt = 0;
       for (;;) {
         await limits?.ready();
+        attempt += 1;
+        const sessionsBefore = new Set(sessionFilesOf(jobDir));
         try {
           row = await runStep(options, job, spec, agent, env, steps, step, state, jobDir);
           break;
         } catch (error) {
           // 这一步作废（144、M2）：已回到本步起点、不留行，等放行后重做同一步
           if (!(error instanceof StepInterruptedError)) throw error;
+          quarantineSessions(
+            options.outDir,
+            job,
+            jobDir,
+            sessionsBefore,
+            `step-${step.seq}-attempt-${attempt}`
+          );
           if (error.signalled) {
             bareInterruptions = 0;
             log(`第 ${step.seq} 步撞上限额或上游故障，作废，恢复后重做：${error.message}`);
@@ -434,6 +491,7 @@ async function runStreamJob(
       // 先存流历史与测量基线、后写结果行：两者之间崩溃时，断点行仍指向上一步，导出的历史里也有上一步的提交
       writeAtomic(bundleFile, await env.ws.exportBundle());
       writeAtomic(passingFile(step.seq), JSON.stringify([...state.agentPassing]));
+      writeAtomic(sessionsFile(step.seq), JSON.stringify(sessionFilesOf(jobDir)));
       appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
       state.previous = row;
       state.head = row.head;
