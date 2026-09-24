@@ -521,3 +521,128 @@ Docker 用 containerd 镜像存储时，`docker image inspect` 的 `{{.Id}}` 是
 - 作废只回滚工作区：agent 建的 refs/stash、分支、reflog、被忽略文件与 `/tmp` 下的文件仍在，重做时可见；两种 agent 对称。
 - 跑 pytest 时 `PYTHONPATH` 以 `src` 在前，agent 在 `src` 下放 `sitecustomize.py` 或与依赖同名的模块可以影响 pytest，`-c` 管不到。
 - 人的 pytest 配置的查找顺序未含 pytest 9 新增的 `pytest.toml`、`.pytest.toml`、`.pytest.ini` 与 `[tool.pytest]`，也不往上级目录找；当前 strands 清单的 95 个提交都含 `[tool.pytest.ini_options]`，没有影响。
+
+## 二十三、合并前第四轮修复
+
+以下各项均先补用例、再改代码，承重处做变异（改坏后对应用例精确变红，改回后通过）。本节改动了第二十二节"判题前只删会影响人写测试收集的 conftest"与"人的 pytest 配置放到 agent 不可写的位置"两处的做法，以本节为准。
+
+### conftest 的加载边界保持在 strands-py
+
+现象：人的 pytest 配置移到 `/opt/stream/human-pytest` 之后，pytest 缺省的 confcutdir 变成配置文件所在的目录，工作区根（strands-py 之外）与测量副本根下的 conftest 从"不加载"变成"加载"，回炉验证门因此会加载 agent 放在工作区根的 conftest。
+
+修法：strands 的全部 pytest 调用（判题、测量、人的基准、开跑前检查、验证门）显式带 `--confcutdir "$PWD"`，与 `--rootdir "$PWD"` 同指 strands-py，恢复原来的加载边界。在容器里核对（pytest 9.1.1）：工作区根放一个让用例全部跳过的 conftest，不带 `--confcutdir` 时两条用例都被跳过，带上后一过一不过。
+
+用例："conftest 的加载边界保持在 strands-py：工作区根放一个让用例全部跳过的 conftest，跑用例与验证门都不加载它"。变异：不带 `--confcutdir`（该用例红）。
+
+### 等价表跟上新命令
+
+跑用例命令的摘要随上一项变为 `7d0b7803e11a57b5`（验证门命令摘要为 `79b6c71439beab9b`）。人的基准的等价表把此前的三个摘要 `da2746ca28858993`、`47c962cd27b0eefe`、`70f10b887f6bfdc1` 都对应到新摘要：同一份人的配置，rootdir 与 confcutdir 都是 strands-py，只是配置文件的位置不同；仍只在结果没有挂起迹象时读回。开跑前检查的结果不做等价，在服务器上重算。
+
+### 每次回炉验证之前也删覆盖人写测试的 conftest
+
+现象：第二十二节只在判题前删 agent 放的、覆盖人写测试的 conftest；Pigeon 回炉期间 agent 放的这类 conftest 照常生效，可以让失败的用例被跳过、骗过验证门而不被撤回。
+
+修法：容器模式下每次验证（首轮与各轮回炉）之前，按与判题前相同的规则删除：名为 `conftest.py`、不在人在该步的树里、所在目录的子树里有人在该步的测试文件。候选改由文件系统遍历（`find`）列出，不只依赖 `git ls-files`，嵌套的 git 仓库与符号链接目录里藏的文件也列到；删除用 `rm -rf` 且不跟随链接：名为 `conftest.py` 的目录整个删，指向别处的符号链接只删链接本身，路径含空格、非 ASCII 字符或位于工作区根的都照常处理，作业不停下。
+
+用例："Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写测试的 conftest——验证照样失败，修满轮数后撤回"；"删覆盖人写测试的自动加载辅助文件：按文件系统列（嵌套的 git 仓库里的也删），名叫 conftest 的目录整个删、符号链接只删链接本身；agent 自己目录的与人的保留"（另含空格、非 ASCII 与根目录路径）。变异：回炉验证前不删（回炉用例红）；候选只看版本库（嵌套仓库里的留下）；删除时不按目录删（名为 `conftest.py` 的目录留下）。
+
+### Pigeon 验证前还原受保护文件遇到未解决冲突
+
+与第二十二节跑批器一侧的做法相同：执行端在验证前还原受保护文件之前，先去掉进行中的合并状态，冲突路径按工作区里的样子暂存，再去标记与还原；不因 agent 的 stash pop 或 merge 冲突把这一步记成服务故障。去标记分两次执行（`--no-skip-worktree` 与 `--no-assume-unchanged` 各一次），因为同一次 `update-index` 调用只生效其中一个标志。用例："验证前还原受保护的文件：agent 留下未解决的合并冲突也照样还原，不报错"。变异：还原前不收冲突（该用例红）。
+
+### 写人的配置之前核对容器里的权限
+
+人的配置写入脚本（以 root 执行）在写之前核对：`/opt` 带粘滞位，`/opt/stream` 归 root，且组与其他用户不可写；不满足即报"容器里的权限不对，不写人的 pytest 配置"并以退出码 3 停下作业，防止误用没有只读 lint 层的旧镜像时放配置的目录可被改名或替换。放配置的目录 `/opt/stream/human-pytest` 每次由 root 删掉重建并收成其他用户只读。在容器里核对：v6 镜像通过，v4 镜像以退出码 3 停下。用例："写人的 pytest 配置之前核对容器里的权限：/opt 没有粘滞位或 /opt/stream 不归 root 即报错停下"；"人的 pytest 配置以 root 写到容器里 agent 不可写的位置"补上写入脚本先核对。变异：核对恒通过；写配置之前不核对。
+
+### 验证前的还原与清理期间到达的中止
+
+还原受保护文件与验证前的清理（删覆盖人写测试的 conftest）之后、验证之前再看一次外部中止，已中止即不跑这次验证、不回炉，终态记 aborted。用例："容器回炉：验证前的还原与清理期间来了外部中止，不跑这次验证、不回炉，终态记 aborted"。变异：验证前不再看中止（跑了验证）。
+
+### Pigeon 在容器里起的进程按步标记并清理
+
+Pigeon 的容器执行端在这一步执行的每条命令都带环境变量 `PIGEON_STEP_MARKER`（每步随机生成），与最简 agent 同一做法；一步结束后按这个标记清掉仍在运行的进程，反复清到一轮里找不到为止，至多五轮；清不净或清理命令本身失败即报被打断，这一步作废重做。这样 agent 起的后台进程不会在步与步之间重新生成被删的 conftest 等文件。用例："Pigeon agent：这一步在容器里执行的每条命令都带本步标记，步结束后按同一标记清理残留进程；清不净即报被打断，这一步作废"（假 docker 记下每次调用的参数，清理命令分别回答 0 与 1）。变异：命令不带标记；清不净也照常交判题（该用例各自红）。
+
+### 测试补缺
+
+- 外部中止在验证进行中到达的用例改为两个时点：第 2 次验证（此后本还能回炉）与第 4 次验证（修满三轮后的最后一次）。断言验证次数与模型调用次数停在中止时的值、工作区没有撤回。原先只测第 4 次时"模型调用 8 次"的断言恒成立（修满三轮本就只有 8 次）。变异：验证后不立即停（第 4 次时点被撤回，用例红）。第 2 次时点之后不再回炉由三道检查重复保证（中止即打断会话、会话不再接受新的运行；每轮收尾后看中止；下一轮之前看中止），单去其中任何一道用例都不红；三道一并去掉时，终态与"被打断"两条断言照常通过，"没有再调模型"一条精确变红（模型调用 6 次，应为 4 次）。
+- 跑批器"判题前删 conftest"的用例补上整个目录被 `.gitignore` 忽略的情形。变异：候选改由 `git ls-files`（含未跟踪、不含被忽略）列出，两种忽略情形都红（错的实现判为通过）。
+- 维护步验证门的报告路径在 `STRANDS_VERIFY_STEPS` 里改用与清理共用的常量 `GATE_REPORT`，命令文本不变（验证门命令摘要不变）。
+- 检查命令用例清理临时目录时的重试放宽（Windows 上偶发文件占用）。
+
+### strands 验证门与跑用例命令的最终形式
+
+验证门三步，均在 `strands-py` 下执行：
+
+- ruff：`ruff check`
+- mypy：`mypy ./src $(test -d tests_typing && echo ./tests_typing)`
+- pytest：
+
+```sh
+c=$(ls -d "${PIGEON_PYTEST_CONFIG_DIR:-/opt/stream/human-pytest}"/* 2>/dev/null | head -n 1); [ -n "$c" ] || { echo "缺人的 pytest 配置（跑批器应先写入）" >&2; exit 2; }; j=/tmp/pigeon-gate-junit.xml && rm -f "$j" && { PYTHONPATH="$PWD/src" python -m pytest tests -q -p no:cacheprovider --continue-on-collection-errors --reruns 2 -c "$c" --rootdir "$PWD" --confcutdir "$PWD" --timeout 90 --timeout-method signal --rerun-except Timeout -o junit_family=xunit1 --junitxml="$j" & p=$!; while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done; wait "$p" 2>/dev/null; true; } && [ -s "$j" ] && ! grep -Eq '<(failure|error)[ />]' "$j"
+```
+
+跑用例（判题、测量、人的基准与开跑前检查共用；参数依次为报告路径、整体时限秒数、单条超时秒数与用例列表，单条超时缺省 90 秒）：
+
+```sh
+cd strands-py && j="$1"; lim="$2"; ct="$3"; shift 3; rm -f "$j"; c=$(ls -d "${PIGEON_PYTEST_CONFIG_DIR:-/opt/stream/human-pytest}"/* 2>/dev/null | head -n 1); [ -n "$c" ] || { echo "缺人的 pytest 配置（跑批器应先写入）" >&2; exit 2; }; PYTHONPATH="$PWD/src" python -m pytest -v -p no:cacheprovider --continue-on-collection-errors --reruns 2 -c "$c" --rootdir "$PWD" --confcutdir "$PWD" --timeout "$ct" --timeout-method signal --rerun-except Timeout -o junit_family=xunit1 --junitxml="$j" "$@" & p=$!; t=0; while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; if [ "$t" -ge "$lim" ]; then kill -9 "$p" 2>/dev/null; break; fi; sleep 1; t=$((t + 1)); done; wait "$p" 2>/dev/null
+```
+
+`PIGEON_PYTEST_CONFIG_DIR` 只供本机测试把配置目录指到别处；正式跑不设，读 `/opt/stream/human-pytest`，写入前做上文的权限核对。
+
+### 已知限制
+
+- agent 在人写测试目录里新建的 `__init__.py` 或同名模块，判题收集时会被导入执行；测量副本不受影响。
+- 其他目录里 agent 的 conftest 与测试模块，在回炉验证门里仍能注册会话级 hook（只删覆盖人写测试的 conftest）。
+- 收冲突的步骤不清 rebase、bisect 的残留状态（不会让作业停下）。
+
+## 二十四、预算定值、试跑结果行与无人值守的重启
+
+### 每步预算定为 150 轮、30 分钟（决策 147 的校准）
+
+在正式实验的服务器上以完整 Pigeon、v6 镜像、5 路并发试跑 10 步：轮数第 90 百分位 78、墙钟第 90 百分位 857,745 毫秒（约 14.3 分钟）。按判据乘 1.5 后分别为 117 轮与 22 分钟，两项都低于下限，由下限起作用，定为每步 150 轮、30 分钟。正式跑批的缺省墙钟由 46 分钟改为 30 分钟，CLI 说明同步。预算属于身份头的比对项，以旧缺省开跑的输出目录不能以新缺省续跑。用例："正式跑批的预算缺省为每步 150 轮、30 分钟（147 校准）"。建议预算的判据用例仍用一组墙钟高于下限的数，以测乘 1.5 的一支。
+
+### 试跑结果行带 gateway 列
+
+试跑结果行新增 `gateway`，与正式结果行同形：本步等空闲账号的累计毫秒、各账号成功转发的次数、同时在途的请求数峰值，不经网关为 null。用例："试跑：……轮数与 token 取网关计量……"补断言。变异：结果行不带 gateway（该用例红）。
+
+### 续跑接管已存在的流容器
+
+现象：续跑时一律删掉残留的流容器，由镜像加导出的流历史重建。进程被杀或整机重启后，容器里被忽略的文件（agent 装的依赖、构建产物等）随之丢失，续跑的作业与没中断的作业状态不同。
+
+修法：续跑时先看这个作业的容器在不在、用的是不是当前镜像（按镜像 ID 比）。是则停止的启动、仍在运行的重启（清掉上次留下的进程），核对库里有上一个完成步的提交，再把工作区回到那个提交：在途步的提交与改动一律作废，与作废重做同一口径，被忽略的文件保留。容器不在、镜像不同，或接管中任何一步出错，即退回原来的做法，由流历史重建，并记一行日志。限额控制器与网关的状态（暂停、各账号的可用与并发上限）只在内存里，重启后按网关当时的探测结果重新计算，不落盘。
+
+用例："续跑接管已存在的流容器：停止的启动、仍在运行的重启；回到上一个完成步，在途步的提交与改动作废，被忽略的产物保留，不重建"；"续跑时残留容器用不上即由流历史重建：镜像不是当前的、库里没有上一个完成步的提交、容器已不在"。变异：接管不核对镜像（镜像不同时仍接管）；接管不回到上一个完成步（在途步的提交留下）。
+
+### SIGTERM：在途的步作废，跑批停下
+
+限额控制器新增 `shutdown(reason)`，与每月额度用完同一路径：计一次限额信号、通知在途的看守、状态置为已停止。两种 agent 在途的这一步随即中止并作废（回到本步起点、会话移入隔离目录、不留结果行），作业在取下一步时停下并记下原因；已完成的步保留，同一输出目录重跑即从作废的那一步续跑。
+
+正式跑批的 CLI 收到第一次 SIGTERM 时交给控制器收尾，并设 90 秒的硬时限（低于单元的 TimeoutStopSec 120 秒）：正在判题或全量测量的步到时收不完即以退出码 143 直接退出，与进程崩溃同一续跑口径；再收到一次立即退出。按时收尾时作业以"停止"结束，进程退出码为 3。
+
+用例："停止信号：与每月额度用完同一路径……重复收到不再计"；"停止信号（SIGTERM）：在途的一步作废、不留行，作业停下并说明；已完成的步保留，同一输出目录续跑从作废的那步重做"；"SIGTERM：第一次交给控制器收尾并设硬时限，到时仍没退出即以 143 退出；再收到一次立即退出；卸下后不再响应"。变异：停止信号不计信号（在途的步照常落地，用例红）；不设硬时限（用例红）。
+
+### 输出目录的落盘
+
+输出目录由 `--out` 指定，内容为：`identity.json`（身份头）、`results.jsonl`（结果行）、`report.md`（报告）、`streams/<作业>/`（流历史、测量基线、会话清单与治理根）、`voided/`（作废尝试的会话）；不给 `--baseline` 时另有 `reference/`（人的基准缓存）。
+
+- 流历史、测量基线与每步的会话清单先写临时文件再改名；三者都写完才追加这一步的结果行。两者之间被杀时，断点仍指向上一步，续跑按上一步恢复，并把会话清单之外的会话移入隔离目录。
+- 结果行逐行追加。进程死于写到一半会留下没有换行的半行，此前之后追加的整行会接在它后面、一起读不出来；现在开跑前先补一个换行把它隔开，读时照常丢弃这半行。用例："结果文件末尾留着写到一半的行（进程被杀）：续跑前隔开它，之后追加的结果行照常读得出"。变异：开跑前不隔开（第 2 步的结果行读不出）。
+- 身份头改为先写临时文件再改名：原先写到一半被杀，续跑会因读不出身份头而一直被拒。
+- 报告每次跑完整份重写，由结果行生成，不承载状态。
+- 从外部拷走输出目录时，拷到的 `results.jsonl` 末尾可能带半行，按上面的口径读时丢弃即可。
+
+### 正式实验的命令行与 systemd 单元
+
+工作目录为仓库根，`ExecStart` 须用绝对路径。正式实验的命令行（尖括号为服务器上的路径）：
+
+```
+ExecStart=/usr/local/bin/node src/cli/index.ts eval stream --manifest <清单> --repo <人的仓库> --image pigeon-stream-strands:v6 --out <输出目录> --baseline <人的基准目录> --conditions full,no-memory,no-gate,minimal --concurrency 6 --mini-python <mini-swe-agent 的 python>
+```
+
+预算用缺省（每步 150 轮、30 分钟），不另给 `--max-turns` 与 `--wall-clock-min`；模型用缺省（kimi-for-coding）。账号从 `EnvironmentFile` 读：`KIMI_API_KEY`、`KIMI_API_KEY_2` 等依次为账号 1、2……，各账号的并发上限取 `KIMI_API_KEY_<编号>_CONCURRENCY`（缺省 2）。
+
+与单元设置有关的事实：
+
+- 作业停下（每月额度用完、同一步累计作废 10 次、连续被打断等）时进程以退出码 3 结束。`Restart=on-failure` 会在 30 秒后重启并续跑；每月额度用完时，重启后很快又会停下，每 30 秒重复一次。若不希望如此，可在单元里加 `RestartPreventExitStatus=3`。
+- `systemctl stop` 发出的 SIGTERM 按上文收尾；systemd 不会因此重启。
+- 容器由 docker 守护进程管理，不在服务的 cgroup 里，停服与重启都不会删掉它们；续跑按上文接管。
