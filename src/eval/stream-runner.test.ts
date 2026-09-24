@@ -1083,6 +1083,48 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("同一步因上游故障（或限额信号）一再作废：累计 5 次向标准错误告警一次，累计 10 次停下作业并说明，不无止境重做", async () => {
+    const t = await toy();
+    try {
+      const meters = new Map<string, GatewayMeter>();
+      const zero: GatewayMeter = {
+        requests: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        upstreamFailures: 0,
+      };
+      const gateway = {
+        jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
+        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+      };
+      // 每次尝试都遇到一次上游故障
+      const agent = scriptedAgent((input) => {
+        const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
+        const m = meters.get(key) ?? zero;
+        meters.set(key, { ...m, upstreamFailures: m.upstreamFailures + 1 });
+        return undefined;
+      });
+      const warnings: string[] = [];
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          maxSteps: 1,
+          gateway,
+          warn: (line) => warnings.push(line),
+        })
+      );
+      assert.match(summary.jobs[0]?.stopped ?? "", /累计作废 10 次：停下作业/);
+      assert.equal(agent.calls.length, 10);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0] ?? "", /已累计作废 5 次/);
+      assert.deepEqual(readStreamResults(summary.resultsFile), []);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("agent 连续自报被打断、期间没有任何限额信号或上游故障：重做三次后停下作业并说明，不无限重做", async () => {
     const t = await toy();
     try {

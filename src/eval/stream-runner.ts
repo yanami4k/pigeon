@@ -203,6 +203,9 @@ export interface HumanReferenceCases {
 
 // agent 自报被打断、期间却没有任何限额信号或上游故障：最多重做这么多次
 export const MAX_BARE_INTERRUPTIONS = 3;
+// 同一步因限额信号或上游故障被作废：累计到前一个数先向标准错误告警，到后一个数停下作业，免得无止境重做
+export const SIGNALLED_VOID_WARN = 5;
+export const SIGNALLED_VOID_STOP = 10;
 
 // 治理根里的会话文件（会话账本与旁置的正文文件）
 function sessionFilesOf(jobDir: string): string[] {
@@ -262,6 +265,8 @@ export interface RunStreamsOptions {
   measureTimeoutMs?: number;
   harnessRef: HarnessRef;
   log?: (line: string) => void;
+  // 告警（缺省写标准错误输出）
+  warn?: (line: string) => void;
   // 限额统一处理（第 17 条）：每步前等放行、agent 运行时占一路；这一步撞上限额即作废、恢复后重做
   limits?: LimitController;
   // 经网关时：轮数与 token 一律取网关的按作业计量，四个条件同一口径
@@ -399,6 +404,7 @@ async function runStreamJob(
   const remaining = steps.filter((s) => last === undefined || s.seq > last.seq);
   if (remaining.length === 0) return last?.seq ?? null;
   const log = (text: string) => options.log?.(`[${streamJobKey(job)}] ${text}`);
+  const warn = options.warn ?? ((line: string) => process.stderr.write(`[跑批] ${line}\n`));
   if (last !== undefined && !existsSync(bundleFile)) {
     throw new Error(`续跑缺流历史：${bundleFile} 不存在（断点在第 ${last.seq} 步）`);
   }
@@ -455,6 +461,7 @@ async function runStreamJob(
       let row: StreamResultLine;
       // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
       let bareInterruptions = 0;
+      let signalledVoids = 0;
       let attempt = 0;
       for (;;) {
         await limits?.ready();
@@ -475,6 +482,17 @@ async function runStreamJob(
           );
           if (error.signalled) {
             bareInterruptions = 0;
+            signalledVoids += 1;
+            if (signalledVoids >= SIGNALLED_VOID_STOP) {
+              throw new Error(
+                `第 ${step.seq} 步因限额信号或上游故障累计作废 ${signalledVoids} 次：停下作业（最后一次：${error.message}）`
+              );
+            }
+            if (signalledVoids === SIGNALLED_VOID_WARN) {
+              warn(
+                `[${streamJobKey(job)}] 第 ${step.seq} 步因限额信号或上游故障已累计作废 ${signalledVoids} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这个作业`
+              );
+            }
             log(`第 ${step.seq} 步撞上限额或上游故障，作废，恢复后重做：${error.message}`);
             continue;
           }
