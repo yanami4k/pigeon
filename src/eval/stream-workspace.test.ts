@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -222,4 +230,26 @@ test("命令拼接：单引号转义、安全字符原样、超时换算为整�
   assert.equal(shellQuote("it's"), `'it'\\''s'`);
   assert.equal(shellQuote("a b"), "'a b'");
   assert.equal(timeoutWrapped(["npm", "run", "verify"], 1500), "timeout -s KILL 2 npm run verify");
+});
+
+test("清理测量与判题的产物：测量副本目录清空（目录本身保留），判题报告与维护步验证门的报告（/tmp/pigeon-gate-junit.xml）都删掉", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-artifacts-"));
+  try {
+    const root = join(base, "ws");
+    mkdirSync(join(root, ".git"), { recursive: true });
+    const measure = join(base, "measure");
+    mkdirSync(join(measure, "copy"), { recursive: true });
+    writeFileSync(join(measure, "copy", "report.xml"), "x");
+    writeFileSync(join(root, ".git", "pigeon-cases-junit.xml"), "x");
+    const ws = new StreamWorkspace(localStreamShell(root));
+    const gate = "/tmp/pigeon-gate-junit.xml";
+    await ws.run(["sh", "-c", `echo x > ${gate}`], 10_000);
+    await ws.clearArtifacts(measure);
+    const left = await ws.run(["sh", "-c", `test -e ${gate}`], 10_000);
+    assert.notEqual(left.exitCode, 0, "验证门的报告已删");
+    assert.equal(existsSync(join(root, ".git", "pigeon-cases-junit.xml")), false);
+    assert.deepEqual(readdirSync(measure), []);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

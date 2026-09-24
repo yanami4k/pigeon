@@ -196,6 +196,47 @@ test("命令式 agent：这一步在容器里启动的进程都带本步标记�
   }
 });
 
+test("命令式 agent：容器里带本步标记的进程清不净（每轮都还有，或清理命令本身失败）即报被打断，这一步作废、不交判题", async () => {
+  for (const [what, script] of [
+    ["每轮都还剩一个", 'process.stdout.write("1\\n");'],
+    ["清理命令失败", "process.exit(1);"],
+  ] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+    try {
+      const log = join(dir, "docker.log");
+      const fakeDocker = join(dir, "docker.mjs");
+      writeFileSync(
+        fakeDocker,
+        [
+          'import { appendFileSync } from "node:fs";',
+          `appendFileSync(${JSON.stringify(log)}, "x\\n");`,
+          script,
+        ].join("\n")
+      );
+      const done = join(dir, "done.mjs");
+      writeFileSync(
+        done,
+        [
+          'import { writeFileSync } from "node:fs";',
+          "writeFileSync(process.argv[3], JSON.stringify({ status: 'completed', turns: 1 }));",
+        ].join("\n")
+      );
+      const out = await commandStepAgent({
+        command: [process.execPath, done],
+        docker: [process.execPath, fakeDocker],
+      }).run(input(dir));
+      assert.equal(out.status, "aborted", what);
+      assert.match(out.interrupted ?? "", /清理不净/, what);
+      const rounds = readFileSync(log, "utf8")
+        .split("\n")
+        .filter((l) => l !== "").length;
+      assert.equal(rounds, what === "清理命令失败" ? 1 : 5, `${what}：清理的轮数`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("命令式 agent：启动器的环境里没有密钥类变量（真 key 只在网关里），普通变量照常", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const planted = {
