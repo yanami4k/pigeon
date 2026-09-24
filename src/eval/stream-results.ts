@@ -85,6 +85,9 @@ export interface StreamResultLine {
   // 经网关时本步的模型请求：等空闲账号的累计毫秒、各账号成功转发的次数（下标 0 为账号 1，不记 key）、
   // 同时在途的请求数峰值；没跑 agent 或不经网关为 null
   gateway: StreamGatewayFacts | null;
+  // 这一步的 agent 开始之前等放行的毫秒（决策 163：同时在跑的 agent 数达到可用容量或配置路数时在步与步之间等；
+  // 含整批暂停）；没跑 agent 为 null
+  admissionWaitMs: number | null;
   harnessRef: HarnessRef;
   error?: string;
 }
@@ -135,6 +138,7 @@ export const STREAM_RESULT_FIELDS = [
   "attribution",
   "limitPauses",
   "gateway",
+  "admissionWaitMs",
   "harnessRef",
 ] as const;
 

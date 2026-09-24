@@ -112,6 +112,9 @@ export interface StepAgentInput {
   verify: { steps: readonly StreamVerifyStep[]; command: string; timeoutMs: number };
   // 宿主上给这个作业用的目录（会话账本等）
   workDir: string;
+  // 跑批器按步中止（本作业在网关排队超时等）：agent 与限额信号同一条路径停下（中止 agent、清掉容器里的进程），
+  // 报被打断
+  abortSignal?: AbortSignal;
   // 经网关时，这个作业的模型接入地址（决策 155）
   modelBaseUrl?: string;
   // 人在这一步的树里的测试与测试辅助文件：回炉验证前只还原（并计数）这些，agent 早先步骤落地的自己的测试不算
@@ -123,11 +126,74 @@ export interface StepAgentInput {
   humanTree?: readonly string[];
 }
 
-// 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值
+// 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守
 export interface StreamModelGateway {
   jobBaseUrl(job: string): string;
   meter(job: string): GatewayMeter;
   resetPeak(job: string): void;
+  watchQueue?(job: string, thresholdMs: number, listener: () => void): () => void;
+}
+
+// 一步的 agent 在放行机制下运行（决策 144、160、163；跑批器与定点对照的单步重跑共用）：
+//   先等放行（同时在跑的 agent 数小于网关的可用容量且不超过配置路数；等待发生在 agent 开始之前，不计入这一步的
+//   墙钟预算，不作废、不耗额度，时长交回记入结果行）；放行后记下限额信号数与本作业的计量，跑 agent；
+//   本作业在网关累计等空闲账号超过 QUEUE_VOID_MS 即经按步中止立即停下 agent（不等它跑完）；
+//   结束后比较：期间有限额信号、本作业有上游故障、排队超时或 agent 自报被打断，即作废（不看是哪种 agent，
+//   也不看 agent 自己报没报被打断）
+export interface AdmittedAgentRun {
+  result: StepAgentResult;
+  delta: GatewayMeter | undefined;
+  admissionWaitMs: number;
+  // 作废的原因；空即不作废
+  voidReasons: string[];
+  // 作废源于限额信号、上游故障或排队超时（计入同一步累计作废的上限）
+  limitRelated: boolean;
+}
+
+export async function runAdmittedAgent(
+  options: { limits?: LimitController; gateway?: StreamModelGateway },
+  key: string,
+  run: (abortSignal: AbortSignal) => Promise<StepAgentResult>
+): Promise<AdmittedAgentRun> {
+  const admission = await options.limits?.acquire();
+  const signalsBefore = options.limits?.signals ?? 0;
+  const before = options.gateway?.meter(key);
+  options.gateway?.resetPeak(key);
+  const stepAbort = new AbortController();
+  let queueExceeded = false;
+  const stopQueueWatch = options.gateway?.watchQueue?.(key, QUEUE_VOID_MS, () => {
+    queueExceeded = true;
+    stepAbort.abort();
+  });
+  let result: StepAgentResult;
+  try {
+    result = await run(stepAbort.signal);
+  } finally {
+    stopQueueWatch?.();
+    admission?.();
+  }
+  const delta =
+    options.gateway !== undefined && before !== undefined
+      ? meterDelta(options.gateway.meter(key), before)
+      : undefined;
+  const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
+  const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
+  const queued = queueExceeded || (delta?.queueMs ?? 0) > QUEUE_VOID_MS;
+  const voidReasons = [
+    signalled ? "期间出现限额信号" : undefined,
+    upstreamFailed ? `本作业的上游故障 ${delta?.upstreamFailures} 次` : undefined,
+    queued
+      ? `等空闲账号累计 ${Math.round((delta?.queueMs ?? 0) / 1000)} 秒（超过 ${QUEUE_VOID_MS / 1000} 秒）`
+      : undefined,
+    result.interrupted !== undefined ? `agent 报被打断：${result.interrupted}` : undefined,
+  ].filter((x) => x !== undefined);
+  return {
+    result,
+    delta,
+    admissionWaitMs: admission?.waitedMs ?? 0,
+    voidReasons,
+    limitRelated: signalled || upstreamFailed || queued,
+  };
 }
 
 export interface StepAgentResult {
@@ -803,6 +869,7 @@ async function runStep(
     harnessRef: options.harnessRef,
     limitPauses: [],
     gateway: null,
+    admissionWaitMs: null,
     humanFailsGate: step.humanFailsGate === true,
     runIdentity: options.runIdentity ?? null,
     agentSettings: options.agentSettings?.[spec.agent] ?? null,
@@ -847,6 +914,7 @@ async function runStep(
   let agentChangedDeps: boolean | null = null;
   let result: StepAgentResult | null = null;
   let gatewayFacts: StreamGatewayFacts | null = null;
+  let admissionWaitMs: number | null = null;
   let judged = false;
   let passed = false;
   let judgeOutput = "";
@@ -856,14 +924,8 @@ async function runStep(
     head = await ws.land(step.message);
   } else {
     const key = streamJobKey(job);
-    const release = await options.limits?.acquire();
-    // 这一步开始时的限额信号数与本作业的计量（含上游故障数）：结束时比较，有变化即作废（决策 144、160，不看是哪种 agent、
-    // 也不看 agent 自己报没报被打断）
-    const signalsBefore = options.limits?.signals ?? 0;
-    const before = options.gateway?.meter(key);
-    options.gateway?.resetPeak(key);
-    try {
-      result = await agent.run({
+    const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
+      agent.run({
         job,
         step,
         prompt: step.prompt ?? step.message,
@@ -893,33 +955,18 @@ async function runStep(
             }
           : {}),
         ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
-      });
-    } finally {
-      release?.();
-    }
-    const delta =
-      options.gateway !== undefined && before !== undefined
-        ? meterDelta(options.gateway.meter(key), before)
-        : undefined;
-    const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
-    const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
-    // 等空闲账号累计超过 QUEUE_VOID_MS：有账号受限（退避、停用或降了上限），这一步受了限额事件的影响，与上游故障
-    // 同一口径作废重做（不看 agent 种类）
-    const queued = (delta?.queueMs ?? 0) > QUEUE_VOID_MS;
-    if (signalled || upstreamFailed || queued || result.interrupted !== undefined) {
+        abortSignal,
+      })
+    );
+    result = admitted.result;
+    admissionWaitMs = admitted.admissionWaitMs;
+    const delta = admitted.delta;
+    if (admitted.voidReasons.length > 0) {
       // 作废重做：连同这次尝试在库里留下的痕迹（agent 的提交所在的 reflog、ORIG_HEAD、本步的开工树引用）一并丢掉
       await ws.discardAttempt(state.head, step.seq - 1);
-      const why = [
-        signalled ? "期间出现限额信号" : undefined,
-        upstreamFailed ? `本作业的上游故障 ${delta?.upstreamFailures} 次` : undefined,
-        queued
-          ? `等空闲账号累计 ${Math.round((delta?.queueMs ?? 0) / 1000)} 秒（超过 ${QUEUE_VOID_MS / 1000} 秒）`
-          : undefined,
-        result.interrupted !== undefined ? `agent 报被打断：${result.interrupted}` : undefined,
-      ].filter((x) => x !== undefined);
       throw new StepInterruptedError(
-        `第 ${step.seq} 步作废：${why.join("；")}`,
-        signalled || upstreamFailed || queued
+        `第 ${step.seq} 步作废：${admitted.voidReasons.join("；")}`,
+        admitted.limitRelated
       );
     }
     if (delta !== undefined) {
@@ -1032,6 +1079,7 @@ async function runStep(
     wallMs: Date.now() - started,
     attribution,
     gateway: gatewayFacts,
+    admissionWaitMs,
   };
 }
 

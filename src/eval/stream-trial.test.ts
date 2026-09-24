@@ -191,6 +191,10 @@ test("试跑：每步从人在父提交上的代码起跑，按条件各跑一�
         [2, "no-gate", { queueMs: 40, accountRequests: [0, 7], peakInFlight: 1 }],
       ]
     );
+    assert.ok(
+      rows.every((r) => typeof r.admissionWaitMs === "number"),
+      "每行记下放行等待（决策 163，与跑批器同一套放行）"
+    );
     assert.deepEqual(summary.recommendation, {
       condition: "all",
       samples: 4,

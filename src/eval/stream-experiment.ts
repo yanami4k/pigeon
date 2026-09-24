@@ -12,7 +12,12 @@ import {
   gatewayUpstreamBaseUrl,
 } from "../pi-runtime/index.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
-import { type GatewayAccount, type ModelGateway, startModelGateway } from "./model-gateway.ts";
+import {
+  assertConcurrencyFits,
+  type GatewayAccount,
+  type ModelGateway,
+  startModelGateway,
+} from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
 import { currentHarnessRef } from "./runner.ts";
 import { commandStepAgent, type PigeonStepAgentOptions, pigeonStepAgent } from "./stream-agents.ts";
@@ -184,6 +189,8 @@ export async function runStreamExperiment(
   const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const referenceName = `${prefix}-reference`;
   const modelId = options.gateway.modelId;
+  // 路数大于各账号配置并发之和即拒绝开跑（决策 163）：在写身份头、起网关与容器之前
+  assertConcurrencyFits(options.concurrency ?? 4, options.gateway.accounts);
   // 身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：开跑前写入或比对，不一致即拒绝续跑——在起网关与容器之前做
   const imageId = imageIdOf(options.image, docker);
   const pigeonSettings =
@@ -214,31 +221,17 @@ export async function runStreamExperiment(
       harness: currentHarnessRef(),
     },
   });
-  // 控制器与网关互相引用：控制器探测经网关的上游，网关把限额信号交给控制器
-  let gateway: ModelGateway | undefined;
-  const limits = new LimitController({
-    probe: () => gateway?.probe() ?? Promise.resolve(false),
-    slots: options.concurrency ?? 4,
-  });
+  const { gateway: liveGateway, limits } = await startGatewayAndLimits(
+    options.gateway,
+    options.concurrency ?? 4
+  );
   const shutdown = options.shutdownSignal;
   if (shutdown !== undefined) {
     const onShutdown = () => limits.shutdown(String(shutdown.reason ?? "收到停止信号"));
     if (shutdown.aborted) onShutdown();
     else shutdown.addEventListener("abort", onShutdown, { once: true });
   }
-  gateway = await startModelGateway({
-    upstreamBaseUrl: await gatewayUpstreamBaseUrl(modelId),
-    accounts: options.gateway.accounts,
-    limits,
-    probeRequest: {
-      path: "/v1/messages",
-      body: { model: modelId, max_tokens: 1, messages: [{ role: "user", content: "回一个字" }] },
-    },
-  });
-  const liveGateway = gateway;
   try {
-    // 开跑前逐账号探测一次（极小请求）：任一账号认证失败即拒绝开跑并报出账号编号
-    await liveGateway.preflight();
     await removeWorkspaceContainer(referenceName, docker);
     await startWorkspaceContainer({
       image: options.image,
@@ -352,21 +345,11 @@ export async function runStreamTrialExperiment(
   const human = gitHumanRepo(options.repoDir);
   const prefix = `pigeon-trial-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const modelId = options.gateway.modelId;
-  let gateway: ModelGateway | undefined;
-  const limits = new LimitController({
-    probe: () => gateway?.probe() ?? Promise.resolve(false),
-    slots: options.concurrency,
-  });
-  gateway = await startModelGateway({
-    upstreamBaseUrl: await gatewayUpstreamBaseUrl(modelId),
-    accounts: options.gateway.accounts,
-    limits,
-    probeRequest: {
-      path: "/v1/messages",
-      body: { model: modelId, max_tokens: 1, messages: [{ role: "user", content: "回一个字" }] },
-    },
-  });
-  const liveGateway = gateway;
+  assertConcurrencyFits(options.concurrency, options.gateway.accounts);
+  const { gateway: liveGateway, limits } = await startGatewayAndLimits(
+    options.gateway,
+    options.concurrency
+  );
   try {
     const agents: Partial<Record<"pigeon" | "minimal", StepAgent>> = {};
     if (options.pigeon !== undefined) {
@@ -408,7 +391,44 @@ export async function runStreamTrialExperiment(
     });
   } finally {
     await liveGateway.close();
+    limits.close();
   }
+}
+
+// 起限额控制器与网关（互相引用：控制器探测经网关的上游，网关把限额信号交给控制器）。控制器按网关报来的可用容量
+// 放行（决策 163），网关的容量一变即通知控制器；开跑前逐账号探测一次，未通过即关掉两者、拒绝开跑
+async function startGatewayAndLimits(
+  settings: { accounts: readonly GatewayAccount[]; modelId: string },
+  concurrency: number
+): Promise<{ gateway: ModelGateway; limits: LimitController }> {
+  let gateway: ModelGateway | undefined;
+  const limits = new LimitController({
+    probe: () => gateway?.probe() ?? Promise.resolve(false),
+    slots: concurrency,
+    capacity: () => gateway?.capacity() ?? Number.POSITIVE_INFINITY,
+  });
+  gateway = await startModelGateway({
+    upstreamBaseUrl: await gatewayUpstreamBaseUrl(settings.modelId),
+    accounts: settings.accounts,
+    limits,
+    probeRequest: {
+      path: "/v1/messages",
+      body: {
+        model: settings.modelId,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "回一个字" }],
+      },
+    },
+  });
+  gateway.subscribeCapacity(() => limits.capacityChanged());
+  try {
+    await gateway.preflight();
+  } catch (error) {
+    await gateway.close();
+    limits.close();
+    throw error;
+  }
+  return { gateway, limits };
 }
 
 export interface StreamBaselineOptions {

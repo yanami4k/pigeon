@@ -47,6 +47,7 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     attribution: null,
     limitPauses: [],
     gateway: { queueMs: 0, accountRequests: [5], peakInFlight: 1 },
+    admissionWaitMs: 0,
     harnessRef: { commit: "abc", dirty: false },
     ...overrides,
   };

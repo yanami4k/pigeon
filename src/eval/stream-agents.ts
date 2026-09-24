@@ -56,24 +56,33 @@ export interface LimitWatch {
   subscribe?(listener: () => void): () => void;
 }
 
-// 这一步开始后一有限额信号就调用 onSignal；返回停止看守的函数
-function watchLimits(limits: LimitWatch | undefined, onSignal: () => void): () => void {
-  if (limits === undefined) return () => {};
-  const signalsAtStart = limits.signals ?? 0;
+// 这一步开始后一有限额信号、或跑批器按步中止（排队超时等），就调用 onSignal；返回停止看守的函数
+function watchLimits(
+  limits: LimitWatch | undefined,
+  abortSignal: AbortSignal | undefined,
+  onSignal: () => void
+): () => void {
+  if (limits === undefined && abortSignal === undefined) return () => {};
+  const signalsAtStart = limits?.signals ?? 0;
   let fired = false;
   const check = () => {
     if (fired) return;
-    if (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart) {
+    const limited =
+      limits !== undefined &&
+      (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart);
+    if (limited || abortSignal?.aborted === true) {
       fired = true;
       onSignal();
     }
   };
-  const unsubscribe = limits.subscribe?.(check);
+  const unsubscribe = limits?.subscribe?.(check);
+  abortSignal?.addEventListener("abort", check);
   const timer = setInterval(check, 500);
   check();
   return () => {
     clearInterval(timer);
     unsubscribe?.();
+    abortSignal?.removeEventListener("abort", check);
   };
 }
 
@@ -111,7 +120,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
       const placeholder = path.join(input.workDir, "workspace");
       mkdirSync(placeholder, { recursive: true });
       const abort = new AbortController();
-      const stopWatch = watchLimits(options.limits, () => abort.abort());
+      const stopWatch = watchLimits(options.limits, input.abortSignal, () => abort.abort());
       let run: Awaited<ReturnType<typeof runHeadless>>;
       try {
         run = await runHeadless({
@@ -218,7 +227,10 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           usage: run.usage,
           wallMs: run.durationMs,
           repair: null,
-          interrupted: "限额信号：Pigeon 已中止",
+          interrupted:
+            input.abortSignal?.aborted === true
+              ? "跑批器按步中止（排队超时等）：Pigeon 已中止"
+              : "限额信号：Pigeon 已中止",
         };
       }
       // 与外部基准同一判法：内容审核拒答与确定性错误照常判分；其余以错误收尾的算模型服务故障，这一步作废重做
@@ -396,18 +408,25 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
         );
         const limits = options.limits;
         const signalsAtStart = limits?.signals ?? 0;
+        // 限额信号与跑批器的按步中止同一条路径：杀掉启动器，之后按标记清掉容器里的进程
         const check = () => {
+          if (input.abortSignal?.aborted === true) {
+            kill("paused");
+            return;
+          }
           if (limits === undefined) return;
           if (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart)
             kill("paused");
         };
         const unsubscribe = limits?.subscribe?.(check);
+        input.abortSignal?.addEventListener("abort", check);
         const watch = setInterval(check, 500);
         check();
         const done = () => {
           clearTimeout(timer);
           clearInterval(watch);
           unsubscribe?.();
+          input.abortSignal?.removeEventListener("abort", check);
         };
         child.on("error", (error) => {
           done();
@@ -444,7 +463,10 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
           usage: ZERO_USAGE,
           wallMs,
           repair: null,
-          interrupted: "限额信号：最简 agent 已中止",
+          interrupted:
+            input.abortSignal?.aborted === true
+              ? "跑批器按步中止（排队超时等）：最简 agent 已中止"
+              : "限额信号：最简 agent 已中止",
         };
       }
       const timedOut = ended === "timeout";

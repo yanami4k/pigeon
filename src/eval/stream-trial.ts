@@ -12,7 +12,6 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
-import { meterDelta } from "./model-gateway.ts";
 import type { LimitController } from "./model-limits.ts";
 import type { HumanRepo } from "./stream-facts.ts";
 import type { StreamManifest, StreamStep } from "./stream-manifest.ts";
@@ -21,6 +20,7 @@ import type { StreamCondition, StreamGatewayFacts } from "./stream-results.ts";
 import {
   CONDITION_SPECS,
   lockOutDir,
+  runAdmittedAgent,
   type StepAgent,
   type StepBudget,
   type StreamEnvFactory,
@@ -47,6 +47,8 @@ export interface TrialRow {
   tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
   agentWallMs?: number;
   stepWallMs?: number;
+  // agent 开始之前等放行的毫秒（决策 163）
+  admissionWaitMs?: number;
   // 每次验证的用时（Pigeon 回炉条件从会话账本取）
   verifyMs?: number[];
   repairRounds?: number | null;
@@ -235,13 +237,9 @@ async function runStreamTrialLocked(options: StreamTrialOptions): Promise<Stream
       try {
         await env.ws.applyHumanFiles(step.humanFiles, (p) => options.human.show(step.commit, p));
         await syncEnv(options, env.ws, step.commit);
-        const before = options.gateway?.meter(key);
-        options.gateway?.resetPeak(key);
-        const signalsBefore = options.limits?.signals ?? 0;
-        const release = await options.limits?.acquire();
-        let result: Awaited<ReturnType<StepAgent["run"]>>;
-        try {
-          result = await agent.run({
+        // 放行、按步中止与作废判定与跑批器同一套（决策 163）
+        const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
+          agent.run({
             job,
             step,
             prompt: step.prompt ?? step.message,
@@ -266,17 +264,12 @@ async function runStreamTrialLocked(options: StreamTrialOptions): Promise<Stream
             ...(options.gateway !== undefined
               ? { modelBaseUrl: options.gateway.jobBaseUrl(key) }
               : {}),
-          });
-        } finally {
-          release?.();
-        }
-        const delta =
-          options.gateway !== undefined && before !== undefined
-            ? meterDelta(options.gateway.meter(key), before)
-            : undefined;
-        const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
-        if (signalled || (delta?.upstreamFailures ?? 0) > 0 || result.interrupted !== undefined) {
-          log(`${key} 被打断，作废重做：${result.interrupted ?? "限额信号或上游故障"}`);
+            abortSignal,
+          })
+        );
+        const { result, delta } = admitted;
+        if (admitted.voidReasons.length > 0) {
+          log(`${key} 被打断，作废重做：${admitted.voidReasons.join("；")}`);
           continue;
         }
         const facts = sessionFacts(workDir);
@@ -303,6 +296,7 @@ async function runStreamTrialLocked(options: StreamTrialOptions): Promise<Stream
                 },
           agentWallMs: result.wallMs,
           stepWallMs: Date.now() - started,
+          admissionWaitMs: admitted.admissionWaitMs,
           verifyMs: facts.verifyMs,
           repairRounds: result.repair?.rounds ?? null,
           finalVerdict: result.repair?.finalVerdict ?? null,

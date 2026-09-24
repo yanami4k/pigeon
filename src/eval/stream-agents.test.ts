@@ -318,6 +318,30 @@ test("命令式 agent：状态没变、只来了限额信号（例如整批暂�
   }
 });
 
+test("命令式 agent：跑批器按步中止（本作业排队超时等）与限额信号同一条路径——立即杀掉启动器、清掉容器里的进程，报被打断", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  try {
+    const hang = join(dir, "hang.mjs");
+    writeFileSync(hang, "setInterval(() => {}, 1000);\n");
+    const agent = commandStepAgent({
+      command: [process.execPath, hang],
+      limits: { state: "running", signals: 0 },
+      graceMs: 0,
+      docker: NO_RESIDUE,
+    });
+    const stepAbort = new AbortController();
+    setTimeout(() => stepAbort.abort(), 200);
+    const started = Date.now();
+    const out = await agent.run(
+      input(dir, { budget: { maxTurns: 1, wallClockMs: 30_000 }, abortSignal: stepAbort.signal })
+    );
+    assert.equal(out.interrupted, "跑批器按步中止（排队超时等）：最简 agent 已中止");
+    assert.ok(Date.now() - started < 20_000, "不等墙钟用满");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // 容器以在本机执行命令的假 docker 代替：工作区是真实 git 仓库，a.txt 起初为 bug
 function containerWorkspace(dir: string) {
   const testbed = join(dir, "testbed");

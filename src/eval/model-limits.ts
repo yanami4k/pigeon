@@ -4,7 +4,10 @@
 //   403 额度用完：只停该账号、请求换号；按报错文案区分 5 小时、每周、每月三种额度（文案里分不出窗口的额度类 403
 //     按 5 小时处理）；每月额度用完的账号不再恢复；
 //   403 并发受限：降该账号的并发上限，已是 1 时派出的请求仍受限则该账号暂时不可用；
-//   401 与认证类 403：该账号停用（不探测恢复，需人工处理），这一步按上游故障作废重做；
+//   401 与文案明确是认证问题的 403：该账号停用（不探测恢复，需人工处理），这一步按上游故障作废重做；认不出的 403
+//     原样交回、记上游故障（这一步作废），不停用账号；
+//   放行（决策 163）：同时在跑的 agent 数须小于网关报来的可用容量（未停用账号当前并发上限之和）且不超过配置路数，
+//     否则在步与步之间等，按先来后到放行（各条件公平）；等待不计入该步的墙钟预算、不作废、不耗额度，时长记入结果行；
 //   全部账号都不可用：整批暂停并探测，间隔从 5 分钟逐步拉长到 30 分钟，总等待上限 6 小时；暂停期间网关的任一账号
 //     单独探测恢复即通知这里立即恢复整批（recovered），不等下一轮探测；全部账号都不会自行恢复（每月额度用完或认证失败）
 //     则直接停下并告警；
@@ -42,6 +45,9 @@ export function scrubKeys(text: unknown, keys: readonly (string | undefined)[]):
 // auth：账号认证失败（401 或认证类 403），停用、不探测恢复，需人工处理
 export type LimitKind = "5h" | "weekly" | "monthly" | "concurrency" | "rate-limit" | "auth";
 
+// 文案明确是认证问题：只认这些，单写 forbidden、permission denied 之类认不出（5 小时额度用完也是 permission_error）
+const EXPLICIT_AUTH_PATTERN =
+  /authentication|unauthori[sz]ed|invalid[ _-]?(x-)?api[ _-]?key|api[ _-]?key\b.*\b(invalid|expired|revoked|disabled)|认证失败|鉴权失败|密钥无效|无效的?\s*(api\s*)?key/i;
 const CONCURRENCY_PATTERN = /concurren|too many (parallel|simultaneous)|并发/i;
 const MONTHLY_PATTERN = /month|每月|本月|月度/i;
 const WEEKLY_PATTERN = /week|每周|本周|周度/i;
@@ -54,7 +60,8 @@ export function classifyUpstreamFailure(
   if (status === 401) return { kind: "auth" };
   if (status !== 403) return { kind: "other" };
   if (CONCURRENCY_PATTERN.test(body)) return { kind: "concurrency" };
-  if (!isQuotaError(body)) return { kind: "auth" };
+  if (!isQuotaError(body))
+    return EXPLICIT_AUTH_PATTERN.test(body) ? { kind: "auth" } : { kind: "other" };
   if (MONTHLY_PATTERN.test(body)) return { kind: "monthly" };
   if (WEEKLY_PATTERN.test(body)) return { kind: "weekly" };
   return { kind: "5h" };
@@ -79,6 +86,8 @@ export interface LimitControllerOptions {
   probe(): Promise<boolean>;
   // 初始并行路数（在途的 agent 步数上限）
   slots: number;
+  // 可用容量（网关按账号统计）；缺省不限。变化时调用 capacityChanged
+  capacity?: () => number;
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -86,6 +95,9 @@ export interface LimitControllerOptions {
 }
 
 export type LimitState = "running" | "paused" | "stopped";
+
+// 放行：调用即释放这一路；waitedMs 为这一路在放行前等了多久（含整批暂停）
+export type Admission = (() => void) & { waitedMs: number };
 
 export class LimitController {
   state: LimitState = "running";
@@ -103,7 +115,8 @@ export class LimitController {
   private current: { record: PauseRecord; started: number } | undefined;
   // 取消探测循环正在等的间隔（缺省计时器才有）
   private cancelWait: (() => void) | undefined;
-  private readonly waiting: (() => void)[] = [];
+  // 等放行的各路（先来先放）：以 true 唤醒即已放行（已占一路），false 为停下后请它重查
+  private readonly waiting: ((granted: boolean) => void)[] = [];
   private readonly records: { epoch: number; record: PauseRecord }[] = [];
   private resumed: Promise<void> = Promise.resolve();
   private resolveResumed: (() => void) | undefined;
@@ -183,7 +196,7 @@ export class LimitController {
     this.resolveResumed = undefined;
     this.current = undefined;
     this.cancelWait?.();
-    for (const wake of this.waiting.splice(0)) wake();
+    for (const wake of this.waiting.splice(0)) wake(false);
   }
 
   // 网关的某个账号单独探测恢复：暂停中即立即恢复整批，不等下一轮探测
@@ -205,6 +218,7 @@ export class LimitController {
     this.resolveResumed = undefined;
     this.rejectResumed = undefined;
     this.cancelWait?.();
+    this.admit();
   }
 
   // 收尾：取消探测循环的定时，跑完后进程不因它多挂
@@ -229,7 +243,8 @@ export class LimitController {
   }
 
   private pause(kind: LimitKind): void {
-    if (this.state !== "running") return;
+    // 已关闭：不再开暂停、不再设探测定时
+    if (this.closed || this.state !== "running") return;
     this.state = "paused";
     this.epoch += 1;
     const record: PauseRecord = {
@@ -291,21 +306,45 @@ export class LimitController {
     if (this.state === "paused") await this.resumed;
   }
 
-  // 占一路在途步骤；返回释放函数
-  async acquire(): Promise<() => void> {
+  // 同时在跑的 agent 数上限：配置路数与可用容量取小
+  admitLimit(): number {
+    return Math.min(this.slots, this.options.capacity?.() ?? Number.POSITIVE_INFINITY);
+  }
+
+  // 网关报来可用容量变了：按先来后到放行等待的各路
+  capacityChanged(): void {
+    this.admit();
+  }
+
+  private admit(): void {
+    while (this.state === "running" && this.waiting.length > 0 && this.active < this.admitLimit()) {
+      this.active += 1;
+      this.waiting.shift()?.(true);
+    }
+  }
+
+  // 等放行、占一路在途步骤（每步 agent 开始之前调用）：暂停中等恢复，同时在跑的数已达上限即排在后面等；
+  // 返回释放函数，带这一路等了多久
+  async acquire(): Promise<Admission> {
+    const from = this.now();
     for (;;) {
       await this.ready();
-      if (this.active < this.slots) {
+      let granted: boolean;
+      if (this.waiting.length === 0 && this.active < this.admitLimit()) {
         this.active += 1;
-        let released = false;
-        return () => {
-          if (released) return;
-          released = true;
-          this.active -= 1;
-          this.waiting.shift()?.();
-        };
+        granted = true;
+      } else {
+        granted = await new Promise<boolean>((resolve) => this.waiting.push(resolve));
       }
-      await new Promise<void>((resolve) => this.waiting.push(resolve));
+      if (!granted) continue;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        this.active -= 1;
+        this.admit();
+      };
+      return Object.assign(release, { waitedMs: this.now() - from });
     }
   }
 

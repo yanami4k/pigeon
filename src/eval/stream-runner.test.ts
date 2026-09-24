@@ -1378,60 +1378,94 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("一步等空闲账号累计超过 30 秒即作废重做（与上游故障同一口径、不看 agent 种类）；恰为 30 秒不作废", async () => {
-    const t = await toy();
-    try {
-      const meters = new Map<string, GatewayMeter>();
-      const zero: GatewayMeter = {
-        requests: 0,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        upstreamFailures: 0,
-        queueMs: 0,
-        peakInFlight: 0,
-        accountRequests: [0],
-      };
-      const gateway = {
-        jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
-        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
-        resetPeak: () => {},
-      };
-      // 第一次尝试排队 31 秒，第二次 30 秒
-      const waits = [31_000, 30_000];
-      const agent = scriptedAgent((input) => {
-        const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
-        const m = meters.get(key) ?? zero;
-        meters.set(key, {
-          ...m,
-          requests: m.requests + 1,
-          queueMs: m.queueMs + (waits.shift() ?? 0),
-        });
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        return undefined;
-      });
-      const log: string[] = [];
-      const summary = await runStreams(
-        options(t, {
-          agents: { pigeon: agent },
-          maxSteps: 1,
-          gateway,
-          log: (line) => log.push(line),
-        })
-      );
-      assert.equal(agent.calls.length, 2, "第一次作废、重做一次");
-      assert.ok(
-        log.some((l) => /等空闲账号累计 31 秒（超过 30 秒）/.test(l)),
-        log.join("\n")
-      );
-      const rows = readStreamResults(summary.resultsFile);
-      assert.equal(rows.length, 1);
-      assert.equal(rows[0]?.gateway?.queueMs, 30_000, "结果行只记没作废的那次");
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
+  // 排队作废（决策 163）：Pigeon 与最简 agent 各跑一遍，绑定"不看 agent 种类"
+  for (const kind of ["pigeon", "minimal"] as const) {
+    test(`排队作废（${kind === "pigeon" ? "Pigeon" : "最简 agent"}）：网关报排队超 30 秒即经按步中止立即停下在途的 agent、作废重做；事后才查到超 30 秒的同样作废；恰为 30 秒不作废；结果行记放行等待`, async () => {
+      const t = await toy();
+      try {
+        const meters = new Map<string, GatewayMeter>();
+        const zero: GatewayMeter = {
+          requests: 0,
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          upstreamFailures: 0,
+          queueMs: 0,
+          peakInFlight: 0,
+          accountRequests: [0],
+        };
+        const watchers = new Map<string, () => void>();
+        const gateway = {
+          jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
+          meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+          resetPeak: () => {},
+          watchQueue: (job: string, thresholdMs: number, listener: () => void) => {
+            assert.equal(thresholdMs, 30_000);
+            watchers.set(job, listener);
+            return () => watchers.delete(job);
+          },
+        };
+        const addQueue = (key: string, ms: number) => {
+          const m = meters.get(key) ?? zero;
+          meters.set(key, { ...m, requests: m.requests + 1, queueMs: m.queueMs + ms });
+        };
+        // 第 1 次：排队中网关报超时，agent 一直跑到被按步中止为止（5 秒内没被中止即照常收工，用例随之失败）；
+        // 第 2 次：事后查到排队 31 秒；第 3 次：恰为 30 秒
+        const calls: StepAgentInput[] = [];
+        let abortedWhileRunning = false;
+        const agent: StepAgent = {
+          async run(input) {
+            calls.push(input);
+            const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
+            const done = {
+              status: "completed",
+              turns: 1,
+              usage: ZERO_USAGE,
+              wallMs: 5,
+              repair: null,
+            };
+            if (calls.length === 1) {
+              addQueue(key, 31_000);
+              watchers.get(key)?.();
+              const aborted = await new Promise<boolean>((resolve) => {
+                if (input.abortSignal?.aborted === true) resolve(true);
+                input.abortSignal?.addEventListener("abort", () => resolve(true));
+                setTimeout(() => resolve(false), 5000).unref();
+              });
+              abortedWhileRunning = aborted;
+              return aborted ? { ...done, status: "aborted", interrupted: "按步中止" } : done;
+            }
+            addQueue(key, calls.length === 2 ? 31_000 : 30_000);
+            if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+            return done;
+          },
+        };
+        const log: string[] = [];
+        const summary = await runStreams(
+          options(t, {
+            agents: { [kind]: agent },
+            conditions: [kind === "pigeon" ? "no-gate" : "minimal"],
+            maxSteps: 1,
+            gateway,
+            log: (line) => log.push(line),
+          })
+        );
+        assert.equal(abortedWhileRunning, true, "在途的 agent 被按步中止，不等它跑完");
+        assert.equal(calls.length, 3, "前两次作废、第三次照常");
+        assert.ok(
+          log.filter((l) => /等空闲账号累计 31 秒（超过 30 秒）/.test(l)).length === 2,
+          log.join("\n")
+        );
+        const rows = readStreamResults(summary.resultsFile);
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0]?.gateway?.queueMs, 30_000, "结果行只记没作废的那次");
+        assert.equal(typeof rows[0]?.admissionWaitMs, "number", "结果行记放行等待");
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
+    });
+  }
 
   test("agent 连续自报被打断、期间没有任何限额信号或上游故障：重做三次后停下作业并说明，不无限重做", async () => {
     const t = await toy();

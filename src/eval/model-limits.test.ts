@@ -21,7 +21,7 @@ test("限额识别沿用既有口径：明说用量上限的 403 是限额，其
   assert.equal(scrubKeys("bad key sk-abc in sk-abc", ["sk-abc", ""]), "bad key [key] in [key]");
 });
 
-test("上游失败分类：429 为频率限制；403 按文案分并发、每月、每周、5 小时（额度类缺省）；其余 403 为认证", () => {
+test("上游失败分类：429 为频率限制；403 按文案分并发、每月、每周、5 小时（额度类缺省）；401 与文案明确的 403 为认证，其余 403 为 other", () => {
   assert.deepEqual(classifyUpstreamFailure(429, "rate limited"), { kind: "rate-limit" });
   assert.deepEqual(
     classifyUpstreamFailure(
@@ -38,8 +38,18 @@ test("上游失败分类：429 为频率限制；403 按文案分并发、每月
     kind: "concurrency",
   });
   assert.deepEqual(classifyUpstreamFailure(403, "并发请求数超过上限"), { kind: "concurrency" });
-  assert.deepEqual(classifyUpstreamFailure(403, "forbidden"), { kind: "auth" });
-  assert.deepEqual(classifyUpstreamFailure(401, "invalid x-api-key"), { kind: "auth" });
+  // 认证只认 401 与文案明确是认证问题的 403；认不出的 403 为 other（交回、计上游故障，不停用账号）
+  assert.deepEqual(classifyUpstreamFailure(401, "whatever"), { kind: "auth" });
+  assert.deepEqual(classifyUpstreamFailure(403, "invalid x-api-key"), { kind: "auth" });
+  assert.deepEqual(classifyUpstreamFailure(403, '{"error":{"type":"authentication_error"}}'), {
+    kind: "auth",
+  });
+  assert.deepEqual(classifyUpstreamFailure(403, "API key has been revoked"), { kind: "auth" });
+  assert.deepEqual(classifyUpstreamFailure(403, "Unauthorized"), { kind: "auth" });
+  assert.deepEqual(classifyUpstreamFailure(403, "认证失败：密钥无效"), { kind: "auth" });
+  assert.deepEqual(classifyUpstreamFailure(403, "forbidden"), { kind: "other" });
+  assert.deepEqual(classifyUpstreamFailure(403, "Request not allowed"), { kind: "other" });
+  assert.deepEqual(classifyUpstreamFailure(403, "permission denied"), { kind: "other" });
   assert.deepEqual(classifyUpstreamFailure(500, "boom"), { kind: "other" });
 });
 
@@ -52,6 +62,10 @@ function manualClock() {
       new Promise<void>((resolve) => {
         waiters.push({ at: now + ms, resolve });
       }),
+    // 直接拨到某个时刻（不触发等待点）
+    set(ms: number): void {
+      now = ms;
+    },
     // 推进到下一个等待点
     async tick(): Promise<boolean> {
       waiters.sort((a, b) => a.at - b.at);
@@ -235,4 +249,85 @@ test("收尾：缺省计时下，暂停中的探测定时在恢复、停下或 c
   limits.close();
   await new Promise((r) => setImmediate(r));
   assert.equal(timeouts(), before, "close() 取消");
+});
+
+test("收尾：关闭之后再报来限额也不开新的暂停、不设新的探测定时", async () => {
+  const timeouts = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const before = timeouts();
+  const limits = new LimitController({ probe: async () => false, slots: 2, warn: () => {} });
+  limits.close();
+  limits.onLimit("5h");
+  assert.equal(limits.state, "running");
+  assert.equal(timeouts(), before);
+});
+
+// 放行（决策 163）：同时在跑的 agent 数小于可用容量且不超过配置路数
+test("放行：同时在跑的数取配置路数与可用容量的小者；空出或容量回升即按先来后到放行等待的各路", async () => {
+  const clock = manualClock();
+  let capacity = 4;
+  const limits = new LimitController({
+    probe: async () => true,
+    sleep: clock.sleep,
+    now: clock.now,
+    warn: () => {},
+    slots: 6,
+    capacity: () => capacity,
+  });
+  const running = await Promise.all([1, 2, 3, 4].map(() => limits.acquire()));
+  assert.ok(running.every((r) => r.waitedMs === 0));
+  const order: string[] = [];
+  const waiting = ["a", "b", "c"].map((name) =>
+    limits.acquire().then((r) => {
+      order.push(name);
+      return r;
+    })
+  );
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, [], "已有 4 路在跑、容量 4：都等");
+  running[0]?.();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, ["a"], "空出一路：只放行最先等的");
+  capacity = 6;
+  limits.capacityChanged();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, ["a", "b", "c"], "容量回升：按先来后到再放行两路");
+  capacity = 100;
+  limits.capacityChanged();
+  let admitted = false;
+  const extra = limits.acquire().then((r) => {
+    admitted = true;
+    return r;
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(admitted, false, "不超过配置路数 6");
+  (await waiting[0])?.();
+  await extra;
+  assert.equal(admitted, true);
+});
+
+test("放行：等待的时长按控制器的时钟计，容量不足等多久都不作废；整批停下时等待的各路报错退出", async () => {
+  const clock = manualClock();
+  let capacity = 1;
+  const limits = new LimitController({
+    probe: async () => true,
+    sleep: clock.sleep,
+    now: clock.now,
+    warn: () => {},
+    slots: 3,
+    capacity: () => capacity,
+  });
+  const first = await limits.acquire();
+  const second = limits.acquire();
+  const third = limits.acquire().then(
+    () => "admitted",
+    (e: Error) => e.message
+  );
+  clock.set(3 * 60 * 60_000);
+  capacity = 2;
+  limits.capacityChanged();
+  assert.equal((await second).waitedMs, 3 * 60 * 60_000, "容量不足等了三小时：只记等待");
+  assert.equal(limits.state, "running");
+  limits.onLimit("monthly");
+  assert.match(await third, /每月额度/);
+  first();
 });

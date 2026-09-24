@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import diagnostics_channel from "node:diagnostics_channel";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { gatewayStreamFn } from "../pi-runtime/index.ts";
 import {
+  assertConcurrencyFits,
   type GatewayClock,
   gatewayAccountsFromEnv,
   type ModelGateway,
@@ -237,11 +239,29 @@ test("网关：额度 403 交给控制器暂停，暂停期间直接 529 不打�
   );
 });
 
+test("网关（单账号）：认不出的 403 按 other 交回（正文不含 key）、记为上游故障，不停用账号、不发限额信号", async () => {
+  await withGateway(
+    [
+      { status: 403, body: "forbidden: request from key-one not allowed" },
+      { status: 200, body: "{}" },
+    ],
+    async (g, _up, l) => {
+      const other = await post(g, "j");
+      assert.equal(other.status, 403);
+      assert.equal(await other.text(), "forbidden: request from [key] not allowed");
+      assert.equal(g.meter("j").upstreamFailures, 1, "这一步作废重做");
+      assert.equal(g.accountStatus()[0]?.down, null, "不停用账号");
+      assert.deepEqual([l.state, l.signals], ["running", 0]);
+      assert.equal((await post(g, "j")).status, 200, "同一账号照常可用");
+    }
+  );
+});
+
 test("网关（单账号）：认证 403 交回（正文不含 key）、记为上游故障，该账号停用；唯一的账号停用即整批停下", async () => {
-  await withGateway([{ status: 403, body: "forbidden: bad key key-one" }], async (g, up, l) => {
+  await withGateway([{ status: 403, body: "invalid api key: key-one" }], async (g, up, l) => {
     const auth = await post(g, "j");
     assert.equal(auth.status, 403);
-    assert.equal(await auth.text(), "forbidden: bad key [key]");
+    assert.equal(await auth.text(), "invalid api key: [key]");
     assert.equal(g.meter("j").upstreamFailures, 1, "这一步按上游故障作废重做，不以认证错误判题");
     assert.equal(g.accountStatus()[0]?.down, "auth");
     assert.equal(l.state, "stopped");
@@ -658,27 +678,39 @@ test("账号配置：账号数超过上限、并发变量指向不存在的账�
   );
 });
 
-// ---- 复核补修（98efa60 之后）----
+// ---- 复核补修 ----
 
 const RATE: Scripted = { status: 429, body: "rate limited" };
 const CONCURRENT: Scripted = { status: 403, body: "too many concurrent requests" };
 
-// 回 429 头与半截正文后停住的上游：hang 等客户端断开，drop 随即断开连接
-async function stallingUpstream(mode: "hang" | "drop") {
+// 回 429 头与半截正文后停住的上游：之后由用例决定断开（drop）或一直等（直到客户端中止）。headersSeen 为网关一侧的
+// fetch 已收到这个上游的响应头（经 undici 的诊断通道得知）——此后清空一轮微任务，网关必然停在读错误正文上
+async function stallingUpstream() {
   let got = 0;
+  let current: http.ServerResponse | undefined;
   const server = http.createServer((req, res) => {
     got += 1;
     req.resume();
+    current = res;
     res.writeHead(429, { "content-type": "application/json" });
     res.write('{"error":{"type":"rate_limit_error","message":"');
-    if (mode === "drop") setTimeout(() => res.socket?.destroy(), 30);
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  let headersSeen = false;
+  const onHeaders = (message: unknown) => {
+    const origin = (message as { request?: { origin?: unknown } }).request?.origin;
+    if (String(origin).replace(/\/$/, "") === url) headersSeen = true;
+  };
+  diagnostics_channel.subscribe("undici:request:headers", onHeaders);
   return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    url,
     got: () => got,
+    headersSeen: () => headersSeen,
+    drop: () => current?.socket?.destroy(),
     close: () =>
       new Promise<void>((r) => {
+        diagnostics_channel.unsubscribe("undici:request:headers", onHeaders);
         server.closeAllConnections();
         server.close(() => r());
       }),
@@ -687,7 +719,7 @@ async function stallingUpstream(mode: "hang" | "drop") {
 
 test("在途计数不泄漏：读 429 错误正文时客户端中止、或上游在错误正文中途断开，账号在途与作业在途都归零", async () => {
   for (const mode of ["hang", "drop"] as const) {
-    const up = await stallingUpstream(mode);
+    const up = await stallingUpstream();
     const g = await startModelGateway({
       upstreamBaseUrl: up.url,
       accounts: [{ key: "key-one", concurrency: 1 }],
@@ -702,13 +734,14 @@ test("在途计数不泄漏：读 429 错误正文时客户端中止、或上游
         (r) => r.status,
         () => "aborted"
       );
-      await until(() => up.got() === 1, "上游收到请求");
+      await until(() => up.got() === 1 && up.headersSeen(), "网关收到上游的响应头");
+      await new Promise((r) => setImmediate(r));
+      assert.equal(g.accountStatus()[0]?.inFlight, 1, "停在读错误正文：位子仍占着");
       if (mode === "hang") {
-        // 等网关读到响应头、进入读错误正文
-        await new Promise((r) => setTimeout(r, 80));
         client.abort();
         assert.equal(await pending, "aborted");
       } else {
+        up.drop();
         assert.equal(await pending, 502, "上游中途断开：交回 502");
       }
       await until(
@@ -964,13 +997,40 @@ test("探测占额度：暂停期间控制器的探测跳过正在单独探测�
   );
 });
 
-test("认证失败：开跑前逐账号探测，坏 key 混在正常 key 中即拒绝开跑并报出账号编号（不含 key）", async () => {
+test("开跑前逐账号探测：凡不是成功、也不是额度、并发、限流的（认证失败、认不出的 403、5xx）一律拒绝开跑并报出账号编号（不含 key）", async () => {
   await withAccounts(
     {
       "key-a": () => OK,
       "key-b": () => ({ status: 401, body: '{"error":{"message":"invalid api key key-b"}}' }),
       "key-c": () => ({ status: 403, body: "forbidden" }),
       "key-d": () => QUOTA,
+      "key-e": () => ({ status: 503, body: "busy" }),
+    },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+      { key: "key-c", concurrency: 1 },
+      { key: "key-d", concurrency: 1 },
+      { key: "key-e", concurrency: 1 },
+    ],
+    async (g, up) => {
+      await assert.rejects(g.preflight(), (e: Error) => {
+        assert.match(
+          e.message,
+          /账号 2（认证失败）、账号 3（认不出的回应或连不上）、账号 5（认不出的回应或连不上）/
+        );
+        assert.doesNotMatch(e.message, /key-/);
+        return true;
+      });
+      assert.equal(up.probes.length, 5, "逐账号各探一次");
+    }
+  );
+  await withAccounts(
+    {
+      "key-a": () => OK,
+      "key-b": () => QUOTA,
+      "key-c": () => CONCURRENT,
+      "key-d": () => RATE,
     },
     [
       { key: "key-a", concurrency: 1 },
@@ -978,27 +1038,14 @@ test("认证失败：开跑前逐账号探测，坏 key 混在正常 key 中即�
       { key: "key-c", concurrency: 1 },
       { key: "key-d", concurrency: 1 },
     ],
-    async (g, up) => {
-      await assert.rejects(g.preflight(), (e: Error) => {
-        assert.match(e.message, /账号 2、3 认证失败/);
-        assert.doesNotMatch(e.message, /key-/);
-        return true;
-      });
-      assert.equal(up.probes.length, 4, "逐账号各探一次");
-    }
-  );
-  await withAccounts(
-    { "key-a": () => OK, "key-b": () => QUOTA },
-    [
-      { key: "key-a", concurrency: 1 },
-      { key: "key-b", concurrency: 1 },
-    ],
     async (g, _up, _l, warnings) => {
       await g.preflight();
-      assert.ok(
-        warnings.some((w) => /账号 2开跑前探测未通过/.test(w)),
-        "额度类只告警，开跑后照常处理"
-      );
+      for (const n of [2, 3, 4]) {
+        assert.ok(
+          warnings.some((w) => w.startsWith(`账号 ${n}开跑前探测撞上限额`)),
+          `额度、并发、限流只告警，开跑后照常处理（账号 ${n}）`
+        );
+      }
     }
   );
 });
@@ -1208,4 +1255,165 @@ test("每月额度：单独探测中发现已转为每月额度的账号停止�
       assert.match(l.stopReason ?? "", /每月额度/);
     }
   );
+});
+
+test("账号配置：KIMI_API_KEY_ 前缀下认不出的变量名一律报错，报错只写变量名、不写取值", () => {
+  for (const name of [
+    "KIMI_API_KEY_CONCURRENCY",
+    "KIMI_API_KEY_2_CONCURENCY",
+    "KIMI_API_KEY_B",
+    "KIMI_API_KEY_",
+  ]) {
+    assert.throws(
+      () => gatewayAccountsFromEnv({ KIMI_API_KEY: "secret-a", [name]: "secret-x" }),
+      (e: Error) => {
+        assert.ok(e.message.startsWith(`${name}：认不出的变量名`), e.message);
+        assert.doesNotMatch(e.message, /secret-/);
+        return true;
+      }
+    );
+  }
+  assert.throws(
+    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_CONCURRENCY: "" }),
+    /KIMI_API_KEY_CONCURRENCY：认不出/,
+    "取值为空的也报：多半是写错了名字"
+  );
+  assert.equal(gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEYS: "x" }).length, 1);
+});
+
+test("开跑前校验：路数大于各账号配置并发之和即拒绝开跑，报出两个数（不含 key）", () => {
+  const accounts = [
+    { key: "secret-1", concurrency: 2 },
+    { key: "secret-2", concurrency: 2 },
+    { key: "secret-3", concurrency: 2 },
+  ];
+  assert.doesNotThrow(() => assertConcurrencyFits(6, accounts));
+  assert.throws(
+    () => assertConcurrencyFits(7, accounts),
+    (e: Error) => {
+      assert.match(e.message, /路数 7 大于各账号配置并发之和 6/);
+      assert.doesNotMatch(e.message, /secret-/);
+      return true;
+    }
+  );
+});
+
+// 可用容量（决策 163）：未停用账号当前并发上限之和
+test("可用容量：额度停用、上限降低即下降，恢复与回升即回到原值，每次变化都通知；429 退避期间不下降、不通知", async () => {
+  let aState: "ok" | "rate" | "quota" | "concurrent" = "ok";
+  await withAccounts(
+    {
+      "key-a": (_n, probe) => {
+        if (probe) return OK;
+        if (aState === "concurrent") {
+          // 只受限一次：降上限后的重试照常
+          aState = "ok";
+          return CONCURRENT;
+        }
+        return aState === "rate" ? RATE : aState === "quota" ? QUOTA : OK;
+      },
+      "key-b": () => OK,
+      "key-c": () => OK,
+    },
+    [
+      { key: "key-a", concurrency: 2 },
+      { key: "key-b", concurrency: 2 },
+      { key: "key-c", concurrency: 2 },
+    ],
+    async (g, _up, _l, _w, clock) => {
+      let notified = 0;
+      const stop = g.subscribeCapacity(() => {
+        notified += 1;
+      });
+      assert.equal(g.capacity(), 6);
+      aState = "rate";
+      assert.equal((await post(g, "j")).status, 200, "撞 429 换号");
+      assert.equal(g.accountStatus()[0]?.cooling, true);
+      assert.deepEqual([g.capacity(), notified], [6, 0], "退避三级之内不计入容量下降");
+      await clock.advance(10 * 60_000);
+      aState = "concurrent";
+      await until(() => g.accountStatus()[0]?.cooling === false, "冷却结束");
+      assert.equal((await post(g, "j")).status, 200);
+      assert.deepEqual([g.capacity(), notified], [5, 1], "上限降 1");
+      await clock.advance(30 * 60_000);
+      assert.deepEqual([g.capacity(), notified], [6, 2], "上限回升");
+      aState = "quota";
+      assert.equal((await post(g, "j")).status, 200);
+      assert.deepEqual([g.capacity(), notified], [4, 3], "账号 1 额度停用");
+      await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
+      await until(() => g.capacity() === 6, "单独探测通过、账号恢复");
+      assert.equal(notified, 4);
+      stop();
+    },
+    { backoffDelaysMs: [5_000, 15_000, 45_000], autoBelowMs: 4_000 }
+  );
+});
+
+test("排队看守：作业自登记起累计等空闲账号超过阈值即通知一次；别的作业不算；停止看守后不再通知", async () => {
+  const held: ((s: Scripted) => void)[] = [];
+  await withAccounts(
+    { "key-a": () => new Promise<Scripted>((r) => held.push(r)) },
+    [{ key: "key-a", concurrency: 1 }],
+    async (g, _up, _l, _w, clock) => {
+      const fired: string[] = [];
+      g.watchQueue("j2", 30_000, () => fired.push("j2"));
+      const stopped = g.watchQueue("j3", 30_000, () => fired.push("j3"));
+      g.watchQueue("j1", 30_000, () => fired.push("j1"));
+      const p1 = post(g, "j1");
+      await until(() => held.length === 1, "占满唯一的位子");
+      const p2 = post(g, "j2");
+      const p3 = post(g, "j3");
+      await until(() => g.jobInFlight("j2") === 1 && g.jobInFlight("j3") === 1, "两个作业在排队");
+      stopped();
+      await clock.advance(29_000);
+      assert.deepEqual(fired, [], "未超过阈值");
+      await clock.advance(2_000);
+      assert.deepEqual(fired, ["j2"], "只通知排队超时的作业，且只一次；j3 已停止看守，j1 没排队");
+      await clock.advance(60_000);
+      assert.deepEqual(fired, ["j2"]);
+      for (let i = 0; i < 3; i++) {
+        await until(() => held.length === 1, "下一个请求派出");
+        held.shift()?.(OK);
+      }
+      for (const r of await Promise.all([p1, p2, p3])) assert.equal(r.status, 200);
+    },
+    { virtual: true, autoBelowMs: 0 }
+  );
+});
+
+test("收尾：关闭之后不再新设定时——关闭时同一作业还有多个请求在排队，它们逐个退出时也不为排队看守设定时", async () => {
+  let afterClose = 0;
+  let closing = false;
+  const clock: GatewayClock = {
+    now: Date.now,
+    setTimer(ms, fn) {
+      if (closing) afterClose += 1;
+      const t = setTimeout(fn, ms);
+      return () => clearTimeout(t);
+    },
+  };
+  const held: ((s: Scripted) => void)[] = [];
+  const up = await keyedUpstream({ "key-a": () => new Promise<Scripted>((r) => held.push(r)) });
+  const g = await startModelGateway({
+    upstreamBaseUrl: up.url,
+    accounts: [{ key: "key-a", concurrency: 1 }],
+    limits: limits(),
+    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+    clock,
+    warn: () => {},
+  });
+  try {
+    const all = [post(g, "j1"), post(g, "j2"), post(g, "j2"), post(g, "j2")].map((p) =>
+      p.catch(() => undefined)
+    );
+    await until(() => held.length === 1 && g.jobInFlight("j2") === 3, "一个在途、三个排队");
+    g.watchQueue("j2", 30 * 60_000, () => {});
+    closing = true;
+    await g.close();
+    for (const r of held.splice(0)) r(OK);
+    await Promise.all(all);
+    assert.equal(afterClose, 0, "关闭之后一个定时也不设");
+  } finally {
+    await up.close();
+  }
 });
