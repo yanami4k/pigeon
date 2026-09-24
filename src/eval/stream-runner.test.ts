@@ -1348,12 +1348,17 @@ test("镜像等价只用于人的用例基准：旧镜像的用例基准按镜�
     await ws.init(human.bundle(commit), commit);
     const cacheDir = join(base, "cache");
     const gate = ["sh", "-c", "exit 0"];
+    // 同一个旧镜像可以对多个新镜像（v4 对 v5 与 v6）
+    const pairs: [string, string][] = [
+      ["sha256:old", "sha256:mid"],
+      ["sha256:old", "sha256:new"],
+    ];
     const reference = new ReferenceCases({
       reference: ws,
       runtime: toyRuntime,
       cacheDir,
       image: "sha256:new",
-      equivalentImages: new Map([["sha256:old", "sha256:new"]]),
+      equivalentImages: pairs,
     });
     const casesCommand = commandDigest(toyRuntime.casesCommand);
     const gateCommand = commandDigest(JSON.stringify(gate));

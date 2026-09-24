@@ -1012,15 +1012,29 @@ export const EQUIVALENT_BASELINE_COMMANDS: ReadonlyMap<string, string> = new Map
   ["448eea1b5f30a457", "e5c99abd87a6bf24"],
 ]);
 
-// 镜像等价表（旧镜像 ID → 新镜像 ID），只用于人的用例基准：列入的镜像运行环境逐字相同、只差 lint 层，
+// 等价表：（旧, 新）对的列表；同一个旧值可以对多个新值
+export type EquivalencePairs = Iterable<readonly [string, string]>;
+
+function listedAsEquivalent(pairs: EquivalencePairs, from: string, to: string): boolean {
+  for (const [a, b] of pairs) if (a === from && b === to) return true;
+  return false;
+}
+
+// 镜像等价表（旧镜像 ID, 新镜像 ID），只用于人的用例基准：列入的镜像运行环境逐字相同、只差 lint 层，
 // 跑用例用的是运行环境，逐用例结果不受影响；检查门结果要用 lint 环境，不按镜像等价
-export const EQUIVALENT_CASE_IMAGES: ReadonlyMap<string, string> = new Map([
-  // strands v4 → v5：v5 只在 v4 之上多一层按提交解析的 lint 环境（148 修订）
+export const EQUIVALENT_CASE_IMAGES: EquivalencePairs = [
+  // strands v4 → v5：v5 只在 v4 之上多一层按提交解析的 lint 环境（148 补记）
   [
     "sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6",
     "sha256:c543a4eaf23f465b494e56a1ef825673796611a52ac5f85f73daad1e02fb1148",
   ],
-]);
+  // strands v4 → v6：v6 的 lint 层与 v5 解析结果逐字相同（95 个提交对到同样的 42 套），只是套装、映射表与切换脚本
+  // 改归 root 且只读，/opt 与 /opt/lint 改为带粘滞位——只改了属主与权限，运行环境不动
+  [
+    "sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6",
+    "sha256:d23b0a512ca217bc2c7984bf33dc52c1006cbf0cd2a9642b7638efb0e3f99b42",
+  ],
+];
 
 function sameIdentity(saved: unknown, want: BaselineIdentity): boolean {
   const s = saved as Partial<BaselineIdentity> | undefined;
@@ -1034,8 +1048,8 @@ function readIdentified<T>(
   want: BaselineIdentity,
   equivalent: ReadonlyMap<string, string>,
   hangFree: (saved: T) => boolean,
-  // 镜像等价表（旧镜像 ID → 新镜像 ID）：只有运行环境逐字相同的镜像才列入，只用于人的用例基准
-  equivalentImages: ReadonlyMap<string, string> = new Map()
+  // 镜像等价表：只有运行环境逐字相同的镜像才列入，只用于人的用例基准
+  equivalentImages: EquivalencePairs = []
 ): T | undefined {
   if (!existsSync(file)) return undefined;
   try {
@@ -1043,7 +1057,8 @@ function readIdentified<T>(
     if (sameIdentity(saved.identity, want)) return saved;
     const s = saved.identity as Partial<BaselineIdentity> | undefined;
     if (s === undefined || s.image === undefined || s.command === undefined) return undefined;
-    const imageOk = s.image === want.image || equivalentImages.get(s.image) === want.image;
+    const imageOk =
+      s.image === want.image || listedAsEquivalent(equivalentImages, s.image, want.image);
     const commandOk =
       s.command === want.command || (equivalent.get(s.command) === want.command && hangFree(saved));
     return imageOk && commandOk ? saved : undefined;
@@ -1061,7 +1076,7 @@ export class ReferenceCases implements HumanReferenceCases {
   private readonly cacheDir: string;
   private readonly image: string;
   private readonly equivalent: ReadonlyMap<string, string>;
-  private readonly equivalentImages: ReadonlyMap<string, string>;
+  private readonly equivalentImages: EquivalencePairs;
   private readonly timeoutMs: number;
   private readonly repeat: number;
   private readonly cgroupDir: string;
@@ -1076,7 +1091,7 @@ export class ReferenceCases implements HumanReferenceCases {
     image: string;
     // 等价摘要表（缺省 EQUIVALENT_BASELINE_COMMANDS）与用例基准的镜像等价表（缺省 EQUIVALENT_CASE_IMAGES）
     equivalentCommands?: ReadonlyMap<string, string>;
-    equivalentImages?: ReadonlyMap<string, string>;
+    equivalentImages?: EquivalencePairs;
     timeoutMs?: number;
     repeat?: number;
     // 容器内 cgroup v2 的目录（测试时指向假的目录）；告警出口缺省为标准错误
