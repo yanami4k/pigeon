@@ -4,9 +4,17 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import {
+  edits,
+  finished,
+  makeMemoryRepo,
+  memoryVerifyConfig,
+} from "../application/structured-memory-fixtures.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { buildMemoryEntries, loadStructuredMemory } from "../memory/structured-store.ts";
+import { hostWorkspaceAccess } from "../memory/structured-workspace.ts";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
-import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import { commandStepAgent, pigeonStepAgent, STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
@@ -30,7 +38,7 @@ function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAg
     condition: CONDITION_SPECS.minimal,
     target: { container: "box", root: "/testbed" },
     budget: { maxTurns: 150, wallClockMs: 60_000 },
-    verify: { command: "true", timeoutMs: 60_000 },
+    verify: { steps: [{ name: "验证", command: "true" }], command: "true", timeoutMs: 60_000 },
     workDir,
     ...overrides,
   };
@@ -203,6 +211,13 @@ function containerWorkspace(dir: string) {
   return { testbed, ...localDockerHost(testbed) };
 }
 
+// a.txt 为 fixed 才通过的一步验证
+const FIXED_GATE = {
+  steps: [{ name: "验证", command: "grep -qx fixed a.txt" }],
+  command: "grep -qx fixed a.txt",
+  timeoutMs: 60_000,
+};
+
 const editTo = (from: string, to: string) => ({
   text: `把 ${from} 改成 ${to}`,
   toolCalls: [
@@ -235,7 +250,7 @@ test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修�
       input(join(dir, "job"), {
         condition: CONDITION_SPECS.full,
         target: { container: "box", root: ws.containerRoot },
-        verify: { command: "grep -qx fixed a.txt", timeoutMs: 60_000 },
+        verify: FIXED_GATE,
       })
     );
     assert.deepEqual(out.repair, {
@@ -265,7 +280,7 @@ test("Pigeon agent：不开回炉的条件不验证、不撤回，结果不带�
       input(join(dir, "job"), {
         condition: CONDITION_SPECS["no-gate"],
         target: { container: "box", root: ws.containerRoot },
-        verify: { command: "grep -qx fixed a.txt", timeoutMs: 60_000 },
+        verify: FIXED_GATE,
       })
     );
     assert.equal(out.repair, null);
@@ -293,7 +308,7 @@ test("Pigeon agent：完整条件接入结构化记忆（开启、按题面与�
         input(workDir, {
           condition: CONDITION_SPECS[condition],
           target: { container: "box", root: ws.containerRoot },
-          verify: { command: "grep -qx fixed a.txt", timeoutMs: 60_000 },
+          verify: FIXED_GATE,
         })
       );
       assert.equal(out.repair?.finalVerdict, "pass");
@@ -311,4 +326,86 @@ test("Pigeon agent：完整条件接入结构化记忆（开启、按题面与�
   }
   assert.deepEqual(seen.full, { enabled: true, selection: "auto" });
   assert.notEqual(seen["no-memory"]?.enabled, true);
+});
+
+test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py 下各出结论；pytest 失败、回炉修好，事实锚点带 strands-py/ 前缀，下一步开局挑中并在容器里核验通过", async () => {
+  const repo = makeMemoryRepo({
+    "strands-py/src/pkg/mod.py": "VALUE = 1  # VALUE_OK\n",
+    "strands-py/tests/test_mod.py":
+      "# FAILS_UNLESS src/pkg/mod.py VALUE_OK test_value\ndef test_value():\n    pass\n",
+  });
+  const docker = localDockerHost(repo.root);
+  const workDir = mkdtempSync(join(tmpdir(), "pigeon-stream-job-"));
+  const config = memoryVerifyConfig([
+    { name: "格式", cwd: "strands-py" },
+    { name: "类型", cwd: "strands-py" },
+    { name: "子测试", cwd: "strands-py" },
+  ]);
+  const verify = { command: "不应被用到的单条命令", steps: config.steps ?? [], timeoutMs: 60_000 };
+  const streamFns: ReturnType<typeof createFakeStreamFn>[] = [];
+  const runStep = (prompt: string, replies: FakeReply[]) => {
+    const streamFn = createFakeStreamFn({ replies });
+    streamFns.push(streamFn);
+    return pigeonStepAgent({
+      streamFn,
+      yolo: true,
+      docker: docker.docker,
+      homeDir: repo.home,
+    }).run(
+      input(workDir, {
+        prompt,
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: docker.containerRoot },
+        verify,
+      })
+    );
+  };
+  const sessions = join(workDir, ".pigeon", "sessions");
+  try {
+    const first = await runStep("以往的一步", [
+      edits(["strands-py/src/pkg/mod.py", "  # VALUE_OK", ""]),
+      finished(),
+      edits(["strands-py/src/pkg/mod.py", "VALUE = 1", "VALUE = 1  # VALUE_OK again"]),
+      finished("修好了"),
+    ]);
+    assert.deepEqual([first.repair?.rounds, first.repair?.finalVerdict], [1, "pass"]);
+    const [firstId] = listSessionIds(sessions);
+    assert.ok(firstId !== undefined);
+    const verified = materializeSession(sessions, firstId, { content: false }).attemptVerifieds;
+    // 首轮三步各出结论，都在 strands-py 下执行
+    assert.deepEqual(
+      verified[0]?.steps?.map((s) => [s.name, s.cwd, s.verdict]),
+      [
+        ["格式", "strands-py", "pass"],
+        ["类型", "strands-py", "pass"],
+        ["子测试", "strands-py", "fail"],
+      ]
+    );
+    // 回炉反馈按步列出：失败步与已通过步分开，附失败步的输出末尾，不是整条命令的输出截尾
+    const feedback = JSON.stringify(streamFns[0]?.calls[2]?.context.messages.at(-1));
+    assert.match(feedback, /失败的步骤：子测试/);
+    assert.match(feedback, /已通过的步骤：格式、类型/);
+    assert.match(feedback, /test_value/);
+    assert.doesNotMatch(feedback, /验证命令：/);
+    repo.commit("落地");
+    const { facts } = loadStructuredMemory(workDir, {
+      persist: false,
+      accessFor: () => hostWorkspaceAccess(docker.host),
+    });
+    const onModule = buildMemoryEntries(facts).find(
+      (entry) => entry.anchor === "strands-py/src/pkg/mod.py"
+    );
+    assert.ok(onModule !== undefined, "锚点带 strands-py/ 前缀");
+    await runStep("修改 strands-py/src/pkg/mod.py", [finished("看过了")]);
+    const nextId = listSessionIds(sessions).find((id) => id !== firstId);
+    assert.ok(nextId !== undefined);
+    const opening = materializeSession(sessions, nextId, { content: false }).runStarteds[0]?.payload
+      .structuredMemory;
+    assert.deepEqual(opening?.opening, [onModule.id]);
+    assert.equal(opening?.openingBlocked, undefined);
+  } finally {
+    docker.cleanup();
+    rmSync(workDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    repo.cleanup();
+  }
 });

@@ -10,6 +10,7 @@ import { createContainerWorkspaceHost } from "../execution/container-host.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
+import { verifyStepsDisplay } from "../state/verify-steps.ts";
 import { deterministicErrorOf, isContentRefusal } from "./runner.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
@@ -69,11 +70,14 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
         // 去掉记忆的条件关闭。事实取自治理根里的以往会话，治理根即作业目录（条件 × 流 × 遍次各一个，见跑批器），
         // 记忆因此只在同一条流里沿步累积，不跨条件、遍次或流串用
         structuredMemory: input.condition.memory ? {} : { enabled: false },
-        // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点
+        // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点。
+        // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
+        // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取
         ...(repairRounds > 0
           ? {
               verify: {
-                command: input.verify.command,
+                command: verifyStepsDisplay(input.verify.steps),
+                steps: input.verify.steps.map((s) => ({ ...s })),
                 timeoutMs: input.verify.timeoutMs,
                 source: "project" as const,
               },

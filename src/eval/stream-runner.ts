@@ -33,6 +33,7 @@ import {
   countQuality,
   failedStepsOf,
   type StreamRepoRuntime,
+  type StreamVerifyStep,
   verifyConfigFile,
   verifyScript,
 } from "./stream-profiles.ts";
@@ -89,8 +90,9 @@ export interface StepAgentInput {
   condition: ConditionSpec;
   target: AgentTarget;
   budget: StepBudget;
-  // 开回炉的条件按它验证：由这条流的分步验证派生的一行命令（交 sh -c，在工作区根执行）与超时
-  verify: { command: string; timeoutMs: number };
+  // 开回炉的条件按它验证：这条流的分步验证（各步名称、命令与执行目录，Pigeon 原样交给 headless，逐步出结论）、
+  // 由它派生的一行命令（交 sh -c、在工作区根执行，给只认一条命令的 agent）与超时
+  verify: { steps: readonly StreamVerifyStep[]; command: string; timeoutMs: number };
   // 宿主上给这个作业用的目录（会话账本等）
   workDir: string;
   // 经网关时，这个作业的模型接入地址（决策 155）
@@ -342,8 +344,8 @@ async function runStreamJob(
   // 所以只在同一条流里沿步累积，不跨条件、遍次或流串用；目录名必须同时含这三者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });
-  // 分步验证配置写进这个作业的治理根（Pigeon 在宿主进程内运行，项目配置从治理根读；不写进容器工作区，
-  // 免得被当成 agent 的改动落地提交）
+  // 分步验证配置另存一份在作业的治理根，供事后查看这个作业验证的是什么（Pigeon 的验证不读它：跑批器每步把分步配置
+  // 直接交给步 agent）；不写进容器工作区，免得被当成 agent 的改动落地提交
   mkdirSync(path.join(jobDir, ".pigeon"), { recursive: true });
   writeAtomic(
     path.join(jobDir, ".pigeon", "verify.json"),
@@ -624,6 +626,7 @@ async function runStep(
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
         verify: {
+          steps: options.runtime.verifySteps,
           command: verifyScript(options.runtime.verifySteps),
           timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
         },

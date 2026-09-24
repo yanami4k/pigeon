@@ -19,7 +19,7 @@
 
 ## 二、两条流的分步验证配置
 
-分步验证的形状与 `.pigeon/verify.json` 的分步配置一致（`version: 1`、`steps: [{name, command, cwd?}]`、`timeoutMs`）。每条流的运行方式带上自己的分步，跑批器在每个作业开始时把它写进该作业治理根下的 `.pigeon/verify.json`。Pigeon 在宿主进程内运行，项目配置从治理根读取；strands 仓库也不忽略 `.pigeon/`，写进容器工作区会被当成 agent 的改动落地提交，故不写进容器工作区。
+分步验证的形状与 `.pigeon/verify.json` 的分步配置一致（`version: 1`、`steps: [{name, command, cwd?}]`、`timeoutMs`）。每条流的运行方式带上自己的分步，跑批器在每个作业开始时把它写进该作业治理根下的 `.pigeon/verify.json`。这份文件只供事后查看这个作业验证的是什么，Pigeon 的验证不读它：跑批器每步把分步配置（各步名称、命令与执行目录）直接交给步 agent，Pigeon 步 agent 原样传给 headless 的分步验证（见本文 M1 一节）。strands 仓库也不忽略 `.pigeon/`，写进容器工作区会被当成 agent 的改动落地提交，故不写进容器工作区。
 
 - 本仓库四步：格式（`npm run lint`）、类型（`npm run check`）、测试（`node --test --test-timeout=120000 "src/**/*.test.ts"`）、分层（`npm run deps`）。逐提交核对：清单范围内 93 个提交（起点加各步）的 `package.json` 里 lint、check、test、deps、verify 五个脚本逐字相同，没有缺失或不一致。
 - strands 三步，都在 `strands-py` 下执行：ruff（`ruff format --check && ruff check`）、mypy、pytest（与原验证门的单测一步相同：带 `--continue-on-collection-errors`，报告写出后等 5 秒杀掉进程，看报告里有没有失败或出错的用例）。
@@ -217,3 +217,10 @@ v3 上对人的代码实跑验证门暴露的三件环境问题（第二节末�
 `eval stream` 原先把命令行的 `--yolo` 原样交给 Pigeon 步 agent：调用方忘了传，prompt 档的写与执行在无审批通道时一律被拒，条件就不再是"完整 Pigeon"。修法：装配层以 `streamPigeonOptions` 拼出 Pigeon 步 agent 的参数，放权固定为 yolo，调用方传了 false 也不算数；命令行不再传 `--yolo`，用法说明同步去掉。
 
 用例"延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数"。变异：调用方的值覆盖固定值，用例精确变红（得到 false）。
+
+## 十五、复核补修：分步验证接到 Pigeon（M1）
+
+- 现状：分步配置写进了作业治理根的 `.pigeon/verify.json`，但 `runHeadless` 不读它；Pigeon 步 agent 传给 headless 的是 `verifyScript()` 拼成的一条命令，没有 `steps` 与 `cwd`。验证记录因此只有一个旧式步，指纹解析只认第一个工具，strands 各步在 `strands-py/` 下执行、报错路径缺前缀，回炉反馈按整条输出截尾。
+- 修法（二选一中取"调用时直接传分步"）：`StepAgentInput.verify` 增加 `steps`（各步名称、命令、执行目录），跑批器传入这条流的 `runtime.verifySteps`；Pigeon 步 agent 把它原样交给 `runHeadless` 的 `verify`（`{ command: verifyStepsDisplay(steps), steps, timeoutMs, source: "project" }`）。各步在各自执行目录下执行、各出结论，验证记录带各步结果，报错路径按执行目录换算回工作区根，回炉反馈按步列出失败步与各步输出末尾。一行命令 `verify.command` 仍留在输入里，给只认一条命令的 agent。治理根下的 `verify.json` 只供事后查看，Pigeon 不读（第二节第 22 行同步改正）。
+- 用例（`src/eval/stream-agents.test.ts`，假 docker 容器加真实 git 仓库）：`Pigeon agent：分步验证原样接到 headless——三步在 strands-py 下各出结论；pytest 失败、回炉修好，事实锚点带 strands-py/ 前缀，下一步开局挑中并在容器里核验通过`。首轮三步在 `strands-py` 下各出结论（格式、类型通过，子测试失败）；回炉那一轮的反馈写"失败的步骤：子测试""已通过的步骤：格式、类型"并附 pytest 输出末尾，不含单条命令式的"验证命令："；回炉一轮修好；派生的事实锚点为 `strands-py/src/pkg/mod.py`；下一步题面指到该文件，开局挑中这一条且没有被用前核验拦下。改动之前该用例为红（回炉轮数与结论实际为 3、fail，期望 1、pass）。原有三条 Pigeon agent 用例的验证改为带一步的分步配置。
+- 变异：Pigeon 步 agent 退回单条命令（`command: input.verify.command`，不传 `steps`）→ 上述用例精确变红，其余 Pigeon agent 用例通过；撤回后通过。
