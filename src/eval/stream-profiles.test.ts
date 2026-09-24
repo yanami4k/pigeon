@@ -100,9 +100,10 @@ function fakeStrands(tests: Record<string, string>): { base: string; ws: StreamW
   mkdirSync(join(root, "strands-py", "tests"), { recursive: true });
   mkdirSync(join(root, ".git"));
   mkdirSync(bin);
-  writeFileSync(join(bin, "python"), FAKE_PYTEST);
-  writeFileSync(join(bin, "ruff"), "#!/bin/sh\nexit 0\n");
-  writeFileSync(join(bin, "mypy"), "#!/bin/sh\nexit 0\n");
+  // 经 PATH 调用：Linux 上要有可执行位
+  writeFileSync(join(bin, "python"), FAKE_PYTEST, { mode: 0o755 });
+  writeFileSync(join(bin, "ruff"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(bin, "mypy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   for (const [name, content] of Object.entries(tests)) {
     writeFileSync(join(root, "strands-py", "tests", name), content);
   }
