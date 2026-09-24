@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
@@ -469,6 +477,61 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           [2, "maintenance", "passed"],
         ]
       );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("测量副本与人写测试集一致：agent 新建、落了地的测试文件不进全量测量的副本", async () => {
+    const t = await toy();
+    try {
+      const inCopy: boolean[] = [];
+      const runtime = {
+        ...toyRuntime,
+        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+          const cwd = args[2].cwd;
+          // 只看全量测量（在测量副本里跑）
+          if (cwd !== undefined) inCopy.push(existsSync(join(cwd, "src", "agent.test.sh")));
+          return toyRuntime.runCases(...args);
+        },
+      };
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1)
+          write(input.target.root, { "src/a.txt": "alpha\n", "src/agent.test.sh": "exit 1\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
+      assert.ok(inCopy.length > 0, "做了全量测量");
+      assert.ok(
+        inCopy.every((present) => !present),
+        "agent 新建的测试文件不在测量副本里"
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("测量与判题的产物用完即清：下一步开始时，工作区里没有判题报告，测量副本目录是空的", async () => {
+    const t = await toy();
+    try {
+      const leftovers: string[][] = [];
+      const agent = scriptedAgent((input) => {
+        const root = input.target.root;
+        const measureDirs = join(t.base, "envs", "measure");
+        const inMeasure = existsSync(measureDirs)
+          ? readdirSync(measureDirs).flatMap((d) => readdirSync(join(measureDirs, d)))
+          : [];
+        leftovers.push([
+          ...(existsSync(join(root, ".git", "pigeon-cases-junit.xml")) ? ["judge-junit"] : []),
+          ...inMeasure,
+        ]);
+        if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
+        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      // 第 2 步开始时：第 1 步判题与全量测量留下的都已清掉
+      assert.deepEqual(leftovers[1], []);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

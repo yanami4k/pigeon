@@ -251,6 +251,19 @@ export class StreamWorkspace {
     return measureRoot;
   }
 
+  // 测量与判题的产物用完即清，不留给下一步的 agent：清空测量副本目录的内容（人写测试的副本与其中的报告），
+  // 删掉工作区里判题的报告与维护步验证门的报告
+  async clearArtifacts(measureRoot: string): Promise<void> {
+    await this.must(
+      [
+        'if [ -d "$1" ]; then find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi',
+        `rm -f ${shellQuote(`${this.root}/.git/pigeon-cases-junit.xml`)} /tmp/pigeon-gate-junit.xml`,
+      ].join("\n"),
+      "清理测量与判题的产物",
+      { args: [measureRoot], timeoutMs: 120_000 }
+    );
+  }
+
   // 在测量副本里写入人的文件
   async applyHumanFilesAt(
     dir: string,
@@ -305,13 +318,25 @@ export class StreamWorkspace {
     return out;
   }
 
-  // 把人的文件同步进目录：只写 blob 与目录里被跟踪版本不同（或缺失）的文件；返回写入的路径
+  // 把人的文件同步进目录：只写 blob 与目录里被跟踪版本不同（或缺失）的文件；返回写入的路径。
+  // 给了 exclusive 时，目录里被它认定为同一类（测试、测试辅助）却不在人的这批文件里的，先删掉（例如 agent 新建的
+  // conftest.py 与测试文件），使目录里这一类文件与人的完全一致
   async syncHumanFilesAt(
     dir: string,
     entries: readonly { path: string; blob: string; kind: HumanFileOp["kind"] }[],
-    read: (path: string) => Buffer
+    read: (path: string) => Buffer,
+    exclusive?: (path: string) => HumanFileOp["kind"] | null
   ): Promise<string[]> {
     const tracked = await this.trackedBlobs(dir);
+    if (exclusive !== undefined) {
+      const human = new Set(entries.map((e) => e.path));
+      const extra: HumanFileOp[] = [];
+      for (const p of tracked.keys()) {
+        const kind = exclusive(p);
+        if (kind !== null && !human.has(p)) extra.push({ path: p, op: "delete", kind });
+      }
+      await this.applyHumanFilesAt(dir, extra, read);
+    }
     const stale = entries.filter((e) => tracked.get(e.path) !== e.blob);
     await this.applyHumanFilesAt(
       dir,

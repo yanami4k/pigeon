@@ -508,7 +508,16 @@ async function measure(
     .tree(step.commit)
     .map((e) => ({ ...e, kind: runtime.profile.classifyFile(e.path) }))
     .filter((e) => e.kind === "test" || e.kind === "testaux");
-  await ws.syncHumanFilesAt(copy, tree, (p) => options.human.show(step.commit, p));
+  // 副本里的测试与测试辅助文件与人的这一集合完全一致：agent 新建的（含 conftest.py 一类）先删掉，再写人的
+  await ws.syncHumanFilesAt(
+    copy,
+    tree,
+    (p) => options.human.show(step.commit, p),
+    (p) => {
+      const kind = runtime.profile.classifyFile(p);
+      return kind === "test" || kind === "testaux" ? kind : null;
+    }
+  );
   await syncEnv(options, ws, copy);
   const tests = humanTestsAt(options.human, runtime, step.commit);
   // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例在分母里、计为未通过
@@ -709,6 +718,8 @@ async function runStep(
     }
   }
   const measured = await measure(options, env, steps, step, state);
+  // 测量与判题的产物（测量副本、判题与验证门的报告）用完即清，不留给下一步的 agent
+  await ws.clearArtifacts(env.measureRoot);
   const attribution = judged
     ? attributeFailure({
         passed: passed && !reverted,
