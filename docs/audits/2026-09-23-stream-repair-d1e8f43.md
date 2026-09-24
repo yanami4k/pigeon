@@ -211,3 +211,9 @@ v3 上对人的代码实跑验证门暴露的三件环境问题（第二节末�
 启动器原先继承跑批进程的全部环境变量，真 key（KIMI_API_KEY 等）随之进入 mini-swe-agent 与 litellm 所在的进程。修法：拉起启动器时显式传入去掉密钥类变量的环境（名字里含 API_KEY、TOKEN、SECRET、PASSWORD、CREDENTIAL、PRIVATE_KEY、AUTH 的一律去掉），启动器只拿到请求文件里的网关地址与占位 key。
 
 用例"命令式 agent：启动器的环境里没有密钥类变量（真 key 只在网关里），普通变量照常"：宿主环境里放几个密钥类变量，启动器把自己看到的环境写回，断言密钥类变量都不在、任何值里都不带密钥，普通变量与 PATH 照常。变异：拉起时传原样的宿主环境，用例精确变红（KIMI_API_KEY 进入了启动器的环境）。
+
+### Pigeon 各条件一律无人值守放权（顺手做）
+
+`eval stream` 原先把命令行的 `--yolo` 原样交给 Pigeon 步 agent：调用方忘了传，prompt 档的写与执行在无审批通道时一律被拒，条件就不再是"完整 Pigeon"。修法：装配层以 `streamPigeonOptions` 拼出 Pigeon 步 agent 的参数，放权固定为 yolo，调用方传了 false 也不算数；命令行不再传 `--yolo`，用法说明同步去掉。
+
+用例"延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数"。变异：调用方的值覆盖固定值，用例精确变红（得到 false）。

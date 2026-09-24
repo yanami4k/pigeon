@@ -51,8 +51,8 @@ export interface StreamExperimentOptions {
   budget: StepBudget;
   // 四个条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里
   gateway: { keys: readonly string[]; modelId: string };
-  // Pigeon 各条件的运行参数（模型接入由网关给）；缺省则这些条件的作业停止并说明
-  pigeon?: Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor">;
+  // Pigeon 各条件的运行参数（模型接入由网关给；放权固定为无人值守，见 streamPigeonOptions）；缺省则这些条件的作业停止并说明
+  pigeon?: StreamPigeonOptions;
   // 最简 agent 的启动器命令；缺省则该条件的作业停止并说明
   minimalCommand?: readonly string[];
   docker?: readonly string[];
@@ -60,6 +60,16 @@ export interface StreamExperimentOptions {
   // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
   baselineDir?: string;
   log?: (line: string) => void;
+}
+
+export type StreamPigeonOptions = Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor" | "yolo">;
+
+// 延续式跑批无人值守：Pigeon 各条件一律放权（yolo），不依赖调用方记得传——没有审批通道时，prompt 档的写与执行
+// 一律被拒，条件就不再是"完整 Pigeon"
+export function streamPigeonOptions(
+  pigeon: StreamPigeonOptions
+): Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor"> {
+  return { ...pigeon, yolo: true };
 }
 
 function readManifest(file: string): { manifest: StreamManifest; runtime: StreamRepoRuntime } {
@@ -116,7 +126,7 @@ export async function runStreamExperiment(
     const agents: Partial<Record<"pigeon" | "minimal", StepAgent>> = {};
     if (options.pigeon !== undefined) {
       agents.pigeon = pigeonStepAgent({
-        ...options.pigeon,
+        ...streamPigeonOptions(options.pigeon),
         docker,
         streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId),
       });
