@@ -476,6 +476,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         }
       }
       await options.beforeVerify?.();
+      // 还原受保护文件与验证前的清理期间来了外部中止：不跑验证
+      if (externallyAborted) {
+        status = "aborted";
+        break;
+      }
       const verified = await verifyAttempt({
         config: options.verify,
         workspace: options.workspaceHost?.root ?? options.workspaceRoot,

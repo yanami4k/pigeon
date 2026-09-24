@@ -169,3 +169,33 @@ test("容器上的回炉：执行端没有回到起点的能力即启动报错",
     s.cleanup();
   }
 });
+
+test("容器回炉：验证前的还原与清理期间来了外部中止，不跑这次验证、不回炉，终态记 aborted", async () => {
+  const s = setup();
+  try {
+    const abort = new AbortController();
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: s.governance,
+      workspaceRoot: s.placeholder,
+      workspaceHost: s.host,
+      streamFn: createFakeStreamFn({ replies: [edit("bug", "half"), done()] }),
+      yolo: true,
+      homeDir: s.home,
+      verify: {
+        command: "touch verified.flag; grep -qx fixed a.txt",
+        timeoutMs: 30_000,
+        source: "project",
+      },
+      repairRounds: 3,
+      abortSignal: abort.signal,
+      // 验证前的清理里到达中止（相当于还原受保护文件期间来了限额信号）
+      beforeVerify: async () => abort.abort(),
+    });
+    assert.equal(result.status, "aborted");
+    assert.equal(existsSync(join(s.testbed, "verified.flag")), false, "没有跑验证");
+    assert.equal(readFileSync(join(s.testbed, "a.txt"), "utf8"), "half\n", "没有回炉、没有撤回");
+  } finally {
+    s.cleanup();
+  }
+});
