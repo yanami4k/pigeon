@@ -67,6 +67,9 @@ export const STREAM_COMMITTER = { name: "pigeon-stream", email: "stream@pigeon.i
 
 const BUNDLE_PATH = ".git/pigeon-start.bundle";
 
+// 各步"开工时的树"的引用前缀（容器执行端在每步开工时建，见 container-host 的 stepStartRef）
+export const STEP_START_REFS = "refs/pigeon/step-start";
+
 // 跑批器自己的 git 操作不受 agent 能改的 git 设置左右：不执行 .git/hooks 里的钩子、不跑 fsmonitor 程序（环境变量里的
 // 设置优先于仓库的 .git/config）。只加在工作区内部操作上，agent 与判题的命令照旧
 const SAFE_GIT_ENV =
@@ -169,6 +172,8 @@ export class StreamWorkspace {
         "git config core.autocrlf false",
         `cat > ${BUNDLE_PATH}`,
         `git fetch -q ${BUNDLE_PATH} "$1"`,
+        // 各步"开工时的树"的引用随流历史一起带回，之后导出的流历史里仍有它们
+        `if git bundle list-heads ${BUNDLE_PATH} | grep -q " ${STEP_START_REFS}/"; then git fetch -q ${BUNDLE_PATH} "${STEP_START_REFS}/*:${STEP_START_REFS}/*"; fi`,
         'git checkout -q -f -B main "$1"',
         `rm -f ${BUNDLE_PATH}`,
         "rm -f .git/FETCH_HEAD",

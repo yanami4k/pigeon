@@ -90,6 +90,9 @@ export interface ContainerHostOptions {
   docker?: readonly string[];
   // 每次 exec 带入容器的环境变量（如外部基准镜像里激活测试环境所需的 PATH）
   env?: Readonly<Record<string, string>>;
+  // 给"开工时的树"建的引用（如 refs/pigeon/step-start/<流>/<步>）：开工时的树是挂在起点提交下的独立提交，没有引用会被
+  // 垃圾回收；有了引用，它随流历史一起导出，事后的定点对照与单步重跑都取得到
+  stepStartRef?: string;
   // 辅助调用（解析路径、读写文件、列清单、重启容器）的超时，缺省 60 秒
   helperTimeoutMs?: number;
 }
@@ -432,10 +435,17 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         .trim();
       // "开工时的树"：在临时索引上 add -A（不含被忽略的）写成树，挂在起点提交之下；不动真实索引与工作区
       const base = await must(["sh", "-c", START_TREE_SCRIPT, "sh", commit], "记下开工时的树");
+      const baseCommit = base.toString("utf8").trim();
+      if (options.stepStartRef !== undefined) {
+        await must(
+          ["git", "-c", "core.hooksPath=/dev/null", "update-ref", options.stepStartRef, baseCommit],
+          "给开工时的树建引用"
+        );
+      }
       return {
         commit,
         ignored: await ignoredPaths(),
-        baseCommit: base.toString("utf8").trim(),
+        baseCommit,
       };
     },
     async restoreStepStart(mark) {

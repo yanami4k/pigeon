@@ -15,6 +15,7 @@ import { verifyStepsDisplay } from "../state/verify-steps.ts";
 import { deterministicErrorOf, isContentRefusal } from "./runner.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
+import { STEP_START_REFS } from "./stream-workspace.ts";
 
 // 工作方式指令：与外部基准同一句的写法（对齐公开最简实现的措辞），把"修 issue"换成"实现用户消息里描述的改动"。
 // 四个条件共用；它属于被测条件，改它等于换条件
@@ -90,6 +91,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
       const host = createContainerWorkspaceHost({
         container: input.target.container,
         root: input.target.root,
+        stepStartRef: `${STEP_START_REFS}/${input.job.stream}/${input.step.seq}`,
         ...(options.docker !== undefined ? { docker: options.docker } : {}),
       });
       // 容器工作区下宿主侧只是占位目录：账本与治理按它登记，工具不经它读写

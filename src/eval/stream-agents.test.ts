@@ -19,6 +19,8 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { commandStepAgent, pigeonStepAgent, STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
+import { localStreamShell } from "./stream-shell-fixtures.ts";
+import { StreamWorkspace } from "./stream-workspace.ts";
 
 function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAgentInput {
   return {
@@ -629,6 +631,53 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
       ws.cleanup();
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
+  }
+});
+
+test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）建了引用，随导出的流历史带走、从流历史恢复后仍在", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  try {
+    // 开工时有未提交的人写测试：开工时的树因此是挂在起点提交下的独立提交
+    writeFileSync(join(ws.testbed, "check.sh"), "grep -qx fixed a.txt\n");
+    const agent = pigeonStepAgent({
+      streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    });
+    await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: FIXED_GATE,
+      })
+    );
+    const sessions = join(dir, "job", ".pigeon", "sessions");
+    const recorded = listSessionIds(sessions)
+      .flatMap((id) => materializeSession(sessions, id, { content: false }).runStarteds)
+      .map((r) => r.payload.stepStart?.baseCommit)
+      .find((b) => b !== undefined);
+    assert.ok(recorded !== undefined, "run.started 记下了开工时的树");
+    const ref = "refs/pigeon/step-start/s1/7";
+    assert.equal(git(ws.testbed, "rev-parse", ref), recorded);
+    // 导出的流历史里有这个引用与它的对象
+    const bundle = await new StreamWorkspace(localStreamShell(ws.testbed)).exportBundle();
+    const file = join(dir, "history.bundle");
+    writeFileSync(file, bundle);
+    assert.ok(git(dir, "bundle", "list-heads", file).split("\n").includes(`${recorded} ${ref}`));
+    // 从流历史恢复（续跑重建容器）后引用仍在
+    const restored = join(dir, "restored");
+    mkdirSync(restored);
+    const head = git(ws.testbed, "rev-parse", "HEAD");
+    await new StreamWorkspace(localStreamShell(restored)).restoreFromBundle(bundle, head);
+    assert.equal(git(restored, "rev-parse", ref), recorded);
+    assert.equal(git(restored, "cat-file", "-t", recorded), "commit");
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
