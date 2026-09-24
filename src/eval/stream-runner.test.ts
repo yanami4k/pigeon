@@ -482,6 +482,35 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("agent 暂存了人写测试的改名：原路径恢复成本步起点的版本、改名后的路径删掉，作业不中止", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        const root = input.target.root;
+        if (input.step.seq === 1) {
+          write(root, { "src/a.txt": "alpha\n" });
+          git(root, "mv", "src/base.test.sh", "src/moved.test.sh");
+        }
+        return undefined;
+      });
+      const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 1 }]);
+      const [row] = readStreamResults(summary.resultsFile);
+      assert.equal(row?.outcome, "passed");
+      const bundle = readFileSync(join(t.base, "out", "streams", "s1-no-gate-1", "history.bundle"));
+      const check = join(t.base, "check");
+      mkdirSync(check);
+      git(check, "init", "-q");
+      writeFileSync(join(check, "h.bundle"), bundle);
+      git(check, "fetch", "-q", "h.bundle", `${row?.head}:refs/heads/main`);
+      const files = git(check, "ls-tree", "--name-only", "-r", "main", "src").split("\n");
+      assert.ok(files.includes("src/base.test.sh"), "原路径恢复");
+      assert.ok(!files.includes("src/moved.test.sh"), "改名后的路径删掉");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("测量副本与人写测试集一致：agent 新建、落了地的测试文件不进全量测量的副本", async () => {
     const t = await toy();
     try {

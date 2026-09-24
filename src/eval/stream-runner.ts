@@ -489,19 +489,27 @@ async function agentChangedDeclaration(
 }
 
 // agent 不许改测试（第 6 条）：它动过的测试与测试辅助文件，本步由程序写入的恢复成人的版本，其余恢复成本步起点的版本；
-// 它新建的测试文件保留（全量测量只跑人写的测试）
+// 它新建的测试文件保留（全量测量只跑人写的测试）。把测试或测试辅助文件改了名的（暂存的改名）：改名后的路径删掉，
+// 原路径另作一项、恢复成本步起点的版本
 async function restoreTests(
   options: RunStreamsOptions,
   ws: StreamWorkspace,
   step: StreamStep
 ): Promise<void> {
   const profile = options.runtime.profile;
-  const changed = (await ws.changedPaths()).filter((c) => {
-    const kind = profile.classifyFile(c.path);
+  const isTest = (p: string) => {
+    const kind = profile.classifyFile(p);
     return kind === "test" || kind === "testaux";
-  });
+  };
+  const all = await ws.changedPaths();
+  const changed = all.filter((c) => isTest(c.path));
   const human = new Set(
     step.humanFiles.filter((f) => f.kind === "test" || f.kind === "testaux").map((f) => f.path)
+  );
+  await ws.removePaths(
+    all
+      .filter((c) => c.renamedFrom !== undefined && isTest(c.renamedFrom) && !human.has(c.path))
+      .map((c) => c.path)
   );
   await ws.restoreFromHead(
     changed.filter((c) => !c.untracked && !human.has(c.path)).map((c) => c.path)

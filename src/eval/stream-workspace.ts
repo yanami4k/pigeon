@@ -282,19 +282,42 @@ export class StreamWorkspace {
   }
 
   // 相对 HEAD 有改动的路径（含删除与未忽略的未跟踪文件）；untracked 表示 HEAD 里没有它
-  async changedPaths(): Promise<{ path: string; untracked: boolean }[]> {
+  // 相对本步起点的改动。暂存了的改名（R）与复制（C）：新路径记为新建（HEAD 里没有），并带上原路径 renamedFrom；
+  // 改名的原路径另记一项（它在工作区里已不在，从 HEAD 恢复即可），复制的原路径没动、不记
+  async changedPaths(): Promise<{ path: string; untracked: boolean; renamedFrom?: string }[]> {
     const r = await this.must("git status --porcelain=v1 -z --untracked-files=all", "读取改动");
     const parts = r.stdout.split("\x00");
-    const out: { path: string; untracked: boolean }[] = [];
+    const out: { path: string; untracked: boolean; renamedFrom?: string }[] = [];
     for (let i = 0; i < parts.length; i++) {
       const entry = parts[i] ?? "";
       if (entry.length < 4) continue;
       const code = entry.slice(0, 2);
-      out.push({ path: entry.slice(3), untracked: code === "??" || code.includes("A") });
-      // 改名项后面跟着原路径
-      if (code.startsWith("R") || code.startsWith("C")) i++;
+      const path = entry.slice(3);
+      if (code.startsWith("R") || code.startsWith("C")) {
+        // 改名与复制项后面跟着原路径
+        const from = parts[i + 1] ?? "";
+        i++;
+        if (code.startsWith("R")) {
+          out.push({ path, untracked: true, renamedFrom: from });
+          out.push({ path: from, untracked: false });
+        } else {
+          out.push({ path, untracked: true });
+        }
+        continue;
+      }
+      out.push({ path, untracked: code === "??" || code.includes("A") });
     }
     return out;
+  }
+
+  // 删掉给定路径（连同暂存区里的记录）；不在的忽略
+  async removePaths(paths: readonly string[]): Promise<void> {
+    if (paths.length === 0) return;
+    await this.must(
+      'git rm -q -f --cached --ignore-unmatch -- "$@" >/dev/null && rm -f -- "$@"',
+      "删除文件",
+      { args: paths }
+    );
   }
 
   // 把给定路径恢复成 HEAD 里的版本
