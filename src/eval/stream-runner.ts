@@ -79,7 +79,9 @@ export interface StepBudget {
   wallClockMs: number;
 }
 
-export const DEFAULT_STEP_BUDGET: StepBudget = { maxTurns: 150, wallClockMs: 30 * 60_000 };
+// 每步预算（147 校准）：试跑 10 步的轮数与墙钟各取第 90 百分位乘 1.5，且分别不低于 150 轮、30 分钟，得 150 轮、46 分钟；
+// 四个条件同额，回炉的消耗计入其中
+export const DEFAULT_STEP_BUDGET: StepBudget = { maxTurns: 150, wallClockMs: 46 * 60_000 };
 
 // agent 的命令在哪里执行
 export interface AgentTarget {
@@ -236,6 +238,9 @@ export interface RunStreamsOptions {
   limits?: LimitController;
   // 经网关时：轮数与 token 一律取网关的按作业计量，四个条件同一口径
   gateway?: StreamModelGateway;
+  // 身份头的摘要与各 agent 的参数：原样记进每条结果行（应修 9、顺手做第 3 条）
+  runIdentity?: string;
+  agentSettings?: Partial<Record<ConditionSpec["agent"], Record<string, unknown>>>;
 }
 
 export interface StreamJobSummary {
@@ -638,6 +643,8 @@ async function runStep(
     harnessRef: options.harnessRef,
     limitPauses: [],
     humanFailsGate: step.humanFailsGate === true,
+    runIdentity: options.runIdentity ?? null,
+    agentSettings: options.agentSettings?.[spec.agent] ?? null,
   };
   // 不做、不判的一行：跳过步，或因依赖环境选不出来而作废的步（回到本步起点、记下原因、沿用上一步的测量）
   const notRun = (error?: string): StreamResultLine => ({

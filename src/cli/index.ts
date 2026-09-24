@@ -635,7 +635,7 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 
 // pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
 //   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
-//   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
+//   [--wall-clock-min N（缺省 46）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>]：
 // 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地或撤回、全量测量、写结果行；
 // 无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；

@@ -660,6 +660,43 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("结果行带身份摘要与本条件所用 agent 的参数（温度、输出上限、推理档位等，两种 agent 各记各的）", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent, minimal: agent },
+          conditions: ["no-gate", "minimal"],
+          maxSteps: 1,
+          concurrency: 1,
+          runIdentity: "0123456789abcdef",
+          agentSettings: {
+            pigeon: { temperature: 0, thinking: null, maxOutputTokens: null },
+            minimal: { modelKwargs: { temperature: 0.0, drop_params: true } },
+          },
+        })
+      );
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.condition, r.runIdentity, r.agentSettings]),
+        [
+          [
+            "no-gate",
+            "0123456789abcdef",
+            { temperature: 0, thinking: null, maxOutputTokens: null },
+          ],
+          ["minimal", "0123456789abcdef", { modelKwargs: { temperature: 0.0, drop_params: true } }],
+        ]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("人的代码没过检查门的步：清单按预检结果打标记（其余去掉），结果行照抄这一列，步照常跑", async () => {
     const t = await toy();
     try {
