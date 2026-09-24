@@ -714,6 +714,62 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("依赖环境切换的其他失败（命令不在、超时、容器故障等，退出码不是 3）：停下作业并报错，不作废成跳过步", async () => {
+    for (const bad of [
+      { envSyncFor: () => ["sh", "-c", "echo select-env: not found >&2; exit 127"] },
+      { lintSyncCommand: () => ["sh", "-c", "echo docker 故障 >&2; exit 1"] },
+    ]) {
+      const t = await toy();
+      try {
+        const runtime = { ...toyRuntime, envDeclarationFile: "src/base.txt", ...bad };
+        const agent = scriptedAgent(() => undefined);
+        const summary = await runStreams(
+          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+        );
+        assert.match(summary.jobs[0]?.stopped ?? "", /环境切换出错/);
+        assert.deepEqual(readStreamResults(summary.resultsFile), []);
+        assert.equal(agent.calls.length, 0);
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("全量测量时找不到可用的依赖组合（退出码 3）：这一步作废——撤掉已落地的提交、记下原因，下一步从本步起点接着做", async () => {
+    const t = await toy();
+    try {
+      // 只在测量副本里（目录名含 measure）选不出组合
+      const runtime = {
+        ...toyRuntime,
+        envDeclarationFile: "src/base.txt",
+        envSyncFor: () => ["sh", "-c", 'case "$(pwd)" in *measure*) exit 3;; esac; exit 0'],
+      };
+      const sawStep1Work: boolean[] = [];
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        if (input.step.seq === 2)
+          sawStep1Work.push(existsSync(join(input.target.root, "src/a.txt")));
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+      );
+      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }]);
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.seq, r.outcome]),
+        [
+          [1, "skipped"],
+          [2, "skipped"],
+        ]
+      );
+      assert.ok(rows.every((r) => /依赖环境选择失败.*作废/s.test(r.error ?? "")));
+      assert.deepEqual(sawStep1Work, [false], "第 1 步落地的提交已撤掉");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("lint 环境按该步人的提交切换：agent 运行前已切到该步人的提交，不看 agent 改过的依赖声明", async () => {
     const t = await toy();
     try {

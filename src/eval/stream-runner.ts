@@ -53,7 +53,7 @@ import {
   streamJobKey,
   ZERO_USAGE,
 } from "./stream-results.ts";
-import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
+import { type CommandOutcome, dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
 // 四个条件（126 修订、140）：完整 Pigeon 开回炉、撤回与结构化记忆；去掉记忆只关结构化记忆；去掉验证门与回退两者都不开；
@@ -503,6 +503,9 @@ async function runStreamJob(
 }
 
 // 依赖环境选不出来（没有满足该步依赖声明的组合、lint 映射里没有该提交）：这一步作废，作业照常往下走
+// select-env / select-lint 的"没有可用组合 / 映射里没有该提交"
+export const ENV_UNAVAILABLE_EXIT = 3;
+
 export class EnvSelectionError extends Error {
   override name = "EnvSelectionError";
 }
@@ -522,17 +525,19 @@ async function syncEnv(
     await ws.writeFile(declared, options.human.show(humanCommit, runtime.envDeclarationFile));
     command = runtime.envSyncFor(declared);
   }
-  if (command !== null) {
-    const r = await ws.run(command, 120_000, cwd);
-    if (r.exitCode !== 0)
-      throw new EnvSelectionError(`依赖环境选择失败（${humanCommit}）：${r.output.slice(-500)}`);
-  }
+  // 只有切换脚本明说"没有可用组合 / 映射里没有该提交"（退出码 3）才作废这一步；其余失败（超时、命令不在、容器故障等）
+  // 是跑批环境的问题，停下作业报错，不写成跳过步
+  const check = (what: string, r: CommandOutcome) => {
+    if (r.exitCode === 0 && !r.timedOut) return;
+    if (r.exitCode === ENV_UNAVAILABLE_EXIT && !r.timedOut)
+      throw new EnvSelectionError(`${what}选择失败（${humanCommit}）：${r.output.slice(-500)}`);
+    throw new Error(
+      `${what}切换出错（${humanCommit}，退出码 ${r.exitCode}${r.timedOut ? "，超时" : ""}）：${r.output.slice(-500)}`
+    );
+  };
+  if (command !== null) check("依赖环境", await ws.run(command, 120_000, cwd));
   const lint = runtime.lintSyncCommand?.(humanCommit);
-  if (lint !== undefined) {
-    const r = await ws.run(lint, 120_000, cwd);
-    if (r.exitCode !== 0)
-      throw new EnvSelectionError(`lint 环境选择失败（${humanCommit}）：${r.output.slice(-500)}`);
-  }
+  if (lint !== undefined) check("lint 环境", await ws.run(lint, 120_000, cwd));
 }
 
 // agent 是否改了依赖声明文件（与人在该步的版本不同，含删掉）；运行方式没有依赖声明为 null
@@ -863,7 +868,15 @@ async function runStep(
       head = await ws.land(step.message);
     }
   }
-  const measured = await measure(options, env, steps, step, state);
+  let measured: Measurement;
+  try {
+    measured = await measure(options, env, steps, step, state);
+  } catch (error) {
+    // 测量时选不出依赖组合：与判题前同一口径作废——撤掉已落地的提交，回到本步起点
+    if (!(error instanceof EnvSelectionError)) throw error;
+    await ws.clearArtifacts(env.measureRoot);
+    return voided(error);
+  }
   // 测量与判题的产物（测量副本、判题与验证门的报告）用完即清，不留给下一步的 agent
   await ws.clearArtifacts(env.measureRoot);
   const attribution = judged
