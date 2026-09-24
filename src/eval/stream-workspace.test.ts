@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -288,7 +289,7 @@ test("容器里的 root 操作：跑批器写 agent 不可写的位置时以 doc
   }
 });
 
-test("删覆盖人写测试的自动加载辅助文件：按文件系统列（嵌套的 git 仓库里的也删），名叫 conftest 的目录整个删、符号链接只删链接本身；agent 自己目录的与人的保留", async () => {
+test("删覆盖人写测试的自动加载辅助文件：按文件系统列（嵌套的 git 仓库里的也删），名叫 conftest 的目录整个删；agent 自己目录的与人的保留", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-"));
   try {
     const root = join(base, "ws");
@@ -311,10 +312,6 @@ test("删覆盖人写测试的自动加载辅助文件：按文件系统列（�
     // agent 自己的测试目录
     put("own/conftest.sh", "agent\n");
     put("own/test_own.sh");
-    const target = join(base, "outside.sh");
-    writeFileSync(target, "outside\n");
-    const symlinks = process.platform !== "win32";
-    if (symlinks) execFileSync("ln", ["-s", target, join(root, "tests", "unit", "more", "linked")]);
     const ws = new StreamWorkspace(localStreamShell(root));
     const human = ["tests/unit/test_a.sh", "tests/deep/test_b.sh", "tests/unit/more/test_c.sh"];
     const removed = await removeCoveringHelpers(
@@ -331,7 +328,6 @@ test("删覆盖人写测试的自动加载辅助文件：按文件系统列（�
     assert.equal(existsSync(join(root, "tests", "conftest.sh")), true, "人的保留");
     assert.equal(existsSync(join(root, "own", "conftest.sh")), true, "agent 自己目录的保留");
     assert.equal(existsSync(join(root, "tests", "unit", "more", "conftest.sh")), false);
-    assert.equal(readFileSync(target, "utf8"), "outside\n", "符号链接指向的文件不动");
     // 空格、非 ASCII 与根目录下的路径
     put("有 空格/test_d.sh");
     put("有 空格/conftest.sh", "agent\n");
@@ -340,6 +336,106 @@ test("删覆盖人写测试的自动加载辅助文件：按文件系统列（�
       "有 空格/test_d.sh",
     ]);
     assert.deepEqual(again.sort(), ["conftest.sh", "有 空格/conftest.sh"]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// 本机（Windows）建不了原生符号链接：符号链接的用例只在 Linux 上跑
+const NO_SYMLINKS = process.platform === "win32" ? "本机建不了原生符号链接" : false;
+
+test("删覆盖人写测试的 conftest 时不跟随符号链接：名为 conftest 的链接只删链接；人写测试的上级目录被换成链接的删掉链接本身，链接那边的目录与其中的 conftest 不动；agent 自己目录的链接保留", {
+  skip: NO_SYMLINKS,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-link-"));
+  try {
+    const root = join(base, "ws");
+    git(base, "init", "-q", "ws");
+    mkdirSync(join(root, "tests", "unit"), { recursive: true });
+    writeFileSync(join(root, "tests", "unit", "test_a.sh"), "x\n");
+    // 链接那边：一个会让用例恒过的 conftest，和一份人写测试的副本
+    const outside = join(base, "np");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "conftest.sh"), "sh() { return 0; }\n");
+    writeFileSync(join(outside, "test_b.sh"), "x\n");
+    const outsideFile = join(base, "outside.sh");
+    writeFileSync(outsideFile, "outside\n");
+    // 人写测试的上级目录被换成指向别处的链接
+    execFileSync("ln", ["-s", outside, join(root, "tests", "x")]);
+    // 名为 conftest 的链接（指向一个文件）
+    execFileSync("ln", ["-s", outsideFile, join(root, "tests", "unit", "conftest.sh")]);
+    // agent 自己目录里的链接：不在人写测试的路径上
+    mkdirSync(join(root, "own"));
+    execFileSync("ln", ["-s", outside, join(root, "own", "linked")]);
+    const ws = new StreamWorkspace(localStreamShell(root));
+    const human = ["tests/unit/test_a.sh", "tests/x/test_b.sh"];
+    const removed = await removeCoveringHelpers(ws, "conftest.sh", (p) => human.includes(p), human);
+    assert.deepEqual(removed.sort(), ["tests/unit/conftest.sh", "tests/x"]);
+    assert.equal(existsSync(join(root, "tests", "x")), false, "链接本身删掉");
+    assert.equal(existsSync(join(root, "tests", "unit", "conftest.sh")), false);
+    assert.equal(
+      readFileSync(join(outside, "conftest.sh"), "utf8"),
+      "sh() { return 0; }\n",
+      "链接那边不动"
+    );
+    assert.equal(readFileSync(outsideFile, "utf8"), "outside\n", "链接指向的文件不动");
+    assert.equal(
+      lstatSync(join(root, "own", "linked")).isSymbolicLink(),
+      true,
+      "agent 自己目录的链接保留"
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("写入人写测试之前，路径上被换成符号链接的目录与文件换成真的：不顺着链接写到工作区之外，按判题的方式加载 conftest 加载不到，错的实现照样失败；测量副本同样", {
+  skip: NO_SYMLINKS,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-human-link-"));
+  try {
+    const root = join(base, "ws");
+    git(base, "init", "-q", "ws");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.txt"), "wrong\n");
+    // agent 把这一步新增的人写测试目录换成链接，那边放一个让用例恒过的 conftest；另把一个人写测试文件换成链接
+    const outside = join(base, "np");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "conftest.sh"), "sh() { return 0; }\n");
+    writeFileSync(join(base, "evil.sh"), "true\n");
+    mkdirSync(join(root, "tests"));
+    execFileSync("ln", ["-s", outside, join(root, "tests", "x")]);
+    execFileSync("ln", ["-s", join(base, "evil.sh"), join(root, "tests", "y.test.sh")]);
+    const ws = new StreamWorkspace(localStreamShell(root));
+    const content = Buffer.from("grep -q alpha src/a.txt\n");
+    const ops = [
+      { path: "tests/x/a.test.sh", op: "write" as const, kind: "test" as const },
+      { path: "tests/y.test.sh", op: "write" as const, kind: "test" as const },
+    ];
+    await ws.applyHumanFiles(ops, () => content);
+    assert.equal(lstatSync(join(root, "tests", "x")).isSymbolicLink(), false, "换成真目录");
+    assert.equal(lstatSync(join(root, "tests", "y.test.sh")).isSymbolicLink(), false, "换成真文件");
+    assert.equal(readFileSync(join(root, "tests", "x", "a.test.sh"), "utf8"), content.toString());
+    assert.deepEqual(readdirSync(outside), ["conftest.sh"], "没有写到链接那边");
+    assert.equal(readFileSync(join(base, "evil.sh"), "utf8"), "true\n", "链接指向的文件没被改写");
+    // 判题：先加载覆盖这些测试的 conftest，再跑用例
+    const judge = () =>
+      execFileSync(
+        "sh",
+        [
+          "-c",
+          'for c in tests/x/conftest.sh; do [ -f "$c" ] && . "./$c"; done; sh tests/x/a.test.sh && sh tests/y.test.sh',
+        ],
+        { cwd: root, stdio: "ignore" }
+      );
+    assert.throws(judge, "错的实现照样失败");
+    // 测量副本：同样不顺着链接写
+    const copy = join(base, "copy");
+    mkdirSync(join(copy, "tests"), { recursive: true });
+    execFileSync("ln", ["-s", outside, join(copy, "tests", "x")]);
+    await ws.applyHumanFilesAt(copy, ops.slice(0, 1), () => content);
+    assert.equal(lstatSync(join(copy, "tests", "x")).isSymbolicLink(), false);
+    assert.deepEqual(readdirSync(outside), ["conftest.sh"]);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

@@ -99,6 +99,18 @@ export function shellQuote(word: string): string {
   return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
+// 写入或删除人的文件之前：路径上凡是符号链接的一级（各级目录与文件本身）只删链接本身、不跟随，再由 mkdir -p 建真目录。
+// 否则 agent 把人写测试的目录换成指向别处的链接后，写入会顺着链接写到工作区之外，pytest 按链接路径加载那边的 conftest，
+// 链接还会随落地提交。删不掉（例如权限）不让作业停下
+const UNLINK_ON_PATH = [
+  'unlink_on_path() { up_rest="$1"; up_p="";',
+  'while [ -n "$up_rest" ]; do',
+  `case "$up_rest" in */*) up_c="\${up_rest%%/*}"; up_rest="\${up_rest#*/}";; *) up_c="$up_rest"; up_rest="";; esac;`,
+  `up_p="\${up_p:+$up_p/}$up_c";`,
+  'if [ -L "$up_p" ]; then rm -f -- "$up_p" || return 0; fi;',
+  "done; };",
+].join(" ");
+
 // timeout 命令被 KILL 信号杀掉时的退出码
 const TIMEOUT_KILLED = 137;
 
@@ -194,13 +206,20 @@ export class StreamWorkspace {
   ): Promise<void> {
     for (const op of ops) {
       if (op.op === "delete") {
-        await this.must('rm -f -- "$1"', `删除人的文件 ${op.path}`, { args: [op.path] });
+        await this.must(
+          `${UNLINK_ON_PATH} unlink_on_path "$1"; rm -f -- "$1"`,
+          `删除人的文件 ${op.path}`,
+          {
+            args: [op.path],
+          }
+        );
         continue;
       }
-      await this.must('mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', `写入人的文件 ${op.path}`, {
-        args: [op.path],
-        stdin: read(op.path),
-      });
+      await this.must(
+        `${UNLINK_ON_PATH} unlink_on_path "$1"; mkdir -p -- "$(dirname -- "$1")" && cat > "$1"`,
+        `写入人的文件 ${op.path}`,
+        { args: [op.path], stdin: read(op.path) }
+      );
     }
   }
 
@@ -313,8 +332,9 @@ export class StreamWorkspace {
     read: (path: string) => Buffer
   ): Promise<void> {
     for (const op of ops) {
-      const script =
-        op.op === "delete" ? 'rm -f -- "$1"' : 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"';
+      const script = `${UNLINK_ON_PATH} unlink_on_path "$1"; ${
+        op.op === "delete" ? 'rm -f -- "$1"' : 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"'
+      }`;
       await this.must(script, `测量副本写入 ${op.path}`, {
         args: [op.path],
         cwd: dir,
@@ -358,6 +378,15 @@ export class StreamWorkspace {
     const r = await this.must('find . -path ./.git -prune -o -name "$1" -print0', `列出 ${name}`, {
       args: [name],
     });
+    return r.stdout
+      .split("\x00")
+      .filter((p) => p !== "")
+      .map((p) => p.replace(/^\.\//, ""));
+  }
+
+  // 工作区里的全部符号链接（不跟随，跳过工作区根的 .git）。返回相对工作区根的路径
+  async symlinks(): Promise<string[]> {
+    const r = await this.must("find . -path ./.git -prune -o -type l -print0", "列出符号链接");
     return r.stdout
       .split("\x00")
       .filter((p) => p !== "")
@@ -457,7 +486,8 @@ export class StreamWorkspace {
 
 // 会被测试框架自动加载、改变人写测试收集与执行的辅助文件（strands 的 conftest.py）：不在人在该步树里、且所在目录的
 // 子树里有人在该步测试文件的，删掉；只作用于 agent 自己测试目录的保留。判题之前（跑批器）与每次回炉验证之前（Pigeon）
-// 同一规则。返回删掉的路径
+// 同一规则。候选按文件系统列出且不进入符号链接目录，所以路径上是人写测试的上级目录、本身却是符号链接的，链接一并删掉
+// （只删链接本身）：pytest 会按链接路径加载链接那边的 conftest。返回删掉的路径
 export async function removeCoveringHelpers(
   ws: StreamWorkspace,
   name: string,
@@ -469,8 +499,12 @@ export async function removeCoveringHelpers(
   const stray = (await ws.pathsNamed(name)).filter(
     (p) => !inHumanTree(p) && covers(posixDirname(p))
   );
-  await ws.removeTrees(stray);
-  return stray;
+  const linkedDirs = (await ws.symlinks()).filter(
+    (p) => !inHumanTree(p) && !stray.includes(p) && humanTests.some((t) => t.startsWith(`${p}/`))
+  );
+  const removed = [...stray, ...linkedDirs];
+  await ws.removeTrees(removed);
+  return removed;
 }
 
 function posixDirname(p: string): string {
