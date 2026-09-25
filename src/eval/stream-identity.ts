@@ -103,7 +103,7 @@ export function checkOrWriteIdentity(
         ...(saved.infoLog ?? []),
         { since: now().toISOString(), info: identity.info },
       ];
-      writeFileSync(file, `${JSON.stringify({ ...saved, infoLog }, null, 2)}\n`);
+      writeAtomic(file, `${JSON.stringify({ ...saved, infoLog }, null, 2)}\n`);
     }
     return digest;
   }
@@ -114,10 +114,14 @@ export function checkOrWriteIdentity(
       `输出目录里已有跑批结果（${leftovers.join("、")}）却没有 identity.json，认不出它们属于哪一次身份，拒绝续跑：请换一个空的输出目录`
     );
   }
-  // 先写临时文件再改名：写到一半被杀不会留下读不出的身份头（那样续跑会一直被拒）
-  writeFileSync(`${file}.tmp`, `${JSON.stringify({ ...identity, digest }, null, 2)}\n`);
-  renameSync(`${file}.tmp`, file);
+  writeAtomic(file, `${JSON.stringify({ ...identity, digest }, null, 2)}\n`);
   return digest;
+}
+
+// 先写临时文件再改名：写到一半被杀不会留下读不出的身份头（那样续跑会一直被拒）
+function writeAtomic(file: string, content: string): void {
+  writeFileSync(`${file}.tmp`, content);
+  renameSync(`${file}.tmp`, file);
 }
 
 // 跑批在输出目录里留下的东西：结果行、报告、各作业的目录（流历史、断点、治理根）、作废尝试的隔离目录

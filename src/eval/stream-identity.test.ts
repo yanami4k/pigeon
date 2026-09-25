@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -123,5 +131,31 @@ test("身份头：输出目录里已有结果、报告、作业目录或隔离�
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("身份头：首次写入与追加 infoLog 都是先写临时文件再改名（换目录项，不原地改写）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+  try {
+    const file = join(dir, "identity.json");
+    const withAccounts = (accountConcurrency: number[]): StreamRunIdentity => ({
+      ...identity(),
+      info: {
+        concurrency: 4,
+        accounts: accountConcurrency.length,
+        accountConcurrency,
+        harness: { commit: "h1", dirty: false },
+      },
+    });
+    checkOrWriteIdentity(dir, withAccounts([2]));
+    const before = readFileSync(file, "utf8");
+    // 旁证：同一个文件的硬链接。原地改写会连它一起改，改名只换 identity.json 这个目录项
+    linkSync(file, join(dir, "witness.json"));
+    checkOrWriteIdentity(dir, withAccounts([2, 3]));
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).infoLog.length, 1, "追加了 infoLog");
+    assert.equal(readFileSync(join(dir, "witness.json"), "utf8"), before, "不是原地改写");
+    assert.equal(existsSync(`${file}.tmp`), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
