@@ -180,7 +180,11 @@ export class LimitController {
   // 进程收到停止信号（systemd 停服、整机关机）：与每月额度用完同一路径——计一次信号，在途的步中止并作废，不再取新步；
   // 已完成的步保留，之后在同一输出目录续跑
   shutdown(reason: string): void {
-    if (this.state === "stopped") return;
+    // 已因每月额度或认证失败停下：照样记下停止信号（作业容器按停止信号保留、续跑接管），不再计信号
+    if (this.state === "stopped") {
+      this.shutdownReason ??= reason;
+      return;
+    }
     this.shutdownReason = reason;
     this.signals += 1;
     this.stop(reason);

@@ -341,3 +341,13 @@ test("停止信号与放行队列：路数占满时排队等放行的全部以�
   first();
   await assert.rejects(limits.acquire(), /收到 SIGTERM/);
 });
+
+test("已因每月额度停下后再收到停止信号：照样记下停止原因（作业容器按停止信号保留），不再计信号", () => {
+  const limits = new LimitController({ probe: async () => true, slots: 2, warn: () => {} });
+  limits.onLimit("monthly");
+  assert.equal(limits.state, "stopped");
+  const signals = limits.signals;
+  limits.shutdown("收到 SIGTERM");
+  assert.equal(limits.shutdownReason, "收到 SIGTERM");
+  assert.equal(limits.signals, signals);
+});
