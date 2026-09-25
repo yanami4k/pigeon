@@ -433,6 +433,8 @@ async function runStreamJob(
   if (last !== undefined && !existsSync(bundleFile)) {
     throw new Error(`续跑缺流历史：${bundleFile} 不存在（断点在第 ${last.seq} 步）`);
   }
+  // 开容器（接管或重建）之前先看控制器：已停下（收到停止信号、每月额度用完）的不再开，免得开了又删
+  await options.limits?.ready();
   const env = await options.envs.open(job, {
     startCommit: segment.startCommit,
     ...(last !== undefined
@@ -547,7 +549,8 @@ async function runStreamJob(
     }
     return steps.at(-1)?.seq ?? null;
   } finally {
-    await env.dispose();
+    // 因停止信号（停服、关机）停下的作业留着容器，重启后续跑接管它；其余情形照常删掉
+    if (options.limits?.shutdownReason === undefined) await env.dispose();
   }
 }
 

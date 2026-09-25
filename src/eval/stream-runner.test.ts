@@ -1535,6 +1535,51 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("因停止信号停下：在途作业的容器留着（续跑接管），排队的作业不再开容器", async () => {
+    const t = await toy();
+    try {
+      const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
+      const inner = localStreamEnvs(join(t.base, "envs"), (c: string) => t.human.bundle(c));
+      const opened: string[] = [];
+      const disposed: string[] = [];
+      const envs = {
+        async open(job: Parameters<typeof inner.open>[0], init: Parameters<typeof inner.open>[1]) {
+          opened.push(job.condition);
+          const env = await inner.open(job, init);
+          return {
+            ...env,
+            dispose: async () => {
+              disposed.push(job.condition);
+              await env.dispose();
+            },
+          };
+        },
+      };
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) {
+          write(input.target.root, { "src/a.txt": "alpha\n" });
+          limits.shutdown("收到 SIGTERM");
+        }
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent, minimal: agent },
+          conditions: ["no-gate", "minimal"],
+          concurrency: 1,
+          envs,
+          maxSteps: 2,
+          limits,
+        })
+      );
+      assert.deepEqual(opened, ["no-gate"], "排队的作业不再开容器");
+      assert.deepEqual(disposed, [], "在途作业的容器留着");
+      assert.ok(summary.jobs.every((j) => /收到 SIGTERM/.test(j.stopped ?? "")));
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("条件需要的 agent 没有接入：该作业停止并说明原因，其余作业照跑", async () => {
     const t = await toy();
     try {
