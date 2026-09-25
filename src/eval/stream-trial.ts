@@ -20,6 +20,7 @@ import { type StreamRepoRuntime, verifyConfigFile, verifyScript } from "./stream
 import type { StreamCondition, StreamGatewayFacts } from "./stream-results.ts";
 import {
   CONDITION_SPECS,
+  lockOutDir,
   type StepAgent,
   type StepBudget,
   type StreamEnvFactory,
@@ -169,6 +170,15 @@ export interface StreamTrialSummary {
 }
 
 export async function runStreamTrial(options: StreamTrialOptions): Promise<StreamTrialSummary> {
+  const release = lockOutDir(options.outDir);
+  try {
+    return await runStreamTrialLocked(options);
+  } finally {
+    release();
+  }
+}
+
+async function runStreamTrialLocked(options: StreamTrialOptions): Promise<StreamTrialSummary> {
   const log = (line: string) => options.log?.(line);
   mkdirSync(options.outDir, { recursive: true });
   const resultsFile = path.join(options.outDir, "results.jsonl");

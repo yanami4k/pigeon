@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
+import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
@@ -326,7 +327,28 @@ function writeAtomic(file: string, content: Buffer | string): void {
   renameSync(tmp, file);
 }
 
+// 输出目录的单实例锁：同一时刻只许一个跑批进程写同一个输出目录（锁文件记持有进程；持有者已死的残留锁由下一个进程接管，
+// 与项目里其余跨进程锁同一口径）
+export const RUN_LOCK = "run.lock";
+
+export function lockOutDir(outDir: string): () => void {
+  mkdirSync(outDir, { recursive: true });
+  return acquireExclusiveLock(
+    path.join(outDir, RUN_LOCK),
+    `输出目录 ${outDir} 正被另一个跑批进程使用，拒绝同时写同一目录`
+  );
+}
+
 export async function runStreams(options: RunStreamsOptions): Promise<RunStreamsSummary> {
+  const release = lockOutDir(options.outDir);
+  try {
+    return await runStreamsLocked(options);
+  } finally {
+    release();
+  }
+}
+
+async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsSummary> {
   mkdirSync(options.outDir, { recursive: true });
   const resultsFile = path.join(options.outDir, "results.jsonl");
   sealTornTail(resultsFile);

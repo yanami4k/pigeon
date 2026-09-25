@@ -38,6 +38,7 @@ import {
   DEFAULT_STEP_BUDGET,
   EQUIVALENT_BASELINE_COMMANDS,
   ReferenceCases,
+  RUN_LOCK,
   runStreams,
   type StepAgent,
   type StepAgentInput,
@@ -1575,6 +1576,35 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       assert.deepEqual(opened, ["no-gate"], "排队的作业不再开容器");
       assert.deepEqual(disposed, [], "在途作业的容器留着");
       assert.ok(summary.jobs.every((j) => /收到 SIGTERM/.test(j.stopped ?? "")));
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("输出目录单实例：另一个跑批进程正占着同一输出目录即拒绝，报出占用者；持有者已不在的残留锁照常接管", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent(() => undefined);
+      const outDir = join(t.base, "out");
+      mkdirSync(outDir, { recursive: true });
+      // 占用者：一个仍在运行的进程
+      writeFileSync(
+        join(outDir, RUN_LOCK),
+        `${JSON.stringify({ pid: process.pid, acquiredAt: Date.now() })}\n`
+      );
+      await assert.rejects(
+        runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 })),
+        new RegExp(`正被另一个跑批进程使用.*pid ${process.pid}`)
+      );
+      assert.equal(agent.calls.length, 0, "撞锁即拒绝，一步都不跑");
+      // 残留锁：持有进程已不在
+      writeFileSync(
+        join(outDir, RUN_LOCK),
+        `${JSON.stringify({ pid: 2 ** 22 + 12345, acquiredAt: 0 })}\n`
+      );
+      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+      assert.equal(agent.calls.length, 1);
+      assert.equal(existsSync(join(outDir, RUN_LOCK)), false, "跑完释放");
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
