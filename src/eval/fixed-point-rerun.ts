@@ -71,7 +71,7 @@ import {
   type StreamRepoRuntime,
   verifyScript,
 } from "./stream-profiles.ts";
-import { type StreamGatewayFacts, ZERO_USAGE } from "./stream-results.ts";
+import { type StreamGatewayFacts, type StreamJobId, ZERO_USAGE } from "./stream-results.ts";
 import {
   CONDITION_SPECS,
   humanTestsAt,
@@ -80,6 +80,7 @@ import {
   restoreTests,
   runAdmittedAgent,
   SIGNALLED_VOID_STOP,
+  SIGNALLED_VOID_WARN,
   type StepAgent,
   type StepBudget,
   StepInterruptedError,
@@ -87,6 +88,7 @@ import {
   type StreamModelGateway,
   syncEnv,
 } from "./stream-runner.ts";
+import { StreamWorkspaceAccessError } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
 // 每组缺省几遍（139）
@@ -317,6 +319,8 @@ export interface FixedPointOptions {
   warn?: (line: string) => void;
   // 调用方已对输出目录取了锁
   outDirLocked?: boolean;
+  // 丢掉某个作业的残留环境（容器实现：删掉同名容器）；每遍开环境之前调用
+  discardEnv?: (job: StreamJobId) => Promise<void>;
   // 这次重跑所用镜像的 ID：给了即与无记忆整流身份头里的核对
   imageId?: string;
   // harness 代码的核对：给了即以无记忆整流结果行记下的 harness 版本调用它，不符即抛错拒绝
@@ -439,22 +443,22 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
   const done = new Set(readFixedPointRows(resultsFile).map(fixedPointKey));
   const existing = done.size;
   const missing: string[] = [];
-  const jobs: { prep: Prepared; group: FixedPointGroup; pass: number; fixed: FixedSelection }[] =
-    [];
-  for (const prep of prepared.values()) {
+  const preps = [...prepared.values()];
+  for (const prep of preps) {
     for (const group of groups) {
-      const fixed = prep.event.fixed[group];
-      if (fixed === null) {
-        missing.push(`${prep.event.id}|${group}`);
-        continue;
-      }
-      for (let pass = 1; pass <= passes; pass++) {
-        if (!done.has(fixedPointKey({ eventId: prep.event.id, group, pass }))) {
-          jobs.push({ prep, group, pass, fixed });
-        }
-      }
+      if (prep.event.fixed[group] === null) missing.push(`${prep.event.id}|${group}`);
     }
   }
+  const jobs = scheduleJobs(preps.length, groups, passes)
+    .map(({ event, group, pass }) => {
+      const prep = preps[event] as Prepared;
+      return { prep, group, pass, fixed: prep.event.fixed[group] };
+    })
+    .filter(
+      (j): j is { prep: Prepared; group: FixedPointGroup; pass: number; fixed: FixedSelection } =>
+        j.fixed !== null &&
+        !done.has(fixedPointKey({ eventId: j.prep.event.id, group: j.group, pass: j.pass }))
+    );
   let written = 0;
   const stopped: FixedPointSummary["stopped"] = [];
   await runWorkQueue(jobs, options.concurrency ?? DEFAULT_FIXED_POINT_CONCURRENCY, async (job) => {
@@ -476,6 +480,26 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
     renderFixedPointReport(options.events, readFixedPointRows(resultsFile), { passes })
   );
   return { resultsFile, reportFile, written, existing, stopped, missing };
+}
+
+// 作业顺序：遍次在外、事件居中、组在内，组的先后按（事件序号 + 遍次）轮转——同一事件同一遍次的各组相邻出队，
+// 哪组先跑在遍次间轮换，负载、接口延迟与限额窗口随时段的变化不会系统性地偏向某一组（配对差按事件算）。
+// 确定性；续跑按"事件 × 组 × 遍次"成键，与顺序无关
+export function scheduleJobs(
+  eventCount: number,
+  groups: readonly FixedPointGroup[],
+  passes: number
+): { event: number; group: FixedPointGroup; pass: number }[] {
+  const out: { event: number; group: FixedPointGroup; pass: number }[] = [];
+  for (let pass = 1; pass <= passes; pass++) {
+    for (let event = 0; event < eventCount; event++) {
+      const shift = (event + pass) % Math.max(1, groups.length);
+      for (let i = 0; i < groups.length; i++) {
+        out.push({ event, group: groups[(i + shift) % groups.length] as FixedPointGroup, pass });
+      }
+    }
+  }
+  return out;
 }
 
 // 一遍的治理根：每遍独立（各遍互不可见）
@@ -520,15 +544,29 @@ async function runPassWithVoids(
     resetGovernanceRoot(options, prep, dir, `attempt-${attempt}-${Date.now()}`);
     try {
       const row = await runPass(options, prep, group, pass, fixed, dir);
+      // 这一遍开始之后收到过停止信号（停服、关机）：不论判定进行到哪，这一遍作废、不写行，取下一遍时停下
+      if (options.limits?.shutdownReason !== undefined) {
+        throw new StepInterruptedError(`作废：${options.limits.shutdownReason}`, true);
+      }
       row.limitPauses = options.limits?.pausesSince(epoch) ?? [];
       return row;
-    } catch (error) {
+    } catch (caught) {
+      // 工作区访问出错（agent 改坏了属主或权限、放了删不掉的链接）：与跑批器同一口径，作废重做、计入被打断上限
+      const error =
+        caught instanceof StreamWorkspaceAccessError
+          ? new StepInterruptedError(`作废：${caught.message}`, false)
+          : caught;
       if (!(error instanceof StepInterruptedError)) throw error;
       if (error.signalled) {
         signalled += 1;
         bare = 0;
         if (signalled >= SIGNALLED_VOID_STOP) {
           throw new Error(`因限额信号或上游故障累计作废 ${signalled} 次：停下（${error.message}）`);
+        }
+        if (signalled === SIGNALLED_VOID_WARN) {
+          (options.warn ?? ((line: string) => process.stderr.write(`[定点对照] ${line}\n`)))(
+            `[${prep.event.id}|${group}|${pass}] 因限额信号或上游故障已累计作废 ${signalled} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这一遍`
+          );
         }
       } else {
         bare += 1;
@@ -560,6 +598,8 @@ async function runPass(
     scratch: path.join(options.outDir, "scratch"),
   });
   const job = { stream: `${event.id}-${group}`, condition: "full" as const, attempt: pass };
+  // 每遍都从新环境、干净起点开始：先丢掉同名的残留环境（上次被杀留下的容器），免得工厂接管它、看到上次的被忽略文件与 /tmp
+  await options.discardEnv?.(job);
   const env = await options.envs.open(job, {
     startCommit: prep.segmentStart,
     resume: { head: event.startHead, seq: event.startSeq, bundle: prep.sliced },

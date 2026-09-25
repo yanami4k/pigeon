@@ -20,6 +20,7 @@ import {
   givenMatches,
   offTaskRedOf,
   rerunBudget,
+  scheduleJobs,
   taskTestFilesAt,
 } from "./fixed-point-rerun.ts";
 import {
@@ -285,6 +286,31 @@ test("某次验证的题面测试文件只用这次验证之前的事实：之�
     mentioned: ["src/other.ts"],
   });
   assert.deepEqual([...files].sort(), ["src/mine.test.ts", "src/other.test.ts", "src/other.ts"]);
+});
+
+test("作业顺序：遍次在外、组在内，同一事件同一遍次的各组相邻出队；组的先后按事件与遍次轮换；全部键各出现一次", () => {
+  const groups = ["memory", "irrelevant", "none"] as const;
+  const jobs = scheduleJobs(2, groups, 3);
+  assert.equal(jobs.length, 18);
+  assert.equal(new Set(jobs.map((j) => `${j.event}|${j.group}|${j.pass}`)).size, 18);
+  for (let i = 0; i < jobs.length; i += 3) {
+    const triple = jobs.slice(i, i + 3);
+    assert.equal(new Set(triple.map((j) => `${j.event}|${j.pass}`)).size, 1, "三组相邻");
+    assert.equal(new Set(triple.map((j) => j.group)).size, 3);
+  }
+  assert.deepEqual(
+    jobs.map((j) => j.pass),
+    [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3],
+    "遍次在外"
+  );
+  const firstOf = (event: number, pass: number) =>
+    jobs.find((j) => j.event === event && j.pass === pass)?.group;
+  assert.deepEqual(
+    [1, 2, 3].map((pass) => firstOf(0, pass)),
+    ["irrelevant", "none", "memory"],
+    "同一事件里先跑的组逐遍轮换"
+  );
+  assert.notEqual(firstOf(0, 1), firstOf(1, 1), "同一遍次里不同事件先跑的组也错开");
 });
 
 function plan(overrides: Partial<AttemptPlan> = {}): AttemptPlan {

@@ -23,6 +23,7 @@ import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { pigeonStepAgent } from "./stream-agents.ts";
 import { gitHumanRepo, type HumanRepo } from "./stream-facts.ts";
+import { identityDigest, identityFile, type StreamRunIdentity } from "./stream-identity.ts";
 import { buildTaskPrompt, type StreamManifest, type StreamStep } from "./stream-manifest.ts";
 import { runJunitOnce, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type {
@@ -97,16 +98,36 @@ export function worktreeState(root: string): { head: string; tree: string } {
 
 // 固定目录的本地"假容器"：每次打开都清空同一个目录再从 bundle 建（容器里工作区根总是同一个路径，
 // 账本里记下的工作区与执行端的根因此对得上）。只能依次打开，不能并行
+// takeOver：模拟容器工厂接管残留容器——续跑时目录还在且没被丢弃，就只把受跟踪的文件回到断点（被忽略的文件留着），
+// 不从流历史重建；discard 丢掉残留（删掉目录），下次打开即从流历史重建
 export function fixedDirEnvs(input: {
   root: string;
   containerRoot: string;
   bundleOf: (commit: string) => Buffer;
-}): StreamEnvFactory & { opened: string[] } {
+  takeOver?: boolean;
+}): StreamEnvFactory & { opened: string[]; discard(): Promise<void> } {
   const opened: string[] = [];
   return {
     opened,
+    async discard() {
+      rmSync(input.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    },
     async open(job, init) {
       opened.push(`${job.stream}|${job.condition}|${job.attempt}`);
+      if (
+        input.takeOver === true &&
+        init.resume !== undefined &&
+        existsSync(join(input.root, ".git"))
+      ) {
+        const ws = new StreamWorkspace(localStreamShell(input.root));
+        await ws.rollback(init.resume.head);
+        return {
+          ws,
+          target: { container: "box", root: input.containerRoot },
+          measureRoot: join(dirname(input.root), "measure"),
+          dispose: async () => {},
+        };
+      }
       rmSync(input.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
       mkdirSync(input.root, { recursive: true });
       const ws = new StreamWorkspace(localStreamShell(input.root));
@@ -200,6 +221,21 @@ export function noMemoryReplies(seq: number): FakeReply[] {
       ];
   }
 }
+
+// 夹具整流的身份头：镜像 ID 为 TOY_IMAGE_ID
+export const TOY_IMAGE_ID = "sha256:toy";
+const TOY_IDENTITY = {
+  core: {
+    repo: "memtoy",
+    manifestDigest: "toy",
+    image: TOY_IMAGE_ID,
+    budget: { maxTurns: 150, wallClockMs: 600_000 },
+    conditions: ["no-memory"],
+    maxSteps: null,
+    agents: {},
+  },
+  info: {},
+} as unknown as StreamRunIdentity;
 
 export interface FixedPointToy {
   base: string;
@@ -332,6 +368,8 @@ export async function fixedPointToy(): Promise<FixedPointToy> {
   mkdirSync(home, { recursive: true });
   const startStates = new Map<number, { head: string; tree: string }>();
   const noMemoryDir = join(base, "no-memory");
+  mkdirSync(noMemoryDir, { recursive: true });
+  writeFileSync(identityFile(noMemoryDir), JSON.stringify(TOY_IDENTITY));
   const summary = await runStreams({
     manifest,
     runtime: memToyRuntime,
@@ -347,6 +385,7 @@ export async function fixedPointToy(): Promise<FixedPointToy> {
     },
     reference: emptyReference,
     outDir: noMemoryDir,
+    runIdentity: identityDigest(TOY_IDENTITY.core),
     conditions: ["no-memory"],
     budget: { maxTurns: 150, wallClockMs: 600_000 },
     harnessRef: { commit: "test", dirty: false },

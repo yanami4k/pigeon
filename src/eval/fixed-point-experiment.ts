@@ -3,7 +3,10 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createContainerWorkspaceHost } from "../execution/container-host.ts";
+import {
+  createContainerWorkspaceHost,
+  removeWorkspaceContainer,
+} from "../execution/container-host.ts";
 import { gatewayStreamFn } from "../pi-runtime/index.ts";
 import {
   type FixedPointEventList,
@@ -28,7 +31,7 @@ import {
   streamPigeonOptions,
 } from "./stream-experiment.ts";
 import { gitHumanRepo } from "./stream-facts.ts";
-import { dockerStreamEnvs, lockOutDir } from "./stream-runner.ts";
+import { dockerStreamEnvs, jobDirName, lockOutDir } from "./stream-runner.ts";
 
 function prefixOf(kind: string, outPath: string): string {
   return `pigeon-${kind}-${createHash("sha256").update(path.resolve(outPath)).digest("hex").slice(0, 8)}`;
@@ -92,6 +95,8 @@ export interface FixedPointExperimentOptions {
   gateway: { accounts: readonly GatewayAccount[]; modelId: string };
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
+  // 停止信号（SIGTERM）：在途的遍作废、不写行，不再取新遍
+  shutdownSignal?: AbortSignal;
   log?: (line: string) => void;
 }
 
@@ -125,6 +130,14 @@ async function runFixedPointExperimentLocked(
     options.gateway,
     concurrency
   );
+  // 停止信号（SIGTERM）与正式跑批同一路径：交给限额控制器，在途的遍作废、不再取新遍
+  const shutdown = options.shutdownSignal;
+  if (shutdown !== undefined) {
+    const onShutdown = () => limits.shutdown(String(shutdown.reason ?? "收到停止信号"));
+    if (shutdown.aborted) onShutdown();
+    else shutdown.addEventListener("abort", onShutdown, { once: true });
+  }
+  const prefix = prefixOf("fixed-point", outDir);
   try {
     return await runFixedPoint({
       events,
@@ -135,7 +148,7 @@ async function runFixedPointExperimentLocked(
       envs: dockerStreamEnvs({
         image: options.image,
         human,
-        prefix: prefixOf("fixed-point", outDir),
+        prefix,
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
       }),
@@ -171,6 +184,8 @@ async function runFixedPointExperimentLocked(
       limits,
       gateway: liveGateway,
       outDirLocked: true,
+      // 每遍都从新容器开始：先删掉同名的残留容器，不让工厂接管它
+      discardEnv: (job) => removeWorkspaceContainer(`${prefix}-${jobDirName(job)}`, docker),
       // 镜像与 harness 代码须与无记忆整流时相同（决策 156）
       imageId: imageIdOf(options.image, docker),
       checkHarness: (recorded) =>

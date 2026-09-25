@@ -50,7 +50,8 @@ test("harness 核对：只差类型、export、注释、定点对照的标记段
 
 test("harness 核对：改了运行行为的跑批器文件、未标记的新增、非 TypeScript 文件都算不同，列出文件名；定点对照自己的文件与文档放行", () => {
   const behavioral = RUNNER.replace('"on"', '"ON"');
-  const unmarked = RUNNER.replace("}\n", "  fixed();\n}\n");
+  // 往函数体里插入一行未加标记的新增（语法照样合法，靠规整后不同才算违规）
+  const unmarked = RUNNER.replace("  return input.memory", "  fixed();\n  return input.memory");
   assert.deepEqual(
     harnessViolations([
       { path: "src/eval/stream-runner.ts", before: RUNNER, after: behavioral },

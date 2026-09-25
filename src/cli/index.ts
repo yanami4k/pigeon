@@ -765,7 +765,19 @@ async function evalFixedPointMain(argv: string[]): Promise<void> {
   }
   const concurrency = args.positive("--concurrency");
   const passes = args.positive("--passes");
+  // SIGTERM（停服、关机）：与正式跑批同一处理——在途的遍作废、不写行，硬时限内自行退出
+  const shutdown = new AbortController();
+  const removeTermHandler = installTerminationHandler(
+    process,
+    (reason) => {
+      writeOut(`[fixed-point] ${reason}
+`);
+      shutdown.abort(reason);
+    },
+    (code) => process.exit(code)
+  );
   const summary = await runFixedPointExperiment({
+    shutdownSignal: shutdown.signal,
     manifestFile: args.required("--manifest"),
     repoDir: args.required("--repo"),
     image: args.required("--image"),
@@ -785,6 +797,7 @@ async function evalFixedPointMain(argv: string[]): Promise<void> {
     ...(passes !== undefined ? { passes } : {}),
     log: (line) => writeOut(`[fixed-point] ${new Date().toISOString()} ${line}\n`),
   });
+  removeTermHandler();
   writeOut(
     `[fixed-point] 本次写 ${summary.written} 行、此前已有 ${summary.existing} 行；缺失的组 ${summary.missing.length} 个；` +
       `停止 ${summary.stopped.length} 遍\n`

@@ -1,7 +1,7 @@
 // 定点对照的事件认定与单步重跑（决策 139、156、157）：真的 Pigeon（假模型、在本机执行命令的假 docker）跑出的一遍
 // "去掉记忆"整流为输入，一份夹具各用例共用
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
@@ -11,23 +11,30 @@ import type { ReproducedRuntime } from "../replay/fidelity.ts";
 import {
   type FixedPointEventList,
   identifyEvents,
+  openNoMemoryJob,
   readEventList,
+  resultsDigestOf,
   writeEventList,
 } from "./fixed-point-events.ts";
 import {
   digestOf,
   type FixedPointToy,
+  fixedDirEnvs,
   fixedPointToy,
   memToyRuntime,
   noMemoryReplies,
   perStepPigeon,
+  TOY_IMAGE_ID,
   worktreeState,
 } from "./fixed-point-fixtures.ts";
+import { HarnessMismatchError } from "./fixed-point-harness.ts";
 import { type FixedPointOptions, runFixedPoint } from "./fixed-point-rerun.ts";
 import { fixedPointKey, readFixedPointRows } from "./fixed-point-results.ts";
 import type { GatewayMeter } from "./model-gateway.ts";
+import { LimitController } from "./model-limits.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import { lockOutDir, type StepAgent, type StepAgentInput } from "./stream-runner.ts";
+import { StreamWorkspaceAccessError } from "./stream-workspace.ts";
 
 const RIGHT_FIRST_TIME: Record<number, FakeReply[]> = {
   3: [
@@ -477,6 +484,166 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
     assert.equal(rows.length, 1, "作废的一遍不写行");
     assert.equal(rows[0]?.gateway?.queueMs, 0);
     assert.deepEqual(readdirSync(join(outDir, "voided", "s1-3")), ["none-1"]);
+  });
+
+  test("续跑不接管残留环境：进程死在某遍中途后重跑，这一遍先丢掉同名的残留环境、从新环境重来，看不到上次留下的被忽略文件", async () => {
+    const envs = fixedDirEnvs({
+      root: toy.root,
+      containerRoot: toy.containerRoot,
+      bundleOf: (c) => toy.human.bundle(c),
+      takeOver: true,
+    });
+    const leftover = join(toy.root, ".pigeon", "leftover.txt");
+    const sawLeftover: boolean[] = [];
+    let crash = true;
+    const agentFor = (rt: ReproducedRuntime): StepAgent => {
+      const inner = rerunAgent([], [], (s) => RIGHT_FIRST_TIME[s.step.seq] ?? [])(rt);
+      return {
+        async run(input) {
+          sawLeftover.push(existsSync(leftover));
+          if (crash) {
+            crash = false;
+            mkdirSync(join(toy.root, ".pigeon"), { recursive: true });
+            writeFileSync(leftover, "上次留下的");
+            throw new Error("模拟进程死在中途");
+          }
+          return inner.run(input);
+        },
+      };
+    };
+    const run = () =>
+      runFixedPoint(
+        options({
+          events: only(["s1-3"]),
+          outDir: join(toy.base, "out-takeover"),
+          groups: ["none"],
+          passes: 1,
+          envs,
+          discardEnv: () => envs.discard(),
+          agentFor,
+        })
+      );
+    const first = await run();
+    assert.match(first.stopped[0]?.error ?? "", /模拟进程死在中途/);
+    const second = await run();
+    assert.deepEqual([second.written, second.stopped.length], [1, 0]);
+    assert.deepEqual(sawLeftover, [false, false], "重来的一遍看不到上次的产物");
+  });
+
+  test("作废口径同跑批器：工作区访问出错的一遍作废重做（计入被打断上限），不记为停下；这一遍期间收到停止信号即作废、不写行", async () => {
+    let accessError = true;
+    const flaky = (rt: ReproducedRuntime): StepAgent => {
+      const inner = rerunAgent([], [], (s) => RIGHT_FIRST_TIME[s.step.seq] ?? [])(rt);
+      return {
+        async run(input) {
+          if (accessError) {
+            accessError = false;
+            throw new StreamWorkspaceAccessError("agent 把目录改成了不可写");
+          }
+          return inner.run(input);
+        },
+      };
+    };
+    const outDir = join(toy.base, "out-access");
+    const a = await runFixedPoint(
+      options({ events: only(["s1-3"]), outDir, groups: ["none"], passes: 1, agentFor: flaky })
+    );
+    assert.deepEqual([a.written, a.stopped.length], [1, 0]);
+    assert.deepEqual(readdirSync(join(outDir, "voided", "s1-3")), ["none-1"]);
+    const limits = new LimitController({ probe: async () => true, slots: 1 });
+    // 停止信号在 agent 跑完之后、判题时到达：放行判定已过，由这一遍收尾时的检查作废
+    const judging = {
+      ...memToyRuntime,
+      runCases: ((...args: Parameters<typeof memToyRuntime.runCases>) => {
+        limits.shutdown("收到 SIGTERM");
+        return memToyRuntime.runCases(...args);
+      }) as typeof memToyRuntime.runCases,
+    };
+    const b = await runFixedPoint(
+      options({
+        events: only(["s1-3"]),
+        outDir: join(toy.base, "out-shutdown"),
+        groups: ["none"],
+        passes: 1,
+        runtime: judging,
+        limits,
+        agentFor: rerunAgent([], [], (s) => RIGHT_FIRST_TIME[s.step.seq] ?? []),
+      })
+    );
+    limits.close();
+    assert.equal(b.written, 0, "停止信号之后的一遍不写行");
+    assert.equal(b.stopped.length, 1);
+  });
+
+  test("三项新核对在开跑前生效：镜像与无记忆整流的身份头不同、harness 核对不过、无记忆整流记下多个 harness 版本，都整体拒绝，一个环境都不开", async () => {
+    const opened = toy.envs.opened.length;
+    // 核对若被跳过，这里也只会真跑一遍（不致拖长用例）
+    const agentFor = rerunAgent([], [], (s) => RIGHT_FIRST_TIME[s.step.seq] ?? []);
+    const small = { events: only(["s1-3"]), groups: ["none"] as const, passes: 1 };
+    await assert.rejects(
+      runFixedPoint(
+        options({
+          ...small,
+          outDir: join(toy.base, "out-image"),
+          imageId: "sha256:other",
+          agentFor,
+        })
+      ),
+      /镜像 sha256:other/
+    );
+    let checked: unknown;
+    await assert.rejects(
+      runFixedPoint(
+        options({
+          ...small,
+          outDir: join(toy.base, "out-harness"),
+          imageId: TOY_IMAGE_ID,
+          checkHarness: (recorded) => {
+            checked = recorded;
+            throw new HarnessMismatchError(
+              "定点对照以外的文件不同，拒绝：src/eval/stream-runner.ts"
+            );
+          },
+          agentFor,
+        })
+      ),
+      HarnessMismatchError
+    );
+    assert.deepEqual(
+      checked,
+      { commit: "test", dirty: false },
+      "以无记忆整流记下的 harness 版本调用"
+    );
+    // 结果行里出现第二个 harness 版本：摘要照新内容算，只看版本唯一这一项
+    const copy = join(toy.base, "no-memory-two-harness");
+    cpSync(toy.noMemoryDir, copy, { recursive: true });
+    const results = join(copy, "results.jsonl");
+    const lines = readFileSync(results, "utf8").trim().split("\n");
+    lines[0] = JSON.stringify({
+      ...JSON.parse(lines[0] ?? "{}"),
+      harnessRef: { commit: "other", dirty: false },
+    });
+    writeFileSync(results, `${lines.join("\n")}\n`);
+    const retargeted: FixedPointEventList = {
+      ...events,
+      noMemory: {
+        ...events.noMemory,
+        streams: [{ id: "s1", resultsDigest: resultsDigestOf(openNoMemoryJob(copy, "s1")) }],
+      },
+    };
+    await assert.rejects(
+      runFixedPoint(
+        options({
+          ...small,
+          events: { ...retargeted, events: retargeted.events.filter((e) => e.id === "s1-3") },
+          noMemoryDir: copy,
+          outDir: join(toy.base, "out-two"),
+          agentFor,
+        })
+      ),
+      /2 个不同的 harness 版本/
+    );
+    assert.equal(toy.envs.opened.length, opened, "一个环境都没开");
   });
 
   test("一致性核对：运行面与原尝试不同（换推理档位）即拒绝、不写结果行；事件清单须出自同一份整流输出；同一输出目录被另一进程占用即拒绝", async () => {
