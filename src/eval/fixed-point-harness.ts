@@ -123,3 +123,112 @@ export function assertHarnessMatches(
     );
   }
 }
+
+// ---------- 运行时兼容提交 ----------
+
+// 运行时兼容提交：无记忆整流跑到一半换上的 harness 修补，只改运行环境的处理（限额、放行等），不改一步的执行。
+// 无记忆整流的结果行因此可记下两个 harness 版本 {R, C}：R 为最早的那个，C 须登记在这里、是 R 的后代，
+// 且 R 到 C 之间改过的文件全部落在 C 登记的文件里
+export interface RuntimeCompatibleCommit {
+  // 完整提交号
+  commit: string;
+  // 允许改动的文件
+  files: readonly string[];
+  reason: string;
+}
+
+export const RUNTIME_COMPATIBLE_COMMITS: readonly RuntimeCompatibleCommit[] = [
+  {
+    commit: "a806573ac877b2405398fc6d4912b9f1c4c95685",
+    files: [
+      "src/eval/model-gateway.ts",
+      "src/eval/model-gateway.test.ts",
+      "src/eval/stream-runner.ts",
+      "src/eval/stream-runner.test.ts",
+      "docs/audits/2026-09-23-stream-repair-2d2a56d.md",
+    ],
+    reason:
+      "额度类停用加最短停用期、排队作废单独计数（10 告警、30 停）；只改限额与作废计数，不改一步的执行",
+  },
+];
+
+// 核对记下的版本集合要用到的 git 查询
+export interface HarnessGit {
+  // a 是否为 b 的祖先（或同一提交）
+  isAncestor(a: string, b: string): boolean;
+  // a 到 b 之间改过的文件
+  changedFiles(a: string, b: string): string[];
+}
+
+export function harnessGit(repoDir: string): HarnessGit {
+  return {
+    isAncestor(a, b) {
+      try {
+        execFileSync("git", ["-C", repoDir, "merge-base", "--is-ancestor", a, b], {
+          stdio: "ignore",
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    changedFiles(a, b) {
+      return execFileSync("git", ["-C", repoDir, "diff", "--name-only", "--no-renames", a, b], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .split("\n")
+        .filter((l) => l !== "");
+    },
+  };
+}
+
+// 无记忆整流结果行记下的 harness 版本集合须为 {R} 或 {R, C}（见 RUNTIME_COMPATIBLE_COMMITS）；任何一个有未提交改动即拒绝。
+// 返回其中最新的那个（有 C 即 C），重跑的代码按它与当前代码比较
+export function resolveRecordedHarness(
+  refs: readonly HarnessRef[],
+  git: HarnessGit,
+  registry: readonly RuntimeCompatibleCommit[] = RUNTIME_COMPATIBLE_COMMITS
+): HarnessRef {
+  const distinct = [...new Map(refs.map((r) => [`${r.commit}|${r.dirty}`, r])).values()];
+  const dirty = distinct.filter((r) => r.dirty);
+  if (dirty.length > 0) {
+    throw new HarnessMismatchError(
+      `无记忆整流时 harness 工作区有未提交的改动（${dirty.map((r) => r.commit).join("、")}）：无从核对重跑的代码是否相同，拒绝`
+    );
+  }
+  const [first, second, ...rest] = distinct;
+  if (first === undefined)
+    throw new HarnessMismatchError("无记忆整流的结果行没有记下 harness 版本，拒绝");
+  if (second === undefined) return first;
+  if (rest.length > 0) {
+    throw new HarnessMismatchError(
+      `无记忆整流的结果行记下了 ${distinct.length} 个不同的 harness 版本（${distinct.map((r) => r.commit).join("、")}），至多两个，拒绝`
+    );
+  }
+  const [base, later] = git.isAncestor(first.commit, second.commit)
+    ? [first, second]
+    : git.isAncestor(second.commit, first.commit)
+      ? [second, first]
+      : [undefined, undefined];
+  if (base === undefined || later === undefined) {
+    throw new HarnessMismatchError(
+      `无记忆整流记下的两个 harness 版本 ${first.commit}、${second.commit} 互不为祖先，拒绝`
+    );
+  }
+  const entry = registry.find((e) => e.commit.startsWith(later.commit));
+  if (entry === undefined) {
+    throw new HarnessMismatchError(
+      `无记忆整流中途换上的 harness ${later.commit} 不在运行时兼容提交登记表里，拒绝`
+    );
+  }
+  const outside = git
+    .changedFiles(base.commit, later.commit)
+    .filter((f) => !entry.files.includes(f));
+  if (outside.length > 0) {
+    throw new HarnessMismatchError(
+      `运行时兼容提交 ${later.commit} 相对 ${base.commit} 改了登记以外的文件，拒绝：${outside.sort().join("、")}`
+    );
+  }
+  return later;
+}

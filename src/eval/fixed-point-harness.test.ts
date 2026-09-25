@@ -7,9 +7,12 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   assertHarnessMatches,
+  type HarnessGit,
   HarnessMismatchError,
   harnessViolations,
   normalizeForBehavior,
+  RUNTIME_COMPATIBLE_COMMITS,
+  resolveRecordedHarness,
 } from "./fixed-point-harness.ts";
 import {
   assertSameImage,
@@ -161,5 +164,84 @@ test("镜像与无记忆整流的身份头不同即拒绝；身份头与结果�
     assert.throws(() => assertSameImage(dir, [{ runIdentity: "0000" }], "sha256:aaa"), /摘要/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 假的 git：给定祖先关系与每对提交之间改过的文件
+function fakeGit(
+  ancestors: ReadonlyArray<[string, string]>,
+  changed: Record<string, string[]>
+): HarnessGit {
+  return {
+    isAncestor: (a, b) => a === b || ancestors.some(([x, y]) => x === a && y === b),
+    changedFiles: (a, b) => changed[`${a}..${b}`] ?? [],
+  };
+}
+
+const R = { commit: "base111", dirty: false };
+const C = { commit: "compat2", dirty: false };
+const REGISTRY = [
+  {
+    commit: "compat2222222222222222222222222222222222",
+    files: ["src/eval/model-gateway.ts", "src/eval/stream-runner.ts"],
+    reason: "只改限额与作废计数",
+  },
+];
+const GIT = fakeGit([["base111", "compat2"]], {
+  "base111..compat2": ["src/eval/model-gateway.ts", "src/eval/stream-runner.ts"],
+});
+
+test("运行时兼容提交：记下的版本只有 R 即按 R；{R, C} 且 C 已登记、是 R 的后代、只改登记的文件即按 C（顺序不限）", () => {
+  assert.deepEqual(resolveRecordedHarness([R, R], GIT, REGISTRY), R);
+  assert.deepEqual(resolveRecordedHarness([R, C], GIT, REGISTRY), C);
+  assert.deepEqual(resolveRecordedHarness([C, R], GIT, REGISTRY), C);
+});
+
+test("运行时兼容提交：C 未登记即拒绝", () => {
+  assert.throws(
+    () => resolveRecordedHarness([R, C], GIT, []),
+    (e: unknown) =>
+      e instanceof HarnessMismatchError && /不在运行时兼容提交登记表里/.test(String(e))
+  );
+});
+
+test("运行时兼容提交：C 改了登记以外的文件即拒绝，列出文件名", () => {
+  const wider = fakeGit([["base111", "compat2"]], {
+    "base111..compat2": ["src/eval/model-gateway.ts", "src/eval/stream-agents.ts"],
+  });
+  assert.throws(
+    () => resolveRecordedHarness([R, C], wider, REGISTRY),
+    (e: unknown) =>
+      e instanceof HarnessMismatchError &&
+      /登记以外的文件，拒绝：src\/eval\/stream-agents\.ts/.test(String(e))
+  );
+});
+
+test("运行时兼容提交：两个版本互不为祖先即拒绝", () => {
+  assert.throws(
+    () => resolveRecordedHarness([R, C], fakeGit([], {}), REGISTRY),
+    (e: unknown) => e instanceof HarnessMismatchError && /互不为祖先/.test(String(e))
+  );
+});
+
+test("运行时兼容提交：记下三个版本即拒绝", () => {
+  assert.throws(
+    () => resolveRecordedHarness([R, C, { commit: "third33", dirty: false }], GIT, REGISTRY),
+    (e: unknown) => e instanceof HarnessMismatchError && /3 个不同的 harness 版本/.test(String(e))
+  );
+});
+
+test("运行时兼容提交：任何一个版本有未提交改动即拒绝", () => {
+  assert.throws(
+    () => resolveRecordedHarness([R, { ...C, dirty: true }], GIT, REGISTRY),
+    (e: unknown) => e instanceof HarnessMismatchError && /未提交的改动/.test(String(e))
+  );
+});
+
+test("运行时兼容提交登记表：每条是完整提交号，写明允许改动的文件与理由", () => {
+  for (const entry of RUNTIME_COMPATIBLE_COMMITS) {
+    assert.match(entry.commit, /^[0-9a-f]{40}$/);
+    assert.ok(entry.files.length > 0);
+    assert.ok(entry.reason.length > 0);
   }
 });

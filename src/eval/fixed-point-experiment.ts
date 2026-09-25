@@ -15,7 +15,7 @@ import {
   readEventList,
   writeEventList,
 } from "./fixed-point-events.ts";
-import { assertHarnessMatches } from "./fixed-point-harness.ts";
+import { assertHarnessMatches, harnessGit, resolveRecordedHarness } from "./fixed-point-harness.ts";
 import {
   DEFAULT_FIXED_POINT_CONCURRENCY,
   type FixedPointSummary,
@@ -188,12 +188,12 @@ async function runFixedPointExperimentLocked(
       discardEnv: (job) => removeWorkspaceContainer(`${prefix}-${jobDirName(job)}`, docker),
       // 镜像与 harness 代码须与无记忆整流时相同（决策 156）
       imageId: imageIdOf(options.image, docker),
-      checkHarness: (recorded) =>
-        assertHarnessMatches(
-          fileURLToPath(new URL("../..", import.meta.url)),
-          recorded,
-          currentHarnessRef()
-        ),
+      // 记下的版本集合须为 {R} 或 {R, 登记过的运行时兼容提交}；当前代码与其中最新的那个比
+      checkHarness: (recorded) => {
+        const repoDir = fileURLToPath(new URL("../..", import.meta.url));
+        const latest = resolveRecordedHarness(recorded, harnessGit(repoDir));
+        assertHarnessMatches(repoDir, latest, currentHarnessRef());
+      },
       concurrency,
       harnessRef: currentHarnessRef(),
       ...(options.log !== undefined ? { log: options.log } : {}),

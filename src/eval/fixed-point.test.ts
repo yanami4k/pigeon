@@ -611,10 +611,10 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
     );
     assert.deepEqual(
       checked,
-      { commit: "test", dirty: false },
+      [{ commit: "test", dirty: false }],
       "以无记忆整流记下的 harness 版本调用"
     );
-    // 结果行里出现第二个 harness 版本：摘要照新内容算，只看版本唯一这一项
+    // 结果行里出现第二个 harness 版本而没有核对（登记表的核对另有用例）：摘要照新内容算，只看这一项
     const copy = join(toy.base, "no-memory-two-harness");
     cpSync(toy.noMemoryDir, copy, { recursive: true });
     const results = join(copy, "results.jsonl");

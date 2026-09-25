@@ -77,6 +77,8 @@ import {
   humanTestsAt,
   lockOutDir,
   MAX_BARE_INTERRUPTIONS,
+  QUEUE_VOID_STOP,
+  QUEUE_VOID_WARN,
   restoreTests,
   runAdmittedAgent,
   SIGNALLED_VOID_STOP,
@@ -323,8 +325,8 @@ export interface FixedPointOptions {
   discardEnv?: (job: StreamJobId) => Promise<void>;
   // 这次重跑所用镜像的 ID：给了即与无记忆整流身份头里的核对
   imageId?: string;
-  // harness 代码的核对：给了即以无记忆整流结果行记下的 harness 版本调用它，不符即抛错拒绝
-  checkHarness?: (recorded: HarnessRef) => void;
+  // harness 代码的核对：给了即以无记忆整流结果行记下的各个 harness 版本调用它，不符即抛错拒绝
+  checkHarness?: (recorded: readonly HarnessRef[]) => void;
 }
 
 export interface FixedPointSummary {
@@ -391,13 +393,13 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
   const harnessRefs = new Map(
     noMemoryRows.map((r) => [`${r.harnessRef.commit}|${r.harnessRef.dirty}`, r.harnessRef])
   );
-  if (harnessRefs.size !== 1) {
+  // 至多两个（中途换上登记过的运行时兼容提交，见 fixed-point-harness.ts）；两个以上、或两个而没有核对，一律拒绝
+  if (harnessRefs.size > 2 || (harnessRefs.size === 2 && options.checkHarness === undefined)) {
     throw new FidelityRejectedError(
       `无记忆整流的结果行记下了 ${harnessRefs.size} 个不同的 harness 版本：无从核对，拒绝`
     );
   }
-  const [recordedHarness] = harnessRefs.values();
-  if (recordedHarness !== undefined) options.checkHarness?.(recordedHarness);
+  options.checkHarness?.([...harnessRefs.values()]);
   const prepared = new Map<string, Prepared>();
   for (const event of options.events.events) {
     const step = bySeq.get(event.seq);
@@ -538,6 +540,8 @@ async function runPassWithVoids(
   const dir = passDirOf(options.outDir, prep.event.id, group, pass);
   let bare = 0;
   let signalled = 0;
+  let queued = 0;
+  const warn = options.warn ?? ((line: string) => process.stderr.write(`[定点对照] ${line}\n`));
   for (let attempt = 1; ; attempt++) {
     await options.limits?.ready();
     const epoch = options.limits?.epoch ?? 0;
@@ -557,6 +561,23 @@ async function runPassWithVoids(
           ? new StepInterruptedError(`作废：${caught.message}`, false)
           : caught;
       if (!(error instanceof StepInterruptedError)) throw error;
+      // 只因排队超时作废（额度环境造成）：与跑批器同一口径单独计数，10 次告警、30 次停下，不计入限额信号类的上限
+      if (error.queued) {
+        queued += 1;
+        bare = 0;
+        if (queued >= QUEUE_VOID_STOP) {
+          throw new Error(`因排队超时累计作废 ${queued} 次：停下（${error.message}）`);
+        }
+        if (queued === QUEUE_VOID_WARN) {
+          warn(
+            `[${prep.event.id}|${group}|${pass}] 因排队超时已累计作废 ${queued} 次，仍在重做；累计 ${QUEUE_VOID_STOP} 次即停下这一遍`
+          );
+        }
+        options.log?.(
+          `[${prep.event.id}|${group}|${pass}] 第 ${queued} 次排队作废，从起点重来：${error.message}`
+        );
+        continue;
+      }
       if (error.signalled) {
         signalled += 1;
         bare = 0;
@@ -564,7 +585,7 @@ async function runPassWithVoids(
           throw new Error(`因限额信号或上游故障累计作废 ${signalled} 次：停下（${error.message}）`);
         }
         if (signalled === SIGNALLED_VOID_WARN) {
-          (options.warn ?? ((line: string) => process.stderr.write(`[定点对照] ${line}\n`)))(
+          warn(
             `[${prep.event.id}|${group}|${pass}] 因限额信号或上游故障已累计作废 ${signalled} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这一遍`
           );
         }
@@ -658,7 +679,8 @@ async function runPass(
     if (admitted.voidReasons.length > 0) {
       throw new StepInterruptedError(
         `作废：${admitted.voidReasons.join("；")}`,
-        admitted.limitRelated
+        admitted.limitRelated,
+        admitted.queueOnly
       );
     }
     let turns = result.turns;
