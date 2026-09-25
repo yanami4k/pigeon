@@ -6,6 +6,7 @@ import {
   asReceiptId,
   asRunId,
   asSessionId,
+  monotonicUlid,
   newEntryId,
   newExecutionId,
   newReceiptId,
@@ -58,4 +59,39 @@ test("ULID 字典序与时间序一致", () => {
   if (before.slice(4, 14) !== after.slice(4, 14)) {
     assert.ok(before < after);
   }
+});
+
+test("ULID 单调：同一毫秒内连续生成 1000 个严格递增；时钟回拨仍递增；随机部分加到溢出时毫秒进 1、仍递增", () => {
+  // 同一毫秒
+  const sameMs = monotonicUlid(() => 1_700_000_000_000);
+  const ids = Array.from({ length: 1000 }, () => sameMs());
+  for (let i = 1; i < ids.length; i++) {
+    assert.ok((ids[i] ?? "") > (ids[i - 1] ?? ""), `第 ${i} 个不大于前一个`);
+  }
+  assert.ok(
+    ids.every((id) => /^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)),
+    "26 位 Crockford"
+  );
+  assert.ok(
+    ids.every((id) => id.slice(0, 10) === ids[0]?.slice(0, 10)),
+    "毫秒部分不变"
+  );
+  // 时钟回拨
+  let now = 2_000_000_000_000;
+  const rollback = monotonicUlid(() => now);
+  const before = rollback();
+  now -= 5_000;
+  const after = rollback();
+  assert.ok(after > before, "回拨后仍递增");
+  // 随机部分溢出：随机源给出 80 位全 1，下一次加 1 即溢出
+  const overflow = monotonicUlid(
+    () => 3_000,
+    (n) => Buffer.alloc(n, 0xff)
+  );
+  const max = overflow();
+  const carried = overflow();
+  assert.ok(carried > max, "溢出后仍递增");
+  assert.equal(max.slice(10), "ZZZZZZZZZZZZZZZZ");
+  assert.equal(carried.slice(10), "0000000000000000", "随机部分归零");
+  assert.ok(carried.slice(0, 10) > max.slice(0, 10), "毫秒进 1");
 });

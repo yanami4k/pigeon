@@ -9,30 +9,54 @@ const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const ULID_PATTERN_SOURCE = "[0-9A-HJKMNP-TV-Z]{26}";
 
 // ULID：48 位毫秒时间戳 + 80 位随机数，编码为 26 个字符，字典序即时间序
-function ulid(now: number = Date.now()): string {
+const RANDOM_BITS = 80n;
+const RANDOM_LIMIT = 1n << RANDOM_BITS;
+
+function encodeTime(ms: number): string {
   // 时间部分：10 个字符，大端序
-  let time = now;
+  let time = ms;
   let head = "";
   for (let i = 0; i < 10; i++) {
     head = CROCKFORD.charAt(time % 32) + head;
     time = Math.floor(time / 32);
   }
-  // 随机部分：10 字节 = 80 bit = 16 个字符，每字符 5 bit
-  const bytes = randomBytes(10);
-  let tail = "";
-  let buffer = 0;
-  let bits = 0;
-  for (const byte of bytes) {
-    buffer = (buffer << 8) | byte;
-    bits += 8;
-    while (bits >= 5) {
-      bits -= 5;
-      tail += CROCKFORD.charAt((buffer >> bits) & 31);
-    }
-    buffer &= (1 << bits) - 1;
-  }
-  return head + tail;
+  return head;
 }
+
+function encodeRandom(value: bigint): string {
+  // 随机部分：80 bit = 16 个字符，每字符 5 bit，大端序
+  let tail = "";
+  for (let i = 15; i >= 0; i--) {
+    tail += CROCKFORD.charAt(Number((value >> BigInt(5 * i)) & 31n));
+  }
+  return tail;
+}
+
+// 单调的 ULID 生成器：同一毫秒内（或时钟回拨时）沿用上一次的毫秒、把随机部分加 1，先生成的字典序一定在前；随机部分
+// 加到溢出则毫秒进 1、随机部分归零。只在更晚的毫秒才重新取随机数。时钟与随机源可注入（测试用）
+export function monotonicUlid(
+  clock: () => number = Date.now,
+  random: (bytes: number) => Buffer = randomBytes
+): () => string {
+  let lastTime = -1;
+  let lastRandom = 0n;
+  return () => {
+    const now = clock();
+    if (now > lastTime) {
+      lastTime = now;
+      lastRandom = BigInt(`0x${random(10).toString("hex")}`);
+    } else {
+      lastRandom += 1n;
+      if (lastRandom >= RANDOM_LIMIT) {
+        lastRandom = 0n;
+        lastTime += 1;
+      }
+    }
+    return encodeTime(lastTime) + encodeRandom(lastRandom);
+  };
+}
+
+const ulid = monotonicUlid();
 
 // 标识种类工厂：生成 new*/as* 闭包与对应的 typebox schema，保证前缀只有一处定义
 function defineIdKind<Brand>(prefix: string) {
