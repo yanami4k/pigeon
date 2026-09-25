@@ -342,8 +342,8 @@ test("删覆盖人写测试的自动加载辅助文件：按文件系统列（�
   }
 });
 
-// 本机（Windows）建不了原生符号链接：符号链接的用例只在 Linux 上跑
-const NO_SYMLINKS = process.platform === "win32" ? "本机建不了原生符号链接" : false;
+// Windows 上建不了原生符号链接：符号链接的用例只在 Linux 上跑
+const NO_SYMLINKS = process.platform === "win32" ? "Windows 上建不了原生符号链接" : false;
 
 test("删覆盖人写测试的 conftest 时不跟随符号链接：名为 conftest 的链接只删链接；人写测试的上级目录被换成链接的删掉链接本身，链接那边的目录与其中的 conftest 不动；agent 自己目录的链接保留", {
   skip: NO_SYMLINKS,
