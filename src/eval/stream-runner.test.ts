@@ -1272,7 +1272,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("同一步因上游故障或排队超时（或限额信号）一再作废：累计 5 次向标准错误告警一次，累计 10 次停下作业并说明，不无止境重做", async () => {
+  test("同一步一再作废：上游故障（与限额信号同一口径）累计 5 次告警一次、10 次停下作业；只因排队超时的单独计数，10 次告警一次、不停作业，累计 30 次才停下", async () => {
     for (const cause of ["upstream", "queue"] as const) {
       const t = await toy();
       try {
@@ -1314,10 +1314,15 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             warn: (line) => warnings.push(line),
           })
         );
-        assert.match(summary.jobs[0]?.stopped ?? "", /累计作废 10 次：停下作业/, cause);
-        assert.equal(agent.calls.length, 10, cause);
+        const [stopAt, warnAt] = cause === "upstream" ? [10, 5] : [30, 10];
+        assert.match(
+          summary.jobs[0]?.stopped ?? "",
+          new RegExp(`累计作废 ${stopAt} 次：停下作业`),
+          cause
+        );
+        assert.equal(agent.calls.length, stopAt, cause);
         assert.equal(warnings.length, 1, cause);
-        assert.match(warnings[0] ?? "", /已累计作废 5 次/, cause);
+        assert.match(warnings[0] ?? "", new RegExp(`已累计作废 ${warnAt} 次`), cause);
         assert.deepEqual(readStreamResults(summary.resultsFile), [], cause);
       } finally {
         rmSync(t.base, { recursive: true, force: true });

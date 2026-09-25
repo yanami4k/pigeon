@@ -147,8 +147,10 @@ export interface AdmittedAgentRun {
   admissionWaitMs: number;
   // 作废的原因；空即不作废
   voidReasons: string[];
-  // 作废源于限额信号、上游故障或排队超时（计入同一步累计作废的上限）
+  // 作废源于限额信号、上游故障或排队超时
   limitRelated: boolean;
+  // 作废只因排队超时（期间没有限额信号与上游故障）：单独计数，不计入限额信号类作废的上限
+  queueOnly: boolean;
 }
 
 export async function runAdmittedAgent(
@@ -198,6 +200,7 @@ export async function runAdmittedAgent(
     admissionWaitMs: admission?.waitedMs ?? 0,
     voidReasons,
     limitRelated: signalled || upstreamFailed || queued,
+    queueOnly: queued && !signalled && !upstreamFailed,
   };
 }
 
@@ -294,6 +297,9 @@ export const MAX_BARE_INTERRUPTIONS = 3;
 // 同一步因限额信号、上游故障或排队超时被作废：累计到前一个数先向标准错误告警，到后一个数停下作业，免得无止境重做
 export const SIGNALLED_VOID_WARN = 5;
 export const SIGNALLED_VOID_STOP = 10;
+// 同一步只因排队超时被作废（额度环境造成，不是这一步本身的故障）：单独计数，累计到前一个数告警一次，到后一个数停下作业
+export const QUEUE_VOID_WARN = 10;
+export const QUEUE_VOID_STOP = 30;
 
 // 治理根里的会话文件（会话账本与旁置的正文文件）
 function sessionFilesOf(jobDir: string): string[] {
@@ -321,13 +327,16 @@ function quarantineSessions(
   return stray.length;
 }
 
-// 一步作废：signalled 为这一步期间出现过限额信号或本作业的上游故障（无论 agent 怎么报），否则是 agent 自报被打断
+// 一步作废：signalled 为这一步期间出现过限额信号、本作业的上游故障或排队超时（无论 agent 怎么报），否则是 agent 自报被打断；
+// queued 为作废只因排队超时（额度环境造成，单独计数）
 export class StepInterruptedError extends Error {
   override name = "StepInterruptedError";
   readonly signalled: boolean;
-  constructor(message: string, signalled: boolean) {
+  readonly queued: boolean;
+  constructor(message: string, signalled: boolean, queued = false) {
     super(message);
     this.signalled = signalled;
+    this.queued = queued;
   }
 }
 
@@ -584,6 +593,7 @@ async function runStreamJob(
       // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
       let bareInterruptions = 0;
       let signalledVoids = 0;
+      let queueVoids = 0;
       let attempt = 0;
       for (;;) {
         await limits?.ready();
@@ -608,6 +618,24 @@ async function runStreamJob(
             sessionsBefore,
             `step-${step.seq}-attempt-${attempt}`
           );
+          if (error.queued) {
+            bareInterruptions = 0;
+            queueVoids += 1;
+            if (queueVoids >= QUEUE_VOID_STOP) {
+              throw new Error(
+                `第 ${step.seq} 步因排队超时累计作废 ${queueVoids} 次：停下作业（最后一次：${error.message}）`
+              );
+            }
+            if (queueVoids === QUEUE_VOID_WARN) {
+              warn(
+                `[${streamJobKey(job)}] 第 ${step.seq} 步因排队超时已累计作废 ${queueVoids} 次，仍在重做；累计 ${QUEUE_VOID_STOP} 次即停下这个作业`
+              );
+            }
+            log(
+              `第 ${step.seq} 步第 ${queueVoids} 次排队作废（不计入限额信号类的累计上限；累计 ${QUEUE_VOID_STOP} 次即停下）：${error.message}`
+            );
+            continue;
+          }
           if (error.signalled) {
             bareInterruptions = 0;
             signalledVoids += 1;
@@ -1023,7 +1051,8 @@ async function runStep(
       await ws.discardAttempt(state.head, step.seq - 1);
       throw new StepInterruptedError(
         `第 ${step.seq} 步作废：${admitted.voidReasons.join("；")}`,
-        admitted.limitRelated
+        admitted.limitRelated,
+        admitted.queueOnly
       );
     }
     if (delta !== undefined) {

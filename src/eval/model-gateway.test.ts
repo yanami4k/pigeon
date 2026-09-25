@@ -10,6 +10,7 @@ import {
   gatewayAccountsFromEnv,
   type ModelGateway,
   meterDelta,
+  QUOTA_HOLD_MIN_MS,
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
@@ -128,6 +129,8 @@ async function withGateway(
   const up = await fakeUpstream(script);
   const l = limits();
   const g = await startModelGateway({
+    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
+    quotaHoldMinMs: 0,
     upstreamBaseUrl: up.url,
     accounts: keys.map((key) => ({ key, concurrency: 2 })),
     limits: l,
@@ -437,7 +440,12 @@ async function withAccounts(
     warnings: string[],
     clock: ReturnType<typeof testClock>
   ) => Promise<void>,
-  gatewayOptions: { backoffDelaysMs?: number[]; virtual?: boolean; autoBelowMs?: number } = {}
+  gatewayOptions: {
+    backoffDelaysMs?: number[];
+    virtual?: boolean;
+    autoBelowMs?: number;
+    quotaHoldMinMs?: number;
+  } = {}
 ) {
   const up = await keyedUpstream(respond);
   const l = limits();
@@ -449,6 +457,8 @@ async function withAccounts(
       : {}),
   });
   const g = await startModelGateway({
+    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
+    quotaHoldMinMs: gatewayOptions.quotaHoldMinMs ?? 0,
     upstreamBaseUrl: up.url,
     accounts,
     limits: l,
@@ -721,6 +731,8 @@ test("在途计数不泄漏：读 429 错误正文时客户端中止、或上游
   for (const mode of ["hang", "drop"] as const) {
     const up = await stallingUpstream();
     const g = await startModelGateway({
+      // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
+      quotaHoldMinMs: 0,
       upstreamBaseUrl: up.url,
       accounts: [{ key: "key-one", concurrency: 1 }],
       limits: limits(),
@@ -1175,6 +1187,8 @@ test("收尾：close() 取消冷却、单独探测与上限回升的定时，跑
   });
   const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
   const g = await startModelGateway({
+    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
+    quotaHoldMinMs: 0,
     upstreamBaseUrl: up.url,
     accounts: [
       { key: "key-a", concurrency: 2 },
@@ -1398,6 +1412,8 @@ test("收尾：关闭之后不再新设定时——关闭时同一作业还有�
   const held: ((s: Scripted) => void)[] = [];
   const up = await keyedUpstream({ "key-a": () => new Promise<Scripted>((r) => held.push(r)) });
   const g = await startModelGateway({
+    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
+    quotaHoldMinMs: 0,
     upstreamBaseUrl: up.url,
     accounts: [{ key: "key-a", concurrency: 1 }],
     limits: limits(),
@@ -1419,4 +1435,112 @@ test("收尾：关闭之后不再新设定时——关闭时同一作业还有�
   } finally {
     await up.close();
   }
+});
+
+// 最短停用期的用例：两个账号，账号 1 按开关回额度 403 或 200，账号 2 一直 200；虚拟时钟，探测按 5 至 30 分钟的间隔手动拨到
+async function withQuotaHold(
+  run: (ctx: {
+    g: ModelGateway;
+    up: Awaited<ReturnType<typeof keyedUpstream>>;
+    warnings: string[];
+    clock: ReturnType<typeof testClock>;
+    setQuota: (on: boolean) => void;
+    elapsed: () => number;
+  }) => Promise<void>
+) {
+  let quota = false;
+  let offset = 0;
+  await withAccounts(
+    { "key-a": () => (quota ? QUOTA : OK), "key-b": () => OK },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+    ],
+    async (g, up, _l, warnings, clock) => {
+      const advance = clock.advance.bind(clock);
+      clock.advance = async (ms: number) => {
+        offset += ms;
+        await advance(ms);
+      };
+      await run({
+        g,
+        up,
+        warnings,
+        clock,
+        setQuota: (on) => {
+          quota = on;
+        },
+        elapsed: () => offset,
+      });
+    },
+    { virtual: true, quotaHoldMinMs: QUOTA_HOLD_MIN_MS }
+  );
+}
+
+// 让账号 1 撞额度停用：一个请求先派给它（在途占比相同取编号小的），403 后换到账号 2
+async function quotaDown(ctx: Parameters<Parameters<typeof withQuotaHold>[0]>[0]) {
+  ctx.setQuota(true);
+  assert.equal((await post(ctx.g, "j")).status, 200);
+  assert.equal(ctx.g.accountStatus()[0]?.down, "5h");
+  ctx.setQuota(false);
+}
+
+// 按探测间隔一格一格拨，直到账号 1 恢复；返回用了多少虚拟毫秒
+async function untilRestored(ctx: Parameters<Parameters<typeof withQuotaHold>[0]>[0]) {
+  const from = ctx.elapsed();
+  for (let i = 0; i < 400 && ctx.g.accountStatus()[0]?.down !== null; i++) {
+    const probes = ctx.up.probes.length;
+    await ctx.clock.advance(60_000);
+    if (ctx.up.probes.length > probes)
+      await until(
+        () => ctx.g.accountStatus()[0]?.down === null || ctx.warnings.some((w) => /未满/.test(w)),
+        "探测结果"
+      );
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.equal(ctx.g.accountStatus()[0]?.down, null, "最终恢复");
+  return ctx.elapsed() - from;
+}
+
+const holdOf = (warnings: string[]) =>
+  Number(
+    /最短停用期 (\d+) 分钟（期内探测通过也不恢复）/.exec(
+      warnings.filter((w) => /额度用完/.test(w)).at(-1) ?? ""
+    )?.[1]
+  );
+
+test("最短停用期：额度停用后探测立即通过也不恢复，满 30 分钟才恢复；日志写明停用期与剩余时长", async () => {
+  await withQuotaHold(async (ctx) => {
+    await quotaDown(ctx);
+    assert.equal(holdOf(ctx.warnings), 30);
+    // 5 分钟、15 分钟两次探测都通过，但未满 30 分钟：不恢复
+    await ctx.clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
+    await until(() => ctx.up.probes.length === 1, "第一次探测");
+    await until(
+      () => ctx.warnings.some((w) => /最短停用期 30 分钟未满（还剩 25 分钟）/.test(w)),
+      "未满的日志"
+    );
+    assert.equal(ctx.g.accountStatus()[0]?.down, "5h");
+    assert.equal(ctx.g.capacity(), 1, "停用期内不回到容量");
+    const used = await untilRestored(ctx);
+    assert.equal(used + (PROBE_SCHEDULE_MS[0] ?? 0), 30 * 60_000, "第 30 分钟那次探测才恢复");
+    assert.ok(ctx.warnings.some((w) => /恢复可用（已停用 30 分钟，最短停用期 30 分钟）/.test(w)));
+    assert.equal(ctx.g.capacity(), 2);
+  });
+});
+
+test("最短停用期：6 小时内再次因额度停用即翻倍（30 → 60 → 120 → 240，封顶 240）；连续 6 小时没有再停用即回到 30 分钟", async () => {
+  await withQuotaHold(async (ctx) => {
+    const holds: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      await quotaDown(ctx);
+      holds.push(holdOf(ctx.warnings));
+      await untilRestored(ctx);
+    }
+    assert.deepEqual(holds, [30, 60, 120, 240, 240]);
+    // 最后一次停用之后已过 240 分钟以上；再过 2 小时即满 6 小时没有再因额度停用
+    await ctx.clock.advance(2 * 60 * 60_000);
+    await quotaDown(ctx);
+    assert.equal(holdOf(ctx.warnings), 30);
+  });
 });

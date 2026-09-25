@@ -143,6 +143,8 @@ export interface ModelGatewayOptions {
   backoffDelaysMs?: readonly number[];
   concurrencyRetryDelayMs?: number;
   capRegrowMs?: number;
+  // 额度类停用的首次最短停用期（缺省 QUOTA_HOLD_MIN_MS；翻倍、封顶与回落的规则不变）
+  quotaHoldMinMs?: number;
   // 缺省为真实时钟（退避按 5、15、45 秒，探测按 5 至 30 分钟真实等待）
   clock?: GatewayClock;
   warn?: (line: string) => void;
@@ -238,6 +240,10 @@ interface AccountState {
   probing: Promise<ProbeOutcome> | undefined;
   // 上限回升的定时
   regrow: (() => void) | undefined;
+  // 额度类停用（5 小时、每周、每月）的最短停用期：这次停用的时刻与停用期；上一次因额度停用的时刻（算翻倍与回落用）
+  quotaDownAt: number | null;
+  quotaHoldMs: number;
+  lastQuotaDownAt: number | null;
 }
 
 // 一次派发：账号、派发时的退避轮次与该账号的并发上限
@@ -251,6 +257,16 @@ type ProbeOutcome = "ok" | "fail" | LimitKind;
 
 // 每月额度用完与认证失败的账号不会自行恢复，不探测
 const permanent = (down: LimitKind | null) => down === "monthly" || down === "auth";
+
+// 额度类停用（5 小时、每周、每月）：额度按滚动窗口，停用后极小的探测请求能过、真实负载一上来又用完。
+// 恢复要同时满足探测通过与距这次停用已满最短停用期：首次 30 分钟；上一次因额度停用不到 6 小时即翻倍，封顶 240 分钟；
+// 连续 6 小时没有再因额度停用即回到 30 分钟。停用期内照常按原间隔探测，探测通过只记下、不恢复。429 退避、并发 403
+// 与认证失败的处理不受影响
+const isQuota = (down: LimitKind | null) =>
+  down === "5h" || down === "weekly" || down === "monthly";
+export const QUOTA_HOLD_MIN_MS = 30 * 60_000;
+export const QUOTA_HOLD_MAX_MS = 240 * 60_000;
+export const QUOTA_HOLD_RESET_MS = 6 * 60 * 60_000;
 
 async function readAll(req: http.IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -315,12 +331,16 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
       recovering: false,
       probing: undefined,
       regrow: undefined,
+      quotaDownAt: null,
+      quotaHoldMs: options.quotaHoldMinMs ?? QUOTA_HOLD_MIN_MS,
+      lastQuotaDownAt: null,
     }));
   if (accounts.length === 0) throw new Error("网关至少需要一个账号");
   const keys = accounts.map((a) => a.key);
   const delays = options.backoffDelaysMs ?? BACKOFF_DELAYS_MS;
   const concurrencyRetryDelayMs = options.concurrencyRetryDelayMs ?? CONCURRENCY_RETRY_DELAY_MS;
   const capRegrowMs = options.capRegrowMs ?? CAP_REGROW_MS;
+  const quotaHoldMinMs = options.quotaHoldMinMs ?? QUOTA_HOLD_MIN_MS;
   const clock = options.clock ?? REAL_CLOCK;
   const now = () => clock.now();
   const warn = options.warn ?? ((line: string) => process.stderr.write(`[网关] ${line}\n`));
@@ -341,6 +361,8 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     return m;
   };
   const label = (i: number) => `账号 ${i + 1}`;
+  const account = (i: number) => accounts[i] as AccountState;
+  const minutes = (ms: number) => Math.ceil(ms / 60_000);
   let closed = false;
   // 关闭时中止探测请求
   const closing = new AbortController();
@@ -575,25 +597,38 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     })();
     return account.probing;
   };
-  const restore = (index: number) => {
+  // 恢复：额度类停用须已满最短停用期（探测通过但未满只记下、不恢复）；恢复了或本来就可用返回 true
+  const restore = (index: number): boolean => {
     const account = accounts[index] as AccountState;
-    if (account.down === null || permanent(account.down)) return;
+    // 本来就可用：探测通过即算通过
+    if (account.down === null) return true;
+    if (permanent(account.down)) return false;
+    let held = "";
+    if (isQuota(account.down) && account.quotaDownAt !== null) {
+      const elapsed = now() - account.quotaDownAt;
+      if (elapsed < account.quotaHoldMs) {
+        warn(
+          `${label(index)}探测通过，但最短停用期 ${minutes(account.quotaHoldMs)} 分钟未满（还剩 ${minutes(account.quotaHoldMs - elapsed)} 分钟）：暂不恢复，照常按间隔探测`
+        );
+        return false;
+      }
+      held = `（已停用 ${minutes(elapsed)} 分钟，最短停用期 ${minutes(account.quotaHoldMs)} 分钟）`;
+      account.quotaDownAt = null;
+    }
     account.down = null;
     account.level = 0;
     account.round += 1;
     account.cooling = false;
-    warn(`${label(index)}探测通过，恢复可用`);
+    warn(`${label(index)}探测通过，恢复可用${held}`);
     // 整批暂停中有账号恢复：立即恢复整批，不等控制器的下一轮探测
     options.limits.recovered();
     pump();
     capacityChanged();
+    return true;
   };
-  // 按探测结果处理：通过即恢复；认证失败或每月额度用完即转为不再恢复。通过为 true
+  // 按探测结果处理：通过即恢复（额度类停用须已满最短停用期）；认证失败或每月额度用完即转为不再恢复。恢复了为 true
   const settleProbe = (index: number, outcome: ProbeOutcome): boolean => {
-    if (outcome === "ok") {
-      restore(index);
-      return true;
-    }
+    if (outcome === "ok") return restore(index);
     if (permanent(outcome as LimitKind)) takeDown(index, outcome as LimitKind);
     return false;
   };
@@ -622,7 +657,11 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
         : kind === "concurrency"
           ? "并发上限已是 1 仍受限"
           : "额度用完";
-    return `${who}${why}，暂时不可用；按 5 至 30 分钟的间隔探测恢复`;
+    const hold =
+      isQuota(kind) && account(index).quotaDownAt !== null
+        ? `；最短停用期 ${minutes(account(index).quotaHoldMs)} 分钟（期内探测通过也不恢复）`
+        : "";
+    return `${who}${why}，暂时不可用${hold}；按 5 至 30 分钟的间隔探测恢复`;
   };
   // 账号不可用：还有可用账号即只停它、请求换号；全部不可用即交给控制器整批暂停，都不会自行恢复则停下
   const takeDown = (index: number, kind: LimitKind) => {
@@ -631,6 +670,16 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     if (account.down === kind || (account.down !== null && !permanent(kind))) return;
     account.down = kind;
     account.cooling = false;
+    if (isQuota(kind)) {
+      // 最短停用期：上一次因额度停用不到 6 小时即翻倍（封顶），否则回到 30 分钟
+      const t = now();
+      account.quotaHoldMs =
+        account.lastQuotaDownAt !== null && t - account.lastQuotaDownAt < QUOTA_HOLD_RESET_MS
+          ? Math.min(account.quotaHoldMs * 2, QUOTA_HOLD_MAX_MS)
+          : quotaHoldMinMs;
+      account.quotaDownAt = t;
+      account.lastQuotaDownAt = t;
+    }
     capacityChanged();
     warn(`${downLine(index, kind)}${usable() ? "，请求换到其他账号" : ""}`);
     if (!permanent(kind)) void recover(index);
