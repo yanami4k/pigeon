@@ -332,7 +332,7 @@ test("放行：等待的时长按控制器的时钟计，容量不足等多久�
   first();
 });
 
-test("停止信号与放行队列：路数占满时排队等放行的全部以停止原因释放、不被放行；之后取新步一律拒绝", async () => {
+test("停止信号与放行队列：取步者刚过放行门、尚未入队时收到停止，以停止原因释放、不被放行；之后取新步一律拒绝", async () => {
   const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
   const first = await limits.acquire();
   const queued = limits.acquire();
