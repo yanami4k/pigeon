@@ -1,4 +1,4 @@
-// 决策 163 的整体用例：真网关（虚拟时钟）+ 按可用容量放行的限额控制器 + 跑批器与定点对照共用的 runAdmittedAgent；
+// 决策 163 的整体用例：真网关（虚拟时钟）+ 按可用容量放行的限额控制器 + 正式跑批与预算试跑共用的 runAdmittedAgent；
 // agent 是模拟的：每一步发一个模型请求、等它回来，按步中止即停下；各路按"作废即重做同一步"循环，与跑批器同一口径
 import assert from "node:assert/strict";
 import http from "node:http";
