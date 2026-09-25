@@ -74,8 +74,9 @@ export interface FixedPointEvent {
   seq: number;
   commit: string;
   kind: StreamStep["kind"];
-  // 第 k 步起点：上一步结束时的提交
+  // 第 k 步起点：上一步结束时的提交与上一步的步序（恢复时编号大于它的开工树引用一律丢掉）
   startHead: string;
+  startSeq: number;
   // 放进治理根的第 1 到 k−1 步的会话文件
   priorSessionFiles: string[];
   // 这些会话开工时的树（重跑时一并带进工作区）
@@ -407,6 +408,7 @@ export async function identifyEvents(options: IdentifyOptions): Promise<FixedPoi
         segmentStart: segment.startCommit,
         step,
         startHead: prev.head,
+        startSeq: prev.seq,
         sliced,
         keep,
         priorFiles,
@@ -425,6 +427,7 @@ export async function identifyEvents(options: IdentifyOptions): Promise<FixedPoi
         commit: step.commit,
         kind: step.kind,
         startHead: prev.head,
+        startSeq: prev.seq,
         priorSessionFiles: priorFiles,
         priorStepStarts: [...new Set(keep)].sort(),
         stepSession,
@@ -465,6 +468,7 @@ async function pickAt(
     segmentStart: string;
     step: StreamStep;
     startHead: string;
+    startSeq: number;
     sliced: Buffer;
     keep: readonly string[];
     priorFiles: readonly string[];
@@ -480,7 +484,10 @@ async function pickAt(
   if (firstRunId === undefined) throw new Error(`第 ${step.seq} 步的会话里没有 Run`);
   const env = await options.envs.open(
     { stream: `${input.stream}-events`, condition: "no-memory", attempt: step.seq },
-    { startCommit: input.segmentStart, resume: { head: input.startHead, bundle: input.sliced } }
+    {
+      startCommit: input.segmentStart,
+      resume: { head: input.startHead, seq: input.startSeq, bundle: input.sliced },
+    }
   );
   const governance = mkdtempSync(path.join(options.scratch, `gov-${input.stream}-${step.seq}-`));
   try {

@@ -6,10 +6,16 @@
 // 不接受调用方另给）；每遍跑完再按重跑自己的 run.started 核对一次，任何一项不同即拒绝、不写结果行。
 // 各遍互不可见：每遍一个独立的治理根副本；被打断的一遍整遍作废（会话移出、从起点重来），与流中的作废规则相同。
 // 结果写结果行（158：不新增账本记录），按"事件 × 组 × 遍次"断点续跑。
-import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { hostWorkspaceAccess, taskReferencedFiles } from "../memory/structured-workspace.ts";
-import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import { materializeSession } from "../persistence/session-read.ts";
 import {
   AttemptFidelityError,
@@ -53,11 +59,11 @@ import {
   type RepairVerify,
   readFixedPointRows,
 } from "./fixed-point-results.ts";
-import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import type { LimitController } from "./model-limits.ts";
 import type { HarnessRef } from "./results.ts";
 import { STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import type { HumanRepo } from "./stream-facts.ts";
+import { identityDigest, identityFile, type StreamRunIdentity } from "./stream-identity.ts";
 import type { StreamManifest, StreamStep } from "./stream-manifest.ts";
 import {
   allPassed,
@@ -68,11 +74,13 @@ import {
 import { type StreamGatewayFacts, ZERO_USAGE } from "./stream-results.ts";
 import {
   CONDITION_SPECS,
+  humanTestsAt,
+  lockOutDir,
   MAX_BARE_INTERRUPTIONS,
   restoreTests,
+  runAdmittedAgent,
   SIGNALLED_VOID_STOP,
   type StepAgent,
-  type StepAgentResult,
   type StepBudget,
   StepInterruptedError,
   type StreamEnvFactory,
@@ -157,6 +165,47 @@ export function assertRerunFidelity(original: AttemptPlan, rerun: AttemptPlan): 
   }
   if (problems.length > 0) {
     throw new FidelityRejectedError(`重跑与原尝试不一致，拒绝：${problems.join("；")}`);
+  }
+}
+
+// 验证分步（run.started 冻结的 verify.steps：名字、命令与执行目录）须与原尝试相同，不同即拒绝
+export function assertSameVerifySteps(
+  what: string,
+  expected: readonly { name: string; command: string; cwd?: string }[] | undefined,
+  actual: readonly { name: string; command: string; cwd?: string }[] | undefined
+): void {
+  const shape = (steps: typeof expected) =>
+    JSON.stringify((steps ?? []).map((s) => [s.name, s.command, s.cwd ?? null]));
+  if (expected === undefined || actual === undefined || shape(expected) !== shape(actual)) {
+    throw new FidelityRejectedError(
+      `重跑与原尝试不一致，拒绝：${what}的验证分步不同（${shape(actual)}，原尝试 ${shape(expected)}）`
+    );
+  }
+}
+
+// 镜像：无记忆整流输出目录的身份头里记下的镜像 ID 须与这次重跑所用的相同；身份头须与结果行记下的摘要对得上
+export function assertSameImage(
+  noMemoryDir: string,
+  rows: readonly { runIdentity: string | null }[],
+  imageId: string
+): void {
+  const file = identityFile(noMemoryDir);
+  if (!existsSync(file)) {
+    throw new FidelityRejectedError(
+      "无记忆整流的输出目录里没有身份头（identity.json）：无从核对镜像，拒绝"
+    );
+  }
+  const identity = JSON.parse(readFileSync(file, "utf8")) as StreamRunIdentity;
+  const digest = identityDigest(identity.core);
+  if (rows.some((r) => r.runIdentity !== digest)) {
+    throw new FidelityRejectedError(
+      "无记忆整流的结果行记下的身份摘要与身份头对不上：无从核对镜像，拒绝"
+    );
+  }
+  if (identity.core.image !== imageId) {
+    throw new FidelityRejectedError(
+      `重跑与原尝试不一致，拒绝：镜像 ${imageId}，无记忆整流所用 ${identity.core.image}`
+    );
   }
 }
 
@@ -266,6 +315,12 @@ export interface FixedPointOptions {
   harnessRef: HarnessRef;
   log?: (line: string) => void;
   warn?: (line: string) => void;
+  // 调用方已对输出目录取了锁
+  outDirLocked?: boolean;
+  // 这次重跑所用镜像的 ID：给了即与无记忆整流身份头里的核对
+  imageId?: string;
+  // harness 代码的核对：给了即以无记忆整流结果行记下的 harness 版本调用它，不符即抛错拒绝
+  checkHarness?: (recorded: HarnessRef) => void;
 }
 
 export interface FixedPointSummary {
@@ -283,8 +338,9 @@ interface Prepared {
   event: FixedPointEvent;
   step: StreamStep;
   original: AttemptPlan;
-  // 原尝试 run.started 冻结的回炉上限
+  // 原尝试 run.started 冻结的回炉上限与验证分步
   originalRepairRounds: number;
+  originalVerifySteps: readonly { name: string; command: string; cwd?: string }[] | undefined;
   budget: StepBudget;
   agent: StepAgent;
   segmentStart: string;
@@ -298,12 +354,9 @@ function message(error: unknown): string {
 }
 
 export async function runFixedPoint(options: FixedPointOptions): Promise<FixedPointSummary> {
-  mkdirSync(options.outDir, { recursive: true });
-  // 同一输出目录同一时刻只许一个进程写（结果行、各遍治理根）：撞锁即拒绝，报出占用者
-  const release = acquireExclusiveLock(
-    path.join(options.outDir, ".fixed-point.lock"),
-    "这个输出目录正被另一个定点对照进程使用"
-  );
+  // 同一输出目录同一时刻只许一个进程写（结果行、各遍治理根）：与跑批器同一把输出目录锁，撞锁即拒绝并报出占用者；
+  // 调用方已取锁（装配在开跑前探测账号之前就取）即不再取
+  const release = options.outDirLocked === true ? () => {} : lockOutDir(options.outDir);
   try {
     return await runLocked(options);
   } finally {
@@ -325,6 +378,22 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
       throw new Error(`事件清单不是出自这份无记忆整流输出（流 ${s.id} 的结果行摘要不符）`);
     }
   }
+  // 镜像与 harness 代码须与无记忆整流时相同（决策 156）
+  const noMemoryRows = options.events.noMemory.streams.flatMap(
+    (s) => openNoMemoryJob(options.noMemoryDir, s.id, attempt).rows
+  );
+  if (options.imageId !== undefined)
+    assertSameImage(options.noMemoryDir, noMemoryRows, options.imageId);
+  const harnessRefs = new Map(
+    noMemoryRows.map((r) => [`${r.harnessRef.commit}|${r.harnessRef.dirty}`, r.harnessRef])
+  );
+  if (harnessRefs.size !== 1) {
+    throw new FidelityRejectedError(
+      `无记忆整流的结果行记下了 ${harnessRefs.size} 个不同的 harness 版本：无从核对，拒绝`
+    );
+  }
+  const [recordedHarness] = harnessRefs.values();
+  if (recordedHarness !== undefined) options.checkHarness?.(recordedHarness);
   const prepared = new Map<string, Prepared>();
   for (const event of options.events.events) {
     const step = bySeq.get(event.seq);
@@ -345,14 +414,21 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
       throw new AttemptFidelityError(`事件 ${event.id} 的原尝试题面与清单不同，拒绝重跑`);
     }
     const budget = rerunBudget(original);
+    const originalSession = materializeSession(job.sessionsDir, event.stepSession as SessionId, {
+      content: false,
+    });
+    assertSameVerifySteps(
+      `事件 ${event.id} 这次运行方式`,
+      originalSession.runStarteds[0]?.payload.verify?.steps,
+      options.runtime.verifySteps
+    );
     const runtime = rerunRuntime(original);
     prepared.set(event.id, {
       event,
       step,
       original,
-      originalRepairRounds: repairRoundsOf(
-        materializeSession(job.sessionsDir, event.stepSession as SessionId, { content: false })
-      ),
+      originalRepairRounds: repairRoundsOf(originalSession),
+      originalVerifySteps: originalSession.runStarteds[0]?.payload.verify?.steps,
       budget,
       agent: options.agentFor(runtime),
       segmentStart: segment.startCommit,
@@ -486,7 +562,7 @@ async function runPass(
   const job = { stream: `${event.id}-${group}`, condition: "full" as const, attempt: pass };
   const env = await options.envs.open(job, {
     startCommit: prep.segmentStart,
-    resume: { head: event.startHead, bundle: prep.sliced },
+    resume: { head: event.startHead, seq: event.startSeq, bundle: prep.sliced },
   });
   try {
     await prepareStepStart(options, env, step, {
@@ -506,13 +582,10 @@ async function runPass(
           return kind === "test" || kind === "testaux";
         })
     );
-    const release = await options.limits?.acquire();
-    const signalsBefore = options.limits?.signals ?? 0;
-    const before: GatewayMeter | undefined = options.gateway?.meter(meterKey);
-    options.gateway?.resetPeak(meterKey);
-    let result: StepAgentResult;
-    try {
-      result = await prep.agent.run({
+    // 放行与作废判定与跑批器共用（决策 144、160、163）：等放行后跑 agent，本作业在网关排队超过阈值即中止；期间有限额信号、
+    // 上游故障、排队超时或 agent 报被打断即整遍作废
+    const admitted = await runAdmittedAgent(options, meterKey, (abortSignal) =>
+      prep.agent.run({
         job: { stream: event.stream, condition: "full", attempt: pass },
         step,
         prompt: step.prompt ?? step.message,
@@ -526,27 +599,27 @@ async function runPass(
         },
         workDir: dir,
         humanTestFiles: humanTests,
+        ...(options.runtime.autoloadedTestHelper !== undefined
+          ? {
+              autoloadedTestHelper: options.runtime.autoloadedTestHelper,
+              humanTests: humanTestsAt(options.human, options.runtime, step.commit),
+              humanTree: options.human.tree(step.commit).map((e) => e.path),
+            }
+          : {}),
         structuredMemoryFixed: fixed,
         ...(options.gateway !== undefined
           ? { modelBaseUrl: options.gateway.jobBaseUrl(meterKey) }
           : {}),
-      });
-    } finally {
-      release?.();
-    }
-    const delta =
-      options.gateway !== undefined && before !== undefined
-        ? meterDelta(options.gateway.meter(meterKey), before)
-        : undefined;
-    const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
-    const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
-    if (signalled || upstreamFailed || result.interrupted !== undefined) {
-      const why = [
-        signalled ? "期间出现限额信号" : undefined,
-        upstreamFailed ? `上游故障 ${delta?.upstreamFailures} 次` : undefined,
-        result.interrupted !== undefined ? `agent 报被打断：${result.interrupted}` : undefined,
-      ].filter((x) => x !== undefined);
-      throw new StepInterruptedError(`作废：${why.join("；")}`, signalled || upstreamFailed);
+        abortSignal,
+      })
+    );
+    const result = admitted.result;
+    const delta = admitted.delta;
+    if (admitted.voidReasons.length > 0) {
+      throw new StepInterruptedError(
+        `作废：${admitted.voidReasons.join("；")}`,
+        admitted.limitRelated
+      );
     }
     let turns = result.turns;
     let usage = result.usage;
@@ -585,6 +658,11 @@ async function runPass(
       })
     );
     assertSameRepairRounds(prep.originalRepairRounds, repairRoundsOf(session));
+    assertSameVerifySteps(
+      "这一遍",
+      prep.originalVerifySteps,
+      session.runStarteds[0]?.payload.verify?.steps
+    );
     const host = options.hostFor(env.target);
     const verdicts = verdictsOf(session, sessionId, host, step, humanTests);
     const used = memoryUsedOf(session, sessionId, event);
@@ -631,6 +709,7 @@ async function runPass(
       agentWallMs: result.wallMs,
       wallMs: Date.now() - started,
       gateway,
+      admissionWaitMs: admitted.admissionWaitMs,
       limitPauses: [],
       harnessRef: options.harnessRef,
     };

@@ -429,7 +429,7 @@ async function runStreamTrialExperimentLocked(
 
 // 起限额控制器与网关（互相引用：控制器探测经网关的上游，网关把限额信号交给控制器）。控制器按网关报来的可用容量
 // 放行（决策 163），网关的容量一变即通知控制器；开跑前逐账号探测一次，未通过即关掉两者、拒绝开跑
-async function startGatewayAndLimits(
+export async function startGatewayAndLimits(
   settings: { accounts: readonly GatewayAccount[]; modelId: string },
   concurrency: number
 ): Promise<{ gateway: ModelGateway; limits: LimitController }> {

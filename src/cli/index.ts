@@ -652,6 +652,7 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
+// 定点对照：开始
 // 定点对照（决策 139、156、157）的两个命令共用的参数解析：每个参数都带取值
 function fixedPointArgs(argv: string[], usage: string, own: ReadonlySet<string>) {
   const values = new Map<string, string>();
@@ -792,6 +793,7 @@ async function evalFixedPointMain(argv: string[]): Promise<void> {
   writeOut(`[fixed-point] 结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`);
   if (summary.stopped.length > 0) process.exitCode = 3;
 }
+// 定点对照：结束
 
 // pigeon eval stream-trial --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --steps 3,9,12
 //   [--conditions full（缺省）] [--concurrency N（缺省 2）] [--max-turns N（缺省 400）] [--wall-clock-min N（缺省 90）]
@@ -1204,6 +1206,7 @@ async function main(argv: string[]): Promise<void> {
     await evalStreamMain(argv.slice(2));
     return;
   }
+  // 定点对照：开始
   if (argv[0] === "eval" && argv[1] === "stream-fixed-point-events") {
     await evalFixedPointEventsMain(argv.slice(2));
     return;
@@ -1212,6 +1215,7 @@ async function main(argv: string[]): Promise<void> {
     await evalFixedPointMain(argv.slice(2));
     return;
   }
+  // 定点对照：结束
   if (argv[0] === "eval" && argv[1] === "stream-trial") {
     await evalStreamMain(argv.slice(2), true);
     return;

@@ -63,6 +63,8 @@ export interface FixedPointRow {
   wallMs: number;
   // 网关：等空闲账号的累计毫秒（排队）、各账号转发次数、在途峰值；不经网关为 null
   gateway: StreamGatewayFacts | null;
+  // 等放行的毫秒（agent 开始之前，不计入这一遍的墙钟预算，决策 163）
+  admissionWaitMs: number;
   limitPauses: LimitPauseRecord[];
   harnessRef: HarnessRef;
 }

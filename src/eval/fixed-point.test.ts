@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
-import { acquireExclusiveLock, ExclusiveLockError } from "../persistence/exclusive-lock.ts";
+import { ExclusiveLockError } from "../persistence/exclusive-lock.ts";
 import type { FakeReply } from "../pi-runtime/fixtures.ts";
 import type { ReproducedRuntime } from "../replay/fidelity.ts";
 import {
@@ -25,8 +25,9 @@ import {
 } from "./fixed-point-fixtures.ts";
 import { type FixedPointOptions, runFixedPoint } from "./fixed-point-rerun.ts";
 import { fixedPointKey, readFixedPointRows } from "./fixed-point-results.ts";
+import type { GatewayMeter } from "./model-gateway.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
-import type { StepAgent, StepAgentInput } from "./stream-runner.ts";
+import { lockOutDir, type StepAgent, type StepAgentInput } from "./stream-runner.ts";
 
 const RIGHT_FIRST_TIME: Record<number, FakeReply[]> = {
   3: [
@@ -430,16 +431,64 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
     assert.equal(lateRow?.memoryUsed, false);
   });
 
+  test("放行与作废同跑批器：这一遍在网关排队超过阈值即中止并整遍作废、不写行，治理根移出后从起点重来", async () => {
+    // 假网关：第一遍开始排队看守后不久报排队超时（这个作业累计等空闲账号超过阈值），之后一切正常
+    const meters = new Map<string, GatewayMeter>();
+    const zero: GatewayMeter = {
+      requests: 0,
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      upstreamFailures: 0,
+      queueMs: 0,
+      peakInFlight: 0,
+      accountRequests: [],
+    };
+    let watches = 0;
+    const gateway = {
+      jobBaseUrl: (job: string) => `http://127.0.0.1:9/j/${job}`,
+      meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+      resetPeak: () => {},
+      watchQueue(job: string, thresholdMs: number, listener: () => void) {
+        watches += 1;
+        if (watches > 1) return () => {};
+        const timer = setTimeout(() => {
+          meters.set(job, { ...(meters.get(job) ?? zero), queueMs: thresholdMs + 1 });
+          listener();
+        }, 200);
+        return () => clearTimeout(timer);
+      },
+    };
+    const outDir = join(toy.base, "out-queue");
+    const summary = await runFixedPoint(
+      options({
+        events: only(["s1-3"]),
+        outDir,
+        groups: ["none"],
+        passes: 1,
+        gateway,
+        agentFor: rerunAgent([], [], (s) => RIGHT_FIRST_TIME[s.step.seq] ?? []),
+      })
+    );
+    assert.deepEqual(summary.stopped, []);
+    assert.equal(watches, 2, "排队超时的一遍作废后从起点重来一次");
+    const rows = readFixedPointRows(summary.resultsFile);
+    assert.equal(rows.length, 1, "作废的一遍不写行");
+    assert.equal(rows[0]?.gateway?.queueMs, 0);
+    assert.deepEqual(readdirSync(join(outDir, "voided", "s1-3")), ["none-1"]);
+  });
+
   test("一致性核对：运行面与原尝试不同（换推理档位）即拒绝、不写结果行；事件清单须出自同一份整流输出；同一输出目录被另一进程占用即拒绝", async () => {
     const opened = toy.envs.opened.length;
     const locked = join(toy.base, "out-locked");
     mkdirSync(locked, { recursive: true });
-    const release = acquireExclusiveLock(join(locked, ".fixed-point.lock"), "占用");
+    const release = lockOutDir(locked);
     try {
       await assert.rejects(
         runFixedPoint(options({ outDir: locked, agentFor: rerunAgent([], [], () => []) })),
         (error: unknown) =>
-          error instanceof ExclusiveLockError && /另一个定点对照进程/.test(String(error))
+          error instanceof ExclusiveLockError && /正被另一个跑批进程使用/.test(String(error))
       );
     } finally {
       release();
