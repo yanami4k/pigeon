@@ -62,6 +62,7 @@ import {
   dockerStreamShell,
   removeCoveringHelpers,
   StreamWorkspace,
+  StreamWorkspaceAccessError,
 } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
@@ -720,6 +721,7 @@ async function restoreTests(
   ws: StreamWorkspace,
   step: StreamStep
 ): Promise<void> {
+  await ws.grantOwnerAccess();
   const profile = options.runtime.profile;
   const isTest = (p: string) => {
     const kind = profile.classifyFile(p);
@@ -998,7 +1000,14 @@ async function runStep(
     }
     agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
     await ws.normalizeTo(state.head);
-    await restoreTests(options, ws, step);
+    try {
+      await restoreTests(options, ws, step);
+    } catch (error) {
+      // agent 设下、跑批器处理不了的访问障碍（列不出的目录、删不掉的链接）：这一步作废重做，不停作业
+      if (!(error instanceof StreamWorkspaceAccessError)) throw error;
+      await ws.discardAttempt(state.head, step.seq - 1);
+      throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
+    }
     try {
       await syncEnv(options, ws, step.commit);
     } catch (error) {

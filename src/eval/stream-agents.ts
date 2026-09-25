@@ -22,6 +22,7 @@ import {
   STALE_GIT_LOCKS,
   STEP_START_REFS,
   StreamWorkspace,
+  StreamWorkspaceAccessError,
 } from "./stream-workspace.ts";
 
 // 工作方式指令：与外部基准同一句的写法（对齐公开最简实现的措辞），把"修 issue"换成"实现用户消息里描述的改动"。
@@ -110,6 +111,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
       const docker = options.docker ?? ["docker"];
       // 回炉验证之前清进程清不净：这一步中止并作废
       let uncleared = false;
+      // 回炉验证之前清 conftest 遇到 agent 设下的访问障碍：这一步中止并作废
+      let unprepared: string | undefined;
       const host = createContainerWorkspaceHost({
         container: input.target.container,
         root: input.target.root,
@@ -179,12 +182,18 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                   await ws.removeTrees([GATE_REPORT]);
                   if (input.autoloadedTestHelper !== undefined && input.humanTests !== undefined) {
                     const humanTree = new Set(input.humanTree ?? []);
-                    await removeCoveringHelpers(
-                      ws,
-                      input.autoloadedTestHelper,
-                      (p) => humanTree.has(p),
-                      input.humanTests
-                    );
+                    try {
+                      await removeCoveringHelpers(
+                        ws,
+                        input.autoloadedTestHelper,
+                        (p) => humanTree.has(p),
+                        input.humanTests
+                      );
+                    } catch (error) {
+                      if (!(error instanceof StreamWorkspaceAccessError)) throw error;
+                      unprepared = error.message;
+                      abort.abort();
+                    }
                   }
                 },
                 // 跑批器给了人在这一步的测试集就只认它（agent 早先落地的自己的测试不还原、不计数），否则按归类
@@ -219,6 +228,16 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           wallMs: run.durationMs,
           repair: null,
           interrupted: "Pigeon 在容器里的进程清理不净：这一步作废",
+        };
+      }
+      if (unprepared !== undefined) {
+        return {
+          status: "aborted",
+          turns: run.turns,
+          usage: run.usage,
+          wallMs: run.durationMs,
+          repair: null,
+          interrupted: `验证前清理 conftest 失败：${unprepared}`,
         };
       }
       if (abort.signal.aborted) {

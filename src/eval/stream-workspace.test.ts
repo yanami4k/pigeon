@@ -19,6 +19,7 @@ import {
   removeCoveringHelpers,
   STREAM_COMMITTER,
   StreamWorkspace,
+  StreamWorkspaceAccessError,
   shellQuote,
   timeoutWrapped,
 } from "./stream-workspace.ts";
@@ -441,27 +442,78 @@ test("写入人写测试之前，路径上被换成符号链接的目录与文�
   }
 });
 
-test("列 conftest 候选时容忍不可读的目录（agent chmod 000）：不让作业停下，照样删掉覆盖人写测试的 conftest", {
+test("删 conftest 之前先放回属主权限：agent 把目录设成能进不能列（0311），里面可读的子目录放一个覆盖人写测试的 conftest，照样找到并删掉", {
   skip: NO_SYMLINKS,
 }, async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-perm-"));
-  const locked = join(base, "ws", "tests", "locked");
+  const hidden = join(base, "ws", "tests", "x");
   try {
     const root = join(base, "ws");
     git(base, "init", "-q", "ws");
-    mkdirSync(join(root, "tests", "unit"), { recursive: true });
-    writeFileSync(join(root, "tests", "unit", "test_a.sh"), "x\n");
-    writeFileSync(join(root, "tests", "conftest.sh"), "agent\n");
-    mkdirSync(locked);
-    writeFileSync(join(locked, "conftest.sh"), "hidden\n");
-    execFileSync("chmod", ["000", locked]);
+    mkdirSync(join(hidden, "y"), { recursive: true });
+    writeFileSync(join(hidden, "y", "test_a.sh"), "x\n");
+    writeFileSync(join(hidden, "y", "conftest.sh"), "sh() { return 0; }\n");
+    execFileSync("chmod", ["0311", hidden]);
+    // 先确认目录确实列不出来（root 下 chmod 不生效，用例会空转）
+    let listable = true;
+    try {
+      readdirSync(hidden);
+    } catch {
+      listable = false;
+    }
+    if (listable) return;
     const ws = new StreamWorkspace(localStreamShell(root));
     const removed = await removeCoveringHelpers(ws, "conftest.sh", () => false, [
-      "tests/unit/test_a.sh",
+      "tests/x/y/test_a.sh",
     ]);
-    assert.deepEqual(removed, ["tests/conftest.sh"]);
+    assert.deepEqual(removed, ["tests/x/y/conftest.sh"]);
   } finally {
-    execFileSync("chmod", ["755", locked]);
+    execFileSync("chmod", ["-R", "u+rwX", join(base, "ws")]);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("写人的文件时路径上的链接删不掉：报访问错误（调用方把这一步作废），不顺着链接写到工作区之外", {
+  skip: NO_SYMLINKS,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-unlink-"));
+  const tests = join(base, "ws", "tests");
+  try {
+    const root = join(base, "ws");
+    git(base, "init", "-q", "ws");
+    mkdirSync(tests);
+    const outside = join(base, "np");
+    mkdirSync(outside);
+    execFileSync("ln", ["-s", outside, join(tests, "x")]);
+    // 上级目录不可写：链接删不掉
+    execFileSync("chmod", ["0555", tests]);
+    const ws = new StreamWorkspace(localStreamShell(root));
+    await assert.rejects(
+      ws.applyHumanFiles([{ path: "tests/x/a.test.sh", op: "write", kind: "test" }], () =>
+        Buffer.from("x\n")
+      ),
+      StreamWorkspaceAccessError
+    );
+    assert.deepEqual(readdirSync(outside), [], "没有写到链接那边");
+  } finally {
+    execFileSync("chmod", ["-R", "u+rwX", join(base, "ws")]);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("写人的文件时路径上某一级是普通文件（人的树规定那里是目录）：删掉它、建目录再写", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-filedir-"));
+  try {
+    const root = join(base, "ws");
+    git(base, "init", "-q", "ws");
+    mkdirSync(join(root, "tests"));
+    writeFileSync(join(root, "tests", "x"), "agent's file\n");
+    const ws = new StreamWorkspace(localStreamShell(root));
+    await ws.applyHumanFiles([{ path: "tests/x/a.test.sh", op: "write", kind: "test" }], () =>
+      Buffer.from("human\n")
+    );
+    assert.equal(readFileSync(join(root, "tests", "x", "a.test.sh"), "utf8"), "human\n");
+  } finally {
     rmSync(base, { recursive: true, force: true });
   }
 });

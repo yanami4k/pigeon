@@ -47,6 +47,7 @@ import {
 } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { git, localStreamEnvs, toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
+import { StreamWorkspaceAccessError } from "./stream-workspace.ts";
 
 const NEEDS_A = `[ -f src/a.txt ] || { echo "Cannot find module 'src/a.txt'"; exit 1; }\n`;
 
@@ -1702,6 +1703,44 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
       assert.equal(agent.calls.length, 1);
       assert.equal(existsSync(join(outDir, RUN_LOCK)), false, "跑完释放");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("判题前列 conftest 候选遇到 agent 设下的访问障碍：这一步作废重做，不停作业、不写错行", async () => {
+    const t = await toy();
+    try {
+      const inner = localStreamEnvs(join(t.base, "envs"), (c: string) => t.human.bundle(c));
+      let failures = 1;
+      const envs = {
+        async open(job: Parameters<typeof inner.open>[0], init: Parameters<typeof inner.open>[1]) {
+          const env = await inner.open(job, init);
+          const pathsNamed = env.ws.pathsNamed.bind(env.ws);
+          env.ws.pathsNamed = async (name: string) => {
+            if (failures > 0) {
+              failures -= 1;
+              throw new StreamWorkspaceAccessError("列出 conftest.sh不全（退出码 1）");
+            }
+            return pathsNamed(name);
+          };
+          return env;
+        },
+      };
+      const runtime: typeof toyRuntime = { ...toyRuntime, autoloadedTestHelper: "conftest.sh" };
+      const agent = scriptedAgent((input) => {
+        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        return undefined;
+      });
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, envs, maxSteps: 1 })
+      );
+      assert.equal(summary.jobs[0]?.stopped, undefined);
+      assert.equal(agent.calls.length, 2, "作废一次、重做一次");
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => [r.seq, r.outcome]),
+        [[1, "passed"]]
+      );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

@@ -99,15 +99,18 @@ export function shellQuote(word: string): string {
   return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-// 写入或删除人的文件之前：路径上凡是符号链接的一级（各级目录与文件本身）只删链接本身、不跟随，再由 mkdir -p 建真目录。
-// 否则 agent 把人写测试的目录换成指向别处的链接后，写入会顺着链接写到工作区之外，pytest 按链接路径加载那边的 conftest，
-// 链接还会随落地提交。删不掉（例如权限）不让作业停下
+// 写入或删除人的文件之前：路径上凡是符号链接的一级（各级目录与文件本身）只删链接本身、不跟随，再由 mkdir -p 建真目录；
+// 中间某一级是普通文件（人的树规定那里是目录）同样删掉。否则 agent 把人写测试的目录换成指向别处的链接后，写入会顺着链接
+// 写到工作区之外，pytest 按链接路径加载那边的 conftest，链接还会随落地提交。删不掉即以退出码 UNLINK_FAILED 失败，
+// 不顺着写出去（调用方把这一步作废）
+const UNLINK_FAILED = 97;
 const UNLINK_ON_PATH = [
   'unlink_on_path() { up_rest="$1"; up_p="";',
   'while [ -n "$up_rest" ]; do',
   `case "$up_rest" in */*) up_c="\${up_rest%%/*}"; up_rest="\${up_rest#*/}";; *) up_c="$up_rest"; up_rest="";; esac;`,
   `up_p="\${up_p:+$up_p/}$up_c";`,
-  'if [ -L "$up_p" ]; then rm -f -- "$up_p" || return 0; fi;',
+  `if [ -L "$up_p" ]; then rm -f -- "$up_p" || return ${UNLINK_FAILED};`,
+  `elif [ -n "$up_rest" ] && [ -e "$up_p" ] && [ ! -d "$up_p" ]; then rm -f -- "$up_p" || return ${UNLINK_FAILED}; fi;`,
   "done; };",
 ].join(" ");
 
@@ -128,6 +131,11 @@ export const STALE_GIT_LOCKS = [
 
 // timeout 命令被 KILL 信号杀掉时的退出码
 const TIMEOUT_KILLED = 137;
+
+// 工作区里有 agent 设下、跑批器处理不了的访问障碍（列不出的目录、删不掉的链接）：调用方把这一步作废重做，不停作业
+export class StreamWorkspaceAccessError extends Error {
+  override name = "StreamWorkspaceAccessError";
+}
 
 // 维护步验证门写在容器里的报告（strands 的验证门步写到这里）
 export const GATE_REPORT = "/tmp/pigeon-gate-junit.xml";
@@ -221,8 +229,8 @@ export class StreamWorkspace {
   ): Promise<void> {
     for (const op of ops) {
       if (op.op === "delete") {
-        await this.must(
-          `${UNLINK_ON_PATH} unlink_on_path "$1"; rm -f -- "$1"`,
+        await this.humanWrite(
+          `${UNLINK_ON_PATH} unlink_on_path "$1" || exit $?; rm -f -- "$1"`,
           `删除人的文件 ${op.path}`,
           {
             args: [op.path],
@@ -230,8 +238,8 @@ export class StreamWorkspace {
         );
         continue;
       }
-      await this.must(
-        `${UNLINK_ON_PATH} unlink_on_path "$1"; mkdir -p -- "$(dirname -- "$1")" && cat > "$1"`,
+      await this.humanWrite(
+        `${UNLINK_ON_PATH} unlink_on_path "$1" || exit $?; mkdir -p -- "$(dirname -- "$1")" && cat > "$1"`,
         `写入人的文件 ${op.path}`,
         { args: [op.path], stdin: read(op.path) }
       );
@@ -261,6 +269,7 @@ export class StreamWorkspace {
 
   // 回到本步起点（缺省为 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件；被忽略的文件（依赖目录）不动
   async rollback(to = "HEAD"): Promise<void> {
+    await this.grantOwnerAccess();
     await this.must(
       `${UNMARK_INDEX} && git reset -q --hard "$1" && git clean -fdq`,
       "回到本步起点",
@@ -314,6 +323,15 @@ export class StreamWorkspace {
       args: [head],
     });
     await this.discardAttempt(head, seq, measureRoot);
+  }
+
+  // 把工作区里 agent 收走的属主权限放回来（chmod -R u+rwX；跑批器与 agent 同一用户，做得到）：agent 把目录设成
+  // 不可读或不可写（例如 0311 能进不能列）后，列候选、回滚、还原与写人的文件都会漏看或失败。尽力而为，放不回来的由
+  // 之后的操作报错
+  async grantOwnerAccess(): Promise<void> {
+    await this.must("chmod -R u+rwX -- . 2>/dev/null; true", "放回工作区的属主权限", {
+      timeoutMs: 300_000,
+    });
   }
 
   // 清掉残留的 git 锁文件（见 STALE_GIT_LOCKS）
@@ -381,10 +399,10 @@ export class StreamWorkspace {
     read: (path: string) => Buffer
   ): Promise<void> {
     for (const op of ops) {
-      const script = `${UNLINK_ON_PATH} unlink_on_path "$1"; ${
+      const script = `${UNLINK_ON_PATH} unlink_on_path "$1" || exit $?; ${
         op.op === "delete" ? 'rm -f -- "$1"' : 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"'
       }`;
-      await this.must(script, `测量副本写入 ${op.path}`, {
+      await this.humanWrite(script, `测量副本写入 ${op.path}`, {
         args: [op.path],
         cwd: dir,
         ...(op.op === "write" ? { stdin: read(op.path) } : {}),
@@ -424,12 +442,12 @@ export class StreamWorkspace {
   // 工作区里叫这个名字的全部路径（文件、目录、符号链接本身），按文件系统逐个列出：不看 git（被忽略的、嵌套的 git 仓库里的
   // 都列到），不跟随符号链接，跳过工作区根的 .git。返回相对工作区根的路径
   async pathsNamed(name: string): Promise<string[]> {
-    // agent 把目录改成不可读（chmod 000）时 find 以退出码 1 结束：容忍这类报错，照样用列出来的（同一用户跑的 pytest
-    // 本来也读不到那些目录）
-    const r = await this.must(
-      'find . -path ./.git -prune -o -name "$1" -print0 2>/dev/null; true',
+    // 调用方先放回属主权限（grantOwnerAccess）；仍列不全（find 报错）即抛访问错误，不当作"没有"——pytest 可以按路径直接
+    // 加载列不出的目录里的 conftest
+    const r = await this.listing(
+      'find . -path ./.git -prune -o -name "$1" -print0',
       `列出 ${name}`,
-      { args: [name] }
+      [name]
     );
     return r.stdout
       .split("\x00")
@@ -439,14 +457,39 @@ export class StreamWorkspace {
 
   // 工作区里的全部符号链接（不跟随，跳过工作区根的 .git）。返回相对工作区根的路径
   async symlinks(): Promise<string[]> {
-    const r = await this.must(
-      "find . -path ./.git -prune -o -type l -print0 2>/dev/null; true",
-      "列出符号链接"
+    const r = await this.listing(
+      "find . -path ./.git -prune -o -type l -print0",
+      "列出符号链接",
+      []
     );
     return r.stdout
       .split("\x00")
       .filter((p) => p !== "")
       .map((p) => p.replace(/^\.\//, ""));
+  }
+
+  // 写或删人的文件：路径上的链接删不掉（UNLINK_FAILED）即抛访问错误，其余失败照常报错
+  private async humanWrite(script: string, what: string, options: ShellOptions): Promise<void> {
+    const r = await this.shell.sh(`${SAFE_GIT_ENV}\n${script}`, options);
+    if (r.exitCode === UNLINK_FAILED) {
+      throw new StreamWorkspaceAccessError(`${what}：路径上的链接或文件删不掉，不顺着写出去`);
+    }
+    if (r.exitCode !== 0) {
+      throw new StreamWorkspaceError(
+        `${what}失败（退出码 ${r.exitCode}）：${r.stderr.trim() || r.stdout.trim()}`
+      );
+    }
+  }
+
+  // 列文件的 find：报错即抛访问错误
+  private async listing(script: string, what: string, args: string[]): Promise<ShellResult> {
+    const r = await this.shell.sh(`${SAFE_GIT_ENV}\n${script}`, { args });
+    if (r.exitCode !== 0) {
+      throw new StreamWorkspaceAccessError(
+        `${what}不全（退出码 ${r.exitCode}）：${r.stderr.trim().slice(-500)}`
+      );
+    }
+    return r;
   }
 
   // 删掉给定路径：文件、整个目录，或符号链接本身（不跟随）；不在的忽略
@@ -552,6 +595,7 @@ export async function removeCoveringHelpers(
 ): Promise<string[]> {
   const covers = (dir: string) =>
     dir === "" || dir === "." || humanTests.some((t) => t.startsWith(`${dir}/`));
+  await ws.grantOwnerAccess();
   const stray = (await ws.pathsNamed(name)).filter(
     (p) => !inHumanTree(p) && covers(posixDirname(p))
   );
