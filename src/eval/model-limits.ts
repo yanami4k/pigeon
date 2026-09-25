@@ -329,6 +329,9 @@ export class LimitController {
     const from = this.now();
     for (;;) {
       await this.ready();
+      // ready() 放行之后、进入排队之前可能已停下（停止信号在这之间到达）：停下时排队者已全部唤醒过，此时再排队
+      // 就没人唤醒了，所以先看一次
+      if (this.state === "stopped") throw new Error(this.stopReason ?? "跑批已停止");
       let granted: boolean;
       if (this.waiting.length === 0 && this.active < this.admitLimit()) {
         this.active += 1;
