@@ -870,8 +870,11 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
           `开跑前逐账号探测未通过：${bad.join("、")}，拒绝开跑，请检查对应的 key 与上游`
         );
       }
+      // 额度用完（5 小时、每周、每月）的账号直接置为不可用：容量从一开始就不含它，额度类照常定时探测恢复（每月的
+      // 不再使用）；并发受限与频率限制只告警，开跑后按常规处理
       for (const [i, o] of outcomes.entries()) {
-        if (o !== "ok") warn(`${label(i)}开跑前探测撞上限额（${o}），开跑后按常规处理`);
+        if (o === "5h" || o === "weekly" || o === "monthly") takeDown(i, o);
+        else if (o !== "ok") warn(`${label(i)}开跑前探测撞上限额（${o}），开跑后按常规处理`);
       }
     },
     async probe() {

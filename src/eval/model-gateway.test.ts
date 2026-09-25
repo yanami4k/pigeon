@@ -1040,12 +1040,15 @@ test("开跑前逐账号探测：凡不是成功、也不是额度、并发、�
     ],
     async (g, _up, _l, warnings) => {
       await g.preflight();
-      for (const n of [2, 3, 4]) {
+      for (const n of [3, 4]) {
         assert.ok(
           warnings.some((w) => w.startsWith(`账号 ${n}开跑前探测撞上限额`)),
-          `额度、并发、限流只告警，开跑后照常处理（账号 ${n}）`
+          `并发、限流只告警，开跑后照常处理（账号 ${n}）`
         );
       }
+      // 额度用完的账号直接置为不可用：容量从一开始就不含它（其余三个账号各 1），按间隔探测恢复
+      assert.ok(warnings.some((w) => w.startsWith("账号 2额度用完，暂时不可用")));
+      assert.equal(g.capacity(), 3);
     }
   );
 });
