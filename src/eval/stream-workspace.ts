@@ -111,6 +111,21 @@ const UNLINK_ON_PATH = [
   "done; };",
 ].join(" ");
 
+// 残留的 git 锁文件（index.lock、HEAD.lock、packed-refs.lock、refs 下的 *.lock）：清进程恰好杀掉 agent 在途的 git
+// 命令、或容器重启时留下，否则跑批器下一次 git 操作失败、作业停下。只在没有工作目录位于工作区（$1）下的 git 进程时删——
+// 只看工作区下的，容器或宿主上别处的 git 进程不相干
+export const STALE_GIT_LOCKS = [
+  'r="$1"',
+  "for p in /proc/[0-9]*; do",
+  '  [ "$(cat "$p/comm" 2>/dev/null)" = git ] || continue',
+  '  c="$(readlink "$p/cwd" 2>/dev/null)" || continue',
+  '  case "$c" in "$r" | "$r"/*) exit 0 ;; esac',
+  "done",
+  'rm -f -- "$r/.git/index.lock" "$r/.git/HEAD.lock" "$r/.git/packed-refs.lock"',
+  'if [ -d "$r/.git/refs" ]; then find "$r/.git/refs" -type f -name "*.lock" -exec rm -f -- {} + 2>/dev/null; fi',
+  "true",
+].join("\n");
+
 // timeout 命令被 KILL 信号杀掉时的退出码
 const TIMEOUT_KILLED = 137;
 
@@ -293,10 +308,17 @@ export class StreamWorkspace {
   // 接管续跑时已存在的工作区：库里须有上一个完成步（第 seq 步）的提交（没有即抛错，由调用方改为重建），再按作废重做
   // 同一口径丢掉在途那次尝试，并清空测量副本；被忽略的文件留着（与没中断的作业一样）
   async takeOver(head: string, seq: number, measureRoot: string): Promise<void> {
+    // 容器刚重启：上次被杀的 git 命令留下的锁文件先清掉，否则回到断点的 reset 失败、接管退回重建
+    await this.removeStaleGitLocks();
     await this.must('git cat-file -e "$1^{commit}"', `核对上一个完成步的提交 ${head}`, {
       args: [head],
     });
     await this.discardAttempt(head, seq, measureRoot);
+  }
+
+  // 清掉残留的 git 锁文件（见 STALE_GIT_LOCKS）
+  async removeStaleGitLocks(): Promise<void> {
+    await this.must(STALE_GIT_LOCKS, "清理残留的 git 锁文件", { args: [this.root] });
   }
 
   // 工作区是否与 HEAD 逐字一致（被跟踪文件与未忽略的未跟踪文件）

@@ -19,6 +19,7 @@ import {
   dockerStreamShell,
   GATE_REPORT,
   removeCoveringHelpers,
+  STALE_GIT_LOCKS,
   STEP_START_REFS,
   StreamWorkspace,
 } from "./stream-workspace.ts";
@@ -310,15 +311,8 @@ const KILL_MARKED = [
   'echo "$n"',
 ].join("\n");
 
-// 清完进程后：容器里没有 git 进程在跑，就删掉残留的 index.lock（清理恰好杀掉 agent 在途的 git 命令时留下，
-// 否则跑批器下一次 git 操作失败、作业停下）
-const STALE_INDEX_LOCK = [
-  'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = git ] && exit 0; done',
-  'rm -f -- "$1/.git/index.lock"',
-].join("\n");
-
 // 一步结束后与每次回炉验证之前清掉 agent（最简 agent 与 Pigeon）在容器里启动、仍在运行的进程：反复清到一轮里找不到为止，
-// 再删掉残留的 index.lock；清不净（或清理本身失败）返回 false
+// 再删掉残留的 git 锁文件（STALE_GIT_LOCKS）；清不净（或清理本身失败）返回 false
 async function clearMarkedProcesses(
   docker: readonly string[],
   container: string,
@@ -343,7 +337,7 @@ async function clearMarkedProcesses(
       await new Promise<void>((resolve) => {
         execFile(
           program,
-          [...pre, "exec", container, "sh", "-c", STALE_INDEX_LOCK, "sh", root],
+          [...pre, "exec", container, "sh", "-c", STALE_GIT_LOCKS, "sh", root],
           { timeout: 60_000, windowsHide: true },
           () => resolve()
         );

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -462,6 +462,56 @@ test("列 conftest 候选时容忍不可读的目录（agent chmod 000）：不�
     assert.deepEqual(removed, ["tests/conftest.sh"]);
   } finally {
     execFileSync("chmod", ["755", locked]);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("残留的 git 锁文件：只在工作区下没有 git 进程在跑时删（index.lock、HEAD.lock、packed-refs.lock、refs 下的 *.lock）；别处的 git 进程不相干", {
+  skip: NO_SYMLINKS,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-locks-"));
+  const running: ReturnType<typeof spawn>[] = [];
+  // 一个一直在跑的 git 进程（等标准输入），工作目录在 cwd
+  const gitRunningIn = (cwd: string) => {
+    const child = spawn("git", ["cat-file", "--batch"], {
+      cwd,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    running.push(child);
+    return new Promise((r) => setTimeout(r, 300));
+  };
+  try {
+    const root = join(base, "ws");
+    git(base, "init", "-q", "ws");
+    git(base, "init", "-q", "elsewhere");
+    const locks = [
+      ".git/index.lock",
+      ".git/HEAD.lock",
+      ".git/packed-refs.lock",
+      ".git/refs/heads/x.lock",
+    ];
+    const plant = () => {
+      for (const l of locks) writeFileSync(join(root, l), "");
+    };
+    const ws = new StreamWorkspace(localStreamShell(root));
+    await gitRunningIn(join(base, "elsewhere"));
+    plant();
+    await ws.removeStaleGitLocks();
+    assert.deepEqual(
+      locks.filter((l) => existsSync(join(root, l))),
+      [],
+      "别处的 git 进程不相干"
+    );
+    await gitRunningIn(root);
+    plant();
+    await ws.removeStaleGitLocks();
+    assert.deepEqual(
+      locks.filter((l) => existsSync(join(root, l))),
+      locks,
+      "工作区下有 git 在跑即保留"
+    );
+  } finally {
+    for (const child of running) child.kill();
     rmSync(base, { recursive: true, force: true });
   }
 });

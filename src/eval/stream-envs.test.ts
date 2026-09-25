@@ -48,6 +48,8 @@ for (;;) {
   break;
 }
 const [program, ...rest] = args.slice(i + 1);
+// Windows 上 PATH 里的 find 会先命中系统自带的同名程序：sh -c 的脚本前把 coreutils 所在的 /usr/bin 提到最前
+if (process.platform === "win32" && program === "sh" && rest[0] === "-c") rest[1] = 'export PATH="/usr/bin:$PATH"\\n' + rest[1];
 const r = spawnSync(program, rest, { cwd, stdio: ["inherit", "inherit", "inherit"] });
 process.exit(r.status ?? 1);
 `;
@@ -129,6 +131,8 @@ test("续跑接管已存在的流容器：停止的启动、仍在运行的重�
     const s = await scenario();
     try {
       s.setState(status);
+      // 进程被杀时在途的 git 命令留下的锁文件：接管前清掉，不让回到断点的 reset 失败
+      writeFileSync(join(s.root, ".git", "index.lock"), "");
       const env = await s.envs.open(s.job, {
         startCommit: "unused",
         resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
