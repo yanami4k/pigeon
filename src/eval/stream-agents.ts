@@ -18,6 +18,7 @@ import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
 import {
   dockerStreamShell,
   GATE_REPORT,
+  IN_STREAM_CONTAINER,
   removeCoveringHelpers,
   STALE_GIT_LOCKS,
   STEP_START_REFS,
@@ -320,19 +321,42 @@ export function launcherEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return Object.fromEntries(Object.entries(env).filter(([name]) => !SECRET_ENV.test(name)));
 }
 
-// 清掉容器里带本步标记的进程，输出这一轮找到并杀掉的个数（清理命令自身不带标记，不会杀到自己）
-const KILL_MARKED = [
-  'm="PIGEON_STEP_MARKER=$1"; n=0',
-  "for p in /proc/[0-9]*; do",
-  '  pid=$(basename "$p"); [ "$pid" = "$$" ] && continue',
-  '  if { tr "\\000" "\\n" < "$p/environ"; } 2>/dev/null | grep -qx "$m"; then kill -9 "$pid" 2>/dev/null; n=$((n + 1)); fi',
-  "done",
+// 清掉 agent 留在容器里的进程，输出这一轮找到并杀掉的个数。跑批器起的作业容器（带 PIGEON_STREAM_CONTAINER=1）里不看
+// 标记：除 PID 1（init）、容器主命令（PID 1 最早的子进程）与本脚本及其子进程外全清——agent 用 env -u 或 env -i 起的
+// 后台进程不带标记，照样清掉。容器里没有跑批器自己的常驻进程，清理时跑批器也没有并发的 exec。没有这个变量（本机测试的
+// "容器"就是本机）只清带本步标记的进程，不碰本机上的其他进程。已成僵尸的不算
+export const KILL_STEP_PROCESSES = [
+  'm="PIGEON_STEP_MARKER=$1"; n=0; self=$$',
+  `if ${IN_STREAM_CONTAINER}; then`,
+  '  main=""',
+  "  for p in /proc/[0-9]*; do",
+  `    pid=\${p#/proc/}`,
+  '    { read -r st < "$p/stat"; } 2>/dev/null || continue',
+  `    rest=\${st##*) }; set -- $rest`,
+  '    [ "$2" = 1 ] || continue',
+  '    if [ -z "$main" ] || [ "$pid" -lt "$main" ]; then main=$pid; fi',
+  "  done",
+  "  for p in /proc/[0-9]*; do",
+  `    pid=\${p#/proc/}`,
+  '    case "$pid" in 1 | "$self" | "$main") continue ;; esac',
+  '    { read -r st < "$p/stat"; } 2>/dev/null || continue',
+  `    rest=\${st##*) }; set -- $rest`,
+  '    [ "$1" = Z ] && continue',
+  '    [ "$2" = "$self" ] && continue',
+  '    kill -9 "$pid" 2>/dev/null && n=$((n + 1))',
+  "  done",
+  "else",
+  "  for p in /proc/[0-9]*; do",
+  '    pid=$(basename "$p"); [ "$pid" = "$self" ] && continue',
+  '    if { tr "\\000" "\\n" < "$p/environ"; } 2>/dev/null | grep -qx "$m"; then kill -9 "$pid" 2>/dev/null; n=$((n + 1)); fi',
+  "  done",
+  "fi",
   'echo "$n"',
 ].join("\n");
 
 // 一步结束后与每次回炉验证之前清掉 agent（最简 agent 与 Pigeon）在容器里启动、仍在运行的进程：反复清到一轮里找不到为止，
 // 再删掉残留的 git 锁文件（STALE_GIT_LOCKS）；清不净（或清理本身失败）返回 false
-async function clearMarkedProcesses(
+export async function clearMarkedProcesses(
   docker: readonly string[],
   container: string,
   marker: string,
@@ -343,7 +367,7 @@ async function clearMarkedProcesses(
     const found = await new Promise<number | null>((resolve) => {
       execFile(
         program,
-        [...pre, "exec", container, "sh", "-c", KILL_MARKED, "sh", marker],
+        [...pre, "exec", container, "sh", "-c", KILL_STEP_PROCESSES, "sh", marker],
         { timeout: 60_000, windowsHide: true },
         (error, stdout) => {
           const n = Number.parseInt(String(stdout).trim(), 10);

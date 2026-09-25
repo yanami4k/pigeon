@@ -1117,6 +1117,8 @@ export function dockerStreamEnvs(input: {
   // 容器内的工作区根与测量副本目录（缺省 /testbed 与 /measure；本机测试指到临时目录）
   root?: string;
   measureRoot?: string;
+  // 容器里的临时目录：丢弃作废的尝试时清空（正式跑批传 /tmp）；不给即不清
+  tmpDir?: string;
   log?: (line: string) => void;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
@@ -1141,7 +1143,10 @@ export function dockerStreamEnvs(input: {
               found.status === "running" ? "restart" : "start",
               container,
             ]);
-            const ws = new StreamWorkspace(dockerStreamShell({ container, root, docker }));
+            const ws = new StreamWorkspace(
+              dockerStreamShell({ container, root, docker }),
+              input.tmpDir !== undefined ? { tmpDir: input.tmpDir } : {}
+            );
             await ws.takeOver(init.resume.head, init.resume.seq, measureRoot);
             input.log?.(
               `[${container}] 接管已存在的容器（原为 ${found.status}），回到第 ${init.resume.head.slice(0, 9)} 提交`
@@ -1161,16 +1166,24 @@ export function dockerStreamEnvs(input: {
         docker,
         runArgs: [
           ...WORKSPACE_NETWORK_ARGS,
+          // 标明这是跑批器起的作业容器：清 agent 进程时据此除 init 与主命令外全清（见 KILL_STEP_PROCESSES）
+          "-e",
+          "PIGEON_STREAM_CONTAINER=1",
           "--label",
           `pigeon.stream=${input.prefix}`,
           ...(input.runArgs ?? []),
         ],
       });
-      const ws = new StreamWorkspace(dockerStreamShell({ container, root, docker }));
+      const ws = new StreamWorkspace(
+        dockerStreamShell({ container, root, docker }),
+        input.tmpDir !== undefined ? { tmpDir: input.tmpDir } : {}
+      );
       try {
-        if (init.resume !== undefined)
+        if (init.resume !== undefined) {
           await ws.restoreFromBundle(init.resume.bundle, init.resume.head);
-        else await ws.initFromBundle(input.human.bundle(init.startCommit), init.startCommit);
+          // 流历史里可能带着断点之后那一步落地的提交（导出流历史之后、写结果行之前被停）：同一口径丢掉
+          await ws.discardAttempt(init.resume.head, init.resume.seq);
+        } else await ws.initFromBundle(input.human.bundle(init.startCommit), init.startCommit);
       } catch (error) {
         await removeWorkspaceContainer(container, docker).catch(() => {});
         throw error;

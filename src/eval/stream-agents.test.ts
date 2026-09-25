@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,12 @@ import { hostWorkspaceAccess } from "../memory/structured-workspace.ts";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import { commandStepAgent, pigeonStepAgent, STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
+import {
+  clearMarkedProcesses,
+  commandStepAgent,
+  pigeonStepAgent,
+  STREAM_WORK_DIRECTIVE,
+} from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
@@ -1294,6 +1299,80 @@ test("Pigeon agent：回炉验证之前清进程清不净即中止这一步、�
       .filter((l) => l.includes("grep -qx fixed a.txt")).length;
     assert.equal(verified, 0, "一次验证都不跑");
   } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+// 真 docker 与本仓库的流镜像：服务器上都有，本机或 CI 缺一即跳过
+const REAL_IMAGE = "pigeon-stream-pigeon:v4";
+function realDockerSkip(): string | false {
+  try {
+    execFileSync("docker", ["image", "inspect", REAL_IMAGE], { stdio: "ignore" });
+    return false;
+  } catch {
+    return `没有 docker 或镜像 ${REAL_IMAGE}`;
+  }
+}
+
+test("作业容器里清 agent 进程不看标记：用 env -u 起的后台进程照样清掉，init 与容器主命令不动、容器照常运行", {
+  skip: realDockerSkip(),
+}, async () => {
+  const name = `pigeon-kill-test-${process.pid}`;
+  const docker = (...a: string[]) => execFileSync("docker", a, { encoding: "utf8" }).trim();
+  try {
+    docker(
+      "run",
+      "-d",
+      "--init",
+      "--network",
+      "none",
+      "-e",
+      "PIGEON_STREAM_CONTAINER=1",
+      "--name",
+      name,
+      "--entrypoint",
+      "tail",
+      REAL_IMAGE,
+      "-f",
+      "/dev/null"
+    );
+    // 不带本步标记的后台进程
+    docker("exec", "-d", name, "sh", "-c", "env -u PIGEON_STEP_MARKER sleep 1000");
+    await new Promise((r) => setTimeout(r, 500));
+    const sleeping = () =>
+      docker("exec", name, "sh", "-c", 'for p in /proc/[0-9]*; do cat "$p/comm" 2>/dev/null; done')
+        .split("\n")
+        .filter((c) => c === "sleep").length;
+    assert.equal(sleeping(), 1, "后台进程在跑");
+    assert.equal(await clearMarkedProcesses(["docker"], name, "pigeon-step-x", "/testbed"), true);
+    assert.equal(sleeping(), 0, "不带标记也清掉");
+    assert.equal(docker("inspect", "-f", "{{.State.Running}}", name), "true", "容器照常运行");
+  } finally {
+    try {
+      docker("rm", "-f", name);
+    } catch {
+      // 容器没起来
+    }
+  }
+});
+
+test("闸门：本机假 docker 下（不在作业容器里）清 agent 进程只清带本步标记的，不带标记的进程不动", async () => {
+  if (process.env.PIGEON_STREAM_CONTAINER !== undefined) return;
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-gate-"));
+  const ws = containerWorkspace(dir);
+  // 用例自己起的、不带标记的后台进程
+  const child = spawn("sleep", ["60"], { stdio: "ignore" });
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(
+      await clearMarkedProcesses(ws.docker, "box", "pigeon-step-gate", ws.containerRoot),
+      true
+    );
+    assert.equal(child.exitCode, null, "进程还在");
+    assert.equal(child.signalCode, null, "没收到信号");
+  } finally {
+    child.kill();
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }

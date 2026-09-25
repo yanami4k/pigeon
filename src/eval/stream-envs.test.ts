@@ -199,3 +199,22 @@ test("续跑时残留容器用不上即由流历史重建：镜像不是当前�
     }
   }
 });
+
+test("由流历史重建：流历史里带着断点之后那一步落地的提交（导出之后、写结果行之前被停），重建后同一口径丢掉，库里找不到它", async () => {
+  const s = await scenario();
+  try {
+    // 导出的流历史里已有第 2 步落地的提交 N
+    const bundleFile = join(s.base, "with-n.bundle");
+    git(s.root, "bundle", "create", "-q", bundleFile, "--all");
+    const bundle = readFileSync(bundleFile);
+    s.dropContainer();
+    const env = await s.envs.open(s.job, {
+      startCommit: "unused",
+      resume: { head: s.head1, seq: 1, bundle },
+    });
+    assert.equal(await env.ws.head(), s.head1);
+    assert.throws(() => git(s.root, "cat-file", "-e", s.landed), "N 不在库里");
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});

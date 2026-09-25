@@ -132,6 +132,11 @@ export const STALE_GIT_LOCKS = [
 // timeout 命令被 KILL 信号杀掉时的退出码
 const TIMEOUT_KILLED = 137;
 
+// 脚本确实在跑批器起的 docker 作业容器里执行：容器带 PIGEON_STREAM_CONTAINER=1（docker run -e，exec 出来的进程都继承，
+// agent 改不了容器配置），且有 docker 建的 /.dockerenv。本机测试的假 docker 在本机执行脚本，两者都不满足——清临时目录、
+// 清进程这类只对作业容器安全的操作以它为前提
+export const IN_STREAM_CONTAINER = `{ [ "\${PIGEON_STREAM_CONTAINER:-}" = 1 ] && [ -f /.dockerenv ]; }`;
+
 // 工作区里有 agent 设下、跑批器处理不了的访问障碍（列不出的目录、删不掉的链接）：调用方把这一步作废重做，不停作业
 export class StreamWorkspaceAccessError extends Error {
   override name = "StreamWorkspaceAccessError";
@@ -143,11 +148,14 @@ export const GATE_REPORT = "/tmp/pigeon-gate-junit.xml";
 export class StreamWorkspace {
   private readonly shell: StreamShell;
   private readonly gateReport: string;
+  private readonly tmpDir: string | undefined;
 
-  // gateReport 只供本机测试改到各自的临时路径（本机 /tmp 为各用例共用）
-  constructor(shell: StreamShell, options: { gateReport?: string } = {}) {
+  // gateReport 只供本机测试改到各自的临时路径（本机 /tmp 为各用例共用）。tmpDir 是容器里的临时目录（作业容器为 /tmp）：
+  // 丢弃作废的尝试时清空；不给即不清（本机测试的"容器"就是本机，不能清本机的临时目录）
+  constructor(shell: StreamShell, options: { gateReport?: string; tmpDir?: string } = {}) {
     this.shell = shell;
     this.gateReport = options.gateReport ?? GATE_REPORT;
+    this.tmpDir = options.tmpDir;
   }
 
   get root(): string {
@@ -267,11 +275,12 @@ export class StreamWorkspace {
     return this.head();
   }
 
-  // 回到本步起点（缺省为 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件；被忽略的文件（依赖目录）不动
+  // 回到本步起点（缺省为 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件（含未跟踪的嵌套仓库，clean 要两个 -f）；
+  // 被忽略的文件（依赖目录）不动
   async rollback(to = "HEAD"): Promise<void> {
     await this.grantOwnerAccess();
     await this.must(
-      `${UNMARK_INDEX} && git reset -q --hard "$1" && git clean -fdq`,
+      `${UNMARK_INDEX} && git reset -q --hard "$1" && git clean -ffdq`,
       "回到本步起点",
       {
         args: [to],
@@ -287,9 +296,11 @@ export class StreamWorkspace {
     });
   }
 
-  // 丢弃作废的尝试（作废重做、接管续跑）：回到 head，并去掉那次尝试在库里留下、重做时 agent 看得到的痕迹——ORIG_HEAD
-  // 等伪引用、序号大于 keepStepStartsUpTo 的开工树引用、reflog（全部清空）与因此不可达的对象；给了测量副本目录时一并
-  // 清空（接管时它可能还放着作废那一步落地后的整份解）。agent 自己建的分支与 stash 不动（见审计的已知限制）
+  // 丢弃作废的尝试（作废重做、接管续跑、由流历史重建）：回到 head，并去掉那次尝试在库里与容器里留下、重做时 agent 看得到
+  // 的痕迹——ORIG_HEAD、REBASE_HEAD 等伪引用与 rebase-merge、rebase-apply、sequencer 目录（后者以补丁文件存着提交的完整
+  // 改动），agent 建的 worktree，main 与不超过 keepStepStartsUpTo 的开工树引用以外的全部引用（agent 建的分支、标签、
+  // refs/stash），reflog（全部清空），以及因此不可达的对象（先全部重新打包，被自动 gc 打进包的提交也回收掉）；容器的临时
+  // 目录清空；给了测量副本目录时一并清空（接管时它可能还放着作废那一步落地后的整份解）。被忽略的文件按设计保留
   async discardAttempt(
     head: string,
     keepStepStartsUpTo: number,
@@ -300,18 +311,43 @@ export class StreamWorkspace {
       [
         "set -e",
         'gd="$(git rev-parse --git-dir)"',
-        'rm -f -- "$gd/ORIG_HEAD" "$gd/FETCH_HEAD" "$gd/MERGE_HEAD" "$gd/CHERRY_PICK_HEAD" "$gd/REVERT_HEAD" "$gd/AUTO_MERGE" "$gd/BISECT_HEAD"',
-        `git for-each-ref --format='%(refname)' ${STEP_START_REFS}/ | while IFS= read -r r; do`,
-        `  n="\${r##*/}"; case "$n" in ''|*[!0-9]*) continue;; esac`,
-        '  if [ "$n" -gt "$1" ]; then git update-ref -d "$r"; fi',
+        'rm -f -- "$gd/ORIG_HEAD" "$gd/FETCH_HEAD" "$gd/MERGE_HEAD" "$gd/CHERRY_PICK_HEAD" "$gd/REVERT_HEAD" "$gd/AUTO_MERGE" "$gd/BISECT_HEAD" "$gd/REBASE_HEAD"',
+        'rm -rf -- "$gd/rebase-merge" "$gd/rebase-apply" "$gd/sequencer"',
+        // worktree 的路径由 .git/worktrees/*/gitdir 决定，agent 能指到任意位置：只删工作区之内的，登记整个删掉
+        "git worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 | while IFS= read -r w; do",
+        '  case "$w" in "$(pwd -P)"/?*) rm -rf -- "$w" ;; esac',
+        "done",
+        'rm -rf -- "$gd/worktrees"',
+        'git checkout -q -f -B main "$2"',
+        "git for-each-ref --format='%(refname)' | while IFS= read -r r; do",
+        '  case "$r" in',
+        "    refs/heads/main) ;;",
+        `    ${STEP_START_REFS}/*)`,
+        `      n="\${r##*/}"`,
+        `      case "$n" in ''|*[!0-9]*) git update-ref -d "$r" ;; *) if [ "$n" -gt "$1" ]; then git update-ref -d "$r"; fi ;; esac ;;`,
+        '    *) git update-ref -d "$r" ;;',
+        "  esac",
         "done",
         "git reflog expire --expire=now --expire-unreachable=now --all",
+        "git repack -a -d -q",
         "git prune --expire=now",
       ].join("\n"),
       "丢弃作废的尝试",
-      { args: [String(keepStepStartsUpTo)], timeoutMs: 600_000 }
+      { args: [String(keepStepStartsUpTo), head], timeoutMs: 900_000 }
     );
+    await this.clearTmpDir();
     if (measureRoot !== undefined) await this.clearArtifacts(measureRoot);
+  }
+
+  // 清空容器的临时目录（给了 tmpDir 时）。只在跑批器起的 docker 作业容器里清（IN_STREAM_CONTAINER）：本机测试的假 docker
+  // 把脚本放在本机执行，那里的临时目录是本机的，绝不能清
+  async clearTmpDir(): Promise<void> {
+    if (this.tmpDir === undefined) return;
+    await this.must(
+      `${IN_STREAM_CONTAINER} || exit 0; find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null; true`,
+      "清空容器的临时目录",
+      { args: [this.tmpDir] }
+    );
   }
 
   // 接管续跑时已存在的工作区：库里须有上一个完成步（第 seq 步）的提交（没有即抛错，由调用方改为重建），再按作废重做

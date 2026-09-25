@@ -567,3 +567,90 @@ test("残留的 git 锁文件：只在工作区下没有 git 进程在跑时删�
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("丢弃作废的尝试：agent 留下的分支、标签、stash、rebase-apply、worktree 登记、未跟踪的嵌套仓库与打进包的提交，丢弃后都找不到；工作区之外的路径不碰；main 与不超过断点的开工树引用保留；不在作业容器里时临时目录不动", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-discard-"));
+  try {
+    const root = join(base, "ws");
+    const tmp = join(base, "tmp");
+    mkdirSync(tmp);
+    git(base, "init", "-q", "-b", "main", "ws");
+    const g = (...a: string[]) => git(root, "-c", "user.name=a", "-c", "user.email=a@x", ...a);
+    writeFileSync(join(root, "a.txt"), "base\n");
+    g("add", "-A");
+    g("commit", "-qm", "base");
+    const head = git(root, "rev-parse", "HEAD");
+    g("update-ref", "refs/pigeon/step-start/s1/1", head);
+    g("update-ref", "refs/pigeon/step-start/s1/2", head);
+    // 作废的那次尝试：落地提交 N 并打进包，再回到 head（N 只剩 reflog 与包里）
+    writeFileSync(join(root, "a.txt"), "solution\n");
+    g("commit", "-qam", "N");
+    const landed = git(root, "rev-parse", "HEAD");
+    g("repack", "-a", "-d", "-q");
+    g("tag", "t1");
+    g("branch", "b1");
+    g("reset", "-q", "--hard", head);
+    // stash 着一份在途改动
+    writeFileSync(join(root, "a.txt"), "in flight\n");
+    g("stash", "-q");
+    // rebase-apply 里以补丁文件存着改动
+    mkdirSync(join(root, ".git", "rebase-apply"));
+    writeFileSync(join(root, ".git", "rebase-apply", "0001"), "patch\n");
+    // worktree（工作区之内与之外各一个）与未跟踪的嵌套仓库
+    g("worktree", "add", "-q", join(root, "inner-wt"), "b1");
+    g("worktree", "add", "-q", "--detach", join(base, "wt"), head);
+    git(root, "init", "-q", "nested");
+    writeFileSync(join(tmp, "left.txt"), "x\n");
+    const ws = new StreamWorkspace(localStreamShell(root), { tmpDir: tmp });
+    await ws.discardAttempt(head, 1);
+    assert.deepEqual(
+      git(root, "for-each-ref", "--format=%(refname)").split("\n").sort(),
+      ["refs/heads/main", "refs/pigeon/step-start/s1/1"],
+      "只剩 main 与不超过断点的开工树引用"
+    );
+    assert.equal(git(root, "rev-parse", "HEAD"), head);
+    assert.equal(git(root, "stash", "list"), "", "stash 清掉");
+    assert.equal(existsSync(join(root, ".git", "rebase-apply")), false, "rebase-apply 清掉");
+    assert.equal(existsSync(join(root, "inner-wt")), false, "工作区之内的 worktree 删掉");
+    assert.equal(existsSync(join(base, "wt")), true, "工作区之外的路径不碰（只摘掉登记）");
+    assert.equal(git(root, "worktree", "list", "--porcelain").split("\n\n").length, 1);
+    assert.equal(existsSync(join(root, "nested")), false, "未跟踪的嵌套仓库删掉");
+    assert.throws(() => git(root, "cat-file", "-e", landed), "打进包的提交 N 也回收掉");
+    // 不在跑批器起的作业容器里（本机）：临时目录一个文件都不动（在作业容器里清空，见真容器的用例）
+    assert.deepEqual(readdirSync(tmp), ["left.txt"], "本机的临时目录不动");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// 闸门（IN_STREAM_CONTAINER）的两个条件：本机有没有 /.dockerenv
+const HAS_DOCKERENV = existsSync("/.dockerenv");
+
+test("闸门：不在跑批器起的作业容器里（缺环境变量或缺 /.dockerenv，或两者都缺），清空临时目录不动手", async () => {
+  const cases: [string, boolean, string | false][] = [
+    ["两者都缺", false, HAS_DOCKERENV ? "本机有 /.dockerenv" : false],
+    ["只有环境变量", true, HAS_DOCKERENV ? "本机有 /.dockerenv" : false],
+    ["只有 /.dockerenv", false, HAS_DOCKERENV ? false : "本机没有 /.dockerenv"],
+  ];
+  for (const [what, setVar, skip] of cases) {
+    if (skip !== false) continue;
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-gate-"));
+    const saved = process.env.PIGEON_STREAM_CONTAINER;
+    try {
+      const root = join(base, "ws");
+      mkdirSync(root);
+      // 清空的目标永远是用例自建的临时目录
+      const tmp = join(base, "tmp");
+      mkdirSync(tmp);
+      writeFileSync(join(tmp, "keep.txt"), "x\n");
+      if (setVar) process.env.PIGEON_STREAM_CONTAINER = "1";
+      else delete process.env.PIGEON_STREAM_CONTAINER;
+      await new StreamWorkspace(localStreamShell(root), { tmpDir: tmp }).clearTmpDir();
+      assert.deepEqual(readdirSync(tmp), ["keep.txt"], what);
+    } finally {
+      if (saved === undefined) delete process.env.PIGEON_STREAM_CONTAINER;
+      else process.env.PIGEON_STREAM_CONTAINER = saved;
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});

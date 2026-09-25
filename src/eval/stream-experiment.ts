@@ -297,6 +297,7 @@ async function runStreamExperimentLocked(
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
+        tmpDir: "/tmp",
       }),
       agents,
       reference: new ReferenceCases({
