@@ -1495,6 +1495,46 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("停止信号在判题或测量期间到达：这一步作废、不写行，作业停下；续跑重做这一步", async () => {
+    for (const where of ["judge", "measure"] as const) {
+      const t = await toy();
+      try {
+        const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
+        let fired = false;
+        const runtime: typeof toyRuntime = {
+          ...toyRuntime,
+          // 判题跑用例不带 cwd，全量测量在测量副本里跑（带 cwd）：在其中一处途中收到停止信号
+          runCases: (ws, tests, opts) => {
+            if (!fired && (opts.cwd === undefined) === (where === "judge")) {
+              fired = true;
+              limits.shutdown("收到 SIGTERM");
+            }
+            return toyRuntime.runCases(ws, tests, opts);
+          },
+        };
+        const agent = scriptedAgent((input) => {
+          if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+          return undefined;
+        });
+        const summary = await runStreams(
+          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1, limits })
+        );
+        assert.equal(fired, true, where);
+        assert.match(summary.jobs[0]?.stopped ?? "", /收到 SIGTERM/, where);
+        assert.deepEqual(readStreamResults(summary.resultsFile), [], `${where}：不写行`);
+        const again = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+        assert.deepEqual(
+          readStreamResults(again.resultsFile).map((r) => [r.seq, r.outcome]),
+          [[1, "passed"]],
+          `${where}：续跑重做这一步`
+        );
+        assert.equal(agent.calls.length, 2, where);
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("条件需要的 agent 没有接入：该作业停止并说明原因，其余作业照跑", async () => {
     const t = await toy();
     try {

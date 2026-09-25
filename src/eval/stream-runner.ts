@@ -494,6 +494,12 @@ async function runStreamJob(
         const sessionsBefore = new Set(sessionFilesOf(jobDir));
         try {
           row = await runStep(options, job, spec, agent, env, steps, step, state, jobDir);
+          // 这一步开始之后收到过停止信号：不论判题、测量进行到哪（停止信号可能打断了它们），这一步作废、不写行，
+          // 回到本步起点后作业在取下一步时停下
+          if (limits?.shutdownReason !== undefined) {
+            await env.ws.discardAttempt(state.head, step.seq - 1, env.measureRoot);
+            throw new StepInterruptedError(`第 ${step.seq} 步作废：${limits.shutdownReason}`, true);
+          }
           break;
         } catch (error) {
           // 这一步作废（决策 144、160）：已回到本步起点、不留行，等放行后重做同一步

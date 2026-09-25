@@ -87,6 +87,8 @@ export class LimitController {
   // 限额信号计数：每收到一次加一；一步前后计数不同，即这一步撞上过整批限额，作废重做
   signals = 0;
   stopReason: string | undefined;
+  // 收到过停止信号（SIGTERM）即记下原因：跑批器据此把判题或测量途中的步作废、不写行。不用信号计数，暂停也会加计数
+  shutdownReason: string | undefined;
   private active = 0;
   private readonly waiting: (() => void)[] = [];
   private readonly records: { epoch: number; record: PauseRecord }[] = [];
@@ -148,6 +150,7 @@ export class LimitController {
   // 已完成的步保留，之后在同一输出目录续跑
   shutdown(reason: string): void {
     if (this.state === "stopped") return;
+    this.shutdownReason = reason;
     this.signals += 1;
     this.stop(reason);
     this.notify();

@@ -155,18 +155,28 @@ test("路数固定：限额信号不再降路（并发受限由网关按账号�
 });
 
 test("停止信号：与每月额度用完同一路径——计一次信号、通知在途的看守、状态为已停止，之后取新步即报停止原因；重复收到不再计", async () => {
-  const limits = new LimitController({ probe: async () => true, slots: 2, warn: () => {} });
+  // 暂停后的探测不真的等（不留定时器）
+  const limits = new LimitController({
+    probe: async () => true,
+    slots: 2,
+    warn: () => {},
+    sleep: () => new Promise<void>(() => {}),
+  });
   let notified = 0;
   limits.subscribe(() => {
     notified += 1;
   });
+  limits.onLimit("5h");
+  assert.equal(limits.shutdownReason, undefined, "暂停不算停止信号");
   limits.shutdown("收到 SIGTERM");
+  assert.equal(limits.shutdownReason, "收到 SIGTERM");
   assert.equal(limits.state, "stopped");
-  assert.equal(limits.signals, 1);
-  assert.equal(notified, 1);
+  assert.equal(limits.signals, 2);
+  assert.equal(notified, 2);
   await assert.rejects(limits.ready(), /收到 SIGTERM/);
   await assert.rejects(limits.acquire(), /收到 SIGTERM/);
   limits.shutdown("又一次");
-  assert.equal(limits.signals, 1);
-  assert.equal(notified, 1);
+  assert.equal(limits.signals, 2);
+  assert.equal(notified, 2);
+  assert.equal(limits.shutdownReason, "收到 SIGTERM");
 });
