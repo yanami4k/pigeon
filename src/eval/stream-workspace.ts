@@ -263,13 +263,40 @@ export class StreamWorkspace {
     });
   }
 
-  // 接管续跑时已存在的工作区：库里须有上一个完成步的提交（没有即抛错，由调用方改为重建），再回到它——在途步的改动
-  // 与作废重做同一口径地丢掉，被忽略的文件留着（与没中断的作业一样）
-  async takeOver(head: string): Promise<void> {
+  // 丢弃作废的尝试（作废重做、接管续跑）：回到 head，并去掉那次尝试在库里留下、重做时 agent 看得到的痕迹——ORIG_HEAD
+  // 等伪引用、序号大于 keepStepStartsUpTo 的开工树引用、reflog（全部清空）与因此不可达的对象；给了测量副本目录时一并
+  // 清空（接管时它可能还放着作废那一步落地后的整份解）。agent 自己建的分支与 stash 不动（见审计的已知限制）
+  async discardAttempt(
+    head: string,
+    keepStepStartsUpTo: number,
+    measureRoot?: string
+  ): Promise<void> {
+    await this.rollback(head);
+    await this.must(
+      [
+        "set -e",
+        'gd="$(git rev-parse --git-dir)"',
+        'rm -f -- "$gd/ORIG_HEAD" "$gd/FETCH_HEAD" "$gd/MERGE_HEAD" "$gd/CHERRY_PICK_HEAD" "$gd/REVERT_HEAD" "$gd/AUTO_MERGE" "$gd/BISECT_HEAD"',
+        `git for-each-ref --format='%(refname)' ${STEP_START_REFS}/ | while IFS= read -r r; do`,
+        `  n="\${r##*/}"; case "$n" in ''|*[!0-9]*) continue;; esac`,
+        '  if [ "$n" -gt "$1" ]; then git update-ref -d "$r"; fi',
+        "done",
+        "git reflog expire --expire=now --expire-unreachable=now --all",
+        "git prune --expire=now",
+      ].join("\n"),
+      "丢弃作废的尝试",
+      { args: [String(keepStepStartsUpTo)], timeoutMs: 600_000 }
+    );
+    if (measureRoot !== undefined) await this.clearArtifacts(measureRoot);
+  }
+
+  // 接管续跑时已存在的工作区：库里须有上一个完成步（第 seq 步）的提交（没有即抛错，由调用方改为重建），再按作废重做
+  // 同一口径丢掉在途那次尝试，并清空测量副本；被忽略的文件留着（与没中断的作业一样）
+  async takeOver(head: string, seq: number, measureRoot: string): Promise<void> {
     await this.must('git cat-file -e "$1^{commit}"', `核对上一个完成步的提交 ${head}`, {
       args: [head],
     });
-    await this.rollback(head);
+    await this.discardAttempt(head, seq, measureRoot);
   }
 
   // 工作区是否与 HEAD 逐字一致（被跟踪文件与未忽略的未跟踪文件）

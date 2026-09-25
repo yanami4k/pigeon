@@ -164,7 +164,7 @@ export interface StreamEnvFactory {
   // 新开：从流起点建；续跑：从导出的流历史恢复到断点
   open(
     job: StreamJobId,
-    init: { startCommit: string; resume?: { head: string; bundle: Buffer } }
+    init: { startCommit: string; resume?: { head: string; seq: number; bundle: Buffer } }
   ): Promise<StreamEnvironment>;
 }
 
@@ -435,7 +435,7 @@ async function runStreamJob(
   const env = await options.envs.open(job, {
     startCommit: segment.startCommit,
     ...(last !== undefined
-      ? { resume: { head: last.head, bundle: readFileSync(bundleFile) } }
+      ? { resume: { head: last.head, seq: last.seq, bundle: readFileSync(bundleFile) } }
       : {}),
   });
   try {
@@ -797,7 +797,7 @@ async function runStep(
     ...(error !== undefined ? { error } : {}),
   });
   const voided = async (error: EnvSelectionError) => {
-    await ws.rollback(state.head);
+    await ws.discardAttempt(state.head, step.seq - 1);
     return notRun(`${error.message}（这一步作废）`);
   };
   // 回到本步起点：上一步结束时的 HEAD
@@ -869,7 +869,8 @@ async function runStep(
     const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
     const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
     if (signalled || upstreamFailed || result.interrupted !== undefined) {
-      await ws.rollback(state.head);
+      // 作废重做：连同这次尝试在库里留下的痕迹（agent 的提交所在的 reflog、ORIG_HEAD、本步的开工树引用）一并丢掉
+      await ws.discardAttempt(state.head, step.seq - 1);
       const why = [
         signalled ? "期间出现限额信号" : undefined,
         upstreamFailed ? `本作业的上游故障 ${delta?.upstreamFailures} 次` : undefined,
@@ -1009,17 +1010,19 @@ export function dockerStreamEnvs(input: {
   prefix: string;
   docker?: readonly string[];
   runArgs?: readonly string[];
-  // 容器内的工作区根（缺省 /testbed；本机测试指到临时目录）
+  // 容器内的工作区根与测量副本目录（缺省 /testbed 与 /measure；本机测试指到临时目录）
   root?: string;
+  measureRoot?: string;
   log?: (line: string) => void;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
   const root = input.root ?? STREAM_CONTAINER_ROOT;
+  const measureRoot = input.measureRoot ?? STREAM_MEASURE_ROOT;
   let imageId: string | undefined;
   const envOf = (container: string, ws: StreamWorkspace): StreamEnvironment => ({
     ws,
     target: { container, root },
-    measureRoot: STREAM_MEASURE_ROOT,
+    measureRoot,
     dispose: () => removeWorkspaceContainer(container, docker),
   });
   return {
@@ -1035,7 +1038,7 @@ export function dockerStreamEnvs(input: {
               container,
             ]);
             const ws = new StreamWorkspace(dockerStreamShell({ container, root, docker }));
-            await ws.takeOver(init.resume.head);
+            await ws.takeOver(init.resume.head, init.resume.seq, measureRoot);
             input.log?.(
               `[${container}] 接管已存在的容器（原为 ${found.status}），回到第 ${init.resume.head.slice(0, 9)} 提交`
             );

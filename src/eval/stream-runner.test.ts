@@ -1451,6 +1451,41 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("作废重做前丢掉那次尝试在库里的痕迹：agent 在被打断的尝试里提交过，重做时 reflog 与对象库里都找不到那个提交", async () => {
+    const t = await toy();
+    try {
+      let attemptCommit = "";
+      let seenAtRedo: { reflog: string; exists: boolean } | undefined;
+      const agent = scriptedAgent((input) => {
+        const root = input.target.root;
+        if (input.step.seq !== 1) return undefined;
+        if (attemptCommit === "") {
+          write(root, { "src/a.txt": "attempt\n" });
+          git(root, "-c", "user.name=a", "-c", "user.email=a@x", "add", "-A");
+          git(root, "-c", "user.name=a", "-c", "user.email=a@x", "commit", "-qm", "attempt");
+          attemptCommit = git(root, "rev-parse", "HEAD");
+          return { interrupted: "模型服务故障" };
+        }
+        let exists = true;
+        try {
+          git(root, "cat-file", "-e", attemptCommit);
+        } catch {
+          exists = false;
+        }
+        seenAtRedo = { reflog: git(root, "reflog", "--all", "--format=%H"), exists };
+        write(root, { "src/a.txt": "alpha\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+      assert.notEqual(attemptCommit, "");
+      assert.equal(agent.calls.length, 2, "作废一次、重做一次");
+      assert.doesNotMatch(seenAtRedo?.reflog ?? "", new RegExp(attemptCommit), "reflog 里没有");
+      assert.equal(seenAtRedo?.exists, false, "对象库里也没有");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("条件需要的 agent 没有接入：该作业停止并说明原因，其余作业照跑", async () => {
     const t = await toy();
     try {
