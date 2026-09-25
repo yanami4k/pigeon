@@ -654,3 +654,115 @@ test("闸门：不在跑批器起的作业容器里（缺环境变量或缺 /.do
     }
   }
 });
+
+// 一个只有一个提交的工作区，另建第 1 步的开工树引用指向另一个提交；返回提交号与 git 助手
+function symrefRepo(base: string) {
+  const root = join(base, "ws");
+  git(base, "init", "-q", "-b", "main", "ws");
+  const g = (...a: string[]) => git(root, "-c", "user.name=a", "-c", "user.email=a@x", ...a);
+  writeFileSync(join(root, "a.txt"), "start\n");
+  g("add", "-A");
+  g("commit", "-qm", "start");
+  const start = git(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "a.txt"), "landed\n");
+  g("commit", "-qam", "landed");
+  const landed = git(root, "rev-parse", "HEAD");
+  g("update-ref", "refs/pigeon/step-start/s1/1", start);
+  return { root, g, start, landed, ws: new StreamWorkspace(localStreamShell(root)) };
+}
+
+test("丢弃作废的尝试不跟随符号引用：agent 让某条引用或开工树引用指向 main，丢弃后 main 与落地提交都在；HEAD 被设成指向保留引用时，回退与挪回起点都不改写那条引用", async () => {
+  for (const what of [
+    "分支指向 main",
+    "开工树引用指向 main",
+    "HEAD 指向保留的开工树引用",
+  ] as const) {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-symref-"));
+    try {
+      const r = symrefRepo(base);
+      if (what === "分支指向 main") r.g("symbolic-ref", "refs/heads/x", "refs/heads/main");
+      if (what === "开工树引用指向 main")
+        r.g("symbolic-ref", "refs/pigeon/step-start/s1/9", "refs/heads/main");
+      if (what === "HEAD 指向保留的开工树引用") {
+        r.g("symbolic-ref", "HEAD", "refs/pigeon/step-start/s1/1");
+        await r.ws.normalizeTo(r.landed);
+        assert.equal(
+          git(r.root, "rev-parse", "refs/pigeon/step-start/s1/1"),
+          r.start,
+          `${what}：挪回起点不改写`
+        );
+        r.g("symbolic-ref", "HEAD", "refs/pigeon/step-start/s1/1");
+      }
+      await r.ws.discardAttempt(r.landed, 1);
+      assert.equal(
+        git(r.root, "rev-parse", "refs/heads/main"),
+        r.landed,
+        `${what}：main 还在、指向落地提交`
+      );
+      assert.equal(
+        git(r.root, "symbolic-ref", "HEAD"),
+        "refs/heads/main",
+        `${what}：HEAD 指回 main`
+      );
+      assert.equal(
+        git(r.root, "rev-parse", "refs/pigeon/step-start/s1/1"),
+        r.start,
+        `${what}：保留的引用未被改写`
+      );
+      git(r.root, "cat-file", "-e", r.landed);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("落地提交记在 main 上：agent 切到别的分支或让 HEAD 游离后提交，挪回起点再落地，main 等于落地提交、导出的流历史里有它", async () => {
+  for (const how of ["别的分支", "HEAD 游离"] as const) {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-land-main-"));
+    try {
+      const r = symrefRepo(base);
+      if (how === "别的分支") r.g("checkout", "-q", "-b", "b");
+      else r.g("checkout", "-q", "--detach");
+      writeFileSync(join(r.root, "a.txt"), "agent\n");
+      r.g("commit", "-qam", "agent");
+      await r.ws.normalizeTo(r.landed);
+      const next = await r.ws.land("step 2");
+      assert.equal(git(r.root, "rev-parse", "refs/heads/main"), next, `${how}：main 等于落地提交`);
+      const bundle = join(base, "history.bundle");
+      writeFileSync(bundle, await r.ws.exportBundle());
+      assert.match(
+        git(r.root, "bundle", "list-heads", bundle),
+        new RegExp(`${next} refs/heads/main`),
+        how
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("丢弃时 worktree 路径先规范化：登记里写成 工作区/sub/../../外面 的路径不按字面当作工作区之内删掉", {
+  skip: NO_SYMLINKS,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-wt-norm-"));
+  try {
+    const r = symrefRepo(base);
+    // sub 是已提交的目录：回退后仍在，按字面拼出的 工作区/sub/../../outside 才解析得到外面
+    mkdirSync(join(r.root, "sub"));
+    writeFileSync(join(r.root, "sub", "keep.txt"), "x\n");
+    r.g("add", "-A");
+    r.g("commit", "-qm", "sub");
+    const head = git(r.root, "rev-parse", "HEAD");
+    const outside = join(base, "outside");
+    r.g("worktree", "add", "-q", "--detach", outside, head);
+    // 把登记里的路径改写成按字面落在工作区前缀下、实际在外面的写法
+    writeFileSync(
+      join(r.root, ".git", "worktrees", "outside", "gitdir"),
+      `${r.root}/sub/../../outside/.git\n`
+    );
+    await r.ws.discardAttempt(head, 1);
+    assert.equal(existsSync(outside), true, "工作区之外的目录不删");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

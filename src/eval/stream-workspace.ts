@@ -82,6 +82,11 @@ const SETTLE_INDEX = [
   "git diff -z --name-only --diff-filter=U | xargs -0 -r git add -A --",
 ].join(" && ");
 const UNMARK_INDEX = `${SETTLE_INDEX} && git ls-files -z | xargs -0 -r git update-index --no-skip-worktree -- && git ls-files -z | xargs -0 -r git update-index --no-assume-unchanged --`;
+// 让 HEAD 指回 main、main 指向给定提交（$1），不经过任何符号引用：agent 可以把 HEAD 或某条引用设成符号引用（例如
+// HEAD 指向一条开工树引用、refs/heads/x 指向 main），跑批器沿着它们改写就会改掉保留的引用或删掉 main。只动引用，不动
+// 暂存区与工作区
+const HEAD_ONTO_MAIN =
+  'git update-ref --no-deref refs/heads/main "$1" && git symbolic-ref HEAD refs/heads/main';
 
 export interface CommandOutcome {
   exitCode: number | null;
@@ -268,6 +273,8 @@ export class StreamWorkspace {
 
   // 落地：以提交信息提交当前工作区的全部改动（没有改动也提交一次，步与提交一一对应）
   async land(message: string): Promise<string> {
+    // 提交前再保证一次 HEAD 在 main 上：落地提交一定记在 main 上，导出的流历史里一定有它
+    await this.must(`set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN}`, "把 HEAD 放回 main");
     await this.must("git add -A && git commit -q --allow-empty --no-verify -F -", "落地提交", {
       stdin: message,
       timeoutMs: 300_000,
@@ -280,7 +287,8 @@ export class StreamWorkspace {
   async rollback(to = "HEAD"): Promise<void> {
     await this.grantOwnerAccess();
     await this.must(
-      `${UNMARK_INDEX} && git reset -q --hard "$1" && git clean -ffdq`,
+      // 先让 HEAD 脱离到目标提交（checkout --detach 只改 HEAD 本身），再让 HEAD 指回指向目标的 main，然后复原
+      `${UNMARK_INDEX} && git checkout -q -f --detach "$1" && set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN} && git reset -q --hard && git clean -ffdq`,
       "回到本步起点",
       {
         args: [to],
@@ -289,9 +297,10 @@ export class StreamWorkspace {
     );
   }
 
-  // agent 在容器里也可能自己提交：把 HEAD 挪回本步起点、改动留在工作区，此后的恢复、判定与落地都相对起点
+  // agent 在容器里也可能自己提交、切到别的分支或让 HEAD 游离：把 HEAD 放回指向本步起点的 main、改动留在暂存区与
+  // 工作区（等同 soft reset，但不经过 agent 设下的符号引用），此后的恢复、判定与落地都相对起点，落地提交记在 main 上
   async normalizeTo(base: string): Promise<void> {
-    await this.must(`${SETTLE_INDEX} && git reset -q --soft "$1"`, "把 HEAD 挪回本步起点", {
+    await this.must(`${SETTLE_INDEX} && ${HEAD_ONTO_MAIN}`, "把 HEAD 挪回本步起点", {
       args: [base],
     });
   }
@@ -315,17 +324,19 @@ export class StreamWorkspace {
         'rm -rf -- "$gd/rebase-merge" "$gd/rebase-apply" "$gd/sequencer"',
         // worktree 的路径由 .git/worktrees/*/gitdir 决定，agent 能指到任意位置：只删工作区之内的，登记整个删掉
         "git worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 | while IFS= read -r w; do",
-        '  case "$w" in "$(pwd -P)"/?*) rm -rf -- "$w" ;; esac',
+        // 先规范化（cd 进去再 pwd -P），防止 /testbed/../x 这类写法按字面落在工作区前缀下、实际在外面
+        '  n="$(cd "$w" 2>/dev/null && pwd -P)" || continue',
+        '  case "$n" in "$(pwd -P)"/?*) rm -rf -- "$n" ;; esac',
         "done",
         'rm -rf -- "$gd/worktrees"',
-        'git checkout -q -f -B main "$2"',
         "git for-each-ref --format='%(refname)' | while IFS= read -r r; do",
         '  case "$r" in',
         "    refs/heads/main) ;;",
         `    ${STEP_START_REFS}/*)`,
         `      n="\${r##*/}"`,
-        `      case "$n" in ''|*[!0-9]*) git update-ref -d "$r" ;; *) if [ "$n" -gt "$1" ]; then git update-ref -d "$r"; fi ;; esac ;;`,
-        '    *) git update-ref -d "$r" ;;',
+        // 删引用一律 --no-deref：只删这条引用本身，不沿着符号引用删到 main
+        `      case "$n" in ''|*[!0-9]*) git update-ref --no-deref -d "$r" ;; *) if [ "$n" -gt "$1" ]; then git update-ref --no-deref -d "$r"; fi ;; esac ;;`,
+        '    *) git update-ref --no-deref -d "$r" ;;',
         "  esac",
         "done",
         "git reflog expire --expire=now --expire-unreachable=now --all",
