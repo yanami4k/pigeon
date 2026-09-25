@@ -644,6 +644,15 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           `${ignore}：判题与测量时都没有 agent 新建的 conftest`
         );
         assert.deepEqual(atStep2, [], `${ignore}：conftest 没有落地，下一步开始时不在工作区里`);
+        // 回炉前删 conftest 用的人树与判题前同一份：人在该步树里的全部路径
+        assert.deepEqual(
+          [...(agent.calls[0]?.humanTree ?? [])].sort(),
+          t.human
+            .tree(agent.calls[0]?.step.commit ?? "")
+            .map((e) => e.path)
+            .sort(),
+          `${ignore}：交给 agent 的人树`
+        );
       } finally {
         rmSync(t.base, { recursive: true, force: true });
       }

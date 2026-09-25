@@ -150,10 +150,11 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                             ...(options.docker !== undefined ? { docker: options.docker } : {}),
                           })
                         );
+                        const humanTree = new Set(input.humanTree ?? []);
                         await removeCoveringHelpers(
                           ws,
                           input.autoloadedTestHelper as string,
-                          (p) => input.humanTestFiles?.has(p) === true,
+                          (p) => humanTree.has(p),
                           input.humanTests ?? []
                         );
                       },

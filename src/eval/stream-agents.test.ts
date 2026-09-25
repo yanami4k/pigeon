@@ -744,6 +744,46 @@ test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写�
   }
 });
 
+test("Pigeon agent：回炉验证之前删 conftest 与判题前同一口径——人在该步树里的（例如仓库根的 conftest，不属于测试文件）不删、不改", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
+  mkdirSync(join(ws.testbed, "tests"));
+  writeFileSync(join(ws.testbed, "tests", "check.sh"), "grep -qx fixed a.txt\n");
+  writeFileSync(join(ws.testbed, "conftest.sh"), "# human hooks\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "human files");
+  try {
+    const agent = pigeonStepAgent({
+      streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    });
+    const load = "sh tests/check.sh";
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: { steps: [{ name: "测试", command: load }], command: load, timeoutMs: 60_000 },
+        humanTestFiles: new Set(["tests/check.sh"]),
+        autoloadedTestHelper: "conftest.sh",
+        humanTests: ["tests/check.sh"],
+        humanTree: ["a.txt", "conftest.sh", "tests/check.sh"],
+      })
+    );
+    assert.equal(out.repair?.finalVerdict, "pass");
+    assert.equal(
+      readFileSync(join(ws.testbed, "conftest.sh"), "utf8"),
+      "# human hooks\n",
+      "人写的根 conftest 还在"
+    );
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
 test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);

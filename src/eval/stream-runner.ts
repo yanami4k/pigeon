@@ -115,10 +115,11 @@ export interface StepAgentInput {
   modelBaseUrl?: string;
   // 人在这一步的树里的测试与测试辅助文件：回炉验证前只还原（并计数）这些，agent 早先步骤落地的自己的测试不算
   humanTestFiles?: ReadonlySet<string>;
-  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）与人在这一步的测试文件：回炉验证前按与判题前同一规则
-  // 删掉 agent 放的、覆盖人写测试的这类文件
+  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）、人在这一步的测试文件与人在这一步的树里的全部路径：回炉
+  // 验证前按与判题前同一规则删掉 agent 放的、覆盖人写测试的这类文件（人树里有的一律不删，例如仓库根的 conftest.py）
   autoloadedTestHelper?: string;
   humanTests?: readonly string[];
+  humanTree?: readonly string[];
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值
@@ -855,6 +856,7 @@ async function runStep(
           ? {
               autoloadedTestHelper: options.runtime.autoloadedTestHelper,
               humanTests: humanTestsAt(options.human, options.runtime, step.commit),
+              humanTree: options.human.tree(step.commit).map((e) => e.path),
             }
           : {}),
         ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
