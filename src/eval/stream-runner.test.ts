@@ -21,7 +21,7 @@ import { listSessionIds } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { GatewayMeter } from "./model-gateway.ts";
-import { LimitController } from "./model-limits.ts";
+import { LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
 import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
@@ -39,6 +39,7 @@ import {
   EQUIVALENT_BASELINE_COMMANDS,
   ReferenceCases,
   RUN_LOCK,
+  runAdmittedAgent,
   runStreams,
   type StepAgent,
   type StepAgentInput,
@@ -1268,49 +1269,56 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("同一步因上游故障（或限额信号）一再作废：累计 5 次向标准错误告警一次，累计 10 次停下作业并说明，不无止境重做", async () => {
-    const t = await toy();
-    try {
-      const meters = new Map<string, GatewayMeter>();
-      const zero: GatewayMeter = {
-        requests: 0,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        upstreamFailures: 0,
-        queueMs: 0,
-        peakInFlight: 0,
-        accountRequests: [0],
-      };
-      const gateway = {
-        jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
-        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
-        resetPeak: () => {},
-      };
-      // 每次尝试都遇到一次上游故障
-      const agent = scriptedAgent((input) => {
-        const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
-        const m = meters.get(key) ?? zero;
-        meters.set(key, { ...m, upstreamFailures: m.upstreamFailures + 1 });
-        return undefined;
-      });
-      const warnings: string[] = [];
-      const summary = await runStreams(
-        options(t, {
-          agents: { pigeon: agent },
-          maxSteps: 1,
-          gateway,
-          warn: (line) => warnings.push(line),
-        })
-      );
-      assert.match(summary.jobs[0]?.stopped ?? "", /累计作废 10 次：停下作业/);
-      assert.equal(agent.calls.length, 10);
-      assert.equal(warnings.length, 1);
-      assert.match(warnings[0] ?? "", /已累计作废 5 次/);
-      assert.deepEqual(readStreamResults(summary.resultsFile), []);
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
+  test("同一步因上游故障或排队超时（或限额信号）一再作废：累计 5 次向标准错误告警一次，累计 10 次停下作业并说明，不无止境重做", async () => {
+    for (const cause of ["upstream", "queue"] as const) {
+      const t = await toy();
+      try {
+        const meters = new Map<string, GatewayMeter>();
+        const zero: GatewayMeter = {
+          requests: 0,
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          upstreamFailures: 0,
+          queueMs: 0,
+          peakInFlight: 0,
+          accountRequests: [0],
+        };
+        const gateway = {
+          jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
+          meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
+          resetPeak: () => {},
+        };
+        // 每次尝试都遇到一次上游故障，或等空闲账号累计超过 30 秒
+        const agent = scriptedAgent((input) => {
+          const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
+          const m = meters.get(key) ?? zero;
+          meters.set(
+            key,
+            cause === "upstream"
+              ? { ...m, upstreamFailures: m.upstreamFailures + 1 }
+              : { ...m, queueMs: m.queueMs + QUEUE_VOID_MS + 1_000 }
+          );
+          return undefined;
+        });
+        const warnings: string[] = [];
+        const summary = await runStreams(
+          options(t, {
+            agents: { pigeon: agent },
+            maxSteps: 1,
+            gateway,
+            warn: (line) => warnings.push(line),
+          })
+        );
+        assert.match(summary.jobs[0]?.stopped ?? "", /累计作废 10 次：停下作业/, cause);
+        assert.equal(agent.calls.length, 10, cause);
+        assert.equal(warnings.length, 1, cause);
+        assert.match(warnings[0] ?? "", /已累计作废 5 次/, cause);
+        assert.deepEqual(readStreamResults(summary.resultsFile), [], cause);
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
     }
   });
 
@@ -2221,4 +2229,31 @@ test("治理根按条件 × 流 × 遍次隔离：同一作业各步共用一个
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }
+});
+
+test("放行之后、agent 开始之前出错（例如读网关计量失败）也交还放行名额：下一个取步者照常放行", async () => {
+  const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
+  const gateway = {
+    jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
+    meter: (): GatewayMeter => {
+      throw new Error("读计量失败");
+    },
+    resetPeak: () => {},
+  };
+  await assert.rejects(
+    runAdmittedAgent({ limits, gateway }, "k", async () => ({
+      status: "completed",
+      turns: 1,
+      usage: ZERO_USAGE,
+      wallMs: 1,
+      repair: null,
+    })),
+    /读计量失败/
+  );
+  const next = await Promise.race([
+    limits.acquire(),
+    new Promise<"stuck">((r) => setTimeout(() => r("stuck"), 2_000).unref()),
+  ]);
+  assert.notEqual(next, "stuck", "名额已交还");
+  if (next !== "stuck") next();
 });

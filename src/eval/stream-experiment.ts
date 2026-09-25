@@ -35,6 +35,7 @@ import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";
 import {
   dockerStreamEnvs,
+  lockOutDir,
   ReferenceCases,
   type RunStreamsSummary,
   runStreams,
@@ -179,12 +180,25 @@ function readManifest(file: string): { manifest: StreamManifest; runtime: Stream
   return { manifest, runtime };
 }
 
+// 输出目录的锁在最前面取（读清单、写身份头、起网关探测各账号之前）：误起第二个进程时它什么都不动就被拒
 export async function runStreamExperiment(
   options: StreamExperimentOptions
 ): Promise<RunStreamsSummary> {
+  const outDir = path.resolve(options.outDir);
+  const release = lockOutDir(outDir);
+  try {
+    return await runStreamExperimentLocked(options, outDir);
+  } finally {
+    release();
+  }
+}
+
+async function runStreamExperimentLocked(
+  options: StreamExperimentOptions,
+  outDir: string
+): Promise<RunStreamsSummary> {
   const { manifest, runtime } = readManifest(options.manifestFile);
   const docker = options.docker ?? ["docker"];
-  const outDir = path.resolve(options.outDir);
   const human = gitHumanRepo(options.repoDir);
   const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const referenceName = `${prefix}-reference`;
@@ -272,6 +286,7 @@ export async function runStreamExperiment(
       });
     }
     return await runStreams({
+      outDirLocked: true,
       manifest,
       runtime,
       human,
@@ -339,9 +354,21 @@ export interface StreamTrialExperimentOptions {
 export async function runStreamTrialExperiment(
   options: StreamTrialExperimentOptions
 ): Promise<StreamTrialSummary> {
+  const outDir = path.resolve(options.outDir);
+  const release = lockOutDir(outDir);
+  try {
+    return await runStreamTrialExperimentLocked(options, outDir);
+  } finally {
+    release();
+  }
+}
+
+async function runStreamTrialExperimentLocked(
+  options: StreamTrialExperimentOptions,
+  outDir: string
+): Promise<StreamTrialSummary> {
   const { manifest, runtime } = readManifest(options.manifestFile);
   const docker = options.docker ?? ["docker"];
-  const outDir = path.resolve(options.outDir);
   const human = gitHumanRepo(options.repoDir);
   const prefix = `pigeon-trial-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const modelId = options.gateway.modelId;
@@ -369,6 +396,7 @@ export async function runStreamTrialExperiment(
       });
     }
     return await runStreamTrial({
+      outDirLocked: true,
       manifest,
       human,
       runtime,

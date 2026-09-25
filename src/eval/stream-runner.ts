@@ -134,7 +134,7 @@ export interface StreamModelGateway {
   watchQueue?(job: string, thresholdMs: number, listener: () => void): () => void;
 }
 
-// 一步的 agent 在放行机制下运行（决策 144、160、163；跑批器与定点对照的单步重跑共用）：
+// 一步的 agent 在放行机制下运行（决策 144、160、163；正式跑批与预算试跑共用）：
 //   先等放行（同时在跑的 agent 数小于网关的可用容量且不超过配置路数；等待发生在 agent 开始之前，不计入这一步的
 //   墙钟预算，不作废、不耗额度，时长交回记入结果行）；放行后记下限额信号数与本作业的计量，跑 agent；
 //   本作业在网关累计等空闲账号超过 QUEUE_VOID_MS 即经按步中止立即停下 agent（不等它跑完）；
@@ -156,17 +156,21 @@ export async function runAdmittedAgent(
   run: (abortSignal: AbortSignal) => Promise<StepAgentResult>
 ): Promise<AdmittedAgentRun> {
   const admission = await options.limits?.acquire();
-  const signalsBefore = options.limits?.signals ?? 0;
-  const before = options.gateway?.meter(key);
-  options.gateway?.resetPeak(key);
-  const stepAbort = new AbortController();
+  // 放行之后任何一条语句抛错都要交还放行名额：紧接着进 try
+  let signalsBefore = 0;
+  let before: GatewayMeter | undefined;
   let queueExceeded = false;
-  const stopQueueWatch = options.gateway?.watchQueue?.(key, QUEUE_VOID_MS, () => {
-    queueExceeded = true;
-    stepAbort.abort();
-  });
+  let stopQueueWatch: (() => void) | undefined;
   let result: StepAgentResult;
   try {
+    signalsBefore = options.limits?.signals ?? 0;
+    before = options.gateway?.meter(key);
+    options.gateway?.resetPeak(key);
+    const stepAbort = new AbortController();
+    stopQueueWatch = options.gateway?.watchQueue?.(key, QUEUE_VOID_MS, () => {
+      queueExceeded = true;
+      stepAbort.abort();
+    });
     result = await run(stepAbort.signal);
   } finally {
     stopQueueWatch?.();
@@ -357,6 +361,8 @@ export interface RunStreamsOptions {
   // 身份头的摘要与各 agent 的参数：原样记进每条结果行（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）
   runIdentity?: string;
   agentSettings?: Partial<Record<ConditionSpec["agent"], Record<string, unknown>>>;
+  // 调用方已对输出目录取了锁（CLI 入口在写身份头、开跑前探测之前就取）：这里不再取
+  outDirLocked?: boolean;
 }
 
 export interface StreamJobSummary {
@@ -406,7 +412,7 @@ export function lockOutDir(outDir: string): () => void {
 }
 
 export async function runStreams(options: RunStreamsOptions): Promise<RunStreamsSummary> {
-  const release = lockOutDir(options.outDir);
+  const release = options.outDirLocked === true ? () => {} : lockOutDir(options.outDir);
   try {
     return await runStreamsLocked(options);
   } finally {

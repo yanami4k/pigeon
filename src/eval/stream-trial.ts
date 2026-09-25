@@ -163,6 +163,8 @@ export interface StreamTrialOptions {
   limits?: LimitController;
   verifyTimeoutMs?: number;
   log?: (line: string) => void;
+  // 调用方已对输出目录取了锁：这里不再取
+  outDirLocked?: boolean;
 }
 
 export interface StreamTrialSummary {
@@ -172,7 +174,7 @@ export interface StreamTrialSummary {
 }
 
 export async function runStreamTrial(options: StreamTrialOptions): Promise<StreamTrialSummary> {
-  const release = lockOutDir(options.outDir);
+  const release = options.outDirLocked === true ? () => {} : lockOutDir(options.outDir);
   try {
     return await runStreamTrialLocked(options);
   } finally {
