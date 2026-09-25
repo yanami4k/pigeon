@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createContainerWorkspaceHost } from "../execution/container-host.ts";
+import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { clearMarkedProcesses } from "./stream-agents.ts";
 import {
   allPassed,
   failedStepsOf,
@@ -21,7 +25,7 @@ import {
   verifyConfigFile,
 } from "./stream-profiles.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
-import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
+import { dockerStreamShell, removeCoveringHelpers, StreamWorkspace } from "./stream-workspace.ts";
 
 // 假的 python -m pytest，按 pytest 对这几种情形的行为出结果（逐条 -v 进度、xunit1 报告）：
 //   测试文件里有 import-error 即收集失败；不带 --continue-on-collection-errors 时整次中断、只报收集错误；
@@ -623,6 +627,86 @@ test("写人的 pytest 配置之前核对容器里的权限：/opt 没有粘滞�
     assert.equal(r.exitCode, 3);
     assert.match(r.output, /容器里的权限不对，不写人的 pytest 配置：.* 没有粘滞位/);
   } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("跑批器在容器里的内部命令不经过 agent 能改的 PATH：镜像 PATH 最前面换成放了假 sh、find、git 的目录（相当于 /opt/venv 被改指），删 conftest、以 root 写人的 pytest 配置、执行端的内部命令与清进程都不执行它们，conftest 照样删掉", {
+  skip: process.platform === "win32" ? "Windows 上执行不了无扩展名的假程序" : false,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-path-"));
+  const savedPath = process.env.PATH;
+  const savedConfig = process.env[PYTEST_CONFIG_DIR_ENV];
+  try {
+    const root = join(base, "ws");
+    mkdirSync(join(root, "tests", "unit"), { recursive: true });
+    execFileSync("git", ["init", "-q", root]);
+    writeFileSync(join(root, "tests", "unit", "test_a.sh"), "x\n");
+    writeFileSync(join(root, "tests", "conftest.sh"), "agent\n");
+    execFileSync("git", ["-C", root, "add", "-A"]);
+    execFileSync("git", [
+      "-C",
+      root,
+      "-c",
+      "user.name=a",
+      "-c",
+      "user.email=a@x",
+      "commit",
+      "-qm",
+      "x",
+    ]);
+    // agent 的假程序：记一个标记，再交给真的
+    const fake = join(base, "fake-bin");
+    mkdirSync(fake);
+    const marker = join(base, "ran");
+    for (const [name, real] of [
+      ["sh", "/bin/sh"],
+      ["find", "/usr/bin/find"],
+      ["git", "/usr/bin/git"],
+    ] as const) {
+      writeFileSync(
+        join(fake, name),
+        `#!/bin/sh\necho ${name} >> "${marker}"\nexec ${real} "$@"\n`,
+        {
+          mode: 0o755,
+        }
+      );
+    }
+    process.env.PATH = `${fake}:${savedPath}`;
+    const config = join(base, "config");
+    process.env[PYTEST_CONFIG_DIR_ENV] = config;
+    const docker = localDockerHost(root);
+    try {
+      const ws = new StreamWorkspace(
+        dockerStreamShell({ container: "box", root: docker.containerRoot, docker: docker.docker })
+      );
+      const removed = await removeCoveringHelpers(ws, "conftest.sh", () => false, [
+        "tests/unit/test_a.sh",
+      ]);
+      assert.deepEqual(removed, ["tests/conftest.sh"]);
+      await strandsRuntime.pinTestConfig?.(ws, async () => Buffer.from("[pytest]\n"));
+      const host = createContainerWorkspaceHost({
+        container: "box",
+        root: docker.containerRoot,
+        docker: docker.docker,
+      });
+      await host.listTracked?.();
+      assert.equal(
+        await clearMarkedProcesses(docker.docker, "box", "pigeon-step-path", docker.containerRoot),
+        true
+      );
+      assert.equal(
+        existsSync(marker),
+        false,
+        `agent 的假程序被执行了：${existsSync(marker) ? readFileSync(marker, "utf8") : ""}`
+      );
+    } finally {
+      docker.cleanup();
+    }
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedConfig === undefined) delete process.env[PYTEST_CONFIG_DIR_ENV];
+    else process.env[PYTEST_CONFIG_DIR_ENV] = savedConfig;
     rmSync(base, { recursive: true, force: true });
   }
 });

@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { runHeadless } from "../application/headless.ts";
-import { createContainerWorkspaceHost } from "../execution/container-host.ts";
+import { createContainerWorkspaceHost, trustedShell } from "../execution/container-host.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
@@ -369,7 +369,7 @@ export async function clearMarkedProcesses(
     const found = await new Promise<number | null>((resolve) => {
       execFile(
         program,
-        [...pre, "exec", container, "sh", "-c", KILL_STEP_PROCESSES, "sh", marker],
+        [...pre, "exec", container, ...trustedShell(KILL_STEP_PROCESSES, marker)],
         { timeout: 60_000, windowsHide: true },
         (error, stdout) => {
           const n = Number.parseInt(String(stdout).trim(), 10);
@@ -382,7 +382,7 @@ export async function clearMarkedProcesses(
       await new Promise<void>((resolve) => {
         execFile(
           program,
-          [...pre, "exec", container, "sh", "-c", STALE_GIT_LOCKS, "sh", root],
+          [...pre, "exec", container, ...trustedShell(STALE_GIT_LOCKS, root)],
           { timeout: 60_000, windowsHide: true },
           () => resolve()
         );

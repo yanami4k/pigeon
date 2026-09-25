@@ -26,6 +26,8 @@ for (;;) {
     continue;
   }
   if (args[i] === "-e") { i += 2; continue; }
+  // 以哪个用户执行：本机照常以当前用户执行
+  if (args[i] === "-u") { i += 2; continue; }
   break;
 }
 let [program, ...rest] = args.slice(i + 1);

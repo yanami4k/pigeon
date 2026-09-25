@@ -89,6 +89,19 @@ const RESTORE_FROM_START_SCRIPT = [
   'g checkout -q "$base" -- "$@" && g reset -q -- "$@"',
 ].join(" ");
 
+// 跑批器与执行端自己在容器里执行的内部命令用的 shell：/bin/sh 取绝对路径（docker exec 按镜像的 PATH 找 sh，而镜像的
+// PATH 可能以 agent 能改指的链接开头，例如 /opt/venv/bin），脚本开头把系统目录放到 PATH 最前（sh、find、git、chmod、
+// timeout、rm 等都从 root 所有的系统目录解析）。只放到最前、不整个替换：本机测试的假 docker 在本机执行，本机的 git 在
+// 系统目录之外；跑批器用到的工具在镜像里都位于系统目录，两种做法等效
+export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+export function trustedShell(script: string, ...args: readonly string[]): string[] {
+  return ["/bin/sh", "-c", `PATH="${SYSTEM_PATH}:$PATH"; export PATH\n${script}`, "sh", ...args];
+}
+// 以固定 PATH 执行一条命令（argv[0] 从系统目录解析）
+export function trustedCommand(argv: readonly string[]): string[] {
+  return trustedShell('exec "$@"', ...argv);
+}
+
 export interface ContainerHostOptions {
   // 容器名或 id（须已在运行）
   container: string;
@@ -179,8 +192,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
 
   // 在工作区根执行一个辅助命令，失败即抛环境错误；返回标准输出
+  // 执行端自己的命令（取起点、还原受保护文件、撤回、列清单）：以固定 PATH 执行，不经过 agent 能改指的链接
   const must = async (command: string[], what: string): Promise<Buffer> => {
-    const result = await helper(execArgs(false, command));
+    const result = await helper(execArgs(false, trustedCommand(command)));
     if (daemonFailure(result)) {
       throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
     }

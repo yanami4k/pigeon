@@ -684,17 +684,39 @@ export async function syncEnv(
       `${what}切换出错（${humanCommit}，退出码 ${r.exitCode}${r.timedOut ? "，超时" : ""}）：${r.output.slice(-500)}`
     );
   };
-  if (command !== null) check("依赖环境", await ws.run(command, 120_000, cwd));
-  // 测试配置同样按人在该步的版本（agent 改的 pytest 配置不起作用）
-  await runtime.pinTestConfig?.(ws, async (p) => {
-    try {
-      return options.human.show(humanCommit, p);
-    } catch {
-      return undefined;
-    }
-  });
+  // 切换命令是跑批器自己的命令：以固定 PATH 执行，不经过 agent 能改指的依赖环境链接
   const lint = runtime.lintSyncCommand?.(humanCommit);
-  if (lint !== undefined) check("lint 环境", await ws.run(lint, 120_000, cwd));
+  const switchEnvs = async (withConfig: boolean) => {
+    if (command !== null)
+      check("依赖环境", await ws.run(command, 120_000, cwd, { systemPath: true }));
+    // 测试配置同样按人在该步的版本（agent 改的 pytest 配置不起作用）
+    if (withConfig) {
+      await runtime.pinTestConfig?.(ws, async (p) => {
+        try {
+          return options.human.show(humanCommit, p);
+        } catch {
+          return undefined;
+        }
+      });
+    }
+    if (lint !== undefined)
+      check("lint 环境", await ws.run(lint, 120_000, cwd, { systemPath: true }));
+  };
+  await switchEnvs(true);
+  // 判题、测量、验证门以镜像的 PATH 用这些链接：核对切换结果，被 agent 改指或换成普通目录（切换命令改不回来）即以 root
+  // 删掉链接再切一次，仍不对则这一步作废
+  const links = runtime.envLinks;
+  if (links !== undefined && !(await ws.envLinksIntact(links))) {
+    await ws.asRoot('rm -rf -- "$@"', "删掉被改过的依赖环境链接", {
+      args: links.map((l) => l.link),
+    });
+    await switchEnvs(false);
+    if (!(await ws.envLinksIntact(links))) {
+      throw new StreamWorkspaceAccessError(
+        `依赖环境的链接被改过，重切之后仍不在 root 所有的目录下（${links.map((l) => l.link).join("、")}）`
+      );
+    }
+  }
 }
 
 // agent 是否改了依赖声明文件（与人在该步的版本不同，含删掉）；运行方式没有依赖声明为 null
@@ -917,6 +939,10 @@ async function runStep(
     await syncEnv(options, ws, step.commit);
   } catch (error) {
     if (error instanceof EnvSelectionError) return voided(error);
+    if (error instanceof StreamWorkspaceAccessError) {
+      await ws.discardAttempt(state.head, step.seq - 1);
+      throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
+    }
     throw error;
   }
   let agentChangedDeps: boolean | null = null;
@@ -1012,6 +1038,10 @@ async function runStep(
       await syncEnv(options, ws, step.commit);
     } catch (error) {
       if (error instanceof EnvSelectionError) return voided(error);
+      if (error instanceof StreamWorkspaceAccessError) {
+        await ws.discardAttempt(state.head, step.seq - 1);
+        throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
+      }
       throw error;
     }
     // 题：判题测试的逐用例结果（不看退出码）；维护步：验证门
@@ -1047,6 +1077,10 @@ async function runStep(
     measured = await measure(options, env, steps, step, state);
   } catch (error) {
     // 测量时选不出依赖组合：与判题前同一口径作废——撤掉已落地的提交，回到本步起点
+    if (error instanceof StreamWorkspaceAccessError) {
+      await ws.discardAttempt(state.head, step.seq - 1, env.measureRoot);
+      throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
+    }
     if (!(error instanceof EnvSelectionError)) throw error;
     await ws.clearArtifacts(env.measureRoot);
     return voided(error);

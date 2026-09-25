@@ -47,7 +47,9 @@ for (;;) {
   }
   break;
 }
-const [program, ...rest] = args.slice(i + 1);
+let [program, ...rest] = args.slice(i + 1);
+// 容器里的 /bin/sh 在 Windows 上对应 PATH 里的 sh
+if (process.platform === "win32" && program === "/bin/sh") program = "sh";
 // Windows 上 PATH 里的 find 会先命中系统自带的同名程序：sh -c 的脚本前把 coreutils 所在的 /usr/bin 提到最前
 if (process.platform === "win32" && program === "sh" && rest[0] === "-c") rest[1] = 'export PATH="/usr/bin:$PATH"\\n' + rest[1];
 const r = spawnSync(program, rest, { cwd, stdio: ["inherit", "inherit", "inherit"] });

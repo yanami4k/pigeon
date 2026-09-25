@@ -4,6 +4,7 @@ import {
   appendFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -44,10 +45,11 @@ import {
   type StepAgent,
   type StepAgentInput,
   type StepAgentResult,
+  syncEnv,
 } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { git, localStreamEnvs, toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
-import { StreamWorkspaceAccessError } from "./stream-workspace.ts";
+import { StreamWorkspace, StreamWorkspaceAccessError } from "./stream-workspace.ts";
 
 const NEEDS_A = `[ -f src/a.txt ] || { echo "Cannot find module 'src/a.txt'"; exit 1; }\n`;
 
@@ -2295,4 +2297,34 @@ test("放行之后、agent 开始之前出错（例如读网关计量失败）�
   ]);
   assert.notEqual(next, "stuck", "名额已交还");
   if (next !== "stuck") next();
+});
+
+test("依赖环境的链接被改过（换成普通目录，切换命令改不回来）：以 root 删掉重切，链接恢复；重切之后仍不在 root 所有的目录下即报访问错误", {
+  skip: process.platform === "win32" ? "Windows 上建不了原生符号链接" : false,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-envlink-"));
+  try {
+    const root = join(base, "ws");
+    mkdirSync(root);
+    const venv = join(base, "venv");
+    const ws = new StreamWorkspace(localStreamShell(root));
+    const runtimeLinking = (target: string): typeof toyRuntime => ({
+      ...toyRuntime,
+      envSyncCommand: ["sh", "-c", `ln -sfn ${target} ${venv}`],
+      envLinks: [{ link: venv, under: "/usr/share/" }],
+    });
+    // agent 把链接换成了普通目录：ln -sfn 只会在目录里再建一个链接
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    await syncEnv({ runtime: runtimeLinking("/usr/share"), human: {} as HumanRepo }, ws, "c");
+    assert.equal(lstatSync(venv).isSymbolicLink(), true, "删掉重切，恢复成链接");
+    // 切换命令本身指向 agent 的目录（不归 root）：重切之后仍不对
+    const agentDir = join(base, "agent");
+    mkdirSync(agentDir);
+    await assert.rejects(
+      syncEnv({ runtime: runtimeLinking(agentDir), human: {} as HumanRepo }, ws, "c"),
+      StreamWorkspaceAccessError
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });

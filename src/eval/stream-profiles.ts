@@ -310,6 +310,9 @@ export interface StreamRepoRuntime {
   // 临时位置再交给它），不用 agent 改过的；两者都给了才生效，否则退回 envSyncCommand
   envDeclarationFile?: string;
   envSyncFor?: (declarationFile: string) => readonly string[];
+  // 切换命令建的依赖环境链接与它们应落在的 root 所有目录（以 / 结尾）：跑批器切完环境后核对，被 agent 改指或换成普通目录
+  // 即以 root 删掉重切，仍不对则这一步作废（判题、测量、验证门以镜像的 PATH 用这些链接）
+  envLinks?: readonly { link: string; under: string }[];
 }
 
 async function readOrNull(ws: StreamWorkspace, file: string): Promise<string | null> {
@@ -500,6 +503,10 @@ export const strandsRuntime: StreamRepoRuntime = {
   // 148 修订：跑批器切环境按人在该步的依赖声明，不按 agent 改过的 pyproject
   envDeclarationFile: "strands-py/pyproject.toml",
   envSyncFor: (file) => ["/opt/stream/select-env", file],
+  envLinks: [
+    { link: "/opt/venv", under: "/opt/venvs/" },
+    { link: "/opt/lint/current", under: "/opt/lint/sets/" },
+  ],
   // v5 镜像起：lint 环境按每个提交自己的提交时间解析，这里按该步人的提交切换（148 修订）
   lintSyncCommand: (commit) => ["/opt/stream/select-lint", commit],
   autoloadedTestHelper: "conftest.py",

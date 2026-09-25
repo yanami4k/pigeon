@@ -8,7 +8,7 @@
 //   回到本步起点：每步起点即 HEAD，复原被跟踪文件并删掉未忽略的未跟踪文件，被忽略的依赖目录不动（154）；
 //   续跑：每步落地后把历史导出成 bundle 存到宿主，容器丢失时可由镜像加 bundle 重建；
 //   测量副本：从 HEAD 克隆一份到另一目录，依赖目录以链接接上，在其中跑全量测试，结果不进 agent 的会话（145）。
-import { containerExec } from "../execution/container-host.ts";
+import { containerExec, trustedShell } from "../execution/container-host.ts";
 import { historyPruneVerified, PRUNE_HISTORY_SCRIPT } from "./container-workspace.ts";
 import type { HumanFileOp } from "./stream-manifest.ts";
 
@@ -28,6 +28,8 @@ export interface ShellOptions {
   cwd?: string;
   // 以 root 执行（写 agent 不可写的位置，例如人的 pytest 配置）；本机测试实现照常以当前用户执行
   asRoot?: boolean;
+  // 用镜像自己的 PATH（所选依赖环境在前）：只给判题、测量、验证门这类要用所选环境的测试命令；其余一律以固定 PATH 执行
+  imagePath?: boolean;
 }
 
 export interface StreamShell {
@@ -47,7 +49,10 @@ export function dockerStreamShell(input: {
     async sh(script, options = {}) {
       return containerExec({
         container: input.container,
-        command: ["sh", "-c", script, "sh", ...(options.args ?? [])],
+        command:
+          options.imagePath === true
+            ? ["/bin/sh", "-c", script, "sh", ...(options.args ?? [])]
+            : trustedShell(script, ...(options.args ?? [])),
         workdir: options.cwd ?? input.root,
         ...(input.docker !== undefined ? { docker: input.docker } : {}),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
@@ -281,11 +286,18 @@ export class StreamWorkspace {
   }
 
   // 在工作区根跑一条命令（验证门等），带墙钟上限
-  async run(command: readonly string[], timeoutMs: number, cwd?: string): Promise<CommandOutcome> {
+  // systemPath：以固定 PATH 执行（切依赖环境这类跑批器自己的命令）；缺省用镜像的 PATH（判题、测量、验证门）
+  async run(
+    command: readonly string[],
+    timeoutMs: number,
+    cwd?: string,
+    options: { systemPath?: boolean } = {}
+  ): Promise<CommandOutcome> {
     const started = Date.now();
     const result = await this.shell.sh(timeoutWrapped(command, timeoutMs), {
       timeoutMs: timeoutMs + 60_000,
       ...(cwd !== undefined ? { cwd } : {}),
+      ...(options.systemPath === true ? {} : { imagePath: true }),
     });
     // 137 也可能是内存超限被杀：只有同时用满了墙钟才算超时
     const timedOut = result.exitCode === TIMEOUT_KILLED && Date.now() - started >= timeoutMs;
@@ -407,6 +419,22 @@ export class StreamWorkspace {
     await this.must("chmod -R u+rwX -- . 2>/dev/null; true", "放回工作区的属主权限", {
       timeoutMs: 300_000,
     });
+  }
+
+  // 依赖环境的链接是否完好：每条都是链接、解析到给定的 root 所有目录之下（links 的 under 以 / 结尾）
+  async envLinksIntact(links: readonly { link: string; under: string }[]): Promise<boolean> {
+    const r = await this.shell.sh(
+      [
+        'while [ "$#" -gt 0 ]; do l="$1"; u="$2"; shift 2',
+        '  [ -L "$l" ] || exit 1',
+        '  t="$(readlink -f -- "$l")" || exit 1',
+        '  case "$t/" in "$u"*) ;; *) exit 1 ;; esac',
+        '  [ "$(stat -c %u -- "$t")" = 0 ] || exit 1',
+        "done",
+      ].join("\n"),
+      { args: links.flatMap((l) => [l.link, l.under]) }
+    );
+    return r.exitCode === 0;
   }
 
   // 清掉 agent 在 .git/config 与 .git/info/attributes 里设下的东西（见 SANITIZE_GIT_CONFIG）
