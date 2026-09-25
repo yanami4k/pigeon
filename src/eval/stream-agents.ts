@@ -17,6 +17,7 @@ import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
 import {
   dockerStreamShell,
+  GATE_REPORT,
   removeCoveringHelpers,
   STEP_START_REFS,
   StreamWorkspace,
@@ -96,6 +97,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
       // 本步标记：Pigeon 在容器里执行的每条命令都带上它（与最简 agent 同一做法），步结束后据此清掉残留的后台进程，
       // 免得它们在步与步之间重新生成被删的 conftest 等文件
       const marker = `pigeon-step-${randomBytes(8).toString("hex")}`;
+      const docker = options.docker ?? ["docker"];
+      // 回炉验证之前清进程清不净：这一步中止并作废
+      let uncleared = false;
       const host = createContainerWorkspaceHost({
         container: input.target.container,
         root: input.target.root,
@@ -139,27 +143,40 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                   source: "project" as const,
                 },
                 repairRounds,
-                // 每次验证前按与判题前同一规则删掉 agent 放的、覆盖人写测试的自动加载辅助文件（conftest）
-                ...(input.autoloadedTestHelper !== undefined && input.humanTests !== undefined
-                  ? {
-                      beforeVerify: async () => {
-                        const ws = new StreamWorkspace(
-                          dockerStreamShell({
-                            container: input.target.container,
-                            root: input.target.root,
-                            ...(options.docker !== undefined ? { docker: options.docker } : {}),
-                          })
-                        );
-                        const humanTree = new Set(input.humanTree ?? []);
-                        await removeCoveringHelpers(
-                          ws,
-                          input.autoloadedTestHelper as string,
-                          (p) => humanTree.has(p),
-                          input.humanTests ?? []
-                        );
-                      },
-                    }
-                  : {}),
+                // 每次验证（首轮与各轮回炉）之前：先按本步标记清掉 agent 留在容器里的后台进程（免得它们在验证期间重建被删的
+                // conftest，或预先写一份全过的验证门报告被采信），再删掉验证门的报告，最后按与判题前同一规则删掉 agent 放的、
+                // 覆盖人写测试的自动加载辅助文件（conftest）。清不净即中止这一步、报被打断
+                beforeVerify: async () => {
+                  if (
+                    !(await clearMarkedProcesses(
+                      docker,
+                      input.target.container,
+                      marker,
+                      input.target.root
+                    ))
+                  ) {
+                    uncleared = true;
+                    abort.abort();
+                    return;
+                  }
+                  const ws = new StreamWorkspace(
+                    dockerStreamShell({
+                      container: input.target.container,
+                      root: input.target.root,
+                      docker,
+                    })
+                  );
+                  await ws.removeTrees([GATE_REPORT]);
+                  if (input.autoloadedTestHelper !== undefined && input.humanTests !== undefined) {
+                    const humanTree = new Set(input.humanTree ?? []);
+                    await removeCoveringHelpers(
+                      ws,
+                      input.autoloadedTestHelper,
+                      (p) => humanTree.has(p),
+                      input.humanTests
+                    );
+                  }
+                },
                 // 跑批器给了人在这一步的测试集就只认它（agent 早先落地的自己的测试不还原、不计数），否则按归类
                 ...(input.humanTestFiles !== undefined
                   ? { protectedFiles: (p: string) => input.humanTestFiles?.has(p) === true }
@@ -182,7 +199,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
         stopWatch();
       }
       if (
-        !(await clearMarkedProcesses(options.docker ?? ["docker"], input.target.container, marker))
+        uncleared ||
+        !(await clearMarkedProcesses(docker, input.target.container, marker, input.target.root))
       ) {
         return {
           status: "aborted",
@@ -280,11 +298,20 @@ const KILL_MARKED = [
   'echo "$n"',
 ].join("\n");
 
-// 一步结束后清掉 agent（最简 agent 与 Pigeon）在容器里启动、仍在运行的进程：反复清到一轮里找不到为止；清不净（或清理本身失败）返回 false
+// 清完进程后：容器里没有 git 进程在跑，就删掉残留的 index.lock（清理恰好杀掉 agent 在途的 git 命令时留下，
+// 否则跑批器下一次 git 操作失败、作业停下）
+const STALE_INDEX_LOCK = [
+  'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = git ] && exit 0; done',
+  'rm -f -- "$1/.git/index.lock"',
+].join("\n");
+
+// 一步结束后与每次回炉验证之前清掉 agent（最简 agent 与 Pigeon）在容器里启动、仍在运行的进程：反复清到一轮里找不到为止，
+// 再删掉残留的 index.lock；清不净（或清理本身失败）返回 false
 async function clearMarkedProcesses(
   docker: readonly string[],
   container: string,
-  marker: string
+  marker: string,
+  root: string
 ): Promise<boolean> {
   const [program = "docker", ...pre] = docker;
   for (let round = 0; round < 5; round++) {
@@ -300,7 +327,17 @@ async function clearMarkedProcesses(
       );
     });
     if (found === null) return false;
-    if (found === 0) return true;
+    if (found === 0) {
+      await new Promise<void>((resolve) => {
+        execFile(
+          program,
+          [...pre, "exec", container, "sh", "-c", STALE_INDEX_LOCK, "sh", root],
+          { timeout: 60_000, windowsHide: true },
+          () => resolve()
+        );
+      });
+      return true;
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
   return false;
@@ -383,7 +420,12 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
       });
       // 不论怎么结束（正常收尾、墙钟到、限额被杀），先清掉它在容器里留下的进程、确认没有残留，再交回判题与落地
       if (
-        !(await clearMarkedProcesses(options.docker ?? ["docker"], input.target.container, marker))
+        !(await clearMarkedProcesses(
+          options.docker ?? ["docker"],
+          input.target.container,
+          marker,
+          input.target.root
+        ))
       ) {
         return {
           status: "aborted",

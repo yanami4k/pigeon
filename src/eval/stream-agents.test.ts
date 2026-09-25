@@ -1121,3 +1121,156 @@ test("Pigeon agent：这一步在容器里执行的每条命令都带本步标�
     }
   }
 });
+
+test("Pigeon agent：每次回炉验证之前先按本步标记清一遍后台进程、删掉验证门的报告，步结束后再清一遍", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const log = join(dir, "docker.log");
+    const wrapper = join(dir, "docker-wrapper.mjs");
+    writeFileSync(
+      wrapper,
+      [
+        'import { appendFileSync } from "node:fs";',
+        'import { spawnSync } from "node:child_process";',
+        "const args = process.argv.slice(2);",
+        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");`,
+        'if (args.some((a) => a.includes("PIGEON_STEP_MARKER=$1"))) { process.stdout.write("0\\n"); process.exit(0); }',
+        `const r = spawnSync(${JSON.stringify(ws.docker[0])}, [${JSON.stringify(ws.docker[1])}, ...args], { stdio: "inherit" });`,
+        "process.exit(r.status ?? 1);",
+      ].join("\n")
+    );
+    const out = await pigeonStepAgent({
+      streamFn: createFakeStreamFn({
+        replies: [
+          editTo("bug", "w1"),
+          { text: "好了" },
+          editTo("w1", "w2"),
+          { text: "好了" },
+          editTo("w2", "w3"),
+          { text: "好了" },
+          editTo("w3", "w4"),
+          { text: "好了" },
+        ],
+      }),
+      yolo: true,
+      docker: [process.execPath, wrapper],
+      homeDir: join(dir, "home"),
+    }).run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: FIXED_GATE,
+      })
+    );
+    assert.equal(out.repair?.rounds, 3);
+    const calls = readFileSync(log, "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as string[]);
+    const tag = (a: string[]) =>
+      a.some((x) => x.includes("PIGEON_STEP_MARKER=$1"))
+        ? "清"
+        : a.some((x) => x.includes("grep -qx fixed a.txt"))
+          ? "验"
+          : a.some((x) => x.includes("/tmp/pigeon-gate-junit.xml"))
+            ? "删报告"
+            : null;
+    const seq = calls.map(tag).filter((x) => x !== null);
+    assert.deepEqual(
+      seq,
+      [
+        "清",
+        "删报告",
+        "验",
+        "清",
+        "删报告",
+        "验",
+        "清",
+        "删报告",
+        "验",
+        "清",
+        "删报告",
+        "验",
+        "清",
+      ],
+      "每次验证之前先清进程、删报告，步结束后再清一遍"
+    );
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("Pigeon agent：清完进程后容器里没有 git 进程在跑，就删掉残留的 .git/index.lock（agent 在途的 git 命令被杀时留下的）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const out = await pigeonStepAgent({
+      streamFn: createFakeStreamFn({
+        replies: [
+          {
+            text: "跑个命令",
+            toolCalls: [{ name: "run_command", args: { command: "touch .git/index.lock" } }],
+          },
+          { text: "好了" },
+        ],
+      }),
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    }).run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS["no-gate"],
+        target: { container: "box", root: ws.containerRoot },
+      })
+    );
+    assert.equal(out.interrupted, undefined);
+    assert.equal(existsSync(join(ws.testbed, ".git", "index.lock")), false);
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("Pigeon agent：回炉验证之前清进程清不净即中止这一步、一次验证都不跑，报被打断", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const log = join(dir, "docker.log");
+    const wrapper = join(dir, "docker-wrapper.mjs");
+    writeFileSync(
+      wrapper,
+      [
+        'import { appendFileSync } from "node:fs";',
+        'import { spawnSync } from "node:child_process";',
+        "const args = process.argv.slice(2);",
+        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");`,
+        'if (args.some((a) => a.includes("PIGEON_STEP_MARKER=$1"))) { process.stdout.write("1\\n"); process.exit(0); }',
+        `const r = spawnSync(${JSON.stringify(ws.docker[0])}, [${JSON.stringify(ws.docker[1])}, ...args], { stdio: "inherit" });`,
+        "process.exit(r.status ?? 1);",
+      ].join("\n")
+    );
+    const out = await pigeonStepAgent({
+      streamFn: createFakeStreamFn({ replies: [editTo("bug", "w1"), { text: "好了" }] }),
+      yolo: true,
+      docker: [process.execPath, wrapper],
+      homeDir: join(dir, "home"),
+    }).run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS.full,
+        target: { container: "box", root: ws.containerRoot },
+        verify: FIXED_GATE,
+      })
+    );
+    assert.equal(out.status, "aborted");
+    assert.match(out.interrupted ?? "", /清理不净/);
+    const verified = readFileSync(log, "utf8")
+      .split("\n")
+      .filter((l) => l.includes("grep -qx fixed a.txt")).length;
+    assert.equal(verified, 0, "一次验证都不跑");
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
