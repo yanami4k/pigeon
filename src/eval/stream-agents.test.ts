@@ -25,7 +25,7 @@ import {
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
-import { StreamWorkspace } from "./stream-workspace.ts";
+import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
 
 function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAgentInput {
   return {
@@ -1379,5 +1379,65 @@ test("闸门：本机假 docker 下（不在作业容器里）清 agent 进程�
     child.kill();
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("作业容器里（真容器）：丢弃作废尝试时清空临时目录；清 agent 进程时被 init 收养的孤儿进程照样清掉，主命令不动", {
+  skip: realDockerSkip(),
+}, async () => {
+  const name = `pigeon-tmp-test-${process.pid}`;
+  const docker = (...a: string[]) => execFileSync("docker", a, { encoding: "utf8" }).trim();
+  try {
+    docker(
+      "run",
+      "-d",
+      "--init",
+      "--network",
+      "none",
+      "-e",
+      "PIGEON_STREAM_CONTAINER=1",
+      "--name",
+      name,
+      "--entrypoint",
+      "tail",
+      REAL_IMAGE,
+      "-f",
+      "/dev/null"
+    );
+    // 清空临时目录
+    docker(
+      "exec",
+      name,
+      "sh",
+      "-c",
+      "echo x > /tmp/left-by-agent; mkdir -p /tmp/d && echo y > /tmp/d/f"
+    );
+    const ws = new StreamWorkspace(dockerStreamShell({ container: name, root: "/" }), {
+      tmpDir: "/tmp",
+    });
+    await ws.clearTmpDir();
+    // agent 留下的清掉；镜像自带、归 root 的（例如 node 的编译缓存目录）以 stream 身份删不掉，也不是 agent 留下的
+    assert.equal(
+      docker("exec", name, "sh", "-c", "ls -A /tmp | grep -c -e left-by-agent -e '^d$' || true"),
+      "0",
+      "agent 留下的临时文件清掉"
+    );
+    // 孤儿进程：起它的 sh 退出后由 init 收养（父进程为 1）
+    docker("exec", name, "sh", "-c", "sleep 1000 > /dev/null 2>&1 & exit 0");
+    await new Promise((r) => setTimeout(r, 500));
+    const sleeping = () =>
+      docker("exec", name, "sh", "-c", 'for p in /proc/[0-9]*; do cat "$p/comm" 2>/dev/null; done')
+        .split("\n")
+        .filter((c) => c === "sleep").length;
+    assert.equal(sleeping(), 1, "孤儿进程在跑");
+    assert.equal(await clearMarkedProcesses(["docker"], name, "pigeon-step-x", "/"), true);
+    assert.equal(sleeping(), 0, "孤儿进程清掉");
+    assert.equal(docker("inspect", "-f", "{{.State.Running}}", name), "true", "主命令不动");
+  } finally {
+    try {
+      docker("rm", "-f", name);
+    } catch {
+      // 容器没起来
+    }
   }
 });

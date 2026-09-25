@@ -437,6 +437,11 @@ export class StreamWorkspace {
     return r.exitCode === 0;
   }
 
+  // 闸门（IN_STREAM_CONTAINER）在这个容器里是否成立
+  async inStreamContainer(): Promise<boolean> {
+    return (await this.shell.sh(IN_STREAM_CONTAINER)).exitCode === 0;
+  }
+
   // 清掉 agent 在 .git/config 与 .git/info/attributes 里设下的东西（见 SANITIZE_GIT_CONFIG）
   async sanitizeGitConfig(): Promise<void> {
     await this.must(SANITIZE_GIT_CONFIG, "清理 git 配置");
@@ -477,6 +482,8 @@ export class StreamWorkspace {
       [
         "set -e",
         'mkdir -p -- "$1"',
+        // agent 在副本里放的不可写目录（0555 里有文件）会让 rm 失败：先放回属主权限
+        'chmod -R u+rwX -- "$1" 2>/dev/null || true',
         'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +',
         `git -c core.autocrlf=false clone -q --no-hardlinks ${shellQuote(this.root)} "$1"`,
         links,
@@ -492,7 +499,7 @@ export class StreamWorkspace {
   async clearArtifacts(measureRoot: string): Promise<void> {
     await this.must(
       [
-        'if [ -d "$1" ]; then find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi',
+        'if [ -d "$1" ]; then chmod -R u+rwX -- "$1" 2>/dev/null; find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi',
         `rm -f ${shellQuote(`${this.root}/.git/pigeon-cases-junit.xml`)} ${shellQuote(this.gateReport)}`,
       ].join("\n"),
       "清理测量与判题的产物",

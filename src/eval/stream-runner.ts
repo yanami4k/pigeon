@@ -1154,11 +1154,23 @@ export function dockerStreamEnvs(input: {
   // 容器里的临时目录：丢弃作废的尝试时清空（正式跑批传 /tmp）；不给即不清
   tmpDir?: string;
   log?: (line: string) => void;
+  // 闸门不成立时的告警（缺省写标准错误，只报一次）
+  warn?: (line: string) => void;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
   const root = input.root ?? STREAM_CONTAINER_ROOT;
   const measureRoot = input.measureRoot ?? STREAM_MEASURE_ROOT;
   let imageId: string | undefined;
+  // 开好容器后探一次闸门：不成立（Podman、rootless 等没有 /.dockerenv，或缺少环境变量）即告警一次，说明后果
+  let gateWarned = false;
+  const warn = input.warn ?? ((line: string) => process.stderr.write(`[跑批] ${line}\n`));
+  const probeGate = async (container: string, ws: StreamWorkspace) => {
+    if (gateWarned || (await ws.inStreamContainer())) return;
+    gateWarned = true;
+    warn(
+      `作业容器 ${container} 里闸门不成立（缺 PIGEON_STREAM_CONTAINER=1 或 /.dockerenv）：丢弃作废尝试时不清空 /tmp，清 agent 进程退回只按本步标记清，不带标记的后台进程清不到`
+    );
+  };
   const envOf = (container: string, ws: StreamWorkspace): StreamEnvironment => ({
     ws,
     target: { container, root },
@@ -1171,7 +1183,8 @@ export function dockerStreamEnvs(input: {
       if (init.resume !== undefined) {
         const found = await containerStatus(container, docker);
         imageId ??= await imageIdAsync(input.image, docker);
-        if (found !== null && found.image === imageId) {
+        // 只接管用当前镜像、由跑批器带标志起的容器；先前未带标志起的，闸门在里面不成立，改由流历史重建
+        if (found !== null && found.image === imageId && found.marked) {
           try {
             await dockerCommand(docker, [
               found.status === "running" ? "restart" : "start",
@@ -1185,6 +1198,7 @@ export function dockerStreamEnvs(input: {
             input.log?.(
               `[${container}] 接管已存在的容器（原为 ${found.status}），回到第 ${init.resume.head.slice(0, 9)} 提交`
             );
+            await probeGate(container, ws);
             return envOf(container, ws);
           } catch (error) {
             input.log?.(
@@ -1222,6 +1236,7 @@ export function dockerStreamEnvs(input: {
         await removeWorkspaceContainer(container, docker).catch(() => {});
         throw error;
       }
+      await probeGate(container, ws);
       return envOf(container, ws);
     },
   };
@@ -1247,18 +1262,20 @@ function dockerCommand(docker: readonly string[], args: readonly string[]): Prom
 async function containerStatus(
   container: string,
   docker: readonly string[]
-): Promise<{ status: string; image: string } | null> {
+): Promise<{ status: string; image: string; marked: boolean } | null> {
   try {
     const out = (
       await dockerCommand(docker, [
         "inspect",
         "--format",
-        "{{.State.Status}}|{{.Image}}",
+        "{{.State.Status}}|{{.Image}}|{{range .Config.Env}}{{.}};{{end}}",
         container,
       ])
     ).trim();
-    const [status = "", image = ""] = out.split("|");
-    return status === "" ? null : { status, image };
+    const [status = "", image = "", env = ""] = out.split("|");
+    // 是否由跑批器以 -e PIGEON_STREAM_CONTAINER=1 起的（先前版本起的容器没有，闸门在里面不成立）
+    const marked = env.split(";").includes("PIGEON_STREAM_CONTAINER=1");
+    return status === "" ? null : { status, image, marked };
   } catch {
     return null;
   }

@@ -28,13 +28,13 @@ if (args[0] !== "exec") appendFileSync(logFile, args.join(" ") + "\\n");
 if (args[0] === "inspect") {
   const c = state[args.at(-1)];
   if (c === undefined) { process.stderr.write("Error: No such object\\n"); process.exit(1); }
-  process.stdout.write(c.status + "|" + c.image + "\\n");
+  process.stdout.write(c.status + "|" + c.image + "|" + (c.env ?? []).map((e) => e + ";").join("") + "\\n");
   process.exit(0);
 }
 if (args[0] === "image") { process.stdout.write("sha256:current\\n"); process.exit(0); }
 if (args[0] === "start" || args[0] === "restart") { state[args.at(-1)].status = "running"; save(); process.exit(0); }
 if (args[0] === "rm") { delete state[args.at(-1)]; save(); process.exit(0); }
-if (args[0] === "run") { const name = args[args.indexOf("--name") + 1]; state[name] = { status: "running", image: "sha256:current" }; save(); process.exit(0); }
+if (args[0] === "run") { const name = args[args.indexOf("--name") + 1]; const env = args.flatMap((a, k) => (args[k - 1] === "-e" ? [a] : [])); state[name] = { status: "running", image: "sha256:current", env }; save(); process.exit(0); }
 if (args[0] !== "exec") process.exit(0);
 let i = 1; let cwd = process.cwd();
 for (;;) {
@@ -90,6 +90,7 @@ async function scenario() {
   const stateFile = join(base, "state.json");
   const logFile = join(base, "docker.log");
   const docker = [process.execPath, script, stateFile, logFile];
+  const warnings: string[] = [];
   const envs = dockerStreamEnvs({
     image: "img",
     human: gitHumanRepo(human),
@@ -97,6 +98,7 @@ async function scenario() {
     docker,
     root: containerRoot,
     measureRoot: msys(measure),
+    warn: (line) => warnings.push(line),
   });
   const job = { stream: "s1", condition: "no-gate" as const, attempt: 1 };
   const first = await envs.open(job, { startCommit: start });
@@ -115,14 +117,30 @@ async function scenario() {
   put(measure, { "src/b.txt": "solution of step 2\n" });
   put(root, { "src/c.txt": "dirty\n" });
   writeFileSync(logFile, "");
-  const setState = (status: string, image = "sha256:current") =>
-    writeFileSync(stateFile, JSON.stringify({ "p-s1-no-gate-1": { status, image } }));
+  const setState = (
+    status: string,
+    image = "sha256:current",
+    env = ["PIGEON_STREAM_CONTAINER=1"]
+  ) => writeFileSync(stateFile, JSON.stringify({ "p-s1-no-gate-1": { status, image, env } }));
   const log = () =>
     readFileSync(logFile, "utf8")
       .split("\n")
       .filter((l) => l !== "");
   const dropContainer = () => writeFileSync(stateFile, "{}");
-  return { base, root, measure, envs, job, head1, landed, bundle1, setState, dropContainer, log };
+  return {
+    base,
+    root,
+    measure,
+    envs,
+    job,
+    head1,
+    landed,
+    bundle1,
+    setState,
+    dropContainer,
+    log,
+    warnings,
+  };
 }
 
 test("续跑接管已存在的流容器：停止的启动、仍在运行的重启；回到上一个完成步，在途步的提交与改动作废，被忽略的产物保留，不重建；作废那一步落地的提交在 reflog、伪引用、开工树引用、对象库与测量副本里都不留痕迹", async () => {
@@ -216,6 +234,29 @@ test("由流历史重建：流历史里带着断点之后那一步落地的提�
     });
     assert.equal(await env.ws.head(), s.head1);
     assert.throws(() => git(s.root, "cat-file", "-e", s.landed), "N 不在库里");
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("续跑时先前未带标志起的容器（闸门在里面不成立）不接管，改由流历史重建；闸门不成立时告警一次并说明后果", async () => {
+  const s = await scenario();
+  try {
+    s.setState("exited", "sha256:current", []);
+    await s.envs.open(s.job, {
+      startCommit: "unused",
+      resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
+    });
+    const verbs = s.log().map((l) => l.split(" ")[0]);
+    assert.ok(verbs.includes("rm") && verbs.includes("run"), `重建（${verbs.join(" ")}）`);
+    // 本机假 docker 把脚本放在本机执行：闸门在这里不成立
+    assert.equal(s.warnings.length, 1);
+    assert.match(s.warnings[0] ?? "", /闸门不成立.*不清空 \/tmp.*只按本步标记/);
+    await s.envs.open(s.job, {
+      startCommit: "unused",
+      resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
+    });
+    assert.equal(s.warnings.length, 1, "只报一次");
   } finally {
     rmSync(s.base, { recursive: true, force: true });
   }
