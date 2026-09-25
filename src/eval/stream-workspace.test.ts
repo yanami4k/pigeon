@@ -766,3 +766,37 @@ test("丢弃时 worktree 路径先规范化：登记里写成 工作区/sub/../.
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("跑批器的 git 操作不执行 agent 在 git 配置里设下的程序：仓库 .git/config 与全局配置里的 filter 驱动、要求签名的 gpg.program 都不起作用；配置被重写成只含无害项", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-gitcfg-"));
+  const saved = process.env.GIT_CONFIG_GLOBAL;
+  try {
+    const r = symrefRepo(base);
+    const marker = join(base, "ran").replace(/\\/g, "/");
+    const evil = join(base, "evil.sh");
+    writeFileSync(evil, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 });
+    const evilPath = evil.replace(/\\/g, "/");
+    // 仓库配置：filter 驱动与签名
+    r.g("config", "filter.evil.clean", evilPath);
+    r.g("config", "commit.gpgsign", "true");
+    r.g("config", "gpg.program", evilPath);
+    writeFileSync(join(r.root, ".git", "info", "attributes"), "* filter=evil\n");
+    // 全局配置：另一个 filter 驱动（配合工作区里的 .gitattributes）
+    const globalCfg = join(base, "global.gitconfig");
+    writeFileSync(globalCfg, `[filter "evil2"]\n\tclean = ${evilPath}\n`);
+    process.env.GIT_CONFIG_GLOBAL = globalCfg;
+    writeFileSync(join(r.root, ".gitattributes"), "*.txt filter=evil2\n");
+    writeFileSync(join(r.root, "a.txt"), "agent change\n");
+    await r.ws.normalizeTo(r.landed);
+    await r.ws.land("step 2");
+    assert.equal(existsSync(join(base, "ran")), false, "agent 的程序没被执行");
+    const cfg = readFileSync(join(r.root, ".git", "config"), "utf8");
+    assert.doesNotMatch(cfg, /filter|program|evil/, "配置里的 filter 与 gpg.program 被清掉");
+    assert.match(cfg, /gpgsign = false/);
+    assert.equal(existsSync(join(r.root, ".git", "info", "attributes")), false);
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = saved;
+    rmSync(base, { recursive: true, force: true });
+  }
+});

@@ -180,6 +180,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                       docker,
                     })
                   );
+                  // 执行端接下来的 git 操作（还原受保护文件、撤回）不执行 agent 在 git 配置里设下的程序
+                  await ws.sanitizeGitConfig();
                   await ws.removeTrees([GATE_REPORT]);
                   if (input.autoloadedTestHelper !== undefined && input.humanTests !== undefined) {
                     const humanTree = new Set(input.humanTree ?? []);

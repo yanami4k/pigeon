@@ -58,22 +58,43 @@ export function dockerStreamShell(input: {
   };
 }
 
+// 程序落地提交用的身份；agent 从 git log 能看出哪些提交是程序落的
+export const STREAM_COMMITTER = { name: "pigeon-stream", email: "stream@pigeon.invalid" };
+
 export class StreamWorkspaceError extends Error {
   override name = "StreamWorkspaceError";
 }
-
-// 程序落地提交用的身份；agent 从 git log 能看出哪些提交是程序落的
-export const STREAM_COMMITTER = { name: "pigeon-stream", email: "stream@pigeon.invalid" };
 
 const BUNDLE_PATH = ".git/pigeon-start.bundle";
 
 // 各步"开工时的树"的引用前缀（容器执行端在每步开工时建，见 container-host 的 stepStartRef）
 export const STEP_START_REFS = "refs/pigeon/step-start";
 
-// 跑批器自己的 git 操作不受 agent 能改的 git 设置左右：不执行 .git/hooks 里的钩子、不跑 fsmonitor 程序（环境变量里的
-// 设置优先于仓库的 .git/config）。只加在工作区内部操作上，agent 与判题的命令照旧
-const SAFE_GIT_ENV =
-  "export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false";
+// 跑批器自己的 git 操作不受 agent 能改的 git 设置左右：不读全局与系统配置（agent 能写 ~/.gitconfig），不执行 .git/hooks
+// 里的钩子、不跑 fsmonitor 程序、提交不签名（不调 gpg.program），提交身份固定（环境变量里的设置优先于仓库的
+// .git/config）。仓库 .git/config 里的 filter 驱动等由 SANITIZE_GIT_CONFIG 在跑批器的 git 操作之前清掉。只加在工作区
+// 内部操作上，agent 与判题的命令照旧
+const SAFE_GIT_ENV = [
+  "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=5",
+  "GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null",
+  "GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false",
+  "GIT_CONFIG_KEY_2=commit.gpgsign GIT_CONFIG_VALUE_2=false",
+  `GIT_CONFIG_KEY_3=user.name GIT_CONFIG_VALUE_3=${STREAM_COMMITTER.name}`,
+  `GIT_CONFIG_KEY_4=user.email GIT_CONFIG_VALUE_4=${STREAM_COMMITTER.email}`,
+].join(" ");
+// 把 .git/config 重写成只含无害项的一份，并删掉 .git/info/attributes：agent 能在其中配 filter 驱动（配合 .gitattributes，
+// 跑批器的 git add、status、checkout 会执行它）、include 其他文件、改 core.worktree 等。只保留仓库格式与几项文件系统
+// 属性（取值须为 true 或 false），其余一律丢掉；读取用 --file，不跟随 include
+const SANITIZE_GIT_CONFIG = [
+  'gd="$(git rev-parse --git-dir)" && cfg="$gd/config" &&',
+  "{ printf '[core]\\n\\trepositoryformatversion = 0\\n\\tbare = false\\n\\tlogallrefupdates = true\\n\\tautocrlf = false\\n';",
+  "for k in filemode symlinks ignorecase; do",
+  '  v="$(git config --file "$cfg" --get "core.$k" 2>/dev/null)";',
+  '  case "$v" in true | false) printf \'\\t%s = %s\\n\' "$k" "$v" ;; esac;',
+  "done;",
+  `printf '[user]\\n\\tname = %s\\n\\temail = %s\\n[commit]\\n\\tgpgsign = false\\n' '${STREAM_COMMITTER.name}' '${STREAM_COMMITTER.email}'; } > "$cfg.pigeon" &&`,
+  'mv -f -- "$cfg.pigeon" "$cfg" && rm -f -- "$gd/info/attributes"',
+].join(" ");
 // 把 agent 留下的未解决冲突（merge、cherry-pick、revert、stash pop）收成干净的索引：去掉进行中的合并状态，冲突路径按
 // 工作区里的样子暂存。之后去标记、reset 都不会因为冲突条目报错（Unable to mark file、合并中不能 soft reset）
 const SETTLE_INDEX = [
@@ -274,7 +295,10 @@ export class StreamWorkspace {
   // 落地：以提交信息提交当前工作区的全部改动（没有改动也提交一次，步与提交一一对应）
   async land(message: string): Promise<string> {
     // 提交前再保证一次 HEAD 在 main 上：落地提交一定记在 main 上，导出的流历史里一定有它
-    await this.must(`set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN}`, "把 HEAD 放回 main");
+    await this.must(
+      `${SANITIZE_GIT_CONFIG} && set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN}`,
+      "把 HEAD 放回 main"
+    );
     await this.must("git add -A && git commit -q --allow-empty --no-verify -F -", "落地提交", {
       stdin: message,
       timeoutMs: 300_000,
@@ -288,7 +312,7 @@ export class StreamWorkspace {
     await this.grantOwnerAccess();
     await this.must(
       // 先让 HEAD 脱离到目标提交（checkout --detach 只改 HEAD 本身），再让 HEAD 指回指向目标的 main，然后复原
-      `${UNMARK_INDEX} && git checkout -q -f --detach "$1" && set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN} && git reset -q --hard && git clean -ffdq`,
+      `${SANITIZE_GIT_CONFIG} && ${UNMARK_INDEX} && git checkout -q -f --detach "$1" && set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN} && git reset -q --hard && git clean -ffdq`,
       "回到本步起点",
       {
         args: [to],
@@ -300,9 +324,13 @@ export class StreamWorkspace {
   // agent 在容器里也可能自己提交、切到别的分支或让 HEAD 游离：把 HEAD 放回指向本步起点的 main、改动留在暂存区与
   // 工作区（等同 soft reset，但不经过 agent 设下的符号引用），此后的恢复、判定与落地都相对起点，落地提交记在 main 上
   async normalizeTo(base: string): Promise<void> {
-    await this.must(`${SETTLE_INDEX} && ${HEAD_ONTO_MAIN}`, "把 HEAD 挪回本步起点", {
-      args: [base],
-    });
+    await this.must(
+      `${SANITIZE_GIT_CONFIG} && ${SETTLE_INDEX} && ${HEAD_ONTO_MAIN}`,
+      "把 HEAD 挪回本步起点",
+      {
+        args: [base],
+      }
+    );
   }
 
   // 丢弃作废的尝试（作废重做、接管续跑、由流历史重建）：回到 head，并去掉那次尝试在库里与容器里留下、重做时 agent 看得到
@@ -379,6 +407,11 @@ export class StreamWorkspace {
     await this.must("chmod -R u+rwX -- . 2>/dev/null; true", "放回工作区的属主权限", {
       timeoutMs: 300_000,
     });
+  }
+
+  // 清掉 agent 在 .git/config 与 .git/info/attributes 里设下的东西（见 SANITIZE_GIT_CONFIG）
+  async sanitizeGitConfig(): Promise<void> {
+    await this.must(SANITIZE_GIT_CONFIG, "清理 git 配置");
   }
 
   // 清掉残留的 git 锁文件（见 STALE_GIT_LOCKS）
