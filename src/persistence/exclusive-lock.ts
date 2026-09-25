@@ -7,7 +7,9 @@
 // 决策 137 退役）。故实现上不维护进程内计数：靠锁文件本身的独占建立，同进程再取一样被拒。
 //
 // 残留处理与会话锁同口径：锁文件记持有进程 pid，持有者仍存活则拒绝；已死或内容畸形即接管。
-// 已知局限相同——pid 被系统复用给无关进程时会误判为存活，报错给出锁文件路径供人工清理。
+// Linux 上另记开机编号（/proc/sys/kernel/random/boot_id）与持有进程的启动时刻（/proc/<pid>/stat 第 22 列）：
+// 整机重启或进程被强杀后 pid 可能被无关进程占用，两者任一与现在不符即按残留接管，不会永远报"持有进程仍在"。
+// 取不到这两项的系统（或旧锁文件里没有它们）退回只看 pid，局限同前：pid 被复用时误判为存活，报错给出锁文件路径。
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -26,6 +28,40 @@ export class ExclusiveLockError extends Error {}
 interface LockHolder {
   pid: number;
   acquiredAt: number;
+  bootId?: string;
+  startTime?: string;
+}
+
+// 本次开机的编号；取不到（非 Linux）为 undefined
+export function currentBootId(): string | undefined {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// 进程的启动时刻（开机以来的时钟滴答数，/proc/<pid>/stat 第 22 列）；取不到为 undefined
+export function processStartTime(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // 第 2 列是带括号的进程名，可能含空格：从最后一个右括号之后数起，其后第 1 个字段是第 3 列
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[22 - 3];
+  } catch {
+    return undefined;
+  }
+}
+
+// 锁里记的持有者是否还是那个进程：pid 存活，且开机编号与启动时刻（两边都有时）一致
+function holderAlive(holder: LockHolder): boolean {
+  if (!isProcessAlive(holder.pid)) return false;
+  const bootId = currentBootId();
+  if (holder.bootId !== undefined && bootId !== undefined && holder.bootId !== bootId) return false;
+  const startTime = processStartTime(holder.pid);
+  if (holder.startTime !== undefined && startTime !== undefined && holder.startTime !== startTime)
+    return false;
+  return true;
 }
 
 function readHolder(path: string): LockHolder | "missing" | "malformed" {
@@ -89,7 +125,14 @@ function tryCreate(path: string, holder: LockHolder): boolean {
 // 取锁；返回幂等的释放函数。detail 是给人看的一句话，拒绝时连同锁文件路径一起报出
 export function acquireExclusiveLock(path: string, detail: string): () => void {
   mkdirSync(dirname(path), { recursive: true });
-  const holder: LockHolder = { pid: process.pid, acquiredAt: Date.now() };
+  const bootId = currentBootId();
+  const startTime = processStartTime(process.pid);
+  const holder: LockHolder = {
+    pid: process.pid,
+    acquiredAt: Date.now(),
+    ...(bootId !== undefined ? { bootId } : {}),
+    ...(startTime !== undefined ? { startTime } : {}),
+  };
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (tryCreate(path, holder)) {
       return releaser(path, holder.acquiredAt);
@@ -98,10 +141,10 @@ export function acquireExclusiveLock(path: string, detail: string): () => void {
     if (current === "missing") {
       continue;
     }
-    if (current !== "malformed" && isProcessAlive(current.pid)) {
+    if (current !== "malformed" && holderAlive(current)) {
       throw new ExclusiveLockError(`${detail}（持有进程 pid ${current.pid}，锁文件 ${path}）`);
     }
-    // 残留锁：持有进程已死或内容畸形
+    // 残留锁：持有进程已死、已不是记下的那个进程（重启或 pid 被复用），或内容畸形
     rmSync(path, { force: true });
   }
   throw new ExclusiveLockError(`取锁争用，多次重试仍未取得：${path}`);

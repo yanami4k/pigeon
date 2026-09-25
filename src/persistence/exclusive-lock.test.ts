@@ -6,7 +6,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { acquireExclusiveLock, ExclusiveLockError } from "./exclusive-lock.ts";
+import {
+  acquireExclusiveLock,
+  currentBootId,
+  ExclusiveLockError,
+  processStartTime,
+} from "./exclusive-lock.ts";
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), "pigeon-exclusive-lock-"));
@@ -127,5 +132,36 @@ test("建锁原子性：锁文件一出现就是完整内容，另一个进程�
     assert.equal(observed.torn, 0, "锁文件不该有任何一刻是不完整的");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 开机编号与启动时刻只在 Linux 上取得到
+const NO_PROC = currentBootId() === undefined ? "取不到开机编号（非 Linux）" : false;
+
+test("独占锁：记下的开机编号或进程启动时刻与现在不符（整机重启、pid 被复用）即按残留接管；真在跑的持有者照常拒绝", {
+  skip: NO_PROC,
+}, () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-lock-"));
+  try {
+    const path = join(dir, "run.lock");
+    const alive = {
+      pid: process.pid,
+      acquiredAt: 1,
+      bootId: currentBootId(),
+      startTime: processStartTime(process.pid),
+    };
+    for (const [what, holder] of [
+      ["开机编号不同", { ...alive, bootId: "00000000-0000-0000-0000-000000000000" }],
+      ["同一 pid、启动时刻不同", { ...alive, startTime: "1" }],
+    ] as const) {
+      writeFileSync(path, `${JSON.stringify(holder)}\n`);
+      const release = acquireExclusiveLock(path, "测试");
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).startTime, alive.startTime, what);
+      release();
+    }
+    writeFileSync(path, `${JSON.stringify(alive)}\n`);
+    assert.throws(() => acquireExclusiveLock(path, "测试"), ExclusiveLockError, "真在跑的持有者");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
