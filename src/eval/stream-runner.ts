@@ -702,15 +702,38 @@ export async function syncEnv(
     if (lint !== undefined)
       check("lint 环境", await ws.run(lint, 120_000, cwd, { systemPath: true }));
   };
-  await switchEnvs(true);
-  // 判题、测量、验证门以镜像的 PATH 用这些链接：核对切换结果，被 agent 改指或换成普通目录（切换命令改不回来）即以 root
-  // 删掉链接再切一次，仍不对则这一步作废
+  // 判题、测量、验证门以镜像的 PATH 用这些链接。agent 能把链接或切换脚本的中间链接（<链接>.next）换成真目录，切换脚本
+  // 的替换随之失败（EISDIR）：以 root、固定 PATH 删掉两者再切
   const links = runtime.envLinks;
-  if (links !== undefined && !(await ws.envLinksIntact(links))) {
+  const clearLinks = async () => {
+    if (links === undefined) return;
     await ws.asRoot('rm -rf -- "$@"', "删掉被改过的依赖环境链接", {
-      args: links.map((l) => l.link),
+      args: links.flatMap((l) => [l.link, `${l.link}.next`]),
     });
-    await switchEnvs(false);
+  };
+  const retryAfterClearing = async (withConfig: boolean) => {
+    await clearLinks();
+    try {
+      await switchEnvs(withConfig);
+    } catch (error) {
+      if (error instanceof EnvSelectionError) throw error;
+      throw new StreamWorkspaceAccessError(
+        `删掉依赖环境链接之后切换仍失败：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
+  // 第一次切换之前先核对：链接已被改过即先删掉
+  if (links !== undefined && !(await ws.envLinksIntact(links))) await clearLinks();
+  try {
+    await switchEnvs(true);
+  } catch (error) {
+    // 切换以 3 以外的退出码失败（例如中间链接被换成了目录）：配置了链接即删掉重试一次，仍失败按访问错误作废
+    if (links === undefined || error instanceof EnvSelectionError) throw error;
+    await retryAfterClearing(true);
+  }
+  // 核对切换结果：仍被改指或不是链接即删掉重切一次，仍不对则这一步作废
+  if (links !== undefined && !(await ws.envLinksIntact(links))) {
+    await retryAfterClearing(false);
     if (!(await ws.envLinksIntact(links))) {
       throw new StreamWorkspaceAccessError(
         `依赖环境的链接被改过，重切之后仍不在 root 所有的目录下（${links.map((l) => l.link).join("、")}）`
@@ -955,7 +978,7 @@ async function runStep(
   let reverted = false;
   let head: string;
   if (step.kind === "apply") {
-    head = await ws.land(step.message);
+    head = await ws.land(step.message, state.head);
   } else {
     const key = streamJobKey(job);
     const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
@@ -1069,7 +1092,7 @@ async function runStep(
       await ws.rollback(state.head);
       head = state.head;
     } else {
-      head = await ws.land(step.message);
+      head = await ws.land(step.message, state.head);
     }
   }
   let measured: Measurement;

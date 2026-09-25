@@ -2299,7 +2299,7 @@ test("放行之后、agent 开始之前出错（例如读网关计量失败）�
   if (next !== "stuck") next();
 });
 
-test("依赖环境的链接被改过（换成普通目录，切换命令改不回来）：以 root 删掉重切，链接恢复；重切之后仍不在 root 所有的目录下即报访问错误", {
+test("依赖环境的链接或中间链接被换成真目录（切换脚本的替换会失败）：切换之前先核对、失败时以 root 删掉链接与 .next 再切，链接恢复、作业不停；重切之后仍不在 root 所有的目录下即报访问错误", {
   skip: process.platform === "win32" ? "Windows 上建不了原生符号链接" : false,
 }, async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-envlink-"));
@@ -2308,20 +2308,27 @@ test("依赖环境的链接被改过（换成普通目录，切换命令改不�
     mkdirSync(root);
     const venv = join(base, "venv");
     const ws = new StreamWorkspace(localStreamShell(root));
+    // 与镜像里的切换脚本同一手法：先建 <链接>.next，再改名替换；链接或 .next 是目录时改名失败、以 1 退出
     const runtimeLinking = (target: string): typeof toyRuntime => ({
       ...toyRuntime,
-      envSyncCommand: ["sh", "-c", `ln -sfn ${target} ${venv}`],
+      envSyncCommand: ["sh", "-c", `ln -sfn ${target} ${venv}.next && mv -T ${venv}.next ${venv}`],
       envLinks: [{ link: venv, under: "/usr/share/" }],
     });
-    // agent 把链接换成了普通目录：ln -sfn 只会在目录里再建一个链接
+    const human = {} as HumanRepo;
+    // 链接被换成了真目录（里面有东西）
     mkdirSync(join(venv, "bin"), { recursive: true });
-    await syncEnv({ runtime: runtimeLinking("/usr/share"), human: {} as HumanRepo }, ws, "c");
-    assert.equal(lstatSync(venv).isSymbolicLink(), true, "删掉重切，恢复成链接");
+    await syncEnv({ runtime: runtimeLinking("/usr/share"), human }, ws, "c");
+    assert.equal(lstatSync(venv).isSymbolicLink(), true, "链接被换成真目录：删掉重切，恢复成链接");
+    // 中间链接 .next 是一个目录：切换先失败，删掉重试
+    mkdirSync(join(`${venv}.next`, "x"), { recursive: true });
+    await syncEnv({ runtime: runtimeLinking("/usr/share"), human }, ws, "c");
+    assert.equal(lstatSync(venv).isSymbolicLink(), true, ".next 是目录：删掉重试，恢复成链接");
+    assert.equal(existsSync(`${venv}.next`), false);
     // 切换命令本身指向 agent 的目录（不归 root）：重切之后仍不对
     const agentDir = join(base, "agent");
     mkdirSync(agentDir);
     await assert.rejects(
-      syncEnv({ runtime: runtimeLinking(agentDir), human: {} as HumanRepo }, ws, "c"),
+      syncEnv({ runtime: runtimeLinking(agentDir), human }, ws, "c"),
       StreamWorkspaceAccessError
     );
   } finally {

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { StepStartLostError } from "./container-host.ts";
+import { createContainerWorkspaceHost, StepStartLostError } from "./container-host.ts";
 import { localDockerHost } from "./local-docker-fixtures.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -194,6 +194,63 @@ test("验证前还原受保护的文件：agent 留下未解决的合并冲突�
     assert.equal(readFileSync(join(root, "tests", "test_a.py"), "utf8"), "human a\n");
     assert.equal(existsSync(join(root, ".git", "MERGE_HEAD")), false, "合并状态已清");
   } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("执行端不跟随符号引用：开工树引用被设成指向 main 的符号引用时，记起点只改这条引用、不改 main；HEAD 指向某条保留引用时，撤回不改写那条引用", async () => {
+  const { base, root } = fixture();
+  try {
+    const start = git(root, "rev-parse", "HEAD");
+    const docker = localDockerHost(root);
+    try {
+      // 当前分支（名字随本机 git 的缺省而定）
+      const branch = git(root, "symbolic-ref", "HEAD");
+      git(root, "symbolic-ref", "refs/pigeon/step-start/s/1", branch);
+      const host = createContainerWorkspaceHost({
+        container: "box",
+        root: docker.containerRoot,
+        docker: docker.docker,
+        stepStartRef: "refs/pigeon/step-start/s/1",
+      });
+      put(root, { "a.txt": "changed before start\n" });
+      const mark = await host.markStepStart?.();
+      assert.equal(git(root, "rev-parse", branch), start, "当前分支未被改写");
+      // agent 提交一次，让一条保留引用指向这个提交，再把 HEAD 设成指向它的符号引用
+      git(root, "-c", "user.name=a", "-c", "user.email=a@x", "commit", "-qam", "agent");
+      const agentCommit = git(root, "rev-parse", "HEAD");
+      git(root, "update-ref", "refs/keep", agentCommit);
+      git(root, "symbolic-ref", "HEAD", "refs/keep");
+      assert.ok(mark !== undefined);
+      await host.restoreStepStart?.(mark);
+      assert.equal(git(root, "rev-parse", "HEAD"), start, "回到起点提交");
+      assert.equal(git(root, "rev-parse", "refs/keep"), agentCommit, "保留引用未被改写");
+    } finally {
+      docker.cleanup();
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("执行端的 git 不读全局配置：agent 在全局配置里配 filter 驱动（配合工作区的 .gitattributes），记起点与验证前还原受保护文件都不执行它", async () => {
+  const { base, root, host } = fixture();
+  const saved = process.env.GIT_CONFIG_GLOBAL;
+  try {
+    const marker = join(base, "ran").replace(/\\/g, "/");
+    const evil = join(base, "evil.sh");
+    writeFileSync(evil, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 });
+    const globalCfg = join(base, "global.gitconfig");
+    writeFileSync(globalCfg, `[filter "evil"]\n\tclean = ${evil.replace(/\\/g, "/")}\n`);
+    process.env.GIT_CONFIG_GLOBAL = globalCfg;
+    put(root, { ".gitattributes": "*.txt filter=evil\n", "a.txt": "changed\n" });
+    const mark = await host.markStepStart?.();
+    put(root, { "a.txt": "agent\n" });
+    if (mark !== undefined) await host.restoreProtectedFromStepStart?.(mark, (p) => p === "a.txt");
+    assert.equal(existsSync(join(base, "ran")), false, "agent 的程序没被执行");
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = saved;
     rmSync(base, { recursive: true, force: true });
   }
 });

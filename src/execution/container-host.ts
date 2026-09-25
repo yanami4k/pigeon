@@ -94,8 +94,16 @@ const RESTORE_FROM_START_SCRIPT = [
 // timeout、rm 等都从 root 所有的系统目录解析）。只放到最前、不整个替换：本机测试的假 docker 在本机执行，本机的 git 在
 // 系统目录之外；跑批器用到的工具在镜像里都位于系统目录，两种做法等效
 export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+// 同时屏蔽全局与系统 git 配置（agent 能写 ~/.gitconfig，其中的 filter 驱动会在执行端的 git add 里被执行），并让 python
+// 不加载用户目录下的 site（~/.local 下的 .pth、usercustomize 与同名包；切换依赖环境的脚本以 stream 身份跑 python）
 export function trustedShell(script: string, ...args: readonly string[]): string[] {
-  return ["/bin/sh", "-c", `PATH="${SYSTEM_PATH}:$PATH"; export PATH\n${script}`, "sh", ...args];
+  return [
+    "/bin/sh",
+    "-c",
+    `PATH="${SYSTEM_PATH}:$PATH"; export PATH GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PYTHONNOUSERSITE=1\n${script}`,
+    "sh",
+    ...args,
+  ];
 }
 // 以固定 PATH 执行一条命令（argv[0] 从系统目录解析）
 export function trustedCommand(argv: readonly string[]): string[] {
@@ -460,7 +468,15 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const baseCommit = base.toString("utf8").trim();
       if (options.stepStartRef !== undefined) {
         await must(
-          ["git", "-c", "core.hooksPath=/dev/null", "update-ref", options.stepStartRef, baseCommit],
+          [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "update-ref",
+            "--no-deref",
+            options.stepStartRef,
+            baseCommit,
+          ],
           "给开工时的树建引用"
         );
       }
@@ -482,7 +498,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       // 回到起点提交并删掉未跟踪的文件与目录（不带 -x：被忽略的留给下面按开工时的清单处理）
       await must(
-        ["sh", "-c", 'git reset -q --hard "$1" && git clean -fdq', "sh", mark.commit],
+        // 先让 HEAD 脱离到起点提交：HEAD 被 agent 设成指向某条引用的符号引用时，reset --hard 不改写那条引用
+        [
+          "sh",
+          "-c",
+          'git checkout -q -f --detach "$1" && git reset -q --hard && git clean -fdq',
+          "sh",
+          mark.commit,
+        ],
         "回到起点提交"
       );
       // agent 新建的被忽略路径：现在被忽略、开工时不在清单里的

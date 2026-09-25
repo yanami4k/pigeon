@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
   dockerStreamShell,
@@ -821,6 +822,63 @@ test("清空测量副本之前放回属主权限：副本里有 agent 放的不�
     assert.deepEqual(readdirSync(copy), []);
   } finally {
     execFileSync("chmod", ["-R", "u+rwX", base]);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("落地以本步起点为父提交：判题期间 HEAD 被移动（多了提交），落地提交的父提交仍是起点，多出的提交不进 main", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-land-base-"));
+  try {
+    const r = symrefRepo(base);
+    // 判题期间 agent 的代码提交了一次
+    r.g("commit", "-q", "--allow-empty", "-m", "stray");
+    writeFileSync(join(r.root, "a.txt"), "solution\n");
+    const next = await r.ws.land("step 2", r.landed);
+    assert.equal(git(r.root, "rev-parse", `${next}^`), r.landed, "父提交是起点");
+    assert.equal(git(r.root, "rev-parse", "refs/heads/main"), next);
+    assert.doesNotMatch(git(r.root, "log", "--format=%s", "main"), /stray/, "多出的提交不进 main");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("净化 git 配置不依赖 git 读得懂配置：.git/config 被写坏，回退照常成功、配置被重写", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-broken-config-"));
+  try {
+    const r = symrefRepo(base);
+    writeFileSync(join(r.root, ".git", "config"), "[[[ not a config\n");
+    await r.ws.rollback(r.landed);
+    assert.match(
+      readFileSync(join(r.root, ".git", "config"), "utf8"),
+      /repositoryformatversion = 0/
+    );
+    assert.equal(git(r.root, "rev-parse", "HEAD"), r.landed);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("跑批器的内部命令里 python 不加载用户目录下的 site（PYTHONNOUSERSITE=1），git 不读全局与系统配置", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-trusted-env-"));
+  try {
+    const root = join(base, "ws");
+    mkdirSync(root);
+    const docker = localDockerHost(root);
+    try {
+      const ws = new StreamWorkspace(
+        dockerStreamShell({ container: "box", root: docker.containerRoot, docker: docker.docker })
+      );
+      const r = await ws.run(
+        ["sh", "-c", 'echo "$PYTHONNOUSERSITE $GIT_CONFIG_GLOBAL $GIT_CONFIG_NOSYSTEM"'],
+        30_000,
+        undefined,
+        { systemPath: true }
+      );
+      assert.equal(r.output.trim(), "1 /dev/null 1");
+    } finally {
+      docker.cleanup();
+    }
+  } finally {
     rmSync(base, { recursive: true, force: true });
   }
 });

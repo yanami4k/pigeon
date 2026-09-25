@@ -91,7 +91,8 @@ const SAFE_GIT_ENV = [
 // 跑批器的 git add、status、checkout 会执行它）、include 其他文件、改 core.worktree 等。只保留仓库格式与几项文件系统
 // 属性（取值须为 true 或 false），其余一律丢掉；读取用 --file，不跟随 include
 const SANITIZE_GIT_CONFIG = [
-  'gd="$(git rev-parse --git-dir)" && cfg="$gd/config" &&',
+  // 不调 git：.git/config 被写坏时 git 自己先失败，回退随之报错
+  'gd=.git && cfg="$gd/config" &&',
   "{ printf '[core]\\n\\trepositoryformatversion = 0\\n\\tbare = false\\n\\tlogallrefupdates = true\\n\\tautocrlf = false\\n';",
   "for k in filemode symlinks ignorecase; do",
   '  v="$(git config --file "$cfg" --get "core.$k" 2>/dev/null)";',
@@ -305,11 +306,13 @@ export class StreamWorkspace {
   }
 
   // 落地：以提交信息提交当前工作区的全部改动（没有改动也提交一次，步与提交一一对应）
-  async land(message: string): Promise<string> {
-    // 提交前再保证一次 HEAD 在 main 上：落地提交一定记在 main 上，导出的流历史里一定有它
+  // base：落地提交的父提交（跑批器传本步起点）。提交前让 main 指向它、HEAD 指回 main：落地提交一定记在 main 上、父提交
+  // 一定是本步起点——判题期间 agent 的代码移动了 HEAD 也不会让流历史多出提交；不给则以当前 HEAD 为准（测试用）
+  async land(message: string, base?: string): Promise<string> {
     await this.must(
-      `${SANITIZE_GIT_CONFIG} && set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN}`,
-      "把 HEAD 放回 main"
+      `${SANITIZE_GIT_CONFIG} && set -- "\${1:-$(git rev-parse HEAD)}" && ${HEAD_ONTO_MAIN}`,
+      "把 HEAD 放回 main",
+      { args: base !== undefined ? [base] : [] }
     );
     await this.must("git add -A && git commit -q --allow-empty --no-verify -F -", "落地提交", {
       stdin: message,
