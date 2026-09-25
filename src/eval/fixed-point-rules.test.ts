@@ -10,11 +10,12 @@ import { buildMemoryEntries, type MemoryEntry } from "../memory/structured-store
 import { AttemptFidelityError } from "../replay/fidelity.ts";
 import type { AttemptPlan } from "../replay/plan.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
-import type { FrictionFact } from "../state/structured-memory.ts";
+import { type FrictionFact, frictionAnchors } from "../state/structured-memory.ts";
 import { type Fingerprint, fingerprintKey } from "../state/verify-fingerprint.ts";
 import { chooseIrrelevant, StepStartMissingError, sliceHistory } from "./fixed-point-events.ts";
 import {
   assertRerunFidelity,
+  assertSameRepairRounds,
   FidelityRejectedError,
   givenMatches,
   offTaskRedOf,
@@ -122,6 +123,24 @@ test("无关记忆按整条事实排除：一条事实展开成几条条目，�
   ]);
   const onV = f4.find((e) => e.anchor === "src/v.ts") as MemoryEntry;
   assert.equal(chooseIrrelevant([relevant], [onV], new Set(), f4), null);
+});
+
+test("无关记忆按整条事实排除看同指纹的全部事实与全部条目：较旧的一条事实碰过题面文件，候选条目最近一次事实的锚点里没有它，也不取；核验没过的同指纹条目同样算数", () => {
+  const { byAnchor } = entries();
+  const relevant = byAnchor.get("src/a.ts") as MemoryEntry;
+  const fp = testFp("src/x.test.ts", "x works");
+  const older = { ...fact("测试", fp, ["src/core.ts", "src/x.ts"], ["src/x.ts"]), at: AT - 60_000 };
+  const newer = fact("测试", fp, ["src/x.ts"], ["src/x.ts"]);
+  const all = buildMemoryEntries([older, newer]);
+  const onX = all.find((e) => e.anchor === "src/x.ts") as MemoryEntry;
+  const onCore = all.find((e) => e.anchor === "src/core.ts") as MemoryEntry;
+  assert.ok(onCore !== undefined, "较旧的事实展开出挂在 core.ts 上的条目");
+  assert.ok(
+    !frictionAnchors(onX.latest).includes("src/core.ts"),
+    "候选最近一次事实的锚点里没有 core.ts"
+  );
+  // 候选池里只有核验通过的 onX；挂在 core.ts 上的那条核验没过、只在全部条目里
+  assert.equal(chooseIrrelevant([relevant], [onX], new Set(["src/core.ts"]), all), null);
 });
 
 test("无关记忆先同种类：被换的是撤回类就只取撤回类，没有同种类的候选即该组缺失", () => {
@@ -333,19 +352,33 @@ test("一致性核对：重跑的预算照搬原尝试；原尝试的预算不�
   );
 });
 
-test("给出与指定核对：开局与每一轮回炉都逐条相同才算一致；被拦下、少给、多给、不是固定挑选都算不一致", () => {
+test("给出与指定核对：开局与每一轮回炉分开记，逐条相同才算一致；被拦下、少给、多给、不是固定挑选都算不一致", () => {
   const fixed = { opening: ["m1"], repair: ["m2"] };
   const given = (opening: string[], repair: string[][], selection: string | null = "fixed") => ({
     selection,
     opening,
     repair,
   });
-  assert.equal(givenMatches(given(["m1"], [["m2"], ["m2"]]), fixed), true);
-  assert.equal(givenMatches(given(["m1"], []), fixed), true, "没进回炉只看开局");
-  assert.equal(givenMatches(given([], [["m2"]]), fixed), false);
-  assert.equal(givenMatches(given(["m1"], [["m2"], []]), fixed), false);
-  assert.equal(givenMatches(given(["m1", "m3"], []), fixed), false);
-  assert.equal(givenMatches(given(["m1"], [], "auto"), fixed), false);
+  assert.deepEqual(givenMatches(given(["m1"], [["m2"], ["m2"]]), fixed), {
+    opening: true,
+    repair: [true, true],
+  });
+  assert.deepEqual(givenMatches(given(["m1"], []), fixed), { opening: true, repair: [] });
+  assert.deepEqual(givenMatches(given([], [["m2"]]), fixed), { opening: false, repair: [true] });
+  assert.deepEqual(givenMatches(given(["m1"], [["m2"], []]), fixed), {
+    opening: true,
+    repair: [true, false],
+  });
+  assert.deepEqual(givenMatches(given(["m1", "m3"], []), fixed), { opening: false, repair: [] });
+  assert.deepEqual(givenMatches(given(["m1"], [["m2"]], "auto"), fixed), {
+    opening: false,
+    repair: [false],
+  });
+});
+
+test("一致性核对：回炉上限（run.started 冻结的值）与原尝试不同即拒绝", () => {
+  assert.doesNotThrow(() => assertSameRepairRounds(3, 3));
+  assert.throws(() => assertSameRepairRounds(3, 2), FidelityRejectedError);
 });
 
 test("撕裂行续跑：末行没有换行且解析不了的先截掉再追加；末行完整只是缺换行的补上换行", () => {

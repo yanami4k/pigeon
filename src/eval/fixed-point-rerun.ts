@@ -160,6 +160,15 @@ export function assertRerunFidelity(original: AttemptPlan, rerun: AttemptPlan): 
   }
 }
 
+// 回炉上限（run.started 冻结的值）须与原尝试相同，不同即拒绝
+export function assertSameRepairRounds(original: number, rerun: number): void {
+  if (original !== rerun) {
+    throw new FidelityRejectedError(
+      `重跑与原尝试不一致，拒绝：回炉上限 ${rerun}，原尝试 ${original}`
+    );
+  }
+}
+
 // ---------- 首轮验证 ----------
 
 // 某次验证是否在题面以外的检查上变红（131 口径）：taskTestFiles 为题面测试文件（本步改动的文件、开工时已在工作区的
@@ -274,6 +283,8 @@ interface Prepared {
   event: FixedPointEvent;
   step: StreamStep;
   original: AttemptPlan;
+  // 原尝试 run.started 冻结的回炉上限
+  originalRepairRounds: number;
   budget: StepBudget;
   agent: StepAgent;
   segmentStart: string;
@@ -306,7 +317,7 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
   const groups = options.groups ?? FIXED_POINT_GROUPS;
   const passes = options.passes ?? DEFAULT_FIXED_POINT_PASSES;
   const bySeq = new Map(options.manifest.steps.map((s) => [s.seq, s]));
-  // 开跑之前全部核对：事件清单出自这份整流输出，每个事件的原尝试可照搬、预算不宽于原尝试——任一不符即一遍都不跑
+  // 开跑之前全部核对：事件清单出自这份整流输出，每个事件的原尝试可照搬、预算与原尝试相同——任一不符即一遍都不跑
   const attempt = options.events.noMemory.attempt;
   for (const s of options.events.noMemory.streams) {
     const digest = resultsDigestOf(openNoMemoryJob(options.noMemoryDir, s.id, attempt));
@@ -339,6 +350,9 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
       event,
       step,
       original,
+      originalRepairRounds: repairRoundsOf(
+        materializeSession(job.sessionsDir, event.stepSession as SessionId, { content: false })
+      ),
       budget,
       agent: options.agentFor(runtime),
       segmentStart: segment.startCommit,
@@ -570,6 +584,7 @@ async function runPass(
         startCommit: event.startHead,
       })
     );
+    assertSameRepairRounds(prep.originalRepairRounds, repairRoundsOf(session));
     const host = options.hostFor(env.target);
     const verdicts = verdictsOf(session, sessionId, host, step, humanTests);
     const used = memoryUsedOf(session, sessionId, event);
@@ -601,7 +616,7 @@ async function runPass(
       pass,
       sessionId,
       given,
-      givenMatchesFixed: givenMatches(given, fixed),
+      givenMatch: givenMatches(given, fixed),
       firstVerify: verdicts.first,
       repairVerify: verdicts.repair,
       repairRounds: result.repair?.rounds ?? null,
@@ -643,15 +658,19 @@ function givenOf(session: Session): FixedPointRow["given"] {
   };
 }
 
-// 实际给出的与指定的是否一致：开局逐条相同，每一轮回炉都与指定的回炉条目逐条相同（用前核验没过而被拦下即不一致）
-export function givenMatches(given: FixedPointRow["given"], fixed: FixedSelection): boolean {
+// 实际给出的与指定的是否一致，按开局与每一轮回炉分开：开局逐条相同；每一轮回炉与指定的回炉条目逐条相同
+// （用前核验没过而被拦下即不一致）；不是固定挑选一律不一致
+export function givenMatches(
+  given: FixedPointRow["given"],
+  fixed: FixedSelection
+): FixedPointRow["givenMatch"] {
   const same = (a: readonly string[], b: readonly string[]) =>
     a.length === b.length && a.every((x, i) => x === b[i]);
-  return (
-    given.selection === "fixed" &&
-    same(given.opening, fixed.opening) &&
-    given.repair.every((round) => same(round, fixed.repair))
-  );
+  const fixedSelection = given.selection === "fixed";
+  return {
+    opening: fixedSelection && same(given.opening, fixed.opening),
+    repair: given.repair.map((round) => fixedSelection && same(round, fixed.repair)),
+  };
 }
 
 function gatesOf(session: Session, sessionId: string) {

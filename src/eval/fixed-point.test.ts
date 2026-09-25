@@ -265,7 +265,7 @@ describe("定点对照：事件认定与单步重跑（真 Pigeon、假模型、
     assert.equal(r3("none")?.memoryUsed, true);
     assert.equal(r4("memory")?.memoryUsed, true);
     // 实际给出的与该组指定的一致
-    assert.ok(rows.every((r) => r.givenMatchesFixed));
+    assert.ok(rows.every((r) => r.givenMatch.opening && r.givenMatch.repair.every((ok) => ok)));
     // 回炉判据：第 3 步没进回炉；第 4 步进了回炉，给出记忆那一轮之后的第 2 次验证不再变红
     assert.equal(r3("memory")?.repairVerify.entered, false);
     assert.deepEqual(

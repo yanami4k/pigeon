@@ -42,8 +42,9 @@ export interface FixedPointRow {
   sessionId: string;
   // 实际给出的条目（取自重跑会话各 Run 的 run.started）：开局，与每轮回炉
   given: { selection: string | null; opening: string[]; repair: string[][] };
-  // 实际给出的与该组指定的是否一致（开局一致、每轮回炉都一致）；不一致的遍次不进配对、单列计数
-  givenMatchesFixed: boolean;
+  // 实际给出的与该组指定的是否一致，按开局与每一轮回炉分开记（用前核验没过而被拦下即不一致）。意向处理：条目被现场核验
+  // 拦下是正式使用时的正常行为，属于处理的一部分，不一致的遍次照样进各自判据的分母，只在汇总里按时机、按组单列计数
+  givenMatch: { opening: boolean; repair: boolean[] };
   firstVerify: FirstVerify;
   repairVerify: RepairVerify;
   repairRounds: number | null;

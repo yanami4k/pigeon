@@ -59,7 +59,7 @@ function row(
     pass,
     sessionId: `sess-${eventId}-${group}-${pass}`,
     given: { selection: "fixed", opening: [], repair: [] },
-    givenMatchesFixed: true,
+    givenMatch: { opening: true, repair: repair === undefined ? [] : [true] },
     firstVerify: {
       failed: repair !== undefined ? true : first,
       offTaskRed: first,
@@ -153,7 +153,7 @@ test("回炉判据只取进入回炉的遍次，按事件、按组算比例后�
   assert.equal(e5?.pairedDiff, null);
 });
 
-test("结果行按事件 × 组 × 遍次去重、只计遍次号不超过遍数的；实际给出与指定不一致的遍次不进配对、单列计数", () => {
+test("结果行按事件 × 组 × 遍次去重、只计遍次号不超过遍数的", () => {
   const extra = [
     row("s1-3", "memory", 1, false), // 重复键：留先写的（变红）
     row("s1-3", "memory", 6, true), // 超出遍数
@@ -161,29 +161,62 @@ test("结果行按事件 × 组 × 遍次去重、只计遍次号不超过遍数
   ];
   const [e3] = criterionStats(LIST, [...ROWS, ...extra], "opening", 5);
   approx(e3?.groups.memory?.redRate, 1 / 4);
-  const mismatched = ROWS.map((r) =>
-    r.eventId === "s1-3" && r.group === "memory" && r.pass === 1
-      ? { ...r, givenMatchesFixed: false }
-      : r
+  approx(e3?.groups.none?.redRate, 3 / 5);
+});
+
+test("意向处理：实际给出与指定不一致的遍次照样进各自判据的分母（记忆组第 2 轮回炉时条目被拦下的一遍仍计入），只按时机、按组单列计数；开局不一致醒目提示", () => {
+  const mismatched = ROWS.map((r) => {
+    if (r.eventId === "s1-4" && r.group === "memory" && r.pass === 3) {
+      return { ...r, repairRounds: 2, givenMatch: { opening: true, repair: [true, false] } };
+    }
+    if (r.eventId === "s1-3" && r.group === "memory" && r.pass === 1) {
+      return { ...r, givenMatch: { opening: false, repair: [] } };
+    }
+    return r;
+  });
+  const [e4] = criterionStats(LIST, mismatched, "repair", 5, "repair-only");
+  assert.deepEqual([e4?.groups.memory?.eligible, e4?.groups.memory?.red], [4, 1]);
+  const [e3] = criterionStats(LIST, mismatched, "opening", 5);
+  approx(e3?.groups.memory?.redRate, 1 / 4);
+  const text = renderFixedPointReport(LIST, mismatched, { passes: 5 });
+  assert.match(text, /\| 开局 \| 1 \| 0 \| 0 \|/);
+  assert.match(text, /\| 回炉（任一轮） \| 1 \| 0 \| 0 \|/);
+  assert.match(text, /注意：开局时机出现 1 遍实际给出与指定不一致/);
+  assert.doesNotMatch(renderFixedPointReport(LIST, ROWS, { passes: 5 }), /注意：开局时机/);
+});
+
+test("回炉判据分三行：只在回炉时机挑到记忆的事件、两个时机都有的事件、两者合计；两种事件各落在对应的行", () => {
+  assert.deepEqual(
+    criterionStats(LIST, ROWS, "repair", 5, "repair-only").map((s) => s.eventId),
+    ["s1-4"]
   );
-  const [m3] = criterionStats(LIST, mismatched, "opening", 5);
-  approx(m3?.groups.memory?.redRate, 0);
+  assert.deepEqual(
+    criterionStats(LIST, ROWS, "repair", 5, "both").map((s) => s.eventId),
+    ["s1-5"]
+  );
+  const text = renderFixedPointReport(LIST, ROWS, { passes: 5 });
+  const repair = text.slice(text.indexOf("## 回炉事件"), text.indexOf("## 辅助指标"));
   assert.match(
-    renderFixedPointReport(LIST, mismatched, { passes: 5 }),
-    /实际给出与指定不一致的遍次（不进配对） \| 1 \|/
+    repair,
+    /\| 只在回炉时机挑到记忆的事件（主看） \| 1 \| 1 \| 0 \| -75\.0 \| 0 \| 1 \| 0 \| —（0 个事件） \| 0 \|/
+  );
+  assert.match(
+    repair,
+    /\| 两个时机都有的事件（筛选发生在开局记忆之后，仅供参考） \| 1 \| 0 \| 1 \| — \| 0 \| 0 \| 0 \| —（0 个事件） \| 0 \|/
+  );
+  assert.match(
+    repair,
+    /\| 两者合计 \| 2 \| 1 \| 1 \| -75\.0 \| 0 \| 1 \| 0 \| —（0 个事件） \| 0 \|/
   );
 });
 
-test("报告：两类判据各自的配对差均值、帮倒忙事件数与无关对照分开列；组别取自结果文件；用上三组并列", () => {
+test("报告：开局判据的配对差均值、帮倒忙事件数与无关对照；组别取自结果文件；用上三组并列", () => {
   const text = renderFixedPointReport(LIST, ROWS, { passes: 5 });
   const opening = text.slice(text.indexOf("## 开局事件"), text.indexOf("## 回炉事件"));
-  const repair = text.slice(text.indexOf("## 回炉事件"), text.indexOf("## 辅助指标"));
-  const openingMean = ((1 / 4 - 3 / 5 + (0 - 2 / 5)) / 2) * 100;
-  assert.match(opening, new RegExp(`按事件配对的均值（百分点） \\| ${openingMean.toFixed(1)} \\|`));
-  assert.match(opening, /帮倒忙的事件数（带记忆组变红比例高于不带组） \| 0 \|/);
-  assert.match(repair, /可配对的事件（带记忆与不带两组都有判得清的遍次） \| 1 \|/);
-  assert.match(repair, /缺失的事件（某组没有判得清的回炉遍次，不补值） \| 1 \|/);
-  assert.match(repair, /按事件配对的均值（百分点） \| -75\.0 \|/);
+  assert.match(
+    opening,
+    /\| 开局挑到记忆的事件 \| 2 \| 2 \| 0 \| -37\.5 \| 0 \| 2 \| 0 \| -20\.0（1 个事件） \| 1 \|/
+  );
   assert.match(text, /带无关记忆组缺失的事件数（找不到候选） \| 1 \|/);
   assert.match(text, /\| 记忆被用上 \| 2\/5（40\.0%） \| — \| 1\/5（20\.0%） \|/);
   assert.match(text, /带记忆减不带的"用上"比例差（百分点）：\+20\.0/);
@@ -193,5 +226,5 @@ test("报告：两类判据各自的配对差均值、帮倒忙事件数与无�
     ROWS.filter((r) => r.group !== "irrelevant"),
     { passes: 5 }
   );
-  assert.match(twoGroups, /\| 事件 \| 步 \| 带记忆变红 \| 不带变红 \|/);
+  assert.match(twoGroups, /\| 事件 \| 步 \| 两个时机都有 \| 带记忆变红 \| 不带变红 \|/);
 });
