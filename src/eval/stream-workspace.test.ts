@@ -440,3 +440,28 @@ test("写入人写测试之前，路径上被换成符号链接的目录与文�
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("列 conftest 候选时容忍不可读的目录（agent chmod 000）：不让作业停下，照样删掉覆盖人写测试的 conftest", {
+  skip: NO_SYMLINKS,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-perm-"));
+  const locked = join(base, "ws", "tests", "locked");
+  try {
+    const root = join(base, "ws");
+    git(base, "init", "-q", "ws");
+    mkdirSync(join(root, "tests", "unit"), { recursive: true });
+    writeFileSync(join(root, "tests", "unit", "test_a.sh"), "x\n");
+    writeFileSync(join(root, "tests", "conftest.sh"), "agent\n");
+    mkdirSync(locked);
+    writeFileSync(join(locked, "conftest.sh"), "hidden\n");
+    execFileSync("chmod", ["000", locked]);
+    const ws = new StreamWorkspace(localStreamShell(root));
+    const removed = await removeCoveringHelpers(ws, "conftest.sh", () => false, [
+      "tests/unit/test_a.sh",
+    ]);
+    assert.deepEqual(removed, ["tests/conftest.sh"]);
+  } finally {
+    execFileSync("chmod", ["755", locked]);
+    rmSync(base, { recursive: true, force: true });
+  }
+});

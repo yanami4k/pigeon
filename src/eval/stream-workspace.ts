@@ -402,9 +402,13 @@ export class StreamWorkspace {
   // 工作区里叫这个名字的全部路径（文件、目录、符号链接本身），按文件系统逐个列出：不看 git（被忽略的、嵌套的 git 仓库里的
   // 都列到），不跟随符号链接，跳过工作区根的 .git。返回相对工作区根的路径
   async pathsNamed(name: string): Promise<string[]> {
-    const r = await this.must('find . -path ./.git -prune -o -name "$1" -print0', `列出 ${name}`, {
-      args: [name],
-    });
+    // agent 把目录改成不可读（chmod 000）时 find 以退出码 1 结束：容忍这类报错，照样用列出来的（同一用户跑的 pytest
+    // 本来也读不到那些目录）
+    const r = await this.must(
+      'find . -path ./.git -prune -o -name "$1" -print0 2>/dev/null; true',
+      `列出 ${name}`,
+      { args: [name] }
+    );
     return r.stdout
       .split("\x00")
       .filter((p) => p !== "")
@@ -413,7 +417,10 @@ export class StreamWorkspace {
 
   // 工作区里的全部符号链接（不跟随，跳过工作区根的 .git）。返回相对工作区根的路径
   async symlinks(): Promise<string[]> {
-    const r = await this.must("find . -path ./.git -prune -o -type l -print0", "列出符号链接");
+    const r = await this.must(
+      "find . -path ./.git -prune -o -type l -print0 2>/dev/null; true",
+      "列出符号链接"
+    );
     return r.stdout
       .split("\x00")
       .filter((p) => p !== "")
