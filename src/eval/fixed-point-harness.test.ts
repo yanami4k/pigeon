@@ -93,19 +93,22 @@ test("harness 核对（真实 git）：取记下的提交与当前工作区的�
     git("commit", "-q", "-m", "fixed point");
     const head = { commit: git("rev-parse", "HEAD"), dirty: false };
     assert.doesNotThrow(() => assertHarnessMatches(dir, { commit: base, dirty: false }, head));
+    // 其余都相符时，记下时或当前有未提交的改动也拒绝
+    assert.throws(
+      () => assertHarnessMatches(dir, { commit: base, dirty: true }, head),
+      (error: unknown) =>
+        error instanceof HarnessMismatchError && /未提交的改动/.test(String(error))
+    );
+    assert.throws(
+      () => assertHarnessMatches(dir, { commit: base, dirty: false }, { ...head, dirty: true }),
+      (error: unknown) =>
+        error instanceof HarnessMismatchError && /未提交的改动/.test(String(error))
+    );
     write("src/eval/stream-runner.ts", RUNNER.replace('"on"', '"ON"'));
     assert.throws(
       () => assertHarnessMatches(dir, { commit: base, dirty: false }, head),
       (error: unknown) =>
         error instanceof HarnessMismatchError && /src\/eval\/stream-runner\.ts/.test(String(error))
-    );
-    assert.throws(
-      () => assertHarnessMatches(dir, { commit: base, dirty: true }, head),
-      HarnessMismatchError
-    );
-    assert.throws(
-      () => assertHarnessMatches(dir, { commit: base, dirty: false }, { ...head, dirty: true }),
-      HarnessMismatchError
     );
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
