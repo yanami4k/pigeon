@@ -4,7 +4,7 @@
 //        计入该步墙钟；客户端中止即出队）；同一账号内不轮换 key；每次派发记下当时的退避轮次与该账号的上限；
 //   429：该账号按退避轮次逐级退避（5、15、45 秒）：只有本轮派出的请求（冷却结束之后派出）再撞 429 才升级，同时在途的
 //        几路一起撞只算一次；退避期间请求可换到别的账号；45 秒退避之后仍撞即该账号暂时不可用、请求换号；
-//   403 额度：只停该账号、请求换号透明重试；403 并发：降该账号的并发上限、稍候重试，只有在上限已是 1 时派出的请求
+//   403 额度：只停该账号、请求换号透明重试（停用期按正文里的重置时刻，拿不到按封顶规则；正文去密钥后记一次日志）；403 并发：降该账号的并发上限、稍候重试，只有在上限已是 1 时派出的请求
 //        仍受限才判该账号暂时不可用；降下的上限每 30 分钟回升 1，直到配置值；
 //   401 与认证类 403：该账号停用（不探测恢复，需人工处理），这次请求原样交回并记为本作业的上游故障（这一步作废重做）；
 //        开跑前逐账号探测一次，任一账号认证失败即拒绝开跑；
@@ -143,7 +143,8 @@ export interface ModelGatewayOptions {
   backoffDelaysMs?: readonly number[];
   concurrencyRetryDelayMs?: number;
   capRegrowMs?: number;
-  // 额度类停用的首次最短停用期（缺省 QUOTA_HOLD_MIN_MS；翻倍、封顶与回落的规则不变）
+  // 额度类停用在正文里拿不到重置时刻时的首次最短停用期（缺省 QUOTA_HOLD_MIN_MS；翻倍、封顶与回落的规则不变）。
+  // 设为 0 即不设停用期（按重置时刻的也不设），只供检验探测与恢复本身的用例
   quotaHoldMinMs?: number;
   // 缺省为真实时钟（退避按 5、15、45 秒，探测按 5 至 30 分钟真实等待）
   clock?: GatewayClock;
@@ -240,10 +241,15 @@ interface AccountState {
   probing: Promise<ProbeOutcome> | undefined;
   // 上限回升的定时
   regrow: (() => void) | undefined;
-  // 额度类停用（5 小时、每周、每月）的最短停用期：这次停用的时刻与停用期；上一次因额度停用的时刻（算翻倍与回落用）
+  // 额度类停用（5 小时、每周、每月）的最短停用期：这次停用的时刻与停用期；封顶规则下的停用期（翻倍用）；上一次因额度
+  // 停用的时刻（算翻倍与回落用）
   quotaDownAt: number | null;
   quotaHoldMs: number;
+  quotaRuleMs: number;
+  quotaHoldSource: string;
   lastQuotaDownAt: number | null;
+  // 最近一次探测撞上限额时上游的错误正文（开跑前与探测中转为额度停用时，据此取重置时刻、写日志）
+  probeBody: string | undefined;
 }
 
 // 一次派发：账号、派发时的退避轮次与该账号的并发上限
@@ -258,15 +264,128 @@ type ProbeOutcome = "ok" | "fail" | LimitKind;
 // 每月额度用完与认证失败的账号不会自行恢复，不探测
 const permanent = (down: LimitKind | null) => down === "monthly" || down === "auth";
 
-// 额度类停用（5 小时、每周、每月）：额度按滚动窗口，停用后极小的探测请求能过、真实负载一上来又用完。
-// 恢复要同时满足探测通过与距这次停用已满最短停用期：首次 30 分钟；上一次因额度停用不到 6 小时即翻倍，封顶 240 分钟；
-// 连续 6 小时没有再因额度停用即回到 30 分钟。停用期内照常按原间隔探测，探测通过只记下、不恢复。429 退避、并发 403
-// 与认证失败的处理不受影响
+// 额度类停用（5 小时、每周、每月）：停用后极小的探测请求能过、真实负载一上来又用完，恢复要同时满足探测通过与距这次
+// 停用已满最短停用期。额度在服务给的时刻整份重置：错误正文里拿得到重置时刻即停用到该时刻再加 2 分钟（夹在 5 分钟至
+// 6 小时之间）；拿不到即按封顶规则：首次 30 分钟，上一次因额度停用不到 6 小时即翻倍，封顶 60 分钟，连续 6 小时没有再
+// 因额度停用即回到 30 分钟。停用期内照常按原间隔探测（停用期先到即到点探测），探测通过只记下、不恢复。429 退避、
+// 并发 403 与认证失败的处理不受影响
 const isQuota = (down: LimitKind | null) =>
   down === "5h" || down === "weekly" || down === "monthly";
 export const QUOTA_HOLD_MIN_MS = 30 * 60_000;
-export const QUOTA_HOLD_MAX_MS = 240 * 60_000;
+export const QUOTA_HOLD_MAX_MS = 60 * 60_000;
 export const QUOTA_HOLD_RESET_MS = 6 * 60 * 60_000;
+export const QUOTA_RESET_MARGIN_MS = 2 * 60_000;
+export const QUOTA_RESET_HOLD_MIN_MS = 5 * 60_000;
+export const QUOTA_RESET_HOLD_MAX_MS = 6 * 60 * 60_000;
+
+const ISO_TIME =
+  /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))?/i;
+const UNIX_TIME = /(?<![\d.])\d{10}(?:\d{3})?(?![\d.])/;
+const RELATIVE_TIME =
+  /(\d+(?:\.\d+)?)\s*(小时|钟头|分钟|分|秒|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])/i;
+const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
+// 相对时间须带方向（"x 分钟后"、"in x minutes"、"after x minutes"），免得把"5 小时额度"之类当成重置时刻
+const RELATIVE_AFTER =
+  /(?:\bin|\bafter|约|大约)?\s*(\d+(?:\.\d+)?)\s*(小时|钟头|分钟|分|秒|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])\s*(后|之后|以后|later)?/gi;
+
+const unitMs = (unit: string) => {
+  const u = unit.toLowerCase();
+  if (u === "小时" || u === "钟头" || u.startsWith("h")) return UNIT_MS.h as number;
+  if (u === "分钟" || u === "分" || u.startsWith("m")) return UNIT_MS.m as number;
+  return UNIT_MS.s as number;
+};
+// Unix 秒或毫秒：只认 2020 年至 2100 年之间的
+const unixMs = (digits: string) => {
+  const n = Number(digits);
+  const ms = digits.length === 13 ? n : n * 1000;
+  return ms >= Date.UTC(2020, 0, 1) && ms < Date.UTC(2100, 0, 1) ? ms : null;
+};
+const isoMs = (text: string) => {
+  const t = text
+    .trim()
+    .replace(/\s*UTC$/i, "Z")
+    .replace(" ", "T");
+  const ms = Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(t) ? t : `${t}Z`);
+  return Number.isFinite(ms) ? ms : null;
+};
+
+// 一段文字里最靠前的时间：ISO 时间戳、Unix 秒或毫秒、相对时间（这里已在"reset"/"重置"字样之后，不要求方向）
+function firstTime(text: string, now: number): number | null {
+  const found: { at: number; ms: number | null }[] = [];
+  const iso = ISO_TIME.exec(text);
+  if (iso) found.push({ at: iso.index, ms: isoMs(iso[0]) });
+  const unix = UNIX_TIME.exec(text);
+  if (unix) found.push({ at: unix.index, ms: unixMs(unix[0]) });
+  const rel = RELATIVE_TIME.exec(text);
+  if (rel) found.push({ at: rel.index, ms: now + Number(rel[1]) * unitMs(rel[2] ?? "s") });
+  const first = found.filter((f) => f.ms !== null).sort((a, b) => a.at - b.at)[0];
+  return first?.ms ?? null;
+}
+
+// JSON 正文里名字带 reset 的字段：数值按 Unix 秒或毫秒（名字带 in/after/seconds 且数值小的按相对秒数），字符串按时间解析
+function resetField(value: unknown, now: number): number | null {
+  if (value === null || typeof value !== "object") return null;
+  for (const [key, v] of Object.entries(value)) {
+    if (/reset/i.test(key)) {
+      if (typeof v === "number" && Number.isFinite(v)) {
+        if (v < 1e9 && /in|after|sec|ttl/i.test(key)) return now + v * 1000;
+        const ms = unixMs(String(Math.trunc(v)));
+        if (ms !== null) return ms;
+      }
+      if (typeof v === "string") {
+        const t = /^\d+$/.test(v.trim()) ? unixMs(v.trim()) : firstTime(v, now);
+        if (t !== null) return t;
+      }
+    }
+    const nested = resetField(v, now);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+// 额度类错误正文里的重置时刻（毫秒）：依次认 JSON 里名字带 reset 的字段、"reset"/"重置"字样之后 80 字以内的时间、
+// 正文里任意的 ISO 时间戳、带方向的相对时间（"x 分钟后"、"in x minutes"）；都拿不到为 null
+export function quotaResetAt(body: string, now: number): number | null {
+  try {
+    const field = resetField(JSON.parse(body), now);
+    if (field !== null) return field;
+  } catch {
+    // 不是 JSON：按文字认
+  }
+  for (const m of body.matchAll(/resets?|重置/gi)) {
+    const start = m.index + m[0].length;
+    const t = firstTime(body.slice(start, start + 80), now);
+    if (t !== null) return t;
+  }
+  const iso = ISO_TIME.exec(body);
+  if (iso) {
+    const t = isoMs(iso[0]);
+    if (t !== null) return t;
+  }
+  for (const m of body.matchAll(RELATIVE_AFTER)) {
+    const directed = /^\s*(in|after)\b/i.test(m[0]) || m[3] !== undefined;
+    if (directed) return now + Number(m[1]) * unitMs(m[2] ?? "s");
+  }
+  return null;
+}
+
+// 写进日志的错误正文：先去掉配置的 key 与任何形似密钥的内容（sk- 之类前缀的串、Bearer 凭据、key/token/secret 字段的值、
+// 20 字以上字母数字相混的串），再把空白压成一个空格，取前 200 字
+export function redactBody(body: string, keys: readonly (string | undefined)[]): string {
+  return scrubKeys(body, keys)
+    .replace(/\bBearer\s+[^\s"',}]+/gi, "Bearer [已去除]")
+    .replace(
+      /((?:api[_-]?key|access[_-]?key|token|secret|authorization|password)["']?\s*[:=]\s*["']?)[^\s"',}]+/gi,
+      "$1[已去除]"
+    )
+    .replace(/\b(?:sk|ak|pk|rk)[-_][A-Za-z0-9_-]{6,}/gi, "[已去除]")
+    .replace(/[A-Za-z0-9_\-+/=.]{20,}/g, (t) =>
+      /[A-Za-z]/.test(t) && /\d/.test(t) ? "[已去除]" : t
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
 
 async function readAll(req: http.IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -333,7 +452,10 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
       regrow: undefined,
       quotaDownAt: null,
       quotaHoldMs: options.quotaHoldMinMs ?? QUOTA_HOLD_MIN_MS,
+      quotaRuleMs: options.quotaHoldMinMs ?? QUOTA_HOLD_MIN_MS,
+      quotaHoldSource: "按封顶规则",
       lastQuotaDownAt: null,
+      probeBody: undefined,
     }));
   if (accounts.length === 0) throw new Error("网关至少需要一个账号");
   const keys = accounts.map((a) => a.key);
@@ -586,7 +708,9 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
           await r.body?.cancel();
           return "ok";
         }
-        const failure = classifyUpstreamFailure(r.status, await r.text());
+        const text = await r.text();
+        account.probeBody = text;
+        const failure = classifyUpstreamFailure(r.status, text);
         return failure.kind === "other" ? "fail" : failure.kind;
       } catch {
         return "fail";
@@ -629,7 +753,9 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
   // 按探测结果处理：通过即恢复（额度类停用须已满最短停用期）；认证失败或每月额度用完即转为不再恢复。恢复了为 true
   const settleProbe = (index: number, outcome: ProbeOutcome): boolean => {
     if (outcome === "ok") return restore(index);
-    if (permanent(outcome as LimitKind)) takeDown(index, outcome as LimitKind);
+    if (permanent(outcome as LimitKind)) {
+      takeDown(index, outcome as LimitKind, (accounts[index] as AccountState).probeBody);
+    }
     return false;
   };
   // 暂时不可用的账号单独探测，通过即恢复；每月额度用完与认证失败的不探测（探测中转为这两种即停止）
@@ -639,7 +765,13 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     account.recovering = true;
     try {
       for (let i = 0; !closed && account.down !== null && !permanent(account.down); i++) {
-        await delay(PROBE_SCHEDULE_MS[Math.min(i, PROBE_SCHEDULE_MS.length - 1)] ?? 0);
+        // 额度停用期先于下一次探测结束即到点探测
+        const scheduled = PROBE_SCHEDULE_MS[Math.min(i, PROBE_SCHEDULE_MS.length - 1)] ?? 0;
+        const holdLeft =
+          isQuota(account.down) && account.quotaDownAt !== null
+            ? account.quotaDownAt + account.quotaHoldMs - now()
+            : 0;
+        await delay(holdLeft > 0 && holdLeft < scheduled ? holdLeft : scheduled);
         if (closed || account.down === null || permanent(account.down)) return;
         settleProbe(index, await probeAccount(index));
       }
@@ -657,28 +789,46 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
         : kind === "concurrency"
           ? "并发上限已是 1 仍受限"
           : "额度用完";
+    const a = account(index);
     const hold =
-      isQuota(kind) && account(index).quotaDownAt !== null
-        ? `；最短停用期 ${minutes(account(index).quotaHoldMs)} 分钟（期内探测通过也不恢复）`
+      isQuota(kind) && a.quotaDownAt !== null && a.quotaHoldMs > 0
+        ? `；最短停用期 ${minutes(a.quotaHoldMs)} 分钟（期内探测通过也不恢复），来源：${a.quotaHoldSource}，恢复时刻 ${new Date(a.quotaDownAt + a.quotaHoldMs).toISOString()}（到点探测通过即恢复）`
         : "";
     return `${who}${why}，暂时不可用${hold}；按 5 至 30 分钟的间隔探测恢复`;
   };
   // 账号不可用：还有可用账号即只停它、请求换号；全部不可用即交给控制器整批暂停，都不会自行恢复则停下
-  const takeDown = (index: number, kind: LimitKind) => {
+  const takeDown = (index: number, kind: LimitKind, body?: string) => {
     const account = accounts[index] as AccountState;
     // 已经不可用的，只有转为不会自行恢复的原因才改记
     if (account.down === kind || (account.down !== null && !permanent(kind))) return;
     account.down = kind;
     account.cooling = false;
     if (isQuota(kind)) {
-      // 最短停用期：上一次因额度停用不到 6 小时即翻倍（封顶），否则回到 30 分钟
+      // 封顶规则：上一次因额度停用不到 6 小时即翻倍（封顶），否则回到 30 分钟；正文给了重置时刻即按它（加 2 分钟、夹紧）
       const t = now();
-      account.quotaHoldMs =
+      account.quotaRuleMs =
         account.lastQuotaDownAt !== null && t - account.lastQuotaDownAt < QUOTA_HOLD_RESET_MS
-          ? Math.min(account.quotaHoldMs * 2, QUOTA_HOLD_MAX_MS)
+          ? Math.min(account.quotaRuleMs * 2, QUOTA_HOLD_MAX_MS)
           : quotaHoldMinMs;
+      const resetAt = body === undefined ? null : quotaResetAt(body, t);
+      account.quotaHoldMs =
+        quotaHoldMinMs === 0
+          ? 0
+          : resetAt === null
+            ? account.quotaRuleMs
+            : Math.min(
+                QUOTA_RESET_HOLD_MAX_MS,
+                Math.max(QUOTA_RESET_HOLD_MIN_MS, resetAt + QUOTA_RESET_MARGIN_MS - t)
+              );
+      account.quotaHoldSource =
+        resetAt === null
+          ? "按封顶规则"
+          : `按服务给的重置时刻（${new Date(resetAt).toISOString()}）`;
       account.quotaDownAt = t;
       account.lastQuotaDownAt = t;
+      warn(
+        `${label(index)}额度类停用，错误正文前 200 字（已去密钥）：${body === undefined ? "（无）" : redactBody(body, keys)}`
+      );
     }
     capacityChanged();
     warn(`${downLine(index, kind)}${usable() ? "，请求换到其他账号" : ""}`);
@@ -809,7 +959,7 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
               meterOf(job).upstreamFailures += 1;
             } else if (failure.kind !== "other") {
               last = { status: upstream.status, contentType, text };
-              takeDown(index, failure.kind);
+              takeDown(index, failure.kind, text);
               continue;
             } else if (upstream.status >= 500 || upstream.status === 403) {
               // 5xx 与认不出的 403：原样交回、记上游故障（这一步作废），不停用账号
@@ -922,8 +1072,9 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
       // 额度用完（5 小时、每周、每月）的账号直接置为不可用：容量从一开始就不含它，额度类照常定时探测恢复（每月的
       // 不再使用）；并发受限与频率限制只告警，开跑后按常规处理
       for (const [i, o] of outcomes.entries()) {
-        if (o === "5h" || o === "weekly" || o === "monthly") takeDown(i, o);
-        else if (o !== "ok") warn(`${label(i)}开跑前探测撞上限额（${o}），开跑后按常规处理`);
+        if (o === "5h" || o === "weekly" || o === "monthly") {
+          takeDown(i, o, (accounts[i] as AccountState).probeBody);
+        } else if (o !== "ok") warn(`${label(i)}开跑前探测撞上限额（${o}），开跑后按常规处理`);
       }
     },
     async probe() {

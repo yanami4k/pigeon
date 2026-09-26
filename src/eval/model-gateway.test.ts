@@ -11,6 +11,8 @@ import {
   type ModelGateway,
   meterDelta,
   QUOTA_HOLD_MIN_MS,
+  quotaResetAt,
+  redactBody,
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
@@ -1437,21 +1439,29 @@ test("收尾：关闭之后不再新设定时——关闭时同一作业还有�
   }
 });
 
-// 最短停用期的用例：两个账号，账号 1 按开关回额度 403 或 200，账号 2 一直 200；虚拟时钟，探测按 5 至 30 分钟的间隔手动拨到
+// 不带重置时刻的额度 403 正文（按封顶规则）
+const QUOTA_NO_RESET = "usage limit reached for this account";
+
+// 最短停用期的用例：两个账号，账号 1 按开关回额度 403（正文可设，缺省不带重置时刻）或 200，账号 2 一直 200；
+// 虚拟时钟（从 0 起），探测按 5 至 30 分钟的间隔手动拨到
 async function withQuotaHold(
   run: (ctx: {
     g: ModelGateway;
     up: Awaited<ReturnType<typeof keyedUpstream>>;
     warnings: string[];
     clock: ReturnType<typeof testClock>;
-    setQuota: (on: boolean) => void;
+    setQuota: (on: boolean, body?: string) => void;
     elapsed: () => number;
   }) => Promise<void>
 ) {
   let quota = false;
+  let quotaBody = QUOTA_NO_RESET;
   let offset = 0;
   await withAccounts(
-    { "key-a": () => (quota ? QUOTA : OK), "key-b": () => OK },
+    {
+      "key-a": () => (quota ? { status: 403, body: quotaBody } : OK),
+      "key-b": () => OK,
+    },
     [
       { key: "key-a", concurrency: 1 },
       { key: "key-b", concurrency: 1 },
@@ -1467,8 +1477,9 @@ async function withQuotaHold(
         up,
         warnings,
         clock,
-        setQuota: (on) => {
+        setQuota: (on, body) => {
           quota = on;
+          quotaBody = body ?? QUOTA_NO_RESET;
         },
         elapsed: () => offset,
       });
@@ -1478,8 +1489,8 @@ async function withQuotaHold(
 }
 
 // 让账号 1 撞额度停用：一个请求先派给它（在途占比相同取编号小的），403 后换到账号 2
-async function quotaDown(ctx: Parameters<Parameters<typeof withQuotaHold>[0]>[0]) {
-  ctx.setQuota(true);
+async function quotaDown(ctx: Parameters<Parameters<typeof withQuotaHold>[0]>[0], body?: string) {
+  ctx.setQuota(true, body);
   assert.equal((await post(ctx.g, "j")).status, 200);
   assert.equal(ctx.g.accountStatus()[0]?.down, "5h");
   ctx.setQuota(false);
@@ -1529,18 +1540,111 @@ test("最短停用期：额度停用后探测立即通过也不恢复，满 30 �
   });
 });
 
-test("最短停用期：6 小时内再次因额度停用即翻倍（30 → 60 → 120 → 240，封顶 240）；连续 6 小时没有再停用即回到 30 分钟", async () => {
+test("最短停用期（正文不带重置时刻，按封顶规则）：6 小时内再次因额度停用即翻倍但封顶 60 分钟（30 → 60 → 60 → 60）；连续 6 小时没有再停用即回到 30 分钟；日志写明来源", async () => {
   await withQuotaHold(async (ctx) => {
     const holds: number[] = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 4; i++) {
       await quotaDown(ctx);
       holds.push(holdOf(ctx.warnings));
       await untilRestored(ctx);
     }
-    assert.deepEqual(holds, [30, 60, 120, 240, 240]);
-    // 最后一次停用之后已过 240 分钟以上；再过 2 小时即满 6 小时没有再因额度停用
-    await ctx.clock.advance(2 * 60 * 60_000);
+    assert.deepEqual(holds, [30, 60, 60, 60]);
+    assert.ok(ctx.warnings.some((w) => /额度用完.*来源：按封顶规则，恢复时刻 /.test(w)));
+    await ctx.clock.advance(6 * 60 * 60_000);
     await quotaDown(ctx);
     assert.equal(holdOf(ctx.warnings), 30);
   });
+});
+
+const isoAt = (ms: number) => new Date(ms).toISOString();
+
+test("按重置时刻：正文带绝对重置时刻即停用到该时刻再加 2 分钟，停用期先到即到点探测、通过即恢复；日志写明来源与恢复时刻", async () => {
+  await withQuotaHold(async (ctx) => {
+    const reset = ctx.clock.clock.now() + 90 * 60_000;
+    await quotaDown(
+      ctx,
+      JSON.stringify({
+        error: {
+          type: "permission_error",
+          message: `usage limit reached, resets at ${isoAt(reset)}`,
+        },
+      })
+    );
+    assert.equal(holdOf(ctx.warnings), 92);
+    const line = ctx.warnings.filter((w) => /额度用完/.test(w)).at(-1) ?? "";
+    assert.match(line, /来源：按服务给的重置时刻/);
+    assert.ok(line.includes(`恢复时刻 ${isoAt(reset + 2 * 60_000)}`), line);
+    assert.equal(await untilRestored(ctx), 92 * 60_000, "第 92 分钟到点探测即恢复");
+  });
+});
+
+test("按重置时刻：正文带相对时间（x 分钟后、in x hours）同样按该时刻再加 2 分钟", async () => {
+  await withQuotaHold(async (ctx) => {
+    await quotaDown(ctx, "额度已用完，请 45 分钟后再试");
+    assert.equal(holdOf(ctx.warnings), 47);
+    await untilRestored(ctx);
+    await quotaDown(ctx, "usage limit reached, quota will reset in 3 hours");
+    assert.equal(holdOf(ctx.warnings), 182);
+  });
+});
+
+test("按重置时刻：超出 5 分钟至 6 小时的被夹紧（1 分钟后 → 5 分钟；10 小时后 → 6 小时）", async () => {
+  await withQuotaHold(async (ctx) => {
+    await quotaDown(ctx, "usage limit reached, quota will reset in 1 minute");
+    assert.equal(holdOf(ctx.warnings), 5);
+    await untilRestored(ctx);
+    await quotaDown(ctx, "usage limit reached, quota will reset in 10 hours");
+    assert.equal(holdOf(ctx.warnings), 360);
+  });
+});
+
+test("额度停用的日志：错误正文前 200 字写一次，去掉配置的 key 与任何形似密钥的内容，只留说明文字与数字", async () => {
+  await withQuotaHold(async (ctx) => {
+    const body = JSON.stringify({
+      error: {
+        message:
+          "usage limit reached for key-a (sk-live-9f8e7d6c5b4a3210), quota will reset in 2 hours",
+        api_key: "abc123secretvalue",
+        auth: "Bearer eyJhbGciOiJIUzI1NiJ9.payload",
+        request_id: "req_0123456789abcdefABCDEF",
+      },
+    });
+    await quotaDown(ctx, `${body}${" padding".repeat(60)}`);
+    const logs = ctx.warnings.filter((w) => /错误正文前 200 字（已去密钥）/.test(w));
+    assert.equal(logs.length, 1, "每次额度停用写一次");
+    const snippet = (logs[0] ?? "").replace(/^.*已去密钥）：/, "");
+    assert.ok(snippet.length <= 200, `${snippet.length}`);
+    assert.match(snippet, /usage limit reached/);
+    assert.match(snippet, /2 hours/);
+    for (const secret of [
+      "key-a",
+      "sk-live",
+      "9f8e7d6c5b4a3210",
+      "abc123secretvalue",
+      "eyJhbGci",
+      "0123456789abcdefABCDEF",
+    ]) {
+      assert.ok(!snippet.includes(secret), `日志里出现了 ${secret}`);
+    }
+  });
+});
+
+test("重置时刻的写法：JSON 字段（Unix 秒、毫秒、ISO、相对秒数）、reset/重置字样后的时间、正文里的 ISO、带方向的相对时间；拿不到为 null", () => {
+  const now = Date.UTC(2026, 8, 26, 20, 0, 0);
+  const at = Date.UTC(2026, 8, 26, 21, 50, 0);
+  assert.equal(quotaResetAt(JSON.stringify({ error: { reset_at: at / 1000 } }), now), at);
+  assert.equal(quotaResetAt(JSON.stringify({ resetAt: at }), now), at);
+  assert.equal(quotaResetAt(JSON.stringify({ resets_at: "2026-09-26T21:50:00Z" }), now), at);
+  assert.equal(quotaResetAt(JSON.stringify({ reset_in_seconds: 600 }), now), now + 600_000);
+  assert.equal(quotaResetAt(`limit reached; resets at ${at / 1000}`, now), at);
+  assert.equal(quotaResetAt("额度已用完，将于 2026-09-26 21:50:00 UTC 重置", now), at);
+  assert.equal(quotaResetAt("额度已用完，重置时间：2026-09-26T21:50:00Z", now), at);
+  assert.equal(quotaResetAt("quota will reset in 5 hours", now), now + 5 * 3_600_000);
+  assert.equal(quotaResetAt("用量上限，约 30 分钟后恢复", now), now + 30 * 60_000);
+  assert.equal(quotaResetAt("usage limit reached for the 5-hour window", now), null);
+  assert.equal(quotaResetAt("usage limit reached", now), null);
+  assert.equal(
+    redactBody("token=abc Bearer xyz   plain 42", []),
+    "token=[已去除] Bearer [已去除] plain 42"
+  );
 });

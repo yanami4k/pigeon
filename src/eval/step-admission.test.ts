@@ -118,7 +118,8 @@ async function heldUpstream(probe: (key: string) => { status: number; body: stri
   };
 }
 
-const QUOTA = { status: 403, body: "usage limit reached, quota will reset in 5 hours" };
+// 不带重置时刻的额度正文：停用期按封顶规则（首次 30 分钟），这里检验的是按容量放行，不是停用期的来源
+const QUOTA = { status: 403, body: "usage limit reached for this account" };
 const OK = { status: 200, body: "{}" };
 
 // 跑批的若干路：每路按顺序做几步，作废即重做同一步；记下同时在跑的 agent 数、每步的尝试与放行等待
