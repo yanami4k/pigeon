@@ -16,7 +16,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { hostWorkspaceAccess, taskReferencedFiles } from "../memory/structured-workspace.ts";
-import { materializeSession } from "../persistence/session-read.ts";
+import {
+  materializeSession,
+  readMessageContentFileDetailed,
+  sessionContentFilePath,
+} from "../persistence/session-read.ts";
 import {
   AttemptFidelityError,
   assertThinkingLevelReproducible,
@@ -26,7 +30,8 @@ import {
   samplingOf,
 } from "../replay/fidelity.ts";
 import { type AttemptPlan, resolveAttemptPlan } from "../replay/plan.ts";
-import type { SessionId } from "../state/ids.ts";
+import type { RunId, SessionId } from "../state/ids.ts";
+import { type ContentBlock, sha256Hex } from "../state/message-content.ts";
 import { repairRoundsOf, repairStepOutcome } from "../state/repair-step.ts";
 import {
   type FileChangeEvent,
@@ -126,7 +131,7 @@ export function rerunRuntime(original: AttemptPlan): ReproducedRuntime {
 }
 
 // 跑完后按重跑自己的 run.started 核对：预算与原尝试相同，工具不多于原尝试，模型、推理档位、温度、输出上限、
-// 工作方式指令、题面与放权方式逐项相同
+// 工作方式指令与放权方式逐项相同（题面另按内容块语义核对，见 assertSessionTask：计划里的题面取自账本存储，长题面是截断的）
 export function assertRerunFidelity(original: AttemptPlan, rerun: AttemptPlan): void {
   const problems: string[] = [];
   const ob = original.budget;
@@ -163,12 +168,61 @@ export function assertRerunFidelity(original: AttemptPlan, rerun: AttemptPlan): 
     problems.push(`单轮输出上限不同：${r.maxOutputTokens}，原尝试 ${o.maxOutputTokens}`);
   }
   if (original.taskDirective !== rerun.taskDirective) problems.push("工作方式指令不同");
-  if (original.task !== rerun.task) problems.push("题面不同");
   if (original.approvalMode !== rerun.approvalMode) {
     problems.push(`放权方式不同：${rerun.approvalMode}，原尝试 ${original.approvalMode}`);
   }
   if (problems.length > 0) {
     throw new FidelityRejectedError(`重跑与原尝试不一致，拒绝：${problems.join("；")}`);
+  }
+}
+
+// 题面核对（按内容块语义）：账本存消息正文时按单块 64 KiB 截断存储（块上标 truncated，并带未截断全文的 sha256 fullHash），
+// agent 当时拿到的是全文。首条用户消息的文本块有截断的，就以题面（跑批器交给 agent 的原字符串，不去首尾空白）的 sha256
+// 与该块的 fullHash 比较；都未截断的，文本块相接后与题面逐字比较（两边都去首尾空白，同回放计划的取法）。截断的存储文本
+// 不参与逐字比较
+export function taskBlocksMatch(
+  blocks: readonly ContentBlock[],
+  expected: string
+): { ok: true } | { ok: false; reason: string } {
+  const texts = blocks.filter(
+    (b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text"
+  );
+  if (texts.length === 0) return { ok: false, reason: "首条用户消息里没有文本" };
+  if (texts.some((b) => b.truncated)) {
+    const [only] = texts;
+    if (texts.length !== 1 || only === undefined) {
+      return { ok: false, reason: "题面分成多块且有截断，无从核对全文" };
+    }
+    return only.fullHash === sha256Hex(expected)
+      ? { ok: true }
+      : { ok: false, reason: "题面全文的哈希不同（存储截断）" };
+  }
+  return texts
+    .map((b) => b.text)
+    .join("\n")
+    .trim() === expected.trim()
+    ? { ok: true }
+    : { ok: false, reason: "题面不同" };
+}
+
+// 某个会话里某个 Run 的首条用户消息须与题面相同（taskBlocksMatch），不同即以给定的错误拒绝
+export function assertSessionTask(
+  sessionsDir: string,
+  sessionId: SessionId,
+  runId: RunId,
+  expected: string,
+  what: string,
+  ErrorType: new (message: string) => Error
+): void {
+  const first = readMessageContentFileDetailed(sessionContentFilePath(sessionsDir, sessionId))
+    .records.filter((r) => r.runId === runId && r.role === "user")
+    .sort((a, b) => a.runSeq - b.runSeq)[0];
+  const verdict =
+    first === undefined
+      ? { ok: false as const, reason: "账本里没有首条用户消息" }
+      : taskBlocksMatch(first.blocks, expected);
+  if (!verdict.ok) {
+    throw new ErrorType(`${what}的题面与清单不同，拒绝重跑：${verdict.reason}`);
   }
 }
 
@@ -415,10 +469,15 @@ async function runLocked(options: FixedPointOptions): Promise<FixedPointSummary>
       runId: event.firstRunId as AttemptPlan["runId"],
       startCommit: event.startHead,
     });
-    // 原尝试的题面按账本里首条用户消息取（去掉首尾空白），与清单题面同样去掉首尾空白再比
-    if (original.task !== (step.prompt ?? step.message).trim()) {
-      throw new AttemptFidelityError(`事件 ${event.id} 的原尝试题面与清单不同，拒绝重跑`);
-    }
+    // 原尝试交给 agent 的题面须与清单题面相同（按内容块语义：存储截断的比全文哈希）
+    assertSessionTask(
+      job.sessionsDir,
+      event.stepSession as SessionId,
+      event.firstRunId as RunId,
+      step.prompt ?? step.message,
+      `事件 ${event.id} 的原尝试`,
+      AttemptFidelityError
+    );
     const budget = rerunBudget(original);
     const originalSession = materializeSession(job.sessionsDir, event.stepSession as SessionId, {
       content: false,
@@ -718,6 +777,14 @@ async function runPass(
         runId: firstRun.runId,
         startCommit: event.startHead,
       })
+    );
+    assertSessionTask(
+      sessionsDir,
+      sessionId,
+      firstRun.runId,
+      step.prompt ?? step.message,
+      "这一遍",
+      FidelityRejectedError
     );
     assertSameRepairRounds(prep.originalRepairRounds, repairRoundsOf(session));
     assertSameVerifySteps(

@@ -7,20 +7,24 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { renderEntry } from "../memory/structured-select.ts";
 import { buildMemoryEntries, type MemoryEntry } from "../memory/structured-store.ts";
+import { sessionContentFilePath } from "../persistence/session-read.ts";
 import { AttemptFidelityError } from "../replay/fidelity.ts";
 import type { AttemptPlan } from "../replay/plan.ts";
-import { newRunId, newSessionId } from "../state/ids.ts";
+import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import { buildMessageContent } from "../state/message-content.ts";
 import { type FrictionFact, frictionAnchors } from "../state/structured-memory.ts";
 import { type Fingerprint, fingerprintKey } from "../state/verify-fingerprint.ts";
 import { chooseIrrelevant, StepStartMissingError, sliceHistory } from "./fixed-point-events.ts";
 import {
   assertRerunFidelity,
   assertSameRepairRounds,
+  assertSessionTask,
   FidelityRejectedError,
   givenMatches,
   offTaskRedOf,
   rerunBudget,
   scheduleJobs,
+  taskBlocksMatch,
   taskTestFilesAt,
 } from "./fixed-point-rerun.ts";
 import {
@@ -313,6 +317,71 @@ test("作业顺序：遍次在外、组在内，同一事件同一遍次的各�
   assert.notEqual(firstOf(0, 1), firstOf(1, 1), "同一遍次里不同事件先跑的组也错开");
 });
 
+// 题面超过 64 KiB（单块存储上限）：账本里只存前缀、标截断并带全文哈希
+const LONG_PROMPT = `src/big.test.ts\n\nAdd big\n\n--- src/big.test.ts ---\n${"// 一行测试代码 ".repeat(8000)}\n`;
+
+// 写一个只有首条用户消息的会话内容文件（与账本存储同一转换，超过单块上限即截断）
+function sessionWithTask(task: string): { dir: string; sessionId: SessionId; runId: RunId } {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-fp-task-"));
+  const sessionId = newSessionId();
+  const runId = newRunId();
+  const content = buildMessageContent({ role: "user", content: task });
+  const record = {
+    version: 1,
+    sessionId,
+    runId,
+    runSeq: 1,
+    entryId: newEntryId(),
+    timestamp: Date.now(),
+    ...content,
+  };
+  writeFileSync(sessionContentFilePath(dir, sessionId), `${JSON.stringify(record)}\n`);
+  return { dir, sessionId, runId };
+}
+
+test("题面核对：题面超过 64 KiB、账本存储截断时比全文哈希——与清单相同即通过，全文不同（截断前缀相同）即拒绝", () => {
+  const blocks = buildMessageContent({ role: "user", content: LONG_PROMPT }).blocks;
+  const [block] = blocks;
+  assert.ok(block?.type === "text" && block.truncated, "存储截断");
+  assert.deepEqual(taskBlocksMatch(blocks, LONG_PROMPT), { ok: true });
+  const differentTail = `${LONG_PROMPT}// 清单比原尝试多一行\n`;
+  assert.equal(taskBlocksMatch(blocks, differentTail).ok, false);
+});
+
+test("题面核对：未截断时逐字比较——相同即通过，不同即拒绝", () => {
+  const blocks = buildMessageContent({ role: "user", content: "Add small\n" }).blocks;
+  assert.deepEqual(taskBlocksMatch(blocks, "Add small\n"), { ok: true });
+  assert.equal(taskBlocksMatch(blocks, "Add other\n").ok, false);
+});
+
+test("题面核对（真实内容文件）：开跑前与每遍跑完后的再核同用一个函数，截断题面按全文哈希通过、不同即以给定的错误拒绝", () => {
+  const { dir, sessionId, runId } = sessionWithTask(LONG_PROMPT);
+  try {
+    assert.doesNotThrow(() =>
+      assertSessionTask(dir, sessionId, runId, LONG_PROMPT, "这一遍", FidelityRejectedError)
+    );
+    assert.throws(
+      () =>
+        assertSessionTask(
+          dir,
+          sessionId,
+          runId,
+          `${LONG_PROMPT}x`,
+          "这一遍",
+          FidelityRejectedError
+        ),
+      (e: unknown) => e instanceof FidelityRejectedError && /全文的哈希不同/.test(String(e))
+    );
+    assert.throws(
+      () =>
+        assertSessionTask(dir, sessionId, newRunId(), LONG_PROMPT, "这一遍", FidelityRejectedError),
+      /没有首条用户消息/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function plan(overrides: Partial<AttemptPlan> = {}): AttemptPlan {
   return {
     sessionId: newSessionId(),
@@ -338,7 +407,7 @@ test("一致性核对：重跑照搬原尝试即通过；预算收紧同样拒�
   );
 });
 
-test("一致性核对：预算放宽、多一件工具、换模型、换推理档位、换温度、换输出上限、换工作方式指令或题面，一律拒绝", () => {
+test("一致性核对：预算放宽、多一件工具、换模型、换推理档位、换温度、换输出上限、换工作方式指令，一律拒绝", () => {
   const original = plan();
   const widened: Partial<AttemptPlan>[] = [
     { budget: { maxTurns: 151, wallClockMs: 600_000 } },
@@ -358,7 +427,6 @@ test("一致性核对：预算放宽、多一件工具、换模型、换推理�
     },
     { model: { provider: "p", id: "m", thinkingLevel: "off", maxOutputTokens: 32768 } },
     { taskDirective: "E" },
-    { task: "do something else" },
   ];
   for (const w of widened) {
     assert.throws(
