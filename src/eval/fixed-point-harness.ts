@@ -5,6 +5,9 @@
 //   import、全部类型（Node 的去类型）、export 关键字、整行注释与空行，并把连续空白（含换行）压成一个空格；规整后相同即只差定点对照的
 //   新增段或不改变运行行为的写法（类型、导出），放行；
 // - 其余一律拒绝，列出文件名。无记忆整流时工作区有未提交的改动（dirty）或当前工作区有未提交的改动，都无从核对，一律拒绝。
+// 记下的提交之后、当前头之前（含）若有登记过的运行时兼容提交（见 RUNTIME_COMPATIBLE_COMMITS），它们须从记下的提交起一个接一个
+// （每个的父提交即前一个，中间没有未登记的提交），且各自只改了登记的文件；这时当前代码改与其中最后一个比较，即另允许差在这些
+// 提交登记的文件上。
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
@@ -102,11 +105,13 @@ export function harnessChangesSince(repoDir: string, commit: string): HarnessCha
   });
 }
 
-// 核对：无记忆整流时的 harness 与当前代码之间只差定点对照自己的文件（及只影响报告的文件）
+// 核对：无记忆整流时的 harness（及其后登记过的运行时兼容提交）与当前代码之间只差定点对照自己的文件（及只影响报告的文件）
 export function assertHarnessMatches(
   repoDir: string,
   recorded: HarnessRef,
-  current: HarnessRef
+  current: HarnessRef,
+  git: HarnessGit = harnessGit(repoDir),
+  registry: readonly RuntimeCompatibleCommit[] = RUNTIME_COMPATIBLE_COMMITS
 ): void {
   if (recorded.dirty) {
     throw new HarnessMismatchError(
@@ -116,12 +121,53 @@ export function assertHarnessMatches(
   if (current.dirty) {
     throw new HarnessMismatchError("当前 harness 工作区有未提交的改动：请先提交，再重跑");
   }
-  const violations = harnessViolations(harnessChangesSince(repoDir, recorded.commit));
+  const base = latestCompatibleSince(recorded.commit, current.commit, git, registry);
+  const violations = harnessViolations(harnessChangesSince(repoDir, base));
   if (violations.length > 0) {
+    const since =
+      base === recorded.commit
+        ? `无记忆整流时（${recorded.commit}）`
+        : `无记忆整流时（${recorded.commit}）及其后的运行时兼容提交（${base}）`;
     throw new HarnessMismatchError(
-      `当前 harness 与无记忆整流时（${recorded.commit}）相比，定点对照以外的文件不同，拒绝：${violations.join("、")}`
+      `当前 harness 与${since}相比，定点对照以外的文件不同，拒绝：${violations.join("、")}`
     );
   }
+}
+
+// 记下的提交之后、当前头之前（含）登记过的运行时兼容提交：须从记下的提交起一个接一个（每个的父提交即前一个），且各自只改了
+// 登记的文件（相对它的父提交），否则拒绝。返回其中最后一个；没有即记下的提交
+export function latestCompatibleSince(
+  recorded: string,
+  head: string,
+  git: HarnessGit,
+  registry: readonly RuntimeCompatibleCommit[] = RUNTIME_COMPATIBLE_COMMITS
+): string {
+  const same = (a: string, b: string) => git.isAncestor(a, b) && git.isAncestor(b, a);
+  const between = registry
+    .filter(
+      (e) =>
+        !same(e.commit, recorded) &&
+        git.isAncestor(recorded, e.commit) &&
+        git.isAncestor(e.commit, head)
+    )
+    .sort((a, b) => (git.isAncestor(a.commit, b.commit) ? -1 : 1));
+  let previous = recorded;
+  for (const entry of between) {
+    const parent = git.parentOf(entry.commit);
+    if (parent === null || !same(parent, previous)) {
+      throw new HarnessMismatchError(
+        `运行时兼容提交 ${entry.commit} 的父提交不是 ${previous}：两者之间有未登记的提交，拒绝`
+      );
+    }
+    const outside = git.changedFiles(parent, entry.commit).filter((f) => !entry.files.includes(f));
+    if (outside.length > 0) {
+      throw new HarnessMismatchError(
+        `运行时兼容提交 ${entry.commit} 相对它的父提交改了登记以外的文件，拒绝：${outside.sort().join("、")}`
+      );
+    }
+    previous = entry.commit;
+  }
+  return previous;
 }
 
 // ---------- 运行时兼容提交 ----------
@@ -150,6 +196,17 @@ export const RUNTIME_COMPATIBLE_COMMITS: readonly RuntimeCompatibleCommit[] = [
     reason:
       "额度类停用加最短停用期、排队作废单独计数（10 告警、30 停）；只改限额与作废计数，不改一步的执行",
   },
+  {
+    commit: "5275ca2da285cf6a92e37871697225e47cbe0bad",
+    files: [
+      "src/eval/model-gateway.ts",
+      "src/eval/model-gateway.test.ts",
+      "src/eval/step-admission.test.ts",
+      "docs/audits/2026-09-23-stream-repair-2d2a56d.md",
+    ],
+    reason:
+      "额度停用期按错误正文里的重置时刻（加 2 分钟、夹在 5 分钟至 6 小时），拿不到按封顶 60 分钟；只改限额，不改一步的执行",
+  },
 ];
 
 // 核对记下的版本集合要用到的 git 查询
@@ -158,6 +215,8 @@ export interface HarnessGit {
   isAncestor(a: string, b: string): boolean;
   // a 到 b 之间改过的文件
   changedFiles(a: string, b: string): string[];
+  // 第一个父提交（完整提交号）；没有为 null
+  parentOf(commit: string): string | null;
 }
 
 export function harnessGit(repoDir: string): HarnessGit {
@@ -179,6 +238,16 @@ export function harnessGit(repoDir: string): HarnessGit {
       })
         .split("\n")
         .filter((l) => l !== "");
+    },
+    parentOf(commit) {
+      try {
+        return execFileSync("git", ["-C", repoDir, "rev-parse", "--verify", `${commit}^`], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+      } catch {
+        return null;
+      }
     },
   };
 }

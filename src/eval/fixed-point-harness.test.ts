@@ -9,6 +9,7 @@ import {
   assertHarnessMatches,
   type HarnessGit,
   HarnessMismatchError,
+  harnessGit,
   harnessViolations,
   normalizeForBehavior,
   RUNTIME_COMPATIBLE_COMMITS,
@@ -175,6 +176,7 @@ function fakeGit(
   return {
     isAncestor: (a, b) => a === b || ancestors.some(([x, y]) => x === a && y === b),
     changedFiles: (a, b) => changed[`${a}..${b}`] ?? [],
+    parentOf: () => null,
   };
 }
 
@@ -243,5 +245,85 @@ test("运行时兼容提交登记表：每条是完整提交号，写明允许�
     assert.match(entry.commit, /^[0-9a-f]{40}$/);
     assert.ok(entry.files.length > 0);
     assert.ok(entry.reason.length > 0);
+  }
+});
+
+const GATEWAY = ["export function holdMs(): number {", "  return 240;", "}", ""].join("\n");
+
+test("harness 核对（真实 git）：记下的提交之后、当前头之前有登记过的运行时兼容提交，另允许差在它登记的文件上；兼容提交之后或之前含未登记的提交改了共用文件、兼容提交改了登记以外的文件，都拒绝", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-fp-compat-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+  const write = (file: string, content: string) => {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    writeFileSync(join(dir, file), content);
+  };
+  const commit = (message: string) => {
+    git("add", "-A");
+    git("commit", "-q", "-m", message);
+    return git("rev-parse", "HEAD");
+  };
+  const clean = (sha: string) => ({ commit: sha, dirty: false });
+  const entry = (sha: string) => ({
+    commit: sha,
+    files: ["src/eval/model-gateway.ts"],
+    reason: "只改限额",
+  });
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.name", "t");
+    git("config", "user.email", "t@example.invalid");
+    write("src/eval/stream-runner.ts", RUNNER);
+    write("src/eval/model-gateway.ts", GATEWAY);
+    const recorded = commit("base");
+    write("src/eval/model-gateway.ts", GATEWAY.replace("240", "60"));
+    const compat = commit("compat");
+    write("src/eval/fixed-point-rerun.ts", "export const x = 1;\n");
+    const head = commit("fixed point");
+    const g = harnessGit(dir);
+    // 当前头在记下的提交之后又含一个已登记的兼容提交：通过
+    assert.doesNotThrow(() =>
+      assertHarnessMatches(dir, clean(recorded), clean(head), g, [entry(compat)])
+    );
+    // 同一个提交没登记：按原口径拒绝，列出它改的文件
+    assert.throws(
+      () => assertHarnessMatches(dir, clean(recorded), clean(head), g, []),
+      (e: unknown) =>
+        e instanceof HarnessMismatchError && /拒绝：src\/eval\/model-gateway\.ts$/.test(String(e))
+    );
+    // 兼容提交之后又有未登记的提交改了共用文件：拒绝
+    write("src/eval/stream-runner.ts", RUNNER.replace('"on"', '"ON"'));
+    const after = commit("unregistered after");
+    assert.throws(
+      () => assertHarnessMatches(dir, clean(recorded), clean(after), g, [entry(compat)]),
+      (e: unknown) =>
+        e instanceof HarnessMismatchError && /拒绝：src\/eval\/stream-runner\.ts$/.test(String(e))
+    );
+    // 未登记的提交夹在记下的提交与兼容提交之间：拒绝
+    git("checkout", "-q", "-b", "between", recorded);
+    write("src/eval/stream-runner.ts", RUNNER.replace('"on"', '"ON"'));
+    commit("unregistered before");
+    write("src/eval/model-gateway.ts", GATEWAY.replace("240", "60"));
+    const compatAfterGap = commit("compat after gap");
+    assert.throws(
+      () =>
+        assertHarnessMatches(dir, clean(recorded), clean(compatAfterGap), g, [
+          entry(compatAfterGap),
+        ]),
+      (e: unknown) => e instanceof HarnessMismatchError && /之间有未登记的提交/.test(String(e))
+    );
+    // 兼容提交改了登记以外的文件：拒绝，列出文件名
+    git("checkout", "-q", "-b", "wide", recorded);
+    write("src/eval/model-gateway.ts", GATEWAY.replace("240", "60"));
+    write("src/eval/stream-runner.ts", RUNNER.replace('"on"', '"ON"'));
+    const wide = commit("compat too wide");
+    assert.throws(
+      () => assertHarnessMatches(dir, clean(recorded), clean(wide), g, [entry(wide)]),
+      (e: unknown) =>
+        e instanceof HarnessMismatchError &&
+        /登记以外的文件，拒绝：src\/eval\/stream-runner\.ts/.test(String(e))
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
