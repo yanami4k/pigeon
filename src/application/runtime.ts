@@ -49,7 +49,9 @@ import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace
 import {
   createRunCommandTool,
   RUN_COMMAND_TOOL,
+  type RunCommandApproval,
   RunCommandParamsSchema,
+  runCommandTexts,
 } from "../tools/run-command.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { createToolGovernance } from "./governance.ts";
@@ -134,6 +136,13 @@ export interface RuntimeDeps {
 export const TRUNCATION_GUIDANCE =
   "工具调用若因输出上限未执行，把改动拆成几次较小的调用重发，不要原样重发；单次编辑只改需要改的那一段。";
 
+// 系统提示里写操作的审批说法（170 ④），按本会话的审批状态取
+const WRITE_APPROVAL_SENTENCES: Readonly<Record<RunCommandApproval, string>> = {
+  yolo: "写操作自动批准。",
+  prompt: "写操作可能需要人工批准。",
+  none: "需要批准的写操作会被拒绝（本会话没有人工审批通道）。",
+};
+
 export interface RuntimeBundle {
   adapter: PiRuntimeAdapter;
   eventLog: JsonlEventLog;
@@ -198,6 +207,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     eventLog,
     restored: deps.restoredGrants,
   });
+  // 170 ④：本会话的审批状态——委派策略在场时取其审批模式，否则取 yolo 旗标；非 yolo 时看有没有注入审批通道。
+  // run_command 的三处说明与系统提示里的审批说法都按它与执行端的平台生成，不写死本地、人工批准的说法
+  const approvalMode = deps.toolPolicy?.approvalMode ?? (deps.yolo ? "yolo" : "prompt");
+  const approval: RunCommandApproval =
+    approvalMode === "yolo" ? "yolo" : deps.createApprovalHandler !== undefined ? "prompt" : "none";
+  const commandTexts = runCommandTexts({ platform: workspaceHost.platform, approval });
   const registry = new ToolRegistry();
   registry.register({
     name: "read_file",
@@ -218,7 +233,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // M5.5 S5（决策 048）：exec 档——永不自动放行，[a] 收窄为精确命令串
   registry.register({
     name: RUN_COMMAND_TOOL,
-    description: "在工作区根运行一条命令（不经 shell）",
+    description: commandTexts.registry,
     parameters: RunCommandParamsSchema,
     tier: "exec",
     pathConfinement: { kind: "workspace" },
@@ -244,8 +259,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const basePrompt =
     editSentence +
     TRUNCATION_GUIDANCE +
-    "写操作可能需要人工批准。" +
-    "用 run_command 运行命令（不经 shell，不支持管道与 && 串联；每条命令都要人工批准）。" +
+    WRITE_APPROVAL_SENTENCES[approval] +
+    commandTexts.prompt +
     "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
     "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
@@ -372,6 +387,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
         host: workspaceHost,
+        approval,
         commands: commandsConfig.commands,
         ...(deps.commandRole !== undefined
           ? { allowlist: commandsConfig.roles[deps.commandRole] ?? [] }

@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { REPLACE_EDIT_DESCRIPTION } from "../tools/replace-edit.ts";
+import { runCommandTexts } from "../tools/run-command.ts";
 import { runHeadless } from "./headless.ts";
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加
@@ -19,8 +20,9 @@ const HASHLINE_PROMPT =
   "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
   "用 edit_file 按锚点编辑。" +
   TRUNCATION_GUIDANCE +
-  "写操作可能需要人工批准。" +
-  "用 run_command 运行命令（不经 shell，不支持管道与 && 串联；每条命令都要人工批准）。" +
+  // 审批与 run_command 的说法按执行端与审批状态生成（170 ④）；本文件的运行一律 yolo、本地执行端
+  "写操作自动批准。" +
+  runCommandTexts({ platform: process.platform, approval: "yolo" }).prompt +
   "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
   "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
 

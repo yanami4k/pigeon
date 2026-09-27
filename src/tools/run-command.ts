@@ -139,6 +139,57 @@ export interface RunCommandOptions {
   env?: NodeJS.ProcessEnv;
   // 平台（缺省 process.platform；决定 .cmd / .bat 解析与 shell 程序）；只对缺省的本地执行端生效，注入 host 时以 host 为准
   platform?: NodeJS.Platform;
+  // 本会话的审批状态（只影响工具说明，审批本身由治理层判定）；缺省按有人工审批
+  approval?: RunCommandApproval;
+}
+
+// 审批状态（170 ④）：yolo 为命令自动批准；prompt 为有人工审批通道；none 为没有审批通道（无人值守又未放权），
+// 需要批准的一律被拒绝，只有放权规则放行的能执行
+export type RunCommandApproval = "yolo" | "prompt" | "none";
+
+export interface RunCommandTexts {
+  // 工具登记里的描述
+  registry: string;
+  // 系统提示里介绍 run_command 的一句
+  prompt: string;
+  // 发给模型的工具说明
+  tool: string;
+}
+
+// 三处说明按实际执行端与审批状态生成（170 ④）：需要 shell 的命令在 Windows 上经 cmd.exe、其余平台（含容器）经 /bin/sh -c；
+// 是否要人工批准取审批状态。文字只陈述事实，与 spawnPlan 与治理层的实际行为一致
+export function runCommandTexts(input: {
+  platform: NodeJS.Platform;
+  approval: RunCommandApproval;
+}): RunCommandTexts {
+  const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
+  const toolShell = {
+    yolo: `管道、重定向、&& 串联等需要 shell 的命令经 ${shell} 运行。`,
+    prompt: `管道、重定向、&& 串联等需要 shell 的命令只在人确认后经 ${shell} 运行，尽量拆成单条命令。`,
+    none: `管道、重定向、&& 串联等需要 shell 的命令须有放权规则允许才经 ${shell} 运行。`,
+  }[input.approval];
+  const toolApproval = {
+    yolo: "本会话的命令自动批准。",
+    prompt: "每条命令都需要人工批准，除非本会话已放行这条一模一样的命令。",
+    none: "本会话没有人工审批通道：未被放权规则放行的命令会被拒绝。",
+  }[input.approval];
+  const promptShell = {
+    yolo: `经 ${shell} 执行`,
+    prompt: `须经人确认后经 ${shell} 执行，尽量拆成单条命令`,
+    none: `须有放权规则允许才经 ${shell} 执行`,
+  }[input.approval];
+  const promptApproval = {
+    yolo: "命令自动批准",
+    prompt: "每条命令都要人工批准",
+    none: "本会话没有人工审批通道，未被放权规则放行的命令会被拒绝",
+  }[input.approval];
+  return {
+    registry: `在工作区根运行一条命令（普通命令直接执行，需要 shell 语义的经 ${shell} 执行）`,
+    prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令${promptShell}；${promptApproval}。`,
+    tool:
+      `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
+      "可用 .pigeon/commands.json 登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化。",
+  };
 }
 
 // 命令串 → 参数数组：空白切分；单引号内原样；双引号内只认 \" 与 \\ 两种转义；
@@ -292,10 +343,7 @@ export function createRunCommandTool(
   return {
     name: RUN_COMMAND_TOOL,
     label: RUN_COMMAND_TOOL,
-    description:
-      "在工作区根运行一条命令。普通命令不经 shell 直接执行；管道、重定向、&& 串联等需要 shell 的命令只在人确认后" +
-      "以 shell 运行，尽量拆成单条命令。每条命令都需要人工批准，除非本会话已放行这条一模一样的命令。" +
-      "可用 .pigeon/commands.json 登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化。",
+    description: runCommandTexts({ platform, approval: options.approval ?? "prompt" }).tool,
     parameters: RunCommandParamsSchema,
     executionMode: "sequential",
     inspectCommand: inspectParams,
