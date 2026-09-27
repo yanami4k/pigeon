@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import {
   branchEntries,
   locateSessionFile,
@@ -440,6 +440,48 @@ test("双写：新存储建不起文件时向标准错误输出告警一次，�
     assert.equal(old.entries.length, 4);
     assert.equal(old.unfinishedRuns.length, 0);
     assert.equal(locateSessionFile(sessionsDir, sessionId), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("双写：双写之前就存在的旧会话（旧账本已有记录、新存储没有文件）续跑时不在新存储里建文件，只写旧账本、不告警", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-dual-legacy-"));
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionId = newSessionId();
+    // 双写之前的会话：只有旧账本
+    const legacy = new JsonlEventLog(sessionsDir, sessionId);
+    legacy.appendBreaker({
+      toolName: "edit_file",
+      toolCallId: "tc-old",
+      scope: "tool",
+      count: 3,
+      threshold: 3,
+      at: 1,
+      runId: asRunId("run_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
+    });
+    legacy.close();
+    const warnings: string[] = [];
+    const bundle = buildRuntime({
+      streamFn: createFakeStreamFn({ replies: [{ text: "接着干" }] }),
+      workspaceRoot: root,
+      sessionId,
+      yolo: true,
+      provider: "custom",
+      modelId: "custom",
+      homeDir: root,
+      storeWarn: (line) => warnings.push(line),
+    });
+    const run = await bundle.adapter.run("续跑");
+    bundle.grantStore.create({ tool: "edit_file", firstCall: { toolCallId: "tc", args: {} } });
+    await disposeRuntime(bundle);
+    assert.equal(run.status, "completed");
+    assert.equal(locateSessionFile(sessionsDir, sessionId), undefined, "新存储里没有这个会话");
+    assert.deepEqual(warnings, []);
+    const old = materializeSession(sessionsDir, sessionId);
+    assert.equal(old.entries.length, 2, "旧账本照写");
+    assert.equal(old.grantCreateds.length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

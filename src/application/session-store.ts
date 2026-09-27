@@ -1,11 +1,14 @@
 // 账本重构双写接线（决策 206）：旧账本照写照读，新会话存储同时写入；本段不改任何读者，最后一段停写旧账本时连同本文件删除。
 // - 打开：每个运行面按会话号列目录找到已有的会话文件（续跑、分支、收尾后补写验证），有即打开续写，没有即新建；
-//   worker 与分支会话的来历在新建时写进文件头（父会话号与 metadata，177）。
+//   worker 与分支会话的来历在新建时写进文件头（父会话号与 metadata，177）。双写之前就存在的旧会话（新存储里没有文件、
+//   旧账本已有记录）续跑时不建文件，过渡期只写旧账本：新存储只放双写开始后创建的会话。
 // - 写入点：在写旧账本的同一处先写旧账本、再写新存储。运行面自己写消息、Run 开始与收尾（pi-runtime/adapter.ts）；
 //   验证记录、代码快照、worker 派出与收尾、分叉、授权建立与撤销由各写入点经这里的转换写入。
 //   写不进旧账本即放弃的动作（授权、派出、分叉）在旧账本失败时新存储也不写；验证已经做了，旧记录写失败时新存储照写。
 // - 故障：新存储的任何失败都是内部故障——向标准错误输出去重告警（同一个运行面里同一类故障只报一次，文案说明后果），
 //   不中断运行、不影响旧账本；口径与快照器、会话树写穿的告警一致。
+import { existsSync, statSync } from "node:fs";
+import { JsonlEventLog } from "../persistence/event-log.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import {
   branchEntries,
@@ -101,7 +104,25 @@ function branchMetadata(branch: BranchHeaderInput): NonNullable<SessionHeaderMet
   };
 }
 
-// 打开一个会话的新存储写者：已有会话文件即打开续写，否则以 cwd 新建
+// 双写之前就存在的旧会话的写者：什么都不写、不建文件、不告警
+function legacySessionStore(sessionId: string): SessionStoreWriter {
+  return {
+    sessionId,
+    appendMessage: () => {},
+    append: () => {},
+    flush: async () => {},
+    filePath: async () => undefined,
+    close: async () => {},
+  };
+}
+
+// 旧账本里这个会话已有记录（在打开新存储之前）
+function hasLegacyRecords(sessionsDir: string, sessionId: string): boolean {
+  const path = JsonlEventLog.filePathFor(sessionsDir, sessionId as never);
+  return existsSync(path) && statSync(path).size > 0;
+}
+
+// 打开一个会话的新存储写者：已有会话文件即打开续写；没有文件而旧账本已有记录的（双写之前的旧会话）不写；否则以 cwd 新建
 export function openSessionStore(input: {
   sessionsDir: string;
   sessionId: string;
@@ -114,6 +135,9 @@ export function openSessionStore(input: {
     existingPath = locateSessionFile(input.sessionsDir, input.sessionId)?.path;
   } catch (error) {
     input.onFault(new SessionStoreFault("定位会话文件", error));
+  }
+  if (existingPath === undefined && hasLegacyRecords(input.sessionsDir, input.sessionId)) {
+    return legacySessionStore(input.sessionId);
   }
   return openSessionStoreWriter({
     sessionsRoot: input.sessionsDir,
