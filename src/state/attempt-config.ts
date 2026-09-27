@@ -15,6 +15,9 @@ export const VerifyStepSchema = Type.Object({
   // 在哪个目录下执行（相对工作区根、正斜杠，不得越出工作区；加法式可缺省，缺省即工作区根）。
   // 工具报出的相对路径据此换算成相对工作区根的路径
   cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
+  // 这一步用的检查工具（决策 170 ③，加法式可缺省）：据它按工具公开的非正常退出码识别工具自身崩溃（表在 state/verify-steps.ts）；
+  // 缺省即不识别
+  tool: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
 });
 export type VerifyStep = Static<typeof VerifyStepSchema>;
 

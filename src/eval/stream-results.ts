@@ -59,6 +59,9 @@ export interface StreamResultLine {
   repairBudgetExhausted?: boolean | null;
   // 验证之前发现 agent 改过人写测试并还原的次数（每次验证至多计 1）；未开回炉为 null
   humanTestRestores: number | null;
+  // 验证工具故障的次数（决策 170 ③）：这一步各次验证里检查工具自身崩溃、重跑一次仍崩溃的步数合计（不计入验证结论）；
+  // 未开回炉或没跑 agent 为 null。这个字段之前写下的旧结果行没有它
+  verifyToolFaults: number | null;
   // agent 是否改了依赖声明文件（与人在该步的版本不同）：切环境一律按人的声明，这里只记下；没有依赖声明或没跑 agent 为 null
   agentChangedDeps: boolean | null;
   // 人的代码在这一步没过验证门（清单里的标记，见开跑前置检查）
@@ -165,6 +168,7 @@ export const STREAM_RESULT_FIELDS = [
   "repairRounds",
   "finalVerdict",
   "humanTestRestores",
+  "verifyToolFaults",
   "agentChangedDeps",
   "humanFailsGate",
   "runIdentity",

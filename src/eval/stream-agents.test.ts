@@ -975,6 +975,37 @@ test("Pigeon agent：空回复异常结束不是模型服务故障——不报�
   }
 });
 
+test("Pigeon agent：验证里检查工具自身崩溃（重跑一次仍崩溃）不判失败、不回炉，步结果带工具故障次数", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const streamFn = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
+    const agent = pigeonStepAgent({
+      streamFn,
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    });
+    const steps = [
+      { name: "验证", command: "grep -qx fixed a.txt" },
+      { name: "mypy", command: "echo 'please use --show-traceback'; exit 2", tool: "mypy" },
+    ];
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS["search-only"],
+        target: { container: "box", root: ws.containerRoot },
+        verify: { steps, command: "[验证] …；[mypy] …", timeoutMs: 60_000 },
+      })
+    );
+    assert.equal(streamFn.calls.length, 2, "不开回炉轮");
+    assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "pass", toolFaults: 1 });
+    assert.equal(out.interrupted, undefined);
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
 test("Pigeon agent：推送记忆的格子把开关交给 headless——推送记忆尚未实现，这一步报错、不发模型请求（作业随之停下并说明）", async () => {
   for (const condition of ["search-push", "push-only"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));

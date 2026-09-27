@@ -18,8 +18,9 @@ import type { AttemptVerifiedInput, AttemptVerifiedRecord } from "../state/event
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { SessionEntrySink } from "../state/session-entries.ts";
 import {
-  combineStepVerdicts,
-  type VerifyStepResult,
+  isToolCrash,
+  type VerifyStepOutcome,
+  verdictOfSteps,
   verifyStepsOf,
 } from "../state/verify-steps.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
@@ -87,52 +88,62 @@ export interface VerifyAttemptInput {
 
 export interface VerifyAttemptResult {
   outcome: CheckOutcome;
-  // 决策 159：分步配置下的各步结论（单条命令配置缺省）
-  steps?: VerifyStepResult[];
+  // 决策 159：分步配置下的各步结论（单条命令配置缺省）；检查工具自身崩溃的步带工具故障标记（决策 170 ③）
+  steps?: VerifyStepOutcome[];
   // 落盘成功时在场
   record?: AttemptVerifiedRecord;
   recordError?: unknown;
 }
 
 // 分步配置（决策 159）：各步依次执行、各出结论，前一步失败不跳过后续；超时按每步各自计时。
-// 整体结论为各步合取；整体退出码取第一个失败步骤的（通过为 0，无法判定为空）；整体输出为各步输出按步分段后的末尾
+// 检查工具自身崩溃（决策 170 ③）：声明了检查工具的步以该工具的崩溃退出码收尾即重跑一次，按重跑的结果记；仍崩溃即标工具故障。
+// 整体结论为不是工具故障的各步的合取；整体退出码取第一个失败步骤的（通过为 0，无法判定为空）；整体输出为各步输出按步分段后的末尾
 async function runVerifySteps(
   config: VerifyConfig,
   workspace: string,
   host: WorkspaceHost | undefined
-): Promise<{ outcome: CheckOutcome; steps: VerifyStepResult[] }> {
+): Promise<{ outcome: CheckOutcome; steps: VerifyStepOutcome[] }> {
   const startedAt = Date.now();
-  const outcomes: Array<{ name: string; command: string; cwd?: string; outcome: CheckOutcome }> =
-    [];
+  const outcomes: Array<{
+    name: string;
+    command: string;
+    cwd?: string;
+    outcome: CheckOutcome;
+    toolFault: boolean;
+  }> = [];
   for (const step of verifyStepsOf(config)) {
-    const outcome = await runVerifyCommand(
-      step.command,
-      workspace,
-      step.cwd,
-      config.timeoutMs,
-      host
-    );
+    const run = () => runVerifyCommand(step.command, workspace, step.cwd, config.timeoutMs, host);
+    let outcome = await run();
+    let toolFault = false;
+    if (isToolCrash(step.tool, outcome.exitCode)) {
+      outcome = await run();
+      toolFault = isToolCrash(step.tool, outcome.exitCode);
+    }
     outcomes.push({
       name: step.name,
       command: step.command,
       ...(step.cwd !== undefined ? { cwd: step.cwd } : {}),
       outcome,
+      toolFault,
     });
   }
-  const steps: VerifyStepResult[] = outcomes.map(({ name, cwd, outcome }) => ({
+  const steps: VerifyStepOutcome[] = outcomes.map(({ name, cwd, outcome, toolFault }) => ({
     name,
     exitCode: outcome.exitCode,
     verdict: outcome.verdict,
     output: outcome.output,
     truncated: outcome.truncated,
     ...(cwd !== undefined ? { cwd } : {}),
+    ...(toolFault ? { toolFault: true as const } : {}),
   }));
-  const verdict = combineStepVerdicts(steps.map((step) => step.verdict));
-  const firstFailed = steps.find((step) => step.verdict === "fail");
+  const verdict = verdictOfSteps(steps);
+  const firstFailed = steps.find((step) => step.verdict === "fail" && step.toolFault !== true);
   const sections = outcomes
     .map(
-      ({ name, outcome }) =>
-        `== [${name}] ${outcome.verdict}（退出码 ${outcome.exitCode ?? "无"}）==\n${outcome.output.trimEnd()}`
+      ({ name, outcome, toolFault }) =>
+        `== [${name}] ${outcome.verdict}（退出码 ${outcome.exitCode ?? "无"}${
+          toolFault ? "；工具故障：检查工具自身崩溃，重跑一次仍崩溃，不计入结论" : ""
+        }）==\n${outcome.output.trimEnd()}`
     )
     .join("\n\n");
   const encoded = Buffer.from(sections, "utf8");

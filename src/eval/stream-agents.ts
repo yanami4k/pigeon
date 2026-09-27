@@ -97,9 +97,12 @@ function watchLimits(
   };
 }
 
-// Pigeon 步的结果：回炉字段另带"agent 改过人写测试"的计数——有几次验证之前发现并还原了 agent 对人写测试的改动
+// Pigeon 步的结果：回炉字段另带"agent 改过人写测试"的计数——有几次验证之前发现并还原了 agent 对人写测试的改动；
+// 以及验证工具故障的次数（决策 170 ③，有才带）
 export interface PigeonStepAgentResult extends StepAgentResult {
-  repair: (NonNullable<StepAgentResult["repair"]> & { humanTestRestores?: number }) | null;
+  repair:
+    | (NonNullable<StepAgentResult["repair"]> & { humanTestRestores?: number; toolFaults?: number })
+    | null;
 }
 
 export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
@@ -289,6 +292,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                     : null,
                 ...(run.repair.protectedRestores !== undefined
                   ? { humanTestRestores: run.repair.protectedRestores }
+                  : {}),
+                ...(run.repair.toolFaults !== undefined
+                  ? { toolFaults: run.repair.toolFaults }
                   : {}),
               },
         ...(providerFailed

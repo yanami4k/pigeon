@@ -18,6 +18,7 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     repairRounds: null,
     finalVerdict: null,
     humanTestRestores: null,
+    verifyToolFaults: null,
     agentChangedDeps: null,
     humanFailsGate: false,
     runIdentity: null,

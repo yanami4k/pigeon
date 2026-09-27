@@ -104,8 +104,8 @@ export const RunEndDataSchema = Type.Object({
 });
 export type RunEndData = Static<typeof RunEndDataSchema>;
 
-// 验证记录的一步：在旧的各步结论上预留"工具故障"标记——检查工具本身崩溃（以各检查工具公开的非正常退出码识别，
-// 重跑一次仍崩）时标记，整体结论只看其余步。识别另行施工，本段只留字段
+// 验证记录的一步：在旧的各步结论上加"工具故障"标记——检查工具本身崩溃（以各检查工具公开的非正常退出码识别，
+// 重跑一次仍崩）时标记，整体结论只看其余步（决策 170 ③；识别表见 state/verify-steps.ts）
 export const VerificationStepSchema = Type.Object({
   ...VerifyStepResultSchema.properties,
   toolFault: Type.Optional(Type.Literal(true)),

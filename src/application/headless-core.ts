@@ -150,6 +150,8 @@ export interface HeadlessRepairSummary {
   closed: boolean;
   // 给了受保护文件时：有几次验证之前发现 agent 改过受保护文件并将其还原（每次验证至多计 1）
   protectedRestores?: number;
+  // 这一步各次验证里标了工具故障（检查工具自身崩溃，重跑一次仍崩溃，决策 170 ③）的步数合计；没有即缺省
+  toolFaults?: number;
 }
 
 // 回炉的启动前检查（决策 142 / 143）：设定不成立即启动报错，不装配运行面
@@ -335,6 +337,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let stepStart: StepStartMark | undefined;
   // 验证前发现 agent 改过受保护文件并还原的次数
   let protectedRestores = 0;
+  // 各次验证里的工具故障步数合计
+  let toolFaults = 0;
   try {
     if (repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined) {
       stepStart = await options.workspaceHost.markStepStart();
@@ -404,6 +408,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       });
       const { verdict } = verified.outcome;
       lastVerdict = verdict;
+      toolFaults += (verified.steps ?? []).filter((step) => step.toolFault === true).length;
       verification = { verdict, recorded: verified.record !== undefined };
       // 验证进行中来了外部中止：验证一结束即停，不回炉
       if (externallyAborted) {
@@ -493,6 +498,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   }
   if (repair !== undefined && options.protectedFiles !== undefined) {
     repair = { ...repair, protectedRestores };
+  }
+  if (repair !== undefined && toolFaults > 0) {
+    repair = { ...repair, toolFaults };
   }
   return {
     sessionId,

@@ -144,3 +144,17 @@ test("报告：每步得分表（分段与合并）、多遍均值与范围、�
   assert.match(md, /旧口径的结果行 1 条/);
   assert.doesNotMatch(md, /终点|补跑/);
 });
+
+test("报告：次要指标单列验证工具故障的步次（决策 170 ③）——第一遍各步合计；未开回炉的条件记为—", () => {
+  const lines = [
+    line("neither", 1, [1, 1], { verifyToolFaults: 2 }),
+    line("neither", 5, [1, 1], { verifyToolFaults: 1 }),
+    line("neither", 1, [1, 1], { attempt: 2, verifyToolFaults: 5 }),
+    line("minimal", 1, [1, 1], { verifyToolFaults: null }),
+  ];
+  const md = renderStreamReport(lines, { title: "工具故障", segments });
+  const secondary = md.slice(md.indexOf("## 次要指标"));
+  assert.match(secondary, /\| 依赖环境选不出而作废的步 \| 验证工具故障（步次） \|/);
+  assert.match(secondary, /^\| neither \|.*\| 3 \|$/m);
+  assert.match(secondary, /^\| minimal \|.*\| — \|$/m);
+});
