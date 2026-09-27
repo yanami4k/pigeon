@@ -112,6 +112,7 @@ async function main(argv: string[]): Promise<void> {
                   yolo: flags.yolo,
                   persistThinking: flags.persistThinking,
                   ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+                  ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
                   ...(verify !== undefined ? { verify } : {}),
                 },
               }),

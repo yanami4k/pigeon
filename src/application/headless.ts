@@ -48,6 +48,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
       ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
       ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
+      ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
       ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
       ...(options.verify !== undefined ? { verify: options.verify } : {}),
       ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),

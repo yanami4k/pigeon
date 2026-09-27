@@ -211,6 +211,9 @@ export async function openSessionRuntime(
             ? { thinking: request.flags.thinkingLevel }
             : {}),
           ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
+          ...(request.flags.compaction !== undefined
+            ? { compaction: request.flags.compaction }
+            : {}),
           ...(request.verify !== undefined ? { verify: request.verify } : {}),
           ...(startMcp !== undefined
             ? {

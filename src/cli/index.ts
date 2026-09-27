@@ -927,6 +927,7 @@ function forkHandlerOf(
         yolo: flags.yolo,
         persistThinking: flags.persistThinking,
         ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+        ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
         ...verifyOption(flags, governanceRoot),
       },
     });
