@@ -4,6 +4,11 @@
 // M4 S6（决策 3）：斜杠命令分发给 grant 治理面（/grants /revoke /grants save）。
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
+import {
+  compactFocusOf,
+  compactionNoticeText,
+  manualCompactionText,
+} from "../application/compaction-text.ts";
 import { sanitizeTerminalText } from "../application/format.ts";
 import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import { runSearchCommand } from "../application/search.ts";
@@ -72,7 +77,7 @@ export interface ReplOptions {
 }
 
 export async function runRepl(options: ReplOptions): Promise<void> {
-  const { adapter, ask, write } = options;
+  const { adapter, write } = options;
   write(
     "Pigeon M3 最小 CLI（内联审批 REPL）。输入任务回车运行；:quit 退出；" +
       "/grants 查看放权、/revoke <id> 撤销、/grants save <id> 升格固化。\n"
@@ -89,6 +94,19 @@ export async function runRepl(options: ReplOptions): Promise<void> {
     }
   };
   warnEvidenceGaps();
+  // 决策 189：每次压缩（自动或手动）打印一行压缩前后的 token 数
+  const unsubscribeCompaction = adapter.subscribeCompaction((notice) => {
+    write(`${compactionNoticeText(notice)}\n`);
+  });
+  try {
+    await replLoop(options, warnEvidenceGaps);
+  } finally {
+    unsubscribeCompaction();
+  }
+}
+
+async function replLoop(options: ReplOptions, warnEvidenceGaps: () => void): Promise<void> {
+  const { adapter, ask, write } = options;
   for (;;) {
     const line = await ask("pigeon> ");
     if (line === null) {
@@ -117,9 +135,19 @@ export async function runRepl(options: ReplOptions): Promise<void> {
           write(`${await options.fork(task.slice("/fork".length))}\n`);
           continue;
         }
+        // 决策 189：/compact [重点] 手动压缩——重点作为摘要的附加说明；压成时的一行提示由上面的订阅打印
+        if (tokens[0] === "compact") {
+          const text = manualCompactionText(await adapter.compact(compactFocusOf(task)));
+          if (text !== undefined) {
+            write(`${text}\n`);
+          }
+          continue;
+        }
         const handled = options.grants !== undefined && runGrantCommand(tokens, options.grants);
         if (!handled) {
-          write(`未知命令：${task}（可用 /search、/grants、/revoke <id>、/grants save <id>）\n`);
+          write(
+            `未知命令：${task}（可用 /compact [重点]、/search、/grants、/revoke <id>、/grants save <id>）\n`
+          );
         }
       } catch (error) {
         write(`命令失败：${error instanceof Error ? error.message : String(error)}\n`);

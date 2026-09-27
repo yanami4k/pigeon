@@ -2,6 +2,7 @@
 //（决策 030）、会话列表在 application/session-list.ts、检索在 application/search.ts、恢复流程在
 // application/resume.ts——全部与 cli 同一份逻辑；语法/语义错误响亮呈现（同 REPL 口径），
 // 未知命令如实说明。worker 与 resume 的具体动作由壳转交给对应视图模块。
+import { compactFocusOf } from "../application/compaction-text.ts";
 import { runGrantCommand } from "../application/grants.ts";
 import { runSearchCommand } from "../application/search.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
@@ -33,6 +34,7 @@ export interface CommandsHost {
   cancelCommand(workers: TuiWorkersFace, ref: string | undefined): void;
   workersStatusCommand(workers: TuiWorkersFace): void;
   resumeCommand(arg: string | undefined): void;
+  compactCommand(focus: string | undefined): void;
 }
 
 export function handleSlashCommand(host: CommandsHost, value: string): void {
@@ -99,6 +101,11 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       host.workersStatusCommand(workers);
       return;
     }
+    // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）
+    if (tokens[0] === "compact") {
+      host.compactCommand(compactFocusOf(value));
+      return;
+    }
     // S4：/resume <sessionId> 冷恢复对账 + 换绑续跑（异步流程，见 resume-view.ts）
     if (tokens[0] === "resume" && host.resumeConfigured()) {
       host.resumeCommand(tokens[1]);
@@ -117,7 +124,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       });
     if (!handled) {
       host.addSystem(
-        `未知命令：${value}（可用 /quit、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}）`
+        `未知命令：${value}（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}）`
       );
     }
   } catch (error) {

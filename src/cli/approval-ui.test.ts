@@ -180,10 +180,11 @@ test("终端边界净化（决策 036）：REPL 终态摘要 errorMessage 携带
   const outputs: string[] = [];
   const script = ["跑一下", ":quit"];
   const write = sanitizedWriter((text: string) => outputs.push(text));
-  // REPL 只消费 adapter.run 与 adapter.listenerErrors——结构替身即足（终态决议形状同
+  // REPL 只消费 adapter.run、adapter.listenerErrors 与压缩提示订阅——结构替身即足（终态决议形状同
   // RunResult：errorMessage 是模型/上游错误文本，半信任）
   const stub = {
     listenerErrors: () => [],
+    subscribeCompaction: () => () => {},
     run: async () => ({
       runId: asRunId("run_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
       status: "failed",

@@ -31,9 +31,15 @@
 //   TUI 投影，措辞与增量报数口径同 cli repl：启动即查 + 每次 run 收尾复查）。
 // - dispose 对称：取消键的订阅与监听器一律进 disposers，在 start/stop 里成对出现。
 import { Input, type Terminal, Text, TuiMainScreen } from "@earendil-works/pi-tui";
+import { compactionNoticeText, manualCompactionText } from "../application/compaction-text.ts";
 import { failureBadge, summarizeArgs } from "../application/format.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
-import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
+import type {
+  CompactionNotice,
+  ManualCompactionOutcome,
+  RunResult,
+  StreamTextDelta,
+} from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type {
@@ -87,6 +93,9 @@ export interface TuiRuntimeFace {
   interrupt(): Promise<void>;
   // S5 D2 可见化投影：事件落盘失败观察口（措辞与增量报数口径同 cli repl）
   listenerErrors(): unknown[];
+  // 决策 189：压缩完成的提示（自动与手动）与手动压缩；缺省（替身运行面）即不提示、/compact 不可用
+  subscribeCompaction?(listener: (notice: CompactionNotice) => void): () => void;
+  compact?(customInstructions?: string): Promise<ManualCompactionOutcome>;
 }
 
 // /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文（形状定义在 resume-view.ts）
@@ -212,6 +221,14 @@ export class PigeonTuiShell
       runtime.subscribe((event) => this.handleEvent(event)),
       runtime.subscribeStream((delta) => this.handleDelta(delta))
     );
+    // 决策 189：每次压缩（自动或手动）在消息区提示一行压缩前后的 token 数
+    const unsubscribeCompaction = runtime.subscribeCompaction?.((notice) => {
+      this.flow.addSystem(`[compact] ${compactionNoticeText(notice)}`);
+      this.tui.requestRender();
+    });
+    if (unsubscribeCompaction !== undefined) {
+      this.runtimeDisposers.push(unsubscribeCompaction);
+    }
   }
 
   stop(): void {
@@ -443,6 +460,33 @@ export class PigeonTuiShell
 
   resumeCommand(arg: string | undefined): void {
     dispatchResumeCommand(this, arg);
+  }
+
+  // 决策 189：/compact [重点] 手动压缩——压缩期间与 Run 同样占住输入（busy 语义）；压成时的一行提示由订阅给出，
+  // 没有压成时说明原因
+  compactCommand(focus: string | undefined): void {
+    const runtime = this.current.runtime;
+    if (runtime.compact === undefined) {
+      this.flow.addSystem("本会话不支持 /compact");
+      this.tui.requestRender();
+      return;
+    }
+    this.running = true;
+    this.updateStatus();
+    this.tui.requestRender();
+    const settleCompact = (line: string | undefined): void => {
+      this.running = false;
+      if (line !== undefined) {
+        this.flow.addSystem(`[compact] ${line}`);
+      }
+      this.updateStatus();
+      this.tui.requestRender();
+    };
+    runtime.compact(focus).then(
+      (outcome) => settleCompact(manualCompactionText(outcome)),
+      (error: unknown) =>
+        settleCompact(`压缩失败：${error instanceof Error ? error.message : String(error)}`)
+    );
   }
 
   // ---- 退出与取消（键位路由在 modal.ts）----
