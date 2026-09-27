@@ -325,3 +325,35 @@ test("双写：接真实写者，新文件里 Run 开始、消息、Run 收尾�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("收尾：Run 以异常结束（上游抛错）也写收尾条目，结束方式记出错并带异常文本；settled 等到收尾条目交出之后", async () => {
+  const { sink, captured } = captureSink();
+  const adapter = adapterWith([{ text: "不会用到" }], sink);
+  // 没有任何消息时上游 continue 直接抛错
+  await assert.rejects(adapter.continueRun());
+  await adapter.settled();
+  const last = captured.at(-1);
+  assert.equal(last?.kind, "entry");
+  const entry = (last as { entry: { customType: string; data: RunEndData } }).entry;
+  assert.equal(entry.customType, SessionEntryType.RunEnd);
+  assert.equal(entry.data.ending, "error");
+  assert.ok((entry.data.errorMessage ?? "").length > 0);
+  assert.equal(entry.data.messageCount, 0);
+  await adapter.dispose();
+});
+
+test("续跑：restoreMessages 以还原的消息作为对话上下文接着跑；跑过 Run 之后不能再还原", async () => {
+  const { sink } = captureSink();
+  const adapter = adapterWith([{ text: "接着说" }], sink);
+  adapter.restoreMessages([
+    { role: "user", content: [{ type: "text", text: "上次的问题" }], timestamp: 1 },
+  ] as AgentMessage[]);
+  const result = await adapter.continueRun();
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    adapter.transcript().map((message) => message.role),
+    ["user", "assistant"]
+  );
+  assert.throws(() => adapter.restoreMessages([]), /之前还原/);
+  await adapter.dispose();
+});

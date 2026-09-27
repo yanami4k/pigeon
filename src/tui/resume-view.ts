@@ -1,6 +1,5 @@
-// resume 与历史渲染（决策 067 拆分自 shell.ts，零行为变化）：/resume <sessionId> 的对账流程在
-// application/resume.ts（自动确证报告 → 剩余悬账人工确认 → human-confirmed resolution 落盘——
-// 写盘路径唯一，壳不另起）；人工确认用面板式单键（决策 031）；enterRepl 钩子 = 换绑运行面续跑
+// resume 与历史渲染（决策 067 拆分自 shell.ts）：/resume <sessionId> 的续跑流程在 application/resume.ts
+// （报告将还原的对话上下文与悬空的工具调用 → 换绑运行面，运行面装配时还原上下文，决策 183）；enterRepl 钩子 = 换绑运行面续跑
 //（同 sessionId 续写会话文件）。历史投影在 application/history.ts（与 cli --with-content 同一份）。
 // 换绑产物对本模块不透明（泛型）：壳持有运行面类型，本模块只把它原样交回壳的换绑动作。
 import { loadSessionHistory } from "../application/history.ts";
@@ -20,8 +19,6 @@ export interface SessionBinding<Runtime, Grants, Workers> {
 export interface ResumeOptions<Binding> {
   root: string;
   rebind: (sessionId: SessionId) => Binding | Promise<Binding>;
-  // M5.5 S4：目标会话的确证读取根（worker 会话 = 其工作树）；缺省 = root
-  workspaceRootFor?: (sessionId: SessionId) => string;
 }
 
 // 壳侧窄接口：resume 视图需要的壳状态与壳动作（resuming 状态由壳持有）
@@ -36,7 +33,6 @@ export interface ResumeViewHost<Binding> {
   hasRunningWorkers(): boolean;
   resumeOptions(): ResumeOptions<Binding> | undefined;
   historyLimit(): number | undefined;
-  askMenuChoice(prompt: string): Promise<string | null>;
   rebindSession(sessionId: SessionId, binding: Binding): void;
 }
 
@@ -67,14 +63,6 @@ export function handleResumeCommand<Binding>(
     host.addSystem("有 worker 仍在运行：先 /cancel 或等其收尾，再 /resume");
     return;
   }
-  // worker 会话的确证读取根是它自己的工作树（装配方注入解析；父会话或工作树缺失时拒绝）
-  let workspaceRoot: string | undefined;
-  try {
-    workspaceRoot = resume.workspaceRootFor?.(asSessionId(arg));
-  } catch (error) {
-    host.addSystem(`恢复失败：${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
   host.setResuming(true);
   host.updateStatus();
   host.render();
@@ -88,15 +76,12 @@ export function handleResumeCommand<Binding>(
   };
   void runResumeFlow({
     root: resume.root,
-    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
     sessionId: arg,
-    // 问答注入（决策 025 同形）：菜单提示落消息区，面板式单键捕获作答
-    ask: (prompt) => host.askMenuChoice(prompt),
     write: (text) => {
       host.addSystem(text.trimEnd());
       host.render();
     },
-    // 对账收口后续跑：换绑运行面（restoredGrants 种子与新运行面的装配在壳外的
+    // 续跑：换绑运行面（grant 种子、上下文还原与新运行面的装配在壳外的
     // rebind 工厂，同 cli resume 的 enterRepl 配方）；壳已停止则换绑无意义
     enterRepl: async () => {
       if (!host.isStarted()) return;

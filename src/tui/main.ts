@@ -24,7 +24,6 @@ import {
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "../application/session-runtime.ts";
-import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -165,8 +164,6 @@ async function main(argv: string[]): Promise<void> {
     // 旧运行面不受影响，壳继续留在原会话
     resume: {
       root: workspaceRoot,
-      // M5.5 S4：worker 会话的确证读取根是其工作树
-      workspaceRootFor: (targetId) => sessionRuntimeScope(workspaceRoot, targetId).workspaceRoot,
       rebind: async (targetId) => {
         // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）；
         // 决策 3b：固化 grant 种子物化。两者与 MCP 启动一并在 session-runtime.ts（与 cli resume 同一份）
@@ -178,7 +175,8 @@ async function main(argv: string[]): Promise<void> {
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
           createApprovalHandler: createHandler,
-          restoreGrants: true,
+          // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
+          resume: true,
         });
         const bundle = opened.bundle;
         const workers = workersFor(opened, opened.scope.parentSessionId);

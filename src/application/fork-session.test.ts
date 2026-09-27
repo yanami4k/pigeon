@@ -1,6 +1,7 @@
 // 主会话的分叉接线（M7 S6，决策 077 / 079）：
 // - --retry-on-fail 解析、按会话冻结；主会话一次尝试验证为失败后在后台从任务开始处分叉重试；
-// - 分叉后来源会话此后的 Run 实时写穿进会话树，与由账本重建的结果一致；恢复一个已在树里的会话同样接上写穿；
+// - 分叉读写新会话存储（账本重构 177 / 180）：来源会话文件记分叉条目，分支会话文件由 pi 的 fork 复制分叉点之前的历史，
+//   分支运行面在它上面续写；来源会话此后的 Run 照常写进自己的文件（派生会话树的写穿随之去掉）；
 // - 手动分叉命令 /fork [--at <条目号> | --at <Run 号前缀>:<条目号>] ["新输入"]：缺省分叉点是最近一次 Run 的任务开始处。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -9,15 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { openSessionTree, TREE_MAIN_LANE } from "../pi-runtime/session-tree.ts";
 import { newSessionId } from "../state/ids.ts";
 import { parseForkCommand, resolveForkPoint, runForkCommand } from "./fork-command.ts";
 import { parseLaunchFlags } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
-import { rebuildSessionTree } from "./session-tree.ts";
 
 const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
@@ -65,10 +65,6 @@ const edit = (content: string) => ({
   ],
 });
 
-type Lane = Awaited<ReturnType<Awaited<ReturnType<typeof openSessionTree>>["lanePath"]>>;
-const shape = (lane: Lane) =>
-  lane.map((entry) => ({ id: entry.id, parentId: entry.parentId, message: entry.message }));
-
 test("启动参数：--retry-on-fail 取非负整数，缺省 0；未允许的入口按未知参数处理", () => {
   assert.equal(parseLaunchFlags([], { usage: "u", retry: true }).retryOnFail, undefined);
   assert.equal(
@@ -79,7 +75,7 @@ test("启动参数：--retry-on-fail 取非负整数，缺省 0；未允许的�
   assert.throws(() => parseLaunchFlags(["--retry-on-fail", "1"], { usage: "u" }), /未知参数/);
 });
 
-test("主会话 --retry-on-fail 1：失败后后台分叉重试；分叉后来源会话的新 Run 实时写穿，与重建一致", async () => {
+test("主会话 --retry-on-fail 1：失败后后台分叉重试；分支文件从来源复制分叉点之前的历史，来源会话此后的 Run 照常写进自己的文件", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const sessionId = newSessionId();
@@ -112,25 +108,30 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试；分叉后来�
       branchId = afterRetry.sessionForkeds[0]?.branchSessionId;
       assert.ok(branchId !== undefined, "失败后分叉重试");
       assert.equal(afterRetry.sessionForkeds[0]?.trigger, "retry-on-fail");
-      // 分叉后来源会话继续：新 Run 实时写穿进 main 通道
+      // 分叉后来源会话继续：新 Run 照常写进来源会话自己的文件
       await opened.bundle.adapter.run("再问一个问题");
-      await opened.tree?.idle();
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const source = materializeSession(join(dir, ".pigeon", "sessions"), sessionId);
-    const tree = await openSessionTree({ governanceRoot: dir, rootSessionId: sessionId });
-    const main = shape(await tree.lanePath(TREE_MAIN_LANE));
-    assert.deepEqual(
-      main.map((entry) => entry.id),
-      source.entries.map((entry) => entry.id),
-      "来源会话分叉后的消息也写穿"
+    const sessionsDir = join(dir, ".pigeon", "sessions");
+    const source = loadStoreSession(sessionsDir, sessionId);
+    assert.ok(source !== undefined);
+    assert.equal(source.view.runs.length, 2);
+    assert.equal(source.view.forks[0]?.data.branchSessionId, branchId);
+    assert.equal(source.view.forks[0]?.data.trigger, "retry-on-fail");
+    const branch = loadStoreSession(sessionsDir, branchId as string);
+    assert.ok(branch !== undefined);
+    // 分支文件开头是来源会话首个 Run 的开始条目与任务消息（复制段），之后是分支自己的 Run
+    assert.equal(branch.file.header.parentSessionId, sessionId);
+    const copiedStart = branch.main[0];
+    assert.equal(copiedStart?.type, "custom");
+    assert.equal(
+      (copiedStart?.data as { runId?: string } | undefined)?.runId,
+      source.view.runs[0]?.runId
     );
-    const branch = shape(await tree.lanePath(branchId as string));
-    await tree.remove();
-    const rebuilt = await rebuildSessionTree({ governanceRoot: dir, rootSessionId: sessionId });
-    assert.deepEqual(shape(await rebuilt.lanePath(TREE_MAIN_LANE)), main);
-    assert.deepEqual(shape(await rebuilt.lanePath(branchId as string)), branch);
+    assert.equal(branch.view.runs.length, 1);
+    assert.notEqual(branch.view.runs[0]?.runId, source.view.runs[0]?.runId);
+    assert.equal(branch.view.runs[0]?.end?.ending, "completed");
   } finally {
     cleanup();
   }
@@ -159,8 +160,11 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
     try {
       await opened.bundle.adapter.run("第一个任务");
       await opened.bundle.adapter.run("第二个任务");
-      const session = materializeSession(join(dir, ".pigeon", "sessions"), sessionId);
-      const [first, second] = session.runStarteds.map((record) => record.runId);
+      await opened.bundle.sessionStore.flush();
+      const loaded = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+      assert.ok(loaded !== undefined);
+      const session = loaded.view;
+      const [first, second] = session.runs.map((run) => run.runId);
       assert.deepEqual(resolveForkPoint(session, {}), { runId: second, runSeq: 1 });
       assert.deepEqual(resolveForkPoint(session, { runSeq: 2 }), { runId: second, runSeq: 2 });
       assert.deepEqual(
@@ -186,6 +190,41 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
     const session = materializeSession(join(dir, ".pigeon", "sessions"), sessionId);
     assert.equal(session.sessionForkeds[0]?.trigger, "manual");
     assert.equal(session.sessionForkeds[0]?.forkPoint.runId, session.runStarteds[1]?.runId);
+  } finally {
+    cleanup();
+  }
+});
+
+test("主会话 --retry-on-fail 1、不配验证命令：Run 收尾后按新存储现算的标签判失败（输出截断即业务失败）并分叉重试", async () => {
+  const { dir, home, cleanup } = repo();
+  try {
+    const sessionId = newSessionId();
+    const opened = await openSessionRuntime({
+      governanceRoot: dir,
+      sessionId,
+      streamFn: createFakeStreamFn({
+        replies: [{ text: "说到一半", stopReason: "length" }, { text: "这次说完了" }],
+      }),
+      flags: { yolo: true, provider: "custom", modelId: "custom", persistThinking: true },
+      startMcp: noMcp,
+      homeDir: home,
+      retryOnFail: 1,
+    });
+    try {
+      await opened.bundle.adapter.run("讲个完整的故事");
+      await opened.retry?.idle();
+      assert.deepEqual(opened.retry?.errors(), []);
+    } finally {
+      await disposeRuntime(opened.bundle);
+    }
+    const source = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+    assert.ok(source !== undefined);
+    assert.equal(source.view.runs[0]?.end?.stopReason, "length");
+    assert.deepEqual(
+      source.view.forks.map((fork) => fork.data.trigger),
+      ["retry-on-fail"],
+      "标签判为失败才分叉重试"
+    );
   } finally {
     cleanup();
   }

@@ -16,7 +16,7 @@ import type {
   WorkerWorkspace,
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import { newSessionId, type ReceiptId, type RunId, type SessionId } from "../state/ids.ts";
+import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { RunStopCause } from "../state/session-entries.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
@@ -44,7 +44,6 @@ export interface WorkerRuntimeHandle {
   // 撞上限时带上原因（决策 206：运行面据此把 Run 收尾的结束方式一次写全）；取消与外部中止不带
   interrupt(cause?: RunStopCause): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
-  receiptIds(): ReceiptId[];
   // 末条 assistant 正文
   summary(): string;
   // M6（决策 064）：模型交回的结构化内容（末条 assistant 正文能解析成对象时在场）；
@@ -402,7 +401,6 @@ export class WorkerOrchestrator {
               changedFiles: this.#workspaces.changedFiles(entry.workspace),
             }
           : {}),
-        receiptIds: runtime.receiptIds(),
         summary: summary.slice(0, WORKER_SUMMARY_MAX_CHARS),
         summaryTruncated: summary.length > WORKER_SUMMARY_MAX_CHARS,
         ...(structured !== undefined ? { structured } : {}),

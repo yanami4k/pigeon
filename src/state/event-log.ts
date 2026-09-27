@@ -437,13 +437,14 @@ export const ChildSettledStatusSchema = Type.Union([
 export type ChildSettledStatus = Static<typeof ChildSettledStatusSchema>;
 
 // worker 结构化结果：分支、改动文件清单（工作树内相对路径）、receipt 列表、自述摘要。
+// receipt 列表自账本重构第二段起不再写（回执随 184 停写后失去来源），旧记录里的照常可读，故改可缺省。
 // M6（决策 064）：无工作区的 worker（已退役的 Reviewer，决策 137）没有分支与改动文件，两项改可缺省；
 // structured 承载模型交回的结构化内容：仍在写入（编排器收尾时取运行面的结构化结果），第一版的读取方
 // （候选落盘）随决策 137 退役后，生产代码暂无读取方
 export const ChildResultSchema = Type.Object({
   branch: Type.Optional(Type.String({ minLength: 1 })),
   changedFiles: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-  receiptIds: Type.Array(ReceiptIdSchema),
+  receiptIds: Type.Optional(Type.Array(ReceiptIdSchema)),
   summary: Type.String(),
   summaryTruncated: Type.Boolean(),
   structured: Type.Optional(Type.Unknown()),

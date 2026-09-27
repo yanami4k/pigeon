@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
+import { createFixtureSession } from "./session-store-fixtures.ts";
 import { prepareWorkspace, restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
 test("prepareWorkspace：返回 realpath 规范化的根，不再触碰 M3 旧账本（决策 128）", () => {
@@ -66,6 +67,25 @@ test("restoreGrantSeed：物化目标会话的生效 grant（created − revoked
       [[kept.grantId, "edit_file", "src"]]
     );
     assert.deepEqual(restoreGrantSeed(workspaceRoot, newSessionId()), [], "无会话文件 = 空种子");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restoreGrantSeed（新会话存储）：从授权条目现算生效集合（建立减撤销）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-grant-store-"));
+  try {
+    const sessionsDir = sessionsDirOf(root);
+    const session = createFixtureSession({ sessionsDir, cwd: root });
+    const kept = session.grantCreated({ tool: "edit_file", pathPrefix: "src" });
+    const dropped = session.grantCreated({ tool: "run_command" });
+    session.grantRevoked(dropped);
+    const { sessionId } = await session.close();
+    const seed = restoreGrantSeed(root, sessionId);
+    assert.deepEqual(
+      seed.map((grant) => [grant.grantId, grant.tool, grant.pathPrefix]),
+      [[kept, "edit_file", "src"]]
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

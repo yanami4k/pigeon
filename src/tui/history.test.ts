@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { seedToolRun } from "../application/history-fixtures.ts";
+import { createFixtureSession } from "../application/session-store-fixtures.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import { newEntryId, newRunId, newSessionId, type RunId } from "../state/ids.ts";
@@ -106,6 +107,10 @@ test("/resume 换绑后渲染全部历史：正文、thinking、工具行与折�
   const sessionsDir = join(root, ".pigeon", "sessions");
   const target = newSessionId();
   seedToolRun(sessionsDir, target);
+  // 续跑要求新会话存储里有这个会话的文件（账本重构 183）；历史渲染仍读旧账本（改读新存储在后续段施工）
+  const stored = createFixtureSession({ sessionsDir, sessionId: target, cwd: root });
+  stored.startRun({ task: "把 beta 改成大写" });
+  await stored.close();
   const render = async (historyLimit?: number): Promise<string> => {
     const term = new MockTerminal(100, 60);
     const shell = new PigeonTuiShell({

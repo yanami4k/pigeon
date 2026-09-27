@@ -195,7 +195,10 @@ function recordDetail(record: EventRecord): string {
         detail += ` ｜ 原因：${record.error}`;
       }
       if (record.result !== undefined) {
-        detail += ` ｜ 改动 ${(record.result.changedFiles ?? []).length} 个文件，Receipt ${record.result.receiptIds.length} 条`;
+        detail += ` ｜ 改动 ${(record.result.changedFiles ?? []).length} 个文件`;
+        if (record.result.receiptIds !== undefined) {
+          detail += `，Receipt ${record.result.receiptIds.length} 条`;
+        }
       }
       return detail;
     }

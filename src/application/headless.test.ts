@@ -6,8 +6,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { locateSessionFile } from "../persistence/session-reader.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { newRunId, newSessionId } from "../state/ids.ts";
 import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { runHeadless } from "./headless.ts";
@@ -211,6 +213,59 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
     );
     assert.deepEqual(started?.memory, []);
     assert.equal(started?.advertisedTools.includes("load_skill"), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("headless：结果从新会话存储现算；双写之前的旧会话续跑（新存储里没有文件）过渡期回退旧账本读法", async () => {
+  const { root, home, cleanup } = makeWorkspace();
+  try {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const fresh = await runHeadless({
+      task: "读",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+          { text: "读完了" },
+        ],
+      }),
+      yolo: true,
+      homeDir: home,
+    });
+    assert.ok(locateSessionFile(sessionsDir, fresh.sessionId) !== undefined);
+    assert.equal(fresh.turns, 2);
+    assert.equal(fresh.toolCalls, 1);
+    assert.equal(fresh.failure, null);
+
+    // 旧会话：旧账本里已有一个 Run，新存储里没有文件
+    const legacyId = newSessionId();
+    const legacyRun = newRunId();
+    const log = new JsonlEventLog(sessionsDir, legacyId);
+    log.appendEntry({
+      runSeq: 1,
+      role: "user",
+      runId: legacyRun,
+      message: { role: "user", content: "旧" },
+    });
+    log.close();
+    const resumed = await runHeadless({
+      task: "接着读",
+      governanceRoot: root,
+      workspaceRoot: root,
+      sessionId: legacyId,
+      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      yolo: true,
+      homeDir: home,
+    });
+    assert.equal(locateSessionFile(sessionsDir, legacyId), undefined, "不为旧会话建新文件");
+    // 回退旧账本：新存储里没有这个会话，指标与标签照旧从旧账本算出（首个 Run 按旧读法取有开始记录的那个）
+    assert.ok(resumed.runId !== undefined && resumed.runId !== legacyRun);
+    assert.equal(resumed.turns, 1);
+    assert.equal(resumed.failure, null);
+    assert.equal(resumed.label, "Unknown");
   } finally {
     cleanup();
   }

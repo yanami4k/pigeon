@@ -95,7 +95,8 @@ test("并行 worker：两个 implementer 各写自己的工作树，主工作区
     ] as const) {
       assert.equal(outcome.status, "completed", JSON.stringify(outcome));
       assert.deepEqual(outcome.result?.changedFiles, ["a.ts"]);
-      assert.equal(outcome.result?.receiptIds.length, 1);
+      // 收尾结果不再带回执号（Q4：回执随 184 停写后失去来源）
+      assert.equal(outcome.result?.receiptIds, undefined);
       assert.equal(outcome.result?.summary, `${name} 完成`);
       assert.equal(
         readFileSync(join(worktreePathFor(repo, id, name), "a.ts"), "utf8"),

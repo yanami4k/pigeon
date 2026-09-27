@@ -1,7 +1,7 @@
 // worker 命令层（M5.5 S4，决策 040）：/spawn 解析、/workers 与状态栏排版、收尾摘要、/cancel 定位。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { newReceiptId, newSessionId } from "../state/ids.ts";
+import { newSessionId } from "../state/ids.ts";
 import {
   parseSpawnCommand,
   renderWorkerOutcome,
@@ -67,7 +67,7 @@ test("/workers 与状态栏：人读清单列出状态、轮次、分支、会�
   assert.ok(/^[\x20-\x7e]*$/.test(bar), "状态栏纯 ASCII");
 });
 
-test("收尾摘要：状态、分支、改动文件、Receipt 数、自述与工作树位置；失败带原因", () => {
+test("收尾摘要：状态、分支、改动文件、自述与工作树位置；失败带原因", () => {
   const sessionId = newSessionId();
   const text = renderWorkerOutcome({
     sessionId,
@@ -83,7 +83,6 @@ test("收尾摘要：状态、分支、改动文件、Receipt 数、自述与工
     result: {
       branch: "pigeon/fix-a",
       changedFiles: ["a.ts", "b.ts"],
-      receiptIds: [newReceiptId()],
       summary: "改好了",
       summaryTruncated: true,
     },
@@ -92,7 +91,7 @@ test("收尾摘要：状态、分支、改动文件、Receipt 数、自述与工
     text.includes(`== worker fix-a（implementer）收尾：完成 ｜ 2 轮 ｜ 会话 ${sessionId} ==`),
     text
   );
-  assert.ok(text.includes("分支 pigeon/fix-a ｜ 改动 2 个文件：a.ts、b.ts ｜ Receipt 1 条"), text);
+  assert.ok(text.includes("分支 pigeon/fix-a ｜ 改动 2 个文件：a.ts、b.ts\n"), text);
   assert.ok(text.includes("自述：改好了（已截断，全文见 worker 会话）"), text);
   assert.ok(text.includes("工作树 /repo/.pigeon/worktrees/x-fix-a"), text);
 

@@ -167,7 +167,10 @@ function renderChildLine({ spawned, settled }: ChildLink): string {
   }
   let line = `${base} ｜ ${settled.status} ｜ ${settled.turns} 轮`;
   if (settled.result !== undefined) {
-    line += ` ｜ 改动 ${(settled.result.changedFiles ?? []).length} 个文件 ｜ Receipt ${settled.result.receiptIds.length} 条`;
+    line += ` ｜ 改动 ${(settled.result.changedFiles ?? []).length} 个文件`;
+    if (settled.result.receiptIds !== undefined) {
+      line += ` ｜ Receipt ${settled.result.receiptIds.length} 条`;
+    }
   }
   if (settled.error !== undefined) {
     line += ` ｜ 原因：${settled.error}`;

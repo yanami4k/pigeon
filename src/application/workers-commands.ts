@@ -126,9 +126,8 @@ export function renderWorkerOutcome(outcome: WorkerOutcome): string {
     const files = result.changedFiles ?? [];
     lines.push(
       result.branch !== undefined
-        ? `  分支 ${result.branch} ｜ 改动 ${files.length} 个文件${files.length > 0 ? `：${files.join("、")}` : ""} ｜ ` +
-            `Receipt ${result.receiptIds.length} 条`
-        : `  只读审阅（无工作区、无改动）｜ Receipt ${result.receiptIds.length} 条`
+        ? `  分支 ${result.branch} ｜ 改动 ${files.length} 个文件${files.length > 0 ? `：${files.join("、")}` : ""}`
+        : "  只读审阅（无工作区、无改动）"
     );
     if (result.summary !== "") {
       lines.push(

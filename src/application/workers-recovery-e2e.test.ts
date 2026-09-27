@@ -1,6 +1,7 @@
 // worker 崩溃冷恢复端到端（M5.5 S4，决策 040）：worker 写入后进程死于 receipt 与 child.settled 之前——
 // 父会话留"派出未收尾"，worker 会话留悬账。会话列表与 trace 如实标注；运行面范围把 worker 会话还原到
-// 它自己的工作树与委派策略；resume 以工作树为确证读取根，哈希自动确证为已执行（以主工作区为根会误判）。
+// 它自己的工作树与委派策略。本例的会话只写了旧账本（新会话存储里没有文件，即双写之前的旧会话形态）：
+// 运行面范围过渡期回退旧账本读法；续跑明确报错（187，旧会话由只读的旧版代码读；哈希对账随 183 删除）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -26,7 +27,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-test("worker 崩溃冷恢复：父会话标注未收尾，worker 会话回到自己的工作树对账，哈希确证为已执行", async () => {
+test("worker 崩溃冷恢复（旧账本会话）：父会话标注未收尾，运行面范围回到自己的工作树，续跑明确报错", async () => {
   const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-worker-recovery-")));
   try {
     const original = "alpha\nbeta\n";
@@ -144,28 +145,21 @@ test("worker 崩溃冷恢复：父会话标注未收尾，worker 会话回到自
     assert.deepEqual(scope.toolPolicy, policy);
     assert.equal(scope.parentSessionId, parentId);
 
-    // resume：以工作树为确证读取根，哈希自动确证为已执行，悬账清零
-    let output = "";
+    // resume：新会话存储里没有这个会话的文件，明确报错，不进入续会话、不写任何记录
     let entered = false;
-    await runResumeFlow({
-      root: repo,
-      workspaceRoot: scope.workspaceRoot,
-      sessionId: workerId,
-      ask: async () => "3",
-      write: (text) => {
-        output += text;
-      },
-      enterRepl: async () => {
-        entered = true;
-      },
-    });
-    assert.ok(output.includes("本次自动确证（哈希比对）1 条"), output);
-    assert.ok(output.includes("edit_file：已执行"), output);
-    assert.equal(entered, true);
-    const recovered = materializeSession(sessionsDir, workerId);
-    assert.equal(recovered.reconcile.unknown.length, 0);
-    assert.equal(recovered.reconcile.resolved[0]?.resolution.outcome, "executed");
-    // 父会话不受 worker 对账影响
+    await assert.rejects(
+      runResumeFlow({
+        root: repo,
+        sessionId: workerId,
+        write: () => {},
+        enterRepl: async () => {
+          entered = true;
+        },
+      }),
+      /创建于新会话存储启用之前，不能续跑/
+    );
+    assert.equal(entered, false);
+    assert.equal(materializeSession(sessionsDir, workerId).reconcile.unknown.length, 1);
     assert.equal(materializeSession(sessionsDir, parentId).records.length, 1);
   } finally {
     rmSync(repo, { recursive: true, force: true });

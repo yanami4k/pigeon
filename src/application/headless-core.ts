@@ -2,9 +2,9 @@
 // 以无父会话方式装出完整运行面跑到收尾，带轮次、墙钟与可选 token 上限。每次运行是一个普通会话，
 // 账本、trace、search 照旧。无人值守下没有审批通道：prompt 档一律 fail-closed 拒绝并落 decision（006），
 // yolo 是人的显式拨档，固化规则照常生效；不新增任何审批语义。
-// 结果全部从 Event Log 算（046）：轮次、工具调用数、usage、失败分类，以及需审批次数——从回执反推：
-// write 与 exec 档且 approvedBy 为 policy:yolo 的调用数（只有 write / exec 档落 receipt，read 档不计），
-// 即"有人在场时会被问几次"。
+// 结果全部从会话记录算（046）：轮次、工具调用数、usage、失败分类，以及需审批次数——yolo 档下写档与命令档、通过了审批闸的
+// 调用数，即"有人在场时会被问几次"。账本重构第二段（决策 180）起从新会话存储现算（state/session-judge.ts）；新存储里没有
+// 这个会话（双写之前的旧会话、或新存储打不开）时，过渡期回退旧账本读法（summarizeRunMetrics）。
 // 回炉（决策 142 / 143 / 147）：开启时一次 Run 结束后，在同一会话里、释放运行面之前跑验证命令——通过即结束；
 // 失败即把失败反馈作为新一轮输入开一个新 Run 接着修，最多 N 轮；无法判定不回炉、记为未知。修满 N 轮或预算耗尽仍失败，
 // 这一步以失败收尾，工作区保留 agent 的改动、不做回退（决策 172 / 173）。各轮与首次共用同一个总预算（轮次、墙钟与 token；
@@ -14,6 +14,7 @@ import path from "node:path";
 import type { MemoryRoot } from "../memory/resident.ts";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -24,6 +25,7 @@ import type { MaterializedSession } from "../state/materialize.ts";
 import { attemptOutcomeFacts, labelAttempt, type OutcomeLabel } from "../state/outcome-label.ts";
 import { lastStepRunOf, stepRunsOf } from "../state/repair-step.ts";
 import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
+import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { StepStartMark, WorkspaceHost } from "../tools/workspace-host.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
@@ -208,6 +210,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   const startedAt = Date.now();
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
+  // 已注册工具的风险档位（需审批次数按它现算；运行面没装起来时为空）
+  let toolTiers: ReadonlyMap<string, string> = new Map();
   const handle = createDetachedRuntime({
     sessionId,
     governanceRoot: options.governanceRoot,
@@ -258,6 +262,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
+      toolTiers = bundle.toolTiers;
       // M7（决策 078）：会分叉的会话（开了失败自动重试的尝试、分支会话）在 git 工作区里打快照；
       // 决策 142：开启回炉时强制打快照——首个快照的改前基线就是这一步的起点
       // 执行端另一侧的工作区不在宿主上打快照：回炉的起点由执行端记下（见下）
@@ -428,9 +433,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     await handle.dispose();
   }
   const sessionsDir = path.join(options.governanceRoot, ".pigeon", "sessions");
-  const metricsBefore = summarizeRunMetrics(
-    materializeSession(sessionsDir, sessionId, { content: false })
-  );
+  const metricsBefore = readRunOutcome(sessionsDir, sessionId, toolTiers).metrics;
   // M7（决策 071）：尝试收尾后在工作区独立执行验证命令（运行面没装起来、没有 Run 时不跑）；
   // 回炉开启时验证已在释放之前做过，不再跑
   if (
@@ -465,11 +468,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       }
     }
   }
-  const session = materializeSession(sessionsDir, sessionId, { content: false });
-  const metrics = summarizeRunMetrics(session);
-  // 未收尾时轮数按账本的推法取（Run 数减 1）：回炉那一轮若没开起来，不算用了一轮
+  const outcome = readRunOutcome(sessionsDir, sessionId, toolTiers);
+  const metrics = outcome.metrics;
+  // 未收尾时轮数按会话记录的推法取（Run 数减 1）：回炉那一轮若没开起来，不算用了一轮
   if (repair !== undefined && !repair.closed) {
-    repair = { ...repair, rounds: Math.max(0, session.runStarteds.length - 1) };
+    repair = { ...repair, rounds: Math.max(0, outcome.runCount - 1) };
   }
   if (repair !== undefined && options.protectedFiles !== undefined) {
     repair = { ...repair, protectedRestores };
@@ -480,12 +483,37 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...metrics,
     ...(verification !== undefined ? { verification } : {}),
     ...(repair !== undefined ? { repair } : {}),
+    label: outcome.label,
+    durationMs: Date.now() - startedAt,
+    ...(errorMessage !== undefined ? { errorMessage } : {}),
+  };
+}
+
+// 一次运行的指标、标签与 Run 数：新存储优先，没有这个会话的文件时回退旧账本
+function readRunOutcome(
+  sessionsDir: string,
+  sessionId: SessionId,
+  toolTiers: ReadonlyMap<string, string>
+): { metrics: HeadlessRunMetrics; label: OutcomeLabel; runCount: number } {
+  const loaded = loadStoreSession(sessionsDir, sessionId);
+  if (loaded !== undefined) {
+    const metrics = storeRunMetrics(loaded.view, { toolTiers });
+    return {
+      metrics,
+      label:
+        metrics.runId !== undefined ? storeAttemptLabel(loaded.view, metrics.runId) : "Unknown",
+      runCount: loaded.view.runs.length,
+    };
+  }
+  const session = materializeSession(sessionsDir, sessionId, { content: false });
+  const metrics = summarizeRunMetrics(session);
+  return {
+    metrics,
     label:
       metrics.runId !== undefined
         ? labelAttempt(attemptOutcomeFacts(session, metrics.runId))
         : "Unknown",
-    durationMs: Date.now() - startedAt,
-    ...(errorMessage !== undefined ? { errorMessage } : {}),
+    runCount: session.runStarteds.length,
   };
 }
 
@@ -498,7 +526,7 @@ const ZERO_USAGE: TurnUsage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-// 单次运行会话的指标（冷侧，只读 Event Log）：取首个 Run；回炉开启时按整步（同一会话里的全部 Run）汇总，
+// 单次运行会话的指标（旧账本读法，过渡期回退与双写对照用；停写旧账本时删除）：取首个 Run；回炉开启时按整步（同一会话里的全部 Run）汇总，
 // runId 仍是首个 Run（一步的身份）
 export function summarizeRunMetrics(session: MaterializedSession): HeadlessRunMetrics {
   const runId = session.runStarteds[0]?.runId ?? session.runtimeEvents[0]?.runId;

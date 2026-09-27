@@ -116,8 +116,8 @@ function legacySessionStore(sessionId: string): SessionStoreWriter {
   };
 }
 
-// 旧账本里这个会话已有记录（在打开新存储之前）
-function hasLegacyRecords(sessionsDir: string, sessionId: string): boolean {
+// 旧账本里这个会话已有记录（在打开新存储之前）；读者据此区分"双写之前的旧会话"与"不存在"
+export function hasLegacyRecords(sessionsDir: string, sessionId: string): boolean {
   const path = JsonlEventLog.filePathFor(sessionsDir, sessionId as never);
   return existsSync(path) && statSync(path).size > 0;
 }
@@ -339,12 +339,13 @@ export function teeChildFamilies(log: ChildFamilyLog, store: SessionEntrySink): 
 // ---- 分叉 ----
 
 export interface StoreFork {
-  // 用 pi 的 fork 为分支会话建文件（分叉点之前的历史复制过去，文件头记来源与分支来历）；失败按内部故障告警
+  // 用 pi 的 fork 为分支会话建文件（分叉点之前的历史复制过去，文件头记来源与分支来历），返回分支文件路径；
+  // 失败按内部故障告警并返回 undefined（分叉续跑的初始消息读不到，由调用方决定报错）
   forkBranch(input: {
     branchSessionId: string;
     cwd: string;
     branch: BranchHeaderInput;
-  }): Promise<void>;
+  }): Promise<string | undefined>;
   // 放弃（分叉中途失败时）：释放本段打开的来源写者
   release(): Promise<void>;
 }
@@ -405,7 +406,7 @@ export async function beginStoreFork(input: {
           if (forkEntryId === undefined) {
             throw new Error("分叉点在来源会话的新存储里没有对应消息");
           }
-          await forkSessionFile({
+          return await forkSessionFile({
             sessionsRoot: input.sessionsDir,
             source: { sessionId: input.sourceSessionId, path: sourcePath },
             entryId: forkEntryId,
@@ -415,6 +416,7 @@ export async function beginStoreFork(input: {
           });
         } catch (error) {
           input.onFault(new SessionStoreFault("分叉", error));
+          return undefined;
         } finally {
           await release();
         }

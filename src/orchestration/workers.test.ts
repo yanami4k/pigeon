@@ -4,14 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ChildSettledInput, ChildSpawnedInput, WorkerWorkspace } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import {
-  newReceiptId,
-  newRunId,
-  newSessionId,
-  type ReceiptId,
-  type RunId,
-  type SessionId,
-} from "../state/ids.ts";
+import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import {
   WorkerDepthError,
   WorkerOrchestrator,
@@ -26,7 +19,6 @@ type Behavior = "complete" | "hang" | "endless-turns" | "complete-at-limit" | "s
 
 class FakeRuntime implements WorkerRuntimeHandle {
   readonly listeners = new Set<(event: EventEnvelope) => void>();
-  readonly receipt: ReceiptId = newReceiptId();
   interrupted = false;
   disposed = false;
   // M7（决策 072）：上限中止前经运行面写进 worker 自己账本的上限
@@ -107,10 +99,6 @@ class FakeRuntime implements WorkerRuntimeHandle {
     this.#release.resolve();
   }
 
-  receiptIds(): ReceiptId[] {
-    return [this.receipt];
-  }
-
   summary(): string {
     return "已完成任务";
   }
@@ -175,7 +163,7 @@ function setup(
 }
 
 test("spawn：child.spawned 先于工作区与运行面落盘；收尾先释放运行面再写带结构化结果的 child.settled", async () => {
-  const { orchestrator, journal, spawned, settled, runtimes } = setup();
+  const { orchestrator, journal, spawned, settled } = setup();
   const id = orchestrator.spawn({ role: "implementer", task: "改 a.ts", name: "fix-a" });
   const outcome = await orchestrator.awaitResult(id);
 
@@ -194,7 +182,6 @@ test("spawn：child.spawned 先于工作区与运行面落盘；收尾先释放�
   assert.deepEqual(outcome.result, {
     branch: "pigeon/fix-a",
     changedFiles: ["a.ts"],
-    receiptIds: [runtimes.get(id)?.receipt],
     summary: "已完成任务",
     summaryTruncated: false,
   });

@@ -2,12 +2,13 @@
 // 用法：/fork [--at <条目号> | --at <Run 号前缀>:<条目号>] ["新输入"]
 // - 缺省分叉点：最近一次 Run 的任务开始处（第 1 条）；只给条目号时指最近一次 Run；Run 号可用唯一前缀（trace 里显示的短号）；
 // - 分叉点末条是用户消息或工具结果时不给新输入直接续跑；末条是助手消息时必须给新输入；
-// - 分支在独立工作树里续跑，跑完回报分支会话、工作树、终态与标签；来源会话此后实时写穿进会话树。
-import { materializeSession } from "../persistence/session-read.ts";
+// - 分支在独立工作树里续跑，跑完回报分支会话、工作树、终态与标签。
+// 分叉点从新会话存储定位（账本重构第二段）；本会话在新存储里没有文件时明确报错。
+import { loadStoreSession } from "../persistence/session-view.ts";
 import type { ForkPoint } from "../state/event-log.ts";
 import type { RunId } from "../state/ids.ts";
-import type { MaterializedSession } from "../state/materialize.ts";
-import { type ForkRunOptions, runForkBranch } from "./fork.ts";
+import { type StoreSessionView, storeMessageAt } from "../state/session-judge.ts";
+import { ForkError, type ForkRunOptions, runForkBranch } from "./fork.ts";
 import type { OpenedSessionRuntime } from "./session-runtime.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
@@ -48,21 +49,9 @@ export function parseForkCommand(raw: string): { at?: ForkAt; input?: string } {
   return { ...(at !== undefined ? { at } : {}), ...(input !== "" ? { input } : {}) };
 }
 
-// 分叉点定位：Run 顺序取 run.started（旧会话退回条目顺序）
-export function resolveForkPoint(session: MaterializedSession, at: ForkAt): ForkPoint {
-  const runs: RunId[] = [];
-  for (const record of session.runStarteds) {
-    if (!runs.includes(record.runId)) {
-      runs.push(record.runId);
-    }
-  }
-  if (runs.length === 0) {
-    for (const entry of session.entries) {
-      if (!runs.includes(entry.runId)) {
-        runs.push(entry.runId);
-      }
-    }
-  }
+// 分叉点定位：Run 顺序取会话里 Run 开始条目的先后
+export function resolveForkPoint(session: StoreSessionView, at: ForkAt): ForkPoint {
+  const runs: RunId[] = session.runs.map((run) => run.runId);
   let runId: RunId | undefined;
   if (at.runPrefix !== undefined) {
     const prefix = at.runPrefix;
@@ -82,7 +71,7 @@ export function resolveForkPoint(session: MaterializedSession, at: ForkAt): Fork
     throw new ForkCommandError("本会话还没有任何 Run，没有可分叉的位置");
   }
   const runSeq = at.runSeq ?? 1;
-  if (!session.entries.some((entry) => entry.runId === runId && entry.runSeq === runSeq)) {
+  if (storeMessageAt(session, { runId, runSeq }) === undefined) {
     throw new ForkCommandError(`该 Run 里没有第 ${runSeq} 条`);
   }
   return { runId, runSeq };
@@ -99,10 +88,15 @@ export async function runForkCommand(input: {
   if (input.opened.bundle.adapter.isRunning()) {
     throw new ForkCommandError("当前 Run 还在进行中，收尾后再分叉");
   }
-  const session = materializeSession(sessionsDirOf(input.governanceRoot), sessionId, {
-    content: false,
-  });
-  const forkPoint = resolveForkPoint(session, at ?? {});
+  // 本会话的写者先落盘，再从新存储读
+  await input.opened.bundle.sessionStore.flush();
+  const loaded = loadStoreSession(sessionsDirOf(input.governanceRoot), sessionId);
+  if (loaded === undefined) {
+    throw new ForkError(
+      `本会话 ${sessionId} 在新会话存储里没有文件（创建于新存储启用之前，或新存储打开失败），不能分叉`
+    );
+  }
+  const forkPoint = resolveForkPoint(loaded.view, at ?? {});
   const result = await runForkBranch({
     governanceRoot: input.governanceRoot,
     sourceSessionId: sessionId,
@@ -116,8 +110,6 @@ export async function runForkCommand(input: {
       : {}),
     run: { ...input.run, ...(nextInput !== undefined ? { input: nextInput } : {}) },
   });
-  // 来源会话此后实时写穿进会话树
-  await input.opened.tree?.ensureAttached();
   return [
     `已分叉：分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条 ｜ 快照 ${result.checkpoint.commit.slice(0, 12)}`,
     `  分支会话 ${result.branchSessionId} ｜ 工作树 ${result.workspace.path}（分支 ${result.workspace.branch}）`,
