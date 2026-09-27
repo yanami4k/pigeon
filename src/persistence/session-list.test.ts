@@ -1,5 +1,5 @@
 // M4 S5：Session 列表投影测试（D5：派生不落库——每次从会话文件现算，不写任何文件；默认安静：创建时间 + Run 数）。
-// 读新会话存储：逐会话摘要字段（ULID 创建时间 / Run 数 / 工具名 / Run 级失败分类 / 用量 / 父子关系）、
+// 读新会话存储：逐会话摘要字段（ULID 创建时间 / Run 数 / 工具名 / Run 级与工具级失败分类 / 用量 / 父子关系）、
 // 最小过滤器（tool / class / since / until）、排序、只读（读正被写入的文件不改文件）。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -156,6 +156,74 @@ test("worker 父子关系：子会话摘要回指父会话，父会话计派出�
       role: "implementer",
       parentSessionId: parentId,
     });
+  } finally {
+    cleanup();
+  }
+});
+
+// 工具级失败分类（账本重构第二段的现算口径：工具结果消息上的运行面标记，没有标记时按消息正文与策略）并入摘要，
+// 接在 Run 级之后按出现序去重；--class 据此过滤。三个会话的 Run 都正常收尾，Run 级没有分类
+test("摘要含工具级失败分类：环境异常、上游拦截计入，审批闸拒绝不计；--class 按它过滤", async () => {
+  const { dir, cleanup } = makeDir();
+  try {
+    const toolCall = (s: FixtureSession, name: string): string => {
+      const [id = ""] = s.assistant({ toolCalls: [{ name }] });
+      return id;
+    };
+    const environment = await seed(dir, (s) => {
+      s.startRun({ task: "a" });
+      s.toolResult({
+        toolCallId: toolCall(s, "edit_file"),
+        toolName: "edit_file",
+        text: "EACCES",
+        isError: true,
+        details: {
+          pigeon: {
+            errorKind: "environment",
+            gate: { outcome: "approved", approvedBy: "policy:yolo" },
+          },
+        },
+      });
+      s.assistant({ text: "改不了" });
+      s.endRun();
+    });
+    const intercepted = await seed(dir, (s) => {
+      s.startRun({ task: "b" });
+      s.toolResult({
+        toolCallId: toolCall(s, "ghost"),
+        toolName: "ghost",
+        text: "Tool ghost not found",
+        isError: true,
+      });
+      s.assistant({ text: "没有这个工具" });
+      s.endRun();
+    });
+    const rejected = await seed(dir, (s) => {
+      s.startRun({ task: "c" });
+      s.toolResult({
+        toolCallId: toolCall(s, "edit_file"),
+        toolName: "edit_file",
+        text: "用户拒绝",
+        isError: true,
+        details: { pigeon: { gate: { outcome: "rejected", approvedBy: "human" } } },
+      });
+      s.assistant({ text: "好的" });
+      s.endRun();
+    });
+    const classes = new Map(
+      listSessionSummaries(dir).map((summary) => [summary.sessionId, summary.failureClasses])
+    );
+    assert.deepEqual(classes.get(environment), ["infrastructure"]);
+    assert.deepEqual(classes.get(intercepted), ["business"]);
+    assert.deepEqual(classes.get(rejected), []);
+    assert.deepEqual(
+      listSessionSummaries(dir, { class: "infrastructure" }).map((s) => s.sessionId),
+      [environment]
+    );
+    assert.deepEqual(
+      listSessionSummaries(dir, { class: "business" }).map((s) => s.sessionId),
+      [intercepted]
+    );
   } finally {
     cleanup();
   }

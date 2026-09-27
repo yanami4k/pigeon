@@ -90,6 +90,8 @@ export interface FixtureSession {
     toolName: string;
     text: string;
     isError?: boolean;
+    // 工具结果消息的 details（运行面在 pigeon 键下挂错误归类与审批闸决定）
+    details?: Record<string, unknown>;
   }): void;
   // 一轮工具调用：助手发起一次调用 →（可选）代码快照 → 工具结果；返回工具调用号
   toolTurn(input: {
@@ -220,6 +222,7 @@ export function createFixtureSession(options: FixtureSessionOptions): FixtureSes
         toolName: input.toolName,
         content: [{ type: "text", text: input.text }],
         isError: input.isError ?? false,
+        ...(input.details !== undefined ? { details: input.details } : {}),
       }),
     toolTurn: (input) => {
       const [toolCallId = ""] = session.assistant({

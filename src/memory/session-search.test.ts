@@ -211,6 +211,40 @@ test("复用 SessionListFilters：tool 只搜用过该工具的会话，since �
     );
   }));
 
+test("复用 SessionListFilters：class 按工具级失败分类过滤（工具结果上的环境异常标记）", () =>
+  withDir(async (dir) => {
+    await seed(dir, OLD, (s) => {
+      s.startRun({ task: "alpha 环境异常" });
+      const [id = ""] = s.assistant({ toolCalls: [{ name: "edit_file" }] });
+      s.toolResult({
+        toolCallId: id,
+        toolName: "edit_file",
+        text: "EACCES",
+        isError: true,
+        details: {
+          pigeon: {
+            errorKind: "environment",
+            gate: { outcome: "approved", approvedBy: "policy:yolo" },
+          },
+        },
+      });
+      s.assistant({ text: "改不了" });
+      s.endRun();
+    });
+    await seed(dir, NEW, (s) => {
+      s.startRun({ task: "alpha 正常" });
+      s.toolTurn({ name: "edit_file" });
+      s.endRun();
+    });
+    const search = createSessionSearch(dir);
+    assert.deepEqual(
+      (
+        await collect(search.search({ keywords: ["alpha"], filters: { class: "infrastructure" } }))
+      ).map((hit) => hit.sessionId),
+      [OLD]
+    );
+  }));
+
 test("分支会话开头从来源复制的历史不重复命中，分支自己的消息照常命中", () =>
   withDir(async (dir) => {
     const source = createFixtureSession({ sessionsDir: dir, sessionId: OLD });

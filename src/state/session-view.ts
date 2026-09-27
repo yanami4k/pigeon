@@ -1,5 +1,5 @@
 // 会话原生视图（决策 180）：把新会话存储里一个会话文件的主分支条目投影成读者直接用的结构——按 Run 切段的消息
-// （带 Run 内序号）、七种自定义条目、worker 父子关系与 Run 级失败分类。搜索与各显示读者（会话列表、trace、replay、
+// （带 Run 内序号）、七种自定义条目、worker 父子关系、Run 级与工具级失败分类。搜索与各显示读者（会话列表、trace、replay、
 // 历史）共用这一份，不合成旧账本形状的视图。纯函数、无 IO：输入按结构读取（persistence/session-reader.ts 的读取结果
 // 满足它），state 不依赖 persistence。
 // 切段口径：Run 开始条目之后、下一个 Run 开始之前的消息属于它，Run 内序号从 1 起、每条消息占一个（同 messageEntryAt）；
@@ -25,6 +25,7 @@ import {
   type VerificationData,
   type WorkerData,
 } from "./session-entries.ts";
+import { type StoreToolOutcome, storeSessionView, storeToolOutcomes } from "./session-judge.ts";
 import {
   type SessionSummary,
   type SessionSummaryFailureClass,
@@ -36,10 +37,12 @@ import { omittedThinkingOf } from "./thinking-omission.ts";
 export interface SessionFileEntryInput {
   type: string;
   id: string;
+  parentId: string | null;
   timestamp: number;
   message?: unknown;
   customType?: unknown;
   data?: unknown;
+  [field: string]: unknown;
 }
 
 export interface SessionFileInput {
@@ -156,6 +159,8 @@ export interface SessionView {
   children: ViewChild[];
   // 有收尾无派出的 worker 收尾条目
   orphanSettleds: WorkerSettled[];
+  // 工具级失败分类（逐个调用，按出现顺序）：判定类读者的同一现算口径（session-judge.ts 的 storeToolOutcomes）
+  toolOutcomes: StoreToolOutcome[];
   // 数据不合 schema、版本不认识而被跳过的自定义条目说明
   warnings: string[];
 }
@@ -516,12 +521,20 @@ export function buildSessionView(input: SessionFileInput): SessionView {
     messages,
     children,
     orphanSettleds,
+    toolOutcomes: storeToolOutcomes(
+      storeSessionView({
+        sessionId: input.header.id as SessionId,
+        ...(input.header.metadata !== undefined ? { metadata: input.header.metadata } : {}),
+        entries: input.entries,
+      })
+    ),
     warnings,
   };
 }
 
-// 会话摘要（会话列表与检索过滤共用）：Run 数、用过的工具名、Run 级失败分类、用量合计与父子关系，全部从本会话自己的
-// 条目现算（分支会话的复制段不计）。旧摘要的"待对账"随写操作回执停写（184）不再有来源
+// 会话摘要（会话列表与检索过滤共用）：Run 数、用过的工具名、失败分类（Run 级在前、工具级在后，按出现序去重）、
+// 用量合计与父子关系，全部从本会话自己的条目现算（分支会话的复制段不计）。旧摘要的"待对账"随写操作回执停写（184）
+// 不再有来源
 export type SessionViewSummary = Omit<SessionSummary, "pendingReconcile">;
 
 export function summarizeSessionView(view: SessionView): SessionViewSummary {
@@ -537,6 +550,11 @@ export function summarizeSessionView(view: SessionView): SessionViewSummary {
     }
     if (run.failure !== null && !failureClasses.includes(run.failure.category)) {
       failureClasses.push(run.failure.category);
+    }
+  }
+  for (const outcome of view.toolOutcomes) {
+    if (outcome.failure !== null && !failureClasses.includes(outcome.failure.category)) {
+      failureClasses.push(outcome.failure.category);
     }
   }
   for (const message of view.messages) {
