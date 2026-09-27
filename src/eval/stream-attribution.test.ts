@@ -69,34 +69,24 @@ test("人新建的文件与名字：取新增文件与新增行里的导出定�
 
 const none: MissingRefs = { paths: [], names: [] };
 
-test("归因：通过不归因；缺前置优先于维护步接口不同，二者优先于回归，其余为没做出来", () => {
-  const reverted = [
-    createdByDiff({ addedFiles: ["src/a.ts"], addedLines: ["export function fa() {"] }),
-  ];
+test("归因：通过不归因；维护步接口不同优先于回归，其余为没做出来；不再归因为缺前置", () => {
   const maintenance = [
     createdByDiff({ addedFiles: ["src/m.ts"], addedLines: ["export function fm() {"] }),
   ];
-  const base = { revertedCreated: reverted, maintenanceCreated: maintenance, regressions: 0 };
+  const base = { maintenanceCreated: maintenance, regressions: 0 };
   assert.equal(attributeFailure({ ...base, passed: true, missing: none }), null);
-  assert.equal(
-    attributeFailure({ ...base, passed: false, missing: { paths: ["src/a.ts"], names: [] } }),
-    "missing-prerequisite"
-  );
-  assert.equal(
-    attributeFailure({ ...base, passed: false, missing: { paths: [], names: ["fa"] } }),
-    "missing-prerequisite"
-  );
   assert.equal(
     attributeFailure({ ...base, passed: false, missing: { paths: [], names: ["fm"] } }),
     "maintenance-interface"
   );
   assert.equal(
-    attributeFailure({
-      ...base,
-      passed: false,
-      missing: { paths: ["src/a.ts"], names: ["fm"] },
-    }),
-    "missing-prerequisite"
+    attributeFailure({ ...base, passed: false, missing: { paths: ["src/m.ts"], names: [] } }),
+    "maintenance-interface"
+  );
+  // 缺的东西对不上维护步新建的（此前某道题本应新建的也一样）：按回归或没做出来归
+  assert.equal(
+    attributeFailure({ ...base, passed: false, missing: { paths: ["src/a.ts"], names: ["fa"] } }),
+    "not-done"
   );
   assert.equal(
     attributeFailure({
@@ -111,18 +101,17 @@ test("归因：通过不归因；缺前置优先于维护步接口不同，二�
 });
 
 test("归因：Python 模块路径片段与新建文件按去扩展名的后缀对上", () => {
-  const reverted = [
+  const maintenance = [
     createdByDiff({ addedFiles: ["strands-py/src/strands/agent/local_agent.py"], addedLines: [] }),
   ];
   assert.equal(
     attributeFailure({
       passed: false,
       missing: { paths: ["strands/agent/local_agent"], names: [] },
-      revertedCreated: reverted,
-      maintenanceCreated: [],
+      maintenanceCreated: maintenance,
       regressions: 0,
     }),
-    "missing-prerequisite"
+    "maintenance-interface"
   );
   // 包目录：模块名对应 __init__.py
   const pkg = [
@@ -132,10 +121,9 @@ test("归因：Python 模块路径片段与新建文件按去扩展名的后缀�
     attributeFailure({
       passed: false,
       missing: { paths: ["strands/routing"], names: [] },
-      revertedCreated: pkg,
-      maintenanceCreated: [],
+      maintenanceCreated: pkg,
       regressions: 0,
     }),
-    "missing-prerequisite"
+    "maintenance-interface"
   );
 });

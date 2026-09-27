@@ -49,7 +49,8 @@ export interface FixedPointRow {
   repairVerify: RepairVerify;
   repairRounds: number | null;
   finalVerdict: "pass" | "fail" | null;
-  reverted: boolean;
+  // 撤回拆除（决策 173）之前写下的旧结果行才有，新行不写；只读兼容
+  reverted?: boolean;
   outcome: "passed" | "failed";
   // 记忆是否被用上（139）：按带记忆组那几条指定的红转绿条目、在带记忆组本会给出的时间窗口里（开局的看首轮验证之前，
   // 回炉的看每一轮回炉里），agent 是否改了条目的补改文件；三组同一口径，不带组与无关组即基线。

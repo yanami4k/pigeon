@@ -7,9 +7,9 @@
 // 即"有人在场时会被问几次"。
 // 回炉（决策 142 / 143 / 147）：开启时一次 Run 结束后，在同一会话里、释放运行面之前跑验证命令——通过即结束；
 // 失败即把失败反馈作为新一轮输入开一个新 Run 接着修，最多 N 轮；无法判定不回炉、记为未知。修满 N 轮或预算耗尽仍失败，
-// 按快照把工作区恢复到这一步第一个 Run 之前的状态，这一步记为失败。各轮与首次共用同一个总预算（轮次、墙钟与 token；
-// 验证命令的耗时也算在墙钟里）。一步的成败以最后一次验证为准；账本不新增记录，撤回由 run.started 里冻结的回炉轮数
-// 与最后一次验证记录推出（state/repair-step.ts）。
+// 这一步以失败收尾，工作区保留 agent 的改动、不做回退（决策 172 / 173）。各轮与首次共用同一个总预算（轮次、墙钟与 token；
+// 验证命令的耗时也算在墙钟里）。一步的成败以最后一次验证为准，由 run.started 里冻结的回炉轮数与最后一次验证记录推出
+// （state/repair-step.ts），账本不新增记录。
 import path from "node:path";
 import type { MemoryRoot } from "../memory/resident.ts";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
@@ -27,10 +27,10 @@ import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-eve
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { StepStartMark, WorkspaceHost } from "../tools/workspace-host.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
-import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
+import { attachCheckpoints } from "./checkpoints.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
-import { buildRepairFeedback, type RepairAppendix, restoreStepStart } from "./repair-loop.ts";
+import { buildRepairFeedback, type RepairAppendix } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
 import {
   createStructuredMemoryPush,
@@ -98,7 +98,7 @@ export interface HeadlessRunOptions {
   // M7（决策 079）：失败自动分叉重试次数——冻结进注入快照并随 run.started 落盘（重试本身由 headless.ts 叠加）
   retryOnFail?: number;
   // 决策 142 / 143：回炉轮数，缺省 0 即关闭；开启时冻结进注入快照并随 run.started 落盘。
-  // 须配验证命令、不得与失败自动分叉重试同开、须能撤回：本地 git 工作区按快照，容器工作区经执行端回到这一步起点
+  // 须配验证命令、不得与失败自动分叉重试同开、须能记下这一步的起点：本地 git 工作区按快照，容器工作区经执行端
   repairRounds?: number;
   // 回炉反馈的附加内容注入点（缺省为空；结构化记忆将来从这里附加）
   repairAppendix?: RepairAppendix;
@@ -137,7 +137,7 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   // M7（决策 071 / 072）：验证结论（配置了验证命令且运行面装起来时在场）与由账本现算的标签
   verification?: { verdict: EvalVerdict; recorded: boolean };
   label: OutcomeLabel;
-  // 决策 142 / 143：回炉开启时在场——用了几轮、最后一次验证的结论、是否撤回、撤回是否因预算耗尽而提前
+  // 决策 142 / 143：回炉开启时在场——用了几轮、最后一次验证的结论、这一步是否收尾
   repair?: HeadlessRepairSummary;
   // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条
   structuredMemory?: StructuredMemorySummary;
@@ -148,15 +148,9 @@ export interface HeadlessRepairSummary {
   rounds: number;
   // 这一步最后一次验证门的结论；没验证过（运行面没装起来、回炉途中出错）时缺省
   verdict?: EvalVerdict;
-  // 这一步是否收尾：通过、无法判定、撤回为收尾；回炉途中出现异常或没有 Run 可验证为未收尾（续跑时整步重做）
+  // 这一步是否收尾：通过、无法判定、修满或预算耗尽仍失败为收尾；回炉途中出现异常或没有 Run 可验证为未收尾（续跑时整步重做）。
+  // 修满或预算耗尽仍失败时这一步以失败收尾，工作区保留 agent 的改动、不做回退（决策 172 / 173），失败由验证记录体现
   closed: boolean;
-  reverted: boolean;
-  // 撤回是否因预算先于轮数用尽而提前；轮数与预算同时用满记为轮数用满
-  budgetExhausted: boolean;
-  // 撤回时工作区是否真的恢复了；一次文件都没改过（没有快照起点）时为 false 且不带 restoreError
-  restored: boolean;
-  // 恢复没做成的原因：恢复抛错，或快照出过故障而没有撤回起点
-  restoreError?: string;
   // 给了受保护文件时：有几次验证之前发现 agent 改过受保护文件并将其还原（每次验证至多计 1）
   protectedRestores?: number;
 }
@@ -172,27 +166,28 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
   }
   if (options.verify === undefined) {
     throw new Error(
-      `设了回炉轮数（${rounds}）却没有验证命令：回炉靠验证结论决定修不修、撤不撤，` +
+      `设了回炉轮数（${rounds}）却没有验证命令：回炉靠验证结论决定修不修，` +
         "请用 --verify-command 或项目验证配置（.pigeon/verify.json）给出验证命令"
     );
   }
   if ((options.retryOnFail ?? 0) > 0) {
     throw new Error(
-      "回炉与失败自动分叉重试不能同时开启：回炉在同一会话里接着修、到上限撤回，" +
-        "失败重试从任务起点另开分支重做，两者对同一次失败各有一套处理，叠加后这一步的成败与撤回无法判定"
+      "回炉与失败自动分叉重试不能同时开启：回炉在同一会话里接着修，" +
+        "失败重试从任务起点另开分支重做，两者对同一次失败各有一套处理，叠加后这一步的成败无法判定"
     );
   }
-  // 撤回的起点：本地 git 工作区按快照；执行端另一侧的工作区（容器）要执行端能记下并回到这一步起点（154②）
+  // 这一步的起点：本地 git 工作区由快照的改前基线给出；执行端另一侧的工作区（容器）要执行端能记下这一步起点（154②）。
+  // 两者供验证前还原受保护的文件，以及结构化记忆认定开工时的脏文件与本步改动（待 174 删除结构化记忆时重审本地这一条）
   const host = options.workspaceHost;
   if (host !== undefined) {
-    if (host.markStepStart === undefined || host.restoreStepStart === undefined) {
+    if (host.markStepStart === undefined) {
       throw new Error(
-        "开启回炉却没有撤回起点：这个执行端不提供回到这一步起点的能力，回炉修不好时无法把工作区恢复到这一步起点"
+        "开启回炉却无法记下这一步的起点：这个执行端不提供记下起点的能力，验证前无从还原受保护的文件"
       );
     }
   } else if (!isGitWorkspace(options.workspaceRoot)) {
     throw new Error(
-      "开启回炉却没有可用快照：回炉修不好时要按快照把工作区恢复到这一步起点，目前只支持本地 git 工作区"
+      "开启回炉却没有可用快照：回炉要按快照记下这一步的起点与改动，目前只支持本地 git 工作区"
     );
   }
   if (options.protectedFiles !== undefined && host?.restoreProtectedFromStepStart === undefined) {
@@ -207,7 +202,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   const repairRounds = assertRepairSetup(options);
   // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 只是宿主侧占位目录。分叉（失败自动重试、分支会话）要在它上面
   // 打 git 快照，会话验证命令要在它里面执行——在占位目录上做只会得到假结果，装配前一律拒绝。
-  // 回炉例外：它的验证与撤回都经执行端（见 assertRepairSetup）
+  // 回炉例外：它的验证经执行端（见 assertRepairSetup）
   if (options.workspaceHost !== undefined) {
     const unsupported = [
       (options.retryOnFail ?? 0) > 0 ? "失败自动分叉重试" : undefined,
@@ -239,9 +234,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   const startedAt = Date.now();
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
-  // 快照挂载：撤回时据它的内部错误清单区分"一次文件都没改过"与"快照出过故障、没有起点"
-  let attachment: CheckpointAttachment | undefined;
-  // 回炉的运行时诊断（注入点出错、撤回没做成）：标准错误、按类别去重，不进账本
+  // 回炉的运行时诊断（注入点出错）：标准错误、按类别去重，不进账本
   const warn = dedupedWarner();
   const handle = createDetachedRuntime({
     sessionId,
@@ -303,15 +296,14 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     onBundle: (bundle) => {
       liveBundle = bundle;
       // M7（决策 078）：会分叉的会话（开了失败自动重试的尝试、分支会话）在 git 工作区里打快照；
-      // 决策 142：开启回炉时强制打快照——首个快照的改前基线就是撤回的起点
-      // 执行端另一侧的工作区不在宿主上打快照：回炉的撤回起点由执行端记下（见下）
+      // 决策 142：开启回炉时强制打快照——首个快照的改前基线就是这一步的起点
+      // 执行端另一侧的工作区不在宿主上打快照：回炉的起点由执行端记下（见下）
       if (
         options.workspaceHost === undefined &&
         ((options.retryOnFail ?? 0) > 0 || options.branchHeader !== undefined || repairRounds > 0)
       ) {
         const checkpoints = attachCheckpoints({ bundle, workspaceRoot: options.workspaceRoot });
         if (checkpoints !== undefined) {
-          attachment = checkpoints;
           bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
         }
       }
@@ -364,64 +356,6 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let stepStart: StepStartMark | undefined;
   // 验证前发现 agent 改过受保护文件并还原的次数
   let protectedRestores = 0;
-  // 撤回：恢复到这一步起点，并如实给出恢复是否做成
-  const restoreForRevert = async (): Promise<
-    Pick<HeadlessRepairSummary, "restored" | "restoreError">
-  > => {
-    const host = options.workspaceHost;
-    if (host?.restoreStepStart !== undefined) {
-      try {
-        if (stepStart === undefined) throw new Error("没有记下这一步的起点");
-        await host.restoreStepStart(stepStart);
-        return { restored: true };
-      } catch (error) {
-        const restoreError = `撤回时恢复工作区失败：${failureDetail(error)}`;
-        warn(error, `回炉告警：${restoreError}（这一步记为已撤回，但工作区可能未恢复）`);
-        return { restored: false, restoreError };
-      }
-    }
-    try {
-      const done = restoreStepStart({
-        governanceRoot: options.governanceRoot,
-        workspaceRoot: options.workspaceRoot,
-        sessionId,
-      });
-      if (done.restored) {
-        if (done.startIgnoredMissing === true) {
-          warn(
-            new Error("开工忽略清单缺失"),
-            "回炉告警：开工忽略清单缺失，agent 新建的被忽略文件未清理（撤回照常，被忽略的文件一律没动）"
-          );
-        }
-        return { restored: true };
-      }
-      // 有快照却没有改前基线：起点丢失（账本可见，续跑同样认得出来）
-      if (done.startLost === true) {
-        const restoreError = "快照记录里没有改前基线，撤回起点丢失，工作区未恢复";
-        warn(
-          new Error("回炉撤回起点丢失"),
-          `回炉告警：${restoreError}（这一步记为已撤回，但工作区仍是最后一轮修改后的样子）`
-        );
-        return { restored: false, restoreError };
-      }
-      // 没有任何快照：本进程快照没出过故障即这一步一次文件都没改过，无需恢复；出过故障即起点丢了，工作区未恢复
-      const snapshotError = attachment?.errors()[0];
-      if (snapshotError === undefined) {
-        return { restored: false };
-      }
-      const restoreError = `快照出过故障，没有撤回起点，工作区未恢复：${failureDetail(snapshotError)}`;
-      warn(
-        new Error("回炉撤回没有起点"),
-        `回炉告警：${restoreError}（这一步记为已撤回，但工作区仍是最后一轮修改后的样子）`
-      );
-      return { restored: false, restoreError };
-    } catch (error) {
-      // 账本已能推出撤回；恢复可重复执行，由调用方决定是否再执行一次
-      const restoreError = `撤回时恢复工作区失败（可重复执行恢复）：${failureDetail(error)}`;
-      warn(error, `回炉告警：${restoreError}（工作区可能只恢复了一部分）`);
-      return { restored: false, restoreError };
-    }
-  };
   try {
     if (repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined) {
       stepStart = await options.workspaceHost.markStepStart();
@@ -436,7 +370,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     while (run !== undefined) {
       status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
       errorMessage = run.errorMessage;
-      // 外部中止：这一步由调用方作废，不验证、不回炉、不撤回
+      // 外部中止：这一步由调用方作废，不验证、不回炉
       if (externallyAborted) {
         status = "aborted";
         break;
@@ -452,13 +386,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       // 回炉：在同一会话里、释放之前验证（运行面没装起来、没有 Run 时不验证，这一步结束）
       // 没有 Run 可验证：这一步未收尾（账本里最后一个 Run 也没有验证记录）
       if (liveBundle === undefined || run.runId === undefined) {
-        repair = {
-          rounds,
-          closed: false,
-          reverted: false,
-          budgetExhausted: false,
-          restored: false,
-        };
+        repair = { rounds, closed: false };
         break;
       }
       await options.beforeVerify?.();
@@ -492,38 +420,19 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       const { verdict } = verified.outcome;
       lastVerdict = verdict;
       verification = { verdict, recorded: verified.record !== undefined };
-      // 验证进行中来了外部中止：验证一结束即停，不回炉、不撤回
+      // 验证进行中来了外部中止：验证一结束即停，不回炉
       if (externallyAborted) {
         status = "aborted";
         break;
       }
       // 通过即结束；无法判定不回炉，按现有口径记为未知
       if (verdict !== "fail") {
-        repair = {
-          rounds,
-          verdict,
-          closed: true,
-          reverted: false,
-          budgetExhausted: false,
-          restored: false,
-        };
+        repair = { rounds, verdict, closed: true };
         break;
       }
-      // 修满 N 轮或预算耗尽仍失败：恢复到这一步第一个 Run 之前的状态，这一步记为失败。
-      // 预算只在先于轮数用尽时算提前撤回；轮数与预算同时用满记为轮数用满
+      // 修满 N 轮或预算耗尽仍失败：这一步以失败收尾，工作区保留 agent 的改动（决策 172 / 173）
       if (rounds >= repairRounds || limitHit !== undefined) {
-        const restore = await restoreForRevert();
-        repair = {
-          rounds,
-          verdict,
-          closed: true,
-          reverted: true,
-          budgetExhausted: limitHit !== undefined && rounds < repairRounds,
-          ...restore,
-        };
-        if (restore.restoreError !== undefined) {
-          errorMessage = restore.restoreError;
-        }
+        repair = { rounds, verdict, closed: true };
         break;
       }
       rounds += 1;
@@ -566,9 +475,6 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         rounds,
         ...(lastVerdict !== undefined ? { verdict: lastVerdict } : {}),
         closed: false,
-        reverted: false,
-        budgetExhausted: false,
-        restored: false,
       };
     }
   } finally {

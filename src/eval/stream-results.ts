@@ -36,16 +36,16 @@ export interface StreamResultLine {
   kind: StreamStepKind;
   commit: string;
   outcome: StreamStepOutcome;
-  // 本步结束后工作区的 HEAD（落地后的新提交，撤回或跳过时为本步起点）；续跑时据此核对容器
+  // 本步结束后工作区的 HEAD（落地后的新提交，跳过时为本步起点）；续跑时据此核对容器
   head: string;
   // 本步是否做了判定（题与维护步为 true）
   judged: boolean;
   // 回炉：未开回炉的条件为 null
   repairRounds: number | null;
-  reverted: boolean;
   finalVerdict: "pass" | "fail" | null;
-  // 回炉撤回是否因预算先于轮数用尽；未开回炉为 null
-  repairBudgetExhausted: boolean | null;
+  // 撤回拆除（决策 173）之前写下的旧结果行才有：是否撤回、撤回是否因预算先于轮数用尽。新行不写，只读兼容
+  reverted?: boolean;
+  repairBudgetExhausted?: boolean | null;
   // 验证之前发现 agent 改过人写测试并还原的次数（每次验证至多计 1）；未开回炉为 null
   humanTestRestores: number | null;
   // agent 是否改了依赖声明文件（与人在该步的版本不同）：切环境一律按人的声明，这里只记下；没有依赖声明或没跑 agent 为 null
@@ -119,9 +119,7 @@ export const STREAM_RESULT_FIELDS = [
   "head",
   "judged",
   "repairRounds",
-  "reverted",
   "finalVerdict",
-  "repairBudgetExhausted",
   "humanTestRestores",
   "agentChangedDeps",
   "humanFailsGate",
@@ -141,6 +139,9 @@ export const STREAM_RESULT_FIELDS = [
   "admissionWaitMs",
   "harnessRef",
 ] as const;
+
+// 旧结果行才带、新行不再写的字段（决策 173）：读取与报告照常接受
+export const LEGACY_STREAM_RESULT_FIELDS = ["reverted", "repairBudgetExhausted"] as const;
 
 export interface StreamJobId {
   stream: string;

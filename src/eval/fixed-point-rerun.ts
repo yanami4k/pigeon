@@ -1,6 +1,6 @@
 // 定点对照的单步重跑（决策 139、156、157、158）：每个事件、每组各若干遍（缺省 5），每遍从该步起点恢复该流的断网容器工作区
 // （上一步落地的提交加该步的人写测试，与流中该步开工时一致），治理根里放第 1 到 k−1 步的会话副本，按完整条件跑完整的一步：
-// agent、分步验证门、回炉（3 轮）、撤回，预算与原尝试相同；模型请求经本地网关、计量与限额处理与流中一致。
+// agent、分步验证门、回炉（3 轮），预算与原尝试相同；模型请求经本地网关、计量与限额处理与流中一致。
 // 三组的差别只在结构化记忆的固定挑选（157），推送路径与正式使用同一条。
 // 一致性核对（156）：从原尝试的 run.started 解出预算、模型、推理档位、工具名单与工作方式指令，重跑照搬（预算与流中相同，
 // 不接受调用方另给）；每遍跑完再按重跑自己的 run.started 核对一次，任何一项不同即拒绝、不写结果行。
@@ -814,7 +814,6 @@ async function runPass(
       );
       passed = judgement.exitCode === 0 && !judgement.timedOut;
     }
-    const reverted = result.repair?.finalVerdict === "fail";
     return {
       eventId: event.id,
       stream: event.stream,
@@ -828,8 +827,8 @@ async function runPass(
       repairVerify: verdicts.repair,
       repairRounds: result.repair?.rounds ?? null,
       finalVerdict: result.repair?.finalVerdict ?? null,
-      reverted,
-      outcome: passed && !reverted ? "passed" : "failed",
+      // 与流中同一口径：成败只看判题，回炉的最终结论另记在 finalVerdict（172 / 173）
+      outcome: passed ? "passed" : "failed",
       memoryUsed: used.used,
       memoryUsedFiles: used.files,
       status: result.status,

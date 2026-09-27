@@ -109,16 +109,15 @@ export interface EvalResultLine {
   testProgress?: TestProgress;
   // M9：整次运行的墙钟耗时（环境准备、agent 运行、判分与清理）。新写的行必带；此前写下的行缺省，读侧容忍
   wallMs?: number;
-  // 决策 142 / 143：回炉开启时在场——用了几轮、这一步里验证门的最终结论（不是判据的判决）、是否撤回、
-  // 撤回是否因预算先于轮数用尽而提前、这一步是否收尾、撤回时工作区是否真的恢复（没恢复成时附原因）。
-  // 回炉关闭时缺省，行形状与此前一致
+  // 决策 142 / 143：回炉开启时在场——用了几轮、这一步里验证门的最终结论（不是判据的判决）、这一步是否收尾。
+  // 回炉关闭时缺省，行形状与此前一致。撤回相关的四个字段只在撤回拆除（决策 173）之前写下的旧行里出现，新行不写，只读兼容
   repair?: {
     rounds: number;
     verdict?: EvalVerdict;
     closed: boolean;
-    reverted: boolean;
-    budgetExhausted: boolean;
-    restored: boolean;
+    reverted?: boolean;
+    budgetExhausted?: boolean;
+    restored?: boolean;
     restoreError?: string;
   };
   // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条（条目编号），以及各处挑出来但用前核验没过、

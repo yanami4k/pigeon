@@ -148,18 +148,6 @@ test("无关记忆按整条事实排除看同指纹的全部事实与全部条�
   assert.equal(chooseIrrelevant([relevant], [onX], new Set(["src/core.ts"]), all), null);
 });
 
-test("无关记忆先同种类：被换的是撤回类就只取撤回类，没有同种类的候选即该组缺失", () => {
-  const { byAnchor } = entries();
-  const regression = byAnchor.get("src/c.ts") as MemoryEntry;
-  const reverted: MemoryEntry = { ...(byAnchor.get("src/a.ts") as MemoryEntry), kind: "reverted" };
-  assert.equal(chooseIrrelevant([reverted], [regression], new Set()), null);
-  const otherReverted: MemoryEntry = { ...regression, kind: "reverted" };
-  assert.equal(
-    chooseIrrelevant([reverted], [regression, otherReverted], new Set())?.get(reverted.id),
-    otherReverted
-  );
-});
-
 test("无关记忆：同一事件里两条被换的条目换上的不重复、也不取同指纹的两条", () => {
   const { byAnchor, all } = entries();
   const a = byAnchor.get("src/a.ts") as MemoryEntry;

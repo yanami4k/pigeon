@@ -110,7 +110,7 @@ export interface StructuredMemoryPush {
 export interface StructuredMemoryListing {
   id: string;
   anchor: string;
-  kind: "regression" | "reverted";
+  kind: "regression";
   step: string;
   fingerprint: string;
   names: string[];
@@ -148,7 +148,7 @@ export function renderStructuredMemoryList(listing: readonly StructuredMemoryLis
   }
   const lines = listing.map(
     (item) =>
-      `${item.id} ｜ 锚点 ${item.anchor} ｜ ${item.kind === "regression" ? "红转绿" : "撤回"} ｜ ` +
+      `${item.id} ｜ 锚点 ${item.anchor} ｜ 红转绿 ｜ ` +
       `「${item.step}」${item.fingerprint}${item.names.length > 0 ? `（${item.names.join("、")}）` : ""} ｜ ` +
       `${item.count} 次 ｜ 最近 ${new Date(item.lastAt).toISOString()} ｜ 来源会话 ${item.sessions.join("、")} ｜ ` +
       `核验${item.check.ok ? "通过" : `不过：${item.check.reason ?? ""}`}`

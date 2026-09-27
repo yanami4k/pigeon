@@ -273,7 +273,7 @@ test("同一次验证里指纹键相同的多行报错合为一条事实，名�
   assert.deepEqual(facts[0]?.fingerprint.names, ["alpha", "beta", "gamma"]);
 });
 
-test("无法判断就不猜：步骤类型未知或为测试、输出又无法识别时不记红转绿；撤回照记", () => {
+test("无法判断就不猜：步骤类型未知或为测试、输出又无法识别时不记红转绿；修满仍失败也不产出事实", () => {
   for (const command of ["npx jest", "./run-all.sh"]) {
     const legacy = { command };
     const facts = deriveSessionFrictions(
@@ -286,7 +286,7 @@ test("无法判断就不猜：步骤类型未知或为测试、输出又无法�
       )
     );
     assert.deepEqual(facts, [], command);
-    const reverted = deriveSessionFrictions(
+    const unresolved = deriveSessionFrictions(
       sessionOf(
         [
           [{ name: "验证", verdict: "fail", output: "FAIL  some weird output ●" }],
@@ -295,10 +295,6 @@ test("无法判断就不猜：步骤类型未知或为测试、输出又无法�
         legacy
       )
     );
-    assert.deepEqual(
-      reverted.map((fact) => [fact.kind, fact.fingerprint.tool]),
-      [["reverted", "unrecognized"]],
-      command
-    );
+    assert.deepEqual(unresolved, [], command);
   }
 });

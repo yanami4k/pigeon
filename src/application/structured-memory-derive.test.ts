@@ -1,6 +1,6 @@
 // 结构化记忆的事实派生（决策 131）：真实 headless 回炉流程写下的账本 → 程序推出的两类摩擦。
 // 红转绿：格式、类型、分层、他处测试失败后修好各记一条；本步题面测试（本步新增的测试文件）一开始不过不记；
-// 测试步输出无法解析时不记红转绿；非测试步无法解析时记"未识别"指纹。撤回：按 154 修订的推断记录尝试。
+// 测试步输出无法解析时不记红转绿；非测试步无法解析时记"未识别"指纹。修满仍失败的一步不产出事实（决策 173）。
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -218,7 +218,7 @@ test("红转绿：多轮回炉才修好只记一次，指纹取变红那次；�
   }
 });
 
-test("撤回：回炉到上限仍失败即推断为已撤回，记本步尝试改动过的文件与最后一次验证里失败的步名与指纹（无法解析的记未识别）", async () => {
+test("回炉修满仍失败（旧口径下会推为已撤回的会话）：不产出撤回类事实，始终没修好也没有红转绿", async () => {
   const repo = makeMemoryRepo(BASE_FILES);
   try {
     const session = await runStep(
@@ -235,68 +235,14 @@ test("撤回：回炉到上限仍失败即推断为已撤回，记本步尝试�
       ],
       2
     );
-    assert.equal(repairStepOutcome(session)?.reverted, true);
-    const facts = deriveSessionFrictions(session);
-    const reverted = facts.filter((fact) => fact.kind === "reverted");
-    assert.deepEqual(
-      reverted.map(brief).sort((left, right) => left.step.localeCompare(right.step)),
-      [
-        {
-          kind: "reverted",
-          step: "类型",
-          stepKind: "type",
-          tool: "tsc",
-          what: "TS2304",
-          file: "src/b.ts",
-          names: ["helper"],
-        },
-        {
-          kind: "reverted",
-          step: "集成测试",
-          stepKind: "test",
-          tool: "unrecognized",
-          what: null,
-          file: null,
-          names: [],
-        },
-      ].sort((left, right) => left.step.localeCompare(right.step))
-    );
-    for (const fact of reverted) {
-      assert.deepEqual(fact.attemptedFiles, ["src/b.ts", "src/d.ts", "src/e.ts"]);
-    }
-    // 始终没修好，没有红转绿
-    assert.equal(facts.filter((fact) => fact.kind === "regression").length, 0);
-  } finally {
-    repo.cleanup();
-  }
-});
-
-test("撤回推断沿用 154 修订：最后一个 Run 没有验证记录（未收尾）不推为撤回，不记尝试", async () => {
-  const repo = makeMemoryRepo(BASE_FILES);
-  try {
-    const session = await runStep(
-      repo,
-      [
-        edits(["src/b.ts", "helper;", "helper; // TYPE_BAD:helper"]),
-        finished(),
-        finished("修不好"),
-      ],
-      1
-    );
-    assert.equal(repairStepOutcome(session)?.reverted, true);
-    // 去掉最后一个 Run 的验证记录，模拟"回炉 Run 结束后、验证落盘前崩溃"
+    // 回炉开启、最后一个 Run 有验证记录且为失败：正是旧撤回推断认定"已撤回"的账本形状
     const lastRun = session.runStarteds.at(-1)?.runId;
-    const truncated = {
-      ...session,
-      attemptVerifieds: session.attemptVerifieds.filter(
-        (record) => record.target.runId !== lastRun
-      ),
-    };
-    assert.equal(repairStepOutcome(truncated)?.reverted, false);
-    assert.deepEqual(
-      deriveSessionFrictions(truncated).filter((fact) => fact.kind === "reverted"),
-      []
+    assert.equal(
+      session.attemptVerifieds.find((record) => record.target.runId === lastRun)?.verdict,
+      "fail"
     );
+    assert.deepEqual(repairStepOutcome(session), { rounds: 2, verdict: "fail" });
+    assert.deepEqual(deriveSessionFrictions(session), []);
   } finally {
     repo.cleanup();
   }

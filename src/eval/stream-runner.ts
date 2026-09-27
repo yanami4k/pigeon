@@ -1,7 +1,7 @@
 // 延续式跑批器（决策 126 修订、140、142、143、145、147、148；第三、四、六节）：agent 按历史顺序一步一步地做，
 // 每一步都在它自己上一步留下的代码上接着做。每条流乘以每个条件（乘以第几遍）为一个独立作业，共用工作队列并行（缺省 4 路）。
 // 每一步：回到本步起点 → 程序写入该步人的测试、测试辅助与环境文件 → 按条件运行 agent → 恢复 agent 动过的测试 →
-// 判定（题：判题测试；维护步：验证门）→ 落地提交或撤回（撤回后该步留空，后续照常往下做）→ 在另一份副本上做全量测量 →
+// 判定（题：判题测试；维护步：验证门）→ 落地提交（没做好也照样落地，后续在它之上接着做）→ 在另一份副本上做全量测量 →
 // 失败归因 → 导出流历史 → 写结果行。被打断的一步整题作废、回到本步起点、不留结果行（144）；崩溃后从结果行与导出的
 // 流历史续跑。agent 怎么跑（Pigeon 在进程内、最简 agent 在宿主上）与模型怎么接入都在 StepAgent 之后，跑批器不感知。
 import { execFile } from "node:child_process";
@@ -66,23 +66,21 @@ import {
 } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
-// 四个条件（126 修订、140）：完整 Pigeon 开回炉、撤回与结构化记忆；去掉记忆只关结构化记忆；去掉验证门与回退两者都不开；
+// 四个条件（126 修订、140）：完整 Pigeon 开回炉与结构化记忆；去掉记忆只关结构化记忆；去掉验证门即不开回炉；
 // 最简 agent 另走启动器
 export interface ConditionSpec {
   name: StreamCondition;
   agent: "pigeon" | "minimal";
-  // 回炉轮数上限（143）；0 为不开回炉
+  // 回炉轮数上限（143）；0 为不开回炉。回炉到上限仍不通过即以失败收尾、代码照样落地（172 / 173）
   repairRounds: number;
-  // 回炉到上限仍不通过即撤回（142）
-  revert: boolean;
   memory: boolean;
 }
 
 export const CONDITION_SPECS: Record<StreamCondition, ConditionSpec> = {
-  full: { name: "full", agent: "pigeon", repairRounds: 3, revert: true, memory: true },
-  "no-memory": { name: "no-memory", agent: "pigeon", repairRounds: 3, revert: true, memory: false },
-  "no-gate": { name: "no-gate", agent: "pigeon", repairRounds: 0, revert: false, memory: false },
-  minimal: { name: "minimal", agent: "minimal", repairRounds: 0, revert: false, memory: false },
+  full: { name: "full", agent: "pigeon", repairRounds: 3, memory: true },
+  "no-memory": { name: "no-memory", agent: "pigeon", repairRounds: 3, memory: false },
+  "no-gate": { name: "no-gate", agent: "pigeon", repairRounds: 0, memory: false },
+  minimal: { name: "minimal", agent: "minimal", repairRounds: 0, memory: false },
 };
 
 // 每步总预算（147）：各条件同一个，包括轮数与墙钟，回炉的消耗计入其中；先按 150 轮、30 分钟，试跑后定死
@@ -211,14 +209,10 @@ export interface StepAgentResult {
   turns: number;
   usage: TurnUsage;
   wallMs: number;
-  // 开回炉的条件：用了几轮、最后一次验证结论（无法判定为 null）、是否撤回、撤回是否因预算先于轮数用尽、
-  // 撤回时工作区没恢复成的原因；未开回炉为 null
+  // 开回炉的条件：用了几轮、最后一次验证结论（无法判定为 null）；未开回炉为 null
   repair: {
     rounds: number;
     finalVerdict: "pass" | "fail" | null;
-    reverted?: boolean;
-    budgetExhausted?: boolean;
-    restoreError?: string;
     // 验证之前发现 agent 改过人写测试并还原的次数（容器模式的 Pigeon 给出；缺省按 0 记）
     humanTestRestores?: number;
   } | null;
@@ -499,7 +493,6 @@ interface JobState {
   previous: StreamResultLine | undefined;
   // 上一次测量时 agent 代码上通过的用例
   agentPassing: Set<string>;
-  revertedCreated: CreatedRefs[];
   maintenanceCreated: CreatedRefs[];
 }
 
@@ -565,8 +558,6 @@ async function runStreamJob(
       );
       if (moved > 0) log(`续跑：上次中断的一步留下 ${moved} 个会话文件，已移出治理根`);
     }
-    const jobRows = lines.filter((l) => streamJobKey(l) === streamJobKey(job));
-    const bySeq = new Map(steps.map((s) => [s.seq, s]));
     const state: JobState = {
       head: await env.ws.head(),
       previous: last,
@@ -574,12 +565,6 @@ async function runStreamJob(
         last !== undefined && existsSync(passingFile(last.seq))
           ? new Set(JSON.parse(readFileSync(passingFile(last.seq), "utf8")) as string[])
           : new Set(),
-      revertedCreated: jobRows
-        .filter((r) => r.reverted && r.kind === "task")
-        .flatMap((r) => {
-          const s = bySeq.get(r.seq);
-          return s === undefined ? [] : [createdFor(options, s)];
-        }),
       maintenanceCreated: steps
         .filter((s) => s.kind === "maintenance" && last !== undefined && s.seq <= last.seq)
         .map((s) => createdFor(options, s)),
@@ -852,7 +837,7 @@ interface Measurement {
   quality: NonNullable<StreamResultLine["quality"]>;
 }
 
-// 全量测量（145、148）：在从 HEAD 克隆的副本上补齐人截至该步的全部测试与测试辅助文件（被撤回题的测试也在内），
+// 全量测量（145、148）：在从 HEAD 克隆的副本上补齐人截至该步的全部测试与测试辅助文件（没做出来的题的测试也在内），
 // 跑人写的全部测试；结果不进 agent 的会话
 async function measure(
   options: RunStreamsOptions,
@@ -964,9 +949,7 @@ async function runStep(
     head: state.head,
     judged: false,
     repairRounds: null,
-    reverted: false,
     finalVerdict: null,
-    repairBudgetExhausted: null,
     humanTestRestores: null,
     agentChangedDeps: null,
     fullPassRate: state.previous?.fullPassRate ?? null,
@@ -1005,7 +988,6 @@ async function runStep(
   let judged = false;
   let passed = false;
   let judgeOutput = "";
-  let reverted = false;
   let head: string;
   if (step.kind === "apply") {
     head = await ws.land(step.message, state.head);
@@ -1117,14 +1099,8 @@ async function runStep(
       judgeOutput = judgement.output;
     }
     judged = true;
-    // 154：回炉开启且最后一次验证失败即已撤回
-    reverted = spec.revert && result.repair?.finalVerdict === "fail";
-    if (reverted) {
-      await ws.rollback(state.head);
-      head = state.head;
-    } else {
-      head = await ws.land(step.message, state.head);
-    }
+    // 回炉最终不通过也照样落地：这一步以失败收尾，下一步从 agent 的代码之上接着做（172 / 173）
+    head = await ws.land(step.message, state.head);
   }
   let measured: Measurement;
   try {
@@ -1143,35 +1119,26 @@ async function runStep(
   await ws.clearArtifacts(env.measureRoot);
   const attribution = judged
     ? attributeFailure({
-        passed: passed && !reverted,
+        passed,
         missing: extractMissing(judgeOutput, ws.root),
-        revertedCreated: state.revertedCreated,
         maintenanceCreated: state.maintenanceCreated,
         regressions: measured.regressions,
       })
     : null;
-  if (reverted && step.kind === "task") state.revertedCreated.push(createdFor(options, step));
   if (step.kind === "maintenance") state.maintenanceCreated.push(createdFor(options, step));
   return {
     ...base,
-    outcome: step.kind === "apply" ? "applied" : passed && !reverted ? "passed" : "failed",
+    // 成败只看判题（题跑判题测试、维护步跑验证门），判的是落地的 agent 代码；回炉的最终结论另记在 finalVerdict
+    outcome: step.kind === "apply" ? "applied" : passed ? "passed" : "failed",
     head,
     judged,
     repairRounds: result?.repair?.rounds ?? null,
-    reverted,
     finalVerdict: result?.repair?.finalVerdict ?? null,
-    repairBudgetExhausted:
-      result?.repair === null || result?.repair === undefined
-        ? null
-        : (result.repair.budgetExhausted ?? false),
     humanTestRestores:
       result?.repair === null || result?.repair === undefined
         ? null
         : (result.repair.humanTestRestores ?? 0),
     agentChangedDeps,
-    ...(result?.repair?.restoreError !== undefined
-      ? { error: `回炉撤回时工作区未恢复（跑批器已按本步起点复原）：${result.repair.restoreError}` }
-      : {}),
     fullPassRate: measured.fullPassRate,
     regressions: measured.regressions,
     quality: measured.quality,

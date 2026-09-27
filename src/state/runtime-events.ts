@@ -179,7 +179,7 @@ export const RunStartedPayloadSchema = Type.Object({
   // M8（决策 087）：本次尝试的预算（冻结快照值，加法式可缺省）——回放据此沿用同一预算，不得放宽
   budget: Type.Optional(AttemptBudgetSchema),
   // 回炉轮数（决策 142 / 143；冻结快照值，只在开启时在场）：一步里的每次 Run 都带同一个值，
-  // 撤回由它与这一步最后一次验证记录推出（state/repair-step.ts），不另记
+  // 这一步的成败由它与这一步最后一次验证记录推出（state/repair-step.ts），不另记
   repairRounds: Type.Optional(RepairRoundsSchema),
   // 这一步的起点（决策 154②；加法式可缺省）：工作区在执行端另一侧（容器）时，回炉开启下执行端在第一个 Run 之前记下的
   // 起点提交与"开工时的树"挂在它之下的提交；一步里的每个 Run 同值。两者之差即开工时的脏文件（跑批器预置、尚未提交的人写测试），

@@ -113,7 +113,7 @@ function rowsOf(out: string): EvalResultLine[] {
     .map((line) => JSON.parse(line) as EvalResultLine);
 }
 
-test("评测跑批开启回炉：结果行带回炉轮数、验证门最终结论与是否撤回，判据在回炉结束后照常判分", async () => {
+test("评测跑批开启回炉：结果行带回炉轮数与验证门最终结论，判据在回炉结束后照常判分", async () => {
   const fixture = makeFixture();
   try {
     const tasks = loadEvalTasks(join(fixture.repo, "eval", "tasks"));
@@ -135,9 +135,6 @@ test("评测跑批开启回炉：结果行带回炉轮数、验证门最终结�
       rounds: 1,
       verdict: "pass",
       closed: true,
-      reverted: false,
-      budgetExhausted: false,
-      restored: false,
     });
     assert.equal(row.verdict, "pass", "回炉修好后判据判通过");
     assert.equal(row.turns, 3, "轮次按整步汇总：首次 1 轮，回炉一轮 2 轮");
@@ -146,7 +143,7 @@ test("评测跑批开启回炉：结果行带回炉轮数、验证门最终结�
   }
 });
 
-test("评测跑批回炉撤回：结果行记已撤回；误报按整步最后一个 Run 的自报完成判，不看首个 Run", async () => {
+test("评测跑批回炉修满仍失败：结果行记最终结论为失败；误报按整步最后一个 Run 的自报完成判，不看首个 Run", async () => {
   const fixture = makeFixture();
   try {
     const tasks = loadEvalTasks(join(fixture.repo, "eval", "tasks"));
@@ -182,63 +179,10 @@ test("评测跑批回炉撤回：结果行记已撤回；误报按整步最后�
       rounds: 1,
       verdict: "fail",
       closed: true,
-      reverted: true,
-      budgetExhausted: false,
-      // 这一步一次文件都没改过（改文件的工具调用出错）：没有快照起点，无需恢复
-      restored: false,
     });
     assert.equal(row.verdict, "fail");
     assert.equal(row.falsePositive, true, "这一步最后一个 Run 自报完成而判据判失败，即误报");
     assert.equal(row.failureClass, null, "失败分类取最后一个 Run 的（正常收尾）");
-  } finally {
-    fixture.cleanup();
-  }
-});
-
-test("评测跑批回炉撤回而工作区没恢复成：记错误行（不判分、不计入成败），带 restoreError", async () => {
-  const fixture = makeFixture({
-    // agent 的命令：挪走 .git 再改文件——提议时记下了基线，落定时快照打不成，起点因此丢失（真实故障）
-    "park.mjs":
-      'import { renameSync, writeFileSync } from "node:fs";\n' +
-      'renameSync(".git", ".git-parked");\n' +
-      'writeFileSync("a.txt", "v2\\n");\n',
-    // 验证门：先把 .git 挪回来，再判失败
-    "gate-unpark.mjs":
-      'import { existsSync, renameSync } from "node:fs";\n' +
-      'if (existsSync(".git-parked")) renameSync(".git-parked", ".git");\n' +
-      "process.exit(1);\n",
-  });
-  try {
-    const tasks = loadEvalTasks(join(fixture.repo, "eval", "tasks"));
-    await runEval({
-      source: localTaskSource(tasks),
-      outDir: fixture.out,
-      runs: 1,
-      streamFn: createFakeStreamFn({
-        replies: [
-          {
-            text: "跑个命令",
-            toolCalls: [{ name: "run_command", args: { command: `${NODE} park.mjs` } }],
-          },
-          { text: "完成" },
-          { text: "还是完成" },
-        ],
-      }),
-      yolo: true,
-      homeDir: fixture.home,
-      conditions: ["none"],
-      editMode: "replace",
-      verify: { command: `${NODE} gate-unpark.mjs`, timeoutMs: 30_000 },
-      repairRounds: 1,
-    });
-    const [row] = rowsOf(fixture.out);
-    assert.ok(row !== undefined);
-    assert.equal(row.repair?.reverted, true);
-    assert.equal(row.repair?.restored, false);
-    assert.match(row.repair?.restoreError ?? "", /没有撤回起点|起点丢失/);
-    assert.equal(row.status, "error", "错误行：不计入成败，重跑时补跑");
-    assert.equal(row.verdict, "undetermined");
-    assert.match(row.error ?? "", /回炉撤回时工作区未恢复/);
   } finally {
     fixture.cleanup();
   }

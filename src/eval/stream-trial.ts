@@ -53,6 +53,7 @@ export interface TrialRow {
   verifyMs?: number[];
   repairRounds?: number | null;
   finalVerdict?: "pass" | "fail" | null;
+  // 撤回拆除（决策 173）之前写下的试跑行才有，新行不写；只读兼容
   reverted?: boolean;
   budgetExhausted?: boolean | null;
   // 与正式结果行同形：等空闲账号的累计毫秒、各账号成功转发的次数、同时在途的请求数峰值；不经网关为 null
@@ -302,8 +303,6 @@ async function runStreamTrialLocked(options: StreamTrialOptions): Promise<Stream
           verifyMs: facts.verifyMs,
           repairRounds: result.repair?.rounds ?? null,
           finalVerdict: result.repair?.finalVerdict ?? null,
-          reverted: result.repair?.reverted ?? false,
-          budgetExhausted: result.repair?.budgetExhausted ?? null,
           gateway:
             delta !== undefined
               ? {

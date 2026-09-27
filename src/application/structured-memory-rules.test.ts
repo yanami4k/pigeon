@@ -60,47 +60,6 @@ const repairing = (names: string[], rounds = 2): Partial<HeadlessRunOptions> => 
   repairRounds: rounds,
 });
 
-test("同一指纹既有红转绿又有撤回：挑选时只给一条，优先红转绿；两种事实在合并键里分开", async () => {
-  const repo = makeMemoryRepo(FILES);
-  try {
-    await step(
-      repo,
-      "以往",
-      [
-        edits(["src/a.ts", "= 1;", "= 2;"], ["src/b.ts", "helper;", "helper; // TYPE_BAD:helper"]),
-        finished(),
-        edits(["src/b.ts", " // TYPE_BAD:helper", " // helper ok"]),
-        finished("修好了"),
-      ],
-      { enabled: false },
-      repairing(["类型"])
-    );
-    repo.commit("落地");
-    // 更近的一步：同一指纹一直没修好，撤回
-    await step(
-      repo,
-      "以往",
-      [
-        edits(["src/b.ts", " // helper ok", " // helper ok TYPE_BAD:helper"]),
-        finished(),
-        finished("修不好"),
-      ],
-      { enabled: false },
-      repairing(["类型"], 1)
-    );
-    const onB = buildMemoryEntries(loadStructuredMemory(repo.root).facts).filter(
-      (entry) => entry.anchor === "src/b.ts"
-    );
-    assert.deepEqual(onB.map((entry) => entry.kind).sort(), ["regression", "reverted"]);
-    assert.equal(onB[0]?.fingerprintKey, onB[1]?.fingerprintKey);
-    const regression = onB.find((entry) => entry.kind === "regression");
-    const next = await step(repo, "改 src/b.ts", [finished("看过了")], {});
-    assert.deepEqual(next.runStarteds[0]?.payload.structuredMemory?.opening, [regression?.id]);
-  } finally {
-    repo.cleanup();
-  }
-});
-
 test('回炉挑选：未识别的指纹不参加"指纹对上"那一档，只参加"涉及文件"那一档', async () => {
   const repo = makeMemoryRepo(FILES);
   try {

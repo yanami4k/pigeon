@@ -148,7 +148,7 @@ test("分叉复用运行面已挂的快照器：分叉前后的快照 ref 编号
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    // 只数快照 ref（开工忽略清单另挂在 refs/pigeon/start-ignored/ 下，不是快照）
+    // 只数快照 ref
     const own = git(dir, [
       "for-each-ref",
       "--format=%(refname) %(objectname)",

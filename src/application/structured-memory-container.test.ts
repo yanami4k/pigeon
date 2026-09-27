@@ -47,10 +47,7 @@ test("容器里的结构化记忆：首轮类型检查变红、回炉修好即�
       edits(["src/b.ts", " // TYPE_BAD:helper", " // helper ok"]),
       finished("修好了"),
     ]);
-    assert.deepEqual(
-      [first.repair?.rounds, first.repair?.verdict, first.repair?.reverted],
-      [1, "pass", false]
-    );
+    assert.deepEqual([first.repair?.rounds, first.repair?.verdict], [1, "pass"]);
     // 验证经执行端在容器里执行：记录里的工作区是执行端的工作区根
     const session = materializeSession(join(governance, ".pigeon", "sessions"), first.sessionId, {
       content: false,

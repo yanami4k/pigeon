@@ -376,7 +376,7 @@ const editTo = (from: string, to: string) => ({
   ],
 });
 
-test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修满轮数仍失败即撤回到这一步起点，结果带回回炉字段", async () => {
+test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动，结果带回回炉字段", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   try {
@@ -404,13 +404,8 @@ test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修�
         verify: FIXED_GATE,
       })
     );
-    assert.deepEqual(out.repair, {
-      rounds: 3,
-      finalVerdict: "fail",
-      reverted: true,
-      budgetExhausted: false,
-    });
-    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
+    assert.deepEqual(out.repair, { rounds: 3, finalVerdict: "fail" });
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w4\n");
   } finally {
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -557,7 +552,7 @@ for (const condition of ["full", "no-memory", "no-gate"] as const) {
   });
 }
 
-test("Pigeon agent：开工前已来了限额信号（起点记好之后、第一轮之前）即一轮都不跑；验证进行中来了信号，验证一结束即停、不回炉不撤回", async () => {
+test("Pigeon agent：开工前已来了限额信号（起点记好之后、第一轮之前）即一轮都不跑；验证进行中来了信号，验证一结束即停、不再回炉", async () => {
   // 开工前：控制器已是暂停状态
   {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
@@ -586,7 +581,7 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
   }
-  // 验证进行中：第 2 次验证（后面还能回炉）与第 4 次验证（修满 3 轮后的最后一次，不过即要撤回）
+  // 验证进行中：第 2 次验证（后面还能回炉）与第 4 次验证（修满 3 轮后的最后一次，不过即以失败收尾）
   for (const at of [2, 4]) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
@@ -655,7 +650,7 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
       assert.equal(
         readFileSync(join(ws.testbed, "a.txt"), "utf8"),
         `w${at}\n`,
-        `第 ${at} 次：没有撤回（由跑批器作废）`
+        `第 ${at} 次：工作区是 agent 改到的样子（由跑批器作废）`
       );
     } finally {
       ws.cleanup();
@@ -711,7 +706,7 @@ test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）
   }
 });
 
-test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写测试的 conftest——验证照样失败，修满轮数后撤回", async () => {
+test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写测试的 conftest——验证照样失败，修满轮数后以失败收尾", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
@@ -762,11 +757,7 @@ test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写�
         humanTests: ["tests/check.sh"],
       })
     );
-    assert.deepEqual(
-      [out.repair?.rounds, out.repair?.finalVerdict, out.repair?.reverted],
-      [3, "fail", true]
-    );
-    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
+    assert.deepEqual([out.repair?.rounds, out.repair?.finalVerdict], [3, "fail"]);
   } finally {
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -813,7 +804,7 @@ test("Pigeon agent：回炉验证之前删 conftest 与判题前同一口径—�
   }
 });
 
-test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后撤回，结果记下还原次数", async () => {
+test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后以失败收尾，结果记下还原次数", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   // 跑批器在开工前预置的人写测试（未提交）：a.txt 须为 fixed
@@ -867,11 +858,9 @@ test("Pigeon agent：验证前把人写测试还原成开工时的版本——ag
     assert.deepEqual(out.repair, {
       rounds: 3,
       finalVerdict: "fail",
-      reverted: true,
-      budgetExhausted: false,
       humanTestRestores: 4,
     });
-    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w1\n");
     assert.equal(readFileSync(join(ws.testbed, "check.sh"), "utf8"), check);
   } finally {
     ws.cleanup();
@@ -942,7 +931,7 @@ test("Pigeon agent：回炉验证前只还原并计数人在这一步的测试�
   }
 });
 
-test("Pigeon agent：不开回炉的条件不验证、不撤回，结果不带回炉字段", async () => {
+test("Pigeon agent：不开回炉的条件不验证、不回炉，结果不带回炉字段", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   try {

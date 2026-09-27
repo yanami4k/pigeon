@@ -63,7 +63,7 @@ export interface RunEvalOptions {
   // M9：采样温度（缺省不设）；评测固定采样时由调用方给出，冻结进每次运行的注入快照
   temperature?: number;
   // 决策 142 / 143：回炉——每次运行的验证命令与回炉轮数（缺省不给即关闭）。验证命令是这一步里的验证门，
-  // 与任务源的判据不是一回事：回炉结束（含撤回）后判据照常判分。只支持本地 git 工作区（容器任务源启动即报错）
+  // 与任务源的判据不是一回事：回炉结束后判据照常判分（修满仍失败时判的是 agent 最后的代码）。只支持本地 git 工作区（容器任务源启动即报错）
   verify?: VerifyConfig;
   repairRounds?: number;
   // 决策 134 / 157：结构化记忆（开关与固定挑选）——给了才接入。缺省不接入：本跑批的治理根是整批共用的输出目录，
@@ -371,11 +371,8 @@ async function runOnce(
       !refused &&
       deterministic === undefined &&
       (run.failure?.category === "infrastructure" || run.status === "failed");
-    // 回炉撤回而工作区没恢复成：工作区既不是这一步起点、也不是 agent 的最后结果，判分没有意义——
-    // 不判分，记错误行（不占续跑键，重跑时补跑）
-    const restoreFailed = !refused && !providerFailed && run.repair?.restoreError !== undefined;
     const verified =
-      providerFailed || refused || restoreFailed
+      providerFailed || refused
         ? undefined
         : await verifyTaskRun({
             taskId: instance.id,
@@ -406,7 +403,7 @@ async function runOnce(
       errors.push(`过程指标汇总失败：${message(error)}`);
     }
     // 错误行口径（决策 101 ①：未完成不计为模型失败）：模型服务故障（失败分类为基础设施）或判据设施自身出错
-    // （备料失败、拉不起来、约定的出错退出码）或回炉撤回时工作区没恢复成时，这次运行没有产出可用结果——
+    // （备料失败、拉不起来、约定的出错退出码）时，这次运行没有产出可用结果——
     // 记 error，不占续跑键，重跑时补跑。
     // 验证器超时不在此列：可能正是任务改坏了代码，属于这次运行的真实结果
     const testProgress = parseTestProgress(verified?.details);
@@ -415,9 +412,7 @@ async function runOnce(
       ? "模型服务故障"
       : verified?.error !== undefined
         ? "判据设施出错"
-        : restoreFailed
-          ? "回炉撤回时工作区未恢复"
-          : undefined;
+        : undefined;
     line = {
       ...base,
       process,
@@ -446,7 +441,7 @@ async function runOnce(
       ...(infrastructure === undefined && deterministic !== undefined
         ? { deterministicError: deterministic }
         : {}),
-      // 决策 142 / 143：回炉开启时在场——用了几轮、最终验证结论、是否撤回（及是否因预算耗尽提前撤回）
+      // 决策 142 / 143：回炉开启时在场——用了几轮、最终验证结论、这一步是否收尾
       ...(run.repair !== undefined ? { repair: { ...run.repair } } : {}),
       // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条
       ...(run.structuredMemory !== undefined

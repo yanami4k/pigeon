@@ -1,19 +1,18 @@
-// 结构化记忆的事实派生（决策 131 / 132 / 133）：由程序从一个会话的账本推出两类"摩擦"，不经模型。
+// 结构化记忆的事实派生（决策 131 / 132 / 133）：由程序从一个会话的账本推出"摩擦"，不经模型。
 // - 回归与约束的红转绿：一步之中某次验证在题面以外的检查上失败，后续回炉后该检查转为通过。
 //   格式、类型、分层、代码检查的失败一律算；测试步只算题面测试文件以外的失败用例——题面测试文件取本步改动过的文件、
 //   开工时已是脏状态的文件、题面直接指到的文件三者的并集。无法判断就不猜：测试步或类型未知的步骤输出无法解析时不记。
 //   按指纹键逐个追踪：同一次验证里多行同键报错合为一个指纹；失败清单不全（输出被截断、去重后超过指纹上限、测试运行被中断、
 //   无法解析）时只认整步通过。工作区不在或取不到改前基线时题面测试文件认定不全（taskTestsUnknown），测试步不记红转绿。
-// - 被撤回的尝试：一步按 154（2026-09-23 修订）推断为已撤回时，记本步尝试改动过的文件与最后一次验证里失败的步名与指纹
-//   （无法解析的记为未识别指纹）。
-// 两类都只产生于回炉开启的一步（一个会话即一步，见 repair-step.ts）；每条事实只带一个指纹，同一次摩擦有几个指纹就展开成几条。
+// 修满或预算耗尽仍失败的一步不产出事实（决策 173 撤回拆除后不再有"被撤回的尝试"一类）。
+// 只产生于回炉开启的一步（一个会话即一步，见 repair-step.ts）；每条事实只带一个指纹，同一次摩擦有几个指纹就展开成几条。
 // 改动文件的取法：编辑工具调用（intent 的路径参数，且回执为已执行、未出错）、命令执行回执里的文件变化，外加调用方从快照之间的
 // 差异算出的文件（git 在 IO 层，本模块只收结果）；三者按时间合并。工具报错、围栏拒绝、每步改动摘要与读过哪些文件都不记。
 // 纯函数，无 IO。
 import { Type } from "typebox";
 import { type SessionId, SessionIdSchema } from "./ids.ts";
 import type { MaterializedSession } from "./materialize.ts";
-import { lastGateVerificationOf, repairRoundsOf, repairStepOutcome } from "./repair-step.ts";
+import { repairRoundsOf } from "./repair-step.ts";
 import {
   type Fingerprint,
   fingerprintKey,
@@ -23,7 +22,7 @@ import {
 } from "./verify-fingerprint.ts";
 import { LEGACY_VERIFY_STEP_NAME, recordStepsOf, underStepCwd } from "./verify-steps.ts";
 
-export type FrictionKind = "regression" | "reverted";
+export type FrictionKind = "regression";
 
 // 合法的毫秒时间戳（Date 能表示的范围），缓存里读回的事实据此校验
 const TimestampSchema = Type.Integer({ minimum: 0, maximum: 8_640_000_000_000_000 });
@@ -51,7 +50,7 @@ const FingerprintSchema = Type.Object({
 
 // 一条摩擦事实（缓存按本 schema 校验，不符即整份重建）
 export const FrictionFactSchema = Type.Object({
-  kind: Type.Union([Type.Literal("regression"), Type.Literal("reverted")]),
+  kind: Type.Literal("regression"),
   sessionId: SessionIdSchema,
   stepName: Type.String({ minLength: 1 }),
   stepKind: Type.Union(
@@ -60,7 +59,7 @@ export const FrictionFactSchema = Type.Object({
   fingerprint: FingerprintSchema,
   // 指纹键（步名、工具、错误码或规则或测试名、文件），合并用
   fingerprintKey: Type.String({ minLength: 1 }),
-  // 事发时刻：红转绿为转绿那次验证的时间，撤回为最后一次验证的时间（改动幅度从这里起算）
+  // 事发时刻：转绿那次验证的时间（改动幅度从这里起算）
   at: TimestampSchema,
   // 执行验证的工作区（绝对路径；改动文件与报错路径都相对它）
   workspace: Type.String({ minLength: 1 }),
@@ -68,8 +67,6 @@ export const FrictionFactSchema = Type.Object({
   redAt: Type.Optional(TimestampSchema),
   changedAtRed: Type.Optional(Type.Array(Type.String())),
   repairFiles: Type.Optional(Type.Array(Type.String())),
-  // 撤回：本步尝试改动过的文件
-  attemptedFiles: Type.Optional(Type.Array(Type.String())),
 });
 
 export interface FrictionFact {
@@ -84,7 +81,6 @@ export interface FrictionFact {
   redAt?: number;
   changedAtRed?: string[];
   repairFiles?: string[];
-  attemptedFiles?: string[];
 }
 
 // 一次文件改动（时间取落盘记录的时间）
@@ -408,37 +404,10 @@ export function deriveSessionFrictions(
       }
     }
   }
-
-  // 被撤回的尝试（154 修订：回炉开启、最后一个 Run 有验证记录且为失败）
-  const outcome = repairStepOutcome(session);
-  const lastRun = session.runStarteds.at(-1)?.runId;
-  const last = lastRun !== undefined ? lastGateVerificationOf(session, lastRun) : undefined;
-  if (outcome?.reverted === true && last !== undefined) {
-    const parsed = parseVerification(last, commands);
-    const attemptedFiles = [...stepFiles].sort();
-    for (const step of parsed.steps.values()) {
-      if (step.verdict !== "fail") {
-        continue;
-      }
-      for (const fingerprint of step.parsed.fingerprints) {
-        facts.push({
-          kind: "reverted",
-          sessionId: session.sessionId,
-          stepName: step.name,
-          stepKind: step.parsed.kind,
-          fingerprint,
-          fingerprintKey: fingerprintKey(step.name, fingerprint),
-          at: parsed.at,
-          workspace: parsed.workspace,
-          attemptedFiles,
-        });
-      }
-    }
-  }
   return facts;
 }
 
-// 一条事实挂在哪些文件上（决策 133）：红转绿挂报错所在文件、变红时已改文件与回炉补改文件；撤回挂尝试改过的文件与报错文件
+// 一条事实挂在哪些文件上（决策 133）：报错所在文件、变红时已改文件与回炉补改文件
 export function frictionAnchors(fact: FrictionFact): string[] {
   const files = new Set<string>();
   const add = (file: string | undefined) => {
@@ -448,11 +417,7 @@ export function frictionAnchors(fact: FrictionFact): string[] {
   };
   add(fact.fingerprint.file);
   add(fact.fingerprint.to);
-  for (const file of [
-    ...(fact.changedAtRed ?? []),
-    ...(fact.repairFiles ?? []),
-    ...(fact.attemptedFiles ?? []),
-  ]) {
+  for (const file of [...(fact.changedAtRed ?? []), ...(fact.repairFiles ?? [])]) {
     add(file);
   }
   return [...files].sort();

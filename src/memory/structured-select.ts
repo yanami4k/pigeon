@@ -161,9 +161,6 @@ function verifiedTop(
 }
 
 function betterRepresentative(candidate: MemoryPick, current: MemoryPick): boolean {
-  if (candidate.entry.kind !== current.entry.kind) {
-    return candidate.entry.kind === "regression";
-  }
   if (candidate.entry.latest.at !== current.entry.latest.at) {
     return candidate.entry.latest.at > current.entry.latest.at;
   }
@@ -304,11 +301,8 @@ export function renderEntry(entry: MemoryEntry): string {
     entry.fingerprint.names.length > 0 ? `（涉及 ${entry.fingerprint.names.join("、")}）` : "";
   const repeated = entry.count > 1 ? `同类出现过 ${entry.count} 次。` : "";
   const body =
-    entry.kind === "regression"
-      ? `${day(fact.at)} 的一步里改动 ${fileList(fact.changedAtRed)} 后，「${entry.stepName}」检查报 ${what}${names}，` +
-        `随后补改 ${fileList(fact.repairFiles)} 才通过。`
-      : `${day(fact.at)} 的一步尝试改动 ${fileList(fact.attemptedFiles)}，「${entry.stepName}」检查一直报 ${what}${names}，` +
-        "修到上限仍未通过、改动已撤回。";
+    `${day(fact.at)} 的一步里改动 ${fileList(fact.changedAtRed)} 后，「${entry.stepName}」检查报 ${what}${names}，` +
+    `随后补改 ${fileList(fact.repairFiles)} 才通过。`;
   const text = `[${entry.id}] ${STRUCTURED_MEMORY_DISCLAIMER}：${body}${repeated}`;
   return text.length > ENTRY_TEXT_LIMIT ? `${text.slice(0, ENTRY_TEXT_LIMIT - 1)}…` : text;
 }

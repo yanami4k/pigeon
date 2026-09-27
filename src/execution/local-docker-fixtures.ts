@@ -1,5 +1,5 @@
 // 测试夹具：在本机执行命令的假 docker CLI——exec 在 -w 给出的目录里直接运行（该目录即"容器内"工作区），其余子命令
-// 直接成功。容器执行端经它驱动，撤回、验证等跨边界的逻辑因而能对着真实的 git 与 shell 验证。只供测试使用。
+// 直接成功。容器执行端经它驱动，记起点、还原受保护文件、验证等跨边界的逻辑因而能对着真实的 git 与 shell 验证。只供测试使用。
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

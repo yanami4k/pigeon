@@ -1,12 +1,12 @@
-// 执行端的"回到这一步起点"（决策 154②）：用一个在本机执行命令的假 docker CLI 驱动容器实现，对着真实的 git 仓库验证
-// 撤回规则——回到起点提交、删掉 agent 新建的一切（含被忽略的），开工时已被忽略的路径一概不动。
+// 执行端的"这一步起点"（决策 154②）：用一个在本机执行命令的假 docker CLI 驱动容器实现，对着真实的 git 仓库验证
+// 记下起点与验证前按起点还原受保护的文件。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { createContainerWorkspaceHost, StepStartLostError } from "./container-host.ts";
+import { createContainerWorkspaceHost } from "./container-host.ts";
 import { localDockerHost } from "./local-docker-fixtures.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -36,81 +36,6 @@ function fixture() {
   const { host } = localDockerHost(root);
   return { base, root, host };
 }
-
-test("回到这一步起点：回到起点提交（agent 自己的提交也撤掉），删掉 agent 新建的一切含被忽略的，开工时已被忽略的不动", async () => {
-  const { base, root, host } = fixture();
-  try {
-    const start = git(root, "rev-parse", "HEAD");
-    assert.ok(host.markStepStart !== undefined && host.restoreStepStart !== undefined);
-    // 开工时已有未提交的改动（跑批器预置的人写测试）：起点另记一个"开工时的树"挂在 HEAD 下的提交，
-    // 它与 HEAD 之差即开工时的脏文件（结构化记忆认定题面测试用）
-    put(root, { "tests/preset.test.py": "def test_x():\n    pass\n" });
-    const mark = await host.markStepStart();
-    assert.equal(mark.commit, start);
-    assert.equal(git(root, "rev-parse", `${mark.baseCommit}^`), start);
-    assert.equal(
-      git(
-        root,
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "-r",
-        "--root",
-        mark.baseCommit ?? ""
-      ),
-      "tests/preset.test.py"
-    );
-    assert.equal(git(root, "status", "--porcelain"), "?? tests/", "记起点不动工作区与索引");
-    assert.deepEqual([...mark.ignored].sort(), ["build/", "pre.log"]);
-    // agent 在这一步里：改已跟踪文件并自己提交，再改一次不提交；新建未跟踪文件与目录；新建被忽略的文件与目录；
-    // 往开工时已被忽略的目录里加文件；删掉一个已跟踪文件
-    put(root, { "a.txt": "two\n" });
-    git(root, "commit", "-q", "-am", "agent wip");
-    put(root, {
-      "a.txt": "three\n",
-      "new.txt": "n\n",
-      "src/added/x.py": "y = 2\n",
-      "new.log": "agent log\n",
-      "tmp/cache.bin": "c\n",
-      "build/more.o": "obj2\n",
-    });
-    rmSync(join(root, "src/keep.py"));
-    await host.restoreStepStart(mark);
-    assert.equal(git(root, "rev-parse", "HEAD"), start);
-    assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "one\n");
-    assert.equal(readFileSync(join(root, "src/keep.py"), "utf8"), "x = 1\n");
-    for (const gone of ["new.txt", "src/added", "new.log", "tmp"]) {
-      assert.ok(!existsSync(join(root, gone)), `${gone} 应被删掉`);
-    }
-    // 开工时已被忽略的路径（含其下后来多出的文件）一概不动
-    assert.equal(readFileSync(join(root, "pre.log"), "utf8"), "old log\n");
-    assert.ok(existsSync(join(root, "build/keep.o")));
-    assert.ok(existsSync(join(root, "build/more.o")));
-    // 开工时预置、尚未提交的文件回到开工时的样子（未跟踪）
-    assert.equal(
-      readFileSync(join(root, "tests/preset.test.py"), "utf8"),
-      "def test_x():\n    pass\n"
-    );
-    assert.equal(git(root, "status", "--porcelain"), "?? tests/");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("回到这一步起点：起点提交已不在库里即报错，不做部分恢复", async () => {
-  const { base, root, host } = fixture();
-  try {
-    assert.ok(host.restoreStepStart !== undefined);
-    put(root, { "a.txt": "changed\n" });
-    await assert.rejects(
-      host.restoreStepStart({ commit: "0".repeat(40), ignored: [] }),
-      StepStartLostError
-    );
-    assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "changed\n");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
 
 test("验证前还原受保护的文件：改动、删除、改名、换成目录、换成符号链接，以及设了 skip-worktree 或 assume-unchanged 的改动一律还原成开工时的版本；不执行 agent 放进 .git/hooks 的钩子", async () => {
   const { base, root, host } = fixture();
@@ -198,7 +123,7 @@ test("验证前还原受保护的文件：agent 留下未解决的合并冲突�
   }
 });
 
-test("执行端不跟随符号引用：开工树引用被设成指向 main 的符号引用时，记起点只改这条引用、不改 main；HEAD 指向某条保留引用时，撤回不改写那条引用", async () => {
+test("执行端不跟随符号引用：开工树引用被设成指向 main 的符号引用时，记起点只改这条引用、不改 main", async () => {
   const { base, root } = fixture();
   try {
     const start = git(root, "rev-parse", "HEAD");
@@ -216,15 +141,8 @@ test("执行端不跟随符号引用：开工树引用被设成指向 main 的�
       put(root, { "a.txt": "changed before start\n" });
       const mark = await host.markStepStart?.();
       assert.equal(git(root, "rev-parse", branch), start, "当前分支未被改写");
-      // agent 提交一次，让一条保留引用指向这个提交，再把 HEAD 设成指向它的符号引用
-      git(root, "-c", "user.name=a", "-c", "user.email=a@x", "commit", "-qam", "agent");
-      const agentCommit = git(root, "rev-parse", "HEAD");
-      git(root, "update-ref", "refs/keep", agentCommit);
-      git(root, "symbolic-ref", "HEAD", "refs/keep");
-      assert.ok(mark !== undefined);
-      await host.restoreStepStart?.(mark);
-      assert.equal(git(root, "rev-parse", "HEAD"), start, "回到起点提交");
-      assert.equal(git(root, "rev-parse", "refs/keep"), agentCommit, "保留引用未被改写");
+      assert.ok(mark?.baseCommit !== undefined);
+      assert.equal(git(root, "rev-parse", "refs/pigeon/step-start/s/1"), mark.baseCommit);
     } finally {
       docker.cleanup();
     }

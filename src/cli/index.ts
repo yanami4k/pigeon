@@ -645,7 +645,7 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>]：
-// 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地或撤回、全量测量、写结果行；
+// 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地、全量测量、写结果行；
 // 无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
 // 四个条件的模型请求都经跑批进程内置的网关（决策 155）；一个 key 一个账号：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3…
 // 依次为后续账号，各账号并发上限取 KIMI_API_KEY_<编号>_CONCURRENCY（缺省 2）；
@@ -732,7 +732,7 @@ async function evalFixedPointEventsMain(argv: string[]): Promise<void> {
 // pigeon eval stream-fixed-point --manifest <清单> --repo <人的仓库> --image <镜像> --no-memory <无记忆整流的输出目录>
 //   --events <事件清单> --out <输出目录> [--concurrency N（缺省 2）] [--passes N（缺省 5）] [--groups memory,irrelevant,none]
 //   [--model-id <模型>（须与原尝试相同，缺省 kimi-for-coding）] [--container-memory <上限>]：
-// 定点对照的单步重跑——每个事件、每组各若干遍，从该步起点跑完整的一步（agent、分步验证门、回炉、撤回），预算、模型、推理档位、
+// 定点对照的单步重跑——每个事件、每组各若干遍，从该步起点跑完整的一步（agent、分步验证门、回炉），预算、模型、推理档位、
 // 工具名单照搬原尝试（预算与流中相同，不接受另给）；模型请求经网关（账号同 eval stream）。
 // 结果写 <输出目录>/results.jsonl 与 report.md；同一输出目录重跑即按"事件 × 组 × 遍次"续跑
 async function evalFixedPointMain(argv: string[]): Promise<void> {
@@ -1383,19 +1383,13 @@ function memoryListMain(argv: string[]): void {
   writeOut(json ? `${JSON.stringify(listing)}\n` : renderStructuredMemoryList(listing));
 }
 
-// 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、是否撤回（预算耗尽而提前撤回另行标注）
+// 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、这一步是否收尾
 function repairSummary(
   repair: NonNullable<Awaited<ReturnType<typeof runHeadless>>["repair"]>
 ): string {
   return (
     `回炉 ${repair.rounds} 轮 ｜ 最终验证 ${repair.verdict ?? "未验证"}` +
-    (repair.closed ? "" : " ｜ 这一步未收尾") +
-    (repair.reverted
-      ? ` ｜ 已撤回${repair.budgetExhausted ? "（预算耗尽提前撤回）" : ""}` +
-        (repair.restored
-          ? ""
-          : `（工作区未恢复${repair.restoreError !== undefined ? "" : "：没有改动"}）`)
-      : "")
+    (repair.closed ? "" : " ｜ 这一步未收尾")
   );
 }
 

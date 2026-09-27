@@ -1,6 +1,7 @@
 // 延续式实验的报告（决策 145、146）：
 //   健康度曲线——每条流、每个条件的全量测试通过率（按条数）随步数的变化，给出终点值（多遍时给均值与范围）；
-//   次要指标——判定通过数、撤回数、回归数、机检错误数（终点）、失败归因分布、轮数、token、墙钟、限额暂停；
+//   次要指标——判定通过数、回归数、机检错误数（终点）、失败归因分布、轮数、token、墙钟、限额暂停；
+//   撤回拆除（决策 173）之前的旧结果行带撤回字段，这类结果照旧多出"撤回"一列；
 //   补跑提示——任意两个条件第一遍的终点值相差小于 10 个百分点，即提示这两个条件各补跑到 3 遍（146）。
 // 终点指流清单里该流的最后一步；没跑到那一步（试跑或中途停止）的记为未跑完，不参与补跑比较。
 import { ATTRIBUTION_LABELS, type FailureAttribution } from "./stream-attribution.ts";
@@ -205,10 +206,12 @@ export function renderStreamReport(
     out.push(`人的基准：${baselineFacts(ofStream)}`, "");
 
     out.push("### 次要指标（第一遍）", "");
+    // 旧结果行（带 reverted 字段）才有"撤回"列；新结果行不写撤回字段，不显示这一列
+    const legacyReverted = ofStream.some((l) => l.reverted !== undefined);
     out.push(
-      "| 条件 | 判定通过 | 撤回 | 回归 | 终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 |"
+      `| 条件 | 判定通过 | ${legacyReverted ? "撤回 | " : ""}回归 | 终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 |`
     );
-    out.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    out.push(`|---|---|${legacyReverted ? "---|" : ""}---|---|---|---|---|---|---|---|---|`);
     const attributionLines: string[] = [];
     for (const c of conditions) {
       const rows = ofStream.filter((l) => l.condition === c);
@@ -216,8 +219,8 @@ export function renderStreamReport(
       const last = [...rows].sort((a, b) => b.seq - a.seq)[0];
       out.push(
         `| ${c} | ${judged.filter((l) => l.outcome === "passed").length}/${judged.length} | ${
-          rows.filter((l) => l.reverted).length
-        } | ${sum(rows.map((l) => l.regressions ?? 0))} | ${pct(last?.fullPassRate?.byTask.rate)} | ${
+          legacyReverted ? `${rows.filter((l) => l.reverted === true).length} | ` : ""
+        }${sum(rows.map((l) => l.regressions ?? 0))} | ${pct(last?.fullPassRate?.byTask.rate)} | ${
           last?.quality?.typeErrors ?? "—"
         } | ${last?.quality?.formatErrors ?? "—"} | ${last?.quality?.layerViolations ?? "—"} | ${sum(
           rows.map((l) => l.turns)

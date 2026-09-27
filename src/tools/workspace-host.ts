@@ -44,12 +44,11 @@ export interface HostFileSnapshot {
   truncated: boolean;
 }
 
-// 这一步的起点（决策 154②）：开工时的提交与当时已被忽略的路径（git 的 --directory 形式，目录带结尾斜杠）
+// 这一步的起点（决策 154②）：开工时的提交
 export interface StepStartMark {
   commit: string;
-  ignored: string[];
   // "开工时的树"挂在起点提交之下的提交（含开工时未提交的改动，如跑批器预置的人写测试；不含被忽略的文件）：
-  // 撤回时据它把这些改动还原，结构化记忆据它与起点提交之差认定开工时的脏文件
+  // 验证前据它还原受保护的文件，结构化记忆据它与起点提交之差认定开工时的脏文件
   baseCommit?: string;
 }
 
@@ -80,10 +79,8 @@ export interface WorkspaceHost {
   // 尚未迁到本接口；容器实现未提供。迁移时两个实现各自落在这两个方法上，调用方不得判断工作区形状
   snapshot?(): Promise<WorkspaceSnapshotRef>;
   fork?(ref: WorkspaceSnapshotRef): Promise<WorkspaceHost>;
-  // 回到这一步起点（决策 154②）：开工时记下当前提交与已被忽略的路径；撤回时回到该提交（agent 自己的提交一并撤掉），
-  // 删掉 agent 新建的一切（含被忽略的），开工时已被忽略的路径一概不动。容器实现提供；宿主侧仍由 checkpoint.ts 负责
+  // 记下这一步的起点（决策 154②）：开工时的提交与"开工时的树"。容器实现提供；宿主侧由 checkpoint.ts 的快照改前基线给出
   markStepStart?(): Promise<StepStartMark>;
-  restoreStepStart?(mark: StepStartMark): Promise<void>;
   // 验证前还原受保护的文件：与开工时的树（mark.baseCommit）相比被改动或删除、且 isProtected 认定受保护的文件，
   // 恢复成开工时的版本（不进暂存区）；开工时不在的文件（agent 新建的）不动。返回还原了的路径。容器实现提供
   restoreProtectedFromStepStart?(

@@ -73,7 +73,10 @@ test("报告：曲线表、终点、次要指标与补跑提示", () => {
   assert.match(md, /\| 1 \| 题 \| 50\.0% \| 50\.0% \|/);
   assert.match(md, /\| 3 \| 套用 \| 80\.0% \| 70\.0% \|/);
   assert.match(md, /终点（按条数）：no-gate 80\.0%；minimal 70\.0%/);
-  assert.match(md, /\| no-gate \| 1\/2 \| 0 \| 1 \|/);
+  // 新结果行不带撤回字段：次要指标表没有"撤回"列
+  assert.match(md, /\| 条件 \| 判定通过 \| 回归 \|/);
+  assert.doesNotMatch(md, /\| 撤回 \|/);
+  assert.match(md, /\| no-gate \| 1\/2 \| 1 \|/);
   // 用量按未命中输入、缓存命中、输出分列（额度不计缓存命中的部分）：夹具每行 10 / 0 / 5，三行合计
   assert.match(md, /\| no-gate \| 1\/2 \|.*\| 30 \/ 0 \/ 15 \|/);
   assert.match(md, /没做出来 1/);
@@ -126,4 +129,28 @@ test("人的基准：取各步各遍内存峰值的最大值与其上限，超�
     renderStreamReport(lines, { title: "t", streams: [{ id: "s1", lastSeq: 2 }] }),
     /人的基准：内存峰值最大 1600 MiB/
   );
+});
+
+test("报告：旧结果行带撤回字段时照常生成，次要指标表带「撤回」列，旧的缺前置归因照常显示", () => {
+  const legacy = (seq: number, extra: Record<string, unknown>): StreamResultLine =>
+    ({ ...line("full", seq, [5, 10]), ...extra }) as StreamResultLine;
+  const lines = [
+    legacy(1, {
+      outcome: "failed",
+      reverted: true,
+      repairBudgetExhausted: false,
+      attribution: "not-done",
+    }),
+    legacy(2, { reverted: false, repairBudgetExhausted: false }),
+    legacy(3, {
+      outcome: "failed",
+      reverted: false,
+      repairBudgetExhausted: false,
+      attribution: "missing-prerequisite",
+    }),
+  ];
+  const md = renderStreamReport(lines, { title: "旧结果", streams });
+  assert.match(md, /\| 条件 \| 判定通过 \| 撤回 \| 回归 \|/);
+  assert.match(md, /\| full \| 1\/3 \| 1 \| 0 \|/);
+  assert.match(md, /缺前置 1/);
 });

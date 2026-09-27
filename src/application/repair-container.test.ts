@@ -1,6 +1,6 @@
-// 回炉接入容器执行端（决策 142 / 154②）：执行端提供"回到这一步起点"时，headless 在容器工作区上开回炉——验证经执行端
-// 在容器里执行，修满轮数仍失败即经执行端撤回到开工时的提交。容器以在本机执行命令的假 docker 代替，工作区是真实的
-// git 仓库；宿主侧的治理根与占位目录都不是 git 工作区。
+// 回炉接入容器执行端（决策 142 / 154②）：执行端能记下这一步的起点时，headless 在容器工作区上开回炉——验证经执行端
+// 在容器里执行，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动（决策 172 / 173：不做回退）。容器以在本机
+// 执行命令的假 docker 代替，工作区是真实的 git 仓库；宿主侧的治理根与占位目录都不是 git 工作区。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -87,9 +87,6 @@ test("容器上的回炉：验证经执行端在容器里执行，第一次失�
       rounds: 1,
       verdict: "pass",
       closed: true,
-      reverted: false,
-      budgetExhausted: false,
-      restored: false,
     });
     assert.equal(readFileSync(join(s.testbed, "a.txt"), "utf8"), "fixed\n");
   } finally {
@@ -97,7 +94,7 @@ test("容器上的回炉：验证经执行端在容器里执行，第一次失�
   }
 });
 
-test("容器上的回炉：修满轮数仍失败即经执行端撤回——回到开工时的提交，agent 的提交、新建文件与新建的被忽略文件都清掉", async () => {
+test("容器上的回炉：修满轮数仍失败即以失败收尾——agent 的提交、新建文件与新建的被忽略文件都留在容器工作区", async () => {
   const s = setup();
   try {
     const start = git(s.testbed, "rev-parse", "HEAD");
@@ -134,23 +131,21 @@ test("容器上的回炉：修满轮数仍失败即经执行端撤回——回�
       rounds: 1,
       verdict: "fail",
       closed: true,
-      reverted: true,
-      budgetExhausted: false,
-      restored: true,
     });
-    assert.equal(git(s.testbed, "rev-parse", "HEAD"), start);
-    assert.equal(readFileSync(join(s.testbed, "a.txt"), "utf8"), "bug\n");
-    assert.ok(!existsSync(join(s.testbed, "new.txt")));
-    assert.ok(!existsSync(join(s.testbed, "build")));
+    assert.equal(result.errorMessage, undefined);
+    assert.equal(git(s.testbed, "rev-parse", "HEAD~1"), start, "agent 的提交还在");
+    assert.equal(readFileSync(join(s.testbed, "a.txt"), "utf8"), "w2\n");
+    assert.ok(existsSync(join(s.testbed, "new.txt")));
+    assert.ok(existsSync(join(s.testbed, "build", "out.o")));
   } finally {
     s.cleanup();
   }
 });
 
-test("容器上的回炉：执行端没有回到起点的能力即启动报错", async () => {
+test("容器上的回炉：执行端不能记下这一步的起点即启动报错", async () => {
   const s = setup();
   try {
-    const { markStepStart: _m, restoreStepStart: _r, ...bare } = s.host;
+    const { markStepStart: _m, ...bare } = s.host;
     await assert.rejects(
       runHeadless({
         task: "把 a.txt 修好",
@@ -163,7 +158,7 @@ test("容器上的回炉：执行端没有回到起点的能力即启动报错",
         verify: VERIFY,
         repairRounds: 1,
       }),
-      /回到这一步起点/
+      /记下这一步的起点/
     );
   } finally {
     s.cleanup();

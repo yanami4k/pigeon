@@ -1,10 +1,10 @@
-// 延续式实验的失败归因（决策 142、141、145）：由程序判定，四类——
+// 延续式实验的失败归因（决策 142、141、145）：由程序判定，三类——
 //   没做出来；改坏旧功能（回归）；
-//   缺前置：测试加载时找不到的文件或名字，恰好是此前某个被撤回的题本应新建的；
 //   维护步接口不同：测试加载时找不到的文件或名字，恰好是某个维护步里人新建了、而 agent 没建的
 //   （报错本身即说明 agent 这边没有它）。
 // 找不到的文件或名字从判题（或验证门）输出里按两种运行时的报错文案提取；本应新建的取人的 diff：新增文件与新增行里的
-// 顶层导出定义。优先级：缺前置 > 维护步接口不同 > 回归 > 没做出来——前两类是上游缺口，回归是本步把旧的弄坏。
+// 顶层导出定义。优先级：维护步接口不同 > 回归 > 没做出来——前者是上游缺口，回归是本步把旧的弄坏。
+// 缺前置（此前被撤回的题本应新建的）随撤回拆除（决策 173）不再判定，只留在类型与标签里供旧结果行读出与显示。
 
 export type FailureAttribution =
   | "not-done"
@@ -93,15 +93,12 @@ function hits(missing: MissingRefs, created: readonly CreatedRefs[]): boolean {
 export function attributeFailure(input: {
   passed: boolean;
   missing: MissingRefs;
-  // 此前被撤回的题各自本应新建的
-  revertedCreated: readonly CreatedRefs[];
   // 此前维护步里人新建的
   maintenanceCreated: readonly CreatedRefs[];
   // 本步全量测量里、上一步在 agent 代码上通过而本步不再通过的用例数
   regressions: number;
 }): FailureAttribution | null {
   if (input.passed) return null;
-  if (hits(input.missing, input.revertedCreated)) return "missing-prerequisite";
   if (hits(input.missing, input.maintenanceCreated)) return "maintenance-interface";
   if (input.regressions > 0) return "regression";
   return "not-done";

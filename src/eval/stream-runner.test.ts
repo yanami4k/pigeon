@@ -265,16 +265,14 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("完整 Pigeon：回炉最终不通过即撤回、该步留空；后面依赖它的题判为缺前置；全量测量把被撤回题的测试算作失败", async () => {
+  test("完整 Pigeon：回炉最终不通过即以失败收尾，agent 的代码照样落地、下一步从它之上接着做；结果行不写撤回字段", async () => {
     const t = await toy();
     try {
       const agent = scriptedAgent((input) => {
         const root = input.target.root;
         if (input.step.seq === 1) {
           write(root, { "src/a.txt": "wrong\n" });
-          return {
-            repair: { rounds: 2, finalVerdict: "fail", reverted: true, budgetExhausted: true },
-          };
+          return { repair: { rounds: 2, finalVerdict: "fail" } };
         }
         if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
         if (input.step.seq === 5) write(root, { "src/b.txt": "beta\n" });
@@ -284,47 +282,50 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         options(t, { agents: { pigeon: agent }, conditions: ["full"] })
       );
       const rows = readStreamResults(summary.resultsFile);
-      const [r1, r2, , , r5] = rows;
+      const [r1, r2] = rows;
       assert.deepEqual(
-        [
-          r1?.outcome,
-          r1?.reverted,
-          r1?.repairRounds,
-          r1?.finalVerdict,
-          r1?.repairBudgetExhausted,
-          r1?.attribution,
-        ],
-        ["failed", true, 2, "fail", true, "not-done"]
+        [r1?.outcome, r1?.repairRounds, r1?.finalVerdict, r1?.attribution],
+        ["failed", 2, "fail", "not-done"]
       );
+      for (const row of rows) {
+        assert.equal("reverted" in row, false, `第 ${row.seq} 步不写 reverted`);
+        assert.equal(
+          "repairBudgetExhausted" in row,
+          false,
+          `第 ${row.seq} 步不写 repairBudgetExhausted`
+        );
+      }
+      assert.notEqual(r1?.head, t.commits[0], "修不好的代码照样落地");
+      // 第 2 步（维护步）的验证门里 base 测试依赖 a：第 1 步落地的 a.txt 是 agent 写错的，第 2 步因此照样判失败
+      assert.equal(r2?.outcome, "failed");
+      // 第 2 步从第 1 步落地的提交之上接着做：agent 第 1 步写下的 a.txt 还在
+      const check = join(t.base, "check");
+      mkdirSync(check);
+      git(check, "init", "-q");
+      writeFileSync(
+        join(check, "h.bundle"),
+        readFileSync(join(t.base, "out", "streams", "s1-full-1", "history.bundle"))
+      );
+      git(check, "fetch", "-q", "h.bundle", `${r2?.head}:refs/heads/main`);
+      assert.equal(git(check, "rev-parse", `${r2?.head}~1`), r1?.head);
+      assert.equal(git(check, "show", `${r2?.head}:src/a.txt`), "wrong");
       assert.equal(
-        r2?.repairBudgetExhausted,
+        rows.some((row) => row.attribution === "missing-prerequisite"),
         false,
-        "开回炉的条件、回炉照常收尾：预算没有先于轮数用尽"
+        "不再归因为缺前置"
       );
-      assert.equal(r1?.head, t.commits[0], "撤回后工作区回到本步起点");
-      assert.deepEqual(
-        [r5?.outcome, r5?.reverted, r5?.attribution],
-        ["failed", false, "missing-prerequisite"]
-      );
-      // 第 2 步：人截至此时的 base 测试（题 A 里改成依赖 a）、keep、a 三条——测量副本必须补上人的新版 base 测试，
-      // 被撤回的工作区里只有旧版
-      assert.deepEqual(r2?.fullPassRate?.byCount, { passed: 1, total: 3, rate: 1 / 3 });
-      // 第 5 步：base（人已改回不依赖 a）、keep 过；a 与 b 在 agent 的代码上都过不了
-      assert.deepEqual(r5?.fullPassRate?.byCount, { passed: 2, total: 4, rate: 0.5 });
-      assert.deepEqual(r5?.fullPassRate?.byTask, { passed: 0, total: 2, rate: 0 });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
   test("一次全量测量在报告写出前被杀、一条结果都没拿到：分母仍是人的代码上通过的全部用例，全部计为未通过", async () => {
-    // a 的测试在没有 a.txt 时把跑测试的外壳杀掉：人的代码上照常通过，被撤回了题 A 的 agent 代码上整次测量拿不到报告
+    // a 的测试在没有 a.txt 时把跑测试的外壳杀掉：人的代码上照常通过，题 A 没做出 a.txt 的 agent 代码上整次测量拿不到报告
     const t = await toy("[ -f src/a.txt ] || kill -9 $PPID\ngrep -q alpha src/a.txt\n");
     try {
       const agent = scriptedAgent((input) => {
         const root = input.target.root;
         if (input.step.seq === 1) {
-          write(root, { "src/a.txt": "wrong\n" });
           return { repair: { rounds: 3, finalVerdict: "fail" } };
         }
         if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });

@@ -59,7 +59,7 @@ export interface MemoryItem {
   fingerprintKey: string;
   // 推送文字的长度（无关记忆按它取最接近者）
   textLength: number;
-  // 红转绿的补改文件（判定"记忆是否被用上"）；撤回类没有，为 null
+  // 红转绿的补改文件（判定"记忆是否被用上"）；撤回类（撤回拆除之前冻结的事件文件里才有）没有，为 null
   repairFiles: string[] | null;
 }
 
@@ -295,7 +295,7 @@ function itemOf(entry: MemoryEntry): MemoryItem {
 // - 按整条事实排除：一条事实按锚点展开成几条同指纹的条目，成文相同，都写着报错文件、变红时已改的文件与补改文件。
 //   某个指纹只要有任何一条展开的锚点（all 里同指纹的全部条目，与各自最近一次事实的锚点）落在 excluded（本步题面指到的
 //   文件、本步改动的文件）或被换条目涉及的文件里，这个指纹下的条目全部不取；与被换条目同指纹的也不取（同一件事）。
-// - 候选须核验通过（pool），且与被换条目同一种类（红转绿或撤回）；取成文长度最接近者，平手按编号取最小；
+// - 候选须核验通过（pool），且与被换条目同一种类；取成文长度最接近者，平手按编号取最小；
 //   同一事件里不重复取同一条、也不取同指纹的两条。有一条找不到候选即返回 null（该组缺失）
 export function chooseIrrelevant(
   relevant: readonly MemoryEntry[],

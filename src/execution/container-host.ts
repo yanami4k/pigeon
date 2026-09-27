@@ -25,21 +25,11 @@ export class ContainerHostError extends Error {
   readonly pigeonToolErrorKind = "environment";
 }
 
-// 撤回时起点提交已不在库里（例如 agent 改写历史后被回收）：不做部分恢复，交调用方按撤回失败处理
+// 这一步的起点缺了"开工时的树"：无法按起点还原受保护的文件
 export class StepStartLostError extends Error {}
 
-// 已被忽略的路径清单：--directory 让整个被忽略的目录只占一项（带结尾斜杠），开工时已在其中的一概不动
-const IGNORED_LIST = [
-  "git",
-  "ls-files",
-  "-z",
-  "--others",
-  "--ignored",
-  "--exclude-standard",
-  "--directory",
-];
-// 一次 rm 的参数条数上限：避免撞上命令行长度限制
-const REMOVE_BATCH = 200;
+// 一次还原的路径条数上限：避免撞上命令行长度限制
+const RESTORE_BATCH = 200;
 // "开工时的树"的提交：复制真实索引到临时索引，在其上 add -A 写成树，以起点提交（$1）为父提交；打印新提交
 const START_TREE_SCRIPT = [
   "set -e",
@@ -200,7 +190,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
 
   // 在工作区根执行一个辅助命令，失败即抛环境错误；返回标准输出
-  // 执行端自己的命令（取起点、还原受保护文件、撤回、列清单）：以固定 PATH 执行，不经过 agent 能改指的链接
+  // 执行端自己的命令（取起点、还原受保护文件）：以固定 PATH 执行，不经过 agent 能改指的链接
   const must = async (command: string[], what: string): Promise<Buffer> => {
     const result = await helper(execArgs(false, trustedCommand(command)));
     if (daemonFailure(result)) {
@@ -211,11 +201,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     }
     return result.stdout;
   };
-  const ignoredPaths = async (): Promise<string[]> =>
-    (await must(IGNORED_LIST, "列出被忽略的路径"))
-      .toString("utf8")
-      .split("\0")
-      .filter((p) => p !== "");
 
   const restart = async (): Promise<void> => {
     const result = await helper([...dockerPrefix, "restart", "-t", "0", options.container]);
@@ -480,50 +465,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           "给开工时的树建引用"
         );
       }
-      return {
-        commit,
-        ignored: await ignoredPaths(),
-        baseCommit,
-      };
-    },
-    async restoreStepStart(mark) {
-      const exists = await helper(
-        execArgs(false, ["git", "cat-file", "-e", `${mark.commit}^{commit}`])
-      );
-      if (daemonFailure(exists)) {
-        throw new ContainerHostError(`容器不可用：${exists.stderr.trim()}`);
-      }
-      if (exists.exitCode !== 0) {
-        throw new StepStartLostError(`这一步的起点提交 ${mark.commit} 已不在库里，无法撤回`);
-      }
-      // 回到起点提交并删掉未跟踪的文件与目录（不带 -x：被忽略的留给下面按开工时的清单处理）
-      await must(
-        // 先让 HEAD 脱离到起点提交：HEAD 被 agent 设成指向某条引用的符号引用时，reset --hard 不改写那条引用
-        [
-          "sh",
-          "-c",
-          'git checkout -q -f --detach "$1" && git reset -q --hard && git clean -fdq',
-          "sh",
-          mark.commit,
-        ],
-        "回到起点提交"
-      );
-      // agent 新建的被忽略路径：现在被忽略、开工时不在清单里的
-      const kept = new Set(mark.ignored);
-      const added = (await ignoredPaths()).filter((p) => !kept.has(p));
-      for (let i = 0; i < added.length; i += REMOVE_BATCH) {
-        await must(
-          ["rm", "-rf", "--", ...added.slice(i, i + REMOVE_BATCH)],
-          "删除 agent 新建的被忽略路径"
-        );
-      }
-      // 开工时未提交的改动（跑批器预置的人写测试等）还原为开工时的样子：检出开工时的树，再取消暂存
-      if (mark.baseCommit !== undefined) {
-        await must(
-          ["sh", "-c", 'git checkout -q "$1" -- . && git reset -q', "sh", mark.baseCommit],
-          "还原开工时未提交的改动"
-        );
-      }
+      return { commit, baseCommit };
     },
     async restoreProtectedFromStepStart(mark, isProtected) {
       if (mark.baseCommit === undefined) {
@@ -538,8 +480,8 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         .toString("utf8")
         .split("\0")
         .filter((p) => p !== "" && isProtected(p));
-      // 检出开工时的版本再取消暂存：与撤回时还原开工时未提交改动的做法一致
-      for (let i = 0; i < changed.length; i += REMOVE_BATCH) {
+      // 检出开工时的版本再取消暂存
+      for (let i = 0; i < changed.length; i += RESTORE_BATCH) {
         await must(
           [
             "sh",
@@ -547,7 +489,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
             RESTORE_FROM_START_SCRIPT,
             "sh",
             mark.baseCommit,
-            ...changed.slice(i, i + REMOVE_BATCH),
+            ...changed.slice(i, i + RESTORE_BATCH),
           ],
           "还原受保护的文件"
         );

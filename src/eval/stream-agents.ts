@@ -158,7 +158,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
               }
             : {}),
           // 定点对照：结束
-          // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即经执行端撤回到这一步起点。
+          // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动。
           // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
           // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取
           ...(repairRounds > 0
@@ -193,7 +193,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                       docker,
                     })
                   );
-                  // 执行端接下来的 git 操作（还原受保护文件、撤回）不执行 agent 在 git 配置里设下的程序
+                  // 执行端接下来的 git 操作（还原受保护文件）不执行 agent 在 git 配置里设下的程序
                   await ws.sanitizeGitConfig();
                   await ws.removeTrees([GATE_REPORT]);
                   if (input.autoloadedTestHelper !== undefined && input.humanTests !== undefined) {
@@ -291,11 +291,6 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
                   run.repair.verdict === "pass" || run.repair.verdict === "fail"
                     ? run.repair.verdict
                     : null,
-                reverted: run.repair.reverted,
-                budgetExhausted: run.repair.budgetExhausted,
-                ...(run.repair.restoreError !== undefined
-                  ? { restoreError: run.repair.restoreError }
-                  : {}),
                 ...(run.repair.protectedRestores !== undefined
                   ? { humanTestRestores: run.repair.protectedRestores }
                   : {}),
