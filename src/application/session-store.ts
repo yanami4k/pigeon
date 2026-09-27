@@ -110,6 +110,8 @@ function legacySessionStore(sessionId: string): SessionStoreWriter {
     sessionId,
     appendMessage: () => {},
     append: () => {},
+    branch: async () => undefined,
+    appendCompaction: async () => undefined,
     flush: async () => {},
     filePath: async () => undefined,
     close: async () => {},

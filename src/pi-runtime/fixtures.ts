@@ -12,6 +12,7 @@ import {
   type Context,
   createAssistantMessageEventStream,
   type Model,
+  type SimpleStreamOptions,
   type ToolCall,
 } from "@earendil-works/pi-ai";
 
@@ -84,6 +85,8 @@ export interface FakeReply {
   // 模拟 provider 在流里以错误收尾（连接中断、服务端报错）：start 之后直接发 error 事件，
   // 终态消息 stopReason 为 error 且 usage 非零——与上游的合成失败消息（请求层抛错、usage 全零）是两条路
   streamError?: string;
+  // 终态消息 usage 的 totalTokens（上下文压缩按它估算上下文大小）；缺省按内容长度
+  contextTokens?: number;
 }
 
 export interface FakeStreamBehavior {
@@ -98,6 +101,8 @@ export interface FakeStreamBehavior {
 export interface FakeStreamCall {
   model: Model<Api>;
   context: Context;
+  // 调用选项（输出上限、温度、推理档位等）
+  options?: SimpleStreamOptions;
 }
 
 export type FakeStreamFn = StreamFn & { readonly calls: FakeStreamCall[] };
@@ -108,7 +113,7 @@ export function createFakeStreamFn(behavior: FakeStreamBehavior): FakeStreamFn {
   }
   const calls: FakeStreamCall[] = [];
   const streamFn: StreamFn = (model, context, options) => {
-    calls.push({ model, context });
+    calls.push({ model, context, ...(options !== undefined ? { options } : {}) });
     if (calls.length === behavior.failOnCall) {
       return Promise.reject(new Error(behavior.failureMessage ?? "模拟模型错误"));
     }
@@ -246,14 +251,15 @@ async function pump(
   stream.push({
     type: "done",
     reason: stopReason,
-    message: finalize(partial, contents, stopReason),
+    message: finalize(partial, contents, stopReason, reply.contextTokens),
   });
 }
 
 function finalize(
   partial: AssistantMessage,
   content: AssistantMessage["content"],
-  stopReason: "stop" | "toolUse" | "length" | "aborted" | "error"
+  stopReason: "stop" | "toolUse" | "length" | "aborted" | "error",
+  contextTokens?: number
 ): AssistantMessage {
   return {
     ...partial,
@@ -262,7 +268,7 @@ function finalize(
     usage: {
       ...zeroUsage(),
       output: Math.max(JSON.stringify(content).length, 1),
-      totalTokens: Math.max(JSON.stringify(content).length, 1),
+      totalTokens: contextTokens ?? Math.max(JSON.stringify(content).length, 1),
     },
     stopReason,
     timestamp: Date.now(),
