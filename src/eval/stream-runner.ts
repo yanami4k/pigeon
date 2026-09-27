@@ -29,7 +29,7 @@ import {
   extractMissing,
 } from "./stream-attribution.ts";
 import type { HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
-import type { HarnessRef } from "./stream-identity.ts";
+import type { HarnessRef } from "./stream-harness.ts";
 import { type StreamManifest, type StreamStep, stepsOf } from "./stream-manifest.ts";
 import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measure.ts";
 import {

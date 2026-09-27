@@ -4,7 +4,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import type { FailureAttribution } from "./stream-attribution.ts";
-import type { HarnessRef } from "./stream-identity.ts";
+import type { HarnessRef } from "./stream-harness.ts";
 import type { StreamStepKind } from "./stream-manifest.ts";
 import type { CountPassRate } from "./stream-measure.ts";
 

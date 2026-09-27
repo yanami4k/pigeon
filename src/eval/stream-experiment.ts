@@ -28,7 +28,8 @@ import {
 } from "./stream-baseline.ts";
 import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
-import { checkOrWriteIdentity, currentHarnessRef, manifestDigestOf } from "./stream-identity.ts";
+import { currentHarnessRef } from "./stream-harness.ts";
+import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
 import type { StreamManifest } from "./stream-manifest.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";

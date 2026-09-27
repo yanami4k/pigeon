@@ -11,11 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  checkOrWriteIdentity,
-  currentHarnessRef,
-  type StreamRunIdentity,
-} from "./stream-identity.ts";
+import { currentHarnessRef } from "./stream-harness.ts";
+import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
 import { DEFAULT_STEP_BUDGET } from "./stream-runner.ts";
 
 test("harness 版本：取本源码所在仓库的 HEAD 短号与是否有未提交改动", () => {

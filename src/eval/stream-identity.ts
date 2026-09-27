@@ -6,24 +6,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { describeHead } from "../orchestration/worktree.ts";
+import type { HarnessRef } from "./stream-harness.ts";
 import type { StepBudget } from "./stream-runner.ts";
-
-// harness 版本：Pigeon 仓库 HEAD 短号与是否有未提交改动
-export interface HarnessRef {
-  commit: string;
-  dirty: boolean;
-}
-
-// 本源码所在仓库（Pigeon）的版本；读不到时如实记 unknown
-export function currentHarnessRef(): HarnessRef {
-  try {
-    return describeHead(fileURLToPath(new URL(".", import.meta.url)));
-  } catch {
-    return { commit: "unknown", dirty: false };
-  }
-}
 
 export interface StreamRunIdentity {
   core: {
