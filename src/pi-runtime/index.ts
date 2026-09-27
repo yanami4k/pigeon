@@ -2,13 +2,24 @@
 export type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 // PiRuntimeAdapter 公开面桶文件；fixtures.ts 是测试设施，不从这里导出。
 export {
+  type CompactionNotice,
   DEFAULT_THINKING_LEVEL,
+  type ManualCompactionOutcome,
   PiRuntimeAdapter,
   type PiRuntimeAdapterOptions,
   type RunResult,
   type RunTerminalStatus,
   type StreamTextDelta,
 } from "./adapter.ts";
+export {
+  type BeforeCompaction,
+  type BeforeCompactionInfo,
+  type CompactionConfig,
+  type CompactionConfigInput,
+  type CompactionOutcome,
+  type CompactionTrigger,
+  DEFAULT_CONTEXT_WINDOW,
+} from "./compaction.ts";
 export {
   DEEPSEEK_ANTHROPIC_BASE_URL,
   DEEPSEEK_MODEL_ID,
