@@ -178,7 +178,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   ) {
     throw new Error(`采样温度需要 0 到 2 之间的数：${deps.temperature}`);
   }
-  // 推理开启时上游不把温度交给 provider（二者在该线路上互斥）：请求值如实记成"未生效"，也不再往下传
+  // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
+  // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（缺省 off）时温度照常下发
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
   const appliedTemperature = reasoningEnabled ? undefined : deps.temperature;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;

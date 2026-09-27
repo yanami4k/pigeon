@@ -9,12 +9,19 @@ export {
   type RunTerminalStatus,
   type StreamTextDelta,
 } from "./adapter.ts";
+export {
+  DEEPSEEK_ANTHROPIC_BASE_URL,
+  DEEPSEEK_MODEL_ID,
+  deepseekModel,
+} from "./deepseek-model.ts";
+export { createDeepSeekStreamFn, DEEPSEEK_KEY_ENV } from "./deepseek-stream.ts";
 export { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 export {
   DEFAULT_GATEWAY_MODEL_ID,
   GATEWAY_PLACEHOLDER_KEY,
+  GATEWAY_PROVIDER,
+  GATEWAY_UPSTREAM_BASE_URL,
   gatewayStreamFn,
-  gatewayUpstreamBaseUrl,
 } from "./gateway-stream.ts";
 export type {
   EventLogSink,

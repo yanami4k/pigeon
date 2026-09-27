@@ -43,7 +43,7 @@ import {
 import { markHumanGateFailures, type StreamManifest } from "../eval/stream-manifest.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
-import { DEFAULT_GATEWAY_MODEL_ID } from "../pi-runtime/index.ts";
+import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
@@ -524,12 +524,13 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 
 // pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
 //   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
-//   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 kimi-for-coding）] [--mini-python <解释器>]
-//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>]：
+//   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
+//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--spend-limit-cny <元>]：
 // 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地、全量测量、写结果行；
 // 无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
-// 四个条件的模型请求都经跑批进程内置的网关（决策 155）；一个 key 一个账号：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3…
-// 依次为后续账号，各账号并发上限取 KIMI_API_KEY_<编号>_CONCURRENCY（缺省 2）；
+// 四个条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
+// 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
+// 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
@@ -538,7 +539,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
     "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>]";
+    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--spend-limit-cny <元>]";
   const own = new Set([
     "--manifest",
     "--repo",
@@ -555,6 +556,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--mini-python",
     "--container-memory",
     "--baseline",
+    "--spend-limit-cny",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -605,7 +607,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
   const pigeon = needsPigeon
     ? {
-        provider: "kimi-coding",
+        provider: GATEWAY_PROVIDER,
         modelId,
         // 缺省固定温度 0（110）
         temperature: streamTemperature(flags.temperature),
@@ -621,6 +623,11 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   const memory = values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY;
   const miniPython = values.get("--mini-python");
   const baselineDir = values.get("--baseline");
+  const spendLimitRaw = values.get("--spend-limit-cny");
+  const spendLimitCny = spendLimitRaw === undefined ? undefined : Number(spendLimitRaw);
+  if (spendLimitCny !== undefined && !(Number.isFinite(spendLimitCny) && spendLimitCny > 0)) {
+    throw new Error(`--spend-limit-cny 需要正数（${usage}）`);
+  }
   const minimalCommand =
     miniPython !== undefined
       ? [miniPython, fileURLToPath(new URL("../../eval/stream/mini/run_mini.py", import.meta.url))]
@@ -637,7 +644,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   );
   const summary = await runStreamExperiment({
     shutdownSignal: shutdown.signal,
-    gateway: { accounts, modelId },
+    gateway: { accounts, modelId, ...(spendLimitCny !== undefined ? { spendLimitCny } : {}) },
     manifestFile: required("--manifest"),
     repoDir: required("--repo"),
     image: required("--image"),
