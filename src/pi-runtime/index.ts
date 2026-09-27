@@ -19,6 +19,7 @@ export {
   type CompactionOutcome,
   type CompactionTrigger,
   DEFAULT_CONTEXT_WINDOW,
+  resolveCompactionConfig,
 } from "./compaction.ts";
 export {
   DEEPSEEK_ANTHROPIC_BASE_URL,
