@@ -15,7 +15,8 @@ python -m venv .venv
 
 ```sh
 # 正式跑：四格与最简 agent 的结果文件可一并给出，也可分多个文件
-python -m pigeon_analysis formal --results <results.jsonl> [...] --out <输出目录> --tasks 全部题号.json [--minimal-reserve 元]
+python -m pigeon_analysis formal --results <results.jsonl> [...] --out <输出目录> --tasks 全部题号.json \
+  [--classes-summary 两类用例预计算汇总.json] [--minimal-reserve 元]
 
 # 校准
 python -m pigeon_analysis calibration --results <results.jsonl> [...] --out <输出目录> \

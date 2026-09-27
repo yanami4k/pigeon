@@ -20,13 +20,18 @@ PIGEON_CALIBRATION_CELLS = ("01", "11")
 MINUTE_MS = 60_000
 
 
-def sample_tasks(eligible: Iterable[int], seed: int = K.SAMPLE_SEED, k: int = K.CALIBRATION_TASKS) -> list[int]:
-    """抽题（219）：只在要做到的用例不为零的题中，以 random.Random(seed).sample 抽 k 道，再按时间排序。
-    总体按时间顺序（题号升序）排列后交给 sample，抽中结果只取决于总体的顺序与种子。"""
+def sample_order(eligible: Iterable[int], seed: int = K.SAMPLE_SEED, k: int = K.CALIBRATION_TASKS) -> list[int]:
+    """random.Random(seed).sample 的抽取次序（排序之前），与跑批器二的 PythonRandom.sample 逐位比对用。
+    总体按时间顺序（题号升序）排列：跑批器用流中的序号、这里用步序，两者随时间单调对应，抽中的位置相同。"""
     population = sorted(set(int(x) for x in eligible))
     if k > len(population):
         raise ValueError(f"只有 {len(population)} 道可抽的题，不足 {k} 道")
-    return sorted(random.Random(seed).sample(population, k))
+    return random.Random(seed).sample(population, k)
+
+
+def sample_tasks(eligible: Iterable[int], seed: int = K.SAMPLE_SEED, k: int = K.CALIBRATION_TASKS) -> list[int]:
+    """抽题（219）：只在要做到的用例不为零的题中，以 random.Random(seed).sample 抽 k 道，再按时间排序。"""
+    return sorted(sample_order(eligible, seed, k))
 
 
 def solved_rate_rule(df: pd.DataFrame) -> dict[str, Any]:

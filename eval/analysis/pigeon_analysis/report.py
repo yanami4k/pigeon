@@ -61,6 +61,7 @@ def formal_markdown(res: dict[str, Any]) -> str:
     lines.append("")
     lines += ["## 主判据明细", ""]
     lines.append(f"- 有效题 {p['nValid']} 道；要做到的为零的题 {len(p['fEmptyTasks'])} 道：{p['fEmptyTasks']}")
+    lines.append(f"- 无法建立两类用例基线的题 {len(p['baselineUnavailableTasks'])} 道（排除在主判据之外）：{p['baselineUnavailableTasks']}")
     if p["missingTasks"]:
         lines.append("- 不进主判据的缺失题：" + "；".join(
             f"第 {m['task']} 题（{'、'.join(m['cellsWithoutResult'])} 无有效结果）" for m in p["missingTasks"]))
@@ -153,7 +154,7 @@ def formal_markdown(res: dict[str, Any]) -> str:
         d = tp.get("decision")
         lines.append(f"- 判定：{'补第 3 遍' if d else ('不补' if d is False else '无法判定（' + tp.get('reason', '') + '）')}")
     lines += ["", "## 输入", "", f"- 读入结果行 {res['input']['rows']} 条，规整表记录 {res['input']['records']} 条",
-              f"- 待对齐字段中结果行里没有的：{res['input']['pendingFieldsAbsent']}", ""]
+              f"- 结果行里整列为空的字段（网关计价、复盘等尚未接入时如此）：{res['input']['fieldsAbsent']}", ""]
     return "\n".join(lines)
 
 
@@ -204,7 +205,7 @@ def calibration_markdown(res: dict[str, Any]) -> str:
         sc = c["sampleCheck"]
         lines += ["## 抽题核对", "", f"- 按种子 {K.SAMPLE_SEED} 应抽 {sc['expected']}；与结果中的题一致：{'是' if sc['matches'] else '否'}", ""]
     lines += ["## 输入", "", f"- 读入结果行 {res['input']['rows']} 条，规整表记录 {res['input']['records']} 条",
-              f"- 待对齐字段中结果行里没有的：{res['input']['pendingFieldsAbsent']}", ""]
+              f"- 结果行里整列为空的字段（网关计价、复盘等尚未接入时如此）：{res['input']['fieldsAbsent']}", ""]
     return "\n".join(lines)
 
 

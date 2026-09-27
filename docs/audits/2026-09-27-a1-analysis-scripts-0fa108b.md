@@ -227,3 +227,60 @@ M24 第一次的写法是给 DataFrame 的 fillna 传 Series，这会按列对�
 ### 测试总数
 
 在 Windows 开发机上实测：全部用例 169 过、1 跳过（抽题交叉用例，等跑批器二的抽题输出），耗时 190 秒。
+
+## 十一、按跑批器二的结果行对齐读入层（2026-09-27 追加）
+
+跑批器二交付于 runner-r3 0f463bb（审计 docs/audits/2026-09-27-r3-runner-judging-5744a7a.md）。读入层按其结果行字段表改为最终字段名；前文第四节的暂定名作废，以本节为准。
+
+### 字段对应
+
+| 规整表列 | 结果行字段 |
+|---|---|
+| f_passed、f_total | judging.failToPass.passed、judging.failToPass.total |
+| score | judging.score（要做到的为零时为 null） |
+| solved | judging.solved（要做到的为零时为 null） |
+| p_failed、p_total | judging.passToPass.failed、judging.passToPass.total |
+| flaky_excluded | judging.excludedFlaky |
+| turns、wall_ms | turns、agentWallMs（含验证门与回炉） |
+| cost、review_cost | gateway.costCny、gateway.reviewCostCny |
+| peak_input | gateway.peakInputTokens |
+| review_turns、review_wall_ms | review.turns、review.wallMs |
+| memory_chars、memory_bytes、memory_entries | memoryAtStart.entryChars、memoryAtStart.bytes、memoryAtStart.entries（上限按 entryChars，即条目部分的 Unicode 码点数，文件头不计） |
+| memory_chars_after | memoryAtEnd.entryChars（步末：agent 与收尾复盘都结束之后） |
+| hit_step_budget、hit_review_budget | hitStepBudget、hitReviewBudget |
+| input_miss、input_hit、output_tokens | usage.input、usage.cacheRead、usage.output |
+| baseline_unavailable | baselineUnavailable（暂定名，见下） |
+
+- 没判的步 judging 为 null，读出来得分为空，按缺失处理。
+- 网关计价与复盘接入之前，gateway.costCny、gateway.reviewCostCny、gateway.peakInputTokens、review、hitReviewBudget 为 null。报告"输入"一节列出结果行里整列为空的字段，便于发现没接上的计量。
+- 结果行没有折回非高峰价的花费，3.2 的高峰折算列（cost_offpeak）不再映射；校准按实测花费估算，报告注明"已折回非高峰价：否"。
+- memoryUsage、searchUsage（记忆使用与检索的计数）跑批器二未提供，映射保留、暂定。
+
+### 无法建立基线的题
+
+- 跑批器二预计算两类用例时，叠放运行拿不全用例即判这道题出错，记在 classes-summary.json 的 failed（流中题号、提交、原因）。正式跑命令新增 --classes-summary，读其 failed，按题号在全部题（--tasks，按步序排序）中的位置换算成步序。
+- 结果行上的逐步标记由跑批器二随后补上，读入层暂按布尔字段 baselineUnavailable 读，名字待其提交确认。
+- 两路任一标记的题排除在主判据之外、单独计数（报告"无法建立两类用例基线的题 N 道"，结果中为 baselineUnavailableTasks），不算缺失题、不使结论降格；仍占学习曲线的时间位置。
+
+### 抽题交叉用例
+
+- 跑批器二的"题号"是题在流中按时间的序号（从 1 起），分析脚本的题号是步序；两者随时间单调对应，总体按时间排序后抽中的位置相同。新增 sample_order 返回排序前的抽取次序。
+- tests/fixtures/runner-sample.json 由跑批器二在 0f463bb 的 src/eval/stream-sample.ts 原文件（blob 5892d20）直接生成：该文件只引用清单模块的 chainedTasks，生成时以一个只返回题列表的替身代替清单模块，被测文件不改。共 6 组：经 sampleTasks 的 3 组（89 道全可抽，走已选集合分支；每 7 道一道要做到的为零、总体 77 道，走池子分支；前 10 道为零），直接调 PythonRandom.sample 的 3 组（1–30 抽 15、种子 1；1–200 抽 5；1–89 抽 1、种子 42）。每组逐位比对抽取次序与按时间排序后的题单，全部一致。
+- 另以跑批器二审计中 CPython 3.13 算出的对照值（89 道里抽 15 道的抽取次序 31、63、41、16、10、64、52、47、88、14、40、24、86、60、38）单列一条用例。
+- 该交叉用例原先因缺输出而跳过，现不再跳过。
+
+### 变异反向验证（对齐后）
+
+原 26 处（M8 随选题逻辑改为只去掉"F 为空"一条件）与新增 5 处逐个植入，跑除模拟检验外的全部用例（170 个），写回后各文件哈希与植入前一致；31 处全部变红。
+
+| 变异 | 位置 | 结果 | 变红的用例 |
+|---|---|---|---|
+| M27 抽题总体倒序 | calibration.py | 4 败 | 与跑批器二交叉比对；金标准；跑批器二审计对照值；与 Python 一致 |
+| M28 无法建立基线的题不排除 | primary.py | 2 败 | 排除并单独计数；命令行读汇总 |
+| M29 记忆字符数读成字节数 | reader.py | 2 败 | 字段对应；整列为空的字段 |
+| M30 汇总题号换算差一位 | reader.py | 2 败 | 汇总题号换算；命令行读汇总 |
+| M31 要做到的通过数读错字段 | reader.py | 1 败 | 字段对应 |
+
+### 测试总数
+
+在 Windows 开发机上实测：全部用例 175 过、0 跳过，耗时 159 秒；模拟检验结果与第十节相同。

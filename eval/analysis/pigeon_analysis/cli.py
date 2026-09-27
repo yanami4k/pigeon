@@ -10,7 +10,7 @@ from typing import Any
 from . import constants as K
 from .calibration import analyze_calibration
 from .primary import analyze_primary
-from .reader import load_table
+from .reader import load_table, read_baseline_failures
 from .report import calibration_markdown, dumps, formal_markdown, formal_result
 from .secondary import analyze_secondary
 from .sensitivity import third_pass_decision
@@ -25,7 +25,9 @@ def _read_tasks(path: str | None) -> list[int] | None:
 
 def run_formal(args: argparse.Namespace) -> dict[str, Any]:
     df, info = load_table(args.results)
-    primary = analyze_primary(df, expected_tasks=_read_tasks(args.tasks))
+    tasks = _read_tasks(args.tasks)
+    no_baseline = read_baseline_failures(args.classes_summary, tasks) if args.classes_summary else None
+    primary = analyze_primary(df, expected_tasks=tasks, baseline_unavailable=no_baseline)
     secondary = analyze_secondary(df, primary)
     passes = set(primary["passesPerCell"].values())
     # 第 3 遍规则只在四格都跑完两遍、尚无第 3 遍时判定（224）
@@ -54,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--out", required=True, help="输出目录")
     f.add_argument("--tasks", required=True,
                    help="全部题号（89 道）的 JSON 数组：学习曲线的时间位置按它排，完全没有结果行的题也列为缺失")
+    f.add_argument("--classes-summary",
+                   help="两类用例预计算汇总（classes-summary.json）：其中出错、无法建立基线的题排除在主判据之外并计数")
     f.add_argument("--minimal-reserve", type=float, default=None,
                    help="最简 agent 尚未跑时为它预留的花费 C_M（元），第 3 遍判定用")
 

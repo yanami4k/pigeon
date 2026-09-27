@@ -10,6 +10,7 @@ from pigeon_analysis.calibration import (
     cost_rule,
     memory_cap_rule,
     review_cap_rule,
+    sample_order,
     sample_tasks,
     solved_rate_rule,
     step_budget_rule,
@@ -230,10 +231,17 @@ class TestSample:
             sample_tasks(range(10))
 
     def test_cross_check_with_runner(self):
-        """与跑批器二的抽题逐字一致：跑批器二交付后把它对同一题单的抽题输出存成 fixtures/runner-sample.json
-        （{"eligible": [...], "selected": [...]}），此用例即比对；文件不在时跳过。"""
+        """与跑批器二的抽题逐位一致。fixtures/runner-sample.json 由跑批器二（runner-r3 0f463bb）的
+        src/eval/stream-sample.ts 原文件生成：经 sampleTasks（按要做到的条数筛总体）与直接调 PythonRandom.sample，
+        覆盖 CPython 的池子与已选集合两种分支、不同种子与样本数；每组比对抽取次序与按时间排序后的题单。"""
         fixture = Path(__file__).parent / "fixtures" / "runner-sample.json"
-        if not fixture.exists():
-            pytest.skip("跑批器二的抽题输出尚未提供")
         data = json.loads(fixture.read_text(encoding="utf-8"))
-        assert sample_tasks(data["eligible"]) == data["selected"]
+        assert len(data["cases"]) >= 6
+        for case in data["cases"]:
+            order = sample_order(case["eligible"], seed=case["seed"], k=case["k"])
+            assert order == case["sampleOrder"], case["source"]
+            assert sample_tasks(case["eligible"], seed=case["seed"], k=case["k"]) == case["selected"], case["source"]
+
+    def test_runner_reference_list(self):
+        # 跑批器二审计里由 CPython 3.13 算出的对照值：89 道里抽 15 道的抽取次序
+        assert sample_order(range(1, 90)) == [31, 63, 41, 16, 10, 64, 52, 47, 88, 14, 40, 24, 86, 60, 38]

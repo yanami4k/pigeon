@@ -93,6 +93,25 @@ class TestSelection:
         assert res["exploratory"] is True
         assert res["missingRatio"] == pytest.approx(2 / 9)
 
+    def test_baseline_unavailable_excluded_and_counted(self):
+        # 第 2 题无法建立基线：结果行带标记、没有得分；排除在主判据之外、单独计数，不算缺失题、不降格
+        recs = grid({"00": 0.2, "01": 0.4, "10": 0.6, "11": 0.8}, tasks=(1, 2, 3))
+        for r in recs:
+            if r["task"] == 2:
+                r.pop("f_passed")
+                r["f_total"] = None
+                r["baseline_unavailable"] = 1.0
+        res = analyze_primary(make_table(recs), with_mixed=False, **FAST)
+        assert res["baselineUnavailableTasks"] == [2]
+        assert res["validTasks"] == [1, 3]
+        assert res["missingTasks"] == []
+        assert res["exploratory"] is False
+        # 由参数给出（汇总文件）时同样处理，即使结果行里没有这道题
+        res = analyze_primary(make_table(grid({"00": 0.2, "01": 0.4, "10": 0.6, "11": 0.8}, tasks=(1, 3))),
+                              expected_tasks=[1, 2, 3], baseline_unavailable=[2], with_mixed=False, **FAST)
+        assert res["baselineUnavailableTasks"] == [2]
+        assert res["missingTasks"] == []
+
     def test_invalid_pass_score_nan_counts_as_missing(self):
         # 行在但得分缺（例如判题故障记为缺失）：按缺失处理
         recs = grid({"00": 0.2, "01": 0.4, "10": 0.6, "11": 0.8}, tasks=(1, 2))
