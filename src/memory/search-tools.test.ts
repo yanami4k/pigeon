@@ -1,29 +1,23 @@
 // M5 S2（决策 038）：两个 read 档工具——search_sessions（默认 20 条 + 总字节上限，超限提示收窄）
-// 与 read_session_entry（按 EntryId 取完整内容块 + 同 Run 的 intent / decision / receipt 状态）；
-// 经真实 Adapter 调用时只留 tool.proposed / tool.settled 事件级记录（read 档自动放行）。
+// 与 read_session_entry（按条目号取一条消息的完整内容块）；读新会话存储（决策 185）。agent 可见的说明与输出冻结，
+// 这里逐字核对；经真实 Adapter 调用时只留 tool.proposed / tool.settled 事件级记录（read 档自动放行）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createToolGovernance } from "../application/governance.ts";
+import {
+  createFixtureSession,
+  type FixtureSession,
+} from "../application/session-store-fixtures.ts";
+import { markLegacyEventFile } from "../application/session-view-fixtures.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
-import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
-import {
-  asSessionId,
-  newEntryId,
-  newExecutionId,
-  newReceiptId,
-  newRunId,
-  newSessionId,
-  type RunId,
-  type SessionId,
-} from "../state/ids.ts";
-import { RECEIPT_VERSION } from "../state/receipt.ts";
-import { RuntimeEventKind } from "../state/runtime-events.ts";
+import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import {
   createReadSessionEntryTool,
@@ -37,67 +31,108 @@ import {
 const SESSION = asSessionId("sess_01JAAAAAA30000000000000000");
 
 function withDir(run: (dir: string) => Promise<void>): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-search-tools-"));
-  return run(dir).finally(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), "pigeon-search-tools-"));
+  return run(join(root, ".pigeon", "sessions")).finally(() =>
+    rmSync(root, { recursive: true, force: true })
+  );
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
   return result.content.map((block) => block.text ?? "").join("");
 }
 
-function proposed(
-  sessionId: SessionId,
-  runId: RunId,
-  toolCallId: string,
-  toolName: string
-): EventEnvelope {
-  return {
-    version: EVENT_ENVELOPE_VERSION,
-    id: newEntryId(),
-    sessionId,
-    runId,
-    timestamp: 1_757_000_000_000,
-    kind: RuntimeEventKind.ToolProposed,
-    payload: { toolCallId, toolName, args: { path: "a.ts" } },
-  };
+async function seed(
+  dir: string,
+  write: (session: FixtureSession) => void,
+  sessionId: SessionId = SESSION
+): Promise<void> {
+  const session = createFixtureSession({ sessionsDir: dir, sessionId });
+  write(session);
+  await session.close();
+  markLegacyEventFile(dir, sessionId);
 }
+
+test("两个工具的说明逐字冻结：只去掉了治理记录与审批回执状态的字句", () => {
+  const search = createSearchSessionsTool({ sessionsDir: "x" });
+  const read = createReadSessionEntryTool({ sessionsDir: "x" });
+  assert.equal(
+    search.description,
+    "检索本项目历史会话的消息正文（用户输入、模型回复与思维链、工具输出）。关键词大小写不敏感、" +
+      "按字面子串匹配、多个关键词须同时出现；不支持正则。结果从新到旧，最多 20 条。" +
+      "命中片段只是线索，结论必须用 read_session_entry 按 entryId 回查原文。"
+  );
+  assert.equal(
+    read.description,
+    "按 entryId 读取历史会话里一条消息的完整原文（含思维链与工具输出）。" +
+      "entryId 来自 search_sessions 的命中；可附 sessionId 加速定位。"
+  );
+  assert.deepEqual(
+    sessionToolRegistrations("x").map((registration) => registration.description),
+    ["检索本项目历史会话的消息正文（关键词字面匹配）", "按 entryId 读取历史消息原文"]
+  );
+});
+
+test("search_sessions 典型输出逐字：命中行带条目号、会话、Run 第 N 条、角色与工具名、时间，末行提示回查原文", () =>
+  withDir(async (dir) => {
+    await seed(dir, (s) => {
+      s.startRun({ task: "部署网关" });
+      s.toolTurn({ name: "read_file", result: "网关配置在 gw.yaml" });
+      s.endRun();
+    });
+    const view = loadSessionView(dir, SESSION);
+    const [user, , result] = view?.messages ?? [];
+    assert.ok(user !== undefined && result !== undefined && view !== undefined);
+    const runId = view.runs[0]?.runId;
+    const text = textOf(
+      await createSearchSessionsTool({ sessionsDir: dir }).execute("t1", { keywords: ["网关"] })
+    );
+    assert.equal(
+      text,
+      [
+        "命中 2 条（关键词：网关；从新到旧）：",
+        `- ${user.entryId}｜会话 ${SESSION}｜${runId} 第 1 条｜user｜${new Date(user.timestamp).toISOString()}`,
+        "  部署网关",
+        `- ${result.entryId}｜会话 ${SESSION}｜${runId} 第 3 条｜toolResult（read_file）｜${new Date(result.timestamp).toISOString()}`,
+        "  网关配置在 gw.yaml",
+        "片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。",
+      ].join("\n")
+    );
+    assert.equal(
+      textOf(
+        await createSearchSessionsTool({ sessionsDir: dir }).execute("t2", { keywords: ["无此词"] })
+      ),
+      "没有命中（关键词：无此词）。可以换同义词或减少关键词再试。"
+    );
+  }));
 
 test("search_sessions 默认 20 条上限并提示收窄（去上限变红）", () =>
   withDir(async (dir) => {
-    const log = new JsonlEventLog(dir, SESSION);
-    const runId = newRunId();
-    for (let index = 1; index <= 25; index++) {
-      log.appendEntry({
-        runSeq: index,
-        role: "user",
-        runId,
-        message: { role: "user", content: `match 第 ${index} 条` },
-      });
-    }
-    log.close();
+    await seed(dir, (s) => {
+      s.startRun({ task: "match 第 1 条" });
+      for (let index = 2; index <= 25; index++) {
+        s.user(`match 第 ${index} 条`);
+      }
+      s.endRun();
+    });
     const tool = createSearchSessionsTool({ sessionsDir: dir });
     assert.equal(tool.name, SEARCH_SESSIONS_TOOL);
     const result = await tool.execute("t1", { keywords: ["match"] });
     assert.equal(DEFAULT_SEARCH_TOOL_LIMIT, 20);
     assert.equal(result.details.hits.length, 20);
     assert.equal(result.details.limited, true);
-    assert.match(textOf(result), /已达 20 条上限/);
+    assert.match(textOf(result), /已达 20 条上限，结果可能不全；请增加关键词或加 role 过滤收窄。/);
     assert.match(textOf(result), /read_session_entry/);
   }));
 
 test("search_sessions 总字节上限：超出即停并提示收窄", () =>
   withDir(async (dir) => {
-    const log = new JsonlEventLog(dir, SESSION);
-    const runId = newRunId();
-    for (let index = 1; index <= 10; index++) {
-      log.appendEntry({
-        runSeq: index,
-        role: "user",
-        runId,
-        message: { role: "user", content: `match ${"长".repeat(60)} ${index}` },
-      });
-    }
-    log.close();
+    await seed(dir, (s) => {
+      s.startRun({ task: `match ${"长".repeat(60)} 1` });
+      for (let index = 2; index <= 10; index++) {
+        s.user(`match ${"长".repeat(60)} ${index}`);
+      }
+      s.endRun();
+    });
     const tool = createSearchSessionsTool({ sessionsDir: dir, maxBytes: 800 });
     const result = await tool.execute("t1", { keywords: ["match"] });
     assert.ok(result.details.hits.length > 0 && result.details.hits.length < 10);
@@ -105,110 +140,81 @@ test("search_sessions 总字节上限：超出即停并提示收窄", () =>
     assert.match(textOf(result), /字节上限/);
   }));
 
-test("read_session_entry：完整内容块 + 同 Run 的治理邻居，其他 Run 不混入", () =>
+test("read_session_entry 典型输出逐字：头行、正文分隔、thinking 与工具调用块；不再有正文哈希与治理邻居", () =>
   withDir(async (dir) => {
-    const log = new JsonlEventLog(dir, SESSION);
-    const runA = newRunId();
-    const runB = newRunId();
-    const entry = log.appendEntry({
-      runSeq: 1,
-      role: "user",
-      runId: runA,
-      message: { role: "user", content: "把 a.ts 的 beta 改成大写" },
-    });
-    const approved = (runId: RunId, toolCallId: string) => ({
-      executionId: newExecutionId(),
-      toolCallId,
-      toolName: "edit_file",
-      rawArgs: { path: "a.ts" },
-      decision: { outcome: "approved" as const, approvedBy: "human" as const, decidedAt: 1 },
-      at: 1,
-      runId,
-    });
-    log.appendRuntimeEvent(proposed(SESSION, runA, "tc-1", "edit_file"));
-    const done = log.appendIntent(approved(runA, "tc-1"));
-    log.appendReceipt({
-      runId: runA,
-      receipt: {
-        version: RECEIPT_VERSION,
-        id: newReceiptId(),
-        executionId: done.executionId,
+    await seed(dir, (s) => {
+      s.startRun({ task: "把 a.ts 的 beta 改成大写" });
+      s.assistant({
+        thinking: "先读文件",
+        text: "我来改",
+        toolCalls: [{ name: "edit_file", args: { path: "a.ts" } }],
+      });
+      s.toolResult({
         toolCallId: "tc-1",
-        approvedBy: "human",
-        executed: true,
-        isError: false,
-        startedAt: 2,
-        finishedAt: 3,
-        summary: "edit_file 执行完成",
-      },
+        toolName: "edit_file",
+        text: "失败：锚点不唯一",
+        isError: true,
+      });
+      s.endRun();
     });
-    log.appendRuntimeEvent(proposed(SESSION, runA, "tc-2", "edit_file"));
-    log.appendDecision({
-      executionId: newExecutionId(),
-      toolCallId: "tc-2",
-      toolName: "edit_file",
-      rawArgs: { path: "b.ts" },
-      decision: { outcome: "rejected", approvedBy: "human", reason: "不许改 b.ts", decidedAt: 4 },
-      at: 4,
-      runId: runA,
-    });
-    log.appendRuntimeEvent(proposed(SESSION, runA, "tc-3", "edit_file"));
-    log.appendIntent(approved(runA, "tc-3"));
-    log.appendRuntimeEvent(proposed(SESSION, runA, "tc-4", "read_file"));
-    log.appendRuntimeEvent(proposed(SESSION, runB, "tc-9", "edit_file"));
-    log.appendIntent(approved(runB, "tc-9"));
-    log.close();
-
+    const view = loadSessionView(dir, SESSION);
+    const [, assistant, result] = view?.messages ?? [];
+    assert.ok(assistant !== undefined && result !== undefined && view !== undefined);
+    const runId = view.runs[0]?.runId;
     const tool = createReadSessionEntryTool({ sessionsDir: dir });
     assert.equal(tool.name, READ_SESSION_ENTRY_TOOL);
-    const text = textOf(await tool.execute("t1", { entryId: entry.id }));
-    assert.match(text, /把 a\.ts 的 beta 改成大写/);
-    assert.match(text, /正文哈希.*与 entry 回指一致/);
-    assert.match(text, /tc-1.*已执行/);
-    assert.match(text, /tc-2.*拒绝.*不许改 b\.ts/);
-    assert.match(text, /tc-3.*待对账/);
-    assert.match(text, /tc-4.*只读调用/);
-    assert.doesNotMatch(text, /tc-9/);
-    // 显式给 sessionId 同样可读
-    assert.match(
-      textOf(await tool.execute("t2", { entryId: entry.id, sessionId: SESSION })),
-      /beta 改成大写/
+    const read = await tool.execute("t1", { entryId: assistant.entryId });
+    assert.equal(
+      textOf(read),
+      [
+        `[${assistant.entryId}｜会话 ${SESSION}｜${runId} 第 2 条｜assistant｜${new Date(assistant.timestamp).toISOString()}]`,
+        "--- 正文 ---",
+        "[thinking] 先读文件",
+        "我来改",
+        "[toolCall] edit_file（tc-1）",
+      ].join("\n")
+    );
+    assert.deepEqual(read.details, {
+      sessionId: SESSION,
+      entryId: assistant.entryId,
+      runId,
+      runSeq: 2,
+      role: "assistant",
+    });
+    assert.equal(
+      textOf(await tool.execute("t2", { entryId: result.entryId, sessionId: SESSION })),
+      [
+        `[${result.entryId}｜会话 ${SESSION}｜${runId} 第 3 条｜toolResult（edit_file，出错）｜${new Date(result.timestamp).toISOString()}]`,
+        "--- 正文 ---",
+        "失败：锚点不唯一",
+      ].join("\n")
     );
   }));
 
-test("read_session_entry：截断块如实标注不得支撑确定性结论；找不到 entry 响亮报错", () =>
+test("read_session_entry：完整原文不截断；找不到条目响亮报错；给错会话号也找不到", () =>
   withDir(async (dir) => {
-    const log = new JsonlEventLog(dir, SESSION, { content: { blockLimitBytes: 30 } });
-    const entry = log.appendEntry({
-      runSeq: 1,
-      role: "toolResult",
-      runId: newRunId(),
-      message: {
-        role: "toolResult",
-        toolName: "read_file",
-        toolCallId: "tc-1",
-        isError: false,
-        content: [{ type: "text", text: "很长的工具输出".repeat(10) }],
-      },
+    const long = "很长的工具输出".repeat(20_000);
+    await seed(dir, (s) => {
+      s.startRun({ task: "读一下" });
+      s.toolTurn({ name: "read_file", result: long });
+      s.endRun();
     });
-    log.close();
+    const other = newSessionId();
+    await seed(dir, (s) => s.startRun({ task: "另一个会话" }), other);
+    const entryId = loadSessionView(dir, SESSION)?.messages[2]?.entryId ?? "";
     const tool = createReadSessionEntryTool({ sessionsDir: dir });
-    const text = textOf(await tool.execute("t1", { entryId: entry.id }));
-    assert.match(text, /已截断/);
-    assert.match(text, /不得支撑确定性结论/);
-    await assert.rejects(tool.execute("t2", { entryId: newEntryId() }), /未找到 entry/);
+    const text = textOf(await tool.execute("t1", { entryId }));
+    assert.ok(text.endsWith(long));
+    await assert.rejects(
+      tool.execute("t2", { entryId: "no-such-entry" }),
+      /未找到 entry no-such-entry/
+    );
+    await assert.rejects(tool.execute("t3", { entryId, sessionId: other }), /未找到 entry/);
   }));
 
 test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 tool.proposed / tool.settled", () =>
   withDir(async (dir) => {
-    const old = new JsonlEventLog(dir, SESSION);
-    old.appendEntry({
-      runSeq: 1,
-      role: "user",
-      runId: newRunId(),
-      message: { role: "user", content: "上周部署过网关" },
-    });
-    old.close();
+    await seed(dir, (s) => s.startRun({ task: "上周部署过网关" }));
 
     const sessionId = newSessionId();
     const eventLog = new JsonlEventLog(dir, sessionId);
@@ -216,6 +222,8 @@ test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 t
     for (const registration of sessionToolRegistrations(dir)) {
       registry.register(registration);
     }
+    const tool = createSearchSessionsTool({ sessionsDir: dir });
+    const outputs: string[] = [];
     const adapter = new PiRuntimeAdapter({
       snapshot: {
         version: INJECTION_SNAPSHOT_VERSION,
@@ -238,7 +246,16 @@ test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 t
       governance: createToolGovernance({
         registry,
       }),
-      tools: [createSearchSessionsTool({ sessionsDir: dir })],
+      tools: [
+        {
+          ...tool,
+          execute: async (id, params) => {
+            const result = await tool.execute(id, params as { keywords: string[] });
+            outputs.push(textOf(result));
+            return result;
+          },
+        },
+      ],
       sessionId,
       eventLog,
     });
@@ -246,6 +263,7 @@ test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 t
     assert.equal(result.status, "completed");
     await adapter.dispose();
     eventLog.close();
+    assert.match(outputs[0] ?? "", /^命中 1 条/);
 
     const materialized = materializeSession(dir, sessionId);
     const kinds = materialized.runtimeEvents

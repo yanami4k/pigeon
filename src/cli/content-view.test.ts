@@ -1,5 +1,5 @@
-// M5 S2（决策 045）：cli trace 与 replay 的带正文开关——默认关（治理视图不变），
-// 打开后正文与 thinking 按 entry 呈现，措辞与 TUI 历史投影同一份。
+// M5 S2（决策 045）：cli trace 与 replay 的带正文开关——默认关，
+// 打开后正文与 thinking 按消息呈现，措辞与 TUI 历史投影同一份。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,11 +10,11 @@ import { newSessionId } from "../state/ids.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runTraceCommand } from "./trace.ts";
 
-test("trace / replay 默认不带正文；--with-content 打开后呈现正文与 thinking", () => {
+test("trace / replay 默认不带正文；--with-content 打开后呈现正文与 thinking", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-content-view-"));
   try {
     const sessionId = newSessionId();
-    const runId = seedToolRun(join(root, ".pigeon", "sessions"), sessionId);
+    const runId = await seedToolRun(join(root, ".pigeon", "sessions"), sessionId);
 
     const replayPlain = runReplayCommand({ root, runId, sessionId });
     assert.doesNotMatch(replayPlain, /我来改/);

@@ -140,7 +140,7 @@ export function summarizeSession(materialized: MaterializedSession): SessionSumm
 
 // 最小过滤器求值（多条件叠加为与）；since/until 也可在读文件前按 ULID 时间分量预筛
 export function matchesSessionFilters(
-  summary: SessionSummary,
+  summary: Pick<SessionSummary, "createdAt" | "toolNames" | "failureClasses">,
   filters: SessionListFilters
 ): boolean {
   if (filters.since !== undefined && summary.createdAt < filters.since) {

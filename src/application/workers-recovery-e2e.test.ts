@@ -1,5 +1,6 @@
 // worker 崩溃冷恢复端到端（M5.5 S4，决策 040）：worker 写入后进程死于 receipt 与 child.settled 之前——
-// 父会话留"派出未收尾"，worker 会话留悬账。会话列表与 trace 如实标注；运行面范围把 worker 会话还原到
+// 父会话留"派出未收尾"，worker 会话留悬账（会话列表与 trace 的呈现见 cli/trace-workers.test.ts、
+// persistence/session-list.test.ts，读新会话存储）；运行面范围把 worker 会话还原到
 // 它自己的工作树与委派策略；resume 以工作树为确证读取根，哈希自动确证为已执行（以主工作区为根会误判）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -7,7 +8,6 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runTraceCommand } from "../cli/trace.ts";
 import { addWorktree } from "../orchestration/worktree.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
@@ -19,7 +19,6 @@ import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { createToolGovernance } from "./governance.ts";
 import { runResumeFlow } from "./resume.ts";
-import { runSessionListCommand } from "./session-list.ts";
 import { sessionRuntimeScope } from "./worker-scope.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -131,12 +130,6 @@ test("worker 崩溃冷恢复：父会话标注未收尾，worker 会话回到自
     // 冷侧可见：父会话未收尾、worker 会话一条悬账
     assert.equal(materializeSession(sessionsDir, parentId).children[0]?.settled, undefined);
     assert.equal(materializeSession(sessionsDir, workerId).reconcile.unknown.length, 1);
-    const list = runSessionListCommand({ root: repo });
-    assert.ok(list.includes("派出 worker 1 个（1 个未收尾）"), list);
-    assert.ok(list.includes(`worker fix-a（implementer）← 父会话 ${parentId}`), list);
-    assert.ok(list.includes("1 条待对账"), list);
-    const trace = runTraceCommand({ root: repo, sessionId: parentId });
-    assert.ok(trace.includes(`用 resume ${workerId} 进入该 worker 会话对账`), trace);
 
     // 运行面范围：worker 会话回到自己的工作树与委派策略
     const scope = sessionRuntimeScope(repo, workerId);
