@@ -15,6 +15,7 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -375,14 +376,21 @@ export const SIGNALLED_VOID_STOP = 10;
 export const QUEUE_VOID_WARN = 10;
 export const QUEUE_VOID_STOP = 30;
 
-// 治理根里的会话文件（会话账本与旁置的正文文件）
+// 治理根里的会话文件（决策 210 的布局：会话根下按工作目录编码的子目录、文件名为创建时间加会话号，另有同目录的锁文件），
+// 以相对会话根的路径（分隔符一律为 /）标识，逐个文件区分：同一工作目录下前后几次尝试的会话落在同一个子目录里
 function sessionFilesOf(jobDir: string): string[] {
   const dir = path.join(jobDir, ".pigeon", "sessions");
-  return existsSync(dir) ? readdirSync(dir).sort() : [];
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) =>
+      path.relative(dir, path.join(entry.parentPath, entry.name)).split(path.sep).join("/")
+    )
+    .sort();
 }
 
-// 清掉一次作废的尝试留在治理根里的痕迹：不在 keep 里的会话文件移到输出目录下、治理根之外的隔离目录（保留备查），
-// 重做时会话检索看不到作废的尝试，与从零开始的最简 agent 对等
+// 清掉一次作废的尝试留在治理根里的痕迹：不在 keep 里的会话文件连同所在子目录的相对路径移到输出目录下、治理根之外的
+// 隔离目录（保留备查），移空的子目录一并删去；重做时会话检索看不到作废的尝试，与从零开始的最简 agent 对等
 function quarantineSessions(
   outDir: string,
   job: StreamJobId,
@@ -394,8 +402,14 @@ function quarantineSessions(
   const stray = sessionFilesOf(jobDir).filter((f) => !keep.has(f));
   if (stray.length > 0) {
     const target = path.join(outDir, "voided", jobDirName(job), label);
-    mkdirSync(target, { recursive: true });
-    for (const file of stray) renameSync(path.join(dir, file), path.join(target, file));
+    for (const file of stray) {
+      const to = path.join(target, ...file.split("/"));
+      mkdirSync(path.dirname(to), { recursive: true });
+      renameSync(path.join(dir, ...file.split("/")), to);
+    }
+    for (const sub of new Set(stray.map((f) => path.dirname(path.join(dir, ...f.split("/")))))) {
+      if (sub !== dir && readdirSync(sub).length === 0) rmdirSync(sub);
+    }
   }
   return stray.length;
 }
@@ -596,7 +610,7 @@ async function runStreamJob(
     path.join(jobDir, ".pigeon", "verify.json"),
     `${JSON.stringify(verifyConfigFile(options.runtime.verifySteps, options.judgeTimeoutMs ?? 1_800_000), null, 2)}\n`
   );
-  // 每步完成时治理根里的会话文件清单：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出
+  // 每步完成时治理根里的会话文件清单（相对会话根的路径，含工作目录编码子目录）：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出
   const sessionsFile = (seq: number) => path.join(jobDir, `sessions-${seq}.json`);
   const lines = readStreamResults(resultsFile);
   const last = lastCompletedStep(lines, job);
