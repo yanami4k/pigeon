@@ -1,0 +1,46 @@
+# 正式跑与校准的统计分析
+
+按正式跑分析计划（主判据、次要判据、设计灵敏度、校准取值规则、报告措辞）计算，输入为跑批器的 results.jsonl。
+
+## 安装
+
+```sh
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt   # Windows 为 .venv\Scripts\pip
+```
+
+## 运行
+
+在本目录下：
+
+```sh
+# 正式跑：四格与最简 agent 的结果文件可一并给出，也可分多个文件
+python -m pigeon_analysis formal --results <results.jsonl> [...] --out <输出目录> [--tasks 全部题号.json] [--minimal-reserve 元]
+
+# 校准
+python -m pigeon_analysis calibration --results <results.jsonl> [...] --out <输出目录> \
+  [--formal-valid-tasks N] [--compaction-trigger token 数] [--eligible 要做到的不为零的题号.json]
+```
+
+输出目录下为 report.md（报告）与 result.json（机器可读结果）。随机种子写死在 pigeon_analysis/constants.py，同一输入两次运行结果逐字相同。
+
+## 测试
+
+```sh
+python -m pytest            # 全部，含几分钟的模拟检验
+python -m pytest -m "not slow"   # 跳过模拟检验
+```
+
+测试不在 npm run verify 内。
+
+## 结构
+
+- pigeon_analysis/table.py：规整表（计算核心的唯一输入）
+- pigeon_analysis/stats.py：符号翻转、Holm、自助法、标准化效应
+- pigeon_analysis/primary.py：主判据与混合模型对照
+- pigeon_analysis/secondary.py：次要判据
+- pigeon_analysis/sensitivity.py：设计灵敏度与第 3 遍规则
+- pigeon_analysis/calibration.py：校准取值规则与抽题
+- pigeon_analysis/wording.py：报告的固定措辞
+- pigeon_analysis/reader.py：结果行 → 规整表（跑批器字段变动只改这里）
+- pigeon_analysis/report.py、cli.py：输出与命令行
