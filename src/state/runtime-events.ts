@@ -135,7 +135,7 @@ export function isThinkingLevel(value: string): value is ThinkingLevel {
 }
 
 // git 对象号（SHA-1 或 SHA-256）
-const GitObjectIdSchema = Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" });
+export const GitObjectIdSchema = Type.String({ pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$" });
 
 export const RunStartedPayloadSchema = Type.Object({
   model: Type.Object({

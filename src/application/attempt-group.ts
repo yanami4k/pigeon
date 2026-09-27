@@ -10,6 +10,7 @@ import type { VerifyConfig } from "../state/attempt-config.ts";
 import { type Attempt, buildTaskAttempt, firstRunOf } from "../state/episode.ts";
 import type { WorkerLimits } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { SessionEntrySink } from "../state/session-entries.ts";
 import { type AttemptVerificationSink, verifyAttempt } from "./attempt-verify.ts";
 
 export interface AttemptGroupHost extends AttemptVerificationSink {
@@ -21,6 +22,8 @@ export interface AttemptGroupInput {
   orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult">;
   governanceRoot: string;
   hostLog: AttemptGroupHost;
+  // 决策 206：宿主会话的新存储写入面（验证记录双写）；缺省不写
+  hostStore?: SessionEntrySink;
   role: string;
   task: string;
   count: number;
@@ -73,6 +76,7 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
             workspace: outcome.workspace.path,
             target: { sessionId: id, runId },
             sink: input.hostLog,
+            ...(input.hostStore !== undefined ? { store: input.hostStore } : {}),
           });
           // 账本写失败不被吞：口径同 attempt-verify.ts 的主会话挂载（进错误清单，不改变尝试结果）
           if (result.recordError !== undefined) {
@@ -108,6 +112,7 @@ export interface SessionAttemptRunnerDeps {
   orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult">;
   governanceRoot: string;
   hostLog: AttemptGroupHost;
+  hostStore?: SessionEntrySink;
   verify?: VerifyConfig;
 }
 
@@ -120,6 +125,7 @@ export function createSessionAttemptRunner(
       orchestrator: deps.orchestrator,
       governanceRoot: deps.governanceRoot,
       hostLog: deps.hostLog,
+      ...(deps.hostStore !== undefined ? { hostStore: deps.hostStore } : {}),
       role: request.role,
       task: request.task,
       count: request.count,

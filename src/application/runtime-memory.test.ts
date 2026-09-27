@@ -54,6 +54,7 @@ test("Memory 段会话开始拼进 system prompt 即冻结：中途改文件不�
   } finally {
     await bundle.adapter.dispose();
     bundle.eventLog.close();
+    await bundle.sessionStore.close();
     rmSync(base, { recursive: true, force: true });
   }
 });

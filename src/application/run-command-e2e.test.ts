@@ -72,6 +72,7 @@ test("run_command：exec 每次都问且显示完整命令；[a] 精确命令放
     } finally {
       await bundle.adapter.dispose();
       bundle.eventLog.close();
+      await bundle.sessionStore.close();
     }
 
     // 两次人工审批：第一次的 A 与换参数的 B；同一条 A 免审
@@ -150,6 +151,7 @@ test("tester 角色：只能运行 commands.json 为它登记的命令（短名�
     } finally {
       await bundle.adapter.dispose();
       bundle.eventLog.close();
+      await bundle.sessionStore.close();
     }
     assert.equal(toolResults[0]?.isError, false);
     assert.ok(toolResults[0]?.text.includes("（短名 hello）"), toolResults[0]?.text);

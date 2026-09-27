@@ -17,6 +17,7 @@ import type {
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type ReceiptId, type RunId, type SessionId } from "../state/ids.ts";
+import type { RunStopCause } from "../state/session-entries.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
 import {
@@ -40,7 +41,8 @@ export type WorkerRunStatus = "completed" | "failed" | "aborted" | "unknown";
 export interface WorkerRuntimeHandle {
   // runId：本次运行的 Run（运行面装起来并真正开跑时在场）；撞上限记录据此落在被中止的那次 Run 上
   run(task: string): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
-  interrupt(): Promise<void>;
+  // 撞上限时带上原因（决策 206：运行面据此把 Run 收尾的结束方式一次写全）；取消与外部中止不带
+  interrupt(cause?: RunStopCause): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
   receiptIds(): ReceiptId[];
   // 末条 assistant 正文
@@ -341,7 +343,7 @@ export class WorkerOrchestrator {
       }
       entry.limitHit = reason;
       // 只发中止请求；撞上限记录等运行确以中止收尾后再写（072 修订）
-      runtime.interrupt().catch((error: unknown) => {
+      runtime.interrupt(reason).catch((error: unknown) => {
         this.#errors.push(error);
       });
     };

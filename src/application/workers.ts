@@ -38,6 +38,7 @@ import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
+import { teeChildFamilies } from "./session-store.ts";
 
 export interface WorkerRuntimeDeps {
   // 每个 worker 的模型接入：生产传同一个无状态 streamFn，测试按 worker 给独立剧本
@@ -86,7 +87,8 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
       ...(deps.parentSessionId !== undefined ? { parentSessionId: deps.parentSessionId } : {}),
     },
     parentPolicy: deps.bundle.adapter.snapshot().tools.policy,
-    parentLog: deps.bundle.eventLog,
+    // 决策 206：父子两族先写旧账本、再写新存储
+    parentLog: teeChildFamilies(deps.bundle.eventLog, deps.bundle.sessionStore),
     approvals: deps.approvals,
     createRuntime: sessionWorkerRuntimeFactory(deps),
   });
@@ -338,7 +340,16 @@ function openBundle(
   runtimeDeps: RuntimeDeps,
   branchHeader?: BranchHeaderInput
 ): RuntimeBundle {
-  const bundle = buildRuntime(runtimeDeps);
+  // 决策 206：新存储的会话来历只在新建会话文件时写进文件头，故随装配一并交给运行面
+  const lineage = {
+    ...(header !== undefined ? { worker: header } : {}),
+    ...(branchHeader !== undefined ? { branch: branchHeader } : {}),
+  };
+  const bundle = buildRuntime(
+    header !== undefined || branchHeader !== undefined
+      ? { ...runtimeDeps, storeLineage: lineage }
+      : runtimeDeps
+  );
   if (header === undefined && branchHeader === undefined) {
     return bundle;
   }
@@ -378,7 +389,7 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   const { adapter } = bundle;
   return {
     run: (task) => adapter.run(task),
-    interrupt: () => adapter.interrupt(),
+    interrupt: (cause) => adapter.interrupt(cause),
     subscribe: (listener) => adapter.subscribe(listener),
     receiptIds: () => receiptIdsOf(bundle),
     summary: () => summaryOf(bundle),
@@ -412,12 +423,12 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       }
       return current.adapter.run(task);
     },
-    interrupt: async () => {
+    interrupt: async (cause) => {
       if (bundle === undefined) {
         interruptedEarly = true;
         return;
       }
-      await bundle.adapter.interrupt();
+      await bundle.adapter.interrupt(cause);
     },
     subscribe: (listener) => {
       if (bundle !== undefined) {

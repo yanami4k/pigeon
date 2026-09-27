@@ -32,6 +32,7 @@ import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { buildRepairFeedback } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
+import { openSessionStore, storeFaultWarner } from "./session-store.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
 export type HeadlessStatus =
@@ -278,9 +279,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       return;
     }
     limitHit = reason;
-    // 只发中止请求；撞上限记录等运行确以中止收尾后再写（072 修订）。
+    // 只发中止请求；撞上限记录等运行确以中止收尾后再写（072 修订）。原因随中止请求交给运行面（新存储的 Run 收尾据此写全）。
     // 中止失败不改变结果：run 以当时的终态收尾
-    handle.interrupt().catch(() => {});
+    handle.interrupt(reason).catch(() => {});
   };
   let turns = 0;
   let tokens = 0;
@@ -377,6 +378,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         ...(options.workspaceHost !== undefined ? { host: options.workspaceHost } : {}),
         target: { sessionId, runId: run.runId },
         sink: liveBundle.eventLog,
+        store: liveBundle.sessionStore,
         envelopeRunId: run.runId,
       });
       const { verdict } = verified.outcome;
@@ -438,17 +440,29 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     !externallyAborted
   ) {
     const log = new JsonlEventLog(sessionsDir, sessionId);
+    // 决策 206：运行面已释放，按会话号重新打开新存储的会话文件补写这条验证记录
+    const store = openSessionStore({
+      sessionsDir,
+      sessionId,
+      cwd: options.workspaceRoot,
+      onFault: storeFaultWarner(),
+    });
     try {
       const verified = await verifyAttempt({
         config: options.verify,
         workspace: options.workspaceRoot,
         target: { sessionId, runId: metricsBefore.runId },
         sink: log,
+        store,
         envelopeRunId: metricsBefore.runId,
       });
       verification = { verdict: verified.outcome.verdict, recorded: verified.record !== undefined };
     } finally {
-      log.close();
+      try {
+        log.close();
+      } finally {
+        await store.close();
+      }
     }
   }
   const session = materializeSession(sessionsDir, sessionId, { content: false });

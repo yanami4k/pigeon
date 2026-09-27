@@ -107,6 +107,7 @@ export async function runForkCommand(input: {
     governanceRoot: input.governanceRoot,
     sourceSessionId: sessionId,
     sourceLog: input.opened.bundle.eventLog,
+    sourceStore: input.opened.bundle.sessionStore,
     forkPoint,
     trigger: "manual",
     // 复用运行面已挂的快照器实例：同一会话只能有一个实例，否则两边各自算序号会写同一个 ref

@@ -116,6 +116,7 @@ test("本地有人工审批通道：系统提示与 run_command 说明照实写�
   } finally {
     await bundle.adapter.dispose();
     bundle.eventLog.close();
+    await bundle.sessionStore.close();
     d.cleanup();
   }
 });

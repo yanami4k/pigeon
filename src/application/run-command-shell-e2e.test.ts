@@ -87,6 +87,7 @@ test("shell 命令：prompt 下经确认以 shell 执行，面板含经 shell �
     } finally {
       await runtime.bundle.adapter.dispose();
       runtime.bundle.eventLog.close();
+      await runtime.bundle.sessionStore.close();
     }
     assert.equal(runtime.asked(), 2);
     assert.ok(runtime.screen().includes(`命令（经 shell）：${SHELL_1}`), runtime.screen());
@@ -142,6 +143,7 @@ test("shell 命令：不带 shell 标记的固化规则不能免审，仍弹人�
     } finally {
       await runtime.bundle.adapter.dispose();
       runtime.bundle.eventLog.close();
+      await runtime.bundle.sessionStore.close();
     }
     assert.equal(runtime.asked(), 1);
     assert.equal(executions[0]?.decision?.approvedBy, "human");
@@ -167,6 +169,7 @@ test("shell 命令：yolo 下直接执行不问人，Receipt 带经 shell 标记
     } finally {
       await runtime.bundle.adapter.dispose();
       runtime.bundle.eventLog.close();
+      await runtime.bundle.sessionStore.close();
     }
     assert.equal(runtime.asked(), 0);
     assert.equal(executions[0]?.decision?.approvedBy, "policy:yolo");

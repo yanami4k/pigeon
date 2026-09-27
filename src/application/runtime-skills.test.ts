@@ -24,6 +24,7 @@ async function build(root: string, home: string) {
   const snapshot = bundle.adapter.snapshot();
   await bundle.adapter.dispose();
   bundle.eventLog.close();
+  await bundle.sessionStore.close();
   return snapshot;
 }
 

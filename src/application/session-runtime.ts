@@ -154,6 +154,7 @@ export async function openSessionRuntime(
         governanceRoot: request.governanceRoot,
         sourceSessionId: request.sessionId,
         sourceLog: bundle.eventLog,
+        sourceStore: bundle.sessionStore,
         runId,
         retries,
         // 复用本会话运行面已挂的快照器实例（同一会话只能有一个实例，否则序号会撞车）

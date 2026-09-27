@@ -11,6 +11,7 @@ import {
   isGitWorkspace,
 } from "../orchestration/checkpoint.ts";
 import type { RuntimeBundle } from "./runtime.ts";
+import { checkpointEntry } from "./session-store.ts";
 import { dedupedWarner, failureDetail } from "./warnings.ts";
 
 export interface CheckpointAttachment {
@@ -48,14 +49,19 @@ export function attachCheckpoints(options: {
         }
         const snapshot = checkpointer.afterChange();
         if (snapshot !== undefined) {
-          bundle.adapter.recordObservation("workspace.checkpoint", {
+          const checkpoint = {
             ref: snapshot.ref,
             commit: snapshot.commit,
             tree: snapshot.tree,
             ...(snapshot.baseCommit !== undefined ? { baseCommit: snapshot.baseCommit } : {}),
             toolCallId: payload.toolCallId,
+          };
+          bundle.adapter.recordObservation("workspace.checkpoint", {
+            ...checkpoint,
             afterRunSeq: bundle.adapter.entrySeq() + 1,
           });
+          // 决策 206 双写：代码快照条目紧跟在发起调用的助手消息之后、工具结果消息之前（位置取代 afterRunSeq）
+          bundle.sessionStore.append(checkpointEntry(event.runId, checkpoint));
         }
       }
     } catch (error) {

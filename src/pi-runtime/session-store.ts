@@ -1,0 +1,265 @@
+// 新会话存储的写者（决策 176–181 / 184 / 206 / 210）：以 pi-agent-core 0.84.4 的 JsonlSessionRepo 为存储，
+// 会话根为 .pigeon/sessions，照 pi 原生布局按工作目录编码分子目录、文件名为创建时间加会话号；以 Pigeon 自己的会话号创建。
+// - 写者用 pi 的打开；跨进程单写者锁由调用方注入（persistence/session-lock.ts，按会话文件加锁）。不注入 fsync（178）。
+// - 消息以 pi 消息条目完整存储，不截断、不写旁置正文文件（179）；写入前剥掉值为 undefined 的键（上游序列化会拒绝）。
+// - 只写 custom 条目（state/session-entries.ts 的七种），不写未知的 entry 或 record 类型（上游写时不报、读时整个文件打不开）。
+// - 写者从不抛：打开、加锁、每一条写入的失败都交给 onFault，由调用方按内部故障告警；打开失败后这个写者不再写任何东西。
+// - 写入经内部队列串行、按调用顺序落盘；调用方不等待（不拖慢运行），需要落盘确认时 flush。
+// - 同进程对同一会话只有一个 pi 会话实例：再开写者时共用，最后一个关闭才释放锁（同一文件两个实例会各自持有 seq，交错写坏文件）。
+// 读非本进程所写的会话一律用 persistence/session-reader.ts 的只读读取器，不用这里。
+import path from "node:path";
+import {
+  type AgentMessage,
+  type JsonlSessionMetadata,
+  JsonlSessionRepo,
+  type Session,
+} from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import {
+  HEADER_METADATA_KEY,
+  type SessionEntrySink,
+  type SessionHeaderMetadata,
+} from "../state/session-entries.ts";
+
+// 与写者同一套配置的仓库（契约测试与分叉共用）
+export function createSessionRepo(sessionsRoot: string): JsonlSessionRepo {
+  return new JsonlSessionRepo({ fs: new NodeExecutionEnv({ cwd: sessionsRoot }), sessionsRoot });
+}
+
+// 剥掉对象里值为 undefined 的键（上游 assertJsonSerializable 拒绝它们）；数组里的 undefined 按 JSON 语义记为 null。
+// 返回新对象，原对象不动；其余值原样交给上游校验
+export function stripUndefined<T>(value: T): T {
+  return strip(value) as T;
+}
+
+function strip(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => (item === undefined ? null : strip(item)));
+  }
+  if (typeof value === "object" && value !== null) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype === Object.prototype || prototype === null) {
+      const result: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) {
+        if (item !== undefined) {
+          result[key] = strip(item);
+        }
+      }
+      return result;
+    }
+  }
+  return value;
+}
+
+// 新存储的一次失败：action 说明是哪一步（打开、写入某种条目、分叉），cause 为原始错误
+export class SessionStoreFault extends Error {
+  override name = "SessionStoreFault";
+  readonly action: string;
+  constructor(action: string, cause: unknown) {
+    super(`新会话存储${action}失败：${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
+    this.action = action;
+  }
+}
+
+export interface SessionStoreWriterOptions {
+  // 会话根（.pigeon/sessions）
+  sessionsRoot: string;
+  sessionId: string;
+  // 会话的工作目录：新建文件时决定子目录，并记进文件头
+  cwd: string;
+  // 已有的会话文件（调用方按会话号列目录找到）：在场即打开续写，否则新建
+  existingPath?: string;
+  // 新建时写进文件头（之后不能改）
+  parentSessionId?: string;
+  metadata?: SessionHeaderMetadata;
+  // 跨进程单写者锁：拿到文件路径后取锁，返回释放函数；取不到时抛错（该写者即不打开）
+  lock?: (filePath: string) => () => void;
+  onFault?: (fault: SessionStoreFault) => void;
+}
+
+// 运行面写消息与自定义条目的写入面（Adapter 经它写，结构类型便于测试注入）
+export interface SessionStoreSink extends SessionEntrySink {
+  appendMessage(message: AgentMessage): void;
+}
+
+export interface SessionStoreWriter extends SessionStoreSink {
+  readonly sessionId: string;
+  // 等此前排队的写入全部落盘（写失败已交给 onFault，这里不拒绝）
+  flush(): Promise<void>;
+  // 会话文件路径；打开或新建失败时为 undefined
+  filePath(): Promise<string | undefined>;
+  // flush 后关闭；同进程最后一个写者关闭时释放锁
+  close(): Promise<void>;
+}
+
+interface WriterCore {
+  key: string;
+  refs: number;
+  tail: Promise<void>;
+  session: Session | undefined;
+  path: string | undefined;
+  release: (() => void) | undefined;
+}
+
+const openCores = new Map<string, WriterCore>();
+
+function report(onFault: SessionStoreWriterOptions["onFault"], action: string, error: unknown) {
+  try {
+    onFault?.(error instanceof SessionStoreFault ? error : new SessionStoreFault(action, error));
+  } catch {
+    // 告警口自身的异常不外泄：写者从不抛
+  }
+}
+
+function startCore(key: string, options: SessionStoreWriterOptions): WriterCore {
+  const core: WriterCore = {
+    key,
+    refs: 1,
+    tail: Promise.resolve(),
+    session: undefined,
+    path: undefined,
+    release: undefined,
+  };
+  core.tail = (async () => {
+    const repo = createSessionRepo(options.sessionsRoot);
+    try {
+      if (options.existingPath !== undefined) {
+        core.release = options.lock?.(options.existingPath);
+        core.session = await repo.open({
+          id: options.sessionId,
+          path: options.existingPath,
+        } as JsonlSessionMetadata);
+        core.path = options.existingPath;
+      } else {
+        const session = await repo.create({
+          id: options.sessionId,
+          cwd: options.cwd,
+          ...(options.parentSessionId !== undefined
+            ? { parentSessionId: options.parentSessionId }
+            : {}),
+          ...(options.metadata !== undefined
+            ? { metadata: { [HEADER_METADATA_KEY]: stripUndefined(options.metadata) } as never }
+            : {}),
+        });
+        const filePath = (await session.getMetadata()).path;
+        core.release = options.lock?.(filePath);
+        core.session = session;
+        core.path = filePath;
+      }
+    } catch (error) {
+      core.release?.();
+      core.release = undefined;
+      core.session = undefined;
+      report(options.onFault, "打开", error);
+    }
+  })();
+  return core;
+}
+
+// 开一个写者：同进程已有同一会话的写者时共用它的 pi 会话实例
+export function openSessionStoreWriter(options: SessionStoreWriterOptions): SessionStoreWriter {
+  const key = `${path.resolve(options.sessionsRoot)}\0${options.sessionId}`;
+  let core = openCores.get(key);
+  if (core === undefined) {
+    core = startCore(key, options);
+    openCores.set(key, core);
+  } else {
+    core.refs += 1;
+  }
+  const shared = core;
+  let closed = false;
+  const enqueue = (action: string, write: (session: Session) => Promise<unknown>): void => {
+    if (closed) {
+      report(options.onFault, action, new Error("写者已关闭"));
+      return;
+    }
+    shared.tail = shared.tail.then(async () => {
+      const session = shared.session;
+      if (session === undefined) {
+        return;
+      }
+      try {
+        await write(session);
+      } catch (error) {
+        report(options.onFault, action, error);
+      }
+    });
+  };
+  return {
+    sessionId: options.sessionId,
+    appendMessage: (message) => {
+      let clean: AgentMessage;
+      try {
+        clean = stripUndefined(message);
+      } catch (error) {
+        report(options.onFault, "写入消息", error);
+        return;
+      }
+      enqueue("写入消息", (session) => session.appendMessage(clean));
+    },
+    append: (entry) => {
+      const action = `写入 ${entry.customType} 条目`;
+      let data: unknown;
+      try {
+        data = stripUndefined(entry.data);
+      } catch (error) {
+        report(options.onFault, action, error);
+        return;
+      }
+      enqueue(action, (session) => session.appendCustomEntry(entry.customType, data));
+    },
+    flush: () => shared.tail,
+    filePath: async () => {
+      await shared.tail;
+      return shared.session !== undefined ? shared.path : undefined;
+    },
+    close: async () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      shared.refs -= 1;
+      await shared.tail;
+      if (shared.refs === 0 && openCores.get(shared.key) === shared) {
+        openCores.delete(shared.key);
+        try {
+          shared.release?.();
+        } catch (error) {
+          report(options.onFault, "释放锁", error);
+        }
+        shared.release = undefined;
+        shared.session = undefined;
+      }
+    },
+  };
+}
+
+// 分叉（177 / 210）：用 pi 的 fork 把来源会话里从根到 entryId（含，须是消息条目）的历史复制进分支会话的新文件，
+// 新文件头的 parentSessionId 记来源会话、metadata 记分支来历。调用方负责来源文件此刻没有别的进程在写
+// （来源写者在本进程且已 flush，或已按文件取锁）。失败抛错，由调用方按内部故障处理
+export async function forkSessionFile(input: {
+  sessionsRoot: string;
+  source: { sessionId: string; path: string };
+  entryId: string;
+  branchSessionId: string;
+  cwd: string;
+  metadata?: SessionHeaderMetadata;
+}): Promise<string> {
+  const repo = createSessionRepo(input.sessionsRoot);
+  const session = await repo.fork(
+    { id: input.source.sessionId, path: input.source.path } as JsonlSessionMetadata,
+    {
+      scope: "branch",
+      entryId: input.entryId,
+      position: "at",
+      id: input.branchSessionId,
+      cwd: input.cwd,
+      ...(input.metadata !== undefined
+        ? { metadata: { [HEADER_METADATA_KEY]: stripUndefined(input.metadata) } as never }
+        : {}),
+    }
+  );
+  return (await session.getMetadata()).path;
+}

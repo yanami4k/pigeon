@@ -74,6 +74,7 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
     } finally {
       await bundle.adapter.dispose();
       bundle.eventLog.close();
+      await bundle.sessionStore.close();
     }
     // 会话文件落治理根；工作区根不出现 .pigeon/
     assert.ok(

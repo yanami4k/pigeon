@@ -5,6 +5,8 @@
 // Agent 初始状态；分支是新的 Pigeon 会话，会话头指向来源会话与分叉点。分叉点末条是用户消息或工具结果时不给新输入直接续跑，
 // 末条是助手消息时必须给新输入。非 git 工作区发起分叉明确报错，不降级，也不留任何记录。
 // 失败自动分叉重试（079）：尝试标为失败时从本次任务开始处（该 Run 第 1 条）分叉重试，最多 K 次，不注入任何提示。
+// 账本重构双写（决策 206 / 177）：旧账本记下分叉记录之后，新存储在来源会话文件里记分叉条目；工作树建好后用 pi 的 fork
+// 把分叉点（含）之前的历史复制进分支会话的新文件，文件头记来源会话与分支来历。新存储的失败只告警，不挡分叉。
 
 import {
   type Checkpointer,
@@ -27,6 +29,12 @@ import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import { type HeadlessRunOptions, runHeadlessOnce } from "./headless-core.ts";
 import {
+  beginStoreFork,
+  type SessionStoreWriter,
+  type StoreFork,
+  storeFaultWarner,
+} from "./session-store.ts";
+import {
   acquireSessionTree,
   attachTreeWriteThrough,
   importSessionIntoTree,
@@ -46,6 +54,8 @@ export interface ForkRequest {
   sourceSessionId: SessionId;
   // 来源会话正由本进程的运行面持有时传入其日志（主会话）；缺省打开会话文件（冷会话，另一进程持有时按会话锁失败）
   sourceLog?: JsonlEventLog;
+  // 同上，来源会话的新存储写者（决策 206）；缺省按会话号打开来源的会话文件
+  sourceStore?: SessionStoreWriter;
   forkPoint: ForkPoint;
   trigger: ForkTrigger;
   // 来源会话的运行面已持有的快照器：必须传入，同一会话在运行时只能存在一个实例——
@@ -106,48 +116,80 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
     checkpoint = { ref: now.ref, commit: now.commit };
   }
   // a. 账本先记分叉记录（写不进就不分叉）
+  const forked = {
+    runId: forkPoint.runId,
+    forkPoint,
+    branchSessionId,
+    checkpoint,
+    trigger: request.trigger,
+    forkedAt: Date.now(),
+  };
   const ownsLog = request.sourceLog === undefined;
   const log = request.sourceLog ?? new JsonlEventLog(dir, sourceSessionId);
   try {
-    log.appendSessionForked({
-      runId: forkPoint.runId,
-      forkPoint,
-      branchSessionId,
-      checkpoint,
-      trigger: request.trigger,
-      forkedAt: Date.now(),
-    });
+    log.appendSessionForked(forked);
   } finally {
     if (ownsLog) {
       log.close();
     }
   }
-  // b. 导入树：树不存在时整棵导入（含刚记下的分叉通道），已存在时在分叉条目上加分支通道
-  const rootSessionId = treeRootOf(governanceRoot, sourceSessionId);
-  const tree = await acquireSessionTree({ governanceRoot, rootSessionId });
-  if ((await tree.laneLeaf("main")) === null) {
-    await importSessionIntoTree(tree, governanceRoot, rootSessionId, "main");
-  }
-  if (!(await tree.hasLane(branchSessionId))) {
-    await tree.createLane(branchSessionId, forkEntry.id);
-  }
-  // 独立工作树：从分叉点之前最近的快照开出
-  const name = `fork-${branchSessionId.slice(-8).toLowerCase()}`;
-  const worktree = addWorktree({
-    repoRoot: mainRepoRoot(sourceWorkspace),
-    governanceRoot,
-    sessionId: branchSessionId,
-    name,
-    baseRef: checkpoint.commit,
+  // 决策 206 双写：来源会话的新存储记分叉条目（不抛）
+  const storeFork: StoreFork | undefined = await beginStoreFork({
+    sessionsDir: dir,
+    sourceSessionId,
+    ...(request.sourceStore !== undefined ? { sourceStore: request.sourceStore } : {}),
+    cwd: sourceWorkspace,
+    forked,
+    onFault: storeFaultWarner(),
   });
-  return {
-    branchSessionId,
-    checkpoint,
-    workspace: { kind: "git-worktree", path: worktree.path, branch: worktree.branch },
-    initialMessages: await tree.messagesUpTo(forkEntry.id),
-    tree,
-    continueFromHistory,
-  };
+  try {
+    // b. 导入树：树不存在时整棵导入（含刚记下的分叉通道），已存在时在分叉条目上加分支通道
+    const rootSessionId = treeRootOf(governanceRoot, sourceSessionId);
+    const tree = await acquireSessionTree({ governanceRoot, rootSessionId });
+    if ((await tree.laneLeaf("main")) === null) {
+      await importSessionIntoTree(tree, governanceRoot, rootSessionId, "main");
+    }
+    if (!(await tree.hasLane(branchSessionId))) {
+      await tree.createLane(branchSessionId, forkEntry.id);
+    }
+    // 独立工作树：从分叉点之前最近的快照开出
+    const name = `fork-${branchSessionId.slice(-8).toLowerCase()}`;
+    const worktree = addWorktree({
+      repoRoot: mainRepoRoot(sourceWorkspace),
+      governanceRoot,
+      sessionId: branchSessionId,
+      name,
+      baseRef: checkpoint.commit,
+    });
+    const workspace: GitWorktreeWorkspace = {
+      kind: "git-worktree",
+      path: worktree.path,
+      branch: worktree.branch,
+    };
+    // 决策 206 双写：分支会话的新文件由 pi 的 fork 从来源复制出来（分支运行面随后打开它续写）
+    await storeFork?.forkBranch({
+      branchSessionId,
+      cwd: worktree.path,
+      branch: {
+        sourceSessionId,
+        forkPoint,
+        checkpoint,
+        workspace,
+        trigger: request.trigger,
+        startedAt: Date.now(),
+      },
+    });
+    return {
+      branchSessionId,
+      checkpoint,
+      workspace,
+      initialMessages: await tree.messagesUpTo(forkEntry.id),
+      tree,
+      continueFromHistory,
+    };
+  } finally {
+    await storeFork?.release();
+  }
 }
 
 // 分支续跑用的运行参数（与 headless 同一组；任务描述由分叉点决定）
@@ -183,6 +225,7 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
     governanceRoot: request.governanceRoot,
     sourceSessionId: request.sourceSessionId,
     ...(request.sourceLog !== undefined ? { sourceLog: request.sourceLog } : {}),
+    ...(request.sourceStore !== undefined ? { sourceStore: request.sourceStore } : {}),
     forkPoint: request.forkPoint,
     trigger: request.trigger,
     ...(request.checkpointer !== undefined ? { checkpointer: request.checkpointer } : {}),
@@ -239,6 +282,7 @@ export async function runRetryOnFail(input: {
   governanceRoot: string;
   sourceSessionId: SessionId;
   sourceLog?: JsonlEventLog;
+  sourceStore?: SessionStoreWriter;
   runId: RunId;
   retries: number;
   run: ForkRunOptions;
@@ -252,6 +296,7 @@ export async function runRetryOnFail(input: {
       governanceRoot: input.governanceRoot,
       sourceSessionId: input.sourceSessionId,
       ...(input.sourceLog !== undefined ? { sourceLog: input.sourceLog } : {}),
+      ...(input.sourceStore !== undefined ? { sourceStore: input.sourceStore } : {}),
       forkPoint,
       trigger: "retry-on-fail",
       ...(input.checkpointer !== undefined ? { checkpointer: input.checkpointer } : {}),

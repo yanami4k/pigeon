@@ -24,6 +24,9 @@
 // 11. M5 S5（决策 044）：每个 Run 开始落 run.started（快照摘要），system prompt 全文每个 Adapter
 //    生命周期写一次内容记录；transformContext 只读观察每次模型调用落 llm.request（条数、角色计数、
 //    估算字符数、消息内容哈希的滚动哈希），原样返回消息数组，观察失败只进 listenerErrors。
+// 12. 账本重构双写（决策 206）：在写旧账本的同一处同时写新会话存储——每条 message_end 的完整消息、
+//    每个 Run 的开始（本次配置与系统提示全文）与收尾（结束方式）。撞上限的一方经 interrupt(原因) 交代中止原因，
+//    收尾条目一次写全；新存储的写入面自身不抛，这里仍兜一层，异常只进 listenerErrors，不影响旧账本与运行。
 import {
   Agent,
   type AgentEvent,
@@ -49,10 +52,17 @@ import {
   RuntimeEventKind,
   type ToolSettledPayload,
 } from "../state/runtime-events.ts";
+import {
+  type RunEnding,
+  type RunStopCause,
+  SESSION_ENTRY_VERSION,
+  SessionEntryType,
+} from "../state/session-entries.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import type { EventLogSink, ToolGovernance, ToolGovernanceFactory } from "./governance.ts";
+import type { SessionStoreSink } from "./session-store.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
 // 推理档位的缺省：快照里没给即 off（不请求推理）
@@ -90,6 +100,8 @@ export interface StreamTextDelta {
   delta: string;
 }
 
+type RunStartedExtras = Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
   // 永远显式传入；测试注入假 streamFn，生产注入真实 provider 实现
@@ -116,6 +128,8 @@ export interface PiRuntimeAdapterOptions {
   runStartedStepStart?: () => RunStartedPayload["stepStart"];
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
   initialMessages?: AgentMessage[];
+  // 决策 206：新会话存储的写入面（双写期间与 eventLog 同时写）；缺省不写
+  sessionStore?: SessionStoreSink;
 }
 
 export class PiRuntimeAdapter {
@@ -148,6 +162,9 @@ export class PiRuntimeAdapter {
   #systemPromptRecorded = false;
   readonly #runStartedExtras: PiRuntimeAdapterOptions["runStartedExtras"];
   readonly #runStartedStepStart: PiRuntimeAdapterOptions["runStartedStepStart"];
+  readonly #sessionStore: SessionStoreSink | undefined;
+  // 当前 Run 被我们的上限中止的原因（interrupt 时给出；每个 Run 开始时清空）
+  #stopCause: RunStopCause | undefined;
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -165,6 +182,7 @@ export class PiRuntimeAdapter {
     this.#eventLog = options.eventLog;
     this.#runStartedExtras = options.runStartedExtras;
     this.#runStartedStepStart = options.runStartedStepStart;
+    this.#sessionStore = options.sessionStore;
     this.#messageContent = options.messageContent ?? {};
     this.#systemPromptHash = sha256Hex(this.#snapshot.context.systemPrompt);
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
@@ -253,20 +271,36 @@ export class PiRuntimeAdapter {
     this.#currentRunId = runId;
     this.#governance.beginRun();
     this.#runEntrySeq = 0;
+    this.#stopCause = undefined;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
-    this.#recordRunStarted(advertisedTools);
+    // 附加摘要每个 Run 取一次，旧账本与新存储共用；取失败只进 listenerErrors，两边都缺 MCP 字段，不挡 Run 启动
+    let extras: RunStartedExtras = {};
+    try {
+      extras = this.#runStartedExtras?.() ?? {};
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+    this.#recordRunStarted(advertisedTools, extras);
+    this.#recordRunStart(runId, advertisedTools, extras);
     try {
       await start();
       await this.#agent.waitForIdle();
-      return this.#judgeTerminal(runId, advertisedTools);
+      const result = this.#judgeTerminal(runId, advertisedTools);
+      this.#recordRunEnded(result);
+      return result;
     } finally {
       this.#currentRunId = null;
     }
   }
 
   // 中断当前 Run：固定姿势 abort → waitForIdle；终态由并发等待的 run() 返回承载。
-  async interrupt(): Promise<void> {
+  // 撞上限的一方给出原因（轮数 / 墙钟 / token）：该 Run 确以中止收尾时，收尾条目的结束方式记这个原因；
+  // 同一 Run 先到的原因为准，Run 之外的调用不留原因
+  async interrupt(cause?: RunStopCause): Promise<void> {
+    if (cause !== undefined && this.#currentRunId !== null && this.#stopCause === undefined) {
+      this.#stopCause = cause;
+    }
     this.#agent.abort();
     await this.#agent.waitForIdle();
   }
@@ -423,6 +457,14 @@ export class PiRuntimeAdapter {
             this.#listenerErrors.push(error);
           }
         }
+        // 决策 206 双写：同一条消息的完整深拷贝进新会话存储（179：不截断）；写入面异常同样只进 listenerErrors
+        if (this.#sessionStore !== undefined) {
+          try {
+            this.#sessionStore.appendMessage(structuredClone(event.message));
+          } catch (error) {
+            this.#listenerErrors.push(error);
+          }
+        }
       }
       const normalized = normalizePiEvent(event, { sessionId: this.sessionId, runId });
       if (!normalized) {
@@ -496,7 +538,7 @@ export class PiRuntimeAdapter {
   // run.started 落盘（M5 S5，决策 044）：InjectionSnapshot v3 的摘要，先于本 Run 任何其他记录；
   // system prompt 全文每个 Adapter 生命周期只写一次（写失败下个 Run 再试）。整段自包，
   // 失败只进 listenerErrors——快照留证缺口可见，但不挡 Run 启动
-  #recordRunStarted(advertisedTools: string[]): void {
+  #recordRunStarted(advertisedTools: string[], extras: RunStartedExtras): void {
     const runId = this.#currentRunId;
     const sink = this.#eventLog;
     if (runId === null || sink === undefined) {
@@ -511,13 +553,6 @@ export class PiRuntimeAdapter {
       }
     }
     const snapshot = this.#snapshot;
-    // 附加摘要取失败只进 listenerErrors：该 Run 的 run.started 缺 MCP 字段，不挡 Run 启动
-    let extras: Pick<RunStartedPayload, "mcpTools" | "mcpServers"> = {};
-    try {
-      extras = this.#runStartedExtras?.() ?? {};
-    } catch (error) {
-      this.#listenerErrors.push(error);
-    }
     const stepStart = this.#runStartedStepStart?.();
     this.recordObservation("run.started", {
       model: {
@@ -556,6 +591,91 @@ export class PiRuntimeAdapter {
       ...extras,
       ...(stepStart !== undefined ? { stepStart: { ...stepStart } } : {}),
     });
+  }
+
+  // 决策 206 双写：Run 开始条目（182 / 184）——配置同 run.started，另带系统提示全文；
+  // 不带 systemPromptHash（有全文即可现算）与这一步起点（已无读者）。与旧账本在不在无关
+  #recordRunStart(runId: RunId, advertisedTools: string[], extras: RunStartedExtras): void {
+    if (this.#sessionStore === undefined) {
+      return;
+    }
+    const snapshot = this.#snapshot;
+    try {
+      this.#sessionStore.append({
+        customType: SessionEntryType.RunStart,
+        data: {
+          version: SESSION_ENTRY_VERSION,
+          runId,
+          startedAt: Date.now(),
+          model: {
+            provider: snapshot.model.provider,
+            id: snapshot.model.id,
+            thinkingLevel: snapshot.model.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+            ...(snapshot.model.maxOutputTokens !== undefined
+              ? { maxOutputTokens: snapshot.model.maxOutputTokens }
+              : {}),
+            ...(snapshot.model.temperature !== undefined
+              ? { temperature: snapshot.model.temperature }
+              : {}),
+            ...(snapshot.model.temperatureIgnored !== undefined
+              ? { temperatureIgnored: { ...snapshot.model.temperatureIgnored } }
+              : {}),
+          },
+          policy: {
+            allow: [...snapshot.tools.policy.allow],
+            deny: [...snapshot.tools.policy.deny],
+            approvalMode: snapshot.tools.policy.approvalMode,
+          },
+          advertisedTools: [...advertisedTools],
+          systemPrompt: snapshot.context.systemPrompt,
+          ...(snapshot.context.taskDirective !== undefined
+            ? { taskDirective: snapshot.context.taskDirective }
+            : {}),
+          memory: structuredClone(snapshot.memory),
+          skills: structuredClone(snapshot.skills),
+          ...structuredClone(extras),
+          ...(snapshot.verify !== undefined ? { verify: structuredClone(snapshot.verify) } : {}),
+          ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
+          ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
+          ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
+        },
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+  }
+
+  // 决策 206 双写：Run 收尾条目（182）。结束方式：确以中止收尾时，撞上限的原因优先，其次熔断，否则为中止；
+  // 出错与终态不明记为出错；其余为正常完成（空回复异常结束另行施工）
+  #recordRunEnded(result: RunResult): void {
+    if (this.#sessionStore === undefined) {
+      return;
+    }
+    let ending: RunEnding;
+    if (result.status === "aborted") {
+      ending =
+        this.#stopCause ?? (this.#governance.runOutcome().breakerTripped ? "breaker" : "aborted");
+    } else if (result.status === "completed") {
+      ending = "completed";
+    } else {
+      ending = "error";
+    }
+    try {
+      this.#sessionStore.append({
+        customType: SessionEntryType.RunEnd,
+        data: {
+          version: SESSION_ENTRY_VERSION,
+          runId: result.runId,
+          ending,
+          ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
+          ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
+          messageCount: this.#runEntrySeq,
+          endedAt: Date.now(),
+        },
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
   }
 
   // transformContext 只读观察（M5 S5，决策 044）：每次模型调用前落 llm.request——消息条数、各角色

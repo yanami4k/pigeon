@@ -32,7 +32,20 @@ export function sessionLockPath(dir: string, sessionId: SessionId | string): str
 
 // 取得会话锁，返回幂等的释放函数
 export function acquireSessionLock(dir: string, sessionId: SessionId): () => void {
-  const lockPath = sessionLockPath(dir, sessionId);
+  return acquireLockAt(sessionLockPath(dir, sessionId));
+}
+
+// 新会话存储的锁（决策 181）：按会话文件加锁，锁文件与会话文件同目录、名为 <会话文件>.lock；
+// 语义同会话锁（存活进程持有即拒绝、崩溃残留接管、同进程可重入）
+export function sessionFileLockPath(filePath: string): string {
+  return `${filePath}.lock`;
+}
+
+export function acquireSessionFileLock(filePath: string): () => void {
+  return acquireLockAt(sessionFileLockPath(filePath));
+}
+
+function acquireLockAt(lockPath: string): () => void {
   const count = heldLocks.get(lockPath);
   if (count !== undefined) {
     heldLocks.set(lockPath, count + 1);

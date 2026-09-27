@@ -16,6 +16,7 @@ import {
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { AttemptVerifiedInput, AttemptVerifiedRecord } from "../state/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
+import type { SessionEntrySink } from "../state/session-entries.ts";
 import {
   combineStepVerdicts,
   type VerifyStepResult,
@@ -23,6 +24,7 @@ import {
 } from "../state/verify-steps.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import type { RuntimeBundle } from "./runtime.ts";
+import { verificationEntry } from "./session-store.ts";
 
 // 经执行端验证时取回的输出上限：取全量再按本地同一口径留尾部、计字节数与哈希（执行端只留开头）
 const HOST_VERIFY_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -75,6 +77,8 @@ export interface VerifyAttemptInput {
   workspace: string;
   target: { sessionId: SessionId; runId: RunId };
   sink: AttemptVerificationSink;
+  // 决策 206：新存储的写入面（与 sink 落在同一个会话）；缺省不写
+  store?: SessionEntrySink;
   // 写记录时的信封 Run（写进尝试自己的会话文件时即该 Run；父会话无活动 Run 时缺省）
   envelopeRunId?: RunId;
   // 工作区在执行端另一侧（容器）时经它执行；workspace 此时记执行端的工作区根
@@ -180,29 +184,34 @@ export async function verifyAttempt(input: VerifyAttemptInput): Promise<VerifyAt
       input.host
     ));
   const steps = stepped?.steps;
+  const recordInput: AttemptVerifiedInput = {
+    ...(input.envelopeRunId !== undefined ? { runId: input.envelopeRunId } : {}),
+    target: input.target,
+    command: outcome.command,
+    exitCode: outcome.exitCode,
+    ...(outcome.signal !== undefined ? { signal: outcome.signal } : {}),
+    timedOut: outcome.timedOut,
+    ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+    durationMs: outcome.durationMs,
+    outputBytes: outcome.outputBytes,
+    outputHash: outcome.outputHash,
+    output: outcome.output,
+    truncated: outcome.truncated,
+    workspace: input.workspace,
+    verdict: outcome.verdict,
+    verifiedAt: Date.now(),
+    ...(steps !== undefined ? { steps } : {}),
+  };
+  let result: VerifyAttemptResult;
   try {
-    const record = input.sink.appendAttemptVerified({
-      ...(input.envelopeRunId !== undefined ? { runId: input.envelopeRunId } : {}),
-      target: input.target,
-      command: outcome.command,
-      exitCode: outcome.exitCode,
-      ...(outcome.signal !== undefined ? { signal: outcome.signal } : {}),
-      timedOut: outcome.timedOut,
-      ...(outcome.error !== undefined ? { error: outcome.error } : {}),
-      durationMs: outcome.durationMs,
-      outputBytes: outcome.outputBytes,
-      outputHash: outcome.outputHash,
-      output: outcome.output,
-      truncated: outcome.truncated,
-      workspace: input.workspace,
-      verdict: outcome.verdict,
-      verifiedAt: Date.now(),
-      ...(steps !== undefined ? { steps } : {}),
-    });
-    return { outcome, ...(steps !== undefined ? { steps } : {}), record };
+    const record = input.sink.appendAttemptVerified(recordInput);
+    result = { outcome, ...(steps !== undefined ? { steps } : {}), record };
   } catch (recordError) {
-    return { outcome, ...(steps !== undefined ? { steps } : {}), recordError };
+    result = { outcome, ...(steps !== undefined ? { steps } : {}), recordError };
   }
+  // 决策 206 双写：验证已经做了，旧记录写失败时新存储照写；新存储的写入面自身不抛
+  input.store?.append(verificationEntry(recordInput));
+  return result;
 }
 
 export interface AttachAttemptVerificationOptions {
@@ -239,6 +248,7 @@ export function attachAttemptVerification(
         workspace: options.workspaceRoot,
         target: { sessionId, runId },
         sink: bundle.eventLog,
+        store: bundle.sessionStore,
         envelopeRunId: runId,
       });
       if (result.recordError !== undefined) {

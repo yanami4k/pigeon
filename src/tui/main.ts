@@ -97,6 +97,7 @@ async function main(argv: string[]): Promise<void> {
               orchestrator,
               governanceRoot: workspaceRoot,
               hostLog: bundle.eventLog,
+              hostStore: bundle.sessionStore,
               ...(verify !== undefined ? { verify } : {}),
             }),
             // M7（决策 079）：/fork 手动分叉

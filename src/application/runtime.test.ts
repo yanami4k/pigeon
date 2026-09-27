@@ -65,6 +65,7 @@ test("装配根：注入审批 handler 的 bundle 跑通 prompt 模式写调用�
     } finally {
       await bundle.adapter.dispose();
       bundle.eventLog.close();
+      await bundle.sessionStore.close();
     }
     // 治理族落盘：批准路径写 intent（自带 decision 快照）与 receipt 到同一会话文件
     const records = readEventLogFile(

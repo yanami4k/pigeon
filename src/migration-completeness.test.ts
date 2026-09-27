@@ -41,6 +41,7 @@ import { MCP_CONFIG_VERSION, McpConfigFileSchema } from "./state/mcp-config.ts";
 import { MESSAGE_CONTENT_VERSION, MessageContentRecordSchema } from "./state/message-content.ts";
 import { MigrationRegistry } from "./state/migration.ts";
 import { migrateReceiptToCurrent, RECEIPT_VERSION } from "./state/receipt.ts";
+import { RunEndDataSchema, SESSION_ENTRY_VERSION } from "./state/session-entries.ts";
 import { TOOL_EXECUTION_VERSION, ToolExecutionSchema } from "./state/tool-execution.ts";
 
 interface VersionedSchemaCase {
@@ -192,6 +193,19 @@ const CASES: VersionedSchemaCase[] = [
       proposedAt: 0,
     }),
     migrate: validateOnly(ToolExecutionSchema),
+  },
+  {
+    // 新会话存储七种自定义条目共用一个版本号（决策 184）：当前即 v1，迁移链为空，以收尾条目的最小文档校验
+    constant: "SESSION_ENTRY_VERSION",
+    current: SESSION_ENTRY_VERSION,
+    v1: () => ({
+      version: 1,
+      runId: newRunId(),
+      ending: "completed",
+      messageCount: 0,
+      endedAt: 0,
+    }),
+    migrate: validateOnly(RunEndDataSchema),
   },
   {
     constant: "EVENT_ENVELOPE_VERSION",

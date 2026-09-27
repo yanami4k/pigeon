@@ -47,6 +47,7 @@ test("推理档位：缺省 off 不请求推理；全局值冻结进快照、落
       } finally {
         await bundle.adapter.dispose();
         bundle.eventLog.close();
+        await bundle.sessionStore.close();
       }
       assert.deepEqual(seen, [expectedReasoning]);
       const started = materializeSession(join(root, ".pigeon", "sessions"), sessionId)
