@@ -88,15 +88,6 @@ test("工具只调执行端接口：read_file / edit_file（两种模式）经�
     edits: [{ op: "replace", anchor: `1#${lineTag("one")}`, lines: ["ONE"] }],
   });
   assert.equal(files.get(`${FAKE_ROOT}/src/a.txt`), "ONE\ntwo\n");
-  // 回执落盘时的同步实测也走执行端
-  assert.equal(
-    hashline.hashContentTarget({
-      path: "src/a.txt",
-      snapshot: "0".repeat(16),
-      edits: [{ op: "delete", anchor: "1#0000" }],
-    }),
-    snapshotTag("ONE\ntwo\n")
-  );
 
   const replace = createReplaceEditTool(host);
   await replace.execute("c3", { path: "src/a.txt", old_string: "two", new_string: "TWO" });

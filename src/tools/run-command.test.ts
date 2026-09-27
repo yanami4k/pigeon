@@ -1,5 +1,6 @@
-// run_command（M5.5 S5，决策 048）：命令串切分与 shell 语法拒绝；参数数组直接 spawn 并记退出码、输出哈希、
-// 文件变化；超时终止；输出按字节截断；环境变量白名单；短名展开与角色允许清单；命令不存在为域错误。
+// run_command（M5.5 S5，决策 048）：命令串切分与 shell 语法拒绝；参数数组直接 spawn，执行证据（退出码、输出哈希、
+// 文件变化）作为成功结果的 details 返回；超时终止；输出按字节截断；环境变量白名单；短名展开与角色允许清单；
+// 命令不存在为域错误。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -49,7 +50,7 @@ test("命令串切分：空白分隔、单双引号、双引号内转义、Windo
   }
 });
 
-test("执行：参数数组直接 spawn，记退出码、输出与哈希、文件增删改；证据取一次即删", async () => {
+test("执行：参数数组直接 spawn，结果 details 记退出码、输出与哈希、文件增删改", async () => {
   await withRoot(async (root) => {
     writeFileSync(join(root, "keep.txt"), "x");
     writeFileSync(join(root, "gone.txt"), "y");
@@ -63,8 +64,7 @@ test("执行：参数数组直接 spawn，记退出码、输出与哈希、文�
       text?.type === "text" && text.text.includes("退出码：3") && text.text.includes("你好")
     );
 
-    const evidence = tool.takeExecEvidence("tc-1");
-    assert.ok(evidence !== undefined);
+    const evidence = result.details;
     assert.equal(evidence.spawned, true);
     assert.equal(evidence.exitCode, 3);
     assert.equal(evidence.argv[0], process.execPath);
@@ -77,20 +77,17 @@ test("执行：参数数组直接 spawn，记退出码、输出与哈希、文�
       modified: ["keep.txt"],
       truncated: false,
     });
-    assert.equal(tool.takeExecEvidence("tc-1"), undefined);
   });
 });
 
-test("超时：终止进程并抛环境类错误，证据记已启动与超时", async () => {
+test("超时：终止进程并抛环境类错误", async () => {
   await withRoot(async (root) => {
     const tool = createRunCommandTool({ workspaceRoot: root, timeoutMs: 300 });
     await assert.rejects(
       tool.execute("tc-2", { command: `${NODE} -e "setTimeout(() => {}, 20000)"` }),
-      RunCommandTimeoutError
+      (error: unknown) =>
+        error instanceof RunCommandTimeoutError && /命令超时（300 毫秒）已终止/.test(error.message)
     );
-    const evidence = tool.takeExecEvidence("tc-2");
-    assert.equal(evidence?.spawned, true);
-    assert.equal(evidence?.timedOut, true);
   });
 });
 
@@ -100,11 +97,11 @@ test("输出按字节截断并标记，哈希按全量输出", async () => {
     const result = await tool.execute("tc-3", {
       command: `${NODE} -e "process.stdout.write('x'.repeat(100))"`,
     });
-    const evidence = tool.takeExecEvidence("tc-3");
-    assert.equal(evidence?.output, "x".repeat(10));
-    assert.equal(evidence?.outputBytes, 100);
-    assert.equal(evidence?.truncated, true);
-    assert.equal(evidence?.outputHash, sha256("x".repeat(100)));
+    const evidence = result.details;
+    assert.equal(evidence.output, "x".repeat(10));
+    assert.equal(evidence.outputBytes, 100);
+    assert.equal(evidence.truncated, true);
+    assert.equal(evidence.outputHash, sha256("x".repeat(100)));
     const text = result.content[0];
     assert.ok(text?.type === "text" && text.text.includes("输出已截断：共 100 字节"));
   });
@@ -116,10 +113,10 @@ test("环境变量只透传白名单：密钥类变量不进子进程，PATH 照
       workspaceRoot: root,
       env: { ...process.env, PIGEON_TEST_SECRET: "s3cr3t" },
     });
-    await tool.execute("tc-4", {
+    const result = await tool.execute("tc-4", {
       command: `${NODE} -e "process.stdout.write((process.env.PIGEON_TEST_SECRET ?? 'none') + ':' + typeof process.env.PATH)"`,
     });
-    assert.equal(tool.takeExecEvidence("tc-4")?.output, "none:string");
+    assert.equal(result.details.output, "none:string");
   });
 });
 
@@ -131,21 +128,19 @@ test("短名与角色允许清单：清单内短名与其展开命令放行，�
       commands: { hello },
       allowlist: ["hello"],
     });
-    await tool.execute("tc-a", { command: "hello" });
-    const aliased = tool.takeExecEvidence("tc-a");
-    assert.equal(aliased?.alias, "hello");
-    assert.equal(aliased?.command, hello);
-    assert.equal(aliased?.output, "hi");
+    const aliased = (await tool.execute("tc-a", { command: "hello" })).details;
+    assert.equal(aliased.alias, "hello");
+    assert.equal(aliased.command, hello);
+    assert.equal(aliased.output, "hi");
 
-    await tool.execute("tc-b", { command: hello });
-    assert.equal(tool.takeExecEvidence("tc-b")?.output, "hi");
+    const expanded = (await tool.execute("tc-b", { command: hello })).details;
+    assert.equal(expanded.output, "hi");
 
     await assert.rejects(
       tool.execute("tc-c", { command: `${NODE} -e "1"` }),
       (error: unknown) =>
         error instanceof RunCommandError && /不在本角色允许清单内/.test(error.message)
     );
-    assert.equal(tool.takeExecEvidence("tc-c"), undefined);
 
     const preview = await tool.preview({ command: "hello" });
     assert.ok(preview.includes(`命令：${hello}（短名 hello）`), preview);

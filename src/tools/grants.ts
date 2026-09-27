@@ -8,7 +8,7 @@ import type { ConfigGrantRule } from "../state/grants.ts";
 import { isPathInsideDir } from "./paths.ts";
 
 // grant 命中出处：adapter 据此记 approvedBy = human:grant / policy:config，
-// intent 的 grantRef 逐字回指（决策 3：每次自动放行账本回指具体 grant/配置条目）
+// 审批决定的 grantRef 逐字回指（决策 3：每次自动放行账本回指具体 grant/配置条目）
 export interface GrantMatchOutcome {
   readonly source: "session-grant" | "config-rule";
   // session-grant：grant_<ulid>（grant.created 的 grantId）；

@@ -1,6 +1,6 @@
 // 边界规则的元测试：防"规则还在但已经不执行任务了"（TS7 静默巡航 0 模块事故的教训）。
 // 断言一：真实违规会被规则抓住（cli/tui→execution、src/tools 下绕过桥接文件的 rogue 直连、
-// pi-runtime→application、cli→tui、Actor 直连 persistence/event-log.ts）；
+// pi-runtime→application、cli→tui、Actor 直连会话存储写者 pi-runtime/session-store.ts 与会话锁）；
 // 断言二：tools 单一桥接文件（wrap.ts）豁免真的生效；断言三：巡航没有空转（模块数 > 15 且 0 违规）。
 // 夹具写在 os.tmpdir()，不进 src/——否则主 npm run deps 会把夹具当真违规报出来。
 import assert from "node:assert/strict";
@@ -35,7 +35,7 @@ async function cruiseJson(targets: string[], ruleSet: NonNullable<ICruiseOptions
   return result.output;
 }
 
-test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tools 下 rogue 直连、pi-runtime→application、cli→tui、Actor 直连 event-log.ts；wrap.ts 桥豁免生效", async () => {
+test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tools 下 rogue 直连、pi-runtime→application、cli→tui、Actor 直连会话写者与会话锁；wrap.ts 桥豁免生效", async () => {
   const ruleSet = await loadRuleSet();
   const fixtureRoot = mkdtempSync(join(tmpdir(), "pigeon-boundary-"));
   const originalCwd = process.cwd();
@@ -52,7 +52,8 @@ test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tool
     mkdirSync(join(fixtureRoot, "src/persistence"), { recursive: true });
     writeFileSync(join(fixtureRoot, "src/execution/index.ts"), "export {};\n");
     writeFileSync(join(fixtureRoot, "src/application/index.ts"), "export {};\n");
-    writeFileSync(join(fixtureRoot, "src/persistence/event-log.ts"), "export {};\n");
+    writeFileSync(join(fixtureRoot, "src/pi-runtime/session-store.ts"), "export {};\n");
+    writeFileSync(join(fixtureRoot, "src/persistence/session-lock.ts"), "export {};\n");
     // pi-runtime 允许清单（022 修订）：只许 state 与 tools，引用 application 必须被抓
     writeFileSync(
       join(fixtureRoot, "src/pi-runtime/probe.ts"),
@@ -63,10 +64,14 @@ test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tool
       join(fixtureRoot, "src/cli/tui-probe.ts"),
       'import "../tui/ui.ts";\nexport {};\n'
     );
-    // Actor 只经只读面读会话（022 修订）：直连 persistence/event-log.ts 必须被抓
+    // Actor 只经只读读取器读会话（022 修订，决策 181）：直连会话存储写者、直连会话锁必须被抓
     writeFileSync(
-      join(fixtureRoot, "src/cli/event-log-probe.ts"),
-      'import "../persistence/event-log.ts";\nexport {};\n'
+      join(fixtureRoot, "src/cli/session-writer-probe.ts"),
+      'import "../pi-runtime/session-store.ts";\nexport {};\n'
+    );
+    writeFileSync(
+      join(fixtureRoot, "src/tui/session-lock-probe.ts"),
+      'import "../persistence/session-lock.ts";\nexport {};\n'
     );
     writeFileSync(
       join(fixtureRoot, "src/tui/probe.ts"),
@@ -161,14 +166,23 @@ test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tool
       ),
       `应抓到 cli→tui，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
     );
-    // Actor 直连事件日志读写器
+    // Actor 直连会话存储写者
     assert.ok(
       output.summary.violations.some(
         (v) =>
-          v.rule.name === "actors-no-event-log-direct" &&
-          v.from.includes("src/cli/event-log-probe.ts")
+          v.rule.name === "actors-no-session-writer-direct" &&
+          v.from.includes("src/cli/session-writer-probe.ts")
       ),
-      `应抓到 Actor 直连 persistence/event-log.ts，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
+      `应抓到 Actor 直连 pi-runtime/session-store.ts，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
+    );
+    // Actor 直连会话锁（会改文件的入口）
+    assert.ok(
+      output.summary.violations.some(
+        (v) =>
+          v.rule.name === "actors-no-persistence-writes" &&
+          v.from.includes("src/tui/session-lock-probe.ts")
+      ),
+      `应抓到 Actor 直连 persistence/session-lock.ts，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from} -> ${v.to}`))}`
     );
     // tui-pi-tui-only：tui 直连 pi-agent-core 被抓；直连 pi-tui 豁免生效
     const tuiViolations = output.summary.violations.filter(

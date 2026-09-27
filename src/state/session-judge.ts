@@ -1,18 +1,15 @@
-// 判定类读者的原生视图（账本重构第二段，决策 180 / 182 / 183 / 184）：成败分类与标签、回炉一步、尝试切片、运行指标、
-// 工具级失败分类、需审批次数、生效授权与 worker 派出记录，全部直接从新会话存储的条目现算——消息条目与七种自定义条目，
-// 不合成旧账本形状的视图。纯函数、无 IO：读哪个会话文件、读主分支哪一段由调用方决定（persistence/session-reader.ts）。
+// 判定类读者的原生视图（决策 180 / 182 / 183 / 184）：成败分类与标签、回炉一步、尝试切片、运行指标、
+// 工具级失败分类、需审批次数、生效授权与 worker 派出记录，全部直接从会话存储的条目现算——消息条目与七种自定义条目。纯函数、无 IO：读哪个会话文件、读主分支哪一段由调用方决定（persistence/session-reader.ts）。
 // 判据沿用 classification.ts 与 outcome-label.ts 的同一套纯函数，只换事实来源：
 // - Run 级失败分类：末条助手消息的停止原因与是否上游合成的失败消息、Run 收尾条目在不在、结束方式是不是熔断；
 // - 撞上限：Run 收尾条目的结束方式（轮数、墙钟、token 三种）；
 // - 悬账：带工具调用而没有工具结果的助手消息（续跑时补的"结果未知"工具结果同样算，它只说明结果不明）；
-// - 验证结论：验证记录条目（旧 eval.verified 随 184 停写，不再计入）；
+// - 验证结论：验证记录条目；
 // - 工具级失败分类与需审批次数：工具结果消息 details 里运行面挂的标记（错误归类与审批闸决定），没有标记时退回按消息正文与策略判。
-// 旧账本的判定函数（materialize.ts、outcome-label.ts、episode.ts、repair-step.ts）在停写之前保留，只供双写对照与
-// 双写之前的旧会话回退读取；新读者一律经本文件。
 import type { AttemptRef, OutcomeLabel } from "./attempt-ref.ts";
 import { classifyRunOutcome, type FailureClass } from "./classification.ts";
+import type { ActiveGrant } from "./grants.ts";
 import type { RunId, SessionId } from "./ids.ts";
-import type { ActiveGrant } from "./materialize.ts";
 import { type AttemptOutcomeFacts, labelAttempt } from "./outcome-label.ts";
 import type { EvalVerdict, TurnUsage } from "./runtime-events.ts";
 import {

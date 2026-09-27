@@ -24,7 +24,6 @@ import { runResumeFlow } from "../application/resume.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
-import { runTreeRebuildCommand } from "../application/session-tree.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
@@ -67,7 +66,7 @@ const writeOut = sanitizedWriter((text: string): void => {
 });
 
 // pigeon trace <sessionId> [--run <runId>] [--root <dir>]：只读关联视图（M4 S3）——
-// 不需要模型接入，永不写事件日志/工作区（只走 materializeSession 读路径，见 trace.ts）
+// 不需要模型接入，永不写会话文件/工作区（只经只读读取器读，见 trace.ts）
 function traceMain(argv: string[]): void {
   let sessionId: string | undefined;
   let runId: string | undefined;
@@ -103,8 +102,8 @@ function traceMain(argv: string[]): void {
 }
 
 // pigeon replay <runId> [--session <sessionId>] [--root <dir>]：只读黑匣子时间线（M4 S4，
-// D4 一次性渲染）——不需要模型接入，永不写事件日志/工作区，绝不重新执行真实副作用
-// （只走 materializeSession 读路径，见 replay.ts）；与 trace 的链式分组治理视图相区别
+// D4 一次性渲染）——不需要模型接入，永不写会话文件/工作区，绝不重新执行真实副作用
+// （只经只读读取器读，见 replay.ts）；与 trace 的按轮分组视图相区别
 function replayMain(argv: string[]): void {
   let runId: string | undefined;
   let sessionId: string | undefined;
@@ -142,7 +141,7 @@ function replayMain(argv: string[]): void {
 
 // pigeon session list [--tool <name>] [--class <cancelled|business|infrastructure|unknown>]
 //   [--since <ISO 日期|epoch 毫秒>] [--until <...>] [--root <dir>]：会话投影列表（M4 S5，D5）——
-// 只读渲染（派生不落库），不需要模型接入，永不写事件日志/工作区
+// 只读渲染（派生不落库），不需要模型接入，永不写会话文件/工作区
 const FAILURE_CLASSES = ["cancelled", "business", "infrastructure", "unknown"] as const;
 
 // 时间边界解析：全数字 = epoch 毫秒；否则按 ISO 日期 Date.parse，解析不出响亮报错
@@ -807,21 +806,6 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "resume") {
     await resumeMain(argv.slice(1));
-    return;
-  }
-  // M7（决策 077）：由账本重建会话树
-  if (argv[0] === "tree" && argv[1] === "rebuild") {
-    const sessionArg = argv[2];
-    if (sessionArg === undefined) {
-      throw new Error("用法：pigeon tree rebuild <sessionId> [--root <dir>]");
-    }
-    const rootIndex = argv.indexOf("--root");
-    const root = prepareWorkspace(
-      rootIndex >= 0 ? (argv[rootIndex + 1] ?? process.cwd()) : process.cwd()
-    );
-    writeOut(
-      `${await runTreeRebuildCommand({ governanceRoot: root, sessionId: asSessionId(sessionArg) })}\n`
-    );
     return;
   }
   const startUsage =

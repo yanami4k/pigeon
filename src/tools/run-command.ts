@@ -9,7 +9,7 @@
 // 以 shell 运行的命令串与审批面板显示的字节一致，不做改写。工作目录固定为工作区根（worker 即其工作树）；环境变量只透传
 // 白名单；墙钟超时终止；输出按字节截断并标记。审批语义不在本工具：exec 档永不自动放行、[a] 收窄为精确命令串，均由
 // 治理层判定。执行证据（命令、实际进程参数、是否经启动器、是否经 shell、退出码、输出哈希与截断输出、执行前后工作树
-// 文件清单差异）按 toolCallId 暂存，receipt 落盘时由治理层取走。
+// 文件清单差异）作为成功结果的 details 随工具结果消息记进会话存储。
 // .pigeon/commands.json 的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -117,11 +117,10 @@ export interface CommandInspection {
   scriptPath?: string;
 }
 
-// 可选能力：只读检查、按调用授予 shell、执行证据暂存（治理层使用）
-export interface ExecEvidenceTool {
+// 可选能力：只读检查、按调用授予 shell（治理层使用）
+export interface ExecCommandTool {
   inspectCommand(params: unknown): CommandInspection;
   authorizeShell(toolCallId: string): void;
-  takeExecEvidence(toolCallId: string): ExecEvidence | undefined;
 }
 
 export interface RunCommandOptions {
@@ -258,7 +257,7 @@ export function createRunCommandTool(
   options: RunCommandOptions
 ): PigeonAgentTool<typeof RunCommandParamsSchema, ExecEvidence> &
   PreviewableTool &
-  ExecEvidenceTool {
+  ExecCommandTool {
   const host =
     options.host ??
     createLocalWorkspaceHost(
@@ -270,7 +269,6 @@ export function createRunCommandTool(
   const timeoutMs = options.timeoutMs ?? DEFAULT_RUN_COMMAND_TIMEOUT_MS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_BYTES;
   const env = allowedEnv(options.env ?? process.env);
-  const evidences = new Map<string, ExecEvidence>();
   // 治理层按调用授予的 shell 确认（一次一用）
   const shellAuthorized = new Set<string>();
 
@@ -371,11 +369,6 @@ export function createRunCommandTool(
       }
       return lines.join("\n");
     },
-    takeExecEvidence(toolCallId) {
-      const evidence = evidences.get(toolCallId);
-      evidences.delete(toolCallId);
-      return evidence;
-    },
     async execute(toolCallId, params, signal): Promise<PigeonToolResult<ExecEvidence>> {
       const inspection = inspectParams(params);
       const { command, alias } = inspection;
@@ -414,7 +407,6 @@ export function createRunCommandTool(
         truncated: run.outputBytes > maxOutputBytes,
         fileChanges: diffFiles(before, after),
       };
-      evidences.set(toolCallId, evidence);
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
           throw new RunCommandError(`命令不存在：${plan.program}`);

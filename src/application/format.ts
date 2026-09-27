@@ -2,7 +2,6 @@
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { FailureClass } from "../state/classification.ts";
-import type { ContentGap } from "../state/materialize.ts";
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
@@ -94,27 +93,6 @@ export function failureBadge(failure: FailureClass | null | undefined): string {
 // Eval 验证器三值判决（M6.5 S3，决策 058）→ 通俗措辞：trace Run 头、replay 时间线与 Eval 报告同一口径
 export function evalVerdictLabel(verdict: "pass" | "fail" | "undetermined"): string {
   return verdict === "pass" ? "通过" : verdict === "fail" ? "失败" : "未判定";
-}
-
-// 正文缺口（M5 S1，决策 037）→ 通俗措辞：trace Run 头与 replay 尾部总账同一口径
-export function describeContentGaps(gaps: readonly ContentGap[]): string {
-  const detail = gaps
-    .map(
-      (gap) =>
-        `第 ${gap.runSeq} 条${gap.reason === "missing" ? "内容文件无记录" : "哈希不符（正文被改动或损坏）"}`
-    )
-    .join("；");
-  return `消息正文缺失 ${gaps.length} 条（${detail}）`;
-}
-
-// 熔断计数粒度 → 通俗措辞
-export function breakerScopeLabel(scope: string): string {
-  const SCOPE_LABEL: Record<string, string> = {
-    tool: "按工具名计数",
-    fingerprint: "按参数指纹计数",
-    intercepted: "上游拦截连击",
-  };
-  return SCOPE_LABEL[scope] ?? scope;
 }
 
 // 终端控制序列净化（决策 036，M2 审计 P2-1）：半信任内容——模型流式文本、工具参数、

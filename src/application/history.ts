@@ -4,7 +4,11 @@
 // 来源会话）。纯投影：输出结构化行，TUI 渲染面与 cli 的 --with-content 各自排版；终端净化在各自边界（036）。
 // 措辞与 TUI 实时流同口径（轮次标记、工具行、thinking 前缀）。
 import { join } from "node:path";
-import { loadSessionView } from "../persistence/session-catalog.ts";
+import {
+  hasLegacySessionFile,
+  LEGACY_READER_HINT,
+  loadSessionView,
+} from "../persistence/session-catalog.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
 
@@ -96,12 +100,15 @@ export function loadSessionHistory(
 ): HistoryLine[] {
   const limit = options.limit ?? DEFAULT_HISTORY_LIMIT;
   const entryChars = options.entryChars ?? DEFAULT_HISTORY_ENTRY_CHARS;
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), sessionId);
+  const sessionsDir = join(root, ".pigeon", "sessions");
+  const view = loadSessionView(sessionsDir, sessionId);
   if (view === undefined) {
     return [
       {
         kind: "notice",
-        text: "[该会话创建于新会话存储启用之前，只在旧账本里，这里不显示历史]",
+        text: hasLegacySessionFile(sessionsDir, sessionId)
+          ? `[旧格式会话（迁移之前创建），这里不显示历史；${LEGACY_READER_HINT}]`
+          : "[该会话在会话存储里没有记录，这里不显示历史]",
       },
     ];
   }

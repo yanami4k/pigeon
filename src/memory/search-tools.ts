@@ -6,11 +6,7 @@
 // 哪些旧账在 trace 可见。范围只限本项目 .pigeon/sessions，目录由装配根注入。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import {
-  hasLegacyEventFile,
-  listSessionRefs,
-  readSessionView,
-} from "../persistence/session-catalog.ts";
+import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ViewBlock, ViewMessage } from "../state/session-view.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
@@ -169,9 +165,6 @@ function findMessage(
     .reverse()
     .filter((ref) => sessionId === undefined || ref.sessionId === sessionId);
   for (const ref of refs) {
-    if (!hasLegacyEventFile(sessionsDir, ref.sessionId)) {
-      continue;
-    }
     const view = readSessionView(ref);
     const message = view?.messages.find((item) => item.entryId === entryId);
     if (view !== undefined && message !== undefined) {

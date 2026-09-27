@@ -1,18 +1,17 @@
 // 会话运行面装配（决策 067）：新建与 resume 走同一条路——作用域解析（worker 会话回到它自己的
-// 工作树与委派策略）、固化 grant 种子物化、MCP 会话启动与启动提示、运行面构建。
+// 工作树与委派策略）、会话 grant 种子还原、MCP 会话启动与启动提示、运行面构建。
 // 续跑（决策 183）：运行面打开会话文件之后，用 pi 的 buildSessionContext 还原对话上下文交给 Agent；末条助手消息里
 // 悬空的工具调用各补一条"进程中断、结果未知、请自行核实"的工具结果并写进会话，由 agent 自行核对。
 // cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
 
-import { materializeSession } from "../persistence/session-read.ts";
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
-import { attemptOutcomeFacts, labelAttempt, type OutcomeLabel } from "../state/outcome-label.ts";
+import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { storeAttemptLabel } from "../state/session-judge.ts";
 import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
@@ -70,7 +69,7 @@ export interface OpenedSessionRuntime {
 }
 
 // 续跑：等写者打开会话文件，读主分支还原上下文；悬空调用补的工具结果先写进会话，再连同还原的消息交给 Agent。
-// 会话文件打不开（新存储故障）时报错：没有上下文的续跑不是续跑
+// 会话文件打不开（会话存储故障）时报错：没有上下文的续跑不是续跑
 async function restoreContext(bundle: RuntimeBundle): Promise<{
   messages: number;
   interrupted: number;
@@ -78,7 +77,7 @@ async function restoreContext(bundle: RuntimeBundle): Promise<{
   const path = await bundle.sessionStore.filePath();
   const loaded = path !== undefined ? loadStoreSessionFile(path) : undefined;
   if (loaded === undefined) {
-    throw new Error("会话文件没有打开（新会话存储告警已给出原因），无法还原对话上下文，续跑中止");
+    throw new Error("会话文件没有打开（会话存储告警已给出原因），无法还原对话上下文，续跑中止");
   }
   const { messages, interrupted } = restoreSessionContext(loaded.main);
   for (const message of interrupted) {
@@ -160,19 +159,13 @@ export async function openSessionRuntime(
     const retryErrors: unknown[] = [];
     const retryPending = new Set<Promise<void>>();
     const retries = request.retryOnFail ?? 0;
-    // 这次尝试的标签（账本重构第二段）：等本 Run 的收尾条目交给写者并落盘，再从新存储现算；
-    // 新存储里没有本会话的文件（双写之前的旧会话、或新存储打不开）时过渡期回退旧账本
+    // 这次尝试的标签：等本 Run 的收尾条目交给写者并落盘，再从会话存储现算；
+    // 会话存储里没有本会话的文件（写者打不开，已告警）时标签无从现算，按未知处理、不重试
     const labelOf = async (runId: RunId): Promise<OutcomeLabel> => {
       await bundle.adapter.settled();
       await bundle.sessionStore.flush();
-      const dir = sessionsDirOf(request.governanceRoot);
-      const loaded = loadStoreSession(dir, request.sessionId);
-      if (loaded !== undefined) {
-        return storeAttemptLabel(loaded.view, runId);
-      }
-      return labelAttempt(
-        attemptOutcomeFacts(materializeSession(dir, request.sessionId, { content: false }), runId)
-      );
+      const loaded = loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId);
+      return loaded !== undefined ? storeAttemptLabel(loaded.view, runId) : "Unknown";
     };
     const startRetry = (runId: RunId): void => {
       if (retries <= 0 || scope.parentSessionId !== undefined) {
@@ -191,7 +184,6 @@ export async function openSessionRuntime(
       const task = runRetryOnFail({
         governanceRoot: request.governanceRoot,
         sourceSessionId: request.sessionId,
-        sourceLog: bundle.eventLog,
         sourceStore: bundle.sessionStore,
         runId,
         retries,
@@ -231,7 +223,7 @@ export async function openSessionRuntime(
             onVerified: (record) => startRetry(record.target.runId),
           })
         : undefined;
-    // 未配置验证命令时，在 Run 结束后按账本现算的标签判断（撞上限、熔断、业务失败）
+    // 未配置验证命令时，在 Run 结束后按会话现算的标签判断（撞上限、熔断、业务失败）
     const unsubscribeRetry =
       request.verify === undefined && retries > 0
         ? bundle.adapter.subscribe((event) => {

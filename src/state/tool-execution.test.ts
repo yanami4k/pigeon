@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
-import { newReceiptId } from "./ids.ts";
 import {
   advanceToolExecution,
   proposeToolExecution,
@@ -47,7 +46,7 @@ function approvedAt(state: "dispatch" | "execution" | "settled" | "verification"
 }
 
 test("ToolExecution JSON 往返后深度相等且校验通过（走完完整生命周期）", () => {
-  const exec = { ...approvedAt("verification"), receiptId: newReceiptId() };
+  const exec = approvedAt("verification");
   const revived: unknown = JSON.parse(JSON.stringify(exec));
   assert.ok(Value.Check(ToolExecutionSchema, revived));
   assert.deepStrictEqual(revived, exec);
@@ -222,13 +221,5 @@ test("决定可携带理由来源（决策 066）：人写 / 系统默认通过�
   assert.ok(Value.Check(ToolExecutionSchema, approvedAt("settled")));
 
   const bad = { ...exec, decision: { ...exec.decision, reasonSource: "guessed" } };
-  assert.ok(!Value.Check(ToolExecutionSchema, bad));
-});
-
-test("settled 后关联 receiptId：合法 rcpt_ 标识通过，坏标识被拒绝", () => {
-  const exec = approvedAt("settled");
-  const linked = { ...exec, receiptId: newReceiptId() };
-  assert.ok(Value.Check(ToolExecutionSchema, linked));
-  const bad = { ...exec, receiptId: "not-a-receipt-id" };
   assert.ok(!Value.Check(ToolExecutionSchema, bad));
 });

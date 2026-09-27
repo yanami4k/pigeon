@@ -1,6 +1,6 @@
 // run_command 的 shell 修订（M5.5，048 修订）：Windows 下 .cmd / .bat 参数全在保守字符集内经 cmd.exe 启动器运行，
 // 任一参数越界即判定需 shell——未经人确认拒绝并指出参数；shell 语法同样判定需 shell，确认后以 shell 运行；
-// 执行证据标明启动器与经 shell。
+// 成功结果的 details（执行证据）标明启动器与经 shell。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,16 +33,14 @@ test("Windows .cmd：参数全在保守字符集内经 cmd.exe 启动器运行�
     const tool = createRunCommandTool({ workspaceRoot: root, env: envWithPath(root) });
     assert.equal(tool.inspectCommand({ command: "ok hello" }).mode, "launcher");
 
-    await tool.execute("tc-1", { command: "ok.cmd hello-1 k=v a/b" });
-    const explicit = tool.takeExecEvidence("tc-1");
-    assert.equal(explicit?.launcher, true);
-    assert.equal(explicit?.shell, false);
-    assert.equal(explicit?.output.trim(), "cmd-ok hello-1 k=v a/b");
+    const explicit = (await tool.execute("tc-1", { command: "ok.cmd hello-1 k=v a/b" })).details;
+    assert.equal(explicit.launcher, true);
+    assert.equal(explicit.shell, false);
+    assert.equal(explicit.output.trim(), "cmd-ok hello-1 k=v a/b");
 
-    await tool.execute("tc-2", { command: "ok x@y:z_1.2" });
-    const viaPath = tool.takeExecEvidence("tc-2");
-    assert.equal(viaPath?.launcher, true);
-    assert.equal(viaPath?.output.trim(), "cmd-ok x@y:z_1.2");
+    const viaPath = (await tool.execute("tc-2", { command: "ok x@y:z_1.2" })).details;
+    assert.equal(viaPath.launcher, true);
+    assert.equal(viaPath.output.trim(), "cmd-ok x@y:z_1.2");
   });
 });
 
@@ -60,7 +58,6 @@ test("Windows .cmd：白名单外参数未经 shell 确认即拒绝并指出参�
       tool.execute("tc-3", { command }),
       (error: unknown) => error instanceof RunCommandError && error.message.includes("「a b」")
     );
-    assert.equal(tool.takeExecEvidence("tc-3"), undefined);
   });
 });
 
@@ -77,15 +74,13 @@ test("shell 语法判定需 shell：未确认拒绝，确认后以 shell 运行�
       tool.execute("tc-4", { command }),
       (error: unknown) => error instanceof RunCommandError && /需要经 shell/.test(error.message)
     );
-    assert.equal(tool.takeExecEvidence("tc-4"), undefined);
 
     tool.authorizeShell("tc-5");
-    await tool.execute("tc-5", { command });
-    const evidence = tool.takeExecEvidence("tc-5");
-    assert.equal(evidence?.shell, true);
-    assert.equal(evidence?.launcher, false);
-    assert.equal(evidence?.command, command);
-    assert.equal(evidence?.output, "xy");
+    const evidence = (await tool.execute("tc-5", { command })).details;
+    assert.equal(evidence.shell, true);
+    assert.equal(evidence.launcher, false);
+    assert.equal(evidence.command, command);
+    assert.equal(evidence.output, "xy");
     // 授权一次一用：同一 toolCallId 不能复用
     await assert.rejects(tool.execute("tc-5", { command }), RunCommandError);
   });
@@ -97,10 +92,9 @@ test("普通命令直接 spawn，不需 shell，执行证据两个标记都为�
     const command = `${NODE} -e "process.stdout.write('d')"`;
     assert.equal(tool.inspectCommand({ command }).mode, "direct");
     assert.equal(tool.inspectCommand({ command }).needsShell, false);
-    await tool.execute("tc-6", { command });
-    const evidence = tool.takeExecEvidence("tc-6");
-    assert.equal(evidence?.shell, false);
-    assert.equal(evidence?.launcher, false);
-    assert.equal(evidence?.output, "d");
+    const evidence = (await tool.execute("tc-6", { command })).details;
+    assert.equal(evidence.shell, false);
+    assert.equal(evidence.launcher, false);
+    assert.equal(evidence.output, "d");
   });
 });

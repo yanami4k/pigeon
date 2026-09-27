@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
-import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
+import { listSessionFiles } from "../persistence/session-reader.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import {
@@ -658,7 +659,7 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
   }
 });
 
-test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）建了引用，回炉验证前按它还原受保护的文件", async () => {
+test("Pigeon agent：每步开工时的树建了引用（挂在起点提交之下、含未提交的人写测试），回炉验证前按它还原受保护的文件", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   const git = (cwd: string, ...args: string[]) =>
@@ -666,6 +667,7 @@ test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）
   try {
     // 开工时有未提交的人写测试：开工时的树因此是挂在起点提交下的独立提交
     writeFileSync(join(ws.testbed, "check.sh"), "grep -qx fixed a.txt\n");
+    const startCommit = git(ws.testbed, "rev-parse", "HEAD");
     const agent = pigeonStepAgent({
       streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
       yolo: true,
@@ -679,15 +681,13 @@ test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）
         verify: FIXED_GATE,
       })
     );
-    const sessions = join(dir, "job", ".pigeon", "sessions");
-    const recorded = listSessionIds(sessions)
-      .flatMap((id) => materializeSession(sessions, id, { content: false }).runStarteds)
-      .map((r) => r.payload.stepStart?.baseCommit)
-      .find((b) => b !== undefined);
-    assert.ok(recorded !== undefined, "run.started 记下了开工时的树");
+    // 开工时的树只记在引用上（Run 开始条目不再带它）：引用指向挂在起点提交之下的提交，树里有未提交的人写测试
     const ref = "refs/pigeon/step-start/s1/7";
-    assert.equal(git(ws.testbed, "rev-parse", ref), recorded);
+    const recorded = git(ws.testbed, "rev-parse", ref);
     assert.equal(git(ws.testbed, "cat-file", "-t", recorded), "commit");
+    assert.notEqual(recorded, startCommit);
+    assert.equal(git(ws.testbed, "rev-parse", `${recorded}^`), startCommit);
+    assert.equal(git(ws.testbed, "show", `${recorded}:check.sh`), "grep -qx fixed a.txt");
   } finally {
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -1089,9 +1089,14 @@ test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py
       })
     );
     assert.deepEqual([first.repair?.rounds, first.repair?.finalVerdict], [1, "pass"]);
-    const [firstId] = listSessionIds(sessions);
+    const files = listSessionFiles(sessions);
+    assert.equal(files.length, 1);
+    const firstId = files[0]?.sessionId;
     assert.ok(firstId !== undefined);
-    const verified = materializeSession(sessions, firstId, { content: false }).attemptVerifieds;
+    const verified = (loadStoreSession(sessions, firstId)?.view.verifications ?? []).map(
+      (record) => record.data
+    );
+    assert.equal(verified.length, 2, "首轮与回炉一轮各一条验证记录");
     // 首轮三步各出结论，都在 strands-py 下执行
     assert.deepEqual(
       verified[0]?.steps?.map((s) => [s.name, s.cwd, s.verdict]),

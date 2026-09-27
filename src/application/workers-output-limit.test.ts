@@ -1,12 +1,12 @@
 // worker 继承父运行面的单轮输出上限（决策 063 第 1 件）：按会话装配的编排器从父运行面的冻结快照取上限，
-// worker 的模型调用收到同一 maxTokens，worker 会话的 run.started 记下同一值。
+// worker 的模型调用收到同一 maxTokens，worker 会话文件里的 Run 开始条目记下同一值。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -17,7 +17,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-test("worker 继承父运行面的输出上限：worker 的模型调用收到父值，worker 会话 run.started 记下同一值", async () => {
+test("worker 继承父运行面的输出上限：worker 的模型调用收到父值，worker 会话的 Run 开始记下同一值", async () => {
   const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-worker-limit-")));
   const home = mkdtempSync(join(tmpdir(), "pigeon-worker-limit-home-"));
   try {
@@ -59,8 +59,9 @@ test("worker 继承父运行面的输出上限：worker 的模型调用收到父
       const outcome = await orchestrator.awaitResult(workerId);
       assert.equal(outcome.status, "completed", JSON.stringify(outcome));
       assert.deepEqual(seen, [2048]);
-      const worker = materializeSession(join(repo, ".pigeon", "sessions"), workerId);
-      assert.equal(worker.runStarteds[0]?.payload.model.maxOutputTokens, 2048);
+      const worker = loadSessionView(join(repo, ".pigeon", "sessions"), workerId);
+      assert.equal(worker?.runs.length, 1);
+      assert.equal(worker?.runs[0]?.start.model.maxOutputTokens, 2048);
     } finally {
       await disposeRuntime(parent);
     }

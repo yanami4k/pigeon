@@ -4,7 +4,7 @@
 //   2. deny 清单绝对：任何模式下精确匹配工具名即拒，yolo / grant / 配置规则一律不豁免
 //      （M3 仅精确匹配（工具名级），参数内容模式识别显式排除——做不好的模式识别是虚假安全感）
 //   3. grant 命中（会话 grant / 固化配置规则，M4 S6）→ auto-allow——approvedBy 记
-//      human:grant / policy:config，intent 回指出处（每次免审都可审计"凭什么没问人"）
+//      human:grant / policy:config，审批决定回指出处（每次免审都可审计"凭什么没问人"）
 //   4. yolo → 非 deny 全放行（人事先批发授权，账本上 approvedBy 记 policy:yolo）
 //   5. prompt → read 层自动放行；write / exec 层必须人工批准
 // 注意：policy.allow 不参与逐调用判定——它约束的是广告给模型的工具集（Adapter 接线层职责）；

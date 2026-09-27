@@ -8,7 +8,7 @@ import { test } from "node:test";
 import type { SpawnRequest, WorkerOutcome, WorkerStatus } from "../application/workers-commands.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import { newReceiptId, newSessionId, type SessionId } from "../state/ids.ts";
+import { newSessionId, type SessionId } from "../state/ids.ts";
 import { APPROVAL_CANCEL_CLOSED } from "./approval.ts";
 import { PigeonTuiShell, type TuiRuntimeFace, type TuiWorkersFace } from "./shell.ts";
 import { MockTerminal, screenFlat, settle } from "./testing.ts";
@@ -138,7 +138,6 @@ test("TUI worker 命令：派出回显与状态行、清单、运行中拒绝恢
       result: {
         branch: "pigeon/fix-a",
         changedFiles: ["a.ts"],
-        receiptIds: [newReceiptId()],
         summary: "",
         summaryTruncated: false,
       },

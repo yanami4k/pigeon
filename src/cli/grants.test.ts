@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { asSessionId } from "../state/ids.ts";
 import { matchConfigGrants } from "../tools/grants.ts";
@@ -17,17 +16,14 @@ const SESSION = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRCC");
 
 function makeContext(): {
   root: string;
-  sessionsDir: string;
-  eventLog: JsonlEventLog;
   store: SessionGrantStore;
   outputs: string[];
   ctx: GrantsCommandContext;
   cleanup: () => void;
 } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-cmd-"));
-  const sessionsDir = join(root, ".pigeon", "sessions");
-  const eventLog = new JsonlEventLog(sessionsDir, SESSION);
-  const store = new SessionGrantStore({ workspaceRoot: root, eventLog });
+  // 这些用例只看配置文件，授权建立与撤销不落盘（纯内存）
+  const store = new SessionGrantStore({ workspaceRoot: root });
   const outputs: string[] = [];
   const ctx: GrantsCommandContext = {
     root,
@@ -38,15 +34,10 @@ function makeContext(): {
   };
   return {
     root,
-    sessionsDir,
-    eventLog,
     store,
     outputs,
     ctx,
-    cleanup: () => {
-      eventLog.close();
-      rmSync(root, { recursive: true, force: true });
-    },
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
 

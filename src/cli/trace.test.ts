@@ -14,7 +14,7 @@ import {
   forkFixture,
   tearTail,
 } from "../application/session-store-fixtures.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
+import { writeLegacySessionFile } from "../application/session-view-fixtures.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
@@ -74,14 +74,13 @@ function editCall(content: string): EditFileParams {
   };
 }
 
-// 经真实 Adapter 跑一次（旧账本与新存储双写）：读一次、改一次（批准）、再改一次（人工拒绝）、收尾
+// 经真实 Adapter 跑一次（写进会话存储）：读一次、改一次（批准）、再改一次（人工拒绝）、收尾
 async function scriptSession(
   root: string,
   replies: Parameters<typeof createFakeStreamFn>[0]["replies"],
   sessionId: SessionId = newSessionId()
 ): Promise<{ sessionId: SessionId; runId: RunId }> {
   const sessionsDir = join(root, ".pigeon", "sessions");
-  const eventLog = new JsonlEventLog(sessionsDir, sessionId);
   const existing = locateSessionFile(sessionsDir, sessionId);
   const store = openSessionStoreWriter({
     sessionsRoot: sessionsDir,
@@ -108,12 +107,10 @@ async function scriptSession(
     }),
     tools: [createReadFileTool(root), createEditFileTool(root)],
     sessionId,
-    eventLog,
     sessionStore: store,
   });
   const result = await adapter.run("改文件");
   await adapter.dispose();
-  eventLog.close();
   await store.close();
   return { sessionId, runId: result.runId };
 }
@@ -133,7 +130,7 @@ function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
     .finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("trace 报告（真实双写运行）：会话头、启动快照、逐轮 stopReason、工具调用参数与结果、分类徽章；不再有治理与回执", () =>
+test("trace 报告（真实运行）：会话头、启动快照、逐轮 stopReason、工具调用参数与结果、分类徽章；不再有治理与回执", () =>
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root, EDIT_SCRIPT);
     const output = runTraceCommand({ root, sessionId });
@@ -247,7 +244,7 @@ test("trace 命令只读：正被写入（末行撕裂）的会话照常出报�
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), workspaceBefore, "工作区不得变化");
   }));
 
-test("trace 命令：会话不存在时报错并列出已有会话；双写之前的旧会话单独说明；--run 过滤只渲染目标 Run", () =>
+test("trace 命令：会话不存在时报错并列出已有会话；旧格式会话单独说明；--run 过滤只渲染目标 Run", () =>
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root, EDIT_SCRIPT);
     await scriptSession(root, [{ text: "嗯" }], sessionId);
@@ -262,11 +259,13 @@ test("trace 命令：会话不存在时报错并列出已有会话；双写之�
         return true;
       }
     );
-    const legacy = newSessionId();
-    writeFileSync(join(root, ".pigeon", "sessions", `${legacy}.jsonl`), "");
+    const legacy = writeLegacySessionFile(join(root, ".pigeon", "sessions"));
     assert.throws(
       () => runTraceCommand({ root, sessionId: legacy }),
-      new RegExp(`会话 ${legacy} 创建于新会话存储启用之前，只在旧账本里（用迁移前的只读旧版查看）`)
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message ===
+          `会话 ${legacy} 是旧格式会话（迁移之前创建），这里不读；旧格式会话请用只读的旧版代码 455d88d 读取`
     );
 
     const filtered = runTraceCommand({ root, sessionId, runId });

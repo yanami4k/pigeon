@@ -4,7 +4,6 @@
 // 旧断言里的期望行因此可以原样用来核对新读法。
 import type { RunId, SessionId } from "../state/ids.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
-import { markLegacyEventFile } from "./session-view-fixtures.ts";
 
 // 一个完整的工具调用 Run：user → assistant(thinking + text + toolCall) → toolResult → assistant → 正常收尾
 export async function seedToolRun(sessionsDir: string, sessionId: SessionId): Promise<RunId> {
@@ -19,6 +18,5 @@ export async function seedToolRun(sessionsDir: string, sessionId: SessionId): Pr
   session.assistant({ text: "改好了" });
   session.endRun();
   await session.close();
-  markLegacyEventFile(sessionsDir, sessionId);
   return runId;
 }

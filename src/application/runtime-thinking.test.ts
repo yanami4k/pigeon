@@ -1,11 +1,11 @@
-// 推理档位（M5.5 S5，决策 050）：缺省不请求推理；全局值冻结进快照、随 run.started 落盘并交给上游
+// 推理档位（M5.5 S5，决策 050）：缺省不请求推理；全局值冻结进快照、随 Run 开始条目落会话存储并交给上游
 // （streamFn 收到 reasoning）；worker 按角色配置覆盖全局值，无覆盖时继承。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -21,7 +21,7 @@ function recordingStreamFn(seen: unknown[]): StreamFn {
   };
 }
 
-test("推理档位：缺省 off 不请求推理；全局值冻结进快照、落 run.started 并交给上游", async () => {
+test("推理档位：缺省 off 不请求推理；全局值冻结进快照、落 Run 开始条目并交给上游", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-thinking-"));
   try {
     for (const [level, expectedReasoning] of [
@@ -46,13 +46,13 @@ test("推理档位：缺省 off 不请求推理；全局值冻结进快照、落
         assert.equal(bundle.adapter.snapshot().model.thinkingLevel, level);
       } finally {
         await bundle.adapter.dispose();
-        bundle.eventLog.close();
         await bundle.sessionStore.close();
       }
       assert.deepEqual(seen, [expectedReasoning]);
-      const started = materializeSession(join(root, ".pigeon", "sessions"), sessionId)
-        .runStarteds[0];
-      assert.equal(started?.payload.model.thinkingLevel, level ?? "off");
+      const started = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId)?.view.runs[0]
+        ?.start;
+      assert.ok(started !== undefined, "会话存储里应有 Run 开始条目");
+      assert.equal(started.model.thinkingLevel, level ?? "off");
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -88,8 +88,8 @@ test("推理档位：worker 按角色配置覆盖全局值，无覆盖的角色�
       await handle.run("看看");
       await handle.dispose();
       levels.push(
-        materializeSession(join(root, ".pigeon", "sessions"), sessionId).runStarteds[0]?.payload
-          .model.thinkingLevel
+        loadStoreSession(join(root, ".pigeon", "sessions"), sessionId)?.view.runs[0]?.start.model
+          .thinkingLevel
       );
     }
     assert.deepEqual(levels, ["low", "high"]);

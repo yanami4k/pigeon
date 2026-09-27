@@ -1,3 +1,4 @@
+// 只适用于旧格式：本脚本读写旧账本或会话树写穿（persistence/event-log.ts 等模块已在账本重构第四段删除），只能在只读旧版代码 455d88d 上运行；新代码上不再维护。
 // 剧本 M5.7 everything（决策 041 / 043 / 052 / 053 / 055）：真实 @modelcontextprotocol/server-everything（npx 经 048 启动器）
 // + 真实装配根 + 剧本模型（fake streamFn，不接外部模型）。自动核对：
 //   启动计划走 cmd.exe 启动器；注解与配置冲突落 run.started，冲突工具走审批；server 的无参 prompt 进 Skill Catalog、

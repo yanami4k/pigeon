@@ -2,8 +2,7 @@
 // 小写蛇形（注册表工具名形态，provider 工具名长度上限 64）；配置档位取配置、未列出落 defaultTier，再按注解冲突的
 // 更严规则得出实际档位并以它注册（决策 052）；inputSchema 原样透传。
 // 执行转发给 server 并把内容块映射为模型可见内容：文本、图片原样，其余类型给文字占位。
-// server 给出返回即暂存 mcp 证据（决策 053，治理层 settle 时取走落 receipt）；server 返回 isError = 工具域错误；
-// server 不可用 = 环境错误（client 抛出，原样上抛）。
+// server 返回 isError = 工具域错误；server 不可用 = 环境错误（client 抛出，原样上抛）。
 import type { TSchema } from "typebox";
 import {
   type McpPathConfinement,
@@ -11,9 +10,7 @@ import {
   type McpToolTier,
   resolveMcpToolTier,
 } from "../state/mcp-config.ts";
-import { buildMcpEvidence } from "../state/mcp-evidence.ts";
 import { effectiveMcpTier, type McpDeclaredHint } from "../state/mcp-toolset.ts";
-import type { ReceiptMcp } from "../state/receipt.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import type { McpToolDescriptor } from "./client.ts";
@@ -50,7 +47,7 @@ export interface McpBridgedTool {
   // server 侧工具名
   mcpName: string;
   registration: ToolRegistration;
-  tool: PigeonAgentTool<TSchema, McpToolCallDetails> & McpEvidenceTool;
+  tool: PigeonAgentTool<TSchema, McpToolCallDetails>;
   // server 注解里的行为线索（title 不是线索，不收）
   declaredHint?: McpDeclaredHint;
   configuredTier: McpToolTier;
@@ -59,11 +56,6 @@ export interface McpBridgedTool {
   conflict: boolean;
   // 是否在配置里逐工具列出
   configured: boolean;
-}
-
-// 证据暂存能力：执行时按调用暂存，治理层 settle 时取一次即删
-export interface McpEvidenceTool {
-  takeMcpEvidence(toolCallId: string): ReceiptMcp | undefined;
 }
 
 // server 返回 isError：工具自身的域错误
@@ -138,45 +130,19 @@ function createBridgedTool(
   source: McpToolSource,
   descriptor: McpToolDescriptor,
   name: string,
-  description: string,
-  // read 档不落 receipt，不暂存证据（免得无人取走）
-  recordEvidence: boolean
-): PigeonAgentTool<TSchema, McpToolCallDetails> & McpEvidenceTool {
-  const evidences = new Map<string, ReceiptMcp>();
+  description: string
+): PigeonAgentTool<TSchema, McpToolCallDetails> {
   return {
     name,
     label: name,
     description,
     parameters: descriptor.inputSchema as unknown as TSchema,
     executionMode: "sequential",
-    takeMcpEvidence(toolCallId) {
-      const evidence = evidences.get(toolCallId);
-      evidences.delete(toolCallId);
-      return evidence;
-    },
-    async execute(toolCallId, params, signal): Promise<PigeonToolResult<McpToolCallDetails>> {
+    async execute(_toolCallId, params, signal): Promise<PigeonToolResult<McpToolCallDetails>> {
       const args = params ?? {};
       const raw = record(await source.callTool(descriptor.name, args, signal));
       if (raw === undefined || !Array.isArray(raw.content)) {
         throw new Error(`MCP 工具 ${server.name}/${descriptor.name} 返回形状不合法`);
-      }
-      // server 给出返回即留证（含 isError 结果：调用已到达 server，副作用可能已发生）
-      if (recordEvidence) {
-        evidences.set(
-          toolCallId,
-          buildMcpEvidence({
-            server: server.name,
-            tool: descriptor.name,
-            args,
-            result: {
-              content: raw.content,
-              ...(raw.structuredContent !== undefined
-                ? { structuredContent: raw.structuredContent }
-                : {}),
-              ...(raw.isError === true ? { isError: true } : {}),
-            },
-          })
-        );
       }
       const content = raw.content.map(mapContentBlock);
       if (raw.isError === true) {
@@ -248,14 +214,7 @@ export function bridgeMcpServer(input: { server: McpServerConfig; source: McpToo
         pathConfinement,
         executionMode: "sequential",
       },
-      tool: createBridgedTool(
-        server,
-        source,
-        descriptor,
-        name,
-        description,
-        effectiveTier !== "read"
-      ),
+      tool: createBridgedTool(server, source, descriptor, name, description),
       ...(declaredHint !== undefined ? { declaredHint } : {}),
       configuredTier: resolution.tier,
       effectiveTier,

@@ -1,6 +1,6 @@
 // 主会话的分叉接线（M7 S6，决策 077 / 079）：
 // - --retry-on-fail 解析、按会话冻结；主会话一次尝试验证为失败后在后台从任务开始处分叉重试；
-// - 分叉读写新会话存储（账本重构 177 / 180）：来源会话文件记分叉条目，分支会话文件由 pi 的 fork 复制分叉点之前的历史，
+// - 分叉读写会话存储（账本重构 177 / 180）：来源会话文件记分叉条目，分支会话文件由 pi 的 fork 复制分叉点之前的历史，
 //   分支运行面在它上面续写；来源会话此后的 Run 照常写进自己的文件（派生会话树的写穿随之去掉）；
 // - 手动分叉命令 /fork [--at <条目号> | --at <Run 号前缀>:<条目号>] ["新输入"]：缺省分叉点是最近一次 Run 的任务开始处。
 import assert from "node:assert/strict";
@@ -9,7 +9,6 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -104,10 +103,13 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试；分支文件�
       await opened.bundle.adapter.run("把 a.txt 改成 new");
       await opened.verification?.idle();
       await opened.retry?.idle();
-      const afterRetry = materializeSession(join(dir, ".pigeon", "sessions"), sessionId);
-      branchId = afterRetry.sessionForkeds[0]?.branchSessionId;
+      await opened.bundle.sessionStore.flush();
+      const afterRetry = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+      assert.ok(afterRetry !== undefined);
+      assert.equal(afterRetry.view.forks.length, 1, "失败后分叉重试一次");
+      branchId = afterRetry.view.forks[0]?.data.branchSessionId;
       assert.ok(branchId !== undefined, "失败后分叉重试");
-      assert.equal(afterRetry.sessionForkeds[0]?.trigger, "retry-on-fail");
+      assert.equal(afterRetry.view.forks[0]?.data.trigger, "retry-on-fail");
       // 分叉后来源会话继续：新 Run 照常写进来源会话自己的文件
       await opened.bundle.adapter.run("再问一个问题");
     } finally {
@@ -187,9 +189,20 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const session = materializeSession(join(dir, ".pigeon", "sessions"), sessionId);
-    assert.equal(session.sessionForkeds[0]?.trigger, "manual");
-    assert.equal(session.sessionForkeds[0]?.forkPoint.runId, session.runStarteds[1]?.runId);
+    const after = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+    assert.ok(after !== undefined);
+    assert.equal(after.view.forks.length, 1);
+    assert.equal(after.view.forks[0]?.data.trigger, "manual");
+    assert.deepEqual(after.view.forks[0]?.data.forkPoint, {
+      runId: after.view.runs[1]?.runId,
+      runSeq: 1,
+    });
+    // 分支会话文件已建，文件头指向来源会话
+    const branch = loadStoreSession(
+      join(dir, ".pigeon", "sessions"),
+      after.view.forks[0]?.data.branchSessionId ?? ""
+    );
+    assert.equal(branch?.file.header.parentSessionId, sessionId);
   } finally {
     cleanup();
   }

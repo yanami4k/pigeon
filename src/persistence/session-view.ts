@@ -36,7 +36,7 @@ export function loadStoreSessionFile(path: string): LoadedStoreSession | undefin
   return { path, file, main, view };
 }
 
-// 按会话号读；新存储里没有这个会话（双写之前的旧会话或不存在）时返回 undefined
+// 按会话号读；会话存储里没有这个会话时返回 undefined
 export function loadStoreSession(
   sessionsRoot: string,
   sessionId: SessionId | string

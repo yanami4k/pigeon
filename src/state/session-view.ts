@@ -1,14 +1,14 @@
 // 会话原生视图（决策 180）：把新会话存储里一个会话文件的主分支条目投影成读者直接用的结构——按 Run 切段的消息
 // （带 Run 内序号）、七种自定义条目、worker 父子关系、Run 级与工具级失败分类。搜索与各显示读者（会话列表、trace、replay、
-// 历史）共用这一份，不合成旧账本形状的视图。纯函数、无 IO：输入按结构读取（persistence/session-reader.ts 的读取结果
+// 历史）共用这一份。纯函数、无 IO：输入按结构读取（persistence/session-reader.ts 的读取结果
 // 满足它），state 不依赖 persistence。
 // 切段口径：Run 开始条目之后、下一个 Run 开始之前的消息属于它，Run 内序号从 1 起、每条消息占一个（同 messageEntryAt）；
-// 自定义条目按数据里的 runId 归属 Run（同旧账本按记录的 runId 归属），不带 runId 的是会话级条目。
+// 自定义条目按数据里的 runId 归属 Run，不带 runId 的是会话级条目。
 // 分支会话文件开头是 pi 的 fork 从来源会话复制来的历史（条目号与时间戳原样），属于来源会话，不算本会话的内容：
 // 复制段止于文件头记下的分叉点（Run 开始之后按消息条数数到第 runSeq 条），投影从其后开始。
-import { createHash } from "node:crypto";
 import { Value } from "typebox/value";
 import { classifyRunOutcome, type FailureClass } from "./classification.ts";
+import { canonicalJson, sha256Hex } from "./hashing.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import {
   type CheckpointData,
@@ -167,26 +167,6 @@ export interface SessionView {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function sha256Hex(data: string | Uint8Array): string {
-  return createHash("sha256").update(data).digest("hex");
-}
-
-// 规范序列化（键按码点序、省略 undefined）：不认识的块以它的哈希标识，与字段顺序无关
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value) ?? "null";
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => (item === undefined ? "null" : canonicalJson(item))).join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  const fields = Object.keys(record)
-    .filter((key) => record[key] !== undefined)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
-  return `{${fields.join(",")}}`;
 }
 
 function toBlock(block: unknown): ViewBlock {
@@ -373,7 +353,7 @@ function copiedPrefixLength(
       }
     }
   }
-  // 来源会话在新存储里没有文件（双写之前的旧会话）时分支文件不含复制段
+  // 文件头记的分叉点在文件里数不到（复制段与文件头不符）时按不含复制段处理
   return 0;
 }
 
@@ -535,7 +515,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
 // 会话摘要（会话列表与检索过滤共用）：Run 数、用过的工具名、失败分类（Run 级在前、工具级在后，按出现序去重）、
 // 用量合计与父子关系，全部从本会话自己的条目现算（分支会话的复制段不计）。旧摘要的"待对账"随写操作回执停写（184）
 // 不再有来源
-export type SessionViewSummary = Omit<SessionSummary, "pendingReconcile">;
+export type SessionViewSummary = SessionSummary;
 
 export function summarizeSessionView(view: SessionView): SessionViewSummary {
   const toolNames: string[] = [];

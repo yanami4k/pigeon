@@ -1,16 +1,18 @@
 // 快照挂到运行面（M7 S5，决策 078）：写档或命令档工具提议时记基线、落定后文件确实改变才生成快照，
-// 落 workspace.checkpoint 观察记录；记录的条目号就是该工具结果消息的条目号（与内容文件里的工具调用号对得上），
-// 快照与条目号的对应关系因此可以只从账本查到。只读工具与没有改变文件的调用不打快照；非 git 工作区不打、不报错。
+// 在会话存储里写代码快照条目：条目紧跟在发起调用的助手消息之后、该调用的工具结果消息之前，以 toolCallId 对应，
+// 快照与消息的对应关系因此可以只从会话文件查到。只读工具与没有改变文件的调用不打快照；非 git 工作区不打、不报错。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession, readMessageContentFileDetailed } from "../persistence/event-log.ts";
+import type { StoredEntry } from "../persistence/session-reader.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
-import { checkpointAtOrBefore } from "../state/materialize.ts";
+import { type CheckpointData, SessionEntryType } from "../state/session-entries.ts";
+import { storeCheckpointBefore } from "../state/session-judge.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
@@ -28,6 +30,19 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
+function isCheckpointEntry(entry: StoredEntry | undefined): boolean {
+  return entry?.type === "custom" && entry.customType === SessionEntryType.Checkpoint;
+}
+
+// 条目里的消息（非消息条目返回 undefined）
+function messageOf(
+  entry: StoredEntry | undefined
+): { role: string; content?: unknown; toolCallId?: string; toolName?: string } | undefined {
+  return entry?.type === "message"
+    ? (entry.message as { role: string; content?: unknown; toolCallId?: string })
+    : undefined;
+}
+
 const SCRIPT = [
   { text: "先读", toolCalls: [{ name: "read_file", args: { path: "a.txt" } }] },
   {
@@ -39,7 +54,7 @@ const SCRIPT = [
   { text: "改好了" },
 ];
 
-test("写工具改变文件后生成快照，记录的条目号即工具结果消息的条目号；只读工具不打快照", async () => {
+test("写工具改变文件后生成快照，快照条目夹在发起调用的助手消息与其工具结果消息之间；只读工具不打快照", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-cp-runtime-")));
   const home = mkdtempSync(join(tmpdir(), "pigeon-cp-home-"));
   try {
@@ -65,27 +80,50 @@ test("写工具改变文件后生成快照，记录的条目号即工具结果�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const session = materializeSession(sessionsDir, sessionId);
-    assert.equal(session.checkpoints.length, 1, "只有改变文件的写工具打快照");
-    const checkpoint = session.checkpoints[0];
-    assert.ok(checkpoint !== undefined);
-    const editCall = session.runtimeEvents.find(
-      (event) => event.kind === "tool.proposed" && event.payload.toolName === "edit_file"
+    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    assert.ok(loaded !== undefined);
+    const entries = loaded.main;
+    const indexes = entries.flatMap((entry, index) => (isCheckpointEntry(entry) ? [index] : []));
+    assert.equal(indexes.length, 1, "只有改变文件的写工具打快照");
+    const at = indexes[0] ?? -1;
+    const checkpoint = entries[at]?.data as CheckpointData;
+    // 前一条是发起 edit_file 调用的助手消息
+    const assistant = messageOf(entries[at - 1]);
+    assert.ok(assistant !== undefined && assistant.role === "assistant");
+    const editCall = (
+      assistant.content as Array<{ type: string; id?: string; name?: string }>
+    ).filter((block) => block.type === "toolCall");
+    assert.deepEqual(
+      editCall.map((block) => [block.name, block.id]),
+      [["edit_file", checkpoint.toolCallId]]
+    );
+    // 后一条是该调用的工具结果消息
+    const toolResult = messageOf(entries[at + 1]);
+    assert.equal(toolResult?.role, "toolResult");
+    assert.equal(toolResult?.toolCallId, checkpoint.toolCallId, "快照与工具结果消息对得上");
+    assert.equal(git(root, ["show", `${checkpoint.commit}:a.txt`]), "new\n");
+    assert.equal(git(root, ["show", `${checkpoint.baseCommit}:a.txt`]), "old\n");
+    // 视图里快照归到该工具结果消息（所属 Run 里的第几条消息），按分叉点取快照的口径取到它
+    const run = loaded.view.runs[0];
+    assert.ok(run !== undefined);
+    assert.equal(run.runId, checkpoint.runId);
+    const resultSeq =
+      run.messages.findIndex((ref) => ref.message.toolCallId === checkpoint.toolCallId) + 1;
+    assert.ok(resultSeq > 0);
+    assert.deepEqual(
+      run.checkpoints.map((entry) => entry.afterRunSeq),
+      [resultSeq]
     );
     assert.equal(
-      checkpoint.payload.toolCallId,
-      editCall?.kind === "tool.proposed" ? editCall.payload.toolCallId : ""
+      storeCheckpointBefore(loaded.view, { runId: run.runId, runSeq: resultSeq })?.commit,
+      checkpoint.commit
     );
-    const toolResult = readMessageContentFileDetailed(
-      join(sessionsDir, `${sessionId}.messages.jsonl`)
-    ).records.find((record) => record.toolCallId === checkpoint.payload.toolCallId);
-    assert.equal(checkpoint.payload.afterRunSeq, toolResult?.runSeq, "条目号对得上工具结果消息");
-    assert.equal(git(root, ["show", `${checkpoint.payload.commit}:a.txt`]), "new\n");
-    assert.equal(git(root, ["show", `${checkpoint.payload.baseCommit}:a.txt`]), "old\n");
-    assert.equal(
-      checkpointAtOrBefore(session, checkpoint.runId, checkpoint.payload.afterRunSeq)?.commit,
-      checkpoint.payload.commit
+    // 工具结果之前的分叉点取不到这个快照，只能取到改前基线
+    assert.deepEqual(
+      storeCheckpointBefore(loaded.view, { runId: run.runId, runSeq: resultSeq - 1 }),
+      {
+        commit: checkpoint.baseCommit,
+      }
     );
     assert.equal(git(root, ["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "main");
   } finally {
@@ -114,8 +152,10 @@ test("非 git 工作区：不打快照，运行照常", async () => {
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const session = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
-    assert.equal(session.checkpoints.length, 0);
+    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    assert.ok(loaded !== undefined);
+    assert.equal(loaded.view.runs.length, 1);
+    assert.equal(loaded.main.filter((entry) => isCheckpointEntry(entry)).length, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

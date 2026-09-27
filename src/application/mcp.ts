@@ -1,7 +1,7 @@
 // MCP 会话装配（M5.7 S3，决策 041 / 051 / 052 / 054）：application 负责装配，src/mcp 只管协议与映射。
 // 会话开始时读两份配置（畸形响亮失败）、为每个 server 建连接并并发启动（单个 server 起不来不挡会话，
 // 其工具不暴露并记问题）、把工具映射进注册表形态；roots 广告为本会话的工作区根（worker 即其工作树）。
-// summary 在每个 Run 开始时取一次，写进 run.started：工具集的注解 / 配置 / 实际档位与冲突，server 当前状态。
+// summary 在每个 Run 开始时取一次，写进 Run 开始条目：工具集的注解 / 配置 / 实际档位与冲突，server 当前状态。
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { McpServerConnection, renderPromptText } from "../mcp/client.ts";
 import { bridgeMcpServer, type McpBridgedTool, mcpToolName } from "../mcp/registry-bridge.ts";
@@ -51,7 +51,7 @@ export interface McpSession {
   close(): Promise<void>;
 }
 
-// 启动提示（决策 052：冲突除记进 run.started 外，启动时进程内同时警告）：先列启动问题，再逐项列注解与配置冲突；
+// 启动提示（决策 052：冲突除记进 Run 开始条目 外，启动时进程内同时警告）：先列启动问题，再逐项列注解与配置冲突；
 // Actor 只负责打出去
 export function describeMcpStartup(session: Pick<McpSession, "problems" | "summary">): string[] {
   const conflicts = session.summary().mcpTools.filter((tool) => tool.conflict === true);

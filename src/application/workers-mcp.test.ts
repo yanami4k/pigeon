@@ -1,6 +1,6 @@
 // worker 的 MCP 会话（M5.7 S4，决策 054）：worker 运行面按其工作树启动自己的 MCP server——roots 广告为 worker
-// 工作树路径；装配是异步的，订阅先于就绪也不丢事件；MCP 写工具经汇聚审批、落 receipt；worker 会话头记工作树；
-// 释放时关闭 server 连接。
+// 工作树路径；装配是异步的，订阅先于就绪也不丢事件；MCP 写工具经汇聚审批放行并执行（工具结果上挂审批闸标记）；
+// worker 会话文件头记工作树；释放时关闭 server 连接。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,10 +8,11 @@ import { basename, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { createFixtureServer, type FixtureServer } from "../mcp/fixtures.ts";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { McpConfig } from "../state/mcp-config.ts";
+import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { createWorkerRuntimeFactory } from "./workers.ts";
 
@@ -27,7 +28,7 @@ const CONFIG: McpConfig = {
   ],
 };
 
-test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；订阅先于就绪不丢事件；写工具经审批落 receipt；释放关闭连接", async () => {
+test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；订阅先于就绪不丢事件；写工具经审批放行并执行；释放关闭连接", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-workers-mcp-"));
   try {
     const root = join(base, "repo");
@@ -105,15 +106,29 @@ test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；�
     assert.equal(handle.summary(), "完成");
     await handle.dispose();
     assert.equal(sessions[0]?.connections[0]?.state, "closed");
-    const worker = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
-    // 写档 MCP 工具经审批放行并执行：worker 会话里落了一条回执
-    assert.equal(worker.receipts.length, 1);
-    const headerWorkspace = worker.sessionHeader?.workspace;
+    const worker = loadSessionView(join(root, ".pigeon", "sessions"), sessionId);
+    assert.ok(worker !== undefined);
+    // 写档 MCP 工具经审批放行并执行：worker 会话里唯一的调用有结果、未出错，审批闸标记为人工批准
+    const calls = worker.runs.flatMap((run) => run.toolCalls);
+    assert.deepEqual(
+      calls.map((call) => [call.toolName, call.result?.isError]),
+      [["mcp__fx__note", false]]
+    );
+    const noteResult = calls[0]?.result;
+    assert.ok(noteResult !== undefined);
+    assert.deepEqual(toolResultMark(noteResult.raw as unknown as StoreMessage)?.gate, {
+      outcome: "approved",
+      approvedBy: "human",
+    });
+    assert.ok(
+      JSON.stringify(noteResult.blocks).includes("noted"),
+      JSON.stringify(noteResult.blocks)
+    );
+    const headerWorkspace = worker.worker?.workspace;
     assert.equal(
       headerWorkspace?.kind === "git-worktree" ? headerWorkspace.path : undefined,
       workspacePath
     );
-    assert.equal(worker.receipts[0]?.mcp?.tool, "note");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

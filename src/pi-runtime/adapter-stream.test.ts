@@ -1,18 +1,15 @@
 // M2 S1（决策 024）：subscribeStream 只读流式观察口测试。
 // 纪律：上游 message_update 携带 text_delta / thinking_delta 时把增量连同 runId 与 kind
-// 转发给订阅者（045 修订：thinking 一并转发）；增量不进 Event Log、不进 events()、不锚身份
-//（013：流式载荷是上游浅拷贝 partial）——正文持久化走 message_end 的内容记录（037）；
+// 转发给订阅者（045 修订：thinking 一并转发）；增量不进会话存储、不进 events()、不锚身份
+//（013：流式载荷是上游浅拷贝 partial）——正文持久化只走 message_end 的完整消息；
 // listener 自包 try/catch 进 listenerErrors，绝不毒化 Run。
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { createToolGovernance } from "../application/governance.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
-import { newSessionId } from "../state/ids.ts";
+import { SessionEntryType } from "../state/session-entries.ts";
 import { PiRuntimeAdapter, type StreamTextDelta } from "./adapter.ts";
 import { createFakeStreamFn } from "./fixtures.ts";
+import type { AgentMessage } from "./index.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 
 function createSnapshot(): InjectionSnapshot {
@@ -93,42 +90,41 @@ test("listener 抛异常进 listenerErrors，Run 与其他 listener 不受影响
   await adapter.dispose();
 });
 
-test("流式增量不进 Event Log：会话事件文件零文本记录（正文只经 message_end 进旁置内容文件）", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-stream-log-"));
-  try {
-    const text = "绝不落盘的流式文本甲乙丙";
-    const streamFn = createFakeStreamFn({ replies: [{ text, chunkSize: 2 }] });
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const sessionId = newSessionId();
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-    const adapter = new PiRuntimeAdapter({
-      snapshot: createSnapshot(),
-      streamFn,
-      sessionId,
-      eventLog,
-      governance: createToolGovernance(),
-    });
-    const deltas: string[] = [];
-    adapter.subscribeStream((delta) => deltas.push(delta.delta));
+test("流式增量不进会话存储：写入面只收到 message_end 的完整消息，没有逐段增量", async () => {
+  const text = "绝不逐段落盘的流式文本甲乙丙";
+  const streamFn = createFakeStreamFn({ replies: [{ text, chunkSize: 2 }] });
+  const messages: AgentMessage[] = [];
+  const entries: string[] = [];
+  const adapter = new PiRuntimeAdapter({
+    snapshot: createSnapshot(),
+    streamFn,
+    governance: createToolGovernance(),
+    sessionStore: {
+      appendMessage: (message) => messages.push(message),
+      append: (entry) => entries.push(String(entry.customType)),
+    },
+  });
+  const deltas: string[] = [];
+  adapter.subscribeStream((delta) => deltas.push(delta.delta));
 
-    const result = await adapter.run("你好");
-    eventLog.close();
+  const result = await adapter.run("你好");
 
-    assert.equal(result.status, "completed");
-    assert.equal(deltas.join(""), text, "观察口照常收到增量");
-    // 事件日志确实在工作（entry/事件族已落盘），但任何记录都不含模型文本
-    const raw = readFileSync(JsonlEventLog.filePathFor(sessionsDir, sessionId), "utf8");
-    assert.ok(raw.length > 0, "事件日志应有记录（entry/turn/run 族）");
-    assert.ok(!raw.includes("流式文本"), `事件日志不得含模型文本\n${raw}`);
-    assert.ok(!raw.includes("甲乙丙"), `事件日志不得含流式增量片段\n${raw}`);
-    // 冷物化也读不出文本：entry 记录只有 runSeq 与 role
-    const materialized = materializeSession(sessionsDir, sessionId);
-    assert.ok(!JSON.stringify(materialized).includes("甲乙丙"));
+  assert.equal(result.status, "completed");
+  assert.ok(deltas.length > 1, "观察口照常收到多段增量");
+  assert.equal(deltas.join(""), text, "观察口照常收到增量");
+  // 写入面：恰两条消息（用户与助手），助手消息正文是完整文本；自定义条目只有 Run 开始与收尾
+  assert.deepEqual(
+    messages.map((message) => message.role),
+    ["user", "assistant"]
+  );
+  const assistant = messages[1] as { content: Array<{ type: string; text?: string }> };
+  assert.deepEqual(
+    assistant.content.filter((block) => block.type === "text").map((block) => block.text),
+    [text]
+  );
+  assert.deepEqual(entries, [SessionEntryType.RunStart, SessionEntryType.RunEnd]);
 
-    await adapter.dispose();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+  await adapter.dispose();
 });
 
 test("events() 不含流式增量：序列仍是归一化五族，载荷无模型文本", async () => {

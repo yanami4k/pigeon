@@ -10,8 +10,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { sha256Hex } from "../state/hashing.ts";
 import type { MemoryManifestEntry } from "../state/injection-manifest.ts";
-import { sha256Hex } from "../state/message-content.ts";
 
 // 默认字符预算：约 2000 token
 export const DEFAULT_MEMORY_BUDGET_CHARS = 8000;

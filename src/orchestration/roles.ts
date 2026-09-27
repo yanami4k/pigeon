@@ -5,8 +5,8 @@
 // 账本里的角色取值（WorkerRoleSchema）保留，旧会话记录照常读取。
 import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
-import type { DelegatedPolicy, WorkerRole } from "../state/event-log.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
+import type { DelegatedPolicy, WorkerRole } from "../state/session-payloads.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 
 export class WorkerPolicyError extends Error {}
@@ -28,7 +28,7 @@ export const ROLE_THINKING_LEVELS: Readonly<Partial<Record<WorkerRole, ThinkingL
 
 // 角色表的模型接入覆盖列（M6，决策 064 子裁决 ③）：在场即覆盖主会话的模型接入与标识，缺省继承。
 // streamFnSpec 是插件模块说明符，由装配层预先加载成 StreamFn（工厂本身同步，不在此处做 IO）；
-// provider 与 modelId 只是身份标签，进注入快照与 run.started。现有角色都留空
+// provider 与 modelId 只是身份标签，进注入快照与 Run 开始条目。现有角色都留空
 export interface RoleModelOverride {
   streamFnSpec?: string;
   provider?: string;

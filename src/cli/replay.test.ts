@@ -17,7 +17,6 @@ import {
   spawnFixtureWorker,
   tearTail,
 } from "../application/session-store-fixtures.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
@@ -60,11 +59,10 @@ function editCall(content: string): EditFileParams {
   };
 }
 
-// 经真实 Adapter 跑一次（旧账本与新存储双写）：读、改（批准）、再改（人工拒绝）、收尾
+// 经真实 Adapter 跑一次（写进会话存储）：读、改（批准）、再改（人工拒绝）、收尾
 async function scriptSession(root: string): Promise<{ sessionId: SessionId; runId: RunId }> {
   const sessionsDir = join(root, ".pigeon", "sessions");
   const sessionId = newSessionId();
-  const eventLog = new JsonlEventLog(sessionsDir, sessionId);
   const store = openSessionStoreWriter({
     sessionsRoot: sessionsDir,
     sessionId,
@@ -111,12 +109,10 @@ async function scriptSession(root: string): Promise<{ sessionId: SessionId; runI
     }),
     tools: [createReadFileTool(root), createEditFileTool(root)],
     sessionId,
-    eventLog,
     sessionStore: store,
   });
   const result = await adapter.run("改文件");
   await adapter.dispose();
-  eventLog.close();
   await store.close();
   return { sessionId, runId: result.runId };
 }
@@ -129,7 +125,7 @@ function withRoot(run: (root: string) => Promise<void>): Promise<void> {
 
 const TIMELINE = /^\d{2}:\d{2}:\d{2}\.\d{3} /;
 
-test("replay 报告（真实双写运行）：运行头终态与分类，时间线按会话文件顺序，每个条目恰好一行", () =>
+test("replay 报告（真实运行）：运行头终态与分类，时间线按会话文件顺序，每个条目恰好一行", () =>
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
     const output = runReplayCommand({ root, runId, sessionId });

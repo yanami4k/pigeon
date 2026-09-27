@@ -3,11 +3,11 @@
 // - 缺省分叉点：最近一次 Run 的任务开始处（第 1 条）；只给条目号时指最近一次 Run；Run 号可用唯一前缀（trace 里显示的短号）；
 // - 分叉点末条是用户消息或工具结果时不给新输入直接续跑；末条是助手消息时必须给新输入；
 // - 分支在独立工作树里续跑，跑完回报分支会话、工作树、终态与标签。
-// 分叉点从新会话存储定位（账本重构第二段）；本会话在新存储里没有文件时明确报错。
+// 分叉点从会话存储定位；本会话在会话存储里没有文件时明确报错。
 import { loadStoreSession } from "../persistence/session-view.ts";
-import type { ForkPoint } from "../state/event-log.ts";
 import type { RunId } from "../state/ids.ts";
 import { type StoreSessionView, storeMessageAt } from "../state/session-judge.ts";
+import type { ForkPoint } from "../state/session-payloads.ts";
 import { ForkError, type ForkRunOptions, runForkBranch } from "./fork.ts";
 import type { OpenedSessionRuntime } from "./session-runtime.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -88,19 +88,16 @@ export async function runForkCommand(input: {
   if (input.opened.bundle.adapter.isRunning()) {
     throw new ForkCommandError("当前 Run 还在进行中，收尾后再分叉");
   }
-  // 本会话的写者先落盘，再从新存储读
+  // 本会话的写者先落盘，再从会话存储读
   await input.opened.bundle.sessionStore.flush();
   const loaded = loadStoreSession(sessionsDirOf(input.governanceRoot), sessionId);
   if (loaded === undefined) {
-    throw new ForkError(
-      `本会话 ${sessionId} 在新会话存储里没有文件（创建于新存储启用之前，或新存储打开失败），不能分叉`
-    );
+    throw new ForkError(`本会话 ${sessionId} 在会话存储里没有文件（会话存储打开失败），不能分叉`);
   }
   const forkPoint = resolveForkPoint(loaded.view, at ?? {});
   const result = await runForkBranch({
     governanceRoot: input.governanceRoot,
     sourceSessionId: sessionId,
-    sourceLog: input.opened.bundle.eventLog,
     sourceStore: input.opened.bundle.sessionStore,
     forkPoint,
     trigger: "manual",

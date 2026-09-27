@@ -1,6 +1,6 @@
 // run_command 端到端（M5.5 S5，决策 048）：真实装配根 + CLI 审批问答版。
 // prompt 模式下 exec 每次都问，面板显示完整命令；[a] 创建精确命令放权，同一条命令再来免审
-// （human:grant），参数不同重新问；receipt 带 exec 证据。tester 角色只能跑 commands.json 为它登记的命令。
+// （human:grant），参数不同重新问；执行证据随工具结果的 details 记进会话存储。tester 角色只能跑 commands.json 为它登记的命令。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -8,10 +8,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
+import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
+import type { ExecEvidence } from "../tools/run-command.ts";
 import { buildRuntime } from "./runtime.ts";
+
+// 取值并断言在场（替代非空断言）
+function required<T>(value: T | undefined): T {
+  assert.ok(value !== undefined, "值应在场");
+  return value;
+}
 
 const NODE = `"${process.execPath}"`;
 const COMMAND_A = `${NODE} -e "process.stdout.write('a')"`;
@@ -21,11 +29,26 @@ function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+// 读会话存储里本会话的全部工具结果消息（按顺序）与授权条目
+function storeFacts(root: string, sessionId: string) {
+  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(loaded !== undefined, "会话存储里应有本会话");
+  const toolResults = loaded.view.runs
+    .flatMap((run) => run.messages.map((ref) => ref.message))
+    .filter((message) => message.role === "toolResult");
+  return { toolResults, grants: loaded.view.grants.map((record) => record.data) };
+}
+
+// 成功执行的工具结果 details 就是执行证据（外加运行面标记）；出错路径不带证据
+function execOf(message: StoreMessage | undefined): Partial<ExecEvidence> {
+  return (message?.details ?? {}) as Partial<ExecEvidence>;
+}
+
 function runCommandCall(command: string, text: string) {
   return { text, toolCalls: [{ name: "run_command", args: { command } }] };
 }
 
-test("run_command：exec 每次都问且显示完整命令；[a] 精确命令放权后同一命令免审、改参数重新问；receipt 带 exec 证据", async () => {
+test("run_command：exec 每次都问且显示完整命令；[a] 精确命令放权后同一命令免审、改参数重新问；工具结果带执行证据", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-run-command-e2e-"));
   try {
     const sessionId = newSessionId();
@@ -71,7 +94,6 @@ test("run_command：exec 每次都问且显示完整命令；[a] 精确命令放
       executions = result.toolExecutions;
     } finally {
       await bundle.adapter.dispose();
-      bundle.eventLog.close();
       await bundle.sessionStore.close();
     }
 
@@ -88,19 +110,32 @@ test("run_command：exec 每次都问且显示完整命令；[a] 精确命令放
     assert.equal(executions[2]?.decision?.outcome, "rejected");
     assert.equal(executions[2]?.decision?.reason, "不跑 b");
 
-    const session = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
-    assert.equal(session.grantCreateds[0]?.command, COMMAND_A);
-    assert.equal(session.receipts.length, 3);
-    const [first, second, third] = session.receipts;
-    for (const receipt of [first, second]) {
-      assert.equal(receipt?.executed, true);
-      assert.equal(receipt?.exec?.command, COMMAND_A);
-      assert.equal(receipt?.exec?.exitCode, 0);
-      assert.equal(receipt?.exec?.output, "a");
-      assert.equal(receipt?.exec?.outputHash, sha256("a"));
+    const { toolResults, grants } = storeFacts(root, sessionId);
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0]?.event, "created");
+    assert.equal(grants[0]?.event === "created" ? grants[0].command : undefined, COMMAND_A);
+    assert.equal(toolResults.length, 3);
+    const [first, second, third] = toolResults;
+    // 工具结果上的审批闸标记与内存里的决定一致
+    assert.deepEqual(
+      toolResults.map((message) => toolResultMark(message)?.gate),
+      [
+        { outcome: "approved", approvedBy: "human" },
+        { outcome: "approved", approvedBy: "human:grant" },
+        { outcome: "rejected", approvedBy: "human" },
+      ]
+    );
+    for (const message of [first, second]) {
+      assert.equal(message?.isError, false);
+      const exec = execOf(message);
+      assert.equal(exec.command, COMMAND_A);
+      assert.equal(exec.exitCode, 0);
+      assert.equal(exec.output, "a");
+      assert.equal(exec.outputHash, sha256("a"));
     }
-    assert.equal(third?.executed, false);
-    assert.equal(third?.exec, undefined);
+    // 被拒的调用没有执行：工具结果是错误、不带执行证据
+    assert.equal(third?.isError, true);
+    assert.equal(execOf(third).command, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -150,7 +185,6 @@ test("tester 角色：只能运行 commands.json 为它登记的命令（短名�
       );
     } finally {
       await bundle.adapter.dispose();
-      bundle.eventLog.close();
       await bundle.sessionStore.close();
     }
     assert.equal(toolResults[0]?.isError, false);
@@ -158,11 +192,14 @@ test("tester 角色：只能运行 commands.json 为它登记的命令（短名�
     assert.equal(toolResults[1]?.isError, true);
     assert.ok(toolResults[1]?.text.includes("不在本角色允许清单内"), toolResults[1]?.text);
 
-    const receipts = materializeSession(join(root, ".pigeon", "sessions"), sessionId).receipts;
-    assert.equal(receipts[0]?.exec?.alias, "hello");
-    assert.equal(receipts[0]?.exec?.output, "a");
-    assert.equal(receipts[1]?.executed, false);
-    assert.equal(receipts[1]?.exec, undefined);
+    const stored = storeFacts(root, sessionId).toolResults;
+    assert.equal(stored.length, 2);
+    assert.equal(execOf(stored[0]).alias, "hello");
+    assert.equal(execOf(stored[0]).output, "a");
+    // 清单外的命令由工具自己拒绝（域错误），没有执行、不带执行证据
+    assert.equal(stored[1]?.isError, true);
+    assert.equal(toolResultMark(required(stored[1]))?.errorKind, "domain");
+    assert.equal(execOf(stored[1]).command, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

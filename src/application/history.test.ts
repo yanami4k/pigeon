@@ -1,6 +1,6 @@
 // M5 S2（决策 045）：历史投影——正文、thinking、工具行、轮次与 Run 标记按会话文件里的顺序交织；
 // toolResult 默认折叠；单条渲染上限；安全上限默认 500 行，超出折叠为一行提示。读新会话存储：
-// 分支会话只画自己的部分；出错的工具调用、上游合成失败与未收尾如实呈现；双写之前的旧会话给提示。
+// 分支会话只画自己的部分；出错的工具调用、上游合成失败与未收尾如实呈现；旧格式会话与不存在的会话各给一行提示。
 // TUI 的 /resume 与 cli 的 --with-content 共用本投影。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -91,7 +91,7 @@ test("出错的工具调用、上游合成失败消息与撞上限收尾：工�
     ]);
   }));
 
-test("分支会话只画自己的部分；未收尾的 Run 没有结束标记；双写之前的旧会话给提示", () =>
+test("分支会话只画自己的部分；未收尾的 Run 没有结束标记；旧格式会话与不存在的会话各给提示", () =>
   withRoot(async (root, sessionsDir) => {
     const source = createFixtureSession({ sessionsDir });
     const runId = source.startRun({ task: "来源任务" });
@@ -106,6 +106,12 @@ test("分支会话只画自己的部分；未收尾的 Run 没有结束标记；
     const legacy = newSessionId();
     writeFileSync(join(sessionsDir, `${legacy}.jsonl`), "");
     assert.deepEqual(pairs(loadSessionHistory(root, legacy)), [
-      ["notice", "[该会话创建于新会话存储启用之前，只在旧账本里，这里不显示历史]"],
+      [
+        "notice",
+        "[旧格式会话（迁移之前创建），这里不显示历史；旧格式会话请用只读的旧版代码 455d88d 读取]",
+      ],
+    ]);
+    assert.deepEqual(pairs(loadSessionHistory(root, newSessionId())), [
+      ["notice", "[该会话在会话存储里没有记录，这里不显示历史]"],
     ]);
   }));

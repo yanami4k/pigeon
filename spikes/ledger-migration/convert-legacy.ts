@@ -1,8 +1,9 @@
 // 旧账本 → 新会话存储的转换器（决策 180 / 187）：只用于对照验证，产品不读旧格式。
-// 新代码在账本重构收尾后不再读旧格式，所以本转换器只依赖旧代码里一直存在的模块（persistence/event-log.ts 的物化与正文读取、
-// pi-runtime/session-tree.ts 的消息投影）与上游 JsonlSessionRepo，放进只读旧版工作树（455d88d）里照样能跑。
-// 新条目的形状照 src/state/session-entries.ts 的 v1 schema 内联写出（旧版代码里没有那个文件）；两边须保持一致，
-// 在新代码上跑样例（sample.ts）时会按新 schema 校验转换结果。
+// 只能在旧版代码上运行：它依赖的 persistence/event-log.ts（物化与正文读取）与 pi-runtime/session-tree.ts（消息投影）
+// 已在账本重构第四段从新代码里删除；用法是把本文件拷进只读旧版工作树（455d88d）的同一路径后运行。
+// 新条目的形状照 src/state/session-entries.ts 的 v1 schema 内联写出（旧版代码里没有那个文件）；两边须保持一致。
+// 转换结果按新 schema 的校验与逐条比对由第一段的样例完成（结论见 docs/audits 下第一段审计）；样例需要在同一份代码上双写，
+// 停写之后已无法运行，随对照工具一并删除。
 //
 // 用法：node spikes/ledger-migration/convert-legacy.ts <旧会话目录> <会话号> <输出会话根> [--cwd <工作目录>]
 //   旧会话目录即 <治理根>/.pigeon/sessions；工作目录缺省为治理根（worker 与分支会话取其工作树）。

@@ -1,5 +1,5 @@
-// 会话打开锁（M5.5 S1，决策 040 多窗口小修）：一个会话文件同一时刻只有一个写入进程。
-// 锁文件 <sessionId>.lock 记持有进程 pid；先写临时文件再硬链接成锁文件，锁文件一出现就是完整内容
+// 会话打开锁（M5.5 S1，决策 040 多窗口小修；决策 181 起按会话文件加锁）：一个会话文件同一时刻只有一个写入进程。
+// 锁文件 <会话文件>.lock 与会话文件同目录，记持有进程 pid；先写临时文件再硬链接成锁文件，锁文件一出现就是完整内容
 // （不存在"读到半截锁"的窗口）。持有进程仍存活 → 拒绝打开；已死（崩溃残留）或内容畸形 → 接管。
 // 同进程内可重入：本进程按锁路径计数，最后一个写入实例关闭才删锁；进程内的重复恢复由 application
 // 层拒绝。已知局限：pid 被系统复用给无关进程时会误判为存活，报错信息给出锁文件路径供人工清理。
@@ -13,10 +13,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
-import type { SessionId } from "../state/ids.ts";
-
-export class EventLogLockedError extends Error {}
+export class SessionLockedError extends Error {}
 
 interface LockHolder {
   pid: number;
@@ -26,21 +23,11 @@ interface LockHolder {
 // 本进程已持有的锁：锁路径 → 打开中的写入实例数
 const heldLocks = new Map<string, number>();
 
-export function sessionLockPath(dir: string, sessionId: SessionId | string): string {
-  return join(dir, `${sessionId}.lock`);
-}
-
-// 取得会话锁，返回幂等的释放函数
-export function acquireSessionLock(dir: string, sessionId: SessionId): () => void {
-  return acquireLockAt(sessionLockPath(dir, sessionId));
-}
-
-// 新会话存储的锁（决策 181）：按会话文件加锁，锁文件与会话文件同目录、名为 <会话文件>.lock；
-// 语义同会话锁（存活进程持有即拒绝、崩溃残留接管、同进程可重入）
 export function sessionFileLockPath(filePath: string): string {
   return `${filePath}.lock`;
 }
 
+// 取得会话文件的锁，返回幂等的释放函数
 export function acquireSessionFileLock(filePath: string): () => void {
   return acquireLockAt(sessionFileLockPath(filePath));
 }
@@ -62,7 +49,7 @@ function acquireLockAt(lockPath: string): () => void {
       continue;
     }
     if (holder !== "malformed" && holder.pid !== process.pid && isProcessAlive(holder.pid)) {
-      throw new EventLogLockedError(
+      throw new SessionLockedError(
         `会话已被另一个进程打开（pid ${holder.pid}）：${lockPath}。` +
           "关闭那个窗口后再恢复；确认该进程已不存在时可删除锁文件"
       );
@@ -70,7 +57,7 @@ function acquireLockAt(lockPath: string): () => void {
     // 残留锁：持有进程已死、内容畸形，或 pid 与本进程相同但本进程并未持有（pid 复用）
     rmSync(lockPath, { force: true });
   }
-  throw new EventLogLockedError(`会话锁争用，多次重试仍未取得：${lockPath}`);
+  throw new SessionLockedError(`会话锁争用，多次重试仍未取得：${lockPath}`);
 }
 
 function releaser(lockPath: string): () => void {

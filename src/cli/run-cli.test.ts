@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HEADLESS_EXIT_CODES } from "../application/headless.ts";
-import { materializeSession } from "../persistence/event-log.ts";
-import { asSessionId } from "../state/ids.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
+import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -94,7 +94,7 @@ test("pigeon run：--yolo --json 跑通假 streamFn 任务，退出码 0，末�
   }
 });
 
-test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-closed 留 decision 记录", () => {
+test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-closed，工具结果上标记策略拒绝", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-run-cli-"));
   try {
     writeFileSync(join(root, "a.ts"), ORIGINAL);
@@ -108,13 +108,23 @@ test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-c
     // 因无审批通道而拒绝的写调用计入需审批次数（需要人来批的一次）
     assert.equal(result.approvalsNeeded, 1);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), ORIGINAL);
-    const session = materializeSession(
-      join(root, ".pigeon", "sessions"),
-      asSessionId(String(result.sessionId))
+    const session = loadSessionView(join(root, ".pigeon", "sessions"), String(result.sessionId));
+    assert.ok(session !== undefined);
+    const calls = session.runs.flatMap((run) => run.toolCalls);
+    assert.deepEqual(
+      calls.map((call) => [call.toolName, call.result?.isError]),
+      [["edit_file", true]]
     );
-    assert.equal(session.decisions[0]?.decision.approvedBy, "policy:deny");
-    // stdin 读到的任务原样进了 user 消息
-    assert.ok(session.entries.some((entry) => entry.role === "user"));
+    const denied = calls[0]?.result;
+    assert.ok(denied !== undefined);
+    assert.deepEqual(toolResultMark(denied.raw as unknown as StoreMessage)?.gate, {
+      outcome: "rejected",
+      approvedBy: "policy:deny",
+    });
+    // stdin 读到的任务进了 user 消息
+    const users = session.messages.filter((message) => message.role === "user");
+    assert.equal(users.length, 1);
+    assert.ok(JSON.stringify(users[0]?.blocks).includes("改 beta"), JSON.stringify(users[0]));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

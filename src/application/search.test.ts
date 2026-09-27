@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { runSearchCommand } from "./search.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
-import { markLegacyEventFile } from "./session-view-fixtures.ts";
+import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 function withRoot(run: (root: string, sessionsDir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-cmd-"));
@@ -24,7 +24,6 @@ test("/search 命中排版：条数、会话、run 内序号、角色与片段�
     session.toolTurn({ name: "read_file", result: "部署日志第一行" });
     session.endRun();
     const { sessionId } = await session.close();
-    markLegacyEventFile(sessionsDir, sessionId);
     const [user, , result] = loadSessionView(sessionsDir, sessionId)?.messages ?? [];
 
     const all = await runSearchCommand({ root, args: ["部署"] });
@@ -51,6 +50,25 @@ test("/search 命中排版：条数、会话、run 内序号、角色与片段�
     assert.match(limited, /已达 1 条上限/);
   }));
 
+test("/search 末尾提示会话根下未列出的旧格式会话条数；没有旧格式文件时不出现", () =>
+  withRoot(async (root, sessionsDir) => {
+    const session = createFixtureSession({ sessionsDir });
+    session.startRun({ task: "部署网关" });
+    await session.close();
+    assert.doesNotMatch(await runSearchCommand({ root, args: ["部署"] }), /旧格式会话/);
+
+    writeLegacySessionFile(sessionsDir);
+    writeLegacySessionFile(sessionsDir);
+    const output = await runSearchCommand({ root, args: ["部署"] });
+    assert.match(output, /命中 1 条/);
+    assert.ok(
+      output.endsWith(
+        "另有 2 个旧格式会话（迁移之前创建）未列出；旧格式会话请用只读的旧版代码 455d88d 读取\n"
+      ),
+      output
+    );
+  }));
+
 test("/search 无关键词给用法；未知角色响亮报错", () =>
   withRoot(async (root) => {
     assert.match(await runSearchCommand({ root, args: [] }), /用法：\/search/);
@@ -61,8 +79,7 @@ test("/search 片段净化：正文里的终端控制序列可见化，原始 ES
   withRoot(async (root, sessionsDir) => {
     const session = createFixtureSession({ sessionsDir });
     session.startRun({ task: "注入\x1b]52;c;ZXZpbA==\x07部署\x1b[2J" });
-    const { sessionId } = await session.close();
-    markLegacyEventFile(sessionsDir, sessionId);
+    await session.close();
     const output = await runSearchCommand({ root, args: ["部署"] });
     assert.ok(output.includes("␛]52"), output);
     assert.ok(!output.includes("\x1b"));

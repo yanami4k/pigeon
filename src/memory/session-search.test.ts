@@ -1,8 +1,8 @@
 // M5 S2（决策 038）：内容级 Session Search 扫描器测试——从新到旧逐会话读新会话存储（决策 181 / 185），
 // 多词与、大小写不敏感、元字符按字面、角色过滤、复用 SessionListFilters、上限即停；分支会话的复制段不重复命中、
-// 被跑批器作废移走旧格式文件的会话不检索、读正被写入的文件不改文件。
+// 会话根下的旧格式平铺文件不检索也不报错、读正被写入的文件不改文件。
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,7 +12,6 @@ import {
   forkFixture,
   tearTail,
 } from "../application/session-store-fixtures.ts";
-import { markLegacyEventFile } from "../application/session-view-fixtures.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { asSessionId, type SessionId } from "../state/ids.ts";
 import { sessionCreatedAt } from "../state/session-summary.ts";
@@ -26,7 +25,7 @@ const OLD = asSessionId("sess_01JAAAAAA10000000000000000");
 const MID = asSessionId("sess_01JAAAAAA20000000000000000");
 const NEW = asSessionId("sess_01JAAAAAA30000000000000000");
 
-// 开一个会话并在旧账本位置放事件文件占位（双写期间的常态），写完关闭，返回本会话各消息的条目号
+// 开一个会话，写完关闭，返回本会话各消息的条目号
 async function seed(
   dir: string,
   sessionId: SessionId,
@@ -35,7 +34,6 @@ async function seed(
   const session = createFixtureSession({ sessionsDir: dir, sessionId });
   write(session);
   await session.close();
-  markLegacyEventFile(dir, sessionId);
   return (loadSessionView(dir, sessionId)?.messages ?? []).map((message) => message.entryId);
 }
 
@@ -252,12 +250,10 @@ test("分支会话开头从来源复制的历史不重复命中，分支自己�
     source.assistant({ text: "来源回复" });
     source.endRun();
     await source.close();
-    markLegacyEventFile(dir, OLD);
     const branch = await forkFixture({ sessionsDir: dir, sourceSessionId: OLD, runId, runSeq: 2 });
     branch.startRun({ task: "分支里的 needle" });
     branch.endRun();
     const { sessionId: branchId } = await branch.close();
-    markLegacyEventFile(dir, branchId);
 
     const hits = await collect(createSessionSearch(dir).search({ keywords: ["needle"] }));
     assert.deepEqual(
@@ -269,18 +265,18 @@ test("分支会话开头从来源复制的历史不重复命中，分支自己�
     );
   }));
 
-test("旧账本事件文件已被移走的会话（跑批器作废重做）不检索；双写之前的旧会话新存储里没有，也不检索", () =>
+test("会话根下的旧格式平铺会话文件（迁移之前的会话）不检索、不报错，新存储里的会话照常命中", () =>
   withDir(async (dir) => {
     await seed(dir, OLD, (s) => {
-      s.startRun({ task: "clue 留下的会话" });
+      s.startRun({ task: "clue 新存储里的会话" });
       s.endRun();
     });
-    await seed(dir, NEW, (s) => {
-      s.startRun({ task: "clue 被作废的会话" });
-      s.endRun();
-    });
-    unlinkSync(join(dir, `${NEW}.jsonl`));
-    markLegacyEventFile(dir, MID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${MID}.jsonl`),
+      `${JSON.stringify({ v: 17, kind: "session.header", text: "clue 旧格式" })}\n`
+    );
+    writeFileSync(join(dir, `${MID}.messages.jsonl`), "clue 旧格式正文\n");
     const hits = await collect(createSessionSearch(dir).search({ keywords: ["clue"] }));
     assert.deepEqual(
       hits.map((hit) => hit.sessionId),
@@ -293,7 +289,6 @@ test("读正被写入的会话：撕裂的末行不产出命中，文件一个�
     const session = createFixtureSession({ sessionsDir: dir, sessionId: NEW });
     session.startRun({ task: "clue 已落盘" });
     const { path } = await session.close();
-    markLegacyEventFile(dir, NEW);
     tearTail(
       path,
       '{"kind":"entry","lane":"main","type":"message","message":{"role":"user","content":"clue 半截'

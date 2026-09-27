@@ -77,14 +77,14 @@ export async function runRepl(options: ReplOptions): Promise<void> {
     "Pigeon M3 最小 CLI（内联审批 REPL）。输入任务回车运行；:quit 退出；" +
       "/grants 查看放权、/revoke <id> 撤销、/grants save <id> 升格固化。\n"
   );
-  // D2 可见性：事件落盘失败（listenerErrors）非空时显式警告——可见降级，绝不假装证据链完整。
+  // D2 可见性：会话记录写入失败（listenerErrors）非空时显式警告——可见降级，绝不假装证据链完整。
   // 增量报数：同一批故障不重复刷屏，新故障出现时以累计数提醒。
   // 启动即查一次：覆盖未来冷恢复路径（resume 复用同一出口）
   let reportedListenerErrors = 0;
   const warnEvidenceGaps = (): void => {
     const count = adapter.listenerErrors().length;
     if (count > reportedListenerErrors) {
-      write(`警告：本会话有 ${count} 条事件落盘失败，证据链不完整。\n`);
+      write(`警告：本会话有 ${count} 条会话记录写入失败，证据链不完整。\n`);
       reportedListenerErrors = count;
     }
   };

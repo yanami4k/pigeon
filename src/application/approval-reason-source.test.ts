@@ -1,22 +1,23 @@
-// 拒绝理由来源（决策 066）：决定记录新增可选的理由来源字段——人写 / 系统默认。
-// 审批 handler 交回理由时标人写（TUI [r]、CLI 输入了理由）；不带理由的拒绝由治理层落默认文案
-// 并标系统默认（TUI [n]、CLI 留空）；策略自动拒绝（deny 清单、无审批通道 fail-closed）同样是系统默认。
-// 加法式可选字段，不升 Event Log 版本（口径同 052）。
+// 拒绝理由（决策 066）：审批 handler 交回的理由逐字反馈给模型，作为被拒调用的工具结果正文记进会话存储；
+// 不带理由的拒绝（TUI [n]、CLI 留空）由治理层落默认文案。审批决定（人工拒绝）挂在该工具结果的运行面标记上。
+// 理由来源（人写 / 系统默认）原只记在旧决定记录里，随旧账本停写，会话存储不再记这一项。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "../pi-runtime/snapshot.ts";
 import { newSessionId } from "../state/ids.ts";
+import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { createToolGovernance } from "./governance.ts";
+import { openSessionStore } from "./session-store.ts";
 
 const ORIGINAL = "alpha\nbeta\n";
 
@@ -56,12 +57,18 @@ function editCall(content: string): EditFileParams {
 async function runRejected(options: {
   deny?: string[];
   approval?: { approved: false; reason?: string; reasonSource?: "human" | "system-default" };
-}): Promise<{ reason?: string; reasonSource?: string }> {
+}): Promise<{ text: string; gate: unknown }> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-reason-source-"));
   writeFileSync(join(root, "a.ts"), ORIGINAL);
   const sessionsDir = join(root, ".pigeon", "sessions");
   const sessionId = newSessionId();
-  const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+  const faults: unknown[] = [];
+  const sessionStore = openSessionStore({
+    sessionsDir,
+    sessionId,
+    cwd: root,
+    onFault: (fault) => faults.push(fault),
+  });
   try {
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot(options.deny ?? []),
@@ -79,41 +86,42 @@ async function runRejected(options: {
       }),
       tools: [createEditFileTool(root)],
       sessionId,
-      eventLog,
+      sessionStore,
     });
     await adapter.run("改文件");
     await adapter.dispose();
-    eventLog.close();
-    const decision = materializeSession(sessionsDir, sessionId, { content: false }).decisions[0];
-    assert.ok(decision, "拒绝路径必须落 decision 记录");
-    return {
-      ...(decision.decision.reason !== undefined ? { reason: decision.decision.reason } : {}),
-      ...(decision.decision.reasonSource !== undefined
-        ? { reasonSource: decision.decision.reasonSource }
-        : {}),
-    };
+    await sessionStore.close();
+    assert.deepEqual(faults, []);
+    // 被拒调用的工具结果：只有这一条，是错误，文件未被改动
+    const loaded = loadStoreSession(sessionsDir, sessionId);
+    assert.ok(loaded !== undefined, "会话存储里应有本会话");
+    const results = (loaded.view.runs[0]?.messages ?? [])
+      .map((ref) => ref.message)
+      .filter((message) => message.role === "toolResult");
+    assert.equal(results.length, 1, "拒绝路径必须留下一条工具结果");
+    const result = results[0] as StoreMessage;
+    assert.equal(result.isError, true);
+    const text = Array.isArray(result.content)
+      ? (result.content as Array<{ type: string; text?: string }>)
+          .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+          .join("")
+      : "";
+    return { text, gate: toolResultMark(result)?.gate };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-test("人写理由：handler 交回理由并标人写，decision 记录逐字保留理由与来源", async () => {
+test("人写理由：handler 交回的理由逐字成为被拒调用的工具结果正文，审批决定记为人工拒绝", async () => {
   const recorded = await runRejected({
     approval: { approved: false, reason: "这个文件不该动", reasonSource: "human" },
   });
-  assert.equal(recorded.reason, "这个文件不该动");
-  assert.equal(recorded.reasonSource, "human");
+  assert.equal(recorded.text, "这个文件不该动");
+  assert.deepEqual(recorded.gate, { outcome: "rejected", approvedBy: "human" });
 });
 
-test("系统默认：handler 不带理由（TUI [n] / CLI 留空）时落默认文案并标系统默认", async () => {
+test("默认文案：handler 不带理由（TUI [n] / CLI 留空）时工具结果正文是默认文案", async () => {
   const recorded = await runRejected({ approval: { approved: false } });
-  assert.equal(recorded.reason, "人工拒绝");
-  assert.equal(recorded.reasonSource, "system-default");
-});
-
-test("策略自动拒绝：deny 清单与无审批通道 fail-closed 的理由同样标系统默认", async () => {
-  const denied = await runRejected({ deny: ["edit_file"] });
-  assert.equal(denied.reasonSource, "system-default");
-  const failClosed = await runRejected({});
-  assert.equal(failClosed.reasonSource, "system-default");
+  assert.equal(recorded.text, "人工拒绝");
+  assert.deepEqual(recorded.gate, { outcome: "rejected", approvedBy: "human" });
 });

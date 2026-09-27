@@ -177,10 +177,10 @@ export default {
       name: "actors-no-persistence-writes",
       severity: "error",
       comment:
-        "Actor（cli / tui）对 persistence 只许只读物化（materializeSession / listSessionIds / filePathFor）；" +
-        "会改文件的入口（grants.json 读写）一律经 application（M2 审计 note-1，决策 034）。",
+        "Actor（cli / tui）对 persistence 只许只读：会话文件经只读读取器与会话目录读（session-reader / session-catalog，决策 181）；" +
+        "会改文件的入口（grants.json 读写、会话文件锁）一律经 application（M2 审计 note-1，决策 034）。",
       from: { path: "^src/(cli|tui)", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/persistence/grants-config\\.ts$" },
+      to: { path: "^src/persistence/(grants-config|session-lock)\\.ts$" },
     },
     {
       name: "actors-not-each-other",
@@ -192,13 +192,13 @@ export default {
       to: { path: "^src/(cli|tui)/", pathNot: "^src/$1/" },
     },
     {
-      name: "actors-no-event-log-direct",
+      name: "actors-no-session-writer-direct",
       severity: "error",
       comment:
-        "Actor（cli / tui）不直连事件日志读写器 persistence/event-log.ts（022 修订）：" +
-        "只读物化一律经 persistence/session-read.ts 的只读面，避免 Actor 侧构造出会建目录、开追加句柄的写入实例。",
+        "Actor（cli / tui）不直连会话存储写者 pi-runtime/session-store.ts（022 修订，决策 181）：" +
+        "读会话一律经 persistence 的只读读取器，写会话只由 application 装配的运行面持有，避免 Actor 侧建出会加锁、开追加句柄的写者。",
       from: { path: "^src/(cli|tui)/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/persistence/event-log\\.ts$" },
+      to: { path: "^src/pi-runtime/session-store\\.ts$" },
     },
   ],
   options: {

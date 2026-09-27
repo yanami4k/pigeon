@@ -3,9 +3,13 @@
 // 只读、无工作区的 Reviewer 已随第一版学习闭环退役（决策 137），git 工作区提供者不再规划无工作区。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ChildSettledInput, ChildSpawnedInput, WorkerWorkspace } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId } from "../state/ids.ts";
+import type {
+  ChildSettledInput,
+  ChildSpawnedInput,
+  WorkerWorkspace,
+} from "../state/session-payloads.ts";
 import {
   gitWorktreeWorkspaces,
   WorkerOrchestrator,

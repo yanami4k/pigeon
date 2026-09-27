@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { materializeSession } from "../persistence/event-log.ts";
+import { Value } from "typebox/value";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import {
   loadVerifyConfig,
   VerifyConfigError,
@@ -15,15 +16,20 @@ import {
 } from "../persistence/verify-config.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import { VERIFY_CONFIG_VERSION, type VerifyConfig } from "../state/attempt-config.ts";
-import { EVENT_LOG_VERSION, parseEventRecord } from "../state/event-log.ts";
-import { newEntryId, newRunId, newSessionId } from "../state/ids.ts";
+import { newRunId, newSessionId } from "../state/ids.ts";
+import {
+  type SessionCustomEntry,
+  type SessionEntrySink,
+  SessionEntryType,
+  type VerificationData,
+  VerificationDataSchema,
+} from "../state/session-entries.ts";
 import {
   combineStepVerdicts,
   LEGACY_VERIFY_STEP_NAME,
   recordStepsOf,
   verifyStepsOf,
 } from "../state/verify-steps.ts";
-import type { AttemptVerificationSink } from "./attempt-verify.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
 import { runHeadless } from "./headless.ts";
 import { buildRepairFeedback } from "./repair-loop.ts";
@@ -60,24 +66,26 @@ function stepsConfig(steps: Array<{ name: string; command: string }>, timeoutMs 
   } satisfies VerifyConfig;
 }
 
-// 收集写入的验证记录（不落盘）
-function memorySink(): AttemptVerificationSink & { records: unknown[] } {
-  const records: unknown[] = [];
+// 收集写入的会话条目（不落盘）
+function memorySink(): SessionEntrySink & { entries: SessionCustomEntry[] } {
+  const entries: SessionCustomEntry[] = [];
   return {
-    records,
-    appendAttemptVerified(input) {
-      const record = {
-        version: EVENT_LOG_VERSION,
-        id: newEntryId(),
-        sessionId: input.target.sessionId,
-        kind: "attempt.verified" as const,
-        timestamp: Date.now(),
-        ...input,
-      };
-      records.push(record);
-      return record as never;
+    entries,
+    append(entry) {
+      entries.push(entry);
     },
   };
+}
+
+// 写入面收到的唯一一条条目：必须是验证记录条目，且数据通过验证记录的 schema
+function onlyVerification(sink: { entries: SessionCustomEntry[] }): VerificationData {
+  assert.equal(sink.entries.length, 1, "只写一条验证记录条目");
+  const entry = sink.entries[0];
+  if (entry?.customType !== SessionEntryType.Verification) {
+    assert.fail("应为验证记录条目");
+  }
+  assert.ok(Value.Check(VerificationDataSchema, entry.data), "验证记录条目通过 schema");
+  return entry.data;
 }
 
 test("验证分步：四步全部执行、各出结论，前一步失败不跳过后续；整体为各步合取；记录带各步结论", async () => {
@@ -94,7 +102,7 @@ test("验证分步：四步全部执行、各出结论，前一步失败不跳�
       ]),
       workspace: ws.root,
       target,
-      sink,
+      store: sink,
     });
     assert.equal(result.outcome.verdict, "fail");
     assert.deepEqual(
@@ -106,11 +114,8 @@ test("验证分步：四步全部执行、各出结论，前一步失败不跳�
         ["分层", 0, "pass"],
       ]
     );
-    const record = parseEventRecord(sink.records[0]);
-    assert.equal(record.kind, "attempt.verified");
-    if (record.kind !== "attempt.verified") {
-      return;
-    }
+    const record = onlyVerification(sink);
+    assert.deepEqual(record.target, target);
     assert.equal(record.verdict, "fail");
     assert.deepEqual(
       record.steps?.map((entry) => [entry.name, entry.exitCode, entry.verdict]),
@@ -148,7 +153,7 @@ test("验证分步：合取口径——任一步失败即失败；无失败但�
       ),
       workspace: ws.root,
       target: { sessionId: newSessionId(), runId: newRunId() },
-      sink,
+      store: sink,
     });
     assert.equal(result.outcome.verdict, "undetermined");
     assert.deepEqual(
@@ -173,13 +178,10 @@ test("验证分步：单条命令的旧配置照常可用——只跑一次、�
       config: legacy,
       workspace: ws.root,
       target: { sessionId: newSessionId(), runId: newRunId() },
-      sink,
+      store: sink,
     });
     assert.equal(result.outcome.verdict, "fail");
-    const record = parseEventRecord(sink.records[0]);
-    if (record.kind !== "attempt.verified") {
-      assert.fail("应为验证记录");
-    }
+    const record = onlyVerification(sink);
     assert.equal(record.steps, undefined);
     assert.deepEqual(recordStepsOf(record), [
       {
@@ -193,36 +195,6 @@ test("验证分步：单条命令的旧配置照常可用——只跑一次、�
   } finally {
     ws.cleanup();
   }
-});
-
-test("验证分步：v15 的验证记录经迁移链升到当前版本，逐字有效、不带各步字段", () => {
-  const raw = {
-    version: 15,
-    id: newEntryId(),
-    sessionId: newSessionId(),
-    kind: "attempt.verified",
-    timestamp: 1,
-    target: { sessionId: newSessionId(), runId: newRunId() },
-    command: ["sh", "-c", "npm test"],
-    exitCode: 1,
-    timedOut: false,
-    durationMs: 5,
-    outputBytes: 3,
-    outputHash: "0".repeat(64),
-    output: "bad",
-    truncated: false,
-    workspace: "/w",
-    verdict: "fail",
-    verifiedAt: 1,
-  };
-  const record = parseEventRecord(raw);
-  assert.equal(record.version, EVENT_LOG_VERSION);
-  assert.equal(EVENT_LOG_VERSION, 17);
-  if (record.kind !== "attempt.verified") {
-    assert.fail("应为验证记录");
-  }
-  assert.equal(record.steps, undefined);
-  assert.equal(record.output, "bad");
 });
 
 test("回炉反馈：分步配置下写明哪几步失败并附各失败步的输出末尾，通过的步骤不附输出", () => {
@@ -320,11 +292,10 @@ test("回炉路径：分步配置下各步全跑，回炉反馈发回的是失�
     const feedback = JSON.stringify(messages.findLast((message) => message.role === "user"));
     assert.ok(feedback.includes("失败的步骤：内容"), feedback);
     assert.ok(feedback.includes("a.txt=half"), feedback);
-    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId, {
-      content: false,
-    });
+    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), result.sessionId);
+    assert.ok(loaded !== undefined);
     assert.deepEqual(
-      session.attemptVerifieds.map((record) => record.steps?.map((entry) => entry.verdict)),
+      loaded.view.verifications.map((record) => record.data.steps?.map((entry) => entry.verdict)),
       [
         ["fail", "pass"],
         ["pass", "pass"],

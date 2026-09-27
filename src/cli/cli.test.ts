@@ -8,11 +8,10 @@ import { Readable } from "node:stream";
 import { test } from "node:test";
 import { Type } from "typebox";
 import { createToolGovernance } from "../application/governance.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import type { SessionStoreSink } from "../pi-runtime/session-store.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
-import { newSessionId } from "../state/ids.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
@@ -138,18 +137,14 @@ test("D2 可见性：事件落盘失败（listenerErrors 非空）→ REPL 显�
     const input = Readable.from(["改一下\n", ":quit\n"], { objectMode: false });
     const write = (text: string) => outputs.push(text);
     const { ask, close } = createAsker(input, write);
-    // 故障注入：receipt 写盘即抛错（模拟磁盘故障）——listenerErrors 非空
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const eventLog = new JsonlEventLog(sessionsDir, newSessionId());
-    const poison = {
-      appendRuntimeEvent: eventLog.appendRuntimeEvent.bind(eventLog),
-      appendEntry: eventLog.appendEntry.bind(eventLog),
-      appendIntent: eventLog.appendIntent.bind(eventLog),
-      appendDecision: eventLog.appendDecision.bind(eventLog),
-      appendReceipt: () => {
-        throw new Error("模拟磁盘写失败");
+    // 故障注入：会话存储写工具结果时抛错（模拟磁盘故障；生产写者自身不抛，这里注入的写入面抛）——listenerErrors 非空
+    const poison: SessionStoreSink = {
+      appendMessage: (message) => {
+        if (message.role === "toolResult") {
+          throw new Error("模拟磁盘写失败");
+        }
       },
-      appendBreaker: eventLog.appendBreaker.bind(eventLog),
+      append: () => undefined,
     };
     const adapter = new PiRuntimeAdapter({
       snapshot: {
@@ -174,13 +169,11 @@ test("D2 可见性：事件落盘失败（listenerErrors 非空）→ REPL 显�
         registry: makeRegistry(),
       }),
       tools: [createEditFileTool(root)],
-      sessionId: eventLog.sessionId,
-      eventLog: poison,
+      sessionStore: poison,
     });
 
     await runRepl({ adapter, ask, write });
     close();
-    eventLog.close();
 
     const terminal = outputs.join("");
     assert.ok(

@@ -1,15 +1,15 @@
 // 续跑（决策 183）：运行面打开会话文件后用 pi 的 buildSessionContext 还原对话上下文接着跑；末条助手消息里悬空的工具调用
 // 各补一条"进程在执行途中中断、结果未知、请自行核实"的工具结果（写进会话、交给 Agent），由 agent 自行核对；不再按文件哈希
-// 对账、不再逐条问人。双写之前的旧会话（新存储里没有文件）不能续跑，明确报错。
+// 对账、不再逐条问人。迁移之前的旧格式会话（会话根下的平铺文件）不能续跑，明确报错并指向只读的旧版代码。
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JsonlEventLog } from "../persistence/event-log.ts";
+import { LEGACY_READER_HINT } from "../persistence/session-catalog.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { newRunId, newSessionId } from "../state/ids.ts";
+import { newSessionId } from "../state/ids.ts";
 import {
   INTERRUPTED_TOOL_RESULT_MARK,
   INTERRUPTED_TOOL_RESULT_TEXT,
@@ -20,6 +20,7 @@ import { describeResume, runResumeFlow } from "./resume.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "./session-runtime.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
+import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
@@ -161,18 +162,10 @@ test("续跑：正常收尾的会话还原全部对话、不补结果；以中�
   }
 });
 
-test("续跑：双写之前的旧会话明确报错、不进入续会话；不存在的会话列出已有会话", async () => {
+test("续跑：旧格式会话明确报错、不进入续会话；不存在的会话列出已有会话", async () => {
   const { dir, sessionsDir, cleanup } = workspace();
   try {
-    const legacyId = newSessionId();
-    const log = new JsonlEventLog(sessionsDir, legacyId);
-    log.appendEntry({
-      runSeq: 1,
-      role: "user",
-      runId: newRunId(),
-      message: { role: "user", content: "旧会话" },
-    });
-    log.close();
+    const legacyId = writeLegacySessionFile(sessionsDir);
     let entered = false;
     await assert.rejects(
       runResumeFlow({
@@ -183,8 +176,11 @@ test("续跑：双写之前的旧会话明确报错、不进入续会话；不�
           entered = true;
         },
       }),
-      /创建于新会话存储启用之前，不能续跑/
+      (error: Error) =>
+        error.message ===
+        `会话 ${legacyId} 是旧格式会话（迁移之前创建），不能续跑；${LEGACY_READER_HINT}`
     );
+    assert.equal(LEGACY_READER_HINT, "旧格式会话请用只读的旧版代码 455d88d 读取");
     assert.equal(entered, false);
 
     const present = createFixtureSession({ sessionsDir, cwd: dir });

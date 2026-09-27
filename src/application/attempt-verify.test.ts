@@ -1,14 +1,14 @@
-// 会话级验证命令（M7 S3，决策 071）：--verify-command / --verify-timeout 按会话冻结，写进注入快照与 run.started；
+// 会话级验证命令（M7 S3，决策 071）：--verify-command / --verify-timeout 按会话冻结，写进注入快照与 Run 开始条目；
 // 尝试收尾后由程序作为独立子进程在该尝试的工作区执行，模型看不到，结果落通用验证记录；未配置时不跑、标签为未知。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
-import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
+import { type StoreSessionView, storeAttemptLabel } from "../state/session-judge.ts";
 import { runHeadless } from "./headless.ts";
 import { DEFAULT_VERIFY_TIMEOUT_MS, parseLaunchFlags, verifyConfigOf } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
@@ -16,6 +16,13 @@ import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
 const NODE = `"${process.execPath}"`;
+
+// 读新会话存储里的会话视图（会话必须存在）
+function storeView(root: string, sessionId: string): StoreSessionView {
+  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
+  return loaded.view;
+}
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
@@ -48,7 +55,7 @@ test("启动参数：--verify-command 与 --verify-timeout 解析；缺省超时
   assert.throws(() => parseLaunchFlags(["--verify-command", "x"], { usage: "u" }), /未知参数/);
 });
 
-test("主会话：配置冻结进注入快照与 run.started；Run 结束后在工作区独立执行，结果落通用验证记录，标签由此现算", async () => {
+test("主会话：配置冻结进注入快照与 Run 开始条目；Run 结束后在工作区独立执行，结果落通用验证记录，标签由此现算", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-attempt-verify-"));
   try {
     writeFileSync(join(root, "v.mjs"), "process.exit(1);\n");
@@ -72,23 +79,24 @@ test("主会话：配置冻结进注入快照与 run.started；Run 结束后在�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const session = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
-    assert.deepEqual(session.runStarteds[0]?.payload.verify, {
+    const view = storeView(root, sessionId);
+    assert.deepEqual(view.runs[0]?.start.verify, {
       command: `${NODE} v.mjs`,
       timeoutMs: 30_000,
     });
-    const verified = session.attemptVerifieds[0];
-    assert.ok(verified !== undefined, "Run 结束后落一条通用验证记录");
+    assert.equal(view.verifications.length, 1, "Run 结束后落一条通用验证记录");
+    const verified = view.verifications[0]?.data;
+    assert.ok(verified !== undefined);
     assert.equal(verified.verdict, "fail");
     assert.equal(verified.exitCode, 1);
     assert.equal(verified.workspace, root);
     assert.equal(verified.target.sessionId, sessionId);
-    const runId = session.runStarteds[0]?.runId;
+    const runId = view.runs[0]?.runId;
     assert.ok(runId !== undefined);
     assert.equal(verified.target.runId, runId);
-    assert.equal(labelAttempt(attemptOutcomeFacts(session, runId)), "Failed");
-    const contents = session.records.filter((record) => record.kind === "entry");
-    assert.equal(contents.length, 2, "验证结果不进模型可见的消息");
+    assert.equal(storeAttemptLabel(view, runId), "Failed");
+    assert.equal(view.runs.length, 1);
+    assert.equal(view.runs[0]?.messages.length, 2, "验证结果不进模型可见的消息");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -112,11 +120,11 @@ test("主会话：未配置验证命令时不跑、不落记录，正常完成�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const session = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
-    assert.equal(session.attemptVerifieds.length, 0);
-    const runId = session.runStarteds[0]?.runId;
+    const view = storeView(root, sessionId);
+    assert.equal(view.verifications.length, 0);
+    const runId = view.runs[0]?.runId;
     assert.ok(runId !== undefined);
-    assert.equal(labelAttempt(attemptOutcomeFacts(session, runId)), "Unknown");
+    assert.equal(storeAttemptLabel(view, runId), "Unknown");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -139,9 +147,10 @@ test("headless：配置验证命令时收尾后在工作区独立执行并落本
     });
     assert.equal(result.verification?.verdict, "pass");
     assert.equal(result.label, "Passed");
-    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
-    assert.equal(session.attemptVerifieds[0]?.verdict, "pass");
-    assert.equal(session.runStarteds[0]?.payload.verify?.timeoutMs, 30_000);
+    const view = storeView(root, result.sessionId);
+    assert.equal(view.verifications.length, 1);
+    assert.equal(view.verifications[0]?.data.verdict, "pass");
+    assert.equal(view.runs[0]?.start.verify?.timeoutMs, 30_000);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

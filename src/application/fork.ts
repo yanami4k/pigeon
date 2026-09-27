@@ -1,10 +1,10 @@
-// 会话树分叉与续跑（M7 S6，决策 068 / 077 / 078 / 079；账本重构 177 / 206）。
-// 分叉顺序：a. 从新会话存储读来源会话（本进程写者先落盘），核对分叉点、找分叉点之前最近的快照 → b. 旧账本记分叉记录
-// （写不进就不分叉，双写期间照旧）→ c. 新存储在来源会话文件里记分叉条目 → d. 从快照开独立工作树 → e. 用 pi 的 fork 把分叉点
-// （含）之前的历史复制进分支会话的新文件，文件头记来源会话与分支来历；分支运行面随后打开这个文件续写。
+// 会话树分叉与续跑（M7 S6，决策 068 / 077 / 078 / 079；账本重构 177）。
+// 分叉顺序：a. 从会话存储读来源会话（本进程写者先落盘），核对分叉点、找分叉点之前最近的快照 → b. 在来源会话文件里记分叉条目
+// （写不成就不分叉：冷会话被另一进程持有时按会话锁失败）→ c. 从快照开独立工作树 → d. 用 pi 的 fork 把分叉点（含）之前的
+// 历史复制进分支会话的新文件，文件头记来源会话与分支来历；分支运行面随后打开这个文件续写。
 // 续跑（078 / 077）：以 buildSessionContext 从分支文件还原的消息作为 Agent 初始状态；分支是新的 Pigeon 会话。
 // 分叉点末条是用户消息或工具结果时不给新输入直接续跑，末条是助手消息时必须给新输入。非 git 工作区发起分叉明确报错，
-// 不降级，也不留任何记录。来源会话在新存储里没有文件（双写之前的旧会话）时明确报错，不回退旧账本（187）。
+// 不降级，也不留任何记录。来源会话在会话存储里没有文件时明确报错（旧格式会话不读，187）。
 // 失败自动分叉重试（079）：尝试标为失败时从本次任务开始处（该 Run 第 1 条）分叉重试，最多 K 次，不注入任何提示。
 
 import {
@@ -14,43 +14,30 @@ import {
   NotGitWorkspaceError,
 } from "../orchestration/checkpoint.ts";
 import { addWorktree, mainRepoRoot } from "../orchestration/worktree.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { AgentMessage } from "../pi-runtime/index.ts";
 import { sessionContextMessages } from "../pi-runtime/session-store.ts";
-import { resolveCheckpointBefore } from "../state/checkpoint-ref.ts";
+import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import type { OutcomeLabel } from "../state/outcome-label.ts";
+import { storeCheckpointBefore, storeMessageAt } from "../state/session-judge.ts";
 import type {
   CheckpointRef,
   ForkPoint,
   ForkTrigger,
   GitWorktreeWorkspace,
-} from "../state/event-log.ts";
-import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
-import type { OutcomeLabel } from "../state/outcome-label.ts";
-import { storeCheckpointBefore, storeMessageAt } from "../state/session-judge.ts";
+} from "../state/session-payloads.ts";
 import { type HeadlessRunOptions, runHeadlessOnce } from "./headless-core.ts";
-import {
-  beginStoreFork,
-  hasLegacyRecords,
-  type SessionStoreWriter,
-  type StoreFork,
-  storeFaultWarner,
-} from "./session-store.ts";
+import { beginStoreFork, type SessionStoreWriter, storeFaultWarner } from "./session-store.ts";
 import { sessionRuntimeScope } from "./worker-scope.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
 export class ForkError extends Error {}
 
-// 分叉点之前最近的快照（旧账本读法）：判据是纯函数，随 M8 回放共用下沉到 state/checkpoint-ref.ts；
-// 分叉本身已改读新存储（storeCheckpointBefore），此处原名转出只供双写对照，停写旧账本时删除
-export const resolveForkCheckpoint = resolveCheckpointBefore;
-
 export interface ForkRequest {
   governanceRoot: string;
   sourceSessionId: SessionId;
-  // 来源会话正由本进程的运行面持有时传入其日志（主会话）；缺省打开会话文件（冷会话，另一进程持有时按会话锁失败）
-  sourceLog?: JsonlEventLog;
-  // 同上，来源会话的新存储写者（决策 206）；缺省按会话号打开来源的会话文件
+  // 来源会话正由本进程的运行面持有时传入其会话存储写者（主会话）；缺省按会话号打开来源的会话文件
+  // （冷会话，另一进程持有时按会话锁失败）
   sourceStore?: SessionStoreWriter;
   forkPoint: ForkPoint;
   trigger: ForkTrigger;
@@ -84,12 +71,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
   await request.sourceStore?.flush();
   const source = loadStoreSession(dir, sourceSessionId);
   if (source === undefined) {
-    throw new ForkError(
-      hasLegacyRecords(dir, sourceSessionId)
-        ? `来源会话 ${sourceSessionId} 在新会话存储里没有文件（创建于新存储启用之前，或新存储打开失败），不能分叉；` +
-            "旧会话用只读的旧版代码查看"
-        : `来源会话不存在：${sourceSessionId}`
-    );
+    throw new ForkError(`来源会话不存在：${sourceSessionId}`);
   }
   const forkMessage = storeMessageAt(source.view, forkPoint);
   if (forkMessage === undefined) {
@@ -118,7 +100,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
     const now = checkpointer.snapshotNow();
     checkpoint = { ref: now.ref, commit: now.commit };
   }
-  // b. 旧账本先记分叉记录（写不进就不分叉）
+  // b. 来源会话记分叉条目（写不成就不分叉）
   const forked = {
     runId: forkPoint.runId,
     forkPoint,
@@ -127,17 +109,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
     trigger: request.trigger,
     forkedAt: Date.now(),
   };
-  const ownsLog = request.sourceLog === undefined;
-  const log = request.sourceLog ?? new JsonlEventLog(dir, sourceSessionId);
-  try {
-    log.appendSessionForked(forked);
-  } finally {
-    if (ownsLog) {
-      log.close();
-    }
-  }
-  // c. 来源会话的新存储记分叉条目
-  const storeFork: StoreFork | undefined = await beginStoreFork({
+  const storeFork = await beginStoreFork({
     sessionsDir: dir,
     sourceSessionId,
     ...(request.sourceStore !== undefined ? { sourceStore: request.sourceStore } : {}),
@@ -145,8 +117,13 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
     forked,
     onFault: storeFaultWarner(),
   });
+  if (storeFork === undefined) {
+    throw new ForkError(
+      `来源会话 ${sourceSessionId} 的分叉条目没有写成（会话存储告警已给出原因），不分叉`
+    );
+  }
   try {
-    // d. 独立工作树：从分叉点之前最近的快照开出
+    // c. 独立工作树：从分叉点之前最近的快照开出
     const name = `fork-${branchSessionId.slice(-8).toLowerCase()}`;
     const worktree = addWorktree({
       repoRoot: mainRepoRoot(sourceWorkspace),
@@ -160,8 +137,8 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
       path: worktree.path,
       branch: worktree.branch,
     };
-    // e. 分支会话的新文件由 pi 的 fork 从来源复制出来（分支运行面随后打开它续写），初始消息从它还原
-    const branchPath = await storeFork?.forkBranch({
+    // d. 分支会话的新文件由 pi 的 fork 从来源复制出来（分支运行面随后打开它续写），初始消息从它还原
+    const branchPath = await storeFork.forkBranch({
       branchSessionId,
       cwd: worktree.path,
       branch: {
@@ -176,7 +153,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
     const branch = branchPath !== undefined ? loadStoreSessionFile(branchPath) : undefined;
     if (branch === undefined) {
       throw new ForkError(
-        `分支会话文件没有建成（新会话存储告警已给出原因），分叉续跑无从还原消息；工作树 ${worktree.path} 已建，可手动清理`
+        `分支会话文件没有建成（会话存储告警已给出原因），分叉续跑无从还原消息；工作树 ${worktree.path} 已建，可手动清理`
       );
     }
     return {
@@ -187,7 +164,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
       continueFromHistory,
     };
   } finally {
-    await storeFork?.release();
+    await storeFork.release();
   }
 }
 
@@ -223,7 +200,6 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
   const prepared = await prepareFork({
     governanceRoot: request.governanceRoot,
     sourceSessionId: request.sourceSessionId,
-    ...(request.sourceLog !== undefined ? { sourceLog: request.sourceLog } : {}),
     ...(request.sourceStore !== undefined ? { sourceStore: request.sourceStore } : {}),
     forkPoint: request.forkPoint,
     trigger: request.trigger,
@@ -265,7 +241,6 @@ export interface RetryOutcome {
 export async function runRetryOnFail(input: {
   governanceRoot: string;
   sourceSessionId: SessionId;
-  sourceLog?: JsonlEventLog;
   sourceStore?: SessionStoreWriter;
   runId: RunId;
   retries: number;
@@ -279,7 +254,6 @@ export async function runRetryOnFail(input: {
     const branch = await runForkBranch({
       governanceRoot: input.governanceRoot,
       sourceSessionId: input.sourceSessionId,
-      ...(input.sourceLog !== undefined ? { sourceLog: input.sourceLog } : {}),
       ...(input.sourceStore !== undefined ? { sourceStore: input.sourceStore } : {}),
       forkPoint,
       trigger: "retry-on-fail",

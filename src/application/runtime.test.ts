@@ -1,21 +1,28 @@
 // 装配根冒烟（M2 S1，决策 025）：buildRuntime 从 cli/index.ts 抽到 Controller 层后，
 // 装配接线本身是被改动的部分——本测试钉住"装配出的 bundle 真能跑通一次写调用"：
 // 注入的审批 handler 工厂收到装配根自建的 grantStore、prompt 模式下批准生效、
-// 文件被真实编辑、intent/receipt 治理族落盘。
+// 文件被真实编辑、工具结果消息上挂着审批闸的决定（会话存储）。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
-import { JsonlEventLog, readEventLogFile } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
+import { toolResultMark } from "../state/session-judge.ts";
 import type { EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { buildRuntime } from "./runtime.ts";
 
-test("装配根：注入审批 handler 的 bundle 跑通 prompt 模式写调用，治理族落盘", async () => {
+// 取值并断言在场（替代非空断言）
+function required<T>(value: T | undefined): T {
+  assert.ok(value !== undefined, "值应在场");
+  return value;
+}
+
+test("装配根：注入审批 handler 的 bundle 跑通 prompt 模式写调用，审批决定记在工具结果上", async () => {
   const original = "alpha\nbeta\ngamma\n";
   const root = mkdtempSync(join(tmpdir(), "pigeon-runtime-"));
   try {
@@ -64,16 +71,21 @@ test("装配根：注入审批 handler 的 bundle 跑通 prompt 模式写调用�
       assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
     } finally {
       await bundle.adapter.dispose();
-      bundle.eventLog.close();
       await bundle.sessionStore.close();
     }
-    // 治理族落盘：批准路径写 intent（自带 decision 快照）与 receipt 到同一会话文件
-    const records = readEventLogFile(
-      JsonlEventLog.filePathFor(join(root, ".pigeon", "sessions"), sessionId)
-    );
-    const kinds = records.map((record) => record.kind);
-    assert.ok(kinds.includes("intent"), `应有 intent 记录：${kinds.join(",")}`);
-    assert.ok(kinds.includes("receipt"), `应有 receipt 记录：${kinds.join(",")}`);
+    // 审批决定落会话存储：edit_file 的工具结果消息上挂着"人工批准"的审批闸标记，且只有这一条工具结果
+    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    assert.ok(loaded !== undefined, "会话存储里应有本会话");
+    const results = (loaded.view.runs[0]?.messages ?? [])
+      .map((ref) => ref.message)
+      .filter((message) => message.role === "toolResult");
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.toolName, "edit_file");
+    assert.equal(results[0]?.isError, false);
+    assert.deepEqual(toolResultMark(required(results[0]))?.gate, {
+      outcome: "approved",
+      approvedBy: "human",
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

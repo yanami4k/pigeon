@@ -1,6 +1,6 @@
 // M5 S4（决策 043）：load_skill 三重约束 fail-closed——realpath 后必须在该 Skill 目录内（含目录联接
 // 逃逸）、单文件上限默认 64 KiB 超出可见截断、来源只认登记过的 Skill 名；读取时比对开会话时的
-// 哈希清单，不符或新增文件拒绝并提示下个会话生效；每次读取回调 skill.loaded 载荷；scripts 只读不执行。
+// 哈希清单，不符或新增文件拒绝并提示下个会话生效；每次成功读取的摘要作工具结果 details；scripts 只读不执行。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -16,6 +16,25 @@ import {
 } from "./load-skill-tool.ts";
 
 const sha256 = (data: string): string => createHash("sha256").update(data).digest("hex");
+
+// 收集每次成功读取的摘要：读取摘要随工具结果的 details 返回（读取失败即抛错，不产生摘要）
+function recording(tool: ReturnType<typeof createLoadSkillTool>): {
+  tool: ReturnType<typeof createLoadSkillTool>;
+  loaded: SkillLoadedPayload[];
+} {
+  const loaded: SkillLoadedPayload[] = [];
+  return {
+    loaded,
+    tool: {
+      ...tool,
+      execute: async (...args: Parameters<typeof tool.execute>) => {
+        const result = await tool.execute(...args);
+        loaded.push(result.details);
+        return result;
+      },
+    },
+  };
+}
 
 const SKILL_MD = "---\nname: deploy\ndescription: 部署步骤\n---\n# 部署\n1. 先跑测试\n";
 
@@ -40,8 +59,7 @@ function makeSkill(setup?: (skillDir: string, base: string) => void) {
   writeFile(join(base, "outside", "secret.md"), "不该读到的机密");
   setup?.(skillDir, base);
   const catalog = loadSkillCatalog({ workspaceRoot: root, homeDir: home });
-  const loaded: SkillLoadedPayload[] = [];
-  const tool = createLoadSkillTool({ catalog, onLoaded: (payload) => loaded.push(payload) });
+  const { tool, loaded } = recording(createLoadSkillTool({ catalog }));
   return {
     base,
     skillDir,
@@ -51,7 +69,7 @@ function makeSkill(setup?: (skillDir: string, base: string) => void) {
   };
 }
 
-test("读 SKILL.md 与 references 资源；每次读取回调 skill.loaded 载荷（名、路径、哈希、是否截断）", async () => {
+test("读 SKILL.md 与 references 资源；每次读取的 details 带摘要（名、路径、哈希、是否截断）", async () => {
   const { tool, loaded, cleanup } = makeSkill();
   try {
     assert.equal(tool.name, LOAD_SKILL_TOOL);

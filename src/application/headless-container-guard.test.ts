@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import type { BranchHeaderInput } from "../state/event-log.ts";
+import type { BranchHeaderInput } from "../state/session-payloads.ts";
 import { asWorkspaceHost } from "../tools/local-host.ts";
 import { runHeadless } from "./headless.ts";
 

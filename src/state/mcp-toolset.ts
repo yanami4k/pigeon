@@ -1,4 +1,4 @@
-// MCP 工具集摘要（M5.7 S3，决策 052）：run.started 里每个 MCP 工具带 server 注解线索（declaredHint）、配置档位与
+// MCP 工具集摘要（M5.7 S3，决策 052）：Run 开始条目 里每个 MCP 工具带 server 注解线索（declaredHint）、配置档位与
 // 实际采用的风险档（effectiveTier），不一致的标 conflict；server 状态（含掉线、清单变更通知）一并记下，冷侧可查。
 // 更严执行规则写死：声明只读但配置 write / exec，按配置；声明 destructive 但配置 read，按 write。
 import { type Static, Type } from "typebox";

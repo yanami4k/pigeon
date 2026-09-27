@@ -1,7 +1,7 @@
 // M4 S6：Grant 体系治理接线测试——fake streamFn 驱动真实 pi-agent-core Agent，
 // 验证排律（deny → 会话 grant → 配置 grant → yolo → read 自动 → prompt）、approvedBy
-// 扩展（human:grant / policy:config + grantRef 回指）、撤销立即生效、崩溃恢复还原、
-// 熔断独立性与读层事件级裁剪（决策 1）八条不变式。
+// 扩展（human:grant / policy:config + grantRef 回指）、撤销立即生效、崩溃恢复还原（授权条目落会话存储）、
+// 熔断独立性与读调用的审批闸标记八条不变式。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,17 +9,25 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Type } from "typebox";
 import { createToolGovernance } from "../application/governance.ts";
+import { grantEventSink } from "../application/session-store.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { appendGrantConfigRule, loadGrantConfig } from "../persistence/grants-config.ts";
-import { asGrantId, asSessionId } from "../state/ids.ts";
+import { acquireSessionFileLock } from "../persistence/session-lock.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
+import { asGrantId, asSessionId, type SessionId } from "../state/ids.ts";
+import {
+  type StoreSessionView,
+  storeActiveGrants,
+  toolResultMark,
+} from "../state/session-judge.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
 import { createFakeStreamFn } from "./fixtures.ts";
+import { openSessionStoreWriter, type SessionStoreWriter } from "./session-store.ts";
 import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "./snapshot.ts";
 
 function makeWorkspace(files: Record<string, string> = {}): { root: string; cleanup: () => void } {
@@ -30,6 +38,35 @@ function makeWorkspace(files: Record<string, string> = {}): { root: string; clea
     writeFileSync(full, content, "utf8");
   }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+// 真实会话存储写者（会话根 <root>/.pigeon/sessions）；existingPath 在场即续写已有文件（模拟冷重启后重新打开）
+function openStore(root: string, sessionId: SessionId, existingPath?: string): SessionStoreWriter {
+  return openSessionStoreWriter({
+    sessionsRoot: join(root, ".pigeon", "sessions"),
+    sessionId,
+    cwd: root,
+    lock: acquireSessionFileLock,
+    ...(existingPath !== undefined ? { existingPath } : {}),
+  });
+}
+
+// 读回会话存储里的视图（调用方已 close 写者）
+function readStore(root: string, sessionId: SessionId): StoreSessionView {
+  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(loaded !== undefined, "会话存储里应有该会话的文件");
+  return loaded.view;
+}
+
+// 视图里某个工具的全部工具结果消息上的标记
+function marksOf(view: StoreSessionView, toolName: string) {
+  return view.runs.flatMap((run) =>
+    run.messages.flatMap(({ message }) =>
+      message.role === "toolResult" && message.toolName === toolName
+        ? [toolResultMark(message)]
+        : []
+    )
+  );
 }
 
 function makeSnapshot(
@@ -117,14 +154,16 @@ test("不变式①deny 压过 grant：deny 清单在，grant 命中也一律拒�
   }
 });
 
-test("不变式②grant 命中：approvedBy=human:grant，intent 携带 grantRef 回指 grantId", async () => {
+test("不变式②grant 命中：approvedBy=human:grant 带 grantRef 回指 grantId；授权条目与审批闸标记落会话存储", async () => {
   const original = "alpha\n";
-  const { root, cleanup } = makeWorkspace({ "a.ts": original, "sessions/.keep": "" });
-  const sessionsDir = join(root, "sessions");
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
   const sessionId = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPQRV");
   try {
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-    const store = new SessionGrantStore({ workspaceRoot: root, eventLog });
+    const sessionStore = openStore(root, sessionId);
+    const store = new SessionGrantStore({
+      workspaceRoot: root,
+      sink: grantEventSink(sessionStore),
+    });
     const grant = store.create({
       tool: "edit_file",
       firstCall: { toolCallId: "tc-seed", args: { path: "a.ts" } },
@@ -146,7 +185,7 @@ test("不变式②grant 命中：approvedBy=human:grant，intent 携带 grantRef
         workspaceRoot: root,
       }),
       tools: [createEditFileTool(root)],
-      eventLog,
+      sessionStore,
       sessionId,
     });
     const result = await adapter.run("改文件");
@@ -156,18 +195,17 @@ test("不变式②grant 命中：approvedBy=human:grant，intent 携带 grantRef
     assert.equal(record?.decision?.approvedBy, "human:grant");
     assert.deepEqual(record?.decision?.grantRef, { kind: "session-grant", id: grant.grantId });
     await adapter.dispose();
-    eventLog.close();
+    await sessionStore.close();
 
-    // intent 落盘同载 grantRef（账本回指出处，决策 3）
-    const lines = readFileSync(eventLog.path, "utf8")
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as Record<string, never>);
-    const intent = lines.find((line) => line.kind === "intent") as unknown as {
-      decision: { approvedBy: string; grantRef: { kind: string; id: string } };
-    };
-    assert.equal(intent.decision.approvedBy, "human:grant");
-    assert.deepEqual(intent.decision.grantRef, { kind: "session-grant", id: grant.grantId });
+    // 会话存储：授权建立条目恰一条且就是这条 grant；工具结果消息上的审批闸标记记 human:grant
+    const view = readStore(root, sessionId);
+    assert.deepEqual(
+      view.grants.map((record) => [record.data.event, record.data.grantId]),
+      [["created", grant.grantId]]
+    );
+    assert.deepEqual(marksOf(view, "edit_file"), [
+      { gate: { outcome: "approved", approvedBy: "human:grant" } },
+    ]);
     // grant 放行照样计命中（/grants 展示面）
     assert.equal(store.list()[0]?.hitCount, 1);
   } finally {
@@ -288,30 +326,34 @@ test("不变式④配置规则命中：approvedBy=policy:config，grantRef 回�
   }
 });
 
-test("不变式⑤崩溃恢复：grant.created 落盘 → 冷物化还原 → 新会话静默继续免审（决策 3b）", async () => {
+test("不变式⑤崩溃恢复：授权建立条目落会话存储 → 冷读还原 → 新进程静默继续免审（决策 3b）", async () => {
   const original = "alpha\n";
-  const { root, cleanup } = makeWorkspace({ "a.ts": original, "sessions/.keep": "" });
-  const sessionsDir = join(root, "sessions");
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
   const sessionId = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRSV");
   try {
-    // 第一进程：人工批准后创建 grant（模拟 [a] 键），事件落盘
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-    const store = new SessionGrantStore({ workspaceRoot: root, eventLog });
+    // 第一进程：人工批准后创建 grant（模拟 [a] 键），授权建立条目落会话存储
+    const first = openStore(root, sessionId);
+    const store = new SessionGrantStore({ workspaceRoot: root, sink: grantEventSink(first) });
     const grant = store.create({
       tool: "edit_file",
       firstCall: { toolCallId: "toolu_01ABC", args: { path: "a.ts" } },
     });
-    eventLog.close();
+    const filePath = await first.filePath();
+    await first.close();
+    assert.ok(filePath !== undefined);
 
-    // 崩溃 + 冷重启：从事件文件物化 grant（静默恢复，无确认环节），注入新存储
-    const materialized = materializeSession(sessionsDir, sessionId);
-    assert.equal(materialized.grants.length, 1);
-    assert.equal(materialized.grants[0]?.grantId, grant.grantId);
+    // 崩溃 + 冷重启：从会话存储读回生效授权（静默恢复，无确认环节），注入新存储
+    const active = storeActiveGrants(readStore(root, sessionId));
+    assert.equal(active.length, 1);
+    assert.equal(active[0]?.grantId, grant.grantId);
+    assert.equal(active[0]?.tool, "edit_file");
+    assert.deepEqual(active[0]?.firstCall, { toolCallId: "toolu_01ABC", args: { path: "a.ts" } });
 
+    const second = openStore(root, sessionId, filePath);
     const restored = new SessionGrantStore({
       workspaceRoot: root,
-      eventLog: new JsonlEventLog(sessionsDir, sessionId),
-      restored: materialized.grants,
+      sink: grantEventSink(second),
+      restored: active,
     });
     const approvals: ApprovalRequest[] = [];
     const adapter = new PiRuntimeAdapter({
@@ -345,6 +387,7 @@ test("不变式⑤崩溃恢复：grant.created 落盘 → 冷物化还原 → �
       id: grant.grantId,
     });
     await adapter.dispose();
+    await second.close();
   } finally {
     cleanup();
   }
@@ -394,12 +437,11 @@ test("不变式⑦熔断独立于授权：grant 生效期间幽灵工具名连�
   }
 });
 
-test("不变式⑧读层事件级裁剪（决策 1）：read_file 调用零 intent / receipt 治理行，内存账本仍完整", async () => {
-  const { root, cleanup } = makeWorkspace({ "a.ts": "one\ntwo\n", "sessions/.keep": "" });
-  const sessionsDir = join(root, "sessions");
+test("不变式⑧读调用：read_file 自动放行（policy:auto），RunResult 与会话存储里的审批闸标记一致", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "one\ntwo\n" });
   const sessionId = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRTV");
   try {
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+    const sessionStore = openStore(root, sessionId);
     const adapter = new PiRuntimeAdapter({
       snapshot: makeSnapshot({ allow: ["read_file", "edit_file"] }),
       streamFn: createFakeStreamFn({
@@ -412,32 +454,23 @@ test("不变式⑧读层事件级裁剪（决策 1）：read_file 调用零 inte
         registry: makeRegistry(),
       }),
       tools: [createReadFileTool(root)],
-      eventLog,
+      sessionStore,
       sessionId,
     });
     const result = await adapter.run("读文件");
     assert.equal(result.status, "completed");
-    // 内存账本不受裁剪影响（RunResult 照常报告）
     assert.equal(result.toolExecutions.length, 1);
     assert.equal(result.toolExecutions[0]?.toolName, "read_file");
     assert.equal(result.toolExecutions[0]?.decision?.approvedBy, "policy:auto");
     await adapter.dispose();
-    eventLog.close();
+    await sessionStore.close();
 
-    const lines = readFileSync(eventLog.path, "utf8")
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .map((line) => (JSON.parse(line) as { kind: string }).kind);
-    assert.ok(lines.includes("tool.proposed"));
-    assert.ok(lines.includes("tool.settled"));
-    assert.ok(!lines.includes("intent"), "读调用不得落 intent");
-    assert.ok(!lines.includes("receipt"), "读调用不得落 receipt");
-
-    // 冷物化对账零悬账：没有 intent 就没有 OutcomeUnknown（决策 1：对账对读层无意义）
-    const materialized = materializeSession(sessionsDir, sessionId);
-    assert.equal(materialized.intents.length, 0);
-    assert.equal(materialized.receipts.length, 0);
-    assert.equal(materialized.reconcile.unknown.length, 0);
+    // 会话存储：恰一条 read_file 工具结果，标记为自动放行、无错误归类；读调用不产生授权条目
+    const view = readStore(root, sessionId);
+    assert.deepEqual(marksOf(view, "read_file"), [
+      { gate: { outcome: "approved", approvedBy: "policy:auto" } },
+    ]);
+    assert.equal(view.grants.length, 0);
   } finally {
     cleanup();
   }

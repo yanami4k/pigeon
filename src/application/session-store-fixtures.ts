@@ -30,7 +30,6 @@ import {
   type SessionStoreFault,
   type SessionStoreWriter,
 } from "../pi-runtime/session-store.ts";
-import type { ChildSettledStatus, ForkTrigger, WorkerRole } from "../state/event-log.ts";
 import { newGrantId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { EvalVerdict } from "../state/runtime-events.ts";
 import {
@@ -41,6 +40,7 @@ import {
   SessionEntryType,
   type SessionHeaderMetadata,
 } from "../state/session-entries.ts";
+import type { ChildSettledStatus, ForkTrigger, WorkerRole } from "../state/session-payloads.ts";
 
 const ZERO_USAGE = {
   input: 0,

@@ -5,6 +5,9 @@
 // 落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
 // 深度 1：本编排器所在会话自己是 worker 时拒绝再派。上限只有轮次与墙钟，超限与取消都走 interrupt。
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
+import type { EventEnvelope } from "../state/events.ts";
+import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import type { RunStopCause } from "../state/session-entries.ts";
 import type {
   ChildResult,
   ChildSettledInput,
@@ -14,10 +17,7 @@ import type {
   WorkerLimits,
   WorkerRole,
   WorkerWorkspace,
-} from "../state/event-log.ts";
-import type { EventEnvelope } from "../state/events.ts";
-import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
-import type { RunStopCause } from "../state/session-entries.ts";
+} from "../state/session-payloads.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
 import {
@@ -29,7 +29,7 @@ import {
 } from "./worktree.ts";
 
 export const DEFAULT_WORKER_LIMITS: WorkerLimits = { maxTurns: 40, wallClockMs: 30 * 60_000 };
-// 自述摘要进 child.settled 的上限（全文在 worker 会话的内容文件里）
+// 自述摘要进 child.settled 的上限（全文在 worker 会话的消息里）
 export const WORKER_SUMMARY_MAX_CHARS = 2000;
 
 export class WorkerDepthError extends Error {}
@@ -41,7 +41,7 @@ export type WorkerRunStatus = "completed" | "failed" | "aborted" | "unknown";
 export interface WorkerRuntimeHandle {
   // runId：本次运行的 Run（运行面装起来并真正开跑时在场）；撞上限记录据此落在被中止的那次 Run 上
   run(task: string): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
-  // 撞上限时带上原因（决策 206：运行面据此把 Run 收尾的结束方式一次写全）；取消与外部中止不带
+  // 撞上限时带上原因（决策 182：运行面据此把 Run 收尾的结束方式一次写全）；取消与外部中止不带
   interrupt(cause?: RunStopCause): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
   // 末条 assistant 正文
@@ -49,9 +49,6 @@ export interface WorkerRuntimeHandle {
   // M6（决策 064）：模型交回的结构化内容（末条 assistant 正文能解析成对象时在场）；
   // 不实现即视为没有结构化结果，既有 worker 行为不变
   structured?(): unknown;
-  // M7（决策 072）：把撞到的上限写进 worker 自己的账本（run.limit-hit）；不实现即不留痕。
-  // 072 修订：只在运行确以中止收尾后调用，runId 指明被中止的那次 Run
-  recordLimitHit?(limit: "turn-limit" | "wall-clock-limit" | "token-limit", runId?: RunId): void;
   // M7（决策 077 / 079）：从已有消息续跑（分叉续跑）；不实现即不支持
   continueRun?(): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
   // 释放运行面并关闭 worker 会话文件
@@ -124,7 +121,7 @@ export function gitWorktreeWorkspaces(roots: {
   };
 }
 
-// 父会话的父子两族落盘口（JsonlEventLog 满足）
+// 父会话的派出与收尾落盘口（装配根接到父会话的会话存储）
 export interface ChildFamilySink {
   appendChildSpawned(input: ChildSpawnedInput): unknown;
   appendChildSettled(input: ChildSettledInput): unknown;
@@ -367,16 +364,8 @@ export class WorkerOrchestrator {
       if (run.status === "completed") {
         status = "completed";
       } else if (run.status === "aborted") {
+        // 上限中止在运行终态上只表现为中止；撞上限的原因随中止请求交给运行面，由 Run 收尾条目记下（072 修订）
         status = entry.cancelRequested ? "cancelled" : (entry.limitHit ?? "aborted");
-        // 072 修订：上限中止在运行终态上只表现为中止，标签靠这条记录判失败；
-        // 中止请求到达前模型已自然收尾（恰好用满最后一轮）的运行不走到这里，不写
-        if (entry.limitHit !== undefined && !entry.cancelRequested) {
-          try {
-            runtime.recordLimitHit?.(entry.limitHit, run.runId);
-          } catch (caught) {
-            this.#errors.push(caught);
-          }
-        }
       } else {
         status = "failed";
         error = run.errorMessage ?? "运行以未知终态结束";

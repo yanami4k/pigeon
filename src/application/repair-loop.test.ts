@@ -15,12 +15,20 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { locateSessionFile } from "../persistence/session-reader.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
-import { buildTaskAttempt } from "../state/episode.ts";
-import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
-import { repairStepOutcome } from "../state/repair-step.ts";
+import type { RunId } from "../state/ids.ts";
+import { SessionEntryType } from "../state/session-entries.ts";
+import {
+  type StoreSessionView,
+  storeAttemptLabel,
+  storeRepairStepOutcome,
+  storeRunFailure,
+  storeTaskAttempt,
+  storeToolOutcomes,
+} from "../state/session-judge.ts";
 import { runHeadless } from "./headless.ts";
 import { parseLaunchFlags, resolveRepairRounds } from "./launch-flags.ts";
 import { REPAIR_FEEDBACK_INSTRUCTION } from "./repair-loop.ts";
@@ -96,10 +104,11 @@ function edit(from: string, to: string): FakeReply {
 
 const done = (text = "改好了"): FakeReply => ({ text });
 
-function sessionOf(root: string, sessionId: string) {
-  return materializeSession(join(root, ".pigeon", "sessions"), sessionId as never, {
-    content: false,
-  });
+// 读新会话存储里的会话视图（会话必须存在）
+function sessionOf(root: string, sessionId: string): StoreSessionView {
+  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
+  return loaded.view;
 }
 
 // 某次模型调用收到的最后一条用户消息正文
@@ -140,37 +149,36 @@ test("回炉一轮修好：第一次验证失败、反馈发回同一会话，�
     assert.equal(result.verification?.verdict, "pass");
     assert.equal(result.label, "Passed");
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "fixed\n");
-    // 同一会话：两次 Run、两条验证记录，run.started 里冻结了回炉设定
-    const session = sessionOf(repo.root, result.sessionId);
-    assert.equal(session.runStarteds.length, 2);
+    // 同一会话：两次 Run、两条验证记录，Run 开始条目里冻结了回炉设定
+    const view = sessionOf(repo.root, result.sessionId);
+    assert.equal(view.runs.length, 2);
     assert.deepEqual(
-      session.runStarteds.map((record) => record.payload.repairRounds),
+      view.runs.map((run) => run.start.repairRounds),
       [3, 3]
     );
     assert.deepEqual(
-      session.attemptVerifieds.map((record) => record.verdict),
+      view.verifications.map((record) => record.data.verdict),
       ["fail", "pass"]
     );
-    assert.equal(result.runId, session.runStarteds[0]?.runId, "一步的身份是首个 Run");
+    assert.equal(result.runId, view.runs[0]?.runId, "一步的身份是首个 Run");
     // 整步标签：中间轮的失败不决定这一步的成败——从首个 Run 取值同样是整步结论
-    const firstRun = session.runStarteds[0]?.runId;
+    const firstRun = view.runs[0]?.runId;
     assert.ok(firstRun !== undefined);
-    assert.equal(labelAttempt(attemptOutcomeFacts(session, firstRun)), "Passed");
+    assert.equal(storeAttemptLabel(view, firstRun), "Passed");
     assert.equal(
-      buildTaskAttempt({ governanceRoot: repo.root, session, runId: firstRun }).label,
+      storeTaskAttempt({ governanceRoot: repo.root, view, runId: firstRun }).label,
       "Passed"
     );
-    assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).label, "Passed");
+    assert.equal(storeTaskAttempt({ governanceRoot: repo.root, view }).label, "Passed");
     assert.equal(result.turns, 4, "指标按整步汇总：两次 Run 共 4 轮");
-    // 对比尝试的轮次与账本里的工具调用同样按整步：两次 Run 各一次 edit_file
-    assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).turns, 4);
-    assert.equal(
-      session.runtimeEvents.filter(
-        (record) => record.kind === "tool.settled" && record.payload.toolName === "edit_file"
-      ).length,
-      2
+    // 对比尝试的轮次与会话里的工具调用同样按整步：两次 Run 各一次成功的 edit_file
+    assert.equal(storeTaskAttempt({ governanceRoot: repo.root, view }).turns, 4);
+    const edits = storeToolOutcomes(view).filter((outcome) => outcome.toolName === "edit_file");
+    assert.deepEqual(
+      edits.map((outcome) => [outcome.runId, outcome.failure]),
+      view.runs.map((run) => [run.runId, null])
     );
-    assert.deepEqual(repairStepOutcome(session), {
+    assert.deepEqual(storeRepairStepOutcome(view), {
       rounds: 1,
       verdict: "pass",
     });
@@ -199,9 +207,9 @@ test("回炉整步的失败分类取最后一个 Run：首个 Run 撞输出上�
       verify: VERIFY,
       repairRounds: 3,
     });
-    const session = sessionOf(repo.root, result.sessionId);
+    const view = sessionOf(repo.root, result.sessionId);
     assert.deepEqual(
-      session.classification.runs.map((entry) => entry.failure),
+      view.runs.map((run) => storeRunFailure(run)),
       [{ category: "business" }, null],
       "首个 Run 业务失败、回炉那一轮正常收尾"
     );
@@ -286,26 +294,31 @@ test("回炉三轮都失败：这一步以失败收尾，工作区保留 agent �
     // 开工忽略清单只为撤回而记，已停写
     assert.equal(git(repo.root, ["for-each-ref", "refs/pigeon/start-ignored/"]).trim(), "");
     // 失败由验证记录体现：这一步的结论取最后一次验证
-    const session = sessionOf(repo.root, result.sessionId);
-    assert.equal(session.runStarteds.length, 4);
+    const view = sessionOf(repo.root, result.sessionId);
+    assert.equal(view.runs.length, 4);
     assert.deepEqual(
-      session.attemptVerifieds.map((record) => record.verdict),
+      view.verifications.map((record) => record.data.verdict),
       ["fail", "fail", "fail", "fail"]
     );
-    assert.deepEqual(repairStepOutcome(session), { rounds: 3, verdict: "fail" });
+    assert.deepEqual(storeRepairStepOutcome(view), { rounds: 3, verdict: "fail" });
   } finally {
     repo.cleanup();
   }
 });
 
-// 把会话文件截到最后一条验证记录之前：即进程崩溃在"最后一个回炉 Run 结束之后、它的验证落盘之前"留下的账本
+// 把会话文件截到最后一条验证记录条目之前：即进程崩溃在"最后一个回炉 Run 结束之后、它的验证落盘之前"留下的会话文件
 function truncateBeforeLastVerification(root: string, sessionId: string): void {
-  const file = JsonlEventLog.filePathFor(join(root, ".pigeon", "sessions"), sessionId as never);
+  const located = locateSessionFile(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(located !== undefined, "会话存储里应有会话文件");
+  const file = located.path;
   const lines = readFileSync(file, "utf8").split("\n");
-  const cut = lines.findLastIndex(
-    (line) =>
-      line.trim() !== "" && (JSON.parse(line) as { kind?: string }).kind === "attempt.verified"
-  );
+  const cut = lines.findLastIndex((line) => {
+    if (line.trim() === "") {
+      return false;
+    }
+    const entry = JSON.parse(line) as { type?: string; customType?: string };
+    return entry.type === "custom" && entry.customType === SessionEntryType.Verification;
+  });
   assert.ok(cut > 0, "会话文件里应有验证记录");
   writeFileSync(file, `${lines.slice(0, cut).join("\n")}\n`);
 }
@@ -327,25 +340,21 @@ test("崩溃窗口：某轮回炉 Run 结束后、其验证落盘前中断——
     });
     assert.deepEqual(result.repair, { rounds: 1, verdict: "fail", closed: true }, "正常收尾为失败");
     truncateBeforeLastVerification(repo.root, result.sessionId);
-    const session = sessionOf(repo.root, result.sessionId);
-    // 两个 Run 都有运行结束记录，只有首个 Run 有验证记录（失败）
-    assert.equal(session.runStarteds.length, 2);
-    const [firstRun, lastRun] = session.runStarteds.map((record) => record.runId);
+    const view = sessionOf(repo.root, result.sessionId);
+    // 两个 Run 都有收尾条目，只有首个 Run 有验证记录（失败）
+    assert.equal(view.runs.length, 2);
+    const [firstRun, lastRun] = view.runs.map((run) => run.runId);
     assert.ok(firstRun !== undefined && lastRun !== undefined);
-    assert.equal(
-      session.runtimeEvents.filter((event) => event.kind === "run.ended").length,
-      2,
-      "最后一个 Run 已结束"
-    );
+    assert.equal(view.runs.filter((run) => run.end !== undefined).length, 2, "最后一个 Run 已结束");
     assert.deepEqual(
-      session.attemptVerifieds.map((record) => [record.target.runId, record.verdict]),
+      view.verifications.map((record) => [record.data.target.runId, record.data.verdict]),
       [[firstRun, "fail"]]
     );
     // 最后一个 Run 没有验证记录即未收尾、没有结论；上一轮的失败验证不作数
-    assert.deepEqual(repairStepOutcome(session), { rounds: 1 });
+    assert.deepEqual(storeRepairStepOutcome(view), { rounds: 1 });
     // 成败标签：中间轮的失败不决定整步，这一步现算为未知
-    assert.equal(labelAttempt(attemptOutcomeFacts(session, firstRun)), "Unknown");
-    assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).label, "Unknown");
+    assert.equal(storeAttemptLabel(view, firstRun), "Unknown");
+    assert.equal(storeTaskAttempt({ governanceRoot: repo.root, view }).label, "Unknown");
   } finally {
     repo.cleanup();
   }
@@ -377,7 +386,7 @@ test("验证无法判定（超时）：不进入回炉，按现有口径记为�
       "half\n",
       "无法判定时工作区照样保留"
     );
-    assert.deepEqual(repairStepOutcome(sessionOf(repo.root, result.sessionId)), {
+    assert.deepEqual(storeRepairStepOutcome(sessionOf(repo.root, result.sessionId)), {
       rounds: 0,
       verdict: "undetermined",
     });
@@ -410,7 +419,7 @@ test("预算耗尽：回炉各轮与首次共用同一个总预算，耗尽即�
     assert.ok(streamFn.calls.length <= 4, String(streamFn.calls.length));
     // 第 3 轮用满即中止，这一轮提议的改动没有执行：工作区保留首次 Run 改到的样子，不回到起点
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "w1\n");
-    assert.deepEqual(repairStepOutcome(sessionOf(repo.root, result.sessionId)), {
+    assert.deepEqual(storeRepairStepOutcome(sessionOf(repo.root, result.sessionId)), {
       rounds: 1,
       verdict: "fail",
     });
@@ -419,7 +428,7 @@ test("预算耗尽：回炉各轮与首次共用同一个总预算，耗尽即�
   }
 });
 
-test("缺省关闭：行为与现状一致——验证失败不回炉、不打快照，run.started 不带回炉设定", async () => {
+test("缺省关闭：行为与现状一致——验证失败不回炉、不打快照，Run 开始条目不带回炉设定", async () => {
   const repo = makeRepo();
   try {
     const streamFn = createFakeStreamFn({ replies: [edit("bug", "half"), done()] });
@@ -437,11 +446,11 @@ test("缺省关闭：行为与现状一致——验证失败不回炉、不打�
     assert.equal(result.verification?.verdict, "fail");
     assert.equal(result.label, "Failed");
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "half\n");
-    const session = sessionOf(repo.root, result.sessionId);
-    assert.equal(session.runStarteds.length, 1);
-    assert.equal(session.runStarteds[0]?.payload.repairRounds, undefined);
-    assert.equal(session.checkpoints.length, 0);
-    assert.equal(repairStepOutcome(session), undefined);
+    const view = sessionOf(repo.root, result.sessionId);
+    assert.equal(view.runs.length, 1);
+    assert.equal(view.runs[0]?.start.repairRounds, undefined);
+    assert.equal(view.runs[0]?.checkpoints.length, 0);
+    assert.equal(storeRepairStepOutcome(view), undefined);
   } finally {
     repo.cleanup();
   }
@@ -610,8 +619,8 @@ test("回炉途中出现异常：结果仍带回炉字段并标明这一步未�
     });
     assert.equal(result.status, "failed");
     assert.match(result.errorMessage ?? "", /运行面故障/);
-    // 回炉那一轮没开起来：轮数按账本的推法（Run 数减 1）为 0
-    assert.equal(sessionOf(repo.root, result.sessionId).runStarteds.length, 1);
+    // 回炉那一轮没开起来：轮数按会话记录的推法（Run 数减 1）为 0
+    assert.equal(sessionOf(repo.root, result.sessionId).runs.length, 1);
     assert.deepEqual(result.repair, {
       rounds: 0,
       verdict: "fail",
@@ -649,19 +658,16 @@ test("token 预算整步共用：首次与回炉一轮各自都没到上限，�
       repairRounds: 3,
       maxTokens: 1200,
     });
-    const session = sessionOf(repo.root, result.sessionId);
-    const [firstRun, secondRun] = session.runStarteds.map((record) => record.runId);
-    const tokensOf = (runId: unknown) =>
-      session.runtimeEvents
-        .filter((event) => event.kind === "turn.completed" && event.runId === runId)
-        .reduce(
-          (sum, event) =>
-            sum + ((event.payload as { usage?: { totalTokens?: number } }).usage?.totalTokens ?? 0),
-          0
-        );
-    assert.ok(tokensOf(firstRun) < 1200, String(tokensOf(firstRun)));
-    assert.ok(tokensOf(secondRun) < 1200, String(tokensOf(secondRun)));
-    assert.equal(session.runStarteds.length, 2, "不开第 2 轮回炉");
+    const view = sessionOf(repo.root, result.sessionId);
+    const [firstRun, secondRun] = view.runs.map((run) => run.runId);
+    // 一个 Run 各轮助手消息的 token 用量之和
+    const tokensOf = (runId: RunId | undefined) =>
+      (view.runs.find((run) => run.runId === runId)?.messages ?? [])
+        .filter((ref) => ref.message.role === "assistant")
+        .reduce((sum, ref) => sum + (ref.message.usage?.totalTokens ?? 0), 0);
+    assert.ok(tokensOf(firstRun) > 0 && tokensOf(firstRun) < 1200, String(tokensOf(firstRun)));
+    assert.ok(tokensOf(secondRun) > 0 && tokensOf(secondRun) < 1200, String(tokensOf(secondRun)));
+    assert.equal(view.runs.length, 2, "不开第 2 轮回炉");
     assert.equal(result.repair?.rounds, 1);
     assert.equal(result.repair?.verdict, "fail");
     assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "w1\n");
@@ -691,15 +697,19 @@ test("墙钟预算计入验证耗时：Run 内没到点、验证期间到点，�
       repairRounds: 3,
       wallClockMs: 5000,
     });
-    const session = sessionOf(repo.root, result.sessionId);
-    // 会话确实读到了（否则下面"没有撞上限记录"恒真）：一个 Run、一条失败的验证记录
-    assert.equal(session.runStarteds.length, 1);
+    const view = sessionOf(repo.root, result.sessionId);
+    // 一个 Run、一条失败的验证记录
+    assert.equal(view.runs.length, 1);
     assert.deepEqual(
-      session.attemptVerifieds.map((record) => record.verdict),
+      view.verifications.map((record) => record.data.verdict),
       ["fail"]
     );
     assert.equal(result.status, "completed", "首个 Run 以完成收尾，不是被墙钟中止");
-    assert.equal(session.limitHits.length, 0, "首个 Run 在墙钟到点之前正常收尾");
+    assert.deepEqual(
+      view.runs.map((run) => run.end?.ending),
+      ["completed"],
+      "首个 Run 在墙钟到点之前正常收尾"
+    );
     assert.equal(streamFn.calls.length, 2, "不开回炉轮");
     assert.equal(result.repair?.rounds, 0);
     assert.equal(result.repair?.verdict, "fail");
