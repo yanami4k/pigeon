@@ -60,8 +60,8 @@ TRACKED_FIELDS = tuple(p for col, p in FIELD_MAP.items() if col not in ("task", 
     "searchUsage",
 )
 
-# 暂定名、待跑批器二随后的提交确认：无法建立基线的标记；记忆使用与检索的计数（推送记忆与复盘接入后才有）
-PENDING_FIELDS = ("baselineUnavailable", "memoryUsage", "searchUsage")
+# 暂定名：记忆使用与检索的计数（推送记忆与复盘接入后才有）
+PENDING_FIELDS = ("memoryUsage", "searchUsage")
 
 # 记忆使用的计数（推送记忆实现后才有）：对象里的每个数值字段展开为 mem_<键> / search_<键>
 USAGE_OBJECTS = {"memoryUsage": "mem_", "searchUsage": "search_"}
@@ -109,6 +109,9 @@ def row_to_record(row: dict[str, Any]) -> dict[str, Any] | None:
         rec[col] = _num(_get(row, path))
     if rec["task"] is None or rec["pass_no"] is None:
         return None
+    # baselineUnavailable 为 string | null：非空即为无法建立基线的原因文字，记 1；null 或空串记 0。不按布尔真假判断
+    reason = _get(row, FIELD_MAP["baseline_unavailable"])
+    rec["baseline_unavailable"] = 1.0 if (isinstance(reason, str) and reason.strip() != "") else 0.0
     for obj_name, prefix in USAGE_OBJECTS.items():
         obj = row.get(obj_name)
         if isinstance(obj, dict):

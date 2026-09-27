@@ -79,6 +79,25 @@ class TestReader:
         r = row_to_record(runner_row("00", 1, 1, 1, 2, judging=None, gateway=None))
         assert r["f_total"] is None and r["score"] is None and r["cost"] is None and r["review_turns"] is None
 
+    @pytest.mark.parametrize(
+        "value,want",
+        [("叠放运行拿不全用例", 1.0), (None, 0.0), ("", 0.0), ("  ", 0.0)],
+    )
+    def test_baseline_unavailable_reason_string(self, value, want):
+        # 跑批器二（7b91a71）的 baselineUnavailable 为 string | null：非空即排除
+        assert row_to_record(runner_row("00", 1, 1, 1, 2, baselineUnavailable=value))["baseline_unavailable"] == want
+
+    def test_baseline_unavailable_reason_excludes_task(self, tmp_path):
+        f = tmp_path / "results.jsonl"
+        rows = [runner_row(c, 1, 1, 1, 2) for c in ("00", "01", "10", "11")]
+        rows += [runner_row(c, 2, 1, 0, 0, judging=None, baselineUnavailable="叠放运行拿不全用例") for c in ("00", "01", "10", "11")]
+        write_jsonl(f, rows)
+        df, _ = load_table([f])
+        from pigeon_analysis.primary import select_tasks
+        sel = select_tasks(df)
+        assert sel["baselineUnavailableTasks"] == [2]
+        assert sel["missingTasks"] == []
+
     def test_non_task_and_unknown_condition_skipped(self):
         assert row_to_record(runner_row("00", 1, 1, 1, 1, kind="maintenance")) is None
         assert row_to_record({**runner_row("00", 1, 1, 1, 1), "condition": "full"}) is None
