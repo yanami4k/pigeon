@@ -151,6 +151,8 @@ interface RuntimeSurface {
   temperature?: number;
   // M9：任务源给的系统指令（追加进 system prompt 并随之冻结）；同上，只有无父会话的运行面会给
   taskDirective?: string;
+  // 决策 193：能否检索历史会话（缺省开着）；同上，只有无父会话的运行面会给
+  sessionSearch?: boolean;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
@@ -243,6 +245,8 @@ export interface DetachedRuntimeRequest {
   maxOutputTokens?: number;
   temperature?: number;
   taskDirective?: string;
+  // 决策 193：能否检索历史会话（缺省开着）
+  sessionSearch?: boolean;
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
@@ -297,6 +301,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
+    ...(surface.sessionSearch !== undefined ? { sessionSearch: surface.sessionSearch } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),

@@ -1,5 +1,6 @@
-// 延续式跑批的身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：输出目录下的 identity.json。core 为参与比对的身份——仓库、清单摘要、镜像标识、预算、
-// 条件、试跑的每流步数、两种 agent 的模型与推理参数（最简 agent 另记 mini-swe-agent 与 litellm 的版本），续跑时任何一项
+// 提交流跑批的身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：输出目录下的 identity.json。core 为参与比对的身份——仓库、清单摘要、镜像标识、预算、
+// 条件、步的范围（193、215、216 的固定起点与题的接法）、题面格式（198、213）、试跑的题数、两种 agent 的模型与推理参数
+// （最简 agent 另记 mini-swe-agent 与 litellm 的版本），续跑时任何一项
 // 与已写的不同即拒绝，避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降、跑批器代码
 // 版本另记在每条结果行上；续跑时路数、账号数或各账号并发上限有变即在 infoLog 追加一条）。结果行带 core 的摘要，
 // 据此认出每行属于哪一次身份
@@ -16,6 +17,10 @@ export interface StreamRunIdentity {
     image: string;
     budget: StepBudget;
     conditions: readonly string[];
+    // 步的范围与起点的取法：清单相同而题的接法或起点不同，结果不能混
+    stepScope: string;
+    // 题面格式（测试文件路径或用例名）：清单相同而题面不同，结果不能混
+    promptFormat: string;
     maxSteps: number | null;
     agents: {
       pigeon?: {

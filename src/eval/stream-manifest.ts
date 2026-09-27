@@ -62,9 +62,10 @@ export interface StreamStep {
   // 红测试对合并时的两个提交（先红后修），commit 为后者
   mergedCommits?: readonly string[];
   subject: string;
-  // 提交信息全文（红测试对为两段相接）；落地时程序以它提交（148）
+  // 提交信息全文（红测试对为两段相接）
   message: string;
-  // 题：提交信息加测试文件全文；维护步：提交信息；其余为 null
+  // 出清单时拼好的题面（题：本题测试文件路径、提交信息加测试文件全文；维护步：提交信息；其余为 null）。198 起跑批器
+  // 不用它，按题面格式现拼（见 taskPromptOf）
   prompt: string | null;
   // 由程序从人的提交里写入工作区的文件：测试、测试辅助、环境文件；套用步为该提交的全部相关文件
   humanFiles: readonly HumanFileOp[];
@@ -122,6 +123,42 @@ export function buildTaskPrompt(
   parts.push(message.trimEnd());
   for (const t of tests) parts.push(`--- ${t.path} ---\n${t.content.trimEnd()}`);
   return `${parts.join("\n\n")}\n`;
+}
+
+// 题面格式（198、213）：提交信息加应通过的测试名单，不附测试内容。名单先给测试文件路径（test-files）；给用例名
+// （test-cases）作为校准做成率过低时的备用，要先算出人在该步使其由失败变通过的用例，由跑批器二接上
+export type TaskPromptFormat = "test-files" | "test-cases";
+export const TASK_PROMPT_FORMATS: readonly TaskPromptFormat[] = ["test-files", "test-cases"];
+export const DEFAULT_TASK_PROMPT_FORMAT: TaskPromptFormat = "test-files";
+
+// 名单前的一行说明：名单里的测试（新写的或改过的）此刻不在工作区里或还是旧版本，判题时才放入
+const SHOULD_PASS_HEADINGS: Record<TaskPromptFormat, string> = {
+  "test-files":
+    "Test files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):",
+  "test-cases":
+    "Test cases that should pass after the change (in new or updated test files; their final versions are not in the repository and are added when the change is checked):",
+};
+
+// 跑批器拼的题面：提交信息原文，其后一行说明与应通过的测试名单（每行一个）；名单为空时只有提交信息
+export function taskPromptOf(
+  message: string,
+  format: TaskPromptFormat,
+  shouldPass: readonly string[]
+): string {
+  const parts = [message.trimEnd()];
+  if (shouldPass.length > 0)
+    parts.push(`${SHOULD_PASS_HEADINGS[format]}\n${shouldPass.join("\n")}`);
+  return `${parts.join("\n\n")}\n`;
+}
+
+// 固定起点的步（215、216）：清单里的题按时间接成一条流，维护步、套用步与跳过步都不跑，重置点不再切分
+export const TASK_CHAIN_ID = "tasks";
+// 身份头里记的步的范围
+export const TASK_CHAIN_SCOPE =
+  "fixed-start: all tasks chained in time order; non-task steps not run";
+
+export function chainedTasks(manifest: StreamManifest): StreamStep[] {
+  return manifest.steps.filter((s) => s.kind === "task");
 }
 
 export type ReadHumanFile = (sha: string, path: string) => string;

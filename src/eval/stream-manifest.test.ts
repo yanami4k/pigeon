@@ -5,11 +5,16 @@ import {
   buildTaskPrompt,
   type CommitFacts,
   type CommitFileChange,
+  chainedTasks,
   composeStreamManifest,
   countStepKinds,
+  DEFAULT_TASK_PROMPT_FORMAT,
   type RepoProfile,
   stepsOf,
+  TASK_CHAIN_ID,
+  TASK_PROMPT_FORMATS,
   type TestProbe,
+  taskPromptOf,
 } from "./stream-manifest.ts";
 import {
   classifyPigeonFile,
@@ -285,6 +290,44 @@ test("缺探针或缺格式化比对即报错，不默认定性；只改测试�
   );
   assert.throws(() => compose([commit("t1", [change("src/a.test.ts")])]), /缺判题探针/);
   assert.throws(() => compose([commit("c1", [change("src/a.ts")])]), /缺格式化比对/);
+});
+
+test("固定起点的步（215、216）：清单里的题按时间接成一条流，重置点不切分，维护步、套用步、跳过步与重置步都不在其中", () => {
+  const big = Array.from({ length: 21 }, (_, i) => change(`docs/f${i}.md`));
+  const m = compose([
+    commit("a", [change("src/a.ts"), change("src/a.test.ts")], { probe: PASS }),
+    commit("m", [change("src/m.ts")], { formatOnly: false }),
+    commit("t", [change("src/t.test.ts")], { probe: GREEN }),
+    commit("move", big),
+    commit("b", [change("src/b.ts"), change("src/b.test.ts")], { probe: PASS }),
+    commit("d", [change("README.md")]),
+  ]);
+  assert.deepEqual(
+    m.steps.map((s) => s.kind),
+    ["task", "maintenance", "apply", "reset", "task", "skip"]
+  );
+  assert.deepEqual(
+    chainedTasks(m).map((s) => [s.seq, s.commit, s.parent]),
+    [
+      [1, "a", "a-p"],
+      [5, "b", "b-p"],
+    ]
+  );
+  assert.equal(TASK_CHAIN_ID, "tasks");
+});
+
+test("跑批器的题面（198、213）：提交信息原文，其后一行说明与应通过的测试名单，不附测试内容；两种名单的说明各自点明是文件还是用例；名单为空时只有提交信息", () => {
+  const files = taskPromptOf("Add a\n\nBody\n", "test-files", ["src/a.test.ts", "src/b.test.ts"]);
+  assert.match(
+    files,
+    /^Add a\n\nBody\n\nTest files that should pass after the change \([^\n]*\):\nsrc\/a\.test\.ts\nsrc\/b\.test\.ts\n$/
+  );
+  const cases = taskPromptOf("Add a", "test-cases", ["src/a.test.ts::works"]);
+  assert.match(cases, /^Add a\n\nTest cases that should pass after the change \([^\n]*\):\n/);
+  assert.match(cases, /\nsrc\/a\.test\.ts::works\n$/);
+  assert.equal(taskPromptOf("Add a\n", "test-files", []), "Add a\n");
+  assert.deepEqual([...TASK_PROMPT_FORMATS], ["test-files", "test-cases"]);
+  assert.equal(DEFAULT_TASK_PROMPT_FORMAT, "test-files");
 });
 
 test("重置点切流：重置步的提交为下一条流的起点，重置步不属于任何流", () => {

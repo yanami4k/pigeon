@@ -293,8 +293,8 @@ export interface StreamRepoRuntime {
   ): Promise<CaseRun>;
   // 格式化（只做格式与 import 整理，不含 lint 自动修复），就地改写给定文件
   formatCommand(files: readonly string[]): string[];
-  // 预装在工作区根、被 .gitignore 忽略的依赖目录；测量副本以链接接上
-  depsLinks: readonly string[];
+  // 判题与测量之前的清理（195 的补口）：没有这类机制的运行方式不给
+  judgeHygiene?: JudgeHygiene;
   // 写入人的环境文件后执行：按当前依赖声明离线切换到对应的冻结依赖组合；没有则为 null
   envSyncCommand: readonly string[] | null;
   // 按"该步人的提交"切 lint 环境（ruff、mypy 等静态检查所用）：不看 agent 改过的依赖声明。没有按提交的 lint 环境即缺省
@@ -314,6 +314,24 @@ export interface StreamRepoRuntime {
   // 即以 root 删掉重切，仍不对则这一步作废（判题、测量、验证门以镜像的 PATH 用这些链接）
   envLinks?: readonly { link: string; under: string }[];
 }
+
+// 判题与测量一律按人的版本（195）：agent 放下的、会在解释器启动时被自动加载的文件（find -name 的样式），不在人在该步
+// 树里的一律删掉；静态检查工具读的配置文件名，工作区里的写回人的版本、人树里没有的删掉（这类工具还按子目录就近取配置）；
+// 家目录下同类的用户级文件与目录（用户级 site-packages、静态检查工具的用户级配置）一律删掉
+export interface JudgeHygiene {
+  startupHooks: readonly string[];
+  lintConfigs: readonly string[];
+  homePaths: readonly string[];
+}
+
+// strands：Python 启动时自动导入 sitecustomize 与 usercustomize（源文件、字节码、扩展模块或包目录，放在 sys.path 上任一处
+// 即生效，跑 pytest 时 src 在 PYTHONPATH 上）；ruff 与 mypy 读 pyproject.toml、ruff.toml、.ruff.toml、mypy.ini、
+// .mypy.ini、setup.cfg；用户级 site-packages 在 ~/.local/lib 下，用户级配置在 ~/.config/ruff、~/.config/mypy 与 ~/.mypy.ini
+export const STRANDS_JUDGE_HYGIENE: JudgeHygiene = {
+  startupHooks: ["sitecustomize", "sitecustomize.*", "usercustomize", "usercustomize.*"],
+  lintConfigs: ["pyproject.toml", "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", "setup.cfg"],
+  homePaths: [".local/lib", ".config/ruff", ".config/mypy", ".mypy.ini"],
+};
 
 async function readOrNull(ws: StreamWorkspace, file: string): Promise<string | null> {
   try {
@@ -398,7 +416,6 @@ export const pigeonRuntime: StreamRepoRuntime = {
     "--linter-enabled=false",
     ...files,
   ],
-  depsLinks: ["node_modules"],
   envSyncCommand: null,
 };
 
@@ -497,7 +514,7 @@ export const strandsRuntime: StreamRepoRuntime = {
     "sh",
     ...inStrands(files),
   ],
-  depsLinks: [],
+  judgeHygiene: STRANDS_JUDGE_HYGIENE,
   // 镜像里的选择脚本：按 strands-py/pyproject.toml 选第一套满足约束的冻结依赖，切换 /opt/venv 链接
   envSyncCommand: ["/opt/stream/select-env", "strands-py/pyproject.toml"],
   // 148 修订：跑批器切环境按人在该步的依赖声明，不按 agent 改过的 pyproject

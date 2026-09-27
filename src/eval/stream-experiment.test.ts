@@ -126,12 +126,35 @@ test("输出目录的锁在读清单、写身份头、起网关探测之前取�
       repoDir: dir,
       image: "img",
       outDir,
-      conditions: ["full" as const],
+      conditions: ["search-only" as const],
       gateway: { accounts: [{ key: "k", concurrency: 2 }], modelId: "m" },
     };
     await assert.rejects(
       runStreamExperiment({ ...common, budget: DEFAULT_STEP_BUDGET }),
       /正被另一个跑批进程使用/
+    );
+    assert.equal(existsSync(join(outDir, "identity.json")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("题面给用例名（213 的备用）还没接上：读清单、写身份头、起网关之前即拒绝开跑并说明", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-prompt-format-"));
+  try {
+    const outDir = join(dir, "out");
+    await assert.rejects(
+      runStreamExperiment({
+        manifestFile: join(dir, "missing.json"),
+        repoDir: dir,
+        image: "img",
+        outDir,
+        conditions: ["search-only"],
+        gateway: { accounts: [{ key: "k", concurrency: 2 }], modelId: "m" },
+        budget: DEFAULT_STEP_BUDGET,
+        promptFormat: "test-cases",
+      }),
+      /给用例名的题面尚未实现/
     );
     assert.equal(existsSync(join(outDir, "identity.json")), false);
   } finally {

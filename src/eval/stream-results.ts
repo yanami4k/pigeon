@@ -1,23 +1,25 @@
-// 延续式实验的结果行（决策 145、142、143、144）：每条流、每个条件、每一步一行，逐行追加到 results.jsonl，
+// 提交流实验的结果行（决策 145、142、143、144、193）：每个条件、每一步一行，逐行追加到 results.jsonl，
 // 与外部基准跑批同一种落盘与续跑做法（写完即追加；撕裂的末行读时丢弃；按键取断点）。
 // 被限额打断的一步整题作废、不留行（144），因此这里没有错误行：有行即该步已完成。
 import { existsSync, readFileSync } from "node:fs";
 import type { TurnUsage } from "../state/runtime-events.ts";
-import type { FailureAttribution } from "./stream-attribution.ts";
 import type { HarnessRef } from "./stream-harness.ts";
 import type { StreamStepKind } from "./stream-manifest.ts";
 import type { CountPassRate } from "./stream-measure.ts";
 
-export type StreamCondition = "full" | "no-memory" | "no-gate" | "minimal";
+// 条件（193、194、217）：记忆的 2 × 2——能否检索历史会话 × 有无推送记忆，四格都开验证门与回炉；另加最简 agent 作外部参照
+export type StreamCondition = "search-push" | "search-only" | "push-only" | "neither" | "minimal";
 
 export const STREAM_CONDITIONS: readonly StreamCondition[] = [
-  "full",
-  "no-memory",
-  "no-gate",
+  "search-push",
+  "search-only",
+  "push-only",
+  "neither",
   "minimal",
 ];
 
-// 结果：题与维护步按判定记 passed / failed；套用步记 applied；跳过步记 skipped
+// 结果：题按判定记 passed / failed；依赖环境选不出而作废的步记 skipped。固定起点（215）下维护步、套用步与跳过步
+// 都不跑，applied 与维护步的判定只出现在旧结果行里
 export type StreamStepOutcome = "passed" | "failed" | "applied" | "skipped";
 
 export interface LimitPauseRecord {
@@ -36,9 +38,17 @@ export interface StreamResultLine {
   kind: StreamStepKind;
   commit: string;
   outcome: StreamStepOutcome;
-  // 本步结束后工作区的 HEAD（落地后的新提交，跳过时为本步起点）；续跑时据此核对容器
-  head: string;
-  // 本步是否做了判定（题与维护步为 true）
+  // 本步的起点：人在该步之前的代码（step.parent，193、212 固定起点）
+  start: string;
+  // agent 在这一步的改动（相对起点的 git diff，含新建文件）存在哪里：输出目录下的相对路径；没跑 agent 为 null
+  diff: string | null;
+  // 为这一步新开干净容器（建容器、送入起点、清历史自验）的毫秒；没开容器为 null
+  envOpenMs: number | null;
+  // 延续式（193 之前）的旧结果行才有：本步结束后的 HEAD、回归数与失败归因。新行不写，只读兼容
+  head?: string;
+  regressions?: number | null;
+  attribution?: string | null;
+  // 本步是否做了判定（题为 true）
   judged: boolean;
   // 回炉：未开回炉的条件为 null
   repairRounds: number | null;
@@ -67,7 +77,6 @@ export interface StreamResultLine {
     humanRuns: BaselineRunFacts[];
     humanSlowest: { id: string; seconds: number } | null;
   } | null;
-  regressions: number | null;
   quality: {
     typeErrors: number | null;
     formatErrors: number | null;
@@ -80,7 +89,6 @@ export interface StreamResultLine {
   // agent 用时；整步用时
   agentWallMs: number;
   wallMs: number;
-  attribution: FailureAttribution | null;
   limitPauses: LimitPauseRecord[];
   // 经网关时本步的模型请求：等空闲账号的累计毫秒、各账号成功转发的次数（下标 0 为账号 1，不记 key）、
   // 同时在途的请求数峰值、花费；没跑 agent 或不经网关为 null
@@ -120,7 +128,9 @@ export const STREAM_RESULT_FIELDS = [
   "kind",
   "commit",
   "outcome",
-  "head",
+  "start",
+  "diff",
+  "envOpenMs",
   "judged",
   "repairRounds",
   "finalVerdict",
@@ -130,22 +140,26 @@ export const STREAM_RESULT_FIELDS = [
   "runIdentity",
   "agentSettings",
   "fullPassRate",
-  "regressions",
   "quality",
   "status",
   "turns",
   "usage",
   "agentWallMs",
   "wallMs",
-  "attribution",
   "limitPauses",
   "gateway",
   "admissionWaitMs",
   "harnessRef",
 ] as const;
 
-// 旧结果行才带、新行不再写的字段（决策 173）：读取与报告照常接受
-export const LEGACY_STREAM_RESULT_FIELDS = ["reverted", "repairBudgetExhausted"] as const;
+// 旧结果行才带、新行不再写的字段（决策 173 的撤回字段；193 固定起点之前的 HEAD、回归数与失败归因）：读取照常接受
+export const LEGACY_STREAM_RESULT_FIELDS = [
+  "reverted",
+  "repairBudgetExhausted",
+  "head",
+  "regressions",
+  "attribution",
+] as const;
 
 export interface StreamJobId {
   stream: string;

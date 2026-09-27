@@ -29,10 +29,13 @@ import {
   composeStreamManifest,
   markHumanGateFailures,
   type StreamManifest,
+  TASK_CHAIN_SCOPE,
 } from "./stream-manifest.ts";
+import { learnedDirOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
 import { gateFromSteps, runJunitOnce, strandsRuntime } from "./stream-profiles.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
+  CONDITION_SPECS,
   commandDigest,
   compareRuns,
   DEFAULT_STEP_BUDGET,
@@ -44,6 +47,7 @@ import {
   type StepAgent,
   type StepAgentInput,
   type StepAgentResult,
+  type StreamEnvFactory,
   syncEnv,
 } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
@@ -61,8 +65,12 @@ interface Toy {
 }
 
 // 人的历史：起点 → 题 A（新建 a，并把已有的 base 测试改成也依赖 a）→ 维护步 → 只改文档（跳过）
-// → 只改测试（套用，base 测试不再依赖 a）→ 题 B（依赖 a）。keep 测试此后人不再改
-async function toy(aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`): Promise<Toy> {
+// → 只改测试（套用，base 测试不再依赖 a）→ 题 B（依赖 a）。keep 测试此后人不再改。固定起点下只跑两道题：
+// 第 1 步（起点为 Start）与第 5 步（起点为"Tweak base test"）
+async function toy(
+  aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`,
+  extraStart: Record<string, string> = {}
+): Promise<Toy> {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-runner-"));
   const dir = join(base, "human");
   const commit = toyRepo(dir);
@@ -71,6 +79,7 @@ async function toy(aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`): Promise<Toy> 
       "src/base.txt": "base\n",
       "src/base.test.sh": "grep -q base src/base.txt\n",
       "src/keep.test.sh": "true\n",
+      ...extraStart,
     },
     "Start"
   );
@@ -147,6 +156,13 @@ function scriptedAgent(script: Script): StepAgent & { calls: StepAgentInput[] } 
   };
 }
 
+// 两道题都做对的写法
+const solve: Script = (input) => {
+  if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+  if (input.step.seq === 5) write(input.target.root, { "src/b.txt": "beta\n" });
+  return undefined;
+};
+
 function write(root: string, files: Record<string, string>): void {
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -163,22 +179,32 @@ function options(t: Toy, overrides: Partial<Parameters<typeof runStreams>[0]>) {
     agents: {},
     reference: t.reference,
     outDir: join(t.base, "out"),
-    conditions: ["no-gate" as const],
+    conditions: ["neither" as const],
     harnessRef: { commit: "test", dirty: false },
     ...overrides,
   };
 }
 
-describe("延续式跑批（假 agent、本地假容器）", { concurrency: true }, () => {
-  test("去掉验证门与回退：逐步落地、恢复被改的测试、规整 agent 自己的提交、全量测量与类型分布", async () => {
+// 全量测量跑人在该步的全部测试（含 keep），判题只跑本题的测试：据此分开两种调用
+const isMeasure = (tests: readonly string[]) => tests.includes("src/keep.test.sh");
+
+describe("固定起点跑批（假 agent、本地假容器）", { concurrency: true }, () => {
+  test("固定起点：只跑题（维护步、套用步、跳过步不跑），每步从人在该步之前的代码新开干净环境，agent 上一步的改动不带进下一步；题面为提交信息加应通过的测试文件路径、不附内容；人在该步新写或改过的测试开工时不在、判题时放入；每步存下 agent 的改动；结果行记起点与开容器耗时", async () => {
     const t = await toy();
     try {
+      const seen: Record<number, { a: boolean; b: boolean; baseTest: string; stray: boolean }> = {};
       const agent = scriptedAgent((input) => {
         const root = input.target.root;
+        seen[input.step.seq] = {
+          a: existsSync(join(root, "src", "a.test.sh")),
+          b: existsSync(join(root, "src", "b.test.sh")),
+          baseTest: readFileSync(join(root, "src", "base.test.sh"), "utf8"),
+          stray: existsSync(join(root, "src", "agent.test.sh")),
+        };
         if (input.step.seq === 1) {
           write(root, {
             "src/a.txt": "alpha\n",
-            // 篡改旧测试、自建测试、自己提交：都要被程序兜住
+            // 篡改旧测试、自建测试、自己提交：判题前都要被程序兜住，也都不带进下一步
             "src/keep.test.sh": "exit 0\n",
             "src/agent.test.sh": "true\n",
           });
@@ -195,76 +221,82 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             "agent wip"
           );
         }
-        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
         if (input.step.seq === 5) write(root, { "src/b.txt": "beta\n" });
         return undefined;
       });
       const summary = await runStreams(options(t, { agents: { pigeon: agent } }));
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 5 }]);
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 5 }]);
       const rows = readStreamResults(summary.resultsFile);
       assert.deepEqual(
-        rows.map((r) => [r.seq, r.kind, r.outcome, r.attribution]),
+        rows.map((r) => [r.seq, r.kind, r.outcome, r.start]),
         [
-          [1, "task", "passed", null],
-          [2, "maintenance", "passed", null],
-          [3, "skip", "skipped", null],
-          [4, "apply", "applied", null],
-          [5, "task", "passed", null],
+          [1, "task", "passed", t.commits[0]],
+          [5, "task", "passed", t.commits[4]],
         ]
       );
-      // agent 只在题与维护步上被调用，题面为提交信息加测试全文
       assert.deepEqual(
         agent.calls.map((c) => c.step.seq),
-        [1, 2, 5]
+        [1, 5],
+        "agent 只在题上被调用"
       );
+      // 开工时：人在该步新写的测试不在，改过的测试还是起点的版本；上一步 agent 的东西不在
+      assert.deepEqual(seen[1], {
+        a: false,
+        b: false,
+        baseTest: "grep -q base src/base.txt\n",
+        stray: false,
+      });
+      assert.deepEqual(seen[5], {
+        a: true,
+        b: false,
+        baseTest: "grep -q base src/base.txt && true\n",
+        stray: false,
+      });
+      // 题面：提交信息原文，其后一行说明与应通过的测试文件路径，不附测试内容
       assert.match(
         agent.calls[0]?.prompt ?? "",
-        /^src\/a\.test\.sh\nsrc\/base\.test\.sh\n\nAdd alpha\n\nCreate src\/a\.txt\n\n--- src\/a\.test\.sh ---/
+        /^Add alpha\n\nCreate src\/a\.txt\n\nTest files that should pass[^\n]*\nsrc\/a\.test\.sh\nsrc\/base\.test\.sh\n$/
       );
+      assert.doesNotMatch(agent.calls[0]?.prompt ?? "", /grep|---/);
+      // 每步的改动存成 diff：agent 提交了的与没提交的都在；判题时写入的人的测试不在
+      const diff1 = readFileSync(join(t.base, "out", rows[0]?.diff ?? "missing"), "utf8");
+      assert.match(diff1, /^\+alpha$/m);
+      assert.match(diff1, /^diff --git a\/src\/keep\.test\.sh/m);
+      assert.match(diff1, /^diff --git a\/src\/agent\.test\.sh/m);
+      assert.doesNotMatch(diff1, /a\.test\.sh b\/src\/a\.test\.sh/);
+      assert.equal(rows[0]?.diff, "streams/tasks-neither-1/diffs/step-1.diff");
+      assert.ok(rows.every((r) => typeof r.envOpenMs === "number" && r.envOpenMs >= 0));
+      for (const field of ["head", "regressions", "attribution", "reverted"]) {
+        assert.ok(
+          rows.every((r) => !(field in r)),
+          `新行不写 ${field}`
+        );
+      }
       const last = rows.at(-1);
       assert.deepEqual(last?.fullPassRate?.byCount, { passed: 4, total: 4, rate: 1 });
       assert.deepEqual(last?.fullPassRate?.byTask, { passed: 2, total: 2, rate: 1 });
       assert.deepEqual(last?.quality, { typeErrors: 0, formatErrors: null, layerViolations: null });
-      assert.equal(rows[2]?.head, rows[1]?.head, "跳过步不落地");
+      // 第 1 步的全量测量：agent 篡改的 keep 测试已换回人的版本、它自建的测试不在
+      assert.deepEqual(rows[0]?.fullPassRate?.byCount, { passed: 3, total: 3, rate: 1 });
       // 分步验证配置写进作业的治理根，形状与 .pigeon/verify.json 一致
       assert.deepEqual(
         JSON.parse(
           readFileSync(
-            join(t.base, "out", "streams", "s1-no-gate-1", ".pigeon", "verify.json"),
+            join(t.base, "out", "streams", "tasks-neither-1", ".pigeon", "verify.json"),
             "utf8"
           )
         ),
         { version: 1, steps: toyRuntime.verifySteps, timeoutMs: 1_800_000 }
       );
-      assert.deepEqual(rows[2]?.fullPassRate, rows[1]?.fullPassRate, "跳过步沿用上一步的测量");
-      // 落地的历史：起点之上一步一个提交，提交信息为人的提交信息，改动的测试被恢复、自建的测试保留
-      const bundle = readFileSync(join(t.base, "out", "streams", "s1-no-gate-1", "history.bundle"));
-      const check = join(t.base, "check");
-      mkdirSync(check);
-      git(check, "init", "-q");
-      writeFileSync(join(check, "h.bundle"), bundle);
-      git(check, "fetch", "-q", "h.bundle", `${last?.head}:refs/heads/main`);
-      git(check, "-c", "core.autocrlf=false", "checkout", "-q", "main");
-      assert.deepEqual(git(check, "log", "--format=%s", `${t.commits[0]}..main`).split("\n"), [
-        "Add beta",
-        "Tweak base test",
-        "Bump base",
-        "Add alpha",
-      ]);
-      assert.equal(
-        readFileSync(join(check, "src/base.test.sh"), "utf8"),
-        "grep -q base src/base.txt && true\n"
-      );
-      assert.ok(existsSync(join(check, "src/agent.test.sh")));
-      // 第 1 步落地的提交里，被 agent 篡改的旧测试已恢复成人的版本
-      assert.equal(git(check, "show", `${rows[0]?.head}:src/keep.test.sh`), "true");
-      assert.match(readFileSync(summary.reportFile, "utf8"), /终点（按条数）：no-gate 100\.0%/);
+      // 每步的环境用完即弃
+      assert.deepEqual(readdirSync(join(t.base, "envs", "ws")), []);
+      assert.match(readFileSync(summary.reportFile, "utf8"), /终点（按条数）：neither 100\.0%/);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("完整 Pigeon：回炉最终不通过即以失败收尾，agent 的代码照样落地、下一步从它之上接着做；结果行不写撤回字段", async () => {
+  test("回炉最终不通过的题判为失败，记下回炉轮数与结论；下一题仍从人的代码开工，不受它影响", async () => {
     const t = await toy();
     try {
       const agent = scriptedAgent((input) => {
@@ -273,45 +305,19 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           write(root, { "src/a.txt": "wrong\n" });
           return { repair: { rounds: 2, finalVerdict: "fail" } };
         }
-        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
-        if (input.step.seq === 5) write(root, { "src/b.txt": "beta\n" });
+        write(root, { "src/b.txt": "beta\n" });
         return { repair: { rounds: 0, finalVerdict: "pass" } };
       });
       const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, conditions: ["full"] })
+        options(t, { agents: { pigeon: agent }, conditions: ["search-only"] })
       );
       const rows = readStreamResults(summary.resultsFile);
-      const [r1, r2] = rows;
       assert.deepEqual(
-        [r1?.outcome, r1?.repairRounds, r1?.finalVerdict, r1?.attribution],
-        ["failed", 2, "fail", "not-done"]
-      );
-      for (const row of rows) {
-        assert.equal("reverted" in row, false, `第 ${row.seq} 步不写 reverted`);
-        assert.equal(
-          "repairBudgetExhausted" in row,
-          false,
-          `第 ${row.seq} 步不写 repairBudgetExhausted`
-        );
-      }
-      assert.notEqual(r1?.head, t.commits[0], "修不好的代码照样落地");
-      // 第 2 步（维护步）的验证门里 base 测试依赖 a：第 1 步落地的 a.txt 是 agent 写错的，第 2 步因此照样判失败
-      assert.equal(r2?.outcome, "failed");
-      // 第 2 步从第 1 步落地的提交之上接着做：agent 第 1 步写下的 a.txt 还在
-      const check = join(t.base, "check");
-      mkdirSync(check);
-      git(check, "init", "-q");
-      writeFileSync(
-        join(check, "h.bundle"),
-        readFileSync(join(t.base, "out", "streams", "s1-full-1", "history.bundle"))
-      );
-      git(check, "fetch", "-q", "h.bundle", `${r2?.head}:refs/heads/main`);
-      assert.equal(git(check, "rev-parse", `${r2?.head}~1`), r1?.head);
-      assert.equal(git(check, "show", `${r2?.head}:src/a.txt`), "wrong");
-      assert.equal(
-        rows.some((row) => row.attribution === "missing-prerequisite"),
-        false,
-        "不再归因为缺前置"
+        rows.map((r) => [r.seq, r.outcome, r.repairRounds, r.finalVerdict]),
+        [
+          [1, "failed", 2, "fail"],
+          [5, "passed", 0, "pass"],
+        ]
       );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -319,88 +325,108 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
   });
 
   test("一次全量测量在报告写出前被杀、一条结果都没拿到：分母仍是人的代码上通过的全部用例，全部计为未通过", async () => {
-    // a 的测试在没有 a.txt 时把跑测试的外壳杀掉：人的代码上照常通过，题 A 没做出 a.txt 的 agent 代码上整次测量拿不到报告
+    // a 的测试在没有 a.txt 时把跑测试的外壳杀掉：人的代码上照常通过，没做出 a.txt 的 agent 代码上整次测量拿不到报告
     const t = await toy("[ -f src/a.txt ] || kill -9 $PPID\ngrep -q alpha src/a.txt\n");
     try {
-      const agent = scriptedAgent((input) => {
-        const root = input.target.root;
-        if (input.step.seq === 1) {
-          return { repair: { rounds: 3, finalVerdict: "fail" } };
-        }
-        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
-        return { repair: { rounds: 0, finalVerdict: "pass" } };
-      });
+      const agent = scriptedAgent(() => ({ repair: { rounds: 3, finalVerdict: "fail" } }));
       const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, conditions: ["full"], maxSteps: 2 })
+        options(t, { agents: { pigeon: agent }, conditions: ["search-only"], maxSteps: 1 })
       );
-      const r2 = readStreamResults(summary.resultsFile)[1];
-      assert.deepEqual(r2?.fullPassRate?.byCount, { passed: 0, total: 3, rate: 0 });
-      assert.deepEqual(r2?.fullPassRate?.byCountCollected, { passed: 0, total: 3, rate: 0 });
+      const [r1] = readStreamResults(summary.resultsFile);
+      assert.equal(r1?.outcome, "failed");
+      assert.deepEqual(r1?.fullPassRate?.byCount, { passed: 0, total: 3, rate: 0 });
+      assert.deepEqual(r1?.fullPassRate?.byCountCollected, { passed: 0, total: 3, rate: 0 });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("被打断的一步整题作废不留行，续跑从导出的流历史接着做；试跑只跑每条流前 K 步", async () => {
+  test("被打断的一步整题作废不留行，重做时另开干净环境（作废尝试的改动不在）；续跑从结果行接着做下一题；试跑只跑前 K 道题", async () => {
     const t = await toy();
     try {
-      const good: Script = (input) => {
-        const root = input.target.root;
-        if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
-        return undefined;
-      };
+      const sawHalf: boolean[] = [];
       const flaky = scriptedAgent((input) => {
-        if (input.step.seq === 2) {
+        if (input.step.seq === 5) {
+          sawHalf.push(existsSync(join(input.target.root, "src", "half.txt")));
           write(input.target.root, { "src/half.txt": "half done\n" });
           return { interrupted: "模型服务故障" };
         }
-        return good(input);
+        return solve(input);
       });
-      const first = await runStreams(options(t, { agents: { pigeon: flaky }, maxSteps: 4 }));
+      const first = await runStreams(options(t, { agents: { pigeon: flaky }, maxSteps: 2 }));
       assert.equal(first.jobs[0]?.completedTo, 1);
       // 没有限额信号的被打断：作废重做，连续超过上限才停下作业
       assert.match(
         first.jobs[0]?.stopped ?? "",
-        /第 2 步连续 4 次被打断.*agent 报被打断：模型服务故障/
+        /第 5 步连续 4 次被打断.*agent 报被打断：模型服务故障/
       );
-      assert.equal(flaky.calls.filter((c) => c.step.seq === 2).length, 4);
+      assert.equal(flaky.calls.filter((c) => c.step.seq === 5).length, 4);
+      assert.deepEqual(sawHalf, [false, false, false, false], "每次重做都另开干净环境");
       assert.deepEqual(
         readStreamResults(first.resultsFile).map((r) => r.seq),
         [1]
       );
-
-      const again = scriptedAgent(good);
-      const second = await runStreams(options(t, { agents: { pigeon: again }, maxSteps: 4 }));
-      assert.deepEqual(second.jobs, [{ key: "s1|no-gate|1", completedTo: 4 }]);
-      const rows = readStreamResults(second.resultsFile);
+      const again = scriptedAgent(solve);
+      const second = await runStreams(options(t, { agents: { pigeon: again }, maxSteps: 2 }));
+      assert.deepEqual(second.jobs, [{ key: "tasks|neither|1", completedTo: 5 }]);
       assert.deepEqual(
-        rows.map((r) => r.seq),
-        [1, 2, 3, 4]
+        readStreamResults(second.resultsFile).map((r) => [r.seq, r.outcome]),
+        [
+          [1, "passed"],
+          [5, "passed"],
+        ]
       );
       assert.deepEqual(
         again.calls.map((c) => c.step.seq),
-        [2]
+        [5]
       );
-      assert.equal(rows[1]?.outcome, "passed");
-      // 续跑的工作区里没有被打断那一次留下的半成品
-      const bundle = readFileSync(join(t.base, "out", "streams", "s1-no-gate-1", "history.bundle"));
-      const check = join(t.base, "check");
-      mkdirSync(check);
-      git(check, "init", "-q");
-      writeFileSync(join(check, "h.bundle"), bundle);
-      git(check, "fetch", "-q", "h.bundle", `${rows[3]?.head}:refs/heads/main`);
-      assert.equal(
-        git(check, "ls-tree", "--name-only", "-r", "main", "src").includes("src/half.txt"),
-        false
-      );
-      assert.match(readFileSync(second.reportFile, "utf8"), /试跑：每条流前 4 步/);
+      assert.match(readFileSync(second.reportFile, "utf8"), /试跑：只跑前 2 道题/);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("限额：一步撞上额度即作废、回到本步起点，整批恢复后重做同一步，暂停记录挂在该步结果行上；轮数与 token 取网关计量", async () => {
+  test("记忆快照（191）：每步开工前取 .pigeon/learned/ 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
+    const t = await toy();
+    try {
+      const memoryOf = (workDir: string) => {
+        const file = join(learnedDirOf(workDir), "MEMORY.md");
+        return existsSync(file) ? readFileSync(file, "utf8") : null;
+      };
+      const remember = (workDir: string, text: string) => {
+        mkdirSync(learnedDirOf(workDir), { recursive: true });
+        writeFileSync(join(learnedDirOf(workDir), "MEMORY.md"), text);
+      };
+      const seen: [number, string | null][] = [];
+      let attempts = 0;
+      const agent = scriptedAgent((input) => {
+        seen.push([input.step.seq, memoryOf(input.workDir)]);
+        if (input.step.seq === 1 && attempts++ === 0) {
+          remember(input.workDir, "作废尝试写下的\n");
+          return { interrupted: "模型服务故障" };
+        }
+        remember(input.workDir, `第 ${input.step.seq} 步之后\n`);
+        return solve(input);
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+      const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
+      // 模拟第 5 步开工、取过快照之后进程被杀：记忆里留着半截写下的东西
+      snapshotOrRestoreLearned(jobDir, 5);
+      remember(jobDir, "崩溃前半截写下的\n");
+      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      assert.deepEqual(seen, [
+        [1, null],
+        [1, null],
+        [5, "第 1 步之后\n"],
+      ]);
+      assert.equal(memoryOf(jobDir), "第 5 步之后\n");
+      assert.deepEqual(readdirSync(join(jobDir, "learned-snapshots")).sort(), ["step-1", "step-5"]);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("限额：一步撞上额度即作废，整批恢复后另开环境重做同一步，暂停记录挂在该步结果行上；轮数与 token 取网关计量", async () => {
     const t = await toy();
     try {
       const limits = new LimitController({
@@ -409,24 +435,23 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         sleep: () => new Promise((r) => setTimeout(r, 5)),
         warn: () => {},
       });
+      const zero: GatewayMeter = {
+        requests: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        costCny: 0,
+        upstreamFailures: 0,
+        queueMs: 0,
+        peakInFlight: 0,
+        peakInputTokens: 0,
+        accountRequests: [0, 0],
+      };
       const meters = new Map<string, GatewayMeter>();
       const gateway = {
         jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
-        meter: (job: string) => ({
-          ...(meters.get(job) ?? {
-            requests: 0,
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            costCny: 0,
-            upstreamFailures: 0,
-            queueMs: 0,
-            peakInFlight: 0,
-            peakInputTokens: 0,
-            accountRequests: [0, 0],
-          }),
-        }),
+        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
         resetPeak: (job: string) => {
           const m = meters.get(job);
           if (m !== undefined) meters.set(job, { ...m, peakInFlight: 0 });
@@ -434,21 +459,9 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       };
       let hits = 0;
       const agent = scriptedAgent((input) => {
-        const root = input.target.root;
-        const m = meters.get(`${input.job.stream}|${input.job.condition}|${input.job.attempt}`) ?? {
-          requests: 0,
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          costCny: 0,
-          upstreamFailures: 0,
-          queueMs: 0,
-          peakInFlight: 0,
-          peakInputTokens: 0,
-          accountRequests: [0, 0],
-        };
-        meters.set(`${input.job.stream}|${input.job.condition}|${input.job.attempt}`, {
+        const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
+        const m = meters.get(key) ?? zero;
+        meters.set(key, {
           ...m,
           requests: m.requests + 2,
           input: m.input + 100,
@@ -460,34 +473,29 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           peakInFlight: m.peakInFlight + 1,
           accountRequests: [(m.accountRequests[0] ?? 0) + 1, (m.accountRequests[1] ?? 0) + 1],
         });
-        assert.equal(input.modelBaseUrl, "http://gateway/j/s1|no-gate|1");
-        if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) {
-          write(root, { "src/half.txt": "half\n" });
-          if (hits++ === 0) {
-            limits.onLimit("rate-limit");
-            return { interrupted: "网关暂停" };
-          }
-          write(root, { "src/base.txt": "base v2\n" });
+        assert.equal(input.modelBaseUrl, "http://gateway/j/tasks|neither|1");
+        if (input.step.seq === 5 && hits++ === 0) {
+          limits.onLimit("rate-limit");
+          return { interrupted: "网关暂停" };
         }
-        return undefined;
+        return solve(input);
       });
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, maxSteps: 2, limits, gateway })
       );
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }]);
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 5 }]);
       const rows = readStreamResults(summary.resultsFile);
       assert.deepEqual(
         rows.map((r) => [r.seq, r.outcome, r.limitPauses.map((p) => p.kind)]),
         [
           [1, "passed", []],
-          [2, "passed", ["rate-limit"]],
+          [5, "passed", ["rate-limit"]],
         ]
       );
       assert.equal(rows[1]?.limitPauses[0]?.endedAt !== null, true);
       assert.deepEqual(
         agent.calls.map((c) => c.step.seq),
-        [1, 2, 2]
+        [1, 5, 5]
       );
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
@@ -511,91 +519,60 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("维护步用这条流的分步验证判定（与回炉、开跑前检查同一套），不用清单里冻结的验证命令", async () => {
+  test("agent 暂存了人写测试的改名：判题前原路径恢复成起点的版本、改名后的路径删掉，作业不中止", async () => {
     const t = await toy();
     try {
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
-        return undefined;
-      });
-      // 清单里冻结的命令必然失败；分步验证照常能过
-      const manifest = { ...t.manifest, gateCommand: ["sh", "-c", "exit 1"] };
-      const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, manifest, maxSteps: 2 })
-      );
-      const rows = readStreamResults(summary.resultsFile);
-      assert.deepEqual(
-        rows.map((r) => [r.seq, r.kind, r.outcome]),
-        [
-          [1, "task", "passed"],
-          [2, "maintenance", "passed"],
-        ]
-      );
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
-  test("agent 暂存了人写测试的改名：原路径恢复成本步起点的版本、改名后的路径删掉，作业不中止", async () => {
-    const t = await toy();
-    try {
-      const agent = scriptedAgent((input) => {
-        const root = input.target.root;
-        if (input.step.seq === 1) {
-          write(root, { "src/a.txt": "alpha\n" });
-          git(root, "mv", "src/base.test.sh", "src/moved.test.sh");
-        }
-        return undefined;
-      });
-      const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 1 }]);
-      const [row] = readStreamResults(summary.resultsFile);
-      assert.equal(row?.outcome, "passed");
-      const bundle = readFileSync(join(t.base, "out", "streams", "s1-no-gate-1", "history.bundle"));
-      const check = join(t.base, "check");
-      mkdirSync(check);
-      git(check, "init", "-q");
-      writeFileSync(join(check, "h.bundle"), bundle);
-      git(check, "fetch", "-q", "h.bundle", `${row?.head}:refs/heads/main`);
-      const files = git(check, "ls-tree", "--name-only", "-r", "main", "src").split("\n");
-      assert.ok(files.includes("src/base.test.sh"), "原路径恢复");
-      assert.ok(!files.includes("src/moved.test.sh"), "改名后的路径删掉");
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
-  test("测量副本与人写测试集一致：agent 新建、落了地的测试文件不进全量测量的副本", async () => {
-    const t = await toy();
-    try {
-      const inCopy: boolean[] = [];
-      const runtime = {
+      const atJudge: string[][] = [];
+      const runtime: typeof toyRuntime = {
         ...toyRuntime,
-        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
-          const cwd = args[2].cwd;
-          // 只看全量测量（在测量副本里跑）
-          if (cwd !== undefined) inCopy.push(existsSync(join(cwd, "src", "agent.test.sh")));
-          return toyRuntime.runCases(...args);
+        runCases: (ws, tests, opts) => {
+          if (!isMeasure(tests)) {
+            atJudge.push(
+              ["src/base.test.sh", "src/moved.test.sh"].filter((f) => existsSync(join(ws.root, f)))
+            );
+          }
+          return toyRuntime.runCases(ws, tests, opts);
         },
       };
       const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1)
-          write(input.target.root, { "src/a.txt": "alpha\n", "src/agent.test.sh": "exit 1\n" });
+        write(input.target.root, { "src/a.txt": "alpha\n" });
+        git(input.target.root, "mv", "src/base.test.sh", "src/moved.test.sh");
         return undefined;
       });
-      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
-      assert.ok(inCopy.length > 0, "做了全量测量");
-      assert.ok(
-        inCopy.every((present) => !present),
-        "agent 新建的测试文件不在测量副本里"
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 })
       );
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 1 }]);
+      assert.equal(readStreamResults(summary.resultsFile)[0]?.outcome, "passed");
+      assert.deepEqual(atJudge, [["src/base.test.sh"]]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删，单个文件或整个目录被忽略都一样），测量副本同样没有，也不落地", async () => {
+  test("全量测量与人写测试集一致：agent 新建的测试文件（未跟踪的也算）测量时不在", async () => {
+    const t = await toy();
+    try {
+      const atMeasure: boolean[] = [];
+      const runtime: typeof toyRuntime = {
+        ...toyRuntime,
+        runCases: (ws, tests, opts) => {
+          if (isMeasure(tests)) atMeasure.push(existsSync(join(ws.root, "src", "agent.test.sh")));
+          return toyRuntime.runCases(ws, tests, opts);
+        },
+      };
+      const agent = scriptedAgent((input) => {
+        write(input.target.root, { "src/a.txt": "alpha\n", "src/agent.test.sh": "exit 1\n" });
+        return undefined;
+      });
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
+      assert.deepEqual(atMeasure, [false]);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删，单个文件或整个目录被忽略都一样）；下一题开工时也不在", async () => {
     for (const ignore of ["/src/conftest.sh\n", "src/\n"]) {
       const t = await toy();
       try {
@@ -616,7 +593,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           runCases: (ws, tests, opts) => {
             const root = opts.cwd ?? ws.root;
             seen.push({
-              where: opts.cwd === undefined ? "judge" : "measure",
+              where: isMeasure(tests) ? "measure" : "judge",
               present: hooks.filter((h) => existsSync(join(root, h))),
             });
             return runJunitOnce(
@@ -633,19 +610,18 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             );
           },
         };
-        let atStep2: string[] | undefined;
+        let atStep5: string[] | undefined;
         const agent = scriptedAgent((input) => {
-          if (input.step.seq === 2) {
-            atStep2 = hooks.filter((h) => existsSync(join(input.target.root, h)));
-            write(input.target.root, { "src/base.txt": "base v2\n" });
+          if (input.step.seq === 5) {
+            atStep5 = hooks.filter((h) => existsSync(join(input.target.root, h)));
+            write(input.target.root, { "src/b.txt": "beta\n" });
           }
           if (input.step.seq === 1) {
-            const hijack = "sh() { return 0; }\n";
             write(input.target.root, {
               "src/a.txt": "wrong\n",
               // 这份还被 agent 写进了 .gitignore（这个文件本身，或它所在的整个目录）：git status 看不到它
               ".gitignore": ignore,
-              "src/conftest.sh": hijack,
+              "src/conftest.sh": "sh() { return 0; }\n",
             });
           }
           return undefined;
@@ -666,12 +642,12 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           [],
           `${ignore}：判题与测量时都没有 agent 新建的 conftest`
         );
-        assert.deepEqual(atStep2, [], `${ignore}：conftest 没有落地，下一步开始时不在工作区里`);
-        // 回炉前删 conftest 用的人树与判题前同一份：人在该步树里的全部路径
+        assert.deepEqual(atStep5, [], `${ignore}：下一题开工时不在工作区里`);
+        // 回炉前删 conftest 用的人树按起点：人在该步之前的树里的全部路径
         assert.deepEqual(
           [...(agent.calls[0]?.humanTree ?? [])].sort(),
           t.human
-            .tree(agent.calls[0]?.step.commit ?? "")
+            .tree(agent.calls[0]?.step.parent ?? "")
             .map((e) => e.path)
             .sort(),
           `${ignore}：交给 agent 的人树`
@@ -682,37 +658,31 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("还原人写测试防绕过：agent 给已落地的人写测试设 skip-worktree 或 assume-unchanged 再改，照样还原；跑批器自己的 git 操作不执行 agent 放进 .git/hooks 的钩子", async () => {
+  test("还原人写测试防绕过：agent 给起点里人写的测试设 skip-worktree 或 assume-unchanged 再改，测量前照样还原；跑批器自己的 git 操作不执行 agent 放进 .git/hooks 的钩子", async () => {
     for (const flag of ["--skip-worktree", "--assume-unchanged"]) {
       const t = await toy();
       try {
         const marker = join(t.base, "hook-ran").replace(/\\/g, "/");
         const agent = scriptedAgent((input) => {
           const root = input.target.root;
-          if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
-          if (input.step.seq === 2) {
-            // 维护步：把 a 改坏，再让第 1 步落地的人写测试 a.test.sh 恒过、并对 git 隐藏这处改动
-            write(root, { "src/a.txt": "wrong\n" });
-            git(root, "update-index", flag, "src/a.test.sh");
-            write(root, { "src/a.test.sh": "true\n" });
-            mkdirSync(join(root, ".git", "hooks"), { recursive: true });
-            for (const hook of ["post-commit", "post-checkout", "post-index-change"]) {
-              writeFileSync(join(root, ".git", "hooks", hook), `#!/bin/sh\ntouch "${marker}"\n`, {
-                mode: 0o755,
-              });
-            }
+          write(root, { "src/a.txt": "alpha\n" });
+          // keep 测试人在该步没改：把它改成恒败、并对 git 隐藏这处改动
+          git(root, "update-index", flag, "src/keep.test.sh");
+          write(root, { "src/keep.test.sh": "exit 1\n" });
+          mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+          for (const hook of ["post-commit", "post-checkout", "post-index-change"]) {
+            writeFileSync(join(root, ".git", "hooks", hook), `#!/bin/sh\ntouch "${marker}"\n`, {
+              mode: 0o755,
+            });
           }
           return undefined;
         });
-        const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
-        const rows = readStreamResults(summary.resultsFile);
+        const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
+        const [row] = readStreamResults(summary.resultsFile);
         assert.deepEqual(
-          rows.map((r) => [r.seq, r.kind, r.outcome]),
-          [
-            [1, "task", "passed"],
-            [2, "maintenance", "failed"],
-          ],
-          `${flag}：隐藏的改动被还原，改坏的 a 判为不过`
+          row?.fullPassRate?.byCount,
+          { passed: 3, total: 3, rate: 1 },
+          `${flag}：隐藏的改动被还原，keep 测试照常通过`
         );
         assert.equal(existsSync(marker), false, `${flag}：agent 的钩子没有被执行`);
       } finally {
@@ -721,20 +691,25 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("交给 agent 的人写测试集是人在该步树里的测试与测试辅助文件，不含 agent 早先步骤落地的自己的测试", async () => {
+  test("交给 agent 的人写测试集按起点：人在该步之前的树里的测试与测试辅助文件，人在该步新写的不在其内", async () => {
     const t = await toy();
     try {
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1)
-          write(input.target.root, { "src/a.txt": "alpha\n", "src/agent.test.sh": "true\n" });
-        return undefined;
-      });
-      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      const runtime: typeof toyRuntime = { ...toyRuntime, autoloadedTestHelper: "conftest.sh" };
+      const agent = scriptedAgent(solve);
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
       assert.deepEqual(
-        agent.calls.map((c) => [...(c.humanTestFiles ?? [])].sort()),
+        agent.calls.map((c) => [
+          c.step.seq,
+          [...(c.humanTestFiles ?? [])].sort(),
+          [...(c.humanTests ?? [])].sort(),
+        ]),
         [
-          ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
-          ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+          [1, ["src/base.test.sh", "src/keep.test.sh"], ["src/base.test.sh", "src/keep.test.sh"]],
+          [
+            5,
+            ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+            ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+          ],
         ]
       );
     } finally {
@@ -742,10 +717,17 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("agent 自己测试的辅助文件保留：helper、__init__、数据文件与只作用于自己测试目录的 conftest 都不删，后续验证门照常通过；被忽略的 __pycache__/ 与 agent 在 .gitignore 里写的整目录不让作业停下", async () => {
+  test("agent 自己测试的辅助文件保留：helper、__init__、数据文件与只作用于自己测试目录的 conftest 判题时都在；被忽略的 __pycache__/ 与 agent 在 .gitignore 里写的整目录不让作业停下", async () => {
     const t = await toy();
     try {
       // 与 strands 相仿：src 下除用例与已知源文件外都归测试辅助
+      const own = [
+        "src/agent/conftest.sh",
+        "src/agent/helper.aux",
+        "src/agent/__init__.aux",
+        "src/agent/data.aux",
+      ];
+      let atJudge: string[] | undefined;
       const runtime: typeof toyRuntime = {
         ...toyRuntime,
         autoloadedTestHelper: "conftest.sh",
@@ -756,110 +738,149 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
               ? "testaux"
               : toyRuntime.profile.classifyFile(p),
         },
+        runCases: (ws, tests, opts) => {
+          if (!isMeasure(tests)) atJudge = own.filter((f) => existsSync(join(ws.root, f)));
+          return toyRuntime.runCases(ws, tests, opts);
+        },
       };
-      const own = [
-        "src/agent/conftest.sh",
-        "src/agent/helper.aux",
-        "src/agent/__init__.aux",
-        "src/agent/data.aux",
-      ];
-      let atStep2: string[] | undefined;
       const agent = scriptedAgent((input) => {
-        const root = input.target.root;
-        if (input.step.seq === 1) {
-          write(root, {
-            "src/a.txt": "alpha\n",
-            ".gitignore": "__pycache__/\nsrc/cachedir/\n",
-            "src/__pycache__/a.cpython-310.pyc": "x",
-            "src/cachedir/deep/conftest.sh": "true\n",
-            ...Object.fromEntries(own.map((f) => [f, "ok=1\n"])),
-            // agent 自己的用例依赖自己的 helper：helper 被删，验证门即不过
-            "src/agent.test.sh": '. src/agent/helper.aux && [ "$ok" = 1 ]\n',
-          });
-        }
-        if (input.step.seq === 2) {
-          atStep2 = own.filter((f) => existsSync(join(root, f)));
-          write(root, { "src/base.txt": "base v2\n" });
-        }
+        write(input.target.root, {
+          "src/a.txt": "alpha\n",
+          ".gitignore": "__pycache__/\nsrc/cachedir/\n",
+          "src/__pycache__/a.cpython-310.pyc": "x",
+          "src/cachedir/deep/conftest.sh": "true\n",
+          ...Object.fromEntries(own.map((f) => [f, "ok=1\n"])),
+          "src/agent.test.sh": '. src/agent/helper.aux && [ "$ok" = 1 ]\n',
+        });
         return undefined;
       });
       const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 })
       );
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }], "作业没有停下");
-      const rows = readStreamResults(summary.resultsFile);
-      assert.deepEqual(
-        rows.map((r) => [r.seq, r.kind, r.outcome]),
-        [
-          [1, "task", "passed"],
-          [2, "maintenance", "passed"],
-        ]
-      );
-      assert.deepEqual(atStep2, own, "agent 自己的辅助文件都在");
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 1 }], "作业没有停下");
+      assert.equal(readStreamResults(summary.resultsFile)[0]?.outcome, "passed");
+      assert.deepEqual(atJudge, own, "agent 自己的辅助文件都在");
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("测量与判题的产物用完即清：下一步开始时，工作区里没有判题报告，测量副本目录是空的", async () => {
-    const t = await toy();
+  test("判题前清理（195 补口）：agent 放的解释器启动钩子（文件与包目录）删掉、人树里有的保留；静态检查配置写回人的版本、人树里没有的删掉；家目录下的用户级文件删掉", async () => {
+    const t = await toy(undefined, { "lint.cfg": "strict\n", "src/sitecustomize.keep": "human\n" });
     try {
-      const leftovers: string[][] = [];
+      const home = join(t.base, "home");
+      const inner = localStreamEnvs(join(t.base, "envs"), (c: string) => t.human.bundle(c));
+      const envs: StreamEnvFactory = {
+        async open(job, init) {
+          const env = await inner.open(job, init);
+          return {
+            ...env,
+            ws: new StreamWorkspace(localStreamShell(env.target.root), { homeDir: home }),
+          };
+        },
+      };
+      const runtime: typeof toyRuntime = {
+        ...toyRuntime,
+        judgeHygiene: {
+          startupHooks: ["sitecustomize", "sitecustomize.*"],
+          lintConfigs: ["lint.cfg"],
+          homePaths: [".local/lib", ".lint.cfg"],
+        },
+      };
+      let atJudge: Record<string, string | boolean> | undefined;
+      const judging: typeof toyRuntime = {
+        ...runtime,
+        runCases: (ws, tests, opts) => {
+          if (!isMeasure(tests)) {
+            const at = (p: string) => join(ws.root, p);
+            atJudge = {
+              hookFile: existsSync(at("src/sitecustomize.sh")),
+              hookDir: existsSync(at("deep/sitecustomize")),
+              humanHook: existsSync(at("src/sitecustomize.keep")),
+              lint: readFileSync(at("lint.cfg"), "utf8"),
+              agentLint: existsSync(at("src/lint.cfg")),
+              userSite: existsSync(join(home, ".local", "lib")),
+              userLint: existsSync(join(home, ".lint.cfg")),
+              userOther: existsSync(join(home, ".bashrc")),
+            };
+          }
+          return toyRuntime.runCases(ws, tests, opts);
+        },
+      };
       const agent = scriptedAgent((input) => {
-        const root = input.target.root;
-        const measureDirs = join(t.base, "envs", "measure");
-        const inMeasure = existsSync(measureDirs)
-          ? readdirSync(measureDirs).flatMap((d) => readdirSync(join(measureDirs, d)))
-          : [];
-        leftovers.push([
-          ...(existsSync(join(root, ".git", "pigeon-cases-junit.xml")) ? ["judge-junit"] : []),
-          ...inMeasure,
-        ]);
-        if (input.step.seq === 1) write(root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
+        write(input.target.root, {
+          "src/a.txt": "alpha\n",
+          "src/sitecustomize.sh": "x\n",
+          "deep/sitecustomize/__init__.py": "x\n",
+          "lint.cfg": "lenient\n",
+          "src/lint.cfg": "lenient\n",
+        });
+        write(home, {
+          ".local/lib/python3/site-packages/usercustomize.py": "x\n",
+          ".lint.cfg": "lenient\n",
+          ".bashrc": "keep\n",
+        });
         return undefined;
       });
-      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
-      // 第 2 步开始时：第 1 步判题与全量测量留下的都已清掉
-      assert.deepEqual(leftovers[1], []);
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime: judging, envs, maxSteps: 1 })
+      );
+      assert.equal(readStreamResults(summary.resultsFile)[0]?.outcome, "passed");
+      assert.deepEqual(atJudge, {
+        hookFile: false,
+        hookDir: false,
+        humanHook: true,
+        lint: "strict\n",
+        agentLint: false,
+        userSite: false,
+        userLint: false,
+        userOther: true,
+      });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("依赖环境按人在该步的依赖声明选：agent 改了声明文件，切环境仍用人的版本；结果行记下 agent 改了依赖声明", async () => {
+  test("依赖环境按人在该步的依赖声明选：agent 改了声明文件，开工与判题前切环境仍用人的版本；结果行记下 agent 改了依赖声明", async () => {
     const t = await toy();
     try {
       // 以 src/base.txt 充当依赖声明文件；切环境的命令把收到的声明内容追加进工作区的记录
-      const runtime = {
+      const logs: string[][] = [];
+      const runtime: typeof toyRuntime = {
         ...toyRuntime,
         envDeclarationFile: "src/base.txt",
         envSyncFor: (file: string) => ["sh", "-c", `cat "${file}" >> .git/decl-log`],
+        runCases: (ws, tests, opts) => {
+          if (!isMeasure(tests)) {
+            logs.push(
+              readFileSync(join(ws.root, ".git", "decl-log"), "utf8")
+                .split("\n")
+                .filter((l) => l !== "")
+            );
+          }
+          return toyRuntime.runCases(ws, tests, opts);
+        },
       };
       const agent = scriptedAgent((input) => {
-        const root = input.target.root;
         if (input.step.seq === 1)
-          write(root, { "src/a.txt": "alpha\n", "src/base.txt": "base agent\n" });
-        if (input.step.seq === 2) write(root, { "src/base.txt": "base v2\n" });
-        return undefined;
+          write(input.target.root, { "src/a.txt": "alpha\n", "src/base.txt": "base agent\n" });
+        return solve(input);
       });
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
       );
-      const rows = readStreamResults(summary.resultsFile);
       assert.deepEqual(
-        rows.map((r) => [r.seq, r.agentChangedDeps]),
+        readStreamResults(summary.resultsFile).map((r) => [r.seq, r.agentChangedDeps]),
         [
           [1, true],
-          [2, false],
+          [5, false],
         ]
       );
-      const [wsDir] = readdirSync(join(t.base, "envs", "ws"));
-      const log = readFileSync(join(t.base, "envs", "ws", wsDir ?? "", ".git", "decl-log"), "utf8")
-        .split("\n")
-        .filter((l) => l !== "");
-      // 每次切环境（agent 之前、agent 之后）用的都是人在该步的声明，从来不是 agent 改过的
-      assert.deepEqual(log, ["base", "base", "base v2", "base v2"]);
+      // 每步开工与判题前各切一次，用的都是人在该步的声明，从来不是 agent 改过的
+      assert.deepEqual(logs, [
+        ["base", "base"],
+        ["base v2", "base v2"],
+      ]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -877,17 +898,46 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
       );
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }]);
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 5 }]);
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [r.seq, r.outcome, r.judged, r.diff]),
+        [
+          [1, "skipped", false, null],
+          [5, "skipped", false, null],
+        ]
+      );
+      assert.ok(rows.every((r) => /依赖环境选择失败.*作废/s.test(r.error ?? "")));
+      assert.equal(agent.calls.length, 0);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("判题前切环境时找不到可用的依赖组合（退出码 3）：这一步作废、记下原因，下一题照常", async () => {
+    const t = await toy();
+    try {
+      // 每个环境里第一次切换照常，第二次（agent 之后、判题之前）选不出组合
+      const runtime = {
+        ...toyRuntime,
+        envDeclarationFile: "src/base.txt",
+        envSyncFor: () => ["sh", "-c", "if [ -f .git/synced ]; then exit 3; fi; touch .git/synced"],
+      };
+      const agent = scriptedAgent(solve);
+      const summary = await runStreams(
+        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+      );
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 5 }]);
       const rows = readStreamResults(summary.resultsFile);
       assert.deepEqual(
         rows.map((r) => [r.seq, r.outcome, r.judged]),
         [
           [1, "skipped", false],
-          [2, "skipped", false],
+          [5, "skipped", false],
         ]
       );
-      assert.ok(rows.every((r) => /依赖环境选择失败/.test(r.error ?? "")));
-      assert.equal(agent.calls.length, 0);
+      assert.ok(rows.every((r) => /依赖环境选择失败.*作废/s.test(r.error ?? "")));
+      assert.equal(agent.calls.length, 2, "agent 照常跑过");
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -914,42 +964,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("全量测量时找不到可用的依赖组合（退出码 3）：这一步作废——撤掉已落地的提交、记下原因，下一步从本步起点接着做", async () => {
-    const t = await toy();
-    try {
-      // 只在测量副本里（目录名含 measure）选不出组合
-      const runtime = {
-        ...toyRuntime,
-        envDeclarationFile: "src/base.txt",
-        envSyncFor: () => ["sh", "-c", 'case "$(pwd)" in *measure*) exit 3;; esac; exit 0'],
-      };
-      const sawStep1Work: boolean[] = [];
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2)
-          sawStep1Work.push(existsSync(join(input.target.root, "src/a.txt")));
-        return undefined;
-      });
-      const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
-      );
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 2 }]);
-      const rows = readStreamResults(summary.resultsFile);
-      assert.deepEqual(
-        rows.map((r) => [r.seq, r.outcome]),
-        [
-          [1, "skipped"],
-          [2, "skipped"],
-        ]
-      );
-      assert.ok(rows.every((r) => /依赖环境选择失败.*作废/s.test(r.error ?? "")));
-      assert.deepEqual(sawStep1Work, [false], "第 1 步落地的提交已撤掉");
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
-  test("测试配置按人在该步的版本写入：agent 运行前、判题前与测量副本里写的都是人的文件，不是 agent 改过的", async () => {
+  test("测试配置按人在该步的版本写入：agent 运行前与判题前写的都是人的文件，不是 agent 改过的", async () => {
     const t = await toy();
     try {
       const pinned: string[] = [];
@@ -961,13 +976,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       };
       const agent = scriptedAgent((input) => {
         // agent 改了"配置"文件
-        if (input.step.seq === 1)
-          write(input.target.root, { "src/a.txt": "alpha\n", "src/base.txt": "agent 的配置\n" });
+        write(input.target.root, { "src/a.txt": "alpha\n", "src/base.txt": "agent 的配置\n" });
         return undefined;
       });
       await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
-      // agent 运行前、判题前、测量副本各写一次
-      assert.deepEqual(pinned, ["base\n", "base\n", "base\n"]);
+      assert.deepEqual(pinned, ["base\n", "base\n"]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -985,9 +998,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const agent = scriptedAgent((input) => {
         const marker = readFileSync(join(input.target.root, ".git", "pigeon-lint"), "utf8").trim();
         seen.push([input.step.commit, marker]);
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
-        return undefined;
+        return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
       assert.equal(seen.length, 2);
@@ -1000,14 +1011,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
   test("结果行带身份摘要与本条件所用 agent 的参数（温度、输出上限、推理档位等，两种 agent 各记各的）", async () => {
     const t = await toy();
     try {
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        return undefined;
-      });
+      const agent = scriptedAgent(solve);
       const summary = await runStreams(
         options(t, {
           agents: { pigeon: agent, minimal: agent },
-          conditions: ["no-gate", "minimal"],
+          conditions: ["neither", "minimal"],
           maxSteps: 1,
           concurrency: 1,
           runIdentity: "0123456789abcdef",
@@ -1022,7 +1030,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         rows.map((r) => [r.condition, r.runIdentity, r.agentSettings]),
         [
           [
-            "no-gate",
+            "neither",
             "0123456789abcdef",
             { temperature: 0, thinking: null, maxOutputTokens: null },
           ],
@@ -1034,28 +1042,91 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
+  test("条件表（193、194）：四格都是 Pigeon、开 3 轮回炉，按能否检索与有无推送各开关；最简 agent 不开回炉；各条件原样交给 agent", async () => {
+    assert.deepEqual(
+      Object.values(CONDITION_SPECS).map((c) => [
+        c.name,
+        c.agent,
+        c.repairRounds,
+        c.sessionSearch,
+        c.pushedMemory,
+      ]),
+      [
+        ["search-push", "pigeon", 3, true, true],
+        ["search-only", "pigeon", 3, true, false],
+        ["push-only", "pigeon", 3, false, true],
+        ["neither", "pigeon", 3, false, false],
+        ["minimal", "minimal", 0, false, false],
+      ]
+    );
+    const t = await toy();
+    try {
+      const agent = scriptedAgent(solve);
+      await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          conditions: ["search-only", "neither"],
+          maxSteps: 1,
+          concurrency: 1,
+        })
+      );
+      assert.deepEqual(
+        agent.calls.map((c) => [c.job.condition, c.condition]),
+        [
+          ["search-only", CONDITION_SPECS["search-only"]],
+          ["neither", CONDITION_SPECS.neither],
+        ]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("题面给用例名（213 的备用）：没接上要做到的用例即拒绝开跑；接上后题面列出用例名、不附内容", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent(solve);
+      await assert.rejects(
+        runStreams(options(t, { agents: { pigeon: agent }, promptFormat: "test-cases" })),
+        /给用例名的题面尚未实现/
+      );
+      assert.equal(agent.calls.length, 0);
+      await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          promptFormat: "test-cases",
+          shouldPassCases: async (step) => [`src/a.test.sh::case-of-${step.seq}`],
+          maxSteps: 1,
+        })
+      );
+      assert.match(
+        agent.calls[0]?.prompt ?? "",
+        /^Add alpha\n\nCreate src\/a\.txt\n\nTest cases that should pass[^\n]*\nsrc\/a\.test\.sh::case-of-1\n$/
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("人的代码没过检查门的步：清单按预检结果打标记（其余去掉），结果行照抄这一列，步照常跑", async () => {
     const t = await toy();
     try {
-      const [s1, s2] = t.manifest.steps;
-      assert.ok(s1 !== undefined && s2 !== undefined);
+      const s1 = t.manifest.steps.find((s) => s.seq === 1);
+      const s5 = t.manifest.steps.find((s) => s.seq === 5);
+      assert.ok(s1 !== undefined && s5 !== undefined);
       const stale = {
         ...t.manifest,
         steps: t.manifest.steps.map((s) => (s.seq === 1 ? { ...s, humanFailsGate: true } : s)),
       };
-      const marked = markHumanGateFailures(stale, [s2.commit]);
+      const marked = markHumanGateFailures(stale, [s5.commit]);
       assert.deepEqual(
-        marked.steps.slice(0, 2).map((s) => [s.seq, s.humanFailsGate]),
+        marked.steps.filter((s) => s.kind === "task").map((s) => [s.seq, s.humanFailsGate]),
         [
           [1, undefined],
-          [2, true],
+          [5, true],
         ]
       );
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
-        return undefined;
-      });
+      const agent = scriptedAgent(solve);
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, manifest: marked, maxSteps: 2 })
       );
@@ -1063,7 +1134,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         readStreamResults(summary.resultsFile).map((r) => [r.seq, r.humanFailsGate, r.judged]),
         [
           [1, false, true],
-          [2, true, true],
+          [5, true, true],
         ]
       );
     } finally {
@@ -1075,25 +1146,24 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     const t = await toy();
     try {
       const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
+        solve(input);
         return input.condition.repairRounds > 0
           ? { repair: { rounds: 1, finalVerdict: "pass", humanTestRestores: 2 } }
           : undefined;
       });
       const summary = await runStreams(
         options(t, {
-          agents: { pigeon: agent },
-          conditions: ["full", "no-gate"],
+          agents: { pigeon: agent, minimal: agent },
+          conditions: ["search-only", "minimal"],
           maxSteps: 1,
           concurrency: 1,
         })
       );
-      const rows = readStreamResults(summary.resultsFile);
       assert.deepEqual(
-        rows.map((r) => [r.condition, r.humanTestRestores]),
+        readStreamResults(summary.resultsFile).map((r) => [r.condition, r.humanTestRestores]),
         [
-          ["full", 2],
-          ["no-gate", null],
+          ["search-only", 2],
+          ["minimal", null],
         ]
       );
     } finally {
@@ -1154,7 +1224,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const summary = await runStreams(
         options(t, {
           agents: { minimal: mini, pigeon },
-          conditions: ["minimal", "no-gate"],
+          conditions: ["minimal", "neither"],
           maxSteps: 1,
           concurrency: 1,
           limits,
@@ -1164,8 +1234,8 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       assert.deepEqual(
         summary.jobs.map((j) => [j.key, j.completedTo, j.stopped]),
         [
-          ["s1|minimal|1", 1, undefined],
-          ["s1|no-gate|1", 1, undefined],
+          ["tasks|minimal|1", 1, undefined],
+          ["tasks|neither|1", 1, undefined],
         ]
       );
       const rows = readStreamResults(summary.resultsFile);
@@ -1174,7 +1244,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         rows.map((r) => [r.condition, r.seq, r.outcome]),
         [
           ["minimal", 1, "passed"],
-          ["no-gate", 1, "passed"],
+          ["neither", 1, "passed"],
         ]
       );
       assert.deepEqual([mini.calls.length, pigeon.calls.length], [5, 5]);
@@ -1232,7 +1302,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         },
       };
       const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
-      assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 1 }]);
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 1 }]);
       assert.notEqual(voidedSession, "");
       assert.deepEqual(seenOnRetry, [{ hits: 0, sessions: [] }]);
       // 作废的会话保留在输出目录下、作业治理根之外的隔离目录里备查
@@ -1255,18 +1325,16 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         const sessions = join(input.workDir, ".pigeon", "sessions");
         mkdirSync(sessions, { recursive: true });
         writeFileSync(join(sessions, `sess_step${input.step.seq}.jsonl`), "{}\n");
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        if (input.step.seq === 2) write(input.target.root, { "src/base.txt": "base v2\n" });
-        return undefined;
+        return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
-      const jobDir = join(t.base, "out", "streams", "s1-no-gate-1");
+      const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
       const sessions = join(jobDir, ".pigeon", "sessions");
       assert.ok(existsSync(join(jobDir, "sessions-1.json")));
-      // 模拟第 2 步做到一半进程被杀：会话留在治理根，没有结果行
+      // 模拟第 5 步做到一半进程被杀：会话留在治理根，没有结果行
       writeFileSync(join(sessions, "sess_crashed.jsonl"), "{}\n");
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
-      assert.deepEqual(readdirSync(sessions).sort(), ["sess_step1.jsonl", "sess_step2.jsonl"]);
+      assert.deepEqual(readdirSync(sessions).sort(), ["sess_step1.jsonl", "sess_step5.jsonl"]);
       const quarantined = readdirSync(join(t.base, "out", "voided"), { recursive: true }).map((f) =>
         String(f).replaceAll("\\", "/")
       );
@@ -1392,7 +1460,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
           assert.deepEqual(
             summary.jobs,
-            [{ key: "s1|no-gate|1", completedTo: 1 }],
+            [{ key: "tasks|neither|1", completedTo: 1 }],
             `${how}${voided ? "后作废" : "后照常收工"}：作业没有停下`
           );
           assert.equal(attempts, voided ? 2 : 1);
@@ -1472,7 +1540,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         const summary = await runStreams(
           options(t, {
             agents: { [kind]: agent },
-            conditions: [kind === "pigeon" ? "no-gate" : "minimal"],
+            conditions: [kind === "pigeon" ? "neither" : "minimal"],
             maxSteps: 1,
             gateway,
             log: (line) => log.push(line),
@@ -1515,13 +1583,12 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     try {
       const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
       const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        // 第 2 步做到一半收到停止信号：已改的工作区作废
-        if (input.step.seq === 2 && agent.calls.length === 2) {
+        // 第 5 步做到一半收到停止信号：已改的工作区作废
+        if (input.step.seq === 5 && agent.calls.length === 2) {
           write(input.target.root, { "src/base.txt": "half\n" });
           limits.shutdown("收到 SIGTERM");
         }
-        return undefined;
+        return solve(input);
       });
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, maxSteps: 2, limits })
@@ -1530,25 +1597,25 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       assert.deepEqual(
         readStreamResults(summary.resultsFile).map((r) => r.seq),
         [1],
-        "作废的第 2 步不留行"
+        "作废的第 5 步不留行"
       );
       assert.equal(agent.calls.length, 2, "停下后不再重做");
-      // 续跑：从第 2 步起重做，起点是第 1 步结束时的树
+      // 续跑：从第 5 步起重做，起点是人在该步之前的代码
       let seenAtRedo: string | undefined;
       const resumed = scriptedAgent((input) => {
         seenAtRedo = readFileSync(join(input.target.root, "src", "base.txt"), "utf8");
-        return undefined;
+        return solve(input);
       });
       const again = await runStreams(options(t, { agents: { pigeon: resumed }, maxSteps: 2 }));
       assert.deepEqual(
         readStreamResults(again.resultsFile).map((r) => r.seq),
-        [1, 2]
+        [1, 5]
       );
       assert.deepEqual(
         resumed.calls.map((c) => c.step.seq),
-        [2]
+        [5]
       );
-      assert.notEqual(seenAtRedo, "half\n", "作废那步的改动没有带进重做");
+      assert.equal(seenAtRedo, "base v2\n", "作废那步的改动没有带进重做，起点是人的代码");
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -1557,27 +1624,24 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
   test("结果文件末尾留着写到一半的行（进程被杀）：续跑前隔开它，之后追加的结果行照常读得出", async () => {
     const t = await toy();
     try {
-      const agent = scriptedAgent((input) => {
-        if (input.step.seq === 1) write(input.target.root, { "src/a.txt": "alpha\n" });
-        return undefined;
-      });
+      const agent = scriptedAgent(solve);
       const first = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
-      appendFileSync(first.resultsFile, '{"stream":"s1","condition":"no-g');
+      appendFileSync(first.resultsFile, '{"stream":"tasks","condition":"neit');
       const again = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
       assert.deepEqual(
         readStreamResults(again.resultsFile).map((r) => r.seq),
-        [1, 2]
+        [1, 5]
       );
       assert.deepEqual(
         agent.calls.map((c) => c.step.seq),
-        [1, 2]
+        [1, 5]
       );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("作废重做前丢掉那次尝试在库里的痕迹：agent 在被打断的尝试里提交过，重做时 reflog 与对象库里都找不到那个提交", async () => {
+  test("作废重做另开环境、不留那次尝试的痕迹：agent 在被打断的尝试里提交过，重做时 reflog 与对象库里都找不到那个提交", async () => {
     const t = await toy();
     try {
       let attemptCommit = "";
@@ -1620,9 +1684,9 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         let fired = false;
         const runtime: typeof toyRuntime = {
           ...toyRuntime,
-          // 判题跑用例不带 cwd，全量测量在测量副本里跑（带 cwd）：在其中一处途中收到停止信号
+          // 判题只跑本题的测试，全量测量跑人在该步的全部测试：在其中一处途中收到停止信号
           runCases: (ws, tests, opts) => {
-            if (!fired && (opts.cwd === undefined) === (where === "judge")) {
+            if (!fired && isMeasure(tests) === (where === "measure")) {
               fired = true;
               limits.shutdown("收到 SIGTERM");
             }
@@ -1652,7 +1716,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("因停止信号停下：在途作业的容器留着（续跑接管），排队的作业不再开容器", async () => {
+  test("因停止信号停下：在途一步的容器照样丢弃（续跑另开），排队的作业不再开容器", async () => {
     const t = await toy();
     try {
       const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
@@ -1682,15 +1746,15 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const summary = await runStreams(
         options(t, {
           agents: { pigeon: agent, minimal: agent },
-          conditions: ["no-gate", "minimal"],
+          conditions: ["neither", "minimal"],
           concurrency: 1,
           envs,
           maxSteps: 2,
           limits,
         })
       );
-      assert.deepEqual(opened, ["no-gate"], "排队的作业不再开容器");
-      assert.deepEqual(disposed, [], "在途作业的容器留着");
+      assert.deepEqual(opened, ["neither"], "排队的作业不再开容器");
+      assert.deepEqual(disposed, ["neither"], "在途一步的容器丢弃");
       assert.ok(summary.jobs.every((j) => /收到 SIGTERM/.test(j.stopped ?? "")));
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -1769,11 +1833,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     try {
       const agent = scriptedAgent(() => undefined);
       const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, conditions: ["minimal", "no-gate"], maxSteps: 1 })
+        options(t, { agents: { pigeon: agent }, conditions: ["minimal", "neither"], maxSteps: 1 })
       );
       const byKey = new Map(summary.jobs.map((j) => [j.key, j]));
-      assert.match(byKey.get("s1|minimal|1")?.stopped ?? "", /agent（minimal）没有接入/);
-      assert.equal(byKey.get("s1|no-gate|1")?.completedTo, 1);
+      assert.match(byKey.get("tasks|minimal|1")?.stopped ?? "", /agent（minimal）没有接入/);
+      assert.equal(byKey.get("tasks|neither|1")?.completedTo, 1);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -2001,7 +2065,9 @@ test("换根目录：同一份清单、人的基准、检查门结果与身份�
         manifestDigest: manifestDigestOf(join(a, "data", "manifest.json")),
         image: "sha256:img",
         budget: DEFAULT_STEP_BUDGET,
-        conditions: ["no-gate"],
+        conditions: ["neither"],
+        stepScope: TASK_CHAIN_SCOPE,
+        promptFormat: "test-files",
         maxSteps: null,
         agents: {},
       },
@@ -2253,14 +2319,14 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
   }
 });
 
-test("治理根按条件 × 流 × 遍次隔离：同一作业各步共用一个（记忆沿流累积），不同条件、不同遍次各用各的", async () => {
+test("治理根按条件 × 遍次隔离：同一作业各步共用一个（会话与记忆沿步累积），不同条件、不同遍次各用各的", async () => {
   const t = await toy();
   try {
     const agent = scriptedAgent(() => undefined);
     await runStreams(
       options(t, {
         agents: { pigeon: agent },
-        conditions: ["full", "no-memory"],
+        conditions: ["search-only", "neither"],
         attempts: 2,
         maxSteps: 2,
         concurrency: 1,
@@ -2271,7 +2337,7 @@ test("治理根按条件 × 流 × 遍次隔离：同一作业各步共用一个
       const key = `${call.job.stream}|${call.job.condition}|${call.job.attempt}`;
       roots.set(key, (roots.get(key) ?? new Set()).add(call.workDir));
     }
-    // 每个作业的两步（题、维护步）都调了 agent，且共用一个治理根
+    // 每个作业的两道题都调了 agent，且共用一个治理根
     assert.equal(agent.calls.length, 8);
     assert.deepEqual(
       [...roots.values()].map((set) => set.size),
@@ -2281,8 +2347,8 @@ test("治理根按条件 × 流 × 遍次隔离：同一作业各步共用一个
     const distinct = new Set([...roots.values()].map((set) => [...set][0]));
     assert.equal(distinct.size, 4);
     const of = (key: string) => [...(roots.get(key) ?? [])][0];
-    assert.notEqual(of("s1|full|1"), of("s1|full|2"), "两个遍次的治理根不同");
-    assert.notEqual(of("s1|full|1"), of("s1|no-memory|1"), "两个条件的治理根不同");
+    assert.notEqual(of("tasks|search-only|1"), of("tasks|search-only|2"), "两个遍次的治理根不同");
+    assert.notEqual(of("tasks|search-only|1"), of("tasks|neither|1"), "两个条件的治理根不同");
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }

@@ -1,13 +1,11 @@
-// 延续式实验的流工作区（决策 148、104、109、154）：每条流一个断网容器，agent 在其中一步接一步地改同一份代码。
+// 提交流实验的工作区（决策 148、104、109、154、193、212）：每一步一个新开的断网容器，agent 在其中从人在该步之前的代码开工。
 // 工作区的一切动作都是在工作区根执行的一段 sh 脚本，经 StreamShell 下发：生产实现走 docker exec，
 // 测试用本机 sh 在临时目录里真跑同一批脚本。
-//   起点：人在该流起点那次提交的代码，经 git bundle 送入（bundle 只含起点可达的历史，天然看不到未来），
+//   起点：人在该步之前那次提交的代码，经 git bundle 送入（bundle 只含起点可达的历史，天然看不到未来），
 //         再用与外部基准同一份清理脚本清到只剩当前并自验（109）；
-//   每步：程序把该步人写的测试、测试辅助与环境文件写进去（内容由宿主从人的提交里取、经标准输入送入，容器里没有未来对象）；
-//   落地：以该步的提交信息提交一次（148），agent 可用 git log 读到；
-//   回到本步起点：每步起点即 HEAD，复原被跟踪文件并删掉未忽略的未跟踪文件，被忽略的依赖目录不动（154）；
-//   续跑：每步落地后把历史导出成 bundle 存到宿主，容器丢失时可由镜像加 bundle 重建；
-//   测量副本：从 HEAD 克隆一份到另一目录，依赖目录以链接接上，在其中跑全量测试，结果不进 agent 的会话（145）。
+//   开工：程序把该步人写的环境文件写进去（内容由宿主从人的提交里取、经标准输入送入，容器里没有未来对象）；
+//         人在该步的测试与测试辅助文件判题时才写入（198）；
+//   收工：记下 agent 相对开工时的改动（diff），判题与全量测量就地进行，之后整个容器丢弃，下一步另开。
 import { containerExec, trustedShell } from "../execution/container-host.ts";
 import { historyPruneVerified, PRUNE_HISTORY_SCRIPT } from "./container-workspace.ts";
 import type { HumanFileOp } from "./stream-manifest.ts";
@@ -179,15 +177,13 @@ export const GATE_REPORT = "/tmp/pigeon-gate-junit.xml";
 
 export class StreamWorkspace {
   private readonly shell: StreamShell;
-  private readonly gateReport: string;
-  private readonly tmpDir: string | undefined;
+  private readonly homeDir: string | undefined;
 
-  // gateReport 只供本机测试改到各自的临时路径（本机 /tmp 为各用例共用）。tmpDir 是容器里的临时目录（作业容器为 /tmp）：
-  // 丢弃作废的尝试时清空；不给即不清（本机测试的"容器"就是本机，不能清本机的临时目录）
-  constructor(shell: StreamShell, options: { gateReport?: string; tmpDir?: string } = {}) {
+  // homeDir 只供本机测试：判题前清家目录下的用户级文件时改到用例自建的目录。缺省清容器里执行用户的 $HOME，且只在
+  // 跑批器起的作业容器里清（本机测试的"容器"就是本机，绝不能清本机的家目录）
+  constructor(shell: StreamShell, options: { homeDir?: string } = {}) {
     this.shell = shell;
-    this.gateReport = options.gateReport ?? GATE_REPORT;
-    this.tmpDir = options.tmpDir;
+    this.homeDir = options.homeDir;
   }
 
   get root(): string {
@@ -235,7 +231,7 @@ export class StreamWorkspace {
       throw new StreamWorkspaceError(`起点检出不符：HEAD 为 ${head}，应为 ${startCommit}`);
   }
 
-  // 从续跑 bundle 恢复（容器丢失后重建）：bundle 为此前导出的完整流历史，末端即断点
+  // 从 bundle 恢复出完整历史并检出 head（参考工作区装人的完整历史用）
   async restoreFromBundle(bundle: Buffer, head: string): Promise<void> {
     await this.must(
       [
@@ -247,13 +243,11 @@ export class StreamWorkspace {
         "git config core.autocrlf false",
         `cat > ${BUNDLE_PATH}`,
         `git fetch -q ${BUNDLE_PATH} "$1"`,
-        // 各步"开工时的树"的引用随流历史一起带回，之后导出的流历史里仍有它们
-        `if git bundle list-heads ${BUNDLE_PATH} | grep -q " ${STEP_START_REFS}/"; then git fetch -q ${BUNDLE_PATH} "${STEP_START_REFS}/*:${STEP_START_REFS}/*"; fi`,
         'git checkout -q -f -B main "$1"',
         `rm -f ${BUNDLE_PATH}`,
         "rm -f .git/FETCH_HEAD",
       ].join("\n"),
-      "从续跑点恢复",
+      "从 bundle 恢复",
       { args: [head], stdin: bundle, timeoutMs: 900_000 }
     );
   }
@@ -305,39 +299,8 @@ export class StreamWorkspace {
     return { exitCode: result.exitCode, timedOut, output: result.stdout + result.stderr };
   }
 
-  // 落地：以提交信息提交当前工作区的全部改动（没有改动也提交一次，步与提交一一对应）
-  // base：落地提交的父提交（跑批器传本步起点）。提交前让 main 指向它、HEAD 指回 main：落地提交一定记在 main 上、父提交
-  // 一定是本步起点——判题期间 agent 的代码移动了 HEAD 也不会让流历史多出提交；不给则以当前 HEAD 为准（测试用）
-  async land(message: string, base?: string): Promise<string> {
-    await this.must(
-      `${SANITIZE_GIT_CONFIG} && set -- "\${1:-$(git rev-parse HEAD)}" && ${HEAD_ONTO_MAIN}`,
-      "把 HEAD 放回 main",
-      { args: base !== undefined ? [base] : [] }
-    );
-    await this.must("git add -A && git commit -q --allow-empty --no-verify -F -", "落地提交", {
-      stdin: message,
-      timeoutMs: 300_000,
-    });
-    return this.head();
-  }
-
-  // 回到本步起点（缺省为 HEAD）：复原被跟踪文件，删掉未忽略的未跟踪文件（含未跟踪的嵌套仓库，clean 要两个 -f）；
-  // 被忽略的文件（依赖目录）不动
-  async rollback(to = "HEAD"): Promise<void> {
-    await this.grantOwnerAccess();
-    await this.must(
-      // 先让 HEAD 脱离到目标提交（checkout --detach 只改 HEAD 本身），再让 HEAD 指回指向目标的 main，然后复原
-      `${SANITIZE_GIT_CONFIG} && ${UNMARK_INDEX} && git checkout -q -f --detach "$1" && set -- "$(git rev-parse HEAD)" && ${HEAD_ONTO_MAIN} && git reset -q --hard && git clean -ffdq`,
-      "回到本步起点",
-      {
-        args: [to],
-        timeoutMs: 300_000,
-      }
-    );
-  }
-
   // agent 在容器里也可能自己提交、切到别的分支或让 HEAD 游离：把 HEAD 放回指向本步起点的 main、改动留在暂存区与
-  // 工作区（等同 soft reset，但不经过 agent 设下的符号引用），此后的恢复、判定与落地都相对起点，落地提交记在 main 上
+  // 工作区（等同 soft reset，但不经过 agent 设下的符号引用），此后记改动、恢复人写测试与判题都相对起点
   async normalizeTo(base: string): Promise<void> {
     await this.must(
       `${SANITIZE_GIT_CONFIG} && ${SETTLE_INDEX} && ${HEAD_ONTO_MAIN}`,
@@ -348,71 +311,75 @@ export class StreamWorkspace {
     );
   }
 
-  // 丢弃作废的尝试（作废重做、接管续跑、由流历史重建）：回到 head，并去掉那次尝试在库里与容器里留下、重做时 agent 看得到
-  // 的痕迹——ORIG_HEAD、REBASE_HEAD 等伪引用与 rebase-merge、rebase-apply、sequencer 目录（后者以补丁文件存着提交的完整
-  // 改动），agent 建的 worktree，main 与不超过 keepStepStartsUpTo 的开工树引用以外的全部引用（agent 建的分支、标签、
-  // refs/stash），reflog（全部清空），以及因此不可达的对象（先全部重新打包，被自动 gc 打进包的提交也回收掉）；容器的临时
-  // 目录清空；给了测量副本目录时一并清空（接管时它可能还放着作废那一步落地后的整份解）。被忽略的文件按设计保留
-  async discardAttempt(
-    head: string,
-    keepStepStartsUpTo: number,
-    measureRoot?: string
-  ): Promise<void> {
-    await this.rollback(head);
-    await this.must(
+  // 工作区此刻的树（被跟踪文件与未忽略的未跟踪文件）：用临时索引从 HEAD 起暂存全部、写出树对象，返回树的哈希；
+  // 不动真的暂存区。开工时与收工时各取一次，两者之差即 agent 在这一步的改动
+  async worktreeTree(): Promise<string> {
+    const r = await this.must(
       [
-        "set -e",
-        'gd="$(git rev-parse --git-dir)"',
-        'rm -f -- "$gd/ORIG_HEAD" "$gd/FETCH_HEAD" "$gd/MERGE_HEAD" "$gd/CHERRY_PICK_HEAD" "$gd/REVERT_HEAD" "$gd/AUTO_MERGE" "$gd/BISECT_HEAD" "$gd/REBASE_HEAD"',
-        'rm -rf -- "$gd/rebase-merge" "$gd/rebase-apply" "$gd/sequencer"',
-        // worktree 的路径由 .git/worktrees/*/gitdir 决定，agent 能指到任意位置：只删工作区之内的，登记整个删掉
-        "git worktree list --porcelain | sed -n 's/^worktree //p' | tail -n +2 | while IFS= read -r w; do",
-        // 先规范化（cd 进去再 pwd -P），防止 /testbed/../x 这类写法按字面落在工作区前缀下、实际在外面
-        '  n="$(cd "$w" 2>/dev/null && pwd -P)" || continue',
-        '  case "$n" in "$(pwd -P)"/?*) rm -rf -- "$n" ;; esac',
-        "done",
-        'rm -rf -- "$gd/worktrees"',
-        "git for-each-ref --format='%(refname)' | while IFS= read -r r; do",
-        '  case "$r" in',
-        "    refs/heads/main) ;;",
-        `    ${STEP_START_REFS}/*)`,
-        `      n="\${r##*/}"`,
-        // 删引用一律 --no-deref：只删这条引用本身，不沿着符号引用删到 main
-        `      case "$n" in ''|*[!0-9]*) git update-ref --no-deref -d "$r" ;; *) if [ "$n" -gt "$1" ]; then git update-ref --no-deref -d "$r"; fi ;; esac ;;`,
-        '    *) git update-ref --no-deref -d "$r" ;;',
-        "  esac",
-        "done",
-        "git reflog expire --expire=now --expire-unreachable=now --all",
-        "git repack -a -d -q",
-        "git prune --expire=now",
-      ].join("\n"),
-      "丢弃作废的尝试",
-      { args: [String(keepStepStartsUpTo), head], timeoutMs: 900_000 }
+        SANITIZE_GIT_CONFIG,
+        'gd="$(git rev-parse --git-dir)" && t="$gd/pigeon-tree-index" && rm -f -- "$t"',
+        'GIT_INDEX_FILE="$t" git read-tree HEAD',
+        'GIT_INDEX_FILE="$t" git add -A',
+        'tree="$(GIT_INDEX_FILE="$t" git write-tree)"',
+        'rm -f -- "$t"',
+        'echo "$tree"',
+      ].join(" && "),
+      "读取工作区的树",
+      { timeoutMs: 300_000 }
     );
-    await this.clearTmpDir();
-    if (measureRoot !== undefined) await this.clearArtifacts(measureRoot);
+    return r.stdout.trim();
   }
 
-  // 清空容器的临时目录（给了 tmpDir 时）。只在跑批器起的 docker 作业容器里清（IN_STREAM_CONTAINER）：本机测试的假 docker
-  // 把脚本放在本机执行，那里的临时目录是本机的，绝不能清
-  async clearTmpDir(): Promise<void> {
-    if (this.tmpDir === undefined) return;
-    await this.must(
-      `${IN_STREAM_CONTAINER} || exit 0; find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null; true`,
-      "清空容器的临时目录",
-      { args: [this.tmpDir] }
+  // 两棵树之差（含二进制内容）：存下 agent 在这一步的改动，替代延续式的流历史
+  async diffTrees(from: string, to: string): Promise<Buffer> {
+    const r = await this.must(
+      'git diff --binary --no-color --no-ext-diff --no-textconv "$1" "$2"',
+      "取出改动",
+      { args: [from, to], timeoutMs: 300_000 }
     );
+    return r.stdoutBytes;
   }
 
-  // 接管续跑时已存在的工作区：库里须有上一个完成步（第 seq 步）的提交（没有即抛错，由调用方改为重建），再按作废重做
-  // 同一口径丢掉在途那次尝试，并清空测量副本；被忽略的文件留着（与没中断的作业一样）
-  async takeOver(head: string, seq: number, measureRoot: string): Promise<void> {
-    // 容器刚重启：上次被杀的 git 命令留下的锁文件先清掉，否则回到断点的 reset 失败、接管退回重建
-    await this.removeStaleGitLocks();
-    await this.must('git cat-file -e "$1^{commit}"', `核对上一个完成步的提交 ${head}`, {
-      args: [head],
+  // 把工作区的全部改动暂存（含未忽略的未跟踪文件）：就地全量测量之前，让 agent 新建的测试文件也在被跟踪之列，
+  // 同步人写测试时才能按类删掉它们
+  async stageAll(): Promise<void> {
+    await this.must(`${SANITIZE_GIT_CONFIG} && git add -A`, "暂存工作区的改动", {
+      timeoutMs: 300_000,
     });
-    await this.discardAttempt(head, seq, measureRoot);
+  }
+
+  // 删掉家目录下给定的相对路径（用户级 site-packages、ruff 与 mypy 的用户级配置等，决策 195 的补口）：删不掉即抛访问
+  // 错误（调用方把这一步作废）。缺省为容器里执行用户的 $HOME，且只在跑批器起的作业容器里删（IN_STREAM_CONTAINER）；
+  // 构造时给了 homeDir（本机测试）则删它下面的
+  async clearHomePaths(paths: readonly string[]): Promise<void> {
+    if (paths.length === 0) return;
+    for (const p of paths) {
+      if (p.startsWith("/") || p.split("/").includes("..") || p === "" || p === ".") {
+        throw new StreamWorkspaceError(`家目录下的路径须为相对路径、不含 ..：${p}`);
+      }
+    }
+    const enter =
+      this.homeDir !== undefined
+        ? 'h="$1"'
+        : `${IN_STREAM_CONTAINER} || exit 0; h="\${HOME:-}"; [ -n "$h" ] && [ "$h" != / ] || exit 0`;
+    const r = await this.shell.sh(
+      [
+        `${enter}; shift; cd -- "$h" || exit 0`,
+        'chmod -R u+rwX -- "$@" 2>/dev/null; rm -rf -- "$@" 2>/dev/null',
+        `for p; do if [ -e "$p" ] || [ -L "$p" ]; then exit ${UNLINK_FAILED}; fi; done; true`,
+      ].join("\n"),
+      { args: [this.homeDir ?? "", ...paths] }
+    );
+    if (r.exitCode === UNLINK_FAILED) {
+      throw new StreamWorkspaceAccessError(
+        `家目录下的用户级文件删不掉（${paths.join("、")}）：判题前不能保证它们不起作用`
+      );
+    }
+    if (r.exitCode !== 0) {
+      throw new StreamWorkspaceError(
+        `清家目录下的用户级文件失败（退出码 ${r.exitCode}）：${r.stderr.trim()}`
+      );
+    }
   }
 
   // 把工作区里 agent 收走的属主权限放回来（chmod -R u+rwX；跑批器与 agent 同一用户，做得到）：agent 把目录设成
@@ -450,11 +417,6 @@ export class StreamWorkspace {
     await this.must(SANITIZE_GIT_CONFIG, "清理 git 配置");
   }
 
-  // 清掉残留的 git 锁文件（见 STALE_GIT_LOCKS）
-  async removeStaleGitLocks(): Promise<void> {
-    await this.must(STALE_GIT_LOCKS, "清理残留的 git 锁文件", { args: [this.root] });
-  }
-
   // 工作区是否与 HEAD 逐字一致（被跟踪文件与未忽略的未跟踪文件）
   async isClean(): Promise<boolean> {
     const status = await this.must(
@@ -464,53 +426,7 @@ export class StreamWorkspace {
     return status.stdout.trim() === "";
   }
 
-  // 导出整条流历史，供续跑时重建
-  async exportBundle(): Promise<Buffer> {
-    const result = await this.must("git bundle create - --all 2>/dev/null", "导出流历史", {
-      timeoutMs: 600_000,
-    });
-    return result.stdoutBytes;
-  }
-
-  // 建测量副本：从 HEAD 克隆到 measureRoot，依赖目录以链接接上；返回副本路径。只清空副本目录里的内容、不删目录本身：
-  // 容器里以非 root 用户执行，镜像预建好归它所有的副本目录，它未必能写上级目录
-  async prepareMeasureCopy(measureRoot: string, depsLinks: readonly string[]): Promise<string> {
-    const links = depsLinks
-      .map(
-        (d) =>
-          `if [ -e ${shellQuote(`${this.root}/${d}`)} ]; then ln -s ${shellQuote(`${this.root}/${d}`)} "$1/${d}"; fi`
-      )
-      .join("\n");
-    await this.must(
-      [
-        "set -e",
-        'mkdir -p -- "$1"',
-        // agent 在副本里放的不可写目录（0555 里有文件）会让 rm 失败：先放回属主权限
-        'chmod -R u+rwX -- "$1" 2>/dev/null || true',
-        'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +',
-        `git -c core.autocrlf=false clone -q --no-hardlinks ${shellQuote(this.root)} "$1"`,
-        links,
-      ].join("\n"),
-      "建立测量副本",
-      { args: [measureRoot], timeoutMs: 600_000 }
-    );
-    return measureRoot;
-  }
-
-  // 测量与判题的产物用完即清，不留给下一步的 agent：清空测量副本目录的内容（人写测试的副本与其中的报告），
-  // 删掉工作区里判题的报告与维护步验证门的报告
-  async clearArtifacts(measureRoot: string): Promise<void> {
-    await this.must(
-      [
-        'if [ -d "$1" ]; then chmod -R u+rwX -- "$1" 2>/dev/null; find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi',
-        `rm -f ${shellQuote(`${this.root}/.git/pigeon-cases-junit.xml`)} ${shellQuote(this.gateReport)}`,
-      ].join("\n"),
-      "清理测量与判题的产物",
-      { args: [measureRoot], timeoutMs: 120_000 }
-    );
-  }
-
-  // 在测量副本里写入人的文件
+  // 在给定目录（缺省工作区根）里写入人的文件
   async applyHumanFilesAt(
     dir: string,
     ops: readonly HumanFileOp[],
@@ -520,7 +436,7 @@ export class StreamWorkspace {
       const script = `${UNLINK_ON_PATH} unlink_on_path "$1" || exit $?; ${
         op.op === "delete" ? 'rm -f -- "$1"' : 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"'
       }`;
-      await this.humanWrite(script, `测量副本写入 ${op.path}`, {
+      await this.humanWrite(script, `写入人的文件 ${op.path}`, {
         args: [op.path],
         cwd: dir,
         ...(op.op === "write" ? { stdin: read(op.path) } : {}),

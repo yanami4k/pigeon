@@ -86,6 +86,10 @@ export interface HeadlessRunOptions {
   temperature?: number;
   // M9：任务源给的系统指令——追加进 system prompt 并随之冻结；任务说明（task）不受影响
   taskDirective?: string;
+  // 决策 193：能否检索历史会话（缺省开着）；关掉时两件会话检索工具不注册，系统提示不提它们
+  sessionSearch?: boolean;
+  // 决策 191、193：推送记忆（开局把记忆整份推入系统提示）。尚未实现：打开即在装配前报错
+  pushedMemory?: boolean;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令——冻结进注入快照；尝试收尾后在工作区独立执行并落本会话的通用验证记录
@@ -187,6 +191,9 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
 }
 
 export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
+  if (options.pushedMemory === true) {
+    throw new Error("推送记忆尚未实现：打开推送记忆的条件暂时不能运行");
+  }
   const repairRounds = assertRepairSetup(options);
   // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 只是宿主侧占位目录。分叉（失败自动重试、分支会话）要在它上面
   // 打 git 快照，会话验证命令要在它里面执行——在占位目录上做只会得到假结果，装配前一律拒绝。
@@ -230,6 +237,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
+    ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),

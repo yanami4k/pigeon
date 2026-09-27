@@ -1,16 +1,9 @@
-// 续跑时接管已存在的流容器（进程被杀、整机重启之后）：用一个带状态的假 docker——记下容器在不在、状态与所用镜像，exec 在
-// -w 给出的本机目录里直接执行——对着真实的 git 验证接管、回到上一个完成步与退回重建三种走法
+// 每一步新开干净容器（决策 212）：用一个带状态的假 docker——记下容器在不在、状态与所用镜像，exec 在 -w 给出的本机目录里
+// 直接执行，删除与新建容器时把"容器"的文件系统（本机上的工作区目录）一并清空——对着真实的 git 验证每步从人的起点新开、
+// 上一步留下的东西不跨步
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -19,11 +12,13 @@ import { dockerStreamEnvs } from "./stream-runner.ts";
 import { toyRepo } from "./stream-toy-fixtures.ts";
 
 const FAKE_DOCKER = `
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-const [stateFile, logFile, ...args] = process.argv.slice(2);
+const [stateFile, logFile, fsRoot, ...args] = process.argv.slice(2);
 const state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : {};
 const save = () => writeFileSync(stateFile, JSON.stringify(state));
+// 容器的文件系统随容器删除而消失、新建时为空
+const wipe = () => { rmSync(fsRoot, { recursive: true, force: true }); mkdirSync(fsRoot, { recursive: true }); };
 if (args[0] !== "exec") appendFileSync(logFile, args.join(" ") + "\\n");
 if (args[0] === "inspect") {
   const c = state[args.at(-1)];
@@ -31,10 +26,8 @@ if (args[0] === "inspect") {
   process.stdout.write(c.status + "|" + c.image + "|" + (c.env ?? []).map((e) => e + ";").join("") + "\\n");
   process.exit(0);
 }
-if (args[0] === "image") { process.stdout.write("sha256:current\\n"); process.exit(0); }
-if (args[0] === "start" || args[0] === "restart") { state[args.at(-1)].status = "running"; save(); process.exit(0); }
-if (args[0] === "rm") { delete state[args.at(-1)]; save(); process.exit(0); }
-if (args[0] === "run") { const name = args[args.indexOf("--name") + 1]; const env = args.flatMap((a, k) => (args[k - 1] === "-e" ? [a] : [])); state[name] = { status: "running", image: "sha256:current", env }; save(); process.exit(0); }
+if (args[0] === "rm") { if (state[args.at(-1)] !== undefined) wipe(); delete state[args.at(-1)]; save(); process.exit(0); }
+if (args[0] === "run") { wipe(); const name = args[args.indexOf("--name") + 1]; const env = args.flatMap((a, k) => (args[k - 1] === "-e" ? [a] : [])); state[name] = { status: "running", image: "sha256:current", env }; save(); process.exit(0); }
 if (args[0] !== "exec") process.exit(0);
 let i = 1; let cwd = process.cwd();
 for (;;) {
@@ -67,196 +60,101 @@ function put(root: string, files: Record<string, string>): void {
   }
 }
 
-// 起一个"容器"：新开到流起点，落地第 1 步（带 .gitignore 与一个被忽略的产物），再模拟第 2 步已落地、正在测量时进程被停
-// （库里多了落地提交 N、ORIG_HEAD 指向它、第 1 与第 2 步的开工树引用都在，测量副本里是落地后的整份解，工作区另有未提交的
-// 改动）。返回续跑要用的断点与流历史
-async function scenario() {
+// 人的历史 c1 → c2 → c3（未来）；返回按每步开容器的工厂与假 docker 的记录
+function scenario() {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-envs-"));
   const human = join(base, "human");
-  const start = toyRepo(human)({ "src/base.txt": "base\n" }, "Start");
+  const commit = toyRepo(human);
+  const c1 = commit({ ".gitignore": "build/\n", "src/base.txt": "base\n" }, "Start");
+  const c2 = commit({ "src/a.txt": "alpha\n" }, "Step 1");
+  const c3 = commit({ "src/b.txt": "future\n" }, "Step 2");
   const root = join(base, "testbed");
   mkdirSync(root);
-  const measure = join(base, "measure");
-  mkdirSync(measure);
-  const msys = (dir: string) =>
+  const containerRoot =
     process.platform === "win32"
-      ? execFileSync("sh", ["-c", 'cd -- "$1" && readlink -f .', "sh", dir], {
+      ? execFileSync("sh", ["-c", 'cd -- "$1" && readlink -f .', "sh", root], {
           encoding: "utf8",
         }).trim()
-      : dir;
-  const containerRoot = msys(root);
+      : root;
   const script = join(base, "docker.mjs");
   writeFileSync(script, FAKE_DOCKER);
   const stateFile = join(base, "state.json");
   const logFile = join(base, "docker.log");
-  const docker = [process.execPath, script, stateFile, logFile];
+  writeFileSync(logFile, "");
   const warnings: string[] = [];
   const envs = dockerStreamEnvs({
     image: "img",
     human: gitHumanRepo(human),
     prefix: "p",
-    docker,
+    docker: [process.execPath, script, stateFile, logFile, root],
     root: containerRoot,
-    measureRoot: msys(measure),
     warn: (line) => warnings.push(line),
   });
-  const job = { stream: "s1", condition: "no-gate" as const, attempt: 1 };
-  const first = await envs.open(job, { startCommit: start });
-  put(root, { ".gitignore": "build/\n", "src/a.txt": "alpha\n" });
-  const head1 = await first.ws.land("step 1");
-  const bundle1 = await first.ws.exportBundle();
-  put(root, { "build/keep.o": "obj\n" });
-  git(root, "update-ref", "refs/pigeon/step-start/s1/1", head1);
-  // 第 2 步：开工树引用、落地提交 N（ORIG_HEAD 指向它）、测量副本里的整份解，另有未提交的改动
-  git(root, "update-ref", "refs/pigeon/step-start/s1/2", head1);
-  put(root, { "src/b.txt": "solution of step 2\n" });
-  git(root, "-c", "user.name=a", "-c", "user.email=a@x", "add", "-A");
-  git(root, "-c", "user.name=a", "-c", "user.email=a@x", "commit", "-qm", "step 2");
-  const landed = git(root, "rev-parse", "HEAD");
-  git(root, "update-ref", "ORIG_HEAD", landed);
-  put(measure, { "src/b.txt": "solution of step 2\n" });
-  put(root, { "src/c.txt": "dirty\n" });
-  writeFileSync(logFile, "");
-  const setState = (
-    status: string,
-    image = "sha256:current",
-    env = ["PIGEON_STREAM_CONTAINER=1"]
-  ) => writeFileSync(stateFile, JSON.stringify({ "p-s1-no-gate-1": { status, image, env } }));
-  const log = () =>
+  const job = { stream: "tasks", condition: "neither" as const, attempt: 1 };
+  const verbs = () =>
     readFileSync(logFile, "utf8")
       .split("\n")
-      .filter((l) => l !== "");
-  const dropContainer = () => writeFileSync(stateFile, "{}");
-  return {
-    base,
-    root,
-    measure,
-    envs,
-    job,
-    head1,
-    landed,
-    bundle1,
-    setState,
-    dropContainer,
-    log,
-    warnings,
-  };
+      .filter((l) => l !== "")
+      .map((l) => l.split(" ")[0]);
+  const state = () => JSON.parse(readFileSync(stateFile, "utf8")) as Record<string, unknown>;
+  return { base, root, envs, job, c1, c2, c3, verbs, state, warnings };
 }
 
-test("续跑接管已存在的流容器：停止的启动、仍在运行的重启；回到上一个完成步，在途步的提交与改动作废，被忽略的产物保留，不重建；作废那一步落地的提交在 reflog、伪引用、开工树引用、对象库与测量副本里都不留痕迹", async () => {
-  for (const [status, verb] of [
-    ["exited", "start"],
-    ["running", "restart"],
-  ] as const) {
-    const s = await scenario();
-    try {
-      s.setState(status);
-      // 进程被杀时在途的 git 命令留下的锁文件：接管前清掉，不让回到断点的 reset 失败
-      writeFileSync(join(s.root, ".git", "index.lock"), "");
-      const env = await s.envs.open(s.job, {
-        startCommit: "unused",
-        resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
-      });
-      assert.deepEqual(
-        s.log().map((l) => l.split(" ")[0]),
-        ["inspect", "image", verb],
-        `${status}：只${verb}、不删不建`
-      );
-      assert.equal(await env.ws.head(), s.head1);
-      assert.equal(existsSync(join(s.root, "src", "b.txt")), false, "在途步的提交作废");
-      assert.equal(existsSync(join(s.root, "src", "c.txt")), false, "在途步的改动作废");
-      assert.equal(existsSync(join(s.root, "build", "keep.o")), true, "被忽略的产物保留");
-      // agent 能访问到的范围内找不到落地提交 N
-      assert.doesNotMatch(
-        git(s.root, "reflog", "--all", "--format=%H"),
-        new RegExp(s.landed),
-        "reflog"
-      );
-      assert.equal(existsSync(join(s.root, ".git", "ORIG_HEAD")), false, "ORIG_HEAD");
-      assert.deepEqual(
-        git(s.root, "for-each-ref", "--format=%(refname)", "refs/pigeon/step-start/").split("\n"),
-        ["refs/pigeon/step-start/s1/1"],
-        "只留断点及以前的开工树引用"
-      );
-      assert.throws(() => git(s.root, "cat-file", "-e", s.landed), "对象库里也没有");
-      assert.deepEqual(readdirSync(s.measure), [], "测量副本清空");
-    } finally {
-      rmSync(s.base, { recursive: true, force: true });
-    }
-  }
-});
-
-test("续跑时残留容器用不上即由流历史重建：镜像不是当前的、库里没有上一个完成步的提交、容器已不在", async () => {
-  const cases: [string, (s: Awaited<ReturnType<typeof scenario>>) => void][] = [
-    ["镜像不同", (s) => s.setState("exited", "sha256:old")],
-    [
-      "库里没有上一个完成步的提交",
-      (s) => {
-        s.setState("exited");
-        // 容器里的库换成另起的一个（没有上一个完成步的提交）
-        rmSync(join(s.root, ".git"), { recursive: true, force: true });
-        git(s.root, "init", "-q");
-      },
-    ],
-    ["容器已不在", (s) => s.dropContainer()],
-  ];
-  for (const [what, arrange] of cases) {
-    const s = await scenario();
-    try {
-      arrange(s);
-      const env = await s.envs.open(s.job, {
-        startCommit: "unused",
-        resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
-      });
-      const verbs = s.log().map((l) => l.split(" ")[0]);
-      assert.ok(
-        verbs.includes("rm") && verbs.includes("run"),
-        `${what}：重建（${verbs.join(" ")}）`
-      );
-      assert.equal(await env.ws.head(), s.head1, `${what}：回到上一个完成步`);
-    } finally {
-      rmSync(s.base, { recursive: true, force: true });
-    }
-  }
-});
-
-test("由流历史重建：流历史里带着断点之后那一步落地的提交（导出之后、写结果行之前被停），重建后同一口径丢掉，库里找不到它", async () => {
-  const s = await scenario();
+test("每步新开干净容器：同名的旧容器先删后建（不接管、不重启），检出人在该步之前的代码、历史只到它；上一步留下的被忽略文件与未跟踪文件都不跨步", async () => {
+  const s = scenario();
   try {
-    // 导出的流历史里已有第 2 步落地的提交 N
-    const bundleFile = join(s.base, "with-n.bundle");
-    git(s.root, "bundle", "create", "-q", bundleFile, "--all");
-    const bundle = readFileSync(bundleFile);
-    s.dropContainer();
-    const env = await s.envs.open(s.job, {
-      startCommit: "unused",
-      resume: { head: s.head1, seq: 1, bundle },
-    });
-    assert.equal(await env.ws.head(), s.head1);
-    assert.throws(() => git(s.root, "cat-file", "-e", s.landed), "N 不在库里");
+    const first = await s.envs.open(s.job, { startCommit: s.c1 });
+    assert.equal(await first.ws.head(), s.c1);
+    // 上一步的 agent 留下：被忽略的产物、未跟踪的文件、自己的提交
+    put(s.root, { "build/keep.o": "obj\n", "src/stray.txt": "x\n" });
+    git(
+      s.root,
+      "-c",
+      "user.name=a",
+      "-c",
+      "user.email=a@x",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "agent"
+    );
+    // 下一步：容器还在（没丢弃也一样），照样删掉重建
+    const second = await s.envs.open(s.job, { startCommit: s.c2 });
+    assert.deepEqual(
+      s.verbs().filter((v) => v === "rm" || v === "run" || v === "start" || v === "restart"),
+      ["rm", "run", "rm", "run"]
+    );
+    assert.equal(await second.ws.head(), s.c2);
+    assert.equal(existsSync(join(s.root, "build", "keep.o")), false, "被忽略的产物不跨步");
+    assert.equal(existsSync(join(s.root, "src", "stray.txt")), false, "未跟踪的文件不跨步");
+    assert.equal(readFileSync(join(s.root, "src", "a.txt"), "utf8"), "alpha\n");
+    assert.equal(git(s.root, "rev-list", "--all", "--count"), "2", "历史只到起点");
+    assert.throws(() => git(s.root, "cat-file", "-e", s.c3), "看不到未来");
+    await second.dispose();
+    assert.deepEqual(s.state(), {}, "用完即删");
   } finally {
     rmSync(s.base, { recursive: true, force: true });
   }
 });
 
-test("续跑时先前未带标志起的容器（闸门在里面不成立）不接管，改由流历史重建；闸门不成立时告警一次并说明后果", async () => {
-  const s = await scenario();
+test("送入起点失败（人的仓库里取不出该提交）：新起的容器随即删掉，报错交回", async () => {
+  const s = scenario();
   try {
-    s.setState("exited", "sha256:current", []);
-    await s.envs.open(s.job, {
-      startCommit: "unused",
-      resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
-    });
-    const verbs = s.log().map((l) => l.split(" ")[0]);
-    assert.ok(verbs.includes("rm") && verbs.includes("run"), `重建（${verbs.join(" ")}）`);
-    // 本机假 docker 把脚本放在本机执行：闸门在这里不成立
+    await assert.rejects(s.envs.open(s.job, { startCommit: "0".repeat(40) }), /rev-parse/);
+    assert.deepEqual(s.state(), {});
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("闸门不成立（本机假 docker 把脚本放在本机执行）：告警一次并说明后果，之后各步不再重复", async () => {
+  const s = scenario();
+  try {
+    await s.envs.open(s.job, { startCommit: s.c1 });
+    await s.envs.open(s.job, { startCommit: s.c2 });
     assert.equal(s.warnings.length, 1);
-    assert.match(s.warnings[0] ?? "", /闸门不成立.*不清空 \/tmp.*只按本步标记/);
-    await s.envs.open(s.job, {
-      startCommit: "unused",
-      resume: { head: s.head1, seq: 1, bundle: s.bundle1 },
-    });
-    assert.equal(s.warnings.length, 1, "只报一次");
+    assert.match(s.warnings[0] ?? "", /闸门不成立.*不清家目录下的用户级文件.*只按本步标记/);
   } finally {
     rmSync(s.base, { recursive: true, force: true });
   }

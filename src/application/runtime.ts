@@ -135,6 +135,9 @@ export interface RuntimeDeps {
   storeLineage?: StoreLineage;
   // 新存储故障告警的出口（缺省标准错误输出；测试注入）
   storeWarn?: WarnSink;
+  // 决策 193：能否检索历史会话。关掉时不注册 search_sessions 与 read_session_entry，系统提示去掉提到它们的那一句；
+  // 缺省开着（日常使用与 193 之前逐字一致）
+  sessionSearch?: boolean;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -255,9 +258,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
-  // M5 S2（决策 038）：Session Search 的两个 read 档工具，范围只限本项目会话目录
-  for (const registration of sessionToolRegistrations(sessionsDir)) {
-    registry.register(registration);
+  // M5 S2（决策 038）：Session Search 的两个 read 档工具，范围只限本项目会话目录；决策 193 的开关关掉时不注册
+  const sessionSearch = deps.sessionSearch ?? true;
+  if (sessionSearch) {
+    for (const registration of sessionToolRegistrations(sessionsDir)) {
+      registry.register(registration);
+    }
   }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
@@ -277,8 +283,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     TRUNCATION_GUIDANCE +
     WRITE_APPROVAL_SENTENCES[approval] +
     commandTexts.prompt +
-    "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
-    "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
+    (sessionSearch
+      ? "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
+        "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
+      : "");
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
   const skillCatalog = loadSkillCatalog({
@@ -302,8 +310,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "read_file",
     "edit_file",
     RUN_COMMAND_TOOL,
-    SEARCH_SESSIONS_TOOL,
-    READ_SESSION_ENTRY_TOOL,
+    ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
   ];
@@ -387,8 +394,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ? { allowlist: commandsConfig.roles[deps.commandRole] ?? [] }
           : {}),
       }),
-      createSearchSessionsTool({ sessionsDir }),
-      createReadSessionEntryTool({ sessionsDir }),
+      ...(sessionSearch
+        ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
+        : []),
       ...(hasSkills
         ? [
             createLoadSkillTool({

@@ -40,7 +40,12 @@ import {
   STREAM_RUNTIMES,
   summarizeManifest,
 } from "../eval/stream-generate.ts";
-import { markHumanGateFailures, type StreamManifest } from "../eval/stream-manifest.ts";
+import {
+  markHumanGateFailures,
+  type StreamManifest,
+  TASK_PROMPT_FORMATS,
+  type TaskPromptFormat,
+} from "../eval/stream-manifest.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
@@ -523,12 +528,13 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 }
 
 // pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
-//   [--streams s1,s2] [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑）] [--max-turns N（缺省 150）]
+//   [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑：只跑前 K 道题）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
-//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--spend-limit-cny <元>]：
-// 延续式实验（第三至六节）——每条流乘以每个条件为一个作业，逐步在断网容器里做、判、落地、全量测量、写结果行；
-// 无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
-// 四个条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
+//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases]
+//   [--spend-limit-cny <元>]：
+// 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开断网容器从人在
+// 该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
+// 各条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
 // 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
 // 同一输出目录重跑即从断点续跑
@@ -537,16 +543,17 @@ const STREAM_CONTAINER_MEMORY = "2g";
 async function evalStreamMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
-    "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
+    `--conditions ${STREAM_CONDITIONS.join(",")} [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--spend-limit-cny <元>]";
+    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
+    "[--spend-limit-cny <元>]";
   const own = new Set([
     "--manifest",
     "--repo",
     "--image",
     "--out",
     "--conditions",
-    "--streams",
+    "--prompt-format",
     "--attempts",
     "--concurrency",
     "--max-steps",
@@ -615,7 +622,13 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
       }
     : undefined;
-  const streams = list("--streams");
+  const promptFormat = values.get("--prompt-format");
+  if (
+    promptFormat !== undefined &&
+    !(TASK_PROMPT_FORMATS as readonly string[]).includes(promptFormat)
+  ) {
+    throw new Error(`未知题面格式 ${promptFormat}（可选 ${TASK_PROMPT_FORMATS.join("、")}）`);
+  }
   const attempts = positive("--attempts");
   const concurrency = positive("--concurrency");
   const maxSteps = positive("--max-steps");
@@ -657,7 +670,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     },
     ...(pigeon !== undefined ? { pigeon } : {}),
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
-    ...(streams !== undefined ? { streams } : {}),
+    ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
     ...(attempts !== undefined ? { attempts } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),
