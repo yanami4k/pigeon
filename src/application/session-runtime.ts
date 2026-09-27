@@ -8,6 +8,7 @@
 
 import { materializeSession } from "../persistence/session-read.ts";
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
+import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -32,6 +33,8 @@ export interface SessionRuntimeFlags {
   thinkingLevel?: ThinkingLevel;
   memoryBudgetChars?: number;
   maxOutputTokens?: number;
+  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
+  compaction?: CompactionConfigInput;
 }
 
 export interface OpenSessionRuntimeRequest {
@@ -128,6 +131,7 @@ export async function openSessionRuntime(
       ...(request.flags.maxOutputTokens !== undefined
         ? { maxOutputTokens: request.flags.maxOutputTokens }
         : {}),
+      ...(request.flags.compaction !== undefined ? { compaction: request.flags.compaction } : {}),
       ...(request.createApprovalHandler !== undefined
         ? { createApprovalHandler: request.createApprovalHandler }
         : {}),

@@ -20,6 +20,7 @@ import type {
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
+import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
@@ -153,6 +154,8 @@ interface RuntimeSurface {
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）；同上，只有无父会话的运行面会给
   sessionSearch?: boolean;
+  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）；同上，只有无父会话的运行面会给，worker 用产品缺省
+  compaction?: CompactionConfigInput;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
@@ -247,6 +250,8 @@ export interface DetachedRuntimeRequest {
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）
   sessionSearch?: boolean;
+  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
+  compaction?: CompactionConfigInput;
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
@@ -302,6 +307,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
     ...(surface.sessionSearch !== undefined ? { sessionSearch: surface.sessionSearch } : {}),
+    ...(surface.compaction !== undefined ? { compaction: surface.compaction } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),

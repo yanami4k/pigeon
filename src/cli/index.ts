@@ -245,7 +245,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
   const sessionId = asSessionId(sessionIdArg);
   const modelUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
   const flags = parseLaunchFlags(modelArgv, {
     usage: modelUsage,
     verify: true,
@@ -309,7 +309,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -379,6 +379,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+    ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
@@ -550,7 +551,8 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑：只跑前 K 道题）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases]
-//   [--spend-limit-cny <元>]
+//   [--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>]（上下文压缩的触发点与保留量，缺省为产品缺省；
+//   集成冒烟调低触发点验证压缩，决策 218）
 //   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]：
 // 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开断网容器从人在
 // 该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
@@ -566,7 +568,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     `--conditions ${STREAM_CONDITIONS.join(",")} [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
-    "[--spend-limit-cny <元>] [--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]]";
+    "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]]";
   const own = new Set([
     "--manifest",
     "--repo",
@@ -643,6 +646,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         temperature: streamTemperature(flags.temperature),
         ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
+        // 决策 218：压缩阈值用产品缺省；集成冒烟可经参数调低
+        ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
       }
     : undefined;
   const promptFormat = values.get("--prompt-format");
@@ -825,7 +830,7 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   const startUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
     verify: true,

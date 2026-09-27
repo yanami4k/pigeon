@@ -4,6 +4,7 @@
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
+import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 
@@ -43,7 +44,17 @@ export interface LaunchFlags {
   retryOnFail?: number;
   // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
   repairRounds?: number;
+  // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
+  // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
+  compaction?: CompactionConfigInput;
 }
+
+// 上下文压缩参数名 → 配置字段
+const COMPACTION_FLAGS: Readonly<Record<string, keyof CompactionConfigInput>> = {
+  "--context-window": "contextWindow",
+  "--compact-threshold": "thresholdTokens",
+  "--compact-keep": "keepRecentTokens",
+};
 
 export interface ParseLaunchFlagsOptions {
   // 参数错误时附在报错里的用法说明（各入口自己的用法行）
@@ -146,6 +157,12 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--repair-rounds 需要非负整数（0 表示关闭）（${usage}）`);
       }
       flags.repairRounds = value;
+    } else if (flag !== undefined && COMPACTION_FLAGS[flag] !== undefined) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`${flag} 需要正整数（token 数）（${usage}）`);
+      }
+      flags.compaction = { ...flags.compaction, [COMPACTION_FLAGS[flag]]: value };
     } else if (flag === "--root") {
       flags.root = argv[++i] ?? flags.root;
     } else if (flag === "--stream-fn") {

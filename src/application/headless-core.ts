@@ -15,6 +15,7 @@ import type { MemoryRoot } from "../memory/resident.ts";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
+import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -90,6 +91,8 @@ export interface HeadlessRunOptions {
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）；关掉时两件会话检索工具不注册，系统提示不提它们
   sessionSearch?: boolean;
+  // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省，集成冒烟可调低触发点
+  compaction?: CompactionConfigInput;
   // 决策 191、193：推送记忆（开局把记忆整份推入系统提示）。尚未实现：打开即在装配前报错
   pushedMemory?: boolean;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
@@ -242,6 +245,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
     ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
+    ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),

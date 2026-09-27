@@ -6,7 +6,9 @@
 // ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）。
 // resume 复用同一 sessionId 续写（append 模式），会话文件跨进程延续。
 // 账本重构双写（决策 206）：同时打开该会话的新存储写者（.pigeon/sessions/<工作目录编码>/ 下的 pi 会话文件），
-// 交给 Adapter 写消息与 Run 起止，授权经转接同时写入；释放运行面时关闭
+// 交给 Adapter 写消息与 Run 起止，授权经转接同时写入；释放运行面时关闭。
+// 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
+// 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,6 +26,12 @@ import { loadCommandsConfig } from "../persistence/commands-config.ts";
 import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
+import {
+  type BeforeCompaction,
+  type CompactionConfigInput,
+  ContextCompactor,
+  resolveCompactionConfig,
+} from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
@@ -138,6 +146,10 @@ export interface RuntimeDeps {
   // 决策 193：能否检索历史会话。关掉时不注册 search_sessions 与 read_session_entry，系统提示去掉提到它们的那一句；
   // 缺省开着（日常使用与 193 之前逐字一致）
   sessionSearch?: boolean;
+  // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
+  compaction?: CompactionConfigInput;
+  // 决策 192、207：压缩前回调（压缩前复盘的挂点）；缺省不挂
+  beforeCompaction?: BeforeCompaction;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -181,6 +193,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   ) {
     throw new Error(`采样温度需要 0 到 2 之间的数：${deps.temperature}`);
   }
+  // 压缩配置畸形在打开会话文件之前响亮失败
+  const compactionConfig = resolveCompactionConfig(deps.compaction);
   // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
   // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（缺省 off）时温度照常下发
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
@@ -341,6 +355,29 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // run.started 的附加摘要：MCP 工具集与 server 状态（有 server 时）
   const mcpSummary = mcp !== undefined && mcp.connections.length > 0 ? mcp : undefined;
   const runStartedExtras = mcpSummary !== undefined ? () => mcpSummary.summary() : undefined;
+  // 决策 188：压缩服务。摘要请求与主请求同一个模型接入，只套温度（摘要从不请求推理，温度总能生效）；
+  // 不套单轮输出上限包装——它会盖掉上游给摘要定的输出上限（0.8 倍预留与模型输出上限的较小者）。
+  // 模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供上游定摘要请求的选项
+  const compactor = new ContextCompactor({
+    config: compactionConfig,
+    streamFn:
+      deps.temperature !== undefined
+        ? fixTemperature(deps.streamFn, deps.temperature)
+        : deps.streamFn,
+    model: {
+      id: deps.modelId,
+      name: deps.modelId,
+      api: "unknown",
+      provider: deps.provider,
+      baseUrl: "",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: compactionConfig.contextWindow,
+      maxTokens: maxOutputTokens,
+    },
+    ...(deps.beforeCompaction !== undefined ? { beforeCompaction: deps.beforeCompaction } : {}),
+  });
   // load_skill 的读取留痕经 Adapter 盖 runId 落 skill.loaded；工具先于 Adapter 构造，故晚绑定
   const adapterRef: { current: PiRuntimeAdapter | undefined } = { current: undefined };
   const adapter = new PiRuntimeAdapter({
@@ -424,6 +461,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     sessionId: deps.sessionId,
     eventLog,
     sessionStore,
+    compaction: compactor,
     // M5 S5（决策 044）：llm.request 指纹与内容文件同一抽取选项
     messageContent: { persistThinking: deps.persistThinking ?? true },
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 run.started；无 server 时不带字段
