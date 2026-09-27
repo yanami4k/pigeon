@@ -1,4 +1,4 @@
-// 采样参数的保真（决策 087 修订、110）：回放与分叉重试必须沿用原尝试的采样温度与工作方式指令。
+// 采样参数的保真（决策 087 修订、110）：分叉重试必须沿用原尝试的采样温度与工作方式指令。
 // 同一个模型换一个温度就是换了尺子——087 修订说"日后新增同类维度按本条推定"，温度与工作方式指令都属于这一类。
 // 失效判定的封闭清单（091）本轮不纳入温度，是已知缺口，见审计。
 import assert from "node:assert/strict";
@@ -8,12 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { swebenchTemperature } from "../eval/swebench-source.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import { resolveAttemptPlan } from "../replay/plan.ts";
-import type { ObservationInput } from "../state/event-log.ts";
-import { newRunId, newSessionId } from "../state/ids.ts";
 import { runHeadless } from "./headless.ts";
 import type { McpSession } from "./mcp.ts";
 
@@ -24,70 +21,6 @@ const noMcp = async (): Promise<McpSession> => ({
   connections: [],
   summary: () => ({ mcpTools: [], mcpServers: [] }),
   close: async () => {},
-});
-
-type RunStartedPayload = Extract<ObservationInput, { kind: "run.started" }>["payload"];
-
-function attemptWith(
-  dir: string,
-  model: RunStartedPayload["model"],
-  extra: Partial<RunStartedPayload>
-) {
-  const sessionId = newSessionId();
-  const runId = newRunId();
-  const log = new JsonlEventLog(dir, sessionId);
-  log.appendObservation({
-    kind: "run.started",
-    runId,
-    payload: {
-      model,
-      policy: { allow: ["read_file"], deny: [], approvalMode: "yolo" },
-      advertisedTools: ["read_file"],
-      systemPromptHash: "b".repeat(64),
-      memory: [],
-      skills: [],
-      budget: { maxTurns: 5, wallClockMs: 60_000 },
-      ...extra,
-    },
-  });
-  log.appendEntry({ runId, runSeq: 1, role: "user", message: { role: "user", content: "修好它" } });
-  log.close();
-  return { sessionId, runId };
-}
-
-test("回放计划：从原尝试的 run.started 取出温度与工作方式指令；原尝试没设就不带", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-sampling-plan-"));
-  try {
-    const set = attemptWith(
-      dir,
-      { provider: "p", id: "m", thinkingLevel: "off", temperature: 0 },
-      { taskDirective: "Your task is to fix the issue." }
-    );
-    const plan = resolveAttemptPlan({ sessionsDir: dir, ...set, startCommit: "a".repeat(40) });
-    assert.equal(plan.model.temperature, 0);
-    assert.equal(plan.taskDirective, "Your task is to fix the issue.");
-
-    const unset = attemptWith(dir, { provider: "p", id: "m", thinkingLevel: "off" }, {});
-    const plain = resolveAttemptPlan({ sessionsDir: dir, ...unset, startCommit: "a".repeat(40) });
-    assert.equal("temperature" in plain.model, false);
-    assert.equal("taskDirective" in plain, false);
-
-    // 推理开启时温度没有生效：计划带上当时请求的值，回放照原样请求（同档位下同样不生效）
-    const ignored = attemptWith(
-      dir,
-      {
-        provider: "p",
-        id: "m",
-        thinkingLevel: "high",
-        temperatureIgnored: { requested: 0.3, reason: "reasoning-enabled" },
-      },
-      {}
-    );
-    const again = resolveAttemptPlan({ sessionsDir: dir, ...ignored, startCommit: "a".repeat(40) });
-    assert.equal(again.model.temperature, 0.3);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test("外部基准的采样温度缺省固定为 0；显式给出的值原样沿用", () => {

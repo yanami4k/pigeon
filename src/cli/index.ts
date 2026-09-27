@@ -34,8 +34,6 @@ import {
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { renderEditModeComparison } from "../eval/compare.ts";
-import { FIXED_POINT_GROUPS, type FixedPointGroup } from "../eval/fixed-point-events.ts";
-import { runFixedPointEvents, runFixedPointExperiment } from "../eval/fixed-point-experiment.ts";
 import { localTaskSource } from "../eval/local-source.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
@@ -652,162 +650,6 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
-// 定点对照：开始
-// 定点对照（决策 139、156、157）的两个命令共用的参数解析：每个参数都带取值
-function fixedPointArgs(argv: string[], usage: string, own: ReadonlySet<string>) {
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const value = argv[i + 1];
-    if (arg === undefined || !own.has(arg) || value === undefined) {
-      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
-    }
-    values.set(arg, value);
-    i++;
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
-    return value;
-  };
-  const positive = (name: string): number | undefined => {
-    const raw = values.get(name);
-    if (raw === undefined) return undefined;
-    const value = Number(raw);
-    if (!Number.isInteger(value) || value < 1) throw new Error(`${name} 需要正整数（${usage}）`);
-    return value;
-  };
-  const list = (name: string) =>
-    values
-      .get(name)
-      ?.split(",")
-      .filter((x) => x !== "");
-  return { values, required, positive, list };
-}
-
-// pigeon eval stream-fixed-point-events --manifest <清单> --repo <人的仓库> --image <镜像> --no-memory <无记忆整流的输出目录>
-//   --out <事件清单文件> [--streams s1,s2] [--attempt N（缺省 1）] [--container-memory <上限>（缺省 2g）]：
-// 定点对照的事件认定——对无记忆整流的每一步，在断网容器里恢复该步起点、以正式推送代码按题面与原跑的回炉报错挑一遍，
-// 挑到记忆的步即事件；同时定下三组的固定挑选。不调模型；同一输入得到逐字相同的清单
-async function evalFixedPointEventsMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval stream-fixed-point-events --manifest <清单> --repo <人的仓库> --image <镜像> " +
-    "--no-memory <无记忆整流的输出目录> --out <事件清单文件> [--streams s1,s2] [--attempt N] [--container-memory <上限>]";
-  const args = fixedPointArgs(
-    argv,
-    usage,
-    new Set([
-      "--manifest",
-      "--repo",
-      "--image",
-      "--no-memory",
-      "--out",
-      "--streams",
-      "--attempt",
-      "--container-memory",
-    ])
-  );
-  const streams = args.list("--streams");
-  const attempt = args.positive("--attempt");
-  const list = await runFixedPointEvents({
-    manifestFile: args.required("--manifest"),
-    repoDir: args.required("--repo"),
-    image: args.required("--image"),
-    noMemoryDir: args.required("--no-memory"),
-    outFile: args.required("--out"),
-    containerRunArgs: [
-      "--memory",
-      args.values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY,
-    ],
-    ...(streams !== undefined ? { streams } : {}),
-    ...(attempt !== undefined ? { attempt } : {}),
-    log: (line) => process.stderr.write(`[fixed-point] ${new Date().toISOString()} ${line}\n`),
-  });
-  writeOut(
-    `事件认定：扫描 ${list.scanned.length} 步，事件 ${list.events.length} 个` +
-      `（无关记忆组缺失 ${list.events.filter((e) => e.fixed.irrelevant === null).length} 个），写到 ${args.required("--out")}\n`
-  );
-}
-
-// pigeon eval stream-fixed-point --manifest <清单> --repo <人的仓库> --image <镜像> --no-memory <无记忆整流的输出目录>
-//   --events <事件清单> --out <输出目录> [--concurrency N（缺省 2）] [--passes N（缺省 5）] [--groups memory,irrelevant,none]
-//   [--model-id <模型>（须与原尝试相同，缺省 kimi-for-coding）] [--container-memory <上限>]：
-// 定点对照的单步重跑——每个事件、每组各若干遍，从该步起点跑完整的一步（agent、分步验证门、回炉），预算、模型、推理档位、
-// 工具名单照搬原尝试（预算与流中相同，不接受另给）；模型请求经网关（账号同 eval stream）。
-// 结果写 <输出目录>/results.jsonl 与 report.md；同一输出目录重跑即按"事件 × 组 × 遍次"续跑
-async function evalFixedPointMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval stream-fixed-point --manifest <清单> --repo <人的仓库> --image <镜像> --no-memory <无记忆整流的输出目录> " +
-    "--events <事件清单> --out <输出目录> [--concurrency N] [--passes N] [--groups memory,irrelevant,none] " +
-    "[--model-id <模型>] [--container-memory <上限>]";
-  const args = fixedPointArgs(
-    argv,
-    usage,
-    new Set([
-      "--manifest",
-      "--repo",
-      "--image",
-      "--no-memory",
-      "--events",
-      "--out",
-      "--concurrency",
-      "--passes",
-      "--groups",
-      "--model-id",
-      "--container-memory",
-    ])
-  );
-  const groups = args.list("--groups");
-  for (const g of groups ?? []) {
-    if (!(FIXED_POINT_GROUPS as readonly string[]).includes(g)) {
-      throw new Error(`未知的组 ${g}（可选 ${FIXED_POINT_GROUPS.join("、")}）`);
-    }
-  }
-  const concurrency = args.positive("--concurrency");
-  const passes = args.positive("--passes");
-  // SIGTERM（停服、关机）：与正式跑批同一处理——在途的遍作废、不写行，硬时限内自行退出
-  const shutdown = new AbortController();
-  const removeTermHandler = installTerminationHandler(
-    process,
-    (reason) => {
-      writeOut(`[fixed-point] ${reason}
-`);
-      shutdown.abort(reason);
-    },
-    (code) => process.exit(code)
-  );
-  const summary = await runFixedPointExperiment({
-    shutdownSignal: shutdown.signal,
-    manifestFile: args.required("--manifest"),
-    repoDir: args.required("--repo"),
-    image: args.required("--image"),
-    noMemoryDir: args.required("--no-memory"),
-    eventsFile: args.required("--events"),
-    outDir: args.required("--out"),
-    gateway: {
-      accounts: gatewayAccountsFromEnv(process.env),
-      modelId: args.values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID,
-    },
-    containerRunArgs: [
-      "--memory",
-      args.values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY,
-    ],
-    ...(groups !== undefined ? { groups: groups as FixedPointGroup[] } : {}),
-    ...(concurrency !== undefined ? { concurrency } : {}),
-    ...(passes !== undefined ? { passes } : {}),
-    log: (line) => writeOut(`[fixed-point] ${new Date().toISOString()} ${line}\n`),
-  });
-  removeTermHandler();
-  writeOut(
-    `[fixed-point] 本次写 ${summary.written} 行、此前已有 ${summary.existing} 行；缺失的组 ${summary.missing.length} 个；` +
-      `停止 ${summary.stopped.length} 遍\n`
-  );
-  for (const s of summary.stopped) writeOut(`  ${s.key}：${s.error.slice(0, 300)}\n`);
-  writeOut(`[fixed-point] 结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`);
-  if (summary.stopped.length > 0) process.exitCode = 3;
-}
-// 定点对照：结束
-
 // pigeon eval stream-trial --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --steps 3,9,12
 //   [--conditions full（缺省）] [--concurrency N（缺省 2）] [--max-turns N（缺省 400）] [--wall-clock-min N（缺省 90）]
 //   [--model-id <模型>] [--mini-python <解释器>] [--container-memory <上限>]：
@@ -1219,16 +1061,6 @@ async function main(argv: string[]): Promise<void> {
     await evalStreamMain(argv.slice(2));
     return;
   }
-  // 定点对照：开始
-  if (argv[0] === "eval" && argv[1] === "stream-fixed-point-events") {
-    await evalFixedPointEventsMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream-fixed-point") {
-    await evalFixedPointMain(argv.slice(2));
-    return;
-  }
-  // 定点对照：结束
   if (argv[0] === "eval" && argv[1] === "stream-trial") {
     await evalStreamMain(argv.slice(2), true);
     return;

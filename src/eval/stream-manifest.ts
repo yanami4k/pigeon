@@ -72,7 +72,7 @@ export interface StreamStep {
   judgeTests: readonly string[];
   reason: string;
   // 开跑前置检查里人的代码在这一步没过验证门（人当时的代码就坏了）：这一步照常跑、照常判，
-  // 只作标记，供之后分析与挑定点对照的事件时识别
+  // 只作标记，供之后分析时识别
   humanFailsGate?: boolean;
 }
 

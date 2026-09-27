@@ -23,7 +23,6 @@ import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { type LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
-import type { HarnessRef } from "./stream-identity.ts";
 import {
   attributeFailure,
   type CreatedRefs,
@@ -31,6 +30,7 @@ import {
   extractMissing,
 } from "./stream-attribution.ts";
 import type { HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
+import type { HarnessRef } from "./stream-identity.ts";
 import { type StreamManifest, type StreamStep, stepsOf } from "./stream-manifest.ts";
 import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measure.ts";
 import {
@@ -123,8 +123,6 @@ export interface StepAgentInput {
   autoloadedTestHelper?: string;
   humanTests?: readonly string[];
   humanTree?: readonly string[];
-  // 定点对照的单步重跑（决策 157）：结构化记忆开启、挑选固定为这几条（空即一条不给），走正常推送路径；流中不给
-  structuredMemoryFixed?: { opening: readonly string[]; repair: readonly string[] };
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守

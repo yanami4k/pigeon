@@ -88,12 +88,12 @@ export default {
       comment:
         "application 是 Controller 层（M2 S1，决策 025）：装配根、resume 流程与 Actor 共用措辞；" +
         "可依赖 state / persistence / tools / approvals / pi-runtime / execution 与各下层能力目录" +
-        "（memory / skills / orchestration / mcp / replay），不触达 Actor 层（cli/tui）。",
+        "（memory / skills / orchestration / mcp），不触达 Actor 层（cli/tui）。",
       from: { path: "^src/application/", pathNot: "\\.test\\.ts$" },
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|replay)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp)/",
       },
     },
     {
@@ -112,9 +112,7 @@ export default {
     {
       name: "placeholders-only-state-tools",
       severity: "error",
-      comment:
-        "占位目录（context）暂按最小允许清单约束：只依赖 state 与 tools（022 修订）。" +
-        "replay/ 已放行到自己的清单，见 replay-below-controller。",
+      comment: "占位目录（context）暂按最小允许清单约束：只依赖 state 与 tools（022 修订）。",
       from: {
         path: "^src/context/",
         pathNot: "\\.test\\.ts$",
@@ -123,17 +121,6 @@ export default {
         path: "^src/",
         pathNot: "^src/(context|state|tools)/",
       },
-    },
-    {
-      name: "replay-below-controller",
-      severity: "error",
-      comment:
-        "replay（回放计划与重跑的一致性核对，决策 087 / 156）只依赖 state、tools 与 persistence 的只读物化；" +
-        "它只从账本解出原尝试的任务、起点、预算、模型与工具名单并核对重跑不得放宽，不执行任何东西。" +
-        "不触达 pi-runtime、orchestration、application 与 Actor 层——执行由调用方承担。" +
-        "M4 的 pigeon replay 与 state/replay.ts 仍是只读重建。",
-      from: { path: "^src/replay/", pathNot: "\\.test\\.ts$" },
-      to: { path: "^src/", pathNot: "^src/(replay|state|tools|persistence)/" },
     },
     {
       name: "memory-below-controller",
@@ -166,16 +153,14 @@ export default {
     {
       name: "eval-below-actors",
       severity: "error",
-      // replay 的放行保留：swebench-verify 删除后 eval 暂无引用，但跑批器以后做单步重跑时要调用
-      // replay/fidelity.ts 的一致性核对（决策 156）
       comment:
-        "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057）可依赖 state / persistence / replay / " +
+        "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057）可依赖 state / persistence / " +
         "tools / orchestration / application 及以下；不触达 Actor 层（cli/tui），由 cli 调用（022 修订）。",
       from: { path: "^src/eval/", pathNot: "\\.test\\.ts$" },
       to: {
         path: "^src/",
         pathNot:
-          "^src/(eval|application|replay|orchestration|pi-runtime|approvals|execution|memory|skills|mcp|persistence|tools|state)/",
+          "^src/(eval|application|orchestration|pi-runtime|approvals|execution|memory|skills|mcp|persistence|tools|state)/",
       },
     },
     {

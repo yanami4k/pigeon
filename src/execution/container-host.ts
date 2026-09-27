@@ -110,7 +110,7 @@ export interface ContainerHostOptions {
   // 每次 exec 带入容器的环境变量（如外部基准镜像里激活测试环境所需的 PATH）
   env?: Readonly<Record<string, string>>;
   // 给"开工时的树"建的引用（如 refs/pigeon/step-start/<流>/<步>）：开工时的树是挂在起点提交下的独立提交，没有引用会被
-  // 垃圾回收；有了引用，它随流历史一起导出，事后的定点对照与单步重跑都取得到
+  // 垃圾回收；有了引用，它随流历史一起导出，事后取得到
   stepStartRef?: string;
   // 辅助调用（解析路径、读写文件、列清单、重启容器）的超时，缺省 60 秒
   helperTimeoutMs?: number;
