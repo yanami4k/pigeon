@@ -1325,6 +1325,31 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
+  test("空回复异常结束（决策 170 ②）照常判题、留行，不作废重做", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        solve(input);
+        return { status: "empty-reply", repair: { rounds: 0, finalVerdict: "fail" } };
+      });
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          conditions: ["search-only"],
+          maxSteps: 1,
+          concurrency: 1,
+        })
+      );
+      assert.equal(agent.calls.length, 1, "不重做");
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => [r.status, r.judged, r.outcome]),
+        [["empty-reply", true, "passed"]]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("限额与上游故障一律作废重做：一步期间出现并发受限、额度暂停、本作业的上游故障，或 agent 自报被打断，不论 agent 报没报、哪种 agent，这一步都回到起点重做、不判分", async () => {
     const t = await toy();
     try {

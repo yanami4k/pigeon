@@ -44,7 +44,9 @@ export type HeadlessStatus =
   | "unknown"
   | "turn-limit"
   | "wall-clock-limit"
-  | "token-limit";
+  | "token-limit"
+  // 空回复异常结束（决策 170 ②）：模型的回复既无文字也无工具调用，重试一次仍是如此。不算模型服务故障
+  | "empty-reply";
 
 // 退出码按终态映射；1 留给参数与装配错误（cli 入口的异常出口）
 export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
@@ -55,6 +57,7 @@ export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
   "turn-limit": 5,
   "wall-clock-limit": 6,
   "token-limit": 7,
+  "empty-reply": 8,
 };
 
 export interface HeadlessRunOptions {
@@ -344,7 +347,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         : await handle.run(options.task);
     if (run === undefined) status = "aborted";
     while (run !== undefined) {
-      status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
+      status =
+        run.emptyReply === true
+          ? "empty-reply"
+          : run.status === "aborted"
+            ? (limitHit ?? "aborted")
+            : run.status;
       errorMessage = run.errorMessage;
       // 外部中止：这一步由调用方作废，不验证、不回炉
       if (externallyAborted) {
@@ -407,8 +415,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         repair = { rounds, verdict, closed: true };
         break;
       }
-      // 修满 N 轮或预算耗尽仍失败：这一步以失败收尾，工作区保留 agent 的改动（决策 172 / 173）
-      if (rounds >= repairRounds || limitHit !== undefined) {
+      // 修满 N 轮或预算耗尽仍失败：这一步以失败收尾，工作区保留 agent 的改动（决策 172 / 173）。
+      // 空回复异常结束（决策 170 ②）同样收尾、不再回炉：这一步的结论仍以刚做的这次验证为准
+      if (rounds >= repairRounds || limitHit !== undefined || run.emptyReply === true) {
         repair = { rounds, verdict, closed: true };
         break;
       }

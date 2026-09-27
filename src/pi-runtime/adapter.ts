@@ -96,6 +96,22 @@ export interface RunResult {
   advertisedTools: string[];
   // 本次 Run 的 ToolExecution 账本记录（终态快照，深拷贝）
   toolExecutions: ToolExecution[];
+  // 空回复异常结束（决策 170 ②）：重试一次仍是空回复（或空回复时已来了中止请求、没能重试）。此时 status 为 failed。
+  // 运行面恒给出；结构替身可缺省（缺省即否）
+  emptyReply?: boolean;
+}
+
+// 空回复重试仍空时的错误文本（Run 结果与收尾条目共用）
+export const EMPTY_REPLY_ERROR = "模型返回空回复（既无文字也无工具调用），重试一次仍为空回复";
+
+// 空回复（决策 170 ②）：以正常停止收尾，既无非空文字、也无工具调用；思考块不算内容，只有空白的文字算空
+export function isEmptyReply(message: AssistantMessage): boolean {
+  if (message.stopReason !== "stop") {
+    return false;
+  }
+  return !message.content.some(
+    (block) => block.type === "toolCall" || (block.type === "text" && block.text.trim() !== "")
+  );
 }
 
 // M2 S1（决策 024）：流式文本增量载荷——subscribeStream 观察口的转发单位。
@@ -174,6 +190,11 @@ export class PiRuntimeAdapter {
   readonly #sessionStore: SessionStoreSink | undefined;
   // 当前 Run 被我们的上限中止的原因（interrupt 时给出；每个 Run 开始时清空）
   #stopCause: RunStopCause | undefined;
+  // 当前 Run 是否来过中止请求（任何来源；每个 Run 开始时清空）：来过即不再为空回复重试
+  #interruptRequested = false;
+  // 空回复重试（决策 170 ②）：本 Run 是否已重试过；等待重试时暂扣的那次 agent_end（重试那次的 agent_end 才是本 Run 的收尾）
+  #emptyReplyRetried = false;
+  #deferredRunEnd: AgentEvent | undefined;
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -281,6 +302,9 @@ export class PiRuntimeAdapter {
     this.#governance.beginRun();
     this.#runEntrySeq = 0;
     this.#stopCause = undefined;
+    this.#interruptRequested = false;
+    this.#emptyReplyRetried = false;
+    this.#deferredRunEnd = undefined;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
     // 附加摘要每个 Run 取一次，旧账本与新存储共用；取失败只进 listenerErrors，两边都缺 MCP 字段，不挡 Run 启动
@@ -299,6 +323,7 @@ export class PiRuntimeAdapter {
     try {
       await start();
       await this.#agent.waitForIdle();
+      await this.#retryEmptyReply();
       const result = this.#judgeTerminal(runId, advertisedTools);
       this.#recordRunEnded(result);
       return result;
@@ -314,6 +339,34 @@ export class PiRuntimeAdapter {
       this.#currentRunId = null;
       settle();
     }
+  }
+
+  // 空回复重试（决策 170 ②）：上游一次运行以空回复收尾时，其 agent_end 已被暂扣（见 #recordAndForward）。
+  // 在同一个 Run 里从 Agent 状态去掉这条空消息（会话文件照实留着它）再接着运行一次；重试那一轮照常发事件、计轮与计预算。
+  // 暂扣之后来了中止请求即不重试，补发暂扣的 agent_end。continue 同步建立上游的活动运行，其间中止请求插不进空档
+  async #retryEmptyReply(): Promise<void> {
+    const deferred = this.#deferredRunEnd;
+    if (deferred === undefined) {
+      return;
+    }
+    this.#deferredRunEnd = undefined;
+    if (this.#interruptRequested) {
+      this.#recordAndForward(deferred);
+      return;
+    }
+    this.#emptyReplyRetried = true;
+    this.#agent.state.messages = this.#agent.state.messages.slice(0, -1);
+    await this.#agent.continue();
+    await this.#agent.waitForIdle();
+  }
+
+  // 这次 agent_end 要不要暂扣、等空回复重试：本 Run 还没重试过、没来过中止请求，且对话以空回复收尾
+  #shouldRetryEmptyReply(): boolean {
+    if (this.#emptyReplyRetried || this.#interruptRequested) {
+      return false;
+    }
+    const last = this.#agent.state.messages.at(-1);
+    return last !== undefined && last.role === "assistant" && isEmptyReply(last);
   }
 
   // 工具结果消息挂运行面标记（账本重构第二段的裁决：写在该消息 details 的 pigeon 键下，不新增记录种类）：
@@ -359,6 +412,9 @@ export class PiRuntimeAdapter {
   async interrupt(cause?: RunStopCause): Promise<void> {
     if (cause !== undefined && this.#currentRunId !== null && this.#stopCause === undefined) {
       this.#stopCause = cause;
+    }
+    if (this.#currentRunId !== null) {
+      this.#interruptRequested = true;
     }
     this.#agent.abort();
     await this.#agent.waitForIdle();
@@ -500,6 +556,11 @@ export class PiRuntimeAdapter {
     try {
       const runId = this.#currentRunId;
       if (!runId) {
+        return;
+      }
+      // 空回复要重试时暂扣这次 agent_end：一个 Run 只发一次 run.ended（订阅方据它验证、收会话树），由重试那次的发出
+      if (event.type === "agent_end" && this.#shouldRetryEmptyReply()) {
+        this.#deferredRunEnd = event;
         return;
       }
       // D3 entry 映射（M4 S5）：身份只在 message_end 时刻确立（spike P1/P3：流式阶段的
@@ -716,16 +777,18 @@ export class PiRuntimeAdapter {
     }
   }
 
-  // 决策 206 双写：Run 收尾条目（182）。结束方式：确以中止收尾时，撞上限的原因优先，其次熔断，否则为中止；
-  // 出错与终态不明记为出错；其余为正常完成（空回复异常结束另行施工）
+  // 决策 206 双写：Run 收尾条目（182）。结束方式：空回复异常结束记 empty-reply；确以中止收尾时，撞上限的原因优先，
+  // 其次熔断，否则为中止；出错与终态不明记为出错；其余为正常完成
   #recordRunEnded(
-    result: Pick<RunResult, "runId" | "status" | "stopReason" | "errorMessage">
+    result: Pick<RunResult, "runId" | "status" | "stopReason" | "errorMessage" | "emptyReply">
   ): void {
     if (this.#sessionStore === undefined) {
       return;
     }
     let ending: RunEnding;
-    if (result.status === "aborted") {
+    if (result.emptyReply === true) {
+      ending = "empty-reply";
+    } else if (result.status === "aborted") {
       ending =
         this.#stopCause ?? (this.#governance.runOutcome().breakerTripped ? "breaker" : "aborted");
     } else if (result.status === "completed") {
@@ -794,9 +857,13 @@ export class PiRuntimeAdapter {
       (message): message is AssistantMessage => message.role === "assistant"
     );
     const stopReason = lastAssistant?.stopReason;
-    const errorMessage = this.#agent.state.errorMessage;
+    // 走到这里仍以空回复收尾：已重试过一次，或空回复时已来了中止请求、没能重试
+    const emptyReply = lastAssistant !== undefined && isEmptyReply(lastAssistant);
+    const errorMessage = emptyReply ? EMPTY_REPLY_ERROR : this.#agent.state.errorMessage;
     let status: RunTerminalStatus;
-    if (stopReason === "aborted") {
+    if (emptyReply) {
+      status = "failed";
+    } else if (stopReason === "aborted") {
       status = "aborted";
     } else if (stopReason === "error") {
       status = "failed";
@@ -824,9 +891,11 @@ export class PiRuntimeAdapter {
         hasTurnCompleted: lastAssistant !== undefined,
         // 活侧在 prompt() resolve 之后计算，agent_end 已发出（abort 路径同样发）
         hasRunEnded: true,
+        emptyReply,
       }),
       advertisedTools,
       toolExecutions: governed.toolExecutions,
+      emptyReply,
     };
   }
 

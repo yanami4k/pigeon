@@ -944,6 +944,37 @@ test("Pigeon agent：回炉轮数为 0 时不验证、不回炉，结果不带�
   }
 });
 
+test("Pigeon agent：空回复异常结束不是模型服务故障——不报被打断（照常判题、不作废重做），也不再回炉", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
+  const ws = containerWorkspace(dir);
+  try {
+    const streamFn = createFakeStreamFn({
+      replies: [editTo("bug", "w1"), { text: "" }, { text: "" }, editTo("w1", "fixed")],
+    });
+    const agent = pigeonStepAgent({
+      streamFn,
+      yolo: true,
+      docker: ws.docker,
+      homeDir: join(dir, "home"),
+    });
+    const out = await agent.run(
+      input(join(dir, "job"), {
+        condition: CONDITION_SPECS["search-only"],
+        target: { container: "box", root: ws.containerRoot },
+        verify: FIXED_GATE,
+      })
+    );
+    assert.equal(out.status, "empty-reply");
+    assert.equal(out.interrupted, undefined);
+    assert.equal(streamFn.calls.length, 3);
+    assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "fail" });
+    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w1\n");
+  } finally {
+    ws.cleanup();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
 test("Pigeon agent：推送记忆的格子把开关交给 headless——推送记忆尚未实现，这一步报错、不发模型请求（作业随之停下并说明）", async () => {
   for (const condition of ["search-push", "push-only"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));

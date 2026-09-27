@@ -78,7 +78,7 @@ export const RunStopCauseSchema = Type.Union([
 export type RunStopCause = Static<typeof RunStopCauseSchema>;
 
 // Run 的结束方式：正常完成、撞轮数 / 墙钟 / token 上限、熔断、中止、出错，以及空回复异常结束
-// （empty-reply 只留枚举值，识别另行施工）
+// （empty-reply：空回复重试一次仍空，见 pi-runtime/adapter.ts 的 isEmptyReply）
 export const RunEndingSchema = Type.Union([
   Type.Literal("completed"),
   Type.Literal("turn-limit"),

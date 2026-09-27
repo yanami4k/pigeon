@@ -263,11 +263,13 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
               : "限额信号：Pigeon 已中止",
         };
       }
-      // 与外部基准同一判法：内容审核拒答与确定性错误照常判分；其余以错误收尾的算模型服务故障，这一步作废重做
+      // 与外部基准同一判法：内容审核拒答与确定性错误照常判分；其余以错误收尾的算模型服务故障，这一步作废重做。
+      // 空回复异常结束（决策 170 ②）是这一步的真实失败，照常判题：作废重做只会反复作废
       const refused = run.status === "failed" && isContentRefusal(run.errorMessage);
       const deterministic =
         run.status === "failed" && !refused ? deterministicErrorOf(run.errorMessage) : undefined;
       const providerFailed =
+        run.status !== "empty-reply" &&
         !refused &&
         deterministic === undefined &&
         (run.failure?.category === "infrastructure" || run.status === "failed");
