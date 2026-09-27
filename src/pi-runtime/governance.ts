@@ -14,7 +14,7 @@ import type {
 import type { EventEnvelope } from "../state/events.ts";
 import type { RunId } from "../state/ids.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
-import type { ToolExecution } from "../state/tool-execution.ts";
+import type { ToolExecution, ToolExecutionDecision } from "../state/tool-execution.ts";
 import type { ToolPolicy } from "./snapshot.ts";
 
 // application 层不直连上游包：工具执行体类型经本文件转口
@@ -79,6 +79,8 @@ export interface ToolGovernance {
   decide(call: ToolCallProposal): Promise<GovernanceVerdict>;
   // 账本是否有该调用的记录（有 ⟺ 审批闸跑过；无 ⟺ 被上游拦截）
   governs(toolCallId: string): boolean;
+  // 审批闸对该调用的决定（结果与批准来源）；审批闸没跑过时为 undefined
+  decisionOf(toolCallId: string): ToolExecutionDecision | undefined;
   // tool_execution_end 后：账本迁 settled、落 receipt、上游拦截熔断计数
   settle(settlement: ToolSettledPayload): void;
   runOutcome(): GovernanceRunOutcome;

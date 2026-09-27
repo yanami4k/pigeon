@@ -36,7 +36,13 @@ import {
   type BeforeToolCallResult,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  Model,
+  StopReason,
+  ToolResultMessage,
+} from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { classifyRunOutcome, type FailureClass } from "../state/classification.ts";
 import type { ObservationInput } from "../state/event-log.ts";
@@ -58,6 +64,7 @@ import {
   SESSION_ENTRY_VERSION,
   SessionEntryType,
 } from "../state/session-entries.ts";
+import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
@@ -153,6 +160,8 @@ export class PiRuntimeAdapter {
   // 工具抛错分类留证（M4 S2，D7）：toolCallId → 域/环境归类。
   // 上游把工具异常转成 isError 结果后只剩消息字符串，错误类信息必须在抛出源头捕获
   // （包装 execute，见 #wrapToolErrorCapture）；判不出存 undefined → settled 不落 errorKind
+  // 当前（或最近一次）Run 彻底收尾的时刻（settled() 等它）
+  #runSettled: Promise<void> = Promise.resolve();
   readonly #toolErrorKinds = new Map<string, ToolErrorKind | undefined>();
   #currentRunId: RunId | null = null;
   #disposed = false;
@@ -283,15 +292,65 @@ export class PiRuntimeAdapter {
     }
     this.#recordRunStarted(advertisedTools, extras);
     this.#recordRunStart(runId, advertisedTools, extras);
+    let settle = (): void => {};
+    this.#runSettled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
     try {
       await start();
       await this.#agent.waitForIdle();
       const result = this.#judgeTerminal(runId, advertisedTools);
       this.#recordRunEnded(result);
       return result;
+    } catch (error) {
+      // Run 以异常结束（上游抛错）：收尾条目记出错，不留成"有开始无收尾"（那只留给进程死于中途）
+      this.#recordRunEnded({
+        runId,
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
     } finally {
       this.#currentRunId = null;
+      settle();
     }
+  }
+
+  // 工具结果消息挂运行面标记（账本重构第二段的裁决：写在该消息 details 的 pigeon 键下，不新增记录种类）：
+  // 工具抛错时捕获的错误归类（审批闸没跑过即上游拦截，记域错误）与审批闸的决定（结果与批准来源）。
+  // 就地改这条消息：交给 Agent 的对话、旧账本条目与新存储是同一份（details 不发给模型，旧账本正文抽取也不含它）。
+  // 工具自己的 details 是对象时并入，缺省时新建；其余形状（非对象）不动。标记自身出错只进 listenerErrors
+  #markToolResult(message: ToolResultMessage): void {
+    try {
+      const errorKind = message.isError
+        ? (this.#toolErrorKinds.get(message.toolCallId) ??
+          (this.#governance.governs(message.toolCallId) ? undefined : "domain"))
+        : undefined;
+      const decision = this.#governance.decisionOf(message.toolCallId);
+      const mark: ToolResultMark = {
+        ...(errorKind !== undefined ? { errorKind } : {}),
+        ...(decision !== undefined
+          ? { gate: { outcome: decision.outcome, approvedBy: decision.approvedBy } }
+          : {}),
+      };
+      if (mark.errorKind === undefined && mark.gate === undefined) {
+        return;
+      }
+      const details: unknown = message.details;
+      if (details === undefined || details === null) {
+        message.details = { [TOOL_RESULT_MARK_KEY]: mark };
+      } else if (typeof details === "object" && !Array.isArray(details)) {
+        message.details = { ...details, [TOOL_RESULT_MARK_KEY]: mark };
+      }
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+  }
+
+  // 等当前 Run 彻底收尾（收尾条目已交给新存储写者）；没有进行中的 Run 时立即返回。
+  // run.ended 事件先于收尾条目到达，读者在事件回调里要读收尾条目时先等这里
+  async settled(): Promise<void> {
+    await this.#runSettled;
   }
 
   // 中断当前 Run：固定姿势 abort → waitForIdle；终态由并发等待的 run() 返回承载。
@@ -365,6 +424,15 @@ export class PiRuntimeAdapter {
   // 拷贝不冻结：观察方对自己的副本做变换是合法的。
   transcript(): AgentMessage[] {
     return structuredClone(this.#agent.state.messages);
+  }
+
+  // 续跑（决策 183）：以会话里还原出的消息作为 Agent 的对话上下文（深拷贝）。只在还没有跑过任何 Run、也没有进行中的 Run 时可用
+  restoreMessages(messages: readonly AgentMessage[]): void {
+    this.#assertUsable();
+    if (this.#currentRunId !== null || this.#agent.state.messages.length > 0) {
+      throw new Error("只能在运行面跑任何 Run 之前还原对话上下文");
+    }
+    this.#agent.state.messages = structuredClone([...messages]);
   }
 
   // M7（决策 078）：本 Run 已分配的最后一个条目号（message_end 累计序号）；Run 之外为 0
@@ -443,6 +511,9 @@ export class PiRuntimeAdapter {
       // 写盘失败进 listenerErrors 留证缺口，绝不毒化 Run 或重排后续序号。
       if (event.type === "message_end") {
         this.#runEntrySeq += 1;
+        if (event.message.role === "toolResult") {
+          this.#markToolResult(event.message);
+        }
         if (this.#eventLog !== undefined) {
           try {
             // M5 S1（决策 037）：消息深拷贝交落盘口——上游零防御拷贝，落盘侧抽取内容块
@@ -647,7 +718,9 @@ export class PiRuntimeAdapter {
 
   // 决策 206 双写：Run 收尾条目（182）。结束方式：确以中止收尾时，撞上限的原因优先，其次熔断，否则为中止；
   // 出错与终态不明记为出错；其余为正常完成（空回复异常结束另行施工）
-  #recordRunEnded(result: RunResult): void {
+  #recordRunEnded(
+    result: Pick<RunResult, "runId" | "status" | "stopReason" | "errorMessage">
+  ): void {
     if (this.#sessionStore === undefined) {
       return;
     }

@@ -25,7 +25,6 @@ import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
 import { runTreeRebuildCommand } from "../application/session-tree.ts";
-import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
@@ -215,9 +214,8 @@ function grantCommandsOf(
 }
 
 // pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>]
-//   [--model <m>]：冷恢复对账（哈希自动确证 + 剩余悬账人工确认菜单）后在同一会话下续跑
-// REPL（M4 S5，D5）——Pi transcript 不恢复，模型对话上下文重新建立；后续 Run 继续写入
-// 本会话事件日志；系统永不自动重新执行（§3.2）
+//   [--model <m>]：在同一会话下续跑 REPL（M4 S5；决策 183）——对话上下文由会话文件还原，悬空的工具调用
+// 补"结果未知、请自行核实"的工具结果由 agent 核对；后续 Run 接着写入本会话；系统永不自动重新执行（§3.2）
 async function resumeMain(argv: string[]): Promise<void> {
   let sessionIdArg: string | undefined;
   const modelArgv: string[] = [];
@@ -255,27 +253,23 @@ async function resumeMain(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
   const write = writeOut;
-  // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）
-  const scope = sessionRuntimeScope(workspaceRoot, sessionId);
   const { ask, close } = createAsker(process.stdin, write);
   try {
     await runResumeFlow({
       root: workspaceRoot,
-      workspaceRoot: scope.workspaceRoot,
       sessionId: sessionIdArg,
-      ask,
       write,
-      // 对账收口后进入 REPL：同一 sessionId 续写事件日志；EOF/退出走正常 finally
+      // 进入 REPL：同一 sessionId 续写会话；EOF/退出走正常 finally
       enterRepl: async () => {
         const streamFn = await loadStreamFn(streamFnSpec);
-        // 作用域、grant 冷恢复种子（决策 3b）、MCP 启动与装配都在 application/session-runtime.ts
-        //（决策 067，与 tui 的 /resume 换绑同一份）
+        // 作用域（worker 会话回到它自己的工作树与委派策略）、grant 冷恢复种子（决策 3b）、对话上下文还原（决策 183）、
+        // MCP 启动与装配都在 application/session-runtime.ts（决策 067，与 tui 的 /resume 换绑同一份）
         const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
           sessionId,
           streamFn,
           flags,
-          restoreGrants: true,
+          resume: true,
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版

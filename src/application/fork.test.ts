@@ -1,9 +1,9 @@
 // 会话树分叉与续跑（M7 S6，决策 068 / 077 / 078 / 079）：真实 git 仓库 + 真实装配根 + 假模型。
-// - 分叉顺序：账本先记分叉记录 → 从账本与内容文件把历史导入 .pigeon/trees/ 的会话树 → 此后实时写穿；
-// - 续跑：从分叉点之前最近的快照开独立工作树，以 buildSessionContext 还原的分支消息作为 Agent 初始状态，
+// - 分叉顺序：从新会话存储读来源会话 → 旧账本记分叉记录 → 来源文件记分叉条目 → 开独立工作树 → pi 的 fork 建分支文件；
+// - 续跑：从分叉点之前最近的快照开独立工作树，以 buildSessionContext 从分支文件还原的消息作为 Agent 初始状态，
 //   新分支是新的 Pigeon 会话，会话头指向来源会话与分叉点；用户工作区不受影响；
-// - 由账本重建树：删掉树文件后重建，各通道的路径与写穿结果一致；
-// - 非 git 工作区发起分叉明确报错，不降级、不留分叉记录；写穿失败只告警、不进账本，不影响运行；
+// - 非 git 工作区发起分叉明确报错，不降级、不留分叉记录；派生会话树的写穿失败只告警、不进账本，不影响运行
+//   （分叉已不再建派生会话树，写穿模块待停写旧账本时删除）；
 // - --retry-on-fail：尝试标为失败时从本次任务开始处分叉重试（不注入任何提示）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -20,19 +20,16 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { NotGitWorkspaceError } from "../orchestration/checkpoint.ts";
 import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { openSessionTree, TREE_MAIN_LANE } from "../pi-runtime/session-tree.ts";
+import { TREE_MAIN_LANE } from "../pi-runtime/session-tree.ts";
 import { newSessionId } from "../state/ids.ts";
 import { runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
-import {
-  attachTreeWriteThrough,
-  rebuildSessionTree,
-  runTreeRebuildCommand,
-} from "./session-tree.ts";
+import { attachTreeWriteThrough } from "./session-tree.ts";
 
 const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
@@ -85,17 +82,7 @@ const edit = (content: string) => ({
 
 const VERIFY = { command: `${NODE} check.mjs`, timeoutMs: 30_000 };
 
-function laneShape(
-  entries: Awaited<ReturnType<Awaited<ReturnType<typeof openSessionTree>>["lanePath"]>>
-) {
-  return entries.map((entry) => ({
-    id: entry.id,
-    parentId: entry.parentId,
-    message: entry.message,
-  }));
-}
-
-test("分叉续跑：先记分叉记录再建树再写穿；从分叉点前最近的快照开独立工作树，分支消息只到分叉点；删树后由账本重建一致", async () => {
+test("分叉续跑：先记分叉记录，从分叉点前最近的快照开独立工作树，分支文件复制分叉点之前的历史，分支消息只到分叉点", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const sourceId = newSessionId();
@@ -165,30 +152,27 @@ test("分叉续跑：先记分叉记录再建树再写穿；从分叉点前最�
     assert.equal(firstCall.length, 1, "分支初始消息只到分叉点（任务消息）");
     assert.equal(firstCall[0]?.role, "user");
 
-    const tree = await openSessionTree({ governanceRoot: dir, rootSessionId: sourceId });
-    const mainBefore = laneShape(await tree.lanePath(TREE_MAIN_LANE));
-    const branchBefore = laneShape(await tree.lanePath(branch.branchSessionId));
+    // 新会话存储：来源文件记分叉条目（指向分叉点的消息条目），分支文件由 pi 的 fork 复制根到分叉点的历史，
+    // 分支运行面在它上面续写；派生会话树不再建
+    const storeSource = loadStoreSession(sessionsDir, sourceId);
+    const storeBranch = loadStoreSession(sessionsDir, branch.branchSessionId);
+    assert.ok(storeSource !== undefined && storeBranch !== undefined);
+    const forkData = storeSource.view.forks[0]?.data;
+    assert.equal(forkData?.branchSessionId, branch.branchSessionId);
+    const taskEntry = storeSource.view.runs[0]?.messages[0]?.entryId;
+    assert.equal(forkData?.forkEntryId, taskEntry);
     assert.deepEqual(
-      mainBefore.map((entry) => entry.id),
-      source.entries.map((entry) => entry.id)
+      storeBranch.main.slice(0, 2).map((entry) => entry.id),
+      [storeSource.main[0]?.id, taskEntry],
+      "分支文件开头是来源的 Run 开始条目与任务消息"
     );
-    assert.equal(branchBefore[0]?.id, source.entries[0]?.id, "分支通道从分叉条目长出");
-    assert.deepEqual(
-      branchBefore.slice(1).map((entry) => entry.id),
-      branchSession.entries.map((entry) => entry.id),
-      "分支消息实时写穿"
+    assert.equal(storeBranch.view.runs.length, 1);
+    assert.equal(
+      storeBranch.view.runs[0]?.messages.length,
+      branchSession.entries.length,
+      "分支自己的消息全部写进分支文件"
     );
-    await tree.remove();
-    const rebuilt = await rebuildSessionTree({ governanceRoot: dir, rootSessionId: sourceId });
-    assert.deepEqual(laneShape(await rebuilt.lanePath(TREE_MAIN_LANE)), mainBefore);
-    assert.deepEqual(laneShape(await rebuilt.lanePath(branch.branchSessionId)), branchBefore);
-    // 由账本重建的命令入口：给分支会话号也按根会话整棵重建
-    const report = await runTreeRebuildCommand({
-      governanceRoot: dir,
-      sessionId: branch.branchSessionId,
-    });
-    assert.ok(report.includes(`根会话 ${sourceId}`), report);
-    assert.ok(report.includes(`通道 ${branch.branchSessionId}：${branchBefore.length} 条`), report);
+    assert.equal(existsSync(join(dir, ".pigeon", "trees")), false);
   } finally {
     cleanup();
   }

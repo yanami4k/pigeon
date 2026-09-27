@@ -105,7 +105,8 @@ test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-c
     );
     assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
     const result = lastJsonLine(child.stdout);
-    assert.equal(result.approvalsNeeded, 0);
+    // 因无审批通道而拒绝的写调用计入需审批次数（需要人来批的一次）
+    assert.equal(result.approvalsNeeded, 1);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), ORIGINAL);
     const session = materializeSession(
       join(root, ".pigeon", "sessions"),

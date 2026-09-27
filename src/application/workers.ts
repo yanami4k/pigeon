@@ -31,7 +31,7 @@ import type {
   WorkerRole,
 } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import type { ReceiptId, SessionId } from "../state/ids.ts";
+import type { SessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
@@ -373,12 +373,6 @@ function openBundle(
   return bundle;
 }
 
-function receiptIdsOf(bundle: RuntimeBundle): ReceiptId[] {
-  return bundle.adapter
-    .toolExecutions()
-    .flatMap((record): ReceiptId[] => (record.receiptId !== undefined ? [record.receiptId] : []));
-}
-
 function summaryOf(bundle: RuntimeBundle): string {
   const last = bundle.adapter.transcript().findLast((message) => message.role === "assistant");
   if (last === undefined || last.role !== "assistant") {
@@ -396,7 +390,6 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     run: (task) => adapter.run(task),
     interrupt: (cause) => adapter.interrupt(cause),
     subscribe: (listener) => adapter.subscribe(listener),
-    receiptIds: () => receiptIdsOf(bundle),
     summary: () => summaryOf(bundle),
     structured: () => structuredResultOf(summaryOf(bundle)),
     recordLimitHit: (limit, runId) => adapter.recordObservation("run.limit-hit", { limit }, runId),
@@ -446,7 +439,6 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
         unsubscribe?.();
       };
     },
-    receiptIds: () => (bundle !== undefined ? receiptIdsOf(bundle) : []),
     summary: () => (bundle !== undefined ? summaryOf(bundle) : ""),
     structured: () => (bundle !== undefined ? structuredResultOf(summaryOf(bundle)) : undefined),
     recordLimitHit: (limit, runId) =>

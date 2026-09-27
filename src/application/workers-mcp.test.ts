@@ -102,11 +102,12 @@ test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；�
     });
     assert.deepEqual(asked, ["mcp__fx__note"]);
     assert.ok(kinds.includes("tool.settled"), JSON.stringify(kinds));
-    assert.equal(handle.receiptIds().length, 1);
     assert.equal(handle.summary(), "完成");
     await handle.dispose();
     assert.equal(sessions[0]?.connections[0]?.state, "closed");
     const worker = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
+    // 写档 MCP 工具经审批放行并执行：worker 会话里落了一条回执
+    assert.equal(worker.receipts.length, 1);
     const headerWorkspace = worker.sessionHeader?.workspace;
     assert.equal(
       headerWorkspace?.kind === "git-worktree" ? headerWorkspace.path : undefined,

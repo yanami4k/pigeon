@@ -10,6 +10,8 @@
 import path from "node:path";
 import {
   type AgentMessage,
+  buildSessionContext,
+  type Entry,
   type JsonlSessionMetadata,
   JsonlSessionRepo,
   type Session,
@@ -20,6 +22,12 @@ import {
   type SessionEntrySink,
   type SessionHeaderMetadata,
 } from "../state/session-entries.ts";
+import {
+  danglingToolCalls,
+  INTERRUPTED_TOOL_RESULT_MARK,
+  INTERRUPTED_TOOL_RESULT_TEXT,
+  type StoreMessage,
+} from "../state/session-judge.ts";
 import { omitThinking } from "../state/thinking-omission.ts";
 
 // 与写者同一套配置的仓库（契约测试与分叉共用）
@@ -265,4 +273,33 @@ export async function forkSessionFile(input: {
     }
   );
   return (await session.getMetadata()).path;
+}
+
+// 由一条分支（根到叶的条目，只读读取器读出）用 pi 的 buildSessionContext 还原消息（决策 183 续跑、177 分叉续跑的初始消息）：
+// 自定义条目不产生消息，压缩条目换成摘要加保留段（上游口径）
+export function sessionContextMessages(pathEntries: readonly object[]): AgentMessage[] {
+  return buildSessionContext(pathEntries as readonly Entry[]).messages;
+}
+
+// 续跑时还原的对话上下文（决策 183）：messages 是 buildSessionContext 还原的消息；末条助手消息里有没配上结果的工具调用时，
+// interrupted 为每个悬空调用补的一条工具结果（"进程在执行途中中断、结果未知、请自行核实"，details 带标记供读者认出），
+// 由调用方写进会话并接在 messages 之后交给 Agent——上游 continue 与 provider 都要求工具调用有结果
+export function restoreSessionContext(pathEntries: readonly object[]): {
+  messages: AgentMessage[];
+  interrupted: AgentMessage[];
+} {
+  const messages = sessionContextMessages(pathEntries);
+  const interrupted = danglingToolCalls(messages as unknown as StoreMessage[]).map(
+    (call) =>
+      ({
+        role: "toolResult",
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
+        details: { [INTERRUPTED_TOOL_RESULT_MARK]: true },
+        isError: true,
+        timestamp: Date.now(),
+      }) as AgentMessage
+  );
+  return { messages, interrupted };
 }

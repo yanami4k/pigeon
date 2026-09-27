@@ -1,11 +1,15 @@
 // 会话运行面范围（M5.5 S4，决策 040）：worker 会话的冷恢复与续跑必须回到它自己的工作树与委派策略——
-// 工作区根取会话头记的工作树，策略取父会话 child.spawned 记的委派策略，父会话 id 用于深度 1 判定；
+// 工作区根取会话头记的工作树，策略取父会话派出记录里的委派策略，父会话 id 用于深度 1 判定；
 // 主会话即治理根与缺省策略。父会话记录缺失、派出记录缺失或工作树已被移除时响亮失败（授权范围不猜，
-// fail-closed）。只读：只经冷物化读会话文件。
+// fail-closed）。只读。
+// 账本重构第二段（决策 177 / 180）：从新会话存储读——worker 与分支会话的来历在会话文件头（metadata），委派策略在父会话的
+// worker 派出条目里；新存储里没有这个会话的文件（双写之前的旧会话）时，过渡期回退旧账本读法。
 import { existsSync } from "node:fs";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
-import type { DelegatedPolicy, WorkerRole } from "../state/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
+import type { DelegatedPolicy, WorkerRole, WorkerWorkspace } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
+import { storeWorkerSpawned } from "../state/session-judge.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
 export interface SessionRuntimeScope {
@@ -20,19 +24,74 @@ export function sessionRuntimeScope(
   sessionId: SessionId
 ): SessionRuntimeScope {
   const dir = sessionsDirOf(governanceRoot);
+  const loaded = loadStoreSession(dir, sessionId);
+  if (loaded === undefined) {
+    return legacySessionRuntimeScope(governanceRoot, sessionId);
+  }
+  const { view } = loaded;
+  // M7（决策 077）：分支会话回到它自己的工作树（主会话形态，不是委派）
+  const branch = view.metadata?.branch;
+  if (branch !== undefined) {
+    return { workspaceRoot: existingWorktree("分支", branch.workspace) };
+  }
+  const worker = view.metadata?.worker;
+  const parentSessionId = view.parentSessionId;
+  if (worker === undefined || parentSessionId === undefined) {
+    return { workspaceRoot: governanceRoot };
+  }
+  const parent = loadStoreSession(dir, parentSessionId);
+  if (parent === undefined) {
+    throw new Error(
+      `worker 会话 ${sessionId} 的父会话记录不存在：${parentSessionId}（无法还原委派策略，拒绝恢复）`
+    );
+  }
+  const spawned = storeWorkerSpawned(parent.view, sessionId);
+  if (spawned === undefined) {
+    throw new Error(
+      `父会话 ${parentSessionId} 没有派出 ${sessionId} 的记录（无法还原委派策略，拒绝恢复）`
+    );
+  }
+  return scopeOf(governanceRoot, worker.workspace, {
+    toolPolicy: spawned.policy,
+    parentSessionId,
+    worker: { name: worker.name, role: worker.role },
+  });
+}
+
+function existingWorktree(kind: string, workspace: { path: string; branch: string }): string {
+  if (!existsSync(workspace.path)) {
+    throw new Error(
+      `${kind}工作树已不存在：${workspace.path}（分支 ${workspace.branch} 仍可用 git 查看）`
+    );
+  }
+  return workspace.path;
+}
+
+function scopeOf(
+  governanceRoot: string,
+  workspace: WorkerWorkspace,
+  delegated: Required<Omit<SessionRuntimeScope, "workspaceRoot">>
+): SessionRuntimeScope {
+  // M6（决策 064）：无工作区的 worker（已退役的 Reviewer，决策 137；只剩旧会话）作用域根即治理根，没有工作树可检查
+  if (workspace.kind === "none") {
+    return { workspaceRoot: governanceRoot, ...delegated };
+  }
+  return { workspaceRoot: existingWorktree("worker ", workspace), ...delegated };
+}
+
+// 旧账本读法（过渡期：新存储里没有这个会话的文件时回退；停写旧账本时删除）
+function legacySessionRuntimeScope(
+  governanceRoot: string,
+  sessionId: SessionId
+): SessionRuntimeScope {
+  const dir = sessionsDirOf(governanceRoot);
   if (!existsSync(JsonlEventLog.filePathFor(dir, sessionId))) {
     return { workspaceRoot: governanceRoot };
   }
   const session = materializeSession(dir, sessionId, { content: false });
-  // M7（决策 077）：分支会话回到它自己的工作树（主会话形态，不是委派）
   const branch = session.branchHeader;
   if (branch !== undefined) {
-    if (!existsSync(branch.workspace.path)) {
-      throw new Error(
-        `分支工作树已不存在：${branch.workspace.path}（分支 ${branch.workspace.branch} 仍可用 git 查看）`
-      );
-    }
-    return { workspaceRoot: branch.workspace.path };
+    return { workspaceRoot: existingWorktree("分支", branch.workspace) };
   }
   const header = session.sessionHeader;
   if (header === undefined) {
@@ -51,24 +110,9 @@ export function sessionRuntimeScope(
       `父会话 ${header.parentSessionId} 没有派出 ${sessionId} 的记录（无法还原委派策略，拒绝恢复）`
     );
   }
-  // M6（决策 064）：无工作区的 worker（已退役的 Reviewer，决策 137；只剩旧会话）只读账本，作用域根即治理根，没有工作树可检查
-  if (header.workspace.kind === "none") {
-    return {
-      workspaceRoot: governanceRoot,
-      toolPolicy: spawned.policy,
-      parentSessionId: header.parentSessionId,
-      worker: header.worker,
-    };
-  }
-  if (!existsSync(header.workspace.path)) {
-    throw new Error(
-      `worker 工作树已不存在：${header.workspace.path}（分支 ${header.workspace.branch} 仍可用 git 查看）`
-    );
-  }
-  return {
-    workspaceRoot: header.workspace.path,
+  return scopeOf(governanceRoot, header.workspace, {
     toolPolicy: spawned.policy,
     parentSessionId: header.parentSessionId,
     worker: header.worker,
-  };
+  });
 }

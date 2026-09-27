@@ -1,1 +1,1 @@
-export * from "./recovery.ts";
+export * from "./check-command.ts";

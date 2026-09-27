@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ChildSettledInput, ChildSpawnedInput, WorkerWorkspace } from "../state/event-log.ts";
 import type { EventEnvelope } from "../state/events.ts";
-import { newReceiptId, newSessionId, type ReceiptId } from "../state/ids.ts";
+import { newSessionId } from "../state/ids.ts";
 import {
   gitWorktreeWorkspaces,
   WorkerOrchestrator,
@@ -17,7 +17,6 @@ import {
 } from "./workers.ts";
 
 class FakeRuntime implements WorkerRuntimeHandle {
-  readonly receipt: ReceiptId = newReceiptId();
   disposed = false;
   readonly #structured: unknown;
 
@@ -35,10 +34,6 @@ class FakeRuntime implements WorkerRuntimeHandle {
   }
 
   async interrupt(): Promise<void> {}
-
-  receiptIds(): ReceiptId[] {
-    return [this.receipt];
-  }
 
   summary(): string {
     return "完成";
@@ -157,7 +152,6 @@ test("token 预算：累计 token 达到上限即中止，以 token-limit 收尾
     interrupt: async () => {
       interrupted = true;
     },
-    receiptIds: () => [],
     summary: () => "",
     dispose: async () => {},
   };

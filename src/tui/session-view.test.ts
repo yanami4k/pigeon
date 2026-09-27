@@ -2,21 +2,21 @@
 // 断言面：
 //   - /sessions 渲染口径与 cli 一致（共享 application/session-list.ts 命令层）：安静行
 //     （时间 + Run 数 + sessionId）+ 待对账突出行；空目录如实说明；
-//   - /resume 全流程：自动确证报告渲染进消息区 → 人工确认走面板式单键（决策 031）→
-//     human-confirmed resolution 落盘（写盘路径 = application/resume.ts）→ 同 sessionId
-//     换绑运行面续跑；「模型对话上下文重新建立」说明与 cli 同口径；
-//   - 哈希自动确证命中：报告呈现且无需人工菜单直接续跑；
-//   - restoredGrants 种子：恢复后 /grants 渲染物化的治理投影（重启恢复证据）；
+//   - /resume 全流程（账本重构 183）：续跑报告（还原的消息条数、未收尾的 Run、悬空的工具调用）渲染进消息区，
+//     与 cli 同口径 → 不再有人工对账菜单 → 同 sessionId 换绑运行面续跑（上下文还原在换绑工厂装配运行面时做）；
+//   - 双写之前的旧会话（新会话存储里没有文件）明确报错、不换绑；
+//   - grant 种子：恢复后 /grants 渲染新会话存储里的生效授权（重启恢复证据）；
 //   - 会话不存在/空目录响亮报错，原运行面不受影响；当前会话拒绝重复恢复；
-//   - 菜单期间普通输入吞掉（029 同款语义）；busy 期间 /sessions 与 /resume 不开旁路（027）。
+//   - busy 期间 /sessions 与 /resume 不开旁路（027）。
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createFixtureSession } from "../application/session-store-fixtures.ts";
+import { restoreGrantSeed } from "../application/workspace.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { JsonlEventLog } from "../persistence/event-log.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
 import type { IntentInput } from "../state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
@@ -33,7 +33,6 @@ import {
 } from "../state/ids.ts";
 import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
-import { snapshotTag } from "../tools/hashline.ts";
 import { PigeonTuiShell, type TuiRuntimeFace, type TuiSessionBinding } from "./shell.ts";
 import { MockTerminal, screenText, settle } from "./testing.ts";
 
@@ -202,8 +201,20 @@ function writeCrashedSession(
   return { sessionId, executionId };
 }
 
-// 带会话 grant 的健康会话（restoredGrants 种子测试用）
-function writeGrantedSession(sessionsDir: string): { sessionId: SessionId; grantId: string } {
+// 新会话存储里的崩溃会话：任务消息与带工具调用的助手消息之后进程死亡（无工具结果、无 Run 收尾）
+async function writeStoreCrashedSession(
+  sessionsDir: string,
+  root: string,
+  toolName: string
+): Promise<SessionId> {
+  const session = createFixtureSession({ sessionsDir, cwd: root });
+  session.startRun({ task: "改 a.ts" });
+  session.assistant({ text: "先改", toolCalls: [{ name: toolName, args: { path: "a.ts" } }] });
+  return (await session.close()).sessionId;
+}
+
+// 带会话 grant 的健康会话（旧账本形状）
+function _writeGrantedSession(sessionsDir: string): { sessionId: SessionId; grantId: string } {
   const sessionId = writeHealthySession(sessionsDir, "read_file");
   const grantId = newGrantId();
   const log = new JsonlEventLog(sessionsDir, sessionId);
@@ -315,13 +326,12 @@ test("/sessions：安静行（时间 + Run 数 + sessionId），与 cli 同一�
   }
 });
 
-test("/resume 全流程：自动确证报告 → 人工确认单键 → resolution 落盘 → 同 sessionId 换绑续跑", async () => {
+test("/resume 全流程：报告将还原的上下文与悬空的工具调用 → 无对账菜单 → 同 sessionId 换绑续跑", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    // 无 contentHashes 的悬账：哈希确证不可得，只能留人确认
-    const crashed = writeCrashedSession(sessionsDir, "edit_file");
+    const crashed = await writeStoreCrashedSession(sessionsDir, root, "edit_file");
     const tracker = makeRebindTracker();
     const oldRuntime = new FakeRuntime();
     const term = new MockTerminal(90, 30);
@@ -336,41 +346,22 @@ test("/resume 全流程：自动确证报告 → 人工确认单键 → resoluti
     try {
       shell.start();
       await settle();
-      term.input(`/resume ${crashed.sessionId}`);
+      term.input(`/resume ${crashed}`);
       term.input("\r");
       await settle();
 
-      // 自动确证报告渲染进消息区（cli 同口径措辞）
-      const menuScreen = screenText(term);
-      assert.ok(menuScreen.includes("冷恢复对账"), menuScreen);
-      assert.ok(menuScreen.includes("本次自动确证（哈希比对）：无"), menuScreen);
-      assert.ok(menuScreen.includes("待对账 1/1：edit_file"), menuScreen);
-      assert.ok(menuScreen.includes("[1] 我看过了，实际已执行"), menuScreen);
-      assert.ok(menuScreen.includes("请选择 [1/2/3]："), menuScreen);
-
-      // 面板式单键：按 2 = 实际未执行
-      term.input("2");
-      await settle();
+      // 续跑报告渲染进消息区（cli 同口径措辞）：还原的消息条数、未收尾的 Run、悬空的工具调用
       const done = screenText(term);
-      assert.ok(done.includes("已记录：实际未执行。"), done);
-      assert.ok(
-        done.includes("模型对话上下文重新建立（Pi transcript 不恢复）"),
-        `上下文重建说明应与 cli 同口径\n${done}`
-      );
-
-      // resolution 落盘（写盘路径 = application/resume.ts）：悬账销账、human-confirmed 留证
-      const materialized = materializeSession(sessionsDir, crashed.sessionId);
-      assert.equal(materialized.reconcile.unknown.length, 0, "人工确认后悬账应销账");
-      const resolution = materialized.records.find((record) => record.kind === "resolution");
-      assert.ok(resolution !== undefined && resolution.kind === "resolution");
-      assert.equal(resolution.method, "human-confirmed");
-      assert.equal(resolution.outcome, "not-executed");
+      assert.ok(done.includes("续跑：还原对话上下文 2 条消息"), done);
+      assert.ok(done.includes("1 个 Run 没有收尾记录"), done);
+      assert.ok(done.includes("1 个工具调用没有结果（edit_file）"), done);
+      assert.ok(!done.includes("请选择 [1/2/3]"), "不再有人工对账菜单");
 
       // 同 sessionId 换绑：rebind 收到目标会话；旧运行面退订；后续提交只走新运行面
-      assert.deepEqual(tracker.rebinds, [crashed.sessionId]);
+      assert.deepEqual(tracker.rebinds, [crashed]);
       assert.equal(tracker.runtimes.length, 1);
       assert.equal(oldRuntime.listenerCount(), 0, "换绑后旧运行面必须退订");
-      assert.ok(done.includes(`session ${crashed.sessionId}`), "chrome 应切到恢复会话");
+      assert.ok(done.includes(`session ${crashed}`), "chrome 应切到恢复会话");
       term.input("继续任务");
       term.input("\r");
       await settle();
@@ -385,23 +376,18 @@ test("/resume 全流程：自动确证报告 → 人工确认单键 → resoluti
   }
 });
 
-test("/resume 哈希自动确证命中：报告呈现、无人工菜单、直接换绑续跑", async () => {
+test("/resume 双写之前的旧会话：明确报错、不换绑，原运行面不受影响", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    // 目标文件现状 == 预期改后 → 自动确证 executed
-    writeFileSync(join(root, "a.ts"), "after content\n", "utf8");
-    const crashed = writeCrashedSession(sessionsDir, "edit_file", {
-      path: "a.ts",
-      beforeHash: snapshotTag("before content\n"),
-      expectedAfterHash: snapshotTag("after content\n"),
-    });
+    const legacy = writeCrashedSession(sessionsDir, "edit_file");
     const tracker = makeRebindTracker();
+    const runtime = new FakeRuntime();
     const term = new MockTerminal(90, 30);
     const shell = new PigeonTuiShell({
       terminal: term,
-      runtime: new FakeRuntime(),
+      runtime,
       sessionId: SESSION_ID,
       logDir,
       sessions: { root },
@@ -410,24 +396,16 @@ test("/resume 哈希自动确证命中：报告呈现、无人工菜单、直接
     try {
       shell.start();
       await settle();
-      term.input(`/resume ${crashed.sessionId}`);
+      term.input(`/resume ${legacy.sessionId}`);
       term.input("\r");
       await settle();
       const text = screenText(term);
-      assert.ok(text.includes("本次自动确证（哈希比对）1 条："), text);
-      assert.ok(text.includes("edit_file：已执行"), text);
-      // 悬账清零但崩溃残留（无 run.ended）是既往缺口——按 021/023 口径不说"证据链完整"
-      assert.ok(text.includes("剩余待对账：无。"), text);
-      assert.ok(!text.includes("证据链完整"), text);
-      assert.ok(text.includes("崩溃残留：1 个 Run 无 run.ended"), text);
-      assert.ok(!text.includes("请选择 [1/2/3]"), "无悬账不得出现人工菜单");
-      assert.ok(text.includes("模型对话上下文重新建立"), text);
-      assert.deepEqual(tracker.rebinds, [crashed.sessionId], "无菜单也应完成换绑");
-      const materialized = materializeSession(sessionsDir, crashed.sessionId);
-      const resolution = materialized.records.find((record) => record.kind === "resolution");
-      assert.ok(resolution !== undefined && resolution.kind === "resolution");
-      assert.equal(resolution.method, "hash-auto");
-      assert.equal(resolution.outcome, "executed");
+      assert.ok(text.includes("创建于新会话存储启用之前"), text);
+      assert.deepEqual(tracker.rebinds, [], "失败不得换绑");
+      term.input("还活着");
+      term.input("\r");
+      await settle();
+      assert.deepEqual(runtime.runs, ["还活着"]);
     } finally {
       shell.stop();
     }
@@ -437,15 +415,20 @@ test("/resume 哈希自动确证命中：报告呈现、无人工菜单、直接
   }
 });
 
-test("/resume restoredGrants 种子：恢复后 /grants 渲染物化的治理投影（重启恢复证据）", async () => {
+test("/resume grant 种子：恢复后 /grants 渲染新会话存储里的生效授权（重启恢复证据）", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const granted = writeGrantedSession(sessionsDir);
-    // 与 tui/main.ts 同一换绑配方：物化目标会话的生效 grant（created − revoked）做种子
-    const tracker = makeRebindTracker((sessionId) => {
-      const restored = materializeSession(sessionsDir, sessionId).grants;
+    const granted = createFixtureSession({ sessionsDir, cwd: root });
+    granted.startRun({ task: "读" });
+    const grantId = granted.grantCreated({ tool: "read_file" });
+    granted.assistant({ text: "读完了" });
+    granted.endRun();
+    const { sessionId } = await granted.close();
+    // 与 tui/main.ts 同一换绑配方：目标会话的生效 grant（created − revoked）做种子
+    const tracker = makeRebindTracker((target) => {
+      const restored = restoreGrantSeed(root, target);
       const store = new SessionGrantStore({ workspaceRoot: root, restored });
       return { runtime: new FakeRuntime(), grants: { root, store, configRules: [] } };
     });
@@ -461,17 +444,16 @@ test("/resume restoredGrants 种子：恢复后 /grants 渲染物化的治理投
     try {
       shell.start();
       await settle();
-      term.input(`/resume ${granted.sessionId}`);
+      term.input(`/resume ${sessionId}`);
       term.input("\r");
       await settle();
-      assert.deepEqual(tracker.rebinds, [granted.sessionId]);
-      // 恢复后治理投影可渲染：物化的会话 grant 出现在 /grants 视图
+      assert.deepEqual(tracker.rebinds, [sessionId]);
       term.input("/grants");
       term.input("\r");
       await settle();
       const text = screenText(term);
-      assert.ok(text.includes("会话放权（1）："), `物化的 grant 应进入新治理上下文\n${text}`);
-      assert.ok(text.includes(granted.grantId), text);
+      assert.ok(text.includes("会话放权（1）："), `生效授权应进入新治理上下文\n${text}`);
+      assert.ok(text.includes(grantId), text);
       assert.ok(text.includes("read_file"), text);
     } finally {
       shell.stop();
@@ -560,12 +542,12 @@ test("/resume 会话不存在与空目录响亮报错；原运行面不受影响
   }
 });
 
-test("菜单期间普通输入吞掉：非 1/2/3 键不决议、不提交、不回显；busy 期间 /sessions 与 /resume 不开旁路", async () => {
+test("busy 期间 /sessions 与 /resume 不开旁路；收尾后 /resume 直接换绑，不进菜单", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const crashed = writeCrashedSession(sessionsDir, "read_file");
+    const crashed = await writeStoreCrashedSession(sessionsDir, root, "read_file");
     const tracker = makeRebindTracker();
     const runtime = new FakeRuntime();
     const term = new MockTerminal(90, 30);
@@ -588,7 +570,7 @@ test("菜单期间普通输入吞掉：非 1/2/3 键不决议、不提交、不�
       await settle();
       term.input("/sessions");
       term.input("\r");
-      term.input(`/resume ${crashed.sessionId}`);
+      term.input(`/resume ${crashed}`);
       term.input("\r");
       await settle();
       const busyText = screenText(term);
@@ -603,26 +585,12 @@ test("菜单期间普通输入吞掉：非 1/2/3 键不决议、不提交、不�
       term.input("\r");
       await settle();
 
-      // 菜单期间：字母键吞掉——不决议、不提交、消息区无变化
-      term.input(`/resume ${crashed.sessionId}`);
+      term.input(`/resume ${crashed}`);
       term.input("\r");
       await settle();
-      const menuBefore = screenText(term);
-      assert.ok(menuBefore.includes("请选择 [1/2/3]："), menuBefore);
-      term.input("x");
-      await settle();
-      assert.equal(screenText(term), menuBefore, "非菜单键必须吞掉（029 同款语义）");
-      assert.deepEqual(runtime.runs, ["任务一"], "菜单期间不得产生提交");
-
-      // 数字键决议：按 1 = 实际已执行
-      term.input("1");
-      await settle();
-      assert.ok(screenText(term).includes("已记录：实际已执行。"), screenText(term));
-      const materialized = materializeSession(sessionsDir, crashed.sessionId);
-      const resolution = materialized.records.find((record) => record.kind === "resolution");
-      assert.ok(resolution !== undefined && resolution.kind === "resolution");
-      assert.equal(resolution.outcome, "executed");
-      assert.deepEqual(tracker.rebinds, [crashed.sessionId]);
+      assert.ok(!screenText(term).includes("请选择 [1/2/3]"), screenText(term));
+      assert.deepEqual(tracker.rebinds, [crashed]);
+      assert.deepEqual(runtime.runs, ["任务一"], "续跑流程本身不产生提交");
     } finally {
       shell.stop();
     }
@@ -637,7 +605,7 @@ test("换绑后旧运行面迟到事件不进消息区（退订彻底）", async
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const crashed = writeCrashedSession(sessionsDir, "read_file");
+    const crashed = await writeStoreCrashedSession(sessionsDir, root, "read_file");
     const tracker = makeRebindTracker();
     const oldRuntime = new FakeRuntime();
     const term = new MockTerminal(90, 30);
@@ -652,12 +620,10 @@ test("换绑后旧运行面迟到事件不进消息区（退订彻底）", async
     try {
       shell.start();
       await settle();
-      term.input(`/resume ${crashed.sessionId}`);
+      term.input(`/resume ${crashed}`);
       term.input("\r");
       await settle();
-      term.input("3");
-      await settle();
-      assert.deepEqual(tracker.rebinds, [crashed.sessionId]);
+      assert.deepEqual(tracker.rebinds, [crashed]);
       const before = screenText(term);
       oldRuntime.emit(RuntimeEventKind.TurnStarted, {});
       oldRuntime.emit(RuntimeEventKind.TurnCompleted, {
