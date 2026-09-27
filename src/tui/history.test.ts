@@ -105,7 +105,7 @@ test("/resume 换绑后渲染全部历史：正文、thinking、工具行与折�
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-history-"));
   const sessionsDir = join(root, ".pigeon", "sessions");
   const target = newSessionId();
-  seedToolRun(sessionsDir, target);
+  await seedToolRun(sessionsDir, target);
   const render = async (historyLimit?: number): Promise<string> => {
     const term = new MockTerminal(100, 60);
     const shell = new PigeonTuiShell({

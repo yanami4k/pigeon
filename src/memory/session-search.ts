@@ -1,24 +1,31 @@
 // Session Search 内容级检索（M5 S2，决策 038）：给 agent 一个能翻本项目旧会话的 grep。
-// 第一版全文扫描：按会话从新到旧，逐文件流式逐行读 037 的旁置内容文件；关键词大小写不敏感
+// 全文扫描：按会话从新到旧，经只读读取器逐个读新会话存储的会话文件（决策 181 / 185），搜消息条目；关键词大小写不敏感
 // 子串匹配、多词为与、不接受正则（模型给正则是 ReDoS 面，元字符一律按字面）；对外只暴露命中流
 // 接口，将来换成索引或语义检索时换实现不换调用方（查询是结构化对象、命中预留 score）。
-// 命中只是线索（§3.3）：结论须经 read_session_entry 回查原文与当时的治理记录。
+// 命中只是线索（§3.3）：结论须经 read_session_entry 回查原文。
+// 分支会话文件开头从来源复制来的历史不重复产出命中（它属于来源会话）。双写期间旧账本里已没有事件文件的会话
+// （跑批器作废重做时移走了旧格式文件）不检索，见 persistence/session-catalog.ts 的 hasLegacyEventFile。
 // 无状态、无索引、无后台：扫描结果不落盘（015 派生不落库）。
-import { createReadStream, existsSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { JsonlEventLog, listSessionIds, materializeSession } from "../persistence/event-log.ts";
-import type { EntryId, RunId, SessionId } from "../state/ids.ts";
 import {
-  type ContentRole,
-  type MessageContentRecord,
-  parseMessageContentRecord,
-} from "../state/message-content.ts";
-import {
-  matchesSessionFilters,
-  type SessionListFilters,
-  sessionCreatedAt,
-  summarizeSession,
-} from "../state/session-summary.ts";
+  hasLegacyEventFile,
+  listSessionRefs,
+  readSessionView,
+  sessionRefTime,
+} from "../persistence/session-catalog.ts";
+import type { RunId, SessionId } from "../state/ids.ts";
+import { matchesSessionFilters, type SessionListFilters } from "../state/session-summary.ts";
+import { summarizeSessionView, type ViewBlock } from "../state/session-view.ts";
+
+// 消息角色：pi 消息的三种与上游扩展消息的四种，另有 system（不对应会话里的消息，检索从不产出）
+export type SessionMessageRole =
+  | "user"
+  | "assistant"
+  | "toolResult"
+  | "system"
+  | "custom"
+  | "bashExecution"
+  | "branchSummary"
+  | "compactionSummary";
 
 // 片段窗口（字符）：命中关键词附近约 200 字
 export const DEFAULT_SNIPPET_CHARS = 200;
@@ -27,7 +34,7 @@ export interface SessionSearchQuery {
   // 多词为与；大小写不敏感；按字面子串匹配
   keywords: readonly string[];
   // 角色过滤；缺省 = 除 system 以外全部角色（system prompt 每会话重复一份，搜它只是噪声）
-  roles?: readonly ContentRole[];
+  roles?: readonly SessionMessageRole[];
   // 复用会话列表的工具 / 分类 / 时间过滤（M4 SessionListFilters）
   filters?: SessionListFilters;
 }
@@ -40,14 +47,14 @@ export interface SessionSearchOptions {
 
 export interface SessionSearchHit {
   sessionId: SessionId;
-  entryId: EntryId;
+  // 新存储里的条目号
+  entryId: string;
   runId: RunId;
   runSeq: number;
-  role: ContentRole;
+  role: SessionMessageRole;
+  // 条目写入时刻
   timestamp: number;
   snippet: string;
-  // 该条内容在落盘时有块被截断：命中片段与原文都不完整，不得支撑确定性结论
-  truncated: boolean;
   toolName?: string;
   // 语义检索（M10）的相关度预留；全文扫描不给
   score?: number;
@@ -60,7 +67,7 @@ export interface SessionSearch {
   ): AsyncIterable<SessionSearchHit>;
 }
 
-const DEFAULT_ROLES: readonly ContentRole[] = [
+const DEFAULT_ROLES: readonly SessionMessageRole[] = [
   "user",
   "assistant",
   "toolResult",
@@ -89,10 +96,10 @@ export function matchesAllKeywords(
   return keywordsLower.every((keyword) => haystackLower.includes(keyword));
 }
 
-// 可检索文本：text 与 thinking 正文、工具调用名；图片与未知块只有哈希，不可检索
-export function searchableText(record: MessageContentRecord): string {
+// 可检索文本：text 与 thinking 正文、工具调用名；图片与未知块不可检索
+export function searchableText(blocks: readonly ViewBlock[]): string {
   const parts: string[] = [];
-  for (const block of record.blocks) {
+  for (const block of blocks) {
     if (block.type === "text") {
       parts.push(block.text);
     } else if (block.type === "thinking") {
@@ -128,12 +135,6 @@ export function buildSnippet(
   return `${start > 0 ? "…" : ""}${flat.slice(start, clippedEnd)}${clippedEnd < flat.length ? "…" : ""}`;
 }
 
-function hasTruncatedBlock(record: MessageContentRecord): boolean {
-  return record.blocks.some(
-    (block) => (block.type === "text" || block.type === "thinking") && block.truncated
-  );
-}
-
 export function createSessionSearch(sessionsDir: string): SessionSearch {
   return {
     search: (query, options = {}) => scanSessions(sessionsDir, query, options),
@@ -154,68 +155,50 @@ async function* scanSessions(
     return;
   }
   let emitted = 0;
-  // 从新到旧：会话 id 内嵌 ULID，字典序即时间序（D1）
-  for (const sessionId of listSessionIds(sessionsDir).reverse()) {
-    const createdAt = sessionCreatedAt(sessionId);
+  // 从新到旧（会话创建时间序）
+  for (const ref of listSessionRefs(sessionsDir).reverse()) {
+    if (!hasLegacyEventFile(sessionsDir, ref.sessionId)) {
+      continue;
+    }
+    const createdAt = sessionRefTime(ref);
     if (filters.since !== undefined && createdAt < filters.since) {
       continue;
     }
     if (filters.until !== undefined && createdAt > filters.until) {
       continue;
     }
-    // 工具 / 分类过滤要看治理记录：只物化事件文件，不读内容文件（037 冷路径口径）
-    if (filters.tool !== undefined || filters.class !== undefined) {
-      const summary = summarizeSession(
-        materializeSession(sessionsDir, sessionId, { content: false })
-      );
-      if (!matchesSessionFilters(summary, filters)) {
-        continue;
-      }
-    }
-    const path = JsonlEventLog.contentFilePathFor(sessionsDir, sessionId);
-    if (!existsSync(path)) {
+    const view = readSessionView(ref);
+    if (view === undefined) {
       continue;
     }
-    const stream = createReadStream(path, { encoding: "utf8" });
-    const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
-    try {
-      for await (const line of lines) {
-        if (line.length === 0) {
-          continue;
-        }
-        let record: MessageContentRecord;
-        try {
-          record = parseMessageContentRecord(JSON.parse(line));
-        } catch {
-          // 坏行与撕裂尾巴不产出命中；缺口由 trace / resume 的正文缺口判据呈现
-          continue;
-        }
-        if (!roles.has(record.role)) {
-          continue;
-        }
-        const text = searchableText(record);
-        if (!matchesAllKeywords(text.toLowerCase(), keywords)) {
-          continue;
-        }
-        yield {
-          sessionId,
-          entryId: record.entryId,
-          runId: record.runId,
-          runSeq: record.runSeq,
-          role: record.role,
-          timestamp: record.timestamp,
-          snippet: buildSnippet(text, keywords, snippetChars),
-          truncated: hasTruncatedBlock(record),
-          ...(record.toolName !== undefined ? { toolName: record.toolName } : {}),
-        };
-        emitted += 1;
-        if (emitted >= limit) {
-          return;
-        }
+    if (
+      (filters.tool !== undefined || filters.class !== undefined) &&
+      !matchesSessionFilters(summarizeSessionView(view), filters)
+    ) {
+      continue;
+    }
+    for (const message of view.messages) {
+      if (!roles.has(message.role)) {
+        continue;
       }
-    } finally {
-      lines.close();
-      stream.destroy();
+      const text = searchableText(message.blocks);
+      if (!matchesAllKeywords(text.toLowerCase(), keywords)) {
+        continue;
+      }
+      yield {
+        sessionId: view.sessionId,
+        entryId: message.entryId,
+        runId: message.runId,
+        runSeq: message.runSeq,
+        role: message.role as SessionMessageRole,
+        timestamp: message.timestamp,
+        snippet: buildSnippet(text, keywords, snippetChars),
+        ...(message.toolName !== undefined ? { toolName: message.toolName } : {}),
+      };
+      emitted += 1;
+      if (emitted >= limit) {
+        return;
+      }
     }
   }
 }

@@ -129,6 +129,8 @@ export function openSessionStore(input: {
   cwd: string;
   lineage?: StoreLineage;
   onFault: StoreFaultHandler;
+  // 思考是否持久化（045）：透传给写者
+  persistThinking?: boolean;
 }): SessionStoreWriter {
   let existingPath: string | undefined;
   try {
@@ -147,6 +149,7 @@ export function openSessionStore(input: {
     ...headerOf(input.lineage),
     lock: acquireSessionFileLock,
     onFault: input.onFault,
+    ...(input.persistThinking !== undefined ? { persistThinking: input.persistThinking } : {}),
   });
 }
 

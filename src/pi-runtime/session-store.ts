@@ -20,6 +20,7 @@ import {
   type SessionEntrySink,
   type SessionHeaderMetadata,
 } from "../state/session-entries.ts";
+import { omitThinking } from "../state/thinking-omission.ts";
 
 // 与写者同一套配置的仓库（契约测试与分叉共用）
 export function createSessionRepo(sessionsRoot: string): JsonlSessionRepo {
@@ -77,6 +78,8 @@ export interface SessionStoreWriterOptions {
   // 跨进程单写者锁：拿到文件路径后取锁，返回释放函数；取不到时抛错（该写者即不打开）
   lock?: (filePath: string) => () => void;
   onFault?: (fault: SessionStoreFault) => void;
+  // 思考是否持久化（045，缺省 true）：false 时助手消息的思考块在写入前剥去，只留略去标记（state/thinking-omission.ts）
+  persistThinking?: boolean;
 }
 
 // 运行面写消息与自定义条目的写入面（Adapter 经它写，结构类型便于测试注入）
@@ -192,7 +195,7 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
     appendMessage: (message) => {
       let clean: AgentMessage;
       try {
-        clean = stripUndefined(message);
+        clean = stripUndefined(options.persistThinking === false ? omitThinking(message) : message);
       } catch (error) {
         report(options.onFault, "写入消息", error);
         return;

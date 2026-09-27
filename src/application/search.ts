@@ -2,8 +2,11 @@
 // （同 030 / 031 方向）；输出是纯字符串，命中片段经 sanitizeTerminalText 净化后才出命令层
 //（036：正文是半信任内容）。检索本身在 memory/session-search.ts，本层不另起扫描。
 import { join } from "node:path";
-import { createSessionSearch, type SessionSearchHit } from "../memory/session-search.ts";
-import type { ContentRole } from "../state/message-content.ts";
+import {
+  createSessionSearch,
+  type SessionMessageRole,
+  type SessionSearchHit,
+} from "../memory/session-search.ts";
 import { sanitizeTerminalText } from "./format.ts";
 
 export const DEFAULT_SEARCH_COMMAND_LIMIT = 20;
@@ -26,13 +29,13 @@ function formatHit(hit: SessionSearchHit): string {
   const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
   return (
     `${time}  ${hit.sessionId}  第 ${hit.runSeq} 条 ${hit.role}${tool}  ${hit.entryId}\n` +
-    `  ${hit.snippet}${hit.truncated ? "（落盘时已截断）" : ""}`
+    `  ${hit.snippet}`
   );
 }
 
 export async function runSearchCommand(options: SearchCommandOptions): Promise<string> {
   const keywords: string[] = [];
-  let role: ContentRole | undefined;
+  let role: SessionMessageRole | undefined;
   let limit = DEFAULT_SEARCH_COMMAND_LIMIT;
   const { args } = options;
   for (let index = 0; index < args.length; index++) {
@@ -44,7 +47,7 @@ export async function runSearchCommand(options: SearchCommandOptions): Promise<s
           `未知角色：${value ?? "（缺取值）"}（可选：${SEARCHABLE_ROLES.join("/")}）`
         );
       }
-      role = value as ContentRole;
+      role = value as SessionMessageRole;
     } else if (token === "--limit") {
       const raw = args[++index];
       const value = Number(raw);

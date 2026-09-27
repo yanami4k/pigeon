@@ -10,6 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { RunStartedRecord } from "../state/event-log.ts";
 import {
   buildMessageContent,
+  hashContentBlocks,
   type MessageContentOptions,
   sha256Hex,
 } from "../state/message-content.ts";
@@ -20,6 +21,7 @@ import {
   SessionEntryType,
   type VerificationData,
 } from "../state/session-entries.ts";
+import { omittedThinkingOf } from "../state/thinking-omission.ts";
 import { materializeSession } from "./event-log.ts";
 import {
   branchEntries,
@@ -223,8 +225,7 @@ export function compareDualWrite(input: {
     if (expectedHash === undefined) {
       continue;
     }
-    const rebuilt = buildMessageContent(message as never, input.content ?? {});
-    if (rebuilt.contentHash !== expectedHash) {
+    if (legacyContentHash(message, input.content ?? {}) !== expectedHash) {
       diffs.push({ area: "消息", where, detail: "按旧账本口径重算的正文哈希与旧条目回指不一致" });
     }
   }
@@ -323,6 +324,29 @@ export function compareDualWrite(input: {
   });
 
   return { sessionId: input.sessionId, newPath: located.path, counted, diffs };
+}
+
+// 按旧账本的抽取口径重算新存储消息的正文哈希。思考不持久化时新存储已剥去思考块、只留略去标记，
+// 旧账本存的是正文为空、带字节数与全文哈希的略去块：按标记在原位置补回旧口径的块再算
+function legacyContentHash(message: unknown, options: MessageContentOptions): string {
+  const omitted = omittedThinkingOf(message as Record<string, unknown>);
+  const rebuilt = buildMessageContent(message as never, options);
+  if (omitted.length === 0) {
+    return rebuilt.contentHash;
+  }
+  const blocks: unknown[] = [...rebuilt.blocks];
+  for (const item of [...omitted].sort((a, b) => a.index - b.index)) {
+    blocks.splice(Math.min(item.index, blocks.length), 0, {
+      type: "thinking",
+      thinking: "",
+      truncated: false,
+      omitted: true,
+      bytes: item.bytes,
+      fullHash: item.hash,
+      ...(item.redacted === true ? { redacted: true } : {}),
+    });
+  }
+  return hashContentBlocks(blocks as never);
 }
 
 // 分支文件开头从来源复制来的条目数：复制段止于分支自己的第一个 Run 开始（以旧账本里该分支的 Run 为准）

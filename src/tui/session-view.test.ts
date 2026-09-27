@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createFixtureSession } from "../application/session-store-fixtures.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
@@ -244,13 +245,20 @@ function makeRebindTracker(binding?: (sessionId: SessionId) => TuiSessionBinding
 
 // ---------- 测试 ----------
 
-test("/sessions：安静行（时间 + Run 数 + sessionId）+ 待对账突出行；空目录如实说明", async () => {
+test("/sessions：安静行（时间 + Run 数 + sessionId），与 cli 同一命令层；空目录如实说明", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const healthy = writeHealthySession(sessionsDir, "edit_file");
-    const crashed = writeCrashedSession(sessionsDir, "read_file");
+    const seed = async (crashedRun: boolean): Promise<SessionId> => {
+      const session = createFixtureSession({ sessionsDir });
+      session.startRun({ task: "t" });
+      session.toolTurn({ name: crashedRun ? "read_file" : "edit_file" });
+      if (!crashedRun) session.endRun();
+      return (await session.close()).sessionId;
+    };
+    const healthy = await seed(false);
+    const crashed = { sessionId: await seed(true) };
     const term = new MockTerminal(90, 30);
     const shell = new PigeonTuiShell({
       terminal: term,
@@ -272,10 +280,7 @@ test("/sessions：安静行（时间 + Run 数 + sessionId）+ 待对账突出�
       assert.ok(healthyLine?.includes("1 个 Run"), `安静行应含 Run 数：${healthyLine}`);
       const crashedLine = text.split("\n").find((line) => line.includes(crashed.sessionId));
       assert.ok(crashedLine?.includes("1 个 Run"), `安静行应含 Run 数：${crashedLine}`);
-      assert.ok(
-        text.includes("1 条待对账（上次会话异常中断，用 resume 处理）"),
-        `待对账突出行应与 cli 同口径\n${text}`
-      );
+      assert.ok(!text.includes("待对账"), `新存储没有待对账突出行\n${text}`);
     } finally {
       shell.stop();
     }

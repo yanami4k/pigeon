@@ -1,17 +1,9 @@
-// M4 S4：CLI replay 命令（只读黑匣子时间线，D4 一次性渲染）测试——运行头终态+四分类、
-// 逐条时间戳/kind/关键字段按落盘顺序、拒绝理由逐字、崩溃残留/待对账/孤儿/撕裂尾巴如实标注、
-// 只读性（字节级零副作用证明）、响亮失败列出可选项。
-
+// M4 S4：CLI replay 命令（只读黑匣子时间线，D4 一次性渲染）测试——读新会话存储（决策 180 / 181）。
+// 运行头终态（结束方式）+ 四分类、逐条时间戳 / 条目类型 / 关键字段按会话文件里的顺序、七种自定义条目原位呈现、
+// 崩溃残留如实标注、只读性（读正被写入的文件不改文件）、响亮失败列出可选项、子进程端到端。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  appendFileSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,22 +11,20 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { shortId } from "../application/format.ts";
 import { createToolGovernance } from "../application/governance.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import {
+  createFixtureSession,
+  forkFixture,
+  spawnFixtureWorker,
+  tearTail,
+} from "../application/session-store-fixtures.ts";
+import { JsonlEventLog } from "../persistence/event-log.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
+import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { INJECTION_SNAPSHOT_VERSION, type InjectionSnapshot } from "../pi-runtime/snapshot.ts";
-import type { BreakerInput } from "../state/event-log.ts";
-import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
-import {
-  newEntryId,
-  newExecutionId,
-  newReceiptId,
-  newRunId,
-  newSessionId,
-  type RunId,
-  type SessionId,
-} from "../state/ids.ts";
-import { RECEIPT_VERSION } from "../state/receipt.ts";
+import { openSessionStoreWriter } from "../pi-runtime/session-store.ts";
+import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
+import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
@@ -62,21 +52,6 @@ function makeRegistry(): ToolRegistry {
   return registry;
 }
 
-function makeSnapshot(): InjectionSnapshot {
-  return {
-    version: INJECTION_SNAPSHOT_VERSION,
-    model: { provider: "fake-provider", id: "fake-model-1" },
-    tools: {
-      policy: { allow: ["read_file", "edit_file"], deny: [], approvalMode: "prompt" },
-      advertised: [],
-    },
-    context: { systemPrompt: "你是 Pigeon 测试助手。" },
-    memory: [],
-    skills: [],
-    createdAt: 1700000000000,
-  };
-}
-
 function editCall(content: string): EditFileParams {
   return {
     path: "a.ts",
@@ -85,14 +60,31 @@ function editCall(content: string): EditFileParams {
   };
 }
 
-// 脚本化会话：一次自动放行读 + 一次人工批准编辑 + 一次人工拒绝编辑 + 纯文本收尾
+// 经真实 Adapter 跑一次（旧账本与新存储双写）：读、改（批准）、再改（人工拒绝）、收尾
 async function scriptSession(root: string): Promise<{ sessionId: SessionId; runId: RunId }> {
   const sessionsDir = join(root, ".pigeon", "sessions");
   const sessionId = newSessionId();
   const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-  let editApprovals = 0;
+  const store = openSessionStoreWriter({
+    sessionsRoot: sessionsDir,
+    sessionId,
+    cwd: root,
+    lock: acquireSessionFileLock,
+  });
+  let edits = 0;
   const adapter = new PiRuntimeAdapter({
-    snapshot: makeSnapshot(),
+    snapshot: {
+      version: INJECTION_SNAPSHOT_VERSION,
+      model: { provider: "fake-provider", id: "fake-model-1" },
+      tools: {
+        policy: { allow: ["read_file", "edit_file"], deny: [], approvalMode: "prompt" },
+        advertised: [],
+      },
+      context: { systemPrompt: "你是 Pigeon 测试助手。" },
+      memory: [],
+      skills: [],
+      createdAt: 1700000000000,
+    },
     streamFn: createFakeStreamFn({
       replies: [
         { text: "先读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
@@ -111,10 +103,8 @@ async function scriptSession(root: string): Promise<{ sessionId: SessionId; runI
       registry: makeRegistry(),
       approvalHandler: async ({ toolName }) => {
         if (toolName === "edit_file") {
-          editApprovals += 1;
-          return editApprovals === 1
-            ? { approved: true }
-            : { approved: false, reason: "先别动这个文件" };
+          edits += 1;
+          return edits === 1 ? { approved: true } : { approved: false, reason: "先别动这个文件" };
         }
         return { approved: true };
       },
@@ -122,216 +112,160 @@ async function scriptSession(root: string): Promise<{ sessionId: SessionId; runI
     tools: [createReadFileTool(root), createEditFileTool(root)],
     sessionId,
     eventLog,
+    sessionStore: store,
   });
   const result = await adapter.run("改文件");
   await adapter.dispose();
   eventLog.close();
+  await store.close();
   return { sessionId, runId: result.runId };
 }
 
-// 手写崩溃残留会话：turn.started → tool.proposed → intent，然后进程死亡
-function writeCrashResidue(root: string): { sessionId: SessionId; runId: RunId } {
-  const sessionsDir = join(root, ".pigeon", "sessions");
-  const sessionId = newSessionId();
-  const runId = newRunId();
-  const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-  const envelope = (kind: string, payload: unknown): EventEnvelope => ({
-    version: EVENT_ENVELOPE_VERSION,
-    id: newEntryId(),
-    sessionId,
-    runId,
-    timestamp: 1_757_000_000_000,
-    kind,
-    payload,
-  });
-  eventLog.appendRuntimeEvent(envelope("turn.started", {}));
-  eventLog.appendRuntimeEvent(
-    envelope("tool.proposed", { toolCallId: "tc-crash", toolName: "edit_file", args: {} })
-  );
-  eventLog.appendIntent({
-    executionId: newExecutionId(),
-    toolCallId: "tc-crash",
-    toolName: "edit_file",
-    rawArgs: {},
-    decision: { outcome: "approved", approvedBy: "human", decidedAt: 1_757_000_000_001 },
-    at: 1_757_000_000_000,
-    runId,
-  });
-  eventLog.close();
-  return { sessionId, runId };
+function withRoot(run: (root: string) => Promise<void>): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
+  writeFileSync(join(root, "a.ts"), "alpha\nbeta\ngamma\n");
+  return run(root).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("replay 报告：运行头终态+分类，时间线严格按落盘顺序，治理族穿插原位", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  writeFileSync(join(root, "a.ts"), "alpha\nbeta\ngamma\n");
-  try {
+const TIMELINE = /^\d{2}:\d{2}:\d{2}\.\d{3} /;
+
+test("replay 报告（真实双写运行）：运行头终态与分类，时间线按会话文件顺序，每个条目恰好一行", () =>
+  withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
-    const output = runReplayCommand({ root, runId });
-
-    // 运行头：终态 + 四分类徽章
-    const header = output.split("\n")[0] ?? "";
-    assert.ok(header.includes(`回放 Run ${shortId(runId)}`), "运行头含 Run 短哈希");
-    assert.ok(header.includes("终态"), "运行头含终态");
-    assert.ok(header.includes("分类：正常"), "正常收尾的 Run 分类为正常");
-
-    // 时间线：逐条 时间戳 + kind + 关键字段，按落盘顺序
-    const lines = output.split("\n").filter((line) => /^\d{2}:\d{2}:\d{2}\.\d{3} /.test(line));
-    assert.ok(lines.length > 0, "时间线条目带毫秒时间戳");
-    const kinds = lines.map((line) => line.split(" ")[1]);
-    // 上游时序：user 消息的 message_end（entry）先于 assistant 的 turn.started；
-    // turn_completed（toolUse 轮末）先于该轮工具事件；第一个工具调用是 read_file——
-    // 决策 1（M4 S6 G）读层只留事件级，故 tool.settled 先于任何治理族首见；
-    // 写调用的 Receipt 落盘先于其 tool.settled 事件（adapter 在 settled 状态推进时先落账再发事件）。
-    // M4 S5：entry 族（D3 消息映射）是时间线的合法成员——replay 呈现全部记录
-    // M5 S5（决策 044）：run.started 先于本 Run 任何其他记录；llm.request 在 user 消息 entry 之后、
-    // assistant 的 turn.started 之前（transformContext 在模型调用前观察）
-    assert.deepEqual(
-      [...new Set(kinds)],
-      [
-        "run.started",
-        "entry",
-        "llm.request",
-        "turn.started",
-        "turn.completed",
-        "tool.proposed",
-        "tool.settled",
-        "intent",
-        "receipt",
-        "decision",
-        "run.ended",
-      ],
-      "kind 首见顺序 = 落盘顺序（与 trace 的分组视图相区别）"
-    );
-    // 批准的编辑：以 toolCallId 为关联键过滤时间线（时间线原位，
-    // 与 trace 把全链证据聚合到一个「工具调用」块下的分组视图相区别）
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const settledEdit = materializeSession(sessionsDir, sessionId).reconcile.settled.find(
-      (entry) => entry.intent.toolName === "edit_file"
-    );
-    assert.ok(settledEdit);
-    const callKinds = lines
-      .filter((line) => line.includes(settledEdit.intent.toolCallId))
-      .map((line) => line.split(" ")[1]);
-    assert.deepEqual(
-      callKinds,
-      ["tool.proposed", "intent", "receipt", "tool.settled"],
-      "同一次调用的记录按真实落盘时序呈现"
-    );
-    assert.ok(output.includes("理由：先别动这个文件"), "拒绝理由逐字在场");
-    assert.ok(output.includes("已执行，无错误"), "Receipt 结果在场");
-    assert.ok(output.includes("参数 {"), "提议参数摘要在场");
-    // 拒绝发生在 dispatch 前：被拒绝的调用没有 Receipt
-    assert.ok(output.includes("decision"), "拒绝落账在时间线中");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("replay 报告：崩溃残留 Run 标注「记录到此中断」+ 待对账 + 未知分类", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  try {
-    const { sessionId, runId } = writeCrashResidue(root);
     const output = runReplayCommand({ root, runId, sessionId });
-    assert.ok(output.includes("分类：未知"), "崩溃残留落未知桶");
-    assert.ok(output.includes("记录到此中断（崩溃可能）"), "崩溃残留通俗措辞标注");
-    assert.ok(output.includes("待对账"), "悬账 intent 标注待对账");
-    assert.ok(output.includes("OutcomeUnknown"));
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    const run = loadSessionView(join(root, ".pigeon", "sessions"), sessionId)?.runs[0];
+    assert.ok(run !== undefined);
+    const lines = output.split("\n");
+    assert.equal(
+      lines[0],
+      `回放 Run ${shortId(runId)} ｜ 会话 ${shortId(sessionId)} ｜ 条目 ${run.items.length} 条 ｜ ` +
+        "终态：结束方式 completed，stopReason=stop ｜ 分类：正常"
+    );
+    const timeline = lines.filter((line) => TIMELINE.test(line));
+    assert.equal(timeline.length, run.items.length, "每个条目恰好在时间线出现一次");
+    const kinds = timeline.map((line) => line.split(" ")[1]);
+    assert.deepEqual(kinds, [
+      "pigeon.run-start",
+      ...Array.from({ length: 8 }, () => "message"),
+      "pigeon.run-end",
+    ]);
+    assert.ok(timeline[0]?.includes("Run 启动快照 ｜ 模型 fake-provider/fake-model-1"), output);
+    const [first, second, third] = run.messages;
+    assert.ok(
+      timeline[1]?.endsWith(`｜ 消息 ${first?.entryId}：run 内第 1 条（user）`),
+      timeline[1]
+    );
+    assert.ok(
+      timeline[2]?.endsWith(
+        `｜ 消息 ${second?.entryId}：run 内第 2 条（assistant） ｜ stopReason=toolUse ｜ 工具调用 read_file（tc-1-1）参数 {"path":"a.ts"}`
+      ),
+      timeline[2]
+    );
+    assert.ok(
+      timeline[3]?.endsWith(
+        `｜ 消息 ${third?.entryId}：run 内第 3 条（toolResult） ｜ 工具结果 read_file（tc-1-1）成功`
+      ),
+      timeline[3]
+    );
+    assert.ok(timeline[7]?.endsWith("工具结果 edit_file（tc-3-1）失败"), timeline[7]);
+    assert.ok(
+      timeline
+        .at(-1)
+        ?.endsWith("｜ Run 收尾 ｜ 结束方式 completed ｜ 新增消息 8 条 ｜ stopReason=stop"),
+      timeline.at(-1)
+    );
+    for (const retired of ["Receipt", "意图落账", "待对账", "entry 映射"]) {
+      assert.ok(!output.includes(retired), `不应再出现"${retired}"\n${output}`);
+    }
+  }));
 
-test("replay 报告：孤儿记录与撕裂尾巴如实标注", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  try {
+test("replay 报告：七种自定义条目原位呈现（快照、验证、worker、分叉、授权、收尾）", () =>
+  withRoot(async (root) => {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const sessionId = newSessionId();
-    const runId = newRunId();
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-    // 孤儿 Receipt（executionId 无对应 intent/decision）
-    eventLog.appendReceipt({
-      receipt: {
-        version: RECEIPT_VERSION,
-        id: newReceiptId(),
-        executionId: newExecutionId(),
-        toolCallId: "tc-orphan",
-        approvedBy: "human",
-        executed: true,
-        isError: false,
-        startedAt: 1_757_000_000_000,
-        finishedAt: 1_757_000_000_001,
-        summary: "孤儿",
-      },
-      runId,
-    });
-    // 熔断落闸记录（breaker 族也在时间线上）
-    const breaker: BreakerInput = {
-      toolName: "edit_file",
-      toolCallId: "tc-orphan",
-      scope: "fingerprint",
-      count: 3,
-      threshold: 3,
-      at: 1_757_000_000_002,
-      runId,
-    };
-    eventLog.appendBreaker(breaker);
-    eventLog.appendRuntimeEvent({
-      version: EVENT_ENVELOPE_VERSION,
-      id: newEntryId(),
-      sessionId,
-      runId,
-      timestamp: 1_757_000_000_003,
-      kind: "run.ended",
-      payload: { messageCount: 0 },
-    });
-    eventLog.close();
-    // 模拟进程死于写盘中途：半截末行
-    appendFileSync(eventLog.path, '{"version":2,"id":"entry_', "utf8");
+    const session = createFixtureSession({ sessionsDir, cwd: root });
+    const runId = session.startRun({ task: "改" });
+    session.toolTurn({ name: "edit_file", checkpoint: true });
+    const grantId = session.grantCreated({ tool: "edit_file", pathPrefix: "src/" });
+    session.grantRevoked(grantId);
+    const worker = spawnFixtureWorker(session, { sessionsDir, name: "impl-1", task: "子任务" });
+    const { sessionId: childId } = await worker.close();
+    session.workerSettled({ childSessionId: childId, name: "impl-1", turns: 3 });
+    session.endRun({ ending: "wall-clock-limit", stopReason: "aborted" });
+    session.verification({ verdict: "pass" });
+    const { sessionId } = await session.close();
+    const branch = await forkFixture({ sessionsDir, sourceSessionId: sessionId, runId, runSeq: 2 });
+    await branch.close();
 
     const output = runReplayCommand({ root, runId, sessionId });
-    assert.ok(output.includes("孤儿记录"), "孤儿 Receipt 标注在场");
-    assert.ok(output.includes("撕裂写"), "撕裂尾巴标注在场");
-    assert.ok(output.includes("熔断落闸"), "熔断记录在场");
-    assert.ok(output.includes("按参数指纹计数"), "熔断计数粒度通俗措辞");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("replay 命令只读：报告前后事件日志字节、会话目录清单与工作区均不变", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  writeFileSync(join(root, "a.ts"), "alpha\nbeta\ngamma\n");
-  try {
-    const { sessionId, runId } = await scriptSession(root);
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const filesBefore = readdirSync(sessionsDir);
-    const bytesBefore = filesBefore.map((f) => readFileSync(join(sessionsDir, f), "utf8"));
-    const workspaceBefore = readFileSync(join(root, "a.ts"), "utf8");
-
-    // 连跑两次（指定会话与跨会话扫描两条路径）：幂等且零副作用
-    runReplayCommand({ root, runId, sessionId });
-    runReplayCommand({ root, runId });
-
-    assert.deepEqual(readdirSync(sessionsDir), filesBefore, "不得新增/删除会话文件");
-    assert.deepEqual(
-      filesBefore.map((f) => readFileSync(join(sessionsDir, f), "utf8")),
-      bytesBefore,
-      "事件日志字节不得变化"
+    const timeline = output.split("\n").filter((line) => TIMELINE.test(line));
+    const detail = (kind: string) =>
+      timeline
+        .filter((line) => line.split(" ")[1] === kind)
+        .map((line) => line.split(" ｜ ").slice(1).join(" ｜ "));
+    assert.deepEqual(detail("pigeon.checkpoint"), [
+      `工作区快照 ${"a".repeat(12)} ｜ 工具调用 tc-1`,
+    ]);
+    assert.deepEqual(detail("pigeon.grant"), [
+      `放权创建 ${shortId(grantId)} ｜ edit_file，仅限目录 src/ ｜ 首调 tc-grant`,
+      `放权撤销 ${shortId(grantId)}`,
+    ]);
+    assert.deepEqual(detail("pigeon.worker"), [
+      `派出 worker impl-1（implementer）｜ 会话 ${shortId(childId)} ｜ 分支 impl-1 ｜ 工具 read_file、edit_file ｜ 审批模式 yolo ｜ 上限 20 轮 / 600 秒`,
+      `worker 收尾 impl-1 ｜ 会话 ${shortId(childId)} ｜ completed ｜ 3 轮 ｜ 改动 0 个文件`,
+    ]);
+    assert.deepEqual(detail("pigeon.run-end"), [
+      "Run 收尾 ｜ 结束方式 wall-clock-limit ｜ 新增消息 3 条 ｜ stopReason=aborted",
+    ]);
+    assert.deepEqual(detail("pigeon.verification"), [
+      `尝试验证 ｜ 会话 ${shortId(sessionId)} Run ${shortId(runId)} ｜ 通过 ｜ 退出码 0 ｜ 命令 npm test ｜ 10 毫秒`,
+    ]);
+    assert.equal(detail("pigeon.fork").length, 1);
+    assert.match(
+      detail("pigeon.fork")[0] ?? "",
+      new RegExp(`^分叉 ｜ 分叉点 Run ${shortId(runId)} 第 2 条 ｜ 分支会话 `)
     );
-    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), workspaceBefore, "工作区不得变化");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    assert.match(
+      output.split("\n")[0] ?? "",
+      /终态：结束方式 wall-clock-limit，stopReason=aborted ｜ 分类：取消/
+    );
+  }));
 
-test("replay 命令：未知 Run/会话响亮失败并列出可选项；--session 定位与跨会话扫描", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  writeFileSync(join(root, "a.ts"), "alpha\nbeta\ngamma\n");
-  try {
+test("replay 报告：有开始无收尾的 Run 标注「记录到此中断」+ 未知分类", () =>
+  withRoot(async (root) => {
+    const session = createFixtureSession({ sessionsDir: join(root, ".pigeon", "sessions") });
+    const runId = session.startRun({ task: "改" });
+    session.assistant({ toolCalls: [{ name: "edit_file" }] });
+    const { sessionId } = await session.close();
+    const output = runReplayCommand({ root, runId, sessionId });
+    assert.match(output.split("\n")[0] ?? "", /终态：Run 收尾缺失 ｜ 分类：未知$/);
+    assert.ok(output.endsWith("记录到此中断（崩溃可能）：本 Run 无收尾条目\n"), output);
+  }));
+
+test("replay 命令只读：正被写入（末行撕裂）的会话照常回放，会话文件字节、目录清单与工作区均不变", () =>
+  withRoot(async (root) => {
+    const { sessionId, runId } = await scriptSession(root);
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const files = readdirSync(sessionsDir, { recursive: true })
+      .map((file) => join(sessionsDir, String(file)))
+      .filter((path) => path.endsWith(".jsonl"));
+    const current = files.find((path) => path.includes(`_${sessionId}.jsonl`));
+    assert.ok(current !== undefined);
+    tearTail(current);
+    const snapshot = () => files.map((path) => readFileSync(path, "utf8"));
+    const before = snapshot();
+    const listing = readdirSync(sessionsDir, { recursive: true });
+    const first = runReplayCommand({ root, runId, sessionId, withContent: true });
+    assert.equal(runReplayCommand({ root, runId, sessionId, withContent: true }), first);
+    assert.deepEqual(snapshot(), before, "会话文件字节不得变化");
+    assert.deepEqual(readdirSync(sessionsDir, { recursive: true }), listing);
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
+  }));
+
+test("replay 命令：未知 Run/会话响亮失败并列出可选项；--session 定位与跨会话扫描；歧义要求消歧", () =>
+  withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
     const sessionsDir = join(root, ".pigeon", "sessions");
 
-    // 未知会话：报错列出已有会话
     assert.throws(
       () => runReplayCommand({ root, runId, sessionId: newSessionId() }),
       (error: unknown) => {
@@ -341,44 +275,19 @@ test("replay 命令：未知 Run/会话响亮失败并列出可选项；--sessio
         return true;
       }
     );
-
-    // 未知 Run（指定会话）：报错列出该会话已有 Run
     assert.throws(
       () => runReplayCommand({ root, runId: newRunId(), sessionId }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.ok(error.message.includes(runId), "必须列出已有 Run 帮助定位");
-        return true;
-      }
+      new RegExp(`该会话无 Run .*。已有 Run：${runId}`)
     );
-
-    // 未知 Run（跨会话扫描）：报错列出全部已有 Run
     assert.throws(
       () => runReplayCommand({ root, runId: newRunId() }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.ok(error.message.includes("Run 不存在"));
-        assert.ok(error.message.includes(runId));
-        return true;
-      }
+      new RegExp(`Run 不存在：.*。已有 Run：${runId}（会话 ${sessionId}）`)
     );
+    assert.ok(runReplayCommand({ root, runId }).includes("回放 Run"), "跨会话扫描定位并渲染");
 
-    // 不指定 --session：跨会话扫描命中唯一 Run 并渲染
-    const scanned = runReplayCommand({ root, runId });
-    assert.ok(scanned.includes("回放 Run"), "跨会话扫描必须能定位并渲染");
-
-    // 同一 runId 出现在两个会话 → 响亮失败要求 --session 消歧
-    const other = new JsonlEventLog(sessionsDir, newSessionId());
-    other.appendRuntimeEvent({
-      version: EVENT_ENVELOPE_VERSION,
-      id: newEntryId(),
-      sessionId: other.sessionId,
-      runId,
-      timestamp: 1_757_000_000_000,
-      kind: "turn.started",
-      payload: {},
-    });
-    other.close();
+    const other = createFixtureSession({ sessionsDir });
+    other.startRun({ runId, task: "同号" });
+    const { sessionId: otherId } = await other.close();
     assert.throws(
       () => runReplayCommand({ root, runId }),
       (error: unknown) => {
@@ -388,42 +297,15 @@ test("replay 命令：未知 Run/会话响亮失败并列出可选项；--sessio
         return true;
       }
     );
-    // 歧义下 --session 仍可各自渲染
-    assert.ok(runReplayCommand({ root, runId, sessionId: other.sessionId }).includes("回放 Run"));
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    assert.ok(runReplayCommand({ root, runId, sessionId: otherId }).includes("回放 Run"));
+  }));
 
-test("replay 投影来源：与冷物化同一事实源（materializeSession），不产生第二套事实", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  writeFileSync(join(root, "a.ts"), "alpha\nbeta\ngamma\n");
-  try {
-    const { sessionId, runId } = await scriptSession(root);
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const materialized = materializeSession(sessionsDir, sessionId);
-    const runRecords = materialized.records.filter((record) => record.runId === runId);
-    const output = runReplayCommand({ root, runId, sessionId });
-    // 时间线条目数 = 该 Run 的记录数（一条记录一行，无增无减）
-    const timelineLines = output
-      .split("\n")
-      .filter((line) => /^\d{2}:\d{2}:\d{2}\.\d{3} /.test(line));
-    assert.equal(timelineLines.length, runRecords.length, "每条落盘记录恰好在时间线出现一次");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接入检查之前）", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  writeFileSync(join(root, "a.ts"), "alpha\nbeta\ngamma\n");
-  try {
+test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接入检查之前）", () =>
+  withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
     const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-    // 环境剥离 PIGEON_STREAM_FN 且不传 --stream-fn：replay 不得触碰模型接入
     const env = { ...process.env };
     delete env.PIGEON_STREAM_FN;
-    // 入口用绝对路径：不依赖进程 cwd 落在仓库根（cwd 仍给仓库根，供子进程解析 node_modules）
     const cliEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
     const ok = spawnSync(process.execPath, [cliEntry, "replay", runId, "--root", root], {
       cwd: repoRoot,
@@ -435,7 +317,6 @@ test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接
     assert.ok(ok.stdout.includes("回放 Run"), "子进程输出时间线报告");
     assert.ok(ok.stdout.includes(shortId(sessionId)), "报告含会话短哈希");
 
-    // 未知 Run：非零退出 + 响亮报错列出可选项
     const missing = spawnSync(process.execPath, [cliEntry, "replay", newRunId(), "--root", root], {
       cwd: repoRoot,
       env,
@@ -445,38 +326,4 @@ test("replay 子进程端到端：无 streamFn 也能回放（分流在模型接
     assert.notEqual(missing.status, 0, "未知 Run 必须失败退出");
     assert.ok(missing.stderr.includes("Run 不存在"));
     assert.ok(missing.stderr.includes(runId), "报错列出已有 Run 帮助定位");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("replay 报告：entry runSeq 断号原位标注 + 尾部汇总（D2 冷侧可见化，M4 收口决策 ③）", () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-replay-cli-"));
-  try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const sessionId = newSessionId();
-    const runId = newRunId();
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
-    eventLog.appendEntry({ runSeq: 1, role: "user", runId });
-    eventLog.appendEntry({ runSeq: 3, role: "assistant", runId });
-    eventLog.appendRuntimeEvent({
-      version: EVENT_ENVELOPE_VERSION,
-      id: newEntryId(),
-      sessionId,
-      runId,
-      timestamp: 1_757_000_000_003,
-      kind: "run.ended",
-      payload: { messageCount: 4 },
-    });
-    eventLog.close();
-
-    const output = runReplayCommand({ root, runId, sessionId });
-    assert.ok(output.includes("标注：entry 映射断号"), `原位标注在场\n${output}`);
-    assert.ok(output.includes("第 2 条"), output);
-    assert.ok(output.includes("第 4 条"), output);
-    assert.ok(output.includes("entry 映射断号：缺第 2、4 条"), `尾部汇总在场\n${output}`);
-    assert.ok(output.includes("写盘失败留证缺口"), output);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+  }));

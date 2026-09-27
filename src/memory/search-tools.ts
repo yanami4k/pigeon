@@ -1,25 +1,18 @@
 // Session Search 的两个 read 档工具（M5 S2，决策 038）：模型访问完整历史的唯一入口。
 //   - search_sessions：关键词检索命中流，默认上限 20 条并有总字节上限，超限提示收窄，不做分页状态；
-//   - read_session_entry：按 EntryId 返回完整内容块 + 同 Run 的治理邻居（intent / decision /
-//     receipt 状态），满足 §3.3 结论回查原文。
+//   - read_session_entry：按条目号返回一条消息的完整内容块，满足 §3.3 结论回查原文。
+// 两者经只读读取器读新会话存储（决策 181 / 185）；agent 可见的说明与输出冻结，只去掉了治理邻居与正文哈希两部分。
 // 两者都是 read 档（§3.9 第 5 档自动放行），调用天然落 tool.proposed / tool.settled——模型翻了
 // 哪些旧账在 trace 可见。范围只限本项目 .pigeon/sessions，目录由装配根注入。
-import { existsSync } from "node:fs";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
-  JsonlEventLog,
-  listSessionIds,
-  materializeSession,
-  readMessageContentFileDetailed,
-} from "../persistence/event-log.ts";
-import { asSessionId, type SessionId } from "../state/ids.ts";
-import type { MaterializedSession } from "../state/materialize.ts";
-import {
-  type ContentBlock,
-  type MessageContentRecord,
-  recomputeContentHash,
-} from "../state/message-content.ts";
+  hasLegacyEventFile,
+  listSessionRefs,
+  readSessionView,
+} from "../persistence/session-catalog.ts";
+import type { SessionId } from "../state/ids.ts";
+import type { ViewBlock, ViewMessage } from "../state/session-view.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import { createSessionSearch, type SessionSearchHit } from "./session-search.ts";
@@ -65,9 +58,6 @@ export interface ReadSessionEntryDetails {
   runId: string;
   runSeq: number;
   role: string;
-  contentHash: string;
-  // true = 与 entry 回指一致；false = 不符；null = Event Log 无该 entry 的回指
-  hashVerified: boolean | null;
 }
 
 export interface SessionToolsOptions {
@@ -84,7 +74,7 @@ function formatHit(hit: SessionSearchHit): string {
   const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
   return (
     `- ${hit.entryId}｜会话 ${hit.sessionId}｜${hit.runId} 第 ${hit.runSeq} 条｜${hit.role}${tool}｜${isoTime(hit.timestamp)}\n` +
-    `  ${hit.snippet}${hit.truncated ? "（该条落盘时已截断）" : ""}`
+    `  ${hit.snippet}`
   );
 }
 
@@ -139,9 +129,7 @@ export function createSearchSessionsTool(
             `输出已达 ${maxBytes} 字节上限，只列出前 ${hits.length} 条；请增加关键词或加 role 过滤收窄。`
           );
         }
-        lines.push(
-          "片段只是线索：用 read_session_entry 按 entryId 读原文与当时的治理记录，结论须回查原文。"
-        );
+        lines.push("片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。");
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }],
@@ -151,24 +139,17 @@ export function createSearchSessionsTool(
   };
 }
 
-function truncationNote(block: { truncated: boolean; fullHash?: string }): string {
-  return block.truncated
-    ? `（该块落盘时已截断，全文哈希 ${block.fullHash ?? "缺失"}；截断内容不得支撑确定性结论）`
-    : "";
-}
-
-function renderBlock(block: ContentBlock): string {
+function renderBlock(block: ViewBlock): string {
   switch (block.type) {
     case "text":
-      return `${block.text}${truncationNote(block)}`;
+      return block.text;
+    case "omitted-thinking":
+      return `[thinking 未持久化，${block.bytes} 字节]`;
     case "thinking":
-      if (block.omitted === true) {
-        return `[thinking 未持久化，${block.bytes ?? 0} 字节]`;
-      }
-      if (block.redacted === true) {
+      if (block.redacted) {
         return "[thinking 已被 provider 编辑]";
       }
-      return `[thinking] ${block.thinking}${truncationNote(block)}`;
+      return `[thinking] ${block.thinking}`;
     case "toolCall":
       return `[toolCall] ${block.name}（${block.id}）`;
     case "image":
@@ -178,94 +159,23 @@ function renderBlock(block: ContentBlock): string {
   }
 }
 
-// 同 Run 的治理邻居：每次工具调用一行状态（按首见顺序）
-function governanceNeighbors(materialized: MaterializedSession, runId: string): string[] {
-  const order: string[] = [];
-  const names = new Map<string, string>();
-  const statuses = new Map<string, string>();
-  const note = (toolCallId: string, toolName: string): void => {
-    if (!names.has(toolCallId)) {
-      order.push(toolCallId);
-      names.set(toolCallId, toolName);
-    }
-  };
-  const settledError = new Map<string, boolean>();
-  for (const event of materialized.runtimeEvents) {
-    if (event.runId !== runId) {
-      continue;
-    }
-    if (event.kind === "tool.proposed") {
-      note(event.payload.toolCallId, event.payload.toolName);
-    } else if (event.kind === "tool.settled") {
-      note(event.payload.toolCallId, event.payload.toolName);
-      settledError.set(event.payload.toolCallId, event.payload.isError);
-    }
-  }
-  const { reconcile } = materialized;
-  for (const { intent, receipt } of reconcile.settled) {
-    if (intent.runId !== runId) continue;
-    note(intent.toolCallId, intent.toolName);
-    const outcome = receipt?.executed
-      ? receipt.isError
-        ? "已执行，有错误"
-        : "已执行，无错误"
-      : "未执行（副作用未发生）";
-    statuses.set(
-      intent.toolCallId,
-      `意图批准（${intent.decision.approvedBy}）→ Receipt ${outcome}`
-    );
-  }
-  for (const { intent, resolution } of reconcile.resolved) {
-    if (intent.runId !== runId) continue;
-    note(intent.toolCallId, intent.toolName);
-    statuses.set(
-      intent.toolCallId,
-      `意图批准（${intent.decision.approvedBy}）→ 无 Receipt，已确证${resolution.outcome === "executed" ? "已执行" : "未执行"}（${resolution.method}）`
-    );
-  }
-  for (const { intent } of reconcile.unknown) {
-    if (intent.runId !== runId) continue;
-    note(intent.toolCallId, intent.toolName);
-    statuses.set(
-      intent.toolCallId,
-      `意图批准（${intent.decision.approvedBy}）→ 待对账（intent 无 Receipt，结果未知，禁止据此下结论）`
-    );
-  }
-  for (const { decision } of reconcile.rejected) {
-    if (decision.runId !== runId) continue;
-    note(decision.toolCallId, decision.toolName);
-    statuses.set(
-      decision.toolCallId,
-      `拒绝（${decision.decision.approvedBy}）理由：${decision.decision.reason ?? "无"}`
-    );
-  }
-  return order.map((toolCallId) => {
-    const status =
-      statuses.get(toolCallId) ??
-      (settledError.get(toolCallId) === true
-        ? "未过审批闸（上游拦截或事件缺口）"
-        : "只读调用（事件级记录，无治理族）");
-    return `- ${names.get(toolCallId)}（${toolCallId}）：${status}`;
-  });
-}
-
-function findContentRecord(
+// 按条目号找消息：给了会话号只查该会话，否则从新到旧逐个会话查（分支会话的复制段不算，它属于来源会话）
+function findMessage(
   sessionsDir: string,
   entryId: string,
   sessionId: string | undefined
-): { sessionId: SessionId; record: MessageContentRecord } | null {
-  const candidates =
-    sessionId !== undefined ? [asSessionId(sessionId)] : listSessionIds(sessionsDir).reverse();
-  for (const candidate of candidates) {
-    const path = JsonlEventLog.contentFilePathFor(sessionsDir, candidate);
-    if (!existsSync(path)) {
+): { sessionId: SessionId; message: ViewMessage } | null {
+  const refs = listSessionRefs(sessionsDir)
+    .reverse()
+    .filter((ref) => sessionId === undefined || ref.sessionId === sessionId);
+  for (const ref of refs) {
+    if (!hasLegacyEventFile(sessionsDir, ref.sessionId)) {
       continue;
     }
-    const record = readMessageContentFileDetailed(path).records.findLast(
-      (item) => item.entryId === entryId
-    );
-    if (record !== undefined) {
-      return { sessionId: candidate, record };
+    const view = readSessionView(ref);
+    const message = view?.messages.find((item) => item.entryId === entryId);
+    if (view !== undefined && message !== undefined) {
+      return { sessionId: view.sessionId, message };
     }
   }
   return null;
@@ -278,55 +188,36 @@ export function createReadSessionEntryTool(
     name: READ_SESSION_ENTRY_TOOL,
     label: READ_SESSION_ENTRY_TOOL,
     description:
-      "按 entryId 读取历史会话里一条消息的完整原文（含思维链与工具输出），并附同一 Run 里每次工具" +
-      "调用的审批与回执状态。entryId 来自 search_sessions 的命中；可附 sessionId 加速定位。",
+      "按 entryId 读取历史会话里一条消息的完整原文（含思维链与工具输出）。" +
+      "entryId 来自 search_sessions 的命中；可附 sessionId 加速定位。",
     parameters: ReadSessionEntryParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ReadSessionEntryDetails>> {
       const args = Value.Parse(ReadSessionEntryParamsSchema, params);
-      const found = findContentRecord(options.sessionsDir, args.entryId, args.sessionId);
+      const found = findMessage(options.sessionsDir, args.entryId, args.sessionId);
       if (found === null) {
         throw new SessionToolError(
           `未找到 entry ${args.entryId}（只查本项目 .pigeon/sessions；entryId 应来自 search_sessions 的命中）`
         );
       }
-      const { sessionId, record } = found;
-      const materialized = materializeSession(options.sessionsDir, sessionId, { content: false });
-      const entry = materialized.entries.find((item) => item.id === record.entryId);
-      const actualHash = recomputeContentHash(record);
-      const hashVerified =
-        entry?.contentHash === undefined ? null : entry.contentHash === actualHash;
-      const hashLine =
-        hashVerified === null
-          ? `正文哈希：${actualHash}（Event Log 无该 entry 的回指记录）`
-          : hashVerified
-            ? `正文哈希：${actualHash}（与 entry 回指一致）`
-            : `正文哈希：${actualHash}（与 entry 回指 ${entry?.contentHash} 不符！正文可能被改动，不得作为证据）`;
+      const { sessionId, message } = found;
       const tool =
-        record.toolName !== undefined
-          ? `（${record.toolName}${record.isError === true ? "，出错" : ""}）`
+        message.toolName !== undefined
+          ? `（${message.toolName}${message.isError === true ? "，出错" : ""}）`
           : "";
-      const neighbors = governanceNeighbors(materialized, record.runId);
       const lines = [
-        `[${record.entryId}｜会话 ${sessionId}｜${record.runId} 第 ${record.runSeq} 条｜${record.role}${tool}｜${isoTime(record.timestamp)}]`,
-        hashLine,
+        `[${message.entryId}｜会话 ${sessionId}｜${message.runId} 第 ${message.runSeq} 条｜${message.role}${tool}｜${isoTime(message.timestamp)}]`,
         "--- 正文 ---",
-        ...(record.blocks.length > 0 ? record.blocks.map(renderBlock) : ["（空）"]),
-        neighbors.length > 0
-          ? `--- 同 Run 治理邻居（${neighbors.length} 次工具调用）---`
-          : "--- 同 Run 治理邻居：本 Run 无工具调用 ---",
-        ...neighbors,
+        ...(message.blocks.length > 0 ? message.blocks.map(renderBlock) : ["（空）"]),
       ];
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: {
           sessionId,
-          entryId: record.entryId,
-          runId: record.runId,
-          runSeq: record.runSeq,
-          role: record.role,
-          contentHash: actualHash,
-          hashVerified,
+          entryId: message.entryId,
+          runId: message.runId,
+          runSeq: message.runSeq,
+          role: message.role,
         },
       };
     },
@@ -349,7 +240,7 @@ export function sessionToolRegistrations(sessionsDir: string): ToolRegistration[
     },
     {
       name: READ_SESSION_ENTRY_TOOL,
-      description: "按 entryId 读取历史消息原文与同 Run 治理邻居",
+      description: "按 entryId 读取历史消息原文",
       parameters: ReadSessionEntryParamsSchema,
       ...base,
     },

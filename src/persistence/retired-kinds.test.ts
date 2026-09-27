@@ -11,7 +11,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runReplayCommand } from "../cli/replay.ts";
 import { EVENT_LOG_VERSION, RETIRED_EVENT_KINDS } from "../state/event-log.ts";
 import {
   newEntryId,
@@ -21,6 +20,7 @@ import {
   type RunId,
   type SessionId,
 } from "../state/ids.ts";
+import { buildRunReplay } from "../state/replay.ts";
 import { buildSessionTrace } from "../state/trace.ts";
 import { JsonlEventLog, materializeSession, readEventLogFile } from "./event-log.ts";
 
@@ -390,21 +390,13 @@ test("退役记录不进任何视图：trace 只列出保留记录的那一个 R
       trace.runs.map((run) => run.runId),
       [file.runId]
     );
-    const replay = runReplayCommand({
-      root: file.root,
-      sessionId: file.sessionId,
-      runId: file.runId,
-    });
-    assert.match(replay, /事件 3 条/, "时间线只含保留下来的三条记录");
-    assert.throws(
-      () =>
-        runReplayCommand({
-          root: file.root,
-          sessionId: file.sessionId,
-          runId: file.phantomRunId,
-        }),
-      /该会话无 Run/
+    const materialized = materializeSession(file.sessionsDir, file.sessionId);
+    assert.equal(
+      buildRunReplay(materialized, file.runId)?.events.length,
+      3,
+      "时间线只含保留下来的三条记录"
     );
+    assert.equal(buildRunReplay(materialized, file.phantomRunId), null);
   } finally {
     file.cleanup();
   }
