@@ -21,6 +21,7 @@ import {
   proposeToolExecution,
   recordDecision,
   type ToolExecution,
+  type ToolExecutionDecision,
 } from "../state/tool-execution.ts";
 import { type GrantMatchOutcome, matchConfigGrants } from "../tools/grants.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
@@ -143,6 +144,11 @@ class GovernedToolCalls implements ToolGovernance {
 
   governs(toolCallId: string): boolean {
     return this.#executions.has(toolCallId);
+  }
+
+  decisionOf(toolCallId: string): ToolExecutionDecision | undefined {
+    const decision = this.#executions.get(toolCallId)?.decision;
+    return decision !== undefined ? structuredClone(decision) : undefined;
   }
 
   // 账本联动：tool_execution_end 到达即 settled——被阻断者从 approval 落（决策已 rejected），

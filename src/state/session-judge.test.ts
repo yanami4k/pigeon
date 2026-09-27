@@ -28,6 +28,7 @@ import {
   storeTaskAttempt,
   storeToolOutcomes,
   storeWorkerSpawned,
+  TOOL_RESULT_MARK_KEY,
 } from "./session-judge.ts";
 
 async function withSessions(body: (sessionsDir: string, root: string) => Promise<void>) {
@@ -396,5 +397,121 @@ test("分叉点之前的快照：同 Run 里归属条目号不大于分叉点的
       [own]
     );
     assert.equal(branchView.metadata?.branch?.sourceSessionId, s.sessionId);
+  });
+});
+
+// 带运行面标记的工具结果（details.pigeon：错误归类与审批闸决定），同生产的形状
+function markedResult(
+  s: FixtureSession,
+  input: {
+    toolCallId: string;
+    toolName: string;
+    text?: string;
+    isError?: boolean;
+    errorKind?: "domain" | "environment";
+    gate?: { outcome: "approved" | "rejected"; approvedBy: string };
+  }
+): void {
+  s.writer.appendMessage({
+    role: "toolResult",
+    toolCallId: input.toolCallId,
+    toolName: input.toolName,
+    content: [{ type: "text", text: input.text ?? "ok" }],
+    details: {
+      [TOOL_RESULT_MARK_KEY]: {
+        ...(input.errorKind !== undefined ? { errorKind: input.errorKind } : {}),
+        ...(input.gate !== undefined ? { gate: input.gate } : {}),
+      },
+    },
+    isError: input.isError ?? false,
+    timestamp: Date.now(),
+  } as never);
+}
+
+test("工具级失败分类（带运行面标记）：域错误为业务失败、环境异常为基础设施错误、判不出为未知；审批闸拒绝（含人工拒绝）为非失败；上游拦截为业务失败", async () => {
+  await withSessions(async (sessionsDir, root) => {
+    const s = createFixtureSession({ sessionsDir, cwd: root });
+    s.startRun({
+      task: "做",
+      config: { policy: { allow: ["edit_file"], deny: [], approvalMode: "prompt" } },
+    });
+    const approved = { outcome: "approved", approvedBy: "human" } as const;
+    const cases: Array<[Parameters<typeof markedResult>[1], unknown]> = [];
+    const call = (
+      mark: Omit<Parameters<typeof markedResult>[1], "toolCallId" | "toolName">,
+      want: unknown
+    ) => {
+      const [toolCallId = ""] = s.assistant({ toolCalls: [{ name: "edit_file" }] });
+      const input = { toolCallId, toolName: "edit_file", ...mark };
+      markedResult(s, input);
+      cases.push([input, want]);
+    };
+    call({ isError: true, errorKind: "domain", gate: approved }, { category: "business" });
+    call(
+      { isError: true, errorKind: "environment", gate: approved },
+      { category: "infrastructure" }
+    );
+    call({ isError: true, gate: approved }, { category: "unknown" });
+    call(
+      { isError: true, text: "不准改", gate: { outcome: "rejected", approvedBy: "human" } },
+      null
+    );
+    call({ isError: true, text: "参数不对", errorKind: "domain" }, { category: "business" });
+    call({ gate: approved }, null);
+    s.assistant({ text: "完成" });
+    s.endRun();
+    const view = await viewOf(s, sessionsDir);
+    const byCall = new Map(
+      storeToolOutcomes(view).map((outcome) => [outcome.toolCallId, outcome.failure])
+    );
+    assert.deepEqual(
+      cases.map(([input]) => byCall.get(input.toolCallId)),
+      cases.map(([, want]) => want)
+    );
+  });
+});
+
+test("需审批次数（带运行面标记）：计 yolo 批发授权、人工批准或拒绝、无审批通道的拒绝；固化规则、会话放权、deny 清单与读档不计", async () => {
+  await withSessions(async (sessionsDir, root) => {
+    const s = createFixtureSession({ sessionsDir, cwd: root });
+    s.startRun({ task: "做" });
+    const gated = (
+      name: string,
+      gate: { outcome: "approved" | "rejected"; approvedBy: string },
+      text?: string
+    ) => {
+      const [toolCallId = ""] = s.assistant({ toolCalls: [{ name }] });
+      markedResult(s, {
+        toolCallId,
+        toolName: name,
+        gate,
+        ...(text !== undefined ? { text, isError: true } : {}),
+      });
+    };
+    gated("edit_file", { outcome: "approved", approvedBy: "policy:yolo" });
+    gated("run_command", { outcome: "approved", approvedBy: "human" });
+    gated("edit_file", { outcome: "rejected", approvedBy: "human" }, "不准改");
+    gated(
+      "edit_file",
+      { outcome: "rejected", approvedBy: "policy:deny" },
+      FAIL_CLOSED_APPROVAL_REASON
+    );
+    gated("edit_file", { outcome: "approved", approvedBy: "policy:config" });
+    gated("edit_file", { outcome: "approved", approvedBy: "human:grant" });
+    gated(
+      "run_command",
+      { outcome: "rejected", approvedBy: "policy:deny" },
+      "run_command 在 deny 清单上"
+    );
+    gated("read_file", { outcome: "approved", approvedBy: "policy:yolo" });
+    s.assistant({ text: "完成" });
+    s.endRun();
+    const view = await viewOf(s, sessionsDir);
+    const tiers = new Map([
+      ["read_file", "read"],
+      ["edit_file", "write"],
+      ["run_command", "exec"],
+    ]);
+    assert.equal(storeRunMetrics(view, { toolTiers: tiers }).approvalsNeeded, 4);
   });
 });

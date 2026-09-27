@@ -91,7 +91,8 @@ test("headless：prompt 模式无审批通道一律 fail-closed——写调用�
       editMode: "hashline",
     });
     assert.equal(result.status, "completed");
-    assert.equal(result.approvalsNeeded, 0);
+    // 因无审批通道而拒绝的写调用正是"需要人来批"的一次（读档不计）
+    assert.equal(result.approvalsNeeded, 1);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), ORIGINAL);
     const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
     assert.equal(session.decisions.length, 1);

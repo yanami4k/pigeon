@@ -10,7 +10,7 @@ import { createToolGovernance } from "../application/governance.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { locateSessionFile, readSessionFile } from "../persistence/session-reader.ts";
-import { newSessionId } from "../state/ids.ts";
+import { newGrantId, newSessionId } from "../state/ids.ts";
 import {
   type RunEndData,
   type RunStartData,
@@ -226,6 +226,7 @@ test("双写：熔断中止的 Run 记为熔断", async () => {
           return { kind: "block", reason: "熔断" };
         },
         governs: () => true,
+        decisionOf: () => undefined,
         settle: () => {},
         runOutcome: () => ({ breakerTripped: tripped, toolExecutions: [] }),
         toolExecutions: () => [],
@@ -339,6 +340,111 @@ test("收尾：Run 以异常结束（上游抛错）也写收尾条目，结束�
   assert.equal(entry.data.ending, "error");
   assert.ok((entry.data.errorMessage ?? "").length > 0);
   assert.equal(entry.data.messageCount, 0);
+  await adapter.dispose();
+});
+
+test("工具结果消息的 details 带上错误归类与审批闸决定：执行出错的归类、上游拦截记域错误、固化规则放行记 policy:config", async () => {
+  const registry = new ToolRegistry();
+  for (const [name, tier] of [
+    ["echo", "read"],
+    ["boom", "write"],
+    ["ruled", "write"],
+  ] as const) {
+    registry.register({
+      name,
+      description: name,
+      parameters: Type.Object({ text: Type.String() }),
+      tier,
+      pathConfinement: { kind: "workspace" },
+      executionMode: "sequential",
+    });
+  }
+  const tool = (name: string, execute: AgentTool["execute"]): AgentTool => ({
+    name,
+    label: name,
+    description: name,
+    parameters: Type.Object({ text: Type.String() }),
+    execute,
+  });
+  const environmentError = Object.assign(new Error("磁盘满了"), {
+    pigeonToolErrorKind: "environment",
+  });
+  const { sink, captured } = captureSink();
+  const adapter = new PiRuntimeAdapter({
+    snapshot: {
+      ...snapshot(),
+      tools: {
+        policy: { allow: ["echo", "boom", "ruled"], deny: [], approvalMode: "yolo" },
+        advertised: [],
+      },
+    },
+    streamFn: createFakeStreamFn({
+      replies: [
+        {
+          text: "调",
+          toolCalls: [
+            { name: "echo", args: { text: "回声" } },
+            { name: "boom", args: { text: "x" } },
+            { name: "ruled", args: { text: "y" } },
+            { name: "nope", args: {} },
+          ],
+        },
+        { text: "完成" },
+      ],
+    }),
+    governance: createToolGovernance({
+      registry,
+      configGrants: [
+        {
+          tool: "ruled",
+          promotedFrom: {
+            grantId: newGrantId(),
+            sessionId: newSessionId(),
+            firstCall: { toolCallId: "tc-0", args: {} },
+            promotedAt: 1,
+          },
+        },
+      ],
+    }),
+    tools: [
+      echoTool,
+      tool("boom", async () => {
+        throw environmentError;
+      }),
+      tool("ruled", async () => ({
+        content: [{ type: "text", text: "ok" }],
+        details: { kept: 1 },
+      })),
+    ],
+    sessionStore: sink,
+  });
+  await adapter.run("做事");
+  const results = new Map(
+    captured.flatMap((item) =>
+      item.kind === "message" && item.message.role === "toolResult"
+        ? [
+            [
+              item.message.toolName,
+              item.message as unknown as { details?: Record<string, unknown> },
+            ],
+          ]
+        : []
+    )
+  );
+  const mark = (name: string) => results.get(name)?.details?.pigeon;
+  assert.deepEqual(mark("echo"), { gate: { outcome: "approved", approvedBy: "policy:yolo" } });
+  assert.deepEqual(mark("boom"), {
+    errorKind: "environment",
+    gate: { outcome: "approved", approvedBy: "policy:yolo" },
+  });
+  assert.deepEqual(mark("ruled"), { gate: { outcome: "approved", approvedBy: "policy:config" } });
+  // 工具自己的 details 保留
+  assert.equal(results.get("ruled")?.details?.kept, 1);
+  // 上游拦截（幽灵工具名）：审批闸没跑过，记域错误、无决定
+  assert.deepEqual(mark("nope"), { errorKind: "domain" });
+  // 交给 Agent 的对话与写进新存储的是同一份消息
+  const messages = captured.flatMap((item) => (item.kind === "message" ? [item.message] : []));
+  assert.deepEqual(messages, adapter.transcript());
   await adapter.dispose();
 });
 

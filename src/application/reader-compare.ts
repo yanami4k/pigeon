@@ -11,10 +11,12 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import { sessionContextMessages } from "../pi-runtime/session-store.ts";
 import { resolveCheckpointBefore } from "../state/checkpoint-ref.ts";
 import { buildTaskAttempt, firstRunOf } from "../state/episode.ts";
+import type { RunId } from "../state/ids.ts";
 import type { MaterializedSession } from "../state/materialize.ts";
 import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
-import { repairStepOutcome } from "../state/repair-step.ts";
+import { repairStepOutcome, stepRunsOf } from "../state/repair-step.ts";
 import {
+  FAIL_CLOSED_APPROVAL_REASON,
   type StoreSessionView,
   storeActiveGrants,
   storeAttemptFacts,
@@ -61,10 +63,8 @@ export interface ReaderComparison {
 
 // 预期差异的原因（与审计、README 的清单一一对应）
 export const EXPECTED = {
-  errorKind: "工具执行出错的域 / 环境归类随工具落定事件停写，新读法落未知",
-  humanRejected: "人工拒绝与执行出错在消息上不可分，新读法落未知",
   evalVerified: "旧 eval.verified 随 184 停写，新读法不计",
-  configRule: "固化规则命中的调用不在会话存储里，新读法按 yolo 批发授权计入需审批次数",
+  approvalScope: "需审批次数按裁决计入人工批准或拒绝与无审批通道的拒绝，旧读法只计 yolo 批发授权",
   thrownRun: "Run 以异常结束时新存储记出错收尾，旧账本没有运行结束记录",
   interruptedResult: "续跑为悬空调用补的工具结果只写新存储",
   endedAt: "结束时刻取自不同记录（旧 run.ended 与新 Run 收尾条目），相差几毫秒",
@@ -212,7 +212,18 @@ export function compareReaders(input: {
   const tiers = options.toolTiers ?? BUILTIN_TOOL_TIERS;
   const oldMetrics = summarizeRunMetrics(old);
   const newMetrics = storeRunMetrics(view, { toolTiers: tiers });
-  const configHits = old.receipts.some((receipt) => receipt.approvedBy === "policy:config");
+  // 旧读法不计、新读法按裁决计入的调用：本步里由人批准或拒绝的、因无审批通道而拒绝的
+  const stepRuns = new Set(stepRunsOf(old, oldMetrics.runId ?? ("" as RunId)));
+  const widened =
+    old.intents.filter(
+      (record) => stepRuns.has(record.runId) && record.decision.approvedBy === "human"
+    ).length +
+    old.decisions.filter(
+      (record) =>
+        stepRuns.has(record.runId) &&
+        (record.decision.approvedBy === "human" ||
+          record.decision.reason?.startsWith(FAIL_CLOSED_APPROVAL_REASON) === true)
+    ).length;
   same("运行指标", "首个 Run", oldMetrics.runId, newMetrics.runId);
   same("运行指标", "轮次", oldMetrics.turns, newMetrics.turns);
   same("运行指标", "工具调用", oldMetrics.toolCalls, newMetrics.toolCalls);
@@ -222,7 +233,9 @@ export function compareReaders(input: {
     "需审批次数",
     oldMetrics.approvalsNeeded,
     newMetrics.approvalsNeeded,
-    configHits ? EXPECTED.configRule : undefined
+    widened > 0 && newMetrics.approvalsNeeded - oldMetrics.approvalsNeeded === widened
+      ? EXPECTED.approvalScope
+      : undefined
   );
   same(
     "运行指标",
@@ -349,35 +362,14 @@ function compareToolOutcomes(
   const oldByCall = new Map(
     old.classification.toolExecutions.map((entry) => [entry.toolCallId, entry.failure])
   );
-  const humanRejected = new Set(
-    old.decisions
-      .filter((record) => record.decision.approvedBy === "human")
-      .map((record) => record.toolCallId)
-  );
-  const errorKinds = new Map<string, string>();
-  for (const event of old.runtimeEvents) {
-    if (event.kind === "tool.settled" && event.payload.errorKind !== undefined) {
-      errorKinds.set(event.payload.toolCallId, event.payload.errorKind);
-    }
-  }
   for (const outcome of storeToolOutcomes(view)) {
     // 旧读法只给落了治理记录或以出错落定的调用分类；成功的读档调用旧读法不列，新读法记非失败
     const oldFailure = oldByCall.has(outcome.toolCallId) ? oldByCall.get(outcome.toolCallId) : null;
-    const isUnknown = outcome.failure?.category === "unknown";
-    const expected =
-      isUnknown && humanRejected.has(outcome.toolCallId)
-        ? EXPECTED.humanRejected
-        : isUnknown &&
-            errorKinds.has(outcome.toolCallId) &&
-            (oldFailure?.category === "business" || oldFailure?.category === "infrastructure")
-          ? EXPECTED.errorKind
-          : undefined;
     same(
       "工具分类",
       `${outcome.toolName} ${outcome.toolCallId}`,
       oldFailure ?? null,
-      outcome.failure,
-      expected
+      outcome.failure
     );
   }
 }

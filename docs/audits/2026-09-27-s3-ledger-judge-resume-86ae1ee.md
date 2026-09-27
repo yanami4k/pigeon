@@ -186,3 +186,49 @@ src/application/reader-compare.ts：同一个会话，旧读法（物化旧账�
 
 - 与第三段（搜索、显示改读新存储）：materialize.ts、state/index.ts、测试夹具本段未改动。本段改动了第三段可能改到的：cli/trace.ts 与 cli/replay.ts（worker 收尾结果的回执号在场才显示）、cli/index.ts（续跑入口）、tui/main.ts、tui/resume-view.ts、tui/session-view.test.ts、tui/history.test.ts（为目标会话补一个新存储文件；历史渲染仍读旧账本，归第三段）、state/event-log.ts（ChildResult 的 receiptIds 可缺省）。工具级失败分类的新读法（storeToolOutcomes）已在 state/session-judge.ts，第三段的会话列表 `--class` 与搜索的 class 过滤可直接用。
 - 与跑批器分支：stream-agents.ts 未改动；headless-core.ts 的结果读法改动（运行指标、标签、Run 数）若跑批器分支也改该文件，可能有文本冲突。
+
+## 十、追加：工具错误归类与需审批次数的裁决（2026-09-27）
+
+第二、五节交付后，就两个待定项的裁决：① 工具执行出错的域 / 环境归类不接受落未知，改为存进该工具结果消息的 details，读者从那里取，恢复会话列表与检索按类过滤的原有效果，不新增记录种类；② 固化放权规则命中而自动放行的调用不计入需审批次数，这个数的含义是需要人来批的次数。
+
+### 10.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| src/pi-runtime/adapter.ts | 每条工具结果消息在 message_end 时挂运行面标记，写在该消息 details 的 `pigeon` 键下：errorKind（工具抛错时捕获的归类；审批闸没跑过即上游拦截，记 domain；判不出不写）与 gate（审批闸对这次调用的决定：outcome、approvedBy；上游拦截的调用没有）。就地改这条消息，交给 Agent 的对话、旧账本条目与新存储是同一份；details 不发给模型，旧账本的正文抽取与内容哈希不含 details。工具自己的 details 是对象时并入、缺省时新建、其他形状不动 |
+| src/pi-runtime/governance.ts、src/application/governance.ts | 治理接口加 decisionOf(调用号)：返回审批闸对该调用的决定（深拷贝），审批闸没跑过为 undefined |
+| src/state/session-judge.ts | 读标记（toolResultMark）。工具级失败分类按标记：审批闸拒绝（策略拒绝与人工拒绝）为非失败，没有审批决定即上游拦截为业务失败，Run 以中止收尾为取消，errorKind 为 domain 是业务失败、environment 是基础设施错误，判不出为未知；判定顺序同 classifyToolOutcome。需审批次数按标记：写档与命令档里 approvedBy 为 policy:yolo 或 human、或因无审批通道而拒绝的计入；policy:config、human:grant、policy:auto 与 deny 清单拒绝不计。没有标记的结果退回第二节的判据 |
+| src/application/reader-compare.ts | 预期差异去掉原第 1、2、4 项（执行出错归类、人工拒绝、固化规则计入），新增"需审批次数按裁决计入人工审批与无审批通道的拒绝"：只在新旧之差恰等于旧账本里本步由人批准或拒绝、因无审批通道而拒绝的条数时标为预期 |
+
+第二节"工具级失败分类"与"需审批次数"两段的口径由本节取代（没有标记的结果仍按第二节）。第五节的预期差异清单相应变为：eval.verified 停写；需审批次数计入人工审批与无审批通道的拒绝（旧读法只计 yolo 批发授权）；Run 以异常结束；续跑补的"结果未知"工具结果；尝试切片的结束时刻与验证记录号。
+
+需审批次数的口径变化波及既有用例两处：prompt 档无审批通道时写调用被拒，需审批次数由 0 改为 1（application/headless.test.ts 的 headless 用例、cli/run-cli.test.ts 的 pigeon run 用例）。
+
+### 10.2 测试
+
+测试先行：新用例先在服务器上跑出 3 处失败，再改实现。
+
+| 文件 | 用例 | 覆盖 |
+|---|---|---|
+| pi-runtime/adapter-session-store.test.ts | +1 | 工具结果消息的标记：读档成功（policy:yolo）、写档抛环境异常（environment 与 policy:yolo）、固化规则放行（policy:config，工具自己的 details 保留）、幽灵工具名（domain、无决定）；新存储里的消息与交给 Agent 的对话逐条一致 |
+| state/session-judge.test.ts | +2 | 带标记的工具级失败分类六种情形（域错误、环境异常、判不出、人工拒绝、上游拦截、成功）；带标记的需审批次数八种调用（yolo、人工批准、人工拒绝、无审批通道拒绝计入，固化规则、会话放权、deny 清单、读档不计） |
+| application/reader-compare.test.ts | 改 1 | 工具域错误的会话由一条预期差异变为零差异；固化规则放行的写调用两边需审批次数都为 0、零差异；prompt 档无审批通道的拒绝只有需审批次数一处预期差异（0 对 1） |
+| application/headless.test.ts、cli/run-cli.test.ts | 各改 1 | 见 10.1 末段 |
+
+### 10.3 变异反向验证
+
+同样每次只植入一处，跑相关的 10 个测试文件（71 例），还原后按字节比对源文件哈希，两处都逐字一致。
+
+| 变异 | 精确变红的用例 |
+|---|---|
+| M12 运行面不把错误归类写进标记 | 工具结果消息的 details 带上错误归类与审批闸决定；读者对照：回炉一步、上游拦截与域错误……（2 例） |
+| M13 需审批次数把固化规则放行也计入 | 需审批次数（带运行面标记）；读者对照：回炉一步、上游拦截与域错误……（2 例） |
+
+### 10.4 verify 的实际运行
+
+同一台服务器（8 vCPU、31 GB 内存、Ubuntu 24.04、Node 24.12.0），在 c349ef6 上同步本节改动的 13 个文件后跑，跑前确认没有别的测试进程，并发取 6；随后以本节提交本身检出重跑一次核对（第一次全量报出 cli/run-cli.test.ts 一例仍按旧口径断言需审批次数为 0，改后再跑）：
+
+- lint 通过（385 个文件）；check 通过；
+- 测试整份运行 98.5 秒，1102 个用例，1100 通过、0 失败、2 跳过（仅 Windows 的 .cmd 用例两例）；比 8.1 节多 3 例（本节新增 1 + 2）；
+- 测试进程最大常驻内存约 0.53 GB；
+- deps 通过（402 个模块、2790 条依赖、无违规）。

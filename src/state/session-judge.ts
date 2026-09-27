@@ -5,7 +5,8 @@
 // - Run 级失败分类：末条助手消息的停止原因与是否上游合成的失败消息、Run 收尾条目在不在、结束方式是不是熔断；
 // - 撞上限：Run 收尾条目的结束方式（轮数、墙钟、token 三种）；
 // - 悬账：带工具调用而没有工具结果的助手消息（续跑时补的"结果未知"工具结果同样算，它只说明结果不明）；
-// - 验证结论：验证记录条目（旧 eval.verified 随 184 停写，不再计入）。
+// - 验证结论：验证记录条目（旧 eval.verified 随 184 停写，不再计入）；
+// - 工具级失败分类与需审批次数：工具结果消息 details 里运行面挂的标记（错误归类与审批闸决定），没有标记时退回按消息正文与策略判。
 // 旧账本的判定函数（materialize.ts、outcome-label.ts、episode.ts、repair-step.ts）在停写之前保留，只供双写对照与
 // 双写之前的旧会话回退读取；新读者一律经本文件。
 import type { AttemptRef, OutcomeLabel } from "./attempt-ref.ts";
@@ -89,6 +90,14 @@ export interface StoreSessionView {
 export const INTERRUPTED_TOOL_RESULT_TEXT =
   "进程在执行途中中断，这次工具调用的结果未知：请自行核实（例如重新读取相关文件、查看命令的效果）后再决定下一步。";
 export const INTERRUPTED_TOOL_RESULT_MARK = "pigeonInterrupted";
+
+// 运行面给工具结果消息挂的标记（写在该消息 details 的这个键下，不新增记录种类）：工具抛错时的错误归类（域 / 环境；
+// 上游拦截记域错误），与审批闸对这次调用的决定（结果与批准来源；上游拦截的调用审批闸没跑过，没有这一项）
+export const TOOL_RESULT_MARK_KEY = "pigeon";
+export interface ToolResultMark {
+  errorKind?: "domain" | "environment";
+  gate?: { outcome: "approved" | "rejected"; approvedBy: string };
+}
 
 // 审批闸在 prompt 档而没有审批通道时的固定拒绝理由（application/governance.ts 用它，工具级分类据它认出策略拒绝）
 export const FAIL_CLOSED_APPROVAL_REASON = "策略要求人工审批但未配置审批通道";
@@ -275,6 +284,28 @@ export function isSyntheticFailure(message: StoreMessage): boolean {
     usage.cacheRead === 0 &&
     usage.cacheWrite === 0;
   return emptyText && zeroUsage;
+}
+
+// 工具结果消息上的运行面标记；没有标记（标记之前写的文件、测试夹具）返回 undefined
+export function toolResultMark(message: StoreMessage): ToolResultMark | undefined {
+  if (message.role !== "toolResult" || !isObject(message.details)) {
+    return undefined;
+  }
+  const mark = message.details[TOOL_RESULT_MARK_KEY];
+  if (!isObject(mark)) {
+    return undefined;
+  }
+  const gate = isObject(mark.gate) ? mark.gate : undefined;
+  return {
+    ...(mark.errorKind === "domain" || mark.errorKind === "environment"
+      ? { errorKind: mark.errorKind }
+      : {}),
+    ...(gate !== undefined &&
+    (gate.outcome === "approved" || gate.outcome === "rejected") &&
+    typeof gate.approvedBy === "string"
+      ? { gate: { outcome: gate.outcome, approvedBy: gate.approvedBy } }
+      : {}),
+  };
 }
 
 // 续跑时补的"结果未知"工具结果
@@ -522,25 +553,63 @@ function upstreamIntercepted(call: ToolCallBlock, text: string): boolean {
   );
 }
 
-// 审批闸的策略拒绝（治理闭环，不是失败）：工具在 deny 清单上，或 prompt 档无审批通道时的固定拒绝理由
+// 审批闸的策略拒绝（治理闭环，不是失败）：工具在 deny 清单上，或 prompt 档无审批通道时的固定拒绝理由（无标记时的判据）
 function policyRejected(call: ToolCallBlock, text: string, start: RunStartData): boolean {
   return start.policy.deny.includes(call.name) || text === FAIL_CLOSED_APPROVAL_REASON;
 }
 
-// 口径：成功为非失败；没有结果或只有续跑补的"结果未知"为未知；Run 以中止收尾归取消（熔断为其子类）；
-// 上游拦截与未广告的工具名为业务失败；策略拒绝为非失败；其余执行出错为未知——工具抛错时的域 / 环境归类随工具落定事件停写
-// 不再有来源，人工拒绝在消息上与执行出错不可分，同落未知
+function resultsOf(run: StoreRun): Map<string, StoreMessage> {
+  const results = new Map<string, StoreMessage>();
+  for (const { message } of run.messages) {
+    if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+      results.set(message.toolCallId, message);
+    }
+  }
+  return results;
+}
+
+// 一个执行出错的调用的分类。判定顺序同 classifyToolOutcome：审批闸拒绝 → 上游拦截 → Run 中止 → 错误归类。
+// 有运行面标记时按标记（审批闸决定、错误归类）；没有标记的结果（标记之前写的文件、测试夹具）退回按消息正文与策略判
+function erroredToolFailure(
+  call: ToolCallBlock,
+  result: StoreMessage,
+  run: StoreRun,
+  aborted: boolean
+): FailureClass | null {
+  const mark = toolResultMark(result);
+  const text = textOf(result);
+  const rejected =
+    mark !== undefined ? mark.gate?.outcome === "rejected" : policyRejected(call, text, run.start);
+  if (rejected) {
+    return null;
+  }
+  const intercepted =
+    mark !== undefined
+      ? mark.gate === undefined
+      : upstreamIntercepted(call, text) || !run.start.advertisedTools.includes(call.name);
+  if (intercepted) {
+    return { category: "business" };
+  }
+  if (aborted) {
+    return { category: "cancelled", breaker: run.end?.ending === "breaker" };
+  }
+  if (mark?.errorKind === "domain") {
+    return { category: "business" };
+  }
+  if (mark?.errorKind === "environment") {
+    return { category: "infrastructure" };
+  }
+  return { category: "unknown" };
+}
+
+// 口径：成功为非失败；没有结果或只有续跑补的"结果未知"为未知；执行出错的按 erroredToolFailure——
+// 审批闸拒绝（策略拒绝与人工拒绝）为非失败，上游拦截为业务失败，Run 以中止收尾归取消（熔断为其子类），
+// 工具抛错的域错误为业务失败、环境异常为基础设施错误，判不出为未知
 export function storeToolOutcomes(view: StoreSessionView): StoreToolOutcome[] {
   const outcomes: StoreToolOutcome[] = [];
   for (const run of view.runs) {
-    const results = new Map<string, StoreMessage>();
-    for (const { message } of run.messages) {
-      if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-        results.set(message.toolCallId, message);
-      }
-    }
+    const results = resultsOf(run);
     const aborted = lastAssistantOf(run)?.stopReason === "aborted";
-    const breaker = run.end?.ending === "breaker";
     for (const { message } of run.messages) {
       for (const call of toolCallsOf(message)) {
         const result = results.get(call.id);
@@ -550,19 +619,7 @@ export function storeToolOutcomes(view: StoreSessionView): StoreToolOutcome[] {
         } else if (result.isError !== true) {
           failure = null;
         } else {
-          const text = textOf(result);
-          if (policyRejected(call, text, run.start)) {
-            failure = null;
-          } else if (aborted) {
-            failure = { category: "cancelled", breaker };
-          } else if (
-            upstreamIntercepted(call, text) ||
-            !run.start.advertisedTools.includes(call.name)
-          ) {
-            failure = { category: "business" };
-          } else {
-            failure = { category: "unknown" };
-          }
+          failure = erroredToolFailure(call, result, run, aborted);
         }
         outcomes.push({ runId: run.runId, toolCallId: call.id, toolName: call.name, failure });
       }
@@ -571,34 +628,46 @@ export function storeToolOutcomes(view: StoreSessionView): StoreToolOutcome[] {
   return outcomes;
 }
 
-// 需审批次数（Q4）：yolo 档下写档与命令档、通过了审批闸（不在 deny 清单、没被上游拦截、有工具结果）的调用数，
-// 即"有人在场时会被问几次"。toolTiers 缺某个工具时不计。固化规则命中的调用同样计入（规则匹配不在会话存储里）
+// 一次调用是否"需要人来批"：写档与命令档里，审批闸以 yolo 批发授权放行（有人在场时会被问）、由人批准或拒绝、
+// 或因没有审批通道而拒绝的；固化规则与会话放权放行的、deny 清单拒绝的、读档的不算
+function neededApproval(
+  call: ToolCallBlock,
+  result: StoreMessage,
+  run: StoreRun,
+  tier: string | undefined
+): boolean {
+  if ((tier !== "write" && tier !== "exec") || isInterruptedToolResult(result)) {
+    return false;
+  }
+  const mark = toolResultMark(result);
+  if (mark !== undefined) {
+    const approvedBy = mark.gate?.approvedBy;
+    return (
+      approvedBy === "policy:yolo" ||
+      approvedBy === "human" ||
+      (approvedBy === "policy:deny" && textOf(result) === FAIL_CLOSED_APPROVAL_REASON)
+    );
+  }
+  // 没有标记：只能认出 yolo 档下通过了审批闸的调用（不在 deny 清单、没被上游拦截）
+  return (
+    run.start.policy.approvalMode === "yolo" &&
+    !run.start.policy.deny.includes(call.name) &&
+    !(result.isError === true && upstreamIntercepted(call, textOf(result)))
+  );
+}
+
+// 需审批次数（Q4 与其后的裁决）：按 neededApproval 计。toolTiers 缺某个工具时不计
 function approvalsNeededOf(
   runs: readonly StoreRun[],
   toolTiers: ReadonlyMap<string, string>
 ): number {
   let count = 0;
   for (const run of runs) {
-    if (run.start.policy.approvalMode !== "yolo") {
-      continue;
-    }
-    const results = new Map<string, StoreMessage>();
-    for (const { message } of run.messages) {
-      if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-        results.set(message.toolCallId, message);
-      }
-    }
+    const results = resultsOf(run);
     for (const { message } of run.messages) {
       for (const call of toolCallsOf(message)) {
-        const tier = toolTiers.get(call.name);
         const result = results.get(call.id);
-        if (
-          (tier === "write" || tier === "exec") &&
-          result !== undefined &&
-          !isInterruptedToolResult(result) &&
-          !run.start.policy.deny.includes(call.name) &&
-          !(result.isError === true && upstreamIntercepted(call, textOf(result)))
-        ) {
+        if (result !== undefined && neededApproval(call, result, run, toolTiers.get(call.name))) {
           count += 1;
         }
       }

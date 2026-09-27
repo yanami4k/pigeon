@@ -36,7 +36,13 @@ import {
   type BeforeToolCallResult,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
-import type { Api, AssistantMessage, Model, StopReason } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  Model,
+  StopReason,
+  ToolResultMessage,
+} from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { classifyRunOutcome, type FailureClass } from "../state/classification.ts";
 import type { ObservationInput } from "../state/event-log.ts";
@@ -58,6 +64,7 @@ import {
   SESSION_ENTRY_VERSION,
   SessionEntryType,
 } from "../state/session-entries.ts";
+import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
@@ -309,6 +316,37 @@ export class PiRuntimeAdapter {
     }
   }
 
+  // 工具结果消息挂运行面标记（账本重构第二段的裁决：写在该消息 details 的 pigeon 键下，不新增记录种类）：
+  // 工具抛错时捕获的错误归类（审批闸没跑过即上游拦截，记域错误）与审批闸的决定（结果与批准来源）。
+  // 就地改这条消息：交给 Agent 的对话、旧账本条目与新存储是同一份（details 不发给模型，旧账本正文抽取也不含它）。
+  // 工具自己的 details 是对象时并入，缺省时新建；其余形状（非对象）不动。标记自身出错只进 listenerErrors
+  #markToolResult(message: ToolResultMessage): void {
+    try {
+      const errorKind = message.isError
+        ? (this.#toolErrorKinds.get(message.toolCallId) ??
+          (this.#governance.governs(message.toolCallId) ? undefined : "domain"))
+        : undefined;
+      const decision = this.#governance.decisionOf(message.toolCallId);
+      const mark: ToolResultMark = {
+        ...(errorKind !== undefined ? { errorKind } : {}),
+        ...(decision !== undefined
+          ? { gate: { outcome: decision.outcome, approvedBy: decision.approvedBy } }
+          : {}),
+      };
+      if (mark.errorKind === undefined && mark.gate === undefined) {
+        return;
+      }
+      const details: unknown = message.details;
+      if (details === undefined || details === null) {
+        message.details = { [TOOL_RESULT_MARK_KEY]: mark };
+      } else if (typeof details === "object" && !Array.isArray(details)) {
+        message.details = { ...details, [TOOL_RESULT_MARK_KEY]: mark };
+      }
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+  }
+
   // 等当前 Run 彻底收尾（收尾条目已交给新存储写者）；没有进行中的 Run 时立即返回。
   // run.ended 事件先于收尾条目到达，读者在事件回调里要读收尾条目时先等这里
   async settled(): Promise<void> {
@@ -473,6 +511,9 @@ export class PiRuntimeAdapter {
       // 写盘失败进 listenerErrors 留证缺口，绝不毒化 Run 或重排后续序号。
       if (event.type === "message_end") {
         this.#runEntrySeq += 1;
+        if (event.message.role === "toolResult") {
+          this.#markToolResult(event.message);
+        }
         if (this.#eventLog !== undefined) {
           try {
             // M5 S1（决策 037）：消息深拷贝交落盘口——上游零防御拷贝，落盘侧抽取内容块

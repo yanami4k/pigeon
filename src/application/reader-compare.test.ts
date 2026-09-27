@@ -1,9 +1,9 @@
 // 读者对照（决策 180 / 206，账本重构第二段）：同一次运行的旧读法与新读法逐项比较。双写产出的会话——失败自动分叉重试的来源与
-// 分支、撞上限、回炉、上游拦截与域错误、prompt 档无审批通道的策略拒绝、授权建立与撤销——没有未预期差异，已知的预期差异
-// 带原因标出；新文件被篡改时报出未预期差异。
+// 分支、撞上限、回炉、上游拦截与域错误、prompt 档无审批通道的策略拒绝、固化规则放行、授权建立与撤销——没有差异；
+// 新文件被篡改时报出未预期差异。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -112,7 +112,7 @@ test("读者对照：失败自动分叉重试的来源与分支、撞上限的�
   }
 });
 
-test("读者对照：回炉一步、上游拦截与域错误、prompt 档策略拒绝——只有标出原因的预期差异", async () => {
+test("读者对照：回炉一步、上游拦截与域错误、固化规则放行没有差异；prompt 档无审批通道的拒绝只有需审批次数一处预期差异", async () => {
   const { dir, home, sessionsDir, cleanup } = repo();
   try {
     const repaired = await runHeadlessOnce({
@@ -147,12 +147,8 @@ test("读者对照：回炉一步、上游拦截与域错误、prompt 档策略�
       homeDir: home,
       startMcp: noMcp,
     });
-    const diffs = compareReaders({ sessionsDir, sessionId: errored.sessionId }).diffs;
-    assert.deepEqual(unexpected(diffs), [], JSON.stringify(diffs, null, 2));
-    assert.deepEqual(
-      diffs.map((diff) => [diff.area, diff.old, diff.new, diff.expected]),
-      [["工具分类", { category: "business" }, { category: "unknown" }, EXPECTED.errorKind]]
-    );
+    // 工具抛错的归类随工具结果消息的 details 存下，新读法与旧读法一致（域错误为业务失败）
+    assert.deepEqual(compareReaders({ sessionsDir, sessionId: errored.sessionId }).diffs, []);
 
     // prompt 档无审批通道：写调用 fail-closed 拒绝，两边都记非失败
     const rejected = await runHeadless({
@@ -164,7 +160,48 @@ test("读者对照：回炉一步、上游拦截与域错误、prompt 档策略�
       homeDir: home,
       startMcp: noMcp,
     });
-    assert.deepEqual(compareReaders({ sessionsDir, sessionId: rejected.sessionId }).diffs, []);
+    // 无审批通道而拒绝的写调用：按裁决计入需审批次数（旧读法只计 yolo 批发授权），唯一的差异且标为预期
+    assert.equal(rejected.approvalsNeeded, 1);
+    assert.deepEqual(
+      compareReaders({ sessionsDir, sessionId: rejected.sessionId }).diffs.map((diff) => [
+        diff.where,
+        diff.old,
+        diff.new,
+        diff.expected,
+      ]),
+      [["需审批次数", 0, 1, EXPECTED.approvalScope]]
+    );
+
+    // 固化规则放行的写调用：两边都不计入需审批次数
+    mkdirSync(join(dir, ".pigeon"), { recursive: true });
+    writeFileSync(
+      join(dir, ".pigeon", "grants.json"),
+      JSON.stringify({
+        version: 1,
+        grants: [
+          {
+            tool: "edit_file",
+            promotedFrom: {
+              grantId: newGrantId(),
+              sessionId: newSessionId(),
+              firstCall: { toolCallId: "tc-0", args: {} },
+              promotedAt: 1,
+            },
+          },
+        ],
+      })
+    );
+    const ruled = await runHeadless({
+      task: "改",
+      governanceRoot: dir,
+      workspaceRoot: dir,
+      streamFn: createFakeStreamFn({ replies: [edit("newer\n", "new\n"), { text: "好" }] }),
+      yolo: true,
+      homeDir: home,
+      startMcp: noMcp,
+    });
+    assert.equal(ruled.approvalsNeeded, 0);
+    assert.deepEqual(compareReaders({ sessionsDir, sessionId: ruled.sessionId }).diffs, []);
   } finally {
     cleanup();
   }
