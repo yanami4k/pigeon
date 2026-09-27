@@ -8,8 +8,9 @@ import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_LEVEL,
+  GATEWAY_PROVIDER,
+  GATEWAY_UPSTREAM_BASE_URL,
   gatewayStreamFn,
-  gatewayUpstreamBaseUrl,
 } from "../pi-runtime/index.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import {
@@ -62,8 +63,9 @@ export interface StreamExperimentOptions {
   concurrency?: number;
   maxSteps?: number;
   budget: StepBudget;
-  // 四个条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里
-  gateway: { accounts: readonly GatewayAccount[]; modelId: string };
+  // 四个条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里；spendLimitCny 为花费上限（人民币元，
+  // 决策 235），缺省不设
+  gateway: { accounts: readonly GatewayAccount[]; modelId: string; spendLimitCny?: number };
   // Pigeon 各条件的运行参数（模型接入由网关给；放权固定为无人值守，见 streamPigeonOptions）；缺省则这些条件的作业停止并说明
   pigeon?: StreamPigeonOptions;
   // 最简 agent 的启动器命令；缺省则该条件的作业停止并说明
@@ -91,7 +93,7 @@ export function streamPigeonOptions(
 // 不记 null；温度没给即由服务端决定，记 null
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
   return {
-    provider: pigeon.provider ?? "kimi-coding",
+    provider: pigeon.provider ?? GATEWAY_PROVIDER,
     modelId: pigeon.modelId ?? modelId,
     temperature: pigeon.temperature ?? null,
     thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
@@ -133,31 +135,17 @@ export function imageIdOf(image: string, docker: readonly string[]): string {
   return id;
 }
 
-// 最简 agent 的版本与它自己的模型设定：用装有 mini-swe-agent 的解释器查（取不到的项记 null，照实）
-const MINI_IDENTITY_SCRIPT = [
-  "import json, importlib.metadata as m",
-  "out = {}",
-  "for k, p in (('miniSweAgent', 'mini-swe-agent'), ('litellm', 'litellm')):",
-  "    try: out[k] = m.version(p)",
-  "    except Exception: out[k] = None",
-  "try:",
-  "    import yaml",
-  "    from minisweagent.config import builtin_config_dir",
-  "    c = yaml.safe_load((builtin_config_dir / 'benchmarks' / 'swebench.yaml').read_text(encoding='utf-8'))",
-  "    out['modelKwargs'] = c.get('model', {}).get('model_kwargs', {})",
-  "except Exception:",
-  "    out['modelKwargs'] = None",
-  "print(json.dumps(out))",
-].join("\n");
-
-function miniIdentityOf(python: string): {
+// 最简 agent 的版本与实际生效的模型参数：由启动器自己报（run_mini.py --identity，含它覆盖后的输出上限、温度与思考开关），
+// 取不到的项记 null，照实
+function miniIdentityOf(command: readonly string[]): {
   miniSweAgent: string | null;
   litellm: string | null;
   modelKwargs: Record<string, unknown> | null;
 } {
+  const [program = "python", ...args] = command;
   try {
     // mini-swe-agent 导入时会在标准输出打横幅，结果取最后一个非空行
-    const out = execFileSync(python, ["-c", MINI_IDENTITY_SCRIPT], {
+    const out = execFileSync(program, [...args, "--identity"], {
       encoding: "utf8",
       windowsHide: true,
     });
@@ -214,7 +202,7 @@ async function runStreamExperimentLocked(
   const miniSettings =
     options.minimalCommand === undefined
       ? undefined
-      : { model: modelId, ...miniIdentityOf(options.minimalCommand[0] ?? "python") };
+      : { model: modelId, ...miniIdentityOf(options.minimalCommand) };
   mkdirSync(outDir, { recursive: true });
   const runIdentity = checkOrWriteIdentity(outDir, {
     core: {
@@ -239,7 +227,8 @@ async function runStreamExperimentLocked(
   });
   const { gateway: liveGateway, limits } = await startGatewayAndLimits(
     options.gateway,
-    options.concurrency ?? 4
+    options.concurrency ?? 4,
+    path.join(outDir, GATEWAY_SPEND_FILE)
   );
   const shutdown = options.shutdownSignal;
   if (shutdown !== undefined) {
@@ -335,11 +324,15 @@ async function runStreamExperimentLocked(
   }
 }
 
+// 网关花费累计的落盘文件（在输出目录下）：续跑时接着累计
+export const GATEWAY_SPEND_FILE = "gateway-spend.json";
+
 // 起限额控制器与网关（互相引用：控制器探测经网关的上游，网关把限额信号交给控制器）。控制器按网关报来的可用容量
 // 放行（决策 163），网关的容量一变即通知控制器；开跑前逐账号探测一次，未通过即关掉两者、拒绝开跑
 export async function startGatewayAndLimits(
-  settings: { accounts: readonly GatewayAccount[]; modelId: string },
-  concurrency: number
+  settings: { accounts: readonly GatewayAccount[]; modelId: string; spendLimitCny?: number },
+  concurrency: number,
+  spendFile?: string
 ): Promise<{ gateway: ModelGateway; limits: LimitController }> {
   let gateway: ModelGateway | undefined;
   const limits = new LimitController({
@@ -348,16 +341,22 @@ export async function startGatewayAndLimits(
     capacity: () => gateway?.capacity() ?? Number.POSITIVE_INFINITY,
   });
   gateway = await startModelGateway({
-    upstreamBaseUrl: await gatewayUpstreamBaseUrl(settings.modelId),
+    upstreamBaseUrl: GATEWAY_UPSTREAM_BASE_URL,
     accounts: settings.accounts,
     limits,
+    // 探测：max_tokens 1、关思考（不发 thinking 时 DeepSeek 默认开思考，只回一个思考块），探针实测 200
     probeRequest: {
       path: "/v1/messages",
       body: {
         model: settings.modelId,
         max_tokens: 1,
+        thinking: { type: "disabled" },
         messages: [{ role: "user", content: "回一个字" }],
       },
+    },
+    spend: {
+      ...(spendFile !== undefined ? { file: spendFile } : {}),
+      ...(settings.spendLimitCny !== undefined ? { limitCny: settings.spendLimitCny } : {}),
     },
   });
   gateway.subscribeCapacity(() => limits.capacityChanged());

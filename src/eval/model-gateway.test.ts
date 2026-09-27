@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import diagnostics_channel from "node:diagnostics_channel";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 import { gatewayStreamFn } from "../pi-runtime/index.ts";
 import {
@@ -10,12 +13,11 @@ import {
   gatewayAccountsFromEnv,
   type ModelGateway,
   meterDelta,
-  QUOTA_HOLD_MIN_MS,
-  quotaResetAt,
   redactBody,
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
+import { requestCostCny } from "./model-pricing.ts";
 
 // 可控时钟：短于 autoBelowMs 的定时在下一轮事件循环即触发，其余等 advance 拨到；virtual 为真时 now 只随 advance 走，
 // 否则为真实时间加上拨快的量。set 记下每次定时的毫秒数
@@ -131,14 +133,14 @@ async function withGateway(
   const up = await fakeUpstream(script);
   const l = limits();
   const g = await startModelGateway({
-    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
-    quotaHoldMinMs: 0,
     upstreamBaseUrl: up.url,
     accounts: keys.map((key) => ({ key, concurrency: 2 })),
     limits: l,
     probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
     backoffDelaysMs: [1, 1],
-    clock: testClock().clock,
+    serverErrorRetryDelaysMs: [1, 1],
+    // 虚拟时钟：计价时刻固定在 0（北京时间 1970-01-01 周四 8 时，空闲时段）
+    clock: testClock({ virtual: true }).clock,
     warn: () => {},
   });
   try {
@@ -181,9 +183,11 @@ test("网关：按作业前缀转发、注入真 key、流式原样透传并按�
         output: 42,
         cacheRead: 30,
         cacheWrite: 0,
+        costCny: requestCostCny({ input: 120, cacheRead: 30, cacheWrite: 0, output: 42 }, 0, 0).cny,
         upstreamFailures: 0,
         queueMs: 0,
         peakInFlight: 1,
+        peakInputTokens: 150,
         accountRequests: [1],
       });
       assert.deepEqual(g.meter("other"), {
@@ -192,9 +196,11 @@ test("网关：按作业前缀转发、注入真 key、流式原样透传并按�
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
+        costCny: 0,
         upstreamFailures: 0,
         queueMs: 0,
         peakInFlight: 0,
+        peakInputTokens: 0,
         accountRequests: [0],
       });
     }
@@ -222,24 +228,67 @@ test("网关（单账号）：429 在该账号上逐级退避后重试；退避�
   );
 });
 
-test("网关：额度 403 交给控制器暂停，暂停期间直接 529 不打上游；交回的正文里没有 key", async () => {
+// DeepSeek 实测的错误正文形状（两个端点都是 OpenAI 风格）
+const deepseekError = (type: string, message: string) =>
+  JSON.stringify({ error: { message, type, param: null, code: "invalid_request_error" } });
+const BALANCE: Scripted = {
+  status: 402,
+  body: deepseekError("invalid_request_error", "Insufficient Balance"),
+};
+const BUSY: Scripted = { status: 503, body: deepseekError("server_error", "Server overloaded") };
+
+test("网关（单账号）：402 余额不足即停批（计一次限额信号，这一步作废、不当真失败），停下期间直接 529 不打上游；交回的正文里没有 key", async () => {
   await withGateway(
     [
       {
-        status: 403,
-        body: '{"error":{"type":"permission_error","message":"usage limit reached for key-one, quota will reset soon"}}',
+        status: 402,
+        body: deepseekError("invalid_request_error", "Insufficient Balance for key-one"),
       },
     ],
     async (g, up, l) => {
-      const quota = await post(g, "j");
-      assert.equal(quota.status, 403);
-      assert.doesNotMatch(await quota.text(), /key-one/);
-      assert.equal(l.state, "paused");
-      assert.equal(l.pausesSince(0)[0]?.kind, "5h");
+      const balance = await post(g, "j");
+      assert.equal(balance.status, 402);
+      assert.doesNotMatch(await balance.text(), /key-one/);
+      assert.equal(l.state, "stopped");
+      assert.equal(l.signals, 1, "限额信号：跑批器据此作废这一步");
+      assert.match(l.stopReason ?? "", /余额不足/);
+      assert.equal(g.accountStatus()[0]?.down, "balance");
+      assert.equal(g.meter("j").upstreamFailures, 0, "不是上游故障");
       const blocked = await post(g, "j");
       assert.equal(blocked.status, 529);
       assert.match(await blocked.text(), /网关暂停/);
-      assert.equal(up.seen.length, 1, "暂停期间不打上游");
+      assert.equal(await g.probe(), false, "余额不足的账号不探测");
+      assert.equal(up.seen.length, 1, "停下期间不打上游");
+    }
+  );
+});
+
+test("网关（单账号）：503 服务器繁忙按 429 同样退避后重试，不记上游故障、不作废；退避用满即该账号暂时不可用、整批暂停", async () => {
+  await withGateway([BUSY, { status: 200, body: "{}" }, BUSY, BUSY, BUSY], async (g, up, l) => {
+    assert.equal((await post(g, "j")).status, 200, "退避一次后成功");
+    assert.equal(g.meter("j").upstreamFailures, 0);
+    assert.equal(l.signals, 0);
+    const exhausted = await post(g, "j");
+    assert.equal(exhausted.status, 503);
+    assert.equal(up.seen.length, 5);
+    assert.equal(l.state, "paused");
+    assert.equal(l.pausesSince(0)[0]?.kind, "busy");
+    assert.equal(g.accountStatus()[0]?.down, "busy");
+  });
+});
+
+test("网关（单账号）：500 服务器故障不动账号、这次请求退避重试有限次——重试后成功即照常；用满仍是 500 即交回并记上游故障（这一步作废重做）", async () => {
+  const E500: Scripted = { status: 500, body: deepseekError("server_error", "internal error") };
+  await withGateway(
+    [E500, E500, { status: 200, body: "{}" }, E500, E500, E500],
+    async (g, up, l) => {
+      assert.equal((await post(g, "a")).status, 200, "两次 500 之后成功");
+      assert.equal(g.meter("a").upstreamFailures, 0);
+      const failed = await post(g, "b");
+      assert.equal(failed.status, 500, "首次加两次重试都是 500：交回");
+      assert.equal(g.meter("b").upstreamFailures, 1);
+      assert.equal(up.seen.length, 6);
+      assert.deepEqual([l.state, l.signals, g.accountStatus()[0]?.down], ["running", 0, null]);
     }
   );
 });
@@ -262,11 +311,17 @@ test("网关（单账号）：认不出的 403 按 other 交回（正文不含 k
   );
 });
 
-test("网关（单账号）：认证 403 交回（正文不含 key）、记为上游故障，该账号停用；唯一的账号停用即整批停下", async () => {
-  await withGateway([{ status: 403, body: "invalid api key: key-one" }], async (g, up, l) => {
+test("网关（单账号）：认证 401 交回（正文不含 key，也不含回显的末四位）、记为上游故障，该账号停用；唯一的账号停用即整批停下", async () => {
+  const body = deepseekError(
+    "authentication_error",
+    "Authentication Fails, Your api key: ****-one is invalid (request_id: 1f2e)"
+  );
+  await withGateway([{ status: 401, body }], async (g, up, l) => {
     const auth = await post(g, "j");
-    assert.equal(auth.status, 403);
-    assert.equal(await auth.text(), "invalid api key: [key]");
+    assert.equal(auth.status, 401);
+    const text = await auth.text();
+    assert.doesNotMatch(text, /-one/);
+    assert.match(text, /Your api key: \[key\] is invalid/);
     assert.equal(g.meter("j").upstreamFailures, 1, "这一步按上游故障作废重做，不以认证错误判题");
     assert.equal(g.accountStatus()[0]?.down, "auth");
     assert.equal(l.state, "stopped");
@@ -278,7 +333,7 @@ test("网关（单账号）：认证 403 交回（正文不含 key）、记为�
 
 const ANTHROPIC_SSE = [
   "event: message_start",
-  'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"kimi-for-coding","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}',
+  'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":64,"output_tokens":0,"service_tier":"standard"}}}',
   "",
   "event: content_block_start",
   'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
@@ -290,7 +345,7 @@ const ANTHROPIC_SSE = [
   'data: {"type":"content_block_stop","index":0}',
   "",
   "event: message_delta",
-  'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}',
+  'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":64,"output_tokens":5,"service_tier":"standard"}}',
   "",
   "event: message_stop",
   'data: {"type":"message_stop"}',
@@ -319,15 +374,22 @@ test("网关：Pigeon 的模型接入经网关走通上游 SDK——路径、真
       assert.equal(text, "你好");
       assert.equal(up.seen[0]?.path, "/v1/messages");
       assert.equal(up.seen[0]?.key, "key-one");
+      // 自构模型对象的请求参数（决策 203）：模型名 deepseek-flash、显式关思考、单次输出上限 16384
+      const sent = JSON.parse(up.seen[0]?.body ?? "{}") as Record<string, unknown>;
+      assert.equal(sent.model, "deepseek-flash");
+      assert.deepEqual(sent.thinking, { type: "disabled" });
+      assert.equal(sent.max_tokens, 16384);
       assert.deepEqual(g.meter("s1|no-gate|1"), {
         requests: 1,
         input: 12,
         output: 5,
-        cacheRead: 0,
+        cacheRead: 64,
         cacheWrite: 0,
+        costCny: requestCostCny({ input: 12, cacheRead: 64, cacheWrite: 0, output: 5 }, 0, 0).cny,
         upstreamFailures: 0,
         queueMs: 0,
         peakInFlight: 1,
+        peakInputTokens: 76,
         accountRequests: [1],
       });
     }
@@ -354,20 +416,17 @@ test("网关：探测发极小请求，上游 200 即恢复；非 200 为未恢�
   );
 });
 
-test("网关（单账号）：上游 5xx 记为出事作业的上游故障、不算限额；403 并发受限降该账号上限后透明重试；已是 1 仍受限即整批暂停", async () => {
+test("网关（单账号）：上游 502 记为出事作业的上游故障、不算限额；403 并发受限降该账号上限后透明重试；已是 1 仍受限即整批暂停", async () => {
   await withGateway(
     [
-      {
-        status: 503,
-        body: '{"type":"error","error":{"type":"overloaded_error","message":"busy"}}',
-      },
+      { status: 502, body: "bad gateway" },
       { status: 403, body: "too many concurrent requests" },
       { status: 200, body: "{}" },
       { status: 403, body: "too many concurrent requests" },
     ],
     async (g, _up, l) => {
       const r1 = await post(g, "s1|minimal|1");
-      assert.equal(r1.status, 503);
+      assert.equal(r1.status, 502);
       await r1.text();
       assert.equal(g.meter("s1|minimal|1").upstreamFailures, 1);
       assert.equal(g.meter("s1|full|1").upstreamFailures, 0, "别的作业不受影响");
@@ -446,7 +505,6 @@ async function withAccounts(
     backoffDelaysMs?: number[];
     virtual?: boolean;
     autoBelowMs?: number;
-    quotaHoldMinMs?: number;
   } = {}
 ) {
   const up = await keyedUpstream(respond);
@@ -459,8 +517,6 @@ async function withAccounts(
       : {}),
   });
   const g = await startModelGateway({
-    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
-    quotaHoldMinMs: gatewayOptions.quotaHoldMinMs ?? 0,
     upstreamBaseUrl: up.url,
     accounts,
     limits: l,
@@ -478,7 +534,8 @@ async function withAccounts(
 }
 
 const OK: Scripted = { status: 200, body: "{}" };
-const QUOTA: Scripted = { status: 403, body: "usage limit reached, quota will reset in 5 hours" };
+// 退避级数为空时一次 503 即该账号暂时不可用（按间隔探测恢复）：用来检验账号停用、换号与恢复本身
+const NO_BACKOFF = { backoffDelaysMs: [] as number[] };
 
 test("多账号：一个账号 429 退避用满即该账号暂时不可用、请求换号，整批不暂停；按账号记请求数；告警与正文不出现 key", async () => {
   await withAccounts(
@@ -501,26 +558,26 @@ test("多账号：一个账号 429 退避用满即该账号暂时不可用、请
   );
 });
 
-test("多账号：一个账号额度 403 只停该账号，同一请求透明换号重试；全部账号额度用完才整批暂停；单独探测恢复一个账号即立即恢复整批", async () => {
-  let aQuota = true;
+test("多账号：一个账号暂时不可用只停该账号，同一请求透明换号重试；全部账号不可用才整批暂停；单独探测恢复一个账号即立即恢复整批", async () => {
+  let aBusy = true;
   await withAccounts(
-    { "key-a": () => (aQuota ? QUOTA : OK), "key-b": (n) => (n === 1 ? OK : QUOTA) },
+    { "key-a": () => (aBusy ? BUSY : OK), "key-b": (n) => (n === 1 ? OK : BUSY) },
     [
       { key: "key-a", concurrency: 2 },
       { key: "key-b", concurrency: 2 },
     ],
     async (g, up, l, _w, clock) => {
       const r1 = await post(g, "j");
-      assert.equal(r1.status, 200, "账号 1 额度用完：换到账号 2，客户端看不到");
+      assert.equal(r1.status, 200, "账号 1 不可用：换到账号 2，客户端看不到");
       assert.deepEqual(up.seen, ["key-a", "key-b"]);
       assert.deepEqual([l.state, l.signals], ["running", 0]);
-      assert.equal(g.accountStatus()[0]?.down, "5h");
+      assert.equal(g.accountStatus()[0]?.down, "busy");
       const r2 = await post(g, "j");
-      assert.equal(r2.status, 403, "最后一个账号也额度用完：交回 403");
+      assert.equal(r2.status, 503, "最后一个账号也不可用：交回 503");
       assert.equal(l.state, "paused");
-      assert.equal(l.pausesSince(0)[0]?.kind, "5h");
+      assert.equal(l.pausesSince(0)[0]?.kind, "busy");
       assert.equal((await post(g, "j")).status, 529, "暂停期间直接拒绝");
-      aQuota = false;
+      aBusy = false;
       // 控制器的探测不探正在单独探测的账号：一个请求也不发
       assert.equal(await g.probe(), false);
       assert.deepEqual(up.probes, []);
@@ -529,37 +586,56 @@ test("多账号：一个账号额度 403 只停该账号，同一请求透明换
       await until(() => up.probes.length === 2, "两个账号各探一次");
       await until(() => l.state === "running", "整批恢复");
       assert.equal(g.accountStatus()[0]?.down, null);
-      assert.equal(g.accountStatus()[1]?.down, "5h", "没通过探测的账号仍不可用");
+      assert.equal(g.accountStatus()[1]?.down, "busy", "没通过探测的账号仍不可用");
       assert.notEqual(l.pausesSince(0)[0]?.endedAt, null);
       assert.equal((await post(g, "j")).status, 200);
-    }
+    },
+    NO_BACKOFF
   );
 });
 
-test("多账号：每月额度用完的账号不再恢复；全部账号都是每月额度用完即停下", async () => {
+test("多账号：余额不足的账号不再恢复、请求换号；全部账号都是余额不足即停下；错误正文去密钥后记一次日志", async () => {
   await withAccounts(
-    { "key-a": () => ({ status: 403, body: "monthly usage limit reached" }), "key-b": () => QUOTA },
+    { "key-a": () => BALANCE, "key-b": () => BUSY },
     [
       { key: "key-a", concurrency: 1 },
       { key: "key-b", concurrency: 1 },
     ],
     async (g, _up, l) => {
-      assert.equal((await post(g, "j")).status, 403);
+      assert.equal((await post(g, "j")).status, 503);
       assert.equal(l.state, "paused", "还有能恢复的账号：暂停而不是停下");
       assert.deepEqual(
         g.accountStatus().map((a) => a.down),
-        ["monthly", "5h"]
+        ["balance", "busy"]
+      );
+    },
+    NO_BACKOFF
+  );
+  await withAccounts(
+    { "key-a": () => BALANCE, "key-b": () => OK },
+    [
+      { key: "key-a", concurrency: 1 },
+      { key: "key-b", concurrency: 1 },
+    ],
+    async (g, _up, l, warnings) => {
+      assert.equal((await post(g, "j")).status, 200, "账号 1 余额不足：换到账号 2");
+      assert.deepEqual([l.state, l.signals], ["running", 0]);
+      assert.ok(warnings.some((w) => /账号 1余额不足：不再使用/.test(w)));
+      assert.ok(
+        warnings.some((w) =>
+          /账号 1上游错误（已去密钥）：invalid_request_error.*Insufficient Balance/.test(w)
+        )
       );
     }
   );
   await withAccounts(
-    { "key-a": () => ({ status: 403, body: "monthly usage limit reached" }) },
+    { "key-a": () => BALANCE },
     [{ key: "key-a", concurrency: 1 }],
     async (g, up, l) => {
-      assert.equal((await post(g, "j")).status, 403);
+      assert.equal((await post(g, "j")).status, 402);
       assert.equal(l.state, "stopped");
       assert.equal(await g.probe(), false);
-      assert.equal(up.seen.length, 1, "每月额度用完的账号不探测");
+      assert.equal(up.seen.length, 1, "余额不足的账号不探测");
     }
   );
 });
@@ -619,72 +695,72 @@ test("多账号：作业的在途峰值——同一作业并发两个请求记 2
   );
 });
 
-test("账号配置：KIMI_API_KEY 为账号 1，KIMI_API_KEY_2、_3… 依次为后续账号；并发缺省 2，可按账号覆盖；取值不合法即报错", () => {
+test("账号配置：DEEPSEEK_API_KEY 为账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号；并发缺省 2500（官方单账号上限），可按账号覆盖；取值不合法即报错", () => {
   assert.deepEqual(
     gatewayAccountsFromEnv({
-      KIMI_API_KEY: "a",
-      KIMI_API_KEY_2: "b",
-      KIMI_API_KEY_3: "c",
-      KIMI_API_KEY_3_CONCURRENCY: "4",
-      KIMI_API_KEY_1_CONCURRENCY: "1",
+      DEEPSEEK_API_KEY: "a",
+      DEEPSEEK_API_KEY_2: "b",
+      DEEPSEEK_API_KEY_3: "c",
+      DEEPSEEK_API_KEY_3_CONCURRENCY: "4",
+      DEEPSEEK_API_KEY_1_CONCURRENCY: "1",
     }),
     [
       { key: "a", concurrency: 1 },
-      { key: "b", concurrency: 2 },
+      { key: "b", concurrency: 2500 },
       { key: "c", concurrency: 4 },
     ]
   );
-  assert.deepEqual(gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_2: "" }), [
-    { key: "a", concurrency: 2 },
+  assert.deepEqual(gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_2: "" }), [
+    { key: "a", concurrency: 2500 },
   ]);
-  assert.throws(() => gatewayAccountsFromEnv({}), /KIMI_API_KEY/);
+  assert.throws(() => gatewayAccountsFromEnv({}), /DEEPSEEK_API_KEY/);
   assert.throws(
-    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_1_CONCURRENCY: "0" }),
-    /KIMI_API_KEY_1_CONCURRENCY/
+    () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_1_CONCURRENCY: "0" }),
+    /DEEPSEEK_API_KEY_1_CONCURRENCY/
   );
   assert.throws(
-    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_3: "c" }),
-    /KIMI_API_KEY_2/,
+    () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_3: "c" }),
+    /DEEPSEEK_API_KEY_2/,
     "编号不连续即报错，免得漏掉账号"
   );
 });
 
-test("账号配置：账号数超过上限、并发变量指向不存在的账号、KIMI_API_KEY_1 都响亮报错，不静默忽略", () => {
-  const nine: Record<string, string> = { KIMI_API_KEY: "k1" };
-  for (let n = 2; n <= 9; n++) nine[`KIMI_API_KEY_${n}`] = `k${n}`;
+test("账号配置：账号数超过上限、并发变量指向不存在的账号、DEEPSEEK_API_KEY_1 都响亮报错，不静默忽略", () => {
+  const nine: Record<string, string> = { DEEPSEEK_API_KEY: "k1" };
+  for (let n = 2; n <= 9; n++) nine[`DEEPSEEK_API_KEY_${n}`] = `k${n}`;
   assert.equal(gatewayAccountsFromEnv(nine).length, 9);
   assert.throws(
-    () => gatewayAccountsFromEnv({ ...nine, KIMI_API_KEY_10: "k10" }),
-    /KIMI_API_KEY_10.*至多 9 个/
+    () => gatewayAccountsFromEnv({ ...nine, DEEPSEEK_API_KEY_10: "k10" }),
+    /DEEPSEEK_API_KEY_10.*至多 9 个/
   );
   assert.throws(
-    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_12: "x" }),
+    () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_12: "x" }),
     /至多 9 个/,
     "远超上限的编号也报错，不因跳号检查只查到上限而漏掉"
   );
   assert.throws(
     () =>
       gatewayAccountsFromEnv({
-        KIMI_API_KEY: "a",
-        KIMI_API_KEY_2: "b",
-        KIMI_API_KEY_3_CONCURRENCY: "4",
+        DEEPSEEK_API_KEY: "a",
+        DEEPSEEK_API_KEY_2: "b",
+        DEEPSEEK_API_KEY_3_CONCURRENCY: "4",
       }),
-    /KIMI_API_KEY_3_CONCURRENCY.*没有账号 3/
+    /DEEPSEEK_API_KEY_3_CONCURRENCY.*没有账号 3/
   );
   assert.throws(
-    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_1: "b" }),
-    /KIMI_API_KEY_1/
+    () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_1: "b" }),
+    /DEEPSEEK_API_KEY_1/
   );
   assert.throws(
-    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_02: "b" }),
+    () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_02: "b" }),
     /写法不对/
   );
   // 空值等于没设：不报错
   assert.equal(
     gatewayAccountsFromEnv({
-      KIMI_API_KEY: "a",
-      KIMI_API_KEY_5: "",
-      KIMI_API_KEY_5_CONCURRENCY: "",
+      DEEPSEEK_API_KEY: "a",
+      DEEPSEEK_API_KEY_5: "",
+      DEEPSEEK_API_KEY_5_CONCURRENCY: "",
     }).length,
     1
   );
@@ -733,8 +809,6 @@ test("在途计数不泄漏：读 429 错误正文时客户端中止、或上游
   for (const mode of ["hang", "drop"] as const) {
     const up = await stallingUpstream();
     const g = await startModelGateway({
-      // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
-      quotaHoldMinMs: 0,
       upstreamBaseUrl: up.url,
       accounts: [{ key: "key-one", concurrency: 1 }],
       limits: limits(),
@@ -855,42 +929,6 @@ test("429 退避时长（可控时钟）：单账号两路一直撞 429，依次
   );
 });
 
-test("冷却定时器带代次号：账号恢复之后开始的新冷却，不被恢复前那一轮的旧定时器提前结束", async () => {
-  const held: ((s: Scripted) => void)[] = [];
-  await withAccounts(
-    {
-      "key-a": (n, probe) =>
-        probe ? OK : n <= 2 ? new Promise<Scripted>((r) => held.push(r)) : RATE,
-    },
-    [{ key: "key-a", concurrency: 2 }],
-    async (g, up, l, _w, clock) => {
-      const p1 = post(g, "j");
-      const p2 = post(g, "j");
-      await until(() => held.length === 2, "两路都在途");
-      held.shift()?.(RATE);
-      await until(() => g.accountStatus()[0]?.cooling === true, "第一轮冷却（10 分钟）");
-      held.shift()?.(QUOTA);
-      await until(() => l.state === "paused", "额度用完、整批暂停");
-      assert.equal((await p1).status, 429);
-      assert.equal((await p2).status, 403);
-      // 5 分钟：单独探测通过，账号恢复、整批恢复；旧冷却的定时器（第 10 分钟到）仍在
-      await clock.advance(5 * 60_000);
-      await until(() => l.state === "running", "整批恢复");
-      const p3 = post(g, "j");
-      await until(() => up.seen.length === 3, "恢复后的请求撞 429");
-      await until(() => g.accountStatus()[0]?.cooling === true, "新一轮冷却（到第 15 分钟）");
-      // 第 10 分钟：旧定时器到点，不得结束新的冷却
-      await clock.advance(5 * 60_000);
-      await new Promise((r) => setTimeout(r, 50));
-      assert.equal(g.accountStatus()[0]?.cooling, true, "旧定时器不结束新冷却");
-      assert.equal(up.seen.length, 3, "冷却中不派请求");
-      await clock.advance(5 * 60_000);
-      assert.equal((await p3).status, 429);
-    },
-    { backoffDelaysMs: [10 * 60_000], virtual: true }
-  );
-});
-
 test("探测占额度：探测占该账号一个在途位子，满了等空出；探测在途时新请求排队", async () => {
   const held: ((s: Scripted) => void)[] = [];
   const probeHeld: ((s: Scripted) => void)[] = [];
@@ -977,8 +1015,8 @@ test("探测占额度：暂停期间控制器的探测跳过正在单独探测�
           ? new Promise<Scripted>((r) => probeHeld.push(r))
           : n === 1
             ? new Promise<Scripted>((r) => held.push(r))
-            : QUOTA,
-      "key-b": (_n, probe) => (probe ? new Promise<Scripted>((r) => probeHeld.push(r)) : QUOTA),
+            : BUSY,
+      "key-b": (_n, probe) => (probe ? new Promise<Scripted>((r) => probeHeld.push(r)) : BUSY),
     },
     [
       { key: "key-a", concurrency: 2 },
@@ -987,7 +1025,7 @@ test("探测占额度：暂停期间控制器的探测跳过正在单独探测�
     async (g, up, l, _w, clock) => {
       const p1 = post(g, "j1");
       await until(() => held.length === 1, "账号 1 上有一个在途请求");
-      assert.equal((await post(g, "j2")).status, 403);
+      assert.equal((await post(g, "j2")).status, 503);
       assert.equal(l.state, "paused");
       for (let i = 0; i < 3; i++) assert.equal(await g.probe(), false);
       assert.deepEqual(up.probes, [], "控制器不探正在单独探测的账号");
@@ -1007,18 +1045,19 @@ test("探测占额度：暂停期间控制器的探测跳过正在单独探测�
       await until(() => l.state === "running", "单独探测通过即恢复整批");
       held.shift()?.(OK);
       assert.equal((await p1).status, 200);
-    }
+    },
+    NO_BACKOFF
   );
 });
 
-test("开跑前逐账号探测：凡不是成功、也不是额度、并发、限流的（认证失败、认不出的 403、5xx）一律拒绝开跑并报出账号编号（不含 key）", async () => {
+test("开跑前逐账号探测：凡不是成功、也不是并发、限流、繁忙的（认证失败、余额不足、认不出的 403、500）一律拒绝开跑并报出账号编号（不含 key）", async () => {
   await withAccounts(
     {
       "key-a": () => OK,
       "key-b": () => ({ status: 401, body: '{"error":{"message":"invalid api key key-b"}}' }),
       "key-c": () => ({ status: 403, body: "forbidden" }),
-      "key-d": () => QUOTA,
-      "key-e": () => ({ status: 503, body: "busy" }),
+      "key-d": () => BALANCE,
+      "key-e": () => ({ status: 500, body: "boom" }),
     },
     [
       { key: "key-a", concurrency: 1 },
@@ -1031,7 +1070,7 @@ test("开跑前逐账号探测：凡不是成功、也不是额度、并发、�
       await assert.rejects(g.preflight(), (e: Error) => {
         assert.match(
           e.message,
-          /账号 2（认证失败）、账号 3（认不出的回应或连不上）、账号 5（认不出的回应或连不上）/
+          /账号 2（认证失败）、账号 3（认不出的回应或连不上）、账号 4（余额不足）、账号 5（认不出的回应或连不上）/
         );
         assert.doesNotMatch(e.message, /key-/);
         return true;
@@ -1042,7 +1081,7 @@ test("开跑前逐账号探测：凡不是成功、也不是额度、并发、�
   await withAccounts(
     {
       "key-a": () => OK,
-      "key-b": () => QUOTA,
+      "key-b": () => BUSY,
       "key-c": () => CONCURRENT,
       "key-d": () => RATE,
     },
@@ -1054,15 +1093,13 @@ test("开跑前逐账号探测：凡不是成功、也不是额度、并发、�
     ],
     async (g, _up, _l, warnings) => {
       await g.preflight();
-      for (const n of [3, 4]) {
+      for (const n of [2, 3, 4]) {
         assert.ok(
           warnings.some((w) => w.startsWith(`账号 ${n}开跑前探测撞上限额`)),
-          `并发、限流只告警，开跑后照常处理（账号 ${n}）`
+          `繁忙、并发、限流只告警，开跑后照常处理（账号 ${n}）`
         );
       }
-      // 额度用完的账号直接置为不可用：容量从一开始就不含它（其余三个账号各 1），按间隔探测恢复
-      assert.ok(warnings.some((w) => w.startsWith("账号 2额度用完，暂时不可用")));
-      assert.equal(g.capacity(), 3);
+      assert.equal(g.capacity(), 4);
     }
   );
 });
@@ -1184,13 +1221,11 @@ test("收尾：close() 取消冷却、单独探测与上限回升的定时，跑
   };
   const up = await keyedUpstream({
     "key-a": () => RATE,
-    "key-b": () => QUOTA,
+    "key-b": () => BUSY,
     "key-c": (n) => (n === 1 ? CONCURRENT : OK),
   });
   const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
   const g = await startModelGateway({
-    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
-    quotaHoldMinMs: 0,
     upstreamBaseUrl: up.url,
     accounts: [
       { key: "key-a", concurrency: 2 },
@@ -1200,12 +1235,14 @@ test("收尾：close() 取消冷却、单独探测与上限回升的定时，跑
     limits: limits(),
     probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
     concurrencyRetryDelayMs: 1,
+    // 账号 1 只退避一级即不可用：之后等 5 分钟探测
+    backoffDelaysMs: [5_000],
     clock,
     warn: () => {},
   });
   try {
     assert.equal((await post(g, "j")).status, 200);
-    // 账号 1 冷却 5 秒、账号 2 等 5 分钟探测、账号 3 等 30 分钟回升上限
+    // 账号 1 冷却 5 秒、账号 2 冷却 5 秒、账号 3 等 30 分钟回升上限
     assert.ok(live.size >= 3, `应有三个未到的定时，实有 ${live.size}`);
   } finally {
     await g.close();
@@ -1238,11 +1275,10 @@ test("上限回升：因 403 并发降下的上限每 30 分钟回升 1，最多
   );
 });
 
-test("每月额度：单独探测中发现已转为每月额度的账号停止探测；最后一个能恢复的账号转为每月额度即整批停下", async () => {
+test("余额不足：单独探测中发现已余额不足的账号停止探测；最后一个能恢复的账号转为余额不足即整批停下", async () => {
   await withAccounts(
     {
-      "key-a": (_n, probe) =>
-        probe ? { status: 403, body: "monthly usage limit reached" } : QUOTA,
+      "key-a": (_n, probe) => (probe ? BALANCE : BUSY),
       "key-b": () => OK,
     },
     [
@@ -1251,40 +1287,39 @@ test("每月额度：单独探测中发现已转为每月额度的账号停止�
     ],
     async (g, up, l, _w, clock) => {
       assert.equal((await post(g, "j")).status, 200);
-      assert.equal(g.accountStatus()[0]?.down, "5h");
+      assert.equal(g.accountStatus()[0]?.down, "busy");
       await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
-      await until(() => g.accountStatus()[0]?.down === "monthly", "转为每月额度");
+      await until(() => g.accountStatus()[0]?.down === "balance", "转为余额不足");
       await clock.advance(24 * 60 * 60_000);
       await new Promise((r) => setTimeout(r, 50));
       assert.deepEqual(up.probes, ["key-a"], "之后不再探测");
       assert.equal(l.state, "running");
-    }
+    },
+    NO_BACKOFF
   );
   await withAccounts(
-    {
-      "key-a": (_n, probe) =>
-        probe ? { status: 403, body: "monthly usage limit reached" } : QUOTA,
-    },
+    { "key-a": (_n, probe) => (probe ? BALANCE : BUSY) },
     [{ key: "key-a", concurrency: 1 }],
     async (g, _up, l, _w, clock) => {
-      assert.equal((await post(g, "j")).status, 403);
+      assert.equal((await post(g, "j")).status, 503);
       assert.equal(l.state, "paused");
       await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
       await until(() => l.state === "stopped", "整批停下");
-      assert.match(l.stopReason ?? "", /每月额度/);
-    }
+      assert.match(l.stopReason ?? "", /余额不足/);
+    },
+    NO_BACKOFF
   );
 });
 
-test("账号配置：KIMI_API_KEY_ 前缀下认不出的变量名一律报错，报错只写变量名、不写取值", () => {
+test("账号配置：DEEPSEEK_API_KEY_ 前缀下认不出的变量名一律报错，报错只写变量名、不写取值", () => {
   for (const name of [
-    "KIMI_API_KEY_CONCURRENCY",
-    "KIMI_API_KEY_2_CONCURENCY",
-    "KIMI_API_KEY_B",
-    "KIMI_API_KEY_",
+    "DEEPSEEK_API_KEY_CONCURRENCY",
+    "DEEPSEEK_API_KEY_2_CONCURENCY",
+    "DEEPSEEK_API_KEY_B",
+    "DEEPSEEK_API_KEY_",
   ]) {
     assert.throws(
-      () => gatewayAccountsFromEnv({ KIMI_API_KEY: "secret-a", [name]: "secret-x" }),
+      () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "secret-a", [name]: "secret-x" }),
       (e: Error) => {
         assert.ok(e.message.startsWith(`${name}：认不出的变量名`), e.message);
         assert.doesNotMatch(e.message, /secret-/);
@@ -1293,11 +1328,11 @@ test("账号配置：KIMI_API_KEY_ 前缀下认不出的变量名一律报错，
     );
   }
   assert.throws(
-    () => gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEY_CONCURRENCY: "" }),
-    /KIMI_API_KEY_CONCURRENCY：认不出/,
+    () => gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEY_CONCURRENCY: "" }),
+    /DEEPSEEK_API_KEY_CONCURRENCY：认不出/,
     "取值为空的也报：多半是写错了名字"
   );
-  assert.equal(gatewayAccountsFromEnv({ KIMI_API_KEY: "a", KIMI_API_KEYS: "x" }).length, 1);
+  assert.equal(gatewayAccountsFromEnv({ DEEPSEEK_API_KEY: "a", DEEPSEEK_API_KEYS: "x" }).length, 1);
 });
 
 test("开跑前校验：路数大于各账号配置并发之和即拒绝开跑，报出两个数（不含 key）", () => {
@@ -1318,8 +1353,8 @@ test("开跑前校验：路数大于各账号配置并发之和即拒绝开跑�
 });
 
 // 可用容量（决策 163）：未停用账号当前并发上限之和
-test("可用容量：额度停用、上限降低即下降，恢复与回升即回到原值，每次变化都通知；429 退避期间不下降、不通知", async () => {
-  let aState: "ok" | "rate" | "quota" | "concurrent" = "ok";
+test("可用容量：上限降低、账号停用即下降，恢复与回升即回到原值，每次变化都通知；429 退避期间不下降、不通知", async () => {
+  let aState: "ok" | "rate" | "concurrent" = "ok";
   await withAccounts(
     {
       "key-a": (_n, probe) => {
@@ -1329,7 +1364,7 @@ test("可用容量：额度停用、上限降低即下降，恢复与回升即�
           aState = "ok";
           return CONCURRENT;
         }
-        return aState === "rate" ? RATE : aState === "quota" ? QUOTA : OK;
+        return aState === "rate" ? RATE : OK;
       },
       "key-b": () => OK,
       "key-c": () => OK,
@@ -1354,14 +1389,15 @@ test("可用容量：额度停用、上限降低即下降，恢复与回升即�
       await until(() => g.accountStatus()[0]?.cooling === false, "冷却结束");
       assert.equal((await post(g, "j")).status, 200);
       assert.deepEqual([g.capacity(), notified], [5, 1], "上限降 1");
-      await clock.advance(30 * 60_000);
-      assert.deepEqual([g.capacity(), notified], [6, 2], "上限回升");
-      aState = "quota";
-      assert.equal((await post(g, "j")).status, 200);
-      assert.deepEqual([g.capacity(), notified], [4, 3], "账号 1 额度停用");
+      // 上限已是 1 时派出的请求再受限：账号 1 暂时不可用，容量去掉它
+      aState = "concurrent";
+      assert.equal((await post(g, "j")).status, 200, "换号");
+      assert.deepEqual([g.capacity(), notified], [4, 2], "账号 1 停用");
       await clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
-      await until(() => g.capacity() === 6, "单独探测通过、账号恢复");
-      assert.equal(notified, 4);
+      await until(() => g.capacity() === 5, "单独探测通过、账号恢复（上限仍是 1）");
+      assert.equal(notified, 3);
+      await clock.advance(30 * 60_000);
+      assert.deepEqual([g.capacity(), notified], [6, 4], "上限回升");
       stop();
     },
     { backoffDelaysMs: [5_000, 15_000, 45_000], autoBelowMs: 4_000 }
@@ -1414,8 +1450,6 @@ test("收尾：关闭之后不再新设定时——关闭时同一作业还有�
   const held: ((s: Scripted) => void)[] = [];
   const up = await keyedUpstream({ "key-a": () => new Promise<Scripted>((r) => held.push(r)) });
   const g = await startModelGateway({
-    // 最短停用期另有专门用例；这里检验探测与恢复本身，不设最短停用期
-    quotaHoldMinMs: 0,
     upstreamBaseUrl: up.url,
     accounts: [{ key: "key-a", concurrency: 1 }],
     limits: limits(),
@@ -1439,212 +1473,321 @@ test("收尾：关闭之后不再新设定时——关闭时同一作业还有�
   }
 });
 
-// 不带重置时刻的额度 403 正文（按封顶规则）
-const QUOTA_NO_RESET = "usage limit reached for this account";
+// ---- 花费（决策 235）：逐请求按开始与结束时刻计价、全局累计落盘续算、到上限停批 ----
 
-// 最短停用期的用例：两个账号，账号 1 按开关回额度 403（正文可设，缺省不带重置时刻）或 200，账号 2 一直 200；
-// 虚拟时钟（从 0 起），探测按 5 至 30 分钟的间隔手动拨到
-async function withQuotaHold(
-  run: (ctx: {
-    g: ModelGateway;
-    up: Awaited<ReturnType<typeof keyedUpstream>>;
-    warnings: string[];
-    clock: ReturnType<typeof testClock>;
-    setQuota: (on: boolean, body?: string) => void;
-    elapsed: () => number;
-  }) => Promise<void>
+// 北京时间的时刻
+const bj = (date: string, time: string) => Date.parse(`${date}T${time}+08:00`);
+
+// 手动时钟：now 取 t；定时在下一轮事件循环即触发（这些用例不看退避与探测间隔）
+function fixedClock(start: number) {
+  const state = { t: start };
+  const clock: GatewayClock = {
+    now: () => state.t,
+    setTimer(_ms, fn) {
+      const x = setImmediate(fn);
+      return () => clearImmediate(x);
+    },
+  };
+  return { state, clock };
+}
+
+// 假上游：回应前把时钟拨到 endAt（模拟请求耗时跨过某个时刻），回 DeepSeek 形状的流式或非流式用量
+async function timedUpstream(
+  state: { t: number },
+  steps: { endAt: number; usage: Record<string, number>; stream?: boolean }[]
 ) {
-  let quota = false;
-  let quotaBody = QUOTA_NO_RESET;
-  let offset = 0;
-  await withAccounts(
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      // 读完请求体
+    }
+    const step = steps.shift();
+    if (step === undefined) {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end("脚本用完");
+      return;
+    }
+    state.t = step.endAt;
+    const usage = {
+      input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      output_tokens: 0,
+      ...step.usage,
+    };
+    if (step.stream === false) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ type: "message", content: [], usage }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      [
+        "event: message_start",
+        `data: ${JSON.stringify({ type: "message_start", message: { usage: { ...usage, output_tokens: 0 } } })}`,
+        "",
+        "event: message_delta",
+        `data: ${JSON.stringify({ type: "message_delta", usage })}`,
+        "",
+        "",
+      ].join("\n")
+    );
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close: () =>
+      new Promise<void>((r) => {
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
+}
+
+// 这几例起的网关：断言失败时也要在 finally 里全部关掉，否则监听不关、测试进程退不出
+const spendGateways = new Set<ModelGateway>();
+async function closeSpendGateways() {
+  for (const g of spendGateways) await g.close();
+  spendGateways.clear();
+}
+
+async function spendGateway(
+  url: string,
+  clock: GatewayClock,
+  l: LimitController,
+  spend: { file?: string; limitCny?: number } = {}
+) {
+  const g = await startModelGateway({
+    upstreamBaseUrl: url,
+    accounts: [{ key: "key-one", concurrency: 2 }],
+    limits: l,
+    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+    clock,
+    spend,
+    warn: () => {},
+  });
+  spendGateways.add(g);
+  return g;
+}
+
+const near = (a: number, b: number) => Math.abs(a - b) < 1e-12;
+
+test("花费：每条请求按开始与结束时刻计价——跨入高峰的整条按高峰价，空闲时段按空闲价；记到作业并计入全局累计；探测也计入全局累计", async () => {
+  const { state, clock } = fixedClock(bj("2026-09-28", "08:59:50"));
+  const u1 = { input_tokens: 1000, cache_read_input_tokens: 64_000, output_tokens: 200 };
+  const u2 = { input_tokens: 500, cache_read_input_tokens: 0, output_tokens: 100 };
+  const up = await timedUpstream(state, [
+    { endAt: bj("2026-09-28", "09:00:05"), usage: u1 },
+    { endAt: bj("2026-09-28", "12:30:10"), usage: u2 },
     {
-      "key-a": () => (quota ? { status: 403, body: quotaBody } : OK),
-      "key-b": () => OK,
+      endAt: bj("2026-09-28", "12:31:00"),
+      usage: { input_tokens: 5, output_tokens: 1 },
+      stream: false,
     },
-    [
-      { key: "key-a", concurrency: 1 },
-      { key: "key-b", concurrency: 1 },
-    ],
-    async (g, up, _l, warnings, clock) => {
-      const advance = clock.advance.bind(clock);
-      clock.advance = async (ms: number) => {
-        offset += ms;
-        await advance(ms);
-      };
-      await run({
-        g,
-        up,
-        warnings,
-        clock,
-        setQuota: (on, body) => {
-          quota = on;
-          quotaBody = body ?? QUOTA_NO_RESET;
-        },
-        elapsed: () => offset,
-      });
-    },
-    { virtual: true, quotaHoldMinMs: QUOTA_HOLD_MIN_MS }
-  );
-}
-
-// 让账号 1 撞额度停用：一个请求先派给它（在途占比相同取编号小的），403 后换到账号 2
-async function quotaDown(ctx: Parameters<Parameters<typeof withQuotaHold>[0]>[0], body?: string) {
-  ctx.setQuota(true, body);
-  assert.equal((await post(ctx.g, "j")).status, 200);
-  assert.equal(ctx.g.accountStatus()[0]?.down, "5h");
-  ctx.setQuota(false);
-}
-
-// 按探测间隔一格一格拨，直到账号 1 恢复；返回用了多少虚拟毫秒
-async function untilRestored(ctx: Parameters<Parameters<typeof withQuotaHold>[0]>[0]) {
-  const from = ctx.elapsed();
-  for (let i = 0; i < 400 && ctx.g.accountStatus()[0]?.down !== null; i++) {
-    const probes = ctx.up.probes.length;
-    await ctx.clock.advance(60_000);
-    if (ctx.up.probes.length > probes)
-      await until(
-        () => ctx.g.accountStatus()[0]?.down === null || ctx.warnings.some((w) => /未满/.test(w)),
-        "探测结果"
-      );
-    await new Promise((r) => setTimeout(r, 20));
+  ]);
+  const l = limits();
+  const g = await spendGateway(up.url, clock, l);
+  try {
+    assert.equal((await (await post(g, "s1|full|1")).text()).length > 0, true);
+    const peak = requestCostCny(
+      { input: 1000, cacheRead: 64_000, cacheWrite: 0, output: 200 },
+      bj("2026-09-28", "08:59:50"),
+      bj("2026-09-28", "09:00:05")
+    );
+    assert.equal(peak.peak, true);
+    assert.ok(near(g.meter("s1|full|1").costCny, peak.cny));
+    // 高峰价是空闲价的两倍：(1000×1 + 64000×0.02 + 200×4) ÷ 100 万 × 2
+    assert.ok(near(peak.cny, ((1000 + 64_000 * 0.02 + 200 * 4) / 1e6) * 2));
+    state.t = bj("2026-09-28", "12:30:00");
+    await (await post(g, "s1|full|1")).text();
+    const idle = requestCostCny(
+      { input: 500, cacheRead: 0, cacheWrite: 0, output: 100 },
+      bj("2026-09-28", "12:30:00"),
+      bj("2026-09-28", "12:30:10")
+    );
+    assert.equal(idle.peak, false);
+    assert.ok(near(g.meter("s1|full|1").costCny, peak.cny + idle.cny));
+    assert.equal(g.meter("s2|full|1").costCny, 0, "别的作业不受影响");
+    // 探测：没有作业，只进全局累计
+    assert.equal(await g.probe(), true);
+    const probe = requestCostCny({ input: 5, cacheRead: 0, cacheWrite: 0, output: 1 }, 0, 0).cny;
+    const spent = g.spend();
+    assert.ok(near(spent.totalCny, peak.cny + idle.cny + probe));
+    assert.deepEqual([spent.requests, spent.peakRequests, spent.limitCny], [3, 1, null]);
+    assert.equal(l.state, "running");
+  } finally {
+    await g.close();
+    await up.close();
   }
-  assert.equal(ctx.g.accountStatus()[0]?.down, null, "最终恢复");
-  return ctx.elapsed() - from;
-}
+});
 
-const holdOf = (warnings: string[]) =>
-  Number(
-    /最短停用期 (\d+) 分钟（期内探测通过也不恢复）/.exec(
-      warnings.filter((w) => /额度用完/.test(w)).at(-1) ?? ""
-    )?.[1]
+test("花费累计落盘：每记一笔即整份写入；进程重启（新网关读同一文件）接着累计；文件认不出即拒绝启动", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "pigeon-spend-"));
+  const file = path.join(dir, "gateway-spend.json");
+  try {
+    const { state, clock } = fixedClock(bj("2026-10-03", "10:00:00"));
+    const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+    const up = await timedUpstream(state, [
+      { endAt: bj("2026-10-03", "10:00:01"), usage },
+      { endAt: bj("2026-10-03", "10:00:02"), usage },
+    ]);
+    try {
+      const first = await spendGateway(up.url, clock, limits(), { file });
+      await (await post(first, "j")).text();
+      await first.close();
+      const saved = JSON.parse(readFileSync(file, "utf8")) as {
+        totalCny: number;
+        requests: number;
+      };
+      // 国庆假期（周六）：空闲价，100 万未命中输入 ¥1
+      assert.ok(near(saved.totalCny, 1));
+      assert.equal(saved.requests, 1);
+      const second = await spendGateway(up.url, clock, limits(), { file });
+      assert.ok(near(second.spend().totalCny, 1), "启动即接着上次的累计");
+      await (await post(second, "j")).text();
+      assert.ok(near(second.spend().totalCny, 2));
+      assert.equal(second.meter("j").costCny, 1, "作业计量只算本进程的请求");
+      await second.close();
+      assert.ok(near((JSON.parse(readFileSync(file, "utf8")) as { totalCny: number }).totalCny, 2));
+    } finally {
+      await closeSpendGateways();
+      await up.close();
+    }
+    writeFileSync(file, "{}");
+    await assert.rejects(
+      spendGateway("http://127.0.0.1:9", fixedClock(0).clock, limits(), { file }),
+      /花费累计文件.*认不出/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("花费上限：累计到上限即交给控制器停批（计一次限额信号，在途的步作废、不当真失败）；之后请求一律 529 不打上游；已到上限的累计文件开跑前即拒绝、不发探测", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "pigeon-spend-"));
+  const file = path.join(dir, "gateway-spend.json");
+  try {
+    const { state, clock } = fixedClock(bj("2026-10-03", "10:00:00"));
+    const usage = { input_tokens: 600_000, output_tokens: 0 };
+    let requests = 0;
+    const steps = [
+      { endAt: bj("2026-10-03", "10:00:01"), usage },
+      { endAt: bj("2026-10-03", "10:00:02"), usage },
+    ];
+    const up = await timedUpstream(state, steps);
+    try {
+      const l = limits();
+      const g = await spendGateway(up.url, clock, l, { file, limitCny: 1 });
+      await (await post(g, "j")).text();
+      requests += 1;
+      assert.deepEqual([l.state, l.signals], ["running", 0], "¥0.6：未到上限");
+      await (await post(g, "j")).text();
+      requests += 1;
+      assert.equal(l.state, "stopped", "¥1.2：到上限即停批");
+      assert.equal(l.signals, 1);
+      assert.match(l.stopReason ?? "", /花费累计 ¥1\.20，已到上限 ¥1/);
+      const blocked = await post(g, "j");
+      assert.equal(blocked.status, 529);
+      assert.equal(steps.length, 0);
+      assert.equal(requests, 2);
+      await g.close();
+      const again = await spendGateway(up.url, clock, limits(), { file, limitCny: 1 });
+      await assert.rejects(again.preflight(), /花费累计 ¥1\.20 已到上限 ¥1：拒绝开跑/);
+      await again.close();
+      // 调高上限即可续跑
+      const raised = await spendGateway(up.url, clock, limits(), { file, limitCny: 5 });
+      assert.equal(raised.spend().limitCny, 5);
+      await raised.close();
+    } finally {
+      await closeSpendGateways();
+      await up.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("用量读法：message_delta 带输入与缓存字段时以它为准（DeepSeek 两处都带；与 pi-ai 一致）", async () => {
+  const sse = [
+    "event: message_start",
+    'data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":0,"output_tokens":0}}}',
+    "",
+    "event: message_delta",
+    'data: {"type":"message_delta","usage":{"input_tokens":12,"cache_read_input_tokens":128,"output_tokens":7}}',
+    "",
+  ].join("\n");
+  await withGateway([{ status: 200, body: sse, contentType: "text/event-stream" }], async (g) => {
+    await (await post(g, "j")).text();
+    const m = g.meter("j");
+    assert.deepEqual([m.input, m.cacheRead, m.output], [12, 128, 7]);
+  });
+});
+
+test("日志脱敏：DeepSeek 401 正文回显的密钥末四位、api key 后跟空格的写法、形似密钥的串一律去掉，只留说明文字与数字", () => {
+  const body = JSON.stringify({
+    error: {
+      message:
+        "Authentication Fails, Your api key: ****robe is invalid (request_id: 0123456789abcdefABCDEF)",
+      type: "authentication_error",
+      param: null,
+      code: "invalid_request_error",
+    },
+  });
+  const line = redactBody(body, ["sk-configured-robe"]);
+  for (const secret of ["robe", "0123456789abcdefABCDEF"]) {
+    assert.ok(!line.includes(secret), `日志里出现了 ${secret}`);
+  }
+  assert.match(line, /Authentication Fails/);
+  assert.equal(
+    redactBody("api key: sk-abcdef123456 is invalid", []),
+    "api key: [已去除] is invalid"
   );
-
-test("最短停用期：额度停用后探测立即通过也不恢复，满 30 分钟才恢复；日志写明停用期与剩余时长", async () => {
-  await withQuotaHold(async (ctx) => {
-    await quotaDown(ctx);
-    assert.equal(holdOf(ctx.warnings), 30);
-    // 5 分钟、15 分钟两次探测都通过，但未满 30 分钟：不恢复
-    await ctx.clock.advance(PROBE_SCHEDULE_MS[0] ?? 0);
-    await until(() => ctx.up.probes.length === 1, "第一次探测");
-    await until(
-      () => ctx.warnings.some((w) => /最短停用期 30 分钟未满（还剩 25 分钟）/.test(w)),
-      "未满的日志"
-    );
-    assert.equal(ctx.g.accountStatus()[0]?.down, "5h");
-    assert.equal(ctx.g.capacity(), 1, "停用期内不回到容量");
-    const used = await untilRestored(ctx);
-    assert.equal(used + (PROBE_SCHEDULE_MS[0] ?? 0), 30 * 60_000, "第 30 分钟那次探测才恢复");
-    assert.ok(ctx.warnings.some((w) => /恢复可用（已停用 30 分钟，最短停用期 30 分钟）/.test(w)));
-    assert.equal(ctx.g.capacity(), 2);
-  });
-});
-
-test("最短停用期（正文不带重置时刻，按封顶规则）：6 小时内再次因额度停用即翻倍但封顶 60 分钟（30 → 60 → 60 → 60）；连续 6 小时没有再停用即回到 30 分钟；日志写明来源", async () => {
-  await withQuotaHold(async (ctx) => {
-    const holds: number[] = [];
-    for (let i = 0; i < 4; i++) {
-      await quotaDown(ctx);
-      holds.push(holdOf(ctx.warnings));
-      await untilRestored(ctx);
-    }
-    assert.deepEqual(holds, [30, 60, 60, 60]);
-    assert.ok(ctx.warnings.some((w) => /额度用完.*来源：按封顶规则，恢复时刻 /.test(w)));
-    await ctx.clock.advance(6 * 60 * 60_000);
-    await quotaDown(ctx);
-    assert.equal(holdOf(ctx.warnings), 30);
-  });
-});
-
-const isoAt = (ms: number) => new Date(ms).toISOString();
-
-test("按重置时刻：正文带绝对重置时刻即停用到该时刻再加 2 分钟，停用期先到即到点探测、通过即恢复；日志写明来源与恢复时刻", async () => {
-  await withQuotaHold(async (ctx) => {
-    const reset = ctx.clock.clock.now() + 90 * 60_000;
-    await quotaDown(
-      ctx,
-      JSON.stringify({
-        error: {
-          type: "permission_error",
-          message: `usage limit reached, resets at ${isoAt(reset)}`,
-        },
-      })
-    );
-    assert.equal(holdOf(ctx.warnings), 92);
-    const line = ctx.warnings.filter((w) => /额度用完/.test(w)).at(-1) ?? "";
-    assert.match(line, /来源：按服务给的重置时刻/);
-    assert.ok(line.includes(`恢复时刻 ${isoAt(reset + 2 * 60_000)}`), line);
-    assert.equal(await untilRestored(ctx), 92 * 60_000, "第 92 分钟到点探测即恢复");
-  });
-});
-
-test("按重置时刻：正文带相对时间（x 分钟后、in x hours）同样按该时刻再加 2 分钟", async () => {
-  await withQuotaHold(async (ctx) => {
-    await quotaDown(ctx, "额度已用完，请 45 分钟后再试");
-    assert.equal(holdOf(ctx.warnings), 47);
-    await untilRestored(ctx);
-    await quotaDown(ctx, "usage limit reached, quota will reset in 3 hours");
-    assert.equal(holdOf(ctx.warnings), 182);
-  });
-});
-
-test("按重置时刻：超出 5 分钟至 6 小时的被夹紧（1 分钟后 → 5 分钟；10 小时后 → 6 小时）", async () => {
-  await withQuotaHold(async (ctx) => {
-    await quotaDown(ctx, "usage limit reached, quota will reset in 1 minute");
-    assert.equal(holdOf(ctx.warnings), 5);
-    await untilRestored(ctx);
-    await quotaDown(ctx, "usage limit reached, quota will reset in 10 hours");
-    assert.equal(holdOf(ctx.warnings), 360);
-  });
-});
-
-test("额度停用的日志：错误正文前 200 字写一次，去掉配置的 key 与任何形似密钥的内容，只留说明文字与数字", async () => {
-  await withQuotaHold(async (ctx) => {
-    const body = JSON.stringify({
-      error: {
-        message:
-          "usage limit reached for key-a (sk-live-9f8e7d6c5b4a3210), quota will reset in 2 hours",
-        api_key: "abc123secretvalue",
-        auth: "Bearer eyJhbGciOiJIUzI1NiJ9.payload",
-        request_id: "req_0123456789abcdefABCDEF",
-      },
-    });
-    await quotaDown(ctx, `${body}${" padding".repeat(60)}`);
-    const logs = ctx.warnings.filter((w) => /错误正文前 200 字（已去密钥）/.test(w));
-    assert.equal(logs.length, 1, "每次额度停用写一次");
-    const snippet = (logs[0] ?? "").replace(/^.*已去密钥）：/, "");
-    assert.ok(snippet.length <= 200, `${snippet.length}`);
-    assert.match(snippet, /usage limit reached/);
-    assert.match(snippet, /2 hours/);
-    for (const secret of [
-      "key-a",
-      "sk-live",
-      "9f8e7d6c5b4a3210",
-      "abc123secretvalue",
-      "eyJhbGci",
-      "0123456789abcdefABCDEF",
-    ]) {
-      assert.ok(!snippet.includes(secret), `日志里出现了 ${secret}`);
-    }
-  });
-});
-
-test("重置时刻的写法：JSON 字段（Unix 秒、毫秒、ISO、相对秒数）、reset/重置字样后的时间、正文里的 ISO、带方向的相对时间；拿不到为 null", () => {
-  const now = Date.UTC(2026, 8, 26, 20, 0, 0);
-  const at = Date.UTC(2026, 8, 26, 21, 50, 0);
-  assert.equal(quotaResetAt(JSON.stringify({ error: { reset_at: at / 1000 } }), now), at);
-  assert.equal(quotaResetAt(JSON.stringify({ resetAt: at }), now), at);
-  assert.equal(quotaResetAt(JSON.stringify({ resets_at: "2026-09-26T21:50:00Z" }), now), at);
-  assert.equal(quotaResetAt(JSON.stringify({ reset_in_seconds: 600 }), now), now + 600_000);
-  assert.equal(quotaResetAt(`limit reached; resets at ${at / 1000}`, now), at);
-  assert.equal(quotaResetAt("额度已用完，将于 2026-09-26 21:50:00 UTC 重置", now), at);
-  assert.equal(quotaResetAt("额度已用完，重置时间：2026-09-26T21:50:00Z", now), at);
-  assert.equal(quotaResetAt("quota will reset in 5 hours", now), now + 5 * 3_600_000);
-  assert.equal(quotaResetAt("用量上限，约 30 分钟后恢复", now), now + 30 * 60_000);
-  assert.equal(quotaResetAt("usage limit reached for the 5-hour window", now), null);
-  assert.equal(quotaResetAt("usage limit reached", now), null);
   assert.equal(
     redactBody("token=abc Bearer xyz   plain 42", []),
     "token=[已去除] Bearer [已去除] plain 42"
+  );
+  assert.ok(redactBody(`${"x ".repeat(300)}`, []).length <= 200);
+});
+
+test("单次请求输入 token 峰值：取每个请求的未命中 + 缓存命中 + 缓存写入的最大值（不是累加）；resetPeak 清零；按步做差时取步末的值；别的作业不受影响", async () => {
+  const sse = (usage: Record<string, number>) =>
+    [
+      "event: message_start",
+      `data: ${JSON.stringify({ type: "message_start", message: { usage } })}`,
+      "",
+      "event: message_delta",
+      `data: ${JSON.stringify({ type: "message_delta", usage })}`,
+      "",
+    ].join("\n");
+  const stream = (usage: Record<string, number>): Scripted => ({
+    status: 200,
+    body: sse(usage),
+    contentType: "text/event-stream",
+  });
+  await withGateway(
+    [
+      stream({ input_tokens: 100, cache_read_input_tokens: 5_000, output_tokens: 9 }),
+      stream({
+        input_tokens: 40,
+        cache_read_input_tokens: 9_000,
+        cache_creation_input_tokens: 60,
+        output_tokens: 9,
+      }),
+      stream({ input_tokens: 10, cache_read_input_tokens: 2_000, output_tokens: 9 }),
+      stream({ input_tokens: 700, cache_read_input_tokens: 0, output_tokens: 9 }),
+    ],
+    async (g) => {
+      for (let i = 0; i < 3; i++) await (await post(g, "s1|minimal|1")).text();
+      assert.equal(
+        g.meter("s1|minimal|1").peakInputTokens,
+        9_100,
+        "第二个请求最大：40 + 9000 + 60"
+      );
+      const before = g.meter("s1|minimal|1");
+      g.resetPeak("s1|minimal|1");
+      assert.equal(g.meter("s1|minimal|1").peakInputTokens, 0, "每步开始时清零");
+      await (await post(g, "s1|minimal|1")).text();
+      assert.equal(meterDelta(g.meter("s1|minimal|1"), before).peakInputTokens, 700);
+      assert.equal(g.meter("s1|full|1").peakInputTokens, 0);
+    }
   );
 });

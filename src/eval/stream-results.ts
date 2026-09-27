@@ -83,7 +83,7 @@ export interface StreamResultLine {
   attribution: FailureAttribution | null;
   limitPauses: LimitPauseRecord[];
   // 经网关时本步的模型请求：等空闲账号的累计毫秒、各账号成功转发的次数（下标 0 为账号 1，不记 key）、
-  // 同时在途的请求数峰值；没跑 agent 或不经网关为 null
+  // 同时在途的请求数峰值、花费；没跑 agent 或不经网关为 null
   gateway: StreamGatewayFacts | null;
   // 这一步的 agent 开始之前等放行的毫秒（决策 163：同时在跑的 agent 数达到可用容量或配置路数时在步与步之间等；
   // 含整批暂停）；没跑 agent 为 null
@@ -96,6 +96,10 @@ export interface StreamGatewayFacts {
   queueMs: number;
   accountRequests: number[];
   peakInFlight: number;
+  // 本步 agent 的模型花费（人民币元，网关按请求时刻逐条计价后按步做差，决策 235）；旧结果行没有这个字段
+  costCny?: number;
+  // 本步复盘的模型花费（人民币元），单列；复盘接入之前恒为 null
+  reviewCostCny?: number | null;
 }
 
 // 人的基准内存峰值超过容器上限的这一比例即告警：说明作业容器的上限可能不够

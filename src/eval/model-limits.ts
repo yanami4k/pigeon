@@ -1,19 +1,20 @@
-// 模型请求的限额口径与限额控制器（决策 144 及其修订、155）。所有条件的模型请求都经跑批进程内置的网关
-// （model-gateway.ts）。网关按账号（一个 key 一个账号）处理上游的限额信号，只在全部账号都不可用时交给这里整批处理：
-//   429：按账号各自退避（5、15、45 秒），退避用满仍撞即该账号暂时不可用、请求换号；
-//   403 额度用完：只停该账号、请求换号；按报错文案区分 5 小时、每周、每月三种额度（文案里分不出窗口的额度类 403
-//     按 5 小时处理）；每月额度用完的账号不再恢复；
-//   403 并发受限：降该账号的并发上限，已是 1 时派出的请求仍受限则该账号暂时不可用；
+// 模型请求的限额口径与限额控制器（决策 144 及其修订、155、234）。所有条件的模型请求都经跑批进程内置的网关
+// （model-gateway.ts），上游为 DeepSeek 的 Anthropic 兼容端点。网关按账号（一个 key 一个账号）处理上游的限额信号，
+// 只在全部账号都不可用时交给这里整批处理。状态码按 DeepSeek 错误码文档，错误正文为 OpenAI 形状
+// （{"error":{message,type,param,code}}，两个端点实测都是这个形状）：
+//   429 请求速率达到上限、503 服务器繁忙：按账号各自退避（5、15、45 秒），退避用满仍撞即该账号暂时不可用、请求换号；
+//   500 服务器故障：不动账号，这次请求退避重试有限次，仍失败即原样交回、记上游故障（这一步作废重做）；
+//   402 余额不足：该账号不再使用；全部账号都不可用即停批（已完成的步保留，充值后续跑），不当作真失败、不作废重做；
 //   401 与文案明确是认证问题的 403：该账号停用（不探测恢复，需人工处理），这一步按上游故障作废重做；认不出的 403
-//     原样交回、记上游故障（这一步作废），不停用账号；
+//     原样交回、记上游故障（这一步作废），不停用账号；403 并发受限（按文案）：降该账号的并发上限；
+//   花费上限（决策 235）：网关累计花费到上限即停批，与余额不足同一停下路径；
 //   放行（决策 163）：同时在跑的 agent 数须小于网关报来的可用容量（未停用账号当前并发上限之和）且不超过配置路数，
 //     否则在步与步之间等，按先来后到放行（各条件公平）；等待不计入该步的墙钟预算、不作废、不耗额度，时长记入结果行；
 //   全部账号都不可用：整批暂停并探测，间隔从 5 分钟逐步拉长到 30 分钟，总等待上限 6 小时；暂停期间网关的任一账号
-//     单独探测恢复即通知这里立即恢复整批（recovered），不等下一轮探测；全部账号都不会自行恢复（每月额度用完或认证失败）
+//     单独探测恢复即通知这里立即恢复整批（recovered），不等下一轮探测；全部账号都不会自行恢复（余额不足或认证失败）
 //     则直接停下并告警；
 //   告警写标准错误输出、同类只报一次（去重），文案说明后果。
-// 限额识别的底层口径与外部基准的双 key 探针同一份，探针改为从这里取：明说用量上限的 403 算限额；401 与文案明确是
-// 认证问题的 403 算认证；其余认不出的 403 不算认证（原样交回、记上游故障）；上下文超长不算限额。
+// isQuotaError 是外部基准的双 key 探针（spikes/key-failover.mjs）沿用的文案口径，网关的分类不再用它。
 
 export const BACKOFF_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
 
@@ -33,38 +34,76 @@ export function isQuotaError(message: unknown): boolean {
   return QUOTA_PATTERN.test(text);
 }
 
-// 文本里不得出现 key：逐个替换成占位
+// 上游在错误正文里回显的打码密钥片段：三个以上星号紧跟 1 至 8 位字母数字（DeepSeek 的 401 正文形如
+// "Your api key: ****abcd is invalid"，末四位是所交 key 的真实片段）
+const MASKED_KEY_FRAGMENT = /\*{3,}[A-Za-z0-9_-]{1,8}(?![A-Za-z0-9_-])/g;
+
+// 文本里不得出现 key：配置的 key 逐个替换成占位，上游回显的打码片段同样替换
 export function scrubKeys(text: unknown, keys: readonly (string | undefined)[]): string {
   let out = String(text ?? "");
   for (const key of keys) {
     if (key) out = out.split(key).join("[key]");
   }
-  return out;
+  return out.replace(MASKED_KEY_FRAGMENT, "[key]");
 }
 
-// auth：账号认证失败（401 或认证类 403），停用、不探测恢复，需人工处理
-export type LimitKind = "5h" | "weekly" | "monthly" | "concurrency" | "rate-limit" | "auth";
+// 上游错误正文（OpenAI 形状 {"error":{message,type,param,code}}；Anthropic 形状 {"type":"error","error":{type,message}}
+// 同样取得出）：取不到 error 对象或其中既无 message 也无 type 即 null
+export interface UpstreamError {
+  message: string | null;
+  type: string | null;
+  param: string | null;
+  code: string | null;
+}
+
+export function parseUpstreamError(body: string): UpstreamError | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const error = (parsed as { error?: unknown } | null)?.error;
+  if (error === null || typeof error !== "object") return null;
+  const field = (k: string) => {
+    const v = (error as Record<string, unknown>)[k];
+    return typeof v === "string" ? v : null;
+  };
+  const out = {
+    message: field("message"),
+    type: field("type"),
+    param: field("param"),
+    code: field("code"),
+  };
+  return out.message === null && out.type === null ? null : out;
+}
+
+// 账号不可用的原因：
+//   rate-limit 429 退避用满；busy 503 服务器繁忙退避用满；concurrency 403 并发受限且上限已是 1；
+//   auth 认证失败（401 或认证类 403），停用、不探测恢复，需人工处理；balance 402 余额不足，不再使用、不探测
+export type LimitKind = "concurrency" | "rate-limit" | "busy" | "auth" | "balance";
 
 // 文案明确是认证问题：只认这些，单写 forbidden、permission denied 之类认不出（5 小时额度用完也是 permission_error）
 const EXPLICIT_AUTH_PATTERN =
   /authentication|unauthori[sz]ed|invalid[ _-]?(x-)?api[ _-]?key|api[ _-]?key\b.*\b(invalid|expired|revoked|disabled)|认证失败|鉴权失败|密钥无效|无效的?\s*(api\s*)?key/i;
 const CONCURRENCY_PATTERN = /concurren|too many (parallel|simultaneous)|并发/i;
-const MONTHLY_PATTERN = /month|每月|本月|月度/i;
-const WEEKLY_PATTERN = /week|每周|本周|周度/i;
 
+// 上游非 200 的分类：按状态码（DeepSeek 错误码文档）；403 不在 DeepSeek 的错误码里，只按文案认并发与明确的认证。
+// server 为 500 服务器故障（不动账号、请求退避重试有限次）；other 原样交回
 export function classifyUpstreamFailure(
   status: number,
   body: string
-): { kind: LimitKind } | { kind: "other" } {
+): { kind: LimitKind } | { kind: "server" } | { kind: "other" } {
   if (status === 429) return { kind: "rate-limit" };
+  if (status === 503) return { kind: "busy" };
+  if (status === 500) return { kind: "server" };
   if (status === 401) return { kind: "auth" };
+  if (status === 402) return { kind: "balance" };
   if (status !== 403) return { kind: "other" };
-  if (CONCURRENCY_PATTERN.test(body)) return { kind: "concurrency" };
-  if (!isQuotaError(body))
-    return EXPLICIT_AUTH_PATTERN.test(body) ? { kind: "auth" } : { kind: "other" };
-  if (MONTHLY_PATTERN.test(body)) return { kind: "monthly" };
-  if (WEEKLY_PATTERN.test(body)) return { kind: "weekly" };
-  return { kind: "5h" };
+  const error = parseUpstreamError(body);
+  const text = error === null ? body : `${error.type ?? ""} ${error.message ?? ""}`;
+  if (CONCURRENCY_PATTERN.test(text)) return { kind: "concurrency" };
+  return EXPLICIT_AUTH_PATTERN.test(text) ? { kind: "auth" } : { kind: "other" };
 }
 
 // 一步累计等空闲账号超过这么久即作废重做（与上游故障同一口径，不看 agent 种类）：正常情况下路数不超过各账号并发之和，
@@ -159,17 +198,17 @@ export class LimitController {
   }
 
   // 网关的全部账号都不可用：整批暂停（kind 为让最后一个账号不可用的原因）；全部账号都不会自行恢复则停下——
-  // 全是每月额度用完报 monthly，其中有认证失败的报 auth
+  // 全是余额不足报 balance，其中有认证失败的报 auth
   onLimit(kind: LimitKind): void {
     if (this.state === "stopped") return;
     this.signals += 1;
-    if (kind === "monthly") {
+    if (kind === "balance") {
       this.stop(
-        "每月额度用完：跑批停下，额度恢复前不再发请求（已完成的步保留，之后在同一输出目录续跑）"
+        "模型服务账号余额不足：跑批停下，充值前不再发请求（已完成的步保留，充值后在同一输出目录续跑）"
       );
     } else if (kind === "auth") {
       this.stop(
-        "模型服务的账号全部不可用且不会自行恢复（有账号认证失败，需人工检查 key；其余每月额度用完）：跑批停下（已完成的步保留，处理后在同一输出目录续跑）"
+        "模型服务的账号全部不可用且不会自行恢复（有账号认证失败，需人工检查 key；其余余额不足）：跑批停下（已完成的步保留，处理后在同一输出目录续跑）"
       );
     } else {
       this.pause(kind);
@@ -177,10 +216,21 @@ export class LimitController {
     this.notify();
   }
 
-  // 进程收到停止信号（systemd 停服、整机关机）：与每月额度用完同一路径——计一次信号，在途的步中止并作废，不再取新步；
+  // 网关累计花费到上限（决策 235）：与余额不足同一停下路径——计一次信号，在途的步中止并作废，不再取新步；
+  // 已完成的步保留，调高上限后在同一输出目录续跑
+  spendLimitReached(totalCny: number, limitCny: number): void {
+    if (this.state === "stopped") return;
+    this.signals += 1;
+    this.stop(
+      `模型花费累计 ¥${totalCny.toFixed(2)}，已到上限 ¥${limitCny}：跑批停下，不再发请求（已完成的步保留，调高上限后在同一输出目录续跑）`
+    );
+    this.notify();
+  }
+
+  // 进程收到停止信号（systemd 停服、整机关机）：与余额不足同一路径——计一次信号，在途的步中止并作废，不再取新步；
   // 已完成的步保留，之后在同一输出目录续跑
   shutdown(reason: string): void {
-    // 已因每月额度或认证失败停下：照样记下停止信号（作业容器按停止信号保留、续跑接管），不再计信号
+    // 已因余额不足、认证失败或花费上限停下：照样记下停止信号（作业容器按停止信号保留、续跑接管），不再计信号
     if (this.state === "stopped") {
       this.shutdownReason ??= reason;
       return;

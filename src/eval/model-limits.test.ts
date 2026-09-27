@@ -5,6 +5,7 @@ import {
   isQuotaError,
   LimitController,
   PROBE_SCHEDULE_MS,
+  parseUpstreamError,
   scrubKeys,
 } from "./model-limits.ts";
 
@@ -21,36 +22,89 @@ test("限额识别沿用既有口径：明说用量上限的 403 是限额，其
   assert.equal(scrubKeys("bad key sk-abc in sk-abc", ["sk-abc", ""]), "bad key [key] in [key]");
 });
 
-test("上游失败分类：429 为频率限制；403 按文案分并发、每月、每周、5 小时（额度类缺省）；401 与文案明确的 403 为认证，其余 403 为 other", () => {
+// DeepSeek 两个端点实测的错误正文形状（OpenAI 风格；Anthropic 兼容端点也是这个形状）
+const deepseekError = (type: string, message: string) =>
+  JSON.stringify({ error: { message, type, param: null, code: "invalid_request_error" } });
+
+test("上游失败分类（DeepSeek）：401 认证、402 余额不足、429 频率限制、503 服务器繁忙、500 服务器故障，其余为 other", () => {
+  assert.deepEqual(
+    classifyUpstreamFailure(
+      401,
+      deepseekError(
+        "authentication_error",
+        "Authentication Fails, Your api key: ****robe is invalid"
+      )
+    ),
+    { kind: "auth" }
+  );
+  assert.deepEqual(
+    classifyUpstreamFailure(402, deepseekError("invalid_request_error", "Insufficient Balance")),
+    { kind: "balance" }
+  );
   assert.deepEqual(classifyUpstreamFailure(429, "rate limited"), { kind: "rate-limit" });
+  assert.deepEqual(classifyUpstreamFailure(503, "Server overloaded"), { kind: "busy" });
+  assert.deepEqual(classifyUpstreamFailure(500, "boom"), { kind: "server" });
+  // 400、422 是请求问题，其他 5xx 也原样交回
+  assert.deepEqual(
+    classifyUpstreamFailure(
+      400,
+      deepseekError("invalid_request_error", "Invalid max_tokens value")
+    ),
+    { kind: "other" }
+  );
+  assert.deepEqual(classifyUpstreamFailure(422, "bad param"), { kind: "other" });
+  assert.deepEqual(classifyUpstreamFailure(502, "bad gateway"), { kind: "other" });
+});
+
+test("上游失败分类：Kimi 的 403 额度窗口语义已删去——明说用量上限的 403 也不再当额度；403 只认并发与明确的认证", () => {
   assert.deepEqual(
     classifyUpstreamFailure(
       403,
       '{"error":{"type":"permission_error","message":"usage limit reached, quota will reset in 3 hours"}}'
     ),
-    { kind: "5h" }
+    { kind: "other" }
   );
-  assert.deepEqual(classifyUpstreamFailure(403, "Your weekly usage limit has been reached"), {
-    kind: "weekly",
-  });
-  assert.deepEqual(classifyUpstreamFailure(403, "本月额度已用完"), { kind: "monthly" });
+  assert.deepEqual(classifyUpstreamFailure(403, "本月额度已用完"), { kind: "other" });
   assert.deepEqual(classifyUpstreamFailure(403, "too many concurrent requests"), {
     kind: "concurrency",
   });
-  assert.deepEqual(classifyUpstreamFailure(403, "并发请求数超过上限"), { kind: "concurrency" });
-  // 认证只认 401 与文案明确是认证问题的 403；认不出的 403 为 other（交回、计上游故障，不停用账号）
-  assert.deepEqual(classifyUpstreamFailure(401, "whatever"), { kind: "auth" });
   assert.deepEqual(classifyUpstreamFailure(403, "invalid x-api-key"), { kind: "auth" });
-  assert.deepEqual(classifyUpstreamFailure(403, '{"error":{"type":"authentication_error"}}'), {
+  assert.deepEqual(classifyUpstreamFailure(403, deepseekError("authentication_error", "x")), {
     kind: "auth",
   });
-  assert.deepEqual(classifyUpstreamFailure(403, "API key has been revoked"), { kind: "auth" });
-  assert.deepEqual(classifyUpstreamFailure(403, "Unauthorized"), { kind: "auth" });
-  assert.deepEqual(classifyUpstreamFailure(403, "认证失败：密钥无效"), { kind: "auth" });
   assert.deepEqual(classifyUpstreamFailure(403, "forbidden"), { kind: "other" });
-  assert.deepEqual(classifyUpstreamFailure(403, "Request not allowed"), { kind: "other" });
-  assert.deepEqual(classifyUpstreamFailure(403, "permission denied"), { kind: "other" });
-  assert.deepEqual(classifyUpstreamFailure(500, "boom"), { kind: "other" });
+});
+
+test("错误正文按 OpenAI 形状解析：取 message、type、param、code；Anthropic 形状同样取得出；认不出为 null", () => {
+  assert.deepEqual(
+    parseUpstreamError(
+      '{"error":{"message":"Invalid temperature value","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}'
+    ),
+    {
+      message: "Invalid temperature value",
+      type: "invalid_request_error",
+      param: null,
+      code: "invalid_request_error",
+    }
+  );
+  assert.deepEqual(
+    parseUpstreamError('{"type":"error","error":{"type":"overloaded_error","message":"busy"}}'),
+    { message: "busy", type: "overloaded_error", param: null, code: null }
+  );
+  assert.equal(parseUpstreamError("<html>502</html>"), null);
+  assert.equal(parseUpstreamError('{"detail":"x"}'), null);
+});
+
+test("脱敏：正文回显的密钥末四位（****xxxx）一并去掉；配置的 key 原样替换", () => {
+  const body = deepseekError(
+    "authentication_error",
+    "Authentication Fails, Your api key: ****robe is invalid (request_id: 1a2b)"
+  );
+  const scrubbed = scrubKeys(body, ["sk-real-key-robe"]);
+  assert.doesNotMatch(scrubbed, /robe/);
+  assert.match(scrubbed, /Your api key: \[key\] is invalid/);
+  assert.equal(scrubKeys("key ***abcd and ****** end", []), "key [key] and ****** end");
+  assert.equal(scrubKeys("x sk-real y", ["sk-real"]), "x [key] y");
 });
 
 function manualClock() {
@@ -91,8 +145,8 @@ test("额度暂停：整批暂停、按拉长的间隔探测，探到恢复即�
     slots: 4,
   });
   const epoch = limits.epoch;
-  limits.onLimit("5h");
-  limits.onLimit("5h");
+  limits.onLimit("rate-limit");
+  limits.onLimit("rate-limit");
   assert.equal(limits.state, "paused");
   assert.equal(limits.epoch, epoch + 1, "暂停中再撞不重复开暂停");
   const ready = limits.ready();
@@ -103,7 +157,7 @@ test("额度暂停：整批暂停、按拉长的间隔探测，探到恢复即�
   assert.equal(limits.state, "running");
   const records = limits.pausesSince(epoch);
   assert.equal(records.length, 1);
-  assert.equal(records[0]?.kind, "5h");
+  assert.equal(records[0]?.kind, "rate-limit");
   assert.equal(records[0]?.startedAt, new Date(0).toISOString());
   const waited =
     (PROBE_SCHEDULE_MS[0] ?? 0) + (PROBE_SCHEDULE_MS[1] ?? 0) + (PROBE_SCHEDULE_MS[2] ?? 0);
@@ -113,7 +167,7 @@ test("额度暂停：整批暂停、按拉长的间隔探测，探到恢复即�
   assert.equal(warnings.length, 2, "开始与恢复各一条告警");
 });
 
-test("额度暂停：总等待逾 6 小时即停止；每月额度直接停止并告警，不探测", async () => {
+test("额度暂停：总等待逾 6 小时即停止；余额不足直接停止并告警，不探测", async () => {
   const clock = manualClock();
   let probes = 0;
   const limits = new LimitController({
@@ -127,7 +181,7 @@ test("额度暂停：总等待逾 6 小时即停止；每月额度直接停止�
     slots: 2,
     maxWaitMs: 60 * 60_000,
   });
-  limits.onLimit("weekly");
+  limits.onLimit("busy");
   const ready = limits.ready().then(
     () => "resolved",
     (e: Error) => e.message
@@ -137,7 +191,7 @@ test("额度暂停：总等待逾 6 小时即停止；每月额度直接停止�
   assert.equal(limits.state, "stopped");
   assert.ok(probes >= 1);
 
-  const monthly = new LimitController({
+  const balance = new LimitController({
     probe: async () => {
       throw new Error("不该探测");
     },
@@ -146,9 +200,9 @@ test("额度暂停：总等待逾 6 小时即停止；每月额度直接停止�
     warn: () => {},
     slots: 2,
   });
-  monthly.onLimit("monthly");
-  assert.equal(monthly.state, "stopped");
-  await assert.rejects(monthly.ready(), /每月额度用完/);
+  balance.onLimit("balance");
+  assert.equal(balance.state, "stopped");
+  await assert.rejects(balance.ready(), /余额不足/);
 });
 
 test("路数固定：限额信号不再降路（并发受限由网关按账号降上限）；全部账号并发受限报来时整批暂停", async () => {
@@ -169,7 +223,7 @@ test("路数固定：限额信号不再降路（并发受限由网关按账号�
   a();
 });
 
-test("停止信号：与每月额度用完同一路径——计一次信号、通知在途的看守、状态为已停止，之后取新步即报停止原因；重复收到不再计", async () => {
+test("停止信号：与余额不足同一路径——计一次信号、通知在途的看守、状态为已停止，之后取新步即报停止原因；重复收到不再计", async () => {
   // 暂停后的探测不真的等（不留定时器）
   const limits = new LimitController({
     probe: async () => true,
@@ -181,7 +235,7 @@ test("停止信号：与每月额度用完同一路径——计一次信号、�
   limits.subscribe(() => {
     notified += 1;
   });
-  limits.onLimit("5h");
+  limits.onLimit("rate-limit");
   assert.equal(limits.shutdownReason, undefined, "暂停不算停止信号");
   limits.shutdown("收到 SIGTERM");
   assert.equal(limits.shutdownReason, "收到 SIGTERM");
@@ -209,7 +263,7 @@ test("网关通知账号恢复（recovered）即立即恢复整批、记下暂�
     warn: () => {},
     slots: 2,
   });
-  limits.onLimit("5h");
+  limits.onLimit("rate-limit");
   const ready = limits.ready();
   limits.recovered();
   await ready;
@@ -219,7 +273,7 @@ test("网关通知账号恢复（recovered）即立即恢复整批、记下暂�
   limits.recovered();
   assert.equal(limits.state, "running", "运行中通知恢复无副作用");
   // 新开一次暂停：第一次暂停的探测循环先醒（同一时刻排在前面），不得探测、不得结束新的暂停
-  limits.onLimit("weekly");
+  limits.onLimit("busy");
   await clock.tick();
   assert.equal(limits.state, "paused");
   assert.equal(probes, 0, "旧循环醒来即退出");
@@ -239,12 +293,12 @@ test("收尾：缺省计时下，暂停中的探测定时在恢复、停下或 c
   const timeouts = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
   const before = timeouts();
   const limits = new LimitController({ probe: async () => false, slots: 2, warn: () => {} });
-  limits.onLimit("5h");
+  limits.onLimit("rate-limit");
   assert.equal(timeouts(), before + 1, "暂停中有一个探测定时");
   limits.recovered();
   await new Promise((r) => setImmediate(r));
   assert.equal(timeouts(), before, "恢复即取消");
-  limits.onLimit("5h");
+  limits.onLimit("rate-limit");
   assert.equal(timeouts(), before + 1);
   limits.close();
   await new Promise((r) => setImmediate(r));
@@ -256,7 +310,7 @@ test("收尾：关闭之后再报来限额也不开新的暂停、不设新的�
   const before = timeouts();
   const limits = new LimitController({ probe: async () => false, slots: 2, warn: () => {} });
   limits.close();
-  limits.onLimit("5h");
+  limits.onLimit("rate-limit");
   assert.equal(limits.state, "running");
   assert.equal(timeouts(), before);
 });
@@ -327,8 +381,8 @@ test("放行：等待的时长按控制器的时钟计，容量不足等多久�
   limits.capacityChanged();
   assert.equal((await second).waitedMs, 3 * 60 * 60_000, "容量不足等了三小时：只记等待");
   assert.equal(limits.state, "running");
-  limits.onLimit("monthly");
-  assert.match(await third, /每月额度/);
+  limits.onLimit("balance");
+  assert.match(await third, /余额不足/);
   first();
 });
 
@@ -342,12 +396,26 @@ test("停止信号与放行队列：取步者刚过放行门、尚未入队时�
   await assert.rejects(limits.acquire(), /收到 SIGTERM/);
 });
 
-test("已因每月额度停下后再收到停止信号：照样记下停止原因（作业容器按停止信号保留），不再计信号", () => {
+test("已因余额不足停下后再收到停止信号：照样记下停止原因（作业容器按停止信号保留），不再计信号", () => {
   const limits = new LimitController({ probe: async () => true, slots: 2, warn: () => {} });
-  limits.onLimit("monthly");
+  limits.onLimit("balance");
   assert.equal(limits.state, "stopped");
   const signals = limits.signals;
   limits.shutdown("收到 SIGTERM");
   assert.equal(limits.shutdownReason, "收到 SIGTERM");
   assert.equal(limits.signals, signals);
+});
+
+test("花费上限：到上限即走停下路径——计一次信号、通知看守、状态为已停止，原因写明累计与上限；重复报来不再计", async () => {
+  const limits = new LimitController({ probe: async () => true, slots: 2, warn: () => {} });
+  let notified = 0;
+  limits.subscribe(() => notified++);
+  const signals = limits.signals;
+  limits.spendLimitReached(650.12, 650);
+  assert.equal(limits.state, "stopped");
+  assert.equal(limits.signals, signals + 1);
+  assert.equal(notified, 1);
+  await assert.rejects(limits.ready(), /花费.*650\.12.*上限 ¥650/);
+  limits.spendLimitReached(651, 650);
+  assert.equal(limits.signals, signals + 1);
 });

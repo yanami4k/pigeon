@@ -25,9 +25,9 @@ test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），�
 });
 
 test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位与单轮输出上限记运行时缺省（off、16,384），不记 null；给了的原样记", () => {
-  assert.deepEqual(effectivePigeonSettings({}, "kimi-for-coding"), {
-    provider: "kimi-coding",
-    modelId: "kimi-for-coding",
+  assert.deepEqual(effectivePigeonSettings({}, "deepseek-flash"), {
+    provider: "deepseek",
+    modelId: "deepseek-flash",
     temperature: null,
     thinking: "off",
     maxOutputTokens: 16_384,
@@ -35,10 +35,10 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
   assert.deepEqual(
     effectivePigeonSettings(
       { temperature: 0, thinking: "high", maxOutputTokens: 8_000, modelId: "m2" },
-      "kimi-for-coding"
+      "deepseek-flash"
     ),
     {
-      provider: "kimi-coding",
+      provider: "deepseek",
       modelId: "m2",
       temperature: 0,
       thinking: "high",

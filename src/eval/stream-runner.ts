@@ -1042,6 +1042,8 @@ async function runStep(
         queueMs: d.queueMs,
         accountRequests: d.accountRequests,
         peakInFlight: d.peakInFlight,
+        costCny: d.costCny,
+        reviewCostCny: null,
       };
       result = {
         ...result,

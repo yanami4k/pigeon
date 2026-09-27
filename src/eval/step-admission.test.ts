@@ -118,8 +118,11 @@ async function heldUpstream(probe: (key: string) => { status: number; body: stri
   };
 }
 
-// 不带重置时刻的额度正文：停用期按封顶规则（首次 30 分钟），这里检验的是按容量放行，不是停用期的来源
-const QUOTA = { status: 403, body: "usage limit reached for this account" };
+// 服务器繁忙（503）：setup 传入空的退避级数时一次即让该账号暂时不可用、按间隔探测恢复；这里检验的是按容量放行
+const BUSY = {
+  status: 503,
+  body: '{"error":{"message":"Server overloaded","type":"server_error","param":null,"code":null}}',
+};
 const OK = { status: 200, body: "{}" };
 
 // 跑批的若干路：每路按顺序做几步，作废即重做同一步；记下同时在跑的 agent 数、每步的尝试与放行等待
@@ -190,7 +193,11 @@ function lanes(g: ModelGateway, limits: LimitController) {
   };
 }
 
-async function setup(probe: (key: string) => { status: number; body: string }, slots: number) {
+async function setup(
+  probe: (key: string) => { status: number; body: string },
+  slots: number,
+  backoffDelaysMs?: number[]
+) {
   const up = await heldUpstream(probe);
   const vc = virtualClock();
   let gateway: ModelGateway | undefined;
@@ -209,6 +216,7 @@ async function setup(probe: (key: string) => { status: number; body: string }, s
     accounts,
     limits,
     probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+    ...(backoffDelaysMs !== undefined ? { backoffDelaysMs } : {}),
     clock: vc.clock,
     warn: () => {},
   });
@@ -216,9 +224,9 @@ async function setup(probe: (key: string) => { status: number; body: string }, s
   return { up, vc, g: gateway, limits };
 }
 
-test("按剩余容量放行（6 路、3 个账号各 2）：账号 2 额度停用后同时在跑的 agent 不超过 4；排队超 30 秒的在途步被及时中止、放行后重做；容量不足数小时不停作业；账号恢复后回到 6 路；等待的各路先来先放行", async () => {
-  let bQuota = false;
-  const { up, vc, g, limits } = await setup((key) => (key === "key-b" && bQuota ? QUOTA : OK), 6);
+test("按剩余容量放行（6 路、3 个账号各 2）：账号 2 停用后同时在跑的 agent 不超过 4；排队超 30 秒的在途步被及时中止、放行后重做；容量不足数小时不停作业；账号恢复后回到 6 路；等待的各路先来先放行", async () => {
+  let bBusy = false;
+  const { up, vc, g, limits } = await setup((key) => (key === "key-b" && bBusy ? BUSY : OK), 6, []);
   assert.throws(() =>
     assertConcurrencyFits(
       7,
@@ -233,12 +241,12 @@ test("按剩余容量放行（6 路、3 个账号各 2）：账号 2 额度停�
     await until(() => up.held.length === 6, "6 路都在等模型回应");
     assert.equal(L.running.size, 6);
     assert.ok(!L.events.includes("start L7"), "不超过配置路数");
-    // 账号 2 额度用完：它上面的两路换号，另两个账号都满，排队
-    bQuota = true;
+    // 账号 2 不可用：它上面的两路换号，另两个账号都满，排队
+    bBusy = true;
     const victims = up.held.filter((h) => h.key === "key-b").map((h) => h.lane);
     assert.equal(victims.length, 2);
-    for (const v of victims) up.answer(v, QUOTA.status, QUOTA.body);
-    await until(() => g.accountStatus()[1]?.down === "5h", "账号 2 停用");
+    for (const v of victims) up.answer(v, BUSY.status, BUSY.body);
+    await until(() => g.accountStatus()[1]?.down === "busy", "账号 2 停用");
     await settle();
     assert.equal(g.capacity(), 4);
     assert.equal(up.held.length, 4, "两路换号后排队，没有派出");
@@ -268,7 +276,7 @@ test("按剩余容量放行（6 路、3 个账号各 2）：账号 2 额度停�
     );
     assert.ok(L.maxRunning() <= 4, `同时在跑的不超过 4，实为 ${L.maxRunning()}`);
     // 账号 2 恢复（下一次单独探测通过）：容量回到 6，两路按作废的先后放行，回到 6 路
-    bQuota = false;
+    bBusy = false;
     await vc.advance(PROBE_SCHEDULE_MS.at(-1) ?? 0);
     await until(() => L.running.size === 6, "回到 6 路");
     assert.equal(g.capacity(), 6);

@@ -419,9 +419,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             output: 0,
             cacheRead: 0,
             cacheWrite: 0,
+            costCny: 0,
             upstreamFailures: 0,
             queueMs: 0,
             peakInFlight: 0,
+            peakInputTokens: 0,
             accountRequests: [0, 0],
           }),
         }),
@@ -439,9 +441,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           output: 0,
           cacheRead: 0,
           cacheWrite: 0,
+          costCny: 0,
           upstreamFailures: 0,
           queueMs: 0,
           peakInFlight: 0,
+          peakInputTokens: 0,
           accountRequests: [0, 0],
         };
         meters.set(`${input.job.stream}|${input.job.condition}|${input.job.attempt}`, {
@@ -450,6 +454,8 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           input: m.input + 100,
           output: m.output + 10,
           queueMs: m.queueMs + 30,
+          // 每步花费按网关计量做差写进结果行
+          costCny: m.costCny + 0.25,
           // 峰值不重记就会沿步累加：跑批器每步开始时 resetPeak
           peakInFlight: m.peakInFlight + 1,
           accountRequests: [(m.accountRequests[0] ?? 0) + 1, (m.accountRequests[1] ?? 0) + 1],
@@ -459,7 +465,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         if (input.step.seq === 2) {
           write(root, { "src/half.txt": "half\n" });
           if (hits++ === 0) {
-            limits.onLimit("5h");
+            limits.onLimit("rate-limit");
             return { interrupted: "网关暂停" };
           }
           write(root, { "src/base.txt": "base v2\n" });
@@ -475,7 +481,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         rows.map((r) => [r.seq, r.outcome, r.limitPauses.map((p) => p.kind)]),
         [
           [1, "passed", []],
-          [2, "passed", ["5h"]],
+          [2, "passed", ["rate-limit"]],
         ]
       );
       assert.equal(rows[1]?.limitPauses[0]?.endedAt !== null, true);
@@ -486,8 +492,20 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
       // 网关的排队时间、各账号请求数与在途峰值按步取差记到结果行上
-      assert.deepEqual(rows[0]?.gateway, { queueMs: 30, accountRequests: [1, 1], peakInFlight: 1 });
-      assert.deepEqual(rows[1]?.gateway, { queueMs: 30, accountRequests: [1, 1], peakInFlight: 1 });
+      assert.deepEqual(rows[0]?.gateway, {
+        queueMs: 30,
+        accountRequests: [1, 1],
+        peakInFlight: 1,
+        costCny: 0.25,
+        reviewCostCny: null,
+      });
+      assert.deepEqual(rows[1]?.gateway, {
+        queueMs: 30,
+        accountRequests: [1, 1],
+        peakInFlight: 1,
+        costCny: 0.25,
+        reviewCostCny: null,
+      });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -1099,9 +1117,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
+        costCny: 0,
         upstreamFailures: 0,
         queueMs: 0,
         peakInFlight: 0,
+        peakInputTokens: 0,
         accountRequests: [0],
       };
       const gateway = {
@@ -1124,7 +1144,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             const m = meters.get(key) ?? zero;
             meters.set(key, { ...m, upstreamFailures: m.upstreamFailures + 1 });
           }
-          if (n === 3) limits.onLimit("5h");
+          if (n === 3) limits.onLimit("rate-limit");
           if (n === 4) return { interrupted: "模型服务故障" };
           if (n === 5) write(root, { "src/a.txt": "alpha\n" });
           return undefined;
@@ -1270,9 +1290,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           output: 0,
           cacheRead: 0,
           cacheWrite: 0,
+          costCny: 0,
           upstreamFailures: 0,
           queueMs: 0,
           peakInFlight: 0,
+          peakInputTokens: 0,
           accountRequests: [0],
         };
         const gateway = {
@@ -1393,9 +1415,11 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
           output: 0,
           cacheRead: 0,
           cacheWrite: 0,
+          costCny: 0,
           upstreamFailures: 0,
           queueMs: 0,
           peakInFlight: 0,
+          peakInputTokens: 0,
           accountRequests: [0],
         };
         const watchers = new Map<string, () => void>();
