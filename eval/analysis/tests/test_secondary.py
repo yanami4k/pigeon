@@ -72,6 +72,15 @@ class TestLearningCurve:
         assert p["validTasks"] == [1, 3]
         assert s["learningCurve"]["push"]["slope"] == pytest.approx(0.1)
 
+    def test_positions_include_tasks_without_rows(self):
+        # 全部题为 1–5，第 5 题没有任何结果行：它仍占时间位置，第 3 题的 t 为 0.5 而不是 1
+        recs = grid({"00": 0.3, "01": 0.3, "10": lambda t, r: 0.3 + 0.1 * (t - 1) / 4, "11": lambda t, r: 0.3 + 0.1 * (t - 1) / 4},
+                    tasks=(1, 2, 3))
+        df = make_table(recs)
+        p = analyze_primary(df, expected_tasks=[1, 2, 3, 4, 5], with_mixed=False, **FAST)
+        s = analyze_secondary(df, p, **FAST)
+        assert s["learningCurve"]["push"]["slope"] == pytest.approx(0.1)
+
     @pytest.mark.parametrize(
         "d,want",
         [([1, 2, 3, 4], 2.0), ([1, 2, 100, 3, 4], 2.0), ([5], None), ([], None)],

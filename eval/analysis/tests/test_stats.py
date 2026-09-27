@@ -39,6 +39,12 @@ class TestSignFlip:
         # 3 道题全为 +1：只有全正与全负两种翻转的 |平均| 不小于实测，精确 p = 2/8
         assert sign_flip_pvalue([1.0, 1.0, 1.0]) == pytest.approx(0.25, abs=0.005)
 
+    def test_plus_one_correction(self):
+        # 30 道题全为正且幅度相同：十万次翻转里几乎不可能出现全同号，超过次数为 0，p = 1 / (100000 + 1)
+        assert sign_flip_pvalue(np.full(30, 0.1)) == pytest.approx(1 / 100_001)
+        # 小翻转数时同样按 (次数 + 1) / (翻转数 + 1)
+        assert sign_flip_pvalue(np.full(30, 0.1), flips=99) == pytest.approx(1 / 100)
+
     def test_zero_differences_give_one(self):
         assert sign_flip_pvalue([0.0, 0.0, 0.0]) == 1.0
 

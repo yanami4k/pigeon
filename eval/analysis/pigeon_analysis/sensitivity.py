@@ -18,9 +18,9 @@ from .stats import at_least, sample_var
 
 def rerun_variance(df: pd.DataFrame, cells: Iterable[str]) -> dict[str, Any]:
     """单遍单格的重跑方差 v：各格同题两遍之差 e = y(·, 1) − y(·, 2) 的方差的一半，多格合并。
-    合并按各格以自身均值为中心的合并方差（自由度相加）；只用两遍都有有效得分的题。"""
-    ss = 0.0
-    dof = 0
+    合并为各格各自按题算两遍差的样本方差的一半，再对格子取简单平均（各格题目相同，等权）；
+    只用两遍都有有效得分的题，不足两题的格不参与平均。"""
+    halves: list[float] = []
     per_cell: dict[str, Any] = {}
     for c in cells:
         g = df[(df["cell"] == c) & df["pass_no"].isin([1, 2]) & df["score"].notna()]
@@ -29,12 +29,12 @@ def rerun_variance(df: pd.DataFrame, cells: Iterable[str]) -> dict[str, Any]:
             per_cell[c] = {"n": 0}
             continue
         e = (wide[1] - wide[2]).dropna().to_numpy(dtype=float)
-        per_cell[c] = {"n": int(e.size), "varE": sample_var(e)}
-        if e.size >= 2:
-            ss += float(((e - e.mean()) ** 2).sum())
-            dof += e.size - 1
-    v = (ss / dof) / 2 if dof > 0 else None
-    return {"v": v, "dof": dof, "byCell": per_cell}
+        var_e = sample_var(e)
+        per_cell[c] = {"n": int(e.size), "varE": var_e}
+        if var_e is not None:
+            halves.append(var_e / 2)
+    v = sum(halves) / len(halves) if halves else None
+    return {"v": v, "cellsPooled": len(halves), "byCell": per_cell}
 
 
 def mde(tau2: float, v: float, passes: int, n: int, k: float = K.MDE_MARGIN_K) -> float:
@@ -42,8 +42,9 @@ def mde(tau2: float, v: float, passes: int, n: int, k: float = K.MDE_MARGIN_K) -
     return K.MDE_Z_SUM * math.sqrt((tau2 + v / passes) / n) * k
 
 
-def calibration_design_sensitivity(df: pd.DataFrame, formal_tasks: int) -> dict[str, Any]:
-    """由校准的 01、11 两格估 v 与 τ²，按正式跑 n 道题、R = 2、3 各算 MDE（3.7）。
+def calibration_design_sensitivity(df: pd.DataFrame, formal_tasks: int | None) -> dict[str, Any]:
+    """由校准的 01、11 两格估 v 与 τ²，按正式跑 n 道有效题（要做到的不为零）、R = 2、3 各算 MDE（3.7）；
+    n 未给时不算 MDE。
     τ² = max(0, s² − v)，s² 为各题 d(i) = ȳ(11, i) − ȳ(01, i)（各两遍平均）的样本方差；只用方差。"""
     var = rerun_variance(df, ("01", "11"))
     both = df[df["cell"].isin(["01", "11"]) & df["pass_no"].isin([1, 2]) & df["score"].notna()]
@@ -60,7 +61,7 @@ def calibration_design_sensitivity(df: pd.DataFrame, formal_tasks: int) -> dict[
         return out
     tau2 = max(0.0, s2 - v)
     out["tau2"] = tau2
-    out["mde"] = {str(r): mde(tau2, v, r, formal_tasks) for r in (2, 3)}
+    out["mde"] = {str(r): mde(tau2, v, r, formal_tasks) for r in (2, 3)} if formal_tasks else None
     return out
 
 

@@ -52,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     f = sub.add_parser("formal", help="分析正式跑")
     f.add_argument("--results", nargs="+", required=True, help="results.jsonl（可多个）")
     f.add_argument("--out", required=True, help="输出目录")
-    f.add_argument("--tasks", help="全部题号的 JSON 数组；给出时完全没有结果行的题也列为缺失")
+    f.add_argument("--tasks", required=True,
+                   help="全部题号（89 道）的 JSON 数组：学习曲线的时间位置按它排，完全没有结果行的题也列为缺失")
     f.add_argument("--minimal-reserve", type=float, default=None,
                    help="最简 agent 尚未跑时为它预留的花费 C_M（元），第 3 遍判定用")
 
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--out", required=True)
     c.add_argument("--formal-tasks", type=int, default=K.FORMAL_TASKS, help="正式跑的题数（花费估算）")
     c.add_argument("--formal-valid-tasks", type=int, default=None,
-                   help="正式跑中要做到的不为零的题数（最小可分辨效果的 n）；缺省用 --formal-tasks")
+                   help="正式跑的有效题数（89 道里要做到的不为零的题数，最小可分辨效果的 n）；未给时不算最小可分辨效果")
     c.add_argument("--compaction-trigger", type=float, default=None, help="压缩触发点（token）")
     c.add_argument("--eligible", help="要做到的不为零的全部题号（JSON 数组），用于核对抽题")
 

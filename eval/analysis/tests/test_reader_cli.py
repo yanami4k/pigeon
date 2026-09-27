@@ -84,13 +84,26 @@ def formal_rows(n=12, passes=2, seed=0):
     return rows
 
 
+def tasks_file(tmp_path, n=12):
+    p = tmp_path / "tasks.json"
+    p.write_text(json.dumps([10 + t for t in range(1, n + 1)]), encoding="utf-8")
+    return str(p)
+
+
+def test_cli_formal_requires_tasks(tmp_path):
+    f = tmp_path / "results.jsonl"
+    write_jsonl(f, formal_rows())
+    with pytest.raises(SystemExit):
+        main(["formal", "--results", str(f), "--out", str(tmp_path / "o")])
+
+
 def test_cli_formal_deterministic(tmp_path):
     f = tmp_path / "results.jsonl"
     write_jsonl(f, formal_rows())
     outs = []
     for k in range(2):
         out = tmp_path / f"out{k}"
-        assert main(["formal", "--results", str(f), "--out", str(out)]) == 0
+        assert main(["formal", "--results", str(f), "--out", str(out), "--tasks", tasks_file(tmp_path)]) == 0
         outs.append(((out / "report.md").read_bytes(), (out / "result.json").read_bytes()))
     assert outs[0] == outs[1]
     res = json.loads(outs[0][1])
@@ -104,7 +117,7 @@ def test_cli_formal_deterministic(tmp_path):
 def test_cli_formal_single_pass_no_third_pass(tmp_path):
     f = tmp_path / "results.jsonl"
     write_jsonl(f, formal_rows(passes=1))
-    main(["formal", "--results", str(f), "--out", str(tmp_path / "o")])
+    main(["formal", "--results", str(f), "--out", str(tmp_path / "o"), "--tasks", tasks_file(tmp_path)])
     res = json.loads((tmp_path / "o" / "result.json").read_text(encoding="utf-8"))
     assert res["thirdPass"] is None
 
@@ -127,7 +140,8 @@ def test_cli_calibration(tmp_path):
     outs = []
     for k in range(2):
         out = tmp_path / f"c{k}"
-        main(["calibration", "--results", str(f), "--out", str(out), "--eligible", str(el), "--compaction-trigger", "900000"])
+        main(["calibration", "--results", str(f), "--out", str(out), "--eligible", str(el), "--compaction-trigger", "900000",
+              "--formal-valid-tasks", "80"])
         outs.append(((out / "report.md").read_bytes(), (out / "result.json").read_bytes()))
     assert outs[0] == outs[1]
     cal = json.loads(outs[0][1])["calibration"]
@@ -135,4 +149,10 @@ def test_cli_calibration(tmp_path):
     assert cal["memoryCap"]["capChars"] == 8000  # 每步 250 × 30 = 7,500 → 8,000
     assert cal["reviewCap"]["turns"] == 20
     assert cal["stepBudget"]["turns"] == 150
+    assert cal["designSensitivity"]["formalTasks"] == 80
     assert cal["designSensitivity"]["mde"] is not None
+    # 不给正式跑有效题数时不算最小可分辨效果
+    main(["calibration", "--results", str(f), "--out", str(tmp_path / "c2")])
+    cal2 = json.loads((tmp_path / "c2" / "result.json").read_text(encoding="utf-8"))["calibration"]
+    assert cal2["designSensitivity"]["mde"] is None
+    assert cal2["designSensitivity"]["v"] is not None

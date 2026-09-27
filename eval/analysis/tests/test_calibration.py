@@ -174,10 +174,22 @@ class TestMemoryCap:
         rows = rows[~((rows.cell == "11") & (rows.task == TASKS[7]))]
         assert memory_cap_rule(rows)["growthByPass"]["1"] == pytest.approx(300)
 
-    def test_falls_back_to_bytes(self):
+    def test_bytes_only_gives_no_cap(self):
+        # 只按字符算：结果行只有字节数时不给上限，不拿字节近似
         r = memory_cap_rule(memory_rows({1: linear(300)}, column="memory_bytes"))
-        assert r["column"] == "memory_bytes"
-        assert r["capChars"] == 9000
+        assert r["capChars"] is None
+        assert r["reason"] == "memory-chars-missing"
+
+    def test_end_of_step_sizes_include_last_step(self):
+        # 开工时 0、300、…、4,200；最后一步复盘后涨到 6,000：增长 = (6,000 − 0) / 15 = 400 → 12,000
+        rows = memory_rows({1: linear(300)})
+        last = (rows.cell == "11") & (rows.task == TASKS[-1])
+        rows.loc[last, "memory_chars_after"] = 6000.0
+        r = memory_cap_rule(rows)
+        assert r["usedEndOfStepSizes"] == {"1": True}
+        assert r["growthByPass"]["1"] == pytest.approx(400)
+        # 没有复盘后的大小时退回开工时首尾差：4,200 / 14 = 300
+        assert memory_cap_rule(memory_rows({1: linear(300)}))["growthByPass"]["1"] == pytest.approx(300)
 
 
 class TestReviewCap:

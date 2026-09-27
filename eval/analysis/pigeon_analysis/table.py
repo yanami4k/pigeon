@@ -16,6 +16,7 @@
 - input_miss、input_hit、output_tokens：输入 token（未命中 / 命中）与输出 token
 - peak_input：每步单次请求输入 token 的峰值
 - memory_chars、memory_bytes、memory_entries：每步开工时 MEMORY.md 的字符数、字节数与条目数
+- memory_chars_after：每步复盘结束后 MEMORY.md 的字符数（最后一步的即该遍结束值）
 - hit_step_budget、hit_review_budget：是否撞了每步 / 复盘的上限（1 / 0，未知为 NaN）
 - 其余以 mem_ 或 search_ 开头的列为记忆使用的计数，原样汇总
 """
@@ -46,6 +47,7 @@ NUMERIC_COLUMNS = (
     "output_tokens",
     "peak_input",
     "memory_chars",
+    "memory_chars_after",
     "memory_bytes",
     "memory_entries",
     "hit_step_budget",

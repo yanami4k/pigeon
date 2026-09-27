@@ -21,8 +21,9 @@ def sign_flip_pvalue(
     flips: int = K.PERMUTATIONS,
     seed: int = K.PERMUTATION_SEED,
 ) -> float | None:
-    """双侧 p 值：零假设下每个 d(i) 的正负号可以互换，随机翻转 flips 次，
-    翻转后平均差的绝对值不小于实测平均差绝对值的比例（1.5 甲）。没有有效题时为 None。"""
+    """双侧 p 值：零假设下每个 d(i) 的正负号可以互换，随机翻转 flips 次，数翻转后平均差的绝对值
+    不小于实测平均差绝对值的次数，按加 1 修正取 (次数 + 1) / (翻转次数 + 1)（1.5 甲），p 值不会为 0。
+    没有有效题时为 None。"""
     d = np.asarray(d, dtype=float)
     n = d.size
     if n == 0:
@@ -39,7 +40,7 @@ def sign_flip_pvalue(
         means = np.abs(signs @ d) / n
         hits += int(np.count_nonzero(means >= observed - tol))
         done += m
-    return hits / flips
+    return (hits + 1) / (flips + 1)
 
 
 @dataclass(frozen=True)

@@ -76,11 +76,13 @@ def formal_markdown(res: dict[str, Any]) -> str:
             f"{'是' if e['holmSignificant'] else '否'} | {_v(e['dz'], 2)} |"
         )
     b = p["baseline"]
+    top = int(K.CEILING_SCORE * 100)
     lines += [
         "",
-        f"- 00 格平均得分 {_v(b['mean00'], 1, 100)}%；推送效果相对其变化 {_v(b['pushRelativeTo00'], 1, 100)}%，"
-        f"检索效果相对其变化 {_v(b['searchRelativeTo00'], 1, 100)}%。",
-        f"- 无推送两格平均得分 {_v(b['noPushMean'], 1, 100)}%（达到 {int(K.CEILING_SCORE * 100)}% 及以上为基线触顶：{'是' if b['ceiling'] else '否'}）。",
+        f"- 推送效果的基线（无推送的 00、01 两格）平均得分 {_v(b['push']['mean'], 1, 100)}%，相对提升约 {_v(b['push']['relative'], 1, 100)}%；"
+        f"达到 {top}% 及以上为基线触顶：{'是' if b['push']['ceiling'] else '否'}。",
+        f"- 检索效果的基线（不能检索的 00、10 两格）平均得分 {_v(b['search']['mean'], 1, 100)}%，相对提升约 {_v(b['search']['relative'], 1, 100)}%；"
+        f"达到 {top}% 及以上为基线触顶：{'是' if b['search']['ceiling'] else '否'}。",
         "- 各格各遍平均得分（描述用）：" + "；".join(
             f"{c}：" + "、".join(f"第 {r} 遍 {_v(v, 1, 100)}" for r, v in sorted(rs.items()))
             for c, rs in sorted(p["cellPassScores"].items())),
@@ -90,14 +92,18 @@ def formal_markdown(res: dict[str, Any]) -> str:
     ]
     mm = p.get("mixedModel", {})
     if "error" in mm:
-        lines.append(f"- 混合模型未拟合出结果：{mm['error']}；无法比较。")
+        lines.append(f"- 混合模型未拟合出结果：{mm['error']}；稳健性对照不可用，主结论照符号翻转检验。")
+    elif mm and not mm["converged"]:
+        lines.append("- 混合模型未收敛，稳健性对照不可用，主结论照符号翻转检验。")
+        if mm["warnings"]:
+            lines.append(f"- 拟合告警：{'；'.join(mm['warnings'])}")
     elif mm:
         for name in ("push", "search"):
             lines.append(
                 f"- {LABELS[name]}：系数 {_v(mm['coef'][name], 1, 100)} 个百分点，p = {mm['p'][name]:.4f}，"
                 f"Holm 显著：{'是' if mm['holmSignificant'][name] else '否'}"
             )
-        lines.append(f"- 收敛：{'是' if mm['converged'] else '否（系数与 p 值仅供参考）'}；方差分量：{ {k: round(v, 6) for k, v in mm['varianceComponents'].items()} }")
+        lines.append(f"- 收敛：是；方差分量：{ {k: round(v, 6) for k, v in mm['varianceComponents'].items()} }")
         if mm["warnings"]:
             lines.append(f"- 拟合告警：{'；'.join(mm['warnings'])}")
         sens = p["sensitivity"]
@@ -179,7 +185,9 @@ def calibration_markdown(res: dict[str, Any]) -> str:
               f"- 正式上限：{_v(sb.get('turns'), 0)} 轮、{_v(sb.get('wallMinutes'), 0)} 分钟；封顶生效：{'是' if sb.get('capApplied') else '否'}", ""]
     mc = c["memoryCap"]
     lines += ["## 3.5 记忆总量硬上限", "",
-              f"- 按 {mc['column']} 计；各遍每步平均增长 {mc['growthByPass']}；两遍相差超过一倍：{'是' if mc.get('passesDiverged') else '否'}",
+              f"- 按字符计；各遍每步平均增长 {mc['growthByPass']}（是否用了每步复盘后的大小：{mc['usedEndOfStepSizes']}）；"
+              f"两遍相差超过一倍：{'是' if mc.get('passesDiverged') else '否'}"
+              + ("；结果行没有字符数，未给上限" if mc.get("reason") == "memory-chars-missing" else ""),
               f"- 取用增长 {_v(mc.get('growthUsed'), 1)} × 30 → 取整 {_v(mc.get('rounded'), 0)} → 上限 {_v(mc.get('capChars'), 0)} 字符", ""]
     rc = c["reviewCap"]
     lines += ["## 3.6 复盘上限", "",
@@ -188,8 +196,9 @@ def calibration_markdown(res: dict[str, Any]) -> str:
     ds = c["designSensitivity"]
     lines += ["## 3.7 设计灵敏度", "",
               f"- 重跑方差 v = {_v(ds['v'], 6)}，因题而异 τ² = {_v(ds.get('tau2'), 6)}（配对题 {ds['nPaired']} 道；只用方差）",
-              f"- 正式跑 n = {ds['formalTasks']}（{c['mdeTasksSource']}），k = {ds['k']}：" + (
-                  "；".join(f"R = {r} 时最小可分辨效果约 {pp(m)} 个百分点" for r, m in ds["mde"].items()) if ds.get("mde") else "无法计算"),
+              f"- 正式跑有效题 n = {ds['formalTasks'] if ds['formalTasks'] else '未给'}，k = {ds['k']}：" + (
+                  "；".join(f"R = {r} 时最小可分辨效果约 {pp(m)} 个百分点" for r, m in ds["mde"].items()) if ds.get("mde")
+                  else "未算（须给出正式跑有效题数，或方差不可估）"),
               "- 校准的记忆轨迹只有 15 道题，可能低估波动。", ""]
     if "sampleCheck" in c:
         sc = c["sampleCheck"]

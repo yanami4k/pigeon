@@ -1,13 +1,17 @@
 from pigeon_analysis.wording import conclusion_sentences, exploratory_banner, fmt_p
 
 
-def primary(push, search=None, ceiling=False, sensitive=None, exploratory=False):
+def primary(push, search=None, ceiling=False, search_ceiling=False, sensitive=None, exploratory=False,
+            push_rel=0.13, search_rel=0.002):
     search = search or dict(estimate=0.001, ci=[-0.01, 0.012], p=0.8, holmSignificant=False, mdeFormal=0.06)
     return {
         "nValid": 80,
         "passesPerCell": {"00": 2, "01": 2, "10": 2, "11": 2},
         "effects": {"push": push, "search": search},
-        "baseline": {"ceiling": ceiling},
+        "baseline": {
+            "push": {"ceiling": ceiling, "relative": push_rel},
+            "search": {"ceiling": search_ceiling, "relative": search_rel},
+        },
         "sensitivity": {"byEffect": sensitive or {}},
         "exploratory": exploratory,
         "missingTasks": [1] * 9,
@@ -22,24 +26,29 @@ def test_positive():
     s = conclusion_sentences(primary(eff(0.052, True, p=0.0031)))["push"]
     assert s["kind"] == "detected-positive"
     assert s["text"] == (
-        "在 80 道题、2 遍下，推送记忆使每步要做到的用例通过比例平均提高 5.2 个百分点"
+        "在 80 道题、2 遍下，推送记忆使每步要做到的用例通过比例平均提高 5.2 个百分点，相对提升约 13.0%"
         "（95% 置信区间 [1.0, 9.0]；按题配对的符号翻转检验，Holm 校正后显著，p = 0.0031）。"
     )
 
 
 def test_negative():
-    s = conclusion_sentences(primary(eff(-0.04, True, ci=(-0.07, -0.01))))["push"]
+    s = conclusion_sentences(primary(eff(-0.04, True, ci=(-0.07, -0.01)), push_rel=-0.1))["push"]
     assert s["kind"] == "detected-negative"
-    assert "平均降低 4.0 个百分点" in s["text"]
+    assert "平均降低 4.0 个百分点，相对降低约 10.0%（" in s["text"]
 
 
 def test_not_detected_with_mde():
-    s = conclusion_sentences(primary(eff(0.02, False, p=0.2, ci=(-0.01, 0.05), mde=0.061)))["push"]
+    s = conclusion_sentences(primary(eff(0.02, False, p=0.2, ci=(-0.01, 0.05), mde=0.061), push_rel=0.05))["push"]
     assert s["kind"] == "not-detected"
     assert s["text"] == (
-        "在 80 道题、2 遍下，未测出推送记忆的改善：估计差 2.0 个百分点（95% 置信区间 [-1.0, 5.0]）。"
+        "在 80 道题、2 遍下，未测出推送记忆的改善：估计差 2.0 个百分点，相对提升约 5.0%（95% 置信区间 [-1.0, 5.0]）。"
         "本设计能以 80% 把握分辨的最小效果约为 6.1 个百分点，因此不能排除小于约 6.1 个百分点的效果。"
     )
+
+
+def test_relative_omitted_without_baseline():
+    s = conclusion_sentences(primary(eff(0.02, False), push_rel=None))["push"]
+    assert "相对" not in s["text"]
 
 
 def test_significant_but_uncorrected_is_not_detected():
@@ -48,10 +57,14 @@ def test_significant_but_uncorrected_is_not_detected():
     assert s["kind"] == "not-detected"
 
 
-def test_ceiling_appended_only_to_push_not_detected():
+def test_ceiling_appended_to_not_detected_per_effect():
     out = conclusion_sentences(primary(eff(0.01, False), ceiling=True))
     assert out["push"]["text"].endswith("（基线触顶）")
     assert "基线触顶" not in out["search"]["text"]
+    out = conclusion_sentences(primary(eff(0.01, False), search_ceiling=True))
+    assert out["search"]["text"].endswith("（基线触顶）")
+    assert "基线触顶" not in out["push"]["text"]
+    # 测出时不挂
     out = conclusion_sentences(primary(eff(0.05, True), ceiling=True))
     assert "基线触顶" not in out["push"]["text"]
 

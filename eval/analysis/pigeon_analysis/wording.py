@@ -29,6 +29,11 @@ def fmt_passes(passes: dict[str, int]) -> str:
     return str(vals[0]) if len(vals) == 1 else f"{vals[0]}–{vals[-1]}"
 
 
+def rel_clause(rel: float | None, prefix: str) -> str:
+    """相对提升：主效应 ÷ 对应基线两格的平均得分，与百分点并列；基线为 0 时不写。"""
+    return f"，{prefix} {rel * 100:.1f}%" if rel is not None else ""
+
+
 def classify(effect: dict[str, Any]) -> str:
     if effect["holmSignificant"] and effect["estimate"] is not None:
         return DETECTED_POSITIVE if effect["estimate"] > 0 else DETECTED_NEGATIVE
@@ -48,27 +53,32 @@ def conclusion_sentences(primary: dict[str, Any]) -> dict[str, dict[str, str]]:
             out[name] = {"kind": "no-data", "text": f"没有有效题，无法估计{label}的效果。"}
             continue
         kind = classify(e)
+        base = primary["baseline"][name]
+        rel = base["relative"]
         lo, hi = e["ci"]
         ci = f"95% 置信区间 [{pp(lo)}, {pp(hi)}]"
         if kind == DETECTED_POSITIVE:
             text = (
                 f"在 {n} 道题、{r} 遍下，{label}使每步要做到的用例通过比例平均提高 {pp(e['estimate'])} 个百分点"
+                f"{rel_clause(rel, '相对提升约')}"
                 f"（{ci}；按题配对的符号翻转检验，Holm 校正后显著，{fmt_p(e['p'])}）。"
             )
         elif kind == DETECTED_NEGATIVE:
             text = (
                 f"在 {n} 道题、{r} 遍下，{label}使每步要做到的用例通过比例平均降低 {pp(-e['estimate'])} 个百分点"
+                f"{rel_clause(-rel if rel is not None else None, '相对降低约')}"
                 f"（{ci}；按题配对的符号翻转检验，Holm 校正后显著，{fmt_p(e['p'])}）。"
             )
         else:
             mde = e["mdeFormal"]
             mde_s = pp(mde) if mde is not None else "—"
             text = (
-                f"在 {n} 道题、{r} 遍下，未测出{label}的改善：估计差 {pp(e['estimate'])} 个百分点（{ci}）。"
+                f"在 {n} 道题、{r} 遍下，未测出{label}的改善：估计差 {pp(e['estimate'])} 个百分点"
+                f"{rel_clause(rel, '相对提升约')}（{ci}）。"
                 f"本设计能以 80% 把握分辨的最小效果约为 {mde_s} 个百分点，因此不能排除小于约 {mde_s} 个百分点的效果。"
             )
-            # 基线触顶按无推送两格定义（第 4 节），只挂在推送效果的"未测出"句后
-            if name == "push" and primary["baseline"]["ceiling"]:
+            # 基线触顶：推送效果看无推送的 00、01，检索效果看不能检索的 00、10，平均得分达到 90% 及以上
+            if base["ceiling"]:
                 text += "（基线触顶）"
         if sens.get(name):
             text += "结论对建模方式敏感，见稳健性分析。"

@@ -123,11 +123,27 @@ class TestAnalyze:
         assert a == b
 
     def test_ceiling_definition(self):
-        # 无推送两格 (00、01) 平均得分正好 0.90：触顶
+        # 无推送两格 (00、01) 平均得分正好 0.90：推送触顶
         df = make_table(grid({"00": 0.85, "01": 0.95, "10": 0.9, "11": 0.9}))
-        assert analyze_primary(df, with_mixed=False, **FAST)["baseline"]["ceiling"] is True
+        assert analyze_primary(df, with_mixed=False, **FAST)["baseline"]["push"]["ceiling"] is True
         df = make_table(grid({"00": 0.85, "01": 0.949, "10": 0.9, "11": 0.9}))
-        assert analyze_primary(df, with_mixed=False, **FAST)["baseline"]["ceiling"] is False
+        assert analyze_primary(df, with_mixed=False, **FAST)["baseline"]["push"]["ceiling"] is False
+
+    def test_search_ceiling_uses_no_search_cells(self):
+        # 不能检索的两格 (00、10) 平均正好 0.90：检索触顶；无推送两格 (00、01) 只有 0.55，推送不触顶
+        df = make_table(grid({"00": 0.85, "01": 0.25, "10": 0.95, "11": 0.3}))
+        b = analyze_primary(df, with_mixed=False, **FAST)["baseline"]
+        assert b["search"]["ceiling"] is True
+        assert b["push"]["ceiling"] is False
+
+    def test_relative_lift_over_matching_baseline(self):
+        # 推送：0.4 ÷ 无推送两格 0.3 = 133%；检索：0.2 ÷ 不能检索两格 0.4 = 50%
+        df = make_table(grid({"00": 0.2, "01": 0.4, "10": 0.6, "11": 0.8}))
+        b = analyze_primary(df, with_mixed=False, **FAST)["baseline"]
+        assert b["push"]["mean"] == pytest.approx(0.3)
+        assert b["push"]["relative"] == pytest.approx(0.4 / 0.3)
+        assert b["search"]["mean"] == pytest.approx(0.4)
+        assert b["search"]["relative"] == pytest.approx(0.5)
 
     def test_mde_formal_formula(self):
         df = simulate(n_tasks=30, passes=2, seed=3)
@@ -148,18 +164,24 @@ class TestSensitivity:
 
     def test_consistent(self):
         effects = {"push": self.eff(0.05, True), "search": self.eff(-0.01, False)}
-        mixed = {"coef": {"push": 0.04, "search": -0.02}, "holmSignificant": {"push": True, "search": False}}
+        mixed = {"coef": {"push": 0.04, "search": -0.02}, "holmSignificant": {"push": True, "search": False}, "converged": True}
         assert sensitivity(effects, mixed) == {"sensitive": False, "byEffect": {"push": False, "search": False}}
 
     def test_significance_disagrees(self):
         effects = {"push": self.eff(0.05, True), "search": self.eff(-0.01, False)}
-        mixed = {"coef": {"push": 0.04, "search": -0.02}, "holmSignificant": {"push": False, "search": False}}
+        mixed = {"coef": {"push": 0.04, "search": -0.02}, "holmSignificant": {"push": False, "search": False}, "converged": True}
         assert sensitivity(effects, mixed)["byEffect"] == {"push": True, "search": False}
 
     def test_direction_disagrees(self):
         effects = {"push": self.eff(0.01, False), "search": self.eff(0.01, False)}
-        mixed = {"coef": {"push": 0.01, "search": -0.001}, "holmSignificant": {"push": False, "search": False}}
+        mixed = {"coef": {"push": 0.01, "search": -0.001}, "holmSignificant": {"push": False, "search": False}, "converged": True}
         assert sensitivity(effects, mixed)["byEffect"] == {"push": False, "search": True}
+
+    def test_not_converged_not_compared(self):
+        # 未收敛：即使方向与显著性都不一致也不比较，稳健性对照不可用
+        effects = {"push": self.eff(0.05, True), "search": self.eff(0.01, False)}
+        mixed = {"coef": {"push": -0.04, "search": -0.02}, "holmSignificant": {"push": False, "search": True}, "converged": False}
+        assert sensitivity(effects, mixed) == {"sensitive": None, "byEffect": {}}
 
     def test_fit_failure(self):
         assert sensitivity({}, {"error": "x"})["sensitive"] is None

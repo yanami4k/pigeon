@@ -148,30 +148,41 @@ def step_budget_rule(df: pd.DataFrame) -> dict[str, Any]:
     return out
 
 
-def pass_memory_growth(g: pd.DataFrame, column: str, order: list[int]) -> float | None:
-    """一遍里每步平均增长：以每步开工时的大小算，(最后一个 − 第一个) / 两者相隔的步数。"""
-    s = g[["task", column]].dropna().sort_values("task")
-    if len(s) < 2:
-        return None
+def pass_memory_growth(g: pd.DataFrame, order: list[int]) -> tuple[float | None, bool]:
+    """一遍里每步平均增长（字符）。有每步复盘结束后的大小时：(最后一步复盘后 − 第一步开工时) / 两者之间的步数，
+    最后一步的增长也算在内；没有时退回只用开工时大小：(最后一个 − 第一个) / 两者相隔的步数。
+    返回 (增长, 是否用了复盘后的大小)。"""
     pos = {t: k for k, t in enumerate(order)}
-    first, last = s.iloc[0], s.iloc[-1]
+    starts = g[["task", "memory_chars"]].dropna().sort_values("task")
+    ends = g[["task", "memory_chars_after"]].dropna().sort_values("task")
+    if not starts.empty and not ends.empty:
+        first, last = starts.iloc[0], ends.iloc[-1]
+        steps = pos[int(last["task"])] - pos[int(first["task"])] + 1
+        if steps > 0:
+            return float(last["memory_chars_after"] - first["memory_chars"]) / steps, True
+    if len(starts) < 2:
+        return None, False
+    first, last = starts.iloc[0], starts.iloc[-1]
     steps = pos[int(last["task"])] - pos[int(first["task"])]
     if steps <= 0:
-        return None
-    return float(last[column] - first[column]) / steps
+        return None, False
+    return float(last["memory_chars"] - first["memory_chars"]) / steps, False
 
 
 def memory_cap_rule(df: pd.DataFrame) -> dict[str, Any]:
     """记忆总量硬上限（3.5、223）：上限 = 11 格每步平均增长字符数 × 30，向上取整到 1,000，限制在 2,200 到 12,000 之间。
-    两遍增长速度相差超过一倍时取较快的一遍，否则取两遍平均。没有字符数时退用字节数并注明。"""
+    两遍增长速度相差超过一倍时取较快的一遍，否则取两遍平均。只按字符算，结果行没有字符数时不给上限。"""
     g = df[df["cell"] == "11"]
-    column = "memory_chars" if g["memory_chars"].notna().any() else "memory_bytes"
     order = sorted(int(t) for t in df["task"].unique())
-    growth = {str(int(p)): pass_memory_growth(x, column, order) for p, x in g.groupby("pass_no")}
+    growth: dict[str, float | None] = {}
+    end_of_pass: dict[str, bool] = {}
+    for p, x in g.groupby("pass_no"):
+        growth[str(int(p))], end_of_pass[str(int(p))] = pass_memory_growth(x, order)
     rates = [r for r in growth.values() if r is not None]
-    out: dict[str, Any] = {"column": column, "growthByPass": growth}
+    out: dict[str, Any] = {"growthByPass": growth, "usedEndOfStepSizes": end_of_pass}
     if not rates:
         out["capChars"] = None
+        out["reason"] = "memory-chars-missing"
         return out
     if len(rates) >= 2:
         lo, hi = min(rates), max(rates)
@@ -216,9 +227,8 @@ def analyze_calibration(
     compaction_trigger: float | None = None,
     eligible: Iterable[int] | None = None,
 ) -> dict[str, Any]:
-    """校准分析：六项取值与设计灵敏度。formal_valid_tasks 为正式跑中要做到的不为零的题数（MDE 的 n），
-    未给时用 formal_tasks。eligible 给出时核对结果里的题是否正是按种子抽出的 15 道。"""
-    n_for_mde = formal_valid_tasks if formal_valid_tasks is not None else formal_tasks
+    """校准分析：六项取值与设计灵敏度。formal_valid_tasks 为正式跑的有效题数（89 道里要做到的不为零的题数，
+    MDE 的 n），未给时只报 v 与 τ²、不算 MDE。eligible 给出时核对结果里的题是否正是按种子抽出的 15 道。"""
     out: dict[str, Any] = {
         "solvedRate": solved_rate_rule(df),
         "cost": cost_rule(df, formal_tasks),
@@ -226,8 +236,7 @@ def analyze_calibration(
         "stepBudget": step_budget_rule(df),
         "memoryCap": memory_cap_rule(df),
         "reviewCap": review_cap_rule(df),
-        "designSensitivity": calibration_design_sensitivity(df, n_for_mde),
-        "mdeTasksSource": "formal-valid-tasks" if formal_valid_tasks is not None else "formal-tasks",
+        "designSensitivity": calibration_design_sensitivity(df, formal_valid_tasks),
         "tasks": sorted(int(t) for t in df["task"].unique()),
     }
     if eligible is not None:

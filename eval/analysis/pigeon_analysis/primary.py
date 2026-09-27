@@ -154,8 +154,9 @@ def mixed_model(df: pd.DataFrame, valid_tasks: list[int]) -> dict[str, Any]:
 
 
 def sensitivity(effects: dict[str, dict[str, Any]], mixed: dict[str, Any]) -> dict[str, Any]:
-    """两者方向或显著性不一致时写明结论对建模方式敏感（222）。混合模型没拟合出来时无法比较，记 None。"""
-    if "error" in mixed:
+    """两者方向或显著性不一致时写明结论对建模方式敏感（222）。混合模型没拟合出来或未收敛时
+    稳健性对照不可用、不做比较，记 None，主结论照符号翻转检验。"""
+    if "error" in mixed or not mixed.get("converged", False):
         return {"sensitive": None, "byEffect": {}}
     by: dict[str, bool] = {}
     for name in EFFECTS:
@@ -165,6 +166,15 @@ def sensitivity(effects: dict[str, dict[str, Any]], mixed: dict[str, Any]) -> di
         same_sig = effects[name]["holmSignificant"] == mixed["holmSignificant"][name]
         by[name] = not (same_dir and same_sig)
     return {"sensitive": any(by.values()), "byEffect": by}
+
+
+def _baseline(mean: float | None, estimate: float | None) -> dict[str, Any]:
+    """基线两格的平均得分、是否触顶（达到 90% 及以上）、相对提升（主效应 ÷ 基线平均）。"""
+    return {
+        "mean": mean,
+        "ceiling": (mean is not None and at_least(mean, K.CEILING_SCORE)),
+        "relative": (estimate / mean) if (mean and estimate is not None) else None,
+    }
 
 
 def analyze_primary(
@@ -193,8 +203,9 @@ def analyze_primary(
     n_valid = len(valid)
     n_missing = len(sel["missingTasks"])
     missing_ratio = (n_missing / n_valid) if n_valid else (math.inf if n_missing else 0.0)
-    base00 = float(means["00"].mean()) if n_valid else None
+    # 各效应的基线两格：推送效果对无推送的 00、01；检索效果对不能检索的 00、10
     no_push = float(((means["00"] + means["01"]) / 2).mean()) if n_valid else None
+    no_search = float(((means["00"] + means["10"]) / 2).mean()) if n_valid else None
     passes = {c: int(rows[rows["cell"] == c]["pass_no"].nunique()) for c in K.CELLS}
     result: dict[str, Any] = {
         **sel,
@@ -207,12 +218,8 @@ def analyze_primary(
         "effects": effects,
         "interaction": interaction,
         "baseline": {
-            "mean00": base00,
-            "noPushMean": no_push,
-            "ceiling": (no_push is not None and at_least(no_push, K.CEILING_SCORE)),
-            # 以 00 格平均得分为底的相对变化
-            "pushRelativeTo00": (effects["push"]["estimate"] / base00) if base00 else None,
-            "searchRelativeTo00": (effects["search"]["estimate"] / base00) if base00 else None,
+            "push": _baseline(no_push, effects["push"]["estimate"]),
+            "search": _baseline(no_search, effects["search"]["estimate"]),
         },
         "perTask": {
             "tasks": valid,

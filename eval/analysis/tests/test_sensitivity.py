@@ -18,13 +18,14 @@ def two_pass(cell, task, y1, y2, **kw):
 
 
 class TestRerunVariance:
-    def test_pooled_half_variance(self):
-        # 01：e = 0.2、0、−0.2（均值 0，平方和 0.08，自由度 2）；11：e = 0.1、0.3（均值 0.2，平方和 0.02，自由度 1）
+    def test_simple_average_of_cell_halves(self):
+        # 01：e = 0.2、0、−0.2，样本方差 0.04，一半 0.02；11：e = 0.1、0.3，样本方差 0.02，一半 0.01；
+        # 对格子简单平均 0.015（按自由度加权合并则为 0.01667，两者不同）
         recs = two_pass("01", 1, 0.5, 0.3) + two_pass("01", 2, 0.4, 0.4) + two_pass("01", 3, 0.3, 0.5)
         recs += two_pass("11", 1, 0.6, 0.5) + two_pass("11", 2, 0.8, 0.5)
         r = rerun_variance(make_table(recs), ("01", "11"))
-        assert r["dof"] == 3
-        assert r["v"] == pytest.approx((0.08 + 0.02) / 3 / 2)
+        assert r["cellsPooled"] == 2
+        assert r["v"] == pytest.approx((0.04 / 2 + 0.02 / 2) / 2)
 
     def test_f_empty_and_single_pass_tasks_ignored(self):
         recs = two_pass("01", 1, 0.5, 0.3) + two_pass("01", 2, 0.4, 0.2)
