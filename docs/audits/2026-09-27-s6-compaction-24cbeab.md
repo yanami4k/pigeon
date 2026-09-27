@@ -115,7 +115,66 @@ Run 开始条目（`pigeon.run-start`）新增可缺省字段 `compaction`：`co
 
 本机（Windows）只跑类型检查与 biome，均通过；测试全部在服务器上跑。
 
-## 十一、与并行施工的交集
+## 十一、与其他分支的交集
 
-- 账本重构第四段（停写旧账本、删旧代码）：`pi-runtime/adapter.ts`（本次只加挂点、订阅、手动压缩与 Run 开始条目的一个字段，未碰旧账本写入与 run.started）、`application/runtime.ts`（装配压缩服务的一段与两个选项）、`application/session-store.ts`（双写之前旧会话的空写者补了 `branch` 与 `appendCompaction` 两行，若该写者随第四段删除，这两行一并去掉）、`pi-runtime/session-store.ts`、`state/session-entries.ts`、`application/workers.ts`、`application/headless-core.ts`。
-- 两处缺陷（空回复、检查工具崩溃）：`pi-runtime/adapter.ts` 的 `#runWith` 与收尾判定（本次在 `start()` 前后各加了挂点与还原，终态判定未改）、`application/headless-core.ts`（只加一个选项透传）、`eval/stream-agents.ts`（只加一个选项透传）。
+- ledger-s5（账本重构第四段：停写旧账本、删旧代码）：`pi-runtime/adapter.ts`（本次只加挂点、订阅、手动压缩与 Run 开始条目的一个字段，未碰旧账本写入与 run.started）、`application/runtime.ts`（装配压缩服务的一段与两个选项）、`application/session-store.ts`（双写之前旧会话的空写者补了 `branch` 与 `appendCompaction` 两行，若该写者随第四段删除，这两行一并去掉）、`pi-runtime/session-store.ts`、`state/session-entries.ts`、`application/workers.ts`、`application/headless-core.ts`。
+- defects-s7（空回复与检查工具崩溃两处缺陷）：`pi-runtime/adapter.ts` 的 `#runWith` 与收尾判定（本次在 `start()` 前后各加了挂点与还原，终态判定未改）、`application/headless-core.ts`（只加一个选项透传）、`eval/stream-agents.ts`（只加一个选项透传）。
+
+## 十二、worker 继承、跑批身份头、切开那一轮的重点、压缩失败可见
+
+| 提交 | 内容 |
+|---|---|
+| 173fc5e | worker 与分叉续跑沿用本次运行的压缩配置 |
+| 7a4d8ec | 跑批身份头与结果行记实际生效的压缩配置；续跑时列出具体不同的参数 |
+| 20dfa9d | 自动压缩没压成与压缩前回调失败改为压缩提示，无头运行写标准错误输出；不再计成事件落盘失败 |
+
+改动：20 个文件，新增 604 行、删除 69 行；其中生产代码新增 150 行、删除 50 行，测试新增 454 行、删除 19 行。本节取代第二节"worker 用产品缺省"一句与第三节"失败处理"一段；第十一节的交集文件另加 `application/headless.ts`、`application/session-runtime.ts`、`cli/index.ts`、`tui/main.ts`、`eval/stream-identity.ts`、`eval/stream-experiment.ts`（各为一两行透传或一个字段）。
+
+### 1. worker 继承主会话的压缩配置
+
+- 运行面新增 `compactionConfig()`，给出本运行面生效的压缩配置。按会话装配的 worker 工厂在没有显式给配置时取父运行面的这一份，worker 会话的 Run 开始条目因此与主会话记同一份；主会话没给参数时即产品缺省。
+- 分叉续跑沿用启动参数里的压缩配置：无头运行的失败自动分叉重试、会话里的失败自动分叉重试、命令行对话与终端界面的手动 `/fork`。
+- 测试 `application/workers-compaction.test.ts` 2 例：父运行面给了配置时 worker 的 Run 开始条目记同一份；没给时记产品缺省。
+
+### 2. 跑批身份头记压缩配置
+
+- `effectivePigeonSettings` 增加 `compaction`，取 `resolveCompactionConfig` 的结果：没给参数记产品缺省（窗口 1,000,000、预留 16,384、保留 20,000、触发点 983,616），不记 null。身份头 `core.agents.pigeon` 与结果行的 `agentSettings` 同取这一份；最简 agent 不记。
+- 续跑比对：同一 agent 两次都记了参数时，不同即拒绝，报错改为列出具体不同的参数（如 `agents.pigeon.compaction`），此前只列到 `agents.pigeon`。加这一项之前写下的身份头没有 `compaction`，用本版续跑即判为不同而拒绝。
+- 测试：`eval/stream-experiment.test.ts` 的生效参数一例补上缺省与给定两种压缩配置；`eval/stream-identity.test.ts` 新增 1 例，续跑时触发点不同即拒绝，报错含 `agents.pigeon.compaction`。
+
+### 3. 切开那一轮的前段摘要不带重点
+
+接受上游行为，不自补，见第七节。
+
+### 4. 压缩失败可见
+
+- 压缩提示由一类改为三类：压成了（压缩前后的 token 数）；自动压缩没压成（"上下文压缩未完成（自动，轮间 / 自动，Run 开始前）：原因；本轮按原上下文继续"）；压缩前回调失败（"压缩前回调失败：原因；压缩照常进行"）。压缩被中断时不发"没压成"的提示；手动压缩没压成时结果直接交回调用方，照旧在界面说明原因，不另发提示。
+- 原因：失败即错误信息；跳过即"最近保留的消息之外没有更早的对话可摘要"或"会话文件没有打开"。压缩服务的失败结果标明出在哪一步（准备、摘要、写入）。
+- 命令行对话与终端界面经原有的压缩提示通道显示这两类（终端界面前缀 `[compact]`）。
+- 无头运行（`pigeon run` 与跑批的 Pigeon 条件）在运行面装起来时订阅压缩提示，经 `dedupedWarner` 写标准错误输出：没压成与回调失败各按原因去重，同一类只说一次；压成了不告警。无头运行新增 `warn`（告警出口，缺省标准错误输出）与 `beforeCompaction`（压缩前回调）两个选项。
+- 摘要请求失败与回调失败不再进 `listenerErrors`，不再计成"事件落盘失败"；压缩条目写不进会话文件仍进 `listenerErrors`。没有新增账本或会话记录的种类。
+- 测试：`pi-runtime/adapter-compaction.test.ts` 新增 3 例（摘要失败：提示没压成、按原上下文继续、不计入落盘失败；回调失败：提示回调失败、压缩照常完成、不计入；写入失败：提示没压成、仍计入）；`pi-runtime/compaction.test.ts` 新增 1 例（写入失败标明出在写入一步），摘要失败一例补断言（出在摘要一步）；`application/runtime-compaction.test.ts` 新增 2 例（无头运行两次没压成只告警一行、回调失败告警一行，文案逐字）；`cli/repl-compact.test.ts` 新增 1 例（打印没压成的一行，不出现"事件落盘失败"）；`tui/compact.test.ts` 新增 1 例（两类提示的文字）。既有的压缩提示用例随提示形状补上 `kind`。
+
+测试先行：本节测试先于实现写成，实现前在服务器上运行，16 例变红（其中含随提示形状与回调参数名变化而落空的既有用例）；"父运行面没给配置时 worker 即产品缺省"一例在实现前即通过（原行为如此）。
+
+### 5. 变异反向验证
+
+在服务器上以 20dfa9d 运行：每次只植入一处，跑 8 个测试文件（压缩服务、运行面、装配、worker、命令行对话、终端界面、身份头、生效参数，共 57 例），并发 3；以 `git checkout` 还原，6 次还原后源文件 sha256 均与植入前一致，工作树干净。
+
+| 变异 | 精确变红 |
+|---|---|
+| N1 worker 改回产品缺省 | 1 例：worker 继承父运行面的压缩配置 |
+| N2 生效参数不记压缩配置 | 1 例：身份头与结果行记 Pigeon 实际生效的参数 |
+| N3 去掉无头告警 | 2 例：无头运行没压成告警、回调失败告警 |
+| N4 去掉自动压缩没压成的提示 | 4 例：运行面摘要失败与写入失败 2 例、命令行对话没压成 1 例、无头运行没压成告警 1 例 |
+| N5 去掉压缩前回调失败的提示 | 2 例：运行面回调失败、无头运行回调失败告警 |
+| N6 摘要请求失败也计入事件落盘失败 | 2 例：运行面摘要失败、命令行对话没压成 |
+
+### 6. verify 的实际运行情况
+
+服务器同上。专属目录经 git bundle 取 20dfa9d 强制检出（工作树无改动），依赖声明未变。跑前服务器上没有别的测试进程，测试步并发 6：
+
+- lint：通过（411 个文件）；
+- check：通过；
+- 测试：`node --test --test-concurrency=6 "src/**/*.test.ts"`，1190 个用例，1188 通过、0 失败、0 取消、2 跳过（仅 Windows 的 .cmd 启动器两例），用时 97.1 秒，测试进程最大常驻内存 570,564 KB；
+- deps：无违规（428 个模块、2976 条依赖）。
