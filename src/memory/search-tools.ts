@@ -143,6 +143,8 @@ function renderBlock(block: ViewBlock): string {
   switch (block.type) {
     case "text":
       return block.text;
+    case "omitted-thinking":
+      return `[thinking 未持久化，${block.bytes} 字节]`;
     case "thinking":
       if (block.redacted) {
         return "[thinking 已被 provider 编辑]";

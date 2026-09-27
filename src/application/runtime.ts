@@ -215,6 +215,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     cwd: deps.workspaceRoot,
     ...(deps.storeLineage !== undefined ? { lineage: deps.storeLineage } : {}),
     onFault: storeFaultWarner(deps.storeWarn),
+    persistThinking: deps.persistThinking ?? true,
   });
   // 决策 3b：会话 grant 运行态——resume 时以事件日志物化结果为种子（created − revoked）
   const grantStore = new SessionGrantStore({

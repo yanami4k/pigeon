@@ -62,7 +62,9 @@ export function messageLines(
   const prefix =
     message.role === "user" ? "> " : message.role === "assistant" ? "" : `[${message.role}] `;
   for (const block of message.blocks) {
-    if (block.type === "thinking") {
+    if (block.type === "omitted-thinking") {
+      lines.push({ kind: "thinking", text: `~ thinking（未持久化，${block.bytes} 字节）` });
+    } else if (block.type === "thinking") {
       lines.push({
         kind: "thinking",
         text: block.redacted

@@ -30,6 +30,7 @@ import {
   type SessionSummaryFailureClass,
   sessionCreatedAt,
 } from "./session-summary.ts";
+import { omittedThinkingOf } from "./thinking-omission.ts";
 
 // 读取结果里本投影用到的部分（结构类型）
 export interface SessionFileEntryInput {
@@ -58,7 +59,9 @@ export type ViewBlock =
   | { type: "thinking"; thinking: string; redacted: boolean }
   | { type: "toolCall"; id: string; name: string; arguments: unknown }
   | { type: "image"; mimeType: string; bytes: number; hash: string }
-  | { type: "unknown"; originalType: string; hash: string };
+  | { type: "unknown"; originalType: string; hash: string }
+  // 思考不持久化时写入前剥去的思考块（045）：只剩字节数，位置同原块
+  | { type: "omitted-thinking"; bytes: number; redacted: boolean };
 
 export interface ViewMessage {
   entryId: string;
@@ -221,16 +224,24 @@ function toBlock(block: unknown): ViewBlock {
   }
 }
 
-// 消息正文的内容块：字符串正文视作一个 text 块
+// 消息正文的内容块：字符串正文视作一个 text 块；写入前剥去的思考块按标记插回原位置
 export function messageBlocks(message: Record<string, unknown>): ViewBlock[] {
   const content = message.content;
-  const blocks: unknown[] =
+  const blocks: ViewBlock[] = (
     typeof content === "string"
       ? [{ type: "text", text: content }]
       : Array.isArray(content)
         ? content
-        : [];
-  return blocks.map(toBlock);
+        : []
+  ).map(toBlock);
+  for (const omitted of omittedThinkingOf(message).sort((a, b) => a.index - b.index)) {
+    blocks.splice(Math.min(omitted.index, blocks.length), 0, {
+      type: "omitted-thinking",
+      bytes: omitted.bytes,
+      redacted: omitted.redacted === true,
+    });
+  }
+  return blocks;
 }
 
 function usageOf(value: unknown): ViewUsage | undefined {
