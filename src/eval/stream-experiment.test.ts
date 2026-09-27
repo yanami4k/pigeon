@@ -9,7 +9,6 @@ import {
   imageIdOf,
   installTerminationHandler,
   runStreamExperiment,
-  runStreamTrialExperiment,
   streamPigeonOptions,
 } from "./stream-experiment.ts";
 import { DEFAULT_STEP_BUDGET, RUN_LOCK } from "./stream-runner.ts";
@@ -112,7 +111,7 @@ test("SIGTERM：第一次交给控制器收尾并设硬时限，到时仍没退�
   assert.deepEqual(late, []);
 });
 
-test("输出目录的锁在读清单、写身份头、起网关探测之前取：另一个进程占着即拒绝，身份头不动（正式跑批与试跑）", async () => {
+test("输出目录的锁在读清单、写身份头、起网关探测之前取：另一个进程占着即拒绝，身份头不动", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-lock-"));
   try {
     const outDir = join(dir, "out");
@@ -132,15 +131,6 @@ test("输出目录的锁在读清单、写身份头、起网关探测之前取�
     };
     await assert.rejects(
       runStreamExperiment({ ...common, budget: DEFAULT_STEP_BUDGET }),
-      /正被另一个跑批进程使用/
-    );
-    await assert.rejects(
-      runStreamTrialExperiment({
-        ...common,
-        steps: [1],
-        budget: DEFAULT_STEP_BUDGET,
-        concurrency: 1,
-      }),
       /正被另一个跑批进程使用/
     );
     assert.equal(existsSync(join(outDir, "identity.json")), false);

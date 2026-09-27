@@ -38,7 +38,6 @@ import {
   installTerminationHandler,
   runStreamBaselines,
   runStreamExperiment,
-  runStreamTrialExperiment,
 } from "../eval/stream-experiment.ts";
 import {
   assembleImageContext,
@@ -543,24 +542,13 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
-// pigeon eval stream-trial --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --steps 3,9,12
-//   [--conditions full（缺省）] [--concurrency N（缺省 2）] [--max-turns N（缺省 400）] [--wall-clock-min N（缺省 90）]
-//   [--model-id <模型>] [--mini-python <解释器>] [--container-memory <上限>]：
-// 预算校准的试跑（147 修订）——每步各自从人在父提交上的代码起跑，预算放宽使消耗不被截断；结果行写到输出目录，
-// 按判据（轮数与墙钟各取第 90 百分位、乘 1.5、不低于 150 轮与 30 分钟）算出建议预算。同一输出目录重跑只补没完成的步
-export const STREAM_TRIAL_BUDGET = { maxTurns: 400, wallClockMs: 90 * 60_000 };
-
-async function evalStreamMain(argv: string[], trial = false): Promise<void> {
-  const usage = trial
-    ? "用法：pigeon eval stream-trial --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --steps 3,9,12 " +
-      "[--conditions full] [--concurrency N] [--max-turns N] [--wall-clock-min N] [--model-id <模型>] " +
-      "[--mini-python <装有 mini-swe-agent 的解释器>] [--container-memory <上限，缺省 2g>]"
-    : "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
-      "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
-      "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-      "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>]";
+async function evalStreamMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
+    "--conditions full,no-memory,no-gate,minimal [--streams s1] [--attempts N] [--concurrency N] [--max-steps K] " +
+    "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
+    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>]";
   const own = new Set([
-    ...(trial ? ["--steps"] : []),
     "--manifest",
     "--repo",
     "--image",
@@ -613,7 +601,7 @@ async function evalStreamMain(argv: string[], trial = false): Promise<void> {
           .split(",")
           .filter((x) => x !== "")
       : undefined;
-  const conditions = list("--conditions") ?? (trial ? ["full"] : []);
+  const conditions = list("--conditions") ?? [];
   for (const c of conditions) {
     if (!(STREAM_CONDITIONS as readonly string[]).includes(c)) {
       throw new Error(`未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}）`);
@@ -628,7 +616,7 @@ async function evalStreamMain(argv: string[], trial = false): Promise<void> {
     ? {
         provider: "kimi-coding",
         modelId,
-        // 与外部基准同一口径：缺省固定温度 0
+        // 缺省固定温度 0（110）
         temperature: streamTemperature(flags.temperature),
         ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
@@ -646,37 +634,6 @@ async function evalStreamMain(argv: string[], trial = false): Promise<void> {
     miniPython !== undefined
       ? [miniPython, fileURLToPath(new URL("../../eval/stream/mini/run_mini.py", import.meta.url))]
       : undefined;
-  if (trial) {
-    const steps = (list("--steps") ?? []).map((x) => Number(x));
-    if (steps.length === 0 || steps.some((x) => !Number.isInteger(x) || x < 1))
-      throw new Error(`--steps 需要逗号分隔的步序（${usage}）`);
-    const trialSummary = await runStreamTrialExperiment({
-      gateway: { accounts, modelId },
-      manifestFile: required("--manifest"),
-      repoDir: required("--repo"),
-      image: required("--image"),
-      outDir: required("--out"),
-      steps,
-      conditions: conditions as StreamCondition[],
-      budget: {
-        maxTurns: positive("--max-turns") ?? STREAM_TRIAL_BUDGET.maxTurns,
-        wallClockMs:
-          (positive("--wall-clock-min") ?? STREAM_TRIAL_BUDGET.wallClockMs / 60_000) * 60_000,
-      },
-      concurrency: concurrency ?? 2,
-      ...(pigeon !== undefined ? { pigeon } : {}),
-      ...(minimalCommand !== undefined ? { minimalCommand } : {}),
-      containerRunArgs: ["--memory", memory],
-      log: (line) => writeOut(`[trial] ${new Date().toISOString()} ${line}\n`),
-    });
-    const r = trialSummary.recommendation;
-    writeOut(
-      r === null
-        ? `[trial] 没有完成的步，算不出建议预算；结果 ${trialSummary.resultsFile}\n`
-        : `[trial] 建议预算（${r.condition === "full" ? "完整 Pigeon" : "全部条件"}，${r.samples} 步）：轮数第 90 百分位 ${r.p90Turns} → ${r.maxTurns} 轮；墙钟第 90 百分位 ${(r.p90WallMs / 60_000).toFixed(1)} 分 → ${r.wallClockMin} 分。结果 ${trialSummary.resultsFile}；建议 ${trialSummary.recommendationFile}\n`
-    );
-    return;
-  }
   // SIGTERM（systemd 停服、整机关机）：在途的步作废、不再取新步，硬时限内自行退出
   const shutdown = new AbortController();
   const removeTermHandler = installTerminationHandler(
@@ -770,10 +727,6 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "stream") {
     await evalStreamMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream-trial") {
-    await evalStreamMain(argv.slice(2), true);
     return;
   }
   if (argv[0] === "eval" && argv[1] === "stream-image-context") {
