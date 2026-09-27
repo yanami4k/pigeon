@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { currentHarnessRef } from "./stream-harness.ts";
 import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
-import { TASK_CHAIN_SCOPE } from "./stream-manifest.ts";
+import { TASK_CHAIN_SCOPE, TASK_PROMPT_LAYOUT } from "./stream-manifest.ts";
 import { DEFAULT_STEP_BUDGET } from "./stream-runner.ts";
 
 test("harness 版本：取本源码所在仓库的 HEAD 短号与是否有未提交改动", () => {
@@ -31,6 +31,8 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
     conditions: ["search-only", "minimal"],
     stepScope: TASK_CHAIN_SCOPE,
     promptFormat: "test-files",
+    promptLayout: TASK_PROMPT_LAYOUT,
+    taskSelection: { method: "all" },
     maxSteps: null,
     agents: {
       pigeon: {
@@ -89,6 +91,11 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
       () => checkOrWriteIdentity(dir, identity({ stepScope: "continuation" })),
       /stepScope/
     );
+    // 题面版式不同（两段名单之前的单段版式）：结果不能混
+    assert.throws(
+      () => checkOrWriteIdentity(dir, identity({ promptLayout: "single should-pass list" })),
+      /promptLayout/
+    );
     // 193 之前写下的身份头没有这两项：同样拒绝续跑
     const { stepScope: _s, promptFormat: _p, ...legacyCore } = identity().core;
     const legacyDir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
@@ -101,6 +108,66 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
     } finally {
       rmSync(legacyDir, { recursive: true, force: true });
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("身份头按条件子集续跑（202、219）：只跑一部分条件、只接一种 agent 的都放行，条件取并集、agent 参数补上，摘要不变；同一 agent 参数不同、选题不同即拒绝", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+  try {
+    const sample = {
+      method: "sample" as const,
+      seed: 20260927,
+      k: 15,
+      population: "p",
+      tasks: [3, 7],
+    };
+    const { minimal: _m, ...pigeonOnly } = identity().core.agents;
+    const { pigeon, ...minimalOnly } = identity().core.agents;
+    const first = checkOrWriteIdentity(
+      dir,
+      identity({ conditions: ["search-only"], agents: pigeonOnly, taskSelection: sample })
+    );
+    const read = () => JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+    assert.equal(
+      checkOrWriteIdentity(
+        dir,
+        identity({ conditions: ["minimal"], agents: minimalOnly, taskSelection: sample })
+      ),
+      first
+    );
+    assert.deepEqual(read().core.conditions, ["search-only", "minimal"]);
+    assert.deepEqual(Object.keys(read().core.agents).sort(), ["minimal", "pigeon"]);
+    assert.equal(read().digest, first);
+    // 同一格整份重跑第二遍（遍次不在身份里）、条件已在并集里：照常
+    assert.equal(
+      checkOrWriteIdentity(
+        dir,
+        identity({ conditions: ["search-only"], agents: pigeonOnly, taskSelection: sample })
+      ),
+      first
+    );
+    assert.throws(
+      () =>
+        checkOrWriteIdentity(
+          dir,
+          identity({
+            conditions: ["search-push"],
+            agents: { pigeon: { ...(pigeon as NonNullable<typeof pigeon>), temperature: 1 } },
+            taskSelection: sample,
+          })
+        ),
+      /agents\.pigeon/
+    );
+    assert.throws(
+      () => checkOrWriteIdentity(dir, identity({ taskSelection: { ...sample, tasks: [3, 8] } })),
+      /taskSelection/
+    );
+    assert.throws(
+      () => checkOrWriteIdentity(dir, identity({ taskSelection: { method: "all" } })),
+      /taskSelection/
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -3,6 +3,7 @@
 // 被限额打断的一步整题作废、不留行（144），因此这里没有错误行：有行即该步已完成。
 import { existsSync, readFileSync } from "node:fs";
 import type { TurnUsage } from "../state/runtime-events.ts";
+import type { StepJudging } from "./stream-classes.ts";
 import type { HarnessRef } from "./stream-harness.ts";
 import type { StreamStepKind } from "./stream-manifest.ts";
 import type { CountPassRate } from "./stream-measure.ts";
@@ -66,10 +67,15 @@ export interface StreamResultLine {
   runIdentity: string | null;
   // 本条件所用 agent 的参数（Pigeon：温度、输出上限、推理档位；最简 agent：它自己配置里的 model_kwargs）；没给为 null
   agentSettings: Record<string, unknown> | null;
-  // 全量测试通过率（跳过步沿用上一步，没有测量时为 null）。主指标 byCount 的分母为人的代码上每遍都通过的用例（B，
-  // 145 修订）；byCountCollected 的分母为人的代码上收集出的全部用例（A，对照）；humanFlaky 为人的代码上时过时不过的用例数；
-  // humanRuns 为人的基准每一遍的内存峰值与墙钟，humanSlowest 为其中耗时最长的用例
-  fullPassRate: {
+  // 判题（196、201、214）：放入人在该步的全部测试后跑一次全量，按两类用例统计——要做到的通过数与总数、每步得分（要做到的
+  // 为零时为 null，不进主判据分母）、不许挂的失败数与总数、做成与否（要做到的为零时为 null）、没通过的用例编号（截断）、
+  // 因时过时不过排除的用例数。没判的步为 null
+  judging: StepJudging | null;
+  // 这道题无法建立两类用例的基线（人的代码或叠放运行拿不全用例的结果）的原因：agent 照跑、不判分，不进主判据，报告单列
+  // 计数；能建立即 null
+  baselineUnavailable: string | null;
+  // 193 固定起点之前的旧结果行才有的全量测试通过率（按条数、按题等）。新行不写，只读兼容
+  fullPassRate?: {
     byCount: CountPassRate;
     byCountCollected: CountPassRate;
     byTask: CountPassRate;
@@ -77,6 +83,21 @@ export interface StreamResultLine {
     humanRuns: BaselineRunFacts[];
     humanSlowest: { id: string; seconds: number } | null;
   } | null;
+  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里 .pigeon/learned/MEMORY.md 的字节数、条目数与条目
+  // 部分的字符数（文件头不计，223 的上限按它算）；文件不在记 0
+  memoryAtStart: MemoryFacts | null;
+  // 这一步 agent 运行与收尾复盘都结束之后（判题之前）的记忆大小，口径同上；最后一步的即一遍结束时的记忆。复盘接入之前
+  // 照样在 agent 结束后记。依赖环境选不出而没跑 agent 的步为 null
+  memoryAtEnd: MemoryFacts | null;
+  // 这一步是否撞了宽上限（171）：agent 以撞轮数或墙钟上限收尾（终态 turn-limit / wall-clock-limit），或轮数、墙钟
+  // （含验证门与回炉）达到上限。没跑 agent 为 null
+  hitStepBudget: boolean | null;
+  // 这一步的收尾复盘是否撞了复盘上限；复盘接入之前恒为 null
+  hitReviewBudget: boolean | null;
+  // 这一步的收尾复盘：轮数与墙钟（推送记忆的复盘接入之前恒为 null）；花费在 gateway.reviewCostCny
+  review: { turns: number; wallMs: number } | null;
+  // 这一步的容器是否在上一步进行时预先开好（envOpenMs 为等它就绪的时间）
+  envPrefetched: boolean;
   quality: {
     typeErrors: number | null;
     formatErrors: number | null;
@@ -108,6 +129,15 @@ export interface StreamGatewayFacts {
   costCny?: number;
   // 本步复盘的模型花费（人民币元），单列；复盘接入之前恒为 null
   reviewCostCny?: number | null;
+  // 本步单次请求送进模型的输入 token 最大值（上下文峰值，218）：读网关计量的 peakInputTokens（每步开始时重置）；
+  // 旧结果行没有这个字段
+  peakInputTokens?: number;
+}
+
+export interface MemoryFacts {
+  bytes: number;
+  entries: number;
+  entryChars: number;
 }
 
 // 人的基准内存峰值超过容器上限的这一比例即告警：说明作业容器的上限可能不够
@@ -139,7 +169,14 @@ export const STREAM_RESULT_FIELDS = [
   "humanFailsGate",
   "runIdentity",
   "agentSettings",
-  "fullPassRate",
+  "judging",
+  "baselineUnavailable",
+  "memoryAtStart",
+  "memoryAtEnd",
+  "hitStepBudget",
+  "hitReviewBudget",
+  "review",
+  "envPrefetched",
   "quality",
   "status",
   "turns",
@@ -152,13 +189,15 @@ export const STREAM_RESULT_FIELDS = [
   "harnessRef",
 ] as const;
 
-// 旧结果行才带、新行不再写的字段（决策 173 的撤回字段；193 固定起点之前的 HEAD、回归数与失败归因）：读取照常接受
+// 旧结果行才带、新行不再写的字段（决策 173 的撤回字段；193 固定起点之前的 HEAD、回归数与失败归因；196、201 两类用例
+// 计分之前的全量测试通过率）：读取照常接受
 export const LEGACY_STREAM_RESULT_FIELDS = [
   "reverted",
   "repairBudgetExhausted",
   "head",
   "regressions",
   "attribution",
+  "fullPassRate",
 ] as const;
 
 export interface StreamJobId {

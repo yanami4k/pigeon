@@ -29,8 +29,10 @@ import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
 import {
+  CLASSES_SUMMARY_FILE,
   installTerminationHandler,
   runStreamBaselines,
+  runStreamClasses,
   runStreamExperiment,
 } from "../eval/stream-experiment.ts";
 import {
@@ -401,13 +403,14 @@ async function runMain(argv: string[]): Promise<void> {
 //   [--test-timeout-sec N]：延续式实验出题（决策 127、141、153）——在断网的参考容器里逐提交测判题探针与格式化比对，
 // 按写死的规则出流清单；清单与探针原始记录各存一个文件
 // pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录>
-//   [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）] [--streams s1,s2] [--check cases|gate|both]：
-// 提前单独算全量测量的人的基准——每路一个独立的参考容器，按提交落盘，同一目录重跑即续算；eval stream 以 --baseline 读取。
-// 同时做开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与步（--check 缺省两者都做）
+//   [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）] [--streams s1,s2] [--check cases|gate|both|classes]：
+// 提前单独算人的基准——每路一个独立的参考容器，按提交落盘，同一目录重跑即续算；eval stream 以 --baseline 读取。
+// 同时做开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与步（--check 缺省两者都做）。--check classes 为全部题
+// 预计算两类用例（214，正式跑与校准之前须算好），写汇总文件 classes-summary.json
 async function evalStreamBaselineMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录> " +
-    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2] [--check cases|gate|both] " +
+    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2] [--check cases|gate|both|classes] " +
     "[--mark-manifest <写出的清单>]";
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
@@ -432,19 +435,41 @@ async function evalStreamBaselineMain(argv: string[]): Promise<void> {
     ?.split(",")
     .filter((x) => x !== "");
   const check = values.get("--check") ?? "both";
-  if (check !== "cases" && check !== "gate" && check !== "both")
-    throw new Error(`--check 只能是 cases、gate 或 both（${usage}）`);
-  const summary = await runStreamBaselines({
+  if (check !== "cases" && check !== "gate" && check !== "both" && check !== "classes")
+    throw new Error(`--check 只能是 cases、gate、both 或 classes（${usage}）`);
+  const common = {
     manifestFile: required("--manifest"),
     repoDir: required("--repo"),
     image: required("--image"),
     outDir: required("--out"),
     concurrency,
-    check,
     containerRunArgs: ["--memory", values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY],
     ...(streams !== undefined ? { streams } : {}),
-    log: (line) => process.stderr.write(`[baseline] ${new Date().toISOString()} ${line}\n`),
-  });
+    log: (line: string) => process.stderr.write(`[baseline] ${new Date().toISOString()} ${line}\n`),
+  };
+  // 两类用例（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，按提交落盘，同一目录重跑即续算
+  if (check === "classes") {
+    const classes = await runStreamClasses(common);
+    const zero = classes.steps.filter((s) => s.failToPass === 0);
+    process.stdout.write(
+      `两类用例：共 ${classes.total} 道题，本次算 ${classes.computed} 道，此前已落盘 ${classes.cached} 道，` +
+        `出错 ${classes.failed.length} 道；要做到的为零的题 ${zero.length} 道` +
+        `${zero.length > 0 ? `（题号 ${zero.map((s) => s.task).join(",")}）` : ""}；汇总写到 ${CLASSES_SUMMARY_FILE}\n`
+    );
+    process.stdout.write(
+      `无法建立基线的题 ${classes.unbuildable.length} 道${
+        classes.unbuildable.length > 0
+          ? `（题号 ${classes.unbuildable.map((u) => u.task).join(",")}，跑批时不判分、不进主判据）`
+          : ""
+      }\n`
+    );
+    for (const f of classes.failed) {
+      process.stdout.write(`  题 ${f.task}（${f.commit}）：${f.error.slice(0, 300)}\n`);
+    }
+    if (classes.failed.length > 0) process.exitCode = 1;
+    return;
+  }
+  const summary = await runStreamBaselines({ ...common, check });
   process.stdout.write(
     `人的基准（${check}）：共 ${summary.total} 个提交，本次算 ${summary.computed} 个，` +
       `此前已落盘 ${summary.cached} 个，出错 ${summary.failed.length} 个\n`
@@ -525,7 +550,8 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑：只跑前 K 道题）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases]
-//   [--spend-limit-cny <元>]：
+//   [--spend-limit-cny <元>]
+//   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]：
 // 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开断网容器从人在
 // 该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
 // 各条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
@@ -540,7 +566,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     `--conditions ${STREAM_CONDITIONS.join(",")} [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
-    "[--spend-limit-cny <元>]";
+    "[--spend-limit-cny <元>] [--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]]";
   const own = new Set([
     "--manifest",
     "--repo",
@@ -551,6 +577,9 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--attempts",
     "--concurrency",
     "--max-steps",
+    "--tasks",
+    "--sample",
+    "--seed",
     "--max-turns",
     "--wall-clock-min",
     "--model-id",
@@ -626,6 +655,16 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   const attempts = positive("--attempts");
   const concurrency = positive("--concurrency");
   const maxSteps = positive("--max-steps");
+  // 选题（202、219）：题号为清单里的题按时间接成的流中的序号（从 1 起）；抽样只在要做到的用例不为零的题中抽
+  const tasks = list("--tasks")?.map((t) => {
+    const n = Number(t);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`--tasks 需要正整数题号（${usage}）`);
+    return n;
+  });
+  const sampleK = positive("--sample");
+  const seed = positive("--seed");
+  if (seed !== undefined && sampleK === undefined)
+    throw new Error(`--seed 只配合 --sample 用（${usage}）`);
   // 作业容器与参考容器缺省 2g：人的基准逐遍记录内存峰值，超过上限的 75% 即告警
   const memory = values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY;
   const miniPython = values.get("--mini-python");
@@ -668,6 +707,10 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(attempts !== undefined ? { attempts } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),
+    ...(tasks !== undefined ? { tasks } : {}),
+    ...(sampleK !== undefined
+      ? { sample: { k: sampleK, ...(seed !== undefined ? { seed } : {}) } }
+      : {}),
     containerRunArgs: ["--memory", memory],
     ...(baselineDir !== undefined ? { baselineDir } : {}),
     // 带时间戳：试跑时据此把每步的耗时与内存采样对上

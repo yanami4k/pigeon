@@ -6,12 +6,23 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   effectivePigeonSettings,
-  imageIdOf,
+  imageIdentityOf,
   installTerminationHandler,
+  layersIdentity,
+  resolveTaskSelection,
   runStreamExperiment,
   streamPigeonOptions,
 } from "./stream-experiment.ts";
-import { DEFAULT_STEP_BUDGET, RUN_LOCK } from "./stream-runner.ts";
+import type { StreamManifest, StreamStep } from "./stream-manifest.ts";
+import {
+  DEFAULT_STEP_BUDGET,
+  EQUIVALENT_CASE_IMAGES,
+  RUN_LOCK,
+  STRANDS_V6_LAYERS,
+  type StepClasses,
+  selectSteps,
+} from "./stream-runner.ts";
+import { PythonRandom, SAMPLE_POPULATION } from "./stream-sample.ts";
 
 test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数", () => {
   assert.equal(streamPigeonOptions({ provider: "kimi-coding", modelId: "m" }).yolo, true);
@@ -47,29 +58,53 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
   );
 });
 
-test("镜像 ID：经典存储下取 config 摘要；containerd 镜像存储下取到的是 manifest 摘要、与已记下的对不上，响亮报错", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-image-store-"));
+test("镜像身份（⑥）：按内容层（RootFS 各层摘要的有序列表）取摘要，不看本地镜像 ID——经典存储与 containerd 存储下同一镜像判为同一个；层的顺序或内容不同即不同；取不到层即报错", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-image-layers-"));
   try {
-    const fake = (status: string) => {
-      const file = join(dir, `docker-${status.length}.mjs`);
+    let n = 0;
+    // 假 docker：按 --format 回镜像 ID 或内容层
+    const fake = (id: string, layers: string) => {
+      const file = join(dir, `docker-${n++}.mjs`);
       writeFileSync(
         file,
         [
           "const args = process.argv.slice(2);",
-          `if (args[0] === "info") process.stdout.write(${JSON.stringify(status)} + "\\n");`,
-          'else process.stdout.write("sha256:config\\n");',
+          `if (args.includes("{{.Id}}")) process.stdout.write(${JSON.stringify(id)} + "\\n");`,
+          `else process.stdout.write(${JSON.stringify(layers)} + "\\n");`,
         ].join("\n")
       );
       return [process.execPath, file];
     };
+    const layers = JSON.stringify(["sha256:aaa", "sha256:bbb"]);
+    const classic = imageIdentityOf("img", fake("sha256:config", layers));
+    const containerd = imageIdentityOf("img", fake("sha256:manifest", layers));
+    assert.equal(classic, containerd, "本地镜像 ID 不同、内容层相同：同一镜像");
+    assert.equal(classic, layersIdentity(["sha256:aaa", "sha256:bbb"]));
+    assert.match(classic, /^layers:sha256:[0-9a-f]{64}$/);
+    assert.notEqual(
+      imageIdentityOf("img", fake("x", JSON.stringify(["sha256:bbb", "sha256:aaa"]))),
+      classic,
+      "层的顺序不同即不同"
+    );
+    assert.notEqual(
+      imageIdentityOf("img", fake("x", JSON.stringify(["sha256:aaa", "sha256:ccc"]))),
+      classic
+    );
+    assert.throws(() => imageIdentityOf("img", fake("x", "null")), /取不到镜像 img 的内容层/);
+    assert.throws(() => imageIdentityOf("img", fake("x", "[]")), /没有内容层/);
+    // strands v6 的内容层身份（本机经典存储与验证服务器 containerd 存储下实测相同）
     assert.equal(
-      imageIdOf("img", fake('overlay2|[["Backing Filesystem","extfs"]]')),
-      "sha256:config"
+      STRANDS_V6_LAYERS,
+      "layers:sha256:ebe5a5270ca0fcee26caf49d6695a56b090b81b027fed92ac7eac8c35b60c5fa"
     );
-    assert.throws(
-      () => imageIdOf("img", fake('overlayfs|[["driver-type","io.containerd.snapshotter.v1"]]')),
-      /containerd 镜像存储/
-    );
+    // 已落盘的人的基准记的是经典存储下的 config 摘要：v6 与 v4 的都按等价读回到 v6 的内容层身份
+    const pairs = [...EQUIVALENT_CASE_IMAGES].map(([a, b]) => `${a}>${b}`);
+    for (const old of [
+      "sha256:d23b0a512ca217bc2c7984bf33dc52c1006cbf0cd2a9642b7638efb0e3f99b42",
+      "sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6",
+    ]) {
+      assert.ok(pairs.includes(`${old}>${STRANDS_V6_LAYERS}`), old);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -139,25 +174,98 @@ test("输出目录的锁在读清单、写身份头、起网关探测之前取�
   }
 });
 
-test("题面给用例名（213 的备用）还没接上：读清单、写身份头、起网关之前即拒绝开跑并说明", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-prompt-format-"));
-  try {
-    const outDir = join(dir, "out");
-    await assert.rejects(
-      runStreamExperiment({
-        manifestFile: join(dir, "missing.json"),
-        repoDir: dir,
-        image: "img",
-        outDir,
-        conditions: ["search-only"],
-        gateway: { accounts: [{ key: "k", concurrency: 2 }], modelId: "m" },
-        budget: DEFAULT_STEP_BUDGET,
-        promptFormat: "test-cases",
-      }),
-      /给用例名的题面尚未实现/
-    );
-    assert.equal(existsSync(join(outDir, "identity.json")), false);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+// 一份只有题的清单：第 i 道题的提交为 c<i>、步序为 2i（中间隔着不跑的步）
+function taskManifest(n: number): StreamManifest {
+  const steps = Array.from(
+    { length: n },
+    (_, i): StreamStep => ({
+      seq: 2 * (i + 1),
+      kind: "task",
+      commit: `c${i + 1}`,
+      parent: `p${i + 1}`,
+      subject: `t${i + 1}`,
+      message: `t${i + 1}`,
+      prompt: null,
+      humanFiles: [],
+      judgeTests: [],
+      reason: "",
+    })
+  );
+  return {
+    version: 1,
+    repo: "toy",
+    rangeStart: "p1",
+    rangeEnd: `c${n}`,
+    gateCommand: [],
+    steps: [...steps, { ...(steps[0] as StreamStep), seq: 999, kind: "skip", commit: "skip" }],
+    streams: [],
+  };
+}
+
+const classesWith = (failToPass: number): StepClasses => ({
+  commit: "c",
+  parent: "p",
+  failToPass: Array.from({ length: failToPass }, (_, i) => `t::${i}`),
+  passToPass: [],
+  excludedFlaky: [],
+  failToPassOutsideJudgeFiles: 0,
+  unbuildable: null,
+});
+
+test("选题（202、219）：抽样只在要做到的不为零的题里、按 Python random.Random(种子).sample 抽再按时间排序，与 Python 逐位一致；给题号即按题号；都不给为全部；两者都给、题没算完两类用例即拒绝", () => {
+  const manifest = taskManifest(20);
+  // 第 4、9、13 道题要做到的为零，不在总体里
+  const zero = new Set(["c4", "c9", "c13"]);
+  const reference = {
+    cachedClasses: (step: StreamStep) => classesWith(zero.has(step.commit) ? 0 : 2),
+  };
+  const picked = resolveTaskSelection(manifest, reference, { sample: { k: 5 } });
+  const population = Array.from({ length: 20 }, (_, i) => i + 1).filter(
+    (n) => ![4, 9, 13].includes(n)
+  );
+  const expected = new PythonRandom(20260927).sample(population, 5).sort((a, b) => a - b);
+  assert.deepEqual(picked, {
+    method: "sample",
+    seed: 20260927,
+    k: 5,
+    population: SAMPLE_POPULATION,
+    tasks: expected,
+  });
+  // 由 CPython 3.13 算出的对照：random.Random(20260927).sample([1..20 去掉 4、9、13], 5) 排序后
+  assert.deepEqual(expected, [2, 7, 10, 17, 19]);
+  assert.ok(picked.method === "sample" && picked.tasks.every((n) => !zero.has(`c${n}`)));
+  assert.equal(
+    (resolveTaskSelection(manifest, reference, { sample: { k: 5, seed: 7 } }) as { seed: number })
+      .seed,
+    7
+  );
+  assert.deepEqual(resolveTaskSelection(manifest, reference, { tasks: [3, 1] }), {
+    method: "list",
+    tasks: [3, 1],
+  });
+  assert.deepEqual(resolveTaskSelection(manifest, reference, {}), { method: "all" });
+  assert.throws(
+    () => resolveTaskSelection(manifest, reference, { tasks: [1], sample: { k: 2 } }),
+    /二选一/
+  );
+  assert.throws(
+    () =>
+      resolveTaskSelection(
+        manifest,
+        { cachedClasses: (s) => (s.commit === "c7" ? undefined : classesWith(1)) },
+        { sample: { k: 2 } }
+      ),
+    /还缺 1 道（题号 7）.*--check classes/
+  );
+  // 选出的题号按时间顺序对到步；越界、重复即拒绝
+  assert.deepEqual(
+    selectSteps(manifest, { tasks: [3, 1] }).map((s) => s.seq),
+    [2, 6]
+  );
+  assert.deepEqual(
+    selectSteps(manifest, { tasks: [3, 1, 5], maxSteps: 2 }).map((s) => s.seq),
+    [2, 6]
+  );
+  assert.throws(() => selectSteps(manifest, { tasks: [21] }), /题号 21 越界/);
+  assert.throws(() => selectSteps(manifest, { tasks: [2, 2] }), /题号 2 重复/);
 });

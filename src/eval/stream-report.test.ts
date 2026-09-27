@@ -1,159 +1,146 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { baselineFacts, endValues, renderStreamReport, rerunHints } from "./stream-report.ts";
+import { cellScore, distribution, pairedDiffs, renderStreamReport } from "./stream-report.ts";
 import { sampleLine } from "./stream-result-fixtures.ts";
 import type { StreamResultLine } from "./stream-results.ts";
 
-function rate(passed: number, total: number) {
-  return { passed, total, rate: total === 0 ? 1 : passed / total };
-}
-
+// 一行：要做到的 passed/total、不许挂的失败数
 function line(
   condition: StreamResultLine["condition"],
   seq: number,
-  byCount: [number, number],
-  extra: Partial<StreamResultLine> = {}
+  f2p: [number, number],
+  extra: Partial<StreamResultLine> & { p2pFailed?: number } = {}
 ): StreamResultLine {
+  const { p2pFailed = 0, ...rest } = extra;
+  const [passed, total] = f2p;
   return sampleLine({
     condition,
     seq,
-    fullPassRate: {
-      byCount: rate(...byCount),
-      byCountCollected: rate(byCount[0], byCount[1] + 1),
-      byTask: rate(1, 1),
-      humanFlaky: 0,
-      humanRuns: [],
-      humanSlowest: null,
+    judging: {
+      failToPass: { passed, total },
+      score: total === 0 ? null : passed / total,
+      passToPass: { failed: p2pFailed, total: 10 },
+      solved: total === 0 ? null : passed === total && p2pFailed === 0,
+      failedCases: { failToPass: [], passToPass: [], truncated: false },
+      excludedFlaky: 0,
     },
-    ...extra,
+    ...rest,
   });
 }
 
-const streams = [{ id: "tasks", lastSeq: 3 }];
+const segments = [
+  { id: "s1", firstSeq: 1, lastSeq: 3 },
+  { id: "s2", firstSeq: 5, lastSeq: 9 },
+];
 
-test("终点值：取流末步的按条数通过率；没跑到末步的记未跑完；多遍给均值与范围", () => {
+test("每步得分（201）：各步等权平均、只算要做到的不为零的步；做成步数、不许挂的失败合计与要做到的为零的步另计；按分段取", () => {
   const lines = [
-    line("neither", 1, [5, 10]),
-    line("neither", 2, [6, 10]),
-    line("neither", 3, [7, 10]),
-    line("neither", 3, [9, 10], { attempt: 2 }),
-    line("neither", 1, [5, 10], { attempt: 2 }),
-    line("minimal", 1, [4, 10]),
-    line("minimal", 2, [3, 10]),
+    line("neither", 1, [1, 2]),
+    line("neither", 2, [3, 3]),
+    line("neither", 3, [0, 0], { p2pFailed: 2 }),
+    line("neither", 5, [0, 4], { p2pFailed: 1 }),
+    line("neither", 6, [2, 2], { outcome: "skipped", judged: false, judging: null }),
+    line("neither", 1, [2, 2], { attempt: 2 }),
+    line("minimal", 1, [2, 2]),
   ];
-  const ends = endValues(lines, streams);
-  assert.deepEqual(ends.get("tasks|neither"), {
-    attempts: [0.7, 0.9],
-    mean: 0.8,
-    min: 0.7,
-    max: 0.9,
+  // 第 1 遍：(0.5 + 1 + 0) / 3，第 3 步要做到的为零不计
+  assert.deepEqual(cellScore(lines, "neither", 1), {
+    mean: 0.5,
+    scored: 3,
+    solved: 1,
+    passToPassFailed: 3,
+    zeroFailToPass: 1,
+    judged: 4,
   });
-  assert.deepEqual(ends.get("tasks|minimal"), { attempts: [], mean: null, min: null, max: null });
+  assert.deepEqual(cellScore(lines, "neither", 1, segments[0]), {
+    mean: 0.75,
+    scored: 2,
+    solved: 1,
+    passToPassFailed: 2,
+    zeroFailToPass: 1,
+    judged: 3,
+  });
+  assert.equal(cellScore(lines, "neither", 1, segments[1]).mean, 0);
+  assert.equal(cellScore(lines, "neither", 2).mean, 1);
+  assert.equal(cellScore(lines, "search-only", 1).mean, null);
 });
 
-test("补跑提示（146）：两个条件第一遍终点相差不足 10 个百分点才提示，没跑完的不比", () => {
+test("同题两遍的每步得分差：只取两遍都有得分的步，给平均差、平均绝对差与样本方差", () => {
   const lines = [
-    line("neither", 3, [80, 100]),
-    line("minimal", 3, [75, 100]),
-    line("search-push", 3, [95, 100]),
-    line("search-only", 2, [80, 100]),
+    line("search-only", 1, [1, 2]),
+    line("search-only", 2, [2, 2]),
+    line("search-only", 3, [0, 0]),
+    line("search-only", 1, [2, 2], { attempt: 2 }),
+    line("search-only", 2, [1, 2], { attempt: 2 }),
+    line("search-only", 3, [0, 0], { attempt: 2 }),
+    line("minimal", 1, [1, 1]),
   ];
-  assert.deepEqual(rerunHints(lines, streams), [
-    { stream: "tasks", a: "neither", b: "minimal", gapPoints: 5 },
-  ]);
+  const [d] = pairedDiffs(lines);
+  assert.equal(pairedDiffs(lines).length, 1, "只跑了一遍的格子不列");
+  assert.equal(d?.condition, "search-only");
+  assert.equal(d?.pairs, 2);
+  assert.equal(d?.meanDiff, 0);
+  assert.equal(d?.meanAbsDiff, 0.5);
+  assert.equal(d?.variance, 0.5);
 });
 
-test("报告：曲线表、终点、次要指标与补跑提示；不再列回归数与失败归因", () => {
+test("分布：中位（偶数个取中间两个平均）、90 分位（最近秩）与最大；忽略空值", () => {
+  assert.deepEqual(distribution([3, 1, null, 2, 10]), { n: 4, median: 2.5, p90: 10, max: 10 });
+  assert.deepEqual(distribution(Array.from({ length: 20 }, (_, i) => i + 1)), {
+    n: 20,
+    median: 10.5,
+    p90: 18,
+    max: 20,
+  });
+  assert.deepEqual(distribution([null, undefined]), { n: 0, median: null, p90: null, max: null });
+});
+
+test("报告：每步得分表（分段与合并）、多遍均值与范围、同题两遍差、用量分布、每步明细与次要指标；旧口径的结果行只报条数；不再有终点值与补跑提示", () => {
   const lines = [
-    line("neither", 1, [5, 10], { outcome: "failed" }),
-    line("neither", 2, [6, 10]),
-    line("neither", 3, [8, 10], { outcome: "skipped", judged: false }),
-    line("minimal", 1, [5, 10]),
-    line("minimal", 2, [5, 10], { outcome: "failed" }),
-    line("minimal", 3, [7, 10], { outcome: "skipped", judged: false }),
-  ];
-  const md = renderStreamReport(lines, { title: "试跑", streams });
-  assert.match(md, /^# 提交流实验报告：试跑/m);
-  assert.match(md, /\| 步序 \| 类型 \| neither \| minimal \|/);
-  assert.match(md, /\| 1 \| 题 \| 50\.0% \| 50\.0% \|/);
-  assert.match(md, /\| 3 \| 题 \| 80\.0% \| 70\.0% \|/);
-  assert.match(md, /终点（按条数）：neither 80\.0%；minimal 70\.0%/);
-  // 新结果行不带撤回字段：次要指标表没有"撤回"列
-  assert.match(md, /\| 条件 \| 判定通过 \| 终点按题 \|/);
-  assert.doesNotMatch(md, /\| 撤回 \|/);
-  assert.doesNotMatch(md, /回归|失败归因/);
-  assert.match(md, /\| neither \| 1\/2 \| 100\.0% \|/);
-  // 用量按未命中输入、缓存命中、输出分列（额度不计缓存命中的部分）：夹具每行 10 / 0 / 5，三行合计
-  assert.match(md, /\| neither \| 1\/2 \|.*\| 30 \/ 0 \/ 15 \|/);
-  assert.match(md, /neither 与 minimal：终点相差 10\.0 个百分点/);
-  assert.doesNotMatch(md, /提示补跑/);
-});
-
-test("人的基准：取各步各遍内存峰值的最大值与其上限，超过上限的 75% 时标出；单遍最长墙钟；最慢用例", () => {
-  const MiB = 1048576;
-  const withBaseline = (
-    seq: number,
-    runs: { peakBytes: number | null; limitBytes: number | null; wallMs: number }[],
-    slowest: { id: string; seconds: number } | null
-  ) =>
-    sampleLine({
-      seq,
-      fullPassRate: {
-        byCount: rate(1, 1),
-        byCountCollected: rate(1, 1),
-        byTask: rate(1, 1),
-        humanFlaky: 0,
-        humanRuns: runs,
-        humanSlowest: slowest,
+    line("neither", 1, [1, 2], { outcome: "failed" }),
+    line("neither", 5, [2, 2], {
+      memoryAtStart: { bytes: 300, entries: 2, entryChars: 120 },
+      gateway: {
+        queueMs: 0,
+        accountRequests: [3],
+        peakInFlight: 1,
+        costCny: 0.3,
+        reviewCostCny: null,
+        peakInputTokens: 50_000,
       },
-    });
-  const lines = [
-    withBaseline(
-      1,
-      [
-        { peakBytes: 900 * MiB, limitBytes: 2048 * MiB, wallMs: 240_000 },
-        { peakBytes: 1600 * MiB, limitBytes: 2048 * MiB, wallMs: 300_000 },
-      ],
-      { id: "t.py::a", seconds: 12.5 }
-    ),
-    withBaseline(2, [{ peakBytes: 1000 * MiB, limitBytes: 2048 * MiB, wallMs: 200_000 }], {
-      id: "t.py::b",
-      seconds: 40.25,
     }),
+    line("neither", 1, [2, 2], { attempt: 2 }),
+    line("neither", 5, [2, 2], { attempt: 2, p2pFailed: 1 }),
+    line("minimal", 1, [0, 2], { outcome: "failed" }),
+    line("minimal", 5, [0, 0]),
+    // 旧口径的行：没有 judging、带全量测试通过率
+    {
+      ...line("minimal", 9, [1, 1]),
+      judging: undefined,
+      fullPassRate: null,
+    } as unknown as StreamResultLine,
   ];
-  assert.equal(
-    baselineFacts(lines),
-    "内存峰值最大 1600 MiB（第 1 步，上限 2048 MiB，超过上限的 75%）；单遍最长 5.0 分；最慢用例 t.py::b（40.3 秒）"
-  );
-  assert.equal(
-    baselineFacts([withBaseline(1, [{ peakBytes: null, limitBytes: null, wallMs: 60_000 }], null)]),
-    "内存峰值未测得；单遍最长 1.0 分；最慢用例未测得"
+  const md = renderStreamReport(lines, { title: "校准", segments });
+  assert.match(md, /^# 提交流实验报告：校准/m);
+  assert.match(md, /\| 条件 \| 遍 \| 合并 \| s1（第 1–3 步） \| s2（第 5–9 步） \| 做成步数 \|/);
+  assert.match(
+    md,
+    /\| neither \| 1 \| 75\.0%（2 步） \| 50\.0%（1 步） \| 100\.0%（1 步） \| 1\/2 \| 0 \| 0 \| 2 \|/
   );
   assert.match(
-    renderStreamReport(lines, { title: "t", streams: [{ id: "tasks", lastSeq: 2 }] }),
-    /人的基准：内存峰值最大 1600 MiB/
+    md,
+    /\| neither \| 2 \| 100\.0%（2 步） \| 100\.0%（1 步） \| 100\.0%（1 步） \| 1\/2 \| 1 \| 0 \| 2 \|/
   );
-});
-
-test("报告：旧结果行带撤回与延续式字段时照常生成，次要指标表带「撤回」列", () => {
-  const legacy = (seq: number, extra: Record<string, unknown>): StreamResultLine =>
-    ({ ...line("search-push", seq, [5, 10]), ...extra }) as StreamResultLine;
-  const lines = [
-    legacy(1, {
-      outcome: "failed",
-      reverted: true,
-      repairBudgetExhausted: false,
-      attribution: "not-done",
-    }),
-    legacy(2, { reverted: false, repairBudgetExhausted: false }),
-    legacy(3, {
-      outcome: "failed",
-      reverted: false,
-      repairBudgetExhausted: false,
-      attribution: "missing-prerequisite",
-    }),
-  ];
-  const md = renderStreamReport(lines, { title: "旧结果", streams });
-  assert.match(md, /\| 条件 \| 判定通过 \| 撤回 \| 终点按题 \|/);
-  assert.match(md, /\| search-push \| 1\/3 \| 1 \| 100\.0% \|/);
+  assert.match(md, /\| minimal \| 1 \| 0\.0%（1 步） \|.*\| 0\/1 \| 0 \| 1 \| 2 \|/);
+  assert.match(
+    md,
+    /\| neither \| 87\.5%（2 遍，75\.0%–100\.0%） \| 75\.0%（2 遍，50\.0%–100\.0%） \|/
+  );
+  assert.match(md, /\| neither \| 2 \| -25\.0 点 \| 25\.0 点 \|/);
+  assert.match(md, /## 每步用量/);
+  assert.match(md, /\| neither \| 4 \| 5 \/ 5 \/ 5 \|/);
+  assert.match(md, /\| 5 \| 2\/2 成 \| 0\/0 \|/);
+  assert.match(md, /\| 1 \| 1\/2 \| 0\/2 \|/);
+  assert.match(md, /旧口径的结果行 1 条/);
+  assert.doesNotMatch(md, /终点|补跑/);
 });

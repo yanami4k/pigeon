@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   learnedDirOf,
   learnedSnapshotOf,
+  memoryFactsOf,
   snapshotOrRestoreLearned,
 } from "./stream-memory-snapshot.ts";
 
@@ -74,4 +75,25 @@ test("记忆快照：上次取到一半留下的临时目录不算快照，重�
       readFileSync(join(learnedSnapshotOf(jobDir, 4), "learned", "MEMORY.md"), "utf8"),
       "完整的\n"
     );
+  }));
+
+test("开工时的记忆大小：文件不在记 0；条目数按「- [L编号]」开头的行数，条目字符数从第一条起按码点计（文件头不计）", () =>
+  withJobDir((jobDir) => {
+    assert.deepEqual(memoryFactsOf(jobDir), { bytes: 0, entries: 0, entryChars: 0 });
+    mkdirSync(learnedDirOf(jobDir), { recursive: true });
+    const header = "# 学到的记忆\n<!-- 说明 -->\n\n";
+    const entries =
+      "- [L1] 事实：甲\n  引用：a.py\n  理由：乙\n- [L3] 事实：丙\n  引用：user\n  理由：丁\n";
+    writeFileSync(join(learnedDirOf(jobDir), "MEMORY.md"), header + entries);
+    assert.deepEqual(memoryFactsOf(jobDir), {
+      bytes: Buffer.byteLength(header + entries),
+      entries: 2,
+      entryChars: [...entries].length,
+    });
+    writeFileSync(join(learnedDirOf(jobDir), "MEMORY.md"), header);
+    assert.deepEqual(memoryFactsOf(jobDir), {
+      bytes: Buffer.byteLength(header),
+      entries: 0,
+      entryChars: 0,
+    });
   }));
