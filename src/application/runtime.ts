@@ -36,7 +36,6 @@ import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { WorkerRole } from "../state/event-log.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
-import type { StructuredMemoryManifest } from "../state/injection-manifest.ts";
 import type { ActiveGrant } from "../state/materialize.ts";
 import type { RunStartedPayload, ThinkingLevel } from "../state/runtime-events.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
@@ -118,14 +117,6 @@ export interface RuntimeDeps {
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数（只在开启时给）——冻结进注入快照并随 run.started 落盘
   repairRounds?: number;
-  // 决策 134 / 157：结构化记忆——开局段落作为系统提示里独立的一段（与常驻 Memory 分开计预算），开局留痕冻结进注入快照；
-  // 回炉轮收到的条目由 takeRepairIds 在该轮 Run 开始时交给 run.started。缺省即本入口不接入结构化记忆
-  structuredMemory?: {
-    section: string;
-    manifest: StructuredMemoryManifest;
-    // 这一轮回炉给出的与因核验没过被拦下的条目
-    takeRepairIds?: () => { given: string[]; blocked: string[] } | undefined;
-  };
   // 这一步的起点（容器工作区、回炉开启时由执行端记下）：每个 Run 开始时取一次写进 run.started
   stepStart?: () => RunStartedPayload["stepStart"];
   // M7（决策 077）：分叉续跑的 Agent 初始消息
@@ -296,11 +287,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
         "server 不可用时这些工具会报错，改用内置工具继续。"
       : "";
-  const structuredMemory = deps.structuredMemory;
   const systemPrompt = [
     basePrompt,
     residentMemory.section,
-    structuredMemory?.section ?? "",
     skillCatalog.section,
     mcpSection,
     deps.taskDirective ?? "",
@@ -319,23 +308,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // run.started 的附加摘要：MCP 工具集与 server 状态（有 server 时）
   const mcpSummary = mcp !== undefined && mcp.connections.length > 0 ? mcp : undefined;
   const runStartedExtras = mcpSummary !== undefined ? () => mcpSummary.summary() : undefined;
-  // 本 Run 作为回炉轮收到与被拦下的结构化记忆条目（与 MCP 摘要分开取，一边抛错不连带另一边）
-  const takeRepairIds = structuredMemory?.takeRepairIds;
-  const runStartedMemory =
-    structuredMemory === undefined || takeRepairIds === undefined
-      ? undefined
-      : () => {
-          const repair = takeRepairIds();
-          return repair === undefined
-            ? {}
-            : {
-                structuredMemory: {
-                  ...structuredClone(structuredMemory.manifest),
-                  repair: [...repair.given],
-                  ...(repair.blocked.length > 0 ? { repairBlocked: [...repair.blocked] } : {}),
-                },
-              };
-        };
   // load_skill 的读取留痕经 Adapter 盖 runId 落 skill.loaded；工具先于 Adapter 构造，故晚绑定
   const adapterRef: { current: PiRuntimeAdapter | undefined } = { current: undefined };
   const adapter = new PiRuntimeAdapter({
@@ -368,9 +340,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
       ...(deps.repairRounds !== undefined ? { repairRounds: deps.repairRounds } : {}),
-      ...(structuredMemory !== undefined
-        ? { structuredMemory: structuredClone(structuredMemory.manifest) }
-        : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: limitOutputTokens(
@@ -424,7 +393,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     messageContent: { persistThinking: deps.persistThinking ?? true },
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 run.started；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
-    ...(runStartedMemory !== undefined ? { runStartedMemory } : {}),
     ...(deps.stepStart !== undefined ? { runStartedStepStart: deps.stepStart } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
   });

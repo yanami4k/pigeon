@@ -17,7 +17,6 @@ import {
   parseLaunchFlags,
   resolveRepairRounds,
   resolveStreamFnSpec,
-  resolveStructuredMemoryEnabled,
   resolveVerifyConfig,
   VALUELESS_FLAGS,
 } from "../application/launch-flags.ts";
@@ -26,10 +25,6 @@ import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
 import { runTreeRebuildCommand } from "../application/session-tree.ts";
-import {
-  listStructuredMemory,
-  renderStructuredMemoryList,
-} from "../application/structured-memory.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
@@ -313,7 +308,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--no-structured-memory] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -366,8 +361,6 @@ async function runMain(argv: string[]): Promise<void> {
   const workspaceRoot = prepareWorkspace(flags.root);
   // 决策 142 / 143：回炉轮数——启动参数 > 项目验证配置 > 关闭；设定不成立由 runHeadless 启动报错
   const repairRounds = resolveRepairRounds(flags, workspaceRoot);
-  // 决策 134：结构化记忆开关——启动参数 > 项目配置 > 开启
-  const structuredMemoryEnabled = resolveStructuredMemoryEnabled(flags, workspaceRoot);
   const result = await runHeadless({
     task,
     governanceRoot: workspaceRoot,
@@ -389,7 +382,6 @@ async function runMain(argv: string[]): Promise<void> {
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
     ...(repairRounds > 0 ? { repairRounds } : {}),
-    structuredMemory: { enabled: structuredMemoryEnabled },
   });
   if (json) {
     // JSON.stringify 转义全部 C0 控制字符，一行输出不携带终端控制序列
@@ -400,7 +392,6 @@ async function runMain(argv: string[]): Promise<void> {
         `${result.turns} 轮 ｜ 工具调用 ${result.toolCalls} 次 ｜ 需审批 ${result.approvalsNeeded} 次 ｜ ` +
         `token ${result.usage.totalTokens}${result.retries !== undefined ? ` ｜ 重试 ${result.retries.map((retry) => retry.label).join("、")}` : ""} ｜ 标签 ${result.label}${result.verification !== undefined ? `（验证 ${result.verification.verdict}）` : ""}` +
         `${result.repair !== undefined ? ` ｜ ${repairSummary(result.repair)}` : ""}` +
-        `${result.structuredMemory !== undefined ? ` ｜ ${structuredMemorySummaryText(result.structuredMemory, structuredMemoryEnabled)}` : ""}` +
         `${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
     );
   }
@@ -757,11 +748,6 @@ async function main(argv: string[]): Promise<void> {
     sessionListMain(argv.slice(2));
     return;
   }
-  // 决策 132 / 136：只读列出结构化记忆条目
-  if (argv[0] === "memory" && argv[1] === "list") {
-    memoryListMain(argv.slice(2));
-    return;
-  }
   if (argv[0] === "resume") {
     await resumeMain(argv.slice(1));
     return;
@@ -832,43 +818,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
-}
-
-// 决策 134：结构化记忆给了哪几条（开局一组、回炉每轮一组）
-function structuredMemorySummaryText(
-  summary: NonNullable<Awaited<ReturnType<typeof runHeadless>>["structuredMemory"]>,
-  enabled: boolean
-): string {
-  if (!enabled) {
-    return "结构化记忆 关闭";
-  }
-  const list = (ids: readonly string[]) => (ids.length > 0 ? ids.join("、") : "无");
-  return (
-    `结构化记忆 开局 ${list(summary.opening)}` +
-    (summary.repair.length > 0
-      ? `，回炉 ${summary.repair.map((round, index) => `第 ${index + 1} 轮 ${list(round)}`).join("；")}`
-      : "")
-  );
-}
-
-// pigeon memory list [--root <dir>] [--json]：只读列出当前项目的结构化记忆条目（决策 132 / 136）——
-// 从账本现算、不回写缓存，不需要模型接入
-function memoryListMain(argv: string[]): void {
-  let root = process.cwd();
-  let json = false;
-  const usage = "用法：pigeon memory list [--root <dir>] [--json]";
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    if (flag === "--root") {
-      root = argv[++i] ?? root;
-    } else if (flag === "--json") {
-      json = true;
-    } else {
-      throw new Error(`未知参数：${flag}（${usage}）`);
-    }
-  }
-  const listing = listStructuredMemory(realpathSync(root));
-  writeOut(json ? `${JSON.stringify(listing)}\n` : renderStructuredMemoryList(listing));
 }
 
 // 决策 142 / 143：回炉摘要——用了几轮、最终验证结论、这一步是否收尾

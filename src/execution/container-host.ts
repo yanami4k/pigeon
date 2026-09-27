@@ -398,52 +398,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return { files, truncated };
     },
     findLauncherScript: () => undefined,
-    runSync(argv, timeoutMs) {
-      const result = spawnSync(dockerProgram, execArgs(false, argv), {
-        timeout: timeoutMs,
-        windowsHide: true,
-        maxBuffer: SYNC_READ_MAX_BYTES,
-      });
-      const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
-      if (result.error !== undefined && !timedOut) {
-        throw new ContainerHostError(`docker 拉不起来：${result.error.message}`);
-      }
-      const stderr = result.stderr?.toString("utf8") ?? "";
-      if (!timedOut && daemonFailure({ exitCode: result.status, stderr })) {
-        throw new ContainerHostError(`容器不可用：${stderr.trim()}`);
-      }
-      return { exitCode: result.status, stdout: result.stdout ?? Buffer.alloc(0), timedOut };
-    },
-    async listTracked() {
-      return (await must(["git", "ls-files", "-z"], "列出受跟踪的文件"))
-        .toString("utf8")
-        .split("\0")
-        .filter((p) => p !== "");
-    },
-    async fileHistory(filePath, limit) {
-      // 每个提交一段：NUL 加提交号，其后是该提交上的路径（--follow 跨改名追踪）
-      const out = await must(
-        [
-          "git",
-          "log",
-          "--follow",
-          "--name-only",
-          "--format=%x00%H",
-          ...(limit !== undefined ? [`-n${limit}`] : []),
-          "--",
-          filePath,
-        ],
-        "追踪文件历史"
-      );
-      return out
-        .toString("utf8")
-        .split("\0")
-        .filter((chunk) => chunk.trim() !== "")
-        .map((chunk) => {
-          const [commit = "", ...rest] = chunk.split("\n").filter((l) => l !== "");
-          return { commit, path: rest[0] ?? filePath };
-        });
-    },
     async markStepStart() {
       const commit = (await must(["git", "rev-parse", "--verify", "HEAD"], "取起点提交"))
         .toString("utf8")

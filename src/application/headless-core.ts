@@ -30,14 +30,8 @@ import { verifyAttempt } from "./attempt-verify.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
-import { buildRepairFeedback, type RepairAppendix } from "./repair-loop.ts";
+import { buildRepairFeedback } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
-import {
-  createStructuredMemoryPush,
-  type StructuredMemoryOptions,
-  type StructuredMemorySummary,
-} from "./structured-memory.ts";
-import { dedupedWarner, failureDetail } from "./warnings.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
 export type HeadlessStatus =
@@ -100,17 +94,12 @@ export interface HeadlessRunOptions {
   // 决策 142 / 143：回炉轮数，缺省 0 即关闭；开启时冻结进注入快照并随 run.started 落盘。
   // 须配验证命令、不得与失败自动分叉重试同开、须能记下这一步的起点：本地 git 工作区按快照，容器工作区经执行端
   repairRounds?: number;
-  // 回炉反馈的附加内容注入点（缺省为空；结构化记忆将来从这里附加）
-  repairAppendix?: RepairAppendix;
   // 验证前还原的受保护文件（如人写的测试与测试辅助文件）：给了即在每次回炉验证（首轮与各轮）之前，
   // 经执行端把 agent 改动或删除过的受保护文件恢复成这一步开工时的版本，再验证。须执行端能按起点还原（容器）
   protectedFiles?: (path: string) => boolean;
   // 每次验证（首轮与各轮回炉）之前、还原受保护文件之前调用：调用方借此清掉 agent 留下的、会改变验证结果的东西
   // （后台进程、覆盖人写测试的 conftest 等）。先于还原，后台进程就来不及在还原之后再改受保护的文件
   beforeVerify?: () => Promise<void>;
-  // 决策 134 / 157：结构化记忆——给了即接入（开关、固定挑选）：开局按题面挑选拼进系统提示，回炉时附在反馈之后
-  // （调用方另给了回炉附加内容时以调用方的为准）。缺省不接入
-  structuredMemory?: StructuredMemoryOptions;
   // M7（决策 077）：分叉续跑——分支会话头、由会话树还原的初始消息、不给新输入从已有消息续跑
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -139,8 +128,6 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   label: OutcomeLabel;
   // 决策 142 / 143：回炉开启时在场——用了几轮、最后一次验证的结论、这一步是否收尾
   repair?: HeadlessRepairSummary;
-  // 决策 134：接入结构化记忆时在场——开局给了哪几条、每轮回炉给了哪几条
-  structuredMemory?: StructuredMemorySummary;
 }
 
 export interface HeadlessRepairSummary {
@@ -177,7 +164,7 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
     );
   }
   // 这一步的起点：本地 git 工作区由快照的改前基线给出；执行端另一侧的工作区（容器）要执行端能记下这一步起点（154②）。
-  // 两者供验证前还原受保护的文件，以及结构化记忆认定开工时的脏文件与本步改动（待 174 删除结构化记忆时重审本地这一条）
+  // 容器一侧供验证前还原受保护的文件。本地一条：结构化记忆删除后已无读者依赖本地回炉的快照（见 2026-09-27 删除与清理审计第七节），是否放宽另行裁决
   const host = options.workspaceHost;
   if (host !== undefined) {
     if (host.markStepStart === undefined) {
@@ -217,25 +204,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     }
   }
   const sessionId = options.sessionId ?? newSessionId();
-  // 决策 134：结构化记忆的开局挑选在装配之前做——段落要拼进系统提示并随注入快照冻结。题面即本次任务说明；
-  // 分叉续跑不给新输入，没有题面
-  const memory =
-    options.structuredMemory !== undefined
-      ? createStructuredMemoryPush({
-          governanceRoot: options.governanceRoot,
-          workspaceRoot: options.workspaceRoot,
-          ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
-          sessionId,
-          options: options.structuredMemory,
-        })
-      : undefined;
-  const opening = memory?.opening(options.continueFromHistory === true ? undefined : options.task);
-  const repairAppendix = options.repairAppendix ?? memory?.repairAppendix;
   const startedAt = Date.now();
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
-  // 回炉的运行时诊断（注入点出错）：标准错误、按类别去重，不进账本
-  const warn = dedupedWarner();
   const handle = createDetachedRuntime({
     sessionId,
     governanceRoot: options.governanceRoot,
@@ -262,7 +233,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
     ...(repairRounds > 0 ? { repairRounds } : {}),
-    // 容器工作区的起点记进每个 Run 的 run.started（结构化记忆派生据它认定开工时的脏文件）；本地工作区由快照给出
+    // 容器工作区的起点记进每个 Run 的 run.started（留作记录）；本地工作区由快照给出
     ...(repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined
       ? {
           stepStart: () =>
@@ -274,15 +245,6 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
                     ? { baseCommit: stepStart.baseCommit }
                     : {}),
                 },
-        }
-      : {}),
-    ...(memory !== undefined && opening !== undefined
-      ? {
-          structuredMemory: {
-            section: opening.section,
-            manifest: opening.manifest,
-            takeRepairIds: memory.takeRepairIds,
-          },
         }
       : {}),
     // M8（决策 087）：本次运行的预算冻结进注入快照——回放据此沿用同一预算，不得放宽
@@ -436,25 +398,6 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         break;
       }
       rounds += 1;
-      // 注入点出错不拖垮这一步：告警后以空附加内容照常回炉（不进账本）
-      let appendix: string | undefined;
-      try {
-        appendix = repairAppendix?.({
-          round: rounds,
-          maxRounds: repairRounds,
-          outcome: verified.outcome,
-          ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
-        });
-      } catch (error) {
-        warn(
-          error,
-          `回炉反馈附加内容告警：注入点出错：${failureDetail(error)}（出错的轮次反馈不带附加内容，回炉照常进行）`
-        );
-      }
-      if (externallyAborted) {
-        status = "aborted";
-        break;
-      }
       run = await handle.run(
         buildRepairFeedback({
           command: options.verify.command,
@@ -462,7 +405,6 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
           round: rounds,
           maxRounds: repairRounds,
-          ...(appendix !== undefined ? { appendix } : {}),
         })
       );
     }
@@ -524,7 +466,6 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...metrics,
     ...(verification !== undefined ? { verification } : {}),
     ...(repair !== undefined ? { repair } : {}),
-    ...(memory !== undefined ? { structuredMemory: memory.summary() } : {}),
     label:
       metrics.runId !== undefined
         ? labelAttempt(attemptOutcomeFacts(session, metrics.runId))

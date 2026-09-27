@@ -1,3 +1,0 @@
-src\strands\agent\demo.py:6: [1m[91merror:[0m Incompatible types in assignment (expression has type [0m[1m"str"[0m, variable has type [0m[1m"int"[0m)  [0m[93m[assignment][0m
-src\strands\agent\demo.py:7: [1m[91merror:[0m Unsupported operand types for + ([0m[1m"str"[0m and [0m[1m"int"[0m)  [0m[93m[operator][0m
-[1m[91mFound 2 errors in 1 file (checked 1 source file)[0m

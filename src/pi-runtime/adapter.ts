@@ -112,9 +112,6 @@ export interface PiRuntimeAdapterOptions {
   // M5.7 S3（决策 052）：run.started 的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
   // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
   runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
-  // 决策 134：本 Run 的结构化记忆留痕（快照里冻结的开局留痕，加上本 Run 作为回炉轮收到与被拦下的条目）——
-  // 与 MCP 摘要分开取，一边抛错不连带另一边
-  runStartedMemory?: () => Pick<RunStartedPayload, "structuredMemory">;
   // 这一步的起点（容器工作区、回炉开启时由执行端记下）：每个 Run 开始时取一次写进 run.started；缺省或取到 undefined 不带
   runStartedStepStart?: () => RunStartedPayload["stepStart"];
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
@@ -150,7 +147,6 @@ export class PiRuntimeAdapter {
   readonly #systemPromptHash: string;
   #systemPromptRecorded = false;
   readonly #runStartedExtras: PiRuntimeAdapterOptions["runStartedExtras"];
-  readonly #runStartedMemory: PiRuntimeAdapterOptions["runStartedMemory"];
   readonly #runStartedStepStart: PiRuntimeAdapterOptions["runStartedStepStart"];
 
   constructor(options: PiRuntimeAdapterOptions) {
@@ -168,7 +164,6 @@ export class PiRuntimeAdapter {
 
     this.#eventLog = options.eventLog;
     this.#runStartedExtras = options.runStartedExtras;
-    this.#runStartedMemory = options.runStartedMemory;
     this.#runStartedStepStart = options.runStartedStepStart;
     this.#messageContent = options.messageContent ?? {};
     this.#systemPromptHash = sha256Hex(this.#snapshot.context.systemPrompt);
@@ -523,12 +518,6 @@ export class PiRuntimeAdapter {
     } catch (error) {
       this.#listenerErrors.push(error);
     }
-    let memory: Pick<RunStartedPayload, "structuredMemory"> = {};
-    try {
-      memory = this.#runStartedMemory?.() ?? {};
-    } catch (error) {
-      this.#listenerErrors.push(error);
-    }
     const stepStart = this.#runStartedStepStart?.();
     this.recordObservation("run.started", {
       model: {
@@ -564,17 +553,7 @@ export class PiRuntimeAdapter {
       ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
       // 决策 142 / 143：回炉轮数随 run.started 落盘（一步里的每次 Run 同值）
       ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
-      // 决策 134 / 157：结构化记忆的开局留痕随 run.started 落盘（附加摘要里带了本 Run 的回炉留痕时以它为准）
-      ...(snapshot.structuredMemory !== undefined
-        ? {
-            structuredMemory: {
-              ...snapshot.structuredMemory,
-              opening: [...snapshot.structuredMemory.opening],
-            },
-          }
-        : {}),
       ...extras,
-      ...memory,
       ...(stepStart !== undefined ? { stepStart: { ...stepStart } } : {}),
     });
   }

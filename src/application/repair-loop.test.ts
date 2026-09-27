@@ -213,41 +213,34 @@ test("回炉整步的失败分类取最后一个 Run：首个 Run 撞输出上�
   }
 });
 
-test("回炉反馈：带验证命令、退出码、输出末尾与修正要求；附加内容注入点默认为空，给了就附在末尾", async () => {
-  for (const appendix of [undefined, "相关记忆：a.txt 上次也是这样修的"]) {
-    const repo = makeRepo();
-    try {
-      const streamFn = createFakeStreamFn({
-        replies: [edit("bug", "half"), done(), edit("half", "fixed"), done("修好了")],
-      });
-      await runHeadless({
-        task: "把 a.txt 修好",
-        governanceRoot: repo.root,
-        workspaceRoot: repo.root,
-        streamFn,
-        yolo: true,
-        homeDir: repo.home,
-        verify: VERIFY,
-        repairRounds: 3,
-        ...(appendix !== undefined ? { repairAppendix: () => appendix } : {}),
-      });
-      // 第 3 次模型调用是回炉第一轮的开头，收到的最后一条用户消息即反馈
-      const feedback = lastUserText(streamFn.calls[2]);
-      assert.ok(feedback.includes(VERIFY.command), feedback);
-      assert.ok(feedback.includes("退出码：1"), feedback);
-      assert.ok(feedback.includes("a.txt=half"), feedback);
-      assert.ok(feedback.includes("期望 fixed"), feedback);
-      assert.ok(feedback.includes(REPAIR_FEEDBACK_INSTRUCTION), feedback);
-      assert.ok(REPAIR_FEEDBACK_INSTRUCTION.includes("修正代码直到验证通过，不要修改测试文件"));
-      assert.ok(feedback.includes("第 1/3 轮"), feedback);
-      if (appendix === undefined) {
-        assert.ok(feedback.trimEnd().endsWith(REPAIR_FEEDBACK_INSTRUCTION), feedback);
-      } else {
-        assert.ok(feedback.trimEnd().endsWith(appendix), feedback);
-      }
-    } finally {
-      repo.cleanup();
-    }
+test("回炉反馈：带验证命令、退出码、输出末尾与修正要求，以修正要求收尾、不附别的内容（回炉不另推记忆）", async () => {
+  const repo = makeRepo();
+  try {
+    const streamFn = createFakeStreamFn({
+      replies: [edit("bug", "half"), done(), edit("half", "fixed"), done("修好了")],
+    });
+    await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn,
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 3,
+    });
+    // 第 3 次模型调用是回炉第一轮的开头，收到的最后一条用户消息即反馈
+    const feedback = lastUserText(streamFn.calls[2]);
+    assert.ok(feedback.includes(VERIFY.command), feedback);
+    assert.ok(feedback.includes("退出码：1"), feedback);
+    assert.ok(feedback.includes("a.txt=half"), feedback);
+    assert.ok(feedback.includes("期望 fixed"), feedback);
+    assert.ok(feedback.includes(REPAIR_FEEDBACK_INSTRUCTION), feedback);
+    assert.ok(REPAIR_FEEDBACK_INSTRUCTION.includes("修正代码直到验证通过，不要修改测试文件"));
+    assert.ok(feedback.includes("第 1/3 轮"), feedback);
+    assert.ok(feedback.trimEnd().endsWith(REPAIR_FEEDBACK_INSTRUCTION), feedback);
+  } finally {
+    repo.cleanup();
   }
 });
 
@@ -585,71 +578,6 @@ test("回炉轮数的来源：启动参数优先于项目验证配置，缺省�
       () => parseLaunchFlags(["--repair-rounds", "3"], { usage, verify: true }),
       /--repair-rounds|未知/
     );
-  } finally {
-    repo.cleanup();
-  }
-});
-
-// 截获标准错误（去重告警走这里）
-async function captureStderr<T>(run: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
-  const lines: string[] = [];
-  const original = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((chunk: unknown) => {
-    lines.push(String(chunk));
-    return true;
-  }) as typeof process.stderr.write;
-  try {
-    return { result: await run(), lines };
-  } finally {
-    process.stderr.write = original;
-  }
-}
-
-test("回炉反馈的附加内容注入点每轮都抛错：只告警一次、以空附加照常回炉，这一步按最后一次验证收尾", async () => {
-  const repo = makeRepo();
-  try {
-    const streamFn = createFakeStreamFn({
-      replies: [
-        edit("bug", "w1"),
-        done(),
-        edit("w1", "half"),
-        done(),
-        edit("half", "fixed"),
-        done("修好了"),
-      ],
-    });
-    let appendixCalls = 0;
-    const { result, lines } = await captureStderr(() =>
-      runHeadless({
-        task: "把 a.txt 修好",
-        governanceRoot: repo.root,
-        workspaceRoot: repo.root,
-        streamFn,
-        yolo: true,
-        homeDir: repo.home,
-        verify: VERIFY,
-        repairRounds: 3,
-        repairAppendix: () => {
-          appendixCalls += 1;
-          throw new Error("记忆索引读不出：坏文件");
-        },
-      })
-    );
-    assert.deepEqual(result.repair, {
-      rounds: 2,
-      verdict: "pass",
-      closed: true,
-    });
-    assert.equal(result.label, "Passed");
-    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "fixed\n");
-    assert.equal(appendixCalls, 2, "两轮回炉各调用一次注入点");
-    const warnings = lines.filter((line) => line.startsWith("回炉反馈附加内容告警："));
-    assert.equal(warnings.length, 1, `同一类故障只告警一次：${lines.join("")}`);
-    assert.match(warnings[0] ?? "", /出错的轮次反馈不带附加内容，回炉照常进行/);
-    for (const call of [streamFn.calls[2], streamFn.calls[4]]) {
-      const feedback = lastUserText(call);
-      assert.ok(feedback.trimEnd().endsWith(REPAIR_FEEDBACK_INSTRUCTION), feedback);
-    }
   } finally {
     repo.cleanup();
   }

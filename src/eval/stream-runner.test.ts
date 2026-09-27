@@ -17,7 +17,6 @@ import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { runHeadless } from "../application/headless.ts";
 import { createSessionSearch } from "../memory/session-search.ts";
-import { loadStructuredMemory, structuredMemoryCachePath } from "../memory/structured-store.ts";
 import { listSessionIds } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -1164,20 +1163,19 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
     }
   });
 
-  test("作废一步时清掉这次尝试的痕迹：重做时会话检索搜不到上一次尝试，结构化记忆不含作废的会话，会话移到治理根之外的隔离目录", async () => {
+  test("作废一步时清掉这次尝试的痕迹：重做时会话检索搜不到上一次尝试，会话移到治理根之外的隔离目录", async () => {
     const t = await toy();
     try {
       const clue = "作废尝试留下的线索甲乙丙";
       let voidedSession = "";
-      const seenOnRetry: { hits: number; sessions: string[]; cache: boolean; memory: string[] }[] =
-        [];
+      const seenOnRetry: { hits: number; sessions: string[] }[] = [];
       const calls: StepAgentInput[] = [];
       const agent: StepAgent = {
         async run(input) {
           calls.push(input);
           const sessionsDir = join(input.workDir, ".pigeon", "sessions");
           if (input.step.seq === 1 && calls.length === 1) {
-            // 第一次尝试：真实地跑一次 headless，会话落进治理根，结构化记忆缓存随之生成；然后报被打断
+            // 第一次尝试：真实地跑一次 headless，会话落进治理根；然后报被打断
             const workspace = join(t.base, "headless-ws");
             mkdirSync(workspace, { recursive: true });
             const run = await runHeadless({
@@ -1192,8 +1190,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
               homeDir: join(t.base, "home"),
             });
             voidedSession = run.sessionId;
-            loadStructuredMemory(input.workDir);
-            assert.ok(existsSync(structuredMemoryCachePath(input.workDir)));
+            assert.ok(listSessionIds(sessionsDir).includes(run.sessionId));
             return {
               status: "failed",
               turns: 1,
@@ -1208,18 +1205,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
             for await (const hit of createSessionSearch(sessionsDir).search({ keywords: [clue] })) {
               hits.push(hit);
             }
-            const cache = existsSync(structuredMemoryCachePath(input.workDir));
-            // 重建结构化记忆后看缓存里登记了哪些会话
-            loadStructuredMemory(input.workDir);
-            const rebuilt = JSON.parse(
-              readFileSync(structuredMemoryCachePath(input.workDir), "utf8")
-            ) as { sessions: Record<string, unknown> };
-            seenOnRetry.push({
-              hits: hits.length,
-              sessions: listSessionIds(sessionsDir),
-              cache,
-              memory: Object.keys(rebuilt.sessions),
-            });
+            seenOnRetry.push({ hits: hits.length, sessions: listSessionIds(sessionsDir) });
             write(input.target.root, { "src/a.txt": "alpha\n" });
           }
           return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5, repair: null };
@@ -1228,7 +1214,7 @@ describe("延续式跑批（假 agent、本地假容器）", { concurrency: true
       const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
       assert.deepEqual(summary.jobs, [{ key: "s1|no-gate|1", completedTo: 1 }]);
       assert.notEqual(voidedSession, "");
-      assert.deepEqual(seenOnRetry, [{ hits: 0, sessions: [], cache: false, memory: [] }]);
+      assert.deepEqual(seenOnRetry, [{ hits: 0, sessions: [] }]);
       // 作废的会话保留在输出目录下、作业治理根之外的隔离目录里备查
       const quarantined = readdirSync(join(t.base, "out", "voided"), { recursive: true }).map((f) =>
         String(f).replaceAll("\\", "/")

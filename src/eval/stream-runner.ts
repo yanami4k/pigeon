@@ -13,7 +13,6 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -66,8 +65,8 @@ import {
 } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
-// 四个条件（126 修订、140）：完整 Pigeon 开回炉与结构化记忆；去掉记忆只关结构化记忆；去掉验证门即不开回炉；
-// 最简 agent 另走启动器
+// 四个条件（126 修订、140）：完整 Pigeon 开回炉；去掉验证门即不开回炉；最简 agent 另走启动器。
+// 结构化记忆删除（决策 174）后 memory 开关没有接线，过渡期 full 与 no-memory 行为相同；条件表之后另行重做
 export interface ConditionSpec {
   name: StreamCondition;
   agent: "pigeon" | "minimal";
@@ -302,7 +301,7 @@ function sessionFilesOf(jobDir: string): string[] {
 }
 
 // 清掉一次作废的尝试留在治理根里的痕迹：不在 keep 里的会话文件移到输出目录下、治理根之外的隔离目录（保留备查），
-// 结构化记忆缓存删掉、下次由其余会话重建——重做时会话检索与结构化记忆都看不到作废的尝试，与从零开始的最简 agent 对等
+// 重做时会话检索看不到作废的尝试，与从零开始的最简 agent 对等
 function quarantineSessions(
   outDir: string,
   job: StreamJobId,
@@ -317,7 +316,6 @@ function quarantineSessions(
     mkdirSync(target, { recursive: true });
     for (const file of stray) renameSync(path.join(dir, file), path.join(target, file));
   }
-  rmSync(path.join(jobDir, ".pigeon", "cache"), { recursive: true, force: true });
   return stray.length;
 }
 
@@ -506,7 +504,7 @@ async function runStreamJob(
   const segment = options.manifest.streams.find((s) => s.id === job.stream);
   if (segment === undefined) throw new Error(`清单里没有流 ${job.stream}`);
   const steps = limitSteps(stepsOf(options.manifest, job.stream), options.maxSteps);
-  // 作业目录即 agent 的治理根：条件 × 流 × 遍次各一个。结构化记忆从治理根里的以往会话派生，
+  // 作业目录即 agent 的治理根：条件 × 流 × 遍次各一个。会话检索读治理根里的以往会话，
   // 所以只在同一条流里沿步累积，不跨条件、遍次或流串用；目录名必须同时含这三者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });

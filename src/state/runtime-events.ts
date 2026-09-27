@@ -183,12 +183,12 @@ export const RunStartedPayloadSchema = Type.Object({
   repairRounds: Type.Optional(RepairRoundsSchema),
   // 这一步的起点（决策 154②；加法式可缺省）：工作区在执行端另一侧（容器）时，回炉开启下执行端在第一个 Run 之前记下的
   // 起点提交与"开工时的树"挂在它之下的提交；一步里的每个 Run 同值。两者之差即开工时的脏文件（跑批器预置、尚未提交的人写测试），
-  // 结构化记忆派生据此认定题面测试——本地工作区由快照记录的改前基线给出，不带本字段。旧记录没有时按未知处理
+  // 结构化记忆删除（决策 174）后只作记录、没有读者——本地工作区由快照记录的改前基线给出，不带本字段。旧记录没有时按未知处理
   stepStart: Type.Optional(
     Type.Object({ commit: GitObjectIdSchema, baseCommit: Type.Optional(GitObjectIdSchema) })
   ),
   // 结构化记忆（决策 134 / 157；加法式可缺省）：开关、挑选方式、开局给了哪几条（冻结快照值，每个 Run 同值），
-  // 以及本 Run 作为回炉轮收到了哪几条（只在回炉 Run 上在场）。没有接入结构化记忆的入口（REPL、TUI、worker）不带
+  // 以及本 Run 作为回炉轮收到了哪几条（只在回炉 Run 上在场）。决策 174 删除结构化记忆后已停写，只为旧会话照常可读而保留
   structuredMemory: Type.Optional(
     Type.Object({
       ...StructuredMemoryManifestSchema.properties,

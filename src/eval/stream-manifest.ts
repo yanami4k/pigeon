@@ -112,7 +112,7 @@ export interface StreamManifest {
   streams: readonly StreamSegment[];
 }
 
-// 题面：开头每行一个本题测试文件的路径（相对仓库根；全文过长被截断时路径仍在，结构化记忆据此认定题面测试），
+// 题面：开头每行一个本题测试文件的路径（相对仓库根；全文过长被截断时路径仍在），
 // 其后是提交信息原文，再逐个附上该步新增或修改的测试文件全文。与 M9 同一做法，不加任何包装措辞
 export function buildTaskPrompt(
   message: string,

@@ -94,7 +94,7 @@ export const InjectionSnapshotSchema = Type.Object({
   budget: Type.Optional(AttemptBudgetSchema),
   // 回炉轮数（决策 142 / 143）：只在开启时在场；缺省即关闭
   repairRounds: Type.Optional(RepairRoundsSchema),
-  // 结构化记忆的开局留痕（决策 134 / 157）：与常驻 Memory 分开计预算、分开留痕；缺省即本入口不接入结构化记忆
+  // 结构化记忆的开局留痕（决策 134 / 157）：决策 174 删除结构化记忆后已停写，只为旧会话与 v12 快照照常可读而保留
   structuredMemory: Type.Optional(StructuredMemoryManifestSchema),
 });
 

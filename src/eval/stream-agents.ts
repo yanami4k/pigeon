@@ -1,5 +1,5 @@
 // 延续式跑批的两种 agent 接入（第三节）：跑批器只经 StepAgent 调用，不感知 agent 怎么跑。
-//   Pigeon（完整、去掉记忆、去掉验证门与回退）：与外部基准同一条路——进程内经 headless 入口运行，执行端为该流的容器；
+//   Pigeon（完整、去掉记忆、去掉验证门；结构化记忆删除后前两者行为相同）：与外部基准同一条路——进程内经 headless 入口运行，执行端为该流的容器；
 //   最简 agent（099）：宿主上的独立进程，经请求文件拿到题面、容器与预算，命令在该流的容器里执行，结果写回结果文件。
 // 模型接入由各自的 stream-fn / 启动器配置决定；限额的统一处理（第 17、18 条）待定后接在这一层之下。
 import { execFile, spawn } from "node:child_process";
@@ -148,10 +148,6 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           skillRoots: [],
           memoryRoots: [],
           taskDirective: STREAM_WORK_DIRECTIVE,
-          // 结构化记忆（134、157）：完整条件开启、按题面与报错正常挑选；
-          // 去掉记忆的条件关闭。事实取自治理根里的以往会话，治理根即作业目录（条件 × 流 × 遍次各一个，见跑批器），
-          // 记忆因此只在同一条流里沿步累积，不跨条件、遍次或流串用
-          structuredMemory: input.condition.memory ? {} : { enabled: false },
           // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动。
           // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
           // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取

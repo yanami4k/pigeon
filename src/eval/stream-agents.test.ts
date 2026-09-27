@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
 import {
-  edits,
-  finished,
-  makeMemoryRepo,
-  memoryVerifyConfig,
-} from "../application/structured-memory-fixtures.ts";
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
-import { buildMemoryEntries, loadStructuredMemory } from "../memory/structured-store.ts";
-import { hostWorkspaceAccess } from "../memory/structured-workspace.ts";
 import { listSessionIds, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
@@ -957,8 +957,8 @@ test("Pigeon agent：不开回炉的条件不验证、不回炉，结果不带�
   }
 });
 
-test("Pigeon agent：完整条件接入结构化记忆（开启、按题面与报错正常挑选），去掉记忆的条件关闭", async () => {
-  const seen: Record<string, { enabled: boolean; selection: string } | undefined> = {};
+test("Pigeon agent：结构化记忆删除后完整与去掉记忆两个条件行为相同——run.started 都不带结构化记忆字段，系统提示逐字相同", async () => {
+  const seen: Record<string, { memory: unknown; promptHash: string | undefined }> = {};
   for (const condition of ["full", "no-memory"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
@@ -981,59 +981,136 @@ test("Pigeon agent：完整条件接入结构化记忆（开启、按题面与�
       const sessions = join(workDir, ".pigeon", "sessions");
       const [sessionId] = listSessionIds(sessions);
       assert.ok(sessionId !== undefined);
-      const memory = materializeSession(sessions, sessionId, { content: false }).runStarteds[0]
-        ?.payload.structuredMemory;
-      seen[condition] =
-        memory === undefined ? undefined : { enabled: memory.enabled, selection: memory.selection };
+      const started = materializeSession(sessions, sessionId, { content: false }).runStarteds;
+      assert.equal(started.length, 1);
+      seen[condition] = {
+        memory: started[0]?.payload.structuredMemory,
+        promptHash: started[0]?.payload.systemPromptHash,
+      };
     } finally {
       ws.cleanup();
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
   }
-  assert.deepEqual(seen.full, { enabled: true, selection: "auto" });
-  assert.notEqual(seen["no-memory"]?.enabled, true);
+  assert.equal(seen.full?.memory, undefined);
+  assert.equal(seen["no-memory"]?.memory, undefined);
+  assert.ok(seen.full?.promptHash !== undefined);
+  assert.equal(seen.full?.promptHash, seen["no-memory"]?.promptHash);
 });
 
-test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py 下各出结论；pytest 失败、回炉修好，事实锚点带 strands-py/ 前缀，下一步开局挑中并在容器里核验通过", async () => {
-  const repo = makeMemoryRepo({
+// 分步验证用的小仓库：v.mjs <步名> 在本步执行目录下扫描 *.py 里每行 "# FAILS_UNLESS <文件> <标记> <测试名>"，
+// <文件> 不含 <标记> 即该测试失败，只对"子测试"一步生效并按 pytest 短汇总报出；其余步一律通过
+const STEPWISE_VERIFY_SCRIPT = String.raw`import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+const step = process.argv[2];
+const root = process.cwd();
+const files = [];
+const walk = (dir) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if ([".git", ".pigeon", "node_modules", "v.mjs"].includes(entry.name)) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full);
+    else files.push(relative(root, full).split("\\").join("/"));
+  }
+};
+walk(root);
+const read = (file) => { try { return readFileSync(join(root, file), "utf8"); } catch { return ""; } };
+const out = [];
+if (step === "子测试") {
+  const failing = [];
+  for (const file of files.filter((name) => name.endsWith(".py"))) {
+    for (const match of read(file).matchAll(/# FAILS_UNLESS (\S+) (\S+) (\S+)/g)) {
+      if (!read(match[1]).includes(match[2])) failing.push({ file, name: match[3] });
+    }
+  }
+  if (failing.length > 0) {
+    out.push("=========================== short test summary info ============================");
+    for (const test of failing) out.push("FAILED " + test.file + "::" + test.name + " - AssertionError: assert False");
+    out.push("========================= " + failing.length + " failed, 1 passed in 0.10s =========================");
+  }
+}
+process.stdout.write(out.join("\n") + (out.length > 0 ? "\n" : "一切正常\n"));
+process.exit(out.length > 0 ? 1 : 0);
+`;
+
+function makeStepwiseRepo(files: Record<string, string>) {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-stepwise-")));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-stepwise-home-"));
+  const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
+  const write = (file: string, content: string) => {
+    mkdirSync(dirname(join(root, file)), { recursive: true });
+    writeFileSync(join(root, file), content);
+  };
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "user.email", "pigeon@example.invalid"]);
+  git(["config", "user.name", "pigeon-test"]);
+  git(["config", "core.autocrlf", "false"]);
+  write("v.mjs", STEPWISE_VERIFY_SCRIPT);
+  write(".gitignore", ".pigeon/\n");
+  for (const [file, content] of Object.entries(files)) write(file, content);
+  git(["add", "-A"]);
+  git(["commit", "-q", "-m", "init"]);
+  return {
+    root,
+    home,
+    cleanup: () => {
+      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+      rmSync(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    },
+  };
+}
+
+// 一次回复里的若干处替换编辑
+function edits(...changes: Array<[path: string, from: string, to: string]>): FakeReply {
+  return {
+    text: "改一下",
+    toolCalls: changes.map(([path, from, to]) => ({
+      name: "edit_file",
+      args: { path, old_string: from, new_string: to },
+    })),
+  };
+}
+
+const finished = (text = "好了"): FakeReply => ({ text });
+
+test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py 下各出结论；pytest 失败、回炉修好，回炉反馈按步列出", async () => {
+  const repo = makeStepwiseRepo({
     "strands-py/src/pkg/mod.py": "VALUE = 1  # VALUE_OK\n",
     "strands-py/tests/test_mod.py":
       "# FAILS_UNLESS src/pkg/mod.py VALUE_OK test_value\ndef test_value():\n    pass\n",
   });
   const docker = localDockerHost(repo.root);
   const workDir = mkdtempSync(join(tmpdir(), "pigeon-stream-job-"));
-  const config = memoryVerifyConfig([
-    { name: "格式", cwd: "strands-py" },
-    { name: "类型", cwd: "strands-py" },
-    { name: "子测试", cwd: "strands-py" },
-  ]);
-  const verify = { command: "不应被用到的单条命令", steps: config.steps ?? [], timeoutMs: 60_000 };
-  const streamFns: ReturnType<typeof createFakeStreamFn>[] = [];
-  const runStep = (prompt: string, replies: FakeReply[]) => {
-    const streamFn = createFakeStreamFn({ replies });
-    streamFns.push(streamFn);
-    return pigeonStepAgent({
+  const node = `"${process.execPath}"`;
+  const steps = ["格式", "类型", "子测试"].map((name) => ({
+    name,
+    command: `${node} ../v.mjs ${name}`,
+    cwd: "strands-py",
+  }));
+  const verify = { command: "不应被用到的单条命令", steps, timeoutMs: 60_000 };
+  const streamFn = createFakeStreamFn({
+    replies: [
+      edits(["strands-py/src/pkg/mod.py", "  # VALUE_OK", ""]),
+      finished(),
+      edits(["strands-py/src/pkg/mod.py", "VALUE = 1", "VALUE = 1  # VALUE_OK again"]),
+      finished("修好了"),
+    ],
+  });
+  const sessions = join(workDir, ".pigeon", "sessions");
+  try {
+    const first = await pigeonStepAgent({
       streamFn,
       yolo: true,
       docker: docker.docker,
       homeDir: repo.home,
     }).run(
       input(workDir, {
-        prompt,
+        prompt: "以往的一步",
         condition: CONDITION_SPECS.full,
         target: { container: "box", root: docker.containerRoot },
         verify,
       })
     );
-  };
-  const sessions = join(workDir, ".pigeon", "sessions");
-  try {
-    const first = await runStep("以往的一步", [
-      edits(["strands-py/src/pkg/mod.py", "  # VALUE_OK", ""]),
-      finished(),
-      edits(["strands-py/src/pkg/mod.py", "VALUE = 1", "VALUE = 1  # VALUE_OK again"]),
-      finished("修好了"),
-    ]);
     assert.deepEqual([first.repair?.rounds, first.repair?.finalVerdict], [1, "pass"]);
     const [firstId] = listSessionIds(sessions);
     assert.ok(firstId !== undefined);
@@ -1048,27 +1125,11 @@ test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py
       ]
     );
     // 回炉反馈按步列出：失败步与已通过步分开，附失败步的输出末尾，不是整条命令的输出截尾
-    const feedback = JSON.stringify(streamFns[0]?.calls[2]?.context.messages.at(-1));
+    const feedback = JSON.stringify(streamFn.calls[2]?.context.messages.at(-1));
     assert.match(feedback, /失败的步骤：子测试/);
     assert.match(feedback, /已通过的步骤：格式、类型/);
     assert.match(feedback, /test_value/);
     assert.doesNotMatch(feedback, /验证命令：/);
-    repo.commit("落地");
-    const { facts } = loadStructuredMemory(workDir, {
-      persist: false,
-      accessFor: () => hostWorkspaceAccess(docker.host),
-    });
-    const onModule = buildMemoryEntries(facts).find(
-      (entry) => entry.anchor === "strands-py/src/pkg/mod.py"
-    );
-    assert.ok(onModule !== undefined, "锚点带 strands-py/ 前缀");
-    await runStep("修改 strands-py/src/pkg/mod.py", [finished("看过了")]);
-    const nextId = listSessionIds(sessions).find((id) => id !== firstId);
-    assert.ok(nextId !== undefined);
-    const opening = materializeSession(sessions, nextId, { content: false }).runStarteds[0]?.payload
-      .structuredMemory;
-    assert.deepEqual(opening?.opening, [onModule.id]);
-    assert.equal(opening?.openingBlocked, undefined);
   } finally {
     docker.cleanup();
     rmSync(workDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

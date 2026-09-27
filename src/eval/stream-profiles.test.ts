@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createContainerWorkspaceHost } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { clearMarkedProcesses } from "./stream-agents.ts";
 import {
@@ -685,12 +684,6 @@ test("跑批器在容器里的内部命令不经过 agent 能改的 PATH：镜�
       ]);
       assert.deepEqual(removed, ["tests/conftest.sh"]);
       await strandsRuntime.pinTestConfig?.(ws, async () => Buffer.from("[pytest]\n"));
-      const host = createContainerWorkspaceHost({
-        container: "box",
-        root: docker.containerRoot,
-        docker: docker.docker,
-      });
-      await host.listTracked?.();
       assert.equal(
         await clearMarkedProcesses(docker.docker, "box", "pigeon-step-path", docker.containerRoot),
         true
