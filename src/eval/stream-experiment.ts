@@ -2,7 +2,7 @@
 // 基准，按条件接入 agent，交给跑批器；结束后移除参考容器。
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import {
@@ -24,13 +24,17 @@ import {
   type BaselineCheck,
   type BaselineSummary,
   baselineTargets,
+  type ClassesSummary,
+  classTargets,
   computeBaselines,
+  computeClasses,
 } from "./stream-baseline.ts";
-import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
+import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
-import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
+import { checkOrWriteIdentity, manifestDigestOf, type TaskSelection } from "./stream-identity.ts";
 import {
+  chainedTasks,
   DEFAULT_TASK_PROMPT_FORMAT,
   type StreamManifest,
   TASK_CHAIN_SCOPE,
@@ -39,7 +43,6 @@ import {
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";
 import {
-  assertPromptFormatReady,
   dockerStreamEnvs,
   lockOutDir,
   ReferenceCases,
@@ -48,7 +51,9 @@ import {
   STREAM_CONTAINER_ROOT,
   type StepAgent,
   type StepBudget,
+  selectSteps,
 } from "./stream-runner.ts";
+import { CALIBRATION_SEED, sampleTasks } from "./stream-sample.ts";
 import { dockerStreamShell } from "./stream-workspace.ts";
 
 // 清单里的仓库名 → 运行方式
@@ -66,8 +71,11 @@ export interface StreamExperimentOptions {
   attempts?: number;
   concurrency?: number;
   maxSteps?: number;
+  // 选题（202、219 校准）：给定题号，或按种子抽样（只在要做到的用例不为零的题中抽，需两类用例已预计算）；都不给即全部
+  tasks?: readonly number[];
+  sample?: { k: number; seed?: number };
   budget: StepBudget;
-  // 题面格式（198、213）：缺省给测试文件路径；给用例名要等跑批器二接上
+  // 题面格式（198、213）：缺省给测试文件路径；给用例名时名单为这一步要做到的用例
   promptFormat?: TaskPromptFormat;
   // 四个条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里
   gateway: { accounts: readonly GatewayAccount[]; modelId: string };
@@ -189,6 +197,38 @@ export function readManifest(file: string): {
   return { manifest, runtime };
 }
 
+// 选题（202、219）：给题号即按题号；抽样只在要做到的用例不为零的题中抽，要求全部题的两类用例都已预计算（只读落盘结果，
+// 不现算），缺了即拒绝并说明；两者都给即拒绝。都不给为全部
+export function resolveTaskSelection(
+  manifest: StreamManifest,
+  reference: Pick<ReferenceCases, "cachedClasses">,
+  options: Pick<StreamExperimentOptions, "tasks" | "sample">
+): TaskSelection {
+  if (options.tasks !== undefined && options.sample !== undefined) {
+    throw new Error("题号列表与抽样只能二选一");
+  }
+  if (options.tasks !== undefined) return { method: "list", tasks: [...options.tasks] };
+  if (options.sample === undefined) return { method: "all" };
+  const counts = new Map<string, number>();
+  const missing: number[] = [];
+  chainedTasks(manifest).forEach((step, i) => {
+    const classes = reference.cachedClasses(step);
+    if (classes === undefined) missing.push(i + 1);
+    else counts.set(step.commit, classes.failToPass.length);
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `抽样要先算好全部题的两类用例，还缺 ${missing.length} 道（题号 ${missing.slice(0, 20).join(",")}${missing.length > 20 ? "…" : ""}）：先用 eval stream-baseline --check classes 预计算`
+    );
+  }
+  return sampleTasks(
+    manifest,
+    (step) => counts.get(step.commit) ?? 0,
+    options.sample.k,
+    options.sample.seed ?? CALIBRATION_SEED
+  );
+}
+
 // 输出目录的锁在最前面取（读清单、写身份头、起网关探测各账号之前）：误起第二个进程时它什么都不动就被拒
 export async function runStreamExperiment(
   options: StreamExperimentOptions
@@ -206,9 +246,7 @@ async function runStreamExperimentLocked(
   options: StreamExperimentOptions,
   outDir: string
 ): Promise<RunStreamsSummary> {
-  // 给用例名的题面还没接上（跑批器二）：读清单、写身份头、起网关与容器之前即拒绝
   const promptFormat = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
-  assertPromptFormatReady(promptFormat, undefined);
   const { manifest, runtime } = readManifest(options.manifestFile);
   const docker = options.docker ?? ["docker"];
   const human = gitHumanRepo(options.repoDir);
@@ -219,6 +257,24 @@ async function runStreamExperimentLocked(
   assertConcurrencyFits(options.concurrency ?? 4, options.gateway.accounts);
   // 身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：开跑前写入或比对，不一致即拒绝续跑——在起网关与容器之前做
   const imageId = imageIdOf(options.image, docker);
+  // 参考工作区的容器开跑时才起；选题只读已落盘的两类用例，用不到容器
+  const referenceWs = new ReferenceWorkspace(
+    dockerStreamShell({ container: referenceName, root: STREAM_CONTAINER_ROOT, docker })
+  );
+  const reference = new ReferenceCases({
+    reference: referenceWs,
+    runtime,
+    human,
+    image: imageId,
+    cacheDir:
+      options.baselineDir !== undefined
+        ? path.resolve(options.baselineDir)
+        : path.join(outDir, "reference"),
+  });
+  const taskSelection = resolveTaskSelection(manifest, reference, options);
+  const tasks = taskSelection.method === "all" ? undefined : taskSelection.tasks;
+  // 题号越界、重复即在写身份头之前拒绝
+  selectSteps(manifest, { tasks, maxSteps: options.maxSteps });
   const pigeonSettings =
     options.pigeon === undefined ? undefined : effectivePigeonSettings(options.pigeon, modelId);
   const miniSettings =
@@ -235,6 +291,7 @@ async function runStreamExperimentLocked(
       conditions: [...options.conditions],
       stepScope: TASK_CHAIN_SCOPE,
       promptFormat,
+      taskSelection,
       maxSteps: options.maxSteps ?? null,
       agents: {
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
@@ -272,9 +329,6 @@ async function runStreamExperimentLocked(
         ...(options.containerRunArgs ?? []),
       ],
     });
-    const referenceWs = new ReferenceWorkspace(
-      dockerStreamShell({ container: referenceName, root: STREAM_CONTAINER_ROOT, docker })
-    );
     await referenceWs.init(human.bundle(manifest.rangeEnd), manifest.rangeEnd);
     const agents: Partial<Record<"pigeon" | "minimal", StepAgent>> = {};
     if (options.pigeon !== undefined) {
@@ -313,15 +367,7 @@ async function runStreamExperimentLocked(
         ...(options.log !== undefined ? { log: options.log } : {}),
       }),
       agents,
-      reference: new ReferenceCases({
-        reference: referenceWs,
-        runtime,
-        image: imageId,
-        cacheDir:
-          options.baselineDir !== undefined
-            ? path.resolve(options.baselineDir)
-            : path.join(outDir, "reference"),
-      }),
+      reference,
       outDir,
       conditions: options.conditions,
       budget: options.budget,
@@ -337,6 +383,7 @@ async function runStreamExperimentLocked(
       ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
       ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
       ...(options.maxSteps !== undefined ? { maxSteps: options.maxSteps } : {}),
+      ...(tasks !== undefined ? { tasks } : {}),
       ...(options.log !== undefined ? { log: options.log } : {}),
     });
   } finally {
@@ -398,8 +445,17 @@ export interface StreamBaselineOptions {
   log?: (line: string) => void;
 }
 
-// 提前单独算人的基准：起 N 个参考容器（与作业的参考容器分开），按提交分摊，结束后移除
-export async function runStreamBaselines(options: StreamBaselineOptions): Promise<BaselineSummary> {
+// 起 N 个参考容器（与作业的参考容器分开），交给 work 分摊，结束后移除
+async function withBaselineReferences<T>(
+  options: StreamBaselineOptions,
+  work: (input: {
+    manifest: StreamManifest;
+    runtime: StreamRepoRuntime;
+    human: HumanRepo;
+    outDir: string;
+    references: ReferenceCases[];
+  }) => Promise<T>
+): Promise<T> {
   const { manifest, runtime } = readManifest(options.manifestFile);
   const docker = options.docker ?? ["docker"];
   const outDir = path.resolve(options.outDir);
@@ -408,12 +464,6 @@ export async function runStreamBaselines(options: StreamBaselineOptions): Promis
   const lanes = Math.max(1, options.concurrency ?? 1);
   const names = Array.from({ length: lanes }, (_, i) => `${prefix}-baseline-${i + 1}`);
   const imageId = imageIdOf(options.image, docker);
-  const targets = baselineTargets({
-    manifest,
-    human,
-    runtime,
-    ...(options.streams !== undefined ? { streams: options.streams } : {}),
-  });
   try {
     const references = await Promise.all(
       names.map(async (name) => {
@@ -433,19 +483,58 @@ export async function runStreamBaselines(options: StreamBaselineOptions): Promis
           dockerStreamShell({ container: name, root: STREAM_CONTAINER_ROOT, docker })
         );
         await ws.init(human.bundle(manifest.rangeEnd), manifest.rangeEnd);
-        return new ReferenceCases({ reference: ws, runtime, cacheDir: outDir, image: imageId });
+        return new ReferenceCases({
+          reference: ws,
+          runtime,
+          human,
+          cacheDir: outDir,
+          image: imageId,
+        });
       })
     );
-    return await computeBaselines({
-      targets,
+    return await work({ manifest, runtime, human, outDir, references });
+  } finally {
+    for (const name of names) await removeWorkspaceContainer(name, docker).catch(() => {});
+  }
+}
+
+// 提前单独算人的基准：按提交分摊到各路参考容器
+export function runStreamBaselines(options: StreamBaselineOptions): Promise<BaselineSummary> {
+  return withBaselineReferences(options, ({ manifest, runtime, human, references }) =>
+    computeBaselines({
+      targets: baselineTargets({
+        manifest,
+        human,
+        runtime,
+        ...(options.streams !== undefined ? { streams: options.streams } : {}),
+      }),
       references,
       check: options.check ?? "both",
       gateCommand: gateFromSteps(runtime.verifySteps),
       ...(options.log !== undefined ? { log: options.log } : {}),
+    })
+  );
+}
+
+// 两类用例的汇总文件（基准目录下）：每道题两类用例的条数，供选题核对与事后分析
+export const CLASSES_SUMMARY_FILE = "classes-summary.json";
+
+// 预计算两类用例（214）：全部题（清单里的题按时间接成的流）按题分摊到各路参考容器；同一目录重跑即续算。
+// 结束后写汇总文件
+export function runStreamClasses(options: StreamBaselineOptions): Promise<ClassesSummary> {
+  return withBaselineReferences(options, async ({ manifest, outDir, references }) => {
+    const summary = await computeClasses({
+      targets: classTargets(manifest),
+      references,
+      ...(options.log !== undefined ? { log: options.log } : {}),
     });
-  } finally {
-    for (const name of names) await removeWorkspaceContainer(name, docker).catch(() => {});
-  }
+    writeFileSync(
+      path.join(outDir, CLASSES_SUMMARY_FILE),
+      `${JSON.stringify(summary, null, 2)}
+`
+    );
+    return summary;
+  });
 }
 
 // 停止信号的硬时限：低于 systemd 单元的 TimeoutStopSec（120 秒），在它发 SIGKILL 之前自行退出

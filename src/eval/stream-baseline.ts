@@ -2,7 +2,7 @@
 // 清单出来后即可先算。用独立的参考容器，与作业的参考工作区分开；结果按提交原子落盘，同一目录重跑时已算的直接跳过，
 // 加路数即带更大的并行数重跑。正式实验读这个目录，不再现算。
 import type { HumanRepo } from "./stream-facts.ts";
-import { type StreamManifest, stepsOf } from "./stream-manifest.ts";
+import { chainedTasks, type StreamManifest, type StreamStep, stepsOf } from "./stream-manifest.ts";
 import type { StreamRepoRuntime } from "./stream-profiles.ts";
 import { type HumanBaseline, humanTestsAt, type ReferenceCases } from "./stream-runner.ts";
 import { runWorkQueue } from "./work-queue.ts";
@@ -124,6 +124,95 @@ export async function computeBaselines(input: {
       free.push(reference);
     }
   });
+  return summary;
+}
+
+// ---------- 两类用例的预计算（214）----------
+
+// 要算两类用例的题：清单里的题按时间接成的流，题号从 1 起
+export interface ClassTarget {
+  task: number;
+  step: StreamStep;
+}
+
+export function classTargets(manifest: StreamManifest): ClassTarget[] {
+  return chainedTasks(manifest).map((step, i) => ({ task: i + 1, step }));
+}
+
+export interface ClassesSummary {
+  total: number;
+  computed: number;
+  cached: number;
+  failed: { task: number; commit: string; error: string }[];
+  // 每道题两类用例的条数（按题号排序；出错的不在其内）
+  steps: {
+    task: number;
+    seq: number;
+    commit: string;
+    parent: string;
+    failToPass: number;
+    passToPass: number;
+    excludedFlaky: number;
+    failToPassOutsideJudgeFiles: number;
+  }[];
+}
+
+// 预计算两类用例：每一路一个参考工作区，哪一路空了就取下一道题；每道题之后一侧（人的基准）与之前一侧（叠放运行）各按
+// 提交落盘，同一目录重跑时已算的直接读回（断点续算）。一道题出错记下来、接着算其余的
+export async function computeClasses(input: {
+  targets: readonly ClassTarget[];
+  references: readonly ReferenceCases[];
+  log?: (line: string) => void;
+}): Promise<ClassesSummary> {
+  const log = input.log ?? (() => {});
+  const free = [...input.references];
+  if (free.length === 0) throw new Error("没有参考工作区");
+  const summary: ClassesSummary = {
+    total: input.targets.length,
+    computed: 0,
+    cached: 0,
+    failed: [],
+    steps: [],
+  };
+  const done = (t: ClassTarget) => input.references.some((r) => r.hasClasses(t.step));
+  for (const t of input.targets) if (done(t)) summary.cached++;
+  log(
+    `两类用例：共 ${summary.total} 道题，已落盘 ${summary.cached} 道，本次算 ${summary.total - summary.cached} 道`
+  );
+  await runWorkQueue(input.targets, free.length, async (target) => {
+    const reference = free.pop();
+    if (reference === undefined) throw new Error("参考工作区不够分");
+    const fresh = !done(target);
+    const started = Date.now();
+    try {
+      const c = await reference.classesAt(target.step);
+      summary.steps.push({
+        task: target.task,
+        seq: target.step.seq,
+        commit: c.commit,
+        parent: c.parent,
+        failToPass: c.failToPass.length,
+        passToPass: c.passToPass.length,
+        excludedFlaky: c.excludedFlaky.length,
+        failToPassOutsideJudgeFiles: c.failToPassOutsideJudgeFiles,
+      });
+      if (fresh) {
+        summary.computed++;
+        log(
+          `两类用例 ${summary.cached + summary.computed}/${summary.total} 题 ${target.task}（步 ${target.step.seq}，${c.commit.slice(0, 9)}）：` +
+            `要做到的 ${c.failToPass.length} 条（其中不在本题测试文件里的 ${c.failToPassOutsideJudgeFiles} 条），` +
+            `不许挂的 ${c.passToPass.length} 条，时过时不过排除 ${c.excludedFlaky.length} 条，${((Date.now() - started) / 60_000).toFixed(1)} 分`
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      summary.failed.push({ task: target.task, commit: target.step.commit, error: message });
+      log(`两类用例 题 ${target.task}（步 ${target.step.seq}）出错：${message.slice(0, 500)}`);
+    } finally {
+      free.push(reference);
+    }
+  });
+  summary.steps.sort((a, b) => a.task - b.task);
   return summary;
 }
 

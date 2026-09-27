@@ -13,7 +13,7 @@ import {
   streamJobKey,
 } from "./stream-results.ts";
 
-test("结果行字段清单：要求的字段都在（起点、agent 改动的 diff、开容器耗时、回炉两字段、两种通过率、机检、轮数与用量、限额暂停）；新行不写延续式与撤回的字段", () => {
+test("结果行字段清单：要求的字段都在（起点、agent 改动的 diff、开容器耗时与是否预先开好、回炉两字段、两类用例的判题、开工时记忆大小、复盘、机检、轮数与用量、限额暂停、网关计量）；新行不写延续式、撤回与全量通过率的字段", () => {
   for (const field of [
     "seq",
     "kind",
@@ -24,7 +24,14 @@ test("结果行字段清单：要求的字段都在（起点、agent 改动的 d
     "envOpenMs",
     "repairRounds",
     "finalVerdict",
-    "fullPassRate",
+    "judging",
+    "memoryAtStart",
+    "memoryAtEnd",
+    "hitStepBudget",
+    "hitReviewBudget",
+    "review",
+    "envPrefetched",
+    "gateway",
     "quality",
     "turns",
     "usage",
@@ -41,8 +48,24 @@ test("结果行字段清单：要求的字段都在（起点、agent 改动的 d
       field
     );
   }
-  // 固定起点（193）下失去意义的延续式字段只读兼容
-  for (const field of ["head", "regressions", "attribution", "reverted", "repairBudgetExhausted"]) {
+  // 固定起点（193）下失去意义的延续式字段与两类用例计分（196、201）之前的全量测试通过率只读兼容
+  const gateway = sampleLine().gateway;
+  assert.deepEqual(Object.keys(gateway ?? {}).sort(), [
+    "accountRequests",
+    "costCny",
+    "peakInFlight",
+    "peakInputTokens",
+    "queueMs",
+    "reviewCostCny",
+  ]);
+  for (const field of [
+    "head",
+    "regressions",
+    "attribution",
+    "reverted",
+    "repairBudgetExhausted",
+    "fullPassRate",
+  ]) {
     assert.ok(
       (LEGACY_STREAM_RESULT_FIELDS as readonly string[]).includes(field),
       `${field} 列为旧字段`
@@ -68,6 +91,8 @@ test("旧结果行带撤回与延续式字段（reverted、head、regressions、
       head: "h1",
       regressions: 2,
       attribution: "not-done",
+      judging: undefined,
+      fullPassRate: { byCount: { passed: 1, total: 2, rate: 0.5 } },
     };
     writeFileSync(file, `${JSON.stringify(legacy)}\n${JSON.stringify(sampleLine({ seq: 2 }))}\n`);
     const lines = readStreamResults(file);
@@ -76,6 +101,8 @@ test("旧结果行带撤回与延续式字段（reverted、head、regressions、
     assert.equal(lines[0]?.repairBudgetExhausted, true);
     assert.equal(lines[0]?.head, "h1");
     assert.equal(lines[0]?.regressions, 2);
+    assert.equal(lines[0]?.fullPassRate?.byCount.rate, 0.5);
+    assert.equal(lines[0]?.judging, undefined);
     assert.equal(lines[1]?.reverted, undefined);
     assert.equal(
       lastCompletedStep(lines, { stream: "tasks", condition: "search-only", attempt: 1 })?.seq,

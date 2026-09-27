@@ -1,10 +1,12 @@
 // 提交流跑批器（决策 193、212、215、216；144、145、147 等沿用）：固定起点——每一步都从人在该步之前的代码（step.parent）
 // 新开一个干净容器开工，跨步只保留作业目录（治理根）里的会话与记忆，被 git 忽略的文件、/tmp 与家目录都随容器丢弃。
 // 步为清单里的题按时间接成的一条流（维护步、套用步与跳过步都不跑，重置点不再切分）。每个条件（乘以第几遍）为一个独立作业，
-// 共用工作队列并行（缺省 4 路）。每一步：取或恢复记忆快照 → 新开容器到起点 → 程序写入该步人的环境文件（人的测试与测试
-// 辅助文件判题时才放入，198）→ 按条件运行 agent → 存下 agent 的改动（diff）→ 恢复 agent 动过的测试、写入人在该步的
-// 测试 → 判题前清理（195）→ 判题（本题测试全过即做成）→ 就地全量测量 → 写结果行 → 丢弃容器。被打断的一步整题作废、
-// 不留行（144），重做时另开容器；崩溃后从结果行续跑。agent 怎么跑与模型怎么接入都在 StepAgent 之后，跑批器不感知。
+// 共用工作队列并行（缺省 4 路）。每一步：取或恢复记忆快照、记下开工时的记忆大小 → 取这一步的两类用例（214）→ 取容器到
+// 起点（上一步进行时已预先开好的直接用）并为下一步预先开容器 → 程序写入该步人的环境文件（人的测试与测试辅助文件判题时
+// 才放入，198）→ 按条件运行 agent → 存下 agent 的改动（diff）→ 恢复 agent 动过的测试、写入人在该步的测试 → 判题前清理
+// （195）→ 放入人在该步的全部测试跑一次全量、按两类用例计分（196、201）→ 写结果行 → 丢弃容器。可按题号只跑选出的题
+// （202、219 校准）。被打断的一步整题作废、不留行（144），重做时另开容器；崩溃后从结果行续跑。agent 怎么跑与模型怎么
+// 接入都在 StepAgent 之后，跑批器不感知。
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -22,6 +24,13 @@ import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { type LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
+import {
+  type CaseClasses,
+  classifyCases,
+  judgeStep,
+  type SideRuns,
+  type StepJudging,
+} from "./stream-classes.ts";
 import type { HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import type { HarnessRef } from "./stream-harness.ts";
 import {
@@ -33,10 +42,9 @@ import {
   type TaskPromptFormat,
   taskPromptOf,
 } from "./stream-manifest.ts";
-import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measure.ts";
-import { snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
+import type { TestCaseResult } from "./stream-measure.ts";
+import { memoryFactsOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
 import {
-  allPassed,
   countQuality,
   failedStepsOf,
   pinTestConfigFromTree,
@@ -50,6 +58,7 @@ import { renderStreamReport } from "./stream-report.ts";
 import {
   lastCompletedStep,
   MEMORY_WARN_RATIO,
+  type MemoryFacts,
   readStreamResults,
   type StreamCondition,
   type StreamGatewayFacts,
@@ -175,9 +184,14 @@ export interface StreamModelGateway {
 //   本作业在网关累计等空闲账号超过 QUEUE_VOID_MS 即经按步中止立即停下 agent（不等它跑完）；
 //   结束后比较：期间有限额信号、本作业有上游故障、排队超时或 agent 自报被打断，即作废（不看是哪种 agent，
 //   也不看 agent 自己报没报被打断）
+// 网关计量里的花费（人民币元，累计）与单次请求输入 token 的峰值（自上次 resetPeak 起）：网关的计价接入之后才有
+type PricedMeter = GatewayMeter & { costCny?: number; peakInputTokens?: number };
+
 export interface AdmittedAgentRun {
   result: StepAgentResult;
   delta: GatewayMeter | undefined;
+  // 这一步的花费与上下文峰值；不经网关为 undefined，计量里没有这两项的为 null
+  priced: { costCny: number | null; peakInputTokens: number | null } | undefined;
   admissionWaitMs: number;
   // 作废的原因；空即不作废
   voidReasons: string[];
@@ -213,10 +227,24 @@ export async function runAdmittedAgent(
     stopQueueWatch?.();
     admission?.();
   }
-  const delta =
-    options.gateway !== undefined && before !== undefined
-      ? meterDelta(options.gateway.meter(key), before)
-      : undefined;
+  const after =
+    options.gateway !== undefined && before !== undefined ? options.gateway.meter(key) : undefined;
+  const delta = after !== undefined && before !== undefined ? meterDelta(after, before) : undefined;
+  // 花费与单次请求输入峰值直接从网关计量的前后两份读（计量里还没有这两项时为 null）：花费做差，峰值取收尾时的值
+  // （每步开始时已重记）
+  const pricedBefore = before as PricedMeter | undefined;
+  const pricedAfter = after as PricedMeter | undefined;
+  const priced =
+    pricedAfter === undefined
+      ? undefined
+      : {
+          costCny:
+            typeof pricedAfter.costCny === "number" && typeof pricedBefore?.costCny === "number"
+              ? pricedAfter.costCny - pricedBefore.costCny
+              : null,
+          peakInputTokens:
+            typeof pricedAfter.peakInputTokens === "number" ? pricedAfter.peakInputTokens : null,
+        };
   const signalled = (options.limits?.signals ?? 0) !== signalsBefore;
   const upstreamFailed = (delta?.upstreamFailures ?? 0) > 0;
   const queued = queueExceeded || (delta?.queueMs ?? 0) > QUEUE_VOID_MS;
@@ -231,6 +259,7 @@ export async function runAdmittedAgent(
   return {
     result,
     delta,
+    priced,
     admissionWaitMs: admission?.waitedMs ?? 0,
     voidReasons,
     limitRelated: signalled || upstreamFailed || queued,
@@ -265,8 +294,9 @@ export interface StreamEnvironment {
 }
 
 export interface StreamEnvFactory {
-  // 为一步新开一个干净的工作区，检出人在该步之前的代码（固定起点，212）
-  open(job: StreamJobId, init: { startCommit: string }): Promise<StreamEnvironment>;
+  // 为一步新开一个干净的工作区，检出人在该步之前的代码（固定起点，212）。slot 为这一步在作业里用的槽位（0 或 1）：
+  // 预先开下一步时同一作业同时有两个环境，按槽位区分（容器名带槽位）
+  open(job: StreamJobId, init: { startCommit: string; slot?: number }): Promise<StreamEnvironment>;
 }
 
 // 人的代码在某提交上跑给定测试的用例结果（全量测量的基准）
@@ -315,6 +345,16 @@ const MEMORY_SAMPLER = [
 
 export interface HumanReferenceCases {
   casesAt(commit: string, tests: readonly string[]): Promise<HumanBaseline>;
+  // 这一步的两类用例（214）：人在该步的全部测试在 commit 上与叠放到 parent 上各跑两遍比出
+  classesAt(step: StreamStep): Promise<StepClasses>;
+}
+
+// 一步的两类用例：commit 与 parent 为人在该步与之前的代码；failToPassOutsideJudgeFiles 为要做到的里不在本题测试文件
+// （人在该步新写或改过的测试文件）中的条数
+export interface StepClasses extends CaseClasses {
+  commit: string;
+  parent: string;
+  failToPassOutsideJudgeFiles: number;
 }
 
 // agent 自报被打断、期间却没有任何限额信号或上游故障：最多重做这么多次
@@ -377,14 +417,17 @@ export interface RunStreamsOptions {
   attempts?: number;
   // 并行作业数（缺省 4）
   concurrency?: number;
-  // 试跑：只跑前 K 道题（143、147 校准用）
+  // 按题号选步（202、219 校准）：题号为清单里的题按时间接成的流中的序号（从 1 起）；给了即只跑这些题、按时间顺序
+  tasks?: readonly number[];
+  // 试跑：只跑（选出的题里的）前 K 道题
   maxSteps?: number;
   budget?: StepBudget;
+  // 判题（放入人的测试后跑一次全量）的墙钟上限，也是交给回炉验证的超时
   judgeTimeoutMs?: number;
-  measureTimeoutMs?: number;
-  // 题面格式（198、213）：缺省给测试文件路径；给用例名时须由 shouldPassCases 给出每步要做到的用例（跑批器二接上）
+  // 题面格式（198、213）：缺省给测试文件路径；给用例名时名单为这一步要做到的用例（214）
   promptFormat?: TaskPromptFormat;
-  shouldPassCases?: (step: StreamStep) => Promise<readonly string[]>;
+  // 预先开好下一步的容器（缺省开）：当前步的 agent 开始之前即为下一步新开容器，下一步开工时直接取用
+  prefetchEnvs?: boolean;
   harnessRef: HarnessRef;
   log?: (line: string) => void;
   // 告警（缺省写标准错误输出）
@@ -446,16 +489,26 @@ export function lockOutDir(outDir: string): () => void {
   );
 }
 
-// 给用例名的题面要先算出每步要做到的用例（跑批器二）：没接上即拒绝开跑
-export function assertPromptFormatReady(
-  format: TaskPromptFormat,
-  shouldPassCases: RunStreamsOptions["shouldPassCases"]
-): void {
-  if (format === "test-cases" && shouldPassCases === undefined) {
-    throw new Error(
-      "给用例名的题面尚未实现：须先算出每步要做到的用例（跑批器二），目前只能给测试文件路径"
-    );
+// 这次跑哪些步：清单里的题按时间接成一条流（215、216）；给了题号即只取这些题（按时间顺序，题号从 1 起、不得重复或越界），
+// 再按 maxSteps 只取前 K 道
+export function selectSteps(
+  manifest: StreamManifest,
+  selection: { tasks?: readonly number[] | undefined; maxSteps?: number | undefined }
+): StreamStep[] {
+  const all = chainedTasks(manifest);
+  let steps = all;
+  if (selection.tasks !== undefined) {
+    const seen = new Set<number>();
+    for (const n of selection.tasks) {
+      if (!Number.isInteger(n) || n < 1 || n > all.length) {
+        throw new Error(`题号 ${n} 越界（共 ${all.length} 道题，题号从 1 起）`);
+      }
+      if (seen.has(n)) throw new Error(`题号 ${n} 重复`);
+      seen.add(n);
+    }
+    steps = [...seen].sort((a, b) => a - b).map((n) => all[n - 1] as StreamStep);
   }
+  return selection.maxSteps === undefined ? steps : steps.slice(0, selection.maxSteps);
 }
 
 export async function runStreams(options: RunStreamsOptions): Promise<RunStreamsSummary> {
@@ -468,10 +521,8 @@ export async function runStreams(options: RunStreamsOptions): Promise<RunStreams
 }
 
 async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsSummary> {
-  assertPromptFormatReady(
-    options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT,
-    options.shouldPassCases
-  );
+  // 题号不对即在开任何作业之前拒绝
+  const steps = selectSteps(options.manifest, options);
   mkdirSync(options.outDir, { recursive: true });
   const resultsFile = path.join(options.outDir, "results.jsonl");
   sealTornTail(resultsFile);
@@ -487,7 +538,7 @@ async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsS
   await runWorkQueue(jobs, options.concurrency ?? 4, async (job) => {
     const summary: StreamJobSummary = { key: streamJobKey(job), completedTo: null };
     try {
-      summary.completedTo = await runStreamJob(options, job, resultsFile);
+      summary.completedTo = await runStreamJob(options, job, steps, resultsFile);
     } catch (error) {
       summary.stopped = message(error);
       summary.completedTo = lastCompletedStep(readStreamResults(resultsFile), job)?.seq ?? null;
@@ -495,31 +546,36 @@ async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsS
     }
     summaries.push(summary);
   });
-  const steps = limitSteps(chainedTasks(options.manifest), options.maxSteps);
+  const scope = [
+    options.tasks !== undefined ? `按题号选 ${steps.length} 道题` : undefined,
+    options.maxSteps !== undefined ? `试跑：只跑前 ${options.maxSteps} 道题` : undefined,
+  ].filter((x) => x !== undefined);
   writeFileSync(
     reportFile,
     renderStreamReport(readStreamResults(resultsFile), {
-      title: `${options.manifest.repo}${options.maxSteps !== undefined ? `（试跑：只跑前 ${options.maxSteps} 道题）` : ""}`,
-      streams: [{ id: TASK_CHAIN_ID, lastSeq: steps.at(-1)?.seq ?? 0 }],
+      title: `${options.manifest.repo}${scope.length > 0 ? `（${scope.join("；")}）` : ""}`,
+      // 分段：清单里按重置点切出的各段（固定起点下只用于分段报告，不影响怎么跑）
+      segments: options.manifest.streams.map((s) => ({
+        id: s.id,
+        firstSeq: s.firstSeq,
+        lastSeq: s.lastSeq,
+      })),
     })
   );
   return { resultsFile, reportFile, jobs: summaries };
 }
 
-function limitSteps(steps: StreamStep[], maxSteps: number | undefined): StreamStep[] {
-  return maxSteps === undefined ? steps : steps.slice(0, maxSteps);
-}
-
 async function runStreamJob(
   options: RunStreamsOptions,
   job: StreamJobId,
+  steps: readonly StreamStep[],
   resultsFile: string
 ): Promise<number | null> {
   const spec = CONDITION_SPECS[job.condition];
   const agent = options.agents[spec.agent];
   if (agent === undefined)
     throw new Error(`条件 ${job.condition} 需要的 agent（${spec.agent}）没有接入`);
-  const steps = limitSteps(chainedTasks(options.manifest), options.maxSteps);
+  const stepAgent: StepAgent = agent;
   // 作业目录即 agent 的治理根：条件 × 遍次各一个。会话与记忆只在同一作业里沿步累积，不跨条件或遍次串用；
   // 目录名必须同时含这两者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
@@ -557,88 +613,149 @@ async function runStreamJob(
     if (moved > 0) log(`续跑：上次中断的一步留下 ${moved} 个会话文件，已移出治理根`);
   }
   const limits = options.limits;
-  for (const step of remaining) {
-    log(`第 ${step.seq} 步 ${step.subject.slice(0, 60)}`);
-    const epochAtStart = limits?.epoch ?? 0;
-    let row: StreamResultLine;
-    // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
-    let bareInterruptions = 0;
-    let signalledVoids = 0;
-    let queueVoids = 0;
-    let attempt = 0;
-    for (;;) {
-      await limits?.ready();
-      attempt += 1;
-      // 记忆（191）：还没有这一步的快照即取一份；已有（作废重做、崩溃后续跑）即把记忆恢复成它
-      snapshotOrRestoreLearned(jobDir, step.seq);
-      const sessionsBefore = new Set(sessionFilesOf(jobDir));
+  // 预先开下一步的容器（流水线只做到这一步，判分与下一步开工不重叠）：当前步的 agent 开始之前即为下一步开好容器。
+  // 同一作业同时至多两个容器，按步在本作业题单里的位置轮流用两个槽位命名，互不冲突
+  const prefetched = new Map<number, Promise<StreamEnvironment>>();
+  const openFor = (step: StreamStep) =>
+    options.envs.open(job, { startCommit: step.parent, slot: steps.indexOf(step) % 2 });
+  const envs: JobEnvs = {
+    async take(step) {
+      const pending = prefetched.get(step.seq);
+      if (pending !== undefined) {
+        prefetched.delete(step.seq);
+        try {
+          return { env: await pending, prefetched: true };
+        } catch (error) {
+          log(`第 ${step.seq} 步预先开的容器不可用，重开：${message(error)}`);
+        }
+      }
+      return { env: await openFor(step), prefetched: false };
+    },
+    prefetchAfter(step) {
+      if (options.prefetchEnvs === false || limits?.shutdownReason !== undefined) return;
+      const next = remaining[remaining.indexOf(step) + 1];
+      if (next === undefined || prefetched.has(next.seq)) return;
+      const pending = openFor(next);
+      pending.catch(() => {});
+      prefetched.set(next.seq, pending);
+    },
+  };
+  try {
+    await runRemainingSteps();
+  } finally {
+    // 作业结束或停下：预先开好却没用上的容器一律丢弃
+    for (const pending of prefetched.values()) {
       try {
-        row = await runStep(options, job, spec, agent, steps, step, jobDir, log);
-        // 这一步开始之后收到过停止信号：不论判题、测量进行到哪（停止信号可能打断了它们），这一步作废、不写行，
-        // 作业在取下一步时停下
-        if (limits?.shutdownReason !== undefined) {
-          throw new StepInterruptedError(`第 ${step.seq} 步作废：${limits.shutdownReason}`, true);
-        }
-        break;
-      } catch (error) {
-        // 这一步作废（决策 144、160）：容器已丢弃、不留行，等放行后另开容器重做同一步
-        if (!(error instanceof StepInterruptedError)) throw error;
-        quarantineSessions(
-          options.outDir,
-          job,
-          jobDir,
-          sessionsBefore,
-          `step-${step.seq}-attempt-${attempt}`
-        );
-        if (error.queued) {
-          bareInterruptions = 0;
-          queueVoids += 1;
-          if (queueVoids >= QUEUE_VOID_STOP) {
-            throw new Error(
-              `第 ${step.seq} 步因排队超时累计作废 ${queueVoids} 次：停下作业（最后一次：${error.message}）`
-            );
-          }
-          if (queueVoids === QUEUE_VOID_WARN) {
-            warn(
-              `[${streamJobKey(job)}] 第 ${step.seq} 步因排队超时已累计作废 ${queueVoids} 次，仍在重做；累计 ${QUEUE_VOID_STOP} 次即停下这个作业`
-            );
-          }
-          log(
-            `第 ${step.seq} 步第 ${queueVoids} 次排队作废（不计入限额信号类的累计上限；累计 ${QUEUE_VOID_STOP} 次即停下）：${error.message}`
-          );
-          continue;
-        }
-        if (error.signalled) {
-          bareInterruptions = 0;
-          signalledVoids += 1;
-          if (signalledVoids >= SIGNALLED_VOID_STOP) {
-            throw new Error(
-              `第 ${step.seq} 步因限额信号或上游故障累计作废 ${signalledVoids} 次：停下作业（最后一次：${error.message}）`
-            );
-          }
-          if (signalledVoids === SIGNALLED_VOID_WARN) {
-            warn(
-              `[${streamJobKey(job)}] 第 ${step.seq} 步因限额信号或上游故障已累计作废 ${signalledVoids} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这个作业`
-            );
-          }
-          log(`第 ${step.seq} 步撞上限额、上游故障或排队超时，作废，恢复后重做：${error.message}`);
-          continue;
-        }
-        bareInterruptions += 1;
-        if (bareInterruptions > MAX_BARE_INTERRUPTIONS) {
-          throw new Error(
-            `第 ${step.seq} 步连续 ${bareInterruptions} 次被打断，期间没有限额信号或上游故障：停下作业（${error.message}）`
-          );
-        }
-        log(`第 ${step.seq} 步被打断，作废重做（第 ${bareInterruptions} 次）：${error.message}`);
+        await (await pending).dispose();
+      } catch {
+        // 没开成的不必丢弃
       }
     }
-    row.limitPauses = limits?.pausesSince(epochAtStart) ?? [];
-    // 先存会话清单、后写结果行：两者之间崩溃时，断点行仍指向上一步，续跑重做这一步
-    writeAtomic(sessionsFile(step.seq), JSON.stringify(sessionFilesOf(jobDir)));
-    appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
   }
   return steps.at(-1)?.seq ?? null;
+
+  async function runRemainingSteps(): Promise<void> {
+    for (const step of remaining) {
+      log(`第 ${step.seq} 步 ${step.subject.slice(0, 60)}`);
+      const epochAtStart = limits?.epoch ?? 0;
+      let row: StreamResultLine;
+      // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
+      let bareInterruptions = 0;
+      let signalledVoids = 0;
+      let queueVoids = 0;
+      let attempt = 0;
+      for (;;) {
+        await limits?.ready();
+        attempt += 1;
+        // 记忆（191）：还没有这一步的快照即取一份；已有（作废重做、崩溃后续跑）即把记忆恢复成它
+        snapshotOrRestoreLearned(jobDir, step.seq);
+        const memoryAtStart = memoryFactsOf(jobDir);
+        const sessionsBefore = new Set(sessionFilesOf(jobDir));
+        try {
+          row = await runStep(
+            options,
+            job,
+            spec,
+            stepAgent,
+            envs,
+            step,
+            jobDir,
+            memoryAtStart,
+            log
+          );
+          // 这一步开始之后收到过停止信号：不论判题、测量进行到哪（停止信号可能打断了它们），这一步作废、不写行，
+          // 作业在取下一步时停下
+          if (limits?.shutdownReason !== undefined) {
+            throw new StepInterruptedError(`第 ${step.seq} 步作废：${limits.shutdownReason}`, true);
+          }
+          break;
+        } catch (error) {
+          // 这一步作废（决策 144、160）：容器已丢弃、不留行，等放行后另开容器重做同一步
+          if (!(error instanceof StepInterruptedError)) throw error;
+          quarantineSessions(
+            options.outDir,
+            job,
+            jobDir,
+            sessionsBefore,
+            `step-${step.seq}-attempt-${attempt}`
+          );
+          if (error.queued) {
+            bareInterruptions = 0;
+            queueVoids += 1;
+            if (queueVoids >= QUEUE_VOID_STOP) {
+              throw new Error(
+                `第 ${step.seq} 步因排队超时累计作废 ${queueVoids} 次：停下作业（最后一次：${error.message}）`
+              );
+            }
+            if (queueVoids === QUEUE_VOID_WARN) {
+              warn(
+                `[${streamJobKey(job)}] 第 ${step.seq} 步因排队超时已累计作废 ${queueVoids} 次，仍在重做；累计 ${QUEUE_VOID_STOP} 次即停下这个作业`
+              );
+            }
+            log(
+              `第 ${step.seq} 步第 ${queueVoids} 次排队作废（不计入限额信号类的累计上限；累计 ${QUEUE_VOID_STOP} 次即停下）：${error.message}`
+            );
+            continue;
+          }
+          if (error.signalled) {
+            bareInterruptions = 0;
+            signalledVoids += 1;
+            if (signalledVoids >= SIGNALLED_VOID_STOP) {
+              throw new Error(
+                `第 ${step.seq} 步因限额信号或上游故障累计作废 ${signalledVoids} 次：停下作业（最后一次：${error.message}）`
+              );
+            }
+            if (signalledVoids === SIGNALLED_VOID_WARN) {
+              warn(
+                `[${streamJobKey(job)}] 第 ${step.seq} 步因限额信号或上游故障已累计作废 ${signalledVoids} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这个作业`
+              );
+            }
+            log(
+              `第 ${step.seq} 步撞上限额、上游故障或排队超时，作废，恢复后重做：${error.message}`
+            );
+            continue;
+          }
+          bareInterruptions += 1;
+          if (bareInterruptions > MAX_BARE_INTERRUPTIONS) {
+            throw new Error(
+              `第 ${step.seq} 步连续 ${bareInterruptions} 次被打断，期间没有限额信号或上游故障：停下作业（${error.message}）`
+            );
+          }
+          log(`第 ${step.seq} 步被打断，作废重做（第 ${bareInterruptions} 次）：${error.message}`);
+        }
+      }
+      row.limitPauses = limits?.pausesSince(epochAtStart) ?? [];
+      // 先存会话清单、后写结果行：两者之间崩溃时，断点行仍指向上一步，续跑重做这一步
+      writeAtomic(sessionsFile(step.seq), JSON.stringify(sessionFilesOf(jobDir)));
+      appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
+    }
+  }
+}
+
+// 一个作业取步环境的方式：take 取这一步的容器（预先开好的直接用，否则现开）；prefetchAfter 为下一步预先开容器
+interface JobEnvs {
+  take(step: StreamStep): Promise<{ env: StreamEnvironment; prefetched: boolean }>;
+  prefetchAfter(step: StreamStep): void;
 }
 
 // 依赖环境选不出来（没有满足该步依赖声明的组合、lint 映射里没有该提交）：这一步作废，作业照常往下走
@@ -839,19 +956,19 @@ export function humanTestsAt(
     .map((e) => e.path);
 }
 
-interface Measurement {
-  fullPassRate: NonNullable<StreamResultLine["fullPassRate"]>;
+interface Judgement {
+  judging: StepJudging;
   quality: NonNullable<StreamResultLine["quality"]>;
 }
 
-// 全量测量（145、148）：判题之后就地进行（容器随这一步丢弃，不必另建副本）——工作区里的测试与测试辅助文件同步成人在该步
-// 的全部（agent 新建的删掉），跑人写的全部测试；结果不进 agent 的会话
-async function measure(
+// 判题（196、201、214）：就地进行（容器随这一步丢弃）——工作区里的测试与测试辅助文件同步成人在该步的全部（agent 新建的
+// 删掉），跑人在该步的全部测试一次，按两类用例计分；再跑静态检查计数。结果不进 agent 可见的任何地方
+async function judgeFull(
   options: RunStreamsOptions,
   ws: StreamWorkspace,
-  steps: readonly StreamStep[],
-  step: StreamStep
-): Promise<Measurement> {
+  step: StreamStep,
+  classes: CaseClasses
+): Promise<Judgement> {
   const runtime = options.runtime;
   // agent 新建的文件先暂存：同步时才能按类删掉未跟踪的测试文件
   await ws.stageAll();
@@ -869,38 +986,18 @@ async function measure(
     }
   );
   const tests = humanTestsAt(options.human, runtime, step.commit);
-  // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例在分母里、计为未通过
+  // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例计为未通过
   const run = await runtime.runCases(ws, tests, {
-    timeoutMs: options.measureTimeoutMs ?? 1_800_000,
+    timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
     scratch: `${ws.root}/.git`,
   });
-  const agentCases = run.cases;
-  // 分母固定在人这一侧（不在 agent 的代码上现收）：B 为人的代码上每遍都通过的用例，A 为人的代码上收集出的全部用例；
-  // 时过时不过的单独计数（不进 B）
-  const human = await options.reference.casesAt(step.commit, tests);
-  const humanPassing = new Set(human.passing);
-  const humanCollected = new Set(human.cases.map((c) => c.id));
-  const humanCasesB = human.cases.map((c) =>
-    humanPassing.has(c.id)
-      ? c
-      : { ...c, outcome: c.outcome === "passed" ? ("failed" as const) : c.outcome }
-  );
-  const tasks = steps.filter((s) => s.seq <= step.seq);
-  const byTask = taskPassRate(tasks, humanCasesB, agentCases);
   const quality = async (check: StreamRepoRuntime["quality"]["type"]) => {
     if (check === null) return null;
     const r = await ws.run(check.command, 900_000);
     return countQuality(check, r.output, r.exitCode);
   };
   return {
-    fullPassRate: {
-      byCount: countPassRate(humanPassing, agentCases),
-      byCountCollected: countPassRate(humanCollected, agentCases),
-      byTask: { passed: byTask.passed, total: byTask.total, rate: byTask.rate },
-      humanFlaky: human.flaky.length,
-      humanRuns: human.runs,
-      humanSlowest: human.slowest,
-    },
+    judging: judgeStep(classes, run.cases),
     quality: {
       typeErrors: await quality(runtime.quality.type),
       formatErrors: await quality(runtime.quality.format),
@@ -909,12 +1006,14 @@ async function measure(
   };
 }
 
-// 这一步的题面（198、213）：提交信息加应通过的测试名单
-async function promptFor(options: RunStreamsOptions, step: StreamStep): Promise<string> {
+// 这一步的题面（198、213）：提交信息加应通过的测试名单——测试文件路径，或这一步要做到的用例编号
+function promptFor(options: RunStreamsOptions, step: StreamStep, classes: CaseClasses): string {
   const format = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
-  if (format === "test-files") return taskPromptOf(step.message, format, step.judgeTests);
-  assertPromptFormatReady(format, options.shouldPassCases);
-  return taskPromptOf(step.message, format, (await options.shouldPassCases?.(step)) ?? []);
+  return taskPromptOf(
+    step.message,
+    format,
+    format === "test-files" ? step.judgeTests : classes.failToPass
+  );
 }
 
 // agent 设下、跑批器处理不了的访问障碍（列不出的目录、删不掉的链接）：这一步作废重做，不停作业
@@ -930,12 +1029,15 @@ async function runStep(
   job: StreamJobId,
   spec: ConditionSpec,
   agent: StepAgent,
-  steps: readonly StreamStep[],
+  envs: JobEnvs,
   step: StreamStep,
   jobDir: string,
+  memoryAtStart: MemoryFacts,
   log: (text: string) => void
 ): Promise<StreamResultLine> {
   const started = Date.now();
+  // 两类用例（214）：题面给用例名时要用，判题时计分；已预计算的直接读，没有即在参考工作区现算
+  const classes = await options.reference.classesAt(step);
   const base = {
     repo: options.manifest.repo,
     stream: job.stream,
@@ -952,19 +1054,30 @@ async function runStep(
     humanFailsGate: step.humanFailsGate === true,
     runIdentity: options.runIdentity ?? null,
     agentSettings: options.agentSettings?.[spec.agent] ?? null,
+    memoryAtStart,
+    // 收尾复盘另行施工：接入之前恒为 null（复盘结束才算这一步结束、才开下一步）
+    review: null,
+    hitReviewBudget: null,
   };
+  let envPrefetched = false;
+  // agent（与收尾复盘）跑完才有：步末的记忆大小、是否撞了宽上限
+  let memoryAtEnd: MemoryFacts | null = null;
+  let hitStepBudget: boolean | null = null;
   // 不判的一行：依赖环境选不出来而作废的步（记下原因，不计 agent 的用量）
   const notRun = (envOpenMs: number, error: EnvSelectionError): StreamResultLine => ({
     ...base,
     outcome: "skipped",
     diff: null,
     envOpenMs,
+    envPrefetched,
     judged: false,
     repairRounds: null,
     finalVerdict: null,
     humanTestRestores: null,
     agentChangedDeps: null,
-    fullPassRate: null,
+    judging: null,
+    memoryAtEnd,
+    hitStepBudget,
     quality: null,
     status: null,
     turns: 0,
@@ -973,13 +1086,19 @@ async function runStep(
     wallMs: Date.now() - started,
     error: `${error.message}（这一步作废）`,
   });
-  const prompt = await promptFor(options, step);
-  // 固定起点（193、212）：为这一步新开干净容器，检出人在该步之前的代码
+  const prompt = promptFor(options, step, classes);
+  // 固定起点（193、212）：为这一步新开干净容器，检出人在该步之前的代码（上一步进行时已预先开好的直接取用）
   const openedAt = Date.now();
-  const env = await options.envs.open(job, { startCommit: step.parent });
+  const taken = await envs.take(step);
+  const env = taken.env;
+  envPrefetched = taken.prefetched;
   const envOpenMs = Date.now() - openedAt;
-  log(`第 ${step.seq} 步开容器 ${(envOpenMs / 1000).toFixed(1)} 秒`);
+  log(
+    `第 ${step.seq} 步${envPrefetched ? "取预先开好的容器" : "开容器"} ${(envOpenMs / 1000).toFixed(1)} 秒`
+  );
   try {
+    // 这一步的 agent 开始之前为下一步预先开容器
+    envs.prefetchAfter(step);
     const { ws } = env;
     // 开工只写人在该步的环境文件；测试与测试辅助文件判题时才放入（198）
     await ws.applyHumanFiles(
@@ -1037,10 +1156,15 @@ async function runStep(
     const delta = admitted.delta;
     if (delta !== undefined) {
       // 各条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
+      // 花费与上下文峰值从网关计量读（计价与单次请求输入峰值由网关提供；计量里还没有这两项时记 null）；
+      // 复盘接入之前复盘花费为 null
       gatewayFacts = {
         queueMs: delta.queueMs,
         accountRequests: delta.accountRequests,
         peakInFlight: delta.peakInFlight,
+        costCny: admitted.priced?.costCny ?? null,
+        reviewCostCny: null,
+        peakInputTokens: admitted.priced?.peakInputTokens ?? null,
       };
       result = {
         ...result,
@@ -1055,6 +1179,14 @@ async function runStep(
         },
       };
     }
+    const budget = options.budget ?? DEFAULT_STEP_BUDGET;
+    hitStepBudget =
+      result.status === "turn-limit" ||
+      result.status === "wall-clock-limit" ||
+      result.turns >= budget.maxTurns ||
+      result.wallMs >= budget.wallClockMs;
+    // 收尾复盘另行施工，接入点在这里：复盘写完记忆才算这一步的 agent 部分结束。步末的记忆大小在复盘之后记
+    memoryAtEnd = memoryFactsOf(jobDir);
     const agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
     // agent 自己提交、切分支或让 HEAD 游离过的，先挪回起点；再存下它相对开工时的改动（代替延续式的流历史）
     await ws.normalizeTo(step.parent);
@@ -1077,30 +1209,33 @@ async function runStep(
       if (error instanceof EnvSelectionError) return notRun(envOpenMs, error);
       voidOnAccessError(step.seq, error);
     }
-    // 判题：本题测试的逐用例结果全过即做成（不看退出码）；两类用例与部分得分由跑批器二接上
-    const judged = await options.runtime.runCases(ws, step.judgeTests, {
-      timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
-      scratch: `${ws.root}/.git`,
-    });
-    let measured: Measurement;
+    // 判题：放入人在该步的全部测试后跑一次全量，按两类用例计分（不看退出码）
+    let judged: Judgement;
     try {
-      measured = await measure(options, ws, steps, step);
+      judged = await judgeFull(options, ws, step, classes);
     } catch (error) {
-      if (error instanceof EnvSelectionError) return notRun(envOpenMs, error);
       voidOnAccessError(step.seq, error);
     }
+    const j = judged.judging;
     return {
       ...base,
-      outcome: allPassed(judged) ? "passed" : "failed",
+      // 结果：要做到的全过（为零时即成立）且不许挂的无一失败记 passed，否则 failed；主判据看 judging
+      outcome:
+        j.failToPass.passed === j.failToPass.total && j.passToPass.failed === 0
+          ? "passed"
+          : "failed",
       diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
       envOpenMs,
+      envPrefetched,
       judged: true,
       repairRounds: result.repair?.rounds ?? null,
       finalVerdict: result.repair?.finalVerdict ?? null,
       humanTestRestores: result.repair === null ? null : (result.repair.humanTestRestores ?? 0),
       agentChangedDeps,
-      fullPassRate: measured.fullPassRate,
-      quality: measured.quality,
+      judging: j,
+      memoryAtEnd,
+      hitStepBudget,
+      quality: judged.quality,
       status: result.status,
       turns: result.turns,
       usage: result.usage,
@@ -1148,7 +1283,7 @@ export function dockerStreamEnvs(input: {
   };
   return {
     async open(job, init) {
-      const container = `${input.prefix}-${jobDirName(job)}`;
+      const container = `${input.prefix}-${jobDirName(job)}-${init.slot ?? 0}`;
       await removeWorkspaceContainer(container, docker);
       await startWorkspaceContainer({
         image: input.image,
@@ -1279,11 +1414,14 @@ export class ReferenceCases implements HumanReferenceCases {
   private readonly repeat: number;
   private readonly cgroupDir: string;
   private readonly warn: (message: string) => void;
+  private readonly human: HumanRepo | undefined;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(input: {
     reference: ReferenceWorkspace;
     runtime: StreamRepoRuntime;
+    // 人的仓库（宿主侧）：两类用例的叠放运行从这里取人在该步的测试、测试辅助、环境文件与测试配置；只算人的基准时可不给
+    human?: HumanRepo;
     cacheDir: string;
     // 参考容器所用镜像的标识（镜像 ID）：缓存身份之一
     image: string;
@@ -1306,7 +1444,112 @@ export class ReferenceCases implements HumanReferenceCases {
     this.repeat = Math.max(1, input.repeat ?? 2);
     this.cgroupDir = input.cgroupDir ?? "/sys/fs/cgroup";
     this.warn = input.warn ?? ((m) => console.error(m));
+    this.human = input.human;
     mkdirSync(this.cacheDir, { recursive: true });
+  }
+
+  private requireHuman(): HumanRepo {
+    if (this.human === undefined)
+      throw new Error("算两类用例需要人的仓库（ReferenceCases 的 human）");
+    return this.human;
+  }
+
+  // 叠放运行的落盘结果：身份相符（或按等价读回）且记的起点就是这一步的 parent 才算
+  private readOverlay(step: StreamStep): HumanBaseline | undefined {
+    const saved = readIdentified<HumanBaseline & { stuck?: string[]; parent?: string }>(
+      path.join(this.cacheDir, `${step.commit}.overlay.json`),
+      this.casesIdentity(),
+      this.equivalent,
+      (s) => this.casesHangFree(s),
+      this.equivalentImages
+    );
+    return saved?.parent === step.parent ? saved : undefined;
+  }
+
+  // 这一步的两类用例是否已能全从落盘结果读出（提前预计算过的）
+  hasClasses(step: StreamStep): boolean {
+    return this.cachedClasses(step) !== undefined;
+  }
+
+  // 只从落盘结果读两类用例（不跑任何东西）；两侧有一侧没落盘即 undefined。选题（只在要做到的不为零的题中抽）用它
+  cachedClasses(step: StreamStep): StepClasses | undefined {
+    const after = this.readCases(step.commit);
+    const before = this.readOverlay(step);
+    return after === undefined || before === undefined
+      ? undefined
+      : this.stepClasses(step, after, before);
+  }
+
+  private stepClasses(step: StreamStep, after: SideRuns, before: SideRuns): StepClasses {
+    const classes = classifyCases(after, before);
+    const judgeFiles = new Set(step.judgeTests);
+    return {
+      commit: step.commit,
+      parent: step.parent,
+      ...classes,
+      failToPassOutsideJudgeFiles: classes.failToPass.filter(
+        (id) => !judgeFiles.has(id.slice(0, id.indexOf("::")))
+      ).length,
+    };
+  }
+
+  // 两类用例（214）：之后一侧即人的基准（commit 上跑人在该步的全部测试两遍，与全量测量同一份缓存）；之前一侧为叠放运行。
+  // 比出的两类另存一份 <commit>.classes.json（由两份落盘结果现算，供事后分析读，不作缓存）
+  async classesAt(step: StreamStep): Promise<StepClasses> {
+    const tests = humanTestsAt(this.requireHuman(), this.runtime, step.commit);
+    const after = await this.casesAt(step.commit, tests);
+    const before = await this.overlayAt(step, tests);
+    const out = this.stepClasses(step, after, before);
+    writeAtomic(
+      path.join(this.cacheDir, `${step.commit}.classes.json`),
+      JSON.stringify({ seq: step.seq, ...out })
+    );
+    return out;
+  }
+
+  // 叠放运行（214 的之前一侧）：检出人在该步之前的代码，叠上人在该步的测试、测试辅助与环境文件（红测试对取合并后的
+  // 版本，即 step.commit 上的），依赖按叠上的人的声明切，pytest 配置显式取 step.commit 的版本（不读工作区里 parent 的），
+  // 跑人在该步的全部测试 repeat 遍。拿不全用例的结果即报错：缺席会被当作没通过，整遍缺失会把不许挂的误判成要做到的
+  overlayAt(step: StreamStep, tests: readonly string[]): Promise<HumanBaseline> {
+    const run = this.queue.then(async (): Promise<HumanBaseline> => {
+      const saved = this.readOverlay(step);
+      if (saved !== undefined)
+        return { ...saved, runs: saved.runs ?? [], slowest: saved.slowest ?? null };
+      const human = this.requireHuman();
+      const read = (p: string) => human.show(step.commit, p);
+      const ws = this.reference.ws;
+      await this.reference.checkout(step.parent);
+      const overlay = step.humanFiles.filter(
+        (f) => f.kind === "test" || f.kind === "testaux" || f.kind === "env"
+      );
+      await ws.applyHumanFiles(overlay, read);
+      if (this.runtime.envSyncCommand !== null) {
+        const sync = await ws.run(this.runtime.envSyncCommand, 120_000);
+        if (sync.exitCode !== 0)
+          throw new Error(`参考工作区依赖切换失败（${step.parent} 叠 ${step.commit}）`);
+      }
+      await this.runtime.pinTestConfig?.(ws, async (p) => {
+        try {
+          return read(p);
+        } catch {
+          return undefined;
+        }
+      });
+      const baseline = await this.repeatRuns(`${step.commit}（叠放到 ${step.parent}）`, tests);
+      writeAtomic(
+        path.join(this.cacheDir, `${step.commit}.overlay.json`),
+        JSON.stringify({
+          ...baseline.result,
+          stuck: baseline.stuck,
+          parent: step.parent,
+          overlay: overlay.map((f) => `${f.op} ${f.path}`),
+          identity: this.casesIdentity(),
+        })
+      );
+      return baseline.result;
+    });
+    this.queue = run.catch(() => {});
+    return run;
   }
 
   private casesIdentity(): BaselineIdentity {
@@ -1410,6 +1653,17 @@ export class ReferenceCases implements HumanReferenceCases {
       if (sync.exitCode !== 0) throw new Error(`参考工作区依赖切换失败（${commit}）`);
     }
     await pinTestConfigFromTree(this.runtime, ws);
+    const { result: baseline, stuck } = await this.repeatRuns(commit, tests);
+    writeAtomic(file, JSON.stringify({ ...baseline, stuck, identity }));
+    return baseline;
+  }
+
+  // 在参考工作区现状上跑 tests repeat 遍、逐条比对；每遍采内存峰值，拿不全用例即报错
+  private async repeatRuns(
+    commit: string,
+    tests: readonly string[]
+  ): Promise<{ result: HumanBaseline; stuck: string[] }> {
+    const ws = this.reference.ws;
     const runs: TestCaseResult[][] = [];
     const meta: BaselineRun[] = [];
     // 各遍里卡住、被记为失败的用例（并集）：落盘供日后判断这份基准有没有挂起迹象
@@ -1443,9 +1697,7 @@ export class ReferenceCases implements HumanReferenceCases {
       runs.push(run.cases);
       for (const id of run.stuck) stuck.add(id);
     }
-    const baseline = { ...compareRuns(runs), runs: meta };
-    writeAtomic(file, JSON.stringify({ ...baseline, stuck: [...stuck], identity }));
-    return baseline;
+    return { result: { ...compareRuns(runs), runs: meta }, stuck: [...stuck] };
   }
 
   // 做 work 的同时在参考容器里采样内存，返回期间的峰值与上限

@@ -1,76 +1,28 @@
-// 提交流实验的报告（决策 145、146；193 固定起点之后的计分与报告由跑批器二按 196、201 重做）：
-//   每步曲线——每条流、每个条件的全量测试通过率（按条数）随步数的变化，给出终点值（多遍时给均值与范围）；
-//   次要指标——判定通过数、机检错误数（终点）、轮数、token、墙钟、限额暂停；
-//   撤回拆除（决策 173）之前的旧结果行带撤回字段，这类结果照旧多出"撤回"一列；
-//   补跑提示——任意两个条件第一遍的终点值相差小于 10 个百分点，即提示这两个条件各补跑到 3 遍（146）。
-// 终点指流里的最后一步；没跑到那一步（试跑或中途停止）的记为未跑完，不参与补跑比较。
-// 固定起点下回归数与失败归因不再计（它们都相对 agent 上一步的代码），报告不再列
+// 提交流实验的报告（决策 146、196、201、202、219）：
+//   每步得分——各格各遍在已判的步上取每步得分（要做到的用例通过比例）的等权平均，分段（清单里按重置点切出的各段）与合并
+//   各给一个；多遍时给均值与范围。要做到的为零的步不进平均，单列步数；做成步数与不许挂的失败合计照报（次要判据）；
+//   同题两遍的每步得分差——同一格第 1、2 遍在同一步上的得分之差（只作描述，统计检验在另写的分析脚本里做）；
+//   每步用量——轮数、墙钟、花费、上下文峰值、开工时的记忆大小与复盘消耗的分布（校准所要的量）；
+//   每步明细（第一遍）与次要指标（静态检查、token、墙钟、限额暂停）。
+// 196、201 之前的旧结果行（带全量测试通过率、没有 judging）照常读出，不计入以上各表，只报条数
 import {
-  MEMORY_WARN_RATIO,
   STREAM_CONDITIONS,
   type StreamCondition,
   type StreamResultLine,
 } from "./stream-results.ts";
 
-export interface ReportStream {
+export interface ReportSegment {
   id: string;
+  firstSeq: number;
   lastSeq: number;
 }
-
-export interface EndValue {
-  // 各遍的终点值（按第几遍排序）；未跑完的遍不在其中
-  attempts: number[];
-  mean: number | null;
-  min: number | null;
-  max: number | null;
-}
-
-// 146 的补跑门槛：百分点
-export const RERUN_GAP_POINTS = 10;
-
-const KIND_LABELS: Record<string, string> = {
-  task: "题",
-  maintenance: "维护步",
-  apply: "套用",
-  skip: "跳过",
-  reset: "重置",
-};
 
 function pct(value: number | null | undefined): string {
   return value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)}%`;
 }
 
-const mib = (bytes: number) => `${Math.round(bytes / 1048576)} MiB`;
-
-// 人的基准（每步全量跑的多遍）：内存峰值的最大值与其上限、单遍最长墙钟、最慢的用例
-export function baselineFacts(lines: readonly StreamResultLine[]): string {
-  let peak: { bytes: number; limit: number | null; seq: number } | null = null;
-  let longestMs = 0;
-  let slowest: { id: string; seconds: number } | null = null;
-  for (const l of lines) {
-    const f = l.fullPassRate;
-    if (f === null) continue;
-    for (const r of f.humanRuns ?? []) {
-      if (r.peakBytes !== null && (peak === null || r.peakBytes > peak.bytes)) {
-        peak = { bytes: r.peakBytes, limit: r.limitBytes, seq: l.seq };
-      }
-      longestMs = Math.max(longestMs, r.wallMs);
-    }
-    const s = f.humanSlowest ?? null;
-    if (s !== null && (slowest === null || s.seconds > slowest.seconds)) slowest = s;
-  }
-  const peakText =
-    peak === null
-      ? "内存峰值未测得"
-      : `内存峰值最大 ${mib(peak.bytes)}（第 ${peak.seq} 步` +
-        (peak.limit === null
-          ? "，容器未设上限）"
-          : `，上限 ${mib(peak.limit)}${peak.bytes > peak.limit * MEMORY_WARN_RATIO ? `，超过上限的 ${MEMORY_WARN_RATIO * 100}%` : ""}）`);
-  const slowText =
-    slowest === null
-      ? "最慢用例未测得"
-      : `最慢用例 ${slowest.id}（${slowest.seconds.toFixed(1)} 秒）`;
-  return `${peakText}；单遍最长 ${(longestMs / 60_000).toFixed(1)} 分；${slowText}`;
+function sum(values: readonly number[]): number {
+  return values.reduce((a, b) => a + b, 0);
 }
 
 function conditionsIn(lines: readonly StreamResultLine[]): StreamCondition[] {
@@ -78,169 +30,283 @@ function conditionsIn(lines: readonly StreamResultLine[]): StreamCondition[] {
   return STREAM_CONDITIONS.filter((c) => present.has(c));
 }
 
-export function endValues(
-  lines: readonly StreamResultLine[],
-  streams: readonly ReportStream[]
-): Map<string, EndValue> {
-  const out = new Map<string, EndValue>();
-  for (const s of streams) {
-    for (const condition of conditionsIn(lines)) {
-      const finals = lines
-        .filter((l) => l.stream === s.id && l.condition === condition && l.seq === s.lastSeq)
-        .filter((l) => l.fullPassRate !== null)
-        .sort((a, b) => a.attempt - b.attempt)
-        .map((l) => l.fullPassRate?.byCount.rate ?? 0);
-      const mean = finals.length === 0 ? null : finals.reduce((a, b) => a + b, 0) / finals.length;
-      out.set(`${s.id}|${condition}`, {
-        attempts: finals,
-        mean,
-        min: finals.length === 0 ? null : Math.min(...finals),
-        max: finals.length === 0 ? null : Math.max(...finals),
-      });
-    }
-  }
-  return out;
+// 已按两类用例判过的行
+function judgedLines(lines: readonly StreamResultLine[]): StreamResultLine[] {
+  return lines.filter((l) => l.judging !== null && l.judging !== undefined);
 }
 
-export interface RerunHint {
-  stream: string;
-  a: StreamCondition;
-  b: StreamCondition;
-  gapPoints: number;
+export interface CellScore {
+  // 每步得分的等权平均：只算要做到的不为零的步；没有这样的步为 null
+  mean: number | null;
+  // 进平均的步数
+  scored: number;
+  // 做成的步数（要做到的不为零且做成）
+  solved: number;
+  // 不许挂的一类里失败的用例合计
+  passToPassFailed: number;
+  // 要做到的为零的步数
+  zeroFailToPass: number;
+  // 已判的步数
+  judged: number;
 }
 
-function firstAttemptEnd(
+export function cellScore(
   lines: readonly StreamResultLine[],
-  stream: ReportStream,
-  condition: StreamCondition
-): number | null {
-  const final = lines.find(
+  condition: StreamCondition,
+  attempt: number,
+  segment?: ReportSegment
+): CellScore {
+  const rows = judgedLines(lines).filter(
     (l) =>
-      l.stream === stream.id &&
       l.condition === condition &&
-      l.attempt === 1 &&
-      l.seq === stream.lastSeq
+      l.attempt === attempt &&
+      (segment === undefined || (l.seq >= segment.firstSeq && l.seq <= segment.lastSeq))
   );
-  return final?.fullPassRate?.byCount.rate ?? null;
+  const scores = rows
+    .map((l) => l.judging?.score)
+    .filter((s): s is number => typeof s === "number");
+  return {
+    mean: scores.length === 0 ? null : sum(scores) / scores.length,
+    scored: scores.length,
+    solved: rows.filter((l) => l.judging?.solved === true).length,
+    passToPassFailed: sum(rows.map((l) => l.judging?.passToPass.failed ?? 0)),
+    zeroFailToPass: rows.filter((l) => l.judging?.failToPass.total === 0).length,
+    judged: rows.length,
+  };
 }
 
-function pairGaps(
-  lines: readonly StreamResultLine[],
-  streams: readonly ReportStream[]
-): RerunHint[] {
-  const out: RerunHint[] = [];
-  const conditions = conditionsIn(lines);
-  for (const s of streams) {
-    for (let i = 0; i < conditions.length; i++) {
-      for (let j = i + 1; j < conditions.length; j++) {
-        const a = conditions[i] as StreamCondition;
-        const b = conditions[j] as StreamCondition;
-        const ea = firstAttemptEnd(lines, s, a);
-        const eb = firstAttemptEnd(lines, s, b);
-        if (ea === null || eb === null) continue;
-        out.push({ stream: s.id, a, b, gapPoints: Math.round(Math.abs(ea - eb) * 1000) / 10 });
-      }
-    }
+export interface PairedDiff {
+  condition: StreamCondition;
+  // 两遍都有得分的步数
+  pairs: number;
+  // 第 1 遍减第 2 遍的平均、平均绝对差与样本方差（步数不足 2 时为 null）
+  meanDiff: number | null;
+  meanAbsDiff: number | null;
+  variance: number | null;
+}
+
+// 同题两遍的每步得分差（202、219）：同一格第 1、2 遍在同一步上都有得分的，逐步相减
+export function pairedDiffs(lines: readonly StreamResultLine[]): PairedDiff[] {
+  const out: PairedDiff[] = [];
+  const judged = judgedLines(lines);
+  for (const condition of conditionsIn(judged)) {
+    const scoreOf = (attempt: number) =>
+      new Map(
+        judged
+          .filter((l) => l.condition === condition && l.attempt === attempt)
+          .filter((l) => typeof l.judging?.score === "number")
+          .map((l) => [l.seq, l.judging?.score as number])
+      );
+    const first = scoreOf(1);
+    const second = scoreOf(2);
+    if (second.size === 0) continue;
+    const diffs = [...first]
+      .filter(([seq]) => second.has(seq))
+      .map(([seq, s]) => s - (second.get(seq) as number));
+    const n = diffs.length;
+    const mean = n === 0 ? null : sum(diffs) / n;
+    out.push({
+      condition,
+      pairs: n,
+      meanDiff: mean,
+      meanAbsDiff: n === 0 ? null : sum(diffs.map(Math.abs)) / n,
+      variance: n < 2 || mean === null ? null : sum(diffs.map((d) => (d - mean) ** 2)) / (n - 1),
+    });
   }
   return out;
 }
 
-export function rerunHints(
-  lines: readonly StreamResultLine[],
-  streams: readonly ReportStream[]
-): RerunHint[] {
-  return pairGaps(lines, streams).filter((h) => h.gapPoints < RERUN_GAP_POINTS);
+export interface Distribution {
+  n: number;
+  median: number | null;
+  p90: number | null;
+  max: number | null;
 }
 
-function sum(values: readonly number[]): number {
-  return values.reduce((a, b) => a + b, 0);
+// 分布：中位数（偶数个取中间两个的平均）、90 分位（最近秩）与最大值；忽略 null
+export function distribution(values: readonly (number | null | undefined)[]): Distribution {
+  const xs = values.filter((v): v is number => typeof v === "number").sort((a, b) => a - b);
+  const n = xs.length;
+  if (n === 0) return { n, median: null, p90: null, max: null };
+  const mid = Math.floor(n / 2);
+  const median =
+    n % 2 === 1 ? (xs[mid] as number) : ((xs[mid - 1] as number) + (xs[mid] as number)) / 2;
+  return { n, median, p90: xs[Math.ceil(0.9 * n) - 1] as number, max: xs[n - 1] as number };
+}
+
+function fmt(value: number | null, digits = 0): string {
+  return value === null ? "—" : value.toFixed(digits);
+}
+
+function distText(d: Distribution, digits = 0): string {
+  return d.n === 0
+    ? "—"
+    : `${fmt(d.median, digits)} / ${fmt(d.p90, digits)} / ${fmt(d.max, digits)}`;
+}
+
+function attemptsOf(lines: readonly StreamResultLine[], condition: StreamCondition): number[] {
+  return [...new Set(lines.filter((l) => l.condition === condition).map((l) => l.attempt))].sort(
+    (a, b) => a - b
+  );
+}
+
+// 多遍的均值与范围（各遍等权，只取有得分的遍）
+function acrossAttempts(means: readonly (number | null)[]): string {
+  const xs = means.filter((m): m is number => m !== null);
+  if (xs.length === 0) return "—";
+  if (xs.length === 1) return pct(xs[0]);
+  return `${pct(sum(xs) / xs.length)}（${xs.length} 遍，${pct(Math.min(...xs))}–${pct(Math.max(...xs))}）`;
 }
 
 export function renderStreamReport(
   lines: readonly StreamResultLine[],
-  options: { title: string; streams: readonly ReportStream[] }
+  options: { title: string; segments: readonly ReportSegment[] }
 ): string {
   const out: string[] = [`# 提交流实验报告：${options.title}`, ""];
+  const judged = judgedLines(lines);
+  const legacy = lines.length - judged.length - lines.filter((l) => !l.judged).length;
   const conditions = conditionsIn(lines);
-  const ends = endValues(lines, options.streams);
-  for (const s of options.streams) {
-    const ofStream = lines.filter((l) => l.stream === s.id && l.attempt === 1);
-    if (ofStream.length === 0) continue;
-    out.push(
-      `## 流 ${s.id}（末步 ${s.lastSeq}）`,
-      "",
-      "### 每步全量测试通过率（按条数，第一遍）",
-      ""
-    );
-    out.push(`| 步序 | 类型 | ${conditions.join(" | ")} |`);
-    out.push(`|---|---|${conditions.map(() => "---").join("|")}|`);
-    const seqs = [...new Set(ofStream.map((l) => l.seq))].sort((a, b) => a - b);
-    for (const seq of seqs) {
-      const kind = ofStream.find((l) => l.seq === seq)?.kind ?? "";
-      const cells = conditions.map((c) =>
-        pct(ofStream.find((l) => l.seq === seq && l.condition === c)?.fullPassRate?.byCount.rate)
+  // 只列有已判步的分段
+  const segments = options.segments.filter((s) =>
+    judged.some((l) => l.seq >= s.firstSeq && l.seq <= s.lastSeq)
+  );
+  const segHead = segments.map((s) => `${s.id}（第 ${s.firstSeq}–${s.lastSeq} 步）`);
+
+  out.push(
+    "## 每步得分（要做到的用例通过比例，各步等权；要做到的为零的步不计）",
+    "",
+    `| 条件 | 遍 | 合并 | ${segHead.map((h) => `${h} | `).join("")}做成步数 | 不许挂的失败合计 | 要做到的为零的步 | 已判步数 |`,
+    `|---|---|---|${segments.map(() => "---|").join("")}---|---|---|---|`
+  );
+  for (const c of conditions) {
+    for (const a of attemptsOf(judged, c)) {
+      const all = cellScore(lines, c, a);
+      const bySeg = segments.map((s) => cellScore(lines, c, a, s));
+      out.push(
+        `| ${c} | ${a} | ${pct(all.mean)}（${all.scored} 步） | ${bySeg.map((s) => `${pct(s.mean)}（${s.scored} 步） | `).join("")}${all.solved}/${all.scored} | ${all.passToPassFailed} | ${all.zeroFailToPass} | ${all.judged} |`
       );
-      out.push(`| ${seq} | ${KIND_LABELS[kind] ?? kind} | ${cells.join(" | ")} |`);
+    }
+  }
+  out.push("");
+  const multi = conditions.filter((c) => attemptsOf(judged, c).length > 1);
+  if (multi.length > 0) {
+    out.push(
+      "多遍合并（各遍等权的均值与范围）：",
+      "",
+      `| 条件 | 合并 | ${segHead.join(" | ")}${segHead.length > 0 ? " |" : ""}`,
+      `|---|---|${segments.map(() => "---|").join("")}`
+    );
+    for (const c of multi) {
+      const attempts = attemptsOf(judged, c);
+      const cell = (s?: ReportSegment) =>
+        acrossAttempts(attempts.map((a) => cellScore(lines, c, a, s).mean));
+      out.push(`| ${c} | ${cell()} | ${segments.map((s) => `${cell(s)} | `).join("")}`);
     }
     out.push("");
-    const endText = conditions
-      .map((c) => {
-        const e = ends.get(`${s.id}|${c}`);
-        if (e === undefined || e.mean === null) return `${c} 未跑完`;
-        return e.attempts.length > 1
-          ? `${c} ${pct(e.mean)}（${e.attempts.length} 遍，${pct(e.min)}–${pct(e.max)}）`
-          : `${c} ${pct(e.mean)}`;
-      })
-      .join("；");
-    out.push(`终点（按条数）：${endText}`, "");
-    // 对照口径 A（分母为人的代码上收集出的全部用例）与人的代码上时过时不过的用例数，取第一遍的末步
-    const endA = conditions
-      .map((c) => {
-        const last = ofStream.find((l) => l.condition === c && l.seq === s.lastSeq);
-        return last?.fullPassRate === null || last === undefined
-          ? `${c} 未跑完`
-          : `${c} ${pct(last.fullPassRate.byCountCollected.rate)}（人的代码上时过时不过 ${last.fullPassRate.humanFlaky} 条）`;
-      })
-      .join("；");
-    out.push(`终点对照（按条数，分母为人收集出的全部用例）：${endA}`, "");
-    out.push(`人的基准：${baselineFacts(ofStream)}`, "");
+  }
 
-    out.push("### 次要指标（第一遍）", "");
-    // 旧结果行（带 reverted 字段）才有"撤回"列；新结果行不写撤回字段，不显示这一列
-    const legacyReverted = ofStream.some((l) => l.reverted !== undefined);
+  const diffs = pairedDiffs(lines);
+  if (diffs.length > 0) {
     out.push(
-      `| 条件 | 判定通过 | ${legacyReverted ? "撤回 | " : ""}终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 |`
+      "## 同题两遍的每步得分差（第 1 遍减第 2 遍；只作描述）",
+      "",
+      "| 条件 | 两遍都有得分的步 | 平均差 | 平均绝对差 | 差的样本方差 |",
+      "|---|---|---|---|---|"
     );
-    out.push(`|---|---|${legacyReverted ? "---|" : ""}---|---|---|---|---|---|---|---|`);
-    for (const c of conditions) {
-      const rows = ofStream.filter((l) => l.condition === c);
-      const judged = rows.filter((l) => l.judged);
-      const last = [...rows].sort((a, b) => b.seq - a.seq)[0];
+    for (const d of diffs) {
       out.push(
-        `| ${c} | ${judged.filter((l) => l.outcome === "passed").length}/${judged.length} | ${
-          legacyReverted ? `${rows.filter((l) => l.reverted === true).length} | ` : ""
-        }${pct(last?.fullPassRate?.byTask.rate)} | ${
-          last?.quality?.typeErrors ?? "—"
-        } | ${last?.quality?.formatErrors ?? "—"} | ${last?.quality?.layerViolations ?? "—"} | ${sum(
-          rows.map((l) => l.turns)
-        )} | ${sum(rows.map((l) => l.usage.input))} / ${sum(rows.map((l) => l.usage.cacheRead))} / ${sum(
-          rows.map((l) => l.usage.output)
-        )} | ${(sum(rows.map((l) => l.wallMs)) / 60_000).toFixed(
-          1
-        )} | ${sum(rows.map((l) => l.limitPauses.length))} |`
+        `| ${d.condition} | ${d.pairs} | ${d.meanDiff === null ? "—" : `${(d.meanDiff * 100).toFixed(1)} 点`} | ${
+          d.meanAbsDiff === null ? "—" : `${(d.meanAbsDiff * 100).toFixed(1)} 点`
+        } | ${d.variance === null ? "—" : d.variance.toFixed(4)} |`
       );
     }
     out.push("");
   }
-  const gaps = pairGaps(lines, options.streams);
-  out.push("## 补跑判定（146：第一遍终点相差小于 10 个百分点即各补跑到 3 遍）", "");
-  if (gaps.length === 0) out.push("没有两个条件都跑完第一遍的流，暂不比较。");
-  for (const g of gaps) {
-    const hint = g.gapPoints < RERUN_GAP_POINTS ? "，提示补跑：这两个条件各补跑到 3 遍" : "";
+
+  out.push(
+    "## 每步用量（各遍合计；中位 / 90 分位 / 最大）",
+    "",
+    "| 条件 | 步数 | 轮数 | agent 墙钟（分，含验证门与回炉） | 花费（元） | 花费合计（元） | 上下文峰值（token） | 开工时记忆条目字符 | 开工时记忆条目数 | 复盘轮数 | 复盘墙钟（分） | 复盘花费合计（元） | 撞宽上限的步 | 撞复盘上限的次数 |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+  );
+  for (const c of conditions) {
+    const rows = judged.filter((l) => l.condition === c);
+    const costs = rows.map((l) => l.gateway?.costCny ?? null);
+    const reviewCosts = rows.map((l) => l.gateway?.reviewCostCny ?? null);
+    const known = (xs: readonly (number | null)[]) => xs.filter((x): x is number => x !== null);
     out.push(
-      `- 流 ${g.stream}，${g.a} 与 ${g.b}：终点相差 ${g.gapPoints.toFixed(1)} 个百分点${hint}`
+      `| ${c} | ${rows.length} | ${distText(distribution(rows.map((l) => l.turns)))} | ${distText(
+        distribution(rows.map((l) => l.agentWallMs / 60_000)),
+        1
+      )} | ${distText(distribution(costs), 3)} | ${known(costs).length === 0 ? "—" : sum(known(costs)).toFixed(2)} | ${distText(
+        distribution(rows.map((l) => l.gateway?.peakInputTokens ?? null))
+      )} | ${distText(distribution(rows.map((l) => l.memoryAtStart?.entryChars ?? null)))} | ${distText(
+        distribution(rows.map((l) => l.memoryAtStart?.entries ?? null))
+      )} | ${distText(distribution(rows.map((l) => l.review?.turns ?? null)))} | ${distText(
+        distribution(
+          rows.map((l) =>
+            l.review === null || l.review === undefined ? null : l.review.wallMs / 60_000
+          )
+        ),
+        1
+      )} | ${known(reviewCosts).length === 0 ? "—" : sum(known(reviewCosts)).toFixed(2)} | ${
+        rows.filter((l) => l.hitStepBudget === true).length
+      } | ${rows.filter((l) => l.hitReviewBudget === true).length} |`
     );
   }
   out.push("");
+
+  const first = judged.filter((l) => l.attempt === 1);
+  if (first.length > 0) {
+    out.push(
+      "## 每步明细（第一遍；要做到的通过数/总数，「成」为做成，「挂 n」为不许挂的失败条数）",
+      "",
+      `| 步序 | ${conditions.join(" | ")} |`,
+      `|---|${conditions.map(() => "---").join("|")}|`
+    );
+    const seqs = [...new Set(first.map((l) => l.seq))].sort((a, b) => a - b);
+    for (const seq of seqs) {
+      const cells = conditions.map((c) => {
+        const j = first.find((l) => l.seq === seq && l.condition === c)?.judging;
+        if (j === null || j === undefined) return "—";
+        return `${j.failToPass.passed}/${j.failToPass.total}${j.solved === true ? " 成" : ""}${
+          j.passToPass.failed > 0 ? ` 挂 ${j.passToPass.failed}` : ""
+        }`;
+      });
+      out.push(`| ${seq} | ${cells.join(" | ")} |`);
+    }
+    out.push("");
+  }
+
+  const firstAll = lines.filter((l) => l.attempt === 1);
+  out.push(
+    "## 次要指标（第一遍）",
+    "",
+    "| 条件 | 类型错误（各步合计） | 格式错误（各步合计） | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 | 依赖环境选不出而作废的步 |",
+    "|---|---|---|---|---|---|---|---|"
+  );
+  for (const c of conditions) {
+    const rows = firstAll.filter((l) => l.condition === c);
+    const q = (pick: (l: StreamResultLine) => number | null | undefined) => {
+      const xs = rows.map(pick).filter((x): x is number => typeof x === "number");
+      return xs.length === 0 ? "—" : String(sum(xs));
+    };
+    out.push(
+      `| ${c} | ${q((l) => l.quality?.typeErrors)} | ${q((l) => l.quality?.formatErrors)} | ${sum(
+        rows.map((l) => l.turns)
+      )} | ${sum(rows.map((l) => l.usage.input))} / ${sum(rows.map((l) => l.usage.cacheRead))} / ${sum(
+        rows.map((l) => l.usage.output)
+      )} | ${(sum(rows.map((l) => l.wallMs)) / 60_000).toFixed(1)} | ${sum(
+        rows.map((l) => l.limitPauses.length)
+      )} | ${rows.filter((l) => l.outcome === "skipped").length} |`
+    );
+  }
+  out.push("");
+  if (legacy > 0) {
+    out.push(
+      `旧口径的结果行 ${legacy} 条（两类用例计分之前的全量测试通过率口径）：照常读出，不计入以上各表。`,
+      ""
+    );
+  }
   return out.join("\n");
 }

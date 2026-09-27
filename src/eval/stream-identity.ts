@@ -1,7 +1,7 @@
 // 提交流跑批的身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：输出目录下的 identity.json。core 为参与比对的身份——仓库、清单摘要、镜像标识、预算、
 // 条件、步的范围（193、215、216 的固定起点与题的接法）、题面格式（198、213）、试跑的题数、两种 agent 的模型与推理参数
-// （最简 agent 另记 mini-swe-agent 与 litellm 的版本），续跑时任何一项
-// 与已写的不同即拒绝，避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降、跑批器代码
+// （最简 agent 另记 mini-swe-agent 与 litellm 的版本）、选题方式，续跑时任何一项
+// 与已写的不同即拒绝（条件与 agent 参数例外：按子集续跑时取并集、同一 agent 两次都记了才比，见 mergeCore），避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降、跑批器代码
 // 版本另记在每条结果行上；续跑时路数、账号数或各账号并发上限有变即在 infoLog 追加一条）。结果行带 core 的摘要，
 // 据此认出每行属于哪一次身份
 import { createHash } from "node:crypto";
@@ -21,6 +21,8 @@ export interface StreamRunIdentity {
     stepScope: string;
     // 题面格式（测试文件路径或用例名）：清单相同而题面不同，结果不能混
     promptFormat: string;
+    // 选了哪些题（202、219）：全部、给定题号，或按种子抽样（选法、种子、样本数与抽出的题号都记下）
+    taskSelection: TaskSelection;
     maxSteps: number | null;
     agents: {
       pigeon?: {
@@ -60,8 +62,52 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+// 选题方式：题号为清单里的题按时间接成的流中的序号（从 1 起）
+export type TaskSelection =
+  | { method: "all" }
+  | { method: "list"; tasks: number[] }
+  | {
+      method: "sample";
+      // Python 的 random.Random(seed).sample(总体, k)，再按时间排序
+      seed: number;
+      k: number;
+      // 总体的说明（只在要做到的用例不为零的题中抽）
+      population: string;
+      tasks: number[];
+    };
+
+// 按条件子集续跑（202、219）：同一输出目录可以分几次、每次只跑一部分条件。条件与各 agent 的参数因此不整体比对——条件取
+// 并集；某个 agent 两次都记了参数才逐项比对，只有一边记了即补上。其余各项逐项比对。摘要不含这两项，子集续跑时不变
+const MERGED_KEYS: readonly string[] = ["conditions", "agents"];
+
 export function identityDigest(core: StreamRunIdentity["core"]): string {
-  return createHash("sha256").update(canonical(core)).digest("hex").slice(0, 16);
+  const { conditions: _conditions, agents: _agents, ...compared } = core;
+  return createHash("sha256").update(canonical(compared)).digest("hex").slice(0, 16);
+}
+
+function mergeCore(
+  saved: StreamRunIdentity["core"],
+  now: StreamRunIdentity["core"]
+): { differ: string[]; merged: StreamRunIdentity["core"] } {
+  const differ: string[] = (
+    Object.keys({ ...saved, ...now }) as (keyof StreamRunIdentity["core"])[]
+  )
+    .filter((k) => !MERGED_KEYS.includes(k))
+    .filter((k) => canonical(saved[k]) !== canonical(now[k]));
+  const agents = { ...(saved.agents ?? {}) } as Record<string, unknown>;
+  for (const [name, settings] of Object.entries(now.agents ?? {})) {
+    if (settings === undefined) continue;
+    if (agents[name] !== undefined && canonical(agents[name]) !== canonical(settings)) {
+      differ.push(`agents.${name}`);
+    }
+    agents[name] = agents[name] ?? settings;
+  }
+  const conditions = [...(saved.conditions ?? [])];
+  for (const c of now.conditions) if (!conditions.includes(c)) conditions.push(c);
+  return {
+    differ,
+    merged: { ...saved, conditions, agents: agents as StreamRunIdentity["core"]["agents"] },
+  };
 }
 
 export function identityFile(outDir: string): string {
@@ -94,22 +140,23 @@ export function checkOrWriteIdentity(
     const saved = JSON.parse(readFileSync(file, "utf8")) as StreamRunIdentity & {
       infoLog?: StreamInfoChange[];
     };
-    const differ = (
-      Object.keys({ ...saved.core, ...identity.core }) as (keyof StreamRunIdentity["core"])[]
-    ).filter((k) => canonical(saved.core[k]) !== canonical(identity.core[k]));
+    const { differ, merged } = mergeCore(saved.core, identity.core);
     if (differ.length > 0) {
       throw new Error(
-        `输出目录的身份与这次不一致（${differ.join("、")}），拒绝续跑：不同仓库、预算、镜像、模型设定或试跑与正式的结果不能混在同一目录`
+        `输出目录的身份与这次不一致（${differ.join("、")}），拒绝续跑：不同仓库、预算、镜像、模型设定、选题或试跑与正式的结果不能混在同一目录`
       );
     }
+    let next = saved;
+    // 这次跑了新的条件或新接入的 agent：并进身份头（摘要不变）
+    if (canonical(merged) !== canonical(saved.core)) next = { ...next, core: merged };
     const latest = saved.infoLog?.at(-1)?.info ?? saved.info;
     if (infoShape(latest) !== infoShape(identity.info)) {
-      const infoLog = [
-        ...(saved.infoLog ?? []),
-        { since: now().toISOString(), info: identity.info },
-      ];
-      writeAtomic(file, `${JSON.stringify({ ...saved, infoLog }, null, 2)}\n`);
+      next = {
+        ...next,
+        infoLog: [...(saved.infoLog ?? []), { since: now().toISOString(), info: identity.info }],
+      };
     }
+    if (next !== saved) writeAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
     return digest;
   }
   // 没有身份头却已有跑批留下的东西（结果行、各作业的目录）：认不出它们属于哪一次身份，拒绝续跑，不补写身份头

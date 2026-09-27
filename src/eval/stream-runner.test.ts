@@ -22,7 +22,12 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { GatewayMeter } from "./model-gateway.ts";
 import { LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
-import { baselineTargets, computeBaselines } from "./stream-baseline.ts";
+import {
+  baselineTargets,
+  classTargets,
+  computeBaselines,
+  computeClasses,
+} from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
 import {
@@ -128,6 +133,7 @@ async function toy(
   const reference = new ReferenceCases({
     reference: referenceWs,
     runtime: toyRuntime,
+    human,
     cacheDir: join(base, "reference-cache"),
     image: "test-image",
   });
@@ -185,8 +191,8 @@ function options(t: Toy, overrides: Partial<Parameters<typeof runStreams>[0]>) {
   };
 }
 
-// 全量测量跑人在该步的全部测试（含 keep），判题只跑本题的测试：据此分开两种调用
-const isMeasure = (tests: readonly string[]) => tests.includes("src/keep.test.sh");
+// 判题跑人在该步的全部测试（含 keep）一次：据此认出判题的调用
+const isFullRun = (tests: readonly string[]) => tests.includes("src/keep.test.sh");
 
 describe("固定起点跑批（假 agent、本地假容器）", { concurrency: true }, () => {
   test("固定起点：只跑题（维护步、套用步、跳过步不跑），每步从人在该步之前的代码新开干净环境，agent 上一步的改动不带进下一步；题面为提交信息加应通过的测试文件路径、不附内容；人在该步新写或改过的测试开工时不在、判题时放入；每步存下 agent 的改动；结果行记起点与开容器耗时", async () => {
@@ -204,8 +210,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         if (input.step.seq === 1) {
           write(root, {
             "src/a.txt": "alpha\n",
-            // 篡改旧测试、自建测试、自己提交：判题前都要被程序兜住，也都不带进下一步
-            "src/keep.test.sh": "exit 0\n",
+            // 篡改旧测试（改成必挂的写法：没换回人的版本即算不许挂的失败）、自建测试、自己提交：判题前都要被程序兜住，
+            // 也都不带进下一步
+            "src/keep.test.sh": "exit 1\n",
             "src/agent.test.sh": "true\n",
           });
           git(root, "add", "-A");
@@ -273,11 +280,31 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         );
       }
       const last = rows.at(-1);
-      assert.deepEqual(last?.fullPassRate?.byCount, { passed: 4, total: 4, rate: 1 });
-      assert.deepEqual(last?.fullPassRate?.byTask, { passed: 2, total: 2, rate: 1 });
+      // 第 5 步：b 为要做到的（叠放到起点上失败、人的代码上通过），base、keep、a 为不许挂的
+      assert.deepEqual(last?.judging, {
+        failToPass: { passed: 1, total: 1 },
+        score: 1,
+        passToPass: { failed: 0, total: 3 },
+        solved: true,
+        failedCases: { failToPass: [], passToPass: [], truncated: false },
+        excludedFlaky: 0,
+      });
       assert.deepEqual(last?.quality, { typeErrors: 0, formatErrors: null, layerViolations: null });
-      // 第 1 步的全量测量：agent 篡改的 keep 测试已换回人的版本、它自建的测试不在
-      assert.deepEqual(rows[0]?.fullPassRate?.byCount, { passed: 3, total: 3, rate: 1 });
+      // 第 1 步：a 与改过的 base 为要做到的，keep 为不许挂的；agent 篡改的 keep 测试已换回人的版本（没换回即挂 1 条），
+      // 它自建的测试不在
+      assert.deepEqual(rows[0]?.judging?.failToPass, { passed: 2, total: 2 });
+      assert.deepEqual(rows[0]?.judging?.passToPass, { failed: 0, total: 1 });
+      assert.equal(rows[0]?.judging?.solved, true);
+      for (const r of rows) {
+        assert.ok(!("fullPassRate" in r), "新行不写全量通过率");
+        assert.deepEqual(r.memoryAtStart, { bytes: 0, entries: 0, entryChars: 0 });
+        assert.equal(r.review, null);
+      }
+      assert.deepEqual(
+        rows.map((r) => r.envPrefetched),
+        [false, true],
+        "第 5 步的容器在第 1 步进行时已预先开好"
+      );
       // 分步验证配置写进作业的治理根，形状与 .pigeon/verify.json 一致
       assert.deepEqual(
         JSON.parse(
@@ -290,9 +317,67 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       );
       // 每步的环境用完即弃
       assert.deepEqual(readdirSync(join(t.base, "envs", "ws")), []);
-      assert.match(readFileSync(summary.reportFile, "utf8"), /终点（按条数）：neither 100\.0%/);
+      assert.match(
+        readFileSync(summary.reportFile, "utf8"),
+        /\| neither \| 1 \| 100\.0%（2 步） \|/
+      );
+      // 两类用例的落盘：之后一侧（人的基准）、之前一侧（叠放运行）与比出的两类各一份
+      const cache = join(t.base, "reference-cache");
+      assert.deepEqual(
+        JSON.parse(readFileSync(join(cache, `${t.commits[1]}.classes.json`), "utf8")),
+        {
+          seq: 1,
+          commit: t.commits[1],
+          parent: t.commits[0],
+          failToPass: ["src/a.test.sh::case", "src/base.test.sh::case"],
+          passToPass: ["src/keep.test.sh::case"],
+          excludedFlaky: [],
+          failToPassOutsideJudgeFiles: 0,
+        }
+      );
+      assert.equal(
+        JSON.parse(readFileSync(join(cache, `${t.commits[1]}.overlay.json`), "utf8")).parent,
+        t.commits[0]
+      );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("撞宽上限（171）：agent 以撞轮数或墙钟上限收尾，或轮数、墙钟达到上限，记 hitStepBudget；复盘接入之前 hitReviewBudget 为空", async () => {
+    for (const [name, script, expected] of [
+      [
+        "终态撞墙钟",
+        (seq: number) => (seq === 1 ? { status: "wall-clock-limit" } : {}),
+        [true, false],
+      ],
+      ["终态撞轮数", (seq: number) => (seq === 5 ? { status: "turn-limit" } : {}), [false, true]],
+      ["轮数达到上限", (seq: number) => (seq === 1 ? { turns: 4 } : {}), [true, false]],
+      ["墙钟达到上限", (seq: number) => (seq === 5 ? { wallMs: 60_000 } : {}), [false, true]],
+    ] as const) {
+      const t = await toy();
+      try {
+        const agent = scriptedAgent((input) => ({ ...solve(input), ...script(input.step.seq) }));
+        const summary = await runStreams(
+          options(t, {
+            agents: { pigeon: agent },
+            budget: { maxTurns: 4, wallClockMs: 60_000 },
+          })
+        );
+        const rows = readStreamResults(summary.resultsFile);
+        assert.deepEqual(
+          rows.map((r) => r.hitStepBudget),
+          [...expected],
+          name
+        );
+        assert.deepEqual(
+          rows.map((r) => r.hitReviewBudget),
+          [null, null],
+          name
+        );
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
     }
   });
 
@@ -324,18 +409,30 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("一次全量测量在报告写出前被杀、一条结果都没拿到：分母仍是人的代码上通过的全部用例，全部计为未通过", async () => {
-    // a 的测试在没有 a.txt 时把跑测试的外壳杀掉：人的代码上照常通过，没做出 a.txt 的 agent 代码上整次测量拿不到报告
-    const t = await toy("[ -f src/a.txt ] || kill -9 $PPID\ngrep -q alpha src/a.txt\n");
+  test("判题的全量运行在报告写出前被杀、一条结果都没拿到：两类用例的分母仍按人这一侧，要做到的与不许挂的全部计为未通过", async () => {
+    // a 的测试在 a.txt 写成 wrong 时把跑测试的外壳杀掉：人的代码与起点上都照常出结果，写错了的 agent 代码上整次运行拿不到报告
+    const t = await toy(
+      `${NEEDS_A}grep -q wrong src/a.txt && kill -9 $PPID\ngrep -q alpha src/a.txt\n`
+    );
     try {
-      const agent = scriptedAgent(() => ({ repair: { rounds: 3, finalVerdict: "fail" } }));
+      const agent = scriptedAgent((input) => {
+        write(input.target.root, { "src/a.txt": "wrong\n" });
+        return { repair: { rounds: 3, finalVerdict: "fail" } };
+      });
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, conditions: ["search-only"], maxSteps: 1 })
       );
       const [r1] = readStreamResults(summary.resultsFile);
       assert.equal(r1?.outcome, "failed");
-      assert.deepEqual(r1?.fullPassRate?.byCount, { passed: 0, total: 3, rate: 0 });
-      assert.deepEqual(r1?.fullPassRate?.byCountCollected, { passed: 0, total: 3, rate: 0 });
+      assert.deepEqual(r1?.judging?.failToPass, { passed: 0, total: 2 });
+      assert.equal(r1?.judging?.score, 0);
+      assert.deepEqual(r1?.judging?.passToPass, { failed: 1, total: 1 });
+      assert.equal(r1?.judging?.solved, false);
+      assert.deepEqual(r1?.judging?.failedCases, {
+        failToPass: ["src/a.test.sh::case", "src/base.test.sh::case"],
+        passToPass: ["src/keep.test.sh::case"],
+        truncated: false,
+      });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -405,7 +502,8 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           remember(input.workDir, "作废尝试写下的\n");
           return { interrupted: "模型服务故障" };
         }
-        remember(input.workDir, `第 ${input.step.seq} 步之后\n`);
+        // 第 1 步之后一条，第 5 步之后两条（229 的条目格式）
+        remember(input.workDir, input.step.seq === 1 ? "- [L1] 甲\n" : "- [L1] 甲\n- [L2] 乙乙\n");
         return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
@@ -413,13 +511,26 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       // 模拟第 5 步开工、取过快照之后进程被杀：记忆里留着半截写下的东西
       snapshotOrRestoreLearned(jobDir, 5);
       remember(jobDir, "崩溃前半截写下的\n");
-      await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
       assert.deepEqual(seen, [
         [1, null],
         [1, null],
-        [5, "第 1 步之后\n"],
+        [5, "- [L1] 甲\n"],
       ]);
-      assert.equal(memoryOf(jobDir), "第 5 步之后\n");
+      assert.equal(memoryOf(jobDir), "- [L1] 甲\n- [L2] 乙乙\n");
+      // 结果行记开工时（恢复快照之后）与步末（agent 结束之后）的记忆大小：作废尝试与崩溃前半截写下的都不计
+      const one = { bytes: Buffer.byteLength("- [L1] 甲\n"), entries: 1, entryChars: 9 };
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => [r.seq, r.memoryAtStart, r.memoryAtEnd]),
+        [
+          [1, { bytes: 0, entries: 0, entryChars: 0 }, one],
+          [
+            5,
+            one,
+            { bytes: Buffer.byteLength("- [L1] 甲\n- [L2] 乙乙\n"), entries: 2, entryChars: 19 },
+          ],
+        ]
+      );
       assert.deepEqual(readdirSync(join(jobDir, "learned-snapshots")).sort(), ["step-1", "step-5"]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -435,7 +546,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         sleep: () => new Promise((r) => setTimeout(r, 5)),
         warn: () => {},
       });
-      const zero: GatewayMeter = {
+      // 计量带花费与单次请求输入峰值（网关计价接入之后的形状）：跑批器按步做差读花费、峰值直接读
+      type PricedMeter = GatewayMeter & { costCny: number; peakInputTokens: number };
+      const zero: PricedMeter = {
         requests: 0,
         input: 0,
         output: 0,
@@ -445,14 +558,16 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         queueMs: 0,
         peakInFlight: 0,
         accountRequests: [0, 0],
+        costCny: 0,
+        peakInputTokens: 0,
       };
-      const meters = new Map<string, GatewayMeter>();
+      const meters = new Map<string, PricedMeter>();
       const gateway = {
         jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
         meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
         resetPeak: (job: string) => {
           const m = meters.get(job);
-          if (m !== undefined) meters.set(job, { ...m, peakInFlight: 0 });
+          if (m !== undefined) meters.set(job, { ...m, peakInFlight: 0, peakInputTokens: 0 });
         },
       };
       let hits = 0;
@@ -468,6 +583,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           // 峰值不重记就会沿步累加：跑批器每步开始时 resetPeak
           peakInFlight: m.peakInFlight + 1,
           accountRequests: [(m.accountRequests[0] ?? 0) + 1, (m.accountRequests[1] ?? 0) + 1],
+          costCny: m.costCny + 0.25,
+          // 峰值同样每步重记：没重记会留着上一步的 5000
+          peakInputTokens: Math.max(m.peakInputTokens, input.step.seq === 1 ? 5000 : 1200),
         });
         assert.equal(input.modelBaseUrl, "http://gateway/j/tasks|neither|1");
         if (input.step.seq === 5 && hits++ === 0) {
@@ -495,9 +613,24 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       );
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
-      // 网关的排队时间、各账号请求数与在途峰值按步取差记到结果行上
-      assert.deepEqual(rows[0]?.gateway, { queueMs: 30, accountRequests: [1, 1], peakInFlight: 1 });
-      assert.deepEqual(rows[1]?.gateway, { queueMs: 30, accountRequests: [1, 1], peakInFlight: 1 });
+      // 网关的排队时间、各账号请求数与花费按步取差，在途峰值与单次请求输入峰值直接取（每步开始时重记）；
+      // 复盘花费在复盘接入之前为 null。第 5 步作废过一次：作废那次的花费不算进重做的这一步
+      assert.deepEqual(rows[0]?.gateway, {
+        queueMs: 30,
+        accountRequests: [1, 1],
+        peakInFlight: 1,
+        costCny: 0.25,
+        reviewCostCny: null,
+        peakInputTokens: 5000,
+      });
+      assert.deepEqual(rows[1]?.gateway, {
+        queueMs: 30,
+        accountRequests: [1, 1],
+        peakInFlight: 1,
+        costCny: 0.25,
+        reviewCostCny: null,
+        peakInputTokens: 1200,
+      });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -510,11 +643,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       const runtime: typeof toyRuntime = {
         ...toyRuntime,
         runCases: (ws, tests, opts) => {
-          if (!isMeasure(tests)) {
-            atJudge.push(
-              ["src/base.test.sh", "src/moved.test.sh"].filter((f) => existsSync(join(ws.root, f)))
-            );
-          }
+          atJudge.push(
+            ["src/base.test.sh", "src/moved.test.sh"].filter((f) => existsSync(join(ws.root, f)))
+          );
           return toyRuntime.runCases(ws, tests, opts);
         },
       };
@@ -541,7 +672,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       const runtime: typeof toyRuntime = {
         ...toyRuntime,
         runCases: (ws, tests, opts) => {
-          if (isMeasure(tests)) atMeasure.push(existsSync(join(ws.root, "src", "agent.test.sh")));
+          if (isFullRun(tests)) atMeasure.push(existsSync(join(ws.root, "src", "agent.test.sh")));
           return toyRuntime.runCases(ws, tests, opts);
         },
       };
@@ -577,7 +708,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           runCases: (ws, tests, opts) => {
             const root = opts.cwd ?? ws.root;
             seen.push({
-              where: isMeasure(tests) ? "measure" : "judge",
+              where: isFullRun(tests) ? "full" : "subset",
               present: hooks.filter((h) => existsSync(join(root, h))),
             });
             return runJunitOnce(
@@ -619,12 +750,15 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           "failed",
           `${ignore}：错的实现不因 agent 的 conftest 判为通过`
         );
-        assert.ok(seen.some((s) => s.where === "judge"));
-        assert.ok(seen.some((s) => s.where === "measure"));
+        // 判题只跑一次全量（含 keep 的全部人写测试），每步一次
+        assert.deepEqual(
+          seen.map((s) => s.where),
+          ["full", "full"]
+        );
         assert.deepEqual(
           seen.filter((s) => s.present.length > 0),
           [],
-          `${ignore}：判题与测量时都没有 agent 新建的 conftest`
+          `${ignore}：判题时没有 agent 新建的 conftest`
         );
         assert.deepEqual(atStep5, [], `${ignore}：下一题开工时不在工作区里`);
         // 回炉前删 conftest 用的人树按起点：人在该步之前的树里的全部路径
@@ -664,9 +798,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
         const [row] = readStreamResults(summary.resultsFile);
         assert.deepEqual(
-          row?.fullPassRate?.byCount,
-          { passed: 3, total: 3, rate: 1 },
-          `${flag}：隐藏的改动被还原，keep 测试照常通过`
+          row?.judging?.passToPass,
+          { failed: 0, total: 1 },
+          `${flag}：隐藏的改动被还原，keep 测试（不许挂的）照常通过`
         );
         assert.equal(existsSync(marker), false, `${flag}：agent 的钩子没有被执行`);
       } finally {
@@ -701,7 +835,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("agent 自己测试的辅助文件保留：helper、__init__、数据文件与只作用于自己测试目录的 conftest 判题时都在；被忽略的 __pycache__/ 与 agent 在 .gitignore 里写的整目录不让作业停下", async () => {
+  test("agent 自己测试的辅助文件：判题的全量运行前按人在该步的全部测试与测试辅助文件同步掉（与原全量测量同一口径）；被忽略的 __pycache__/ 与 agent 在 .gitignore 里写的整目录不让作业停下", async () => {
     const t = await toy();
     try {
       // 与 strands 相仿：src 下除用例与已知源文件外都归测试辅助
@@ -723,7 +857,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
               : toyRuntime.profile.classifyFile(p),
         },
         runCases: (ws, tests, opts) => {
-          if (!isMeasure(tests)) atJudge = own.filter((f) => existsSync(join(ws.root, f)));
+          atJudge = own.filter((f) => existsSync(join(ws.root, f)));
           return toyRuntime.runCases(ws, tests, opts);
         },
       };
@@ -743,7 +877,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       );
       assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 1 }], "作业没有停下");
       assert.equal(readStreamResults(summary.resultsFile)[0]?.outcome, "passed");
-      assert.deepEqual(atJudge, own, "agent 自己的辅助文件都在");
+      assert.deepEqual(atJudge, [], "agent 自己的辅助文件（跟踪得到的）判题时不在");
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -775,19 +909,17 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       const judging: typeof toyRuntime = {
         ...runtime,
         runCases: (ws, tests, opts) => {
-          if (!isMeasure(tests)) {
-            const at = (p: string) => join(ws.root, p);
-            atJudge = {
-              hookFile: existsSync(at("src/sitecustomize.sh")),
-              hookDir: existsSync(at("deep/sitecustomize")),
-              humanHook: existsSync(at("src/sitecustomize.keep")),
-              lint: readFileSync(at("lint.cfg"), "utf8"),
-              agentLint: existsSync(at("src/lint.cfg")),
-              userSite: existsSync(join(home, ".local", "lib")),
-              userLint: existsSync(join(home, ".lint.cfg")),
-              userOther: existsSync(join(home, ".bashrc")),
-            };
-          }
+          const at = (p: string) => join(ws.root, p);
+          atJudge = {
+            hookFile: existsSync(at("src/sitecustomize.sh")),
+            hookDir: existsSync(at("deep/sitecustomize")),
+            humanHook: existsSync(at("src/sitecustomize.keep")),
+            lint: readFileSync(at("lint.cfg"), "utf8"),
+            agentLint: existsSync(at("src/lint.cfg")),
+            userSite: existsSync(join(home, ".local", "lib")),
+            userLint: existsSync(join(home, ".lint.cfg")),
+            userOther: existsSync(join(home, ".bashrc")),
+          };
           return toyRuntime.runCases(ws, tests, opts);
         },
       };
@@ -835,13 +967,11 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         envDeclarationFile: "src/base.txt",
         envSyncFor: (file: string) => ["sh", "-c", `cat "${file}" >> .git/decl-log`],
         runCases: (ws, tests, opts) => {
-          if (!isMeasure(tests)) {
-            logs.push(
-              readFileSync(join(ws.root, ".git", "decl-log"), "utf8")
-                .split("\n")
-                .filter((l) => l !== "")
-            );
-          }
+          logs.push(
+            readFileSync(join(ws.root, ".git", "decl-log"), "utf8")
+              .split("\n")
+              .filter((l) => l !== "")
+          );
           return toyRuntime.runCases(ws, tests, opts);
         },
       };
@@ -1066,26 +1196,18 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("题面给用例名（213 的备用）：没接上要做到的用例即拒绝开跑；接上后题面列出用例名、不附内容", async () => {
+  test("题面给用例名（213 的备用）：名单为这一步要做到的用例（214），不附内容；不许挂的不在名单里", async () => {
     const t = await toy();
     try {
       const agent = scriptedAgent(solve);
-      await assert.rejects(
-        runStreams(options(t, { agents: { pigeon: agent }, promptFormat: "test-cases" })),
-        /给用例名的题面尚未实现/
-      );
-      assert.equal(agent.calls.length, 0);
-      await runStreams(
-        options(t, {
-          agents: { pigeon: agent },
-          promptFormat: "test-cases",
-          shouldPassCases: async (step) => [`src/a.test.sh::case-of-${step.seq}`],
-          maxSteps: 1,
-        })
-      );
+      await runStreams(options(t, { agents: { pigeon: agent }, promptFormat: "test-cases" }));
       assert.match(
         agent.calls[0]?.prompt ?? "",
-        /^Add alpha\n\nCreate src\/a\.txt\n\nTest cases that should pass[^\n]*\nsrc\/a\.test\.sh::case-of-1\n$/
+        /^Add alpha\n\nCreate src\/a\.txt\n\nTest cases that should pass[^\n]*\nsrc\/a\.test\.sh::case\nsrc\/base\.test\.sh::case\n$/
+      );
+      assert.match(
+        agent.calls[1]?.prompt ?? "",
+        /^Add beta\n\nTest cases that should pass[^\n]*\nsrc\/b\.test\.sh::case\n$/
       );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -1654,21 +1776,45 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("停止信号在判题或测量期间到达：这一步作废、不写行，作业停下；续跑重做这一步", async () => {
-    for (const where of ["judge", "measure"] as const) {
+  test("停止信号在判题的全量运行期间或之后的静态检查期间到达：这一步作废、不写行，作业停下；续跑重做这一步", async () => {
+    for (const where of ["judge", "quality"] as const) {
       const t = await toy();
       try {
         const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
         let fired = false;
+        const fire = () => {
+          if (fired) return;
+          fired = true;
+          limits.shutdown("收到 SIGTERM");
+        };
         const runtime: typeof toyRuntime = {
           ...toyRuntime,
-          // 判题只跑本题的测试，全量测量跑人在该步的全部测试：在其中一处途中收到停止信号
+          // 在判题的全量运行途中，或其后的静态检查计数途中收到停止信号
           runCases: (ws, tests, opts) => {
-            if (!fired && isMeasure(tests) === (where === "measure")) {
-              fired = true;
-              limits.shutdown("收到 SIGTERM");
-            }
+            if (where === "judge") fire();
             return toyRuntime.runCases(ws, tests, opts);
+          },
+          quality: {
+            ...toyRuntime.quality,
+            type: {
+              command: ["sh", "-c", where === "quality" ? "touch .git/quality-ran; true" : "true"],
+              pattern: /TYPE-ERROR/,
+            },
+          },
+        };
+        const envs: StreamEnvFactory = {
+          async open(job, init) {
+            const env = await localStreamEnvs(join(t.base, "envs"), (c: string) =>
+              t.human.bundle(c)
+            ).open(job, init);
+            const run = env.ws.run.bind(env.ws);
+            env.ws.run = async (...args: Parameters<typeof run>) => {
+              const r = await run(...args);
+              if (where === "quality" && existsSync(join(env.target.root, ".git", "quality-ran")))
+                fire();
+              return r;
+            };
+            return env;
           },
         };
         const agent = scriptedAgent((input) => {
@@ -1676,7 +1822,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           return undefined;
         });
         const summary = await runStreams(
-          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1, limits })
+          options(t, { agents: { pigeon: agent }, runtime, envs, maxSteps: 1, limits })
         );
         assert.equal(fired, true, where);
         assert.match(summary.jobs[0]?.stopped ?? "", /收到 SIGTERM/, where);
@@ -1694,7 +1840,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("因停止信号停下：在途一步的容器照样丢弃（续跑另开），排队的作业不再开容器", async () => {
+  test("因停止信号停下：在途一步的容器与为下一步预先开好的容器照样丢弃（续跑另开），排队的作业不再开容器", async () => {
     const t = await toy();
     try {
       const limits = new LimitController({ probe: async () => true, slots: 1, warn: () => {} });
@@ -1731,8 +1877,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           limits,
         })
       );
-      assert.deepEqual(opened, ["neither"], "排队的作业不再开容器");
-      assert.deepEqual(disposed, ["neither"], "在途一步的容器丢弃");
+      // 第 1 步开工时已为第 5 步预先开了容器：两个都丢弃；排队的 minimal 作业一个都不开
+      assert.deepEqual(opened, ["neither", "neither"], "排队的作业不再开容器");
+      assert.deepEqual(disposed, ["neither", "neither"], "在途一步与预先开好的容器都丢弃");
       assert.ok(summary.jobs.every((j) => /收到 SIGTERM/.test(j.stopped ?? "")));
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -2046,6 +2193,7 @@ test("换根目录：同一份清单、人的基准、检查门结果与身份�
         conditions: ["neither"],
         stepScope: TASK_CHAIN_SCOPE,
         promptFormat: "test-files",
+        taskSelection: { method: "all" as const },
         maxSteps: null,
         agents: {},
       },
@@ -2236,6 +2384,7 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
         return new ReferenceCases({
           reference: ws,
           runtime: counting,
+          human: t.human,
           cacheDir: join(t.base, "baseline"),
           image: "test-image",
         });
@@ -2257,12 +2406,13 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
         runtime: measuring,
       })
     );
-    assert.equal(runs, 8);
-    assert.ok(caseTimeouts.length > 8, "基准与全量测量都跑过");
+    // 两道题：之后一侧读已落盘的人的基准，之前一侧（叠放运行）没预计算、现算两遍
+    assert.equal(runs, 12);
+    assert.ok(caseTimeouts.length > 12, "基准、叠放运行与判题都跑过");
     assert.ok(caseTimeouts.every((t) => t === undefined));
     const rows = readStreamResults(summary.resultsFile);
-    assert.equal(rows.at(-1)?.fullPassRate?.byCount.total, 4);
-    assert.equal(rows.at(-1)?.fullPassRate?.humanRuns.length, 2);
+    assert.deepEqual(rows.at(-1)?.judging?.failToPass, { passed: 0, total: 1 });
+    assert.equal(rows.at(-1)?.judging?.passToPass.total, 3);
     const broken = await computeBaselines({
       targets: [
         { commit: "0000000000000000000000000000000000000000", tests: [], seqs: [9] },
@@ -2292,6 +2442,107 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
     });
     assert.deepEqual(order(regated.gateFailures), [1, 2, 4, 5]);
     assert.deepEqual([regated.cached, regated.computed], [0, 4]);
+  } finally {
+    rmSync(t.base, { recursive: true, force: true });
+  }
+});
+
+test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，多路分摊、按提交落盘、重跑即续算；叠放运行的测试配置显式取 commit 版；起点对不上的落盘结果重算；叠放运行拿不全用例即记为出错、接着算其余的；跑批直接读、不再现算", async () => {
+  const t = await toy();
+  try {
+    let runs = 0;
+    // 测试配置的钉法：记下每次钉配置时读到的 src/b.txt（只在第 5 步的 commit 上有；叠放运行若读工作区里 parent 的，读不到）
+    const pinned: (string | undefined)[] = [];
+    const runtime: typeof toyRuntime = {
+      ...toyRuntime,
+      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+        runs++;
+        return toyRuntime.runCases(...args);
+      },
+      pinTestConfig: async (_ws, read) => {
+        pinned.push((await read("src/b.txt"))?.toString("utf8"));
+      },
+    };
+    const end = t.commits[5] ?? "";
+    const referencesIn = (cacheDir: string, rt: typeof toyRuntime) =>
+      Promise.all(
+        [0, 1].map(async (i) => {
+          const root = join(t.base, `classes-ref-${cacheDir}-${i}`);
+          mkdirSync(root);
+          const ws = new ReferenceWorkspace(localStreamShell(root));
+          await ws.init(t.human.bundle(end), end);
+          return new ReferenceCases({
+            reference: ws,
+            runtime: rt,
+            human: t.human,
+            cacheDir: join(t.base, cacheDir),
+            image: "test-image",
+          });
+        })
+      );
+    const references = await referencesIn("classes", runtime);
+    const targets = classTargets(t.manifest);
+    assert.deepEqual(
+      targets.map((x) => [x.task, x.step.seq]),
+      [
+        [1, 1],
+        [2, 5],
+      ]
+    );
+    const first = await computeClasses({ targets, references });
+    assert.deepEqual([first.total, first.computed, first.cached, first.failed], [2, 2, 0, []]);
+    assert.equal(runs, 8, "每道题 commit 两遍、叠放两遍");
+    assert.deepEqual(
+      first.steps.map((s) => [s.task, s.failToPass, s.passToPass, s.excludedFlaky]),
+      [
+        [1, 2, 1, 0],
+        [2, 1, 3, 0],
+      ]
+    );
+    assert.deepEqual(
+      [...pinned].sort(),
+      ["beta\n", "beta\n", undefined, undefined].sort(),
+      "第 5 步的 commit 一侧与叠放运行都钉的是 commit 版"
+    );
+    const again = await computeClasses({ targets, references });
+    assert.deepEqual([again.computed, again.cached, again.steps.length], [0, 2, 2]);
+    assert.equal(runs, 8, "已落盘的不再跑");
+    // 叠放运行的落盘结果记的起点与这一步的 parent 对不上：只重算这一侧
+    const overlayFile = join(t.base, "classes", `${t.commits[5]}.overlay.json`);
+    const saved = JSON.parse(readFileSync(overlayFile, "utf8"));
+    writeFileSync(overlayFile, JSON.stringify({ ...saved, parent: "someone-else" }));
+    const redo = await computeClasses({ targets, references });
+    assert.deepEqual([redo.computed, redo.cached], [1, 1]);
+    assert.equal(runs, 10);
+    // 跑批读同一目录：两类用例不再现算
+    const [reading] = references;
+    assert.ok(reading !== undefined);
+    await runStreams(options(t, { agents: { pigeon: scriptedAgent(solve) }, reference: reading }));
+    assert.equal(runs, 10);
+    // 叠放运行拿不全用例（第 5 步叠放到起点上时报告写不出）：这道题记为出错，另一道照算
+    const broken: typeof toyRuntime = {
+      ...toyRuntime,
+      runCases: async (ws, tests, opts) => {
+        const run = await toyRuntime.runCases(ws, tests, opts);
+        const overlayOfStep5 =
+          existsSync(join(ws.root, "src", "b.test.sh")) &&
+          !existsSync(join(ws.root, "src", "b.txt"));
+        return overlayOfStep5 ? { ...run, complete: false } : run;
+      },
+    };
+    const failed = await computeClasses({
+      targets,
+      references: await referencesIn("classes-broken", broken),
+    });
+    assert.deepEqual(
+      failed.steps.map((s) => s.task),
+      [1]
+    );
+    assert.deepEqual(
+      failed.failed.map((f) => f.task),
+      [2]
+    );
+    assert.match(failed.failed[0]?.error ?? "", /没拿到全部用例的结果.*叠放到/);
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }
