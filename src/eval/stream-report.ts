@@ -1,10 +1,10 @@
-// 延续式实验的报告（决策 145、146）：
-//   健康度曲线——每条流、每个条件的全量测试通过率（按条数）随步数的变化，给出终点值（多遍时给均值与范围）；
-//   次要指标——判定通过数、回归数、机检错误数（终点）、失败归因分布、轮数、token、墙钟、限额暂停；
+// 提交流实验的报告（决策 145、146；193 固定起点之后的计分与报告由跑批器二按 196、201 重做）：
+//   每步曲线——每条流、每个条件的全量测试通过率（按条数）随步数的变化，给出终点值（多遍时给均值与范围）；
+//   次要指标——判定通过数、机检错误数（终点）、轮数、token、墙钟、限额暂停；
 //   撤回拆除（决策 173）之前的旧结果行带撤回字段，这类结果照旧多出"撤回"一列；
 //   补跑提示——任意两个条件第一遍的终点值相差小于 10 个百分点，即提示这两个条件各补跑到 3 遍（146）。
-// 终点指流清单里该流的最后一步；没跑到那一步（试跑或中途停止）的记为未跑完，不参与补跑比较。
-import { ATTRIBUTION_LABELS, type FailureAttribution } from "./stream-attribution.ts";
+// 终点指流里的最后一步；没跑到那一步（试跑或中途停止）的记为未跑完，不参与补跑比较。
+// 固定起点下回归数与失败归因不再计（它们都相对 agent 上一步的代码），报告不再列
 import {
   MEMORY_WARN_RATIO,
   STREAM_CONDITIONS,
@@ -160,7 +160,7 @@ export function renderStreamReport(
   lines: readonly StreamResultLine[],
   options: { title: string; streams: readonly ReportStream[] }
 ): string {
-  const out: string[] = [`# 延续式实验报告：${options.title}`, ""];
+  const out: string[] = [`# 提交流实验报告：${options.title}`, ""];
   const conditions = conditionsIn(lines);
   const ends = endValues(lines, options.streams);
   for (const s of options.streams) {
@@ -169,7 +169,7 @@ export function renderStreamReport(
     out.push(
       `## 流 ${s.id}（末步 ${s.lastSeq}）`,
       "",
-      "### 健康度曲线（全量测试通过率，按条数，第一遍）",
+      "### 每步全量测试通过率（按条数，第一遍）",
       ""
     );
     out.push(`| 步序 | 类型 | ${conditions.join(" | ")} |`);
@@ -209,10 +209,9 @@ export function renderStreamReport(
     // 旧结果行（带 reverted 字段）才有"撤回"列；新结果行不写撤回字段，不显示这一列
     const legacyReverted = ofStream.some((l) => l.reverted !== undefined);
     out.push(
-      `| 条件 | 判定通过 | ${legacyReverted ? "撤回 | " : ""}回归 | 终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 |`
+      `| 条件 | 判定通过 | ${legacyReverted ? "撤回 | " : ""}终点按题 | 终点类型错误 | 终点格式错误 | 终点分层违规 | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 |`
     );
-    out.push(`|---|---|${legacyReverted ? "---|" : ""}---|---|---|---|---|---|---|---|---|`);
-    const attributionLines: string[] = [];
+    out.push(`|---|---|${legacyReverted ? "---|" : ""}---|---|---|---|---|---|---|---|`);
     for (const c of conditions) {
       const rows = ofStream.filter((l) => l.condition === c);
       const judged = rows.filter((l) => l.judged);
@@ -220,7 +219,7 @@ export function renderStreamReport(
       out.push(
         `| ${c} | ${judged.filter((l) => l.outcome === "passed").length}/${judged.length} | ${
           legacyReverted ? `${rows.filter((l) => l.reverted === true).length} | ` : ""
-        }${sum(rows.map((l) => l.regressions ?? 0))} | ${pct(last?.fullPassRate?.byTask.rate)} | ${
+        }${pct(last?.fullPassRate?.byTask.rate)} | ${
           last?.quality?.typeErrors ?? "—"
         } | ${last?.quality?.formatErrors ?? "—"} | ${last?.quality?.layerViolations ?? "—"} | ${sum(
           rows.map((l) => l.turns)
@@ -230,16 +229,8 @@ export function renderStreamReport(
           1
         )} | ${sum(rows.map((l) => l.limitPauses.length))} |`
       );
-      const counts = new Map<FailureAttribution, number>();
-      for (const r of rows) {
-        if (r.attribution !== null) counts.set(r.attribution, (counts.get(r.attribution) ?? 0) + 1);
-      }
-      const text = [...counts.entries()]
-        .map(([k, n]) => `${ATTRIBUTION_LABELS[k]} ${n}`)
-        .join("、");
-      attributionLines.push(`- ${c}：${text === "" ? "无失败" : text}`);
     }
-    out.push("", "失败归因：", "", ...attributionLines, "");
+    out.push("");
   }
   const gaps = pairGaps(lines, options.streams);
   out.push("## 补跑判定（146：第一遍终点相差小于 10 个百分点即各补跑到 3 遍）", "");

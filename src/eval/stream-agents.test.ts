@@ -23,9 +23,9 @@ import {
   STREAM_WORK_DIRECTIVE,
   streamTemperature,
 } from "./stream-agents.ts";
+import { STRANDS_JUDGE_HYGIENE } from "./stream-profiles.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
-import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { dockerStreamShell, StreamWorkspace } from "./stream-workspace.ts";
 
 function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAgentInput {
@@ -400,7 +400,7 @@ test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修�
     });
     const out = await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: FIXED_GATE,
       })
@@ -448,7 +448,7 @@ test("Pigeon agent：一步期间来了限额信号即中止在途的运行（�
     });
     const running = agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: {
           steps: [{ name: "验证", command: "touch verified.flag; exit 1" }],
@@ -493,17 +493,15 @@ function countingStreamFn(inner: StreamFn) {
   return { fn, seen };
 }
 
-// 三个 Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具
-const PIGEON_STREAM_TOOLS = [
-  "edit_file",
-  "read_file",
-  "read_session_entry",
-  "run_command",
-  "search_sessions",
-];
+// Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多两件
+// 检索工具（193）
+const PIGEON_STREAM_TOOLS = {
+  "search-only": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
+  neither: ["edit_file", "read_file", "run_command"],
+} as const;
 
-for (const condition of ["full", "no-memory", "no-gate"] as const) {
-  test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用与回炉），工具清单里没有派生 agent 或 worker 的工具`, async () => {
+for (const condition of ["search-only", "neither"] as const) {
+  test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用与回炉），工具清单里没有派生 agent 或 worker 的工具，会话检索工具随条件的开关增减`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     try {
@@ -543,9 +541,9 @@ for (const condition of ["full", "no-memory", "no-gate"] as const) {
           verify: FIXED_GATE,
         })
       );
-      assert.equal(counting.seen.calls, condition === "no-gate" ? 2 : 8);
+      assert.equal(counting.seen.calls, 8, "四格都开回炉：修满 3 轮");
       assert.equal(counting.seen.peak, 1);
-      assert.deepEqual([...counting.seen.tools].sort(), PIGEON_STREAM_TOOLS);
+      assert.deepEqual([...counting.seen.tools].sort(), PIGEON_STREAM_TOOLS[condition]);
     } finally {
       ws.cleanup();
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -569,7 +567,7 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
       });
       const out = await agent.run(
         input(join(dir, "job"), {
-          condition: CONDITION_SPECS.full,
+          condition: CONDITION_SPECS["search-only"],
           target: { container: "box", root: ws.containerRoot },
           verify: FIXED_GATE,
         })
@@ -619,7 +617,7 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
       const counter = join(ws.testbed, ".git", "verify-count");
       const running = agent.run(
         input(join(dir, "job"), {
-          condition: CONDITION_SPECS.full,
+          condition: CONDITION_SPECS["search-only"],
           target: { container: "box", root: ws.containerRoot },
           verify: {
             steps: [
@@ -660,7 +658,7 @@ test("Pigeon agent：开工前已来了限额信号（起点记好之后、第�
   }
 });
 
-test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）建了引用，随导出的流历史带走、从流历史恢复后仍在", async () => {
+test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）建了引用，回炉验证前按它还原受保护的文件", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   const git = (cwd: string, ...args: string[]) =>
@@ -676,7 +674,7 @@ test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）
     });
     await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: FIXED_GATE,
       })
@@ -689,18 +687,7 @@ test("Pigeon agent：每步开工时的树（run.started 记下的 baseCommit）
     assert.ok(recorded !== undefined, "run.started 记下了开工时的树");
     const ref = "refs/pigeon/step-start/s1/7";
     assert.equal(git(ws.testbed, "rev-parse", ref), recorded);
-    // 导出的流历史里有这个引用与它的对象
-    const bundle = await new StreamWorkspace(localStreamShell(ws.testbed)).exportBundle();
-    const file = join(dir, "history.bundle");
-    writeFileSync(file, bundle);
-    assert.ok(git(dir, "bundle", "list-heads", file).split("\n").includes(`${recorded} ${ref}`));
-    // 从流历史恢复（续跑重建容器）后引用仍在
-    const restored = join(dir, "restored");
-    mkdirSync(restored);
-    const head = git(ws.testbed, "rev-parse", "HEAD");
-    await new StreamWorkspace(localStreamShell(restored)).restoreFromBundle(bundle, head);
-    assert.equal(git(restored, "rev-parse", ref), recorded);
-    assert.equal(git(restored, "cat-file", "-t", recorded), "commit");
+    assert.equal(git(ws.testbed, "cat-file", "-t", recorded), "commit");
   } finally {
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
@@ -750,7 +737,7 @@ test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写�
     const load = "[ -f tests/conftest.sh ] && . ./tests/conftest.sh; sh tests/check.sh";
     const out = await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: { steps: [{ name: "测试", command: load }], command: load, timeoutMs: 60_000 },
         humanTestFiles: new Set(["tests/check.sh"]),
@@ -784,7 +771,7 @@ test("Pigeon agent：回炉验证之前删 conftest 与判题前同一口径—�
     const load = "sh tests/check.sh";
     const out = await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: { steps: [{ name: "测试", command: load }], command: load, timeoutMs: 60_000 },
         humanTestFiles: new Set(["tests/check.sh"]),
@@ -847,7 +834,7 @@ test("Pigeon agent：验证前把人写测试还原成开工时的版本——ag
     });
     const out = await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: {
           steps: [{ name: "测试", command: "sh check.sh" }],
@@ -909,7 +896,7 @@ test("Pigeon agent：回炉验证前只还原并计数人在这一步的测试�
     });
     const out = await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: {
           steps: [{ name: "测试", command: "sh check.sh" }],
@@ -932,7 +919,7 @@ test("Pigeon agent：回炉验证前只还原并计数人在这一步的测试�
   }
 });
 
-test("Pigeon agent：不开回炉的条件不验证、不回炉，结果不带回炉字段", async () => {
+test("Pigeon agent：回炉轮数为 0 时不验证、不回炉，结果不带回炉字段", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   try {
@@ -944,7 +931,7 @@ test("Pigeon agent：不开回炉的条件不验证、不回炉，结果不带�
     });
     const out = await agent.run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS["no-gate"],
+        condition: { ...CONDITION_SPECS.neither, repairRounds: 0 },
         target: { container: "box", root: ws.containerRoot },
         verify: FIXED_GATE,
       })
@@ -957,45 +944,35 @@ test("Pigeon agent：不开回炉的条件不验证、不回炉，结果不带�
   }
 });
 
-test("Pigeon agent：结构化记忆删除后完整与去掉记忆两个条件行为相同——run.started 都不带结构化记忆字段，系统提示逐字相同", async () => {
-  const seen: Record<string, { memory: unknown; promptHash: string | undefined }> = {};
-  for (const condition of ["full", "no-memory"] as const) {
+test("Pigeon agent：推送记忆的格子把开关交给 headless——推送记忆尚未实现，这一步报错、不发模型请求（作业随之停下并说明）", async () => {
+  for (const condition of ["search-push", "push-only"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     try {
+      const inner = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
       const agent = pigeonStepAgent({
-        streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
+        streamFn: inner,
         yolo: true,
         docker: ws.docker,
         homeDir: join(dir, "home"),
       });
-      const workDir = join(dir, "job");
-      const out = await agent.run(
-        input(workDir, {
-          condition: CONDITION_SPECS[condition],
-          target: { container: "box", root: ws.containerRoot },
-          verify: FIXED_GATE,
-        })
+      await assert.rejects(
+        agent.run(
+          input(join(dir, "job"), {
+            condition: CONDITION_SPECS[condition],
+            target: { container: "box", root: ws.containerRoot },
+            verify: FIXED_GATE,
+          })
+        ),
+        /推送记忆尚未实现/,
+        condition
       );
-      assert.equal(out.repair?.finalVerdict, "pass");
-      const sessions = join(workDir, ".pigeon", "sessions");
-      const [sessionId] = listSessionIds(sessions);
-      assert.ok(sessionId !== undefined);
-      const started = materializeSession(sessions, sessionId, { content: false }).runStarteds;
-      assert.equal(started.length, 1);
-      seen[condition] = {
-        memory: started[0]?.payload.structuredMemory,
-        promptHash: started[0]?.payload.systemPromptHash,
-      };
+      assert.equal(inner.calls.length, 0, condition);
     } finally {
       ws.cleanup();
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
   }
-  assert.equal(seen.full?.memory, undefined);
-  assert.equal(seen["no-memory"]?.memory, undefined);
-  assert.ok(seen.full?.promptHash !== undefined);
-  assert.equal(seen.full?.promptHash, seen["no-memory"]?.promptHash);
 });
 
 // 分步验证用的小仓库：v.mjs <步名> 在本步执行目录下扫描 *.py 里每行 "# FAILS_UNLESS <文件> <标记> <测试名>"，
@@ -1106,7 +1083,7 @@ test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py
     }).run(
       input(workDir, {
         prompt: "以往的一步",
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: docker.containerRoot },
         verify,
       })
@@ -1242,7 +1219,7 @@ test("Pigeon agent：每次回炉验证之前先按本步标记清一遍后台�
       homeDir: join(dir, "home"),
     }).run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: FIXED_GATE,
       })
@@ -1305,7 +1282,7 @@ test("Pigeon agent：清完进程后容器里没有 git 进程在跑，就删掉
       homeDir: join(dir, "home"),
     }).run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS["no-gate"],
+        condition: { ...CONDITION_SPECS.neither, repairRounds: 0 },
         target: { container: "box", root: ws.containerRoot },
       })
     );
@@ -1342,7 +1319,7 @@ test("Pigeon agent：回炉验证之前清进程清不净即中止这一步、�
       homeDir: join(dir, "home"),
     }).run(
       input(join(dir, "job"), {
-        condition: CONDITION_SPECS.full,
+        condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
         verify: FIXED_GATE,
       })
@@ -1433,7 +1410,7 @@ test("闸门：本机假 docker 下（不在作业容器里）清 agent 进程�
   }
 });
 
-test("作业容器里（真容器）：丢弃作废尝试时清空临时目录；清 agent 进程时被 init 收养的孤儿进程照样清掉，主命令不动", {
+test("作业容器里（真容器）：判题前删掉家目录下的用户级 site-packages 与静态检查配置；清 agent 进程时被 init 收养的孤儿进程照样清掉，主命令不动", {
   skip: realDockerSkip(),
 }, async () => {
   const name = `pigeon-tmp-test-${process.pid}`;
@@ -1455,23 +1432,26 @@ test("作业容器里（真容器）：丢弃作废尝试时清空临时目录�
       "-f",
       "/dev/null"
     );
-    // 清空临时目录
+    // 家目录下 agent 放的用户级 site-packages（其中的 usercustomize 会在 Python 启动时被加载）与 mypy 用户级配置
     docker(
       "exec",
       name,
       "sh",
       "-c",
-      "echo x > /tmp/left-by-agent; mkdir -p /tmp/d && echo y > /tmp/d/f"
+      'mkdir -p "$HOME/.local/lib/python3/site-packages" && echo x > "$HOME/.local/lib/python3/site-packages/usercustomize.py" && echo y > "$HOME/.mypy.ini"'
     );
-    const ws = new StreamWorkspace(dockerStreamShell({ container: name, root: "/" }), {
-      tmpDir: "/tmp",
-    });
-    await ws.clearTmpDir();
-    // agent 留下的清掉；镜像自带、归 root 的（例如 node 的编译缓存目录）以 stream 身份删不掉，也不是 agent 留下的
+    const ws = new StreamWorkspace(dockerStreamShell({ container: name, root: "/" }));
+    await ws.clearHomePaths(STRANDS_JUDGE_HYGIENE.homePaths);
     assert.equal(
-      docker("exec", name, "sh", "-c", "ls -A /tmp | grep -c -e left-by-agent -e '^d$' || true"),
-      "0",
-      "agent 留下的临时文件清掉"
+      docker(
+        "exec",
+        name,
+        "sh",
+        "-c",
+        'if [ -e "$HOME/.local/lib" ] || [ -e "$HOME/.mypy.ini" ]; then echo left; else echo gone; fi'
+      ),
+      "gone",
+      "家目录下 agent 放的用户级文件清掉"
     );
     // 孤儿进程：起它的 sh 退出后由 init 收养（父进程为 1）
     docker("exec", name, "sh", "-c", "sleep 1000 > /dev/null 2>&1 & exit 0");

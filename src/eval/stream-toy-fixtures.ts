@@ -2,7 +2,7 @@
 // 约定："测试"是 src/ 下的 *.test.sh（用 grep 断言源文件内容，缺前置时打印与 node 同形的"Cannot find module"），
 // "格式化"是把连续空格压成一个，"类型错误"是源文件里的 TYPE-ERROR 标记；junit 报告由一段 sh 逐文件写出。
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RepoProfile, StreamFileKind } from "./stream-manifest.ts";
 import { runJunitOnce, type StreamRepoRuntime } from "./stream-profiles.ts";
@@ -50,7 +50,6 @@ export const toyRuntime: StreamRepoRuntime = {
     "sh",
     ...files,
   ],
-  depsLinks: [],
   envSyncCommand: null,
 };
 
@@ -82,26 +81,24 @@ export function toyRepo(
   };
 }
 
-// 本地"假容器"：每个作业（每次打开）一个临时目录，用本机 sh 执行同一批脚本；
-// 起点由宿主的人的仓库打 bundle 送入，续跑由导出的流历史恢复（与容器实现同一条路）
+// 本地"假容器"：每次打开（每一步、每次重做）一个全新的临时目录，用本机 sh 执行同一批脚本；起点由宿主的人的仓库打
+// bundle 送入（与容器实现同一条路），用完删掉目录（与丢弃容器同一口径：被忽略的文件不跨步）
 export function localStreamEnvs(
   base: string,
   bundleOf: (commit: string) => Buffer
 ): StreamEnvFactory {
+  let opened = 0;
   return {
     async open(job, init) {
-      const name = `${job.stream}-${job.condition}-${job.attempt}`;
-      const root = join(base, "ws", `${name}-${Date.now()}`);
+      opened += 1;
+      const root = join(base, "ws", `${job.stream}-${job.condition}-${job.attempt}-${opened}`);
       mkdirSync(root, { recursive: true });
       const ws = new StreamWorkspace(localStreamShell(root));
-      if (init.resume !== undefined)
-        await ws.restoreFromBundle(init.resume.bundle, init.resume.head);
-      else await ws.initFromBundle(bundleOf(init.startCommit), init.startCommit);
+      await ws.initFromBundle(bundleOf(init.startCommit), init.startCommit);
       return {
         ws,
         target: { container: "local", root },
-        measureRoot: join(base, "measure", name),
-        dispose: async () => {},
+        dispose: async () => rmSync(root, { recursive: true, force: true }),
       };
     },
   };

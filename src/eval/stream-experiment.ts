@@ -1,5 +1,5 @@
-// 延续式实验的装配（第三至六节）：读流清单，按仓库选运行方式，起一个装有人的完整历史的参考容器算全量测量的基准，
-// 按条件接入 agent，交给跑批器；结束后移除参考容器。
+// 提交流实验的装配（第三至六节；193 固定起点）：读流清单，按仓库选运行方式，起一个装有人的完整历史的参考容器算全量测量的
+// 基准，按条件接入 agent，交给跑批器；结束后移除参考容器。
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -30,10 +30,16 @@ import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
 import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
-import type { StreamManifest } from "./stream-manifest.ts";
+import {
+  DEFAULT_TASK_PROMPT_FORMAT,
+  type StreamManifest,
+  TASK_CHAIN_SCOPE,
+  type TaskPromptFormat,
+} from "./stream-manifest.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";
 import {
+  assertPromptFormatReady,
   dockerStreamEnvs,
   lockOutDir,
   ReferenceCases,
@@ -57,11 +63,12 @@ export interface StreamExperimentOptions {
   image: string;
   outDir: string;
   conditions: readonly StreamCondition[];
-  streams?: readonly string[];
   attempts?: number;
   concurrency?: number;
   maxSteps?: number;
   budget: StepBudget;
+  // 题面格式（198、213）：缺省给测试文件路径；给用例名要等跑批器二接上
+  promptFormat?: TaskPromptFormat;
   // 四个条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里
   gateway: { accounts: readonly GatewayAccount[]; modelId: string };
   // Pigeon 各条件的运行参数（模型接入由网关给；放权固定为无人值守，见 streamPigeonOptions）；缺省则这些条件的作业停止并说明
@@ -199,6 +206,9 @@ async function runStreamExperimentLocked(
   options: StreamExperimentOptions,
   outDir: string
 ): Promise<RunStreamsSummary> {
+  // 给用例名的题面还没接上（跑批器二）：读清单、写身份头、起网关与容器之前即拒绝
+  const promptFormat = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
+  assertPromptFormatReady(promptFormat, undefined);
   const { manifest, runtime } = readManifest(options.manifestFile);
   const docker = options.docker ?? ["docker"];
   const human = gitHumanRepo(options.repoDir);
@@ -223,6 +233,8 @@ async function runStreamExperimentLocked(
       image: imageId,
       budget: options.budget,
       conditions: [...options.conditions],
+      stepScope: TASK_CHAIN_SCOPE,
+      promptFormat,
       maxSteps: options.maxSteps ?? null,
       agents: {
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
@@ -299,7 +311,6 @@ async function runStreamExperimentLocked(
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
-        tmpDir: "/tmp",
       }),
       agents,
       reference: new ReferenceCases({
@@ -314,6 +325,7 @@ async function runStreamExperimentLocked(
       outDir,
       conditions: options.conditions,
       budget: options.budget,
+      promptFormat,
       harnessRef: currentHarnessRef(),
       limits,
       gateway: liveGateway,
@@ -322,7 +334,6 @@ async function runStreamExperimentLocked(
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
         ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
       },
-      ...(options.streams !== undefined ? { streams: options.streams } : {}),
       ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
       ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
       ...(options.maxSteps !== undefined ? { maxSteps: options.maxSteps } : {}),

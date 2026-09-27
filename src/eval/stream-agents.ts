@@ -1,5 +1,6 @@
-// 延续式跑批的两种 agent 接入（第三节）：跑批器只经 StepAgent 调用，不感知 agent 怎么跑。
-//   Pigeon（完整、去掉记忆、去掉验证门；结构化记忆删除后前两者行为相同）：与外部基准同一条路——进程内经 headless 入口运行，执行端为该流的容器；
+// 提交流跑批的两种 agent 接入（第三节）：跑批器只经 StepAgent 调用，不感知 agent 怎么跑。
+//   Pigeon（记忆 2 × 2 的四格：能否检索历史会话 × 有无推送记忆，都开验证门与回炉，193）：与外部基准同一条路——进程内经
+//     headless 入口运行，执行端为这一步的容器；
 //   最简 agent（099）：宿主上的独立进程，经请求文件拿到题面、容器与预算，命令在该流的容器里执行，结果写回结果文件。
 // 模型接入由各自的 stream-fn / 启动器配置决定；限额的统一处理（第 17、18 条）待定后接在这一层之下。
 import { execFile, spawn } from "node:child_process";
@@ -27,7 +28,7 @@ import {
 } from "./stream-workspace.ts";
 
 // 工作方式指令：与外部基准同一句的写法（对齐公开最简实现的措辞），把"修 issue"换成"实现用户消息里描述的改动"。
-// 四个条件共用；它属于被测条件，改它等于换条件
+// 各条件共用；它属于被测条件，改它等于换条件
 export const STREAM_WORK_DIRECTIVE =
   "Your task is to make changes to non-test files in the repository at /testbed in order to implement the change described in the user message, in a way that is general and consistent with the codebase.";
 
@@ -52,7 +53,7 @@ export interface PigeonStepAgentOptions {
   modelId?: string;
   homeDir?: string;
   // 人写的测试与测试辅助文件（按这条流的运行方式归类）：开回炉的条件在每次验证之前把 agent 对它们的改动还原成
-  // 这一步开工时的版本（开工时的树已含跑批器预置的人写测试），agent 不能靠改测试让验证通过
+  // 这一步开工时的版本（即人在该步之前的版本；人在该步新写的测试判题时才放入），agent 不能靠改测试让验证通过
   humanTestFile?: (path: string) => boolean;
   // 限额控制器：这一步期间有任何限额信号（暂停、停止）即中止在途的运行——这一步反正要作废重做，不必跑满
   // （与最简 agent 同一做法：订阅即时通知，另以 500 毫秒轮询兜底）
@@ -148,6 +149,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           skillRoots: [],
           memoryRoots: [],
           taskDirective: STREAM_WORK_DIRECTIVE,
+          // 记忆条件（193）：能否检索历史会话；推送记忆只透传（另行施工，打开时 headless 暂时报错）
+          sessionSearch: input.condition.sessionSearch,
+          ...(input.condition.pushedMemory ? { pushedMemory: true } : {}),
           // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动。
           // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
           // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取

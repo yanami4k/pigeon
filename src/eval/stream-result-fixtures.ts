@@ -1,17 +1,19 @@
-// 测试夹具：一条完整的延续式结果行，供结果行与报告的测试改写字段使用。只供测试使用。
+// 测试夹具：一条完整的提交流结果行，供结果行与报告的测试改写字段使用。只供测试使用。
 import type { StreamResultLine } from "./stream-results.ts";
 
 export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamResultLine {
   return {
     repo: "pigeon-harness",
-    stream: "s1",
-    condition: "no-gate",
+    stream: "tasks",
+    condition: "neither",
     attempt: 1,
     seq: 1,
     kind: "task",
     commit: "c1",
     outcome: "passed",
-    head: "h1",
+    start: "p1",
+    diff: "streams/tasks-neither-1/diffs/step-1.diff",
+    envOpenMs: 1500,
     judged: true,
     repairRounds: null,
     finalVerdict: null,
@@ -28,7 +30,6 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
       humanRuns: [{ peakBytes: 500 * 1048576, limitBytes: 2048 * 1048576, wallMs: 60_000 }],
       humanSlowest: { id: "src/a.test.ts::slow", seconds: 3.5 },
     },
-    regressions: 0,
     quality: { typeErrors: 0, formatErrors: 0, layerViolations: 0 },
     status: "completed",
     turns: 5,
@@ -42,7 +43,6 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     },
     agentWallMs: 1000,
     wallMs: 2000,
-    attribution: null,
     limitPauses: [],
     gateway: { queueMs: 0, accountRequests: [5], peakInFlight: 1 },
     admissionWaitMs: 0,

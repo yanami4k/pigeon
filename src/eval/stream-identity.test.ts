@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { currentHarnessRef } from "./stream-harness.ts";
 import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
+import { TASK_CHAIN_SCOPE } from "./stream-manifest.ts";
 import { DEFAULT_STEP_BUDGET } from "./stream-runner.ts";
 
 test("harness 版本：取本源码所在仓库的 HEAD 短号与是否有未提交改动", () => {
@@ -27,7 +28,9 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
     manifestDigest: "abc",
     image: "sha256:img",
     budget: { maxTurns: 150, wallClockMs: 30 * 60_000 },
-    conditions: ["full", "minimal"],
+    conditions: ["search-only", "minimal"],
+    stepScope: TASK_CHAIN_SCOPE,
+    promptFormat: "test-files",
     maxSteps: null,
     agents: {
       pigeon: {
@@ -77,6 +80,27 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
       /budget.*image|image.*budget/
     );
     assert.throws(() => checkOrWriteIdentity(dir, identity({ maxSteps: 5 })), /maxSteps/);
+    // 清单相同而题面格式或步的范围不同（198、213、215、216）：结果不能混
+    assert.throws(
+      () => checkOrWriteIdentity(dir, identity({ promptFormat: "test-cases" })),
+      /promptFormat/
+    );
+    assert.throws(
+      () => checkOrWriteIdentity(dir, identity({ stepScope: "continuation" })),
+      /stepScope/
+    );
+    // 193 之前写下的身份头没有这两项：同样拒绝续跑
+    const { stepScope: _s, promptFormat: _p, ...legacyCore } = identity().core;
+    const legacyDir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+    try {
+      writeFileSync(
+        join(legacyDir, "identity.json"),
+        JSON.stringify({ ...identity(), core: legacyCore })
+      );
+      assert.throws(() => checkOrWriteIdentity(legacyDir, identity()), /stepScope.*promptFormat/);
+    } finally {
+      rmSync(legacyDir, { recursive: true, force: true });
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

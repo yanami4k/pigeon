@@ -18,7 +18,7 @@ import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
   dockerStreamShell,
   removeCoveringHelpers,
-  STREAM_COMMITTER,
+  STALE_GIT_LOCKS,
   StreamWorkspace,
   StreamWorkspaceAccessError,
   shellQuote,
@@ -139,82 +139,26 @@ describe("流工作区（本机 sh 真跑同一批脚本）", { concurrency: tru
   );
 
   test(
-    "落地：以该步提交信息提交全部改动，提交者为程序身份；无改动也落一次",
-    withTemp(async (base) => {
-      const { human, root, ws } = await freshWorkspace(base);
-      writeFileSync(join(root, "b.txt"), "agent\n");
-      const message = "Add b\n\nBody line with 'quotes' and $dollar\n";
-      const landed = await ws.land(message);
-      assert.notEqual(landed, human.c2);
-      assert.equal(git(root, "log", "-1", "--format=%B"), message.trimEnd());
-      assert.equal(
-        git(root, "log", "-1", "--format=%an <%ae>"),
-        `${STREAM_COMMITTER.name} <${STREAM_COMMITTER.email}>`
-      );
-      assert.equal(git(root, "show", "--name-only", "--format=", "HEAD"), "b.txt");
-      const again = await ws.land("Empty step\n");
-      assert.equal(git(root, "rev-parse", "HEAD~1"), landed);
-      assert.notEqual(again, landed);
-    })
-  );
-
-  test(
-    "回到本步起点：被跟踪文件复原、未忽略的未跟踪文件删除、被忽略的依赖目录不动",
+    "开工树与改动：开工时与收工时各取一次工作区的树，两者之差即 agent 的改动（改动与新增，含二进制与未跟踪文件）；取树不动真的暂存区，被忽略的文件不在其中",
     withTemp(async (base) => {
       const { root, ws } = await freshWorkspace(base);
-      writeFileSync(join(root, "a.txt"), "broken\n");
-      mkdirSync(join(root, "newdir"));
-      writeFileSync(join(root, "newdir", "n.txt"), "untracked\n");
+      const start = await ws.worktreeTree();
+      writeFileSync(join(root, "a.txt"), "agent\n");
+      writeFileSync(join(root, "new.bin"), Buffer.from([0, 255, 1]));
       writeFileSync(join(root, "node_modules", "dep", "cache.txt"), "ignored\n");
-      assert.ok(!(await ws.isClean()));
-      await ws.rollback();
-      assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "two\n");
-      assert.ok(!existsSync(join(root, "newdir")));
-      assert.ok(existsSync(join(root, "node_modules", "dep", "cache.txt")));
-      assert.ok(await ws.isClean());
-    })
-  );
-
-  test(
-    "续跑：导出的流历史在新目录恢复出同一 HEAD 与提交信息",
-    withTemp(async (base) => {
-      const { root, ws } = await freshWorkspace(base);
-      writeFileSync(join(root, "b.txt"), "agent\n");
-      const landed = await ws.land("Step one\n");
-      const bundle = await ws.exportBundle();
-      const again = join(base, "restored");
-      mkdirSync(again);
-      const restored = new StreamWorkspace(localStreamShell(again));
-      await restored.restoreFromBundle(bundle, landed);
-      assert.equal(await restored.head(), landed);
-      assert.equal(readFileSync(join(again, "b.txt"), "utf8"), "agent\n");
-      assert.equal(git(again, "log", "-1", "--format=%s"), "Step one");
-      assert.equal(git(again, "remote"), "");
-    })
-  );
-
-  test(
-    "测量副本：从 HEAD 克隆、依赖目录接上，写入人的文件不影响工作区",
-    withTemp(async (base) => {
-      const { root, ws } = await freshWorkspace(base);
-      writeFileSync(join(root, "uncommitted.txt"), "not in HEAD\n");
-      const copy = join(base, "measure");
-      await ws.prepareMeasureCopy(copy, ["node_modules", "no-such-dir"]);
-      assert.equal(readFileSync(join(copy, "a.txt"), "utf8"), "two\n");
-      assert.ok(!existsSync(join(copy, "uncommitted.txt")));
-      assert.ok(existsSync(join(copy, "node_modules", "dep", "index.js")));
-      assert.ok(!existsSync(join(copy, "no-such-dir")));
-      await ws.applyHumanFilesAt(copy, [{ path: "t/h.test.ts", op: "write", kind: "test" }], () =>
-        Buffer.from("human\n")
-      );
-      assert.equal(readFileSync(join(copy, "t/h.test.ts"), "utf8"), "human\n");
-      assert.ok(!existsSync(join(root, "t")));
-      // 重建副本会先清空旧副本（含以点开头的文件）；副本目录本身保留，非 root 用户不必能写它的上级目录
-      writeFileSync(join(copy, ".stale"), "old\n");
-      await ws.prepareMeasureCopy(copy, []);
-      assert.ok(!existsSync(join(copy, "t")));
-      assert.ok(!existsSync(join(copy, ".stale")));
-      assert.equal(readFileSync(join(copy, "a.txt"), "utf8"), "two\n");
+      git(root, "add", "a.txt");
+      const indexBefore = git(root, "ls-files", "-s");
+      const end = await ws.worktreeTree();
+      assert.equal(git(root, "ls-files", "-s"), indexBefore, "真的暂存区不动");
+      const diff = (await ws.diffTrees(start, end)).toString("utf8");
+      assert.match(diff, /^diff --git a\/a\.txt b\/a\.txt/m);
+      assert.match(diff, /^\+agent$/m);
+      assert.match(diff, /^diff --git a\/new\.bin b\/new\.bin[\s\S]*GIT binary patch/m);
+      assert.doesNotMatch(diff, /node_modules/, "被忽略的文件不在改动里");
+      assert.equal((await ws.diffTrees(start, start)).length, 0, "同一棵树没有差");
+      // 全量测量前暂存全部：未跟踪的文件进了暂存区
+      await ws.stageAll();
+      assert.match(git(root, "ls-files"), /^new\.bin$/m);
     })
   );
 
@@ -237,25 +181,45 @@ test("命令拼接：单引号转义、安全字符原样、超时换算为整�
   assert.equal(timeoutWrapped(["npm", "run", "verify"], 1500), "timeout -s KILL 2 npm run verify");
 });
 
-test("清理测量与判题的产物：测量副本目录清空（目录本身保留），判题报告与维护步验证门的报告（/tmp/pigeon-gate-junit.xml）都删掉", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-artifacts-"));
+test("家目录下的用户级文件（195 补口）：删掉给定的相对路径（文件与整个目录），其余不动；绝对路径与含 .. 的路径拒绝", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-home-"));
   try {
     const root = join(base, "ws");
-    mkdirSync(join(root, ".git"), { recursive: true });
-    const measure = join(base, "measure");
-    mkdirSync(join(measure, "copy"), { recursive: true });
-    writeFileSync(join(measure, "copy", "report.xml"), "x");
-    writeFileSync(join(root, ".git", "pigeon-cases-junit.xml"), "x");
-    // 本用例自己的报告路径：不碰各用例共用的 /tmp/pigeon-gate-junit.xml
-    const gate = `${root.replace(/\\/g, "/")}/gate-junit.xml`;
-    const ws = new StreamWorkspace(localStreamShell(root), { gateReport: gate });
-    await ws.run(["sh", "-c", `echo x > ${gate}`], 10_000);
-    await ws.clearArtifacts(measure);
-    const left = await ws.run(["sh", "-c", `test -e ${gate}`], 10_000);
-    assert.notEqual(left.exitCode, 0, "验证门的报告已删");
-    assert.equal(existsSync(join(root, ".git", "pigeon-cases-junit.xml")), false);
-    assert.deepEqual(readdirSync(measure), []);
+    mkdirSync(root);
+    const home = join(base, "home");
+    mkdirSync(join(home, ".local", "lib", "python3", "site-packages"), { recursive: true });
+    writeFileSync(join(home, ".local", "lib", "python3", "site-packages", "usercustomize.py"), "x");
+    mkdirSync(join(home, ".local", "bin"), { recursive: true });
+    writeFileSync(join(home, ".mypy.ini"), "[mypy]\n");
+    writeFileSync(join(home, ".bashrc"), "keep\n");
+    const ws = new StreamWorkspace(localStreamShell(root), { homeDir: home });
+    await ws.clearHomePaths([".local/lib", ".config/ruff", ".mypy.ini"]);
+    assert.equal(existsSync(join(home, ".local", "lib")), false);
+    assert.equal(existsSync(join(home, ".mypy.ini")), false);
+    assert.equal(existsSync(join(home, ".local", "bin")), true, "没列的不动");
+    assert.equal(readFileSync(join(home, ".bashrc"), "utf8"), "keep\n");
+    await assert.rejects(ws.clearHomePaths(["/etc"]), /相对路径/);
+    await assert.rejects(ws.clearHomePaths([".local/../.."]), /相对路径/);
   } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("家目录下的用户级文件删不掉（所在目录不可写）：报访问错误（调用方把这一步作废），不当作已清", {
+  skip: process.platform === "win32" ? "Windows 上 chmod 不收走写权限" : false,
+}, async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-home-locked-"));
+  const home = join(base, "home");
+  try {
+    const root = join(base, "ws");
+    mkdirSync(root);
+    mkdirSync(join(home, ".config", "mypy"), { recursive: true });
+    writeFileSync(join(home, ".config", "mypy", "config"), "[mypy]\n");
+    execFileSync("chmod", ["0555", join(home, ".config")]);
+    const ws = new StreamWorkspace(localStreamShell(root), { homeDir: home });
+    await assert.rejects(ws.clearHomePaths([".config/mypy"]), StreamWorkspaceAccessError);
+  } finally {
+    execFileSync("chmod", ["-R", "u+rwX", base]);
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -391,7 +355,7 @@ test("删覆盖人写测试的 conftest 时不跟随符号链接：名为 confte
   }
 });
 
-test("写入人写测试之前，路径上被换成符号链接的目录与文件换成真的：不顺着链接写到工作区之外，按判题的方式加载 conftest 加载不到，错的实现照样失败；测量副本同样", {
+test("写入人写测试之前，路径上被换成符号链接的目录与文件换成真的：不顺着链接写到工作区之外，按判题的方式加载 conftest 加载不到，错的实现照样失败；写到别的目录时同样", {
   skip: NO_SYMLINKS,
 }, async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-human-link-"));
@@ -431,7 +395,7 @@ test("写入人写测试之前，路径上被换成符号链接的目录与文�
         { cwd: root, stdio: "ignore" }
       );
     assert.throws(judge, "错的实现照样失败");
-    // 测量副本：同样不顺着链接写
+    // 写到别的目录：同样不顺着链接写
     const copy = join(base, "copy");
     mkdirSync(join(copy, "tests"), { recursive: true });
     execFileSync("ln", ["-s", outside, join(copy, "tests", "x")]);
@@ -550,10 +514,13 @@ test("残留的 git 锁文件：只在工作区下没有 git 进程在跑时删�
     const plant = () => {
       for (const l of locks) writeFileSync(join(root, l), "");
     };
-    const ws = new StreamWorkspace(localStreamShell(root));
+    const clearLocks = async () => {
+      const r = await localStreamShell(root).sh(STALE_GIT_LOCKS, { args: [root] });
+      assert.equal(r.exitCode, 0, r.stderr);
+    };
     await gitRunningIn(join(base, "elsewhere"));
     plant();
-    await ws.removeStaleGitLocks();
+    await clearLocks();
     assert.deepEqual(
       locks.filter((l) => existsSync(join(root, l))),
       [],
@@ -561,7 +528,7 @@ test("残留的 git 锁文件：只在工作区下没有 git 进程在跑时删�
     );
     await gitRunningIn(root);
     plant();
-    await ws.removeStaleGitLocks();
+    await clearLocks();
     assert.deepEqual(
       locks.filter((l) => existsSync(join(root, l))),
       locks,
@@ -573,65 +540,10 @@ test("残留的 git 锁文件：只在工作区下没有 git 进程在跑时删�
   }
 });
 
-test("丢弃作废的尝试：agent 留下的分支、标签、stash、rebase-apply、worktree 登记、未跟踪的嵌套仓库与打进包的提交，丢弃后都找不到；工作区之外的路径不碰；main 与不超过断点的开工树引用保留；不在作业容器里时临时目录不动", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-discard-"));
-  try {
-    const root = join(base, "ws");
-    const tmp = join(base, "tmp");
-    mkdirSync(tmp);
-    git(base, "init", "-q", "-b", "main", "ws");
-    const g = (...a: string[]) => git(root, "-c", "user.name=a", "-c", "user.email=a@x", ...a);
-    writeFileSync(join(root, "a.txt"), "base\n");
-    g("add", "-A");
-    g("commit", "-qm", "base");
-    const head = git(root, "rev-parse", "HEAD");
-    g("update-ref", "refs/pigeon/step-start/s1/1", head);
-    g("update-ref", "refs/pigeon/step-start/s1/2", head);
-    // 作废的那次尝试：落地提交 N 并打进包，再回到 head（N 只剩 reflog 与包里）
-    writeFileSync(join(root, "a.txt"), "solution\n");
-    g("commit", "-qam", "N");
-    const landed = git(root, "rev-parse", "HEAD");
-    g("repack", "-a", "-d", "-q");
-    g("tag", "t1");
-    g("branch", "b1");
-    g("reset", "-q", "--hard", head);
-    // stash 着一份在途改动
-    writeFileSync(join(root, "a.txt"), "in flight\n");
-    g("stash", "-q");
-    // rebase-apply 里以补丁文件存着改动
-    mkdirSync(join(root, ".git", "rebase-apply"));
-    writeFileSync(join(root, ".git", "rebase-apply", "0001"), "patch\n");
-    // worktree（工作区之内与之外各一个）与未跟踪的嵌套仓库
-    g("worktree", "add", "-q", join(root, "inner-wt"), "b1");
-    g("worktree", "add", "-q", "--detach", join(base, "wt"), head);
-    git(root, "init", "-q", "nested");
-    writeFileSync(join(tmp, "left.txt"), "x\n");
-    const ws = new StreamWorkspace(localStreamShell(root), { tmpDir: tmp });
-    await ws.discardAttempt(head, 1);
-    assert.deepEqual(
-      git(root, "for-each-ref", "--format=%(refname)").split("\n").sort(),
-      ["refs/heads/main", "refs/pigeon/step-start/s1/1"],
-      "只剩 main 与不超过断点的开工树引用"
-    );
-    assert.equal(git(root, "rev-parse", "HEAD"), head);
-    assert.equal(git(root, "stash", "list"), "", "stash 清掉");
-    assert.equal(existsSync(join(root, ".git", "rebase-apply")), false, "rebase-apply 清掉");
-    assert.equal(existsSync(join(root, "inner-wt")), false, "工作区之内的 worktree 删掉");
-    assert.equal(existsSync(join(base, "wt")), true, "工作区之外的路径不碰（只摘掉登记）");
-    assert.equal(git(root, "worktree", "list", "--porcelain").split("\n\n").length, 1);
-    assert.equal(existsSync(join(root, "nested")), false, "未跟踪的嵌套仓库删掉");
-    assert.throws(() => git(root, "cat-file", "-e", landed), "打进包的提交 N 也回收掉");
-    // 不在跑批器起的作业容器里（本机）：临时目录一个文件都不动（在作业容器里清空，见真容器的用例）
-    assert.deepEqual(readdirSync(tmp), ["left.txt"], "本机的临时目录不动");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
 // 闸门（IN_STREAM_CONTAINER）的两个条件：本机有没有 /.dockerenv
 const HAS_DOCKERENV = existsSync("/.dockerenv");
 
-test("闸门：不在跑批器起的作业容器里（缺环境变量或缺 /.dockerenv，或两者都缺），清空临时目录不动手", async () => {
+test("闸门：不在跑批器起的作业容器里（缺环境变量或缺 /.dockerenv，或两者都缺），清家目录下的用户级文件不动手", async () => {
   const cases: [string, boolean, string | false][] = [
     ["两者都缺", false, HAS_DOCKERENV ? "本机有 /.dockerenv" : false],
     ["只有环境变量", true, HAS_DOCKERENV ? "本机有 /.dockerenv" : false],
@@ -641,26 +553,30 @@ test("闸门：不在跑批器起的作业容器里（缺环境变量或缺 /.do
     if (skip !== false) continue;
     const base = mkdtempSync(join(tmpdir(), "pigeon-stream-gate-"));
     const saved = process.env.PIGEON_STREAM_CONTAINER;
+    const savedHome = process.env.HOME;
     try {
       const root = join(base, "ws");
       mkdirSync(root);
-      // 清空的目标永远是用例自建的临时目录
-      const tmp = join(base, "tmp");
-      mkdirSync(tmp);
-      writeFileSync(join(tmp, "keep.txt"), "x\n");
+      // 清理的目标永远是用例自建的家目录（本机的 sh 继承这里的 HOME）
+      const home = join(base, "home");
+      mkdirSync(home);
+      writeFileSync(join(home, ".mypy.ini"), "[mypy]\n");
+      process.env.HOME = home;
       if (setVar) process.env.PIGEON_STREAM_CONTAINER = "1";
       else delete process.env.PIGEON_STREAM_CONTAINER;
-      await new StreamWorkspace(localStreamShell(root), { tmpDir: tmp }).clearTmpDir();
-      assert.deepEqual(readdirSync(tmp), ["keep.txt"], what);
+      await new StreamWorkspace(localStreamShell(root)).clearHomePaths([".mypy.ini"]);
+      assert.deepEqual(readdirSync(home), [".mypy.ini"], what);
     } finally {
       if (saved === undefined) delete process.env.PIGEON_STREAM_CONTAINER;
       else process.env.PIGEON_STREAM_CONTAINER = saved;
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
       rmSync(base, { recursive: true, force: true });
     }
   }
 });
 
-// 一个只有一个提交的工作区，另建第 1 步的开工树引用指向另一个提交；返回提交号与 git 助手
+// 一个两个提交的工作区（start → landed），另建第 1 步的开工树引用指向 start；返回提交号与 git 助手
 function symrefRepo(base: string) {
   const root = join(base, "ws");
   git(base, "init", "-q", "-b", "main", "ws");
@@ -676,7 +592,7 @@ function symrefRepo(base: string) {
   return { root, g, start, landed, ws: new StreamWorkspace(localStreamShell(root)) };
 }
 
-test("丢弃作废的尝试不跟随符号引用：agent 让某条引用或开工树引用指向 main，丢弃后 main 与落地提交都在；HEAD 被设成指向保留引用时，回退与挪回起点都不改写那条引用", async () => {
+test("挪回起点不跟随符号引用：agent 让某条引用或开工树引用指向 main、或让 HEAD 指向保留的开工树引用，挪回后 HEAD 指回 main、main 指向起点，保留的引用未被改写", async () => {
   for (const what of [
     "分支指向 main",
     "开工树引用指向 main",
@@ -688,87 +604,45 @@ test("丢弃作废的尝试不跟随符号引用：agent 让某条引用或开�
       if (what === "分支指向 main") r.g("symbolic-ref", "refs/heads/x", "refs/heads/main");
       if (what === "开工树引用指向 main")
         r.g("symbolic-ref", "refs/pigeon/step-start/s1/9", "refs/heads/main");
-      if (what === "HEAD 指向保留的开工树引用") {
+      if (what === "HEAD 指向保留的开工树引用")
         r.g("symbolic-ref", "HEAD", "refs/pigeon/step-start/s1/1");
-        await r.ws.normalizeTo(r.landed);
-        assert.equal(
-          git(r.root, "rev-parse", "refs/pigeon/step-start/s1/1"),
-          r.start,
-          `${what}：挪回起点不改写`
-        );
-        r.g("symbolic-ref", "HEAD", "refs/pigeon/step-start/s1/1");
-      }
-      await r.ws.discardAttempt(r.landed, 1);
-      assert.equal(
-        git(r.root, "rev-parse", "refs/heads/main"),
-        r.landed,
-        `${what}：main 还在、指向落地提交`
-      );
+      await r.ws.normalizeTo(r.landed);
       assert.equal(
         git(r.root, "symbolic-ref", "HEAD"),
         "refs/heads/main",
         `${what}：HEAD 指回 main`
       );
+      assert.equal(git(r.root, "rev-parse", "refs/heads/main"), r.landed, `${what}：main 指向起点`);
       assert.equal(
         git(r.root, "rev-parse", "refs/pigeon/step-start/s1/1"),
         r.start,
         `${what}：保留的引用未被改写`
       );
-      git(r.root, "cat-file", "-e", r.landed);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
   }
 });
 
-test("落地提交记在 main 上：agent 切到别的分支或让 HEAD 游离后提交，挪回起点再落地，main 等于落地提交、导出的流历史里有它", async () => {
+test("agent 切到别的分支或让 HEAD 游离后提交：挪回起点后 main 指向起点、改动留在工作区，开工树与收工树之差含它提交的改动", async () => {
   for (const how of ["别的分支", "HEAD 游离"] as const) {
-    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-land-main-"));
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-commit-diff-"));
     try {
       const r = symrefRepo(base);
+      const start = await r.ws.worktreeTree();
       if (how === "别的分支") r.g("checkout", "-q", "-b", "b");
       else r.g("checkout", "-q", "--detach");
       writeFileSync(join(r.root, "a.txt"), "agent\n");
       r.g("commit", "-qam", "agent");
+      writeFileSync(join(r.root, "b.txt"), "uncommitted\n");
       await r.ws.normalizeTo(r.landed);
-      const next = await r.ws.land("step 2");
-      assert.equal(git(r.root, "rev-parse", "refs/heads/main"), next, `${how}：main 等于落地提交`);
-      const bundle = join(base, "history.bundle");
-      writeFileSync(bundle, await r.ws.exportBundle());
-      assert.match(
-        git(r.root, "bundle", "list-heads", bundle),
-        new RegExp(`${next} refs/heads/main`),
-        how
-      );
+      assert.equal(git(r.root, "rev-parse", "HEAD"), r.landed, `${how}：HEAD 在起点`);
+      const diff = (await r.ws.diffTrees(start, await r.ws.worktreeTree())).toString("utf8");
+      assert.match(diff, /^\+agent$/m, `${how}：提交了的改动在内`);
+      assert.match(diff, /^\+uncommitted$/m, `${how}：没提交的改动也在内`);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
-  }
-});
-
-test("丢弃时 worktree 路径先规范化：登记里写成 工作区/sub/../../外面 的路径不按字面当作工作区之内删掉", {
-  skip: NO_SYMLINKS,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-wt-norm-"));
-  try {
-    const r = symrefRepo(base);
-    // sub 是已提交的目录：回退后仍在，按字面拼出的 工作区/sub/../../outside 才解析得到外面
-    mkdirSync(join(r.root, "sub"));
-    writeFileSync(join(r.root, "sub", "keep.txt"), "x\n");
-    r.g("add", "-A");
-    r.g("commit", "-qm", "sub");
-    const head = git(r.root, "rev-parse", "HEAD");
-    const outside = join(base, "outside");
-    r.g("worktree", "add", "-q", "--detach", outside, head);
-    // 把登记里的路径改写成按字面落在工作区前缀下、实际在外面的写法
-    writeFileSync(
-      join(r.root, ".git", "worktrees", "outside", "gitdir"),
-      `${r.root}/sub/../../outside/.git\n`
-    );
-    await r.ws.discardAttempt(head, 1);
-    assert.equal(existsSync(outside), true, "工作区之外的目录不删");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
   }
 });
 
@@ -793,7 +667,8 @@ test("跑批器的 git 操作不执行 agent 在 git 配置里设下的程序：
     writeFileSync(join(r.root, ".gitattributes"), "*.txt filter=evil2\n");
     writeFileSync(join(r.root, "a.txt"), "agent change\n");
     await r.ws.normalizeTo(r.landed);
-    await r.ws.land("step 2");
+    await r.ws.worktreeTree();
+    await r.ws.stageAll();
     assert.equal(existsSync(join(base, "ran")), false, "agent 的程序没被执行");
     const cfg = readFileSync(join(r.root, ".git", "config"), "utf8");
     assert.doesNotMatch(cfg, /filter|program|evil/, "配置里的 filter 与 gpg.program 被清掉");
@@ -806,48 +681,12 @@ test("跑批器的 git 操作不执行 agent 在 git 配置里设下的程序：
   }
 });
 
-test("清空测量副本之前放回属主权限：副本里有 agent 放的不可写目录（0555，里面有文件），照样清空、不让作业停下", {
-  skip: NO_SYMLINKS,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-measure-perm-"));
-  const copy = join(base, "measure");
-  try {
-    const root = join(base, "ws");
-    git(base, "init", "-q", "ws");
-    mkdirSync(join(copy, "locked"), { recursive: true });
-    writeFileSync(join(copy, "locked", "f"), "x\n");
-    execFileSync("chmod", ["0555", join(copy, "locked")]);
-    const ws = new StreamWorkspace(localStreamShell(root), { gateReport: join(base, "gate.xml") });
-    await ws.clearArtifacts(copy);
-    assert.deepEqual(readdirSync(copy), []);
-  } finally {
-    execFileSync("chmod", ["-R", "u+rwX", base]);
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("落地以本步起点为父提交：判题期间 HEAD 被移动（多了提交），落地提交的父提交仍是起点，多出的提交不进 main", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-land-base-"));
-  try {
-    const r = symrefRepo(base);
-    // 判题期间 agent 的代码提交了一次
-    r.g("commit", "-q", "--allow-empty", "-m", "stray");
-    writeFileSync(join(r.root, "a.txt"), "solution\n");
-    const next = await r.ws.land("step 2", r.landed);
-    assert.equal(git(r.root, "rev-parse", `${next}^`), r.landed, "父提交是起点");
-    assert.equal(git(r.root, "rev-parse", "refs/heads/main"), next);
-    assert.doesNotMatch(git(r.root, "log", "--format=%s", "main"), /stray/, "多出的提交不进 main");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("净化 git 配置不依赖 git 读得懂配置：.git/config 被写坏，回退照常成功、配置被重写", async () => {
+test("净化 git 配置不依赖 git 读得懂配置：.git/config 被写坏，挪回起点照常成功、配置被重写", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-broken-config-"));
   try {
     const r = symrefRepo(base);
     writeFileSync(join(r.root, ".git", "config"), "[[[ not a config\n");
-    await r.ws.rollback(r.landed);
+    await r.ws.normalizeTo(r.landed);
     assert.match(
       readFileSync(join(r.root, ".git", "config"), "utf8"),
       /repositoryformatversion = 0/

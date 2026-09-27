@@ -1,10 +1,10 @@
-// 延续式跑批器（决策 126 修订、140、142、143、145、147、148；第三、四、六节）：agent 按历史顺序一步一步地做，
-// 每一步都在它自己上一步留下的代码上接着做。每条流乘以每个条件（乘以第几遍）为一个独立作业，共用工作队列并行（缺省 4 路）。
-// 每一步：回到本步起点 → 程序写入该步人的测试、测试辅助与环境文件 → 按条件运行 agent → 恢复 agent 动过的测试 →
-// 判定（题：判题测试；维护步：验证门）→ 落地提交（没做好也照样落地，后续在它之上接着做）→ 在另一份副本上做全量测量 →
-// 失败归因 → 导出流历史 → 写结果行。被打断的一步整题作废、回到本步起点、不留结果行（144）；崩溃后从结果行与导出的
-// 流历史续跑。agent 怎么跑（Pigeon 在进程内、最简 agent 在宿主上）与模型怎么接入都在 StepAgent 之后，跑批器不感知。
-import { execFile } from "node:child_process";
+// 提交流跑批器（决策 193、212、215、216；144、145、147 等沿用）：固定起点——每一步都从人在该步之前的代码（step.parent）
+// 新开一个干净容器开工，跨步只保留作业目录（治理根）里的会话与记忆，被 git 忽略的文件、/tmp 与家目录都随容器丢弃。
+// 步为清单里的题按时间接成的一条流（维护步、套用步与跳过步都不跑，重置点不再切分）。每个条件（乘以第几遍）为一个独立作业，
+// 共用工作队列并行（缺省 4 路）。每一步：取或恢复记忆快照 → 新开容器到起点 → 程序写入该步人的环境文件（人的测试与测试
+// 辅助文件判题时才放入，198）→ 按条件运行 agent → 存下 agent 的改动（diff）→ 恢复 agent 动过的测试、写入人在该步的
+// 测试 → 判题前清理（195）→ 判题（本题测试全过即做成）→ 就地全量测量 → 写结果行 → 丢弃容器。被打断的一步整题作废、
+// 不留行（144），重做时另开容器；崩溃后从结果行续跑。agent 怎么跑与模型怎么接入都在 StepAgent 之后，跑批器不感知。
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -22,21 +22,23 @@ import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { type LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
-import {
-  attributeFailure,
-  type CreatedRefs,
-  createdByDiff,
-  extractMissing,
-} from "./stream-attribution.ts";
 import type { HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import type { HarnessRef } from "./stream-harness.ts";
-import { type StreamManifest, type StreamStep, stepsOf } from "./stream-manifest.ts";
+import {
+  chainedTasks,
+  DEFAULT_TASK_PROMPT_FORMAT,
+  type StreamManifest,
+  type StreamStep,
+  TASK_CHAIN_ID,
+  type TaskPromptFormat,
+  taskPromptOf,
+} from "./stream-manifest.ts";
 import { countPassRate, type TestCaseResult, taskPassRate } from "./stream-measure.ts";
+import { snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
 import {
   allPassed,
   countQuality,
   failedStepsOf,
-  gateFromSteps,
   pinTestConfigFromTree,
   STRANDS_CASE_TIMEOUT_SEC,
   type StreamRepoRuntime,
@@ -65,21 +67,55 @@ import {
 } from "./stream-workspace.ts";
 import { runWorkQueue } from "./work-queue.ts";
 
-// 四个条件（126 修订、140）：完整 Pigeon 开回炉；去掉验证门即不开回炉；最简 agent 另走启动器。
-// 结构化记忆删除（决策 174）后 memory 开关没有接线，过渡期 full 与 no-memory 行为相同；条件表之后另行重做
+// 条件表（193、194、217）：记忆的 2 × 2——能否检索历史会话（sessionSearch）× 有无推送记忆（pushedMemory），四格都是
+// 完整 Pigeon、开验证门与 3 轮回炉；最简 agent 另走启动器、不开回炉，作外部参照
 export interface ConditionSpec {
   name: StreamCondition;
   agent: "pigeon" | "minimal";
-  // 回炉轮数上限（143）；0 为不开回炉。回炉到上限仍不通过即以失败收尾、代码照样落地（172 / 173）
+  // 回炉轮数上限（143）；0 为不开回炉。回炉到上限仍不通过即以失败收尾（172 / 173）
   repairRounds: number;
-  memory: boolean;
+  // 能否检索历史会话：关掉时 Pigeon 不注册两件会话检索工具，系统提示不提它们
+  sessionSearch: boolean;
+  // 有无推送记忆：透传给 headless（推送记忆另行施工，打开时 headless 暂时报错）
+  pushedMemory: boolean;
 }
 
 export const CONDITION_SPECS: Record<StreamCondition, ConditionSpec> = {
-  full: { name: "full", agent: "pigeon", repairRounds: 3, memory: true },
-  "no-memory": { name: "no-memory", agent: "pigeon", repairRounds: 3, memory: false },
-  "no-gate": { name: "no-gate", agent: "pigeon", repairRounds: 0, memory: false },
-  minimal: { name: "minimal", agent: "minimal", repairRounds: 0, memory: false },
+  "search-push": {
+    name: "search-push",
+    agent: "pigeon",
+    repairRounds: 3,
+    sessionSearch: true,
+    pushedMemory: true,
+  },
+  "search-only": {
+    name: "search-only",
+    agent: "pigeon",
+    repairRounds: 3,
+    sessionSearch: true,
+    pushedMemory: false,
+  },
+  "push-only": {
+    name: "push-only",
+    agent: "pigeon",
+    repairRounds: 3,
+    sessionSearch: false,
+    pushedMemory: true,
+  },
+  neither: {
+    name: "neither",
+    agent: "pigeon",
+    repairRounds: 3,
+    sessionSearch: false,
+    pushedMemory: false,
+  },
+  minimal: {
+    name: "minimal",
+    agent: "minimal",
+    repairRounds: 0,
+    sessionSearch: false,
+    pushedMemory: false,
+  },
 };
 
 // 每步总预算（147）：各条件同一个，包括轮数与墙钟，回炉的消耗计入其中；先按 150 轮、30 分钟，试跑后定死
@@ -89,7 +125,7 @@ export interface StepBudget {
 }
 
 // 每步预算（147 校准）：在正式实验的服务器上以完整 Pigeon 试跑 10 步，轮数与墙钟各取第 90 百分位（78 轮、约 14.3 分钟）
-// 乘 1.5，且分别不低于 150 轮、30 分钟，两项都由下限起作用，得 150 轮、30 分钟；四个条件同额，回炉的消耗计入其中
+// 乘 1.5，且分别不低于 150 轮、30 分钟，两项都由下限起作用，得 150 轮、30 分钟；各条件同额，回炉的消耗计入其中
 export const DEFAULT_STEP_BUDGET: StepBudget = { maxTurns: 150, wallClockMs: 30 * 60_000 };
 
 // agent 的命令在哪里执行
@@ -115,10 +151,11 @@ export interface StepAgentInput {
   abortSignal?: AbortSignal;
   // 经网关时，这个作业的模型接入地址（决策 155）
   modelBaseUrl?: string;
-  // 人在这一步的树里的测试与测试辅助文件：回炉验证前只还原（并计数）这些，agent 早先步骤落地的自己的测试不算
+  // 人在该步之前的树（起点）里的测试与测试辅助文件：回炉验证前只还原（并计数）这些——agent 改了人的旧测试即还原成
+  // 起点的版本；人在该步新写的测试 agent 看不到，不在其列（198）
   humanTestFiles?: ReadonlySet<string>;
-  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）、人在这一步的测试文件与人在这一步的树里的全部路径：回炉
-  // 验证前按与判题前同一规则删掉 agent 放的、覆盖人写测试的这类文件（人树里有的一律不删，例如仓库根的 conftest.py）
+  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）、起点树里人的测试文件与起点树里的全部路径：回炉验证前按与
+  // 判题前同一规则删掉 agent 放的、覆盖人写测试的这类文件（起点树里有的一律不删，例如仓库根的 conftest.py）
   autoloadedTestHelper?: string;
   humanTests?: readonly string[];
   humanTree?: readonly string[];
@@ -224,17 +261,12 @@ export interface StepAgent {
 export interface StreamEnvironment {
   ws: StreamWorkspace;
   target: AgentTarget;
-  // 测量副本放在哪里（容器内路径）
-  measureRoot: string;
   dispose(): Promise<void>;
 }
 
 export interface StreamEnvFactory {
-  // 新开：从流起点建；续跑：从导出的流历史恢复到断点
-  open(
-    job: StreamJobId,
-    init: { startCommit: string; resume?: { head: string; seq: number; bundle: Buffer } }
-  ): Promise<StreamEnvironment>;
+  // 为一步新开一个干净的工作区，检出人在该步之前的代码（固定起点，212）
+  open(job: StreamJobId, init: { startCommit: string }): Promise<StreamEnvironment>;
 }
 
 // 人的代码在某提交上跑给定测试的用例结果（全量测量的基准）
@@ -343,22 +375,23 @@ export interface RunStreamsOptions {
   conditions: readonly StreamCondition[];
   // 每个条件跑几遍（146 补跑时为 3）
   attempts?: number;
-  // 只跑这些流；缺省为清单里全部
-  streams?: readonly string[];
   // 并行作业数（缺省 4）
   concurrency?: number;
-  // 试跑：每条流只跑前 K 步（143、147 校准用）
+  // 试跑：只跑前 K 道题（143、147 校准用）
   maxSteps?: number;
   budget?: StepBudget;
   judgeTimeoutMs?: number;
   measureTimeoutMs?: number;
+  // 题面格式（198、213）：缺省给测试文件路径；给用例名时须由 shouldPassCases 给出每步要做到的用例（跑批器二接上）
+  promptFormat?: TaskPromptFormat;
+  shouldPassCases?: (step: StreamStep) => Promise<readonly string[]>;
   harnessRef: HarnessRef;
   log?: (line: string) => void;
   // 告警（缺省写标准错误输出）
   warn?: (line: string) => void;
   // 限额统一处理（决策 144、155）：每步前等放行、agent 运行时占一路；这一步撞上限额即作废、恢复后重做
   limits?: LimitController;
-  // 经网关时：轮数与 token 一律取网关的按作业计量，四个条件同一口径
+  // 经网关时：轮数与 token 一律取网关的按作业计量，各条件同一口径
   gateway?: StreamModelGateway;
   // 身份头的摘要与各 agent 的参数：原样记进每条结果行（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）
   runIdentity?: string;
@@ -413,6 +446,18 @@ export function lockOutDir(outDir: string): () => void {
   );
 }
 
+// 给用例名的题面要先算出每步要做到的用例（跑批器二）：没接上即拒绝开跑
+export function assertPromptFormatReady(
+  format: TaskPromptFormat,
+  shouldPassCases: RunStreamsOptions["shouldPassCases"]
+): void {
+  if (format === "test-cases" && shouldPassCases === undefined) {
+    throw new Error(
+      "给用例名的题面尚未实现：须先算出每步要做到的用例（跑批器二），目前只能给测试文件路径"
+    );
+  }
+}
+
 export async function runStreams(options: RunStreamsOptions): Promise<RunStreamsSummary> {
   const release = options.outDirLocked === true ? () => {} : lockOutDir(options.outDir);
   try {
@@ -423,19 +468,19 @@ export async function runStreams(options: RunStreamsOptions): Promise<RunStreams
 }
 
 async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsSummary> {
+  assertPromptFormatReady(
+    options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT,
+    options.shouldPassCases
+  );
   mkdirSync(options.outDir, { recursive: true });
   const resultsFile = path.join(options.outDir, "results.jsonl");
   sealTornTail(resultsFile);
   const reportFile = path.join(options.outDir, "report.md");
-  const streamIds = options.streams ?? options.manifest.streams.map((s) => s.id);
-  for (const id of streamIds) {
-    if (!options.manifest.streams.some((s) => s.id === id)) throw new Error(`清单里没有流 ${id}`);
-  }
   const attempts = options.attempts ?? 1;
   const jobs: StreamJobId[] = [];
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    for (const stream of streamIds) {
-      for (const condition of options.conditions) jobs.push({ stream, condition, attempt });
+    for (const condition of options.conditions) {
+      jobs.push({ stream: TASK_CHAIN_ID, condition, attempt });
     }
   }
   const summaries: StreamJobSummary[] = [];
@@ -450,15 +495,12 @@ async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsS
     }
     summaries.push(summary);
   });
-  const reportStreams = streamIds.map((id) => {
-    const steps = limitSteps(stepsOf(options.manifest, id), options.maxSteps);
-    return { id, lastSeq: steps.at(-1)?.seq ?? 0 };
-  });
+  const steps = limitSteps(chainedTasks(options.manifest), options.maxSteps);
   writeFileSync(
     reportFile,
     renderStreamReport(readStreamResults(resultsFile), {
-      title: `${options.manifest.repo}${options.maxSteps !== undefined ? `（试跑：每条流前 ${options.maxSteps} 步）` : ""}`,
-      streams: reportStreams,
+      title: `${options.manifest.repo}${options.maxSteps !== undefined ? `（试跑：只跑前 ${options.maxSteps} 道题）` : ""}`,
+      streams: [{ id: TASK_CHAIN_ID, lastSeq: steps.at(-1)?.seq ?? 0 }],
     })
   );
   return { resultsFile, reportFile, jobs: summaries };
@@ -466,30 +508,6 @@ async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsS
 
 function limitSteps(steps: StreamStep[], maxSteps: number | undefined): StreamStep[] {
   return maxSteps === undefined ? steps : steps.slice(0, maxSteps);
-}
-
-// 人的某步本应新建的：新增的源代码文件与源代码新增行里的顶层定义
-function createdFor(options: RunStreamsOptions, step: StreamStep): CreatedRefs {
-  const profile = options.runtime.profile;
-  const source = options.human
-    .changes(step.parent, step.commit)
-    .filter((f) => profile.classifyFile(f.path) === "source");
-  return createdByDiff({
-    addedFiles: source.filter((f) => f.status === "A").map((f) => f.path),
-    addedLines: options.human.addedLines(
-      step.parent,
-      step.commit,
-      source.filter((f) => f.status !== "D").map((f) => f.path)
-    ),
-  });
-}
-
-interface JobState {
-  head: string;
-  previous: StreamResultLine | undefined;
-  // 上一次测量时 agent 代码上通过的用例
-  agentPassing: Set<string>;
-  maintenanceCreated: CreatedRefs[];
 }
 
 async function runStreamJob(
@@ -501,22 +519,18 @@ async function runStreamJob(
   const agent = options.agents[spec.agent];
   if (agent === undefined)
     throw new Error(`条件 ${job.condition} 需要的 agent（${spec.agent}）没有接入`);
-  const segment = options.manifest.streams.find((s) => s.id === job.stream);
-  if (segment === undefined) throw new Error(`清单里没有流 ${job.stream}`);
-  const steps = limitSteps(stepsOf(options.manifest, job.stream), options.maxSteps);
-  // 作业目录即 agent 的治理根：条件 × 流 × 遍次各一个。会话检索读治理根里的以往会话，
-  // 所以只在同一条流里沿步累积，不跨条件、遍次或流串用；目录名必须同时含这三者
+  const steps = limitSteps(chainedTasks(options.manifest), options.maxSteps);
+  // 作业目录即 agent 的治理根：条件 × 遍次各一个。会话与记忆只在同一作业里沿步累积，不跨条件或遍次串用；
+  // 目录名必须同时含这两者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });
   // 分步验证配置另存一份在作业的治理根，供事后查看这个作业验证的是什么（Pigeon 的验证不读它：跑批器每步把分步配置
-  // 直接交给步 agent）；不写进容器工作区，免得被当成 agent 的改动落地提交
+  // 直接交给步 agent）；不写进容器工作区
   mkdirSync(path.join(jobDir, ".pigeon"), { recursive: true });
   writeAtomic(
     path.join(jobDir, ".pigeon", "verify.json"),
     `${JSON.stringify(verifyConfigFile(options.runtime.verifySteps, options.judgeTimeoutMs ?? 1_800_000), null, 2)}\n`
   );
-  const bundleFile = path.join(jobDir, "history.bundle");
-  const passingFile = (seq: number) => path.join(jobDir, `passing-${seq}.json`);
   // 每步完成时治理根里的会话文件清单：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出
   const sessionsFile = (seq: number) => path.join(jobDir, `sessions-${seq}.json`);
   const lines = readStreamResults(resultsFile);
@@ -525,141 +539,106 @@ async function runStreamJob(
   if (remaining.length === 0) return last?.seq ?? null;
   const log = (text: string) => options.log?.(`[${streamJobKey(job)}] ${text}`);
   const warn = options.warn ?? ((line: string) => process.stderr.write(`[跑批] ${line}\n`));
-  if (last !== undefined && !existsSync(bundleFile)) {
-    throw new Error(`续跑缺流历史：${bundleFile} 不存在（断点在第 ${last.seq} 步）`);
+  // 进程死在一步中途（被杀、整机重启）时，那次尝试的会话还在治理根里；续跑重做这一步之前同样移出
+  const committed =
+    last === undefined
+      ? new Set<string>()
+      : existsSync(sessionsFile(last.seq))
+        ? new Set(JSON.parse(readFileSync(sessionsFile(last.seq), "utf8")) as string[])
+        : undefined;
+  if (committed !== undefined) {
+    const moved = quarantineSessions(
+      options.outDir,
+      job,
+      jobDir,
+      committed,
+      `resume-after-${last?.seq ?? 0}-${Date.now()}`
+    );
+    if (moved > 0) log(`续跑：上次中断的一步留下 ${moved} 个会话文件，已移出治理根`);
   }
-  // 开容器（接管或重建）之前先看控制器：已停下（收到停止信号、每月额度用完）的不再开，免得开了又删
-  await options.limits?.ready();
-  const env = await options.envs.open(job, {
-    startCommit: segment.startCommit,
-    ...(last !== undefined
-      ? { resume: { head: last.head, seq: last.seq, bundle: readFileSync(bundleFile) } }
-      : {}),
-  });
-  try {
-    // 进程死在一步中途（被杀、整机重启）时，那次尝试的会话还在治理根里；续跑重做这一步之前同样移出
-    const committed =
-      last === undefined
-        ? new Set<string>()
-        : existsSync(sessionsFile(last.seq))
-          ? new Set(JSON.parse(readFileSync(sessionsFile(last.seq), "utf8")) as string[])
-          : undefined;
-    if (committed !== undefined) {
-      const moved = quarantineSessions(
-        options.outDir,
-        job,
-        jobDir,
-        committed,
-        `resume-after-${last?.seq ?? 0}-${Date.now()}`
-      );
-      if (moved > 0) log(`续跑：上次中断的一步留下 ${moved} 个会话文件，已移出治理根`);
-    }
-    const state: JobState = {
-      head: await env.ws.head(),
-      previous: last,
-      agentPassing:
-        last !== undefined && existsSync(passingFile(last.seq))
-          ? new Set(JSON.parse(readFileSync(passingFile(last.seq), "utf8")) as string[])
-          : new Set(),
-      maintenanceCreated: steps
-        .filter((s) => s.kind === "maintenance" && last !== undefined && s.seq <= last.seq)
-        .map((s) => createdFor(options, s)),
-    };
-    if (last !== undefined && state.head !== last.head) {
-      throw new Error(`续跑核对不符：工作区 HEAD 为 ${state.head}，断点行记的是 ${last.head}`);
-    }
-    const limits = options.limits;
-    for (const step of remaining) {
-      log(`第 ${step.seq} 步（${step.kind}）${step.subject.slice(0, 60)}`);
-      const epochAtStart = limits?.epoch ?? 0;
-      let row: StreamResultLine;
-      // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
-      let bareInterruptions = 0;
-      let signalledVoids = 0;
-      let queueVoids = 0;
-      let attempt = 0;
-      for (;;) {
-        await limits?.ready();
-        attempt += 1;
-        const sessionsBefore = new Set(sessionFilesOf(jobDir));
-        try {
-          row = await runStep(options, job, spec, agent, env, steps, step, state, jobDir);
-          // 这一步开始之后收到过停止信号：不论判题、测量进行到哪（停止信号可能打断了它们），这一步作废、不写行，
-          // 回到本步起点后作业在取下一步时停下
-          if (limits?.shutdownReason !== undefined) {
-            await env.ws.discardAttempt(state.head, step.seq - 1, env.measureRoot);
-            throw new StepInterruptedError(`第 ${step.seq} 步作废：${limits.shutdownReason}`, true);
-          }
-          break;
-        } catch (error) {
-          // 这一步作废（决策 144、160）：已回到本步起点、不留行，等放行后重做同一步
-          if (!(error instanceof StepInterruptedError)) throw error;
-          quarantineSessions(
-            options.outDir,
-            job,
-            jobDir,
-            sessionsBefore,
-            `step-${step.seq}-attempt-${attempt}`
-          );
-          if (error.queued) {
-            bareInterruptions = 0;
-            queueVoids += 1;
-            if (queueVoids >= QUEUE_VOID_STOP) {
-              throw new Error(
-                `第 ${step.seq} 步因排队超时累计作废 ${queueVoids} 次：停下作业（最后一次：${error.message}）`
-              );
-            }
-            if (queueVoids === QUEUE_VOID_WARN) {
-              warn(
-                `[${streamJobKey(job)}] 第 ${step.seq} 步因排队超时已累计作废 ${queueVoids} 次，仍在重做；累计 ${QUEUE_VOID_STOP} 次即停下这个作业`
-              );
-            }
-            log(
-              `第 ${step.seq} 步第 ${queueVoids} 次排队作废（不计入限额信号类的累计上限；累计 ${QUEUE_VOID_STOP} 次即停下）：${error.message}`
-            );
-            continue;
-          }
-          if (error.signalled) {
-            bareInterruptions = 0;
-            signalledVoids += 1;
-            if (signalledVoids >= SIGNALLED_VOID_STOP) {
-              throw new Error(
-                `第 ${step.seq} 步因限额信号或上游故障累计作废 ${signalledVoids} 次：停下作业（最后一次：${error.message}）`
-              );
-            }
-            if (signalledVoids === SIGNALLED_VOID_WARN) {
-              warn(
-                `[${streamJobKey(job)}] 第 ${step.seq} 步因限额信号或上游故障已累计作废 ${signalledVoids} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这个作业`
-              );
-            }
-            log(
-              `第 ${step.seq} 步撞上限额、上游故障或排队超时，作废，恢复后重做：${error.message}`
-            );
-            continue;
-          }
-          bareInterruptions += 1;
-          if (bareInterruptions > MAX_BARE_INTERRUPTIONS) {
-            throw new Error(
-              `第 ${step.seq} 步连续 ${bareInterruptions} 次被打断，期间没有限额信号或上游故障：停下作业（${error.message}）`
-            );
-          }
-          log(`第 ${step.seq} 步被打断，作废重做（第 ${bareInterruptions} 次）：${error.message}`);
+  const limits = options.limits;
+  for (const step of remaining) {
+    log(`第 ${step.seq} 步 ${step.subject.slice(0, 60)}`);
+    const epochAtStart = limits?.epoch ?? 0;
+    let row: StreamResultLine;
+    // 连续被打断、期间却没有任何限额信号或上游故障的次数：超过上限即停下作业，不无限重做
+    let bareInterruptions = 0;
+    let signalledVoids = 0;
+    let queueVoids = 0;
+    let attempt = 0;
+    for (;;) {
+      await limits?.ready();
+      attempt += 1;
+      // 记忆（191）：还没有这一步的快照即取一份；已有（作废重做、崩溃后续跑）即把记忆恢复成它
+      snapshotOrRestoreLearned(jobDir, step.seq);
+      const sessionsBefore = new Set(sessionFilesOf(jobDir));
+      try {
+        row = await runStep(options, job, spec, agent, steps, step, jobDir, log);
+        // 这一步开始之后收到过停止信号：不论判题、测量进行到哪（停止信号可能打断了它们），这一步作废、不写行，
+        // 作业在取下一步时停下
+        if (limits?.shutdownReason !== undefined) {
+          throw new StepInterruptedError(`第 ${step.seq} 步作废：${limits.shutdownReason}`, true);
         }
+        break;
+      } catch (error) {
+        // 这一步作废（决策 144、160）：容器已丢弃、不留行，等放行后另开容器重做同一步
+        if (!(error instanceof StepInterruptedError)) throw error;
+        quarantineSessions(
+          options.outDir,
+          job,
+          jobDir,
+          sessionsBefore,
+          `step-${step.seq}-attempt-${attempt}`
+        );
+        if (error.queued) {
+          bareInterruptions = 0;
+          queueVoids += 1;
+          if (queueVoids >= QUEUE_VOID_STOP) {
+            throw new Error(
+              `第 ${step.seq} 步因排队超时累计作废 ${queueVoids} 次：停下作业（最后一次：${error.message}）`
+            );
+          }
+          if (queueVoids === QUEUE_VOID_WARN) {
+            warn(
+              `[${streamJobKey(job)}] 第 ${step.seq} 步因排队超时已累计作废 ${queueVoids} 次，仍在重做；累计 ${QUEUE_VOID_STOP} 次即停下这个作业`
+            );
+          }
+          log(
+            `第 ${step.seq} 步第 ${queueVoids} 次排队作废（不计入限额信号类的累计上限；累计 ${QUEUE_VOID_STOP} 次即停下）：${error.message}`
+          );
+          continue;
+        }
+        if (error.signalled) {
+          bareInterruptions = 0;
+          signalledVoids += 1;
+          if (signalledVoids >= SIGNALLED_VOID_STOP) {
+            throw new Error(
+              `第 ${step.seq} 步因限额信号或上游故障累计作废 ${signalledVoids} 次：停下作业（最后一次：${error.message}）`
+            );
+          }
+          if (signalledVoids === SIGNALLED_VOID_WARN) {
+            warn(
+              `[${streamJobKey(job)}] 第 ${step.seq} 步因限额信号或上游故障已累计作废 ${signalledVoids} 次，仍在重做；累计 ${SIGNALLED_VOID_STOP} 次即停下这个作业`
+            );
+          }
+          log(`第 ${step.seq} 步撞上限额、上游故障或排队超时，作废，恢复后重做：${error.message}`);
+          continue;
+        }
+        bareInterruptions += 1;
+        if (bareInterruptions > MAX_BARE_INTERRUPTIONS) {
+          throw new Error(
+            `第 ${step.seq} 步连续 ${bareInterruptions} 次被打断，期间没有限额信号或上游故障：停下作业（${error.message}）`
+          );
+        }
+        log(`第 ${step.seq} 步被打断，作废重做（第 ${bareInterruptions} 次）：${error.message}`);
       }
-      row.limitPauses = limits?.pausesSince(epochAtStart) ?? [];
-      // 先存流历史与测量基线、后写结果行：两者之间崩溃时，断点行仍指向上一步，导出的历史里也有上一步的提交
-      writeAtomic(bundleFile, await env.ws.exportBundle());
-      writeAtomic(passingFile(step.seq), JSON.stringify([...state.agentPassing]));
-      writeAtomic(sessionsFile(step.seq), JSON.stringify(sessionFilesOf(jobDir)));
-      appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
-      state.previous = row;
-      state.head = row.head;
     }
-    return steps.at(-1)?.seq ?? null;
-  } finally {
-    // 因停止信号（停服、关机）停下的作业留着容器，重启后续跑接管它；其余情形照常删掉
-    if (options.limits?.shutdownReason === undefined) await env.dispose();
+    row.limitPauses = limits?.pausesSince(epochAtStart) ?? [];
+    // 先存会话清单、后写结果行：两者之间崩溃时，断点行仍指向上一步，续跑重做这一步
+    writeAtomic(sessionsFile(step.seq), JSON.stringify(sessionFilesOf(jobDir)));
+    appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
   }
+  return steps.at(-1)?.seq ?? null;
 }
 
 // 依赖环境选不出来（没有满足该步依赖声明的组合、lint 映射里没有该提交）：这一步作废，作业照常往下走
@@ -769,9 +748,9 @@ async function agentChangedDeclaration(
   }
 }
 
-// agent 不许改测试（决策 148）：它动过的测试与测试辅助文件，本步由程序写入的恢复成人的版本，其余恢复成本步起点的版本；
-// 它新建的测试文件保留（全量测量只跑人写的测试）。把测试或测试辅助文件改了名的（暂存的改名）：改名后的路径删掉，
-// 原路径另作一项、恢复成本步起点的版本
+// agent 不许改测试（决策 148）：它动过的测试与测试辅助文件，人在该步写入的换成人的版本，其余恢复成起点的版本；人在该步
+// 新写或改过的测试与测试辅助文件此时才写入（198：判题时才放入）。它新建的测试文件保留（全量测量只跑人写的测试）。
+// 把测试或测试辅助文件改了名的（暂存的改名）：改名后的路径删掉，原路径另作一项、恢复成起点的版本
 export async function restoreTests(
   options: Pick<RunStreamsOptions, "runtime" | "human">,
   ws: StreamWorkspace,
@@ -803,9 +782,8 @@ export async function restoreTests(
     (p) => options.human.show(step.commit, p)
   );
   // 会被测试框架自动加载、改变人写测试的收集与执行的文件（strands 的 conftest.py）：不在人在该步树里、且所在目录的
-  // 子树里有人在该步的测试文件的，判题之前删掉，也就不会落地；只作用于 agent 自己测试目录的保留。其余测试辅助（helper
-  // 模块、数据文件、__init__.py 等）是 agent 自己测试的依赖，不动。候选逐个文件列出（被忽略的也算：agent 可以改
-  // .gitignore 藏它）。测量副本另按人的测试集合同步（见 measure）
+  // 子树里有人在该步的测试文件的，判题之前删掉；只作用于 agent 自己测试目录的保留。其余测试辅助（helper 模块、数据
+  // 文件、__init__.py 等）是 agent 自己测试的依赖，不动。候选逐个文件列出（被忽略的也算：agent 可以改 .gitignore 藏它）
   const helper = options.runtime.autoloadedTestHelper;
   if (helper !== undefined) {
     const tree = options.human.tree(step.commit).map((e) => e.path);
@@ -813,6 +791,40 @@ export async function restoreTests(
     const humanTests = tree.filter((p) => profile.classifyFile(p) === "test");
     await removeCoveringHelpers(ws, helper, (p) => inTree.has(p), humanTests);
   }
+}
+
+// 判题与测量之前的清理（195 的补口）：agent 放下的、解释器启动时会被自动加载的文件（不在人在该步树里的）删掉；静态检查
+// 工具的配置写回人的版本、人树里没有的删掉；家目录下同类的用户级文件与目录删掉。运行方式没给这类清理的不做
+export async function cleanForJudging(
+  options: Pick<RunStreamsOptions, "runtime" | "human">,
+  ws: StreamWorkspace,
+  step: StreamStep
+): Promise<void> {
+  const hygiene = options.runtime.judgeHygiene;
+  if (hygiene === undefined) return;
+  const tree = options.human.tree(step.commit).map((e) => e.path);
+  const inTree = new Set(tree);
+  const inOrAboveTree = (p: string) => inTree.has(p) || tree.some((t) => t.startsWith(`${p}/`));
+  const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+  await ws.grantOwnerAccess();
+  const named = async (patterns: readonly string[]) => {
+    const found: string[] = [];
+    for (const pattern of patterns) found.push(...(await ws.pathsNamed(pattern)));
+    return [...new Set(found)];
+  };
+  await ws.removeTrees((await named(hygiene.startupHooks)).filter((p) => !inOrAboveTree(p)));
+  await ws.removeTrees((await named(hygiene.lintConfigs)).filter((p) => !inTree.has(p)));
+  await ws.applyHumanFiles(
+    tree
+      .filter((p) => hygiene.lintConfigs.includes(baseName(p)))
+      .map((p) => ({
+        path: p,
+        op: "write" as const,
+        kind: options.runtime.profile.classifyFile(p),
+      })),
+    (p) => options.human.show(step.commit, p)
+  );
+  await ws.clearHomePaths(hygiene.homePaths);
 }
 
 // 某提交上人写的全部测试文件：全量测量与提前单独算的人的基准用同一份，两边的用例集一致
@@ -829,29 +841,26 @@ export function humanTestsAt(
 
 interface Measurement {
   fullPassRate: NonNullable<StreamResultLine["fullPassRate"]>;
-  regressions: number;
   quality: NonNullable<StreamResultLine["quality"]>;
 }
 
-// 全量测量（145、148）：在从 HEAD 克隆的副本上补齐人截至该步的全部测试与测试辅助文件（没做出来的题的测试也在内），
-// 跑人写的全部测试；结果不进 agent 的会话
+// 全量测量（145、148）：判题之后就地进行（容器随这一步丢弃，不必另建副本）——工作区里的测试与测试辅助文件同步成人在该步
+// 的全部（agent 新建的删掉），跑人写的全部测试；结果不进 agent 的会话
 async function measure(
   options: RunStreamsOptions,
-  env: StreamEnvironment,
+  ws: StreamWorkspace,
   steps: readonly StreamStep[],
-  step: StreamStep,
-  state: JobState
+  step: StreamStep
 ): Promise<Measurement> {
-  const { ws } = env;
   const runtime = options.runtime;
-  const copy = await ws.prepareMeasureCopy(env.measureRoot, runtime.depsLinks);
+  // agent 新建的文件先暂存：同步时才能按类删掉未跟踪的测试文件
+  await ws.stageAll();
   const tree = options.human
     .tree(step.commit)
     .map((e) => ({ ...e, kind: runtime.profile.classifyFile(e.path) }))
     .filter((e) => e.kind === "test" || e.kind === "testaux");
-  // 副本里的测试与测试辅助文件与人的这一集合完全一致：agent 新建的（含 conftest.py 一类）先删掉，再写人的
   await ws.syncHumanFilesAt(
-    copy,
+    ws.root,
     tree,
     (p) => options.human.show(step.commit, p),
     (p) => {
@@ -859,13 +868,11 @@ async function measure(
       return kind === "test" || kind === "testaux" ? kind : null;
     }
   );
-  await syncEnv(options, ws, step.commit, copy);
   const tests = humanTestsAt(options.human, runtime, step.commit);
   // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例在分母里、计为未通过
   const run = await runtime.runCases(ws, tests, {
     timeoutMs: options.measureTimeoutMs ?? 1_800_000,
-    cwd: copy,
-    scratch: `${copy}/.git`,
+    scratch: `${ws.root}/.git`,
   });
   const agentCases = run.cases;
   // 分母固定在人这一侧（不在 agent 的代码上现收）：B 为人的代码上每遍都通过的用例，A 为人的代码上收集出的全部用例；
@@ -878,17 +885,11 @@ async function measure(
       ? c
       : { ...c, outcome: c.outcome === "passed" ? ("failed" as const) : c.outcome }
   );
-  const nowPassing = new Set(agentCases.filter((c) => c.outcome === "passed").map((c) => c.id));
-  let regressions = 0;
-  for (const id of state.agentPassing) {
-    if (humanPassing.has(id) && !nowPassing.has(id)) regressions++;
-  }
-  state.agentPassing = nowPassing;
-  const tasks = steps.filter((s) => s.kind === "task" && s.seq <= step.seq);
+  const tasks = steps.filter((s) => s.seq <= step.seq);
   const byTask = taskPassRate(tasks, humanCasesB, agentCases);
   const quality = async (check: StreamRepoRuntime["quality"]["type"]) => {
     if (check === null) return null;
-    const r = await ws.run(check.command, 900_000, copy);
+    const r = await ws.run(check.command, 900_000);
     return countQuality(check, r.output, r.exitCode);
   };
   return {
@@ -900,7 +901,6 @@ async function measure(
       humanRuns: human.runs,
       humanSlowest: human.slowest,
     },
-    regressions,
     quality: {
       typeErrors: await quality(runtime.quality.type),
       formatErrors: await quality(runtime.quality.format),
@@ -909,19 +909,33 @@ async function measure(
   };
 }
 
+// 这一步的题面（198、213）：提交信息加应通过的测试名单
+async function promptFor(options: RunStreamsOptions, step: StreamStep): Promise<string> {
+  const format = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
+  if (format === "test-files") return taskPromptOf(step.message, format, step.judgeTests);
+  assertPromptFormatReady(format, options.shouldPassCases);
+  return taskPromptOf(step.message, format, (await options.shouldPassCases?.(step)) ?? []);
+}
+
+// agent 设下、跑批器处理不了的访问障碍（列不出的目录、删不掉的链接）：这一步作废重做，不停作业
+function voidOnAccessError(seq: number, error: unknown): never {
+  if (error instanceof StreamWorkspaceAccessError) {
+    throw new StepInterruptedError(`第 ${seq} 步作废：${error.message}`, false);
+  }
+  throw error;
+}
+
 async function runStep(
   options: RunStreamsOptions,
   job: StreamJobId,
   spec: ConditionSpec,
   agent: StepAgent,
-  env: StreamEnvironment,
   steps: readonly StreamStep[],
   step: StreamStep,
-  state: JobState,
-  jobDir: string
+  jobDir: string,
+  log: (text: string) => void
 ): Promise<StreamResultLine> {
   const started = Date.now();
-  const { ws } = env;
   const base = {
     repo: options.manifest.repo,
     stream: job.stream,
@@ -930,6 +944,7 @@ async function runStep(
     seq: step.seq,
     kind: step.kind,
     commit: step.commit,
+    start: step.parent,
     harnessRef: options.harnessRef,
     limitPauses: [],
     gateway: null,
@@ -938,62 +953,55 @@ async function runStep(
     runIdentity: options.runIdentity ?? null,
     agentSettings: options.agentSettings?.[spec.agent] ?? null,
   };
-  // 不做、不判的一行：跳过步，或因依赖环境选不出来而作废的步（回到本步起点、记下原因、沿用上一步的测量）
-  const notRun = (error?: string): StreamResultLine => ({
+  // 不判的一行：依赖环境选不出来而作废的步（记下原因，不计 agent 的用量）
+  const notRun = (envOpenMs: number, error: EnvSelectionError): StreamResultLine => ({
     ...base,
     outcome: "skipped",
-    head: state.head,
+    diff: null,
+    envOpenMs,
     judged: false,
     repairRounds: null,
     finalVerdict: null,
     humanTestRestores: null,
     agentChangedDeps: null,
-    fullPassRate: state.previous?.fullPassRate ?? null,
-    regressions: 0,
-    quality: state.previous?.quality ?? null,
+    fullPassRate: null,
+    quality: null,
     status: null,
     turns: 0,
     usage: ZERO_USAGE,
     agentWallMs: 0,
     wallMs: Date.now() - started,
-    attribution: null,
-    ...(error !== undefined ? { error } : {}),
+    error: `${error.message}（这一步作废）`,
   });
-  const voided = async (error: EnvSelectionError) => {
-    await ws.discardAttempt(state.head, step.seq - 1);
-    return notRun(`${error.message}（这一步作废）`);
-  };
-  // 回到本步起点：上一步结束时的 HEAD
-  await ws.rollback(state.head);
-  if (step.kind === "skip" || step.kind === "reset") return notRun();
-  await ws.applyHumanFiles(step.humanFiles, (p) => options.human.show(step.commit, p));
+  const prompt = await promptFor(options, step);
+  // 固定起点（193、212）：为这一步新开干净容器，检出人在该步之前的代码
+  const openedAt = Date.now();
+  const env = await options.envs.open(job, { startCommit: step.parent });
+  const envOpenMs = Date.now() - openedAt;
+  log(`第 ${step.seq} 步开容器 ${(envOpenMs / 1000).toFixed(1)} 秒`);
   try {
-    await syncEnv(options, ws, step.commit);
-  } catch (error) {
-    if (error instanceof EnvSelectionError) return voided(error);
-    if (error instanceof StreamWorkspaceAccessError) {
-      await ws.discardAttempt(state.head, step.seq - 1);
-      throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
+    const { ws } = env;
+    // 开工只写人在该步的环境文件；测试与测试辅助文件判题时才放入（198）
+    await ws.applyHumanFiles(
+      step.humanFiles.filter((f) => f.kind === "env"),
+      (p) => options.human.show(step.commit, p)
+    );
+    try {
+      await syncEnv(options, ws, step.commit);
+    } catch (error) {
+      if (error instanceof EnvSelectionError) return notRun(envOpenMs, error);
+      voidOnAccessError(step.seq, error);
     }
-    throw error;
-  }
-  let agentChangedDeps: boolean | null = null;
-  let result: StepAgentResult | null = null;
-  let gatewayFacts: StreamGatewayFacts | null = null;
-  let admissionWaitMs: number | null = null;
-  let judged = false;
-  let passed = false;
-  let judgeOutput = "";
-  let head: string;
-  if (step.kind === "apply") {
-    head = await ws.land(step.message, state.head);
-  } else {
+    const startTree = await ws.worktreeTree();
+    // 回炉验证前的保护按起点的树（8.2）：agent 改了人的旧测试即还原成起点的版本；人在该步新写的测试它看不到
+    const startPaths = options.human.tree(step.parent).map((e) => e.path);
+    const classify = (p: string) => options.runtime.profile.classifyFile(p);
     const key = streamJobKey(job);
     const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
       agent.run({
         job,
         step,
-        prompt: step.prompt ?? step.message,
+        prompt,
         condition: spec,
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
@@ -1004,160 +1012,115 @@ async function runStep(
         },
         workDir: jobDir,
         humanTestFiles: new Set(
-          options.human
-            .tree(step.commit)
-            .map((e) => e.path)
-            .filter((p) => {
-              const kind = options.runtime.profile.classifyFile(p);
-              return kind === "test" || kind === "testaux";
-            })
+          startPaths.filter((p) => classify(p) === "test" || classify(p) === "testaux")
         ),
         ...(options.runtime.autoloadedTestHelper !== undefined
           ? {
               autoloadedTestHelper: options.runtime.autoloadedTestHelper,
-              humanTests: humanTestsAt(options.human, options.runtime, step.commit),
-              humanTree: options.human.tree(step.commit).map((e) => e.path),
+              humanTests: startPaths.filter((p) => classify(p) === "test"),
+              humanTree: startPaths,
             }
           : {}),
         ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
         abortSignal,
       })
     );
-    result = admitted.result;
-    admissionWaitMs = admitted.admissionWaitMs;
-    const delta = admitted.delta;
+    let result = admitted.result;
     if (admitted.voidReasons.length > 0) {
-      // 作废重做：连同这次尝试在库里留下的痕迹（agent 的提交所在的 reflog、ORIG_HEAD、本步的开工树引用）一并丢掉
-      await ws.discardAttempt(state.head, step.seq - 1);
       throw new StepInterruptedError(
         `第 ${step.seq} 步作废：${admitted.voidReasons.join("；")}`,
         admitted.limitRelated,
         admitted.queueOnly
       );
     }
+    let gatewayFacts: StreamGatewayFacts | null = null;
+    const delta = admitted.delta;
     if (delta !== undefined) {
-      // 四个条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
-      const d = delta;
+      // 各条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
       gatewayFacts = {
-        queueMs: d.queueMs,
-        accountRequests: d.accountRequests,
-        peakInFlight: d.peakInFlight,
+        queueMs: delta.queueMs,
+        accountRequests: delta.accountRequests,
+        peakInFlight: delta.peakInFlight,
       };
       result = {
         ...result,
-        turns: d.requests,
+        turns: delta.requests,
         usage: {
           ...ZERO_USAGE,
-          input: d.input,
-          output: d.output,
-          cacheRead: d.cacheRead,
-          cacheWrite: d.cacheWrite,
-          totalTokens: d.input + d.output + d.cacheRead + d.cacheWrite,
+          input: delta.input,
+          output: delta.output,
+          cacheRead: delta.cacheRead,
+          cacheWrite: delta.cacheWrite,
+          totalTokens: delta.input + delta.output + delta.cacheRead + delta.cacheWrite,
         },
       };
     }
-    agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
-    await ws.normalizeTo(state.head);
+    const agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
+    // agent 自己提交、切分支或让 HEAD 游离过的，先挪回起点；再存下它相对开工时的改动（代替延续式的流历史）
+    await ws.normalizeTo(step.parent);
+    await ws.grantOwnerAccess();
+    const diffName = `step-${step.seq}.diff`;
+    mkdirSync(path.join(jobDir, "diffs"), { recursive: true });
+    writeAtomic(
+      path.join(jobDir, "diffs", diffName),
+      await ws.diffTrees(startTree, await ws.worktreeTree())
+    );
     try {
       await restoreTests(options, ws, step);
+      await cleanForJudging(options, ws, step);
     } catch (error) {
-      // agent 设下、跑批器处理不了的访问障碍（列不出的目录、删不掉的链接）：这一步作废重做，不停作业
-      if (!(error instanceof StreamWorkspaceAccessError)) throw error;
-      await ws.discardAttempt(state.head, step.seq - 1);
-      throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
+      voidOnAccessError(step.seq, error);
     }
     try {
       await syncEnv(options, ws, step.commit);
     } catch (error) {
-      if (error instanceof EnvSelectionError) return voided(error);
-      if (error instanceof StreamWorkspaceAccessError) {
-        await ws.discardAttempt(state.head, step.seq - 1);
-        throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
-      }
-      throw error;
+      if (error instanceof EnvSelectionError) return notRun(envOpenMs, error);
+      voidOnAccessError(step.seq, error);
     }
-    // 题：判题测试的逐用例结果（不看退出码）；维护步：验证门
-    if (step.kind === "task") {
-      const run = await options.runtime.runCases(ws, step.judgeTests, {
-        timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
-        scratch: `${ws.root}/.git`,
-      });
-      passed = allPassed(run);
-      judgeOutput = run.output;
-    } else {
-      // 维护步：这条流的分步验证（与回炉的验证、开跑前检查同一套），不用清单里冻结的验证命令——
-      // 两者一旦不一致，维护步的判定就与 agent 在回炉里被验证的不是同一件事
-      const judgement = await ws.run(
-        gateFromSteps(options.runtime.verifySteps),
-        options.judgeTimeoutMs ?? 1_800_000
-      );
-      passed = judgement.exitCode === 0 && !judgement.timedOut;
-      judgeOutput = judgement.output;
+    // 判题：本题测试的逐用例结果全过即做成（不看退出码）；两类用例与部分得分由跑批器二接上
+    const judged = await options.runtime.runCases(ws, step.judgeTests, {
+      timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
+      scratch: `${ws.root}/.git`,
+    });
+    let measured: Measurement;
+    try {
+      measured = await measure(options, ws, steps, step);
+    } catch (error) {
+      if (error instanceof EnvSelectionError) return notRun(envOpenMs, error);
+      voidOnAccessError(step.seq, error);
     }
-    judged = true;
-    // 回炉最终不通过也照样落地：这一步以失败收尾，下一步从 agent 的代码之上接着做（172 / 173）
-    head = await ws.land(step.message, state.head);
+    return {
+      ...base,
+      outcome: allPassed(judged) ? "passed" : "failed",
+      diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
+      envOpenMs,
+      judged: true,
+      repairRounds: result.repair?.rounds ?? null,
+      finalVerdict: result.repair?.finalVerdict ?? null,
+      humanTestRestores: result.repair === null ? null : (result.repair.humanTestRestores ?? 0),
+      agentChangedDeps,
+      fullPassRate: measured.fullPassRate,
+      quality: measured.quality,
+      status: result.status,
+      turns: result.turns,
+      usage: result.usage,
+      agentWallMs: result.wallMs,
+      wallMs: Date.now() - started,
+      gateway: gatewayFacts,
+      admissionWaitMs: admitted.admissionWaitMs,
+    };
+  } finally {
+    // 这一步的容器用完即弃：被忽略的文件、/tmp 与家目录都不跨步（212）
+    await env.dispose();
   }
-  let measured: Measurement;
-  try {
-    measured = await measure(options, env, steps, step, state);
-  } catch (error) {
-    // 测量时选不出依赖组合：与判题前同一口径作废——撤掉已落地的提交，回到本步起点
-    if (error instanceof StreamWorkspaceAccessError) {
-      await ws.discardAttempt(state.head, step.seq - 1, env.measureRoot);
-      throw new StepInterruptedError(`第 ${step.seq} 步作废：${error.message}`, false);
-    }
-    if (!(error instanceof EnvSelectionError)) throw error;
-    await ws.clearArtifacts(env.measureRoot);
-    return voided(error);
-  }
-  // 测量与判题的产物（测量副本、判题与验证门的报告）用完即清，不留给下一步的 agent
-  await ws.clearArtifacts(env.measureRoot);
-  const attribution = judged
-    ? attributeFailure({
-        passed,
-        missing: extractMissing(judgeOutput, ws.root),
-        maintenanceCreated: state.maintenanceCreated,
-        regressions: measured.regressions,
-      })
-    : null;
-  if (step.kind === "maintenance") state.maintenanceCreated.push(createdFor(options, step));
-  return {
-    ...base,
-    // 成败只看判题（题跑判题测试、维护步跑验证门），判的是落地的 agent 代码；回炉的最终结论另记在 finalVerdict
-    outcome: step.kind === "apply" ? "applied" : passed ? "passed" : "failed",
-    head,
-    judged,
-    repairRounds: result?.repair?.rounds ?? null,
-    finalVerdict: result?.repair?.finalVerdict ?? null,
-    humanTestRestores:
-      result?.repair === null || result?.repair === undefined
-        ? null
-        : (result.repair.humanTestRestores ?? 0),
-    agentChangedDeps,
-    fullPassRate: measured.fullPassRate,
-    regressions: measured.regressions,
-    quality: measured.quality,
-    status: result?.status ?? null,
-    turns: result?.turns ?? 0,
-    usage: result?.usage ?? ZERO_USAGE,
-    agentWallMs: result?.wallMs ?? 0,
-    wallMs: Date.now() - started,
-    attribution,
-    gateway: gatewayFacts,
-    admissionWaitMs,
-  };
 }
 
 // ---------- 容器实现 ----------
 
 export const STREAM_CONTAINER_ROOT = "/testbed";
-export const STREAM_MEASURE_ROOT = "/measure";
 
-// 每个作业一个断网容器。续跑时（进程被杀、整机重启之后）先接管已存在的流容器：停止的启动、仍在运行的重启（清掉上次
-// 留下的进程），核对它用的是当前镜像、库里有上一个完成步的提交，再把工作区回到那个提交（在途步的改动一律作废，
-// 与作废重做同一口径；会话由续跑时的清理移出治理根）。这样续跑的作业与没中断的作业一样保留容器里的被忽略文件等状态。
-// 没有残留容器、镜像不同或核对不上时，由镜像加导出的流历史重建
+// 每一步一个新开的断网容器（决策 212）：同名的旧容器（上一步的、作废尝试的，或进程被杀时留下的）先删掉，由镜像新起，
+// 经 bundle 送入人在该步之前的代码并清历史自验。容器随这一步结束丢弃，被 git 忽略的文件、/tmp 与家目录都不跨步
 export function dockerStreamEnvs(input: {
   image: string;
   human: HumanRepo;
@@ -1165,19 +1128,14 @@ export function dockerStreamEnvs(input: {
   prefix: string;
   docker?: readonly string[];
   runArgs?: readonly string[];
-  // 容器内的工作区根与测量副本目录（缺省 /testbed 与 /measure；本机测试指到临时目录）
+  // 容器内的工作区根（缺省 /testbed；本机测试指到临时目录）
   root?: string;
-  measureRoot?: string;
-  // 容器里的临时目录：丢弃作废的尝试时清空（正式跑批传 /tmp）；不给即不清
-  tmpDir?: string;
   log?: (line: string) => void;
   // 闸门不成立时的告警（缺省写标准错误，只报一次）
   warn?: (line: string) => void;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
   const root = input.root ?? STREAM_CONTAINER_ROOT;
-  const measureRoot = input.measureRoot ?? STREAM_MEASURE_ROOT;
-  let imageId: string | undefined;
   // 开好容器后探一次闸门：不成立（Podman、rootless 等没有 /.dockerenv，或缺少环境变量）即告警一次，说明后果
   let gateWarned = false;
   const warn = input.warn ?? ((line: string) => process.stderr.write(`[跑批] ${line}\n`));
@@ -1185,45 +1143,12 @@ export function dockerStreamEnvs(input: {
     if (gateWarned || (await ws.inStreamContainer())) return;
     gateWarned = true;
     warn(
-      `作业容器 ${container} 里闸门不成立（缺 PIGEON_STREAM_CONTAINER=1 或 /.dockerenv）：丢弃作废尝试时不清空 /tmp，清 agent 进程退回只按本步标记清，不带标记的后台进程清不到`
+      `作业容器 ${container} 里闸门不成立（缺 PIGEON_STREAM_CONTAINER=1 或 /.dockerenv）：判题前不清家目录下的用户级文件，清 agent 进程退回只按本步标记清，不带标记的后台进程清不到`
     );
   };
-  const envOf = (container: string, ws: StreamWorkspace): StreamEnvironment => ({
-    ws,
-    target: { container, root },
-    measureRoot,
-    dispose: () => removeWorkspaceContainer(container, docker),
-  });
   return {
     async open(job, init) {
       const container = `${input.prefix}-${jobDirName(job)}`;
-      if (init.resume !== undefined) {
-        const found = await containerStatus(container, docker);
-        imageId ??= await imageIdAsync(input.image, docker);
-        // 只接管用当前镜像、由跑批器带标志起的容器；先前未带标志起的，闸门在里面不成立，改由流历史重建
-        if (found !== null && found.image === imageId && found.marked) {
-          try {
-            await dockerCommand(docker, [
-              found.status === "running" ? "restart" : "start",
-              container,
-            ]);
-            const ws = new StreamWorkspace(
-              dockerStreamShell({ container, root, docker }),
-              input.tmpDir !== undefined ? { tmpDir: input.tmpDir } : {}
-            );
-            await ws.takeOver(init.resume.head, init.resume.seq, measureRoot);
-            input.log?.(
-              `[${container}] 接管已存在的容器（原为 ${found.status}），回到第 ${init.resume.head.slice(0, 9)} 提交`
-            );
-            await probeGate(container, ws);
-            return envOf(container, ws);
-          } catch (error) {
-            input.log?.(
-              `[${container}] 接管已存在的容器失败，改由流历史重建：${error instanceof Error ? error.message : String(error)}`
-            );
-          }
-        }
-      }
       await removeWorkspaceContainer(container, docker);
       await startWorkspaceContainer({
         image: input.image,
@@ -1239,67 +1164,22 @@ export function dockerStreamEnvs(input: {
           ...(input.runArgs ?? []),
         ],
       });
-      const ws = new StreamWorkspace(
-        dockerStreamShell({ container, root, docker }),
-        input.tmpDir !== undefined ? { tmpDir: input.tmpDir } : {}
-      );
+      const ws = new StreamWorkspace(dockerStreamShell({ container, root, docker }));
       try {
-        if (init.resume !== undefined) {
-          await ws.restoreFromBundle(init.resume.bundle, init.resume.head);
-          // 流历史里可能带着断点之后那一步落地的提交（导出流历史之后、写结果行之前被停）：同一口径丢掉
-          await ws.discardAttempt(init.resume.head, init.resume.seq);
-        } else await ws.initFromBundle(input.human.bundle(init.startCommit), init.startCommit);
+        await ws.initFromBundle(input.human.bundle(init.startCommit), init.startCommit);
       } catch (error) {
         await removeWorkspaceContainer(container, docker).catch(() => {});
         throw error;
       }
       await probeGate(container, ws);
-      return envOf(container, ws);
+      input.log?.(`[${container}] 新开到 ${init.startCommit.slice(0, 9)}`);
+      return {
+        ws,
+        target: { container, root },
+        dispose: () => removeWorkspaceContainer(container, docker),
+      };
     },
   };
-}
-
-function dockerCommand(docker: readonly string[], args: readonly string[]): Promise<string> {
-  const [program = "docker", ...pre] = docker;
-  return new Promise((resolve, reject) => {
-    execFile(
-      program,
-      [...pre, ...args],
-      { timeout: 120_000, windowsHide: true },
-      (error, stdout, stderr) => {
-        if (error !== null)
-          reject(new Error(`docker ${args[0]} 失败：${String(stderr).trim() || error.message}`));
-        else resolve(String(stdout));
-      }
-    );
-  });
-}
-
-// 容器的状态与所用镜像 ID；不存在为 null
-async function containerStatus(
-  container: string,
-  docker: readonly string[]
-): Promise<{ status: string; image: string; marked: boolean } | null> {
-  try {
-    const out = (
-      await dockerCommand(docker, [
-        "inspect",
-        "--format",
-        "{{.State.Status}}|{{.Image}}|{{range .Config.Env}}{{.}};{{end}}",
-        container,
-      ])
-    ).trim();
-    const [status = "", image = "", env = ""] = out.split("|");
-    // 是否由跑批器以 -e PIGEON_STREAM_CONTAINER=1 起的（先前版本起的容器没有，闸门在里面不成立）
-    const marked = env.split(";").includes("PIGEON_STREAM_CONTAINER=1");
-    return status === "" ? null : { status, image, marked };
-  } catch {
-    return null;
-  }
-}
-
-async function imageIdAsync(image: string, docker: readonly string[]): Promise<string> {
-  return (await dockerCommand(docker, ["image", "inspect", "--format", "{{.Id}}", image])).trim();
 }
 
 // 缓存结果的身份：镜像标识（镜像 ID，不用可变的标签）与命令摘要（人的基准为跑用例的方式，开跑前检查为检查门命令）
