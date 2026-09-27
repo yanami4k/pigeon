@@ -12,7 +12,7 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { verifyStepsDisplay } from "../state/verify-steps.ts";
-import { deterministicErrorOf, isContentRefusal } from "./runner.ts";
+import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
 import {

@@ -23,7 +23,7 @@ import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { type LimitController, QUEUE_VOID_MS } from "./model-limits.ts";
-import type { HarnessRef } from "./results.ts";
+import type { HarnessRef } from "./stream-identity.ts";
 import {
   attributeFailure,
   type CreatedRefs,

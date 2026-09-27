@@ -19,7 +19,6 @@ import {
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
-import { currentHarnessRef } from "./runner.ts";
 import { commandStepAgent, type PigeonStepAgentOptions, pigeonStepAgent } from "./stream-agents.ts";
 import {
   type BaselineCheck,
@@ -29,7 +28,7 @@ import {
 } from "./stream-baseline.ts";
 import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
-import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
+import { checkOrWriteIdentity, currentHarnessRef, manifestDigestOf } from "./stream-identity.ts";
 import type { StreamManifest } from "./stream-manifest.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
 import type { StreamCondition } from "./stream-results.ts";

@@ -3,7 +3,7 @@
 // 被限额打断的一步整题作废、不留行（144），因此这里没有错误行：有行即该步已完成。
 import { existsSync, readFileSync } from "node:fs";
 import type { TurnUsage } from "../state/runtime-events.ts";
-import type { HarnessRef } from "./results.ts";
+import type { HarnessRef } from "./stream-identity.ts";
 import type { FailureAttribution } from "./stream-attribution.ts";
 import type { StreamStepKind } from "./stream-manifest.ts";
 import type { CountPassRate } from "./stream-measure.ts";

@@ -11,8 +11,18 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
+import {
+  checkOrWriteIdentity,
+  currentHarnessRef,
+  type StreamRunIdentity,
+} from "./stream-identity.ts";
 import { DEFAULT_STEP_BUDGET } from "./stream-runner.ts";
+
+test("harness 版本：取本源码所在仓库的 HEAD 短号与是否有未提交改动", () => {
+  const ref = currentHarnessRef();
+  assert.match(ref.commit, /^[0-9a-f]{7,40}$|^unknown$/);
+  assert.equal(typeof ref.dirty, "boolean");
+});
 
 const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdentity => ({
   core: {
