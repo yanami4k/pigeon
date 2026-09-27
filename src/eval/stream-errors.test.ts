@@ -10,6 +10,8 @@ test("内容审核类拒答：只认审核文案；连接中断、限额与缺�
       '400 {"error":{"type":"content_filter","message":"The request was rejected because it was considered high risk"}}',
       true,
     ],
+    // 各分支单独成立：只带"high risk"的也认
+    ["The request was rejected because it was considered high risk", true],
     ["Connection error.", false],
     ['429 {"error":{"type":"rate_limit_error"}}', false],
     [undefined, false],
