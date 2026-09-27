@@ -124,6 +124,16 @@ class TestThirdPassDecision:
         assert res["bestReduction"] == pytest.approx(1 - math.sqrt(2 / 3))
         assert res["decision"] is True
 
+    def test_tau2_subtracts_half_v(self):
+        # 各格同题两遍之差 e = 2δ = 0.1、−0.1、0.2：四格合并的方差 0.18667/8 = 0.023333，v = 0.011667；
+        # 推送差因题而异 −0.1、0、0.1：s² = 0.01；τ² = s² − v/2 = 0.0041667（两遍平均后噪声为 v/2）
+        res = third_pass_decision(formal_two_pass([0.05, -0.05, 0.1], dp_spread=0.1))
+        assert res["v"] == pytest.approx(0.18666667 / 8 / 2)
+        push = res["byEffect"]["push"]
+        assert push["s2"] == pytest.approx(0.01)
+        assert push["tau2"] == pytest.approx(0.01 - res["v"] / 2)
+        assert push["reduction"] == pytest.approx(third_pass_reduction(0.01 - res["v"] / 2, res["v"]))
+
     def test_budget_boundary_inclusive(self):
         df = formal_two_pass([0.05, -0.05, 0.1])
         assert third_pass_decision(df, budget=33 + 16.5)["decision"] is True
