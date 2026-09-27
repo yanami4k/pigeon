@@ -7,7 +7,6 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { swebenchTemperature } from "../eval/swebench-source.ts";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
@@ -21,11 +20,6 @@ const noMcp = async (): Promise<McpSession> => ({
   connections: [],
   summary: () => ({ mcpTools: [], mcpServers: [] }),
   close: async () => {},
-});
-
-test("外部基准的采样温度缺省固定为 0；显式给出的值原样沿用", () => {
-  assert.equal(swebenchTemperature(undefined), 0);
-  assert.equal(swebenchTemperature(0.4), 0.4);
 });
 
 function git(cwd: string, args: string[]): string {

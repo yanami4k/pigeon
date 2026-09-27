@@ -154,7 +154,7 @@ export default {
       name: "eval-below-actors",
       severity: "error",
       comment:
-        "eval（M6.5：任务目录、快照准备、验证器、runner 与报告，决策 046 / 057）可依赖 state / persistence / " +
+        "eval（延续式跑批：出题、人的基准、跑批器、模型网关与报告）可依赖 state / persistence / " +
         "tools / orchestration / application 及以下；不触达 Actor 层（cli/tui），由 cli 调用（022 修订）。",
       from: { path: "^src/eval/", pathNot: "\\.test\\.ts$" },
       to: {

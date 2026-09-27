@@ -21,6 +21,7 @@ import {
   commandStepAgent,
   pigeonStepAgent,
   STREAM_WORK_DIRECTIVE,
+  streamTemperature,
 } from "./stream-agents.ts";
 import type { StepAgentInput } from "./stream-runner.ts";
 import { CONDITION_SPECS } from "./stream-runner.ts";
@@ -1429,4 +1430,9 @@ test("作业容器里（真容器）：丢弃作废尝试时清空临时目录�
       // 容器没起来
     }
   }
+});
+
+test("Pigeon 条件的采样温度缺省固定为 0；显式给出的值原样沿用", () => {
+  assert.equal(streamTemperature(undefined), 0);
+  assert.equal(streamTemperature(0.4), 0.4);
 });

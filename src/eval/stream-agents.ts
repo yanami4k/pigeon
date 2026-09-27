@@ -31,6 +31,13 @@ import {
 export const STREAM_WORK_DIRECTIVE =
   "Your task is to make changes to non-test files in the repository at /testbed in order to implement the change described in the user message, in a way that is general and consistent with the codebase.";
 
+// Pigeon 条件的采样温度（110，原外部基准的口径，决策 205 随旧跑批退役搬到提交流）：缺省固定为 0；要改必须由调用方显式给出
+export const STREAM_DEFAULT_TEMPERATURE = 0;
+
+export function streamTemperature(requested: number | undefined): number {
+  return requested ?? STREAM_DEFAULT_TEMPERATURE;
+}
+
 export interface PigeonStepAgentOptions {
   // 固定的模型接入（不经网关时）
   streamFn?: StreamFn;

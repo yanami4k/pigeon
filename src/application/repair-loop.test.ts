@@ -15,7 +15,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { summarizeProcess } from "../eval/process.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -163,14 +162,12 @@ test("回炉一轮修好：第一次验证失败、反馈发回同一会话，�
     );
     assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).label, "Passed");
     assert.equal(result.turns, 4, "指标按整步汇总：两次 Run 共 4 轮");
-    // 对比尝试的轮次与过程指标同样按整步：两次 Run 各一次 edit_file
+    // 对比尝试的轮次与账本里的工具调用同样按整步：两次 Run 各一次 edit_file
     assert.equal(buildTaskAttempt({ governanceRoot: repo.root, session }).turns, 4);
     assert.equal(
-      summarizeProcess({
-        sessionsDir: join(repo.root, ".pigeon", "sessions"),
-        sessionId: result.sessionId,
-        editMode: "replace",
-      }).tools.edit_file?.calls,
+      session.runtimeEvents.filter(
+        (record) => record.kind === "tool.settled" && record.payload.toolName === "edit_file"
+      ).length,
       2
     );
     assert.deepEqual(repairStepOutcome(session), {

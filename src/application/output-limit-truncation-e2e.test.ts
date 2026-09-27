@@ -1,12 +1,11 @@
 // 截断与熔断核实（决策 063 施工口径）：模型回复以 length 停止且带工具调用时——
 // a. 工具不执行，文件不变；b. 被截断的调用计入上游拦截熔断，同一工具连续 3 次被截断后 Run 中止并留下熔断记录；
-// c. 过程指标的撞输出上限轮数计数正确。
+// c. 撞输出上限的轮数与被截断的调用在账本里如实记下。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { summarizeProcess } from "../eval/process.ts";
 import { materializeSession } from "../persistence/event-log.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { runHeadless } from "./headless.ts";
@@ -68,15 +67,19 @@ test("截断与熔断：length 停止的工具调用不执行、文件不变；�
     assert.equal(session.breakers[0]?.count, 3);
     assert.deepEqual(result.failure, { category: "cancelled", breaker: true });
 
-    // c. 过程指标：3 轮撞输出上限，edit_file 3 次调用全部报错并归"输出上限截断"
-    const metrics = summarizeProcess({
-      sessionsDir,
-      sessionId: result.sessionId,
-      editMode: "replace",
-    });
-    assert.equal(metrics.outputLimitTurns, 3);
-    assert.deepEqual(metrics.tools.edit_file, { calls: 3, errors: 3 });
-    assert.equal(metrics.editErrors["output-limit"], 3);
+    // c. 撞输出上限的轮数与被截断的调用：3 轮以 length 收尾，edit_file 3 次调用全部落定为出错
+    assert.equal(stopReasons.filter((reason) => reason === "length").length, 3);
+    const settled = session.runtimeEvents.flatMap((record) =>
+      record.kind === "tool.settled" ? [record.payload] : []
+    );
+    assert.deepEqual(
+      settled.map((payload) => [payload.toolName, payload.isError]),
+      [
+        ["edit_file", true],
+        ["edit_file", true],
+        ["edit_file", true],
+      ]
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

@@ -3,8 +3,6 @@
 // 跨边界的失败模式（超时后的孤儿进程、退出码保真、输出截断、路径映射）各由实现自己保证并各有测试。
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
-import { WorkspacePathNotFoundError } from "./paths.ts";
-
 // 一次执行的进程参数：direct 直接给出程序与参数；shell 与 cmd.exe 启动器由工具按平台拼好后同样以此形态交来
 export interface HostExecPlan {
   program: string;
@@ -106,61 +104,4 @@ export interface HostSyncResult {
 export interface FileHistoryEntry {
   commit: string;
   path: string;
-}
-
-// 写保护命中——域错误（模型可以换个文件改），带归类标记
-export class WorkspaceReadonlyError extends Error {
-  readonly pigeonToolErrorKind = "domain";
-}
-
-// 写保护包装：给定的工作区相对路径经本接口一律不可写。用于外部基准的测试文件——判分脚本会先复位这些文件
-// 再打官方测试补丁，改动不作数，还可能让补丁打不上。经命令改动拦不住，由任务源在取 diff 时排除同一批路径兜底
-export function withReadonlyPaths(
-  host: WorkspaceHost,
-  relativePaths: readonly string[],
-  reason: string
-): WorkspaceHost {
-  if (relativePaths.length === 0) {
-    return host;
-  }
-  // 受保护路径的规范形式：目标存在才解析得出；不存在的每次写入时重试（之后可能被命令创建）
-  const resolved = new Map<string, string>();
-  const protectedTargets = async (): Promise<Map<string, string>> => {
-    for (const relative of relativePaths) {
-      if (resolved.has(relative)) {
-        continue;
-      }
-      try {
-        resolved.set(relative, await host.resolveExisting(relative));
-      } catch (error) {
-        // 目标不存在：无从写入，放行别的写入。其余失败（执行端不可用、越界、不可读）说明判不了这次写的是不是
-        // 受保护文件——拒绝写入，而不是当作不受保护放行
-        if (!(error instanceof WorkspacePathNotFoundError)) {
-          throw new Error(
-            `无法确认受保护路径 ${relative} 的位置（${error instanceof Error ? error.message : String(error)}），为免改到它，拒绝这次写入`
-          );
-        }
-      }
-    }
-    return resolved;
-  };
-  return {
-    platform: host.platform,
-    root: host.root,
-    resolveExisting: (inputPath) => host.resolveExisting(inputPath),
-    isFile: (resolvedPath) => host.isFile(resolvedPath),
-    readText: (resolvedPath) => host.readText(resolvedPath),
-    readTextSync: (inputPath) => host.readTextSync(inputPath),
-    exec: (plan, options) => host.exec(plan, options),
-    listFiles: (limit) => host.listFiles(limit),
-    findLauncherScript: (program, env) => host.findLauncherScript(program, env),
-    async writeText(resolvedPath, content) {
-      for (const [relative, target] of await protectedTargets()) {
-        if (target === resolvedPath) {
-          throw new WorkspaceReadonlyError(`${relative} 不可修改：${reason}`);
-        }
-      }
-      await host.writeText(resolvedPath, content);
-    },
-  };
 }

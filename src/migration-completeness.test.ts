@@ -9,7 +9,6 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
-import { EVAL_TASK_VERSION, EvalTaskSchema } from "./eval/task.ts";
 import {
   STRUCTURED_MEMORY_CACHE_VERSION,
   StructuredMemoryCacheFileSchema,
@@ -220,22 +219,6 @@ const CASES: VersionedSchemaCase[] = [
     current: EVENT_ENVELOPE_VERSION,
     v1: () => ({ ...eventEnvelopeV1(), kind: "run.created", payload: null }),
     migrate: validateOnly(EventEnvelopeSchema),
-  },
-  {
-    constant: "EVAL_TASK_VERSION",
-    current: EVAL_TASK_VERSION,
-    v1: () => ({
-      version: 1,
-      id: "fix-a",
-      instructions: "task.md",
-      repo: { path: ".", ref: "HEAD" },
-      budget: { maxTurns: 1, wallClockMs: 1 },
-      verifier: { command: ["node", "verify.mjs"], timeoutMs: 1 },
-      assets: [],
-      tags: [],
-      holdout: false,
-    }),
-    migrate: validateOnly(EvalTaskSchema),
   },
 ];
 

@@ -6,11 +6,10 @@
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runForkCommand } from "../application/fork-command.ts";
-import { evalVerdictLabel, failureBadge } from "../application/format.ts";
+import { failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import {
@@ -33,10 +32,8 @@ import {
 } from "../application/structured-memory.ts";
 import { sessionRuntimeScope } from "../application/worker-scope.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
-import { renderEditModeComparison } from "../eval/compare.ts";
-import { localTaskSource } from "../eval/local-source.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
-import { DEFAULT_OUTAGE, runEval } from "../eval/runner.ts";
+import { streamTemperature } from "../eval/stream-agents.ts";
 import {
   installTerminationHandler,
   runStreamBaselines,
@@ -52,18 +49,11 @@ import {
 import { markHumanGateFailures, type StreamManifest } from "../eval/stream-manifest.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
-import { swebenchTaskSource, swebenchTemperature } from "../eval/swebench-source.ts";
-import { EVAL_CONDITIONS, type EvalCondition, loadEvalTasks } from "../eval/task.ts";
 import { DEFAULT_GATEWAY_MODEL_ID } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
-import {
-  EDIT_MODES,
-  type EditMode,
-  isEditMode,
-  LEGACY_RESULT_EDIT_MODE,
-} from "../tools/edit-mode.ts";
+import { EDIT_MODES, type EditMode, isEditMode } from "../tools/edit-mode.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
 import { runReplayCommand } from "./replay.ts";
@@ -418,103 +408,6 @@ async function runMain(argv: string[]): Promise<void> {
   process.exitCode = HEADLESS_EXIT_CODES[result.status];
 }
 
-// pigeon eval <任务目录> --out <输出目录> [--runs N] --stream-fn <模块路径> [--yolo] [--thinking <档位>]
-//   [--provider <p>] [--model <m>] [--skill <eval/skills/<name> 目录>] [--conditions none,candidate,approved]：
-// Eval 冒烟（M6.5 S4，决策 059 / 060）——任务目录可以是任务集或单个任务；Skill 目录缺省取任务集同级 skills/ 下
-// 唯一的那个；三个条件的 skillRoots 分别为空、<skill>/candidate、<skill>/approved；results.jsonl 与 report.md
-// 写在输出目录，实验会话在输出目录的 .pigeon/ 下；重跑同一输出目录跳过已有的行
-async function evalMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval <任务目录> --out <输出目录> [--runs N] --stream-fn <模块路径> [--yolo] " +
-    "[--thinking <档位>] [--skill <Skill 目录>] [--conditions none,candidate,approved] [--edit-mode hashline|replace] " +
-    "[--max-output-tokens <n>]";
-  let tasksDir: string | undefined;
-  let outDir: string | undefined;
-  let runs = 3;
-  let skillDir: string | undefined;
-  let conditions: EvalCondition[] | undefined;
-  let editMode: EditMode | undefined;
-  const modelArgv: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg === "--out") {
-      outDir = argv[++i];
-    } else if (arg === "--skill") {
-      skillDir = argv[++i];
-    } else if (arg === "--runs") {
-      runs = Number(argv[++i]);
-      if (!Number.isInteger(runs) || runs < 1) {
-        throw new Error(`--runs 需要正整数（${usage}）`);
-      }
-    } else if (arg === "--edit-mode") {
-      editMode = parseEditMode(argv[++i], usage);
-    } else if (arg === "--conditions") {
-      const values = (argv[++i] ?? "").split(",").filter((value) => value !== "");
-      const unknown = values.filter(
-        (value) => !(EVAL_CONDITIONS as readonly string[]).includes(value)
-      );
-      if (values.length === 0 || unknown.length > 0) {
-        throw new Error(`--conditions 只接受 ${EVAL_CONDITIONS.join("/")}（${usage}）`);
-      }
-      conditions = values as EvalCondition[];
-    } else if (!arg.startsWith("--") && tasksDir === undefined) {
-      tasksDir = arg;
-    } else {
-      modelArgv.push(arg);
-      const next = argv[i + 1];
-      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
-        modelArgv.push(next);
-        i++;
-      }
-    }
-  }
-  if (tasksDir === undefined || outDir === undefined || outDir === "") {
-    throw new Error(usage);
-  }
-  const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
-  const tasks = loadEvalTasks(tasksDir);
-  if (tasks.length === 0) {
-    throw new Error(`任务目录下没有任务：${tasksDir}`);
-  }
-  const resolvedSkill = path.resolve(skillDir ?? defaultSkillDir(tasksDir));
-  // 展示路径取 eval/ 所在目录的相对路径（如 eval/skills/<name>/candidate），随 run.started 的 Skill 清单落盘
-  const labelBase = path.dirname(path.dirname(path.dirname(resolvedSkill)));
-  const rootOf = (stage: "candidate" | "approved") => {
-    const dir = path.join(resolvedSkill, stage);
-    return { path: dir, label: path.relative(labelBase, dir).split(path.sep).join("/") };
-  };
-  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
-  const summary = await runEval({
-    source: localTaskSource(tasks),
-    skill: { candidate: rootOf("candidate"), approved: rootOf("approved") },
-    outDir,
-    runs,
-    streamFn,
-    yolo: flags.yolo,
-    provider: flags.provider,
-    modelId: flags.modelId,
-    ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
-    ...(conditions !== undefined ? { conditions } : {}),
-    ...(editMode !== undefined ? { editMode } : {}),
-    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
-    ...(flags.temperature !== undefined ? { temperature: flags.temperature } : {}),
-    onResult: (line) => {
-      writeOut(
-        `[eval] ${line.taskId} ｜ ${line.condition} ｜ ${line.editMode ?? LEGACY_RESULT_EDIT_MODE} ｜ 第 ${line.attempt} 次 ｜ ${line.status} ｜ ` +
-          `${evalVerdictLabel(line.verdict)}${line.falsePositive ? "（误报）" : ""} ｜ ${line.turns} 轮 ｜ ` +
-          `token ${line.usage.totalTokens} ｜ 会话 ${line.sessionId}${line.error !== undefined ? ` ｜ ${line.error}` : ""}\n`
-      );
-    },
-  });
-  writeOut(
-    `[eval] 完成：本次运行 ${summary.ran} 次，跳过已有 ${summary.skipped} 次；` +
-      `结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`
-  );
-}
-
 // pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> --image <镜像> --out <清单文件>
 //   [--test-timeout-sec N]：延续式实验出题（决策 127、141、153）——在断网的参考容器里逐提交测判题探针与格式化比对，
 // 按写死的规则出流清单；清单与探针原始记录各存一个文件
@@ -736,7 +629,7 @@ async function evalStreamMain(argv: string[], trial = false): Promise<void> {
         provider: "kimi-coding",
         modelId,
         // 与外部基准同一口径：缺省固定温度 0
-        temperature: swebenchTemperature(flags.temperature),
+        temperature: streamTemperature(flags.temperature),
         ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
       }
@@ -863,130 +756,6 @@ function evalStreamImageContextMain(argv: string[]): void {
   process.stdout.write(`${written.join("\n")}\n`);
 }
 
-// pigeon eval swebench --dataset <JSONL> --out <输出目录> --work-dir <判分工作目录> --python <解释器> --stream-fn <模块路径>
-//   [--instances a,b,c] [--concurrency N] [--max-turns N] [--wall-clock-min N] [--container-memory <如 3g>] [--yolo] …：
-// 外部基准跑批（M9，决策 097 / 102）——任务源换成 SWE-bench Verified，其余与 pigeon eval 同一个 runner：只跑无经验条件，
-// 每题一次；agent 在该实例的评测容器里干活，收工取 diff 交官方判分器；重跑同一输出目录只补跑没有结果的题
-async function evalSwebenchMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval swebench --dataset <JSONL> --out <输出目录> --work-dir <判分工作目录> --python <解释器> " +
-    "--stream-fn <模块路径> [--instances a,b,c] [--concurrency N] [--temperature <0-2，缺省 0>] [--max-turns N] [--wall-clock-min N] " +
-    "[--container-memory <上限>] [--judge-script <路径>] [--judge-proxy <地址|gateway:端口>] [--edit-mode hashline|replace] [--yolo]";
-  const values = new Map<string, string>();
-  const own = new Set([
-    "--dataset",
-    "--out",
-    "--work-dir",
-    "--python",
-    "--instances",
-    "--concurrency",
-    "--max-turns",
-    "--wall-clock-min",
-    "--container-memory",
-    "--judge-script",
-    "--judge-proxy",
-    "--edit-mode",
-  ]);
-  const modelArgv: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === undefined) {
-      continue;
-    }
-    if (own.has(arg)) {
-      const value = argv[++i];
-      if (value === undefined) {
-        throw new Error(`${arg} 需要取值（${usage}）`);
-      }
-      values.set(arg, value);
-    } else {
-      modelArgv.push(arg);
-      const next = argv[i + 1];
-      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
-        modelArgv.push(next);
-        i++;
-      }
-    }
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") {
-      throw new Error(`缺 ${name}（${usage}）`);
-    }
-    return value;
-  };
-  const positive = (name: string, fallback: number): number => {
-    const raw = values.get(name);
-    if (raw === undefined) {
-      return fallback;
-    }
-    const value = Number(raw);
-    if (!Number.isInteger(value) || value < 1) {
-      throw new Error(`${name} 需要正整数（${usage}）`);
-    }
-    return value;
-  };
-  const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
-  const editModeValue = values.get("--edit-mode");
-  const memory = values.get("--container-memory");
-  const source = swebenchTaskSource({
-    datasetFile: required("--dataset"),
-    workDir: required("--work-dir"),
-    python: required("--python"),
-    judgeScript:
-      values.get("--judge-script") ??
-      fileURLToPath(new URL("../../eval/swebench/judge.py", import.meta.url)),
-    budget: {
-      maxTurns: positive("--max-turns", 80),
-      wallClockMs: positive("--wall-clock-min", 20) * 60_000,
-    },
-    ...(values.has("--instances")
-      ? {
-          instanceIds: required("--instances")
-            .split(",")
-            .filter((id) => id !== ""),
-        }
-      : {}),
-    ...(memory !== undefined ? { containerRunArgs: ["--memory", memory] } : {}),
-    // 只作用于判分阶段的评测容器；agent 的工作区容器不受影响
-    ...(values.has("--judge-proxy") ? { judgeProxy: required("--judge-proxy") } : {}),
-  });
-  const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
-  const summary = await runEval({
-    source,
-    outDir: required("--out"),
-    runs: 1,
-    conditions: ["none"],
-    concurrency: positive("--concurrency", 1),
-    streamFn,
-    yolo: flags.yolo,
-    provider: flags.provider,
-    modelId: flags.modelId,
-    ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
-    ...(editModeValue !== undefined ? { editMode: parseEditMode(editModeValue, usage) } : {}),
-    ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
-    // 110：外部基准缺省固定温度 0，要改必须显式传 --temperature
-    temperature: swebenchTemperature(flags.temperature),
-    // 各路共用一个工作队列；模型服务持续不可用时暂停再取题，用满暂停次数就停止（退出码 3，之后同目录续跑）
-    outage: { ...DEFAULT_OUTAGE },
-    onResult: (line) => {
-      writeOut(
-        `[eval] ${line.taskId} ｜ ${line.status} ｜ ${evalVerdictLabel(line.verdict)} ｜ ${line.turns} 轮 ｜ ` +
-          `token ${line.usage.totalTokens} ｜ ${Math.round((line.wallMs ?? 0) / 1000)} 秒 ｜ 会话 ${line.sessionId}` +
-          `${line.error !== undefined ? ` ｜ ${line.error}` : ""}\n`
-      );
-    },
-  });
-  writeOut(
-    `[eval] 完成：本次运行 ${summary.ran} 次，跳过已有 ${summary.skipped} 次；` +
-      `结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`
-  );
-  if (summary.stopped !== undefined) {
-    writeOut(`[eval] 已停止取新题：${summary.stopped}\n`);
-    process.exitCode = 3;
-  }
-}
-
 function parseEditMode(value: string | undefined, usage: string): EditMode {
   if (value === undefined || !isEditMode(value)) {
     throw new Error(`--edit-mode 只接受 ${EDIT_MODES.join("/")}（${usage}）`);
@@ -994,68 +763,10 @@ function parseEditMode(value: string | undefined, usage: string): EditMode {
   return value;
 }
 
-// pigeon eval compare --baseline <目录> --candidate <目录> [--condition none] [--out <文件>]：编辑模式对照报告
-// （决策 061）——两个 Eval 输出目录按编辑模式汇总与逐任务对比，缺省写到候选目录下的 compare.md
-function evalCompareMain(argv: string[]): void {
-  const usage =
-    "用法：pigeon eval compare --baseline <目录> --candidate <目录> [--condition none] [--out <文件>]";
-  let baselineDir: string | undefined;
-  let candidateDir: string | undefined;
-  let condition: EvalCondition = "none";
-  let outFile: string | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--baseline") {
-      baselineDir = argv[++i];
-    } else if (arg === "--candidate") {
-      candidateDir = argv[++i];
-    } else if (arg === "--condition") {
-      const value = argv[++i];
-      if (value === undefined || !(EVAL_CONDITIONS as readonly string[]).includes(value)) {
-        throw new Error(`--condition 只接受 ${EVAL_CONDITIONS.join("/")}（${usage}）`);
-      }
-      condition = value as EvalCondition;
-    } else if (arg === "--out") {
-      outFile = argv[++i];
-    } else {
-      throw new Error(`未知参数：${arg}（${usage}）`);
-    }
-  }
-  if (baselineDir === undefined || candidateDir === undefined) {
-    throw new Error(usage);
-  }
-  const report = renderEditModeComparison({ baselineDir, candidateDir, condition });
-  const target = outFile ?? path.join(candidateDir, "compare.md");
-  writeFileSync(target, report);
-  writeOut(`[eval compare] 报告 ${target}\n`);
-}
-
-// 缺省 Skill 目录：任务集同级 skills/ 下唯一的子目录
-function defaultSkillDir(tasksDir: string): string {
-  const resolved = path.resolve(tasksDir);
-  const tasksRoot = existsSync(path.join(resolved, "task.json"))
-    ? path.dirname(resolved)
-    : resolved;
-  const skillsRoot = path.join(path.dirname(tasksRoot), "skills");
-  const names = existsSync(skillsRoot)
-    ? readdirSync(skillsRoot, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-    : [];
-  if (names.length !== 1) {
-    throw new Error(`无法确定 Skill 目录：${skillsRoot} 下应恰有一个子目录，请用 --skill 指定`);
-  }
-  return path.join(skillsRoot, names[0] ?? "");
-}
-
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警
   for (const warning of probeUpstreamVersions().warnings) {
     process.stderr.write(`${warning}\n`);
-  }
-  if (argv[0] === "eval" && argv[1] === "compare") {
-    evalCompareMain(argv.slice(2));
-    return;
   }
   if (argv[0] === "eval" && argv[1] === "stream") {
     await evalStreamMain(argv.slice(2));
@@ -1075,14 +786,6 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "stream-manifest") {
     await evalStreamManifestMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "swebench") {
-    await evalSwebenchMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval") {
-    await evalMain(argv.slice(1));
     return;
   }
   if (argv[0] === "run") {
