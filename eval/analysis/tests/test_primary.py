@@ -50,6 +50,9 @@ class TestSelection:
         res = analyze_primary(make_table(recs), with_mixed=False, **FAST)
         assert res["fEmptyTasks"] == [3]
         assert res["validTasks"] == [1, 2]
+        # F 为空的题单列，不算缺失题，也不因此把结论降格
+        assert res["missingTasks"] == []
+        assert res["exploratory"] is False
         assert res["effects"]["push"]["estimate"] == pytest.approx(0.4)
 
     def test_f_empty_row_score_is_nan_even_if_given(self):
