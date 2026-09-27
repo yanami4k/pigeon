@@ -75,6 +75,20 @@ export function cellScore(
   };
 }
 
+// 无法建立两类用例基线的步数（agent 照跑、不判分，不进主判据）
+export function unbuildableSteps(
+  lines: readonly StreamResultLine[],
+  condition: StreamCondition,
+  attempt: number
+): number {
+  return lines.filter(
+    (l) =>
+      l.condition === condition &&
+      l.attempt === attempt &&
+      typeof l.baselineUnavailable === "string"
+  ).length;
+}
+
 export interface PairedDiff {
   condition: StreamCondition;
   // 两遍都有得分的步数
@@ -173,17 +187,17 @@ export function renderStreamReport(
   const segHead = segments.map((s) => `${s.id}（第 ${s.firstSeq}–${s.lastSeq} 步）`);
 
   out.push(
-    "## 每步得分（要做到的用例通过比例，各步等权；要做到的为零的步不计）",
+    "## 每步得分（要做到的用例通过比例，各步等权；要做到的为零的步与无法建立基线的步不计）",
     "",
-    `| 条件 | 遍 | 合并 | ${segHead.map((h) => `${h} | `).join("")}做成步数 | 不许挂的失败合计 | 要做到的为零的步 | 已判步数 |`,
-    `|---|---|---|${segments.map(() => "---|").join("")}---|---|---|---|`
+    `| 条件 | 遍 | 合并 | ${segHead.map((h) => `${h} | `).join("")}做成步数 | 不许挂的失败合计 | 要做到的为零的步 | 已判步数 | 无法建立基线的步 |`,
+    `|---|---|---|${segments.map(() => "---|").join("")}---|---|---|---|---|`
   );
   for (const c of conditions) {
     for (const a of attemptsOf(judged, c)) {
       const all = cellScore(lines, c, a);
       const bySeg = segments.map((s) => cellScore(lines, c, a, s));
       out.push(
-        `| ${c} | ${a} | ${pct(all.mean)}（${all.scored} 步） | ${bySeg.map((s) => `${pct(s.mean)}（${s.scored} 步） | `).join("")}${all.solved}/${all.scored} | ${all.passToPassFailed} | ${all.zeroFailToPass} | ${all.judged} |`
+        `| ${c} | ${a} | ${pct(all.mean)}（${all.scored} 步） | ${bySeg.map((s) => `${pct(s.mean)}（${s.scored} 步） | `).join("")}${all.solved}/${all.scored} | ${all.passToPassFailed} | ${all.zeroFailToPass} | ${all.judged} | ${unbuildableSteps(lines, c, a)} |`
       );
     }
   }

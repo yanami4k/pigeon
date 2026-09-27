@@ -35,6 +35,7 @@ import {
   markHumanGateFailures,
   type StreamManifest,
   TASK_CHAIN_SCOPE,
+  TASK_PROMPT_LAYOUT,
 } from "./stream-manifest.ts";
 import { learnedDirOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
 import { gateFromSteps, runJunitOnce, strandsRuntime } from "./stream-profiles.ts";
@@ -333,6 +334,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           passToPass: ["src/keep.test.sh::case"],
           excludedFlaky: [],
           failToPassOutsideJudgeFiles: 0,
+          unbuildable: null,
         }
       );
       assert.equal(
@@ -1211,6 +1213,52 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("题面两段名单（①）：要做到的用例有落在本题新写或改过的测试文件之外的，另列第二段（测试文件路径去重排序，或用例名）；这些文件开工时就在工作区里；没有这类用例的题只有一段", async () => {
+    // 起点就有的两个测试依赖第 1 步才新建的 a.txt：起点上失败、人的代码上通过，人在第 1 步没改它们
+    const needsAlpha = "grep -q alpha src/a.txt 2>/dev/null\n";
+    for (const format of ["test-files", "test-cases"] as const) {
+      const t = await toy(undefined, {
+        "src/z.test.sh": needsAlpha,
+        "src/other.test.sh": needsAlpha,
+      });
+      try {
+        const present: boolean[] = [];
+        const agent = scriptedAgent((input) => {
+          present.push(existsSync(join(input.target.root, "src", "other.test.sh")));
+          return solve(input);
+        });
+        const summary = await runStreams(
+          options(t, { agents: { pigeon: agent }, promptFormat: format })
+        );
+        const second =
+          format === "test-files"
+            ? "Other test files already in the repository that currently fail and should pass after the change:\nsrc/other.test.sh\nsrc/z.test.sh\n"
+            : "Other test cases in test files already in the repository that currently fail and should pass after the change:\nsrc/other.test.sh::case\nsrc/z.test.sh::case\n";
+        const first =
+          format === "test-files"
+            ? "src/a.test.sh\nsrc/base.test.sh"
+            : "src/a.test.sh::case\nsrc/base.test.sh::case";
+        assert.equal(
+          agent.calls[0]?.prompt,
+          `Add alpha\n\nCreate src/a.txt\n\n${
+            format === "test-files" ? "Test files" : "Test cases"
+          } that should pass${(agent.calls[0]?.prompt ?? "").split("should pass")[1]?.split("\n")[0]}\n${first}\n\n${second}`,
+          format
+        );
+        assert.doesNotMatch(
+          agent.calls[1]?.prompt ?? "",
+          /Other test/,
+          `${format}：第 5 步只有一段`
+        );
+        assert.deepEqual(present, [true, true], "第二段的文件开工时在工作区里");
+        const [r1] = readStreamResults(summary.resultsFile);
+        assert.deepEqual(r1?.judging?.failToPass, { passed: 4, total: 4 });
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
     }
   });
 
@@ -2193,6 +2241,7 @@ test("换根目录：同一份清单、人的基准、检查门结果与身份�
         conditions: ["neither"],
         stepScope: TASK_CHAIN_SCOPE,
         promptFormat: "test-files",
+        promptLayout: TASK_PROMPT_LAYOUT,
         taskSelection: { method: "all" as const },
         maxSteps: null,
         agents: {},
@@ -2447,7 +2496,7 @@ test("人的基准提前单独算：只取要全量测量的步的提交、按�
   }
 });
 
-test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，多路分摊、按提交落盘、重跑即续算；叠放运行的测试配置显式取 commit 版；起点对不上的落盘结果重算；叠放运行拿不全用例即记为出错、接着算其余的；跑批直接读、不再现算", async () => {
+test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，多路分摊、按提交落盘、重跑即续算；叠放运行的测试配置显式取 commit 版；起点对不上的落盘结果重算；叠放运行拿不全用例即记这道题无法建立基线、跳过并接着算其余的（重跑读回、不重算），跑批时这道题照跑不判分、报告计数；跑批直接读、不再现算", async () => {
   const t = await toy();
   try {
     let runs = 0;
@@ -2519,10 +2568,13 @@ test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 pa
     assert.ok(reading !== undefined);
     await runStreams(options(t, { agents: { pigeon: scriptedAgent(solve) }, reference: reading }));
     assert.equal(runs, 10);
-    // 叠放运行拿不全用例（第 5 步叠放到起点上时报告写不出）：这道题记为出错，另一道照算
+    // 叠放运行拿不全用例（第 5 步叠放到起点上时报告写不出）：这道题记"无法建立基线"与原因、跳过，不算出错，另一道照算；
+    // 重跑时读回这条记录、不再重算
+    let brokenRuns = 0;
     const broken: typeof toyRuntime = {
       ...toyRuntime,
       runCases: async (ws, tests, opts) => {
+        brokenRuns++;
         const run = await toyRuntime.runCases(ws, tests, opts);
         const overlayOfStep5 =
           existsSync(join(ws.root, "src", "b.test.sh")) &&
@@ -2530,19 +2582,57 @@ test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 pa
         return overlayOfStep5 ? { ...run, complete: false } : run;
       },
     };
-    const failed = await computeClasses({
-      targets,
-      references: await referencesIn("classes-broken", broken),
-    });
+    const brokenRefs = await referencesIn("classes-broken", broken);
+    const partial = await computeClasses({ targets, references: brokenRefs });
     assert.deepEqual(
-      failed.steps.map((s) => s.task),
+      partial.steps.map((s) => s.task),
       [1]
     );
+    assert.deepEqual(partial.failed, [], "无法建立基线不算出错，预计算不停");
     assert.deepEqual(
-      failed.failed.map((f) => f.task),
-      [2]
+      partial.unbuildable.map((u) => [u.task, u.seq]),
+      [[2, 5]]
     );
-    assert.match(failed.failed[0]?.error ?? "", /没拿到全部用例的结果.*叠放到/);
+    assert.match(partial.unbuildable[0]?.reason ?? "", /没拿到全部用例的结果.*叠放到/);
+    const brokenRunsAfterFirst = brokenRuns;
+    const resumed = await computeClasses({ targets, references: brokenRefs });
+    assert.deepEqual([resumed.cached, resumed.computed, resumed.unbuildable.length], [2, 0, 1]);
+    assert.equal(brokenRuns, brokenRunsAfterFirst, "无法建立基线的记录读回，不再重算");
+    // 跑批：这道题 agent 照跑（记忆照常积累），不判分，结果行记原因；报告单列计数、不进主判据
+    const [brokenRef] = brokenRefs;
+    assert.ok(brokenRef !== undefined);
+    const agent = scriptedAgent(solve);
+    const run = await runStreams(
+      options(t, {
+        agents: { pigeon: agent },
+        reference: brokenRef,
+        outDir: join(t.base, "out-broken"),
+      })
+    );
+    assert.deepEqual(
+      agent.calls.map((c) => c.step.seq),
+      [1, 5]
+    );
+    const rows = readStreamResults(run.resultsFile);
+    assert.deepEqual(
+      rows.map((r) => [
+        r.seq,
+        r.outcome,
+        r.judged,
+        r.judging === null,
+        r.baselineUnavailable !== null,
+      ]),
+      [
+        [1, "passed", true, false, false],
+        [5, "skipped", false, true, true],
+      ]
+    );
+    assert.match(rows[1]?.baselineUnavailable ?? "", /没拿到全部用例的结果/);
+    assert.equal(rows[1]?.memoryAtEnd?.bytes, 0, "agent 部分照常记");
+    assert.match(
+      readFileSync(run.reportFile, "utf8"),
+      /\| neither \| 1 \| 100\.0%（1 步） \|.*\| 1 \| 1 \|$/m
+    );
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }

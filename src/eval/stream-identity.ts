@@ -21,6 +21,8 @@ export interface StreamRunIdentity {
     stepScope: string;
     // 题面格式（测试文件路径或用例名）：清单相同而题面不同，结果不能混
     promptFormat: string;
+    // 题面的版式（两段名单等）：格式相同而版式不同，结果不能混
+    promptLayout: string;
     // 选了哪些题（202、219）：全部、给定题号，或按种子抽样（选法、种子、样本数与抽出的题号都记下）
     taskSelection: TaskSelection;
     maxSteps: number | null;

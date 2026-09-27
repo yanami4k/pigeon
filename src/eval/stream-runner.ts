@@ -350,11 +350,41 @@ export interface HumanReferenceCases {
 }
 
 // 一步的两类用例：commit 与 parent 为人在该步与之前的代码；failToPassOutsideJudgeFiles 为要做到的里不在本题测试文件
-// （人在该步新写或改过的测试文件）中的条数
+// （人在该步新写或改过的测试文件）中的条数；unbuildable 为无法建立基线的原因（此时两类都为空），能建立即 null
 export interface StepClasses extends CaseClasses {
   commit: string;
   parent: string;
   failToPassOutsideJudgeFiles: number;
+  unbuildable: string | null;
+}
+
+// 人的代码或叠放运行拿不全用例的结果
+export class IncompleteRunError extends Error {
+  override name = "IncompleteRunError";
+}
+
+function unbuildableClasses(step: StreamStep, reason: string): StepClasses {
+  return {
+    commit: step.commit,
+    parent: step.parent,
+    failToPass: [],
+    passToPass: [],
+    excludedFlaky: [],
+    failToPassOutsideJudgeFiles: 0,
+    unbuildable: reason,
+  };
+}
+
+// 要做到的用例里落在本题测试文件（人在该步新写或改过的测试文件）之外的那些（用例编号，保持原顺序）
+export function outsideJudgeCases(step: StreamStep, failToPass: readonly string[]): string[] {
+  const judgeFiles = new Set(step.judgeTests);
+  return failToPass.filter((id) => !judgeFiles.has(caseFile(id)));
+}
+
+// 用例编号里的测试文件路径（"文件::…"的前一段）
+export function caseFile(id: string): string {
+  const cut = id.indexOf("::");
+  return cut < 0 ? id : id.slice(0, cut);
 }
 
 // agent 自报被打断、期间却没有任何限额信号或上游故障：最多重做这么多次
@@ -1006,13 +1036,25 @@ async function judgeFull(
   };
 }
 
-// 这一步的题面（198、213）：提交信息加应通过的测试名单——测试文件路径，或这一步要做到的用例编号
+// 这一步的题面（198、213）：提交信息加应通过的测试名单——本题新写或改过的测试文件路径，或其中要做到的用例编号；
+// 要做到的用例有落在这些文件之外的，另列第二段：它们所在的测试文件（去重、排序），或这些用例编号
 function promptFor(options: RunStreamsOptions, step: StreamStep, classes: CaseClasses): string {
   const format = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
+  const outside = outsideJudgeCases(step, classes.failToPass);
+  const outsideSet = new Set(outside);
+  if (format === "test-files") {
+    return taskPromptOf(
+      step.message,
+      format,
+      step.judgeTests,
+      [...new Set(outside.map(caseFile))].sort()
+    );
+  }
   return taskPromptOf(
     step.message,
     format,
-    format === "test-files" ? step.judgeTests : classes.failToPass
+    classes.failToPass.filter((id) => !outsideSet.has(id)),
+    outside
   );
 }
 
@@ -1076,6 +1118,7 @@ async function runStep(
     humanTestRestores: null,
     agentChangedDeps: null,
     judging: null,
+    baselineUnavailable: classes.unbuildable,
     memoryAtEnd,
     hitStepBudget,
     quality: null,
@@ -1197,6 +1240,36 @@ async function runStep(
       path.join(jobDir, "diffs", diffName),
       await ws.diffTrees(startTree, await ws.worktreeTree())
     );
+    const agentPart = {
+      diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
+      envOpenMs,
+      envPrefetched,
+      repairRounds: result.repair?.rounds ?? null,
+      finalVerdict: result.repair?.finalVerdict ?? null,
+      humanTestRestores: result.repair === null ? null : (result.repair.humanTestRestores ?? 0),
+      agentChangedDeps,
+      memoryAtEnd,
+      hitStepBudget,
+      status: result.status,
+      turns: result.turns,
+      usage: result.usage,
+      agentWallMs: result.wallMs,
+      gateway: gatewayFacts,
+      admissionWaitMs: admitted.admissionWaitMs,
+    };
+    // 这道题无法建立基线（⑤）：agent 照跑（记忆照常积累），不判分，结果行记原因，不进主判据
+    if (classes.unbuildable !== null) {
+      return {
+        ...base,
+        ...agentPart,
+        outcome: "skipped",
+        judged: false,
+        judging: null,
+        baselineUnavailable: classes.unbuildable,
+        quality: null,
+        wallMs: Date.now() - started,
+      };
+    }
     try {
       await restoreTests(options, ws, step);
       await cleanForJudging(options, ws, step);
@@ -1219,30 +1292,17 @@ async function runStep(
     const j = judged.judging;
     return {
       ...base,
+      ...agentPart,
       // 结果：要做到的全过（为零时即成立）且不许挂的无一失败记 passed，否则 failed；主判据看 judging
       outcome:
         j.failToPass.passed === j.failToPass.total && j.passToPass.failed === 0
           ? "passed"
           : "failed",
-      diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
-      envOpenMs,
-      envPrefetched,
       judged: true,
-      repairRounds: result.repair?.rounds ?? null,
-      finalVerdict: result.repair?.finalVerdict ?? null,
-      humanTestRestores: result.repair === null ? null : (result.repair.humanTestRestores ?? 0),
-      agentChangedDeps,
       judging: j,
-      memoryAtEnd,
-      hitStepBudget,
+      baselineUnavailable: null,
       quality: judged.quality,
-      status: result.status,
-      turns: result.turns,
-      usage: result.usage,
-      agentWallMs: result.wallMs,
       wallMs: Date.now() - started,
-      gateway: gatewayFacts,
-      admissionWaitMs: admitted.admissionWaitMs,
     };
   } finally {
     // 这一步的容器用完即弃：被忽略的文件、/tmp 与家目录都不跨步（212）
@@ -1317,7 +1377,7 @@ export function dockerStreamEnvs(input: {
   };
 }
 
-// 缓存结果的身份：镜像标识（镜像 ID，不用可变的标签）与命令摘要（人的基准为跑用例的方式，开跑前检查为检查门命令）
+// 缓存结果的身份：镜像身份（内容层摘要，见 imageIdentityOf；不用本地镜像 ID 与可变的标签）与命令摘要（人的基准为跑用例的方式，开跑前检查为检查门命令）
 export interface BaselineIdentity {
   image: string;
   command: string;
@@ -1352,7 +1412,11 @@ function listedAsEquivalent(pairs: EquivalencePairs, from: string, to: string): 
   return false;
 }
 
-// 镜像等价表（旧镜像 ID, 新镜像 ID），只用于人的用例基准：列入的镜像运行环境逐字相同、只差 lint 层，
+// strands v6 镜像的内容层身份（14 层；经典存储与 containerd 镜像存储下相同）
+export const STRANDS_V6_LAYERS =
+  "layers:sha256:ebe5a5270ca0fcee26caf49d6695a56b090b81b027fed92ac7eac8c35b60c5fa";
+
+// 镜像等价表（旧镜像身份, 新镜像身份），只用于人的用例基准：列入的镜像运行环境逐字相同、只差 lint 层，
 // 跑用例用的是运行环境，逐用例结果不受影响；检查门结果要用 lint 环境，不按镜像等价
 export const EQUIVALENT_CASE_IMAGES: EquivalencePairs = [
   // strands v4 → v5：v5 只在 v4 之上多一层按提交解析的 lint 环境（148 补记）
@@ -1366,6 +1430,10 @@ export const EQUIVALENT_CASE_IMAGES: EquivalencePairs = [
     "sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6",
     "sha256:d23b0a512ca217bc2c7984bf33dc52c1006cbf0cd2a9642b7638efb0e3f99b42",
   ],
+  // 镜像身份改按内容层（RootFS 各层摘要的有序列表）之后：已落盘结果记的是经典存储下的 config 摘要。v6 的 config 摘要与
+  // v6 的内容层身份是同一个镜像；v4 与 v6 运行环境逐字相同（见上一对），读回口径不变
+  ["sha256:d23b0a512ca217bc2c7984bf33dc52c1006cbf0cd2a9642b7638efb0e3f99b42", STRANDS_V6_LAYERS],
+  ["sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6", STRANDS_V6_LAYERS],
 ];
 
 function sameIdentity(saved: unknown, want: BaselineIdentity): boolean {
@@ -1423,7 +1491,7 @@ export class ReferenceCases implements HumanReferenceCases {
     // 人的仓库（宿主侧）：两类用例的叠放运行从这里取人在该步的测试、测试辅助、环境文件与测试配置；只算人的基准时可不给
     human?: HumanRepo;
     cacheDir: string;
-    // 参考容器所用镜像的标识（镜像 ID）：缓存身份之一
+    // 参考容器所用镜像的身份（内容层摘要）：缓存身份之一
     image: string;
     // 等价摘要表（缺省 EQUIVALENT_BASELINE_COMMANDS）与用例基准的镜像等价表（缺省 EQUIVALENT_CASE_IMAGES）
     equivalentCommands?: EquivalencePairs;
@@ -1471,8 +1539,23 @@ export class ReferenceCases implements HumanReferenceCases {
     return this.cachedClasses(step) !== undefined;
   }
 
-  // 只从落盘结果读两类用例（不跑任何东西）；两侧有一侧没落盘即 undefined。选题（只在要做到的不为零的题中抽）用它
+  // 这道题"无法建立基线"的落盘记录：身份相符（或按等价读回）且记的起点就是这一步的 parent 才算；返回原因
+  private readUnbuildable(step: StreamStep): string | undefined {
+    const saved = readIdentified<{ parent?: string; reason?: string }>(
+      path.join(this.cacheDir, `${step.commit}.unbuildable.json`),
+      this.casesIdentity(),
+      this.equivalent,
+      () => true,
+      this.equivalentImages
+    );
+    return saved?.parent === step.parent ? (saved.reason ?? "") : undefined;
+  }
+
+  // 只从落盘结果读两类用例（不跑任何东西）；两侧有一侧没落盘即 undefined，记为无法建立基线的读回那条记录。选题（只在
+  // 要做到的不为零的题中抽）用它
   cachedClasses(step: StreamStep): StepClasses | undefined {
+    const unbuildable = this.readUnbuildable(step);
+    if (unbuildable !== undefined) return unbuildableClasses(step, unbuildable);
     const after = this.readCases(step.commit);
     const before = this.readOverlay(step);
     return after === undefined || before === undefined
@@ -1482,24 +1565,39 @@ export class ReferenceCases implements HumanReferenceCases {
 
   private stepClasses(step: StreamStep, after: SideRuns, before: SideRuns): StepClasses {
     const classes = classifyCases(after, before);
-    const judgeFiles = new Set(step.judgeTests);
     return {
       commit: step.commit,
       parent: step.parent,
       ...classes,
-      failToPassOutsideJudgeFiles: classes.failToPass.filter(
-        (id) => !judgeFiles.has(id.slice(0, id.indexOf("::")))
-      ).length,
+      failToPassOutsideJudgeFiles: outsideJudgeCases(step, classes.failToPass).length,
+      unbuildable: null,
     };
   }
 
   // 两类用例（214）：之后一侧即人的基准（commit 上跑人在该步的全部测试两遍，与全量测量同一份缓存）；之前一侧为叠放运行。
-  // 比出的两类另存一份 <commit>.classes.json（由两份落盘结果现算，供事后分析读，不作缓存）
+  // 比出的两类另存一份 <commit>.classes.json（由两份落盘结果现算，供事后分析读，不作缓存）。任一侧拿不全用例的结果
+  // 即这道题无法建立基线：落盘原因（<commit>.unbuildable.json），之后读回、不再重算，两类都为空
   async classesAt(step: StreamStep): Promise<StepClasses> {
+    const known = this.readUnbuildable(step);
+    if (known !== undefined) return unbuildableClasses(step, known);
     const tests = humanTestsAt(this.requireHuman(), this.runtime, step.commit);
-    const after = await this.casesAt(step.commit, tests);
-    const before = await this.overlayAt(step, tests);
-    const out = this.stepClasses(step, after, before);
+    let out: StepClasses;
+    try {
+      const after = await this.casesAt(step.commit, tests);
+      const before = await this.overlayAt(step, tests);
+      out = this.stepClasses(step, after, before);
+    } catch (error) {
+      if (!(error instanceof IncompleteRunError)) throw error;
+      writeAtomic(
+        path.join(this.cacheDir, `${step.commit}.unbuildable.json`),
+        JSON.stringify({
+          parent: step.parent,
+          reason: error.message,
+          identity: this.casesIdentity(),
+        })
+      );
+      out = unbuildableClasses(step, error.message);
+    }
     writeAtomic(
       path.join(this.cacheDir, `${step.commit}.classes.json`),
       JSON.stringify({ seq: step.seq, ...out })
@@ -1688,9 +1786,9 @@ export class ReferenceCases implements HumanReferenceCases {
             `超过上限 ${mib(limitBytes)} MiB 的 ${MEMORY_WARN_RATIO * 100}%，作业容器的内存上限可能不够`
         );
       }
-      // 人这一侧拿不全就没有可信的分母：报错停下，不以缺了用例的基准静默缩小分母
+      // 人这一侧拿不全就没有可信的分母：报错，不以缺了用例的基准静默缩小分母（两类用例据此记这道题无法建立基线）
       if (!run.complete) {
-        throw new Error(
+        throw new IncompleteRunError(
           `人的基准没拿到全部用例的结果（${commit}，第 ${k + 1} 遍）：${run.output.slice(-500)}`
         );
       }

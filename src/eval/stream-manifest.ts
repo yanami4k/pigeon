@@ -139,15 +139,32 @@ const SHOULD_PASS_HEADINGS: Record<TaskPromptFormat, string> = {
     "Test cases that should pass after the change (in new or updated test files; their final versions are not in the repository and are added when the change is checked):",
 };
 
-// 跑批器拼的题面：提交信息原文，其后一行说明与应通过的测试名单（每行一个）；名单为空时只有提交信息
+// 第二段名单前的一行说明：要做到的用例落在本题新写或改过的测试文件之外时，这些用例所在的、仓库里本来就有的测试文件
+// （或用例名）此刻失败、改完应通过；这些文件照常在工作区里，不扣下
+const OTHER_FAILING_HEADINGS: Record<TaskPromptFormat, string> = {
+  "test-files":
+    "Other test files already in the repository that currently fail and should pass after the change:",
+  "test-cases":
+    "Other test cases in test files already in the repository that currently fail and should pass after the change:",
+};
+
+// 题面的版式（进身份头比对）：应通过的名单，另有要做到的用例落在本题测试文件之外时再列第二段
+export const TASK_PROMPT_LAYOUT =
+  "commit message; should-pass list; second list of other failing tests already in the repository";
+
+// 跑批器拼的题面：提交信息原文，其后一行说明与应通过的测试名单（每行一个）；第二段只在 otherFailing 不为空时出现。
+// 两段名单都为空时只有提交信息
 export function taskPromptOf(
   message: string,
   format: TaskPromptFormat,
-  shouldPass: readonly string[]
+  shouldPass: readonly string[],
+  otherFailing: readonly string[] = []
 ): string {
   const parts = [message.trimEnd()];
   if (shouldPass.length > 0)
     parts.push(`${SHOULD_PASS_HEADINGS[format]}\n${shouldPass.join("\n")}`);
+  if (otherFailing.length > 0)
+    parts.push(`${OTHER_FAILING_HEADINGS[format]}\n${otherFailing.join("\n")}`);
   return `${parts.join("\n\n")}\n`;
 }
 

@@ -6,14 +6,22 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   effectivePigeonSettings,
-  imageIdOf,
+  imageIdentityOf,
   installTerminationHandler,
+  layersIdentity,
   resolveTaskSelection,
   runStreamExperiment,
   streamPigeonOptions,
 } from "./stream-experiment.ts";
 import type { StreamManifest, StreamStep } from "./stream-manifest.ts";
-import { DEFAULT_STEP_BUDGET, RUN_LOCK, type StepClasses, selectSteps } from "./stream-runner.ts";
+import {
+  DEFAULT_STEP_BUDGET,
+  EQUIVALENT_CASE_IMAGES,
+  RUN_LOCK,
+  STRANDS_V6_LAYERS,
+  type StepClasses,
+  selectSteps,
+} from "./stream-runner.ts";
 import { PythonRandom, SAMPLE_POPULATION } from "./stream-sample.ts";
 
 test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数", () => {
@@ -50,29 +58,53 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
   );
 });
 
-test("镜像 ID：经典存储下取 config 摘要；containerd 镜像存储下取到的是 manifest 摘要、与已记下的对不上，响亮报错", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-image-store-"));
+test("镜像身份（⑥）：按内容层（RootFS 各层摘要的有序列表）取摘要，不看本地镜像 ID——经典存储与 containerd 存储下同一镜像判为同一个；层的顺序或内容不同即不同；取不到层即报错", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-image-layers-"));
   try {
-    const fake = (status: string) => {
-      const file = join(dir, `docker-${status.length}.mjs`);
+    let n = 0;
+    // 假 docker：按 --format 回镜像 ID 或内容层
+    const fake = (id: string, layers: string) => {
+      const file = join(dir, `docker-${n++}.mjs`);
       writeFileSync(
         file,
         [
           "const args = process.argv.slice(2);",
-          `if (args[0] === "info") process.stdout.write(${JSON.stringify(status)} + "\\n");`,
-          'else process.stdout.write("sha256:config\\n");',
+          `if (args.includes("{{.Id}}")) process.stdout.write(${JSON.stringify(id)} + "\\n");`,
+          `else process.stdout.write(${JSON.stringify(layers)} + "\\n");`,
         ].join("\n")
       );
       return [process.execPath, file];
     };
+    const layers = JSON.stringify(["sha256:aaa", "sha256:bbb"]);
+    const classic = imageIdentityOf("img", fake("sha256:config", layers));
+    const containerd = imageIdentityOf("img", fake("sha256:manifest", layers));
+    assert.equal(classic, containerd, "本地镜像 ID 不同、内容层相同：同一镜像");
+    assert.equal(classic, layersIdentity(["sha256:aaa", "sha256:bbb"]));
+    assert.match(classic, /^layers:sha256:[0-9a-f]{64}$/);
+    assert.notEqual(
+      imageIdentityOf("img", fake("x", JSON.stringify(["sha256:bbb", "sha256:aaa"]))),
+      classic,
+      "层的顺序不同即不同"
+    );
+    assert.notEqual(
+      imageIdentityOf("img", fake("x", JSON.stringify(["sha256:aaa", "sha256:ccc"]))),
+      classic
+    );
+    assert.throws(() => imageIdentityOf("img", fake("x", "null")), /取不到镜像 img 的内容层/);
+    assert.throws(() => imageIdentityOf("img", fake("x", "[]")), /没有内容层/);
+    // strands v6 的内容层身份（本机经典存储与验证服务器 containerd 存储下实测相同）
     assert.equal(
-      imageIdOf("img", fake('overlay2|[["Backing Filesystem","extfs"]]')),
-      "sha256:config"
+      STRANDS_V6_LAYERS,
+      "layers:sha256:ebe5a5270ca0fcee26caf49d6695a56b090b81b027fed92ac7eac8c35b60c5fa"
     );
-    assert.throws(
-      () => imageIdOf("img", fake('overlayfs|[["driver-type","io.containerd.snapshotter.v1"]]')),
-      /containerd 镜像存储/
-    );
+    // 已落盘的人的基准记的是经典存储下的 config 摘要：v6 与 v4 的都按等价读回到 v6 的内容层身份
+    const pairs = [...EQUIVALENT_CASE_IMAGES].map(([a, b]) => `${a}>${b}`);
+    for (const old of [
+      "sha256:d23b0a512ca217bc2c7984bf33dc52c1006cbf0cd2a9642b7638efb0e3f99b42",
+      "sha256:281bf24305dd0891440e1ecf3a07f09644688f8b28a4e770a5522a43b4d6d8d6",
+    ]) {
+      assert.ok(pairs.includes(`${old}>${STRANDS_V6_LAYERS}`), old);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -177,6 +209,7 @@ const classesWith = (failToPass: number): StepClasses => ({
   passToPass: [],
   excludedFlaky: [],
   failToPassOutsideJudgeFiles: 0,
+  unbuildable: null,
 });
 
 test("选题（202、219）：抽样只在要做到的不为零的题里、按 Python random.Random(种子).sample 抽再按时间排序，与 Python 逐位一致；给题号即按题号；都不给为全部；两者都给、题没算完两类用例即拒绝", () => {

@@ -462,6 +462,13 @@ async function evalStreamBaselineMain(argv: string[]): Promise<void> {
         `出错 ${classes.failed.length} 道；要做到的为零的题 ${zero.length} 道` +
         `${zero.length > 0 ? `（题号 ${zero.map((s) => s.task).join(",")}）` : ""}；汇总写到 ${CLASSES_SUMMARY_FILE}\n`
     );
+    process.stdout.write(
+      `无法建立基线的题 ${classes.unbuildable.length} 道${
+        classes.unbuildable.length > 0
+          ? `（题号 ${classes.unbuildable.map((u) => u.task).join(",")}，跑批时不判分、不进主判据）`
+          : ""
+      }\n`
+    );
     for (const f of classes.failed) {
       process.stdout.write(`  题 ${f.task}（${f.commit}）：${f.error.slice(0, 300)}\n`);
     }

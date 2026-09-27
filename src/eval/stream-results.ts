@@ -71,6 +71,9 @@ export interface StreamResultLine {
   // 为零时为 null，不进主判据分母）、不许挂的失败数与总数、做成与否（要做到的为零时为 null）、没通过的用例编号（截断）、
   // 因时过时不过排除的用例数。没判的步为 null
   judging: StepJudging | null;
+  // 这道题无法建立两类用例的基线（人的代码或叠放运行拿不全用例的结果）的原因：agent 照跑、不判分，不进主判据，报告单列
+  // 计数；能建立即 null
+  baselineUnavailable: string | null;
   // 193 固定起点之前的旧结果行才有的全量测试通过率（按条数、按题等）。新行不写，只读兼容
   fullPassRate?: {
     byCount: CountPassRate;
@@ -167,6 +170,7 @@ export const STREAM_RESULT_FIELDS = [
   "runIdentity",
   "agentSettings",
   "judging",
+  "baselineUnavailable",
   "memoryAtStart",
   "memoryAtEnd",
   "hitStepBudget",

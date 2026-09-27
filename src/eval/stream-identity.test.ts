@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { currentHarnessRef } from "./stream-harness.ts";
 import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
-import { TASK_CHAIN_SCOPE } from "./stream-manifest.ts";
+import { TASK_CHAIN_SCOPE, TASK_PROMPT_LAYOUT } from "./stream-manifest.ts";
 import { DEFAULT_STEP_BUDGET } from "./stream-runner.ts";
 
 test("harness 版本：取本源码所在仓库的 HEAD 短号与是否有未提交改动", () => {
@@ -31,6 +31,7 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
     conditions: ["search-only", "minimal"],
     stepScope: TASK_CHAIN_SCOPE,
     promptFormat: "test-files",
+    promptLayout: TASK_PROMPT_LAYOUT,
     taskSelection: { method: "all" },
     maxSteps: null,
     agents: {
@@ -89,6 +90,11 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
     assert.throws(
       () => checkOrWriteIdentity(dir, identity({ stepScope: "continuation" })),
       /stepScope/
+    );
+    // 题面版式不同（两段名单之前的单段版式）：结果不能混
+    assert.throws(
+      () => checkOrWriteIdentity(dir, identity({ promptLayout: "single should-pass list" })),
+      /promptLayout/
     );
     // 193 之前写下的身份头没有这两项：同样拒绝续跑
     const { stepScope: _s, promptFormat: _p, ...legacyCore } = identity().core;

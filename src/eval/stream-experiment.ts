@@ -38,6 +38,7 @@ import {
   DEFAULT_TASK_PROMPT_FORMAT,
   type StreamManifest,
   TASK_CHAIN_SCOPE,
+  TASK_PROMPT_LAYOUT,
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
@@ -114,38 +115,31 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
   };
 }
 
-// Docker 的镜像存储：经典存储（overlay2 等）下镜像 ID 为 config 摘要；containerd 镜像存储下 {{.Id}} 取到的是 manifest
-// 摘要，同一个镜像两种存储下 ID 不同。人的基准、镜像等价表与身份头记的都是经典存储下的 config 摘要
-export function imageStoreOf(docker: readonly string[]): { driver: string; containerd: boolean } {
+// 镜像的身份：按镜像的内容层——RootFS 各层摘要的有序列表——取摘要（各层摘要按顺序以换行相接，取 SHA-256），不看本地镜像
+// ID：经典存储下镜像 ID 为 config 摘要，containerd 镜像存储下取到的是 manifest 摘要，同一个镜像在两种存储、两台机器上 ID
+// 不同，内容层相同。也不用可变的标签——同一标签重建后内容层即变，已落盘的人的基准不再复用
+export function layersIdentity(layers: readonly string[]): string {
+  if (layers.length === 0) throw new Error("镜像没有内容层");
+  return `layers:sha256:${createHash("sha256").update(layers.join("\n")).digest("hex")}`;
+}
+
+export function imageIdentityOf(image: string, docker: readonly string[]): string {
   const [program = "docker", ...pre] = docker;
   const out = execFileSync(
     program,
-    [...pre, "info", "--format", "{{.Driver}}|{{json .DriverStatus}}"],
-    {
-      encoding: "utf8",
-    }
+    [...pre, "image", "inspect", "--format", "{{json .RootFS.Layers}}", image],
+    { encoding: "utf8" }
   ).trim();
-  const bar = out.indexOf("|");
-  const driver = bar < 0 ? out : out.slice(0, bar);
-  return { driver, containerd: out.includes("io.containerd.snapshotter") };
-}
-
-// 镜像的标识：镜像 ID（内容摘要），不用可变的标签——同一标签重建后 ID 即变，已落盘的人的基准不再复用。
-// containerd 镜像存储下取到的 ID 与已记下的对不上：响亮报错，不静默地换一套 ID
-export function imageIdOf(image: string, docker: readonly string[]): string {
-  const store = imageStoreOf(docker);
-  if (store.containerd) {
-    throw new Error(
-      `Docker 用的是 containerd 镜像存储（${store.driver}）：镜像 ID 取到的是 manifest 摘要，与经典存储下记录的 config 摘要` +
-        "（人的基准、镜像等价表、身份头）对不上。请把 Docker 改回经典存储（daemon.json 里 features.containerd-snapshotter 设为 false）后再跑"
-    );
+  let layers: unknown;
+  try {
+    layers = JSON.parse(out);
+  } catch {
+    layers = undefined;
   }
-  const [program = "docker", ...pre] = docker;
-  const id = execFileSync(program, [...pre, "image", "inspect", "--format", "{{.Id}}", image], {
-    encoding: "utf8",
-  }).trim();
-  if (id === "") throw new Error(`取不到镜像 ${image} 的 ID`);
-  return id;
+  if (!Array.isArray(layers) || !layers.every((l) => typeof l === "string")) {
+    throw new Error(`取不到镜像 ${image} 的内容层：${out.slice(0, 200)}`);
+  }
+  return layersIdentity(layers);
 }
 
 // 最简 agent 的版本与它自己的模型设定：用装有 mini-swe-agent 的解释器查（取不到的项记 null，照实）
@@ -256,7 +250,7 @@ async function runStreamExperimentLocked(
   // 路数大于各账号配置并发之和即拒绝开跑（决策 163）：在写身份头、起网关与容器之前
   assertConcurrencyFits(options.concurrency ?? 4, options.gateway.accounts);
   // 身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：开跑前写入或比对，不一致即拒绝续跑——在起网关与容器之前做
-  const imageId = imageIdOf(options.image, docker);
+  const imageId = imageIdentityOf(options.image, docker);
   // 参考工作区的容器开跑时才起；选题只读已落盘的两类用例，用不到容器
   const referenceWs = new ReferenceWorkspace(
     dockerStreamShell({ container: referenceName, root: STREAM_CONTAINER_ROOT, docker })
@@ -291,6 +285,7 @@ async function runStreamExperimentLocked(
       conditions: [...options.conditions],
       stepScope: TASK_CHAIN_SCOPE,
       promptFormat,
+      promptLayout: TASK_PROMPT_LAYOUT,
       taskSelection,
       maxSteps: options.maxSteps ?? null,
       agents: {
@@ -463,7 +458,7 @@ async function withBaselineReferences<T>(
   const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
   const lanes = Math.max(1, options.concurrency ?? 1);
   const names = Array.from({ length: lanes }, (_, i) => `${prefix}-baseline-${i + 1}`);
-  const imageId = imageIdOf(options.image, docker);
+  const imageId = imageIdentityOf(options.image, docker);
   try {
     const references = await Promise.all(
       names.map(async (name) => {

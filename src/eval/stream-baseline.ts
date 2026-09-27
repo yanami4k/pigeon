@@ -144,6 +144,8 @@ export interface ClassesSummary {
   computed: number;
   cached: number;
   failed: { task: number; commit: string; error: string }[];
+  // 无法建立基线的题（人的代码或叠放运行拿不全用例的结果）：记原因、跳过，不算出错，跑批时这些题不判分
+  unbuildable: { task: number; seq: number; commit: string; reason: string }[];
   // 每道题两类用例的条数（按题号排序；出错的不在其内）
   steps: {
     task: number;
@@ -172,6 +174,7 @@ export async function computeClasses(input: {
     computed: 0,
     cached: 0,
     failed: [],
+    unbuildable: [],
     steps: [],
   };
   const done = (t: ClassTarget) => input.references.some((r) => r.hasClasses(t.step));
@@ -186,6 +189,19 @@ export async function computeClasses(input: {
     const started = Date.now();
     try {
       const c = await reference.classesAt(target.step);
+      if (c.unbuildable !== null) {
+        summary.unbuildable.push({
+          task: target.task,
+          seq: target.step.seq,
+          commit: c.commit,
+          reason: c.unbuildable,
+        });
+        if (fresh) summary.computed++;
+        log(
+          `两类用例 题 ${target.task}（步 ${target.step.seq}）无法建立基线，跳过：${c.unbuildable.slice(0, 300)}`
+        );
+        return;
+      }
       summary.steps.push({
         task: target.task,
         seq: target.step.seq,
@@ -213,6 +229,7 @@ export async function computeClasses(input: {
     }
   });
   summary.steps.sort((a, b) => a.task - b.task);
+  summary.unbuildable.sort((a, b) => a.task - b.task);
   return summary;
 }
 

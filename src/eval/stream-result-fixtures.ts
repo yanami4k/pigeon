@@ -22,6 +22,7 @@ export function sampleLine(overrides: Partial<StreamResultLine> = {}): StreamRes
     humanFailsGate: false,
     runIdentity: null,
     agentSettings: null,
+    baselineUnavailable: null,
     judging: {
       failToPass: { passed: 2, total: 2 },
       score: 1,

@@ -25,6 +25,7 @@ test("结果行字段清单：要求的字段都在（起点、agent 改动的 d
     "repairRounds",
     "finalVerdict",
     "judging",
+    "baselineUnavailable",
     "memoryAtStart",
     "memoryAtEnd",
     "hitStepBudget",
