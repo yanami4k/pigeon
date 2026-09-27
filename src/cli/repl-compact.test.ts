@@ -19,7 +19,12 @@ import { runRepl } from "./repl.ts";
 const LONG_TASK = `请修好 a.ts 里的空指针，${"细节说明。".repeat(80)}`;
 const LONG_REPLY = "我已经读完了相关文件，接下来开始修改。".repeat(3);
 
-async function replWith(lines: string[], replies: FakeReply[], threshold: number) {
+async function replWith(
+  lines: string[],
+  replies: FakeReply[],
+  threshold: number,
+  failSummary = false
+) {
   const root = mkdtempSync(join(tmpdir(), "pigeon-repl-compact-"));
   const sessionId = newSessionId();
   const store = openSessionStoreWriter({
@@ -45,7 +50,7 @@ async function replWith(lines: string[], replies: FakeReply[], threshold: number
     sessionStore: store,
     compaction: new ContextCompactor({
       config: resolveCompactionConfig({ thresholdTokens: threshold, keepRecentTokens: 5 }),
-      streamFn,
+      streamFn: failSummary ? () => Promise.reject(new Error("网关拒绝：花费上限")) : streamFn,
       model: {
         id: "fake-model-1",
         name: "fake-model-1",
@@ -118,4 +123,23 @@ test("/compact 没有可压缩的内容：说明原因，不调用模型", async
   );
   assert.ok(terminal.includes("没有可压缩的内容"), terminal);
   assert.equal(streamFn.calls.length, 0);
+});
+
+test("自动压缩没压成：打印一行未完成与原因，不计成事件落盘失败", async () => {
+  const { terminal } = await replWith(
+    [LONG_TASK, "第二问", ":quit"],
+    [
+      { text: LONG_REPLY, contextTokens: 5000 },
+      { text: "第二问的回答", contextTokens: 300 },
+    ],
+    1000,
+    true
+  );
+  assert.ok(
+    terminal.includes(
+      "上下文压缩未完成（自动，Run 开始前）：网关拒绝：花费上限；本轮按原上下文继续"
+    ),
+    terminal
+  );
+  assert.equal(terminal.includes("事件落盘失败"), false, terminal);
 });

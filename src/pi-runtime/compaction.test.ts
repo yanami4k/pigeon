@@ -201,7 +201,7 @@ describe("执行一次压缩", () => {
       trigger: "turn",
       tokens: 10,
       signal: new AbortController().signal,
-      reportError: noop,
+      onHookError: noop,
     });
     assert.deepEqual(outcome, { kind: "skipped", reason: "nothing-to-summarize" });
     assert.equal(streamFn.calls.length, 0);
@@ -232,7 +232,7 @@ describe("执行一次压缩", () => {
       trigger: "run-start",
       tokens: 4321,
       signal: new AbortController().signal,
-      reportError: noop,
+      onHookError: noop,
     });
     assert.equal(outcome.kind, "compacted");
     assert.deepEqual(order, ["before:run-start:4321", "summary"]);
@@ -260,7 +260,7 @@ describe("执行一次压缩", () => {
       trigger: "turn",
       tokens: 100,
       signal: new AbortController().signal,
-      reportError: noop,
+      onHookError: noop,
     });
     assert.equal(streamFn.calls[0]?.options?.maxTokens, 4096);
   });
@@ -277,7 +277,7 @@ describe("执行一次压缩", () => {
       tokens: 100,
       customInstructions: "保留 b.ts 的改动细节",
       signal: new AbortController().signal,
-      reportError: noop,
+      onHookError: noop,
     });
     const prompt = JSON.stringify(streamFn.calls[0]?.context.messages);
     assert.ok(prompt.includes("Additional focus: 保留 b.ts 的改动细节"));
@@ -298,14 +298,14 @@ describe("执行一次压缩", () => {
       trigger: "turn",
       tokens: 100,
       signal: new AbortController().signal,
-      reportError: (error) => errors.push(error),
+      onHookError: (error) => errors.push(error),
     });
     assert.equal(outcome.kind, "compacted");
     assert.equal(errors.length, 1);
     assert.match(String(errors[0]), /复盘失败/);
   });
 
-  test("摘要请求失败：返回失败，不写压缩条目；没有存储时跳过", async () => {
+  test("摘要请求失败：返回失败（出在摘要一步），不写压缩条目；没有存储时跳过", async () => {
     const streamFn = createFakeStreamFn({
       replies: [{ text: "摘要" }],
       failOnCall: 1,
@@ -321,18 +321,35 @@ describe("执行一次压缩", () => {
       trigger: "turn",
       tokens: 100,
       signal: new AbortController().signal,
-      reportError: noop,
+      onHookError: noop,
     });
     assert.equal(outcome.kind, "failed");
+    assert.equal(outcome.kind === "failed" ? outcome.stage : undefined, "summary");
     assert.equal(store.appended.length, 0);
     assert.deepEqual(
       await compactor.run(undefined, {
         trigger: "turn",
         tokens: 100,
         signal: new AbortController().signal,
-        reportError: noop,
+        onHookError: noop,
       }),
       { kind: "skipped", reason: "store-unavailable" }
     );
   });
+});
+
+test("压缩条目写不进会话文件：返回失败（出在写入一步）", async () => {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "摘要" }] });
+  const compactor = new ContextCompactor({
+    config: resolveCompactionConfig({ thresholdTokens: 10, keepRecentTokens: 5 }),
+    streamFn,
+    model: summaryModel(),
+  });
+  const store = memoryStore(longConversation());
+  const outcome = await compactor.run(
+    { branch: store.branch, appendCompaction: async () => undefined },
+    { trigger: "turn", tokens: 100, signal: new AbortController().signal, onHookError: noop }
+  );
+  assert.equal(outcome.kind, "failed");
+  assert.equal(outcome.kind === "failed" ? outcome.stage : undefined, "store");
 });

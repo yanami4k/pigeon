@@ -73,6 +73,7 @@ class FakeRuntime implements TuiRuntimeFace {
     const outcome = this.nextOutcome;
     if (outcome.kind === "compacted") {
       this.emit({
+        kind: "compacted",
         trigger: outcome.trigger,
         tokensBefore: outcome.tokensBefore,
         tokensAfter: outcome.tokensAfter,
@@ -130,8 +131,18 @@ test("自动压缩：运行面发出压缩提示时，消息区同样提示一�
   try {
     shell.start();
     await settle();
-    runtime.emit({ trigger: "turn", tokensBefore: 990_000, tokensAfter: 21_000 });
-    runtime.emit({ trigger: "run-start", tokensBefore: 985_000, tokensAfter: 20_500 });
+    runtime.emit({
+      kind: "compacted",
+      trigger: "turn",
+      tokensBefore: 990_000,
+      tokensAfter: 21_000,
+    });
+    runtime.emit({
+      kind: "compacted",
+      trigger: "run-start",
+      tokensBefore: 985_000,
+      tokensAfter: 20_500,
+    });
     await settle();
     const text = screenFlat(term);
     assert.ok(text.includes("上下文已压缩（自动，轮间）：约 990000 → 21000 token"), text);
@@ -176,6 +187,36 @@ test("压缩进行中：提交被拒绝（busy 语义），压缩完成后恢复
     term.input("\r");
     await settle();
     assert.deepEqual(runtime.runs, ["新任务"]);
+  } finally {
+    shell.stop();
+    rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("自动压缩没压成与压缩前回调失败：消息区各提示一行，说明原因与后果", async () => {
+  const { shell, runtime, term, logDir } = makeShell();
+  try {
+    shell.start();
+    await settle();
+    runtime.emit({
+      kind: "incomplete",
+      trigger: "turn",
+      outcome: { kind: "failed", stage: "summary", error: new Error("网关拒绝：花费上限") },
+    });
+    runtime.emit({
+      kind: "incomplete",
+      trigger: "run-start",
+      outcome: { kind: "skipped", reason: "nothing-to-summarize" },
+    });
+    runtime.emit({ kind: "hook-failed", trigger: "turn", error: new Error("复盘失败") });
+    await settle();
+    const text = screenFlat(term);
+    assert.ok(
+      text.includes("上下文压缩未完成（自动，轮间）：网关拒绝：花费上限；本轮按原上下文继续"),
+      text
+    );
+    assert.ok(text.includes("上下文压缩未完成（自动，Run 开始前）："), text);
+    assert.ok(text.includes("压缩前回调失败：复盘失败；压缩照常进行"), text);
   } finally {
     shell.stop();
     rmSync(logDir, { recursive: true, force: true });

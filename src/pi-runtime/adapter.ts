@@ -77,6 +77,7 @@ import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judg
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import type {
+  CompactionConfig,
   CompactionOutcome,
   CompactionStore,
   CompactionTrigger,
@@ -122,12 +123,16 @@ export interface StreamTextDelta {
   delta: string;
 }
 
-// 一次压缩完成后的提示（189）：界面据此提示一行压缩前后的 token 数
-export interface CompactionNotice {
-  trigger: CompactionTrigger;
-  tokensBefore: number;
-  tokensAfter: number;
-}
+// 压缩提示（189）：界面据此各提示一行——压成了（压缩前后的 token 数）、自动压缩没压成（原因；本轮按原上下文继续；
+// 被中断的不提示）、压缩前回调失败（原因；压缩照常进行）。手动压缩没压成时结果直接交回调用方，不另发提示
+export type CompactionNotice =
+  | { kind: "compacted"; trigger: CompactionTrigger; tokensBefore: number; tokensAfter: number }
+  | {
+      kind: "incomplete";
+      trigger: Exclude<CompactionTrigger, "manual">;
+      outcome: Exclude<CompactionOutcome, { kind: "compacted" }>;
+    }
+  | { kind: "hook-failed"; trigger: CompactionTrigger; error: unknown };
 
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
 export type ManualCompactionOutcome = CompactionOutcome | { kind: "skipped"; reason: "disabled" };
@@ -438,10 +443,15 @@ export class PiRuntimeAdapter {
     return () => this.#streamListeners.delete(listener);
   }
 
-  // 观察口（189）：订阅压缩完成的提示（自动与手动）；listener 抛异常只进 listenerErrors
+  // 观察口（189）：订阅压缩提示（压成、自动压缩没压成、压缩前回调失败）；listener 抛异常只进 listenerErrors
   subscribeCompaction(listener: (notice: CompactionNotice) => void): () => void {
     this.#compactionListeners.add(listener);
     return () => this.#compactionListeners.delete(listener);
+  }
+
+  // 本运行面的压缩配置（188、218）：派出的 worker 按同一配置跑；没有配置压缩时为 undefined
+  compactionConfig(): CompactionConfig | undefined {
+    return this.#compactor !== undefined ? { ...this.#compactor.config } : undefined;
   }
 
   // 手动压缩（189 的 /compact [重点]）：重点作为摘要的附加说明。只在没有进行中的 Run 时可用；
@@ -563,7 +573,20 @@ export class PiRuntimeAdapter {
     };
   }
 
-  // 执行一次压缩并发出提示；失败只进 listenerErrors
+  // 发出一条压缩提示；listener 抛异常只进 listenerErrors
+  #notifyCompaction(notice: CompactionNotice): void {
+    const frozen = Object.freeze(notice);
+    for (const listener of this.#compactionListeners) {
+      try {
+        listener(frozen);
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+  }
+
+  // 执行一次压缩并发出提示。摘要请求失败与压缩前回调失败属运行时诊断，经提示给出、不计入事件落盘失败；
+  // 压缩条目写不进会话文件属落盘失败，仍进 listenerErrors
   async #runCompaction(
     trigger: CompactionTrigger,
     tokens: number,
@@ -579,25 +602,22 @@ export class PiRuntimeAdapter {
       tokens,
       ...(customInstructions !== undefined ? { customInstructions } : {}),
       signal,
-      reportError: (error) => {
-        this.#listenerErrors.push(error);
+      onHookError: (error) => {
+        this.#notifyCompaction({ kind: "hook-failed", trigger, error });
       },
     });
-    if (outcome.kind === "failed") {
+    if (outcome.kind === "failed" && outcome.stage === "store") {
       this.#listenerErrors.push(outcome.error);
-    } else if (outcome.kind === "compacted") {
-      const notice: CompactionNotice = Object.freeze({
+    }
+    if (outcome.kind === "compacted") {
+      this.#notifyCompaction({
+        kind: "compacted",
         trigger,
         tokensBefore: outcome.tokensBefore,
         tokensAfter: outcome.tokensAfter,
       });
-      for (const listener of this.#compactionListeners) {
-        try {
-          listener(notice);
-        } catch (error) {
-          this.#listenerErrors.push(error);
-        }
-      }
+    } else if (trigger !== "manual" && !signal.aborted) {
+      this.#notifyCompaction({ kind: "incomplete", trigger, outcome });
     }
     return outcome;
   }

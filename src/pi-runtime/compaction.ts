@@ -184,7 +184,7 @@ export interface BeforeCompactionInfo {
 }
 
 // 压缩前回调（192、207 压缩前复盘的挂点）：待摘要段非空、摘要请求发出之前调用并等待；
-// 调用时此前的消息都已写进会话文件。抛错或拒绝只记为内部故障，压缩照常进行
+// 调用时此前的消息都已写进会话文件。抛错或拒绝交给调用方提示，压缩照常进行
 export type BeforeCompaction = (info: BeforeCompactionInfo) => void | Promise<void>;
 
 export type CompactionOutcome =
@@ -197,7 +197,8 @@ export type CompactionOutcome =
       messages: AgentMessage[];
     }
   | { kind: "skipped"; reason: "nothing-to-summarize" | "store-unavailable" }
-  | { kind: "failed"; error: unknown };
+  // stage：出在哪一步——准备（会话树形状不对）、摘要（摘要请求失败或被中止）、写入（压缩条目没写进会话文件）
+  | { kind: "failed"; stage: "prepare" | "summary" | "store"; error: unknown };
 
 export interface ContextCompactorOptions {
   config: CompactionConfig;
@@ -228,7 +229,7 @@ export class ContextCompactor {
   }
 
   // 执行一次压缩：读主分支、准备、判空、压缩前回调、生成摘要、写压缩条目、按会话树还原上下文。
-  // 从不抛：失败以 failed 返回，压缩前回调的故障交给 reportError
+  // 从不抛：失败以 failed 返回，压缩前回调的故障交给 onHookError
   async run(
     store: CompactionStore | undefined,
     input: {
@@ -236,7 +237,7 @@ export class ContextCompactor {
       tokens: number;
       customInstructions?: string;
       signal: AbortSignal;
-      reportError: (error: unknown) => void;
+      onHookError: (error: unknown) => void;
     }
   ): Promise<CompactionOutcome> {
     try {
@@ -249,7 +250,7 @@ export class ContextCompactor {
       }
       const prepared = prepareCompaction([...entries], settingsOf(this.config));
       if (!prepared.ok) {
-        return { kind: "failed", error: prepared.error };
+        return { kind: "failed", stage: "prepare", error: prepared.error };
       }
       const preparation = prepared.value;
       if (preparation === undefined || isEmptyPreparation(preparation)) {
@@ -266,7 +267,7 @@ export class ContextCompactor {
             signal: input.signal,
           });
         } catch (error) {
-          input.reportError(error);
+          input.onHookError(error);
         }
       }
       const result = await compact(
@@ -277,11 +278,11 @@ export class ContextCompactor {
         input.signal
       );
       if (!result.ok) {
-        return { kind: "failed", error: result.error };
+        return { kind: "failed", stage: "summary", error: result.error };
       }
       const after = await store.appendCompaction(result.value);
       if (after === undefined) {
-        return { kind: "failed", error: new Error("压缩条目没有写进会话文件") };
+        return { kind: "failed", stage: "store", error: new Error("压缩条目没有写进会话文件") };
       }
       const messages = buildSessionContext([...after]).messages;
       return {
@@ -292,7 +293,7 @@ export class ContextCompactor {
         messages,
       };
     } catch (error) {
-      return { kind: "failed", error };
+      return { kind: "failed", stage: "summary", error };
     }
   }
 }

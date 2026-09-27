@@ -14,7 +14,7 @@ import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { newSessionId } from "../state/ids.ts";
 import { type RunStartData, SessionEntryType } from "../state/session-entries.ts";
 import { ToolRegistry } from "../tools/registry.ts";
-import { PiRuntimeAdapter } from "./adapter.ts";
+import { type CompactionNotice, PiRuntimeAdapter } from "./adapter.ts";
 import {
   type BeforeCompactionInfo,
   type CompactionConfigInput,
@@ -88,13 +88,23 @@ interface Harness {
   sessionId: string;
   before: BeforeCompactionInfo[];
   notices: Array<{ trigger: string; tokensBefore: number; tokensAfter: number }>;
+  // 没压成与压缩前回调失败的提示
+  problems: CompactionNotice[];
   cleanup: () => Promise<void>;
+}
+
+interface HarnessFaults {
+  // 摘要请求一律失败（如网关拒绝）
+  failSummary?: boolean;
+  // 压缩条目写不进会话文件
+  failCompactionWrite?: boolean;
 }
 
 function harness(
   replies: FakeReply[],
   config: CompactionConfigInput = { thresholdTokens: 1000, keepRecentTokens: 5 },
-  beforeCompaction?: (info: BeforeCompactionInfo, adapter: PiRuntimeAdapter) => Promise<void>
+  beforeCompaction?: (info: BeforeCompactionInfo, adapter: PiRuntimeAdapter) => Promise<void>,
+  faults: HarnessFaults = {}
 ): Harness {
   const root = mkdtempSync(join(tmpdir(), "pigeon-compaction-"));
   const sessions = join(root, ".pigeon", "sessions");
@@ -110,7 +120,10 @@ function harness(
   const ref: { adapter?: PiRuntimeAdapter } = {};
   const compactor = new ContextCompactor({
     config: resolveCompactionConfig(config),
-    streamFn,
+    streamFn:
+      faults.failSummary === true
+        ? () => Promise.reject(new Error("网关拒绝：花费上限"))
+        : streamFn,
     model: {
       id: "fake-model-1",
       name: "fake-model-1",
@@ -136,12 +149,31 @@ function harness(
     tools: [echoTool],
     governance: governance(),
     sessionId: sessionId as never,
-    sessionStore: store,
+    sessionStore:
+      faults.failCompactionWrite === true
+        ? {
+            appendMessage: (message) => store.appendMessage(message),
+            append: (entry) => store.append(entry),
+            branch: () => store.branch(),
+            appendCompaction: async () => undefined,
+          }
+        : store,
     compaction: compactor,
   });
   ref.adapter = adapter;
   const notices: Harness["notices"] = [];
-  adapter.subscribeCompaction((notice) => notices.push({ ...notice }));
+  const problems: CompactionNotice[] = [];
+  adapter.subscribeCompaction((notice) => {
+    if (notice.kind === "compacted") {
+      notices.push({
+        trigger: notice.trigger,
+        tokensBefore: notice.tokensBefore,
+        tokensAfter: notice.tokensAfter,
+      });
+    } else {
+      problems.push(notice);
+    }
+  });
   return {
     adapter,
     streamFn,
@@ -150,6 +182,7 @@ function harness(
     sessionId,
     before,
     notices,
+    problems,
     cleanup: async () => {
       await adapter.dispose();
       await store.close();
@@ -423,6 +456,89 @@ test("Run 开始条目记下本次的压缩配置（窗口、预留、保留量�
       thresholdTokens: 30_000,
     });
     assert.deepEqual(roles(h.adapter.transcript()), ["user", "assistant"]);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("自动压缩未完成（摘要请求失败）：提示一行未完成，本轮按原上下文继续；不计入事件落盘失败", async () => {
+  const h = harness(
+    [
+      { text: "", toolCalls: [{ name: "echo", args: { text: "ok" } }], contextTokens: 5000 },
+      { text: "修好了", contextTokens: 300 },
+    ],
+    { thresholdTokens: 1000, keepRecentTokens: 5 },
+    undefined,
+    { failSummary: true }
+  );
+  try {
+    const result = await h.adapter.run(LONG_TASK);
+    assert.equal(result.status, "completed");
+    assert.equal(h.streamFn.calls.length, 2);
+    assert.ok(requestText(h.streamFn.calls[1]).includes("细节说明。细节说明。"));
+    assert.deepEqual(
+      h.problems.map((notice) => [notice.kind, notice.trigger]),
+      [["incomplete", "turn"]]
+    );
+    const problem = h.problems[0];
+    assert.ok(problem?.kind === "incomplete" && problem.outcome.kind === "failed");
+    assert.match(String(problem.outcome.error), /网关拒绝/);
+    assert.deepEqual(h.notices, []);
+    assert.equal(h.adapter.listenerErrors().length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("压缩前回调失败：提示一行回调失败，压缩照常完成；不计入事件落盘失败", async () => {
+  const h = harness(
+    [
+      { text: LONG_REPLY, contextTokens: 5000 },
+      { text: "## Goal\n第一问" },
+      { text: "第二问的回答", contextTokens: 300 },
+    ],
+    { thresholdTokens: 1000, keepRecentTokens: 5 },
+    async () => {
+      throw new Error("复盘失败：记忆文件被锁");
+    }
+  );
+  try {
+    await h.adapter.run(LONG_TASK);
+    await h.adapter.run("第二问");
+    assert.deepEqual(
+      h.problems.map((notice) => [notice.kind, notice.trigger]),
+      [["hook-failed", "run-start"]]
+    );
+    assert.deepEqual(
+      h.notices.map((notice) => notice.trigger),
+      ["run-start"]
+    );
+    assert.equal(h.adapter.listenerErrors().length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("压缩条目写不进会话文件：提示一行未完成，仍计入事件落盘失败", async () => {
+  const h = harness(
+    [
+      { text: LONG_REPLY, contextTokens: 5000 },
+      { text: "## Goal\n第一问" },
+      { text: "第二问的回答", contextTokens: 300 },
+    ],
+    { thresholdTokens: 1000, keepRecentTokens: 5 },
+    undefined,
+    { failCompactionWrite: true }
+  );
+  try {
+    await h.adapter.run(LONG_TASK);
+    await h.adapter.run("第二问");
+    assert.deepEqual(
+      h.problems.map((notice) => [notice.kind, notice.trigger]),
+      [["incomplete", "run-start"]]
+    );
+    assert.equal(h.adapter.listenerErrors().length, 1);
+    assert.ok(requestText(h.streamFn.calls[2]).includes("细节说明。细节说明。"));
   } finally {
     await h.cleanup();
   }

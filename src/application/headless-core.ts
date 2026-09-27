@@ -15,7 +15,7 @@ import type { MemoryRoot } from "../memory/resident.ts";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
-import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
+import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -31,11 +31,13 @@ import type { EditMode } from "../tools/edit-mode.ts";
 import type { StepStartMark, WorkspaceHost } from "../tools/workspace-host.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
+import { compactionWarner } from "./compaction-text.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { buildRepairFeedback } from "./repair-loop.ts";
 import type { RuntimeBundle } from "./runtime.ts";
 import { openSessionStore, storeFaultWarner } from "./session-store.ts";
+import type { WarnSink } from "./warnings.ts";
 import { createDetachedRuntime } from "./workers.ts";
 
 export type HeadlessStatus =
@@ -93,6 +95,10 @@ export interface HeadlessRunOptions {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省，集成冒烟可调低触发点
   compaction?: CompactionConfigInput;
+  // 决策 192、207：压缩前回调（压缩前复盘的挂点）；缺省不挂
+  beforeCompaction?: BeforeCompaction;
+  // 运行时告警的出口（自动压缩没压成、压缩前回调失败；缺省标准错误输出，同一类只说一次；测试注入）
+  warn?: WarnSink;
   // 决策 191、193：推送记忆（开局把记忆整份推入系统提示）。尚未实现：打开即在装配前报错
   pushedMemory?: boolean;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
@@ -246,6 +252,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
     ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
     ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
+    ...(options.beforeCompaction !== undefined
+      ? { beforeCompaction: options.beforeCompaction }
+      : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
@@ -274,6 +283,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
+      // 决策 189：无头运行没人看压缩提示——自动压缩没压成与压缩前回调失败写标准错误输出，同一类只说一次
+      bundle.adapter.subscribeCompaction(compactionWarner(options.warn));
       toolTiers = bundle.toolTiers;
       // M7（决策 078）：会分叉的会话（开了失败自动重试的尝试、分支会话）在 git 工作区里打快照；
       // 决策 142：开启回炉时强制打快照——首个快照的改前基线就是这一步的起点
