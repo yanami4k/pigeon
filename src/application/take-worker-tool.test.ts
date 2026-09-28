@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { snapshotWorkdir } from "../execution/workdir-snapshot.ts";
-import type { WorkerStatus } from "../orchestration/workers.ts";
+import { WorkerOrchestrator, type WorkerStatus } from "../orchestration/workers.ts";
 import { newSessionId } from "../state/ids.ts";
 import { SpawnWorkerBudget, SpawnWorkerSlot } from "./spawn-worker-tool.ts";
 import {
@@ -27,6 +27,7 @@ import {
   takeWorkerChanges,
   takeWorkerRegistration,
 } from "./take-worker-tool.ts";
+import { workerStartPoint } from "./workers.ts";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -238,5 +239,57 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
     assert.equal(readFileSync(join(f.main, "n.txt"), "utf8"), "new\n");
   } finally {
     f.cleanup();
+  }
+});
+
+// 决策 279 修订：起点引用建树后即删——worker 分支指向起点快照提交，提交不会被回收；取用照样按快照号比对
+test("派出后 refs/pigeon/ 下不留该 worker 的起点引用；gc 之后 take_worker 仍按快照号比对并叠入", async () => {
+  const main = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-take-release-")));
+  try {
+    git(main, "init", "-q", "-b", "main");
+    git(main, "config", "user.email", "pigeon@example.invalid");
+    git(main, "config", "user.name", "pigeon-test");
+    git(main, "config", "core.autocrlf", "false");
+    writeFileSync(join(main, ".gitignore"), ".pigeon/\n");
+    writeFileSync(join(main, "a.txt"), "a1\na2\na3\n");
+    git(main, "add", ".");
+    git(main, "commit", "-q", "-m", "init");
+    // 主工作目录的未提交改动：派出时带进快照
+    writeFileSync(join(main, "a.txt"), "a1 main\na2\na3\n");
+    const orchestrator = new WorkerOrchestrator({
+      governanceRoot: main,
+      session: { sessionId: newSessionId() },
+      parentPolicy: { allow: ["read_file", "edit_file"], deny: [], approvalMode: "yolo" },
+      parentLog: { appendChildSpawned: () => {}, appendChildSettled: () => {} },
+      approvals: async () => ({ approved: true }),
+      startPoint: workerStartPoint(main),
+      // worker 在自己的工作树里改 a.txt 末行、新建 n.txt（不提交）
+      createRuntime: (request) => ({
+        run: async () => {
+          const path = request.workspace.kind === "git-worktree" ? request.workspace.path : "";
+          writeFileSync(join(path, "a.txt"), "a1 main\na2\na3 worker\n");
+          writeFileSync(join(path, "n.txt"), "new\n");
+          return { status: "completed" };
+        },
+        interrupt: async () => {},
+        subscribe: () => () => {},
+        summary: () => "改好了",
+        dispose: async () => {},
+      }),
+    });
+    const id = orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" });
+    assert.equal(git(main, "for-each-ref", "refs/pigeon/"), "", "建树后起点引用已删");
+    const outcome = await orchestrator.awaitResult(id);
+    assert.equal(outcome.start?.snapshot, true);
+    const base = outcome.start?.commit ?? "";
+    assert.equal(git(main, "rev-parse", "pigeon/fix-a"), base, "worker 分支指向起点快照提交");
+    git(main, "gc", "-q", "--prune=now");
+    assert.equal(git(main, "cat-file", "-t", base), "commit", "gc 之后快照提交仍在");
+    const { text, details } = takeWorkerChanges({ orchestrator, governanceRoot: main }, "fix-a");
+    assert.deepEqual(details.result?.applied, ["a.txt", "n.txt"], text);
+    assert.equal(readFileSync(join(main, "a.txt"), "utf8"), "a1 main\na2\na3 worker\n");
+    assert.deepEqual(orchestrator.errors(), []);
+  } finally {
+    rmSync(main, { recursive: true, force: true });
   }
 });

@@ -394,3 +394,38 @@ test("没有起点提供者：与从前一样（工作区形状不带 baseCommit
   assert.equal("baseCommit" in (spawned[0]?.workspace ?? {}), false);
   assert.equal(outcome.start, undefined);
 });
+
+// 决策 279 修订：起点引用只护住"拍好快照到建好工作树"一段——建好（或建失败）即调 release；release 出错不改变派出结果
+test("起点的 release：建好工作区后调一次；建工作区失败也调；release 抛错只进内部故障清单", async () => {
+  const calls: string[] = [];
+  const point = { commit: "b".repeat(40), snapshot: true, files: ["x.ts"] };
+  const ok = setup({
+    startPoint: () => ({ ...point, release: () => calls.push("release") }),
+  });
+  const id = ok.orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" });
+  assert.deepEqual(calls, ["release"]);
+  const outcome = await ok.orchestrator.awaitResult(id);
+  assert.deepEqual(outcome.start, point, "结果里的起点不带 release");
+
+  const failed = setup({
+    failCreate: true,
+    startPoint: () => ({ ...point, release: () => calls.push("release-after-failure") }),
+  });
+  assert.throws(
+    () => failed.orchestrator.spawn({ role: "implementer", task: "改" }),
+    WorkerSpawnError
+  );
+  assert.deepEqual(calls, ["release", "release-after-failure"]);
+
+  const throwing = setup({
+    startPoint: () => ({
+      ...point,
+      release: () => {
+        throw new Error("删不掉");
+      },
+    }),
+  });
+  const other = throwing.orchestrator.spawn({ role: "implementer", task: "改" });
+  assert.equal((await throwing.orchestrator.awaitResult(other)).status, "completed");
+  assert.equal(throwing.orchestrator.errors().length, 1);
+});

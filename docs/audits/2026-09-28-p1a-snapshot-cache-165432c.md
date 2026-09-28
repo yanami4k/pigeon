@@ -173,3 +173,17 @@ worker 的改动取它工作树的当前内容（可能未提交）：用与快�
 2. 第二次在同一仓库执行 `pigeon run --sandbox --sandbox-network off`，在断网的容器里执行 `npm install --offline left-pad@1.3.0`，退出码 0，外网请求失败，说明包是从共用缓存卷装的。
 3. `pigeon sandbox cache` 显示卷的占用。收尾没有残留的沙箱容器，`pigeon sandbox clear-cache` 删除了本次测试建立的卷，之后没有 pigeon 卷。
 4. 在中间提交上的第一次冒烟里，与提交在同一秒内改过、大小不变的 `a.txt` 没有进入快照（容器里是改前内容）。据此改为保留原索引的时间戳，并加了用例与变异 M0。上面是 cdef03f 上的结果。
+
+## 九、验收后的修订
+
+- 取用入口（take_worker 工具加 `/take`）见决策 292。
+- `spawn_worker` 工具说明第二段改为："worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。"原句中与新起点矛盾的"看不到你还没提交的改动""要它接着你的改动干，先提交"随之去掉，其余定稿文字不动；逐字核对的测试同步更新。
+- 起点引用建树后即删：
+  - worker：起点提供者返回的释放函数由编排器在建工作区之后调用（建失败也调），删掉 `refs/pigeon/worker-start/<名>`。worker 分支本身指向起点快照提交，提交不会被回收。释放出错只进编排器的内部故障清单，不改变派出结果。`deleteBranch` 连带删引用的逻辑留作兜底。
+  - 沙箱：容器里建好仓库即删 `refs/pigeon/sandbox-start/<sessionId>`；开工中途失败照旧删除；`pigeon sandbox clean` 连带删除留作兜底。
+  - 开箱后到交回之前，宿主仓库里的快照提交没有引用；交回时它随交回的分支重新被引用。git 缺省只回收超过两周的无引用对象。
+  - 不加清理命令。
+- 新增用例：
+  - take-worker-tool.test.ts「派出后 refs/pigeon/ 下不留该 worker 的起点引用；gc 之后 take_worker 仍按快照号比对并叠入」：真实编排器与 git 工作树，`git gc --prune=now` 之后快照提交仍在，叠入成功。
+  - workers.test.ts「起点的 release：建好工作区后调一次；建工作区失败也调；release 抛错只进内部故障清单」。
+  - sandbox.test.ts 两处断言改为开箱后引用已不在。

@@ -100,11 +100,13 @@ export interface WorkerStartPoint {
   files: string[];
 }
 
+// release：起点的引用只需护住"拍好快照到建好工作树"这一段——worker 分支建好即指向起点提交，提交不会被回收；
+// 编排器在建工作区之后（成败都）调用它，由提供者删掉单独的引用（决策 279 修订）
 export type WorkerStartPointProvider = (input: {
   sessionId: SessionId;
   name: string;
   role: WorkerRole;
-}) => WorkerStartPoint;
+}) => WorkerStartPoint & { release?: () => void };
 
 // 隔离工作区提供者：第一版为 git 工作树；测试注入内存实现。
 // M6.5 S2（决策 057）：baseRef 为起点提交（Eval 任务的 ref），缺省 HEAD
@@ -284,9 +286,12 @@ export class WorkerOrchestrator {
     const sessionId = newSessionId();
     // 决策 279：先拍主工作目录的快照当起点（拍不成即不派：没有派出记录、零工作区零运行面）
     let startPoint: WorkerStartPoint | undefined;
+    let releaseStart: (() => void) | undefined;
     if (this.#options.startPoint !== undefined) {
       try {
-        startPoint = this.#options.startPoint({ sessionId, name, role });
+        const { release, ...point } = this.#options.startPoint({ sessionId, name, role });
+        startPoint = point;
+        releaseStart = release;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         throw new WorkerSpawnError(`派出 worker ${name} 失败：拍工作目录快照失败：${message}`, {
@@ -321,6 +326,8 @@ export class WorkerOrchestrator {
         role,
         ...(startPoint !== undefined ? { baseRef: startPoint.commit } : {}),
       });
+      this.#releaseStart(releaseStart);
+      releaseStart = undefined;
       runtime = this.#options.createRuntime({
         sessionId,
         name,
@@ -338,6 +345,7 @@ export class WorkerOrchestrator {
         limits,
       });
     } catch (error) {
+      this.#releaseStart(releaseStart);
       const message = error instanceof Error ? error.message : String(error);
       this.#appendSettled({
         childSessionId: sessionId,
@@ -547,6 +555,18 @@ export class WorkerOrchestrator {
       ...(result !== undefined ? { result } : {}),
     });
     return outcome;
+  }
+
+  // 删起点引用失败不改变派出结果：进内部故障清单
+  #releaseStart(release: (() => void) | undefined): void {
+    if (release === undefined) {
+      return;
+    }
+    try {
+      release();
+    } catch (error) {
+      this.#errors.push(error);
+    }
   }
 
   // settled 写盘失败不改变 worker 结果：进内部故障清单，父会话留"缺 settled"的可见缺口

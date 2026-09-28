@@ -24,7 +24,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
 
-// 有一个提交的 git 仓库（worker 从当前提交开工）；.pigeon/ 不进版本
+// 有一个提交的 git 仓库（worker 从主工作目录的快照开工）；.pigeon/ 不进版本
 function repo(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "pigeon-spawn-headless-"));
   roots.push(root);

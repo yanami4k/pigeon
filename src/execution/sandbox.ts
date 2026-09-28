@@ -11,7 +11,7 @@
 //         不缓存装好的依赖目录。清空与查看占用的命令在 pigeon sandbox 下。
 //   交回（245）：容器内把改动提交到 pigeon/sandbox-<会话号>，打 bundle 取出，在宿主仓库 git fetch 成同名分支。不动
 //         当前分支、工作目录与未提交的改动，不经网络，不自动推送。交回的分支 = 快照提交 + agent 的提交（提示里说明）。
-//   收尾：交回一次后删除容器，快照引用随之删除（快照提交已由交回的分支引用）；交回失败即保留容器与引用，改动还在里面。
+//   收尾：交回一次后删除容器；交回失败即保留容器，改动还在里面。快照引用在开箱（容器里建好仓库）后即删，开工中途失败也删。
 //   残留：进程异常退出留下的带标签容器，开沙箱时列出并给出清理命令，不自动删除；清理时连同其快照引用一并删除。
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -640,6 +640,8 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     await discard().catch(() => {});
     throw error;
   }
+  // 开箱即删快照引用（决策 278 修订）：快照提交已进容器的仓库，交回的分支含它；引用只护住拍快照到开箱这一段
+  dropStartRef();
 
   const host = createContainerWorkspaceHost({ container, root: workspaceRoot, docker });
   let closed: SandboxExport | undefined;

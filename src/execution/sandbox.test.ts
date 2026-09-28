@@ -67,7 +67,7 @@ async function inContainer(
   assert.equal(result.exitCode, 0, result.output);
 }
 
-test("开沙箱缺省带入未提交的改动（含新建文件，不含被忽略的）：容器从以 HEAD 为父的快照起步、带会话号标签；交回的分支 = 快照 + agent 的提交，不动当前分支、工作目录与未提交改动；快照引用随收尾删除", async () => {
+test("开沙箱缺省带入未提交的改动（含新建文件，不含被忽略的）：容器从以 HEAD 为父的快照起步、带会话号标签；交回的分支 = 快照 + agent 的提交，不动当前分支、工作目录与未提交改动；快照引用开箱即删", async () => {
   const repo = makeRepo();
   const fake = fakeSandboxDocker();
   try {
@@ -86,11 +86,7 @@ test("开沙箱缺省带入未提交的改动（含新建文件，不含被忽�
     assert.deepEqual(sandbox.startSnapshot.files, [".gitignore", "a.txt", "u.txt"]);
     assert.equal(sandbox.startCommit, sandbox.startSnapshot.commit);
     assert.equal(git(repo, "rev-parse", `${sandbox.startCommit}^`), head, "快照以 HEAD 为父");
-    assert.equal(
-      readSnapshotRef(repo, sandboxStartRef("sess_T1")),
-      sandbox.startCommit,
-      "会话中引用钉着快照提交"
-    );
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_T1")), undefined, "开箱即删快照引用");
     const container = fake.state().containers["pigeon-sandbox-sess_T1"];
     assert.ok(container !== undefined);
     assert.equal(container.labels["pigeon.sandbox"], "sess_T1");
@@ -245,7 +241,7 @@ test("硬性规则：开沙箱挂共用下载缓存卷——run 参数带卷与�
   });
 });
 
-test("快照引用的清理：开工中途失败与不交回直接删容器时一并删除；清理残留容器时连同其引用", async () => {
+test("快照引用的清理：开箱即删、开工中途失败也删；清理残留容器时连同其引用（兜底）", async () => {
   const repo = makeRepo();
   const noGit = fakeSandboxDocker({ noGit: ["sandbox-test:latest"] });
   const fake = fakeSandboxDocker();
@@ -255,9 +251,9 @@ test("快照引用的清理：开工中途失败与不交回直接删容器时�
     assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_NG")), undefined, "开工失败即删引用");
     const sandbox = await openSandbox(options(fake, repo, "sess_DC"));
     assert.ok(sandbox.startSnapshot !== undefined);
-    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_DC")), sandbox.startSnapshot.commit);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_DC")), undefined, "开箱即删引用");
     await sandbox.discard();
-    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_DC")), undefined, "丢弃即删引用");
+    assert.equal(git(repo, "cat-file", "-t", sandbox.startSnapshot.commit), "commit");
     // 上次进程异常退出留下的容器与引用：清理残留时一并删
     const head = git(repo, "rev-parse", "HEAD");
     git(repo, "update-ref", sandboxStartRef("sess_DEAD"), head);

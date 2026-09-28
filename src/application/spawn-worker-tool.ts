@@ -50,7 +50,7 @@ export function assertSpawnWorkerLimits(limits: SpawnWorkerLimits): void {
 export function spawnWorkerDescription(limits: SpawnWorkerLimits): string {
   return [
     "派一个 worker 去完成一项独立的子任务，等它做完，把它的分支、改动过的文件与工作摘要交回给你。",
-    "worker 从当前提交开工，在自己的 git 工作树与分支里干活；看不到你还没提交的改动，也看不到本会话的对话。要它接着你的改动干，先提交。",
+    "worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。",
     `要并行，就在同一次回复里多次调用本工具，每次派一个；同时最多跑 ${limits.maxConcurrent} 个，多的排队；一次运行最多派 ${limits.maxAgentSpawns} 个。`,
     "何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。",
     "任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问，也不能再派 worker。",
