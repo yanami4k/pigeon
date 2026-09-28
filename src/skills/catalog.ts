@@ -30,7 +30,7 @@ export interface SkillPromptInput extends SkillPromptSource {
   text: string;
 }
 
-// M6.5（决策 059）：显式 Skill 根。label 是清单与目录段里的展示路径（如 eval/skills/<name>/candidate），
+// M6.5（决策 059）：显式 Skill 根。label 是清单与目录段里的展示路径（如 skills/<name>/candidate），
 // 哈希清单随 Run 开始条目 落盘，事后可与该路径下的文件对账
 export interface SkillRoot {
   path: string;
