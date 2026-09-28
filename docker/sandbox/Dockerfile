@@ -1,14 +1,16 @@
-# Pigeon 日常沙箱的通用镜像：Ubuntu 24.04，含 git、Python 3、Node 与常用命令行工具，以非 root 用户 pigeon 运行。
-# 首次开沙箱时由 Pigeon 构建，标签带本文件内容（与底镜像名）的哈希，之后直接用缓存。
+# Pigeon 日常沙箱的通用镜像：Ubuntu 24.04，含 git、Python 3、Node 24（长期支持版）与常用命令行工具，以非 root 用户
+# pigeon 运行。首次开沙箱时由 Pigeon 构建，标签带本文件内容（与底镜像名）的哈希，之后直接用缓存。
 # 国内网络可经构建参数替换底镜像与软件源：
 #   BASE_IMAGE    底镜像名（缺省 ubuntu:24.04，可换成镜像站上的同版本镜像）
 #   APT_MIRROR    apt 软件源根地址（如 https://mirrors.aliyun.com/ubuntu）
+#   NODE_MIRROR   Node 官方二进制包的下载根地址（缺省 https://nodejs.org/dist，可换 https://npmmirror.com/mirrors/node）
 #   PIP_INDEX_URL pip 索引地址（同时写进镜像，容器里的 pip 照此安装）
 #   NPM_REGISTRY  npm 源（同时写进镜像，容器里的 npm 照此安装）
 ARG BASE_IMAGE=ubuntu:24.04
 FROM ${BASE_IMAGE}
 
 ARG APT_MIRROR=
+ARG NODE_MIRROR=https://nodejs.org/dist
 ARG PIP_INDEX_URL=
 ARG NPM_REGISTRY=
 ENV DEBIAN_FRONTEND=noninteractive
@@ -25,11 +27,29 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       git ca-certificates curl wget openssh-client \
       python3 python3-pip python3-venv python-is-python3 \
-      nodejs npm \
       ripgrep fd-find jq tree less file patch procps unzip zip xz-utils \
       build-essential; \
     ln -s /usr/bin/fdfind /usr/local/bin/fd; \
     rm -rf /var/lib/apt/lists/*
+
+# Node 24 长期支持版的最新发布：取官方二进制包，按同目录的 SHASUMS256.txt 校验后解到 /usr/local（apt 的 nodejs 为 v18，已停止维护）
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) arch=x64 ;; \
+      arm64) arch=arm64 ;; \
+      *) echo "不支持的架构：$(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    base="${NODE_MIRROR%/}/latest-v24.x"; \
+    cd /tmp; \
+    curl -fsSL "$base/SHASUMS256.txt" -o SHASUMS256.txt; \
+    file="$(grep -oE "node-v24\.[0-9]+\.[0-9]+-linux-${arch}\.tar\.xz" SHASUMS256.txt | head -n 1)"; \
+    test -n "$file"; \
+    curl -fsSL "$base/$file" -o "$file"; \
+    grep " ${file}\$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xJf "$file" -C /usr/local --strip-components=1 --no-same-owner; \
+    rm -f "$file" SHASUMS256.txt; \
+    node -v; \
+    npm -v
 
 RUN set -eux; \
     if [ -n "$PIP_INDEX_URL" ]; then printf '[global]\nindex-url = %s\n' "$PIP_INDEX_URL" > /etc/pip.conf; fi; \

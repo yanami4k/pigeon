@@ -1,6 +1,6 @@
 // 日常沙箱的镜像（决策 247）：缺省用 Pigeon 自带的通用镜像（仓库里 docker/sandbox/Dockerfile，Ubuntu 24.04），
 // 首次使用时构建，标签带 Dockerfile 内容与底镜像名的哈希，之后直接用缓存；项目可在 .pigeon/sandbox.json 里改用任一镜像名，
-// 或指向项目自己的 Dockerfile。国内网络经构建参数替换底镜像与 apt / pip / npm 的软件源（环境变量或配置的 build 段）。
+// 或指向项目自己的 Dockerfile。国内网络经构建参数替换底镜像、apt 软件源、Node 二进制包下载地址与 pip / npm 的软件源（环境变量或配置的 build 段）。
 // 镜像里须有 git：开工时由沙箱检查（sandbox.ts），这里只负责给出可用的镜像名。
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -32,6 +32,12 @@ const BUILD_PARAMS = [
     env: "PIGEON_SANDBOX_APT_MIRROR",
     arg: "APT_MIRROR",
     what: "apt 软件源根地址",
+  },
+  {
+    key: "nodeMirror",
+    env: "PIGEON_SANDBOX_NODE_MIRROR",
+    arg: "NODE_MIRROR",
+    what: "Node 官方二进制包的下载根地址（缺省 https://nodejs.org/dist，可换 https://npmmirror.com/mirrors/node）",
   },
   { key: "pipIndex", env: "PIGEON_SANDBOX_PIP_INDEX", arg: "PIP_INDEX_URL", what: "pip 索引地址" },
   { key: "npmRegistry", env: "PIGEON_SANDBOX_NPM_REGISTRY", arg: "NPM_REGISTRY", what: "npm 源" },

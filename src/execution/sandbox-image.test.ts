@@ -24,14 +24,20 @@ function project(config?: unknown): string {
   return root;
 }
 
-test("通用镜像的 Dockerfile 在仓库里：Ubuntu 24.04，含 git、Python 3、Node、ripgrep，以非 root 用户运行", () => {
+test("通用镜像的 Dockerfile 在仓库里：Ubuntu 24.04，含 git、Python 3、ripgrep，Node 24 取官方二进制包并校验，以非 root 用户运行", () => {
   const content = readFileSync(GENERIC_DOCKERFILE, "utf8");
   assert.match(content, /ARG BASE_IMAGE=ubuntu:24\.04/);
-  for (const pkg of ["git", "python3", "nodejs", "ripgrep"]) {
+  for (const pkg of ["git", "python3", "ripgrep", "xz-utils"]) {
     assert.match(content, new RegExp(`\\b${pkg}\\b`), pkg);
   }
+  // Node 不走 apt（apt 的 nodejs 为 v18）：取 Node 24 长期支持版的官方二进制包，按官方 SHASUMS256 校验
+  assert.doesNotMatch(content, /^\s+nodejs npm\b/m);
+  assert.match(content, /^ARG NODE_MIRROR=https:\/\/nodejs\.org\/dist$/m);
+  assert.match(content, /latest-v24\.x/);
+  assert.match(content, /SHASUMS256\.txt/);
+  assert.match(content, /sha256sum -c -/);
   assert.match(content, /^USER pigeon$/m);
-  for (const arg of ["APT_MIRROR", "PIP_INDEX_URL", "NPM_REGISTRY"]) {
+  for (const arg of ["APT_MIRROR", "NODE_MIRROR", "PIP_INDEX_URL", "NPM_REGISTRY"]) {
     assert.match(content, new RegExp(`^ARG ${arg}=`, "m"), arg);
   }
 });
@@ -50,6 +56,7 @@ test("缺省用通用镜像：标签带 Dockerfile 与底镜像的哈希，软�
         PIGEON_SANDBOX_APT_MIRROR: "https://mirrors.example/ubuntu",
         PIGEON_SANDBOX_PIP_INDEX: "https://pip.example/simple",
         PIGEON_SANDBOX_NPM_REGISTRY: "https://npm.example",
+        PIGEON_SANDBOX_NODE_MIRROR: "https://node.example/dist",
       }
     );
     assert.equal(mirrored.image, plain.image, "软件源不影响镜像内容标签");
@@ -57,7 +64,17 @@ test("缺省用通用镜像：标签带 Dockerfile 与底镜像的哈希，软�
       APT_MIRROR: "https://mirrors.example/ubuntu",
       PIP_INDEX_URL: "https://pip.example/simple",
       NPM_REGISTRY: "https://npm.example",
+      NODE_MIRROR: "https://node.example/dist",
     });
+    const fromConfig = resolveSandboxImage(
+      root,
+      { build: { nodeMirror: "https://cfg.example/node" } },
+      {}
+    );
+    assert.equal(
+      fromConfig.kind === "build" ? fromConfig.buildArgs.NODE_MIRROR : undefined,
+      "https://cfg.example/node"
+    );
     const rebased = resolveSandboxImage(
       root,
       {},
@@ -142,6 +159,7 @@ test("通用镜像首次使用时构建、之后用缓存；构建失败时报�
         for (const name of [
           "PIGEON_SANDBOX_BASE_IMAGE",
           "PIGEON_SANDBOX_APT_MIRROR",
+          "PIGEON_SANDBOX_NODE_MIRROR",
           "PIGEON_SANDBOX_PIP_INDEX",
           "PIGEON_SANDBOX_NPM_REGISTRY",
         ]) {
