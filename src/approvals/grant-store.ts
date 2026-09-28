@@ -17,6 +17,9 @@ export interface SessionGrantView extends ActiveGrant {
 
 export class GrantNotFoundError extends Error {}
 
+// 这个会话不支持按目录放权（容器工作区：目录限定以宿主路径判定，会静默失配）
+export class PathScopedGrantUnsupportedError extends Error {}
+
 // 授权建立与撤销的落盘口（装配根接到会话存储；返回值无关——落盘副作用才是契约）
 type GrantEventSink = {
   appendGrantCreated(input: GrantCreatedInput): unknown;
@@ -31,15 +34,19 @@ export interface SessionGrantStoreOptions {
   // 冷恢复种子（决策 3b）：会话存储里生效授权的还原——崩溃后会话
   // grant 静默继续有效，恢复屏不加确认环节（用户裁决：重复确认是纯摩擦）
   restored?: readonly ActiveGrant[] | undefined;
+  // 是否允许按目录限定的放权（缺省允许）；容器工作区下关闭，[d] 不建放权
+  pathScoped?: boolean;
 }
 
 export class SessionGrantStore {
   readonly #workspaceRoot: string;
   readonly #sink: GrantEventSink | undefined;
   readonly #grants = new Map<GrantId, SessionGrantView>();
+  readonly #pathScoped: boolean;
 
   constructor(options: SessionGrantStoreOptions) {
     this.#workspaceRoot = options.workspaceRoot;
+    this.#pathScoped = options.pathScoped ?? true;
     this.#sink = options.sink;
     for (const grant of options.restored ?? []) {
       this.#grants.set(grant.grantId, { ...grant, hitCount: 0 });
@@ -55,6 +62,11 @@ export class SessionGrantStore {
     firstCall: { toolCallId: string; args: unknown };
     runId?: RunId;
   }): SessionGrantView {
+    if (input.pathPrefix !== undefined && !this.#pathScoped) {
+      throw new PathScopedGrantUnsupportedError(
+        "沙箱里不支持按目录放权：目录限定以宿主路径判定，对容器里的工作区会静默失配"
+      );
+    }
     const grantId = newGrantId();
     const createdAt = Date.now();
     const scope = {

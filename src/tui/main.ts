@@ -23,6 +23,12 @@ import {
   resolveVerifyConfig,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import {
+  closeSandbox,
+  exportSandbox,
+  type Sandbox,
+  startSandbox,
+} from "../application/sandbox-session.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "../application/session-runtime.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
@@ -31,7 +37,7 @@ import { createApprovalQueue } from "../approvals/queue.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
-import { PigeonTuiShell, type TuiWorkersFace } from "./shell.ts";
+import { PigeonTuiShell, type TuiShellOptions, type TuiWorkersFace } from "./shell.ts";
 
 // 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
 const WORKER_SHUTDOWN_GRACE_MS = 5000;
@@ -40,7 +46,8 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
   "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>]";
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
+  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]]";
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -52,6 +59,7 @@ async function main(argv: string[]): Promise<void> {
     historyLimit: true,
     verify: true,
     retry: true,
+    sandbox: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
@@ -122,6 +130,13 @@ async function main(argv: string[]): Promise<void> {
   };
   // 壳尚未接管终端：启动问题（单个 server 起不来不挡会话）与注解配置冲突（052）直接打到 stderr，
   // 冷侧另见 Run 开始条目 的工具集摘要与 server 状态
+  // 决策 237：--sandbox 先开容器（壳尚未接管终端，提示打到 stderr）；与沙箱不相容的参数在起容器之前报错
+  const sandbox: Sandbox | undefined = await startSandbox({
+    flags,
+    governanceRoot: workspaceRoot,
+    sessionId,
+    log: (line) => console.error(`[沙箱] ${line}`),
+  });
   const mainOpened = await openSessionRuntime({
     governanceRoot: workspaceRoot,
     sessionId,
@@ -129,17 +144,21 @@ async function main(argv: string[]): Promise<void> {
     flags,
     ...verifyOption(flags, workspaceRoot),
     ...retryOption(flags),
+    ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
     createApprovalHandler: createHandler,
     onMcpNote: (note) => {
       console.error(`[mcp] ${note}`);
     },
+  }).catch(async (error: unknown) => {
+    await sandbox?.discard().catch(() => {});
+    throw error;
   });
   const mainBundle = mainOpened.bundle;
-  // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格
-  let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers: TuiWorkersFace } = {
+  // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格。沙箱里不派 worker（会越出容器）
+  let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers?: TuiWorkersFace } = {
     sessionId,
     bundle: mainBundle,
-    workers: workersFor(mainOpened),
+    ...(sandbox === undefined ? { workers: workersFor(mainOpened) } : {}),
   };
   const shell = new PigeonTuiShell({
     terminal: new ProcessTerminal(),
@@ -157,13 +176,22 @@ async function main(argv: string[]): Promise<void> {
     // M5 S2（决策 038 / 045）：/search 命令上下文与 /resume 历史渲染上限
     search: { root: workspaceRoot },
     ...(flags.historyLimit !== undefined ? { historyLimit: flags.historyLimit } : {}),
-    // M5.5 S4：/spawn /cancel /workers
-    workers: slot.workers,
+    // M5.5 S4：/spawn /cancel /workers（沙箱里不提供）
+    ...(slot.workers !== undefined ? { workers: slot.workers } : {}),
+    // 决策 245：沙箱会话的 /export 手动交回
+    ...(sandbox !== undefined ? { sandbox: { exportChanges: () => exportSandbox(sandbox) } } : {}),
     // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
     // restoredGrants 种子（决策 3b，还原目标会话的生效 grant，静默继续有效）+
     // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
     // 旧运行面不受影响，壳继续留在原会话
-    resume: {
+    // 沙箱会话里不提供换绑（命令给出原因）
+    ...(sandbox !== undefined ? {} : { resume: resumeOptions() }),
+    // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
+    //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
+    onExit: release,
+  });
+  function resumeOptions(): NonNullable<TuiShellOptions["resume"]> {
+    return {
       root: workspaceRoot,
       rebind: async (targetId) => {
         // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）；
@@ -194,11 +222,8 @@ async function main(argv: string[]): Promise<void> {
           workers,
         };
       },
-    },
-    // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
-    //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
-    onExit: release,
-  });
+    };
+  }
   faceHolder.current = shell;
   shell.start();
   // 进程级退出：先取消在跑的 worker 并等其收尾记录落盘（有上限），再释放当前运行面并退进程。
@@ -206,13 +231,20 @@ async function main(argv: string[]): Promise<void> {
   function release(): void {
     const current = slot;
     void (async () => {
-      const running = current.workers.status().filter((worker) => worker.state === "running");
-      await Promise.allSettled(running.map((worker) => current.workers.cancel(worker.sessionId)));
-      await Promise.race([
-        Promise.allSettled(running.map((worker) => current.workers.awaitResult(worker.sessionId))),
-        new Promise((resolve) => setTimeout(resolve, WORKER_SHUTDOWN_GRACE_MS)),
-      ]);
+      const workers = current.workers;
+      if (workers !== undefined) {
+        const running = workers.status().filter((worker) => worker.state === "running");
+        await Promise.allSettled(running.map((worker) => workers.cancel(worker.sessionId)));
+        await Promise.race([
+          Promise.allSettled(running.map((worker) => workers.awaitResult(worker.sessionId))),
+          new Promise((resolve) => setTimeout(resolve, WORKER_SHUTDOWN_GRACE_MS)),
+        ]);
+      }
       await disposeRuntime(current.bundle);
+      // 决策 245：会话结束时自动交回一次、删除容器；壳已停，分支名与查看命令打到标准输出
+      if (sandbox !== undefined) {
+        console.log(`[沙箱] ${(await closeSandbox(sandbox)).notice}`);
+      }
     })().finally(() => {
       process.exit(0);
     });

@@ -23,7 +23,10 @@ import {
   approvalVerdict,
   workerGrantScopeNote,
 } from "../application/format.ts";
-import type { SessionGrantStore } from "../approvals/grant-store.ts";
+import {
+  PathScopedGrantUnsupportedError,
+  type SessionGrantStore,
+} from "../approvals/grant-store.ts";
 import {
   type ApprovalDecision,
   type ApprovalHandler,
@@ -121,12 +124,21 @@ export function createTuiApprovalHandler(
       // M5.5 S3（决策 040）：放权落点跟随请求来源——worker 请求自带其会话存储
       const target = request.grants ?? grants;
       // 与 cli 版同一份放权语义：grant.created 事件先于运行态（store.create fail-closed）
-      const grant = target.create({
-        tool: request.toolName,
-        ...scope,
-        firstCall: { toolCallId: request.toolCallId, args: request.args },
-        ...(request.runId !== undefined ? { runId: request.runId } : {}),
-      });
+      let grant: ReturnType<typeof target.create>;
+      try {
+        grant = target.create({
+          tool: request.toolName,
+          ...scope,
+          firstCall: { toolCallId: request.toolCallId, args: request.args },
+          ...(request.runId !== undefined ? { runId: request.runId } : {}),
+        });
+      } catch (error) {
+        // 沙箱里不建目录限定的放权：说明原因，按批准一次处理
+        if (!(error instanceof PathScopedGrantUnsupportedError)) throw error;
+        panel.noteApproval(verdictLine("approved", "human"));
+        panel.noteApproval(`${error.message}，未创建放权（按批准一次处理）`);
+        return { approved: true };
+      }
       panel.noteApproval(verdictLine("approved", "human:grant"));
       panel.noteApproval(
         `已创建会话放权 ${grant.grantId}（${grant.tool}${commandScopeNote(scope)}）${workerGrantScopeNote(request)}`

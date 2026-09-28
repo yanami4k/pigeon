@@ -22,6 +22,15 @@ import {
 } from "../application/launch-flags.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import {
+  closeSandbox,
+  exportSandbox,
+  runHeadlessInSandbox,
+  runSandboxCommand,
+  SANDBOX_FORK_UNSUPPORTED,
+  type Sandbox,
+  startSandbox,
+} from "../application/sandbox-session.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
@@ -243,12 +252,12 @@ async function resumeMain(argv: string[]): Promise<void> {
     throw new Error(usage);
   }
   const sessionId = asSessionId(sessionIdArg);
-  const modelUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+  const modelUsage = `支持 ${SESSION_FLAGS_HINT}`;
   const flags = parseLaunchFlags(modelArgv, {
     usage: modelUsage,
     verify: true,
     retry: true,
+    sandbox: true,
   });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
@@ -263,6 +272,14 @@ async function resumeMain(argv: string[]): Promise<void> {
       // 进入 REPL：同一 sessionId 续写会话；EOF/退出走正常 finally
       enterRepl: async () => {
         const streamFn = await loadStreamFn(streamFnSpec);
+        // 决策 237：沙箱会话从它交回过的分支新开容器接着干
+        const sandbox = await startSandbox({
+          flags,
+          governanceRoot: workspaceRoot,
+          sessionId,
+          resume: true,
+          log: sandboxLog(write),
+        });
         // 作用域（worker 会话回到它自己的工作树与委派策略）、grant 冷恢复种子（决策 3b）、对话上下文还原（决策 183）、
         // MCP 启动与装配都在 application/session-runtime.ts（决策 067，与 tui 的 /resume 换绑同一份）
         const opened = await openSessionRuntime({
@@ -273,11 +290,15 @@ async function resumeMain(argv: string[]): Promise<void> {
           resume: true,
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
+          ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
             write(`[mcp] ${note}\n`);
           },
+        }).catch(async (error: unknown) => {
+          await sandbox?.discard().catch(() => {});
+          throw error;
         });
         const { bundle } = opened;
         try {
@@ -288,11 +309,16 @@ async function resumeMain(argv: string[]): Promise<void> {
             grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
             // M5 S2（决策 038）：/search 内容级检索
             search: { root: workspaceRoot },
-            // M7（决策 079）：/fork 手动分叉
-            fork: forkHandlerOf(opened, workspaceRoot, flags, streamFn),
+            // M7（决策 079）：/fork 手动分叉（沙箱里不支持，说明原因）
+            fork:
+              sandbox !== undefined
+                ? async () => SANDBOX_FORK_UNSUPPORTED
+                : forkHandlerOf(opened, workspaceRoot, flags, streamFn),
+            ...sandboxReplOptions(sandbox),
           });
         } finally {
           await disposeRuntime(bundle);
+          await finishSandbox(sandbox, write);
         }
       },
     });
@@ -308,7 +334,8 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
+    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -345,7 +372,13 @@ async function runMain(argv: string[]): Promise<void> {
       }
     }
   }
-  const flags = parseLaunchFlags(modelArgv, { usage, verify: true, retry: true, repair: true });
+  const flags = parseLaunchFlags(modelArgv, {
+    usage,
+    verify: true,
+    retry: true,
+    repair: true,
+    sandbox: true,
+  });
   if (task === undefined) {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) {
@@ -361,7 +394,7 @@ async function runMain(argv: string[]): Promise<void> {
   const workspaceRoot = prepareWorkspace(flags.root);
   // 决策 142 / 143：回炉轮数——启动参数 > 项目验证配置 > 关闭；设定不成立由 runHeadless 启动报错
   const repairRounds = resolveRepairRounds(flags, workspaceRoot);
-  const result = await runHeadless({
+  const runOptions = {
     task,
     governanceRoot: workspaceRoot,
     workspaceRoot,
@@ -383,7 +416,15 @@ async function runMain(argv: string[]): Promise<void> {
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
     ...(repairRounds > 0 ? { repairRounds } : {}),
-  });
+  };
+  // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
+  const result =
+    flags.sandbox !== undefined
+      ? await runHeadlessInSandbox(
+          { ...runOptions, sessionId: newSessionId() },
+          { flags, log: (line) => process.stderr.write(`[沙箱] ${line}\n`) }
+        )
+      : await runHeadless(runOptions);
   if (json) {
     // JSON.stringify 转义全部 C0 控制字符，一行输出不携带终端控制序列
     process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -395,6 +436,9 @@ async function runMain(argv: string[]): Promise<void> {
         `${result.repair !== undefined ? ` ｜ ${repairSummary(result.repair)}` : ""}` +
         `${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
     );
+  }
+  if ("sandboxNotice" in result && result.sandboxNotice !== undefined) {
+    process.stderr.write(`[沙箱] ${result.sandboxNotice}\n`);
   }
   process.exitCode = HEADLESS_EXIT_CODES[result.status];
 }
@@ -813,12 +857,17 @@ async function main(argv: string[]): Promise<void> {
     await resumeMain(argv.slice(1));
     return;
   }
-  const startUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+  // pigeon sandbox list | clean：残留的沙箱容器
+  if (argv[0] === "sandbox") {
+    writeOut(await runSandboxCommand(argv.slice(1)));
+    return;
+  }
+  const startUsage = `支持 ${SESSION_FLAGS_HINT}`;
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
     verify: true,
     retry: true,
+    sandbox: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）
@@ -826,20 +875,36 @@ async function main(argv: string[]): Promise<void> {
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
-  // 会话运行面装配（决策 067）：MCP 启动、作用域与装配失败收口都在 application/session-runtime.ts
-  const opened = await openSessionRuntime({
-    governanceRoot: workspaceRoot,
-    sessionId,
-    streamFn,
-    flags,
-    ...verifyOption(flags, workspaceRoot),
-    ...retryOption(flags),
-    // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
-    createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
-    onMcpNote: (note) => {
-      write(`[mcp] ${note}\n`);
-    },
-  });
+  // 决策 237：--sandbox 先开容器（与沙箱不相容的参数在起容器之前报错）
+  let sandbox: Sandbox | undefined;
+  let opened: Awaited<ReturnType<typeof openSessionRuntime>>;
+  try {
+    sandbox = await startSandbox({
+      flags,
+      governanceRoot: workspaceRoot,
+      sessionId,
+      log: sandboxLog(write),
+    });
+    // 会话运行面装配（决策 067）：MCP 启动、作用域与装配失败收口都在 application/session-runtime.ts
+    opened = await openSessionRuntime({
+      governanceRoot: workspaceRoot,
+      sessionId,
+      streamFn,
+      flags,
+      ...verifyOption(flags, workspaceRoot),
+      ...retryOption(flags),
+      ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+      // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
+      createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
+      onMcpNote: (note) => {
+        write(`[mcp] ${note}\n`);
+      },
+    });
+  } catch (error) {
+    close();
+    await sandbox?.discard().catch(() => {});
+    throw error;
+  }
   const { bundle } = opened;
   try {
     await runRepl({
@@ -849,12 +914,43 @@ async function main(argv: string[]): Promise<void> {
       grants: grantCommandsOf(bundle, workspaceRoot, sessionId, write),
       // M5 S2（决策 038）：/search 内容级检索
       search: { root: workspaceRoot },
-      // M7（决策 079）：/fork 手动分叉
-      fork: forkHandlerOf(opened, workspaceRoot, flags, streamFn),
+      // M7（决策 079）：/fork 手动分叉（沙箱里不支持，说明原因）
+      fork:
+        sandbox !== undefined
+          ? async () => SANDBOX_FORK_UNSUPPORTED
+          : forkHandlerOf(opened, workspaceRoot, flags, streamFn),
+      ...sandboxReplOptions(sandbox),
     });
   } finally {
     close();
     await disposeRuntime(bundle);
+    await finishSandbox(sandbox, write);
+  }
+}
+
+// 命令行对话与续跑接受的启动参数
+const SESSION_FLAGS_HINT =
+  "--yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt";
+
+// 决策 237：沙箱的提示行
+function sandboxLog(write: (text: string) => void): (line: string) => void {
+  return (line) => write(`[沙箱] ${line}\n`);
+}
+
+// 决策 245：沙箱里提供 /export 手动交回
+function sandboxReplOptions(sandbox: Sandbox | undefined): {
+  exportChanges?: () => Promise<string>;
+} {
+  return sandbox !== undefined ? { exportChanges: () => exportSandbox(sandbox) } : {};
+}
+
+// 决策 245：会话结束时自动交回一次，交回后删除容器；写明分支名与查看命令
+async function finishSandbox(
+  sandbox: Sandbox | undefined,
+  write: (text: string) => void
+): Promise<void> {
+  if (sandbox !== undefined) {
+    write(`[沙箱] ${(await closeSandbox(sandbox)).notice}\n`);
   }
 }
 

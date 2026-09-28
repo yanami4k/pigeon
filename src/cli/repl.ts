@@ -74,6 +74,8 @@ export interface ReplOptions {
   search?: { root: string };
   // M7（决策 079）：/fork 手动分叉（命令层在 application/fork-command.ts，与 tui 同一份）；缺省时不可用
   fork?: (args: string) => Promise<string>;
+  // 决策 245：/export 把沙箱里的改动手动交回成分支（只在沙箱里）；缺省时不可用
+  exportChanges?: () => Promise<string>;
 }
 
 export async function runRepl(options: ReplOptions): Promise<void> {
@@ -131,6 +133,10 @@ async function replLoop(options: ReplOptions, warnEvidenceGaps: () => void): Pro
           write(await runSearchCommand({ root: options.search.root, args: tokens.slice(1) }));
           continue;
         }
+        if (tokens[0] === "export" && options.exportChanges !== undefined) {
+          write(`${await options.exportChanges()}\n`);
+          continue;
+        }
         if (tokens[0] === "fork" && options.fork !== undefined) {
           write(`${await options.fork(task.slice("/fork".length))}\n`);
           continue;
@@ -146,7 +152,7 @@ async function replLoop(options: ReplOptions, warnEvidenceGaps: () => void): Pro
         const handled = options.grants !== undefined && runGrantCommand(tokens, options.grants);
         if (!handled) {
           write(
-            `未知命令：${task}（可用 /compact [重点]、/search、/grants、/revoke <id>、/grants save <id>）\n`
+            `未知命令：${task}（可用 /compact [重点]、/search、/grants、/revoke <id>、/grants save <id>${options.exportChanges !== undefined ? "、/export" : ""}）\n`
           );
         }
       } catch (error) {

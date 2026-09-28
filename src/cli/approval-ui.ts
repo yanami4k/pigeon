@@ -7,7 +7,10 @@
 // M5.5 S5（决策 048 及其修订）：exec 档原样显示将执行的命令串，需 shell 时标明；[a] 收窄为这条一模一样的
 // 命令串（需 shell 的带 shell 标记），不提供 [d]
 import { approvalSourceLine, workerGrantScopeNote } from "../application/format.ts";
-import type { SessionGrantStore } from "../approvals/grant-store.ts";
+import {
+  PathScopedGrantUnsupportedError,
+  type SessionGrantStore,
+} from "../approvals/grant-store.ts";
 import {
   type ApprovalHandler,
   commandScopeNote,
@@ -73,12 +76,20 @@ export function createCliApprovalHandler(
         write("定位不到命令串，未创建放权（按批准一次处理）\n");
         return { approved: true };
       }
-      const grant = grants.create({
-        tool: request.toolName,
-        ...scope,
-        firstCall: { toolCallId: request.toolCallId, args: request.args },
-        ...(request.runId !== undefined ? { runId: request.runId } : {}),
-      });
+      let grant: ReturnType<typeof grants.create>;
+      try {
+        grant = grants.create({
+          tool: request.toolName,
+          ...scope,
+          firstCall: { toolCallId: request.toolCallId, args: request.args },
+          ...(request.runId !== undefined ? { runId: request.runId } : {}),
+        });
+      } catch (error) {
+        // 沙箱里不建目录限定的放权：说明原因，按批准一次处理
+        if (!(error instanceof PathScopedGrantUnsupportedError)) throw error;
+        write(`${error.message}，未创建放权（按批准一次处理）\n`);
+        return { approved: true };
+      }
       write(
         `已创建会话放权 ${grant.grantId}（${grant.tool}${commandScopeNote(scope)}）${workerGrantScopeNote(request)}\n`
       );
