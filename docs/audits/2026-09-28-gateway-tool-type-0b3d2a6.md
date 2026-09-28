@@ -79,3 +79,28 @@
 - lint（`npm run lint`）：1 个错误，为 `eval/analysis/tests/fixtures/runner-sample.json` 的格式（biome 要求把多行数组收成一行）。该文件出自 ab90f4d，本分支未改动；在 formal-v2 的 0b3d2a6 上对该文件单独运行 biome 同样报这 1 个错误。其余 400 个文件（含本次改动的两个文件）通过。本次未改该文件。
 
 真实模型接口的端到端验证不在本段做，结果另行追加。
+
+## 六、追加：fixture 格式化与 max_tokens 取值
+
+### 6.1 fixture 格式化
+
+- 单独一个提交（ad30691）：对 `eval/analysis/tests/fixtures/runner-sample.json` 只运行 biome 格式化，把多行数组收成一行，内容不改。该文件只被 `eval/analysis/tests/test_calibration.py` 用 `json.load` 读取。用 Python 的 `json.load` 读改前与改后的文件，两者解析结果完全相等。
+- 本机 `biome check .`：401 个文件，0 错误。
+
+### 6.2 max_tokens：已显式设为 16384，缺省补值不生效
+
+第 3.3 节所述"litellm 按模型表补 max_tokens 缺省值"的路径，最简 agent 走不到。原因如下：
+
+- `eval/stream/mini/run_mini.py` 的 `model_kwargs` 显式传入 `max_tokens`，取 `MAX_OUTPUT_TOKENS = 16384`；同时显式传入温度 0 与 `thinking: {"type": "disabled"}`。
+- `eval/stream/mini/test_run_mini.py` 断言 `max_tokens` 为 16384、温度为 0、thinking 为 disabled。
+
+### 6.3 verify（pigeon-verify，ad30691）
+
+同一台服务器，同一目录，检出 ad30691，`git status --porcelain` 为空。开跑前没有其他 `node --test` 进程，测试并发取 6。
+
+- lint：401 个文件，0 错误。tsc 与 depcruise 均通过（depcruise 无违规）。
+- 测试第一次：1141 条，1138 通过、1 失败、2 跳过。
+  - 失败的是 `src/application/fork-session.test.ts` 中"/fork 命令：解析 --at 与新输入…"一例，报错为 `Run 号前缀 … 不唯一（2 个）`。
+  - 原因与 i1 集成冒烟审计第三节记录的相同：两次 Run 在同一毫秒内开始，单调 ULID 只在末位加一，该用例截去末 2 位作前缀，于是两次 Run 落在同一前缀下。
+  - 该文件单独重跑 20 次，通过 16 次，说明单独运行也会偶发失败，与本段改动无关，本段未修改。
+- 测试第二次（同一提交，全量，并发 6）：1141 条，1139 通过、0 失败、2 跳过，约 108 秒。
