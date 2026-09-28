@@ -25,7 +25,12 @@ import {
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
-import { commandStepAgent, type PigeonStepAgentOptions, pigeonStepAgent } from "./stream-agents.ts";
+import {
+  commandStepAgent,
+  type PigeonStepAgentOptions,
+  pigeonStepAgent,
+  STREAM_SPAWN_WORKERS,
+} from "./stream-agents.ts";
 import {
   type BaselineCheck,
   type BaselineSummary,
@@ -125,6 +130,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMIT_CHARS,
     reviewTemplate: REVIEW_TEMPLATE_VERSION,
     reviewBudget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
+    // 决策 265：主 agent 派 worker 在各条件里的实际生效值
+    spawnWorkers: STREAM_SPAWN_WORKERS,
   };
 }
 

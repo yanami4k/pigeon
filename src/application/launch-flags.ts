@@ -21,6 +21,7 @@ export const VALUELESS_FLAGS = new Set([
   "--yolo",
   "--no-persist-thinking",
   "--no-pushed-memory",
+  "--no-spawn-workers",
   "--sandbox",
 ]);
 
@@ -72,6 +73,9 @@ export interface LaunchFlags {
   compaction?: CompactionConfigInput;
   // 决策 237：--sandbox 及其参数；不开沙箱时缺省
   sandbox?: SandboxLaunch;
+  // 决策 265–267：主 agent 派 worker——终端界面与 pigeon run 缺省开着，--no-spawn-workers 关掉（关掉即不注册 spawn_worker）；
+  // 沙箱会话与命令行对话不注册，不看这一项
+  spawnWorkers: boolean;
 }
 
 // 上下文压缩参数名 → 配置字段
@@ -102,6 +106,8 @@ export interface ParseLaunchFlagsOptions {
   pushedMemory?: boolean;
   // 是否接受 --sandbox 及其参数（终端界面、命令行对话与续跑、pigeon run）
   sandbox?: boolean;
+  // 是否接受 --no-spawn-workers（能派 worker 的入口：终端界面与 pigeon run）
+  spawnWorkers?: boolean;
 }
 
 export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOptions): LaunchFlags {
@@ -114,6 +120,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
     pushedMemory: true,
+    spawnWorkers: true,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
   // 沙箱参数：先收下，循环后与 --sandbox 对齐
@@ -144,6 +151,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       sandboxApproval = value as SandboxApproval;
     } else if (flag === "--no-persist-thinking") {
       flags.persistThinking = false;
+    } else if (flag === "--no-spawn-workers" && options.spawnWorkers === true) {
+      flags.spawnWorkers = false;
     } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
       flags.pushedMemory = false;
     } else if (flag === "--memory-limit" && options.pushedMemory === true) {

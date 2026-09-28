@@ -47,6 +47,7 @@ import {
   type RuntimeDeps,
 } from "./runtime.ts";
 import { childFamilySink } from "./session-store.ts";
+import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
 
 export interface WorkerRuntimeDeps {
   // 每个 worker 的模型接入：生产传同一个无状态 streamFn，测试按 worker 给独立剧本
@@ -77,6 +78,8 @@ export interface WorkerRuntimeDeps {
   roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
   // 覆盖列里 streamFnSpec 对应的已加载插件：装配层按表预加载后传入（工厂同步，不在此处做 IO）
   roleStreamFns?: Readonly<Partial<Record<WorkerRole, StreamFn>>>;
+  // 决策 266：无人值守（pigeon run）——worker 不接审批通道：按放权规则或全部放行（审批模式继承父会话），否则拒绝
+  unattended?: boolean;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -87,9 +90,20 @@ export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor
   bundle: RuntimeBundle;
   // 父运行面本身是 worker 会话时在场（深度 1：拒绝再派）
   parentSessionId?: SessionId;
-  // 汇聚审批入口（Actor 注入，经审批队列）
-  approvals: ApprovalHandler;
+  // 汇聚审批入口（Actor 注入，经审批队列）；缺省 = 无人值守，worker 没有审批通道（决策 266）
+  approvals?: ApprovalHandler;
+  // 决策 268：同时在跑的 worker 上限（人派的与 agent 派的一并计算；缺省不限）
+  maxConcurrent?: number;
+  // 决策 268：worker 每收尾一轮回报本轮用的 token（计入本次运行的总额度）
+  onWorkerTokens?: (sessionId: SessionId, tokens: number) => void;
 }
+
+// 无人值守时汇聚审批的兜底：worker 不接审批通道，不会走到这里；万一走到按拒绝处理
+const UNATTENDED_APPROVAL = async () => ({
+  approved: false,
+  reason: "无人值守运行没有审批通道",
+  reasonSource: "system-default" as const,
+});
 
 // 按会话装配编排器（M5.5 S4）：Actor 只拿四动作面，不触达 orchestration 的构造细节
 export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrator {
@@ -102,8 +116,10 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
     parentPolicy: deps.bundle.adapter.snapshot().tools.policy,
     // worker 派出与收尾写进父会话的会话存储
     parentLog: childFamilySink(deps.bundle.sessionStore),
-    approvals: deps.approvals,
+    approvals: deps.approvals ?? UNATTENDED_APPROVAL,
     createRuntime: sessionWorkerRuntimeFactory(deps),
+    ...(deps.maxConcurrent !== undefined ? { maxConcurrent: deps.maxConcurrent } : {}),
+    ...(deps.onWorkerTokens !== undefined ? { onWorkerTokens: deps.onWorkerTokens } : {}),
   });
 }
 
@@ -137,6 +153,7 @@ export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRun
       ? { roleModelOverrides: deps.roleModelOverrides }
       : {}),
     ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
+    ...(deps.approvals === undefined ? { unattended: true } : {}),
   });
 }
 
@@ -187,6 +204,8 @@ interface RuntimeSurface {
   verify?: VerifyConfig;
   // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照）
   retryOnFail?: number;
+  // 决策 264–267：派 worker 的开关（只有 headless 主会话会给）
+  spawnWorker?: SpawnWorkerSlot;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
@@ -230,7 +249,8 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       policy: request.policy,
       // M5.5 S5（决策 048）：run_command 按角色套 .pigeon/commands.json 的允许清单
       role: request.role,
-      approvalHandler: request.approvalHandler,
+      // 决策 266：无人值守时不接审批通道（prompt 档 fail-closed，与 headless 主会话同一口径）
+      ...(deps.unattended === true ? {} : { approvalHandler: request.approvalHandler }),
       header: {
         parentSessionId: request.lineage.parentSessionId,
         ...(request.lineage.parentRunId !== undefined
@@ -285,6 +305,8 @@ export interface DetachedRuntimeRequest {
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
   retryOnFail?: number;
+  // 决策 264–267：派 worker 的开关
+  spawnWorker?: SpawnWorkerSlot;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
@@ -342,6 +364,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.reviewSession !== undefined ? { reviewSession: surface.reviewSession } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
+    ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),

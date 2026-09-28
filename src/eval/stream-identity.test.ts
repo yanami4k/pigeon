@@ -128,6 +128,32 @@ test("身份头记推送记忆的记忆上限、复盘模板版本与复盘上�
   }
 });
 
+test("身份头记主 agent 派 worker 的实际生效值（265）：续跑时不同即拒绝", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-spawn-"));
+  try {
+    const pigeon = {
+      ...(identity().core.agents.pigeon as NonNullable<
+        StreamRunIdentity["core"]["agents"]["pigeon"]
+      >),
+      spawnWorkers: false,
+    };
+    checkOrWriteIdentity(dir, identity({ agents: { pigeon } }));
+    const saved = JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+    assert.equal(saved.core.agents.pigeon.spawnWorkers, false);
+    checkOrWriteIdentity(dir, identity({ agents: { pigeon } }));
+    assert.throws(
+      () =>
+        checkOrWriteIdentity(
+          dir,
+          identity({ agents: { pigeon: { ...pigeon, spawnWorkers: true } } })
+        ),
+      /agents\.pigeon\.spawnWorkers/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("正式跑批的预算缺省为每步 150 轮、30 分钟（147 校准）", () => {
   assert.deepEqual(DEFAULT_STEP_BUDGET, { maxTurns: 150, wallClockMs: 30 * 60_000 });
 });
