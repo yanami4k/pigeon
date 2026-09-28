@@ -80,12 +80,15 @@ def step_costs(df: pd.DataFrame) -> pd.Series:
 
 def third_pass_decision(
     df: pd.DataFrame,
+    *,
+    spent: dict[str, Any],
     minimal_reserve: float | None = None,
     budget: float = K.BUDGET_YUAN,
 ) -> dict[str, Any]:
     """第 3 遍补跑规则（224）：B ≥ C3，且以两遍数据推算第 3 遍能把 MDE 降低至少一成，才补。
-    B = 预算 − 已花（含最简 agent；它尚未跑时按 C_M 预留，由 minimal_reserve 给出）；
-    C3 = 前两遍四格实际平均每遍花费 × 1.1。v 取四格合并，τ² = max(0, 两遍平均 dP(i) 的样本方差 − v/2)，
+    B = 预算 − 已花（含最简 agent；它尚未跑时按 C_M 预留，由 minimal_reserve 给出）；已花取网关累计（spent 为
+    reader.spent_summary 的结果：各输出目录网关花费记录之和，含作废的步与开跑前探测），结果行合计只并列写出。
+    C3 = 前两遍四格实际平均每遍花费 × 1.1（按结果行）。v 取四格合并，τ² = max(0, 两遍平均 dP(i) 的样本方差 − v/2)，
     检索差同法推算，取降低较多者。"""
     two = df[df["pass_no"].isin([1, 2])]
     four = two[two["cell"].isin(K.CELLS)]
@@ -125,6 +128,9 @@ def third_pass_decision(
         {
             "fourCellSpent": four_spent,
             "minimalSpent": m_spent,
+            "spentGateway": spent["gatewayCny"],
+            "spentRows": spent["rowsCny"],
+            "spentDifference": spent["difference"],
             "minimalReserve": reserve,
             "stepsWithoutCost": missing_cost,
             "c3": c3,
@@ -133,7 +139,7 @@ def third_pass_decision(
     if reserve is None:
         out.update({"remaining": None, "decision": None, "reason": "minimal-reserve-required"})
         return out
-    remaining = budget - four_spent - m_spent - reserve
+    remaining = budget - spent["gatewayCny"] - reserve
     out["remaining"] = remaining
     if best is None or c3 is None:
         out.update({"decision": None, "reason": "variance-unavailable"})
