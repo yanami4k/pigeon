@@ -28,6 +28,7 @@ import {
   type RuntimeDeps,
 } from "./runtime.ts";
 import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import type { WebToolsConfig } from "./web-tools.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
 import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
@@ -93,6 +94,8 @@ export interface OpenSessionRuntimeRequest {
   workspaceHost?: WorkspaceHost;
   // 决策 264–267：派 worker 的工具槽（终端界面给；命令行对话不给）。只给主会话注册：worker 会话（深度 1）与沙箱会话不注册
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
+  webTools?: WebToolsConfig;
 }
 
 export interface OpenedSessionRuntime {
@@ -196,6 +199,7 @@ export async function openSessionRuntime(
         ? { workspaceHost: request.workspaceHost, pathScopedGrants: false }
         : {}),
       ...(spawnWorker !== undefined ? { spawnWorker } : {}),
+      ...(request.webTools !== undefined ? { webTools: request.webTools } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];

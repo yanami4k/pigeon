@@ -24,6 +24,7 @@ import {
   resolveVerifyConfig,
   spawnWorkerLimitsOf,
   VALUELESS_FLAGS,
+  webToolsEnabled,
 } from "../application/launch-flags.ts";
 import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
 import { runResumeFlow } from "../application/resume.ts";
@@ -39,6 +40,7 @@ import {
 } from "../application/sandbox-session.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime, pushedMemoryRunOptions } from "../application/session-runtime.ts";
+import { resolveWebTools } from "../application/web-tools.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
@@ -298,6 +300,7 @@ async function resumeMain(argv: string[]): Promise<void> {
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+          ...webToolsOption(flags, workspaceRoot),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
@@ -431,6 +434,8 @@ async function runMain(argv: string[]): Promise<void> {
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
     ...(repairRounds > 0 ? { repairRounds } : {}),
+    // 决策 287–291：联网工具缺省给出，--sandbox-network off 不给
+    ...webToolsOption(flags, workspaceRoot),
   };
   // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
   const result =
@@ -1009,6 +1014,7 @@ async function lineMain(argv: string[]): Promise<void> {
       ...verifyOption(flags, workspaceRoot),
       ...retryOption(flags),
       ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+      ...webToolsOption(flags, workspaceRoot),
       // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
       createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
       onMcpNote: (note) => {
@@ -1062,6 +1068,14 @@ const SESSION_FLAGS_HINT =
   "--yolo / --no-persist-thinking / --no-pushed-memory / --memory-limit / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt";
 
 // 决策 237：沙箱的提示行
+// 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败
+function webToolsOption(
+  flags: LaunchFlags,
+  governanceRoot: string
+): { webTools?: ReturnType<typeof resolveWebTools> } {
+  return webToolsEnabled(flags) ? { webTools: resolveWebTools({ governanceRoot }) } : {};
+}
+
 function sandboxLog(write: (text: string) => void): (line: string) => void {
   return (line) => write(`[沙箱] ${line}\n`);
 }

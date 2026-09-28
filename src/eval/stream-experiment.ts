@@ -30,6 +30,7 @@ import {
   type PigeonStepAgentOptions,
   pigeonStepAgent,
   STREAM_SPAWN_WORKERS,
+  STREAM_WEB_TOOLS,
 } from "./stream-agents.ts";
 import {
   type BaselineCheck,
@@ -140,6 +141,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     reviewBudget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
     // 决策 265：主 agent 派 worker 在各条件里的实际生效值
     spawnWorkers: STREAM_SPAWN_WORKERS,
+    // 决策 291 与 265 的先例：联网工具在各条件里的实际生效值（关）
+    webTools: STREAM_WEB_TOOLS,
   };
 }
 

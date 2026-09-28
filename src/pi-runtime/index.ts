@@ -22,12 +22,18 @@ export {
   resolveCompactionConfig,
 } from "./compaction.ts";
 export {
+  CompletionError,
+  type CompletionOutcome,
+  type CompletionRequest,
+  completeWithoutTools,
+} from "./complete.ts";
+export {
   DEEPSEEK_ANTHROPIC_BASE_URL,
   DEEPSEEK_MODEL_ID,
   deepseekModel,
 } from "./deepseek-model.ts";
 export { createDeepSeekStreamFn, DEEPSEEK_KEY_ENV } from "./deepseek-stream.ts";
-export { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
+export { isSyntheticFailureMessage, normalizePiEvent, turnUsageOf } from "./events.ts";
 export {
   DEFAULT_GATEWAY_MODEL_ID,
   GATEWAY_PLACEHOLDER_KEY,

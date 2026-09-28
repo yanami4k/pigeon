@@ -17,7 +17,27 @@ import {
   type ToolProposedPayload,
   type ToolSettledPayload,
   type TurnCompletedPayload,
+  type TurnUsage,
 } from "../state/runtime-events.ts";
+
+// 上游 usage → 落盘格式的用量（M5 S1，决策 044）：只取自有字段集，不随上游加字段漂移（cacheWrite1h / reasoning 不收）。
+// 轮次收尾与不带工具的单次补全（网页提炼）共用
+export function turnUsageOf(usage: AssistantMessage["usage"]): TurnUsage {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    totalTokens: usage.totalTokens,
+    cost: {
+      input: usage.cost.input,
+      output: usage.cost.output,
+      cacheRead: usage.cost.cacheRead,
+      cacheWrite: usage.cost.cacheWrite,
+      total: usage.cost.total,
+    },
+  };
+}
 
 // 识别上游 handleRunFailure 合成的 assistant 消息：
 // 空文本内容 + usage 全零 + 携带 errorMessage，三者齐备才认定，避免误标真实模型错误消息。
@@ -70,24 +90,7 @@ export function normalizePiEvent(
         stopReason: message.stopReason,
         syntheticFailure: isSyntheticFailureMessage(message),
         ...(message.errorMessage !== undefined ? { errorMessage: message.errorMessage } : {}),
-        ...(usage !== undefined
-          ? {
-              usage: {
-                input: usage.input,
-                output: usage.output,
-                cacheRead: usage.cacheRead,
-                cacheWrite: usage.cacheWrite,
-                totalTokens: usage.totalTokens,
-                cost: {
-                  input: usage.cost.input,
-                  output: usage.cost.output,
-                  cacheRead: usage.cost.cacheRead,
-                  cacheWrite: usage.cost.cacheWrite,
-                  total: usage.cost.total,
-                },
-              },
-            }
-          : {}),
+        ...(usage !== undefined ? { usage: turnUsageOf(usage) } : {}),
       };
       return envelope(ids, RuntimeEventKind.TurnCompleted, payload);
     }
