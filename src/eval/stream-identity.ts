@@ -45,6 +45,8 @@ export interface StreamRunIdentity {
         spawnWorkers?: boolean;
         // 联网工具（291 与 265 的先例）：实际生效的值（各条件都关掉）；同一口径
         webTools?: boolean;
+        // 取用 worker 改动的工具 take_worker（279）：与派 worker 同槽，各条件同样关掉；加这一项之前写下的身份头没有它，续跑即判为不同
+        takeWorker?: boolean;
       };
       minimal?: {
         model: string;

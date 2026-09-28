@@ -11,14 +11,21 @@
 import { type Static, Type } from "typebox";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { isWorkerRole, WORKER_ROLES } from "../orchestration/roles.ts";
-import type { WorkerOrchestrator, WorkerOutcome } from "../orchestration/workers.ts";
+import type {
+  WorkerOrchestrator,
+  WorkerOutcome,
+  WorkerStartPoint,
+} from "../orchestration/workers.ts";
 import { worktreeBranchFor } from "../orchestration/worktree.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
+import { workerStartLine } from "./workers-commands.ts";
 
 export const SPAWN_WORKER_TOOL = "spawn_worker";
+// 决策 279：取用 worker 自身改动的工具名（工具在 take-worker-tool.ts，与本工具共用工具槽；返回文字里要提到它）
+export const TAKE_WORKER_TOOL = "take_worker";
 
 // 两个上限（268）：同时在跑的 worker 数、一次运行里 agent 派出的总数；可配置
 export interface SpawnWorkerLimits {
@@ -43,7 +50,7 @@ export function assertSpawnWorkerLimits(limits: SpawnWorkerLimits): void {
 export function spawnWorkerDescription(limits: SpawnWorkerLimits): string {
   return [
     "派一个 worker 去完成一项独立的子任务，等它做完，把它的分支、改动过的文件与工作摘要交回给你。",
-    "worker 从当前提交开工，在自己的 git 工作树与分支里干活；看不到你还没提交的改动，也看不到本会话的对话。要它接着你的改动干，先提交。",
+    "worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。",
     `要并行，就在同一次回复里多次调用本工具，每次派一个；同时最多跑 ${limits.maxConcurrent} 个，多的排队；一次运行最多派 ${limits.maxAgentSpawns} 个。`,
     "何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。",
     "任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问，也不能再派 worker。",
@@ -92,6 +99,9 @@ export const SPAWN_WORKER_TEXTS = {
   notGit: "当前工作区不是 git 仓库，不能派 worker。",
   unknownRole: (role: string) => `没有角色 ${role}；可选：${WORKER_ROLES.join("、")}。`,
   emptyTask: "task 不能为空：写清目标、相关文件与完成的标准。",
+  // 决策 279（271 修订）：另起一行写明起点快照与只取其自身改动的取用方式
+  start: (start: WorkerStartPoint, name: string) =>
+    workerStartLine(start, `调用 ${TAKE_WORKER_TOOL}（worker=${name}）`),
 } as const;
 
 interface WorkerFacts {
@@ -175,7 +185,8 @@ export interface SpawnAttemptsResult {
 
 // 工具执行时要用的会话侧能力（装配方在编排器建好后绑定）
 export interface SpawnWorkerHost {
-  orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult" | "cancel">;
+  // status 供 take_worker 找 worker（决策 279）
+  orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult" | "cancel" | "status">;
   // 治理根（主仓库根）：是不是 git 仓库
   governanceRoot: string;
   spawnAttempts(request: SpawnAttemptsRequest): Promise<SpawnAttemptsResult>;
@@ -215,7 +226,8 @@ const VERDICT_TEXT: Readonly<Record<OutcomeLabel, "通过" | "未通过" | "未�
   InfrastructureError: "未知",
 };
 
-// 一个 worker 收尾后交回的文字
+// 一个 worker 收尾后交回的文字。决策 279（271 修订）：有工作树的 worker 另起一行写明起点快照与只取其自身改动的取用方式
+// （额度用完的文字不加）
 export function workerOutcomeText(outcome: WorkerOutcome, budgetExhausted = false): string {
   const branch =
     outcome.result?.branch ??
@@ -230,23 +242,27 @@ export function workerOutcomeText(outcome: WorkerOutcome, budgetExhausted = fals
     outcome.result?.summaryTruncated === true
       ? SPAWN_WORKER_TEXTS.truncated(outcome.sessionId)
       : "";
+  const start =
+    outcome.start !== undefined && outcome.workspace.kind === "git-worktree"
+      ? `\n${SPAWN_WORKER_TEXTS.start(outcome.start, outcome.name)}`
+      : "";
   switch (outcome.status) {
     case "completed":
-      return SPAWN_WORKER_TEXTS.completed(facts) + suffix;
+      return SPAWN_WORKER_TEXTS.completed(facts) + suffix + start;
     case "turn-limit":
-      return SPAWN_WORKER_TEXTS.limitHit(facts, "轮数") + suffix;
+      return SPAWN_WORKER_TEXTS.limitHit(facts, "轮数") + suffix + start;
     case "wall-clock-limit":
-      return SPAWN_WORKER_TEXTS.limitHit(facts, "时间") + suffix;
+      return SPAWN_WORKER_TEXTS.limitHit(facts, "时间") + suffix + start;
     case "cancelled":
     case "aborted":
       // 额度用完而停掉的 worker：交回额度用完的文字
       return budgetExhausted
         ? SPAWN_WORKER_TEXTS.budgetExhausted
-        : SPAWN_WORKER_TEXTS.cancelled(base);
+        : SPAWN_WORKER_TEXTS.cancelled(base) + start;
     case "token-limit":
-      return SPAWN_WORKER_TEXTS.failed(base, "撞上 token 上限");
+      return SPAWN_WORKER_TEXTS.failed(base, "撞上 token 上限") + start;
     default:
-      return SPAWN_WORKER_TEXTS.failed(base, outcome.error ?? "运行以未知终态结束");
+      return SPAWN_WORKER_TEXTS.failed(base, outcome.error ?? "运行以未知终态结束") + start;
   }
 }
 

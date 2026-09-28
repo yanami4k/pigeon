@@ -89,6 +89,25 @@ export interface WorkerRuntimeRequest {
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
 
+// 决策 279：worker 的起点——主工作目录连同未提交改动拍成的快照（没有未提交改动时就是 HEAD）。
+// 由装配根注入（快照的做法在执行层，本层不触达），派出时记进工作区形状的 baseCommit 与派出记录
+export interface WorkerStartPoint {
+  // 起点提交：快照提交或 HEAD
+  commit: string;
+  // 是否另拍了快照（有未提交改动）
+  snapshot: boolean;
+  // 快照带入的未提交文件（仓库相对路径）；没有快照时为空
+  files: string[];
+}
+
+// release：起点的引用只需护住"拍好快照到建好工作树"这一段——worker 分支建好即指向起点提交，提交不会被回收；
+// 编排器在建工作区之后（成败都）调用它，由提供者删掉单独的引用（决策 279 修订）
+export type WorkerStartPointProvider = (input: {
+  sessionId: SessionId;
+  name: string;
+  role: WorkerRole;
+}) => WorkerStartPoint & { release?: () => void };
+
 // 隔离工作区提供者：第一版为 git 工作树；测试注入内存实现。
 // M6.5 S2（决策 057）：baseRef 为起点提交（Eval 任务的 ref），缺省 HEAD
 export interface WorkspaceProviderInput {
@@ -152,6 +171,8 @@ export interface WorkerOrchestratorOptions {
   // 决策 268：worker 每收尾一轮回报本轮用的 token（计入本次运行的总额度）
   onWorkerTokens?: (sessionId: SessionId, tokens: number) => void;
   workspaces?: WorkspaceProvider;
+  // 决策 279：worker 的起点（主工作目录的快照）；缺省不给 = 工作区提供者自己的缺省（git 工作树为 HEAD）
+  startPoint?: WorkerStartPointProvider;
   defaultLimits?: Partial<WorkerLimits>;
   now?: () => number;
 }
@@ -178,6 +199,8 @@ export interface WorkerStatus {
   branch?: string;
   startedAt: number;
   workspace: WorkerWorkspace;
+  // 决策 279：起点（注入了起点提供者时在场）
+  start?: WorkerStartPoint;
 }
 
 export interface WorkerOutcome {
@@ -189,6 +212,8 @@ export interface WorkerOutcome {
   turns: number;
   result?: ChildResult;
   workspace: WorkerWorkspace;
+  // 决策 279：起点（注入了起点提供者时在场）
+  start?: WorkerStartPoint;
 }
 
 interface WorkerEntry {
@@ -196,6 +221,7 @@ interface WorkerEntry {
   name: string;
   role: WorkerRole;
   workspace: WorkerWorkspace;
+  start?: WorkerStartPoint;
   runtime: WorkerRuntimeHandle;
   state: WorkerState;
   turns: number;
@@ -258,7 +284,26 @@ export class WorkerOrchestrator {
       ...request.limits,
     };
     const sessionId = newSessionId();
-    const workspace = this.#workspaces.plan({ sessionId, name, role });
+    // 决策 279：先拍主工作目录的快照当起点（拍不成即不派：没有派出记录、零工作区零运行面）
+    let startPoint: WorkerStartPoint | undefined;
+    let releaseStart: (() => void) | undefined;
+    if (this.#options.startPoint !== undefined) {
+      try {
+        const { release, ...point } = this.#options.startPoint({ sessionId, name, role });
+        startPoint = point;
+        releaseStart = release;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new WorkerSpawnError(`派出 worker ${name} 失败：拍工作目录快照失败：${message}`, {
+          cause: error,
+        });
+      }
+    }
+    const planned = this.#workspaces.plan({ sessionId, name, role });
+    const workspace: WorkerWorkspace =
+      planned.kind === "git-worktree" && startPoint !== undefined
+        ? { ...planned, baseCommit: startPoint.commit }
+        : planned;
     const parentRunId = this.#options.activeRunId?.();
     // 派出意图先落盘：写不进就不派（异常原样上抛，零工作区零运行面）
     this.#options.parentLog.appendChildSpawned({
@@ -275,7 +320,14 @@ export class WorkerOrchestrator {
     });
     let runtime: WorkerRuntimeHandle;
     try {
-      this.#workspaces.create(workspace, { sessionId, name, role });
+      this.#workspaces.create(workspace, {
+        sessionId,
+        name,
+        role,
+        ...(startPoint !== undefined ? { baseRef: startPoint.commit } : {}),
+      });
+      this.#releaseStart(releaseStart);
+      releaseStart = undefined;
       runtime = this.#options.createRuntime({
         sessionId,
         name,
@@ -293,6 +345,7 @@ export class WorkerOrchestrator {
         limits,
       });
     } catch (error) {
+      this.#releaseStart(releaseStart);
       const message = error instanceof Error ? error.message : String(error);
       this.#appendSettled({
         childSessionId: sessionId,
@@ -309,6 +362,7 @@ export class WorkerOrchestrator {
       name,
       role,
       workspace,
+      ...(startPoint !== undefined ? { start: startPoint } : {}),
       runtime,
       state: "queued",
       turns: 0,
@@ -361,6 +415,7 @@ export class WorkerOrchestrator {
       ...(entry.workspace.kind === "git-worktree" ? { branch: entry.workspace.branch } : {}),
       startedAt: entry.startedAt,
       workspace: entry.workspace,
+      ...(entry.start !== undefined ? { start: entry.start } : {}),
     }));
   }
 
@@ -485,6 +540,7 @@ export class WorkerOrchestrator {
       name: entry.name,
       role: entry.role,
       workspace: entry.workspace,
+      ...(entry.start !== undefined ? { start: entry.start } : {}),
       status,
       turns: entry.turns,
       ...(error !== undefined ? { error } : {}),
@@ -499,6 +555,18 @@ export class WorkerOrchestrator {
       ...(result !== undefined ? { result } : {}),
     });
     return outcome;
+  }
+
+  // 删起点引用失败不改变派出结果：进内部故障清单
+  #releaseStart(release: (() => void) | undefined): void {
+    if (release === undefined) {
+      return;
+    }
+    try {
+      release();
+    } catch (error) {
+      this.#errors.push(error);
+    }
   }
 
   // settled 写盘失败不改变 worker 结果：进内部故障清单，父会话留"缺 settled"的可见缺口

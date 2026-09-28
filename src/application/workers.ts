@@ -7,6 +7,7 @@
 // headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
 import {
   ROLE_MODEL_OVERRIDES,
@@ -17,8 +18,10 @@ import type {
   WorkerRuntimeFactory,
   WorkerRuntimeHandle,
   WorkerRuntimeRequest,
+  WorkerStartPointProvider,
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
+import { workerStartRefFor } from "../orchestration/worktree.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
@@ -121,9 +124,26 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
     parentLog: childFamilySink(deps.bundle.sessionStore),
     approvals: deps.approvals ?? UNATTENDED_APPROVAL,
     createRuntime: sessionWorkerRuntimeFactory(deps),
+    // 决策 279：worker 从主工作目录连同未提交改动拍成的快照开工
+    startPoint: workerStartPoint(deps.governanceRoot),
     ...(deps.maxConcurrent !== undefined ? { maxConcurrent: deps.maxConcurrent } : {}),
     ...(deps.onWorkerTokens !== undefined ? { onWorkerTokens: deps.onWorkerTokens } : {}),
   });
+}
+
+// 决策 279：worker 的起点提供者——拍主工作目录的快照；快照引用只护住"拍好到建好工作树"这一段，工作树建好后由编排器调 release
+// 删掉（worker 分支指向起点提交，提交不会被回收；删分支时的连带删除仍留作兜底）
+export function workerStartPoint(governanceRoot: string): WorkerStartPointProvider {
+  return ({ name }) => {
+    const ref = workerStartRefFor(name);
+    const snap = snapshotWorkdir({ repoRoot: governanceRoot, ref });
+    return {
+      commit: snap.commit,
+      snapshot: snap.snapshot,
+      files: snap.files,
+      release: () => deleteSnapshotRef(governanceRoot, ref),
+    };
+  };
 }
 
 // 会话 worker 的运行面工厂（同一会话派出的 worker 共用同一份模型接入与角色覆盖）

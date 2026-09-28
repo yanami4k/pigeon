@@ -182,6 +182,7 @@ test("可并行：同一次回复里两次调用 spawn_worker 并行执行（第
       throw new Error("不派多份");
     },
     orchestrator: {
+      status: () => [],
       spawn: (request) => {
         const id = newSessionId();
         names.set(id, request.name ?? "w");

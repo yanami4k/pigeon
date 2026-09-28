@@ -14,7 +14,12 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { noMcpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
-import { runHeadlessInSandbox, SANDBOX_FORK_UNSUPPORTED, startSandbox } from "./sandbox-session.ts";
+import {
+  runHeadlessInSandbox,
+  runSandboxCommand,
+  SANDBOX_FORK_UNSUPPORTED,
+  startSandbox,
+} from "./sandbox-session.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -90,6 +95,7 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
           docker: fake.docker,
           image: { kind: "image", image: "sandbox-test:latest" },
           containerRoot: fake.containerRoot,
+          cacheRoot: fake.cacheRoot,
         },
       }
     );
@@ -125,7 +131,11 @@ test("沙箱里开失败自动分叉重试：起容器之前报错说明原因",
         governanceRoot: repo,
         sessionId: newSessionId(),
         log: () => {},
-        overrides: { docker: fake.docker, containerRoot: fake.containerRoot },
+        overrides: {
+          docker: fake.docker,
+          containerRoot: fake.containerRoot,
+          cacheRoot: fake.cacheRoot,
+        },
       }),
       (error: Error) => error.message === SANDBOX_FORK_UNSUPPORTED
     );
@@ -160,6 +170,7 @@ test("没配 MCP 服务时开沙箱不提示 MCP", async () => {
         docker: fake.docker,
         image: { kind: "image", image: "sandbox-test:latest" },
         containerRoot: fake.containerRoot,
+        cacheRoot: fake.cacheRoot,
       },
     });
     await sandbox?.discard();
@@ -167,6 +178,47 @@ test("没配 MCP 服务时开沙箱不提示 MCP", async () => {
   } finally {
     fake.cleanup();
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// 决策 280：共用下载缓存的查看与清空命令
+test("pigeon sandbox cache | clear-cache：查看占用与清空共用下载缓存；卷不存在与被容器占用各有说明", async () => {
+  const fake = fakeSandboxDocker();
+  const docker = fake.docker;
+  try {
+    assert.match(await runSandboxCommand(["cache"], { docker }), /pigeon-sandbox-cache 尚未建立/);
+    assert.match(await runSandboxCommand(["clear-cache"], { docker }), /本就是空的/);
+    fake.update((state) => {
+      state.volumes["pigeon-sandbox-cache"] = { size: "1.2GB" };
+    });
+    assert.match(
+      await runSandboxCommand(["cache"], { docker }),
+      /pigeon-sandbox-cache：占用 1\.2GB；清空：pigeon sandbox clear-cache/
+    );
+    // 有沙箱容器挂着：不能清空，说明原因
+    fake.update((state) => {
+      state.containers.busy = {
+        image: "sandbox-test:latest",
+        labels: {},
+        args: [],
+        state: "running",
+        volumes: ["pigeon-sandbox-cache"],
+      };
+    });
+    await assert.rejects(runSandboxCommand(["clear-cache"], { docker }), /正被沙箱容器使用/);
+    assert.match(await runSandboxCommand(["cache"], { docker }), /1 个沙箱容器正在使用/);
+    fake.update((state) => {
+      delete state.containers.busy;
+    });
+    assert.match(await runSandboxCommand(["clear-cache"], { docker }), /^已清空沙箱下载缓存/);
+    assert.deepEqual(fake.state().removedVolumes, ["pigeon-sandbox-cache"]);
+    await assert.rejects(
+      runSandboxCommand(["nope"], { docker }),
+      /用法：pigeon sandbox list \| clean \| cache \| clear-cache/
+    );
+    await assert.rejects(runSandboxCommand([], { docker }), /用法/);
+  } finally {
+    fake.cleanup();
   }
 });
 

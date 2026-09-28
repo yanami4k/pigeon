@@ -32,8 +32,24 @@ test("--sandbox-network off 断网；取值形状为档位名，非法取值报�
 test("沙箱参数只配合 --sandbox 用；不接受沙箱的入口当未知参数", () => {
   assert.throws(() => parse(["--sandbox-network", "off"]), /只配合 --sandbox/);
   assert.throws(() => parse(["--sandbox-approval", "prompt"]), /只配合 --sandbox/);
+  assert.throws(() => parse(["--sandbox-from-head"]), /只配合 --sandbox/);
   assert.throws(
     () => parseLaunchFlags(["--sandbox"], { usage: "u", env: {} }),
     /未知参数：--sandbox/
   );
+});
+
+// 决策 278：缺省带未提交改动的快照；--sandbox-from-head 只从最新提交开工
+test("--sandbox-from-head：只从当前分支的最新提交开工；缺省不带这一项（带快照）；是无取值开关", () => {
+  assert.equal(parse(["--sandbox"]).sandbox?.fromHead, undefined);
+  assert.equal(parse(["--sandbox", "--sandbox-from-head"]).sandbox?.fromHead, true);
+  assert.deepEqual(
+    parse(["--sandbox-from-head", "--sandbox", "--sandbox-network", "off"]).sandbox,
+    {
+      network: "off",
+      approval: "yolo",
+      fromHead: true,
+    }
+  );
+  assert.ok(VALUELESS_FLAGS.has("--sandbox-from-head"));
 });

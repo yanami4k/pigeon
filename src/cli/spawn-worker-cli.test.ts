@@ -28,6 +28,11 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
 
+// 决策 279：spawn_worker 的返回末行是起点与取用方式（提交号随仓库变），比对定稿文字时去掉
+const START_LINE =
+  /\n起点：(提交|快照) [0-9a-f]{12}（[^）]*）；要把它的改动叠进你的工作目录，调用 take_worker（worker=[a-z0-9-]+）。/g;
+const withoutStart = (text: string): string => text.replace(START_LINE, "");
+
 function runCli(args: string[], input = "") {
   return spawnSync(process.execPath, [CLI, ...args], {
     encoding: "utf8",
@@ -125,10 +130,15 @@ test("pigeon run：主 agent 同一次回复派两个 worker，并行完成、�
     ((call.result?.raw as { content?: Array<{ text?: string }> } | undefined)?.content ?? [])
       .map((block) => block.text ?? "")
       .join("");
-  assert.deepEqual(calls.filter((call) => call.toolName === "spawn_worker").map(textOf), [
-    "worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（1）：a.txt。摘要：A 改好了（并行）",
-    "worker fix-b（implementer）已完成。分支：pigeon/fix-b。改动的文件（1）：b.txt。摘要：B 改好了",
-  ]);
+  assert.deepEqual(
+    calls
+      .filter((call) => call.toolName === "spawn_worker")
+      .map((call) => withoutStart(textOf(call))),
+    [
+      "worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（1）：a.txt。摘要：A 改好了（并行）",
+      "worker fix-b（implementer）已完成。分支：pigeon/fix-b。改动的文件（1）：b.txt。摘要：B 改好了",
+    ]
+  );
   const merge = calls.find((call) => call.toolName === "run_command");
   assert.ok(merge !== undefined);
   assert.notEqual(merge.result?.isError, true, textOf(merge));
@@ -271,7 +281,7 @@ export default (model, context, options) => {
         .map((block) => block.text ?? "")
         .join("")
     );
-  assert.deepEqual(texts, [
+  assert.deepEqual(texts.map(withoutStart), [
     "worker look-a（explorer）已完成。分支：pigeon/look-a。改动的文件（0）：无。摘要：看过了",
     "本次运行派出的 worker 已达 1 个上限。不要再派；用已有的结果，或自己完成。",
   ]);

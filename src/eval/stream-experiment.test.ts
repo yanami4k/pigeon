@@ -53,6 +53,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     reviewBudget: { maxTurns: 40, wallClockMs: 15 * 60_000 },
     spawnWorkers: false,
     webTools: false,
+    takeWorker: false,
   });
   assert.deepEqual(
     effectivePigeonSettings(
@@ -84,6 +85,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       reviewBudget: { maxTurns: 80, wallClockMs: 30 * 60_000 },
       spawnWorkers: false,
       webTools: false,
+      takeWorker: false,
     }
   );
 });

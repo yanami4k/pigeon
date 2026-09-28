@@ -68,6 +68,13 @@ class FakeWorkers implements TuiWorkersFace {
     return result === undefined ? Promise.reject(new Error("未知 worker")) : result.promise;
   }
 
+  // 决策 279：/take 的取用（文字与 take_worker 同一套）
+  readonly taken: string[] = [];
+  async take(name: string): Promise<string> {
+    this.taken.push(name);
+    return `已把 worker ${name} 的改动叠进工作目录。叠入的文件（1）：a.ts。冲突未写入的文件（0）：无。worker 删除的文件（0，未删）：无。`;
+  }
+
   finish(outcome: WorkerOutcome): void {
     const entry = this.entries.find((candidate) => candidate.sessionId === outcome.sessionId);
     if (entry !== undefined) {
@@ -154,6 +161,13 @@ test("TUI worker 命令：派出回显与状态行、清单、运行中拒绝恢
 
     await submit(term, "/cancel fix-a");
     assert.ok(screenFlat(term).includes("已收尾（已取消），无需取消"), screenFlat(term));
+
+    // 决策 279：/take <名> 取用已收尾 worker 的改动，结果落消息区；没给名字提示用法
+    await submit(term, "/take fix-a");
+    assert.deepEqual(workers.taken, ["fix-a"]);
+    assert.ok(screenFlat(term).includes("已把 worker fix-a 的改动叠进工作目录"), screenFlat(term));
+    await submit(term, "/take");
+    assert.ok(screenFlat(term).includes("用法：/take <worker 名>"), screenFlat(term));
 
     await submit(term, "/nope");
     assert.ok(

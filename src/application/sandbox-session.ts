@@ -5,12 +5,16 @@
 // 列出已配置却不可用的服务名。
 import {
   cleanResidualSandboxes,
+  clearCacheVolume,
   exportNotice,
   findResidualSandboxes,
+  inspectCacheVolume,
   type OpenSandboxOptions,
   openSandbox,
   residualNotice,
+  SANDBOX_CACHE_COMMAND,
   SANDBOX_CLEAN_COMMAND,
+  SANDBOX_CLEAR_CACHE_COMMAND,
   type Sandbox,
   type SandboxExport,
 } from "../execution/sandbox.ts";
@@ -26,12 +30,15 @@ export const SANDBOX_FORK_UNSUPPORTED =
   "沙箱里暂不支持分叉（/fork 与失败自动分叉重试）：分叉要在宿主的 git 工作区上打快照、到独立工作树里续跑，" +
   "而沙箱的工作区在容器里";
 export const SANDBOX_WORKERS_UNSUPPORTED =
-  "沙箱里暂不支持派 worker（/spawn、/cancel、/workers）：worker 在宿主的 git 工作树里干活，会越出沙箱";
+  "沙箱里暂不支持派 worker（/spawn、/cancel、/workers、/take）：worker 在宿主的 git 工作树里干活，会越出沙箱";
 export const SANDBOX_RESUME_UNSUPPORTED =
   "沙箱会话里暂不支持 /resume 换绑：换绑要另开容器。请退出后用 pigeon resume <会话号> --sandbox 续跑";
 
-// 测试注入：docker 调用前缀、镜像来源与容器内工作区根
-export type SandboxOverrides = Pick<OpenSandboxOptions, "docker" | "image" | "containerRoot">;
+// 测试注入：docker 调用前缀、镜像来源、容器内工作区根与缓存卷
+export type SandboxOverrides = Pick<
+  OpenSandboxOptions,
+  "docker" | "image" | "containerRoot" | "cacheVolume" | "cacheRoot"
+>;
 
 export interface StartSandboxInput {
   flags: Pick<LaunchFlags, "sandbox" | "retryOnFail">;
@@ -62,6 +69,8 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
     sessionId: input.sessionId,
     network: launch.network,
     ...(input.resume === true ? { resume: true } : {}),
+    // 决策 278：--sandbox-from-head 只从最新提交开工
+    ...(launch.fromHead === true ? { fromHead: true } : {}),
     log: input.log,
     ...input.overrides,
   });
@@ -77,9 +86,14 @@ export function mcpUnavailableNotice(servers: readonly string[]): string {
 }
 
 export function sandboxReadyNotice(sandbox: Sandbox): string {
+  // 决策 278：带了快照时起点是快照提交，写明它是未提交改动的快照
+  const start =
+    sandbox.startSnapshot !== undefined
+      ? `从 ${sandbox.startLabel} 加未提交改动的快照 ${sandbox.startCommit.slice(0, 12)} 起步`
+      : `从 ${sandbox.startLabel} 的 ${sandbox.startCommit.slice(0, 12)} 起步`;
   return (
-    `沙箱已就绪：容器 ${sandbox.container}（镜像 ${sandbox.image}，${sandbox.network === "on" ? "联网" : "断网"}），` +
-    `从 ${sandbox.startLabel} 的 ${sandbox.startCommit.slice(0, 12)} 起步；改动交回到分支 ${sandbox.branch}，` +
+    `沙箱已就绪：容器 ${sandbox.container}（镜像 ${sandbox.image}，${sandbox.network === "on" ? "联网" : "断网"}，` +
+    `下载缓存共用卷 ${sandbox.cacheVolume}），${start}；改动交回到分支 ${sandbox.branch}，` +
     "会话结束时自动交回，会话中可用 /export 手动交回"
   );
 }
@@ -141,14 +155,17 @@ export async function runHeadlessInSandbox(
   };
 }
 
-// pigeon sandbox list | clean：列出或清理进程异常退出留下的沙箱容器（在用的不动）
+export const SANDBOX_COMMAND_USAGE =
+  "用法：pigeon sandbox list | clean | cache | clear-cache（list/clean：残留的沙箱容器；cache/clear-cache：共用下载缓存的占用与清空）";
+
+// pigeon sandbox list | clean：列出或清理进程异常退出留下的沙箱容器（在用的不动）；
+// pigeon sandbox cache | clear-cache（决策 280）：查看共用下载缓存卷的占用、清空缓存
 export async function runSandboxCommand(
   argv: readonly string[],
-  overrides: Pick<SandboxOverrides, "docker"> = {}
+  overrides: Pick<SandboxOverrides, "docker" | "cacheVolume"> = {}
 ): Promise<string> {
-  const usage = "用法：pigeon sandbox list | pigeon sandbox clean";
   if (argv.length !== 1) {
-    throw new Error(usage);
+    throw new Error(SANDBOX_COMMAND_USAGE);
   }
   if (argv[0] === "list") {
     const residual = await findResidualSandboxes(overrides.docker);
@@ -160,5 +177,20 @@ export async function runSandboxCommand(
       ? "没有残留的沙箱容器\n"
       : `已删除 ${removed.length} 个残留的沙箱容器：${removed.join("、")}\n`;
   }
-  throw new Error(usage);
+  if (argv[0] === "cache") {
+    const info = await inspectCacheVolume(overrides.docker, overrides.cacheVolume);
+    if (!info.exists) {
+      return `沙箱下载缓存卷 ${info.volume} 尚未建立（开过沙箱后自动建立）\n`;
+    }
+    const inUse =
+      info.links !== undefined && info.links > 0 ? `，${info.links} 个沙箱容器正在使用` : "";
+    return `沙箱下载缓存卷 ${info.volume}：占用 ${info.size}${inUse}；清空：${SANDBOX_CLEAR_CACHE_COMMAND}\n`;
+  }
+  if (argv[0] === "clear-cache") {
+    const outcome = await clearCacheVolume(overrides.docker, overrides.cacheVolume);
+    return outcome === "removed"
+      ? "已清空沙箱下载缓存（卷已删除，下次开沙箱自动重建）\n"
+      : `沙箱下载缓存本就是空的（卷不存在）；占用可用 ${SANDBOX_CACHE_COMMAND} 查看\n`;
+  }
+  throw new Error(SANDBOX_COMMAND_USAGE);
 }

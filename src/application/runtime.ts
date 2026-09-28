@@ -102,6 +102,11 @@ import {
   type SpawnWorkerSlot,
   spawnWorkerRegistration,
 } from "./spawn-worker-tool.ts";
+import {
+  createTakeWorkerTool,
+  TAKE_WORKER_TOOL,
+  takeWorkerRegistration,
+} from "./take-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
@@ -383,6 +388,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : undefined;
   if (spawnSlot !== undefined) {
     registry.register(spawnWorkerRegistration());
+    // 决策 279：取用 worker 自身改动的工具与派 worker 同槽同范围（写档，按写操作审批）
+    registry.register(takeWorkerRegistration());
   }
   // 决策 287–291：联网工具——web_search 读档免审批，web_fetch 网络档按网站审批
   const webTools = deps.webTools;
@@ -450,7 +457,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
-    ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL] : []),
+    ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL, TAKE_WORKER_TOOL] : []),
     ...(webTools !== undefined ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
   ];
   const mcpSection =
@@ -635,7 +642,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         : []),
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
-      ...(spawnSlot !== undefined ? [createSpawnWorkerTool(spawnSlot)] : []),
+      ...(spawnSlot !== undefined
+        ? [createSpawnWorkerTool(spawnSlot), createTakeWorkerTool(spawnSlot)]
+        : []),
       ...webToolset,
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）

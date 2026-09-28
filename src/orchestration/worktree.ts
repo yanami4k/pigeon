@@ -45,6 +45,14 @@ export function worktreeBranchFor(name: string): string {
   return `pigeon/${name}`;
 }
 
+// 决策 279：worker 起点快照的引用（快照提交挂在这里防止被 git 回收；与分支同名、随分支一并删除）
+export const WORKER_START_REF_PREFIX = "refs/pigeon/worker-start/";
+
+export function workerStartRefFor(name: string): string {
+  assertWorkerName(name);
+  return `${WORKER_START_REF_PREFIX}${name}`;
+}
+
 export interface AddWorktreeInput {
   // 主仓库根：工作树与分支建在它上面
   repoRoot: string;
@@ -78,11 +86,13 @@ export function removeWorktree(input: { repoRoot: string; path: string; force?: 
   ]);
 }
 
-// 删除 worker 分支（M6.5 S2：Eval 每次运行收尾清理工作树与分支）；只接受 pigeon/<合法 worker 名>
+// 删除 worker 分支（M6.5 S2：Eval 每次运行收尾清理工作树与分支）；只接受 pigeon/<合法 worker 名>。
+// 决策 279：起点快照的引用随分支一并删除（引用不存在也算删掉）
 export function deleteBranch(input: { repoRoot: string; branch: string }): void {
   const name = input.branch.startsWith("pigeon/") ? input.branch.slice("pigeon/".length) : "";
   assertWorkerName(name);
   runGit(input.repoRoot, ["branch", "-D", input.branch]);
+  runGit(input.repoRoot, ["update-ref", "-d", workerStartRefFor(name)]);
 }
 
 // 路径所在仓库的主仓库根（M6.5 S2：任务 repo 为 "." 时）——从工作树里调用同样返回主检出，

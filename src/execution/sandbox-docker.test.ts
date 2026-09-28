@@ -47,6 +47,8 @@ test("真容器：busybox 没有 git，开沙箱即报错说明，容器被删�
 }, async () => {
   const repo = makeRepo();
   const id = sessionId("G");
+  // 容器起来才查 git，缓存卷已随 run 建立：用测试专用的名字，用完删除
+  const volume = `pigeon-sandbox-cache-test-${process.pid}`;
   try {
     await assert.rejects(
       openSandbox({
@@ -54,11 +56,13 @@ test("真容器：busybox 没有 git，开沙箱即报错说明，容器被删�
         sessionId: id,
         network: "on",
         image: { kind: "image", image: "busybox:latest" },
+        cacheVolume: volume,
       }),
       /镜像 busybox:latest 里没有可用的 git/
     );
     assert.notEqual(docker("inspect", `pigeon-sandbox-${id}`).status, 0, "容器已删除");
   } finally {
+    docker("volume", "rm", "-f", volume);
     rmSync(repo, { recursive: true, force: true });
   }
 });
@@ -71,16 +75,51 @@ test("真容器：断网参数生效、缺省联网；非 root 用户运行；�
 }, async () => {
   for (const network of ["off", "on"] as const) {
     const repo = makeRepo();
+    // 决策 278：带未提交的改动与新建文件开工
+    writeFileSync(join(repo, "a.txt"), "dirty\n");
+    writeFileSync(join(repo, "n.txt"), "new\n");
+    const head = git(repo, "rev-parse", "HEAD");
     const id = sessionId(network.toUpperCase());
     const name = `pigeon-sandbox-${id}`;
+    // 决策 280：缓存卷用测试专用的名字，用完删除
+    const volume = `pigeon-sandbox-cache-test-${process.pid}`;
     try {
       const sandbox = await openSandbox({
         repoRoot: repo,
         sessionId: id,
         network,
         image: { kind: "image", image: image as string },
+        cacheVolume: volume,
       });
       try {
+        assert.ok(sandbox.startSnapshot !== undefined, "带了未提交改动的快照");
+        assert.equal(docker("exec", name, "cat", "/workspace/a.txt").stdout, "dirty\n");
+        assert.equal(docker("exec", name, "cat", "/workspace/n.txt").stdout, "new\n");
+        const mounts = docker(
+          "inspect",
+          "--format",
+          "{{range .Mounts}}{{.Name}}:{{.Destination}} {{end}}",
+          name
+        ).stdout;
+        assert.ok(
+          mounts.includes(`${volume}:/pigeon-cache`),
+          `缓存卷未挂（${network}）：${mounts}`
+        );
+        assert.equal(
+          docker(
+            "exec",
+            name,
+            "sh",
+            "-c",
+            "test -w /pigeon-cache/npm && test -w /pigeon-cache/go && echo ok"
+          ).stdout.trim(),
+          "ok",
+          "缓存子目录对运行用户可写"
+        );
+        assert.equal(
+          docker("exec", name, "sh", "-c", 'echo "$npm_config_cache:$PIP_CACHE_DIR"').stdout.trim(),
+          "/pigeon-cache/npm:/pigeon-cache/pip"
+        );
         const mode = docker(
           "inspect",
           "--format",
@@ -113,13 +152,23 @@ test("真容器：断网参数生效、缺省联网；非 root 用户运行；�
         assert.equal(result.exitCode, 0, result.output);
         const exported = await sandbox.close();
         assert.equal(git(repo, "show", `${exported.branch}:r.txt`), "real");
+        assert.equal(git(repo, "show", `${exported.branch}:n.txt`), "new");
+        // 交回分支 = 快照 + agent 的提交
+        assert.equal(exported.snapshotCommit, sandbox.startCommit);
+        assert.equal(git(repo, "rev-parse", `${exported.branch}^^`), head);
         assert.equal(git(repo, "symbolic-ref", "--short", "HEAD"), "main");
+        assert.equal(
+          git(repo, "status", "--porcelain").includes("a.txt"),
+          true,
+          "宿主的未提交改动原样"
+        );
         assert.notEqual(docker("inspect", name).status, 0, "交回后容器已删除");
       } finally {
         await sandbox.discard().catch(() => {});
       }
     } finally {
       docker("rm", "-f", name);
+      docker("volume", "rm", "-f", volume);
       rmSync(repo, { recursive: true, force: true });
     }
   }

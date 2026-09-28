@@ -8,6 +8,7 @@ import {
   renderWorkersStatus,
   resolveWorkerRef,
   type SpawnRequest,
+  TAKE_USAGE,
   type WorkerOutcome,
   type WorkerStatus,
   workerStateLabel,
@@ -22,6 +23,8 @@ export interface TuiWorkersFace {
   cancel(sessionId: SessionId): Promise<void>;
   status(): WorkerStatus[];
   awaitResult(sessionId: SessionId): Promise<WorkerOutcome>;
+  // 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录，返回与 take_worker 工具同一套文字；主会话才有
+  take?(name: string): Promise<string>;
   // M7（决策 069）：并行派发同一任务的 N 个尝试，各自收尾后验证，全部收尾后交回各尝试的标签；主会话才有
   spawnAttempts?(request: {
     role: string;
@@ -125,6 +128,36 @@ export function handleCancelCommand(
     (error: unknown) => {
       host.addSystem(
         `取消 worker ${target.name} 失败：${error instanceof Error ? error.message : String(error)}`
+      );
+      host.render();
+    }
+  );
+}
+
+// 决策 279：/take <worker 名>——把已收尾 worker 自己的改动叠进工作目录，结果（与 take_worker 工具同一套文字）落消息区
+export function handleTakeCommand(
+  host: WorkersViewHost,
+  workers: TuiWorkersFace,
+  name: string | undefined
+): void {
+  if (workers.take === undefined) {
+    host.addSystem("当前会话不支持取用 worker 的改动（worker 会话不能再派、也不取用）");
+    return;
+  }
+  if (name === undefined || name === "") {
+    host.addSystem(TAKE_USAGE);
+    return;
+  }
+  workers.take(name).then(
+    (text) => {
+      if (!host.isStarted()) return;
+      host.addSystem(text);
+      host.render();
+    },
+    (error: unknown) => {
+      if (!host.isStarted()) return;
+      host.addSystem(
+        `取用 worker ${name} 的改动失败：${error instanceof Error ? error.message : String(error)}`
       );
       host.render();
     }

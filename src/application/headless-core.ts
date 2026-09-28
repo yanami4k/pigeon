@@ -392,7 +392,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
         }
       }
-      // 决策 264–268：派 worker 的编排器（worker 从治理根的当前提交开工；无人值守，不接审批通道）
+      // 决策 264–268：派 worker 的编排器（决策 279：worker 从治理根连同未提交改动的快照开工；无人值守，不接审批通道）
       if (spawnSlot !== undefined) {
         workers = createSessionWorkers({
           governanceRoot: options.governanceRoot,
