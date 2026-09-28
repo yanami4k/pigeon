@@ -7,6 +7,12 @@ import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/s
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { McpLaunch } from "../state/mcp-config.ts";
+import {
+  killProcessTree,
+  processGroupSpawnOptions,
+  trackChild,
+  untrackChild,
+} from "../tools/process-tree.ts";
 import { allowedEnv, type McpLaunchPlan, planMcpLaunch } from "../tools/run-command.ts";
 
 // stderr 只留尾部供诊断，不入账
@@ -124,12 +130,16 @@ export class PigeonStdioTransport implements Transport {
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments: this.plan.verbatim,
+        // 以独立进程组拉起：关闭时对整组发信号，覆盖经 npx 等启动器再起的 node MCP server
+        ...processGroupSpawnOptions(),
         stdio: ["pipe", "pipe", "pipe"],
       });
       this.#process = child;
+      trackChild(child);
       this.#exited = new Promise((done) => {
         child.once("close", () => {
           this.#process = undefined;
+          untrackChild(child);
           done();
           this.onclose?.();
         });
@@ -174,15 +184,9 @@ export class PigeonStdioTransport implements Transport {
       return;
     }
     child.stdin?.end();
+    // 先关 stdin 让 server 自行退出（先礼）；宽限内不退就对整组发 SIGTERM（后兵），覆盖启动器之下的 node
     const timer = setTimeout(() => {
-      if (this.#options.platform === "win32" && child.pid !== undefined) {
-        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-          windowsHide: true,
-          stdio: "ignore",
-        }).on("error", () => child.kill());
-      } else {
-        child.kill("SIGTERM");
-      }
+      killProcessTree(child, "SIGTERM");
     }, CLOSE_GRACE_MS);
     await exited;
     clearTimeout(timer);
