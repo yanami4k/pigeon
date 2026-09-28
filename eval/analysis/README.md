@@ -1,6 +1,11 @@
 # 正式跑与校准的统计分析
 
-按正式跑分析计划（主判据、次要判据、设计灵敏度、校准取值规则、报告措辞）计算，输入为跑批器的 results.jsonl。
+按正式跑分析计划（主判据、次要判据、设计灵敏度、校准取值规则、报告措辞）计算，输入为跑批器的输出目录：
+
+- results.jsonl：每格、每题、每遍一行；缺了该有的字段即报错并指明文件、行与字段；
+- identity.json（与 results.jsonl 同目录）：报告的设置一节、难度关的题面格式、压缩触发点取自这里；
+- streams/tasks-<条件>-<遍次>/：会话清单 sessions-<步序>.json、.pigeon/sessions 下的会话文件与开工记忆快照
+  learned-snapshots/step-<步序>/，记忆使用与检索的计数、复盘的 token 细分取自这里；没有这个目录时这些计数记为无来源。
 
 ## 安装
 
@@ -43,5 +48,6 @@ python -m pytest -m "not slow"   # 跳过模拟检验
 - pigeon_analysis/sensitivity.py：设计灵敏度与第 3 遍规则
 - pigeon_analysis/calibration.py：校准取值规则与抽题
 - pigeon_analysis/wording.py：报告的固定措辞
-- pigeon_analysis/reader.py：结果行 → 规整表（跑批器字段变动只改这里）
+- pigeon_analysis/reader.py：结果行 → 规整表、身份头 → 设置（跑批器字段变动只改这里）
+- pigeon_analysis/sessions.py：会话文件 → 记忆使用与检索的计数
 - pigeon_analysis/report.py、cli.py：输出与命令行

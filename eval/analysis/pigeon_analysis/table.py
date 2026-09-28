@@ -10,16 +10,19 @@
 - solved：做成与否（F 全过且 P 无一失败），1 / 0
 - p_failed、p_total：不许挂的用例中失败的条数与总数
 - flaky_excluded：因时过时不过排除的用例数
-- turns、wall_ms：每步轮数与墙钟（含验证门与回炉）
-- cost、review_cost：每步花费与复盘花费（元）
-- review_turns、review_wall_ms：复盘的轮数与墙钟
-- input_miss、input_hit、output_tokens：输入 token（未命中 / 命中）与输出 token
+- turns、wall_ms：干活部分的轮数与墙钟（含验证门与回炉，不含复盘）
+- input_miss、input_hit、output_tokens：干活部分的输入 token（未命中 / 命中）与输出 token
+- cost：干活部分的花费（元，已减去复盘）；review_cost：复盘花费（元）
+- review_closing、review_pre_compaction：这一步收尾与压缩前的复盘次数
+- review_turns、review_tokens、review_wall_ms：复盘的合计轮数、token 与墙钟
+- review_input_miss、review_input_hit、review_output：复盘的输入（未命中 / 命中）与输出 token（取自会话文件）
 - peak_input：每步单次请求输入 token 的峰值
-- memory_chars、memory_bytes、memory_entries：每步开工时 MEMORY.md 的字符数、字节数与条目数
-- memory_chars_after：每步复盘结束后 MEMORY.md 的字符数（最后一步的即该遍结束值）
+- memory_chars、memory_bytes、memory_entries：每步开工时 MEMORY.md 条目部分的字符数、字节数与条目数
+- memory_chars_after、memory_entries_after：每步复盘结束后的字符数与条目数（最后一步的即该遍结束值）
 - hit_step_budget、hit_review_budget：是否撞了每步 / 复盘的上限（1 / 0，未知为 NaN）
+- verify_tool_faults：验证工具故障的次数
 - baseline_unavailable：这道题无法建立两类用例的基线（1 / 0）：排除在主判据之外并单独计数
-- 其余以 mem_ 或 search_ 开头的列为记忆使用的计数，原样汇总
+- 其余以 mem_ 或 search_ 开头的列为记忆使用与检索的计数（取自会话文件）
 """
 
 from __future__ import annotations
@@ -41,18 +44,26 @@ NUMERIC_COLUMNS = (
     "wall_ms",
     "cost",
     "review_cost",
+    "review_closing",
+    "review_pre_compaction",
     "review_turns",
+    "review_tokens",
     "review_wall_ms",
+    "review_input_miss",
+    "review_input_hit",
+    "review_output",
     "input_miss",
     "input_hit",
     "output_tokens",
     "peak_input",
     "memory_chars",
     "memory_chars_after",
+    "memory_entries_after",
     "memory_bytes",
     "memory_entries",
     "hit_step_budget",
     "hit_review_budget",
+    "verify_tool_faults",
     "baseline_unavailable",
 )
 
@@ -82,6 +93,3 @@ def make_table(records: Iterable[dict[str, Any]]) -> pd.DataFrame:
     df = df.drop_duplicates(subset=list(KEY_COLUMNS), keep="last")
     return df.sort_values(list(KEY_COLUMNS), kind="mergesort").reset_index(drop=True)
 
-
-def extra_usage_columns(df: pd.DataFrame) -> list[str]:
-    return sorted(c for c in df.columns if c.startswith("mem_") or c.startswith("search_"))

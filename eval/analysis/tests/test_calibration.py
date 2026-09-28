@@ -5,14 +5,13 @@ from pathlib import Path
 import pytest
 
 from pigeon_analysis.calibration import (
-    _budget_cap,
     context_peak,
     cost_rule,
+    difficulty_gate,
     memory_cap_rule,
     review_cap_rule,
     sample_order,
     sample_tasks,
-    solved_rate_rule,
     step_budget_rule,
 )
 from pigeon_analysis.table import make_table
@@ -21,40 +20,85 @@ from sim import rec
 TASKS = list(range(101, 116))
 
 
-def solved_rows(solved_pass1: int, solved_pass2: int):
+def gate_rows(pass1: list[float], pass2: list[float], solved=0.0, cell="01"):
+    """01 格两遍、15 道题的部分得分；f_total = 20，得分为 1/20 的整数倍。"""
     recs = []
-    for r, k in ((1, solved_pass1), (2, solved_pass2)):
-        for j, t in enumerate(TASKS):
-            recs.append(rec("01", t, r, 0.5, solved=1.0 if j < k else 0.0))
+    for r, scores in ((1, pass1), (2, pass2)):
+        for t, y in zip(TASKS, scores):
+            recs.append(rec(cell, t, r, y, f_total=20, solved=solved))
     return make_table(recs)
 
 
-class TestSolvedRate:
+def flat(y, n=15):
+    return [y] * n
+
+
+class TestDifficultyGate:
     @pytest.mark.parametrize(
-        "p1,p2,decision",
-        [(5, 4, "stay"), (4, 4, "below-threshold"), (11, 10, "stay"), (11, 11, "switch-repo"), (0, 0, "below-threshold")],
+        "y,decision",
+        [
+            (0.30, "stay"),  # 端点算在区间内
+            (0.80, "stay"),
+            (0.55, "stay"),
+            (0.25, "retest-with-test-cases"),
+            (0.85, "switch-repo"),
+        ],
     )
-    def test_threshold_endpoints_inclusive(self, p1, p2, decision):
-        # 9/30 = 30%、21/30 = 70% 都留下；8/30 与 22/30 越界
-        assert solved_rate_rule(solved_rows(p1, p2))["decision"] == decision
+    def test_three_exits_and_endpoints(self, y, decision):
+        assert difficulty_gate(gate_rows(flat(y), flat(y)))["decision"] == decision
 
-    def test_rate_pools_both_passes(self):
-        r = solved_rate_rule(solved_rows(6, 3))
-        assert r["rate"] == pytest.approx(9 / 30)
+    def test_endpoints_by_pooled_mean(self):
+        # 两遍 0.25 与 0.35：合计平均正好 0.30，留下；0.20 与 0.35 合计 0.275 低于 30%
+        assert difficulty_gate(gate_rows(flat(0.25), flat(0.35)))["decision"] == "stay"
+        assert difficulty_gate(gate_rows(flat(0.20), flat(0.35)))["decision"] == "retest-with-test-cases"
+        # 0.75 与 0.85 合计 0.80 留下；0.75 与 0.90 合计 0.825 换仓
+        assert difficulty_gate(gate_rows(flat(0.75), flat(0.85)))["decision"] == "stay"
+        assert difficulty_gate(gate_rows(flat(0.75), flat(0.90)))["decision"] == "switch-repo"
+
+    def test_mean_of_partial_scores_not_solved_rate(self):
+        # 部分得分平均 0.5 留下；做成率为 0 也不影响去留，只作描述
+        r = difficulty_gate(gate_rows(flat(0.5), flat(0.5), solved=0.0))
+        assert r["meanScore"] == pytest.approx(0.5)
+        assert r["solvedRate"] == 0.0
+        assert r["decision"] == "stay"
+        r = difficulty_gate(gate_rows(flat(0.1), flat(0.1), solved=1.0))
+        assert r["solvedRate"] == 1.0
+        assert r["decision"] == "retest-with-test-cases"
+
+    def test_f_empty_steps_not_counted(self):
+        df = gate_rows(flat(0.5), flat(0.5))
+        # 再加一道要做到的为零的题：得分为空，不进平均、不计步数
+        df = make_table(df.to_dict("records") + [rec("01", 999, r, None, f_total=0) for r in (1, 2)])
+        r = difficulty_gate(df)
         assert r["steps"] == 30
-        assert r["byPass"] == {"1": pytest.approx(0.4), "2": pytest.approx(0.2)}
+        assert r["meanScore"] == pytest.approx(0.5)
 
-    def test_large_rerun_gap(self):
-        # 相差正好 20 个点不算大；超过才注明
-        assert solved_rate_rule(solved_rows(6, 3))["largeRerunGap"] is False
-        assert solved_rate_rule(solved_rows(7, 3))["largeRerunGap"] is True
+    def test_only_01_cell_two_passes(self):
+        recs = gate_rows(flat(0.5), flat(0.5)).to_dict("records")
+        recs += [rec("11", t, r, 1.0, f_total=20) for t in TASKS for r in (1, 2)]
+        recs += [rec("M", t, 1, 1.0, f_total=20) for t in TASKS]
+        recs += [rec("01", t, 3, 1.0, f_total=20) for t in TASKS]
+        assert difficulty_gate(make_table(recs))["meanScore"] == pytest.approx(0.5)
 
-    def test_only_01_cell_counts(self):
-        df = make_table(
-            [rec("01", t, 1, 0.5, solved=1.0) for t in TASKS[:10]]
-            + [rec("11", t, 1, 0.5, solved=0.0) for t in TASKS]
-        )
-        assert solved_rate_rule(df)["rate"] == 1.0
+    def test_rerun_gap_noted_but_pooled(self):
+        # 相差正好 20 个点不注明；超过才注明；去留照合计判
+        r = difficulty_gate(gate_rows(flat(0.4), flat(0.6)))
+        assert r["passGap"] == pytest.approx(0.2)
+        assert r["largeRerunGap"] is False
+        r = difficulty_gate(gate_rows(flat(0.35), flat(0.6)))
+        assert r["largeRerunGap"] is True
+        assert r["decision"] == "stay"
+        assert r["byPass"] == {"1": pytest.approx(0.35), "2": pytest.approx(0.6)}
+
+    def test_retest_with_test_cases(self):
+        # 用例名题面的复测：落进区间即以用例名题面开跑，仍低于 30% 交项目负责人另定
+        assert difficulty_gate(gate_rows(flat(0.5), flat(0.5)), prompt_format="test-cases")["decision"] == "start-with-test-cases"
+        assert difficulty_gate(gate_rows(flat(0.2), flat(0.2)), prompt_format="test-cases")["decision"] == "owner-decides"
+        assert difficulty_gate(gate_rows(flat(0.9), flat(0.9)), prompt_format="test-cases")["decision"] == "retest-above-range"
+        assert difficulty_gate(gate_rows(flat(0.2), flat(0.2)), prompt_format="test-files")["decision"] == "retest-with-test-cases"
+
+    def test_no_data(self):
+        assert difficulty_gate(make_table([rec("11", 1, 1, 0.5)]))["decision"] is None
 
 
 def cost_rows(c01, c11, cm, review=0.0):
@@ -84,6 +128,17 @@ class TestCost:
         cm = base / (89 * 1.1)
         assert cost_rule(cost_rows(0.0, 0.0, cm))["decision"] == decision
 
+    def test_owner_decides_lists_candidates(self):
+        # 超过 ¥650 不自动删减，列出候选交项目负责人裁决；其余两档不列
+        r = cost_rule(cost_rows(0.0, 0.0, 650.1 / (89 * 1.1)))
+        assert r["candidates"] == ["raise-budget", "off-peak-only", "skip-minimal"]
+        assert cost_rule(cost_rows(0.0, 0.0, 600 / (89 * 1.1)))["candidates"] == []
+
+    def test_review_cost_listed_separately(self):
+        r = cost_rule(cost_rows(0.5, 0.7, 0.2, review=0.1))
+        assert r["reviewPerStep"]["11"] == pytest.approx(0.1)
+        assert r["reviewPerStep"]["01"] == pytest.approx(0.0)
+
     def test_offpeak_column_preferred(self):
         df = cost_rows(1.0, 1.0, 1.0)
         df["cost_offpeak"] = 0.5
@@ -101,37 +156,35 @@ def test_context_peak():
     assert context_peak(df, None).get("warn") is None
 
 
-def budget_rows(turns, wall_min, cell="01", **kw):
-    return make_table([rec(cell, 1 + k, 1, 0.5, turns=t, wall_ms=w * 60_000, **kw) for k, (t, w) in enumerate(zip(turns, wall_min))])
+def budget_rows(hits, cell="01", **kw):
+    """每步是否撞了宽上限（结果行 hitStepBudget）；轮数与墙钟另给，用来验证它们不参与判定。"""
+    return make_table([rec(cell, 1 + k, 1, 0.5, hit_step_budget=h, **kw) for k, h in enumerate(hits)])
 
 
 class TestStepBudget:
-    @pytest.mark.parametrize(
-        "max_turns,want",
-        [(90, 150), (100, 150), (101, 160), (120, 180), (299, 450)],
-    )
-    def test_turns(self, max_turns, want):
-        assert step_budget_rule(budget_rows([10, max_turns], [5, 5]))["turns"] == want
+    def test_no_hit_keeps_temporary(self):
+        # 没有撞：维持临时值 300 轮、60 分钟；不按实测下调
+        r = step_budget_rule(budget_rows([0.0, 0.0], turns=12, wall_ms=60_000))
+        assert (r["turns"], r["wallMinutes"], r["hitTemporaryCap"]) == (300, 60, False)
 
-    @pytest.mark.parametrize("max_wall,want", [(15, 30), (20, 30), (20.5, 35), (25, 40), (59, 90)])
-    def test_wall(self, max_wall, want):
-        assert step_budget_rule(budget_rows([10, 10], [1, max_wall]))["wallMinutes"] == want
-
-    def test_hit_temporary_cap_doubles(self):
-        r = step_budget_rule(budget_rows([300, 10], [5, 5]))
+    def test_hit_doubles(self):
+        r = step_budget_rule(budget_rows([0.0, 1.0]))
         assert (r["turns"], r["wallMinutes"], r["hitTemporaryCap"]) == (600, 120, True)
-        r = step_budget_rule(budget_rows([10, 10], [60, 5]))
-        assert (r["turns"], r["wallMinutes"]) == (600, 120)
-        r = step_budget_rule(budget_rows([10, 10], [5, 5], hit_step_budget=1.0))
-        assert r["hitTemporaryCap"] is True
+        assert r["hitSteps"] == {"01": 1}
 
-    def test_minimal_ignored(self):
-        df = make_table([rec("01", 1, 1, 0.5, turns=50, wall_ms=60_000), rec("M", 1, 1, 0.5, turns=999, wall_ms=10**9)])
-        assert step_budget_rule(df)["turns"] == 150
+    def test_flag_is_the_only_criterion(self):
+        # 轮数与墙钟达到临时值而标记为否：不算撞（以结果行的撞上限标记为准）
+        r = step_budget_rule(budget_rows([0.0], turns=300, wall_ms=60 * 60_000))
+        assert (r["turns"], r["wallMinutes"]) == (300, 60)
 
-    def test_upper_cap(self):
-        assert _budget_cap(500, 1.5, 10, 150, 600) == (600, True)
-        assert _budget_cap(400, 1.5, 10, 150, 600) == (600, False)
+    def test_any_calibration_step_counts(self):
+        # 最简 agent 与 Pigeon 共用同一个每步上限：它撞了也算
+        df = make_table([rec("01", 1, 1, 0.5, hit_step_budget=0.0), rec("M", 1, 1, 0.5, hit_step_budget=1.0)])
+        r = step_budget_rule(df)
+        assert r["turns"] == 600 and r["hitSteps"] == {"M": 1}
+
+    def test_no_flags(self):
+        assert step_budget_rule(make_table([rec("01", 1, 1, 0.5)]))["turns"] is None
 
 
 def memory_rows(pass_sizes: dict[int, list[float]], column="memory_chars"):
@@ -194,23 +247,24 @@ class TestMemoryCap:
 
 
 class TestReviewCap:
-    def rows(self, turns, wall_min, **kw):
-        return make_table([rec("11", 1 + k, 1, 0.5, review_turns=t, review_wall_ms=w * 60_000, **kw)
-                           for k, (t, w) in enumerate(zip(turns, wall_min))])
+    def rows(self, hits, **kw):
+        return make_table([rec("11", 1 + k, 1, 0.5, hit_review_budget=h, **kw) for k, h in enumerate(hits)])
 
-    @pytest.mark.parametrize("max_turns,want", [(10, 20), (13, 20), (14, 25), (18, 30)])
-    def test_turns(self, max_turns, want):
-        assert review_cap_rule(self.rows([1, max_turns], [1, 1]))["turns"] == want
-
-    @pytest.mark.parametrize("max_wall,want", [(2, 5), (3.3, 5), (3.4, 6), (4, 6), (6, 9)])
-    def test_wall(self, max_wall, want):
-        assert review_cap_rule(self.rows([1, 1], [1, max_wall]))["wallMinutes"] == want
+    def test_no_hit_keeps_temporary(self):
+        r = review_cap_rule(self.rows([0.0, 0.0], review_turns=5, review_wall_ms=60_000))
+        assert (r["turns"], r["wallMinutes"], r["hitTemporaryCap"]) == (40, 15, False)
 
     def test_hit_doubles(self):
-        assert review_cap_rule(self.rows([40, 1], [1, 1]))["turns"] == 80
-        assert review_cap_rule(self.rows([1, 1], [10, 1]))["wallMinutes"] == 20
+        r = review_cap_rule(self.rows([0.0, 1.0]))
+        assert (r["turns"], r["wallMinutes"], r["hitTemporaryCap"]) == (80, 30, True)
+        assert r["hitSteps"] == 1
+
+    def test_flag_is_the_only_criterion(self):
+        r = review_cap_rule(self.rows([0.0], review_turns=40, review_wall_ms=15 * 60_000))
+        assert (r["turns"], r["wallMinutes"]) == (40, 15)
 
     def test_no_reviews(self):
+        # 不推送的条件复盘标记为空：没有复盘可判
         assert review_cap_rule(make_table([rec("01", 1, 1, 0.5)]))["turns"] is None
 
 

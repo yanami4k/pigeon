@@ -118,20 +118,76 @@ def test_efficiency_median_and_paired():
     for r in recs:
         r["turns"] = {"00": 10, "01": 20, "10": 30, "11": 40}[r["cell"]] + r["task"]
     p, s = both(make_table(recs))
-    assert s["efficiency"]["byCell"]["turns"]["00"]["median"] == 12
-    assert s["efficiency"]["pairedMedian"]["turns"]["push"] == pytest.approx(20)
-    assert s["efficiency"]["pairedMedian"]["turns"]["search"] == pytest.approx(10)
+    w = s["efficiency"]["worker"]
+    assert w["byCell"]["turns"]["00"]["median"] == 12
+    assert w["pairedMedian"]["turns"]["push"] == pytest.approx(20)
+    assert w["pairedMedian"]["turns"]["search"] == pytest.approx(10)
+
+
+def test_efficiency_worker_and_review_separate():
+    # 干活与复盘分开报：干活的花费取 cost（已减去复盘），复盘取 review_cost；复盘的轮数、token、墙钟单列
+    recs = grid({"00": 0.5, "01": 0.5, "10": 0.5, "11": 0.5}, tasks=(1, 2, 3))
+    for r in recs:
+        r["cost"] = 1.0
+        r["turns"] = 30
+        if r["cell"][0] == "1":
+            r.update(review_cost=0.25 if r["cell"] == "11" else 0.1, review_turns=8, review_input_miss=100,
+                     review_input_hit=900, review_output=50, review_tokens=1050, review_wall_ms=60_000)
+    p, s = both(make_table(recs))
+    eff = s["efficiency"]
+    assert set(eff["worker"]["byCell"]) == {"turns", "input_miss", "input_hit", "output_tokens", "wall_ms", "cost"}
+    assert set(eff["review"]["byCell"]) == {"review_turns", "review_input_miss", "review_input_hit", "review_output",
+                                            "review_tokens", "review_wall_ms", "review_cost"}
+    assert eff["worker"]["byCell"]["cost"]["11"]["median"] == 1.0
+    assert eff["review"]["byCell"]["review_cost"]["11"]["median"] == 0.25
+    assert set(eff["review"]["byCell"]["review_cost"]) == {"10", "11"}
+    # 复盘只在推送两格：推送差无从配对，检索差为 11 − 10
+    assert eff["review"]["pairedMedian"]["review_cost"] == {"push": None, "search": pytest.approx(0.15)}
+
+
+PUSH_ITEMS = [
+    "memory_entries_after", "memory_chars_after",
+    "mem_worker_add", "mem_worker_replace", "mem_worker_remove",
+    "mem_review_add", "mem_review_replace", "mem_review_remove",
+    "mem_worker_rejected_full", "mem_review_rejected_full",
+    "mem_citations", "mem_cited_entries", "mem_ref_reads",
+    "review_closing", "review_pre_compaction", "review_cost",
+]
+
+
+def test_memory_usage_items_follow_plan():
+    # 计划第 3 节的各项（261 去掉了"复盘记为反面教训的条数"）：逐项列出，不多不少
+    p, s = both(simulate(n_tasks=6, passes=1, seed=2))
+    mu = s["memoryUsage"]
+    assert mu["items"]["push"] == PUSH_ITEMS
+    assert mu["items"]["search"] == ["search_calls_search_sessions", "search_calls_read_session_entry", "search_sessions_hit"]
+    assert set(mu["push"]["11"]) == set(PUSH_ITEMS) | {"endOfPass"}
+    assert not any("lesson" in k or "negative" in k for k in mu["push"]["11"])
 
 
 def test_memory_usage_only_push_and_search_cells():
-    recs = grid({"00": 0.5, "01": 0.5, "10": 0.5, "11": 0.5}, tasks=(1, 2))
+    recs = grid({"00": 0.5, "01": 0.5, "10": 0.5, "11": 0.5}, tasks=(1, 2), passes=(1, 2))
     for r in recs:
-        r["memory_chars"] = 100.0 * r["task"] if r["cell"][0] == "1" else None
-        r["mem_citations"] = 2.0 if r["cell"][0] == "1" else None
-        r["search_calls"] = 1.0 if r["cell"][1] == "1" else None
+        if r["cell"][0] == "1":
+            r["memory_chars_after"] = 100.0 * r["task"] + 10 * r["pass_no"]
+            r["memory_entries_after"] = 1.0 * r["task"]
+            r["mem_citations"] = 2.0
+            r["mem_worker_add"] = 1.0
+            r["review_closing"] = 1.0
+        if r["cell"][1] == "1":
+            r["search_calls_search_sessions"] = 1.0
+            r["search_sessions_hit"] = 3.0
     p, s = both(make_table(recs))
     mu = s["memoryUsage"]
     assert set(mu["push"]) == {"10", "11"}
-    assert mu["push"]["11"]["memory_chars"]["max"] == 200.0
-    assert mu["push"]["10"]["mem_citations"]["total"] == 4.0
-    assert mu["search"]["01"]["search_calls"]["total"] == 2.0
+    assert set(mu["search"]) == {"01", "11"}
+    assert mu["push"]["11"]["memory_chars_after"]["max"] == 220.0
+    # 一遍结束值：每遍最后一步复盘后的大小
+    assert mu["push"]["11"]["endOfPass"] == {"1": {"task": 2, "entries": 2.0, "chars": 210.0},
+                                             "2": {"task": 2, "entries": 2.0, "chars": 220.0}}
+    assert mu["push"]["10"]["mem_citations"] == {"total": 8.0, "meanPerStep": 2.0, "steps": 4}
+    assert mu["push"]["10"]["mem_worker_add"]["total"] == 4.0
+    # 没有来源的项记 None
+    assert mu["push"]["10"]["mem_ref_reads"] is None
+    assert mu["search"]["01"]["search_calls_search_sessions"]["total"] == 4.0
+    assert mu["search"]["01"]["search_calls_read_session_entry"] is None

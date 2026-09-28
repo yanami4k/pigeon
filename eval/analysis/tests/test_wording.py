@@ -57,16 +57,19 @@ def test_significant_but_uncorrected_is_not_detected():
     assert s["kind"] == "not-detected"
 
 
-def test_ceiling_appended_to_not_detected_per_effect():
+def test_ceiling_appended_per_effect():
     out = conclusion_sentences(primary(eff(0.01, False), ceiling=True))
     assert out["push"]["text"].endswith("（基线触顶）")
     assert "基线触顶" not in out["search"]["text"]
     out = conclusion_sentences(primary(eff(0.01, False), search_ceiling=True))
     assert out["search"]["text"].endswith("（基线触顶）")
     assert "基线触顶" not in out["push"]["text"]
-    # 测出时不挂
+    # 测出时同样挂在该效应的结论后（计划第 4 节不限句式）
     out = conclusion_sentences(primary(eff(0.05, True), ceiling=True))
-    assert "基线触顶" not in out["push"]["text"]
+    assert out["push"]["text"].endswith("）。（基线触顶）")
+    out = conclusion_sentences(primary(eff(-0.05, True, ci=(-0.08, -0.02)), ceiling=True, push_rel=-0.05))
+    assert out["push"]["text"].endswith("（基线触顶）")
+    assert "基线触顶" not in out["search"]["text"]
 
 
 def test_sensitive_sentence():

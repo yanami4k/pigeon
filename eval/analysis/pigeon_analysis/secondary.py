@@ -11,10 +11,32 @@ import pandas as pd
 from . import constants as K
 from .primary import EFFECTS, cell_task_means, four_cell_rows, paired_differences
 from .stats import bootstrap_ci, bootstrap_stat_ci, sign_flip_pvalue
-from .table import extra_usage_columns
 
-EFFICIENCY_METRICS = ("turns", "input_miss", "input_hit", "output_tokens", "wall_ms", "cost")
-REVIEW_METRICS = ("review_turns", "review_wall_ms", "review_cost")
+# 效率（第 3 节）：干活与复盘分开报——轮数、token（输入未命中 / 命中、输出）、墙钟、花费
+WORKER_METRICS = ("turns", "input_miss", "input_hit", "output_tokens", "wall_ms", "cost")
+REVIEW_METRICS = ("review_turns", "review_input_miss", "review_input_hit", "review_output", "review_tokens",
+                  "review_wall_ms", "review_cost")
+
+# 记忆使用（第 3 节、261）：推送两格逐步的各项；"复盘记为反面教训的条数"已按 261 去掉
+PUSH_SIZE_ITEMS = ("memory_entries_after", "memory_chars_after")
+PUSH_COUNT_ITEMS = (
+    "mem_worker_add",
+    "mem_worker_replace",
+    "mem_worker_remove",
+    "mem_review_add",
+    "mem_review_replace",
+    "mem_review_remove",
+    "mem_worker_rejected_full",
+    "mem_review_rejected_full",
+    "mem_citations",
+    "mem_cited_entries",
+    "mem_ref_reads",
+    "review_closing",
+    "review_pre_compaction",
+    "review_cost",
+)
+# 检索两格：两件检索工具的调用次数与命中会话数
+SEARCH_COUNT_ITEMS = ("search_calls_search_sessions", "search_calls_read_session_entry", "search_sessions_hit")
 
 
 def _ci(c):
@@ -110,26 +132,33 @@ def learning_curve(primary: dict[str, Any], df: pd.DataFrame, boots=K.BOOTSTRAPS
     return out
 
 
+def _distribution(df: pd.DataFrame, metric: str) -> dict[str, Any]:
+    per_cell = {}
+    for cell, g in df.groupby("cell"):
+        v = g[metric].dropna()
+        if v.empty:
+            continue
+        per_cell[str(cell)] = {"median": float(np.median(v)), "p90": float(np.quantile(v, 0.9)), "n": int(v.size)}
+    return per_cell
+
+
 def efficiency(df: pd.DataFrame, tasks: list[int]) -> dict[str, Any]:
-    """效率：各格中位数与 90 分位；推、拉效应按题配对取差的中位数。复盘单列。"""
-    out: dict[str, Any] = {"byCell": {}, "pairedMedian": {}, "exploratory": True}
-    for metric in EFFICIENCY_METRICS + REVIEW_METRICS:
-        per_cell = {}
-        for cell, g in df.groupby("cell"):
-            v = g[metric].dropna()
-            if v.empty:
-                continue
-            per_cell[str(cell)] = {
-                "median": float(np.median(v)),
-                "p90": float(np.quantile(v, 0.9)),
-                "n": int(v.size),
-            }
-        out["byCell"][metric] = per_cell
+    """效率：干活与复盘分开，各格中位数与 90 分位。干活部分的推、拉效应按题配对取差的中位数；
+    复盘只在推送两格有，推送效应无从配对（记空），检索效应取 ȳ(11, i) − ȳ(10, i) 的中位数。"""
+    out: dict[str, Any] = {"worker": {"byCell": {}, "pairedMedian": {}},
+                           "review": {"byCell": {}, "pairedMedian": {}}, "exploratory": True}
+    for metric in WORKER_METRICS:
+        out["worker"]["byCell"][metric] = _distribution(df, metric)
         means = cell_task_means(four_cell_rows(df), metric).reindex(tasks).dropna()
         diffs = paired_differences(means)
-        out["pairedMedian"][metric] = {
+        out["worker"]["pairedMedian"][metric] = {
             name: (float(np.median(diffs[name])) if len(diffs) else None) for name in EFFECTS
         }
+    for metric in REVIEW_METRICS:
+        out["review"]["byCell"][metric] = _distribution(df, metric)
+        means = cell_task_means(df, metric, cells=("10", "11")).reindex(tasks).dropna()
+        d = (means["11"] - means["10"]).to_numpy(dtype=float)
+        out["review"]["pairedMedian"][metric] = {"push": None, "search": (float(np.median(d)) if d.size else None)}
     return out
 
 
@@ -146,32 +175,43 @@ def versus_minimal(df: pd.DataFrame, tasks: list[int], boots=K.BOOTSTRAPS) -> di
     return out
 
 
+def _counts(g: pd.DataFrame, col: str) -> dict[str, Any] | None:
+    """合计与每步平均；这一列没有来源（整列为空）时为 None。"""
+    if col not in g.columns or not g[col].notna().any():
+        return None
+    v = g[col].dropna()
+    return {"total": float(v.sum()), "meanPerStep": float(v.mean()), "steps": int(v.size)}
+
+
 def memory_usage(df: pd.DataFrame) -> dict[str, Any]:
-    """记忆使用：推送两格的记忆大小与各项计数；检索两格的检索计数。字段不全时只报已有的。"""
-    out: dict[str, Any] = {"push": {}, "search": {}, "exploratory": True}
-    extras = extra_usage_columns(df)
+    """记忆使用：推送两格每步复盘结束后的记忆条数与字符数（分布，另给每遍最后一步即一遍结束值）、干活与复盘各自的
+    新增 / 改写 / 删除次数、写满被拒次数、回复里标出记忆编号的次数与涉及的条目数、读取记忆所引文件的次数、复盘次数与花费；
+    检索两格每步两件检索工具的调用次数与命中会话数。某项没有来源时记 None。"""
+    out: dict[str, Any] = {"push": {}, "search": {}, "exploratory": True,
+                           "items": {"push": list(PUSH_SIZE_ITEMS + PUSH_COUNT_ITEMS), "search": list(SEARCH_COUNT_ITEMS)}}
     for cell in ("10", "11"):
         g = df[df["cell"] == cell]
         if g.empty:
             continue
         item: dict[str, Any] = {}
-        for col in ("memory_chars", "memory_bytes", "memory_entries"):
+        for col in PUSH_SIZE_ITEMS:
             v = g[col].dropna()
-            if not v.empty:
-                item[col] = {"mean": float(v.mean()), "median": float(np.median(v)), "max": float(v.max())}
-        for col in extras:
-            if col.startswith("mem_") and g[col].notna().any():
-                item[col] = {"total": float(g[col].sum()), "meanPerStep": float(g[col].mean())}
+            item[col] = ({"mean": float(v.mean()), "median": float(np.median(v)), "max": float(v.max())}
+                         if not v.empty else None)
+        ends = {}
+        for p, x in g.dropna(subset=["memory_chars_after"]).groupby("pass_no"):
+            last = x.sort_values("task").iloc[-1]
+            ends[str(int(p))] = {"task": int(last["task"]), "entries": float(last["memory_entries_after"]),
+                                 "chars": float(last["memory_chars_after"])}
+        item["endOfPass"] = ends
+        for col in PUSH_COUNT_ITEMS:
+            item[col] = _counts(g, col)
         out["push"][cell] = item
     for cell in ("01", "11"):
         g = df[df["cell"] == cell]
         if g.empty:
             continue
-        out["search"][cell] = {
-            col: {"total": float(g[col].sum()), "meanPerStep": float(g[col].mean())}
-            for col in extras
-            if col.startswith("search_") and g[col].notna().any()
-        }
+        out["search"][cell] = {col: _counts(g, col) for col in SEARCH_COUNT_ITEMS}
     return out
 
 
