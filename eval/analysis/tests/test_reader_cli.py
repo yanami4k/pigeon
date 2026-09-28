@@ -177,6 +177,71 @@ class TestIdentity:
         assert common_settings([]) is None
 
 
+# 最简 agent 单独一个输出目录时身份头里的设置：跑批器按 run_mini.py --identity 记下的 litellm 参数
+MINI_KWARGS = {"drop_params": True, "parallel_tool_calls": True, "max_tokens": 16384, "temperature": 0,
+               "thinking": {"type": "disabled"}, "allowed_openai_params": ["thinking"]}
+
+
+def minimal_identity(**kwargs_override):
+    ident = identity(("minimal",), pigeon=False)
+    ident["core"]["agents"]["minimal"] = {"model": "deepseek-flash", "miniSweAgent": "2.4.6", "litellm": "1.102.1",
+                                          "modelKwargs": {**MINI_KWARGS, **kwargs_override}}
+    return ident
+
+
+def split_runs(tmp_path, minimal_ident):
+    """两格两遍一个目录、最简 agent 一遍另一个目录（校准与正式跑的分法）。"""
+    cells = write_run(tmp_path / "cells", [runner_row(c, s, p, 1, 2) for c in ("01", "11") for s in (1, 2)
+                                           for p in (1, 2)], ident=identity(("search-only", "search-push")))
+    mini = write_run(tmp_path / "minimal", [runner_row("M", s, 1, 1, 2) for s in (1, 2)], ident=minimal_ident)
+    return cells, mini
+
+
+class TestSplitDirs:
+    def test_cells_and_minimal_dirs_read_together(self, tmp_path):
+        cells, mini = split_runs(tmp_path, minimal_identity())
+        for order in ([cells, mini], [mini, cells]):
+            df, info = load_table(order)
+            assert sorted(df["cell"].unique()) == ["01", "11", "M"]
+            settings = common_settings(info["settings"])
+            assert settings["compaction"]["thresholdTokens"] == 983_616
+            assert settings["reviewBudget"] == {"maxTurns": 40, "wallClockMs": 900_000}
+        out = tmp_path / "out"
+        assert main(["calibration", "--results", str(cells), str(mini), "--out", str(out)]) == 0
+        assert json.loads((out / "result.json").read_text(encoding="utf-8"))["input"]["records"] == 10
+
+    @pytest.mark.parametrize("override", [{"temperature": 0.7}, {"max_tokens": 8192},
+                                          {"thinking": {"type": "enabled"}}])
+    def test_minimal_model_settings_must_match(self, tmp_path, override):
+        cells, mini = split_runs(tmp_path, minimal_identity(**override))
+        _, info = load_table([cells, mini])
+        with pytest.raises(ResultFieldError, match="model"):
+            common_settings(info["settings"])
+
+    def test_minimal_model_name_must_match(self, tmp_path):
+        ident = minimal_identity()
+        ident["core"]["agents"]["minimal"]["model"] = "deepseek-pro"
+        cells, mini = split_runs(tmp_path, ident)
+        with pytest.raises(ResultFieldError, match="model"):
+            main(["calibration", "--results", str(cells), str(mini), "--out", str(tmp_path / "out")])
+
+    def test_minimal_without_model_kwargs_cannot_be_checked(self, tmp_path):
+        ident = minimal_identity()
+        ident["core"]["agents"]["minimal"]["modelKwargs"] = None
+        cells, mini = split_runs(tmp_path, ident)
+        _, info = load_table([cells, mini])
+        with pytest.raises(ResultFieldError, match="model"):
+            common_settings(info["settings"])
+
+    def test_minimal_dir_still_checks_shared_step_settings(self, tmp_path):
+        ident = minimal_identity()
+        ident["core"]["budget"] = {"maxTurns": 150, "wallClockMs": 1_800_000}
+        cells, mini = split_runs(tmp_path, ident)
+        _, info = load_table([cells, mini])
+        with pytest.raises(ResultFieldError, match="stepBudget"):
+            common_settings(info["settings"])
+
+
 def worker_step1():
     s = SessionBuilder("w1").run_start()
     s.assistant("先看记忆。依据 [L1]，还有 [L2]；再次依据 [L1]。", calls=[
