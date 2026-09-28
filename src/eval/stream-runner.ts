@@ -1615,7 +1615,7 @@ export class ReferenceCases implements HumanReferenceCases {
   }
 
   private stepClasses(step: StreamStep, after: SideRuns, before: SideRuns): StepClasses {
-    const classes = classifyCases(after, before);
+    const classes = classifyCases(after, before, new Set(step.judgeTests));
     return {
       commit: step.commit,
       parent: step.parent,

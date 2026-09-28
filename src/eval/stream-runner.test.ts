@@ -1406,6 +1406,33 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
+  test("题面第二段与要做到的（274）：人在该步没改的测试文件在叠放运行里整文件收集失败，其中的用例不进要做到的、第二段也不列；同样没改、单条失败的照旧列出", async () => {
+    // other.test.sh 在起点上整文件收集失败（缺 a.txt 时以退出码 5 结束），z.test.sh 只是失败；人在第 1 步两者都没改
+    for (const format of ["test-files", "test-cases"] as const) {
+      const t = await toy(undefined, {
+        "src/z.test.sh": "grep -q alpha src/a.txt 2>/dev/null\n",
+        "src/other.test.sh": "grep -q alpha src/a.txt 2>/dev/null || exit 5\n",
+      });
+      try {
+        const agent = scriptedAgent(solve);
+        const summary = await runStreams(
+          options(t, { agents: { pigeon: agent }, promptFormat: format })
+        );
+        const prompt = agent.calls[0]?.prompt ?? "";
+        const second =
+          format === "test-files"
+            ? "Other test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.sh\n"
+            : "Other test cases in test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.sh::case\n";
+        assert.ok(prompt.endsWith(`\n\n${second}`), `${format}：${prompt}`);
+        assert.doesNotMatch(prompt, /other\.test\.sh/, `${format}：第二段不列整文件收集失败的文件`);
+        const [r1] = readStreamResults(summary.resultsFile);
+        assert.deepEqual(r1?.judging?.failToPass, { passed: 3, total: 3 });
+      } finally {
+        rmSync(t.base, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("人的代码没过检查门的步：清单按预检结果打标记（其余去掉），结果行照抄这一列，步照常跑", async () => {
     const t = await toy();
     try {

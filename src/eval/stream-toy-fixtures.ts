@@ -1,6 +1,7 @@
 // 测试夹具：合成仓库的出题配置与运行方式、本地"假容器"环境工厂。只供测试使用。
 // 约定："测试"是 src/ 下的 *.test.sh（用 grep 断言源文件内容，缺前置时打印与 node 同形的"Cannot find module"），
-// "格式化"是把连续空格压成一个，"类型错误"是源文件里的 TYPE-ERROR 标记；junit 报告由一段 sh 逐文件写出。
+// "格式化"是把连续空格压成一个，"类型错误"是源文件里的 TYPE-ERROR 标记；junit 报告由一段 sh 逐文件写出，
+// 测试以退出码 5 结束即记为该文件整文件收集失败（"文件::<collection>"，与 pytest 收集失败的伪用例同形）。
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -25,7 +26,9 @@ const JUNIT_SCRIPT = [
   "{",
   '  echo "<testsuites>"',
   "  for t; do",
-  '    if sh "$t" >&3 2>&1; then echo "<testcase name=\\"case\\" file=\\"$t\\"/>";',
+  '    sh "$t" >&3 2>&1; rc=$?',
+  '    if [ "$rc" = 0 ]; then echo "<testcase name=\\"case\\" file=\\"$t\\"/>";',
+  '    elif [ "$rc" = 5 ]; then echo "<testcase name=\\"&lt;collection&gt;\\" file=\\"$t\\"><failure message=\\"x\\"/></testcase>";',
   '    else echo "<testcase name=\\"case\\" file=\\"$t\\"><failure message=\\"x\\"/></testcase>"; fi',
   "  done",
   '  echo "</testsuites>"',

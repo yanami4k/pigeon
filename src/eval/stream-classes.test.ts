@@ -59,10 +59,36 @@ test("两类用例（214）：之前两遍都没过、之后两遍都过为要�
       "n.py::<collection>": "failed",
     }),
   ]);
-  assert.deepEqual(classifyCases(commit, parent), {
+  // t.py、n.py 都是人在该步新写或改过的测试文件
+  assert.deepEqual(classifyCases(commit, parent, new Set(["t.py", "n.py"])), {
     failToPass: ["n.py::uncollectedBefore", "t.py::new", "t.py::skippedBefore"],
     passToPass: ["t.py::old"],
     excludedFlaky: ["t.py::commitFlaky", "t.py::oneMissingBefore", "t.py::parentFlaky"],
+  });
+});
+
+test("两类用例（274）：人在该步没改的测试文件在 parent 侧整文件收集失败，其中的用例不进要做到的；人改过的文件收集失败照旧计入；人没改的文件里单条失败的照旧计入", () => {
+  const twice = (outcomes: Record<string, TestCaseResult["outcome"]>) =>
+    compareRuns([run(outcomes), run(outcomes)]);
+  // 之后：三个文件的用例都通过
+  const commit = twice({
+    "changed.py::a": "passed",
+    "unchanged.py::b": "passed",
+    "unchanged.py::c": "passed",
+    "other.py::d": "passed",
+    "other.py::e": "passed",
+  });
+  // 之前：changed.py 与 unchanged.py 整文件收集失败（例如叠上的 conftest 导入该步才有的模块）；other.py 正常收集、一条失败
+  const parent = twice({
+    "changed.py::<collection>": "failed",
+    "unchanged.py::<collection>": "failed",
+    "other.py::d": "failed",
+    "other.py::e": "passed",
+  });
+  assert.deepEqual(classifyCases(commit, parent, new Set(["changed.py"])), {
+    failToPass: ["changed.py::a", "other.py::d"],
+    passToPass: ["other.py::e"],
+    excludedFlaky: [],
   });
 });
 
