@@ -162,6 +162,13 @@ export const STALE_GIT_LOCKS = [
 // timeout 命令被 KILL 信号杀掉时的退出码
 const TIMEOUT_KILLED = 137;
 
+// run 把整条命令拼成一段 sh 脚本、作为一个参数下发；Linux 限制单个参数不超过 128 KiB（MAX_ARG_STRLEN），超了宿主启动
+// docker 即报 spawn E2BIG（续跑时带上千条 --deselect 的用例外壳就会超）。脚本超过这个长度（留出余量）即改经标准输入
+// 送入、在容器里 eval 同一段文本：命令的每个词原样到达，各自成为独立的参数，只受整条命令行的总上限约束
+const INLINE_SCRIPT_LIMIT = 64 * 1024;
+// 从标准输入读出整段脚本再执行（cat 取系统目录下的绝对路径，不按镜像的 PATH 解析）
+const SCRIPT_FROM_STDIN = 'eval "$(/bin/cat)"';
+
 // 脚本确实在跑批器起的 docker 作业容器里执行：容器带 PIGEON_STREAM_CONTAINER=1（docker run -e，exec 出来的进程都继承，
 // agent 改不了容器配置），且有 docker 建的 /.dockerenv。本机测试的假 docker 在本机执行脚本，两者都不满足——清临时目录、
 // 清进程这类只对作业容器安全的操作以它为前提
@@ -289,7 +296,10 @@ export class StreamWorkspace {
     options: { systemPath?: boolean } = {}
   ): Promise<CommandOutcome> {
     const started = Date.now();
-    const result = await this.shell.sh(timeoutWrapped(command, timeoutMs), {
+    const script = timeoutWrapped(command, timeoutMs);
+    const viaStdin = Buffer.byteLength(script) > INLINE_SCRIPT_LIMIT;
+    const result = await this.shell.sh(viaStdin ? SCRIPT_FROM_STDIN : script, {
+      ...(viaStdin ? { stdin: script } : {}),
       timeoutMs: timeoutMs + 60_000,
       ...(cwd !== undefined ? { cwd } : {}),
       ...(options.systemPath === true ? {} : { imagePath: true }),

@@ -721,3 +721,46 @@ test("跑批器的内部命令里 python 不加载用户目录下的 site（PYTH
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+// 续跑时的用例外壳：已完成的上千条用例逐条以 --deselect 排除；节点号里带方括号、空格与引号
+function manyDeselects(count: number): string[] {
+  return Array.from({ length: count }, (_, i) => [
+    "--deselect",
+    `tests/strands/agent/test_agent_${i % 40}.py::TestAgent::test_case_${i}[param-${i} it's "q"]`,
+  ]).flat();
+}
+
+test("命令超出单个参数的长度上限（上千条 --deselect）：经标准输入送入容器执行，每个参数原样到达，不再报 spawn E2BIG；超时照常生效", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-long-command-"));
+  try {
+    const root = join(base, "ws");
+    mkdirSync(root);
+    const docker = localDockerHost(root);
+    try {
+      const ws = new StreamWorkspace(
+        dockerStreamShell({ container: "box", root: docker.containerRoot, docker: docker.docker })
+      );
+      const args = manyDeselects(1500);
+      const command = ["sh", "-c", 'printf "%s\\n" "$@" > args.txt; echo "$#"', "sh", ...args];
+      // 前提：拼成的脚本确实超过 Linux 单个参数的上限（128 KiB）
+      assert.ok(Buffer.byteLength(timeoutWrapped(command, 60_000)) > 128 * 1024);
+      for (const systemPath of [false, true]) {
+        const r = await ws.run(command, 60_000, undefined, { systemPath });
+        assert.deepEqual(
+          [r.exitCode, r.timedOut, r.output.trim()],
+          [0, false, String(args.length)]
+        );
+        assert.deepEqual(
+          readFileSync(join(root, "args.txt"), "utf8").split("\n").slice(0, -1),
+          args
+        );
+      }
+      const slow = await ws.run(["sh", "-c", "sleep 20", "sh", ...args], 1_000);
+      assert.equal(slow.timedOut, true);
+    } finally {
+      docker.cleanup();
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
