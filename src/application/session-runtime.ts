@@ -19,7 +19,7 @@ import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { runRetryOnFail } from "./fork.ts";
-import { describeMcpStartup, type McpSession, startMcpSession } from "./mcp.ts";
+import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
 import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
@@ -109,9 +109,12 @@ export async function openSessionRuntime(
     request.resume === true
       ? restoreGrantSeed(request.governanceRoot, request.sessionId)
       : undefined;
+  // 决策 252：沙箱会话不启动 MCP 服务（它们在宿主上运行，会越出容器）
   const startMcp =
-    request.startMcp ??
-    ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot }));
+    request.workspaceHost !== undefined
+      ? () => noMcpSession()
+      : (request.startMcp ??
+        ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot })));
   const mcp = await startMcp({
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,

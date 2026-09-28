@@ -67,6 +67,11 @@ export function describeMcpStartup(session: Pick<McpSession, "problems" | "summa
   ];
 }
 
+// 不启动任何 server 的空会话（日常沙箱，决策 252：MCP 服务在宿主上运行，会越出容器）
+export function noMcpSession(): Promise<McpSession> {
+  return startMcpSession({ governanceRoot: ".", workspaceRoot: ".", config: { servers: [] } });
+}
+
 export async function startMcpSession(options: McpSessionOptions): Promise<McpSession> {
   const config = options.config ?? loadMcpConfig(options.governanceRoot);
   const connections = config.servers.map(

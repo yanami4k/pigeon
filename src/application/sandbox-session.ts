@@ -1,7 +1,8 @@
 // 日常沙箱的会话接线（决策 237、245–248）：三个入口（终端界面、命令行对话与续跑、pigeon run）开沙箱、接执行端、
 // 收尾交回都经这里；容器生命周期本身在 execution/sandbox.ts。Actor（cli / tui）不直连执行层，所需的符号从这里取。
 // 沙箱里暂不支持分叉（/fork、失败自动分叉重试）、派 worker 与终端界面的 /resume 换绑：它们作用在宿主的 git 工作区或
-// 工作树上，会越出容器。会话验证命令经执行端在容器里运行。
+// 工作树上，会越出容器。会话验证命令经执行端在容器里运行。MCP 服务不启动（决策 252）：它们在宿主上运行，开沙箱时
+// 列出已配置却不可用的服务名。
 import {
   cleanResidualSandboxes,
   exportNotice,
@@ -13,9 +14,11 @@ import {
   type Sandbox,
   type SandboxExport,
 } from "../execution/sandbox.ts";
+import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { SessionId } from "../state/ids.ts";
 import { type HeadlessRetryResult, type HeadlessRunOptions, runHeadless } from "./headless.ts";
 import type { LaunchFlags } from "./launch-flags.ts";
+import { noMcpSession } from "./mcp.ts";
 
 export { exportNotice, SANDBOX_CLEAN_COMMAND, type Sandbox, type SandboxExport };
 
@@ -49,6 +52,11 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
   if ((input.flags.retryOnFail ?? 0) > 0) {
     throw new Error(SANDBOX_FORK_UNSUPPORTED);
   }
+  // 决策 252：沙箱会话不启动 MCP 服务；配置了的列出来说明不可用，没配不提示
+  const mcpServers = loadMcpConfig(input.governanceRoot).servers.map((server) => server.name);
+  if (mcpServers.length > 0) {
+    input.log(mcpUnavailableNotice(mcpServers));
+  }
   const sandbox = await openSandbox({
     repoRoot: input.governanceRoot,
     sessionId: input.sessionId,
@@ -59,6 +67,13 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
   });
   input.log(sandboxReadyNotice(sandbox));
   return sandbox;
+}
+
+export function mcpUnavailableNotice(servers: readonly string[]): string {
+  return (
+    `沙箱里不启动 MCP 服务：已配置的 ${servers.join("、")} 在本会话不可用` +
+    "（MCP 服务在宿主上运行，会越出容器）"
+  );
 }
 
 export function sandboxReadyNotice(sandbox: Sandbox): string {
@@ -111,7 +126,8 @@ export async function runHeadlessInSandbox(
   }
   let result: HeadlessRetryResult;
   try {
-    result = await runHeadless({ ...options, workspaceHost: sandbox.host });
+    // 决策 252：不启动 MCP 服务
+    result = await runHeadless({ ...options, workspaceHost: sandbox.host, startMcp: noMcpSession });
   } catch (error) {
     // 装配前就被拒（参数不相容等）：没有改动可交回，直接删容器
     await sandbox.discard().catch(() => {});
