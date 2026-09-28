@@ -406,3 +406,79 @@
 2. 基线触顶的挂法。选项 A：挂在该效应的结论后，测出与未测出都挂（现实现，照计划第 4 节原文）。选项 B：只挂在"未测出"句后（a1 的做法，与计划开头"未测出改善（基线触顶）"的写法一致）。
 3. 标出记忆编号的计法。选项 A：回复正文里所有 [L编号]（现实现）。选项 B：只计紧跟"依据"的 [L编号]。
 4. 难度关的用例名复测高于 80%：计划未规定。现输出"计划未规定，交项目负责人裁决"。选项 A：维持。选项 B：按 197 换仓。
+
+## 十一、第十节四项的处理（2026-09-28 追加）
+
+第十节四项已裁决（决策 272、273）；前文与之不一致处以本节为准。提交 123da97。
+
+| # | 裁决 | 处理 |
+|---|---|---|
+| 1 | 5.4 看校准的全部步，含最简 agent | 维持原实现（calibration.py step_budget_rule） |
+| 2 | "（基线触顶）"只挂在该效应"未测出改善"的结论后，测出显著变好或变差时不挂（272） | wording.py conclusion_sentences 把触顶注明移回"未测出"分支内；第二节"第 4 节 基线触顶"一行与第五节第 4 条中"挂在该效应的结论后、测出为正为负同样挂"的说法作废 |
+| 3 | 记忆编号并报两个数：回复里出现 [L编号] 的次数，与其中写成"依据 [L编号]"的次数，各附涉及的条目数（273） | sessions.py 新增 mem_basis_citations、mem_basis_cited_entries（"依据"与编号之间允许一个空格；"依据 [L3]、[L5]"中只有 [L3] 算依据写法）；secondary.py 记忆使用清单加入这两项；报告表格加两行 |
+| 4 | 用例名复测高于 80% 交项目负责人 | 维持原实现（calibration.py difficulty_gate） |
+
+### 用例
+
+- 改写：触顶用例改为测出为正、为负都不挂，未测出按效应各自挂。
+- 新增断言：第 1 步回复正文"依据 [L1]，还有 [L2]；再次依据 [L1]"中依据写法 2 次、涉及 1 条（全部编号 3 次、2 条不变）；第 2 步两项为 0；记忆使用清单含这两项。
+
+### 变异反向验证（123da97）
+
+本机空闲内存约 2.3 GB。第一次在 123da97 上按全部用例跑变异时，进程在第 30 处（S4）植入期间因系统内存不足被停，工作区的 sessions.py 停在变异状态，已按提交版本还原并确认工作区干净。之后改为：每处变异只跑与被改文件相关的测试文件（calibration.py、constants.py 对 test_calibration.py 与 test_reader_cli.py；primary.py 对 test_primary.py；wording.py 对 test_wording.py；sensitivity.py 对 test_sensitivity.py；secondary.py 对 test_secondary.py 与 test_reader_cli.py；sessions.py、reader.py 对 test_reader_cli.py），跳过模拟检验，每处开始前等空闲内存不低于 2 GB。变红的用例因此只列相关文件里的，数目可能少于第七节。
+
+原 41 处去掉 C3（它植入的"只挂在未测出句后"现在就是实现本身），新增 5 处，共 45 处。C5 第一次的写法删掉整行后 if 语句体为空，导入即报语法错误，属于无效变异；改为把追加的文字换成空串后重跑变红。45 处全部变红，写回后各文件哈希与植入前一致，结束时工作区干净。
+
+| 变异 | 位置 | 结果 | 变红的用例 |
+|---|---|---|---|
+| G1 难度关用做成率而非部分得分 | calibration.py | 10 败 | TestDifficultyGate::test_endpoints_by_pooled_mean；TestDifficultyGate::test_f_empty_steps_not_counted；TestDifficultyGate::test_mean_of_partial_scores_not_solved_rate；TestDifficultyGate::test_only_01_cell_two_passes；TestDifficultyGate::test_rerun_gap_noted_but_pooled；TestDifficultyGate::test_retest_with_test_cases；TestDifficultyGate::test_three_exits_and_endpoints[0.3-stay]；TestDifficultyGate::test_three_exits_and_endpoints[0.55-stay]；TestDifficultyGate::test_three_exits_and_endpoints[0.8-stay]；TestDifficultyGate::test_three_exits_and_endpoints[0.85-switch-repo] |
+| G2 难度关 80% 端点算作越界 | calibration.py | 2 败 | TestDifficultyGate::test_endpoints_by_pooled_mean；TestDifficultyGate::test_three_exits_and_endpoints[0.8-stay] |
+| G3 难度关 30% 端点算作越界 | calibration.py | 2 败 | TestDifficultyGate::test_endpoints_by_pooled_mean；TestDifficultyGate::test_three_exits_and_endpoints[0.3-stay] |
+| G4 低于 30% 的出口改为留下 | calibration.py | 4 败 | TestDifficultyGate::test_endpoints_by_pooled_mean；TestDifficultyGate::test_mean_of_partial_scores_not_solved_rate；TestDifficultyGate::test_retest_with_test_cases；TestDifficultyGate::test_three_exits_and_endpoints[0.25-retest-with-test-cases] |
+| G5 高于 80% 的出口改为留下 | calibration.py | 2 败 | TestDifficultyGate::test_endpoints_by_pooled_mean；TestDifficultyGate::test_three_exits_and_endpoints[0.85-switch-repo] |
+| G6 要做到的为零的步计入难度关 | calibration.py | 1 败 | TestDifficultyGate::test_f_empty_steps_not_counted |
+| G7 难度关不限 01 格 | calibration.py | 3 败 | TestDifficultyGate::test_no_data；TestDifficultyGate::test_only_01_cell_two_passes；test_cli_calibration |
+| G8 复测结果不按用例名题面分出口 | calibration.py | 2 败 | TestDifficultyGate::test_retest_with_test_cases；test_cli_calibration_retest_prompt_format |
+| C1 推送效应的触顶对照改用 00、10 | primary.py | 3 败 | TestAnalyze::test_ceiling_definition；TestAnalyze::test_relative_lift_over_matching_baseline；TestAnalyze::test_search_ceiling_uses_no_search_cells |
+| C2 检索效应的触顶对照改用 00、01 | primary.py | 2 败 | TestAnalyze::test_relative_lift_over_matching_baseline；TestAnalyze::test_search_ceiling_uses_no_search_cells |
+| K1 没撞上限时按临时值的一半下调 | calibration.py | 5 败 | TestReviewCap::test_flag_is_the_only_criterion；TestReviewCap::test_no_hit_keeps_temporary；TestStepBudget::test_flag_is_the_only_criterion；TestStepBudget::test_no_hit_keeps_temporary；test_cli_calibration |
+| K2 每步撞上限另按轮数达到临时值判 | calibration.py | 2 败 | TestStepBudget::test_flag_is_the_only_criterion；TestStepBudget::test_no_flags |
+| K3 复盘撞上限另按轮数达到临时值判 | calibration.py | 3 败 | TestReviewCap::test_flag_is_the_only_criterion；TestReviewCap::test_no_reviews；test_cli_calibration |
+| K4 复盘临时墙钟仍为 10 分钟 | constants.py | 5 败 | TestReviewCap::test_flag_is_the_only_criterion；TestReviewCap::test_hit_doubles；TestReviewCap::test_no_hit_keeps_temporary；test_cli_calibration；test_cli_calibration_hits_double_caps |
+| K5 复盘上限读每步的撞上限标记 | calibration.py | 3 败 | TestReviewCap::test_flag_is_the_only_criterion；TestReviewCap::test_hit_doubles；TestReviewCap::test_no_hit_keeps_temporary |
+| K6 每步上限只看 Pigeon 两格 | calibration.py | 1 败 | TestStepBudget::test_any_calibration_step_counts |
+| R1 推送的相对提升以 00 一格为底 | primary.py | 1 败 | TestAnalyze::test_relative_lift_over_matching_baseline |
+| R2 检索的相对提升以 00 一格为底 | primary.py | 1 败 | TestAnalyze::test_relative_lift_over_matching_baseline |
+| V1 校准的 v 只用 11 格 | sensitivity.py | 1 败 | TestVCells::test_calibration_uses_both_01_and_11 |
+| V2 第 3 遍推算的 v 只用 01、11 两格 | sensitivity.py | 1 败 | TestVCells::test_third_pass_uses_all_four_cells |
+| V3 v 不取一半 | sensitivity.py | 4 败 | TestRerunVariance::test_simple_average_of_cell_halves；TestThirdPassDecision::test_tau2_subtracts_half_v；TestVCells::test_calibration_uses_both_01_and_11；TestVCells::test_third_pass_uses_all_four_cells |
+| V4 v 取最大格而非简单平均 | sensitivity.py | 3 败 | TestRerunVariance::test_simple_average_of_cell_halves；TestVCells::test_calibration_uses_both_01_and_11；TestVCells::test_third_pass_uses_all_four_cells |
+| U1 记忆使用加回复盘反面教训条数 | secondary.py | 4 败 | test_cli_formal_baseline_unavailable_from_summary；test_cli_formal_deterministic；test_cli_formal_single_pass_no_third_pass；test_memory_usage_items_follow_plan |
+| S1 复盘会话连同干活历史副本一起数 | sessions.py | 1 败 | TestSessions::test_counts_step1 |
+| S2 写入次数把被拒的也算上 | sessions.py | 1 败 | TestSessions::test_counts_step1 |
+| S3 某步的会话不减上一步的清单 | sessions.py | 2 败 | TestSessions::test_counts_step1；TestSessions::test_step2_counts_only_new_sessions |
+| S4 检索计数把复盘会话也算上 | sessions.py | 1 败 | TestSessions::test_counts_step1 |
+| S5 写满被拒按任何拒绝计 | sessions.py | 1 败 | TestSessions::test_counts_step1 |
+| F1 步末字符数读成字节数 | reader.py | 1 败 | TestReader::test_mapping |
+| F2 干活花费读成复盘花费 | reader.py | 1 败 | TestReader::test_mapping |
+| F3 复盘撞上限读成每步撞上限 | reader.py | 1 败 | TestReader::test_nulls_read_as_empty |
+| F4 步末条数读成开工时条数 | reader.py | 1 败 | TestReader::test_mapping |
+| F5 复盘 token 读成复盘轮数 | reader.py | 1 败 | TestReader::test_mapping |
+| F6 不查顶层缺字段 | reader.py | 10 败 | TestReader::test_missing_top_field_raises[baselineUnavailable]；TestReader::test_missing_top_field_raises[gateway]；TestReader::test_missing_top_field_raises[hitReviewBudget]；TestReader::test_missing_top_field_raises[hitStepBudget]；TestReader::test_missing_top_field_raises[kind]；TestReader::test_missing_top_field_raises[memoryAtEnd]；TestReader::test_missing_top_field_raises[review]；TestReader::test_missing_top_field_raises[runIdentity]；TestReader::test_missing_top_field_raises[verifyToolFaults]；test_cli_rejects_missing_field |
+| F7 不查子字段 | reader.py | 9 败 | TestReader::test_missing_judging_subfield_raises；TestReader::test_missing_nested_field_raises[gateway-costCny]；TestReader::test_missing_nested_field_raises[gateway-peakInputTokens]；TestReader::test_missing_nested_field_raises[gateway-reviewCostCny]；TestReader::test_missing_nested_field_raises[memoryAtEnd-entryChars]；TestReader::test_missing_nested_field_raises[memoryAtStart-entries]；TestReader::test_missing_nested_field_raises[review-preCompaction]；TestReader::test_missing_nested_field_raises[review-tokens]；TestReader::test_missing_nested_field_raises[usage-cacheRead] |
+| F8 身份头不查 Pigeon 设置 | reader.py | 4 败 | TestIdentity::test_missing_pigeon_setting[compaction]；TestIdentity::test_missing_pigeon_setting[memoryLimitChars]；TestIdentity::test_missing_pigeon_setting[reviewBudget]；TestIdentity::test_missing_pigeon_setting[reviewTemplate] |
+| F9 不核对结果行的身份摘要 | reader.py | 1 败 | TestIdentity::test_row_digest_must_match |
+| F10 验证工具故障读错字段 | reader.py | 1 败 | TestReader::test_mapping |
+| P1 ¥520 端点算作越档 | calibration.py | 1 败 | TestCost::test_decision_boundaries[520.0-go] |
+| P2 超出 ¥650 不列候选 | calibration.py | 1 败 | TestCost::test_owner_decides_lists_candidates |
+| C4 测出时也挂基线触顶 | wording.py | 1 败 | test_ceiling_appended_per_effect |
+| C5 未测出时不挂基线触顶 | wording.py | 1 败 | test_ceiling_appended_per_effect |
+| B1 依据计数退化为全部编号 | sessions.py | 1 败 | TestSessions::test_counts_step1 |
+| B2 依据涉及的条目数不去重 | sessions.py | 1 败 | TestSessions::test_counts_step1 |
+| B3 记忆使用清单漏掉依据两项 | secondary.py | 1 败 | test_memory_usage_items_follow_plan |
+
+新增 5 处：C4 测出时也挂基线触顶、C5 未测出时不挂基线触顶（对应 272）；B1 依据计数退化为全部编号、B2 依据涉及的条目数不去重、B3 记忆使用清单漏掉依据两项（对应 273）。
+
+### 全量用例（含模拟检验）
+
+变异全部结束、哈希核对之后，在同一台机器上跑一次全量 pytest：212 个用例全部通过，188 秒，没有被停。模拟检验结果与第八节逐项相同：零效果误报率 0.047（Holm 下任一显著 0.053），有界离散得分 0.043，检出率 0.780（5 个点）与 0.335（3 个点），区间覆盖率 0.945。
