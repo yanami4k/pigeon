@@ -30,6 +30,8 @@ PUSH_COUNT_ITEMS = (
     "mem_review_rejected_full",
     "mem_citations",
     "mem_cited_entries",
+    "mem_basis_citations",
+    "mem_basis_cited_entries",
     "mem_ref_reads",
     "review_closing",
     "review_pre_compaction",

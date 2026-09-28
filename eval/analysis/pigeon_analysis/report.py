@@ -283,6 +283,8 @@ MEMORY_LABELS = {
     "mem_review_rejected_full": "复盘写满被拒",
     "mem_citations": "回复里标出记忆编号的次数",
     "mem_cited_entries": "标出的条目数（每步去重）",
+    "mem_basis_citations": "其中写成“依据 [L编号]”的次数",
+    "mem_basis_cited_entries": "“依据”涉及的条目数（每步去重）",
     "mem_ref_reads": "读取记忆所引文件的次数（旁证）",
     "review_closing": "收尾复盘次数",
     "review_pre_compaction": "压缩前复盘次数",
@@ -332,7 +334,7 @@ def memory_usage_lines(mu: dict[str, Any], info: dict[str, Any]) -> list[str]:
         lines.append("|---" * (len(search_cells) + 1) + "|")
         for col in mu["items"]["search"]:
             lines.append(f"| {MEMORY_LABELS[col]} | " + " | ".join(_count_cell(mu["search"][c][col]) for c in search_cells) + " |")
-    lines += ["", "- 写入次数只数写成功的；标出记忆编号按干活的 agent 回复正文里的 [L编号] 计；"
+    lines += ["", "- 写入次数只数写成功的；标出记忆编号按干活的 agent 回复正文里的 [L编号] 计，另报其中写成“依据 [L编号]”的；"
               "读取所引文件按 read_file 的路径与开工时记忆各条目的引用文件比对；检索计数只数干活的会话。"]
     return lines
 

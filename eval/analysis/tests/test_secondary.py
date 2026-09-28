@@ -150,7 +150,7 @@ PUSH_ITEMS = [
     "mem_worker_add", "mem_worker_replace", "mem_worker_remove",
     "mem_review_add", "mem_review_replace", "mem_review_remove",
     "mem_worker_rejected_full", "mem_review_rejected_full",
-    "mem_citations", "mem_cited_entries", "mem_ref_reads",
+    "mem_citations", "mem_cited_entries", "mem_basis_citations", "mem_basis_cited_entries", "mem_ref_reads",
     "review_closing", "review_pre_compaction", "review_cost",
 ]
 

@@ -241,6 +241,8 @@ class TestSessions:
         assert (r.mem_review_add, r.mem_review_replace, r.mem_review_remove, r.mem_review_rejected_full) == (1, 0, 1, 1)
         # 回复正文里的 [L1]、[L2]、[L1]：3 次、2 条；思考与复盘副本里的不算
         assert (r.mem_citations, r.mem_cited_entries) == (3, 2)
+        # 其中写成"依据 [L编号]"的：两处都是 [L1]，涉及 1 条；"还有 [L2]"不算
+        assert (r.mem_basis_citations, r.mem_basis_cited_entries) == (2, 1)
         # 读 /testbed/src/a.py 与 ./tests/test_b.py 命中记忆所引文件，src/other.py 不算
         assert r.mem_ref_reads == 2
         # 检索只数干活会话：search_sessions 2 次、read_session_entry 1 次，命中会话 s1、s2、s3
@@ -254,7 +256,7 @@ class TestSessions:
         r = df[(df.cell == "11") & (df.task == 2)].iloc[0]
         assert (r.mem_worker_add, r.mem_worker_remove) == (0, 1)
         assert (r.mem_review_add, r.mem_review_replace) == (0, 1)
-        assert r.mem_citations == 0 and r.search_sessions_hit == 0
+        assert r.mem_citations == 0 and r.mem_basis_citations == 0 and r.search_sessions_hit == 0
 
     def test_non_push_cell_has_no_memory_counts(self, tmp_path):
         df, _ = load_table([self.build(tmp_path)])

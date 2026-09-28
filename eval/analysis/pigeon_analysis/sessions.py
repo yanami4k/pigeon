@@ -26,8 +26,9 @@ SEARCH_SESSIONS = "search_sessions"
 READ_SESSION_ENTRY = "read_session_entry"
 MEMORY_ACTIONS = ("add", "replace", "remove")
 
-# 干活的 agent 在回复里标出的记忆编号（推送提示要求"依据 [L3]"这样的写法）
+# 干活的 agent 在回复里标出的记忆编号（273）：回复里出现 [L编号] 的次数，与其中写成"依据 [L编号]"的次数，各附涉及的条目数
 CITATION = re.compile(r"\[L([1-9]\d*)\]")
+BASIS_CITATION = re.compile(r"依据 ?\[L([1-9]\d*)\]")
 REFS_LINE = re.compile(r"^ {2}引用：(.+)$")
 REFS_SEPARATOR = ", "
 USER_REF_PREFIX = "用户要求"
@@ -161,6 +162,9 @@ def step_metrics(sessions: list[dict[str, Any]], push: bool, search: bool, refs:
         cited = [int(m) for s in worker for t in s["texts"] for m in CITATION.findall(t)]
         out["mem_citations"] = float(len(cited))
         out["mem_cited_entries"] = float(len(set(cited)))
+        basis = [int(m) for s in worker for t in s["texts"] for m in BASIS_CITATION.findall(t)]
+        out["mem_basis_citations"] = float(len(basis))
+        out["mem_basis_cited_entries"] = float(len(set(basis)))
         out["mem_ref_reads"] = float(sum(
             1 for s in worker for c in s["calls"]
             if c["name"] == READ_FILE and isinstance(c["arguments"].get("path"), str)
