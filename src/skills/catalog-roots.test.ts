@@ -51,19 +51,19 @@ test("Skill 显式根：根自身有 SKILL.md 即一个 Skill（展示路径为 
   const home = mkdtempSync(join(tmpdir(), "pigeon-catalog-roots-home-"));
   try {
     writeSkill(join(workspace, ".pigeon", "skills", "active"), "active");
-    const candidate = join(workspace, "eval", "skills", "pitfalls", "candidate");
+    const candidate = join(workspace, "skills", "pitfalls", "candidate");
     writeSkill(candidate, "pitfalls");
     const catalog = loadSkillCatalog({
       workspaceRoot: workspace,
       homeDir: home,
       roots: [
-        { path: candidate, label: "eval/skills/pitfalls/candidate" },
+        { path: candidate, label: "skills/pitfalls/candidate" },
         { path: join(workspace, "missing"), label: "missing" },
       ],
     });
     assert.deepEqual(
       catalog.skills.map((skill) => [skill.name, skill.displayPath]),
-      [["pitfalls", "eval/skills/pitfalls/candidate"]]
+      [["pitfalls", "skills/pitfalls/candidate"]]
     );
     assert.deepEqual(
       catalog.manifest[0]?.files.map((file) => file.path),

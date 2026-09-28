@@ -20,7 +20,6 @@ import path from "node:path";
 import { assertMemoryLimit } from "../memory/pushed.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
 import { type ReviewVerdictInput, reviewVerdictText } from "../memory/review-text.ts";
-import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
@@ -148,7 +147,8 @@ export interface HeadlessRunOptions {
   // M7（决策 079）：失败自动分叉重试次数——冻结进注入快照并随 Run 开始条目 落盘（重试本身由 headless.ts 叠加）
   retryOnFail?: number;
   // 决策 142 / 143：回炉轮数，缺省 0 即关闭；开启时冻结进注入快照并随 Run 开始条目 落盘。
-  // 须配验证命令、不得与失败自动分叉重试同开、须能记下这一步的起点：本地 git 工作区按快照，容器工作区经执行端
+  // 须配验证命令、不得与失败自动分叉重试同开；容器工作区须由执行端记下这一步的起点。
+  // 本地工作区不要求是 git 工作区（决策 281）：是 git 工作区时照旧在开工时打快照，不是时照常回炉、只是不打快照
   repairRounds?: number;
   // 验证前还原的受保护文件（如人写的测试与测试辅助文件）：给了即在每次回炉验证（首轮与各轮）之前，
   // 经执行端把 agent 改动或删除过的受保护文件恢复成这一步开工时的版本，再验证。须执行端能按起点还原（容器）
@@ -223,18 +223,13 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
         "失败重试从任务起点另开分支重做，两者对同一次失败各有一套处理，叠加后这一步的成败无法判定"
     );
   }
-  // 这一步的起点：本地 git 工作区由快照的改前基线给出；执行端另一侧的工作区（容器）要执行端能记下这一步起点（154②）。
-  // 容器一侧供验证前还原受保护的文件。本地一条：结构化记忆删除后已无读者依赖本地回炉的快照（见 2026-09-27 删除与清理审计第七节），是否放宽另行裁决
+  // 这一步的起点：执行端另一侧的工作区（容器）要执行端能记下这一步起点（154②），供验证前还原受保护的文件。
+  // 本地工作区不作要求（决策 281）：回炉循环本身不读快照，快照只为 /fork 回到回炉中间某一轮取准确基线而打，
+  // 而 /fork 本就只在 git 工作区可用——是 git 工作区时照旧在开工时打快照，不是时照常回炉、不打快照、不报错
   const host = options.workspaceHost;
-  if (host !== undefined) {
-    if (host.markStepStart === undefined) {
-      throw new Error(
-        "开启回炉却无法记下这一步的起点：这个执行端不提供记下起点的能力，验证前无从还原受保护的文件"
-      );
-    }
-  } else if (!isGitWorkspace(options.workspaceRoot)) {
+  if (host !== undefined && host.markStepStart === undefined) {
     throw new Error(
-      "开启回炉却没有可用快照：回炉要按快照记下这一步的起点与改动，目前只支持本地 git 工作区"
+      "开启回炉却无法记下这一步的起点：这个执行端不提供记下起点的能力，验证前无从还原受保护的文件"
     );
   }
   if (options.protectedFiles !== undefined && host?.restoreProtectedFromStepStart === undefined) {
@@ -380,7 +375,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       bundle.adapter.subscribeCompaction(compactionWarner(options.warn));
       toolTiers = bundle.toolTiers;
       // M7（决策 078）：会分叉的会话（开了失败自动重试的尝试、分支会话）在 git 工作区里打快照；
-      // 决策 142：开启回炉时强制打快照——首个快照的改前基线就是这一步的起点
+      // 决策 142 / 281：开启回炉时在 git 工作区照旧打快照——首个快照的改前基线就是这一步的起点，
+      // /fork 回到回炉中间某一轮据此取准确基线；非 git 工作区不挂快照（attachCheckpoints 返回 undefined）、照常回炉。
       // 执行端另一侧的工作区不在宿主上打快照：回炉的起点由执行端记下（见下）
       if (
         options.workspaceHost === undefined &&
