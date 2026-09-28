@@ -37,6 +37,9 @@ export const STREAM_WORK_DIRECTIVE =
 // Pigeon 条件的采样温度（110，原外部基准的口径，决策 205 随旧跑批退役搬到提交流）：缺省固定为 0；要改必须由调用方显式给出
 export const STREAM_DEFAULT_TEMPERATURE = 0;
 
+// 决策 265：跑批器各条件里主 agent 派 worker 一律关掉（所测的 Pigeon 不带这项能力）
+export const STREAM_SPAWN_WORKERS = false;
+
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;
 }
@@ -166,6 +169,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           taskDirective: STREAM_WORK_DIRECTIVE,
           // 记忆条件（193）：能否检索历史会话 × 有无推送记忆（推送格带记忆工具、压缩前与收尾复盘）
           sessionSearch: input.condition.sessionSearch,
+          // 决策 265：各条件都不带主 agent 派 worker 的能力（明确关掉，不依赖缺省；身份头记这一项）
+          spawnWorkers: STREAM_SPAWN_WORKERS,
           ...(pushed
             ? {
                 pushedMemory: true,

@@ -87,6 +87,12 @@ import {
   type StoreLineage,
   storeFaultWarner,
 } from "./session-store.ts";
+import {
+  createSpawnWorkerTool,
+  SPAWN_WORKER_TOOL,
+  type SpawnWorkerSlot,
+  spawnWorkerRegistration,
+} from "./spawn-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 
 export interface RuntimeDeps {
@@ -172,6 +178,10 @@ export interface RuntimeDeps {
   // 决策 191、192：本运行面是一次复盘——系统提示取来源会话冻结的原文（工具定义照常装配，与来源相同），执行时只放行
   // read_file 与 update_memory，Run 开始条目记复盘种类与模板版本。只由复盘装配时给
   reviewSession?: ReviewSessionConfig;
+  // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
+  // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
+  // 注入了执行端（沙箱）时一律不注册
+  spawnWorker?: SpawnWorkerSlot;
 }
 
 // 复盘运行面的设定：种类、来源会话冻结的系统提示原文与来源会话号（refs 里的 user 补来源会话的编号——用户的话说在来源会话里）
@@ -348,6 +358,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   if (learned !== undefined) {
     registry.register(updateMemoryRegistration(governanceRoot));
   }
+  // 决策 264–267：派 worker 的工具——只给主会话；worker 自己（委派策略在场）与沙箱（执行端在场）不注册
+  const spawnSlot =
+    deps.toolPolicy === undefined && deps.workspaceHost === undefined
+      ? deps.spawnWorker
+      : undefined;
+  if (spawnSlot !== undefined) {
+    registry.register(spawnWorkerRegistration());
+  }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
   const residentMemory = loadResidentMemory({
@@ -407,6 +425,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
+    ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -571,6 +590,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         : []),
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
+      ...(spawnSlot !== undefined ? [createSpawnWorkerTool(spawnSlot)] : []),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）
     governance: gateReviewTools(
@@ -594,6 +614,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 Run 开始条目；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
+    // 决策 264：注册了派 worker 工具时，同一次回复里的多个派出并行执行
+    ...(spawnSlot !== undefined ? { parallelTools: true } : {}),
   });
   const toolTiers = new Map(
     registry.list().map((registration) => [registration.name, registration.tier])

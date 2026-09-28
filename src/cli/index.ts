@@ -1,4 +1,6 @@
 // Pigeon M3 极简 CLI 入口（决策 3：REPL 内联审批，单进程最小闭环，不依赖 M2 TUI）。
+// 决策 267：pigeon 不带子命令即启动终端界面（以子进程运行 tui 入口，Actor 之间不互相 import）；命令行对话留作后备，
+// 由 --line 进入，只保证不坏、不再加新功能（不注册 spawn_worker）。
 // M2 S1（决策 025）：装配根（buildRuntime）在 application/runtime.ts，审批 handler 由本入口
 // 注入 REPL 问答版；resume 对账流程在 application/resume.ts，本文件只做参数解析与 IO 接线。
 // 用法：node src/cli/index.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
@@ -7,6 +9,7 @@
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
 
+import { spawn } from "node:child_process";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runForkCommand } from "../application/fork-command.ts";
@@ -19,6 +22,7 @@ import {
   resolveRepairRounds,
   resolveStreamFnSpec,
   resolveVerifyConfig,
+  spawnWorkerLimitsOf,
   VALUELESS_FLAGS,
 } from "../application/launch-flags.ts";
 import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
@@ -337,7 +341,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
@@ -382,6 +386,7 @@ async function runMain(argv: string[]): Promise<void> {
     repair: true,
     pushedMemory: true,
     sandbox: true,
+    spawnWorkers: true,
   });
   if (task === undefined) {
     const chunks: Buffer[] = [];
@@ -419,6 +424,9 @@ async function runMain(argv: string[]): Promise<void> {
     // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守，收尾复盘在最后一次验证之后
     pushedMemory: flags.pushedMemory,
     ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
+    // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
+    spawnWorkers: flags.spawnWorkers,
+    spawnWorkerLimits: spawnWorkerLimitsOf(flags),
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
@@ -862,6 +870,19 @@ async function main(argv: string[]): Promise<void> {
   for (const warning of probeUpstreamVersions().warnings) {
     process.stderr.write(`${warning}\n`);
   }
+  const route = routeTopLevel(argv);
+  if (route.kind === "help") {
+    writeOut(`${TOP_LEVEL_HELP}\n`);
+    return;
+  }
+  if (route.kind === "tui") {
+    await launchTui(route.argv);
+    return;
+  }
+  if (route.kind === "line") {
+    await lineMain(route.argv);
+    return;
+  }
   if (argv[0] === "eval" && argv[1] === "stream") {
     await evalStreamMain(argv.slice(2));
     return;
@@ -903,7 +924,59 @@ async function main(argv: string[]): Promise<void> {
     writeOut(await runSandboxCommand(argv.slice(1)));
     return;
   }
-  const startUsage = `支持 ${SESSION_FLAGS_HINT}`;
+  throw new Error(`未知子命令：${argv[0]}（${TOP_LEVEL_HELP}）`);
+}
+
+// 顶层子命令：不带子命令即终端界面，--line 为命令行对话
+const SUBCOMMANDS = new Set(["eval", "run", "trace", "replay", "session", "resume", "sandbox"]);
+
+export type TopLevelRoute =
+  | { kind: "help" }
+  | { kind: "tui"; argv: string[] }
+  | { kind: "line"; argv: string[] }
+  | { kind: "subcommand" };
+
+// 决策 267：pigeon 不带子命令即启动终端界面；带 --line 进命令行对话（--line 本身不交给参数解析）
+export function routeTopLevel(argv: readonly string[]): TopLevelRoute {
+  const first = argv[0];
+  if (first === "--help" || first === "-h" || first === "help") {
+    return { kind: "help" };
+  }
+  if (first !== undefined && SUBCOMMANDS.has(first)) {
+    return { kind: "subcommand" };
+  }
+  if (argv.includes("--line")) {
+    return { kind: "line", argv: argv.filter((arg) => arg !== "--line") };
+  }
+  return { kind: "tui", argv: [...argv] };
+}
+
+// 终端界面入口（tui/main.ts）：与本文件同在 src 下
+export const TUI_ENTRY = fileURLToPath(new URL("../tui/main.ts", import.meta.url));
+
+// 以子进程启动终端界面：继承终端，退出码原样带回。Ctrl+C 由界面自己处理（双击退出），本进程在其运行期间不响应
+async function launchTui(argv: readonly string[]): Promise<void> {
+  const ignore = (): void => {};
+  process.on("SIGINT", ignore);
+  try {
+    const code = await new Promise<number>((resolve, reject) => {
+      const child = spawn(process.execPath, [...process.execArgv, TUI_ENTRY, ...argv], {
+        stdio: "inherit",
+      });
+      child.on("error", reject);
+      child.on("exit", (exitCode, signal) => {
+        resolve(exitCode ?? (signal !== null ? 1 : 0));
+      });
+    });
+    process.exitCode = code;
+  } finally {
+    process.off("SIGINT", ignore);
+  }
+}
+
+// pigeon --line [参数]：命令行对话（决策 267：后备入口，只保证不坏）
+async function lineMain(argv: string[]): Promise<void> {
+  const startUsage = `pigeon --line 支持 ${SESSION_FLAGS_HINT}`;
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
     verify: true,
@@ -969,6 +1042,20 @@ async function main(argv: string[]): Promise<void> {
     await finishSandbox(sandbox, write);
   }
 }
+
+// 顶层帮助（pigeon --help）与未知子命令提示
+export const TOP_LEVEL_HELP = [
+  "用法：",
+  "  pigeon [参数]                 启动终端界面（--no-spawn-workers 关掉主 agent 派 worker；--worker-concurrency、--worker-limit 调两个上限）",
+  "  pigeon --line [参数]          命令行对话（后备入口）",
+  "  pigeon run [任务描述] [参数]  无人值守运行一个任务",
+  "  pigeon resume <sessionId>     在命令行对话里续跑一个会话",
+  "  pigeon trace <sessionId>      查看一个会话的关联视图",
+  "  pigeon replay <runId>         回放一次运行",
+  "  pigeon session list           列出本项目的会话",
+  "  pigeon sandbox list|clean     查看或清理残留的沙箱容器",
+  "  pigeon eval stream|stream-baseline|stream-manifest|stream-image-context  实验跑批",
+].join("\n");
 
 // 命令行对话与续跑接受的启动参数
 const SESSION_FLAGS_HINT =

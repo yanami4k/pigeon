@@ -69,6 +69,7 @@ export function parseSpawnCommand(raw: string): {
 }
 
 const STATE_LABEL: Record<string, string> = {
+  queued: "排队中",
   running: "进行中",
   completed: "完成",
   failed: "失败",

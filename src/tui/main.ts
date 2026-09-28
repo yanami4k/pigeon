@@ -1,5 +1,5 @@
 // Pigeon TUI 入口（M2 S2 壳 + S3 审批面板与 /grants 视图 + S4 会话列表与恢复入口）。
-// 用法：node src/tui/main.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
+// 用法：pigeon [--yolo] [--root <工作区根>] --stream-fn <模块路径>（亦可 node src/tui/main.ts 直接启动）
 //   [--provider <名>] [--model <id>]
 // 审批 handler（决策 025 的注入点）：面板版——prompt 档在消息区渲染审批块，四键
 // [y/n/a/d] 决议（S3）；deny/grant/固化配置/yolo/read 五档在 Adapter 排律内求值，
@@ -11,6 +11,9 @@
 // M5.5 S4（决策 040）：主会话与各 worker 的审批经同一队列汇聚到面板（一次一个）；每个会话运行面
 // 配一个编排器（/spawn /cancel /workers）；恢复 worker 会话时回到它自己的工作树与委派策略，
 // 且其编排器按深度 1 拒绝再派。一个窗口一个进程：退出时先取消在跑的 worker 并等其收尾记录落盘。
+// 决策 264–268：主会话另给主 agent 注册 spawn_worker（--no-spawn-workers 关掉；沙箱里不派 worker），与 /spawn 共用同一个
+// 编排器——同时在跑的上限对人派的与 agent 派的一并计算；agent 派出的个数按每条输入（一次运行）计。
+// 决策 267：pigeon 不带子命令即启动本界面（命令行对话改由 pigeon --line 进入）。
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
@@ -21,6 +24,7 @@ import {
   parseLaunchFlags,
   resolveStreamFnSpec,
   resolveVerifyConfig,
+  spawnWorkerLimitsOf,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import {
@@ -34,6 +38,8 @@ import {
   openSessionRuntime,
   pushedMemoryRunOptions,
 } from "../application/session-runtime.ts";
+import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
+import { SpawnWorkerSlot } from "../application/spawn-worker-tool.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -49,9 +55,9 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
-  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]]";
+  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -65,6 +71,7 @@ async function main(argv: string[]): Promise<void> {
     retry: true,
     pushedMemory: true,
     sandbox: true,
+    spawnWorkers: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
@@ -94,9 +101,27 @@ async function main(argv: string[]): Promise<void> {
       persistThinking: flags.persistThinking,
       ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      // 决策 268：同时在跑的上限，人用 /spawn 派的与 agent 派的一并计算
+      maxConcurrent: spawnWorkerLimitsOf(flags).maxConcurrent,
     };
     const orchestrator = createSessionWorkers(deps);
     const verify = resolveVerifyConfig(flags, workspaceRoot);
+    // 决策 264：主会话注册了 spawn_worker 时绑定编排器；agent 派出的个数按一次运行（每条输入）计
+    if (opened.spawnWorker !== undefined && parentSessionId === undefined) {
+      let runKey: string | undefined;
+      bundle.adapter.subscribe((event) => {
+        runKey = event.runId;
+      });
+      bindSpawnWorkers({
+        slot: opened.spawnWorker,
+        orchestrator,
+        governanceRoot: workspaceRoot,
+        hostSessionId: bundle.adapter.sessionId,
+        hostStore: bundle.sessionStore,
+        ...(verify !== undefined ? { verify } : {}),
+        runKey: () => runKey,
+      });
+    }
     return {
       spawn: (request) => orchestrator.spawn(request),
       cancel: (id) => orchestrator.cancel(id),
@@ -151,6 +176,7 @@ async function main(argv: string[]): Promise<void> {
     ...verifyOption(flags, workspaceRoot),
     ...retryOption(flags),
     ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+    ...spawnWorkerOption(flags),
     createApprovalHandler: createHandler,
     onMcpNote: (note) => {
       console.error(`[mcp] ${note}`);
@@ -209,6 +235,7 @@ async function main(argv: string[]): Promise<void> {
           flags,
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
+          ...spawnWorkerOption(flags),
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,
@@ -239,7 +266,9 @@ async function main(argv: string[]): Promise<void> {
     void (async () => {
       const workers = current.workers;
       if (workers !== undefined) {
-        const running = workers.status().filter((worker) => worker.state === "running");
+        const running = workers
+          .status()
+          .filter((worker) => worker.state === "running" || worker.state === "queued");
         await Promise.allSettled(running.map((worker) => workers.cancel(worker.sessionId)));
         await Promise.race([
           Promise.allSettled(running.map((worker) => workers.awaitResult(worker.sessionId))),
@@ -280,6 +309,11 @@ function verifyOption(
 } {
   const verify = resolveVerifyConfig(flags, governanceRoot);
   return verify !== undefined ? { verify } : {};
+}
+
+// 决策 264–267：派 worker 开着时每个打开的会话一个工具槽（只给主会话注册，沙箱与 worker 会话由装配层略过）
+function spawnWorkerOption(flags: LaunchFlags): { spawnWorker?: SpawnWorkerSlot } {
+  return flags.spawnWorkers ? { spawnWorker: new SpawnWorkerSlot(spawnWorkerLimitsOf(flags)) } : {};
 }
 
 // M7（决策 079）：失败自动分叉重试次数

@@ -165,6 +165,9 @@ export interface PiRuntimeAdapterOptions {
   // 决策 188：上下文压缩（阈值、保留量、摘要请求的模型接入与压缩前回调）；缺省不压缩。压缩读写会话树，
   // 故只在新存储写入面带读分支与写压缩条目时生效
   compaction?: ContextCompactor;
+  // 决策 264：同一次回复里的多个工具调用可否并行执行；缺省串行（决策 2）。只有注册了可并行的派 worker 工具时装配根才打开：
+  // 上游在同一批调用里只要有一个标为串行的工具就整批串行，写与命令工具因而照旧逐个执行、逐个审批
+  parallelTools?: boolean;
 }
 
 export class PiRuntimeAdapter {
@@ -250,10 +253,11 @@ export class PiRuntimeAdapter {
 
     this.#agent = new Agent({
       streamFn: options.streamFn,
-      // 决策 2：写死 sequential——审批瓶颈是人，parallel 的交错观感错乱且写审批有顺序依赖。
+      // 决策 2：缺省 sequential——审批瓶颈是人，parallel 的交错观感错乱且写审批有顺序依赖。
       // 依据：agent.js:134 构造选项读取、agent.js:299 传入 loop config、
-      // agent-loop.js:288 sequential 走逐 call 的 start→hook→execute→end 执行器
-      toolExecution: "sequential",
+      // agent-loop.js:288 sequential 走逐 call 的 start→hook→execute→end 执行器。
+      // 决策 264：注册了派 worker 工具时改为 parallel——整批都是可并行工具才并行，含串行工具的批次仍整批串行
+      toolExecution: options.parallelTools === true ? "parallel" : "sequential",
       // M3 审批闸（spike S2a：block 可靠，reason 逐字反馈模型）；M5.5 S0 起只转发治理判定
       beforeToolCall: (context) => this.#forwardDecide(context),
       // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们

@@ -27,6 +27,7 @@ import {
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
+import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
 import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
@@ -90,6 +91,8 @@ export interface OpenSessionRuntimeRequest {
   // 决策 237：日常沙箱的执行端——工具与会话验证命令经它在容器里读写与执行；不在宿主上打快照，不支持失败自动分叉重试。
   // 会话文件、放权与记忆仍在宿主的治理根
   workspaceHost?: WorkspaceHost;
+  // 决策 264–267：派 worker 的工具槽（终端界面给；命令行对话不给）。只给主会话注册：worker 会话（深度 1）与沙箱会话不注册
+  spawnWorker?: SpawnWorkerSlot;
 }
 
 export interface OpenedSessionRuntime {
@@ -103,6 +106,8 @@ export interface OpenedSessionRuntime {
   retry?: { idle(): Promise<void>; errors(): unknown[] };
   // 续跑时在场：还原了几条消息、为几个悬空的工具调用补了结果
   restored?: { messages: number; interrupted: number };
+  // 注册了 spawn_worker 时在场：调用方建好编排器后绑定到这个槽上
+  spawnWorker?: SpawnWorkerSlot;
 }
 
 // 续跑：等写者打开会话文件，读主分支还原上下文；悬空调用补的工具结果先写进会话，再连同还原的消息交给 Agent。
@@ -150,6 +155,10 @@ export async function openSessionRuntime(
     workspaceRoot: scope.workspaceRoot,
   });
   const learnedMemory = interactiveLearnedMemory(request.flags);
+  const spawnWorker =
+    scope.parentSessionId === undefined && request.workspaceHost === undefined
+      ? request.spawnWorker
+      : undefined;
   for (const note of describeMcpStartup(mcp)) {
     request.onMcpNote?.(note);
   }
@@ -186,6 +195,7 @@ export async function openSessionRuntime(
       ...(request.workspaceHost !== undefined
         ? { workspaceHost: request.workspaceHost, pathScopedGrants: false }
         : {}),
+      ...(spawnWorker !== undefined ? { spawnWorker } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];
@@ -322,6 +332,7 @@ export async function openSessionRuntime(
       ...(checkpoints !== undefined ? { checkpoints } : {}),
       ...(retry !== undefined ? { retry } : {}),
       ...(restored !== undefined ? { restored } : {}),
+      ...(spawnWorker !== undefined ? { spawnWorker } : {}),
     };
   } catch (error) {
     // 装配失败：已启动的 server 必须关掉，否则留下孤儿进程（先建后换的收口约束）
