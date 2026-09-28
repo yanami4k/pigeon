@@ -178,6 +178,33 @@ test("主 agent 撞上自己的时间上限：正在等的 worker 一并取消",
   ]);
 });
 
+test("pigeon run 的一次运行是一整次交办：回炉各轮与首轮共用 agent 派出的个数上限", async () => {
+  const root = repo({ "a.txt": "a\n", "fail.mjs": "process.exit(1);\n" });
+  const spawnOnce = {
+    text: "派",
+    toolCalls: [{ name: "spawn_worker", args: { role: "explorer", task: "WORKER 看看" } }],
+  };
+  const result = await runHeadlessOnce({
+    task: "MAIN 看看",
+    governanceRoot: root,
+    workspaceRoot: root,
+    yolo: true,
+    spawnWorkers: true,
+    spawnWorkerLimits: { maxConcurrent: 4, maxAgentSpawns: 1 },
+    verify: { command: "node fail.mjs", timeoutMs: 60_000, source: "flag" },
+    repairRounds: 1,
+    streamFn: routed([
+      ["MAIN", { replies: [spawnOnce, { text: "首轮完" }, spawnOnce, { text: "回炉完" }] }],
+      ["WORKER", { replies: [{ text: "看过了" }] }],
+    ]),
+  });
+  assert.equal(result.repair?.rounds, 1);
+  assert.deepEqual(spawnResults(root, result.sessionId), [
+    "worker explorer-1（explorer）已完成。分支：pigeon/explorer-1。改动的文件（0）：无。摘要：看过了",
+    SPAWN_WORKER_TEXTS.spawnLimit(1),
+  ]);
+});
+
 test("多份尝试：各份在自己的工作树里按验证命令标签，每份一段交回", async () => {
   const root = repo({
     "a.txt": "x\n",

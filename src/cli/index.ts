@@ -22,6 +22,7 @@ import {
   resolveRepairRounds,
   resolveStreamFnSpec,
   resolveVerifyConfig,
+  spawnWorkerLimitsOf,
   VALUELESS_FLAGS,
 } from "../application/launch-flags.ts";
 import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
@@ -340,7 +341,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
@@ -425,6 +426,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
+    spawnWorkerLimits: spawnWorkerLimitsOf(flags),
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
@@ -1027,7 +1029,7 @@ async function lineMain(argv: string[]): Promise<void> {
 // 顶层帮助（pigeon --help）与未知子命令提示
 export const TOP_LEVEL_HELP = [
   "用法：",
-  "  pigeon [参数]                 启动终端界面（--no-spawn-workers 关掉主 agent 派 worker）",
+  "  pigeon [参数]                 启动终端界面（--no-spawn-workers 关掉主 agent 派 worker；--worker-concurrency、--worker-limit 调两个上限）",
   "  pigeon --line [参数]          命令行对话（后备入口）",
   "  pigeon run [任务描述] [参数]  无人值守运行一个任务",
   "  pigeon resume <sessionId>     在命令行对话里续跑一个会话",

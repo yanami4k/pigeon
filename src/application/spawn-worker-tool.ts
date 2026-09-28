@@ -52,9 +52,13 @@ export function spawnWorkerDescription(limits: SpawnWorkerLimits): string {
   ].join("\n");
 }
 
-// 参数（说明为冻结原文）。role 与 task 的取值由工具自己检查并按冻结文字回话（角色写错、task 为空），schema 不设枚举与下限
+// 参数（说明为冻结原文）。role 为三个角色的枚举（冻结参数表的类型），写错时上游的参数校验先拒绝；工具自己仍按冻结文字
+// 兜底回话（角色写错，通常走不到）。task 不设下限，为空时由工具按冻结文字回话
 export const SpawnWorkerParamsSchema = Type.Object({
-  role: Type.String({ description: "worker 的角色，决定它能用的工具，见工具说明" }),
+  role: Type.Union(
+    [Type.Literal("explorer"), Type.Literal("implementer"), Type.Literal("tester")],
+    { description: "worker 的角色，决定它能用的工具，见工具说明" }
+  ),
   task: Type.String({ description: "子任务的完整说明：目标、相关文件、完成的标准" }),
   name: Type.Optional(
     Type.String({ description: "worker 的名字，用于分支名与状态显示；不给即自动生成" })

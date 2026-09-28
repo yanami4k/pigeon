@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { Compile } from "typebox/compile";
 import {
   WorkerOrchestrator,
   type WorkerOutcome,
@@ -243,6 +244,12 @@ test("工具说明与参数说明逐字为冻结原文；执行模式可并行",
     );
   }
   assert.deepEqual([...SpawnWorkerParamsSchema.required].sort(), ["role", "task"]);
+  // role 为三个角色的枚举（冻结参数表的类型）
+  const check = Compile(SpawnWorkerParamsSchema);
+  for (const role of ["explorer", "implementer", "tester"]) {
+    assert.equal(check.Check({ role, task: "看" }), true, role);
+  }
+  assert.equal(check.Check({ role: "reviewer", task: "看" }), false);
   const attempts = properties.attempts as unknown as { minimum?: number; maximum?: number };
   assert.equal(attempts.minimum, 2);
   assert.equal(attempts.maximum, 4);
@@ -325,7 +332,8 @@ test("失败与被取消：等待中被中止即取消本次派出的 worker", a
 test("派出前的检查：角色写错、task 为空、不是 git 仓库，都按冻结文字回话且不派出", async () => {
   const h = harness({ scriptFor: () => ({ behavior: "complete" }) });
   assert.equal(
-    await call(h, { role: "reviewer", task: "看" }),
+    // 兜底：role 在 schema 里是枚举，写错通常由上游参数校验先拒绝；这里绕过校验直接调
+    await call(h, { role: "reviewer" as SpawnWorkerParams["role"], task: "看" }),
     "没有角色 reviewer；可选：explorer、implementer、tester。"
   );
   assert.equal(

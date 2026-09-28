@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseLaunchFlags } from "../application/launch-flags.ts";
+import { parseLaunchFlags, spawnWorkerLimitsOf } from "../application/launch-flags.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { routeTopLevel, TOP_LEVEL_HELP, TUI_ENTRY } from "./index.ts";
 
@@ -191,4 +191,88 @@ test("启动参数：--no-spawn-workers 只在能派 worker 的入口接受，�
     false
   );
   assert.throws(() => parseLaunchFlags(["--no-spawn-workers"], { usage: "u" }), /未知参数/);
+});
+
+test("启动参数：--worker-concurrency 与 --worker-limit 调两个上限，缺省 4 与 16；只在能派 worker 的入口接受", () => {
+  assert.deepEqual(spawnWorkerLimitsOf(parseLaunchFlags([], { usage: "u", spawnWorkers: true })), {
+    maxConcurrent: 4,
+    maxAgentSpawns: 16,
+  });
+  assert.deepEqual(
+    spawnWorkerLimitsOf(
+      parseLaunchFlags(["--worker-concurrency", "2", "--worker-limit", "5"], {
+        usage: "u",
+        spawnWorkers: true,
+      })
+    ),
+    { maxConcurrent: 2, maxAgentSpawns: 5 }
+  );
+  for (const bad of ["0", "1.5", "x"]) {
+    assert.throws(
+      () => parseLaunchFlags(["--worker-limit", bad], { usage: "u", spawnWorkers: true }),
+      /--worker-limit 需要正整数/
+    );
+  }
+  assert.throws(() => parseLaunchFlags(["--worker-concurrency", "2"], { usage: "u" }), /未知参数/);
+});
+
+test("pigeon run --worker-limit 1：同一次回复派两个，第二个按冻结文字拒绝", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-spawn-limit-"));
+  roots.push(root);
+  git(root, ["init", "-q"]);
+  git(root, ["config", "user.email", "t@example.com"]);
+  git(root, ["config", "user.name", "t"]);
+  writeFileSync(join(root, ".gitignore"), ".pigeon/\nfake.mjs\n");
+  writeFileSync(join(root, "a.txt"), "a\n");
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "-qm", "init"]);
+  const stream = join(root, "fake.mjs");
+  writeFileSync(
+    stream,
+    `import { createFakeStreamFn } from ${JSON.stringify(FIXTURES)};
+const main = createFakeStreamFn({ replies: [
+  { text: "派两个", toolCalls: [
+    { name: "spawn_worker", args: { role: "explorer", task: "WORKER 看 a", name: "look-a" } },
+    { name: "spawn_worker", args: { role: "explorer", task: "WORKER 看 b", name: "look-b" } },
+  ] },
+  { text: "收到" },
+] });
+const worker = createFakeStreamFn({ replies: [{ text: "看过了" }] });
+export default (model, context, options) => {
+  const user = context.messages.find((m) => m.role === "user");
+  const text = typeof user.content === "string" ? user.content : user.content.map((c) => c.text ?? "").join("");
+  return (text.includes("WORKER") ? worker : main)(model, context, options);
+};
+`
+  );
+  const child = runCli([
+    "run",
+    "MAIN 派两个",
+    "--root",
+    root,
+    "--stream-fn",
+    stream,
+    "--yolo",
+    "--json",
+    "--no-pushed-memory",
+    "--worker-limit",
+    "1",
+  ]);
+  assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+  const lines = child.stdout.trim().split(/\r?\n/);
+  const result = JSON.parse(lines[lines.length - 1] ?? "") as { sessionId: string };
+  const view = loadSessionView(join(root, ".pigeon", "sessions"), result.sessionId);
+  assert.ok(view !== undefined);
+  const texts = view.runs
+    .flatMap((run) => run.toolCalls)
+    .filter((call) => call.toolName === "spawn_worker")
+    .map((call) =>
+      ((call.result?.raw as { content?: Array<{ text?: string }> } | undefined)?.content ?? [])
+        .map((block) => block.text ?? "")
+        .join("")
+    );
+  assert.deepEqual(texts, [
+    "worker look-a（explorer）已完成。分支：pigeon/look-a。改动的文件（0）：无。摘要：看过了",
+    "本次运行派出的 worker 已达 1 个上限。不要再派；用已有的结果，或自己完成。",
+  ]);
 });

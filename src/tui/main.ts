@@ -24,6 +24,7 @@ import {
   parseLaunchFlags,
   resolveStreamFnSpec,
   resolveVerifyConfig,
+  spawnWorkerLimitsOf,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import {
@@ -38,7 +39,7 @@ import {
   pushedMemoryRunOptions,
 } from "../application/session-runtime.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
-import { DEFAULT_SPAWN_WORKER_LIMITS, SpawnWorkerSlot } from "../application/spawn-worker-tool.ts";
+import { SpawnWorkerSlot } from "../application/spawn-worker-tool.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -54,7 +55,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
@@ -101,7 +102,7 @@ async function main(argv: string[]): Promise<void> {
       ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       // 决策 268：同时在跑的上限，人用 /spawn 派的与 agent 派的一并计算
-      maxConcurrent: DEFAULT_SPAWN_WORKER_LIMITS.maxConcurrent,
+      maxConcurrent: spawnWorkerLimitsOf(flags).maxConcurrent,
     };
     const orchestrator = createSessionWorkers(deps);
     const verify = resolveVerifyConfig(flags, workspaceRoot);
@@ -312,7 +313,7 @@ function verifyOption(
 
 // 决策 264–267：派 worker 开着时每个打开的会话一个工具槽（只给主会话注册，沙箱与 worker 会话由装配层略过）
 function spawnWorkerOption(flags: LaunchFlags): { spawnWorker?: SpawnWorkerSlot } {
-  return flags.spawnWorkers ? { spawnWorker: new SpawnWorkerSlot() } : {};
+  return flags.spawnWorkers ? { spawnWorker: new SpawnWorkerSlot(spawnWorkerLimitsOf(flags)) } : {};
 }
 
 // M7（决策 079）：失败自动分叉重试次数

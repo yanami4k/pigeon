@@ -9,6 +9,7 @@ import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
+import { DEFAULT_SPAWN_WORKER_LIMITS, type SpawnWorkerLimits } from "./spawn-worker-tool.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
@@ -76,6 +77,10 @@ export interface LaunchFlags {
   // 决策 265–267：主 agent 派 worker——终端界面与 pigeon run 缺省开着，--no-spawn-workers 关掉（关掉即不注册 spawn_worker）；
   // 沙箱会话与命令行对话不注册，不看这一项
   spawnWorkers: boolean;
+  // 决策 268：--worker-concurrency <n> 同时在跑的 worker 上限（缺省 4，人派的与 agent 派的一并计算）；
+  // --worker-limit <n> 一次运行里 agent 最多派出的 worker 数（缺省 16）。与 --no-spawn-workers 同在能派 worker 的入口接受
+  workerConcurrency?: number;
+  workerLimit?: number;
 }
 
 // 上下文压缩参数名 → 配置字段
@@ -153,6 +158,19 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       flags.persistThinking = false;
     } else if (flag === "--no-spawn-workers" && options.spawnWorkers === true) {
       flags.spawnWorkers = false;
+    } else if (
+      (flag === "--worker-concurrency" || flag === "--worker-limit") &&
+      options.spawnWorkers === true
+    ) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`${flag} 需要正整数（${usage}）`);
+      }
+      if (flag === "--worker-concurrency") {
+        flags.workerConcurrency = value;
+      } else {
+        flags.workerLimit = value;
+      }
     } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
       flags.pushedMemory = false;
     } else if (flag === "--memory-limit" && options.pushedMemory === true) {
@@ -252,6 +270,14 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     throw new Error(`--sandbox-network 与 --sandbox-approval 只配合 --sandbox 用（${usage}）`);
   }
   return flags;
+}
+
+// 派 worker 的两个上限（决策 268）：启动参数给了取参数，没给取缺省（4 与 16）
+export function spawnWorkerLimitsOf(flags: LaunchFlags): SpawnWorkerLimits {
+  return {
+    maxConcurrent: flags.workerConcurrency ?? DEFAULT_SPAWN_WORKER_LIMITS.maxConcurrent,
+    maxAgentSpawns: flags.workerLimit ?? DEFAULT_SPAWN_WORKER_LIMITS.maxAgentSpawns,
+  };
 }
 
 // 模型接入必须显式配置：缺失时响亮失败（措辞与两个入口此前一致）
