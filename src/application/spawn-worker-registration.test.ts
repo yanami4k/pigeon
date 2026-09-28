@@ -132,11 +132,19 @@ async function headlessTools(
   return tools;
 }
 
-test("pigeon run：缺省不注册、开了才注册；跑批器各条件（明确关掉）的工具清单都不含 spawn_worker，身份头记关", async () => {
+test("pigeon run：缺省不注册、开了才注册；跑批器五个条件（四格明确关掉，最简 agent 不经 Pigeon）的工具清单都不含 spawn_worker，身份头记关", async () => {
   const root = gitRoot();
   assert.ok(!(await headlessTools(root, {})).includes(SPAWN_WORKER_TOOL));
   assert.ok((await headlessTools(root, { spawnWorkers: true })).includes(SPAWN_WORKER_TOOL));
-  const pigeonConditions = Object.values(CONDITION_SPECS).filter((spec) => spec.agent === "pigeon");
+  // 实验的五个条件（193、265）：四格经 headless 跑 Pigeon、派 worker 明确关掉；最简 agent 是宿主上的独立进程，
+  // 不装 Pigeon 的任何工具
+  const specs = Object.values(CONDITION_SPECS);
+  assert.equal(specs.length, 5);
+  assert.deepEqual(
+    specs.filter((spec) => spec.agent !== "pigeon").map((spec) => `${spec.name}:${spec.agent}`),
+    ["minimal:minimal"]
+  );
+  const pigeonConditions = specs.filter((spec) => spec.agent === "pigeon");
   assert.equal(pigeonConditions.length, 4);
   for (const spec of pigeonConditions) {
     const tools = await headlessTools(root, {

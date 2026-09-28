@@ -11,9 +11,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { effectivePigeonSettings } from "./stream-experiment.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
-import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
+import {
+  checkOrWriteIdentity,
+  readStoredIdentity,
+  type StreamRunIdentity,
+} from "./stream-identity.ts";
 import { TASK_CHAIN_SCOPE, TASK_PROMPT_LAYOUT } from "./stream-manifest.ts";
+import { renderStreamReport } from "./stream-report.ts";
 import { DEFAULT_STEP_BUDGET } from "./stream-runner.ts";
 
 test("harness 版本：取本源码所在仓库的 HEAD 短号与是否有未提交改动", () => {
@@ -503,4 +509,60 @@ test("身份头：首次写入与追加 infoLog 都是先写临时文件再改�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("合并后的身份头：agents.pigeon 记派 worker 关（265）并与代码版本（269）一起核对——同一代码中断后续跑放行、不追加记录；派 worker 的生效值不同即拒绝；换了提交号即拒绝，--accept-harness-change 放行、记进 infoLog 与报告的设置一节", () => {
+  withDir("pigeon-stream-identity-merge5-", (dir) => {
+    // 跑批器实际写进身份头的 Pigeon 参数：没给参数时的生效值，含派 worker 关
+    const pigeon = effectivePigeonSettings({}, "m");
+    assert.equal(pigeon.spawnWorkers, false);
+    const at = (commit: string): StreamRunIdentity => ({
+      ...identity({ agents: { ...identity().core.agents, pigeon } }),
+      info: { concurrency: 4, harness: { commit, dirty: false } },
+    });
+    // 开跑
+    const digest = checkOrWriteIdentity(dir, at("aaa1111"));
+    assert.equal(readIdentityFile(dir).core.agents.pigeon.spawnWorkers, false);
+    // 中断后用同一份代码续跑：放行，摘要不变，不追加 infoLog（新增的字段两次都记了且相同，不因它误拒）
+    assert.equal(checkOrWriteIdentity(dir, at("aaa1111")), digest);
+    assert.equal(readIdentityFile(dir).infoLog, undefined);
+    // 派 worker 的生效值变了：core 不一致，拒绝并点名这一项
+    const opened = at("aaa1111");
+    assert.throws(
+      () =>
+        checkOrWriteIdentity(dir, {
+          ...opened,
+          core: {
+            ...opened.core,
+            agents: { ...opened.core.agents, pigeon: { ...pigeon, spawnWorkers: true } },
+          },
+        }),
+      /agents\.pigeon\.spawnWorkers/
+    );
+    // 换了提交号：拒绝，身份头不动
+    assert.throws(
+      () => checkOrWriteIdentity(dir, at("bbb2222")),
+      /记录的代码：提交 aaa1111（无未提交改动）.*当前的代码：提交 bbb2222（无未提交改动）.*--accept-harness-change/
+    );
+    assert.equal(readIdentityFile(dir).infoLog, undefined);
+    // 显式放行：摘要不变，infoLog 追加一条带原因的记录，core 里的派 worker 一项照旧
+    const when = new Date("2026-09-28T01:02:03Z");
+    assert.equal(
+      checkOrWriteIdentity(dir, at("bbb2222"), () => when, { acceptHarnessChange: "修复判题超时" }),
+      digest
+    );
+    const stored = readStoredIdentity(dir);
+    assert.ok(stored !== undefined);
+    assert.deepEqual(stored.infoLog, [
+      { since: when.toISOString(), info: at("bbb2222").info, acceptHarnessChange: "修复判题超时" },
+    ]);
+    assert.equal(stored.core.agents.pigeon?.spawnWorkers, false);
+    // 报告的设置一节列出开跑时的代码与这次放行
+    const md = renderStreamReport([], { title: "续跑", segments: [], identity: stored });
+    assert.match(md, /^- 开跑时的代码：提交 aaa1111（无未提交改动）$/m);
+    assert.match(
+      md,
+      /^\| 2026-09-28T01:02:03\.000Z \| 提交 bbb2222（无未提交改动） \| 修复判题超时 \|$/m
+    );
+  });
 });
