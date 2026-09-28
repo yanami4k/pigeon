@@ -11,6 +11,26 @@ import {
 
 const USAGE = "用法：测试";
 
+test("上下文压缩参数（决策 188、218）：--context-window、--compact-threshold、--compact-keep 解析为正整数，缺省不带", () => {
+  const flags = parseLaunchFlags(
+    ["--context-window", "262144", "--compact-threshold", "30000", "--compact-keep", "4000"],
+    { usage: USAGE, env: {} }
+  );
+  assert.deepEqual(flags.compaction, {
+    contextWindow: 262_144,
+    thresholdTokens: 30_000,
+    keepRecentTokens: 4000,
+  });
+  assert.equal(parseLaunchFlags([], { usage: USAGE, env: {} }).compaction, undefined);
+  for (const flag of ["--context-window", "--compact-threshold", "--compact-keep"]) {
+    assert.throws(() => parseLaunchFlags([flag, "0"], { usage: USAGE, env: {} }), new RegExp(flag));
+    assert.throws(
+      () => parseLaunchFlags([flag, "1.5"], { usage: USAGE, env: {} }),
+      new RegExp(flag)
+    );
+  }
+});
+
 test("模型占位缺省统一为 custom/custom（三个入口同一常量）", () => {
   assert.deepEqual(DEFAULT_MODEL_PLACEHOLDER, { provider: "custom", modelId: "custom" });
   const flags = parseLaunchFlags([], { usage: USAGE, env: {} });

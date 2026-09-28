@@ -41,6 +41,12 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
         temperature: 0,
         thinking: null,
         maxOutputTokens: null,
+        compaction: {
+          contextWindow: 1_000_000,
+          reserveTokens: 16_384,
+          keepRecentTokens: 20_000,
+          thresholdTokens: 983_616,
+        },
       },
       minimal: {
         model: "m",
@@ -52,6 +58,40 @@ const identity = (over: Partial<StreamRunIdentity["core"]> = {}): StreamRunIdent
     ...over,
   },
   info: { concurrency: 4, harness: { commit: "h1", dirty: false } },
+});
+
+test("身份头记 Pigeon 的压缩配置：续跑时压缩配置不同即拒绝并列出不同项", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-compaction-"));
+  try {
+    checkOrWriteIdentity(dir, identity());
+    const saved = JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+    assert.equal(saved.core.agents.pigeon.compaction.thresholdTokens, 983_616);
+    const pigeon = identity().core.agents.pigeon as NonNullable<
+      StreamRunIdentity["core"]["agents"]["pigeon"]
+    >;
+    assert.throws(
+      () =>
+        checkOrWriteIdentity(
+          dir,
+          identity({
+            agents: {
+              pigeon: {
+                ...pigeon,
+                compaction: {
+                  contextWindow: 1_000_000,
+                  reserveTokens: 16_384,
+                  keepRecentTokens: 20_000,
+                  thresholdTokens: 30_000,
+                },
+              },
+            },
+          })
+        ),
+      /agents\.pigeon\.compaction/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("正式跑批的预算缺省为每步 150 轮、30 分钟（147 校准）", () => {

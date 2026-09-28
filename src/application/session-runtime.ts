@@ -7,6 +7,7 @@
 // 调用方的旧运行面不受影响。
 
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
+import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -31,6 +32,8 @@ export interface SessionRuntimeFlags {
   thinkingLevel?: ThinkingLevel;
   memoryBudgetChars?: number;
   maxOutputTokens?: number;
+  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
+  compaction?: CompactionConfigInput;
 }
 
 export interface OpenSessionRuntimeRequest {
@@ -127,6 +130,7 @@ export async function openSessionRuntime(
       ...(request.flags.maxOutputTokens !== undefined
         ? { maxOutputTokens: request.flags.maxOutputTokens }
         : {}),
+      ...(request.flags.compaction !== undefined ? { compaction: request.flags.compaction } : {}),
       ...(request.createApprovalHandler !== undefined
         ? { createApprovalHandler: request.createApprovalHandler }
         : {}),
@@ -199,6 +203,9 @@ export async function openSessionRuntime(
             ? { thinking: request.flags.thinkingLevel }
             : {}),
           ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
+          ...(request.flags.compaction !== undefined
+            ? { compaction: request.flags.compaction }
+            : {}),
           ...(request.verify !== undefined ? { verify: request.verify } : {}),
           ...(startMcp !== undefined
             ? {

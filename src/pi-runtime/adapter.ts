@@ -21,13 +21,22 @@
 // 10. 会话存储（决策 176 / 182 / 184）：每条 message_end 的完整消息、每个 Run 的开始（本次配置与系统提示全文）
 //    与收尾（结束方式）写进新会话存储。撞上限的一方经 interrupt(原因) 交代中止原因，收尾条目一次写全；
 //    写入面自身不抛，这里仍兜一层，异常只进 listenerErrors，不影响运行。
+// 11. 上下文压缩（决策 188、189）：两个触发挂点——一次 Run 内轮与轮之间（上游 prepareNextTurnWithContext，返回替换后的
+//    上下文）、一次 Run 开始之前（prompt 或 continue 发起前自行检查并整体替换 Agent 的消息）；另有手动压缩。轮间替换后
+//    Agent 的消息仍按 message_end 累积全量，故本 Run 内压缩过时，Run 结束后按会话树重新还原一次。上游的 convertToLlm
+//    必须交给 Agent：缺省实现只留 user、assistant、toolResult，会把压缩摘要消息静默丢掉。压缩自身不抛，失败只进
+//    listenerErrors，本轮照原上下文继续。
 import {
   Agent,
   type AgentEvent,
+  type AgentLoopTurnUpdate,
   type AgentMessage,
   type AgentTool,
   type BeforeToolCallContext,
   type BeforeToolCallResult,
+  buildSessionContext,
+  convertToLlm,
+  type PrepareNextTurnContext,
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
 import type {
@@ -55,6 +64,13 @@ import {
 import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
+import type {
+  CompactionConfig,
+  CompactionOutcome,
+  CompactionStore,
+  CompactionTrigger,
+  ContextCompactor,
+} from "./compaction.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import type { ToolGovernance, ToolGovernanceFactory } from "./governance.ts";
 import type { SessionStoreSink } from "./session-store.ts";
@@ -94,6 +110,20 @@ export interface StreamTextDelta {
   delta: string;
 }
 
+// 压缩提示（189）：界面据此各提示一行——压成了（压缩前后的 token 数）、自动压缩没压成（原因；本轮按原上下文继续；
+// 被中断的不提示）、压缩前回调失败（原因；压缩照常进行）。手动压缩没压成时结果直接交回调用方，不另发提示
+export type CompactionNotice =
+  | { kind: "compacted"; trigger: CompactionTrigger; tokensBefore: number; tokensAfter: number }
+  | {
+      kind: "incomplete";
+      trigger: Exclude<CompactionTrigger, "manual">;
+      outcome: Exclude<CompactionOutcome, { kind: "compacted" }>;
+    }
+  | { kind: "hook-failed"; trigger: CompactionTrigger; error: unknown };
+
+// 手动压缩的结果：运行面没有配置压缩时为 disabled
+export type ManualCompactionOutcome = CompactionOutcome | { kind: "skipped"; reason: "disabled" };
+
 type RunStartedExtras = Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
 
 export interface PiRuntimeAdapterOptions {
@@ -116,6 +146,9 @@ export interface PiRuntimeAdapterOptions {
   initialMessages?: AgentMessage[];
   // 新会话存储的写入面（决策 176）；缺省不写
   sessionStore?: SessionStoreSink;
+  // 决策 188：上下文压缩（阈值、保留量、摘要请求的模型接入与压缩前回调）；缺省不压缩。压缩读写会话树，
+  // 故只在新存储写入面带读分支与写压缩条目时生效
+  compaction?: ContextCompactor;
 }
 
 export class PiRuntimeAdapter {
@@ -146,6 +179,14 @@ export class PiRuntimeAdapter {
   readonly #sessionStore: SessionStoreSink | undefined;
   // 当前 Run 被我们的上限中止的原因（interrupt 时给出；每个 Run 开始时清空）
   #stopCause: RunStopCause | undefined;
+  readonly #compactor: ContextCompactor | undefined;
+  readonly #compactionListeners = new Set<(notice: CompactionNotice) => void>();
+  // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
+  #compactionAbort: AbortController | undefined;
+  // 手动压缩进行中：此时不接受 Run
+  #manualCompacting = false;
+  // 本 Run 内轮间压缩过：压缩后的上下文与压缩时 Agent 已有的消息条数，Run 结束后据此还原（会话树读不到时的后备）
+  #turnCompaction: { messages: AgentMessage[]; stateLength: number } | undefined;
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -162,6 +203,7 @@ export class PiRuntimeAdapter {
 
     this.#runStartedExtras = options.runStartedExtras;
     this.#sessionStore = options.sessionStore;
+    this.#compactor = options.compaction;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -193,6 +235,10 @@ export class PiRuntimeAdapter {
       toolExecution: "sequential",
       // M3 审批闸（spike S2a：block 可靠，reason 逐字反馈模型）；M5.5 S0 起只转发治理判定
       beforeToolCall: (context) => this.#forwardDecide(context),
+      // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们
+      convertToLlm,
+      // 决策 188：一次 Run 内轮与轮之间的压缩挂点
+      prepareNextTurnWithContext: (context, signal) => this.#compactBetweenTurns(context, signal),
       initialState: {
         systemPrompt: this.#snapshot.context.systemPrompt,
         // M5.5 S5（决策 050）：推理档位随快照冻结；缺省 off = 不请求推理
@@ -241,11 +287,15 @@ export class PiRuntimeAdapter {
     if (this.#currentRunId !== null) {
       throw new Error("已有进行中的 Run：run() 互斥（决策 2）");
     }
+    if (this.#manualCompacting) {
+      throw new Error("手动压缩进行中，等它完成再启动 Run");
+    }
     const runId = newRunId();
     this.#currentRunId = runId;
     this.#governance.beginRun();
     this.#runEntrySeq = 0;
     this.#stopCause = undefined;
+    this.#turnCompaction = undefined;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
     // 附加摘要每个 Run 取一次；取失败只进 listenerErrors，Run 开始条目缺 MCP 字段，不挡 Run 启动
@@ -261,10 +311,18 @@ export class PiRuntimeAdapter {
       settle = resolve;
     });
     try {
-      await start();
+      // 决策 188：Run 开始之前的压缩挂点（上游 prepareNextTurn 不在首轮之前调用）。压缩期间被中断时，
+      // 照常发起再立即中止：Agent 按上游的标准事件序列以中止收尾，不留半截 Run
+      const interrupted = await this.#compactBeforeRun();
+      const started = start();
+      if (interrupted) {
+        this.#agent.abort();
+      }
+      await started;
       await this.#agent.waitForIdle();
       const result = this.#judgeTerminal(runId, advertisedTools);
       this.#recordRunEnded(result);
+      await this.#restoreAfterTurnCompaction();
       return result;
     } catch (error) {
       // Run 以异常结束（上游抛错）：收尾条目记出错，不留成"有开始无收尾"（那只留给进程死于中途）
@@ -324,6 +382,7 @@ export class PiRuntimeAdapter {
     if (cause !== undefined && this.#currentRunId !== null && this.#stopCause === undefined) {
       this.#stopCause = cause;
     }
+    this.#compactionAbort?.abort();
     this.#agent.abort();
     await this.#agent.waitForIdle();
   }
@@ -346,6 +405,49 @@ export class PiRuntimeAdapter {
   subscribeStream(listener: (delta: StreamTextDelta) => void): () => void {
     this.#streamListeners.add(listener);
     return () => this.#streamListeners.delete(listener);
+  }
+
+  // 观察口（189）：订阅压缩提示（压成、自动压缩没压成、压缩前回调失败）；listener 抛异常只进 listenerErrors
+  subscribeCompaction(listener: (notice: CompactionNotice) => void): () => void {
+    this.#compactionListeners.add(listener);
+    return () => this.#compactionListeners.delete(listener);
+  }
+
+  // 本运行面的压缩配置（188、218）：派出的 worker 按同一配置跑；没有配置压缩时为 undefined
+  compactionConfig(): CompactionConfig | undefined {
+    return this.#compactor !== undefined ? { ...this.#compactor.config } : undefined;
+  }
+
+  // 手动压缩（189 的 /compact [重点]）：重点作为摘要的附加说明。只在没有进行中的 Run 时可用；
+  // 完成后整体替换 Agent 的消息为压缩后的上下文。失败以结果返回，不抛
+  async compact(customInstructions?: string): Promise<ManualCompactionOutcome> {
+    this.#assertUsable();
+    if (this.#currentRunId !== null || this.#manualCompacting) {
+      throw new Error("Run 进行中，不能手动压缩");
+    }
+    const compactor = this.#compactor;
+    if (compactor === undefined) {
+      return { kind: "skipped", reason: "disabled" };
+    }
+    this.#manualCompacting = true;
+    const abort = new AbortController();
+    this.#compactionAbort = abort;
+    try {
+      const focus = customInstructions?.trim();
+      const outcome = await this.#runCompaction(
+        "manual",
+        compactor.check(this.#agent.state.messages).tokens,
+        abort.signal,
+        focus !== undefined && focus !== "" ? focus : undefined
+      );
+      if (outcome.kind === "compacted") {
+        this.#agent.state.messages = structuredClone(outcome.messages);
+      }
+      return outcome;
+    } finally {
+      this.#compactionAbort = undefined;
+      this.#manualCompacting = false;
+    }
   }
 
   // 被吞掉的 listener 异常记录（含内部归一化异常）
@@ -395,11 +497,154 @@ export class PiRuntimeAdapter {
       return;
     }
     this.#disposed = true;
+    this.#compactionAbort?.abort();
     this.#agent.abort();
     await this.#agent.waitForIdle();
     this.#unsubscribe();
     this.#listeners.clear();
     this.#streamListeners.clear();
+    this.#compactionListeners.clear();
+  }
+
+  // 压缩要用的会话树读写：新存储写入面带读分支与写压缩条目时才有
+  #compactionStore(): CompactionStore | undefined {
+    const sink = this.#sessionStore;
+    if (sink?.branch === undefined || sink.appendCompaction === undefined) {
+      return undefined;
+    }
+    return {
+      branch: () => sink.branch?.() ?? Promise.resolve(undefined),
+      appendCompaction: (result) => sink.appendCompaction?.(result) ?? Promise.resolve(undefined),
+    };
+  }
+
+  // 发出一条压缩提示；listener 抛异常只进 listenerErrors
+  #notifyCompaction(notice: CompactionNotice): void {
+    const frozen = Object.freeze(notice);
+    for (const listener of this.#compactionListeners) {
+      try {
+        listener(frozen);
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+  }
+
+  // 执行一次压缩并发出提示。摘要请求失败与压缩前回调失败属运行时诊断，经提示给出、不计入会话记录写入失败；
+  // 压缩条目写不进会话文件属落盘失败，仍进 listenerErrors
+  async #runCompaction(
+    trigger: CompactionTrigger,
+    tokens: number,
+    signal: AbortSignal,
+    customInstructions?: string
+  ): Promise<CompactionOutcome> {
+    const compactor = this.#compactor;
+    if (compactor === undefined) {
+      return { kind: "skipped", reason: "store-unavailable" };
+    }
+    const outcome = await compactor.run(this.#compactionStore(), {
+      trigger,
+      tokens,
+      ...(customInstructions !== undefined ? { customInstructions } : {}),
+      signal,
+      onHookError: (error) => {
+        this.#notifyCompaction({ kind: "hook-failed", trigger, error });
+      },
+    });
+    if (outcome.kind === "failed" && outcome.stage === "store") {
+      this.#listenerErrors.push(outcome.error);
+    }
+    if (outcome.kind === "compacted") {
+      this.#notifyCompaction({
+        kind: "compacted",
+        trigger,
+        tokensBefore: outcome.tokensBefore,
+        tokensAfter: outcome.tokensAfter,
+      });
+    } else if (trigger !== "manual" && !signal.aborted) {
+      this.#notifyCompaction({ kind: "incomplete", trigger, outcome });
+    }
+    return outcome;
+  }
+
+  // 轮间挂点（上游 prepareNextTurnWithContext）：本轮的消息都已交给新存储写者，超过触发点即压缩，返回替换后的上下文；
+  // 未超过或压缩没有完成时返回 undefined（照原上下文继续）。上游对此回调无防护，这里绝不抛
+  async #compactBetweenTurns(
+    turn: PrepareNextTurnContext,
+    signal?: AbortSignal
+  ): Promise<AgentLoopTurnUpdate | undefined> {
+    try {
+      const compactor = this.#compactor;
+      if (compactor === undefined || this.#currentRunId === null) {
+        return undefined;
+      }
+      const { tokens, exceeds } = compactor.check(turn.context.messages);
+      if (!exceeds) {
+        return undefined;
+      }
+      const outcome = await this.#runCompaction(
+        "turn",
+        tokens,
+        signal ?? new AbortController().signal
+      );
+      if (outcome.kind !== "compacted") {
+        return undefined;
+      }
+      this.#turnCompaction = {
+        messages: outcome.messages,
+        stateLength: this.#agent.state.messages.length,
+      };
+      return { context: { ...turn.context, messages: structuredClone(outcome.messages) } };
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return undefined;
+    }
+  }
+
+  // Run 开始之前的挂点：超过触发点即压缩并整体替换 Agent 的消息。返回压缩期间是否被中断
+  async #compactBeforeRun(): Promise<boolean> {
+    const compactor = this.#compactor;
+    if (compactor === undefined) {
+      return false;
+    }
+    const abort = new AbortController();
+    this.#compactionAbort = abort;
+    try {
+      const { tokens, exceeds } = compactor.check(this.#agent.state.messages);
+      if (!exceeds) {
+        return false;
+      }
+      const outcome = await this.#runCompaction("run-start", tokens, abort.signal);
+      if (outcome.kind === "compacted" && !abort.signal.aborted) {
+        this.#agent.state.messages = structuredClone(outcome.messages);
+      }
+      return abort.signal.aborted;
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return abort.signal.aborted;
+    } finally {
+      this.#compactionAbort = undefined;
+    }
+  }
+
+  // 本 Run 内轮间压缩过：Agent 的消息按 message_end 累积了全量，按会话树重新还原一次，使下一个 Run 从压缩后的上下文接着跑。
+  // 会话树读不到时退回压缩后的上下文加压缩之后追加的消息
+  async #restoreAfterTurnCompaction(): Promise<void> {
+    const compaction = this.#turnCompaction;
+    if (compaction === undefined) {
+      return;
+    }
+    this.#turnCompaction = undefined;
+    try {
+      const entries = await this.#compactionStore()?.branch();
+      const messages =
+        entries !== undefined
+          ? buildSessionContext(entries).messages
+          : [...compaction.messages, ...this.#agent.state.messages.slice(compaction.stateLength)];
+      this.#agent.state.messages = structuredClone(messages);
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
   }
 
   // beforeToolCall 转发（决策 049）：判定交治理实例，阻断理由原样交回上游（逐字成为模型可见的
@@ -571,6 +816,8 @@ export class PiRuntimeAdapter {
           ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
           ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
           ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
+          // 决策 188、218：本次的压缩配置
+          ...(this.#compactor !== undefined ? { compaction: { ...this.#compactor.config } } : {}),
         },
       });
     } catch (error) {

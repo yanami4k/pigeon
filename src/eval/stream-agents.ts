@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { runHeadless } from "../application/headless.ts";
 import { createContainerWorkspaceHost, trustedShell } from "../execution/container-host.ts";
-import type { StreamFn } from "../pi-runtime/index.ts";
+import type { CompactionConfigInput, StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { verifyStepsDisplay } from "../state/verify-steps.ts";
@@ -49,6 +49,8 @@ export interface PigeonStepAgentOptions {
   thinking?: ThinkingLevel;
   maxOutputTokens?: number;
   temperature?: number;
+  // 决策 188、218：上下文压缩的配置；缺省为产品缺省（实际几乎不触发），集成冒烟调低触发点验证压缩
+  compaction?: CompactionConfigInput;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -219,6 +221,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
             ? { maxOutputTokens: options.maxOutputTokens }
             : {}),
           ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+          ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
           ...(options.provider !== undefined ? { provider: options.provider } : {}),
           ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
           ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),

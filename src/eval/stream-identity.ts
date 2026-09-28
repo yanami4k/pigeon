@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { CompactionConfig } from "../pi-runtime/index.ts";
 import type { HarnessRef } from "./stream-harness.ts";
 import type { StepBudget } from "./stream-runner.ts";
 
@@ -33,6 +34,8 @@ export interface StreamRunIdentity {
         temperature: number | null;
         thinking: string | null;
         maxOutputTokens: number | null;
+        // 上下文压缩的实际生效配置（188、218）：没给参数即产品缺省；加这一项之前写下的身份头没有它，续跑即判为不同
+        compaction?: CompactionConfig;
       };
       minimal?: {
         model: string;
@@ -99,8 +102,13 @@ function mergeCore(
   const agents = { ...(saved.agents ?? {}) } as Record<string, unknown>;
   for (const [name, settings] of Object.entries(now.agents ?? {})) {
     if (settings === undefined) continue;
-    if (agents[name] !== undefined && canonical(agents[name]) !== canonical(settings)) {
-      differ.push(`agents.${name}`);
+    const before = agents[name] as Record<string, unknown> | undefined;
+    if (before !== undefined && canonical(before) !== canonical(settings)) {
+      // 列出具体不同的参数（如 agents.pigeon.compaction）
+      const now = settings as Record<string, unknown>;
+      for (const key of Object.keys({ ...before, ...now })) {
+        if (canonical(before[key]) !== canonical(now[key])) differ.push(`agents.${name}.${key}`);
+      }
     }
     agents[name] = agents[name] ?? settings;
   }

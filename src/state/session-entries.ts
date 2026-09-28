@@ -45,6 +45,14 @@ const VERSION = Type.Literal(SESSION_ENTRY_VERSION);
 
 const run = RunStartedPayloadSchema.properties;
 
+// 本次运行的上下文压缩配置（188、218）：模型窗口、预留、压缩后保留的最近消息量、触发点（上下文 token 数大于它即压缩）
+export const CompactionConfigSchema = Type.Object({
+  contextWindow: Type.Integer({ minimum: 1 }),
+  reserveTokens: Type.Integer({ minimum: 1 }),
+  keepRecentTokens: Type.Integer({ minimum: 1 }),
+  thresholdTokens: Type.Integer({ minimum: 1 }),
+});
+
 // Run 开始（182 / 184）：本次配置与系统提示全文，先于本 Run 的任何消息。
 // 不再带旧 run.started 的 systemPromptHash（有全文即可现算）、stepStart 与 structuredMemory（都已无读者）
 export const RunStartDataSchema = Type.Object({
@@ -66,6 +74,8 @@ export const RunStartDataSchema = Type.Object({
   retryOnFail: Type.Optional(RetryOnFailSchema),
   budget: Type.Optional(AttemptBudgetSchema),
   repairRounds: Type.Optional(RepairRoundsSchema),
+  // 上下文压缩配置（188、218）：运行面没有压缩（测试装配）时不带
+  compaction: Type.Optional(CompactionConfigSchema),
 });
 export type RunStartData = Static<typeof RunStartDataSchema>;
 

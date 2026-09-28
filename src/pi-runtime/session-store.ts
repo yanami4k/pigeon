@@ -5,12 +5,15 @@
 // - 只写 custom 条目（state/session-entries.ts 的七种），不写未知的 entry 或 record 类型（上游写时不报、读时整个文件打不开）。
 // - 写者从不抛：打开、加锁、每一条写入的失败都交给 onFault，由调用方按内部故障告警；打开失败后这个写者不再写任何东西。
 // - 写入经内部队列串行、按调用顺序落盘；调用方不等待（不拖慢运行），需要落盘确认时 flush。
+// - 上下文压缩（188）：读主分支与写压缩条目同样排进队列（排在此前的写入之后）；压缩条目是 pi 原生条目，原始消息不动（179）。
 // - 同进程对同一会话只有一个 pi 会话实例：再开写者时共用，最后一个关闭才释放锁（同一文件两个实例会各自持有 seq，交错写坏文件）。
 // 读非本进程所写的会话一律用 persistence/session-reader.ts 的只读读取器，不用这里。
 import path from "node:path";
 import {
   type AgentMessage,
   buildSessionContext,
+  type CompactionEntry,
+  type CompactResult,
   type Entry,
   type JsonlSessionMetadata,
   JsonlSessionRepo,
@@ -90,13 +93,20 @@ export interface SessionStoreWriterOptions {
   persistThinking?: boolean;
 }
 
-// 运行面写消息与自定义条目的写入面（Adapter 经它写，结构类型便于测试注入）
+// 运行面写消息与自定义条目的写入面（Adapter 经它写，结构类型便于测试注入）。
+// 上下文压缩要用的两项可缺省：缺了即不压缩（只写不读的测试替身）
 export interface SessionStoreSink extends SessionEntrySink {
   appendMessage(message: AgentMessage): void;
+  // 读主分支（从根到叶）：排在此前的写入之后；会话没打开或读失败时为 undefined
+  branch?(): Promise<Entry[] | undefined>;
+  // 写一条压缩条目（排在此前的写入之后），返回写入后的主分支；失败时为 undefined
+  appendCompaction?(result: CompactResult): Promise<Entry[] | undefined>;
 }
 
 export interface SessionStoreWriter extends SessionStoreSink {
   readonly sessionId: string;
+  branch(): Promise<Entry[] | undefined>;
+  appendCompaction(result: CompactResult): Promise<Entry[] | undefined>;
   // 等此前排队的写入全部落盘（写失败已交给 onFault，这里不拒绝）
   flush(): Promise<void>;
   // 会话文件路径；打开或新建失败时为 undefined
@@ -198,6 +208,30 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
       }
     });
   };
+  // 排进队列并取回结果：会话没打开、写者已关闭或失败时为 undefined（失败交给 onFault）
+  const request = <T>(action: string, work: (session: Session) => Promise<T>) => {
+    const { promise, resolve } = Promise.withResolvers<T | undefined>();
+    if (closed) {
+      report(options.onFault, action, new Error("写者已关闭"));
+      resolve(undefined);
+      return promise;
+    }
+    shared.tail = shared.tail.then(async () => {
+      const session = shared.session;
+      if (session === undefined) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        resolve(await work(session));
+      } catch (error) {
+        report(options.onFault, action, error);
+        resolve(undefined);
+      }
+    });
+    return promise;
+  };
+  const readBranch = (session: Session) => session.findEntriesOnBranch({ order: "oldestFirst" });
   return {
     sessionId: options.sessionId,
     appendMessage: (message) => {
@@ -220,6 +254,30 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
         return;
       }
       enqueue(action, (session) => session.appendCustomEntry(entry.customType, data));
+    },
+    branch: () => request("读主分支", readBranch),
+    appendCompaction: (result) => {
+      let entry: Omit<CompactionEntry, "id" | "parentId" | "seq" | "timestamp">;
+      try {
+        // 保留段与消息同一口径：思考不持久化时剥去，值为 undefined 的键剥掉
+        entry = stripUndefined({
+          type: "compaction",
+          summary: result.summary,
+          retainedTail: result.retainedTail.map((message) =>
+            options.persistThinking === false ? omitThinking(message) : message
+          ),
+          tokensBefore: result.tokensBefore,
+          ...(result.details !== undefined ? { details: result.details } : {}),
+          ...(result.usage !== undefined ? { usage: result.usage } : {}),
+        });
+      } catch (error) {
+        report(options.onFault, "写入压缩条目", error);
+        return Promise.resolve(undefined);
+      }
+      return request("写入压缩条目", async (session) => {
+        await session.appendEntry({ ...entry, id: session.idGenerator.next() }, "main");
+        return readBranch(session);
+      });
     },
     flush: () => shared.tail,
     filePath: async () => {

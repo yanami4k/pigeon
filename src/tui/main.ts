@@ -40,7 +40,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
   "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>]";
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>]";
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -112,6 +112,7 @@ async function main(argv: string[]): Promise<void> {
                   yolo: flags.yolo,
                   persistThinking: flags.persistThinking,
                   ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
+                  ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
                   ...(verify !== undefined ? { verify } : {}),
                 },
               }),

@@ -11,6 +11,7 @@ import {
   GATEWAY_PROVIDER,
   GATEWAY_UPSTREAM_BASE_URL,
   gatewayStreamFn,
+  resolveCompactionConfig,
 } from "../pi-runtime/index.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import {
@@ -105,8 +106,8 @@ export function streamPigeonOptions(
   return { ...pigeon, yolo: true };
 }
 
-// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位与单轮输出上限记运行时的缺省值（off、16,384），
-// 不记 null；温度没给即由服务端决定，记 null
+// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限与压缩配置记运行时的缺省值（off、16,384、
+// 产品缺省的压缩配置），不记 null；温度没给即由服务端决定，记 null
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
   return {
     provider: pigeon.provider ?? GATEWAY_PROVIDER,
@@ -114,6 +115,7 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     temperature: pigeon.temperature ?? null,
     thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
     maxOutputTokens: pigeon.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    compaction: resolveCompactionConfig(pigeon.compaction),
   };
 }
 

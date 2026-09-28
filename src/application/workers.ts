@@ -20,6 +20,7 @@ import type {
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
+import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
@@ -57,6 +58,8 @@ export interface WorkerRuntimeDeps {
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
   maxOutputTokens?: number;
+  // 决策 188、218：上下文压缩的配置——worker 按主会话同一配置跑（缺省为产品缺省）
+  compaction?: CompactionConfigInput;
   // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
   temperature?: number;
   taskDirective?: string;
@@ -99,6 +102,8 @@ export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRun
   // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
   const maxOutputTokens =
     deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
+  // 决策 188、218：worker 继承父运行面的压缩配置（显式传入时以传入值为准）；父运行面没给即产品缺省
+  const compaction = deps.compaction ?? deps.bundle.adapter.compactionConfig();
   return createWorkerRuntimeFactory({
     streamFnFor: () => deps.streamFn,
     provider: deps.provider,
@@ -112,6 +117,7 @@ export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRun
     ...(deps.startMcp !== undefined ? { startMcp: deps.startMcp } : {}),
     ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    ...(compaction !== undefined ? { compaction } : {}),
     ...(deps.roleModelOverrides !== undefined
       ? { roleModelOverrides: deps.roleModelOverrides }
       : {}),
@@ -153,6 +159,10 @@ interface RuntimeSurface {
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）；同上，只有无父会话的运行面会给
   sessionSearch?: boolean;
+  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）；worker 取主会话的配置
+  compaction?: CompactionConfigInput;
+  // 决策 192、207：压缩前回调；只有无父会话的运行面会给
+  beforeCompaction?: BeforeCompaction;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
@@ -218,6 +228,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(startMcp !== undefined ? { startMcp: () => startMcp(request) } : {}),
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
+      ...(deps.compaction !== undefined ? { compaction: deps.compaction } : {}),
       ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
       ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
@@ -245,6 +256,9 @@ export interface DetachedRuntimeRequest {
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）
   sessionSearch?: boolean;
+  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
+  compaction?: CompactionConfigInput;
+  beforeCompaction?: BeforeCompaction;
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
@@ -298,6 +312,10 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
     ...(surface.sessionSearch !== undefined ? { sessionSearch: surface.sessionSearch } : {}),
+    ...(surface.compaction !== undefined ? { compaction: surface.compaction } : {}),
+    ...(surface.beforeCompaction !== undefined
+      ? { beforeCompaction: surface.beforeCompaction }
+      : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
