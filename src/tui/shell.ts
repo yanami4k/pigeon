@@ -321,8 +321,8 @@ export class PigeonTuiShell
 
   // ---- S3 审批面板（TuiApprovalFace 实现；交互语义在 modal.ts）----
 
-  askApproval(request: ApprovalRequest): Promise<ApprovalPanelResult> {
-    return askApprovalPanel(this, request);
+  askApproval(request: ApprovalRequest, directoryGrant?: boolean): Promise<ApprovalPanelResult> {
+    return askApprovalPanel(this, request, directoryGrant);
   }
 
   // 审批结果回显（handler 在决议后调用：裁决行 / 已创建放权行）

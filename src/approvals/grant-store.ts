@@ -53,6 +53,11 @@ export class SessionGrantStore {
     }
   }
 
+  // 能否建按目录限定的放权：不能时审批不提供 [d]（决策 253）
+  get pathScoped(): boolean {
+    return this.#pathScoped;
+  }
+
   // 审批提示 [a]/[d] 键触发：先交给落盘口再入运行态（落盘口抛错则 grant 不生效）
   create(input: {
     tool: string;

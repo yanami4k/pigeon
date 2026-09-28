@@ -43,6 +43,20 @@ export interface GrantCreator {
     firstCall: { toolCallId: string; args: unknown };
     runId?: RunId;
   }): { grantId: GrantId; tool: string };
+  // 能否建按目录限定的放权（缺省能）；日常沙箱的会话不能（决策 253），审批不提供 [d]
+  readonly pathScoped?: boolean;
+}
+
+// 这次审批提供不提供 [d]（cli 与 tui 共用）：调用带 path 参数、不是 exec 档、放权落点能建目录限定的放权
+export function offersDirectoryGrant(
+  request: ApprovalRequest,
+  grants: Pick<GrantCreator, "pathScoped"> | undefined
+): boolean {
+  return (
+    request.tier !== "exec" &&
+    extractPathArg(request.args) !== undefined &&
+    grants?.pathScoped !== false
+  );
 }
 
 export interface ApprovalDecision {
@@ -97,10 +111,12 @@ export function execGrantKeyLabel(request: ApprovalRequest): string {
 
 // 放权作用域（M5.5 S5，决策 048 及其修订）：exec 档 [a]/[d] 都收窄为这条一模一样的命令串（精确匹配，§3.9
 // 第五条不动，没有目录限定），需 shell 的命令带 shell 标记；其余档 [a] 工具级、[d] 仅限当前调用所在目录
-// （决策 3a，无 path 退化为工具级）。null = exec 调用定位不到命令串，不能创建放权。cli 与 tui 共用
+// （决策 3a，无 path 退化为工具级；不提供 [d] 的会话同样退化为工具级，决策 253）。null = exec 调用定位不到命令串，
+// 不能创建放权。cli 与 tui 共用
 export function grantScopeFor(
   request: ApprovalRequest,
-  key: "a" | "d"
+  key: "a" | "d",
+  grants?: Pick<GrantCreator, "pathScoped">
 ): { pathPrefix?: string; command?: string; shell?: boolean } | null {
   if (request.tier === "exec") {
     const command = extractCommandArg(request.args);
@@ -110,7 +126,9 @@ export function grantScopeFor(
     return request.needsShell === true ? { command, shell: true } : { command };
   }
   const pathArg = extractPathArg(request.args);
-  return key === "d" && pathArg !== undefined ? { pathPrefix: dirname(pathArg) } : {};
+  return key === "d" && pathArg !== undefined && offersDirectoryGrant(request, grants)
+    ? { pathPrefix: dirname(pathArg) }
+    : {};
 }
 
 // 放权提示里的作用域后缀（cli 与 tui 共用）

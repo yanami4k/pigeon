@@ -23,10 +23,7 @@ import {
   approvalVerdict,
   workerGrantScopeNote,
 } from "../application/format.ts";
-import {
-  PathScopedGrantUnsupportedError,
-  type SessionGrantStore,
-} from "../approvals/grant-store.ts";
+import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import {
   type ApprovalDecision,
   type ApprovalHandler,
@@ -34,8 +31,8 @@ import {
   commandScopeNote,
   execCommandLine,
   execGrantKeyLabel,
-  extractPathArg,
   grantScopeFor,
+  offersDirectoryGrant,
 } from "../approvals/handler.ts";
 
 // 取消路径的逐字理由（fail-closed 按拒绝处理）
@@ -56,13 +53,17 @@ export type ApprovalPanelResult =
 // 装配顺序上 handler 先于 shell 构造（buildRuntime 收 handler 工厂），故工厂收 face
 // getter 晚绑定；getter 返回 undefined = 壳未就位（装配级故障），fail-closed
 export interface TuiApprovalFace {
-  askApproval(request: ApprovalRequest): Promise<ApprovalPanelResult>;
+  // directoryGrant：审批块提供不提供 [d]（缺省按调用带不带 path 判定）
+  askApproval(request: ApprovalRequest, directoryGrant?: boolean): Promise<ApprovalPanelResult>;
   noteApproval(line: string): void;
 }
 
 // 审批块文本：与 cli 版同口径（工具名 + exec 命令行 + pretty JSON 参数 + diff 预览 + 四键提示）；
 // [d] 仅在调用可定位目录时提供（决策 3a）；exec 档 [a] 为精确命令放权（决策 048 及其修订）
-export function approvalBlockText(request: ApprovalRequest): string {
+export function approvalBlockText(
+  request: ApprovalRequest,
+  directoryGrant: boolean = offersDirectoryGrant(request, undefined)
+): string {
   const lines = ["—— 人工审批 ——"];
   // M5.5 S3（决策 040）：worker 请求标明来源
   const source = approvalSourceLine(request);
@@ -82,7 +83,7 @@ export function approvalBlockText(request: ApprovalRequest): string {
   lines.push(
     request.tier === "exec"
       ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
-      : extractPathArg(request.args) !== undefined
+      : directoryGrant
         ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
         : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许"
   );
@@ -108,37 +109,29 @@ export function createTuiApprovalHandler(
     if (panel === undefined) {
       return { approved: false, reason: APPROVAL_CANCEL_DETACHED };
     }
-    const result = await panel.askApproval(request);
+    // 放权落点跟随请求来源——worker 请求自带其会话存储
+    const target = request.grants ?? grants;
+    // 不能建目录放权的会话（日常沙箱，决策 253）不提供 [d]
+    const result = await panel.askApproval(request, offersDirectoryGrant(request, target));
     if (result.key === "cancel") {
       panel.noteApproval(`审批结果：人工拒绝（${result.reason}）`);
       return { approved: false, reason: result.reason };
     }
     if (result.key === "a" || result.key === "d") {
       // 与 cli 版同一份放权作用域（approvals/handler.ts grantScopeFor）
-      const scope = grantScopeFor(request, result.key);
+      const scope = grantScopeFor(request, result.key, target);
       if (scope === null) {
         panel.noteApproval(verdictLine("approved", "human"));
         panel.noteApproval("定位不到命令串，未创建放权（按批准一次处理）");
         return { approved: true };
       }
-      // M5.5 S3（决策 040）：放权落点跟随请求来源——worker 请求自带其会话存储
-      const target = request.grants ?? grants;
       // 与 cli 版同一份放权语义：grant.created 事件先于运行态（store.create fail-closed）
-      let grant: ReturnType<typeof target.create>;
-      try {
-        grant = target.create({
-          tool: request.toolName,
-          ...scope,
-          firstCall: { toolCallId: request.toolCallId, args: request.args },
-          ...(request.runId !== undefined ? { runId: request.runId } : {}),
-        });
-      } catch (error) {
-        // 沙箱里不建目录限定的放权：说明原因，按批准一次处理
-        if (!(error instanceof PathScopedGrantUnsupportedError)) throw error;
-        panel.noteApproval(verdictLine("approved", "human"));
-        panel.noteApproval(`${error.message}，未创建放权（按批准一次处理）`);
-        return { approved: true };
-      }
+      const grant = target.create({
+        tool: request.toolName,
+        ...scope,
+        firstCall: { toolCallId: request.toolCallId, args: request.args },
+        ...(request.runId !== undefined ? { runId: request.runId } : {}),
+      });
       panel.noteApproval(verdictLine("approved", "human:grant"));
       panel.noteApproval(
         `已创建会话放权 ${grant.grantId}（${grant.tool}${commandScopeNote(scope)}）${workerGrantScopeNote(request)}`
