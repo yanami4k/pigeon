@@ -119,3 +119,11 @@
   - 冻结时钟下，原用例（0b3d2a6）必定失败，报错与现象相同；改后的用例通过。本机与 pigeon-verify 上结果一致。
   - 改后在 pigeon-verify 上单独运行该文件 50 次，全部通过。
 - verify（pigeon-verify，c37dce7，开跑前无其他 `node --test` 进程，测试并发 6）：一次运行全绿。lint 401 个文件 0 错误；tsc 与 depcruise 通过；测试 1141 条，1139 通过、0 失败、2 跳过，约 109 秒。
+
+## 八、真实模型端到端验证
+
+- 代码：680d50f，在 pigeon-run 数据盘上的新目录里检出，工作区干净。最简 agent 为 mini-swe-agent 2.4.6、litellm 1.102.1。
+- 命令要点：`pigeon eval stream --conditions minimal --tasks 1 --concurrency 1 --max-turns 300 --wall-clock-min 60 --spend-limit-cny 2`，镜像 `pigeon-stream-strands:v6`，基线与清单同 i1 集成冒烟。时间：2026-09-28 13:25 至约 13:37（UTC）。
+- 结果：题 1（步 3）status 为 completed，共 117 轮，hitStepBudget 为 false。要做到的 16 条通过 11 条，部分得分 0.6875；不许挂的 5470 条挂掉 0 条。经网关的请求全部被上游接受，没有 400。
+- 计费：网关累计 ¥0.3257，共 118 个请求；结果行中 gateway.costCny 为 ¥0.3257，peakInputTokens 为 87081。
+- 结束后没有残留容器。litellm 启动时去 GitHub 拉取价目表超时，退回本地备份，只输出一条警告。
