@@ -222,44 +222,75 @@ test("日常入口：推送缺省开着，--no-pushed-memory 关掉，--memory-l
   assert.throws(() => parseLaunchFlags(["--no-pushed-memory"], { usage }), /未知参数/);
 });
 
-test("worker 与常驻 Memory 同样处理：父会话推送开着，worker 的系统提示也带推送段；记忆工具照角色表不广告", async () => {
-  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-pushed-worker-")));
-  try {
-    const git = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
-    git(["init", "-q", "-b", "main"]);
-    git(["config", "user.email", "pigeon@example.invalid"]);
-    git(["config", "user.name", "pigeon-test"]);
-    writeFileSync(join(repo, "a.ts"), "alpha\n");
-    git(["add", "a.ts"]);
-    git(["commit", "-q", "-m", "init"]);
-    seed(repo);
-    const streamFn = createFakeStreamFn({ replies: [{ text: "看过了" }] });
-    const parent = buildRuntime({
-      ...deps(repo, { streamFn }),
-      learnedMemory: { conflict: "interactive" },
+// 决策 249：推送开着时三种角色的 worker 都带 update_memory，能调用并写入；推送关着时不注册
+for (const role of ["explorer", "implementer", "tester"] as const) {
+  for (const pushed of [true, false]) {
+    test(`worker（${role}）：父会话推送${pushed ? "开着，系统提示带推送段、update_memory 被广告，调用即写入学到的记忆" : "关着，没有推送段、不注册 update_memory"}`, async () => {
+      const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-pushed-worker-")));
+      try {
+        const git = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+        git(["init", "-q", "-b", "main"]);
+        git(["config", "user.email", "pigeon@example.invalid"]);
+        git(["config", "user.name", "pigeon-test"]);
+        writeFileSync(join(repo, "a.ts"), "alpha\n");
+        git(["add", "a.ts"]);
+        git(["commit", "-q", "-m", "init"]);
+        seed(repo);
+        const parentStream = createFakeStreamFn({ replies: [{ text: "好" }] });
+        const workerStream = createFakeStreamFn({
+          replies: [
+            {
+              text: "记一条",
+              toolCalls: [
+                {
+                  name: "update_memory",
+                  args: {
+                    action: "add",
+                    fact: `${role} 记下的事实`,
+                    refs: ["a.ts"],
+                    reason: "worker 发现",
+                  },
+                },
+              ],
+            },
+            { text: "记好了" },
+          ],
+        });
+        const parent = buildRuntime({
+          ...deps(repo, { streamFn: parentStream }),
+          ...(pushed ? { learnedMemory: { conflict: "interactive" as const } } : {}),
+        });
+        try {
+          const orchestrator = createSessionWorkers({
+            governanceRoot: repo,
+            bundle: parent,
+            approvals: async () => ({ approved: true }),
+            streamFn: workerStream,
+            provider: "fake-provider",
+            modelId: "fake-model",
+            homeDir: repo,
+          });
+          const workerId = orchestrator.spawn({ role, task: "记下来", name: "mem" });
+          const outcome = await orchestrator.awaitResult(workerId);
+          assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+          const [start] = runStarts(repo, workerId);
+          assert.equal(start?.systemPrompt.includes("## 学到的记忆"), pushed);
+          assert.equal(start?.advertisedTools.includes("update_memory"), pushed);
+          assert.equal(
+            readFileSync(memoryFileOf(repo), "utf8").includes(`${role} 记下的事实`),
+            pushed
+          );
+          if (pushed) {
+            assert.equal(start?.learnedMemory?.entries, 1);
+          } else {
+            assert.equal(start?.learnedMemory, undefined);
+          }
+        } finally {
+          await disposeRuntime(parent);
+        }
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
     });
-    try {
-      const orchestrator = createSessionWorkers({
-        governanceRoot: repo,
-        bundle: parent,
-        approvals: async () => ({ approved: true }),
-        streamFn,
-        provider: "fake-provider",
-        modelId: "fake-model",
-        homeDir: repo,
-      });
-      const workerId = orchestrator.spawn({ role: "explorer", task: "看一眼", name: "look" });
-      const outcome = await orchestrator.awaitResult(workerId);
-      assert.equal(outcome.status, "completed", JSON.stringify(outcome));
-      const [start] = runStarts(repo, workerId);
-      assert.ok(start?.systemPrompt.includes("## 学到的记忆"));
-      // 角色表（explorer：read_file 与两件会话检索）没有 update_memory，委派策略照表收窄
-      assert.ok(!start?.advertisedTools.includes("update_memory"));
-      assert.equal(start?.learnedMemory?.entries, 1);
-    } finally {
-      await disposeRuntime(parent);
-    }
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
   }
-});
+}
