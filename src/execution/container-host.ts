@@ -120,7 +120,7 @@ const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
 // 路径不存在时辅助脚本用的退出码
 const EXIT_MISSING = 3;
 
-interface HelperResult {
+export interface HelperResult {
   exitCode: number | null;
   stdout: Buffer;
   stderr: string;
@@ -424,6 +424,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
 }
 
+// 容器断网的 docker run 参数：跑批器的工作区容器恒用它，日常沙箱的断网档也用它
+export const NO_NETWORK_ARGS = ["--network", "none"] as const;
+
 export interface StartContainerOptions {
   image: string;
   name: string;
@@ -433,7 +436,8 @@ export interface StartContainerOptions {
   timeoutMs?: number;
 }
 
-function dockerOnce(
+// 调一次 docker CLI 并收下全部输出（沙箱的生命周期与镜像构建共用）
+export function dockerOnce(
   docker: readonly string[],
   args: readonly string[],
   timeoutMs: number,

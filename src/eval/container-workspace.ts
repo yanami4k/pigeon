@@ -1,8 +1,9 @@
 // 工作区容器的共用约束（决策 096）：出题、人的基准与延续式跑批（stream-workspace.ts）走同一套，
 // 断网（104）与清未来历史（109）只此一份实现。
+import { NO_NETWORK_ARGS } from "../execution/container-host.ts";
 
-// 工作区容器的网络：恒为无网络，不提供开关
-export const WORKSPACE_NETWORK_ARGS = ["--network", "none"] as const;
+// 工作区容器的网络：恒为无网络，不提供开关（与日常沙箱的断网档同一份参数）
+export const WORKSPACE_NETWORK_ARGS = NO_NETWORK_ARGS;
 // 调用方的附加参数里不得出现会打开网络或带入代理的选项。短选项 -p / -P 可与取值粘连（-p8080:80）；
 // 环境变量文件的内容无从检查（可能带代理），一律不收
 const NETWORK_OPENING_ARG =
