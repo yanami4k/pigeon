@@ -11,6 +11,7 @@ import {
   forkFixture,
   spawnFixtureWorker,
 } from "../application/session-store-fixtures.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import {
   FAIL_CLOSED_APPROVAL_REASON,
@@ -50,7 +51,7 @@ async function viewOf(session: FixtureSession, sessionsDir: string): Promise<Sto
 // 上游合成的失败消息：带错误文本、正文只有一个空文本块、用量全零
 const SYNTHETIC = { text: "", stopReason: "error", errorMessage: "provider 503" };
 
-test("Run 级失败分类：正常完成、撞上限中止、熔断、中止、输出截断、上游合成失败、非合成出错、没有助手消息、未收尾", async () => {
+test("Run 级失败分类：正常完成、撞上限中止、熔断、中止、输出截断、上游合成失败、非合成出错、收尾条目的停止原因优先、没有助手消息、未收尾；会话视图逐 Run 一致", async () => {
   await withSessions(async (sessionsDir, root) => {
     const s = createFixtureSession({ sessionsDir, cwd: root });
     const expected: unknown[] = [];
@@ -78,11 +79,24 @@ test("Run 级失败分类：正常完成、撞上限中止、熔断、中止、�
       { ending: "error" },
       { category: "unknown" }
     );
+    // 收尾条目记的停止原因先于末条助手消息的（运行面写出的文件里两者相同，手写的会话文件可以不同）
+    add(
+      () => s.toolTurn({ name: "edit_file" }),
+      { ending: "wall-clock-limit", stopReason: "aborted" },
+      { category: "cancelled", breaker: false }
+    );
     add(() => {}, {}, { category: "unknown" });
     add(() => s.assistant({ text: "好了" }), "none", { category: "unknown" });
     const view = await viewOf(s, sessionsDir);
     assert.deepEqual(
       view.runs.map((run) => storeRunFailure(run)),
+      expected
+    );
+    // 显示类读者的会话视图（会话列表、检索、trace）用同一份 Run 级装配，逐 Run 结果一致
+    const shown = loadSessionView(sessionsDir, view.sessionId);
+    assert.ok(shown !== undefined);
+    assert.deepEqual(
+      shown.runs.map((run) => run.failure),
       expected
     );
   });

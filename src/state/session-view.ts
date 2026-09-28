@@ -7,7 +7,7 @@
 // 分支会话文件开头是 pi 的 fork 从来源会话复制来的历史（条目号与时间戳原样），属于来源会话，不算本会话的内容：
 // 复制段止于文件头记下的分叉点（Run 开始之后按消息条数数到第 runSeq 条），投影从其后开始。
 import { Value } from "typebox/value";
-import { classifyRunOutcome, type FailureClass } from "./classification.ts";
+import type { FailureClass } from "./classification.ts";
 import { canonicalJson, sha256Hex } from "./hashing.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import {
@@ -25,7 +25,13 @@ import {
   type VerificationData,
   type WorkerData,
 } from "./session-entries.ts";
-import { type StoreToolOutcome, storeSessionView, storeToolOutcomes } from "./session-judge.ts";
+import {
+  runFailureOf,
+  type StoreMessage,
+  type StoreToolOutcome,
+  storeSessionView,
+  storeToolOutcomes,
+} from "./session-judge.ts";
 import {
   type SessionSummary,
   type SessionSummaryFailureClass,
@@ -364,17 +370,10 @@ function createdAtOf(header: SessionFileInput["header"]): number {
     : header.createdAt;
 }
 
+// Run 级分类：事实装配与判定类读者共用一处（session-judge.ts 的 runFailureOf），读末条助手消息的原始消息
 function classifyRun(run: Omit<ViewRun, "failure">): FailureClass | null {
   const lastAssistant = run.messages.findLast((message) => message.role === "assistant");
-  const stopReason = run.end?.stopReason ?? lastAssistant?.stopReason;
-  return classifyRunOutcome({
-    ...(stopReason !== undefined ? { stopReason } : {}),
-    syntheticFailure: lastAssistant !== undefined && isSyntheticFailure(lastAssistant),
-    breakerTripped: run.end?.ending === "breaker",
-    hasTurnCompleted: lastAssistant !== undefined,
-    hasRunEnded: run.end !== undefined,
-    emptyReply: run.end?.ending === "empty-reply",
-  });
+  return runFailureOf(lastAssistant?.raw as StoreMessage | undefined, run.end);
 }
 
 function customRunId(item: Exclude<ViewItem, { kind: "message" }>): string | undefined {

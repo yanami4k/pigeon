@@ -65,8 +65,11 @@ const APPROVED_BY_LABEL: Record<string, string> = {
   "policy:config": "策略放行（固化配置）",
 };
 
-// 审批决定 → 通俗措辞裁决：人工区分批准/拒绝；策略来源直接给标签（不伪装成人工）
-export function approvalVerdict(decision: ToolExecutionDecision): string {
+// 审批决定 → 通俗措辞裁决：人工区分批准/拒绝；策略来源直接给标签（不伪装成人工）。
+// 只读结果与批准来源：工具结果消息上的审批闸标记（state/session-judge.ts 的 ToolResultMark）同样适用
+export function approvalVerdict(
+  decision: Pick<ToolExecutionDecision, "outcome"> & { approvedBy: string }
+): string {
   const label = APPROVED_BY_LABEL[decision.approvedBy] ?? decision.approvedBy;
   return label === "人工" ? (decision.outcome === "approved" ? "人工批准" : "人工拒绝") : label;
 }

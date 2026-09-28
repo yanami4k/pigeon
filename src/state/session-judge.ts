@@ -348,14 +348,24 @@ function lastAssistantOf(run: StoreRun): StoreMessage | undefined {
 
 // Run 级失败分类（同 classifyRunOutcome 判据）：收尾条目即运行结束的证据，末条助手消息给停止原因与合成失败
 export function storeRunFailure(run: StoreRun): FailureClass | null {
-  const lastAssistant = lastAssistantOf(run);
+  return runFailureOf(lastAssistantOf(run), run.end);
+}
+
+// Run 级分类事实的唯一装配处：判定类读者（storeRunFailure）与显示类读者的会话视图（state/session-view.ts）都调它。
+// 停止原因先取收尾条目记的，没有再取本 Run 末条助手消息的：运行面写收尾条目时取的就是对话里末条助手消息的停止原因，
+// 本 Run 有助手消息时两者相同；本 Run 没有助手消息时判未知、不看停止原因。trace 与 replay 的 Run 头显示的也是这个值
+export function runFailureOf(
+  lastAssistant: StoreMessage | undefined,
+  end: RunEndData | undefined
+): FailureClass | null {
+  const stopReason = end?.stopReason ?? lastAssistant?.stopReason;
   return classifyRunOutcome({
-    ...(lastAssistant?.stopReason !== undefined ? { stopReason: lastAssistant.stopReason } : {}),
+    ...(stopReason !== undefined ? { stopReason } : {}),
     syntheticFailure: lastAssistant !== undefined && isSyntheticFailure(lastAssistant),
-    breakerTripped: run.end?.ending === "breaker",
+    breakerTripped: end?.ending === "breaker",
     hasTurnCompleted: lastAssistant !== undefined,
-    hasRunEnded: run.end !== undefined,
-    emptyReply: run.end?.ending === "empty-reply",
+    hasRunEnded: end !== undefined,
+    emptyReply: end?.ending === "empty-reply",
   });
 }
 
