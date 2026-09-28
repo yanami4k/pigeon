@@ -24,6 +24,7 @@ export const VALUELESS_FLAGS = new Set([
   "--no-pushed-memory",
   "--no-spawn-workers",
   "--sandbox",
+  "--sandbox-from-head",
 ]);
 
 // 日常沙箱的审批档（决策 248）：缺省全部放行（复用 yolo），可改回逐条询问
@@ -31,10 +32,14 @@ export const SANDBOX_APPROVALS = ["yolo", "prompt"] as const;
 export type SandboxApproval = (typeof SANDBOX_APPROVALS)[number];
 
 // 决策 237、246、248：--sandbox 在一次性容器里工作；--sandbox-network on|off 联网档（缺省 on，以后可加"只放行包管理源"
-// 一档而不改用法）；--sandbox-approval yolo|prompt 审批档（缺省 yolo）
+// 一档而不改用法）；--sandbox-approval yolo|prompt 审批档（缺省 yolo）。
+// 决策 278：缺省把工作目录里未提交的改动（含未被忽略的新文件）拍成快照带进容器；--sandbox-from-head 改为只从当前分支的
+// 最新提交开工（续跑不受影响：照旧从该会话交回过的分支开工）
 export interface SandboxLaunch {
   network: SandboxNetwork;
   approval: SandboxApproval;
+  // 给了 --sandbox-from-head 时为 true；缺省带快照
+  fromHead?: boolean;
 }
 
 export interface LaunchFlags {
@@ -132,6 +137,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
   let sandbox = false;
   let sandboxNetwork: SandboxNetwork | undefined;
   let sandboxApproval: SandboxApproval | undefined;
+  let sandboxFromHead = false;
   const fromEnv = env.PIGEON_STREAM_FN;
   if (fromEnv !== undefined && fromEnv !== "") {
     flags.streamFnSpec = fromEnv;
@@ -142,6 +148,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       flags.yolo = true;
     } else if (flag === "--sandbox" && options.sandbox === true) {
       sandbox = true;
+    } else if (flag === "--sandbox-from-head" && options.sandbox === true) {
+      sandboxFromHead = true;
     } else if (flag === "--sandbox-network" && options.sandbox === true) {
       const value = argv[++i];
       if (value === undefined || !(SANDBOX_NETWORKS as readonly string[]).includes(value)) {
@@ -263,11 +271,17 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     }
   }
   if (sandbox) {
-    flags.sandbox = { network: sandboxNetwork ?? "on", approval: sandboxApproval ?? "yolo" };
+    flags.sandbox = {
+      network: sandboxNetwork ?? "on",
+      approval: sandboxApproval ?? "yolo",
+      ...(sandboxFromHead ? { fromHead: true } : {}),
+    };
     // 沙箱里的审批（决策 248）：缺省全部放行，复用 yolo；--sandbox-approval prompt 改回逐条询问（另给 --yolo 仍放行）
     flags.yolo = flags.yolo || flags.sandbox.approval === "yolo";
-  } else if (sandboxNetwork !== undefined || sandboxApproval !== undefined) {
-    throw new Error(`--sandbox-network 与 --sandbox-approval 只配合 --sandbox 用（${usage}）`);
+  } else if (sandboxNetwork !== undefined || sandboxApproval !== undefined || sandboxFromHead) {
+    throw new Error(
+      `--sandbox-network、--sandbox-approval 与 --sandbox-from-head 只配合 --sandbox 用（${usage}）`
+    );
   }
   return flags;
 }

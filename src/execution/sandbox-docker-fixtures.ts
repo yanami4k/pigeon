@@ -1,7 +1,9 @@
 // 测试夹具：模拟日常沙箱用到的 docker 子命令的假 docker CLI。容器的状态（名字、标签、run 参数、镜像）记在一个 JSON 文件里；
 // exec 在 -w 给出的本机目录里直接运行（"容器内"路径即本机路径），git、sh 都是本机的真程序。只供测试使用。
-//   version / image inspect / pull / build / run / exec / ps / rm / restart
+//   version / image inspect / pull / build / run / exec / ps / rm / restart / volume rm / system df
 // 镜像是否带 git 由状态里的 noGit 名单决定：名单里的镜像，exec git 按 OCI 运行时"找不到程序"失败。
+// 卷：run 带 -v <名>:<路径> 时自动建卷（与真 docker 一致）；volume rm 在有容器挂着时按"volume is in use"失败；
+// system df -v --format '{{json .Volumes}}' 按真 docker 的字段名（Name、Size、Links）输出卷清单。
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,13 +39,15 @@ if (sub === "build") {
 }
 if (sub === "run") {
   let i = 1; let name; const labels = {};
-  const valued = new Set(["--name", "--label", "--user", "-e", "--network", "--memory"]);
+  const valued = new Set(["--name", "--label", "--user", "-e", "--network", "--memory", "-v", "--mount"]);
+  const volumes = [];
   for (; i < args.length; i++) {
     const a = args[i];
     if (a === "-d" || a === "--init") continue;
     if (valued.has(a)) {
       if (a === "--name") name = args[i + 1];
       if (a === "--label") { const [k, ...v] = args[i + 1].split("="); labels[k] = v.join("="); }
+      if (a === "-v") volumes.push(args[i + 1].split(":")[0]);
       i++; continue;
     }
     break;
@@ -51,8 +55,21 @@ if (sub === "run") {
   const image = args[i];
   if (state.containers[name] !== undefined) fail(125, "Error response from daemon: Conflict. The container name is already in use");
   if (!state.images.includes(image) && !state.pullable.includes(image)) fail(125, "Unable to find image " + image);
-  state.containers[name] = { image, labels, args, state: "running" };
+  for (const v of volumes) { if (state.volumes[v] === undefined) state.volumes[v] = { size: "0B" }; }
+  state.containers[name] = { image, labels, args, state: "running", volumes };
   save(); process.stdout.write("0123456789ab\\n"); process.exit(0);
+}
+const volumeUsers = (v) => Object.entries(state.containers).filter(([, c]) => (c.volumes ?? []).includes(v)).map(([n]) => n);
+if (sub === "volume" && args[1] === "rm") {
+  const v = args[args.length - 1];
+  if (state.volumes[v] === undefined) fail(1, "Error response from daemon: get " + v + ": no such volume");
+  const users = volumeUsers(v);
+  if (users.length > 0) fail(1, "Error response from daemon: remove " + v + ": volume is in use - [" + users.join(", ") + "]");
+  delete state.volumes[v]; state.removedVolumes.push(v); save(); process.exit(0);
+}
+if (sub === "system" && args[1] === "df") {
+  const rows = Object.entries(state.volumes).map(([v, info]) => ({ Name: v, Size: info.size, Links: String(volumeUsers(v).length), Driver: "local" }));
+  process.stdout.write(JSON.stringify(rows) + "\\n"); process.exit(0);
 }
 if (sub === "rm") {
   const name = args[args.length - 1];
@@ -106,6 +123,8 @@ export interface FakeContainer {
   labels: Record<string, string>;
   args: string[];
   state: string;
+  // run 时挂的卷名
+  volumes?: string[];
 }
 
 export interface FakeDockerState {
@@ -117,6 +136,9 @@ export interface FakeDockerState {
   builds: string[][];
   containers: Record<string, FakeContainer>;
   removed: string[];
+  // 卷：名字 → docker system df 报的占用
+  volumes: Record<string, { size: string }>;
+  removedVolumes: string[];
   calls: string[][];
 }
 
@@ -126,6 +148,9 @@ export interface FakeSandboxDocker {
   containerRoot: string;
   // 该目录的本机路径
   localRoot: string;
+  // "容器内"的缓存卷挂载点（本机临时目录，Windows 上取 MSYS 形式）与其本机路径
+  cacheRoot: string;
+  localCacheRoot: string;
   state(): FakeDockerState;
   update(change: (state: FakeDockerState) => void): void;
   cleanup(): void;
@@ -137,6 +162,7 @@ export function fakeSandboxDocker(initial: Partial<FakeDockerState> = {}): FakeS
   const script = join(dir, "docker.mjs");
   const stateFile = join(dir, "state.json");
   const localRoot = join(dir, "container-workspace");
+  const localCacheRoot = join(dir, "container-cache");
   writeFileSync(script, SANDBOX_DOCKER);
   const state: FakeDockerState = {
     images: ["sandbox-test:latest"],
@@ -147,26 +173,29 @@ export function fakeSandboxDocker(initial: Partial<FakeDockerState> = {}): FakeS
     builds: [],
     containers: {},
     removed: [],
+    volumes: {},
+    removedVolumes: [],
     calls: [],
     ...initial,
   };
   writeFileSync(stateFile, JSON.stringify(state));
-  const containerRoot =
+  // Windows 上"容器内"路径取 MSYS 形式（sh 脚本里的 mkdir、git 都认）
+  const insideForm = (local: string): string =>
     process.platform === "win32"
-      ? execFileSync(
-          "sh",
-          ["-c", 'mkdir -p -- "$1" && cd -- "$1" && readlink -f .', "sh", localRoot],
-          {
-            encoding: "utf8",
-          }
-        ).trim()
-      : localRoot;
+      ? execFileSync("sh", ["-c", 'mkdir -p -- "$1" && cd -- "$1" && readlink -f .', "sh", local], {
+          encoding: "utf8",
+        }).trim()
+      : local;
+  const containerRoot = insideForm(localRoot);
+  const cacheRoot = insideForm(localCacheRoot);
   const read = (): FakeDockerState =>
     JSON.parse(readFileSync(stateFile, "utf8")) as FakeDockerState;
   return {
     docker: [process.execPath, script, stateFile],
     containerRoot,
     localRoot,
+    cacheRoot,
+    localCacheRoot,
     state: read,
     update(change) {
       const current = read();

@@ -1,13 +1,18 @@
 // 日常沙箱（决策 237、245–248）：日常入口（终端界面、命令行对话、pigeon run）可选在一个一次性的 Docker 容器里工作。
 // 本模块只管容器的生命周期与改动交回，工具经容器执行端（container-host.ts）读写与执行；会话文件、.pigeon/learned 等
 // 仍在宿主的治理根，不进容器。
-//   开工：从当前分支的 HEAD（续跑时从该会话交回过的分支）打 git bundle，经标准输入送进新容器，在容器里建仓库并检出到
-//         pigeon/sandbox-<会话号>；工作目录里未提交的改动不带进去（开工时提示一行）。容器以非 root 用户运行，
+//   开工（278）：缺省把工作目录里未提交的改动（含未被 .gitignore 忽略的新文件）拍成以 HEAD 为父的快照提交（workdir-snapshot.ts，
+//         引用 refs/pigeon/sandbox-start/<会话号>），从它打 git bundle，经标准输入送进新容器，在容器里建仓库并检出到
+//         pigeon/sandbox-<会话号>；开工时提示带入了几个未提交的文件，没有未提交改动时直接从 HEAD 起步、不提示。
+//         fromHead 改为只从当前分支的最新提交开工；续跑照旧从该会话交回过的分支开工。容器以非 root 用户运行，
 //         带 pigeon.sandbox 标签（值为会话号），便于识别与清理。镜像须有 git，开工时检查。
+//   缓存（280）：所有项目与沙箱共用一个 Docker 卷 pigeon-sandbox-cache，挂到容器的 /pigeon-cache，npm、pnpm、yarn、pip、uv、
+//         cargo、go 的下载缓存经环境变量指到卷里各自的子目录；目录由 root 建好交给运行用户。断网档照样挂，缓存里有的包能装。
+//         不缓存装好的依赖目录。清空与查看占用的命令在 pigeon sandbox 下。
 //   交回（245）：容器内把改动提交到 pigeon/sandbox-<会话号>，打 bundle 取出，在宿主仓库 git fetch 成同名分支。不动
-//         当前分支、工作目录与未提交的改动，不经网络，不自动推送。
-//   收尾：交回一次后删除容器；交回失败即保留容器，改动还在里面。
-//   残留：进程异常退出留下的带标签容器，开沙箱时列出并给出清理命令，不自动删除。
+//         当前分支、工作目录与未提交的改动，不经网络，不自动推送。交回的分支 = 快照提交 + agent 的提交（提示里说明）。
+//   收尾：交回一次后删除容器，快照引用随之删除（快照提交已由交回的分支引用）；交回失败即保留容器与引用，改动还在里面。
+//   残留：进程异常退出留下的带标签容器，开沙箱时列出并给出清理命令，不自动删除；清理时连同其快照引用一并删除。
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -27,6 +32,7 @@ import {
   resolveSandboxImage,
   type SandboxImageSpec,
 } from "./sandbox-image.ts";
+import { deleteSnapshotRef, snapshotWorkdir } from "./workdir-snapshot.ts";
 
 // 联网档位（246）：缺省联网，可改为断网；以后可加"只放行包管理源"一档而不改用法
 export const SANDBOX_NETWORKS = ["on", "off"] as const;
@@ -45,6 +51,49 @@ export const SANDBOX_FALLBACK_USER = "1000:1000";
 const SANDBOX_COMMITTER = { name: "pigeon", email: "pigeon@sandbox.invalid" };
 // 送入与取出 bundle、建仓库这类较重操作的超时
 const HEAVY_TIMEOUT_MS = 900_000;
+
+// 决策 278：开工快照的引用（挂在 refs/pigeon/ 下防止被 git 回收；随沙箱会话收尾或残留清理一并删除）
+export const SANDBOX_START_REF_PREFIX = "refs/pigeon/sandbox-start/";
+
+export function sandboxStartRef(sessionId: string): string {
+  return `${SANDBOX_START_REF_PREFIX}${sessionId}`;
+}
+
+// 决策 280：所有项目与沙箱共用的下载缓存卷，及其在容器里的挂载点
+export const SANDBOX_CACHE_VOLUME = "pigeon-sandbox-cache";
+export const SANDBOX_CACHE_ROOT = "/pigeon-cache";
+// 卷下各包管理器的子目录
+export const SANDBOX_CACHE_DIRS = ["npm", "pnpm", "yarn", "pip", "uv", "cargo", "go"] as const;
+
+// 把各包管理器的下载缓存指到卷里各自子目录的环境变量（随 docker run 进容器，之后每次 exec 都带着）
+export function sandboxCacheEnv(root: string = SANDBOX_CACHE_ROOT): Record<string, string> {
+  return {
+    npm_config_cache: `${root}/npm`,
+    // pnpm 读 npm 风格的环境变量：内容可寻址存储放卷里（与项目不在同一文件系统时 pnpm 自行改为复制）
+    npm_config_store_dir: `${root}/pnpm/store`,
+    // yarn 1 的缓存目录；yarn 2+ 缺省用全局目录下的 cache
+    YARN_CACHE_FOLDER: `${root}/yarn/cache`,
+    YARN_GLOBAL_FOLDER: `${root}/yarn/berry`,
+    PIP_CACHE_DIR: `${root}/pip`,
+    UV_CACHE_DIR: `${root}/uv`,
+    // cargo 没有单独的缓存目录变量：整个 CARGO_HOME（registry 与 git 缓存所在）指到卷里
+    CARGO_HOME: `${root}/cargo`,
+    GOMODCACHE: `${root}/go/mod`,
+    GOCACHE: `${root}/go/build`,
+  };
+}
+
+// docker run 的缓存参数：挂卷，加上指向卷的环境变量
+export function sandboxCacheArgs(
+  volume: string = SANDBOX_CACHE_VOLUME,
+  root: string = SANDBOX_CACHE_ROOT
+): string[] {
+  return [
+    "-v",
+    `${volume}:${root}`,
+    ...Object.entries(sandboxCacheEnv(root)).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+  ];
+}
 
 export function sandboxBranch(sessionId: string): string {
   return `pigeon/sandbox-${sessionId}`;
@@ -66,6 +115,15 @@ export interface SandboxExport {
   changed: boolean;
   // 查看改动的命令
   viewCommand: string;
+  // 决策 278：分支第一条提交是开箱时未提交改动的快照时在场（该快照提交号）
+  snapshotCommit?: string;
+}
+
+// 决策 278：开工时带入的未提交改动
+export interface SandboxStartSnapshot {
+  commit: string;
+  // 带入的未提交文件（仓库相对路径，含新建与删除的）
+  files: string[];
 }
 
 export interface Sandbox {
@@ -76,9 +134,13 @@ export interface Sandbox {
   readonly network: SandboxNetwork;
   // 开工时宿主当前分支名（分离头指针时为短提交号）：查看命令以它为比较基准
   readonly baseLabel: string;
-  // 起点：新开时为宿主当前分支，续跑时为交回过的沙箱分支；及其提交
+  // 起点：新开时为宿主当前分支，续跑时为交回过的沙箱分支；及其提交（带了快照时为快照提交）
   readonly startLabel: string;
   readonly startCommit: string;
+  // 决策 278：开工时带入的未提交改动的快照；没有未提交改动、fromHead 或续跑时缺省
+  readonly startSnapshot?: SandboxStartSnapshot;
+  // 决策 280：挂进容器的共用下载缓存卷
+  readonly cacheVolume: string;
   // 工具经它读写容器里的工作区
   readonly host: WorkspaceHost;
   // 把改动交回成宿主仓库里的 pigeon/sandbox-<会话号>（会话中可多次调用）
@@ -96,12 +158,17 @@ export interface OpenSandboxOptions {
   network: SandboxNetwork;
   // 续跑：从该会话交回过的 pigeon/sandbox-<会话号> 起步
   resume?: boolean;
+  // 决策 278：只从当前分支的最新提交开工，不带未提交的改动（缺省带）；续跑不看这一项
+  fromHead?: boolean;
   // 镜像来源（缺省按项目的 .pigeon/sandbox.json 与环境变量解析）
   image?: SandboxImageSpec;
   docker?: readonly string[];
   // 容器内的工作区根（缺省 /workspace；测试的假 docker 指到本机临时目录）
   containerRoot?: string;
-  // 开工时给人看的提示（未提交改动、残留容器、首次构建镜像）
+  // 决策 280：共用下载缓存卷的名字与容器里的挂载点（缺省 pigeon-sandbox-cache 与 /pigeon-cache；测试改到别处）
+  cacheVolume?: string;
+  cacheRoot?: string;
+  // 开工时给人看的提示（带入的未提交改动、残留容器、首次构建镜像）
   log?: (line: string) => void;
 }
 
@@ -219,7 +286,8 @@ export async function findResidualSandboxes(
   return (await listSandboxContainers(docker)).filter((info) => isResidualSandbox(info, probe));
 }
 
-// 清理命令：只删残留容器，在用的不动；返回删掉的容器名
+// 清理命令：只删残留容器，在用的不动；返回删掉的容器名。决策 278：连同该会话在宿主仓库里的开工快照引用一并删除
+//（仓库路径取自容器标签；仓库已不在或引用本就没有都不算错）
 export async function cleanResidualSandboxes(
   docker: readonly string[] = ["docker"],
   probe?: Parameters<typeof isResidualSandbox>[1]
@@ -227,11 +295,85 @@ export async function cleanResidualSandboxes(
   const residual = await findResidualSandboxes(docker, probe);
   for (const info of residual) {
     await removeWorkspaceContainer(info.name, docker);
+    if (info.repo !== undefined && info.sessionId !== "") {
+      try {
+        deleteSnapshotRef(info.repo, sandboxStartRef(info.sessionId));
+      } catch {
+        // 仓库已不在或不是 git 仓库：没有引用可删
+      }
+    }
   }
   return residual.map((info) => info.name);
 }
 
 export const SANDBOX_CLEAN_COMMAND = "pigeon sandbox clean";
+// 决策 280：查看与清空共用下载缓存的命令
+export const SANDBOX_CACHE_COMMAND = "pigeon sandbox cache";
+export const SANDBOX_CLEAR_CACHE_COMMAND = "pigeon sandbox clear-cache";
+
+export interface CacheVolumeInfo {
+  volume: string;
+  exists: boolean;
+  // docker 报的占用（如 1.2GB）与正在使用它的容器数；卷不存在时缺省
+  size?: string;
+  links?: number;
+}
+
+// 查看缓存卷的占用：docker system df -v 的卷清单里找这一个
+export async function inspectCacheVolume(
+  docker: readonly string[] = ["docker"],
+  volume: string = SANDBOX_CACHE_VOLUME
+): Promise<CacheVolumeInfo> {
+  const result = await dockerOnce(
+    docker,
+    ["system", "df", "-v", "--format", "{{json .Volumes}}"],
+    120_000
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`查看缓存卷失败：${result.stderr.trim()}`);
+  }
+  let entries: unknown;
+  try {
+    entries = JSON.parse(result.stdout.toString("utf8").trim() || "[]");
+  } catch (error) {
+    throw new Error(
+      `读不懂 docker system df 的输出：${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const found = Array.isArray(entries)
+    ? (entries as Array<Record<string, unknown>>).find((entry) => entry.Name === volume)
+    : undefined;
+  if (found === undefined) {
+    return { volume, exists: false };
+  }
+  const links = Number(found.Links);
+  return {
+    volume,
+    exists: true,
+    size: typeof found.Size === "string" ? found.Size : String(found.Size ?? ""),
+    ...(Number.isInteger(links) ? { links } : {}),
+  };
+}
+
+// 清空缓存：删掉整个卷（下次开沙箱自动重建）；卷不存在视为本就是空的；有容器在用时报错说明
+export async function clearCacheVolume(
+  docker: readonly string[] = ["docker"],
+  volume: string = SANDBOX_CACHE_VOLUME
+): Promise<"removed" | "absent"> {
+  const result = await dockerOnce(docker, ["volume", "rm", volume], 120_000);
+  if (result.exitCode === 0) {
+    return "removed";
+  }
+  if (/no such volume/i.test(result.stderr)) {
+    return "absent";
+  }
+  if (/volume is in use/i.test(result.stderr)) {
+    throw new Error(
+      `缓存卷 ${volume} 正被沙箱容器使用，不能清空：请先结束在跑的沙箱会话（残留的用 ${SANDBOX_CLEAN_COMMAND} 清理）再试`
+    );
+  }
+  throw new Error(`清空缓存卷 ${volume} 失败：${result.stderr.trim()}`);
+}
 
 export function residualNotice(residual: readonly SandboxContainerInfo[]): string {
   const names = residual.map((info) => `${info.name}（会话 ${info.sessionId || "未知"}）`);
@@ -276,11 +418,27 @@ const BUNDLE_SCRIPT = [
   'rm -f "$b"',
 ].join("\n");
 
+// 由 root 准备目录：工作区目录（$1）建好交给运行用户（$2）；缓存卷（$3）下各包管理器的子目录建好，卷的属主不是运行用户时
+// （新建的卷由 root 所有，或上次以别的 uid 运行过）整卷交给运行用户
+const PREPARE_SCRIPT = [
+  "set -e",
+  'mkdir -p "$1" && chown "$2" "$1"',
+  'root="$3"; shift 3',
+  'for d in "$@"; do mkdir -p "$root/$d"; done',
+  'if [ "$(stat -c %u "$root")" != "$2" ]; then chown -R "$2" "$root"; fi',
+]
+  .join("\n")
+  // $2 在 shift 之后已经不是 uid：把 uid 先存起来
+  .replace('root="$3"; shift 3', 'uid="$2"; root="$3"; shift 3')
+  .replace('!= "$2" ]; then chown -R "$2"', '!= "$uid" ]; then chown -R "$uid"');
+
 export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox> {
   const docker = options.docker ?? ["docker"];
   const log = options.log ?? (() => {});
   const { sessionId, network } = options;
   const branch = sandboxBranch(sessionId);
+  const cacheVolume = options.cacheVolume ?? SANDBOX_CACHE_VOLUME;
+  const cacheRoot = options.cacheRoot ?? SANDBOX_CACHE_ROOT;
   await assertDockerAvailable(docker);
 
   // 项目须是有提交的 git 仓库（245）：改动以分支交回，没有仓库就无处交回
@@ -309,10 +467,18 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     log(residualNotice(residual));
   }
 
+  // 镜像先就位（首次构建可能要几分钟）：之后再拍快照，快照引用不会因镜像构建或拉取失败而留下
+  const spec =
+    options.image ?? resolveSandboxImage(options.repoRoot, loadSandboxConfig(options.repoRoot));
+  const image = await ensureSandboxImage(spec, { docker, log });
+  const runAsFallbackUser = await imageRunsAsRoot(image, docker, log);
+
   const branchLabel = hostGit(repo, ["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim();
   const baseLabel = branchLabel !== "" ? branchLabel : head.stdout.trim().slice(0, 12);
+  const startRefName = sandboxStartRef(sessionId);
   let startRef: string;
   let startCommit: string;
+  let startSnapshot: SandboxStartSnapshot | undefined;
   if (options.resume === true) {
     // 续跑：从该会话交回过的分支接着干
     const tip = hostGit(repo, ["rev-parse", "--verify", "-q", `refs/heads/${branch}^{commit}`]);
@@ -324,21 +490,51 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     }
     startRef = `refs/heads/${branch}`;
     startCommit = tip.stdout.trim();
-  } else {
+    // 上次进程异常退出留下的开工快照引用已无用（快照在交回的分支里）
+    try {
+      deleteSnapshotRef(repo, startRefName);
+    } catch {
+      // 引用删不掉不挡续跑
+    }
+  } else if (options.fromHead === true) {
     startRef = "HEAD";
     startCommit = head.stdout.trim();
     const dirty = hostGit(repo, ["status", "--porcelain"]);
     if (dirty.code === 0 && dirty.stdout.trim() !== "") {
       log(
-        `工作目录有未提交的改动，这些改动不会带进沙箱（沙箱从 ${baseLabel} 的最新提交 ${startCommit.slice(0, 12)} 起步）`
+        `工作目录有未提交的改动，按参数不带进沙箱（沙箱从 ${baseLabel} 的最新提交 ${startCommit.slice(0, 12)} 起步）`
       );
     }
+  } else {
+    // 决策 278：把工作目录里未提交的改动（含未被忽略的新文件）拍成快照，容器从它起步
+    let snap: ReturnType<typeof snapshotWorkdir>;
+    try {
+      snap = snapshotWorkdir({ repoRoot: repo, ref: startRefName });
+    } catch (error) {
+      throw new Error(
+        `拍工作目录快照失败，沙箱没有开：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (snap.snapshot && snap.ref !== undefined) {
+      startRef = snap.ref;
+      startCommit = snap.commit;
+      startSnapshot = { commit: snap.commit, files: snap.files };
+      log(`已带入 ${snap.files.length} 个未提交的文件（含新建文件）`);
+    } else {
+      startRef = "HEAD";
+      startCommit = head.stdout.trim();
+    }
   }
-
-  const spec =
-    options.image ?? resolveSandboxImage(options.repoRoot, loadSandboxConfig(options.repoRoot));
-  const image = await ensureSandboxImage(spec, { docker, log });
-  const runAsFallbackUser = await imageRunsAsRoot(image, docker, log);
+  // 开工中途失败时把快照引用删掉（快照提交没有别的引用，留着只是垃圾）
+  const dropStartRef = (): void => {
+    if (startSnapshot !== undefined) {
+      try {
+        deleteSnapshotRef(repo, startRefName);
+      } catch {
+        // 引用删不掉不影响结果
+      }
+    }
+  };
 
   const bundleDir = mkdtempSync(path.join(os.tmpdir(), "pigeon-sandbox-"));
   let bundle: Buffer;
@@ -349,6 +545,9 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
       throw new Error(`打包起点失败：${created.stderr.trim()}`);
     }
     bundle = readFileSync(bundleFile);
+  } catch (error) {
+    dropStartRef();
+    throw error;
   } finally {
     rmSync(bundleDir, { recursive: true, force: true });
   }
@@ -356,30 +555,41 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
   const container = sandboxContainerName(sessionId);
   const existing = await listSandboxContainers(docker);
   if (existing.some((info) => info.name === container)) {
+    dropStartRef();
     throw new Error(
       `已有同名沙箱容器 ${container}（上次进程异常退出留下的？）：里面可能有没交回的改动。` +
         `可用 docker exec 自取，确认不要后执行 ${SANDBOX_CLEAN_COMMAND}，再重开`
     );
   }
-  await startWorkspaceContainer({
-    image,
-    name: container,
-    docker,
-    runArgs: [
-      ...sandboxNetworkArgs(network),
-      "--label",
-      `${SANDBOX_LABEL}=${sessionId}`,
-      "--label",
-      `${SANDBOX_PID_LABEL}=${process.pid}`,
-      "--label",
-      `${SANDBOX_HOST_LABEL}=${os.hostname()}`,
-      "--label",
-      `${SANDBOX_REPO_LABEL}=${repo}`,
-      // 以非 root 用户运行；家目录用 /tmp（任何镜像里都可写）
-      ...(runAsFallbackUser ? ["--user", SANDBOX_FALLBACK_USER, "-e", "HOME=/tmp"] : []),
-    ],
-  });
-  const discard = () => removeWorkspaceContainer(container, docker);
+  try {
+    await startWorkspaceContainer({
+      image,
+      name: container,
+      docker,
+      runArgs: [
+        ...sandboxNetworkArgs(network),
+        "--label",
+        `${SANDBOX_LABEL}=${sessionId}`,
+        "--label",
+        `${SANDBOX_PID_LABEL}=${process.pid}`,
+        "--label",
+        `${SANDBOX_HOST_LABEL}=${os.hostname()}`,
+        "--label",
+        `${SANDBOX_REPO_LABEL}=${repo}`,
+        // 决策 280：共用下载缓存卷（断网档照样挂）
+        ...sandboxCacheArgs(cacheVolume, cacheRoot),
+        // 以非 root 用户运行；家目录用 /tmp（任何镜像里都可写）
+        ...(runAsFallbackUser ? ["--user", SANDBOX_FALLBACK_USER, "-e", "HOME=/tmp"] : []),
+      ],
+    });
+  } catch (error) {
+    dropStartRef();
+    throw error;
+  }
+  const discard = async (): Promise<void> => {
+    await removeWorkspaceContainer(container, docker);
+    dropStartRef();
+  };
   try {
     // 镜像须有 git（247）：建仓库与交回都靠它
     const git = await containerExec({ container, docker, command: ["git", "--version"] });
@@ -394,15 +604,24 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     if (uid.exitCode !== 0) {
       throw new Error(`取容器用户失败：${uid.stderr.trim()}`);
     }
-    // 工作区目录由 root 建好、交给运行用户
+    // 工作区目录与缓存卷下的各子目录由 root 建好、交给运行用户
     const prepared = await containerExec({
       container,
       docker,
       user: "0",
-      command: ["sh", "-c", 'mkdir -p "$1" && chown "$2" "$1"', "sh", cloneRoot, uid.stdout.trim()],
+      command: [
+        "sh",
+        "-c",
+        PREPARE_SCRIPT,
+        "sh",
+        cloneRoot,
+        uid.stdout.trim(),
+        cacheRoot,
+        ...SANDBOX_CACHE_DIRS,
+      ],
     });
     if (prepared.exitCode !== 0) {
-      throw new Error(`准备工作区目录失败：${prepared.stderr.trim()}`);
+      throw new Error(`准备工作区与缓存目录失败：${prepared.stderr.trim()}`);
     }
     const cloned = await containerExec({
       container,
@@ -483,6 +702,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
       commit,
       changed: commit !== startCommit,
       viewCommand: `git diff ${baseLabel}..${branch}`,
+      ...(startSnapshot !== undefined ? { snapshotCommit: startSnapshot.commit } : {}),
     };
   };
 
@@ -495,6 +715,8 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     baseLabel,
     startLabel: options.resume === true ? branch : baseLabel,
     startCommit,
+    ...(startSnapshot !== undefined ? { startSnapshot } : {}),
+    cacheVolume,
     host,
     exportChanges,
     async close() {
@@ -542,9 +764,12 @@ async function imageRunsAsRoot(
   return user === "" || /^(root|0)(:(root|0))?$/.test(user);
 }
 
-// 交回后给人看的一行：分支名与查看命令
+// 交回后给人看的一行：分支名与查看命令。决策 278：分支第一条提交是开箱时的未提交改动时加一句，提醒合并前先收起本地的这份改动
 export function exportNotice(result: SandboxExport): string {
-  return result.changed
+  const main = result.changed
     ? `沙箱改动已交回到分支 ${result.branch}（${result.commit.slice(0, 12)}）；查看：${result.viewCommand}`
     : `沙箱里没有改动；分支 ${result.branch} 指向起点 ${result.commit.slice(0, 12)}`;
+  return result.snapshotCommit !== undefined
+    ? `${main}。分支第一条提交（${result.snapshotCommit.slice(0, 12)}）是开箱时的未提交改动；合并前先把本地这份未提交改动收起（stash 或丢弃）`
+    : main;
 }

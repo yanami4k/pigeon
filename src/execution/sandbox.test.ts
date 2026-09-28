@@ -7,13 +7,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   cleanResidualSandboxes,
+  exportNotice,
   findResidualSandboxes,
   type OpenSandboxOptions,
   openSandbox,
+  SANDBOX_CACHE_DIRS,
   SANDBOX_CLEAN_COMMAND,
+  sandboxCacheEnv,
   sandboxNetworkArgs,
+  sandboxStartRef,
 } from "./sandbox.ts";
 import { type FakeSandboxDocker, fakeSandboxDocker } from "./sandbox-docker-fixtures.ts";
+import { readSnapshotRef } from "./workdir-snapshot.ts";
 
 const IMAGE = { kind: "image", image: "sandbox-test:latest" } as const;
 
@@ -45,6 +50,7 @@ function options(
     image: IMAGE,
     docker: fake.docker,
     containerRoot: fake.containerRoot,
+    cacheRoot: fake.cacheRoot,
     ...extra,
   };
 }
@@ -61,20 +67,29 @@ async function inContainer(
   assert.equal(result.exitCode, 0, result.output);
 }
 
-test("开沙箱从当前分支 HEAD 起步、带会话号标签；交回成 pigeon/sandbox-<会话号>，不动当前分支、工作目录与未提交改动", async () => {
+test("开沙箱缺省带入未提交的改动（含新建文件，不含被忽略的）：容器从以 HEAD 为父的快照起步、带会话号标签；交回的分支 = 快照 + agent 的提交，不动当前分支、工作目录与未提交改动；快照引用随收尾删除", async () => {
   const repo = makeRepo();
   const fake = fakeSandboxDocker();
   try {
-    // 宿主上有未提交的改动与未跟踪的文件
+    // 宿主上有未提交的改动、未跟踪的文件，以及被 .gitignore 忽略的文件
     writeFileSync(join(repo, "a.txt"), "dirty\n");
     writeFileSync(join(repo, "u.txt"), "untracked\n");
+    writeFileSync(join(repo, ".gitignore"), "*.log\n");
+    writeFileSync(join(repo, "debug.log"), "ignored\n");
+    const head = git(repo, "rev-parse", "HEAD");
     const lines: string[] = [];
     const sandbox = await openSandbox(
       options(fake, repo, "sess_T1", { log: (line) => lines.push(line) })
     );
-    assert.ok(
-      lines.some((line) => line.includes("不会带进沙箱")),
-      `应提示未提交改动不带进沙箱：${lines.join("｜")}`
+    assert.ok(lines.includes("已带入 3 个未提交的文件（含新建文件）"), lines.join("｜"));
+    assert.ok(sandbox.startSnapshot !== undefined, "带了快照");
+    assert.deepEqual(sandbox.startSnapshot.files, [".gitignore", "a.txt", "u.txt"]);
+    assert.equal(sandbox.startCommit, sandbox.startSnapshot.commit);
+    assert.equal(git(repo, "rev-parse", `${sandbox.startCommit}^`), head, "快照以 HEAD 为父");
+    assert.equal(
+      readSnapshotRef(repo, sandboxStartRef("sess_T1")),
+      sandbox.startCommit,
+      "会话中引用钉着快照提交"
     );
     const container = fake.state().containers["pigeon-sandbox-sess_T1"];
     assert.ok(container !== undefined);
@@ -82,9 +97,11 @@ test("开沙箱从当前分支 HEAD 起步、带会话号标签；交回成 pige
     assert.equal(container.labels["pigeon.sandbox.pid"], String(process.pid));
     // 镜像本身以非 root 用户运行：不另指定用户
     assert.equal(container.args.includes("--user"), false);
-    // 容器里是 HEAD 的内容，未提交改动与未跟踪文件都没带进去
-    assert.equal(readFileSync(join(fake.localRoot, "a.txt"), "utf8"), "one\n");
-    assert.equal(existsSync(join(fake.localRoot, "u.txt")), false);
+    // 容器里是快照的内容：改动与新建文件都带进去了，被忽略的文件没带
+    assert.equal(readFileSync(join(fake.localRoot, "a.txt"), "utf8"), "dirty\n");
+    assert.equal(readFileSync(join(fake.localRoot, "u.txt"), "utf8"), "untracked\n");
+    assert.equal(existsSync(join(fake.localRoot, "debug.log")), false, "被忽略的文件不带");
+    assert.equal(git(fake.localRoot, "rev-parse", "HEAD"), sandbox.startCommit);
     assert.equal(git(fake.localRoot, "symbolic-ref", "HEAD"), "refs/heads/pigeon/sandbox-sess_T1");
 
     await inContainer(sandbox, "printf changed > a.txt && printf new > b.txt");
@@ -93,30 +110,174 @@ test("开沙箱从当前分支 HEAD 起步、带会话号标签；交回成 pige
       branch: git(repo, "symbolic-ref", "HEAD"),
       status: git(repo, "status", "--porcelain"),
       a: readFileSync(join(repo, "a.txt"), "utf8"),
+      u: readFileSync(join(repo, "u.txt"), "utf8"),
     };
     const result = await sandbox.close();
     assert.equal(result.branch, "pigeon/sandbox-sess_T1");
     assert.equal(result.changed, true);
     assert.equal(result.viewCommand, "git diff main..pigeon/sandbox-sess_T1");
+    assert.equal(result.snapshotCommit, sandbox.startCommit);
     assert.equal(git(repo, "rev-parse", "pigeon/sandbox-sess_T1"), result.commit);
     assert.equal(git(repo, "show", "pigeon/sandbox-sess_T1:b.txt"), "new");
     assert.equal(git(repo, "show", "pigeon/sandbox-sess_T1:a.txt"), "changed");
-    // 交回分支的父提交就是起点
-    assert.equal(git(repo, "rev-parse", "pigeon/sandbox-sess_T1^"), before.head);
+    assert.equal(git(repo, "show", "pigeon/sandbox-sess_T1:u.txt"), "untracked");
+    // 交回分支 = 快照提交 + agent 的提交：第一条提交是快照，快照的父提交是 HEAD
+    assert.equal(git(repo, "rev-parse", "pigeon/sandbox-sess_T1^"), sandbox.startCommit);
+    assert.equal(git(repo, "rev-parse", "pigeon/sandbox-sess_T1^^"), head);
+    assert.equal(
+      exportNotice(result),
+      `沙箱改动已交回到分支 pigeon/sandbox-sess_T1（${result.commit.slice(0, 12)}）；查看：git diff main..pigeon/sandbox-sess_T1。` +
+        `分支第一条提交（${sandbox.startCommit.slice(0, 12)}）是开箱时的未提交改动；合并前先把本地这份未提交改动收起（stash 或丢弃）`
+    );
     assert.deepEqual(
       {
         head: git(repo, "rev-parse", "HEAD"),
         branch: git(repo, "symbolic-ref", "HEAD"),
         status: git(repo, "status", "--porcelain"),
         a: readFileSync(join(repo, "a.txt"), "utf8"),
+        u: readFileSync(join(repo, "u.txt"), "utf8"),
       },
       before,
       "交回不动当前分支、工作目录与未提交的改动"
     );
-    // 交回后删除容器
+    // 交回后删除容器与快照引用（快照提交已由交回的分支引用）
     assert.ok(fake.state().removed.includes("pigeon-sandbox-sess_T1"));
     assert.equal(fake.state().containers["pigeon-sandbox-sess_T1"], undefined);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_T1")), undefined);
+    assert.equal(git(repo, "cat-file", "-t", sandbox.startCommit), "commit");
   } finally {
+    fake.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// 决策 278：--sandbox-from-head 只从当前分支的最新提交开工
+test("fromHead：未提交的改动不带进沙箱、提示一行，不拍快照不留引用；交回分支的父提交就是 HEAD，提示里不提快照", async () => {
+  const repo = makeRepo();
+  const fake = fakeSandboxDocker();
+  try {
+    writeFileSync(join(repo, "a.txt"), "dirty\n");
+    writeFileSync(join(repo, "u.txt"), "untracked\n");
+    const head = git(repo, "rev-parse", "HEAD");
+    const lines: string[] = [];
+    const sandbox = await openSandbox(
+      options(fake, repo, "sess_FH", { fromHead: true, log: (line) => lines.push(line) })
+    );
+    assert.ok(
+      lines.some((line) => line.includes("按参数不带进沙箱")),
+      `应提示未提交改动不带进沙箱：${lines.join("｜")}`
+    );
+    assert.equal(sandbox.startSnapshot, undefined);
+    assert.equal(sandbox.startCommit, head);
+    assert.equal(readFileSync(join(fake.localRoot, "a.txt"), "utf8"), "one\n");
+    assert.equal(existsSync(join(fake.localRoot, "u.txt")), false);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_FH")), undefined);
+    await inContainer(sandbox, "printf x > c.txt");
+    const result = await sandbox.close();
+    assert.equal(result.snapshotCommit, undefined);
+    assert.equal(git(repo, "rev-parse", "pigeon/sandbox-sess_FH^"), head);
+    assert.doesNotMatch(exportNotice(result), /开箱时的未提交改动/);
+    assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "dirty\n", "宿主的未提交改动原样");
+  } finally {
+    fake.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("没有未提交的改动：不拍快照、不提示、不留引用，起点就是 HEAD", async () => {
+  const repo = makeRepo();
+  const fake = fakeSandboxDocker();
+  try {
+    const head = git(repo, "rev-parse", "HEAD");
+    const lines: string[] = [];
+    const sandbox = await openSandbox(
+      options(fake, repo, "sess_CLEAN", { log: (line) => lines.push(line) })
+    );
+    assert.equal(lines.filter((line) => line.includes("已带入")).length, 0, lines.join("｜"));
+    assert.equal(sandbox.startSnapshot, undefined);
+    assert.equal(sandbox.startCommit, head);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_CLEAN")), undefined);
+    await sandbox.discard();
+  } finally {
+    fake.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// 决策 280：共用下载缓存卷
+test("硬性规则：开沙箱挂共用下载缓存卷——run 参数带卷与各包管理器的环境变量，断网档照样挂；卷下各子目录由 root 建好", async () => {
+  for (const network of ["on", "off"] as const) {
+    const repo = makeRepo();
+    const fake = fakeSandboxDocker();
+    try {
+      const sandbox = await openSandbox(options(fake, repo, `sess_CACHE${network}`, { network }));
+      const args = fake.state().containers[`pigeon-sandbox-sess_CACHE${network}`]?.args ?? [];
+      assert.equal(
+        args[args.indexOf("-v") + 1],
+        `pigeon-sandbox-cache:${fake.cacheRoot}`,
+        `缓存卷未挂（${network}）：${args.join(" ")}`
+      );
+      for (const [key, value] of Object.entries(sandboxCacheEnv(fake.cacheRoot))) {
+        assert.ok(args.includes(`${key}=${value}`), `${key} 未指到卷里：${args.join(" ")}`);
+      }
+      assert.equal(sandbox.cacheVolume, "pigeon-sandbox-cache");
+      assert.ok(fake.state().volumes["pigeon-sandbox-cache"] !== undefined, "卷随 run 建立");
+      for (const dir of SANDBOX_CACHE_DIRS) {
+        assert.ok(existsSync(join(fake.localCacheRoot, dir)), `缓存子目录 ${dir} 未建`);
+      }
+      await sandbox.discard();
+    } finally {
+      fake.cleanup();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }
+  // 各包管理器指到卷里各自的子目录
+  assert.deepEqual(sandboxCacheEnv("/pigeon-cache"), {
+    npm_config_cache: "/pigeon-cache/npm",
+    npm_config_store_dir: "/pigeon-cache/pnpm/store",
+    YARN_CACHE_FOLDER: "/pigeon-cache/yarn/cache",
+    YARN_GLOBAL_FOLDER: "/pigeon-cache/yarn/berry",
+    PIP_CACHE_DIR: "/pigeon-cache/pip",
+    UV_CACHE_DIR: "/pigeon-cache/uv",
+    CARGO_HOME: "/pigeon-cache/cargo",
+    GOMODCACHE: "/pigeon-cache/go/mod",
+    GOCACHE: "/pigeon-cache/go/build",
+  });
+});
+
+test("快照引用的清理：开工中途失败与不交回直接删容器时一并删除；清理残留容器时连同其引用", async () => {
+  const repo = makeRepo();
+  const noGit = fakeSandboxDocker({ noGit: ["sandbox-test:latest"] });
+  const fake = fakeSandboxDocker();
+  try {
+    writeFileSync(join(repo, "a.txt"), "dirty\n");
+    await assert.rejects(openSandbox(options(noGit, repo, "sess_NG")), /没有可用的 git/);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_NG")), undefined, "开工失败即删引用");
+    const sandbox = await openSandbox(options(fake, repo, "sess_DC"));
+    assert.ok(sandbox.startSnapshot !== undefined);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_DC")), sandbox.startSnapshot.commit);
+    await sandbox.discard();
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_DC")), undefined, "丢弃即删引用");
+    // 上次进程异常退出留下的容器与引用：清理残留时一并删
+    const head = git(repo, "rev-parse", "HEAD");
+    git(repo, "update-ref", sandboxStartRef("sess_DEAD"), head);
+    fake.update((state) => {
+      state.containers["pigeon-sandbox-sess_DEAD"] = {
+        image: "sandbox-test:latest",
+        labels: {
+          "pigeon.sandbox": "sess_DEAD",
+          "pigeon.sandbox.pid": "2147483000",
+          "pigeon.sandbox.host": os.hostname(),
+          "pigeon.sandbox.repo": repo,
+        },
+        args: [],
+        state: "running",
+      };
+    });
+    assert.deepEqual(await cleanResidualSandboxes(fake.docker), ["pigeon-sandbox-sess_DEAD"]);
+    assert.equal(readSnapshotRef(repo, sandboxStartRef("sess_DEAD")), undefined);
+  } finally {
+    noGit.cleanup();
     fake.cleanup();
     rmSync(repo, { recursive: true, force: true });
   }

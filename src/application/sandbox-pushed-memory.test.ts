@@ -192,6 +192,7 @@ test("pigeon run --sandbox 开着推送：最后一次验证 → 收尾复盘（
           docker: fake.docker,
           image: { kind: "image", image: "sandbox-test:latest" },
           containerRoot: fake.containerRoot,
+          cacheRoot: fake.cacheRoot,
         },
       }
     );
@@ -246,6 +247,7 @@ test("交互沙箱会话开着推送：update_memory 写宿主的 MEMORY.md、�
         docker: fake.docker,
         image: { kind: "image", image: "sandbox-test:latest" },
         containerRoot: fake.containerRoot,
+        cacheRoot: fake.cacheRoot,
       },
     });
     assert.ok(sandbox !== undefined);
