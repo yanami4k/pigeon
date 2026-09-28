@@ -215,6 +215,8 @@ export interface AttachAttemptVerificationOptions {
   bundle: RuntimeBundle;
   config: VerifyConfig;
   workspaceRoot: string;
+  // 工作区在执行端另一侧（日常沙箱的容器）时经它执行验证命令；缺省在本地 workspaceRoot 执行
+  host?: WorkspaceHost;
   // 一次尝试验证完成（记录已交给会话存储）后的附加处理——失败自动分叉重试的挂点；抛错只进错误清单
   onVerified?: (record: AttemptVerifiedInput) => void | Promise<void>;
 }
@@ -242,7 +244,8 @@ export function attachAttemptVerification(
     const task = (async () => {
       const result = await verifyAttempt({
         config: options.config,
-        workspace: options.workspaceRoot,
+        workspace: options.host?.root ?? options.workspaceRoot,
+        ...(options.host !== undefined ? { host: options.host } : {}),
         target: { sessionId, runId },
         store: bundle.sessionStore,
         envelopeRunId: runId,

@@ -3,6 +3,8 @@
 // 按入口分成三组，影响 Eval 按模型分组）；`PIGEON_STREAM_FN` 只有 tui 读取，而 cli 的报错
 // 文案称支持该变量。本模块统一占位缺省为 custom/custom，并把环境变量回退放进同一处。
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
+
+import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -15,7 +17,23 @@ export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom"
 export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
-export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking", "--no-pushed-memory"]);
+export const VALUELESS_FLAGS = new Set([
+  "--yolo",
+  "--no-persist-thinking",
+  "--no-pushed-memory",
+  "--sandbox",
+]);
+
+// 日常沙箱的审批档（决策 248）：缺省全部放行（复用 yolo），可改回逐条询问
+export const SANDBOX_APPROVALS = ["yolo", "prompt"] as const;
+export type SandboxApproval = (typeof SANDBOX_APPROVALS)[number];
+
+// 决策 237、246、248：--sandbox 在一次性容器里工作；--sandbox-network on|off 联网档（缺省 on，以后可加"只放行包管理源"
+// 一档而不改用法）；--sandbox-approval yolo|prompt 审批档（缺省 yolo）
+export interface SandboxLaunch {
+  network: SandboxNetwork;
+  approval: SandboxApproval;
+}
 
 export interface LaunchFlags {
   root: string;
@@ -52,6 +70,8 @@ export interface LaunchFlags {
   // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
   // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
   compaction?: CompactionConfigInput;
+  // 决策 237：--sandbox 及其参数；不开沙箱时缺省
+  sandbox?: SandboxLaunch;
 }
 
 // 上下文压缩参数名 → 配置字段
@@ -80,6 +100,8 @@ export interface ParseLaunchFlagsOptions {
   repair?: boolean;
   // 是否接受 --no-pushed-memory 与 --memory-limit（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
   pushedMemory?: boolean;
+  // 是否接受 --sandbox 及其参数（终端界面、命令行对话与续跑、pigeon run）
+  sandbox?: boolean;
 }
 
 export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOptions): LaunchFlags {
@@ -94,6 +116,10 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     pushedMemory: true,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
+  // 沙箱参数：先收下，循环后与 --sandbox 对齐
+  let sandbox = false;
+  let sandboxNetwork: SandboxNetwork | undefined;
+  let sandboxApproval: SandboxApproval | undefined;
   const fromEnv = env.PIGEON_STREAM_FN;
   if (fromEnv !== undefined && fromEnv !== "") {
     flags.streamFnSpec = fromEnv;
@@ -102,6 +128,20 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     const flag = argv[i];
     if (flag === "--yolo") {
       flags.yolo = true;
+    } else if (flag === "--sandbox" && options.sandbox === true) {
+      sandbox = true;
+    } else if (flag === "--sandbox-network" && options.sandbox === true) {
+      const value = argv[++i];
+      if (value === undefined || !(SANDBOX_NETWORKS as readonly string[]).includes(value)) {
+        throw new Error(`--sandbox-network 只接受 ${SANDBOX_NETWORKS.join("/")}（${usage}）`);
+      }
+      sandboxNetwork = value as SandboxNetwork;
+    } else if (flag === "--sandbox-approval" && options.sandbox === true) {
+      const value = argv[++i];
+      if (value === undefined || !(SANDBOX_APPROVALS as readonly string[]).includes(value)) {
+        throw new Error(`--sandbox-approval 只接受 ${SANDBOX_APPROVALS.join("/")}（${usage}）`);
+      }
+      sandboxApproval = value as SandboxApproval;
     } else if (flag === "--no-persist-thinking") {
       flags.persistThinking = false;
     } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
@@ -194,6 +234,13 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     } else {
       throw new Error(`未知参数：${flag}（${usage}）`);
     }
+  }
+  if (sandbox) {
+    flags.sandbox = { network: sandboxNetwork ?? "on", approval: sandboxApproval ?? "yolo" };
+    // 沙箱里的审批（决策 248）：缺省全部放行，复用 yolo；--sandbox-approval prompt 改回逐条询问（另给 --yolo 仍放行）
+    flags.yolo = flags.yolo || flags.sandbox.approval === "yolo";
+  } else if (sandboxNetwork !== undefined || sandboxApproval !== undefined) {
+    throw new Error(`--sandbox-network 与 --sandbox-approval 只配合 --sandbox 用（${usage}）`);
   }
   return flags;
 }

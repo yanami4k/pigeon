@@ -231,19 +231,18 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   assertMemoryLimit(options.memoryLimitChars);
   const reviewBudget = options.reviewBudget ?? DEFAULT_REVIEW_BUDGET;
   assertReviewBudget(reviewBudget);
-  // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 只是宿主侧占位目录。分叉（失败自动重试、分支会话）要在它上面
-  // 打 git 快照，会话验证命令要在它里面执行——在占位目录上做只会得到假结果，装配前一律拒绝。
-  // 回炉例外：它的验证经执行端（见 assertRepairSetup）
+  // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 在宿主一侧、不是 agent 干活的工作区。分叉（失败自动重试、分支会话）
+  // 要在它上面打 git 快照、到独立工作树里续跑——对容器里的工作区只会得到假结果，装配前一律拒绝。
+  // 会话验证命令与回炉的验证一样经执行端在容器里执行（日常沙箱，决策 237），不在此列
   if (options.workspaceHost !== undefined) {
     const unsupported = [
       (options.retryOnFail ?? 0) > 0 ? "失败自动分叉重试" : undefined,
-      options.verify !== undefined && repairRounds === 0 ? "会话验证命令" : undefined,
       options.branchHeader !== undefined ? "分支会话" : undefined,
     ].filter((entry): entry is string => entry !== undefined);
     if (unsupported.length > 0) {
       throw new Error(
-        `容器工作区暂不支持${unsupported.join("、")}：它们作用在宿主侧的工作区目录上，` +
-          "而容器执行端下那只是占位目录；目前只支持单次无人值守运行、由任务源判分"
+        `容器工作区暂不支持${unsupported.join("、")}：分叉要在宿主的 git 工作区上打快照、到独立工作树里续跑，` +
+          "而容器工作区在执行端另一侧"
       );
     }
   }
@@ -543,9 +542,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       onFault: storeFaultWarner(),
     });
     try {
+      // 容器工作区经执行端在容器里验证
       const verified = await verifyAttempt({
         config: options.verify,
-        workspace: options.workspaceRoot,
+        workspace: options.workspaceHost?.root ?? options.workspaceRoot,
+        ...(options.workspaceHost !== undefined ? { host: options.workspaceHost } : {}),
         target: { sessionId, runId: metricsBefore.runId },
         store,
         envelopeRunId: metricsBefore.runId,

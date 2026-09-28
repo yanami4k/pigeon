@@ -15,10 +15,11 @@ import type { RunId, SessionId } from "../state/ids.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { storeAttemptLabel } from "../state/session-judge.ts";
+import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { runRetryOnFail } from "./fork.ts";
-import { describeMcpStartup, type McpSession, startMcpSession } from "./mcp.ts";
+import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
 import {
   buildRuntime,
   disposeRuntime,
@@ -86,6 +87,9 @@ export interface OpenSessionRuntimeRequest {
   verify?: VerifyConfig;
   // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照；主会话在尝试标为失败后后台分叉重试）
   retryOnFail?: number;
+  // 决策 237：日常沙箱的执行端——工具与会话验证命令经它在容器里读写与执行；不在宿主上打快照，不支持失败自动分叉重试。
+  // 会话文件、放权与记忆仍在宿主的治理根
+  workspaceHost?: WorkspaceHost;
 }
 
 export interface OpenedSessionRuntime {
@@ -124,15 +128,23 @@ async function restoreContext(bundle: RuntimeBundle): Promise<{
 export async function openSessionRuntime(
   request: OpenSessionRuntimeRequest
 ): Promise<OpenedSessionRuntime> {
+  if (request.workspaceHost !== undefined && (request.retryOnFail ?? 0) > 0) {
+    throw new Error(
+      "容器工作区暂不支持失败自动分叉重试：分叉要在宿主的工作区上打快照、到独立工作树里续跑，而容器工作区在执行端另一侧"
+    );
+  }
   // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略；新建会话与主会话即治理根
   const scope = sessionRuntimeScope(request.governanceRoot, request.sessionId);
   const restoredGrants =
     request.resume === true
       ? restoreGrantSeed(request.governanceRoot, request.sessionId)
       : undefined;
+  // 决策 252：沙箱会话不启动 MCP 服务（它们在宿主上运行，会越出容器）
   const startMcp =
-    request.startMcp ??
-    ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot }));
+    request.workspaceHost !== undefined
+      ? () => noMcpSession()
+      : (request.startMcp ??
+        ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot })));
   const mcp = await startMcp({
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
@@ -170,6 +182,10 @@ export async function openSessionRuntime(
       ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
       ...(request.verify !== undefined ? { verify: { ...request.verify } } : {}),
       ...(request.retryOnFail !== undefined ? { retryOnFail: request.retryOnFail } : {}),
+      // 决策 237、248：沙箱的执行端；改回逐条询问时仍接交互审批，只是不建目录限定的放权
+      ...(request.workspaceHost !== undefined
+        ? { workspaceHost: request.workspaceHost, pathScopedGrants: false }
+        : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];
@@ -184,8 +200,9 @@ export async function openSessionRuntime(
       }
     }
     // M7（决策 078）：主会话在 git 工作区里打快照（写或命令确实改变文件后）；worker 会话不挂
+    // 执行端另一侧的工作区（沙箱）不在宿主上打快照
     const checkpoints =
-      scope.parentSessionId === undefined
+      scope.parentSessionId === undefined && request.workspaceHost === undefined
         ? attachCheckpoints({ bundle, workspaceRoot: scope.workspaceRoot })
         : undefined;
     if (checkpoints !== undefined) {
@@ -260,6 +277,8 @@ export async function openSessionRuntime(
             bundle,
             config: request.verify,
             workspaceRoot: scope.workspaceRoot,
+            // 沙箱：验证命令经执行端在容器里执行
+            ...(request.workspaceHost !== undefined ? { host: request.workspaceHost } : {}),
             onVerified: (record) => startRetry(record.target.runId),
           })
         : undefined;

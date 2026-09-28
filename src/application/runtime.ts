@@ -96,6 +96,9 @@ export interface RuntimeDeps {
   // 本地实现。容器工作区注入容器实现，此时 workspaceRoot 只是宿主侧的占位目录。按路径限定的放权以宿主路径判定，
   // 在这类工作区下暂不支持：带审批通道或装了 pathPrefix 固化规则时装配即报错，不让规则静默失配
   workspaceHost?: WorkspaceHost;
+  // 决策 248：日常沙箱改回逐条询问时置 false——注入执行端时仍接交互审批，但会话放权不建目录限定（[d] 按批准一次处理）；
+  // 缺省不放开，注入执行端时带审批通道即报错
+  pathScopedGrants?: boolean;
   // M5.5 S1（决策 040）：治理根——.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在；
   // 缺省同工作区根。worker 的工作区根是自己的 git 工作树，治理根恒为主仓库根
   governanceRoot?: string;
@@ -261,7 +264,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const workspaceHost = deps.workspaceHost ?? asWorkspaceHost(deps.workspaceRoot);
   // 护栏（M9）：按路径限定的放权（会话 grant 的目录限定、固化规则的 pathPrefix）以宿主路径判定，对非本地的工作区
   // 只会静默失配。路径放权在这类工作区下暂不支持：带审批通道的交互场景直接拒绝装配（审批面板的 [d] 就是目录放权）
-  if (deps.workspaceHost !== undefined && deps.createApprovalHandler !== undefined) {
+  if (
+    deps.workspaceHost !== undefined &&
+    deps.createApprovalHandler !== undefined &&
+    deps.pathScopedGrants !== false
+  ) {
     throw new Error(
       "容器工作区暂不支持交互审批：按路径限定的放权以宿主路径判定，在容器工作区下会静默失配；" +
         "目前只支持无审批通道的无人值守运行"
@@ -295,6 +302,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     workspaceRoot: deps.workspaceRoot,
     sink: grantEventSink(sessionStore),
     restored: deps.restoredGrants,
+    // 执行端另一侧的工作区不建目录限定的放权
+    pathScoped: deps.workspaceHost === undefined,
   });
   // 170 ④：本会话的审批状态——委派策略在场时取其审批模式，否则取 yolo 旗标；非 yolo 时看有没有注入审批通道。
   // run_command 的三处说明与系统提示里的审批说法都按它与执行端的平台生成，不写死本地、人工批准的说法

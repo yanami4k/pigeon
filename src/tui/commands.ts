@@ -4,6 +4,11 @@
 // 未知命令如实说明。worker 与 resume 的具体动作由壳转交给对应视图模块。
 import { compactFocusOf } from "../application/compaction-text.ts";
 import { runGrantCommand } from "../application/grants.ts";
+import {
+  SANDBOX_FORK_UNSUPPORTED,
+  SANDBOX_RESUME_UNSUPPORTED,
+  SANDBOX_WORKERS_UNSUPPORTED,
+} from "../application/sandbox-session.ts";
 import { runSearchCommand } from "../application/search.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { WORKER_COMMANDS_HINT } from "../application/workers-commands.ts";
@@ -11,6 +16,11 @@ import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
+
+// 沙箱会话的命令面（与 shell.ts 的 TuiSandboxFace 同形）
+interface CommandsSandboxFace {
+  exportChanges(): Promise<string>;
+}
 
 // TUI 治理命令上下文（/grants /revoke /grants save；决策 030）
 export interface TuiGrantsContext {
@@ -30,6 +40,8 @@ export interface CommandsHost {
   sessionsRoot(): string | undefined;
   searchRoot(): string | undefined;
   resumeConfigured(): boolean;
+  // 决策 237：沙箱会话在场；缺省 = 不在沙箱里
+  sandbox?(): CommandsSandboxFace | undefined;
   spawnCommand(workers: TuiWorkersFace, raw: string): void;
   cancelCommand(workers: TuiWorkersFace, ref: string | undefined): void;
   workersStatusCommand(workers: TuiWorkersFace): void;
@@ -71,6 +83,36 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         }
       );
       return;
+    }
+    // 决策 237、245：沙箱会话——/export 手动交回；分叉、worker 与 /resume 换绑不支持，说明原因
+    const sandbox = host.sandbox?.();
+    if (sandbox !== undefined) {
+      if (tokens[0] === "export") {
+        host.addSystem("交回中：把沙箱里的改动提交成分支取回宿主仓库");
+        void sandbox.exportChanges().then(
+          (text) => {
+            host.addSystem(text);
+            host.render();
+          },
+          (error: unknown) => {
+            host.addSystem(`交回失败：${error instanceof Error ? error.message : String(error)}`);
+            host.render();
+          }
+        );
+        return;
+      }
+      const reason =
+        tokens[0] === "fork"
+          ? SANDBOX_FORK_UNSUPPORTED
+          : tokens[0] === "spawn" || tokens[0] === "cancel" || tokens[0] === "workers"
+            ? SANDBOX_WORKERS_UNSUPPORTED
+            : tokens[0] === "resume"
+              ? SANDBOX_RESUME_UNSUPPORTED
+              : undefined;
+      if (reason !== undefined) {
+        host.addSystem(reason);
+        return;
+      }
     }
     // M5.5 S4（决策 040）：worker 编排命令——解析与排版在 application/workers-commands.ts
     const workers = host.workers();
@@ -124,7 +166,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       });
     if (!handled) {
       host.addSystem(
-        `未知命令：${value}（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}）`
+        `未知命令：${value}（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}${sandbox !== undefined ? "、/export" : ""}）`
       );
     }
   } catch (error) {

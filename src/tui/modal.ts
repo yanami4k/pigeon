@@ -45,7 +45,8 @@ export interface ModalHost {
 // 一个待审批调用——重入是上游/装配 bug，防御性 fail-closed（按拒绝处理），绝不排队
 export function askApprovalPanel(
   host: ModalHost,
-  request: ApprovalRequest
+  request: ApprovalRequest,
+  directoryGrant?: boolean
 ): Promise<ApprovalPanelResult> {
   // M5.5 S4：壳已停止——排队中轮到的审批（worker 的请求）不再渲染到已停的界面上吊死，
   // 与停止时挂起的审批同一 fail-closed 口径（决策 029）
@@ -55,7 +56,7 @@ export function askApprovalPanel(
   if (host.pendingApproval() !== null) {
     return Promise.resolve({ key: "cancel", reason: APPROVAL_CANCEL_BUSY });
   }
-  host.addSystem(approvalBlockText(request));
+  host.addSystem(approvalBlockText(request, directoryGrant));
   const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
   host.setPendingApproval({ resolve });
   host.updateStatus();

@@ -129,6 +129,13 @@ export interface TuiShellOptions {
   workers?: TuiWorkersFace;
   // worker 状态行刷新间隔（毫秒，有 worker 在跑时生效）；缺省 1000
   workerRefreshMs?: number;
+  // 决策 237、245：沙箱会话——/export 手动交回；分叉、worker 与 /resume 换绑在沙箱里不支持，命令给出原因
+  sandbox?: TuiSandboxFace;
+}
+
+// 沙箱会话的命令面：交回返回给人看的一行（分支名与查看命令，或失败原因）
+export interface TuiSandboxFace {
+  exportChanges(): Promise<string>;
 }
 
 export class PigeonTuiShell
@@ -314,8 +321,8 @@ export class PigeonTuiShell
 
   // ---- S3 审批面板（TuiApprovalFace 实现；交互语义在 modal.ts）----
 
-  askApproval(request: ApprovalRequest): Promise<ApprovalPanelResult> {
-    return askApprovalPanel(this, request);
+  askApproval(request: ApprovalRequest, directoryGrant?: boolean): Promise<ApprovalPanelResult> {
+    return askApprovalPanel(this, request, directoryGrant);
   }
 
   // 审批结果回显（handler 在决议后调用：裁决行 / 已创建放权行）
@@ -408,6 +415,10 @@ export class PigeonTuiShell
 
   resumeConfigured(): boolean {
     return this.options.resume !== undefined;
+  }
+
+  sandbox(): TuiSandboxFace | undefined {
+    return this.options.sandbox;
   }
 
   resumeOptions(): ResumeOptions<TuiSessionBinding> | undefined {
