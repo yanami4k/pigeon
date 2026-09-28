@@ -29,7 +29,7 @@ import {
   computeClasses,
 } from "./stream-baseline.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
-import { checkOrWriteIdentity, manifestDigestOf } from "./stream-identity.ts";
+import { checkOrWriteIdentity, manifestDigestOf, readStoredIdentity } from "./stream-identity.ts";
 import {
   composeStreamManifest,
   markHumanGateFailures,
@@ -480,6 +480,51 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         [5]
       );
       assert.match(readFileSync(second.reportFile, "utf8"), /试跑：只跑前 2 道题/);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("报告的设置一节取自输出目录的身份头：开跑时的代码与显式放行的代码更换（269）", async () => {
+    const t = await toy();
+    try {
+      const outDir = join(t.base, "out");
+      const identity = (commit: string) => ({
+        core: {
+          repo: "toy",
+          manifestDigest: "d",
+          image: "sha256:img",
+          budget: DEFAULT_STEP_BUDGET,
+          conditions: ["neither"],
+          stepScope: TASK_CHAIN_SCOPE,
+          promptFormat: "test-files",
+          promptLayout: TASK_PROMPT_LAYOUT,
+          taskSelection: { method: "all" as const },
+          maxSteps: null,
+          agents: {},
+        },
+        info: { concurrency: 1, harness: { commit, dirty: false } },
+      });
+      mkdirSync(outDir, { recursive: true });
+      checkOrWriteIdentity(outDir, identity("aaa1111"));
+      checkOrWriteIdentity(outDir, identity("bbb2222"), () => new Date("2026-09-28T00:00:00Z"), {
+        acceptHarnessChange: "修复判题超时",
+      });
+      const stored = readStoredIdentity(outDir);
+      assert.ok(stored !== undefined);
+      const run = await runStreams(
+        options(t, {
+          agents: { pigeon: scriptedAgent(solve) },
+          maxSteps: 1,
+          reportIdentity: stored,
+        })
+      );
+      const report = readFileSync(run.reportFile, "utf8");
+      assert.match(report, /开跑时的代码：提交 aaa1111/);
+      assert.match(
+        report,
+        /\| 2026-09-28T00:00:00\.000Z \| 提交 bbb2222（无未提交改动） \| 修复判题超时 \|/
+      );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

@@ -38,7 +38,13 @@ import {
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
-import { checkOrWriteIdentity, manifestDigestOf, type TaskSelection } from "./stream-identity.ts";
+import {
+  checkOrWriteIdentity,
+  type HarnessAllowance,
+  manifestDigestOf,
+  readStoredIdentity,
+  type TaskSelection,
+} from "./stream-identity.ts";
 import {
   chainedTasks,
   DEFAULT_TASK_PROMPT_FORMAT,
@@ -98,6 +104,8 @@ export interface StreamExperimentOptions {
   log?: (line: string) => void;
   // 停止信号（CLI 收到 SIGTERM 时触发，reason 为说明）：交给限额控制器收尾
   shutdownSignal?: AbortSignal;
+  // 代码版本的显式放行（269）：续跑时代码版本不符的放行原因、首次开跑时放行未提交改动；缺省都不放行
+  harnessAllowance?: HarnessAllowance;
 }
 
 export type StreamPigeonOptions = Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor" | "yolo">;
@@ -275,31 +283,40 @@ async function runStreamExperimentLocked(
       ? undefined
       : { model: modelId, ...miniIdentityOf(options.minimalCommand) };
   mkdirSync(outDir, { recursive: true });
-  const runIdentity = checkOrWriteIdentity(outDir, {
-    core: {
-      repo: manifest.repo,
-      manifestDigest: manifestDigestOf(options.manifestFile),
-      image: imageId,
-      budget: options.budget,
-      conditions: [...options.conditions],
-      stepScope: TASK_CHAIN_SCOPE,
-      promptFormat,
-      promptLayout: TASK_PROMPT_LAYOUT,
-      taskSelection,
-      maxSteps: options.maxSteps ?? null,
-      agents: {
-        ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
-        ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+  // 代码版本只取一次：身份头比对的与结果行记的是同一个
+  const harness = currentHarnessRef();
+  const runIdentity = checkOrWriteIdentity(
+    outDir,
+    {
+      core: {
+        repo: manifest.repo,
+        manifestDigest: manifestDigestOf(options.manifestFile),
+        image: imageId,
+        budget: options.budget,
+        conditions: [...options.conditions],
+        stepScope: TASK_CHAIN_SCOPE,
+        promptFormat,
+        promptLayout: TASK_PROMPT_LAYOUT,
+        taskSelection,
+        maxSteps: options.maxSteps ?? null,
+        agents: {
+          ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
+          ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+        },
+      },
+      // 路数与账号数只记不比：换机器、加账号后可以续跑
+      info: {
+        concurrency: options.concurrency ?? 4,
+        accounts: options.gateway.accounts.length,
+        accountConcurrency: options.gateway.accounts.map((a) => a.concurrency),
+        harness,
       },
     },
-    // 路数与账号数只记不比：换机器、加账号后可以续跑
-    info: {
-      concurrency: options.concurrency ?? 4,
-      accounts: options.gateway.accounts.length,
-      accountConcurrency: options.gateway.accounts.map((a) => a.concurrency),
-      harness: currentHarnessRef(),
-    },
-  });
+    undefined,
+    // 代码版本不符（续跑）或认不出（首次开跑）即拒绝，除非显式放行（269）
+    options.harnessAllowance
+  );
+  const storedIdentity = readStoredIdentity(outDir);
   const { gateway: liveGateway, limits } = await startGatewayAndLimits(
     options.gateway,
     options.concurrency ?? 4,
@@ -367,10 +384,12 @@ async function runStreamExperimentLocked(
       conditions: options.conditions,
       budget: options.budget,
       promptFormat,
-      harnessRef: currentHarnessRef(),
+      harnessRef: harness,
       limits,
       gateway: liveGateway,
       runIdentity,
+      // 报告的设置一节：开跑时的代码与显式放行的代码更换（269）
+      ...(storedIdentity !== undefined ? { reportIdentity: storedIdentity } : {}),
       agentSettings: {
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
         ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),

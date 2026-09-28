@@ -55,7 +55,7 @@ import {
   verifyConfigFile,
   verifyScript,
 } from "./stream-profiles.ts";
-import { renderStreamReport } from "./stream-report.ts";
+import { type ReportIdentity, renderStreamReport } from "./stream-report.ts";
 import {
   lastCompletedStep,
   MEMORY_WARN_RATIO,
@@ -480,6 +480,9 @@ export interface RunStreamsOptions {
   // 身份头的摘要与各 agent 的参数：原样记进每条结果行（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）
   runIdentity?: string;
   agentSettings?: Partial<Record<ConditionSpec["agent"], Record<string, unknown>>>;
+  // 输出目录的身份头（调用方写入或比对之后读出）：报告的设置一节据此写开跑时的代码与显式放行的代码更换（269）；
+  // 缺省即不写这一节
+  reportIdentity?: ReportIdentity;
   // 调用方已对输出目录取了锁（CLI 入口在写身份头、开跑前探测之前就取）：这里不再取
   outDirLocked?: boolean;
 }
@@ -594,6 +597,7 @@ async function runStreamsLocked(options: RunStreamsOptions): Promise<RunStreamsS
   writeFileSync(
     reportFile,
     renderStreamReport(readStreamResults(resultsFile), {
+      ...(options.reportIdentity !== undefined ? { identity: options.reportIdentity } : {}),
       title: `${options.manifest.repo}${scope.length > 0 ? `（${scope.join("；")}）` : ""}`,
       // 分段：清单里按重置点切出的各段（固定起点下只用于分段报告，不影响怎么跑）
       segments: options.manifest.streams.map((s) => ({
