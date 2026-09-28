@@ -47,7 +47,7 @@ export function spawnWorkerDescription(limits: SpawnWorkerLimits): string {
     `要并行，就在同一次回复里多次调用本工具，每次派一个；同时最多跑 ${limits.maxConcurrent} 个，多的排队；一次运行最多派 ${limits.maxAgentSpawns} 个。`,
     "何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。",
     "任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问，也不能再派 worker。",
-    "角色决定 worker 能用的工具：explorer 只能读代码与检索历史会话，适合调查与定位；implementer 能读写文件、不能跑命令，适合按明确的方案改代码；tester 能读文件与跑命令、不能改文件，适合运行与诊断测试。",
+    "角色决定 worker 能用的工具：explorer 只能读代码与检索历史会话，适合调查与定位；implementer 能读写文件、不能跑命令，适合按明确的方案改代码；tester 能读文件与跑命令、不能改文件，适合运行与诊断测试。三种角色另外都能用 web_search 与 web_fetch 查资料。",
     "worker 的改动不会自动并入你的分支：看过交回的分支与摘要后，由你决定合不合、怎么合。",
   ].join("\n");
 }

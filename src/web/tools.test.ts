@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { TOOL_RESULT_USAGE_KEY } from "../state/tool-usage.ts";
-import type { DistillInput } from "./distill.ts";
+import { type DistillInput, distillUserText } from "./distill.ts";
 import type { Transport } from "./network.ts";
 import type { SearchBackend, SearchParams } from "./search.ts";
 import {
@@ -27,6 +27,11 @@ before(async () => {
       res.end(
         `<html><head><title>文档</title></head><body><h1>安装</h1><p>${RAW}</p></body></html>`
       );
+      return;
+    }
+    if (req.url === "/long") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end("长".repeat(5_000));
       return;
     }
     if (req.url === "/away") {
@@ -222,4 +227,38 @@ test("web_search：没有可用后端时按配置的说明报错（不带 key）
     tool.execute("tc-7", { query: "x" }, undefined as unknown as AbortSignal, () => {}),
     /缺少 key：请设置环境变量 DEEPSEEK_API_KEY/
   );
+});
+
+test("web_fetch：正文超过字符上限时保留开头，提炼请求与交回结果都注明“原文过长，只看了前 X 字符”；未截断时都不注明", async () => {
+  const inputs: DistillInput[] = [];
+  const tool = createWebFetchTool({
+    limits: { ...limits, maxChars: 1_200 },
+    lookup,
+    transport,
+    distill: async (input) => {
+      inputs.push(input);
+      return { text: "提炼" };
+    },
+  });
+  const result = await tool.execute(
+    "tc-8",
+    { url: "https://docs.example/long", prompt: "找什么" },
+    undefined as unknown as AbortSignal,
+    () => {}
+  );
+  const text = result.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+  assert.equal(inputs[0]?.content.length, 1_200);
+  assert.equal(inputs[0]?.truncated, true);
+  assert.match(distillUserText(inputs[0] as DistillInput), /（原文过长，只看了前 1200 字符）/);
+  assert.match(text, /（原文过长，只看了前 1200 字符）/);
+  assert.equal(result.details.truncated, true);
+
+  await tool.execute(
+    "tc-9",
+    { url: "https://docs.example/doc", prompt: "找什么" },
+    undefined as unknown as AbortSignal,
+    () => {}
+  );
+  assert.equal(inputs[1]?.truncated, false);
+  assert.doesNotMatch(distillUserText(inputs[1] as DistillInput), /原文过长/);
 });

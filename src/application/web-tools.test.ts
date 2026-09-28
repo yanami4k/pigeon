@@ -29,6 +29,7 @@ test("未作配置：后端为 DeepSeek，key 取环境变量 DEEPSEEK_API_KEY�
     maxChars: DEFAULT_FETCH_MAX_CHARS,
   });
   assert.equal(withKey.distillMaxTokens, DEFAULT_DISTILL_MAX_TOKENS);
+  assert.equal(DEFAULT_FETCH_MAX_CHARS, 400_000);
   assert.ok(!JSON.stringify(withKey).includes("sk-deepseek-secret"), "key 不进配置对象");
 
   const noKey = resolveWebTools({

@@ -62,7 +62,8 @@ export type WebConfigFile = Static<typeof WebConfigFileSchema>;
 // 抓取与提炼的缺省上限（决策 289：限制大小与超时；提炼有输出上限）
 export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 export const DEFAULT_FETCH_MAX_BYTES = 2 * 1024 * 1024;
-export const DEFAULT_FETCH_MAX_CHARS = 120_000;
+// 正文字符上限 40 万：DeepSeek 的上下文装得下，一次提炼多花约一毛钱，换长文档不漏段落；仍超长时保留开头并注明
+export const DEFAULT_FETCH_MAX_CHARS = 400_000;
 export const DEFAULT_DISTILL_MAX_TOKENS = 4_096;
 // 搜索的缺省
 export const DEFAULT_SEARCH_BACKEND: SearchBackendId = "deepseek";

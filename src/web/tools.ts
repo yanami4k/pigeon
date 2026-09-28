@@ -15,7 +15,7 @@ import {
 } from "../tools/host-scope.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
-import type { Distiller } from "./distill.ts";
+import { type Distiller, truncatedNote } from "./distill.ts";
 import { type FetchLimits, fetchPage } from "./fetch.ts";
 import type { DnsLookup, Transport } from "./network.ts";
 import { formatSearchResponse, type SearchBackend } from "./search.ts";
@@ -144,7 +144,6 @@ export interface WebFetchDetails {
 export const WEB_FETCH_TEXTS = {
   redirect: (from: string, to: string, toHost: string) =>
     `网页跳到了另一个网站：${to}（网站 ${toHost}，来自 ${from}）。没有跟随跳转；如需读取，请用 web_fetch 抓取该网址。`,
-  truncatedNote: "（网页正文超长，只读取并提炼了开头部分）",
   outputTruncatedNote: "（提炼结果撞上输出上限，末尾可能不完整）",
 } as const;
 
@@ -192,7 +191,7 @@ export function createWebFetchTool(
       const lines = [
         `网页：${page.title}`,
         `网址：${page.finalUrl}${page.finalUrl !== args.url ? `（原网址 ${args.url}，同站跳转）` : ""}`,
-        ...(page.truncated ? [WEB_FETCH_TEXTS.truncatedNote] : []),
+        ...(page.truncated ? [truncatedNote(page.content.length)] : []),
         `提炼结果（针对：${args.prompt}）：`,
         distilled.text.trim() === "" ? "（提炼结果为空）" : distilled.text.trim(),
         ...(distilled.outputTruncated === true ? [WEB_FETCH_TEXTS.outputTruncatedNote] : []),
