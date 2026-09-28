@@ -65,7 +65,7 @@
 
 ## 十、服务器上使用
 
-仓库根新增 `README.md`，含"日常沙箱"与"在服务器上用 tmux 挂着"两节：`tmux new -s pigeon` 起会话、`Ctrl-b d` 脱离、`tmux attach -t pigeon` 接回；交回的分支经 SSH `git fetch` 或 bundle 拷回本机。
+使用说明（日常沙箱的用法、在服务器上用 tmux 挂着会话、交回的分支取回本机）暂未入库：仓库根 README 以后专门编写（决策 254），本段不建。
 
 ## 十一、测试与变异
 
@@ -109,3 +109,27 @@
 - check：通过（tsc 无报错）
 - test：1076 个用例，通过 1074，失败 0，跳过 2（两个 Windows 专属的 `.cmd` 启动用例，平台不符跳过）；沙箱真容器用例两条均实际运行并通过
 - deps：通过（400 个模块、2710 条依赖，无违规）
+
+## 十四、追加：MCP、[d]、使用说明与 Node 版本（决策 252、253、254 与镜像修正）
+
+- **MCP（252）**：沙箱会话不启动 MCP 服务。`session-runtime.ts` 注入执行端时改用不启动任何服务的空会话（`noMcpSession`，`mcp.ts`），不再调用配置的启动函数；`pigeon run --sandbox` 在 `runHeadlessInSandbox` 里同样注入空会话（`headless-core.ts` 不改，跑批器的 MCP 行为不变）。开沙箱时读取 MCP 配置，配了服务即提示一行，列出已配置却在沙箱里不可用的服务名；没配不提示。
+- **[d]（253）**：`approvals/handler.ts` 新增共用判定 `offersDirectoryGrant`：调用带 path 参数、不是 exec 档、放权落点能建目录限定的放权才提供 [d]。放权落点接口 `GrantCreator` 增加可选的 `pathScoped`，会话放权存储公开同名属性（沙箱会话为 false）。命令行审批提示与终端界面审批块都按它决定是否显示 [d]；终端界面的处理器把判定结果交给面板渲染。`grantScopeFor` 在不提供 [d] 的会话里与"调用不带路径"同样退化为工具级。上一版在 [d] 时按批准一次处理的退化路径已删去。放权存储对目录限定放权的拒绝保留，作为兜底。
+- **使用说明（254）**：删去仓库根 `README.md`；第十节改为说明使用说明暂未入库。
+- **Node 版本**：通用镜像不再用 apt 的 nodejs/npm（v18）。改为从 `${NODE_MIRROR}/latest-v24.x/` 读取官方 `SHASUMS256.txt`，按架构（amd64 对应 x64、arm64 对应 arm64）取 `node-v24.x.y-linux-<架构>.tar.xz`，用 `sha256sum -c` 校验后解到 `/usr/local`。构建参数新增 `NODE_MIRROR`（环境变量 `PIGEON_SANDBOX_NODE_MIRROR`，或 `build.nodeMirror`；缺省 `https://nodejs.org/dist`，可换 `https://npmmirror.com/mirrors/node`），构建失败的报错一并列出。下载地址不进镜像标签。标签随 Dockerfile 内容变化；`latest-v24.x` 取构建当时的最新版，同一标签不会自动更新。
+
+测试：`sandbox-session.test.ts` 加 MCP 断言。配了 `.mcp.json` 时，`pigeon run` 沙箱与交互沙箱会话都不调用启动函数（交互会话另有不注入执行端时照常启动的对照）；开沙箱的提示含服务名；没配时不提示（新用例）。新增 `src/cli/approval-sandbox.test.ts`（2）与 `src/tui/approval-sandbox.test.ts`（1），分别断言命令行审批提示与终端界面审批块：不能建目录放权时不含 [d]，能建时含 [d]，按 [d] 建目录限定的放权。`sandbox-image.test.ts` 改为断言 Node 不走 apt、`NODE_MIRROR` 缺省值、`latest-v24.x`、`SHASUMS256.txt` 与 `sha256sum -c -`，并断言 Node 下载地址经环境变量与配置传入、构建失败时列出 `PIGEON_SANDBOX_NODE_MIRROR`。
+
+变异（做法同第十一节，跑上列 4 个测试文件，基线 11 个用例全过，6 次还原均逐字一致）：
+
+| 编号 | 植入处 | 变红的用例 |
+|---|---|---|
+| N1 | 交互沙箱会话照样启动 MCP | 沙箱改回逐条询问……不启动 MCP（1 条） |
+| N2 | `pigeon run` 沙箱照样用调用方的 MCP 启动函数 | run 沙箱全流程（1 条） |
+| N3 | 开沙箱不列出 MCP 服务名 | run 沙箱全流程（1 条） |
+| N4 | [d] 判定不看会话能否按目录放权 | 命令行审批不提供 [d]；终端界面审批面板不提供 [d]（2 条） |
+| N5 | Dockerfile 去掉 SHASUMS 校验 | 通用镜像 Dockerfile 内容（1 条） |
+| N6 | 去掉 Node 下载地址构建参数 | 构建参数与标签（1 条） |
+
+镜像重建与冒烟（服务器）：通用镜像重建为 `pigeon-sandbox:30145c7527e6`，用时 157 秒，979 MB；旧镜像 `pigeon-sandbox:f434f842d1cd` 已删除。冒烟同第十二节，仓库另配一个 MCP 服务。容器内 `node -v` 为 v24.21.0，`npm -v` 为 11.19.0（registry 为官方源）；三次开沙箱都提示该 MCP 服务在沙箱里不可用。其余结果与第十二节一致：联网档 HTTP 301、断网档失败，验证在容器里判 pass，交回、`/export`、`/fork` 说明、续跑从交回分支起步，结束后无残留容器。
+
+verify（服务器，同一实例；代码树与交付提交相同的临时提交；测试步 `--test-concurrency=2`，检测进程时计入了远端命令自身，取了保守值）：lint 通过（386 个文件）；check 通过；test 1080 个用例，通过 1078，失败 0，跳过 2（同上两个 Windows 专属用例）；deps 通过（402 个模块、2729 条依赖，无违规）。
