@@ -4,6 +4,8 @@
 // run() 互斥。证据顺序：父会话先落 child.spawned（派出意图），再建工作区与运行面；worker 会话关闭后
 // 落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
 // 深度 1：本编排器所在会话自己是 worker 时拒绝再派。上限只有轮次与墙钟，超限与取消都走 interrupt。
+// 决策 268：同时在跑的 worker 数可设上限，多派的排队不拒绝——派出记录、工作区与运行面照常在派出时建好，
+// 只是开跑（连同墙钟计时）等到有空位；一个会话里人派的与 agent 派的共用同一个编排器，因而一并计算。
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
@@ -145,6 +147,10 @@ export interface WorkerOrchestratorOptions {
   approvals: (request: WorkerApprovalRequest) => Promise<ApprovalDecision>;
   // 派出时父会话的活动 Run（人以 /spawn 派出时无）
   activeRunId?: () => RunId | undefined;
+  // 决策 268：同时在跑的 worker 上限（缺省不限）；多派的排队
+  maxConcurrent?: number;
+  // 决策 268：worker 每收尾一轮回报本轮用的 token（计入本次运行的总额度）
+  onWorkerTokens?: (sessionId: SessionId, tokens: number) => void;
   workspaces?: WorkspaceProvider;
   defaultLimits?: Partial<WorkerLimits>;
   now?: () => number;
@@ -159,7 +165,8 @@ export interface SpawnRequest {
   taskKey?: string;
 }
 
-export type WorkerState = "running" | ChildSettledStatus;
+// queued：已派出、等空位开跑（决策 268）
+export type WorkerState = "queued" | "running" | ChildSettledStatus;
 
 export interface WorkerStatus {
   sessionId: SessionId;
@@ -204,10 +211,17 @@ export class WorkerOrchestrator {
   readonly #workspaces: WorkspaceProvider;
   readonly #now: () => number;
   readonly #workers = new Map<SessionId, WorkerEntry>();
+  // 排队中的 worker：按派出顺序等空位（决策 268）
+  readonly #queue: Array<{ sessionId: SessionId; start: () => void }> = [];
+  #running = 0;
   // 不改变结果的内部故障（settled 写盘失败、结果回收失败等）
   readonly #errors: unknown[] = [];
 
   constructor(options: WorkerOrchestratorOptions) {
+    const max = options.maxConcurrent;
+    if (max !== undefined && (!Number.isInteger(max) || max < 1)) {
+      throw new WorkerSpawnError(`同时在跑的 worker 上限需要正整数：${max}`);
+    }
     this.#options = options;
     this.#workspaces =
       options.workspaces ??
@@ -296,7 +310,7 @@ export class WorkerOrchestrator {
       role,
       workspace,
       runtime,
-      state: "running",
+      state: "queued",
       turns: 0,
       startedAt: this.#now(),
       cancelRequested: false,
@@ -304,17 +318,36 @@ export class WorkerOrchestrator {
       done: done.promise,
     };
     this.#workers.set(sessionId, entry);
-    this.#drive(entry, task, limits).then(done.resolve, done.reject);
+    const start = (): void => {
+      this.#drive(entry, task, limits)
+        .finally(() => this.#release())
+        .then(done.resolve, done.reject);
+    };
+    // 有空位即同步开跑（与不设上限时的行为一致）；否则按派出顺序排队
+    if (this.#tryAcquire()) {
+      entry.state = "running";
+      start();
+    } else {
+      this.#queue.push({ sessionId, start });
+    }
     return sessionId;
   }
 
-  // 取消走 interrupt（abort → waitForIdle）；已收尾的 worker 无操作
+  // 取消走 interrupt（abort → waitForIdle）；排队中的直接出队、不开跑；已收尾的 worker 无操作
   async cancel(sessionId: SessionId): Promise<void> {
     const entry = this.#require(sessionId);
-    if (entry.state !== "running") {
+    if (entry.state !== "running" && entry.state !== "queued") {
       return;
     }
     entry.cancelRequested = true;
+    const queued = this.#queue.findIndex((item) => item.sessionId === sessionId);
+    if (queued >= 0) {
+      const [item] = this.#queue.splice(queued, 1);
+      // 出队的 worker 不占空位：先记一个再由收尾释放，账目对平
+      this.#running += 1;
+      item?.start();
+      return;
+    }
     await entry.runtime.interrupt();
   }
 
@@ -339,8 +372,34 @@ export class WorkerOrchestrator {
     return this.#errors.slice();
   }
 
+  // 占一个空位：未设上限或有空位即占下
+  #tryAcquire(): boolean {
+    const max = this.#options.maxConcurrent;
+    if (max === undefined || this.#running < max) {
+      this.#running += 1;
+      return true;
+    }
+    return false;
+  }
+
+  // 收尾让出空位：队首的接着开跑（空位直接转交，计数不变）
+  #release(): void {
+    const next = this.#queue.shift();
+    if (next !== undefined) {
+      next.start();
+      return;
+    }
+    this.#running -= 1;
+  }
+
   async #drive(entry: WorkerEntry, task: string, limits: WorkerLimits): Promise<WorkerOutcome> {
     const { runtime } = entry;
+    // 排队期间被取消：不开跑，按取消收尾（结果回收与释放照常）
+    const skipRun = entry.cancelRequested;
+    if (!skipRun) {
+      entry.state = "running";
+      entry.startedAt = this.#now();
+    }
     const stop = (reason: "turn-limit" | "wall-clock-limit" | "token-limit") => {
       if (entry.limitHit !== undefined || entry.cancelRequested) {
         return;
@@ -356,7 +415,15 @@ export class WorkerOrchestrator {
         entry.turns += 1;
         // M6（决策 064 子裁决 ④）：累计 token 上限（取 turn.completed 的用量；缺省不限）
         const usage = (event.payload as { usage?: { totalTokens?: number } } | undefined)?.usage;
-        entry.tokens += usage?.totalTokens ?? 0;
+        const turnTokens = usage?.totalTokens ?? 0;
+        entry.tokens += turnTokens;
+        if (turnTokens > 0) {
+          try {
+            this.#options.onWorkerTokens?.(entry.sessionId, turnTokens);
+          } catch (error) {
+            this.#errors.push(error);
+          }
+        }
         if (entry.turns >= limits.maxTurns) {
           stop("turn-limit");
         } else if (limits.maxTokens !== undefined && entry.tokens >= limits.maxTokens) {
@@ -364,11 +431,13 @@ export class WorkerOrchestrator {
         }
       }
     });
-    const timer = setTimeout(() => stop("wall-clock-limit"), limits.wallClockMs);
+    const timer = skipRun
+      ? undefined
+      : setTimeout(() => stop("wall-clock-limit"), limits.wallClockMs);
     let status: ChildSettledStatus;
     let error: string | undefined;
     try {
-      const run = await runtime.run(task);
+      const run: WorkerRunResult = skipRun ? { status: "aborted" } : await runtime.run(task);
       if (run.status === "completed") {
         status = "completed";
       } else if (run.status === "aborted") {
