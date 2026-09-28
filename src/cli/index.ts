@@ -603,7 +603,9 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases]
 //   [--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>]（上下文压缩的触发点与保留量，缺省为产品缺省；
 //   集成冒烟调低触发点验证压缩，决策 218）
-//   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]：
+//   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]
+//   [--accept-harness-change "<原因>"（续跑时代码版本不符的显式放行，记进身份头与报告）]
+//   [--allow-dirty-harness（首次开跑时放行未提交改动或读不到的提交号，开发自测用，记进身份头与报告）]：
 // 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开断网容器从人在
 // 该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
 // 各条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
@@ -620,8 +622,10 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--memory-limit <字符数，缺省 12000>] [--review-max-turns N（缺省 40）] [--review-wall-clock-min N（缺省 15）] " +
-    "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]]";
+    "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
+    '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
+    "--accept-harness-change",
     "--manifest",
     "--repo",
     "--image",
@@ -647,10 +651,14 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
+  // 不带取值的开关：不交给模型参数的解析
+  let allowDirtyHarness = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined) continue;
-    if (own.has(arg)) {
+    if (arg === "--allow-dirty-harness") {
+      allowDirtyHarness = true;
+    } else if (own.has(arg)) {
       const value = argv[++i];
       if (value === undefined) throw new Error(`${arg} 需要取值（${usage}）`);
       values.set(arg, value);
@@ -746,6 +754,11 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   if (spendLimitCny !== undefined && !(Number.isFinite(spendLimitCny) && spendLimitCny > 0)) {
     throw new Error(`--spend-limit-cny 需要正数（${usage}）`);
   }
+  // 代码版本的显式放行（269）：原因为空即报错
+  const acceptHarnessChange = values.get("--accept-harness-change");
+  if (acceptHarnessChange !== undefined && acceptHarnessChange.trim() === "") {
+    throw new Error(`--accept-harness-change 的原因不能为空（${usage}）`);
+  }
   const minimalCommand =
     miniPython !== undefined
       ? [miniPython, fileURLToPath(new URL("../../eval/stream/mini/run_mini.py", import.meta.url))]
@@ -785,6 +798,10 @@ async function evalStreamMain(argv: string[]): Promise<void> {
       : {}),
     containerRunArgs: ["--memory", memory],
     ...(baselineDir !== undefined ? { baselineDir } : {}),
+    harnessAllowance: {
+      ...(acceptHarnessChange !== undefined ? { acceptHarnessChange } : {}),
+      ...(allowDirtyHarness ? { allowDirtyHarness } : {}),
+    },
     // 带时间戳：试跑时据此把每步的耗时与内存采样对上
     log: (line) => writeOut(`[stream] ${new Date().toISOString()} ${line}\n`),
   }).finally(removeTermHandler);

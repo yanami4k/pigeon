@@ -4,12 +4,55 @@
 //   同题两遍的每步得分差——同一格第 1、2 遍在同一步上的得分之差（只作描述，统计检验在另写的分析脚本里做）；
 //   每步用量——轮数、墙钟、花费、上下文峰值、开工时的记忆大小与复盘消耗的分布（校准所要的量）；
 //   每步明细（第一遍）与次要指标（静态检查、token、墙钟、限额暂停，以及验证工具故障——检查工具自身崩溃、不计入验证结论的步次，170 ③）。
-// 196、201 之前的旧结果行（带全量测试通过率、没有 judging）照常读出，不计入以上各表，只报条数
+// 196、201 之前的旧结果行（带全量测试通过率、没有 judging）照常读出，不计入以上各表，只报条数。
+// 输出目录有身份头时，最前面另有设置一节：开跑时的代码版本与每一次显式放行的代码更换（269）
+import { describeHarness, type HarnessRef } from "./stream-harness.ts";
 import {
   STREAM_CONDITIONS,
   type StreamCondition,
   type StreamResultLine,
 } from "./stream-results.ts";
+
+// 设置一节只用到身份头（stream-identity 的 StoredStreamIdentity）里代码版本的部分
+export interface ReportIdentity {
+  info: { harness: HarnessRef };
+  infoLog?: readonly {
+    since: string;
+    info: { harness: HarnessRef };
+    acceptHarnessChange?: string;
+  }[];
+  allowDirtyHarness?: boolean;
+}
+
+// 设置一节（269）：开跑时的代码提交号（经 --allow-dirty-harness 放行的照写），以及 infoLog 里每一次经
+// --accept-harness-change 显式放行的时刻、新的代码版本与原因；只改路数、账号的记录不列
+function renderSettings(identity: ReportIdentity): string[] {
+  const out = [
+    "## 设置",
+    "",
+    `- 开跑时的代码：${describeHarness(identity.info.harness).replace(
+      /）$/,
+      identity.allowDirtyHarness === true ? "；经 --allow-dirty-harness 放行）" : "）"
+    )}`,
+  ];
+  const accepted = (identity.infoLog ?? []).filter((c) => c.acceptHarnessChange !== undefined);
+  if (accepted.length === 0) {
+    out.push("- 显式放行的代码更换：无", "");
+    return out;
+  }
+  out.push(
+    "- 显式放行的代码更换（--accept-harness-change）：",
+    "",
+    "| 时刻 | 新的代码 | 原因 |",
+    "|---|---|---|"
+  );
+  for (const c of accepted) {
+    const reason = (c.acceptHarnessChange ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+    out.push(`| ${c.since} | ${describeHarness(c.info.harness)} | ${reason} |`);
+  }
+  out.push("");
+  return out;
+}
 
 export interface ReportSegment {
   id: string;
@@ -174,9 +217,10 @@ function acrossAttempts(means: readonly (number | null)[]): string {
 
 export function renderStreamReport(
   lines: readonly StreamResultLine[],
-  options: { title: string; segments: readonly ReportSegment[] }
+  options: { title: string; segments: readonly ReportSegment[]; identity?: ReportIdentity }
 ): string {
   const out: string[] = [`# 提交流实验报告：${options.title}`, ""];
+  if (options.identity !== undefined) out.push(...renderSettings(options.identity));
   const judged = judgedLines(lines);
   const legacy = lines.length - judged.length - lines.filter((l) => !l.judged).length;
   const conditions = conditionsIn(lines);

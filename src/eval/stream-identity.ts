@@ -1,14 +1,14 @@
 // 提交流跑批的身份头（决策 147，修复审计"身份头、预算缺省与两种 agent 的参数"一节）：输出目录下的 identity.json。core 为参与比对的身份——仓库、清单摘要、镜像标识、预算、
 // 条件、步的范围（193、215、216 的固定起点与题的接法）、题面格式（198、213）、试跑的题数、两种 agent 的模型与推理参数
 // （最简 agent 另记 mini-swe-agent 与 litellm 的版本）、选题方式，续跑时任何一项
-// 与已写的不同即拒绝（条件与 agent 参数例外：按子集续跑时取并集、同一 agent 两次都记了才比，见 mergeCore），避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降、跑批器代码
-// 版本另记在每条结果行上；续跑时路数、账号数或各账号并发上限有变即在 infoLog 追加一条）。结果行带 core 的摘要，
-// 据此认出每行属于哪一次身份
+// 与已写的不同即拒绝（条件与 agent 参数例外：按子集续跑时取并集、同一 agent 两次都记了才比，见 mergeCore），避免不同仓库、不同预算或试跑结果混进正式实验；info 只作记录不比对（路数可能因内存降；
+// 续跑时路数、账号数或各账号并发上限有变即在 infoLog 追加一条）。跑批器代码版本（info.harness）例外：实验代码冻结（269）
+// 后续跑时代码版本不符即拒绝，只有显式放行才通过并留痕，见 checkHarness。结果行带 core 的摘要，据此认出每行属于哪一次身份
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CompactionConfig } from "../pi-runtime/index.ts";
-import type { HarnessRef } from "./stream-harness.ts";
+import { describeHarness, type HarnessRef } from "./stream-harness.ts";
 import type { StepBudget } from "./stream-runner.ts";
 
 export interface StreamRunIdentity {
@@ -130,46 +130,91 @@ export function identityFile(outDir: string): string {
 }
 
 // 身份头文件里 info 的变更记录：续跑时路数、账号数或各账号并发上限与最近一条不同即追加一条（带起始时刻），
-// 结果行 gateway.accountRequests 的长度据此对上当时的账号数。info 与这些记录都不参与身份比对
+// 结果行 gateway.accountRequests 的长度据此对上当时的账号数；续跑时经显式放行换了代码也追加一条，带放行的原因。
+// info 与这些记录都不参与身份摘要
 export interface StreamInfoChange {
   since: string;
   info: StreamRunIdentity["info"];
+  // 经 --accept-harness-change 显式放行代码版本不符时的原因（269）
+  acceptHarnessChange?: string;
 }
 
-// 比较 info 时不看跑批器代码版本（它另记在每条结果行上）
+// 身份头文件的全貌：身份、摘要、开跑时是否经 --allow-dirty-harness 放行、info 的变更记录
+export interface StoredStreamIdentity extends StreamRunIdentity {
+  digest?: string;
+  allowDirtyHarness?: true;
+  infoLog?: StreamInfoChange[];
+}
+
+// 代码版本的显式放行（269）：acceptHarnessChange 为续跑时代码版本不符的放行原因（冻结后修缺陷用）；allowDirtyHarness
+// 放行首次开跑时的未提交改动或读不到的提交号（开发自测用）
+export interface HarnessAllowance {
+  acceptHarnessChange?: string;
+  allowDirtyHarness?: boolean;
+}
+
+// 比较 info 时不看跑批器代码版本（它另由 checkHarness 比对）
 function infoShape(info: StreamRunIdentity["info"]): string {
   const { harness: _harness, ...rest } = info;
   return canonical(rest);
 }
 
-// 首次写入身份头；已有的与这次的 core 逐项比对，不同即抛错并列出不同的项；一致而 info 有变即追加一条变更记录。
-// 返回 core 的摘要
+// 代码版本认得出：提交号读得到且没有未提交改动。认不出的一方与谁都不能认定为同一份代码
+function identifiable(ref: HarnessRef | undefined): ref is HarnessRef {
+  return ref !== undefined && ref.commit !== "unknown" && ref.commit !== "" && !ref.dirty;
+}
+
+// 续跑时比对代码版本（269）：记录的（最近一条 infoLog 的，没有即开跑时的）与当前的都认得出且提交号相同才算一致；
+// 不一致而没有显式放行即拒绝。经放行时返回放行的原因（要留痕），一致时返回 undefined
+function checkHarness(
+  recorded: HarnessRef | undefined,
+  current: HarnessRef,
+  allowance: HarnessAllowance
+): string | undefined {
+  if (identifiable(recorded) && identifiable(current) && recorded.commit === current.commit) {
+    return undefined;
+  }
+  if (allowance.acceptHarnessChange !== undefined) return allowance.acceptHarnessChange;
+  throw new Error(
+    `输出目录记录的代码与当前的代码不一致，拒绝续跑（实验代码冻结后，校准与正式跑只用同一份代码）：记录的代码：${describeHarness(recorded)}；当前的代码：${describeHarness(current)}。` +
+      `确需换代码（修使运行无效的缺陷）时加 --accept-harness-change "<原因>" 显式放行，放行会记进身份头与报告`
+  );
+}
+
+// 首次写入身份头；已有的与这次的 core 逐项比对，不同即抛错并列出不同的项；再比对代码版本（见 checkHarness）；
+// 一致而 info 有变即追加一条变更记录。首次开跑时代码版本认不出（有未提交改动或读不到提交号）即拒绝，除非给了
+// allowDirtyHarness（放行即记进身份头）。返回 core 的摘要
 export function checkOrWriteIdentity(
   outDir: string,
   identity: StreamRunIdentity,
-  now: () => Date = () => new Date()
+  now: () => Date = () => new Date(),
+  allowance: HarnessAllowance = {}
 ): string {
+  if (allowance.acceptHarnessChange !== undefined && allowance.acceptHarnessChange.trim() === "") {
+    throw new Error("--accept-harness-change 的原因不能为空：放行换代码必须写明为什么换");
+  }
   const file = identityFile(outDir);
   const digest = identityDigest(identity.core);
   if (existsSync(file)) {
-    const saved = JSON.parse(readFileSync(file, "utf8")) as StreamRunIdentity & {
-      infoLog?: StreamInfoChange[];
-    };
+    const saved = JSON.parse(readFileSync(file, "utf8")) as StoredStreamIdentity;
     const { differ, merged } = mergeCore(saved.core, identity.core);
     if (differ.length > 0) {
       throw new Error(
         `输出目录的身份与这次不一致（${differ.join("、")}），拒绝续跑：不同仓库、预算、镜像、模型设定、选题或试跑与正式的结果不能混在同一目录`
       );
     }
+    const latest = saved.infoLog?.at(-1)?.info ?? saved.info;
+    const accepted = checkHarness(latest?.harness, identity.info.harness, allowance);
     let next = saved;
     // 这次跑了新的条件或新接入的 agent：并进身份头（摘要不变）
     if (canonical(merged) !== canonical(saved.core)) next = { ...next, core: merged };
-    const latest = saved.infoLog?.at(-1)?.info ?? saved.info;
-    if (infoShape(latest) !== infoShape(identity.info)) {
-      next = {
-        ...next,
-        infoLog: [...(saved.infoLog ?? []), { since: now().toISOString(), info: identity.info }],
+    if (accepted !== undefined || infoShape(latest) !== infoShape(identity.info)) {
+      const change: StreamInfoChange = {
+        since: now().toISOString(),
+        info: identity.info,
+        ...(accepted !== undefined ? { acceptHarnessChange: accepted } : {}),
       };
+      next = { ...next, infoLog: [...(saved.infoLog ?? []), change] };
     }
     if (next !== saved) writeAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
     return digest;
@@ -181,8 +226,27 @@ export function checkOrWriteIdentity(
       `输出目录里已有跑批结果（${leftovers.join("、")}）却没有 identity.json，认不出它们属于哪一次身份，拒绝续跑：请换一个空的输出目录`
     );
   }
-  writeAtomic(file, `${JSON.stringify({ ...identity, digest }, null, 2)}\n`);
+  const dirty = !identifiable(identity.info.harness);
+  if (dirty && allowance.allowDirtyHarness !== true) {
+    throw new Error(
+      `当前的代码认不出确定的版本（${describeHarness(identity.info.harness)}），拒绝开跑：实验只用提交过的代码。` +
+        "开发自测时加 --allow-dirty-harness 放行，放行会记进身份头与报告"
+    );
+  }
+  const stored: StoredStreamIdentity = {
+    ...identity,
+    digest,
+    ...(dirty ? { allowDirtyHarness: true as const } : {}),
+  };
+  writeAtomic(file, `${JSON.stringify(stored, null, 2)}\n`);
   return digest;
+}
+
+// 读输出目录的身份头；没有即 undefined
+export function readStoredIdentity(outDir: string): StoredStreamIdentity | undefined {
+  const file = identityFile(outDir);
+  if (!existsSync(file)) return undefined;
+  return JSON.parse(readFileSync(file, "utf8")) as StoredStreamIdentity;
 }
 
 // 先写临时文件再改名：写到一半被杀不会留下读不出的身份头（那样续跑会一直被拒）

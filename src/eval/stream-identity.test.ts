@@ -140,10 +140,10 @@ test("身份头：首次写入；续跑时身份一致放行（路数与跑批�
     assert.equal(saved.core.budget.maxTurns, 150);
     assert.equal(saved.info.concurrency, 4);
     assert.match(first, /^[0-9a-f]{16}$/);
-    // 降了路数、换了跑批器代码：照常续跑，摘要不变
+    // 降了路数：照常续跑，摘要不变
     const resumed = checkOrWriteIdentity(dir, {
       ...identity(),
-      info: { concurrency: 3, harness: { commit: "h2", dirty: true } },
+      info: { concurrency: 3, harness: { commit: "h1", dirty: false } },
     });
     assert.equal(resumed, first);
     // 预算不同、镜像不同、试跑的步数不同：拒绝，并说出是哪几项
@@ -247,7 +247,7 @@ test("身份头按条件子集续跑（202、219）：只跑一部分条件、�
   }
 });
 
-test("身份头：续跑时账号数、各账号并发或路数变了即在 infoLog 追加一条带起始时刻的记录（不参与比对、摘要不变）；只换跑批器代码不追加", () => {
+test("身份头：续跑时账号数、各账号并发或路数变了即在 infoLog 追加一条带起始时刻的记录（不参与比对、摘要不变）；代码相同不追加", () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
   try {
     const withAccounts = (accountConcurrency: number[], commit = "h1"): StreamRunIdentity => ({
@@ -262,8 +262,8 @@ test("身份头：续跑时账号数、各账号并发或路数变了即在 info
     const read = () => JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
     const first = checkOrWriteIdentity(dir, withAccounts([2]));
     assert.equal(read().infoLog, undefined);
-    assert.equal(checkOrWriteIdentity(dir, withAccounts([2], "h2")), first);
-    assert.equal(read().infoLog, undefined, "只换跑批器代码：不追加");
+    assert.equal(checkOrWriteIdentity(dir, withAccounts([2], "h1")), first);
+    assert.equal(read().infoLog, undefined, "什么都没变：不追加");
     const at = new Date("2026-09-25T00:00:00Z");
     assert.equal(
       checkOrWriteIdentity(dir, withAccounts([2, 3]), () => at),
@@ -304,6 +304,153 @@ test("身份头：输出目录里已有结果、报告、作业目录或隔离�
       rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+// 同一份 core，换代码版本
+const atHarness = (commit: string, dirty = false): StreamRunIdentity => ({
+  ...identity(),
+  info: { concurrency: 4, harness: { commit, dirty } },
+});
+
+function withDir(prefix: string, body: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    body(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const readIdentityFile = (dir: string) =>
+  JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+
+test("代码版本（269）：续跑时提交号不同即拒绝，报出记录的与当前的提交号与是否有未提交改动；身份头不动", () => {
+  withDir("pigeon-stream-harness-commit-", (dir) => {
+    checkOrWriteIdentity(dir, atHarness("aaa1111"));
+    const before = readFileSync(join(dir, "identity.json"), "utf8");
+    assert.throws(
+      () => checkOrWriteIdentity(dir, atHarness("bbb2222")),
+      /记录的代码：提交 aaa1111（无未提交改动）.*当前的代码：提交 bbb2222（无未提交改动）.*--accept-harness-change/
+    );
+    assert.equal(readFileSync(join(dir, "identity.json"), "utf8"), before);
+    // 同一提交、干净：照常续跑
+    checkOrWriteIdentity(dir, atHarness("aaa1111"));
+  });
+});
+
+test("代码版本（269）：续跑时当前有未提交改动、或任一方提交号为 unknown、或记录的有未提交改动，即拒绝", () => {
+  withDir("pigeon-stream-harness-dirty-", (dir) => {
+    checkOrWriteIdentity(dir, atHarness("aaa1111"));
+    assert.throws(
+      () => checkOrWriteIdentity(dir, atHarness("aaa1111", true)),
+      /当前的代码：提交 aaa1111（有未提交改动）/
+    );
+    assert.throws(
+      () => checkOrWriteIdentity(dir, atHarness("unknown")),
+      /当前的代码：提交 unknown/
+    );
+  });
+  withDir("pigeon-stream-harness-unknown-", (dir) => {
+    checkOrWriteIdentity(dir, atHarness("unknown"), undefined, { allowDirtyHarness: true });
+    assert.throws(
+      () => checkOrWriteIdentity(dir, atHarness("unknown")),
+      /记录的代码：提交 unknown/
+    );
+  });
+  withDir("pigeon-stream-harness-saved-dirty-", (dir) => {
+    checkOrWriteIdentity(dir, atHarness("aaa1111", true), undefined, { allowDirtyHarness: true });
+    // 记录的那份有未提交改动：认不出当时是哪份代码，同一提交的干净代码也不能认定相同
+    assert.throws(
+      () => checkOrWriteIdentity(dir, atHarness("aaa1111")),
+      /记录的代码：提交 aaa1111（有未提交改动）/
+    );
+  });
+});
+
+test("代码版本（269）：--accept-harness-change 给了原因才放行，在 infoLog 追加一条（时刻、新的代码版本、原因），之后以新版本为准", () => {
+  withDir("pigeon-stream-harness-accept-", (dir) => {
+    const first = checkOrWriteIdentity(dir, atHarness("aaa1111"));
+    const at = new Date("2026-09-28T01:02:03Z");
+    assert.equal(
+      checkOrWriteIdentity(dir, atHarness("bbb2222"), () => at, {
+        acceptHarnessChange: "修复判题超时",
+      }),
+      first,
+      "放行不改身份摘要"
+    );
+    assert.deepEqual(readIdentityFile(dir).infoLog, [
+      {
+        since: at.toISOString(),
+        info: atHarness("bbb2222").info,
+        acceptHarnessChange: "修复判题超时",
+      },
+    ]);
+    assert.equal(readIdentityFile(dir).info.harness.commit, "aaa1111", "开跑时的记录保留");
+    // 放行后以新版本为准：同一新版本照常续跑、不再追加；回到旧版本即拒绝
+    checkOrWriteIdentity(dir, atHarness("bbb2222"));
+    assert.equal(readIdentityFile(dir).infoLog.length, 1);
+    assert.throws(
+      () => checkOrWriteIdentity(dir, atHarness("aaa1111")),
+      /记录的代码：提交 bbb2222/
+    );
+    // 有未提交改动的也可以显式放行，同样留痕
+    checkOrWriteIdentity(dir, atHarness("bbb2222", true), () => at, {
+      acceptHarnessChange: "现场补丁",
+    });
+    assert.deepEqual(readIdentityFile(dir).infoLog.at(-1), {
+      since: at.toISOString(),
+      info: atHarness("bbb2222", true).info,
+      acceptHarnessChange: "现场补丁",
+    });
+    // 代码没变时给了放行：没有要放行的不一致，不追加
+    withDir("pigeon-stream-harness-accept-same-", (other) => {
+      checkOrWriteIdentity(other, atHarness("aaa1111"));
+      checkOrWriteIdentity(other, atHarness("aaa1111"), undefined, { acceptHarnessChange: "无事" });
+      assert.equal(readIdentityFile(other).infoLog, undefined);
+    });
+  });
+});
+
+test("代码版本（269）：--accept-harness-change 的原因为空或只有空白即报错，身份头不动", () => {
+  withDir("pigeon-stream-harness-empty-", (dir) => {
+    checkOrWriteIdentity(dir, atHarness("aaa1111"));
+    const before = readFileSync(join(dir, "identity.json"), "utf8");
+    for (const reason of ["", "  "]) {
+      assert.throws(
+        () =>
+          checkOrWriteIdentity(dir, atHarness("bbb2222"), undefined, {
+            acceptHarnessChange: reason,
+          }),
+        /--accept-harness-change 的原因不能为空/
+      );
+    }
+    assert.equal(readFileSync(join(dir, "identity.json"), "utf8"), before);
+  });
+});
+
+test("代码版本（269）：首次开跑时有未提交改动或提交号为 unknown 即拒绝、不写身份头；--allow-dirty-harness 放行并记进身份头", () => {
+  for (const ref of [
+    { commit: "aaa1111", dirty: true },
+    { commit: "unknown", dirty: false },
+  ]) {
+    withDir("pigeon-stream-harness-first-", (dir) => {
+      assert.throws(
+        () => checkOrWriteIdentity(dir, atHarness(ref.commit, ref.dirty)),
+        /拒绝开跑.*--allow-dirty-harness/
+      );
+      assert.equal(existsSync(join(dir, "identity.json")), false);
+      checkOrWriteIdentity(dir, atHarness(ref.commit, ref.dirty), undefined, {
+        allowDirtyHarness: true,
+      });
+      assert.equal(readIdentityFile(dir).allowDirtyHarness, true);
+      assert.deepEqual(readIdentityFile(dir).info.harness, ref);
+    });
+  }
+  // 干净的代码：不需要放行，给了也不记
+  withDir("pigeon-stream-harness-first-clean-", (dir) => {
+    checkOrWriteIdentity(dir, atHarness("aaa1111"), undefined, { allowDirtyHarness: true });
+    assert.equal(readIdentityFile(dir).allowDirtyHarness, undefined);
+  });
 });
 
 test("身份头：首次写入与追加 infoLog 都是先写临时文件再改名（换目录项，不原地改写）", () => {

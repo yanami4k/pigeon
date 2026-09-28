@@ -145,6 +145,58 @@ test("报告：每步得分表（分段与合并）、多遍均值与范围、�
   assert.doesNotMatch(md, /终点|补跑/);
 });
 
+test("报告的设置一节（269）：开跑时的代码提交号，以及 infoLog 里每一次显式放行的时刻、新提交号与原因；没有身份头即不写这一节", () => {
+  const lines = [line("neither", 1, [1, 1])];
+  const base = { info: { harness: { commit: "aaa1111", dirty: false } } };
+  const md = renderStreamReport(lines, {
+    title: "放行",
+    segments,
+    identity: {
+      ...base,
+      infoLog: [
+        // 没有放行原因的记录（只改路数、账号）不是放行，不列
+        { since: "2026-09-28T00:00:00.000Z", info: base.info },
+        {
+          since: "2026-09-28T01:02:03.000Z",
+          info: { harness: { commit: "bbb2222", dirty: false } },
+          acceptHarnessChange: "修复判题超时",
+        },
+        {
+          since: "2026-09-29T00:00:00.000Z",
+          info: { harness: { commit: "ccc3333", dirty: true } },
+          acceptHarnessChange: "现场补丁",
+        },
+      ],
+    },
+  });
+  const settings = md.slice(md.indexOf("## 设置"), md.indexOf("## 每步得分"));
+  assert.ok(md.indexOf("## 设置") > 0, "有设置一节，排在每步得分之前");
+  assert.match(settings, /开跑时的代码：提交 aaa1111（无未提交改动）/);
+  assert.match(settings, /\| 时刻 \| 新的代码 \| 原因 \|/);
+  assert.match(
+    settings,
+    /^\| 2026-09-28T01:02:03\.000Z \| 提交 bbb2222（无未提交改动） \| 修复判题超时 \|$/m
+  );
+  assert.match(
+    settings,
+    /^\| 2026-09-29T00:00:00\.000Z \| 提交 ccc3333（有未提交改动） \| 现场补丁 \|$/m
+  );
+  assert.doesNotMatch(settings, /2026-09-28T00:00:00/);
+
+  const dirty = renderStreamReport(lines, {
+    title: "自测",
+    segments,
+    identity: {
+      ...base,
+      info: { harness: { commit: "aaa1111", dirty: true } },
+      allowDirtyHarness: true,
+    },
+  });
+  assert.match(dirty, /开跑时的代码：提交 aaa1111（有未提交改动；经 --allow-dirty-harness 放行）/);
+  assert.match(dirty, /显式放行的代码更换：无/);
+  assert.doesNotMatch(renderStreamReport(lines, { title: "无身份头", segments }), /## 设置/);
+});
+
 test("报告：次要指标单列验证工具故障的步次（决策 170 ③）——第一遍各步合计；未开回炉的条件记为—", () => {
   const lines = [
     line("neither", 1, [1, 1], { verifyToolFaults: 2 }),
