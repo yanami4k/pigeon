@@ -879,6 +879,13 @@ export class PiRuntimeAdapter {
           ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
           // 决策 188、218：本次的压缩配置
           ...(this.#compactor !== undefined ? { compaction: { ...this.#compactor.config } } : {}),
+          // 决策 191、192、207：推送的记忆与复盘标记
+          ...(snapshot.learnedMemory !== undefined
+            ? { learnedMemory: { ...snapshot.learnedMemory } }
+            : {}),
+          ...(snapshot.memoryReview !== undefined
+            ? { memoryReview: { ...snapshot.memoryReview } }
+            : {}),
         },
       });
     } catch (error) {

@@ -36,6 +36,11 @@ export interface StreamRunIdentity {
         maxOutputTokens: number | null;
         // 上下文压缩的实际生效配置（188、218）：没给参数即产品缺省；加这一项之前写下的身份头没有它，续跑即判为不同
         compaction?: CompactionConfig;
+        // 推送记忆（191、221、223、243）：学到的记忆的总量上限（字符）、复盘模板版本与复盘上限，实际生效的值（没给即缺省）；
+        // 与压缩配置同一口径，加这几项之前写下的身份头没有它们，续跑即判为不同
+        memoryLimitChars?: number;
+        reviewTemplate?: string;
+        reviewBudget?: { maxTurns: number; wallClockMs: number };
       };
       minimal?: {
         model: string;

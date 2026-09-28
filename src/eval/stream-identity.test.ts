@@ -94,6 +94,40 @@ test("身份头记 Pigeon 的压缩配置：续跑时压缩配置不同即拒绝
   }
 });
 
+test("身份头记推送记忆的记忆上限、复盘模板版本与复盘上限：续跑时任一项不同即拒绝并列出不同项", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-memory-"));
+  try {
+    const pigeon = {
+      ...(identity().core.agents.pigeon as NonNullable<
+        StreamRunIdentity["core"]["agents"]["pigeon"]
+      >),
+      memoryLimitChars: 12_000,
+      reviewTemplate: "v1",
+      reviewBudget: { maxTurns: 40, wallClockMs: 15 * 60_000 },
+    };
+    checkOrWriteIdentity(dir, identity({ agents: { pigeon } }));
+    const saved = JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+    assert.equal(saved.core.agents.pigeon.memoryLimitChars, 12_000);
+    assert.equal(saved.core.agents.pigeon.reviewTemplate, "v1");
+    assert.deepEqual(saved.core.agents.pigeon.reviewBudget, { maxTurns: 40, wallClockMs: 900_000 });
+    // 同样的即通过
+    checkOrWriteIdentity(dir, identity({ agents: { pigeon } }));
+    for (const [changed, key] of [
+      [{ memoryLimitChars: 4000 }, "memoryLimitChars"],
+      [{ reviewTemplate: "v2" }, "reviewTemplate"],
+      [{ reviewBudget: { maxTurns: 80, wallClockMs: 30 * 60_000 } }, "reviewBudget"],
+    ] as const) {
+      assert.throws(
+        () =>
+          checkOrWriteIdentity(dir, identity({ agents: { pigeon: { ...pigeon, ...changed } } })),
+        new RegExp(`agents\\.pigeon\\.${key}`)
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("正式跑批的预算缺省为每步 150 轮、30 分钟（147 校准）", () => {
   assert.deepEqual(DEFAULT_STEP_BUDGET, { maxTurns: 150, wallClockMs: 30 * 60_000 });
 });

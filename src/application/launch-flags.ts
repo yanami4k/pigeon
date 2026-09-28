@@ -15,7 +15,7 @@ export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom"
 export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
-export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking"]);
+export const VALUELESS_FLAGS = new Set(["--yolo", "--no-persist-thinking", "--no-pushed-memory"]);
 
 export interface LaunchFlags {
   root: string;
@@ -44,6 +44,11 @@ export interface LaunchFlags {
   retryOnFail?: number;
   // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
   repairRounds?: number;
+  // 决策 191、244：推送记忆——日常入口缺省开着（与会话检索开关的缺省一致），--no-pushed-memory 关掉（关掉即不推送、
+  // 不注册记忆工具、不复盘）；--memory-limit <字符数> 学到的记忆的总量上限（缺省 12,000）。cli REPL / resume、tui 与
+  // pigeon run 接受
+  pushedMemory: boolean;
+  memoryLimitChars?: number;
   // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
   // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
   compaction?: CompactionConfigInput;
@@ -73,6 +78,8 @@ export interface ParseLaunchFlagsOptions {
   retry?: boolean;
   // 是否接受 --repair-rounds（只有 pigeon run）
   repair?: boolean;
+  // 是否接受 --no-pushed-memory 与 --memory-limit（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
+  pushedMemory?: boolean;
 }
 
 export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOptions): LaunchFlags {
@@ -84,6 +91,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     provider: DEFAULT_MODEL_PLACEHOLDER.provider,
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
+    pushedMemory: true,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
   const fromEnv = env.PIGEON_STREAM_FN;
@@ -96,6 +104,14 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       flags.yolo = true;
     } else if (flag === "--no-persist-thinking") {
       flags.persistThinking = false;
+    } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
+      flags.pushedMemory = false;
+    } else if (flag === "--memory-limit" && options.pushedMemory === true) {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`--memory-limit 需要正整数（字符数）（${usage}）`);
+      }
+      flags.memoryLimitChars = value;
     } else if (flag === "--memory-budget") {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 0) {

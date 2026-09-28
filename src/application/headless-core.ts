@@ -10,8 +10,13 @@
 // 这一步以失败收尾，工作区保留 agent 的改动、不做回退（决策 172 / 173）。各轮与首次共用同一个总预算（轮次、墙钟与 token；
 // 验证命令的耗时也算在墙钟里）。一步的成败以最后一次验证为准，由 Run 开始条目里冻结的回炉轮数与最后一次验证记录推出
 // （state/session-judge.ts），不新增记录。
+// 推送记忆（决策 191、192、207、217）：开着时开局推入学到的记忆、带 update_memory；上下文压缩之前先复盘一次（期间这一步的墙钟
+// 暂停，复盘不占这一步的宽上限，171），最后一次验证之后、返回之前做收尾复盘，复盘做完才算这一步结束。复盘失败或撞上限都不改变
+// 这一步的结果，经去重告警写标准错误输出，并记进结果
 import path from "node:path";
+import { assertMemoryLimit } from "../memory/pushed.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
+import { type ReviewVerdictInput, reviewVerdictText } from "../memory/review-text.ts";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
@@ -26,16 +31,25 @@ import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
 import type { BranchHeaderInput } from "../state/session-payloads.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { StepStartMark, WorkspaceHost } from "../tools/workspace-host.ts";
-import { verifyAttempt } from "./attempt-verify.ts";
+import { type VerifyAttemptResult, verifyAttempt } from "./attempt-verify.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
 import { compactionWarner } from "./compaction-text.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
-import { buildRepairFeedback } from "./repair-loop.ts";
-import type { RuntimeBundle } from "./runtime.ts";
+import {
+  assertReviewBudget,
+  DEFAULT_REVIEW_BUDGET,
+  type ReviewBudget,
+  type ReviewObserver,
+  type ReviewOutcome,
+  reviewWarner,
+  runMemoryReview,
+} from "./memory-review.ts";
+import { buildRepairFeedback, repairFailureSummary } from "./repair-loop.ts";
+import type { LearnedMemoryConfig, RuntimeBundle } from "./runtime.ts";
 import { openSessionStore, storeFaultWarner } from "./session-store.ts";
 import type { WarnSink } from "./warnings.ts";
-import { createDetachedRuntime } from "./workers.ts";
+import { createDetachedRuntime, type DetachedRuntimeRequest } from "./workers.ts";
 
 export type HeadlessStatus =
   | "completed"
@@ -99,8 +113,14 @@ export interface HeadlessRunOptions {
   beforeCompaction?: BeforeCompaction;
   // 运行时告警的出口（自动压缩没压成、压缩前回调失败；缺省标准错误输出，同一类只说一次；测试注入）
   warn?: WarnSink;
-  // 决策 191、193：推送记忆（开局把记忆整份推入系统提示）。尚未实现：打开即在装配前报错
+  // 决策 191、193：推送记忆（开局把记忆整份推入系统提示、带 update_memory、压缩前与收尾复盘）；缺省关着
   pushedMemory?: boolean;
+  // 学到的记忆的总量上限（字符，按码点计）；缺省 12,000
+  memoryLimitChars?: number;
+  // 复盘上限（每次复盘各自计；缺省 40 轮、15 分钟，243）
+  reviewBudget?: ReviewBudget;
+  // 每次复盘开始与结束时调用（跑批器据此在复盘前后读网关计量）
+  onReview?: ReviewObserver;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令——冻结进注入快照；尝试收尾后在工作区独立执行并落本会话的通用验证记录
@@ -144,6 +164,8 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   label: OutcomeLabel;
   // 决策 142 / 143：回炉开启时在场——用了几轮、最后一次验证的结论、这一步是否收尾
   repair?: HeadlessRepairSummary;
+  // 推送记忆开着时在场：这一步的各次复盘（压缩前的按发生先后，收尾的在最后）
+  reviews?: ReviewOutcome[];
 }
 
 export interface HeadlessRepairSummary {
@@ -204,10 +226,11 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
 }
 
 export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
-  if (options.pushedMemory === true) {
-    throw new Error("推送记忆尚未实现：打开推送记忆的条件暂时不能运行");
-  }
   const repairRounds = assertRepairSetup(options);
+  const pushed = options.pushedMemory === true;
+  assertMemoryLimit(options.memoryLimitChars);
+  const reviewBudget = options.reviewBudget ?? DEFAULT_REVIEW_BUDGET;
+  assertReviewBudget(reviewBudget);
   // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 只是宿主侧占位目录。分叉（失败自动重试、分支会话）要在它上面
   // 打 git 快照，会话验证命令要在它里面执行——在占位目录上做只会得到假结果，装配前一律拒绝。
   // 回炉例外：它的验证经执行端（见 assertRepairSetup）
@@ -226,12 +249,56 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   }
   const sessionId = options.sessionId ?? newSessionId();
   const startedAt = Date.now();
+  // 这一步的墙钟：压缩前复盘期间暂停（复盘不占这一步的宽上限，171），复盘结束后顺延
+  let deadline = options.wallClockMs !== undefined ? startedAt + options.wallClockMs : undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let pausedAt: number | undefined;
+  let armClock = (): void => {};
+  const pauseClock = (): void => {
+    clearTimeout(timer);
+    timer = undefined;
+    pausedAt = Date.now();
+  };
+  const resumeClock = (): void => {
+    if (pausedAt !== undefined && deadline !== undefined) {
+      deadline += Date.now() - pausedAt;
+    }
+    pausedAt = undefined;
+    armClock();
+  };
+  const reviews: ReviewOutcome[] = [];
+  const warnReview = reviewWarner(options.warn);
+  // 推送记忆（191）：无人值守——{冲突处理} 填无人值守版；压缩前复盘由运行面在压缩前回调里做
+  const learnedMemory: LearnedMemoryConfig | undefined = pushed
+    ? {
+        conflict: "unattended",
+        ...(options.memoryLimitChars !== undefined ? { limitChars: options.memoryLimitChars } : {}),
+        review: {
+          budget: reviewBudget,
+          observer: {
+            started: (kind) => {
+              pauseClock();
+              options.onReview?.started?.(kind);
+            },
+            ended: (outcome) => {
+              reviews.push(outcome);
+              options.onReview?.ended?.(outcome);
+              resumeClock();
+            },
+          },
+          ...(options.warn !== undefined ? { warn: options.warn } : {}),
+          ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
+        },
+      }
+    : undefined;
+  // 开局冻结的系统提示原文：收尾复盘沿用它
+  let frozenSystemPrompt: string | undefined;
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
   // 已注册工具的风险档位（需审批次数按它现算；运行面没装起来时为空）
   let toolTiers: ReadonlyMap<string, string> = new Map();
-  const handle = createDetachedRuntime({
-    sessionId,
+  // 本次运行与收尾复盘共用的装配参数（工具定义因此相同）
+  const surface: Omit<DetachedRuntimeRequest, "sessionId"> = {
     governanceRoot: options.governanceRoot,
     workspaceRoot: options.workspaceRoot,
     ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
@@ -254,10 +321,15 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
     ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
     ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
+    ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
+    ...(learnedMemory !== undefined ? { learnedMemory } : {}),
+  };
+  const handle = createDetachedRuntime({
+    ...surface,
+    sessionId,
     ...(options.beforeCompaction !== undefined
       ? { beforeCompaction: options.beforeCompaction }
       : {}),
-    ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
     ...(options.retryOnFail !== undefined ? { retryOnFail: options.retryOnFail } : {}),
     ...(repairRounds > 0 ? { repairRounds } : {}),
@@ -271,6 +343,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
+      frozenSystemPrompt = bundle.adapter.snapshot().context.systemPrompt;
       // 决策 189：无头运行没人看压缩提示——自动压缩没压成与压缩前回调失败写标准错误输出，同一类只说一次
       bundle.adapter.subscribeCompaction(compactionWarner(options.warn));
       toolTiers = bundle.toolTiers;
@@ -313,10 +386,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       stop("token-limit");
     }
   });
-  const timer =
-    options.wallClockMs !== undefined
-      ? setTimeout(() => stop("wall-clock-limit"), options.wallClockMs)
-      : undefined;
+  armClock = () => {
+    if (deadline !== undefined) {
+      timer = setTimeout(() => stop("wall-clock-limit"), Math.max(0, deadline - Date.now()));
+    }
+  };
+  armClock();
   let externallyAborted = false;
   const onAbort = () => {
     externallyAborted = true;
@@ -337,6 +412,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let protectedRestores = 0;
   // 各次验证里的工具故障步数合计
   let toolFaults = 0;
+  // 最后一次验证（收尾复盘的验证结论按它填）
+  let lastVerified: VerifyAttemptResult | undefined;
   try {
     if (repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined) {
       stepStart = await options.workspaceHost.markStepStart();
@@ -400,6 +477,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       });
       const { verdict } = verified.outcome;
       lastVerdict = verdict;
+      lastVerified = verified;
       toolFaults += (verified.steps ?? []).filter((step) => step.toolFault === true).length;
       verification = { verdict };
       // 验证进行中来了外部中止：验证一结束即停，不回炉
@@ -442,6 +520,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     }
   } finally {
     clearTimeout(timer);
+    deadline = undefined;
     unsubscribe();
     options.abortSignal?.removeEventListener("abort", onAbort);
     await handle.dispose();
@@ -472,9 +551,40 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         envelopeRunId: metricsBefore.runId,
       });
       verification = { verdict: verified.outcome.verdict };
+      lastVerified = verified;
     } finally {
       await store.close();
     }
+  }
+  // 收尾复盘（192）：最后一次验证之后、返回之前；这一步有 Run、没被外部中止时才做。复盘做完才算这一步结束
+  if (
+    learnedMemory !== undefined &&
+    frozenSystemPrompt !== undefined &&
+    metricsBefore.runId !== undefined &&
+    !externallyAborted
+  ) {
+    const systemPrompt = frozenSystemPrompt;
+    options.onReview?.started?.("closing");
+    const outcome = await runMemoryReview({
+      kind: "closing",
+      governanceRoot: options.governanceRoot,
+      sourceSessionId: sessionId,
+      verdict: reviewVerdictText(verdictInputOf(lastVerified, options.verify?.command ?? "")),
+      budget: reviewBudget,
+      ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
+      open: (review) =>
+        createDetachedRuntime({
+          ...surface,
+          sessionId: review.sessionId,
+          initialMessages: review.initialMessages,
+          reviewSession: { kind: "closing", systemPrompt, sourceSessionId: sessionId },
+          learnedMemory: { ...learnedMemory, review: false },
+          budget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
+        }),
+    });
+    reviews.push(outcome);
+    warnReview(outcome);
+    options.onReview?.ended?.(outcome);
   }
   const outcome = readRunOutcome(sessionsDir, sessionId, toolTiers);
   const metrics = outcome.metrics;
@@ -494,9 +604,33 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...metrics,
     ...(verification !== undefined ? { verification } : {}),
     ...(repair !== undefined ? { repair } : {}),
+    ...(pushed ? { reviews } : {}),
     label: outcome.label,
     durationMs: Date.now() - startedAt,
     ...(errorMessage !== undefined ? { errorMessage } : {}),
+  };
+}
+
+// 收尾复盘的验证结论的输入：没验证过即"没有运行验证门"；验证过按最后一次的结论、工具故障的步与回炉反馈的同一份失败摘要
+function verdictInputOf(
+  verified: VerifyAttemptResult | undefined,
+  command: string
+): ReviewVerdictInput {
+  if (verified === undefined) {
+    return { ran: false };
+  }
+  const steps = verified.steps ?? [];
+  const faulted = steps.filter((step) => step.toolFault === true);
+  return {
+    ran: true,
+    verdict: verified.outcome.verdict,
+    faultedSteps: faulted.map((step) => step.name),
+    allFaulted: steps.length > 0 && faulted.length === steps.length,
+    failureSummary: repairFailureSummary({
+      command,
+      outcome: verified.outcome,
+      ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
+    }),
   };
 }
 

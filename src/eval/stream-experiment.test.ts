@@ -35,7 +35,7 @@ test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），�
   assert.equal(forced.provider, "kimi-coding");
 });
 
-test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限与压缩配置记运行时缺省（off、16,384、产品缺省的压缩配置），不记 null；给了的原样记", () => {
+test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置、记忆上限与复盘上限记运行时缺省（off、16,384、产品缺省的压缩配置、12,000 字符、40 轮与 15 分钟），不记 null；复盘模板版本记 v1；给了的原样记", () => {
   assert.deepEqual(effectivePigeonSettings({}, "deepseek-flash"), {
     provider: "deepseek",
     modelId: "deepseek-flash",
@@ -48,6 +48,9 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       keepRecentTokens: 20_000,
       thresholdTokens: 983_616,
     },
+    memoryLimitChars: 12_000,
+    reviewTemplate: "v1",
+    reviewBudget: { maxTurns: 40, wallClockMs: 15 * 60_000 },
   });
   assert.deepEqual(
     effectivePigeonSettings(
@@ -57,6 +60,8 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
         maxOutputTokens: 8_000,
         modelId: "m2",
         compaction: { thresholdTokens: 30_000, keepRecentTokens: 4000 },
+        memoryLimitChars: 4000,
+        reviewBudget: { maxTurns: 80, wallClockMs: 30 * 60_000 },
       },
       "deepseek-flash"
     ),
@@ -72,6 +77,9 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
         keepRecentTokens: 4000,
         thresholdTokens: 30_000,
       },
+      memoryLimitChars: 4000,
+      reviewTemplate: "v1",
+      reviewBudget: { maxTurns: 80, wallClockMs: 30 * 60_000 },
     }
   );
 });

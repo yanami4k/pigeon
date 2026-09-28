@@ -19,7 +19,13 @@ import { type AttemptVerification, attachAttemptVerification } from "./attempt-v
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { runRetryOnFail } from "./fork.ts";
 import { describeMcpStartup, type McpSession, startMcpSession } from "./mcp.ts";
-import { buildRuntime, disposeRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
+import {
+  buildRuntime,
+  disposeRuntime,
+  type LearnedMemoryConfig,
+  type RuntimeBundle,
+  type RuntimeDeps,
+} from "./runtime.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
 import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
@@ -34,6 +40,30 @@ export interface SessionRuntimeFlags {
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
+  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）与学到的记忆的总量上限
+  pushedMemory?: boolean;
+  memoryLimitChars?: number;
+}
+
+// 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省）
+function interactiveLearnedMemory(flags: SessionRuntimeFlags): LearnedMemoryConfig | undefined {
+  return flags.pushedMemory === true
+    ? {
+        conflict: "interactive",
+        ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
+      }
+    : undefined;
+}
+
+// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关与上限
+export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
+  pushedMemory?: boolean;
+  memoryLimitChars?: number;
+} {
+  return {
+    ...(flags.pushedMemory === true ? { pushedMemory: true } : {}),
+    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
+  };
 }
 
 export interface OpenSessionRuntimeRequest {
@@ -107,6 +137,7 @@ export async function openSessionRuntime(
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
   });
+  const learnedMemory = interactiveLearnedMemory(request.flags);
   for (const note of describeMcpStartup(mcp)) {
     request.onMcpNote?.(note);
   }
@@ -131,6 +162,7 @@ export async function openSessionRuntime(
         ? { maxOutputTokens: request.flags.maxOutputTokens }
         : {}),
       ...(request.flags.compaction !== undefined ? { compaction: request.flags.compaction } : {}),
+      ...(learnedMemory !== undefined ? { learnedMemory } : {}),
       ...(request.createApprovalHandler !== undefined
         ? { createApprovalHandler: request.createApprovalHandler }
         : {}),
@@ -207,6 +239,7 @@ export async function openSessionRuntime(
             ? { compaction: request.flags.compaction }
             : {}),
           ...(request.verify !== undefined ? { verify: request.verify } : {}),
+          ...pushedMemoryRunOptions(request.flags),
           ...(startMcp !== undefined
             ? {
                 startMcp: () =>

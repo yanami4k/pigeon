@@ -7,12 +7,17 @@
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
 // 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
+// 推送记忆（决策 191、217、227、244）：开着时会话开始读 .pigeon/learned/MEMORY.md 推入系统提示（常驻 Memory 之后、Skill 目录之前）
+// 并注册 update_memory；上下文压缩之前先复盘一次（192、207）。复盘运行面也在这里装：系统提示取来源冻结的原文，工具定义不变，
+// 执行时只放行 read_file 与 update_memory（240）
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { assertMemoryLimit, loadPushedMemory, type MemoryConflictMode } from "../memory/pushed.ts";
 import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
+import { REVIEW_TEMPLATE_VERSION, type ReviewKind } from "../memory/review-text.ts";
 import {
   createReadSessionEntryTool,
   createSearchSessionsTool,
@@ -20,6 +25,11 @@ import {
   SEARCH_SESSIONS_TOOL,
   sessionToolRegistrations,
 } from "../memory/search-tools.ts";
+import {
+  createUpdateMemoryTool,
+  UPDATE_MEMORY_TOOL,
+  updateMemoryRegistration,
+} from "../memory/update-memory-tool.ts";
 import { loadCommandsConfig } from "../persistence/commands-config.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
@@ -61,6 +71,15 @@ import {
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { createToolGovernance } from "./governance.ts";
 import type { McpSession } from "./mcp.ts";
+import {
+  assertReviewBudget,
+  DEFAULT_REVIEW_BUDGET,
+  gateReviewTools,
+  type ReviewBudget,
+  type ReviewObserver,
+  reviewWarner,
+  runMemoryReview,
+} from "./memory-review.ts";
 import {
   grantEventSink,
   openSessionStore,
@@ -144,6 +163,40 @@ export interface RuntimeDeps {
   compaction?: CompactionConfigInput;
   // 决策 192、207：压缩前回调（压缩前复盘的挂点）；缺省不挂
   beforeCompaction?: BeforeCompaction;
+  // 决策 191、217、244：推送记忆。在场即开着——开局推送 MEMORY.md、注册 update_memory、压缩前复盘；缺省关着
+  // （装配层缺省；日常入口由启动参数缺省打开，跑批器按条件明确指定）
+  learnedMemory?: LearnedMemoryConfig;
+  // 决策 191、192：本运行面是一次复盘——系统提示取来源会话冻结的原文（工具定义照常装配，与来源相同），执行时只放行
+  // read_file 与 update_memory，Run 开始条目记复盘种类与模板版本。只由复盘装配时给
+  reviewSession?: ReviewSessionConfig;
+}
+
+// 复盘运行面的设定：种类、来源会话冻结的系统提示原文与来源会话号（refs 里的 user 补来源会话的编号——用户的话说在来源会话里）
+export interface ReviewSessionConfig {
+  kind: ReviewKind;
+  systemPrompt: string;
+  sourceSessionId: SessionId;
+}
+
+// 推送记忆的配置
+export interface LearnedMemoryConfig {
+  // {冲突处理} 的填法：交互使用（命令行对话、终端界面）/ 无人值守（pigeon run、跑批）
+  conflict: MemoryConflictMode;
+  // 总量上限（字符，按码点计）；缺省 12,000
+  limitChars?: number;
+  // 压缩前复盘：缺省开着、上限取缺省；false 即不做（worker 与复盘运行面自己）
+  review?: MemoryReviewSettings | false;
+}
+
+export interface MemoryReviewSettings {
+  // 复盘上限（缺省 40 轮、15 分钟）
+  budget?: ReviewBudget;
+  // 每次复盘开始与结束时调用
+  observer?: ReviewObserver;
+  // 复盘失败与撞上限的告警出口（缺省标准错误输出，同一类只说一次）
+  warn?: WarnSink;
+  // 外部中止（跑批器作废这一步等）：在途的复盘随之中止
+  abortSignal?: AbortSignal;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -170,6 +223,8 @@ export interface RuntimeBundle {
   toolTiers: ReadonlyMap<string, "read" | "write" | "exec">;
   // M6：释放运行面前先执行的附加释放动作（快照器、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
+  // 推送记忆开着时在场（worker 按它继承）
+  learnedMemory?: LearnedMemoryConfig;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -188,6 +243,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   }
   // 压缩配置畸形在打开会话文件之前响亮失败
   const compactionConfig = resolveCompactionConfig(deps.compaction);
+  const learned = deps.learnedMemory;
+  assertMemoryLimit(learned?.limitChars);
+  // 压缩前复盘（192、207）：推送开着、不是复盘运行面自己、没有明说不做时开着
+  const reviewSettings =
+    learned !== undefined && learned.review !== false && deps.reviewSession === undefined
+      ? (learned.review ?? {})
+      : undefined;
+  if (reviewSettings?.budget !== undefined) {
+    assertReviewBudget(reviewSettings.budget);
+  }
   // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
   // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（缺省 off）时温度照常下发
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
@@ -270,6 +335,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       registry.register(registration);
     }
   }
+  // 决策 217：推送开着时注册记忆工具（写档、只写 learned/、免审批）
+  if (learned !== undefined) {
+    registry.register(updateMemoryRegistration(governanceRoot));
+  }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
   const residentMemory = loadResidentMemory({
@@ -278,6 +347,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
     ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
   });
+  // 决策 191：会话开始读学到的记忆，整份推入、即冻结；清单进 Run 开始条目。复盘运行面也读一次（记下复盘开始时的记忆），
+  // 但系统提示用来源的原文
+  const pushedMemory =
+    learned !== undefined
+      ? loadPushedMemory({
+          governanceRoot,
+          conflict: learned.conflict,
+          ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
+        })
+      : undefined;
   const editSentence = replaceMode
     ? "你是 Pigeon 编程助手。用 read_file 读取文件（每行形如「行号| 内容」），" +
       "用 edit_file 按原文替换编辑（old_string 须与文件原文逐字一致且在文件里恰好出现一次，不要带行号前缀）。"
@@ -316,6 +395,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "edit_file",
     RUN_COMMAND_TOOL,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL] : []),
+    ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
   ];
@@ -324,15 +404,19 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
         "server 不可用时这些工具会报错，改用内置工具继续。"
       : "";
-  const systemPrompt = [
-    basePrompt,
-    residentMemory.section,
-    skillCatalog.section,
-    mcpSection,
-    deps.taskDirective ?? "",
-  ]
-    .filter((section) => section !== "")
-    .join("\n\n");
+  // 复盘运行面沿用来源会话冻结的系统提示原文（命中缓存，也不让复盘看到开局之后改过的记忆段）
+  const systemPrompt =
+    deps.reviewSession?.systemPrompt ??
+    [
+      basePrompt,
+      residentMemory.section,
+      pushedMemory?.section ?? "",
+      skillCatalog.section,
+      mcpSection,
+      deps.taskDirective ?? "",
+    ]
+      .filter((section) => section !== "")
+      .join("\n\n");
   const delegated = deps.toolPolicy;
   const policy: ToolPolicy =
     delegated !== undefined
@@ -348,6 +432,46 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 188：压缩服务。摘要请求与主请求同一个模型接入，只套温度（摘要从不请求推理，温度总能生效）；
   // 不套单轮输出上限包装——它会盖掉上游给摘要定的输出上限（0.8 倍预留与模型输出上限的较小者）。
   // 模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供上游定摘要请求的选项
+  // 决策 192、207：压缩前复盘——推送开着时，压缩真正执行之前从本会话分叉复盘一次（三个触发位置都经这个回调），
+  // 再调用调用方给的压缩前回调。复盘改动的记忆不影响本会话（开工时已推入）；复盘失败不挡压缩
+  const warnReview = reviewWarner(reviewSettings?.warn);
+  const preCompactionReview: BeforeCompaction | undefined =
+    reviewSettings !== undefined && learned !== undefined
+      ? async (info) => {
+          const observer = reviewSettings.observer;
+          observer?.started?.("pre-compaction");
+          await sessionStore.flush();
+          const signals = [info.signal, reviewSettings.abortSignal].filter(
+            (signal): signal is AbortSignal => signal !== undefined
+          );
+          const outcome = await runMemoryReview({
+            kind: "pre-compaction",
+            governanceRoot,
+            sourceSessionId: deps.sessionId,
+            budget: reviewSettings.budget ?? DEFAULT_REVIEW_BUDGET,
+            abortSignal: AbortSignal.any(signals),
+            open: (review) =>
+              reviewHandle(
+                buildRuntime(
+                  reviewRuntimeDeps(deps, review, {
+                    kind: "pre-compaction",
+                    systemPrompt,
+                    sourceSessionId: deps.sessionId,
+                  })
+                )
+              ),
+          });
+          warnReview(outcome);
+          observer?.ended?.(outcome);
+        }
+      : undefined;
+  const beforeCompaction: BeforeCompaction | undefined =
+    preCompactionReview === undefined
+      ? deps.beforeCompaction
+      : async (info) => {
+          await preCompactionReview(info);
+          await deps.beforeCompaction?.(info);
+        };
   const compactor = new ContextCompactor({
     config: compactionConfig,
     streamFn:
@@ -366,7 +490,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       contextWindow: compactionConfig.contextWindow,
       maxTokens: maxOutputTokens,
     },
-    ...(deps.beforeCompaction !== undefined ? { beforeCompaction: deps.beforeCompaction } : {}),
+    ...(beforeCompaction !== undefined ? { beforeCompaction } : {}),
   });
   const adapter = new PiRuntimeAdapter({
     snapshot: {
@@ -394,6 +518,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       memory: residentMemory.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
+      ...(pushedMemory !== undefined ? { learnedMemory: pushedMemory.manifest } : {}),
+      ...(deps.reviewSession !== undefined
+        ? { memoryReview: { kind: deps.reviewSession.kind, template: REVIEW_TEMPLATE_VERSION } }
+        : {}),
       ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
@@ -423,22 +551,34 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(sessionSearch
         ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
         : []),
+      ...(learned !== undefined
+        ? [
+            createUpdateMemoryTool({
+              governanceRoot,
+              sessionId: deps.reviewSession?.sourceSessionId ?? deps.sessionId,
+              ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
+            }),
+          ]
+        : []),
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
     ],
-    // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
-    governance: createToolGovernance({
-      registry,
-      // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
-      // 交互实现由 Actor 注入（决策 025）；无审批通道时不传，prompt 档 fail-closed
-      ...(deps.createApprovalHandler !== undefined
-        ? { approvalHandler: deps.createApprovalHandler(grantStore) }
-        : {}),
-      // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
-      sessionGrants: grantStore,
-      configGrants,
-      workspaceRoot: deps.workspaceRoot,
-    }),
+    // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）
+    governance: gateReviewTools(
+      deps.reviewSession !== undefined,
+      createToolGovernance({
+        registry,
+        // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
+        // 交互实现由 Actor 注入（决策 025）；无审批通道时不传，prompt 档 fail-closed
+        ...(deps.createApprovalHandler !== undefined
+          ? { approvalHandler: deps.createApprovalHandler(grantStore) }
+          : {}),
+        // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
+        sessionGrants: grantStore,
+        configGrants,
+        workspaceRoot: deps.workspaceRoot,
+      })
+    ),
     sessionId: deps.sessionId,
     sessionStore,
     compaction: compactor,
@@ -456,6 +596,60 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     configGrants,
     toolTiers,
     ...(mcp !== undefined ? { mcp } : {}),
+    ...(learned !== undefined ? { learnedMemory: learned } : {}),
+  };
+}
+
+// 复盘运行面的装配参数：与来源同一份（工具定义因此相同），换会话号与初始消息，系统提示取来源原文；不带验证、回炉、
+// 失败重试、压缩前回调与会话来历；预算取复盘上限；推送照开（注册 update_memory）但不再嵌套压缩前复盘
+export function reviewRuntimeDeps(
+  deps: RuntimeDeps,
+  review: { sessionId: SessionId; initialMessages: AgentMessage[] },
+  session: ReviewSessionConfig
+): RuntimeDeps {
+  const {
+    verify: _verify,
+    retryOnFail: _retryOnFail,
+    repairRounds: _repairRounds,
+    beforeCompaction: _beforeCompaction,
+    storeLineage: _storeLineage,
+    restoredGrants: _restoredGrants,
+    budget: _budget,
+    initialMessages: _initialMessages,
+    learnedMemory,
+    ...base
+  } = deps;
+  const settings = learnedMemory?.review;
+  const budget = (settings !== false ? settings?.budget : undefined) ?? DEFAULT_REVIEW_BUDGET;
+  return {
+    ...base,
+    sessionId: review.sessionId,
+    initialMessages: review.initialMessages,
+    reviewSession: session,
+    budget: { maxTurns: budget.maxTurns, wallClockMs: budget.wallClockMs },
+    ...(learnedMemory !== undefined ? { learnedMemory: { ...learnedMemory, review: false } } : {}),
+  };
+}
+
+// 复盘运行面的句柄：释放时只停运行面、关会话文件，不关 MCP 会话（与来源共用，来源还在用）
+export function reviewHandle(bundle: RuntimeBundle): {
+  run: RuntimeBundle["adapter"]["run"];
+  interrupt: RuntimeBundle["adapter"]["interrupt"];
+  subscribe: RuntimeBundle["adapter"]["subscribe"];
+  dispose(): Promise<void>;
+} {
+  const { adapter, sessionStore } = bundle;
+  return {
+    run: (task) => adapter.run(task),
+    interrupt: (cause) => adapter.interrupt(cause),
+    subscribe: (listener) => adapter.subscribe(listener),
+    dispose: async () => {
+      try {
+        await adapter.dispose();
+      } finally {
+        await sessionStore.close();
+      }
+    },
   };
 }
 
