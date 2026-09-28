@@ -131,8 +131,17 @@
    - 现象：`fork-session.test.ts` 的"/fork 命令：解析 --at…"在满载并发下偶发失败，单独重跑 20 次全过。
    - 原因：两次 Run 在同一毫秒内开始时，单调 ULID 只差末位，用例取"去掉末 2 位"作为前缀，前缀就不唯一。
    - 复现：让两次 `adapter.run` 落在同一毫秒内（例如把时钟固定），再用 `slice(0, -2)` 的前缀调用 `resolveForkPoint`。
-3. **新机镜像层落在系统盘（环境问题，未处理）**
+3. **新机镜像层落在系统盘（环境问题，已处理）**
    - 现象：Docker 29 缺省用 containerd 镜像存储，`data-root` 只管 `/data/docker`，镜像层实际在 `/var/lib/containerd`（17 GiB），系统盘已用 20 GiB / 40 GiB（54%）。
    - 影响：再载入镜像或积累容器可写层会占满系统盘。
-   - 迁移做法：停 docker 与 containerd → 把 `/var/lib/containerd` 复制到 `/data/containerd` → 在 `/etc/containerd/config.toml` 设 `root = "/data/containerd"` → 启动服务。这一步在本次操作权限内未获准执行，现状未改。
+   - 处理（12:44:09 至 12:45:29 前后，经项目负责人授权另行执行）：
+     - 迁移前确认没有容器和跑批进程在跑，记录三个镜像的 Id 与 RootFS 各层摘要。
+     - 停 `docker.socket`、`docker`、`containerd`，用 `rsync -aHAX --numeric-ids` 把 `/var/lib/containerd` 复制到 `/data/containerd`（17 GiB，耗时 37 秒）。
+     - 在 `/etc/containerd/config.toml` 顶部加 `root = "/data/containerd"`，原文件备份在 `/data/migrate`；`containerd config dump` 显示 root 已生效。
+     - 起服务后核对：三个镜像（`busybox:latest`、`pigeon-stream-pigeon:v4`、`pigeon-stream-strands:v6`）的 Id 与各层摘要和迁移前逐一一致；三个镜像各起一次容器均正常（Python 3.13.15、Node v24.12.0）。核对无误后删除旧目录。
+     - 结果：系统盘已用 20 GiB → 3.5 GiB（54% → 10%），`/data` 已用 2.1 GiB → 19 GiB。跑批器不往 `/tmp` 写大文件；主目录下 npm 与 pip 缓存约 160 MB，留在原处。
 4. **作废的步的花费不进结果行（记录）**：中断或撞上限作废的步所发请求计入 `gateway-spend.json`，但不写结果行。本次两者相差 ¥0.41。按结果行汇总花费会低于网关累计值。
+5. **验证命令超时只终止直接子进程（产品缺陷，正式跑不受影响）**
+   - 现象：`src/execution/check-command.ts` 的超时终止在非 Windows 平台只杀直接子进程 `sh`，`sh` 再起的进程成为孤儿继续运行（Windows 用 `taskkill /T` 整树终止）。
+   - 表现：`check-command.test.ts` 的超时用例每次全量 verify 都会漏下一个 `node hang.mjs`，其工作目录是已删除的 `/tmp/pigeon-check-*`。pigeon-run 上两次 verify 留下 2 个，未清理。
+   - 影响范围：正式跑不受影响，因为容器执行端超时会重启容器，整棵进程树一并终止。只影响不开沙箱、验证命令在本机执行的用法。冻结后在产品线修。
