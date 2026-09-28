@@ -1,10 +1,17 @@
 // CLI trace 命令（M4 S3，D4 一次性渲染）：把会话（或单个 Run）的关联视图渲染为静态人读报告打印 stdout，可 grep/less。
 // 读新会话存储（决策 180 / 181）：经只读读取器读会话文件、投影成原生视图（state/session-view.ts），从不写文件——
 // 读的可能是别的进程正在追加的会话。一轮 = 一条助手消息 + 它发起的工具调用，工具调用按调用号与结果消息配对。
-// 旧视图里的审批、回执、确证、熔断记录、待对账与落盘缺口随这些记录停写（184）与断号诊断去掉（181）不再呈现。
+// 旧视图里的回执、确证、熔断记录、待对账与落盘缺口随这些记录停写（184）与断号诊断去掉（181）不再呈现；
+// 工具调用的审批结果与出错归类改读工具结果消息上的运行面标记，工具级失败分类由 storeToolOutcomes 现算。
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { evalVerdictLabel, failureBadge, shortId, summarizeArgs } from "../application/format.ts";
+import {
+  approvalVerdict,
+  evalVerdictLabel,
+  failureBadge,
+  shortId,
+  summarizeArgs,
+} from "../application/format.ts";
 import { messageLines } from "../application/history.ts";
 import {
   hasLegacySessionFile,
@@ -13,6 +20,12 @@ import {
   loadSessionView,
 } from "../persistence/session-catalog.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
+import {
+  type StoreMessage,
+  type StoreToolOutcome,
+  type ToolResultMark,
+  toolResultMark,
+} from "../state/session-judge.ts";
 import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
 import type {
   SessionView,
@@ -42,8 +55,14 @@ function describeMcpConflict(entry: McpToolsetEntry): string {
 
 type CheckpointItem = Extract<ViewItem, { kind: "checkpoint" }>;
 
+const ERROR_KIND_LABEL: Readonly<Record<NonNullable<ToolResultMark["errorKind"]>, string>> = {
+  domain: "域错误",
+  environment: "环境异常",
+};
+
 function renderToolCall(
   call: ViewToolCall,
+  outcome: StoreToolOutcome | undefined,
   checkpoints: ReadonlyMap<string, CheckpointItem>,
   lines: string[]
 ): void {
@@ -54,6 +73,26 @@ function renderToolCall(
     result === undefined
       ? "      结果：无结果消息（进程中断可能）"
       : `      结果：${result.isError === true ? "出错" : "成功"}`
+  );
+  // 审批结果与出错归类：运行面挂在工具结果消息 details 上的标记，取法同工具级分类（toolResultMark）；
+  // 没有标记的结果（标记之前写的文件、续跑补的"结果未知"）两行都不出
+  const mark =
+    result !== undefined ? toolResultMark(result.raw as unknown as StoreMessage) : undefined;
+  if (mark !== undefined) {
+    lines.push(
+      mark.gate !== undefined
+        ? `      审批：${approvalVerdict(mark.gate)}（${mark.gate.approvedBy}）`
+        : "      审批：未经审批闸（上游拦截）"
+    );
+    if (mark.errorKind !== undefined) {
+      lines.push(`      出错归类：${ERROR_KIND_LABEL[mark.errorKind]}`);
+    }
+  }
+  // 工具级失败分类：storeToolOutcomes 现算（会话列表与检索同一口径）；以出错或中止收尾的助手消息里的调用上游不执行，不参与分类
+  lines.push(
+    outcome !== undefined
+      ? `      分类：${failureBadge(outcome.failure)}`
+      : "      分类：无（所在助手消息以出错或中止收尾，调用未执行）"
   );
   const checkpoint = checkpoints.get(call.toolCallId);
   if (checkpoint !== undefined) {
@@ -90,11 +129,18 @@ function runStopReason(run: ViewRun): string | undefined {
 }
 
 function renderRun(
-  sessionId: string,
+  view: SessionView,
   run: ViewRun,
   lines: string[],
   options: TraceRenderOptions
 ): void {
+  const sessionId = view.sessionId;
+  // 本 Run 各调用的工具级分类，按调用号取（调用号在一个 Run 内唯一）
+  const outcomes = new Map(
+    view.toolOutcomes
+      .filter((outcome) => outcome.runId === run.runId)
+      .map((outcome) => [outcome.toolCallId, outcome])
+  );
   let header =
     `Run ${shortId(run.runId)} ｜ 终态 stopReason=${runStopReason(run) ?? "无（无助手消息）"}` +
     ` ｜ 分类：${failureBadge(run.failure)}`;
@@ -177,7 +223,7 @@ function renderRun(
     }
     lines.push(turnHeader);
     for (const call of turn.toolCalls) {
-      renderToolCall(call, checkpoints, lines);
+      renderToolCall(call, outcomes.get(call.toolCallId), checkpoints, lines);
     }
   }
   if (options.withContent === true) {
@@ -229,7 +275,7 @@ export function renderSessionTrace(
     if (index > 0) {
       lines.push("");
     }
-    renderRun(view.sessionId, run, lines, options);
+    renderRun(view, run, lines, options);
   }
   // 会话级异常项：孤立的收尾、读取时跳过的行与条目如实报告，不猜测挂接
   if (view.orphanSettleds.length > 0 || view.warnings.length > 0) {

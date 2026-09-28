@@ -91,12 +91,12 @@ export function approvalBlockText(
 }
 
 // 决议措辞复用 application/format.ts 的 approvalVerdict（通俗措辞单一约定，不造第二套）；
-// 它只读 approvedBy/outcome，decidedAt 为占位
+// 它只读 approvedBy/outcome
 function verdictLine(
   outcome: "approved" | "rejected",
   approvedBy: "human" | "human:grant"
 ): string {
-  return `审批结果：${approvalVerdict({ outcome, approvedBy, decidedAt: 0 })}`;
+  return `审批结果：${approvalVerdict({ outcome, approvedBy })}`;
 }
 
 // 面板版 handler 工厂（决策 025 的注入形态：装配根先建 grantStore，[a]/[d] 放权键需要它）

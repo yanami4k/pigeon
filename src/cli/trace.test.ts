@@ -130,7 +130,7 @@ function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
     .finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("trace 报告（真实运行）：会话头、启动快照、逐轮 stopReason、工具调用参数与结果、分类徽章；不再有治理与回执", () =>
+test("trace 报告（真实运行）：会话头、启动快照、逐轮 stopReason、工具调用参数、结果、审批结果与分类徽章；不再有回执", () =>
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root, EDIT_SCRIPT);
     const output = runTraceCommand({ root, sessionId });
@@ -158,7 +158,19 @@ test("trace 报告（真实运行）：会话头、启动快照、逐轮 stopRea
     assert.ok(output.includes('      提议参数：{"path":"a.ts"}'), output);
     assert.equal(output.split("      结果：成功").length - 1, 2, output);
     assert.equal(output.split("      结果：出错").length - 1, 1, output);
-    for (const retired of ["审批：", "Receipt", "待对账", "哈希证据", "落盘缺口", "确证"]) {
+    // 审批结果与工具级分类取自运行面挂在工具结果消息上的标记：读档自动放行、第一次改人工批准、第二次改人工拒绝
+    assert.deepEqual(
+      output.split("\n").filter((line) => line.startsWith("      审批：")),
+      [
+        "      审批：策略自动放行（policy:auto）",
+        "      审批：人工批准（human）",
+        "      审批：人工拒绝（human）",
+      ],
+      output
+    );
+    assert.ok(!output.includes("出错归类："), output);
+    assert.equal(output.split("      分类：正常").length - 1, 3, output);
+    for (const retired of ["拒绝理由", "Receipt", "待对账", "哈希证据", "落盘缺口", "确证"]) {
       assert.ok(!output.includes(retired), `不应再出现"${retired}"\n${output}`);
     }
   }));
