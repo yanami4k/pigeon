@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { isGitWorkspace } from "../orchestration/checkpoint.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
@@ -29,6 +30,7 @@ import {
   storeTaskAttempt,
   storeToolOutcomes,
 } from "../state/session-judge.ts";
+import { prepareFork } from "./fork.ts";
 import { runHeadless } from "./headless.ts";
 import { parseLaunchFlags, resolveRepairRounds } from "./launch-flags.ts";
 import { REPAIR_FEEDBACK_INSTRUCTION } from "./repair-loop.ts";
@@ -527,27 +529,115 @@ test("启动即报错：回炉与失败自动分叉重试同时开启", async ()
   }
 });
 
-test("启动即报错：开启回炉却没有可用快照（非 git 工作区）", async () => {
+test("非 git 工作区开启回炉（决策 281）：不报错、照常跑完回炉循环，只是不打快照", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-repair-nogit-"));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-repair-nogit-home-"));
   try {
-    mkdirSync(join(root, "sub"), { recursive: true });
-    const streamFn = createFakeStreamFn({ replies: [done()] });
-    await assert.rejects(
-      runHeadless({
-        task: "t",
-        governanceRoot: root,
-        workspaceRoot: join(root, "sub"),
-        streamFn,
-        yolo: true,
-        homeDir: root,
-        verify: VERIFY,
-        repairRounds: 3,
-      }),
-      /回炉.*快照/
+    assert.equal(isGitWorkspace(root), false, "前提：临时目录不在任何 git 工作区里");
+    writeFileSync(join(root, "a.txt"), "bug\n");
+    writeFileSync(join(root, "check.mjs"), CHECK_SCRIPT);
+    const streamFn = createFakeStreamFn({
+      replies: [edit("bug", "half"), done(), edit("half", "fixed"), done("修好了")],
+    });
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn,
+      yolo: true,
+      homeDir: home,
+      verify: VERIFY,
+      repairRounds: 3,
+    });
+    // 回炉循环与 git 工作区里一样：首次验证失败、反馈发回同一会话、第二次通过
+    assert.equal(streamFn.calls.length, 4);
+    assert.deepEqual(result.repair, { rounds: 1, verdict: "pass", closed: true });
+    assert.equal(result.verification?.verdict, "pass");
+    assert.equal(result.label, "Passed");
+    assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "fixed\n");
+    const view = sessionOf(root, result.sessionId);
+    assert.equal(view.runs.length, 2);
+    assert.deepEqual(
+      view.runs.map((run) => run.start.repairRounds),
+      [3, 3]
     );
-    assert.equal(streamFn.calls.length, 0);
+    assert.deepEqual(
+      view.verifications.map((record) => record.data.verdict),
+      ["fail", "pass"]
+    );
+    assert.deepEqual(storeRepairStepOutcome(view), { rounds: 1, verdict: "pass" });
+    // 非 git 工作区不打快照：两个 Run 都没有快照条目
+    assert.deepEqual(
+      view.runs.map((run) => run.checkpoints.length),
+      [0, 0]
+    );
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    rmSync(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("git 工作区开启回炉：照旧在开工时打快照；/fork 回到回炉中间某一轮取到的是那一轮开工前的工作区", async () => {
+  const repo = makeRepo();
+  try {
+    const streamFn = createFakeStreamFn({
+      replies: [edit("bug", "half"), done(), edit("half", "fixed"), done("修好了")],
+    });
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn,
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 3,
+    });
+    assert.deepEqual(result.repair, { rounds: 1, verdict: "pass", closed: true });
+    const view = sessionOf(repo.root, result.sessionId);
+    const [first, second] = view.runs;
+    assert.ok(first !== undefined && second !== undefined, "首轮与回炉一轮各一个 Run");
+    // 每个 Run 里各一次改动、各一个快照；会话首个快照带改前基线，即这一步开工时的工作区
+    const firstCheckpoint = first.checkpoints[0]?.data;
+    const secondCheckpoint = second.checkpoints[0]?.data;
+    assert.equal(first.checkpoints.length, 1);
+    assert.equal(second.checkpoints.length, 1);
+    assert.ok(firstCheckpoint !== undefined && secondCheckpoint !== undefined);
+    assert.ok(firstCheckpoint.baseCommit !== undefined, "首个快照带改前基线");
+    const fileAt = (commit: string): string => git(repo.root, ["show", `${commit}:a.txt`]);
+    assert.equal(fileAt(firstCheckpoint.baseCommit), "bug\n", "改前基线是这一步开工时的工作区");
+    assert.equal(fileAt(firstCheckpoint.commit), "half\n", "首轮改完的快照");
+    assert.equal(fileAt(secondCheckpoint.commit), "fixed\n", "回炉一轮改完的快照");
+    assert.equal(secondCheckpoint.baseCommit, undefined, "改前基线只在会话首个快照上");
+    // /fork 回到回炉这一轮的开始处（第二个 Run 第 1 条，即回炉反馈）：取到的是首轮改完、这一轮开工前的工作区
+    const atRepairRound = await prepareFork({
+      governanceRoot: repo.root,
+      sourceSessionId: result.sessionId,
+      forkPoint: { runId: second.runId, runSeq: 1 },
+      trigger: "manual",
+    });
+    assert.equal(atRepairRound.checkpoint.commit, firstCheckpoint.commit);
+    assert.equal(atRepairRound.continueFromHistory, true, "分叉点是回炉反馈（用户消息），直接续跑");
+    assert.equal(readFileSync(join(atRepairRound.workspace.path, "a.txt"), "utf8"), "half\n");
+    // /fork 回到这一步的任务开始处（首个 Run 第 1 条）：取到的是改前基线
+    const atStepStart = await prepareFork({
+      governanceRoot: repo.root,
+      sourceSessionId: result.sessionId,
+      forkPoint: { runId: first.runId, runSeq: 1 },
+      trigger: "manual",
+    });
+    assert.equal(atStepStart.checkpoint.commit, firstCheckpoint.baseCommit);
+    assert.equal(readFileSync(join(atStepStart.workspace.path, "a.txt"), "utf8"), "bug\n");
+    assert.equal(
+      readFileSync(join(repo.root, "a.txt"), "utf8"),
+      "fixed\n",
+      "用户工作区不受分叉影响"
+    );
+  } finally {
+    try {
+      git(repo.root, ["worktree", "prune"]);
+    } catch {}
+    repo.cleanup();
   }
 });
 
