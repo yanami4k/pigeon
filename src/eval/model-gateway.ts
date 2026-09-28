@@ -324,6 +324,30 @@ async function readAll(req: http.IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+// 工具定义里的 "type": "custom"（litellm 的 anthropic 线路给每个自定义工具都加）：Anthropic 官方接口视同不写，
+// DeepSeek 的兼容接口只认它支持的内置工具类型、见到 custom 即 400。只去掉这些项的 type 后重新序列化；
+// 没有这类项、不是合法 JSON、不是对象或 tools 不是数组时原样返回同一份字节（Pigeon 自己的请求不带该字段，
+// 前缀缓存不受影响）。其他 type 取值不碰
+function stripCustomToolType(body: Buffer): Buffer {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return body;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
+  const tools = (parsed as { tools?: unknown }).tools;
+  if (!Array.isArray(tools)) return body;
+  let changed = false;
+  for (const tool of tools) {
+    if (typeof tool === "object" && tool !== null && tool.type === "custom") {
+      delete tool.type;
+      changed = true;
+    }
+  }
+  return changed ? Buffer.from(JSON.stringify(parsed), "utf8") : body;
+}
+
 // 从响应正文里读用量：SSE 取 message_start 的输入与缓存、message_delta 的输出（累计值，取最后一次）；message_delta
 // 也带输入与缓存字段时以它为准（DeepSeek 实测两处相同；与 pi-ai 的读法一致）。非流式取正文的 usage。
 // input 为缓存未命中的输入（DeepSeek 的 Anthropic 兼容端点实测如此），命中在 cacheRead
@@ -804,7 +828,7 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     res.on("close", () => {
       if (!res.writableFinished) abort.abort();
     });
-    const body = await readAll(req);
+    const body = stripCustomToolType(await readAll(req));
     if (abort.signal.aborted) return;
     const inFlight = (jobInFlight.get(job) ?? 0) + 1;
     jobInFlight.set(job, inFlight);

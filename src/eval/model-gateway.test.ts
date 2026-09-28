@@ -1791,3 +1791,99 @@ test("单次请求输入 token 峰值：取每个请求的未命中 + 缓存命�
     }
   );
 });
+
+// 以原样字节发一条请求（不经 JSON.stringify），用来核对网关是否逐字转发
+function postRaw(g: ModelGateway, job: string, body: string) {
+  return fetch(`${g.jobBaseUrl(job)}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+    body,
+  });
+}
+
+// 核对转发后的计量与只发一条请求、上游回 SSE 时一致
+function assertMeteredOnce(g: ModelGateway, job: string) {
+  const m = g.meter(job);
+  assert.deepEqual(
+    [m.requests, m.input, m.output, m.cacheRead, m.cacheWrite, m.upstreamFailures],
+    [1, 120, 42, 30, 0, 0]
+  );
+  assert.ok(
+    near(
+      m.costCny,
+      requestCostCny({ input: 120, cacheRead: 30, cacheWrite: 0, output: 42 }, 0, 0).cny
+    )
+  );
+}
+
+test("工具定义的 type：tools 里 type 为 custom 的项去掉 type 再转发，其余字段（别的 type 取值、消息里的 type）逐字不变；计量与花费照常", async () => {
+  const tool = (name: string) => ({
+    name,
+    description: `run ${name}`,
+    input_schema: { type: "object", properties: { type: { type: "string" } } },
+  });
+  const request = {
+    model: "deepseek-chat",
+    max_tokens: 4096,
+    messages: [{ role: "user", content: [{ type: "text", text: 'say "custom"' }] }],
+    tools: [
+      { ...tool("bash"), type: "custom" },
+      { type: "web_search_20250305", name: "web_search" },
+      tool("edit"),
+      { type: "custom", ...tool("view"), cache_control: { type: "ephemeral" } },
+    ],
+    stream: true,
+  };
+  const { type: _a, ...bash } = request.tools[0] as { type: string };
+  const { type: _b, ...view } = request.tools[3] as { type: string };
+  const expected = { ...request, tools: [bash, request.tools[1], request.tools[2], view] };
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      const r = await postRaw(g, "s1|minimal|1", JSON.stringify(request, null, 1));
+      assert.equal(r.status, 200);
+      assert.equal(await r.text(), SSE);
+      assert.equal(up.seen.length, 1);
+      assert.equal(up.seen[0]?.body, JSON.stringify(expected));
+      assertMeteredOnce(g, "s1|minimal|1");
+    }
+  );
+});
+
+test("工具定义的 type：tools 里没有 type 为 custom 的项时按原字节转发，空白、键序、数字与转义写法一个字节不动", async () => {
+  const raw =
+    '{ "model" : "deepseek-chat",\n  "max_tokens": 4096, "temperature": 1.0,\n' +
+    '  "system": [{"type": "text", "text": "caf\\u00e9 \\/ custom", "cache_control": {"type":"ephemeral"}}],\n' +
+    '  "tools": [ {"name":"bash","type":"web_search_20250305"}, {"input_schema":{"type":"object"},"name":"edit"} ],\n' +
+    '  "messages": [{"role":"user","content":"{\\"type\\":\\"custom\\"}"}], "stream": true }';
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      const r = await postRaw(g, "s1|full|1", raw);
+      assert.equal(await r.text(), SSE);
+      assert.equal(up.seen[0]?.body, raw);
+      assertMeteredOnce(g, "s1|full|1");
+    }
+  );
+});
+
+test("工具定义的 type：请求体不是合法 JSON、不是对象或 tools 不是数组时原样转发；计量与花费照常", async () => {
+  const bodies = [
+    '{"tools":[{"name":"bash","type":"custom"}],',
+    '[{"tools":[{"name":"bash","type":"custom"}]}]',
+    '{"tools":{"type":"custom"}}',
+  ];
+  await withGateway(
+    bodies.map(() => ({ status: 200, body: SSE, contentType: "text/event-stream" })),
+    async (g, up) => {
+      for (const [i, body] of bodies.entries()) {
+        assert.equal(await (await postRaw(g, `j${i}`, body)).text(), SSE);
+        assertMeteredOnce(g, `j${i}`);
+      }
+      assert.deepEqual(
+        up.seen.map((s) => s.body),
+        bodies
+      );
+    }
+  );
+});
