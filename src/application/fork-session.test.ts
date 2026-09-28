@@ -169,8 +169,18 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
       const [first, second] = session.runs.map((run) => run.runId);
       assert.deepEqual(resolveForkPoint(session, {}), { runId: second, runSeq: 1 });
       assert.deepEqual(resolveForkPoint(session, { runSeq: 2 }), { runId: second, runSeq: 2 });
+      // 两次 Run 号的最长公共前缀：同一毫秒开始的两次 Run 只差随机部分末位，前缀长短随时序而变，
+      // 所以按公共前缀取——公共前缀本身两次都匹配、报不唯一，多取一位即只匹配第一次
+      const a = first as string;
+      const b = second as string;
+      let common = 0;
+      while (common < a.length && a[common] === b[common]) common += 1;
+      assert.throws(
+        () => resolveForkPoint(session, { runPrefix: a.slice(0, common), runSeq: 1 }),
+        /不唯一（2 个）/
+      );
       assert.deepEqual(
-        resolveForkPoint(session, { runPrefix: (first as string).slice(0, -2), runSeq: 1 }),
+        resolveForkPoint(session, { runPrefix: a.slice(0, common + 1), runSeq: 1 }),
         { runId: first, runSeq: 1 }
       );
       assert.throws(() => resolveForkPoint(session, { runSeq: 99 }), /没有/);
