@@ -19,8 +19,6 @@ docs/decisions/
 docs/notes/
 
 assets/
-# M6.5 Eval 任务的验证资产（decisions.md 057 / 058 修订）：任务目录的一部分，入库
-!eval/tasks/*/assets/
 output/
 tmp/
 tmp_extract.txt
