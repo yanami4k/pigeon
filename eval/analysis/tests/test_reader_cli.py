@@ -29,7 +29,7 @@ class TestReader:
     def test_mapping(self):
         r = row_to_record(runner_row(
             "11", 7, 2, 3, 4, keep_failed=2, review_cost=0.1, peak=51_000,
-            mem_start=memory(900, entries=6, size=950), mem_end=memory(1200, entries=8),
+            mem_start=memory(900, entries=6, size=950), mem_end=memory(1200, entries=8, size=1333),
             review=review_facts(turns=12, wall_ms=90_000, tokens=33_000, closing=1, pre=2, hit=True),
             hitStepBudget=True, verifyToolFaults=3,
         ))
@@ -204,6 +204,10 @@ def review_step1():
     s.memory_write("xm", "add")
     s.run_start("closing")
     s.memory_write("rm1", "add")
+    # 复盘里调检索工具会被拒（只能 read_file 与 update_memory），不计入检索次数
+    s.assistant(calls=[("rs1", "search_sessions", {"keywords": ["q"]}), ("rs2", "read_session_entry", {"entryId": "e1"})])
+    s.result("rs1", "search_sessions", {}, text="复盘中只能使用 read_file 与 update_memory，这次调用没有执行。")
+    s.result("rs2", "read_session_entry", {}, text="复盘中只能使用 read_file 与 update_memory，这次调用没有执行。")
     s.memory_write("rm2", "remove")
     s.memory_write("rm3", "add", written=False, rejected="full")
     s.assistant("复盘完", usage=(100, 200, 30))

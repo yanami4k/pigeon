@@ -39,6 +39,30 @@ class TestRerunVariance:
         assert r["v"] is None
 
 
+class TestVCells:
+    """v 的求法（5.7、260 第⑦条）：校准用 01、11 两格，第 3 遍推算用四格，各格按题算两遍差的方差的一半再简单平均。"""
+
+    @staticmethod
+    def cell_rows(cell, spread, tasks=(1, 2, 3), base=0.5):
+        # 两遍之差 e = 0、spread、2·spread：样本方差 spread²，一半 spread²/2
+        recs = []
+        for k, t in enumerate(tasks):
+            recs += two_pass(cell, t, base + k * spread / 2, base - k * spread / 2)
+        return recs
+
+    def test_calibration_uses_both_01_and_11(self):
+        df = make_table(self.cell_rows("01", 0.2) + self.cell_rows("11", 0.1))
+        r = calibration_design_sensitivity(df, 80)
+        assert r["v"] == pytest.approx((0.2 ** 2 / 2 + 0.1 ** 2 / 2) / 2)
+
+    def test_third_pass_uses_all_four_cells(self):
+        recs = []
+        for c, sp in (("00", 0.3), ("01", 0.1), ("10", 0.2), ("11", 0.1)):
+            recs += self.cell_rows(c, sp)
+        res = third_pass_decision(make_table(recs), minimal_reserve=0.0)
+        assert res["v"] == pytest.approx(sum(x ** 2 / 2 for x in (0.3, 0.1, 0.2, 0.1)) / 4)
+
+
 class TestMde:
     def test_formula(self):
         assert mde(0.01, 0.02, 2, 89) == pytest.approx((2.24 + 0.84) * math.sqrt((0.01 + 0.02 / 2) / 89) * 1.3)
