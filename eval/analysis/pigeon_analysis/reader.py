@@ -298,7 +298,8 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
         records.append(rec)
         by_dir.setdefault(f.parent, []).append(row)
     settings: list[dict[str, Any]] = []
-    sessions_info: dict[str, Any] = {}
+    # 会话文件的汇总按输出目录各记一条：不同目录的身份摘要可以相同（摘要不含条件与各 agent 参数），不能以摘要为键
+    sessions_info: list[dict[str, Any]] = []
     session_counts: dict[tuple[str, int, int], dict[str, float]] = {}
     for run_dir, dir_rows in by_dir.items():
         needs_pigeon = any(CONDITION_TO_CELL[r["condition"]] != "M" for r in dir_rows)
@@ -311,7 +312,7 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
         settings.append(ident)
         counts, info = load_session_metrics(run_dir, dir_rows, CONDITION_TO_CELL)
         session_counts.update(counts)
-        sessions_info[ident["digest"]] = info
+        sessions_info.append({"dir": run_dir.name, "digest": ident["digest"], **info})
     for rec in records:
         extra = session_counts.get((rec["cell"], int(rec["task"]), int(rec["pass_no"])))
         if extra:
@@ -326,6 +327,16 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
         "sessions": sessions_info,
     }
     return make_table(records), info
+
+
+def require_step_space(values: Iterable[int], tasks: Iterable[int], flag: str) -> None:
+    """题号列表（--tasks、--eligible）与规整表的"题"同为结果行的步序（seq），不是清单里的题号（从 1 起的序号）。
+    结果行里有步序不在所给列表里即报错，提示改给步序。"""
+    given = {int(v) for v in values}
+    outside = sorted({int(t) for t in tasks} - given)
+    if outside:
+        shown = ", ".join(str(t) for t in outside[:10]) + ("…" if len(outside) > 10 else "")
+        raise ValueError(f"{flag} 应给步序（结果行的 seq），不是题号：结果行里的步序 {shown} 不在 {flag} 里")
 
 
 def read_baseline_failures(summary_path: str | Path, all_tasks: list[int]) -> list[int]:

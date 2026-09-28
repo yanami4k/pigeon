@@ -10,14 +10,14 @@ from typing import Any
 from . import constants as K
 from .calibration import analyze_calibration
 from .primary import analyze_primary
-from .reader import common_settings, load_table, read_baseline_failures
+from .reader import common_settings, load_table, read_baseline_failures, require_step_space
 from .report import calibration_markdown, dumps, formal_markdown, formal_result
 from .secondary import analyze_secondary
 from .sensitivity import third_pass_decision
 
 
 def _read_tasks(path: str | None) -> list[int] | None:
-    """题号列表文件：JSON 数组。"""
+    """题号列表文件：JSON 数组，元素为结果行的步序（seq）。"""
     if path is None:
         return None
     return [int(x) for x in json.loads(Path(path).read_text(encoding="utf-8"))]
@@ -26,6 +26,7 @@ def _read_tasks(path: str | None) -> list[int] | None:
 def run_formal(args: argparse.Namespace) -> dict[str, Any]:
     df, info = load_table(args.results)
     tasks = _read_tasks(args.tasks)
+    require_step_space(tasks, df["task"], "--tasks")
     no_baseline = read_baseline_failures(args.classes_summary, tasks) if args.classes_summary else None
     primary = analyze_primary(df, expected_tasks=tasks, baseline_unavailable=no_baseline)
     secondary = analyze_secondary(df, primary)
@@ -39,12 +40,15 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
 
 def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
     df, info = load_table(args.results)
+    eligible = _read_tasks(args.eligible)
+    if eligible is not None:
+        require_step_space(eligible, df["task"], "--eligible")
     cal = analyze_calibration(
         df,
         formal_tasks=args.formal_tasks,
         formal_valid_tasks=args.formal_valid_tasks,
         compaction_trigger=args.compaction_trigger,
-        eligible=_read_tasks(args.eligible),
+        eligible=eligible,
         settings=common_settings(info["settings"]),
     )
     return {"kind": "calibration", "calibration": cal, "input": info}
@@ -58,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--results", nargs="+", required=True, help="results.jsonl（可多个）")
     f.add_argument("--out", required=True, help="输出目录")
     f.add_argument("--tasks", required=True,
-                   help="全部题号（89 道）的 JSON 数组：学习曲线的时间位置按它排，完全没有结果行的题也列为缺失")
+                   help="全部题（89 道）的步序（结果行的 seq，不是从 1 起的题号）的 JSON 数组：学习曲线的时间位置按它排，"
+                        "完全没有结果行的题也列为缺失")
     f.add_argument("--classes-summary",
                    help="两类用例预计算汇总（classes-summary.json）：其中出错、无法建立基线的题排除在主判据之外并计数")
     f.add_argument("--minimal-reserve", type=float, default=None,
@@ -71,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--formal-valid-tasks", type=int, default=None,
                    help="正式跑的有效题数（89 道里要做到的不为零的题数，最小可分辨效果的 n）；未给时不算最小可分辨效果")
     c.add_argument("--compaction-trigger", type=float, default=None, help="压缩触发点（token）；未给时取身份头里的压缩触发点")
-    c.add_argument("--eligible", help="要做到的不为零的全部题号（JSON 数组），用于核对抽题")
+    c.add_argument("--eligible", help="要做到的不为零的全部题的步序（结果行的 seq，不是从 1 起的题号；JSON 数组），用于核对抽题")
 
     args = ap.parse_args(argv)
     out = Path(args.out)
