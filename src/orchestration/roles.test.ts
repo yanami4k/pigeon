@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
-import { WorkerRoleSchema } from "../state/event-log.ts";
+import { WorkerRoleSchema } from "../state/session-payloads.ts";
 import {
   assertPolicySubset,
   deriveWorkerPolicy,

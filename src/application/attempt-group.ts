@@ -1,23 +1,24 @@
 // 并行同任务派发（M7 S4，决策 069 / 071）：一次派出同一任务的多个 worker，生成共享任务标识写入派出记录；
 // 每个尝试收尾后由程序在该尝试的工作树里独立执行验证命令（未配置则不跑，标签为未知），结果落宿主会话的通用验证记录；
-// 全部收尾后按账本现算各尝试的标签交回。
-// 账本重构第二段（决策 180）：尝试与标签从新会话存储现算；宿主会话在新存储里没有文件（双写之前的旧会话）时，
-// 过渡期整组回退旧账本读法（验证记录只在旧账本里）。
+// 全部收尾后从会话存储现算各尝试的标签交回（决策 180）。
 // 失败自动分叉重试不叠加在并行同任务派发上（决策 079）。
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { WorkerOrchestrator, WorkerOutcome } from "../orchestration/workers.ts";
-import { materializeSession } from "../persistence/session-read.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
-import { type Attempt, buildTaskAttempt, firstRunOf } from "../state/episode.ts";
-import type { WorkerLimits } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { SessionEntrySink } from "../state/session-entries.ts";
-import { type StoreSessionView, storeFirstRun, storeTaskAttempt } from "../state/session-judge.ts";
-import { type AttemptVerificationSink, verifyAttempt } from "./attempt-verify.ts";
+import {
+  type StoreAttempt,
+  type StoreSessionView,
+  storeFirstRun,
+  storeTaskAttempt,
+} from "../state/session-judge.ts";
+import type { WorkerLimits } from "../state/session-payloads.ts";
+import { verifyAttempt } from "./attempt-verify.ts";
 
-export interface AttemptGroupHost extends AttemptVerificationSink {
+export interface AttemptGroupHost {
   // 宿主会话号：验证记录落在这里，现算标签时读它作为额外来源
   readonly sessionId: SessionId;
 }
@@ -26,8 +27,8 @@ export interface AttemptGroupInput {
   orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult">;
   governanceRoot: string;
   hostLog: AttemptGroupHost;
-  // 决策 206：宿主会话的新存储写入面（验证记录双写）；缺省不写。现算标签前经 flush 让验证记录落盘
-  hostStore?: HostStore;
+  // 宿主会话的会话存储写入面（验证记录写在这里）；现算标签前经 flush 让验证记录落盘
+  hostStore: HostStore;
   role: string;
   task: string;
   count: number;
@@ -42,8 +43,8 @@ export interface AttemptGroupInput {
 export interface AttemptGroupResult {
   taskKey: string;
   outcomes: WorkerOutcome[];
-  attempts: Attempt[];
-  // 派发过程里的内部故障（验证记录落盘失败等）：与主会话挂载同口径，不吞掉
+  attempts: StoreAttempt[];
+  // 派发过程里的内部故障：与主会话挂载同口径，不吞掉
   errors: unknown[];
 }
 
@@ -77,16 +78,16 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
       if (verify !== undefined && outcome.workspace.kind === "git-worktree") {
         const runId = firstRunIdOf(sessionsDir, id);
         if (runId !== undefined) {
-          const result = await verifyAttempt({
-            config: verify,
-            workspace: outcome.workspace.path,
-            target: { sessionId: id, runId },
-            sink: input.hostLog,
-            ...(input.hostStore !== undefined ? { store: input.hostStore } : {}),
-          });
-          // 账本写失败不被吞：口径同 attempt-verify.ts 的主会话挂载（进错误清单，不改变尝试结果）
-          if (result.recordError !== undefined) {
-            errors.push(result.recordError);
+          try {
+            await verifyAttempt({
+              config: verify,
+              workspace: outcome.workspace.path,
+              target: { sessionId: id, runId },
+              store: input.hostStore,
+            });
+          } catch (error) {
+            // 验证自身故障不被吞：口径同 attempt-verify.ts 的主会话挂载（进错误清单，不改变尝试结果）
+            errors.push(error);
           }
         }
       }
@@ -94,55 +95,37 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
     })
   );
   // 验证记录落在宿主会话里：现算标签时作为额外来源
-  await input.hostStore?.flush?.();
-  const host = loadStoreSession(sessionsDir, input.hostLog.sessionId);
-  const attempts: Attempt[] =
-    host !== undefined
-      ? storeAttempts(input.governanceRoot, sessionsDir, settled, host.view)
-      : legacyAttempts(input.governanceRoot, sessionsDir, settled, input.hostLog.sessionId);
+  await input.hostStore.flush?.();
+  const host = loadStoreSession(sessionsDir, input.hostLog.sessionId)?.view;
+  const attempts = storeAttempts(input.governanceRoot, sessionsDir, settled, host);
   return { taskKey, outcomes: settled, attempts, errors };
 }
 
-// 尝试会话的首个 Run：新存储优先，没有文件时回退旧账本
+// 尝试会话的首个 Run
 function firstRunIdOf(sessionsDir: string, sessionId: SessionId) {
   const loaded = loadStoreSession(sessionsDir, sessionId);
-  return loaded !== undefined
-    ? storeFirstRun(loaded.view)
-    : firstRunOf(materializeSession(sessionsDir, sessionId, { content: false }));
+  return loaded !== undefined ? storeFirstRun(loaded.view) : undefined;
 }
 
 function storeAttempts(
   governanceRoot: string,
   sessionsDir: string,
   outcomes: readonly WorkerOutcome[],
-  host: StoreSessionView
-): Attempt[] {
-  const attempts: Attempt[] = [];
+  host: StoreSessionView | undefined
+): StoreAttempt[] {
+  const attempts: StoreAttempt[] = [];
   for (const outcome of outcomes) {
     const view = loadStoreSession(sessionsDir, outcome.sessionId)?.view;
     if (view === undefined || storeFirstRun(view) === undefined) {
       continue;
     }
-    attempts.push(storeTaskAttempt({ governanceRoot, view, verificationSources: [host] }));
-  }
-  return attempts;
-}
-
-// 过渡期：宿主是双写之前的旧会话，验证记录只在旧账本里，整组按旧账本现算
-function legacyAttempts(
-  governanceRoot: string,
-  sessionsDir: string,
-  outcomes: readonly WorkerOutcome[],
-  hostSessionId: SessionId
-): Attempt[] {
-  const hostSessions = [materializeSession(sessionsDir, hostSessionId, { content: false })];
-  const attempts: Attempt[] = [];
-  for (const outcome of outcomes) {
-    const session = materializeSession(sessionsDir, outcome.sessionId, { content: false });
-    if (firstRunOf(session) === undefined) {
-      continue;
-    }
-    attempts.push(buildTaskAttempt({ governanceRoot, session, verificationSources: hostSessions }));
+    attempts.push(
+      storeTaskAttempt({
+        governanceRoot,
+        view,
+        verificationSources: host !== undefined ? [host] : [],
+      })
+    );
   }
   return attempts;
 }
@@ -151,7 +134,7 @@ export interface SessionAttemptRunnerDeps {
   orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult">;
   governanceRoot: string;
   hostLog: AttemptGroupHost;
-  hostStore?: HostStore;
+  hostStore: HostStore;
   verify?: VerifyConfig;
 }
 
@@ -164,7 +147,7 @@ export function createSessionAttemptRunner(
       orchestrator: deps.orchestrator,
       governanceRoot: deps.governanceRoot,
       hostLog: deps.hostLog,
-      ...(deps.hostStore !== undefined ? { hostStore: deps.hostStore } : {}),
+      hostStore: deps.hostStore,
       role: request.role,
       task: request.task,
       count: request.count,

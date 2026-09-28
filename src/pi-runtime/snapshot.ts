@@ -13,7 +13,6 @@ import {
   SkillManifestEntrySchema,
   StructuredMemoryManifestSchema,
 } from "../state/injection-manifest.ts";
-import type { Migration } from "../state/migration.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
@@ -78,7 +77,7 @@ export const InjectionSnapshotSchema = Type.Object({
     taskDirective: Type.Optional(Type.String({ minLength: 1 })),
   }),
   // 常驻 Memory 冻结清单（决策 042）：注入走 system prompt 追加段，不走 transformContext；
-  // transformContext 只做只读观察（llm.request），并留给 M10 外部 Provider 的逐调用动态召回
+  // transformContext 留给 M10 外部 Provider 的逐调用动态召回
   memory: Type.Array(MemoryManifestEntrySchema),
   // Skill Catalog 冻结清单（决策 043）：每个 Skill 目录下全部文件的哈希清单，load_skill 读取时比对
   skills: Type.Array(SkillManifestEntrySchema),
@@ -99,51 +98,3 @@ export const InjectionSnapshotSchema = Type.Object({
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
-
-// v1 → v2：ToolPolicy 补 approvalMode，默认 "prompt"（yolo 必须显式选择，见 M3 决策 4）。
-// 迁移管线（src/state/migration.ts）是通用设施，各 schema 各自持有注册表；快照没有常驻注册表，
-// 故此处只导出迁移函数，由快照冷加载方按名 "injection-snapshot" 注册使用。
-// 每个迁移函数只升一级，输出版本写死（不引用当前版本常量，否则常量推进后本级会跳级）
-export const migrateInjectionSnapshotV1toV2: Migration = (doc) => {
-  const { tools, ...rest } = doc;
-  const { policy, ...toolsRest } = tools as { policy: Record<string, unknown> } & Record<
-    string,
-    unknown
-  >;
-  return {
-    ...rest,
-    version: 2,
-    tools: { ...toolsRest, policy: { ...policy, approvalMode: "prompt" } },
-  };
-};
-
-// v2 → v3：memory / skills 由 Type.Unknown 占位数组收紧为结构化清单，版本推进不改内容——
-// 旧快照的空数组照过；非空的非结构化占位在目标 schema 校验时被拒绝（不猜着把它们转成清单）
-export const migrateInjectionSnapshotV2toV3: Migration = (doc) => ({ ...doc, version: 3 });
-
-// v3 → v4：thinkingLevel 可缺省（缺省 = off），纯版本推进
-export const migrateInjectionSnapshotV3toV4: Migration = (doc) => ({ ...doc, version: 4 });
-
-// v4 → v5：maxOutputTokens 可缺省，纯版本推进
-export const migrateInjectionSnapshotV4toV5: Migration = (doc) => ({ ...doc, version: 5 });
-
-// v5 → v6：review 可缺省，纯版本推进
-export const migrateInjectionSnapshotV5toV6: Migration = (doc) => ({ ...doc, version: 6 });
-
-// v6 → v7：verify 与 retryOnFail 可缺省，纯版本推进
-export const migrateInjectionSnapshotV6toV7: Migration = (doc) => ({ ...doc, version: 7 });
-
-// v7 → v8：budget 与 verify.source 均可缺省，纯版本推进——v7 旧快照逐字有效（缺预算 = 当时没记，不补不猜）
-export const migrateInjectionSnapshotV7toV8: Migration = (doc) => ({ ...doc, version: 8 });
-
-// v8 → v9：temperature 可缺省（缺省 = 当时没设），纯版本推进
-export const migrateInjectionSnapshotV8toV9: Migration = (doc) => ({ ...doc, version: 9 });
-
-// v9 → v10：repairRounds 可缺省（缺省 = 回炉关闭），纯版本推进
-export const migrateInjectionSnapshotV9toV10: Migration = (doc) => ({ ...doc, version: 10 });
-
-// v10 → v11：审阅配置字段从 schema 删除，旧快照里的该字段原样留着、读取时忽略（不改写、不猜），纯版本推进
-export const migrateInjectionSnapshotV10toV11: Migration = (doc) => ({ ...doc, version: 11 });
-
-// v11 → v12：structuredMemory 与 verify.steps 可缺省（缺省 = 未接入结构化记忆、单条验证命令），纯版本推进
-export const migrateInjectionSnapshotV11toV12: Migration = (doc) => ({ ...doc, version: 12 });

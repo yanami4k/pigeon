@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
-import type { AttemptVerifiedInput, AttemptVerifiedRecord } from "../state/event-log.ts";
+import {
+  type SessionCustomEntry,
+  SessionEntryType,
+  type VerificationData,
+} from "../state/session-entries.ts";
 import { verifyAttempt } from "./attempt-verify.ts";
 
 function setup() {
@@ -16,17 +20,19 @@ function setup() {
   writeFileSync(join(root, "a.txt"), "a\n");
   writeFileSync(join(root, "sub", "marker"), "m\n");
   const docker = localDockerHost(root);
-  const records: AttemptVerifiedInput[] = [];
-  const sink = {
-    appendAttemptVerified: (input: AttemptVerifiedInput) => {
-      records.push(input);
-      return input as unknown as AttemptVerifiedRecord;
+  // 内存里的会话条目写入面：收下验证记录条目
+  const records: VerificationData[] = [];
+  const store = {
+    append: (entry: SessionCustomEntry) => {
+      if (entry.customType === SessionEntryType.Verification) {
+        records.push(entry.data);
+      }
     },
   };
   return {
     ...docker,
     records,
-    sink,
+    store,
     cleanup: () => {
       docker.cleanup();
       rmSync(base, { recursive: true, force: true });
@@ -52,7 +58,7 @@ test("经执行端验证：分步配置各步在容器工作区里按各自的 c
       workspace: s.host.root,
       host: s.host,
       target,
-      sink: s.sink,
+      store: s.store,
     });
     assert.deepEqual(
       result.steps?.map((step) => [step.name, step.verdict, step.exitCode]),
@@ -64,7 +70,9 @@ test("经执行端验证：分步配置各步在容器工作区里按各自的 c
     );
     assert.match(result.steps?.[1]?.output ?? "", /in-sub/);
     assert.equal(result.outcome.verdict, "fail");
+    assert.equal(s.records.length, 1);
     assert.equal(s.records[0]?.workspace, s.host.root);
+    assert.equal(s.records[0]?.verdict, "fail");
   } finally {
     s.cleanup();
   }
@@ -78,7 +86,7 @@ test("经执行端验证：单条命令的配置同样在容器工作区里执�
       workspace: s.host.root,
       host: s.host,
       target,
-      sink: s.sink,
+      store: s.store,
     });
     assert.equal(passing.outcome.verdict, "pass");
     const failing = await verifyAttempt({
@@ -86,7 +94,7 @@ test("经执行端验证：单条命令的配置同样在容器工作区里执�
       workspace: s.host.root,
       host: s.host,
       target,
-      sink: s.sink,
+      store: s.store,
     });
     assert.equal(failing.outcome.verdict, "fail");
   } finally {

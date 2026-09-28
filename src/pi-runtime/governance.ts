@@ -1,17 +1,8 @@
 // ToolGovernance 接缝（M5.5 S0，决策 049）：审批闸整族逻辑（策略判定、grant 求值、人工审批、
-// ToolExecution 账本、intent / decision / receipt / breaker 落盘、熔断）的实现归 application，
-// pi-runtime 只定义接口并在上游 hook 处转发。Adapter 构造时把自己持有的宿主能力（冻结策略、
-// 广告工具、落盘口、活动 runId、abort、内部异常观察口）交给工厂，一个 Adapter 绑一份治理实例。
+// 内存里的 ToolExecution 账本、熔断）的实现归 application，pi-runtime 只定义接口并在上游 hook 处转发。
+// Adapter 构造时把自己持有的宿主能力（冻结策略、广告工具、活动 runId、abort、内部异常观察口）交给工厂，
+// 一个 Adapter 绑一份治理实例。审批决定与错误归类随工具结果消息记进会话存储（运行面标记），治理实例自己不落盘。
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type {
-  BreakerInput,
-  DecisionInput,
-  EntryAppendInput,
-  IntentInput,
-  ObservationInput,
-  ReceiptInput,
-} from "../state/event-log.ts";
-import type { EventEnvelope } from "../state/events.ts";
 import type { RunId } from "../state/ids.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
 import type { ToolExecution, ToolExecutionDecision } from "../state/tool-execution.ts";
@@ -20,36 +11,17 @@ import type { ToolPolicy } from "./snapshot.ts";
 // application 层不直连上游包：工具执行体类型经本文件转口
 export type { AgentTool } from "@earendil-works/pi-agent-core";
 
-// Event Log 落盘口的结构类型（persistence/JsonlEventLog 的写入面满足它，M4 S1：账本归并进
-// Event Log，不双写）。只依赖 state 的输入形状，不依赖存储引擎——pi-runtime 不触达
-// persistence；测试注入故障包装器模拟崩溃点。Adapter 写 entry / 运行事件 / 观察族，
-// 治理实例写 intent / decision / receipt / breaker
-export interface EventLogSink {
-  appendRuntimeEvent(event: EventEnvelope): unknown;
-  appendEntry(input: EntryAppendInput): unknown;
-  appendIntent(input: IntentInput): unknown;
-  appendDecision(input: DecisionInput): unknown;
-  appendReceipt(input: ReceiptInput): unknown;
-  appendBreaker(input: BreakerInput): unknown;
-  // M5 观察族（决策 043 / 044）：可选——既有故障注入包装器不必实现
-  appendObservation?(input: ObservationInput): unknown;
-  // M5 S5（决策 044）：system prompt 全文写进旁置内容文件；可选，同上
-  appendSystemPrompt?(input: { runId: RunId; text: string }): unknown;
-}
-
 // Adapter 交给治理实例的宿主能力
 export interface GovernanceHost {
   // 冻结快照里的工具策略（InjectionSnapshot 唯一来源）
   readonly policy: ToolPolicy;
-  // 实际广告给模型的工具执行体（执行体 ∩ 快照 allow），preview / 内容证据探针从这里取
+  // 实际广告给模型的工具执行体（执行体 ∩ 快照 allow），preview 与命令检查从这里取
   readonly tools: ReadonlyMap<string, AgentTool>;
-  // Event Log 落盘口；缺省 = 不落盘
-  readonly eventLog: EventLogSink | undefined;
-  // 治理族落盘的 runId；Run 活动窗口外调用响亮失败
+  // 当前活动 Run（审批请求的出处）；Run 活动窗口外调用响亮失败
   activeRunId(): RunId;
   // 熔断落闸：中止整个 Run
   abort(): void;
-  // 内部异常观察口（Adapter.listenerErrors）：落盘失败等不改变结果的故障记在这里
+  // 内部异常观察口（Adapter.listenerErrors）：不改变结果的故障记在这里
   reportError(error: unknown): void;
 }
 
@@ -81,7 +53,7 @@ export interface ToolGovernance {
   governs(toolCallId: string): boolean;
   // 审批闸对该调用的决定（结果与批准来源）；审批闸没跑过时为 undefined
   decisionOf(toolCallId: string): ToolExecutionDecision | undefined;
-  // tool_execution_end 后：账本迁 settled、落 receipt、上游拦截熔断计数
+  // tool_execution_end 后：账本迁 settled、上游拦截熔断计数
   settle(settlement: ToolSettledPayload): void;
   runOutcome(): GovernanceRunOutcome;
   // 本 Session 全部账本记录（深拷贝）

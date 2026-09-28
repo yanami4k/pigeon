@@ -1,6 +1,6 @@
 // 审批汇聚端到端（M5.5 S3，决策 040）：两个 worker 并发请求审批，经审批队列与 CLI 问答版一次一个；
-// 批准与拒绝各自落进对应 worker 的会话文件并绑定其 executionId；worker 的 [a] 放权只活在该 worker
-// 会话内；父会话不出现任何工具治理记录。
+// 批准与拒绝各自挂在对应 worker 会话文件里那次调用的工具结果上（审批闸标记，拒绝理由在结果正文里）；
+// worker 的 [a] 放权只记在该 worker 会话内；父会话只有 worker 派出与收尾，没有工具调用与放权。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -12,11 +12,35 @@ import { createApprovalQueue } from "../approvals/queue.ts";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { worktreePathFor } from "../orchestration/worktree.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
+import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { openSessionStoreWriter } from "../pi-runtime/session-store.ts";
 import { newSessionId } from "../state/ids.ts";
+import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
+import type { SessionView } from "../state/session-view.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
+import { childFamilySink } from "./session-store.ts";
 import { createWorkerRuntimeFactory } from "./workers.ts";
+
+// 会话里每次工具调用：工具名、结果是否出错、审批闸标记、结果正文
+function callsOf(view: SessionView) {
+  return view.runs
+    .flatMap((run) => run.toolCalls)
+    .map((call) => ({
+      toolName: call.toolName,
+      isError: call.result?.isError,
+      gate:
+        call.result !== undefined
+          ? toolResultMark(call.result.raw as unknown as StoreMessage)?.gate
+          : undefined,
+      text: JSON.stringify(call.result?.blocks ?? []),
+    }));
+}
+
+function grantsOf(view: SessionView) {
+  return view.items.flatMap((item) => (item.kind === "grant" ? [item.data] : []));
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -37,7 +61,14 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
 
     const parentId = newSessionId();
     const sessionsDir = join(repo, ".pigeon", "sessions");
-    const parentLog = new JsonlEventLog(sessionsDir, parentId);
+    const faults: unknown[] = [];
+    const parentStore = openSessionStoreWriter({
+      sessionsRoot: sessionsDir,
+      sessionId: parentId,
+      cwd: repo,
+      lock: acquireSessionFileLock,
+      onFault: (fault) => faults.push(fault),
+    });
 
     // 人：看最近一个审批块的来源行作答——fix-a 给 [a]，fix-b 拒绝并给理由
     let screen = "";
@@ -74,7 +105,7 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
       governanceRoot: repo,
       session: { sessionId: parentId },
       parentPolicy: { allow: ["read_file", "edit_file"], deny: [], approvalMode: "prompt" },
-      parentLog,
+      parentLog: childFamilySink(parentStore),
       approvals,
       createRuntime: createWorkerRuntimeFactory({
         provider: "fake-provider",
@@ -112,7 +143,8 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
       orchestrator.awaitResult(idA),
       orchestrator.awaitResult(idB),
     ]);
-    parentLog.close();
+    await parentStore.close();
+    assert.deepEqual(faults, []);
 
     assert.equal(a.status, "completed", JSON.stringify(a));
     assert.equal(b.status, "completed", JSON.stringify(b));
@@ -121,35 +153,55 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
     assert.ok(screen.includes("来源：worker fix-a（implementer）"), screen);
     assert.ok(screen.includes("来源：worker fix-b（implementer）"), screen);
 
-    // fix-a：批准落 intent（绑定 fix-a 自己的 executionId），[a] 放权只在 fix-a 会话
-    const workerA = materializeSession(sessionsDir, idA);
-    assert.equal(workerA.intents.length, 1);
-    assert.equal(workerA.intents[0]?.decision.approvedBy, "human");
-    assert.equal(workerA.decisions.length, 0);
-    assert.equal(workerA.grants.length, 1);
-    assert.equal(workerA.grants[0]?.tool, "edit_file");
+    // fix-a：唯一的调用经人工批准、执行成功；[a] 放权只记在 fix-a 会话
+    const workerA = loadSessionView(sessionsDir, idA);
+    assert.ok(workerA !== undefined);
+    const callsA = callsOf(workerA);
+    assert.deepEqual(
+      callsA.map(({ toolName, isError, gate }) => ({ toolName, isError, gate })),
+      [
+        {
+          toolName: "edit_file",
+          isError: false,
+          gate: { outcome: "approved", approvedBy: "human" },
+        },
+      ]
+    );
+    const grantsA = grantsOf(workerA);
+    assert.equal(grantsA.length, 1);
+    assert.equal(grantsA[0]?.event, "created");
+    assert.equal(grantsA[0]?.event === "created" ? grantsA[0].tool : undefined, "edit_file");
     assert.equal(
       readFileSync(join(worktreePathFor(repo, idA, "fix-a"), "a.ts"), "utf8"),
       "alpha\nfix-a\n"
     );
 
-    // fix-b：拒绝理由逐字落 fix-b 自己的 decision，工作树不动，无放权
-    const workerB = materializeSession(sessionsDir, idB);
-    assert.equal(workerB.intents.length, 0);
-    assert.equal(workerB.decisions[0]?.decision.reason, "fix-b 不准改");
-    assert.equal(workerB.grants.length, 0);
-    const bExecution = workerB.decisions[0]?.executionId;
-    assert.ok(bExecution !== undefined);
-    assert.equal(
-      workerA.intents.some((intent) => intent.executionId === bExecution),
-      false
+    // fix-b：唯一的调用被人工拒绝，拒绝理由逐字在 fix-b 自己的工具结果里；工作树不动，无放权
+    const workerB = loadSessionView(sessionsDir, idB);
+    assert.ok(workerB !== undefined);
+    const callsB = callsOf(workerB);
+    assert.deepEqual(
+      callsB.map(({ toolName, isError, gate }) => ({ toolName, isError, gate })),
+      [{ toolName: "edit_file", isError: true, gate: { outcome: "rejected", approvedBy: "human" } }]
     );
+    assert.ok(callsB[0]?.text.includes("fix-b 不准改"), callsB[0]?.text);
+    assert.equal(
+      callsA.some((call) => call.text.includes("fix-b 不准改")),
+      false,
+      "fix-b 的拒绝不落进 fix-a 的会话"
+    );
+    assert.deepEqual(grantsOf(workerB), []);
     assert.equal(readFileSync(join(worktreePathFor(repo, idB, "fix-b"), "a.ts"), "utf8"), original);
 
-    // 父会话：只有父子两族，无工具治理记录与放权
-    const parent = materializeSession(sessionsDir, parentId);
+    // 父会话：只有两个 worker 的派出与收尾，没有消息（工具调用）与放权
+    const parent = loadSessionView(sessionsDir, parentId);
+    assert.ok(parent !== undefined);
     assert.equal(parent.children.length, 2);
-    assert.equal(parent.intents.length + parent.decisions.length + parent.grantCreateds.length, 0);
+    assert.deepEqual(
+      parent.items.map((item) => item.kind),
+      ["worker", "worker", "worker", "worker"]
+    );
+    assert.equal(parent.messages.length, 0);
     assert.equal(readFileSync(join(repo, "a.ts"), "utf8"), original);
   } finally {
     rmSync(repo, { recursive: true, force: true });

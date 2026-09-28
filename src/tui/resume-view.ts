@@ -7,7 +7,7 @@ import { runResumeFlow } from "../application/resume.ts";
 import { asSessionId, type SessionId } from "../state/ids.ts";
 
 // /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文。装配由调用方（main.ts）完成——
-// restoredGrants 种子物化、buildRuntime、旧运行面释放都在壳外；壳只换绑投影
+// restoredGrants 种子还原、buildRuntime、旧运行面释放都在壳外；壳只换绑投影
 export interface SessionBinding<Runtime, Grants, Workers> {
   runtime: Runtime;
   grants?: Grants;
@@ -51,8 +51,7 @@ export function handleResumeCommand<Binding>(
     host.addSystem("用法：/resume <sessionId>");
     return;
   }
-  // 恢复当前会话会让恢复流程与运行中日志同文件双写（两个 JsonlEventLog 实例写一个
-  // 文件，幂等索引分叉）——且语义上无意义（人就活在该会话里）：响亮拒绝
+  // 恢复当前会话会让两个写者写同一个会话文件——且语义上无意义（人就活在该会话里）：响亮拒绝
   if (arg === host.sessionId()) {
     host.addSystem(`已在会话 ${arg} 中，无需恢复`);
     return;

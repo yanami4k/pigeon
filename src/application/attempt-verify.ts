@@ -1,6 +1,6 @@
 // 会话级验证命令（M7 S3，决策 071）：尝试收尾后由程序作为独立子进程在该尝试的工作区执行配置的验证命令，
-// 模型看不到（结果不进消息，只落通用验证记录）；三值口径同 058。未配置即不跑，标签由账本现算为未知。
-// - verifyAttempt：跑一次并落一条 attempt.verified（落在哪个会话文件由调用方的单写者约束决定）；
+// 模型看不到（结果不进消息，只落通用验证记录）；三值口径同 058。未配置即不跑，标签由会话现算为未知。
+// - verifyAttempt：跑一次并写一条验证记录条目（写进哪个会话文件由调用方的单写者约束决定）；
 // - attachAttemptVerification：主会话挂载——订阅 run.ended，Run 结束后在工作区根执行；验证在后台跑，
 //   失败只进内部错误清单，不改变 Run 结果；释放运行面前等在跑的验证收尾（其记录写进本会话文件）。
 import { createHash } from "node:crypto";
@@ -14,9 +14,9 @@ import {
   shellCommand,
 } from "../execution/check-command.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
-import type { AttemptVerifiedInput, AttemptVerifiedRecord } from "../state/event-log.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { SessionEntrySink } from "../state/session-entries.ts";
+import type { AttemptVerifiedInput } from "../state/session-payloads.ts";
 import {
   combineStepVerdicts,
   type VerifyStepResult,
@@ -67,19 +67,14 @@ async function runVerifyCommand(
   });
 }
 
-export interface AttemptVerificationSink {
-  appendAttemptVerified(input: AttemptVerifiedInput): AttemptVerifiedRecord;
-}
-
 export interface VerifyAttemptInput {
   config: VerifyConfig;
   // 执行验证的工作区（尝试所在的工作树或工作区根）
   workspace: string;
   target: { sessionId: SessionId; runId: RunId };
-  sink: AttemptVerificationSink;
-  // 决策 206：新存储的写入面（与 sink 落在同一个会话）；缺省不写
-  store?: SessionEntrySink;
-  // 写记录时的信封 Run（写进尝试自己的会话文件时即该 Run；父会话无活动 Run 时缺省）
+  // 验证记录写进哪个会话（单写者约束：worker 尝试落父会话，普通会话落自身）
+  store: SessionEntrySink;
+  // 写记录时所属的 Run（写进尝试自己的会话文件时即该 Run；父会话无活动 Run 时缺省）
   envelopeRunId?: RunId;
   // 工作区在执行端另一侧（容器）时经它执行；workspace 此时记执行端的工作区根
   host?: WorkspaceHost;
@@ -89,9 +84,8 @@ export interface VerifyAttemptResult {
   outcome: CheckOutcome;
   // 决策 159：分步配置下的各步结论（单条命令配置缺省）
   steps?: VerifyStepResult[];
-  // 落盘成功时在场
-  record?: AttemptVerifiedRecord;
-  recordError?: unknown;
+  // 交给会话存储的验证记录（写入面自身不抛，失败按内部故障告警）
+  record: AttemptVerifiedInput;
 }
 
 // 分步配置（决策 159）：各步依次执行、各出结论，前一步失败不跳过后续；超时按每步各自计时。
@@ -202,24 +196,16 @@ export async function verifyAttempt(input: VerifyAttemptInput): Promise<VerifyAt
     verifiedAt: Date.now(),
     ...(steps !== undefined ? { steps } : {}),
   };
-  let result: VerifyAttemptResult;
-  try {
-    const record = input.sink.appendAttemptVerified(recordInput);
-    result = { outcome, ...(steps !== undefined ? { steps } : {}), record };
-  } catch (recordError) {
-    result = { outcome, ...(steps !== undefined ? { steps } : {}), recordError };
-  }
-  // 决策 206 双写：验证已经做了，旧记录写失败时新存储照写；新存储的写入面自身不抛
-  input.store?.append(verificationEntry(recordInput));
-  return result;
+  input.store.append(verificationEntry(recordInput));
+  return { outcome, ...(steps !== undefined ? { steps } : {}), record: recordInput };
 }
 
 export interface AttachAttemptVerificationOptions {
   bundle: RuntimeBundle;
   config: VerifyConfig;
   workspaceRoot: string;
-  // 一次尝试验证完成（记录已落盘）后的附加处理——失败自动分叉重试与分叉叶子提炼的挂点；抛错只进错误清单
-  onVerified?: (record: AttemptVerifiedRecord) => void | Promise<void>;
+  // 一次尝试验证完成（记录已交给会话存储）后的附加处理——失败自动分叉重试的挂点；抛错只进错误清单
+  onVerified?: (record: AttemptVerifiedInput) => void | Promise<void>;
 }
 
 export interface AttemptVerification {
@@ -247,17 +233,10 @@ export function attachAttemptVerification(
         config: options.config,
         workspace: options.workspaceRoot,
         target: { sessionId, runId },
-        sink: bundle.eventLog,
         store: bundle.sessionStore,
         envelopeRunId: runId,
       });
-      if (result.recordError !== undefined) {
-        errors.push(result.recordError);
-        return;
-      }
-      if (result.record !== undefined) {
-        await options.onVerified?.(result.record);
-      }
+      await options.onVerified?.(result.record);
     })().catch((error: unknown) => {
       errors.push(error);
     });

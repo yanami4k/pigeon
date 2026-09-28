@@ -66,8 +66,6 @@ export interface WorkspaceHost {
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;
   writeText(resolvedPath: string, content: string): Promise<void>;
-  // 同步读（含围栏）：回执落盘时实测目标现状哈希用，调用点是同步的
-  readTextSync(inputPath: string): string;
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留
   exec(plan: HostExecPlan, options: HostExecOptions): Promise<HostExecResult>;
   listFiles(limit: number): Promise<HostFileSnapshot>;

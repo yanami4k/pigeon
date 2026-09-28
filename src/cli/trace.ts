@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { evalVerdictLabel, failureBadge, shortId, summarizeArgs } from "../application/format.ts";
 import { messageLines } from "../application/history.ts";
 import {
-  hasLegacyEventFile,
+  hasLegacySessionFile,
+  LEGACY_READER_HINT,
   listSessionRefs,
   loadSessionView,
 } from "../persistence/session-catalog.ts";
-import { isGitWorktreeWorkspace } from "../state/event-log.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
+import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
 import type {
   SessionView,
   ViewChild,
@@ -241,11 +242,11 @@ export function renderSessionTrace(
   return `${lines.join("\n")}\n`;
 }
 
-// 会话在新存储里找不到时的报错：双写之前的旧会话单独说明，其余列出已有会话
+// 会话在会话存储里找不到时的报错：旧格式会话单独说明（不读它的内容），其余列出已有会话
 export function missingSessionError(sessionsDir: string, sessionId: string): Error {
-  if (hasLegacyEventFile(sessionsDir, sessionId)) {
+  if (hasLegacySessionFile(sessionsDir, sessionId)) {
     return new Error(
-      `会话 ${sessionId} 创建于新会话存储启用之前，只在旧账本里（用迁移前的只读旧版查看）`
+      `会话 ${sessionId} 是旧格式会话（迁移之前创建），这里不读；${LEGACY_READER_HINT}`
     );
   }
   const available = listSessionRefs(sessionsDir).map((ref) => ref.sessionId);

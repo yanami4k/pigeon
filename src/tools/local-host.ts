@@ -2,7 +2,7 @@
 // 路径围栏沿用 paths.ts 的 realpath 口径；进程执行、文件清单与 .cmd / .bat 解析从 run-command.ts 原样平移，行为不变。
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveWorkspacePath } from "./paths.ts";
@@ -38,8 +38,6 @@ export function createLocalWorkspaceHost(
     },
     readText: (resolvedPath) => readFile(resolvedPath, "utf8"),
     writeText: (resolvedPath, content) => writeFile(resolvedPath, content, "utf8"),
-    readTextSync: (inputPath) =>
-      readFileSync(resolveWorkspacePath(workspaceRoot, inputPath), "utf8"),
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
     async listFiles(limit) {
       return snapshotLocalFiles(workspaceRoot, limit);

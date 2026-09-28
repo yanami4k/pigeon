@@ -7,8 +7,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { sha256Hex } from "../state/hashing.ts";
 import type { SkillFileManifestEntry, SkillManifestEntry } from "../state/injection-manifest.ts";
-import { sha256Hex } from "../state/message-content.ts";
 
 // M5.7 S4（决策 043 口径）：MCP server 的 prompt 作为 Skill 登记——正文在会话开始时由装配根经 getPrompt 取好，
 // 哈希清单按它算；load_skill 读取时经 load 重取并比对。skills 层只收结构类型，不触达 mcp。
@@ -31,7 +31,7 @@ export interface SkillPromptInput extends SkillPromptSource {
 }
 
 // M6.5（决策 059）：显式 Skill 根。label 是清单与目录段里的展示路径（如 eval/skills/<name>/candidate），
-// 哈希清单随 run.started 落盘，事后可与该路径下的文件对账
+// 哈希清单随 Run 开始条目 落盘，事后可与该路径下的文件对账
 export interface SkillRoot {
   path: string;
   label: string;

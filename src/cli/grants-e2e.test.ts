@@ -1,9 +1,9 @@
 // M4 S6 端到端验收：grant 生命周期走人机的真实 CLI 链路（fake streamFn 驱动真实
 // pi-agent-core Agent；stdin 剧本走真实 createAsker/runRepl；命令走真实 runGrantCommand）。
 // 测试一（会话生命周期）：审批 [a] 建 grant → 第二次调用免审（approvedBy=human:grant）→
-//   /grants 列出 → /revoke 立即停免审（重新弹人工，拒绝理由逐字落盘）。
+//   /grants 列出 → /revoke 立即停免审（重新弹人工）；授权建立与撤销、各次调用的审批闸决定落进会话存储。
 // 测试二（升格 + 冷恢复）：/grants save 写 .pigeon/grants.json（promotedFrom 出处）→
-//   模拟新进程：事件日志种子还原会话 grant（决策 3b 静默续命）→ 撤销后配置规则命中
+//   模拟新进程：从会话文件还原生效的会话 grant（决策 3b 静默续命）→ 撤销后配置规则命中
 //   （approvedBy=policy:config）。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -14,14 +14,19 @@ import { test } from "node:test";
 import { Type } from "typebox";
 import { createToolGovernance } from "../application/governance.ts";
 import { type GrantsCommandContext, runGrantCommand } from "../application/grants.ts";
+import { grantEventSink } from "../application/session-store.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
+import { acquireSessionFileLock } from "../persistence/session-lock.ts";
+import { locateSessionFile } from "../persistence/session-reader.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { openSessionStoreWriter, type SessionStoreWriter } from "../pi-runtime/session-store.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { asSessionId, type SessionId } from "../state/ids.ts";
+import { storeActiveGrants, toolResultMark } from "../state/session-judge.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
@@ -38,6 +43,31 @@ function editCall(content: string, oldLine: string, newLine: string): EditFilePa
     snapshot: snapshotTag(content),
     edits: [{ op: "replace", anchor: `1#${lineTag(oldLine)}`, lines: [newLine] }],
   };
+}
+
+// 会话存储写者（同生产：取跨进程单写者锁；已有会话文件即续写）；写入故障收进 faults
+function openStore(root: string, sessionId: SessionId, faults: unknown[]): SessionStoreWriter {
+  const sessionsDir = join(root, ".pigeon", "sessions");
+  const existing = locateSessionFile(sessionsDir, sessionId);
+  return openSessionStoreWriter({
+    sessionsRoot: sessionsDir,
+    sessionId,
+    cwd: root,
+    lock: acquireSessionFileLock,
+    ...(existing !== undefined ? { existingPath: existing.path } : {}),
+    onFault: (fault) => faults.push(fault),
+  });
+}
+
+// 会话文件里各工具结果上审批闸的批准来源（按出现顺序）
+function gateSources(root: string, sessionId: SessionId): Array<string | undefined> {
+  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(loaded !== undefined, "会话文件应在会话存储里");
+  return loaded.view.runs.flatMap((run) =>
+    run.messages
+      .filter((ref) => ref.message.role === "toolResult")
+      .map((ref) => toolResultMark(ref.message)?.gate?.approvedBy)
+  );
 }
 
 function makeRegistry(): ToolRegistry {
@@ -75,7 +105,7 @@ function makeAdapter(
   store: SessionGrantStore,
   configRules: readonly ConfigGrantRule[],
   sessionId: SessionId,
-  eventLog: JsonlEventLog
+  sessionStore: SessionStoreWriter
 ): TestAdapter {
   const write = (text: string): void => {
     outputs.push(text);
@@ -104,7 +134,7 @@ function makeAdapter(
     }),
     tools: [createReadFileTool(root), createEditFileTool(root)],
     sessionId,
-    eventLog,
+    sessionStore,
   });
   return { adapter, ask, close };
 }
@@ -112,9 +142,13 @@ function makeAdapter(
 test("端到端（会话生命周期）：[a] 建 grant → human:grant 免审 → /grants → /revoke 立即停免审", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-e2e-a-"));
   writeFileSync(join(root, "a.ts"), "alpha\n");
-  const eventLog = new JsonlEventLog(join(root, ".pigeon", "sessions"), SESSION_A);
+  const faults: unknown[] = [];
+  const sessionStore = openStore(root, SESSION_A, faults);
   try {
-    const store = new SessionGrantStore({ workspaceRoot: root, eventLog });
+    const store = new SessionGrantStore({
+      workspaceRoot: root,
+      sink: grantEventSink(sessionStore),
+    });
     const commands: GrantsCommandContext = {
       root,
       store,
@@ -147,7 +181,7 @@ test("端到端（会话生命周期）：[a] 建 grant → human:grant 免审 �
       store,
       [],
       SESSION_A,
-      eventLog
+      sessionStore
     );
     await runRepl({
       adapter: r1.adapter,
@@ -194,7 +228,7 @@ test("端到端（会话生命周期）：[a] 建 grant → human:grant 免审 �
       store,
       [],
       SESSION_A,
-      eventLog
+      sessionStore
     );
     await runRepl({
       adapter: r2.adapter,
@@ -210,8 +244,34 @@ test("端到端（会话生命周期）：[a] 建 grant → human:grant 免审 �
       `撤销后重新弹人工，批准来源回到 human\n${terminal2}`
     );
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "STEP2\n", "拒绝后副作用未发生");
+
+    // 会话存储：授权建立与撤销各一条（撤销后生效集为空）；三次调用的审批闸决定依次是人工、会话放权、人工
+    await sessionStore.flush();
+    assert.deepEqual(faults, []);
+    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), SESSION_A);
+    assert.ok(loaded !== undefined);
+    assert.deepEqual(
+      loaded.view.grants.map(({ data }) => [data.event, data.grantId]),
+      [
+        ["created", grant.grantId],
+        ["revoked", grant.grantId],
+      ]
+    );
+    assert.deepEqual(storeActiveGrants(loaded.view), []);
+    assert.deepEqual(gateSources(root, SESSION_A), ["human", "human:grant", "human"]);
+    // 被拒的那次调用：工具结果出错，拒绝理由逐字在正文里
+    const rejected = loaded.view.runs
+      .flatMap((run) => run.messages)
+      .filter((ref) => ref.message.role === "toolResult")
+      .at(-1)?.message;
+    assert.equal(rejected?.isError, true);
+    assert.equal(toolResultMark(rejected ?? { role: "none" })?.gate?.outcome, "rejected");
+    assert.ok(
+      JSON.stringify(rejected?.content).includes("先别动这个文件"),
+      JSON.stringify(rejected)
+    );
   } finally {
-    eventLog.close();
+    await sessionStore.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -220,9 +280,13 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-e2e-b-"));
   writeFileSync(join(root, "a.ts"), "alpha\n");
   const sessionsDir = join(root, ".pigeon", "sessions");
-  const eventLog = new JsonlEventLog(sessionsDir, SESSION_B);
+  const faults: unknown[] = [];
+  let sessionStore = openStore(root, SESSION_B, faults);
   try {
-    const store = new SessionGrantStore({ workspaceRoot: root, eventLog });
+    const store = new SessionGrantStore({
+      workspaceRoot: root,
+      sink: grantEventSink(sessionStore),
+    });
 
     // REPL #1：审批 [a] 建 grant；第二次调用免审
     const outputs1: string[] = [];
@@ -246,7 +310,7 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
       store,
       [],
       SESSION_B,
-      eventLog
+      sessionStore
     );
     await runRepl({
       adapter: r1.adapter,
@@ -282,10 +346,23 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
     assert.equal(configRules[0]?.promotedFrom.grantId, grant.grantId);
     assert.equal(configRules[0]?.promotedFrom.sessionId, SESSION_B);
 
-    // 模拟新进程：事件日志种子还原生效 grant（决策 3b：静默续命，无重复确认）
-    const restoredGrants = materializeSession(sessionsDir, SESSION_B).grants;
-    assert.equal(restoredGrants.length, 1, "升格前的会话 grant 在冷恢复生效集内");
-    const freshStore = new SessionGrantStore({ workspaceRoot: root, restored: restoredGrants });
+    // 模拟新进程：旧写者关闭，从会话文件还原生效 grant（决策 3b：静默续命，无重复确认），新写者续写同一文件
+    await sessionStore.close();
+    assert.deepEqual(faults, []);
+    const restoredView = loadStoreSession(sessionsDir, SESSION_B)?.view;
+    assert.ok(restoredView !== undefined);
+    const restoredGrants = storeActiveGrants(restoredView);
+    assert.deepEqual(
+      restoredGrants.map((restored) => restored.grantId),
+      [grant.grantId],
+      "升格前的会话 grant 在冷恢复生效集内"
+    );
+    sessionStore = openStore(root, SESSION_B, faults);
+    const freshStore = new SessionGrantStore({
+      workspaceRoot: root,
+      sink: grantEventSink(sessionStore),
+      restored: restoredGrants,
+    });
     const outputs3: string[] = [];
     const input3 = Readable.from(["任务三\n", ":quit\n"], { objectMode: false });
     const r3 = makeAdapter(
@@ -302,7 +379,7 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
       freshStore,
       loadGrantConfig(root),
       SESSION_B,
-      eventLog
+      sessionStore
     );
     await runRepl({
       adapter: r3.adapter,
@@ -351,7 +428,7 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
       freshStore,
       loadGrantConfig(root),
       SESSION_B,
-      eventLog
+      sessionStore
     );
     await runRepl({
       adapter: r4.adapter,
@@ -369,13 +446,20 @@ test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程�
     await r4.adapter.dispose();
     assert.ok(outputs4.join("").includes("（policy:config）"), "固化规则命中记 policy:config");
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "STEP4\n");
-    // M4 收口决策 ①：配置命中的账本回指 = 规则的 promotedFrom.grantId（稳定身份，不是位置序号）
-    const configIntent = materializeSession(sessionsDir, SESSION_B).intents.find(
-      (intent) => intent.decision.approvedBy === "policy:config"
-    );
-    assert.deepEqual(configIntent?.decision.grantRef, { kind: "config-rule", id: grant.grantId });
+    // 会话存储：四次调用的审批闸决定依次是人工、会话放权、冷恢复后的会话放权、配置规则；撤销后生效集为空
+    await sessionStore.flush();
+    assert.deepEqual(faults, []);
+    assert.deepEqual(gateSources(root, SESSION_B), [
+      "human",
+      "human:grant",
+      "human:grant",
+      "policy:config",
+    ]);
+    const finalView = loadStoreSession(sessionsDir, SESSION_B)?.view;
+    assert.ok(finalView !== undefined);
+    assert.deepEqual(storeActiveGrants(finalView), []);
   } finally {
-    eventLog.close();
+    await sessionStore.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

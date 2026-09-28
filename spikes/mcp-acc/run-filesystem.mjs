@@ -1,3 +1,4 @@
+// 只适用于旧格式：本脚本读写旧账本或会话树写穿（persistence/event-log.ts 等模块已在账本重构第四段删除），只能在只读旧版代码 455d88d 上运行；新代码上不再维护。
 // 剧本 M5.7 filesystem（决策 051 / 053 / 054 / 055）：真实 Kimi 链路 + 真实 ConPTY + 真实 @modelcontextprotocol/server-filesystem
 // （npx 经 048 启动器，不带目录参数，只靠 client 广告的 roots）。
 //   两个 implementer 并行：各自的 filesystem server 以其工作树为 roots，各用 write_file 在自己工作树里建文件——

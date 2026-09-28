@@ -2,14 +2,13 @@
 // 工作区根取会话头记的工作树，策略取父会话派出记录里的委派策略，父会话 id 用于深度 1 判定；
 // 主会话即治理根与缺省策略。父会话记录缺失、派出记录缺失或工作树已被移除时响亮失败（授权范围不猜，
 // fail-closed）。只读。
-// 账本重构第二段（决策 177 / 180）：从新会话存储读——worker 与分支会话的来历在会话文件头（metadata），委派策略在父会话的
-// worker 派出条目里；新存储里没有这个会话的文件（双写之前的旧会话）时，过渡期回退旧账本读法。
+// 从会话存储读（决策 177 / 180）：worker 与分支会话的来历在会话文件头（metadata），委派策略在父会话的
+// worker 派出条目里；会话存储里没有这个会话的文件即按主会话处理（新会话尚未写出文件）。
 import { existsSync } from "node:fs";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
-import type { DelegatedPolicy, WorkerRole, WorkerWorkspace } from "../state/event-log.ts";
 import type { SessionId } from "../state/ids.ts";
 import { storeWorkerSpawned } from "../state/session-judge.ts";
+import type { DelegatedPolicy, WorkerRole, WorkerWorkspace } from "../state/session-payloads.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
 export interface SessionRuntimeScope {
@@ -26,7 +25,7 @@ export function sessionRuntimeScope(
   const dir = sessionsDirOf(governanceRoot);
   const loaded = loadStoreSession(dir, sessionId);
   if (loaded === undefined) {
-    return legacySessionRuntimeScope(governanceRoot, sessionId);
+    return { workspaceRoot: governanceRoot };
   }
   const { view } = loaded;
   // M7（决策 077）：分支会话回到它自己的工作树（主会话形态，不是委派）
@@ -77,42 +76,4 @@ function scopeOf(
     return { workspaceRoot: governanceRoot, ...delegated };
   }
   return { workspaceRoot: existingWorktree("worker ", workspace), ...delegated };
-}
-
-// 旧账本读法（过渡期：新存储里没有这个会话的文件时回退；停写旧账本时删除）
-function legacySessionRuntimeScope(
-  governanceRoot: string,
-  sessionId: SessionId
-): SessionRuntimeScope {
-  const dir = sessionsDirOf(governanceRoot);
-  if (!existsSync(JsonlEventLog.filePathFor(dir, sessionId))) {
-    return { workspaceRoot: governanceRoot };
-  }
-  const session = materializeSession(dir, sessionId, { content: false });
-  const branch = session.branchHeader;
-  if (branch !== undefined) {
-    return { workspaceRoot: existingWorktree("分支", branch.workspace) };
-  }
-  const header = session.sessionHeader;
-  if (header === undefined) {
-    return { workspaceRoot: governanceRoot };
-  }
-  if (!existsSync(JsonlEventLog.filePathFor(dir, header.parentSessionId))) {
-    throw new Error(
-      `worker 会话 ${sessionId} 的父会话记录不存在：${header.parentSessionId}（无法还原委派策略，拒绝恢复）`
-    );
-  }
-  const spawned = materializeSession(dir, header.parentSessionId, {
-    content: false,
-  }).childSpawneds.find((record) => record.childSessionId === sessionId);
-  if (spawned === undefined) {
-    throw new Error(
-      `父会话 ${header.parentSessionId} 没有派出 ${sessionId} 的记录（无法还原委派策略，拒绝恢复）`
-    );
-  }
-  return scopeOf(governanceRoot, header.workspace, {
-    toolPolicy: spawned.policy,
-    parentSessionId: header.parentSessionId,
-    worker: header.worker,
-  });
 }

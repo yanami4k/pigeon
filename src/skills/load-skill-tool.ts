@@ -5,12 +5,12 @@
 //   3. 单文件大小上限默认 64 KiB，超出可见截断并带全文哈希（截断不是拒绝，但必须看得见）。
 // 另比对开会话时的哈希清单：文件被改或是会话中新增的，拒绝并提示下个会话生效（§2 规则 4）。
 // scripts 在 M5 只读不执行。Skill 是文本，工具照旧经六档排律，不扩权由构造保证。
-// 每次成功读取回调 skill.loaded 载荷，由装配根写成观察记录（skills 层不触达落盘）。
+// 每次成功读取的摘要（名、资源路径、哈希、是否截断）作工具结果的 details。
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { sha256Hex, truncateUtf8 } from "../state/message-content.ts";
+import { sha256Hex, truncateUtf8 } from "../state/hashing.ts";
 import type { SkillLoadedPayload } from "../state/runtime-events.ts";
 import { isOutsideRelative } from "../tools/paths.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
@@ -41,8 +41,6 @@ export type LoadSkillParams = Static<typeof LoadSkillParamsSchema>;
 export interface LoadSkillToolOptions {
   catalog: SkillCatalog;
   maxBytes?: number;
-  // 每次成功读取的留痕回调（装配根接到 Adapter.recordObservation）
-  onLoaded?: (payload: SkillLoadedPayload) => void;
 }
 
 export function createLoadSkillTool(
@@ -68,7 +66,7 @@ export function createLoadSkillTool(
         );
       }
       if (skill.prompt !== undefined) {
-        return loadPromptSkill(skill, skill.prompt, args.resource, maxBytes, options.onLoaded);
+        return loadPromptSkill(skill, skill.prompt, args.resource, maxBytes);
       }
       const resource = args.resource ?? "SKILL.md";
       let realDir: string;
@@ -111,7 +109,6 @@ export function createLoadSkillTool(
         bytes: raw.length,
         truncated: cut.truncated,
       };
-      options.onLoaded?.(payload);
       const lines = [`[Skill ${skill.name}｜${resourcePath}｜${raw.length} 字节｜sha256 ${hash}]`];
       if (cut.truncated) {
         lines.push(
@@ -133,8 +130,7 @@ async function loadPromptSkill(
   skill: SkillEntry,
   source: SkillPromptSource,
   resource: string | undefined,
-  maxBytes: number,
-  onLoaded: ((payload: SkillLoadedPayload) => void) | undefined
+  maxBytes: number
 ): Promise<PigeonToolResult<SkillLoadedPayload>> {
   if (resource !== undefined && resource !== MCP_PROMPT_RESOURCE) {
     throw new LoadSkillError(
@@ -158,7 +154,6 @@ async function loadPromptSkill(
     bytes,
     truncated: cut.truncated,
   };
-  onLoaded?.(payload);
   const lines = [
     `[Skill ${skill.name}｜MCP server ${source.server} 的 prompt ${source.prompt}｜${bytes} 字节｜sha256 ${hash}]`,
   ];

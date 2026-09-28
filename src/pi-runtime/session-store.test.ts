@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { createSessionBackendConformance } from "@earendil-works/pi-agent-core/session/testing";
 import {
   acquireSessionFileLock,
-  EventLogLockedError,
+  SessionLockedError,
   sessionFileLockPath,
 } from "../persistence/session-lock.ts";
 import {
@@ -242,7 +242,7 @@ test("写者：会话文件被另一个存活进程持锁时不打开、不写�
     const before = readFileSync(path, "utf8");
     const { child, exited } = await spawnLockHolder(path);
     try {
-      assert.throws(() => acquireSessionFileLock(path), EventLogLockedError);
+      assert.throws(() => acquireSessionFileLock(path), SessionLockedError);
       const faults: unknown[] = [];
       const blocked = openSessionStoreWriter(
         options(sessions, "sess_E", { existingPath: path, onFault: (error) => faults.push(error) })

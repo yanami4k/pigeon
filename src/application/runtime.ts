@@ -1,12 +1,10 @@
 // 装配根（M2 S1，决策 025 从 cli/index.ts 抽到 Controller 层）：注册内置工具 + 构造适配器与
-// 事件日志 + grant 运行态。审批 handler 由调用方注入（cli 传 REPL 问答版，tui 传面板版）——
+// 会话存储写者 + grant 运行态。审批 handler 由调用方注入（cli 传 REPL 问答版，tui 传面板版）——
 // 工厂形态而非成品：装配根先建 grantStore，审批提示的 [a]/[d] 放权键需要它，
 // 故调用方给一个"拿到 store 再造 handler"的工厂。
-// 事件日志 = <governanceRoot>/.pigeon/sessions/sess_<ulid>.jsonl（M4 D1 布局；M5.5 S1 治理根缺省同工作区根；
-// ROADMAP §3.2 调用前意图 + 调用后 Receipt 作为治理族归并入同一日志，不双写）。
-// resume 复用同一 sessionId 续写（append 模式），会话文件跨进程延续。
-// 账本重构双写（决策 206）：同时打开该会话的新存储写者（.pigeon/sessions/<工作目录编码>/ 下的 pi 会话文件），
-// 交给 Adapter 写消息与 Run 起止，授权经转接同时写入；释放运行面时关闭
+// 会话存储（决策 176 / 210）：<governanceRoot>/.pigeon/sessions/<工作目录编码>/ 下的 pi 会话文件（M5.5 S1 治理根缺省
+// 同工作区根），交给 Adapter 写消息与 Run 起止，授权经落盘口写入；续跑复用同一 sessionId 打开同一文件续写；
+// 释放运行面时关闭
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -21,7 +19,6 @@ import {
   sessionToolRegistrations,
 } from "../memory/search-tools.ts";
 import { loadCommandsConfig } from "../persistence/commands-config.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
@@ -35,11 +32,10 @@ import {
   loadSkillRegistration,
 } from "../skills/load-skill-tool.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
-import type { WorkerRole } from "../state/event-log.ts";
-import type { ConfigGrantRule } from "../state/grants.ts";
+import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
-import type { ActiveGrant } from "../state/materialize.ts";
-import type { RunStartedPayload, ThinkingLevel } from "../state/runtime-events.ts";
+import type { ThinkingLevel } from "../state/runtime-events.ts";
+import type { WorkerRole } from "../state/session-payloads.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { asWorkspaceHost } from "../tools/local-host.ts";
@@ -58,11 +54,11 @@ import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { createToolGovernance } from "./governance.ts";
 import type { McpSession } from "./mcp.ts";
 import {
+  grantEventSink,
   openSessionStore,
   type SessionStoreWriter,
   type StoreLineage,
   storeFaultWarner,
-  teeGrantEvents,
 } from "./session-store.ts";
 import type { WarnSink } from "./warnings.ts";
 
@@ -85,15 +81,15 @@ export interface RuntimeDeps {
   modelId: string;
   // 审批 handler 由 Actor 注入（决策 025）：工厂收 grantStore——审批提示的 [a]/[d]
   // 放权键需要它；cli 传 REPL 问答版，将来的 tui 传面板版。
-  // M6.5 S1（决策 056）：缺省 = 无审批通道，prompt 档一律 fail-closed 拒绝并落 decision（006）——headless 运行如此
+  // M6.5 S1（决策 056）：缺省 = 无审批通道，prompt 档一律 fail-closed 拒绝（006）——headless 运行如此
   createApprovalHandler?: (grants: SessionGrantStore) => ApprovalHandler;
   // M4 S6（D6/F）：固化配置规则——缺省时 buildRuntime 自行 loadGrantConfig；
   // 畸形文件在此响亮失败（治理配置 fail-closed，启动中止）
   configGrants?: readonly ConfigGrantRule[];
-  // M4 S6（决策 3b）：冷恢复种子——resume 时由 materializeSession(...).grants 还原，
+  // M4 S6（决策 3b）：冷恢复种子——续跑时由会话存储的授权条目还原，
   // 会话 grant 崩溃后静默继续有效
   restoredGrants?: readonly ActiveGrant[];
-  // M5 S1（决策 045）：thinking 正文是否持久化进内容文件；缺省 true，Actor 以旗标关闭
+  // M5 S1（决策 045）：thinking 正文是否持久化进会话存储；缺省 true，Actor 以旗标关闭
   persistThinking?: boolean;
   // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
@@ -116,24 +112,22 @@ export interface RuntimeDeps {
   // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
   maxOutputTokens?: number;
   // M9：任务源给的系统指令（如外部基准的工作方式指令）——原样追加为 system prompt 的一段，随整段 system prompt
-  // 冻结进注入快照（run.started 记其哈希，全文在内容文件的 system 记录里）。只说工作方式，不含任务内容；缺省不加
+  // 冻结进注入快照（Run 开始条目记系统提示全文）。只说工作方式，不含任务内容；缺省不加
   taskDirective?: string;
   // M9：采样温度——装配层包装 streamFn 传入，并写进注入快照 model 段；缺省不设（由 provider 决定）
   temperature?: number;
-  // M7（决策 071 / 079）：会话级验证命令与失败自动分叉重试次数——冻结进注入快照并随 run.started 落盘
+  // M7（决策 071 / 079）：会话级验证命令与失败自动分叉重试次数——冻结进注入快照并随 Run 开始条目落盘
   verify?: VerifyConfig;
   retryOnFail?: number;
-  // M8（决策 087）：本次尝试的预算——冻结进注入快照并随 run.started 落盘，回放据此沿用同一预算
+  // M8（决策 087）：本次尝试的预算——冻结进注入快照并随 Run 开始条目落盘
   budget?: AttemptBudget;
-  // 决策 142 / 143：回炉轮数（只在开启时给）——冻结进注入快照并随 run.started 落盘
+  // 决策 142 / 143：回炉轮数（只在开启时给）——冻结进注入快照并随 Run 开始条目落盘
   repairRounds?: number;
-  // 这一步的起点（容器工作区、回炉开启时由执行端记下）：每个 Run 开始时取一次写进 run.started
-  stepStart?: () => RunStartedPayload["stepStart"];
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
-  // 决策 206：worker 与分支会话的来历，新存储新建会话文件时写进文件头
+  // 决策 177：worker 与分支会话的来历，新建会话文件时写进文件头
   storeLineage?: StoreLineage;
-  // 新存储故障告警的出口（缺省标准错误输出；测试注入）
+  // 会话存储故障告警的出口（缺省标准错误输出；测试注入）
   storeWarn?: WarnSink;
   // 决策 193：能否检索历史会话。关掉时不注册 search_sessions 与 read_session_entry，系统提示去掉提到它们的那一句；
   // 缺省开着（日常使用与 193 之前逐字一致）
@@ -153,8 +147,7 @@ const WRITE_APPROVAL_SENTENCES: Readonly<Record<RunCommandApproval, string>> = {
 
 export interface RuntimeBundle {
   adapter: PiRuntimeAdapter;
-  eventLog: JsonlEventLog;
-  // 决策 206：本会话的新存储写者（双写期间与 eventLog 同时写）
+  // 本会话的会话存储写者（决策 176）
   sessionStore: SessionStoreWriter;
   // M4 S6：grant 运行态（审批提示 [a]/[d] 与 /grants /revoke /grants save 共用同一存储）
   grantStore: SessionGrantStore;
@@ -163,11 +156,11 @@ export interface RuntimeBundle {
   mcp?: McpSession;
   // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
   toolTiers: ReadonlyMap<string, "read" | "write" | "exec">;
-  // M6：释放运行面前先执行的附加释放动作（快照器、会话树写穿、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
+  // M6：释放运行面前先执行的附加释放动作（快照器、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
 }
 
-// start/resume 共用的运行时装配：注册内置工具 + 构造适配器与事件日志
+// start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 061：编辑工具按模式装配，工具名都叫 edit_file；hashline 分支与 061 之前逐字一致
   const replaceMode = (deps.editMode ?? DEFAULT_EDIT_MODE) === "replace";
@@ -196,9 +189,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     );
   }
   const sessionsDir = path.join(governanceRoot, ".pigeon", "sessions");
-  const eventLog = new JsonlEventLog(sessionsDir, deps.sessionId, {
-    content: { persistThinking: deps.persistThinking ?? true },
-  });
   // F：固化配置启动时装载（畸形 → 抛错，启动中止——授权语义不明绝不静默运行）
   const configGrants = deps.configGrants ?? loadGrantConfig(governanceRoot);
   if (deps.workspaceHost !== undefined) {
@@ -212,7 +202,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   }
   // M5.5 S5（决策 048）：可选的命令短名与角色允许清单（畸形 → 抛错，启动中止）
   const commandsConfig = loadCommandsConfig(governanceRoot);
-  // 决策 206：新存储写者在配置校验之后打开（装配早期抛错时不留下空的会话文件）
+  // 会话存储写者在配置校验之后打开（装配早期抛错时不留下空的会话文件）
   const sessionStore = openSessionStore({
     sessionsDir,
     sessionId: deps.sessionId,
@@ -221,10 +211,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     onFault: storeFaultWarner(deps.storeWarn),
     persistThinking: deps.persistThinking ?? true,
   });
-  // 决策 3b：会话 grant 运行态——resume 时以事件日志物化结果为种子（created − revoked）
+  // 决策 3b：会话 grant 运行态——续跑时以会话存储里生效的授权为种子（建立减撤销）
   const grantStore = new SessionGrantStore({
     workspaceRoot: deps.workspaceRoot,
-    eventLog: teeGrantEvents(eventLog, sessionStore),
+    sink: grantEventSink(sessionStore),
     restored: deps.restoredGrants,
   });
   // 170 ④：本会话的审批状态——委派策略在场时取其审批模式，否则取 yolo 旗标；非 yolo 时看有没有注入审批通道。
@@ -338,11 +328,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           approvalMode: delegated.approvalMode,
         }
       : { allow: toolNames, deny: [], approvalMode: deps.yolo ? "yolo" : "prompt" };
-  // run.started 的附加摘要：MCP 工具集与 server 状态（有 server 时）
+  // Run 开始条目的附加摘要：MCP 工具集与 server 状态（有 server 时）
   const mcpSummary = mcp !== undefined && mcp.connections.length > 0 ? mcp : undefined;
   const runStartedExtras = mcpSummary !== undefined ? () => mcpSummary.summary() : undefined;
-  // load_skill 的读取留痕经 Adapter 盖 runId 落 skill.loaded；工具先于 Adapter 构造，故晚绑定
-  const adapterRef: { current: PiRuntimeAdapter | undefined } = { current: undefined };
   const adapter = new PiRuntimeAdapter({
     snapshot: {
       version: INJECTION_SNAPSHOT_VERSION,
@@ -398,14 +386,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(sessionSearch
         ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
         : []),
-      ...(hasSkills
-        ? [
-            createLoadSkillTool({
-              catalog: skillCatalog,
-              onLoaded: (payload) => adapterRef.current?.recordObservation("skill.loaded", payload),
-            }),
-          ]
-        : []),
+      ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
@@ -422,22 +403,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       workspaceRoot: deps.workspaceRoot,
     }),
     sessionId: deps.sessionId,
-    eventLog,
     sessionStore,
-    // M5 S5（决策 044）：llm.request 指纹与内容文件同一抽取选项
-    messageContent: { persistThinking: deps.persistThinking ?? true },
-    // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 run.started；无 server 时不带字段
+    // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 Run 开始条目；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
-    ...(deps.stepStart !== undefined ? { runStartedStepStart: deps.stepStart } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
   });
-  adapterRef.current = adapter;
   const toolTiers = new Map(
     registry.list().map((registration) => [registration.name, registration.tier])
   );
   return {
     adapter,
-    eventLog,
     sessionStore,
     grantStore,
     configGrants,
@@ -446,7 +421,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   };
 }
 
-// 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话文件（旧账本与新存储）；
+// 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话存储写者；
 // 前一步失败不跳过后续
 export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
   for (const dispose of bundle.disposers?.splice(0) ?? []) {
@@ -462,11 +437,7 @@ export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
     try {
       await bundle.mcp?.close();
     } finally {
-      try {
-        bundle.eventLog.close();
-      } finally {
-        await bundle.sessionStore.close();
-      }
+      await bundle.sessionStore.close();
     }
   }
 }

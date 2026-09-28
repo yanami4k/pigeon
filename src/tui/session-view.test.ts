@@ -1,10 +1,10 @@
 // M2 S4：TUI 会话列表（/sessions）与恢复入口（/resume）离屏测试（同一 Mock Terminal 路径）。
 // 断言面：
 //   - /sessions 渲染口径与 cli 一致（共享 application/session-list.ts 命令层）：安静行
-//     （时间 + Run 数 + sessionId）+ 待对账突出行；空目录如实说明；
+//     （时间 + Run 数 + sessionId）；空目录如实说明；
 //   - /resume 全流程（账本重构 183）：续跑报告（还原的消息条数、未收尾的 Run、悬空的工具调用）渲染进消息区，
 //     与 cli 同口径 → 不再有人工对账菜单 → 同 sessionId 换绑运行面续跑（上下文还原在换绑工厂装配运行面时做）；
-//   - 双写之前的旧会话（新会话存储里没有文件）明确报错、不换绑；
+//   - 旧格式会话（迁移之前创建，会话根下平铺的文件）明确报错、不换绑；
 //   - grant 种子：恢复后 /grants 渲染新会话存储里的生效授权（重启恢复证据）；
 //   - 会话不存在/空目录响亮报错，原运行面不受影响；当前会话拒绝重复恢复；
 //   - busy 期间 /sessions 与 /resume 不开旁路（027）。
@@ -14,24 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createFixtureSession } from "../application/session-store-fixtures.ts";
+import { writeLegacySessionFile } from "../application/session-view-fixtures.ts";
 import { restoreGrantSeed } from "../application/workspace.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
-import type { IntentInput } from "../state/event-log.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
-import {
-  type ExecutionId,
-  newEntryId,
-  newExecutionId,
-  newGrantId,
-  newReceiptId,
-  newRunId,
-  newSessionId,
-  type RunId,
-  type SessionId,
-} from "../state/ids.ts";
-import { RECEIPT_VERSION, type Receipt } from "../state/receipt.ts";
+import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
 import { PigeonTuiShell, type TuiRuntimeFace, type TuiSessionBinding } from "./shell.ts";
 import { MockTerminal, screenText, settle } from "./testing.ts";
@@ -115,90 +103,13 @@ function makeRoot(): { root: string; cleanup: () => void } {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-function runtimeEnvelope(
-  sessionId: SessionId,
-  runId: RunId,
-  kind: EventEnvelope["kind"],
-  payload: unknown
-): EventEnvelope {
-  return {
-    version: EVENT_ENVELOPE_VERSION,
-    id: newEntryId(),
-    sessionId,
-    runId,
-    timestamp: 1_757_000_000_000,
-    kind,
-    payload,
-  };
-}
-
-function makeIntentInput(
-  runId: RunId,
-  toolName: string,
-  executionId: ExecutionId,
-  contentHashes?: IntentInput["contentHashes"]
-): IntentInput {
-  return {
-    executionId,
-    toolCallId: `toolu_${toolName}`,
-    toolName,
-    rawArgs: { path: "a.ts" },
-    decision: { outcome: "approved", approvedBy: "policy:yolo", decidedAt: 1_757_000_000_001 },
-    at: 1_757_000_000_000,
-    runId,
-    ...(contentHashes !== undefined ? { contentHashes } : {}),
-  };
-}
-
-function makeReceipt(executionId: ExecutionId): Receipt {
-  return {
-    version: RECEIPT_VERSION,
-    id: newReceiptId(),
-    executionId,
-    toolCallId: "toolu_x",
-    approvedBy: "policy:yolo",
-    executed: true,
-    isError: false,
-    startedAt: 1_757_000_000_001,
-    finishedAt: 1_757_000_000_002,
-    summary: "完成",
-  };
-}
-
-// 健康会话：一轮正常工具调用（turn 起讫 + intent/receipt 配对 + run.ended）
-function writeHealthySession(sessionsDir: string, toolName: string): SessionId {
-  const sessionId = newSessionId();
-  const log = new JsonlEventLog(sessionsDir, sessionId);
-  const runId = newRunId();
-  const executionId = newExecutionId();
-  log.appendRuntimeEvent(runtimeEnvelope(sessionId, runId, RuntimeEventKind.TurnStarted, {}));
-  log.appendRuntimeEvent(
-    runtimeEnvelope(sessionId, runId, RuntimeEventKind.TurnCompleted, {
-      stopReason: "stop",
-      syntheticFailure: false,
-    })
-  );
-  log.appendIntent(makeIntentInput(runId, toolName, executionId));
-  log.appendReceipt({ receipt: makeReceipt(executionId), runId });
-  log.appendRuntimeEvent(
-    runtimeEnvelope(sessionId, runId, RuntimeEventKind.RunEnded, { messageCount: 0 })
-  );
-  log.close();
-  return sessionId;
-}
-
-// 崩溃残留会话：intent 落盘后进程死亡（无 receipt）→ 待对账悬账
-function writeCrashedSession(
-  sessionsDir: string,
-  toolName: string,
-  contentHashes?: IntentInput["contentHashes"]
-): { sessionId: SessionId; executionId: ExecutionId } {
-  const sessionId = newSessionId();
-  const executionId = newExecutionId();
-  const log = new JsonlEventLog(sessionsDir, sessionId);
-  log.appendIntent(makeIntentInput(newRunId(), toolName, executionId, contentHashes));
-  log.close();
-  return { sessionId, executionId };
+// 健康会话：一轮正常工具调用、Run 正常收尾
+async function writeHealthySession(sessionsDir: string, toolName: string): Promise<SessionId> {
+  const session = createFixtureSession({ sessionsDir });
+  session.startRun({ task: "t" });
+  session.toolTurn({ name: toolName });
+  session.endRun();
+  return (await session.close()).sessionId;
 }
 
 // 新会话存储里的崩溃会话：任务消息与带工具调用的助手消息之后进程死亡（无工具结果、无 Run 收尾）
@@ -211,22 +122,6 @@ async function writeStoreCrashedSession(
   session.startRun({ task: "改 a.ts" });
   session.assistant({ text: "先改", toolCalls: [{ name: toolName, args: { path: "a.ts" } }] });
   return (await session.close()).sessionId;
-}
-
-// 带会话 grant 的健康会话（旧账本形状）
-function _writeGrantedSession(sessionsDir: string): { sessionId: SessionId; grantId: string } {
-  const sessionId = writeHealthySession(sessionsDir, "read_file");
-  const grantId = newGrantId();
-  const log = new JsonlEventLog(sessionsDir, sessionId);
-  log.appendGrantCreated({
-    grantId,
-    tool: "read_file",
-    createdAt: 1_757_000_000_002,
-    firstCall: { toolCallId: "toolu_read_file", args: { path: "a.ts" } },
-    runId: newRunId(),
-  });
-  log.close();
-  return { sessionId, grantId };
 }
 
 // 换绑工厂夹具：记录收到的 sessionId 与给出的新运行面
@@ -376,12 +271,12 @@ test("/resume 全流程：报告将还原的上下文与悬空的工具调用 �
   }
 });
 
-test("/resume 双写之前的旧会话：明确报错、不换绑，原运行面不受影响", async () => {
+test("/resume 旧格式会话：明确报错、不换绑，原运行面不受影响", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const legacy = writeCrashedSession(sessionsDir, "edit_file");
+    const legacy = writeLegacySessionFile(sessionsDir);
     const tracker = makeRebindTracker();
     const runtime = new FakeRuntime();
     const term = new MockTerminal(90, 30);
@@ -396,11 +291,13 @@ test("/resume 双写之前的旧会话：明确报错、不换绑，原运行面
     try {
       shell.start();
       await settle();
-      term.input(`/resume ${legacy.sessionId}`);
+      term.input(`/resume ${legacy}`);
       term.input("\r");
       await settle();
       const text = screenText(term);
-      assert.ok(text.includes("创建于新会话存储启用之前"), text);
+      // 屏幕按宽度折行，只核对不会跨行的短片段
+      assert.ok(text.includes("是旧格式会话"), text);
+      assert.ok(text.includes("不能续跑"), text);
       assert.deepEqual(tracker.rebinds, [], "失败不得换绑");
       term.input("还活着");
       term.input("\r");
@@ -469,7 +366,7 @@ test("/resume 会话不存在与空目录响亮报错；原运行面不受影响
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    writeHealthySession(sessionsDir, "read_file");
+    await writeHealthySession(sessionsDir, "read_file");
     const tracker = makeRebindTracker();
     const runtime = new FakeRuntime();
     const term = new MockTerminal(90, 30);
@@ -485,7 +382,7 @@ test("/resume 会话不存在与空目录响亮报错；原运行面不受影响
       shell.start();
       await settle();
 
-      // 当前会话：拒绝重复恢复（恢复自己会让恢复流程与运行中日志同文件双写）
+      // 当前会话：拒绝重复恢复（恢复自己会让同一会话文件出现两个写者）
       term.input(`/resume ${SESSION_ID}`);
       term.input("\r");
       await settle();

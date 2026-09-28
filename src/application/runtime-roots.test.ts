@@ -5,8 +5,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JsonlEventLog } from "../persistence/event-log.ts";
 import { appendGrantConfigRule } from "../persistence/grants-config.ts";
+import { locateSessionFile } from "../persistence/session-reader.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import type { EditFileParams } from "../tools/edit-file.ts";
@@ -73,13 +73,12 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
       assert.ok(bundle.adapter.snapshot().context.systemPrompt.includes("暗号：治理根"));
     } finally {
       await bundle.adapter.dispose();
-      bundle.eventLog.close();
       await bundle.sessionStore.close();
     }
     // 会话文件落治理根；工作区根不出现 .pigeon/
-    assert.ok(
-      existsSync(JsonlEventLog.filePathFor(join(governanceRoot, ".pigeon", "sessions"), sessionId))
-    );
+    const located = locateSessionFile(join(governanceRoot, ".pigeon", "sessions"), sessionId);
+    assert.ok(located !== undefined, "治理根的会话存储里应有本会话文件");
+    assert.ok(existsSync(located.path));
     assert.equal(existsSync(join(workspaceRoot, ".pigeon")), false);
   } finally {
     for (const dir of [governanceRoot, workspaceRoot, homeDir]) {

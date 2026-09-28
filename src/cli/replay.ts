@@ -13,7 +13,7 @@ import {
   loadSessionView,
   readSessionView,
 } from "../persistence/session-catalog.ts";
-import { isGitWorktreeWorkspace } from "../state/event-log.ts";
+import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
 import {
   isSyntheticFailure,
   type SessionView,

@@ -1,24 +1,27 @@
 // M5 S4（决策 043，M5 完成证据「Skill 只能影响操作建议，不能扩大 Tool Policy」）：Skill 文本要求
 // 使用被 deny 的工具，模型照做后照样被 deny 清单拦下（yolo 也不豁免）；load_skill 本身是 read 档，
-// 每次读取落 skill.loaded 观察记录。
+// 读取摘要随工具结果的 details 进会话存储，拒绝决定挂在被拦工具结果的审批闸标记上。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createToolGovernance } from "../application/governance.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
+import { acquireSessionFileLock } from "../persistence/session-lock.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { openSessionStoreWriter } from "../pi-runtime/session-store.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
 import { newSessionId } from "../state/ids.ts";
+import { toolResultMark } from "../state/session-judge.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { loadSkillCatalog } from "./catalog.ts";
 import { createLoadSkillTool, LOAD_SKILL_TOOL, loadSkillRegistration } from "./load-skill-tool.ts";
 
-test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下，文件不变；skill.loaded 落盘", async () => {
+test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下，文件不变；读取摘要与拒绝决定落会话存储", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-skill-governance-"));
   const root = join(base, "workspace");
   const home = join(base, "home");
@@ -34,7 +37,12 @@ test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下�
     const catalog = loadSkillCatalog({ workspaceRoot: root, homeDir: home });
     const sessionsDir = join(root, ".pigeon", "sessions");
     const sessionId = newSessionId();
-    const eventLog = new JsonlEventLog(sessionsDir, sessionId);
+    const sessionStore = openSessionStoreWriter({
+      sessionsRoot: sessionsDir,
+      sessionId,
+      cwd: root,
+      lock: acquireSessionFileLock,
+    });
     const registry = new ToolRegistry();
     registry.register({
       name: "edit_file",
@@ -45,7 +53,6 @@ test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下�
       executionMode: "sequential",
     });
     registry.register(loadSkillRegistration(catalog));
-    const adapterRef: { current: PiRuntimeAdapter | undefined } = { current: undefined };
     const adapter = new PiRuntimeAdapter({
       snapshot: {
         version: INJECTION_SNAPSHOT_VERSION,
@@ -86,32 +93,48 @@ test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下�
       governance: createToolGovernance({
         registry,
       }),
-      tools: [
-        createEditFileTool(root),
-        createLoadSkillTool({
-          catalog,
-          onLoaded: (payload) => adapterRef.current?.recordObservation("skill.loaded", payload),
-        }),
-      ],
+      tools: [createEditFileTool(root), createLoadSkillTool({ catalog })],
       sessionId,
-      eventLog,
+      sessionStore,
     });
-    adapterRef.current = adapter;
     const result = await adapter.run("按 hotfix Skill 处理");
     assert.equal(result.status, "completed");
     await adapter.dispose();
-    eventLog.close();
+    await sessionStore.close();
 
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original, "被 deny 的写操作没有发生");
-    const materialized = materializeSession(sessionsDir, sessionId);
-    assert.equal(materialized.decisions.length, 1);
-    assert.equal(materialized.decisions[0]?.toolName, "edit_file");
-    assert.equal(materialized.decisions[0]?.decision.approvedBy, "policy:deny");
-    assert.equal(materialized.intents.length, 0);
-    assert.equal(materialized.skillLoadeds.length, 1);
-    assert.equal(materialized.skillLoadeds[0]?.payload.name, "hotfix");
-    assert.equal(materialized.skillLoadeds[0]?.payload.resourcePath, "SKILL.md");
-    assert.equal(materialized.skillLoadeds[0]?.runId, result.runId);
+    // 内存结果：两次调用，edit_file 被 deny 拒绝
+    assert.deepEqual(
+      result.toolExecutions.map((record) => [record.toolName, record.decision?.approvedBy]),
+      [
+        [LOAD_SKILL_TOOL, "policy:yolo"],
+        ["edit_file", "policy:deny"],
+      ]
+    );
+    assert.equal(result.toolExecutions[1]?.decision?.outcome, "rejected");
+
+    // 会话存储：本 Run 的工具结果恰两条；load_skill 的 details 带读取摘要，edit_file 的审批闸标记为 deny 拒绝
+    const loaded = loadStoreSession(sessionsDir, sessionId);
+    assert.ok(loaded !== undefined);
+    assert.equal(loaded.view.runs.length, 1);
+    const run = loaded.view.runs[0];
+    assert.equal(run?.runId, result.runId);
+    const toolResults = (run?.messages ?? []).flatMap(({ message }) =>
+      message.role === "toolResult" ? [message] : []
+    );
+    assert.deepEqual(
+      toolResults.map((message) => message.toolName),
+      [LOAD_SKILL_TOOL, "edit_file"]
+    );
+    const skillDetails = toolResults[0]?.details as { name?: string; resourcePath?: string };
+    assert.equal(skillDetails.name, "hotfix");
+    assert.equal(skillDetails.resourcePath, "SKILL.md");
+    const denied = toolResults[1];
+    assert.ok(denied !== undefined);
+    assert.deepEqual(toolResultMark(denied)?.gate, {
+      outcome: "rejected",
+      approvedBy: "policy:deny",
+    });
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

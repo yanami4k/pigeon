@@ -1,11 +1,11 @@
 // 单轮输出上限装配（决策 063 第 1 件）：装配层包装 streamFn——缺省时模型调用收到 maxTokens 16,384，
-// headless 的 maxOutputTokens 覆盖生效；上限值写进注入快照 model 段与 run.started 的 model 摘要。
+// headless 的 maxOutputTokens 覆盖生效；上限值写进注入快照 model 段与会话存储 Run 开始条目的 model 摘要。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -26,7 +26,7 @@ for (const [label, maxOutputTokens, expected] of [
   ["缺省", undefined, 16_384],
   ["配置 4096", 4096, 4096],
 ] as const) {
-  test(`输出上限装配（${label}）：模型调用收到 maxTokens ${expected}，run.started 的 model 摘要记下该值`, async () => {
+  test(`输出上限装配（${label}）：模型调用收到 maxTokens ${expected}，Run 开始条目的 model 摘要记下该值`, async () => {
     const root = mkdtempSync(join(tmpdir(), "pigeon-output-limit-"));
     const home = mkdtempSync(join(tmpdir(), "pigeon-output-limit-home-"));
     try {
@@ -43,8 +43,10 @@ for (const [label, maxOutputTokens, expected] of [
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       });
       assert.deepEqual(seen, [expected]);
-      const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
-      assert.equal(session.runStarteds[0]?.payload.model.maxOutputTokens, expected);
+      const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), result.sessionId);
+      assert.ok(loaded !== undefined, "会话存储里应有本会话");
+      assert.equal(loaded.view.runs.length, 1);
+      assert.equal(loaded.view.runs[0]?.start.model.maxOutputTokens, expected);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });

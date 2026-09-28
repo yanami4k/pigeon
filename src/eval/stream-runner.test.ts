@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { runHeadless } from "../application/headless.ts";
 import { createSessionSearch } from "../memory/session-search.ts";
-import { listSessionIds } from "../persistence/event-log.ts";
+import { listSessionFiles, sessionFileName } from "../persistence/session-reader.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { GatewayMeter } from "./model-gateway.ts";
@@ -1407,34 +1407,52 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("作废一步时清掉这次尝试的痕迹：重做时会话检索搜不到上一次尝试，会话移到治理根之外的隔离目录", async () => {
+  test("作废一步时清掉这次尝试的痕迹：重做时会话检索搜不到上一次尝试，会话移到治理根之外的隔离目录，同一工作目录下前一步的会话保留", async () => {
     const t = await toy();
     try {
       const clue = "作废尝试留下的线索甲乙丙";
-      let voidedSession = "";
-      const seenOnRetry: { hits: number; sessions: string[] }[] = [];
+      const kept = "前一步留下的线索丁戊己";
+      const sessionIds = { kept: "", voided: "" };
+      const seenOnRetry: { voidedHits: number; keptHits: number; sessions: string[] }[] = [];
       const calls: StepAgentInput[] = [];
+      // 两步的 headless 运行用同一个工作区：会话文件落在会话根下同一个工作目录编码子目录里
+      const workspace = join(t.base, "headless-ws");
+      mkdirSync(workspace, { recursive: true });
+      const headless = (task: string) =>
+        runHeadless({
+          task,
+          governanceRoot: calls.at(-1)?.workDir ?? "",
+          workspaceRoot: workspace,
+          streamFn: createFakeStreamFn({ replies: [{ text: `收到：${task}` }] }),
+          yolo: true,
+          sessionId: newSessionId(),
+          skillRoots: [],
+          memoryRoots: [],
+          homeDir: join(t.base, "home"),
+        });
+      const hitsOf = async (sessionsDir: string, keyword: string) => {
+        let hits = 0;
+        for await (const _ of createSessionSearch(sessionsDir).search({ keywords: [keyword] })) {
+          hits += 1;
+        }
+        return hits;
+      };
       const agent: StepAgent = {
         async run(input) {
           calls.push(input);
           const sessionsDir = join(input.workDir, ".pigeon", "sessions");
-          if (input.step.seq === 1 && calls.length === 1) {
-            // 第一次尝试：真实地跑一次 headless，会话落进治理根；然后报被打断
-            const workspace = join(t.base, "headless-ws");
-            mkdirSync(workspace, { recursive: true });
-            const run = await runHeadless({
-              task: clue,
-              governanceRoot: input.workDir,
-              workspaceRoot: workspace,
-              streamFn: createFakeStreamFn({ replies: [{ text: `收到：${clue}` }] }),
-              yolo: true,
-              sessionId: newSessionId(),
-              skillRoots: [],
-              memoryRoots: [],
-              homeDir: join(t.base, "home"),
-            });
-            voidedSession = run.sessionId;
-            assert.ok(listSessionIds(sessionsDir).includes(run.sessionId));
+          if (calls.length === 1) {
+            // 第一步：真实地跑一次 headless，会话留在治理根
+            sessionIds.kept = (await headless(kept)).sessionId;
+            write(input.target.root, { "src/a.txt": "alpha\n" });
+            return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5, repair: null };
+          }
+          if (calls.length === 2) {
+            // 第二步第一次尝试：同一工作区再跑一次 headless，然后报被打断
+            sessionIds.voided = (await headless(clue)).sessionId;
+            const files = listSessionFiles(sessionsDir);
+            assert.equal(new Set(files.map((f) => dirname(f.path))).size, 1);
+            assert.equal(files.length, 2);
             return {
               status: "failed",
               turns: 1,
@@ -1444,58 +1462,68 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
               interrupted: "模型服务故障",
             };
           }
-          if (input.step.seq === 1) {
-            const hits: unknown[] = [];
-            for await (const hit of createSessionSearch(sessionsDir).search({ keywords: [clue] })) {
-              hits.push(hit);
-            }
-            seenOnRetry.push({ hits: hits.length, sessions: listSessionIds(sessionsDir) });
-            write(input.target.root, { "src/a.txt": "alpha\n" });
-          }
+          seenOnRetry.push({
+            voidedHits: await hitsOf(sessionsDir, clue),
+            keptHits: await hitsOf(sessionsDir, kept),
+            sessions: listSessionFiles(sessionsDir).map((f) => f.sessionId),
+          });
+          solve(input);
           return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5, repair: null };
         },
       };
-      const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
-      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 1 }]);
-      assert.notEqual(voidedSession, "");
-      assert.deepEqual(seenOnRetry, [{ hits: 0, sessions: [] }]);
+      const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
+      assert.deepEqual(summary.jobs, [{ key: "tasks|neither|1", completedTo: 5 }]);
+      assert.notEqual(sessionIds.voided, "");
+      assert.deepEqual(seenOnRetry, [{ voidedHits: 0, keptHits: 2, sessions: [sessionIds.kept] }]);
       // 作废的会话保留在输出目录下、作业治理根之外的隔离目录里备查
       const quarantined = readdirSync(join(t.base, "out", "voided"), { recursive: true }).map((f) =>
         String(f).replaceAll("\\", "/")
       );
       assert.ok(
-        quarantined.some((f) => f.endsWith(`/${voidedSession}.jsonl`)),
+        quarantined.some((f) => f.endsWith(`_${sessionIds.voided}.jsonl`)),
         `隔离目录里应有作废的会话：${quarantined.join(", ")}`
       );
+      assert.ok(!quarantined.some((f) => f.endsWith(`_${sessionIds.kept}.jsonl`)));
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
   });
 
-  test("进程死在一步中途留下的会话：续跑时不在上一个完成步清单里的会话移出治理根，完成步的会话保留", async () => {
+  test("进程死在一步中途留下的会话：续跑时不在上一个完成步清单里的会话移出治理根，完成步的会话保留（同一工作目录子目录里逐个文件区分）", async () => {
     const t = await toy();
     try {
+      // 新存储布局：会话根下按工作目录编码的子目录、文件名为创建时间加会话号；各步会话落在同一个子目录里
+      const lane = "--work-ws--";
+      const fileOf = (id: string) => `${lane}/${sessionFileName(Date.UTC(2026, 8, 27), id)}`;
       const agent = scriptedAgent((input) => {
         const sessions = join(input.workDir, ".pigeon", "sessions");
-        mkdirSync(sessions, { recursive: true });
-        writeFileSync(join(sessions, `sess_step${input.step.seq}.jsonl`), "{}\n");
+        mkdirSync(join(sessions, lane), { recursive: true });
+        writeFileSync(join(sessions, fileOf(`sess_step${input.step.seq}`)), "{}\n");
         return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
       const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
       const sessions = join(jobDir, ".pigeon", "sessions");
-      assert.ok(existsSync(join(jobDir, "sessions-1.json")));
-      // 模拟第 5 步做到一半进程被杀：会话留在治理根，没有结果行
-      writeFileSync(join(sessions, "sess_crashed.jsonl"), "{}\n");
+      assert.deepEqual(JSON.parse(readFileSync(join(jobDir, "sessions-1.json"), "utf8")), [
+        fileOf("sess_step1"),
+      ]);
+      // 模拟第 5 步做到一半进程被杀：会话与锁文件留在治理根的同一子目录里，没有结果行
+      writeFileSync(join(sessions, fileOf("sess_crashed")), "{}\n");
+      writeFileSync(join(sessions, `${fileOf("sess_crashed")}.lock`), "{}\n");
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
-      assert.deepEqual(readdirSync(sessions).sort(), ["sess_step1.jsonl", "sess_step5.jsonl"]);
+      assert.deepEqual(readdirSync(join(sessions, lane)).sort(), [
+        sessionFileName(Date.UTC(2026, 8, 27), "sess_step1"),
+        sessionFileName(Date.UTC(2026, 8, 27), "sess_step5"),
+      ]);
       const quarantined = readdirSync(join(t.base, "out", "voided"), { recursive: true }).map((f) =>
         String(f).replaceAll("\\", "/")
       );
-      assert.ok(
-        quarantined.some((f) => f.endsWith("/sess_crashed.jsonl")),
-        quarantined.join(", ")
-      );
+      for (const moved of [fileOf("sess_crashed"), `${fileOf("sess_crashed")}.lock`]) {
+        assert.ok(
+          quarantined.some((f) => f.endsWith(`/${moved}`)),
+          `${moved} 应连同子目录移到隔离目录：${quarantined.join(", ")}`
+        );
+      }
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

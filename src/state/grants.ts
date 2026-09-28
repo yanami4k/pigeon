@@ -3,7 +3,7 @@
 // 文件读写在 persistence/grants-config.ts，会话 grant 运行态在 approvals/grant-store.ts。
 // M5.5 S5（决策 048）：exec 档规则带 command（精确命令串），加法式字段，版本不变。
 import { type Static, Type } from "typebox";
-import { GrantIdSchema, SessionIdSchema } from "./ids.ts";
+import { type GrantId, GrantIdSchema, SessionIdSchema } from "./ids.ts";
 
 export const GRANTS_CONFIG_VERSION = 1;
 
@@ -35,3 +35,16 @@ export const GrantsConfigFileSchema = Type.Object({
   version: Type.Literal(GRANTS_CONFIG_VERSION),
   grants: Type.Array(ConfigGrantRuleSchema),
 });
+
+// 会话里生效中的授权（建立减撤销）：续跑时由会话存储的授权条目还原，作为会话 grant 运行态的冷恢复种子（决策 3b）
+export interface ActiveGrant {
+  grantId: GrantId;
+  tool: string;
+  pathPrefix?: string;
+  // 决策 048：exec 档精确命令串
+  command?: string;
+  // 048 修订：经 shell 已由人确认
+  shell?: boolean;
+  createdAt: number;
+  firstCall: { toolCallId: string; args: unknown };
+}

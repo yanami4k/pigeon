@@ -85,7 +85,7 @@ export interface TuiRuntimeFace {
   // S5 取消入口：中断当前 Run（Adapter 固定姿势 abort → waitForIdle，注释约束 5，
   // 任何路径不悬挂；终态由并发等待的 run() 返回承载）
   interrupt(): Promise<void>;
-  // S5 D2 可见化投影：事件落盘失败观察口（措辞与增量报数口径同 cli repl）
+  // S5 D2 可见化投影：会话记录写入失败观察口（措辞与增量报数口径同 cli repl）
   listenerErrors(): unknown[];
 }
 
@@ -483,12 +483,12 @@ export class PigeonTuiShell
     );
   }
 
-  // D2 可见化的 TUI 投影（S5）：事件落盘失败非空时消息区警告——措辞与 cli repl 同口径，
+  // D2 可见化的 TUI 投影（S5）：会话记录写入失败非空时消息区警告——措辞与 cli repl 同口径，
   // 增量报数（同一批故障不重复刷屏，新故障以累计数提醒）；启动即查 + 每次 run 收尾复查
   private warnEvidenceGaps(): void {
     const count = this.current.runtime.listenerErrors().length;
     if (count > this.reportedListenerErrors) {
-      this.flow.addSystem(`警告：本会话有 ${count} 条事件落盘失败，证据链不完整。`);
+      this.flow.addSystem(`警告：本会话有 ${count} 条会话记录写入失败，证据链不完整。`);
       this.reportedListenerErrors = count;
     }
   }

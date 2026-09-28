@@ -8,7 +8,7 @@
 //   ③ 输出截断：与本地实现共用同一个收集器——全量计字节数与哈希，只留开头；
 //   ④ 路径映射：模型给的路径在容器内按工作区根解析（符号链接解析后）再判包含，宿主路径不参与。
 // 宿主环境变量不进容器：容器内环境由镜像与本实现的 env 选项决定。
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { createHeadCollector } from "../tools/local-host.ts";
 import { WorkspacePathError, WorkspacePathNotFoundError } from "../tools/paths.ts";
@@ -117,8 +117,6 @@ export interface ContainerHostOptions {
 }
 
 const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
-// 同步读的缓冲上限
-const SYNC_READ_MAX_BYTES = 256 * 1024 * 1024;
 // 路径不存在时辅助脚本用的退出码
 const EXIT_MISSING = 3;
 
@@ -240,33 +238,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
       }
-    },
-    readTextSync(inputPath) {
-      const run = (command: readonly string[]) => {
-        const result = spawnSync(dockerProgram, execArgs(false, command), {
-          timeout: helperTimeoutMs,
-          windowsHide: true,
-          // 缺省缓冲只有 1 MB：大文件会被判成失败
-          maxBuffer: SYNC_READ_MAX_BYTES,
-        });
-        if (result.error !== undefined) {
-          throw new ContainerHostError(`docker 拉不起来：${result.error.message}`);
-        }
-        return {
-          exitCode: result.status,
-          stdout: result.stdout,
-          stderr: result.stderr.toString("utf8"),
-        };
-      };
-      const base = run(["sh", "-c", RESOLVE_SCRIPT, "sh", root]);
-      const realBase = checkResolved(root, base, base.stdout.toString("utf8"), undefined);
-      const resolved = run(["sh", "-c", RESOLVE_SCRIPT, "sh", inputPath]);
-      const target = checkResolved(inputPath, resolved, resolved.stdout.toString("utf8"), realBase);
-      const content = run(["cat", "--", target]);
-      if (content.exitCode !== 0) {
-        throw new ContainerHostError(`读取失败：${target}（${content.stderr.trim()}）`);
-      }
-      return content.stdout.toString("utf8");
     },
     exec(plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> {
       const collected = createHeadCollector(execOptions.maxOutputBytes);

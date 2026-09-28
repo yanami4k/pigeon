@@ -18,12 +18,7 @@ import {
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
-import type {
-  ContentEvidenceTool,
-  PigeonAgentTool,
-  PigeonToolResult,
-  PreviewableTool,
-} from "./wrap.ts";
+import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
 // 域错误（模型给的原文不对、不唯一或无变化）；带归类标记，tools/error-kind.ts 读标记归 domain
 // 报错文案的稳定前缀：抛错处与 Eval 的编辑报错分类（eval/process.ts）共用同一常量
@@ -60,9 +55,7 @@ export const REPLACE_EDIT_DESCRIPTION =
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
 export function createReplaceEditTool(
   workspace: string | WorkspaceHost
-): PigeonAgentTool<typeof ReplaceEditParamsSchema, ReplaceEditDetails> &
-  PreviewableTool &
-  ContentEvidenceTool {
+): PigeonAgentTool<typeof ReplaceEditParamsSchema, ReplaceEditDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
   return {
     name: "edit_file",
@@ -73,27 +66,6 @@ export function createReplaceEditTool(
     async preview(params) {
       const plan = await planReplace(host, Value.Parse(ReplaceEditParamsSchema, params));
       return buildEditDiff(plan.args.path, plan.oldLines, [plan.applied]);
-    },
-    // 内容证据探针（M4 D5 哈希自动确证）：与执行同一段预检；失败返回 null，治理层降级为人工对账
-    async probeContentEvidence(params) {
-      try {
-        const plan = await planReplace(host, Value.Parse(ReplaceEditParamsSchema, params));
-        return {
-          path: plan.args.path,
-          beforeHash: plan.beforeSnapshot,
-          expectedAfterHash: snapshotTag(plan.newRaw),
-        };
-      } catch {
-        return null;
-      }
-    },
-    hashContentTarget(params) {
-      try {
-        const args = Value.Parse(ReplaceEditParamsSchema, params);
-        return snapshotTag(host.readTextSync(args.path));
-      } catch {
-        return null;
-      }
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<ReplaceEditDetails>> {
       const args = Value.Parse(ReplaceEditParamsSchema, params);

@@ -45,9 +45,6 @@ function memoryHost(initial: Record<string, string>) {
       calls.push(`write:${resolvedPath}`);
       files.set(resolvedPath, content);
     },
-    readTextSync(inputPath) {
-      return files.get(`${FAKE_ROOT}/${inputPath}`) ?? "";
-    },
     async exec(plan) {
       plans.push(plan);
       files.set(`${FAKE_ROOT}/made-by-command.txt`, "x");
@@ -88,15 +85,6 @@ test("工具只调执行端接口：read_file / edit_file（两种模式）经�
     edits: [{ op: "replace", anchor: `1#${lineTag("one")}`, lines: ["ONE"] }],
   });
   assert.equal(files.get(`${FAKE_ROOT}/src/a.txt`), "ONE\ntwo\n");
-  // 回执落盘时的同步实测也走执行端
-  assert.equal(
-    hashline.hashContentTarget({
-      path: "src/a.txt",
-      snapshot: "0".repeat(16),
-      edits: [{ op: "delete", anchor: "1#0000" }],
-    }),
-    snapshotTag("ONE\ntwo\n")
-  );
 
   const replace = createReplaceEditTool(host);
   await replace.execute("c3", { path: "src/a.txt", old_string: "two", new_string: "TWO" });
@@ -136,7 +124,7 @@ test("工具只调执行端接口：run_command 的平台、执行、文件变�
   assert.match(await tool.preview({ command: "ls" }), new RegExp(`工作目录：${FAKE_ROOT}`));
 });
 
-test("本地执行端的路径解析：不存在抛「不存在」子类，越界抛普通围栏错误（二者可区分）", () => {
+test("本地执行端的路径解析：不存在抛「不存在」子类，越界抛普通围栏错误（二者可区分）", async () => {
   // 越界目标必须真实存在（realpath 解析失败会先判"不存在"）：在独立临时目录里建出工作区与其同级的 outside.txt，
   // 不依赖系统临时目录里的残留文件
   const base = mkdtempSync(join(tmpdir(), "pigeon-host-notfound-"));
@@ -145,9 +133,9 @@ test("本地执行端的路径解析：不存在抛「不存在」子类，越�
   writeFileSync(join(base, "outside.txt"), "o");
   try {
     const host = createLocalWorkspaceHost(root);
-    assert.throws(() => host.readTextSync("nope.txt"), WorkspacePathNotFoundError);
-    assert.throws(
-      () => host.readTextSync("../outside.txt"),
+    await assert.rejects(host.resolveExisting("nope.txt"), WorkspacePathNotFoundError);
+    await assert.rejects(
+      host.resolveExisting("../outside.txt"),
       (error: unknown) =>
         error instanceof WorkspacePathError && !(error instanceof WorkspacePathNotFoundError)
     );

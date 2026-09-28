@@ -1,8 +1,8 @@
 // 注入清单（M5，决策 042 / 043 / 044）：常驻 Memory 与 Skill 的冻结身份形状。
-// InjectionSnapshot v3（pi-runtime/snapshot.ts）与 run.started 观察记录（state/event-log.ts）
+// InjectionSnapshot v3（pi-runtime/snapshot.ts）与 Run 开始条目（state/session-entries.ts）
 // 共用同一份 schema——"用的是哪版 Memory / Skill"在快照与账本里是同一种证据，杜绝漂移。
 import { type Static, Type } from "typebox";
-import { Sha256HexSchema } from "./message-content.ts";
+import { Sha256HexSchema } from "./hashing.ts";
 
 // 常驻 Memory 单文件身份：included=false 表示超预算只列文件名未注入；truncated 只可能出现在
 // 被部分装入的那个文件上（偏好文件永不截断）
@@ -32,7 +32,7 @@ export const SkillManifestEntrySchema = Type.Object({
 export type SkillManifestEntry = Static<typeof SkillManifestEntrySchema>;
 
 // 结构化记忆的推送留痕（决策 134 / 157）：开关、挑选方式与开局给了哪几条（条目编号）。决策 174 后已停写，只为读旧会话保留。
-// 开局那几条随注入快照冻结、每个 Run 的 run.started 同值；回炉那几条只记在该轮回炉 Run 的 run.started 上
+// 开局那几条随注入快照冻结、每个 Run 的 Run 开始条目 同值；回炉那几条只记在该轮回炉 Run 的 Run 开始条目 上
 export const StructuredMemorySelectionSchema = Type.Union([
   Type.Literal("auto"),
   Type.Literal("fixed"),

@@ -1,12 +1,11 @@
 // replace 式编辑工具（决策 061 S1）：参数 { path, old_string, new_string }，原文在文件里必须恰好出现一次，精确匹配、
 // 不做空白宽松；匹配时按 LF 规整，写回保留 BOM、行尾风格与末尾换行；未找到、不唯一、新旧相同一律拒绝且文件不变；
-// 审批预览 diff 与内容证据（改前、预期改后哈希）与执行走同一段预检。
+// 审批预览 diff 与执行走同一段预检。
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { snapshotTag } from "./hashline.ts";
 import { createReplaceEditTool } from "./replace-edit.ts";
 
 function makeWorkspace(files: Record<string, string>): { root: string; cleanup: () => void } {
@@ -122,7 +121,7 @@ test("replace 编辑：路径越出工作区、文件不存在、old_string 为�
   }
 });
 
-test("replace 编辑：审批预览 diff 与内容证据和执行所得一致；执行后实测哈希等于预期改后哈希；探针失败返回 null", async () => {
+test("replace 编辑：审批预览 diff 与执行所得一致，预览零副作用", async () => {
   const original = "alpha\nbeta\ngamma\n";
   const expected = "alpha\nBETA\ngamma\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
@@ -132,20 +131,10 @@ test("replace 编辑：审批预览 diff 与内容证据和执行所得一致；
     const diff = await tool.preview(params);
     assert.match(diff, /^--- a\/a\.ts\n\+\+\+ b\/a\.ts\n/);
     assert.ok(diff.includes("\n-beta\n+BETA\n"), diff);
-    const evidence = await tool.probeContentEvidence(params);
-    assert.deepEqual(evidence, {
-      path: "a.ts",
-      beforeHash: snapshotTag(original),
-      expectedAfterHash: snapshotTag(expected),
-    });
-    // 预览与探针零副作用
+    // 预览零副作用
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
     await tool.execute("tc-1", params);
-    assert.equal(tool.hashContentTarget(params), evidence?.expectedAfterHash);
-    assert.equal(
-      await tool.probeContentEvidence({ path: "a.ts", old_string: "nope", new_string: "x" }),
-      null
-    );
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), expected);
   } finally {
     cleanup();
   }

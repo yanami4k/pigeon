@@ -1,13 +1,12 @@
-// 账本重构双写接线（决策 206）：在写旧账本的同一处同时写新会话存储。覆盖面：消息、Run 开始与收尾、验证记录、代码快照、
-// worker 派出与收尾、分叉、授权建立与撤销；worker 与分支会话的来历写进文件头。新存储写失败只向标准错误输出去重告警，
-// 不中断运行、不影响旧账本。
+// 会话存储接线（决策 176 / 177 / 184；旧账本停写后是唯一的写入目标）。覆盖面：消息、Run 开始与收尾、验证记录、代码快照、
+// worker 派出与收尾、分叉、授权建立与撤销；worker 与分支会话的来历写进文件头。会话存储写失败只向标准错误输出去重告警，
+// 不中断运行。会话根下迁移之前的旧格式平铺文件不读：同号会话照常新建自己的文件。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import {
   branchEntries,
   locateSessionFile,
@@ -19,8 +18,11 @@ import {
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { asRunId, newSessionId } from "../state/ids.ts";
 import {
+  type CheckpointData,
   type ForkData,
+  type GrantData,
   type RunEndData,
+  type RunStartData,
   type SessionCustomEntry,
   SessionEntryType,
   type VerificationData,
@@ -31,7 +33,8 @@ import { runHeadless } from "./headless.ts";
 import type { McpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
-import { teeChildFamilies, teeGrantEvents } from "./session-store.ts";
+import { childFamilySink, grantEventSink } from "./session-store.ts";
+import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
@@ -48,8 +51,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 function repo(): { dir: string; home: string; cleanup: () => void } {
-  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-dual-")));
-  const home = mkdtempSync(join(tmpdir(), "pigeon-dual-home-"));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-store-")));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-store-home-"));
   git(dir, ["init", "-q", "-b", "main"]);
   git(dir, ["config", "user.email", "pigeon@example.invalid"]);
   git(dir, ["config", "user.name", "pigeon-test"]);
@@ -86,7 +89,7 @@ const VERIFY = { command: `${NODE} check.mjs`, timeoutMs: 30_000 };
 
 function viewOf(sessionsDir: string, sessionId: string): SessionFileView {
   const located = locateSessionFile(sessionsDir, sessionId);
-  assert.ok(located !== undefined, `新存储里有 ${sessionId} 的会话文件`);
+  assert.ok(located !== undefined, `会话存储里有 ${sessionId} 的会话文件`);
   const view = readSessionFile(located.path);
   assert.ok(view !== undefined);
   assert.deepEqual(view.warnings, []);
@@ -103,7 +106,11 @@ function messages(entries: readonly StoredEntry[]): StoredEntry[] {
   return entries.filter((entry) => entry.type === "message");
 }
 
-test("双写端到端：失败自动分叉重试一次跑通，来源与分支两个新文件的消息、Run 起止、快照、验证、分叉都与旧账本对应", async () => {
+function roles(entries: readonly StoredEntry[]): string[] {
+  return messages(entries).map((entry) => (entry.message as { role: string }).role);
+}
+
+test("端到端：失败自动分叉重试一次跑通，来源与分支两个会话文件的消息、Run 起止、快照、验证、分叉齐全", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const result = await runHeadless({
@@ -121,46 +128,53 @@ test("双写端到端：失败自动分叉重试一次跑通，来源与分支�
     });
     assert.equal(result.retries?.[0]?.label, "Passed");
     const sessionsDir = join(dir, ".pigeon", "sessions");
-    const old = materializeSession(sessionsDir, result.sessionId);
     const source = viewOf(sessionsDir, result.sessionId);
     assert.equal(source.header.cwd, dir);
-    const runId = old.runStarteds[0]?.runId;
+    const starts = customs<RunStartData>(source.entries, SessionEntryType.RunStart);
+    assert.equal(starts.length, 1);
+    const runId = starts[0]?.runId;
     assert.ok(runId !== undefined);
 
-    // 消息：与旧账本同数同序同角色
+    // 消息：任务、改文件、工具结果、收尾回复，同序同角色
     const sourceMessages = messages(source.entries);
-    assert.deepEqual(
-      sourceMessages.map((entry) => (entry.message as { role: string }).role),
-      old.entries.map((entry) => entry.role)
-    );
+    assert.deepEqual(roles(source.entries), ["user", "assistant", "toolResult", "assistant"]);
     // Run 起止：开始在前、收尾在后，收尾为正常完成
-    const [start] = customs<{ runId: string }>(source.entries, SessionEntryType.RunStart);
-    assert.equal(start?.runId, runId);
     assert.equal(source.entries[0]?.customType, SessionEntryType.RunStart);
-    const [end] = customs<RunEndData>(source.entries, SessionEntryType.RunEnd);
-    assert.equal(end?.ending, "completed");
-    assert.equal(end?.messageCount, old.entries.length);
-    // 代码快照：与旧记录同一次提交，位于发起调用的助手消息之后、工具结果之前
-    const [checkpoint] = customs<{ commit: string; toolCallId: string }>(
-      source.entries,
-      SessionEntryType.Checkpoint
+    const ends = customs<RunEndData>(source.entries, SessionEntryType.RunEnd);
+    assert.deepEqual(
+      ends.map((data) => [data.runId, data.ending, data.messageCount]),
+      [[runId, "completed", 4]]
     );
-    assert.equal(checkpoint?.commit, old.checkpoints[0]?.payload.commit);
+    // 代码快照：那一次改动的提交，位于发起调用的助手消息之后、工具结果之前
+    const checkpoints = customs<CheckpointData>(source.entries, SessionEntryType.Checkpoint);
+    assert.equal(checkpoints.length, 1);
+    const checkpoint = checkpoints[0];
+    assert.ok(checkpoint !== undefined);
+    assert.equal(git(dir, ["show", `${checkpoint.commit}:a.txt`]), "wrong\n");
     const checkpointAt = source.entries.findIndex(
       (entry) => entry.customType === SessionEntryType.Checkpoint
     );
     assert.equal(
+      (source.entries[checkpointAt - 1]?.message as { role?: string } | undefined)?.role,
+      "assistant"
+    );
+    assert.equal(
       (source.entries[checkpointAt + 1]?.message as { toolCallId?: string } | undefined)
         ?.toolCallId,
-      checkpoint?.toolCallId
+      checkpoint.toolCallId
     );
-    // 收尾后补写的验证记录（运行面已释放，按会话号重新打开新文件）
-    const [verification] = customs<VerificationData>(source.entries, SessionEntryType.Verification);
+    // 收尾后补写的验证记录（运行面已释放，按会话号重新打开会话文件）
+    const verifications = customs<VerificationData>(source.entries, SessionEntryType.Verification);
+    assert.equal(verifications.length, 1);
+    const verification = verifications[0];
     assert.equal(verification?.verdict, "fail");
-    assert.equal(verification?.outputHash, old.attemptVerifieds[0]?.outputHash);
+    assert.equal(verification?.exitCode, 1);
+    assert.equal(verification?.workspace, dir);
     assert.deepEqual(verification?.target, { sessionId: result.sessionId, runId });
     // 分叉条目：分叉点对应本文件里该 Run 的第 1 条消息
-    const [fork] = customs<ForkData>(source.entries, SessionEntryType.Fork);
+    const forks = customs<ForkData>(source.entries, SessionEntryType.Fork);
+    assert.equal(forks.length, 1);
+    const fork = forks[0];
     const branchId = result.retries?.[0]?.branchSessionId;
     assert.equal(fork?.branchSessionId, branchId);
     assert.equal(fork?.trigger, "retry-on-fail");
@@ -178,8 +192,8 @@ test("双写端到端：失败自动分叉重试一次跑通，来源与分支�
       [source.entries[0]?.id, sourceMessages[0]?.id],
       "复制来源的 Run 开始与任务消息"
     );
-    const branchOld = materializeSession(sessionsDir, branchId);
-    assert.equal(messages(branchPath).length, 1 + branchOld.entries.length);
+    // 复制来的任务消息之后是分支自己的一次改文件、工具结果与收尾回复
+    assert.deepEqual(roles(branchPath), ["user", "assistant", "toolResult", "assistant"]);
     assert.deepEqual(
       customs<RunEndData>(branchPath, SessionEntryType.RunEnd).map((data) => data.ending),
       ["completed"]
@@ -193,7 +207,7 @@ test("双写端到端：失败自动分叉重试一次跑通，来源与分支�
   }
 });
 
-test("双写：手动分叉时来源写者在本进程，先落盘再分叉；分叉条目与分支文件照写", async () => {
+test("手动分叉时来源写者在本进程，先落盘再分叉；分叉条目与分支文件照写", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const sourceId = newSessionId();
@@ -213,7 +227,6 @@ test("双写：手动分叉时来源写者在本进程，先落盘再分叉；�
       const branch = await runForkBranch({
         governanceRoot: dir,
         sourceSessionId: sourceId,
-        sourceLog: opened.bundle.eventLog,
         sourceStore: opened.bundle.sessionStore,
         forkPoint: { runId: run.runId, runSeq: 3 },
         trigger: "manual",
@@ -239,7 +252,7 @@ test("双写：手动分叉时来源写者在本进程，先落盘再分叉；�
     assert.equal(
       customs<VerificationData>(source.entries, SessionEntryType.Verification).length,
       1,
-      "运行面挂的验证同时写进新存储"
+      "运行面挂的验证写进会话存储"
     );
     const branch = viewOf(sessionsDir, branchId);
     const path = branchEntries(branch, branch.lanes.get("main") ?? null);
@@ -255,7 +268,7 @@ test("双写：手动分叉时来源写者在本进程，先落盘再分叉；�
   }
 });
 
-test("双写：撞轮数上限的 Run 收尾条目记轮数上限（原因随中止请求交给运行面）", async () => {
+test("撞轮数上限的 Run 收尾条目记轮数上限（原因随中止请求交给运行面）", async () => {
   const { dir, home, cleanup } = repo();
   try {
     const result = await runHeadless({
@@ -279,8 +292,8 @@ test("双写：撞轮数上限的 Run 收尾条目记轮数上限（原因随中
   }
 });
 
-test("双写：授权建立与撤销先写旧账本再写新存储；worker 会话的来历写进新文件头", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-dual-grant-"));
+test("授权建立与撤销写进会话存储；worker 会话的来历写进文件头", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-store-grant-"));
   try {
     const sessionId = newSessionId();
     const parentRunId = asRunId("run_01J5Z7K8W9ABCDEFGHJKMNPQRS");
@@ -310,15 +323,20 @@ test("双写：授权建立与撤销先写旧账本再写新存储；worker 会�
     bundle.grantStore.revoke(grant.grantId);
     await disposeRuntime(bundle);
     const view = viewOf(join(root, ".pigeon", "sessions"), sessionId);
+    const grants = customs<GrantData>(view.entries, SessionEntryType.Grant);
     assert.deepEqual(
-      customs<{ event: string; grantId: string }>(view.entries, SessionEntryType.Grant).map(
-        (data) => [data.event, data.grantId]
-      ),
+      grants.map((data) => [data.event, data.grantId]),
       [
         ["created", grant.grantId],
         ["revoked", grant.grantId],
       ]
     );
+    const created = grants[0];
+    assert.ok(created?.event === "created");
+    assert.equal(created.tool, "edit_file");
+    assert.equal(created.pathPrefix, "src");
+    // 值为 undefined 的键在写入前剥掉
+    assert.deepEqual(created.firstCall, { toolCallId: "tc-1", args: { path: "src/a.ts" } });
     const header = view.header.metadata?.pigeon as {
       worker?: { name: string; parentRunId?: string };
     };
@@ -330,30 +348,34 @@ test("双写：授权建立与撤销先写旧账本再写新存储；worker 会�
   }
 });
 
-test("转接：旧账本写不进时抛出且新存储不写（授权不生效、worker 不派）；写进之后新存储照写", () => {
+test("转接：授权与 worker 两族的落盘口把输入转成会话存储条目；无读者的字段不写", () => {
   const written: SessionCustomEntry[] = [];
   const store = { append: (entry: SessionCustomEntry) => written.push(entry) };
-  const failing = {
-    appendGrantCreated: () => {
-      throw new Error("盘满");
-    },
-    appendGrantRevoked: () => {
-      throw new Error("盘满");
-    },
-    appendChildSpawned: () => {
-      throw new Error("盘满");
-    },
-    appendChildSettled: () => {
-      throw new Error("盘满");
-    },
-  };
   const grantInput = {
     grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS" as never,
     tool: "edit_file",
     createdAt: 1,
     firstCall: { toolCallId: "tc", args: {} },
   };
-  assert.throws(() => teeGrantEvents(failing, store).appendGrantCreated(grantInput), /盘满/);
+  const grants = grantEventSink(store);
+  grants.appendGrantCreated(grantInput);
+  grants.appendGrantRevoked({ grantId: grantInput.grantId, revokedAt: 2 });
+  assert.deepEqual(
+    written.map((entry) => [entry.customType, (entry.data as GrantData).event]),
+    [
+      [SessionEntryType.Grant, "created"],
+      [SessionEntryType.Grant, "revoked"],
+    ]
+  );
+  assert.deepEqual(written[0]?.data, {
+    version: 1,
+    event: "created",
+    grantId: grantInput.grantId,
+    tool: "edit_file",
+    firstCall: { toolCallId: "tc", args: {} },
+    createdAt: 1,
+  });
+  written.length = 0;
   const spawned = {
     childSessionId: newSessionId(),
     name: "tester-1",
@@ -365,24 +387,15 @@ test("转接：旧账本写不进时抛出且新存储不写（授权不生效�
     workspace: { kind: "none" as const },
     spawnedAt: 1,
   };
-  assert.throws(() => teeChildFamilies(failing, store).appendChildSpawned(spawned), /盘满/);
-  assert.equal(written.length, 0);
-  const ok = {
-    appendGrantCreated: () => "g",
-    appendGrantRevoked: () => "r",
-    appendChildSpawned: () => "s",
-    appendChildSettled: () => "t",
-  };
-  assert.equal(teeGrantEvents(ok, store).appendGrantCreated(grantInput), "g");
-  assert.equal(teeChildFamilies(ok, store).appendChildSpawned(spawned), "s");
-  teeChildFamilies(ok, store).appendChildSettled({
+  const family = childFamilySink(store);
+  family.appendChildSpawned(spawned);
+  family.appendChildSettled({
     childSessionId: spawned.childSessionId,
     name: "tester-1",
     status: "completed",
     result: {
       branch: "b",
       changedFiles: ["a"],
-      receiptIds: [],
       summary: "好",
       summaryTruncated: false,
       structured: { x: 1 },
@@ -391,6 +404,7 @@ test("转接：旧账本写不进时抛出且新存储不写（授权不生效�
     settledAt: 3,
   });
   const worker = written.filter((entry) => entry.customType === SessionEntryType.Worker);
+  assert.equal(worker.length, written.length);
   assert.deepEqual(
     worker.map((entry) => (entry.data as WorkerData).event),
     ["spawned", "settled"]
@@ -407,12 +421,12 @@ test("转接：旧账本写不进时抛出且新存储不写（授权不生效�
   );
 });
 
-test("双写：新存储建不起文件时向标准错误输出告警一次，运行照常完成，旧账本照写", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-dual-fault-"));
+test("会话存储建不起文件时向标准错误输出告警一次，运行照常完成", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-store-fault-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
     mkdirSync(sessionsDir, { recursive: true });
-    // 新存储要建的子目录位置被一个普通文件占着
+    // 会话存储要建的子目录位置被一个普通文件占着
     writeFileSync(join(sessionsDir, sessionDirectoryName(root)), "占位");
     const warnings: string[] = [];
     const sessionId = newSessionId();
@@ -434,34 +448,22 @@ test("双写：新存储建不起文件时向标准错误输出告警一次，�
     assert.equal(warnings.length, 1, warnings.join("\n"));
     assert.match(
       warnings[0] ?? "",
-      /新会话存储告警：新会话存储打开失败.*旧账本照常写入，运行不受影响/
+      /^会话存储告警：新会话存储打开失败.*（会话记录缺这一条，运行不受影响）$/
     );
-    const old = materializeSession(sessionsDir, sessionId);
-    assert.equal(old.entries.length, 4);
-    assert.equal(old.unfinishedRuns.length, 0);
     assert.equal(locateSessionFile(sessionsDir, sessionId), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("双写：双写之前就存在的旧会话（旧账本已有记录、新存储没有文件）续跑时不在新存储里建文件，只写旧账本、不告警", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-dual-legacy-"));
+test("会话根下有同号的旧格式平铺文件：新存储照常新建自己的文件、不读也不改旧文件，不告警", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-store-legacy-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const sessionId = newSessionId();
-    // 双写之前的会话：只有旧账本
-    const legacy = new JsonlEventLog(sessionsDir, sessionId);
-    legacy.appendBreaker({
-      toolName: "edit_file",
-      toolCallId: "tc-old",
-      scope: "tool",
-      count: 3,
-      threshold: 3,
-      at: 1,
-      runId: asRunId("run_01J5Z7K8W9ABCDEFGHJKMNPQRS"),
-    });
-    legacy.close();
+    // 迁移之前创建的会话：会话根下只有平铺的旧格式文件
+    const sessionId = writeLegacySessionFile(sessionsDir, newSessionId());
+    const legacyPath = join(sessionsDir, `${sessionId}.jsonl`);
+    const legacyBefore = readFileSync(legacyPath, "utf8");
     const warnings: string[] = [];
     const bundle = buildRuntime({
       streamFn: createFakeStreamFn({ replies: [{ text: "接着干" }] }),
@@ -477,11 +479,22 @@ test("双写：双写之前就存在的旧会话（旧账本已有记录、新�
     bundle.grantStore.create({ tool: "edit_file", firstCall: { toolCallId: "tc", args: {} } });
     await disposeRuntime(bundle);
     assert.equal(run.status, "completed");
-    assert.equal(locateSessionFile(sessionsDir, sessionId), undefined, "新存储里没有这个会话");
     assert.deepEqual(warnings, []);
-    const old = materializeSession(sessionsDir, sessionId);
-    assert.equal(old.entries.length, 2, "旧账本照写");
-    assert.equal(old.grantCreateds.length, 1);
+    assert.equal(readFileSync(legacyPath, "utf8"), legacyBefore, "旧格式文件原样不动");
+    const located = locateSessionFile(sessionsDir, sessionId);
+    assert.ok(located !== undefined, "新存储建了自己的会话文件");
+    assert.notEqual(located.path, legacyPath);
+    const view = viewOf(sessionsDir, sessionId);
+    assert.deepEqual(
+      roles(view.entries),
+      ["user", "assistant"],
+      "只有这次的消息，不带旧文件的内容"
+    );
+    assert.equal(customs<RunStartData>(view.entries, SessionEntryType.RunStart).length, 1);
+    assert.deepEqual(
+      customs<GrantData>(view.entries, SessionEntryType.Grant).map((data) => data.event),
+      ["created"]
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

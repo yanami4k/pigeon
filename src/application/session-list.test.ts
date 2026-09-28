@@ -1,5 +1,5 @@
 // M4 S5：session list 命令层测试（D5：列表默认安静）。M2 S4：命令层自 cli/session.ts 归位 application/session-list.ts。
-// 读新会话存储：覆盖安静行、从旧到新的顺序、过滤器（工具、Run 级失败分类、时间）、双写之前的旧会话只给计数提示。
+// 读新会话存储：覆盖安静行、从旧到新的顺序、过滤器（工具、Run 级失败分类、时间）、旧格式会话只给计数提示。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -94,16 +94,16 @@ test("session list：过滤器透传（tool / class / since / until）与空目�
   }
 });
 
-test("session list：双写之前的旧会话（只在旧账本里）不列出，末尾给一行计数提示", async () => {
+test("session list：旧格式会话（会话根下平铺的 sess_<ULID>.jsonl）不列出，末尾给一行计数提示", async () => {
   const { root, sessionsDir, cleanup } = makeRoot();
   try {
     await seed(sessionsDir, SECOND, (s) => s.startRun({ task: "a" }));
-    // 双写期间的会话在旧账本里也有事件文件，不算旧会话；只在旧账本里的才算
+    // 新存储里有同号文件的平铺文件不算旧格式会话；旁置文件名不合 sess_<ULID>.jsonl 的也不算
     writeFileSync(join(sessionsDir, `${SECOND}.jsonl`), "");
     writeFileSync(join(sessionsDir, `${FIRST}.jsonl`), "");
     writeFileSync(join(sessionsDir, `${FIRST}.messages.jsonl`), "");
     const notice =
-      "另有 1 个会话创建于新会话存储启用之前，只在旧账本里，这里不列出（用迁移前的只读旧版查看）";
+      "另有 1 个旧格式会话（迁移之前创建）未列出；旧格式会话请用只读的旧版代码 455d88d 读取";
     assert.equal(
       runSessionListCommand({ root }),
       `${minute(SECOND)}  1 个 Run  ${SECOND}\n${notice}\n`

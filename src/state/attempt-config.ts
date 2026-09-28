@@ -1,5 +1,5 @@
 // 尝试级配置（M7，决策 071 / 079；M8，决策 081 / 087）：会话级验证命令、失败自动分叉重试次数与本次尝试的预算。
-// 三者在会话开始时冻结进注入快照，随 run.started 落盘，事后可证每次尝试用的是哪条验证命令、允许重试几次、
+// 三者在会话开始时冻结进注入快照，随 Run 开始条目 落盘，事后可证每次尝试用的是哪条验证命令、允许重试几次、
 // 拿的是多大预算。Eval 沿用 task.json 的验证器，不走验证命令这条路。
 // 本模块只放 schema；项目级配置文件的读取在 persistence/verify-config.ts，来源优先级在 application/launch-flags.ts。
 import { type Static, Type } from "typebox";
@@ -34,12 +34,12 @@ export type VerifyConfig = Static<typeof VerifyConfigSchema>;
 export const RetryOnFailSchema = Type.Integer({ minimum: 0 });
 
 // 回炉轮数（决策 142 / 143）：验证不过就在同一会话里接着修，最多修这么多轮。只在开启时冻结（至少 1）；
-// 缺省即关闭，快照与 run.started 都不带
+// 缺省即关闭，快照与 Run 开始条目 都不带
 export const RepairRoundsSchema = Type.Integer({ minimum: 1 });
 
 // 本次尝试的预算（M8，决策 087）：回放必须沿用被验证那次尝试的预算，不得放宽——预算因此必须在账本里可得。
 // 四项均可缺省：缺省即"该项不设限"，回放沿用同样的不设限，不是放宽。
-// maxOutputTokens 与模型标识一起记在 run.started 的 model 段，不重复进本块。
+// maxOutputTokens 与模型标识一起记在 Run 开始条目 的 model 段，不重复进本块。
 export const AttemptBudgetSchema = Type.Object({
   maxTurns: Type.Optional(Type.Integer({ minimum: 1 })),
   wallClockMs: Type.Optional(Type.Integer({ minimum: 1 })),

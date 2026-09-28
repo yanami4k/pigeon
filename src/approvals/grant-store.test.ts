@@ -1,12 +1,12 @@
-// 会话 grant 存储测试（M4 S6 决策 3 + 3b）：创建写 grant.created、匹配、命中计数只在放行
-// 生效后记、撤销写 grant.revoked 并立即停匹配、冷恢复种子生效。
+// 会话 grant 存储测试（M4 S6 决策 3 + 3b）：创建交落盘口写授权建立、匹配、命中计数只在放行
+// 生效后记、撤销交落盘口写授权撤销并立即停匹配、冷恢复种子生效。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { ActiveGrant } from "../state/grants.ts";
 import { newGrantId } from "../state/ids.ts";
-import type { ActiveGrant } from "../state/materialize.ts";
 import { SessionGrantStore } from "./grant-store.ts";
 
 function makeWorkspace(files: Record<string, string> = {}): {
@@ -24,7 +24,7 @@ function makeWorkspace(files: Record<string, string> = {}): {
 
 // ---- 会话 grant 存储 ----
 
-test("会话 grant：创建写 grant.created 事件；工具级与目录限定匹配；命中计数只在放行生效后记", () => {
+test("会话 grant：创建交落盘口写授权建立；工具级与目录限定匹配；命中计数只在放行生效后记", () => {
   const { root, cleanup } = makeWorkspace({ "src/a.ts": "a", "lib/b.ts": "b" });
   try {
     const events: Array<Record<string, unknown>> = [];
@@ -36,7 +36,7 @@ test("会话 grant：创建写 grant.created 事件；工具级与目录限定�
         events.push(input);
       },
     };
-    const store = new SessionGrantStore({ workspaceRoot: root, eventLog: sink });
+    const store = new SessionGrantStore({ workspaceRoot: root, sink });
     const grant = store.create({
       tool: "edit_file",
       pathPrefix: "src",
@@ -67,7 +67,7 @@ test("会话 grant：创建写 grant.created 事件；工具级与目录限定�
   }
 });
 
-test("会话 grant：撤销立即停匹配并写 grant.revoked；未知 id 响亮报错；恢复种子冷启动生效", () => {
+test("会话 grant：撤销立即停匹配并交落盘口写授权撤销；未知 id 响亮报错；恢复种子冷启动生效", () => {
   const { root, cleanup } = makeWorkspace({ "a.ts": "a" });
   try {
     const events: Array<Record<string, unknown>> = [];
@@ -79,7 +79,7 @@ test("会话 grant：撤销立即停匹配并写 grant.revoked；未知 id 响�
         events.push(input);
       },
     };
-    const store = new SessionGrantStore({ workspaceRoot: root, eventLog: sink });
+    const store = new SessionGrantStore({ workspaceRoot: root, sink });
     const grant = store.create({
       tool: "edit_file",
       firstCall: { toolCallId: "toolu_01ABC", args: { path: "a.ts" } },
@@ -89,7 +89,7 @@ test("会话 grant：撤销立即停匹配并写 grant.revoked；未知 id 响�
     assert.equal(events.filter((event) => "revokedAt" in event).length, 1);
     assert.throws(() => store.revoke(grant.grantId), /不存在/);
 
-    // 冷恢复种子（决策 3b）：从物化态还原的 grant 直接生效，无需重写事件
+    // 冷恢复种子（决策 3b）：从会话存储还原的 grant 直接生效，无需重写授权条目
     const restored: ActiveGrant = {
       grantId: newGrantId(),
       tool: "edit_file",

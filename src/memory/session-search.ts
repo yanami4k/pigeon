@@ -3,11 +3,10 @@
 // 子串匹配、多词为与、不接受正则（模型给正则是 ReDoS 面，元字符一律按字面）；对外只暴露命中流
 // 接口，将来换成索引或语义检索时换实现不换调用方（查询是结构化对象、命中预留 score）。
 // 命中只是线索（§3.3）：结论须经 read_session_entry 回查原文。
-// 分支会话文件开头从来源复制来的历史不重复产出命中（它属于来源会话）。双写期间旧账本里已没有事件文件的会话
-// （跑批器作废重做时移走了旧格式文件）不检索，见 persistence/session-catalog.ts 的 hasLegacyEventFile。
+// 分支会话文件开头从来源复制来的历史不重复产出命中（它属于来源会话）。跑批器作废重做时把作废尝试的会话文件移出会话根，
+// 检索自然看不到它们。
 // 无状态、无索引、无后台：扫描结果不落盘（015 派生不落库）。
 import {
-  hasLegacyEventFile,
   listSessionRefs,
   readSessionView,
   sessionRefTime,
@@ -157,9 +156,6 @@ async function* scanSessions(
   let emitted = 0;
   // 从新到旧（会话创建时间序）
   for (const ref of listSessionRefs(sessionsDir).reverse()) {
-    if (!hasLegacyEventFile(sessionsDir, ref.sessionId)) {
-      continue;
-    }
     const createdAt = sessionRefTime(ref);
     if (filters.since !== undefined && createdAt < filters.since) {
       continue;

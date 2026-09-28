@@ -1,20 +1,33 @@
 // headless 运行入口（M6.5 S1，决策 056）：无父会话装出完整运行面跑到收尾，返回结构化结果；
-// 无审批通道时 prompt 模式 fail-closed（006 既有）；需审批次数从回执反推；skillRoots / memoryRoots 显式指定时
+// 无审批通道时 prompt 模式 fail-closed（006 既有）；需审批次数从会话存储现算；skillRoots / memoryRoots 显式指定时
 // 只用给定的根（不扫治理根与用户级目录）。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { newRunId, newSessionId } from "../state/ids.ts";
-import { attemptOutcomeFacts, labelAttempt } from "../state/outcome-label.ts";
+import { newSessionId } from "../state/ids.ts";
+import {
+  FAIL_CLOSED_APPROVAL_REASON,
+  type StoreSessionView,
+  storeAttemptLabel,
+  toolResultMark,
+} from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { runHeadless } from "./headless.ts";
+import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 const ORIGINAL = "alpha\nbeta\ngamma\n";
+
+// 读新会话存储里的会话视图（会话必须存在）
+function storeView(root: string, sessionId: string): StoreSessionView {
+  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
+  return loaded.view;
+}
 
 function makeWorkspace(): { root: string; home: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-headless-"));
@@ -46,7 +59,7 @@ function readThenEdit() {
   });
 }
 
-test("headless：yolo 下跑到收尾，结构化结果齐全；需审批次数只计 write / exec 档（read 不计）；不写 session.header", async () => {
+test("headless：yolo 下跑到收尾，结构化结果齐全；需审批次数只计 write / exec 档（read 不计）；不写 worker 来历", async () => {
   const { root, home, cleanup } = makeWorkspace();
   try {
     const result = await runHeadless({
@@ -68,17 +81,18 @@ test("headless：yolo 下跑到收尾，结构化结果齐全；需审批次数�
     assert.ok(result.durationMs >= 0);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
 
-    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
-    assert.equal(session.sessionHeader, undefined, "headless 会话是普通会话，不写 worker 会话头");
-    assert.equal(session.runStarteds.length, 1);
-    assert.equal(result.runId, session.runStarteds[0]?.runId);
-    assert.equal(session.runStarteds[0]?.payload.policy.approvalMode, "yolo");
+    const view = storeView(root, result.sessionId);
+    assert.equal(view.metadata, undefined, "headless 会话是普通会话，文件头不写 worker 来历");
+    assert.equal(view.parentSessionId, undefined);
+    assert.equal(view.runs.length, 1);
+    assert.equal(result.runId, view.runs[0]?.runId);
+    assert.equal(view.runs[0]?.start.policy.approvalMode, "yolo");
   } finally {
     cleanup();
   }
 });
 
-test("headless：prompt 模式无审批通道一律 fail-closed——写调用落 decision（policy:deny 逐字理由），文件不变", async () => {
+test("headless：prompt 模式无审批通道一律 fail-closed——写调用的工具结果带审批闸拒绝标记（policy:deny 固定理由），文件不变", async () => {
   const { root, home, cleanup } = makeWorkspace();
   try {
     const result = await runHeadless({
@@ -94,12 +108,30 @@ test("headless：prompt 模式无审批通道一律 fail-closed——写调用�
     // 因无审批通道而拒绝的写调用正是"需要人来批"的一次（读档不计）
     assert.equal(result.approvalsNeeded, 1);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), ORIGINAL);
-    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
-    assert.equal(session.decisions.length, 1);
-    assert.equal(session.decisions[0]?.toolName, "edit_file");
-    assert.equal(session.decisions[0]?.decision.approvedBy, "policy:deny");
-    assert.match(session.decisions[0]?.decision.reason ?? "", /未配置审批通道（fail-closed）/);
-    assert.equal(session.intents.length, 0);
+    const view = storeView(root, result.sessionId);
+    const results = (view.runs[0]?.messages ?? [])
+      .map((ref) => ref.message)
+      .filter((message) => message.role === "toolResult");
+    assert.deepEqual(
+      results.map((message) => message.toolName),
+      ["read_file", "edit_file"]
+    );
+    const rejected = results[1];
+    assert.ok(rejected !== undefined);
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(toolResultMark(rejected)?.gate, {
+      outcome: "rejected",
+      approvedBy: "policy:deny",
+    });
+    const rejectedText = (rejected.content as Array<{ type: string; text?: string }>)
+      .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+      .join("");
+    assert.equal(rejectedText, FAIL_CLOSED_APPROVAL_REASON);
+    // 读档调用在 prompt 档自动放行
+    assert.deepEqual(toolResultMark(results[0] ?? { role: "none" })?.gate, {
+      outcome: "approved",
+      approvedBy: "policy:auto",
+    });
   } finally {
     cleanup();
   }
@@ -121,23 +153,23 @@ test("headless：轮次上限触发中止，终态 turn-limit", async () => {
     });
     assert.equal(result.status, "turn-limit");
     assert.ok(result.turns >= 2, String(result.turns));
-    // M7（决策 072）：撞上限写进本会话账本，标签由账本现算为失败
-    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
+    // M7（决策 072）：撞上限记在被中止那次 Run 的收尾条目的结束方式上，标签由此现算为失败
+    const view = storeView(root, result.sessionId);
     assert.deepEqual(
-      session.limitHits.map((record) => record.payload.limit),
+      view.runs.map((run) => run.end?.ending),
       ["turn-limit"]
     );
-    const limitRun = session.limitHits[0]?.runId;
-    assert.equal(limitRun, result.runId, "记录落在被中止的那次 Run 上");
+    const limitRun = view.runs[0]?.runId;
+    assert.equal(limitRun, result.runId, "结束方式落在被中止的那次 Run 上");
     assert.ok(limitRun !== undefined);
-    assert.equal(labelAttempt(attemptOutcomeFacts(session, limitRun)), "Failed");
+    assert.equal(storeAttemptLabel(view, limitRun), "Failed");
   } finally {
     cleanup();
   }
 });
 
-// 072 修订：只有运行确实因上限被中止才写撞上限记录；恰好用满最后一轮、自然收尾的运行不写
-test("headless：最后一轮恰好用满上限而自然收尾——终态 completed，不写撞上限记录，标签不判失败", async () => {
+// 072 修订：只有运行确实因上限被中止才记撞上限；恰好用满最后一轮、自然收尾的运行以正常完成收尾
+test("headless：最后一轮恰好用满上限而自然收尾——终态 completed，收尾条目为正常完成，标签不判失败", async () => {
   const { root, home, cleanup } = makeWorkspace();
   try {
     const result = await runHeadless({
@@ -151,11 +183,14 @@ test("headless：最后一轮恰好用满上限而自然收尾——终态 compl
     });
     assert.equal(result.status, "completed");
     assert.equal(result.turns, 1);
-    const session = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId);
-    assert.deepEqual(session.limitHits, []);
+    const view = storeView(root, result.sessionId);
+    assert.deepEqual(
+      view.runs.map((run) => run.end?.ending),
+      ["completed"]
+    );
     assert.ok(result.runId !== undefined);
     // 未配验证命令、正常完成 → 未知（072）；不因撞上限判失败
-    assert.equal(labelAttempt(attemptOutcomeFacts(session, result.runId)), "Unknown");
+    assert.equal(storeAttemptLabel(view, result.runId), "Unknown");
   } finally {
     cleanup();
   }
@@ -191,8 +226,7 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
       skillRoots: [],
       memoryRoots: [],
     });
-    const sessionsDir = join(root, ".pigeon", "sessions");
-    const noneStarted = materializeSession(sessionsDir, none.sessionId).runStarteds[0]?.payload;
+    const noneStarted = storeView(root, none.sessionId).runs[0]?.start;
     assert.deepEqual(noneStarted?.skills, []);
     assert.deepEqual(noneStarted?.memory, []);
     assert.equal(noneStarted?.advertisedTools.includes("load_skill"), false);
@@ -207,7 +241,7 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
       skillRoots: [{ path: candidate, label: "eval-skill/candidate" }],
       memoryRoots: [],
     });
-    const started = materializeSession(sessionsDir, withSkill.sessionId).runStarteds[0]?.payload;
+    const started = storeView(root, withSkill.sessionId).runs[0]?.start;
     assert.deepEqual(
       started?.skills.map((skill) => [skill.name, skill.path, skill.files.map((f) => f.path)]),
       [["pitfalls", "eval-skill/candidate", ["SKILL.md"]]]
@@ -219,7 +253,7 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
   }
 });
 
-test("headless：结果从新会话存储现算；双写之前的旧会话续跑（新存储里没有文件）过渡期回退旧账本读法", async () => {
+test("headless：结果从新会话存储现算；会话根下有同号旧格式平铺文件时新存储照常建自己的文件、不读旧文件", async () => {
   const { root, home, cleanup } = makeWorkspace();
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
@@ -241,17 +275,9 @@ test("headless：结果从新会话存储现算；双写之前的旧会话续跑
     assert.equal(fresh.toolCalls, 1);
     assert.equal(fresh.failure, null);
 
-    // 旧会话：旧账本里已有一个 Run，新存储里没有文件
-    const legacyId = newSessionId();
-    const legacyRun = newRunId();
-    const log = new JsonlEventLog(sessionsDir, legacyId);
-    log.appendEntry({
-      runSeq: 1,
-      role: "user",
-      runId: legacyRun,
-      message: { role: "user", content: "旧" },
-    });
-    log.close();
+    // 旧格式会话：会话根下只有迁移之前的平铺文件，新存储里没有文件
+    const legacyId = writeLegacySessionFile(sessionsDir, newSessionId());
+    const legacyPath = join(sessionsDir, `${legacyId}.jsonl`);
     const resumed = await runHeadless({
       task: "接着读",
       governanceRoot: root,
@@ -261,9 +287,15 @@ test("headless：结果从新会话存储现算；双写之前的旧会话续跑
       yolo: true,
       homeDir: home,
     });
-    assert.equal(locateSessionFile(sessionsDir, legacyId), undefined, "不为旧会话建新文件");
-    // 回退旧账本：新存储里没有这个会话，指标与标签照旧从旧账本算出（首个 Run 按旧读法取有开始记录的那个）
-    assert.ok(resumed.runId !== undefined && resumed.runId !== legacyRun);
+    // 新存储按会话号新建自己的文件；旧格式文件原样不动，指标只从新文件算
+    const created = locateSessionFile(sessionsDir, legacyId);
+    assert.ok(created !== undefined, "新存储照常建自己的会话文件");
+    assert.notEqual(created.path, legacyPath);
+    assert.ok(existsSync(legacyPath));
+    assert.equal(readFileSync(legacyPath, "utf8"), '{"legacy":true}\n', "旧格式文件不被改写");
+    const view = storeView(root, legacyId);
+    assert.equal(view.runs.length, 1);
+    assert.equal(resumed.runId, view.runs[0]?.runId);
     assert.equal(resumed.turns, 1);
     assert.equal(resumed.failure, null);
     assert.equal(resumed.label, "Unknown");

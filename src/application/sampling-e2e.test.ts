@@ -1,16 +1,23 @@
-// 采样温度固定并冻结进快照（M9）：给了温度，每一次模型调用的选项里都带它，注入快照与 run.started 记下同一个值；
-// 不给则调用选项里没有这个键、账本里也没有这个字段——既有运行逐字不变。
+// 采样温度固定并冻结进快照（M9）：给了温度，每一次模型调用的选项里都带它，注入快照与会话存储的 Run 开始条目
+// 记下同一个值；不给则调用选项里没有这个键、Run 开始条目里也没有这个字段——既有运行逐字不变。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { runHeadless } from "./headless.ts";
 import { parseLaunchFlags } from "./launch-flags.ts";
+
+// 会话存储里本会话第一个 Run 开始条目的模型摘要
+function startedModel(sessionsDir: string, sessionId: string) {
+  const model = loadStoreSession(sessionsDir, sessionId)?.view.runs[0]?.start.model;
+  assert.ok(model !== undefined, "会话存储里应有 Run 开始条目");
+  return model;
+}
 
 function capturing(): { streamFn: StreamFn; seen: Array<Record<string, unknown>> } {
   const seen: Array<Record<string, unknown>> = [];
@@ -32,7 +39,7 @@ test("fixTemperature：把温度写进每次调用的选项；调用方自带的
   assert.deepEqual(seen[0], { maxTokens: 128, temperature: 0 });
 });
 
-test("headless：给了温度，调用选项、注入快照摘要（run.started）一致记下；不给则两处都没有这个键", async () => {
+test("headless：给了温度，调用选项、注入快照摘要（Run 开始条目）一致记下；不给则两处都没有这个键", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-sampling-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-sampling-home-"));
   try {
@@ -52,8 +59,7 @@ test("headless：给了温度，调用选项、注入快照摘要（run.started�
     assert.ok(fixed.seen.length > 0);
     assert.ok(fixed.seen.every((options) => options.temperature === 0));
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const started = materializeSession(sessionsDir, withTemperature.sessionId).runStarteds[0];
-    assert.equal(started?.payload.model.temperature, 0);
+    assert.equal(startedModel(sessionsDir, withTemperature.sessionId).temperature, 0);
 
     const plain = capturing();
     const without = await runHeadless({
@@ -67,9 +73,7 @@ test("headless：给了温度，调用选项、注入快照摘要（run.started�
       memoryRoots: [],
     });
     assert.ok(plain.seen.every((options) => !("temperature" in options)));
-    const plainStarted = materializeSession(sessionsDir, without.sessionId).runStarteds[0];
-    assert.ok(plainStarted !== undefined);
-    assert.equal("temperature" in plainStarted.payload.model, false);
+    assert.equal("temperature" in startedModel(sessionsDir, without.sessionId), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -96,7 +100,7 @@ test("--temperature：只有用它的入口接受（接受时 0 到 2，非法�
   );
 });
 
-test("推理开启时温度不生效：调用选项里不带温度，账本如实记「未生效」与请求值，不记成温度 0", async () => {
+test("推理开启时温度不生效：调用选项里不带温度，Run 开始条目如实记「未生效」与请求值，不记成温度 0", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-sampling-reason-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-sampling-reason-home-"));
   try {
@@ -116,9 +120,7 @@ test("推理开启时温度不生效：调用选项里不带温度，账本如�
     assert.equal(result.status, "completed");
     assert.ok(run.seen.length > 0);
     assert.ok(run.seen.every((options) => !("temperature" in options)));
-    const model = materializeSession(join(root, ".pigeon", "sessions"), result.sessionId)
-      .runStarteds[0]?.payload.model;
-    assert.ok(model !== undefined);
+    const model = startedModel(join(root, ".pigeon", "sessions"), result.sessionId);
     assert.equal("temperature" in model, false);
     assert.deepEqual(model.temperatureIgnored, { requested: 0, reason: "reasoning-enabled" });
   } finally {

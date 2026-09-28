@@ -11,6 +11,9 @@ import {
   RetryOnFailSchema,
   VerifyConfigSchema,
 } from "./attempt-config.ts";
+import { Sha256HexSchema } from "./hashing.ts";
+import { GrantIdSchema, RunIdSchema, SessionIdSchema } from "./ids.ts";
+import { EvalVerdictSchema, GitObjectIdSchema, RunStartedPayloadSchema } from "./runtime-events.ts";
 import {
   CheckpointRefSchema,
   ChildSettledStatusSchema,
@@ -21,10 +24,7 @@ import {
   WorkerLimitsSchema,
   WorkerRoleSchema,
   WorkerWorkspaceSchema,
-} from "./event-log.ts";
-import { GrantIdSchema, RunIdSchema, SessionIdSchema } from "./ids.ts";
-import { Sha256HexSchema } from "./message-content.ts";
-import { EvalVerdictSchema, GitObjectIdSchema, RunStartedPayloadSchema } from "./runtime-events.ts";
+} from "./session-payloads.ts";
 import { VerifyStepResultSchema } from "./verify-steps.ts";
 
 // 七种自定义条目的 customType（加 pigeon. 前缀，与上游或其他应用写的 custom 条目区分）

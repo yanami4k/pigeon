@@ -3,13 +3,11 @@ import { test } from "node:test";
 import {
   asEntryId,
   asExecutionId,
-  asReceiptId,
   asRunId,
   asSessionId,
   monotonicUlid,
   newEntryId,
   newExecutionId,
-  newReceiptId,
   newRunId,
   newSessionId,
 } from "./ids.ts";
@@ -22,20 +20,18 @@ test("生成 1000 个 RunId 无重复", () => {
   assert.equal(ids.size, 1000);
 });
 
-test("五类标识各自生成且前缀互不相同", () => {
+test("四类标识各自生成且前缀互不相同", () => {
   assert.match(newRunId(), /^run_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.match(newSessionId(), /^sess_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.match(newEntryId(), /^entry_[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.match(newExecutionId(), /^exec_[0-9A-HJKMNP-TV-Z]{26}$/);
-  assert.match(newReceiptId(), /^rcpt_[0-9A-HJKMNP-TV-Z]{26}$/);
 });
 
 test("前缀错误时 as* 抛异常", () => {
   assert.throws(() => asRunId(newSessionId()));
   assert.throws(() => asSessionId(newRunId()));
   assert.throws(() => asEntryId(newExecutionId()));
-  assert.throws(() => asExecutionId(newReceiptId()));
-  assert.throws(() => asReceiptId(newEntryId()));
+  assert.throws(() => asExecutionId(newEntryId()));
 });
 
 test("形态非法时 as* 抛异常", () => {

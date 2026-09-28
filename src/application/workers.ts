@@ -23,22 +23,22 @@ import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
+import type { EventEnvelope } from "../state/events.ts";
+import type { SessionId } from "../state/ids.ts";
+import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
   BranchHeaderInput,
   DelegatedPolicy,
   SessionHeaderInput,
   WorkerLimits,
   WorkerRole,
-} from "../state/event-log.ts";
-import type { EventEnvelope } from "../state/events.ts";
-import type { SessionId } from "../state/ids.ts";
-import type { ThinkingLevel } from "../state/runtime-events.ts";
+} from "../state/session-payloads.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeBundle, type RuntimeDeps } from "./runtime.ts";
-import { teeChildFamilies } from "./session-store.ts";
+import { childFamilySink } from "./session-store.ts";
 
 export interface WorkerRuntimeDeps {
   // 每个 worker 的模型接入：生产传同一个无状态 streamFn，测试按 worker 给独立剧本
@@ -87,8 +87,8 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
       ...(deps.parentSessionId !== undefined ? { parentSessionId: deps.parentSessionId } : {}),
     },
     parentPolicy: deps.bundle.adapter.snapshot().tools.policy,
-    // 决策 206：父子两族先写旧账本、再写新存储
-    parentLog: teeChildFamilies(deps.bundle.eventLog, deps.bundle.sessionStore),
+    // worker 派出与收尾写进父会话的会话存储
+    parentLog: childFamilySink(deps.bundle.sessionStore),
     approvals: deps.approvals,
     createRuntime: sessionWorkerRuntimeFactory(deps),
   });
@@ -163,12 +163,10 @@ interface RuntimeSurface {
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
   repairRounds?: number;
-  // 这一步的起点（只有 headless 在容器工作区开启回炉时给），写进每个 Run 的 run.started
-  stepStart?: RuntimeDeps["stepStart"];
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
-  // 运行面装起来后的回调（挂快照与会话树写穿）
+  // 运行面装起来后的回调（挂快照器）
   onBundle?: (bundle: RuntimeBundle) => void;
 }
 
@@ -255,8 +253,6 @@ export interface DetachedRuntimeRequest {
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
   repairRounds?: number;
-  // 这一步的起点（只有 headless 在容器工作区开启回炉时给），写进每个 Run 的 run.started
-  stepStart?: RuntimeDeps["stepStart"];
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -306,7 +302,6 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
-    ...(surface.stepStart !== undefined ? { stepStart: surface.stepStart } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）
@@ -339,38 +334,22 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
   );
 }
 
-// 装配运行面；worker 另写会话头，写不进即关会话文件并上抛
+// 装配运行面；worker 与分支会话的来历只在新建会话文件时写进文件头（177），故随装配一并交给运行面
 function openBundle(
   header: SessionHeaderInput | undefined,
   runtimeDeps: RuntimeDeps,
   branchHeader?: BranchHeaderInput
 ): RuntimeBundle {
-  // 决策 206：新存储的会话来历只在新建会话文件时写进文件头，故随装配一并交给运行面
-  const lineage = {
-    ...(header !== undefined ? { worker: header } : {}),
-    ...(branchHeader !== undefined ? { branch: branchHeader } : {}),
-  };
-  const bundle = buildRuntime(
-    header !== undefined || branchHeader !== undefined
-      ? { ...runtimeDeps, storeLineage: lineage }
-      : runtimeDeps
-  );
   if (header === undefined && branchHeader === undefined) {
-    return bundle;
+    return buildRuntime(runtimeDeps);
   }
-  try {
-    if (header !== undefined) {
-      bundle.eventLog.appendSessionHeader(header);
-    }
-    // M7（决策 077）：分支会话文件的首条记录
-    if (branchHeader !== undefined) {
-      bundle.eventLog.appendBranchHeader(branchHeader);
-    }
-  } catch (error) {
-    bundle.eventLog.close();
-    throw error;
-  }
-  return bundle;
+  return buildRuntime({
+    ...runtimeDeps,
+    storeLineage: {
+      ...(header !== undefined ? { worker: header } : {}),
+      ...(branchHeader !== undefined ? { branch: branchHeader } : {}),
+    },
+  });
 }
 
 function summaryOf(bundle: RuntimeBundle): string {
@@ -392,7 +371,6 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     subscribe: (listener) => adapter.subscribe(listener),
     summary: () => summaryOf(bundle),
     structured: () => structuredResultOf(summaryOf(bundle)),
-    recordLimitHit: (limit, runId) => adapter.recordObservation("run.limit-hit", { limit }, runId),
     continueRun: () => adapter.continueRun(),
     dispose: () => disposeRuntime(bundle),
   };
@@ -441,8 +419,6 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
     },
     summary: () => (bundle !== undefined ? summaryOf(bundle) : ""),
     structured: () => (bundle !== undefined ? structuredResultOf(summaryOf(bundle)) : undefined),
-    recordLimitHit: (limit, runId) =>
-      bundle?.adapter.recordObservation("run.limit-hit", { limit }, runId),
     continueRun: async () => {
       const current = await settled;
       if (interruptedEarly) {

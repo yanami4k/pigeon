@@ -1,4 +1,4 @@
-// 稳定标识（ROADMAP §4 / M0）：Run、Session、Entry、Execution、Receipt 五类。
+// 稳定标识（ROADMAP §4 / M0）：Run、Session、Entry、Execution 四类（另有 Grant）。
 // 形态：`<前缀>_<26 位 Crockford Base32 ULID>`。
 // 品牌类型（branded type）保证编译期不可混用；as* 函数做运行期校验，供反序列化入口使用。
 import { randomBytes } from "node:crypto";
@@ -100,14 +100,7 @@ export const newExecutionId: () => ExecutionId = executionId.create;
 export const asExecutionId: (value: string) => ExecutionId = executionId.check;
 export const ExecutionIdSchema = executionId.schema;
 
-export type ReceiptId = string & { readonly __brand: "ReceiptId" };
-const receiptId = defineIdKind<ReceiptId>("rcpt_");
-export const newReceiptId: () => ReceiptId = receiptId.create;
-export const asReceiptId: (value: string) => ReceiptId = receiptId.check;
-export const ReceiptIdSchema = receiptId.schema;
-
-// GrantId（M4 S6，决策 3）：会话级工具放权的稳定标识；grant.created/grant.revoked
-// 事件族与 intent 的 grantRef 共用
+// GrantId（M4 S6，决策 3）：会话级工具放权的稳定标识；授权条目与审批决定的 grantRef 共用
 export type GrantId = string & { readonly __brand: "GrantId" };
 const grantId = defineIdKind<GrantId>("grant_");
 export const newGrantId: () => GrantId = grantId.create;

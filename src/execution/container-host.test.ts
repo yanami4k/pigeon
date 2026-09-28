@@ -265,10 +265,9 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
     await assert.rejects(host.resolveExisting("src/missing.txt"), WorkspacePathNotFoundError);
     // Windows 风格的宿主路径在容器里没有意义：按不存在处理，不做映射
     await assert.rejects(host.resolveExisting("C:\\work\\src\\a.txt"), WorkspacePathError);
-    assert.throws(() => host.readTextSync("../outside/secret.txt"), WorkspacePathError);
   });
 
-  test("读写往返：UTF-8、CRLF、无末尾换行与 1 MB 内容逐字节保真；同步读与异步读一致", async () => {
+  test("读写往返：UTF-8、CRLF、无末尾换行与 1 MB 内容逐字节保真", async () => {
     const target = await host.resolveExisting("src/a.txt");
     assert.equal(await host.isFile(target), true);
     assert.equal(await host.isFile(`${root}/src`), false);
@@ -283,7 +282,6 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
     for (const sample of samples) {
       await host.writeText(target, sample);
       assert.equal(await host.readText(target), sample);
-      assert.equal(host.readTextSync("src/a.txt"), sample);
     }
     await host.writeText(target, "one\ntwo\n");
   });

@@ -1,6 +1,6 @@
 // M4 S6（决策 3）审批提示四键测试：[y] 批准一次 / [n] 拒绝 / [a] 本会话允许（工具级 grant）
 // / [d] 本会话允许（仅限当前调用所在目录）——[d] 仅当调用带可解析 path 参数时提供。
-// 创建 grant 必须写 grant.created 事件（事件写盘失败 = grant 不生效，fail-closed）。
+// 创建 grant 必须先写成授权建立条目（落盘失败 = grant 不生效，fail-closed）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -98,12 +98,12 @@ test("[d] 创建目录限定 grant：pathPrefix = 调用所在目录；无 path 
   }
 });
 
-test("grant.created 事件写盘失败 = grant 不生效（fail-closed：免审授权必须留证后才存在）", async () => {
+test("授权建立条目写盘失败 = grant 不生效（fail-closed：免审授权必须留证后才存在）", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-approval-"));
   try {
     const store = new SessionGrantStore({
       workspaceRoot: root,
-      eventLog: {
+      sink: {
         appendGrantCreated: () => {
           throw new Error("磁盘故障");
         },
@@ -116,7 +116,7 @@ test("grant.created 事件写盘失败 = grant 不生效（fail-closed：免审�
       { grants: store }
     );
     await assert.rejects(() => handler(makeRequest()), /磁盘故障/);
-    assert.equal(store.list().length, 0, "事件未落盘的 grant 不得生效");
+    assert.equal(store.list().length, 0, "未落盘的 grant 不得生效");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 // M5 S2（决策 038）：两个 read 档工具——search_sessions（默认 20 条 + 总字节上限，超限提示收窄）
 // 与 read_session_entry（按条目号取一条消息的完整内容块）；读新会话存储（决策 185）。agent 可见的说明与输出冻结，
-// 这里逐字核对；经真实 Adapter 调用时只留 tool.proposed / tool.settled 事件级记录（read 档自动放行）。
+// 这里逐字核对；经真实 Adapter 调用时会话存储里只有这一次调用与它的工具结果（read 档自动放行，审批闸标记为策略放行）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,13 +11,13 @@ import {
   createFixtureSession,
   type FixtureSession,
 } from "../application/session-store-fixtures.ts";
-import { markLegacyEventFile } from "../application/session-view-fixtures.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import type { AgentMessage } from "../pi-runtime/index.ts";
 import { INJECTION_SNAPSHOT_VERSION } from "../pi-runtime/snapshot.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import {
   createReadSessionEntryTool,
@@ -49,7 +49,6 @@ async function seed(
   const session = createFixtureSession({ sessionsDir: dir, sessionId });
   write(session);
   await session.close();
-  markLegacyEventFile(dir, sessionId);
 }
 
 test("两个工具的说明逐字冻结：只去掉了治理记录与审批回执状态的字句", () => {
@@ -212,12 +211,17 @@ test("read_session_entry：完整原文不截断；找不到条目响亮报错�
     await assert.rejects(tool.execute("t3", { entryId, sessionId: other }), /未找到 entry/);
   }));
 
-test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 tool.proposed / tool.settled", () =>
+test("经真实 Adapter 调用 search_sessions：read 档自动放行，会话存储里只有这一次调用与它的工具结果", () =>
   withDir(async (dir) => {
     await seed(dir, (s) => s.startRun({ task: "上周部署过网关" }));
 
     const sessionId = newSessionId();
-    const eventLog = new JsonlEventLog(dir, sessionId);
+    // 运行面写入的消息收在内存里（不落进被检索的会话根，免得检索到本次运行自己）
+    const written: AgentMessage[] = [];
+    const sessionStore = {
+      appendMessage: (message: AgentMessage) => written.push(message),
+      append: () => undefined,
+    };
     const registry = new ToolRegistry();
     for (const registration of sessionToolRegistrations(dir)) {
       registry.register(registration);
@@ -257,26 +261,27 @@ test("经真实 Adapter 调用 search_sessions：read 档自动放行，只留 t
         },
       ],
       sessionId,
-      eventLog,
+      sessionStore,
     });
     const result = await adapter.run("我们以前部署过什么");
     assert.equal(result.status, "completed");
     await adapter.dispose();
-    eventLog.close();
     assert.match(outputs[0] ?? "", /^命中 1 条/);
 
-    const materialized = materializeSession(dir, sessionId);
-    const kinds = materialized.runtimeEvents
-      .filter((event) => event.kind === "tool.proposed" || event.kind === "tool.settled")
-      .map((event) => [event.kind, (event.payload as { toolName: string }).toolName]);
-    assert.deepEqual(kinds, [
-      ["tool.proposed", SEARCH_SESSIONS_TOOL],
-      ["tool.settled", SEARCH_SESSIONS_TOOL],
-    ]);
-    const settled = materialized.runtimeEvents.find((event) => event.kind === "tool.settled");
-    assert.ok(settled?.kind === "tool.settled");
-    assert.equal(settled.payload.isError, false);
-    assert.equal(materialized.intents.length, 0);
-    assert.equal(materialized.decisions.length, 0);
+    // 工具调用只有一次、工具结果只有一条：都是 search_sessions，结果未出错，审批闸标记为策略自动放行
+    const calls = written.flatMap((message) =>
+      message.role === "assistant"
+        ? message.content.flatMap((block) => (block.type === "toolCall" ? [block.name] : []))
+        : []
+    );
+    assert.deepEqual(calls, [SEARCH_SESSIONS_TOOL]);
+    const results = written.filter((message) => message.role === "toolResult");
+    assert.deepEqual(
+      results.map((message) => [message.toolName, message.isError]),
+      [[SEARCH_SESSIONS_TOOL, false]]
+    );
+    assert.deepEqual(toolResultMark(results[0] as unknown as StoreMessage), {
+      gate: { outcome: "approved", approvedBy: "policy:auto" },
+    });
     assert.equal(result.toolExecutions[0]?.decision?.approvedBy, "policy:auto");
   }));

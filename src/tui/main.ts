@@ -95,7 +95,7 @@ async function main(argv: string[]): Promise<void> {
             spawnAttempts: createSessionAttemptRunner({
               orchestrator,
               governanceRoot: workspaceRoot,
-              hostLog: bundle.eventLog,
+              hostLog: { sessionId: bundle.adapter.sessionId },
               hostStore: bundle.sessionStore,
               ...(verify !== undefined ? { verify } : {}),
             }),
@@ -120,7 +120,7 @@ async function main(argv: string[]): Promise<void> {
     };
   };
   // 壳尚未接管终端：启动问题（单个 server 起不来不挡会话）与注解配置冲突（052）直接打到 stderr，
-  // 冷侧另见 run.started 的工具集摘要与 server 状态
+  // 冷侧另见 Run 开始条目 的工具集摘要与 server 状态
   const mainOpened = await openSessionRuntime({
     governanceRoot: workspaceRoot,
     sessionId,
@@ -159,14 +159,14 @@ async function main(argv: string[]): Promise<void> {
     // M5.5 S4：/spawn /cancel /workers
     workers: slot.workers,
     // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
-    // restoredGrants 种子（决策 3b，物化目标会话的生效 grant，静默继续有效）+
+    // restoredGrants 种子（决策 3b，还原目标会话的生效 grant，静默继续有效）+
     // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
     // 旧运行面不受影响，壳继续留在原会话
     resume: {
       root: workspaceRoot,
       rebind: async (targetId) => {
         // M5.5 S4：worker 会话回到它自己的工作树与委派策略（父会话或工作树缺失时响亮失败）；
-        // 决策 3b：固化 grant 种子物化。两者与 MCP 启动一并在 session-runtime.ts（与 cli resume 同一份）
+        // 决策 3b：会话 grant 种子还原。两者与 MCP 启动一并在 session-runtime.ts（与 cli resume 同一份）
         const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
           sessionId: targetId,

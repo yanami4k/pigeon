@@ -10,7 +10,7 @@ import {
   type CommandsConfigFile,
   CommandsConfigFileSchema,
 } from "../state/commands.ts";
-import { WorkerRoleSchema } from "../state/event-log.ts";
+import { WorkerRoleSchema } from "../state/session-payloads.ts";
 
 export class CommandsConfigError extends Error {}
 

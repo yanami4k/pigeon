@@ -4,7 +4,7 @@
 // policy:deny 记录 deny 清单的自动拒绝——策略拒绝不能伪装成人工或 yolo 决定。
 // spike S5：transcript/事件只记模型原始参数，"批准≠执行"上游不可自检，故 rawArgs 快照在此留证。
 import { type Static, Type } from "typebox";
-import { ExecutionIdSchema, newExecutionId, ReceiptIdSchema } from "./ids.ts";
+import { ExecutionIdSchema, newExecutionId } from "./ids.ts";
 
 export const TOOL_EXECUTION_VERSION = 1;
 
@@ -50,7 +50,7 @@ export const ToolExecutionDecisionSchema = Type.Object({
   // 理由来源（决策 066）：human = 人写（TUI [r] 拒绝并说明、CLI 输入了理由）；
   // system-default = 系统兜底文案（TUI [n] 单按拒绝、CLI 留空、策略自动拒绝）。
   // 006 把逐字拒绝理由定为负样本监督信号，来源字段让学习侧能把真实理由与兜底文案分开。
-  // 加法式可选字段，不升 Event Log 版本（口径同 052）：066 之前的记录无此字段
+  // 加法式可选字段（口径同 052）：066 之前的记录无此字段
   reasonSource: Type.Optional(Type.Union([Type.Literal("human"), Type.Literal("system-default")])),
   decidedAt: Type.Integer({ minimum: 0 }),
 });
@@ -82,8 +82,6 @@ export const ToolExecutionSchema = Type.Object({
   executionStartedAt: Type.Optional(Type.Integer({ minimum: 0 })),
   settledAt: Type.Optional(Type.Integer({ minimum: 0 })),
   verifiedAt: Type.Optional(Type.Integer({ minimum: 0 })),
-  // settled 后关联的执行 Receipt（M3 切片 5 账本）
-  receiptId: Type.Optional(ReceiptIdSchema),
 });
 export type ToolExecution = Static<typeof ToolExecutionSchema>;
 

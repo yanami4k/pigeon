@@ -24,7 +24,6 @@ export {
   gatewayStreamFn,
 } from "./gateway-stream.ts";
 export type {
-  EventLogSink,
   GovernanceHost,
   GovernanceRunOutcome,
   GovernanceVerdict,
@@ -38,9 +37,6 @@ export {
   INJECTION_SNAPSHOT_VERSION,
   type InjectionSnapshot,
   InjectionSnapshotSchema,
-  migrateInjectionSnapshotV1toV2,
-  migrateInjectionSnapshotV2toV3,
-  migrateInjectionSnapshotV3toV4,
   type ToolPolicy,
   ToolPolicySchema,
 } from "./snapshot.ts";

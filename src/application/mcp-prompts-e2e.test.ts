@@ -1,6 +1,6 @@
 // MCP prompts 与 roots 端到端（M5.7 S4，决策 043 / 054）：真实装配根 + 内存传输夹具 server + fake streamFn。
 // 会话开始时 server 的 prompts 经 getPrompt 取正文进 Skill Catalog（需要参数的不登记并记问题）；load_skill 读取后
-// 留 skill.loaded；run.started 的 Skill 清单含该 prompt；client 广告的 roots 是本会话工作区根。
+// 读取摘要随工具结果的 details 记进会话存储；Run 开始条目的 Skill 清单含该 prompt；client 广告的 roots 是本会话工作区根。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,10 +8,11 @@ import { basename, join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { createFixtureServer, type FixtureServer } from "../mcp/fixtures.ts";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { sha256Hex } from "../state/hashing.ts";
 import { newSessionId } from "../state/ids.ts";
-import { sha256Hex } from "../state/message-content.ts";
+import { TOOL_RESULT_MARK_KEY } from "../state/session-judge.ts";
 import { startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
@@ -91,9 +92,22 @@ test("MCP prompts 进 Skill Catalog 并可由 load_skill 读取留痕；需要�
     } finally {
       await disposeRuntime(bundle);
     }
-    const session = materializeSession(join(root, ".pigeon", "sessions"), sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    assert.ok(loaded !== undefined, "会话存储里应有本会话");
+    const run = loaded.view.runs[0];
+    // 读取摘要：load_skill 工具结果的 details（去掉运行面挂的审批闸标记）
+    const loads = (run?.messages ?? [])
+      .map((ref) => ref.message)
+      .filter((message) => message.role === "toolResult" && message.toolName === "load_skill");
     assert.deepEqual(
-      session.skillLoadeds.map((record) => record.payload),
+      loads.map((message) => {
+        assert.equal(message.isError, false);
+        const { [TOOL_RESULT_MARK_KEY]: _mark, ...summary } = (message.details ?? {}) as Record<
+          string,
+          unknown
+        >;
+        return summary;
+      }),
       [
         {
           name: "mcp__fx__greet",
@@ -104,7 +118,7 @@ test("MCP prompts 进 Skill Catalog 并可由 load_skill 读取留痕；需要�
         },
       ]
     );
-    assert.deepEqual(session.runStarteds[0]?.payload.skills, [
+    assert.deepEqual(run?.start.skills, [
       {
         name: "mcp__fx__greet",
         path: "mcp:fx/greet",

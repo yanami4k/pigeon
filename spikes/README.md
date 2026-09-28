@@ -13,9 +13,14 @@
 | `real-stream-fn.mjs`、`acc-driver.mjs`、`acc-run-*.mjs` | cli 真实模型链路验收（M3 / M4） | docs/audits/*-real-provider-acceptance.md |
 | `key-failover.mjs`、`key-failover.selfcheck.mjs` | `real-stream-fn.mjs` 的备用 key 逻辑（可选的 `KIMI_API_KEY_2`）：限额类错误才切 key 并保持使用，两个都撞限额时退避 5、15、45 秒，认证失败等配置问题不切；告警与错误文本不含 key。自检脱网运行：`node spikes/key-failover.selfcheck.mjs` | docs/audits/2026-09-20-m9-pipeline-c63a0bf.md |
 | `m5-thinking-probe.mjs` | Kimi For Coding 不设 / 设推理档位时是否返回 thinking 块（决策 045） | docs/audits/2026-09-13-m5-ba94b53.md |
-| `m5-reasoning-stream-fn.mjs`、`tui-acc/run-m5.mjs`、`tui-acc/run-m5c.mjs` | M5 TUI 真实链路验收：Memory 冻结与下个会话生效、load_skill 读取与拒绝、/search 与两个检索工具、/resume 历史渲染与 thinking | docs/audits/2026-09-13-m5-ba94b53.md |
-| `tui-acc/run-m55.mjs` | M5.5 TUI 真实链路验收：两个 worker 并行写各自工作树与审批来源、run_command 精确命令放权、强杀后恢复 worker 会话与深度 1、两个窗口恢复同一会话被拒 | docs/audits/2026-09-13-m5-5-8ac7266.md |
+| `m5-reasoning-stream-fn.mjs`、`tui-acc/run-m5.mjs`、`tui-acc/run-m5c.mjs` | M5 TUI 真实链路验收：Memory 冻结与下个会话生效、load_skill 读取与拒绝、/search 与两个检索工具、/resume 历史渲染与 thinking。两个剧本读旧账本，**只适用于旧格式** | docs/audits/2026-09-13-m5-ba94b53.md |
+| `tui-acc/run-m55.mjs` | M5.5 TUI 真实链路验收：两个 worker 并行写各自工作树与审批来源、run_command 精确命令放权、强杀后恢复 worker 会话与深度 1、两个窗口恢复同一会话被拒。读旧账本，**只适用于旧格式** | docs/audits/2026-09-13-m5-5-8ac7266.md |
+| `mcp-acc/run-everything.mjs`、`mcp-acc/run-filesystem.mjs` | M5.7 MCP 真实链路验收：server 启动与注解冲突、prompt 进 Skill Catalog、回执 mcp 块、server 被杀后的环境错误。读旧账本与回执，**只适用于旧格式** | docs/audits/2026-09-14-m5-7-d99d693.md |
+| `m7-tree-write-bench.ts` | M7 会话树写穿耗时基准。写穿已随旧账本删除，**只适用于旧格式** | docs/audits/2026-09-16-m7-9f440fe.md |
+| `ledger-migration/` | 账本重构的旧转新转换器（只能在旧版代码上运行）；双写期的对照工具已退役 | 见目录内 README 与账本重构各段审计 |
 | `notfound-spike.mjs`、`probe-note2-layout.mjs`、`pty-probe.js` | 单点探针：上游拦截幽灵工具、消息区离屏布局、PTY 输入 | 对应审计文件 |
+
+**只适用于旧格式**：账本重构第四段停写旧账本并删除了旧格式的读写代码（决策 187），标注为只适用于旧格式的脚本在新代码上不再维护，需要复现时在只读旧版工作树（455d88d，决策 211）里运行；各脚本文件头有同样的标注。
 
 脚本按原有目录层级放置，`../src` 与 `../../src` 的相对引用保持有效；从仓库根目录运行。这些脚本原先位于本地 `tmp/`，docs/audits 下的历史审计文档按只追加不覆盖原则保留当时的 `tmp/...` 路径，对应本目录同名文件。所有运行产出（日志、截屏文本、`acc-*` 与 `tui-acc/ws-*` 工作区、会话文件）统一写到 `tmp/`，该目录被忽略；脚本里出现的 `tmp/...` 路径都是产出位置，不是脚本位置。
 

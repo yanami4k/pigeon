@@ -7,7 +7,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { materializeSession } from "../persistence/event-log.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { runHeadless } from "./headless.ts";
@@ -26,7 +26,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-test("分叉重试沿用来源尝试的温度与工作方式指令：重试那次的调用选项与 run.started 与来源尝试一致", async () => {
+test("分叉重试沿用来源尝试的温度与工作方式指令：重试那次的调用选项与 Run 开始条目与来源尝试一致", async () => {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-sampling-fork-")));
   const home = mkdtempSync(join(tmpdir(), "pigeon-sampling-fork-home-"));
   try {
@@ -82,9 +82,12 @@ test("分叉重试沿用来源尝试的温度与工作方式指令：重试那�
       assert.equal(call.temperature, 0);
       assert.ok(call.systemPrompt.endsWith(directive));
     }
-    const branch = materializeSession(join(dir, ".pigeon", "sessions"), branchId);
-    assert.equal(branch.runStarteds[0]?.payload.model.temperature, 0);
-    assert.equal(branch.runStarteds[0]?.payload.taskDirective, directive);
+    // 分支会话自己的 Run（不含从来源复制过来的那一段）的开始条目
+    const branch = loadStoreSession(join(dir, ".pigeon", "sessions"), branchId);
+    assert.ok(branch !== undefined, "会话存储里应有分支会话");
+    assert.equal(branch.view.runs.length, 1);
+    assert.equal(branch.view.runs[0]?.start.model.temperature, 0);
+    assert.equal(branch.view.runs[0]?.start.taskDirective, directive);
   } finally {
     try {
       git(dir, ["worktree", "prune"]);

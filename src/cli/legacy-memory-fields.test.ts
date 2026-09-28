@@ -1,68 +1,36 @@
-// 结构化记忆删除（决策 174）只停写、不改读：旧会话 run.started 里的结构化记忆留痕与这一步起点照常物化读出。
-// 会话列表、trace 与 replay 改读新会话存储后不读旧格式（187）：这类旧会话在列表里只计入提示行，trace 与 replay
-// 说明它只在旧账本里，不报"会话不存在"
+// 结构化记忆删除（决策 174）之前的旧会话：run.started 里带结构化记忆留痕与这一步起点，只存在于旧格式会话文件里。
+// 新代码不读旧格式（187 / 211）：这类会话在会话列表里只计入提示行，trace 与 replay 说明它是旧格式会话并指向只读的
+// 旧版代码，不报"会话不存在"
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runSessionListCommand } from "../application/session-list.ts";
-import { JsonlEventLog, materializeSession } from "../persistence/event-log.ts";
-import { newRunId, newSessionId } from "../state/ids.ts";
+import { writeLegacySessionFile } from "../application/session-view-fixtures.ts";
+import { newRunId } from "../state/ids.ts";
 import { runReplayCommand } from "./replay.ts";
 import { runTraceCommand } from "./trace.ts";
 
-test("旧会话里带结构化记忆留痕与这一步起点的 run.started：照常物化读出；显示读者只给旧会话提示", () => {
+test("旧格式会话（带结构化记忆留痕的旧会话所在）：显示读者只给旧格式会话提示并指向旧版代码", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-legacy-memory-"));
   try {
     const sessionsDir = join(root, ".pigeon", "sessions");
-    const sessionId = newSessionId();
+    const sessionId = writeLegacySessionFile(sessionsDir);
     const runId = newRunId();
-    const legacy = {
-      enabled: true,
-      selection: "auto" as const,
-      opening: ["mem_1"],
-      openingBlocked: ["mem_9"],
-      repair: ["mem_2"],
-    };
-    const stepStart = { commit: "a".repeat(40), baseCommit: "b".repeat(40) };
-    const log = new JsonlEventLog(sessionsDir, sessionId);
-    log.appendObservation({
-      kind: "run.started",
-      runId,
-      payload: {
-        model: { provider: "p", id: "m", thinkingLevel: "off" },
-        policy: { allow: ["read_file"], deny: [], approvalMode: "yolo" },
-        advertisedTools: ["read_file"],
-        systemPromptHash: "c".repeat(64),
-        memory: [],
-        skills: [],
-        structuredMemory: legacy,
-        stepStart,
-      },
-    });
-    log.appendEntry({
-      runId,
-      runSeq: 1,
-      role: "user",
-      message: { role: "user", content: "修好它" },
-    });
-    log.close();
 
-    const payload = materializeSession(sessionsDir, sessionId).runStarteds[0]?.payload;
-    assert.deepEqual(payload?.structuredMemory, legacy);
-    assert.deepEqual(payload?.stepStart, stepStart);
-    assert.match(
+    assert.equal(
       runSessionListCommand({ root, filters: {} }),
-      /另有 1 个会话创建于新会话存储启用之前/
+      "尚无会话记录。\n另有 1 个旧格式会话（迁移之前创建）未列出；旧格式会话请用只读的旧版代码 455d88d 读取\n"
     );
+    const hint = `会话 ${sessionId} 是旧格式会话（迁移之前创建），这里不读；旧格式会话请用只读的旧版代码 455d88d 读取`;
     assert.throws(
       () => runTraceCommand({ root, sessionId, withContent: false }),
-      /创建于新会话存储启用之前，只在旧账本里/
+      (error: unknown) => error instanceof Error && error.message === hint
     );
     assert.throws(
       () => runReplayCommand({ root, runId, sessionId, withContent: false }),
-      /创建于新会话存储启用之前，只在旧账本里/
+      (error: unknown) => error instanceof Error && error.message === hint
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

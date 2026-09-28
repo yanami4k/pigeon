@@ -1,6 +1,7 @@
 // 工具调用治理（M5.5 S0，决策 049）：审批闸整族逻辑自 PiRuntimeAdapter 原样搬入 Controller 层，
 // 零行为变化。M3 治理闭环：策略判定 → 人工审批 / 自动放行 → block + ToolExecution 账本 + 熔断
-// （决策 1/2/4，spike S2a/S4/S5）；M4 S6 grant 求值排律；决策 1 证据链 intent / decision / receipt。
+// （决策 1/2/4，spike S2a/S4/S5）；M4 S6 grant 求值排律。账本只在内存里：意图、决定、回执与熔断记录随 184 停写，
+// 审批决定与错误归类由 Adapter 挂在工具结果消息上记进会话存储。
 // 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游 prepareToolCall
 // 在 hook 前拦截，事件级连续计数熔断兜底（spikes/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
 import type { ApprovalHandler } from "../approvals/handler.ts";
@@ -14,7 +15,6 @@ import type {
 } from "../pi-runtime/governance.ts";
 import { type BreakerScope, breakerCountKey, InterceptStreak } from "../state/breaker.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
-import { buildReceipt, type ReceiptMcp } from "../state/receipt.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
 import {
   advanceToolExecution,
@@ -26,13 +26,7 @@ import {
 import { type GrantMatchOutcome, matchConfigGrants } from "../tools/grants.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
-import type { CommandInspection, ExecEvidence, ExecEvidenceTool } from "../tools/run-command.ts";
-import type { ContentEvidence } from "../tools/wrap.ts";
-
-// M5.7 S3（决策 053）：MCP 工具的证据暂存能力（mcp/registry-bridge.ts 的执行体满足）；结构检查，不要求工具必实现
-interface McpEvidenceSource {
-  takeMcpEvidence(toolCallId: string): ReceiptMcp | undefined;
-}
+import type { CommandInspection, ExecCommandTool } from "../tools/run-command.ts";
 
 // M4 S6（决策 3）：会话 grant 匹配注入面——approvals/grant-store.ts 的 SessionGrantStore
 // 满足该结构；测试可注入假实现。match 纯求值（无副作用）；命中计数在放行实际生效后
@@ -56,7 +50,7 @@ export interface ToolGovernanceOptions {
   // 治理面运行时状态，不进 InjectionSnapshot（约束 4：grant 必须可撤销，与快照冻结矛盾）
   sessionGrants?: SessionGrantMatcher;
   // M4 S6（D6）：固化配置规则（.pigeon/grants.json，启动时装载、会话内冻结）；
-  // 命中记 approvedBy=policy:config，intent 回指规则的 promotedFrom.grantId（收口决策 ①：稳定身份）
+  // 命中记 approvedBy=policy:config，决定回指规则的 promotedFrom.grantId（收口决策 ①：稳定身份）
   configGrants?: readonly ConfigGrantRule[];
   // 目录限定匹配（pathPrefix）的 realpath 解析根；缺省 = 带 pathPrefix 的规则一律不匹配
   // （fail-closed 到人工审批——授权判定不猜）
@@ -130,11 +124,10 @@ class GovernedToolCalls implements ToolGovernance {
       return await this.#decideInner(call);
     } catch (error) {
       // fail-closed 语义不变（异常一律转 block），但阻断必须过熔断计数（P2-1b）：
-      // 账本写盘持续失败 + 顽固模型 = 无限阻断循环。rawArgs 可能正是异常源
+      // 闸内持续异常 + 顽固模型 = 无限阻断循环。rawArgs 可能正是异常源
       // （structuredClone 失败），故取原始参数做指纹，由 #blockWithBreaker 兜底不抛
       return this.#blockWithBreaker(
         call.toolName,
-        call.toolCallId,
         call.args,
         `审批闸内部异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
         "fingerprint"
@@ -153,11 +146,9 @@ class GovernedToolCalls implements ToolGovernance {
 
   // 账本联动：tool_execution_end 到达即 settled——被阻断者从 approval 落（决策已 rejected），
   // 执行完毕者从 execution 落；spike S1/S2a：无论放行与否 end 事件都保证到达。
-  // 例外留痕：approved 但停在 approval = intent 写盘失败被 fail-closed 阻断（从未 dispatch），
-  // 不迁移状态（审计可见的异常记录），也不产生 receipt。
+  // 例外：approved 但停在 approval = 放行前闸内异常被 fail-closed 阻断（从未 dispatch），不迁移状态。
   settle(settlement: ToolSettledPayload): void {
-    // 账本联动隔离在独立 try/catch（P2-2）：receipt 写盘失败只进内部异常观察口，
-    // 绝不让 settled 事件本体因此丢失（Adapter 侧事件落日志与转发无条件）
+    // 账本联动隔离在独立 try/catch（P2-2）：异常只进内部异常观察口，不挡下方熔断计数
     try {
       const existing = this.#executions.get(settlement.toolCallId);
       if (
@@ -165,9 +156,10 @@ class GovernedToolCalls implements ToolGovernance {
         (existing.state === "execution" ||
           (existing.state === "approval" && existing.decision?.outcome === "rejected"))
       ) {
-        const settled = advanceToolExecution(existing, "settled", Date.now());
-        this.#executions.set(settlement.toolCallId, settled);
-        this.#persistReceipt(settled, settlement.isError);
+        this.#executions.set(
+          settlement.toolCallId,
+          advanceToolExecution(existing, "settled", Date.now())
+        );
       }
     } catch (error) {
       this.#host.reportError(error);
@@ -224,8 +216,7 @@ class GovernedToolCalls implements ToolGovernance {
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
-      this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, toolCallId, rawArgs, decision.reason, "tool");
+      return this.#blockWithBreaker(toolName, rawArgs, decision.reason, "tool");
     }
 
     // 自动放行：grant 命中（human:grant / policy:config，回指出处）> yolo 批发授权
@@ -249,11 +240,6 @@ class GovernedToolCalls implements ToolGovernance {
         ...(grant !== undefined ? { grantRef: { kind: grant.source, id: grant.refId } } : {}),
         decidedAt: Date.now(),
       });
-      // 决策 1 证据链分层（M4 S6 G）：读层调用只留事件级记录——无副作用，intent/receipt
-      // 级持久化冗余；写/exec 层维持 §3.2 三族齐全（intent 写盘失败 = fail-closed 不放行）
-      if (this.#registry.get(toolName)?.tier !== "read") {
-        await this.#persistIntent(record);
-      }
       if (grant !== undefined) {
         this.#sessionGrants?.noteEffectiveHit(grant);
       }
@@ -276,14 +262,7 @@ class GovernedToolCalls implements ToolGovernance {
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
-      this.#persistDecision(record);
-      return this.#blockWithBreaker(
-        toolName,
-        toolCallId,
-        rawArgs,
-        "策略要求人工审批但未配置审批通道",
-        "tool"
-      );
+      return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
     }
     const tier = this.#registry.get(toolName)?.tier;
     // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
@@ -322,8 +301,7 @@ class GovernedToolCalls implements ToolGovernance {
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
-      this.#persistDecision(record);
-      return this.#blockWithBreaker(toolName, toolCallId, rawArgs, reason, "fingerprint");
+      return this.#blockWithBreaker(toolName, rawArgs, reason, "fingerprint");
     }
     record = recordDecision(record, {
       outcome: "approved",
@@ -333,8 +311,6 @@ class GovernedToolCalls implements ToolGovernance {
         : {}),
       decidedAt: Date.now(),
     });
-    // ROADMAP §3.2：dispatch 前先持久化意图；写盘失败 = fail-closed（异常由外层转 block）
-    await this.#persistIntent(record);
     // 人在面板上看到了原样命令串与"经 shell"并批准
     this.#authorizeShell(toolName, toolCallId, needsShell);
     record = advanceToolExecution(record, "dispatch", Date.now());
@@ -354,7 +330,7 @@ class GovernedToolCalls implements ToolGovernance {
       return undefined;
     }
     try {
-      return (tool as unknown as ExecEvidenceTool).inspectCommand(args);
+      return (tool as unknown as ExecCommandTool).inspectCommand(args);
     } catch {
       return undefined;
     }
@@ -371,153 +347,8 @@ class GovernedToolCalls implements ToolGovernance {
       "authorizeShell" in tool &&
       typeof tool.authorizeShell === "function"
     ) {
-      (tool as unknown as ExecEvidenceTool).authorizeShell(toolCallId);
+      (tool as unknown as ExecCommandTool).authorizeShell(toolCallId);
     }
-  }
-
-  // dispatch 前持久化调用意图（ROADMAP §3.2）。写盘失败向上抛——外层 catch 转成 block，
-  // 即 fail-closed：事件日志写不进就不放行，未留证的副作用一律不得发生。
-  // M4 S2（D5）：写工具 intent 携带内容哈希三元组（工具探针零副作用算出改前/预期改后）；
-  // 探针无能力或失败 → 字段缺省，该悬账冷恢复时降级为人工对账，不阻断审批流
-  async #persistIntent(record: ToolExecution): Promise<void> {
-    const eventLog = this.#host.eventLog;
-    if (eventLog === undefined) {
-      return;
-    }
-    const decision = record.decision;
-    if (decision === undefined) {
-      throw new Error("账本 intent 缺失决定快照");
-    }
-    let contentHashes: ContentEvidence | null = null;
-    const tool = this.#host.tools.get(record.toolName);
-    if (
-      this.#registry.get(record.toolName)?.tier === "write" &&
-      tool !== undefined &&
-      "probeContentEvidence" in tool &&
-      typeof tool.probeContentEvidence === "function"
-    ) {
-      try {
-        contentHashes = await tool.probeContentEvidence(record.rawArgs);
-      } catch {
-        contentHashes = null;
-      }
-    }
-    eventLog.appendIntent({
-      executionId: record.executionId,
-      toolCallId: record.toolCallId,
-      toolName: record.toolName,
-      rawArgs: record.rawArgs,
-      decision,
-      ...(contentHashes != null ? { contentHashes } : {}),
-      at: Date.now(),
-      runId: this.#host.activeRunId(),
-    });
-  }
-
-  // 拒绝决定落盘（决策 4 证据链：拒绝理由必须在场，进程退出后不蒸发）。
-  // 失败语义：调用已被阻断（副作用已防住），写盘失败不得改变结果——故自包 catch 进
-  // 内部异常观察口，而非上抛让外层 catch 把逐字拒绝理由换成内部异常文案
-  #persistDecision(record: ToolExecution): void {
-    const eventLog = this.#host.eventLog;
-    if (eventLog === undefined) {
-      return;
-    }
-    const decision = record.decision;
-    if (decision === undefined) {
-      throw new Error("账本 decision 缺失决定快照");
-    }
-    try {
-      eventLog.appendDecision({
-        executionId: record.executionId,
-        toolCallId: record.toolCallId,
-        toolName: record.toolName,
-        rawArgs: record.rawArgs,
-        decision,
-        at: Date.now(),
-        runId: this.#host.activeRunId(),
-      });
-    } catch (error) {
-      this.#host.reportError(error);
-    }
-  }
-
-  // tool_execution_end 后写 Receipt 并回填 receiptId（三层关联 executionId/toolCallId/receiptId）。
-  // executed 判据：到达 execution 阶段且执行结果无错误。M3 两个自建工具的唯一副作用都在
-  // 最后一次写盘调用（edit_file 全部预检通过才落盘），故"执行过且无错"≡副作用发生；
-  // 阻断/拒绝路径 executionStartedAt 为空 → executed=false（副作用从未发生）。
-  // 崩溃点：进程死于 end 事件前则 receipt 永不落盘——approved 路径冷启动 reconcile 报
-  // OutcomeUnknown；rejected 路径已有 decision 行闭环，归 rejected 不入 unknown。
-  #persistReceipt(record: ToolExecution, isError: boolean): void {
-    const eventLog = this.#host.eventLog;
-    if (eventLog === undefined) {
-      return;
-    }
-    // 决策 1 证据链分层（M4 S6 G）：读层调用只留事件级记录——receipt 不落盘
-    // （无副作用可对账；内存账本与事件流仍完整）
-    if (this.#registry.get(record.toolName)?.tier === "read") {
-      return;
-    }
-    const decision = record.decision;
-    if (decision === undefined) {
-      return;
-    }
-    // M5.5 S5（决策 048）：exec 工具的执行证据（命令、退出码、输出哈希与截断输出、文件清单差异），
-    // 取一次即删；取证失败只让字段缺省，不改变 receipt 落盘
-    let exec: ExecEvidence | undefined;
-    const execTool = this.#host.tools.get(record.toolName);
-    if (
-      execTool !== undefined &&
-      "takeExecEvidence" in execTool &&
-      typeof execTool.takeExecEvidence === "function"
-    ) {
-      try {
-        exec = (execTool as unknown as ExecEvidenceTool).takeExecEvidence(record.toolCallId);
-      } catch {
-        exec = undefined;
-      }
-    }
-    // M5.7 S3（决策 053）：MCP 工具的调用与返回证据（参数哈希、返回哈希与摘要、server 证据），取一次即删；
-    // 取证失败只让字段缺省，不改变 receipt 落盘
-    let mcp: ReceiptMcp | undefined;
-    if (
-      execTool !== undefined &&
-      "takeMcpEvidence" in execTool &&
-      typeof execTool.takeMcpEvidence === "function"
-    ) {
-      try {
-        mcp = (execTool as unknown as McpEvidenceSource).takeMcpEvidence(record.toolCallId);
-      } catch {
-        mcp = undefined;
-      }
-    }
-    // 组装判据在 state/receipt.ts（executed 判据、摘要文案、exec/mcp 字段取舍）；
-    // 这一层只负责把证据取到手，以及在 executed 为真时去实测目标现状哈希
-    // （M4 S2 / D5：实测而非采信工具自报，撕裂写会在冷恢复三方比对中现形；测不得则缺省）
-    const receipt = buildReceipt({
-      record,
-      decision,
-      isError,
-      ...(exec !== undefined ? { exec } : {}),
-      ...(mcp !== undefined ? { mcp } : {}),
-      hashAfter: () => {
-        const tool = this.#host.tools.get(record.toolName);
-        if (
-          tool === undefined ||
-          !("hashContentTarget" in tool) ||
-          typeof tool.hashContentTarget !== "function"
-        ) {
-          return null;
-        }
-        try {
-          return tool.hashContentTarget(record.rawArgs);
-        } catch {
-          return null;
-        }
-      },
-    });
-    eventLog.appendReceipt({ receipt, runId: this.#host.activeRunId() });
-    // settled 后回填 receiptId：schema 允许的回填，不是状态迁移
-    this.#executions.set(record.toolCallId, { ...record, receiptId: receipt.id });
   }
 
   // 阻断 + 熔断（spike S4：上游无循环护栏，模型可无限重发被拦调用）。
@@ -532,7 +363,6 @@ class GovernedToolCalls implements ToolGovernance {
   // 代价：abort 后本次 block 的 reason 被上游覆盖为 "Operation aborted"（agent-loop.js:410-416）。
   #blockWithBreaker(
     toolName: string,
-    toolCallId: string,
     rawArgs: unknown,
     reason: string,
     scope: BreakerScope
@@ -542,36 +372,9 @@ class GovernedToolCalls implements ToolGovernance {
     this.#blockCounts.set(key, count);
     if (count >= this.#breakerThreshold) {
       this.#breakerTripped = true;
-      this.#persistBreaker({
-        toolName,
-        toolCallId,
-        scope,
-        count,
-        threshold: this.#breakerThreshold,
-      });
       this.#host.abort();
     }
     return { kind: "block", reason };
-  }
-
-  // 熔断落闸留证（M4 S2，D7「治理熔断」判据行）：落闸决定已生效（abort 不可逆），
-  // 写盘失败只进内部异常观察口，绝不改变熔断行为
-  #persistBreaker(input: {
-    toolName: string;
-    toolCallId: string;
-    scope: "tool" | "fingerprint" | "intercepted";
-    count: number;
-    threshold: number;
-  }): void {
-    const eventLog = this.#host.eventLog;
-    if (eventLog === undefined) {
-      return;
-    }
-    try {
-      eventLog.appendBreaker({ ...input, at: Date.now(), runId: this.#host.activeRunId() });
-    } catch (error) {
-      this.#host.reportError(error);
-    }
   }
 
   // 上游拦截熔断（事件级）：覆盖两类 beforeToolCall 之前的上游拦截——
@@ -583,20 +386,12 @@ class GovernedToolCalls implements ToolGovernance {
   // 被上游拦截；它同时吞并原"toolName 不在广告集"判据（幽灵调用 hook 同样未运行）。
   // 同一工具名连续达阈值即 abort（与 hook 级熔断共用 #breakerThreshold）；
   // 任何 hook 跑过的 settled（含执行出错）或非错误 settled 重置连击。
-  // 审计留痕：此路径 hook 从未运行，不可能有 ToolExecution 账本记录；
-  // 事件日志里的 tool.proposed/tool.settled 序列即为拦截循环的审计轨迹。
+  // 此路径 hook 从未运行，不可能有 ToolExecution 账本记录；会话里的工具调用与工具结果消息即拦截循环的轨迹。
   #countUpstreamInterceptedAndMaybeBreak(payload: ToolSettledPayload): void {
     const intercepted = payload.isError && !this.#executions.has(payload.toolCallId);
     const count = this.#interceptedStreak.observe(payload.toolName, intercepted);
     if (count >= this.#breakerThreshold) {
       this.#breakerTripped = true;
-      this.#persistBreaker({
-        toolName: payload.toolName,
-        toolCallId: payload.toolCallId,
-        scope: "intercepted",
-        count,
-        threshold: this.#breakerThreshold,
-      });
       this.#host.abort();
     }
   }

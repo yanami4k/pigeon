@@ -19,12 +19,7 @@ import {
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
-import type {
-  ContentEvidenceTool,
-  PigeonAgentTool,
-  PigeonToolResult,
-  PreviewableTool,
-} from "./wrap.ts";
+import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 export class EditFileError extends Error {}
 
 const AnchorSchema = Type.String({ pattern: "^\\d+#[0-9a-f]{4}$" });
@@ -70,9 +65,7 @@ export interface EditFileDetails {
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
 export function createEditFileTool(
   workspace: string | WorkspaceHost
-): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> &
-  PreviewableTool &
-  ContentEvidenceTool {
+): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
   return {
     name: "edit_file",
@@ -90,30 +83,6 @@ export function createEditFileTool(
     async preview(params) {
       const plan = await planEdits(host, Value.Parse(EditFileParamsSchema, params));
       return buildEditDiff(plan.args.path, plan.split.lines, plan.applied);
-    },
-    // M4 S2 内容证据探针（D5 哈希自动确证）：与 execute/preview 共享同一 planEdits 预检，
-    // 「探针所见 = 执行所得」；零副作用。探针失败（快照过期/文件缺失/参数畸形）返回 null——
-    // 治理层凭 intent 哈希缺省把悬账降级为人工对账，不阻断审批流
-    async probeContentEvidence(params) {
-      try {
-        const plan = await planEdits(host, Value.Parse(EditFileParamsSchema, params));
-        return {
-          path: plan.args.path,
-          beforeHash: plan.beforeSnapshot,
-          expectedAfterHash: snapshotTag(joinContent(plan.newLines, plan.split)),
-        };
-      } catch {
-        return null;
-      }
-    },
-    // 执行后实测目标现状内容哈希（receipt 的 contentAfterHash）；目标不可读返回 null
-    hashContentTarget(params) {
-      try {
-        const args = Value.Parse(EditFileParamsSchema, params);
-        return snapshotTag(host.readTextSync(args.path));
-      } catch {
-        return null;
-      }
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<EditFileDetails>> {
       const args = Value.Parse(EditFileParamsSchema, params);
