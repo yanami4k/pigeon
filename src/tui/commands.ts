@@ -45,6 +45,8 @@ export interface CommandsHost {
   spawnCommand(workers: TuiWorkersFace, raw: string): void;
   cancelCommand(workers: TuiWorkersFace, ref: string | undefined): void;
   workersStatusCommand(workers: TuiWorkersFace): void;
+  // 决策 279：/take <worker 名>
+  takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
 }
@@ -104,7 +106,10 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       const reason =
         tokens[0] === "fork"
           ? SANDBOX_FORK_UNSUPPORTED
-          : tokens[0] === "spawn" || tokens[0] === "cancel" || tokens[0] === "workers"
+          : tokens[0] === "spawn" ||
+              tokens[0] === "cancel" ||
+              tokens[0] === "workers" ||
+              tokens[0] === "take"
             ? SANDBOX_WORKERS_UNSUPPORTED
             : tokens[0] === "resume"
               ? SANDBOX_RESUME_UNSUPPORTED
@@ -141,6 +146,11 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     }
     if (workers !== undefined && tokens[0] === "workers") {
       host.workersStatusCommand(workers);
+      return;
+    }
+    // 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录
+    if (workers !== undefined && tokens[0] === "take") {
+      host.takeCommand(workers, tokens[1]);
       return;
     }
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）

@@ -28,6 +28,7 @@ function stubHost(sandbox: { exportChanges(): Promise<string> } | undefined) {
     spawnCommand: () => assert.fail("沙箱里不该派 worker"),
     cancelCommand: () => assert.fail("沙箱里不该派 worker"),
     workersStatusCommand: () => assert.fail("沙箱里不该派 worker"),
+    takeCommand: () => assert.fail("沙箱里不该取用 worker"),
     resumeCommand: () => assert.fail("沙箱里不该换绑"),
     compactCommand: () => {},
     sandbox: () => sandbox,
@@ -35,14 +36,16 @@ function stubHost(sandbox: { exportChanges(): Promise<string> } | undefined) {
   return { host, lines, rendered: () => rendered };
 }
 
-test("沙箱会话：/fork、/spawn、/workers、/resume 给出不支持的原因", () => {
+test("沙箱会话：/fork、/spawn、/workers、/take、/resume 给出不支持的原因", () => {
   const { host, lines } = stubHost({ exportChanges: async () => "不该调用" });
   handleSlashCommand(host, "/fork 换个思路");
   handleSlashCommand(host, "/spawn explorer 看看");
   handleSlashCommand(host, "/workers");
+  handleSlashCommand(host, "/take fix-a");
   handleSlashCommand(host, "/resume sess_x");
   assert.deepEqual(lines, [
     SANDBOX_FORK_UNSUPPORTED,
+    SANDBOX_WORKERS_UNSUPPORTED,
     SANDBOX_WORKERS_UNSUPPORTED,
     SANDBOX_WORKERS_UNSUPPORTED,
     SANDBOX_RESUME_UNSUPPORTED,

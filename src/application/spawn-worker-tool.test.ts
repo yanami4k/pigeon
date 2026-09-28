@@ -280,6 +280,7 @@ test("完成：等到 worker 收尾，交回分支、改动文件与摘要；摘
     }),
     files: ["a.ts", "b.ts"],
   });
+  // 内存工作区没有起点提供者：不带起点那一行（带起点的文字见 workers-start.test.ts）
   assert.equal(
     await call(h, { role: "implementer", task: "改 a", name: "fix-a" }),
     "worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（2）：a.ts、b.ts。摘要：改好了"

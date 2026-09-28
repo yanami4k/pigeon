@@ -7,6 +7,7 @@
 // headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
 import {
   ROLE_MODEL_OVERRIDES,
@@ -19,6 +20,7 @@ import type {
   WorkerRuntimeRequest,
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
+import { workerStartRefFor } from "../orchestration/worktree.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
@@ -118,6 +120,9 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
     parentLog: childFamilySink(deps.bundle.sessionStore),
     approvals: deps.approvals ?? UNATTENDED_APPROVAL,
     createRuntime: sessionWorkerRuntimeFactory(deps),
+    // 决策 279：worker 从主工作目录连同未提交改动拍成的快照开工；快照引用与分支同名，随分支一并删除
+    startPoint: ({ name }) =>
+      snapshotWorkdir({ repoRoot: deps.governanceRoot, ref: workerStartRefFor(name) }),
     ...(deps.maxConcurrent !== undefined ? { maxConcurrent: deps.maxConcurrent } : {}),
     ...(deps.onWorkerTokens !== undefined ? { onWorkerTokens: deps.onWorkerTokens } : {}),
   });

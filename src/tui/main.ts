@@ -40,6 +40,7 @@ import {
 } from "../application/session-runtime.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { SpawnWorkerSlot } from "../application/spawn-worker-tool.ts";
+import { takeWorkerChanges } from "../application/take-worker-tool.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -57,7 +58,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 const USAGE =
   "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
-  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
+  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -130,6 +131,9 @@ async function main(argv: string[]): Promise<void> {
       // M7（决策 069）：并行同任务派发只在主会话提供（worker 会话按深度 1 不能再派）
       ...(parentSessionId === undefined
         ? {
+            // 决策 279：/take 与 take_worker 同一套逻辑与文字
+            take: async (name: string) =>
+              takeWorkerChanges({ orchestrator, governanceRoot: workspaceRoot }, name).text,
             spawnAttempts: createSessionAttemptRunner({
               orchestrator,
               governanceRoot: workspaceRoot,

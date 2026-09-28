@@ -1,16 +1,25 @@
 // worker 命令层（M5.5 S4，决策 040）：/spawn /cancel /workers 的解析与排版，状态栏一行与收尾摘要
 // 同一份措辞。纯函数，输出纯字符串（tui 投影到消息区与状态栏）；编排动作本身在 orchestration。
-import type { WorkerOutcome, WorkerStatus } from "../orchestration/workers.ts";
+import type { WorkerOutcome, WorkerStartPoint, WorkerStatus } from "../orchestration/workers.ts";
 
-export type { SpawnRequest, WorkerOutcome, WorkerStatus } from "../orchestration/workers.ts";
+export type {
+  SpawnRequest,
+  WorkerOutcome,
+  WorkerStartPoint,
+  WorkerStatus,
+} from "../orchestration/workers.ts";
 
 export class WorkerCommandError extends Error {}
 
 export const SPAWN_USAGE =
   '用法：/spawn <角色> [--name <名> | --attempts <N>] "<任务>"（角色：explorer / implementer / tester；--attempts 并行派发同一任务的 N 个尝试）';
 
+// 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录
+export const TAKE_USAGE = "用法：/take <worker 名>";
+
 // 未知命令提示里追加的 worker 命令清单（装配了编排面时才出现）
-export const WORKER_COMMANDS_HINT = '、/spawn <角色> "<任务>"、/cancel <worker>、/workers';
+export const WORKER_COMMANDS_HINT =
+  '、/spawn <角色> "<任务>"、/cancel <worker>、/workers、/take <worker>';
 
 // raw = 去掉 "/spawn" 之后的原文；任务可带英文或中文引号，也可不带
 export function parseSpawnCommand(raw: string): {
@@ -141,7 +150,21 @@ export function renderWorkerOutcome(outcome: WorkerOutcome): string {
       ? `  工作树 ${outcome.workspace.path}：改动未提交，审阅与合并由人用 git 完成（trace ${outcome.sessionId} 查看证据链）`
       : `  无工作区：只读审阅不产生文件改动（trace ${outcome.sessionId} 查看证据链）`
   );
+  // 决策 279：起点快照与只取其自身改动的取用方式（与 spawn_worker 返回的那一行同一口径，取用入口为 /take）
+  if (outcome.start !== undefined && outcome.workspace.kind === "git-worktree") {
+    lines.push(`  ${workerStartLine(outcome.start, `用 /take ${outcome.name}`)}`);
+  }
   return lines.join("\n");
+}
+
+// 决策 279：worker 起点与取用方式的一行——快照起点写明带入了几个未提交的文件，HEAD 起点写明派出时没有未提交的文件；
+// 取用方式由调用方给（agent 见 take_worker 工具，人见 /take）
+export function workerStartLine(start: WorkerStartPoint, takeHint: string): string {
+  const commit = start.commit.slice(0, 12);
+  const origin = start.snapshot
+    ? `起点：快照 ${commit}（含派出时 ${start.files.length} 个未提交的文件）`
+    : `起点：提交 ${commit}（派出时没有未提交的文件）`;
+  return `${origin}；要把它的改动叠进你的工作目录，${takeHint}。`;
 }
 
 // /cancel 的目标：按 worker 名或会话 id 定位

@@ -73,6 +73,7 @@ import {
 import {
   handleCancelCommand,
   handleSpawnCommand,
+  handleTakeCommand,
   refreshWorkers as refreshWorkersView,
   showWorkersStatus,
   type TuiWorkersFace,
@@ -463,6 +464,10 @@ export class PigeonTuiShell
 
   cancelCommand(workers: TuiWorkersFace, ref: string | undefined): void {
     handleCancelCommand(this, workers, ref);
+  }
+
+  takeCommand(workers: TuiWorkersFace, name: string | undefined): void {
+    handleTakeCommand(this, workers, name);
   }
 
   workersStatusCommand(workers: TuiWorkersFace): void {

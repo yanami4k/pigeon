@@ -140,6 +140,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     reviewBudget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
     // 决策 265：主 agent 派 worker 在各条件里的实际生效值
     spawnWorkers: STREAM_SPAWN_WORKERS,
+    // 决策 279：取用 worker 改动的工具与派 worker 同槽，同一个生效值
+    takeWorker: STREAM_SPAWN_WORKERS,
   };
 }
 

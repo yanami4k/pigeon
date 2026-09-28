@@ -93,6 +93,11 @@ import {
   type SpawnWorkerSlot,
   spawnWorkerRegistration,
 } from "./spawn-worker-tool.ts";
+import {
+  createTakeWorkerTool,
+  TAKE_WORKER_TOOL,
+  takeWorkerRegistration,
+} from "./take-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 
 export interface RuntimeDeps {
@@ -365,6 +370,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : undefined;
   if (spawnSlot !== undefined) {
     registry.register(spawnWorkerRegistration());
+    // 决策 279：取用 worker 自身改动的工具与派 worker 同槽同范围（写档，按写操作审批）
+    registry.register(takeWorkerRegistration());
   }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
@@ -425,7 +432,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
-    ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL] : []),
+    ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL, TAKE_WORKER_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -590,7 +597,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         : []),
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
-      ...(spawnSlot !== undefined ? [createSpawnWorkerTool(spawnSlot)] : []),
+      ...(spawnSlot !== undefined
+        ? [createSpawnWorkerTool(spawnSlot), createTakeWorkerTool(spawnSlot)]
+        : []),
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）
     governance: gateReviewTools(

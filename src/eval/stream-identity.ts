@@ -43,6 +43,8 @@ export interface StreamRunIdentity {
         reviewBudget?: { maxTurns: number; wallClockMs: number };
         // 主 agent 派 worker（265）：实际生效的值（各条件都关掉）；与压缩配置同一口径，加这一项之前写下的身份头没有它，续跑即判为不同
         spawnWorkers?: boolean;
+        // 取用 worker 改动的工具 take_worker（279）：与派 worker 同槽，各条件同样关掉；加这一项之前写下的身份头没有它，续跑即判为不同
+        takeWorker?: boolean;
       };
       minimal?: {
         model: string;

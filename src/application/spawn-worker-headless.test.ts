@@ -100,6 +100,11 @@ function spawnResults(root: string, sessionId: string): string[] {
     });
 }
 
+// 决策 279：每段返回文字末尾另起一行写起点与取用方式（提交号随仓库变）；比对定稿文字时去掉这一行，格式另在一处专门核对
+const START_LINE =
+  /\n起点：(提交|快照) [0-9a-f]{12}（(派出时没有未提交的文件|含派出时 \d+ 个未提交的文件)）；要把它的改动叠进你的工作目录，调用 take_worker（worker=[a-z0-9-]+）。/g;
+const withoutStart = (text: string): string => text.replace(START_LINE, "");
+
 const readLoop = {
   replies: [
     { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.txt" } }], contextTokens: 300 },
@@ -173,7 +178,7 @@ test("主 agent 撞上自己的时间上限：正在等的 worker 一并取消",
     ]),
   });
   assert.equal(result.status, "wall-clock-limit");
-  assert.deepEqual(spawnResults(root, result.sessionId), [
+  assert.deepEqual(spawnResults(root, result.sessionId).map(withoutStart), [
     "worker slow（explorer）被取消。分支 pigeon/slow 上可能有部分改动。",
   ]);
 });
@@ -199,10 +204,16 @@ test("pigeon run 的一次运行是一整次交办：回炉各轮与首轮共用
     ]),
   });
   assert.equal(result.repair?.rounds, 1);
-  assert.deepEqual(spawnResults(root, result.sessionId), [
+  const results = spawnResults(root, result.sessionId);
+  assert.deepEqual(results.map(withoutStart), [
     "worker explorer-1（explorer）已完成。分支：pigeon/explorer-1。改动的文件（0）：无。摘要：看过了",
     SPAWN_WORKER_TEXTS.spawnLimit(1),
   ]);
+  // 决策 279：仓库干净时起点就是 HEAD，末行写明派出时没有未提交的文件与取用方式
+  assert.equal(
+    results[0]?.split("\n").at(-1),
+    `起点：提交 ${git(root, ["rev-parse", "HEAD"]).slice(0, 12)}（派出时没有未提交的文件）；要把它的改动叠进你的工作目录，调用 take_worker（worker=explorer-1）。`
+  );
 });
 
 test("多份尝试：各份在自己的工作树里按验证命令标签，每份一段交回", async () => {
@@ -255,7 +266,7 @@ test("多份尝试：各份在自己的工作树里按验证命令标签，每�
     ]),
   });
   assert.equal(result.status, "completed");
-  assert.deepEqual(spawnResults(root, result.sessionId), [
+  assert.deepEqual(spawnResults(root, result.sessionId).map(withoutStart), [
     [
       "第 1 份（通过）：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.txt。摘要：改好了",
       "第 2 份（通过）：worker implementer-2（implementer）已完成。分支：pigeon/implementer-2。改动的文件（1）：a.txt。摘要：改好了",

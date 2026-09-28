@@ -326,3 +326,71 @@ test("入参校验：未知角色、空任务、重名在落盘前拒绝", async
   await orchestrator.awaitResult(id);
   assert.equal(spawned.length, 1);
 });
+
+// 决策 279：worker 从主工作目录的快照开工——起点由装配根注入
+test("起点提供者在场：派出前先拍快照，派出记录的工作区形状记 baseCommit、建工作区以它为起点，状态与结果带起点", async () => {
+  const base = "a".repeat(40);
+  const journal: string[] = [];
+  const workspaces: WorkspaceProvider = {
+    plan: ({ sessionId, name }): WorkerWorkspace => ({
+      kind: "git-worktree",
+      path: `/virtual/${sessionId}-${name}`,
+      branch: `pigeon/${name}`,
+    }),
+    create: (workspace, input) => {
+      journal.push(
+        `create ${workspace.kind === "git-worktree" ? workspace.baseCommit : "none"} ${input.baseRef}`
+      );
+    },
+    changedFiles: () => [],
+  };
+  const { orchestrator, spawned } = setup({
+    workspaces,
+    startPoint: ({ name }) => {
+      journal.push(`snapshot ${name}`);
+      return { commit: base, snapshot: true, files: ["x.ts", "y.ts"] };
+    },
+  });
+  const id = orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" });
+  const outcome = await orchestrator.awaitResult(id);
+  assert.deepEqual(
+    journal,
+    ["snapshot fix-a", `create ${base} ${base}`],
+    "先拍快照再建工作区，起点即快照"
+  );
+  assert.equal(
+    spawned[0]?.workspace.kind === "git-worktree" ? spawned[0].workspace.baseCommit : undefined,
+    base,
+    "派出记录记下起点"
+  );
+  assert.deepEqual(outcome.start, { commit: base, snapshot: true, files: ["x.ts", "y.ts"] });
+  assert.deepEqual(orchestrator.status()[0]?.start, outcome.start);
+  assert.equal(
+    outcome.workspace.kind === "git-worktree" ? outcome.workspace.baseCommit : undefined,
+    base
+  );
+});
+
+test("起点拍不成（如不是 git 工作区）：不派——没有派出记录、零工作区零运行面，错误写明原因", () => {
+  const { orchestrator, spawned, journal } = setup({
+    startPoint: () => {
+      throw new Error("不是 git 工作区");
+    },
+  });
+  assert.throws(
+    () => orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" }),
+    (error: unknown) =>
+      error instanceof WorkerSpawnError && /拍工作目录快照失败：不是 git 工作区/.test(error.message)
+  );
+  assert.equal(spawned.length, 0);
+  assert.deepEqual(journal, []);
+  assert.deepEqual(orchestrator.status(), []);
+});
+
+test("没有起点提供者：与从前一样（工作区形状不带 baseCommit，结果不带起点）", async () => {
+  const { orchestrator, spawned } = setup();
+  const id = orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" });
+  const outcome = await orchestrator.awaitResult(id);
+  assert.equal("baseCommit" in (spawned[0]?.workspace ?? {}), false);
+  assert.equal(outcome.start, undefined);
+});

@@ -16,9 +16,11 @@ import { test } from "node:test";
 import { newSessionId } from "../state/ids.ts";
 import {
   addWorktree,
+  deleteBranch,
   listWorktrees,
   removeWorktree,
   WorktreeError,
+  workerStartRefFor,
   worktreePathFor,
 } from "./worktree.ts";
 
@@ -96,6 +98,35 @@ test("工作树：非法名字在调用 git 之前拒绝", () => {
       );
     }
     assert.equal(existsSync(join(repo, ".pigeon")), false);
+  } finally {
+    cleanup();
+  }
+});
+
+// 决策 279：worker 起点快照的引用与分支同名，随分支一并删除
+test("起点引用 refs/pigeon/worker-start/<名>：删分支时一并删除；没有引用的分支照删；非法名字拒绝", () => {
+  const { repo, cleanup } = makeRepo();
+  try {
+    const head = git(repo, ["rev-parse", "HEAD"]).trim();
+    const ref = workerStartRefFor("fix-a");
+    assert.equal(ref, "refs/pigeon/worker-start/fix-a");
+    git(repo, ["update-ref", ref, head]);
+    const first = addWorktree({
+      repoRoot: repo,
+      sessionId: newSessionId(),
+      name: "fix-a",
+      baseRef: head,
+    });
+    removeWorktree({ repoRoot: repo, path: first.path, force: true });
+    deleteBranch({ repoRoot: repo, branch: "pigeon/fix-a" });
+    assert.equal(git(repo, ["for-each-ref", "refs/pigeon/worker-start/"]).trim(), "", "引用已删");
+    assert.equal(git(repo, ["for-each-ref", "refs/heads/pigeon/"]).trim(), "", "分支已删");
+
+    const second = addWorktree({ repoRoot: repo, sessionId: newSessionId(), name: "fix-b" });
+    removeWorktree({ repoRoot: repo, path: second.path, force: true });
+    deleteBranch({ repoRoot: repo, branch: "pigeon/fix-b" });
+    assert.equal(git(repo, ["for-each-ref", "refs/heads/pigeon/"]).trim(), "");
+    assert.throws(() => workerStartRefFor("../x"), WorktreeError);
   } finally {
     cleanup();
   }
