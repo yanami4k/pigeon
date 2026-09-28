@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -241,6 +242,57 @@ class TestSplitDirs:
         with pytest.raises(ResultFieldError, match="stepBudget"):
             common_settings(info["settings"])
 
+    def test_sessions_kept_per_dir_with_same_digest(self, tmp_path):
+        """两个目录的身份摘要相同（摘要不含条件与 agent 参数）：会话汇总按目录各记一条，后读的不覆盖先读的。"""
+        cells = write_run(tmp_path / "cells", [runner_row("11", 1, 1, 1, 2, mem_start=memory(300, entries=2))],
+                          ident=identity(("search-push",)))
+        write_job(tmp_path / "cells", "search-push", 1, {1: [worker_step1(), review_step1()]}, snapshots={1: MEMORY_MD})
+        mini = write_run(tmp_path / "minimal", [runner_row("M", 1, 1, 1, 2)], ident=minimal_identity())
+        (tmp_path / "minimal" / "streams").mkdir()
+        _, info = load_table([cells, mini])
+        assert info["settings"][0]["digest"] == info["settings"][1]["digest"]
+        assert info["sessions"] == [
+            {"dir": "cells", "digest": "0123456789abcdef", "available": True, "jobs": 1, "sessionFiles": 2},
+            {"dir": "minimal", "digest": "0123456789abcdef", "available": True, "jobs": 0, "sessionFiles": 0},
+        ]
+        out = tmp_path / "out"
+        assert main(["calibration", "--results", str(cells), str(mini), "--out", str(out)]) == 0
+        md = (out / "report.md").read_text(encoding="utf-8")
+        assert "会话文件（目录 cells，摘要 0123456789abcdef）：1 个作业、2 个会话文件" in md
+        assert "会话文件（目录 minimal，摘要 0123456789abcdef）：0 个作业、0 个会话文件" in md
+        assert "会话文件合计（2 个可用目录相加）：1 个作业、2 个会话文件" in md
+
+
+class TestStepSpace:
+    """--eligible 与 --tasks 给的是结果行的步序（seq），不是从 1 起的题号。"""
+
+    def rows(self, tmp_path):
+        return write_run(tmp_path / "run", [runner_row(c, s, p, 1, 2) for c in ("01", "11") for s in (46, 59)
+                                            for p in (1, 2)], ident=identity(("search-only", "search-push")))
+
+    def test_eligible_in_step_space_passes(self, tmp_path):
+        el = tmp_path / "eligible.json"
+        el.write_text(json.dumps([46, 59] + list(range(100, 118))), encoding="utf-8")
+        assert main(["calibration", "--results", str(self.rows(tmp_path)), "--out", str(tmp_path / "o"),
+                     "--eligible", str(el)]) == 0
+
+    def test_eligible_as_task_numbers_raises(self, tmp_path):
+        el = tmp_path / "eligible.json"
+        # 清单里 1 至 20 的题号，与结果行的步序 46、59 不在同一编号空间
+        el.write_text(json.dumps(list(range(1, 21))), encoding="utf-8")
+        with pytest.raises(ValueError, match=r"--eligible 应给步序（结果行的 seq），不是题号：结果行里的步序 46, 59 不在 --eligible 里"):
+            main(["calibration", "--results", str(self.rows(tmp_path)), "--out", str(tmp_path / "o"),
+                  "--eligible", str(el)])
+
+    def test_formal_tasks_missing_a_result_step_raises(self, tmp_path):
+        f = write_run(tmp_path / "run", formal_rows(), ident=identity(FORMAL_CONDITIONS))
+        tasks = json.loads(Path(tasks_file(tmp_path)).read_text(encoding="utf-8"))
+        seen = sorted({r["seq"] for r in formal_rows()})
+        p = tmp_path / "short.json"
+        p.write_text(json.dumps([t for t in tasks if t != seen[-1]]), encoding="utf-8")
+        with pytest.raises(ValueError, match=rf"--tasks 应给步序.*{seen[-1]}"):
+            main(["formal", "--results", str(f), "--out", str(tmp_path / "o"), "--tasks", str(p)])
+
 
 def worker_step1():
     s = SessionBuilder("w1").run_start()
@@ -314,7 +366,8 @@ class TestSessions:
         assert (r.search_calls_search_sessions, r.search_calls_read_session_entry, r.search_sessions_hit) == (2, 1, 3)
         # 复盘 token 只数复盘自己的部分
         assert (r.review_input_miss, r.review_input_hit, r.review_output) == (100, 200, 30)
-        assert info["sessions"]["0123456789abcdef"] == {"available": True, "jobs": 2, "sessionFiles": 5}
+        assert info["sessions"] == [{"dir": tmp_path.name, "digest": "0123456789abcdef", "available": True, "jobs": 2,
+                                     "sessionFiles": 5}]
 
     def test_step2_counts_only_new_sessions(self, tmp_path):
         df, _ = load_table([self.build(tmp_path)])
@@ -345,7 +398,8 @@ class TestSessions:
     def test_no_streams_dir_marked_unavailable(self, tmp_path):
         f = write_run(tmp_path, [runner_row("11", 1, 1, 1, 2)])
         df, info = load_table([f])
-        assert info["sessions"]["0123456789abcdef"] == {"available": False, "reason": "no-streams-dir"}
+        assert info["sessions"] == [{"dir": tmp_path.name, "digest": "0123456789abcdef", "available": False,
+                                     "reason": "no-streams-dir"}]
         assert "mem_citations" not in df.columns
 
     def test_memory_refs_and_matching(self):

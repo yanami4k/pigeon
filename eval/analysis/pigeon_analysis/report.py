@@ -304,7 +304,7 @@ def _count_cell(x: dict[str, Any] | None) -> str:
 
 def memory_usage_lines(mu: dict[str, Any], info: dict[str, Any]) -> list[str]:
     lines = ["", "### 记忆使用（探索性）", ""]
-    avail = [v.get("available") for v in (info.get("sessions") or {}).values()]
+    avail = [v.get("available") for v in (info.get("sessions") or [])]
     if not avail or not all(avail):
         lines.append("- 会话文件不可用（输出目录没有 streams/），取自会话文件的计数记为无来源。")
     push_cells = sorted(mu["push"])
@@ -365,11 +365,18 @@ def settings_lines(settings: list[dict[str, Any]]) -> list[str]:
 def input_lines(info: dict[str, Any], faults: dict[str, Any] | None) -> list[str]:
     lines = ["## 输入", "", f"- 读入结果行 {info['rows']} 条，规整表记录 {info['records']} 条",
              f"- 结果行里整列为空的字段：{info['fieldsAbsent']}"]
-    for digest, s in sorted((info.get("sessions") or {}).items()):
+    # 会话文件按输出目录逐个列出（摘要可以相同）；多于一个目录时另列各目录相加的合计
+    sessions = info.get("sessions") or []
+    for s in sessions:
+        where = f"目录 {s['dir']}，摘要 {s['digest']}"
         if s.get("available"):
-            lines.append(f"- 会话文件（{digest}）：{s['jobs']} 个作业、{s['sessionFiles']} 个会话文件")
+            lines.append(f"- 会话文件（{where}）：{s['jobs']} 个作业、{s['sessionFiles']} 个会话文件")
         else:
-            lines.append(f"- 会话文件（{digest}）：不可用（{s.get('reason')}）")
+            lines.append(f"- 会话文件（{where}）：不可用（{s.get('reason')}）")
+    usable = [s for s in sessions if s.get("available")]
+    if len(sessions) > 1:
+        lines.append(f"- 会话文件合计（{len(usable)} 个可用目录相加）：{sum(s['jobs'] for s in usable)} 个作业、"
+                     f"{sum(s['sessionFiles'] for s in usable)} 个会话文件")
     if faults is not None:
         lines.append("- 验证工具故障次数（各格合计）：" + ("；".join(f"{c} {_v(v, 0)}" for c, v in sorted(faults.items())) or "无"))
     lines.append("")
