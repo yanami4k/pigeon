@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { Value } from "typebox/value";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
 import { WorkerRoleSchema } from "../state/session-payloads.ts";
+import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import {
   assertPolicySubset,
   deriveWorkerPolicy,
@@ -12,12 +13,20 @@ import {
   WorkerPolicyError,
 } from "./roles.ts";
 
-const FULL = ["read_file", "edit_file", SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL];
+const FULL = [
+  "read_file",
+  "edit_file",
+  SEARCH_SESSIONS_TOOL,
+  READ_SESSION_ENTRY_TOOL,
+  WEB_SEARCH_TOOL,
+  WEB_FETCH_TOOL,
+];
 
 test("委派策略：父策略齐全时按角色给默认工具，审批模式继承", () => {
   const parent = { allow: FULL, deny: [], approvalMode: "prompt" as const };
+  // 决策 287–291：三种角色都带联网的两件工具（父策略里有才带）
   assert.deepEqual(deriveWorkerPolicy(parent, "implementer"), {
-    allow: ["read_file", "edit_file"],
+    allow: ["read_file", "edit_file", WEB_SEARCH_TOOL, WEB_FETCH_TOOL],
     deny: [],
     approvalMode: "prompt",
   });
@@ -25,7 +34,17 @@ test("委派策略：父策略齐全时按角色给默认工具，审批模式�
     "read_file",
     SEARCH_SESSIONS_TOOL,
     READ_SESSION_ENTRY_TOOL,
+    WEB_SEARCH_TOOL,
+    WEB_FETCH_TOOL,
   ]);
+  assert.deepEqual(deriveWorkerPolicy(parent, "tester").allow, [
+    "read_file",
+    WEB_SEARCH_TOOL,
+    WEB_FETCH_TOOL,
+  ]);
+  // 父策略里没有联网工具（沙箱断网档、跑批器各条件）时角色也不带
+  const offline = { allow: ["read_file", "edit_file"], deny: [], approvalMode: "prompt" as const };
+  assert.deepEqual(deriveWorkerPolicy(offline, "implementer").allow, ["read_file", "edit_file"]);
 });
 
 test("委派策略：父策略没有的工具角色拿不到；父 deny 原样继承并剔除出 allow", () => {
@@ -36,7 +55,7 @@ test("委派策略：父策略没有的工具角色拿不到；父 deny 原样�
 
   const denyingParent = { allow: FULL, deny: ["edit_file"], approvalMode: "prompt" as const };
   const denied = deriveWorkerPolicy(denyingParent, "implementer");
-  assert.deepEqual(denied.allow, ["read_file"]);
+  assert.deepEqual(denied.allow, ["read_file", WEB_SEARCH_TOOL, WEB_FETCH_TOOL]);
   assert.deepEqual(denied.deny, ["edit_file"]);
   assert.doesNotThrow(() => assertPolicySubset(denied, denyingParent));
 });

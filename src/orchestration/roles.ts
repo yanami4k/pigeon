@@ -5,11 +5,14 @@
 // 账本里的角色取值（WorkerRoleSchema）保留，旧会话记录照常读取。
 // 决策 249：推送记忆开着时（父策略里有 update_memory），三种角色都另带记忆工具——它只写 .pigeon/learned/，不改变角色对
 // 代码的读写范围；并发写靠记忆的跨进程锁。推送关着时父策略里没有它，角色也不带。
+// 决策 287–291：联网的两件工具（web_search、web_fetch）三种角色都带——与主会话同样拿到、同样的审批规则（父策略里有才带；
+// 沙箱断网档与跑批器各条件的父策略里没有，角色也不带）。
 import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
 import { UPDATE_MEMORY_TOOL } from "../memory/update-memory-tool.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { DelegatedPolicy, WorkerRole } from "../state/session-payloads.ts";
+import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 
 export class WorkerPolicyError extends Error {}
@@ -20,10 +23,13 @@ export type ActiveWorkerRole = Extract<WorkerRole, "explorer" | "implementer" | 
 export const WORKER_ROLES: readonly ActiveWorkerRole[] = ["explorer", "implementer", "tester"];
 
 // 角色默认工具（ROADMAP §M5.5 角色表）；tester 的 run_command 另受 .pigeon/commands.json 角色清单限定（048）
+// 联网的两件工具三种角色都带（287–291）
+const WEB_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] as const;
+
 export const ROLE_TOOLS: Readonly<Record<ActiveWorkerRole, readonly string[]>> = {
-  explorer: ["read_file", SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL],
-  implementer: ["read_file", "edit_file"],
-  tester: ["read_file", "run_command"],
+  explorer: ["read_file", SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, ...WEB_TOOLS],
+  implementer: ["read_file", "edit_file", ...WEB_TOOLS],
+  tester: ["read_file", "run_command", ...WEB_TOOLS],
 };
 
 // 角色表的推理档位列（决策 050）：在场即覆盖启动参数的全局值，缺省继承全局。现有角色都继承

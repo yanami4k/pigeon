@@ -4,7 +4,9 @@
 // yolo → read 自动 → prompt），本模块只负责匹配语义。
 // M5.5 S5（决策 048 及其修订）：exec 档放权带 command——参数里的命令串与之一模一样才命中（不做前缀、
 // 不做模式，§3.9 第五条不动）；需 shell 的调用只被带 shell 标记的放权命中，旧记录缺省为 false。
+// 决策 290：网络档放权带 host——参数里网址的主机名与之一模一样（不区分大小写）才命中；不做子域、不做模式。
 import type { ConfigGrantRule } from "../state/grants.ts";
+import { hostOfUrlArg, normalizeHost } from "./host-scope.ts";
 import { isPathInsideDir } from "./paths.ts";
 
 // grant 命中出处：adapter 据此记 approvedBy = human:grant / policy:config，
@@ -38,8 +40,9 @@ function extractCommandArg(args: unknown): string | undefined {
   return typeof command === "string" && command.length > 0 ? command : undefined;
 }
 
-// 作用域匹配（决策 3a + 048 及其修订）：工具名精确相等 + 可选命令串精确相等 + 需 shell 时放权须带 shell 标记 +
-// 可选 pathPrefix 目录包含。pathPrefix 规则必须有工作区根可做 realpath 解析，否则不匹配（fail-closed 到人工）
+// 作用域匹配（决策 3a + 048 及其修订 + 290）：工具名精确相等 + 可选命令串精确相等 + 需 shell 时放权须带 shell 标记 +
+// 可选主机名精确相等 + 可选 pathPrefix 目录包含。pathPrefix 规则必须有工作区根可做 realpath 解析，否则不匹配
+// （fail-closed 到人工）；host 规则在调用定位不到主机名时同样不匹配
 export function scopeMatches(
   workspaceRoot: string | undefined,
   tool: string,
@@ -48,12 +51,16 @@ export function scopeMatches(
   args: unknown,
   command?: string,
   grantShell?: boolean,
-  callNeedsShell?: boolean
+  callNeedsShell?: boolean,
+  host?: string
 ): boolean {
   if (tool !== toolName) {
     return false;
   }
   if (command !== undefined && extractCommandArg(args) !== command) {
+    return false;
+  }
+  if (host !== undefined && hostOfUrlArg(args) !== normalizeHost(host)) {
     return false;
   }
   if (callNeedsShell === true && grantShell !== true) {
@@ -91,7 +98,8 @@ export function matchConfigGrants(
         args,
         rule.command,
         rule.shell,
-        callNeedsShell
+        callNeedsShell,
+        rule.host
       )
     ) {
       return { source: "config-rule", refId: rule.promotedFrom.grantId };

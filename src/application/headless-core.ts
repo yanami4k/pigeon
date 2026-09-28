@@ -59,6 +59,7 @@ import {
   SpawnWorkerSlot,
 } from "./spawn-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
+import type { WebToolsConfig } from "./web-tools.ts";
 import {
   createDetachedRuntime,
   createSessionWorkers,
@@ -140,6 +141,9 @@ export interface HeadlessRunOptions {
   spawnWorkers?: boolean;
   // 决策 268：同时在跑的 worker 上限与一次运行里 agent 派出的上限（缺省 4 与 16）
   spawnWorkerLimits?: SpawnWorkerLimits;
+  // 决策 287–291：联网工具的配置——在场即给主会话与 worker 注册两件工具；缺省不注册（pigeon run 由启动参数缺省给出，
+  // --sandbox-network off 不给；跑批器各条件不给）
+  webTools?: WebToolsConfig;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令——冻结进注入快照；尝试收尾后在工作区独立执行并落本会话的通用验证记录
@@ -350,6 +354,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(learnedMemory !== undefined ? { learnedMemory } : {}),
     // 收尾复盘与本次运行同一份工具定义；复盘的执行闸不放行 spawn_worker
     ...(spawnSlot !== undefined ? { spawnWorker: spawnSlot } : {}),
+    ...(options.webTools !== undefined ? { webTools: options.webTools } : {}),
   };
   const handle = createDetachedRuntime({
     ...surface,
@@ -403,6 +408,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
           maxConcurrent: spawnSlot.limits.maxConcurrent,
           onWorkerTokens: (_workerId, tokens) => addWorkerTokens(tokens),
+          ...(options.webTools !== undefined ? { webTools: options.webTools } : {}),
         });
         spawnBudget = bindSpawnWorkers({
           slot: spawnSlot,

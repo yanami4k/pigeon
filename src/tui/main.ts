@@ -25,6 +25,7 @@ import {
   resolveStreamFnSpec,
   resolveVerifyConfig,
   spawnWorkerLimitsOf,
+  webToolsEnabled,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import {
@@ -40,6 +41,7 @@ import {
 } from "../application/session-runtime.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { SpawnWorkerSlot } from "../application/spawn-worker-tool.ts";
+import { resolveWebTools } from "../application/web-tools.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -77,6 +79,11 @@ async function main(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
+  // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
+  const webTools = webToolsEnabled(flags)
+    ? resolveWebTools({ governanceRoot: workspaceRoot })
+    : undefined;
+  const webToolsOption = webTools !== undefined ? { webTools } : {};
   const sessionId = newSessionId();
   // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
   // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
@@ -103,6 +110,8 @@ async function main(argv: string[]): Promise<void> {
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       // 决策 268：同时在跑的上限，人用 /spawn 派的与 agent 派的一并计算
       maxConcurrent: spawnWorkerLimitsOf(flags).maxConcurrent,
+      // 决策 287–291：worker 与主会话同样拿到联网工具
+      ...webToolsOption,
     };
     const orchestrator = createSessionWorkers(deps);
     const verify = resolveVerifyConfig(flags, workspaceRoot);
@@ -177,6 +186,7 @@ async function main(argv: string[]): Promise<void> {
     ...retryOption(flags),
     ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
     ...spawnWorkerOption(flags),
+    ...webToolsOption,
     createApprovalHandler: createHandler,
     onMcpNote: (note) => {
       console.error(`[mcp] ${note}`);
@@ -236,6 +246,7 @@ async function main(argv: string[]): Promise<void> {
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
           ...spawnWorkerOption(flags),
+          ...webToolsOption,
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,

@@ -48,6 +48,7 @@ import {
 } from "./runtime.ts";
 import { childFamilySink } from "./session-store.ts";
 import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import type { WebToolsConfig } from "./web-tools.ts";
 
 export interface WorkerRuntimeDeps {
   // 每个 worker 的模型接入：生产传同一个无状态 streamFn，测试按 worker 给独立剧本
@@ -80,6 +81,8 @@ export interface WorkerRuntimeDeps {
   roleStreamFns?: Readonly<Partial<Record<WorkerRole, StreamFn>>>;
   // 决策 266：无人值守（pigeon run）——worker 不接审批通道：按放权规则或全部放行（审批模式继承父会话），否则拒绝
   unattended?: boolean;
+  // 决策 287–291：联网工具的配置——worker 与主会话同样拿到（父策略里有才带）
+  webTools?: WebToolsConfig;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -154,6 +157,7 @@ export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRun
       : {}),
     ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
     ...(deps.approvals === undefined ? { unattended: true } : {}),
+    ...(deps.webTools !== undefined ? { webTools: deps.webTools } : {}),
   });
 }
 
@@ -206,6 +210,8 @@ interface RuntimeSurface {
   retryOnFail?: number;
   // 决策 264–267：派 worker 的开关（只有 headless 主会话会给）
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 287–291：联网工具的配置
+  webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
@@ -251,6 +257,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       role: request.role,
       // 决策 266：无人值守时不接审批通道（prompt 档 fail-closed，与 headless 主会话同一口径）
       ...(deps.unattended === true ? {} : { approvalHandler: request.approvalHandler }),
+      ...(deps.webTools !== undefined ? { webTools: deps.webTools } : {}),
       header: {
         parentSessionId: request.lineage.parentSessionId,
         ...(request.lineage.parentRunId !== undefined
@@ -307,6 +314,8 @@ export interface DetachedRuntimeRequest {
   retryOnFail?: number;
   // 决策 264–267：派 worker 的开关
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 287–291：联网工具的配置
+  webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
   budget?: AttemptBudget;
   // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
@@ -365,6 +374,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
+    ...(surface.webTools !== undefined ? { webTools: surface.webTools } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),

@@ -10,6 +10,8 @@
 // 推送记忆（决策 191、217、227、244）：开着时会话开始读 .pigeon/learned/MEMORY.md 推入系统提示（常驻 Memory 之后、Skill 目录之前）
 // 并注册 update_memory；上下文压缩之前先复盘一次（192、207）。复盘运行面也在这里装：系统提示取来源冻结的原文，工具定义不变，
 // 执行时只放行 read_file 与 update_memory（240）
+// 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
+// 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -56,10 +58,11 @@ import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
+import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import { asWorkspaceHost } from "../tools/local-host.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
-import { ToolRegistry } from "../tools/registry.ts";
+import { ToolRegistry, type ToolRiskTier } from "../tools/registry.ts";
 import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace-edit.ts";
 import {
   createRunCommandTool,
@@ -69,6 +72,12 @@ import {
   runCommandTexts,
 } from "../tools/run-command.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import {
+  createWebFetchTool,
+  createWebSearchTool,
+  webFetchRegistration,
+  webSearchRegistration,
+} from "../web/tools.ts";
 import { createToolGovernance } from "./governance.ts";
 import type { McpSession } from "./mcp.ts";
 import {
@@ -94,6 +103,7 @@ import {
   spawnWorkerRegistration,
 } from "./spawn-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
+import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
 export interface RuntimeDeps {
   streamFn: StreamFn;
@@ -182,6 +192,9 @@ export interface RuntimeDeps {
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 287–291：联网工具的配置。在场即注册 web_search 与 web_fetch；缺省不注册（装配层缺省；交互入口与 pigeon run 由启动参数
+  // 缺省给出，--sandbox-network off 不给，跑批器各条件不给）。worker 与主会话同样拿到（父策略里有才带）
+  webTools?: WebToolsConfig;
 }
 
 // 复盘运行面的设定：种类、来源会话冻结的系统提示原文与来源会话号（refs 里的 user 补来源会话的编号——用户的话说在来源会话里）
@@ -223,6 +236,11 @@ const WRITE_APPROVAL_SENTENCES: Readonly<Record<RunCommandApproval, string>> = {
   none: "需要批准的写操作会被拒绝（本会话没有人工审批通道）。",
 };
 
+// 系统提示里联网工具的说法（决策 287、289）：只在注册了两件工具时追加
+export const WEB_TOOLS_SENTENCE =
+  "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
+  "web_fetch 只交回按问题提炼的结果，不交回网页原文。";
+
 export interface RuntimeBundle {
   adapter: PiRuntimeAdapter;
   // 本会话的会话存储写者（决策 176）
@@ -233,7 +251,7 @@ export interface RuntimeBundle {
   // M5.7 S3：本运行面持有的 MCP 会话（disposeRuntime 一并关闭）
   mcp?: McpSession;
   // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
-  toolTiers: ReadonlyMap<string, "read" | "write" | "exec">;
+  toolTiers: ReadonlyMap<string, ToolRiskTier>;
   // M6：释放运行面前先执行的附加释放动作（快照器、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
   // 推送记忆开着时在场（worker 按它继承）
@@ -366,6 +384,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   if (spawnSlot !== undefined) {
     registry.register(spawnWorkerRegistration());
   }
+  // 决策 287–291：联网工具——web_search 读档免审批，web_fetch 网络档按网站审批
+  const webTools = deps.webTools;
+  if (webTools !== undefined) {
+    registry.register(webSearchRegistration());
+    registry.register(webFetchRegistration());
+  }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
   const residentMemory = loadResidentMemory({
@@ -397,7 +421,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     (sessionSearch
       ? "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
         "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
-      : "");
+      : "") +
+    (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
   const skillCatalog = loadSkillCatalog({
@@ -426,6 +451,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
     ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL] : []),
+    ...(webTools !== undefined ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -500,26 +526,45 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           await preCompactionReview(info);
           await deps.beforeCompaction?.(info);
         };
+  // 占位模型对象（真实模型元数据在模型接入插件里）：压缩摘要请求与网页提炼请求共用
+  const placeholderModel = {
+    id: deps.modelId,
+    name: deps.modelId,
+    api: "unknown" as const,
+    provider: deps.provider,
+    baseUrl: "",
+    reasoning: false,
+    input: ["text" as const],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: compactionConfig.contextWindow,
+    maxTokens: maxOutputTokens,
+  };
   const compactor = new ContextCompactor({
     config: compactionConfig,
     streamFn:
       deps.temperature !== undefined
         ? fixTemperature(deps.streamFn, deps.temperature)
         : deps.streamFn,
-    model: {
-      id: deps.modelId,
-      name: deps.modelId,
-      api: "unknown",
-      provider: deps.provider,
-      baseUrl: "",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: compactionConfig.contextWindow,
-      maxTokens: maxOutputTokens,
-    },
+    model: placeholderModel,
     ...(beforeCompaction !== undefined ? { beforeCompaction } : {}),
   });
+  // 决策 289：提炼器——本会话同一个模型接入，温度 0，不带工具，有输出上限；不套单轮输出上限与温度的包装，选项直接给
+  const webToolset =
+    webTools !== undefined
+      ? [
+          createWebSearchTool(webTools.search),
+          createWebFetchTool({
+            limits: webTools.fetch,
+            distill: createModelDistiller({
+              streamFn: deps.streamFn,
+              model: placeholderModel,
+              maxTokens: webTools.distillMaxTokens,
+            }),
+            ...(webTools.lookup !== undefined ? { lookup: webTools.lookup } : {}),
+            ...(webTools.transport !== undefined ? { transport: webTools.transport } : {}),
+          }),
+        ]
+      : [];
   const adapter = new PiRuntimeAdapter({
     snapshot: {
       version: INJECTION_SNAPSHOT_VERSION,
@@ -591,6 +636,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
       ...(spawnSlot !== undefined ? [createSpawnWorkerTool(spawnSlot)] : []),
+      ...webToolset,
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）
     governance: gateReviewTools(

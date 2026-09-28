@@ -227,6 +227,8 @@ export const GrantCreatedDataSchema = Type.Object({
   pathPrefix: Type.Optional(Type.String({ minLength: 1 })),
   command: Type.Optional(Type.String({ minLength: 1 })),
   shell: Type.Optional(Type.Boolean()),
+  // 决策 290：按网站放权的主机名（加法式字段，版本不变）
+  host: Type.Optional(Type.String({ minLength: 1 })),
   firstCall: Type.Object({ toolCallId: Type.String({ minLength: 1 }), args: Type.Unknown() }),
   createdAt: Type.Integer({ minimum: 0 }),
 });

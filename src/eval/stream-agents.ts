@@ -39,6 +39,8 @@ export const STREAM_DEFAULT_TEMPERATURE = 0;
 
 // 决策 265：跑批器各条件里主 agent 派 worker 一律关掉（所测的 Pigeon 不带这项能力）
 export const STREAM_SPAWN_WORKERS = false;
+// 决策 291 与 265 的先例：实验条件不注册联网工具（headless 不给 webTools）；身份头照记这一项
+export const STREAM_WEB_TOOLS = false;
 
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;

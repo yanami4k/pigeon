@@ -93,7 +93,7 @@ export default {
       to: {
         path: "^src/",
         pathNot:
-          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp)/",
+          "^src/(application|state|persistence|tools|approvals|pi-runtime|execution|memory|skills|orchestration|mcp|web)/",
       },
     },
     {
@@ -149,6 +149,15 @@ export default {
         "不触达 persistence / pi-runtime / application / Actor 层，由 application 装配（022 修订）。",
       from: { path: "^src/mcp/", pathNot: "\\.test\\.ts$" },
       to: { path: "^src/", pathNot: "^src/(mcp|state|tools)/" },
+    },
+    {
+      name: "web-only-state-tools",
+      severity: "error",
+      comment:
+        "web（决策 287–291：联网搜索与抓取、内网防护、搜索后端适配、两件工具）只依赖 state 与 tools；" +
+        "提炼的模型接入由 application 经回调注入，web 自身不触达 pi-runtime / persistence / application / Actor 层。",
+      from: { path: "^src/web/", pathNot: ".test.ts$" },
+      to: { path: "^src/", pathNot: "^src/(web|state|tools)/" },
     },
     {
       name: "eval-below-actors",

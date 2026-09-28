@@ -100,6 +100,8 @@ export interface FixtureSession {
     result?: string;
     isError?: boolean;
     checkpoint?: boolean;
+    // 工具结果的 details（如工具执行中另发模型请求的用量 modelUsage）
+    details?: Record<string, unknown>;
   }): string;
   // Run 收尾：结束方式缺省 completed，消息条数取本 Run 已写的条数
   endRun(input?: { ending?: RunEnding; stopReason?: string; errorMessage?: string }): void;
@@ -238,6 +240,7 @@ export function createFixtureSession(options: FixtureSessionOptions): FixtureSes
         toolName: input.name,
         text: input.result ?? "ok",
         ...(input.isError !== undefined ? { isError: input.isError } : {}),
+        ...(input.details !== undefined ? { details: input.details } : {}),
       });
       return toolCallId;
     },

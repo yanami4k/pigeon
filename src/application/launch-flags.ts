@@ -272,6 +272,12 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
   return flags;
 }
 
+// 联网工具给不给（决策 291）：沙箱开断网档时不给——两件工具由宿主代为联网，不受容器断网约束，选断网就一并关掉；
+// 其余情形（不开沙箱、沙箱联网）都给
+export function webToolsEnabled(flags: Pick<LaunchFlags, "sandbox">): boolean {
+  return flags.sandbox?.network !== "off";
+}
+
 // 派 worker 的两个上限（决策 268）：启动参数给了取参数，没给取缺省（4 与 16）
 export function spawnWorkerLimitsOf(flags: LaunchFlags): SpawnWorkerLimits {
   return {

@@ -4,11 +4,13 @@
 import { IsObject, type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-// 风险分层：read 只读 / write 写文件 / exec 执行进程；策略求值按此分层决定是否需人工批准
+// 风险分层：read 只读 / write 写文件 / exec 执行进程 / network 向外联网（决策 290：web_fetch 按网站审批）；
+// 策略求值按此分层决定是否需人工批准——只有 read 自动放行，其余三档在 prompt 模式下都要问人
 export const ToolRiskTierSchema = Type.Union([
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("exec"),
+  Type.Literal("network"),
 ]);
 export type ToolRiskTier = Static<typeof ToolRiskTierSchema>;
 

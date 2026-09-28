@@ -4,6 +4,8 @@
 //
 // 决策 1：审批动作只有批准/拒绝，无"人工改参数"——拒绝理由逐字反馈给模型（spike S2a），
 // 让模型自我修正后重提，而不是人替模型修参数。
+// 决策 290：网络档（web_fetch）按网站审批——请求带上将访问的主机名，[a] 建按网站限定的放权（以后都允许访问该网站），
+// 不提供 [d]。
 import { dirname } from "node:path";
 import type { GrantId, RunId, SessionId } from "../state/ids.ts";
 import type { ToolRiskTier } from "../tools/registry.ts";
@@ -31,6 +33,8 @@ export interface ApprovalRequest {
   // 048 修订：exec 调用将实际执行的命令串（短名已展开，面板原样显示，不做改写）与是否需经 shell
   readonly command?: string;
   readonly needsShell?: boolean;
+  // 决策 290：网络档调用将访问的主机名（工具的 inspectHost 给出）；在场时 [a] 收窄为按网站放权
+  readonly host?: string;
 }
 
 // 会话 grant 的创建面（SessionGrantStore 满足）
@@ -40,6 +44,7 @@ export interface GrantCreator {
     pathPrefix?: string;
     command?: string;
     shell?: boolean;
+    host?: string;
     firstCall: { toolCallId: string; args: unknown };
     runId?: RunId;
   }): { grantId: GrantId; tool: string };
@@ -54,6 +59,7 @@ export function offersDirectoryGrant(
 ): boolean {
   return (
     request.tier !== "exec" &&
+    request.host === undefined &&
     extractPathArg(request.args) !== undefined &&
     grants?.pathScoped !== false
   );
@@ -117,7 +123,11 @@ export function grantScopeFor(
   request: ApprovalRequest,
   key: "a" | "d",
   grants?: Pick<GrantCreator, "pathScoped">
-): { pathPrefix?: string; command?: string; shell?: boolean } | null {
+): { pathPrefix?: string; command?: string; shell?: boolean; host?: string } | null {
+  // 决策 290：网络档按网站放权——[a]/[d] 都收窄为这个主机名
+  if (request.host !== undefined) {
+    return { host: request.host };
+  }
   if (request.tier === "exec") {
     const command = extractCommandArg(request.args);
     if (command === undefined) {
@@ -132,9 +142,21 @@ export function grantScopeFor(
 }
 
 // 放权提示里的作用域后缀（cli 与 tui 共用）
-export function commandScopeNote(scope: { command?: string; shell?: boolean }): string {
+export function commandScopeNote(scope: {
+  command?: string;
+  shell?: boolean;
+  host?: string;
+}): string {
+  if (scope.host !== undefined) {
+    return `，仅限网站 ${scope.host}`;
+  }
   if (scope.command === undefined) {
     return "";
   }
   return `，仅限命令 ${scope.command}${scope.shell === true ? "（经 shell）" : ""}`;
+}
+
+// 网络档 [a] 键的提示文案（cli 与 tui 共用，决策 290）：以后都允许访问这个网站
+export function hostGrantKeyLabel(request: ApprovalRequest): string {
+  return `[a] 以后都允许访问 ${request.host ?? ""}`;
 }

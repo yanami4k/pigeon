@@ -24,6 +24,7 @@ import {
   type ToolExecutionDecision,
 } from "../state/tool-execution.ts";
 import { type GrantMatchOutcome, matchConfigGrants } from "../tools/grants.ts";
+import type { HostScopedTool } from "../tools/host-scope.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import type { CommandInspection, ExecCommandTool } from "../tools/run-command.ts";
@@ -200,6 +201,8 @@ class GovernedToolCalls implements ToolGovernance {
     // 048 修订：exec 工具只读判定这条命令是否需 shell——需 shell 时只有带 shell 标记的放权能免审
     const inspection = this.#inspectCommand(toolName, rawArgs);
     const needsShell = inspection?.needsShell === true;
+    // 决策 290：网络档工具只读判定这次调用要访问的主机——审批面板显示它，[a] 建按网站的放权
+    const host = this.#inspectHost(toolName, rawArgs);
     const grantHit =
       this.#sessionGrants?.match(toolName, rawArgs, { needsShell }) ??
       matchConfigGrants(this.#configGrants, this.#workspaceRoot, toolName, rawArgs, needsShell);
@@ -284,6 +287,7 @@ class GovernedToolCalls implements ToolGovernance {
       ...(tier !== undefined ? { tier } : {}),
       // 048 修订：面板原样显示将执行的命令串，需 shell 时标明
       ...(inspection !== undefined ? { command: inspection.command, needsShell } : {}),
+      ...(host !== undefined ? { host } : {}),
       // 出处 run：审批提示创建 grant（[a]/[d]）时写入 grant.created 事件
       runId: this.#host.activeRunId(),
     });
@@ -331,6 +335,19 @@ class GovernedToolCalls implements ToolGovernance {
     }
     try {
       return (tool as unknown as ExecCommandTool).inspectCommand(args);
+    } catch {
+      return undefined;
+    }
+  }
+
+  // 网络档工具的只读主机检查（决策 290）；工具无此能力或检查失败返回 undefined
+  #inspectHost(toolName: string, args: unknown): string | undefined {
+    const tool = this.#host.tools.get(toolName);
+    if (tool === undefined || !("inspectHost" in tool) || typeof tool.inspectHost !== "function") {
+      return undefined;
+    }
+    try {
+      return (tool as unknown as HostScopedTool).inspectHost(args);
     } catch {
       return undefined;
     }
