@@ -5,6 +5,7 @@
 //      （M3 仅精确匹配（工具名级），参数内容模式识别显式排除——做不好的模式识别是虚假安全感）
 //   3. grant 命中（会话 grant / 固化配置规则，M4 S6）→ auto-allow——approvedBy 记
 //      human:grant / policy:config，审批决定回指出处（每次免审都可审计"凭什么没问人"）
+//   3a. 免审批的写档工具（注册时标明，施工默认 Q12：只写学到的记忆）→ auto-allow，与审批模式无关
 //   4. yolo → 非 deny 全放行（人事先批发授权，账本上 approvedBy 记 policy:yolo）
 //   5. prompt → read 层自动放行；write / exec 层必须人工批准
 // 注意：policy.allow 不参与逐调用判定——它约束的是广告给模型的工具集（Adapter 接线层职责）；
@@ -38,6 +39,8 @@ export interface PolicyDecision {
   readonly reason: string;
   // grant 命中时在场（排律第 3 档）：adapter 据此记 approvedBy=human:grant / policy:config
   readonly grant?: GrantEvaluation;
+  // 免审批的写档工具放行时在场（排律第 3a 档）：记 approvedBy=policy:auto，不算"需要人来批"
+  readonly approvalFree?: true;
 }
 
 // 注册表内查工具：fail-closed 由构造保证——调用方无法把未注册工具当作已注册求值。
@@ -66,6 +69,13 @@ export function evaluateToolPolicy(
         grant.source === "session-grant" ? "human:grant" : "policy:config"
       }，回指出处）`,
       grant,
+    };
+  }
+  if (registration.approvalFree === true) {
+    return {
+      kind: "auto-allow",
+      reason: `免审批的写档工具自动放行：${toolName}`,
+      approvalFree: true,
     };
   }
   if (policy.approvalMode === "yolo") {

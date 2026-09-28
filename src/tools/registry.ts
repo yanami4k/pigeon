@@ -38,6 +38,8 @@ const ToolRegistrationMetaSchema = Type.Object({
   name: Type.String({ pattern: "^[a-z][a-z0-9_]*$" }),
   description: Type.String({ minLength: 1 }),
   tier: ToolRiskTierSchema,
+  // 免审批的写档工具（施工默认 Q12）：只写 Pigeon 自己维护的文件（学到的记忆），不问人、不需放权；缺省即否
+  approvalFree: Type.Optional(Type.Boolean()),
   pathConfinement: PathConfinementSchema,
   executionMode: ToolExecutionModeSchema,
 });
@@ -49,6 +51,8 @@ export interface ToolRegistration {
   // M5.7 起也接受 MCP 工具原样透传的 JSON Schema（type 为 object）
   readonly parameters: TSchema;
   readonly tier: ToolRiskTier;
+  // 免审批的写档工具（施工默认 Q12）：deny 清单照样拒，其余一律自动放行、不计需审批次数
+  readonly approvalFree?: boolean;
   readonly pathConfinement: PathConfinement;
   readonly executionMode: ToolExecutionMode;
 }

@@ -219,7 +219,7 @@ class GovernedToolCalls implements ToolGovernance {
       return this.#blockWithBreaker(toolName, rawArgs, decision.reason, "tool");
     }
 
-    // 自动放行：grant 命中（human:grant / policy:config，回指出处）> yolo 批发授权
+    // 自动放行：grant 命中（human:grant / policy:config，回指出处）> 免审批的写档工具（policy:auto）> yolo 批发授权
     // （policy:yolo）> prompt 模式下 read 层（policy:auto）。
     // sequential 模式下 hook 放行即进入执行（上游无独立 execution-start 事件），
     // 故 dispatch/execution 两个时间戳在放行时一并盖章
@@ -230,7 +230,7 @@ class GovernedToolCalls implements ToolGovernance {
           ? "human:grant"
           : grant?.source === "config-rule"
             ? "policy:config"
-            : policy.approvalMode === "yolo"
+            : policy.approvalMode === "yolo" && decision.approvalFree !== true
               ? "policy:yolo"
               : "policy:auto";
       record = recordDecision(record, {
