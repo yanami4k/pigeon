@@ -239,14 +239,48 @@ SHARED_SETTINGS = ("promptFormat", "promptLayout", "stepBudget", "model", "compa
                    "reviewTemplate", "reviewBudget")
 
 
+# 只属于 Pigeon 的设置项：只跑最简 agent 的输出目录身份头里没有 Pigeon 代理，这几项读出为空，不参与比对
+PIGEON_ONLY_SETTINGS = ("compaction", "memoryLimitChars", "reviewTemplate", "reviewBudget")
+
+
+def minimal_model(minimal: Any) -> dict[str, Any] | None:
+    """最简 agent 身份头里的模型设置 → 与 Pigeon 的 model 同口径（模型名、温度、思考开关、单次输出上限）；
+    缺 modelKwargs（跑批器读不到最简 agent 的参数）返回 None。思考关在 litellm 参数里写作 {"type": "disabled"}，
+    对应 Pigeon 的 "off"；其余取值原样保留，不一致即报错。"""
+    if not isinstance(minimal, dict) or not isinstance(minimal.get("modelKwargs"), dict):
+        return None
+    kw = minimal["modelKwargs"]
+    thinking = kw.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        thinking = "off"
+    return {"modelId": minimal.get("model"), "temperature": kw.get("temperature"), "thinking": thinking,
+            "maxOutputTokens": kw.get("max_tokens")}
+
+
 def common_settings(settings: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """各输出目录的设置应一致（摘要可以不同）；不一致即报错并列出不同的项。"""
+    """各输出目录的设置应一致（摘要可以不同）；不一致即报错并列出不同的项。
+    只跑最简 agent 的目录（身份头里没有 Pigeon 代理）跳过只属于 Pigeon 的几项，模型设置改为核对最简 agent 记录的
+    模型名、温度、思考开关、单次输出上限与 Pigeon 的一致。返回有 Pigeon 代理的目录的设置（没有则为第一个目录的）。"""
     if not settings:
         return None
-    first = settings[0]
-    differ = sorted({k for s in settings[1:] for k in SHARED_SETTINGS if s[k] != first[k]})
+    pigeon_dirs = [s for s in settings if s["model"] is not None]
+    minimal_only = [s for s in settings if s["model"] is None]
+    if not pigeon_dirs:
+        first = settings[0]
+        differ = sorted({k for s in settings[1:] for k in SHARED_SETTINGS if s[k] != first[k]})
+        if differ:
+            raise ResultFieldError(f"各输出目录的设置不一致：{'、'.join(differ)}")
+        return first
+    first = pigeon_dirs[0]
+    differ = {k for s in pigeon_dirs[1:] for k in SHARED_SETTINGS if s[k] != first[k]}
+    exempt = PIGEON_ONLY_SETTINGS + ("model",)
+    differ |= {k for s in minimal_only for k in SHARED_SETTINGS if k not in exempt and s[k] != first[k]}
+    if minimal_only:
+        expected = {k: first["model"].get(k) for k in ("modelId", "temperature", "thinking", "maxOutputTokens")}
+        if any(minimal_model(s["minimal"]) != expected for s in minimal_only):
+            differ.add("model")
     if differ:
-        raise ResultFieldError(f"各输出目录的设置不一致：{'、'.join(differ)}")
+        raise ResultFieldError(f"各输出目录的设置不一致：{'、'.join(sorted(differ))}")
     return first
 
 
