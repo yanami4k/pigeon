@@ -10,7 +10,7 @@ from typing import Any
 from . import constants as K
 from .calibration import analyze_calibration
 from .primary import analyze_primary
-from .reader import common_settings, load_table, read_baseline_failures, require_step_space
+from .reader import common_settings, load_table, read_baseline_failures, require_step_space, spent_summary
 from .report import calibration_markdown, dumps, formal_markdown, formal_result
 from .secondary import analyze_secondary
 from .sensitivity import third_pass_decision
@@ -32,7 +32,8 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
     secondary = analyze_secondary(df, primary)
     passes = set(primary["passesPerCell"].values())
     # 第 3 遍规则只在四格都跑完两遍、尚无第 3 遍时判定（224）
-    third = third_pass_decision(df, minimal_reserve=args.minimal_reserve) if passes == {2} else None
+    third = (third_pass_decision(df, spent=spent_summary(info["spend"]), minimal_reserve=args.minimal_reserve)
+             if passes == {2} else None)
     common_settings(info["settings"])
     faults = {str(c): float(g["verify_tool_faults"].sum()) for c, g in df.groupby("cell") if g["verify_tool_faults"].notna().any()}
     return formal_result(primary, secondary, third, info, faults)
@@ -50,6 +51,7 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
         compaction_trigger=args.compaction_trigger,
         eligible=eligible,
         settings=common_settings(info["settings"]),
+        spent=spent_summary(info["spend"]),
     )
     return {"kind": "calibration", "calibration": cal, "input": info}
 

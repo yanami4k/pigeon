@@ -12,6 +12,8 @@ from pigeon_analysis.reader import (
     load_table,
     read_baseline_failures,
     row_to_record,
+    rows_cost,
+    spent_summary,
 )
 from pigeon_analysis.sessions import SessionSourceError, memory_refs, reads_referenced_file
 from runner_fixture import (
@@ -261,6 +263,56 @@ class TestSplitDirs:
         assert "会话文件（目录 cells，摘要 0123456789abcdef）：1 个作业、2 个会话文件" in md
         assert "会话文件（目录 minimal，摘要 0123456789abcdef）：0 个作业、0 个会话文件" in md
         assert "会话文件合计（2 个可用目录相加）：1 个作业、2 个会话文件" in md
+
+
+class TestGatewaySpent:
+    """已花取各输出目录网关累计之和（含作废的步与开跑前探测），结果行合计与二者之差并列；缺网关记录即报错。"""
+
+    def split(self, tmp_path, cells_gateway=None):
+        cells, mini = split_runs(tmp_path, minimal_identity())
+        if cells_gateway is not None:
+            (tmp_path / "cells" / "gateway-spend.json").write_text(
+                json.dumps({"totalCny": cells_gateway, "requests": 9, "peakRequests": 0}), encoding="utf-8")
+        return cells, mini
+
+    def test_gateway_total_counts_voided_steps(self, tmp_path):
+        # 两格 8 行：01 每步 0.4，11 每步 0.4 + 复盘 0.02，共 3.28；另有作废的步 0.5 只记在网关。最简 agent 2 行 0.8
+        cells, mini = self.split(tmp_path, cells_gateway=3.78)
+        _, info = load_table([cells, mini])
+        assert [(x["dir"], round(x["gatewayCny"], 4), round(x["rowsCny"], 4)) for x in info["spend"]] == [
+            ("cells", 3.78, 3.28), ("minimal", 0.8, 0.8)]
+        sp = spent_summary(info["spend"])
+        assert sp["gatewayCny"] == pytest.approx(4.58)
+        assert sp["rowsCny"] == pytest.approx(4.08)
+        assert sp["difference"] == pytest.approx(0.5)
+        out = tmp_path / "out"
+        assert main(["calibration", "--results", str(cells), str(mini), "--out", str(out)]) == 0
+        res = json.loads((out / "result.json").read_text(encoding="utf-8"))
+        assert res["calibration"]["cost"]["spent"]["gatewayCny"] == pytest.approx(4.58)
+        md = (out / "report.md").read_text(encoding="utf-8")
+        assert "已花（各输出目录网关累计之和，含作废的步与开跑前探测）4.5800 元；结果行合计 4.0800 元；二者之差 0.5000 元" in md
+
+    def test_missing_gateway_file_raises(self, tmp_path):
+        cells, mini = self.split(tmp_path)
+        (tmp_path / "minimal" / "gateway-spend.json").unlink()
+        with pytest.raises(ResultFieldError, match="缺网关花费记录：minimal（缺 gateway-spend.json）"):
+            main(["calibration", "--results", str(cells), str(mini), "--out", str(tmp_path / "out")])
+
+    def test_missing_total_raises(self, tmp_path):
+        cells, mini = self.split(tmp_path)
+        (tmp_path / "cells" / "gateway-spend.json").write_text(json.dumps({"requests": 3}), encoding="utf-8")
+        with pytest.raises(ResultFieldError, match="cells（缺 totalCny）"):
+            main(["calibration", "--results", str(cells), str(mini), "--out", str(tmp_path / "out")])
+
+    def test_rows_cost_takes_last_row(self):
+        rows = [runner_row("01", 1, 1, 1, 2, cost=9.0), runner_row("01", 1, 1, 1, 2, cost=0.4),
+                runner_row("11", 1, 1, 1, 2, cost=0.4)]
+        assert rows_cost(rows) == pytest.approx(0.4 + 0.42)
+
+    def test_formal_missing_gateway_raises(self, tmp_path):
+        f = write_run(tmp_path / "run", formal_rows(), ident=identity(FORMAL_CONDITIONS), gateway_cny=None)
+        with pytest.raises(ResultFieldError, match="缺 gateway-spend.json"):
+            main(["formal", "--results", str(f), "--out", str(tmp_path / "o"), "--tasks", tasks_file(tmp_path)])
 
 
 class TestStepSpace:

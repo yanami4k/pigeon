@@ -300,6 +300,7 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
     settings: list[dict[str, Any]] = []
     # 会话文件的汇总按输出目录各记一条：不同目录的身份摘要可以相同（摘要不含条件与各 agent 参数），不能以摘要为键
     sessions_info: list[dict[str, Any]] = []
+    spend_info: list[dict[str, Any]] = []
     session_counts: dict[tuple[str, int, int], dict[str, float]] = {}
     for run_dir, dir_rows in by_dir.items():
         needs_pigeon = any(CONDITION_TO_CELL[r["condition"]] != "M" for r in dir_rows)
@@ -313,6 +314,7 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
         counts, info = load_session_metrics(run_dir, dir_rows, CONDITION_TO_CELL)
         session_counts.update(counts)
         sessions_info.append({"dir": run_dir.name, "digest": ident["digest"], **info})
+        spend_info.append({"dir": run_dir.name, **read_gateway_spend(run_dir), "rowsCny": rows_cost(dir_rows)})
     for rec in records:
         extra = session_counts.get((rec["cell"], int(rec["task"]), int(rec["pass_no"])))
         if extra:
@@ -325,8 +327,53 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
         "fieldsAbsent": sorted(set(TRACKED_FIELDS) - present),
         "settings": settings,
         "sessions": sessions_info,
+        "spend": spend_info,
     }
     return make_table(records), info
+
+
+# 网关花费累计的落盘文件（跑批器 src/eval/stream-experiment.ts 的 GATEWAY_SPEND_FILE）
+GATEWAY_SPEND_FILE = "gateway-spend.json"
+
+
+def read_gateway_spend(run_dir: Path) -> dict[str, Any]:
+    """输出目录的网关花费累计（含作废的步与开跑前探测的请求）。缺文件或缺 totalCny 时记为缺失（gatewayCny 为 None），
+    由用到"已花"的地方报错，不退回结果行求和。"""
+    f = run_dir / GATEWAY_SPEND_FILE
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"gatewayCny": None, "requests": None, "missing": "no-file"}
+    total = data.get("totalCny") if isinstance(data, dict) else None
+    if not isinstance(total, (int, float)) or isinstance(total, bool):
+        return {"gatewayCny": None, "requests": None, "missing": "no-totalCny"}
+    return {"gatewayCny": float(total), "requests": data.get("requests"), "missing": None}
+
+
+def rows_cost(rows: Iterable[dict[str, Any]]) -> float:
+    """一个输出目录结果行的花费合计（干活加复盘）；同一条件、遍、步取最后出现的一行，与规整表的取法一致。"""
+    last: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+    for r in rows:
+        last[(r["condition"], r["attempt"], r["seq"])] = r
+    total = 0.0
+    for r in last.values():
+        g = r.get("gateway") or {}
+        total += float(g.get("costCny") or 0.0) + float(g.get("reviewCostCny") or 0.0)
+    return total
+
+
+def spent_summary(spend: list[dict[str, Any]]) -> dict[str, Any]:
+    """"已花"（预注册修订 2026-09-28 花费口径的澄清）：各输出目录网关累计之和，含作废的步与开跑前探测；并列结果行合计与
+    二者之差。任一目录缺网关花费记录即报错，不静默退回结果行求和。"""
+    lacking = [s for s in spend if s.get("gatewayCny") is None]
+    if lacking:
+        where = "、".join(f"{s['dir']}（{'缺 ' + GATEWAY_SPEND_FILE if s.get('missing') == 'no-file' else '缺 totalCny'}）"
+                         for s in lacking)
+        raise ResultFieldError(f"已花按网关累计计，但输出目录缺网关花费记录：{where}")
+    gateway = sum(float(s["gatewayCny"]) for s in spend)
+    rows = sum(float(s["rowsCny"]) for s in spend)
+    return {"gatewayCny": gateway, "rowsCny": rows, "difference": gateway - rows,
+            "byDir": [{k: s[k] for k in ("dir", "gatewayCny", "requests", "rowsCny")} for s in spend]}
 
 
 def require_step_space(values: Iterable[int], tasks: Iterable[int], flag: str) -> None:

@@ -152,6 +152,8 @@ def formal_markdown(res: dict[str, Any]) -> str:
     if tp is not None:
         lines += ["", "## 第 3 遍补跑判定（只看预算与波动）", ""]
         lines.append(f"- v = {_v(tp['v'], 6)}；剩余预算 B = {_v(tp.get('remaining'), 2)} 元；C3 = {_v(tp.get('c3'), 2)} 元")
+        lines.append(spent_line({"gatewayCny": tp.get("spentGateway"), "rowsCny": tp.get("spentRows"),
+                                 "difference": tp.get("spentDifference")}))
         for name in ("push", "search"):
             r = tp["byEffect"].get(name)
             if r:
@@ -160,6 +162,12 @@ def formal_markdown(res: dict[str, Any]) -> str:
         lines.append(f"- 判定：{'补第 3 遍' if d else ('不补' if d is False else '无法判定（' + tp.get('reason', '') + '）')}")
     lines += [""] + input_lines(res["input"], res.get("verifyToolFaults"))
     return "\n".join(lines)
+
+
+def spent_line(sp: dict[str, Any]) -> str:
+    """已花的并列写法：网关累计（口径，含作废的步与开跑前探测）、结果行合计与二者之差。"""
+    return (f"- 已花（各输出目录网关累计之和，含作废的步与开跑前探测）{_v(sp.get('gatewayCny'), 4)} 元；"
+            f"结果行合计 {_v(sp.get('rowsCny'), 4)} 元；二者之差 {_v(sp.get('difference'), 4)} 元")
 
 
 def _ci_raw(ci) -> str:
@@ -215,6 +223,8 @@ def calibration_markdown(res: dict[str, Any]) -> str:
               f"- C_pass = {_v(co.get('cPass'), 2)}，C_M = {_v(co.get('cM_total'), 2)}，C_base = {_v(co.get('cBase'), 2)} 元"
               f"（≤ ¥{K.BUDGET_COMFORT_YUAN:.0f} 按计划开跑；≤ ¥{K.BUDGET_YUAN:.0f} 开跑但第 3 遍基本无望）",
               f"- 判定：{COST_TEXT[co.get('decision')]}"]
+    if co.get("spent"):
+        lines.append(spent_line(co["spent"]))
     if co.get("candidates"):
         lines.append("- 候选（交项目负责人裁决）：" + "；".join(CANDIDATE_TEXT[x] for x in co["candidates"]))
     lines.append("")

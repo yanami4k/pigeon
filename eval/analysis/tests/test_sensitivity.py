@@ -6,11 +6,22 @@ from pigeon_analysis.sensitivity import (
     calibration_design_sensitivity,
     mde,
     rerun_variance,
+    step_costs,
     third_pass_decision,
     third_pass_reduction,
 )
 from pigeon_analysis.table import make_table
 from sim import rec
+
+
+def spent_of(df, extra=0.0):
+    """已花的汇总：网关累计 = 结果行合计 + extra（作废的步与探测只记在网关）。"""
+    rows = float(step_costs(df).sum(skipna=True))
+    return {"gatewayCny": rows + extra, "rowsCny": rows, "difference": extra, "byDir": []}
+
+
+def decide(df, extra=0.0, **kw):
+    return third_pass_decision(df, spent=spent_of(df, extra), **kw)
 
 
 def two_pass(cell, task, y1, y2, **kw):
@@ -59,7 +70,7 @@ class TestVCells:
         recs = []
         for c, sp in (("00", 0.3), ("01", 0.1), ("10", 0.2), ("11", 0.1)):
             recs += self.cell_rows(c, sp)
-        res = third_pass_decision(make_table(recs), minimal_reserve=0.0)
+        res = decide(make_table(recs), minimal_reserve=0.0)
         assert res["v"] == pytest.approx(sum(x ** 2 / 2 for x in (0.3, 0.1, 0.2, 0.1)) / 4)
 
 
@@ -139,7 +150,7 @@ def formal_two_pass(delta, dp_spread=0.0, cost=1.0, review=0.5, minimal=True):
 
 class TestThirdPassDecision:
     def test_budget_and_costs(self):
-        res = third_pass_decision(formal_two_pass([0.05, -0.05, 0.1]))
+        res = decide(formal_two_pass([0.05, -0.05, 0.1]))
         # 四格：24 步 × 1 元 + 推送两格 12 次复盘 × 0.5 元 = 30；C3 = 30 / 2 × 1.1
         assert res["fourCellSpent"] == pytest.approx(30.0)
         assert res["c3"] == pytest.approx(16.5)
@@ -152,7 +163,7 @@ class TestThirdPassDecision:
     def test_tau2_subtracts_half_v(self):
         # 各格同题两遍之差 e = 2δ = 0.1、−0.1、0.2：四格合并的方差 0.18667/8 = 0.023333，v = 0.011667；
         # 推送差因题而异 −0.1、0、0.1：s² = 0.01；τ² = s² − v/2 = 0.0041667（两遍平均后噪声为 v/2）
-        res = third_pass_decision(formal_two_pass([0.05, -0.05, 0.1], dp_spread=0.1))
+        res = decide(formal_two_pass([0.05, -0.05, 0.1], dp_spread=0.1))
         assert res["v"] == pytest.approx(0.18666667 / 8 / 2)
         push = res["byEffect"]["push"]
         assert push["s2"] == pytest.approx(0.01)
@@ -161,12 +172,12 @@ class TestThirdPassDecision:
 
     def test_budget_boundary_inclusive(self):
         df = formal_two_pass([0.05, -0.05, 0.1])
-        assert third_pass_decision(df, budget=33 + 16.5)["decision"] is True
-        assert third_pass_decision(df, budget=33 + 16.49)["decision"] is False
+        assert decide(df, budget=33 + 16.5)["decision"] is True
+        assert decide(df, budget=33 + 16.49)["decision"] is False
 
     def test_large_heterogeneity_blocks(self):
         # 推送效果因题差异大、重跑噪声小：第 3 遍几乎帮不上忙
-        res = third_pass_decision(formal_two_pass([0.01, -0.01, 0.01], dp_spread=0.3))
+        res = decide(formal_two_pass([0.01, -0.01, 0.01], dp_spread=0.3))
         assert res["byEffect"]["push"]["reduction"] < 0.10
         # 检索差不含因题差异，第 3 遍能降低 18%：取降低较多者
         assert res["byEffect"]["search"]["reduction"] == pytest.approx(1 - math.sqrt(2 / 3))
@@ -176,22 +187,39 @@ class TestThirdPassDecision:
         df = formal_two_pass([0.01, -0.01, 0.01], dp_spread=0.3)
         # 让检索格也随题大幅变化：01、11 两格再加一项
         df.loc[df.cell.isin(["01"]), "score"] += (df.loc[df.cell.isin(["01"]), "task"] - 2) * 0.3
-        res = third_pass_decision(df)
+        res = decide(df)
         assert res["bestReduction"] < 0.10
         assert res["reductionOk"] is False
         assert res["decision"] is False
 
+    def test_spent_is_gateway_total_not_rows(self):
+        """作废的步与开跑前探测只记在网关：已花取网关累计，结果行合计与差额并列给出；C3 仍按结果行。"""
+        df = formal_two_pass([0.05, -0.05, 0.1])
+        res = decide(df, extra=5.0)
+        assert res["spentGateway"] == pytest.approx(38.0)
+        assert res["spentRows"] == pytest.approx(33.0)
+        assert res["spentDifference"] == pytest.approx(5.0)
+        assert res["remaining"] == pytest.approx(650 - 38)
+        assert res["c3"] == pytest.approx(16.5)
+        # 按结果行算够、按网关算不够：以网关为准
+        assert decide(df, budget=33 + 16.5)["decision"] is True
+        assert decide(df, extra=5.0, budget=33 + 16.5)["decision"] is False
+
+    def test_spent_is_required(self):
+        with pytest.raises(TypeError):
+            third_pass_decision(formal_two_pass([0.05, -0.05, 0.1]))
+
     def test_minimal_not_run_requires_reserve(self):
         df = formal_two_pass([0.05, -0.05, 0.1], minimal=False)
-        assert third_pass_decision(df)["decision"] is None
-        res = third_pass_decision(df, minimal_reserve=100.0)
+        assert decide(df)["decision"] is None
+        res = decide(df, minimal_reserve=100.0)
         assert res["remaining"] == pytest.approx(650 - 30 - 100)
         assert res["decision"] is True
 
     def test_does_not_look_at_effect_mean(self):
-        a = third_pass_decision(formal_two_pass([0.05, -0.05, 0.1]))
+        a = decide(formal_two_pass([0.05, -0.05, 0.1]))
         df = formal_two_pass([0.05, -0.05, 0.1])
         df.loc[df.cell.isin(["10", "11"]), "score"] += 0.2
-        b = third_pass_decision(df)
+        b = decide(df)
         assert a["bestReduction"] == pytest.approx(b["bestReduction"])
         assert a["decision"] == b["decision"]

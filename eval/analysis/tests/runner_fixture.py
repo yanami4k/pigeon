@@ -118,8 +118,17 @@ def identity(conditions=("search-only", "search-push", "minimal"), *, prompt_for
     return {"core": core, "info": {"concurrency": 4, "harness": {"commit": "h", "dirty": False}}, "digest": DIGEST}
 
 
-def write_run(run_dir: Path, rows, ident=None, torn=False) -> Path:
+def write_run(run_dir: Path, rows, ident=None, torn=False, gateway_cny: float | None | str = "rows") -> Path:
+    """gateway_cny：网关花费记录 gateway-spend.json 的 totalCny；缺省为结果行合计（没有作废的步、没有探测），
+    给数即写该数，None 为不写这个文件。"""
     run_dir.mkdir(parents=True, exist_ok=True)
+    if gateway_cny is not None:
+        if gateway_cny == "rows":
+            gateway_cny = sum(float((r.get("gateway") or {}).get("costCny") or 0.0)
+                              + float((r.get("gateway") or {}).get("reviewCostCny") or 0.0)
+                              for r in rows if isinstance(r, dict))
+        (run_dir / "gateway-spend.json").write_text(
+            json.dumps({"totalCny": gateway_cny, "requests": 1, "peakRequests": 0}), encoding="utf-8")
     conditions = sorted({r["condition"] for r in rows if isinstance(r, dict) and "condition" in r})
     ident = ident if ident is not None else identity(conditions)
     (run_dir / "identity.json").write_text(json.dumps(ident, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -269,16 +269,18 @@ def analyze_calibration(
     compaction_trigger: float | None = None,
     eligible: Iterable[int] | None = None,
     settings: dict[str, Any] | None = None,
+    spent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """校准分析：各项取值与设计灵敏度。formal_valid_tasks 为正式跑的有效题数（89 道里要做到的不为零的题数，
     MDE 的 n），未给时只报 v 与 τ²、不算 MDE。eligible 给出时核对结果里的题是否正是按种子抽出的 15 道。
-    settings 为身份头里的设置：题面格式决定难度关是否为用例名复测；没给压缩触发点时取其中的压缩触发点。"""
+    settings 为身份头里的设置：题面格式决定难度关是否为用例名复测；没给压缩触发点时取其中的压缩触发点。
+    spent 为 reader.spent_summary 的结果（已花取网关累计，并列结果行合计与二者之差），给出时记入花费一节。"""
     prompt_format = settings["promptFormat"] if settings else None
     if compaction_trigger is None and settings and settings.get("compaction"):
         compaction_trigger = float(settings["compaction"]["thresholdTokens"])
     out: dict[str, Any] = {
         "difficultyGate": difficulty_gate(df, prompt_format),
-        "cost": cost_rule(df, formal_tasks),
+        "cost": {**cost_rule(df, formal_tasks), **({"spent": spent} if spent is not None else {})},
         "contextPeak": context_peak(df, compaction_trigger),
         "stepBudget": step_budget_rule(df),
         "memoryCap": memory_cap_rule(df),
