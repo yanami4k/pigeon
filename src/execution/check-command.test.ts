@@ -2,11 +2,43 @@
 // 退出码三值判决（0 通过、非 0 失败、超时或拉不起来为未判定）。会话级验证命令是人配置的一行命令，经系统 shell 执行，
 // 实际交给子进程的参数数组原样记录。
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { judgeVerdict, runCheckCommand, shellCommand } from "./check-command.ts";
+
+// 进程是否还在：Windows 用 tasklist 查 PID，其余用 kill(pid,0)（EPERM 视为仍在）
+function isAlive(pid: number): boolean {
+  if (process.platform === "win32") {
+    try {
+      const out = execFileSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH"], { encoding: "utf8" });
+      return out.includes(String(pid));
+    } catch {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function waitGone(pid: number, budgetMs: number): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) {
+      return true;
+    }
+    await sleep(50);
+  }
+  return !isAlive(pid);
+}
 
 function workspace(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-check-"));
@@ -65,6 +97,39 @@ test("超时终止并判未判定；工作区不存在时拉不起来也判未�
     assert.equal(missing.verdict, "undetermined");
     assert.ok(missing.error !== undefined);
   } finally {
+    cleanup();
+  }
+});
+
+test("超时终止整棵进程树：shell 里再起的 node 孙进程在宽限内消失，不留孤儿", async () => {
+  const { dir, cleanup } = workspace();
+  let grandchildPid = 0;
+  try {
+    const pidFile = join(dir, "gc.pid");
+    // 经系统 shell 起 node hang.mjs：shell 是直接子进程，node 是孙进程，它把自己的 pid 写进文件
+    writeFileSync(
+      join(dir, "hang.mjs"),
+      `import { writeFileSync } from "node:fs";\n` +
+        `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        `setInterval(() => {}, 1000);\n`
+    );
+    const hung = await runCheckCommand({
+      ...shellCommand(`${NODE} hang.mjs`),
+      cwd: dir,
+      timeoutMs: 800,
+    });
+    assert.equal(hung.timedOut, true);
+    grandchildPid = Number(readFileSync(pidFile, "utf8"));
+    assert.ok(grandchildPid > 0, "孙进程应已写出 pid");
+    assert.equal(await waitGone(grandchildPid, 6000), true, "超时后孙进程应在宽限内消失");
+  } finally {
+    if (grandchildPid > 0 && isAlive(grandchildPid)) {
+      try {
+        process.kill(grandchildPid, "SIGKILL");
+      } catch {
+        // 已退出
+      }
+    }
     cleanup();
   }
 });

@@ -6,6 +6,12 @@ import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveWorkspacePath } from "./paths.ts";
+import {
+  killProcessTree,
+  processGroupSpawnOptions,
+  trackChild,
+  untrackChild,
+} from "./process-tree.ts";
 import type {
   HostExecOptions,
   HostExecPlan,
@@ -83,6 +89,9 @@ export function createHeadCollector(maxBytes: number): HeadCollector {
   };
 }
 
+// 终止后等 close 的宽限（毫秒）：孙进程占着输出管道时 close 迟迟不来，超时形同虚设，故到点销毁管道、按结果收尾
+const KILL_GRACE_MS = 5000;
+
 function runLocalProcess(
   plan: HostExecPlan,
   cwd: string,
@@ -95,10 +104,13 @@ function runLocalProcess(
   ): HostExecResult => ({ ...partial, timedOut, ...collected.finish() });
   return new Promise((resolve) => {
     let settled = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
     // 只决议一次且只在决议时收尾：启动失败时 error 与 close 两个事件都会到达，哈希只能 digest 一次
     const settle = (build: () => HostExecResult) => {
       if (!settled) {
         settled = true;
+        clearTimeout(grace);
+        untrackChild(child);
         resolve(build());
       }
     };
@@ -110,8 +122,11 @@ function runLocalProcess(
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments: plan.verbatim,
+        // 以独立进程组拉起：超时或中止时对整组发信号，覆盖子进程再起的 node / pytest 等孙进程
+        ...processGroupSpawnOptions(),
         stdio: ["ignore", "pipe", "pipe"],
       });
+      trackChild(child);
     } catch (error) {
       settle(() =>
         finish({ spawned: false, spawnError: error as NodeJS.ErrnoException, exitCode: null })
@@ -120,11 +135,22 @@ function runLocalProcess(
     }
     child.stdout?.on("data", (chunk: Buffer) => collected.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => collected.push(chunk));
+    // 超时与中止都 SIGKILL 整组并给宽限：close 在宽限内不来（孙进程仍占管道）就销毁管道、按当前结果收尾
+    const terminate = () => {
+      killProcessTree(child, "SIGKILL");
+      if (grace === undefined) {
+        grace = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          settle(() => finish({ spawned: true, exitCode: null }));
+        }, KILL_GRACE_MS);
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      terminate();
     }, options.timeoutMs);
-    const onAbort = () => child.kill();
+    const onAbort = () => terminate();
     options.signal?.addEventListener("abort", onAbort, { once: true });
     const cleanup = () => {
       clearTimeout(timer);

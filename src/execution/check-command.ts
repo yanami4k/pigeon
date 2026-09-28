@@ -3,9 +3,15 @@
 // 三值判决：退出码 0 通过、非 0 失败，超时、被信号终止、拉不起来为未判定。
 // Eval 验证器（参数数组不经 shell）与会话级验证命令（人配置的一行命令，经系统 shell）共用本模块；
 // 记录的参数数组即实际交给子进程的参数，不做美化。
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { EvalVerdict } from "../state/runtime-events.ts";
+import {
+  killProcessTree,
+  processGroupSpawnOptions,
+  trackChild,
+  untrackChild,
+} from "../tools/process-tree.ts";
 
 // 截断输出只留尾部（测试日志的结论在末尾）
 export const CHECK_OUTPUT_LIMIT_BYTES = 16 * 1024;
@@ -84,8 +90,11 @@ export async function runCheckCommand(input: CheckCommandInput): Promise<CheckOu
         env: input.env ?? process.env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        // 以独立进程组拉起：超时终止时对整组发信号，覆盖 /bin/sh -c 里再起的 node 等孙进程
+        ...processGroupSpawnOptions(),
         ...(input.verbatimArguments === true ? { windowsVerbatimArguments: true } : {}),
       });
+      trackChild(child);
     } catch (error) {
       resolve({
         exitCode: null,
@@ -108,13 +117,15 @@ export async function runCheckCommand(input: CheckCommandInput): Promise<CheckOu
       settled = true;
       clearTimeout(timer);
       clearTimeout(grace);
+      untrackChild(child);
       resolve(value);
     };
     child.stdout?.on("data", (chunk: Buffer) => collected.push(chunk, true));
     child.stderr?.on("data", (chunk: Buffer) => collected.push(chunk, false));
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(child.pid, () => child.kill("SIGKILL"));
+      // 超时直接 SIGKILL 整组：验证脚本已判超时，无需给孙进程善后机会，决胜要快
+      killProcessTree(child, "SIGKILL");
       // 终止后给宽限：孙进程可能仍占着输出管道，close 迟迟不来时销毁管道、按超时收尾，判决不无限等待
       grace = setTimeout(() => {
         child.stdout?.destroy();
@@ -218,21 +229,4 @@ function parseTailJson(stdout: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-// 超时终止整棵进程树（验证脚本常再起 node --test 子进程）；Windows 用 taskkill /T
-function killTree(pid: number | undefined, fallback: () => void): void {
-  if (pid === undefined) {
-    fallback();
-    return;
-  }
-  if (process.platform === "win32") {
-    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, (error) => {
-      if (error !== null) {
-        fallback();
-      }
-    });
-    return;
-  }
-  fallback();
 }
