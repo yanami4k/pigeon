@@ -6,6 +6,7 @@
 // M5.5 S3（决策 040）：与 tui 版同口径——worker 请求标明来源，放权写进请求来源会话的存储
 // M5.5 S5（决策 048 及其修订）：exec 档原样显示将执行的命令串，需 shell 时标明；[a] 收窄为这条一模一样的
 // 命令串（需 shell 的带 shell 标记），不提供 [d]
+// 决策 290：网络档（web_fetch）显示将访问的网站，[a] 为"以后都允许访问该网站"（按主机名放权），不提供 [d]
 import { approvalSourceLine, workerGrantScopeNote } from "../application/format.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import {
@@ -14,6 +15,7 @@ import {
   execCommandLine,
   execGrantKeyLabel,
   grantScopeFor,
+  hostGrantKeyLabel,
   offersDirectoryGrant,
 } from "../approvals/handler.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
@@ -41,6 +43,10 @@ export function createCliApprovalHandler(
     if (commandLine !== undefined) {
       write(`${commandLine}\n`);
     }
+    if (request.host !== undefined) {
+      write(`网站：${request.host}
+`);
+    }
     write(`参数：\n${JSON.stringify(request.args, null, 2)}\n`);
     if (request.diffPreview !== undefined) {
       write(`改动预览：\n${request.diffPreview}\n`);
@@ -50,11 +56,13 @@ export function createCliApprovalHandler(
     const prompt =
       grants === undefined
         ? "批准执行？[y/N] "
-        : request.tier === "exec"
-          ? `批准执行？[y] 批准一次 / [n] 拒绝 / ${execGrantKeyLabel(request)} `
-          : offersDirectoryGrant(request, grants)
-            ? "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录) "
-            : "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 ";
+        : request.host !== undefined
+          ? `批准执行？[y] 批准一次 / [n] 拒绝 / ${hostGrantKeyLabel(request)} `
+          : request.tier === "exec"
+            ? `批准执行？[y] 批准一次 / [n] 拒绝 / ${execGrantKeyLabel(request)} `
+            : offersDirectoryGrant(request, grants)
+              ? "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录) "
+              : "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 ";
     const answer = await ask(prompt);
     const normalized = answer?.trim().toLowerCase() ?? "";
     if (normalized === "a" || normalized === "d") {

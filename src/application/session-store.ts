@@ -247,6 +247,7 @@ export function grantCreatedEntry(input: GrantCreatedInput): SessionCustomEntry 
       ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
       ...(input.command !== undefined ? { command: input.command } : {}),
       ...(input.shell !== undefined ? { shell: input.shell } : {}),
+      ...(input.host !== undefined ? { host: input.host } : {}),
       firstCall: input.firstCall,
       createdAt: input.createdAt,
     },

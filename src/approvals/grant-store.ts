@@ -4,6 +4,7 @@
 // tools/grants.ts（与固化规则同一判定）。
 // M5.5 S5（决策 048 及其修订）：exec 档放权带 command——只匹配这条一模一样的命令串；带 shell 标记的才能免审
 // 一条需 shell 的命令。
+// 决策 290：网络档放权带 host——只匹配网址主机名一模一样的调用（web_fetch 按网站放行）。
 
 import type { ActiveGrant } from "../state/grants.ts";
 import { asGrantId, type GrantId, newGrantId, type RunId } from "../state/ids.ts";
@@ -64,6 +65,7 @@ export class SessionGrantStore {
     pathPrefix?: string;
     command?: string;
     shell?: boolean;
+    host?: string;
     firstCall: { toolCallId: string; args: unknown };
     runId?: RunId;
   }): SessionGrantView {
@@ -78,6 +80,7 @@ export class SessionGrantStore {
       ...(input.pathPrefix !== undefined ? { pathPrefix: input.pathPrefix } : {}),
       ...(input.command !== undefined ? { command: input.command } : {}),
       ...(input.shell === true ? { shell: true } : {}),
+      ...(input.host !== undefined ? { host: input.host } : {}),
     };
     this.#sink?.appendGrantCreated({
       grantId,
@@ -129,7 +132,8 @@ export class SessionGrantStore {
           args,
           grant.command,
           grant.shell,
-          context.needsShell
+          context.needsShell,
+          grant.host
         )
       ) {
         return { source: "session-grant", refId: grant.grantId };

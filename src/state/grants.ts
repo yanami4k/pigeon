@@ -27,6 +27,8 @@ export const ConfigGrantRuleSchema = Type.Object({
   command: Type.Optional(Type.String({ minLength: 1 })),
   // 048 修订：经 shell 运行这条命令已由人确认（缺省 = false，旧规则不能免审需 shell 的命令）
   shell: Type.Optional(Type.Boolean()),
+  // 决策 290：网络档（web_fetch）按网站放权——只放行网址主机名与之一模一样（不区分大小写）的调用
+  host: Type.Optional(Type.String({ minLength: 1 })),
   promotedFrom: PromotedFromSchema,
 });
 export type ConfigGrantRule = Static<typeof ConfigGrantRuleSchema>;
@@ -45,6 +47,8 @@ export interface ActiveGrant {
   command?: string;
   // 048 修订：经 shell 已由人确认
   shell?: boolean;
+  // 决策 290：按网站放权的主机名
+  host?: string;
   createdAt: number;
   firstCall: { toolCallId: string; args: unknown };
 }

@@ -23,6 +23,7 @@ import {
   type VerificationData,
   type WorkerData,
 } from "./session-entries.ts";
+import { addTurnUsage, toolResultModelUsage } from "./tool-usage.ts";
 
 // 读取器给出的一条条目（结构兼容 persistence/session-reader.ts 的 StoredEntry；state 不依赖 persistence）
 export interface StoreEntry {
@@ -636,7 +637,7 @@ export function storeToolOutcomes(view: StoreSessionView): StoreToolOutcome[] {
   return outcomes;
 }
 
-// 一次调用是否"需要人来批"：写档与命令档里，审批闸以 yolo 批发授权放行（有人在场时会被问）、由人批准或拒绝、
+// 一次调用是否"需要人来批"：写档、命令档与网络档里，审批闸以 yolo 批发授权放行（有人在场时会被问）、由人批准或拒绝、
 // 或因没有审批通道而拒绝的；固化规则与会话放权放行的、deny 清单拒绝的、读档的不算
 function neededApproval(
   call: ToolCallBlock,
@@ -644,7 +645,10 @@ function neededApproval(
   run: StoreRun,
   tier: string | undefined
 ): boolean {
-  if ((tier !== "write" && tier !== "exec") || isInterruptedToolResult(result)) {
+  if (
+    (tier !== "write" && tier !== "exec" && tier !== "network") ||
+    isInterruptedToolResult(result)
+  ) {
     return false;
   }
   const mark = toolResultMark(result);
@@ -729,6 +733,14 @@ export function storeRunMetrics(
   let toolCalls = 0;
   for (const run of runs) {
     for (const { message } of run.messages) {
+      // 工具执行中另发的模型请求（web_fetch 的提炼等）：用量记在工具结果的 details 里，一并计入
+      if (message.role === "toolResult") {
+        const extra = toolResultModelUsage(message.details);
+        if (extra !== undefined) {
+          addTurnUsage(usage, extra);
+        }
+        continue;
+      }
       if (message.role !== "assistant") {
         continue;
       }
@@ -780,6 +792,7 @@ export function storeActiveGrants(view: StoreSessionView): ActiveGrant[] {
       ...(data.pathPrefix !== undefined ? { pathPrefix: data.pathPrefix } : {}),
       ...(data.command !== undefined ? { command: data.command } : {}),
       ...(data.shell === true ? { shell: true } : {}),
+      ...(data.host !== undefined ? { host: data.host } : {}),
       createdAt: data.createdAt,
       firstCall: data.firstCall as ActiveGrant["firstCall"],
     });

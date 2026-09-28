@@ -38,6 +38,7 @@ import {
   sessionCreatedAt,
 } from "./session-summary.ts";
 import { omittedThinkingOf } from "./thinking-omission.ts";
+import { toolResultModelUsage } from "./tool-usage.ts";
 
 // 读取结果里本投影用到的部分（结构类型）
 export interface SessionFileEntryInput {
@@ -541,6 +542,14 @@ export function summarizeSessionView(view: SessionView): SessionViewSummary {
     if (message.usage !== undefined) {
       totalTokens += message.usage.totalTokens;
       totalCost += message.usage.cost.total;
+    }
+    // 工具执行中另发的模型请求（web_fetch 的提炼等）：用量记在工具结果的 details 里，一并计入
+    if (message.role === "toolResult") {
+      const extra = toolResultModelUsage(message.raw.details);
+      if (extra !== undefined) {
+        totalTokens += extra.totalTokens;
+        totalCost += extra.cost.total;
+      }
     }
   }
   return {

@@ -113,6 +113,8 @@ export const GrantCreatedInputSchema = Type.Object({
   // 决策 048：exec 档精确命令串——只放行这条一模一样的命令
   command: Type.Optional(Type.String({ minLength: 1 })),
   shell: Type.Optional(Type.Boolean()),
+  // 决策 290：按网站放权的主机名（web_fetch）
+  host: Type.Optional(Type.String({ minLength: 1 })),
   createdAt: Type.Integer({ minimum: 0 }),
   firstCall: Type.Object({
     toolCallId: Type.String({ minLength: 1 }),

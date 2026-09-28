@@ -6,6 +6,7 @@
 //（决策 3a；无 path 时提示不提供该键，仍按下则与 cli 版同语义退化为工具级，同 [a]）。
 // M5.5 S5（决策 048 及其修订）：exec 档原样显示将执行的命令串，需 shell 时标明；[a] 收窄为这条一模一样的命令串
 // （需 shell 的带 shell 标记），不提供 [d]。
+// 决策 290：网络档（web_fetch）显示将访问的网站，[a] 为"以后都允许访问该网站"（按主机名放权），不提供 [d]。
 //
 // 面板交互语义（决策 029）：
 // - ApprovalHandler 是异步函数（M2 开工 5a 第 2 件）：面板把 Promise 挂起，
@@ -32,6 +33,7 @@ import {
   execCommandLine,
   execGrantKeyLabel,
   grantScopeFor,
+  hostGrantKeyLabel,
   offersDirectoryGrant,
 } from "../approvals/handler.ts";
 
@@ -75,17 +77,22 @@ export function approvalBlockText(
   if (commandLine !== undefined) {
     lines.push(commandLine);
   }
+  if (request.host !== undefined) {
+    lines.push(`网站：${request.host}`);
+  }
   lines.push("参数：");
   lines.push(JSON.stringify(request.args, null, 2) ?? "undefined");
   if (request.diffPreview !== undefined) {
     lines.push("改动预览：", request.diffPreview);
   }
   lines.push(
-    request.tier === "exec"
-      ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
-      : directoryGrant
-        ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
-        : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许"
+    request.host !== undefined
+      ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${hostGrantKeyLabel(request)}`
+      : request.tier === "exec"
+        ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
+        : directoryGrant
+          ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
+          : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许"
   );
   return lines.join("\n");
 }

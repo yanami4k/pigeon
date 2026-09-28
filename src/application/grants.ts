@@ -8,6 +8,7 @@
 // 升格与移除只操作放权配置文件（决策 128：原先的固化升格与固化移除两种留痕已退役）；
 // 固化规则的稳定身份是 promotedFrom.grantId，审批决定的配置规则命中按它回指。
 // M5.5 S5（决策 048）：exec 档的精确命令放权同一套流程——升格与移除都携带 command。
+// 决策 290：网络档的按网站放权同一套流程——升格与移除都携带 host。
 // IO 全依赖注入：write 是内联结构类型（一行文本回调），命令层不 import 任何 Actor。
 
 import { GrantNotFoundError, type SessionGrantStore } from "../approvals/grant-store.ts";
@@ -40,7 +41,15 @@ function formatTime(ms: number): string {
 }
 
 // 作用域措辞（唯一约定：/grants 与 trace 共用口径）
-function scopeWording(pathPrefix: string | undefined, command?: string, shell?: boolean): string {
+function scopeWording(
+  pathPrefix: string | undefined,
+  command?: string,
+  shell?: boolean,
+  host?: string
+): string {
+  if (host !== undefined) {
+    return `仅限网站 ${host}`;
+  }
   if (command !== undefined) {
     return `仅限命令 ${command}${shell === true ? "（经 shell）" : ""}`;
   }
@@ -48,15 +57,22 @@ function scopeWording(pathPrefix: string | undefined, command?: string, shell?: 
 }
 
 // 放权作用域字段的原样携带（升格写配置用）
-function scopeFields(scope: { pathPrefix?: string; command?: string; shell?: boolean }): {
+function scopeFields(scope: {
   pathPrefix?: string;
   command?: string;
   shell?: boolean;
+  host?: string;
+}): {
+  pathPrefix?: string;
+  command?: string;
+  shell?: boolean;
+  host?: string;
 } {
   return {
     ...(scope.pathPrefix !== undefined ? { pathPrefix: scope.pathPrefix } : {}),
     ...(scope.command !== undefined ? { command: scope.command } : {}),
     ...(scope.shell === true ? { shell: true } : {}),
+    ...(scope.host !== undefined ? { host: scope.host } : {}),
   };
 }
 
@@ -94,7 +110,7 @@ function listGrants(ctx: GrantsCommandContext): void {
   lines.push(`会话放权（${sessionGrants.length}）：`);
   for (const grant of sessionGrants) {
     lines.push(
-      `  ${grant.grantId} ｜ ${grant.tool} ｜ ${scopeWording(grant.pathPrefix, grant.command, grant.shell)} ｜ ` +
+      `  ${grant.grantId} ｜ ${grant.tool} ｜ ${scopeWording(grant.pathPrefix, grant.command, grant.shell, grant.host)} ｜ ` +
         `创建 ${formatTime(grant.createdAt)} ｜ 命中 ${grant.hitCount} 次 ｜ ` +
         `首调 ${grant.firstCall.toolCallId}（${summarizeArgs(grant.firstCall.args)}）`
     );
@@ -102,7 +118,7 @@ function listGrants(ctx: GrantsCommandContext): void {
   lines.push(`固化规则（${ctx.configRules.length}，来自 .pigeon/grants.json）：`);
   for (const [index, rule] of ctx.configRules.entries()) {
     lines.push(
-      `  config#${index} ｜ ${rule.tool} ｜ ${scopeWording(rule.pathPrefix, rule.command, rule.shell)} ｜ ` +
+      `  config#${index} ｜ ${rule.tool} ｜ ${scopeWording(rule.pathPrefix, rule.command, rule.shell, rule.host)} ｜ ` +
         `升格 ${formatTime(rule.promotedFrom.promotedAt)} ｜ ` +
         `出处 会话 ${shortId(rule.promotedFrom.sessionId)} / grant ${shortId(rule.promotedFrom.grantId)} ｜ ` +
         `首调 ${rule.promotedFrom.firstCall.toolCallId}`
