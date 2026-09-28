@@ -1,10 +1,14 @@
 // 提交流实验的装配（第三至六节；193 固定起点）：读流清单，按仓库选运行方式，起一个装有人的完整历史的参考容器算全量测量的
 // 基准，按条件接入 agent，交给跑批器；结束后移除参考容器。
+
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
+import { DEFAULT_MEMORY_LIMIT_CHARS } from "../memory/learned.ts";
+import { REVIEW_TEMPLATE_VERSION } from "../memory/review-text.ts";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_LEVEL,
@@ -106,9 +110,11 @@ export function streamPigeonOptions(
   return { ...pigeon, yolo: true };
 }
 
-// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限与压缩配置记运行时的缺省值（off、16,384、
-// 产品缺省的压缩配置），不记 null；温度没给即由服务端决定，记 null
+// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限、压缩配置、记忆上限与复盘上限记运行时的
+// 缺省值（off、16,384、产品缺省的压缩配置、12,000 字符、40 轮与 15 分钟），不记 null；温度没给即由服务端决定，记 null；
+// 复盘模板版本记当前的 v1
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
+  const reviewBudget = pigeon.reviewBudget ?? DEFAULT_REVIEW_BUDGET;
   return {
     provider: pigeon.provider ?? GATEWAY_PROVIDER,
     modelId: pigeon.modelId ?? modelId,
@@ -116,6 +122,9 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
     maxOutputTokens: pigeon.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     compaction: resolveCompactionConfig(pigeon.compaction),
+    memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMIT_CHARS,
+    reviewTemplate: REVIEW_TEMPLATE_VERSION,
+    reviewBudget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
   };
 }
 

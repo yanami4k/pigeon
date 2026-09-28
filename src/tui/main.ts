@@ -23,7 +23,11 @@ import {
   resolveVerifyConfig,
 } from "../application/launch-flags.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
-import { type OpenedSessionRuntime, openSessionRuntime } from "../application/session-runtime.ts";
+import {
+  type OpenedSessionRuntime,
+  openSessionRuntime,
+  pushedMemoryRunOptions,
+} from "../application/session-runtime.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -39,7 +43,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "用法：node src/tui/main.ts [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>]";
 
 async function main(argv: string[]): Promise<void> {
@@ -52,6 +56,7 @@ async function main(argv: string[]): Promise<void> {
     historyLimit: true,
     verify: true,
     retry: true,
+    pushedMemory: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, USAGE));
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
@@ -113,6 +118,7 @@ async function main(argv: string[]): Promise<void> {
                   persistThinking: flags.persistThinking,
                   ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
                   ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
+                  ...pushedMemoryRunOptions(flags),
                   ...(verify !== undefined ? { verify } : {}),
                 },
               }),

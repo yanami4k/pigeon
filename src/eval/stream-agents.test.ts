@@ -17,6 +17,7 @@ import { listSessionFiles } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
+import type { GatewayMeter } from "./model-gateway.ts";
 import {
   clearMarkedProcesses,
   commandStepAgent,
@@ -495,13 +496,22 @@ function countingStreamFn(inner: StreamFn) {
 }
 
 // Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多两件
-// 检索工具（193）
+// 检索工具（193），推送格多记忆工具（217）
 const PIGEON_STREAM_TOOLS = {
+  "search-push": [
+    "edit_file",
+    "read_file",
+    "read_session_entry",
+    "run_command",
+    "search_sessions",
+    "update_memory",
+  ],
   "search-only": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
+  "push-only": ["edit_file", "read_file", "run_command", "update_memory"],
   neither: ["edit_file", "read_file", "run_command"],
 } as const;
 
-for (const condition of ["search-only", "neither"] as const) {
+for (const condition of ["search-push", "search-only", "push-only", "neither"] as const) {
   test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用与回炉），工具清单里没有派生 agent 或 worker 的工具，会话检索工具随条件的开关增减`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
@@ -542,7 +552,12 @@ for (const condition of ["search-only", "neither"] as const) {
           verify: FIXED_GATE,
         })
       );
-      assert.equal(counting.seen.calls, 8, "四格都开回炉：修满 3 轮");
+      // 四格都开回炉：修满 3 轮；推送格另有一次收尾复盘（复盘沿用同一套工具定义）
+      assert.equal(
+        counting.seen.calls,
+        CONDITION_SPECS[condition].pushedMemory ? 9 : 8,
+        "四格都开回炉：修满 3 轮"
+      );
       assert.equal(counting.seen.peak, 1);
       assert.deepEqual([...counting.seen.tools].sort(), PIGEON_STREAM_TOOLS[condition]);
     } finally {
@@ -1006,8 +1021,8 @@ test("Pigeon agent：验证里检查工具自身崩溃（重跑一次仍崩溃�
   }
 });
 
-test("Pigeon agent：推送记忆的格子把开关交给 headless——推送记忆尚未实现，这一步报错、不发模型请求（作业随之停下并说明）", async () => {
-  for (const condition of ["search-push", "push-only"] as const) {
+test("Pigeon agent：推送格打开推送记忆——系统提示带推送段（无人值守版）、带 update_memory，最后一次验证之后收尾复盘；复盘前后读网关计量，结果带复盘事实；不推送的格子都没有", async () => {
+  for (const condition of ["search-push", "push-only", "neither"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     try {
@@ -1018,18 +1033,59 @@ test("Pigeon agent：推送记忆的格子把开关交给 headless——推送�
         docker: ws.docker,
         homeDir: join(dir, "home"),
       });
-      await assert.rejects(
-        agent.run(
-          input(join(dir, "job"), {
-            condition: CONDITION_SPECS[condition],
-            target: { container: "box", root: ws.containerRoot },
-            verify: FIXED_GATE,
-          })
-        ),
-        /推送记忆尚未实现/,
+      // 假计量：请求数即模型请求次数，每次 0.01 元
+      const meter = (): GatewayMeter => ({
+        requests: inner.calls.length,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        costCny: inner.calls.length / 100,
+        upstreamFailures: 0,
+        queueMs: 0,
+        peakInFlight: 0,
+        peakInputTokens: 0,
+        accountRequests: [inner.calls.length],
+      });
+      const out = await agent.run(
+        input(join(dir, "job"), {
+          condition: CONDITION_SPECS[condition],
+          target: { container: "box", root: ws.containerRoot },
+          verify: FIXED_GATE,
+          meter,
+        })
+      );
+      assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "pass" }, condition);
+      const pushed = CONDITION_SPECS[condition].pushedMemory;
+      const first = inner.calls[0];
+      assert.ok(first !== undefined);
+      assert.equal(
+        first.context.systemPrompt?.includes("## 学到的记忆") === true,
+        pushed,
         condition
       );
-      assert.equal(inner.calls.length, 0, condition);
+      assert.equal(
+        first.context.systemPrompt?.includes("当前任务的要求与某条记忆冲突时") === true,
+        false,
+        "空记忆用没有条目的一版"
+      );
+      assert.equal(
+        (first.context.tools ?? []).some((tool) => tool.name === "update_memory"),
+        pushed,
+        condition
+      );
+      if (pushed) {
+        // 干活两次请求，收尾复盘一次
+        assert.equal(inner.calls.length, 3, condition);
+        assert.equal(out.review?.closing, 1);
+        assert.equal(out.review?.preCompaction, 0);
+        assert.deepEqual(out.review?.failures, []);
+        assert.equal(out.review?.meter?.requests, 1);
+        assert.equal(out.review?.meter?.costCny.toFixed(6), (0.01).toFixed(6));
+      } else {
+        assert.equal(inner.calls.length, 2, condition);
+        assert.equal(out.review, undefined);
+      }
     } finally {
       ws.cleanup();
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

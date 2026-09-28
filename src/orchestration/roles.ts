@@ -3,8 +3,11 @@
 // （父 prompt 不派 yolo 子）。assertPolicySubset 是构造之外的第二道校验，派出前必过。
 // 第一版学习闭环退役（决策 137 / 158）：reviewer、distiller、verifier 三个角色停用、不再派出；
 // 账本里的角色取值（WorkerRoleSchema）保留，旧会话记录照常读取。
+// 决策 249：推送记忆开着时（父策略里有 update_memory），三种角色都另带记忆工具——它只写 .pigeon/learned/，不改变角色对
+// 代码的读写范围；并发写靠记忆的跨进程锁。推送关着时父策略里没有它，角色也不带。
 import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
+import { UPDATE_MEMORY_TOOL } from "../memory/update-memory-tool.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { DelegatedPolicy, WorkerRole } from "../state/session-payloads.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
@@ -51,7 +54,8 @@ export function deriveWorkerPolicy(
     role === "implementer"
       ? parent.allow.filter((tool) => tool.startsWith(`${MCP_TOOL_PREFIX}__`))
       : [];
-  const allow = [...ROLE_TOOLS[role], ...inherited].filter(
+  // 决策 249：各角色都另带记忆工具（父策略里有才带，即推送开着）
+  const allow = [...ROLE_TOOLS[role], ...inherited, UPDATE_MEMORY_TOOL].filter(
     (tool) => parent.allow.includes(tool) && !deny.includes(tool)
   );
   return { allow, deny, approvalMode: parent.approvalMode };

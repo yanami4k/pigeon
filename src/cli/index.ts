@@ -6,6 +6,7 @@
 //   （形状 (model, context, options?) => AssistantMessageEventStream，与测试 fixtures 的 fake
 //   streamFn 同型；provider 密钥等由该模块自行从环境变量读取）。
 //   未配置时清晰报错退出，不静默失败。
+
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runForkCommand } from "../application/fork-command.ts";
@@ -20,10 +21,11 @@ import {
   resolveVerifyConfig,
   VALUELESS_FLAGS,
 } from "../application/launch-flags.ts";
+import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
-import { openSessionRuntime } from "../application/session-runtime.ts";
+import { openSessionRuntime, pushedMemoryRunOptions } from "../application/session-runtime.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
@@ -244,11 +246,12 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
   const sessionId = asSessionId(sessionIdArg);
   const modelUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+    "支持 --yolo / --no-persist-thinking / --no-pushed-memory / --memory-limit / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
   const flags = parseLaunchFlags(modelArgv, {
     usage: modelUsage,
     verify: true,
     retry: true,
+    pushedMemory: true,
   });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
@@ -308,7 +311,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] [--json]（任务描述缺省从 stdin 读）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
@@ -345,7 +348,13 @@ async function runMain(argv: string[]): Promise<void> {
       }
     }
   }
-  const flags = parseLaunchFlags(modelArgv, { usage, verify: true, retry: true, repair: true });
+  const flags = parseLaunchFlags(modelArgv, {
+    usage,
+    verify: true,
+    retry: true,
+    repair: true,
+    pushedMemory: true,
+  });
   if (task === undefined) {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) {
@@ -379,6 +388,9 @@ async function runMain(argv: string[]): Promise<void> {
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
+    // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守，收尾复盘在最后一次验证之后
+    pushedMemory: flags.pushedMemory,
+    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),
@@ -568,6 +580,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--memory-limit <字符数，缺省 12000>] [--review-max-turns N（缺省 40）] [--review-wall-clock-min N（缺省 15）] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]]";
   const own = new Set([
     "--manifest",
@@ -589,6 +602,9 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--container-memory",
     "--baseline",
     "--spend-limit-cny",
+    "--memory-limit",
+    "--review-max-turns",
+    "--review-wall-clock-min",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -634,6 +650,9 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   }
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
   const needsPigeon = conditions.some((c) => c !== "minimal");
+  const memoryLimitChars = positive("--memory-limit");
+  const reviewMaxTurns = positive("--review-max-turns");
+  const reviewMinutes = positive("--review-wall-clock-min");
   const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
   const accounts = gatewayAccountsFromEnv(process.env);
   const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
@@ -647,6 +666,16 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
         // 决策 218：压缩阈值用产品缺省；集成冒烟可经参数调低
         ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
+        // 推送格（191、223、243）：记忆上限与复盘上限，没给即缺省（12,000 字符；40 轮、15 分钟）
+        ...(memoryLimitChars !== undefined ? { memoryLimitChars } : {}),
+        ...(reviewMaxTurns !== undefined || reviewMinutes !== undefined
+          ? {
+              reviewBudget: {
+                maxTurns: reviewMaxTurns ?? DEFAULT_REVIEW_BUDGET.maxTurns,
+                wallClockMs: (reviewMinutes ?? DEFAULT_REVIEW_BUDGET.wallClockMs / 60_000) * 60_000,
+              },
+            }
+          : {}),
       }
     : undefined;
   const promptFormat = values.get("--prompt-format");
@@ -814,11 +843,12 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   const startUsage =
-    "支持 --yolo / --no-persist-thinking / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
+    "支持 --yolo / --no-persist-thinking / --no-pushed-memory / --memory-limit / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model";
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
     verify: true,
     retry: true,
+    pushedMemory: true,
   });
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）
@@ -912,6 +942,7 @@ function forkHandlerOf(
         persistThinking: flags.persistThinking,
         ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
         ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
+        ...pushedMemoryRunOptions(flags),
         ...verifyOption(flags, governanceRoot),
       },
     });

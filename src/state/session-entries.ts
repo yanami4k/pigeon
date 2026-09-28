@@ -13,6 +13,7 @@ import {
 } from "./attempt-config.ts";
 import { Sha256HexSchema } from "./hashing.ts";
 import { GrantIdSchema, RunIdSchema, SessionIdSchema } from "./ids.ts";
+import { MemoryReviewTagSchema, PushedMemoryManifestSchema } from "./learned-memory.ts";
 import { EvalVerdictSchema, GitObjectIdSchema, RunStartedPayloadSchema } from "./runtime-events.ts";
 import {
   CheckpointRefSchema,
@@ -76,6 +77,10 @@ export const RunStartDataSchema = Type.Object({
   repairRounds: Type.Optional(RepairRoundsSchema),
   // 上下文压缩配置（188、218）：运行面没有压缩（测试装配）时不带
   compaction: Type.Optional(CompactionConfigSchema),
+  // 推送的记忆（191）：推送开着时记开局冻结的 MEMORY.md 身份（路径、哈希、字节数、条数、上限），与常驻 Memory 分开
+  learnedMemory: Type.Optional(PushedMemoryManifestSchema),
+  // 复盘会话（175、192、207）：复盘种类与模板版本；普通会话不带
+  memoryReview: Type.Optional(MemoryReviewTagSchema),
 });
 export type RunStartData = Static<typeof RunStartDataSchema>;
 

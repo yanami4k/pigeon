@@ -8,14 +8,16 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { runHeadless } from "../application/headless.ts";
+import type { ReviewBudget, ReviewOutcome } from "../application/memory-review.ts";
 import { createContainerWorkspaceHost, trustedShell } from "../execution/container-host.ts";
 import type { CompactionConfigInput, StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { verifyStepsDisplay } from "../state/verify-steps.ts";
+import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
-import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
+import type { StepAgent, StepAgentResult, StepReviewFacts } from "./stream-runner.ts";
 import {
   dockerStreamShell,
   GATE_REPORT,
@@ -51,6 +53,9 @@ export interface PigeonStepAgentOptions {
   temperature?: number;
   // 决策 188、218：上下文压缩的配置；缺省为产品缺省（实际几乎不触发），集成冒烟调低触发点验证压缩
   compaction?: CompactionConfigInput;
+  // 推送格（191、223、243）：学到的记忆的总量上限（缺省 12,000 字符）与复盘上限（缺省 40 轮、15 分钟）
+  memoryLimitChars?: number;
+  reviewBudget?: ReviewBudget;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -139,6 +144,11 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
       mkdirSync(placeholder, { recursive: true });
       const abort = new AbortController();
       const stopWatch = watchLimits(options.limits, input.abortSignal, () => abort.abort());
+      // 推送格的复盘：每次复盘前后各读一次这个作业的网关计量，做差累加即复盘的请求数、token 与花费
+      const pushed = input.condition.pushedMemory;
+      const reviews: ReviewOutcome[] = [];
+      let reviewMeter: GatewayMeter | undefined;
+      let meterBefore: GatewayMeter | undefined;
       let run: Awaited<ReturnType<typeof runHeadless>>;
       try {
         run = await runHeadless({
@@ -154,9 +164,34 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           skillRoots: [],
           memoryRoots: [],
           taskDirective: STREAM_WORK_DIRECTIVE,
-          // 记忆条件（193）：能否检索历史会话；推送记忆只透传（另行施工，打开时 headless 暂时报错）
+          // 记忆条件（193）：能否检索历史会话 × 有无推送记忆（推送格带记忆工具、压缩前与收尾复盘）
           sessionSearch: input.condition.sessionSearch,
-          ...(input.condition.pushedMemory ? { pushedMemory: true } : {}),
+          ...(pushed
+            ? {
+                pushedMemory: true,
+                ...(options.memoryLimitChars !== undefined
+                  ? { memoryLimitChars: options.memoryLimitChars }
+                  : {}),
+                ...(options.reviewBudget !== undefined
+                  ? { reviewBudget: options.reviewBudget }
+                  : {}),
+                onReview: {
+                  started: () => {
+                    meterBefore = input.meter?.();
+                  },
+                  ended: (outcome: ReviewOutcome) => {
+                    reviews.push(outcome);
+                    const after = input.meter?.();
+                    if (after !== undefined && meterBefore !== undefined) {
+                      const delta = meterDelta(after, meterBefore);
+                      reviewMeter =
+                        reviewMeter === undefined ? delta : addMeters(reviewMeter, delta);
+                    }
+                    meterBefore = undefined;
+                  },
+                },
+              }
+            : {}),
           // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动。
           // 分步验证（159）原样交给 headless：各步在各自的执行目录下执行、各出结论，验证记录带各步结果，
           // 报错路径按执行目录换算回工作区根（strands 各步在 strands-py/ 下），回炉反馈按步截取
@@ -303,8 +338,47 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
         ...(providerFailed
           ? { interrupted: `模型服务故障（终态 ${run.status}）：${run.errorMessage ?? ""}` }
           : {}),
+        ...(pushed ? { review: reviewFactsOf(reviews, reviewMeter) } : {}),
       };
     },
+  };
+}
+
+// 两段计量差相加（峰值取较大者）
+function addMeters(a: GatewayMeter, b: GatewayMeter): GatewayMeter {
+  return {
+    requests: a.requests + b.requests,
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    costCny: a.costCny + b.costCny,
+    upstreamFailures: a.upstreamFailures + b.upstreamFailures,
+    queueMs: a.queueMs + b.queueMs,
+    peakInFlight: Math.max(a.peakInFlight, b.peakInFlight),
+    peakInputTokens: Math.max(a.peakInputTokens, b.peakInputTokens),
+    accountRequests: a.accountRequests.map((n, i) => n + (b.accountRequests[i] ?? 0)),
+  };
+}
+
+// 这一步各次复盘的合计（结果行 review 的来源）
+export function reviewFactsOf(
+  reviews: readonly ReviewOutcome[],
+  meter: GatewayMeter | undefined
+): StepReviewFacts {
+  return {
+    closing: reviews.filter((review) => review.kind === "closing").length,
+    preCompaction: reviews.filter((review) => review.kind === "pre-compaction").length,
+    turns: reviews.reduce((sum, review) => sum + review.turns, 0),
+    tokens: reviews.reduce((sum, review) => sum + review.tokens, 0),
+    wallMs: reviews.reduce((sum, review) => sum + review.wallMs, 0),
+    hitLimit: reviews.some((review) => review.hitLimit),
+    failures: reviews.flatMap((review) =>
+      review.error !== undefined
+        ? [`${review.kind === "closing" ? "收尾" : "压缩前"}：${review.error}`]
+        : []
+    ),
+    ...(meter !== undefined ? { meter } : {}),
   };
 }
 

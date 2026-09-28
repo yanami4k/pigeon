@@ -95,10 +95,12 @@ export interface StreamResultLine {
   // 这一步是否撞了宽上限（171）：agent 以撞轮数或墙钟上限收尾（终态 turn-limit / wall-clock-limit），或轮数、墙钟
   // （含验证门与回炉）达到上限。没跑 agent 为 null
   hitStepBudget: boolean | null;
-  // 这一步的收尾复盘是否撞了复盘上限；复盘接入之前恒为 null
+  // 这一步的复盘（收尾或压缩前）有没有撞复盘上限（243）；不推送的条件与复盘接入之前的旧行为 null
   hitReviewBudget: boolean | null;
-  // 这一步的收尾复盘：轮数与墙钟（推送记忆的复盘接入之前恒为 null）；花费在 gateway.reviewCostCny
-  review: { turns: number; wallMs: number } | null;
+  // 这一步的复盘（191、192、207）：收尾与压缩前各几次、合计轮数、token、墙钟、是否撞复盘上限、失败原因（复盘失败不改变
+  // 这一步的结果）。经网关时轮数与 token 取复盘前后的计量差，不计入 agent 的轮数、用量与墙钟；花费在 gateway.reviewCostCny。
+  // 不推送的条件与复盘接入之前的旧行为 null
+  review: StepReview | null;
   // 这一步的容器是否在上一步进行时预先开好（envOpenMs 为等它就绪的时间）
   envPrefetched: boolean;
   quality: {
@@ -130,11 +132,21 @@ export interface StreamGatewayFacts {
   peakInFlight: number;
   // 本步 agent 的模型花费（人民币元，网关按请求时刻逐条计价后按步做差，决策 235）；旧结果行没有这个字段
   costCny?: number;
-  // 本步复盘的模型花费（人民币元），单列；复盘接入之前恒为 null
+  // 本步复盘的模型花费（人民币元，复盘前后的网关计量做差），单列，costCny 不含它；不推送的条件与复盘接入之前的旧行为 null
   reviewCostCny?: number | null;
   // 本步单次请求送进模型的输入 token 最大值（上下文峰值，218）：读网关计量的 peakInputTokens（每步开始时重置）；
   // 旧结果行没有这个字段
   peakInputTokens?: number;
+}
+
+export interface StepReview {
+  closing: number;
+  preCompaction: number;
+  turns: number;
+  tokens: number;
+  wallMs: number;
+  hitLimit: boolean;
+  failures: string[];
 }
 
 export interface MemoryFacts {

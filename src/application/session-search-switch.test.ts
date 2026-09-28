@@ -70,24 +70,25 @@ test("会话检索关掉时模型硬调检索工具：按未注册的工具拒�
   assert.doesNotMatch(off.lastMessages, /命中片段只是线索/);
 });
 
-test("推送记忆打开：headless 在装配前报错，说明尚未实现；不装运行面、不发模型请求", async () => {
+test("推送记忆打开：headless 照常装配运行，推送段与记忆工具随开关出现，收尾复盘一次（挡板已拆）", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-pushed-memory-"));
   try {
     const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
-    await assert.rejects(
-      runHeadless({
-        task: "你好",
-        governanceRoot: root,
-        workspaceRoot: root,
-        streamFn,
-        yolo: true,
-        skillRoots: [],
-        memoryRoots: [],
-        pushedMemory: true,
-      }),
-      /推送记忆尚未实现/
-    );
-    assert.equal(streamFn.calls.length, 0);
+    const result = await runHeadless({
+      task: "你好",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn,
+      yolo: true,
+      skillRoots: [],
+      memoryRoots: [],
+      pushedMemory: true,
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(result.reviews?.length, 1);
+    const first = streamFn.calls[0];
+    assert.ok(first?.context.systemPrompt?.includes("## 学到的记忆"));
+    assert.ok((first?.context.tools ?? []).some((tool) => tool.name === "update_memory"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

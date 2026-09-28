@@ -25,17 +25,21 @@ function tailHeading(truncated: boolean): string {
 
 export function buildRepairFeedback(input: RepairFeedbackInput): string {
   const heading = `验证未通过（第 ${input.round}/${input.maxRounds} 轮回炉）。`;
+  return [heading, repairFailureSummary(input), "", REPAIR_FEEDBACK_INSTRUCTION].join("\n");
+}
+
+// 回炉反馈里的失败摘要（标题与修正要求之间的部分）：复盘指令的验证结论"未通过："之后沿用同一份（决策 242）
+export function repairFailureSummary(
+  input: Pick<RepairFeedbackInput, "command" | "outcome" | "steps">
+): string {
   const lines =
     input.steps !== undefined
-      ? [heading, ...stepFeedbackLines(input.steps), "", REPAIR_FEEDBACK_INSTRUCTION]
+      ? stepFeedbackLines(input.steps)
       : [
-          heading,
           `验证命令：${input.command}`,
           `退出码：${input.outcome.exitCode ?? "无"}`,
           tailHeading(input.outcome.truncated),
           nonEmpty(input.outcome.output),
-          "",
-          REPAIR_FEEDBACK_INSTRUCTION,
         ];
   return lines.join("\n");
 }

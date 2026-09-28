@@ -28,7 +28,7 @@ function makeSnapshot(): InjectionSnapshot {
 }
 
 test("当前版本快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 12);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 13);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -145,6 +145,30 @@ test("v10 字段：回炉轮数可选、至少 1", () => {
 test("v11：审阅配置字段已删除，带该字段的快照照常通过校验", () => {
   const withReview = { ...makeSnapshot(), review: { enabled: true, everyTurns: 4 } };
   assert.ok(Value.Check(InjectionSnapshotSchema, withReview));
+});
+
+// 决策 191、192、207：v13 顶层加推送的记忆与复盘标记（复盘标记不叫 review，与 v11 删掉的旧字段不撞名）
+test("v13 字段：推送的记忆与复盘标记可选；旧的审阅字段照常通过", () => {
+  const snapshot = makeSnapshot();
+  const withMemory = {
+    ...snapshot,
+    learnedMemory: {
+      path: ".pigeon/learned/MEMORY.md",
+      hash: HASH,
+      bytes: 10,
+      entries: 1,
+      limitChars: 12_000,
+    },
+    memoryReview: { kind: "pre-compaction", template: "v1" },
+    review: { enabled: true, everyTurns: 4 },
+  };
+  assert.ok(Value.Check(InjectionSnapshotSchema, withMemory));
+  assert.ok(
+    !Value.Check(InjectionSnapshotSchema, {
+      ...snapshot,
+      memoryReview: { kind: "other", template: "v1" },
+    })
+  );
 });
 
 // 决策 134 / 157 / 159：v12 顶层加结构化记忆的开局留痕、verify 加可选命名分步

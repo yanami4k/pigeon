@@ -49,6 +49,13 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
       ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
       ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
+      // 推送记忆（191）：重试的每次尝试同样推送、带记忆工具、各自收尾复盘
+      ...(options.pushedMemory !== undefined ? { pushedMemory: options.pushedMemory } : {}),
+      ...(options.memoryLimitChars !== undefined
+        ? { memoryLimitChars: options.memoryLimitChars }
+        : {}),
+      ...(options.reviewBudget !== undefined ? { reviewBudget: options.reviewBudget } : {}),
+      ...(options.warn !== undefined ? { warn: options.warn } : {}),
       ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
       ...(options.verify !== undefined ? { verify: options.verify } : {}),
       ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),
