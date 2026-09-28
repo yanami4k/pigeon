@@ -146,9 +146,14 @@ function renderRun(
       checkpoints.set(item.data.toolCallId, item);
     } else if (item.kind === "verification") {
       const data = item.data;
+      // 工具故障的步（决策 170 ③）单列：检查工具自身崩溃、重跑一次仍崩溃，不计入这条验证的结论
+      const faulted = (data.steps ?? []).filter((step) => step.toolFault === true);
       lines.push(
         `  验证：${evalVerdictLabel(data.verdict)} ｜ 退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ` +
           `命令 ${data.command.join(" ")} ｜ ${data.durationMs} 毫秒` +
+          (faulted.length > 0
+            ? ` ｜ 工具故障（不计入结论）：${faulted.map((step) => step.name).join("、")}`
+            : "") +
           (data.target.runId !== run.runId || data.target.sessionId !== sessionId
             ? ` ｜ 目标 会话 ${shortId(data.target.sessionId)} Run ${shortId(data.target.runId)}`
             : "")

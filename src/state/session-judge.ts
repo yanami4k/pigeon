@@ -355,6 +355,7 @@ export function storeRunFailure(run: StoreRun): FailureClass | null {
     breakerTripped: run.end?.ending === "breaker",
     hasTurnCompleted: lastAssistant !== undefined,
     hasRunEnded: run.end !== undefined,
+    emptyReply: run.end?.ending === "empty-reply",
   });
 }
 

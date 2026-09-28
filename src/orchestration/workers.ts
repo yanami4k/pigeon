@@ -37,10 +37,18 @@ export class WorkerSpawnError extends Error {}
 
 export type WorkerRunStatus = "completed" | "failed" | "aborted" | "unknown";
 
+export interface WorkerRunResult {
+  status: WorkerRunStatus;
+  errorMessage?: string;
+  runId?: RunId;
+  emptyReply?: boolean;
+}
+
 // 装配根交回的 worker 运行面（PiRuntimeAdapter + 会话文件的最小操作面）
 export interface WorkerRuntimeHandle {
   // runId：本次运行的 Run（运行面装起来并真正开跑时在场）；撞上限记录据此落在被中止的那次 Run 上
-  run(task: string): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
+  // emptyReply：空回复异常结束（决策 170 ②；运行面给出，此时 status 为 failed）
+  run(task: string): Promise<WorkerRunResult>;
   // 撞上限时带上原因（决策 182：运行面据此把 Run 收尾的结束方式一次写全）；取消与外部中止不带
   interrupt(cause?: RunStopCause): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
@@ -50,7 +58,7 @@ export interface WorkerRuntimeHandle {
   // 不实现即视为没有结构化结果，既有 worker 行为不变
   structured?(): unknown;
   // M7（决策 077 / 079）：从已有消息续跑（分叉续跑）；不实现即不支持
-  continueRun?(): Promise<{ status: WorkerRunStatus; errorMessage?: string; runId?: RunId }>;
+  continueRun?(): Promise<WorkerRunResult>;
   // 释放运行面并关闭 worker 会话文件
   dispose(): Promise<void>;
 }

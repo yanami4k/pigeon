@@ -44,7 +44,9 @@ export type HeadlessStatus =
   | "unknown"
   | "turn-limit"
   | "wall-clock-limit"
-  | "token-limit";
+  | "token-limit"
+  // 空回复异常结束（决策 170 ②）：模型的回复既无文字也无工具调用，重试一次仍是如此。不算模型服务故障
+  | "empty-reply";
 
 // 退出码按终态映射；1 留给参数与装配错误（cli 入口的异常出口）
 export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
@@ -55,6 +57,7 @@ export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
   "turn-limit": 5,
   "wall-clock-limit": 6,
   "token-limit": 7,
+  "empty-reply": 8,
 };
 
 export interface HeadlessRunOptions {
@@ -153,6 +156,8 @@ export interface HeadlessRepairSummary {
   closed: boolean;
   // 给了受保护文件时：有几次验证之前发现 agent 改过受保护文件并将其还原（每次验证至多计 1）
   protectedRestores?: number;
+  // 这一步各次验证里标了工具故障（检查工具自身崩溃，重跑一次仍崩溃，决策 170 ③）的步数合计；没有即缺省
+  toolFaults?: number;
 }
 
 // 回炉的启动前检查（决策 142 / 143）：设定不成立即启动报错，不装配运行面
@@ -330,6 +335,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let stepStart: StepStartMark | undefined;
   // 验证前发现 agent 改过受保护文件并还原的次数
   let protectedRestores = 0;
+  // 各次验证里的工具故障步数合计
+  let toolFaults = 0;
   try {
     if (repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined) {
       stepStart = await options.workspaceHost.markStepStart();
@@ -342,7 +349,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         : await handle.run(options.task);
     if (run === undefined) status = "aborted";
     while (run !== undefined) {
-      status = run.status === "aborted" ? (limitHit ?? "aborted") : run.status;
+      status =
+        run.emptyReply === true
+          ? "empty-reply"
+          : run.status === "aborted"
+            ? (limitHit ?? "aborted")
+            : run.status;
       errorMessage = run.errorMessage;
       // 外部中止：这一步由调用方作废，不验证、不回炉
       if (externallyAborted) {
@@ -388,6 +400,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       });
       const { verdict } = verified.outcome;
       lastVerdict = verdict;
+      toolFaults += (verified.steps ?? []).filter((step) => step.toolFault === true).length;
       verification = { verdict };
       // 验证进行中来了外部中止：验证一结束即停，不回炉
       if (externallyAborted) {
@@ -399,8 +412,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         repair = { rounds, verdict, closed: true };
         break;
       }
-      // 修满 N 轮或预算耗尽仍失败：这一步以失败收尾，工作区保留 agent 的改动（决策 172 / 173）
-      if (rounds >= repairRounds || limitHit !== undefined) {
+      // 修满 N 轮或预算耗尽仍失败：这一步以失败收尾，工作区保留 agent 的改动（决策 172 / 173）。
+      // 空回复异常结束（决策 170 ②）同样收尾、不再回炉：这一步的结论仍以刚做的这次验证为准
+      if (rounds >= repairRounds || limitHit !== undefined || run.emptyReply === true) {
         repair = { rounds, verdict, closed: true };
         break;
       }
@@ -470,6 +484,9 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   }
   if (repair !== undefined && options.protectedFiles !== undefined) {
     repair = { ...repair, protectedRestores };
+  }
+  if (repair !== undefined && toolFaults > 0) {
+    repair = { ...repair, toolFaults };
   }
   return {
     sessionId,

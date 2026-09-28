@@ -3,7 +3,7 @@
 //   各给一个；多遍时给均值与范围。要做到的为零的步不进平均，单列步数；做成步数与不许挂的失败合计照报（次要判据）；
 //   同题两遍的每步得分差——同一格第 1、2 遍在同一步上的得分之差（只作描述，统计检验在另写的分析脚本里做）；
 //   每步用量——轮数、墙钟、花费、上下文峰值、开工时的记忆大小与复盘消耗的分布（校准所要的量）；
-//   每步明细（第一遍）与次要指标（静态检查、token、墙钟、限额暂停）。
+//   每步明细（第一遍）与次要指标（静态检查、token、墙钟、限额暂停，以及验证工具故障——检查工具自身崩溃、不计入验证结论的步次，170 ③）。
 // 196、201 之前的旧结果行（带全量测试通过率、没有 judging）照常读出，不计入以上各表，只报条数
 import {
   STREAM_CONDITIONS,
@@ -296,8 +296,8 @@ export function renderStreamReport(
   out.push(
     "## 次要指标（第一遍）",
     "",
-    "| 条件 | 类型错误（各步合计） | 格式错误（各步合计） | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 | 依赖环境选不出而作废的步 |",
-    "|---|---|---|---|---|---|---|---|"
+    "| 条件 | 类型错误（各步合计） | 格式错误（各步合计） | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 | 依赖环境选不出而作废的步 | 验证工具故障（步次） |",
+    "|---|---|---|---|---|---|---|---|---|"
   );
   for (const c of conditions) {
     const rows = firstAll.filter((l) => l.condition === c);
@@ -312,7 +312,7 @@ export function renderStreamReport(
         rows.map((l) => l.usage.output)
       )} | ${(sum(rows.map((l) => l.wallMs)) / 60_000).toFixed(1)} | ${sum(
         rows.map((l) => l.limitPauses.length)
-      )} | ${rows.filter((l) => l.outcome === "skipped").length} |`
+      )} | ${rows.filter((l) => l.outcome === "skipped").length} | ${q((l) => l.verifyToolFaults)} |`
     );
   }
   out.push("");

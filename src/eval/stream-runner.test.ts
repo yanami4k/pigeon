@@ -1325,6 +1325,63 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
+  test("结果行记下验证工具故障的次数（决策 170 ③）：取步结果的 repair.toolFaults，缺省按 0；未开回炉的条件为 null", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        solve(input);
+        if (input.condition.repairRounds === 0) return undefined;
+        return input.step.seq === 1
+          ? { repair: { rounds: 1, finalVerdict: "pass", toolFaults: 3 } }
+          : { repair: { rounds: 0, finalVerdict: "pass" } };
+      });
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent, minimal: agent },
+          conditions: ["search-only", "minimal"],
+          maxSteps: 2,
+          concurrency: 1,
+        })
+      );
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => [r.condition, r.seq, r.verifyToolFaults]),
+        [
+          ["search-only", 1, 3],
+          ["search-only", 5, 0],
+          ["minimal", 1, null],
+          ["minimal", 5, null],
+        ]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("空回复异常结束（决策 170 ②）照常判题、留行，不作废重做", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent((input) => {
+        solve(input);
+        return { status: "empty-reply", repair: { rounds: 0, finalVerdict: "fail" } };
+      });
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          conditions: ["search-only"],
+          maxSteps: 1,
+          concurrency: 1,
+        })
+      );
+      assert.equal(agent.calls.length, 1, "不重做");
+      assert.deepEqual(
+        readStreamResults(summary.resultsFile).map((r) => [r.status, r.judged, r.outcome]),
+        [["empty-reply", true, "passed"]]
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("限额与上游故障一律作废重做：一步期间出现并发受限、额度暂停、本作业的上游故障，或 agent 自报被打断，不论 agent 报没报、哪种 agent，这一步都回到起点重做、不判分", async () => {
     const t = await toy();
     try {

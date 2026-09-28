@@ -718,3 +718,60 @@ test("墙钟预算计入验证耗时：Run 内没到点、验证期间到点，�
     repo.cleanup();
   }
 });
+
+test("空回复异常结束（决策 170 ②）：重试一次仍空，照常验证一次后不再回炉；终态 empty-reply，重试那一轮计入整步轮数", async () => {
+  const repo = makeRepo();
+  try {
+    // 第 2 次调用空回复，第 3 次（重试）仍空；此后若再回炉会拿到 edit，不该发生
+    const streamFn = createFakeStreamFn({
+      replies: [edit("bug", "half"), { text: "" }, { text: "" }, edit("half", "fixed"), done()],
+    });
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn,
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 3,
+    });
+    assert.equal(streamFn.calls.length, 3, "空回复只重试一次，之后不开回炉轮");
+    assert.equal(result.status, "empty-reply");
+    assert.match(result.errorMessage ?? "", /空回复/);
+    assert.deepEqual(result.failure, { category: "business" });
+    assert.deepEqual(result.repair, { rounds: 0, verdict: "fail", closed: true });
+    assert.equal(result.turns, 3, "重试那一轮计入轮数");
+    assert.equal(readFileSync(join(repo.root, "a.txt"), "utf8"), "half\n");
+    const session = sessionOf(repo.root, result.sessionId);
+    assert.equal(session.runs.length, 1);
+    assert.deepEqual(storeRepairStepOutcome(session), { rounds: 0, verdict: "fail" });
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("空回复重试一次即有内容：同一个 Run 里接着做完，回炉照常", async () => {
+  const repo = makeRepo();
+  try {
+    const streamFn = createFakeStreamFn({
+      replies: [{ text: "" }, edit("bug", "fixed"), done()],
+    });
+    const result = await runHeadless({
+      task: "把 a.txt 修好",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn,
+      yolo: true,
+      homeDir: repo.home,
+      verify: VERIFY,
+      repairRounds: 3,
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(result.repair, { rounds: 0, verdict: "pass", closed: true });
+    assert.equal(result.turns, 3);
+    assert.equal(sessionOf(repo.root, result.sessionId).runs.length, 1);
+  } finally {
+    repo.cleanup();
+  }
+});

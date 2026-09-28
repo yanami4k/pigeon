@@ -16,6 +16,9 @@ export interface StreamVerifyStep {
   name: string;
   command: string;
   cwd?: string;
+  // 这一步用的检查工具（决策 170 ③）：验证按该工具公开的非正常退出码识别它自身崩溃，崩溃即重跑一次、仍崩溃记工具故障。
+  // 只给退出码能如实反映该工具退出码的步；缺省即不识别
+  tool?: string;
 }
 
 // 本仓库流三步（159 修订）：与 package.json 里的同名脚本 check、test、deps 等价（清单范围内每个提交的这几个脚本逐字相同），
@@ -95,14 +98,18 @@ const PINNED_PYTEST_ARGS = '-c "$c" --rootdir "$PWD" --confcutdir "$PWD"';
 const strandsTimeoutArgs = (seconds: string) =>
   `--timeout ${seconds} --timeout-method signal --rerun-except Timeout`;
 
+// 三步各声明所用检查工具（决策 170 ③）。pytest 一步的外壳平时按报告判通过与否（不看 pytest 的退出码），但 pytest 自己以
+// 内部错误（3）或用法错误（4）退出时把这个退出码原样交出，验证据此识别崩溃；外壳在报告写完后杀掉 pytest 的情形退出码为
+// 137，不受影响
 export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
   // 其 CI 的 lint 作业只跑 hatch fmt --linter --check（ruff check 与 mypy），不做格式检查：人的代码并非处处按
   // ruff format 排版，加上格式检查会让人的代码也过不了验证门（格式偏差另计入次要指标）
-  { name: "ruff", command: "ruff check", cwd: "strands-py" },
-  { name: "mypy", command: STRANDS_MYPY, cwd: "strands-py" },
+  { name: "ruff", command: "ruff check", cwd: "strands-py", tool: "ruff" },
+  { name: "mypy", command: STRANDS_MYPY, cwd: "strands-py", tool: "mypy" },
   {
     name: "pytest",
     cwd: "strands-py",
+    tool: "pytest",
     command: [
       PINNED_PYTEST_CONFIG,
       `j=${GATE_REPORT} && rm -f "$j" &&`,
@@ -111,7 +118,7 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
       strandsTimeoutArgs(String(STRANDS_CASE_TIMEOUT_SEC)),
       '-o junit_family=xunit1 --junitxml="$j" & p=$!;',
       'while kill -0 "$p" 2>/dev/null; do if [ -s "$j" ]; then sleep 5; kill -9 "$p" 2>/dev/null; break; fi; sleep 1; done;',
-      'wait "$p" 2>/dev/null; true; } &&',
+      'wait "$p" 2>/dev/null; r=$?; case "$r" in 3 | 4) exit "$r" ;; esac; true; } &&',
       '[ -s "$j" ] && ! grep -Eq \'<(failure|error)[ />]\' "$j"',
     ].join(" "),
   },

@@ -24,7 +24,12 @@ import {
   verifyConfigFile,
 } from "./stream-profiles.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
-import { dockerStreamShell, removeCoveringHelpers, StreamWorkspace } from "./stream-workspace.ts";
+import {
+  dockerStreamShell,
+  GATE_REPORT,
+  removeCoveringHelpers,
+  StreamWorkspace,
+} from "./stream-workspace.ts";
 
 // 假的 python -m pytest，按 pytest 对这几种情形的行为出结果（逐条 -v 进度、xunit1 报告）：
 //   测试文件里有 import-error 即收集失败；不带 --continue-on-collection-errors 时整次中断、只报收集错误；
@@ -454,6 +459,41 @@ test("strands 验证门：一个测试文件导入失败时不通过，反馈里
     assert.notEqual(r.exitCode, 0);
     assert.match(r.output, /ERROR tests\/test_broken\.py/);
     assert.match(r.output, /tests\/test_ok\.py::test_b FAILED/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("strands 验证步声明检查工具（决策 170 ③）；pytest 一步的外壳在 pytest 以内部错误或用法错误退出时交出原退出码，其余照旧按报告判", async () => {
+  assert.deepEqual(
+    STRANDS_VERIFY_STEPS.map((s) => [s.name, s.tool]),
+    [
+      ["ruff", "ruff"],
+      ["mypy", "mypy"],
+      ["pytest", "pytest"],
+    ]
+  );
+  // 本仓库的三步（tsc、node --test、dependency-cruiser）的崩溃退出码没有公开约定：不声明，不识别
+  assert.ok(PIGEON_VERIFY_STEPS.every((s) => s.tool === undefined));
+  const { base, ws } = fakeStrands({ "test_ok.py": "test_a pass\n" });
+  // 报告路径换到本用例的临时目录：容器里的固定路径在宿主上会与同时在跑的其他测试进程共用
+  const command = (STRANDS_VERIFY_STEPS[2]?.command ?? "").replace(
+    GATE_REPORT,
+    `${posix(base)}/gate-junit.xml`
+  );
+  const pytestStep = ["sh", "-c", `cd strands-py && ${command}`];
+  try {
+    const normal = await ws.run(pytestStep, 60_000);
+    assert.equal(normal.exitCode, 0, normal.output);
+    for (const code of [3, 4]) {
+      writeFileSync(join(base, "bin", "python"), `#!/bin/sh\necho INTERNALERROR\nexit ${code}\n`, {
+        mode: 0o755,
+      });
+      assert.equal((await ws.run(pytestStep, 60_000)).exitCode, code);
+    }
+    // 被中断（2）不是崩溃码：没有报告即按报告判为不通过，退出码 1
+    writeFileSync(join(base, "bin", "python"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+    assert.equal((await ws.run(pytestStep, 60_000)).exitCode, 1);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

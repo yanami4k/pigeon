@@ -28,6 +28,8 @@ export interface RunOutcomeFacts {
   // 无论末条 turn 的 stopReason 是什么都不能判正常（M4 验收 O-1，decisions.md 023）。
   // 活侧 RunResult 在 agent_end 之后计算，恒为 true；abort 路径上游照常发 agent_end
   hasRunEnded: boolean;
+  // 空回复异常结束（决策 170 ②）：活侧取自 Run 结果，新存储取自收尾条目的结束方式；旧账本没有这项事实，缺省为否
+  emptyReply?: boolean;
 }
 
 export function classifyRunOutcome(facts: RunOutcomeFacts): FailureClass | null {
@@ -37,7 +39,8 @@ export function classifyRunOutcome(facts: RunOutcomeFacts): FailureClass | null 
   if (facts.stopReason === "aborted") {
     return { category: "cancelled", breaker: facts.breakerTripped };
   }
-  if (facts.stopReason === "length") {
+  // 空回复与撞输出上限同属模型输出的问题：业务失败
+  if (facts.stopReason === "length" || facts.emptyReply === true) {
     return { category: "business" };
   }
   if (facts.syntheticFailure) {

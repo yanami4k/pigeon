@@ -11,7 +11,12 @@ import {
   VerifyConfigFileSchema,
   type VerifyStep,
 } from "../state/attempt-config.ts";
-import { normalizeStepCwd, verifyStepsDisplay } from "../state/verify-steps.ts";
+import {
+  isKnownCheckTool,
+  normalizeStepCwd,
+  TOOL_CRASH_EXIT_CODES,
+  verifyStepsDisplay,
+} from "../state/verify-steps.ts";
 
 export class VerifyConfigError extends Error {}
 
@@ -39,6 +44,7 @@ export function loadVerifyConfig(
         name: step.name,
         command: step.command,
         ...(typeof cwd === "string" ? { cwd } : {}),
+        ...(step.tool !== undefined ? { tool: step.tool } : {}),
       };
     });
     return { command: verifyStepsDisplay(steps), timeoutMs, source: "project", steps };
@@ -94,6 +100,12 @@ function readVerifyConfigFile(governanceRoot: string): VerifyConfigFile | undefi
     if (normalizeStepCwd(step.cwd) === null) {
       throw new VerifyConfigError(
         `verify 配置的分步执行目录须是工作区内的相对路径：${step.name}：${step.cwd ?? ""}：${path}`
+      );
+    }
+    // 决策 170 ③：声明的检查工具须在崩溃退出码表里——写错的工具名会让崩溃识别悄悄失效
+    if (step.tool !== undefined && !isKnownCheckTool(step.tool)) {
+      throw new VerifyConfigError(
+        `verify 配置的分步声明了不认识的检查工具：${step.name}：${step.tool}（可用：${Object.keys(TOOL_CRASH_EXIT_CODES).join("、")}）：${path}`
       );
     }
     if (names.has(step.name)) {

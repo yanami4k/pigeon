@@ -221,6 +221,30 @@ test("trace 报告：撞上限、上游合成失败、代码快照与验证记�
     assert.ok(output.includes("  验证：失败 ｜ 退出码 1 ｜ 命令 npm test ｜ 10 毫秒"), output);
   }));
 
+test("trace 报告：空回复异常结束分类为业务失败；验证记录里工具故障的步单列（决策 170 ② ③）", () =>
+  withRoot(async (root) => {
+    const sessionsDir = join(root, ".pigeon", "sessions");
+    const session = createFixtureSession({ sessionsDir, cwd: root });
+    session.startRun({ task: "改" });
+    session.assistant({ text: "" });
+    session.assistant({ text: "" });
+    session.endRun({ ending: "empty-reply", errorMessage: "空回复" });
+    session.verification({
+      verdict: "pass",
+      exitCode: 0,
+      steps: [
+        { name: "mypy", verdict: "fail", toolFault: true },
+        { name: "pytest", verdict: "pass" },
+      ],
+    });
+    const { sessionId } = await session.close();
+    const output = runTraceCommand({ root, sessionId });
+    const runHeader = output.split("\n").find((line) => line.startsWith("Run "));
+    assert.ok(runHeader?.includes("分类：业务失败"), runHeader);
+    assert.ok(output.includes("  结束方式：empty-reply（消息 3 条）"), output);
+    assert.ok(output.includes("｜ 工具故障（不计入结论）：mypy"), output);
+  }));
+
 test("trace 命令只读：正被写入（末行撕裂）的会话照常出报告，全部会话文件字节与工作区不变", () =>
   withRoot(async (root) => {
     const { sessionId } = await scriptSession(root, EDIT_SCRIPT);
