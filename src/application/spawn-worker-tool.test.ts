@@ -44,7 +44,7 @@ import {
 } from "./spawn-worker-tool.ts";
 import { type NoticeTarget, WORKER_NOTICE_PREFIX, WorkerNotices } from "./worker-notices.ts";
 
-// 定稿原文（297 起的改写经过目）：缺省设定（同时 8 个、不设总数上限、层数 1）
+// 定稿原文（含 297 起的改写）：缺省设定（同时 8 个、不设总数上限、层数 1）
 const FINAL_DESCRIPTION = `派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要。
 worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。
 要并行，就多次调用本工具，每次派一个（可在同一次回复里连续调用）；同时最多跑 8 个，多的排队。派出后可以接着做自己的事，但不要把派出去的活自己再做一遍。需要结果才能往下做时用 wait_workers 等；worker_status 查看进度，message_worker 给在跑的 worker 补充说明，stop_worker 停掉不再需要的。
