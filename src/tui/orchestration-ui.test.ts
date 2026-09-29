@@ -372,9 +372,9 @@ test("进入 worker 会话：从树形视图选中进入；面板与树形视图
     h.runtime("look-b").turn("b 在干活");
     await settle();
     assert.ok(screenFlat(term).includes("b 在干活"));
+    // Esc 回到进入它的树形视图；x 停止选中的（光标仍在 look-b）
     await type(term, ESC);
-    // 树形视图里 x 停止选中的（光标仍在上次选中的 look-b）
-    await type(term, CTRL_X);
+    assert.equal(shell.currentView(), "tree");
     assert.ok(
       lines(term).some((line) => line.startsWith(" >  [+] look-b")),
       lines(term).join("\n")
@@ -714,6 +714,8 @@ test("窄终端与缩放：面板、树形视图与 worker 会话的行都不越
     term.resize(100, 24);
     await settle();
     assertWidthsWithin(term, 100);
+    await type(term, ESC);
+    assert.equal(shell.currentView(), "tree", "从树形视图进入的，Esc 回树形视图");
     await type(term, ESC);
     assert.match(
       panelRow(term, "implementer-long") ?? "",

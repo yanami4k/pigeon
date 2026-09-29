@@ -40,6 +40,9 @@
 //   消息区换成它的对话（历史取自会话记录，之后实时），输入作为消息发给它，/stop 停止、/approve 补批续做，Esc 回主会话。
 //   主会话在此期间照常运行（主会话的消息区在后台照常更新）；审批面板就地在当前视图弹出（写明来源），答完仍留在原处。
 //   已收尾的 worker 会话只读（停在等审批的可 /approve 补批续做）。
+// - 决策 304：树形视图分两种模式，Tab 切换——运行中（上面的编排树）与会话树（session-tree.ts，当前会话这一家）。会话树里
+//   Enter 查看（本次运行编排器里的 worker 进入其会话，其余只读看历史，Esc 回树），r 在此续接（主会话、分支、失败重试；
+//   走 /resume 同一流程）。
 //   面板、树形视图与状态栏的在跑 worker 花费同源（worker-activity.ts，编排器的只读观察口）。
 import {
   type Component,
@@ -62,6 +65,7 @@ import {
   emptyCostTally,
   mergeCostTally,
 } from "../application/session-cost.ts";
+import { type FamilyNode, loadSessionFamily } from "../application/session-family.ts";
 import type { TaskItem } from "../application/task-list-tool.ts";
 import {
   renderWorkerOutcome,
@@ -114,6 +118,7 @@ import {
   type SessionBinding,
 } from "./resume-view.ts";
 import { type PickerKey, SessionPicker } from "./session-picker.ts";
+import { familyKindLabel, SessionTree } from "./session-tree.ts";
 import { type BackfillStatus, StatusBar } from "./status-bar.ts";
 import { WorkerActivityTracker } from "./worker-activity.ts";
 import {
@@ -215,7 +220,13 @@ export interface TuiShellOptions {
 }
 
 // 决策 301：界面所处的视图——主会话、整屏的树形视图、进入的 worker 会话
-export type ShellView = "main" | "tree" | "worker";
+export type ShellView = "main" | "tree" | "worker" | "history";
+
+// 决策 304：树形视图的两种模式
+export type TreeMode = "running" | "sessions";
+
+// 从哪里进入的 worker 会话或历史查看（Esc 回到那里）
+type ReturnTo = { view: "main" } | { view: "tree"; mode: TreeMode };
 
 // 沙箱会话的命令面：交回返回给人看的一行（分支名与查看命令，或失败原因）
 export interface TuiSandboxFace {
@@ -241,6 +252,11 @@ export class PigeonTuiShell
   private readonly panel: WorkerPanel;
   private readonly tree: WorkerTree;
   private view: ShellView = "main";
+  // 决策 304：树形视图的模式、会话树、只读历史查看与 Esc 回到哪里
+  private treeMode: TreeMode = "running";
+  private readonly sessionTree: SessionTree;
+  private historySession: { sessionId: string; flow: MessageFlow } | undefined;
+  private returnTo: ReturnTo = { view: "main" };
   // 决策 301：树形视图里就地显示的审批面板（审批挂起期间）
   private readonly approvalBox = new Text("");
   private approvalBoxText = "";
@@ -333,6 +349,9 @@ export class PigeonTuiShell
       // 标题一行、状态栏一行
       height: () => Math.max(3, this.options.terminal.rows - 2),
     });
+    this.sessionTree = new SessionTree({
+      height: () => Math.max(3, this.options.terminal.rows - 2),
+    });
     this.layout();
     this.input.onSubmit = (value) => this.handleSubmit(value);
     this.updateStatus();
@@ -343,26 +362,39 @@ export class PigeonTuiShell
   private layout(): void {
     const children: Component[] =
       this.view === "tree"
-        ? [this.title, this.tree, this.approvalBox, this.statusBar]
-        : this.view === "worker" && this.workerSession !== undefined
+        ? [
+            this.title,
+            this.treeMode === "sessions" ? this.sessionTree : this.tree,
+            this.approvalBox,
+            this.statusBar,
+          ]
+        : this.view === "history" && this.historySession !== undefined
           ? [
               this.title,
-              this.workerSession.flow.view,
+              this.historySession.flow.view,
               this.statusLine,
-              this.input,
+              this.approvalBox,
               this.statusBar,
-              this.panel,
             ]
-          : [
-              this.title,
-              this.flow.view,
-              this.statusLine,
-              this.queue.view,
-              this.picker.view,
-              this.input,
-              this.statusBar,
-              this.panel,
-            ];
+          : this.view === "worker" && this.workerSession !== undefined
+            ? [
+                this.title,
+                this.workerSession.flow.view,
+                this.statusLine,
+                this.input,
+                this.statusBar,
+                this.panel,
+              ]
+            : [
+                this.title,
+                this.flow.view,
+                this.statusLine,
+                this.queue.view,
+                this.picker.view,
+                this.input,
+                this.statusBar,
+                this.panel,
+              ];
     this.tui.clear();
     for (const child of children) this.tui.addChild(child);
   }
@@ -455,6 +487,12 @@ export class PigeonTuiShell
 
   updateStatus(): void {
     // 决策 301：worker 会话里状态行说明这个 worker 的状态与可用的动作
+    if (this.view === "history" && this.pendingApprovalState === null) {
+      this.statusLine.setText(
+        `history: read only | [esc] back to ${this.returnTo.view === "tree" ? "tree" : "main"}`
+      );
+      return;
+    }
     if (
       this.view === "worker" &&
       this.workerSession !== undefined &&
@@ -625,6 +663,7 @@ export class PigeonTuiShell
       const expanded = !this.flow.toolsExpandedState();
       this.flow.setToolsExpanded(expanded);
       this.workerSession?.flow.setToolsExpanded(expanded);
+      this.historySession?.flow.setToolsExpanded(expanded);
       this.tui.requestRender();
       return { consume: true };
     }
@@ -781,7 +820,7 @@ export class PigeonTuiShell
     this.flow.addSystem(line);
     if (this.view === "worker" && this.workerSession !== undefined) {
       this.workerSession.flow.addSystem(line);
-    } else if (this.view === "tree") {
+    } else if (this.view === "tree" || this.view === "history") {
       this.approvalBoxText =
         this.approvalBoxText === "" ? line : `${this.approvalBoxText}\n${line}`;
       this.approvalBox.setText(this.approvalBoxText);
@@ -1081,16 +1120,20 @@ export class PigeonTuiShell
   // 切换视图：重排组件、标题与状态行跟着变；消息区整体换掉，强制全量重绘
   private showView(view: ShellView): void {
     if (view !== "worker") this.leaveWorkerSession();
+    if (view !== "history") this.historySession = undefined;
     this.view = view;
     const session = this.workerSession;
     const worker =
       session !== undefined
         ? this.workerStatuses().find((status) => status.sessionId === session.sessionId)
         : undefined;
+    const back = this.returnTo.view === "tree" ? "tree" : "main";
     this.title.setText(
       view === "worker" && session !== undefined
-        ? `== pigeon tui | worker ${worker?.name ?? session.sessionId} | session ${session.sessionId} | [esc] back to main ==`
-        : `== pigeon tui | session ${this.current.sessionId} ==`
+        ? `== pigeon tui | worker ${worker?.name ?? session.sessionId} | session ${session.sessionId} | [esc] back to ${back} ==`
+        : view === "history" && this.historySession !== undefined
+          ? `== pigeon tui | history | session ${this.historySession.sessionId} | read only | [esc] back to ${back} ==`
+          : `== pigeon tui | session ${this.current.sessionId} ==`
     );
     this.layout();
     this.tui.setFocus(this.input);
@@ -1106,33 +1149,126 @@ export class PigeonTuiShell
       return;
     }
     this.panel.blur();
-    this.showView(this.view === "tree" ? "main" : "tree");
+    if (this.view === "tree") {
+      this.showView("main");
+      return;
+    }
+    // /agents 与 Ctrl+X 进运行中模式
+    this.treeMode = "running";
+    this.showView("tree");
+  }
+
+  // 决策 304：回到树形视图的某个模式（会话树每次进入都重读这一家）
+  private showTree(mode: TreeMode): void {
+    this.treeMode = mode;
+    if (mode === "sessions") this.loadSessionTree();
+    this.showView("tree");
+  }
+
+  private loadSessionTree(): void {
+    const root = this.options.sessions?.root;
+    if (root === undefined) {
+      this.sessionTree.fail("本会话不支持会话树（没有会话存储）");
+      return;
+    }
+    try {
+      this.sessionTree.load(loadSessionFamily(sessionsDirOf(root), this.current.sessionId));
+    } catch (error) {
+      this.sessionTree.fail(
+        `读会话树失败：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // 会话树里 Enter：本次运行编排器里的 worker 进入其会话（实时加历史），其余只读看历史
+  private viewFamilyNode(node: FamilyNode): void {
+    if (node.kind === "unreadable") {
+      this.sessionTree.setNote("读不到这个会话，不能查看");
+      return;
+    }
+    this.returnTo = { view: "tree", mode: "sessions" };
+    if (
+      node.kind === "worker" &&
+      this.workerStatuses().some((status) => status.sessionId === node.sessionId)
+    ) {
+      this.openWorkerSession(node.sessionId as SessionId, this.returnTo);
+      return;
+    }
+    this.openHistory(node.sessionId, familyKindLabel(node));
+  }
+
+  // 只读的历史查看（任意会话）：与进入 worker 会话同一份历史渲染，没有输入框，Esc 回到进入的地方
+  private openHistory(sessionId: string, label: string): void {
+    const flow = new MessageFlow();
+    flow.setToolsExpanded(this.flow.toolsExpandedState());
+    flow.addSystem(`== ${label} | 会话 ${sessionId} | 只读 ==`);
+    this.renderHistoryInto(flow, sessionId, "== 历史结束 ==");
+    this.historySession = { sessionId, flow };
+    this.showView("history");
+  }
+
+  // 读会话文件渲染历史（与 /resume 同一份读取与上限）
+  private renderHistoryInto(flow: MessageFlow, sessionId: string, endLine: string): void {
+    const root = this.options.sessions?.root;
+    if (root === undefined) return;
+    try {
+      const limit = this.options.historyLimit;
+      const lines = loadSessionHistory(root, sessionId, limit !== undefined ? { limit } : {});
+      flow.addSystem(`== 历史：会话 ${sessionId}（${lines.length} 行）==`);
+      flow.addHistory(lines);
+      flow.addSystem(endLine);
+    } catch (error) {
+      flow.addSystem(`历史渲染失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // 会话树里 r：在此续接——只对主会话、分支与失败重试，走 /resume 同一流程；说明写在树下方
+  private resumeFamilyNode(node: FamilyNode): void {
+    const refusal =
+      node.kind === "review"
+        ? "复盘会话只能查看，不能续接"
+        : node.kind === "worker"
+          ? "worker 会话在这里只能查看，不能续接"
+          : node.kind === "fork"
+            ? "未标明种类的分叉只能查看，不能续接"
+            : node.kind === "unreadable"
+              ? "读不到这个会话，不能续接"
+              : node.sessionId === this.current.sessionId
+                ? "当前会话不能续接"
+                : this.isBusy()
+                  ? resumeWhileRunningText()
+                  : !this.resumeConfigured()
+                    ? "本会话不支持续接"
+                    : undefined;
+    if (refusal !== undefined) {
+      this.sessionTree.setNote(refusal);
+      return;
+    }
+    const root = this.options.resume?.root;
+    if (root !== undefined && isSandboxSession(root, node.sessionId)) {
+      this.sessionTree.setNote(sandboxResumeHint(node.sessionId));
+      return;
+    }
+    this.returnTo = { view: "main" };
+    this.showView("main");
+    this.flow.addUserEcho(`/resume ${node.sessionId}`);
+    dispatchResumeCommand(this, node.sessionId);
   }
 
   // 进入 worker 的会话：消息区换成它的对话——历史取自它的会话记录（与 /resume 同一份渲染），之后的运行事件、流式正文与
   // 工具结果实时投影（与主会话同一套投影）
-  openWorkerSession(sessionId: SessionId): void {
+  openWorkerSession(sessionId: SessionId, returnTo: ReturnTo = { view: "main" }): void {
     const status = this.workerStatuses().find((worker) => worker.sessionId === sessionId);
     if (status === undefined) return;
     this.leaveWorkerSession();
+    this.returnTo = returnTo;
     const flow = new MessageFlow();
     flow.setToolsExpanded(this.flow.toolsExpandedState());
     flow.addSystem(
       `== worker ${status.name}（${status.role}）| 会话 ${status.sessionId}` +
         `${status.label !== undefined ? ` | 标签 ${status.label}` : ""} ==`
     );
-    const root = this.options.sessions?.root;
-    if (root !== undefined) {
-      try {
-        const limit = this.options.historyLimit;
-        const lines = loadSessionHistory(root, sessionId, limit !== undefined ? { limit } : {});
-        flow.addSystem(`== 历史：会话 ${sessionId}（${lines.length} 行）==`);
-        flow.addHistory(lines);
-        flow.addSystem("== 历史结束，以下为实时 ==");
-      } catch (error) {
-        flow.addSystem(`历史渲染失败：${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
+    this.renderHistoryInto(flow, sessionId, "== 历史结束，以下为实时 ==");
     if (status.outcome !== undefined) flow.addSystem(renderWorkerOutcome(status.outcome));
     const unsubscribe = this.tracker.listen((activity) => {
       if (activity.worker.sessionId !== sessionId) return;
@@ -1201,9 +1337,40 @@ export class PigeonTuiShell
     if (data === "\x03" || this.pendingApprovalState !== null) return undefined;
     const workers = this.current.workers;
     if (workers === undefined) return undefined;
+    if (this.view === "tree" && this.treeMode === "sessions") {
+      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+x")) {
+        this.returnTo = { view: "main" };
+        this.showView("main");
+      } else if (matchesKey(data, "tab")) {
+        this.showTree("running");
+      } else if (matchesKey(data, "up")) {
+        this.sessionTree.move(-1);
+      } else if (matchesKey(data, "down")) {
+        this.sessionTree.move(1);
+      } else if (matchesKey(data, "enter")) {
+        const selected = this.sessionTree.selected();
+        if (selected !== undefined) this.viewFamilyNode(selected);
+      } else if (data === "r" || data === "R") {
+        const selected = this.sessionTree.selected();
+        if (selected !== undefined) this.resumeFamilyNode(selected);
+      }
+      this.tui.requestRender();
+      return { consume: true };
+    }
+    if (this.view === "history") {
+      if (matchesKey(data, "escape")) {
+        this.goBack();
+        return { consume: true };
+      }
+      // Ctrl+O 交给视图按键；其余按键吞掉（只读）
+      return matchesKey(data, "ctrl+o") ? undefined : { consume: true };
+    }
     if (this.view === "tree") {
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+x")) {
+        this.returnTo = { view: "main" };
         this.showView("main");
+      } else if (matchesKey(data, "tab")) {
+        this.showTree("sessions");
       } else if (matchesKey(data, "up")) {
         this.tree.move(-1);
       } else if (matchesKey(data, "down")) {
@@ -1216,7 +1383,9 @@ export class PigeonTuiShell
         this.tree.toggleExpanded();
       } else if (matchesKey(data, "enter")) {
         const selected = this.tree.selected();
-        if (selected !== undefined) this.openWorkerSession(selected);
+        if (selected !== undefined) {
+          this.openWorkerSession(selected, { view: "tree", mode: "running" });
+        }
       } else if (data === "x" || data === "X") {
         const selected = this.tree.selected();
         if (selected !== undefined) this.stopWorker(selected, (line) => this.flow.addSystem(line));
@@ -1253,7 +1422,7 @@ export class PigeonTuiShell
       return { consume: true };
     }
     if (this.view === "worker" && matchesKey(data, "escape")) {
-      this.showView("main");
+      this.goBack();
       return { consume: true };
     }
     // 输入框为空时按 ↓ 进入面板（Claude Code 惯例）；会话选择器打开时不抢
@@ -1267,6 +1436,14 @@ export class PigeonTuiShell
       return { consume: true };
     }
     return undefined;
+  }
+
+  // Esc：从 worker 会话或历史查看回到进入它的地方（主会话，或树形视图的某个模式）
+  private goBack(): void {
+    const back = this.returnTo;
+    this.returnTo = { view: "main" };
+    if (back.view === "tree") this.showTree(back.mode);
+    else this.showView("main");
   }
 
   // 当前显示的消息区（worker 会话里是它的对话）
@@ -1465,6 +1642,16 @@ export class PigeonTuiShell
     }
     this.tui.requestRender();
   }
+}
+
+// 决策 304：主 agent 运行中按 r 在此续接——照 /resume 运行中被拒的同一原因
+function resumeWhileRunningText(): string {
+  const spec = lookupSlashCommand(["resume"]);
+  const reason =
+    spec !== undefined && !spec.whileRunning.allow
+      ? spec.whileRunning.reason
+      : "它会改动主会话状态";
+  return `运行中不能在此续接：${reason}。等本轮结束或按 Esc 中断后再用`;
 }
 
 // 决策 301：已收尾的 worker 会话只读
