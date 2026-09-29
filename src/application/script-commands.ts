@@ -5,7 +5,7 @@
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import type { SessionId } from "../state/ids.ts";
 import { parseScriptBudget, SCRIPT_COMMAND } from "./script-naming.ts";
-import type { ScriptRuns } from "./script-runner.ts";
+import { ScriptBudgetError, type ScriptRuns } from "./script-runner.ts";
 import { ORCHESTRATE_TEXTS } from "./script-texts.ts";
 
 export const SCRIPT_COMMAND_USAGE = `/${SCRIPT_COMMAND} <任务> [额度 ¥5|$2|300k]`;
@@ -44,7 +44,13 @@ export function scriptCommands(
   return {
     resume: async (runId, rest) => {
       const budget = parseScriptBudget(rest);
-      const result = await runs.resume(runId, budget !== undefined ? { budget } : {});
+      let result: Awaited<ReturnType<ScriptRuns["resume"]>>;
+      try {
+        result = await runs.resume(runId, budget !== undefined ? { budget } : {});
+      } catch (error) {
+        if (error instanceof ScriptBudgetError) return error.message;
+        throw error;
+      }
       if (result === "unknown") return ORCHESTRATE_TEXTS.unknownRun(runId);
       if (result === "running") return ORCHESTRATE_TEXTS.stillRunning(runId);
       return ORCHESTRATE_TEXTS.resumed(runs.spec(runId)?.name ?? runId, runId);

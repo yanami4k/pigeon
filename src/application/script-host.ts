@@ -18,6 +18,7 @@ import {
 import { overlayWorkerChanges } from "../execution/worker-overlay.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
+import { DEEPSEEK_PROVIDER } from "../pi-runtime/deepseek-model.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { SessionView } from "../state/session-view.ts";
@@ -26,6 +27,7 @@ import type { ScriptBudget } from "./script-naming.ts";
 import {
   type RestoredScriptRun,
   type ScriptCallRecord,
+  type ScriptPricing,
   type ScriptRunnerDeps,
   ScriptRuns,
   type ScriptSpec,
@@ -191,6 +193,9 @@ export interface SessionScriptsInput {
   launcher?: () => Promise<ScriptLauncher>;
   newRunId?: () => string;
   restore?: ScriptRunnerDeps["restore"];
+  // 模型的计价口径（金额额度开跑前核对）与脚本卡住的判定时长
+  pricing?: () => ScriptPricing;
+  stallMs?: number;
 }
 
 export function createSessionScripts(input: SessionScriptsInput): ScriptRuns {
@@ -223,5 +228,26 @@ export function createSessionScripts(input: SessionScriptsInput): ScriptRuns {
     ...(input.provider !== undefined ? { provider: input.provider } : {}),
     ...(input.hostExhausted !== undefined ? { hostExhausted: input.hostExhausted } : {}),
     ...(input.newRunId !== undefined ? { newRunId: input.newRunId } : {}),
+    ...(input.pricing !== undefined ? { pricing: input.pricing } : {}),
+    ...(input.stallMs !== undefined ? { stallMs: input.stallMs } : {}),
   });
+}
+
+// 模型的计价口径（与状态栏同一口径）：DeepSeek 按官方人民币价目；其余看本会话最近一条带用量的回复自带的价格，为 0 即没有价格；
+// 还没有回复即看不出来
+export function modelPricing(
+  provider: string | undefined,
+  transcript: readonly unknown[]
+): ScriptPricing {
+  if (provider === DEEPSEEK_PROVIDER) return "cny";
+  const last = transcript.findLast((message) => {
+    const entry = message as { role?: unknown; usage?: { totalTokens?: unknown } };
+    return (
+      entry.role === "assistant" &&
+      typeof entry.usage?.totalTokens === "number" &&
+      entry.usage.totalTokens > 0
+    );
+  }) as { usage: { cost?: { total?: number } } } | undefined;
+  if (last === undefined) return undefined;
+  return (last.usage.cost?.total ?? 0) > 0 ? "usd" : "none";
 }

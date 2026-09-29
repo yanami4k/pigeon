@@ -35,6 +35,7 @@ export const OrchestrationConfigFileSchema = Type.Object(
         {
           modelDecides: Type.Optional(Type.Boolean()),
           budget: Type.Optional(Type.String({ minLength: 1 })),
+          stallMinutes: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
         },
         { additionalProperties: false }
       )
@@ -58,6 +59,8 @@ export interface OrchestrationSettings {
   // 决策 309、314：脚本编排由模型判断（缺省关）与缺省额度的写法（缺省不限；解析在 application）
   scriptModelDecides: boolean;
   scriptBudget?: string;
+  // 决策 313 验收：脚本卡住的判定（没有 worker 在跑或排队、脚本又没结束，持续这么久即停掉；缺省 10 分钟）
+  scriptStallMs: number;
 }
 
 export const DEFAULT_ORCHESTRATION_SETTINGS: Readonly<OrchestrationSettings> = {
@@ -69,6 +72,7 @@ export const DEFAULT_ORCHESTRATION_SETTINGS: Readonly<OrchestrationSettings> = {
   approvalTimeoutMs: 5 * 60_000,
   taskList: true,
   scriptModelDecides: false,
+  scriptStallMs: 10 * 60_000,
 };
 
 export function orchestrationSettings(
@@ -93,5 +97,9 @@ export function orchestrationSettings(
     taskList: file?.taskList ?? base.taskList,
     scriptModelDecides: file?.script?.modelDecides ?? base.scriptModelDecides,
     ...(file?.script?.budget !== undefined ? { scriptBudget: file.script.budget } : {}),
+    scriptStallMs:
+      file?.script?.stallMinutes !== undefined
+        ? Math.round(file.script.stallMinutes * 60_000)
+        : base.scriptStallMs,
   };
 }

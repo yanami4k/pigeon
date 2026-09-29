@@ -43,7 +43,7 @@ import {
 } from "../application/sandbox-session.ts";
 import { wrapScriptApprovals } from "../application/script-approvals.ts";
 import { type ScriptCommands, scriptCommands } from "../application/script-commands.ts";
-import { createSessionScripts } from "../application/script-host.ts";
+import { createSessionScripts, modelPricing } from "../application/script-host.ts";
 import { ScriptGate, scriptGateSettingsOf } from "../application/script-naming.ts";
 import type { ScriptRuns } from "../application/script-runner.ts";
 import { ScriptSlot } from "../application/script-tool.ts";
@@ -199,6 +199,9 @@ async function main(argv: string[]): Promise<void> {
             handler: createHandler(bundle.grantStore),
           },
           provider: flags.provider,
+          // 决策 314：金额额度要模型有价格；决策 313：脚本卡住的判定时长
+          pricing: () => modelPricing(flags.provider, bundle.adapter.transcript()),
+          stallMs: orchestration.scriptStallMs,
           emit: (line) => {
             shellHolder.current?.addSystem(line);
             shellHolder.current?.render();

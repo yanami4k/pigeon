@@ -58,7 +58,7 @@ import {
 } from "./memory-review.ts";
 import { buildRepairFeedback, repairFailureSummary } from "./repair-loop.ts";
 import type { LearnedMemoryConfig, RuntimeBundle } from "./runtime.ts";
-import { createSessionScripts } from "./script-host.ts";
+import { createSessionScripts, modelPricing } from "./script-host.ts";
 import { ScriptGate, scriptGateSettingsOf } from "./script-naming.ts";
 import type { ScriptRuns } from "./script-runner.ts";
 import { ScriptSlot } from "./script-tool.ts";
@@ -478,6 +478,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
               configGrants: bundle.configGrants,
             },
             provider: surface.provider,
+            pricing: () => modelPricing(surface.provider, bundle.adapter.transcript()),
+            stallMs: (options.orchestration ?? DEFAULT_ORCHESTRATION_SETTINGS).scriptStallMs,
             hostExhausted: () => spawnBudget?.exhausted === true,
             ...(options.scriptLauncher !== undefined ? { launcher: options.scriptLauncher } : {}),
           });

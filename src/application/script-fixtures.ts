@@ -22,7 +22,7 @@ import type { SessionView } from "../state/session-view.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { CollectApproval } from "./script-host.ts";
 import { createSessionScripts, restoreScriptRun } from "./script-host.ts";
-import type { ScriptRuns } from "./script-runner.ts";
+import type { ScriptPricing, ScriptRuns } from "./script-runner.ts";
 import { ORCHESTRATE_TOOL } from "./script-texts.ts";
 import { workerStartPoint } from "./workers.ts";
 
@@ -261,6 +261,8 @@ export function scriptHarness(options: {
   display?: (line: string) => void;
   // 缺省为本机进程版执行器；真容器用例给 Docker 的
   launcher?: () => Promise<ScriptLauncher>;
+  pricing?: () => ScriptPricing;
+  stallMs?: number;
 }): ScriptHarness {
   const repo = options.repo ?? tempRepo();
   const sessionId = options.sessionId ?? newSessionId();
@@ -315,6 +317,8 @@ export function scriptHarness(options: {
     launcher: options.launcher ?? (async () => localScriptLauncher()),
     ...(ids.length > 0 ? { newRunId: () => ids.shift() ?? `s${Date.now()}` } : {}),
     ...(options.hostExhausted !== undefined ? { hostExhausted: options.hostExhausted } : {}),
+    ...(options.pricing !== undefined ? { pricing: options.pricing } : {}),
+    ...(options.stallMs !== undefined ? { stallMs: options.stallMs } : {}),
     // 重启后的找回：由记录与工具结果拼出会话视图，走同一个解析函数
     restore: async (runId) =>
       restoreScriptRun(join(tmpdir(), "no-sessions"), viewOf(sessionId, sink, toolResults), runId),

@@ -29,6 +29,7 @@ import { budgetText, type ScriptBudget } from "./script-naming.ts";
 import {
   logLine,
   planLine,
+  SCRIPT_BUDGET_NO_PRICE,
   SCRIPT_NOTICE_PREFIX,
   type ScriptEnding,
   type SummaryInput,
@@ -42,6 +43,14 @@ import { addUsage, type CostTally, emptyCostTally, type UsageLike } from "./sess
 export const SCRIPT_OUTPUT_CORRECTIONS = 2;
 // 停止整个脚本后，等脚本自己结束的宽限；过了即删掉容器
 export const SCRIPT_STOP_GRACE_MS = 10_000;
+// 脚本卡住的判定：本次脚本没有 worker 在跑或排队、脚本又没结束，持续这么久即停掉容器（缺省 10 分钟，项目配置可改）
+export const SCRIPT_STALL_MS = 10 * 60_000;
+
+// 模型没有价格却给了金额额度：开跑即拒绝（token 额度照常可用）
+export class ScriptBudgetError extends Error {}
+
+// 模型的计价口径：usd 为回复自带价格，cny 为 DeepSeek 官方人民币价目，none 为没有价格；undefined 为还看不出来
+export type ScriptPricing = "usd" | "cny" | "none" | undefined;
 
 export interface ScriptSpec {
   name: string;
@@ -136,6 +145,10 @@ export interface ScriptRunnerDeps {
   hostExhausted?: () => boolean;
   newRunId?: () => string;
   stopGraceMs?: number;
+  // 模型的计价口径（金额额度开跑前核对）；不给即不核对
+  pricing?: () => ScriptPricing;
+  // 脚本卡住的判定时长（缺省 SCRIPT_STALL_MS）
+  stallMs?: number;
 }
 
 type NotStarted = "budget" | "stopped";
@@ -171,6 +184,8 @@ interface ScriptRun {
   spent: CostTally;
   exhausted: boolean;
   stopped: boolean;
+  // 卡住监控停掉的
+  stalled: boolean;
   allowedKinds: Set<string>;
   nextIndex: number;
   proc?: ScriptProcess;
@@ -371,6 +386,7 @@ export class ScriptRuns implements ScriptKindRegistry {
   // ---- 开跑、续跑、停止、放弃 ----
 
   async start(spec: ScriptSpec, budget: ScriptBudget | undefined): Promise<string> {
+    this.#checkBudget(budget);
     const launcher = await this.#deps.launcher();
     const runId = (this.#deps.newRunId ?? defaultRunId)();
     const snapshot = this.#deps.snapshot(runId);
@@ -401,12 +417,21 @@ export class ScriptRuns implements ScriptKindRegistry {
       run.spent = restored.spent;
       this.#runs.set(runId, run);
     }
+    this.#checkBudget(override.budget ?? run.budget);
     const launcher = await this.#deps.launcher();
     this.#refresh(run);
     if (override.spec !== undefined) run.spec = override.spec;
     if (override.budget !== undefined) run.budget = override.budget;
     this.#execute(run, launcher);
     return "resumed";
+  }
+
+  // 金额额度要模型有价格：没有价格即拒绝（token 额度不看价格；还看不出来的不拦）
+  #checkBudget(budget: ScriptBudget | undefined): void {
+    if (budget === undefined || budget.unit === "tokens") return;
+    if (this.#deps.pricing?.() === "none") {
+      throw new ScriptBudgetError(SCRIPT_BUDGET_NO_PRICE);
+    }
   }
 
   // 停止整个脚本：在跑的 worker 停下，其余调用不再派，结果照 313 交回
@@ -475,6 +500,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       spent: emptyCostTally(),
       exhausted: false,
       stopped: false,
+      stalled: false,
       allowedKinds: new Set(),
       nextIndex: 0,
       done: Promise.resolve(),
@@ -487,6 +513,7 @@ export class ScriptRuns implements ScriptKindRegistry {
     run.running = true;
     delete run.ending;
     run.stopped = false;
+    run.stalled = false;
     run.calls = new Map();
     run.fingerprints = new ScriptFingerprints();
     run.phaseOrder = [...run.spec.phases];
@@ -529,6 +556,20 @@ export class ScriptRuns implements ScriptKindRegistry {
     const proc = launcher({ runId: run.runId });
     run.proc = proc;
     const pending = new Set<Promise<void>>();
+    // 卡住监控（宿主侧计时，脚本自身死循环、执行环境阻塞时同样有效）：没有调用在等 worker 时开始计时，有调用进来即停表
+    const stallMs = this.#deps.stallMs ?? SCRIPT_STALL_MS;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    let ended = false;
+    const armStall = (): void => {
+      clearTimeout(stallTimer);
+      if (ended || pending.size > 0) return;
+      stallTimer = setTimeout(() => {
+        if (ended || pending.size > 0) return;
+        run.stalled = true;
+        void proc.kill();
+      }, stallMs);
+      stallTimer.unref?.();
+    };
     const end = new Promise<{ value?: unknown; error?: string }>((resolve) => {
       proc.onMessage((message) => {
         switch (message.t) {
@@ -537,7 +578,11 @@ export class ScriptRuns implements ScriptKindRegistry {
               proc.send({ t: "result", id: message.id, value })
             );
             pending.add(task);
-            void task.finally(() => pending.delete(task));
+            armStall();
+            void task.finally(() => {
+              pending.delete(task);
+              armStall();
+            });
             break;
           }
           case "phase":
@@ -565,7 +610,10 @@ export class ScriptRuns implements ScriptKindRegistry {
       );
     });
     proc.send({ t: "start", source: run.spec.script, args: run.spec.args ?? null });
+    armStall();
     const outcome = await end;
+    ended = true;
+    clearTimeout(stallTimer);
     // 脚本结束时还在跑的调用：做完再收尾
     while (pending.size > 0) {
       await Promise.allSettled([...pending]);
@@ -577,11 +625,13 @@ export class ScriptRuns implements ScriptKindRegistry {
     ).length;
     const ending: ScriptEnding = run.stopped
       ? { kind: "stopped" }
-      : outcome.error !== undefined
-        ? { kind: "error", reason: outcome.error }
-        : notStarted > 0
-          ? { kind: "budget" }
-          : { kind: "completed" };
+      : run.stalled
+        ? { kind: "stalled", minutes: Math.max(1, Math.round(stallMs / 60_000)) }
+        : outcome.error !== undefined
+          ? { kind: "error", reason: outcome.error }
+          : notStarted > 0
+            ? { kind: "budget" }
+            : { kind: "completed" };
     run.ending = ending;
     const collection =
       ending.kind === "completed"
@@ -931,6 +981,16 @@ export class ScriptRuns implements ScriptKindRegistry {
       failures,
       awaitingApproval: awaiting,
       ...(ending.kind === "budget" ? { notStarted } : {}),
+      // 额度用完、被停或卡住：不自动收回，列出已做完的 worker 与分支
+      ...(ending.kind === "budget" || ending.kind === "stopped" || ending.kind === "stalled"
+        ? {
+            done: withWorker.flatMap((call) =>
+              call.result?.ok === true && call.record !== undefined
+                ? [{ name: call.record.name, branch: call.record.branch }]
+                : []
+            ),
+          }
+        : {}),
       collection,
       ...(returned !== undefined && returned !== null ? { returned } : {}),
     };

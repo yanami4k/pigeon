@@ -39,6 +39,10 @@ export const ORCHESTRATE_PARAM_TEXTS = {
   resumeRun: "续跑时给上一次的脚本运行号；不给即新开一次",
 } as const;
 
+// 模型没有价格却给了金额额度
+export const SCRIPT_BUDGET_NO_PRICE =
+  "这个模型没有价格，金额额度算不出来；请改用 token 写额度（如 300k），或不设额度";
+
 export const ORCHESTRATE_TEXTS = {
   started: (name: string, runId: string) =>
     `已开跑脚本 ${name}，运行号 ${runId}。结束时会有通知交回汇总；运行期间主工作目录不动。`,
@@ -92,6 +96,7 @@ export type ScriptEnding =
   | { kind: "completed" }
   | { kind: "budget" }
   | { kind: "stopped" }
+  | { kind: "stalled"; minutes: number }
   | { kind: "error"; reason: string };
 
 export function endingText(ending: ScriptEnding): string {
@@ -102,6 +107,8 @@ export function endingText(ending: ScriptEnding): string {
       return "额度用完";
     case "stopped":
       return "已停止";
+    case "stalled":
+      return `卡住：${ending.minutes} 分钟没有 worker 在跑或排队，脚本也没有结束，已停掉`;
     default:
       return `出错：${ending.reason}`;
   }
@@ -120,6 +127,8 @@ export interface SummaryInput {
   awaitingApproval: ReadonlyArray<{ who: string; action: string }>;
   // 因额度用完没有派出的调用数（额度用完时在场）
   notStarted?: number;
+  // 额度用完、被停或卡住时已做完的 worker 与分支（不自动收回）
+  done?: ReadonlyArray<{ name: string; branch: string }>;
   collection:
     | { kind: "done"; applied: string[]; conflicts: string[]; deletedByWorker: string[] }
     | { kind: "skipped"; reason: "脚本没有正常结束" | "人没有批准" | "没有要收回的" };
@@ -149,6 +158,11 @@ export function summaryText(input: SummaryInput): string {
   if (input.notStarted !== undefined) {
     lines.push(
       `额度用完未做：${input.notStarted} 个调用没有派出；调高额度后用 resume_run=${input.runId} 续跑。`
+    );
+  }
+  if (input.done !== undefined && input.done.length > 0) {
+    lines.push(
+      `已做完：${input.done.map((item) => `${item.name}（分支 ${item.branch}）`).join("、")}。可用 /take 逐个取用，或调高额度后续跑，已做完的会复用。`
     );
   }
   const collection = input.collection;

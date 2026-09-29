@@ -10,7 +10,7 @@ import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import { ScriptLaunchError } from "./script-host.ts";
 import type { ScriptBudget, ScriptGate } from "./script-naming.ts";
-import type { ScriptRuns, ScriptSpec } from "./script-runner.ts";
+import { ScriptBudgetError, type ScriptRuns, type ScriptSpec } from "./script-runner.ts";
 import {
   ORCHESTRATE_PARAM_TEXTS,
   ORCHESTRATE_TEXTS,
@@ -57,7 +57,15 @@ export interface OrchestrateDetails {
   // 续跑时从会话里找回脚本用
   spec?: ScriptSpec;
   budget?: ScriptBudget;
-  rejected?: "not-named" | "unbound" | "not-git" | "unknown-run" | "running" | "docker" | "failed";
+  rejected?:
+    | "not-named"
+    | "unbound"
+    | "not-git"
+    | "unknown-run"
+    | "running"
+    | "docker"
+    | "budget"
+    | "failed";
 }
 
 function reply(text: string, details: OrchestrateDetails): PigeonToolResult<OrchestrateDetails> {
@@ -121,6 +129,9 @@ export function createOrchestrateTool(
         });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
+        if (error instanceof ScriptBudgetError) {
+          return reply(reason, { rejected: "budget" });
+        }
         return error instanceof ScriptLaunchError
           ? reply(ORCHESTRATE_TEXTS.noDocker(reason), { rejected: "docker" })
           : reply(ORCHESTRATE_TEXTS.failed(reason), { rejected: "failed" });
