@@ -13,6 +13,8 @@ import {
 // 挂起中的审批决议（resolve 四键或 cancel）；串行不变量（决策 002）下同时最多一个
 export interface PendingApproval {
   resolve: (result: ApprovalPanelResult) => void;
+  // 决策 303（脚本部分）：面板提供 [s] 本次脚本内同类都允许
+  scriptKind?: boolean;
 }
 
 // 壳侧窄接口：模态状态的读写与壳动作（状态本体在壳里）
@@ -61,7 +63,10 @@ export function askApprovalPanel(
   }
   approvalLine(host, approvalBlockText(request, directoryGrant, host.outsideMainView?.() === true));
   const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
-  const pending = { resolve };
+  const pending: PendingApproval = {
+    resolve,
+    ...(request.script?.kind !== undefined ? { scriptKind: true } : {}),
+  };
   host.setPendingApproval(pending);
   host.updateStatus();
   host.render();
@@ -158,7 +163,13 @@ export function handleModalKey(host: ModalHost, data: string): { consume: true }
       host.render();
       return { consume: true };
     }
-    if (key === "y" || key === "n" || key === "a" || key === "d") {
+    if (
+      key === "y" ||
+      key === "n" ||
+      key === "a" ||
+      key === "d" ||
+      (key === "s" && approval.scriptKind === true)
+    ) {
       host.setPendingApproval(null);
       host.updateStatus();
       approval.resolve({ key });

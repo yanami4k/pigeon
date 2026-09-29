@@ -81,6 +81,19 @@ export class WorkerNotices {
     this.#deliver(text);
   }
 
+  // 决策 309–313：程序在后台做、结束时发一条的（脚本编排）——开始时登记，发出前算作还有未交回的结果（drainWorkers 等它）；
+  // 返回发出的函数，文字原样递出（前缀由调用方给），只发一次
+  hold(): (text: string) => void {
+    this.#pendingGroups += 1;
+    let posted = false;
+    return (text) => {
+      if (posted) return;
+      posted = true;
+      this.#pendingGroups = Math.max(0, this.#pendingGroups - 1);
+      this.#deliver(text, "");
+    };
+  }
+
   // 多份尝试的汇总通知（收尾异常时同样经这里发出）
   postGroup(ids: readonly SessionId[], text: string): void {
     for (const id of ids) {
@@ -147,8 +160,8 @@ export class WorkerNotices {
     this.#keys.set(worker.sessionId, key);
   }
 
-  #deliver(text: string): string {
-    const full = `${WORKER_NOTICE_PREFIX}${text}`;
+  #deliver(text: string, prefix = WORKER_NOTICE_PREFIX): string {
+    const full = `${prefix}${text}`;
     const key = this.#options.target.notify(full);
     this.#options.onNotice?.(full);
     for (const listener of this.#listeners) {

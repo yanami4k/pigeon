@@ -101,6 +101,12 @@ import {
   WORKER_STATUS_TOOL,
 } from "./orchestration-tools.ts";
 import {
+  createOrchestrateTool,
+  ORCHESTRATE_TOOL,
+  orchestrateRegistration,
+  type ScriptSlot,
+} from "./script-tool.ts";
+import {
   grantEventSink,
   openSessionStore,
   type SessionStoreWriter,
@@ -215,6 +221,9 @@ export interface RuntimeDeps {
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 294 D、309：提交编排脚本的工具。在场即给主 agent 注册 orchestrate（运行器建好后由装配方绑定到这个槽上）；能否执行由槽里的
+  // 点名判定管。缺省关着（跑批器各条件不给）；委派策略在场（worker）或注入了执行端（沙箱）时不注册
+  scriptOrchestration?: ScriptSlot;
   // 决策 294 B1：任务清单工具（update_tasks、list_tasks）。缺省关着（装配层缺省；终端界面与 pigeon run 按编排配置缺省打开，
   // 跑批器各条件不给）；只给主会话（委派策略在场时不注册）
   taskList?: boolean;
@@ -438,6 +447,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // 决策 279：取用 worker 自身改动的工具与派 worker 同槽同范围（写档，按写操作审批）
     registry.register(takeWorkerRegistration());
   }
+  // 决策 309：提交编排脚本的工具——只给主会话；worker 与沙箱不注册
+  const scriptSlot =
+    deps.workspaceHost === undefined && deps.toolPolicy === undefined
+      ? deps.scriptOrchestration
+      : undefined;
+  if (scriptSlot !== undefined) {
+    registry.register(orchestrateRegistration());
+  }
   // 决策 294 B1：任务清单——只给主会话
   const taskList =
     deps.taskList === true && deps.toolPolicy === undefined ? new TaskList() : undefined;
@@ -522,6 +539,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ]
       : []),
     ...(takeSlot !== undefined ? [TAKE_WORKER_TOOL] : []),
+    ...(scriptSlot !== undefined ? [ORCHESTRATE_TOOL] : []),
     ...(taskList !== undefined ? [UPDATE_TASKS_TOOL, LIST_TASKS_TOOL] : []),
     ...(webTools !== undefined ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
   ];
@@ -726,6 +744,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ? [createSpawnWorkerTool(spawnSlot), ...createOrchestrationTools(spawnSlot)]
         : []),
       ...(takeSlot !== undefined ? [createTakeWorkerTool(takeSlot)] : []),
+      ...(scriptSlot !== undefined ? [createOrchestrateTool(scriptSlot)] : []),
       ...(taskList !== undefined ? createTaskListTools(taskList) : []),
       ...webToolset,
     ],

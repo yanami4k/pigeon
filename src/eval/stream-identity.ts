@@ -53,6 +53,8 @@ export interface StreamRunIdentity {
         taskList?: boolean;
         // 打转检测（308 与 265 的先例）：各条件关掉；同一口径
         loopGuard?: boolean;
+        // 提交编排脚本的工具 orchestrate（294 D、309）：各条件关掉；同一口径
+        scriptOrchestration?: boolean;
       };
       minimal?: {
         model: string;

@@ -10,6 +10,8 @@ import {
   SANDBOX_RESUME_UNSUPPORTED,
   SANDBOX_WORKERS_UNSUPPORTED,
 } from "../application/sandbox-session.ts";
+import { SCRIPT_COMMAND_TEXTS, type ScriptCommands } from "../application/script-commands.ts";
+import { commandInputText } from "../application/script-texts.ts";
 import { runSearchCommand } from "../application/search.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -58,6 +60,9 @@ export interface CommandsHost {
   tasks?(): string | undefined;
   // 决策 301：/agents 切换树形视图
   toggleTree?(): void;
+  // 决策 309：脚本编排的命令面（缺省 = /orchestrate 不可用）与以人的输入提交一条（空闲即发、运行中排队）
+  scriptCommands?(): ScriptCommands | undefined;
+  submitInput?(text: string): void;
 }
 
 // 命令表判断可用性用的只读面
@@ -69,6 +74,7 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     hasGrants: () => host.grants() !== undefined,
     inSandbox: () => host.sandbox?.() !== undefined,
     tasks: () => host.tasks !== undefined,
+    scripts: () => host.scriptCommands?.() !== undefined,
     workers: () => {
       const workers = host.workers();
       return workers === undefined
@@ -194,6 +200,39 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       host.addSystem(
         host.tasks() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
       );
+      return;
+    }
+    // 决策 309、312、301：/orchestrate——发起即以人的输入提交（交给模型的文字带关键词，点名由程序判断）；续跑、停止、放弃由程序直接做
+    const scripts = host.scriptCommands?.();
+    if (tokens[0] === "orchestrate" && scripts !== undefined) {
+      const sub = tokens[1];
+      const done = (text: string) => {
+        host.addSystem(text);
+        host.render();
+      };
+      const failed = (error: unknown) =>
+        done(`命令失败：${error instanceof Error ? error.message : String(error)}`);
+      if (sub === "resume" || sub === "drop") {
+        const runId = tokens[2];
+        if (runId === undefined) {
+          host.addSystem(SCRIPT_COMMAND_TEXTS.usage);
+        } else if (sub === "drop") {
+          host.addSystem(scripts.drop(runId));
+        } else {
+          void scripts.resume(runId, tokens.slice(3).join(" ")).then(done, failed);
+        }
+        return;
+      }
+      if (sub === "stop") {
+        void scripts.stop(tokens[2]).then(done, failed);
+        return;
+      }
+      const task = value.trim().slice("/orchestrate".length).trim();
+      if (task === "" || host.submitInput === undefined) {
+        host.addSystem(SCRIPT_COMMAND_TEXTS.usage);
+        return;
+      }
+      host.submitInput(commandInputText(task));
       return;
     }
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）

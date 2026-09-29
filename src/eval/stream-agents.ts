@@ -46,6 +46,8 @@ export const STREAM_WEB_TOOLS = false;
 export const STREAM_TASK_LIST = false;
 // 决策 308 与 265 的先例：实验条件关掉打转检测（明确关掉，不依赖缺省；身份头照记这一项）
 export const STREAM_LOOP_GUARD = false;
+// 决策 309 与 265 的先例：实验条件不注册提交编排脚本的工具（明确关掉；身份头照记这一项）
+export const STREAM_SCRIPT_ORCHESTRATION = false;
 
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;
@@ -182,6 +184,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           taskList: STREAM_TASK_LIST,
           // 决策 308：打转检测同样关掉（主 agent、复盘都不挂；轮数与豁免照缺省，只改开关）
           loopGuard: { ...DEFAULT_LOOP_GUARD_SETTINGS, enabled: STREAM_LOOP_GUARD },
+          // 决策 309：提交编排脚本的工具同样不带（明确关掉）
+          scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
           ...(pushed
             ? {
                 pushedMemory: true,

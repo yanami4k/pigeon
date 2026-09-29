@@ -41,6 +41,12 @@ import {
   type Sandbox,
   startSandbox,
 } from "../application/sandbox-session.ts";
+import { wrapScriptApprovals } from "../application/script-approvals.ts";
+import { type ScriptCommands, scriptCommands } from "../application/script-commands.ts";
+import { createSessionScripts, modelPricing } from "../application/script-host.ts";
+import { ScriptGate, scriptGateSettingsOf } from "../application/script-naming.ts";
+import type { ScriptRuns } from "../application/script-runner.ts";
+import { ScriptSlot } from "../application/script-tool.ts";
 import {
   type OpenedSessionRuntime,
   openSessionRuntime,
@@ -128,16 +134,23 @@ async function main(argv: string[]): Promise<void> {
     approvalQueue.wrap(createTuiApprovalHandler(grants, () => faceHolder.current));
   // 决策 297：worker 完成通知显示在消息区、空闲时叫醒主 agent——壳晚于编排器构造，晚绑定
   const shellHolder: { current: PigeonTuiShell | undefined } = { current: undefined };
+  // 决策 309–314：各会话的脚本编排（运行器、命令面与点名状态），按会话的运行面取
+  const scriptsOf = new WeakMap<
+    RuntimeBundle,
+    { runs: ScriptRuns; commands: ScriptCommands; gate: ScriptGate }
+  >();
   const workersFor = (
     opened: OpenedSessionRuntime,
     parentSessionId?: SessionId
   ): TuiWorkersFace => {
     const { bundle } = opened;
+    const scriptHolder: { current?: ScriptRuns } = {};
     const deps = {
       governanceRoot: workspaceRoot,
       bundle,
-      // worker 请求自带其会话的放权落点；此处绑定的父会话存储只是缺省
-      approvals: createHandler(bundle.grantStore),
+      // worker 请求自带其会话的放权落点；此处绑定的父会话存储只是缺省。
+      // 决策 303（脚本部分）：脚本派出的 worker 的请求——同类已放行即批准，否则补上脚本名与同类交给人
+      approvals: wrapScriptApprovals(createHandler(bundle.grantStore), () => scriptHolder.current),
       streamFn,
       provider: flags.provider,
       modelId: flags.modelId,
@@ -160,7 +173,7 @@ async function main(argv: string[]): Promise<void> {
       bundle.adapter.subscribe((event) => {
         runKey = event.runId;
       });
-      bindSpawnWorkers({
+      const bound = bindSpawnWorkers({
         slot: opened.spawnWorker,
         orchestrator,
         governanceRoot: workspaceRoot,
@@ -176,6 +189,39 @@ async function main(argv: string[]): Promise<void> {
           shellHolder.current?.render();
         },
       });
+      // 决策 309–314：脚本编排的运行器——汇总与 worker 完成通知同一条队列；收回按写操作请示（放手模式或已放权即直接做）
+      const scriptSlot = opened.scriptOrchestration;
+      if (scriptSlot !== undefined) {
+        const runs = createSessionScripts({
+          orchestrator,
+          governanceRoot: workspaceRoot,
+          sessionId: bundle.adapter.sessionId,
+          flush: () => bundle.sessionStore.flush(),
+          ...(bound.notices !== undefined ? { notices: bound.notices } : {}),
+          approval: {
+            yolo: flags.yolo,
+            grants: bundle.grantStore,
+            configGrants: bundle.configGrants,
+            handler: createHandler(bundle.grantStore),
+          },
+          provider: flags.provider,
+          // 决策 314：金额额度要模型有价格；决策 313：脚本卡住的判定时长
+          pricing: () => modelPricing(flags.provider, bundle.adapter.transcript()),
+          stallMs: orchestration.scriptStallMs,
+          emit: (line) => {
+            shellHolder.current?.addSystem(line);
+            shellHolder.current?.render();
+          },
+          onChange: () => shellHolder.current?.render(),
+        });
+        scriptHolder.current = runs;
+        scriptSlot.bind({ runs, governanceRoot: workspaceRoot });
+        scriptsOf.set(bundle, {
+          runs,
+          commands: scriptCommands(runs, orchestrator),
+          gate: scriptSlot.gate,
+        });
+      }
     }
     return {
       // 人用 /spawn 派出的：收尾显示在消息区，不另发完成通知
@@ -304,6 +350,10 @@ async function main(argv: string[]): Promise<void> {
     },
     // 决策 301：树形视图按标签标出清单项（换绑后跟着当前会话）
     taskItems: () => slot.bundle.taskList?.items(),
+    // 决策 309、301：脚本编排——点名只看人的输入、树形视图的脚本与阶段两层、/orchestrate（换绑后跟着当前会话）
+    onHumanInput: (text) => scriptsOf.get(slot.bundle)?.gate.humanInput(text),
+    scripts: () => scriptsOf.get(slot.bundle)?.runs.nodes() ?? [],
+    scriptCommands: () => scriptsOf.get(slot.bundle)?.commands,
     // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
     //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
     onExit: release,
@@ -467,12 +517,16 @@ function verifyOption(
 }
 
 // 决策 264–267：派 worker 开着时每个打开的会话一个工具槽（只给主会话注册，沙箱与 worker 会话由装配层略过）
+// 决策 309：脚本编排随派 worker 一并给（每个打开的会话一个槽与点名状态）
 function spawnWorkerOption(
   flags: LaunchFlags,
   orchestration: OrchestrationSettings
-): { spawnWorker?: SpawnWorkerSlot } {
+): { spawnWorker?: SpawnWorkerSlot; scriptOrchestration?: ScriptSlot } {
   return flags.spawnWorkers
-    ? { spawnWorker: new SpawnWorkerSlot(spawnWorkerSettingsOf(orchestration)) }
+    ? {
+        spawnWorker: new SpawnWorkerSlot(spawnWorkerSettingsOf(orchestration)),
+        scriptOrchestration: new ScriptSlot(new ScriptGate(scriptGateSettingsOf(orchestration))),
+      }
     : {};
 }
 

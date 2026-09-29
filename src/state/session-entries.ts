@@ -22,6 +22,8 @@ import {
   ForkPointSchema,
   ForkTriggerSchema,
   GitWorktreeWorkspaceSchema,
+  ScriptSettleTagSchema,
+  ScriptSpawnTagSchema,
   WorkerErrorKindSchema,
   WorkerLimitsSchema,
   WorkerRoleSchema,
@@ -187,6 +189,8 @@ export const WorkerSpawnedDataSchema = Type.Object({
   limits: WorkerLimitsSchema,
   workspace: WorkerWorkspaceSchema,
   spawnedAt: Type.Integer({ minimum: 0 }),
+  // 决策 312：脚本编排派出的调用（运行号、指纹、接力的上游；加这一项之前的记录没有它）
+  script: Type.Optional(ScriptSpawnTagSchema),
 });
 export const WorkerSettledDataSchema = Type.Object({
   version: VERSION,
@@ -208,6 +212,8 @@ export const WorkerSettledDataSchema = Type.Object({
   ),
   turns: Type.Integer({ minimum: 0 }),
   settledAt: Type.Integer({ minimum: 0 }),
+  // 决策 312：脚本编排派出的调用（运行号、指纹与交回的结构化数据）
+  script: Type.Optional(ScriptSettleTagSchema),
 });
 export const WorkerDataSchema = Type.Union([WorkerSpawnedDataSchema, WorkerSettledDataSchema]);
 export type WorkerData = Static<typeof WorkerDataSchema>;

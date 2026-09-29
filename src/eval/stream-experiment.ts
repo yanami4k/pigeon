@@ -30,6 +30,7 @@ import {
   type PigeonStepAgentOptions,
   pigeonStepAgent,
   STREAM_LOOP_GUARD,
+  STREAM_SCRIPT_ORCHESTRATION,
   STREAM_SPAWN_WORKERS,
   STREAM_TASK_LIST,
   STREAM_WEB_TOOLS,
@@ -153,6 +154,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     taskList: STREAM_TASK_LIST,
     // 决策 308：打转检测在各条件里的实际生效值（关）
     loopGuard: STREAM_LOOP_GUARD,
+    // 决策 309：提交编排脚本的工具在各条件里的实际生效值（关）
+    scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
   };
 }
 
