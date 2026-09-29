@@ -25,10 +25,10 @@ import { runForkCommand } from "../application/fork-command.ts";
 import {
   applyReviewModelConfig,
   type LaunchFlags,
+  orchestrationSettingsOf,
   parseLaunchFlags,
   resolveStreamFnSpec,
   resolveVerifyConfig,
-  spawnWorkerLimitsOf,
   webToolsEnabled,
 } from "../application/launch-flags.ts";
 import { promptHistoryStore } from "../application/prompt-history.ts";
@@ -46,8 +46,9 @@ import {
   pushedMemoryRunOptions,
 } from "../application/session-runtime.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
-import { SpawnWorkerSlot } from "../application/spawn-worker-tool.ts";
+import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
+import { renderTaskList } from "../application/task-list-tool.ts";
 import { closeTuiSession, recordTuiExit } from "../application/tui-exit.ts";
 import { resolveWebTools } from "../application/web-tools.ts";
 import { createSessionWorkers } from "../application/workers.ts";
@@ -56,6 +57,7 @@ import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
@@ -93,6 +95,8 @@ async function main(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
+  // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
+  const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
   // 决策 296：复盘模型（配置里指定时，压缩前、收尾、补做三种复盘都用它）
   applyReviewModelConfig(flags, workspaceRoot);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
@@ -117,6 +121,8 @@ async function main(argv: string[]): Promise<void> {
   const approvalQueue = createApprovalQueue();
   const createHandler = (grants: SessionGrantStore) =>
     approvalQueue.wrap(createTuiApprovalHandler(grants, () => faceHolder.current));
+  // 决策 297：worker 完成通知显示在消息区、空闲时叫醒主 agent——壳晚于编排器构造，晚绑定
+  const shellHolder: { current: PigeonTuiShell | undefined } = { current: undefined };
   const workersFor = (
     opened: OpenedSessionRuntime,
     parentSessionId?: SessionId
@@ -133,8 +139,8 @@ async function main(argv: string[]): Promise<void> {
       persistThinking: flags.persistThinking,
       ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-      // 决策 268：同时在跑的上限，人用 /spawn 派的与 agent 派的一并计算
-      maxConcurrent: spawnWorkerLimitsOf(flags).maxConcurrent,
+      // 决策 297–303：编排设定；同时在跑的上限对人用 /spawn 派的与 agent 派的一并计算
+      settings: orchestration,
       // 决策 287–291：worker 与主会话同样拿到联网工具
       ...webToolsOption,
       storeWarn: warn,
@@ -155,10 +161,20 @@ async function main(argv: string[]): Promise<void> {
         hostStore: bundle.sessionStore,
         ...(verify !== undefined ? { verify } : {}),
         runKey: () => runKey,
+        // 决策 297：完成通知进主 agent 的下一轮，空闲时叫醒它；通知同时显示在消息区
+        target: bundle.adapter,
+        wake: () => shellHolder.current?.runNotices(),
+        onNotice: (text) => {
+          shellHolder.current?.addSystem(text);
+          shellHolder.current?.render();
+        },
       });
     }
     return {
-      spawn: (request) => orchestrator.spawn(request),
+      // 人用 /spawn 派出的：收尾显示在消息区，不另发完成通知
+      spawn: (request) => orchestrator.spawn({ ...request, origin: "human" }),
+      // 决策 294：生命周期事件驱动状态行
+      subscribe: (listener) => orchestrator.subscribe(() => listener()),
       cancel: (id) => orchestrator.cancel(id),
       status: () => orchestrator.status(),
       awaitResult: (id) => orchestrator.awaitResult(id),
@@ -215,7 +231,8 @@ async function main(argv: string[]): Promise<void> {
     ...verifyOption(flags, workspaceRoot),
     ...retryOption(flags),
     ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-    ...spawnWorkerOption(flags),
+    ...spawnWorkerOption(flags, orchestration),
+    taskList: orchestration.taskList,
     ...webToolsOption,
     warn,
     createApprovalHandler: createHandler,
@@ -267,6 +284,11 @@ async function main(argv: string[]): Promise<void> {
     // 旧运行面不受影响，壳继续留在原会话
     // 沙箱会话里不提供换绑（命令给出原因）
     ...(sandbox !== undefined ? {} : { resume: resumeOptions() }),
+    // 决策 294 B1：/tasks 查看当前会话的任务清单（换绑后跟着当前会话）
+    tasks: () => {
+      const list = slot.bundle.taskList;
+      return list !== undefined ? renderTaskList(list.items()) : undefined;
+    },
     // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
     //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
     onExit: release,
@@ -284,7 +306,8 @@ async function main(argv: string[]): Promise<void> {
           flags,
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
-          ...spawnWorkerOption(flags),
+          ...spawnWorkerOption(flags, orchestration),
+          taskList: orchestration.taskList,
           ...webToolsOption,
           warn,
           createApprovalHandler: createHandler,
@@ -314,6 +337,7 @@ async function main(argv: string[]): Promise<void> {
     };
   }
   faceHolder.current = shell;
+  shellHolder.current = shell;
   shell.start();
   warnSink.attach((line) => shell.addWarning(line));
   if (target.kind === "resume") {
@@ -416,8 +440,13 @@ function verifyOption(
 }
 
 // 决策 264–267：派 worker 开着时每个打开的会话一个工具槽（只给主会话注册，沙箱与 worker 会话由装配层略过）
-function spawnWorkerOption(flags: LaunchFlags): { spawnWorker?: SpawnWorkerSlot } {
-  return flags.spawnWorkers ? { spawnWorker: new SpawnWorkerSlot(spawnWorkerLimitsOf(flags)) } : {};
+function spawnWorkerOption(
+  flags: LaunchFlags,
+  orchestration: OrchestrationSettings
+): { spawnWorker?: SpawnWorkerSlot } {
+  return flags.spawnWorkers
+    ? { spawnWorker: new SpawnWorkerSlot(spawnWorkerSettingsOf(orchestration)) }
+    : {};
 }
 
 // M7（决策 079）：失败自动分叉重试次数

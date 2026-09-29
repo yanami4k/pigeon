@@ -4,6 +4,7 @@
 // 审批决定与错误归类由 Adapter 挂在工具结果消息上记进会话存储。
 // 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游 prepareToolCall
 // 在 hook 前拦截，事件级连续计数熔断兜底（spikes/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
+import path from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import type {
   GovernanceHost,
@@ -58,6 +59,22 @@ export interface ToolGovernanceOptions {
   workspaceRoot?: string;
   // 熔断阈值：同一 工具名+参数指纹 在同一 Run 内被阻断的次数上限（spike S4：上游无循环护栏）
   circuitBreakerThreshold?: number;
+  // 决策 302：worker 用写层文件工具改工作区根（它自己的工作树）内的文件默认放行——排在 deny、放权、免审、yolo、只读之后，
+  // 原本要问人时生效；跑命令、读网页等其余动作照旧请示。只由 worker 装配时给
+  ownWorkspaceWrites?: boolean;
+}
+
+// 决策 302 所说的写层文件工具：改文件的内置工具（两种编辑模式都叫 edit_file）
+const OWN_WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set(["edit_file"]);
+
+// 调用的 path 参数落在工作区根之内（词法判定；工具自身另有工作区限定）
+function withinWorkspace(root: string, args: unknown): boolean {
+  const target = (args as { path?: unknown } | null)?.path;
+  if (typeof target !== "string" || target === "") {
+    return false;
+  }
+  const relative = path.relative(path.resolve(root), path.resolve(root, target));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 // 装配根组装治理后交给 Adapter；Adapter 构造时绑定宿主能力，一个 Adapter 一份实例
@@ -75,6 +92,7 @@ class GovernedToolCalls implements ToolGovernance {
   readonly #sessionGrants: SessionGrantMatcher | undefined;
   readonly #configGrants: readonly ConfigGrantRule[];
   readonly #workspaceRoot: string | undefined;
+  readonly #ownWorkspaceWrites: boolean;
   // ToolExecution 账本：toolCallId → 记录
   readonly #executions = new Map<string, ToolExecution>();
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
@@ -103,6 +121,7 @@ class GovernedToolCalls implements ToolGovernance {
     this.#sessionGrants = options.sessionGrants;
     this.#configGrants = options.configGrants ?? [];
     this.#workspaceRoot = options.workspaceRoot;
+    this.#ownWorkspaceWrites = options.ownWorkspaceWrites === true;
     // 广告了未在注册表登记的工具 = 配置错误，构造期 fail-fast
     for (const name of host.tools.keys()) {
       if (!this.#registry.has(name)) {
@@ -206,7 +225,21 @@ class GovernedToolCalls implements ToolGovernance {
     const grantHit =
       this.#sessionGrants?.match(toolName, rawArgs, { needsShell }) ??
       matchConfigGrants(this.#configGrants, this.#workspaceRoot, toolName, rawArgs, needsShell);
-    const decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined);
+    let decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined);
+    // 决策 302：worker 改自己工作树内的文件，原本要问人的改为放行（记 policy:auto）
+    if (
+      decision.kind === "prompt" &&
+      this.#ownWorkspaceWrites &&
+      this.#workspaceRoot !== undefined &&
+      OWN_WORKSPACE_WRITE_TOOLS.has(toolName) &&
+      this.#registry.get(toolName)?.tier === "write" &&
+      withinWorkspace(this.#workspaceRoot, rawArgs)
+    ) {
+      decision = {
+        kind: "auto-allow",
+        reason: `worker 在自己的工作树内改文件，默认放行：${toolName}`,
+      };
+    }
 
     // deny 清单绝对 / 未注册 fail-closed：自动拒绝，不弹人工审批
     if (decision.kind === "deny") {

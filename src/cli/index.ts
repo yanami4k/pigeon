@@ -20,11 +20,11 @@ import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import {
   applyReviewModelConfig,
   type LaunchFlags,
+  orchestrationSettingsOf,
   parseLaunchFlags,
   resolveRepairRounds,
   resolveStreamFnSpec,
   resolveVerifyConfig,
-  spawnWorkerLimitsOf,
   VALUELESS_FLAGS,
   webToolsEnabled,
 } from "../application/launch-flags.ts";
@@ -410,6 +410,8 @@ async function runMain(argv: string[]): Promise<void> {
   applyReviewModelConfig(flags, workspaceRoot);
   // 决策 142 / 143：回炉轮数——启动参数 > 项目验证配置 > 关闭；设定不成立由 runHeadless 启动报错
   const repairRounds = resolveRepairRounds(flags, workspaceRoot);
+  // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
+  const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
   const runOptions = {
     task,
     governanceRoot: workspaceRoot,
@@ -435,7 +437,9 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
-    spawnWorkerLimits: spawnWorkerLimitsOf(flags),
+    orchestration,
+    // 决策 294 B1：任务清单按编排配置（缺省开）
+    taskList: orchestration.taskList,
     ...verifyOption(flags, workspaceRoot),
     // M7（决策 079）：失败自动分叉重试
     ...retryOption(flags),

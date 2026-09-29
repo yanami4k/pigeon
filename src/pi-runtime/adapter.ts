@@ -213,6 +213,11 @@ export class PiRuntimeAdapter {
   readonly #sessionStore: SessionStoreSink | undefined;
   // 当前 Run 被我们的上限中止的原因（interrupt 时给出；每个 Run 开始时清空）
   #stopCause: RunStopCause | undefined;
+  // 决策 297：待递的通知——先留在这里，Run 内每轮结束（turn_end）时转入上游的 steer 队列、进下一轮；空闲时由 runNotices
+  // 或下一次 run 一并带上。转入之前可撤回（同一结果已由等待工具交回时不再另发）
+  readonly #notices: Array<{ key: string; message: AgentMessage }> = [];
+  readonly #deliveredNotices = new Set<string>();
+  #noticeSeq = 0;
   readonly #compactor: ContextCompactor | undefined;
   readonly #compactionListeners = new Set<(notice: CompactionNotice) => void>();
   readonly #toolResultListeners = new Set<(notice: ToolResultNotice) => void>();
@@ -311,9 +316,62 @@ export class PiRuntimeAdapter {
     });
   }
 
-  // 启动一次 Run 并等待其彻底收尾；返回终态判定结果。
+  // 启动一次 Run 并等待其彻底收尾；返回终态判定结果。有待递的通知时连同输入一起交给模型（通知在前）
   async run(input: string): Promise<RunResult> {
-    return this.#runWith(() => this.#agent.prompt(input));
+    if (this.#notices.length === 0) {
+      return this.#runWith(() => this.#agent.prompt(input));
+    }
+    return this.#runWith(() =>
+      this.#agent.prompt([
+        ...this.#takeNotices(),
+        { role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() },
+      ])
+    );
+  }
+
+  // 决策 297：递一条通知（作一条用户消息进模型的下一轮）；返回撤回与查询用的键
+  notify(text: string): string {
+    this.#noticeSeq += 1;
+    const key = `notice-${this.#noticeSeq}`;
+    this.#notices.push({
+      key,
+      message: { role: "user", content: [{ type: "text", text }], timestamp: Date.now() },
+    });
+    return key;
+  }
+
+  // 撤回还没递出的通知；已递出（或不认识）返回 false
+  withdrawNotice(key: string): boolean {
+    const index = this.#notices.findIndex((notice) => notice.key === key);
+    if (index < 0) {
+      return false;
+    }
+    this.#notices.splice(index, 1);
+    return true;
+  }
+
+  noticeDelivered(key: string): boolean {
+    return this.#deliveredNotices.has(key);
+  }
+
+  pendingNotices(): number {
+    return this.#notices.length;
+  }
+
+  // 决策 297：空闲时被叫醒——只带待递的通知开一次 Run
+  async runNotices(): Promise<RunResult> {
+    if (this.#notices.length === 0) {
+      throw new Error("没有待递的通知");
+    }
+    return this.#runWith(() => this.#agent.prompt(this.#takeNotices()));
+  }
+
+  #takeNotices(): AgentMessage[] {
+    const taken = this.#notices.splice(0);
+    for (const notice of taken) {
+      this.#deliveredNotices.add(notice.key);
+    }
+    return taken.map((notice) => notice.message);
   }
 
   // M7（决策 077 / 079）：不给新输入，从已有消息续跑（上游 continue：末条消息须是用户消息或工具结果）——
@@ -815,6 +873,12 @@ export class PiRuntimeAdapter {
       const runId = this.#currentRunId;
       if (!runId) {
         return;
+      }
+      // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）
+      if (event.type === "turn_end" && this.#notices.length > 0 && !this.#interruptRequested) {
+        for (const message of this.#takeNotices()) {
+          this.#agent.steer(message);
+        }
       }
       // 空回复要重试时暂扣这次 agent_end：一个 Run 只发一次 run.ended（订阅方据它验证、收会话树），由重试那次的发出
       if (event.type === "agent_end" && this.#shouldRetryEmptyReply()) {

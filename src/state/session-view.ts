@@ -481,9 +481,10 @@ export function buildSessionView(input: SessionFileInput): SessionView {
       childById.set(item.data.childSessionId, child);
     } else {
       const child = childById.get(item.data.childSessionId);
-      if (child === undefined || child.settled !== undefined) {
+      if (child === undefined) {
         orphanSettleds.push(item.data);
       } else {
+        // 决策 303：补批续做的 worker 再收尾一次，后到的收尾记录为准
         child.settled = item.data;
       }
     }

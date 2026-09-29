@@ -1,5 +1,5 @@
-// 主 agent 派 worker 的端到端（决策 264、267）：pigeon run 子进程里，主 agent 同一次回复派出两个 worker，二者并行完成，
-// 结果作为工具返回值交回，主 agent 再用 run_command 合并其中一个分支。另钉住缺省入口：pigeon 不带子命令进终端界面，
+// 主 agent 派 worker 的端到端（决策 264、267、297）：pigeon run 子进程里，主 agent 同一次回复派出两个 worker（派出即返回），
+// 用 wait_workers 等二者并行完成、交回结果，再用 run_command 合并其中一个分支。另钉住缺省入口：pigeon 不带子命令进终端界面，
 // pigeon --line 进命令行对话，--help 列出入口。
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseLaunchFlags, spawnWorkerLimitsOf } from "../application/launch-flags.ts";
+import { orchestrationSettingsOf, parseLaunchFlags } from "../application/launch-flags.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { routeTopLevel, TOP_LEVEL_HELP, TUI_ENTRY } from "./index.ts";
 
@@ -27,11 +27,6 @@ after(() => {
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
-
-// 决策 279：spawn_worker 的返回末行是起点与取用方式（提交号随仓库变），比对定稿文字时去掉
-const START_LINE =
-  /\n起点：(提交|快照) [0-9a-f]{12}（[^）]*）；要把它的改动叠进你的工作目录，调用 take_worker（worker=[a-z0-9-]+）。/g;
-const withoutStart = (text: string): string => text.replace(START_LINE, "");
 
 function runCli(args: string[], input = "") {
   return spawnSync(process.execPath, [CLI, ...args], {
@@ -56,6 +51,7 @@ const main = createFakeStreamFn({ replies: [
     { name: "spawn_worker", args: { role: "implementer", task: "WORKER-A 把 a.txt 里的 a 改成 A", name: "fix-a" } },
     { name: "spawn_worker", args: { role: "implementer", task: "WORKER-B 把 b.txt 里的 b 改成 B", name: "fix-b" } },
   ] },
+  { text: "等两个", toolCalls: [{ name: "wait_workers", args: {} }] },
   { text: "合并 A", toolCalls: [{ name: "run_command", args: { command: ${JSON.stringify(merge)} } }] },
   { text: "合并完成" },
 ] });
@@ -94,7 +90,7 @@ export default async function (model, context, options) {
   return file;
 }
 
-test("pigeon run：主 agent 同一次回复派两个 worker，并行完成、结果交回，再用 run_command 合并其中一个分支", {
+test("pigeon run：主 agent 同一次回复派两个 worker（派出即返回），wait_workers 等二者并行完成、交回结果，再用 run_command 合并其中一个分支", {
   skip: process.platform === "win32" ? "合并命令用 sh 的通配与串联" : false,
 }, () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-spawn-cli-"));
@@ -131,14 +127,19 @@ test("pigeon run：主 agent 同一次回复派两个 worker，并行完成、�
       .map((block) => block.text ?? "")
       .join("");
   assert.deepEqual(
-    calls
-      .filter((call) => call.toolName === "spawn_worker")
-      .map((call) => withoutStart(textOf(call))),
+    calls.filter((call) => call.toolName === "spawn_worker").map((call) => textOf(call)),
     [
-      "worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（1）：a.txt。摘要：A 改好了（并行）",
-      "worker fix-b（implementer）已完成。分支：pigeon/fix-b。改动的文件（1）：b.txt。摘要：B 改好了",
+      "已派出 worker fix-a（implementer），分支 pigeon/fix-a。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
+      "已派出 worker fix-b（implementer），分支 pigeon/fix-b。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
     ]
   );
+  const waited = calls.find((call) => call.toolName === "wait_workers");
+  assert.ok(waited !== undefined);
+  const waitedText = textOf(waited);
+  assert.ok(waitedText.includes("worker fix-a（implementer）：状态 完成。"), waitedText);
+  assert.ok(waitedText.includes("最后一段输出：A 改好了（并行）"), waitedText);
+  assert.ok(waitedText.includes("worker fix-b（implementer）：状态 完成。"), waitedText);
+  assert.ok(waitedText.includes("改动的文件（1）：b.txt。"), waitedText);
   const merge = calls.find((call) => call.toolName === "run_command");
   assert.ok(merge !== undefined);
   assert.notEqual(merge.result?.isError, true, textOf(merge));
@@ -203,20 +204,24 @@ test("启动参数：--no-spawn-workers 只在能派 worker 的入口接受，�
   assert.throws(() => parseLaunchFlags(["--no-spawn-workers"], { usage: "u" }), /未知参数/);
 });
 
-test("启动参数：--worker-concurrency 与 --worker-limit 调两个上限，缺省 4 与 16；只在能派 worker 的入口接受", () => {
-  assert.deepEqual(spawnWorkerLimitsOf(parseLaunchFlags([], { usage: "u", spawnWorkers: true })), {
-    maxConcurrent: 4,
-    maxAgentSpawns: 16,
-  });
-  assert.deepEqual(
-    spawnWorkerLimitsOf(
-      parseLaunchFlags(["--worker-concurrency", "2", "--worker-limit", "5"], {
-        usage: "u",
-        spawnWorkers: true,
-      })
-    ),
-    { maxConcurrent: 2, maxAgentSpawns: 5 }
+test("启动参数：--worker-concurrency 与 --worker-limit 调两个上限，缺省同时 8 个、不设总数上限；只在能派 worker 的入口接受", () => {
+  const empty = mkdtempSync(join(tmpdir(), "pigeon-orch-flags-"));
+  roots.push(empty);
+  const defaults = orchestrationSettingsOf(
+    parseLaunchFlags([], { usage: "u", spawnWorkers: true }),
+    empty
   );
+  assert.equal(defaults.maxConcurrent, 8);
+  assert.equal(defaults.maxWorkersPerRun, undefined);
+  const given = orchestrationSettingsOf(
+    parseLaunchFlags(["--worker-concurrency", "2", "--worker-limit", "5"], {
+      usage: "u",
+      spawnWorkers: true,
+    }),
+    empty
+  );
+  assert.equal(given.maxConcurrent, 2);
+  assert.equal(given.maxWorkersPerRun, 5);
   for (const bad of ["0", "1.5", "x"]) {
     assert.throws(
       () => parseLaunchFlags(["--worker-limit", bad], { usage: "u", spawnWorkers: true }),
@@ -281,8 +286,8 @@ export default (model, context, options) => {
         .map((block) => block.text ?? "")
         .join("")
     );
-  assert.deepEqual(texts.map(withoutStart), [
-    "worker look-a（explorer）已完成。分支：pigeon/look-a。改动的文件（0）：无。摘要：看过了",
+  assert.deepEqual(texts, [
+    "已派出 worker look-a（explorer），分支 pigeon/look-a。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
     "本次运行派出的 worker 已达 1 个上限。不要再派；用已有的结果，或自己完成。",
   ]);
 });

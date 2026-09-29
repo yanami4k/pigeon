@@ -22,6 +22,7 @@ import {
   ForkPointSchema,
   ForkTriggerSchema,
   GitWorktreeWorkspaceSchema,
+  WorkerErrorKindSchema,
   WorkerLimitsSchema,
   WorkerRoleSchema,
   WorkerWorkspaceSchema,
@@ -177,6 +178,8 @@ export const WorkerSpawnedDataSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   role: WorkerRoleSchema,
   task: Type.String({ minLength: 1 }),
+  // 决策 294：派出时带的标签（加这一项之前的记录没有它）
+  label: Type.Optional(Type.String({ minLength: 1 })),
   policy: DelegatedPolicySchema,
   limits: WorkerLimitsSchema,
   workspace: WorkerWorkspaceSchema,
@@ -190,6 +193,8 @@ export const WorkerSettledDataSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   status: ChildSettledStatusSchema,
   error: Type.Optional(Type.String()),
+  // 决策 298：错误类型（加这一项之前的记录没有它）
+  errorKind: Type.Optional(WorkerErrorKindSchema),
   result: Type.Optional(
     Type.Object({
       branch: Type.Optional(Type.String({ minLength: 1 })),

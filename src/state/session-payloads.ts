@@ -65,8 +65,28 @@ export const ChildSettledStatusSchema = Type.Union([
   Type.Literal("token-limit"),
   // 派出失败（工作树或运行面建不起来）：以收尾收口保证派出与收尾配对
   Type.Literal("spawn-failed"),
+  // 决策 298：卡住——长时间没有新的模型回复或工具结果，被卡住监控中断
+  Type.Literal("stalled"),
 ]);
 export type ChildSettledStatus = Static<typeof ChildSettledStatusSchema>;
+
+// 决策 298：worker 结束时的错误类型（非完成时在场）。approval-timeout / approval-unattended 为可恢复（决策 303：补批后能续做）
+export const WorkerErrorKindSchema = Type.Union([
+  Type.Literal("run-failed"),
+  Type.Literal("empty-reply"),
+  Type.Literal("exception"),
+  Type.Literal("spawn-failed"),
+  Type.Literal("cancelled"),
+  Type.Literal("aborted"),
+  Type.Literal("turn-limit"),
+  Type.Literal("wall-clock-limit"),
+  Type.Literal("token-limit"),
+  Type.Literal("stalled"),
+  Type.Literal("looping"),
+  Type.Literal("approval-timeout"),
+  Type.Literal("approval-unattended"),
+]);
+export type WorkerErrorKind = Static<typeof WorkerErrorKindSchema>;
 
 // worker 结构化结果：分支、改动文件清单（工作树内相对路径）、自述摘要；无工作区的 worker 没有分支与改动文件。
 // structured 承载模型交回的结构化内容（编排器收尾时取运行面的结构化结果），生产代码暂无读取方，不写进会话存储
@@ -149,6 +169,8 @@ export const ChildSpawnedInputSchema = Type.Object({
   task: Type.String({ minLength: 1 }),
   // M7（决策 069）：并行派发同一任务的多个 worker 共享的任务标识；单派缺省
   taskKey: Type.Optional(Type.String({ minLength: 1 })),
+  // 决策 294：派出时带的标签（原样带回）
+  label: Type.Optional(Type.String({ minLength: 1 })),
   policy: DelegatedPolicySchema,
   limits: WorkerLimitsSchema,
   workspace: WorkerWorkspaceSchema,
@@ -163,6 +185,8 @@ export const ChildSettledInputSchema = Type.Object({
   status: ChildSettledStatusSchema,
   // 失败、派出失败时的人读原因
   error: Type.Optional(Type.String()),
+  // 决策 298：错误类型（非完成时在场）
+  errorKind: Type.Optional(WorkerErrorKindSchema),
   // 派出失败时缺省（没有可回收的工作）
   result: Type.Optional(ChildResultSchema),
   // 完成的模型轮次数

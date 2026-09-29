@@ -279,7 +279,10 @@ test("审批回调：worker 的审批请求带来源会话与 worker 标签", as
   const seen: unknown[] = [];
   const { orchestrator, requests } = setup({
     approvals: async (request) => {
-      seen.push(request);
+      // 决策 303：请求另带撤回用的 signal（等满时限即撤回），比对时去掉
+      const { signal, ...rest } = request;
+      assert.ok(signal instanceof AbortSignal);
+      seen.push(rest);
       return { approved: false, reason: "不准" };
     },
   });

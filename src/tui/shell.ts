@@ -126,6 +126,9 @@ export interface TuiRuntimeFace {
   // 决策 189：压缩完成的提示（自动与手动）与手动压缩；缺省（替身运行面）即不提示、/compact 不可用
   subscribeCompaction?(listener: (notice: CompactionNotice) => void): () => void;
   compact?(customInstructions?: string): Promise<ManualCompactionOutcome>;
+  // 决策 297：worker 完成通知——待递的条数与空闲时只带通知跑一轮；缺省（替身运行面）即不支持
+  pendingNotices?(): number;
+  runNotices?(): Promise<RunResult>;
   // 决策 286：工具结果（展开显示与 diff）与上下文用量（状态栏）；缺省即不显示结果块、状态栏不显示上下文
   subscribeToolResults?(listener: (notice: ToolResultNotice) => void): () => void;
   contextUsage?(): { tokens: number; contextWindow: number } | undefined;
@@ -164,6 +167,8 @@ export interface TuiShellOptions {
   workerRefreshMs?: number;
   // 决策 237、245：沙箱会话——/export 手动交回；分叉、worker 与 /resume 换绑在沙箱里不支持，命令给出原因
   sandbox?: TuiSandboxFace;
+  // 决策 294 B1：/tasks 查看当前会话的任务清单（排好的文字）；返回 undefined = 清单没开；缺省 = 命令不可用
+  tasks?: () => string | undefined;
   // 决策 286：状态栏显示的模型（provider/模型号）；缺省不显示
   model?: string;
   // 决策 286：主 agent 的模型接入（DeepSeek 回复自带价格为 0 时按官方人民币价目计会话花费）；缺省不另计价
@@ -235,12 +240,15 @@ export class PigeonTuiShell
   // exitRequested 保证退出恰好一次（stop 后输入监听已退订，重入仅作幂等防御）
   private lastCtrlCAtValue: number | null = null;
   private exitRequested = false;
+  // 决策 294 B1：/tasks 的取数（装配方给了才有这条命令）
+  tasks?: () => string | undefined;
 
   constructor(options: TuiShellOptions) {
     this.options = options;
     this.current = { sessionId: options.sessionId, runtime: options.runtime };
     if (options.grants !== undefined) this.current.grants = options.grants;
     if (options.workers !== undefined) this.current.workers = options.workers;
+    if (options.tasks !== undefined) this.tasks = options.tasks;
     this.tui = new TuiMainScreen(options.terminal, false, options.logDir);
     this.input = createPromptEditor(this.tui, options.promptHistory?.load() ?? []);
     this.statusBar = new StatusBar({
@@ -304,6 +312,14 @@ export class PigeonTuiShell
       this.runtimeDisposers.push(unsubscribeToolResults);
     }
     this.refreshContext();
+    // 决策 294：worker 生命周期事件驱动状态行——agent 派出的 worker 同样即时显示与刷新
+    const unsubscribeWorkers = this.current.workers?.subscribe?.(() => {
+      refreshWorkersView(this);
+      this.tui.requestRender();
+    });
+    if (unsubscribeWorkers !== undefined) {
+      this.runtimeDisposers.push(unsubscribeWorkers);
+    }
   }
 
   stop(): void {
@@ -404,14 +420,36 @@ export class PigeonTuiShell
     );
   }
 
-  // 空闲后发出排队的输入（pi 惯例逐条：一条跑完再发下一条）；即时完成的命令不占住，接着发下一条
+  // 空闲后发出排队的输入（pi 惯例逐条：一条跑完再发下一条）；即时完成的命令不占住，接着发下一条。
+  // 决策 297：worker 完成通知也从这里发出——有排队的输入时先发输入，这一轮由运行面在开头带上已到的通知（通知在前、输入在后）；
+  // 没有排队的输入时，已到的通知单独跑一轮（只带通知）
   private drainQueue(): void {
     while (!this.isBusy() && this.started && !this.picker.isOpen() && this.queue.size() > 0) {
       const next = this.queue.take();
       if (next === undefined) break;
       this.submitNow(next);
     }
+    const runtime = this.current.runtime;
+    if (
+      !this.isBusy() &&
+      this.started &&
+      !this.picker.isOpen() &&
+      runtime.runNotices !== undefined &&
+      (runtime.pendingNotices?.() ?? 0) > 0
+    ) {
+      this.running = true;
+      this.updateStatus();
+      runtime.runNotices().then(
+        (result) => this.handleRunEnd(result),
+        (error: unknown) => this.handleRunEnd(null, error)
+      );
+    }
     this.tui.requestRender();
+  }
+
+  // 决策 297：worker 完成通知到来时叫醒主 agent——与排队输入同一个出口；在跑时不动，通知留在运行面上，下一轮或这一轮结束后再递
+  runNotices(): void {
+    this.drainQueue();
   }
 
   // ---- 决策 286：排队接口（编排一段在"下一轮发什么"处接入 worker 完成通知）----

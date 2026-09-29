@@ -50,6 +50,8 @@ export interface CommandsHost {
   takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
+  // 决策 294 B1：任务清单（排好的文字）；undefined = 清单没开；缺省 = /tasks 不可用
+  tasks?(): string | undefined;
 }
 
 // 命令表判断可用性用的只读面
@@ -60,6 +62,7 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     resumeConfigured: () => host.resumeConfigured(),
     hasGrants: () => host.grants() !== undefined,
     inSandbox: () => host.sandbox?.() !== undefined,
+    tasks: () => host.tasks !== undefined,
     workers: () => {
       const workers = host.workers();
       return workers === undefined
@@ -169,6 +172,13 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     // 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录
     if (workers !== undefined && tokens[0] === "take") {
       host.takeCommand(workers, tokens[1]);
+      return;
+    }
+    // 决策 294 B1：/tasks 查看任务清单（完整的清单显示留给编排二段）
+    if (tokens[0] === "tasks" && host.tasks !== undefined) {
+      host.addSystem(
+        host.tasks() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
+      );
       return;
     }
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）

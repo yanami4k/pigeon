@@ -13,9 +13,11 @@
 // 推送记忆（决策 191、192、207、217）：开着时开局推入学到的记忆、带 update_memory；上下文压缩之前先复盘一次（期间这一步的墙钟
 // 暂停，复盘不占这一步的宽上限，171），最后一次验证之后、返回之前做收尾复盘，复盘做完才算这一步结束。复盘失败或撞上限都不改变
 // 这一步的结果，经去重告警写标准错误输出，并记进结果
-// 派 worker（决策 264–268）：开着时给主 agent 注册 spawn_worker，装一个编排器（无人值守：worker 不接审批通道，按放权规则或
-// 全部放行，否则拒绝）；worker 用的 token 计入本次运行的 token 上限，撞了即停掉主 agent 与在跑的 worker、拒绝再派；
-// 释放运行面之前停掉仍在跑的 worker，等其收尾记录写进本会话。执行端另一侧的工作区（容器）与分支会话不注册
+// 派 worker（决策 264–268、297–303）：开着时给主 agent 注册 spawn_worker 与等待等积木，装一个编排器（无人值守：worker 需请示时
+// 不等，作为可恢复错误交回，303）；worker 用的 token 计入本次运行的 token 上限，撞了即停掉主 agent 与在跑的 worker、拒绝再派。
+// 297：每次运行结束后，等本次派出的 worker 全部结束、把完成通知当新的一轮处理完，这一步才往下走（验证、回炉、收尾复盘）；
+// 释放运行面之前停掉仍在跑的 worker（撞上限、外部中止时），等其收尾记录写进本会话。执行端另一侧的工作区（容器）与分支会话不注册。
+// 任务清单（294 B1）：开着时给主 agent 注册两件清单工具
 import path from "node:path";
 import { assertMemoryLimit } from "../memory/pushed.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
@@ -28,6 +30,10 @@ import type { SkillRoot } from "../skills/catalog.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { FailureClass } from "../state/classification.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import {
+  DEFAULT_ORCHESTRATION_SETTINGS,
+  type OrchestrationSettings,
+} from "../state/orchestration-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
@@ -54,13 +60,13 @@ import type { LearnedMemoryConfig, RuntimeBundle } from "./runtime.ts";
 import { openSessionStore, storeFaultWarner } from "./session-store.ts";
 import { bindSpawnWorkers, stopAllWorkers } from "./spawn-worker-host.ts";
 import {
-  DEFAULT_SPAWN_WORKER_LIMITS,
   type SpawnWorkerBudget,
-  type SpawnWorkerLimits,
   SpawnWorkerSlot,
+  spawnWorkerSettingsOf,
 } from "./spawn-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
+import { drainWorkers, type WorkerNotices } from "./worker-notices.ts";
 import {
   createDetachedRuntime,
   createSessionWorkers,
@@ -142,8 +148,10 @@ export interface HeadlessRunOptions {
   // 决策 264–267：派 worker（给主 agent 注册 spawn_worker）；缺省关着——pigeon run 由启动参数缺省打开，跑批器各条件明确关掉。
   // 注入了执行端（容器工作区）或是分支会话时不注册
   spawnWorkers?: boolean;
-  // 决策 268：同时在跑的 worker 上限与一次运行里 agent 派出的上限（缺省 4 与 16）
-  spawnWorkerLimits?: SpawnWorkerLimits;
+  // 决策 297–303：编排设定（同时在跑的上限缺省 8、不设总数上限、层数、每个 worker 的上限、卡住与审批时限）
+  orchestration?: OrchestrationSettings;
+  // 决策 294 B1：任务清单工具；缺省关着——pigeon run 按编排配置缺省打开，跑批器各条件不给
+  taskList?: boolean;
   // 决策 287–291：联网工具的配置——在场即给主会话与 worker 注册两件工具；缺省不注册（pigeon run 由启动参数缺省给出，
   // --sandbox-network off 不给；跑批器各条件不给）
   webTools?: WebToolsConfig;
@@ -324,10 +332,16 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     options.spawnWorkers === true &&
     options.workspaceHost === undefined &&
     options.branchHeader === undefined
-      ? new SpawnWorkerSlot(options.spawnWorkerLimits ?? DEFAULT_SPAWN_WORKER_LIMITS)
+      ? new SpawnWorkerSlot(
+          spawnWorkerSettingsOf({
+            ...(options.orchestration ?? DEFAULT_ORCHESTRATION_SETTINGS),
+            taskList: options.taskList === true,
+          })
+        )
       : undefined;
   let workers: WorkerOrchestrator | undefined;
   let spawnBudget: SpawnWorkerBudget | undefined;
+  let notices: WorkerNotices | undefined;
   // worker 每收尾一轮用的 token（计入本次运行的 token 上限；运行开始前接好）
   let addWorkerTokens: (tokens: number) => void = () => {};
   // 本次运行与收尾复盘共用的装配参数（工具定义因此相同）
@@ -358,6 +372,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(learnedMemory !== undefined ? { learnedMemory } : {}),
     // 收尾复盘与本次运行同一份工具定义；复盘的执行闸不放行 spawn_worker
     ...(spawnSlot !== undefined ? { spawnWorker: spawnSlot } : {}),
+    ...(options.taskList === true ? { taskList: true } : {}),
     ...(options.webTools !== undefined ? { webTools: options.webTools } : {}),
   };
   const handle = createDetachedRuntime({
@@ -410,18 +425,22 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
             : {}),
           ...(options.thinking !== undefined ? { thinkingLevel: options.thinking } : {}),
           ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
-          maxConcurrent: spawnSlot.limits.maxConcurrent,
+          settings: options.orchestration ?? DEFAULT_ORCHESTRATION_SETTINGS,
           onWorkerTokens: (_workerId, tokens) => addWorkerTokens(tokens),
           ...(options.webTools !== undefined ? { webTools: options.webTools } : {}),
         });
-        spawnBudget = bindSpawnWorkers({
+        const bound = bindSpawnWorkers({
           slot: spawnSlot,
           orchestrator: workers,
           governanceRoot: options.governanceRoot,
           hostSessionId: sessionId,
           hostStore: bundle.sessionStore,
           ...(options.verify !== undefined ? { verify: options.verify } : {}),
+          // 决策 297：完成通知进本会话的下一轮（空闲时由 drainWorkers 接着跑）
+          target: bundle.adapter,
         });
+        spawnBudget = bound.budget;
+        notices = bound.notices;
       }
       options.onBundle?.(bundle);
     },
@@ -492,6 +511,29 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   let toolFaults = 0;
   // 最后一次验证（收尾复盘的验证结论按它填）
   let lastVerified: VerifyAttemptResult | undefined;
+  // 决策 297：一次运行结束后，等本次派出的 worker 全部结束、把通知处理完（撞上限或外部中止即不再等）。
+  // 等的途中撞上限或被外部中止：这一步按中止收尾（终态随后按撞上限的原因或外部中止记）
+  let drainInterrupted = false;
+  const settleWorkers = async <R>(run: R): Promise<R> => {
+    const bundle = liveBundle;
+    if (workers === undefined || notices === undefined || bundle === undefined) {
+      return run;
+    }
+    const { last, interrupted } = await drainWorkers({
+      orchestrator: workers,
+      parentSessionId: sessionId,
+      notices,
+      target: {
+        pendingNotices: () => bundle.adapter.pendingNotices(),
+        runNotices: () => bundle.adapter.runNotices() as Promise<unknown> as Promise<R>,
+      },
+      stopped: () => limitHit !== undefined || externallyAborted,
+    });
+    if (interrupted) {
+      drainInterrupted = true;
+    }
+    return last ?? run;
+  };
   try {
     if (repairRounds > 0 && options.workspaceHost?.markStepStart !== undefined) {
       stepStart = await options.workspaceHost.markStepStart();
@@ -499,15 +541,17 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     // 开工前已被外部中止（记起点的空档里到达）：一轮都不跑
     let run = externallyAborted
       ? undefined
-      : options.continueFromHistory === true && handle.continueRun !== undefined
-        ? await handle.continueRun()
-        : await handle.run(options.task);
+      : await settleWorkers(
+          options.continueFromHistory === true && handle.continueRun !== undefined
+            ? await handle.continueRun()
+            : await handle.run(options.task)
+        );
     if (run === undefined) status = "aborted";
     while (run !== undefined) {
       status =
         run.emptyReply === true
           ? "empty-reply"
-          : run.status === "aborted"
+          : run.status === "aborted" || drainInterrupted
             ? (limitHit ?? "aborted")
             : run.status;
       errorMessage = run.errorMessage;
@@ -575,14 +619,16 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
         break;
       }
       rounds += 1;
-      run = await handle.run(
-        buildRepairFeedback({
-          command: options.verify.command,
-          outcome: verified.outcome,
-          ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
-          round: rounds,
-          maxRounds: repairRounds,
-        })
+      run = await settleWorkers(
+        await handle.run(
+          buildRepairFeedback({
+            command: options.verify.command,
+            outcome: verified.outcome,
+            ...(verified.steps !== undefined ? { steps: verified.steps } : {}),
+            round: rounds,
+            maxRounds: repairRounds,
+          })
+        )
       );
     }
   } catch (error) {

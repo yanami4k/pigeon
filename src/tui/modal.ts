@@ -5,6 +5,7 @@ import type { ApprovalRequest } from "../approvals/handler.ts";
 import {
   APPROVAL_CANCEL_BUSY,
   APPROVAL_CANCEL_CLOSED,
+  APPROVAL_WITHDRAWN,
   type ApprovalPanelResult,
   approvalBlockText,
 } from "./approval.ts";
@@ -51,9 +52,25 @@ export function askApprovalPanel(
   }
   host.addSystem(approvalBlockText(request, directoryGrant));
   const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
-  host.setPendingApproval({ resolve });
+  const pending = { resolve };
+  host.setPendingApproval(pending);
   host.updateStatus();
   host.render();
+  // 决策 303：请求方撤回（worker 的请求等满时限无人批）——面板撤下，按取消收口
+  const signal = request.signal;
+  if (signal !== undefined) {
+    const withdraw = (): void => {
+      if (host.pendingApproval() !== pending) return;
+      host.setPendingApproval(null);
+      host.setReasonMode(false);
+      host.addSystem(APPROVAL_WITHDRAWN);
+      host.updateStatus();
+      host.render();
+      resolve({ key: "cancel", reason: APPROVAL_WITHDRAWN });
+    };
+    if (signal.aborted) withdraw();
+    else signal.addEventListener("abort", withdraw, { once: true });
+  }
   return promise;
 }
 

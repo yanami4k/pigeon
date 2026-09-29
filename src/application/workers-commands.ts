@@ -84,6 +84,8 @@ const STATE_LABEL: Record<string, string> = {
   "wall-clock-limit": "达到墙钟上限",
   "token-limit": "达到 token 上限",
   "spawn-failed": "派出失败",
+  // 决策 298
+  stalled: "卡住",
 };
 
 export function workerStateLabel(state: string): string {

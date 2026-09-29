@@ -50,9 +50,20 @@ export function isWorkerRole(value: string): value is ActiveWorkerRole {
   return (WORKER_ROLES as readonly string[]).includes(value);
 }
 
+// 决策 299：层数放开时，还没到最底层的 worker 另带派出与等待等编排工具（take_worker 除外：叠加只往主工作目录）；
+// 名字与 application 层的工具名一致（本层不依赖 application）
+export const NESTED_ORCHESTRATION_TOOLS: readonly string[] = [
+  "spawn_worker",
+  "wait_workers",
+  "worker_status",
+  "message_worker",
+  "stop_worker",
+];
+
 export function deriveWorkerPolicy(
   parent: ToolPolicyLike,
-  role: ActiveWorkerRole
+  role: ActiveWorkerRole,
+  options: { orchestration?: boolean } = {}
 ): DelegatedPolicy {
   const deny = [...new Set(parent.deny)];
   // M5.7 S4：implementer 另继承父策略里的 MCP 工具（外部写工具照样逐次审批）；其余角色不继承
@@ -61,7 +72,8 @@ export function deriveWorkerPolicy(
       ? parent.allow.filter((tool) => tool.startsWith(`${MCP_TOOL_PREFIX}__`))
       : [];
   // 决策 249：各角色都另带记忆工具（父策略里有才带，即推送开着）
-  const allow = [...ROLE_TOOLS[role], ...inherited, UPDATE_MEMORY_TOOL].filter(
+  const orchestration = options.orchestration === true ? NESTED_ORCHESTRATION_TOOLS : [];
+  const allow = [...ROLE_TOOLS[role], ...inherited, UPDATE_MEMORY_TOOL, ...orchestration].filter(
     (tool) => parent.allow.includes(tool) && !deny.includes(tool)
   );
   return { allow, deny, approvalMode: parent.approvalMode };

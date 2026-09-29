@@ -5,13 +5,14 @@
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 
 import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
+import { loadOrchestrationConfig } from "../persistence/orchestration-config.ts";
 import { loadMemoryReviewConfig } from "../persistence/review-backfill-store.ts";
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
+import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import { type ReviewModelChoice, reviewModelChoice } from "./memory-review.ts";
-import { DEFAULT_SPAWN_WORKER_LIMITS, type SpawnWorkerLimits } from "./spawn-worker-tool.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
@@ -86,8 +87,8 @@ export interface LaunchFlags {
   // 决策 265–267：主 agent 派 worker——终端界面与 pigeon run 缺省开着，--no-spawn-workers 关掉（关掉即不注册 spawn_worker）；
   // 沙箱会话与命令行对话不注册，不看这一项
   spawnWorkers: boolean;
-  // 决策 268：--worker-concurrency <n> 同时在跑的 worker 上限（缺省 4，人派的与 agent 派的一并计算）；
-  // --worker-limit <n> 一次运行里 agent 最多派出的 worker 数（缺省 16）。与 --no-spawn-workers 同在能派 worker 的入口接受
+  // 决策 268、300：--worker-concurrency <n> 同时在跑的 worker 上限（缺省取编排配置，配置缺省 8；人派的与 agent 派的一并计算）；
+  // --worker-limit <n> 一次运行里 agent 最多派出的 worker 数（可选的上限，缺省不设）。与 --no-spawn-workers 同在能派 worker 的入口接受
   workerConcurrency?: number;
   workerLimit?: number;
 }
@@ -296,11 +297,16 @@ export function webToolsEnabled(flags: Pick<LaunchFlags, "sandbox">): boolean {
   return flags.sandbox?.network !== "off";
 }
 
-// 派 worker 的两个上限（决策 268）：启动参数给了取参数，没给取缺省（4 与 16）
-export function spawnWorkerLimitsOf(flags: LaunchFlags): SpawnWorkerLimits {
+// 编排设定（决策 297–303）：治理根的编排配置（.pigeon/orchestration.json，缺失取缺省），启动参数给了的两项以参数为准
+export function orchestrationSettingsOf(
+  flags: Pick<LaunchFlags, "workerConcurrency" | "workerLimit">,
+  governanceRoot: string
+): OrchestrationSettings {
+  const settings = loadOrchestrationConfig(governanceRoot);
   return {
-    maxConcurrent: flags.workerConcurrency ?? DEFAULT_SPAWN_WORKER_LIMITS.maxConcurrent,
-    maxAgentSpawns: flags.workerLimit ?? DEFAULT_SPAWN_WORKER_LIMITS.maxAgentSpawns,
+    ...settings,
+    ...(flags.workerConcurrency !== undefined ? { maxConcurrent: flags.workerConcurrency } : {}),
+    ...(flags.workerLimit !== undefined ? { maxWorkersPerRun: flags.workerLimit } : {}),
   };
 }
 

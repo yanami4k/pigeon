@@ -144,7 +144,7 @@ test("运行中只读命令照常执行，改状态的命令被拒并说明原�
 
 test("命令放行表：只读类与 /cancel、/quit 运行中可用，其余逐条说明原因", () => {
   const allowed = SLASH_COMMANDS.filter((spec) => spec.whileRunning.allow).map((spec) => spec.name);
-  assert.deepEqual(allowed, ["quit", "sessions", "search", "grants", "cancel", "workers"]);
+  assert.deepEqual(allowed, ["quit", "sessions", "search", "grants", "cancel", "workers", "tasks"]);
   const rejected = SLASH_COMMANDS.filter((spec) => !spec.whileRunning.allow).map(
     (spec) => spec.name
   );

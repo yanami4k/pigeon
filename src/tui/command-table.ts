@@ -11,6 +11,8 @@ export interface CommandAvailability {
   inSandbox(): boolean;
   // worker 编排面在场，及其可选动作
   workers(): { fork: boolean; take: boolean } | undefined;
+  // 决策 294 B1：任务清单的查看命令在场（缺省即不在场）
+  tasks?(): boolean;
 }
 
 export interface SlashCommandSpec {
@@ -98,6 +100,13 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     usage: "/take <worker>",
     whileRunning: { allow: false, reason: `${WORKDIR}（叠入 worker 的改动）` },
     available: (host) => host.workers()?.take === true && !host.inSandbox(),
+  },
+  // 决策 294 B1：查看任务清单，只读，运行中可用
+  {
+    name: "tasks",
+    usage: "/tasks",
+    whileRunning: { allow: true },
+    available: (host) => host.tasks?.() === true,
   },
   {
     name: "export",

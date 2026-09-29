@@ -107,6 +107,8 @@ export interface OpenSessionRuntimeRequest {
   workspaceHost?: WorkspaceHost;
   // 决策 264–267：派 worker 的工具槽（终端界面给；命令行对话不给）。只给主会话注册：worker 会话（深度 1）与沙箱会话不注册
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 294 B1：任务清单（终端界面按编排配置给，缺省开）；只给主会话注册，续聊时从会话还原
+  taskList?: boolean;
   // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
   webTools?: WebToolsConfig;
   // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
@@ -145,6 +147,8 @@ async function restoreContext(bundle: RuntimeBundle): Promise<{
   }
   await bundle.sessionStore.flush();
   bundle.adapter.restoreMessages([...messages, ...interrupted]);
+  // 决策 294 B1：任务清单从会话里最后一次更新还原
+  bundle.taskList?.restore([...messages, ...interrupted]);
   return { messages: messages.length, interrupted: interrupted.length };
 }
 
@@ -214,6 +218,7 @@ export async function openSessionRuntime(
         ? { workspaceHost: request.workspaceHost, pathScopedGrants: false }
         : {}),
       ...(spawnWorker !== undefined ? { spawnWorker } : {}),
+      ...(request.taskList === true ? { taskList: true } : {}),
       ...(request.webTools !== undefined ? { webTools: request.webTools } : {}),
       ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
       mcp,

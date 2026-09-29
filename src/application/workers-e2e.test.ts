@@ -131,8 +131,9 @@ test("并行 worker：两个 implementer 各写自己的工作树，主工作区
       const result = calls[0]?.result;
       assert.deepEqual(
         result !== undefined ? toolResultMark(result.raw as unknown as StoreMessage) : undefined,
+        // 决策 302：worker 改自己工作树内的文件默认放行（不问人，记 policy:auto）
         {
-          gate: { outcome: "approved", approvedBy: "human" },
+          gate: { outcome: "approved", approvedBy: "policy:auto" },
         }
       );
       assert.equal(worker.runs.length, 1);
@@ -141,12 +142,9 @@ test("并行 worker：两个 implementer 各写自己的工作树，主工作区
     // 主仓库工作区零改动
     assert.equal(readFileSync(join(repo, "a.ts"), "utf8"), original);
     assert.equal(git(repo, ["status", "--porcelain", "--untracked-files=no"]), "");
-    // 审批请求区分来源
-    assert.deepEqual(approvals.map((request) => request.worker.name).sort(), ["fix-a", "fix-b"]);
-    assert.deepEqual(
-      new Set(approvals.map((request) => request.sessionId)),
-      new Set([first, second])
-    );
+    // 决策 302：改自己工作树不请示（请求区分来源另见 workers-approvals-e2e.test.ts）
+    assert.deepEqual(approvals, []);
+    assert.ok(first !== second);
     // 父会话：派出与收尾配对（两个 worker 各一对，没有孤立的收尾）
     const parent = loadSessionView(sessionsDir, parentId);
     assert.ok(parent !== undefined);
