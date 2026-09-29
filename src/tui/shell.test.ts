@@ -280,7 +280,7 @@ test("工具调用轮（无 text_delta）不引入超出统一间距的空行；
   }
 });
 
-test("空输入静默忽略；运行中提交走 busy 语义：拒绝提交、保留缓冲、提示可见（决策 027）", async () => {
+test("空输入静默忽略；运行中提交进队列、结束后逐条自动发出（决策 286）", async () => {
   const { shell, runtime, term, logDir } = makeShell(80, 24);
   runtime.autoResolve = false; // run 挂起，制造「运行中」窗口
   try {
@@ -300,21 +300,29 @@ test("空输入静默忽略；运行中提交走 busy 语义：拒绝提交、�
     assert.deepEqual(runtime.runs, ["任务一"]);
     assert.ok(screenText(term).includes("state: running"), "运行中状态行应可见");
 
-    // 运行中第二次提交：拒绝（不再调 run），保留输入缓冲，busy 提示可见
+    // 运行中两次提交：进队列（不调 run），排队内容显示在输入框上方
     term.input("任务二");
     term.input("\r");
+    term.input("任务三");
+    term.input("\r");
     await settle();
-    assert.deepEqual(runtime.runs, ["任务一"], "busy 期间不得再次提交");
-    assert.ok(screenText(term).includes("[busy]"), "busy 拒绝必须在消息区留可见提示");
-    assert.ok(screenText(term).includes("任务二"), "busy 拒绝后输入缓冲必须保留");
+    assert.deepEqual(runtime.runs, ["任务一"], "运行中不得直接提交");
+    assert.ok(screenText(term).includes("queued: 任务二"), screenText(term));
+    assert.ok(screenText(term).includes("queued: 任务三"), screenText(term));
+    assert.ok(!screenText(term).includes("[busy]"));
 
-    // Run 结束后缓冲仍在，再按回车即提交
+    // Run 结束后排队的第一条自动发出；再结束，第二条发出（逐条，不合并）
+    runtime.finishAll();
+    await settle();
+    assert.deepEqual(runtime.runs, ["任务一", "任务二"], "空闲后自动发出排队的第一条");
+    assert.ok(screenText(term).includes("queued: 任务三"));
+    runtime.finishAll();
+    await settle();
+    assert.deepEqual(runtime.runs, ["任务一", "任务二", "任务三"]);
+    assert.ok(!screenText(term).includes("queued:"), "队列发空后不再显示");
     runtime.finishAll();
     await settle();
     assert.ok(screenText(term).includes("state: idle"), "run 结束后状态行应回 idle");
-    term.input("\r");
-    await settle();
-    assert.deepEqual(runtime.runs, ["任务一", "任务二"], "缓冲保留的输入应可再次提交");
   } finally {
     shell.stop();
     rmSync(logDir, { recursive: true, force: true });

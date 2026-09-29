@@ -5,6 +5,7 @@
 import { loadSessionHistory } from "../application/history.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { asSessionId, type SessionId } from "../state/ids.ts";
+import { resumeUsageText } from "./command-table.ts";
 
 // /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文。装配由调用方（main.ts）完成——
 // restoredGrants 种子还原、buildRuntime、旧运行面释放都在壳外；壳只换绑投影
@@ -42,13 +43,12 @@ export function handleResumeCommand<Binding>(
 ): void {
   const resume = host.resumeOptions();
   if (resume === undefined) {
-    host.addSystem(
-      `未知命令：/resume（可用 /quit、/sessions、/grants、/revoke <id>、/grants save <id>）`
-    );
+    host.addSystem("本会话不支持 /resume");
     return;
   }
+  // 不带会话号的 /resume 由壳弹出会话选择器（决策 286）；走到这里说明没有选择器可用，给用法（从命令表取）
   if (arg === undefined) {
-    host.addSystem("用法：/resume <sessionId>");
+    host.addSystem(resumeUsageText());
     return;
   }
   // 恢复当前会话会让两个写者写同一个会话文件——且语义上无意义（人就活在该会话里）：响亮拒绝

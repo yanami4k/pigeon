@@ -17,10 +17,6 @@ export const SPAWN_USAGE =
 // 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录
 export const TAKE_USAGE = "用法：/take <worker 名>";
 
-// 未知命令提示里追加的 worker 命令清单（装配了编排面时才出现）
-export const WORKER_COMMANDS_HINT =
-  '、/spawn <角色> "<任务>"、/cancel <worker>、/workers、/take <worker>';
-
 // raw = 去掉 "/spawn" 之后的原文；任务可带英文或中文引号，也可不带
 export function parseSpawnCommand(raw: string): {
   role: string;

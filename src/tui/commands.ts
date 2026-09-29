@@ -2,6 +2,7 @@
 //（决策 030）、会话列表在 application/session-list.ts、检索在 application/search.ts、恢复流程在
 // application/resume.ts——全部与 cli 同一份逻辑；语法/语义错误响亮呈现（同 REPL 口径），
 // 未知命令如实说明。worker 与 resume 的具体动作由壳转交给对应视图模块。
+// 决策 286：未知命令列出的可用命令从命令表（command-table.ts）按当前会话生成，以后加命令不再漏。
 import { compactFocusOf } from "../application/compaction-text.ts";
 import { runGrantCommand } from "../application/grants.ts";
 import {
@@ -11,10 +12,10 @@ import {
 } from "../application/sandbox-session.ts";
 import { runSearchCommand } from "../application/search.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
-import { WORKER_COMMANDS_HINT } from "../application/workers-commands.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import { type CommandAvailability, unknownCommandText } from "./command-table.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
 
 // 沙箱会话的命令面（与 shell.ts 的 TuiSandboxFace 同形）
@@ -49,6 +50,23 @@ export interface CommandsHost {
   takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
+}
+
+// 命令表判断可用性用的只读面
+export function commandAvailability(host: CommandsHost): CommandAvailability {
+  return {
+    sessionsRoot: () => host.sessionsRoot(),
+    searchRoot: () => host.searchRoot(),
+    resumeConfigured: () => host.resumeConfigured(),
+    hasGrants: () => host.grants() !== undefined,
+    inSandbox: () => host.sandbox?.() !== undefined,
+    workers: () => {
+      const workers = host.workers();
+      return workers === undefined
+        ? undefined
+        : { fork: workers.fork !== undefined, take: workers.take !== undefined };
+    },
+  };
 }
 
 export function handleSlashCommand(host: CommandsHost, value: string): void {
@@ -175,9 +193,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         },
       });
     if (!handled) {
-      host.addSystem(
-        `未知命令：${value}（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}${sandbox !== undefined ? "、/export" : ""}）`
-      );
+      host.addSystem(unknownCommandText(value, commandAvailability(host)));
     }
   } catch (error) {
     host.addSystem(`命令失败：${error instanceof Error ? error.message : String(error)}`);
