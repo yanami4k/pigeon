@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { flattenFamily, loadSessionFamily } from "../application/session-family.ts";
+import { familyTotal, flattenFamily, loadSessionFamily } from "../application/session-family.ts";
 import {
   createFixtureSession,
   type FixtureSession,
@@ -199,6 +199,19 @@ test("会话家谱：从分支的分支上溯到根主会话，列出这一家�
     assert.equal(nodes.get(family.review)?.review, "closing");
     assert.equal(nodes.get(family.branchReview)?.review, "pre-compaction");
     assert.equal(nodes.get(family.branchWorker)?.unreadable, "全文读不出");
+    // 这一家合计等于各节点之和（节点只计自己的花费）
+    const total = familyTotal(loaded.root);
+    const sum = flattenFamily(loaded.root).reduce(
+      (acc, { node }) => ({
+        cost: acc.cost + (node.cost?.cost ?? 0),
+        turns: acc.turns + (node.turns ?? 0),
+      }),
+      { cost: 0, turns: 0 }
+    );
+    assert.equal(total.cost.cost, sum.cost);
+    assert.equal(total.turns, sum.turns);
+    assert.equal(total.sessions, rows.length);
+    assert.equal(total.cost.cost, 0.5, "只有主会话花了钱，合计不重复计入子节点");
     // 文件头读了全部文件，全文只读这一家的成员
     assert.equal(loaded.headersRead, rows.length + 2);
     assert.equal(fullReads, rows.length);
@@ -265,6 +278,10 @@ test("会话树：树形视图里 Tab 在运行中与会话树两种模式间切
     await press(term, TAB);
     const lines = term.screen.contentLines();
     assert.ok(lines.some((line) => line.startsWith("== sessions tree | [tab] running")));
+    assert.ok(
+      lines.some((line) => /^ {2}这一家合计：8 个会话 {2}\d+t {2}\$0\.50/.test(line)),
+      lines.join("\n")
+    );
     const lineOf = (id: string) =>
       lines.find((line) => line.includes(id) && !/^\s*==/.test(line)) ?? "";
     assert.match(

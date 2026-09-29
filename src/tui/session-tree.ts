@@ -3,7 +3,7 @@
 // 当前会话标 "(current)"，读不到的成一行"读不到"。按键在壳里路由（查看、在此续接）；动作的说明写在树下方一行。
 import type { Component } from "@earendil-works/pi-tui";
 import type { FamilyNode, SessionFamily } from "../application/session-family.ts";
-import { flattenFamily } from "../application/session-family.ts";
+import { familyTotal, flattenFamily } from "../application/session-family.ts";
 import { clipToWidth, formatCost } from "./status-bar.ts";
 
 export const SESSION_TREE_HEADER =
@@ -141,7 +141,18 @@ export class SessionTree implements Component {
         body.push(...rendered);
       }
     }
-    const lines = [clipToWidth(SESSION_TREE_HEADER, width), ...body];
+    const lines = [clipToWidth(SESSION_TREE_HEADER, width)];
+    // 这一家合计（各节点自己的花费相加，不重复）
+    if (this.family !== undefined) {
+      const total = familyTotal(this.family.root);
+      lines.push(
+        clipToWidth(
+          `  这一家合计：${total.sessions} 个会话  ${total.turns}t  ${formatCost(total.cost, true)}`,
+          width
+        )
+      );
+    }
+    lines.push(...body);
     if (this.note !== "") lines.push(clipToWidth(` ${this.note}`, width));
     return lines;
   }

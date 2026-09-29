@@ -13,7 +13,7 @@ import {
 } from "../persistence/session-reader.ts";
 import { HEADER_METADATA_KEY } from "../state/session-entries.ts";
 import type { SessionView } from "../state/session-view.ts";
-import { type CostTally, costTallyOfView } from "./session-cost.ts";
+import { type CostTally, costTallyOfView, emptyCostTally, mergeCostTally } from "./session-cost.ts";
 import { workerStateLabel } from "./workers-commands.ts";
 
 // 主会话、分支（/fork，manual）、失败重试（retry-on-fail）、worker、复盘（带复盘标记）、未标明的分叉（有来源会话、
@@ -221,4 +221,20 @@ export function flattenFamily(root: FamilyNode): Array<{ node: FamilyNode; depth
   };
   walk(root, 0);
   return out;
+}
+
+// 这一家合计：各节点自己的花费与轮数之和（节点花费不含子会话，相加不重复）；读不到的不计
+export function familyTotal(root: FamilyNode): {
+  sessions: number;
+  turns: number;
+  cost: CostTally;
+} {
+  const cost = emptyCostTally();
+  let turns = 0;
+  const rows = flattenFamily(root);
+  for (const { node } of rows) {
+    if (node.cost !== undefined) mergeCostTally(cost, node.cost);
+    turns += node.turns ?? 0;
+  }
+  return { sessions: rows.length, turns, cost };
 }
