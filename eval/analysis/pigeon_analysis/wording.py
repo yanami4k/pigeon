@@ -94,3 +94,24 @@ def exploratory_banner(primary: dict[str, Any]) -> str | None:
             "以下结论降格为探索性。"
         )
     return None
+
+
+# 接口不可猜的敏感性分析（316）：两者结论一致与否的固定句式
+KIND_TEXT = {
+    DETECTED_POSITIVE: "测出变好",
+    DETECTED_NEGATIVE: "测出变差",
+    NOT_DETECTED: "未测出改善",
+    "no-data": "无有效题",
+}
+
+
+def interface_agreement_sentence(agreement: dict[str, Any]) -> str:
+    """一致时注明结论不受题目格式影响；不一致时写明结论对题目格式敏感、以主判据为准。"""
+    if agreement["consistent"]:
+        return "剔除接口不可猜的测试文件后，推送与检索两个效应的结论与主判据一致：结论不受题目格式影响。"
+    parts = [
+        f"{LABELS[name]}（主判据：{KIND_TEXT[x['primary']]}；敏感性分析：{KIND_TEXT[x['sensitivity']]}）"
+        for name, x in agreement["byEffect"].items()
+        if not x["consistent"]
+    ]
+    return "剔除接口不可猜的测试文件后，" + "、".join(parts) + "的结论与主判据不一致：结论对题目格式敏感，以主判据为准。"

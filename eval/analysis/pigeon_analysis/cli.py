@@ -10,7 +10,16 @@ from typing import Any
 from . import constants as K
 from .calibration import analyze_calibration
 from .primary import analyze_primary
-from .reader import common_settings, load_table, read_baseline_failures, require_step_space, spent_summary
+from .interface import analyze_interface_sensitivity, read_unguessable
+from .reader import (
+    common_settings,
+    failed_case_lists,
+    load_table,
+    read_baseline_failures,
+    rejudged_case_lists,
+    require_step_space,
+    spent_summary,
+)
 from .report import calibration_markdown, dumps, formal_markdown, formal_result
 from .secondary import analyze_secondary
 from .sensitivity import third_pass_decision
@@ -37,7 +46,16 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
              if passes == {2} else None)
     common_settings(info["settings"])
     faults = {str(c): float(g["verify_tool_faults"].sum()) for c, g in df.groupby("cell") if g["verify_tool_faults"].notna().any()}
-    return formal_result(primary, secondary, third, info, faults)
+    interface = None
+    if args.unguessable is not None:
+        # 接口不可猜的敏感性分析（316）：剔除用例的逐行结果优先取与原结果行一致的重判结果
+        rejudged, inconsistent = rejudged_case_lists(args.case_results or [])
+        interface = analyze_interface_sensitivity(
+            df, read_unguessable(args.unguessable), failed_case_lists(args.results), primary,
+            rejudged=rejudged, rejudge_inconsistent=inconsistent, expected_tasks=tasks, baseline_unavailable=no_baseline)
+    elif args.case_results:
+        raise ValueError("--case-results 要与 --unguessable 一起给")
+    return formal_result(primary, secondary, third, info, faults, interface)
 
 
 def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
@@ -69,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
                         "完全没有结果行的题也列为缺失")
     f.add_argument("--classes-summary",
                    help="两类用例预计算汇总（classes-summary.json）：其中出错、无法建立基线的题排除在主判据之外并计数")
+    f.add_argument("--unguessable",
+                   help="接口不可猜的测试文件清单（data/unguessable-interfaces.json）：给出即另做剔除这些用例的敏感性分析（316）")
+    f.add_argument("--case-results", nargs="+",
+                   help="按保存的改动重判的逐用例结果（跑批器 eval stream-rejudge 的 rejudge/cases.jsonl，可多个）：只采用与原结果行"
+                        "一致的行")
     f.add_argument("--minimal-reserve", type=float, default=None,
                    help="最简 agent 尚未跑时为它预留的花费 C_M（元），第 3 遍判定用")
 

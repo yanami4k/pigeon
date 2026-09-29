@@ -398,3 +398,40 @@ def read_baseline_failures(summary_path: str | Path, all_tasks: list[int]) -> li
             raise ValueError(f"classes-summary 里的题号 {n} 超出全部题 {len(order)} 道")
         out.append(order[n - 1])
     return sorted(set(out))
+
+
+# ---------- 敏感性分析（316）：逐用例的失败列表 ----------
+
+def failed_case_lists(paths: Iterable[str | Path]) -> dict[tuple[str, int, int], dict[str, Any]]:
+    """结果行里要做到一类的失败用例（跑批器只记前 20 条，按用例编号排序）→ 按（格、题、遍）：failed 为列表，
+    complete 为列表是否齐全（条数等于要做到的总数减通过数）。同一格、题、遍取最后出现的一行；没判分的行不列。"""
+    out: dict[tuple[str, int, int], dict[str, Any]] = {}
+    for _, _, row in read_jsonl(paths):
+        if not is_task_row(row) or row.get("judging") is None:
+            continue
+        j = row["judging"]
+        failed = list(_get(j, "failedCases.failToPass", []) or [])
+        n_failed = int(j["failToPass"]["total"]) - int(j["failToPass"]["passed"])
+        out[(CONDITION_TO_CELL[row["condition"]], int(row["seq"]), int(row["attempt"]))] = {
+            "failed": failed, "complete": len(failed) == n_failed}
+    return out
+
+
+def rejudged_case_lists(paths: Iterable[str | Path]) -> tuple[dict[tuple[str, int, int], list[str]], list[dict[str, Any]]]:
+    """按保存的改动重判的逐用例结果（跑批器 eval stream-rejudge 的 rejudge/cases.jsonl）：只取与原结果行逐项一致的行，
+    返回按（格、题、遍）的要做到一类的全部失败用例；不一致的行另列（不用）。同一格、题、遍取最后出现的一行。"""
+    good: dict[tuple[str, int, int], list[str]] = {}
+    bad: dict[tuple[str, int, int], dict[str, Any]] = {}
+    for f, k, row in read_jsonl(paths):
+        cond = row.get("condition")
+        if cond not in CONDITION_TO_CELL:
+            continue
+        key = (CONDITION_TO_CELL[cond], int(row["seq"]), int(row["attempt"]))
+        if row.get("consistent") is True and row.get("complete") is True:
+            good[key] = list(row["judging"]["failedCases"]["failToPass"])
+            bad.pop(key, None)
+        else:
+            good.pop(key, None)
+            bad[key] = {"cell": key[0], "task": key[1], "pass_no": key[2],
+                        "mismatches": list(row.get("mismatches") or [])}
+    return good, sorted(bad.values(), key=lambda x: (x["task"], x["cell"], x["pass_no"]))
