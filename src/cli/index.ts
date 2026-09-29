@@ -1,6 +1,7 @@
 // Pigeon M3 极简 CLI 入口（决策 3：REPL 内联审批，单进程最小闭环，不依赖 M2 TUI）。
 // 决策 267：pigeon 不带子命令即启动终端界面（以子进程运行 tui 入口，Actor 之间不互相 import）；命令行对话留作后备，
-// 由 --line 进入，只保证不坏、不再加新功能（不注册 spawn_worker）。
+// 由 --line 进入，只保证不坏、不再加新功能（不注册 spawn_worker）。决策 286：顶层帮助补上终端界面的 --continue 与
+// --resume（参数由 tui 入口解析）；只改帮助文字，eval stream 与 pigeon run 的行为不变。
 // M2 S1（决策 025）：装配根（buildRuntime）在 application/runtime.ts，审批 handler 由本入口
 // 注入 REPL 问答版；resume 对账流程在 application/resume.ts，本文件只做参数解析与 IO 接线。
 // 用法：node src/cli/index.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
@@ -1063,6 +1064,8 @@ async function lineMain(argv: string[]): Promise<void> {
 export const TOP_LEVEL_HELP = [
   "用法：",
   "  pigeon [参数]                 启动终端界面（--no-spawn-workers 关掉主 agent 派 worker；--worker-concurrency、--worker-limit 调两个上限）",
+  "  pigeon --continue [参数]      在终端界面里续接本项目最近的会话",
+  "  pigeon --resume [sessionId]   在终端界面里续接指定会话（不带会话号时弹出会话列表）",
   "  pigeon --line [参数]          命令行对话（后备入口）",
   "  pigeon run [任务描述] [参数]  无人值守运行一个任务",
   "  pigeon resume <sessionId>     在命令行对话里续跑一个会话",

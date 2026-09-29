@@ -84,6 +84,9 @@ export interface FixtureSession {
     stopReason?: string;
     errorMessage?: string;
     usage?: Partial<typeof ZERO_USAGE>;
+    // 模型接入（缺省 fixture）与回复开始的时刻（缺省写入时刻）
+    provider?: string;
+    timestamp?: number;
   }): string[];
   toolResult(input: {
     toolCallId: string;
@@ -209,11 +212,12 @@ export function createFixtureSession(options: FixtureSessionOptions): FixtureSes
           ...calls,
         ],
         api: "unknown",
-        provider: "fixture",
+        provider: input.provider ?? "fixture",
         model: "fixture-model",
         usage: { ...ZERO_USAGE, ...input.usage },
         stopReason,
         ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+        ...(input.timestamp !== undefined ? { timestamp: input.timestamp } : {}),
       });
       return calls.map((call) => call.id);
     },

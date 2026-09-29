@@ -7,7 +7,7 @@ import {
   PEAK_MULTIPLIER,
   PRICE_CNY_PER_MTOK,
   requestCostCny,
-} from "./model-pricing.ts";
+} from "../state/model-pricing.ts";
 
 // 北京时间的时刻（UTC+8，无夏令时）
 const bj = (date: string, time: string) => Date.parse(`${date}T${time}+08:00`);

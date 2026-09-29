@@ -186,8 +186,9 @@ export class MockTerminal implements Terminal {
   onInput: ((data: string) => void) | undefined;
   stopped = false;
 
-  private readonly cols: number;
-  private readonly rws: number;
+  private cols: number;
+  private rws: number;
+  private onResize: (() => void) | undefined;
 
   constructor(cols: number, rws: number) {
     this.cols = cols;
@@ -195,8 +196,19 @@ export class MockTerminal implements Terminal {
     this.screen = new VirtualScreen(cols, rws);
   }
 
-  start(onInput: (data: string) => void, _onResize: () => void): void {
+  start(onInput: (data: string) => void, onResize: () => void): void {
     this.onInput = onInput;
+    this.onResize = onResize;
+  }
+
+  // 窗口缩放（决策 286 第 6 项的自动化用例）：改尺寸并通知 pi-tui，同真实终端的 SIGWINCH 路径；
+  // 宽度变化时 pi-tui 全量重绘（清屏序列由仿真器执行）
+  resize(cols: number, rows: number): void {
+    this.cols = cols;
+    this.rws = rows;
+    this.screen.width = cols;
+    this.screen.height = rows;
+    this.onResize?.();
   }
   stop(): void {
     this.stopped = true;

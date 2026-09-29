@@ -22,7 +22,7 @@ import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
 import { newEntryId, newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
 import { PigeonTuiShell, type TuiRuntimeFace, type TuiSessionBinding } from "./shell.ts";
-import { MockTerminal, screenText, settle } from "./testing.ts";
+import { MockTerminal, screenFlat, screenText, settle } from "./testing.ts";
 
 const SESSION_ID: SessionId = newSessionId();
 
@@ -439,7 +439,7 @@ test("/resume 会话不存在与空目录响亮报错；原运行面不受影响
   }
 });
 
-test("busy 期间 /sessions 与 /resume 不开旁路；收尾后 /resume 直接换绑，不进菜单", async () => {
+test("运行中 /sessions 放行、/resume 被拒并说明原因；收尾后 /resume 直接换绑，不进菜单（决策 286）", async () => {
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
@@ -460,29 +460,25 @@ test("busy 期间 /sessions 与 /resume 不开旁路；收尾后 /resume 直接�
       shell.start();
       await settle();
 
-      // busy：运行中 /sessions 与 /resume 同样被拒绝（决策 027 不开旁路）
+      // 运行中：只读的 /sessions 照常渲染，换会话的 /resume 被拒并说明原因（决策 286）
       runtime.autoResolve = false;
       term.input("任务一");
       term.input("\r");
       await settle();
       term.input("/sessions");
       term.input("\r");
+      await settle();
+      assert.ok(screenText(term).includes("个 Run"), "运行中 /sessions 照常渲染会话列表");
       term.input(`/resume ${crashed}`);
       term.input("\r");
       await settle();
-      const busyText = screenText(term);
-      assert.ok(busyText.includes("[busy]"), busyText);
-      assert.ok(!busyText.includes("个 Run"), "busy 期间不得渲染会话列表");
+      assert.ok(screenFlat(term).includes("运行中不能用 /resume"), screenText(term));
       assert.deepEqual(tracker.rebinds, []);
       runtime.finishAll();
       runtime.autoResolve = true;
       await settle();
-      // 冲刷 busy 期间保留的输入缓冲（027：缓冲保留、重提时机交还人——两次拒绝的
-      // 文本首尾相接仍在缓冲里，一次回车作为未知命令提交掉，后续测试从空缓冲开始）
-      term.input("\r");
-      await settle();
 
-      term.input(`/resume ${crashed}`);
+      // 被拒的 /resume 留在输入框里：结束后回车即执行
       term.input("\r");
       await settle();
       assert.ok(!screenText(term).includes("请选择 [1/2/3]"), screenText(term));

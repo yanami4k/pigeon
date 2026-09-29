@@ -5,6 +5,8 @@
 // 没有 MCP 配置时仍同步装配，行为与 M5.5 相同（会话头写不进在派出时即报错）。
 // M6.5 S1（决策 056）：装配内核抽出为 openRuntimeSurface，worker 工厂与 headless 运行共用——
 // headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
+// 决策 286：会话存储告警的出口可由调用方给出（storeWarn，终端界面运行期间落消息区）；不给即照旧写标准错误输出——
+// pigeon run、eval stream 与逐行对话都不给，实验路径不受影响。
 
 import path from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
@@ -57,6 +59,7 @@ import {
 import { childFamilySink } from "./session-store.ts";
 import { bindSpawnWorkers } from "./spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
+import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { drainWorkers } from "./worker-notices.ts";
 
@@ -95,6 +98,8 @@ export interface WorkerRuntimeDeps {
   webTools?: WebToolsConfig;
   // 决策 299：层数放开时，还没到最底层的 worker 另拿一个本层的派出槽（与主会话共用同一个编排器与并发额度）
   nesting?: { settings: OrchestrationSettings; orchestrator: () => WorkerOrchestrator | undefined };
+  // 决策 286：worker 会话存储告警的出口（终端界面运行期间落消息区）；缺省标准错误输出
+  storeWarn?: WarnSink;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -212,6 +217,7 @@ export function sessionWorkerRuntimeFactory(
     ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
     ...(deps.webTools !== undefined ? { webTools: deps.webTools } : {}),
     ...(deps.nesting !== undefined ? { nesting: deps.nesting } : {}),
+    ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
   });
 }
 
@@ -279,6 +285,8 @@ interface RuntimeSurface {
   initialMessages?: AgentMessage[];
   // 运行面装起来后的回调（挂快照器）
   onBundle?: (bundle: RuntimeBundle) => void;
+  // 决策 286：会话存储告警的出口；缺省标准错误输出
+  storeWarn?: WarnSink;
 }
 
 // M8（决策 087）：派出记录的上限即该 worker 尝试的预算——两者同一组值，冻结进注入快照后回放才能沿用。
@@ -373,6 +381,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
             },
           }
         : {}),
+      ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
     });
     if (nestedOrchestrator === undefined) {
       return handle;
@@ -473,6 +482,8 @@ export interface DetachedRuntimeRequest {
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
+  // 决策 286：会话存储告警的出口；缺省标准错误输出
+  storeWarn?: WarnSink;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -530,6 +541,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
+    ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
   };
   // MCP 配置畸形在此响亮失败（派出失败）
   const startMcp =
