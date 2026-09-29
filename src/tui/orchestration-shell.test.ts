@@ -230,3 +230,35 @@ test("worker 的请示等满时限被撤回：审批面板撤下，按取消收�
     shell.stop();
   }
 });
+
+test("通知与排队输入同一个出口：有排队的输入先发输入（这一轮开头由运行面带上通知），没有才单独跑通知；/tasks 运行中可用", async () => {
+  const runtime = new NoticeRuntime();
+  const { term, shell } = shellWith({ runtime, tasks: () => "1. [进行中] 改 a" });
+  try {
+    shell.start();
+    await settle();
+    await submit(term, "第一句");
+    assert.deepEqual(runtime.runs, ["run:第一句"]);
+    // 运行中：人又输入一句（进队列），同时来了一条通知
+    await submit(term, "第二句");
+    runtime.pending = 1;
+    shell.runNotices();
+    await settle();
+    assert.deepEqual(runtime.runs, ["run:第一句"]);
+    // 运行中 /tasks 照常可用
+    await submit(term, "/tasks");
+    assert.ok(screenFlat(term).includes("1. [进行中] 改 a"), screenFlat(term));
+    // 这一轮结束：先发排队的输入（通知由运行面在这一轮开头带上），不另跑通知
+    runtime.finish();
+    await settle();
+    assert.deepEqual(runtime.runs, ["run:第一句", "run:第二句"]);
+    // 未知命令的提示里有 /tasks
+    runtime.pending = 0;
+    runtime.finish();
+    await settle();
+    await submit(term, "/nope");
+    assert.ok(screenFlat(term).includes("/tasks"), screenFlat(term));
+  } finally {
+    shell.stop();
+  }
+});
