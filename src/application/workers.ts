@@ -7,6 +7,8 @@
 // headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
 // 决策 286：会话存储告警的出口可由调用方给出（storeWarn，终端界面运行期间落消息区）；不给即照旧写标准错误输出——
 // pigeon run、eval stream 与逐行对话都不给，实验路径不受影响。
+// 决策 301：运行面的流式正文与工具结果两个只读观察口一并交给编排器；编排器只在有观察者（终端界面）时订阅，
+// pigeon run、eval stream 与逐行对话不订，实验路径不受影响。
 
 import path from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
@@ -618,6 +620,9 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     transcript: () => bundle.sessionStore.filePath(),
     // 决策 299：再派出时的落盘口
     childLog: () => childFamilySink(bundle.sessionStore),
+    // 决策 301：界面实时显示 worker 的对话（只读观察口，编排器有观察者时才订）
+    subscribeStream: (listener) => adapter.subscribeStream(listener),
+    subscribeToolResults: (listener) => adapter.subscribeToolResults(listener),
     dispose: () => disposeRuntime(bundle),
   };
 }
@@ -628,13 +633,29 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
   let interruptedEarly = false;
   // 就绪前订阅的监听器 → 就绪后的退订函数
   const early = new Map<(event: EventEnvelope) => void, () => void>();
+  // 决策 301：就绪前的只读观察（流式正文、工具结果）→ 就绪后的退订函数
+  const earlyObservers = new Map<(adapter: RuntimeBundle["adapter"]) => () => void, () => void>();
   const settled = ready.then((value) => {
     bundle = value;
     for (const listener of early.keys()) {
       early.set(listener, value.adapter.subscribe(listener));
     }
+    for (const attach of earlyObservers.keys()) {
+      earlyObservers.set(attach, attach(value.adapter));
+    }
     return value;
   });
+  const observeWhenReady = (attach: (adapter: RuntimeBundle["adapter"]) => () => void) => {
+    if (bundle !== undefined) {
+      return attach(bundle.adapter);
+    }
+    earlyObservers.set(attach, () => {});
+    return () => {
+      const unsubscribe = earlyObservers.get(attach);
+      earlyObservers.delete(attach);
+      unsubscribe?.();
+    };
+  };
   // 拒绝由 run / dispose 观察；此处只防未处理拒绝
   settled.catch(() => {});
   return {
@@ -680,6 +701,9 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       return current?.sessionStore.filePath();
     },
     childLog: () => (bundle !== undefined ? childFamilySink(bundle.sessionStore) : undefined),
+    subscribeStream: (listener) => observeWhenReady((adapter) => adapter.subscribeStream(listener)),
+    subscribeToolResults: (listener) =>
+      observeWhenReady((adapter) => adapter.subscribeToolResults(listener)),
     dispose: async () => {
       const current = await settled.catch(() => undefined);
       if (current !== undefined) {

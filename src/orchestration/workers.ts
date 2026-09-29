@@ -13,6 +13,8 @@
 // 没有新的模型回复或工具结果即中断、报卡住（等审批期间不计）；观察者接入点留给打转检测（293）。
 // 决策 303：worker 需请示的动作经审批回调汇到派出方，请求带上 worker 的名字；等满审批时限无人批、或处于无人值守（pigeon run）
 // 即不再等，worker 停下、以可恢复的失败交回，其余 worker 照常；之后可经 resume 补批续做。
+// 决策 301：只读观察口 observe——界面据此看各 worker 的运行事件、流式正文与工具结果（编排面板、树形视图、进入 worker 会话）；
+// 没有观察者时不订阅流式正文与工具结果，pigeon run 与跑批的行为不变。
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
@@ -98,8 +100,28 @@ export interface WorkerRuntimeHandle {
   transcript?(): Promise<string | undefined>;
   // 决策 299：本 worker 再派出时的落盘口（它自己的会话存储）；不实现即不能作派出方
   childLog?(): ChildFamilySink | undefined;
+  // 决策 301：只读观察口——流式正文增量与工具结果（界面实时显示 worker 的对话）；不实现即只有运行事件
+  subscribeStream?(listener: (delta: WorkerStreamDelta) => void): () => void;
+  subscribeToolResults?(listener: (result: WorkerToolResult) => void): () => void;
   // 释放运行面并关闭 worker 会话文件
   dispose(): Promise<void>;
+}
+
+// 决策 301：worker 的流式正文增量（与运行面的流式观察口同形）
+export interface WorkerStreamDelta {
+  runId: RunId;
+  kind: "text" | "thinking";
+  delta: string;
+}
+
+// 决策 301：worker 的工具结果（与运行面的工具结果观察口同形）
+export interface WorkerToolResult {
+  runId: RunId;
+  toolCallId: string;
+  toolName: string;
+  isError: boolean;
+  text: string;
+  details: unknown;
 }
 
 // 汇聚到派出方的审批请求：来源会话与 worker 标签恒在场
@@ -222,6 +244,17 @@ export type WorkerLifecycleEvent =
     }
   | { kind: "worker.settled"; worker: WorkerRef; outcome: WorkerOutcome; at: number }
   | { kind: "worker.resumed"; worker: WorkerRef; approved: boolean; at: number };
+
+// 决策 301：观察口交出的一条 worker 活动——运行事件、流式正文增量或工具结果，带 worker 身份
+export type WorkerActivity =
+  | { kind: "event"; worker: WorkerRef; event: EventEnvelope }
+  | { kind: "delta"; worker: WorkerRef; delta: WorkerStreamDelta }
+  | { kind: "tool-result"; worker: WorkerRef; result: WorkerToolResult };
+
+// 决策 303：补批续做时交给 worker 的话（界面在人另附的话前面同样用它）
+export function resumeApprovalText(action: string): string {
+  return `人已批准你之前等待审批的调用（${action}）。请重新发起这个调用，然后接着完成任务。`;
+}
 
 // 决策 298 与 293 的接入点：观察 worker 的运行事件，需要时叫停它。打转检测做成后以观察者接入，本段只有卡住监控
 export interface WorkerWatcherControl {
@@ -435,6 +468,8 @@ export class WorkerOrchestrator {
   readonly #queue: Array<{ key: SessionId; start: () => void }> = [];
   #running = 0;
   readonly #listeners = new Set<(event: WorkerLifecycleEvent) => void>();
+  // 决策 301：worker 活动的观察者（界面）
+  readonly #observers = new Set<(activity: WorkerActivity) => void>();
   // 不改变结果的内部故障（settled 写盘失败、结果回收失败等）
   readonly #errors: unknown[] = [];
 
@@ -472,6 +507,13 @@ export class WorkerOrchestrator {
   subscribe(listener: (event: WorkerLifecycleEvent) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  // 决策 301：观察各 worker 的运行事件、流式正文与工具结果（只读）；观察者抛错只进内部故障清单。
+  // 在 worker 开跑之前订阅才看得到它的流式正文与工具结果（界面在绑定会话时即订阅）
+  observe(listener: (activity: WorkerActivity) => void): () => void {
+    this.#observers.add(listener);
+    return () => this.#observers.delete(listener);
   }
 
   // 派出方为 from 时能否再派（层数未满）
@@ -775,9 +817,7 @@ export class WorkerOrchestrator {
     const blocked = entry.blocked;
     const text =
       options.message ??
-      (approve && blocked !== undefined
-        ? `人已批准你之前等待审批的调用（${blocked.action}）。请重新发起这个调用，然后接着完成任务。`
-        : "请接着完成任务。");
+      (approve && blocked !== undefined ? resumeApprovalText(blocked.action) : "请接着完成任务。");
     const runtime = this.#createRuntime({
       sessionId: entry.sessionId,
       name: entry.name,
@@ -984,6 +1024,16 @@ export class WorkerOrchestrator {
     };
   }
 
+  #observe(activity: WorkerActivity): void {
+    for (const observer of this.#observers) {
+      try {
+        observer(activity);
+      } catch (error) {
+        this.#errors.push(error);
+      }
+    }
+  }
+
   #emit(event: WorkerLifecycleEvent): void {
     for (const listener of this.#listeners) {
       try {
@@ -1123,7 +1173,24 @@ export class WorkerOrchestrator {
           stop("token-limit");
         }
       }
+      // 决策 301：轮数记好之后再交给观察者（界面读到的状态与事件一致）
+      if (this.#observers.size > 0) {
+        this.#observe({ kind: "event", worker: refOf(entry), event });
+      }
     });
+    // 决策 301：有观察者时另订流式正文与工具结果；没有观察者即不订（pigeon run 与跑批不变）
+    const observed: Array<() => void> = [];
+    if (!skipRun && this.#observers.size > 0) {
+      const ref = refOf(entry);
+      const unsubscribeStream = runtime.subscribeStream?.((delta) =>
+        this.#observe({ kind: "delta", worker: ref, delta })
+      );
+      if (unsubscribeStream !== undefined) observed.push(unsubscribeStream);
+      const unsubscribeResults = runtime.subscribeToolResults?.((result) =>
+        this.#observe({ kind: "tool-result", worker: ref, result })
+      );
+      if (unsubscribeResults !== undefined) observed.push(unsubscribeResults);
+    }
     armStall();
     const timer = skipRun
       ? undefined
@@ -1153,6 +1220,7 @@ export class WorkerOrchestrator {
       clearTimeout(timer);
       clearTimeout(stallTimer);
       unsubscribe();
+      for (const dispose of observed) dispose();
       for (const watcher of watchers) {
         try {
           watcher.dispose?.();
