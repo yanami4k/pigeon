@@ -33,6 +33,15 @@ export interface ModalHost {
   updateStatus(): void;
   requestExit(): void;
   requestInterrupt(): void;
+  // 决策 301：审批面板的各行（审批块、撤回、理由行提示）写到哪里——就地显示在当前视图；缺省即 addSystem
+  addApprovalLine?(line: string): void;
+  // 决策 301：当前不在主会话视图（审批块里给主会话的请求写明来源）；缺省即在
+  outsideMainView?(): boolean;
+}
+
+function approvalLine(host: ModalHost, line: string): void {
+  if (host.addApprovalLine !== undefined) host.addApprovalLine(line);
+  else host.addSystem(line);
 }
 
 // 渲染审批块并挂起等四键；返回面板决议。串行不变量（决策 002）下同一会话同时最多
@@ -50,7 +59,7 @@ export function askApprovalPanel(
   if (host.pendingApproval() !== null) {
     return Promise.resolve({ key: "cancel", reason: APPROVAL_CANCEL_BUSY });
   }
-  host.addSystem(approvalBlockText(request, directoryGrant));
+  approvalLine(host, approvalBlockText(request, directoryGrant, host.outsideMainView?.() === true));
   const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
   const pending = { resolve };
   host.setPendingApproval(pending);
@@ -63,7 +72,7 @@ export function askApprovalPanel(
       if (host.pendingApproval() !== pending) return;
       host.setPendingApproval(null);
       host.setReasonMode(false);
-      host.addSystem(APPROVAL_WITHDRAWN);
+      approvalLine(host, APPROVAL_WITHDRAWN);
       host.updateStatus();
       host.render();
       resolve({ key: "cancel", reason: APPROVAL_WITHDRAWN });
@@ -133,7 +142,7 @@ export function handleModalKey(host: ModalHost, data: string): { consume: true }
       if (data === "\x1b") {
         host.setReasonMode(false);
         host.clearInput();
-        host.addSystem("已取消拒绝理由，回到审批面板");
+        approvalLine(host, "已取消拒绝理由，回到审批面板");
         host.updateStatus();
         host.render();
         return { consume: true };
@@ -144,7 +153,7 @@ export function handleModalKey(host: ModalHost, data: string): { consume: true }
     // [r] 拒绝并说明（决策 066）：打开理由行，不在此决议
     if (key === "r") {
       host.setReasonMode(true);
-      host.addSystem("拒绝理由（回车提交，Esc 返回面板）：");
+      approvalLine(host, "拒绝理由（回车提交，Esc 返回面板）：");
       host.updateStatus();
       host.render();
       return { consume: true };

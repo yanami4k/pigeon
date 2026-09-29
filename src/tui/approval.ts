@@ -65,15 +65,22 @@ export interface TuiApprovalFace {
 
 // 审批块文本：与 cli 版同口径（工具名 + exec 命令行 + pretty JSON 参数 + diff 预览 + 四键提示）；
 // [d] 仅在调用可定位目录时提供（决策 3a）；exec 档 [a] 为精确命令放权（决策 048 及其修订）
+// 决策 301：主会话自己的请求的来源行
+export const MAIN_SOURCE_LINE = "来源：主会话";
+
 export function approvalBlockText(
   request: ApprovalRequest,
-  directoryGrant: boolean = offersDirectoryGrant(request, undefined)
+  directoryGrant: boolean = offersDirectoryGrant(request, undefined),
+  // 决策 301：面板不在主会话视图里弹出时，主会话自己的请求也写明来源
+  labelMainSource = false
 ): string {
   const lines = ["—— 人工审批 ——"];
   // M5.5 S3（决策 040）：worker 请求标明来源
   const source = approvalSourceLine(request);
   if (source !== undefined) {
     lines.push(source);
+  } else if (labelMainSource) {
+    lines.push(MAIN_SOURCE_LINE);
   }
   lines.push(`工具：${request.toolName}`);
   const commandLine = execCommandLine(request);

@@ -38,7 +38,8 @@
 // - 决策 301（编排进度）：输入框下方、状态栏之下是编排面板（worker-panel.ts，取代原先输入框上方的 worker 状态行）；Ctrl+X 或
 //   /agents 切换整屏的树形视图（worker-tree.ts）；输入框为空时按 ↓ 进入面板选 worker。在面板与树形视图里回车进入 worker 的会话：
 //   消息区换成它的对话（历史取自会话记录，之后实时），输入作为消息发给它，/stop 停止、/approve 补批续做，Esc 回主会话。
-//   主会话在此期间照常运行（主会话的消息区在后台照常更新），主会话的审批到来时自动回到主会话弹出面板。
+//   主会话在此期间照常运行（主会话的消息区在后台照常更新）；审批面板就地在当前视图弹出（写明来源），答完仍留在原处。
+//   已收尾的 worker 会话只读（停在等审批的可 /approve 补批续做）。
 //   面板、树形视图与状态栏的在跑 worker 花费同源（worker-activity.ts，编排器的只读观察口）。
 import {
   type Component,
@@ -240,6 +241,9 @@ export class PigeonTuiShell
   private readonly panel: WorkerPanel;
   private readonly tree: WorkerTree;
   private view: ShellView = "main";
+  // 决策 301：树形视图里就地显示的审批面板（审批挂起期间）
+  private readonly approvalBox = new Text("");
+  private approvalBoxText = "";
   // 进入的 worker 会话：它的会话号、消息区与活动订阅
   private workerSession:
     | { sessionId: SessionId; flow: MessageFlow; unsubscribe: () => void }
@@ -339,7 +343,7 @@ export class PigeonTuiShell
   private layout(): void {
     const children: Component[] =
       this.view === "tree"
-        ? [this.title, this.tree, this.statusBar]
+        ? [this.title, this.tree, this.approvalBox, this.statusBar]
         : this.view === "worker" && this.workerSession !== undefined
           ? [
               this.title,
@@ -451,7 +455,11 @@ export class PigeonTuiShell
 
   updateStatus(): void {
     // 决策 301：worker 会话里状态行说明这个 worker 的状态与可用的动作
-    if (this.view === "worker" && this.workerSession !== undefined) {
+    if (
+      this.view === "worker" &&
+      this.workerSession !== undefined &&
+      this.pendingApprovalState === null
+    ) {
       this.statusLine.setText(this.workerSessionStatusText(this.workerSession.sessionId));
       return;
     }
@@ -478,7 +486,7 @@ export class PigeonTuiShell
       this.reasonModeOn = false;
       const approval = this.pendingApprovalState;
       this.pendingApprovalState = null;
-      this.flow.addSystem(`拒绝理由：${reason}`);
+      this.addApprovalLine(`拒绝理由：${reason}`);
       this.updateStatus();
       this.tui.requestRender();
       approval?.resolve({ key: "r", reason });
@@ -757,19 +765,36 @@ export class PigeonTuiShell
   // ---- S3 审批面板（TuiApprovalFace 实现；交互语义在 modal.ts）----
 
   askApproval(request: ApprovalRequest, directoryGrant?: boolean): Promise<ApprovalPanelResult> {
-    // 决策 301：在树形视图、面板或 worker 会话里时，主会话的审批照常弹出——先回到主会话再显示面板
-    if (this.isStarted() && (this.view !== "main" || this.panel.isFocused())) {
-      this.panel.blur();
-      this.showView("main");
-      this.flow.addSystem("有待审批的调用，已回到主会话");
-    }
+    // 决策 301：就地弹出——在树形视图、面板或 worker 会话里时不切走，面板写明来源，答完仍留在原处
+    this.clearApprovalBox();
     return askApprovalPanel(this, request, directoryGrant);
   }
 
   // 审批结果回显（handler 在决议后调用：裁决行 / 已创建放权行）
   noteApproval(line: string): void {
-    this.flow.addSystem(line);
+    this.addApprovalLine(line);
     this.tui.requestRender();
+  }
+
+  // 决策 301：审批面板的各行——主会话的消息区照常留下记录；在 worker 会话里同时写进它的消息区，在树形视图里显示在树下方
+  addApprovalLine(line: string): void {
+    this.flow.addSystem(line);
+    if (this.view === "worker" && this.workerSession !== undefined) {
+      this.workerSession.flow.addSystem(line);
+    } else if (this.view === "tree") {
+      this.approvalBoxText =
+        this.approvalBoxText === "" ? line : `${this.approvalBoxText}\n${line}`;
+      this.approvalBox.setText(this.approvalBoxText);
+    }
+  }
+
+  private clearApprovalBox(): void {
+    this.approvalBoxText = "";
+    this.approvalBox.setText("");
+  }
+
+  outsideMainView(): boolean {
+    return this.view !== "main";
   }
 
   // ---- 子模块窄接口（状态本体在本壳，子模块只读写不持有）----
@@ -788,6 +813,7 @@ export class PigeonTuiShell
 
   setPendingApproval(pending: PendingApproval | null): void {
     this.pendingApprovalState = pending;
+    if (pending === null) this.clearApprovalBox();
   }
 
   lastCtrlCAt(): number | null {
@@ -1135,8 +1161,8 @@ export class PigeonTuiShell
     const actions = isActiveWorker(status)
       ? "[enter] message, /stop, [esc] back"
       : isBlockedWorker(status)
-        ? "/approve to approve and continue, [enter] continue with a message, [esc] back"
-        : "[enter] continue with a message, [esc] back";
+        ? "read only, /approve to approve and continue, [esc] back"
+        : "read only, [esc] back";
     return `worker: ${status.name} ${workerStateWord(status)} | ${actions}`;
   }
 
@@ -1310,29 +1336,35 @@ export class PigeonTuiShell
       }
       return;
     }
-    flow.addUserEcho(value);
-    if (isActiveWorker(status)) {
-      if (workers.send === undefined) {
-        flow.addSystem("当前编排面不支持给 worker 发消息");
-        return;
-      }
-      workers.send(sessionId, value).then(
-        (result) => {
-          flow.addSystem(
-            result === "delivered"
-              ? `已把话递给 worker ${status.name}，它在下一轮看到`
-              : `未送达：worker ${status.name} 已结束或正在收尾；它收尾后再发一次即带着这段话接着做`
-          );
-          this.tui.requestRender();
-        },
-        (error: unknown) => {
-          flow.addSystem(`发消息失败：${error instanceof Error ? error.message : String(error)}`);
-          this.tui.requestRender();
-        }
+    // 已收尾的 worker 会话只读：发话不续做，话留在输入框（停在等审批的用 /approve 补批续做）
+    if (!isActiveWorker(status)) {
+      this.input.setText(value);
+      flow.addSystem(
+        isBlockedWorker(status)
+          ? `${WORKER_ENDED_READ_ONLY}；它停在等审批，可用 /approve 补批续做`
+          : WORKER_ENDED_READ_ONLY
       );
       return;
     }
-    this.resumeWorker(status, { message: value }, flow);
+    flow.addUserEcho(value);
+    if (workers.send === undefined) {
+      flow.addSystem("当前编排面不支持给 worker 发消息");
+      return;
+    }
+    workers.send(sessionId, value).then(
+      (result) => {
+        flow.addSystem(
+          result === "delivered"
+            ? `已把话递给 worker ${status.name}，它在下一轮看到`
+            : `未送达：worker ${status.name} 已结束或正在收尾`
+        );
+        this.tui.requestRender();
+      },
+      (error: unknown) => {
+        flow.addSystem(`发消息失败：${error instanceof Error ? error.message : String(error)}`);
+        this.tui.requestRender();
+      }
+    );
   }
 
   // /approve [话]：补批停在等审批的 worker，放行它重新发起的同一个调用并接着做（编排一段的补批续做）
@@ -1365,9 +1397,7 @@ export class PigeonTuiShell
     try {
       workers.resume(status.sessionId, options);
       flow.addSystem(
-        options.approve === true
-          ? `已补批 worker ${status.name} 的调用（${status.outcome?.blocked?.action ?? ""}），它接着做`
-          : `已让 worker ${status.name} 带着这段话接着做`
+        `已补批 worker ${status.name} 的调用（${status.outcome?.blocked?.action ?? ""}），它接着做`
       );
     } catch (error) {
       flow.addSystem(`续做失败：${error instanceof Error ? error.message : String(error)}`);
@@ -1436,6 +1466,9 @@ export class PigeonTuiShell
     this.tui.requestRender();
   }
 }
+
+// 决策 301：已收尾的 worker 会话只读
+export const WORKER_ENDED_READ_ONLY = "这个 worker 已结束，只能查看";
 
 // 沙箱会话在本机界面里不续接（续接要在同一容器配方里开箱）：给出命令行用法
 function sandboxResumeHint(sessionId: string): string {

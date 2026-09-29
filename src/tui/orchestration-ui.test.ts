@@ -395,7 +395,7 @@ test("进入 worker 会话：从树形视图选中进入；面板与树形视图
   }
 });
 
-test("补批续做：请示等满时限交回后，面板标 blocked 且不淡出；进入它的会话 /approve 即放行同一个调用并接着做；收尾后再发话即带着这段话接着做", async () => {
+test("补批续做：请示等满时限交回后，面板标 blocked 且不淡出；进入它的会话发话不续做、/approve 即放行同一个调用并接着做", async () => {
   const clock = { now: 1_700_000_000_000 };
   let asked = 0;
   const h = orchestrationHarness({
@@ -428,7 +428,22 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     assert.ok(panelRow(term, "ship") !== undefined, "停在等审批的不淡出");
     await type(term, DOWN);
     await type(term, "\r");
-    assert.ok(screenFlat(term).includes("worker: ship blocked | /approve to approve and continue"));
+    assert.ok(
+      screenFlat(term).includes(
+        "worker: ship blocked | read only, /approve to approve and continue"
+      )
+    );
+    // 停在等审批的：发话不续做，提示用 /approve
+    await type(term, "直接接着做\r");
+    assert.ok(
+      screenFlat(term).includes(
+        "这个 worker 已结束，只能查看；它停在等审批，可用 /approve 补批续做"
+      ),
+      screenFlat(term)
+    );
+    assert.equal(h.runtimes("ship").length, 1);
+    term.input("\x03");
+    await settle();
     await type(term, "/approve 顺便跑 lint\r");
     await until(() => h.runtimes("ship").length === 2, "续做的运行面");
     const second = h.runtime("ship");
@@ -449,19 +464,43 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     assert.ok(flat.includes("已补批 worker ship 的调用（跑命令 npm test），它接着做"), flat);
     assert.ok(flat.includes("== 已补批，worker 接着做 =="), flat);
     assert.ok(flat.includes("== worker ship（tester）收尾：完成"), flat);
-    // 已收尾：/approve 说明不需要；普通输入带着这段话接着做
+    // 已收尾：/approve 说明不需要
     await type(term, "/approve\r");
     assert.ok(screenFlat(term).includes("worker ship 没有停在等审批，不需要补批"));
-    await type(term, "再补一个用例\r");
-    await until(() => h.runtimes("ship").length === 3, "再续做");
-    assert.deepEqual(h.runtime("ship").inputs, ["再补一个用例"]);
+    assert.equal(h.runtimes("ship").length, 2);
   } finally {
     shell.stop();
     await h.stopAll();
   }
 });
 
-test("进入 worker 会话期间：主 agent 照常运行（结果留在主会话的消息区），主会话的审批到来时回到主会话照常弹出面板", async () => {
+test("已收尾的 worker 会话只读：发话不产生新的一轮，提示只能查看，话留在输入框", async () => {
+  const h = orchestrationHarness();
+  const { term, shell } = shellWith({ workers: h.face });
+  try {
+    shell.start();
+    await settle();
+    h.orchestrator.spawn({ role: "explorer", task: "一", name: "look-a", origin: "agent" });
+    h.runtime("look-a").finish("看完了");
+    await until(() => h.orchestrator.status()[0]?.state === "completed", "look-a 完成");
+    await settle();
+    await type(term, DOWN);
+    await type(term, "\r");
+    assert.equal(shell.currentView(), "worker");
+    assert.ok(screenFlat(term).includes("worker: look-a done | read only, [esc] back"));
+    await type(term, "再看看 b.ts\r");
+    assert.ok(screenFlat(term).includes("这个 worker 已结束，只能查看"), screenFlat(term));
+    assert.ok(!screenFlat(term).includes("> 再看看 b.ts"), "不回显为发出的消息");
+    assert.equal(h.runtimes("look-a").length, 1, "没有新的一轮");
+    assert.deepEqual(h.runtime("look-a").inputs, ["一"]);
+    assert.equal(h.orchestrator.status()[0]?.state, "completed");
+  } finally {
+    shell.stop();
+    await h.stopAll();
+  }
+});
+
+test("进入 worker 会话期间：主 agent 照常运行（结果留在主会话的消息区）；主会话的审批就地弹出、写明来源，答完仍在 worker 会话", async () => {
   const h = orchestrationHarness();
   const { term, shell, runtime } = shellWith({ workers: h.face });
   try {
@@ -478,7 +517,7 @@ test("进入 worker 会话期间：主 agent 照常运行（结果留在主会�
     runtime.finishAll();
     await settle();
     assert.ok(!screenFlat(term).includes("== run: completed"), "worker 会话里不显示主会话的消息");
-    // 主会话的审批：回到主会话弹出面板，四键照常
+    // 主会话的审批：不切走，就地弹出，写明来源
     const request: ApprovalRequest = {
       toolName: "edit_file",
       toolCallId: "tc-1",
@@ -487,13 +526,58 @@ test("进入 worker 会话期间：主 agent 照常运行（结果留在主会�
     };
     const answer = shell.askApproval(request);
     await settle();
-    assert.equal(shell.currentView(), "main");
-    const flat = screenFlat(term);
-    assert.ok(flat.includes("有待审批的调用，已回到主会话"), flat);
-    assert.ok(flat.includes("== run: completed"), "主会话的消息区在后台照常更新");
+    assert.equal(shell.currentView(), "worker");
+    let flat = screenFlat(term);
+    assert.ok(flat.includes("—— 人工审批 ——来源：主会话工具：edit_file"), flat);
     assert.ok(flat.includes("state: approval"), flat);
     await type(term, "y");
     assert.deepEqual(await answer, { key: "y" });
+    await settle();
+    assert.equal(shell.currentView(), "worker");
+    flat = screenFlat(term);
+    assert.ok(flat.includes("worker: look-a running | [enter] message"), flat);
+    // 主会话的消息区照常留下审批记录与后台结束的这一轮
+    await type(term, ESC);
+    flat = screenFlat(term);
+    assert.ok(flat.includes("== run: completed"), flat);
+    assert.ok(flat.includes("来源：主会话"), flat);
+  } finally {
+    shell.stop();
+    await h.stopAll();
+  }
+});
+
+test("树形视图里审批就地弹出：显示在树下方并写明来源（worker 的请求写 worker 名），答完仍在树形视图", async () => {
+  const h = orchestrationHarness();
+  const { term, shell } = shellWith({ workers: h.face });
+  try {
+    shell.start();
+    await settle();
+    const id = h.orchestrator.spawn({ role: "tester", task: "一", name: "ship", origin: "agent" });
+    await type(term, CTRL_X);
+    assert.equal(shell.currentView(), "tree");
+    const request = {
+      toolName: "run_command",
+      toolCallId: "tc-2",
+      args: { command: "npm test" },
+      tier: "exec",
+      command: "npm test",
+      sessionId: id,
+      worker: { name: "ship", role: "tester" },
+    } as unknown as ApprovalRequest;
+    const answer = shell.askApproval(request);
+    await settle();
+    assert.equal(shell.currentView(), "tree");
+    let text = lines(term).join("\n");
+    assert.ok(text.includes("—— 人工审批 ——"), text);
+    assert.ok(text.includes("来源：worker ship（tester）"), text);
+    await type(term, "n");
+    assert.equal((await answer).key, "n");
+    await settle();
+    assert.equal(shell.currentView(), "tree");
+    text = lines(term).join("\n");
+    assert.ok(!text.includes("—— 人工审批 ——"), "答完审批框撤下");
+    assert.ok(text.includes("== workers tree"), text);
   } finally {
     shell.stop();
     await h.stopAll();
