@@ -155,6 +155,7 @@ test("命令放行表：只读类与 /cancel、/quit 运行中可用，其余逐
     "stop",
     "approve",
     "tasks",
+    "orchestrate",
   ]);
   const rejected = SLASH_COMMANDS.filter((spec) => !spec.whileRunning.allow).map(
     (spec) => spec.name

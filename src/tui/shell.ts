@@ -57,6 +57,7 @@ import { failureBadge } from "../application/format.ts";
 import { loadSessionHistory } from "../application/history.ts";
 import type { PromptHistoryStore } from "../application/prompt-history.ts";
 import { listRecentMainSessions } from "../application/recent-sessions.ts";
+import type { ScriptCommands } from "../application/script-commands.ts";
 import {
   accumulatedSessionCost,
   addUsage,
@@ -217,6 +218,10 @@ export interface TuiShellOptions {
   taskItems?: () => readonly TaskItem[] | undefined;
   // 决策 301：树形视图的脚本与阶段两层（脚本编排接上）；缺省没有这两层
   scripts?: () => readonly OrchestrationScriptNode[];
+  // 决策 309：人的一条输入交给运行面之前（点名判定只挂在这里：提交与排队输入，模型读到的内容不经这里）
+  onHumanInput?: (text: string) => void;
+  // 决策 309、312、301：/orchestrate 的命令面（跟着当前会话）；缺省 = 命令不可用
+  scriptCommands?: () => ScriptCommands | undefined;
 }
 
 // 决策 301：界面所处的视图——主会话、整屏的树形视图、进入的 worker 会话
@@ -580,6 +585,8 @@ export class PigeonTuiShell
     this.running = true;
     this.updateStatus();
     this.tui.requestRender();
+    // 决策 309：点名只看人的这条输入
+    this.options.onHumanInput?.(value);
     // 唯一提交通道：application API（当前会话运行面——/resume 换绑后是新面）。终态摘要
     // 在 run() 决议后落（status/failure 是 promise 载荷，run.ended 事件只有 messageCount
     // 生命周期事实）
@@ -619,6 +626,21 @@ export class PigeonTuiShell
   // 决策 297：worker 完成通知到来时叫醒主 agent——与排队输入同一个出口；在跑时不动，通知留在运行面上，下一轮或这一轮结束后再递
   runNotices(): void {
     this.drainQueue();
+  }
+
+  // 决策 309：/orchestrate 的命令面（CommandsHost）
+  scriptCommands(): ScriptCommands | undefined {
+    return this.options.scriptCommands?.();
+  }
+
+  // 以人的输入提交一条（/orchestrate 发起）：空闲即发，运行中排队
+  submitInput(text: string): void {
+    if (this.isBusy()) {
+      this.queue.enqueue(text);
+      this.tui.requestRender();
+      return;
+    }
+    this.submitNow(text);
   }
 
   // ---- 决策 286：排队接口（编排一段在"下一轮发什么"处接入 worker 完成通知）----
@@ -1386,7 +1408,19 @@ export class PigeonTuiShell
         if (selected !== undefined) {
           this.openWorkerSession(selected, { view: "tree", mode: "running" });
         }
-      } else if (data === "x" || data === "X") {
+      } else if (data === "X" && this.tree.selected() !== undefined) {
+        // 决策 301：选中的 worker 属于某个脚本时停止整个脚本，否则同 x
+        const selected = this.tree.selected() as SessionId;
+        const scripts = this.options.scriptCommands?.();
+        const write = (line: string): void => {
+          this.flow.addSystem(line);
+          this.tui.requestRender();
+        };
+        void (scripts?.stopOfWorker(selected) ?? Promise.resolve(undefined)).then((line) => {
+          if (line !== undefined) write(line);
+          else this.stopWorker(selected, write);
+        });
+      } else if (data === "x") {
         const selected = this.tree.selected();
         if (selected !== undefined) this.stopWorker(selected, (line) => this.flow.addSystem(line));
       }

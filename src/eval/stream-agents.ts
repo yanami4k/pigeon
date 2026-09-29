@@ -43,6 +43,8 @@ export const STREAM_SPAWN_WORKERS = false;
 export const STREAM_WEB_TOOLS = false;
 // 决策 294 与 265 的先例：实验条件不注册任务清单工具（明确关掉；身份头照记这一项）
 export const STREAM_TASK_LIST = false;
+// 决策 309 与 265 的先例：实验条件不注册提交编排脚本的工具（明确关掉；身份头照记这一项）
+export const STREAM_SCRIPT_ORCHESTRATION = false;
 
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;
@@ -177,6 +179,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           spawnWorkers: STREAM_SPAWN_WORKERS,
           // 决策 294：任务清单同样不带（明确关掉）
           taskList: STREAM_TASK_LIST,
+          // 决策 309：提交编排脚本的工具同样不带（明确关掉）
+          scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
           ...(pushed
             ? {
                 pushedMemory: true,

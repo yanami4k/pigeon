@@ -24,6 +24,11 @@ import {
   approvalVerdict,
   workerGrantScopeNote,
 } from "../application/format.ts";
+import {
+  collectSourceLine,
+  SCRIPT_KIND_KEY_LABEL,
+  scriptKindAllowedLine,
+} from "../application/script-texts.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import {
   type ApprovalDecision,
@@ -45,7 +50,8 @@ export const APPROVAL_CANCEL_BUSY = "已有另一审批进行中，本次调用�
 export const APPROVAL_WITHDRAWN =
   "[审批] 请求等待超时，已撤回；这个 worker 停下交回，可稍后补批续做";
 
-export type ApprovalPanelKey = "y" | "n" | "a" | "d";
+// s：本次脚本内同类都允许（决策 303 的脚本部分；只在请求带同类时提供）
+export type ApprovalPanelKey = "y" | "n" | "a" | "d" | "s";
 
 // 面板决议：四键之一；r = 拒绝并说明（决策 066，携带人写理由）；
 // cancel = 面板未能完成交互（壳停止/并发防御），携带逐字理由
@@ -79,6 +85,9 @@ export function approvalBlockText(
   const source = approvalSourceLine(request);
   if (source !== undefined) {
     lines.push(source);
+  } else if (request.script !== undefined) {
+    // 决策 311：脚本结束时整批收回的请示
+    lines.push(collectSourceLine(request.script.title ?? "", request.script.runId));
   } else if (labelMainSource) {
     lines.push(MAIN_SOURCE_LINE);
   }
@@ -95,14 +104,15 @@ export function approvalBlockText(
   if (request.diffPreview !== undefined) {
     lines.push("改动预览：", request.diffPreview);
   }
+  const scriptKey = request.script?.kind !== undefined ? ` / ${SCRIPT_KIND_KEY_LABEL}` : "";
   lines.push(
-    request.host !== undefined
+    (request.host !== undefined
       ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${hostGrantKeyLabel(request)}`
       : request.tier === "exec"
         ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
         : directoryGrant
           ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
-          : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许"
+          : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许") + scriptKey
   );
   return lines.join("\n");
 }
@@ -158,6 +168,12 @@ export function createTuiApprovalHandler(
         `已创建会话放权 ${grant.grantId}（${grant.tool}${commandScopeNote(scope)}）${workerGrantScopeNote(request)}`
       );
       return { approved: true };
+    }
+    // 决策 303（脚本部分）：本次脚本内同类都允许——批准这一次，同一脚本里之后的同类由包装层放行
+    if (result.key === "s" && request.script?.kind !== undefined) {
+      panel.noteApproval(verdictLine("approved", "human"));
+      panel.noteApproval(scriptKindAllowedLine(request.script.kind));
+      return { approved: true, scope: "script-kind" };
     }
     if (result.key === "y") {
       panel.noteApproval(verdictLine("approved", "human"));

@@ -437,6 +437,8 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
+    // 决策 309：脚本编排随派 worker 打开，任务描述算作点名
+    scriptOrchestration: flags.spawnWorkers,
     orchestration,
     // 决策 294 B1：任务清单按编排配置（缺省开）
     taskList: orchestration.taskList,

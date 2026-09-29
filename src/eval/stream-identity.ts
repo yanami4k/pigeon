@@ -51,6 +51,8 @@ export interface StreamRunIdentity {
         workerTools?: boolean;
         // 任务清单工具（294 B1）：各条件关掉；同一口径
         taskList?: boolean;
+        // 提交编排脚本的工具 orchestrate（294 D、309）：各条件关掉；同一口径
+        scriptOrchestration?: boolean;
       };
       minimal?: {
         model: string;

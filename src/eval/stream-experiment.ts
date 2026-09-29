@@ -29,6 +29,7 @@ import {
   commandStepAgent,
   type PigeonStepAgentOptions,
   pigeonStepAgent,
+  STREAM_SCRIPT_ORCHESTRATION,
   STREAM_SPAWN_WORKERS,
   STREAM_TASK_LIST,
   STREAM_WEB_TOOLS,
@@ -150,6 +151,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     workerTools: STREAM_SPAWN_WORKERS,
     // 决策 294 B1：任务清单工具在各条件里的实际生效值（关）
     taskList: STREAM_TASK_LIST,
+    // 决策 309：提交编排脚本的工具在各条件里的实际生效值（关）
+    scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
   };
 }
 

@@ -6,6 +6,8 @@
 // - stallMinutes：卡住判定（298，缺省 10 分钟没有新的模型回复或工具结果即中断）
 // - approvalTimeoutMinutes：worker 的审批请求等待时限（303，缺省 5 分钟）
 // - taskList：任务清单工具开关（294 B1，缺省开）
+// - script.modelDecides：脚本编排由模型自行判断何时用（309，缺省关：须人点名）；script.budget：单次脚本的缺省花费上限（314，
+//   写法同点名时的额度，如 "¥20"、"$5"、"2m"；缺省不限）
 import { type Static, Type } from "typebox";
 
 export const ORCHESTRATION_CONFIG_VERSION = 1;
@@ -28,6 +30,15 @@ export const OrchestrationConfigFileSchema = Type.Object(
     stallMinutes: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
     approvalTimeoutMinutes: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
     taskList: Type.Optional(Type.Boolean()),
+    script: Type.Optional(
+      Type.Object(
+        {
+          modelDecides: Type.Optional(Type.Boolean()),
+          budget: Type.Optional(Type.String({ minLength: 1 })),
+        },
+        { additionalProperties: false }
+      )
+    ),
   },
   { additionalProperties: false }
 );
@@ -44,6 +55,9 @@ export interface OrchestrationSettings {
   stallMs: number;
   approvalTimeoutMs: number;
   taskList: boolean;
+  // 决策 309、314：脚本编排由模型判断（缺省关）与缺省额度的写法（缺省不限；解析在 application）
+  scriptModelDecides: boolean;
+  scriptBudget?: string;
 }
 
 export const DEFAULT_ORCHESTRATION_SETTINGS: Readonly<OrchestrationSettings> = {
@@ -54,6 +68,7 @@ export const DEFAULT_ORCHESTRATION_SETTINGS: Readonly<OrchestrationSettings> = {
   stallMs: 10 * 60_000,
   approvalTimeoutMs: 5 * 60_000,
   taskList: true,
+  scriptModelDecides: false,
 };
 
 export function orchestrationSettings(
@@ -76,5 +91,7 @@ export function orchestrationSettings(
         ? Math.round(file.approvalTimeoutMinutes * 60_000)
         : base.approvalTimeoutMs,
     taskList: file?.taskList ?? base.taskList,
+    scriptModelDecides: file?.script?.modelDecides ?? base.scriptModelDecides,
+    ...(file?.script?.budget !== undefined ? { scriptBudget: file.script.budget } : {}),
   };
 }
