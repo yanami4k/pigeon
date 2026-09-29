@@ -55,6 +55,7 @@ import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { MemoryReviewTag, ReviewCoverage } from "../state/learned-memory.ts";
+import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
@@ -256,6 +257,8 @@ export interface MemoryReviewSettings {
   warn?: WarnSink;
   // 外部中止（跑批器作废这一步等）：在途的复盘随之中止
   abortSignal?: AbortSignal;
+  // 决策 307、308：打转检测设定（压缩前复盘挂上；叫停这次复盘，已写入的记忆保留）；缺省不挂
+  loopGuard?: LoopGuardSettings;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -573,6 +576,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
             sourceSessionId: deps.sessionId,
             budget: reviewSettings.budget ?? DEFAULT_REVIEW_BUDGET,
             abortSignal: AbortSignal.any(signals),
+            ...(reviewSettings.loopGuard !== undefined
+              ? { loopGuard: reviewSettings.loopGuard }
+              : {}),
             open: (review) =>
               reviewHandle(
                 buildRuntime(
@@ -805,6 +811,8 @@ export function reviewHandle(bundle: RuntimeBundle): {
   run: RuntimeBundle["adapter"]["run"];
   interrupt: RuntimeBundle["adapter"]["interrupt"];
   subscribe: RuntimeBundle["adapter"]["subscribe"];
+  subscribeRounds: RuntimeBundle["adapter"]["subscribeRounds"];
+  notify: RuntimeBundle["adapter"]["notify"];
   dispose(): Promise<void>;
 } {
   const { adapter, sessionStore } = bundle;
@@ -812,6 +820,8 @@ export function reviewHandle(bundle: RuntimeBundle): {
     run: (task) => adapter.run(task),
     interrupt: (cause) => adapter.interrupt(cause),
     subscribe: (listener) => adapter.subscribe(listener),
+    subscribeRounds: (listener) => adapter.subscribeRounds(listener),
+    notify: (text) => adapter.notify(text),
     dispose: async () => {
       try {
         await adapter.dispose();

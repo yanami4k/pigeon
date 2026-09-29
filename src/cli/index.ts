@@ -28,6 +28,7 @@ import {
   VALUELESS_FLAGS,
   webToolsEnabled,
 } from "../application/launch-flags.ts";
+import { LOOP_GUARD_TEXTS } from "../application/loop-guard.ts";
 import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
@@ -67,6 +68,7 @@ import {
 } from "../eval/stream-manifest.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
+import { loadLoopGuardConfig } from "../persistence/loop-guard-config.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
@@ -412,6 +414,8 @@ async function runMain(argv: string[]): Promise<void> {
   const repairRounds = resolveRepairRounds(flags, workspaceRoot);
   // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
   const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
+  // 决策 308：打转检测——.pigeon/loop-guard.json（缺失取缺省即开着；畸形在开跑之前响亮失败）
+  const loopGuard = loadLoopGuardConfig(workspaceRoot);
   const runOptions = {
     task,
     governanceRoot: workspaceRoot,
@@ -446,6 +450,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...(repairRounds > 0 ? { repairRounds } : {}),
     // 决策 287–291：联网工具缺省给出，--sandbox-network off 不给
     ...webToolsOption(flags, workspaceRoot),
+    loopGuard,
   };
   // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
   const result =
@@ -466,6 +471,10 @@ async function runMain(argv: string[]): Promise<void> {
         `${result.repair !== undefined ? ` ｜ ${repairSummary(result.repair)}` : ""}` +
         `${result.errorMessage !== undefined ? ` ｜ ${result.errorMessage}` : ""}\n`
     );
+  }
+  // 决策 307：打转叫停的收尾说明（终态一行之后；--json 时已在结果里）
+  if (!json && result.looping !== undefined) {
+    writeOut(`${LOOP_GUARD_TEXTS.runStopped(result.looping)}\n`);
   }
   if ("sandboxNotice" in result && result.sandboxNotice !== undefined) {
     process.stderr.write(`[沙箱] ${result.sandboxNotice}\n`);

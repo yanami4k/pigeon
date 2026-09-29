@@ -30,6 +30,7 @@ import type { SkillRoot } from "../skills/catalog.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { FailureClass } from "../state/classification.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import {
   DEFAULT_ORCHESTRATION_SETTINGS,
   type OrchestrationSettings,
@@ -44,6 +45,7 @@ import { type VerifyAttemptResult, verifyAttempt } from "./attempt-verify.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
 import { compactionWarner } from "./compaction-text.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
+import { attachLoopGuard, type LoopStop } from "./loop-guard.ts";
 import type { McpSession } from "./mcp.ts";
 import {
   assertReviewBudget,
@@ -82,7 +84,9 @@ export type HeadlessStatus =
   | "wall-clock-limit"
   | "token-limit"
   // 空回复异常结束（决策 170 ②）：模型的回复既无文字也无工具调用，重试一次仍是如此。不算模型服务故障
-  | "empty-reply";
+  | "empty-reply"
+  // 打转叫停（决策 307）：照常验证、不再回炉，成败算失败
+  | "looping";
 
 // 退出码按终态映射；1 留给参数与装配错误（cli 入口的异常出口）
 export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
@@ -94,6 +98,7 @@ export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
   "wall-clock-limit": 6,
   "token-limit": 7,
   "empty-reply": 8,
+  looping: 9,
 };
 
 export interface HeadlessRunOptions {
@@ -155,6 +160,8 @@ export interface HeadlessRunOptions {
   // 决策 287–291：联网工具的配置——在场即给主会话与 worker 注册两件工具；缺省不注册（pigeon run 由启动参数缺省给出，
   // --sandbox-network off 不给；跑批器各条件不给）
   webTools?: WebToolsConfig;
+  // 决策 305–308：打转检测设定——主 agent、worker 与复盘都挂；缺省不挂（pigeon run 按项目配置缺省打开，跑批器各条件明确关掉）
+  loopGuard?: LoopGuardSettings;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令——冻结进注入快照；尝试收尾后在工作区独立执行并落本会话的通用验证记录
@@ -201,6 +208,8 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   repair?: HeadlessRepairSummary;
   // 推送记忆开着时在场：这一步的各次复盘（压缩前的按发生先后，收尾的在最后）
   reviews?: ReviewOutcome[];
+  // 打转叫停时在场（307）：计数与重复的调用（收尾说明用）
+  looping?: LoopStop;
 }
 
 export interface HeadlessRepairSummary {
@@ -318,6 +327,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           },
           ...(options.warn !== undefined ? { warn: options.warn } : {}),
           ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
+          ...(options.loopGuard !== undefined ? { loopGuard: options.loopGuard } : {}),
         },
       }
     : undefined;
@@ -394,6 +404,14 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
+      // 决策 305–307：打转检测挂在主 agent 上——提醒进下一轮；计到叫停轮数即以打转中止，照常验证、不再回炉
+      const detachLoopGuard = attachLoopGuard(bundle.adapter, options.loopGuard, (found) => {
+        if (limitHit === undefined) {
+          looping = found;
+        }
+        stop("looping");
+      });
+      bundle.disposers = [...(bundle.disposers ?? []), async () => detachLoopGuard()];
       frozenSystemPrompt = bundle.adapter.snapshot().context.systemPrompt;
       // 决策 189：无头运行没人看压缩提示——自动压缩没压成与压缩前回调失败写标准错误输出，同一类只说一次
       bundle.adapter.subscribeCompaction(compactionWarner(options.warn));
@@ -428,6 +446,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           settings: options.orchestration ?? DEFAULT_ORCHESTRATION_SETTINGS,
           onWorkerTokens: (_workerId, tokens) => addWorkerTokens(tokens),
           ...(options.webTools !== undefined ? { webTools: options.webTools } : {}),
+          ...(options.loopGuard !== undefined ? { loopGuard: options.loopGuard } : {}),
         });
         const bound = bindSpawnWorkers({
           slot: spawnSlot,
@@ -445,7 +464,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       options.onBundle?.(bundle);
     },
   });
-  let limitHit: "turn-limit" | "wall-clock-limit" | "token-limit" | undefined;
+  let limitHit: "turn-limit" | "wall-clock-limit" | "token-limit" | "looping" | undefined;
+  let looping: LoopStop | undefined;
   const stop = (reason: NonNullable<typeof limitHit>): void => {
     if (limitHit !== undefined) {
       return;
@@ -702,6 +722,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       verdict: reviewVerdictText(verdictInputOf(lastVerified, options.verify?.command ?? "")),
       budget: reviewBudget,
       ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
+      ...(options.loopGuard !== undefined ? { loopGuard: options.loopGuard } : {}),
       open: (review) =>
         createDetachedRuntime({
           ...surface,
@@ -744,6 +765,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(repair !== undefined ? { repair } : {}),
     ...(pushed ? { reviews } : {}),
     label: outcome.label,
+    ...(status === "looping" && looping !== undefined ? { looping } : {}),
     durationMs: Date.now() - startedAt,
     ...(errorMessage !== undefined ? { errorMessage } : {}),
   };

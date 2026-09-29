@@ -71,6 +71,7 @@ import type {
   TurnCompletedPayload,
 } from "../state/runtime-events.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
+import type { RunStopCause } from "../state/session-entries.ts";
 import { toolResultModelUsage } from "../state/tool-usage.ts";
 import type { ApprovalPanelResult, TuiApprovalFace } from "./approval.ts";
 import { rejectWhileRunning } from "./command-table.ts";
@@ -119,8 +120,8 @@ export interface TuiRuntimeFace {
   subscribe(listener: (event: EventEnvelope) => void): () => void;
   subscribeStream(listener: (delta: StreamTextDelta) => void): () => void;
   // S5 取消入口：中断当前 Run（Adapter 固定姿势 abort → waitForIdle，注释约束 5，
-  // 任何路径不悬挂；终态由并发等待的 run() 返回承载）
-  interrupt(): Promise<void>;
+  // 任何路径不悬挂；终态由并发等待的 run() 返回承载）。打转叫停带上原因（307），收尾条目记结束方式为打转
+  interrupt(cause?: RunStopCause): Promise<void>;
   // S5 D2 可见化投影：会话记录写入失败观察口（措辞与增量报数口径同 cli repl）
   listenerErrors(): unknown[];
   // 决策 189：压缩完成的提示（自动与手动）与手动压缩；缺省（替身运行面）即不提示、/compact 不可用
@@ -835,7 +836,7 @@ export class PigeonTuiShell
   // 取消入口（S5）：触发 adapter.interrupt()（固定姿势 abort → waitForIdle，注释约束 5）。
   // 重复取消防御：中断飞行中不再触发——不 double-abort、不悬挂；running 清算在
   // handleRunEnd（run() 决议承载终态），interrupt 决议只清飞行标记
-  requestInterrupt(): void {
+  requestInterrupt(cause?: RunStopCause): void {
     if (this.interrupting) return;
     this.interrupting = true;
     this.flow.addSystem("[cancel] interrupt requested; waiting for run to settle");
@@ -854,10 +855,16 @@ export class PigeonTuiShell
       this.updateStatus();
       this.tui.requestRender();
     };
-    this.current.runtime.interrupt().then(
+    this.current.runtime.interrupt(cause).then(
       () => settle(),
       (error: unknown) => settle(error)
     );
+  }
+
+  // 决策 307：打转叫停——消息区写明检测到打转、重复的调用与轮数，再同 Esc 一样中断本轮（原因记为打转）；会话照常可用
+  stopForLoop(text: string): void {
+    this.flow.addSystem(text);
+    this.requestInterrupt("looping");
   }
 
   // D2 可见化的 TUI 投影（S5）：会话记录写入失败非空时消息区警告——措辞与 cli repl 同口径，

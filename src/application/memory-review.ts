@@ -22,13 +22,16 @@ import {
   readSessionFile,
 } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
+import type { TurnRoundNotice } from "../pi-runtime/adapter.ts";
 import type { ToolGovernanceFactory } from "../pi-runtime/governance.ts";
 import type { AgentMessage } from "../pi-runtime/index.ts";
 import { forkSessionFile, sessionContextMessages } from "../pi-runtime/session-store.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import type { ReviewCoverage } from "../state/learned-memory.ts";
+import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { RunStopCause } from "../state/session-entries.ts";
+import { attachLoopGuard, LOOP_GUARD_TEXTS, loopGuardTargetOf } from "./loop-guard.ts";
 import { dedupedWarner, failureDetail, type WarnSink } from "./warnings.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
@@ -73,7 +76,8 @@ export interface ReviewOutcome {
   kind: ReviewKind;
   // 复盘会话；分叉没成时缺省
   sessionId?: SessionId;
-  // completed 为正常收尾；turn-limit / wall-clock-limit 为撞复盘上限；其余为失败（failed、aborted、empty-reply）
+  // completed 为正常收尾；turn-limit / wall-clock-limit 为撞复盘上限，looping 为打转叫停（307：同撞上限，视同跑完）；
+  // 其余为失败（failed、aborted、empty-reply）
   status: string;
   turns: number;
   tokens: number;
@@ -94,6 +98,9 @@ export interface ReviewRuntime {
   run(task: string): Promise<{ status: string; emptyReply?: boolean; errorMessage?: string }>;
   interrupt(cause?: RunStopCause): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
+  // 决策 305：整轮观察口与通知（打转检测用）；不实现即不挂打转检测
+  subscribeRounds?(listener: (round: TurnRoundNotice) => void): () => void;
+  notify?(text: string): unknown;
   dispose(): Promise<void>;
 }
 
@@ -111,6 +118,8 @@ export interface MemoryReviewInput {
   open(review: ForkedReview): ReviewRuntime;
   // 外部中止（跑批器作废这一步等）：在途的复盘立即中止
   abortSignal?: AbortSignal;
+  // 决策 307、308：打转检测设定——叫停这次复盘，已写入的记忆保留；缺省不挂
+  loopGuard?: LoopGuardSettings;
 }
 
 // {当前记忆全文}：现读的 MEMORY.md 原文；文件还不在时给新建文件的文件头（空记忆）
@@ -173,7 +182,7 @@ export async function runMemoryReview(input: MemoryReviewInput): Promise<ReviewO
     turns,
     tokens,
     wallMs: Date.now() - startedAt,
-    hitLimit: status === "turn-limit" || status === "wall-clock-limit",
+    hitLimit: status === "turn-limit" || status === "wall-clock-limit" || status === "looping",
     ...(error !== undefined ? { error } : {}),
   });
   let runtime: ReviewRuntime | undefined;
@@ -207,7 +216,13 @@ export async function runMemoryReview(input: MemoryReviewInput): Promise<ReviewO
       limitHit = cause;
       current.interrupt(cause).catch(() => {});
     };
-    unsubscribe = current.subscribe((event) => {
+    // 决策 307：复盘同样挂打转检测，叫停即以打转收尾（同撞上限，已写入的记忆保留）
+    const target = loopGuardTargetOf(current);
+    const detachLoopGuard =
+      target !== undefined
+        ? attachLoopGuard(target, input.loopGuard, () => stop("looping"))
+        : () => {};
+    const unsubscribeTurns = current.subscribe((event) => {
       if (event.kind !== "turn.completed") {
         return;
       }
@@ -217,6 +232,10 @@ export async function runMemoryReview(input: MemoryReviewInput): Promise<ReviewO
         stop("turn-limit");
       }
     });
+    unsubscribe = () => {
+      unsubscribeTurns();
+      detachLoopGuard();
+    };
     timer = setTimeout(() => stop("wall-clock-limit"), input.budget.wallClockMs);
     input.abortSignal?.addEventListener("abort", onAbort, { once: true });
     const result = await current.run(text);
@@ -251,7 +270,12 @@ export function reviewWarner(sink?: WarnSink): (outcome: ReviewOutcome) => void 
   const warn = dedupedWarner(sink);
   return (outcome) => {
     const label = outcome.kind === "closing" ? "收尾复盘" : "压缩前复盘";
-    if (outcome.hitLimit) {
+    if (outcome.status === "looping") {
+      warn(
+        new Error(`${label}打转被叫停`),
+        `${LOOP_GUARD_TEXTS.reviewStopped(label)}，这一步的结果不受影响`
+      );
+    } else if (outcome.hitLimit) {
       warn(
         new Error(`${label}撞上限：${outcome.status}`),
         `${label}撞上复盘上限（${outcome.status === "turn-limit" ? "轮数" : "墙钟"}）而中止：已写入的记忆照常保留，这一步的结果不受影响`
