@@ -57,6 +57,7 @@ import {
   TASK_PROMPT_FORMATS,
   type TaskPromptFormat,
 } from "../eval/stream-manifest.ts";
+import { runStreamRejudge } from "../eval/stream-rejudge.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
@@ -552,6 +553,78 @@ async function evalStreamBaselineMain(argv: string[]): Promise<void> {
   if (summary.failed.length > 0 || summary.gateFailures.length > 0) process.exitCode = 1;
 }
 
+// pigeon eval stream-rejudge --manifest <清单> --repo <人的仓库> --image <镜像> --baseline <基准目录> --out <正式跑输出目录>
+//   [--classes-image <镜像>] [--tasks 步序,步序] [--limit N] [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）]：
+// 按保存的改动重判（270 ①、316）：不重跑 agent，照正式跑同一判题路径重判各行，取完整的逐用例结果，与原结果行逐项核对；
+// 结果写到 <输出目录>/rejudge/cases.jsonl，原结果行不改，已有的行跳过
+async function evalStreamRejudgeMain(argv: string[]): Promise<void> {
+  const usage =
+    "用法：pigeon eval stream-rejudge --manifest <清单> --repo <人的仓库> --image <镜像> --baseline <基准目录> " +
+    "--out <正式跑输出目录> [--classes-image <镜像>] [--tasks 步序,步序] [--limit N] [--concurrency N] " +
+    "[--container-memory <上限>]";
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const value = argv[i + 1];
+    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
+      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
+    }
+    values.set(arg, value);
+    i++;
+  }
+  const required = (name: string): string => {
+    const value = values.get(name);
+    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
+    return value;
+  };
+  const positive = (name: string): number | undefined => {
+    const raw = values.get(name);
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`${name} 需要正整数（${usage}）`);
+    return n;
+  };
+  const tasks = values.get("--tasks");
+  const seqs = tasks
+    ?.split(",")
+    .filter((x) => x !== "")
+    .map((x) => {
+      const n = Number(x);
+      if (!Number.isInteger(n) || n < 1) throw new Error(`--tasks 需要步序列表（${usage}）`);
+      return n;
+    });
+  const limit = positive("--limit");
+  const concurrency = positive("--concurrency");
+  const classesImage = values.get("--classes-image");
+  const summary = await runStreamRejudge({
+    manifestFile: required("--manifest"),
+    repoDir: required("--repo"),
+    image: required("--image"),
+    baselineDir: required("--baseline"),
+    outDir: required("--out"),
+    containerRunArgs: ["--memory", values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY],
+    ...(classesImage !== undefined ? { classesImage } : {}),
+    ...(seqs !== undefined ? { seqs } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    log: (line) =>
+      process.stderr.write(`[rejudge] ${new Date().toISOString()} ${line}
+`),
+  });
+  process.stdout.write(
+    `重判：选中 ${summary.selected} 行，此前已做 ${summary.skipped} 行；本次一致 ${summary.consistent} 行，` +
+      `不一致 ${summary.inconsistent.length} 行，出错 ${summary.errors.length} 行；结果写到 ${summary.file}
+`
+  );
+  for (const x of summary.inconsistent)
+    process.stdout.write(`  不一致 ${x.key}：${x.mismatches.join("；")}
+`);
+  for (const x of summary.errors)
+    process.stdout.write(`  出错 ${x.key}：${x.error.slice(0, 300)}
+`);
+  if (summary.errors.length > 0) process.exitCode = 1;
+}
+
 async function evalStreamManifestMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> " +
@@ -876,6 +949,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (argv[0] === "eval" && argv[1] === "stream-manifest") {
     await evalStreamManifestMain(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "eval" && argv[1] === "stream-rejudge") {
+    await evalStreamRejudgeMain(argv.slice(2));
     return;
   }
   if (argv[0] === "run") {
