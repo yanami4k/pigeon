@@ -657,7 +657,12 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           ...surface,
           sessionId: review.sessionId,
           initialMessages: review.initialMessages,
-          reviewSession: { kind: "closing", systemPrompt, sourceSessionId: sessionId },
+          reviewSession: {
+            kind: "closing",
+            systemPrompt,
+            sourceSessionId: sessionId,
+            covers: review.covers,
+          },
           learnedMemory: { ...learnedMemory, review: false },
           budget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
         }),

@@ -26,6 +26,7 @@ import type { AgentMessage } from "../pi-runtime/index.ts";
 import { forkSessionFile, sessionContextMessages } from "../pi-runtime/session-store.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
+import type { ReviewCoverage } from "../state/learned-memory.ts";
 import type { RunStopCause } from "../state/session-entries.ts";
 import { dedupedWarner, failureDetail, type WarnSink } from "./warnings.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -86,8 +87,9 @@ export interface MemoryReviewInput {
   // 收尾复盘的验证结论（按 review-text.ts 的填法）；压缩前复盘不给
   verdict?: string;
   budget: ReviewBudget;
-  // 用分叉出的会话号与还原的消息装配复盘运行面（系统提示取来源冻结的原文、只放行两件工具，由调用方装配）
-  open(review: { sessionId: SessionId; initialMessages: AgentMessage[] }): ReviewRuntime;
+  // 用分叉出的会话号与还原的消息装配复盘运行面（系统提示取来源冻结的原文、只放行两件工具，由调用方装配）；
+  // covers 为这次复盘覆盖到来源会话的哪一条记录（283 补充），调用方写进复盘会话的 Run 开始条目
+  open(review: ForkedReview): ReviewRuntime;
   // 外部中止（跑批器作废这一步等）：在途的复盘立即中止
   abortSignal?: AbortSignal;
 }
@@ -98,11 +100,18 @@ export function currentMemoryText(governanceRoot: string): string {
   return (read.exists ? read.text : MEMORY_FILE_HEADER).trimEnd();
 }
 
-// 分叉：来源主分支上最后一条消息条目，位置 at；返回复盘会话号与还原的消息
+// 分叉出的复盘会话：会话号、还原的消息与覆盖到的来源条目
+export interface ForkedReview {
+  sessionId: SessionId;
+  initialMessages: AgentMessage[];
+  covers: ReviewCoverage;
+}
+
+// 分叉：来源主分支上最后一条消息条目，位置 at；返回复盘会话号、还原的消息与分叉点（即覆盖到的记录）
 async function forkForReview(
   sessionsDir: string,
   sourceSessionId: SessionId
-): Promise<{ sessionId: SessionId; initialMessages: AgentMessage[] }> {
+): Promise<ForkedReview> {
   const located = locateSessionFile(sessionsDir, sourceSessionId);
   if (located === undefined) {
     throw new Error("来源会话在会话存储里没有会话文件");
@@ -125,7 +134,11 @@ async function forkForReview(
   if (loaded === undefined) {
     throw new Error("复盘会话的文件读不出来");
   }
-  return { sessionId, initialMessages: sessionContextMessages(loaded.main) };
+  return {
+    sessionId,
+    initialMessages: sessionContextMessages(loaded.main),
+    covers: { entryId: last.id, seq: last.seq },
+  };
 }
 
 export async function runMemoryReview(input: MemoryReviewInput): Promise<ReviewOutcome> {

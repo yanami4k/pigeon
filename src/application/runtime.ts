@@ -54,6 +54,7 @@ import {
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { ReviewCoverage, ReviewReadSource } from "../state/learned-memory.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
@@ -207,6 +208,10 @@ export interface ReviewSessionConfig {
   kind: ReviewKind;
   systemPrompt: string;
   sourceSessionId: SessionId;
+  // 覆盖到来源会话的哪一条记录（283 补充）：分叉点，Run 开始条目的复盘标记记下它
+  covers?: ReviewCoverage;
+  // 终端界面启动时后台补做的复盘（283）：读代码的来处
+  backfill?: { readFrom: ReviewReadSource };
 }
 
 // 推送记忆的配置
@@ -518,6 +523,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
                     kind: "pre-compaction",
                     systemPrompt,
                     sourceSessionId: deps.sessionId,
+                    covers: review.covers,
                   })
                 )
               ),
@@ -600,7 +606,18 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       createdAt: Date.now(),
       ...(pushedMemory !== undefined ? { learnedMemory: pushedMemory.manifest } : {}),
       ...(deps.reviewSession !== undefined
-        ? { memoryReview: { kind: deps.reviewSession.kind, template: REVIEW_TEMPLATE_VERSION } }
+        ? {
+            memoryReview: {
+              kind: deps.reviewSession.kind,
+              template: REVIEW_TEMPLATE_VERSION,
+              ...(deps.reviewSession.covers !== undefined
+                ? { covers: { ...deps.reviewSession.covers } }
+                : {}),
+              ...(deps.reviewSession.backfill !== undefined
+                ? { backfill: { readFrom: { ...deps.reviewSession.backfill.readFrom } } }
+                : {}),
+            },
+          }
         : {}),
       ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),

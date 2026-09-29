@@ -9,7 +9,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { MEMORY_FILE_HEADER } from "../memory/learned.ts";
 import { memoryFileOf } from "../memory/learned-store.ts";
-import { locateSessionFile } from "../persistence/session-reader.ts";
+import {
+  branchEntries,
+  locateSessionFile,
+  readSessionFile,
+} from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
@@ -124,6 +128,19 @@ function runStarts(root: string, sessionId: string): RunStartData[] {
     .map((entry) => entry.data as RunStartData);
 }
 
+// 来源会话主分支上最后一条消息条目（条目号与序号）
+function lastMessageEntry(root: string, sessionId: string): { id: string; seq: number } {
+  const located = locateSessionFile(join(root, ".pigeon", "sessions"), sessionId);
+  assert.ok(located !== undefined);
+  const view = readSessionFile(located.path);
+  assert.ok(view !== undefined);
+  const last = branchEntries(view, view.lanes.get("main") ?? null).findLast(
+    (entry) => entry.type === "message"
+  );
+  assert.ok(last !== undefined);
+  return { id: last.id, seq: last.seq };
+}
+
 function messagesOf(root: string, sessionId: string): LoggedMessage[] {
   return (
     sessionEntries(root, sessionId).main as unknown as Array<{
@@ -196,7 +213,13 @@ test("收尾复盘：从最后一条消息（含）分叉；沿用冻结的系�
     const [sourceStart] = runStarts(root, result.sessionId);
     const [reviewStart] = runStarts(root, reviewId).slice(-1);
     assert.equal(reviewStart?.systemPrompt, sourceStart?.systemPrompt);
-    assert.deepEqual(reviewStart?.memoryReview, { kind: "closing", template: "v1" });
+    // 283 补充：复盘记录写明覆盖到来源会话的哪一条记录——来源主分支上最后一条消息条目
+    const lastSource = lastMessageEntry(root, result.sessionId);
+    assert.deepEqual(reviewStart?.memoryReview, {
+      kind: "closing",
+      template: "v1",
+      covers: { entryId: lastSource.id, seq: lastSource.seq },
+    });
     assert.equal(sourceStart?.memoryReview, undefined);
     // 只放行两件：edit_file 与 run_command 回固定的话、没执行；read_file 与 update_memory 照常
     const results = reviewMessages.filter((m) => m.role === "toolResult");
@@ -341,10 +364,24 @@ test("压缩前复盘：经压缩前回调触发、用压缩前指令，期间�
     // 压缩前复盘的会话也记种类
     const preId = result.reviews?.[0]?.sessionId;
     assert.ok(preId !== undefined);
-    assert.deepEqual(runStarts(root, preId).at(-1)?.memoryReview, {
-      kind: "pre-compaction",
-      template: "v1",
-    });
+    // 283 补充：压缩前复盘覆盖到压缩之前的那条消息，收尾复盘覆盖到最后一条
+    const preTag = runStarts(root, preId).at(-1)?.memoryReview;
+    const closingId = result.reviews?.[1]?.sessionId;
+    assert.ok(closingId !== undefined);
+    const closingTag = runStarts(root, closingId).at(-1)?.memoryReview;
+    const lastSource = lastMessageEntry(root, result.sessionId);
+    assert.deepEqual(closingTag?.covers, { entryId: lastSource.id, seq: lastSource.seq });
+    assert.equal(preTag?.kind, "pre-compaction");
+    assert.equal(preTag?.template, "v1");
+    const preCovers = preTag?.covers;
+    assert.ok(preCovers !== undefined);
+    assert.ok(preCovers.seq < lastSource.seq);
+    const sourceMessageIds = (
+      sessionEntries(root, result.sessionId).main as unknown as Array<{ type: string; id: string }>
+    )
+      .filter((entry) => entry.type === "message")
+      .map((entry) => entry.id);
+    assert.ok(sourceMessageIds.includes(preCovers.entryId));
   }));
 
 test("开关关掉：不推送、不注册记忆工具、不复盘", () =>
