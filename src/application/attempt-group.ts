@@ -4,7 +4,7 @@
 // 失败自动分叉重试不叠加在并行同任务派发上（决策 079）。
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { WorkerOrchestrator, WorkerOutcome } from "../orchestration/workers.ts";
+import type { WorkerOrchestrator, WorkerOrigin, WorkerOutcome } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { SessionId } from "../state/ids.ts";
@@ -36,6 +36,10 @@ export interface AttemptGroupInput {
   verify?: VerifyConfig;
   // 缺省生成
   taskKey?: string;
+  // 决策 294、297：各份共用的标签与派出来源；派出方是 worker 时为它的会话号（299）
+  label?: string;
+  origin?: WorkerOrigin;
+  from?: SessionId;
   // 派出后（收尾前）回报派出的会话，供 Actor 回显
   onSpawned?: (sessionIds: readonly string[]) => void;
 }
@@ -66,6 +70,9 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
       task: input.task,
       taskKey,
       ...(input.limits !== undefined ? { limits: input.limits } : {}),
+      ...(input.label !== undefined ? { label: input.label } : {}),
+      ...(input.origin !== undefined ? { origin: input.origin } : {}),
+      ...(input.from !== undefined ? { from: input.from } : {}),
     })
   );
   input.onSpawned?.(ids);

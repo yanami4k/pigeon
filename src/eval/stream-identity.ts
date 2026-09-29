@@ -47,6 +47,10 @@ export interface StreamRunIdentity {
         webTools?: boolean;
         // 取用 worker 改动的工具 take_worker（279）：与派 worker 同槽，各条件同样关掉；加这一项之前写下的身份头没有它，续跑即判为不同
         takeWorker?: boolean;
+        // 编排积木 wait_workers、worker_status、message_worker、stop_worker（297）：与派 worker 同槽，各条件同样关掉；同一口径
+        workerTools?: boolean;
+        // 任务清单工具（294 B1）：各条件关掉；同一口径
+        taskList?: boolean;
       };
       minimal?: {
         model: string;

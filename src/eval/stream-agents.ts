@@ -41,6 +41,8 @@ export const STREAM_DEFAULT_TEMPERATURE = 0;
 export const STREAM_SPAWN_WORKERS = false;
 // 决策 291 与 265 的先例：实验条件不注册联网工具（headless 不给 webTools）；身份头照记这一项
 export const STREAM_WEB_TOOLS = false;
+// 决策 294 与 265 的先例：实验条件不注册任务清单工具（明确关掉；身份头照记这一项）
+export const STREAM_TASK_LIST = false;
 
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;
@@ -173,6 +175,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           sessionSearch: input.condition.sessionSearch,
           // 决策 265：各条件都不带主 agent 派 worker 的能力（明确关掉，不依赖缺省；身份头记这一项）
           spawnWorkers: STREAM_SPAWN_WORKERS,
+          // 决策 294：任务清单同样不带（明确关掉）
+          taskList: STREAM_TASK_LIST,
           ...(pushed
             ? {
                 pushedMemory: true,

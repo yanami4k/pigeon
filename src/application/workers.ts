@@ -6,6 +6,7 @@
 // M6.5 S1（决策 056）：装配内核抽出为 openRuntimeSurface，worker 工厂与 headless 运行共用——
 // headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
 
+import path from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
@@ -15,6 +16,7 @@ import {
   type RoleModelOverride,
 } from "../orchestration/roles.ts";
 import type {
+  WorkerRunResult,
   WorkerRuntimeFactory,
   WorkerRuntimeHandle,
   WorkerRuntimeRequest,
@@ -23,12 +25,15 @@ import type {
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { workerStartRefFor } from "../orchestration/worktree.ts";
 import { loadMcpConfig } from "../persistence/mcp-config.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
+import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
   BranchHeaderInput,
@@ -50,8 +55,10 @@ import {
   type RuntimeDeps,
 } from "./runtime.ts";
 import { childFamilySink } from "./session-store.ts";
-import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import { bindSpawnWorkers } from "./spawn-worker-host.ts";
+import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
+import { drainWorkers } from "./worker-notices.ts";
 
 export interface WorkerRuntimeDeps {
   // 每个 worker 的模型接入：生产传同一个无状态 streamFn，测试按 worker 给独立剧本
@@ -86,6 +93,8 @@ export interface WorkerRuntimeDeps {
   unattended?: boolean;
   // 决策 287–291：联网工具的配置——worker 与主会话同样拿到（父策略里有才带）
   webTools?: WebToolsConfig;
+  // 决策 299：层数放开时，还没到最底层的 worker 另拿一个本层的派出槽（与主会话共用同一个编排器与并发额度）
+  nesting?: { settings: OrchestrationSettings; orchestrator: () => WorkerOrchestrator | undefined };
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -98,8 +107,8 @@ export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor
   parentSessionId?: SessionId;
   // 汇聚审批入口（Actor 注入，经审批队列）；缺省 = 无人值守，worker 没有审批通道（决策 266）
   approvals?: ApprovalHandler;
-  // 决策 268：同时在跑的 worker 上限（人派的与 agent 派的一并计算；缺省不限）
-  maxConcurrent?: number;
+  // 决策 297–303：编排设定（同时在跑的上限、层数、每个 worker 的上限、卡住与审批时限）；缺省取产品缺省
+  settings?: OrchestrationSettings;
   // 决策 268：worker 每收尾一轮回报本轮用的 token（计入本次运行的总额度）
   onWorkerTokens?: (sessionId: SessionId, tokens: number) => void;
 }
@@ -111,9 +120,12 @@ const UNATTENDED_APPROVAL = async () => ({
   reasonSource: "system-default" as const,
 });
 
-// 按会话装配编排器（M5.5 S4）：Actor 只拿四动作面，不触达 orchestration 的构造细节
+// 按会话装配编排器（M5.5 S4）：Actor 只拿动作面，不触达 orchestration 的构造细节。
+// 决策 303：没有审批通道（pigeon run）即无人值守——worker 需请示时不等，作为可恢复错误交回
 export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrator {
-  return new WorkerOrchestrator({
+  const settings = deps.settings;
+  const holder: { current?: WorkerOrchestrator } = {};
+  const orchestrator = new WorkerOrchestrator({
     governanceRoot: deps.governanceRoot,
     session: {
       sessionId: deps.bundle.adapter.sessionId,
@@ -123,20 +135,40 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
     // worker 派出与收尾写进父会话的会话存储
     parentLog: childFamilySink(deps.bundle.sessionStore),
     approvals: deps.approvals ?? UNATTENDED_APPROVAL,
-    createRuntime: sessionWorkerRuntimeFactory(deps),
+    ...(deps.approvals === undefined ? { unattended: true } : {}),
+    createRuntime: sessionWorkerRuntimeFactory({
+      ...deps,
+      ...(settings !== undefined && settings.maxDepth > 1
+        ? { nesting: { settings, orchestrator: () => holder.current } }
+        : {}),
+    }),
     // 决策 279：worker 从主工作目录连同未提交改动拍成的快照开工
     startPoint: workerStartPoint(deps.governanceRoot),
-    ...(deps.maxConcurrent !== undefined ? { maxConcurrent: deps.maxConcurrent } : {}),
+    ...(settings !== undefined
+      ? {
+          maxConcurrent: settings.maxConcurrent,
+          maxDepth: settings.maxDepth,
+          stallMs: settings.stallMs,
+          approvalTimeoutMs: settings.approvalTimeoutMs,
+          defaultLimits: {
+            maxTurns: settings.workerMaxTurns,
+            wallClockMs: settings.workerWallClockMs,
+          },
+        }
+      : {}),
     ...(deps.onWorkerTokens !== undefined ? { onWorkerTokens: deps.onWorkerTokens } : {}),
   });
+  holder.current = orchestrator;
+  return orchestrator;
 }
 
 // 决策 279：worker 的起点提供者——拍主工作目录的快照；快照引用只护住"拍好到建好工作树"这一段，工作树建好后由编排器调 release
 // 删掉（worker 分支指向起点提交，提交不会被回收；删分支时的连带删除仍留作兜底）
 export function workerStartPoint(governanceRoot: string): WorkerStartPointProvider {
-  return ({ name }) => {
+  return ({ name, from }) => {
     const ref = workerStartRefFor(name);
-    const snap = snapshotWorkdir({ repoRoot: governanceRoot, ref });
+    // 决策 299：派出方是 worker 时拍它的工作树（与主仓库同一个对象库，引用共用）
+    const snap = snapshotWorkdir({ repoRoot: from ?? governanceRoot, ref });
     return {
       commit: snap.commit,
       snapshot: snap.snapshot,
@@ -147,7 +179,9 @@ export function workerStartPoint(governanceRoot: string): WorkerStartPointProvid
 }
 
 // 会话 worker 的运行面工厂（同一会话派出的 worker 共用同一份模型接入与角色覆盖）
-export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRuntimeFactory {
+export function sessionWorkerRuntimeFactory(
+  deps: SessionWorkersDeps & Pick<WorkerRuntimeDeps, "nesting">
+): WorkerRuntimeFactory {
   // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
   const maxOutputTokens =
     deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
@@ -176,8 +210,8 @@ export function sessionWorkerRuntimeFactory(deps: SessionWorkersDeps): WorkerRun
       ? { roleModelOverrides: deps.roleModelOverrides }
       : {}),
     ...(deps.roleStreamFns !== undefined ? { roleStreamFns: deps.roleStreamFns } : {}),
-    ...(deps.approvals === undefined ? { unattended: true } : {}),
     ...(deps.webTools !== undefined ? { webTools: deps.webTools } : {}),
+    ...(deps.nesting !== undefined ? { nesting: deps.nesting } : {}),
   });
 }
 
@@ -228,8 +262,12 @@ interface RuntimeSurface {
   verify?: VerifyConfig;
   // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照）
   retryOnFail?: number;
-  // 决策 264–267：派 worker 的开关（只有 headless 主会话会给）
+  // 决策 264–267：派 worker 的开关（headless 主会话会给；层数放开时未到最底层的 worker 也给，299）
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 294 B1：任务清单（只有 headless 主会话会给）
+  taskList?: boolean;
+  // 决策 302：worker 改自己工作树内的文件默认放行（只有 worker 会给）
+  ownWorkspaceWrites?: boolean;
   // 决策 287–291：联网工具的配置
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
@@ -264,7 +302,24 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     // M6（决策 064 子裁决 ③）：角色的模型接入覆盖——缺省继承主会话
     const override = (deps.roleModelOverrides ?? ROLE_MODEL_OVERRIDES)[request.role];
     const roleStreamFn = deps.roleStreamFns?.[request.role];
-    return openRuntimeSurface({
+    // 决策 303：补批续做——从会话文件还原对话（悬空的工具调用补"结果未知"），同一个会话号接着写
+    const restored = request.resume === true ? restoreWorkerMessages(request) : undefined;
+    // 决策 299：层数放开且本 worker 没到最底层——另拿一个本层的派出槽，运行面装起来后绑到同一个编排器
+    const depth = request.depth ?? 1;
+    const nesting = deps.nesting;
+    const nestedOrchestrator =
+      nesting !== undefined && depth < nesting.settings.maxDepth
+        ? nesting.orchestrator()
+        : undefined;
+    const nestedSlot =
+      nesting !== undefined && nestedOrchestrator !== undefined
+        ? new SpawnWorkerSlot(
+            spawnWorkerSettingsOf({ ...nesting.settings, taskList: false }, depth)
+          )
+        : undefined;
+    let nestedBundle: RuntimeBundle | undefined;
+    let nestedNotices: ReturnType<typeof bindSpawnWorkers>["notices"];
+    const handle = openRuntimeSurface({
       sessionId: request.sessionId,
       governanceRoot: request.governanceRoot,
       workspaceRoot,
@@ -298,8 +353,81 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       ...(deps.learnedMemory !== undefined ? { learnedMemory: deps.learnedMemory } : {}),
       ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
+      // 决策 302：worker 改自己工作树内的文件默认放行
+      ownWorkspaceWrites: true,
+      ...(restored !== undefined ? { initialMessages: restored } : {}),
+      ...(nestedSlot !== undefined ? { spawnWorker: nestedSlot } : {}),
+      ...(nestedSlot !== undefined && nestedOrchestrator !== undefined
+        ? {
+            onBundle: (bundle: RuntimeBundle) => {
+              nestedBundle = bundle;
+              nestedNotices = bindSpawnWorkers({
+                slot: nestedSlot,
+                orchestrator: nestedOrchestrator,
+                governanceRoot: request.governanceRoot,
+                hostSessionId: request.sessionId,
+                hostStore: bundle.sessionStore,
+                target: bundle.adapter,
+                from: request.sessionId,
+              }).notices;
+            },
+          }
+        : {}),
     });
+    if (nestedOrchestrator === undefined) {
+      return handle;
+    }
+    // 能再派的 worker：自己的运行结束后等它派出的 worker 全部结束、把通知处理完才算结束；被中止时一并停掉它派出的
+    let halted = false;
+    const children = () =>
+      nestedOrchestrator
+        .status()
+        .filter(
+          (worker) =>
+            worker.parentSessionId === request.sessionId &&
+            (worker.state === "running" || worker.state === "queued")
+        );
+    const settleChildren = async (first: WorkerRunResult): Promise<WorkerRunResult> => {
+      const bundle = nestedBundle;
+      const notices = nestedNotices;
+      if (bundle === undefined || notices === undefined) {
+        return first;
+      }
+      const { last } = await drainWorkers<WorkerRunResult>({
+        orchestrator: nestedOrchestrator,
+        parentSessionId: request.sessionId,
+        notices,
+        target: {
+          pendingNotices: () => bundle.adapter.pendingNotices(),
+          runNotices: () => bundle.adapter.runNotices(),
+        },
+        stopped: () => halted,
+      });
+      return last ?? first;
+    };
+    return {
+      ...handle,
+      run: async (task) => settleChildren(await handle.run(task)),
+      interrupt: async (cause) => {
+        halted = true;
+        await Promise.allSettled(
+          children().map((worker) => nestedOrchestrator.cancel(worker.sessionId))
+        );
+        await handle.interrupt(cause);
+      },
+    };
   };
+}
+
+// 补批续做（303）：worker 会话文件里的主分支还原成对话；悬空的工具调用补"结果未知"
+function restoreWorkerMessages(request: WorkerRuntimeRequest): AgentMessage[] {
+  const sessionsDir = path.join(request.governanceRoot, ".pigeon", "sessions");
+  const loaded = loadStoreSession(sessionsDir, request.sessionId);
+  if (loaded === undefined) {
+    throw new Error(`找不到 worker 会话 ${request.sessionId} 的会话文件，无法续做`);
+  }
+  const { messages, interrupted } = restoreSessionContext(loaded.main);
+  return [...messages, ...interrupted];
 }
 
 export interface DetachedRuntimeRequest {
@@ -334,6 +462,8 @@ export interface DetachedRuntimeRequest {
   retryOnFail?: number;
   // 决策 264–267：派 worker 的开关
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 294 B1：任务清单
+  taskList?: boolean;
   // 决策 287–291：联网工具的配置
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
@@ -394,6 +524,8 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
+    ...(surface.taskList === true ? { taskList: true } : {}),
+    ...(surface.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
     ...(surface.webTools !== undefined ? { webTools: surface.webTools } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
@@ -467,6 +599,13 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     summary: () => summaryOf(bundle),
     structured: () => structuredResultOf(summaryOf(bundle)),
     continueRun: () => adapter.continueRun(),
+    // 决策 297：发给 worker 的话进它的下一轮
+    notify: (text) => {
+      adapter.notify(text);
+    },
+    transcript: () => bundle.sessionStore.filePath(),
+    // 决策 299：再派出时的落盘口
+    childLog: () => childFamilySink(bundle.sessionStore),
     dispose: () => disposeRuntime(bundle),
   };
 }
@@ -521,6 +660,14 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       }
       return current.adapter.continueRun();
     },
+    notify: (text) => {
+      bundle?.adapter.notify(text);
+    },
+    transcript: async () => {
+      const current = await settled.catch(() => undefined);
+      return current?.sessionStore.filePath();
+    },
+    childLog: () => (bundle !== undefined ? childFamilySink(bundle.sessionStore) : undefined),
     dispose: async () => {
       const current = await settled.catch(() => undefined);
       if (current !== undefined) {

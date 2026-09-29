@@ -92,6 +92,14 @@ import {
   runMemoryReview,
 } from "./memory-review.ts";
 import {
+  createOrchestrationTools,
+  MESSAGE_WORKER_TOOL,
+  orchestrationToolRegistrations,
+  STOP_WORKER_TOOL,
+  WAIT_WORKERS_TOOL,
+  WORKER_STATUS_TOOL,
+} from "./orchestration-tools.ts";
+import {
   grantEventSink,
   openSessionStore,
   type SessionStoreWriter,
@@ -109,6 +117,13 @@ import {
   TAKE_WORKER_TOOL,
   takeWorkerRegistration,
 } from "./take-worker-tool.ts";
+import {
+  createTaskListTools,
+  LIST_TASKS_TOOL,
+  TaskList,
+  taskListRegistrations,
+  UPDATE_TASKS_TOOL,
+} from "./task-list-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
@@ -199,6 +214,11 @@ export interface RuntimeDeps {
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 294 B1：任务清单工具（update_tasks、list_tasks）。缺省关着（装配层缺省；终端界面与 pigeon run 按编排配置缺省打开，
+  // 跑批器各条件不给）；只给主会话（委派策略在场时不注册）
+  taskList?: boolean;
+  // 决策 302：worker 用写层文件工具改它自己工作区根（工作树）内的文件默认放行（不开放手模式时）；只由 worker 装配时给
+  ownWorkspaceWrites?: boolean;
   // 决策 287–291：联网工具的配置。在场即注册 web_search 与 web_fetch；缺省不注册（装配层缺省；交互入口与 pigeon run 由启动参数
   // 缺省给出，--sandbox-network off 不给，跑批器各条件不给）。worker 与主会话同样拿到（父策略里有才带）
   webTools?: WebToolsConfig;
@@ -269,6 +289,8 @@ export interface RuntimeBundle {
   disposers?: Array<() => Promise<void>>;
   // 推送记忆开着时在场（worker 按它继承）
   learnedMemory?: LearnedMemoryConfig;
+  // 决策 294 B1：任务清单开着时在场（续聊时从会话还原、/tasks 查看）
+  taskList?: TaskList;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -389,15 +411,37 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   if (learned !== undefined) {
     registry.register(updateMemoryRegistration(governanceRoot));
   }
-  // 决策 264–267：派 worker 的工具——只给主会话；worker 自己（委派策略在场）与沙箱（执行端在场）不注册
-  const spawnSlot =
-    deps.toolPolicy === undefined && deps.workspaceHost === undefined
+  // 决策 264–267：派 worker 的工具——只给主会话；沙箱（执行端在场）不注册。worker 自己（委派策略在场）只在层数放开、
+  // 它还没到最底层时由装配方给一个本层的槽（299：槽的派出方所在层大于 0），此时不给 take_worker（叠加只往主工作目录）
+  const nestedSlot =
+    deps.spawnWorker !== undefined && deps.spawnWorker.settings.depth > 0
       ? deps.spawnWorker
       : undefined;
+  const spawnSlot =
+    deps.workspaceHost === undefined
+      ? deps.toolPolicy === undefined
+        ? deps.spawnWorker
+        : nestedSlot
+      : undefined;
+  const takeSlot = spawnSlot !== undefined && nestedSlot === undefined ? spawnSlot : undefined;
   if (spawnSlot !== undefined) {
     registry.register(spawnWorkerRegistration());
+    // 决策 297：等待、状态、发消息、停止四件积木与派 worker 同槽同范围
+    for (const registration of orchestrationToolRegistrations(spawnSlot.settings)) {
+      registry.register(registration);
+    }
+  }
+  if (takeSlot !== undefined) {
     // 决策 279：取用 worker 自身改动的工具与派 worker 同槽同范围（写档，按写操作审批）
     registry.register(takeWorkerRegistration());
+  }
+  // 决策 294 B1：任务清单——只给主会话
+  const taskList =
+    deps.taskList === true && deps.toolPolicy === undefined ? new TaskList() : undefined;
+  if (taskList !== undefined) {
+    for (const registration of taskListRegistrations()) {
+      registry.register(registration);
+    }
   }
   // 决策 287–291：联网工具——web_search 读档免审批，web_fetch 网络档按网站审批
   const webTools = deps.webTools;
@@ -465,7 +509,17 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
-    ...(spawnSlot !== undefined ? [SPAWN_WORKER_TOOL, TAKE_WORKER_TOOL] : []),
+    ...(spawnSlot !== undefined
+      ? [
+          SPAWN_WORKER_TOOL,
+          WAIT_WORKERS_TOOL,
+          WORKER_STATUS_TOOL,
+          MESSAGE_WORKER_TOOL,
+          STOP_WORKER_TOOL,
+        ]
+      : []),
+    ...(takeSlot !== undefined ? [TAKE_WORKER_TOOL] : []),
+    ...(taskList !== undefined ? [UPDATE_TASKS_TOOL, LIST_TASKS_TOOL] : []),
     ...(webTools !== undefined ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
   ];
   const mcpSection =
@@ -663,8 +717,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
       ...(spawnSlot !== undefined
-        ? [createSpawnWorkerTool(spawnSlot), createTakeWorkerTool(spawnSlot)]
+        ? [createSpawnWorkerTool(spawnSlot), ...createOrchestrationTools(spawnSlot)]
         : []),
+      ...(takeSlot !== undefined ? [createTakeWorkerTool(takeSlot)] : []),
+      ...(taskList !== undefined ? createTaskListTools(taskList) : []),
       ...webToolset,
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）
@@ -681,6 +737,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         sessionGrants: grantStore,
         configGrants,
         workspaceRoot: deps.workspaceRoot,
+        // 决策 302：worker 改自己工作树内的文件默认放行
+        ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
       })
     ),
     sessionId: deps.sessionId,
@@ -703,6 +761,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     toolTiers,
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),
+    ...(taskList !== undefined ? { taskList } : {}),
   };
 }
 

@@ -160,51 +160,46 @@ test("pigeon run：缺省不注册、开了才注册；跑批器五个条件（�
   assert.equal(effectivePigeonSettings({}, "m").spawnWorkers, false);
 });
 
-test("可并行：同一次回复里两次调用 spawn_worker 并行执行（第一个等到第二个派出后才收尾）", async () => {
+test("可并行：同一次回复里两次调用 spawn_worker 都立即返回派出的名字，不等 worker 收尾", async () => {
   const root = gitRoot();
   const spawned: SessionId[] = [];
-  const secondSpawned = Promise.withResolvers<void>();
-  const outcome = (id: SessionId, name: string, summary: string): WorkerOutcome => ({
-    sessionId: id,
-    name,
-    role: "explorer",
-    status: "completed",
-    turns: 1,
-    result: { branch: `pigeon/${name}`, changedFiles: [], summary, summaryTruncated: false },
-    workspace: { kind: "git-worktree", path: join(root, name), branch: `pigeon/${name}` },
-  });
   const names = new Map<SessionId, string>();
+  const never = Promise.withResolvers<WorkerOutcome>();
   const slot = new SpawnWorkerSlot();
   slot.bind({
     governanceRoot: root,
-    budget: new SpawnWorkerBudget({ maxAgentSpawns: 16 }),
+    budget: new SpawnWorkerBudget({}),
     spawnAttempts: async () => {
       throw new Error("不派多份");
     },
     orchestrator: {
-      status: () => [],
+      status: () =>
+        spawned.map((id) => ({
+          sessionId: id,
+          name: names.get(id) ?? "w",
+          role: "explorer" as const,
+          state: "running" as const,
+          turns: 0,
+          branch: `pigeon/${names.get(id) ?? "w"}`,
+          startedAt: 0,
+          workspace: {
+            kind: "git-worktree" as const,
+            path: root,
+            branch: `pigeon/${names.get(id)}`,
+          },
+        })),
       spawn: (request) => {
         const id = newSessionId();
         names.set(id, request.name ?? "w");
         spawned.push(id);
-        if (spawned.length === 2) {
-          secondSpawned.resolve();
-        }
         return id;
       },
-      awaitResult: async (id) => {
-        const name = names.get(id) ?? "w";
-        if (id === spawned[0]) {
-          // 串行执行时第二个调用要等第一个返回才开始：等不到即判为串行
-          const parallel = await Promise.race([
-            secondSpawned.promise.then(() => true),
-            new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3000)),
-          ]);
-          return outcome(id, name, parallel ? "并行" : "串行");
-        }
-        return outcome(id, name, "好");
-      },
+      // worker 永不收尾：派出不等它
+      awaitResult: () => never.promise,
       cancel: async () => {},
+      wait: async () => ({ settled: [], pending: [], timedOut: true }),
+      send: () => {},
+      subscribe: () => () => {},
     },
   });
   const streamFn = createFakeStreamFn({
@@ -230,8 +225,8 @@ test("可并行：同一次回复里两次调用 spawn_worker 并行执行（第
         message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("")
       );
     assert.deepEqual(results, [
-      "worker a（explorer）已完成。分支：pigeon/a。改动的文件（0）：无。摘要：并行",
-      "worker b（explorer）已完成。分支：pigeon/b。改动的文件（0）：无。摘要：好",
+      "已派出 worker a（explorer），分支 pigeon/a。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
+      "已派出 worker b（explorer），分支 pigeon/b。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
     ]);
   } finally {
     await disposeRuntime(bundle);
