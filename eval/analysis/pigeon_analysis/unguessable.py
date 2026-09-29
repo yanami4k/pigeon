@@ -243,7 +243,7 @@ def analyze_task(
     read: ReadFile,
     start_paths: Iterable[str],
 ) -> dict[str, Any]:
-    """一题：要做到的用例按测试文件分组，逐个文件判定。fail_to_pass 为 315 修正之后的要做到用例。"""
+    """一题：要做到的用例按测试文件分组，逐个文件判定。fail_to_pass 为该题要做到的用例。"""
     prompt = task_prompt(step["message"], list(step["judgeTests"]), fail_to_pass)
     start = StartCode(start_paths, lambda p: read(step["parent"], p))
     by_file: dict[str, list[str]] = {}
@@ -263,7 +263,8 @@ def analyze_task(
             unparsable.append(f)
             continue
         if triggers:
-            files.append({"file": f, "cases": len(by_file[f]), "triggers": triggers})
+            files.append({"file": f, "cases": len(by_file[f]), "triggers": triggers,
+                          "caseIds": sorted(by_file[f])})
             excluded += len(by_file[f])
     return {
         "seq": step["seq"],
@@ -283,7 +284,7 @@ def build_list(
     read: ReadFile,
     tree: Callable[[str], list[str]],
 ) -> dict[str, Any]:
-    """全部题的清单与汇总。steps 为清单里 kind 为 task 的步；fail_to_pass 按步序给 315 修正之后的要做到用例。"""
+    """全部题的清单与汇总。steps 为清单里 kind 为 task 的步；fail_to_pass 按步序给要做到的用例。"""
     tasks = [analyze_task(s, fail_to_pass[s["seq"]], read, tree(s["parent"])) for s in steps]
     flagged = [t for t in tasks if t["excluded"] > 0]
     return {
@@ -301,13 +302,19 @@ def build_list(
     }
 
 
-def excluded_cases(list_data: dict[str, Any], fail_to_pass: dict[int, list[str]]) -> dict[int, set[str]]:
-    """清单 → 按步序剔除的用例编号（被判不可猜的文件里的全部要做到用例）。"""
+def excluded_cases(list_data: dict[str, Any]) -> dict[int, set[str]]:
+    """清单 → 按步序剔除的用例编号（被判不可猜的文件里的全部要做到用例）；没有剔除的题不列。"""
     out: dict[int, set[str]] = {}
     for t in list_data["tasks"]:
-        files = {f["file"] for f in t["files"]}
-        out[int(t["seq"])] = {c for c in fail_to_pass.get(int(t["seq"]), []) if case_file(c) in files}
+        ids = {c for f in t["files"] for c in f["caseIds"]}
+        if ids:
+            out[int(t["seq"])] = ids
     return out
+
+
+def remaining_cases(list_data: dict[str, Any]) -> dict[int, int]:
+    """清单 → 按步序剔除后剩余的要做到用例数。"""
+    return {int(t["seq"]): int(t["remaining"]) for t in list_data["tasks"]}
 
 
 # ---------- 命令行：从人的仓库、流清单与两类用例预计算结果生成清单 ----------
@@ -325,14 +332,12 @@ def git_reader(repo: Path) -> tuple[ReadFile, Callable[[str], list[str]]]:
     return read, tree
 
 
-def load_fail_to_pass(steps: list[dict[str, Any]], classes_dir: Path,
-                      exclusions: dict[int, set[str]] | None = None) -> dict[int, list[str]]:
-    """各题要做到的用例：<提交>.classes.json 的 failToPass，再去掉 315 的排除清单（给了才去）。"""
+def load_fail_to_pass(steps: list[dict[str, Any]], classes_dir: Path) -> dict[int, list[str]]:
+    """各题要做到的用例：<提交>.classes.json 的 failToPass。"""
     out: dict[int, list[str]] = {}
     for s in steps:
         data = json.loads((classes_dir / f"{s['commit']}.classes.json").read_text(encoding="utf-8"))
-        drop = (exclusions or {}).get(int(s["seq"]), set())
-        out[int(s["seq"])] = [c for c in data["failToPass"] if c not in drop]
+        out[int(s["seq"])] = list(data["failToPass"])
     return out
 
 

@@ -12,6 +12,7 @@ from pigeon_analysis.unguessable import (
     file_triggers,
     mentioned,
     project_imports,
+    remaining_cases,
     task_prompt,
 )
 
@@ -190,5 +191,5 @@ class TestTaskAndList:
         assert s["tasks"] == 2 and s["tasksWithUnguessableFiles"] == 2 and s["unguessableFiles"] == 2
         assert s["failToPassCases"] == 5 and s["excludedCases"] == 3
         assert s["tasksWithNoRemainingCases"] == [9]
-        ex = excluded_cases(data, f2p)
-        assert ex == {7: {T + "test_new.py::a", T + "test_new.py::b"}, 9: {T + "test_new.py::a"}}
+        assert excluded_cases(data) == {7: {T + "test_new.py::a", T + "test_new.py::b"}, 9: {T + "test_new.py::a"}}
+        assert remaining_cases(data) == {7: 2, 9: 0}
