@@ -7,7 +7,7 @@
 //   以它为父的条目改接到它的父条目上，指向它的通道回退到它的父条目；中段坏行同样告警跳过。
 // 会话文件照 pi 原生布局存放：<会话根>/--<工作目录编码>--/<创建时间>_<会话号>.jsonl。按会话号定位靠列目录匹配文件名，
 // 不逐个读文件首行；会话根下遗留的旧格式平铺文件（sess_*.jsonl 等）不在任何子目录里，不会被列举。
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { SessionEntryType } from "../state/session-entries.ts";
 
@@ -159,6 +159,39 @@ function parseHeader(line: string): SessionHeaderView | undefined {
       : {}),
     ...(isObject(value.metadata) ? { metadata: value.metadata } : {}),
   };
+}
+
+// 决策 304：只读会话文件的文件头（首行），不读全文——会话树在全部会话里找一家人时用。按块读到首个换行为止，
+// 首行超过上限、文件头不合法或读不了返回 undefined。从不写文件
+const HEADER_READ_LIMIT = 1 << 20;
+
+export function readSessionHeader(path: string): SessionHeaderView | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const chunk = Buffer.alloc(16 * 1024);
+    for (;;) {
+      const read = readSync(fd, chunk, 0, chunk.length, total);
+      if (read === 0) break;
+      const piece = chunk.subarray(0, read);
+      const newline = piece.indexOf(10);
+      if (newline >= 0) {
+        chunks.push(Buffer.from(piece.subarray(0, newline)));
+        return parseHeader(Buffer.concat(chunks).toString("utf8"));
+      }
+      chunks.push(Buffer.from(piece));
+      total += read;
+      if (total > HEADER_READ_LIMIT) return undefined;
+    }
+    // 只有一行且没有换行：写者可能正写着文件头
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 // 读一个会话文件；没有合法文件头（空文件、文件头写了一半、版本不是 4）返回 undefined。从不写文件

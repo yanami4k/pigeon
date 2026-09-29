@@ -1,6 +1,7 @@
 // 斜杠命令表（决策 286 第 4、6 项）：命令的用法、在当前会话是否可用、运行中能不能用，集中在这一张表。
 // 未知命令的提示与 /resume 的用法提示从表生成，以后加命令不再漏。运行中放行的是只读类命令与 /cancel、/quit；
 // 改主会话状态或工作目录的命令运行中仍拒，并说明原因。分发本身仍在 commands.ts。
+// 决策 301：进入 worker 会话后只放行表里标了 inWorkerSession 的命令（/stop、/approve 只在 worker 会话里用），其余说明要先回主会话。
 
 // 判断可用性需要的壳侧只读面（CommandsHost 的子集）
 export interface CommandAvailability {
@@ -13,6 +14,8 @@ export interface CommandAvailability {
   workers(): { fork: boolean; take: boolean } | undefined;
   // 决策 294 B1：任务清单的查看命令在场（缺省即不在场）
   tasks?(): boolean;
+  // 决策 301：正在 worker 会话里（缺省即不在）
+  inWorkerSession?(): boolean;
 }
 
 export interface SlashCommandSpec {
@@ -21,6 +24,8 @@ export interface SlashCommandSpec {
   usage: string;
   // 运行中：allow 随时可用；reject 运行中拒绝，reason 说明原因
   whileRunning: { allow: true } | { allow: false; reason: string };
+  // 决策 301：进入 worker 会话后能不能用（缺省不能）
+  inWorkerSession?: boolean;
   available(host: CommandAvailability): boolean;
 }
 
@@ -28,7 +33,13 @@ const MAIN_STATE = "它会改动主会话状态";
 const WORKDIR = "它会改动工作目录";
 
 export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
-  { name: "quit", usage: "/quit", whileRunning: { allow: true }, available: () => true },
+  {
+    name: "quit",
+    usage: "/quit",
+    whileRunning: { allow: true },
+    inWorkerSession: true,
+    available: () => true,
+  },
   {
     name: "compact",
     usage: "/compact [重点]",
@@ -93,7 +104,31 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     name: "workers",
     usage: "/workers",
     whileRunning: { allow: true },
+    inWorkerSession: true,
     available: (host) => host.workers() !== undefined && !host.inSandbox(),
+  },
+  // 决策 301：切换树形视图（同 Ctrl+X），只读，运行中可用
+  {
+    name: "agents",
+    usage: "/agents",
+    whileRunning: { allow: true },
+    inWorkerSession: true,
+    available: (host) => host.workers() !== undefined && !host.inSandbox(),
+  },
+  // 决策 301：worker 会话里停止它、补批续做；只动这个 worker，不动主会话，运行中可用
+  {
+    name: "stop",
+    usage: "/stop",
+    whileRunning: { allow: true },
+    inWorkerSession: true,
+    available: (host) => host.inWorkerSession?.() === true,
+  },
+  {
+    name: "approve",
+    usage: "/approve [附言]",
+    whileRunning: { allow: true },
+    inWorkerSession: true,
+    available: (host) => host.inWorkerSession?.() === true,
   },
   {
     name: "take",
@@ -106,6 +141,7 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     name: "tasks",
     usage: "/tasks",
     whileRunning: { allow: true },
+    inWorkerSession: true,
     available: (host) => host.tasks?.() === true,
   },
   {
@@ -155,3 +191,18 @@ export function rejectWhileRunning(value: string): string | undefined {
   if (spec === undefined || spec.whileRunning.allow) return undefined;
   return `运行中不能用 ${spec.usage.split(" ")[0]}${spec.name === "grants save" ? " save" : ""}：${spec.whileRunning.reason}。等本轮结束或按 Esc 中断后再用；输入已留在输入框`;
 }
+
+// 决策 301：worker 会话里收到的斜杠命令——能用的返回 undefined，不能用的返回给人看的一行（未知命令同样说明）
+export function rejectInWorkerSession(value: string): string | undefined {
+  const tokens = slashTokens(value);
+  const spec = lookupSlashCommand(tokens);
+  if (spec?.inWorkerSession === true) return undefined;
+  const usable = SLASH_COMMANDS.filter((entry) => entry.inWorkerSession === true)
+    .map((entry) => entry.usage)
+    .join("、");
+  return `在 worker 会话里不能用 /${tokens[0] ?? ""}（这里可用 ${usable}）；按 Esc 回主会话后再用，输入已留在输入框`;
+}
+
+// 决策 301：主会话里输入 /stop 或 /approve 时的说明
+export const WORKER_SESSION_ONLY =
+  "/stop 与 /approve 在 worker 会话里用：输入框为空时按 ↓ 从编排面板选中 worker，或按 Ctrl+X（/agents）在树形视图里选中，回车进入";

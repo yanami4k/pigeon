@@ -88,8 +88,8 @@ export function statusBarText(state: StatusBarState, width: number): string {
   return clipToWidth(build({ short: true, model: false, cost: false, backfill: false }), width);
 }
 
-// 按显示宽度硬截（不补省略号、不带任何控制序列）
-function clipToWidth(text: string, width: number): string {
+// 按显示宽度硬截（不补省略号、不带任何控制序列）；编排面板与树形视图同样用它
+export function clipToWidth(text: string, width: number): string {
   let out = "";
   for (const { segment } of new Intl.Segmenter("en", { granularity: "grapheme" }).segment(text)) {
     if (visibleWidth(out + segment) > width) break;

@@ -1,20 +1,22 @@
-// worker 命令与状态行（决策 067 拆分自 shell.ts，零行为变化）：/spawn、/cancel、/workers 与
-// 状态栏下方的 worker 行（M5.5 S4，决策 040）。解析与排版在 application/workers-commands.ts，
-// 本模块只做壳侧投影；定时器与状态行组件由壳持有，经窄接口读写。
+// worker 命令与刷新（决策 067 拆分自 shell.ts）：/spawn、/cancel、/workers 与 worker 状态的刷新（M5.5 S4，决策 040）。
+// 解析与收尾摘要在 application/workers-commands.ts，本模块只做壳侧投影；定时器由壳持有，经窄接口读写。
+// 决策 301：原先输入框上方的 worker 状态行由编排面板（worker-panel.ts）取代；/workers 的每行与面板同一排版（列全部 worker）。
 import {
   parseSpawnCommand,
   renderAttemptGroupOutcome,
   renderWorkerOutcome,
-  renderWorkersStatus,
   resolveWorkerRef,
   type SpawnRequest,
   TAKE_USAGE,
+  type WorkerActivity,
+  type WorkerLifecycleEvent,
   type WorkerOutcome,
   type WorkerStatus,
   workerStateLabel,
-  workerStatusBar,
 } from "../application/workers-commands.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { WorkerActivityTracker } from "./worker-activity.ts";
+import { columnsOf, workerRowText } from "./worker-panel.ts";
 
 // M5.5 S4（决策 040）：worker 编排面——orchestration 的四动作（WorkerOrchestrator 结构满足）。
 // 壳只提交意图与投影状态：派出、取消、状态、等结果
@@ -33,8 +35,13 @@ export interface TuiWorkersFace {
   }): Promise<Parameters<typeof renderAttemptGroupOutcome>[0]>;
   // M7（决策 079）：/fork 手动分叉（主会话才有；命令层在 application/fork-command.ts）
   fork?(args: string): Promise<string>;
-  // 决策 294：worker 生命周期事件（派出、开跑、收尾等）的订阅——壳据此刷新状态行；缺省即只在命令后刷新
-  subscribe?(listener: () => void): () => void;
+  // 决策 294：worker 生命周期事件（派出、开跑、收尾等）的订阅——壳据此刷新编排面板；缺省即只在命令后刷新
+  subscribe?(listener: (event?: WorkerLifecycleEvent) => void): () => void;
+  // 决策 301：worker 的运行事件、流式正文与工具结果（编排器的只读观察口）；缺省即面板没有正在做什么与实时花费
+  observe?(listener: (activity: WorkerActivity) => void): () => void;
+  // 决策 301：进入 worker 会话后发消息（进它的下一轮，交回是否送达）与续做（补批时 approve 为真）；缺省即不支持
+  send?(sessionId: SessionId, text: string): Promise<"delivered" | "undelivered">;
+  resume?(sessionId: SessionId, options: { approve?: boolean; message?: string }): void;
 }
 
 // 壳侧窄接口：worker 视图需要的壳动作与壳持有的状态
@@ -42,7 +49,11 @@ export interface WorkersViewHost {
   isStarted(): boolean;
   addSystem(line: string): void;
   render(): void;
-  setWorkerStatusLine(text: string): void;
+  // 决策 301：worker 状态刷新后（面板重绘、收尾的花费计入）与是否要定时刷新（有在跑的或还有在淡出期内的）
+  workersRefreshed(workers: readonly WorkerStatus[]): void;
+  workersNeedTicking(workers: readonly WorkerStatus[]): boolean;
+  workerActivity(): WorkerActivityTracker;
+  clock(): number;
   workers(): TuiWorkersFace | undefined;
   workerTimer(): ReturnType<typeof setInterval> | null;
   setWorkerTimer(timer: ReturnType<typeof setInterval> | null): void;
@@ -166,17 +177,37 @@ export function handleTakeCommand(
   );
 }
 
-// /workers：状态清单落消息区并刷新状态行
+// /workers 的清单：每个 worker 一行与编排面板同一排版（名字、状态、耗时、轮数、花费、正在做什么），列全部 worker、不淡出，
+// 下一行是分支与会话号（/take 与 trace 用）
+export function renderWorkersTable(
+  statuses: readonly WorkerStatus[],
+  tracker: WorkerActivityTracker,
+  now: number
+): string {
+  if (statuses.length === 0) {
+    return "本会话尚未派出 worker（用 /spawn 派出）";
+  }
+  const columns = columnsOf(statuses);
+  return [
+    `workers (${statuses.length}):`,
+    ...statuses.flatMap((status) => [
+      `  ${workerRowText(status, tracker, now, columns)}`,
+      `    ${status.role} | ${status.branch !== undefined ? `branch ${status.branch}` : "no workspace"} | session ${status.sessionId}`,
+    ]),
+  ].join("\n");
+}
+
+// /workers：清单落消息区并刷新面板
 export function showWorkersStatus(host: WorkersViewHost, workers: TuiWorkersFace): void {
-  host.addSystem(renderWorkersStatus(workers.status()));
+  host.addSystem(renderWorkersTable(workers.status(), host.workerActivity(), host.clock()));
   refreshWorkers(host);
 }
 
-// worker 状态行：状态栏下方一行纯 ASCII；有 worker 在跑时定时刷新（轮次在变），全部收尾即停表
+// worker 状态刷新：面板随之重绘；有 worker 在跑或还有结束的在淡出期内时定时刷新（耗时在走、到点淡出），否则停表
 export function refreshWorkers(host: WorkersViewHost): void {
   const workers = host.workers()?.status() ?? [];
-  host.setWorkerStatusLine(workerStatusBar(workers));
-  const running = workers.some((worker) => worker.state === "running");
+  host.workersRefreshed(workers);
+  const running = host.workersNeedTicking(workers);
   if (running && host.isStarted() && host.workerTimer() === null) {
     const timer = setInterval(() => {
       refreshWorkers(host);

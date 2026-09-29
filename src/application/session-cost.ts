@@ -162,6 +162,11 @@ export class ChildSessionCosts {
     this.since = since;
   }
 
+  // 决策 301：这个子会话的花费是否已由 collect 计入（界面据此不再把它在跑时的实时花费另算一遍）
+  isCollected(sessionId: string): boolean {
+    return this.settled.has(sessionId);
+  }
+
   // 新收尾的子会话的花费合计（没有即为零）
   collect(): CostTally {
     const delta = emptyCostTally();

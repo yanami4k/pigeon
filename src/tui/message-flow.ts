@@ -5,10 +5,18 @@
 // 故净化必须发生在进 Text 之前；幂等，流式累积文本每帧重净化是安全的。
 // 决策 286：工具结果显示在调用行下方，与调用行同一个 Text（仍是每消息一个 Text）；结果块缺省收起，
 // setToolsExpanded 一次切换全部（Ctrl+O），此后到达的结果按当前状态显示。
+// 决策 301：运行事件在消息区的投影（projectRuntimeEvent）由主会话与进入的 worker 会话共用，同一套措辞。
 import { Container, ScrollView, Text } from "@earendil-works/pi-tui";
-import { sanitizeTerminalText } from "../application/format.ts";
+import { sanitizeTerminalText, summarizeArgs } from "../application/format.ts";
 import type { HistoryLine } from "../application/history.ts";
-import { type ToolResultView, toolResultBody } from "./tool-output.ts";
+import type { EventEnvelope } from "../state/events.ts";
+import {
+  RuntimeEventKind,
+  type ToolProposedPayload,
+  type ToolSettledPayload,
+  type TurnCompletedPayload,
+} from "../state/runtime-events.ts";
+import { diffOfDetails, type ToolResultView, toolResultBody } from "./tool-output.ts";
 
 // thinking 段视觉弱化（M5 S2，决策 045）：暗色由壳的受信代码在 pi-tui 补齐行宽后逐行包裹；
 // 内容在进 Text 前已经 036 净化，模型文本里的控制序列此时已惰性化，这里的 SGR 不来自模型
@@ -164,4 +172,59 @@ export class MessageFlow {
     existing.content += ` ${state}`;
     this.renderTool(existing);
   }
+}
+
+// 运行事件在消息区的投影（主会话与进入的 worker 会话共用）：轮次开始重置流式段，轮次结束收尾并落一行轮次标记，
+// 工具调用行随提出与结束原位更新。花费、上下文用量与活动 Run 的记账由调用方各自处理
+export function projectRuntimeEvent(flow: MessageFlow, event: EventEnvelope): void {
+  switch (event.kind) {
+    case RuntimeEventKind.TurnStarted:
+      flow.openStream();
+      break;
+    case RuntimeEventKind.TurnCompleted: {
+      flow.closeStream();
+      const payload = event.payload as TurnCompletedPayload;
+      const marker = [`-- turn: ${payload.stopReason}`];
+      if (payload.syntheticFailure) marker.push("(synthetic failure)");
+      if (payload.errorMessage !== undefined) marker.push(`| ${payload.errorMessage}`);
+      flow.addSystem(`${marker.join(" ")} --`);
+      break;
+    }
+    case RuntimeEventKind.ToolProposed: {
+      const payload = event.payload as ToolProposedPayload;
+      flow.addToolCall(payload.toolCallId, toolCallLine(payload));
+      break;
+    }
+    case RuntimeEventKind.ToolSettled: {
+      const payload = event.payload as ToolSettledPayload;
+      flow.settleToolCall(payload.toolCallId, `$ ${payload.toolName}`, toolSettledState(payload));
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// 工具调用行：工具名 + 参数摘要（面板的"正在做什么"与树形视图的最近调用用同一行）
+export function toolCallLine(payload: { toolName: string; args: unknown }): string {
+  return `$ ${payload.toolName} ${summarizeArgs(payload.args)}`;
+}
+
+export function toolSettledState(payload: ToolSettledPayload): string {
+  return payload.isError
+    ? `-> error${payload.errorKind !== undefined ? ` [${payload.errorKind}]` : ""}`
+    : "-> ok";
+}
+
+// 工具结果（决策 286）挂到调用行下方：details 带 diff 的显示 diff
+export function attachToolResultTo(
+  flow: MessageFlow,
+  notice: { toolCallId: string; toolName: string; isError: boolean; text: string; details: unknown }
+): void {
+  const diff = diffOfDetails(notice.details);
+  flow.attachToolResult(notice.toolCallId, notice.toolName, {
+    isError: notice.isError,
+    text: notice.text,
+    ...(diff !== undefined ? { diff } : {}),
+  });
 }
