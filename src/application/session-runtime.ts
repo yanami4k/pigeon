@@ -5,6 +5,8 @@
 // cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
+// 决策 286：运行期告警（会话存储、压缩前复盘、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
+// 不给即照旧写标准错误输出（逐行对话与其余调用方不变）。
 
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
@@ -29,6 +31,7 @@ import {
   type RuntimeDeps,
 } from "./runtime.ts";
 import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
 import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
@@ -52,10 +55,14 @@ export interface SessionRuntimeFlags {
 }
 
 // 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省）
-function interactiveLearnedMemory(flags: SessionRuntimeFlags): LearnedMemoryConfig | undefined {
+function interactiveLearnedMemory(
+  flags: SessionRuntimeFlags,
+  warn?: WarnSink
+): LearnedMemoryConfig | undefined {
   return flags.pushedMemory === true
     ? {
         conflict: "interactive",
+        ...(warn !== undefined ? { review: { warn } } : {}),
         ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
         ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
       }
@@ -102,6 +109,8 @@ export interface OpenSessionRuntimeRequest {
   spawnWorker?: SpawnWorkerSlot;
   // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
   webTools?: WebToolsConfig;
+  // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
+  warn?: WarnSink;
 }
 
 export interface OpenedSessionRuntime {
@@ -163,7 +172,7 @@ export async function openSessionRuntime(
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
   });
-  const learnedMemory = interactiveLearnedMemory(request.flags);
+  const learnedMemory = interactiveLearnedMemory(request.flags, request.warn);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker
@@ -206,6 +215,7 @@ export async function openSessionRuntime(
         : {}),
       ...(spawnWorker !== undefined ? { spawnWorker } : {}),
       ...(request.webTools !== undefined ? { webTools: request.webTools } : {}),
+      ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];
@@ -223,7 +233,11 @@ export async function openSessionRuntime(
     // 执行端另一侧的工作区（沙箱）不在宿主上打快照
     const checkpoints =
       scope.parentSessionId === undefined && request.workspaceHost === undefined
-        ? attachCheckpoints({ bundle, workspaceRoot: scope.workspaceRoot })
+        ? attachCheckpoints({
+            bundle,
+            workspaceRoot: scope.workspaceRoot,
+            ...(request.warn !== undefined ? { warn: request.warn } : {}),
+          })
         : undefined;
     if (checkpoints !== undefined) {
       bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
