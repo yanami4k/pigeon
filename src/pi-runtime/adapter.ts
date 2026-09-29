@@ -26,6 +26,10 @@
 //    Agent 的消息仍按 message_end 累积全量，故本 Run 内压缩过时，Run 结束后按会话树重新还原一次。上游的 convertToLlm
 //    必须交给 Agent：缺省实现只留 user、assistant、toolResult，会把压缩摘要消息静默丢掉。压缩自身不抛，失败只进
 //    listenerErrors，本轮照原上下文继续。
+// 12. 终端界面完善（决策 286）：两个只读观察口——subscribeToolResults 在工具结果消息落定时转发结果文本与 details
+//    （界面展开工具输出与 diff 用；同 subscribeStream 不落盘、不进 events()、不改事件载荷与会话记录），contextUsage
+//    读当前上下文的 token 数与模型窗口（状态栏用）。没有订阅者时行为与此前逐字节一致，eval stream、pigeon run 与
+//    逐行对话不订阅，实验路径不受影响。
 import {
   Agent,
   type AgentEvent,
@@ -137,6 +141,17 @@ export type CompactionNotice =
     }
   | { kind: "hook-failed"; trigger: CompactionTrigger; error: unknown };
 
+// 工具结果观察口的转发单位（决策 286）：派生显示态，不落盘、不锚身份；details 原样（深拷贝）交出，形状由订阅方判读
+export interface ToolResultNotice {
+  runId: RunId;
+  toolCallId: string;
+  toolName: string;
+  isError: boolean;
+  // 结果里文本块的拼接（图片等非文本块不含）
+  text: string;
+  details: unknown;
+}
+
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
 export type ManualCompactionOutcome = CompactionOutcome | { kind: "skipped"; reason: "disabled" };
 
@@ -200,6 +215,7 @@ export class PiRuntimeAdapter {
   #stopCause: RunStopCause | undefined;
   readonly #compactor: ContextCompactor | undefined;
   readonly #compactionListeners = new Set<(notice: CompactionNotice) => void>();
+  readonly #toolResultListeners = new Set<(notice: ToolResultNotice) => void>();
   // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
   #compactionAbort: AbortController | undefined;
   // 手动压缩进行中：此时不接受 Run
@@ -473,6 +489,25 @@ export class PiRuntimeAdapter {
     return () => this.#compactionListeners.delete(listener);
   }
 
+  // 观察口（286）：订阅工具结果（结果消息落定时）；listener 抛异常只进 listenerErrors
+  subscribeToolResults(listener: (notice: ToolResultNotice) => void): () => void {
+    this.#toolResultListeners.add(listener);
+    return () => this.#toolResultListeners.delete(listener);
+  }
+
+  // 当前上下文用量（286）：同压缩判据的 token 数（最后一条正常助手回复的用量加其后消息的估算，压缩后随之下降）
+  // 与模型窗口；没有配置压缩（无窗口可比）时为 undefined
+  contextUsage(): { tokens: number; contextWindow: number } | undefined {
+    const compactor = this.#compactor;
+    if (compactor === undefined) {
+      return undefined;
+    }
+    return {
+      tokens: compactor.check(this.#agent.state.messages).tokens,
+      contextWindow: compactor.config.contextWindow,
+    };
+  }
+
   // 本运行面的压缩配置（188、218）：派出的 worker 按同一配置跑；没有配置压缩时为 undefined
   compactionConfig(): CompactionConfig | undefined {
     return this.#compactor !== undefined ? { ...this.#compactor.config } : undefined;
@@ -564,6 +599,7 @@ export class PiRuntimeAdapter {
     this.#listeners.clear();
     this.#streamListeners.clear();
     this.#compactionListeners.clear();
+    this.#toolResultListeners.clear();
   }
 
   // 压缩要用的会话树读写：新存储写入面带读分支与写压缩条目时才有
@@ -576,6 +612,28 @@ export class PiRuntimeAdapter {
       branch: () => sink.branch?.() ?? Promise.resolve(undefined),
       appendCompaction: (result) => sink.appendCompaction?.(result) ?? Promise.resolve(undefined),
     };
+  }
+
+  // 转发一条工具结果（286）；listener 抛异常只进 listenerErrors
+  #notifyToolResult(runId: RunId, message: ToolResultMessage): void {
+    const notice: ToolResultNotice = Object.freeze({
+      runId,
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+      isError: message.isError,
+      text: message.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .filter((text) => text !== "")
+        .join("\n"),
+      details: structuredClone(message.details),
+    });
+    for (const listener of this.#toolResultListeners) {
+      try {
+        listener(notice);
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
   }
 
   // 发出一条压缩提示；listener 抛异常只进 listenerErrors
@@ -766,6 +824,9 @@ export class PiRuntimeAdapter {
         this.#runEntrySeq += 1;
         if (event.message.role === "toolResult") {
           this.#markToolResult(event.message);
+          if (this.#toolResultListeners.size > 0) {
+            this.#notifyToolResult(runId, event.message);
+          }
         }
         // 完整消息的深拷贝进会话存储（179：不截断；上游零防御拷贝，不得与 Agent 持有的消息共享对象）；
         // 写入面异常只进 listenerErrors
