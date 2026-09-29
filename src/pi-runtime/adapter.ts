@@ -614,19 +614,25 @@ export class PiRuntimeAdapter {
     };
   }
 
-  // 转发一条工具结果（286）；listener 抛异常只进 listenerErrors
+  // 转发一条工具结果（286）；构造通知出错（details 不可克隆等）与 listener 抛异常都只进 listenerErrors
   #notifyToolResult(runId: RunId, message: ToolResultMessage): void {
-    const notice: ToolResultNotice = Object.freeze({
-      runId,
-      toolCallId: message.toolCallId,
-      toolName: message.toolName,
-      isError: message.isError,
-      text: message.content
-        .map((block) => (block.type === "text" ? block.text : ""))
-        .filter((text) => text !== "")
-        .join("\n"),
-      details: structuredClone(message.details),
-    });
+    let notice: ToolResultNotice;
+    try {
+      notice = Object.freeze({
+        runId,
+        toolCallId: message.toolCallId,
+        toolName: message.toolName,
+        isError: message.isError,
+        text: message.content
+          .map((block) => (block.type === "text" ? block.text : ""))
+          .filter((text) => text !== "")
+          .join("\n"),
+        details: structuredClone(message.details),
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return;
+    }
     for (const listener of this.#toolResultListeners) {
       try {
         listener(notice);
@@ -824,9 +830,6 @@ export class PiRuntimeAdapter {
         this.#runEntrySeq += 1;
         if (event.message.role === "toolResult") {
           this.#markToolResult(event.message);
-          if (this.#toolResultListeners.size > 0) {
-            this.#notifyToolResult(runId, event.message);
-          }
         }
         // 完整消息的深拷贝进会话存储（179：不截断；上游零防御拷贝，不得与 Agent 持有的消息共享对象）；
         // 写入面异常只进 listenerErrors
@@ -836,6 +839,10 @@ export class PiRuntimeAdapter {
           } catch (error) {
             this.#listenerErrors.push(error);
           }
+        }
+        // 工具结果观察口（286）排在会话存储写入之后：它的任何故障都不影响本条的记录
+        if (event.message.role === "toolResult" && this.#toolResultListeners.size > 0) {
+          this.#notifyToolResult(runId, event.message);
         }
       }
       const normalized = normalizePiEvent(event, { sessionId: this.sessionId, runId });
