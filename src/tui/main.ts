@@ -14,6 +14,9 @@
 // 决策 264–268：主会话另给主 agent 注册 spawn_worker（--no-spawn-workers 关掉；沙箱里不派 worker），与 /spawn 共用同一个
 // 编排器——同时在跑的上限对人派的与 agent 派的一并计算；agent 派出的个数按每条输入（一次运行）计。
 // 决策 267：pigeon 不带子命令即启动本界面（命令行对话改由 pigeon --line 进入）。
+// 决策 286：pigeon --continue 接本项目最近的主会话、--resume <id> 接指定会话（启动时直接打开，不另建空会话），
+// --resume 不带会话号开壳后弹出会话选择器；运行期告警在壳接管终端期间落消息区（之前与之后照旧写标准错误输出）；
+// 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/tui-history.json。
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
@@ -28,7 +31,8 @@ import {
   spawnWorkerLimitsOf,
   webToolsEnabled,
 } from "../application/launch-flags.ts";
-import { runReviewBackfill } from "../application/review-backfill.ts";
+import { promptHistoryStore } from "../application/prompt-history.ts";
+import { type BackfillProgress, runReviewBackfill } from "../application/review-backfill.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import {
   closeSandbox,
@@ -51,9 +55,12 @@ import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
-import { newSessionId, type SessionId } from "../state/ids.ts";
+import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
+import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
+import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
 import { PigeonTuiShell, type TuiShellOptions, type TuiWorkersFace } from "./shell.ts";
+import { switchableWarn } from "./warn-sink.ts";
 
 // 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
 const WORKER_SHUTDOWN_GRACE_MS = 5000;
@@ -65,14 +72,15 @@ const BACKFILL_SHUTDOWN_GRACE_MS = 2000;
 const USAGE =
   "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
-  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
+  "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
   for (const warning of probeUpstreamVersions().warnings) {
     console.error(warning);
   }
-  const flags: LaunchFlags = parseLaunchFlags(argv, {
+  const continued = takeContinueFlags(argv);
+  const flags: LaunchFlags = parseLaunchFlags(continued.argv, {
     usage: USAGE,
     historyLimit: true,
     verify: true,
@@ -92,7 +100,16 @@ async function main(argv: string[]): Promise<void> {
     ? resolveWebTools({ governanceRoot: workspaceRoot })
     : undefined;
   const webToolsOption = webTools !== undefined ? { webTools } : {};
-  const sessionId = newSessionId();
+  // 决策 286：启动时打开哪个会话（新会话，或 --continue / --resume <id> 直接续接）；会话不存在等在接管终端前报错
+  const target = resolveStartTarget(workspaceRoot, continued.mode, flags.sandbox !== undefined);
+  if (target.kind === "new" && target.note !== undefined) {
+    console.error(target.note);
+  }
+  const resumed = target.kind === "resume";
+  const sessionId = target.kind === "resume" ? asSessionId(target.sessionId) : newSessionId();
+  // 决策 286：运行期告警的出口——壳接管终端期间落消息区，之前与之后写标准错误输出（去重与文案由告警方负责）
+  const warnSink = switchableWarn();
+  const warn = warnSink.warn;
   // S3 面板版审批 handler：face 晚绑定——buildRuntime 收 handler 工厂时壳尚未构造；
   // 壳未就位即收到审批请求属装配级故障，工厂内 fail-closed 按拒绝处理
   const faceHolder: { current: TuiApprovalFace | undefined } = { current: undefined };
@@ -120,6 +137,7 @@ async function main(argv: string[]): Promise<void> {
       maxConcurrent: spawnWorkerLimitsOf(flags).maxConcurrent,
       // 决策 287–291：worker 与主会话同样拿到联网工具
       ...webToolsOption,
+      storeWarn: warn,
     };
     const orchestrator = createSessionWorkers(deps);
     const verify = resolveVerifyConfig(flags, workspaceRoot);
@@ -186,6 +204,7 @@ async function main(argv: string[]): Promise<void> {
     flags,
     governanceRoot: workspaceRoot,
     sessionId,
+    ...(resumed ? { resume: true } : {}),
     log: (line) => console.error(`[沙箱] ${line}`),
   });
   const mainOpened = await openSessionRuntime({
@@ -198,7 +217,10 @@ async function main(argv: string[]): Promise<void> {
     ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
     ...spawnWorkerOption(flags),
     ...webToolsOption,
+    warn,
     createApprovalHandler: createHandler,
+    // 决策 183、286：--continue / --resume <id> 直接续接——还原对话上下文
+    ...(resumed ? { resume: true } : {}),
     onMcpNote: (note) => {
       console.error(`[mcp] ${note}`);
     },
@@ -211,13 +233,19 @@ async function main(argv: string[]): Promise<void> {
   let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers?: TuiWorkersFace } = {
     sessionId,
     bundle: mainBundle,
-    ...(sandbox === undefined ? { workers: workersFor(mainOpened) } : {}),
+    ...(sandbox === undefined
+      ? { workers: workersFor(mainOpened, mainOpened.scope.parentSessionId) }
+      : {}),
   };
   const shell = new PigeonTuiShell({
     terminal: new ProcessTerminal(),
     runtime: slot.bundle.adapter,
     sessionId: slot.sessionId,
     logDir: path.join(workspaceRoot, ".pigeon"),
+    // 决策 286：状态栏的模型与跨启动的输入历史
+    model: `${flags.provider}/${flags.modelId}`,
+    provider: flags.provider,
+    promptHistory: promptHistoryStore(workspaceRoot),
     // S3：/grants /revoke /grants save 的命令上下文（命令层在 application/grants.ts）
     grants: {
       root: workspaceRoot,
@@ -258,6 +286,7 @@ async function main(argv: string[]): Promise<void> {
           ...retryOption(flags),
           ...spawnWorkerOption(flags),
           ...webToolsOption,
+          warn,
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,
@@ -286,8 +315,16 @@ async function main(argv: string[]): Promise<void> {
   }
   faceHolder.current = shell;
   shell.start();
-  // 决策 283、284：启动后在后台静默补做未复盘的会话，不挡输入；进度在消息区给一行。推送记忆关着时不补
+  warnSink.attach((line) => shell.addWarning(line));
+  if (target.kind === "resume") {
+    shell.announceResumed(workspaceRoot, target.report);
+  } else if (target.picker) {
+    shell.openSessionPicker();
+  }
+  // 决策 283、284：启动后在后台静默补做未复盘的会话，不挡输入；进度在状态栏（286），消息区只留失败与全部补完各一行。
+  // 推送记忆关着时不补
   const backfillStop = new AbortController();
+  let backfillLast: BackfillProgress | undefined;
   const backfillDone: Promise<unknown> = flags.pushedMemory
     ? new Promise((resolve) => setTimeout(resolve, 0))
         .then(() =>
@@ -304,12 +341,19 @@ async function main(argv: string[]): Promise<void> {
               : {}),
             ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
             abortSignal: backfillStop.signal,
-            progress: (line) => {
-              shell.addSystem(line);
-              shell.render();
+            warn,
+            observe: (progress) => {
+              backfillLast = progress;
+              shell.setBackfillProgress(backfillStatusOf(progress));
             },
           })
         )
+        .then((summary) => {
+          shell.setBackfillProgress(undefined);
+          const line = backfillSummaryLine(summary, backfillLast);
+          if (line !== undefined) shell.addSystem(line);
+          shell.render();
+        })
         .catch((error: unknown) => {
           shell.addSystem(
             `后台补做复盘没有进行：${error instanceof Error ? error.message : String(error)}`
@@ -322,6 +366,8 @@ async function main(argv: string[]): Promise<void> {
   // 壳已停止，worker 排队中的审批按拒绝处理，不会吊住取消
   function release(): void {
     const current = slot;
+    // 壳已停：此后的告警写回标准错误输出
+    warnSink.detach();
     backfillStop.abort();
     void (async () => {
       await Promise.race([

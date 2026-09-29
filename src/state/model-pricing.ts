@@ -4,6 +4,8 @@
 //   一条请求的开始或结束时刻任一落在高峰，整条按高峰价计（官方未说明按哪一时刻，取宁多勿少）。
 //   计量口径（探针实测）：Anthropic 兼容端点的 input_tokens 只含未命中部分，命中在 cache_read_input_tokens；
 //   cache_creation_input_tokens 实测恒为 0、价目里没有单列，出现时按未命中价计（宁多勿少）。
+// 价目只定义在这一处（决策 286 起由 src/eval 移到 state，数字不变）：跑批网关逐请求计价；终端界面在 DeepSeek 回复自带价格为 0 时
+// 按同一价目与该条回复的开始、结束时刻计会话花费。
 
 export const PRICE_CNY_PER_MTOK = { cacheHit: 0.02, cacheMiss: 1, output: 4 } as const;
 export const PEAK_MULTIPLIER = 2;

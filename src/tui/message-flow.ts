@@ -3,9 +3,12 @@
 // 决策 036：本类是消息区唯一 Text 创建/setText 入口，半信任内容（模型流式文本、工具参数摘要、审批块、
 // 错误消息）携带的终端控制序列在此统一净化——pi-tui 的 Text 按设计保留并直通 ANSI/OSC/APC（M2 审计 P2-1），
 // 故净化必须发生在进 Text 之前；幂等，流式累积文本每帧重净化是安全的。
+// 决策 286：工具结果显示在调用行下方，与调用行同一个 Text（仍是每消息一个 Text）；结果块缺省收起，
+// setToolsExpanded 一次切换全部（Ctrl+O），此后到达的结果按当前状态显示。
 import { Container, ScrollView, Text } from "@earendil-works/pi-tui";
 import { sanitizeTerminalText } from "../application/format.ts";
 import type { HistoryLine } from "../application/history.ts";
+import { type ToolResultView, toolResultBody } from "./tool-output.ts";
 
 // thinking 段视觉弱化（M5 S2，决策 045）：暗色由壳的受信代码在 pi-tui 补齐行宽后逐行包裹；
 // 内容在进 Text 前已经 036 净化，模型文本里的控制序列此时已惰性化，这里的 SGR 不来自模型
@@ -21,7 +24,11 @@ export class MessageFlow {
   // M5 S2（决策 045）：thinking 流式段——与正文尾巴分开，谁的增量到了谁开段（同 035 懒创建）
   private thinkingTail: Text | null = null;
   private thinkingText = "";
-  private readonly toolLines = new Map<string, { text: Text; content: string }>();
+  private readonly toolLines = new Map<
+    string,
+    { text: Text; content: string; result?: ToolResultView }
+  >();
+  private toolsExpanded = false;
 
   constructor() {
     this.view = new ScrollView(this.list, { follow: "end", primary: true });
@@ -105,9 +112,46 @@ export class MessageFlow {
     this.thinkingText = "";
   }
 
+  // 消息条数（渲染耗时测量与测试用）
+  size(): number {
+    return this.list.children.length;
+  }
+
   // tool.proposed：工具名 + 参数摘要（措辞复用 application/format.ts 的 summarizeArgs）
   addToolCall(toolCallId: string, line: string): void {
     this.toolLines.set(toolCallId, { text: this.append(line), content: line });
+  }
+
+  // 调用行 + 结果块（有结果时）
+  private renderTool(entry: { text: Text; content: string; result?: ToolResultView }): void {
+    const body = entry.result !== undefined ? toolResultBody(entry.result, this.toolsExpanded) : "";
+    entry.text.setText(
+      sanitizeTerminalText(body === "" ? entry.content : `${entry.content}\n${body}`)
+    );
+  }
+
+  // 工具结果（286）：显示在调用行下方；调用行还没出现（结果先到）时如实另起一个空调用行承载
+  attachToolResult(toolCallId: string, toolName: string, result: ToolResultView): void {
+    let entry = this.toolLines.get(toolCallId);
+    if (entry === undefined) {
+      this.addToolCall(toolCallId, `$ ${toolName}`);
+      entry = this.toolLines.get(toolCallId);
+      if (entry === undefined) return;
+    }
+    entry.result = result;
+    this.renderTool(entry);
+  }
+
+  toolsExpandedState(): boolean {
+    return this.toolsExpanded;
+  }
+
+  // Ctrl+O：展开或收起全部工具结果
+  setToolsExpanded(expanded: boolean): void {
+    this.toolsExpanded = expanded;
+    for (const entry of this.toolLines.values()) {
+      if (entry.result !== undefined) this.renderTool(entry);
+    }
   }
 
   // tool.settled：在原行追加结果状态（参数摘要保持可见）；settled 先到则如实落整行
@@ -118,6 +162,6 @@ export class MessageFlow {
       return;
     }
     existing.content += ` ${state}`;
-    existing.text.setText(sanitizeTerminalText(existing.content));
+    this.renderTool(existing);
   }
 }

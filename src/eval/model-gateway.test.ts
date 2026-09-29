@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { gatewayStreamFn } from "../pi-runtime/index.ts";
+import { requestCostCny } from "../state/model-pricing.ts";
 import {
   assertConcurrencyFits,
   type GatewayClock,
@@ -17,7 +18,6 @@ import {
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
-import { requestCostCny } from "./model-pricing.ts";
 
 // 可控时钟：短于 autoBelowMs 的定时在下一轮事件循环即触发，其余等 advance 拨到；virtual 为真时 now 只随 advance 走，
 // 否则为真实时间加上拨快的量。set 记下每次定时的毫秒数

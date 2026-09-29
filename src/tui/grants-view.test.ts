@@ -199,7 +199,7 @@ test("/revoke <id>：store 立即移除（停免审），回显同 cli 措辞；
   }
 });
 
-test("未知命令与命令失败如实呈现（同 REPL 口径）", async () => {
+test("未知命令与命令失败如实呈现（同 REPL 口径）；可用命令按本会话从命令表生成（决策 286）", async () => {
   const { shell, term, cleanup } = makeView();
   try {
     shell.start();
@@ -211,7 +211,7 @@ test("未知命令与命令失败如实呈现（同 REPL 口径）", async () =>
     assert.ok(
       squashSpaces(screenFlat(term)).includes(
         squashSpaces(
-          "未知命令：/blah（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>）"
+          "未知命令：/blah（可用 /quit、/compact [重点]、/grants、/revoke <id>、/grants save <id>）"
         )
       )
     );
@@ -227,7 +227,7 @@ test("未知命令与命令失败如实呈现（同 REPL 口径）", async () =>
   }
 });
 
-test("busy 期间斜杠命令同样被拒绝：不执行、留 [busy] 提示（决策 027 不开旁路）", async () => {
+test("运行中 /grants 只读放行；/revoke 与 /grants save 被拒并说明原因、输入留在输入框（决策 286）", async () => {
   const { shell, term, runtime, store, cleanup } = makeView();
   runtime.autoResolve = false;
   try {
@@ -241,15 +241,34 @@ test("busy 期间斜杠命令同样被拒绝：不执行、留 [busy] 提示（�
     term.input("/grants");
     term.input("\r");
     await settle();
-    assert.ok(screenText(term).includes("[busy]"), "busy 提示");
-    assert.ok(!screenText(term).includes("会话放权（"), "busy 期间命令不得执行");
+    assert.ok(screenFlat(term).includes("会话放权（0）："), "只读命令运行中照常执行");
+
+    term.input("/grants save grant_01J5Z7K8W9ABCDEFGHJKMNPR99");
+    term.input("\r");
+    await settle();
+    assert.ok(
+      squashSpaces(screenFlat(term)).includes(squashSpaces("运行中不能用 /grants save：")),
+      screenText(term)
+    );
+    term.input("\x03"); // 清掉留在输入框里的命令
+    term.input("/revoke grant_01J5Z7K8W9ABCDEFGHJKMNPR99");
+    term.input("\r");
+    await settle();
+    assert.ok(
+      squashSpaces(screenFlat(term)).includes(
+        squashSpaces("运行中不能用 /revoke：它会改动主会话状态")
+      ),
+      screenText(term)
+    );
+    assert.ok(!screenFlat(term).includes("命令失败"), "被拒的命令不得执行");
     assert.equal(store.list().length, 0);
+    assert.deepEqual(runtime.runs, ["任务一"], "命令不排队、不当作任务提交");
 
     runtime.finishAll();
     await settle();
-    term.input("\r"); // 缓冲保留的 /grants 重提
+    term.input("\r"); // 留在输入框里的 /revoke 结束后回车执行
     await settle();
-    assert.ok(screenFlat(term).includes("会话放权（0）："), "run 结束后缓冲的命令可重提");
+    assert.ok(screenFlat(term).includes("命令失败：grant 不存在或已撤销"), "run 结束后可再提交");
   } finally {
     shell.stop();
     cleanup();

@@ -18,12 +18,13 @@
 //   流式响应：错误在响应头阶段分类；200 之后原样透传，中途断流也原样透传（由 agent 一侧按失败处理），同时从事件流里
 //   读出用量按作业计量（请求数即轮数、输入与输出 token、花费、各账号的请求数、排队时间、在途峰值、单次请求输入 token 峰值）。交回客户端与告警的
 //   任何文本里都不出现 key（含上游回显的打码末四位），账号只以编号出现。
-//   花费（决策 235）：每条成功的请求（含网关自己的探测）按请求开始与结束时刻逐条计价（model-pricing.ts），记到作业上并
+//   花费（决策 235）：每条成功的请求（含网关自己的探测）按请求开始与结束时刻逐条计价（state/model-pricing.ts），记到作业上并
 //   计入全局累计；全局累计落盘，进程重启或续跑时接着累计；累计到上限即交给限额控制器停批。
 //   计时（退避、探测间隔、重试等待、上限回升、计价时刻）都经可注入的时钟；close() 取消全部未到的定时。
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { requestCostCny } from "../state/model-pricing.ts";
 import {
   BACKOFF_DELAYS_MS,
   classifyUpstreamFailure,
@@ -33,7 +34,6 @@ import {
   parseUpstreamError,
   scrubKeys,
 } from "./model-limits.ts";
-import { requestCostCny } from "./model-pricing.ts";
 
 export interface GatewayMeter {
   requests: number;

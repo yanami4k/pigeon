@@ -19,10 +19,15 @@
 // - ScrollView follow:"end" 包装消息流：TuiMainScreen（main-screen 模式）不走 layout.js
 //   布局引擎，ScrollView 的裁剪/follow 不激活，follow-end 由终端 scrollback 天然实现
 //   （内容超高流入回卷，差分渲染器重写尾部）；包装声明意图，alt-screen 布局引擎下自动生效。
-// - busy 语义（决策 027）：运行中提交被拒绝——保留输入缓冲、消息区留 [busy] 提示、不进队列；
-//   斜杠命令同样不开旁路。
-// - 审批面板（S3，决策 029）、恢复菜单（S4，决策 031）、取消键（S5 裁决 032）与退出三层形态
-//   （S5+ 裁决 033）的交互语义见 modal.ts；壳停止时挂起的审批 fail-closed 按拒绝处理（理由逐字）。
+// - 运行中输入（决策 286 第 4 项，取代决策 027 的 busy 拒绝）：运行中（含压缩、/resume 进行中）提交的输入进队列
+//   （input-queue.ts），空闲后逐条自动发出；Esc 中断时排队内容退回输入框，Alt+Up（Windows 下另认 Alt+Q）随时退回。
+//   斜杠命令不排队：只读类与 /cancel、/quit 运行中照常执行，改主会话状态或工作目录的命令拒绝并说明原因、输入留在
+//   输入框（放行表在 command-table.ts）。
+// - 审批面板（S3，决策 029）、取消键（S5 裁决 032）与退出三层形态（S5+ 裁决 033）的交互语义见 modal.ts；
+//   壳停止时挂起的审批 fail-closed 按拒绝处理（理由逐字）。
+// - 决策 286 其余各项：输入框为 pi-tui Editor（input-editor.ts，多行、粘贴保留换行、历史跨启动保留）；输入框下方一行
+//   状态栏（status-bar.ts：模型、上下文用量、本会话花费、后台补做进度）；工具调用行下方显示结果（缺省收起，Ctrl+O
+//   展开或收起全部）；/resume 不带会话号弹出会话选择器（session-picker.ts）；运行期告警经 addWarning 落消息区。
 // - 斜杠命令（S3，决策 030）：/grants /revoke /grants save 走 application/grants.ts 的
 //   命令层（与 cli REPL 同一份），输出经 write 回调投影到消息区——零新增治理语义。
 // - 终态摘要（S5）：run() 决议后落终态行——status + stopReason + 四分类徽章（措辞复用
@@ -30,15 +35,33 @@
 //   syntheticFailure 标注（若有）；listenerErrors 非空时消息区增量警告（D2 可见化的
 //   TUI 投影，措辞与增量报数口径同 cli repl：启动即查 + 每次 run 收尾复查）。
 // - dispose 对称：取消键的订阅与监听器一律进 disposers，在 start/stop 里成对出现。
-import { Input, type Terminal, Text, TuiMainScreen } from "@earendil-works/pi-tui";
+import {
+  type Editor,
+  matchesKey,
+  type Terminal,
+  Text,
+  TuiMainScreen,
+} from "@earendil-works/pi-tui";
 import { compactionNoticeText, manualCompactionText } from "../application/compaction-text.ts";
 import { failureBadge, summarizeArgs } from "../application/format.ts";
+import type { PromptHistoryStore } from "../application/prompt-history.ts";
+import { listRecentMainSessions } from "../application/recent-sessions.ts";
+import {
+  accumulatedSessionCost,
+  addUsage,
+  ChildSessionCosts,
+  type CostTally,
+  emptyCostTally,
+  mergeCostTally,
+} from "../application/session-cost.ts";
+import { sessionsDirOf } from "../application/workspace.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import type {
   CompactionNotice,
   ManualCompactionOutcome,
   RunResult,
   StreamTextDelta,
+  ToolResultNotice,
 } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
@@ -48,28 +71,34 @@ import type {
   TurnCompletedPayload,
 } from "../state/runtime-events.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
+import { toolResultModelUsage } from "../state/tool-usage.ts";
 import type { ApprovalPanelResult, TuiApprovalFace } from "./approval.ts";
+import { rejectWhileRunning } from "./command-table.ts";
 import {
   type CommandsHost,
   handleSlashCommand as dispatchSlashCommand,
   type TuiGrantsContext,
 } from "./commands.ts";
+import { createPromptEditor } from "./input-editor.ts";
+import { InputQueue } from "./input-queue.ts";
 import { MessageFlow } from "./message-flow.ts";
 import {
   askApprovalPanel,
-  askMenuChoice as askMenuChoiceModal,
   closePendingModals,
   handleShellKey,
   type ModalHost,
   type PendingApproval,
-  type PendingMenu,
 } from "./modal.ts";
 import {
   handleResumeCommand as dispatchResumeCommand,
   type ResumeOptions,
   type ResumeViewHost,
+  renderHistory,
   type SessionBinding,
 } from "./resume-view.ts";
+import { type PickerKey, SessionPicker } from "./session-picker.ts";
+import { type BackfillStatus, StatusBar } from "./status-bar.ts";
+import { diffOfDetails } from "./tool-output.ts";
 import {
   handleCancelCommand,
   handleSpawnCommand,
@@ -97,6 +126,9 @@ export interface TuiRuntimeFace {
   // 决策 189：压缩完成的提示（自动与手动）与手动压缩；缺省（替身运行面）即不提示、/compact 不可用
   subscribeCompaction?(listener: (notice: CompactionNotice) => void): () => void;
   compact?(customInstructions?: string): Promise<ManualCompactionOutcome>;
+  // 决策 286：工具结果（展开显示与 diff）与上下文用量（状态栏）；缺省即不显示结果块、状态栏不显示上下文
+  subscribeToolResults?(listener: (notice: ToolResultNotice) => void): () => void;
+  contextUsage?(): { tokens: number; contextWindow: number } | undefined;
 }
 
 // /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文（形状定义在 resume-view.ts）
@@ -132,6 +164,12 @@ export interface TuiShellOptions {
   workerRefreshMs?: number;
   // 决策 237、245：沙箱会话——/export 手动交回；分叉、worker 与 /resume 换绑在沙箱里不支持，命令给出原因
   sandbox?: TuiSandboxFace;
+  // 决策 286：状态栏显示的模型（provider/模型号）；缺省不显示
+  model?: string;
+  // 决策 286：主 agent 的模型接入（DeepSeek 回复自带价格为 0 时按官方人民币价目计会话花费）；缺省不另计价
+  provider?: string;
+  // 决策 286：输入历史的跨启动存储（按项目）；缺省只在本次启动内保留
+  promptHistory?: PromptHistoryStore;
 }
 
 // 沙箱会话的命令面：交回返回给人看的一行（分支名与查看命令，或失败原因）
@@ -154,7 +192,17 @@ export class PigeonTuiShell
   // M5.5 S4（决策 040）：worker 状态行（无 worker 时空文本，零行）与刷新定时器（有 worker 在跑才开）
   private readonly workerStatusLine = new Text("");
   private workerTimerHandle: ReturnType<typeof setInterval> | null = null;
-  private readonly input = new Input();
+  private readonly input: Editor;
+  private readonly queue = new InputQueue();
+  private readonly picker = new SessionPicker();
+  private readonly statusBar: StatusBar;
+  // 本会话花费（286）：打开或续接时从会话记录累计的已有部分 + 本次运行中主 agent 的新增 + 之后收尾的子会话
+  private costBase: CostTally = emptyCostTally();
+  private costLive: CostTally = emptyCostTally();
+  private childCosts: ChildSessionCosts | undefined;
+  private runningWorkerCount = 0;
+  // 本轮开始的时刻（DeepSeek 计价看开始与结束是否落在高峰）
+  private turnStartedAt: number | undefined;
   private readonly title: Text;
   // 当前会话上下文（S4）：/resume 换绑整体替换——运行面、治理上下文、sessionId 一体，
   // 绝不换一半（grants 命令与提交必须落在同一会话上）
@@ -171,14 +219,11 @@ export class PigeonTuiShell
   private running = false;
   private activeRunId: RunId | null = null;
   private started = false;
-  // S4：/resume 对账进行中——拒绝一切提交（同 027 busy 语义：保留缓冲、提示可见、不排队）
+  // S4：/resume 进行中——输入排队、改状态的命令被拒（决策 286，同运行中）
   private resuming = false;
   // S3 审批面板：挂起中的审批决议（resolve 四键或 cancel）；串行不变量（决策 002）下
   // 同时最多一个，非空即面板期间
   private pendingApprovalState: PendingApproval | null = null;
-  // S4 恢复菜单：挂起中的三选一决议（面板式单键，决策 031）；与审批面板互斥——
-  // 审批只发生在 Run 内，菜单只在无 Run 的 /resume 流程内（busy 不开旁路）
-  private pendingMenuState: PendingMenu | null = null;
   // 决策 066：理由行输入模式——[r] 打开后按键归输入区，回车提交理由，Esc 回面板（不算拒绝）
   private reasonModeOn = false;
   // S5 取消键：中断飞行中标记——interrupt 未决议期间重复 Esc 不再触发
@@ -197,13 +242,22 @@ export class PigeonTuiShell
     if (options.grants !== undefined) this.current.grants = options.grants;
     if (options.workers !== undefined) this.current.workers = options.workers;
     this.tui = new TuiMainScreen(options.terminal, false, options.logDir);
+    this.input = createPromptEditor(this.tui, options.promptHistory?.load() ?? []);
+    this.statusBar = new StatusBar({
+      ...(options.model !== undefined ? { model: options.model } : {}),
+      cost: emptyCostTally(),
+    });
     // chrome 纯 ASCII（spike 纪律：歧义宽字符不进边框/标题/状态栏）；sessionId 全 ASCII ULID
     this.title = new Text(`== pigeon tui | session ${options.sessionId} ==`);
     this.tui.addChild(this.title);
     this.tui.addChild(this.flow.view);
     this.tui.addChild(this.statusLine);
     this.tui.addChild(this.workerStatusLine);
+    // 排队内容与会话选择器在输入框上方，状态栏在输入框下方（决策 286、301）
+    this.tui.addChild(this.queue.view);
+    this.tui.addChild(this.picker.view);
     this.tui.addChild(this.input);
+    this.tui.addChild(this.statusBar);
     this.input.onSubmit = (value) => this.handleSubmit(value);
     this.updateStatus();
   }
@@ -213,7 +267,10 @@ export class PigeonTuiShell
     this.started = true;
     // 壳级键控（S3 审批面板 + S4 恢复菜单 + S5 取消键）：模态挂起期间接管终端输入
     this.disposers.push(this.tui.addInputListener((data) => handleShellKey(this, data)));
+    // 决策 286：会话选择器、Ctrl+O 与退回排队内容的按键（模态与取消键之后、输入框之前）
+    this.disposers.push(this.tui.addInputListener((data) => this.handleViewKey(data)));
     this.bindRuntime(this.current.runtime);
+    this.resetCosts(this.current.sessionId, false);
     refreshWorkersView(this);
     // D2 可见化（S5，同 repl 口径）：启动即查一次落盘失败
     this.warnEvidenceGaps();
@@ -232,11 +289,21 @@ export class PigeonTuiShell
     // 决策 189：每次压缩（自动或手动）在消息区提示一行压缩前后的 token 数
     const unsubscribeCompaction = runtime.subscribeCompaction?.((notice) => {
       this.flow.addSystem(`[compact] ${compactionNoticeText(notice)}`);
+      // 压缩后上下文用量随之下降；压缩前复盘的花费在其收尾后计入
+      this.refreshContext();
+      this.collectChildCosts();
       this.tui.requestRender();
     });
     if (unsubscribeCompaction !== undefined) {
       this.runtimeDisposers.push(unsubscribeCompaction);
     }
+    const unsubscribeToolResults = runtime.subscribeToolResults?.((notice) =>
+      this.handleToolResult(notice)
+    );
+    if (unsubscribeToolResults !== undefined) {
+      this.runtimeDisposers.push(unsubscribeToolResults);
+    }
+    this.refreshContext();
   }
 
   stop(): void {
@@ -255,17 +322,17 @@ export class PigeonTuiShell
   }
 
   updateStatus(): void {
-    // 状态栏纯 ASCII；审批/恢复菜单期间输入归模态键控，busy 与 resume 期间输入锁定
+    // 状态行纯 ASCII；审批期间输入归模态键控，运行中与 resume 期间输入排队（决策 286）
     const base =
       this.pendingApprovalState !== null
         ? "state: approval | decide in panel"
         : this.resuming
-          ? "state: resume | answer in message area"
+          ? "state: resume | restoring session; input is queued"
           : this.interrupting
-            ? "state: cancelling | input locked"
+            ? "state: cancelling | waiting for run to settle"
             : this.running
-              ? "state: running | input locked"
-              : "state: idle | [enter] submit";
+              ? "state: running | [enter] queue, [esc] interrupt"
+              : "state: idle | [enter] submit, [ctrl+j] newline";
     this.statusLine.setText(base);
   }
 
@@ -275,7 +342,6 @@ export class PigeonTuiShell
     // 理由行提交（决策 066）：本次回车是拒绝理由而非任务提交——理由逐字回模型，审批就此决议
     if (this.reasonModeOn) {
       const reason = value.trim();
-      this.input.setValue("");
       this.reasonModeOn = false;
       const approval = this.pendingApprovalState;
       this.pendingApprovalState = null;
@@ -285,28 +351,46 @@ export class PigeonTuiShell
       approval?.resolve({ key: "r", reason });
       return;
     }
-    if (this.running || this.resuming) {
-      // busy 语义（决策 027）：拒绝提交而非排队——排队意味着未设计的意图顺序/持久化语义；
-      // 保留输入缓冲让人决定重提时机，拒绝痕迹留在消息区（可见，不静默）。
-      // 斜杠命令同样不开旁路（同一语义，命令也不插队）；/resume 对账期同口径（S4）
-      this.flow.addSystem(
-        this.running
-          ? "[busy] run in progress; input kept (not submitted); exit: Ctrl+C twice"
-          : "[busy] resume in progress; input kept (not submitted)"
-      );
+    // 历史（286）：发出的与排队的都进历史；拒绝理由不进
+    this.input.addToHistory(value);
+    this.options.promptHistory?.add(value);
+    if (this.isBusy()) {
+      if (value.startsWith("/")) {
+        // 运行中的斜杠命令不排队：放行的照常执行，改主会话状态或工作目录的拒绝并说明原因、输入留在输入框
+        const rejection = rejectWhileRunning(value);
+        if (rejection !== undefined) {
+          this.input.setText(value);
+          this.flow.addSystem(rejection);
+        } else {
+          this.flow.addUserEcho(value);
+          dispatchSlashCommand(this, value);
+        }
+        this.tui.requestRender();
+        return;
+      }
+      // 决策 286：运行中输入进队列，空闲后逐条发出
+      this.queue.enqueue(value);
       this.tui.requestRender();
       return;
     }
+    this.submitNow(value);
+  }
+
+  // 运行中（含压缩）或 /resume 进行中：输入排队、改状态的命令被拒
+  private isBusy(): boolean {
+    return this.running || this.resuming;
+  }
+
+  // 立即提交一条输入（空闲时的回车，或空闲后从队列取出的一条）
+  private submitNow(value: string): void {
     // S3 斜杠命令：grant 治理面投影（/grants /revoke /grants save）——命令层与
     // cli REPL 同一份（application/grants.ts，决策 030），write 回调落消息区
     if (value.startsWith("/")) {
-      this.input.setValue("");
       this.flow.addUserEcho(value);
       dispatchSlashCommand(this, value);
       this.tui.requestRender();
       return;
     }
-    this.input.setValue("");
     this.flow.addUserEcho(value);
     this.running = true;
     this.updateStatus();
@@ -318,6 +402,192 @@ export class PigeonTuiShell
       (result) => this.handleRunEnd(result),
       (error: unknown) => this.handleRunEnd(null, error)
     );
+  }
+
+  // 空闲后发出排队的输入（pi 惯例逐条：一条跑完再发下一条）；即时完成的命令不占住，接着发下一条
+  private drainQueue(): void {
+    while (!this.isBusy() && this.started && !this.picker.isOpen() && this.queue.size() > 0) {
+      const next = this.queue.take();
+      if (next === undefined) break;
+      this.submitNow(next);
+    }
+    this.tui.requestRender();
+  }
+
+  // ---- 决策 286：排队接口（编排一段在"下一轮发什么"处接入 worker 完成通知）----
+
+  enqueueInput(text: string): void {
+    this.queue.enqueue(text);
+    this.drainQueue();
+  }
+
+  queuedInputs(): readonly string[] {
+    return this.queue.pending();
+  }
+
+  // 把排队内容退回输入框（排队在前、已有草稿在后）
+  restoreQueueToEditor(): void {
+    if (this.queue.size() === 0) return;
+    this.input.setText(this.queue.restoreInto(this.input.getText()));
+    this.tui.requestRender();
+  }
+
+  // ---- 决策 286：视图按键（选择器、Ctrl+O、退回排队）----
+
+  private handleViewKey(data: string): { consume: true } | undefined {
+    if (this.picker.isOpen()) {
+      const key: PickerKey | undefined = matchesKey(data, "up")
+        ? "up"
+        : matchesKey(data, "down")
+          ? "down"
+          : matchesKey(data, "enter")
+            ? "enter"
+            : matchesKey(data, "escape")
+              ? "escape"
+              : undefined;
+      if (key !== undefined) {
+        this.picker.press(key);
+        this.tui.requestRender();
+      }
+      // 选择器打开期间其余按键吞掉，输入框内容不动
+      return { consume: true };
+    }
+    if (matchesKey(data, "ctrl+o")) {
+      this.flow.setToolsExpanded(!this.flow.toolsExpandedState());
+      this.tui.requestRender();
+      return { consume: true };
+    }
+    if ((matchesKey(data, "alt+up") || matchesKey(data, "alt+q")) && this.queue.size() > 0) {
+      this.restoreQueueToEditor();
+      return { consume: true };
+    }
+    return undefined;
+  }
+
+  // ---- 决策 286：工具结果、上下文用量与花费 ----
+
+  private handleToolResult(notice: ToolResultNotice): void {
+    // 同增量：只认当前 Run 的出处
+    if (this.activeRunId === null || notice.runId !== this.activeRunId) return;
+    const diff = diffOfDetails(notice.details);
+    this.flow.attachToolResult(notice.toolCallId, notice.toolName, {
+      isError: notice.isError,
+      text: notice.text,
+      ...(diff !== undefined ? { diff } : {}),
+    });
+    // 工具执行中另发的模型请求（web_fetch 的提炼等）计入本会话花费
+    const extra = toolResultModelUsage(notice.details);
+    if (extra !== undefined) {
+      addUsage(this.costLive, extra, {
+        ...(this.options.provider !== undefined ? { provider: this.options.provider } : {}),
+        endMs: Date.now(),
+      });
+      this.refreshCost();
+    }
+    this.tui.requestRender();
+  }
+
+  private refreshContext(): void {
+    const usage = this.current.runtime.contextUsage?.();
+    this.statusBar.update(usage !== undefined ? { context: usage } : { context: undefined });
+  }
+
+  private refreshCost(): void {
+    const total = emptyCostTally();
+    mergeCostTally(total, this.costBase);
+    mergeCostTally(total, this.costLive);
+    this.statusBar.update({ cost: total });
+  }
+
+  // 打开或续接会话时重置花费：续接从会话记录累计已有花费（主会话、其 worker 与复盘）
+  private resetCosts(sessionId: SessionId, resumed: boolean): void {
+    const root = this.options.sessions?.root;
+    this.costLive = emptyCostTally();
+    if (root === undefined) {
+      this.costBase = emptyCostTally();
+      this.childCosts = undefined;
+    } else {
+      const sessionsRoot = sessionsDirOf(root);
+      try {
+        this.costBase = resumed
+          ? accumulatedSessionCost(sessionsRoot, sessionId)
+          : emptyCostTally();
+      } catch {
+        this.costBase = emptyCostTally();
+      }
+      this.childCosts = new ChildSessionCosts(sessionsRoot, sessionId, Date.now());
+    }
+    this.refreshCost();
+  }
+
+  // 收尾了的 worker 与复盘会话的花费（运行收尾、压缩、worker 收尾时查）
+  private collectChildCosts(): void {
+    if (this.childCosts === undefined) return;
+    try {
+      mergeCostTally(this.costLive, this.childCosts.collect());
+    } catch {
+      // 读会话文件失败：这次不计，下次再看
+    }
+    this.refreshCost();
+  }
+
+  // 后台补做复盘的进度（283、284）：状态栏显示第几个、共几个、花了多少；undefined 即不再显示
+  setBackfillProgress(progress: BackfillStatus | undefined): void {
+    this.statusBar.update({ backfill: progress });
+    this.tui.requestRender();
+  }
+
+  // 运行期告警（复盘、压缩、会话存储、工作区快照等）：终端界面运行期间落消息区，文案与去重由告警方负责
+  addWarning(line: string): void {
+    this.flow.addSystem(line);
+    this.tui.requestRender();
+  }
+
+  // 启动时直接续接的会话（pigeon --continue / --resume <id>）：给出续跑报告与历史，并从会话记录累计已有花费
+  announceResumed(root: string, report: readonly string[]): void {
+    for (const line of report) this.flow.addSystem(line);
+    this.resetCosts(this.current.sessionId, true);
+    renderHistory(this, root, this.current.sessionId);
+  }
+
+  // 会话选择器（286）：/resume 与 pigeon --resume 不带会话号时弹出；当前会话与没有输入过的会话不列
+  openSessionPicker(): void {
+    const root = this.options.resume?.root;
+    if (root === undefined) {
+      this.flow.addSystem("本会话不支持 /resume");
+      this.tui.requestRender();
+      return;
+    }
+    let sessions: ReturnType<typeof listRecentMainSessions>;
+    try {
+      sessions = listRecentMainSessions(root).filter(
+        (session) => session.sessionId !== this.current.sessionId && session.turns > 0
+      );
+    } catch (error) {
+      this.flow.addSystem(
+        `读会话列表失败：${error instanceof Error ? error.message : String(error)}`
+      );
+      this.tui.requestRender();
+      return;
+    }
+    if (sessions.length === 0) {
+      this.flow.addSystem("没有可续接的会话");
+      this.tui.requestRender();
+      return;
+    }
+    this.picker.open(sessions, (picked) => {
+      if (picked === undefined) {
+        this.flow.addSystem("已取消选择会话");
+      } else if (picked.sandbox) {
+        this.flow.addSystem(sandboxResumeHint(picked.sessionId));
+      } else {
+        this.flow.addUserEcho(`/resume ${picked.sessionId}`);
+        dispatchResumeCommand(this, picked.sessionId);
+      }
+      this.tui.requestRender();
+      this.drainQueue();
+    });
+    this.tui.requestRender();
   }
 
   // ---- S3 审批面板（TuiApprovalFace 实现；交互语义在 modal.ts）----
@@ -350,14 +620,6 @@ export class PigeonTuiShell
     this.pendingApprovalState = pending;
   }
 
-  pendingMenu(): PendingMenu | null {
-    return this.pendingMenuState;
-  }
-
-  setPendingMenu(pending: PendingMenu | null): void {
-    this.pendingMenuState = pending;
-  }
-
   lastCtrlCAt(): number | null {
     return this.lastCtrlCAtValue;
   }
@@ -387,7 +649,7 @@ export class PigeonTuiShell
   }
 
   clearInput(): void {
-    this.input.setValue("");
+    this.input.setText("");
   }
 
   render(): void {
@@ -436,10 +698,16 @@ export class PigeonTuiShell
 
   setResuming(resuming: boolean): void {
     this.resuming = resuming;
+    // /resume 流程收尾（成败皆然）后发出排队的输入；延到本轮调用栈之后，让流程先写完收尾行
+    if (!resuming) queueMicrotask(() => this.drainQueue());
   }
 
   setWorkerStatusLine(text: string): void {
     this.workerStatusLine.setText(text);
+    // worker 收尾（在跑的个数减少）时把其花费计入本会话
+    const running = this.current.workers?.status().filter((w) => w.state === "running").length ?? 0;
+    if (running < this.runningWorkerCount) this.collectChildCosts();
+    this.runningWorkerCount = running;
   }
 
   workerTimer(): ReturnType<typeof setInterval> | null {
@@ -452,10 +720,6 @@ export class PigeonTuiShell
 
   workerRefreshMs(): number {
     return this.options.workerRefreshMs ?? 1000;
-  }
-
-  askMenuChoice(prompt: string): Promise<string | null> {
-    return askMenuChoiceModal(this, prompt);
   }
 
   spawnCommand(workers: TuiWorkersFace, raw: string): void {
@@ -474,11 +738,21 @@ export class PigeonTuiShell
     showWorkersStatus(this, workers);
   }
 
+  // /resume：不带会话号弹出选择器（286）；沙箱会话不在本机界面里续接，说明用法
   resumeCommand(arg: string | undefined): void {
+    if (arg === undefined) {
+      this.openSessionPicker();
+      return;
+    }
+    const root = this.options.resume?.root;
+    if (root !== undefined && isSandboxSession(root, arg)) {
+      this.flow.addSystem(sandboxResumeHint(arg));
+      return;
+    }
     dispatchResumeCommand(this, arg);
   }
 
-  // 决策 189：/compact [重点] 手动压缩——压缩期间与 Run 同样占住输入（busy 语义）；压成时的一行提示由订阅给出，
+  // 决策 189：/compact [重点] 手动压缩——压缩期间与 Run 同样占住输入（输入排队，决策 286）；压成时的一行提示由订阅给出，
   // 没有压成时说明原因
   compactCommand(focus: string | undefined): void {
     const runtime = this.current.runtime;
@@ -495,8 +769,11 @@ export class PigeonTuiShell
       if (line !== undefined) {
         this.flow.addSystem(`[compact] ${line}`);
       }
+      this.refreshContext();
+      this.collectChildCosts();
       this.updateStatus();
       this.tui.requestRender();
+      this.drainQueue();
     };
     runtime.compact(focus).then(
       (outcome) => settleCompact(manualCompactionText(outcome)),
@@ -524,6 +801,8 @@ export class PigeonTuiShell
     if (this.interrupting) return;
     this.interrupting = true;
     this.flow.addSystem("[cancel] interrupt requested; waiting for run to settle");
+    // pi 惯例：中断时排队内容退回输入框，不在中断后自动发出
+    this.restoreQueueToEditor();
     this.updateStatus();
     this.tui.requestRender();
     const settle = (error?: unknown): void => {
@@ -564,6 +843,7 @@ export class PigeonTuiShell
     this.reportedListenerErrors = 0;
     this.title.setText(`== pigeon tui | session ${sessionId} ==`);
     this.bindRuntime(binding.runtime);
+    this.resetCosts(sessionId, true);
     refreshWorkersView(this);
     this.tui.requestRender();
   }
@@ -587,8 +867,11 @@ export class PigeonTuiShell
     }
     // D2 可见化（S5）：每次 run 收尾复查落盘失败（增量报数，同 repl 口径）
     this.warnEvidenceGaps();
+    this.refreshContext();
+    this.collectChildCosts();
     this.updateStatus();
     this.tui.requestRender();
+    this.drainQueue();
   }
 
   private handleDelta(delta: StreamTextDelta): void {
@@ -607,11 +890,22 @@ export class PigeonTuiShell
     switch (event.kind) {
       case RuntimeEventKind.TurnStarted:
         this.activeRunId = event.runId;
+        this.turnStartedAt = event.timestamp;
         this.flow.openStream();
         break;
       case RuntimeEventKind.TurnCompleted: {
         this.flow.closeStream();
         const payload = event.payload as TurnCompletedPayload;
+        // 286：主 agent 每轮的用量与价格计入本会话花费；上下文用量按最近一次回复重算
+        if (payload.usage !== undefined) {
+          addUsage(this.costLive, payload.usage, {
+            ...(this.options.provider !== undefined ? { provider: this.options.provider } : {}),
+            ...(this.turnStartedAt !== undefined ? { startMs: this.turnStartedAt } : {}),
+            endMs: event.timestamp,
+          });
+          this.refreshCost();
+        }
+        this.refreshContext();
         const marker = [`-- turn: ${payload.stopReason}`];
         if (payload.syntheticFailure) marker.push("(synthetic failure)");
         if (payload.errorMessage !== undefined) marker.push(`| ${payload.errorMessage}`);
@@ -641,5 +935,20 @@ export class PigeonTuiShell
         break;
     }
     this.tui.requestRender();
+  }
+}
+
+// 沙箱会话在本机界面里不续接（续接要在同一容器配方里开箱）：给出命令行用法
+function sandboxResumeHint(sessionId: string): string {
+  return `会话 ${sessionId} 是沙箱会话，不能在本机会话里续接；请用 pigeon --sandbox --resume ${sessionId}`;
+}
+
+function isSandboxSession(root: string, sessionId: string): boolean {
+  try {
+    return listRecentMainSessions(root).some(
+      (session) => session.sessionId === sessionId && session.sandbox
+    );
+  } catch {
+    return false;
   }
 }
