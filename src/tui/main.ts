@@ -56,12 +56,14 @@ import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
+import { loadLoopGuardConfig } from "../persistence/loop-guard-config.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
+import { guardTuiAgent } from "./loop-guard-view.ts";
 import { PigeonTuiShell, type TuiShellOptions, type TuiWorkersFace } from "./shell.ts";
 import { switchableWarn } from "./warn-sink.ts";
 
@@ -98,6 +100,8 @@ async function main(argv: string[]): Promise<void> {
   const workspaceRoot = prepareWorkspace(flags.root);
   // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
   const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
+  // 决策 308：打转检测——.pigeon/loop-guard.json（缺失取缺省即开着；畸形在接管终端之前响亮失败）
+  const loopGuard = loadLoopGuardConfig(workspaceRoot);
   // 决策 296：复盘模型（配置里指定时，压缩前、收尾、补做三种复盘都用它）
   applyReviewModelConfig(flags, workspaceRoot);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
@@ -145,6 +149,8 @@ async function main(argv: string[]): Promise<void> {
       // 决策 287–291：worker 与主会话同样拿到联网工具
       ...webToolsOption,
       storeWarn: warn,
+      // 决策 307：worker 打转以 looping 失败交回并通知主 agent
+      loopGuard,
     };
     const orchestrator = createSessionWorkers(deps);
     const verify = resolveVerifyConfig(flags, workspaceRoot);
@@ -240,6 +246,7 @@ async function main(argv: string[]): Promise<void> {
     taskList: orchestration.taskList,
     ...webToolsOption,
     warn,
+    loopGuard,
     createApprovalHandler: createHandler,
     // 决策 183、286：--continue / --resume <id> 直接续接——还原对话上下文
     ...(resumed ? { resume: true } : {}),
@@ -251,6 +258,7 @@ async function main(argv: string[]): Promise<void> {
     throw error;
   });
   const mainBundle = mainOpened.bundle;
+  guardMainAgent(mainBundle);
   // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格。沙箱里不派 worker（会越出容器）
   let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers?: TuiWorkersFace } = {
     sessionId,
@@ -300,6 +308,15 @@ async function main(argv: string[]): Promise<void> {
     //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
     onExit: release,
   });
+  // 决策 305–307：主 agent 的打转检测（见 loop-guard-view.ts）。换绑后的会话同样挂上；运行面释放时一并摘掉
+  function guardMainAgent(bundle: RuntimeBundle): void {
+    const detach = guardTuiAgent({
+      runtime: bundle.adapter,
+      settings: loopGuard,
+      shell: () => shellHolder.current,
+    });
+    bundle.disposers = [...(bundle.disposers ?? []), async () => detach()];
+  }
   function resumeOptions(): NonNullable<TuiShellOptions["resume"]> {
     return {
       root: workspaceRoot,
@@ -317,11 +334,13 @@ async function main(argv: string[]): Promise<void> {
           taskList: orchestration.taskList,
           ...webToolsOption,
           warn,
+          loopGuard,
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,
         });
         const bundle = opened.bundle;
+        guardMainAgent(bundle);
         const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
         slot = { sessionId: targetId, bundle, workers };
@@ -371,6 +390,7 @@ async function main(argv: string[]): Promise<void> {
               ? { memoryLimitChars: flags.memoryLimitChars }
               : {}),
             ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
+            loopGuard,
             abortSignal: backfillStop.signal,
             warn,
             observe: (progress) => {

@@ -86,3 +86,10 @@ test("无验证但正常完成算未知；验证未判定算未知；分类为�
   assert.equal(labelAttempt({ ...NORMAL, verdict: "undetermined" }), "Unknown");
   assert.equal(labelAttempt({ ...NORMAL, failure: { category: "unknown" } }), "Unknown");
 });
+
+test("打转叫停（307）：照常验证，但验证结论不压过它——通过也算失败；证据不完整仍为未知", () => {
+  assert.equal(labelAttempt({ ...NORMAL, looping: true, verdict: "pass" }), "Failed");
+  assert.equal(labelAttempt({ ...NORMAL, looping: true }), "Failed");
+  assert.equal(labelAttempt({ ...NORMAL, looping: true, hasRunEnded: false }), "Unknown");
+  assert.equal(labelAttempt({ ...NORMAL, looping: false, verdict: "pass" }), "Passed");
+});

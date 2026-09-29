@@ -37,6 +37,7 @@ import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
@@ -49,6 +50,7 @@ import type {
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import { loopGuardWatcher } from "./loop-guard.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import {
   buildRuntime,
@@ -118,6 +120,8 @@ export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor
   settings?: OrchestrationSettings;
   // 决策 268：worker 每收尾一轮回报本轮用的 token（计入本次运行的总额度）
   onWorkerTokens?: (sessionId: SessionId, tokens: number) => void;
+  // 决策 308：打转检测设定（开着即给每个 worker 挂打转观察者，307：以 looping 失败交回）；缺省不挂
+  loopGuard?: LoopGuardSettings;
 }
 
 // 无人值守时汇聚审批的兜底：worker 不接审批通道，不会走到这里；万一走到按拒绝处理
@@ -164,6 +168,7 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
         }
       : {}),
     ...(deps.onWorkerTokens !== undefined ? { onWorkerTokens: deps.onWorkerTokens } : {}),
+    ...(deps.loopGuard?.enabled === true ? { watchers: [loopGuardWatcher(deps.loopGuard)] } : {}),
   });
   holder.current = orchestrator;
   return orchestrator;
@@ -610,6 +615,7 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     run: (task) => adapter.run(task),
     interrupt: (cause) => adapter.interrupt(cause),
     subscribe: (listener) => adapter.subscribe(listener),
+    subscribeRounds: (listener) => adapter.subscribeRounds(listener),
     summary: () => summaryOf(bundle),
     structured: () => structuredResultOf(summaryOf(bundle)),
     continueRun: () => adapter.continueRun(),
@@ -633,7 +639,7 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
   let interruptedEarly = false;
   // 就绪前订阅的监听器 → 就绪后的退订函数
   const early = new Map<(event: EventEnvelope) => void, () => void>();
-  // 决策 301：就绪前的只读观察（流式正文、工具结果）→ 就绪后的退订函数
+  // 决策 301、305：就绪前的只读观察（流式正文、工具结果、整轮）→ 就绪后的退订函数
   const earlyObservers = new Map<(adapter: RuntimeBundle["adapter"]) => () => void, () => void>();
   const settled = ready.then((value) => {
     bundle = value;
@@ -684,6 +690,7 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
         unsubscribe?.();
       };
     },
+    subscribeRounds: (listener) => observeWhenReady((adapter) => adapter.subscribeRounds(listener)),
     summary: () => (bundle !== undefined ? summaryOf(bundle) : ""),
     structured: () => (bundle !== undefined ? structuredResultOf(summaryOf(bundle)) : undefined),
     continueRun: async () => {

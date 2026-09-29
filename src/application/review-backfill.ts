@@ -47,6 +47,7 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { sessionContextMessages } from "../pi-runtime/session-store.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ReviewReadSource } from "../state/learned-memory.ts";
+import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { ReviewBackfillSettings } from "../state/review-backfill.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import {
@@ -57,6 +58,7 @@ import {
   SessionEntryType,
   type VerificationData,
 } from "../state/session-entries.ts";
+import { LOOP_GUARD_TEXTS } from "./loop-guard.ts";
 import { noMcpSession } from "./mcp.ts";
 import {
   DEFAULT_REVIEW_BUDGET,
@@ -72,16 +74,17 @@ import {
   sessionCostTally,
 } from "./session-cost.ts";
 import { dropExitSnapshotRef } from "./tui-exit.ts";
-import { failureDetail, type WarnSink } from "./warnings.ts";
+import { dedupedWarner, failureDetail, type WarnSink } from "./warnings.ts";
 import { createDetachedRuntime } from "./workers.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
-// 复盘跑完的收尾方式：正常完成或撞复盘上限（撞上限前写入的记忆照常保留）
+// 复盘跑完的收尾方式：正常完成、撞复盘上限或打转叫停（307：视同跑完；此前写入的记忆照常保留）
 const FINISHED_ENDINGS: ReadonlySet<string> = new Set([
   "completed",
   "turn-limit",
   "wall-clock-limit",
   "token-limit",
+  "looping",
 ]);
 
 // 一个待补做的会话
@@ -332,6 +335,8 @@ export interface ReviewBackfillRequest {
   // 复盘模型（296）：配置里指定时在场；缺省用本次启动的 provider 与模型号
   reviewModel?: ReviewModelChoice;
   budget?: ReviewBudget;
+  // 决策 307、308：打转检测设定（叫停这次补做，视同跑完）；缺省不挂
+  loopGuard?: LoopGuardSettings;
   // 进度一行（消息区）
   progress?: (line: string) => void;
   // 结构化进度（286，状态栏）
@@ -372,7 +377,9 @@ async function backfillOne(
   candidate: BackfillCandidate,
   upTo: ReviewedUpTo | null
 ): Promise<
-  ({ ok: true } | { ok: false; aborted: boolean; error: string }) & { reviewSessionId?: SessionId }
+  ({ ok: true; looping?: boolean } | { ok: false; aborted: boolean; error: string }) & {
+    reviewSessionId?: SessionId;
+  }
 > {
   const view = readSessionFile(candidate.path);
   if (view === undefined) {
@@ -411,6 +418,7 @@ async function backfillOne(
       ...(priorCovers !== undefined ? { reviewedUpTo: priorCovers.messages } : {}),
       budget,
       ...(request.abortSignal !== undefined ? { abortSignal: request.abortSignal } : {}),
+      ...(request.loopGuard !== undefined ? { loopGuard: request.loopGuard } : {}),
       open: (review) =>
         createDetachedRuntime({
           sessionId: review.sessionId,
@@ -449,7 +457,7 @@ async function backfillOne(
     });
     const reviewed = outcome.sessionId !== undefined ? { reviewSessionId: outcome.sessionId } : {};
     if (outcome.status === "completed" || outcome.hitLimit) {
-      return { ok: true, ...reviewed };
+      return { ok: true, ...(outcome.status === "looping" ? { looping: true } : {}), ...reviewed };
     }
     return {
       ok: false,
@@ -513,6 +521,8 @@ export async function runReviewBackfill(
     });
   };
   observe();
+  // 补做被打转叫停：同一类只告警一次（视同已复盘，不记失败）
+  const warn = dedupedWarner(request.warn);
   for (const candidate of due) {
     if (attempted >= settings.maxPerLaunch || stopped(request)) {
       break;
@@ -547,6 +557,12 @@ export async function runReviewBackfill(
         );
       }
       if (result.ok) {
+        if (result.looping === true) {
+          warn(
+            new Error("补做复盘打转被叫停"),
+            `${LOOP_GUARD_TEXTS.reviewStopped("补做复盘")}，这个会话视同已复盘`
+          );
+        }
         clearBackfillRecord(request.governanceRoot, candidate.sessionId);
         dropExitSnapshotRef(request.governanceRoot, candidate.sessionId);
         summary.completed.push(candidate.sessionId);

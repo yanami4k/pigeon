@@ -14,6 +14,7 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
+import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { storeAttemptLabel } from "../state/session-judge.ts";
@@ -54,15 +55,23 @@ export interface SessionRuntimeFlags {
   reviewModel?: ReviewModelChoice;
 }
 
-// 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省）
+// 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省；打转检测按设定挂上，308）
 function interactiveLearnedMemory(
   flags: SessionRuntimeFlags,
-  warn?: WarnSink
+  warn?: WarnSink,
+  loopGuard?: LoopGuardSettings
 ): LearnedMemoryConfig | undefined {
   return flags.pushedMemory === true
     ? {
         conflict: "interactive",
-        ...(warn !== undefined ? { review: { warn } } : {}),
+        ...(warn !== undefined || loopGuard !== undefined
+          ? {
+              review: {
+                ...(warn !== undefined ? { warn } : {}),
+                ...(loopGuard !== undefined ? { loopGuard } : {}),
+              },
+            }
+          : {}),
         ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
         ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
       }
@@ -113,6 +122,8 @@ export interface OpenSessionRuntimeRequest {
   webTools?: WebToolsConfig;
   // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
   warn?: WarnSink;
+  // 决策 308：打转检测设定——此处只给压缩前复盘挂上；主 agent 由入口自己挂（叫停后的交代各入口不同）
+  loopGuard?: LoopGuardSettings;
 }
 
 export interface OpenedSessionRuntime {
@@ -176,7 +187,7 @@ export async function openSessionRuntime(
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
   });
-  const learnedMemory = interactiveLearnedMemory(request.flags, request.warn);
+  const learnedMemory = interactiveLearnedMemory(request.flags, request.warn, request.loopGuard);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker

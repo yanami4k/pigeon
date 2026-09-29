@@ -18,6 +18,7 @@
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import type { LoopRound } from "../state/loop-guard.ts";
 import type { RunStopCause } from "../state/session-entries.ts";
 import type {
   ChildResult,
@@ -84,6 +85,8 @@ export interface WorkerRuntimeHandle {
   // 撞上限时带上原因（决策 182：运行面据此把 Run 收尾的结束方式一次写全）；取消与外部中止不带
   interrupt(cause?: RunStopCause): Promise<void>;
   subscribe(listener: (event: EventEnvelope) => void): () => void;
+  // 决策 305：整轮观察口（一轮的工具调用与返回结果）；不实现即观察者拿不到整轮，打转检测对这个 worker 不起作用
+  subscribeRounds?(listener: (round: LoopRound & { runId: RunId }) => void): () => void;
   // 末条 assistant 正文
   summary(): string;
   // M6（决策 064）：模型交回的结构化内容（末条 assistant 正文能解析成对象时在场）；
@@ -256,7 +259,8 @@ export function resumeApprovalText(action: string): string {
   return `人已批准你之前等待审批的调用（${action}）。请重新发起这个调用，然后接着完成任务。`;
 }
 
-// 决策 298 与 293 的接入点：观察 worker 的运行事件，需要时叫停它。打转检测做成后以观察者接入，本段只有卡住监控
+// 决策 298 与 293 的接入点：观察 worker 的运行事件，需要时叫停它。打转检测（305–307）以观察者接入：
+// 工厂另拿到 worker 的运行面，经它的整轮观察口判定、经通知递提醒
 export interface WorkerWatcherControl {
   // 叫停：worker 以失败收尾，错误类型与原因照给出的记
   stop(errorKind: WorkerErrorKind, message: string): void;
@@ -269,7 +273,8 @@ export interface WorkerWatcher {
 
 export type WorkerWatcherFactory = (
   worker: WorkerRef,
-  control: WorkerWatcherControl
+  control: WorkerWatcherControl,
+  runtime: WorkerRuntimeHandle
 ) => WorkerWatcher;
 
 export interface WorkerOrchestratorOptions {
@@ -1099,7 +1104,8 @@ export class WorkerOrchestrator {
         return;
       }
       entry.stopped = { status, errorKind, message };
-      runtime.interrupt().catch((error: unknown) => {
+      // 打转叫停把原因交给运行面：worker 会话的 Run 收尾记结束方式为打转（307）；其余叫停照旧记为中止
+      runtime.interrupt(errorKind === "looping" ? "looping" : undefined).catch((error: unknown) => {
         this.#errors.push(error);
       });
     };
@@ -1132,7 +1138,7 @@ export class WorkerOrchestrator {
       ? []
       : (this.#options.watchers ?? []).flatMap((factory) => {
           try {
-            return [factory(refOf(entry), control)];
+            return [factory(refOf(entry), control, runtime)];
           } catch (error) {
             this.#errors.push(error);
             return [];

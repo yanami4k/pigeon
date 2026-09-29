@@ -11,6 +11,8 @@ import {
 } from "../persistence/session-catalog.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
+import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
+import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 500;
 // 单条正文的渲染上限（字符）：超出折叠并标注，原文用 /search 与读原文工具取
@@ -39,6 +41,10 @@ function clip(text: string, chars: number): string {
   return text.length <= chars
     ? text
     : `${text.slice(0, chars)}…（已截断显示，共 ${text.length} 字符）`;
+}
+
+function isProgramNotice(text: string): boolean {
+  return text.startsWith(LOOP_REMINDER_PREFIX) || text.startsWith(WORKER_NOTICE_PREFIX);
 }
 
 // 一条消息的正文渲染行（TUI 历史与 cli --with-content 共用）
@@ -77,6 +83,11 @@ export function messageLines(
       });
     } else if (block.type === "text") {
       if (block.text.length === 0) {
+        continue;
+      }
+      // 进模型上下文的程序通知（打转提醒、worker 通知）虽以用户消息存下，回看时同实时一样显示成系统行，不像人输入的话
+      if (message.role === "user" && isProgramNotice(block.text)) {
+        lines.push({ kind: "notice", text: clip(block.text, entryChars) });
         continue;
       }
       lines.push({ kind: textKind, text: `${prefix}${clip(block.text, entryChars)}` });
