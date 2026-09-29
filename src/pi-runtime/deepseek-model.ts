@@ -2,7 +2,7 @@
 // anthropic-messages 线路；pi-ai 目录里没有 deepseek-flash（只有暂时转到 V4.1 的旧名），故自构。
 //   reasoning 为真：未请求推理时 pi-ai 显式发 thinking disabled（DeepSeek 不发 thinking 即默认开思考）；
 //   contextWindow 为官方 1M；maxTokens 为单次输出上限 16384（决策 203）；
-//   cost 全为 0：花费由跑批网关按官方人民币价目与高峰时段逐请求计（eval/model-pricing.ts），不在这里另算一份。
+//   cost 全为 0：花费由跑批网关按官方人民币价目与高峰时段逐请求计（state/model-pricing.ts），不在这里另算一份。
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 
 // DeepSeek 的 Anthropic 兼容端点，请求路径 /v1/messages

@@ -166,6 +166,8 @@ export interface TuiShellOptions {
   sandbox?: TuiSandboxFace;
   // 决策 286：状态栏显示的模型（provider/模型号）；缺省不显示
   model?: string;
+  // 决策 286：主 agent 的模型接入（DeepSeek 回复自带价格为 0 时按官方人民币价目计会话花费）；缺省不另计价
+  provider?: string;
   // 决策 286：输入历史的跨启动存储（按项目）；缺省只在本次启动内保留
   promptHistory?: PromptHistoryStore;
 }
@@ -199,6 +201,8 @@ export class PigeonTuiShell
   private costLive: CostTally = emptyCostTally();
   private childCosts: ChildSessionCosts | undefined;
   private runningWorkerCount = 0;
+  // 本轮开始的时刻（DeepSeek 计价看开始与结束是否落在高峰）
+  private turnStartedAt: number | undefined;
   private readonly title: Text;
   // 当前会话上下文（S4）：/resume 换绑整体替换——运行面、治理上下文、sessionId 一体，
   // 绝不换一半（grants 命令与提交必须落在同一会话上）
@@ -474,7 +478,10 @@ export class PigeonTuiShell
     // 工具执行中另发的模型请求（web_fetch 的提炼等）计入本会话花费
     const extra = toolResultModelUsage(notice.details);
     if (extra !== undefined) {
-      addUsage(this.costLive, extra);
+      addUsage(this.costLive, extra, {
+        ...(this.options.provider !== undefined ? { provider: this.options.provider } : {}),
+        endMs: Date.now(),
+      });
       this.refreshCost();
     }
     this.tui.requestRender();
@@ -883,6 +890,7 @@ export class PigeonTuiShell
     switch (event.kind) {
       case RuntimeEventKind.TurnStarted:
         this.activeRunId = event.runId;
+        this.turnStartedAt = event.timestamp;
         this.flow.openStream();
         break;
       case RuntimeEventKind.TurnCompleted: {
@@ -890,7 +898,11 @@ export class PigeonTuiShell
         const payload = event.payload as TurnCompletedPayload;
         // 286：主 agent 每轮的用量与价格计入本会话花费；上下文用量按最近一次回复重算
         if (payload.usage !== undefined) {
-          addUsage(this.costLive, payload.usage);
+          addUsage(this.costLive, payload.usage, {
+            ...(this.options.provider !== undefined ? { provider: this.options.provider } : {}),
+            ...(this.turnStartedAt !== undefined ? { startMs: this.turnStartedAt } : {}),
+            endMs: event.timestamp,
+          });
           this.refreshCost();
         }
         this.refreshContext();

@@ -80,13 +80,13 @@ export class ScriptedRuntime implements TuiRuntimeFace {
     return this.context;
   }
 
-  emit(kind: RuntimeEventKind, payload: unknown): void {
+  emit(kind: RuntimeEventKind, payload: unknown, timestamp = 1700000000000): void {
     const envelope: EventEnvelope = {
       version: EVENT_ENVELOPE_VERSION,
       id: newEntryId(),
       sessionId: this.sessionId,
       runId: this.runId,
-      timestamp: 1700000000000,
+      timestamp,
       kind,
       payload,
     };

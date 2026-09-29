@@ -244,6 +244,7 @@ async function main(argv: string[]): Promise<void> {
     logDir: path.join(workspaceRoot, ".pigeon"),
     // 决策 286：状态栏的模型与跨启动的输入历史
     model: `${flags.provider}/${flags.modelId}`,
+    provider: flags.provider,
     promptHistory: promptHistoryStore(workspaceRoot),
     // S3：/grants /revoke /grants save 的命令上下文（命令层在 application/grants.ts）
     grants: {

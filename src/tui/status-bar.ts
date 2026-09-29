@@ -28,13 +28,18 @@ export function compactNumber(value: number): string {
   return `${(value / 1_000_000).toFixed(1)}M`;
 }
 
+// 花费：回复自带价格的部分写 $，DeepSeek 按官方人民币价目计的部分写 ¥，没有价格的写 token 数并注明；三者并存时相加写出
 export function formatCost(tally: CostTally, short: boolean): string {
-  const priced = tally.cost > 0 || tally.pricedTokens > 0;
-  const money = `$${tally.cost.toFixed(short ? 2 : 4)}`;
-  if (tally.unpricedTokens === 0) return priced ? money : "$0";
-  const unpriced = `${compactNumber(tally.unpricedTokens)} tok`;
-  if (!priced) return short ? `${unpriced} no price` : `${unpriced} (no price)`;
-  return short ? `${money}+${unpriced}` : `${money} + ${unpriced} (no price)`;
+  const digits = short ? 2 : 4;
+  const parts: string[] = [];
+  if (tally.cost > 0 || tally.pricedTokens > 0) parts.push(`$${tally.cost.toFixed(digits)}`);
+  if (tally.cny > 0 || tally.cnyTokens > 0) parts.push(`¥${tally.cny.toFixed(digits)}`);
+  if (tally.unpricedTokens > 0) {
+    const unpriced = `${compactNumber(tally.unpricedTokens)} tok`;
+    parts.push(short ? `${unpriced} no price` : `${unpriced} (no price)`);
+  }
+  if (parts.length === 0) return "$0";
+  return parts.join(short ? "+" : " + ");
 }
 
 function contextSegment(context: StatusBarState["context"], short: boolean): string | undefined {

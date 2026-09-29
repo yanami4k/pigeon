@@ -1,5 +1,7 @@
-// 会话花费（决策 286 第 2 项，终端界面状态栏）：价格来源是会话记录里模型回复自带的用量与价格（usage.cost），
-// 不另立价目表。有价格的计入金额；价格为零而用了 token 的记作"无价格的 token"，状态栏据此注明无价格，不当作免费。
+// 会话花费（决策 286 第 2 项，终端界面状态栏）：价格来源是会话记录里模型回复自带的用量与价格（usage.cost，显示为 $）。
+// DeepSeek 接入（provider deepseek）的回复自带价格为 0（跑批时由网关按官方价目计价），这类回复按同一份官方人民币价目
+// （state/model-pricing.ts，含高峰时段）与该条回复的开始、结束时刻计价，单列为人民币（显示为 ¥）。其余价格为零而用了 token 的
+// 记作"无价格的 token"，状态栏据此注明无价格，不当作免费。
 // 本会话花费 = 主会话自己的消息 + 父会话是它的 worker 会话 + 从它分叉出的复盘会话；后台补做的复盘补的是别的会话，
 // 其花费记在那个会话名下（补做进度里单独显示），不并入当前会话。/fork 分支与失败自动分叉重试是独立的会话，不计入。
 // 只读会话文件，不写任何记录。
@@ -9,54 +11,97 @@ import {
   readSessionView,
   sessionRefTime,
 } from "../persistence/session-catalog.ts";
+import { DEEPSEEK_PROVIDER } from "../pi-runtime/deepseek-model.ts";
+import { requestCostCny } from "../state/model-pricing.ts";
 import type { SessionView } from "../state/session-view.ts";
 import { toolResultModelUsage } from "../state/tool-usage.ts";
 
 // 用量的最小形状：turn.completed 的 usage、会话记录里的助手 usage 与工具另发请求的 usage 都满足
 export interface UsageLike {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
   totalTokens: number;
   cost: { total: number };
 }
 
 export interface CostTally {
-  // 有价格部分的金额（与 usage.cost 同一币种单位）
+  // 回复自带价格的金额（与 usage.cost 同一币种单位，显示为 $）
   cost: number;
-  // 有价格的 token
+  // 有自带价格的 token
   pricedTokens: number;
-  // 用了 token 但记录里价格为零的部分
+  // DeepSeek 回复按官方人民币价目计的金额（元）与其 token
+  cny: number;
+  cnyTokens: number;
+  // 用了 token 但没有价格可依的部分
   unpricedTokens: number;
 }
 
-export function emptyCostTally(): CostTally {
-  return { cost: 0, pricedTokens: 0, unpricedTokens: 0 };
+// 计价需要的这条回复的来历：模型接入与请求的开始、结束时刻（Unix 毫秒；缺一取另一个）
+export interface UsageOrigin {
+  provider?: string;
+  startMs?: number;
+  endMs?: number;
 }
 
-export function addUsage(tally: CostTally, usage: UsageLike): void {
+export function emptyCostTally(): CostTally {
+  return { cost: 0, pricedTokens: 0, cny: 0, cnyTokens: 0, unpricedTokens: 0 };
+}
+
+export function addUsage(tally: CostTally, usage: UsageLike, origin: UsageOrigin = {}): void {
   if (usage.cost.total > 0) {
     tally.cost += usage.cost.total;
     tally.pricedTokens += usage.totalTokens;
-  } else {
-    tally.unpricedTokens += usage.totalTokens;
+    return;
   }
+  const at = origin.endMs ?? origin.startMs;
+  if (origin.provider === DEEPSEEK_PROVIDER && at !== undefined && usage.totalTokens > 0) {
+    // 与跑批网关同一口径：开始或结束任一落在高峰即按高峰价
+    tally.cny += requestCostCny(usage, origin.startMs ?? at, at).cny;
+    tally.cnyTokens += usage.totalTokens;
+    return;
+  }
+  tally.unpricedTokens += usage.totalTokens;
 }
 
 export function mergeCostTally(into: CostTally, from: CostTally): void {
   into.cost += from.cost;
   into.pricedTokens += from.pricedTokens;
+  into.cny += from.cny;
+  into.cnyTokens += from.cnyTokens;
   into.unpricedTokens += from.unpricedTokens;
 }
 
-// 一个会话视图自己的花费：助手消息的用量，加工具执行中另发的模型请求（web_fetch 的提炼等）；分叉复制段不计（视图已跳过）
+function numberOr(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+// 一个会话视图自己的花费：助手消息的用量，加工具执行中另发的模型请求（web_fetch 的提炼等）；分叉复制段不计（视图已跳过）。
+// 助手消息的模型接入取消息自带的 provider，开始时刻取消息自带的 timestamp、结束时刻取写入时刻；工具另发的请求沿用
+// 其前最近一条助手消息的模型接入，时刻取工具结果的写入时刻
 export function costTallyOfView(view: SessionView): CostTally {
   const tally = emptyCostTally();
+  let provider: string | undefined;
   for (const message of view.messages) {
+    if (message.role === "assistant" && typeof message.raw.provider === "string") {
+      provider = message.raw.provider;
+    }
     if (message.usage !== undefined) {
-      addUsage(tally, message.usage);
+      const startMs = numberOr(message.raw.timestamp);
+      addUsage(tally, message.usage, {
+        ...(provider !== undefined ? { provider } : {}),
+        ...(startMs !== undefined ? { startMs } : {}),
+        endMs: message.timestamp,
+      });
     }
     if (message.role === "toolResult") {
       const extra = toolResultModelUsage(message.raw.details);
       if (extra !== undefined) {
-        addUsage(tally, extra);
+        addUsage(tally, extra, {
+          ...(provider !== undefined ? { provider } : {}),
+          endMs: message.timestamp,
+        });
       }
     }
   }
