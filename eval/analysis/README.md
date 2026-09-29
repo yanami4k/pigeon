@@ -28,6 +28,13 @@ python -m pigeon_analysis calibration --results <results.jsonl> [...] --out <输
   [--formal-valid-tasks N] [--compaction-trigger token 数] [--eligible 要做到的不为零的题的步序.json]
 ```
 
+# 接口不可猜的测试文件清单（决策 316；静态规则，只读人的仓库、流清单与两类用例预计算结果，不读任何运行结果）
+python -m pigeon_analysis unguessable --manifest <流清单 strands.json> --repo <人的仓库>   --classes-dir <两类用例预计算目录> --out data/unguessable-interfaces.json
+```
+
+入库的清单为 data/unguessable-interfaces.json，在看到正式结果之前生成。
+
+```sh
 --tasks 与 --eligible 给的是结果行的步序（seq，即该题在全流中的位置），不是清单里从 1 起的题号；结果行里有步序不在所给列表里即报错。
 
 输出目录下为 report.md（报告）与 result.json（机器可读结果）。随机种子写死在 pigeon_analysis/constants.py，同一输入两次运行结果逐字相同。
@@ -48,6 +55,7 @@ python -m pytest -m "not slow"   # 跳过模拟检验
 - pigeon_analysis/primary.py：主判据与混合模型对照
 - pigeon_analysis/secondary.py：次要判据
 - pigeon_analysis/sensitivity.py：设计灵敏度与第 3 遍规则
+- pigeon_analysis/unguessable.py：接口不可猜的测试文件清单（316）
 - pigeon_analysis/calibration.py：校准取值规则与抽题
 - pigeon_analysis/wording.py：报告的固定措辞
 - pigeon_analysis/reader.py：结果行 → 规整表、身份头 → 设置（跑批器字段变动只改这里）

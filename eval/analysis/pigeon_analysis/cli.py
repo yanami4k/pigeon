@@ -14,6 +14,7 @@ from .reader import common_settings, load_table, read_baseline_failures, require
 from .report import calibration_markdown, dumps, formal_markdown, formal_result
 from .secondary import analyze_secondary
 from .sensitivity import third_pass_decision
+from .unguessable import generate
 
 
 def _read_tasks(path: str | None) -> list[int] | None:
@@ -80,7 +81,17 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--compaction-trigger", type=float, default=None, help="压缩触发点（token）；未给时取身份头里的压缩触发点")
     c.add_argument("--eligible", help="要做到的不为零的全部题的步序（结果行的 seq，不是从 1 起的题号；JSON 数组），用于核对抽题")
 
+    u = sub.add_parser("unguessable", help="接口不可猜的测试文件清单（决策 316，静态规则，不读任何结果）")
+    u.add_argument("--manifest", required=True, help="流清单（strands.json）")
+    u.add_argument("--repo", required=True, help="人的仓库（git）")
+    u.add_argument("--classes-dir", required=True, help="两类用例预计算结果目录（<提交>.classes.json）")
+    u.add_argument("--out", required=True, help="清单文件（JSON）")
+
     args = ap.parse_args(argv)
+    if args.command == "unguessable":
+        data = generate(Path(args.manifest), Path(args.repo), Path(args.classes_dir), Path(args.out))
+        print(json.dumps(data["summary"], ensure_ascii=False))
+        return 0
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if args.command == "formal":
