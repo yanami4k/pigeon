@@ -1,6 +1,6 @@
 # 编排一段：积木与任务清单（决策 294、297–300、302、303）实现审计
 
-- 基线：formal-v2 的 fc23673；施工中并入 formal-v2 的 6cb88be（终端界面完善一段）。
+- 基线：formal-v2 的 fc23673；开发中并入 formal-v2 的 6cb88be（终端界面完善一段）。
 - 分支：o1-orchestration
 - 代码提交：d8f52ab（编排器：标签、生命周期事件、等待、发消息、卡住监控、嵌套、审批超时与补批续做）、eb46c91（运行面的通知队列）、99f91d8（后台派出与完成通知、四件积木工具、任务清单、pigeon run 等 worker 结束）、238325f（终端界面：通知显示与叫醒、状态行刷新、/tasks）、58e9ede（并入 formal-v2）、18b04f1（/tasks 登记进命令表，通知与排队输入的次序用例）；本审计另起一个提交。
 - 范围：后台派出与完成通知（297）；结构化结果与卡住监控（298，打转检测只留接入点）；嵌套（299）；额度（300）；五个接口与任务清单 B1（294）；worker 改自己工作树放行与请示的超时交回（302、303）；界面三处（通知进消息区、agent 派出的 worker 刷新状态行、/tasks）。
@@ -19,7 +19,7 @@
 - 新增积木工具（四件分开，与 spawn_worker、take_worker 同为单一动作的风格；都在 `src/application/orchestration-tools.ts`，与 spawn_worker 同槽同注册范围，只读档、不经审批）：
   - `wait_workers`：`workers`（不给即所有还在跑的）、`mode`（any / all，缺省 all）、`timeout_seconds`（缺省 300，最多为每个 worker 的时间上限，缺省 1800 秒，跟着配置走）。到时仍未结束即返回当时的状态，没结束的继续跑。
   - `worker_status`：名字、角色、标签、状态、已用轮数与时间，已结束的附结果摘要（前 200 字）。
-  - `message_worker`：给在跑的 worker 递一段话，前缀 `[来自派出方的消息] `，进它的下一轮（同样经运行面的通知队列）；已结束的收不到。
+  - `message_worker`：给在跑的 worker 递一段话，前缀 `[来自派出方的消息] `，进它的下一轮（同样经运行面的通知队列）；已结束的收不到；它在下一轮之前结束（最后一轮之后才递到、正在收尾）时如实交回"未送达"，不静默丢掉（见第十三节）。
   - `stop_worker`：停掉在跑或排队的 worker，走编排器的取消，结果照常交回。
 - 说明文字：spawn_worker 的第 1、3 句按 297 改写（第 3 句写明四件积木的用法与"不要把派出去的活自己再做一遍"），给了一次运行的派出上限时第 3 句末加"一次运行最多派 N 个。"；第 5 句"也不能再派 worker"只在新 worker 已在最底层时出现，放开嵌套时改为"它还能往下再派 k 层 worker。"；label 参数的说明在任务清单关着时不提清单。其余 271 定稿句不变。各工具说明、参数说明与返回文字由用例逐字钉住（`spawn-worker-tool.test.ts`）。
 
@@ -29,7 +29,7 @@
 - 状态：在原有取值上新增 `stalled`（卡住）。等待工具按 298 的六种说法写：completed 为完成，wall-clock-limit 为超时，turn-limit 与 token-limit 为撞上限，cancelled 与 aborted 为取消，stalled 为卡住，其余为失败。
 - 错误类型取值：run-failed、empty-reply、exception、spawn-failed、cancelled、aborted、turn-limit、wall-clock-limit、token-limit、stalled、looping、approval-timeout、approval-unattended。
 - 不由框架自动重试。
-- 卡住监控：每个 worker 开跑后，运行面发出任何事件（模型回复、工具结果、轮次收尾等）即重新计时；缺省 10 分钟没有新事件即中断，以 `stalled` 收尾、错误类型 stalled。等审批期间不计（到点时有待决的审批即顺延）。阈值可配置（第四节）。一条命令运行期间不发事件，单条命令跑满卡住时限也会被判为卡住。
+- 卡住监控：每个 worker 开跑后，运行面发出任何事件（模型回复、工具结果、轮次收尾等）即重新计时；缺省 10 分钟没有新事件即中断，以 `stalled` 收尾、错误类型 stalled。等审批期间不计（到点时有待决的审批即顺延）。阈值可配置（第四节）。自带超时的工具（run_command、web_search、web_fetch）从提出到结束期间暂停计时，由工具自己的超时兜底，命令跑得比卡住时限久也不判卡住；其余工具执行期间照常计时（见第十三节）。
 - 打转检测的接入点：编排器选项 `watchers`，每个 worker 开跑时各建一份观察者，观察它的运行事件，可经 `control.stop(错误类型, 原因)` 叫停，worker 以失败收尾、错误类型与原因照给出的记（错误类型已预留 looping）。本段不实现打转检测，装配根未注入观察者。
 
 ## 三、嵌套（299）
@@ -116,3 +116,27 @@
 
 - 全部在服务器上跑：8 vCPU、31 GB 内存、Node 24.12.0，专属目录，提交 18b04f1（已含并入的 formal-v2 6cb88be）。
 - `npm run lint`、`npm run check` 通过；测试步 `node --test --test-concurrency=3 "src/**/*.test.ts"`（当时服务器上另有测试进程在跑，并发取 3）：1359 条，通过 1357，跳过 2（既有），失败 0，约 117 秒；`npm run deps`：510 个模块、3539 条依赖，0 违规。四步合计约 134 秒。
+
+## 十三、验收后的修改
+
+- 提交：ae71c8c（卡住监控在自带超时的工具执行期间暂停、message_worker 如实交回未送达）；本节另起一个提交。
+
+### 1. 自带超时的工具执行期间暂停卡住计时
+
+- 编排器新增选项 `selfTimedTools`，缺省为 run_command、web_search、web_fetch（三者各有自己的超时：run_command 为工具选项 `timeoutMs`，缺省 2 分钟，目前未开放到配置；两件联网工具取 .pigeon/web.json 的超时）。worker 的运行事件里出现这些工具的 `tool.proposed` 即记下这次调用，对应的 `tool.settled` 到达即划掉；卡住计时到点时仍有记下的调用即顺延，与等审批同一处理。暂停不看工具超时的具体值，超时配到 10 分钟以上时同样不会误判为卡住。
+- 其余工具（read_file、edit_file、会话检索、MCP 工具等）执行期间照常计时。
+- 用例（`src/orchestration/orchestration-core.test.ts`）：自带超时的工具跑了卡住时限的 5 倍仍在跑、结束后照常完成；不自带超时的工具静默超过卡住时限即以 stalled 收尾。
+
+### 2. message_worker 未送达如实交回
+
+- 编排器的 `send` 改为交回是否送达：运行面的 `notify` 交回键，另有 `noticeDelivered`、`withdrawNotice`；话进了 worker 的下一轮即 delivered；worker 在那之前结束（最后一轮之后才递到、正在收尾）即 undelivered，没递出的撤回。运行面不支持查询送达的按 delivered。
+- `message_worker` 等到有结论才回话：送达时照旧"已把话递给 worker X，它在下一轮看到。"；未送达时交回"未送达：worker X 已结束或正在收尾。要这段话生效，另派一个 worker 或自己做。"，details 的 `delivered` 为 false。不补跑那一轮。
+- 用例：`orchestration-core.test.ts` 的 send 送达与未送达（未送达的撤回、已送达的不再撤回）；`spawn-worker-tool.test.ts` 的 message_worker 未送达。修改中发现并修正：已判送达的话在 worker 收尾时仍被撤回一次，现收尾时先看是否已有结论。
+
+### 3. 已知限制
+
+- 放开嵌套时，下层 worker 不带 take_worker：下层的改动只留在它自己的分支与工作树上，不能由上层 worker 叠进上层的工作树。嵌套缺省关着（层数 1）。
+
+### 4. verify
+
+- 服务器（8 vCPU、31 GB 内存、Node 24.12.0，专属目录），提交 ae71c8c：`npm run lint`、`npm run check` 通过；测试步 `node --test --test-concurrency=3 "src/**/*.test.ts"`（当时服务器上另有测试进程在跑）：1363 条，通过 1361，跳过 2（既有），失败 0，约 117 秒；`npm run deps`：510 个模块、3539 条依赖，0 违规。
