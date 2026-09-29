@@ -10,6 +10,9 @@
 // - 读代码的根：本机会话从退出快照检出临时工作树，沙箱会话从交回的分支检出；没有快照的读当前工作目录并在复盘记录里注明；
 //   临时工作树用完删除。复盘本身沿用现有复盘运行面（只放行 read_file 与 update_memory，上限与模板不变），种类记收尾。
 // - 模型（296）：配置里指定了复盘模型即用它，否则用本次启动的模型。
+// - 结构化进度（286）：observe 在开始补第几个与每补完一个时给出（第几个、共几个、累计花费），终端界面据此在状态栏显示；
+//   花费取复盘会话记录里模型回复自带的用量与价格，记在被补的会话名下，不并入当前会话。progress 的一行文字照旧。
+//   warn 为补做运行面会话存储告警的出口（缺省标准错误输出）。
 
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -62,8 +65,14 @@ import {
   runMemoryReview,
 } from "./memory-review.ts";
 import { repairFailureSummary } from "./repair-loop.ts";
+import {
+  type CostTally,
+  emptyCostTally,
+  mergeCostTally,
+  sessionCostTally,
+} from "./session-cost.ts";
 import { dropExitSnapshotRef } from "./tui-exit.ts";
-import { failureDetail } from "./warnings.ts";
+import { failureDetail, type WarnSink } from "./warnings.ts";
 import { createDetachedRuntime } from "./workers.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
@@ -325,6 +334,10 @@ export interface ReviewBackfillRequest {
   budget?: ReviewBudget;
   // 进度一行（消息区）
   progress?: (line: string) => void;
+  // 结构化进度（286，状态栏）
+  observe?: (progress: BackfillProgress) => void;
+  // 补做运行面会话存储告警的出口（286）；缺省标准错误输出
+  warn?: WarnSink;
   abortSignal?: AbortSignal;
   now?: () => number;
   // 本次启动的持有者标识（租约里记它）；缺省随机
@@ -344,12 +357,23 @@ export interface ReviewBackfillSummary {
   busy: SessionId[];
 }
 
+// 结构化进度（286）：current 为正在补的第几个（1 起；没有在补时为 undefined），cost 为这次启动已补完的复盘的累计花费
+export interface BackfillProgress {
+  planned: number;
+  current?: number;
+  completed: number;
+  failed: number;
+  cost: CostTally;
+}
+
 // 补一个会话：检出读取根、分叉复盘、删除读取根
 async function backfillOne(
   request: ReviewBackfillRequest,
   candidate: BackfillCandidate,
   upTo: ReviewedUpTo | null
-): Promise<{ ok: true } | { ok: false; aborted: boolean; error: string }> {
+): Promise<
+  ({ ok: true } | { ok: false; aborted: boolean; error: string }) & { reviewSessionId?: SessionId }
+> {
   const view = readSessionFile(candidate.path);
   if (view === undefined) {
     return { ok: false, aborted: false, error: "会话文件读不出来" };
@@ -418,17 +442,20 @@ async function backfillOne(
             review: false,
           },
           budget: { maxTurns: budget.maxTurns, wallClockMs: budget.wallClockMs },
+          ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
           // 补做不起 MCP server：复盘只用 read_file 与 update_memory
           startMcp: noMcpSession,
         }),
     });
+    const reviewed = outcome.sessionId !== undefined ? { reviewSessionId: outcome.sessionId } : {};
     if (outcome.status === "completed" || outcome.hitLimit) {
-      return { ok: true };
+      return { ok: true, ...reviewed };
     }
     return {
       ok: false,
       aborted: outcome.status === "aborted",
       error: outcome.error ?? outcome.status,
+      ...reviewed,
     };
   } catch (error) {
     return { ok: false, aborted: false, error: failureDetail(error) };
@@ -475,6 +502,17 @@ export async function runReviewBackfill(
   // 闸三：每次最多补 maxPerLaunch 个
   summary.planned = Math.min(due.length, settings.maxPerLaunch);
   let attempted = 0;
+  const cost = emptyCostTally();
+  const observe = (current?: number): void => {
+    request.observe?.({
+      planned: summary.planned,
+      ...(current !== undefined ? { current } : {}),
+      completed: summary.completed.length,
+      failed: summary.failed.length,
+      cost: { ...cost },
+    });
+  };
+  observe();
   for (const candidate of due) {
     if (attempted >= settings.maxPerLaunch || stopped(request)) {
       break;
@@ -500,7 +538,14 @@ export async function runReviewBackfill(
         continue;
       }
       attempted += 1;
+      observe(attempted);
       const result = await backfillOne(request, candidate, checked.upTo);
+      if (result.reviewSessionId !== undefined) {
+        mergeCostTally(
+          cost,
+          sessionCostTally(sessionsDirOf(request.governanceRoot), result.reviewSessionId)
+        );
+      }
       if (result.ok) {
         clearBackfillRecord(request.governanceRoot, candidate.sessionId);
         dropExitSnapshotRef(request.governanceRoot, candidate.sessionId);
@@ -528,6 +573,7 @@ export async function runReviewBackfill(
       });
     }
     request.progress?.(backfillProgressLine(summary));
+    observe();
   }
   return summary;
 }

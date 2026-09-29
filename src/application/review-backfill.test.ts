@@ -19,7 +19,7 @@ import {
 } from "../persistence/review-backfill-store.ts";
 import type { SessionId } from "../state/ids.ts";
 import { SessionEntryType } from "../state/session-entries.ts";
-import { runReviewBackfill } from "./review-backfill.ts";
+import { type BackfillProgress, runReviewBackfill } from "./review-backfill.ts";
 import { exitSnapshotRef, recordTuiExit } from "./tui-exit.ts";
 import {
   git,
@@ -97,12 +97,26 @@ test("补做读退出快照里的文件而不是之后改过的；复盘记录�
       review: [{ text: "核对一下", toolCalls: [READ_A] }, { text: "不改" }],
     });
     const progress: string[] = [];
+    const observed: BackfillProgress[] = [];
     const summary = await runReviewBackfill({
       ...backfillRequest(root, streamFn),
       progress: (line) => progress.push(line),
+      observe: (step) => observed.push(step),
     });
     assert.deepEqual(summary.completed, [session.sessionId]);
     assert.deepEqual(progress, ["后台补做复盘：已完成 1/1"]);
+    // 结构化进度（286）：开始前、开始补第 1 个、补完；花费取复盘会话记录（假模型的回复有 token 没有价格）
+    assert.deepEqual(
+      observed.map((step) => [step.planned, step.current, step.completed, step.failed]),
+      [
+        [1, undefined, 0, 0],
+        [1, 1, 0, 0],
+        [1, undefined, 1, 0],
+      ]
+    );
+    const spent = observed.at(-1)?.cost;
+    assert.equal(spent?.cost, 0);
+    assert.ok((spent?.unpricedTokens ?? 0) > 0, JSON.stringify(spent));
     // 复盘指令为收尾版本，模板不变
     const instruction = textOf(calls.find((call) => call.kind === "review")?.messages.at(-1) ?? {});
     assert.ok(instruction.startsWith("【复盘 v1】这次会话的工作已经结束。"));
