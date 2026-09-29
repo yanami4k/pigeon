@@ -296,7 +296,7 @@ test("三个数可在配置里改", async () => {
     initRepo(root, { "a.txt": "一\n" });
     launchedLongAgo(root);
     writeFileSync(
-      join(root, ".pigeon", "review-backfill.json"),
+      join(root, ".pigeon", "memory-review.json"),
       '{"version":1,"maxPerLaunch":1,"maxAgeDays":30}\n'
     );
     const ids = await sessionsWithExit(root, 2);

@@ -1,14 +1,26 @@
-// 终端界面启动时后台补做复盘（决策 283、284）的配置与治理根下的状态文件形状：纯类型，无 IO。
-// - 配置 .pigeon/review-backfill.json（人手写，可缺省）：三道闸的数值与租约时长；
+// 终端界面启动时后台补做复盘（决策 283、284、295）与复盘模型（296）的配置、治理根下的状态文件形状：纯类型，无 IO。
+// - 配置 .pigeon/memory-review.json（人手写，可缺省）：三道闸的数值、租约时长，以及日常使用中复盘所用的模型；
 // - 状态目录 .pigeon/review-backfill/：上线时刻（首次以新版本启动时记下）、按会话号的租约、按会话号的补做记录
-//   （过时跳过、失败原因与次数）。一个会话是否已复盘不在这里登记，以会话存储里以它为父、跑完了的收尾复盘为准（192）。
+//   （过时跳过、失败原因与次数）。一个会话要不要补做不在这里登记，以会话存储里以它为父、跑完了的各次复盘覆盖到的位置为准（295）。
 import { type Static, Type } from "typebox";
 
-export const REVIEW_BACKFILL_CONFIG_VERSION = 1;
+export const MEMORY_REVIEW_CONFIG_VERSION = 1;
 
-export const ReviewBackfillConfigFileSchema = Type.Object(
+// 复盘模型（296）：与会话的模型同一套写法（provider 与模型号），经同一个模型接入发出
+export const ReviewModelSchema = Type.Object(
   {
-    version: Type.Literal(REVIEW_BACKFILL_CONFIG_VERSION),
+    provider: Type.String({ minLength: 1 }),
+    model: Type.String({ minLength: 1 }),
+  },
+  { additionalProperties: false }
+);
+export type ReviewModel = Static<typeof ReviewModelSchema>;
+
+export const MemoryReviewConfigFileSchema = Type.Object(
+  {
+    version: Type.Literal(MEMORY_REVIEW_CONFIG_VERSION),
+    // 指定后日常使用中的全部复盘（压缩前、收尾、补做）都用它；不指定时压缩前与收尾复盘用会话本身的模型，补做用本次启动的模型
+    reviewModel: Type.Optional(ReviewModelSchema),
     // 超过这么多天没有动静的会话视为过时，跳过且以后不再补
     maxAgeDays: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
     // 每次启动最多补几个（从最新的开始）
@@ -18,7 +30,7 @@ export const ReviewBackfillConfigFileSchema = Type.Object(
   },
   { additionalProperties: false }
 );
-export type ReviewBackfillConfigFile = Static<typeof ReviewBackfillConfigFileSchema>;
+export type MemoryReviewConfigFile = Static<typeof MemoryReviewConfigFileSchema>;
 
 // 生效的数值
 export interface ReviewBackfillSettings {
@@ -35,7 +47,7 @@ export const DEFAULT_REVIEW_BACKFILL: Readonly<ReviewBackfillSettings> = {
 };
 
 export function reviewBackfillSettings(
-  file: ReviewBackfillConfigFile | undefined
+  file: MemoryReviewConfigFile | undefined
 ): ReviewBackfillSettings {
   return {
     maxAgeMs:

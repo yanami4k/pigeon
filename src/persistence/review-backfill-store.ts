@@ -1,5 +1,5 @@
-// 后台补做复盘（决策 283、284）在治理根下的读写：配置 .pigeon/review-backfill.json（人手写，只读；缺失即缺省，畸形响亮失败，
-// 形态同 web.json）与状态目录 .pigeon/review-backfill/（上线时刻、租约、补做记录）。
+// 后台补做复盘（决策 283、284）与复盘模型（296）在治理根下的读写：配置 .pigeon/memory-review.json（人手写，只读；缺失即缺省，
+// 畸形响亮失败，形态同 web.json）与状态目录 .pigeon/review-backfill/（上线时刻、租约、补做记录）。
 // 租约：每个会话一个租约文件 leases/<会话号>.json，写明持有者（进程号与本次启动的随机标识）与时刻，过了到期时刻即视为失效。
 // 读、判、写三步在同一把按会话号的独占锁里做（exclusive-lock.ts：持有进程已死即接管），同时开着的几个 Pigeon 不会同时领到
 // 同一个会话；锁只在这三步之间持有，复盘期间靠租约文件本身挡住别的进程。
@@ -12,51 +12,59 @@ import {
   type BackfillRecord,
   BackfillRecordSchema,
   BackfillSinceSchema,
-  REVIEW_BACKFILL_CONFIG_VERSION,
-  type ReviewBackfillConfigFile,
-  ReviewBackfillConfigFileSchema,
+  MEMORY_REVIEW_CONFIG_VERSION,
+  type MemoryReviewConfigFile,
+  MemoryReviewConfigFileSchema,
   type ReviewBackfillSettings,
+  type ReviewModel,
   reviewBackfillSettings,
 } from "../state/review-backfill.ts";
 import { writeFileAtomic } from "./atomic-write.ts";
 import { acquireExclusiveLock, ExclusiveLockError } from "./exclusive-lock.ts";
 
-export class ReviewBackfillConfigError extends Error {}
+export class MemoryReviewConfigError extends Error {}
 
-export function reviewBackfillConfigPath(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", "review-backfill.json");
+export function memoryReviewConfigPath(governanceRoot: string): string {
+  return join(governanceRoot, ".pigeon", "memory-review.json");
 }
 
 export function reviewBackfillDir(governanceRoot: string): string {
   return join(governanceRoot, ".pigeon", "review-backfill");
 }
 
-// 读配置并换成生效的数值；缺失取缺省，畸形响亮失败
-export function loadReviewBackfillSettings(governanceRoot: string): ReviewBackfillSettings {
-  const path = reviewBackfillConfigPath(governanceRoot);
+// 读配置：补做的生效数值与复盘模型（没指定即缺省）；文件缺失取缺省，畸形响亮失败
+export function loadMemoryReviewConfig(governanceRoot: string): {
+  backfill: ReviewBackfillSettings;
+  reviewModel?: ReviewModel;
+} {
+  const path = memoryReviewConfigPath(governanceRoot);
   if (!existsSync(path)) {
-    return reviewBackfillSettings(undefined);
+    return { backfill: reviewBackfillSettings(undefined) };
   }
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    throw new ReviewBackfillConfigError(
-      `补做复盘配置不是合法 JSON：${path}：${error instanceof Error ? error.message : String(error)}`
+    throw new MemoryReviewConfigError(
+      `复盘配置不是合法 JSON：${path}：${error instanceof Error ? error.message : String(error)}`
     );
   }
-  if (!Value.Check(ReviewBackfillConfigFileSchema, raw)) {
-    const problems = [...Value.Errors(ReviewBackfillConfigFileSchema, raw)]
+  if (!Value.Check(MemoryReviewConfigFileSchema, raw)) {
+    const problems = [...Value.Errors(MemoryReviewConfigFileSchema, raw)]
       .map((failure) => {
         const where = "path" in failure ? failure.path : "/";
         return `${where === "" ? "/" : where}：${failure.message}`;
       })
       .join("；");
-    throw new ReviewBackfillConfigError(
-      `补做复盘配置校验失败（当前格式版本 ${REVIEW_BACKFILL_CONFIG_VERSION}）：${path}：${problems}`
+    throw new MemoryReviewConfigError(
+      `复盘配置校验失败（当前格式版本 ${MEMORY_REVIEW_CONFIG_VERSION}）：${path}：${problems}`
     );
   }
-  return reviewBackfillSettings(raw as ReviewBackfillConfigFile);
+  const file = raw as MemoryReviewConfigFile;
+  return {
+    backfill: reviewBackfillSettings(file),
+    ...(file.reviewModel !== undefined ? { reviewModel: { ...file.reviewModel } } : {}),
+  };
 }
 
 function readJson(path: string): unknown {

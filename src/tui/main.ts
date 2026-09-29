@@ -20,6 +20,7 @@ import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createSessionAttemptRunner } from "../application/attempt-group.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import {
+  applyReviewModelConfig,
   type LaunchFlags,
   parseLaunchFlags,
   resolveStreamFnSpec,
@@ -84,6 +85,8 @@ async function main(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
+  // 决策 296：复盘模型（配置里指定时，压缩前、收尾、补做三种复盘都用它）
+  applyReviewModelConfig(flags, workspaceRoot);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
   const webTools = webToolsEnabled(flags)
     ? resolveWebTools({ governanceRoot: workspaceRoot })
@@ -299,6 +302,7 @@ async function main(argv: string[]): Promise<void> {
             ...(flags.memoryLimitChars !== undefined
               ? { memoryLimitChars: flags.memoryLimitChars }
               : {}),
+            ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
             abortSignal: backfillStop.signal,
             progress: (line) => {
               shell.addSystem(line);

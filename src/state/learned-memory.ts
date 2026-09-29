@@ -39,7 +39,18 @@ export const MemoryReviewTagSchema = Type.Object({
   kind: Type.Union([Type.Literal("closing"), Type.Literal("pre-compaction")]),
   template: Type.String({ minLength: 1 }),
   covers: Type.Optional(ReviewCoverageSchema),
-  // 终端界面启动时后台补做的复盘（种类记收尾）：读代码的来处
-  backfill: Type.Optional(Type.Object({ readFrom: ReviewReadSourceSchema })),
+  // 终端界面启动时后台补做的复盘（种类记收尾）：读代码的来处；此前各次复盘已覆盖到的位置（295，没有即缺省），
+  // messages 为复盘指令里写的"第 N 条"的 N
+  backfill: Type.Optional(
+    Type.Object({
+      readFrom: ReviewReadSourceSchema,
+      priorCovers: Type.Optional(
+        Type.Object({
+          ...ReviewCoverageSchema.properties,
+          messages: Type.Integer({ minimum: 1 }),
+        })
+      ),
+    })
+  ),
 });
 export type MemoryReviewTag = Static<typeof MemoryReviewTagSchema>;

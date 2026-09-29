@@ -5,10 +5,12 @@
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 
 import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
+import { loadMemoryReviewConfig } from "../persistence/review-backfill-store.ts";
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
+import { type ReviewModelChoice, reviewModelChoice } from "./memory-review.ts";
 import { DEFAULT_SPAWN_WORKER_LIMITS, type SpawnWorkerLimits } from "./spawn-worker-tool.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
@@ -74,6 +76,8 @@ export interface LaunchFlags {
   // pigeon run 接受
   pushedMemory: boolean;
   memoryLimitChars?: number;
+  // 决策 296：复盘模型——不是启动参数，由日常入口在准备好工作区后读 .pigeon/memory-review.json 填入（applyReviewModelConfig）
+  reviewModel?: ReviewModelChoice;
   // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
   // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
   compaction?: CompactionConfigInput;
@@ -337,4 +341,13 @@ export function resolveVerifyConfig(
 // 参数给 0 即关闭，压过项目配置；轮数与验证命令分别取来源，缺验证命令时由运行入口启动报错
 export function resolveRepairRounds(flags: LaunchFlags, governanceRoot: string): number {
   return flags.repairRounds ?? loadProjectRepairRounds(governanceRoot) ?? 0;
+}
+
+// 决策 296：日常入口（终端界面、命令行对话与续跑、pigeon run）读复盘配置里的复盘模型填进启动参数；配置畸形响亮失败。
+// 跑批器不经这里，复盘仍用各步本身的模型
+export function applyReviewModelConfig(flags: LaunchFlags, governanceRoot: string): void {
+  const reviewModel = reviewModelChoice(loadMemoryReviewConfig(governanceRoot).reviewModel);
+  if (reviewModel !== undefined) {
+    flags.reviewModel = reviewModel;
+  }
 }

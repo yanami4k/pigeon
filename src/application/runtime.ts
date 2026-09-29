@@ -54,7 +54,7 @@ import {
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
-import type { ReviewCoverage, ReviewReadSource } from "../state/learned-memory.ts";
+import type { MemoryReviewTag, ReviewCoverage } from "../state/learned-memory.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
@@ -86,6 +86,7 @@ import {
   DEFAULT_REVIEW_BUDGET,
   gateReviewTools,
   type ReviewBudget,
+  type ReviewModelChoice,
   type ReviewObserver,
   reviewWarner,
   runMemoryReview,
@@ -210,8 +211,8 @@ export interface ReviewSessionConfig {
   sourceSessionId: SessionId;
   // 覆盖到来源会话的哪一条记录（283 补充）：分叉点，Run 开始条目的复盘标记记下它
   covers?: ReviewCoverage;
-  // 终端界面启动时后台补做的复盘（283）：读代码的来处
-  backfill?: { readFrom: ReviewReadSource };
+  // 终端界面启动时后台补做的复盘（283、295）：读代码的来处与此前的覆盖位置
+  backfill?: NonNullable<MemoryReviewTag["backfill"]>;
 }
 
 // 推送记忆的配置
@@ -222,6 +223,8 @@ export interface LearnedMemoryConfig {
   limitChars?: number;
   // 压缩前复盘：缺省开着、上限取缺省；false 即不做（worker 与复盘运行面自己）
   review?: MemoryReviewSettings | false;
+  // 复盘模型（决策 296）：在场即本会话的复盘（压缩前、收尾）改用它；缺省用会话本身的模型
+  reviewModel?: ReviewModelChoice;
 }
 
 export interface MemoryReviewSettings {
@@ -614,7 +617,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
                 ? { covers: { ...deps.reviewSession.covers } }
                 : {}),
               ...(deps.reviewSession.backfill !== undefined
-                ? { backfill: { readFrom: { ...deps.reviewSession.backfill.readFrom } } }
+                ? { backfill: structuredClone(deps.reviewSession.backfill) }
                 : {}),
             },
           }
@@ -724,8 +727,12 @@ export function reviewRuntimeDeps(
   } = deps;
   const settings = learnedMemory?.review;
   const budget = (settings !== false ? settings?.budget : undefined) ?? DEFAULT_REVIEW_BUDGET;
+  const reviewModel = learnedMemory?.reviewModel;
   return {
     ...base,
+    ...(reviewModel !== undefined
+      ? { provider: reviewModel.provider, modelId: reviewModel.modelId }
+      : {}),
     sessionId: review.sessionId,
     initialMessages: review.initialMessages,
     reviewSession: session,

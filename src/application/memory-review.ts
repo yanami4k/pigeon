@@ -14,6 +14,7 @@ import {
   REVIEW_TOOL_REFUSAL,
   type ReviewKind,
   reviewInstruction,
+  withReviewedUpTo,
 } from "../memory/review-text.ts";
 import {
   branchEntries,
@@ -30,6 +31,22 @@ import type { ReviewCoverage } from "../state/learned-memory.ts";
 import type { RunStopCause } from "../state/session-entries.ts";
 import { dedupedWarner, failureDetail, type WarnSink } from "./warnings.ts";
 import { sessionsDirOf } from "./workspace.ts";
+
+// 复盘模型（决策 296）：日常使用中在配置里指定后，压缩前、收尾、补做三种复盘都用它（provider 与模型号，经本会话同一个模型接入发出）；
+// 不指定时压缩前与收尾复盘用会话本身的模型，补做用本次启动的模型。跑批器不给，行为不变
+export interface ReviewModelChoice {
+  provider: string;
+  modelId: string;
+}
+
+// 配置文件里的写法（provider、model）→ 装配用的写法
+export function reviewModelChoice(
+  configured: { provider: string; model: string } | undefined
+): ReviewModelChoice | undefined {
+  return configured !== undefined
+    ? { provider: configured.provider, modelId: configured.model }
+    : undefined;
+}
 
 // 复盘上限（243）：校准时临时取 40 轮、15 分钟；可配置
 export interface ReviewBudget {
@@ -86,6 +103,8 @@ export interface MemoryReviewInput {
   sourceSessionId: SessionId;
   // 收尾复盘的验证结论（按 review-text.ts 的填法）；压缩前复盘不给
   verdict?: string;
+  // 补做（295）：此前的复盘已覆盖到上下文里的第几条消息；在场即在指令第一段之后写明，仍给完整上下文
+  reviewedUpTo?: number;
   budget: ReviewBudget;
   // 用分叉出的会话号与还原的消息装配复盘运行面（系统提示取来源冻结的原文、只放行两件工具，由调用方装配）；
   // covers 为这次复盘覆盖到来源会话的哪一条记录（283 补充），调用方写进复盘会话的 Run 开始条目
@@ -175,6 +194,10 @@ export async function runMemoryReview(input: MemoryReviewInput): Promise<ReviewO
       input.kind === "closing"
         ? reviewInstruction({ kind: "closing", verdict: input.verdict ?? "", memory })
         : reviewInstruction({ kind: "pre-compaction", memory });
+    const text =
+      input.reviewedUpTo !== undefined
+        ? withReviewedUpTo(instruction, input.reviewedUpTo)
+        : instruction;
     const current = input.open(forked);
     runtime = current;
     const stop = (cause: RunStopCause) => {
@@ -196,7 +219,7 @@ export async function runMemoryReview(input: MemoryReviewInput): Promise<ReviewO
     });
     timer = setTimeout(() => stop("wall-clock-limit"), input.budget.wallClockMs);
     input.abortSignal?.addEventListener("abort", onAbort, { once: true });
-    const result = await current.run(instruction);
+    const result = await current.run(text);
     if (result.status === "aborted") {
       return limitHit !== undefined
         ? outcome(limitHit)

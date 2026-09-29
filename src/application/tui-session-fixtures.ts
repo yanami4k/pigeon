@@ -12,17 +12,22 @@ import {
   readSessionFile,
   type StoredEntry,
 } from "../persistence/session-reader.ts";
+import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import type { RunStartData } from "../state/session-entries.ts";
 import { noMcpSession } from "./mcp.ts";
+import type { ReviewModelChoice } from "./memory-review.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import { closeTuiSession } from "./tui-exit.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
 export interface LoggedCall {
-  kind: "main" | "review";
+  kind: "main" | "review" | "summary";
+  // 请求发往的 provider 与模型号
+  provider: string;
+  model: string;
   messages: Array<{ role: string; content?: unknown }>;
 }
 
@@ -40,7 +45,10 @@ function isReview(messages: LoggedCall["messages"]): boolean {
   return messages.some((m) => m.role === "user" && textOf(m).startsWith("【复盘 v1"));
 }
 
-// 按请求分派的假模型
+// 压缩摘要请求的系统提示开头（上游口径）
+const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";
+
+// 按请求分派的假模型：压缩摘要、复盘、干活的请求各走各的剧本
 export function routedModel(input: {
   main?: FakeReply[];
   review?: FakeReply[];
@@ -55,15 +63,24 @@ export function routedModel(input: {
       ? { failOnCall: input.reviewFailOnCall, failureMessage: "模拟复盘请求失败" }
       : {}),
   });
+  const summary = createFakeStreamFn({ replies: [{ text: "## Goal\n摘要" }] });
   const calls: LoggedCall[] = [];
   const streamFn: StreamFn = async (model, context, options) => {
     const messages = structuredClone(context.messages) as unknown as LoggedCall["messages"];
-    const kind = isReview(messages) ? "review" : "main";
-    calls.push({ kind, messages });
+    const kind = (context.systemPrompt ?? "").startsWith(SUMMARY_PROMPT_HEAD)
+      ? "summary"
+      : isReview(messages)
+        ? "review"
+        : "main";
+    calls.push({ kind, provider: String(model.provider), model: model.id, messages });
     if (kind === "review" && input.reviewDelayMs !== undefined) {
       await new Promise((resolve) => setTimeout(resolve, input.reviewDelayMs));
     }
-    return (kind === "review" ? review : main)(model, context, options);
+    return (kind === "summary" ? summary : kind === "review" ? review : main)(
+      model,
+      context,
+      options
+    );
   };
   return { streamFn, calls };
 }
@@ -96,13 +113,24 @@ export function initRepo(root: string, files: Record<string, string>): void {
   git(root, ["commit", "-q", "-m", "init"]);
 }
 
-// 开一个终端界面会话（与 tui/main.ts 同一套装配），可选地跑一次
+// 终端界面会话的句柄：再跑一次、落盘、按退出路径收尾
+export interface TuiSessionHandle {
+  sessionId: SessionId;
+  run(task: string): Promise<void>;
+  flush(): Promise<void>;
+  close(): Promise<void>;
+}
+
+// 开一个终端界面会话（与 tui/main.ts 同一套装配），可选地跑一次；resume 给出会话号即续开它（决策 183 的续跑）
 export async function openTuiSession(input: {
   root: string;
   streamFn: StreamFn;
   task?: string;
-}): Promise<{ sessionId: SessionId; close(): Promise<void> }> {
-  const sessionId = newSessionId();
+  resume?: SessionId;
+  reviewModel?: ReviewModelChoice;
+  compaction?: CompactionConfigInput;
+}): Promise<TuiSessionHandle> {
+  const sessionId = input.resume ?? newSessionId();
   const opened = await openSessionRuntime({
     governanceRoot: input.root,
     sessionId,
@@ -113,15 +141,19 @@ export async function openTuiSession(input: {
       modelId: "custom",
       persistThinking: true,
       pushedMemory: true,
+      ...(input.reviewModel !== undefined ? { reviewModel: input.reviewModel } : {}),
+      ...(input.compaction !== undefined ? { compaction: input.compaction } : {}),
     },
     homeDir: input.root,
     startMcp: noMcpSession,
+    ...(input.resume !== undefined ? { resume: true } : {}),
   });
-  if (input.task !== undefined) {
-    await opened.bundle.adapter.run(input.task);
-  }
-  return {
+  const handle: TuiSessionHandle = {
     sessionId,
+    run: async (task) => {
+      await opened.bundle.adapter.run(task);
+    },
+    flush: () => opened.bundle.sessionStore.flush(),
     close: () =>
       closeTuiSession({
         governanceRoot: input.root,
@@ -130,6 +162,10 @@ export async function openTuiSession(input: {
         workerGraceMs: 0,
       }),
   };
+  if (input.task !== undefined) {
+    await handle.run(input.task);
+  }
+  return handle;
 }
 
 // 会话主分支上的条目（session-reader 口径，带 seq）

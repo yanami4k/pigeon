@@ -20,6 +20,7 @@ import { type AttemptVerification, attachAttemptVerification } from "./attempt-v
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { runRetryOnFail } from "./fork.ts";
 import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
+import type { ReviewModelChoice } from "./memory-review.ts";
 import {
   buildRuntime,
   disposeRuntime,
@@ -46,6 +47,8 @@ export interface SessionRuntimeFlags {
   // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）与学到的记忆的总量上限
   pushedMemory?: boolean;
   memoryLimitChars?: number;
+  // 决策 296：复盘模型（日常入口读 .pigeon/memory-review.json 给出；没指定即缺省）
+  reviewModel?: ReviewModelChoice;
 }
 
 // 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省）
@@ -54,16 +57,19 @@ function interactiveLearnedMemory(flags: SessionRuntimeFlags): LearnedMemoryConf
     ? {
         conflict: "interactive",
         ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
+        ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
       }
     : undefined;
 }
 
-// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关与上限
+// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关、上限与复盘模型
 export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
   pushedMemory?: boolean;
   memoryLimitChars?: number;
+  reviewModel?: ReviewModelChoice;
 } {
   return {
+    ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
     ...(flags.pushedMemory === true ? { pushedMemory: true } : {}),
     ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
   };

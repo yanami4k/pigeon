@@ -59,6 +59,8 @@ function routed(input: {
   const summary = createFakeStreamFn({ replies: input.summary ?? [{ text: "## Goal\n摘要" }] });
   const calls: Array<{
     kind: "main" | "review" | "summary";
+    // 请求发往的模型号
+    model: string;
     system: string;
     tools: string[];
     messages: LoggedMessage[];
@@ -73,6 +75,7 @@ function routed(input: {
         : "main";
     calls.push({
       kind,
+      model: model.id,
       system,
       tools: (context.tools ?? []).map((tool) => tool.name),
       messages: structuredClone(messages),
@@ -361,6 +364,10 @@ test("压缩前复盘：经压缩前回调触发、用压缩前指令，期间�
     assert.ok(pre.includes("还在处理中的问题留给会话结束时的复盘，现在不写。"));
     const closing = textOf(reviewCalls.at(-1)?.messages.at(-1) as LoggedMessage);
     assert.ok(closing.startsWith("【复盘 v1】这次会话的工作已经结束。"));
+    // 296：没指定复盘模型时，压缩前与收尾复盘都用这一步本身的模型
+    const mainModel = calls.find((call) => call.kind === "main")?.model;
+    assert.ok(mainModel !== undefined);
+    assert.ok(reviewCalls.every((call) => call.model === mainModel));
     // 压缩前复盘的会话也记种类
     const preId = result.reviews?.[0]?.sessionId;
     assert.ok(preId !== undefined);
@@ -382,6 +389,45 @@ test("压缩前复盘：经压缩前回调触发、用压缩前指令，期间�
       .filter((entry) => entry.type === "message")
       .map((entry) => entry.id);
     assert.ok(sourceMessageIds.includes(preCovers.entryId));
+  }));
+
+test("复盘模型（296）：指定后压缩前与收尾复盘都用它，干活的请求仍用这一步本身的模型", () =>
+  withRoot(async (root) => {
+    writeFileSync(join(root, "a.txt"), "内容\n");
+    const { streamFn, calls } = routed({
+      main: [
+        {
+          text: "我先读一下文件。".repeat(20),
+          toolCalls: [{ name: "read_file", args: { path: "a.txt" } }],
+          contextTokens: 5000,
+        },
+        { text: "读完了", contextTokens: 300 },
+      ],
+      review: [{ text: "不记" }],
+    });
+    const result = await runHeadless({
+      ...base(root, streamFn),
+      task: `请读 a.txt。${"背景说明。".repeat(60)}`,
+      compaction: { thresholdTokens: 1000, keepRecentTokens: 20 },
+      reviewModel: { provider: "review-provider", modelId: "review-model" },
+    });
+    assert.deepEqual(
+      (result.reviews ?? []).map((review) => [review.kind, review.status]),
+      [
+        ["pre-compaction", "completed"],
+        ["closing", "completed"],
+      ]
+    );
+    const reviewCalls = calls.filter((call) => call.kind === "review");
+    assert.ok(reviewCalls.length >= 2);
+    assert.ok(reviewCalls.every((call) => call.model === "review-model"));
+    // 干活的请求用这一步本身的模型（复盘运行面内的压缩摘要属于复盘，随复盘模型）
+    const work = calls.filter((call) => call.kind === "main");
+    assert.ok(work.length > 0);
+    assert.ok(
+      work.every((call) => call.model !== "review-model"),
+      JSON.stringify(calls.map((call) => [call.kind, call.model]))
+    );
   }));
 
 test("开关关掉：不推送、不注册记忆工具、不复盘", () =>
