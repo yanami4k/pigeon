@@ -1,6 +1,6 @@
 // 新会话存储的自定义条目（决策 176 / 182 / 184）：会话文件是 pi 的 v4 JSONL 会话树，消息以 pi 消息条目完整存储（179），
 // Pigeon 自有的事实只以 custom 条目挂进树里（上游 entry 与 record 类型封闭，写入未知类型"写时不报、读时整个文件打不开"）。
-// 除消息外只写七种：Run 开始、Run 收尾、验证记录、代码快照、worker 派出与收尾、分叉、授权建立与撤销。
+// 除消息外只写八种：Run 开始、Run 收尾、验证记录、代码快照、worker 派出与收尾、分叉、授权建立与撤销、终端界面退出（283）。
 // 条目数据的形状与版本由 Pigeon 自己负责（上游读盘只要求 customType 是字符串）：每种数据都带 version，读者按它分派。
 // worker 与分支会话的来历不写成条目，放进会话文件头的 metadata（只在创建与分叉时写一次，177）。
 // 本文件只定义形状与写入接口，纯类型、无 IO；写者在 pi-runtime/session-store.ts，只读读取器在 persistence/session-reader.ts。
@@ -37,6 +37,7 @@ export const SessionEntryType = {
   Worker: "pigeon.worker",
   Fork: "pigeon.fork",
   Grant: "pigeon.grant",
+  Exit: "pigeon.exit",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -242,6 +243,29 @@ export const GrantRevokedDataSchema = Type.Object({
 export const GrantDataSchema = Type.Union([GrantCreatedDataSchema, GrantRevokedDataSchema]);
 export type GrantData = Static<typeof GrantDataSchema>;
 
+// 终端界面退出（283）：退出那一刻工作目录的样子，供下次启动时后台补做复盘读代码。本机 git 工作区记工作目录快照
+// （没有未提交改动时即 HEAD；另建了快照提交时带挂着它的引用）；沙箱会话不另拍，记交回的分支与提交；非 git 工作区或拍快照失败
+// 记无快照与原因。一次运行都没跑过的会话不写。会话原生视图不投影这种条目（它不属于任何 Run）
+export const ExitDataSchema = Type.Object({
+  version: VERSION,
+  exitedAt: Type.Integer({ minimum: 0 }),
+  workdir: Type.Union([
+    Type.Object({
+      kind: Type.Literal("snapshot"),
+      commit: GitObjectIdSchema,
+      head: GitObjectIdSchema,
+      ref: Type.Optional(Type.String({ minLength: 1 })),
+    }),
+    Type.Object({
+      kind: Type.Literal("sandbox"),
+      branch: Type.String({ minLength: 1 }),
+      commit: GitObjectIdSchema,
+    }),
+    Type.Object({ kind: Type.Literal("none"), reason: Type.String({ minLength: 1 }) }),
+  ]),
+});
+export type ExitData = Static<typeof ExitDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -250,7 +274,8 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Checkpoint; data: CheckpointData }
   | { customType: typeof SessionEntryType.Worker; data: WorkerData }
   | { customType: typeof SessionEntryType.Fork; data: ForkData }
-  | { customType: typeof SessionEntryType.Grant; data: GrantData };
+  | { customType: typeof SessionEntryType.Grant; data: GrantData }
+  | { customType: typeof SessionEntryType.Exit; data: ExitData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -261,6 +286,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Worker]: WorkerDataSchema,
   [SessionEntryType.Fork]: ForkDataSchema,
   [SessionEntryType.Grant]: GrantDataSchema,
+  [SessionEntryType.Exit]: ExitDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。

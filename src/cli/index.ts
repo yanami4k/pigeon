@@ -17,6 +17,7 @@ import { failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless.ts";
 import {
+  applyReviewModelConfig,
   type LaunchFlags,
   parseLaunchFlags,
   resolveRepairRounds,
@@ -271,6 +272,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
+  applyReviewModelConfig(flags, workspaceRoot);
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   try {
@@ -404,6 +406,7 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const workspaceRoot = prepareWorkspace(flags.root);
+  applyReviewModelConfig(flags, workspaceRoot);
   // 决策 142 / 143：回炉轮数——启动参数 > 项目验证配置 > 关闭；设定不成立由 runHeadless 启动报错
   const repairRounds = resolveRepairRounds(flags, workspaceRoot);
   const runOptions = {
@@ -427,6 +430,8 @@ async function runMain(argv: string[]): Promise<void> {
     // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守，收尾复盘在最后一次验证之后
     pushedMemory: flags.pushedMemory,
     ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
+    // 决策 296：复盘模型（配置里指定时）
+    ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
     spawnWorkerLimits: spawnWorkerLimitsOf(flags),
@@ -992,6 +997,7 @@ async function lineMain(argv: string[]): Promise<void> {
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）
   const workspaceRoot = prepareWorkspace(flags.root);
+  applyReviewModelConfig(flags, workspaceRoot);
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();

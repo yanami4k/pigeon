@@ -155,3 +155,39 @@ export function readSnapshotRef(repoRoot: string, ref: string): string | undefin
     return undefined;
   }
 }
+
+// ---- 后台补做复盘的读取根（决策 283）：从退出快照或沙箱交回的提交检出临时工作树，用完删除 ----
+
+// 提交在仓库里是否还在
+export function commitExists(repoRoot: string, commit: string): boolean {
+  try {
+    git(repoRoot, ["cat-file", "-e", `${commit}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 本地分支的最新提交；分支不存在或不是 git 工作区返回 undefined
+export function branchTip(repoRoot: string, branch: string): string | undefined {
+  return readSnapshotRef(repoRoot, `refs/heads/${branch}`);
+}
+
+// 在 dir 检出 commit 的临时工作树（分离头指针，不建分支、不动当前分支与工作目录）
+export function addDetachedWorktree(repoRoot: string, dir: string, commit: string): void {
+  git(repoRoot, ["worktree", "add", "--detach", "--force", dir, commit]);
+}
+
+// 删除临时工作树：先按 git 的方式删，删不掉再直接删目录并清掉登记
+export function removeWorktree(repoRoot: string, dir: string): void {
+  try {
+    git(repoRoot, ["worktree", "remove", "--force", "--force", dir]);
+  } catch {
+    rmSync(dir, { recursive: true, force: true });
+    try {
+      git(repoRoot, ["worktree", "prune"]);
+    } catch {
+      // 登记没清掉只是多一条过期登记，git 之后会自行清理
+    }
+  }
+}

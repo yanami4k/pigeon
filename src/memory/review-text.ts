@@ -60,6 +60,17 @@ export function reviewInstruction(
   ].join("\n");
 }
 
+// 补做（决策 295）：此前的复盘已覆盖到第 N 条时，在指令第一段之后加这一句（仍给完整上下文）；没有此前的复盘时不加，
+// 指令与模板 v1 逐字相同。日常使用专用，实验不经过这里
+export function reviewedUpToLine(n: number): string {
+  return `第 ${n} 条及之前已复盘，重点看之后的部分。`;
+}
+
+export function withReviewedUpTo(instruction: string, n: number): string {
+  const [opening, ...rest] = instruction.split("\n");
+  return [opening, "", reviewedUpToLine(n), ...rest].join("\n");
+}
+
 // {验证结论} 的填法（施工说明第 4 点、决策 242）。
 // verdict 为最后一次验证的结论；faultedSteps 为其中标了工具故障的步名；failureSummary 为回炉反馈的同一份失败摘要
 export type ReviewVerdictInput =

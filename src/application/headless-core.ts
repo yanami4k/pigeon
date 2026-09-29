@@ -43,6 +43,7 @@ import {
   assertReviewBudget,
   DEFAULT_REVIEW_BUDGET,
   type ReviewBudget,
+  type ReviewModelChoice,
   type ReviewObserver,
   type ReviewOutcome,
   reviewWarner,
@@ -134,6 +135,8 @@ export interface HeadlessRunOptions {
   memoryLimitChars?: number;
   // 复盘上限（每次复盘各自计；缺省 40 轮、15 分钟，243）
   reviewBudget?: ReviewBudget;
+  // 复盘模型（决策 296）：日常入口按配置给，在场即压缩前与收尾复盘都用它；跑批器不给（复盘用这一步本身的模型）
+  reviewModel?: ReviewModelChoice;
   // 每次复盘开始与结束时调用（跑批器据此在复盘前后读网关计量）
   onReview?: ReviewObserver;
   // 决策 264–267：派 worker（给主 agent 注册 spawn_worker）；缺省关着——pigeon run 由启动参数缺省打开，跑批器各条件明确关掉。
@@ -291,6 +294,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ? {
         conflict: "unattended",
         ...(options.memoryLimitChars !== undefined ? { limitChars: options.memoryLimitChars } : {}),
+        ...(options.reviewModel !== undefined ? { reviewModel: options.reviewModel } : {}),
         review: {
           budget: reviewBudget,
           observer: {
@@ -655,9 +659,17 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
       open: (review) =>
         createDetachedRuntime({
           ...surface,
+          ...(options.reviewModel !== undefined
+            ? { provider: options.reviewModel.provider, modelId: options.reviewModel.modelId }
+            : {}),
           sessionId: review.sessionId,
           initialMessages: review.initialMessages,
-          reviewSession: { kind: "closing", systemPrompt, sourceSessionId: sessionId },
+          reviewSession: {
+            kind: "closing",
+            systemPrompt,
+            sourceSessionId: sessionId,
+            covers: review.covers,
+          },
           learnedMemory: { ...learnedMemory, review: false },
           budget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
         }),
