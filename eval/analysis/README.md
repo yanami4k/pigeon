@@ -21,7 +21,8 @@ python -m venv .venv
 ```sh
 # 正式跑：四格与最简 agent 的结果文件可一并给出，也可分多个文件
 python -m pigeon_analysis formal --results <results.jsonl> [...] --out <输出目录> --tasks 全部题的步序.json \
-  [--classes-summary 两类用例预计算汇总.json] [--minimal-reserve 元]
+  [--classes-summary 两类用例预计算汇总.json] [--minimal-reserve 元] \
+  [--unguessable data/unguessable-interfaces.json [--case-results <输出目录>/rejudge/cases.jsonl ...]]
 
 # 校准
 python -m pigeon_analysis calibration --results <results.jsonl> [...] --out <输出目录> \
@@ -32,7 +33,10 @@ python -m pigeon_analysis unguessable --manifest <流清单 strands.json> --repo
   --classes-dir <两类用例预计算目录> --out data/unguessable-interfaces.json
 ```
 
-入库的清单为 data/unguessable-interfaces.json，在看到正式结果之前生成。
+入库的清单为 data/unguessable-interfaces.json，在看到正式结果之前生成。formal 给了 --unguessable 即另做剔除这些用例的
+敏感性分析（与主判据同一检验、置信区间与 Holm 校正），报告与主判据并列。剔除用例在各行是否通过，优先取跑批器
+eval stream-rejudge 按保存的改动重判、与原结果行逐项一致的逐用例结果（--case-results），其次取结果行的失败用例列表；
+都定不了的行从该分析中去掉并在报告里列出。
 
 --tasks 与 --eligible 给的是结果行的步序（seq，即该题在全流中的位置），不是清单里从 1 起的题号；结果行里有步序不在所给列表里即报错。
 
@@ -55,6 +59,7 @@ python -m pytest -m "not slow"   # 跳过模拟检验
 - pigeon_analysis/secondary.py：次要判据
 - pigeon_analysis/sensitivity.py：设计灵敏度与第 3 遍规则
 - pigeon_analysis/unguessable.py：接口不可猜的测试文件清单（316）
+- pigeon_analysis/interface.py：剔除接口不可猜用例的敏感性分析（316）
 - pigeon_analysis/calibration.py：校准取值规则与抽题
 - pigeon_analysis/wording.py：报告的固定措辞
 - pigeon_analysis/reader.py：结果行 → 规整表、身份头 → 设置（跑批器字段变动只改这里）
