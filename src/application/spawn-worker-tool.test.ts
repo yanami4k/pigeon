@@ -85,6 +85,8 @@ interface Script {
   behavior: Behavior;
   summary?: string;
   tokensPerTurn?: number;
+  // 递来的话随即进它的下一轮；不给即在它结束之前都没进对话
+  consumesMessages?: boolean;
 }
 
 class FakeRuntime implements WorkerRuntimeHandle {
@@ -148,8 +150,19 @@ class FakeRuntime implements WorkerRuntimeHandle {
     this.#stop.resolve();
   }
 
-  notify(text: string): void {
+  notify(text: string): string {
     this.notes.push(text);
+    return `note-${this.notes.length}`;
+  }
+
+  noticeDelivered(): boolean {
+    return this.script.consumesMessages === true;
+  }
+
+  readonly withdrawn: string[] = [];
+  withdrawNotice(key: string): boolean {
+    this.withdrawn.push(key);
+    return true;
   }
 
   async transcript(): Promise<string> {
@@ -627,6 +640,7 @@ test("worker_status 与 message_worker：列出状态与标签、已结束的附
     scriptFor: ({ name }) => ({
       behavior: name === "done" ? "complete" : "hang",
       summary: "结论在此",
+      consumesMessages: true,
     }),
   });
   await call(h, { role: "explorer", task: "一", name: "busy", label: "L" });
@@ -812,4 +826,19 @@ test("多份尝试：派出即返回名单，后台跑完按验证标签汇总�
       ].join("\n\n")
   );
   assert.equal(h.budget.spawned(), 3);
+});
+
+test("message_worker 未送达：worker 在下一轮之前结束（最后一轮之后才递到），如实交回未送达并撤回，不静默丢掉", async () => {
+  const h = harness({ scriptFor: () => ({ behavior: "hang", summary: "收尾了" }) });
+  await call(h, { role: "explorer", task: "一", name: "closing" });
+  const pending = h.message.execute("m", { worker: "closing", message: "再看看 b.ts" });
+  // 它没再开下一轮就结束
+  h.runtimes.get("closing")?.release();
+  const result = await pending;
+  assert.equal(
+    textOf(result),
+    "未送达：worker closing 已结束或正在收尾。要这段话生效，另派一个 worker 或自己做。"
+  );
+  assert.equal(result.details.delivered, false);
+  assert.deepEqual(h.runtimes.get("closing")?.withdrawn, ["note-1"]);
 });

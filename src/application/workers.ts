@@ -612,9 +612,9 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
     structured: () => structuredResultOf(summaryOf(bundle)),
     continueRun: () => adapter.continueRun(),
     // 决策 297：发给 worker 的话进它的下一轮
-    notify: (text) => {
-      adapter.notify(text);
-    },
+    notify: (text) => adapter.notify(text),
+    noticeDelivered: (key) => adapter.noticeDelivered(key),
+    withdrawNotice: (key) => adapter.withdrawNotice(key),
     transcript: () => bundle.sessionStore.filePath(),
     // 决策 299：再派出时的落盘口
     childLog: () => childFamilySink(bundle.sessionStore),
@@ -672,9 +672,9 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       }
       return current.adapter.continueRun();
     },
-    notify: (text) => {
-      bundle?.adapter.notify(text);
-    },
+    notify: (text) => bundle?.adapter.notify(text),
+    noticeDelivered: (key) => bundle?.adapter.noticeDelivered(key) ?? false,
+    withdrawNotice: (key) => bundle?.adapter.withdrawNotice(key) ?? false,
     transcript: async () => {
       const current = await settled.catch(() => undefined);
       return current?.sessionStore.filePath();

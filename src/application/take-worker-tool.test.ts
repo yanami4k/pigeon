@@ -227,7 +227,7 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
         awaitResult: () => Promise.reject(new Error("不等")),
         cancel: async () => {},
         wait: () => Promise.reject(new Error("不等")),
-        send: () => {},
+        send: async () => "delivered" as const,
         subscribe: () => () => {},
       },
       governanceRoot: f.main,

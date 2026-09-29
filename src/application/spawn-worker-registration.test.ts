@@ -198,7 +198,7 @@ test("可并行：同一次回复里两次调用 spawn_worker 都立即返回派
       awaitResult: () => never.promise,
       cancel: async () => {},
       wait: async () => ({ settled: [], pending: [], timedOut: true }),
-      send: () => {},
+      send: async () => "delivered" as const,
       subscribe: () => () => {},
     },
   });

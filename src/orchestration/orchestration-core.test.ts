@@ -24,7 +24,7 @@ import {
 } from "./workers.ts";
 
 // silent：不发任何事件、等中止；ask：请示一次跑命令，批了即完成、被拒即等中止；spawn-child：再派一个 child 并等它（嵌套）
-type Behavior = "complete" | "hang" | "silent" | "ask" | "turns";
+type Behavior = "complete" | "hang" | "silent" | "ask" | "turns" | "tool";
 
 interface Log {
   spawned: ChildSpawnedInput[];
@@ -95,6 +95,19 @@ class FakeRuntime implements WorkerRuntimeHandle {
       case "silent":
         await this.#stop.promise;
         return { status: "aborted" as const, runId };
+      case "tool": {
+        const payload = { toolCallId: "call-t", toolName: this.toolName, args: {} };
+        for (const listener of [...this.listeners]) {
+          listener({ kind: "tool.proposed", payload } as unknown as EventEnvelope);
+        }
+        await Promise.race([this.#release.promise, this.#stop.promise]);
+        if (this.#interrupted) return { status: "aborted" as const, runId };
+        for (const listener of [...this.listeners]) {
+          listener({ kind: "tool.settled", payload } as unknown as EventEnvelope);
+        }
+        this.emit("turn.completed");
+        return { status: "completed" as const, runId };
+      }
       case "hang":
         await Promise.race([this.#release.promise, this.#stop.promise]);
         if (this.#interrupted) return { status: "aborted" as const, runId };
@@ -123,9 +136,13 @@ class FakeRuntime implements WorkerRuntimeHandle {
     this.#stop.resolve();
   }
 
-  notify(text: string): void {
+  notify(text: string): string {
     this.notes.push(text);
+    return `note-${this.notes.length}`;
   }
+
+  // 工具调用的工具名（tool 行为）
+  toolName = "run_command";
 
   async transcript(): Promise<string> {
     return `/sessions/${this.request.sessionId}.jsonl`;
@@ -496,4 +513,54 @@ test("补批后能续做：同一个会话与工作树重新装运行面，放�
   );
   // 放行只一次：同一调用再请示照常走（无人值守即再搁下）
   assert.throws(() => orchestrator.resume(newSessionId() as SessionId), /未知 worker/);
+});
+
+test("自带超时的工具执行期间暂停卡住计时：命令超时配成大于卡住时限、命令跑满也不判卡住", async () => {
+  const { orchestrator, rt } = setup({ stallMs: 40, behaviorFor: () => "tool" });
+  const id = orchestrator.spawn({ role: "tester", task: "跑长命令", name: "long-run" });
+  // 命令跑了卡住时限的 5 倍（其超时由工具自己兜底）
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(orchestrator.status().find((worker) => worker.sessionId === id)?.state, "running");
+  rt("long-run").release();
+  assert.equal((await orchestrator.awaitResult(id)).status, "completed");
+});
+
+test("没有自带超时的工具执行期间照常计时：静默超过卡住时限即判卡住", async () => {
+  // 替身在开跑时才取工具名：先让它排队、改成不自带超时的工具，再放它开跑
+  const slow = setup({
+    stallMs: 40,
+    maxConcurrent: 1,
+    behaviorFor: () => "tool",
+  });
+  const blocker = slow.orchestrator.spawn({ role: "explorer", task: "占位", name: "blocker" });
+  const target = slow.orchestrator.spawn({ role: "explorer", task: "读", name: "reader" });
+  slow.rt("reader").toolName = "read_file";
+  await slow.orchestrator.cancel(blocker);
+  const outcome = await slow.orchestrator.awaitResult(target);
+  assert.equal(outcome.status, "stalled");
+  assert.equal(outcome.errorKind, "stalled");
+});
+
+test("send 交回是否送达：进了它的下一轮为 delivered；它在那之前结束为 undelivered，没递出的撤回", async () => {
+  const { orchestrator, rt } = setup({ behaviorFor: () => "hang" });
+  const id = orchestrator.spawn({ role: "explorer", task: "一", name: "w" });
+  const runtime = rt("w");
+  let delivered = false;
+  const withdrawn: string[] = [];
+  Object.assign(runtime, {
+    noticeDelivered: () => delivered,
+    withdrawNotice: (key: string) => {
+      withdrawn.push(key);
+      return true;
+    },
+  });
+  const first = orchestrator.send(id, "第一句");
+  delivered = true;
+  runtime.emit("turn.completed");
+  assert.equal(await first, "delivered");
+  delivered = false;
+  const second = orchestrator.send(id, "第二句");
+  runtime.release();
+  assert.equal(await second, "undelivered");
+  assert.deepEqual(withdrawn, ["note-2"]);
 });

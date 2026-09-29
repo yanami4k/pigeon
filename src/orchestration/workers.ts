@@ -47,6 +47,12 @@ export const DEFAULT_MAX_WORKER_DEPTH = 1;
 export const DEFAULT_WORKER_STALL_MS = 10 * 60_000;
 // 决策 303：worker 的审批请求等这么久无人批即作为可恢复错误交回
 export const DEFAULT_WORKER_APPROVAL_TIMEOUT_MS = 5 * 60_000;
+// 决策 298（验收修订）：自带超时的工具——执行期间（提出到结束）卡住监控暂停计时，由工具自己的超时兜底；其余工具照常计时
+export const DEFAULT_SELF_TIMED_TOOLS: readonly string[] = [
+  "run_command",
+  "web_search",
+  "web_fetch",
+];
 // 自述摘要进 child.settled 的上限（全文在 worker 会话的消息里）
 export const WORKER_SUMMARY_MAX_CHARS = 2000;
 
@@ -84,7 +90,10 @@ export interface WorkerRuntimeHandle {
   // M7（决策 077 / 079）：从已有消息续跑（分叉续跑）；不实现即不支持
   continueRun?(): Promise<WorkerRunResult>;
   // 决策 294、297：给在跑的 worker 递一段话，进它的下一轮；不实现即不支持发消息
-  notify?(text: string): void;
+  // 返回撤回与查询用的键；noticeDelivered / withdrawNotice 用它查是否已进对话、撤回还没递出的
+  notify?(text: string): string | undefined;
+  noticeDelivered?(key: string): boolean;
+  withdrawNotice?(key: string): boolean;
   // 决策 298：会话记录位置（worker 会话文件的路径）；不实现即结果里不带
   transcript?(): Promise<string | undefined>;
   // 决策 299：本 worker 再派出时的落盘口（它自己的会话存储）；不实现即不能作派出方
@@ -246,6 +255,8 @@ export interface WorkerOrchestratorOptions {
   maxDepth?: number;
   // 决策 298：卡住判定的时长（缺省 10 分钟）
   stallMs?: number;
+  // 自带超时的工具名（缺省 DEFAULT_SELF_TIMED_TOOLS）：执行期间卡住监控暂停
+  selfTimedTools?: readonly string[];
   // 决策 303：审批请求的等待时限（缺省 5 分钟）
   approvalTimeoutMs?: number;
   // 决策 303：无人值守（pigeon run）——worker 需请示时不等，直接作为可恢复错误交回
@@ -708,15 +719,49 @@ export class WorkerOrchestrator {
   }
 
   // 决策 294、297：给在跑的 worker 递一段话，进它的下一轮
-  send(sessionId: SessionId, text: string): void {
+  // 交回是否送达：进了它的下一轮为 delivered；它在那之前结束（最后一轮之后才递到、正在收尾）为 undelivered，没递出的撤回，
+  // 不静默丢掉（验收修订）。运行面不支持查询送达的，递出即按 delivered
+  send(sessionId: SessionId, text: string): Promise<"delivered" | "undelivered"> {
     const entry = this.#require(sessionId);
     if (entry.state !== "running" && entry.state !== "queued") {
       throw new WorkerSpawnError(`worker ${entry.name} 已收尾，收不到消息`);
     }
-    if (entry.runtime.notify === undefined) {
+    const runtime = entry.runtime;
+    if (runtime.notify === undefined) {
       throw new WorkerSpawnError(`worker ${entry.name} 的运行面不支持发消息`);
     }
-    entry.runtime.notify(text);
+    const key = runtime.notify(text);
+    const delivered = runtime.noticeDelivered;
+    if (key === undefined || delivered === undefined) {
+      return Promise.resolve("delivered");
+    }
+    if (delivered.call(runtime, key)) {
+      return Promise.resolve("delivered");
+    }
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (result: "delivered" | "undelivered"): void => {
+        if (finished) return;
+        finished = true;
+        unsubscribe();
+        resolve(result);
+      };
+      const unsubscribe = runtime.subscribe(() => {
+        if (delivered.call(runtime, key)) finish("delivered");
+      });
+      entry.done.then(
+        () => {
+          if (finished) return;
+          if (delivered.call(runtime, key)) {
+            finish("delivered");
+            return;
+          }
+          runtime.withdrawNotice?.(key);
+          finish("undelivered");
+        },
+        () => finish("undelivered")
+      );
+    });
   }
 
   // 决策 303：补批续做——已收尾的 worker 回到同一个会话与工作树接着做。approve 为真且它是因请示搁下的，放行它重新发起的
@@ -1009,13 +1054,16 @@ export class WorkerOrchestrator {
       });
     };
     const stallMs = this.#options.stallMs ?? DEFAULT_WORKER_STALL_MS;
+    const selfTimed = new Set(this.#options.selfTimedTools ?? DEFAULT_SELF_TIMED_TOOLS);
+    // 正在执行的自带超时的工具调用（提出到结束）
+    const timedCalls = new Set<string>();
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
     const armStall = (): void => {
       clearTimeout(stallTimer);
       if (skipRun) return;
       stallTimer = setTimeout(() => {
-        // 等审批不算卡住：等审批期间顺延
-        if (entry.pendingApprovals > 0) {
+        // 等审批、自带超时的工具执行中都不算卡住：顺延
+        if (entry.pendingApprovals > 0 || timedCalls.size > 0) {
           armStall();
           return;
         }
@@ -1041,6 +1089,13 @@ export class WorkerOrchestrator {
           }
         });
     const unsubscribe = runtime.subscribe((event) => {
+      if (event.kind === "tool.proposed" || event.kind === "tool.settled") {
+        const payload = event.payload as { toolCallId?: string; toolName?: string } | undefined;
+        if (payload?.toolCallId !== undefined && selfTimed.has(payload.toolName ?? "")) {
+          if (event.kind === "tool.proposed") timedCalls.add(payload.toolCallId);
+          else timedCalls.delete(payload.toolCallId);
+        }
+      }
       armStall();
       for (const watcher of watchers) {
         try {

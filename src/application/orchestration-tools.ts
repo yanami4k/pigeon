@@ -149,6 +149,9 @@ export const ORCHESTRATION_TEXTS = {
   unknown: (name: string) => `没有名为 ${name} 的 worker；用 spawn_worker 交回的名字。`,
   noWorkers: "还没有派出 worker。",
   messageSent: (name: string) => `已把话递给 worker ${name}，它在下一轮看到。`,
+  // 验收修订：它在下一轮之前结束（最后一轮之后才递到、正在收尾），如实交回
+  messageUndelivered: (name: string) =>
+    `未送达：worker ${name} 已结束或正在收尾。要这段话生效，另派一个 worker 或自己做。`,
   messageSettled: (name: string) => `worker ${name} 已结束，收不到消息。`,
   stopRequested: (name: string) => `已停掉 worker ${name}；它已做的改动留在分支上，结果照常交回。`,
   stopSettled: (name: string) => `worker ${name} 已结束，不需要停。`,
@@ -356,11 +359,19 @@ export function createMessageWorkerTool(
           delivered: false,
         });
       }
-      host.orchestrator.send(worker.sessionId, `[来自派出方的消息] ${params.message}`);
-      return reply(ORCHESTRATION_TEXTS.messageSent(worker.name), {
-        worker: worker.name,
-        delivered: true,
-      });
+      const sent = await host.orchestrator.send(
+        worker.sessionId,
+        `[来自派出方的消息] ${params.message}`
+      );
+      return sent === "delivered"
+        ? reply(ORCHESTRATION_TEXTS.messageSent(worker.name), {
+            worker: worker.name,
+            delivered: true,
+          })
+        : reply(ORCHESTRATION_TEXTS.messageUndelivered(worker.name), {
+            worker: worker.name,
+            delivered: false,
+          });
     },
   };
 }
