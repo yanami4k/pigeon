@@ -33,7 +33,7 @@ python -m pigeon_analysis unguessable --manifest <流清单 strands.json> --repo
   --classes-dir <两类用例预计算目录> --out data/unguessable-interfaces.json
 ```
 
-入库的清单为 data/unguessable-interfaces.json，在看到正式结果之前生成。formal 给了 --unguessable 即另做剔除这些用例的
+入库的清单为 data/unguessable-interfaces.json，在看到正式结果之前生成；入库前以仓库的 biome 排版（只改空白，内容不变）。formal 给了 --unguessable 即另做剔除这些用例的
 敏感性分析（与主判据同一检验、置信区间与 Holm 校正），报告与主判据并列。剔除用例在各行是否通过，优先取跑批器
 eval stream-rejudge 按保存的改动重判、与原结果行逐项一致的逐用例结果（--case-results），其次取结果行的失败用例列表；
 都定不了的行从该分析中去掉并在报告里逐行列出原因；去掉的行超过该分析所用行数的 5% 时，报告在结论一节与敏感性

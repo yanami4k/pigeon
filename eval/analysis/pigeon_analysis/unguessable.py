@@ -345,5 +345,5 @@ def generate(manifest: Path, repo: Path, classes_dir: Path, out: Path) -> dict[s
     steps = [s for s in json.loads(manifest.read_text(encoding="utf-8"))["steps"] if s["kind"] == "task"]
     read, tree = git_reader(repo)
     data = build_list(steps, load_fail_to_pass(steps, classes_dir), read, tree)
-    out.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8", newline="\n")
+    out.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     return data
