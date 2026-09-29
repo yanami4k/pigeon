@@ -15,6 +15,7 @@ import {
 } from "../state/loop-guard-config.ts";
 import type { StoreSessionView } from "../state/session-judge.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "./headless.ts";
+import { loadSessionHistory } from "./history.ts";
 import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
 
 const NODE = `"${process.execPath}"`;
@@ -124,6 +125,12 @@ test("pigeon run：第 5 轮提醒、第 10 轮再提醒、第 20 轮叫停；�
     );
     assert.equal(stored.filter((text) => text.includes("[打转提醒]")).length, 2);
     assert.equal(view.runs.at(-1)?.end?.ending, "looping");
+    // /resume 回看历史：两次提醒都是系统行，不显示成人输入的话
+    const history = loadSessionHistory(repo.root, result.sessionId);
+    const shown = history.filter((line) => line.text.includes("[打转提醒]"));
+    assert.equal(shown.length, 2);
+    assert.ok(shown.every((line) => line.kind === "notice" && line.text.startsWith("[打转提醒]")));
+    assert.ok(history.some((line) => line.kind === "user" && line.text === "> 看看 a.ts"));
   } finally {
     repo.cleanup();
   }

@@ -7,8 +7,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { newSessionId } from "../state/ids.ts";
-import { DEFAULT_HISTORY_LIMIT, type HistoryLine, loadSessionHistory } from "./history.ts";
+import { newRunId, newSessionId } from "../state/ids.ts";
+import type { ViewMessage } from "../state/session-view.ts";
+import {
+  DEFAULT_HISTORY_LIMIT,
+  type HistoryLine,
+  loadSessionHistory,
+  messageLines,
+} from "./history.ts";
 import { seedToolRun } from "./history-fixtures.ts";
 import { createFixtureSession, forkFixture } from "./session-store-fixtures.ts";
 
@@ -115,3 +121,22 @@ test("分支会话只画自己的部分；未收尾的 Run 没有结束标记；
       ["notice", "[该会话在会话存储里没有记录，这里不显示历史]"],
     ]);
   }));
+
+test("回看历史：打转提醒与 worker 通知显示成系统行（同实时），人输入的话照旧带 > 前缀", () => {
+  const message = (text: string): ViewMessage => ({
+    entryId: "e",
+    runId: newRunId(),
+    runSeq: 1,
+    role: "user",
+    timestamp: 0,
+    blocks: [{ type: "text", text }],
+    raw: {},
+  });
+  assert.deepEqual(messageLines(message("[打转提醒] 最近连续 5 轮……")), [
+    { kind: "notice", text: "[打转提醒] 最近连续 5 轮……" },
+  ]);
+  assert.deepEqual(messageLines(message("[worker 通知] worker a（explorer）已完成。")), [
+    { kind: "notice", text: "[worker 通知] worker a（explorer）已完成。" },
+  ]);
+  assert.deepEqual(messageLines(message("继续")), [{ kind: "user", text: "> 继续" }]);
+});
