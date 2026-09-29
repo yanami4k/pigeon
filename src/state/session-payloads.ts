@@ -161,6 +161,23 @@ export const SessionHeaderInputSchema = Type.Object({
 });
 export type SessionHeaderInput = Static<typeof SessionHeaderInputSchema>;
 
+// 决策 312：脚本编排派出的 worker 在派出与收尾条目上加记的字段（不新增记录种类）——脚本运行号、调用指纹，接力时记上游 worker
+// 的会话号（续跑时据此判断下游能否复用：上游重做了，下游随之重做）
+export const ScriptSpawnTagSchema = Type.Object({
+  runId: Type.String({ minLength: 1 }),
+  fingerprint: Type.String({ minLength: 1 }),
+  relayFrom: Type.Optional(SessionIdSchema),
+});
+export type ScriptSpawnTag = Static<typeof ScriptSpawnTagSchema>;
+
+// 收尾条目上的：运行号、指纹与 worker 交回的结构化数据（续跑复用时按输出格式重新校验）
+export const ScriptSettleTagSchema = Type.Object({
+  runId: Type.String({ minLength: 1 }),
+  fingerprint: Type.String({ minLength: 1 }),
+  structured: Type.Optional(Type.Unknown()),
+});
+export type ScriptSettleTag = Static<typeof ScriptSettleTagSchema>;
+
 export const ChildSpawnedInputSchema = Type.Object({
   ...OptionalRunId,
   childSessionId: SessionIdSchema,
@@ -175,6 +192,8 @@ export const ChildSpawnedInputSchema = Type.Object({
   limits: WorkerLimitsSchema,
   workspace: WorkerWorkspaceSchema,
   spawnedAt: Type.Integer({ minimum: 0 }),
+  // 决策 312：脚本编排派出的调用
+  script: Type.Optional(ScriptSpawnTagSchema),
 });
 export type ChildSpawnedInput = Static<typeof ChildSpawnedInputSchema>;
 
@@ -192,6 +211,8 @@ export const ChildSettledInputSchema = Type.Object({
   // 完成的模型轮次数
   turns: Type.Integer({ minimum: 0 }),
   settledAt: Type.Integer({ minimum: 0 }),
+  // 决策 312：脚本编排派出的调用
+  script: Type.Optional(ScriptSettleTagSchema),
 });
 export type ChildSettledInput = Static<typeof ChildSettledInputSchema>;
 

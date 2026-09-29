@@ -37,6 +37,9 @@ export interface ApprovalRequest {
   readonly host?: string;
   // 决策 303：请求方撤回（worker 的请求等满时限无人批）——还在排队的不再上面板，已在面板上的撤下；撤回后的决定不再被采用
   readonly signal?: AbortSignal;
+  // 决策 303（脚本部分）：请求来自脚本编排派出的 worker——运行号与脚本名；kind 为"同类"的描述，在场即面板提供
+  // "本次脚本内同类都允许"（高危命令不给 kind，照常逐次请示）
+  readonly script?: { readonly runId: string; readonly title?: string; readonly kind?: string };
 }
 
 // 会话 grant 的创建面（SessionGrantStore 满足）
@@ -74,6 +77,8 @@ export interface ApprovalDecision {
   // 理由来源（决策 066）：human = 人写（TUI [r]、CLI 输入了理由）；缺省时治理层按
   // 有无理由推定（有理由 = 人写，无理由 = 系统兜底文案），记入决定记录供学习侧区分
   readonly reasonSource?: "human" | "system-default";
+  // 决策 303（脚本部分）：人选了"本次脚本内同类都允许"——批准这一次，并放行同一脚本里之后的同类请求
+  readonly scope?: "script-kind";
 }
 
 export type ApprovalHandler = (request: ApprovalRequest) => Promise<ApprovalDecision>;

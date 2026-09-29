@@ -185,6 +185,7 @@ export function workerSpawnedEntry(input: ChildSpawnedInput): SessionCustomEntry
       limits: input.limits,
       workspace: input.workspace,
       spawnedAt: input.spawnedAt,
+      ...(input.script !== undefined ? { script: input.script } : {}),
     },
   };
 }
@@ -214,6 +215,7 @@ export function workerSettledEntry(input: ChildSettledInput): SessionCustomEntry
         : {}),
       turns: input.turns,
       settledAt: input.settledAt,
+      ...(input.script !== undefined ? { script: input.script } : {}),
     },
   };
 }
