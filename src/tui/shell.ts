@@ -97,6 +97,9 @@ export interface TuiRuntimeFace {
   // 决策 189：压缩完成的提示（自动与手动）与手动压缩；缺省（替身运行面）即不提示、/compact 不可用
   subscribeCompaction?(listener: (notice: CompactionNotice) => void): () => void;
   compact?(customInstructions?: string): Promise<ManualCompactionOutcome>;
+  // 决策 297：worker 完成通知——待递的条数与空闲时只带通知跑一轮；缺省（替身运行面）即不支持
+  pendingNotices?(): number;
+  runNotices?(): Promise<RunResult>;
 }
 
 // /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文（形状定义在 resume-view.ts）
@@ -132,6 +135,8 @@ export interface TuiShellOptions {
   workerRefreshMs?: number;
   // 决策 237、245：沙箱会话——/export 手动交回；分叉、worker 与 /resume 换绑在沙箱里不支持，命令给出原因
   sandbox?: TuiSandboxFace;
+  // 决策 294 B1：/tasks 查看当前会话的任务清单（排好的文字）；返回 undefined = 清单没开；缺省 = 命令不可用
+  tasks?: () => string | undefined;
 }
 
 // 沙箱会话的命令面：交回返回给人看的一行（分支名与查看命令，或失败原因）
@@ -190,12 +195,15 @@ export class PigeonTuiShell
   // exitRequested 保证退出恰好一次（stop 后输入监听已退订，重入仅作幂等防御）
   private lastCtrlCAtValue: number | null = null;
   private exitRequested = false;
+  // 决策 294 B1：/tasks 的取数（装配方给了才有这条命令）
+  tasks?: () => string | undefined;
 
   constructor(options: TuiShellOptions) {
     this.options = options;
     this.current = { sessionId: options.sessionId, runtime: options.runtime };
     if (options.grants !== undefined) this.current.grants = options.grants;
     if (options.workers !== undefined) this.current.workers = options.workers;
+    if (options.tasks !== undefined) this.tasks = options.tasks;
     this.tui = new TuiMainScreen(options.terminal, false, options.logDir);
     // chrome 纯 ASCII（spike 纪律：歧义宽字符不进边框/标题/状态栏）；sessionId 全 ASCII ULID
     this.title = new Text(`== pigeon tui | session ${options.sessionId} ==`);
@@ -237,6 +245,38 @@ export class PigeonTuiShell
     if (unsubscribeCompaction !== undefined) {
       this.runtimeDisposers.push(unsubscribeCompaction);
     }
+    // 决策 294：worker 生命周期事件驱动状态行——agent 派出的 worker 同样即时显示与刷新
+    const unsubscribeWorkers = this.current.workers?.subscribe?.(() => {
+      refreshWorkersView(this);
+      this.tui.requestRender();
+    });
+    if (unsubscribeWorkers !== undefined) {
+      this.runtimeDisposers.push(unsubscribeWorkers);
+    }
+  }
+
+  // 决策 297：worker 完成通知到来时主 agent 空闲即叫醒——只带通知跑一轮（与提交同一条通道与 busy 语义）；
+  // 在跑、恢复或有模态挂起时不动，通知留在运行面上，下一轮或这一轮结束后再递
+  runNotices(): void {
+    const runtime = this.current.runtime;
+    if (
+      !this.started ||
+      this.running ||
+      this.resuming ||
+      this.pendingApprovalState !== null ||
+      this.pendingMenuState !== null ||
+      runtime.runNotices === undefined ||
+      (runtime.pendingNotices?.() ?? 0) === 0
+    ) {
+      return;
+    }
+    this.running = true;
+    this.updateStatus();
+    this.tui.requestRender();
+    runtime.runNotices().then(
+      (result) => this.handleRunEnd(result),
+      (error: unknown) => this.handleRunEnd(null, error)
+    );
   }
 
   stop(): void {
@@ -589,6 +629,8 @@ export class PigeonTuiShell
     this.warnEvidenceGaps();
     this.updateStatus();
     this.tui.requestRender();
+    // 决策 297：这一轮结束时还有没递出的 worker 通知，接着处理
+    setTimeout(() => this.runNotices(), 0);
   }
 
   private handleDelta(delta: StreamTextDelta): void {

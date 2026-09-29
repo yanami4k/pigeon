@@ -41,6 +41,9 @@ import {
 export const APPROVAL_CANCEL_CLOSED = "TUI 已停止，审批面板关闭，本次调用按拒绝处理";
 export const APPROVAL_CANCEL_DETACHED = "TUI 审批面板未装配，本次调用按拒绝处理";
 export const APPROVAL_CANCEL_BUSY = "已有另一审批进行中，本次调用按拒绝处理（串行不变量防御）";
+// 决策 303：worker 的请求等满时限无人批，面板撤下
+export const APPROVAL_WITHDRAWN =
+  "[审批] 请求等待超时，已撤回；这个 worker 停下交回，可稍后补批续做";
 
 export type ApprovalPanelKey = "y" | "n" | "a" | "d";
 
@@ -120,6 +123,10 @@ export function createTuiApprovalHandler(
     const target = request.grants ?? grants;
     // 不能建目录放权的会话（日常沙箱，决策 253）不提供 [d]
     const result = await panel.askApproval(request, offersDirectoryGrant(request, target));
+    // 决策 303：请求已撤回，这次决定不被采用，不再回显裁决
+    if (request.signal?.aborted === true) {
+      return { approved: false, reason: APPROVAL_WITHDRAWN, reasonSource: "system-default" };
+    }
     if (result.key === "cancel") {
       panel.noteApproval(`审批结果：人工拒绝（${result.reason}）`);
       return { approved: false, reason: result.reason };

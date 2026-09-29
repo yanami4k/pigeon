@@ -49,6 +49,8 @@ export interface CommandsHost {
   takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
+  // 决策 294 B1：任务清单（排好的文字）；undefined = 清单没开；缺省 = /tasks 不可用
+  tasks?(): string | undefined;
 }
 
 export function handleSlashCommand(host: CommandsHost, value: string): void {
@@ -153,6 +155,13 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       host.takeCommand(workers, tokens[1]);
       return;
     }
+    // 决策 294 B1：/tasks 查看任务清单（完整的清单显示留给编排二段）
+    if (tokens[0] === "tasks" && host.tasks !== undefined) {
+      host.addSystem(
+        host.tasks() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
+      );
+      return;
+    }
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）
     if (tokens[0] === "compact") {
       host.compactCommand(compactFocusOf(value));
@@ -176,7 +185,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       });
     if (!handled) {
       host.addSystem(
-        `未知命令：${value}（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}${sandbox !== undefined ? "、/export" : ""}）`
+        `未知命令：${value}（可用 /quit、/compact [重点]、/sessions、/resume <sessionId>、/search <关键词>、/grants、/revoke <id>、/grants save <id>${workers !== undefined ? WORKER_COMMANDS_HINT : ""}${host.tasks !== undefined ? "、/tasks" : ""}${sandbox !== undefined ? "、/export" : ""}）`
       );
     }
   } catch (error) {

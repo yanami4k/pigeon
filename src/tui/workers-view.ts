@@ -33,6 +33,8 @@ export interface TuiWorkersFace {
   }): Promise<Parameters<typeof renderAttemptGroupOutcome>[0]>;
   // M7（决策 079）：/fork 手动分叉（主会话才有；命令层在 application/fork-command.ts）
   fork?(args: string): Promise<string>;
+  // 决策 294：worker 生命周期事件（派出、开跑、收尾等）的订阅——壳据此刷新状态行；缺省即只在命令后刷新
+  subscribe?(listener: () => void): () => void;
 }
 
 // 壳侧窄接口：worker 视图需要的壳动作与壳持有的状态
