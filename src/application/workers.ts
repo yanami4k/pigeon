@@ -60,6 +60,7 @@ import {
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
+import type { ScriptSlot } from "./script-tool.ts";
 import { childFamilySink } from "./session-store.ts";
 import { bindSpawnWorkers } from "./spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
@@ -277,6 +278,8 @@ interface RuntimeSurface {
   retryOnFail?: number;
   // 决策 264–267：派 worker 的开关（headless 主会话会给；层数放开时未到最底层的 worker 也给，299）
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 309：提交编排脚本的工具槽（只有 headless 主会话会给）
+  scriptOrchestration?: ScriptSlot;
   // 决策 294 B1：任务清单（只有 headless 主会话会给）
   taskList?: boolean;
   // 决策 302：worker 改自己工作树内的文件默认放行（只有 worker 会给）
@@ -478,6 +481,8 @@ export interface DetachedRuntimeRequest {
   retryOnFail?: number;
   // 决策 264–267：派 worker 的开关
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 309：提交编排脚本的工具槽（只有 headless 主会话会给）
+  scriptOrchestration?: ScriptSlot;
   // 决策 294 B1：任务清单
   taskList?: boolean;
   // 决策 287–291：联网工具的配置
@@ -542,6 +547,9 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
+    ...(surface.scriptOrchestration !== undefined
+      ? { scriptOrchestration: surface.scriptOrchestration }
+      : {}),
     ...(surface.taskList === true ? { taskList: true } : {}),
     ...(surface.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
     ...(surface.webTools !== undefined ? { webTools: surface.webTools } : {}),

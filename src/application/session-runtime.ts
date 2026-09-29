@@ -31,6 +31,7 @@ import {
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
+import type { ScriptSlot } from "./script-tool.ts";
 import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
@@ -116,6 +117,8 @@ export interface OpenSessionRuntimeRequest {
   workspaceHost?: WorkspaceHost;
   // 决策 264–267：派 worker 的工具槽（终端界面给；命令行对话不给）。只给主会话注册：worker 会话（深度 1）与沙箱会话不注册
   spawnWorker?: SpawnWorkerSlot;
+  // 决策 309：提交编排脚本的工具槽（终端界面随派 worker 一并给）；只给主会话注册，worker 会话与沙箱会话不注册
+  scriptOrchestration?: ScriptSlot;
   // 决策 294 B1：任务清单（终端界面按编排配置给，缺省开）；只给主会话注册，续聊时从会话还原
   taskList?: boolean;
   // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
@@ -139,6 +142,8 @@ export interface OpenedSessionRuntime {
   restored?: { messages: number; interrupted: number };
   // 注册了 spawn_worker 时在场：调用方建好编排器后绑定到这个槽上
   spawnWorker?: SpawnWorkerSlot;
+  // 注册了 orchestrate 时在场：调用方建好运行器后绑定到这个槽上
+  scriptOrchestration?: ScriptSlot;
 }
 
 // 续跑：等写者打开会话文件，读主分支还原上下文；悬空调用补的工具结果先写进会话，再连同还原的消息交给 Agent。
@@ -192,6 +197,7 @@ export async function openSessionRuntime(
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker
       : undefined;
+  const scriptOrchestration = spawnWorker !== undefined ? request.scriptOrchestration : undefined;
   for (const note of describeMcpStartup(mcp)) {
     request.onMcpNote?.(note);
   }
@@ -229,6 +235,7 @@ export async function openSessionRuntime(
         ? { workspaceHost: request.workspaceHost, pathScopedGrants: false }
         : {}),
       ...(spawnWorker !== undefined ? { spawnWorker } : {}),
+      ...(scriptOrchestration !== undefined ? { scriptOrchestration } : {}),
       ...(request.taskList === true ? { taskList: true } : {}),
       ...(request.webTools !== undefined ? { webTools: request.webTools } : {}),
       ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
@@ -373,6 +380,7 @@ export async function openSessionRuntime(
       ...(retry !== undefined ? { retry } : {}),
       ...(restored !== undefined ? { restored } : {}),
       ...(spawnWorker !== undefined ? { spawnWorker } : {}),
+      ...(scriptOrchestration !== undefined ? { scriptOrchestration } : {}),
     };
   } catch (error) {
     // 装配失败：已启动的 server 必须关掉，否则留下孤儿进程（先建后换的收口约束）

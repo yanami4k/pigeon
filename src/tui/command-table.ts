@@ -16,6 +16,8 @@ export interface CommandAvailability {
   tasks?(): boolean;
   // 决策 301：正在 worker 会话里（缺省即不在）
   inWorkerSession?(): boolean;
+  // 决策 309：脚本编排的命令面在场（缺省即不在场）
+  scripts?(): boolean;
 }
 
 export interface SlashCommandSpec {
@@ -143,6 +145,13 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     whileRunning: { allow: true },
     inWorkerSession: true,
     available: (host) => host.tasks?.() === true,
+  },
+  // 决策 309、312、301：/orchestrate 点名发起、续跑、停止、放弃；运行中可用（发起的那条输入照常排队）
+  {
+    name: "orchestrate",
+    usage: "/orchestrate <任务> [额度 ¥5|$2|300k]",
+    whileRunning: { allow: true },
+    available: (host) => host.scripts?.() === true && !host.inSandbox(),
   },
   {
     name: "export",

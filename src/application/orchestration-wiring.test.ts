@@ -146,6 +146,8 @@ test("任务清单开关：给了才注册、只给主会话；编排配置缺�
     stallMs: 120_000,
     approvalTimeoutMs: 60_000,
     taskList: false,
+    scriptModelDecides: false,
+    scriptStallMs: 600_000,
   });
   // 启动参数优先于配置
   const flags = parseLaunchFlags(["--worker-concurrency", "5"], { usage: "u", spawnWorkers: true });

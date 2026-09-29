@@ -26,6 +26,7 @@ import type {
   ChildSettledStatus,
   ChildSpawnedInput,
   DelegatedPolicy,
+  ScriptSpawnTag,
   WorkerErrorKind,
   WorkerLimits,
   WorkerRole,
@@ -232,6 +233,8 @@ export interface WorkerRef {
   depth: number;
   // 派出方会话（主会话或上一层 worker）
   parentSessionId: SessionId;
+  // 决策 312：脚本编排派出的（运行号与指纹）
+  script?: ScriptSpawnTag;
 }
 
 // 决策 294：worker 生命周期统一发的事件——派出（进队或直接开跑）、开跑、需请示被搁下、收尾（带结构化结果）、续做
@@ -323,6 +326,11 @@ export interface SpawnRequest {
   origin?: WorkerOrigin;
   // 决策 299：派出方是 worker 时为它的会话号（缺省 = 本编排器所在会话）
   from?: SessionId;
+  // 决策 311：另给起点——point 为脚本整次共用的主目录快照（直接用，不另拍）；from 为接力的上游 worker 的工作树（拍它开工）。
+  // 缺省照 279 拍主工作目录（或派出方 worker 的工作树）
+  start?: { point: WorkerStartPoint } | { from: string };
+  // 决策 312：脚本编排派出的调用——运行号、指纹与接力的上游，写进派出与收尾条目
+  script?: ScriptSpawnTag;
 }
 
 // queued：已派出、等空位开跑（决策 268）
@@ -345,6 +353,8 @@ export interface WorkerStatus {
   origin?: WorkerOrigin;
   depth?: number;
   parentSessionId?: SessionId;
+  // 决策 312：脚本编排派出的在场
+  script?: ScriptSpawnTag;
   // 已收尾的在场：结构化结果
   outcome?: WorkerOutcome;
 }
@@ -404,6 +414,7 @@ interface WorkerEntry {
   parentSessionId: SessionId;
   parentRunId?: RunId;
   parentLog: ChildFamilySink;
+  script?: ScriptSpawnTag;
   runtime: WorkerRuntimeHandle;
   state: WorkerState;
   turns: number;
@@ -432,6 +443,7 @@ function refOf(entry: WorkerEntry): WorkerRef {
     origin: entry.origin,
     depth: entry.depth,
     parentSessionId: entry.parentSessionId,
+    ...(entry.script !== undefined ? { script: entry.script } : {}),
   };
 }
 
@@ -475,6 +487,8 @@ export class WorkerOrchestrator {
   readonly #listeners = new Set<(event: WorkerLifecycleEvent) => void>();
   // 决策 301：worker 活动的观察者（界面）
   readonly #observers = new Set<(activity: WorkerActivity) => void>();
+  // 其中只看运行事件的
+  readonly #eventsOnly = new Set<(activity: WorkerActivity) => void>();
   // 不改变结果的内部故障（settled 写盘失败、结果回收失败等）
   readonly #errors: unknown[] = [];
 
@@ -516,9 +530,17 @@ export class WorkerOrchestrator {
 
   // 决策 301：观察各 worker 的运行事件、流式正文与工具结果（只读）；观察者抛错只进内部故障清单。
   // 在 worker 开跑之前订阅才看得到它的流式正文与工具结果（界面在绑定会话时即订阅）
-  observe(listener: (activity: WorkerActivity) => void): () => void {
+  // eventsOnly：只看运行事件（脚本编排按轮次计花费），不因此订阅流式正文与工具结果（pigeon run 的行为不变）
+  observe(
+    listener: (activity: WorkerActivity) => void,
+    options: { eventsOnly?: boolean } = {}
+  ): () => void {
     this.#observers.add(listener);
-    return () => this.#observers.delete(listener);
+    if (options.eventsOnly === true) this.#eventsOnly.add(listener);
+    return () => {
+      this.#observers.delete(listener);
+      this.#eventsOnly.delete(listener);
+    };
   }
 
   // 派出方为 from 时能否再派（层数未满）
@@ -569,10 +591,20 @@ export class WorkerOrchestrator {
     // 决策 279：先拍工作目录的快照当起点（拍不成即不派：没有派出记录、零工作区零运行面）
     let startPoint: WorkerStartPoint | undefined;
     let releaseStart: (() => void) | undefined;
-    if (this.#options.startPoint !== undefined) {
+    const given = request.start;
+    if (given !== undefined && "point" in given) {
+      // 决策 311：脚本整次共用的快照，引用由脚本持有到收回或放弃
+      startPoint = given.point;
+    } else if (given !== undefined && this.#options.startPoint === undefined) {
+      throw new WorkerSpawnError(`派出 worker ${name} 失败：没有起点提供者，不能接力开工`);
+    } else if (this.#options.startPoint !== undefined) {
       try {
         const from =
-          fromEntry?.workspace.kind === "git-worktree" ? fromEntry.workspace.path : undefined;
+          given !== undefined
+            ? given.from
+            : fromEntry?.workspace.kind === "git-worktree"
+              ? fromEntry.workspace.path
+              : undefined;
         const { release, ...point } = this.#options.startPoint({
           sessionId,
           name,
@@ -608,6 +640,7 @@ export class WorkerOrchestrator {
       workspace,
       spawnedAt: this.#now(),
       ...(parentRunId !== undefined ? { runId: parentRunId } : {}),
+      ...(request.script !== undefined ? { script: request.script } : {}),
     });
     let runtime: WorkerRuntimeHandle;
     try {
@@ -631,6 +664,7 @@ export class WorkerOrchestrator {
         limits,
         depth,
         ...(label !== undefined ? { label } : {}),
+        ...(request.script !== undefined ? { script: request.script } : {}),
         resume: false,
       });
     } catch (error) {
@@ -643,6 +677,11 @@ export class WorkerOrchestrator {
         error: message,
         errorKind: "spawn-failed",
         turns: 0,
+        ...(request.script !== undefined
+          ? {
+              script: { runId: request.script.runId, fingerprint: request.script.fingerprint },
+            }
+          : {}),
       });
       throw new WorkerSpawnError(`派出 worker ${name} 失败：${message}`, { cause: error });
     }
@@ -661,6 +700,7 @@ export class WorkerOrchestrator {
       parentSessionId,
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       parentLog,
+      ...(request.script !== undefined ? { script: request.script } : {}),
       runtime,
       state: "queued",
       turns: 0,
@@ -835,6 +875,7 @@ export class WorkerOrchestrator {
       limits: entry.limits,
       depth: entry.depth,
       ...(entry.label !== undefined ? { label: entry.label } : {}),
+      ...(entry.script !== undefined ? { script: entry.script } : {}),
       resume: true,
     });
     entry.runtime = runtime;
@@ -879,9 +920,10 @@ export class WorkerOrchestrator {
     limits: WorkerLimits;
     depth: number;
     label?: string;
+    script?: ScriptSpawnTag;
     resume: boolean;
   }): WorkerRuntimeHandle {
-    const { sessionId, name, role, label } = input;
+    const { sessionId, name, role, label, script } = input;
     return this.#options.createRuntime({
       sessionId,
       name,
@@ -899,6 +941,8 @@ export class WorkerOrchestrator {
           ...approval,
           sessionId,
           worker: { name, role, ...(label !== undefined ? { label } : {}) },
+          // 决策 303（脚本部分）：脚本派出的 worker 的请求带上运行号，由装配方补上脚本名与同类
+          ...(script !== undefined ? { script: { runId: script.runId } } : {}),
         }),
       limits: input.limits,
       depth: input.depth,
@@ -1025,12 +1069,14 @@ export class WorkerOrchestrator {
       origin: entry.origin,
       depth: entry.depth,
       parentSessionId: entry.parentSessionId,
+      ...(entry.script !== undefined ? { script: entry.script } : {}),
       ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
     };
   }
 
   #observe(activity: WorkerActivity): void {
     for (const observer of this.#observers) {
+      if (activity.kind !== "event" && this.#eventsOnly.has(observer)) continue;
       try {
         observer(activity);
       } catch (error) {
@@ -1186,7 +1232,7 @@ export class WorkerOrchestrator {
     });
     // 决策 301：有观察者时另订流式正文与工具结果；没有观察者即不订（pigeon run 与跑批不变）
     const observed: Array<() => void> = [];
-    if (!skipRun && this.#observers.size > 0) {
+    if (!skipRun && this.#observers.size > this.#eventsOnly.size) {
       const ref = refOf(entry);
       const unsubscribeStream = runtime.subscribeStream?.((delta) =>
         this.#observe({ kind: "delta", worker: ref, delta })
@@ -1315,6 +1361,16 @@ export class WorkerOrchestrator {
       ...(error !== undefined ? { error } : {}),
       ...(errorKind !== undefined ? { errorKind } : {}),
       ...(result !== undefined ? { result } : {}),
+      // 决策 312：脚本派出的调用另记运行号、指纹与交回的结构化数据（续跑复用）
+      ...(entry.script !== undefined
+        ? {
+            script: {
+              runId: entry.script.runId,
+              fingerprint: entry.script.fingerprint,
+              ...(result?.structured !== undefined ? { structured: result.structured } : {}),
+            },
+          }
+        : {}),
     });
     this.#emit({ kind: "worker.settled", worker: refOf(entry), outcome, at: this.#now() });
     return outcome;
