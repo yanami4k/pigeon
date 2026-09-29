@@ -372,7 +372,12 @@ export function runFailureOf(
 
 function limitHitOf(run: StoreRun | undefined): boolean {
   const ending = run?.end?.ending;
-  return ending === "turn-limit" || ending === "wall-clock-limit" || ending === "token-limit";
+  return (
+    ending === "turn-limit" ||
+    ending === "wall-clock-limit" ||
+    ending === "token-limit" ||
+    ending === "looping"
+  );
 }
 
 // 本 Run 的悬账：没有配上工具结果、或只配上续跑补的"结果未知"工具结果的工具调用
@@ -476,6 +481,7 @@ export function storeAttemptFacts(
     pendingCount,
     failure: lastRun !== undefined ? storeRunFailure(lastRun) : { category: "unknown" },
     limitHit: limitHitOf(lastRun),
+    ...(lastRun?.end?.ending === "looping" ? { looping: true } : {}),
     ...(last !== undefined ? { verdict: last.record.data.verdict } : {}),
   };
 }

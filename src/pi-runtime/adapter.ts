@@ -54,6 +54,7 @@ import { Value } from "typebox/value";
 import { classifyRunOutcome, type FailureClass } from "../state/classification.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import type { LoopRound } from "../state/loop-guard.ts";
 import {
   type RunStartedPayload,
   RuntimeEventKind,
@@ -152,6 +153,12 @@ export interface ToolResultNotice {
   details: unknown;
 }
 
+// 整轮观察口的转发单位（决策 305）：一轮结束（上游 turn_end）时这一轮助手消息里的工具调用与它们的返回结果。
+// 派生显示态，不落盘、不锚身份；参数与结果为深拷贝
+export interface TurnRoundNotice extends LoopRound {
+  runId: RunId;
+}
+
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
 export type ManualCompactionOutcome = CompactionOutcome | { kind: "skipped"; reason: "disabled" };
 
@@ -221,6 +228,7 @@ export class PiRuntimeAdapter {
   readonly #compactor: ContextCompactor | undefined;
   readonly #compactionListeners = new Set<(notice: CompactionNotice) => void>();
   readonly #toolResultListeners = new Set<(notice: ToolResultNotice) => void>();
+  readonly #roundListeners = new Set<(round: TurnRoundNotice) => void>();
   // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
   #compactionAbort: AbortController | undefined;
   // 手动压缩进行中：此时不接受 Run
@@ -553,6 +561,13 @@ export class PiRuntimeAdapter {
     return () => this.#toolResultListeners.delete(listener);
   }
 
+  // 观察口（305）：订阅整轮（一轮的工具调用与返回结果，一轮结束时）。在本轮的待递通知转入下一轮之前发出——
+  // 订阅方在回调里递的通知随即进下一轮；listener 抛异常只进 listenerErrors
+  subscribeRounds(listener: (round: TurnRoundNotice) => void): () => void {
+    this.#roundListeners.add(listener);
+    return () => this.#roundListeners.delete(listener);
+  }
+
   // 当前上下文用量（286）：同压缩判据的 token 数（最后一条正常助手回复的用量加其后消息的估算，压缩后随之下降）
   // 与模型窗口；没有配置压缩（无窗口可比）时为 undefined
   contextUsage(): { tokens: number; contextWindow: number } | undefined {
@@ -694,6 +709,49 @@ export class PiRuntimeAdapter {
     for (const listener of this.#toolResultListeners) {
       try {
         listener(notice);
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+  }
+
+  // 发出一条整轮通知（305）：助手消息里的工具调用按出现顺序，结果按 toolCallId 由订阅方对上
+  #notifyRound(runId: RunId, message: AgentMessage, toolResults: ToolResultMessage[]): void {
+    let round: TurnRoundNotice;
+    try {
+      const calls =
+        message.role === "assistant"
+          ? message.content.flatMap((block) =>
+              block.type === "toolCall"
+                ? [
+                    {
+                      toolCallId: block.id,
+                      toolName: block.name,
+                      args: structuredClone(block.arguments),
+                    },
+                  ]
+                : []
+            )
+          : [];
+      round = Object.freeze({
+        runId,
+        calls,
+        results: toolResults.map((result) => ({
+          toolCallId: result.toolCallId,
+          isError: result.isError,
+          text: result.content
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .filter((text) => text !== "")
+            .join("\n"),
+        })),
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return;
+    }
+    for (const listener of this.#roundListeners) {
+      try {
+        listener(round);
       } catch (error) {
         this.#listenerErrors.push(error);
       }
@@ -873,6 +931,10 @@ export class PiRuntimeAdapter {
       const runId = this.#currentRunId;
       if (!runId) {
         return;
+      }
+      // 决策 305：整轮观察口排在通知转入之前，订阅方这时递的通知同样进下一轮
+      if (event.type === "turn_end" && this.#roundListeners.size > 0) {
+        this.#notifyRound(runId, event.message, event.toolResults);
       }
       // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）
       if (event.type === "turn_end" && this.#notices.length > 0 && !this.#interruptRequested) {

@@ -86,21 +86,24 @@ export const RunStartDataSchema = Type.Object({
 });
 export type RunStartData = Static<typeof RunStartDataSchema>;
 
-// 被我们的上限中止的三种原因：由撞上限的一方在发中止请求时交给运行面，收尾条目据此一次写全
+// 被我们的上限中止的原因：由撞上限的一方在发中止请求时交给运行面，收尾条目据此一次写全。
+// looping：打转检测叫停（决策 307，原因记为打转）
 export const RunStopCauseSchema = Type.Union([
   Type.Literal("turn-limit"),
   Type.Literal("wall-clock-limit"),
   Type.Literal("token-limit"),
+  Type.Literal("looping"),
 ]);
 export type RunStopCause = Static<typeof RunStopCauseSchema>;
 
-// Run 的结束方式：正常完成、撞轮数 / 墙钟 / token 上限、熔断、中止、出错，以及空回复异常结束
+// Run 的结束方式：正常完成、撞轮数 / 墙钟 / token 上限、打转叫停、熔断、中止、出错，以及空回复异常结束
 // （empty-reply：空回复重试一次仍空，见 pi-runtime/adapter.ts 的 isEmptyReply）
 export const RunEndingSchema = Type.Union([
   Type.Literal("completed"),
   Type.Literal("turn-limit"),
   Type.Literal("wall-clock-limit"),
   Type.Literal("token-limit"),
+  Type.Literal("looping"),
   Type.Literal("breaker"),
   Type.Literal("aborted"),
   Type.Literal("error"),
