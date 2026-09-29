@@ -566,3 +566,26 @@ test("合并后的身份头：agents.pigeon 记派 worker 关（265）并与代�
     );
   });
 });
+
+test("身份头记打转检测的实际生效值（308，照 265 先例）：续跑时不同即拒绝", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-loop-"));
+  try {
+    const pigeon = {
+      ...(identity().core.agents.pigeon as NonNullable<
+        StreamRunIdentity["core"]["agents"]["pigeon"]
+      >),
+      loopGuard: false,
+    };
+    checkOrWriteIdentity(dir, identity({ agents: { pigeon } }));
+    const saved = JSON.parse(readFileSync(join(dir, "identity.json"), "utf8"));
+    assert.equal(saved.core.agents.pigeon.loopGuard, false);
+    checkOrWriteIdentity(dir, identity({ agents: { pigeon } }));
+    assert.throws(
+      () =>
+        checkOrWriteIdentity(dir, identity({ agents: { pigeon: { ...pigeon, loopGuard: true } } })),
+      /agents\.pigeon\.loopGuard/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

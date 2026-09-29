@@ -51,6 +51,8 @@ export interface StreamRunIdentity {
         workerTools?: boolean;
         // 任务清单工具（294 B1）：各条件关掉；同一口径
         taskList?: boolean;
+        // 打转检测（308 与 265 的先例）：各条件关掉；同一口径
+        loopGuard?: boolean;
       };
       minimal?: {
         model: string;

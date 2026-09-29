@@ -56,6 +56,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     takeWorker: false,
     workerTools: false,
     taskList: false,
+    loopGuard: false,
   });
   assert.deepEqual(
     effectivePigeonSettings(
@@ -90,6 +91,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       takeWorker: false,
       workerTools: false,
       taskList: false,
+      loopGuard: false,
     }
   );
 });
