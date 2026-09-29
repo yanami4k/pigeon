@@ -62,3 +62,28 @@ test("审批排队：前一个 handler 抛错原样上抛，后面的请求照�
   await assert.rejects(failing, /面板炸了/);
   assert.deepEqual(await next, { approved: true });
 });
+
+test("决策 303：排队期间被撤回的请求不再交给 handler（不上面板），按拒绝回话，后面的照常", async () => {
+  const queue = createApprovalQueue();
+  const seen: string[] = [];
+  const first = Promise.withResolvers<{ approved: boolean }>();
+  const handler = queue.wrap(async (request) => {
+    seen.push(request.toolCallId);
+    return request.toolCallId === "a" ? first.promise : { approved: true };
+  });
+  const controller = new AbortController();
+  const a = handler({ toolName: "run_command", toolCallId: "a", args: {} });
+  const b = handler({
+    toolName: "run_command",
+    toolCallId: "b",
+    args: {},
+    signal: controller.signal,
+  });
+  const c = handler({ toolName: "run_command", toolCallId: "c", args: {} });
+  controller.abort();
+  first.resolve({ approved: true });
+  assert.deepEqual(await a, { approved: true });
+  assert.equal((await b).approved, false);
+  assert.deepEqual(await c, { approved: true });
+  assert.deepEqual(seen, ["a", "c"]);
+});

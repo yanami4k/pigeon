@@ -15,7 +15,16 @@ export function createApprovalQueue(): ApprovalQueue {
   return {
     wrap: (handler) => (request) => {
       pending += 1;
-      const turn = tail.then(() => handler(request));
+      // 决策 303：排队期间已撤回的请求不再交给 handler（不上面板），按拒绝回话
+      const turn = tail.then(() =>
+        request.signal?.aborted === true
+          ? {
+              approved: false,
+              reason: "请求已撤回（等待审批超时）",
+              reasonSource: "system-default" as const,
+            }
+          : handler(request)
+      );
       tail = turn.catch(() => undefined);
       return turn.finally(() => {
         pending -= 1;

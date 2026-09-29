@@ -1,11 +1,18 @@
-// worker 生命周期（M5.5 S2，决策 040）：同进程多 Adapter 的并行 worker 编排。对外只有 spawn / cancel /
-// status / awaitResult 四个动作与构造时注入的审批回调——这就是 §3.6 的 Job 边界，多进程与跨机器是换实现
-// 不换调用方。worker 运行面由装配根以工厂注入（本层不触达 application），worker 内部仍是工具串行与
-// run() 互斥。证据顺序：父会话先落 child.spawned（派出意图），再建工作区与运行面；worker 会话关闭后
-// 落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
-// 深度 1：本编排器所在会话自己是 worker 时拒绝再派。上限只有轮次与墙钟，超限与取消都走 interrupt。
-// 决策 268：同时在跑的 worker 数可设上限，多派的排队不拒绝——派出记录、工作区与运行面照常在派出时建好，
-// 只是开跑（连同墙钟计时）等到有空位；一个会话里人派的与 agent 派的共用同一个编排器，因而一并计算。
+// worker 生命周期（M5.5 S2，决策 040）：同进程多 Adapter 的并行 worker 编排。对外的动作是派出 spawn、取消 cancel、
+// 状态 status、等单个结果 awaitResult，以及决策 294、297 补上的等待 wait、发消息 send、补批续做 resume 与生命周期订阅
+// subscribe——这就是 §3.6 的 Job 边界，多进程与跨机器是换实现不换调用方。worker 运行面由装配根以工厂注入（本层不触达
+// application），worker 内部仍是工具串行与 run() 互斥。证据顺序：派出方的会话先落 child.spawned（派出意图），再建工作区与
+// 运行面；worker 会话关闭后落 child.settled（结构化结果）。派出失败同样以 settled 收口，两族恒配对；缺 settled = 进程死于中途。
+// 决策 294 的五个接口在本层：派出可带标签并在各事件与结果里原样带回；生命周期统一经 subscribe 发事件；各动作可被程序直接调用；
+// 并发额度只在这里管（人派、模型派与程序派共用）；worker 的结果与工作树在派出方这一轮结束后仍保留，可稍后收回。
+// 决策 299：层数缺省 1（只有主会话能派），配置放开时各层共用本编排器与同一份并发额度；等待中的 worker 把自己的空位借出，
+// 免得上层占满额度等下层而互相卡死。
+// 决策 300：同时在跑的上限缺省 8，多派的排队不拒绝——派出记录、工作区与运行面照常在派出时建好，只是开跑（连同墙钟计时）
+// 等到有空位；不设总数上限。
+// 决策 298：结束时交回结构化结果（状态、错误类型、最后一段输出、已改文件、会话记录位置），不自动重试；卡住监控——长时间
+// 没有新的模型回复或工具结果即中断、报卡住（等审批期间不计）；观察者接入点留给打转检测（293）。
+// 决策 303：worker 需请示的动作经审批回调汇到派出方，请求带上 worker 的名字；等满审批时限无人批、或处于无人值守（pigeon run）
+// 即不再等，worker 停下、以可恢复的失败交回，其余 worker 照常；之后可经 resume 补批续做。
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../approvals/handler.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
@@ -16,6 +23,7 @@ import type {
   ChildSettledStatus,
   ChildSpawnedInput,
   DelegatedPolicy,
+  WorkerErrorKind,
   WorkerLimits,
   WorkerRole,
   WorkerWorkspace,
@@ -31,6 +39,14 @@ import {
 } from "./worktree.ts";
 
 export const DEFAULT_WORKER_LIMITS: WorkerLimits = { maxTurns: 40, wallClockMs: 30 * 60_000 };
+// 决策 300：同时在跑的 worker 上限缺省
+export const DEFAULT_MAX_CONCURRENT_WORKERS = 8;
+// 决策 299：缺省只有一层（主会话派出的 worker 不能再派）
+export const DEFAULT_MAX_WORKER_DEPTH = 1;
+// 决策 298：卡住判定——这么久没有新的模型回复或工具结果即中断（等审批期间不计）
+export const DEFAULT_WORKER_STALL_MS = 10 * 60_000;
+// 决策 303：worker 的审批请求等这么久无人批即作为可恢复错误交回
+export const DEFAULT_WORKER_APPROVAL_TIMEOUT_MS = 5 * 60_000;
 // 自述摘要进 child.settled 的上限（全文在 worker 会话的消息里）
 export const WORKER_SUMMARY_MAX_CHARS = 2000;
 
@@ -44,6 +60,12 @@ export interface WorkerRunResult {
   errorMessage?: string;
   runId?: RunId;
   emptyReply?: boolean;
+}
+
+// 派出方的派出与收尾落盘口（装配根接到派出方会话的会话存储）
+export interface ChildFamilySink {
+  appendChildSpawned(input: ChildSpawnedInput): unknown;
+  appendChildSettled(input: ChildSettledInput): unknown;
 }
 
 // 装配根交回的 worker 运行面（PiRuntimeAdapter + 会话文件的最小操作面）
@@ -61,14 +83,20 @@ export interface WorkerRuntimeHandle {
   structured?(): unknown;
   // M7（决策 077 / 079）：从已有消息续跑（分叉续跑）；不实现即不支持
   continueRun?(): Promise<WorkerRunResult>;
+  // 决策 294、297：给在跑的 worker 递一段话，进它的下一轮；不实现即不支持发消息
+  notify?(text: string): void;
+  // 决策 298：会话记录位置（worker 会话文件的路径）；不实现即结果里不带
+  transcript?(): Promise<string | undefined>;
+  // 决策 299：本 worker 再派出时的落盘口（它自己的会话存储）；不实现即不能作派出方
+  childLog?(): ChildFamilySink | undefined;
   // 释放运行面并关闭 worker 会话文件
   dispose(): Promise<void>;
 }
 
-// 汇聚到父级的审批请求：来源会话与 worker 标签恒在场
+// 汇聚到派出方的审批请求：来源会话与 worker 标签恒在场
 export interface WorkerApprovalRequest extends ApprovalRequest {
   readonly sessionId: SessionId;
-  readonly worker: { readonly name: string; readonly role: WorkerRole };
+  readonly worker: { readonly name: string; readonly role: WorkerRole; readonly label?: string };
 }
 
 export interface WorkerRuntimeRequest {
@@ -85,6 +113,10 @@ export interface WorkerRuntimeRequest {
   // M8（决策 087）：本 worker 的上限（与派出记录同一组值）——装配层据此把预算冻结进注入快照，
   // 回放才能沿用被验证那次尝试的预算
   limits?: WorkerLimits;
+  // 决策 299：本 worker 所在层（主会话派出的为 1）；装配层据此决定它能不能再派（层数未满才给派出的工具）
+  depth?: number;
+  // 决策 303：补批续做——装配层按已有会话文件还原对话再装运行面（同一个会话号、同一个工作树）
+  resume?: boolean;
 }
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
@@ -101,11 +133,13 @@ export interface WorkerStartPoint {
 }
 
 // release：起点的引用只需护住"拍好快照到建好工作树"这一段——worker 分支建好即指向起点提交，提交不会被回收；
-// 编排器在建工作区之后（成败都）调用它，由提供者删掉单独的引用（决策 279 修订）
+// 编排器在建工作区之后（成败都）调用它，由提供者删掉单独的引用（决策 279 修订）。
+// from：派出方是 worker 时（决策 299）为它的工作树路径，起点拍它的工作树；缺省拍主工作目录
 export type WorkerStartPointProvider = (input: {
   sessionId: SessionId;
   name: string;
   role: WorkerRole;
+  from?: string;
 }) => WorkerStartPoint & { release?: () => void };
 
 // 隔离工作区提供者：第一版为 git 工作树；测试注入内存实现。
@@ -150,24 +184,74 @@ export function gitWorktreeWorkspaces(roots: {
   };
 }
 
-// 父会话的派出与收尾落盘口（装配根接到父会话的会话存储）
-export interface ChildFamilySink {
-  appendChildSpawned(input: ChildSpawnedInput): unknown;
-  appendChildSettled(input: ChildSettledInput): unknown;
+// 谁派出的：主 agent 的工具（agent）、人的命令（human）、程序直接调用（program）。完成通知只发给 agent 派出的
+export type WorkerOrigin = "agent" | "human" | "program";
+
+// 生命周期事件里的 worker 身份（决策 294：标签原样带回）
+export interface WorkerRef {
+  sessionId: SessionId;
+  name: string;
+  role: WorkerRole;
+  label?: string;
+  origin: WorkerOrigin;
+  // 所在层：主会话派出的为 1
+  depth: number;
+  // 派出方会话（主会话或上一层 worker）
+  parentSessionId: SessionId;
 }
+
+// 决策 294：worker 生命周期统一发的事件——派出（进队或直接开跑）、开跑、需请示被搁下、收尾（带结构化结果）、续做
+export type WorkerLifecycleEvent =
+  | { kind: "worker.spawned"; worker: WorkerRef; queued: boolean; at: number }
+  | { kind: "worker.started"; worker: WorkerRef; at: number }
+  | {
+      kind: "worker.blocked";
+      worker: WorkerRef;
+      errorKind: "approval-timeout" | "approval-unattended";
+      action: string;
+      at: number;
+    }
+  | { kind: "worker.settled"; worker: WorkerRef; outcome: WorkerOutcome; at: number }
+  | { kind: "worker.resumed"; worker: WorkerRef; approved: boolean; at: number };
+
+// 决策 298 与 293 的接入点：观察 worker 的运行事件，需要时叫停它。打转检测做成后以观察者接入，本段只有卡住监控
+export interface WorkerWatcherControl {
+  // 叫停：worker 以失败收尾，错误类型与原因照给出的记
+  stop(errorKind: WorkerErrorKind, message: string): void;
+}
+
+export interface WorkerWatcher {
+  observe(event: EventEnvelope): void;
+  dispose?(): void;
+}
+
+export type WorkerWatcherFactory = (
+  worker: WorkerRef,
+  control: WorkerWatcherControl
+) => WorkerWatcher;
 
 export interface WorkerOrchestratorOptions {
   governanceRoot: string;
-  // 本编排器所在会话；parentSessionId 在场 = 本会话自己是 worker
-  session: { sessionId: SessionId; parentSessionId?: SessionId };
+  // 本编排器所在会话；parentSessionId 在场 = 本会话自己是 worker（depth 缺省即 1，否则 0）
+  session: { sessionId: SessionId; parentSessionId?: SessionId; depth?: number };
   parentPolicy: ToolPolicyLike;
   parentLog: ChildFamilySink;
   createRuntime: WorkerRuntimeFactory;
   approvals: (request: WorkerApprovalRequest) => Promise<ApprovalDecision>;
   // 派出时父会话的活动 Run（人以 /spawn 派出时无）
   activeRunId?: () => RunId | undefined;
-  // 决策 268：同时在跑的 worker 上限（缺省不限）；多派的排队
+  // 决策 300：同时在跑的 worker 上限（缺省 8）；多派的排队
   maxConcurrent?: number;
+  // 决策 299：最多几层（缺省 1）
+  maxDepth?: number;
+  // 决策 298：卡住判定的时长（缺省 10 分钟）
+  stallMs?: number;
+  // 决策 303：审批请求的等待时限（缺省 5 分钟）
+  approvalTimeoutMs?: number;
+  // 决策 303：无人值守（pigeon run）——worker 需请示时不等，直接作为可恢复错误交回
+  unattended?: boolean;
+  // 决策 293 的接入点：每个 worker 开跑时各建一份观察者
+  watchers?: readonly WorkerWatcherFactory[];
   // 决策 268：worker 每收尾一轮回报本轮用的 token（计入本次运行的总额度）
   onWorkerTokens?: (sessionId: SessionId, tokens: number) => void;
   workspaces?: WorkspaceProvider;
@@ -184,6 +268,12 @@ export interface SpawnRequest {
   limits?: Partial<WorkerLimits>;
   // M7（决策 069）：并行派发同一任务时的共享任务标识，写入派出记录
   taskKey?: string;
+  // 决策 294：标签，原样写进派出记录并在各事件与结果里带回
+  label?: string;
+  // 缺省 program（程序直接调用）；工具与命令各自标明
+  origin?: WorkerOrigin;
+  // 决策 299：派出方是 worker 时为它的会话号（缺省 = 本编排器所在会话）
+  from?: SessionId;
 }
 
 // queued：已派出、等空位开跑（决策 268）
@@ -201,6 +291,22 @@ export interface WorkerStatus {
   workspace: WorkerWorkspace;
   // 决策 279：起点（注入了起点提供者时在场）
   start?: WorkerStartPoint;
+  label?: string;
+  // 以下三项编排器恒给（替身构造的状态可缺）
+  origin?: WorkerOrigin;
+  depth?: number;
+  parentSessionId?: SessionId;
+  // 已收尾的在场：结构化结果
+  outcome?: WorkerOutcome;
+}
+
+// 决策 303：搁下的请示——补批续做时据此放行同一个调用
+export interface BlockedApproval {
+  errorKind: "approval-timeout" | "approval-unattended";
+  toolName: string;
+  args: unknown;
+  // 人读的动作描述
+  action: string;
 }
 
 export interface WorkerOutcome {
@@ -209,46 +315,131 @@ export interface WorkerOutcome {
   role: WorkerRole;
   status: ChildSettledStatus;
   error?: string;
+  // 决策 298：错误类型（非完成时在场）
+  errorKind?: WorkerErrorKind;
+  // 可恢复：补批后能续做（决策 303）
+  recoverable?: boolean;
+  blocked?: BlockedApproval;
   turns: number;
   result?: ChildResult;
   workspace: WorkerWorkspace;
   // 决策 279：起点（注入了起点提供者时在场）
   start?: WorkerStartPoint;
+  label?: string;
+  // 编排器恒给（替身构造的结果可缺）
+  origin?: WorkerOrigin;
+  // 决策 298：会话记录位置（运行面给出时在场）
+  transcript?: string;
+  durationMs?: number;
+}
+
+// 决策 294 ③：等待的结果——已收尾的结构化结果与仍在跑的状态
+export interface WaitResult {
+  settled: WorkerOutcome[];
+  pending: WorkerStatus[];
+  timedOut: boolean;
 }
 
 interface WorkerEntry {
   sessionId: SessionId;
   name: string;
   role: WorkerRole;
+  task: string;
+  policy: DelegatedPolicy;
+  limits: WorkerLimits;
   workspace: WorkerWorkspace;
   start?: WorkerStartPoint;
+  label?: string;
+  origin: WorkerOrigin;
+  depth: number;
+  parentSessionId: SessionId;
+  parentRunId?: RunId;
+  parentLog: ChildFamilySink;
   runtime: WorkerRuntimeHandle;
   state: WorkerState;
   turns: number;
   startedAt: number;
   cancelRequested: boolean;
   limitHit?: "turn-limit" | "wall-clock-limit" | "token-limit";
+  // 卡住监控或观察者叫停
+  stopped?: { status: ChildSettledStatus; errorKind: WorkerErrorKind; message: string };
+  blocked?: BlockedApproval;
+  // 补批续做时放行的一次调用
+  preApproved?: { toolName: string; args: string };
+  pendingApprovals: number;
+  // 占着一个空位（在跑且没有借出）
+  holdsSlot: boolean;
   tokens: number;
+  outcome?: WorkerOutcome;
   done: Promise<WorkerOutcome>;
+}
+
+function refOf(entry: WorkerEntry): WorkerRef {
+  return {
+    sessionId: entry.sessionId,
+    name: entry.name,
+    role: entry.role,
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
+    origin: entry.origin,
+    depth: entry.depth,
+    parentSessionId: entry.parentSessionId,
+  };
+}
+
+// 请示的人读描述：命令档写命令串，网络档写网站，其余写工具与路径
+function describeAction(request: ApprovalRequest): string {
+  const args = request.args as { command?: unknown; path?: unknown } | undefined;
+  if (request.command !== undefined) {
+    return `跑命令 ${request.command}`;
+  }
+  if (typeof args?.command === "string") {
+    return `跑命令 ${args.command}`;
+  }
+  if (request.host !== undefined) {
+    return `访问网站 ${request.host}`;
+  }
+  if (typeof args?.path === "string") {
+    return `用 ${request.toolName} 处理 ${args.path}`;
+  }
+  return `调用 ${request.toolName}`;
+}
+
+function argsKey(args: unknown): string {
+  try {
+    return JSON.stringify(args) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 export class WorkerOrchestrator {
   readonly #options: WorkerOrchestratorOptions;
   readonly #workspaces: WorkspaceProvider;
   readonly #now: () => number;
+  readonly #depth: number;
+  readonly #maxConcurrent: number;
+  readonly #maxDepth: number;
   readonly #workers = new Map<SessionId, WorkerEntry>();
-  // 排队中的 worker：按派出顺序等空位（决策 268）
-  readonly #queue: Array<{ sessionId: SessionId; start: () => void }> = [];
+  // 等空位的：按先后开跑（排队的 worker 与借出空位后要收回的等待方）
+  readonly #queue: Array<{ key: SessionId; start: () => void }> = [];
   #running = 0;
+  readonly #listeners = new Set<(event: WorkerLifecycleEvent) => void>();
   // 不改变结果的内部故障（settled 写盘失败、结果回收失败等）
   readonly #errors: unknown[] = [];
 
   constructor(options: WorkerOrchestratorOptions) {
-    const max = options.maxConcurrent;
-    if (max !== undefined && (!Number.isInteger(max) || max < 1)) {
+    const max = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_WORKERS;
+    if (!Number.isInteger(max) || max < 1) {
       throw new WorkerSpawnError(`同时在跑的 worker 上限需要正整数：${max}`);
     }
+    const maxDepth = options.maxDepth ?? DEFAULT_MAX_WORKER_DEPTH;
+    if (!Number.isInteger(maxDepth) || maxDepth < 1) {
+      throw new WorkerSpawnError(`worker 层数上限需要正整数：${maxDepth}`);
+    }
     this.#options = options;
+    this.#maxConcurrent = max;
+    this.#maxDepth = maxDepth;
+    this.#depth = options.session.depth ?? (options.session.parentSessionId !== undefined ? 1 : 0);
     this.#workspaces =
       options.workspaces ??
       gitWorktreeWorkspaces({
@@ -258,10 +449,40 @@ export class WorkerOrchestrator {
     this.#now = options.now ?? Date.now;
   }
 
+  get maxConcurrent(): number {
+    return this.#maxConcurrent;
+  }
+
+  get maxDepth(): number {
+    return this.#maxDepth;
+  }
+
+  // 决策 294 ②：订阅生命周期事件；监听器抛错只进内部故障清单
+  subscribe(listener: (event: WorkerLifecycleEvent) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  // 派出方为 from 时能否再派（层数未满）
+  canSpawnFrom(from?: SessionId): boolean {
+    return this.#depthOf(from) + 1 <= this.#maxDepth;
+  }
+
   spawn(request: SpawnRequest): SessionId {
     const { session } = this.#options;
-    if (session.parentSessionId !== undefined) {
-      throw new WorkerDepthError("深度 1：worker 会话不能再派 worker");
+    const fromEntry = request.from !== undefined ? this.#require(request.from) : undefined;
+    const depth = this.#depthOf(request.from) + 1;
+    if (depth > this.#maxDepth) {
+      throw new WorkerDepthError(
+        this.#maxDepth === 1
+          ? "深度 1：worker 会话不能再派 worker"
+          : `层数已满（最多 ${this.#maxDepth} 层）：这一层的 worker 不能再派 worker`
+      );
+    }
+    const parentLog =
+      fromEntry !== undefined ? fromEntry.runtime.childLog?.() : this.#options.parentLog;
+    if (parentLog === undefined) {
+      throw new WorkerSpawnError(`worker ${fromEntry?.name ?? ""} 不能作派出方（没有落盘口）`);
     }
     if (!isWorkerRole(request.role)) {
       throw new WorkerSpawnError(`未知角色：${request.role}（可用：${WORKER_ROLES.join("、")}）`);
@@ -276,20 +497,30 @@ export class WorkerOrchestrator {
     if ([...this.#workers.values()].some((worker) => worker.name === name)) {
       throw new WorkerSpawnError(`worker 名已被占用：${name}`);
     }
-    const policy = deriveWorkerPolicy(this.#options.parentPolicy, role);
-    assertPolicySubset(policy, this.#options.parentPolicy);
+    const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
+    const policy = deriveWorkerPolicy(basePolicy, role, { orchestration: depth < this.#maxDepth });
+    assertPolicySubset(policy, basePolicy);
     const limits: WorkerLimits = {
       ...DEFAULT_WORKER_LIMITS,
       ...this.#options.defaultLimits,
       ...request.limits,
     };
     const sessionId = newSessionId();
-    // 决策 279：先拍主工作目录的快照当起点（拍不成即不派：没有派出记录、零工作区零运行面）
+    const label =
+      request.label !== undefined && request.label.trim() !== "" ? request.label.trim() : undefined;
+    // 决策 279：先拍工作目录的快照当起点（拍不成即不派：没有派出记录、零工作区零运行面）
     let startPoint: WorkerStartPoint | undefined;
     let releaseStart: (() => void) | undefined;
     if (this.#options.startPoint !== undefined) {
       try {
-        const { release, ...point } = this.#options.startPoint({ sessionId, name, role });
+        const from =
+          fromEntry?.workspace.kind === "git-worktree" ? fromEntry.workspace.path : undefined;
+        const { release, ...point } = this.#options.startPoint({
+          sessionId,
+          name,
+          role,
+          ...(from !== undefined ? { from } : {}),
+        });
         startPoint = point;
         releaseStart = release;
       } catch (error) {
@@ -304,14 +535,16 @@ export class WorkerOrchestrator {
       planned.kind === "git-worktree" && startPoint !== undefined
         ? { ...planned, baseCommit: startPoint.commit }
         : planned;
-    const parentRunId = this.#options.activeRunId?.();
+    const parentSessionId = fromEntry?.sessionId ?? session.sessionId;
+    const parentRunId = fromEntry === undefined ? this.#options.activeRunId?.() : undefined;
     // 派出意图先落盘：写不进就不派（异常原样上抛，零工作区零运行面）
-    this.#options.parentLog.appendChildSpawned({
+    parentLog.appendChildSpawned({
       childSessionId: sessionId,
       name,
       role,
       task,
       ...(request.taskKey !== undefined ? { taskKey: request.taskKey } : {}),
+      ...(label !== undefined ? { label } : {}),
       policy,
       limits,
       workspace,
@@ -328,62 +561,60 @@ export class WorkerOrchestrator {
       });
       this.#releaseStart(releaseStart);
       releaseStart = undefined;
-      runtime = this.#options.createRuntime({
+      runtime = this.#createRuntime({
         sessionId,
         name,
         role,
         task,
         policy,
-        governanceRoot: this.#options.governanceRoot,
         workspace,
-        lineage: {
-          parentSessionId: session.sessionId,
-          ...(parentRunId !== undefined ? { parentRunId } : {}),
-        },
-        approvalHandler: (approval) =>
-          this.#options.approvals({ ...approval, sessionId, worker: { name, role } }),
+        parentSessionId,
+        ...(parentRunId !== undefined ? { parentRunId } : {}),
         limits,
+        depth,
+        ...(label !== undefined ? { label } : {}),
+        resume: false,
       });
     } catch (error) {
       this.#releaseStart(releaseStart);
       const message = error instanceof Error ? error.message : String(error);
-      this.#appendSettled({
+      this.#appendSettled(parentLog, {
         childSessionId: sessionId,
         name,
         status: "spawn-failed",
         error: message,
+        errorKind: "spawn-failed",
         turns: 0,
       });
       throw new WorkerSpawnError(`派出 worker ${name} 失败：${message}`, { cause: error });
     }
-    const done = Promise.withResolvers<WorkerOutcome>();
     const entry: WorkerEntry = {
       sessionId,
       name,
       role,
+      task,
+      policy,
+      limits,
       workspace,
       ...(startPoint !== undefined ? { start: startPoint } : {}),
+      ...(label !== undefined ? { label } : {}),
+      origin: request.origin ?? "program",
+      depth,
+      parentSessionId,
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
+      parentLog,
       runtime,
       state: "queued",
       turns: 0,
       startedAt: this.#now(),
       cancelRequested: false,
+      pendingApprovals: 0,
+      holdsSlot: false,
       tokens: 0,
-      done: done.promise,
+      done: Promise.resolve() as unknown as Promise<WorkerOutcome>,
     };
     this.#workers.set(sessionId, entry);
-    const start = (): void => {
-      this.#drive(entry, task, limits)
-        .finally(() => this.#release())
-        .then(done.resolve, done.reject);
-    };
-    // 有空位即同步开跑（与不设上限时的行为一致）；否则按派出顺序排队
-    if (this.#tryAcquire()) {
-      entry.state = "running";
-      start();
-    } else {
-      this.#queue.push({ sessionId, start });
-    }
+    this.#launch(entry, task);
     return sessionId;
   }
 
@@ -394,11 +625,12 @@ export class WorkerOrchestrator {
       return;
     }
     entry.cancelRequested = true;
-    const queued = this.#queue.findIndex((item) => item.sessionId === sessionId);
+    const queued = this.#queue.findIndex((item) => item.key === sessionId);
     if (queued >= 0) {
       const [item] = this.#queue.splice(queued, 1);
       // 出队的 worker 不占空位：先记一个再由收尾释放，账目对平
       this.#running += 1;
+      entry.holdsSlot = true;
       item?.start();
       return;
     }
@@ -406,7 +638,290 @@ export class WorkerOrchestrator {
   }
 
   status(): WorkerStatus[] {
-    return [...this.#workers.values()].map((entry) => ({
+    return [...this.#workers.values()].map((entry) => this.#statusOf(entry));
+  }
+
+  awaitResult(sessionId: SessionId): Promise<WorkerOutcome> {
+    return this.#require(sessionId).done;
+  }
+
+  // 决策 297：等任一或全部指定 worker 收尾，带超时；已收尾的立即交回。waiter 为在跑的 worker（嵌套时的派出方）时，
+  // 等待期间把它的空位借出，等完再收回（收回时没有空位即排队）
+  async wait(
+    sessionIds: readonly SessionId[],
+    options: { mode: "any" | "all"; timeoutMs: number; signal?: AbortSignal; waiter?: SessionId }
+  ): Promise<WaitResult> {
+    const entries = sessionIds.map((id) => this.#require(id));
+    const settledNow = entries.filter((entry) => entry.outcome !== undefined);
+    const alreadyDone =
+      entries.length === 0 ||
+      (options.mode === "any" ? settledNow.length > 0 : settledNow.length === entries.length);
+    if (!alreadyDone) {
+      const lender = options.waiter !== undefined ? this.#workers.get(options.waiter) : undefined;
+      const lent = lender?.holdsSlot === true;
+      if (lent && lender !== undefined) {
+        lender.holdsSlot = false;
+        this.#release();
+      }
+      try {
+        const dones = entries.map((entry) => entry.done.then(() => undefined));
+        const target = options.mode === "any" ? Promise.race(dones) : Promise.all(dones);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let onAbort: (() => void) | undefined;
+        await Promise.race([
+          target,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, Math.max(0, options.timeoutMs));
+          }),
+          new Promise<void>((resolve) => {
+            if (options.signal === undefined) return;
+            onAbort = resolve;
+            if (options.signal.aborted) resolve();
+            else options.signal.addEventListener("abort", onAbort, { once: true });
+          }),
+        ]);
+        clearTimeout(timer);
+        if (onAbort !== undefined) options.signal?.removeEventListener("abort", onAbort);
+      } finally {
+        if (lent && lender !== undefined) {
+          await this.#acquire(lender.sessionId);
+          // 等待期间 worker 已收尾（被取消等）：收回的空位随即让出
+          if (lender.state === "running") {
+            lender.holdsSlot = true;
+          } else {
+            this.#release();
+          }
+        }
+      }
+    }
+    const settled = entries.flatMap((entry) =>
+      entry.outcome !== undefined ? [entry.outcome] : []
+    );
+    const pending = entries
+      .filter((entry) => entry.outcome === undefined)
+      .map((entry) => this.#statusOf(entry));
+    const timedOut =
+      entries.length > 0 &&
+      (options.mode === "any" ? settled.length === 0 : pending.length > 0) &&
+      options.signal?.aborted !== true;
+    return { settled, pending, timedOut };
+  }
+
+  // 决策 294、297：给在跑的 worker 递一段话，进它的下一轮
+  send(sessionId: SessionId, text: string): void {
+    const entry = this.#require(sessionId);
+    if (entry.state !== "running" && entry.state !== "queued") {
+      throw new WorkerSpawnError(`worker ${entry.name} 已收尾，收不到消息`);
+    }
+    if (entry.runtime.notify === undefined) {
+      throw new WorkerSpawnError(`worker ${entry.name} 的运行面不支持发消息`);
+    }
+    entry.runtime.notify(text);
+  }
+
+  // 决策 303：补批续做——已收尾的 worker 回到同一个会话与工作树接着做。approve 为真且它是因请示搁下的，放行它重新发起的
+  // 同一个调用（只放行一次）；message 为续做时交给它的话（缺省按是否补批给出）。重新占额度，收尾照常发事件、写收尾记录
+  resume(sessionId: SessionId, options: { approve?: boolean; message?: string } = {}): void {
+    const entry = this.#require(sessionId);
+    if (entry.outcome === undefined) {
+      throw new WorkerSpawnError(`worker ${entry.name} 还没收尾，不需要续做`);
+    }
+    const approve = options.approve === true && entry.blocked !== undefined;
+    const blocked = entry.blocked;
+    const text =
+      options.message ??
+      (approve && blocked !== undefined
+        ? `人已批准你之前等待审批的调用（${blocked.action}）。请重新发起这个调用，然后接着完成任务。`
+        : "请接着完成任务。");
+    const runtime = this.#createRuntime({
+      sessionId: entry.sessionId,
+      name: entry.name,
+      role: entry.role,
+      task: entry.task,
+      policy: entry.policy,
+      workspace: entry.workspace,
+      parentSessionId: entry.parentSessionId,
+      ...(entry.parentRunId !== undefined ? { parentRunId: entry.parentRunId } : {}),
+      limits: entry.limits,
+      depth: entry.depth,
+      ...(entry.label !== undefined ? { label: entry.label } : {}),
+      resume: true,
+    });
+    entry.runtime = runtime;
+    entry.state = "queued";
+    entry.cancelRequested = false;
+    delete entry.limitHit;
+    delete entry.stopped;
+    delete entry.blocked;
+    delete entry.outcome;
+    if (approve && blocked !== undefined) {
+      entry.preApproved = { toolName: blocked.toolName, args: argsKey(blocked.args) };
+    }
+    this.#emit({
+      kind: "worker.resumed",
+      worker: refOf(entry),
+      approved: approve,
+      at: this.#now(),
+    });
+    this.#launch(entry, text);
+  }
+
+  errors(): unknown[] {
+    return this.#errors.slice();
+  }
+
+  #depthOf(from?: SessionId): number {
+    if (from === undefined) {
+      return this.#depth;
+    }
+    return this.#require(from).depth;
+  }
+
+  #createRuntime(input: {
+    sessionId: SessionId;
+    name: string;
+    role: WorkerRole;
+    task: string;
+    policy: DelegatedPolicy;
+    workspace: WorkerWorkspace;
+    parentSessionId: SessionId;
+    parentRunId?: RunId;
+    limits: WorkerLimits;
+    depth: number;
+    label?: string;
+    resume: boolean;
+  }): WorkerRuntimeHandle {
+    const { sessionId, name, role, label } = input;
+    return this.#options.createRuntime({
+      sessionId,
+      name,
+      role,
+      task: input.task,
+      policy: input.policy,
+      governanceRoot: this.#options.governanceRoot,
+      workspace: input.workspace,
+      lineage: {
+        parentSessionId: input.parentSessionId,
+        ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
+      },
+      approvalHandler: (approval) =>
+        this.#approve({
+          ...approval,
+          sessionId,
+          worker: { name, role, ...(label !== undefined ? { label } : {}) },
+        }),
+      limits: input.limits,
+      depth: input.depth,
+      ...(input.resume ? { resume: true } : {}),
+    });
+  }
+
+  // 派出后开跑或排队：有空位即同步开跑（与不设上限时的行为一致）；否则按先后排队
+  #launch(entry: WorkerEntry, input: string): void {
+    const done = Promise.withResolvers<WorkerOutcome>();
+    entry.done = done.promise;
+    // 收尾的结果不被等待时也不报未处理拒绝
+    done.promise.catch(() => {});
+    const start = (): void => {
+      entry.holdsSlot = true;
+      this.#drive(entry, input)
+        .finally(() => {
+          if (entry.holdsSlot) {
+            entry.holdsSlot = false;
+            this.#release();
+          }
+        })
+        .then(done.resolve, done.reject);
+    };
+    const immediate = this.#tryAcquire();
+    this.#emit({
+      kind: "worker.spawned",
+      worker: refOf(entry),
+      queued: !immediate,
+      at: this.#now(),
+    });
+    if (immediate) {
+      entry.state = "running";
+      start();
+    } else {
+      this.#queue.push({ key: entry.sessionId, start });
+    }
+  }
+
+  // 决策 303：审批汇到派出方——补批放行、无人值守即搁下、等满时限即搁下；等审批期间不计卡住
+  async #approve(request: WorkerApprovalRequest): Promise<ApprovalDecision> {
+    const entry = this.#workers.get(request.sessionId);
+    if (entry === undefined) {
+      return this.#options.approvals(request);
+    }
+    const pre = entry.preApproved;
+    if (
+      pre !== undefined &&
+      pre.toolName === request.toolName &&
+      pre.args === argsKey(request.args)
+    ) {
+      delete entry.preApproved;
+      return { approved: true };
+    }
+    if (this.#options.unattended === true) {
+      return this.#block(entry, request, "approval-unattended");
+    }
+    entry.pendingApprovals += 1;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(
+          () => resolve("timeout"),
+          this.#options.approvalTimeoutMs ?? DEFAULT_WORKER_APPROVAL_TIMEOUT_MS
+        );
+      });
+      const decided = this.#options.approvals({ ...request, signal: controller.signal });
+      const winner = await Promise.race([decided, timeout]);
+      if (winner === "timeout") {
+        controller.abort();
+        decided.catch(() => {});
+        return this.#block(entry, request, "approval-timeout");
+      }
+      return winner;
+    } finally {
+      clearTimeout(timer);
+      entry.pendingApprovals -= 1;
+    }
+  }
+
+  // 请示搁下：拒绝这次调用并叫停 worker，收尾时以可恢复的失败交回
+  #block(
+    entry: WorkerEntry,
+    request: WorkerApprovalRequest,
+    errorKind: BlockedApproval["errorKind"]
+  ): ApprovalDecision {
+    const action = describeAction(request);
+    if (entry.blocked === undefined) {
+      entry.blocked = { errorKind, toolName: request.toolName, args: request.args, action };
+      this.#emit({
+        kind: "worker.blocked",
+        worker: refOf(entry),
+        errorKind,
+        action,
+        at: this.#now(),
+      });
+      entry.runtime.interrupt().catch((error: unknown) => {
+        this.#errors.push(error);
+      });
+    }
+    return {
+      approved: false,
+      reason:
+        errorKind === "approval-unattended"
+          ? "无人值守运行没有人审批，worker 停在这里等人补批"
+          : "等待审批超时，worker 停在这里等人补批",
+      reasonSource: "system-default",
+    };
+  }
+
+  #statusOf(entry: WorkerEntry): WorkerStatus {
+    return {
       sessionId: entry.sessionId,
       name: entry.name,
       role: entry.role,
@@ -416,28 +931,44 @@ export class WorkerOrchestrator {
       startedAt: entry.startedAt,
       workspace: entry.workspace,
       ...(entry.start !== undefined ? { start: entry.start } : {}),
-    }));
+      ...(entry.label !== undefined ? { label: entry.label } : {}),
+      origin: entry.origin,
+      depth: entry.depth,
+      parentSessionId: entry.parentSessionId,
+      ...(entry.outcome !== undefined ? { outcome: entry.outcome } : {}),
+    };
   }
 
-  awaitResult(sessionId: SessionId): Promise<WorkerOutcome> {
-    return this.#require(sessionId).done;
+  #emit(event: WorkerLifecycleEvent): void {
+    for (const listener of this.#listeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.#errors.push(error);
+      }
+    }
   }
 
-  errors(): unknown[] {
-    return this.#errors.slice();
-  }
-
-  // 占一个空位：未设上限或有空位即占下
+  // 占一个空位：有空位即占下
   #tryAcquire(): boolean {
-    const max = this.#options.maxConcurrent;
-    if (max === undefined || this.#running < max) {
+    if (this.#running < this.#maxConcurrent) {
       this.#running += 1;
       return true;
     }
     return false;
   }
 
-  // 收尾让出空位：队首的接着开跑（空位直接转交，计数不变）
+  // 等到占上一个空位（排在队尾）
+  #acquire(key: SessionId): Promise<void> {
+    if (this.#tryAcquire()) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.#queue.push({ key, start: resolve });
+    });
+  }
+
+  // 让出空位：队首的接着开跑（空位直接转交，计数不变）
   #release(): void {
     const next = this.#queue.shift();
     if (next !== undefined) {
@@ -447,16 +978,18 @@ export class WorkerOrchestrator {
     this.#running -= 1;
   }
 
-  async #drive(entry: WorkerEntry, task: string, limits: WorkerLimits): Promise<WorkerOutcome> {
-    const { runtime } = entry;
+  async #drive(entry: WorkerEntry, input: string): Promise<WorkerOutcome> {
+    const { runtime, limits } = entry;
     // 排队期间被取消：不开跑，按取消收尾（结果回收与释放照常）
     const skipRun = entry.cancelRequested;
+    const runStartedAt = this.#now();
     if (!skipRun) {
       entry.state = "running";
-      entry.startedAt = this.#now();
+      entry.startedAt = runStartedAt;
+      this.#emit({ kind: "worker.started", worker: refOf(entry), at: runStartedAt });
     }
     const stop = (reason: "turn-limit" | "wall-clock-limit" | "token-limit") => {
-      if (entry.limitHit !== undefined || entry.cancelRequested) {
+      if (entry.limitHit !== undefined || entry.cancelRequested || entry.stopped !== undefined) {
         return;
       }
       entry.limitHit = reason;
@@ -465,7 +998,57 @@ export class WorkerOrchestrator {
         this.#errors.push(error);
       });
     };
+    // 卡住监控与观察者的叫停：以失败（卡住为 stalled）收尾
+    const halt = (status: ChildSettledStatus, errorKind: WorkerErrorKind, message: string) => {
+      if (entry.limitHit !== undefined || entry.cancelRequested || entry.stopped !== undefined) {
+        return;
+      }
+      entry.stopped = { status, errorKind, message };
+      runtime.interrupt().catch((error: unknown) => {
+        this.#errors.push(error);
+      });
+    };
+    const stallMs = this.#options.stallMs ?? DEFAULT_WORKER_STALL_MS;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    const armStall = (): void => {
+      clearTimeout(stallTimer);
+      if (skipRun) return;
+      stallTimer = setTimeout(() => {
+        // 等审批不算卡住：等审批期间顺延
+        if (entry.pendingApprovals > 0) {
+          armStall();
+          return;
+        }
+        halt(
+          "stalled",
+          "stalled",
+          `${Math.round(stallMs / 60_000)} 分钟没有新的模型回复或工具结果`
+        );
+      }, stallMs);
+      stallTimer.unref?.();
+    };
+    const control: WorkerWatcherControl = {
+      stop: (errorKind, message) => halt("failed", errorKind, message),
+    };
+    const watchers = skipRun
+      ? []
+      : (this.#options.watchers ?? []).flatMap((factory) => {
+          try {
+            return [factory(refOf(entry), control)];
+          } catch (error) {
+            this.#errors.push(error);
+            return [];
+          }
+        });
     const unsubscribe = runtime.subscribe((event) => {
+      armStall();
+      for (const watcher of watchers) {
+        try {
+          watcher.observe(event);
+        } catch (error) {
+          this.#errors.push(error);
+        }
+      }
       if (event.kind === "turn.completed") {
         entry.turns += 1;
         // M6（决策 064 子裁决 ④）：累计 token 上限（取 turn.completed 的用量；缺省不限）
@@ -486,28 +1069,62 @@ export class WorkerOrchestrator {
         }
       }
     });
+    armStall();
     const timer = skipRun
       ? undefined
       : setTimeout(() => stop("wall-clock-limit"), limits.wallClockMs);
     let status: ChildSettledStatus;
     let error: string | undefined;
+    let errorKind: WorkerErrorKind | undefined;
     try {
-      const run: WorkerRunResult = skipRun ? { status: "aborted" } : await runtime.run(task);
+      const run: WorkerRunResult = skipRun ? { status: "aborted" } : await runtime.run(input);
       if (run.status === "completed") {
         status = "completed";
       } else if (run.status === "aborted") {
         // 上限中止在运行终态上只表现为中止；撞上限的原因随中止请求交给运行面，由 Run 收尾条目记下（072 修订）
-        status = entry.cancelRequested ? "cancelled" : (entry.limitHit ?? "aborted");
+        status = entry.cancelRequested
+          ? "cancelled"
+          : (entry.stopped?.status ?? entry.limitHit ?? "aborted");
       } else {
         status = "failed";
         error = run.errorMessage ?? "运行以未知终态结束";
+        errorKind = run.emptyReply === true ? "empty-reply" : "run-failed";
       }
     } catch (caught) {
       status = "failed";
       error = caught instanceof Error ? caught.message : String(caught);
+      errorKind = "exception";
     } finally {
       clearTimeout(timer);
+      clearTimeout(stallTimer);
       unsubscribe();
+      for (const watcher of watchers) {
+        try {
+          watcher.dispose?.();
+        } catch (caught) {
+          this.#errors.push(caught);
+        }
+      }
+    }
+    // 叫停的原因压过运行自身的终态（请示搁下时模型可能已就着拒绝收尾）
+    if (entry.blocked !== undefined && !entry.cancelRequested) {
+      status = "failed";
+      errorKind = entry.blocked.errorKind;
+      error = `${entry.blocked.action}：${
+        entry.blocked.errorKind === "approval-unattended"
+          ? "无人值守运行没有人审批"
+          : "等待审批超时"
+      }`;
+    } else if (status === "stalled" || (status === "failed" && entry.stopped !== undefined)) {
+      errorKind = entry.stopped?.errorKind ?? "stalled";
+      error = entry.stopped?.message ?? error;
+    } else if (status !== "completed" && errorKind === undefined) {
+      errorKind =
+        status === "cancelled" || status === "aborted"
+          ? status
+          : status === "turn-limit" || status === "wall-clock-limit" || status === "token-limit"
+            ? status
+            : "run-failed";
     }
     // 结果回收（失败与中止同样回收：工作树里可能已有部分工作）
     let result: ChildResult | undefined;
@@ -529,6 +1146,12 @@ export class WorkerOrchestrator {
     } catch (caught) {
       this.#errors.push(caught);
     }
+    let transcript: string | undefined;
+    try {
+      transcript = await runtime.transcript?.();
+    } catch (caught) {
+      this.#errors.push(caught);
+    }
     try {
       await runtime.dispose();
     } catch (caught) {
@@ -541,19 +1164,30 @@ export class WorkerOrchestrator {
       role: entry.role,
       workspace: entry.workspace,
       ...(entry.start !== undefined ? { start: entry.start } : {}),
+      ...(entry.label !== undefined ? { label: entry.label } : {}),
+      origin: entry.origin,
       status,
       turns: entry.turns,
       ...(error !== undefined ? { error } : {}),
+      ...(errorKind !== undefined ? { errorKind } : {}),
+      ...(entry.blocked !== undefined && !entry.cancelRequested
+        ? { recoverable: true, blocked: entry.blocked }
+        : {}),
       ...(result !== undefined ? { result } : {}),
+      ...(transcript !== undefined ? { transcript } : {}),
+      durationMs: skipRun ? 0 : this.#now() - runStartedAt,
     };
-    this.#appendSettled({
+    entry.outcome = outcome;
+    this.#appendSettled(entry.parentLog, {
       childSessionId: entry.sessionId,
       name: entry.name,
       status,
       turns: entry.turns,
       ...(error !== undefined ? { error } : {}),
+      ...(errorKind !== undefined ? { errorKind } : {}),
       ...(result !== undefined ? { result } : {}),
     });
+    this.#emit({ kind: "worker.settled", worker: refOf(entry), outcome, at: this.#now() });
     return outcome;
   }
 
@@ -569,10 +1203,10 @@ export class WorkerOrchestrator {
     }
   }
 
-  // settled 写盘失败不改变 worker 结果：进内部故障清单，父会话留"缺 settled"的可见缺口
-  #appendSettled(input: Omit<ChildSettledInput, "settledAt">): void {
+  // settled 写盘失败不改变 worker 结果：进内部故障清单，派出方会话留"缺 settled"的可见缺口
+  #appendSettled(sink: ChildFamilySink, input: Omit<ChildSettledInput, "settledAt">): void {
     try {
-      this.#options.parentLog.appendChildSettled({ ...input, settledAt: this.#now() });
+      sink.appendChildSettled({ ...input, settledAt: this.#now() });
     } catch (error) {
       this.#errors.push(error);
     }

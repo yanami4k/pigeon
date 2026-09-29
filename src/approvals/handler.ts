@@ -35,6 +35,8 @@ export interface ApprovalRequest {
   readonly needsShell?: boolean;
   // 决策 290：网络档调用将访问的主机名（工具的 inspectHost 给出）；在场时 [a] 收窄为按网站放权
   readonly host?: string;
+  // 决策 303：请求方撤回（worker 的请求等满时限无人批）——还在排队的不再上面板，已在面板上的撤下；撤回后的决定不再被采用
+  readonly signal?: AbortSignal;
 }
 
 // 会话 grant 的创建面（SessionGrantStore 满足）

@@ -180,6 +180,7 @@ export function workerSpawnedEntry(input: ChildSpawnedInput): SessionCustomEntry
       name: input.name,
       role: input.role,
       task: input.task,
+      ...(input.label !== undefined ? { label: input.label } : {}),
       policy: input.policy,
       limits: input.limits,
       workspace: input.workspace,
@@ -200,6 +201,7 @@ export function workerSettledEntry(input: ChildSettledInput): SessionCustomEntry
       name: input.name,
       status: input.status,
       ...(input.error !== undefined ? { error: input.error } : {}),
+      ...(input.errorKind !== undefined ? { errorKind: input.errorKind } : {}),
       ...(result !== undefined
         ? {
             result: {
