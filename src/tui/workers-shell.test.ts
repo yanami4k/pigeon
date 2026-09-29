@@ -1,4 +1,4 @@
-// TUI worker 命令（M5.5 S4，决策 040）：/spawn 派出回显与状态行、/workers 清单、运行中拒绝 /resume、
+// TUI worker 命令（M5.5 S4，决策 040）：/spawn 派出回显与编排面板的一行（决策 301 取代原状态行）、/workers 清单、运行中拒绝 /resume、
 // /cancel 走编排面、收尾摘要落消息区、未知命令提示含 worker 命令；壳停止后轮到的审批按拒绝处理。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -119,10 +119,14 @@ test("TUI worker 命令：派出回显与状态行、清单、运行中拒绝恢
     const workerId = workers.entries[0]?.sessionId;
     assert.ok(workerId !== undefined);
     assert.ok(screenFlat(term).includes("已派出 worker fix-a（implementer）"), screenFlat(term));
-    assert.ok(screenFlat(term).includes("workers: fix-a running 2t"), screenFlat(term));
+    assert.match(screenFlat(term), /fix-a\s+running\s+\S+\s+2t\s+\$0\s+starting/);
 
     await submit(term, "/workers");
-    assert.ok(screenFlat(term).includes("fix-a（implementer）｜ 进行中 ｜ 2 轮"), screenFlat(term));
+    assert.ok(screenFlat(term).includes("workers (1):"), screenFlat(term));
+    assert.ok(
+      screenFlat(term).includes(`implementer | branch pigeon/fix-a | session ${workerId}`),
+      screenFlat(term)
+    );
 
     await submit(term, `/resume ${newSessionId()}`);
     assert.ok(screenFlat(term).includes("有 worker 仍在运行"), screenFlat(term));
@@ -157,7 +161,7 @@ test("TUI worker 命令：派出回显与状态行、清单、运行中拒绝恢
       screenFlat(term)
     );
     assert.ok(screenFlat(term).includes("改动 1 个文件：a.ts"), screenFlat(term));
-    assert.ok(screenFlat(term).includes("workers: fix-a cancelled"), screenFlat(term));
+    assert.match(screenFlat(term), /fix-a\s+cancelled\s+/);
 
     await submit(term, "/cancel fix-a");
     assert.ok(screenFlat(term).includes("已收尾（已取消），无需取消"), screenFlat(term));

@@ -17,6 +17,7 @@
 // 决策 286：pigeon --continue 接本项目最近的主会话、--resume <id> 接指定会话（启动时直接打开，不另建空会话），
 // --resume 不带会话号开壳后弹出会话选择器；运行期告警在壳接管终端期间落消息区（之前与之后照旧写标准错误输出）；
 // 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/tui-history.json。
+// 决策 301：编排面接上编排器的只读观察口、发消息与续做（编排面板、树形视图、进入 worker 会话），树形视图按任务清单标注。
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
@@ -173,8 +174,12 @@ async function main(argv: string[]): Promise<void> {
     return {
       // 人用 /spawn 派出的：收尾显示在消息区，不另发完成通知
       spawn: (request) => orchestrator.spawn({ ...request, origin: "human" }),
-      // 决策 294：生命周期事件驱动状态行
-      subscribe: (listener) => orchestrator.subscribe(() => listener()),
+      // 决策 294、301：生命周期事件驱动编排面板；只读观察口给面板、树形视图与进入的 worker 会话
+      subscribe: (listener) => orchestrator.subscribe((event) => listener(event)),
+      observe: (listener) => orchestrator.observe(listener),
+      // 决策 301：进入 worker 会话后发消息、补批续做
+      send: (id, text) => orchestrator.send(id, text),
+      resume: (id, options) => orchestrator.resume(id, options),
       cancel: (id) => orchestrator.cancel(id),
       status: () => orchestrator.status(),
       awaitResult: (id) => orchestrator.awaitResult(id),
@@ -289,6 +294,8 @@ async function main(argv: string[]): Promise<void> {
       const list = slot.bundle.taskList;
       return list !== undefined ? renderTaskList(list.items()) : undefined;
     },
+    // 决策 301：树形视图按标签标出清单项（换绑后跟着当前会话）
+    taskItems: () => slot.bundle.taskList?.items(),
     // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
     //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
     onExit: release,

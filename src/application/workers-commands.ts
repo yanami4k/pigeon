@@ -1,13 +1,18 @@
-// worker 命令层（M5.5 S4，决策 040）：/spawn /cancel /workers 的解析与排版，状态栏一行与收尾摘要
-// 同一份措辞。纯函数，输出纯字符串（tui 投影到消息区与状态栏）；编排动作本身在 orchestration。
+// worker 命令层（M5.5 S4，决策 040）：/spawn /cancel 的解析与收尾摘要。决策 301：/workers 的清单与原先的状态栏一行
+// 由终端界面的编排面板取代（同一排版在 tui/worker-panel.ts）。纯函数，输出纯字符串（tui 投影到消息区与状态栏）；编排动作本身在 orchestration。
 import type { WorkerOutcome, WorkerStartPoint, WorkerStatus } from "../orchestration/workers.ts";
 
 export type {
   SpawnRequest,
+  WorkerActivity,
+  WorkerLifecycleEvent,
   WorkerOutcome,
+  WorkerRef,
   WorkerStartPoint,
   WorkerStatus,
 } from "../orchestration/workers.ts";
+// 决策 301：进入 worker 会话补批时，人另附的话前面同样写这一句
+export { resumeApprovalText } from "../orchestration/workers.ts";
 
 export class WorkerCommandError extends Error {}
 
@@ -90,34 +95,6 @@ const STATE_LABEL: Record<string, string> = {
 
 export function workerStateLabel(state: string): string {
   return STATE_LABEL[state] ?? state;
-}
-
-export function renderWorkersStatus(workers: readonly WorkerStatus[]): string {
-  if (workers.length === 0) {
-    return "本会话尚未派出 worker（用 /spawn 派出）";
-  }
-  return [
-    `worker（${workers.length}）：`,
-    ...workers.map(
-      (worker) =>
-        `  ${worker.name}（${worker.role}）｜ ${workerStateLabel(worker.state)} ｜ ${worker.turns} 轮 ｜ ` +
-        // 无工作区的 worker 没有分支（只读的 Reviewer 已退役，决策 137；形状仍可能出现在旧记录里）
-        `${worker.branch !== undefined ? `分支 ${worker.branch}` : "无工作区"} ｜ 会话 ${worker.sessionId}`
-    ),
-  ].join("\n");
-}
-
-// 状态栏一行：纯 ASCII（chrome 纪律——worker 名经白名单校验，状态为 ASCII 字面量）；无 worker 时空串
-export function workerStatusBar(workers: readonly WorkerStatus[]): string {
-  if (workers.length === 0) {
-    return "";
-  }
-  return `workers: ${workers
-    .map(
-      (worker) =>
-        `${worker.name} ${worker.state}${worker.state === "running" ? ` ${worker.turns}t` : ""}`
-    )
-    .join(" | ")}`;
 }
 
 // 收尾摘要：结构化结果的人读投影；合并由人用 git 完成，Pigeon 不自动合并

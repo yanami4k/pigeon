@@ -1,5 +1,5 @@
-// 终端界面里编排一段的三处改动（决策 294、297、303）：agent 派出的 worker 也即时刷新状态行（生命周期事件驱动，修"agent 派出的
-// worker 不刷新状态行"）；完成通知到来时主 agent 空闲即叫醒跑一轮、在跑时等这一轮结束再接着跑；/tasks 查看任务清单；
+// 终端界面里编排一段的三处改动（决策 294、297、303）：agent 派出的 worker 也即时刷新（生命周期事件驱动，修"agent 派出的
+// worker 不刷新状态行"；决策 301 起显示在编排面板）；完成通知到来时主 agent 空闲即叫醒跑一轮、在跑时等这一轮结束再接着跑；/tasks 查看任务清单；
 // worker 的请示等满时限被撤回时审批面板撤下。
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -129,19 +129,19 @@ function shellWith(options: {
   return { term, shell };
 }
 
-test("agent 派出的 worker：不经 /spawn 也即时出现在状态行，收尾时状态行跟着变", async () => {
+test("agent 派出的 worker：不经 /spawn 也即时出现在编排面板，收尾时那一行跟着变", async () => {
   const workers = new EventedWorkers();
   const { term, shell } = shellWith({ runtime: new NoticeRuntime(), workers });
   try {
     shell.start();
     await settle();
-    assert.ok(!screenFlat(term).includes("workers:"), screenFlat(term));
+    assert.ok(!screenFlat(term).includes("look-a"), screenFlat(term));
     workers.agentSpawn("look-a");
     await settle();
-    assert.ok(screenFlat(term).includes("workers: look-a running 1t"), screenFlat(term));
+    assert.match(screenFlat(term), /look-a\s+running\s+\S+\s+1t/);
     workers.settle("look-a");
     await settle();
-    assert.ok(screenFlat(term).includes("workers: look-a completed"), screenFlat(term));
+    assert.match(screenFlat(term), /look-a\s+done\s+/);
   } finally {
     shell.stop();
   }

@@ -15,7 +15,11 @@ import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
-import { type CommandAvailability, unknownCommandText } from "./command-table.ts";
+import {
+  type CommandAvailability,
+  unknownCommandText,
+  WORKER_SESSION_ONLY,
+} from "./command-table.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
 
 // 沙箱会话的命令面（与 shell.ts 的 TuiSandboxFace 同形）
@@ -52,6 +56,8 @@ export interface CommandsHost {
   compactCommand(focus: string | undefined): void;
   // 决策 294 B1：任务清单（排好的文字）；undefined = 清单没开；缺省 = /tasks 不可用
   tasks?(): string | undefined;
+  // 决策 301：/agents 切换树形视图
+  toggleTree?(): void;
 }
 
 // 命令表判断可用性用的只读面
@@ -167,6 +173,15 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     }
     if (workers !== undefined && tokens[0] === "workers") {
       host.workersStatusCommand(workers);
+      return;
+    }
+    // 决策 301：/agents 切换树形视图；/stop 与 /approve 在 worker 会话里用（主会话里说明怎么进入）
+    if (workers !== undefined && tokens[0] === "agents" && host.toggleTree !== undefined) {
+      host.toggleTree();
+      return;
+    }
+    if (workers !== undefined && (tokens[0] === "stop" || tokens[0] === "approve")) {
+      host.addSystem(WORKER_SESSION_ONLY);
       return;
     }
     // 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录

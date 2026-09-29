@@ -1,15 +1,13 @@
-// worker 命令层（M5.5 S4，决策 040）：/spawn 解析、/workers 与状态栏排版、收尾摘要、/cancel 定位。
+// worker 命令层（M5.5 S4，决策 040）：/spawn 解析、收尾摘要、/cancel 定位（/workers 的排版随编排面板移到终端界面，决策 301）。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { newSessionId } from "../state/ids.ts";
 import {
   parseSpawnCommand,
   renderWorkerOutcome,
-  renderWorkersStatus,
   resolveWorkerRef,
   WorkerCommandError,
   type WorkerStatus,
-  workerStatusBar,
 } from "./workers-commands.ts";
 
 function status(name: string, state: WorkerStatus["state"], turns = 0): WorkerStatus {
@@ -47,24 +45,6 @@ test("/spawn 解析：角色 + 可选 --name + 带引号或不带引号的任务
   assert.throws(() => parseSpawnCommand("implementer"), WorkerCommandError);
   assert.throws(() => parseSpawnCommand('implementer ""'), WorkerCommandError);
   assert.throws(() => parseSpawnCommand("--name x 任务"), WorkerCommandError);
-});
-
-test("/workers 与状态栏：人读清单列出状态、轮次、分支、会话；状态栏纯 ASCII，无 worker 为空串", () => {
-  assert.equal(renderWorkersStatus([]), "本会话尚未派出 worker（用 /spawn 派出）");
-  const running = status("fix-a", "running", 3);
-  const done = status("fix-b", "turn-limit", 40);
-  const text = renderWorkersStatus([running, done]);
-  assert.ok(
-    text.includes(
-      `fix-a（implementer）｜ 进行中 ｜ 3 轮 ｜ 分支 pigeon/fix-a ｜ 会话 ${running.sessionId}`
-    ),
-    text
-  );
-  assert.ok(text.includes("fix-b（implementer）｜ 达到轮次上限 ｜ 40 轮"), text);
-  assert.equal(workerStatusBar([]), "");
-  const bar = workerStatusBar([running, done]);
-  assert.equal(bar, "workers: fix-a running 3t | fix-b turn-limit");
-  assert.ok(/^[\x20-\x7e]*$/.test(bar), "状态栏纯 ASCII");
 });
 
 test("收尾摘要：状态、分支、改动文件、自述与工作树位置；失败带原因", () => {
