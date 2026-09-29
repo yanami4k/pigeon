@@ -10,7 +10,15 @@ from typing import Any
 import numpy as np
 
 from . import constants as K
-from .wording import LABELS, conclusion_sentences, exploratory_banner, fmt_p, interface_agreement_sentence, pp
+from .wording import (
+    LABELS,
+    conclusion_sentences,
+    exploratory_banner,
+    fmt_p,
+    interface_agreement_sentence,
+    interface_dropped_banner,
+    pp,
+)
 
 
 def clean(x: Any) -> Any:
@@ -76,9 +84,14 @@ def interface_lines(res: dict[str, Any]) -> list[str]:
         lines.append("- 重判与原结果行不一致、未采用的行：" + "；".join(
             f"第 {r['task']} 题 {r['cell']} 第 {r['pass_no']} 遍（{'；'.join(r['mismatches']) or '无说明'}）"
             for r in x["rejudgeInconsistent"]))
-    if x["undeterminedRows"]:
-        lines.append(f"- 剔除用例的结果无法确定、从该分析中去掉的行 {len(x['undeterminedRows'])} 行：" + "；".join(
-            f"第 {r['task']} 题 {r['cell']} 第 {r['pass_no']} 遍" for r in x["undeterminedRows"]))
+    banner = interface_dropped_banner(x["dropped"])
+    if banner:
+        lines = lines[:2] + [f"> **{banner}**", ""] + lines[2:]
+    d = x["dropped"]
+    lines.append(f"- 剔除用例的结果无法确定、从该分析中去掉的行 {d['dropped']} 行，占该分析所用 {d['rows']} 行的 "
+                 f"{d['ratio'] * 100:.1f}%")
+    for r in x["undeterminedRows"]:
+        lines.append(f"  - 第 {r['task']} 题 {r['cell']} 第 {r['pass_no']} 遍：{r['reason']}")
     lines.append(f"- 有效题 {sp['nValid']} 道；缺失题 {len(sp['missingTasks'])} 道")
     lines.append("")
     lines += effect_table(sp)
@@ -102,6 +115,9 @@ def formal_markdown(res: dict[str, Any]) -> str:
         lines.append(f"- {res['conclusions'][name]['text']}")
     if res.get("interfaceSensitivity") is not None:
         lines.append(f"- {interface_agreement_sentence(res['interfaceSensitivity']['agreement'])}（见敏感性分析一节）")
+        dropped = interface_dropped_banner(res["interfaceSensitivity"]["dropped"])
+        if dropped:
+            lines += ["", f"> **{dropped}**"]
     lines.append("")
     lines += ["## 主判据明细", ""]
     lines.append(f"- 有效题 {p['nValid']} 道；要做到的为零的题 {len(p['fEmptyTasks'])} 道：{p['fEmptyTasks']}")

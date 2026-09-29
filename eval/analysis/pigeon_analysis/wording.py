@@ -115,3 +115,14 @@ def interface_agreement_sentence(agreement: dict[str, Any]) -> str:
         if not x["consistent"]
     ]
     return "剔除接口不可猜的测试文件后，" + "、".join(parts) + "的结论与主判据不一致：结论对题目格式敏感，以主判据为准。"
+
+
+def interface_dropped_banner(dropped: dict[str, Any]) -> str | None:
+    """去掉的行超过该分析所用行数的 5% 时的醒目注明与可能影响；不超过为 None。"""
+    if not dropped["warn"]:
+        return None
+    return (
+        f"敏感性分析中剔除用例结果定不了、被去掉的行 {dropped['dropped']} 行，占该分析所用 {dropped['rows']} 行的 "
+        f"{dropped['ratio'] * 100:.1f}%，超过 5%。这些行的格子按其余遍的平均计、没有其余遍的题记为缺失；"
+        "若去掉的行在各格之间多少不一，敏感性分析的估计会偏向留下来的行，其结论须连同这些行一起解读，以主判据为准。"
+    )

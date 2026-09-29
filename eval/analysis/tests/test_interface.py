@@ -8,9 +8,15 @@ import pytest
 from runner_fixture import identity, memory, runner_row, write_run
 
 from pigeon_analysis.cli import main
-from pigeon_analysis.interface import adjusted_table, agreement, excluded_failed, read_unguessable
+from pigeon_analysis.interface import (
+    adjusted_table,
+    agreement,
+    dropped_share,
+    excluded_failed,
+    read_unguessable,
+)
 from pigeon_analysis.table import make_table
-from pigeon_analysis.wording import interface_agreement_sentence
+from pigeon_analysis.wording import interface_agreement_sentence, interface_dropped_banner
 
 A = [f"t/test_a.py::c{i}" for i in range(3)]
 B = [f"t/test_b.py::c{i}" for i in range(3, 6)]
@@ -68,8 +74,40 @@ class TestAdjustedTable:
         df = table([("01", 11, 1, 6, 4), ("01", 11, 2, 6, 5)])
         lists = {("01", 11, 2): {"failed": [B[0]], "complete": True}}
         adj, undetermined = adjusted_table(df, {11: set(A)}, lists)
-        assert undetermined == [{"cell": "01", "task": 11, "pass_no": 1}]
+        assert undetermined == [{"cell": "01", "task": 11, "pass_no": 1, "reason": "结果行没有失败用例列表"}]
         assert adj["pass_no"].tolist() == [2]
+
+    def test_reasons(self):
+        df = table([("01", 11, 1, 6, 4), ("01", 11, 2, 6, 4)])
+        lists = {k: {"failed": [A[0]], "complete": False} for k in (("01", 11, 1), ("01", 11, 2))}
+        _, undetermined = adjusted_table(df, {11: set(A)}, lists, {}, [("01", 11, 2)])
+        assert [r["reason"] for r in undetermined] == [
+            "结果行的失败用例列表截断（只记前 20 条），没有一致的重判结果",
+            "重判与原结果行不一致、未采用，结果行的失败用例列表截断",
+        ]
+
+
+class TestDroppedShare:
+    def rows(self, n_drop):
+        # 四格第 11 题共 20 行可用：n_drop 行截断且定不了，其余齐全
+        rows, lists = [], {}
+        for k in range(20):
+            cell, a = ("00", "01", "10", "11")[k % 4], k // 4 + 1
+            rows.append((cell, 11, a, 6, 4))
+            lists[(cell, 11, a)] = {"failed": [A[0]], "complete": k >= n_drop}
+        return table(rows), lists
+
+    @pytest.mark.parametrize("n_drop,warn", [(1, False), (2, True)])
+    def test_threshold(self, n_drop, warn):
+        df, lists = self.rows(n_drop)
+        adj, undetermined = adjusted_table(df, {11: set(A)}, lists)
+        share = dropped_share(adj, undetermined)
+        # 1/20 = 5% 不算超过；2/20 = 10% 超过
+        assert (share["dropped"], share["rows"], share["warn"]) == (n_drop, 20, warn)
+        banner = interface_dropped_banner(share)
+        assert (banner is not None) == warn
+        if warn:
+            assert banner.startswith("敏感性分析中剔除用例结果定不了、被去掉的行 2 行，占该分析所用 20 行的 10.0%，超过 5%。")
 
     def test_unjudged_rows_untouched(self):
         df = make_table([{"cell": "01", "task": 11, "pass_no": 1, "f_total": np.nan, "f_passed": np.nan}])
@@ -222,8 +260,13 @@ def test_cli_without_case_results_drops_undeterminable_rows(tmp_path):
     res, md = run_formal(tmp_path, "o", rows, ["--unguessable", ug])
     k = orig["judging"]["failToPass"]["passed"]
     # 截断后只剩第一条失败用例（编号第 k 小的）：test_a 里还有编号比它大的（k < 2）才定不了
-    expected = [] if k >= 2 else [{"cell": "01", "task": 11, "pass_no": 1}]
-    assert res["interfaceSensitivity"]["undeterminedRows"] == expected
+    reason = "结果行的失败用例列表截断（只记前 20 条），没有一致的重判结果"
+    expected = [] if k >= 2 else [{"cell": "01", "task": 11, "pass_no": 1, "reason": reason}]
+    x = res["interfaceSensitivity"]
+    assert x["undeterminedRows"] == expected
+    assert x["dropped"]["dropped"] == len(expected) and x["dropped"]["warn"] is False
+    if expected:
+        assert f"  - 第 11 题 01 第 1 遍：{reason}" in md
 
 
 def test_cli_case_results_need_list(tmp_path):
@@ -241,3 +284,21 @@ def test_no_exclusions_reproduce_primary(tmp_path):
         for field in ("estimate", "ci", "p", "holmSignificant"):
             assert s["effects"][name][field] == p["effects"][name][field]
     assert res["interfaceSensitivity"]["agreement"]["consistent"] is True
+
+
+
+def test_cli_dropped_rows_over_threshold_flagged(tmp_path):
+    # 第 11 题四格两遍 8 行都是 0 通过、失败列表截断到只剩编号最小的一条：剔除的 test_a 里有更大的编号，全部定不了
+    rows = rows_with_cases()
+    for r in rows:
+        if r["seq"] == 11:
+            r["judging"]["failToPass"]["passed"] = 0
+            r["judging"]["score"] = 0.0
+            r["judging"]["solved"] = False
+            r["judging"]["failedCases"]["failToPass"] = case_ids(11)[:1]
+    ug = unguessable_list(tmp_path, {11: ["t11/test_a.py"]})
+    res, md = run_formal(tmp_path, "o", rows, ["--unguessable", ug])
+    d = res["interfaceSensitivity"]["dropped"]
+    assert (d["dropped"], d["rows"], d["warn"]) == (8, 96, True)
+    assert md.count("> **敏感性分析中剔除用例结果定不了、被去掉的行 8 行，占该分析所用 96 行的 8.3%，超过 5%。") == 2
+    assert 11 not in res["interfaceSensitivity"]["primary"]["validTasks"]

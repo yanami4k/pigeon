@@ -8,7 +8,8 @@
 - 按保存的改动重判、与原结果行逐项一致的逐用例结果（有则优先）；
 - 否则取结果行里的失败用例列表：列表齐全即可确定；列表被截断时（跑批器只记按编号排序的前 20 条），编号不大于列表最后一条的
   剔除用例可确定，有编号更大的即无法确定。
-无法确定的行不猜，从该分析的表里去掉（该格该题按其余遍的平均计，没有其余遍即为缺失题），并在报告里列出。
+无法确定的行不猜，从该分析的表里去掉（该格该题按其余遍的平均计，没有其余遍即为缺失题），并在报告里逐行列出原因；
+去掉的行超过该分析所用行数的 5% 时，报告里醒目注明并写明对结论的可能影响。
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from . import constants as K
 from .primary import EFFECTS, analyze_primary
+from .stats import above
 from .wording import classify
 
 Key = tuple[str, int, int]
@@ -57,14 +60,36 @@ def excluded_failed(
     return len(excluded & set(failed))
 
 
+def undetermined_reason(key: Key, failed_lists: dict[Key, dict[str, Any]], bad: set[Key]) -> str:
+    """剔除用例结果定不了的原因。"""
+    if key not in failed_lists:
+        return "结果行没有失败用例列表"
+    if key in bad:
+        return "重判与原结果行不一致、未采用，结果行的失败用例列表截断"
+    return "结果行的失败用例列表截断（只记前 20 条），没有一致的重判结果"
+
+
+def dropped_share(adj: pd.DataFrame, undetermined: list[dict[str, Any]]) -> dict[str, Any]:
+    """去掉的行占该分析所用行数的比例：分母为调整后四格里仍有要做到用例的判分行加上去掉的行。"""
+    used = int((adj["cell"].isin(K.CELLS) & adj["f_total"].gt(0)).sum())
+    dropped = sum(1 for r in undetermined if r["cell"] in K.CELLS)
+    rows = used + dropped
+    ratio = dropped / rows if rows else 0.0
+    return {"dropped": dropped, "rows": rows, "ratio": ratio,
+            "warn": above(ratio, K.INTERFACE_DROPPED_WARN_RATIO)}
+
+
 def adjusted_table(
     df: pd.DataFrame,
     excluded: dict[int, set[str]],
     failed_lists: dict[Key, dict[str, Any]],
     rejudged: dict[Key, list[str]] | None = None,
+    rejudge_bad: Iterable[Key] = (),
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    """逐行剔除后重算 f_total、f_passed 与 score；返回新表与无法确定、被去掉的行。没判分的行（f_total 为空）原样保留。"""
+    """逐行剔除后重算 f_total、f_passed 与 score；返回新表与无法确定、被去掉的行（附原因）。没判分的行（f_total 为空）
+    原样保留。rejudge_bad 为重判与原结果行不一致、未采用的行。"""
     rejudged = rejudged or {}
+    bad = set(rejudge_bad)
     out = df.copy()
     drop: list[int] = []
     undetermined: list[dict[str, Any]] = []
@@ -83,7 +108,8 @@ def adjusted_table(
         n_failed = excluded_failed(ex, key, failed_lists, rejudged)
         if n_failed is None:
             drop.append(idx)
-            undetermined.append({"cell": key[0], "task": key[1], "pass_no": key[2]})
+            undetermined.append({"cell": key[0], "task": key[1], "pass_no": key[2],
+                                 "reason": undetermined_reason(key, failed_lists, bad)})
             continue
         passed = float(row["f_passed"]) - (len(ex) - n_failed)
         out.at[idx, "f_total"] = total
@@ -115,7 +141,9 @@ def analyze_interface_sensitivity(
     baseline_unavailable: Iterable[int] | None = None,
     **kw: Any,
 ) -> dict[str, Any]:
-    adj, undetermined = adjusted_table(df, unguessable["excluded"], failed_lists, rejudged)
+    inconsistent = list(rejudge_inconsistent)
+    bad = [(r["cell"], int(r["task"]), int(r["pass_no"])) for r in inconsistent]
+    adj, undetermined = adjusted_table(df, unguessable["excluded"], failed_lists, rejudged, bad)
     sens = analyze_primary(adj, expected_tasks=expected_tasks, baseline_unavailable=baseline_unavailable,
                            with_mixed=False, **kw)
     no_remaining = sorted(t for t, n in unguessable["remaining"].items() if n == 0)
@@ -123,8 +151,9 @@ def analyze_interface_sensitivity(
         "list": unguessable["summary"],
         "noRemainingTasks": no_remaining,
         "undeterminedRows": undetermined,
+        "dropped": dropped_share(adj, undetermined),
         "rejudgedRows": len(rejudged or {}),
-        "rejudgeInconsistent": list(rejudge_inconsistent),
+        "rejudgeInconsistent": inconsistent,
         "primary": sens,
         "agreement": agreement(primary, sens),
     }
