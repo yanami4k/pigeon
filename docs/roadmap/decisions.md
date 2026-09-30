@@ -6,6 +6,7 @@
 
 - 任何技术裁决在项目负责人裁决后，同一次提交内必须同步本索引：新增一条或修订既有条目的结论。裁决记录只写本地文件而不更新本索引，视为未完成。
 - 条目一旦落定不删除；被推翻时在原条目追加"已由 NNN 取代"，新结论另起条目。
+- 条目被取代、退役、撤回或部分修改时，同一步三处都改（319）：表格行结论末尾追加标记；详情段标题的编号后加〔已取代〕〔已退役〕〔已撤回〕〔部分已改〕之一；标题下首行写"状态：……见 NNN。判断现状以代码为准"。标题不带状态的为现行。本文件是决策历史，不是现状说明。
 - 锚点只写文件路径，不写行号。
 - 条目正文只写结论与简短理由；未选、建议、代价与事实细节只写本地详情（168）。
 
@@ -331,6 +332,7 @@
 | 316 | 主判据不动，另加一项事先写明的敏感性分析：按静态规则把"接口不可猜"的测试文件（导入的项目内名字在开工代码里不存在、题面也未提及）中的要做到用例剔除后，以同样的统计方法再算一遍，报告两者，不一致时写明结论对题目格式敏感；清单在看到正式结果之前算出并入库 | 实验执行第 4 件 | M9 |
 | 317 | 撤回 315：正式跑判题每步按人在该步的 pyproject 选定依赖组合后再跑测试，按此核对 7 题人写版本两类用例全过，97 个过不了来自核对时未切换组合，判题无缺陷；不重判、分析不改；316 的逐用例重判照做，并与原结果逐项核对作判分抽检 | 实验执行第 5 件 | M9 |
 | 318 | 正式跑模型费上限放宽，让四格与最简 agent 都跑完：四格上限由 ¥590 调到 ¥665，最简 agent 由 ¥60 调到 ¥75（合计上限 ¥740，预计实花约 ¥720）；剩余部分只在 DeepSeek 空闲时段续跑；第 3 遍判定仍按 ¥650 计剩余预算 | 实验执行第 6 件 | M9 |
+| 319 | 文档标明现行状态，防止把已退役的内容当现状：决策索引中非现行的详情段在标题编号后加〔已取代〕〔已退役〕〔已撤回〕〔部分已改〕并在首行写明见哪条、现状以代码为准；路线图开头加读法说明，被改动的章节标题加状态；此后推翻或修改旧条目时同一步改表格行、标题状态与首行；给 agent 的"以什么为准"写入本地协作约定并随每份任务说明给出，不另加入库的 agent 文件 | 文档规范裁决 2026-09-30 | 仓库规范 |
 
 ## 条目
 
@@ -341,8 +343,9 @@
 - 锚点：src/approvals/handler.ts、src/cli/approval-ui.ts；ROADMAP §3.9 第 6 档。
 - 详情：docs/decisions/m3-key-decisions.md。
 
-### 002 工具执行串行写死，run() 互斥（事实）
+### 002 〔部分已改〕工具执行串行写死，run() 互斥（事实）
 
+- 状态：部分已改——开派 worker 时改为并行执行，见 264。判断现状以代码为准，下文为当时的原文。
 - 结论：toolExecution 固定 sequential，Adapter 对并发 run() 互斥，不变量"任何时刻最多一个待审批或执行中的调用"。
 - 理由：上游 parallel 模式审批整批前置、事件交错错乱；审批瓶颈是人，并行省的毫秒没有意义（演进路径为 per-tool shared/exclusive，账本已按调用粒度设计）。
 - 锚点：src/pi-runtime/adapter.ts；ROADMAP §M5.5 前置。
@@ -355,8 +358,9 @@
 - 锚点：src/cli/repl.ts、src/cli/approval-ui.ts；ROADMAP §M3。
 - 详情：docs/decisions/m3-key-decisions.md。
 
-### 004 yolo 是人事先批发授权，证据链不断（事实）
+### 004 〔部分已改〕yolo 是人事先批发授权，证据链不断（事实）
 
+- 状态：部分已改——回执已随 184 停写。判断现状以代码为准，下文为当时的原文。
 - 结论：注入快照的 ToolPolicy 带 approvalMode ∈ {prompt, yolo}，深冻结；yolo 下 Receipt 照写，approvedBy 记 policy:yolo；deny 清单绝对且工具名级精确匹配，参数内容模式识别归 M6。
 - 理由：批发授权也是人授的，证据链不能因它断开；做不好的模式识别是虚假安全感。
 - 锚点：src/pi-runtime/snapshot.ts、src/tools/policy.ts、src/state/tool-execution.ts；ROADMAP §3.9 第 1、4 档。
@@ -369,30 +373,34 @@
 - 锚点：src/pi-runtime/adapter.ts；ROADMAP §5 上游硬事实。
 - 详情：docs/decisions/m3-leftover-fixes-decisions.md。
 
-### 006 拒绝决定落 decision 记录族（事实）
+### 006 〔已取代〕拒绝决定落 decision 记录族（事实）
 
+- 状态：已取代——已由 184 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：三个拒绝点（deny、无审批通道 fail-closed、人工拒绝）全部落 decision 记录，含 approvedBy 与逐字理由；对账把 rejected 归闭环，永不入 OutcomeUnknown。
 - 理由：拒绝理由是 M6 以后蒸馏的负样本监督信号；Receipt 的职责是副作用对账，不塞理由。
 - 锚点：src/state/event-log.ts、src/pi-runtime/adapter.ts；ROADMAP §4 状态流。
 - 详情：docs/decisions/m3-leftover-fixes-decisions.md。
 
-### 007 Receipt v1→v2 占位迁移保留（事实）
+### 007 〔已取代〕Receipt v1→v2 占位迁移保留（事实）
 
+- 状态：已取代——已由 184 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：v1 从未持久化，占位迁移不删。
 - 理由：它是迁移管线的保活装置，JSONL 冷读是管线首个真实消费方。
 - 锚点：src/state/receipt.ts、src/state/migration.ts。
 - 详情：docs/decisions/m3-leftover-fixes-decisions.md。
 
-### 008 证据链按副作用分层（事实）
+### 008 〔已取代〕证据链按副作用分层（事实）
 
+- 状态：已取代——已由 184 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：写与 exec 类调用持久化 intent、decision、receipt 三族；只读调用只留 tool.proposed 与 tool.settled 事件级记录。
 - 理由：§3.2 是写调用的红线不可砍；只读调用无副作用，事件级已满足 Trace 与学习用途。
 - 锚点：src/pi-runtime/adapter.ts；ROADMAP §4 状态流。
 - 已由 184 取代：新会话存储停写意图、审批决定、回执与对账确证。
 - 详情：docs/decisions/m4-pre-decisions.md。
 
-### 009 账本归并进 Event Log，不双写（事实）
+### 009 〔部分已改〕账本归并进 Event Log，不双写（事实）
 
+- 状态：部分已改——修订后独立账本退役，见 176。判断现状以代码为准，下文为当时的原文。
 - 结论：M3 的 JSONL 账本成为 Event Log 的事件族，JsonlLedger 退役为只读解析器；不存在"账本一套、事件日志一套"。
 - 理由：单一事实链是 §3.5 的直接推论，双写意味着两套事实要互相对账。
 - 锚点：src/persistence/event-log.ts、src/persistence/ledger.ts。
@@ -406,24 +414,27 @@
 - 锚点：src/tools/policy.ts、src/tools/grants.ts、src/approvals/grant-store.ts、src/application/grants.ts、src/cli/approval-ui.ts；ROADMAP §3.9。
 - 详情：docs/decisions/m4-pre-decisions.md。
 
-### 011 Event Log 每会话一文件（事实）
+### 011 〔部分已改〕Event Log 每会话一文件（事实）
 
+- 状态：部分已改——修订后改为 pi 会话文件，见 177。判断现状以代码为准，下文为当时的原文。
 - 结论：.pigeon/sessions/sess_<ulid>.jsonl，项目内、gitignored。
 - 理由：冷物化边界等于文件边界；列目录即时间序；单会话损坏不影响全局。
 - 锚点：src/persistence/event-log.ts。
 - 修订（2026-09-26）：会话文件改为 pi 会话文件，仍一会话一文件，见 177。
 - 详情：docs/decisions/m4-design-decisions.md。
 
-### 012 逐条同步写、治理族 fsync、缺口冷侧可见（事实）
+### 012 〔部分已改〕逐条同步写、治理族 fsync、缺口冷侧可见（事实）
 
+- 状态：部分已改——修订后新存储不强制 fsync，见 178；缺口标注已随 181 去掉。判断现状以代码为准，下文为当时的原文。
 - 结论：事件产生即同步写盘；intent、decision、receipt、breaker、resolution、grant 各族写后 fsync，观察族不 fsync；写盘失败进 listenerErrors 不改运行结果，进程内即时警告；跨进程的既往缺口以文件形态派生（撕裂尾巴、entry 断号、孤儿记录）在 trace、replay、resume 标注。
 - 理由：事件频率低，同步写成本可忽略；写盘失败的记录不可能靠写盘持久化，跨进程只能从文件形态推断。
 - 锚点：src/persistence/event-log.ts、src/cli/repl.ts、src/state/materialize.ts；ROADMAP §M4 完成证据。
 - 详情：docs/decisions/m4-design-decisions.md（D2，含 021 的措辞精确化）。
 - 修订（2026-09-26）：会话存储改为 pi 会话树后不强制 fsync，治理族写后 fsync 的要求不再保持，见 178。
 
-### 013 entry 映射：message_end 自封 EntryId，(runId, runSeq) 权威键（事实）
+### 013 〔部分已改〕entry 映射：message_end 自封 EntryId，(runId, runSeq) 权威键（事实）
 
+- 状态：部分已改——EntryId 改用 pi 条目编号，见 185。判断现状以代码为准，下文为当时的原文。
 - 结论：每条 message_end 落地时分配 EntryId，记 (runId, runSeq)；abort 与上游合成失败消息也占序号；timestamp 永不当键；流式阶段不锚身份。
 - 理由：上游消息无稳定 id，timestamp 撞毫秒；reset 可整组替换 transcript，全局下标不可靠。
 - 锚点：src/state/event-log.ts、src/pi-runtime/adapter.ts；docs/spikes/spike-pi-transcript.zh-CN.md。
@@ -436,8 +447,9 @@
 - 锚点：src/state/replay.ts、src/cli/replay.ts；ROADMAP §4 目录图 replay/ 注释。
 - 详情：docs/decisions/m4-design-decisions.md。
 
-### 015 派生不落库；列表安静；哈希三方比对自动确证（事实）
+### 015 〔部分已改〕派生不落库；列表安静；哈希三方比对自动确证（事实）
 
+- 状态：部分已改——哈希确证已由 183 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：session 聚合状态每次从 Event Log 现算；列表默认只给时间与 Run 数，唯一突出项是待对账；冷恢复读目标文件现状哈希与 intent 的改前、预期改后比对，匹配即写 resolution 销账，不匹配留人三选一；任何路径不自动重执行。
 - 理由：无第二套事实（§3.5）；待对账是唯一 actionable 项；确证只销账不重放（§3.2）。
 - 锚点：src/state/session-summary.ts、src/execution/recovery.ts、src/application/session-list.ts。
@@ -458,16 +470,18 @@
 - 详情：docs/decisions/m4-design-decisions.md。
 - 修订：023 增加 hasRunEnded 事实——run.ended 缺失恒为未知，优先于 stopReason。
 
-### 018 M3 旧账本启动时一次性迁移（事实）
+### 018 〔已取代〕M3 旧账本启动时一次性迁移（事实）
 
+- 状态：已取代——已由 128 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：首次启动检测旧 JSONL 账本，逐行转事件格式写入对应会话文件，旧文件改名 *.legacy.jsonl 物理保留、逻辑退役。
 - 理由：并存读后归并让读层长期背复杂度；不迁移则 M3 验收记录失效。
 - 锚点：src/persistence/legacy-migration.ts。
 - 详情：docs/decisions/m4-design-decisions.md。
 - 修订（2026-09-22）：已由 128 取代——M3 旧账本一次性转换删除，启动不再检测旧账本。
 
-### 019 固化规则回指稳定身份，升格与移除留痕（事实）
+### 019 〔部分已改〕固化规则回指稳定身份，升格与移除留痕（事实）
 
+- 状态：部分已改——留痕部分已由 128 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：配置规则命中的账本回指用规则的 promotedFrom.grantId，位置序号只作展示与 /revoke 输入；/grants save 落 grant.promoted，/revoke config#N 落 grant.config-removed；Event Log 版本 4→5 纯版本推进。留痕顺序不对称：扩权先留证后生效，缩权先生效后留证。
 - 理由：位置序号随移除前移，历史回指会漂移；留证失败时宁可少一条痕迹，不可让账本说"已撤"而规则仍在生效。
 - 锚点：src/tools/grants.ts、src/application/grants.ts、src/state/event-log.ts；ROADMAP §3.9 留证段。
@@ -481,8 +495,9 @@
 - 锚点：src/persistence/grants-config.ts、src/application/grants.ts。
 - 详情：docs/decisions/m4-closeout-decisions.md。
 
-### 021 D2 冷视图三处全补，措辞精确化（事实）
+### 021 〔已取代〕D2 冷视图三处全补，措辞精确化（事实）
 
+- 状态：已取代——已由 181 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：entry 断号判据放进冷物化（末尾缺失由 run.ended.messageCount 推出，无 run.ended 的崩溃残留不推）；trace 在 Run 头下标注撕裂尾巴与断号并在会话头计数；replay 原位标注加尾部总账；resume 汇总既往缺口，有缺口不说"证据链完整"。D2 措辞改为"进程内即时警告 + 冷侧文件形态派生标注"。
 - 理由：trace 缺标注直接违反"绝不假装证据链完整"；进程内数组跨重启恒空，字面承诺不成立。
 - 锚点：src/state/materialize.ts、src/state/trace.ts、src/cli/trace.ts、src/cli/replay.ts、src/application/resume.ts。
@@ -506,16 +521,18 @@
 - 锚点：src/state/classification.ts、src/state/materialize.ts、src/application/resume.ts、src/cli/trace.ts；ROADMAP §4 状态流。
 - 详情：docs/decisions/m4-closeout-decisions.md 决策 ④；证据 docs/audits/2026-09-12-m4-real-provider-acceptance.md 复验段。
 
-### 024 Adapter 提供只读流式文本观察口；消息文本不持久化（事实）
+### 024 〔部分已改〕Adapter 提供只读流式文本观察口；消息文本不持久化（事实）
 
+- 状态：部分已改——消息不持久化与 thinking 不转发已由 037、045 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：PiRuntimeAdapter 新增 subscribeStream 观察口，在上游 message_update 携带 text_delta 时把增量文本连同 runId 转发给订阅者；三条纪律：不进 Event Log、不进 events()、不锚身份；listener 自包 try/catch 进 listenerErrors。thinking 增量第一版不转发；消息文本不持久化，历史会话在 TUI 渲染治理投影（工具、审批、Receipt、分类）。
 - 理由：只按 turn 刷新是状态面板不是对话界面；观察口是派生显示态、非权威状态，与 §3.5 不冲突，TUI 直连上游 Agent 违反 §2 边界规则。
 - 锚点：src/pi-runtime/adapter.ts subscribeStream（M2 S1 落地，2026-09-12）、src/pi-runtime/adapter-stream.test.ts；ROADMAP §M2。
 - 详情：docs/decisions/m2-decisions.md。
 - 修订（2026-09-13，045）："thinking 增量第一版不转发"与"消息文本不持久化"两条子裁决由 037 与 045 取代：subscribeStream 增量载荷加 kind 字段区分 text 与 thinking，thinking_delta 一并转发；消息正文与 thinking 均持久化到旁置内容文件；观察口三条纪律不变。
 
-### 025 装配根与恢复流程抽到 application/，cli 与 tui 共用（事实）
+### 025 〔部分已改〕装配根与恢复流程抽到 application/，cli 与 tui 共用（事实）
 
+- 状态：部分已改——对账流程已由 183 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：cli/index.ts 的 buildRuntime 搬到 application/runtime.ts，审批 handler 改由调用方注入（cli 传 REPL 问答版，tui 传面板版）；cli/session.ts 的"哈希确证 + 人工确认写 resolution"流程搬到 application/resume.ts，问答与输出仍注入。巡航规则补：application 可依赖 state / tools / approvals / persistence / execution / pi-runtime；cli 与 tui 不得依赖 execution，只经 application。治理编排仍留在 Adapter（M5.5 前置，022 记账的债不在本条结清）。
 - 理由：M2 是第二个 Actor，正是重审 022"cli 直连 execution 过渡豁免"的时机；Actor 依赖 Actor 方向别扭。
 - 锚点：src/application/runtime.ts、src/application/resume.ts、src/application/format.ts（M2 S1 落地，2026-09-12）、.dependency-cruiser.js（application-is-controller / actors-no-execution 规则）；ROADMAP §4 目录图、§M2 完成证据。
@@ -528,8 +545,9 @@
 - 锚点：docs/spikes/spike-pi-tui.zh-CN.md（复现脚本 spikes/spike-pi-tui/）；package.json（锁定 0.84.4）；.dependency-cruiser.js tui-pi-tui-only；ROADMAP §4 tui 注释。
 - 详情：docs/decisions/m2-decisions.md。
 
-### 027 TUI busy 语义：运行中拒绝提交、保留缓冲、不排队（事实）
+### 027 〔部分已改〕TUI busy 语义：运行中拒绝提交、保留缓冲、不排队（事实）
 
+- 状态：部分已改——已由 286 取代：运行中输入排队。判断现状以代码为准，下文为当时的原文。
 - 结论：Run 进行中按回车提交非空输入时，TUI 拒绝本次提交——不调 application API、输入缓冲保留、消息区落一行 [busy] 提示；空输入（纯空白）静默忽略（不回显、不提交、不提示）。
 - 理由：排队意味着未设计的意图顺序与持久化语义；拒绝让 002 的 run() 互斥在 UI 层可见且零新状态。取消落地后排队需求重审。
 - 锚点：src/tui/shell.ts（handleSubmit）；ROADMAP §M2 完成证据。
@@ -557,8 +575,9 @@
 - 锚点：src/application/grants.ts、src/approvals/handler.ts、src/cli/repl.ts、src/tui/shell.ts（handleSlashCommand）。
 - 详情：docs/decisions/m2-decisions.md。
 
-### 031 TUI 会话列表与恢复入口口径；崩溃残留列表呈现偏差（事实）
+### 031 〔部分已改〕TUI 会话列表与恢复入口口径；崩溃残留列表呈现偏差（事实）
 
+- 状态：部分已改——恢复对账已由 183 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：/sessions 与 /resume <sessionId> 的命令层与 cli 同一份：会话列表查询与渲染归位 application/session-list.ts，恢复对账复用 application/resume.ts；恢复的人工确认用面板式单键（1/2/3，其余键吞掉）。/resume 对账收口后经注入的 rebind 换绑运行面，同 sessionId 续跑；恢复当前会话响亮拒绝。会话列表只突出待对账（pendingReconcile，与 cli 一致），崩溃残留不单独突出，其呈现面为 resume 恢复屏的既往缺口与 trace 会话头（023）；要提进列表需先修订 015。
 - 理由：单键决议复用 029 的模态键控，零新输入语义；列表口径保住 015 与 cli 输出冻结。
 - 锚点：src/tui/shell.ts、src/tui/main.ts、src/application/session-list.ts、src/application/resume.ts、src/state/session-summary.ts。
@@ -579,8 +598,9 @@
 - 锚点：src/tui/shell.ts（handleShellKey/handleCtrlC/requestExit/handleSlashCommand）、src/tui/main.ts（onExit/release）、src/tui/exit.test.ts。
 - 详情：docs/decisions/m2-decisions.md。
 
-### 034 工作区准备与恢复种子归 application；Actor 不触碰 persistence 写侧（事实）
+### 034 〔部分已改〕工作区准备与恢复种子归 application；Actor 不触碰 persistence 写侧（事实）
 
+- 状态：部分已改——旧账本迁移已由 128 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：新增 application/workspace.ts——prepareWorkspace（realpath 规范化 + D8 旧账本一次性迁移）、restoreGrantSeed（物化目标会话的生效 grant 作 restoredGrants 种子）、sessionsDirOf（会话目录唯一约定），cli 与 tui 共用。巡航新增 actors-no-persistence-writes：cli / tui 不得 import persistence/legacy-migration.ts 与 persistence/grants-config.ts，Actor 对 persistence 只剩只读物化。运行中的 [busy] 提示补"exit: Ctrl+C twice"。
 - 理由：两个入口各自保留会改文件的启动装配，tui 因此直接依赖 persistence 写侧，与"Actor 只提交意图、渲染投影"不符。
 - 锚点：src/application/workspace.ts、src/cli/index.ts、src/tui/main.ts、.dependency-cruiser.js。
@@ -600,8 +620,9 @@
 - 锚点：src/application/format.ts（sanitizeTerminalText）、src/tui/shell.ts（MessageFlow）、src/cli/index.ts（writeOut）、src/cli/repl.ts（sanitizedWriter）。
 - 详情：docs/decisions/m2-decisions.md；证据 docs/audits/2026-09-12-m2-fixes.md。
 
-### 037 消息文本旁置内容文件持久化，entry 带内容哈希回指（事实）
+### 037 〔部分已改〕消息文本旁置内容文件持久化，entry 带内容哈希回指（事实）
 
+- 状态：部分已改——修订后存完整消息、不截断，见 179。判断现状以代码为准，下文为当时的原文。
 - 结论：消息正文（user 输入、assistant text 块、toolResult 文本）持久化到每会话一份的旁置内容文件 `.pigeon/sessions/<sessionId>.messages.jsonl`，记录以 (runId, runSeq) 与 EntryId 对齐 entry 族；Event Log 升 v6 加法式：entry 族新增可选 contentHash（内容块规范序列化的 sha256），旧记录缺省视为无文本。Event Log 仍是唯一状态权威，内容文件是被哈希回指的证据材料，不承载任何状态。thinking 第一版不存、只记 hasThinking；图片只记 mimeType、字节数与哈希；按内容块设大小上限，超出截断并标 truncated 加全文哈希，绝不静默丢弃；耐久为观察族（同步写不 fsync），写序先内容后 entry，entry 有 contentHash 而内容缺失由冷侧派生为缺口，按 012/021 口径标注。写入口径：EventLogSink.appendEntry 入参携带 content，由 JsonlEventLog 决定落盘位置。
 - 理由：正文体积大且随工具输出增长，同文件会让 Event Log 的冷路径永远为用不到的文本付成本；哈希回指满足回查原文，内容可单独清除而证据链仍可校验。
 - 锚点：src/state/message-content.ts（记录形状、内容块抽取、规范序列化哈希、UTF-8 按块截断）、src/state/event-log.ts（EVENT_LOG_VERSION 6、entry.contentHash、v5 → v6 恒等迁移）、src/persistence/event-log.ts（appendEntry 先内容后 entry、readMessageContentFileDetailed、listSessionIds 排除内容文件、materializeSession 的 content 选项）、src/state/materialize.ts（detectContentGaps）、src/pi-runtime/adapter.ts（message_end 交深拷贝消息）、src/state/trace.ts / src/state/replay.ts / src/application/resume.ts / src/application/format.ts（三处缺口呈现）；测试 src/state/message-content.test.ts、src/persistence/message-content-log.test.ts、src/pi-runtime/adapter-content.test.ts、src/cli/content-gap.test.ts；ROADMAP §M5。
@@ -610,8 +631,9 @@
 - 落地（2026-09-13）：内容块联合为 text / thinking / image / toolCall / unknown，toolCall 只记 id 与 name，未知块类型记原始类型与哈希；toolResult 记录另带 toolCallId / toolName / isError；单块上限默认 64 KiB（UTF-8 字节，不劈字符与代理对）。缺口判据比对按现有正文重算的哈希；内容文件中段坏行只计数不抛，对应 entry 落缺口。会话列表冷路径以 content:false 跳过内容文件；写盘接缝 EventLogIo 使写序可由崩溃点测试观测。044 起内容文件首条可以是 role 为 system、runSeq 为 0 的 system prompt 记录（不对应 entry）。
 - 修订（同日，045）：thinking 块与 text 块同形态持久化（同大小上限、可见截断、哈希），默认开，配置开关可关；被 provider 编辑掉的块记 redacted 标记；thinking 只是线索不是证据。
 
-### 038 Session Search 内容级检索：全文扫描先行，搜索与读原文两个 read 档工具（事实）
+### 038 〔部分已改〕Session Search 内容级检索：全文扫描先行，搜索与读原文两个 read 档工具（事实）
 
+- 状态：部分已改——读原文输出修订见 185。判断现状以代码为准，下文为当时的原文。
 - 结论：内容级检索第一版为全文扫描：按会话目录从新到旧逐文件流式逐行读 037 的内容文件，关键词大小写不敏感子串匹配、多词为与，不接受正则；对外只暴露命中流接口（search(query, options) 返回 AsyncIterable 命中），命中含 sessionId、EntryId、runId、runSeq、role、时间、约 200 字片段、truncated 标记与可选 score；查询输入为结构化对象（关键词、角色过滤、复用 SessionListFilters 的工具/分类/时间过滤）。模型入口是两个 read 档工具（§3.9 第 5 档自动放行）：搜索工具返回命中列表，默认上限 20 条并有总字节上限，超限提示收窄、不做分页；读原文工具按 EntryId 返回完整内容块加同 Run 的治理邻居。人的入口 /search 命令层在 application/，命中片段经 sanitizeTerminalText。范围只限本项目 .pigeon/sessions。索引不做：真实数据下单次搜索超过约 2 秒再盘，届时索引定性为按内容哈希判过期的可重建缓存；语义检索归 M10。扫描器与两个工具落 memory/，memory/ 可依赖 state / persistence / tools，不触达 pi-runtime / application / Actor 层（022 修订）。
 - 理由：当前零会话数据，索引是为未测过的规模提前付复杂度，且与 015"派生不落库"冲突；§3.3 要求检索两步（线索再原文），模型给正则是 ReDoS 面。
 - 锚点：src/memory/session-search.ts（createSessionSearch 命中流、字面子串匹配、片段、上限即停）、src/memory/search-tools.ts（search_sessions、read_session_entry、sessionToolRegistrations）、src/application/search.ts（runSearchCommand）、src/application/runtime.ts（注册与广告）、src/cli/repl.ts 与 src/tui/shell.ts（/search 渲染面）、.dependency-cruiser.js（memory-below-controller）；测试 src/memory/session-search.test.ts、src/memory/search-tools.test.ts、src/application/search.test.ts；ROADMAP §M5。
@@ -627,8 +649,9 @@
 - 修订（同日）：Event Log 账本原样保留，不拆；其后续消费者优先是学习闭环（§M7、§M9）、Session Search 与并行编排；权限、审批、放权、固化留痕类功能非必要不新增，只在两个主角明确需要时补（如 exec 工具到来时补命令级模式规则与沙箱）。
 - 修订（2026-09-22）："原样保留，不拆"收窄为"主体保留，无读者或与其他记录重复的记录可剪"，见 128。
 
-### 040 并行 worker 编排轻档：同进程多 Adapter、工作树隔离、审批汇聚、四动作接口；M5.5 紧接 M5（事实）
+### 040 〔部分已改〕并行 worker 编排轻档：同进程多 Adapter、工作树隔离、审批汇聚、四动作接口；M5.5 紧接 M5（事实）
 
+- 状态：部分已改——结果收回见 279、292，嵌套见 299，审批见 302、303。判断现状以代码为准，下文为当时的原文。
 - 结论：M5.5 重写为轻档并行 worker 编排，排在 M5 之后。worker = 一整套完整 agent（上游 Agent 循环 + PiRuntimeAdapter + 自己的上下文、策略、会话文件、隔离工作区），同进程多 Adapter，装配根每 worker 调一次 buildRuntime；隔离工作区第一版为 git 工作树，路径围栏根即工作树，治理根（.pigeon/）恒在主仓库根；每 worker 一个会话文件记 parentSessionId / parentRunId，父会话记 child.spawned / child.settled 两族，任何文件只有一个写入者；审批汇聚到父级面板带 worker 标签、一次一个，决定绑定该 worker 的 executionId，worker 内会话 grant 随其结束作废；worker 策略由父策略子集构造，深度 1；第一版只有轮次与墙钟上限，/cancel 走 abort；结果为结构化（分支、文件清单、receipt、自述），合并由人用 git 做；orchestration/ 只暴露 spawn / cancel / status / awaitResult 四动作加审批回调（§3.6 Job 边界，只留接口不做第二实现）；多窗口各自独立，窗口间只保安全不保协调（会话打开锁、grants.json 原子替换、工作树目录名带会话编号）。演进：父 agent 经受治理的 spawn 工具自派；脚本流水线。§5 顺序表改为 M5 → M5.5 → M5.7 → M6.5 → M6 → M7–M9；时间盒改为"规划参考，超盒是否砍范围由项目负责人裁决"；§7 加 v0.2 演示截止线；§8 加"不做多窗口跨进程协调"。
 - 理由：同进程审批无需额外工作、buildRuntime 已支持多实例，多进程复杂度两到三倍且当前无跨机器需求；工作树隔离使 §8"同一工作区禁止并行写入者"原样成立；四动作接口使演进换实现不换调用方。
 - 锚点：src/orchestration/worktree.ts（工作树增删列与改动清单）、src/orchestration/workers.ts（spawn / cancel / status / awaitResult、轮次与墙钟上限、深度 1、审批回调）、src/orchestration/roles.ts（角色表与委派子集构造、子集校验）、src/application/runtime.ts（治理根与工作区根分离、委派策略）、src/application/workers.ts（worker 运行面工厂与按会话装配编排器）、src/application/worker-scope.ts（worker 会话恢复回到自己的工作树与委派策略）、src/application/workers-commands.ts（/spawn /cancel /workers 命令层）、src/approvals/queue.ts（审批排队）、src/approvals/handler.ts（来源会话、worker 标签、放权落点）、src/state/event-log.ts（v7 session.header / child.spawned / child.settled）、src/state/materialize.ts（父子配对）、src/state/session-summary.ts 与 src/application/session-list.ts（父子后缀）、src/persistence/session-lock.ts（会话打开锁）、src/persistence/atomic-write.ts 与 src/persistence/grants-config.ts（grants.json 原子替换）、src/tui/shell.ts 与 src/tui/main.ts（命令、状态行、关窗先取消 worker）、src/cli/trace.ts（从主会话进入 worker 会话）、src/cli/index.ts（resume worker 会话）、.dependency-cruiser.js（orchestration-below-controller）；测试 src/orchestration/workers.test.ts、src/orchestration/worktree.test.ts、src/application/workers-e2e.test.ts、src/application/workers-approvals-e2e.test.ts、src/application/workers-recovery-e2e.test.ts、src/persistence/session-lock.test.ts、src/persistence/grants-config-atomic.test.ts；ROADMAP §M5.5、§5、§7、§8；证据 docs/audits/2026-09-13-m5-5-8ac7266.md。
@@ -646,24 +669,27 @@
 - 修订（同日）：server 配置兼容读取 Claude Code 的 .mcp.json 格式；oh-my-pi 的 MCP 桥接只作设计参考，不引包。
 - 修订（2026-09-14，M5.7 收口）：只有 implementer 角色继承主会话的 MCP 工具，只读与测试角色暂不接。
 
-### 042 常驻 Memory 两层存储、system prompt 冻结注入、字符预算、超预算列名（事实）
+### 042 〔部分已改〕常驻 Memory 两层存储、system prompt 冻结注入、字符预算、超预算列名（事实）
 
+- 状态：部分已改——程序写入 memory 目录一项已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：常驻 Memory 两层存储：项目级 `.pigeon/memory/*.md` 与用户级 `~/.pigeon/preferences.md`，人可直接编辑的 markdown；M5 写入方只有人，M8 激活候选时程序写入同一目录。注入位置是 system prompt 追加段，会话开始拼一次即冻结，不走 transformContext；transformContext 只做只读观察，并留给 M10 外部 Provider 的逐调用动态召回。预算单位为字符数，实际消耗由 usage 落盘事后校准；偏好永不截断，Memory 文件按配置顺序装到预算满，其余只列文件名、模型可用读工具按需读。冻结身份为每文件 sha256 与字节数，整体哈希写入 InjectionSnapshot v3 的 memory 字段；会话中途改文件下个会话生效。
 - 理由：Memory 是背景常识，语义上属于 system prompt；system prompt 是最稳定的前缀、缓存命中率最高，且钩子只观察不改写。
 - 锚点：src/memory/resident.ts（loadResidentMemory）、src/state/injection-manifest.ts（MemoryManifestEntry）、src/pi-runtime/snapshot.ts（INJECTION_SNAPSHOT_VERSION 3、v2 → v3 迁移）、src/application/runtime.ts（会话开始拼 system prompt、homeDir 与 memoryBudgetChars）、src/cli/index.ts 与 src/tui/main.ts（--memory-budget）；测试 src/memory/resident.test.ts、src/application/runtime-memory.test.ts、src/pi-runtime/snapshot.test.ts；ROADMAP §M5、§M10。
 - 详情：docs/decisions/m5-decisions.md；证据 docs/audits/2026-09-13-m5-ba94b53.md（S3）。
 - 落地（2026-09-13）：默认预算 8000 字符；偏好占用预算且排最前；预算边界上的文件只装入前半并标 truncated，其余 included=false 只列文件名；缺省按文件名字典序；v1 → v2 快照迁移函数的输出版本写死为 2。
 
-### 043 Skill Catalog 标准目录、自写加载器、load_skill 三重约束 fail-closed、哈希清单冻结（事实）
+### 043 〔部分已改〕Skill Catalog 标准目录、自写加载器、load_skill 三重约束 fail-closed、哈希清单冻结（事实）
 
+- 状态：部分已改——skill.loaded 已随 184 停写。判断现状以代码为准，下文为当时的原文。
 - 结论：目录格式采用标准 SKILL.md 加前言（name / description），`.pigeon/skills/<name>/` 下可选 references、scripts、templates，用户级 `~/.pigeon/skills/` 同构，与 Claude Code / pi 的 Skill 格式兼容；加载器自写，不借上游 harness 层。启动只把名称、简介、路径追加进 system prompt，与 Memory 同段冻结。按需读取走 read 档工具 load_skill(name, resource?)：路径 realpath 后须在该 Skill 目录内、单文件上限默认 64 KiB 超出截断且可见、来源只认登记过的 Skill 名，任一不满足即报错说明理由、什么都不注入。开会话时每个 Skill 目录全部文件的哈希清单写入 InjectionSnapshot v3 的 skills 字段，load_skill 读取时比对，不一致即拒绝并提示下个会话生效；每次读取另落 skill.loaded 观察记录（名、资源路径、哈希、是否截断）。scripts 在 M5 只读不执行；Skill 是文本，工具照旧经六档排律，不扩权。
 - 理由：标准格式让公开 Skill 直接可用；专用工具既解决工作区围栏又天然留痕，哈希清单落实"会话内新增或修改只能下个会话生效"。
 - 锚点：src/skills/catalog.ts（loadSkillCatalog、前言解析、哈希清单、目录段）、src/skills/load-skill-tool.ts（createLoadSkillTool、loadSkillRegistration）、src/state/injection-manifest.ts（SkillManifestEntry）、src/pi-runtime/snapshot.ts（skills 字段）、src/state/event-log.ts 与 src/persistence/event-log.ts（skill.loaded 族、appendObservation）、src/pi-runtime/adapter.ts（recordObservation）、src/application/runtime.ts（登记、注册、晚绑定留痕）、.dependency-cruiser.js（skills-only-state-tools）；测试 src/skills/catalog.test.ts、src/skills/load-skill-tool.test.ts、src/skills/skill-governance.test.ts、src/application/runtime-skills.test.ts；ROADMAP §M5。
 - 详情：docs/decisions/m5-decisions.md；证据 docs/audits/2026-09-13-m5-ba94b53.md（S4）。
 - 落地（2026-09-13）：同名 Skill 项目级优先，冲突与缺 SKILL.md 的目录记入 problems 不登记；符号链接与目录联接不跟随、不进清单；有 Skill 才注册并广告 load_skill。检查顺序为来源、realpath 围栏、非文件、清单哈希，通过后才截断并回调 skill.loaded；任一拒绝不返回内容也不留读取记录。skill.loaded 由 Adapter 的 recordObservation 盖当前 runId 落盘。
 
-### 044 run.started 快照摘要、llm.request 上下文指纹、turn.completed 加 usage，Event Log v6 一次升（事实）
+### 044 〔已取代〕run.started 快照摘要、llm.request 上下文指纹、turn.completed 加 usage，Event Log v6 一次升（事实）
 
+- 状态：已取代——已由 184 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：M5 起 InjectionSnapshot 落盘：system prompt 全文以 role 为 system 的记录写进 037 的内容文件，每会话一次带哈希；新增观察族 run.started，带模型、策略、广告工具集、system prompt 哈希、memory 与 skills 哈希清单。新增观察族 llm.request，每次模型调用一条：消息条数、各角色条数、估算字符数、全部消息内容哈希的滚动哈希、system prompt 哈希；观察点是 transformContext，只读不改，自包 try/catch，出错原样返回消息数组。turn.completed 载荷加法式加 usage（input / output / cacheRead / cacheWrite / totalTokens / cost）；会话摘要算每会话总 token 与成本，trace 每轮显示。037 entry contentHash、043 skill.loaded 与本条三项合并为 Event Log v6 一次升，迁移全部加法式。
 - 理由：治理日志保持小、全文归旁置内容文件，指纹可按哈希与内容文件对上；字符估算与 provider 计费有偏差，usage 必须落盘。
 - 锚点：src/state/runtime-events.ts（TurnUsage、ObservationKind 与三个观察族 payload）、src/state/event-log.ts（观察族记录并集、ObservationInput）、src/pi-runtime/events.ts（turn.completed 带 usage）、src/pi-runtime/adapter.ts（#recordRunStarted、#observeContext、messageContent 选项）、src/persistence/event-log.ts（appendSystemPrompt、appendObservation）、src/state/session-summary.ts 与 src/application/session-list.ts（总 token 与成本）、src/state/trace.ts 与 src/cli/trace.ts（Run 头启动快照、每轮 usage）、src/cli/replay.ts（观察族时间线）；测试 src/pi-runtime/adapter-observe.test.ts、src/cli/usage-view.test.ts、src/pi-runtime/adapter-content.test.ts（usage）；ROADMAP §M5。
@@ -678,16 +704,18 @@
 - 详情：docs/decisions/m5-decisions.md；证据 docs/audits/2026-09-13-m5-ba94b53.md（S2 渲染部分与真实链路验收）。
 - 落地（2026-09-13）：历史安全上限按渲染行计，默认 500；单条渲染上限默认 4000 字符；thinking 段在 036 净化之后加暗色。思维链映射为标准 thinking 块的前提是请求带推理档位；Adapter 与装配根不设推理档位，推理档位配置未裁决；OpenAI 兼容端点的 reasoning_content 线路未实测。
 
-### 046 Eval 自建薄 runner，任务格式对齐公开基准，外部 harness 只作可选适配（事实）
+### 046 〔部分已改〕Eval 自建薄 runner，任务格式对齐公开基准，外部 harness 只作可选适配（事实）
 
+- 状态：部分已改——本地 Eval runner 已随 205 删除。判断现状以代码为准，下文为当时的原文。
 - 结论：M6.5 / M9 的 Eval 用自建薄 runner，不引入外部评测框架（promptfoo、Inspect AI 等）作主干。runner 读任务目录、准备仓库快照、经 headless 运行入口跑 Pigeon 若干次、调确定性验证器并从账本出 JSONL 结果。三向对照（无 Skill / 候选 / 已批准）靠 042 / 043 的注入冻结开关；指标全部从 Event Log 算。统计按 M9 规范（per-task 三元结果、pairwise delta、Wilson 区间、McNemar exact）自写；报告先出 markdown 表。任务目录格式对齐公开基准（Terminal-Bench 形态），公开任务可导入；Terminal-Bench / SWE-bench 适配器为可选项。M6.5 在本机工作树跑；headless 入口与 M5.5 worker 共用。
 - 理由：外部框架读不到账本、默认 LLM 打分，测不了学习增益；任务格式对齐公开基准保住可比性，又不让外部成为主干依赖。
 - 锚点：src/eval/（task.ts、snapshot.ts、verify.ts、runner.ts、results.ts、report.ts）、src/application/headless.ts、src/cli/index.ts（run 与 eval 子命令）、eval/tasks/、eval/skills/、docs/audits/eval/；ROADMAP §M6.5、§M9；证据 docs/audits/2026-09-14-m6-5-8e76567.md。
 - 落地（2026-09-14，M6.5）：统计只做 per-task 三元结果与 pairwise delta，Wilson 区间与 McNemar exact 留 M9；外部 harness 适配器未做。
 - 详情：docs/decisions/m5-5-orchestration-decisions.md。
 
-### 047 文档规范：audit / decision / spikes 入库，notes 本地；探针脚本入库 spikes/（事实）
+### 047 〔部分已改〕文档规范：audit / decision / spikes 入库，notes 本地；探针脚本入库 spikes/（事实）
 
+- 状态：部分已改——docs/decisions 入库部分已由 130 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：docs/roadmap、docs/decisions、docs/audits、docs/spikes 入库；只有 docs/notes（交接状态、学习材料、上游源码注释）本地不入库。上游行为探针与真实链路验收驱动放仓库根 spikes/，保持原目录层级使 `../src` 相对引用有效，附 README 说明用途、运行前提、PtyHost 编译命令与升级后重跑要求；日志、工作区目录与二进制不入库。spikes/ 不参与 `npm run verify`，并从 biome 检查范围排除。入库文档只写事实、选项、权衡、裁决与证据；不逐字引用对话，不写对人或其他 agent 工作的评价；不含本地绝对路径与密钥；审计文件只追加不覆盖，不同会话用带基线 commit 后缀的不同路径。
 - 理由：audit、decision 与 spike 是"做了什么、为什么、怎么验证"的证据层，不入库则仓库只剩测试与结论；本条只放行这些，不放行对话过程。
 - 锚点：.gitignore、biome.json、docs/roadmap/README.md（文档目录规范表）、spikes/README.md。
@@ -695,16 +723,18 @@
 - 修订（2026-09-26）：决策索引的条目只写结论与简短理由，选项、权衡、建议与事实细节只写本地详情，见 168。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 048 exec 工具：自由命令加逐次审批，[a] 精确命令串会话 grant，commands.json 可选，沙箱后置（事实）
+### 048 〔部分已改〕exec 工具：自由命令加逐次审批，[a] 精确命令串会话 grant，commands.json 可选，沙箱后置（事实）
 
+- 状态：部分已改——回执已随 184 停写；沙箱改为 Docker，见 237。判断现状以代码为准，下文为当时的原文。
 - 结论：一个 exec 档工具 run_command，参数是命令字符串，模型自由提出；exec 档永不走 read 自动放行，默认逐次审批，面板显示完整命令；[a] 对 exec 档收窄为"本会话放行这条一模一样的命令"，精确字符串匹配，/grants save 升格固化、/revoke 撤销，与既有六档流程同一套；yolo 照旧免审。执行不经 shell 解释器，参数数组直接 spawn；工作目录固定为 worker 工作树；环境变量白名单；墙钟超时；输出按字节截断并标记。Receipt 记命令、退出码、输出哈希与截断输出，加执行前后工作树文件清单差异。`.pigeon/commands.json` 可选：给常用命令起短名，并作 tester 等角色的默认权限清单，主会话不受其限制。沙箱后置，按平台适配（macOS sandbox-exec、Linux bubblewrap、Windows Docker），Sandbox 接口只有 run 一个动作；探测不到沙箱时不改变 run_command 的审批语义。
 - 理由：固定命令名单让主会话跑临时命令过重，逐次审批加完整命令显示在无沙箱平台上可接受；精确字符串匹配守住 §3.9，且不会被 `&&` 绕过。
 - 锚点：src/tools/run-command.ts（不经 shell 的参数数组执行、环境变量白名单、超时、截断、文件清单差异、短名与角色清单）、src/tools/grants.ts（精确命令匹配）、src/approvals/handler.ts（grantScopeFor：exec 档 [a] 收窄为命令串）、src/approvals/grant-store.ts、src/state/receipt.ts（v4 exec 证据）、src/state/grants.ts 与 src/state/event-log.ts（grant 族与固化规则的 command 字段）、src/state/commands.ts 与 src/persistence/commands-config.ts（commands.json schema 与读取）、src/application/governance.ts（审批请求带风险分层、exec 证据落 receipt）、src/application/runtime.ts（注册与角色允许清单）、src/application/grants.ts（/grants 展示、升格与移除携带命令）、src/orchestration/roles.ts（tester 角色）、src/tui/approval.ts 与 src/cli/approval-ui.ts（精确命令放权键）、src/cli/trace.ts（exec 证据投影）；测试 src/tools/run-command.test.ts、src/tools/grants-command.test.ts、src/persistence/commands-config.test.ts、src/orchestration/roles-tester.test.ts、src/application/run-command-e2e.test.ts；ROADMAP §M5.5 exec 段与角色表。
 - 详情：docs/decisions/m5-5-orchestration-decisions.md。
 - 修订（2026-09-14）：Windows 上解析到 .cmd / .bat 时，参数逐个匹配保守字符集（字母、数字与 _ . - / : = @），全部通过则经 cmd.exe /d /s /c 作启动器运行，任一不通过则拒绝并指出参数，字符集不因任何模式放宽；需要 shell 语义的命令（管道、串联、白名单外参数）只在人确认后以 shell 运行，确认来源为审批面板对精确命令串的批准、[a] 会话 grant、/grants save 固化规则三种，grant 与固化规则带 shell 标记（加法式，旧记录缺省为 false，只有带标记的才能免审需 shell 的命令），匹配仍是精确字符串；yolo 下需 shell 的命令照 004 免审；Receipt 的执行证据标明经 shell；面板显示的命令串与实际执行的字节一致、文案含"经 shell"、显示前经 036 净化；commands.json 不是 shell 授权来源。锚点：src/tools/run-command.ts（inspectCommand 三路判定、启动器字符集、authorizeShell 一次一用）、src/application/governance.ts（需 shell 判定、放行时授予 shell）、src/tools/grants.ts 与 src/approvals/grant-store.ts（shell 标记匹配）、src/approvals/handler.ts（面板命令行与 [a] 的 shell 标记）、src/state/grants.ts、src/state/event-log.ts、src/state/receipt.ts（shell 字段）；测试 src/tools/run-command-shell.test.ts、src/tools/grants-shell.test.ts、src/application/run-command-shell-e2e.test.ts、src/tui/approval-shell.test.ts。
 
-### 049 治理编排整体搬到 application/，Adapter 只转发 decide；零行为变化作 M5.5 S0（事实）
+### 049 〔部分已改〕治理编排整体搬到 application/，Adapter 只转发 decide；零行为变化作 M5.5 S0（事实）
 
+- 状态：部分已改——四族落盘已随 184 停写。判断现状以代码为准，下文为当时的原文。
 - 结论：Adapter 内的治理编排（六档排律求值、会话 grant 匹配与命中计数、固化规则匹配、审批 handler 调用、拒绝理由回模型、熔断计数、intent / decision / receipt / breaker 四族落盘）整体搬到 application/governance.ts；ToolGovernance 接口定义在 pi-runtime，实现在 application；Adapter 的 beforeToolCall 钩子只做 decide(ctx) 转发，把 block 理由原样交回上游。作 M5.5 的 S0 切片，零行为变化，现有测试断言不改全过。
 - 理由：M5.5 的 childPolicy ⊆ delegatedParentPolicy 校验只能在 Controller 做，且 §2 规则 3 要求 Adapter 不自行决定权限。
 - 锚点：src/pi-runtime/governance.ts（ToolGovernance 接口、宿主能力、落盘口类型）、src/application/governance.ts（审批闸整族实现：排律、grant 求值、人工审批、账本、四族落盘、熔断、上游拦截计数）、src/pi-runtime/adapter.ts（beforeToolCall 转发 decide 并原样交回理由，tool_execution_end 转发 settle）、src/application/runtime.ts（装配根组装后注入）；测试 adapter 七个测试文件只换注入面，src/pi-runtime/adapter-persistence.test.ts「decision 写盘失败不改变拒绝结果」补模型侧逐字断言作接缝证据；ROADMAP §M5.5 前置。
@@ -731,8 +761,9 @@
 - 锚点：ROADMAP §M5.7 交付；src/state/mcp-toolset.ts（更严规则与摘要 schema）、src/state/runtime-events.ts（run.started 载荷加 mcpTools / mcpServers）、src/mcp/registry-bridge.ts（按实际档位注册）、src/application/mcp.ts（摘要）、src/pi-runtime/adapter.ts（每个 Run 开始时取摘要）、src/cli/trace.ts（Run 头列冲突；state/trace.ts 已持有 run.started 记录，不需改动）、src/cli/index.ts 与 src/tui/main.ts（启动时进程内警告）。
 - 详情：docs/decisions/m5-7-decisions.md。
 
-### 053 Receipt 加第三个证据块 mcp：参数与返回哈希、截断标记、serverEvidence 约定；治理链不动（事实）
+### 053 〔已取代〕Receipt 加第三个证据块 mcp：参数与返回哈希、截断标记、serverEvidence 约定；治理链不动（事实）
 
+- 状态：已取代——已由 184 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：Receipt 升 v5 加法式，新增可选块 mcp，与 contentAfterHash（write）、exec（exec）并列：argsHash（与 intent 原始参数哈希对上）、resultSummary 与 resultHash、resultBytes 与 truncated、structuredHash、serverEvidence（MCP 返回的 structuredContent 若含 `evidence` 键原样收入，上限 16 KiB 超出截断并标记，整体算哈希）。冷侧对账对 mcp 块只判回执在不在，不做哈希三方比对。六档排律、审批、intent / decision / receipt 三族、对账规则一律不动，不加新记录族，不解析 server 返回的语义。
 - 理由：每个字段都是既有回执所答问题在第三类工具上的投影，serverEvidence 对应 write 工具改前改后哈希的位置。
 - 锚点：ROADMAP §M5.7 交付；src/state/receipt.ts（v5）、src/state/mcp-evidence.ts（证据计算与 16 KiB 上限）、src/mcp/registry-bridge.ts（执行时暂存证据）、src/application/governance.ts（settle 落 mcp 块）、src/state/event-log.ts（v8：读路径把内嵌 receipt 升到当前版本）、src/cli/replay.ts（mcp 摘要）。
@@ -753,24 +784,27 @@
 - 锚点：ROADMAP §M5.7 完成证据；package.json（devDependencies 锁 2026.8.31）、spikes/mcp-acc/（.mcp.json、.pigeon/mcp.json 夹具，run-everything.mjs 自动化剧本，run-filesystem.mjs 真实链路剧本）、src/tools/run-command.ts（planMcpLaunch 复用 048 启动器）、src/mcp/transport.ts；证据 docs/audits/2026-09-14-m5-7-d99d693.md。
 - 详情：docs/decisions/m5-7-decisions.md。
 
-### 056 headless 运行入口：进程内 API 加 `pigeon run` 薄壳；无人值守审批只有 yolo 或 fail-closed；需审批次数从回执反推（事实）
+### 056 〔部分已改〕headless 运行入口：进程内 API 加 `pigeon run` 薄壳；无人值守审批只有 yolo 或 fail-closed；需审批次数从回执反推（事实）
 
+- 状态：部分已改——回执停写，需审批次数改从工具结果标记反推，见 184。判断现状以代码为准，下文为当时的原文。
 - 结论：headless 入口分两层：进程内 API 复用 M5.5 的 worker 运行面工厂，以无父会话的方式装出完整运行面跑到收尾，带轮次与墙钟上限，供 Eval runner 与脚本流水线调用；cli 子命令 `pigeon run` 是它的薄壳：任务描述从参数或 stdin 读，沿用 --root、--stream-fn、--yolo、--thinking，加 --max-turns、--wall-clock 与 --json（退出时打印一行结构化结果：sessionId、runId、终态、失败分类、轮次、usage、需审批次数），退出码按终态映射。每次运行是一个普通会话，账本、trace、search 照旧。无人值守审批只有三种形态、由参数决定：缺省 prompt 模式下一律 fail-closed 拒绝；显式 --yolo；grants.json 固化规则加 yolo。需审批次数不新增记录，从回执反推：write 与 exec 档且 approvedBy 为 policy:yolo 的调用数。
 - 理由：无人值守时无人可问，fail-closed 是唯一诚实的落法，yolo 是人的显式拨档；worker 工厂已是完整运行面，API 几乎现成。
 - 锚点：src/application/headless.ts（runHeadless、summarizeRunMetrics、HEADLESS_EXIT_CODES）、src/application/workers.ts（openRuntimeSurface 装配内核、createDetachedRuntime）、src/application/runtime.ts（createApprovalHandler 可缺省、skillRoots / memoryRoots）、src/cli/index.ts（run 子命令）；测试 src/application/headless.test.ts、src/cli/run-cli.test.ts；ROADMAP §M6.5。
 - 落地（2026-09-14）：headless 与 worker 工厂共用抽出的装配内核（不写 session.header、run_command 不套角色清单、不传审批通道），worker 路径行为不变；终态除四种 Run 终态外有 turn-limit / wall-clock-limit / token-limit（累计 totalTokens 达上限即中止）；退出码 completed 0、failed 2、aborted 3、unknown 4、turn-limit 5、wall-clock-limit 6、token-limit 7，1 为参数与装配错误；结果另带工具调用数与耗时，全部从 Event Log 算。
 - 详情：docs/decisions/m6-5-decisions.md。
 
-### 057 Eval 任务目录格式：一任务一目录、快照为 git 引用经工作树、验证器由 runner 在收工后独立运行（事实）
+### 057 〔已退役〕Eval 任务目录格式：一任务一目录、快照为 git 引用经工作树、验证器由 runner 在收工后独立运行（事实）
 
+- 状态：已退役——已随 205 删除。判断现状以代码为准，下文为当时的原文。
 - 结论：任务放在仓库 `eval/tasks/<id>/`，入库，一任务一目录：task.md 任务说明、task.json 元数据（id、说明文件、repo 与 ref、预算 maxTurns / wallClockMs / 可选 token 上限、验证器命令与超时、tags、holdout 标记）、verify 脚本、README（测什么能力、来源与许可）。代码快照以 git 引用给出（仓库加提交号），runner 用 M5.5 的 WorkspaceProvider 从该提交开工作树；M6.5 的任务用 Pigeon 自己的仓库在锁定提交上。验证器由 runner 在 agent 收工后作为独立子进程在工作区内执行，带超时，模型看不见也改不了；验证脚本只看工作区最终文件。公开基准导入时转成同一布局。
 - 理由：说明、快照、验证器三件套是公开基准的共同点；验证器由 runner 跑是"确定性验证器"的落法，模型自己跑的测试只是反馈不是判决。
 - 锚点：src/eval/task.ts（EvalTaskSchema、loadEvalTask / loadEvalTasks）、src/eval/snapshot.ts（prepareTaskWorkspace）、src/orchestration/workers.ts（WorkspaceProvider 的 baseRef、gitWorktreeWorkspaces 分传仓库根与治理根）、src/orchestration/worktree.ts（addWorktree 治理根、deleteBranch、mainRepoRoot）、eval/tasks/、.gitignore（资产例外）、.dependency-cruiser.js（eval-below-actors）；测试 src/eval/task.test.ts、src/eval/snapshot.test.ts、src/eval/snapshot-stale.test.ts（崩溃残留续跑前清理）；ROADMAP §M6.5。
 - 落地（2026-09-14）：task.json 带 version；repo.path 为 "." 时取主仓库根；id 与目录名一致、最长 24；验证资产放 assets/ 下按工作区相对路径排布，不得越出工作区根；验证器命令为参数数组，`{TASK_DIR}` 替换为任务目录；工作树开在治理根（输出目录）的 .pigeon/worktrees 下，worker 名 `<taskId>-<condition>-<n>`，挂 node_modules 目录联接，跑完先拆联接再删工作树与分支。
 - 详情：docs/decisions/m6-5-decisions.md。
 
-### 058 验证器接口：退出码三值判决加可选 JSON、误成功取"自报完成但验证失败"、判决记 eval.verified 观察族（事实）
+### 058 〔已退役〕验证器接口：退出码三值判决加可选 JSON、误成功取"自报完成但验证失败"、判决记 eval.verified 观察族（事实）
 
+- 状态：已退役——已随 205 删除。判断现状以代码为准，下文为当时的原文。
 - 结论：验证器返回以退出码为主：0 通过、非 0 失败、超时或脚本自身崩溃为"未判定"，三值对上 M9 的 per-task 三元结果；stdout 最后一行若是 JSON 则原样记进结果，字段不约束。误成功第一层为"agent 自报完成但验证器失败"记为误报，自报完成由账本现成信息判定，不让模型输出特殊标记；第二层为任务可选的反向断言脚本，反向断言失败即使正向通过也判失败并标"越界"；M6.5 只做第一层、留第二层接口。验证器证据记观察族 eval.verified（任务 id、命令、退出码、输出哈希与截断输出、耗时、三值结论），落在该次运行的会话文件里，trace 可见，不是工具调用。
 - 理由：三值是"缺失结果不得支撑确定性结论"与 M9 统计规范的直接要求；判决落账本让 trace 可答，也让 M7 拿到干净的结果标签。
 - 锚点：src/eval/verify.ts（restoreAssets、runVerifier、judgeVerdict、selfReportedDone、verifyTaskRun）、src/state/runtime-events.ts（EvalVerifiedPayloadSchema）、src/state/event-log.ts（v9、eval.verified 族）、src/state/materialize.ts（evalVerifieds）、src/state/trace.ts 与 src/cli/trace.ts（Run 头验证判决）、src/cli/replay.ts、src/application/format.ts（evalVerdictLabel）；测试 src/eval/verify.test.ts；ROADMAP §M6.5。
@@ -778,8 +812,9 @@
 - 详情：docs/decisions/m6-5-decisions.md。
 - 修订（2026-09-14）：验证器的输入资产以任务目录为准：runner 跑验证器前先把任务目录里的测试文件与脚本覆盖写回工作区，工作区里被 agent 改动或删除的同名文件不作数；"验证脚本只看工作区最终文件"精确为"只看回填后的工作区"。
 
-### 059 冒烟对照：候选 Skill 放暂存目录、headless 传 skillRoots 切三条件、Skill 从真实失败手写、任务集含 holdout（事实）
+### 059 〔已退役〕冒烟对照：候选 Skill 放暂存目录、headless 传 skillRoots 切三条件、Skill 从真实失败手写、任务集含 holdout（事实）
 
+- 状态：已退役——已随 137 退役，题与 Skill 已删除，见 282。判断现状以代码为准，下文为当时的原文。
 - 结论：候选 Skill 放独立暂存目录 `.pigeon/candidates/skills/<name>/`，缺省不加载；M8 的激活即把目录搬进 .pigeon/skills 并落记录。三向对照（无 Skill、候选、已批准）由 headless API 的 skillRoots 参数切换：空、只含暂存目录、只含正式目录；哈希清单随之进 run.started。M6.5 的"候选"与"已批准"是同一份文件在两个位置，只验证注入管线，"无对有"才验证经验效果。Skill 由人手写，内容从 M5 与 M5.5 审计里模型真实踩过的坑提炼，不经自动管线。任务集 5 到 10 个，全部在 Pigeon 自己仓库的锁定提交上，其中 2 到 3 个标 holdout、写 Skill 时不看；每任务每条件跑 3 次，成本由 044 的 usage 算出进报告。
 - 理由：runner、任务集与指标是 M7 到 M9 反正要用的设施，手写 Skill 是它们的第一个使用者；holdout 上的指标变化才说明经验会迁移而非背题。
 - 锚点：src/skills/catalog.ts（SkillRoot 显式根）、src/memory/resident.ts（MemoryRoot 显式根）、src/application/headless.ts（skillRoots / memoryRoots）、src/eval/runner.ts（skillRootsFor、条件循环）、eval/skills/pigeon-coding-pitfalls/、eval/tasks/；测试 src/skills/catalog-roots.test.ts、src/application/headless.test.ts、src/eval/runner.test.ts；ROADMAP §M6.5。
@@ -787,8 +822,9 @@
 - 详情：docs/decisions/m6-5-decisions.md。
 - 修订（2026-09-14）：Eval 用的候选与已批准 Skill 放入库的 `eval/skills/<name>/candidate/` 与 `eval/skills/<name>/approved/`，runner 三个条件的 skillRoots 直接指向它们，memoryRoots 三个条件一律为空；`.pigeon/candidates/skills/` 仍是日常使用的暂存区约定，M8 的激活动作不变。
 
-### 060 Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库（事实）
+### 060 〔已退役〕Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库（事实）
 
+- 状态：已退役——已随 205 删除。判断现状以代码为准，下文为当时的原文。
 - 结论：每次 Eval 运行一个目录 `docs/audits/eval/<日期>-<基线号>/`。results.jsonl 入库，每次运行一行：任务 id、条件、第几次、sessionId、runId、三值判决、是否误报、轮次、工具调用数、需审批次数、usage、耗时、失败分类。report.md 入库：任务乘条件的成功率表、误报、成本、holdout 单列；M6.5 只做 per-task 三元结果与 pairwise delta。实验会话文件落该目录下的 `.pigeon/`（独立治理根，不入库，本地保留供 trace / replay 以 --root 回查），不与日常会话混放；runner 的输出目录参数决定三样落点。实验会话不进日常会话列表，015 的重审推迟到日常会话数真实变多时。
 - 理由：结果表小且须可复算、会话文件大，按 047 证据入库、运行时数据不入库；独立治理根让实验会话不污染日常列表。
 - 锚点：src/eval/results.ts（EvalResultLine、EVAL_RESULT_FIELDS、readResultLines）、src/eval/runner.ts（runEval）、src/eval/report.ts（renderEvalReport）、src/cli/index.ts（eval 子命令）、docs/audits/eval/2026-09-14-8e76567/；测试 src/eval/runner.test.ts、src/eval/report.test.ts；ROADMAP §M6.5。
@@ -821,8 +857,9 @@
 - 锚点：src/pi-runtime/output-limit.ts（streamFn 包装）；src/application/runtime.ts（装配、`TRUNCATION_GUIDANCE`、快照 model 段）；src/pi-runtime/snapshot.ts（注入快照 v5）；src/state/runtime-events.ts 与 src/pi-runtime/adapter.ts（run.started 的 model 摘要）；src/application/workers.ts（worker 继承）；src/application/headless.ts、src/eval/runner.ts、src/cli/index.ts、src/tui/main.ts（`maxOutputTokens` 与 `--max-output-tokens`）；测试 src/pi-runtime/output-limit.test.ts、src/application/runtime-output-limit.test.ts、src/application/workers-output-limit.test.ts、src/application/runtime-edit-mode.test.ts、src/application/output-limit-truncation-e2e.test.ts。
 - 详情：docs/decisions/output-limit-decisions.md；施工与验证证据：docs/audits/2026-09-15-output-limit-7818dee.md。
 
-### 064 Reviewer 复用 worker 编排：工作区加"无工作区"成员、补只读快照工具、候选由 Controller 从收尾结果落盘，另加 `pigeon review` 薄壳（事实）
+### 064 〔已退役〕Reviewer 复用 worker 编排：工作区加"无工作区"成员、补只读快照工具、候选由 Controller 从收尾结果落盘，另加 `pigeon review` 薄壳（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：后台 Reviewer 复用 M5.5 的 worker 编排与四动作接口。工作区类型以加法式联合新增"无工作区"成员（054 的形状封顶口径不变），Reviewer 不开工作树；reviewer 角色补只读的本次运行快照工具（对话、Trace、Receipt），不给任何写档工具；worker 收尾结果允许携带结构化内容，候选由 Controller 从收尾结果落盘，模型侧只产出结论。另加 `pigeon review <sessionId>` 薄壳，复用 headless 装配内核，供事后补审冷会话与实验会话。
 - 理由：路线图已把 Reviewer 定为只读、无工作树的 worker，复用编排直接获得会话文件、配对记录、取消与冷恢复；"模型交结果、程序落盘"使 Reviewer 天然只读，不新增放权语义。
 - 锚点：src/state/event-log.ts（工作区联合、child.settled 结果放宽与结构化内容、worker 上限的 token 项与 token-limit 收尾状态、review.skipped 观察族，Event Log v10）；src/state/review.ts（审阅工具名、审阅配置与审阅目标）；src/orchestration/roles.ts（reviewer 白名单、只读快照工具的子集豁免、模型接入覆盖列）；src/orchestration/workers.ts（无工作区规划、结构化收尾结果、token 上限）；src/review/snapshot.ts 与 src/review/tools.ts（冻结快照与两个只读工具）；src/review/scheduler.ts（触发、全局并发、预算缺省）；src/review/prompt.ts（Reviewer 任务说明）；src/application/review-runtime.ts（派发器与主会话调度挂载）、src/application/session-runtime.ts（挂载点）、src/application/runtime.ts（审阅配置进注入快照、Reviewer 运行面注册只读工具）、src/application/workers.ts（无工作区的工作区根、覆盖列生效、结构化结果解析）、src/application/launch-flags.ts（--review-every / --no-review）、src/application/review-command.ts 与 src/cli/index.ts（pigeon review）；src/pi-runtime/snapshot.ts（注入快照 v6）；测试 src/orchestration/reviewer-workspace.test.ts、src/state/worker-workspace.test.ts、src/application/worker-model-override.test.ts、src/review/snapshot.test.ts、src/review/tools.test.ts、src/review/scheduler.test.ts、src/application/review-runtime.test.ts、src/application/review-command.test.ts、src/application/launch-flags.test.ts。
@@ -832,8 +869,9 @@
 - 详情：docs/decisions/m6-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：Reviewer、`pigeon review` 与为它加的只读快照工具已不在产品线中；无工作区成员不再产生，只为读旧记录保留在类型里。
 
-### 065 候选暂存：正文按哈希不可变写入暂存目录，状态由账本记录现算，改内容即新候选并标记取代（事实）
+### 065 〔已退役〕候选暂存：正文按哈希不可变写入暂存目录，状态由账本记录现算，改内容即新候选并标记取代（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：候选正文写入 `.pigeon/candidates/<种类>/<名字>-<内容哈希>/`，写入后不可变；同哈希即同候选；内容修订产生新候选并在记录中标记取代关系。候选状态不落在候选目录里，由账本记录现算。M6 阶段状态只走到提出、已扫描、证据已核，回放验证与审批归 M8。安全扫描用确定性规则（不可见字符、注入与外泄模式、可执行脚本目录标记），模型筛查只作建议不作判决。账本新增提出与筛查两族记录；批准、拒绝、激活归 M8，本轮不新增审批或放权语义。
 - 理由：§3.5 要求 Candidate 状态能从 Event Log 与快照重新物化、Controller 是唯一权威写入者，把可变状态写进候选文件会制造第二事实源。
 - 锚点：src/state/candidate.ts（候选 schema v2 与 v1 迁移）、src/state/candidate-status.ts（状态现算）、src/state/event-log.ts（candidate.proposed / candidate.screened 两族与 review.unparsable 观察族）、src/state/materialize.ts 与 src/state/trace.ts（投影同步）、src/persistence/event-log.ts（两族落盘）；src/review/scan.ts（确定性扫描）、src/review/candidates.ts（解析、按哈希原子落盘、去重、取代）；src/application/candidates-list.ts 与 src/cli/index.ts（pigeon candidates）；测试 src/review/scan.test.ts、src/review/candidates.test.ts、src/state/candidate.test.ts、src/state/trace-review.test.ts、src/migration-completeness.test.ts。
@@ -846,22 +884,25 @@
 - 修订（2026-09-22）：候选筛查一族已由 128 取代——停写并退役；扫描拒绝与已筛查两种状态改由候选提出记录内嵌的扫描结果现算。
 - 修订（2026-09-29）：已随 137 退役：候选暂存与扫描已不在产品线中。
 
-### 066 TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本（事实）
+### 066 〔部分已改〕TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本（事实）
 
+- 状态：部分已改——理由来源随 184 不再落盘。判断现状以代码为准，下文为当时的原文。
 - 结论：TUI 审批面板保留 [n] 单按拒绝，新增 [r] 拒绝并说明——打开理由行，Esc 回面板不算拒绝，回车提交，理由逐字回模型；双击 Ctrl+C 的退出布防在理由行期间照旧生效。决定记录加可选的理由来源字段（人写 / 系统默认），加法式加入、不升 Event Log 版本，迁移完整性机检同步覆盖；CLI 留空理由同样标为系统默认。
 - 理由：账本原先无法区分真实拒绝理由与兜底文案，M7 会学到噪声；来源字段保证数据可信，[r] 提供真实信号，两者都不新增审批语义。
 - 锚点：src/tui/modal.ts（理由行输入模式与按键路由）、src/tui/approval.ts（[r] 键与面板提示）、src/tui/shell.ts（理由行提交）、src/cli/approval-ui.ts（留空与人写的标注）、src/approvals/handler.ts（ApprovalDecision.reasonSource）、src/state/tool-execution.ts（决定记录字段）、src/application/governance.ts（三处拒绝分支落来源）；测试 src/tui/approval-reason.test.ts、src/application/approval-reason-source.test.ts、src/state/tool-execution.test.ts、src/cli/approval-ui.test.ts、src/migration-completeness.test.ts。
 - 详情：docs/decisions/m6-prep-decisions.md。
 
-### 067 tui/shell.ts 按职责拆五个文件；抽启动参数与会话运行面两个装配模块，三入口模型占位缺省统一、cli 补 PIGEON_STREAM_FN 回退（事实）
+### 067 〔部分已改〕tui/shell.ts 按职责拆五个文件；抽启动参数与会话运行面两个装配模块，三入口模型占位缺省统一、cli 补 PIGEON_STREAM_FN 回退（事实）
 
+- 状态：部分已改——headless 已装编排器，见 266、267。判断现状以代码为准，下文为当时的原文。
 - 结论：tui/shell.ts 按职责拆为消息流、模态与按键、斜杠命令、worker 视图、resume 视图五个文件，壳本体保留布局、启停、提交与事件渲染并重新导出原有公开符号，零行为变化。新增启动参数模块（统一三个入口的参数解析）与会话运行面模块（统一新建与 resume 的装配：作用域、grant 种子、MCP 启动、运行面构建，并作为 M6 挂后台 Reviewer 调度的落点）。三入口的模型占位缺省统一为同一常量（provider 与 model 均为 custom），真实模型元数据由 streamFn 插件提供，历史会话标签不做映射；cli 补 `PIGEON_STREAM_FN` 回退。不给 cli 与 headless 装 worker 编排器。
 - 理由：shell.ts 将破千行，先拆出落点再加；三入口缺省漂移会使同一模型在快照与 run.started 里按入口分成三组，影响按模型分组。
 - 锚点：src/tui/message-flow.ts、src/tui/modal.ts、src/tui/commands.ts、src/tui/workers-view.ts、src/tui/resume-view.ts 与瘦身后的 src/tui/shell.ts；src/application/launch-flags.ts 与 src/application/session-runtime.ts；接线方 src/cli/index.ts、src/tui/main.ts、src/application/headless.ts；测试 src/application/launch-flags.test.ts、src/application/session-runtime.test.ts 与 tui 既有 10 个测试文件（断言未改）。
 - 详情：docs/decisions/m6-prep-decisions.md。
 
-### 068 对比素材：同任务独立尝试与会话树分叉都做，先比对后分叉；分叉基于上游 Session 存储，Pigeon 补写穿与分叉续跑，账本为唯一权威（事实）
+### 068 〔部分已改〕对比素材：同任务独立尝试与会话树分叉都做，先比对后分叉；分叉基于上游 Session 存储，Pigeon 补写穿与分叉续跑，账本为唯一权威（事实）
 
+- 状态：部分已改——对比与提炼已随 137 退役；分叉保留，见 078、079、177。判断现状以代码为准，下文为当时的原文。
 - 结论：M7 的对比素材有两类，均在本里程碑完成，先同任务比对、后分叉。同任务独立尝试指同一任务的多次独立运行（Eval 同任务多次运行、并行派发同一任务的多个 worker）；分叉指会话树上从同一分叉点长出的多条分支。会话树以上游 pi-agent-core 0.84.4 的 `Session`、`JsonlSessionRepo` 与 `buildSessionContext` 为存储与上下文还原基础，由 Pigeon 补运行写穿与分叉续跑接线；Pigeon Event Log 仍是唯一权威事实源，会话树为派生结构。契约测试对象为 core 0.84.4 的 v4 JSONL 格式，使用上游 `createSessionBackendConformance`。
 - 理由：两类素材互补——独立尝试回答整体做法差在哪，分叉回答从哪一步走岔；上游会话层已有真实存储，主要工作量在接线。
 - 锚点：src/pi-runtime/session-tree.ts（上游 Session / JsonlSessionRepo / buildSessionContext 只经 pi-runtime 引用；树存储、通道、账本投影）、src/pi-runtime/upstream-version.ts（启动时上游版本探测与告警）、src/application/session-tree.ts（由账本重建、实时写穿、进程内共享树句柄）、src/application/fork.ts（分叉与续跑）；测试 src/pi-runtime/session-tree-conformance.test.ts（createSessionBackendConformance，core 0.84.4 v4 JSONL）、src/pi-runtime/session-tree.test.ts、src/pi-runtime/upstream-version.test.ts、src/application/fork.test.ts。
@@ -875,8 +916,9 @@
 - 锚点：src/state/event-log.ts（child.spawned 可选 taskKey，Event Log v11）、src/orchestration/workers.ts（SpawnRequest.taskKey）、src/application/attempt-group.ts（并行同任务派发、共享任务标识生成）、src/application/workers-commands.ts、src/tui/workers-view.ts 与 src/tui/main.ts（/spawn --attempts）、src/application/distill-command.ts（--task 按派出记录找宿主会话、--eval-results 按任务编号成组）；测试 src/state/contrast-records.test.ts、src/persistence/contrast-families.test.ts、src/application/attempt-group.test.ts、src/application/workers-commands.test.ts、src/application/distill-command.test.ts。
 - 详情：docs/decisions/m7-prep-decisions.md。
 
-### 070 Episode 边界按来源定：同任务比对取尝试会话首个 Run，分叉取分叉点到叶子、共享前缀只算一次（事实）
+### 070 〔已退役〕Episode 边界按来源定：同任务比对取尝试会话首个 Run，分叉取分叉点到叶子、共享前缀只算一次（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：同任务比对的 Episode 取尝试会话的首个 Run；分叉的 Episode 取分叉点到叶子的路径，共享前缀单独记录、只算一次；恢复后追加的 Run 不计入。
 - 理由：尝试会话首个 Run 与一次任务尝试一一对应，恢复追加的 Run 已掺入人的干预；共享前缀按分支数重复计入会重复强化相同步骤。
 - 锚点：src/state/episode.ts（firstRunOf、buildTaskAttempt、buildForkGroup、selectContrast）、src/distillation/target.ts（提炼目标组装与强制提炼的单侧选取）；测试 src/state/episode.test.ts。
@@ -901,16 +943,18 @@
 - 修订（2026-09-22，补记）：撞上限观察记录只在运行确因上限被中止时才写，恰好用满最后一轮、自然收尾的运行不写（2026-09-20 裁决；100 理由中的"（072 修订）"指此）；截至 2026-09-22，headless 与 worker 两处上限中止路径仍在中止前写记录，尚未按此修改（src/application/headless-core.ts、src/orchestration/workers.ts）。
 - 详情：docs/decisions/m7-prep-decisions.md。
 
-### 073 Run 内局部对只取人写拒绝理由与域错误后成功重试，只产出教训候选（事实）
+### 073 〔已退役〕Run 内局部对只取人写拒绝理由与域错误后成功重试，只产出教训候选（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：Run 内局部对纳入提炼，但只取两种：理由来源为人写的拒绝，与域错误后紧跟的成功重试；只产出教训候选。系统默认文案、策略拒绝、环境异常与无理由来源字段的旧记录不用。
 - 理由：人写的拒绝理由是 006 定的负样本监督信号，066 的理由来源字段正为区分真实理由与兜底文案；产出限定为教训，满足"失败分支只产生失败案例"。
 - 锚点：src/state/episode.ts（collectLocalPairs）、src/distillation/snapshot.ts（局部对按侧单列）、src/distillation/candidates.ts（只由失败侧支撑的条目只能是教训）；测试 src/state/episode.test.ts、src/distillation/snapshot.test.ts、src/distillation/candidates.test.ts。
 - 详情：docs/decisions/m7-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：教训候选不再产出。
 
-### 074 提炼器复用 worker 机制新增角色，并行同任务收尾后与分叉叶子验证后自动触发，另有 `pigeon distill`；预算单设、共用全局并发闸（事实）
+### 074 〔已退役〕提炼器复用 worker 机制新增角色，并行同任务收尾后与分叉叶子验证后自动触发，另有 `pigeon distill`；预算单设、共用全局并发闸（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：提炼器复用 worker 机制，作为新增角色：只读、无工作区，只读工具作用域绑定一组尝试；候选走 M6 的暂存、扫描与账本链路。并行同任务全部收尾后、分叉叶子完成验证后自动触发；另有 `pigeon distill`，可指定任务标识或 Eval 结果目录，只读读取其他治理根下的会话。Eval 不自动触发。预算单设，缺省 16 轮、5 分钟、80,000 token，均可配；与 Reviewer 共用全局并发闸。
 - 理由：064 已验证 worker 机制可承载只读、无工作区的后台角色；与 Reviewer 合并会让单次审阅与跨尝试对比两种输入混在一个角色里；Eval 以测量为目的，提炼由人显式发起。
 - 锚点：src/state/distill.ts（工具名与提炼目标）、src/orchestration/roles.ts（distiller 角色与 SCOPED_DISTILL_TOOLS）、src/orchestration/workers.ts（无工作区规划、提炼目标必填）、src/distillation/tools.ts、src/distillation/prompt.ts、src/distillation/candidates.ts、src/application/distill-runtime.ts（派发器、预算 16 轮 / 5 分钟 / 80,000 token、共用全局并发闸排队）、src/application/attempt-group.ts（并行同任务全部收尾后自动触发）、src/application/fork.ts（distillForkGroup，叶子验证后自动触发）、src/application/distill-command.ts 与 src/cli/index.ts（pigeon distill）、src/application/runtime.ts（提炼器运行面注册只读工具）、.dependency-cruiser.js（distillation-below-controller）；测试 src/orchestration/distiller-role.test.ts、src/application/attempt-group.test.ts、src/application/distill-command.test.ts、src/application/fork.test.ts、src/application/fork-session.test.ts。
@@ -920,8 +964,9 @@
 - 修订（2026-09-22）：M7 收口修订中"记一条带原因的提炼跳过记录"已由 128 取代——提炼跳过记录停写并退役；手动提炼命令的跳过原因仍在命令输出中给出。
 - 修订（2026-09-29）：已随 137 退役：提炼器不再派出、`pigeon distill` 已不在产品线中；角色取值只为读旧记录保留（158）。
 
-### 075 候选升 v3，加法式新增对比来源块（事实）
+### 075 〔已退役〕候选升 v3，加法式新增对比来源块（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：候选 schema 升 v3，v2 字段不变，加法式新增对比来源块：成功侧与失败侧各自的尝试引用（治理根、会话、Run、条目范围）、分叉共享前缀范围、各侧标签与验证记录引用、产物形态（教训 / 流程 / 步骤集）。单来源候选该块为空。
 - 理由：065 已预留"成败分支字段归 M7"；独立字段块使 M8 回放验证与 M9 评测可直接按来源取证。
 - 锚点：src/state/candidate.ts（候选 v3、OutcomeLabelSchema、AttemptRefSchema、ContrastSourceSchema、v2 → v3 迁移）、src/state/event-log.ts（v10 → v11 升级候选提出内嵌的候选）、src/review/candidates.ts（stageCandidate 暂存口径复用）、src/distillation/candidates.ts（对比来源块落盘）、src/state/materialize.ts（引用型记录不在宿主会话造 Run）；测试 src/state/candidate.test.ts、src/state/contrast-records.test.ts、src/distillation/candidates.test.ts、src/migration-completeness.test.ts。
@@ -929,8 +974,9 @@
 - 详情：docs/decisions/m7-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 076 提炼器输入沿用 M6 截断，每侧 24,000 字符，共享前缀与任务描述只喂一次，独立尝试不做分歧步对齐（事实）
+### 076 〔已退役〕提炼器输入沿用 M6 截断，每侧 24,000 字符，共享前缀与任务描述只喂一次，独立尝试不做分歧步对齐（事实）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：沿用 M6 的单条工具结果截断口径；每侧上限 24,000 字符，超出从最早处丢弃并标注；任务描述只喂一次；分叉场景以分叉点为界，共享前缀只喂一次；独立尝试不做分歧步对齐。提炼器模型沿用角色表的模型接入覆盖列。
 - 理由：按条截断后每侧 24,000 字符可覆盖大多数真实尝试；独立尝试的步骤序列本不对应，强行对齐易产生伪分歧点。
 - 锚点：src/distillation/snapshot.ts（DISTILL_SIDE_MAX_CHARS、任务描述与共享前缀只喂一次）、src/review/snapshot.ts（clampText、renderBlocks 复用 M6 截断口径）、src/distillation/tools.ts（distill_snapshot / distill_entry 作用域）、src/application/workers.ts（角色表覆盖列对提炼器生效）；测试 src/distillation/snapshot.test.ts。
@@ -939,8 +985,9 @@
 - 详情：docs/decisions/m7-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 077 会话树在分叉发生时才建立：账本先记分叉记录，树放 `.pigeon/trees/` 为可重建的派生缓存，写穿不阻塞主循环（事实）
+### 077 〔已取代〕会话树在分叉发生时才建立：账本先记分叉记录，树放 `.pigeon/trees/` 为可重建的派生缓存，写穿不阻塞主循环（事实）
 
+- 状态：已取代——已由 177 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：会话树在分叉发生时才建立。账本先记分叉记录（分叉点的 Run 与序号、新分支标识、分叉点快照引用），再把分叉点之前的历史导入树，此后该会话实时写穿。树文件放治理根 `.pigeon/trees/`，为派生缓存，不 fsync、不阻塞主循环，可由账本重建。
 - 理由：不分叉的会话零额外写入；账本中的分叉记录是会话树的权威来源，树文件可由账本与内容文件重建、不承载权威状态，与 037、009 不冲突。
 - 锚点：src/state/event-log.ts（session.forked、branch.header）、src/persistence/event-log.ts（onEntry、appendSessionForked、appendBranchHeader）、src/pi-runtime/session-tree.ts、src/application/session-tree.ts（acquireSessionTree、rebuildSessionTree、attachTreeWriteThrough、bindSessionTree、runTreeRebuildCommand）、src/application/fork.ts（prepareFork、runForkBranch）、src/pi-runtime/adapter.ts（initialMessages、continueRun）、src/application/workers.ts 与 src/application/headless-core.ts（分支续跑装配）、src/application/worker-scope.ts（分支会话回到自己的工作树）、src/cli/index.ts（pigeon tree rebuild）；测试 src/application/fork.test.ts、src/application/fork-session.test.ts、src/persistence/contrast-families.test.ts；写穿耗时基准 spikes/m7-tree-write-bench.ts。
@@ -982,48 +1029,54 @@
 - 锚点：src/state/attempt-config.ts（VERIFY_CONFIG_VERSION、配置文件 schema、来源字段）、src/persistence/verify-config.ts（.pigeon/verify.json 只读加载，畸形响亮失败）、src/application/launch-flags.ts（resolveVerifyConfig 三级来源）、src/pi-runtime/snapshot.ts（v8 按会话冻结）、src/cli/index.ts 与 src/tui/main.ts（入口接线）；测试 src/persistence/verify-config.test.ts、src/application/launch-flags-verify.test.ts、src/migration-completeness.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 
-### 082 回放执行体复用 worker 机制新增验证器角色，起点用快照回到任务开始处，统计沿用 Eval 结果行（设计）
+### 082 〔已退役〕回放执行体复用 worker 机制新增验证器角色，起点用快照回到任务开始处，统计沿用 Eval 结果行（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：回放验证复用 worker 编排新增验证器角色，在独立工作树中真执行；起点用 M7 的快照回到任务开始处，成败由验证命令判定，统计沿用 Eval 结果行的形状（任务、条件、次序）。命名遵守 014：M4 的只读重建仍叫 replay，回放验证另起名字。
 - 理由：回放所需的能力 M7 已具备，剩余增量只有装载经验与重复 N 次；把会话分支转成 Eval 任务会丢掉分叉点之前的上下文。
 - 锚点：src/replay/plan.ts（从账本解出任务、起点提交、预算、模型与工具集；四条都拿不到即拒绝回放）、src/application/rerun.ts（验证器 worker、独立工作树、会话文件收回宿主、工作树释放）、src/orchestration/roles.ts（verifier 角色与工具上限）、src/orchestration/workers.ts（工作树起点提交写进派出记录）、src/state/checkpoint-ref.ts（任务开始处之前最近的快照）、src/state/event-log.ts（git 工作树的 baseCommit）；测试 src/replay/plan.test.ts、src/application/rerun.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：回放执行体与验证器角色退役（取值为读旧记录保留，见 158）；定点对照改由跑批器单步重跑（156），后又整套删除（204）。
 
-### 083 回放权限形态用固化命令规则，容器沙箱排入 M9 前置并先跑三个探针（设计）
+### 083 〔部分已改〕回放权限形态用固化命令规则，容器沙箱排入 M9 前置并先跑三个探针（设计）
 
+- 状态：部分已改——回放部分已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：M8 的回放在独立工作树中运行，命令档工具只在预先固化的命令规则内放行，规则外直接拒绝、不询问人；不引入沙箱。容器沙箱明确排入 M9 前置，选型前先跑三个探针：容器 exec 的单次往返延迟、WSL2 内虚拟化设备是否可见、跨边界调用的退出码保真度。
 - 理由：M8 的价值是判据，容器隔离需单独一轮裁决；固化命令规则只缩小开口、不是隔离，无人值守的大批量回放迟早需要沙箱。
 - 锚点：src/orchestration/roles.ts（ROLE_TOOLS.verifier）、src/application/rerun.ts（verifierParentPolicy 与被验证那次尝试的工具集取交集）、src/application/runtime.ts（commandRole → .pigeon/commands.json 的角色允许清单）、src/tools/run-command.ts（清单外一律拒绝）；测试 src/application/verifier-commands.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md，含沙箱选型调研与宿主平台的可行路径。
 - 修订（2026-09-29）：回放的权限形态随 137 退役；容器沙箱已在 M9 落地。
 
-### 084 回放判定为三值加大效应门槛，四组固定 N 全跑不中途停，区间只进回执不作判据（设计）
+### 084 〔已退役〕回放判定为三值加大效应门槛，四组固定 N 全跑不中途停，区间只进回执不作判据（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：判定四组——失败分支带经验与不带经验、成功兄弟分支带经验与不带经验——每组固定 N 次（缺省 5），不中途查看结果决定是否继续。结论为三值：通过（正回放呈大效应且负回放无回归）、未测出（差异未达门槛）、回归（负回放显示变差）。pass@k 与 pass^k 分开报告，Wilson 区间计入验证回执但不作判据。N 可配，低于 3 禁用。
 - 理由：N=5 时以区间不重叠为判据实质就是大效应门槛，不如直接写明；中途查看再决定续跑会抬高假阳性率；"未测出"须与"无效"分开。
 - 锚点：src/replay/verdict.ts（四组统计、pass@k 与 pass^k 分开算、Wilson 区间只进回执、三值加大效应门槛、少跑即拒绝出结论）、src/application/verify-command.ts（四组交错跑满 N 次）；测试 src/replay/verdict.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 085 回放在临时治理根里按正常格式装载经验，走与真激活相同的装载路径（设计）
+### 085 〔已退役〕回放在临时治理根里按正常格式装载经验，走与真激活相同的装载路径（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：回放时在该次运行的工作区内造临时治理根，把候选正文按种类的正常格式放入（Memory 为 markdown 文件、Skill 为标准目录、Policy 为文本），走与真激活完全相同的装载路径；宿主的经验目录一个字节都不写。多条经验联合验证时向临时治理根多放文件即可。
 - 理由：§M8 完成证据要求批准内容与最终激活内容摘要一致，前提是验证与激活同为一条装载路径；另开注入路径会造出最难发现的装载差异。
 - 锚点：src/replay/materials.ts（回放工作区内造临时治理根、固化命令规则与放权规则随行、宿主经验目录只读、经验集合明细）、src/activation/paths.ts 与 src/activation/experience.ts、src/activation/policy.ts（与真激活同一条落点与写入）；测试 src/replay/materials.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 086 回放缺省人工触发 `pigeon verify`，另给显式开关供无人值守时自动验证（设计）
+### 086 〔已退役〕回放缺省人工触发 `pigeon verify`，另给显式开关供无人值守时自动验证（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：回放验证缺省由人显式触发（`pigeon verify`），另提供开关在无人值守运行时自动验证落库的候选。
 - 理由：按 084 的口径一条候选要跑 4×N 次完整运行，全自动会在人不知情时产生数小时的模型花费，且候选尚无语义级去重；重复率可观测后再议是否改为缺省开启。
 - 锚点：src/cli/index.ts（pigeon verify）、src/application/verify-command.ts（前置校验、四组编排、回执落盘）、src/application/auto-verify.ts（无人值守开关与去重告警）、src/application/launch-flags.ts（--auto-verify，缺省关）、src/application/attempt-group.ts 与 src/application/fork.ts（自动触发挂点）。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：`pigeon verify` 已不在产品线中。
 
-### 087 回放单设并发闸缺省 1 可配；每次回放的预算与模型沿用被验证那次尝试（设计）
+### 087 〔已退役〕回放单设并发闸缺省 1 可配；每次回放的预算与模型沿用被验证那次尝试（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：回放单设并发闸，缺省并发 1、可配置调高，不与 Reviewer 及提炼器共用的闸合并。每次回放运行的预算（轮数、墙钟、token 上限）与模型接入一律沿用被验证那次尝试，不得放宽。
 - 理由：回放是重执行，与只读的审阅、提炼共用一个闸会把轻量后台长时间堵死；预算放宽或换模型时，成功率变化就不能归于经验。
 - 锚点：src/application/rerun.ts（effectiveLimits 逐项核对放宽即拒、回放单设并发闸）、src/application/workers.ts（派出上限冻结为本次尝试预算）、src/application/headless-core.ts 与 src/application/runtime.ts、src/pi-runtime/adapter.ts（预算进注入快照 v8 与 run.started）；测试 src/application/rerun.test.ts、src/replay/plan.test.ts、src/pi-runtime/snapshot.test.ts。
@@ -1032,16 +1085,18 @@
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 088 候选审批走 CLI 子命令，TUI 只在状态行提示待审数量（设计）
+### 088 〔已退役〕候选审批走 CLI 子命令，TUI 只在状态行提示待审数量（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：批准、拒绝、撤销、取代四个动作与候选详情查看均落 CLI 子命令；TUI 只在状态行提示待审数量，不做审批面板。
 - 理由：候选审批要读正文、diff、来源链、扫描结果与四组回放回执，是长文离线决策，不适合 TUI 为单次工具调用这类在线短决策设计的模态面板（029）。
 - 锚点：src/cli/index.ts（candidates show / approve / reject / revoke / supersede 子命令）、src/application/candidates-list.ts（列表、详情、与落点的行级 diff、待审数量）、src/tui/shell.ts 与 src/tui/main.ts（状态行只提示待审数量）；测试 src/application/candidates-view.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：候选审批命令与终端界面的待审提示已不在产品线中。
 
-### 089 候选新增三个记录族：验证回执、带动作与理由来源的决定、激活（设计）
+### 089 〔已退役〕候选新增三个记录族：验证回执、带动作与理由来源的决定、激活（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：账本新增三族——验证回执（四组通过次数、三值结论、区间、环境摘要、各次运行的会话号）；决定族（批准、拒绝、撤销、取代合成一族，带动作字段与理由来源字段，来源取值为人写或系统默认，同 066）；激活族（哪个版本在何时生效）。候选状态仍由账本现算，不落候选目录（065 不变）。
 - 理由：分族依记录形状而非动作数量；理由来源字段用于区分人写的拒绝理由（006 定的负样本监督信号）与系统默认文案。
 - 锚点：src/state/event-log.ts（三族 schema 与 v11 → v12 加法式迁移）、src/persistence/event-log.ts（三个追加方法，治理族 fsync）、src/state/materialize.ts（三族进物化结果）、src/state/candidate.ts（状态枚举补齐）、src/state/candidate-status.ts（五族现算候选状态）、src/state/trace.ts 与 src/cli/replay.ts（只读视图渲染）；测试 src/persistence/candidate-families.test.ts、src/state/candidate-status-m8.test.ts、src/migration-completeness.test.ts。
@@ -1050,8 +1105,9 @@
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：候选相关记录读取时跳过（128）。
 
-### 090 Policy 候选只落只读建议文件，永不自动改放权文件，物理分离由分层规则机检（设计）
+### 090 〔已取代〕Policy 候选只落只读建议文件，永不自动改放权文件，物理分离由分层规则机检（设计）
 
+- 状态：已取代——已由 094 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：Policy 候选批准后只落成只读的建议文件，目录与 Skill、Memory 分离，模型可在 system prompt 中看到该建议；激活路径永不自动修改放权文件或命令规则，权限变更仍由人手动编辑。激活器在代码层面不得依赖放权写入模块，由分层规则机检钉死。
 - 理由：§8 禁止后台流程写放权文件，§M8 完成证据要求 Policy 激活路径与 Skill 写入路径物理分离；完成证据要的是"不能绕过"，故以机检而非约定落实。
 - 锚点（随 094 收敛后）：src/activation/experience.ts 与 src/activation/paths.ts（落点只剩 Skill 与 Memory 两类）、.dependency-cruiser.js（activation-only-state 把放权写入模块挡在激活层的依赖之外，这是本条留下的那条不变式）；测试 src/activation/activate.test.ts（激活路径永不触碰放权文件与命令规则）、src/activation-boundary.test.ts（规则真会抓人、真实 src 零违规）。原锚点里的 src/activation/policy.ts 与 policy-activation-isolated 规则已随 094 删除。
@@ -1059,8 +1115,9 @@
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已由 094 取代：Policy 候选停止产出；其余随 137 退役。
 
-### 091 验证回执摘要记全，批准失效只看模型、经验集合哈希、预算、验证命令四项封闭清单（设计）
+### 091 〔已退役〕验证回执摘要记全，批准失效只看模型、经验集合哈希、预算、验证命令四项封闭清单（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：验证回执记全环境摘要——模型标识与版本、harness 提交号、Node 与平台、被验证尝试的预算参数、验证命令、同时装载的经验集合内容哈希、四组通过次数与三值结论、各次运行的会话号。批准失效的判据只看一份封闭清单的四项：模型标识、经验集合内容哈希、预算参数、验证命令；任一变化则批准失效、要求重验。清单之外的项只记录、不参与判定，增删清单须单独裁决。
 - 理由：全项严格失效会让批准因提交号等高频变化长期待重验、最终被弃用；清单四项的共同点是一变则该次验证结论不再适用。
 - 锚点：src/state/event-log.ts（验证环境摘要 schema）、src/replay/environment.ts（经验集合内容哈希、封闭四项清单判据）、src/application/verify-command.ts（摘要组装、两侧模型与预算必须一致）、src/application/candidate-decision.ts（批准前比对经验集合）、src/application/activation-notes.ts（会话启动时的失效告警）；测试 src/replay/environment.test.ts、src/application/activation-notes.test.ts。
@@ -1068,32 +1125,36 @@
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 092 回归的候选一律不可批准；未测出可人工批准但理由必填，激活记录标注未经回放证实（设计）
+### 092 〔已退役〕回归的候选一律不可批准；未测出可人工批准但理由必填，激活记录标注未经回放证实（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：判定为回归的候选一律不可批准，翻案只能靠重验推翻，不接受以理由覆盖。判定为未测出的候选可由人显式批准，但理由必填且来源记为人写；其激活记录标注未经回放证实，供 M9 的整体测量单独分组观察。
 - 理由：负回放是唯一能直接观测"经验有害"的证据，不能被一句理由覆盖；未测出常源于任务集而非候选本身，一刀切禁止会排除价值不在单任务通过率上的经验。
 - 锚点：src/application/candidate-decision.ts（扫描拒收与回归一律不可批准、未测出与未验证须人写理由、激活记录标注未经回放证实）、src/state/event-log.ts（决定族的理由来源字段）；测试 src/application/candidate-decision.test.ts、src/application/approval-bypass.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役。
 
-### 093 激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构（设计）
+### 093 〔已退役〕激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：批准后把候选正文按种类复制到治理根的正常目录，人仍可直接编辑（042、043 的可编辑性不变）。激活记录存内容哈希；会话启动时比对现状与哈希，不一致则标注该经验已脱离批准版本，但不阻止使用。撤销为移走文件并记录，不追溯既往会话。取代为新版本激活加取代关系，与 065 的候选取代同构。
 - 理由：锁定或按哈希从暂存目录装载会推翻 042、043 定下的"经验按文件装载、人可直接编辑"；漂移以可见性而非锁定处理。
 - 锚点：src/activation/activate.ts（复制到正常目录、写盘后回读比对、漂移判定、撤销移走文件）、src/application/candidate-decision.ts（决定先落盘再动文件、撤销先留证后移文件）、src/application/activation-notes.ts（启动时比对哈希并标注已脱离批准版本，不阻止使用）、src/application/candidates-list.ts（列表与详情里的漂移标注）；测试 src/activation/activate.test.ts、src/application/candidate-decision.test.ts、src/application/activation-notes.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：激活与启动漂移告警已不在产品线中。
 
-### 094 Policy 候选停止产出并删除其激活机制，枚举值仅保留读旧记录；机检收敛为激活器不得依赖放权写入模块（设计）
+### 094 〔已退役〕Policy 候选停止产出并删除其激活机制，枚举值仅保留读旧记录；机检收敛为激活器不得依赖放权写入模块（设计）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：提炼器与审阅器不再产出 Policy 候选，产出形态只剩 Memory 与 Skill；删除 Policy 的落点目录、独立写入模块、为其新增的分层规则，以及验证路径上对 Policy 的特判分支。候选 schema 的种类枚举保留 Policy 取值，仅为读取已入库的旧候选，写侧一律拒绝。保留"激活器不得依赖放权写入模块"的分层规则，删除"Policy 与 Skill 写入模块互不引用"的规则。ROADMAP 相应改为两类候选，§M8 完成证据中的物理分离一条改写为前述机检。
 - 理由：逐层收窄后 Policy 与 Memory 的差别仅剩目录，且实现中无任何模块读取其落点；枚举值保留是因为旧数据须可读（加法式原则）。
 - 锚点：src/state/candidate.ts（种类枚举保留 policy 取值只为读旧记录，另出只含 memory 与 skill 的可产出种类）、src/review/candidates.ts 与 src/distillation/candidates.ts（结果 schema 收窄，落盘写侧拒收已停止产出的种类）、src/review/prompt.ts 与 src/distillation/prompt.ts（产出规则改为两类）、src/activation/paths.ts 与 src/activation/experience.ts（落点表只剩两类，Policy 的独立写入模块删除）、src/application/candidate-decision.ts（批准前按种类拦下，判据在决定记录之前）、src/application/candidates-list.ts（旧候选照常列出与展示，并说明它没有激活落点）、.dependency-cruiser.js（删 policy-activation-isolated，保留 activation-only-state）；测试 src/application/legacy-policy-candidate.test.ts、src/activation/activate.test.ts、src/review/candidates.test.ts、src/activation-boundary.test.ts。
 - 详情：docs/decisions/m8-prep-decisions.md。
 - 修订（2026-09-29）：已随 137 退役：激活器已不在产品线中，本条的机检随之失去对象。
 
-### 095 跨进程锁统一撞锁即拒绝不排队，报错须说明占用者与其动作；回放的跨进程全局上限留到 M9（设计）
+### 095 〔部分已改〕跨进程锁统一撞锁即拒绝不排队，报错须说明占用者与其动作；回放的跨进程全局上限留到 M9（设计）
 
+- 状态：部分已改——回放的全局上限随 137 作废。判断现状以代码为准，下文为当时的原文。
 - 结论：本项目的四把跨进程锁（会话打开锁、候选操作锁、会话树重建锁、放权配置锁）统一采用撞锁即拒绝、不排队的口径；报错信息须说明占用者及其正在进行的动作，而非仅提示锁被占用。回放的跨进程全局上限本轮不做，留到 M9 与批量运行的资源口径一并裁定。
 - 理由：四把锁行为一致才可被预期，为毫秒级读改写引入排队机制不成比例；持锁长的只有候选验证，报错指明占用动作才能判断重试时机。
 - 锚点：src/persistence/exclusive-lock.ts（临时文件加硬链接建锁、撞锁即拒）、src/persistence/session-lock.ts（同口径）、src/application/candidate-lookup.ts 与 src/application/candidate-decision.ts（候选操作锁）、src/application/session-tree.ts（重建锁）、src/persistence/grants-config.ts（放权配置锁）；证据 docs/audits/2026-09-20-concurrency-a4a5ca8.md。
@@ -1109,8 +1170,9 @@
 - 更正（2026-09-22）：原写"挂在 041、054 已定的工作区接口下"，应为"挂在 054 已定的工作区接口下"。
 - 详情：docs/decisions/m9-prep-decisions.md（本地）。
 
-### 097 正式度量改用 SWE-bench Verified，先跑 50 题子集打通管道再扩到 100–150 题；只报同模型下的相对差异，不报绝对分数（设计）
+### 097 〔已退役〕正式度量改用 SWE-bench Verified，先跑 50 题子集打通管道再扩到 100–150 题；只报同模型下的相对差异，不报绝对分数（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205；测试床改为连续工作流，见 125。判断现状以代码为准，下文为当时的原文。
 - 结论：M9 的正式度量改用外部基准 SWE-bench Verified，分两阶段：第一阶段用现成的 50 题子集打通全链路，目标是暴露工程问题而非取得结论，其中必须先以标准答案补丁做一次自检（预期接近全绿）以证明判分管道本身可信；第二阶段扩到 100–150 题的固定抽样做正式测量。结论一律以同模型下的相对差异呈现（带经验对不带经验、本 harness 对最简基线），不对外报绝对分数。自造题集降级为冒烟用途（096）。
 - 理由：自造题实测全部触顶且有出题人知道答案、题目同源、数量不足等系统性缺陷；外部基准的污染与坏测试对两个对照条件是共模项，做差分时抵消，故只报相对差异。
 - 附带事实：50 题规模下相差 3 道即为 6 个百分点，只适合回归与冒烟，正式结论须在扩量后给出。
@@ -1128,37 +1190,42 @@
 - 现状说明：快照与分叉在接口上只留占位，宿主侧仍由 orchestration/checkpoint.ts 直接调宿主 git，容器实现未提供；按路径限定的 grant 以宿主路径判定，对容器工作区不会命中（不匹配即回落后续排律，不放宽）。
 - 详情：docs/decisions/m9-prep-decisions.md（本地）。
 
-### 099 对照条件为三类经验条件加一条最简 harness 基线；基线对跑只在扩量后的正式测量做，管道验证阶段不做（设计）
+### 099 〔已取代〕对照条件为三类经验条件加一条最简 harness 基线；基线对跑只在扩量后的正式测量做，管道验证阶段不做（设计）
 
+- 状态：已取代——已由 193、194 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：正式测量设四组条件——无经验、候选经验、已激活经验（路线图原定三类），外加一条最简 harness 基线：同一模型、同一批题，本 harness 对跑一个公开的最简实现（百行量级、单一命令工具的循环）。基线对跑只在扩量后的正式测量执行一次，第一阶段的 50 题管道验证不做。
 - 理由：与公开最简实现对跑可堵住"改善只因自身基线偏弱"的质疑，差值即整套机制的净贡献且免疫数据污染；条件数增加使运行次数成倍增加，故限定在管道稳定后执行。
 - 详情：docs/decisions/m9-prep-decisions.md（本地）。
 
-### 100 自造题集降为冒烟用途只留三道（快、中等、会撞预算上限各一），其余连同验证脚本删除（设计）
+### 100 〔已取代〕自造题集降为冒烟用途只留三道（快、中等、会撞预算上限各一），其余连同验证脚本删除（设计）
 
+- 状态：已取代——已由 282 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：自造题集不再用于度量，降级为冒烟用途，保留三道覆盖面互补的题——耗时最短的一道、中等规模的一道、以及会触到预算上限的一道；其余题目连同其验证脚本一并删除。冒烟只在改动跑批设施后于数分钟内确认链路未坏（能开工作区、能调模型、能执行验证器、能写结果行），不产出任何结论。
 - 理由：八道题全部触顶、已无区分度（097），按 096 旧数据源降级到窄用途；冒烟的价值在便宜且不依赖容器，故不改用外部基准题。
 - 锚点：eval/tasks/tool-error-codes（耗时最短，基线中位 74 秒）、eval/tasks/session-day-groups（中等，基线中位 111 秒，八题居中）、eval/tasks/path-dotdot-name（基线五次里出现撞轮次上限）；其余五道（fmt-duration、insert-after-diff、candidate-evidence、args-summary-surrogate、skill-block-scalar）连同验证脚本与验证资产已删除。docs/audits 下的历史评测结果按只追加原则保留，其中出现的已删题目 id 指向当时的任务目录。
 - 详情：docs/decisions/m9-prep-decisions.md（本地）。
 
-### 101 度量统计：每题每条件跑一次、预算优先投向题数；二值配对用 McNemar 精确检验；回放验证仍按 N 次，两处口径不同是设计（设计）
+### 101 〔已退役〕度量统计：每题每条件跑一次、预算优先投向题数；二值配对用 McNemar 精确检验；回放验证仍按 N 次，两处口径不同是设计（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：三条。① 每道题在每个条件下的结果为三值——通过、失败、未完成（基础设施错误、撞上限等），未完成不计为模型失败，口径同 058 与 084。② 报告主体是同一道题在两个条件上的配对四格表，用 McNemar 精确检验，不报两侧各自的平均通过率。③ 每题每条件只跑一次，重复次数的预算改投向题数。回放验证（M8 定的四组各 N 次）不受本条影响，两处口径不同是设计而非矛盾。
 - 理由：同等预算下多题各跑一次比少题多跑的统计力更强；保持二值配对使方法最简且无额外分布假设。
 - 修订（2026-09-21，M9 第一阶段实测）：同条件两轮实测翻转 14%，50 题单次运行下 6 个百分点以内的差异无意义，测出 10 个百分点量级的效应需把题数扩到 100–150；原理由"题间差异远大于同题重复差异"被实测反证，"每题每条件跑一次"保留，理由改为泛化覆盖面。
 - 修订（2026-09-22，补记）：① 中"未完成"的范围已由后续条目改变——撞上限照常判分（108），上下文超长一类确定性错误照常判分并计入成败（106 修订与 119），认证失败、泛化 400、模型不存在为配置错误、整批停止且不记结果行（119 修订），内容审核类拒答为独立状态、不计入成败（106）；补跑的错误行只剩环境准备失败、模型服务故障、判据设施出错三类。
 - 详情：docs/decisions/m9-prep-decisions.md（本地）。
 
-### 102 抽出任务源接口：实例清单、环境准备、判据命令与元数据由实现提供，跑批设施不感知题目来源（设计）
+### 102 〔已退役〕抽出任务源接口：实例清单、环境准备、判据命令与元数据由实现提供，跑批设施不感知题目来源（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：把"跑什么题"抽成任务源接口，由实现提供四样东西——实例清单、该实例的环境准备方式、判据命令、以及元数据（难度、holdout 标记、对应能力）。跑批设施、结果行、统计、报告与账本记录一律不感知题目来源。冒烟用的自造题与外部基准各为一个实现。
 - 理由：与 098 同一思路（那条管在哪执行，本条管跑什么题）；不抽接口则外部基准的细节会渗入跑批各处，正是 096 要防的局面。
 - 已知边界：换题集的代码代价约为新增一份实现，但新题集的环境、难度与污染须重新评估，不同题集上的历史数字不可比。
 - 锚点：src/eval/task-source.ts（任务源接口与判据命令形状）、src/eval/local-source.ts（自造冒烟题实现）、src/eval/swebench-source.ts（外部基准实现）、src/eval/runner.ts（只认任务源；并行上限；错误行口径）、src/eval/verify.ts（判据命令的通用执行：备料失败与约定的出错退出码记未判定）、src/eval/results.ts（续跑键只由非错误行占用，读侧同键取最后一条非错误行）；测试 src/eval/task-source.test.ts、src/eval/results.test.ts、src/eval/runner.test.ts、src/eval/verify.test.ts；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md。
 - 详情：docs/decisions/m9-prep-decisions.md（本地）。
 
-### 103 判分阶段的评测容器可接代理，agent 的工作区容器不接；两侧网络配置不得互相复用（设计）
+### 103 〔已退役〕判分阶段的评测容器可接代理，agent 的工作区容器不接；两侧网络配置不得互相复用（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：只给判分阶段的评测容器配代理（http_proxy / https_proxy / no_proxy，no_proxy 排除本机回环与容器网段）；代理地址在每次判分时现取默认路由的网关，不写死。agent 一侧的网络设置不因此改动，两侧的容器配置不得互相复用。
 - 理由：部分实例的官方测试要访问外网，否则连标准答案补丁都判不过；断网防的是模型联网，判分跑官方测试、无模型参与。宿主地址重启后可能变化，写死会静默失效。
 - 锚点：eval/swebench/judge.py（--proxy，只作用于判据进程内由官方判分器创建的评测容器）、src/eval/swebench-source.ts（judgeProxy 只进判据命令）、src/cli/index.ts（--judge-proxy）；测试 src/eval/swebench-source.test.ts「判分代理只出现在判据命令里」；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十节。
@@ -1172,15 +1239,17 @@
 - 修订（2026-09-22，补记）：裁决只定了工作区容器断网、因断网无法进行的题记基础设施错误且不开网、两题通过不计入统计；"不提供开关"与"附加参数里出现网络类或代理类选项即拒绝"为落实时的做法，此后附加参数校验补拦了与取值粘连的端口映射写法与 `--env-file`。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 105 四道依赖外网的 sphinx 题留在正式题集，判分启用代理（设计）
+### 105 〔已退役〕四道依赖外网的 sphinx 题留在正式题集，判分启用代理（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：sphinx-doc__sphinx-7985、8269、8475、10435 留在 50 题正式题集；正式跑批时判分启用代理（103）。
 - 理由：判分容器接代理后，四题的标准答案补丁两轮重判均判已解决、逐用例计数一致。
 - 锚点：证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十节、第十一节。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 106 错误行范围不变；验证器超时是真实结果不补跑；内容审核类拒答为独立状态，不补跑、不计入成败统计（设计）
+### 106 〔部分已改〕错误行范围不变；验证器超时是真实结果不补跑；内容审核类拒答为独立状态，不补跑、不计入成败统计（设计）
 
+- 状态：部分已改——SWE-bench 跑批已删除，分类移入提交流跑批，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：补跑的错误行限于三类——环境准备失败、模型服务故障（含流内以错误收尾）、判据设施出错。验证器超时维持为该次运行的真实结果，不补跑。内容审核类拒答新增为独立状态：不判分、不补跑、不计入成败统计，报告里单列。
 - 理由：验证器超时可能正是改动把测试改挂了；拒答重跑大概率重复，计为任务失败又会把 provider 的内容策略混进能力结论。
 - 锚点：src/eval/runner.ts（isContentRefusal 与结果行状态）、src/eval/results.ts（refused 状态）、src/eval/report.ts（成败统计不含拒答）；测试 src/eval/task-source.test.ts、src/eval/report.test.ts；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十一节。
@@ -1188,15 +1257,17 @@
 - 修订（2026-09-22，口径确认为照常判分）：上条修订中"计为任务失败"的判分口径已改为照常判分，见 119 的同日修订。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 107 空补丁仍判失败，结果行加标注以区分“改了没改对”与“根本没改”（设计）
+### 107 〔已退役〕空补丁仍判失败，结果行加标注以区分“改了没改对”与“根本没改”（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：交来的改动为空时判决仍为失败；结果行新增空补丁标注，报告里单列。
 - 理由：两种失败的成因不同（定位或动手不了，对修复思路不对），混在一起会丢掉对失败分类有用的信号；判决本身不因此放宽。
 - 锚点：eval/swebench/judge.py（尾行 JSON 的 emptyPatch）、src/eval/task-source.ts（判据命令尾行 JSON 的约定）、src/eval/runner.ts、src/eval/results.ts、src/eval/report.ts；测试 src/eval/task-source.test.ts、src/eval/report.test.ts。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 108 外部基准不设 token 上限；撞上限但判分通过计为通过，结果行标注并在报告里单列（设计）
+### 108 〔已退役〕外部基准不设 token 上限；撞上限但判分通过计为通过，结果行标注并在报告里单列（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：外部基准靠轮次与墙钟控长尾，不设 token 上限。撞上限而判分通过的运行计为通过（072 的推论：有验证结论时验证压过运行终态）；结果行标注撞的是哪个上限，报告单列撞上限次数与其中判分通过数。
 - 理由：判决来自确定性验证器，与运行怎么收尾无关；撞上限一律计失败会丢掉已经修好的运行。
 - 锚点：src/eval/runner.ts（limitHit）、src/eval/results.ts、src/eval/report.ts；测试 src/eval/task-source.test.ts「撞上限但判分通过计为通过」、src/eval/report.test.ts。
@@ -1212,8 +1283,9 @@
 - 锚点：src/eval/swebench-source.ts（PRUNE_HISTORY_SCRIPT、historyPruneVerified）；测试 src/eval/swebench-source.test.ts「环境准备先清掉基准提交之后的仓库历史再建初始树」与真容器层；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十二节。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 110 评测固定采样温度为 0，并冻结进注入快照随 run.started 落盘（设计）
+### 110 〔部分已改〕评测固定采样温度为 0，并冻结进注入快照随 run.started 落盘（设计）
 
+- 状态：部分已改——温度改记入 Run 开始条目，见 184。判断现状以代码为准，下文为当时的原文。
 - 结论：外部基准的评测运行把采样温度固定为 0；温度作为注入快照 model 段的可选字段冻结，并随 run.started 落盘，事后可证每次运行用的温度。缺省不设（由 provider 决定），既有运行逐字不变。
 - 理由：条件间的差异不应来自采样随机性；默认温度下相邻两轮的逐题翻转率在四分之一上下，盖过几个百分点量级的条件差异。
 - 已知边界：上游只在未请求推理时把温度交给 provider；温度只接到无父会话的运行面（headless 与 Eval），worker、分叉重试与回放未接。
@@ -1222,23 +1294,26 @@
 - 修订（2026-09-22，补记）：落实清单中"其余采样参数（如 top_p）一并显式固定"未落实，src/ 只设温度一项，注入快照与 run.started 也只冻结温度。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 111 任务说明冻结为纯英文 issue 原文，不加包装；中文指令加英文任务的混合语境如实写明（设计）
+### 111 〔已退役〕任务说明冻结为纯英文 issue 原文，不加包装；中文指令加英文任务的混合语境如实写明（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：外部基准交给 agent 的任务说明逐字等于数据集的 issue 原文，不加任何包装文字。system prompt 与工具说明仍是中文，模型处在中文指令加英文任务的混合语境——这是本 harness 的真实特性，在报告与审计里写明，不用包装掩盖。
 - 理由：任务说明的措辞是被测条件的一部分，正式测量前必须冻结，包装越多测到的越是包装；不改测试文件的约束由执行端写保护与取 diff 时的排除兜住。
 - 锚点：src/eval/swebench-source.ts（instructions 取 problem_statement）；测试 src/eval/swebench-source.test.ts「任务说明冻结为 issue 原文」；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十二节。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 112 容器工作区的路径放权暂不处理，但加护栏：交互场景与路径限定规则装配即报错，不许静默失配（设计）
+### 112 〔部分已改〕容器工作区的路径放权暂不处理，但加护栏：交互场景与路径限定规则装配即报错，不许静默失配（设计）
 
+- 状态：部分已改——沙箱会话去掉目录放权后可交互审批，见 253。判断现状以代码为准，下文为当时的原文。
 - 结论：按路径限定的放权以宿主路径判定，对容器工作区只会静默失配。本阶段不做容器工作区下的路径放权；拿到非本地执行端的运行面，凡带审批通道（交互场景）或装了按路径限定的固化放权规则，装配时明确报错说暂不支持。无审批通道、无路径规则的无人值守运行照常。
 - 理由：静默失配比明确拒绝危险，人以为某目录已放行而实际每次都回落；039 之后权限侧非必要不新增功能，护栏是最小代价的收口。
 - 锚点：src/application/runtime.ts（buildRuntime 的两处护栏）；测试 src/application/container-workspace-guard.test.ts。
 - 修订（2026-09-22，补记）：护栏两次扩展、均未单独裁决——落实时加入"装了按路径限定的固化放权规则"为触发条件；复核后改为注入了执行端时，失败自动分叉重试、会话验证命令与分支会话一律在装配前拒绝、不写账本。锚点 src/application/headless-core.ts（runHeadlessOnce 的装配前护栏）。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 113 结果行：整次墙钟新写必带、读侧容忍旧文件缺失；难度随任务源可选（设计）
+### 113 〔已退役〕结果行：整次墙钟新写必带、读侧容忍旧文件缺失；难度随任务源可选（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：结果行的整次墙钟 wallMs 列入必有字段清单，新写的行一律带；读侧容忍此前写下的文件缺这个字段。难度标记 difficulty 随任务源可选，不列入必有字段。
 - 理由：耗时分布要按整次墙钟统计；难度只有外部基准有，强制会逼出占位值。
 - 锚点：src/eval/results.ts（EVAL_RESULT_FIELDS）；测试 src/eval/results.test.ts「必有字段清单」。
@@ -1262,24 +1337,27 @@
 - 修订（2026-09-22，补记）：可信基线还要求带有 116 的工作方式指令，无指令条件下的 12 题观测另存、不作基线；作废范围扩到清历史加温度 0、任务说明仍为旧中文包装的过渡轮（此项扩展未单独裁决）；本阶段基线为最终条件下同条件跑的两轮。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 116 外部基准的 system prompt 补一句工作方式指令：只说工作方式、措辞对齐公开最简实现、冻结进注入快照（设计）
+### 116 〔部分已改〕外部基准的 system prompt 补一句工作方式指令：只说工作方式、措辞对齐公开最简实现、冻结进注入快照（设计）
 
+- 状态：部分已改——SWE-bench 跑批已删除，追加指令的机制保留，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：外部基准的运行在 system prompt 末尾追加一句工作方式指令，告诉模型它的工作是修改仓库代码来解决用户消息里描述的问题。三条约束：只说工作方式，不对 issue 内容做任何归纳或翻译，与任务说明（111）分属两处、不得混；措辞与公开的最简实现对齐；这句话属于被测条件，随整段 system prompt 冻结进注入快照，并在审计里逐字记录。
 - 理由：任务说明冻结为纯 issue 原文后，模型会把 issue 当成提问来回答而不动手；带指令后均正常开工。
 - 锚点：src/eval/swebench-source.ts（SWEBENCH_WORK_DIRECTIVE）、src/eval/task-source.ts（systemDirective）、src/eval/runner.ts、src/application/runtime.ts（taskDirective 追加进 system prompt）；测试 src/eval/swebench-source.test.ts「工作方式指令」、src/eval/task-source.test.ts「任务源给的系统指令进模型实际看到的 system prompt」；证据与逐字措辞 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十二节。
 - 修订（2026-09-27）：SWE-bench 跑批与其工作方式指令已删除，见 205；向 system prompt 追加任务源指令的机制保留，提交流跑批沿用。
 - 详情：docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 117 结果行记录两组测试各自的通过条数与总条数作为连续指标；判据不变，仍以全过为准（设计）
+### 117 〔已退役〕结果行记录两组测试各自的通过条数与总条数作为连续指标；判据不变，仍以全过为准（设计）
 
+- 状态：已退役——SWE-bench 跑批已删除，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：外部基准的每条结果行额外记录"修复后应从失败转通过"与"修复前后都应通过"两组测试各自的通过条数与总条数。解决与否的判据不变，仍以两组全过为准；连续指标只作辅助观测，不改变判决。
 - 理由：二值判决下"31 条过 30 条"与"31 条过 3 条"同为失败而含义不同；连续指标噪声更小，能看到"更接近正确"这类二值看不见的改善。
 - 已知边界：连续指标只在判决相同的题目内比较才有意义；正式测量前须预先指定主指标，其余作探索性描述。
 - 更正（2026-09-22）：标题标签原写"（事实）"，应为"（设计）"；理由中"两组测试全未通过的占多数"应为"目标用例一条没过的占多数"。
 - 详情：docs/audits/2026-09-20-m9-pipeline-c63a0bf.md；裁决过程见 docs/decisions/m9-stage1-decisions.md（本地）。
 
-### 118 本阶段只衡量"同一代码库上越用越好"：来源集与测量集同为 django、题目互不重叠，测量集分层随机抽样并预先落盘，测量集效果为结论、来源题效果仅为上界（设计）
+### 118 〔已取代〕本阶段只衡量"同一代码库上越用越好"：来源集与测量集同为 django、题目互不重叠，测量集分层随机抽样并预先落盘，测量集效果为结论、来源题效果仅为上界（设计）
 
+- 状态：已取代——已由 125 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：M9 第二阶段的目标限定为主张一——经验能否让 agent 在同一代码库的**未见过的新任务**上做得更好；跨仓库迁移（主张二）不在本阶段。来源集与测量集同取自 SWE-bench Verified 的 django 题目，题目互不重叠：来源集 50 道（复用已有两轮干净基线的 25 道，另抽 25 道），测量集 100 道。两者均按数据集自带的难度档分层随机抽样、固定随机种子，**抽样结果在任何运行开始前落盘**，事后不得调整。测量集的无经验基线必须在任何经验激活之前跑完。报告同时给出测量集上的配对差（主张一的结论）与来源题上的效果（上界，含过拟合），两者之差作为经验中"针对具体题目的答案"所占比重的估计。
 - 理由：主张一的真实情形是在同一仓库反复处理不同的任务，必须测对未来任务的效果；在来源题上测，经验可能直接写成该题的修法，等于重新打开 104、109 堵上的答案泄漏通道。
 - 已知边界：结论限定为"在题面清晰的 django 修复任务上"；污染对两个条件为共模项，只影响绝对分数不影响配对差（097）；已有 50 题精简版上的通过率与噪声不能外推到测量集，测量集基线须重测。
@@ -1287,8 +1365,9 @@
 - 修订（2026-09-22，补记）："本轮只做 django、sympy 复现留到 django 出结果之后"未单独裁决；此后 125 把主张一的测试床改为连续工作流，SWE-bench 上 django 与 sympy 的这套安排随之被取代。
 - 详情：docs/decisions/m9-learning-loop-decisions.md（本地）。
 
-### 119 确定性错误不进错误行、不补跑：照常判分，结果行标注类别；目前只认上下文超长（修订 106 的错误行范围）
+### 119 〔部分已改〕确定性错误不进错误行、不补跑：照常判分，结果行标注类别；目前只认上下文超长（修订 106 的错误行范围）
 
+- 状态：部分已改——SWE-bench 跑批已删除，分类移入提交流跑批，见 205。判断现状以代码为准，下文为当时的原文。
 - 结论：模型请求以"重跑必复现"的错误收尾时，这次运行不记错误行、不补跑：照常判分（中途改了什么判什么，与撞上限同理），终态仍是 failed，结果行带 `deterministicError` 标注类别，占续跑键；报告在"标注"一节单列次数与其中判分通过数。判据是"错误由请求内容本身决定、与服务端当时的状态无关"。目前只认上下文超长，识别直接用上游 pi-ai 按各 provider 报错文案的判定（含 kimi-for-coding 的 "exceeded model token limit"），限额类文案先排除。
 - 理由：错误行的本意是服务抽风、换个时间重跑就好；上下文超长是这次运行的真实状态，重跑必然再超，补跑只会无休止地复现。
 - 待裁（暂按服务故障记错误行、会被补跑）：认证失败（401/403）、泛化的 400 请求错误、模型不存在（404）；已由下方 2026-09-22 修订裁定。
@@ -1298,15 +1377,17 @@
 - 修订（2026-09-22，口径确认为照常判分）：确定性错误（目前只有上下文超长）中断前已做的改动照常判分，判分通过即计通过，终态仍记失败，结果行标注类别、报告中单列；取代 106 修订中"计为任务失败"的字面表述。
 - 详情：docs/decisions/m9-learning-loop-decisions.md（本地）。
 
-### 120 提炼器不设 token 上限；轮数与墙钟仍按缺省，并记录实际撞的是哪一项（修订 074 的预算）
+### 120 〔已退役〕提炼器不设 token 上限；轮数与墙钟仍按缺省，并记录实际撞的是哪一项（修订 074 的预算）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：提炼器的缺省预算去掉 token 上限，保留 16 轮、5 分钟；超限仍按中止处理、不产出候选。实际运行中提炼器撞的是轮数还是墙钟，逐组记录，供之后调整这两项。
 - 理由：提炼器每轮都把整段上下文重送一遍，按累计 token 计的 80,000 上限只够 5 到 8 轮，约束的是阅读量而非产出。
 - 锚点：src/application/distill-runtime.ts（DEFAULT_DISTILL_BUDGET）；测试 src/application/attempt-group.test.ts；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十四节。
 - 详情：docs/decisions/m9-learning-loop-decisions.md（本地）。
 
-### 121 修掉提炼器跳过材料的缺陷：冻结对比快照直接放进首轮输入，空结果必须附理由；轮数 40、墙钟同比放宽（修订 076）
+### 121 〔已退役〕修掉提炼器跳过材料的缺陷：冻结对比快照直接放进首轮输入，空结果必须附理由；轮数 40、墙钟同比放宽（修订 076）
 
+- 状态：已退役——已随 137 退役。判断现状以代码为准，下文为当时的原文。
 - 结论：提炼器的任务说明末尾直接附上冻结对比快照，不再只经 `distill_snapshot` 工具给出；截断或省略的内容仍用 `distill_entry` 回查。提炼结果为空时必须附理由——读了哪几侧（存在的侧都要读）、为什么判断没有可学的；缺理由、理由为空或漏报某一侧，按不合格式留痕，不当作正常的空结果。合格的空结果理由随提炼结果交回、逐组列进报告，原文在提炼器会话里。预算改为 40 轮、12.5 分钟（墙钟按 40/16 同比放宽），不设 token 上限（120）。
 - 理由：120 之后的首次重新提炼里，11 组中 5 组第 1 轮不读快照就交空结果，另 5 组读满 16 轮仍没给结论；前者使空结果与"读过后判断没有可学的"在账本上无法区分。
 - 锚点：src/distillation/prompt.ts（distillerTask 附快照、空结果格式）、src/distillation/candidates.ts（DistillerEmptyReasonSchema、空结果校验）、src/application/distill-runtime.ts（DEFAULT_DISTILL_BUDGET、首轮输入）、src/application/distill-command.ts（报告列出空结果理由）；测试 src/distillation/candidates.test.ts「空结果必须附理由」、src/application/distill-command.test.ts「快照直接放进提炼器的首轮输入」、src/application/attempt-group.test.ts；证据 docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十四节。
@@ -1319,16 +1400,18 @@
 - 理由：主张一要证明的是系统自己能从运行历史里学到东西；关键判断由人做出则被测对象被偷换，反复看结果调策略直到测出改善即为事后挑选。
 - 详情：docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十四节；裁决过程见 docs/decisions/m9-learning-loop-decisions.md（本地）。
 
-### 123 学习闭环第一版结论：四个根因与实测失败模式；主张一改为"同一代码库上越用越省"，解决率降为次要指标（设计）
+### 123 〔部分已改〕学习闭环第一版结论：四个根因与实测失败模式；主张一改为"同一代码库上越用越省"，解决率降为次要指标（设计）
 
+- 状态：部分已改——主张一已由 126 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：第一版学习闭环（M6 后台审阅器、M7 对比式提炼、M8 逐条回放验证）在 SWE-bench Verified 的 django 题上按原设计运行后判定为不可用，根因四个：① 学习单位错了——以单道题为单位学，学到的必然是该题的内容；② 反馈信号承载不了因果归因——整题成败只有一个比特且实测 14% 为随机；③ 知识形态错了——自然语言行为建议要么是强模型本就会的通用话，要么是具体题目的答案；④ 逐条验证在统计上不可行，M8 建立在每条经验都可被验证的前提上，该前提不成立。实测失败模式见审计第十四节。主张一据此从"做得更好"改为"在同一代码库上越用越省"（省时间与 token、降低工具错误率与摩擦、定位更准、步数更少、环境类失误更少），解决率作为预先指定的次要指标照实报告；主指标须在正式对照开跑前书面预先指定，其余标为探索性。
 - 理由：外部证据在"同一代码库、严格留出新题"设定上解决率增益均在 0 到 5 个百分点且不稳，低于本项目约 10 个百分点的测量灵敏度，而定位、步数、成本类指标证据一致且噪声更小；在看到自身结果之前据外部证据调整主张属于预先指定。
 - 修订（2026-09-22，补记）：主张一"同一代码库上越用越省"已由 126 取代，改为长时程一致性，"更省"降为次要观测。
 - 修订（2026-09-22，补记）：第二版学习闭环只学关于代码库的结构记忆（东西在哪、改 A 须连带改 B），放弃"任务教训"这一知识形态；记忆系统重做的范围另由 129 裁定。
 - 详情：docs/decisions/m8-prep-decisions.md 前置调研、docs/audits/2026-09-20-m9-pipeline-c63a0bf.md 第十四、十五节；裁决过程见 docs/decisions/m9-learning-loop-decisions.md（本地）。
 
-### 124 基线账本的浪费分析否定"越用越省"在知名仓库上的余量；第二版暂缓，待换题域先量浪费；本轮来源集不补、基线不续跑（设计）
+### 124 〔部分已改〕基线账本的浪费分析否定"越用越省"在知名仓库上的余量；第二版暂缓，待换题域先量浪费；本轮来源集不补、基线不续跑（设计）
 
+- 状态：部分已改——结论已被推翻，见 125。判断现状以代码为准，下文为当时的原文。
 - 结论：对两轮最终基线的会话账本做浪费分析（审计第十五节）后，第二版"发现记忆"方向暂缓：不再为本轮补充来源集的成败对、不给提炼器加"区分可迁移做法与题目答案"的约束、测量集基线停在 70/99 道不续跑（逐题落盘，日后需要可续跑补齐）。下一步为工程收尾（M9 第一阶段入库、README、可用性、许可证），随后用同一套浪费分析在一两个模型不熟且结构复杂的候选仓库上先量浪费，有余量再决定第二版做不做、做什么。
 - 理由：浪费分析显示"agent 在重新发现代码库事实上浪费很多"的前提在知名仓库上不成立，模型本就知道其结构与惯例；此后任何"学习能带来收益"的设计，第一步都应先量收益上界。
 - 附带：反复试图修改判分用测试文件属任务规则而非代码库知识，收尾时把提示写硬即可；浪费分析应做成评测报告的固定一节（命令失败按类型、编辑报错按原因、首次测试命令是否用对）。
@@ -1336,8 +1419,9 @@
 - 修订（2026-09-22，补记）：结论中"不再为本轮补充来源集的成败对"与"不给提炼器加区分可迁移做法与题目答案的约束"两项未经单独裁决；"测量集基线停在 70/99 道、不续跑"由项目负责人明确决定。
 - 详情：docs/decisions/m9-learning-loop-decisions.md（本地）。
 
-### 125 SWE-bench 题目在时间与空间上零局部性，结构上不适合评估"同一代码库上越用越好"；测试床改为连续工作流，先用本仓库提交流跑通，再以外部仓库的连续提交流复现（设计）
+### 125 〔部分已改〕SWE-bench 题目在时间与空间上零局部性，结构上不适合评估"同一代码库上越用越好"；测试床改为连续工作流，先用本仓库提交流跑通，再以外部仓库的连续提交流复现（设计）
 
+- 状态：部分已改——主实验改在外部仓库，见 149。判断现状以代码为准，下文为当时的原文。
 - 结论：主张一（同一代码库上越用越省）的测试床从 SWE-bench Verified 改为**连续工作流**——按时间顺序排列的、来自同一贡献者连续工作的任务序列。先用本仓库自身的提交流跑通并观察迹象，再以一个模型未见过的外部仓库的连续提交流复现；外部复现不是可选项，是本仓库上的结论能否对外陈述的前提。
 - 理由：SWE-bench 的过去任务几乎不预测新任务要改哪里（相邻两题共享文件 0.9%、检索命中新题金文件 16%），本仓库提交流的局部性则很强（相邻提交共享文件 42%）；主张一描述连续工作中的累积效应，与 SWE-bench 的结构不匹配。此发现作为研究结论记录：SWE-bench 类基准不适合评估仓库级累积学习。
 - 前置待裁：题面的出法、大提交的处理、任务流的切分与顺序、判据、环境隔离、"更省"的证据形态、外部复现仓库的选择标准。
@@ -1347,8 +1431,9 @@
 - 修订（2026-09-22）："本仓库先行"改为主实验在更大、更难的外部仓库上进行，见 149。
 - 详情：docs/notes 下的证据目录（不入库）；离线分析方法见本条理由；裁决过程见 docs/decisions/stream-memory-decisions.md（本地）。
 
-### 126 主张一改为长时程一致性：agent 在同一代码库上延续式连续工作能否不把它搞坏；在本仓库 71 题提交流上以三条件（修订后为四个条件，见修订行）比较代码库健康度随步数的曲线；更省降为次要指标（设计）
+### 126 〔部分已改〕主张一改为长时程一致性：agent 在同一代码库上延续式连续工作能否不把它搞坏；在本仓库 71 题提交流上以三条件（修订后为四个条件，见修订行）比较代码库健康度随步数的曲线；更省降为次要指标（设计）
 
+- 状态：部分已改——修订后正式跑主问题改为学习闭环，见 193；测试床改为外部仓库，见 149。判断现状以代码为准，下文为当时的原文。
 - 结论：主张一由 123 定的"同一代码库上越用越省"改为**长时程一致性**——agent 在同一代码库上延续式地连续完成多步任务，能否不让错误累积、不破坏既有约束、不因前面的设计拖累后面。实验为**延续式**：agent 的代码真正带到下一题（不再每题重置到人的父提交），记忆同样跨题延续。三个条件在同一条任务流上比较：完整的 Pigeon（账本、验证门、回退、记忆全开）、Pigeon 去掉记忆（消融）、公开的最简 agent（099 的基线）。比较对象是三条"代码库健康度随步数变化"的曲线。健康度指标预先指定：既有测试通过比例（回归累积）、分层规则违规数、类型与 lint 错误数、每步新增测试的通过率、回退次数；轮数、token、探索次数等过程指标作次要。"更省"不再是主张，只作次要观测。
 - 理由：账本、回执、崩溃恢复、回放与分叉、验证门这整套设计服务的正是无人值守地在一个代码库上连续干很多步而不把它搞坏（039 的定位）；"更省"与这些无关，测出来也说明不了这套架构的价值。
 - 测试床事实：本仓库改动 src/ 的 105 次提交按"测试改动打到父提交上失败、打到提交本身上通过"成题 84 次，排除 13 次逾 20 文件的大提交后余 71 题；`npm run verify` 即为客观的代码库健康判据。
@@ -1367,8 +1452,9 @@
 - 修订（2026-09-26）：正式跑的主问题改为学习闭环，见 193。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 127 提交流成题：题面为提交信息加该提交新增或修改的测试文件全文；成题条件为测试改动打到父提交上失败、打到提交本身上通过；逾 20 文件的提交排除；红测试对合并为一题（设计）
+### 127 〔部分已改〕提交流成题：题面为提交信息加该提交新增或修改的测试文件全文；成题条件为测试改动打到父提交上失败、打到提交本身上通过；逾 20 文件的提交排除；红测试对合并为一题（设计）
 
+- 状态：部分已改——修订后做成与否按两类用例判定，见 196；修订后题面只给测试名单，见 198；外部仓库只数源文件，见 153。判断现状以代码为准，下文为当时的原文。
 - 结论：成题全部按机械规则，不由人判断。题面 = 该次提交的信息 + 该提交新增或修改的测试文件全文；判据 = 这些测试通过，且全套既有测试与机检（分层规则、类型检查、lint）不回归。成题条件 = 该提交的测试改动打到父提交上失败、打到提交本身上通过。逾 20 个文件的提交排除、不拆分；先提红测试再于下一提交修复的相邻对合并为一题。agent 不得修改判分用的测试文件，测试文件始终为人的版本、由 harness 按步覆盖。
 - 理由：测试是行为规格，给全文使 agent 按测试要求的接口实现，避免猜接口名失败而连锁污染曲线；主张已改为长时程一致性（126），不需对规格保密。
 - 修订（2026-09-22）：题与题之间的非题提交如何进入延续式实验，见 141；本条的成题规则不变。
@@ -1377,8 +1463,9 @@
 - 修订（2026-09-26）：题面改为提交信息加应通过的测试名单，测试内容不给，新测试文件判题时才放入工作区，见 198。
 - 详情：测试床事实见 126；裁决过程见 docs/decisions/stream-memory-decisions.md（本地）。
 
-### 128 账本剪去无读者与重复的记录，删除 M3 旧账本一次性转换（设计）
+### 128 〔部分已改〕账本剪去无读者与重复的记录，删除 M3 旧账本一次性转换（设计）
 
+- 状态：部分已改——修订后独立账本退役，见 176。判断现状以代码为准，下文为当时的原文。
 - 结论：剪去四种账本记录与一段旧代码：① 提炼跳过记录停写；② 放权升格与配置移除两种留痕停写；③ 候选筛查记录停写，扫描拒绝与已筛查两种状态改由候选提出记录内嵌的扫描结果现算；④ 删除 M3 旧账本一次性转换（转换模块与旧账本读取模块，启动不再检测旧账本，机检规则里对它的引用一并移除）。四种退役记录在读路径上按退役种类跳过、不视为日志损坏，旧会话文件不改写；Event Log 版本推进一版（13 升 14）；这两处落地方式不属本条裁决内容，可改。
 - 理由：这四种记录写入后没有功能读取，或与另一条记录逐字重复；账本主体没有其他来源可替代，原样保留。
 - 取代：018 全部；019 中升格与移除留痕部分；065 中候选筛查一族；074 修订中提炼跳过记录部分；039 修订中"原样保留，不拆"的口径。
@@ -1388,8 +1475,9 @@
 - 修订（2026-09-22）：候选状态枚举删去四个没有产生方的值：Proposed、EvidenceChecked、ValidationFailed、AwaitingApproval；两处状态显示文字与 ROADMAP §4 的候选状态机同步更新。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 129 记忆系统重做的范围：人写层保留且独立，新建程序产出的结构化记忆层，不写入人写层、不走候选审批（设计）
+### 129 〔部分已改〕记忆系统重做的范围：人写层保留且独立，新建程序产出的结构化记忆层，不写入人写层、不走候选审批（设计）
 
+- 状态：部分已改——程序产出层已由 174 停止，改由模型提炼，见 175。判断现状以代码为准，下文为当时的原文。
 - 结论：记忆系统重做。人写层保留：用户级偏好文件、项目 .pigeon/memory 下的 markdown 与 Skill 由人维护，照旧在会话开始注入。另建一层内容由程序产出的结构化记忆，与人写层分开存放、分开注入、各自计预算，不写入人写层，也不经候选、回放验证与人工审批。按 122，评测时人写层对所有条件冻结为同一份。现有 Reviewer、提炼器与候选审批、激活链路的去留另行裁决。
 - 理由：原生产线在真实数据上失败（123）：模型写的散文无法由程序核查，逐条人工审批无法在无人值守中自动更新；人写层承载意图与惯例，程序产出层承载发生过的事实，两者互不替代。
 - 待裁：记哪几类事实；形态与存储；投放时机与挑选；过期与冲突判定；Reviewer、提炼器与候选审批链路的去留；评测方法。
@@ -1407,8 +1495,9 @@
 - 更正（2026-09-22）：理由注明为记录时的归纳，裁决时未摆出其他选项，也未陈述理由。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 131 新记忆层只记两类摩擦事实：回归与约束的红转绿、被撤回的尝试；工具报错与每步改动摘要不记（设计）
+### 131 〔已取代〕新记忆层只记两类摩擦事实：回归与约束的红转绿、被撤回的尝试；工具报错与每步改动摘要不记（设计）
 
+- 状态：已取代——修订后撤回一类不再产生，见 173；已由 174 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：结构化记忆层（129）只记两类由验证门机械判定、代码与版本历史中看不到的事实。① 回归与约束的红转绿：验证门在题面测试以外的检查项上变红（既有测试失败、类型检查、分层规则、格式），经回炉修正后变绿；记红在哪一项、报错指纹、变红时已改动的文件、回炉时补改的文件；题面测试本身未通过不记。② 被撤回的尝试：一步回炉到上限仍红而整步撤回；记尝试改动的文件与最终卡住的检查项。不记工具报错与围栏拒绝，不记每步改动摘要；读过哪些文件不作为记忆内容，留作投放挑选的学习材料。
 - 理由：只记吃过亏才知道、代码与版本历史中看不到的摩擦；工具报错属环境问题，改动摘要与版本历史重复，注入越多效果越差。
 - 依赖：两类事实都产生于回炉流程，回炉须先于记忆落地。
@@ -1418,36 +1507,41 @@
 - 已由 174 取代：程序提炼记忆这条线停止。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 132 结构化记忆从账本派生、不单独存，配可删可重建的增量缓存（设计）
+### 132 〔部分已改〕结构化记忆从账本派生、不单独存，配可删可重建的增量缓存（设计）
 
+- 状态：部分已改——修订后是否沿用见 175；未沿用，单独存 md 文件，见 190。判断现状以代码为准，下文为当时的原文。
 - 结论：结构化记忆层（129、131）不设独立的记忆存储，记忆是账本事实的跨会话视图，由程序从账本现算。配一份按会话文件是否变动增量更新的缓存；缓存可随时删除、删除后从账本重建，与账本不一致时以账本为准。不新增账本记录族。人写的 md 层不受本条影响。
 - 理由：事实只有账本一处来源；提取规则调整后重算一遍即对全部历史生效，无需迁移旧文件。
 - 修订（2026-09-26）：记忆改为由模型从账本提炼（175），本条是否沿用在其细则中定。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 133 结构化记忆挂在文件上，报错自带的名字作为附带文字，不解析代码（设计）
+### 133 〔已取代〕结构化记忆挂在文件上，报错自带的名字作为附带文字，不解析代码（设计）
 
+- 状态：已取代——已由 174 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：每条结构化记忆的锚点是文件路径（文件改名经版本历史追踪）。报错指纹里本来就带的函数名、测试名、分层规则名作为附带文字随事实存下；不解析代码，不把事实挂到函数或类上，也不挂行号。
 - 理由：外部复现可能换语言，挂到函数或类需逐语言解析器；投放挑选的信号本身是文件级的；行号在延续式工作中每步漂移。
 - 已由 174 取代：程序提炼记忆这条线停止。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 134 结构化记忆在开局与回炉时由程序推送，不做查询工具（设计）
+### 134 〔部分已改〕结构化记忆在开局与回炉时由程序推送，不做查询工具（设计）
 
+- 状态：部分已改——修订后是否沿用见 175；开局整份推送、回炉不另推，见 191。判断现状以代码为准，下文为当时的原文。
 - 结论：结构化记忆只在两个时机由程序推送给模型。开局：拼进系统提示，随注入快照冻结并记入 run.started，设严格门槛，允许一条都不给。回炉：验证不过、报错作为新一轮输入发回同一会话时，把匹配的记忆附在报错之后。不提供由模型自行决定调用的记忆查询工具。挑选方法另行裁决。
 - 理由：开局能在变红前提醒，回炉按真实报错匹配最准；由程序推送，记忆组接触了哪些记忆是确定的、可从账本查到，查询工具则使"是否调用"本身成为变量。
 - 修订（2026-09-26）：记忆改为由模型从账本提炼（175），本条是否沿用在其细则中定。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 135 开局只按题面直接指到的文件挑记忆，最多 2 条、允许不给；学习式挑选留作以后研究（设计）
+### 135 〔已取代〕开局只按题面直接指到的文件挑记忆，最多 2 条、允许不给；学习式挑选留作以后研究（设计）
 
+- 状态：已取代——修订后是否沿用见 175；已由 191 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：开局挑选只用题面直接指到的文件：题面所附测试文件 import 的源文件，以及题面文字中写出的路径；取挂在这些文件上的记忆，最多 2 条，没有指到任何文件或指到的文件上没有记忆时一条都不给。回炉时的匹配：报错指纹（同一检查项、同一错误码或测试名、同一文件）对上的优先，其次是挂在本次报错涉及文件上的记忆，最多 2 条。从账本学习"这类题面要碰哪些文件"的挑选方式留作以后在日常使用场景下单独研究，所需数据账本中一直保留。
 - 理由：记忆的瓶颈在选对，注入条数越多效果越差，故先用最确定的信号并压低条数；实验题面给全测试文件，本方式在实验中偏有利，日常使用中开局常不给、依靠回炉时补上。
 - 修订（2026-09-26）：记忆改为由模型从账本提炼（175），本条是否沿用在其细则中定。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 136 结构化记忆使用前由程序核验，不过即不给；不按使用时间淘汰（设计）
+### 136 〔部分已改〕结构化记忆使用前由程序核验，不过即不给；不按使用时间淘汰（设计）
 
+- 状态：部分已改——修订后是否沿用见 175；程序核验不再沿用，见 175。判断现状以代码为准，下文为当时的原文。
 - 结论：每次挑选之后、给出之前，程序对每条记忆做两项核验：锚点文件仍存在（改名经版本历史追踪）；报错指纹里附带的函数名或测试名仍能在该文件中以文本找到。任一不过即不给。事发以来锚点文件的改动幅度只用于排序，改得越少越靠前。不按"多久没被用到"淘汰。新的在前；同一文件、同一指纹的多条合并为一条，并附"同类出现过 N 次"。
 - 理由：代码有没有变才是记忆是否仍成立的证据，程序可直接查代码；挑选按文件、最多 2 条，用不上的记忆不会被挑出，不删也不造成污染。
 - 修订（2026-09-26）：记忆改为由模型从账本提炼（175），本条是否沿用在其细则中定。
@@ -1463,8 +1557,9 @@
 - 修订（2026-09-23）：退役范围的四项推论见 158。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 138 记忆评测分两层：定点对照为主判据，四条件整流实验报整体一致性；回放执行机制保留（设计）
+### 138 〔已取代〕记忆评测分两层：定点对照为主判据，四条件整流实验报整体一致性；回放执行机制保留（设计）
 
+- 状态：已取代——已由 193 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：第一层定点对照，为记忆有无作用的主判据：先让"去掉记忆"条件跑完整条流；由程序找出记忆本可发挥作用的步骤（此前出现过的报错指纹在该步又出现，且按 135 的挑法该步本能挑到那条记忆）；从该步开始时的快照出发，带与不带那条记忆各重跑若干遍，比较再次变红的比例与回炉轮数。第二层为 126 的四条件延续式实验，照常报告健康度曲线，回答整体一致性。回放验证的执行机制保留，改作定点对照的工具（137 修订）。事件取法、重跑次数、是否设校准组与预算另行裁决。
 - 理由：延续式下各条件的代码很快分岔，整流比较中的差别无法归因于记忆；定点对照同起点、同一题、只差一条记忆，最直接回答记忆有没有用。
 - 修订（2026-09-22）：定点对照改在本仓库的提交流上进行（151），事件取自本仓库两条延续流中"去掉记忆"条件的一遍跑；四条件整流实验在外部仓库上进行。
@@ -1472,53 +1567,60 @@
 - 已由 193 取代：正式跑不做定点对照重跑，学习由固定起点的记忆 2 × 2 条件直接检验。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 139 定点对照：本能挑到记忆的全部步骤，三组各重跑 5 遍，主判据为配对的变红比例差（设计）
+### 139 〔已取代〕定点对照：本能挑到记忆的全部步骤，三组各重跑 5 遍，主判据为配对的变红比例差（设计）
 
+- 状态：已取代——已由 193 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：事件取"去掉记忆"条件整流跑中，按 135 的挑法本能挑到某条记忆的全部步骤，不论该步在无记忆流中是否再次变红；事件在重跑之前由程序按规则确定。每个事件从该步起点快照出发分三组重跑：带那条记忆；不带；带一条无关记忆（取自其他文件的真实记忆，格式与长度相同）。每组 5 遍。主判据为带记忆与不带相比的变红比例差，按事件配对；次要指标为回炉轮数、记忆帮倒忙的事件数、记忆是否被用上（agent 在验证前是否改了记忆提到的补改文件，由程序查得）。
 - 理由：只取又红了的步骤看不到帮倒忙；无关记忆组用于区分起作用的是记忆内容还是多出的一段文字；同起点重跑本身有波动，每组 5 遍才能分辨预期不大的作用。
 - 修订（2026-09-26）：每组先跑 3 遍；跑完 3 遍后只按剩余额度与时间（不看结果）决定是否补第 4、5 遍，补时只跑缺的遍次、已跑的保留；遍次按"遍次在外、事件居中、组在内"排队；报告写明遍数与分辨力的限制。
 - 已由 193 取代：正式跑不做定点对照重跑，学习由固定起点的记忆 2 × 2 条件直接检验。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 140 整流实验四条件各先跑 1 遍，按预先写死的门槛补跑到 3 遍（设计）
+### 140 〔部分已改〕整流实验四条件各先跑 1 遍，按预先写死的门槛补跑到 3 遍（设计）
 
+- 状态：部分已改——修订后正式跑主问题改为学习闭环，见 193；本轮不补跑，见 146。判断现状以代码为准，下文为当时的原文。
 - 结论：126 的四条件（完整 Pigeon、去掉验证门与回退、去掉记忆、最简 agent）各先跑 1 遍整条流。任意两条件之间健康度终值的差距不足以与运气区分的，这两个条件各补跑到 3 遍；门槛在开跑前与其他主指标一并预先写死，不得看了结果再定。定点对照（138、139）取用"去掉记忆"条件第一遍的步骤，第一遍跑完即可开始，不等补跑。并行度暂按 4 路估算，以所用套餐的官方限额为准再调整。
 - 理由：大的差别一遍即可看见，按预先写死的规则只在分不清的对比上补跑，既省墙钟时间，又避免看结果挑数据。
 - 修订（2026-09-22）：补跑门槛定为全量测试通过率终点差距小于 10 个百分点，见 146。
 - 修订（2026-09-26）：正式跑的主问题改为学习闭环，见 193。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 141 提交流中的非题提交按类型处理，形成两条延续流（设计）
+### 141 〔部分已改〕提交流中的非题提交按类型处理，形成两条延续流（设计）
 
+- 状态：部分已改——固定起点下维护步不跑，见 215。判断现状以代码为准，下文为当时的原文。
 - 结论：延续式实验按历史顺序推进，题与题之间的非题提交由程序按改动内容分类处理，规则在开跑前写死：① 只改测试文件与测试辅助文件（测试用的假模型、夹具等）的，直接套用人的版本；② 只有格式变化的（对父提交跑格式化后与该提交无差异），跳过；③ 改了代码但不带测试的，作为"维护步"交给 agent 按提交信息去做，只用验证门判定没有搞坏；④ 中途一次移动 51 个文件的分层目录搬迁处，把代码重置为人的版本一次，作为两条流的分界。由此形成搬迁之前 53 题、之后 17 题两条延续流；M5 以后大提交区中仅有的 1 题放弃。红测试对仍按 127 合并为一题。失败归因新增"维护步接口不同"一类。
 - 理由：非题提交里人写的东西后面的题可能依赖，照搬人的改动又常冲突；按类型处理才能得到足够长的延续流。
 - 修订（2026-09-22）：本条"大提交处重置"只适用于本仓库提交流；外部仓库按源代码改动行数处理，见 153。
 - 修订（2026-09-27）：学习闭环的正式跑为固定起点，维护步不跑，见 215。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 142 回炉到上限仍不过即整题撤回，撤回后留空、后续照常，连带失败单列为"缺前置"（设计）
+### 142 〔部分已改〕回炉到上限仍不过即整题撤回，撤回后留空、后续照常，连带失败单列为"缺前置"（设计）
 
+- 状态：部分已改——修订后本阶段不撤回，见 172。判断现状以代码为准，下文为当时的原文。
 - 结论：延续式实验中，一题回炉到上限仍不通过验证，即把该题改动整体撤回到做题前的快照，该题记为失败，流继续下一题；被撤回题本应新建的文件与名字不补人的版本。后续题因此失败的，单列为"缺前置"，与"自己没做好""维护步接口不同"（141）分开报告；由程序判别：测试加载时找不到的，正是被撤回题本应新建的文件或名字。回炉的轮数上限另行确定。
 - 理由：补人的版本只惠及会撤回的条件，等于在成绩中掺入人的功劳；撤回后留空使每个条件的代码完全出自 agent，连带失败照实分类报告。
 - 修订（2026-09-26）：本阶段不撤回：回炉修满仍不过即保留代码、记为失败，见 172。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 143 回炉上限 3 轮（设计）
+### 143 〔部分已改〕回炉上限 3 轮（设计）
 
+- 状态：部分已改——修满不再撤回，见 172。判断现状以代码为准，下文为当时的原文。
 - 结论：一题做完验证不过，把报错发回同一会话修正、再验证，记为一轮；最多 3 轮，第 3 轮后仍不过即按 142 整题撤回。该上限在正式开跑前定死，对有回炉的条件（完整 Pigeon、去掉记忆）一视同仁。试跑时记录每题实际用了几轮才通过；若大量题恰在第 3 轮后未过，在正式开跑前带数据复议。
 - 理由：轮数太少会撤回本可修好的题并连累后续，太多则耗时且容易为过检查而乱改；自我修复的收益集中在头一两轮。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 144 跑批按限额类型分别处理，额度用完即暂停、续跑时被打断的题作废重做（设计）
+### 144 〔部分已改〕跑批按限额类型分别处理，额度用完即暂停、续跑时被打断的题作废重做（设计）
 
+- 状态：部分已改——容量下降的处理见 163。判断现状以代码为准，下文为当时的原文。
 - 结论：模型服务返回的"不让用"类错误按类型处理。短时限流（429）：沿用双 key 轮换与退避。额度用完（403，5 小时、每周或每月额度）：整批暂停，等窗口刷新后自动从断点续跑；被打断的那一题整体作废，回到该题开始前的快照重新做，不留任何结果行、不计入成败与回炉轮数。并发受限（403）：先把并行度降一路重试，仍不行则整批暂停，并以去重的标准错误告警提示人来处理。不购买额度加油包。
 - 理由：限额是外部原因，不得变成 agent 的成绩，也不得让延续流断在半路或被污染。
 - 修订（2026-09-22，实现要求）：暂停与续跑由跑批程序自行完成、不需人值守：按 403 文案区分额度种类，5 小时窗口用完即暂停并定时探测，每周额度同样探测、等待更久，每月额度用完不探测、直接停下告警；探测用极小请求（只要求回一个字），间隔由 5 分钟逐步拉长到每 20 至 30 分钟一次，总等待设上限（如 6 小时），超过即停下告警；恢复后从账本找到断点，已完成落地的步骤保留，被打断的步骤回到其开始前的快照整题重做；跑批进程自身中途崩溃或机器重启后同样从账本断点续跑。
 - 修订（2026-09-23）：本条的限额处理在延续式实验中由本地模型网关统一实现，见 155。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 145 整流实验主指标为全量测试通过率曲线的终点值（设计）
+### 145 〔部分已改〕整流实验主指标为全量测试通过率曲线的终点值（设计）
 
+- 状态：部分已改——修订后正式跑主问题改为学习闭环，见 193。判断现状以代码为准，下文为当时的原文。
 - 结论：每条流每做完一步，用截至该步人写的全部测试在 agent 的代码上跑一遍，得全量测试通过率，按步数画成健康度曲线；条件之间比较终点值，140 的补跑门槛据此设定。次要指标：回归数（曾经通过、后来又挂的测试）、类型与格式错误及分层违规数、撤回次数、按题通过率（每题测试是否全过）、失败归因（没做出来、搞坏了旧功能、缺前置、维护步接口不同）。没有验证门的条件每步同样跑全量测试，但结果只用于测量，不得反馈给 agent。
 - 理由：主指标须同时计入功能没做出来与旧功能被改坏两头，对有无验证门的条件才公平。
 - 修订（2026-09-23）：分母为人在该步代码上实际跑出的通过用例（满分即与人持平），人在自己代码上也不过的用例不计入；agent 的代码上凡未通过者（含因收集错误而未运行的）均计为未通过，不缩小分母；以人在该步代码上收集出的全部用例为分母的一列同时记录供对照，人在自己代码上时过时不过的用例单独标出。
@@ -1526,16 +1628,18 @@
 - 修订（2026-09-26）：正式跑的主判据改为推与拉两个并列的主判据，见 199；全量测试通过率等只在试跑报告中报告。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 146 补跑门槛为全量测试通过率终点差距 10 个百分点（设计）
+### 146 〔部分已改〕补跑门槛为全量测试通过率终点差距 10 个百分点（设计）
 
+- 状态：部分已改——正式跑遍数见 200。判断现状以代码为准，下文为当时的原文。
 - 结论：任意两个条件第一遍的全量测试通过率终点值（145）相差小于 10 个百分点的，这两个条件各补跑到 3 遍。门槛只决定补不补跑；最终结论使用全部已跑的遍数，并连同波动范围一起报告。补跑所得的同条件重跑波动作为实测数据保留，供以后同类实验按实测设门槛。
 - 理由：只跑一遍时同条件重跑的终点波动未知，延续式又会放大偶然失败，门槛只能事先取保守值；超过 10 个百分点的差距单靠一两题偶然失败很难造成。
 - 修订（2026-09-26）：本轮不补跑，整流实验的结论先用第一遍；整条流同条件重跑不取消，登记为待测项、保留在计划中，额度允许时安排。测得之前，报告写明"单遍、重跑波动未测"，次要指标上的差别不作显著性判断，由机制决定的大差别照常报告，几题之差的小差别只报方向、不下结论；单步层面的重跑波动以定点对照不带组的 5 遍重跑作粗略参考，单独记录并注明它与整条流波动的区别，不代替整条流的测量。
 - 修订（2026-09-26）：正式跑的遍数与预算按 200。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 147 各条件每一步同一个总预算，回炉消耗计入其中；数字试跑校准后定死（设计）
+### 147 〔部分已改〕各条件每一步同一个总预算，回炉消耗计入其中；数字试跑校准后定死（设计）
 
+- 状态：部分已改——校准判据见修订行；修订后改为只防失控的宽上限，见 171；试跑器退役，见 209。判断现状以代码为准，下文为当时的原文。
 - 结论：四个条件每一步使用同一个总预算（对话轮数与墙钟时间），有回炉的条件其回炉轮次消耗从该总额中扣除，最简 agent 拿同样的总额、自行支配（可自行跑测试与修正）。暂按每步 150 轮、30 分钟估算；正式开跑前试跑几步，按实际用量校准一次后定死，正式跑中不再改动。各条件实际消耗的轮数、token 与墙钟时间作为次要指标报告。
 - 理由：总额相同，比出来的才是机制，而不是谁多拿了算力。
 - 修订（2026-09-24）：校准判据：以"完整 Pigeon"条件在 strands 两条流的开头试跑 8 至 10 步（覆盖题与维护步），试跑时预算放宽、使消耗不被截断；取每步实际用掉的轮数与墙钟各自的第 90 百分位，乘以 1.5，且不低于 150 轮与 30 分钟，作为四个条件每步的同一预算；试跑步不计入正式结果。
@@ -1545,8 +1649,9 @@
 - 修订（2026-09-27）：为预算校准所做的试跑器退役，预算按校准试跑的实测取定（202），见 209。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 148 延续式实验环境；落地的步骤提交进 git 历史（设计）
+### 148 〔部分已改〕延续式实验环境；落地的步骤提交进 git 历史（设计）
 
+- 状态：部分已改——正式跑改为固定起点，见 212。判断现状以代码为准，下文为当时的原文。
 - 结论：每条流一个容器，沿用 M9 的容器设施（098），断网（104）。起点为人在该流起点那次提交的代码，历史清理到只剩当前、看不到未来提交（同 109 的做法）。依赖预装历史上最全的一份（已由修订行改为按人当时的 CI 还原）。每一步由程序把该步人写的测试文件覆盖进工作区，agent 不能改（127）。验证门使用仓库自身的检查命令（格式、类型、全部测试、分层规则）。全量测试测量（145）在另一份副本中进行，结果不进 agent 的会话。落地的步骤由程序以题面的提交信息提交一次，agent 在后续题中可用 git log 查看自己此前的工作，四个条件相同。
 - 理由：提交进 git 历史符合在真实仓库中连续工作的情形，也使结构化记忆的作用必须来自 git 历史之外（131）。
 - 修订（2026-09-24）：环境与验证门按人当时的 CI 还原：容器内以非 root 用户运行测试、验证门与 agent 的命令；依赖按各环境起始提交的日期解析、只取当时已发布的版本，各提交按依赖声明选用对应的环境；strands 的类型检查在 Python 3.10 的独立 lint 环境中执行；验证门跟随仓库 CI——ruff 只做 check、不做格式检查（格式偏差计入次要指标），pytest 带 --reruns 2 与单条 90 秒超时（signal 方式），超时失败的用例不重跑；本仓库容器调大 Node 的堆上限。开跑前置检查为人的代码在每个要测的步上都须通过验证门。
@@ -1567,29 +1672,33 @@
 - 理由：①防止模型已记住答案；②是验证门与主指标的前提；③④⑤分别决定能成多少题、换仓库的目的能否达到、延续式能否成立。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 151 分工：外部大仓库测一致性，本仓库提交流测记忆（设计）
+### 151 〔部分已改〕分工：外部大仓库测一致性，本仓库提交流测记忆（设计）
 
+- 状态：部分已改——修订后正式跑主问题改为学习闭环，见 193。判断现状以代码为准，下文为当时的原文。
 - 结论：四条件整流实验（126、140、145、146）在外部大仓库上进行，回答验证门与回炉能否让仓库在长期工作中保持健康。记忆的定点对照（138、139）在本仓库的提交流上进行：本仓库两条延续流（141）以"去掉记忆"条件各跑一遍，从中取事件做定点重跑。结论须写明适用范围：在此测得的记忆作用只适用于连贯的持续开发，不外推到多人各改各处的仓库。
 - 理由：记忆挂在文件上，只有后续题再碰到锚点文件才会出场；外部多人仓库相邻两题碰同一源文件的比例与随机配对相当，本仓库的局部性明显更强。
 - 修订（2026-09-26）：正式跑的主问题改为学习闭环，见 193。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 152 外部测试床选定 strands-agents/harness-sdk 的 Python 部分（事实）
+### 152 〔部分已改〕外部测试床选定 strands-agents/harness-sdk 的 Python 部分（事实）
 
+- 状态：部分已改——修订后正式跑改换更难的仓库，见 197；换仓已撤回，正式跑用 strands，见 198、216。判断现状以代码为准，下文为当时的原文。
 - 结论：四条件整流实验（151）的外部测试床为 strands-agents/harness-sdk 仓库中的 Python SDK（strands-py，Apache-2.0），窗口为主干 2026-08-18 至 2026-09-10。只取该包的源代码与测试，仓库中的 TypeScript 部分与网站、文档不纳入。openai-agents-js 作为备选；pydantic-ai 排除。
 - 理由：成题率最高、流最干净、每步检查最轻、断网最容易、名气最小且窗口在 2026 年。
 - 修订（2026-09-26）：正式跑改换更难的仓库，strands 的数据只作试跑，见 197。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 153 外部仓库上大提交按源代码改动行数处理，超过 3,000 行才重置（设计）
+### 153 〔部分已改〕外部仓库上大提交按源代码改动行数处理，超过 3,000 行才重置（设计）
 
+- 状态：部分已改——固定起点下维护步不跑，见 215；正式跑不再切段，见 216。判断现状以代码为准，下文为当时的原文。
 - 结论：外部仓库（152）的延续流中，非题提交与大提交按以下规则处理，开跑前写死：只有源代码改动超过 3,000 行的提交处把代码重置为人的版本，作为段的分界；其余超过 20 个文件的提交，带题测试且源文件不超过 20 个的当题做（原"逾 20 文件排除"改为只数源文件），不带测试的当维护步交 agent 做、只用验证门判；不碰被测包源代码的提交（网站、文档、CI、其他语言部分）跳过。141 的其余规则照常适用。strands 窗口中据此只在 4,792 行的改名重构处重置一次，形成 55 步与 35 步两段；此前被"逾 20 文件"排除、未测成题率的 7 次提交在搭建该流时一并测定。
 - 理由：外部仓库的大提交多为普通改动加大量测试或文档，照 141 原规则流会被切成十余段、长时程测不出；3,000 行为经验值。
 - 修订（2026-09-27）：学习闭环的正式跑为固定起点，维护步不跑，见 215。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 154 回炉落地的三处口径（设计）
+### 154 〔已取代〕回炉落地的三处口径（设计）
 
+- 状态：已取代——撤回的删除集按开工时的忽略清单判定，见修订行；① ③ 已由 173 取代；① ③ 已由 173 取代，② 已由 281 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：① 账本中"这一步是否撤回"的推断：回炉开启、且这一步最后一次验证结论为失败，即推断为已撤回，不区分轮数用满还是预算耗尽；撤回原因只在结果行上现场标注，账本不负责推出原因。② 回炉本次只支持本地 git 工作区；开启回炉而没有可用快照时启动即报错并说明原因。容器执行端的"回到这一步起点"能力另立项、紧随回炉之后做：在执行端接口上加这一个能力，容器内用 git 实现（每步开始时记下当前提交，撤回时恢复到该提交），不迁移整套快照与分叉。③ 撤回后"逐字一致"的范围为快照覆盖的范围：受跟踪的文件，加未跟踪且未被忽略的文件；被 .gitignore 排除的文件与治理目录不在范围内。
 - 理由：① 开启回炉后以失败收尾只有轮数用满与预算耗尽两条路，二者都撤回，放宽后推断必然正确；② 延续式实验只需要"回到这一步起点"一个能力；③ 快照不含被忽略的文件，一并清除会删掉已装好的依赖。
 - 修订（2026-09-23）：① 的推断收紧为"回炉开启，且这一步最后一个 Run 有验证记录、结论为失败"即已撤回；最后一个 Run 无验证记录即视为这一步未收尾、推为未撤回，续跑时由跑批器整步重做；成败标签不受影响。
@@ -1604,50 +1713,57 @@
 - 理由：四个条件都经网关，限额处理只有一条路径（096）；用量在同一处计量，才能为 147 的预算对等提供证据。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 156 定点对照做成跑批器的单步重跑，旧回放执行体随第一版退役（设计）
+### 156 〔部分已改〕定点对照做成跑批器的单步重跑，旧回放执行体随第一版退役（设计）
 
+- 状态：部分已改——代码已删除，见 204。判断现状以代码为准，下文为当时的原文。
 - 结论：定点对照（138、139）由跑批器的"单步重跑"模式执行：从某一步落地后导出的代码包恢复该流的断网容器工作区，按指定组别（带记忆、不带、带无关记忆）跑完整的一步——agent 工作、验证门、回炉——每组 5 遍；模型请求经本地网关（155），计量与限额处理与流中一致。旧回放中的一致性核对（从原尝试的起始记录取出任务、起点、预算、模型与工具名单，任何放宽即拒绝）保留，接到单步重跑上。旧回放执行体随第一版退役。
 - 理由：重跑单元必须是含回炉的完整一步，且须与该步在流里的执行一致（同一断网容器、同一代码状态、同一网关）。
 - 修订（2026-09-27）：定点对照代码整套删除，见 204。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 157 定点对照三组的记忆走正常推送路径，只固定挑选结果（设计）
+### 157 〔部分已改〕定点对照三组的记忆走正常推送路径，只固定挑选结果（设计）
 
+- 状态：部分已改——代码已删除，见 204。判断现状以代码为准，下文为当时的原文。
 - 结论：定点对照（139、156）的三组差别只在给哪条记忆，给法完全沿用结构化记忆的正式推送路径——开局推送与回炉时附在报错之后两个时机（134）、同一套代码，只把挑选（135）固定为指定条目：带记忆组给那条相关记忆，在它按挑选规则本会出现的时机给出；带无关记忆组换成一条取自其他文件的真实记忆，时机不变；不带组不给。不另开注入口（如直接拼进题面或系统提示）。
 - 理由：验证形态须与正式使用形态一致，测到的才是正式使用时的记忆（同 085 的原则）。
 - 修订（2026-09-27）：定点对照代码整套删除，见 204。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 158 退役的四项推论（设计）
+### 158 〔部分已改〕退役的四项推论（设计）
 
+- 状态：部分已改——① ③ ④ 随 204、205 失去对象。判断现状以代码为准，下文为当时的原文。
 - 结论：① 定点对照的重跑结果写进跑批器的结果行，不新增账本记录；旧回放的结果记录类型随候选验证记录一起退役，照 128 读取时跳过、不改旧文件。② 验证者角色停用，不再派出；账本中角色名的取值保留以读旧会话文件，项目命令配置里写了该角色的照样能读、只是不再起作用。③ SWE-bench 复核命令与容器重跑模块一并删除；以后在 SWE-bench 上做同类的事用 156 的单步重跑。④ 评测中的 none、candidate、approved 三个条件名保持不变。
 - 理由：四项都是 137（第一版整套退役）与 156（定点对照改由跑批器单步重跑）的直接推论，由退役盘点逐项核出。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 159 验证配置支持命名分步，各步结论记入验证记录（设计）
+### 159 〔部分已改〕验证配置支持命名分步，各步结论记入验证记录（设计）
 
+- 状态：部分已改——结构化记忆按步取用随 174 停止。判断现状以代码为准，下文为当时的原文。
 - 结论：项目验证配置支持命名分步：每一步有名字与命令（本仓库为格式、类型、测试、分层四步；strands 为 ruff、mypy、pytest 三步），全部执行、各出结论，不因前一步失败而跳过后续步骤；整体结论为各步的合取（任一步失败即失败，任一步无法判定而其余未失败即无法判定）。验证记录在已有记录上加一个可选的各步结论字段（步名、退出码、结论、输出末尾），不新增记录种类，账本格式随之按加法式推进一版。回炉反馈写明哪几步失败并附各步输出；结构化记忆按"哪一步、什么指纹"记录与挑选（131、135）。单条命令的旧配置照常可用，视为只有一步。施工在结构化记忆施工中作为第一步完成。
 - 理由：记忆要记红在哪一项检查，而原验证只有一个总结论、前一项失败后续不跑；分步后回炉一轮即可看到全部检查的问题。
 - 修订（2026-09-24）：延续式实验中本仓库提交流（记忆定点对照所用）的验证门去掉格式步，只保留类型、测试、分层三步，格式偏差计入次要指标；日常使用本仓库时的验证配置仍为四步。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 160 回炉撤回推断的残余窗口接受为已知限制（设计）
+### 160 〔已取代〕回炉撤回推断的残余窗口接受为已知限制（设计）
 
+- 状态：已取代——已由 173 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：154 修订后的推断规则不再改动。残余窗口为：回炉开启，这一步最后一个 Run 有验证记录且结论为失败，已用轮数未到上限，轮次与 token 未耗尽，该 Run 无撞上限记录，且设了墙钟。此时"墙钟在最后一次验证期间到点、工作区已恢复"与"验证落盘之后、下一轮 run.started 之前进程被硬杀、工作区未恢复"在账本中不可区分，一律推为已撤回。接受为已知限制，写入回炉审计。
 - 理由：只有硬杀、断电或进程内异常能落入这一窗口；延续式实验的跑批器对被打断的步骤整步重做、不读此推断，日常使用中误标时可由 git 查看工作区实际状态。
 - 锚点：src/state/repair-step.ts、src/application/repair-loop.ts。
 - 已由 173 取代：撤回拆除后不再有撤回推断。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 161 容器模式下每步的起点进账本，供认定开工时已在工作区的文件（设计）
+### 161 〔部分已改〕容器模式下每步的起点进账本，供认定开工时已在工作区的文件（设计）
 
+- 状态：部分已改——随 174、184 停写。判断现状以代码为准，下文为当时的原文。
 - 结论：在容器执行端上开启回炉时，run.started 的负载带一个可选字段 stepStart：commit 为这一步开工时的提交，baseCommit 为执行端把开工时的工作树（含跑批器预置、尚未提交的人写测试）写成的、挂在该提交之下的提交。一步里各个 Run 同值；本地工作区不带这个字段。结构化记忆派生"开工时已在工作区的文件"时，先读快照的改前基线，没有再读 stepStart，两者都没有即判为未知。字段在账本 v17 内按加法式加入，不新增记录种类。
 - 理由：容器模式没有宿主快照，缺这一信息时测试步的红转绿一律判为未知，记忆最主要的一类事实会在实验里全部丢失。
 - 锚点：src/state/event-log.ts、src/state/structured-memory.ts、src/application/headless-core.ts。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 162 结构化记忆实验后按结果决定是否重构为"读结构化输出、显式声明题面测试"（设计）
+### 162 〔已取代〕结构化记忆实验后按结果决定是否重构为"读结构化输出、显式声明题面测试"（设计）
 
+- 状态：已取代——已由 174 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：现有实现（从检查工具面向人的文本输出中解析报错指纹，由本步改动、开工时的工作区与题面文字三个来源推断题面测试）用于本轮正式实验，不再改动。实验结束后：若定点对照（139）显示记忆有作用，则重构两处：① 报错指纹改从工具的结构化输出读取（pytest 与 node:test 的 JUnit XML、ruff 与 biome 与依赖巡航的 JSON、mypy 的 JUnit，或统一的 SARIF），文本解析只作兜底；② 题面测试由调用方显式声明（跑批器已知每步的题面测试文件），作为步的元数据交给 Pigeon，推断只在未声明时兜底。若记忆无作用，不再在这一层投入。
 - 理由：现实现不够干净之处主要来自从给人看的文本里抽取结构、用推断代替调用方已知的信息；实验要回答的是记忆有没有用，现实现经三轮复核行为正确，实验前重构会推迟开跑。
 - 锚点：src/state/verify-fingerprint.ts、src/state/structured-memory.ts、src/memory/structured-workspace.ts。
@@ -1661,16 +1777,18 @@
 - 锚点：src/eval/model-gateway.ts、src/eval/model-limits.ts、src/eval/stream-runner.ts、src/eval/stream-experiment.ts。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 164 定点对照的主判据按记忆给出时机拆开（设计）
+### 164 〔已取代〕定点对照的主判据按记忆给出时机拆开（设计）
 
+- 状态：已取代——已由 193 取代。判断现状以代码为准，下文为当时的原文。
 - 结论：细化 139 的主判据。事件按记忆给出的时机分两类，各用一个判据、分开报，不合并成一个均值：开局事件（开局挑到记忆）看首轮验证是否在题面以外的检查上变红；回炉事件（回炉时挑到记忆）只取首轮验证未过、进入回炉的遍次，看给出记忆那一轮之后的下一次验证是否仍在题面以外变红。两个时机都挑到记忆的事件，两类都计入。配对差与"帮倒忙"的事件数按两类分别计算；回炉轮数与最终结论作为辅助指标。回炉时机的记忆在重跑中于每一轮回炉都给出。
 - 理由：回炉时机的记忆在首轮验证之后才给出，与首轮结果没有因果关系，混入首轮判据只会稀释效果；回炉判据的筛选条件发生在各组出现差别之前，不引入偏差。
 - 锚点：src/eval/fixed-point-rerun.ts（结果行）、src/eval/fixed-point-report.ts（汇总）。
 - 已由 193 取代：正式跑不做定点对照重跑，学习由固定起点的记忆 2 × 2 条件直接检验。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 165 整流实验判据：本次照原判据报告，挖掘出的判据由外部复现确证（设计）
+### 165 〔部分已改〕整流实验判据：本次照原判据报告，挖掘出的判据由外部复现确证（设计）
 
+- 状态：部分已改——修订后本次改为试跑，挖出的判据由 DeepSeek 正式跑确证，见 167；修订后正式跑主判据见 199。判断现状以代码为准，下文为当时的原文。
 - 结论：本次整流实验按 145 的原判据报告（全量测试通过率为主指标，回归数、静态检查错误数、撤回次数、按题通过率与失败归因为次要），并照实写明主指标在测试齐全的仓库上饱和。同时从本次结果中挖掘区分度高的判据，连同挖掘过程一并记录，本次相关结论标为探索性发现；在外部复现（125）开跑之前把挖出的判据定为主判据，由外部复现的结果确证。同条件重跑的波动：本次不补跑（146 修订），单步层面的重跑波动取定点对照不带组的 5 遍重跑作参考；外部复现是否对部分条件跑多遍，按届时额度另定。
 - 理由：看过结果再挑差别最大的作主判据，容易把偶然差别当作效应；本次用于发现判据、另一次实验用于确证，既用上数据又保住可信度。
 - 修订（2026-09-26）：本次改为试跑，挖出的判据改由 DeepSeek 正式跑确证，见 167。
@@ -1683,8 +1801,9 @@
 - 理由：额度只够每 5 小时约 40 分钟的工作，剩余约需两周；这批数据改作试跑（167）。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 167 Kimi 这一轮改为试跑，正式结论取 DeepSeek-V4.1-Flash 按新方案重跑的结果（设计）
+### 167 〔部分已改〕Kimi 这一轮改为试跑，正式结论取 DeepSeek-V4.1-Flash 按新方案重跑的结果（设计）
 
+- 状态：部分已改——校准改由 202 另跑。判断现状以代码为准，下文为当时的原文。
 - 结论：Kimi 这一轮的数据只用于挖掘判据、校准预算与遍数、暴露基建问题，报告中单列、不作正式结论；正式结论只取 DeepSeek-V4.1-Flash（官方接口）按新方案重跑的结果，新方案逐件另定、开跑前定死；145 原判据在正式跑中照报。
 - 理由：挖掘与检验分用两批数据，避免事后选判据；Kimi 这一轮未跑完，配对不全。本实验输入约 98% 为缓存命中，DeepSeek-V4.1-Flash 的缓存命中价在可直连的候选中最低、无滚动额度，锁定的 pi-ai 0.84.4 已内置其接口。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -1701,8 +1820,9 @@
 - 理由：同 168。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 170 试跑查出的四处缺陷按原设计修复（设计）
+### 170 〔部分已改〕试跑查出的四处缺陷按原设计修复（设计）
 
+- 状态：部分已改——修订后 ① 不再需要，见 174。判断现状以代码为准，下文为当时的原文。
 - 结论：① 结构化记忆派生的文件改动排除被 git 忽略的文件（按仓库的忽略规则）；② 一次回复既无文字也无工具调用不算正常收尾：重试一次，仍空则该次运行记为异常结束、原因为空回复，回炉不再继续；③ 验证门识别检查工具自身崩溃：重跑一次，仍崩溃则该项记为工具故障并单列，不据此判失败或撤回；④ 命令工具等的说明按实际执行端生成。施工与其余裁决合并下达。
 - 理由：四处都是系统未按原设计工作（记忆只记代码改动、空回复不是完成、工具崩溃不是代码问题、说明应与行为一致），属于只修缺陷。
 - 修订（2026-09-26）：① 随 174 不再需要。
@@ -1732,8 +1852,9 @@
 - 理由：手写规则每换一种检查工具、每多一类知识都要人补，不随模型变强而变好；试跑中这类记忆内容空洞，所警告的错误在该步首轮复发只有 2/110。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 175 本阶段的记忆改为由模型从账本提炼（设计）
+### 175 〔部分已改〕本阶段的记忆改为由模型从账本提炼（设计）
 
+- 状态：部分已改——正式跑条件改为 2 × 2，见 193。判断现状以代码为准，下文为当时的原文。
 - 结论：记忆由模型读取账本提炼教训与工作流程，每条引用代码位置与账本证据，使用前由程序核对引用存在，不经人工审批；提炼结果按会话与提炼模板版本存档，重建时读存档而不重新调用模型。正式跑中 full 与 no-memory 之差即此记忆。提炼时机、输入、条目格式、挑选与上限等细则另定。
 - 理由：随模型变强而变好；业界从运行历史学习的记忆普遍由模型提炼，但未见公开的对照证据，本实验可检验其作用。
 - 修订（2026-09-26）：引用不由程序核对：事实附带代码引用推给 agent，由 agent 在依靠某条事实之前自行读取引用核对，对不上即存修正版；核对过程作为普通工具调用记入账本，供之后的提炼读取。136 的程序核验不再沿用。
@@ -1745,8 +1866,9 @@
 - 理由：账本当初按治理优先自建，与 pi 会话树并存，分叉时还要从账本导入会话树；治理已不是主线，维护两套会话记录的成本不再值得。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 177 会话存储粒度：一个会话一个文件（设计）
+### 177 〔部分已改〕会话存储粒度：一个会话一个文件（设计）
 
+- 状态：部分已改——布局照 pi 原生，见 210。判断现状以代码为准，下文为当时的原文。
 - 结论：一个会话对应一个 pi 会话文件；worker 与分支会话各自成文件，文件头记父会话；分叉用 pi 的 fork 把分叉点之前的历史复制进新文件。同一文件始终只有一个写者。
 - 理由：pi 的会话存储没有跨进程锁，多写者写同一文件会损坏整个文件；一会话一文件在结构上保证单写者，并与现行布局（011）及跑批器按文件隔离、按目录列会话的做法一致。代价是分叉时历史复制一份。
 - 修订（2026-09-27）：文件布局照 pi 原生，见 210。
@@ -1764,14 +1886,16 @@
 - 理由：分叉、续跑与复盘看到的上下文须与 agent 当时所见一致；试跑中被截断的 176 条消息有 120 条是题面，约五分之一的步所存题面不完整；DeepSeek 在开思考时要求历史中的助手消息带思考内容。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 180 读取侧改为原生视图（设计）
+### 180 〔部分已改〕读取侧改为原生视图（设计）
 
+- 状态：部分已改——定点对照读者已随 204 删除。判断现状以代码为准，下文为当时的原文。
 - 结论：所有读会话的地方（失败分类、成败标签、按尝试切片、trace、回放、会话列表、会话搜索、定点对照）直接读 pi 的消息条目与自定义条目，不在内存中合成旧账本形状的视图。改写时把试跑会话转成新格式，与旧代码的输出逐一对照，一致才算改对；该转换只用于对照验证，产品不读旧格式。
 - 理由：只留一套存储与一套词汇，新读者不必再理解旧账本的概念；兼容视图会让已不存在的记录名在代码中长期存留。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 181 读别的会话用自写的只读读取器（设计）
+### 181 〔部分已改〕读别的会话用自写的只读读取器（设计）
 
+- 状态：部分已改——定点对照读者已随 204 删除。判断现状以代码为准，下文为当时的原文。
 - 结论：凡读取非本进程所写的会话（会话搜索、跑批器与定点对照读会话、复盘分叉读源会话），一律使用自写的只读读取器：按 pi 会话文件格式逐行解析、在内存中拼出树，从不改写文件。只有正在写该会话的进程使用 pi 的打开。读到不完整的末行即跳过，不再标记；断号与正文缺口两类诊断随之去掉。
 - 理由：pi 打开会话时会改写文件以删去写了一半的末行，读取正被另一进程追加的会话会把对方文件损坏；会话搜索要扫描大量文件，逐行扫读比完整加载与校验轻。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -1788,11 +1912,13 @@
 - 理由：新存储保存完整消息，可原样接着干；核实交给模型、不设程序规则；新存储不强制 fsync（178），程序对账本就不保证完整。pi 0.84.4 提供会话存储、上下文还原与 continue，但其崩溃恢复流程未实现，悬空调用的处理由 Pigeon 补上。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 184 新会话存储的条目清单与停写清单（设计）
+### 184 〔部分已改〕新会话存储的条目清单与停写清单（设计）
 
+- 状态：部分已改——另加终端界面退出条目，见 283。判断现状以代码为准，下文为当时的原文。
 - 结论：会话文件除 pi 消息条目外只写七种自定义条目：Run 开始（模型与参数、工作方式指令、工具名单、审批模式、预算、验证配置、回炉轮数、开工时的代码版本、系统提示全文）；Run 收尾（结束方式：正常、撞上限及上限种类、中止、出错、熔断，原撞上限与熔断记录并入）；验证记录（结论、各项检查的结论与输出、耗时）；代码快照（提交号及其在会话中的位置）；worker 派出与收尾（任务、工作树、结果，worker 自身信息写在其文件头）；分叉（来源会话、分叉点、快照，主要信息写在新文件头）；授权建立与撤销。停写：每轮与工具调用的开始、结束事件，消息索引与正文旁置文件，请求观察，技能加载，SWE 验证记录，写操作的意图、审批决定、回执与对账确证，以及 Run 开始中的失败重试配置、拒绝名单、给模型看的工具清单、记忆技能与 MCP 清单、两个哈希字段。
 - 理由：按 128 的口径，与 pi 消息重复或只剩显示读者、无读者的不写；写操作证据链的主要读者（续跑对账）随 183 消失，其余读者改用 Run 是否收尾、Run 收尾的结束方式与代码快照之间的 git 差异。系统提示须存，因 pi 消息不含系统提示，分叉与续跑要原样还原上下文。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
+- 修订（2026-09-30）：实现时 Run 开始条目只停写了两个哈希字段（另不再带 stepStart 与 structuredMemory）；失败重试配置、审批策略（含拒绝名单）、给模型看的工具名单、记忆清单、技能清单与 MCP 工具及服务器清单仍写入，trace 与 replay 读其中的工具名单、审批策略、记忆、技能与 MCP 工具清单显示启动快照与注解冲突（052）。以代码为准，上文停写清单里的这几项作废。
 
 ### 185 会话搜索工具的输出口径（设计）
 
@@ -1800,43 +1926,49 @@
 - 理由：两个工具的输出是 agent 直接看到的内容（试跑中每条流 20 到 40 次搜索），变动会改变 agent 行为、破坏试跑与正式跑之间及正式跑内部的可比性；治理邻居与哈希随 184、179 不复存在。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 186 推送记忆的设计原则（设计）
+### 186 〔部分已改〕推送记忆的设计原则（设计）
 
+- 状态：部分已改——复盘指令 v1 见 221。判断现状以代码为准，下文为当时的原文。
 - 结论：推送压小、有上限、允许一条都不推；按类型分工，推只放当下仍成立、带代码引用的事实，具体经过交给会话搜索。复盘读整个会话，由模型认出其中出错再解决的摩擦（验证门、agent 自跑测试、命令报错、被人纠正），验证门的结论在时作为更强的客观信号一并交给复盘，不在也照样学，记忆不绑死验证门。复盘看失败时的报错与修好它的改动这一对前后对照，只从已解决的摩擦里提炼经验；不把变绿直接当成功，迎合验证的修法记为反面教训。推送时机、条数与挑选方式在推送骨架中定。
 - 理由：研究一致显示记忆不是越多越好、挑错比不给更糟、有可靠外部反馈才学得好；第二版的失败在程序提炼而非验证门信号，而日常使用默认不开验证门、摩擦也不只来自验证门；验证门能判断能否按仓库 CI 合入，但会被迎合，不能直接等同于做对。
 - 修订（2026-09-27）：复盘指令的具体写法定为模板 v1，见 221。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 187 迁移先于正式跑，新代码不读旧格式（设计）
+### 187 〔部分已改〕迁移先于正式跑，新代码不读旧格式（设计）
 
+- 状态：部分已改——只读旧版取 455d88d，见 211。判断现状以代码为准，下文为当时的原文。
 - 结论：先完成会话存储迁移，再做 DeepSeek 正式跑，正式数据全部为新格式。新代码不读旧格式；Kimi 试跑等旧会话用迁移前的旧版代码（只读工作树）读取。
 - 理由：正式跑中途换格式会使会话搜索的输出前后不一致、影响可比性；旧会话只剩试跑分析一类读者，无须长期维护两套格式。
 - 修订（2026-09-27）：读旧数据的只读旧版取 455d88d，见 211。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 188 复用 pi 的上下文压缩（设计）
+### 188 〔部分已改〕复用 pi 的上下文压缩（设计）
 
+- 状态：部分已改——阈值不下调，见 218。判断现状以代码为准，下文为当时的原文。
 - 结论：复用 pi-agent-core 公开的上下文压缩，参数取其默认：上下文超过模型上限减去预留（16384 token）时自动压缩，最近约 2 万 token 原样保留，其余由模型写成结构化摘要，以会话树的压缩条目记录；原始消息保留在会话文件中，只改变给模型看的上下文。对所有 Pigeon 条件、所有 Run（首次尝试、回炉、交互使用）生效；阈值是否下调在正式跑前的校准试跑中按实际上下文规模定。
 - 理由：pi 已提供完整的压缩与摘要，会话树原生支持压缩条目，迁移后几乎现成，不需自定规则；当初推迟压缩的顾虑（摘要不是证据）在存完整原始消息（179）后不再成立；做法与 Claude Code 快到上限时自动压缩一致。
 - 修订（2026-09-26）：日常交互使用（TUI、命令行对话）的上下文压缩一并纳入本阶段施工。
 - 修订（2026-09-27）：阈值不下调，校准与正式跑都用默认值（窗口减预留），见 218。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 189 日常交互使用的上下文压缩（设计）
+### 189 〔部分已改〕日常交互使用的上下文压缩（设计）
 
+- 状态：部分已改——改为常显上下文用量，见 286。判断现状以代码为准，下文为当时的原文。
 - 结论：日常交互使用（TUI、命令行对话）在自动压缩（188）之外，提供手动命令 /compact [要保留的重点]，重点作为摘要的附加说明交给 pi 的摘要函数；每次压缩在界面提示一行压缩前后的 token 数。不常显上下文用量。
 - 理由：有人在场时需要能自行控制压缩（对话过长或换话题时）；做法与 Claude Code 一致，pi 的摘要函数原生支持附加说明。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 190 推送记忆存为一个 md 文件（设计）
+### 190 〔部分已改〕推送记忆存为一个 md 文件（设计）
 
+- 状态：部分已改——格式见 229。判断现状以代码为准，下文为当时的原文。
 - 结论：推送记忆存为一个 md 文件 .pigeon/learned/MEMORY.md，与人写的 .pigeon/memory/*.md 分开存放。每条为固定的轻格式：一句话的事实、教训或做法，代码引用（文件、函数），一句理由；人可直接查看、修改、删除。
 - 理由：与人写层分开（129）；Hermes、Claude Code、Letta Code、Codex、omp 均以 md 存学到的记忆，人可读可改；条目字段取自 GitHub Copilot 的记忆（主题、事实、引用、理由）；固定格式使容量上限与按条改写可执行。
 - 修订（2026-09-27）：文件格式定稿，见 229。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 191 推送记忆的骨架（设计）
+### 191 〔部分已改〕推送记忆的骨架（设计）
 
+- 状态：部分已改——干活的 agent 也带记忆工具，见 217；上限取法见 223；推送段文字见 227；日常可另指定复盘模型，见 296。判断现状以代码为准，下文为当时的原文。
 - 结论：复盘从会话分叉，带该会话的完整上下文与验证门最终结论，按一段通用复盘指令（不含试跑分析得出的具体结论）更新记忆；以专用记忆工具新增、改写、删除条目，可以一条不写；记忆总量设硬上限，写满时工具拒绝写入，须先合并或删减，数值在校准试跑中定；复盘使用与干活相同的模型，其消耗计入该条件成本；开局把整份记忆推入系统提示，不做挑选，回炉时不另推；实验中每步开工保存一份记忆快照，用于复现与只用过去的经验。复盘时机另定。
 - 理由：复盘看到 agent 当时所见的全部、程序不挑材料，且复用原会话缓存（Hermes 后台复盘的做法）；记忆不是越多越好，硬上限与写满拒绝沿用 Hermes 的做法；开局推送沿用 Hermes、Claude Code、Copilot 与 042 的系统提示冻结；记忆压得小，整份推送即可免去挑选规则。
 - 修订（2026-09-27）：干活的 agent 在推送格中也带记忆工具，见 217。
@@ -1844,16 +1976,18 @@
 - 修订（2026-09-27）：系统提示中推送段的文字定稿，见 227。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 192 复盘时机：会话收尾时一次（设计）
+### 192 〔部分已改〕复盘时机：会话收尾时一次（设计）
 
+- 状态：部分已改——压缩前复盘在实验中同样适用，见 207；终端界面的时机修订见 283；补做判定见 295，范围见 284。判断现状以代码为准，下文为当时的原文。
 - 结论：每个会话收尾时复盘一次。实验中每一步即一个会话，最后一次验证完成后复盘，复盘做完再开下一步。日常使用中，会话正常退出时复盘；进程被杀或直接关闭而未复盘的会话，下次启动时补做，以一份已复盘会话的记录为准；上下文压缩之前先复盘一次，以免细节被摘要掉。
 - 理由：实验与日常是同一条规则，区别只在日常会话的结束时刻不明确；启动时补做沿用 Codex 与 omp 的做法，压缩时复盘沿用 Letta Code 的默认；不采用 Hermes 每隔固定轮数触发，避免人为定的轮数与会话中途打断。
 - 修订（2026-09-27）：上下文压缩前先复盘一次同样适用于实验，见 207。
 - 修订（2026-09-28）：终端界面退出时不再复盘，改为下次启动终端界面时在后台静默补做，见 283；pigeon run 的收尾复盘与压缩前复盘不变。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 193 正式跑的主问题改为学习闭环（设计）
+### 193 〔部分已改〕正式跑的主问题改为学习闭环（设计）
 
+- 状态：部分已改——修订后加回最简 agent 作外部参照，见 194；步的范围见 216。判断现状以代码为准，下文为当时的原文。
 - 结论：DeepSeek 正式跑检验学习闭环：每一步从人在该步之前的代码开工，只让记忆随步数积累，以便把"学到东西"与"代码被带偏"分开；条件为记忆的 2 × 2，即能否检索历史会话（拉）与有无推送记忆（推）两两组合，四格均带验证门与回炉；不做定点对照重跑；no-gate 与最简 agent 两个条件本轮不跑。长程稳定性的结论（试跑中几乎不弄坏人未改动的测试，已触顶）只写入试跑报告。主判据、遍数与步的范围另定。
 - 理由：学习闭环是 039 所定两个卖点之一且更难测，并非证据不利时改测更容易的主张；长程稳定性已在试跑中得到触顶的答案。固定起点消除连锁带偏带来的噪声；2 × 2 对应市面上只推、只拉、两者皆有、两者皆无的几种做法，并能分别估计检索与推送的作用；花费约为续作六条件方案的一半。
 - 修订（2026-09-26）：最简 agent 修好后作为外部参照加回，正式跑共五个条件，见 194。
@@ -1873,23 +2007,26 @@
 - 理由：迎合在学习闭环里会伤到两处，学到坏经验由复盘处理，骗过成败判定属测量有效性问题，放在测量一侧堵住即可，不给 Pigeon 多加规则；整体保护含依赖声明的配置文件会挡住正当的依赖改动。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 196 每步做成与否按两类用例判定（设计）
+### 196 〔部分已改〕每步做成与否按两类用例判定（设计）
 
+- 状态：部分已改——正式跑主判据按要做到的一类的通过比例计，见 201；圈定办法见 214。判断现状以代码为准，下文为当时的原文。
 - 结论：每一步是否做成，按两类用例判定。要做到的：人在该步使其由失败变通过的用例（把人的新测试放到人上一步的代码上会失败、在人该步的代码上通过），必须全部通过。不许挂的：该步之前已通过、人在该步未改动的全量用例，必须无一失败。两类同时满足才算做成，两类的结果也各自单独报告。回归即不许挂的一类中失败的用例。两类用例由跑批器按人的代码计算基线得出。
 - 理由：试跑中题面测试文件里大部分是旧用例（中位 149 条），整份全过把新行为是否做到与旧功能是否弄坏混在一个数里，会稀释学习曲线；做法与 SWE-bench 的 FAIL_TO_PASS 与 PASS_TO_PASS 一致。
 - 修订（2026-09-26）：正式跑中做成与否改作次要判据，主判据按要做到的一类用例的通过比例计，见 201。
 - 修订（2026-09-27）：两类用例按 SWE-bench 的标准定义圈定，见 214。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 197 正式跑换用更难的仓库（设计）
+### 197 〔部分已改〕正式跑换用更难的仓库（设计）
 
+- 状态：部分已改——修订后换仓视抽样试跑而定，见 198；正式跑留在 strands，见 216。判断现状以代码为准，下文为当时的原文。
 - 结论：学习闭环的正式跑不再以 strands 为测试床，换用更难的仓库；strands 的数据只作试跑。选仓标准与候选另定。
 - 理由：试跑中四个条件都做到的 54 步里 29 步（54%）全部做成，区分度靠其余不到一半的步；换到更强的模型、固定起点、题面附测试全文之后更易触顶，而学习闭环需要基线留有提升空间。
 - 修订（2026-09-26）：换仓改为视抽样试跑结果而定，见 198。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 198 题面只给测试名单，抽样试跑定去留（设计）
+### 198 〔部分已改〕题面只给测试名单，抽样试跑定去留（设计）
 
+- 状态：部分已改——197 的换仓撤回；名单粒度见 213；难度关改看部分得分，见 257；抽样试跑并入校准，见 202；名单分两段，见 239。判断现状以代码为准，下文为当时的原文。
 - 结论：题面改为提交信息加应当通过的测试名单，不给测试内容；人在该步新增或修改的测试文件在 agent 工作时不放入工作区，判题时才放入（与 SWE-bench 在评测时打上测试的做法一致）。先在 strands 上按此题面抽 10 到 15 道题，以"只能检索、不推送"一格用正式跑的模型做抽样试跑：做成率落在 30% 到 70% 之间则留在 strands，197 的换仓撤回；落不进去则按 197 换仓。门槛在试跑前定死。
 - 理由：题面附测试全文等于提前给出全部断言，易使基线触顶；只给名单更难也更接近真实使用，题难则摩擦多、可学的多；只改题面施工很小，strands 的环境、镜像与人写基线现成，可省下换仓的数日，用事先定好的门槛以数据决定是否仍需换仓。代价：提交信息过简时题目说不清会添噪声；验证门在工作时看不到新测试，回炉只能修旧功能与静态检查。
 - 修订（2026-09-26）：做成率高于 70% 按 197 换仓；低于 30% 时的处理在抽样试跑之后、正式跑之前另定。
@@ -1900,16 +2037,18 @@
 - 修订（2026-09-28）：难度关改看只能检索一格的平均部分得分，30% 到 80%，见 257。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 199 正式跑的主判据：推与拉两个并列（设计）
+### 199 〔部分已改〕正式跑的主判据：推与拉两个并列（设计）
 
+- 状态：部分已改——计量改为部分得分，见 201；检验方法见 222；记忆使用的计法见 233、261。判断现状以代码为准，下文为当时的原文。
 - 结论：主判据为两个并列：推送的效果（有推送的两格对无推送的两格）与检索的效果（能检索的两格对不能检索的两格），做成与否按 196，均按同一道题配对、以 2 × 2 四格共同估计；两者以 Holm 法校正，使同时看两个判据时总的误报率不超过 5%。事先写明的次要判据：推与拉的交互效应、学习曲线（做成率随步数的斜率与后半段之差）、效率（轮数、token、墙钟）、回归（不许挂的一类中挂掉的用例）、各格对最简 agent、记忆本身的使用情况（推送条数、agent 核对引用次数、反面教训条数）。次要判据只作佐证、不单独下结论；解读顺序为先看主效应，主效应显著再看学习曲线说明效果来源。测不出即写"未测出改善"，基线触顶时注明。
 - 理由：学习闭环的问题是从运行历史学习有没有用、哪种方式有用，推与拉都是答案的一部分；2 × 2 的每个主效应都用上四格，同样花费估得更准；事先指定主判据可防三个结果打架时事后挑选，Holm 法比 Bonferroni 法少冤枉真效果。最简 agent 回答的是架构比朴素 agent 强多少，作外部参照单独报告。
 - 修订（2026-09-26）：两个主判据的计量由每步做成与否改为部分得分，见 201。
 - 修订（2026-09-27）：两个主判据的检验方法见 222。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 200 正式跑的遍数与预算（设计）
+### 200 〔部分已改〕正式跑的遍数与预算（设计）
 
+- 状态：部分已改——校准试跑另计，见 202；压缩阈值不下调，见 218；第 3 遍规则见 224；执行中上限放宽，见 318。判断现状以代码为准，下文为当时的原文。
 - 结论：正式跑模型费上限 ¥650，服务器另计。最简 agent 只跑 1 遍（外部参照，不进主判据）。记忆 2 × 2 四格先各跑 2 遍，再只按剩余预算与实测的重跑波动决定是否补第 3 遍，不看效果好坏，规则事先写死。为压低单步成本，上下文压缩的阈值在校准试跑中结合成本下调（与 188 衔接），运行尽量排在空闲时段。报告写明所跑遍数下能以 80% 把握分辨的最小效果；测不出时写"在此遍数下未测出大于约若干个点的改善"，不写没用。
 - 理由：遍数少时只有大效果测得出，研究中此类效果多在 2 到 7 个点；预算有限，按"先少后补、只看预算与波动"分批，既控制花费又不引入事后挑选；最简 agent 只作外部参照，跑一遍足以粗看。
 - 修订（2026-09-26）：校准试跑的模型费另计，不占 ¥650，见 202。
@@ -1924,8 +2063,9 @@
 - 理由：做成与否把十条过九条与一条未过记成同样的失败，丢掉大量信息；按比例计分在同样遍数下能分辨更小的效果，遍数受预算所限（200）时尤为要紧；部分做对不等于可用，故做成与否与回归照报。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 202 正式跑前的校准试跑（设计）
+### 202 〔部分已改〕正式跑前的校准试跑（设计）
 
+- 状态：部分已改——上下文大小只记录，见 218；格子与题见 219；取值规则预注册，见 226；难度关改看部分得分，见 257。判断现状以代码为准，下文为当时的原文。
 - 结论：正式跑前以正式跑的模型做一次校准试跑，约 15 道题、两三个格子、部分题跑两次，测六样并各定一个数：只给测试名单时只能检索一格的做成率，定留在 strands 还是换仓（198）；每步的 token、花费与缓存命中率，核对 ¥650 够跑几遍（200）；每步上下文涨到多大，定压缩阈值（188、200）；每步实际用的轮数与耗时，定预算上限使其几乎不触发（171）；推送一格连续跑十来步时记忆文件的增长，定总量上限（191）；同题两次的每步得分差，定是否补第 3 遍并按新计量重算可分辨的最小效果（200、201）。模型费估计 ¥30 到 60，另计，不占 200 的 ¥650。校准结果不进正式结论，正式跑照常跑全部步；每一项由测量值取定数值的规则在校准开始前写定。
 - 理由：前述多件把具体数值留到用正式跑的模型实测后再定；合并为一次小规模试跑最省；花费另计以免挤掉正式跑的遍数；取值规则先写定，避免看了结果再调。
 - 修订（2026-09-27）：每步上下文大小只记录峰值，不再用于定压缩阈值，见 218。
@@ -1997,16 +2137,18 @@
 - 理由：复用容器会让这些残留成为记忆以外的跨步通道，破坏"只让记忆积累"的设计。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 213 题面名单先给测试文件路径（设计）
+### 213 〔部分已改〕题面名单先给测试文件路径（设计）
 
+- 状态：部分已改——名单两段，见 239；切换条件改为部分得分低于 30%，见 257。判断现状以代码为准，下文为当时的原文。
 - 结论：198 的应通过的测试名单先给测试文件路径；给用例名的写法同时做好，以开关切换，作为校准中做成率低于 30% 时的备用。
 - 理由：做成率高于 70% 须换仓，代价以天计；低于 30% 时改给用例名即可补救，代价小；故从信息少的一端开始。
 - 修订（2026-09-27）：名单分两段并定稿措辞，见 239。
 - 修订（2026-09-28）：难度关改看只能检索一格的平均部分得分，30% 到 80%，见 257。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 214 两类用例按 SWE-bench 标准定义圈定（设计）
+### 214 〔部分已改〕两类用例按 SWE-bench 标准定义圈定（设计）
 
+- 状态：部分已改——叠放连带的整文件收集失败不计入，见 274。判断现状以代码为准，下文为当时的原文。
 - 结论：196 的两类用例按 SWE-bench 的标准定义圈定：把人在该步的测试分别放在人该步之前与之后的代码上各跑两遍，前后都稳定通过的为不许挂的，之前失败、之后稳定通过的为要做到的；时过时不过的用例排除并计数。
 - 理由：与公认做法一致；人自己弄坏的用例自动排除，无需逐条判断人是否改过该用例；要做到的一类本就需要这次叠加运行。
 - 修订（2026-09-28）：人未改动的测试文件在之前一侧整文件收集失败时，其中用例不计入要做到的、题面第二段不列该文件，见 274。
@@ -2024,8 +2166,9 @@
 - 理由：主问题是学习闭环，记忆积累越久效果越有机会显出，后段的题能用上前段的经验；大重构后部分记忆过时是真实使用必然遇到的情况，正好检验 agent 核对记忆引用（191）；学习曲线在一条长流上更清楚。代价为带记忆的格子每遍墙钟约多半天。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 217 干活的 agent 也带记忆工具（设计）
+### 217 〔部分已改〕干活的 agent 也带记忆工具（设计）
 
+- 状态：部分已改——只有新增、改写、删除，没有读取动作；工具说明见 228。判断现状以代码为准，下文为当时的原文。
 - 结论：推送格中干活的 agent 也带专用记忆工具。该工具只有新增、改写、删除三个动作，没有读取动作（记忆已在开工时整份推入）；agent 依靠某条记忆前读取其引用的代码核对，对不上以代码为准，可当场用该工具修正，也可随手记录。收尾复盘照常进行。不推送的格子不带该工具。该工具不检索历史会话，不改变"能否检索"这一因素。
 - 理由：与 Hermes、GitHub Copilot 等产品中干活的 agent 手持写记忆工具的做法一致；复盘分叉的工具列表与原会话一致，前缀缓存得以命中；过时记忆可当场修正。
 - 修订（2026-09-27）：记忆工具的名称、说明、参数与返回文字定稿，见 228。
@@ -2037,8 +2180,9 @@
 - 理由：DeepSeek 缓存命中价约为未命中价的五十分之一，长上下文几乎全部命中缓存，花费低；压缩一次要付摘要请求与压缩后首轮的未命中费用，按上下文 15 万粗算须再跑 80 轮以上才能回本，阈值越低回本越慢，而每步宽上限只有百来轮，故为省钱压缩基本是净亏，还可能因摘要丢失细节而影响做题。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 219 校准试跑的格子、题与重跑做法（设计）
+### 219 〔部分已改〕校准试跑的格子、题与重跑做法（设计）
 
+- 状态：部分已改——另加最简 agent 1 遍，见 225。判断现状以代码为准，下文为当时的原文。
 - 结论：校准试跑取"只能检索"（198 的做成率门槛所看的格子）与"推加拉"（量记忆增长）两格；题为从 89 道题中以固定随机种子抽出的 15 道，按时间顺序跑；每格整份跑两遍，每遍从空记忆开始，两遍之差作为重跑波动，含模型随机性与记忆轨迹差异。共 60 步，模型费约 ¥30。15 道题的记忆轨迹远短于正式跑，波动可能被低估，报告写明。
 - 理由：正式跑各遍均从空记忆各跑一条流，遍与遍之差来自模型随机性与记忆轨迹两处，校准须量同一种波动，只量模型随机性会高估灵敏度；随机抽题保证难度有代表性，按时间顺序跑使记忆得以积累、量到增长速度。
 - 修订（2026-09-27）：校准另让最简 agent 在同样的 15 道题上跑 1 遍，见 225。
@@ -2050,8 +2194,9 @@
 - 理由：本机内存不足以跑完全量测试，已有交付未跑全量；账本重构还要连续叠四段，问题攒到集成冒烟才暴露将难以定位引入的那一次；小机器按量付费，每次花费很小。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 221 复盘指令模板 v1（设计）
+### 221 〔部分已改〕复盘指令模板 v1（设计）
 
+- 状态：部分已改——修订见 230、232、233。判断现状以代码为准，下文为当时的原文。
 - 结论：收尾复盘指令定为模板 v1，压缩前复盘只改开头、验证结论一行与未解决问题的处理三处。要点：多数会话一条不写是常态，写前先问以后的 agent 会不会因此做得更好；给出验证门的最终结论，并注明通过只说明它检查的那些项没有发现问题；以命令与工具的实际输出、读到的代码与验证门结论为证据，agent 的自述没有输出支持的不算；从出错后又解决的地方学，对照失败时的报错与修好它的改动；未解决的问题不写成做法，证据清楚指出原因的可把原因作为事实记下；凡改动或删除测试、跳过或放宽检查、针对测试输入写特殊处理之处，须有依据说明测试或检查本身确实错了，否则不算经验，值得记则记"这样改不对"及原因；不记任务经过、只在本次改动里才成立的事、环境一时的故障与"某工具不能用"一类否定说法、通用编程常识与从代码一读就知道的；条目写成陈述句、附代码引用、理由写依据；推送与否以外的四格复盘文字完全一致。记忆工具说明的记与不记标准随之一致。推送段、记忆工具说明与记忆文件格式的其余文字另行过目后冻结。
 - 理由：调研的七家产品与六篇论文均未在提炼指令中设作弊检查，但写入期按可观察信号把关有实证（写入前检查是否删除验证，不安全检索减少 26.7 个百分点；Claude 3.7 Sonnet 系统卡建议监测意外改动测试文件与特判测试的注释）；成败标签来自外部验证时提炼稳定获益、无外部信号时多处负增益；以 agent 自述为材料有害；带成败标注的失败提炼有益；取用少而精；只记即使本次代码未被合并也成立的事实（GitHub Copilot 的写入标准），在固定起点下尤为要紧；陈述句避免被后续会话当作指令（Hermes）。各条均取自公开产品与研究，不取自本项目的运行结果。
 - 修订（2026-09-27）：见 230。
@@ -2059,8 +2204,9 @@
 - 修订（2026-09-27）：用到记忆时标编号、写满删减时优先保留用过的条目，见 233。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 222 主判据的检验方法（设计）
+### 222 〔部分已改〕主判据的检验方法（设计）
 
+- 状态：部分已改——p 值等口径细化见 260。判断现状以代码为准，下文为当时的原文。
 - 结论：199 的两个主判据按题配对检验：对每道有效题算推送差（有推送两格均分减无推送两格均分）与检索差，以符号翻转置换检验为主，即在零假设下随机翻转各题差值的正负号十万次，以翻转后平均差的绝对值不小于实测值的比例为 p 值，再按 Holm 校正。另以按题与按流的随机效应混合模型作稳健性对照；两者方向或显著性不一致时，报告写明结论对建模方式敏感。
 - 理由：假设最少，得分有界、分布偏斜也适用，并直接用上同一道题这层配对以抵消题目难度的波动；其局限是把各题视为独立，而同一条流里记忆使前后题相关、p 值可能偏乐观，故以混合模型对照。混合模型须估计流间差异，两遍仅 8 条流、三遍 12 条，不宜为主；整条流重排两遍时只有 70 种排法，几乎没有检验力。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -2089,8 +2235,9 @@
 - 理由：预注册使"规则先于数据"可被外人核对，符合研究定位与 165、202 防事后挑选的要求；计划本就须在校准前定稿，额外代价只是一次提交。改写历史会使提交号与时间戳失效。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 227 推送段文字定稿（设计）
+### 227 〔部分已改〕推送段文字定稿（设计）
 
+- 状态：部分已改——修订见 230、231、233。判断现状以代码为准，下文为当时的原文。
 - 结论：推送格系统提示中"## 学到的记忆"一段的文字定稿（原文存本地草稿，施工照抄）。有条目时依次说明：记忆是会话开始时读取并冻结的快照，每条是写下时成立的事实、附代码引用与理由，代码可能已改；说到代码现状以现在的代码为准，说到应该怎么做以人写的常驻 Memory 为准，学到的记忆不能推翻人写的要求；依靠某条之前读其引用的代码核对，对得上再用、对不上以代码为准并用记忆工具改写或删除，引用为用户要求的条目不必核对代码，与当前任务无关的条目不必理会；用户纠正做法或说明以后都要怎样做时在同一次回复里记下，其余以后仍成立、会影响做法、不易从代码看出的事实也可记，任务经过与只在本次改动里才成立的事不记；本会话的改动下次会话才出现。无条目时保留简短一段，只说明尚无记忆与怎样记。不推送的格子没有这一段。
 - 理由：冲突分两种，事实以代码为准（两层记忆都可能过时），要求以人写层为准（代码回答不了人想要什么，人写层只由人维护，129）；用前核对与当场修正即 217；用户纠正当场记下与 Claude Code 的做法一致；记与不记的标准与复盘指令（221）一致。实验中人写层为空、无人在场，相关两句只在日常使用生效。
 - 修订（2026-09-27）：见 230。
@@ -2098,8 +2245,9 @@
 - 修订（2026-09-27）：用到记忆时标编号、写满删减时优先保留用过的条目，见 233。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 228 记忆工具说明定稿（设计）
+### 228 〔部分已改〕记忆工具说明定稿（设计）
 
+- 状态：部分已改——修订见 230、232。判断现状以代码为准，下文为当时的原文。
 - 结论：记忆工具名为 update_memory，只写不读，动作为新增、按编号整条替换、按编号删除。每条为一句陈述句的事实（不写成对自己的命令），附至少一处引用：代码写成文件或文件::函数，来自用户明确要求而指不到代码的写 user，由工具替换为"用户要求（会话编号）"；再附一句写明依据的理由。记与不记的标准与 221 一致。写满即拒，拒绝时报出已用字数、本条字数与现有编号；与已有条目完全相同时不新增；编号不存在时报出现有编号；缺字段时拒绝；人把文件格式改坏时拒绝写入并指出行号。引用为用户要求的条目，只有用户在本次会话里改口时才改写或删除。引用是否存在由 agent 用读文件核对，工具不做程序核对。说明、参数与返回的原文存本地草稿，施工照抄。
 - 理由：动作与写满即拒取自 Hermes 的 memory 工具，编号定位比唯一子串不易误改；字段即 190 的事实、代码引用、理由；允许 user 引用使用户所教、指不到代码的做法也能记下；写满时复盘可能为腾地方合并或删除条目，用户明确教过的做法不应由 agent 自行拿掉，此条只能以文字约束；不做程序核对沿用此前对记忆由程序核对的否定方向。
 - 修订（2026-09-27）：见 230。
@@ -2130,8 +2278,9 @@
 - 理由：记忆每次开工原样进系统提示、随请求发给模型服务商，记忆文件在项目目录中、可能随项目分享；GitHub Copilot 与 OpenAI Codex 的写入规则均明写不存敏感信息。程序按模式拦截易误伤哈希值与长编号，别家也都靠写明规矩。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 233 用到记忆时标编号（设计）
+### 233 〔部分已改〕用到记忆时标编号（设计）
 
+- 状态：部分已改——计数口径见 273。判断现状以代码为准，下文为当时的原文。
 - 结论：推送段加一句：依靠某条记忆时，在回复里标出它的编号（如"依据 [L3]"）。复盘指令回顾当前记忆一点加一句：记忆写满需要删减时，优先保留本次会话里标了编号、核对过并用上的条目。分析计划中"记忆使用情况"改为直接数回复里标编号的次数与涉及的条目数，读取记忆所引文件的次数作旁证。
 - 理由：写满删减时原先只能凭判断，可能删掉常用的、留下无人用的；按后来是否用上决定去留，研究中效果最好，GitHub Copilot 以再存延长保留，Cursor 要求用到记忆时引用其编号。本做法只改文字、信号在对话记录中，不新增记录；局限是复盘只见本次会话的使用，常被用到的条目会被一次次保护，从未用过的在写满时先被删。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -2161,14 +2310,16 @@
 - 理由：沙箱执行这一最难部分已完成并经多日实跑，余下为接线与收尾，一到两段施工可得可用版本；它改动日常入口与运行时装配，与账本重构同处，排在其后可避免合并冲突。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 238 账本重构第二三段并行（设计）
+### 238 〔部分已改〕账本重构第二三段并行（设计）
 
+- 状态：部分已改——停写与删除。判断现状以代码为准，下文为当时的原文。
 - 结论：账本重构第一段（存储底座与双写）交付后，第二段（判成败、续跑与分叉等读者改读新存储）与第三段（会话搜索、显示与跑批器的会话文件操作改读新存储）并行施工；第四段（停写旧账本、删除旧代码）在两者都完成后进行。第一段另交付一个以新存储造会话数据的公用测试工具（含各类消息、七种自定义条目、子会话、分叉与撕裂末行等形状），供第二、三段的测试复用。
 - 理由：两段迁移的是不同读者组，主要交集在公共测试夹具与旧账本汇总读取模块；先备好公用造数工具可使两段少改同一处，合并冲突可控。第一段是其余各段的前提、第四段须在全部读者迁完之后，二者不能并行。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 239 题面测试名单两段、措辞定稿（设计）
+### 239 〔部分已改〕题面测试名单两段、措辞定稿（设计）
 
+- 状态：部分已改——收集失败的文件不列，见 274。判断现状以代码为准，下文为当时的原文。
 - 结论：题面里应通过的测试名单分两段，措辞定稿后正式跑期间不再改。第一段列本题人新写或改过的测试文件，前置说明为"Test files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):"。第二段只在确有这类文件时出现，前置说明为"Other test files already in the repository that currently fail and should pass after the change:"，列出含要做到的用例、但不在本题新写或改过之列的测试文件；这些文件就在仓库里，照常写入工作区。用例名写法同样分两段。
 - 理由：人的代码改动有时使本题测试文件以外、原本失败的用例变为通过，这些用例计入要做到的一类与得分，不告知则等于考了未告知的题，既不公平也添噪声；第一段的说明使 agent 知道新测试在检查时才放入，避免寻找不存在的文件或迎合旧版测试。
 - 修订（2026-09-28）：人未改动的测试文件在之前一侧整文件收集失败时，其中用例不计入要做到的、题面第二段不列该文件，见 274。
@@ -2186,8 +2337,9 @@
 - 理由：当前记忆全文已随复盘指令给出，不需要读记忆的工具；复盘若带会话检索，只能落在能检索的格子，推送的效果在两格里含义不同；实验容器断网，以免取得公开仓库里的现成答案。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 242 验证结论遇检查工具崩溃时的填法（设计）
+### 242 〔部分已改〕验证结论遇检查工具崩溃时的填法（设计）
 
+- 状态：部分已改——其余无法判定情形见 250。判断现状以代码为准，下文为当时的原文。
 - 结论：检查工具自身崩溃、重跑仍崩溃的步不计入结论（170）。复盘指令的验证结论：全部崩溃填"无法判定：{步名} 的检查工具自身都崩溃了，没有得出结论"；部分崩溃且结论为通过填"通过（{步名} 的检查工具自身崩溃，未计入结论）"；未通过沿用回炉反馈的失败摘要，其中已单列工具故障。
 - 理由：给复盘的信息须如实，未查成的检查不能当作通过；与回炉反馈的写法一致。这几句属于被测条件，冻结后不改。
 - 修订（2026-09-28）：超时、被信号终止、拉不起来等其余无法判定的情形见 250。
@@ -2308,23 +2460,26 @@
 - 理由：记忆条目按 229 只有事实、引用、理由，不分正反；冻结的复盘指令（221）也未要求反面教训带固定前缀，程序无法可靠计数；为一个次要子指标改被测条件的文字不值得。迎合验证的后果仍由不许挂一类的失败条数反映。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 262 沙箱 worker 的起点（设计）
+### 262 〔部分已改〕沙箱 worker 的起点（设计）
 
+- 状态：部分已改——起点修订见 279；多沙箱暂缓，见 277。判断现状以代码为准，下文为当时的原文。
 - 结论：一个会话开多个沙箱时，worker 的容器与宿主上的 worker（057：起点缺省 HEAD）同样从主会话的当前提交开工，不带未提交的改动；主会话在沙箱里时，程序把主容器的当前提交导出，再送进各 worker 的容器。
 - 理由：与不开沙箱时一致，主 agent 不用学两套规矩；要让 worker 接着自己的改动干，先提交即可；实现最简。起点带上未提交改动作为宿主与沙箱一并的改进另议。
 - 修订（2026-09-28）：起点改为带主会话未提交改动的快照，与宿主上的 worker 同规则，见 279；多沙箱恢复施工时照此。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 263 沙箱 worker 的结果并回（设计）
+### 263 〔部分已改〕沙箱 worker 的结果并回（设计）
 
+- 状态：部分已改——重盘见 276；多沙箱暂缓，见 277。判断现状以代码为准，下文为当时的原文。
 - 结论：沙箱 worker 收尾时，程序把它的分支打包取回宿主仓库；主会话在沙箱里时，再送进主容器作为一条普通分支，不自动合并。主 agent 照常拿到分支名、改动文件清单与摘要，自行决定合不合、怎么合。
 - 理由：与宿主上的 worker 行为一致；冲突与取舍由最清楚意图的主 agent 处理，保留舍弃做得不好的 worker 的机会。
 - 修订（2026-09-28）：所据"宿主上由主 agent 拿到结果并决定合并"的前提有误——现有编排由人在终端界面以 /spawn 派出，结果显示给人；主 agent 可派 worker 见 264。本条待按新情况重盘。
 - 修订（2026-09-28）：按纠正后的前提重盘，结论维持并补明人派的 worker，见 276。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 264 主 agent 派 worker 的工具形态（设计）
+### 264 〔部分已改〕主 agent 派 worker 的工具形态（设计）
 
+- 状态：部分已改——改为后台派出、立即返回，见 297。判断现状以代码为准，下文为当时的原文。
 - 结论：新增一件供主 agent 调用的派 worker 工具，调用后等到 worker 收尾，把分支名、改动文件清单与摘要（在场时含结构化结果）作为工具返回值交回；工具的执行模式标为可并行，模型在一次回复里同时调用多次即并行派出多个 worker。保留派同一任务多份尝试的参数（对应现有 --attempts）。底层沿用现有编排器的派出与等待结果两个动作。
 - 理由：与主流 coding agent 派子 agent 的做法一致，模型熟悉；结果即返回值，不会漏收；只一件工具，实现最简。代价是主 agent 等待期间不做别的，模型若一次只调一个即退化为逐个进行，须在说明文字里写明并行的调法。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -2335,8 +2490,9 @@
 - 理由：实验只测记忆；带上会使花费成倍、重跑波动变大、记忆多出 worker 这一变化来源，且工具未经验证、须改已入库的预注册。产品侧新增的能力不自动带进实验。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 266 哪些入口能派 worker（设计）
+### 266 〔部分已改〕哪些入口能派 worker（设计）
 
+- 状态：部分已改——入口收窄为终端界面与 pigeon run，见 267。判断现状以代码为准，下文为当时的原文。
 - 结论：终端界面、命令行对话与 pigeon run 三个日常入口都装配编排器，主 agent 在三处都能派 worker；审批按各入口原有规矩（无人可问时需审批的操作被拒，除非放权规则放行或全部放行），不新增机制；无人值守时派出的数量与花费由额度一件（主 agent 派 worker 第 5 件）管住。
 - 理由：无人值守的并行执行是项目的主要能力（039），pigeon run 正是交办后走开的用法；沙箱缺省全部放行（248），沙箱加无人值守正适合放手派 worker。
 - 修订（2026-09-28）：命令行对话改为后备、不再加新功能（267），能派 worker 的入口收窄为终端界面与 pigeon run。
@@ -2348,8 +2504,9 @@
 - 理由：终端界面是实际使用的交互入口，与同类产品"缺省全屏交互、另有一次性模式"一致；每加一项功能不必再顾两套界面。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 268 派 worker 的额度（设计）
+### 268 〔部分已改〕派 worker 的额度（设计）
 
+- 状态：部分已改——取消总数上限、并发缺省改为 8，见 300；嵌套可配置放开，见 299。判断现状以代码为准，下文为当时的原文。
 - 结论：①同时最多 4 个 worker，多派的排队不拒绝；沙箱里每个容器另有内存上限。②worker 的 token 与花费计入本次运行的总额度；设了额度的，撞了即拒绝再派并停掉正在跑的。③一次运行最多派 16 个，只作防失控线，撞了返回说明上限、不要再派、用已有结果或自己完成的一句。④每个 worker 保留自己的轮数与时间上限，撞了交回已做部分并标明未完成，由主 agent 决定后续。⑤worker 不能再派 worker（维持现状）。⑥主 agent 等待 worker 的时间计入它自己的时间上限。⑦派几个由说明文字分档引导（简单的不派；能拆成互不相关的几块时派 2 到 4 个；每个 worker 的任务须能独立完成），文字另行过目冻结。两个数值可配置。
 - 理由：同类产品普遍以小的并发默认值控并行（4 到 20 不等），花费计入同一总额度，嵌套浅，撞上限时把说明交回模型；总数上限少见，但日常 pigeon run 缺省没有 token、轮数与时间上限，须有一道宽的防失控线。
 - 修订（2026-09-29）：取消总数上限，同时运行上限缺省改为 8，见 300。
@@ -2367,8 +2524,9 @@
 - 理由：固定起点下步与步之间只传记忆与会话，跑批器已按步留快照，截断续跑可行；截断点之前的步未被缺陷触及，与用修好的代码跑无异；按执行记录而非得分定截断点，避免看结果挑截断点。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 271 派 worker 的 agent 可见文字（设计）
+### 271 〔部分已改〕派 worker 的 agent 可见文字（设计）
 
+- 状态：部分已改——返回内容修订见 279；说明文字修订见 279、287；返回文字随后台派出改写，见 297。判断现状以代码为准，下文为当时的原文。
 - 结论：工具名 spawn_worker；"何时派、派几个"的分档引导写在工具说明里，只在工具开着时出现，不动系统提示；attempts 取 2 到 4 份；工具说明、四个参数的说明与各情形的返回文字按草稿冻结。
 - 理由：与终端界面的 /spawn 同词、与现有工具同一命名风格；引导随工具开关出现，实验里工具关掉时系统提示一字不动；多份尝试以同时最多 4 个为限可一次跑完不排队，份数再多收益有限、花费按份数翻倍。
 - 修订（2026-09-28）：按 279，工具返回内容加一行，写明 worker 的起点快照与只取其自身改动的取用方式；其余定稿文字不变。
@@ -2400,8 +2558,9 @@
 - 理由：价格可低至按量的一成；跑批器已能续跑，回收只损失进行中的一步；风险在于重新开机可能因库存或价格失败，须人手处理。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 276 沙箱 worker 结果并回（重盘，设计）
+### 276 〔部分已改〕沙箱 worker 结果并回（重盘，设计）
 
+- 状态：部分已改——多沙箱暂缓，见 277。判断现状以代码为准，下文为当时的原文。
 - 结论：沙箱里的 worker 不论由主 agent 以 spawn_worker 派出，还是由人以 /spawn 派出，收尾时程序把它的分支先取回宿主仓库，主会话在沙箱里时再送进主容器作普通分支，不自动合并。主 agent 派的，它照常拿到分支名、改动文件与摘要，自行决定合不合、怎么合；人派的，结果照常显示给人，分支已在主容器里，要合可叫主 agent 合。
 - 理由：与宿主上两种派法的行为一致；两种派法走同一条搬运路径，不必为人派的另搬一次。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -2442,8 +2601,9 @@
 - 理由：二者只被已删除的本地评测命令读取，现无读者；留在仓库易被误认为在用的评测集；历史版本留在 git 中，旧审计可按当时提交找回。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 283 终端界面的复盘时机（设计）
+### 283 〔部分已改〕终端界面的复盘时机（设计）
 
+- 状态：部分已改——补做判定见 295。判断现状以代码为准，下文为当时的原文。
 - 结论：终端界面退出时不复盘、立即退出，只在退出时给工作目录拍一份快照。下次启动终端界面时，在后台静默补做尚未复盘的会话，不挡人干活；每个会话补做前先领租约，避免同时开着的几个 Pigeon 重复处理；失败的留待之后的启动重试。补做时，本机会话读退出时的快照，沙箱会话读交回的分支。pigeon run 仍在收尾时复盘；压缩前复盘不变。
 - 理由：同类产品没有在退出时让人等着形成记忆的，多在后台做；把整理推迟到下次启动、在后台做，有成熟先例，也不需要在程序退出后另留进程。代价是新经验要到下次启动后才进记忆。
 - 补充（2026-09-28）：每次复盘的记录写明这次复盘覆盖到会话的哪一条记录。
@@ -2503,8 +2663,9 @@
 - 理由：主 agent 与人都能在会话内取用，无人值守的 pigeon run 也能自己收回成果；与之后动态编排所需的派出、等待、收回几个动作一致。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 293 产品线加入打转检测（设计）
+### 293 〔部分已改〕产品线加入打转检测（设计）
 
+- 状态：部分已改——判定口径见 305。判断现状以代码为准，下文为当时的原文。
 - 结论：产品线加入打转检测：同一工具调用连续重复多次时打断，并提醒模型换思路；具体阈值与处理方式另盘。已冻结的正式跑不改。
 - 理由：正式跑中撞上每步上限的步多数是模型原地打转（同一调用重复上千次），平均每步花费约为正常步的十倍；Pigeon 目前只能等撞上上限才停。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -2605,8 +2766,9 @@
 - 理由：一次脚本可派出数十上百个 worker，而 worker 不设总数上限、开跑也不确认，规模的决定留给人最稳妥；同类里有脚本编排且有使用数据的产品缺省同样须人明确要求，模型自决模式下的问题集中在扇出过度；只认人亲手输入可防注入文字诱导大规模派工。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 310 编排脚本的能力边界与积木（设计）
+### 310 〔部分已改〕编排脚本的能力边界与积木（设计）
 
+- 状态：部分已改——agent 加接力开工选项，见 311。判断现状以代码为准，下文为当时的原文。
 - 结论：编排脚本只负责调度。脚本在专用容器里执行，容器不挂任何工作目录、不联网，只留一条到编排器的通道；脚本本身不能读写文件、跑命令、联网，读当前时间与取随机数即报错。可用积木六个：agent（派一个 worker 并等其结果，可带标签、阶段、角色与结构化输出格式）、parallel（一批同时派、全部结束后返回）、pipeline（清单中每项各自走完各阶段、不互相等齐）、phase（标注阶段）、log（写一行进度）、args（发起时传入的参数）。脚本需要的信息由 worker 查回（结构化输出）或经参数传入；真正读写文件与跑命令的只有 worker，按 302、303 的权限与审批。
 - 理由：脚本编排的价值在调度——中间结果不进主会话上下文、调度零 token、不漏不乱、各项各走各的节奏、可续跑；给脚本 IO 几乎不增加这些价值，却会让模型写的程序执行任意操作、绕开 worker 的审批、使续跑无法可靠重放。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
@@ -2635,8 +2797,9 @@
 - 理由：每个 worker 的轮数、时间上限与打转检测限住单个失控，限不住派得太多（脚本写错时可一次派出成百上千个）；点名才用挡住模型自作主张，挡不住点了名而脚本写错。可选上限给人一个随手可用的刹车，到限停下后调高即可续跑不白做；缺省不限与现有日常使用习惯一致，需要时在项目配置设缺省值即成默认有上限。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
 
-### 315 正式跑判题环境缺陷的补救（事实与设计）
+### 315 〔已撤回〕正式跑判题环境缺陷的补救（事实与设计）
 
+- 状态：已撤回——已由 317 撤回。判断现状以代码为准，下文为当时的原文。
 - 事实：在判题环境（镜像 v6）里逐题实跑人写版本的要做到的测试文件，3314 个中 97 个（2.9%）人写版本也过不了，涉及 7 题：第 8 题 49/49（缺 pyaudio）、第 47 题 1/4（aws_sdk_bedrock_runtime 无 BedrockRuntimeClient）、第 93、94、98、129、149 题共 46 个（mcp 库版本与这几次提交所依赖的不一致）。基线于 9 月 23 日以当时的测试外壳测得这些用例人写版本通过；v4 与 v6 的 Python 包清单逐字相同，差别不在镜像，确切机制未查清。第 8 题各流的会话记录中未出现相关报错，缺陷不改变 agent 所见所为。
 - 结论：按 270 属判题缺陷，只按保存的改动重判、不重跑。第 8、47 题做判题专用镜像（在 v6 上补装 pyaudio 及其系统音频库、换用带 BedrockRuntimeClient 的 aws 库版本），先以人写版本验证要做到的用例全过，再以之重判这两题的各行；验证不全过的用例按剔除处理。第 93、94、98、129、149 题剔除人写版本在 v6 里过不了的用例，以 v6 重判这几题各行取得逐用例结果后按剩余用例重算，无剩余用例的题不进主判据。被判改坏的行逐一核对人写版本在判题环境里是否同样过不了，同样过不了的不计为改坏。重判结果另存，原结果行不改，分析脚本读修正结果；剔除与重判规则在看到任何正式结果之前追加进分析计划，报告如实写明缺陷与补救。
 - 理由：剔除依据只是人写版本在判题环境里能否通过，不看任何格子的结果，对各格一视同仁；能补的依赖补上以保留数据，mcp 各题需要不同大版本、一个镜像装不下，统一修环境不可行。
@@ -2662,4 +2825,10 @@
 - 事实：续跑进入工作日北京时间 9 点起的 DeepSeek 高峰时段后，单请求均价约翻倍，三个小时多花约 ¥80；最简 agent 于 09:16 撞 ¥60 上限停在 87/89，四格于 11:54 因账号余额不足停批，完成 627/712 行，已花 ¥578.39（网关累计，含作废的在途步）。按四格配对，停在此处约有 19 题缺数据，集中在学习曲线末段。空闲时段后段题每行约 ¥0.84，高峰约 ¥1.75。
 - 结论：放宽模型费上限，让四格与最简 agent 都跑完：四格上限调到 ¥665，最简 agent 调到 ¥75（合计上限 ¥740，预计实花约 ¥720，超出 200 所定 ¥650 约 ¥70）。剩余部分只在 DeepSeek 空闲时段续跑，高峰时段节省停机。第 3 遍补跑判定仍按 200 的 ¥650 计剩余预算（已为负，即不补）。报告写明超支金额与原因。
 - 理由：缺失的是学习曲线末段，正是实验最想观察的部分；超支只动预算、不动测量方法。错峰续跑比高峰续跑剩余花费约省一半。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 319 文档的现行状态标注（设计）
+
+- 结论：决策索引与路线图是决策与演进的历史，不是现状说明。决策索引中非现行的详情段在标题编号后标〔已取代〕〔已退役〕〔已撤回〕〔部分已改〕之一，标题下首行写明被哪条改动、判断现状以代码为准；标题不带状态的为现行。路线图开头加读法说明，被后来的决策改动的章节在标题上标状态。此后推翻或修改旧条目时，同一步改表格行标记、详情段标题状态与首行说明（维护约定已写入本文件开头）。给 agent 的"以什么为准"写入本地协作约定并随每份任务说明给出，不另加入库的 agent 说明文件。
+- 理由：agent 读文档靠检索命中的片段，不会通读全段或追查后续条目，状态必须出现在标题与首行；记录架构决策的通行做法同样把状态写在每条开头，被取代的保留原文。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
