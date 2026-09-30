@@ -67,3 +67,13 @@ run_command 在执行前后各取一次工作区的文件清单（执行端的 l
   - 跳过的 8 个：仅 Windows 的 .cmd 启动器 2 个；本地没有所需镜像 4 个（pigeon-sandbox 通用镜像、pigeon-stream-pigeon:v4 两个、带 git 的镜像）；以 root 运行而跳过 2 个。
   - 同一环境的第一次全量运行中，src/application/closeout-fixes.test.ts 的"分叉复用运行面已挂的快照器……"另失败一次（来源会话的快照 ref 为 2 个，期望 3 个）。该用例经 edit_file 与 git 快照，不经过 listFiles（listFiles 只由 run_command 调用）；第二次全量运行通过；单独运行该文件 5 次，5 个用例全部通过。
 - deps：测试步失败使 verify 在 deps 之前停下，另行执行 `npm run deps`：552 个模块、3,922 条依赖、无违规。
+
+## 七、工具说明与验证服务器上的 verify（2026-09-30 追加）
+
+- 提交 ac472a9 改了 run_command 的工具说明：结果一句末尾加"（不含 Pigeon 自己的治理目录 .pigeon）"，src/tools/run-command-text.test.ts 的三处逐字断言同步改。第三节"工具说明文字本次未改"指 63a4c00，以本节为准。系统提示与登记描述两处文字不提文件变化，未改。
+- 在验证服务器上以 ac472a9 跑 verify：8 vCPU（AMD EPYC 9T24）、31 GB 内存，Node 24.12.0；依赖按锁定文件 `npm ci`；以普通用户运行；测试步为 `node --test --test-concurrency=6 "src/**/*.test.ts"`，运行时无其他测试并发。
+  - lint：`biome check .` 通过，525 个文件。
+  - check：`tsc -p tsconfig.json --noEmit` 通过。
+  - test：1,480 个用例，1,478 通过、0 失败、0 取消、2 跳过（仅 Windows 的 .cmd 启动器用例），113 秒。第四节新增的本地、容器替身层、真容器层三条清单用例与打转用例均实际执行并通过；第六节因缺镜像跳过的 4 个用例在此实际执行并通过；第六节以 root 运行而失败的 src/eval/stream-workspace.test.ts 那一条在此通过。
+  - deps：`npm run deps`，552 个模块、3,922 条依赖、无违规。
+- 交付以本节的 verify 为准。
