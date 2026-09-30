@@ -187,7 +187,7 @@ export function runCommandTexts(input: {
     prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令${promptShell}；${promptApproval}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
-      "可用 .pigeon/commands.json 登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化。",
+      "可用 .pigeon/commands.json 登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 .pigeon）。",
   };
 }
 
