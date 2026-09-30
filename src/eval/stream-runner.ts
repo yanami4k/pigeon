@@ -46,6 +46,7 @@ import {
 import type { TestCaseResult } from "./stream-measure.ts";
 import { memoryFactsOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
 import {
+  type CaseRun,
   countQuality,
   failedStepsOf,
   pinTestConfigFromTree,
@@ -1015,6 +1016,29 @@ async function judgeFull(
   classes: CaseClasses
 ): Promise<Judgement> {
   const runtime = options.runtime;
+  const run = await judgeCases(options, ws, step);
+  const quality = async (check: StreamRepoRuntime["quality"]["type"]) => {
+    if (check === null) return null;
+    const r = await ws.run(check.command, 900_000);
+    return countQuality(check, r.output, r.exitCode);
+  };
+  return {
+    judging: judgeStep(classes, run.cases),
+    quality: {
+      typeErrors: await quality(runtime.quality.type),
+      formatErrors: await quality(runtime.quality.format),
+      layerViolations: await quality(runtime.quality.layer),
+    },
+  };
+}
+
+// 判题的用例运行部分（judgeFull 与按保存的改动重判共用）：同步人在该步的测试与测试辅助文件，跑人在该步的全部测试一次
+export async function judgeCases(
+  options: Pick<RunStreamsOptions, "runtime" | "human" | "judgeTimeoutMs">,
+  ws: StreamWorkspace,
+  step: StreamStep
+): Promise<CaseRun> {
+  const runtime = options.runtime;
   // agent 新建的文件先暂存：同步时才能按类删掉未跟踪的测试文件
   await ws.stageAll();
   const tree = options.human
@@ -1032,23 +1056,10 @@ async function judgeFull(
   );
   const tests = humanTestsAt(options.human, runtime, step.commit);
   // 一个卡死或导入失败的用例不让其余用例的结果丢失（见 runCases）；拿不到结果的用例计为未通过
-  const run = await runtime.runCases(ws, tests, {
+  return runtime.runCases(ws, tests, {
     timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
     scratch: `${ws.root}/.git`,
   });
-  const quality = async (check: StreamRepoRuntime["quality"]["type"]) => {
-    if (check === null) return null;
-    const r = await ws.run(check.command, 900_000);
-    return countQuality(check, r.output, r.exitCode);
-  };
-  return {
-    judging: judgeStep(classes, run.cases),
-    quality: {
-      typeErrors: await quality(runtime.quality.type),
-      formatErrors: await quality(runtime.quality.format),
-      layerViolations: await quality(runtime.quality.layer),
-    },
-  };
 }
 
 // 这一步的题面（198、213）：提交信息加应通过的测试名单——本题新写或改过的测试文件路径，或其中要做到的用例编号；

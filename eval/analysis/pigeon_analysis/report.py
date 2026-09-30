@@ -10,7 +10,15 @@ from typing import Any
 import numpy as np
 
 from . import constants as K
-from .wording import LABELS, conclusion_sentences, exploratory_banner, fmt_p, pp
+from .wording import (
+    LABELS,
+    conclusion_sentences,
+    exploratory_banner,
+    fmt_p,
+    interface_agreement_sentence,
+    interface_dropped_banner,
+    pp,
+)
 
 
 def clean(x: Any) -> Any:
@@ -48,6 +56,53 @@ def _v(x, digits=1, scale=1.0) -> str:
     return f"{x * scale:.{digits}f}"
 
 
+def effect_table(p: dict[str, Any]) -> list[str]:
+    """两个主效应的检验表（主判据与敏感性分析同一格式）。"""
+    lines = ["| 效应 | 估计（百分点） | 95% 置信区间 | 双侧 p | Holm 门槛 | Holm 显著 | dz |", "|---|---|---|---|---|---|---|"]
+    for name in ("push", "search"):
+        e = p["effects"][name]
+        lines.append(
+            f"| {LABELS[name]} | {_v(e['estimate'], 1, 100)} | {_ci(e['ci'])} | "
+            f"{fmt_p(e['p']) if e['p'] is not None else '—'} | {e['holmThreshold'] if e['holmThreshold'] is not None else '—'} | "
+            f"{'是' if e['holmSignificant'] else '否'} | {_v(e['dz'], 2)} |"
+        )
+    return lines
+
+
+def interface_lines(res: dict[str, Any]) -> list[str]:
+    """敏感性分析一节（316）：清单汇总、剔除后无剩余用例的题、逐用例结果的来源与无法确定的行、检验表、结论与一致性。"""
+    x = res["interfaceSensitivity"]
+    sp = x["primary"]
+    ls = x["list"]
+    lines = ["## 敏感性分析：剔除接口不可猜的测试文件（决策 316）", ""]
+    lines.append(
+        f"- 清单（静态规则，看到正式结果之前入库）：{ls['tasks']} 道题中 {ls['tasksWithUnguessableFiles']} 道有接口不可猜的测试文件，"
+        f"共 {ls['unguessableFiles']} 个文件；要做到的用例 {ls['failToPassCases']} 个中剔除 {ls['excludedCases']} 个")
+    lines.append(f"- 剔除后无剩余用例、不进该分析的题 {len(x['noRemainingTasks'])} 道：{x['noRemainingTasks']}")
+    lines.append(f"- 剔除用例的逐行结果：取自按保存的改动重判、与原结果行逐项一致的 {x['rejudgedRows']} 行，其余取自结果行的失败用例列表")
+    if x["rejudgeInconsistent"]:
+        lines.append("- 重判与原结果行不一致、未采用的行：" + "；".join(
+            f"第 {r['task']} 题 {r['cell']} 第 {r['pass_no']} 遍（{'；'.join(r['mismatches']) or '无说明'}）"
+            for r in x["rejudgeInconsistent"]))
+    banner = interface_dropped_banner(x["dropped"])
+    if banner:
+        lines = lines[:2] + [f"> **{banner}**", ""] + lines[2:]
+    d = x["dropped"]
+    lines.append(f"- 剔除用例的结果无法确定、从该分析中去掉的行 {d['dropped']} 行，占该分析所用 {d['rows']} 行的 "
+                 f"{d['ratio'] * 100:.1f}%")
+    for r in x["undeterminedRows"]:
+        lines.append(f"  - 第 {r['task']} 题 {r['cell']} 第 {r['pass_no']} 遍：{r['reason']}")
+    lines.append(f"- 有效题 {sp['nValid']} 道；缺失题 {len(sp['missingTasks'])} 道")
+    lines.append("")
+    lines += effect_table(sp)
+    lines.append("")
+    for name in ("push", "search"):
+        lines.append(f"- 敏感性分析：{res['interfaceConclusions'][name]['text']}")
+    lines.append(f"- {interface_agreement_sentence(x['agreement'])}")
+    lines.append("")
+    return lines
+
+
 def formal_markdown(res: dict[str, Any]) -> str:
     p = res["primary"]
     s = res["secondary"]
@@ -58,6 +113,11 @@ def formal_markdown(res: dict[str, Any]) -> str:
     lines += ["## 结论（主判据）", ""]
     for name in ("push", "search"):
         lines.append(f"- {res['conclusions'][name]['text']}")
+    if res.get("interfaceSensitivity") is not None:
+        lines.append(f"- {interface_agreement_sentence(res['interfaceSensitivity']['agreement'])}（见敏感性分析一节）")
+        dropped = interface_dropped_banner(res["interfaceSensitivity"]["dropped"])
+        if dropped:
+            lines += ["", f"> **{dropped}**"]
     lines.append("")
     lines += ["## 主判据明细", ""]
     lines.append(f"- 有效题 {p['nValid']} 道；要做到的为零的题 {len(p['fEmptyTasks'])} 道：{p['fEmptyTasks']}")
@@ -67,15 +127,7 @@ def formal_markdown(res: dict[str, Any]) -> str:
             f"第 {m['task']} 题（{'、'.join(m['cellsWithoutResult'])} 无有效结果）" for m in p["missingTasks"]))
     lines.append(f"- 各格遍数：{p['passesPerCell']}")
     lines.append("")
-    lines.append("| 效应 | 估计（百分点） | 95% 置信区间 | 双侧 p | Holm 门槛 | Holm 显著 | dz |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for name in ("push", "search"):
-        e = p["effects"][name]
-        lines.append(
-            f"| {LABELS[name]} | {_v(e['estimate'], 1, 100)} | {_ci(e['ci'])} | "
-            f"{fmt_p(e['p']) if e['p'] is not None else '—'} | {e['holmThreshold'] if e['holmThreshold'] is not None else '—'} | "
-            f"{'是' if e['holmSignificant'] else '否'} | {_v(e['dz'], 2)} |"
-        )
+    lines += effect_table(p)
     b = p["baseline"]
     top = int(K.CEILING_SCORE * 100)
     lines += [
@@ -109,6 +161,8 @@ def formal_markdown(res: dict[str, Any]) -> str:
             lines.append(f"- 拟合告警：{'；'.join(mm['warnings'])}")
         sens = p["sensitivity"]
         lines.append(f"- 与主检验方向或显著性不一致：{'是，结论对建模方式敏感' if sens['sensitive'] else '否'}")
+    if res.get("interfaceSensitivity") is not None:
+        lines += [""] + interface_lines(res)
     lines += [""] + settings_lines(res["input"]["settings"])
     lines += ["## 次要判据（探索性）", ""]
     lines.append(
@@ -393,9 +447,12 @@ def input_lines(info: dict[str, Any], faults: dict[str, Any] | None) -> list[str
     return lines
 
 
-def formal_result(primary, secondary, third_pass, input_info, verify_tool_faults=None) -> dict[str, Any]:
+def formal_result(primary, secondary, third_pass, input_info, verify_tool_faults=None,
+                  interface=None) -> dict[str, Any]:
     return {
         "kind": "formal",
+        "interfaceSensitivity": interface,
+        "interfaceConclusions": conclusion_sentences(interface["primary"]) if interface is not None else None,
         "verifyToolFaults": verify_tool_faults,
         "primary": primary,
         "secondary": secondary,
