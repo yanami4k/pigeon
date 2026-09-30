@@ -7,7 +7,7 @@
 
 路线图目录见 [`README.md`](README.md)。
 
-## 1. 项目定位
+## 1. 〔部分已改：Event Log 与执行回执改为 pi 会话存储、回执停写，见决策 176–184；程序派生的结构化记忆已停，见决策 174、175〕项目定位
 
 Pigeon 是基于 Pi Agent Core 构建的 Coding Agent Harness。它卖两样东西：**可无人值守的并行执行**，以及**从自己的运行历史里学习**。治理闭环（人工审批、六档放权、ExecutionId + 意图 + Receipt 证据链、OutcomeUnknown 不盲重放、Event Log 单一权威源、学到的东西用前核验）是这两样能力成立的原因，不是卖点本身：没有证据链就不敢把 worker 派出去自己睡觉；学到的只是程序从账本推出的事实、每次给出前对照代码核验，才敢不经人工审批直接推给模型。权限与审批对坐在终端前的人是摩擦，不是招牌；Pigeon 拿它换的是少盯着与敢放手。
 
@@ -116,7 +116,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 - Background Reviewer 不能充当批准者；
 - 权限扩大必须有可审计的外部批准主体。
 
-### 3.2 副作用不能盲目重放
+### 3.2 〔部分已改：意图与回执停写，悬空调用补"结果未知"由 agent 自行核对，见决策 183、184〕副作用不能盲目重放
 
 - 每个可能产生副作用的调用必须有稳定执行 ID；
 - 调用前持久化意图和权限依据；
@@ -125,7 +125,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 - 无法确认结果时进入 `OutcomeUnknown`，不得自动重放原写操作；
 - 以上五条约束的是产生副作用的调用（写 / exec 层）；只读调用无副作用，只留 tool.proposed 与 tool.settled 事件级记录，不进 OutcomeUnknown 对账（decisions.md 008）。
 
-### 3.3 摘要不是事实证据
+### 3.3 〔部分已改：回执已停写，见决策 184〕摘要不是事实证据
 
 - Pi 的 `branch_summary` 和 compaction summary 仅作为检索线索；
 - 最终结论必须回查原始消息、工具结果、Trace 和 Receipt；
@@ -142,7 +142,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 
 第一版的约束（Reviewer 只能生成 Candidate、Candidate 默认暂存、激活前显示 diff 与来源）随第一版学习闭环一并退役（137）。
 
-### 3.5 一个权威状态源
+### 3.5 〔部分已改：权威状态改存 pi 会话树，独立 Event Log 与回执退役，见决策 176–184；Candidate 随 137 退役〕一个权威状态源
 
 - Pigeon Controller 是 Session、Run、Turn、ToolExecution、Approval、Receipt、队列和 Candidate 状态的唯一权威写入者；
 - 这些状态必须能从 Pigeon Event Log 和版本化 Snapshot 重新物化；内存对象、闭包、TUI 和 Pi transcript 不能成为唯一事实源；
@@ -174,7 +174,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 
 第一版候选链已退役（decisions.md 137）；本条保留，约束将来任何由模型产出、需要激活判决的经验。
 
-### 3.9 放权只有六档，且每一档都留证（事实：decisions.md 004、010、019、020）
+### 3.9 〔部分已改：另有 worker 在自己工作树内写文件默认放行、脚本内同类放行两条通道，见决策 302、303〕放权只有六档，且每一档都留证（事实：decisions.md 004、010、019、020）
 
 工具调用的放行判定按固定顺序求值，任何放行都必须落在其中一档，不得另起旁路：
 
@@ -189,7 +189,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 
 留证：每次自动放行的账本回指具体出处（approvedBy = human:grant 回指 grantId，policy:config 回指规则的 promotedFrom.grantId，位置序号不作身份）；会话 grant 的创建与撤销、固化规则的升格与移除各落一条 Event Log 记录。可审计的问题是"这次写操作凭什么没问人"，答案在移除规则之后仍然成立。
 
-## 4. 目标架构
+## 4. 〔部分已改：下方模块图停在 2026-09-14；此后账本改为 pi 会话存储（176–187），replay/ 与 review/ 已删除（137、158、204），新增 web/（287）与编排、脚本沙箱（M11），现状以代码为准〕目标架构
 
 ```text
 src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 按路径强制——
