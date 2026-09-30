@@ -273,10 +273,48 @@ test("真实形状：每轮两条相同的 run_command、结果相同——第 2
     assert.equal(result.status, "looping");
     assert.equal(result.looping?.count, 20);
     assert.equal(result.looping?.pattern[0]?.calls.length, 2);
-    // run_command 的文件变化报告里第 1 轮是会话文件新建、其后各轮是会话文件修改：第 1 轮与其后不同，从第 2 轮起相同，
-    // 计到 20 在第 22 轮；叫停后至多一条被中止的请求，不再有工具调用
-    assert.ok(streamFn.calls.length <= 23, `calls=${streamFn.calls.length}`);
-    assert.ok(result.toolCalls <= 44, `toolCalls=${result.toolCalls}`);
+    // run_command 的文件变化不含治理目录（会话文件的新建与修改不进结果）：第 1 轮起各轮相同，计到 20 在第 21 轮；
+    // 叫停后至多一条被中止的请求，不再有工具调用
+    assert.ok(streamFn.calls.length <= 22, `calls=${streamFn.calls.length}`);
+    assert.ok(result.toolCalls <= 42, `toolCalls=${result.toolCalls}`);
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test("run_command 的文件变化不含治理目录：同一条命令连续两轮、期间只有会话文件在变，两轮结果逐字相同，打转从第 2 轮起计数", async () => {
+  const repo = makeRepo();
+  try {
+    const round: FakeReply = {
+      text: "再跑一次",
+      toolCalls: [{ name: "run_command", args: { command: `${NODE} -e "console.log('same')"` } }],
+    };
+    const streamFn = createFakeStreamFn({ replies: [round] });
+    const result = await runHeadless({
+      task: "跑一下",
+      governanceRoot: repo.root,
+      workspaceRoot: repo.root,
+      streamFn,
+      yolo: true,
+      homeDir: repo.home,
+      maxTurns: 50,
+      loopGuard: { ...DEFAULT_LOOP_GUARD_SETTINGS, remindAt: 1, warnAt: 2, stopAt: 3 },
+    });
+    assert.equal(result.status, "looping");
+    const texts = sessionOf(repo.root, result.sessionId)
+      .runs.flatMap((run) => run.messages.map((ref) => ref.message))
+      .filter((message) => message.role === "toolResult")
+      .map((message) =>
+        (message.content as Array<{ type: string; text?: string }>)
+          .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+          .join("")
+      );
+    assert.ok(texts.length >= 2, `toolResults=${texts.length}`);
+    assert.equal(texts[1], texts[0]);
+    assert.doesNotMatch(texts[0] ?? "", /\.pigeon/);
+    // 第 2 轮与第 1 轮相同即计 1：第 2 轮结束后的请求（第 3 次）里已有第一次提醒
+    assert.deepEqual(reminders(userTexts(streamFn.calls[1])), []);
+    assert.equal(reminders(userTexts(streamFn.calls[2])).length, 1);
   } finally {
     repo.cleanup();
   }

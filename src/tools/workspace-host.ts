@@ -35,7 +35,14 @@ export interface HostExecResult {
   output: string;
 }
 
-// 工作区文件清单：相对路径（正斜杠）→ 大小与修改时间签名；不含版本库元数据与依赖目录
+// 文件清单不跟进的目录，本地与容器实现共用这一份口径。
+// 任意层级：版本库元数据与依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接）
+export const LISTING_SKIPPED_DIRS: readonly string[] = [".git", "node_modules"];
+// 只在工作区根：Pigeon 自己的治理目录（会话记录、记忆、放权与各项配置在运行中持续写入，与 agent 所做无关）；
+// 子目录里同名的普通文件夹照常列出
+export const LISTING_SKIPPED_ROOT_DIRS: readonly string[] = [".pigeon"];
+
+// 工作区文件清单：相对路径（正斜杠）→ 大小与修改时间签名；不含上面两份名单里的目录
 export interface HostFileSnapshot {
   files: Map<string, string>;
   // 清单超过上限，不完整

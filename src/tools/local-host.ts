@@ -12,16 +12,15 @@ import {
   trackChild,
   untrackChild,
 } from "./process-tree.ts";
-import type {
-  HostExecOptions,
-  HostExecPlan,
-  HostExecResult,
-  HostFileSnapshot,
-  WorkspaceHost,
+import {
+  type HostExecOptions,
+  type HostExecPlan,
+  type HostExecResult,
+  type HostFileSnapshot,
+  LISTING_SKIPPED_DIRS,
+  LISTING_SKIPPED_ROOT_DIRS,
+  type WorkspaceHost,
 } from "./workspace-host.ts";
-
-// 文件清单不跟进的目录：版本库元数据与依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接）
-const SKIPPED_DIRS = new Set([".git", "node_modules"]);
 
 export interface LocalHostOptions {
   // 平台（缺省 process.platform；测试注入）
@@ -222,7 +221,7 @@ export function windowsScript(
   return undefined;
 }
 
-// 工作树文件清单：相对路径 → 大小与修改时间签名；跳过符号链接、目录联接与 SKIPPED_DIRS
+// 工作树文件清单：相对路径 → 大小与修改时间签名；跳过符号链接、目录联接与 workspace-host.ts 两份名单里的目录
 function snapshotLocalFiles(root: string, limit: number): HostFileSnapshot {
   const files = new Map<string, string>();
   let truncated = false;
@@ -242,7 +241,10 @@ function snapshotLocalFiles(root: string, limit: number): HostFileSnapshot {
         continue;
       }
       if (entry.isDirectory()) {
-        if (!SKIPPED_DIRS.has(entry.name)) {
+        const skipped =
+          LISTING_SKIPPED_DIRS.includes(entry.name) ||
+          (dir === root && LISTING_SKIPPED_ROOT_DIRS.includes(entry.name));
+        if (!skipped) {
           walk(full);
         }
         continue;
