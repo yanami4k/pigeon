@@ -12,12 +12,14 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { createHeadCollector } from "../tools/local-host.ts";
 import { WorkspacePathError, WorkspacePathNotFoundError } from "../tools/paths.ts";
-import type {
-  HostExecOptions,
-  HostExecPlan,
-  HostExecResult,
-  HostFileSnapshot,
-  WorkspaceHost,
+import {
+  type HostExecOptions,
+  type HostExecPlan,
+  type HostExecResult,
+  type HostFileSnapshot,
+  LISTING_SKIPPED_DIRS,
+  LISTING_SKIPPED_ROOT_DIRS,
+  type WorkspaceHost,
 } from "../tools/workspace-host.ts";
 
 // 环境错误：docker 自身或容器出了问题（区别于命令的非零退出）
@@ -345,9 +347,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       });
     },
     async listFiles(limit): Promise<HostFileSnapshot> {
-      // 不跟进版本库元数据与依赖目录（与本地实现同一口径）；多取一行用来判定是否超限
+      // 不跟进两份名单里的目录（与本地实现同一口径：任意层级按名字，工作区根下的只认根下那一个目录）；
+      // 多取一行用来判定是否超限
+      const pruned = [
+        ...LISTING_SKIPPED_DIRS.map((name) => `-name ${name}`),
+        ...LISTING_SKIPPED_ROOT_DIRS.map((name) => `\\( -path ./${name} -type d \\)`),
+      ].join(" -o ");
       const script =
-        "find . \\( -name .git -o -name node_modules \\) -prune -o -type f " +
+        `find . \\( ${pruned} \\) -prune -o -type f ` +
         `-exec stat -c '%n\t%s:%y' {} + | head -n ${limit + 1}`;
       const result = await helper(execArgs(false, ["sh", "-c", script]));
       if (daemonFailure(result)) {

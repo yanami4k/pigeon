@@ -4,6 +4,8 @@
 //      OCI "程序不存在" 到 ENOENT 的还原、守护进程失败按环境错误上抛、宿主环境变量不进容器；
 //   ② 真容器层（本机有可用的 docker 守护进程与测试镜像才跑，否则跳过并说明）：对着真容器验证四件事的实际效果。
 //      测试镜像缺省 busybox:latest，可用 PIGEON_TEST_CONTAINER_IMAGE 指定；测试不主动拉镜像。
+// 文件清单跳过工作区根下的治理目录 .pigeon（与本地执行端同一口径）：替身层以本机执行的假 docker 对着真实目录验，
+// 真容器层另验一遍。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -11,6 +13,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
+import {
+  CHURN_FILE_CHANGES,
+  CHURN_LISTED_BEFORE,
+  seedGovernanceChurn,
+} from "../tools/listing-fixtures.ts";
 import { WorkspacePathError, WorkspacePathNotFoundError } from "../tools/paths.ts";
 import { createRunCommandTool, RunCommandTimeoutError } from "../tools/run-command.ts";
 import type { HostExecOptions } from "../tools/workspace-host.ts";
@@ -21,6 +28,7 @@ import {
   removeWorkspaceContainer,
   startWorkspaceContainer,
 } from "./container-host.ts";
+import { localDockerHost } from "./local-docker-fixtures.ts";
 
 const execOptions = (overrides: Partial<HostExecOptions> = {}): HostExecOptions => ({
   env: { SECRET_FROM_HOST: "must-not-leak" },
@@ -194,6 +202,26 @@ test("容器执行端（替身）：OCI 报程序不存在还原为 ENOENT；命
     );
   } finally {
     daemon.cleanup();
+  }
+});
+
+test("容器执行端（本机执行的假 docker）：文件清单跳过工作区根下的 .pigeon，治理目录里的新增与修改不进文件变化，别处与子目录里同名的普通文件夹照常报出", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-container-listing-"));
+  const churn = seedGovernanceChurn(root);
+  const docker = localDockerHost(root);
+  try {
+    assert.deepEqual(
+      [...(await docker.host.listFiles(100)).files.keys()].sort(),
+      CHURN_LISTED_BEFORE
+    );
+    const tool = createRunCommandTool({ workspaceRoot: docker.containerRoot, host: docker.host });
+    const result = await tool.execute("c1", { command: churn.command }, undefined);
+    assert.equal(result.details.exitCode, 0, result.details.output);
+    assert.deepEqual(result.details.fileChanges, CHURN_FILE_CHANGES);
+  } finally {
+    docker.cleanup();
+    churn.cleanup();
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
@@ -384,6 +412,39 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
       tool.execute("c3", { command: "no-such-program-here" }, undefined),
       /命令不存在/
     );
+  });
+
+  test("文件清单跳过工作区根下的 .pigeon：治理目录里的新增与修改不进文件变化，子目录里同名的普通文件夹照常报出", async () => {
+    const made = await sh(
+      `mkdir -p ${root}/.pigeon/sessions ${root}/sub/.pigeon && printf '{}\\n' > ${root}/.pigeon/sessions/s.jsonl && ` +
+        `printf 'keep\\n' > ${root}/sub/.pigeon/keep.txt`
+    );
+    assert.equal(made.exitCode, 0, made.stderr);
+    const listed = [...(await host.listFiles(100)).files.keys()];
+    assert.equal(
+      listed.some((file) => file.startsWith(".pigeon/")),
+      false
+    );
+    assert.ok(listed.includes("sub/.pigeon/keep.txt"));
+
+    const tool = createRunCommandTool({ workspaceRoot: root, host });
+    tool.authorizeShell("c4");
+    const result = await tool.execute(
+      "c4",
+      {
+        command:
+          "echo '{}' >> .pigeon/sessions/s.jsonl && mkdir -p .pigeon/learned && echo fact > .pigeon/learned/MEMORY.md && " +
+          "echo c > src/c.txt && echo more >> sub/.pigeon/keep.txt && echo new > sub/.pigeon/new.txt",
+      },
+      undefined
+    );
+    assert.equal(result.details.exitCode, 0, result.details.output);
+    assert.deepEqual(result.details.fileChanges, {
+      added: ["src/c.txt", "sub/.pigeon/new.txt"],
+      removed: [],
+      modified: ["sub/.pigeon/keep.txt"],
+      truncated: false,
+    });
   });
 });
 

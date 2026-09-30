@@ -1,12 +1,19 @@
 // 本地执行端 run_command 的整树终止（决策 098：超时或中止后该命令起的进程不残留）：
 // 子进程再起孙进程并让孙进程占着输出管道，验证超时与中止都终止整组、且工具调用在超时加宽限内返回。
+// 另验文件清单跳过工作区根下的治理目录 .pigeon（与容器执行端同一口径）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import {
+  CHURN_FILE_CHANGES,
+  CHURN_LISTED_BEFORE,
+  seedGovernanceChurn,
+} from "./listing-fixtures.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
+import { createRunCommandTool } from "./run-command.ts";
 import type { HostExecOptions } from "./workspace-host.ts";
 
 function isAlive(pid: number): boolean {
@@ -145,5 +152,21 @@ test("run_command 中止：abort 信号终止整组，孙进程在宽限内消�
       }
     }
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+});
+
+test("文件清单跳过工作区根下的 .pigeon：执行期间治理目录里的新增与修改不进文件变化，别处与子目录里同名的普通文件夹照常报出", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-localhost-listing-"));
+  const churn = seedGovernanceChurn(root);
+  try {
+    const host = createLocalWorkspaceHost(root);
+    assert.deepEqual([...(await host.listFiles(100)).files.keys()].sort(), CHURN_LISTED_BEFORE);
+    const tool = createRunCommandTool({ workspaceRoot: root, host });
+    const result = await tool.execute("c1", { command: churn.command }, undefined);
+    assert.equal(result.details.exitCode, 0, result.details.output);
+    assert.deepEqual(result.details.fileChanges, CHURN_FILE_CHANGES);
+  } finally {
+    churn.cleanup();
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
