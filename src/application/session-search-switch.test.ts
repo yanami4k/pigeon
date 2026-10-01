@@ -29,7 +29,7 @@ async function assembled(
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       ...(sessionSearch !== undefined ? { sessionSearch } : {}),
     });
     const context = streamFn.calls.at(-1)?.context;
@@ -81,7 +81,7 @@ test("推送记忆打开：headless 照常装配运行；无人值守只推送�
       streamFn,
       yolo: true,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       homeDir: root,
       pushedMemory: true,
     });

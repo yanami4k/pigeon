@@ -340,6 +340,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           throw error;
         });
         const { bundle } = opened;
+        // 决策 330：人写的说明超出上限被截断时提示一行
+        if (bundle.instructionsNotice !== undefined) write(`${bundle.instructionsNotice}\n`);
         try {
           await runRepl({
             adapter: bundle.adapter,
@@ -459,9 +461,6 @@ async function runMain(argv: string[]): Promise<void> {
     modelId: flags.modelId,
     persistThinking: flags.persistThinking,
     ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
-    ...(flags.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: flags.memoryBudgetChars }
-      : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
@@ -1178,6 +1177,8 @@ async function lineMain(argv: string[]): Promise<void> {
     throw error;
   }
   const { bundle } = opened;
+  // 决策 330：人写的说明超出上限被截断时提示一行
+  if (bundle.instructionsNotice !== undefined) write(`${bundle.instructionsNotice}\n`);
   try {
     await runRepl({
       adapter: bundle.adapter,
@@ -1220,7 +1221,7 @@ export const TOP_LEVEL_HELP = [
 
 // 命令行对话与续跑接受的启动参数
 const SESSION_FLAGS_HINT =
-  "--yolo / --no-persist-thinking / --no-pushed-memory / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
+  "--yolo / --no-persist-thinking / --no-pushed-memory / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
 
 // 决策 237：沙箱的提示行
 // 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败

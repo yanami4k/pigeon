@@ -76,12 +76,12 @@ export const InjectionSnapshotSchema = Type.Object({
     advertised: Type.Array(Type.String()),
   }),
   context: Type.Object({
-    // 会话开始时拼好的完整 system prompt（基础提示 + 常驻 Memory 段 + Skill 目录段），冻结后不再变
+    // 会话开始时拼好的完整 system prompt（基础提示 + 人写的说明段 + 推送记忆段 + Skill 目录段），冻结后不再变
     systemPrompt: Type.String(),
     // 任务源给的工作方式指令原文（已追加在 systemPrompt 末尾；缺省 = 没有）
     taskDirective: Type.Optional(Type.String({ minLength: 1 })),
   }),
-  // 常驻 Memory 冻结清单（决策 042）：注入走 system prompt 追加段，不走 transformContext；
+  // 人写的说明冻结清单（决策 330；之前为常驻 Memory，决策 042）：注入走 system prompt 追加段，不走 transformContext；
   // transformContext 留给 M10 外部 Provider 的逐调用动态召回
   memory: Type.Array(MemoryManifestEntrySchema),
   // Skill Catalog 冻结清单（决策 043）：每个 Skill 目录下全部文件的哈希清单，load_skill 读取时比对

@@ -320,7 +320,7 @@ test("实验条件不注册提交编排脚本的工具（265）：跑批器各�
       sessionSearch: spec.sessionSearch,
       pushedMemory: spec.pushedMemory,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       onBundle: (bundle) => {
         tools = bundle.adapter.snapshot().tools.advertised;
       },

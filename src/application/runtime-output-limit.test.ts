@@ -39,7 +39,7 @@ for (const [label, maxOutputTokens, expected] of [
         yolo: true,
         homeDir: home,
         skillRoots: [],
-        memoryRoots: [],
+        agentsMd: false,
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       });
       assert.deepEqual(seen, [expected]);
@@ -70,7 +70,7 @@ test("输出上限装配：注入快照 model 段写入 maxOutputTokens（缺省
         modelId: "fake-model-1",
         homeDir: root,
         skillRoots: [],
-        memoryRoots: [],
+        agentsMd: false,
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       });
       try {

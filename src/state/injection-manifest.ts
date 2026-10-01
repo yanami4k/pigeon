@@ -1,11 +1,11 @@
-// 注入清单（M5，决策 042 / 043 / 044）：常驻 Memory 与 Skill 的冻结身份形状。
+// 注入清单（M5，决策 042 / 043 / 044；决策 330 起 memory 清单记人写的说明 AGENTS.md）：说明文件与 Skill 的冻结身份形状。
 // InjectionSnapshot v3（pi-runtime/snapshot.ts）与 Run 开始条目（state/session-entries.ts）
 // 共用同一份 schema——"用的是哪版 Memory / Skill"在快照与账本里是同一种证据，杜绝漂移。
 import { type Static, Type } from "typebox";
 import { Sha256HexSchema } from "./hashing.ts";
 
-// 常驻 Memory 单文件身份：included=false 表示超预算只列文件名未注入；truncated 只可能出现在
-// 被部分装入的那个文件上（偏好文件永不截断）
+// 说明文件（决策 330 之前为常驻 Memory 文件）单文件身份：included=false 表示超出上限未放入；truncated 只可能出现在
+// 被部分放入的那个文件上
 export const MemoryManifestEntrySchema = Type.Object({
   path: Type.String({ minLength: 1 }),
   hash: Sha256HexSchema,

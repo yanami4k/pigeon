@@ -1,6 +1,5 @@
 import type { ScriptLauncher } from "../execution/script-sandbox.ts";
 import type { MemoryLayer } from "../memory/learned.ts";
-import type { MemoryRoot } from "../memory/resident.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
@@ -97,8 +96,8 @@ export interface HeadlessRunOptions {
   // 外部中止（调用方的限额看守等）：在途的运行立即中止、不再回炉，终态记 aborted，不写撞上限记录
   abortSignal?: AbortSignal;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
-  memoryBudgetChars?: number;
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读，跑批器关掉
+  agentsMd?: boolean;
   homeDir?: string;
   persistThinking?: boolean;
   sessionId?: SessionId;
@@ -317,11 +316,8 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.thinking !== undefined ? { thinkingLevel: options.thinking } : {}),
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
     ...(options.persistThinking !== undefined ? { persistThinking: options.persistThinking } : {}),
-    ...(options.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: options.memoryBudgetChars }
-      : {}),
     ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),
-    ...(options.memoryRoots !== undefined ? { memoryRoots: options.memoryRoots } : {}),
+    ...(options.agentsMd !== undefined ? { agentsMd: options.agentsMd } : {}),
     ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
     ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
@@ -354,6 +350,10 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
+      // 决策 330：人写的说明超出上限被截断时提示一行（告警出口，缺省标准错误输出）
+      if (bundle.instructionsNotice !== undefined) {
+        (options.warn ?? ((line: string) => console.error(line)))(bundle.instructionsNotice);
+      }
       // 决策 305–307：打转检测挂在主 agent 上——提醒进下一轮；计到叫停轮数即以打转中止，照常验证、不再回炉
       const detachLoopGuard = attachLoopGuard(bundle.adapter, options.loopGuard, (found) => {
         if (limitHit === undefined) {

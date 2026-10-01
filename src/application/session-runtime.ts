@@ -45,7 +45,6 @@ export interface SessionRuntimeFlags {
   modelId: string;
   persistThinking: boolean;
   thinkingLevel?: ThinkingLevel;
-  memoryBudgetChars?: number;
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
@@ -67,7 +66,7 @@ export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): { pushedMemo
 }
 
 export interface OpenSessionRuntimeRequest {
-  // 治理根：.pigeon/（设置、程序状态、常驻 Memory、Skill）所在
+  // 治理根：.pigeon/（设置、程序状态、Skill）所在
   governanceRoot: string;
   // 决策 325：本会话的设置快照（入口在会话开始时读一次并确认过会执行命令的条目；本会话内各处都从它取）。
   // 缺省为空快照（不读任何设置文件）；日常入口一律显式给出
@@ -198,9 +197,6 @@ export async function openSessionRuntime(
       persistThinking: request.flags.persistThinking,
       ...(request.flags.thinkingLevel !== undefined
         ? { thinkingLevel: request.flags.thinkingLevel }
-        : {}),
-      ...(request.flags.memoryBudgetChars !== undefined
-        ? { memoryBudgetChars: request.flags.memoryBudgetChars }
         : {}),
       ...(request.flags.maxOutputTokens !== undefined
         ? { maxOutputTokens: request.flags.maxOutputTokens }

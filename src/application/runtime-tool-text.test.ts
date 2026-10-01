@@ -54,7 +54,7 @@ test("容器执行端（linux）且自动批准：系统提示与 run_command �
       yolo: true,
       homeDir: d.home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     const { systemPrompt, runCommand } = seen(streamFn);
     const texts = runCommandTexts({ platform: "linux", approval: "yolo" });
@@ -78,7 +78,7 @@ test("本地无人值守且未放权（没有审批通道）：系统提示写�
       yolo: false,
       homeDir: d.home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     const { systemPrompt, runCommand } = seen(streamFn);
     const texts = runCommandTexts({ platform: process.platform, approval: "none" });
@@ -104,7 +104,7 @@ test("本地有人工审批通道：系统提示与 run_command 说明照实写�
     modelId: "fake-model-1",
     homeDir: d.home,
     skillRoots: [],
-    memoryRoots: [],
+    agentsMd: false,
     createApprovalHandler: () => async () => ({ approved: false }),
   });
   try {

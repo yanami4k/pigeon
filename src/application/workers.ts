@@ -12,7 +12,6 @@
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";
-import type { MemoryRoot } from "../memory/resident.ts";
 import {
   ROLE_MODEL_OVERRIDES,
   ROLE_THINKING_LEVELS,
@@ -89,7 +88,7 @@ export interface WorkerRuntimeDeps {
   // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
   temperature?: number;
   taskDirective?: string;
-  // 决策 191、217：推送记忆——worker 与常驻 Memory 同样处理：父会话开着即带推送段与记忆工具（冲突处理的填法、上限同父会话）
+  // 决策 191、331：推送记忆——父会话开着即带推送段（上限同父会话）；worker 只推送，不带记忆工具
   learnedMemory?: LearnedMemoryConfig;
   // M6（决策 064 子裁决 ③）：角色的模型接入覆盖列（缺省取 roles.ts 的角色表，第一版四个角色都留空）
   roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
@@ -250,9 +249,9 @@ interface RuntimeSurface {
   thinkingLevel?: ThinkingLevel;
   homeDir?: string;
   persistThinking?: boolean;
-  memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
+  agentsMd?: boolean;
   // 决策 061：编辑模式（缺省 hashline）
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
@@ -462,9 +461,9 @@ export interface DetachedRuntimeRequest {
   thinkingLevel?: ThinkingLevel;
   homeDir?: string;
   persistThinking?: boolean;
-  memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
+  agentsMd?: boolean;
   editMode?: EditMode;
   maxOutputTokens?: number;
   temperature?: number;
@@ -531,11 +530,8 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       : {}),
     ...(surface.homeDir !== undefined ? { homeDir: surface.homeDir } : {}),
     ...(surface.persistThinking !== undefined ? { persistThinking: surface.persistThinking } : {}),
-    ...(surface.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: surface.memoryBudgetChars }
-      : {}),
     ...(surface.skillRoots !== undefined ? { skillRoots: surface.skillRoots } : {}),
-    ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
+    ...(surface.agentsMd !== undefined ? { agentsMd: surface.agentsMd } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),

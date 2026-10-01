@@ -7,7 +7,8 @@
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
 // 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
-// 推送记忆（决策 191、331、332）：开着时会话开始读两层学到的记忆推入系统提示（常驻 Memory 之后、Skill 目录之前）；
+// 人写的说明（决策 330）：会话开始读 AGENTS.md（用户级与仓库根到工作目录逐层）推入系统提示，合计上限 32 KiB。
+// 推送记忆（决策 191、331、332）：开着时会话开始读两层学到的记忆推入系统提示（人写的说明之后、Skill 目录之前）；
 // 只有有人对话的入口另给写入配置，注册 update_memory、推送段带"被纠正时记下"的说明。复盘（收尾、压缩前、补做）随决策 331 删除
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
 // 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
@@ -16,9 +17,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
+import { loadAgentsInstructions } from "../memory/agents-md.ts";
 import type { MemoryLayer } from "../memory/learned.ts";
 import { loadPushedMemory } from "../memory/pushed.ts";
-import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
 import {
   createReadSessionEntryTool,
   createSearchSessionsTool,
@@ -141,7 +142,7 @@ export interface RuntimeDeps {
   // 决策 248：日常沙箱改回逐条询问时置 false——注入执行端时仍接交互审批，但会话放权不建目录限定（[d] 按批准一次处理）；
   // 缺省不放开，注入执行端时带审批通道即报错
   pathScopedGrants?: boolean;
-  // M5.5 S1（决策 040）：治理根——.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在；
+  // M5.5 S1（决策 040）：治理根——.pigeon/（设置、程序状态、Skill）所在；
   // 缺省同工作区根。worker 的工作区根是自己的 git 工作树，治理根恒为主仓库根
   governanceRoot?: string;
   // M5.5 S2（决策 040）：委派策略（worker）——在场时 allow 与已注册工具取交、deny 与审批模式照搬，
@@ -165,10 +166,8 @@ export interface RuntimeDeps {
   restoredGrants?: readonly ActiveGrant[];
   // M5 S1（决策 045）：thinking 正文是否持久化进会话存储；缺省 true，Actor 以旗标关闭
   persistThinking?: boolean;
-  // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
+  // 用户级目录（~/.pigeon：AGENTS.md、Skill、学到的记忆的用户级）所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
-  // M5 S3（决策 042）：常驻 Memory 字符预算（缺省 8000，约 2000 token）
-  memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖；缺省 off
   thinkingLevel?: ThinkingLevel;
   // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受 .pigeon/commands.json 为该角色登记的
@@ -177,10 +176,10 @@ export interface RuntimeDeps {
   // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
   // 缺省 = 本会话没有外部工具
   mcp?: McpSession;
-  // M6.5（决策 059）：显式 Skill 根与 Memory 根——在场时只用给定的根（空数组 = 不注入），不扫治理根与用户级目录；
-  // Eval 三条件由 skillRoots 切换，memoryRoots 一律为空
+  // M6.5（决策 059）：显式 Skill 根——在场时只用给定的根（空数组 = 不注入），不扫治理根与用户级目录
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读。跑批器与只测装配的用例关掉（对照实验里说明不是变量，任何一层都不能漏进来）
+  agentsMd?: boolean;
   // 决策 061：编辑模式，缺省 hashline（缺省时装配出的工具与 system prompt 逐字不变）
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
@@ -283,6 +282,8 @@ export interface RuntimeBundle {
   disposers?: Array<() => Promise<void>>;
   // 推送记忆开着时在场（worker 按它继承）
   learnedMemory?: LearnedMemoryConfig;
+  // 决策 330：人写的说明超出 32 KiB 被截断时给终端的一行提示（入口打出）；没截断时缺省
+  instructionsNotice?: string;
   // 决策 294 B1：任务清单开着时在场（续聊时从会话还原、/tasks 查看）
   taskList?: TaskList;
 }
@@ -451,14 +452,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     registry.register(webSearchRegistration());
     registry.register(webFetchRegistration());
   }
-  // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
-  // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
-  const residentMemory = loadResidentMemory({
-    workspaceRoot: governanceRoot,
-    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-    ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
-    ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
-  });
+  // 决策 330：会话开始读人写的说明（AGENTS.md），拼进 system prompt 一次即冻结（不走 transformContext）；清单进注入快照，
+  // 会话中途改文件下个会话才生效。本地工作区从工作区根往上读（worker 即它自己的工作树）；沙箱读宿主上的工作区（治理根），
+  // 与本机会话内容一致
+  const instructions =
+    deps.agentsMd === false
+      ? { section: "", manifest: [] }
+      : loadAgentsInstructions({
+          workspaceRoot: deps.workspaceHost === undefined ? deps.workspaceRoot : governanceRoot,
+          ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+        });
   // 决策 191、332：会话开始读两层学到的记忆，整份推入、即冻结；清单进 Run 开始条目
   const pushedMemory =
     learned !== undefined
@@ -533,7 +536,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : "";
   const systemPrompt = [
     basePrompt,
-    residentMemory.section,
+    instructions.section,
     pushedMemory?.section ?? "",
     skillCatalog.section,
     mcpSection,
@@ -618,7 +621,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         systemPrompt,
         ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       },
-      memory: residentMemory.manifest,
+      memory: instructions.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
       ...(pushedMemory !== undefined
@@ -718,6 +721,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     toolTiers,
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),
+    ...("notice" in instructions && instructions.notice !== undefined
+      ? { instructionsNotice: instructions.notice }
+      : {}),
     ...(taskList !== undefined ? { taskList } : {}),
   };
 }

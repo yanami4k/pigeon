@@ -55,8 +55,6 @@ export interface LaunchFlags {
   modelId: string;
   // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
   persistThinking: boolean;
-  // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
-  memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
   thinkingLevel?: ThinkingLevel;
   // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384）
@@ -183,12 +181,6 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       }
     } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
       flags.pushedMemory = false;
-    } else if (flag === "--memory-budget") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
-      }
-      flags.memoryBudgetChars = value;
     } else if (flag === "--thinking") {
       const value = argv[++i];
       if (value === undefined || !isThinkingLevel(value)) {

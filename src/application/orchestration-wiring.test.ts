@@ -202,7 +202,7 @@ test("实验条件不注册本段新增的任何工具（265）：pigeon run 缺
       sessionSearch: spec.sessionSearch,
       pushedMemory: spec.pushedMemory,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     assert.deepEqual(
       tools.filter((name) => NEW_TOOLS.includes(name)),

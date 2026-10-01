@@ -3,7 +3,7 @@
 // Claude Code / pi 兼容。加载器自写，不借上游 harness 层（在巡航边界外，格式只有百行）。
 // 会话开始时扫描一次：给每个 Skill 目录下全部文件算哈希清单（冻结版本的证据，写进
 // InjectionSnapshot v3 的 skills 字段，load_skill 读取时比对）；启动只把名称、简介、路径追加进
-// system prompt，与常驻 Memory 同段冻结——大量 Skill 不线性膨胀初始上下文。
+// system prompt，与人写的说明（AGENTS.md）同样在会话开始时冻结——大量 Skill 不线性膨胀初始上下文。
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";

@@ -39,7 +39,7 @@ test("缺省开启：Run 开始条目记下产品缺省的压缩配置（1M 窗�
       yolo: true,
       homeDir: root,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
@@ -82,7 +82,7 @@ test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模
       yolo: true,
       homeDir: root,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       temperature: 0,
       compaction: { thresholdTokens: 1000, keepRecentTokens: 20 },
     });
@@ -135,7 +135,7 @@ test("主请求开思考时摘要请求仍关思考：摘要不请求推理", as
       modelId: "fake-model-1",
       homeDir: root,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       thinkingLevel: "high",
       compaction: { thresholdTokens: 1000, keepRecentTokens: 5 },
     });
@@ -174,7 +174,7 @@ test("压缩前回调经装配根接上：压缩真正执行之前被调用", as
       modelId: "fake-model-1",
       homeDir: root,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       compaction: { thresholdTokens: 1000, keepRecentTokens: 5 },
       beforeCompaction: (info) => {
         before.push(info);
@@ -231,7 +231,7 @@ test("无头运行：自动压缩没压成时向标准错误输出告警，同�
       yolo: true,
       homeDir: root,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       compaction: { thresholdTokens: 1000, keepRecentTokens: 20 },
       warn: (line) => lines.push(line),
     });
@@ -268,7 +268,7 @@ test("无头运行：压缩前回调失败时向标准错误输出告警，文�
       yolo: true,
       homeDir: root,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       compaction: { thresholdTokens: 1000, keepRecentTokens: 20 },
       beforeCompaction: () => {
         throw new Error("复盘失败：记忆文件被锁");

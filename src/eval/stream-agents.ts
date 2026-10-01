@@ -168,7 +168,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           maxTurns: input.budget.maxTurns,
           wallClockMs: input.budget.wallClockMs,
           skillRoots: [],
-          memoryRoots: [],
+          // 决策 330：跑批器不读人写的说明（作业目录里的 AGENTS.md 与使用者的用户级说明都不进条件）
+          agentsMd: false,
           taskDirective: STREAM_WORK_DIRECTIVE,
           // 记忆条件（193）：能否检索历史会话 × 有无推送记忆
           sessionSearch: input.condition.sessionSearch,

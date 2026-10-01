@@ -57,7 +57,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
       ...(options.verify !== undefined ? { verify: options.verify } : {}),
       ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),
-      ...(options.memoryRoots !== undefined ? { memoryRoots: options.memoryRoots } : {}),
+      ...(options.agentsMd !== undefined ? { agentsMd: options.agentsMd } : {}),
       // 决策 307：重试的每次尝试同样挂打转检测
       ...(options.loopGuard !== undefined ? { loopGuard: options.loopGuard } : {}),
     },

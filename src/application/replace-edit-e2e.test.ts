@@ -51,7 +51,7 @@ test("replace 模式经治理层：工具与 prompt 随模式切换，yolo 下�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       editMode: "replace",
     });
     assert.equal(result.status, "completed");

@@ -1,6 +1,6 @@
 // headless 运行入口（M6.5 S1，决策 056）：无父会话装出完整运行面跑到收尾，返回结构化结果；
-// 无审批通道时 prompt 模式 fail-closed（006 既有）；需审批次数从会话存储现算；skillRoots / memoryRoots 显式指定时
-// 只用给定的根（不扫治理根与用户级目录）。
+// 无审批通道时 prompt 模式 fail-closed（006 既有）；需审批次数从会话存储现算；skillRoots 显式指定时只用给定的根
+// （不扫治理根与用户级目录），agentsMd 关掉时不读人写的说明。
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,19 +196,18 @@ test("headless：最后一轮恰好用满上限而自然收尾——终态 compl
   }
 });
 
-test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数组不注入任何 Skill 与 Memory；Skill 根自带 SKILL.md 即一个 Skill", async () => {
+test("headless：显式 skillRoots 只用给定的根、agentsMd 关掉——空数组不注入任何 Skill，不读 AGENTS.md；Skill 根自带 SKILL.md 即一个 Skill", async () => {
   const { root, home, cleanup } = makeWorkspace();
   try {
-    // 治理根与用户级目录都放了 Skill 与 Memory：显式根时一律不扫
+    // 治理根与用户级目录都放了 Skill 与人写的说明：显式根、关掉说明时一律不读
     mkdirSync(join(root, ".pigeon", "skills", "local"), { recursive: true });
     writeFileSync(
       join(root, ".pigeon", "skills", "local", "SKILL.md"),
       "---\nname: local\ndescription: 本地\n---\n正文\n"
     );
-    mkdirSync(join(root, ".pigeon", "memory"), { recursive: true });
-    writeFileSync(join(root, ".pigeon", "memory", "a.md"), "项目记忆\n");
+    writeFileSync(join(root, "AGENTS.md"), "项目说明\n");
     mkdirSync(join(home, ".pigeon"), { recursive: true });
-    writeFileSync(join(home, ".pigeon", "preferences.md"), "偏好\n");
+    writeFileSync(join(home, ".pigeon", "AGENTS.md"), "用户说明\n");
     const candidate = join(root, "eval-skill", "candidate");
     mkdirSync(candidate, { recursive: true });
     writeFileSync(
@@ -224,7 +223,7 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     const noneStarted = storeView(root, none.sessionId).runs[0]?.start;
     assert.deepEqual(noneStarted?.skills, []);
@@ -239,7 +238,7 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
       yolo: true,
       homeDir: home,
       skillRoots: [{ path: candidate, label: "eval-skill/candidate" }],
-      memoryRoots: [],
+      agentsMd: false,
     });
     const started = storeView(root, withSkill.sessionId).runs[0]?.start;
     assert.deepEqual(

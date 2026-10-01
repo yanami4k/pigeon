@@ -1616,7 +1616,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           yolo: true,
           sessionId: newSessionId(),
           skillRoots: [],
-          memoryRoots: [],
+          agentsMd: false,
           homeDir: join(t.base, "home"),
         });
       const hitsOf = async (sessionsDir: string, keyword: string) => {

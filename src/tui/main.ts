@@ -76,7 +76,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
@@ -431,6 +431,9 @@ async function main(argv: string[]): Promise<void> {
           resume: true,
         });
         const bundle = opened.bundle;
+        if (bundle.instructionsNotice !== undefined) {
+          shellHolder.current?.addSystem(bundle.instructionsNotice);
+        }
         guardMainAgent(bundle);
         const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
@@ -453,6 +456,8 @@ async function main(argv: string[]): Promise<void> {
   faceHolder.current = shell;
   shellHolder.current = shell;
   shell.start();
+  // 决策 330：人写的说明超出上限被截断时在消息区提示一行
+  if (mainBundle.instructionsNotice !== undefined) shell.addSystem(mainBundle.instructionsNotice);
   warnSink.attach((line) => shell.addWarning(line));
   if (target.kind === "resume") {
     shell.announceResumed(workspaceRoot, target.report);

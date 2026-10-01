@@ -1,4 +1,4 @@
-// 推送记忆的装配（决策 191、244、331、332）：推送段放在常驻 Memory 之后、Skill 目录之前；Run 开始条目记两层记忆的身份与
+// 推送记忆的装配（决策 191、244、331、332）：推送段放在人写的说明（AGENTS.md）之后、Skill 目录之前；Run 开始条目记两层记忆的身份与
 // 文字版本；只有带写入配置的主会话（终端界面、--line）注册 update_memory、推送段带"被纠正时记下"的说明与交互版的冲突处理；
 // pigeon run、worker 只推送；记忆工具免审批，写入后交出一行提示；两层上限取设置的 memory 一节；日常入口的启动参数缺省开着，
 // --no-pushed-memory 关掉。
@@ -49,8 +49,7 @@ function readMemory(root: string, layer: MemoryLayer): string {
 function seed(root: string): void {
   writeMemory(root, "project", MEMORY_FILE_HEADERS.project + PROJECT_ENTRY);
   writeMemory(root, "user", MEMORY_FILE_HEADERS.user + USER_ENTRY);
-  mkdirSync(join(root, ".pigeon", "memory"), { recursive: true });
-  writeFileSync(join(root, ".pigeon", "memory", "rules.md"), "人写的规矩\n");
+  writeFileSync(join(root, "AGENTS.md"), "人写的规矩\n");
   mkdirSync(join(root, ".pigeon", "skills", "deploy"), { recursive: true });
   writeFileSync(
     join(root, ".pigeon", "skills", "deploy", "SKILL.md"),
@@ -97,7 +96,7 @@ function withRoot(prefix: string, body: (root: string) => Promise<void>): Promis
   return body(root).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("只推送：推送段在常驻 Memory 之后、Skill 目录之前，两层都推；不注册 update_memory、不带写入说明；Run 开始条目记两层身份与文字版本", () =>
+test("只推送：推送段在人写的说明之后、Skill 目录之前，两层都推；不注册 update_memory、不带写入说明；Run 开始条目记两层身份与文字版本", () =>
   withRoot("pigeon-pushed-only-", async (root) => {
     seed(root);
     const bundle = buildRuntime(deps(root, { learnedMemory: {} }));
@@ -105,7 +104,7 @@ test("只推送：推送段在常驻 Memory 之后、Skill 目录之前，两层
       await bundle.adapter.run("你好");
       const snapshot = bundle.adapter.snapshot();
       const prompt = snapshot.context.systemPrompt;
-      const resident = prompt.indexOf("## 常驻 Memory");
+      const resident = prompt.indexOf("## 人写的说明（AGENTS.md）");
       const pushed = prompt.indexOf("## 学到的记忆");
       const skills = prompt.indexOf("- deploy：部署步骤");
       assert.ok(resident >= 0 && pushed > resident && skills > pushed, prompt);

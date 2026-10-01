@@ -57,7 +57,7 @@ async function advertised(editMode: EditMode | undefined) {
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       ...(editMode !== undefined ? { editMode } : {}),
     });
     const context = streamFn.calls[0]?.context;
