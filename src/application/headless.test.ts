@@ -24,7 +24,7 @@ const ORIGINAL = "alpha\nbeta\ngamma\n";
 
 // 读新会话存储里的会话视图（会话必须存在）
 function storeView(root: string, sessionId: string): StoreSessionView {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
   return loaded.view;
 }
@@ -256,7 +256,7 @@ test("headless：显式 skillRoots / memoryRoots 只用给定的根——空数�
 test("headless：结果从新会话存储现算；会话根下有同号旧格式平铺文件时新存储照常建自己的文件、不读旧文件", async () => {
   const { root, home, cleanup } = makeWorkspace();
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const fresh = await runHeadless({
       task: "读",
       governanceRoot: root,

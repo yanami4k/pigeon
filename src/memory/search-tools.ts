@@ -8,6 +8,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";
 import type { SessionId } from "../state/ids.ts";
+import { pigeonRel } from "../state/paths.ts";
 import type { ViewBlock, ViewMessage } from "../state/session-view.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
@@ -190,7 +191,7 @@ export function createReadSessionEntryTool(
       const found = findMessage(options.sessionsDir, args.entryId, args.sessionId);
       if (found === null) {
         throw new SessionToolError(
-          `未找到 entry ${args.entryId}（只查本项目 .pigeon/sessions；entryId 应来自 search_sessions 的命中）`
+          `未找到 entry ${args.entryId}（只查本项目 ${pigeonRel("state", "sessions")}；entryId 应来自 search_sessions 的命中）`
         );
       }
       const { sessionId, message } = found;

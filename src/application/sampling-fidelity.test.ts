@@ -83,7 +83,7 @@ test("分叉重试沿用来源尝试的温度与工作方式指令：重试那�
       assert.ok(call.systemPrompt.endsWith(directive));
     }
     // 分支会话自己的 Run（不含从来源复制过来的那一段）的开始条目
-    const branch = loadStoreSession(join(dir, ".pigeon", "sessions"), branchId);
+    const branch = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), branchId);
     assert.ok(branch !== undefined, "会话存储里应有分支会话");
     assert.equal(branch.view.runs.length, 1);
     assert.equal(branch.view.runs[0]?.start.model.temperature, 0);

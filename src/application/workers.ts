@@ -10,7 +10,6 @@
 // 决策 301：运行面的流式正文与工具结果两个只读观察口一并交给编排器；编排器只在有观察者（终端界面）时订阅，
 // pigeon run、eval stream 与逐行对话不订，实验路径不受影响。
 
-import path from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
@@ -28,7 +27,6 @@ import type {
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { workerStartRefFor } from "../orchestration/worktree.ts";
-import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
@@ -39,6 +37,7 @@ import type { EventEnvelope } from "../state/events.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
   BranchHeaderInput,
@@ -47,6 +46,7 @@ import type {
   WorkerLimits,
   WorkerRole,
 } from "../state/session-payloads.ts";
+import { mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
@@ -105,6 +105,8 @@ export interface WorkerRuntimeDeps {
   nesting?: { settings: OrchestrationSettings; orchestrator: () => WorkerOrchestrator | undefined };
   // 决策 286：worker 会话存储告警的出口（终端界面运行期间落消息区）；缺省标准错误输出
   storeWarn?: WarnSink;
+  // 决策 325：设置快照——worker 用派出它的会话的快照（不重读设置文件）；缺省为空快照
+  settingsSnapshot?: SettingsSnapshot;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -226,6 +228,8 @@ export function sessionWorkerRuntimeFactory(
     ...(deps.webTools !== undefined ? { webTools: deps.webTools } : {}),
     ...(deps.nesting !== undefined ? { nesting: deps.nesting } : {}),
     ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
+    // 决策 325：worker 沿用父运行面的设置快照（含启动时的确认结果）
+    settingsSnapshot: deps.bundle.settings,
   });
 }
 
@@ -242,7 +246,7 @@ interface RuntimeSurface {
   yolo: boolean;
   // 委派策略（worker）；缺省 = 全部内置工具，审批模式按 yolo 旗标
   policy?: DelegatedPolicy;
-  // worker 角色：run_command 套 .pigeon/commands.json 的角色清单；缺省 = 不套清单
+  // worker 角色：run_command 套设置里 commands 一节的角色清单；缺省 = 不套清单
   role?: WorkerRole;
   approvalHandler?: ApprovalHandler;
   // worker 会话头；缺省 = 普通会话（headless）
@@ -297,6 +301,8 @@ interface RuntimeSurface {
   onBundle?: (bundle: RuntimeBundle) => void;
   // 决策 286：会话存储告警的出口；缺省标准错误输出
   storeWarn?: WarnSink;
+  // 决策 325：本会话的设置快照（缺省为空快照）
+  settings?: SettingsSnapshot;
 }
 
 // M8（决策 087）：派出记录的上限即该 worker 尝试的预算——两者同一组值，冻结进注入快照后回放才能沿用。
@@ -346,7 +352,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       modelId: override?.modelId ?? deps.modelId,
       yolo: request.policy.approvalMode === "yolo",
       policy: request.policy,
-      // M5.5 S5（决策 048）：run_command 按角色套 .pigeon/commands.json 的允许清单
+      // M5.5 S5（决策 048）：run_command 按角色套设置里 commands 一节的允许清单
       role: request.role,
       // 决策 266：无人值守时不接审批通道（prompt 档 fail-closed，与 headless 主会话同一口径）
       ...(deps.unattended === true ? {} : { approvalHandler: request.approvalHandler }),
@@ -392,6 +398,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
           }
         : {}),
       ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
+      ...(deps.settingsSnapshot !== undefined ? { settings: deps.settingsSnapshot } : {}),
     });
     if (nestedOrchestrator === undefined) {
       return handle;
@@ -440,7 +447,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
 
 // 补批续做（303）：worker 会话文件里的主分支还原成对话；悬空的工具调用补"结果未知"
 function restoreWorkerMessages(request: WorkerRuntimeRequest): AgentMessage[] {
-  const sessionsDir = path.join(request.governanceRoot, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(request.governanceRoot);
   const loaded = loadStoreSession(sessionsDir, request.sessionId);
   if (loaded === undefined) {
     throw new Error(`找不到 worker 会话 ${request.sessionId} 的会话文件，无法续做`);
@@ -496,6 +503,8 @@ export interface DetachedRuntimeRequest {
   onBundle?: (bundle: RuntimeBundle) => void;
   // 决策 286：会话存储告警的出口；缺省标准错误输出
   storeWarn?: WarnSink;
+  // 决策 325：本会话的设置快照（pigeon run 由入口读好给出；缺省为空快照）
+  settings?: SettingsSnapshot;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -557,15 +566,19 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
     ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
+    ...(surface.settings !== undefined ? { settings: surface.settings } : {}),
   };
-  // MCP 配置畸形在此响亮失败（派出失败）
+  // MCP 配置取自设置快照（会话开始时已校验；不重读文件）
+  const mcpConfig =
+    surface.settings !== undefined ? mcpConfigOf(surface.settings) : { servers: [] };
   const startMcp =
     surface.startMcp ??
-    (loadMcpConfig(surface.governanceRoot).servers.length > 0
+    (mcpConfig.servers.length > 0
       ? () =>
           startMcpSession({
             governanceRoot: surface.governanceRoot,
             workspaceRoot: surface.workspaceRoot,
+            config: mcpConfig,
           })
       : undefined);
   const open = (deps: RuntimeDeps): RuntimeBundle => {

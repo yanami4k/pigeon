@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { isProgramOwnedPath } from "../state/paths.ts";
 import { repoToplevel, workdirTree } from "./workdir-snapshot.ts";
 
 // 中途失败时带上已经写进去的部分（叠加不设撤销，调用方据此如实交代）
@@ -122,7 +123,7 @@ export function overlayWorkerChanges(input: OverlayInput): OverlayResult {
   for (let index = 0; index + 1 < parts.length; index += 2) {
     const status = parts[index] ?? "";
     const path = parts[index + 1] ?? "";
-    if (status === "" || path === "" || path === ".pigeon" || path.startsWith(".pigeon/")) {
+    if (status === "" || path === "" || isProgramOwnedPath(path)) {
       continue;
     }
     changes.push({ status: status.charAt(0), path });

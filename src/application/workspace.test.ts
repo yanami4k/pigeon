@@ -30,9 +30,9 @@ test("prepareWorkspace：返回 realpath 规范化的根，不再触碰 M3 旧�
     // 旧账本原样留在原处：不改名、不转换、不建会话目录
     assert.equal(readFileSync(join(root, ".pigeon", "ledger.jsonl"), "utf8"), legacyLine);
     assert.deepEqual(readdirSync(join(root, ".pigeon")), ["ledger.jsonl"]);
-    assert.equal(existsSync(join(root, ".pigeon", "sessions")), false);
+    assert.equal(existsSync(join(root, ".pigeon", "state", "sessions")), false);
     assert.equal(prepareWorkspace(root), workspaceRoot);
-    assert.equal(sessionsDirOf(workspaceRoot), join(workspaceRoot, ".pigeon", "sessions"));
+    assert.equal(sessionsDirOf(workspaceRoot), join(workspaceRoot, ".pigeon", "state", "sessions"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

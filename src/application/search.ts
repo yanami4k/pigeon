@@ -1,14 +1,10 @@
-// /search 命令层（M5 S2，决策 038）：人的入口，cli REPL 与 tui 共用同一份解析与排版
-// （同 030 / 031 方向）；输出是纯字符串，命中片段经 sanitizeTerminalText 净化后才出命令层
-//（036：正文是半信任内容）。检索本身在 memory/session-search.ts，本层不另起扫描。
-// 迁移之前的旧格式会话不检索，末尾给一行计数提示（187 / 211）。
-import { join } from "node:path";
 import {
   createSessionSearch,
   type SessionMessageRole,
   type SessionSearchHit,
 } from "../memory/session-search.ts";
 import { legacySessionsNote } from "../persistence/session-catalog.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import { sanitizeTerminalText } from "./format.ts";
 
 export const DEFAULT_SEARCH_COMMAND_LIMIT = 20;
@@ -65,7 +61,7 @@ export async function runSearchCommand(options: SearchCommandOptions): Promise<s
     return USAGE;
   }
   const hits: SessionSearchHit[] = [];
-  const sessionsDir = join(options.root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(options.root);
   const search = createSessionSearch(sessionsDir).search(
     { keywords, ...(role !== undefined ? { roles: [role] } : {}) },
     { limit }

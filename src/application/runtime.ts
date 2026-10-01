@@ -32,8 +32,6 @@ import {
   UPDATE_MEMORY_TOOL,
   updateMemoryRegistration,
 } from "../memory/update-memory-tool.ts";
-import { loadCommandsConfig } from "../persistence/commands-config.ts";
-import { loadGrantConfig } from "../persistence/grants-config.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import {
   type BeforeCompaction,
@@ -56,8 +54,15 @@ import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { MemoryReviewTag, ReviewCoverage } from "../state/learned-memory.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
+import {
+  commandsConfigOf,
+  configGrantRulesOf,
+  emptySettingsSnapshot,
+  type SettingsSnapshot,
+} from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
@@ -100,6 +105,7 @@ import {
   WAIT_WORKERS_TOOL,
   WORKER_STATUS_TOOL,
 } from "./orchestration-tools.ts";
+import { createProtectedPathResolver } from "./protected-paths.ts";
 import {
   createOrchestrateTool,
   ORCHESTRATE_TOOL,
@@ -158,8 +164,10 @@ export interface RuntimeDeps {
   // 放权键需要它；cli 传 REPL 问答版，将来的 tui 传面板版。
   // M6.5 S1（决策 056）：缺省 = 无审批通道，prompt 档一律 fail-closed 拒绝（006）——headless 运行如此
   createApprovalHandler?: (grants: SessionGrantStore) => ApprovalHandler;
-  // M4 S6（D6/F）：固化配置规则——缺省时 buildRuntime 自行 loadGrantConfig；
-  // 畸形文件在此响亮失败（治理配置 fail-closed，启动中止）
+  // 决策 325：本会话的设置快照（会话开始时读一次；worker 与沙箱会话用派出它的会话的快照）。放权规则（三层并集）与
+  // 命令短名都从它取；缺省为空快照（不读任何设置文件——测试与跑批器如此，日常入口一律显式给出）
+  settings?: SettingsSnapshot;
+  // M4 S6（D6/F）：固化配置规则——缺省取设置快照里的放权规则（测试可直接注入）
   configGrants?: readonly ConfigGrantRule[];
   // M4 S6（决策 3b）：冷恢复种子——续跑时由会话存储的授权条目还原，
   // 会话 grant 崩溃后静默继续有效
@@ -293,6 +301,8 @@ export interface RuntimeBundle {
   // M4 S6：grant 运行态（审批提示 [a]/[d] 与 /grants /revoke /grants save 共用同一存储）
   grantStore: SessionGrantStore;
   configGrants: readonly ConfigGrantRule[];
+  // 决策 325：本会话的设置快照（worker 按它继承，/grants 按它列出各层的放权规则）
+  settings: SettingsSnapshot;
   // M5.7 S3：本运行面持有的 MCP 会话（disposeRuntime 一并关闭）
   mcp?: McpSession;
   // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
@@ -349,9 +359,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         "目前只支持无审批通道的无人值守运行"
     );
   }
-  const sessionsDir = path.join(governanceRoot, ".pigeon", "sessions");
-  // F：固化配置启动时装载（畸形 → 抛错，启动中止——授权语义不明绝不静默运行）
-  const configGrants = deps.configGrants ?? loadGrantConfig(governanceRoot);
+  const sessionsDir = sessionsDirOf(governanceRoot);
+  // 决策 325：设置快照（会话开始时已读好、校验过）；放权规则取三层并集
+  const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
+  const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
     if (scoped.length > 0) {
@@ -361,8 +372,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       );
     }
   }
-  // M5.5 S5（决策 048）：可选的命令短名与角色允许清单（畸形 → 抛错，启动中止）
-  const commandsConfig = loadCommandsConfig(governanceRoot);
+  // M5.5 S5（决策 048）：可选的命令短名与角色允许清单（取自设置快照的 commands 一节）
+  const commandsConfig = commandsConfigOf(settings);
   // 会话存储写者在配置校验之后打开（装配早期抛错时不留下空的会话文件）
   const sessionStore = openSessionStore({
     sessionsDir,
@@ -764,6 +775,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         workspaceRoot: deps.workspaceRoot,
         // 决策 302：worker 改自己工作树内的文件默认放行
         ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
+        // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按真实路径判定，容器工作区只做词法判定）
+        protectedPath: createProtectedPathResolver({
+          workspaceRoot: deps.workspaceRoot,
+          governanceRoot,
+          realPaths: deps.workspaceHost === undefined,
+        }),
       })
     ),
     sessionId: deps.sessionId,
@@ -783,6 +800,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     sessionStore,
     grantStore,
     configGrants,
+    settings,
     toolTiers,
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),

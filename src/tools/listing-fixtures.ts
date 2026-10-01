@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const CHURN_SCRIPT = `import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-appendFileSync(".pigeon/sessions/s.jsonl", "{}\\n");
-mkdirSync(".pigeon/learned", { recursive: true });
-writeFileSync(".pigeon/learned/MEMORY.md", "- fact\\n");
+appendFileSync(".pigeon/state/sessions/s.jsonl", "{}\\n");
+mkdirSync(".pigeon/state/learned", { recursive: true });
+writeFileSync(".pigeon/state/learned/MEMORY.md", "- fact\\n");
 writeFileSync("b.txt", "b\\n");
 appendFileSync("a.txt", "more\\n");
 rmSync("gone.txt");
@@ -29,9 +29,9 @@ export const CHURN_FILE_CHANGES = {
 
 // 在 root 下布好执行前的文件；返回造成上述变化的 run_command 命令串（node 执行放在工作区外的脚本）与清理函数
 export function seedGovernanceChurn(root: string): { command: string; cleanup: () => void } {
-  mkdirSync(join(root, ".pigeon", "sessions"), { recursive: true });
+  mkdirSync(join(root, ".pigeon", "state", "sessions"), { recursive: true });
   mkdirSync(join(root, "sub", ".pigeon"), { recursive: true });
-  writeFileSync(join(root, ".pigeon", "sessions", "s.jsonl"), "{}\n");
+  writeFileSync(join(root, ".pigeon", "state", "sessions", "s.jsonl"), "{}\n");
   writeFileSync(join(root, "sub", ".pigeon", "keep.txt"), "keep\n");
   writeFileSync(join(root, "a.txt"), "a\n");
   writeFileSync(join(root, "gone.txt"), "gone\n");

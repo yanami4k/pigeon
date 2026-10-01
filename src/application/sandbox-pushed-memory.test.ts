@@ -1,6 +1,6 @@
 // 日常沙箱与推送记忆的交汇处（决策 192、207、237、245、252）：沙箱会话开着推送记忆时，收尾顺序为
 // 最后一次验证 → 收尾复盘 → 交回分支 → 删除容器；收尾复盘与压缩前复盘的 read_file 都经同一个容器执行端，复盘不启动 MCP；
-// update_memory 写宿主治理根下的 .pigeon/learned/MEMORY.md，不经容器执行端。容器以假 docker 代替，工作区是真 git 仓库。
+// update_memory 写宿主治理根下的 .pigeon/state/learned/MEMORY.md，不经容器执行端。容器以假 docker 代替，工作区是真 git 仓库。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -81,7 +81,7 @@ function configureMarkerMcp(root: string): string {
   return marker;
 }
 
-// 容器工作区里有没有 .pigeon/learned（假 docker 的"容器内"路径即本机目录）
+// 容器工作区里有没有 .pigeon/state/learned（假 docker 的"容器内"路径即本机目录）
 function containerHasLearned(containerRoot: string): boolean {
   const walk = (dir: string): boolean =>
     readdirSync(dir, { withFileTypes: true }).some((entry) => {
@@ -221,7 +221,11 @@ test("pigeon run --sandbox 开着推送：最后一次验证 → 收尾复盘（
     assert.deepEqual(fake.state().containers, {}, "交回后删除容器");
     // 记忆写在宿主治理根，容器里没有
     assert.ok(readFileSync(memoryFileOf(repo), "utf8").includes("事实：复盘时记下的事实"));
-    assert.equal(containerHasLearned(fake.containerRoot), false, "容器里没有 .pigeon/learned");
+    assert.equal(
+      containerHasLearned(fake.containerRoot),
+      false,
+      "容器里没有 .pigeon/state/learned"
+    );
     // 沙箱里包括复盘都不启动 MCP 服务
     assert.equal(existsSync(marker), false, "MCP 服务没有被启动");
   } finally {
@@ -315,7 +319,11 @@ test("交互沙箱会话开着推送：update_memory 写宿主的 MEMORY.md、�
     assert.equal(existsSync(join(repo, "inside.txt")), false);
     // update_memory 写宿主治理根，容器里没有
     assert.ok(readFileSync(memoryFileOf(repo), "utf8").includes("事实：干活时记下的事实"));
-    assert.equal(containerHasLearned(fake.containerRoot), false, "容器里没有 .pigeon/learned");
+    assert.equal(
+      containerHasLearned(fake.containerRoot),
+      false,
+      "容器里没有 .pigeon/state/learned"
+    );
     assert.equal(existsSync(marker), false, "MCP 服务没有被启动");
     await closeSandbox(sandbox);
     assert.deepEqual(fake.state().containers, {});

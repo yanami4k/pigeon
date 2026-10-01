@@ -11,15 +11,27 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { createFixtureServer, type FixtureServer } from "../mcp/fixtures.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
+import { mcpConfigOf } from "../state/settings.ts";
 import { startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
+// 决策 325：MCP 风险档写在项目共享设置的 mcp 一节，经设置快照取用（用户级指到空的临时目录，不碰真实的家目录）
 function writeMcpConfig(root: string, servers: Record<string, unknown>): void {
   mkdirSync(join(root, ".pigeon"), { recursive: true });
-  writeFileSync(join(root, ".pigeon", "mcp.json"), JSON.stringify({ version: 1, servers }));
+  writeFileSync(join(root, ".pigeon", "settings.json"), JSON.stringify({ mcp: { servers } }));
+}
+
+function mcpConfigAt(root: string) {
+  const home = mkdtempSync(join(tmpdir(), "pigeon-mcp-home-"));
+  try {
+    return mcpConfigOf(loadSettings(root, { homeDir: home }));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 function text(value: string) {
@@ -73,7 +85,7 @@ function fxServer(fixtures: FixtureServer[]) {
 
 // 读会话存储里本会话的视图
 function loadView(root: string, sessionId: string) {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, "会话存储里应有本会话");
   return loaded.view;
 }
@@ -107,6 +119,7 @@ test("MCP 接线：冲突落 Run 开始条目；声明只读或未配置、声�
     const mcp = await startMcpSession({
       governanceRoot: root,
       workspaceRoot: root,
+      config: mcpConfigAt(root),
       createTransport: fxServer(fixtures),
     });
     const asked: ApprovalRequest[] = [];
@@ -238,6 +251,7 @@ test("MCP 接线：server 掉线后核心 Run 照跑，MCP 调用报环境错误
     const mcp = await startMcpSession({
       governanceRoot: root,
       workspaceRoot: root,
+      config: mcpConfigAt(root),
       createTransport: fxServer(fixtures),
       maxRestarts: 0,
     });
@@ -297,7 +311,11 @@ test("MCP 接线：server 掉线后核心 Run 照跑，MCP 调用报环境错误
 test("MCP 接线：没有 MCP 配置时会话为空，Run 开始条目不带 MCP 字段，核心 Run 不受影响", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-mcp-e2e-"));
   try {
-    const mcp = await startMcpSession({ governanceRoot: root, workspaceRoot: root });
+    const mcp = await startMcpSession({
+      governanceRoot: root,
+      workspaceRoot: root,
+      config: mcpConfigAt(root),
+    });
     assert.deepEqual(mcp.tools, []);
     assert.deepEqual(mcp.summary(), { mcpTools: [], mcpServers: [] });
     const sessionId = newSessionId();

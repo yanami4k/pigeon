@@ -17,6 +17,7 @@ import {
   grantScopeFor,
   hostGrantKeyLabel,
   offersDirectoryGrant,
+  protectedPathLine,
 } from "../approvals/handler.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
 
@@ -39,6 +40,10 @@ export function createCliApprovalHandler(
       write(`${source}\n`);
     }
     write(`工具：${request.toolName}\n`);
+    const protectedLine = protectedPathLine(request);
+    if (protectedLine !== undefined) {
+      write(`${protectedLine}\n`);
+    }
     const commandLine = execCommandLine(request);
     if (commandLine !== undefined) {
       write(`${commandLine}\n`);

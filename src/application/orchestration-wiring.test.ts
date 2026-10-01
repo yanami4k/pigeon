@@ -12,10 +12,11 @@ import type { ApprovalRequest } from "../approvals/handler.ts";
 import { STREAM_SPAWN_WORKERS, STREAM_TASK_LIST } from "../eval/stream-agents.ts";
 import { effectivePigeonSettings } from "../eval/stream-experiment.ts";
 import { CONDITION_SPECS } from "../eval/stream-runner.ts";
-import { loadOrchestrationConfig } from "../persistence/orchestration-config.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
+import { orchestrationSettingsOf as orchestrationSectionOf } from "../state/settings.ts";
 import { runHeadlessOnce } from "./headless-core.ts";
 import { orchestrationSettingsOf, parseLaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
@@ -123,21 +124,25 @@ test("任务清单开关：给了才注册、只给主会话；编排配置缺�
       )
     ).includes("update_tasks")
   );
-  assert.equal(loadOrchestrationConfig(root).taskList, true);
+  // 决策 325：编排设定是设置的 orchestration 一节（用户级指到空的临时目录）
+  const home = mkdtempSync(join(tmpdir(), "pigeon-orch-home-"));
+  const loadOrchestration = () => orchestrationSectionOf(loadSettings(root, { homeDir: home }));
+  assert.equal(loadOrchestration().taskList, true);
   mkdirSync(join(root, ".pigeon"), { recursive: true });
   writeFileSync(
-    join(root, ".pigeon", "orchestration.json"),
+    join(root, ".pigeon", "settings.json"),
     JSON.stringify({
-      version: 1,
-      taskList: false,
-      maxConcurrent: 3,
-      maxDepth: 2,
-      worker: { maxTurns: 10, wallClockMinutes: 5 },
-      stallMinutes: 2,
-      approvalTimeoutMinutes: 1,
+      orchestration: {
+        taskList: false,
+        maxConcurrent: 3,
+        maxDepth: 2,
+        worker: { maxTurns: 10, wallClockMinutes: 5 },
+        stallMinutes: 2,
+        approvalTimeoutMinutes: 1,
+      },
     })
   );
-  const settings = loadOrchestrationConfig(root);
+  const settings = loadOrchestration();
   assert.deepEqual(settings, {
     maxConcurrent: 3,
     maxDepth: 2,
@@ -151,12 +156,16 @@ test("任务清单开关：给了才注册、只给主会话；编排配置缺�
   });
   // 启动参数优先于配置
   const flags = parseLaunchFlags(["--worker-concurrency", "5"], { usage: "u", spawnWorkers: true });
-  assert.equal(orchestrationSettingsOf(flags, root).maxConcurrent, 5);
-  writeFileSync(
-    join(root, ".pigeon", "orchestration.json"),
-    JSON.stringify({ version: 1, maxConcurrent: 0 })
+  assert.equal(
+    orchestrationSettingsOf(flags, loadSettings(root, { homeDir: home })).maxConcurrent,
+    5
   );
-  assert.throws(() => loadOrchestrationConfig(root), /编排配置校验失败/);
+  writeFileSync(
+    join(root, ".pigeon", "settings.json"),
+    JSON.stringify({ orchestration: { maxConcurrent: 0 } })
+  );
+  assert.throws(() => loadOrchestration(), /settings\.json（项目共享）/);
+  rmSync(home, { recursive: true, force: true });
 });
 
 async function headlessTools(

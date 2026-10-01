@@ -62,10 +62,19 @@ export interface ToolGovernanceOptions {
   // 决策 302：worker 用写层文件工具改工作区根（它自己的工作树）内的文件默认放行——排在 deny、放权、免审、yolo、只读之后，
   // 原本要问人时生效；跑命令、读网页等其余动作照旧请示。只由 worker 装配时给
   ownWorkspaceWrites?: boolean;
+  // 决策 326 ①：受保护路径判定（项目的 .pigeon 目录）。写入类文件工具的 path 落在其上时：会话放权与配置放权都不放行、
+  // worker 自己工作树内的默认放行也不适用，须人逐次批准（yolo 下放行，拒绝名单照常优先）。缺省不判定
+  protectedPath?: (target: string) => string | undefined;
 }
 
 // 决策 302 所说的写层文件工具：改文件的内置工具（两种编辑模式都叫 edit_file）
 const OWN_WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set(["edit_file"]);
+
+// 调用的 path 参数（字符串才算）
+function pathArgOf(args: unknown): string | undefined {
+  const target = (args as { path?: unknown } | null)?.path;
+  return typeof target === "string" && target !== "" ? target : undefined;
+}
 
 // 调用的 path 参数落在工作区根之内（词法判定；工具自身另有工作区限定）
 function withinWorkspace(root: string, args: unknown): boolean {
@@ -93,6 +102,7 @@ class GovernedToolCalls implements ToolGovernance {
   readonly #configGrants: readonly ConfigGrantRule[];
   readonly #workspaceRoot: string | undefined;
   readonly #ownWorkspaceWrites: boolean;
+  readonly #protectedPath: ((target: string) => string | undefined) | undefined;
   // ToolExecution 账本：toolCallId → 记录
   readonly #executions = new Map<string, ToolExecution>();
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
@@ -122,6 +132,7 @@ class GovernedToolCalls implements ToolGovernance {
     this.#configGrants = options.configGrants ?? [];
     this.#workspaceRoot = options.workspaceRoot;
     this.#ownWorkspaceWrites = options.ownWorkspaceWrites === true;
+    this.#protectedPath = options.protectedPath;
     // 广告了未在注册表登记的工具 = 配置错误，构造期 fail-fast
     for (const name of host.tools.keys()) {
       if (!this.#registry.has(name)) {
@@ -222,13 +233,24 @@ class GovernedToolCalls implements ToolGovernance {
     const needsShell = inspection?.needsShell === true;
     // 决策 290：网络档工具只读判定这次调用要访问的主机——审批面板显示它，[a] 建按网站的放权
     const host = this.#inspectHost(toolName, rawArgs);
+    // 决策 326 ①：写入类文件工具写受保护路径——放权（会话与配置）一概不参与求值，worker 的默认放行也不适用
+    const protectedTarget = this.#protectedTargetOf(toolName, rawArgs);
     const grantHit =
-      this.#sessionGrants?.match(toolName, rawArgs, { needsShell }) ??
-      matchConfigGrants(this.#configGrants, this.#workspaceRoot, toolName, rawArgs, needsShell);
+      protectedTarget !== undefined
+        ? null
+        : (this.#sessionGrants?.match(toolName, rawArgs, { needsShell }) ??
+          matchConfigGrants(
+            this.#configGrants,
+            this.#workspaceRoot,
+            toolName,
+            rawArgs,
+            needsShell
+          ));
     let decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined);
     // 决策 302：worker 改自己工作树内的文件，原本要问人的改为放行（记 policy:auto）
     if (
       decision.kind === "prompt" &&
+      protectedTarget === undefined &&
       this.#ownWorkspaceWrites &&
       this.#workspaceRoot !== undefined &&
       OWN_WORKSPACE_WRITE_TOOLS.has(toolName) &&
@@ -321,6 +343,7 @@ class GovernedToolCalls implements ToolGovernance {
       // 048 修订：面板原样显示将执行的命令串，需 shell 时标明
       ...(inspection !== undefined ? { command: inspection.command, needsShell } : {}),
       ...(host !== undefined ? { host } : {}),
+      ...(protectedTarget !== undefined ? { protectedPath: protectedTarget } : {}),
       // 出处 run：审批提示创建 grant（[a]/[d]）时写入 grant.created 事件
       runId: this.#host.activeRunId(),
     });
@@ -354,6 +377,19 @@ class GovernedToolCalls implements ToolGovernance {
     record = advanceToolExecution(record, "execution", Date.now());
     this.#executions.set(toolCallId, record);
     return { kind: "allow" };
+  }
+
+  // 写入类文件工具（写档、按工作区限定路径）的 path 落在受保护路径上时返回其展示写法
+  #protectedTargetOf(toolName: string, args: unknown): string | undefined {
+    if (this.#protectedPath === undefined) {
+      return undefined;
+    }
+    const registration = this.#registry.get(toolName);
+    if (registration?.tier !== "write" || registration.pathConfinement?.kind !== "workspace") {
+      return undefined;
+    }
+    const target = pathArgOf(args);
+    return target !== undefined ? this.#protectedPath(target) : undefined;
   }
 
   // exec 工具的只读命令检查（048 修订）；工具无此能力或检查失败返回 undefined（参数问题由执行时的校验报出）

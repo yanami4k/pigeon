@@ -13,6 +13,7 @@ import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { openSessionStoreWriter } from "../pi-runtime/session-store.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -59,12 +60,12 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
     // tester 只能跑为它登记的命令（048）
     mkdirSync(join(repo, ".pigeon"), { recursive: true });
     writeFileSync(
-      join(repo, ".pigeon", "commands.json"),
-      JSON.stringify({ version: 1, commands: { ver: "node -v" }, roles: { tester: ["ver"] } })
+      join(repo, ".pigeon", "settings.json"),
+      JSON.stringify({ commands: { commands: { ver: "node -v" }, roles: { tester: ["ver"] } } })
     );
 
     const parentId = newSessionId();
-    const sessionsDir = join(repo, ".pigeon", "sessions");
+    const sessionsDir = join(repo, ".pigeon", "state", "sessions");
     const faults: unknown[] = [];
     const parentStore = openSessionStoreWriter({
       sessionsRoot: sessionsDir,
@@ -115,6 +116,8 @@ test("审批汇聚：两个 worker 并发审批一次一个，决定与放权各
         provider: "fake-provider",
         modelId: "fake-model-1",
         homeDir,
+        // 决策 325：worker 用派出它的会话的设置快照
+        settingsSnapshot: loadSettings(repo, { homeDir }),
         streamFnFor: (request) =>
           createFakeStreamFn({
             replies: [

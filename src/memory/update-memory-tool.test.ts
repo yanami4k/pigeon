@@ -41,7 +41,7 @@ const add = (fact: string, refs: string[] = ["src/a.ts"], reason = "理由") =>
 test("工具说明与参数说明逐字照 B 第 2 节", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
-    "新增、改写或删除本项目的学到的记忆（.pigeon/learned/MEMORY.md）。只写不读：记忆已在会话开始时放进系统提示。\n" +
+    "新增、改写或删除本项目的学到的记忆（.pigeon/state/learned/MEMORY.md）。只写不读：记忆已在会话开始时放进系统提示。\n" +
       "每条是一句陈述句的事实，不写成对自己的命令；附至少一处引用：代码写成 文件 或 文件::函数，来自用户明确要求而指不到代码的写 user（工具会补上本会话编号）；再附一句理由，写明依据。\n" +
       "只记以后在本项目仍然成立、会影响做法、又不容易从代码一眼看出的事实；不记任务经过、只在本次改动里才成立的事、环境一时的故障、通用常识、从代码一读就知道的内容，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找，不记值本身）。\n" +
       "记忆有总量上限，写满时新增会被拒绝，须先合并相近条目或删除过时条目。\n" +
@@ -73,7 +73,7 @@ test("治理档位为写、只写 learned/、免审批", () => {
   assert.equal(registration.approvalFree, true);
   assert.deepEqual(registration.pathConfinement, {
     kind: "roots",
-    roots: [join("/proj", ".pigeon", "learned")],
+    roots: [join("/proj", ".pigeon", "state", "learned")],
   });
 });
 
@@ -113,9 +113,9 @@ test("编号不复用：删掉最大编号后再新增，编号接着往上走�
     await call(root, { action: "remove", id: "L2" });
     const next = await call(root, add("三"));
     assert.equal(next.details.id, "L3");
-    assert.equal(readFileSync(join(root, ".pigeon", "learned", "next-id"), "utf8"), "4\n");
+    assert.equal(readFileSync(join(root, ".pigeon", "state", "learned", "next-id"), "utf8"), "4\n");
     // 人删了另存的编号：按现有最大编号续
-    rmSync(join(root, ".pigeon", "learned", "next-id"));
+    rmSync(join(root, ".pigeon", "state", "learned", "next-id"));
     const after = await call(root, add("四"));
     assert.equal(after.details.id, "L4");
   }));
@@ -190,10 +190,13 @@ test("写满判定在锁内：等锁期间另一处写满了记忆，拿到锁�
     const entry = "- [L1] 事实：一\n  引用：a\n  理由：r\n";
     const limit = [...entry].length + 2;
     // 另一个写者（另一进程的复盘等）正持有记忆锁
-    const release = acquireExclusiveLock(join(root, ".pigeon", "learned.lock"), "测试持锁");
+    const release = acquireExclusiveLock(
+      join(root, ".pigeon", "state", "learned.lock"),
+      "测试持锁"
+    );
     const pending = call(root, add("二", ["a"], "r"), limit);
     // 持锁期间对方写满
-    mkdirSync(join(root, ".pigeon", "learned"), { recursive: true });
+    mkdirSync(join(root, ".pigeon", "state", "learned"), { recursive: true });
     writeFileSync(memoryFileOf(root), `${MEMORY_FILE_HEADER}${entry}`);
     release();
     const result = await pending;
@@ -203,7 +206,7 @@ test("写满判定在锁内：等锁期间另一处写满了记忆，拿到锁�
 
 test("人改坏格式：拒绝写入并指出行号，文件原样不动", () =>
   withRoot(async (root) => {
-    mkdirSync(join(root, ".pigeon", "learned"), { recursive: true });
+    mkdirSync(join(root, ".pigeon", "state", "learned"), { recursive: true });
     const broken = `${MEMORY_FILE_HEADER}- [L1] 事实：一\n引用：a\n  理由：r\n`;
     writeFileSync(memoryFileOf(root), broken);
     const result = await call(root, add("二"));

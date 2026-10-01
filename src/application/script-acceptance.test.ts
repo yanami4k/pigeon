@@ -118,8 +118,5 @@ test("等 worker 的脚本不被误停：worker 跑得比判定时长久，脚�
 
 test("卡住的判定时长可在编排配置里改（script.stallMinutes，缺省 10 分钟）", () => {
   assert.equal(orchestrationSettings(undefined).scriptStallMs, 600_000);
-  assert.equal(
-    orchestrationSettings({ version: 1, script: { stallMinutes: 2 } }).scriptStallMs,
-    120_000
-  );
+  assert.equal(orchestrationSettings({ script: { stallMinutes: 2 } }).scriptStallMs, 120_000);
 });

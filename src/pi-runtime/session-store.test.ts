@@ -36,7 +36,7 @@ function tempRoot(): { root: string; sessions: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-store-"));
   return {
     root,
-    sessions: join(root, ".pigeon", "sessions"),
+    sessions: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -60,7 +60,7 @@ function options(
   return {
     sessionsRoot: sessions,
     sessionId,
-    cwd: dirname(dirname(sessions)),
+    cwd: dirname(dirname(dirname(sessions))),
     lock: acquireSessionFileLock,
     ...extra,
   };

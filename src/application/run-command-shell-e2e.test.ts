@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
@@ -29,7 +30,7 @@ const SHELL_2 = shellCommand("x", "z");
 
 // 读会话存储里本会话的全部工具结果消息（按顺序）与授权条目
 function storeFacts(root: string, sessionId: string) {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, "会话存储里应有本会话");
   const toolResults = loaded.view.runs
     .flatMap((run) => run.messages.map((ref) => ref.message))
@@ -58,6 +59,8 @@ function makeRuntime(
     streamFn: createFakeStreamFn({ replies: options.replies as never }),
     workspaceRoot: root,
     homeDir: root,
+    // 决策 325：放权规则取自设置快照（用户级指到另一个空的临时目录）
+    settings: loadSettings(root, { homeDir: mkdtempSync(join(tmpdir(), "pigeon-shell-home-")) }),
     sessionId,
     yolo: options.yolo === true,
     provider: "fake-provider",
@@ -149,21 +152,22 @@ test("shell 命令：不带 shell 标记的固化规则不能免审，仍弹人�
   try {
     mkdirSync(join(root, ".pigeon"), { recursive: true });
     writeFileSync(
-      join(root, ".pigeon", "grants.json"),
+      join(root, ".pigeon", "settings.local.json"),
       JSON.stringify({
-        version: 1,
-        grants: [
-          {
-            tool: "run_command",
-            command: SHELL_1,
-            promotedFrom: {
-              grantId: newGrantId(),
-              sessionId: newSessionId(),
-              firstCall: { toolCallId: "toolu_1", args: { command: SHELL_1 } },
-              promotedAt: 1,
+        permissions: {
+          grants: [
+            {
+              tool: "run_command",
+              command: SHELL_1,
+              promotedFrom: {
+                grantId: newGrantId(),
+                sessionId: newSessionId(),
+                firstCall: { toolCallId: "toolu_1", args: { command: SHELL_1 } },
+                promotedAt: 1,
+              },
             },
-          },
-        ],
+          ],
+        },
       })
     );
     const runtime = makeRuntime(root, { replies: [call(SHELL_1, "跑"), { text: "完成" }] });

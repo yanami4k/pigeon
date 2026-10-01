@@ -1,7 +1,7 @@
 // 会话运行面装配（决策 067）：cli 与 tui 共用一份——作用域（worker 会话回到其工作树与委派策略）、
 // grant 种子、MCP 启动、运行面构建。装配失败时先关掉已启动的 MCP server 再上抛（先建后换语义不变）。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -26,18 +26,23 @@ function fakeMcp(): { session: McpSession; closed: () => boolean } {
   return { session, closed: () => closed };
 }
 
-test("装配失败：先关掉已启动的 MCP server 再上抛（畸形 grants.json 属治理配置 fail-closed）", async () => {
+test("装配失败：先关掉已启动的 MCP server 再上抛（装配参数不成立即 fail-closed）", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-session-runtime-"));
   try {
-    mkdirSync(join(root, ".pigeon"), { recursive: true });
-    writeFileSync(join(root, ".pigeon", "grants.json"), "{ 这不是 JSON");
     const mcp = fakeMcp();
     await assert.rejects(() =>
       openSessionRuntime({
         governanceRoot: root,
         sessionId: newSessionId(),
         streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
-        flags: { yolo: false, provider: "custom", modelId: "custom", persistThinking: true },
+        // 设置文件在会话开始时已读成快照；这里用装配时才校验的参数造一次装配失败
+        flags: {
+          yolo: false,
+          provider: "custom",
+          modelId: "custom",
+          persistThinking: true,
+          maxOutputTokens: 0,
+        },
         startMcp: async () => mcp.session,
       })
     );

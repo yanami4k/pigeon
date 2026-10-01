@@ -1,11 +1,9 @@
-// 固化 grant 规则 schema（M4 S6，D6：项目级 .pigeon/grants.json，JSON + 版本化 typebox schema）。
+// 固化 grant 规则 schema（M4 S6，D6；决策 325 起为 settings.json 的 permissions 一节，三层并集生效）。
 // 规则的稳定身份是 promotedFrom.grantId（M4 收口决策 ①）；匹配语义在 tools/grants.ts，
-// 文件读写在 persistence/grants-config.ts，会话 grant 运行态在 approvals/grant-store.ts。
+// 写入（/grants save 与 /revoke，只写项目个人一层）在 persistence/grants-config.ts，会话 grant 运行态在 approvals/grant-store.ts。
 // M5.5 S5（决策 048）：exec 档规则带 command（精确命令串），加法式字段，版本不变。
 import { type Static, Type } from "typebox";
 import { type GrantId, GrantIdSchema, SessionIdSchema } from "./ids.ts";
-
-export const GRANTS_CONFIG_VERSION = 1;
 
 // 升格出处（promotedFrom）：哪次会话、哪次动作、首次批准的调用——团队共享工具权限
 // 是未来的显式决策，本设计先把每条固化规则的出处结构化留证
@@ -33,10 +31,13 @@ export const ConfigGrantRuleSchema = Type.Object({
 });
 export type ConfigGrantRule = Static<typeof ConfigGrantRuleSchema>;
 
-export const GrantsConfigFileSchema = Type.Object({
-  version: Type.Literal(GRANTS_CONFIG_VERSION),
-  grants: Type.Array(ConfigGrantRuleSchema),
-});
+export const PermissionsSectionSchema = Type.Object(
+  {
+    grants: Type.Optional(Type.Array(ConfigGrantRuleSchema)),
+  },
+  { additionalProperties: false }
+);
+export type PermissionsSection = Static<typeof PermissionsSectionSchema>;
 
 // 会话里生效中的授权（建立减撤销）：续跑时由会话存储的授权条目还原，作为会话 grant 运行态的冷恢复种子（决策 3b）
 export interface ActiveGrant {

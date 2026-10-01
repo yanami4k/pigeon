@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Value } from "typebox/value";
+import { memoryReviewConfigPathOf, reviewBackfillDirOf } from "../state/paths.ts";
 import {
   type BackfillLease,
   BackfillLeaseSchema,
@@ -25,11 +26,11 @@ import { acquireExclusiveLock, ExclusiveLockError } from "./exclusive-lock.ts";
 export class MemoryReviewConfigError extends Error {}
 
 export function memoryReviewConfigPath(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", "memory-review.json");
+  return memoryReviewConfigPathOf(governanceRoot);
 }
 
 export function reviewBackfillDir(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", "review-backfill");
+  return reviewBackfillDirOf(governanceRoot);
 }
 
 // 读配置：补做的生效数值与复盘模型（没指定即缺省）；文件缺失取缺省，畸形响亮失败

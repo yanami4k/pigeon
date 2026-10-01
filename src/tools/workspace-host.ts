@@ -3,6 +3,8 @@
 // 跨边界的失败模式（超时后的孤儿进程、退出码保真、输出截断、路径映射）各由实现自己保证并各有测试。
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
+import { PIGEON_DIR } from "../state/paths.ts";
+
 // 一次执行的进程参数：direct 直接给出程序与参数；shell 与 cmd.exe 启动器由工具按平台拼好后同样以此形态交来
 export interface HostExecPlan {
   program: string;
@@ -40,7 +42,7 @@ export interface HostExecResult {
 export const LISTING_SKIPPED_DIRS: readonly string[] = [".git", "node_modules"];
 // 只在工作区根：Pigeon 自己的治理目录（会话记录、记忆、放权与各项配置在运行中持续写入，与 agent 所做无关）；
 // 子目录里同名的普通文件夹照常列出
-export const LISTING_SKIPPED_ROOT_DIRS: readonly string[] = [".pigeon"];
+export const LISTING_SKIPPED_ROOT_DIRS: readonly string[] = [PIGEON_DIR];
 
 // 工作区文件清单：相对路径（正斜杠）→ 大小与修改时间签名；不含上面两份名单里的目录
 export interface HostFileSnapshot {

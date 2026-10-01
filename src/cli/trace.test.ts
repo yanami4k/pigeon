@@ -80,7 +80,7 @@ async function scriptSession(
   replies: Parameters<typeof createFakeStreamFn>[0]["replies"],
   sessionId: SessionId = newSessionId()
 ): Promise<{ sessionId: SessionId; runId: RunId }> {
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const existing = locateSessionFile(sessionsDir, sessionId);
   const store = openSessionStoreWriter({
     sessionsRoot: sessionsDir,
@@ -190,7 +190,7 @@ test("trace 报告：大参数截断，超长内容不完整外泄", () =>
 
 test("trace 报告：有开始无收尾的 Run 徽章为未知，会话头计崩溃残留；未配对的工具调用标无结果", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir });
     session.startRun({ task: "改" });
     session.assistant({ toolCalls: [{ name: "edit_file", args: { path: "a.ts" } }] });
@@ -206,7 +206,7 @@ test("trace 报告：有开始无收尾的 Run 徽章为未知，会话头计崩
 
 test("trace 报告：撞上限、上游合成失败、代码快照与验证记录照实呈现", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir, cwd: root });
     session.startRun({ task: "改" });
     session.toolTurn({ name: "edit_file", args: { path: "a.ts" }, checkpoint: true });
@@ -235,7 +235,7 @@ test("trace 报告：撞上限、上游合成失败、代码快照与验证记�
 
 test("trace 报告：空回复异常结束分类为业务失败；验证记录里工具故障的步单列（决策 170 ② ③）", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir, cwd: root });
     session.startRun({ task: "改" });
     session.assistant({ text: "" });
@@ -260,7 +260,7 @@ test("trace 报告：空回复异常结束分类为业务失败；验证记录�
 test("trace 命令只读：正被写入（末行撕裂）的会话照常出报告，全部会话文件字节与工作区不变", () =>
   withRoot(async (root) => {
     const { sessionId } = await scriptSession(root, EDIT_SCRIPT);
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const files = readdirSync(sessionsDir, { recursive: true })
       .map((file) => join(sessionsDir, String(file)))
       .filter((path) => path.endsWith(".jsonl"));
@@ -295,7 +295,7 @@ test("trace 命令：会话不存在时报错并列出已有会话；旧格式�
         return true;
       }
     );
-    const legacy = writeLegacySessionFile(join(root, ".pigeon", "sessions"));
+    const legacy = writeLegacySessionFile(join(root, ".pigeon", "state", "sessions"));
     assert.throws(
       () => runTraceCommand({ root, sessionId: legacy }),
       (error: unknown) =>
@@ -318,7 +318,7 @@ test("trace 命令：会话不存在时报错并列出已有会话；旧格式�
 
 test("trace 报告：读取时跳过的行归异常项；分支会话标来源、不重复画复制来的历史", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const source = createFixtureSession({ sessionsDir });
     const runId = source.startRun({ task: "来源" });
     source.assistant({ text: "来源回复" });

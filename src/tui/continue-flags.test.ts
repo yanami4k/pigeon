@@ -43,7 +43,7 @@ async function makeProject(): Promise<{
 }> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-continue-"));
   initRepo(root, { "a.txt": "a\n" });
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const older = await mainSession(sessionsDir, ["最早的任务：修登录页\n第二行不显示"]);
   const middle = await mainSession(sessionsDir, ["中间的任务", "又一轮"]);
   // 中间的会话派过 worker（worker 会话不列）
@@ -129,7 +129,7 @@ test("--continue 接本项目最近的主会话（本机启动不接沙箱会话
     assert.equal(sandbox.kind === "resume" ? sandbox.sessionId : "", project.sandboxed);
 
     // 最旧的会话又被续聊：它成了最近的
-    const sessionsDir = join(project.root, ".pigeon", "sessions");
+    const sessionsDir = join(project.root, ".pigeon", "state", "sessions");
     const reopened = createFixtureSession({
       sessionsDir,
       sessionId: project.older,

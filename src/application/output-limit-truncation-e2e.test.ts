@@ -45,7 +45,7 @@ test("截断与熔断：length 停止的工具调用不执行、文件不变；�
 
     // a. 工具不执行，文件不变
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), ORIGINAL);
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const loaded = loadStoreSession(sessionsDir, result.sessionId);
     assert.ok(loaded !== undefined, "会话存储里应有本会话");
     assert.equal(loaded.view.runs.length, 1);

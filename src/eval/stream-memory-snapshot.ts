@@ -4,9 +4,10 @@
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { memoryFileFacts } from "../memory/learned-store.ts";
+import { learnedDirOf as learnedDirPath } from "../state/paths.ts";
 
 export function learnedDirOf(jobDir: string): string {
-  return path.join(jobDir, ".pigeon", "learned");
+  return learnedDirPath(jobDir);
 }
 
 export function learnedSnapshotOf(jobDir: string, seq: number): string {

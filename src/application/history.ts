@@ -1,14 +1,9 @@
-// 会话历史投影（M5 S2，决策 045）：/resume 与重启后渲染全部历史——正文（含 thinking）、轮次标记、工具行与 Run 收尾
-// 按会话文件里的顺序交织；安全上限默认 500 行可配，超出时最早部分折叠为一行提示；单条正文有渲染上限；toolResult 默认
-// 折叠只显示工具名与摘要。经只读读取器读新会话存储（决策 181），分支会话只画它自己的部分（开头从来源复制的历史属于
-// 来源会话）。纯投影：输出结构化行，TUI 渲染面与 cli 的 --with-content 各自排版；终端净化在各自边界（036）。
-// 措辞与 TUI 实时流同口径（轮次标记、工具行、thinking 前缀）。
-import { join } from "node:path";
 import {
   hasLegacySessionFile,
   LEGACY_READER_HINT,
   loadSessionView,
 } from "../persistence/session-catalog.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
 import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
@@ -117,7 +112,7 @@ export function loadSessionHistory(
 ): HistoryLine[] {
   const limit = options.limit ?? DEFAULT_HISTORY_LIMIT;
   const entryChars = options.entryChars ?? DEFAULT_HISTORY_ENTRY_CHARS;
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(root);
   const view = loadSessionView(sessionsDir, sessionId);
   if (view === undefined) {
     return [

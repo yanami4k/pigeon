@@ -41,7 +41,7 @@ test("缺省开启：Run 开始条目记下产品缺省的压缩配置（1M 窗�
       skillRoots: [],
       memoryRoots: [],
     });
-    const [start] = runStarts(join(root, ".pigeon", "sessions"), result.sessionId);
+    const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
       contextWindow: 1_000_000,
       reserveTokens: 16_384,
@@ -99,7 +99,7 @@ test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模
       assert.equal(options.reasoning, undefined);
       assert.ok(options.maxTokens !== undefined && options.maxTokens <= Math.floor(0.8 * 16_384));
     }
-    const [start] = runStarts(join(root, ".pigeon", "sessions"), result.sessionId);
+    const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
       contextWindow: 1_000_000,
       reserveTokens: 16_384,

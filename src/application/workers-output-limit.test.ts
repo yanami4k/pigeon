@@ -59,7 +59,7 @@ test("worker 继承父运行面的输出上限：worker 的模型调用收到父
       const outcome = await orchestrator.awaitResult(workerId);
       assert.equal(outcome.status, "completed", JSON.stringify(outcome));
       assert.deepEqual(seen, [2048]);
-      const worker = loadSessionView(join(repo, ".pigeon", "sessions"), workerId);
+      const worker = loadSessionView(join(repo, ".pigeon", "state", "sessions"), workerId);
       assert.equal(worker?.runs.length, 1);
       assert.equal(worker?.runs[0]?.start.model.maxOutputTokens, 2048);
     } finally {

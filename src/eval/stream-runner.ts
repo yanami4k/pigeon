@@ -21,6 +21,7 @@ import {
 import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
+import { sessionsDirOf, verifyConfigPathOf } from "../state/paths.ts";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
@@ -398,7 +399,7 @@ export const QUEUE_VOID_STOP = 30;
 // 治理根里的会话文件（决策 210 的布局：会话根下按工作目录编码的子目录、文件名为创建时间加会话号，另有同目录的锁文件），
 // 以相对会话根的路径（分隔符一律为 /）标识，逐个文件区分：同一工作目录下前后几次尝试的会话落在同一个子目录里
 function sessionFilesOf(jobDir: string): string[] {
-  const dir = path.join(jobDir, ".pigeon", "sessions");
+  const dir = sessionsDirOf(jobDir);
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile())
@@ -417,7 +418,7 @@ function quarantineSessions(
   keep: ReadonlySet<string>,
   label: string
 ): number {
-  const dir = path.join(jobDir, ".pigeon", "sessions");
+  const dir = sessionsDirOf(jobDir);
   const stray = sessionFilesOf(jobDir).filter((f) => !keep.has(f));
   if (stray.length > 0) {
     const target = path.join(outDir, "voided", jobDirName(job), label);
@@ -628,9 +629,9 @@ async function runStreamJob(
   mkdirSync(jobDir, { recursive: true });
   // 分步验证配置另存一份在作业的治理根，供事后查看这个作业验证的是什么（Pigeon 的验证不读它：跑批器每步把分步配置
   // 直接交给步 agent）；不写进容器工作区
-  mkdirSync(path.join(jobDir, ".pigeon"), { recursive: true });
+  mkdirSync(path.dirname(verifyConfigPathOf(jobDir)), { recursive: true });
   writeAtomic(
-    path.join(jobDir, ".pigeon", "verify.json"),
+    verifyConfigPathOf(jobDir),
     `${JSON.stringify(verifyConfigFile(options.runtime.verifySteps, options.judgeTimeoutMs ?? 1_800_000), null, 2)}\n`
   );
   // 每步完成时治理根里的会话文件清单（相对会话根的路径，含工作目录编码子目录）：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出

@@ -28,7 +28,7 @@ async function replWith(
   const root = mkdtempSync(join(tmpdir(), "pigeon-repl-compact-"));
   const sessionId = newSessionId();
   const store = openSessionStoreWriter({
-    sessionsRoot: join(root, ".pigeon", "sessions"),
+    sessionsRoot: join(root, ".pigeon", "state", "sessions"),
     sessionId,
     cwd: root,
     lock: acquireSessionFileLock,

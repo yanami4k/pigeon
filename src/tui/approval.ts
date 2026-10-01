@@ -40,6 +40,7 @@ import {
   grantScopeFor,
   hostGrantKeyLabel,
   offersDirectoryGrant,
+  protectedPathLine,
 } from "../approvals/handler.ts";
 
 // 取消路径的逐字理由（fail-closed 按拒绝处理）
@@ -92,6 +93,10 @@ export function approvalBlockText(
     lines.push(MAIN_SOURCE_LINE);
   }
   lines.push(`工具：${request.toolName}`);
+  const protectedLine = protectedPathLine(request);
+  if (protectedLine !== undefined) {
+    lines.push(protectedLine);
+  }
   const commandLine = execCommandLine(request);
   if (commandLine !== undefined) {
     lines.push(commandLine);

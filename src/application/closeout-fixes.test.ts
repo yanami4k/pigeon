@@ -182,7 +182,7 @@ test("并行同任务派发：验证记录写入失败进错误清单，不被�
     // 宿主会话的真实写者承接 worker 派出与收尾；验证记录另经一个写入即抛错的写入面
     const faults: unknown[] = [];
     const hostStore = openSessionStore({
-      sessionsDir: join(dir, ".pigeon", "sessions"),
+      sessionsDir: join(dir, ".pigeon", "state", "sessions"),
       sessionId: hostId,
       cwd: dir,
       onFault: (fault) => faults.push(fault),

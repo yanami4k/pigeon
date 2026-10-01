@@ -72,7 +72,7 @@ test("replace 模式经治理层：工具与 prompt 随模式切换，yolo 下�
     assert.ok(readResult.includes("2| beta"), readResult);
 
     // 会话存储：edit_file 的工具结果成功，审批闸决定为 yolo 自动放行（只有这一次写档调用）
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), result.sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.ok(loaded !== undefined, "会话存储里应有本会话");
     const edits = (loaded.view.runs[0]?.messages ?? [])
       .map((ref) => ref.message)

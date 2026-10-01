@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { SandboxConfig } from "../state/sandbox-config.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
   containerExec,
@@ -26,12 +27,7 @@ import {
   removeWorkspaceContainer,
   startWorkspaceContainer,
 } from "./container-host.ts";
-import {
-  ensureSandboxImage,
-  loadSandboxConfig,
-  resolveSandboxImage,
-  type SandboxImageSpec,
-} from "./sandbox-image.ts";
+import { ensureSandboxImage, resolveSandboxImage, type SandboxImageSpec } from "./sandbox-image.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "./workdir-snapshot.ts";
 
 // 联网档位（246）：缺省联网，可改为断网；以后可加"只放行包管理源"一档而不改用法
@@ -160,8 +156,10 @@ export interface OpenSandboxOptions {
   resume?: boolean;
   // 决策 278：只从当前分支的最新提交开工，不带未提交的改动（缺省带）；续跑不看这一项
   fromHead?: boolean;
-  // 镜像来源（缺省按项目的 .pigeon/sandbox.json 与环境变量解析）
+  // 镜像来源（缺省按 sandboxConfig 与环境变量解析）
   image?: SandboxImageSpec;
+  // 决策 325：本会话设置快照的 sandbox 一节（缺省空配置，即通用镜像）
+  sandboxConfig?: SandboxConfig;
   docker?: readonly string[];
   // 容器内的工作区根（缺省 /workspace；测试的假 docker 指到本机临时目录）
   containerRoot?: string;
@@ -468,8 +466,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
   }
 
   // 镜像先就位（首次构建可能要几分钟）：之后再拍快照，快照引用不会因镜像构建或拉取失败而留下
-  const spec =
-    options.image ?? resolveSandboxImage(options.repoRoot, loadSandboxConfig(options.repoRoot));
+  const spec = options.image ?? resolveSandboxImage(options.repoRoot, options.sandboxConfig ?? {});
   const image = await ensureSandboxImage(spec, { docker, log });
   const runAsFallbackUser = await imageRunsAsRoot(image, docker, log);
 
@@ -597,7 +594,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
       throw new Error(
         `镜像 ${image} 里没有可用的 git（git --version 失败：${(git.stderr || git.stdout).trim()}）：` +
           "沙箱要在容器里用 git 建仓库、把改动提交成分支交回。请换用带 git 的镜像" +
-          "（.pigeon/sandbox.json 的 image 或 dockerfile），或去掉该配置用 Pigeon 自带的通用镜像"
+          "（设置 sandbox 一节的 image 或 dockerfile），或去掉该配置用 Pigeon 自带的通用镜像"
       );
     }
     const uid = await containerExec({ container, docker, command: ["id", "-u"] });

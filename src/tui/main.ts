@@ -1,24 +1,4 @@
-// Pigeon TUI 入口（M2 S2 壳 + S3 审批面板与 /grants 视图 + S4 会话列表与恢复入口）。
-// 用法：pigeon [--yolo] [--root <工作区根>] --stream-fn <模块路径>（亦可 node src/tui/main.ts 直接启动）
-//   [--provider <名>] [--model <id>]
-// 审批 handler（决策 025 的注入点）：面板版——prompt 档在消息区渲染审批块，四键
-// [y/n/a/d] 决议（S3）；deny/grant/固化配置/yolo/read 五档在 Adapter 排律内求值，
-// 不经过 handler（src/tools/policy.ts 六档排律）。
-// 恢复入口（S4）：/resume <sessionId> 的对账流程在 application/resume.ts；本入口提供
-// rebind 工厂——按 cli resume 同一配方（restoredGrants 种子 + buildRuntime + 旧运行面
-// 释放）装配目标会话运行面，壳换绑后同 sessionId 续跑（重启 TUI 恢复已有会话的路径：
-// 重启后进 /resume）。
-// M5.5 S4（决策 040）：主会话与各 worker 的审批经同一队列汇聚到面板（一次一个）；每个会话运行面
-// 配一个编排器（/spawn /cancel /workers）；恢复 worker 会话时回到它自己的工作树与委派策略，
-// 且其编排器按深度 1 拒绝再派。一个窗口一个进程：退出时先取消在跑的 worker 并等其收尾记录落盘。
-// 决策 264–268：主会话另给主 agent 注册 spawn_worker（--no-spawn-workers 关掉；沙箱里不派 worker），与 /spawn 共用同一个
-// 编排器——同时在跑的上限对人派的与 agent 派的一并计算；agent 派出的个数按每条输入（一次运行）计。
-// 决策 267：pigeon 不带子命令即启动本界面（命令行对话改由 pigeon --line 进入）。
-// 决策 286：pigeon --continue 接本项目最近的主会话、--resume <id> 接指定会话（启动时直接打开，不另建空会话），
-// --resume 不带会话号开壳后弹出会话选择器；运行期告警在壳接管终端期间落消息区（之前与之后照旧写标准错误输出）；
-// 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/tui-history.json。
-// 决策 301：编排面接上编排器的只读观察口、发消息与续做（编排面板、树形视图、进入 worker 会话），树形视图按任务清单标注。
-import path from "node:path";
+import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createSessionAttemptRunner } from "../application/attempt-group.ts";
@@ -52,6 +32,12 @@ import {
   openSessionRuntime,
   pushedMemoryRunOptions,
 } from "../application/session-runtime.ts";
+import {
+  openSessionSettings,
+  parseTrustAnswer,
+  type TrustChoice,
+  trustPromptText,
+} from "../application/session-settings.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
@@ -62,10 +48,12 @@ import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
-import { loadLoopGuardConfig } from "../persistence/loop-guard-config.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
+import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
+import { tuiLogDirOf } from "../state/paths.ts";
+import { loopGuardSettingsOf, webSectionOf } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
@@ -84,6 +72,20 @@ const USAGE =
   "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
+
+// 决策 326 ③：壳接管终端之前，在标准错误输出上逐行问答确认会执行命令的配置
+async function askTrustOnStderr(entries: readonly TrustEntry[]): Promise<TrustChoice> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    for (;;) {
+      const answer = await rl.question(`${trustPromptText(entries)}\n> `);
+      const choice = parseTrustAnswer(answer);
+      if (choice !== undefined) return choice;
+    }
+  } finally {
+    rl.close();
+  }
+}
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -104,15 +106,21 @@ async function main(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
-  // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
-  const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
-  // 决策 308：打转检测——.pigeon/loop-guard.json（缺失取缺省即开着；畸形在接管终端之前响亮失败）
-  const loopGuard = loadLoopGuardConfig(workspaceRoot);
+  // 决策 325、326：旧布局检查、读三层设置成本会话快照、确认会执行命令的条目（壳接管终端之前，行内问答）。
+  // 本进程内的会话（含 /resume 换绑、worker、沙箱会话）都用这一份快照
+  const settings = await openSessionSettings(workspaceRoot, {
+    confirmation: { kind: "interactive", ask: askTrustOnStderr },
+    notice: (line) => console.error(line),
+  });
+  // 决策 297–303：编排设定——设置的 orchestration 一节（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
+  const orchestration = orchestrationSettingsOf(flags, settings);
+  // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
+  const loopGuard = loopGuardSettingsOf(settings);
   // 决策 296：复盘模型（配置里指定时，压缩前、收尾、补做三种复盘都用它）
   applyReviewModelConfig(flags, workspaceRoot);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
   const webTools = webToolsEnabled(flags)
-    ? resolveWebTools({ governanceRoot: workspaceRoot })
+    ? resolveWebTools({ config: webSectionOf(settings) })
     : undefined;
   const webToolsOption = webTools !== undefined ? { webTools } : {};
   // 决策 286：启动时打开哪个会话（新会话，或 --continue / --resume <id> 直接续接）；会话不存在等在接管终端前报错
@@ -208,6 +216,7 @@ async function main(argv: string[]): Promise<void> {
           // 决策 314：金额额度要模型有价格；决策 313：脚本卡住的判定时长
           pricing: () => modelPricing(flags.provider, bundle.adapter.transcript()),
           stallMs: orchestration.scriptStallMs,
+          settings: bundle.settings,
           emit: (line) => {
             shellHolder.current?.addSystem(line);
             shellHolder.current?.render();
@@ -276,12 +285,14 @@ async function main(argv: string[]): Promise<void> {
   const sandbox: Sandbox | undefined = await startSandbox({
     flags,
     governanceRoot: workspaceRoot,
+    settings,
     sessionId,
     ...(resumed ? { resume: true } : {}),
     log: (line) => console.error(`[沙箱] ${line}`),
   });
   const mainOpened = await openSessionRuntime({
     governanceRoot: workspaceRoot,
+    settings,
     sessionId,
     streamFn,
     flags,
@@ -317,7 +328,8 @@ async function main(argv: string[]): Promise<void> {
     terminal: new ProcessTerminal(),
     runtime: slot.bundle.adapter,
     sessionId: slot.sessionId,
-    logDir: path.join(workspaceRoot, ".pigeon"),
+    // 决策 325：终端界面日志在程序状态目录下
+    logDir: tuiLogDirOf(workspaceRoot),
     // 决策 286：状态栏的模型与跨启动的输入历史
     model: `${flags.provider}/${flags.modelId}`,
     provider: flags.provider,
@@ -327,6 +339,7 @@ async function main(argv: string[]): Promise<void> {
       root: workspaceRoot,
       store: slot.bundle.grantStore,
       configRules: slot.bundle.configGrants,
+      layeredRules: slot.bundle.settings.grants,
     },
     // S4：/sessions 会话列表（命令层在 application/session-list.ts，与 cli 同一份）
     sessions: { root: workspaceRoot },
@@ -375,6 +388,7 @@ async function main(argv: string[]): Promise<void> {
         // 决策 3b：会话 grant 种子还原。两者与 MCP 启动一并在 session-runtime.ts（与 cli resume 同一份）
         const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
+          settings,
           sessionId: targetId,
           streamFn,
           flags,
@@ -406,6 +420,7 @@ async function main(argv: string[]): Promise<void> {
             root: workspaceRoot,
             store: bundle.grantStore,
             configRules: bundle.configGrants,
+            layeredRules: bundle.settings.grants,
           },
           workers,
         };

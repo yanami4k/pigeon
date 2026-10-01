@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { PathScopedGrantUnsupportedError } from "../approvals/grant-store.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { fakeSandboxDocker } from "../execution/sandbox-docker-fixtures.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { noMcpSession } from "./mcp.ts";
@@ -84,6 +85,8 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
         }),
         yolo: true,
         homeDir: home,
+        // 决策 325：入口在会话开始时读好的设置快照（MCP 服务名取自它）
+        settings: loadSettings(repo, { homeDir: home }),
         // 只有在容器的工作区里执行才能通过
         verify: { command: "test -f made.txt", timeoutMs: 30_000, source: "flag" },
         startMcp: mcp.start,

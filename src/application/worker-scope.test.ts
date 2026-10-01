@@ -91,3 +91,37 @@ test("运行面范围：分支会话回到文件头记的工作树", async () =>
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("决策 325：旧会话记着旧位置的工作树（.pigeon/worktrees/…）——按旧前缀到新前缀映射，回到 .pigeon/state/worktrees 下的同名工作树", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-scope-legacy-"));
+  try {
+    const sessionsDir = sessionsDirOf(root);
+    const legacyPath = join(root, ".pigeon", "worktrees", "sess-fix-a");
+    const moved = join(root, ".pigeon", "state", "worktrees", "sess-fix-a");
+    mkdirSync(moved, { recursive: true });
+    const parent = createFixtureSession({ sessionsDir, cwd: root });
+    const workerId = newSessionId();
+    parent.workerSpawned({ childSessionId: workerId, name: "fix-a", task: "改" });
+    const { sessionId: parentId } = await parent.close();
+    const worker = createFixtureSession({
+      sessionsDir,
+      sessionId: workerId,
+      cwd: legacyPath,
+      parentSessionId: parentId,
+      metadata: {
+        version: SESSION_ENTRY_VERSION,
+        worker: {
+          name: "fix-a",
+          role: "implementer",
+          workspace: { kind: "git-worktree", path: legacyPath, branch: "pigeon/fix-a" },
+          startedAt: 1,
+        },
+      },
+    });
+    worker.startRun({ task: "改" });
+    await worker.close();
+    assert.equal(sessionRuntimeScope(root, workerId).workspaceRoot, moved);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

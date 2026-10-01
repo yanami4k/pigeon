@@ -18,6 +18,7 @@ import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { storeAttemptLabel } from "../state/session-judge.ts";
+import { emptySettingsSnapshot, mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
@@ -93,8 +94,11 @@ export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
 }
 
 export interface OpenSessionRuntimeRequest {
-  // 治理根：.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在
+  // 治理根：.pigeon/（设置、程序状态、常驻 Memory、Skill）所在
   governanceRoot: string;
+  // 决策 325：本会话的设置快照（入口在会话开始时读一次并确认过会执行命令的条目；本会话内各处都从它取）。
+  // 缺省为空快照（不读任何设置文件）；日常入口一律显式给出
+  settings?: SettingsSnapshot;
   sessionId: SessionId;
   streamFn: StreamFn;
   flags: SessionRuntimeFlags;
@@ -176,6 +180,7 @@ export async function openSessionRuntime(
       "容器工作区暂不支持失败自动分叉重试：分叉要在宿主的工作区上打快照、到独立工作树里续跑，而容器工作区在执行端另一侧"
     );
   }
+  const settings = request.settings ?? emptySettingsSnapshot(request.governanceRoot);
   // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略；新建会话与主会话即治理根
   const scope = sessionRuntimeScope(request.governanceRoot, request.sessionId);
   const restoredGrants =
@@ -187,7 +192,12 @@ export async function openSessionRuntime(
     request.workspaceHost !== undefined
       ? () => noMcpSession()
       : (request.startMcp ??
-        ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot })));
+        ((target) =>
+          startMcpSession({
+            ...target,
+            workspaceRoot: target.workspaceRoot,
+            config: mcpConfigOf(settings),
+          })));
   const mcp = await startMcp({
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
@@ -206,6 +216,7 @@ export async function openSessionRuntime(
       streamFn: request.streamFn,
       workspaceRoot: scope.workspaceRoot,
       governanceRoot: request.governanceRoot,
+      settings,
       ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
       sessionId: request.sessionId,
       yolo: request.flags.yolo,
@@ -313,6 +324,7 @@ export async function openSessionRuntime(
             ? { compaction: request.flags.compaction }
             : {}),
           ...(request.verify !== undefined ? { verify: request.verify } : {}),
+          settings,
           ...pushedMemoryRunOptions(request.flags),
           ...(startMcp !== undefined
             ? {

@@ -12,6 +12,7 @@ import {
   DEFAULT_MEMORY_LIMIT_CHARS,
   entryChars,
   entryId,
+  MEMORY_DISPLAY_PATH,
   MEMORY_FILE_HEADER,
   type MemoryEntry,
   nextIdFloor,
@@ -32,7 +33,7 @@ export const UPDATE_MEMORY_TOOL = "update_memory";
 
 // 工具说明（B 第 2 节冻结原文）
 export const UPDATE_MEMORY_DESCRIPTION = [
-  "新增、改写或删除本项目的学到的记忆（.pigeon/learned/MEMORY.md）。只写不读：记忆已在会话开始时放进系统提示。",
+  `新增、改写或删除本项目的学到的记忆（${MEMORY_DISPLAY_PATH}）。只写不读：记忆已在会话开始时放进系统提示。`,
   "每条是一句陈述句的事实，不写成对自己的命令；附至少一处引用：代码写成 文件 或 文件::函数，来自用户明确要求而指不到代码的写 user（工具会补上本会话编号）；再附一句理由，写明依据。",
   "只记以后在本项目仍然成立、会影响做法、又不容易从代码一眼看出的事实；不记任务经过、只在本次改动里才成立的事、环境一时的故障、通用常识、从代码一读就知道的内容，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找，不记值本身）。",
   "记忆有总量上限，写满时新增会被拒绝，须先合并相近条目或删除过时条目。",
@@ -248,7 +249,7 @@ export function createUpdateMemoryTool(
 export function updateMemoryRegistration(governanceRoot: string): ToolRegistration {
   return {
     name: UPDATE_MEMORY_TOOL,
-    description: "新增、替换或删除学到的记忆（.pigeon/learned/MEMORY.md）",
+    description: `新增、替换或删除学到的记忆（${MEMORY_DISPLAY_PATH}）`,
     parameters: UpdateMemoryParamsSchema,
     tier: "write",
     approvalFree: true,

@@ -58,7 +58,7 @@ test("headless：给了温度，调用选项、注入快照摘要（Run 开始�
     assert.equal(withTemperature.status, "completed");
     assert.ok(fixed.seen.length > 0);
     assert.ok(fixed.seen.every((options) => options.temperature === 0));
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     assert.equal(startedModel(sessionsDir, withTemperature.sessionId).temperature, 0);
 
     const plain = capturing();
@@ -120,7 +120,7 @@ test("推理开启时温度不生效：调用选项里不带温度，Run 开始�
     assert.equal(result.status, "completed");
     assert.ok(run.seen.length > 0);
     assert.ok(run.seen.every((options) => !("temperature" in options)));
-    const model = startedModel(join(root, ".pigeon", "sessions"), result.sessionId);
+    const model = startedModel(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.equal("temperature" in model, false);
     assert.deepEqual(model.temperatureIgnored, { requested: 0, reason: "reasoning-enabled" });
   } finally {

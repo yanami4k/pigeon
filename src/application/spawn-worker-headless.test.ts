@@ -92,7 +92,7 @@ function staged(first: FakeStreamBehavior, then: FakeStreamBehavior): StreamFn {
 
 // 主会话里 spawn_worker 的工具结果文字
 function spawnResults(root: string, sessionId: string): string[] {
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(view !== undefined);
   return view.runs
     .flatMap((run) => run.toolCalls)
@@ -107,7 +107,7 @@ function spawnResults(root: string, sessionId: string): string[] {
 
 // 会话里的用户消息（任务与完成通知）
 function userTexts(root: string, sessionId: string): string[] {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined);
   return restoreSessionContext(loaded.main)
     .messages.filter((message) => message.role === "user")
@@ -123,7 +123,7 @@ function userTexts(root: string, sessionId: string): string[] {
 
 // 主会话派出的 worker 的收尾状态（按名字）
 function childStatuses(root: string, sessionId: string): Record<string, string | undefined> {
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(view !== undefined);
   return Object.fromEntries(
     view.children.map((child) => [child.spawned.name, child.settled?.status])
@@ -179,7 +179,7 @@ test("pigeon run 等全部 worker 结束、完成通知作为新的一轮处理�
   assert.equal(result.status, "completed");
   assert.deepEqual(spawnResults(root, result.sessionId), [spawned("slow")]);
   // 主 agent 自己的运行先结束；worker 结束后通知开了第二个运行
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), result.sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
   assert.equal(view?.runs.length, 2);
   assert.equal(mainCalls, 3);
   const users = userTexts(root, result.sessionId);
@@ -230,7 +230,7 @@ test("主 agent 还在跑时结束的 worker：通知进它这次运行的下一
     ]),
   });
   assert.equal(result.status, "completed");
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), result.sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
   assert.equal(view?.runs.length, 1);
   assert.equal(contexts.length, 3);
   // 第二轮还看不到通知，第三轮（read_file 之后的下一轮）看到
@@ -553,7 +553,7 @@ test("放开嵌套（2 层）：主会话派的 worker 再派下一层并等它�
   });
   assert.equal(result.status, "completed");
   assert.deepEqual(childStatuses(root, result.sessionId), { parent: "completed" });
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), result.sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
   const parentId = view?.children[0]?.spawned.childSessionId;
   assert.ok(parentId !== undefined);
   assert.deepEqual(childStatuses(root, parentId), { child: "completed" });

@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { sha256Hex } from "../state/hashing.ts";
 import type { SkillFileManifestEntry, SkillManifestEntry } from "../state/injection-manifest.ts";
+import { pigeonRel, projectSkillsDir, userPigeonRel, userSkillsDir } from "../state/paths.ts";
 
 // M5.7 S4（决策 043 口径）：MCP server 的 prompt 作为 Skill 登记——正文在会话开始时由装配根经 getPrompt 取好，
 // 哈希清单按它算；load_skill 读取时经 load 重取并比对。skills 层只收结构类型，不触达 mcp。
@@ -191,14 +192,14 @@ function scanConfiguredRoot(root: SkillRoot): { entries: SkillEntry[]; problems:
 }
 
 export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
-  const projectRoot = join(options.workspaceRoot, ".pigeon", "skills");
-  const userRoot = join(options.homeDir ?? homedir(), ".pigeon", "skills");
+  const projectRoot = projectSkillsDir(options.workspaceRoot);
+  const userRoot = userSkillsDir(options.homeDir ?? homedir());
   const scanned =
     options.roots !== undefined
       ? options.roots.map(scanConfiguredRoot)
       : [
-          scanRoot(projectRoot, "project", ".pigeon/skills"),
-          scanRoot(userRoot, "user", "~/.pigeon/skills"),
+          scanRoot(projectRoot, "project", pigeonRel("skills")),
+          scanRoot(userRoot, "user", userPigeonRel("skills")),
         ];
   const localEntries = scanned.flatMap((result) => result.entries);
   const problems = scanned.flatMap((result) => result.problems);

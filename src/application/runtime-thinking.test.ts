@@ -49,8 +49,8 @@ test("推理档位：缺省 off 不请求推理；全局值冻结进快照、落
         await bundle.sessionStore.close();
       }
       assert.deepEqual(seen, [expectedReasoning]);
-      const started = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId)?.view.runs[0]
-        ?.start;
+      const started = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId)?.view
+        .runs[0]?.start;
       assert.ok(started !== undefined, "会话存储里应有 Run 开始条目");
       assert.equal(started.model.thinkingLevel, level ?? "off");
     }
@@ -88,8 +88,8 @@ test("推理档位：worker 按角色配置覆盖全局值，无覆盖的角色�
       await handle.run("看看");
       await handle.dispose();
       levels.push(
-        loadStoreSession(join(root, ".pigeon", "sessions"), sessionId)?.view.runs[0]?.start.model
-          .thinkingLevel
+        loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId)?.view.runs[0]?.start
+          .model.thinkingLevel
       );
     }
     assert.deepEqual(levels, ["low", "high"]);

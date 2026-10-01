@@ -103,7 +103,7 @@ test("thinking 流式单独一段并视觉弱化（~ 前缀 + 暗色），正文
 
 test("/resume 换绑后渲染全部历史：正文、thinking、工具行与折叠的 toolResult；历史上限可配", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-history-"));
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const target = newSessionId();
   await seedToolRun(sessionsDir, target);
   const render = async (historyLimit?: number): Promise<string> => {

@@ -8,11 +8,12 @@
 
 export const MEMORY_FILE_NAME = "MEMORY.md";
 // 展示路径（推送段、Run 开始条目与工具说明里的写法）
-export const MEMORY_DISPLAY_PATH = ".pigeon/learned/MEMORY.md";
+export const MEMORY_DISPLAY_PATH = pigeonRel("state", "learned", "MEMORY.md");
 // 上限缺省：223 按校准实测定取值规则之前，临时取 12,000 字符
 export const DEFAULT_MEMORY_LIMIT_CHARS = 12_000;
 
 // 文件头（229，B 第 5 节原文）：新建文件时写入；已有文件的文件头原样保留
+import { pigeonRel } from "../state/paths.ts";
 export const MEMORY_FILE_HEADER =
   "# 学到的记忆\n" +
   "<!-- 由 Pigeon 的 update_memory 维护，也可以直接查看、修改、删除。每条三行：事实 / 引用 / 理由；编号只用于定位，不表示先后或重要性。 -->\n" +

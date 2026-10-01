@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appendGrantConfigRule } from "../persistence/grants-config.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import type { EditFileParams } from "../tools/edit-file.ts";
@@ -48,6 +49,8 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
       }),
       workspaceRoot,
       governanceRoot,
+      // 决策 325：放权规则取自设置快照（由入口在会话开始时读治理根的设置）
+      settings: loadSettings(governanceRoot, { homeDir }),
       homeDir,
       sessionId,
       yolo: false,
@@ -76,7 +79,10 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
       await bundle.sessionStore.close();
     }
     // 会话文件落治理根；工作区根不出现 .pigeon/
-    const located = locateSessionFile(join(governanceRoot, ".pigeon", "sessions"), sessionId);
+    const located = locateSessionFile(
+      join(governanceRoot, ".pigeon", "state", "sessions"),
+      sessionId
+    );
     assert.ok(located !== undefined, "治理根的会话存储里应有本会话文件");
     assert.ok(existsSync(located.path));
     assert.equal(existsSync(join(workspaceRoot, ".pigeon")), false);

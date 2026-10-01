@@ -18,7 +18,7 @@ function outcome(overrides: Partial<WorkerOutcome> = {}): WorkerOutcome {
     turns: 2,
     workspace: {
       kind: "git-worktree",
-      path: "/repo/.pigeon/worktrees/x-fix-a",
+      path: "/repo/.pigeon/state/worktrees/x-fix-a",
       branch: "pigeon/fix-a",
       baseCommit: COMMIT,
     },

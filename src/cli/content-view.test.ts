@@ -14,7 +14,7 @@ test("trace / replay 默认不带正文；--with-content 打开后呈现正文�
   const root = mkdtempSync(join(tmpdir(), "pigeon-content-view-"));
   try {
     const sessionId = newSessionId();
-    const runId = await seedToolRun(join(root, ".pigeon", "sessions"), sessionId);
+    const runId = await seedToolRun(join(root, ".pigeon", "state", "sessions"), sessionId);
 
     const replayPlain = runReplayCommand({ root, runId, sessionId });
     assert.doesNotMatch(replayPlain, /我来改/);

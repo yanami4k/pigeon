@@ -48,8 +48,8 @@ function fixture() {
   git(main, "commit", "-q", "-m", "init");
   writeFileSync(join(main, "a.txt"), "a1 main\na2\na3\n");
   const snap = snapshotWorkdir({ repoRoot: main, ref: "refs/pigeon/worker-start/fix-a" });
-  const worktree = join(main, ".pigeon", "worktrees", "s-fix-a");
-  mkdirSync(join(main, ".pigeon", "worktrees"), { recursive: true });
+  const worktree = join(main, ".pigeon", "state", "worktrees", "s-fix-a");
+  mkdirSync(join(main, ".pigeon", "state", "worktrees"), { recursive: true });
   git(main, "worktree", "add", "-q", "-b", "pigeon/fix-a", worktree, snap.commit);
   // noBase：派出记录里没有起点（没注入起点提供者的旧记录）
   const status = (state: WorkerStatus["state"], noBase = false): WorkerStatus => ({

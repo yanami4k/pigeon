@@ -19,7 +19,7 @@ function withJobDir(fn: (jobDir: string) => void): void {
   }
 }
 
-test("记忆快照：每步开工前整体复制 .pigeon/learned/；同一步再开工（作废重做、续跑）即恢复成那份快照，不重取", () =>
+test("记忆快照：每步开工前整体复制 .pigeon/state/learned/；同一步再开工（作废重做、续跑）即恢复成那份快照，不重取", () =>
   withJobDir((jobDir) => {
     const learned = learnedDirOf(jobDir);
     mkdirSync(join(learned, "sub"), { recursive: true });

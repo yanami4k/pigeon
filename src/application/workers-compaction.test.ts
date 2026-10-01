@@ -54,7 +54,7 @@ async function workerCompaction(parentConfig: CompactionConfigInput | undefined)
       const workerId = orchestrator.spawn({ role: "explorer", task: "看一眼 a.ts", name: "look" });
       const outcome = await orchestrator.awaitResult(workerId);
       assert.equal(outcome.status, "completed", JSON.stringify(outcome));
-      const located = locateSessionFile(join(repo, ".pigeon", "sessions"), workerId);
+      const located = locateSessionFile(join(repo, ".pigeon", "state", "sessions"), workerId);
       assert.ok(located !== undefined);
       const loaded = loadStoreSessionFile(located.path);
       assert.ok(loaded !== undefined);

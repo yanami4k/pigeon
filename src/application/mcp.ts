@@ -6,17 +6,16 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { McpServerConnection, renderPromptText } from "../mcp/client.ts";
 import { bridgeMcpServer, type McpBridgedTool, mcpToolName } from "../mcp/registry-bridge.ts";
 import { createMcpTransport } from "../mcp/transport.ts";
-import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { McpConfig, McpLaunch, McpServerConfig } from "../state/mcp-config.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
 
 export interface McpSessionOptions {
-  // .mcp.json 与 .pigeon/mcp.json 所在（主仓库根）
+  // 主仓库根
   governanceRoot: string;
   // server 进程工作目录与 roots（worker 即其工作树）
   workspaceRoot: string;
-  // 缺省从治理根读取
-  config?: McpConfig;
+  // 决策 325：取自本会话的设置快照（.mcp.json 与设置的 mcp 一节合并后的结果）；不在这里读文件
+  config: McpConfig;
   // 缺省按启动定义创建真实传输；测试注入内存传输
   createTransport?: (launch: McpLaunch, server: McpServerConfig) => Transport;
   maxRestarts?: number;
@@ -73,7 +72,7 @@ export function noMcpSession(): Promise<McpSession> {
 }
 
 export async function startMcpSession(options: McpSessionOptions): Promise<McpSession> {
-  const config = options.config ?? loadMcpConfig(options.governanceRoot);
+  const config = options.config;
   const connections = config.servers.map(
     (server) =>
       new McpServerConnection({

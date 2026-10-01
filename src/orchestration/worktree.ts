@@ -5,6 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { SessionId } from "../state/ids.ts";
+import { worktreesDirOf } from "../state/paths.ts";
 
 export class WorktreeError extends Error {}
 
@@ -38,7 +39,7 @@ export function worktreePathFor(
   sessionId: SessionId,
   name: string
 ): string {
-  return join(governanceRoot, ".pigeon", "worktrees", `${sessionId}-${name}`);
+  return join(worktreesDirOf(governanceRoot), `${sessionId}-${name}`);
 }
 
 export function worktreeBranchFor(name: string): string {

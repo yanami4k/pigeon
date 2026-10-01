@@ -68,7 +68,7 @@ function setup(repo: string, home: string, scripts: Record<string, string>) {
   // 宿主会话的会话存储写者：worker 派出与收尾、验证记录都写在这里
   const faults: unknown[] = [];
   const hostStore = openSessionStore({
-    sessionsDir: join(repo, ".pigeon", "sessions"),
+    sessionsDir: join(repo, ".pigeon", "state", "sessions"),
     sessionId: hostId,
     cwd: repo,
     onFault: (fault) => faults.push(fault),
@@ -103,7 +103,7 @@ function setup(repo: string, home: string, scripts: Record<string, string>) {
 }
 
 function hostView(repo: string, hostId: string): StoreSessionView {
-  const loaded = loadStoreSession(join(repo, ".pigeon", "sessions"), hostId);
+  const loaded = loadStoreSession(join(repo, ".pigeon", "state", "sessions"), hostId);
   assert.ok(loaded !== undefined, "宿主会话在会话存储里有文件");
   return loaded.view;
 }

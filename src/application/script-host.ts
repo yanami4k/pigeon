@@ -1,14 +1,6 @@
-// 脚本编排的会话侧装配（决策 309–314）：把运行器接到本会话的编排器与真实能力上——容器（日常沙箱的通用镜像）、主目录快照、
-// 叠加收回、收回的请示（放手模式或已放权即直接做，否则经审批通道请示一次；没有审批通道即不批）、重启后从会话里找回，
-// 以及结束汇总的去处（与 worker 完成通知同一条队列）。
-import { join } from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { assertDockerAvailable } from "../execution/sandbox.ts";
-import {
-  ensureSandboxImage,
-  loadSandboxConfig,
-  resolveSandboxImage,
-} from "../execution/sandbox-image.ts";
+import { ensureSandboxImage, resolveSandboxImage } from "../execution/sandbox-image.ts";
 import { dockerScriptLauncher, type ScriptLauncher } from "../execution/script-sandbox.ts";
 import {
   readScriptSnapshot,
@@ -21,7 +13,10 @@ import { loadSessionView } from "../persistence/session-catalog.ts";
 import { DEEPSEEK_PROVIDER } from "../pi-runtime/deepseek-model.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import { sessionsDirOf } from "../state/paths.ts";
+import type { SandboxBuildParams } from "../state/sandbox-config.ts";
 import type { SessionView } from "../state/session-view.ts";
+import type { SettingsSnapshot } from "../state/settings.ts";
 import { matchConfigGrants } from "../tools/grants.ts";
 import type { ScriptBudget } from "./script-naming.ts";
 import {
@@ -41,18 +36,22 @@ import type { WorkerNotices } from "./worker-notices.ts";
 export class ScriptLaunchError extends Error {}
 
 // 容器：日常沙箱的通用镜像（含 Node 24）；项目的沙箱配置只取构建参数（改用的镜像不一定带 Node）。首次用时检查一次
+// 决策 325：构建参数取自本会话设置快照的 sandbox 一节（会话开始时冻结，不在每次开跑时重读）
 export function dockerLauncherFor(
   governanceRoot: string,
-  options: { docker?: readonly string[]; log?: (line: string) => void } = {}
+  options: {
+    docker?: readonly string[];
+    log?: (line: string) => void;
+    build?: SandboxBuildParams;
+  } = {}
 ): () => Promise<ScriptLauncher> {
   let ready: Promise<ScriptLauncher> | undefined;
   return () => {
     ready ??= (async () => {
       try {
         await assertDockerAvailable(options.docker);
-        const config = loadSandboxConfig(governanceRoot);
         const spec = resolveSandboxImage(governanceRoot, {
-          ...(config.build !== undefined ? { build: config.build } : {}),
+          ...(options.build !== undefined ? { build: options.build } : {}),
         });
         const image = await ensureSandboxImage(spec, {
           ...(options.docker !== undefined ? { docker: options.docker } : {}),
@@ -196,14 +195,22 @@ export interface SessionScriptsInput {
   // 模型的计价口径（金额额度开跑前核对）与脚本卡住的判定时长
   pricing?: () => ScriptPricing;
   stallMs?: number;
+  // 决策 325：本会话的设置快照（容器镜像的构建参数取自它的 sandbox 一节）
+  settings?: SettingsSnapshot;
 }
 
 export function createSessionScripts(input: SessionScriptsInput): ScriptRuns {
   const root = input.governanceRoot;
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(root);
   return new ScriptRuns({
     orchestrator: input.orchestrator,
-    launcher: input.launcher ?? dockerLauncherFor(root),
+    launcher:
+      input.launcher ??
+      dockerLauncherFor(root, {
+        ...(input.settings?.merged.sandbox?.build !== undefined
+          ? { build: input.settings.merged.sandbox.build }
+          : {}),
+      }),
     snapshot: (runId) => takeScriptSnapshot(root, runId),
     readSnapshot: (runId) => readScriptSnapshot(root, runId),
     releaseSnapshot: (runId) => releaseScriptSnapshot(root, runId),

@@ -18,8 +18,13 @@ import {
   type Sandbox,
   type SandboxExport,
 } from "../execution/sandbox.ts";
-import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import type { SessionId } from "../state/ids.ts";
+import {
+  emptySettingsSnapshot,
+  mcpConfigOf,
+  type SettingsSnapshot,
+  sandboxConfigOf,
+} from "../state/settings.ts";
 import { type HeadlessRetryResult, type HeadlessRunOptions, runHeadless } from "./headless.ts";
 import type { LaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
@@ -46,6 +51,8 @@ export interface StartSandboxInput {
   sessionId: string;
   // 续跑：从该会话交回过的分支起步
   resume?: boolean;
+  // 决策 325：本会话的设置快照（镜像配置取 sandbox 一节，MCP 服务名取合并后的配置）
+  settings?: SettingsSnapshot;
   log: (line: string) => void;
   overrides?: SandboxOverrides;
 }
@@ -60,7 +67,8 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
     throw new Error(SANDBOX_FORK_UNSUPPORTED);
   }
   // 决策 252：沙箱会话不启动 MCP 服务；配置了的列出来说明不可用，没配不提示
-  const mcpServers = loadMcpConfig(input.governanceRoot).servers.map((server) => server.name);
+  const settings = input.settings ?? emptySettingsSnapshot(input.governanceRoot);
+  const mcpServers = mcpConfigOf(settings).servers.map((server) => server.name);
   if (mcpServers.length > 0) {
     input.log(mcpUnavailableNotice(mcpServers));
   }
@@ -68,6 +76,7 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
     repoRoot: input.governanceRoot,
     sessionId: input.sessionId,
     network: launch.network,
+    sandboxConfig: sandboxConfigOf(settings),
     ...(input.resume === true ? { resume: true } : {}),
     // 决策 278：--sandbox-from-head 只从最新提交开工
     ...(launch.fromHead === true ? { fromHead: true } : {}),
@@ -128,12 +137,13 @@ export interface SandboxedHeadlessResult extends HeadlessRetryResult {
 // pigeon run --sandbox：开沙箱、在容器里跑完，返回前交回并删除容器
 export async function runHeadlessInSandbox(
   options: Omit<HeadlessRunOptions, "workspaceHost" | "sessionId"> & { sessionId: SessionId },
-  input: Omit<StartSandboxInput, "sessionId" | "governanceRoot">
+  input: Omit<StartSandboxInput, "sessionId" | "governanceRoot" | "settings">
 ): Promise<SandboxedHeadlessResult> {
   const sandbox = await startSandbox({
     ...input,
     sessionId: options.sessionId,
     governanceRoot: options.governanceRoot,
+    ...(options.settings !== undefined ? { settings: options.settings } : {}),
   });
   if (sandbox === undefined) {
     throw new Error("runHeadlessInSandbox 需要 --sandbox");

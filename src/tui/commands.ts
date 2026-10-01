@@ -17,6 +17,7 @@ import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { LayeredGrantRule } from "../state/settings.ts";
 import {
   type CommandAvailability,
   unknownCommandText,
@@ -34,6 +35,8 @@ export interface TuiGrantsContext {
   root: string;
   store: SessionGrantStore;
   configRules: readonly ConfigGrantRule[];
+  // 决策 325：放权规则连同所在层与层内序号（/grants 按层列出）
+  layeredRules?: readonly LayeredGrantRule[];
 }
 
 // 壳侧窄接口：命令分发需要的当前会话上下文与壳动作
@@ -198,7 +201,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     // 决策 294 B1：/tasks 查看任务清单（完整的清单显示留给编排二段）
     if (tokens[0] === "tasks" && host.tasks !== undefined) {
       host.addSystem(
-        host.tasks() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
+        host.tasks() ?? "任务清单没有开（设置 orchestration 一节的 taskList 为 false）。"
       );
       return;
     }
@@ -251,6 +254,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         root: grants.root,
         store: grants.store,
         configRules: grants.configRules,
+        ...(grants.layeredRules !== undefined ? { layeredRules: grants.layeredRules } : {}),
         sessionId: host.sessionId(),
         write: (text) => {
           host.addSystem(text.trimEnd());

@@ -1547,7 +1547,7 @@ export class PigeonTuiShell
         flow.addSystem(renderWorkersTable(workers.status(), this.tracker, this.now()));
       } else if (name === "tasks") {
         flow.addSystem(
-          this.tasks?.() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
+          this.tasks?.() ?? "任务清单没有开（设置 orchestration 一节的 taskList 为 false）。"
         );
       } else if (name === "quit") {
         this.requestExit();

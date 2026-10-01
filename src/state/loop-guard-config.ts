@@ -1,14 +1,11 @@
-// 打转检测的项目配置 .pigeon/loop-guard.json（决策 308）：纯类型与缺省，无 IO。人手写，可缺省；各项不给即取缺省。
+// 打转检测的配置（决策 308；决策 325 起为 settings.json 的 loopGuard 一节）：纯类型与缺省，无 IO。人手写，可缺省；各项不给即取缺省。
 // - enabled：整体开关（缺省开）
 // - remindAt / warnAt / stopAt：计到第几轮提醒、再提醒、叫停（306，缺省 5、10、20；须为递增的正整数）
 // - exemptTools：追加豁免的工具名（缺省只豁免 wait_workers，追加的与缺省的合并）
 import { type Static, Type } from "typebox";
 
-export const LOOP_GUARD_CONFIG_VERSION = 1;
-
-export const LoopGuardConfigFileSchema = Type.Object(
+export const LoopGuardSectionSchema = Type.Object(
   {
-    version: Type.Literal(LOOP_GUARD_CONFIG_VERSION),
     enabled: Type.Optional(Type.Boolean()),
     remindAt: Type.Optional(Type.Integer({ minimum: 1 })),
     warnAt: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -17,7 +14,7 @@ export const LoopGuardConfigFileSchema = Type.Object(
   },
   { additionalProperties: false }
 );
-export type LoopGuardConfigFile = Static<typeof LoopGuardConfigFileSchema>;
+export type LoopGuardSection = Static<typeof LoopGuardSectionSchema>;
 
 // 生效的设定
 export interface LoopGuardSettings {
@@ -48,7 +45,7 @@ export const DISABLED_LOOP_GUARD_SETTINGS: Readonly<LoopGuardSettings> = {
 
 // 配置 → 生效设定；三个轮数不递增时返回问题描述（由读取方响亮失败）
 export function loopGuardSettings(
-  file: LoopGuardConfigFile | undefined
+  file: LoopGuardSection | undefined
 ): { settings: LoopGuardSettings } | { problem: string } {
   const base = DEFAULT_LOOP_GUARD_SETTINGS;
   const remindAt = file?.remindAt ?? base.remindAt;

@@ -21,7 +21,7 @@ import { createFixtureSession, forkFixture } from "./session-store-fixtures.ts";
 async function withRoot(run: (root: string, sessionsDir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-history-"));
   try {
-    await run(root, join(root, ".pigeon", "sessions"));
+    await run(root, join(root, ".pigeon", "state", "sessions"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

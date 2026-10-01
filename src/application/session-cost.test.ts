@@ -27,7 +27,7 @@ function usage(totalTokens: number, cost: number) {
 test("累计花费：主会话 + worker + 复盘；/fork 分支、别的会话不计；无价格的 token 单列；工具另发请求的用量计入", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-cost-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const main = createFixtureSession({ sessionsDir });
     const runId = main.startRun({ task: "主任务" });
     main.assistant({ text: "好", usage: usage(1000, 0.1) });
@@ -76,7 +76,7 @@ test("累计花费：主会话 + worker + 复盘；/fork 分支、别的会话�
 test("运行期间的子会话：收尾后计入一次；没收尾的下次再看；打开之前就有的不计", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-cost-child-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const main = createFixtureSession({ sessionsDir });
     main.startRun({ task: "主任务" });
     const early = spawnFixtureWorker(main, { sessionsDir, name: "early", task: "早先的" });
@@ -149,7 +149,7 @@ test("DeepSeek 回复自带价格为 0：按官方人民币价目计，高峰翻
 test("DeepSeek 计价同样用于续接累计：主会话、worker 与复盘", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-cost-deepseek-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const main = createFixtureSession({ sessionsDir });
     main.startRun({ task: "主任务" });
     main.assistant({

@@ -9,6 +9,7 @@ import path from "node:path";
 import { writeFileAtomic } from "../persistence/atomic-write.ts";
 import { acquireExclusiveLock, ExclusiveLockError } from "../persistence/exclusive-lock.ts";
 import { sha256Hex } from "../state/hashing.ts";
+import { learnedDirOf as learnedDirPath, learnedLockPathOf } from "../state/paths.ts";
 import { MEMORY_FILE_NAME, memoryFactsOfText } from "./learned.ts";
 
 export const NEXT_ID_FILE_NAME = "next-id";
@@ -17,7 +18,7 @@ const LOCK_WAIT_MS = 10_000;
 const LOCK_POLL_MS = 20;
 
 export function learnedDirOf(governanceRoot: string): string {
-  return path.join(governanceRoot, ".pigeon", "learned");
+  return learnedDirPath(governanceRoot);
 }
 
 export function memoryFileOf(governanceRoot: string): string {
@@ -25,7 +26,7 @@ export function memoryFileOf(governanceRoot: string): string {
 }
 
 function lockFileOf(governanceRoot: string): string {
-  return path.join(governanceRoot, ".pigeon", "learned.lock");
+  return learnedLockPathOf(governanceRoot);
 }
 
 function nextIdFileOf(governanceRoot: string): string {

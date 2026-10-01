@@ -530,7 +530,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("记忆快照（191）：每步开工前取 .pigeon/learned/ 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
+  test("记忆快照（191）：每步开工前取 .pigeon/state/learned/ 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
     const t = await toy();
     try {
       const memoryOf = (workDir: string) => {
@@ -1668,7 +1668,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       const agent: StepAgent = {
         async run(input) {
           calls.push(input);
-          const sessionsDir = join(input.workDir, ".pigeon", "sessions");
+          const sessionsDir = join(input.workDir, ".pigeon", "state", "sessions");
           if (calls.length === 1) {
             // 第一步：真实地跑一次 headless，会话留在治理根
             sessionIds.kept = (await headless(kept)).sessionId;
@@ -1724,14 +1724,14 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       const lane = "--work-ws--";
       const fileOf = (id: string) => `${lane}/${sessionFileName(Date.UTC(2026, 8, 27), id)}`;
       const agent = scriptedAgent((input) => {
-        const sessions = join(input.workDir, ".pigeon", "sessions");
+        const sessions = join(input.workDir, ".pigeon", "state", "sessions");
         mkdirSync(join(sessions, lane), { recursive: true });
         writeFileSync(join(sessions, fileOf(`sess_step${input.step.seq}`)), "{}\n");
         return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
       const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
-      const sessions = join(jobDir, ".pigeon", "sessions");
+      const sessions = join(jobDir, ".pigeon", "state", "sessions");
       assert.deepEqual(JSON.parse(readFileSync(join(jobDir, "sessions-1.json"), "utf8")), [
         fileOf("sess_step1"),
       ]);

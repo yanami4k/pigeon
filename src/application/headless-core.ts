@@ -1,24 +1,3 @@
-// headless 单次运行核心（M6.5 S1，决策 056；M7 S6 拆出：分叉续跑直接复用本核心，失败自动分叉重试叠加在 headless.ts）：进程内 API。与 worker 同一装配内核（workers.ts openRuntimeSurface），
-// 以无父会话方式装出完整运行面跑到收尾，带轮次、墙钟与可选 token 上限。每次运行是一个普通会话，
-// 会话存储、trace、search 照旧。无人值守下没有审批通道：prompt 档一律 fail-closed 拒绝（006），
-// yolo 是人的显式拨档，固化规则照常生效；不新增任何审批语义。
-// 结果全部从会话记录算（046）：轮次、工具调用数、usage、失败分类，以及需审批次数——写档与命令档里需要人来批的调用数：
-// 以 yolo 批发授权放行（有人在场时会被问）、由人批准或拒绝、因无审批通道而拒绝的；固化规则与会话放权放行的不计。
-// 从会话存储现算（决策 180，state/session-judge.ts）。
-// 回炉（决策 142 / 143 / 147）：开启时一次 Run 结束后，在同一会话里、释放运行面之前跑验证命令——通过即结束；
-// 失败即把失败反馈作为新一轮输入开一个新 Run 接着修，最多 N 轮；无法判定不回炉、记为未知。修满 N 轮或预算耗尽仍失败，
-// 这一步以失败收尾，工作区保留 agent 的改动、不做回退（决策 172 / 173）。各轮与首次共用同一个总预算（轮次、墙钟与 token；
-// 验证命令的耗时也算在墙钟里）。一步的成败以最后一次验证为准，由 Run 开始条目里冻结的回炉轮数与最后一次验证记录推出
-// （state/session-judge.ts），不新增记录。
-// 推送记忆（决策 191、192、207、217）：开着时开局推入学到的记忆、带 update_memory；上下文压缩之前先复盘一次（期间这一步的墙钟
-// 暂停，复盘不占这一步的宽上限，171），最后一次验证之后、返回之前做收尾复盘，复盘做完才算这一步结束。复盘失败或撞上限都不改变
-// 这一步的结果，经去重告警写标准错误输出，并记进结果
-// 派 worker（决策 264–268、297–303）：开着时给主 agent 注册 spawn_worker 与等待等积木，装一个编排器（无人值守：worker 需请示时
-// 不等，作为可恢复错误交回，303）；worker 用的 token 计入本次运行的 token 上限，撞了即停掉主 agent 与在跑的 worker、拒绝再派。
-// 297：每次运行结束后，等本次派出的 worker 全部结束、把完成通知当新的一轮处理完，这一步才往下走（验证、回炉、收尾复盘）；
-// 释放运行面之前停掉仍在跑的 worker（撞上限、外部中止时），等其收尾记录写进本会话。执行端另一侧的工作区（容器）与分支会话不注册。
-// 任务清单（294 B1）：开着时给主 agent 注册两件清单工具
-import path from "node:path";
 import type { ScriptLauncher } from "../execution/script-sandbox.ts";
 import { assertMemoryLimit } from "../memory/pushed.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
@@ -37,9 +16,11 @@ import {
   type OrchestrationSettings,
 } from "../state/orchestration-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
+import { pigeonRel, sessionsDirOf } from "../state/paths.ts";
 import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
 import type { BranchHeaderInput } from "../state/session-payloads.ts";
+import type { SettingsSnapshot } from "../state/settings.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { StepStartMark, WorkspaceHost } from "../tools/workspace-host.ts";
 import { type VerifyAttemptResult, verifyAttempt } from "./attempt-verify.ts";
@@ -109,6 +90,8 @@ export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
 export interface HeadlessRunOptions {
   task: string;
   governanceRoot: string;
+  // 决策 325：本次运行的设置快照（pigeon run 由入口读好并确认过会执行命令的条目；缺省为空快照，跑批器如此）
+  settings?: SettingsSnapshot;
   workspaceRoot: string;
   // 决策 098：执行端；缺省为 workspaceRoot 上的本地实现（容器工作区由调用方注入，workspaceRoot 为宿主侧占位目录）
   workspaceHost?: WorkspaceHost;
@@ -248,7 +231,7 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
   if (options.verify === undefined) {
     throw new Error(
       `设了回炉轮数（${rounds}）却没有验证命令：回炉靠验证结论决定修不修，` +
-        "请用 --verify-command 或项目验证配置（.pigeon/verify.json）给出验证命令"
+        `请用 --verify-command 或项目验证配置（${pigeonRel("verify.json")}）给出验证命令`
     );
   }
   if ((options.retryOnFail ?? 0) > 0) {
@@ -378,6 +361,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   // 本次运行与收尾复盘共用的装配参数（工具定义因此相同）
   const surface: Omit<DetachedRuntimeRequest, "sessionId"> = {
     governanceRoot: options.governanceRoot,
+    ...(options.settings !== undefined ? { settings: options.settings } : {}),
     workspaceRoot: options.workspaceRoot,
     ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
     streamFn: options.streamFn,
@@ -488,6 +472,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           scripts = createSessionScripts({
             orchestrator,
             governanceRoot: options.governanceRoot,
+            settings: bundle.settings,
             sessionId,
             flush: () => bundle.sessionStore.flush(),
             ...(notices !== undefined ? { notices } : {}),
@@ -724,7 +709,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     }
     await handle.dispose();
   }
-  const sessionsDir = path.join(options.governanceRoot, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(options.governanceRoot);
   const metricsBefore = readRunOutcome(sessionsDir, sessionId, toolTiers).metrics;
   // M7（决策 071）：尝试收尾后在工作区独立执行验证命令（运行面没装起来、没有 Run 时不跑）；
   // 回炉开启时验证已在释放之前做过，不再跑

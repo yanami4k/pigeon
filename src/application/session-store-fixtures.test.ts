@@ -23,7 +23,7 @@ import {
 
 function withRoot(run: (sessionsDir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-fixture-"));
-  return run(join(root, ".pigeon", "sessions")).finally(() =>
+  return run(join(root, ".pigeon", "state", "sessions")).finally(() =>
     rmSync(root, { recursive: true, force: true })
   );
 }

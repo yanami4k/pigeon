@@ -18,7 +18,7 @@ import { runTraceCommand } from "./trace.ts";
 async function withRoot(body: (root: string, sessionsDir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-trace-classes-"));
   try {
-    await body(root, join(root, ".pigeon", "sessions"));
+    await body(root, join(root, ".pigeon", "state", "sessions"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

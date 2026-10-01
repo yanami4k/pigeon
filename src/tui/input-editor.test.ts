@@ -139,7 +139,7 @@ test("↑↓ 翻历史；历史跨启动保留、按项目分开（存在各自�
     } finally {
       first.cleanup();
     }
-    const stored = join(rootA, ".pigeon", "tui-history.json");
+    const stored = join(rootA, ".pigeon", "state", "tui-history.json");
     assert.ok(existsSync(stored), "历史写在项目的 .pigeon 下");
     assert.deepEqual(JSON.parse(readFileSync(stored, "utf8")).entries, [
       "甲项目任务一",
@@ -171,7 +171,7 @@ test("↑↓ 翻历史；历史跨启动保留、按项目分开（存在各自�
       other.term.input("\r");
       await settle();
       assert.deepEqual(other.runtime.runs, [], "别的项目的历史不串过来");
-      assert.equal(existsSync(join(rootB, ".pigeon", "tui-history.json")), false);
+      assert.equal(existsSync(join(rootB, ".pigeon", "state", "tui-history.json")), false);
     } finally {
       other.cleanup();
     }
@@ -191,7 +191,7 @@ test("输入历史存储：条数上限 100、连续重复只记一次、畸形�
     assert.equal(loaded.length, 100);
     assert.equal(loaded[0], "第5条");
     assert.equal(loaded.at(-1), "第104条");
-    const path = join(root, ".pigeon", "tui-history.json");
+    const path = join(root, ".pigeon", "state", "tui-history.json");
     rmSync(path);
     writeFileSync(path, "{不是 JSON");
     assert.deepEqual(promptHistoryStore(root).load(), []);

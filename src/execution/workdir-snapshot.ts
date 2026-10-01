@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
 
 export class WorkdirSnapshotError extends Error {}
 
@@ -97,7 +98,7 @@ export function workdirTree(top: string): string {
     }
     const env = { GIT_INDEX_FILE: indexFile };
     git(top, ["add", "-A", "--", "."], env);
-    git(top, ["reset", "-q", "--", ".pigeon"], env);
+    git(top, ["reset", "-q", "--", ...PROGRAM_OWNED_PATHS], env);
     return git(top, ["write-tree"], env).trim();
   } finally {
     rmSync(indexFile, { force: true });

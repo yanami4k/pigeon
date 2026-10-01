@@ -37,7 +37,7 @@ function workspace() {
   return {
     dir,
     home,
-    sessionsDir: join(dir, ".pigeon", "sessions"),
+    sessionsDir: join(dir, ".pigeon", "state", "sessions"),
     cleanup: () => {
       rmSync(dir, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });

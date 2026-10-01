@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
+import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
 
 export const CHECKPOINT_REF_PREFIX = "refs/pigeon/checkpoints/";
 
@@ -129,7 +130,7 @@ export function createCheckpointer(input: {
       // 改为加完再从临时索引里摘掉
       git(
         workspaceRoot,
-        ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ".pigeon"],
+        ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ...PROGRAM_OWNED_PATHS],
         env
       );
       return git(workspaceRoot, ["write-tree"], env).trim();

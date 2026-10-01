@@ -104,7 +104,7 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试；分支文件�
       await opened.verification?.idle();
       await opened.retry?.idle();
       await opened.bundle.sessionStore.flush();
-      const afterRetry = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+      const afterRetry = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), sessionId);
       assert.ok(afterRetry !== undefined);
       assert.equal(afterRetry.view.forks.length, 1, "失败后分叉重试一次");
       branchId = afterRetry.view.forks[0]?.data.branchSessionId;
@@ -115,7 +115,7 @@ test("主会话 --retry-on-fail 1：失败后后台分叉重试；分支文件�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const sessionsDir = join(dir, ".pigeon", "sessions");
+    const sessionsDir = join(dir, ".pigeon", "state", "sessions");
     const source = loadStoreSession(sessionsDir, sessionId);
     assert.ok(source !== undefined);
     assert.equal(source.view.runs.length, 2);
@@ -163,7 +163,7 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
       await opened.bundle.adapter.run("第一个任务");
       await opened.bundle.adapter.run("第二个任务");
       await opened.bundle.sessionStore.flush();
-      const loaded = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+      const loaded = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), sessionId);
       assert.ok(loaded !== undefined);
       const session = loaded.view;
       const [first, second] = session.runs.map((run) => run.runId);
@@ -199,7 +199,7 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const after = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+    const after = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(after !== undefined);
     assert.equal(after.view.forks.length, 1);
     assert.equal(after.view.forks[0]?.data.trigger, "manual");
@@ -209,7 +209,7 @@ test("/fork 命令：解析 --at 与新输入；缺省分叉点是最近一次 R
     });
     // 分支会话文件已建，文件头指向来源会话
     const branch = loadStoreSession(
-      join(dir, ".pigeon", "sessions"),
+      join(dir, ".pigeon", "state", "sessions"),
       after.view.forks[0]?.data.branchSessionId ?? ""
     );
     assert.equal(branch?.file.header.parentSessionId, sessionId);
@@ -240,7 +240,7 @@ test("主会话 --retry-on-fail 1、不配验证命令：Run 收尾后按新存�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const source = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+    const source = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(source !== undefined);
     assert.equal(source.view.runs[0]?.end?.stopReason, "length");
     assert.deepEqual(

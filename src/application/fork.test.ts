@@ -47,7 +47,7 @@ function git(cwd: string, args: string[]): string {
 
 // 读会话存储里的会话（必须存在）
 function storeSession(dir: string, sessionId: string): LoadedStoreSession {
-  const loaded = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
   return loaded;
 }
@@ -247,7 +247,11 @@ test("非 git 工作区发起分叉：明确报错，不降级、不留分叉条
       NotGitWorkspaceError
     );
     assert.equal(storeSession(dir, result.sessionId).view.forks.length, 0);
-    assert.equal(listSessionFiles(join(dir, ".pigeon", "sessions")).length, 1, "不建分支会话文件");
+    assert.equal(
+      listSessionFiles(join(dir, ".pigeon", "state", "sessions")).length,
+      1,
+      "不建分支会话文件"
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -266,7 +270,7 @@ test("冷会话被另一进程持有：来源分叉条目写不成，在建工�
       homeDir: home,
       startMcp: noMcp,
     });
-    const sessionsDir = join(dir, ".pigeon", "sessions");
+    const sessionsDir = join(dir, ".pigeon", "state", "sessions");
     const sourcePath = locateSessionFile(sessionsDir, result.sessionId)?.path;
     assert.ok(sourcePath !== undefined);
     const runId = storeSession(dir, result.sessionId).view.runs[0]?.runId;
@@ -314,7 +318,7 @@ test("冷会话被另一进程持有：来源分叉条目写不成，在建工�
       worktreesBefore,
       "没有建任何工作树"
     );
-    assert.equal(existsSync(join(dir, ".pigeon", "worktrees")), false);
+    assert.equal(existsSync(join(dir, ".pigeon", "state", "worktrees")), false);
     assert.equal(readFileSync(sourcePath, "utf8"), sourceBefore, "来源会话文件原样不动");
     assert.equal(listSessionFiles(sessionsDir).length, 1, "不建分支会话文件");
     assert.ok(existsSync(sessionFileLockPath(sourcePath)), "持有进程的锁没有被误删");

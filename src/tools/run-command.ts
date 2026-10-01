@@ -13,6 +13,7 @@
 // .pigeon/commands.json 的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { PIGEON_DIR } from "../state/paths.ts";
 import { createLocalWorkspaceHost, windowsScript } from "./local-host.ts";
 import type { HostExecPlan, HostFileSnapshot, WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
@@ -187,7 +188,7 @@ export function runCommandTexts(input: {
     prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令${promptShell}；${promptApproval}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
-      "可用 .pigeon/commands.json 登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 .pigeon）。",
+      `可用设置 commands 一节登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。`,
   };
 }
 
@@ -376,7 +377,7 @@ export function createRunCommandTool(
       if (!permitted(inspection.input, command)) {
         const names = options.allowlist?.join("、") ?? "";
         throw new RunCommandError(
-          `命令不在本角色允许清单内：${inspection.input}（只能运行 .pigeon/commands.json 为该角色登记的命令：${names === "" ? "未登记任何命令" : names}）`
+          `命令不在本角色允许清单内：${inspection.input}（只能运行设置 commands 一节为该角色登记的命令：${names === "" ? "未登记任何命令" : names}）`
         );
       }
       if (inspection.mode === "invalid") {

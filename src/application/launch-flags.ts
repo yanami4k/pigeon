@@ -5,13 +5,16 @@
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 
 import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
-import { loadOrchestrationConfig } from "../persistence/orchestration-config.ts";
 import { loadMemoryReviewConfig } from "../persistence/review-backfill-store.ts";
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
+import {
+  orchestrationSettingsOf as orchestrationSectionOf,
+  type SettingsSnapshot,
+} from "../state/settings.ts";
 import { type ReviewModelChoice, reviewModelChoice } from "./memory-review.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
@@ -297,12 +300,12 @@ export function webToolsEnabled(flags: Pick<LaunchFlags, "sandbox">): boolean {
   return flags.sandbox?.network !== "off";
 }
 
-// 编排设定（决策 297–303）：治理根的编排配置（.pigeon/orchestration.json，缺失取缺省），启动参数给了的两项以参数为准
+// 编排设定（决策 297–303）：设置快照的 orchestration 一节（缺失取缺省），启动参数给了的两项以参数为准
 export function orchestrationSettingsOf(
   flags: Pick<LaunchFlags, "workerConcurrency" | "workerLimit">,
-  governanceRoot: string
+  snapshot: SettingsSnapshot
 ): OrchestrationSettings {
-  const settings = loadOrchestrationConfig(governanceRoot);
+  const settings = orchestrationSectionOf(snapshot);
   return {
     ...settings,
     ...(flags.workerConcurrency !== undefined ? { maxConcurrent: flags.workerConcurrency } : {}),
