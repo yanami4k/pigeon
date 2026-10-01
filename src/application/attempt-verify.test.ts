@@ -19,7 +19,7 @@ const NODE = `"${process.execPath}"`;
 
 // 读新会话存储里的会话视图（会话必须存在）
 function storeView(root: string, sessionId: string): StoreSessionView {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
   return loaded.view;
 }

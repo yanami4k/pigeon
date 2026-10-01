@@ -12,11 +12,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { sha256Hex } from "../state/hashing.ts";
 import type { MemoryManifestEntry } from "../state/injection-manifest.ts";
+import { pigeonRel, projectMemoryDir, userPigeonRel, userPreferencesPath } from "../state/paths.ts";
 
 // 默认字符预算：约 2000 token
 export const DEFAULT_MEMORY_BUDGET_CHARS = 8000;
 export const CHARS_PER_TOKEN_ESTIMATE = 4;
-export const PREFERENCES_DISPLAY_PATH = "~/.pigeon/preferences.md";
+export const PREFERENCES_DISPLAY_PATH = userPigeonRel("preferences.md");
 
 // M6.5（决策 059）：显式 Memory 根；label 是清单里的展示前缀
 export interface MemoryRoot {
@@ -83,7 +84,7 @@ export function loadResidentMemory(options: ResidentMemoryOptions): ResidentMemo
   const skipped: string[] = [];
   let usedChars = 0;
 
-  const preferencesPath = join(options.homeDir ?? homedir(), ".pigeon", "preferences.md");
+  const preferencesPath = userPreferencesPath(options.homeDir ?? homedir());
   if (
     options.roots === undefined &&
     existsSync(preferencesPath) &&
@@ -103,7 +104,7 @@ export function loadResidentMemory(options: ResidentMemoryOptions): ResidentMemo
   }
 
   const roots = options.roots ?? [
-    { path: join(options.workspaceRoot, ".pigeon", "memory"), label: ".pigeon/memory" },
+    { path: projectMemoryDir(options.workspaceRoot), label: pigeonRel("memory") },
   ];
   const files = roots.flatMap((root) =>
     memoryNames(root.path).map((name) => ({

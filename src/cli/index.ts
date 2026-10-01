@@ -30,6 +30,7 @@ import {
 } from "../application/launch-flags.ts";
 import { LOOP_GUARD_TEXTS } from "../application/loop-guard.ts";
 import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
+import { MIGRATE_CONFIG_USAGE, runMigrateConfig } from "../application/migrate-config.ts";
 import { runResumeFlow } from "../application/resume.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import {
@@ -43,6 +44,13 @@ import {
 } from "../application/sandbox-session.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
 import { openSessionRuntime, pushedMemoryRunOptions } from "../application/session-runtime.ts";
+import {
+  openSessionSettings,
+  parseTrustAnswer,
+  TRUST_CONFIG_FLAG,
+  type TrustChoice,
+  trustPromptText,
+} from "../application/session-settings.ts";
 import { resolveWebTools } from "../application/web-tools.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
@@ -69,11 +77,13 @@ import {
 import { runStreamRejudge } from "../eval/stream-rejudge.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
-import { loadLoopGuardConfig } from "../persistence/loop-guard-config.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
+import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import { pigeonRel } from "../state/paths.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
+import { loopGuardSettingsOf, type SettingsSnapshot, webSectionOf } from "../state/settings.ts";
 import { EDIT_MODES, type EditMode, isEditMode } from "../tools/edit-mode.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
@@ -231,6 +241,7 @@ function grantCommandsOf(
     root: workspaceRoot,
     store: bundle.grantStore,
     configRules: bundle.configGrants,
+    layeredRules: bundle.settings.grants,
     sessionId,
     write,
   };
@@ -280,6 +291,11 @@ async function resumeMain(argv: string[]): Promise<void> {
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   try {
+    // 决策 325、326：旧布局检查、设置快照与会执行命令的条目的确认（行内问答）
+    const settings = await openSessionSettings(workspaceRoot, {
+      confirmation: { kind: "interactive", ask: lineTrustAsker(ask, write) },
+      notice: (line) => write(`${line}\n`),
+    });
     await runResumeFlow({
       root: workspaceRoot,
       sessionId: sessionIdArg,
@@ -291,6 +307,7 @@ async function resumeMain(argv: string[]): Promise<void> {
         const sandbox = await startSandbox({
           flags,
           governanceRoot: workspaceRoot,
+          settings,
           sessionId,
           resume: true,
           log: sandboxLog(write),
@@ -299,6 +316,7 @@ async function resumeMain(argv: string[]): Promise<void> {
         // MCP 启动与装配都在 application/session-runtime.ts（决策 067，与 tui 的 /resume 换绑同一份）
         const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
+          settings,
           sessionId,
           streamFn,
           flags,
@@ -306,7 +324,7 @@ async function resumeMain(argv: string[]): Promise<void> {
           ...verifyOption(flags, workspaceRoot),
           ...retryOption(flags),
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-          ...webToolsOption(flags, workspaceRoot),
+          ...webToolsOption(flags, settings),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
@@ -351,12 +369,14 @@ async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
     "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
-    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--json]（任务描述缺省从 stdin 读）";
+    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
   let wallClockMs: number | undefined;
   let editMode: EditMode | undefined;
+  // 决策 326 ③、341：只对本次运行放行未确认的会执行命令或放权的配置（不记下）
+  let trustConfig = false;
   const modelArgv: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -365,6 +385,8 @@ async function runMain(argv: string[]): Promise<void> {
     }
     if (arg === "--json") {
       json = true;
+    } else if (arg === TRUST_CONFIG_FLAG) {
+      trustConfig = true;
     } else if (arg === "--edit-mode") {
       editMode = parseEditMode(argv[++i], usage);
     } else if (arg === "--max-turns" || arg === "--wall-clock") {
@@ -410,16 +432,21 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const workspaceRoot = prepareWorkspace(flags.root);
+  // 决策 325、326：旧布局检查与设置快照；未确认的会执行命令的配置在开跑前报错退出（--trust-config 只对本次放行）
+  const settings = await openSessionSettings(workspaceRoot, {
+    confirmation: { kind: "unattended", trustConfig },
+  });
   applyReviewModelConfig(flags, workspaceRoot);
   // 决策 142 / 143：回炉轮数——启动参数 > 项目验证配置 > 关闭；设定不成立由 runHeadless 启动报错
   const repairRounds = resolveRepairRounds(flags, workspaceRoot);
-  // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
-  const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
-  // 决策 308：打转检测——.pigeon/loop-guard.json（缺失取缺省即开着；畸形在开跑之前响亮失败）
-  const loopGuard = loadLoopGuardConfig(workspaceRoot);
+  // 决策 297–303：编排设定——设置的 orchestration 一节（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
+  const orchestration = orchestrationSettingsOf(flags, settings);
+  // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
+  const loopGuard = loopGuardSettingsOf(settings);
   const runOptions = {
     task,
     governanceRoot: workspaceRoot,
+    settings,
     workspaceRoot,
     streamFn,
     yolo: flags.yolo,
@@ -452,7 +479,7 @@ async function runMain(argv: string[]): Promise<void> {
     ...retryOption(flags),
     ...(repairRounds > 0 ? { repairRounds } : {}),
     // 决策 287–291：联网工具缺省给出，--sandbox-network off 不给
-    ...webToolsOption(flags, workspaceRoot),
+    ...webToolsOption(flags, settings),
     loopGuard,
   };
   // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
@@ -1027,11 +1054,39 @@ async function main(argv: string[]): Promise<void> {
     writeOut(await runSandboxCommand(argv.slice(1)));
     return;
   }
+  if (argv[0] === "migrate-config") {
+    migrateConfigMain(argv.slice(1));
+    return;
+  }
   throw new Error(`未知子命令：${argv[0]}（${TOP_LEVEL_HELP}）`);
 }
 
 // 顶层子命令：不带子命令即终端界面，--line 为命令行对话
-const SUBCOMMANDS = new Set(["eval", "run", "trace", "replay", "session", "resume", "sandbox"]);
+const SUBCOMMANDS = new Set([
+  "eval",
+  "run",
+  "trace",
+  "replay",
+  "session",
+  "resume",
+  "sandbox",
+  "migrate-config",
+]);
+
+// pigeon migrate-config [--root <dir>]（决策 325）：旧配置并入三层设置、旧位置的程序状态移入 .pigeon/state/；可重复执行
+function migrateConfigMain(argv: string[]): void {
+  let root = process.cwd();
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--root" && argv[i + 1] !== undefined) {
+      root = argv[++i] ?? root;
+    } else {
+      throw new Error(`未知参数：${flag}（${MIGRATE_CONFIG_USAGE}）`);
+    }
+  }
+  const result = runMigrateConfig(realpathSync(root));
+  writeOut(`${result.lines.join("\n")}\n`);
+}
 
 export type TopLevelRoute =
   | { kind: "help" }
@@ -1098,22 +1153,29 @@ async function lineMain(argv: string[]): Promise<void> {
   let sandbox: Sandbox | undefined;
   let opened: Awaited<ReturnType<typeof openSessionRuntime>>;
   try {
+    // 决策 325、326：旧布局检查、设置快照与会执行命令的条目的确认（行内问答）
+    const settings = await openSessionSettings(workspaceRoot, {
+      confirmation: { kind: "interactive", ask: lineTrustAsker(ask, write) },
+      notice: (line) => write(`${line}\n`),
+    });
     sandbox = await startSandbox({
       flags,
       governanceRoot: workspaceRoot,
+      settings,
       sessionId,
       log: sandboxLog(write),
     });
     // 会话运行面装配（决策 067）：MCP 启动、作用域与装配失败收口都在 application/session-runtime.ts
     opened = await openSessionRuntime({
       governanceRoot: workspaceRoot,
+      settings,
       sessionId,
       streamFn,
       flags,
       ...verifyOption(flags, workspaceRoot),
       ...retryOption(flags),
       ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-      ...webToolsOption(flags, workspaceRoot),
+      ...webToolsOption(flags, settings),
       // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
       createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
       onMcpNote: (note) => {
@@ -1161,6 +1223,7 @@ export const TOP_LEVEL_HELP = [
   "  pigeon replay <runId>         回放一次运行",
   "  pigeon session list           列出本项目的会话",
   "  pigeon sandbox list|clean     查看或清理残留的沙箱容器",
+  `  pigeon migrate-config         把旧配置并入三层 settings.json、旧位置的程序状态移入 ${pigeonRel("state")}/`,
   "  pigeon sandbox cache|clear-cache  查看或清空沙箱共用的下载缓存（npm、pnpm、yarn、pip、uv、cargo、go）",
   "  pigeon eval stream|stream-baseline|stream-manifest|stream-image-context  实验跑批",
 ].join("\n");
@@ -1173,9 +1236,27 @@ const SESSION_FLAGS_HINT =
 // 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败
 function webToolsOption(
   flags: LaunchFlags,
-  governanceRoot: string
+  settings: SettingsSnapshot
 ): { webTools?: ReturnType<typeof resolveWebTools> } {
-  return webToolsEnabled(flags) ? { webTools: resolveWebTools({ governanceRoot }) } : {};
+  return webToolsEnabled(flags)
+    ? { webTools: resolveWebTools({ config: webSectionOf(settings) }) }
+    : {};
+}
+
+// 决策 326 ③：命令行对话的行内问答确认会执行命令的配置（输入结束按退出处理）
+function lineTrustAsker(
+  ask: (prompt: string) => Promise<string | null>,
+  write: (text: string) => void
+): (entries: readonly TrustEntry[]) => Promise<TrustChoice> {
+  return async (entries) => {
+    for (;;) {
+      const answer = await ask(`${trustPromptText(entries)}\n> `);
+      if (answer === null) return "quit";
+      const choice = parseTrustAnswer(answer);
+      if (choice !== undefined) return choice;
+      write("请输入 a、s 或 q\n");
+    }
+  };
 }
 
 function sandboxLog(write: (text: string) => void): (line: string) => void {

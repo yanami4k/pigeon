@@ -29,6 +29,8 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     run: {
       streamFn: options.streamFn,
       yolo: options.yolo,
+      // 决策 325：重试沿用本次运行的设置快照（放权、命令短名、MCP 等）
+      ...(options.settings !== undefined ? { settings: options.settings } : {}),
       ...(options.provider !== undefined ? { provider: options.provider } : {}),
       ...(options.modelId !== undefined ? { modelId: options.modelId } : {}),
       ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),

@@ -16,6 +16,7 @@ import {
 } from "../execution/workdir-snapshot.ts";
 import { locateSessionFile, readSessionFile } from "../persistence/session-reader.ts";
 import type { SessionId } from "../state/ids.ts";
+import { mapLegacyWorktreePath } from "../state/paths.ts";
 import {
   type ExitData,
   SESSION_ENTRY_VERSION,
@@ -56,7 +57,8 @@ function sessionFacts(
   const ran = view.entries.some(
     (entry) => entry.type === "custom" && entry.customType === SessionEntryType.RunStart
   );
-  return { ran, cwd: view.header.cwd };
+  // 决策 325：旧会话记着的旧工作树位置按新位置读
+  return { ran, cwd: mapLegacyWorktreePath(governanceRoot, view.header.cwd) };
 }
 
 // 退出那一刻工作目录的样子

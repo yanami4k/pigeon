@@ -40,7 +40,11 @@ test("容器执行端不与分叉重试、分支会话同用：装配前拒绝�
         name
       );
     }
-    assert.equal(existsSync(join(governance, ".pigeon", "sessions")), false, "被拒的装配不写账本");
+    assert.equal(
+      existsSync(join(governance, ".pigeon", "state", "sessions")),
+      false,
+      "被拒的装配不写账本"
+    );
     // 会话验证命令经执行端在它的工作区里执行：文件只在执行端一侧，能通过即证明不在宿主一侧执行
     const verified = await runHeadless({
       ...base,

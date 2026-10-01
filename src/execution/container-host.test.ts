@@ -443,7 +443,7 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
 
   test("文件清单跳过工作区根下的 .pigeon：治理目录里的新增与修改不进文件变化，子目录里同名的普通文件夹照常报出", async () => {
     const made = await sh(
-      `mkdir -p ${root}/.pigeon/sessions ${root}/sub/.pigeon && printf '{}\\n' > ${root}/.pigeon/sessions/s.jsonl && ` +
+      `mkdir -p ${root}/.pigeon/state/sessions ${root}/sub/.pigeon && printf '{}\\n' > ${root}/.pigeon/state/sessions/s.jsonl && ` +
         `printf 'keep\\n' > ${root}/sub/.pigeon/keep.txt`
     );
     assert.equal(made.exitCode, 0, made.stderr);
@@ -460,7 +460,7 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
       "c4",
       {
         command:
-          "echo '{}' >> .pigeon/sessions/s.jsonl && mkdir -p .pigeon/learned && echo fact > .pigeon/learned/MEMORY.md && " +
+          "echo '{}' >> .pigeon/state/sessions/s.jsonl && mkdir -p .pigeon/state/learned && echo fact > .pigeon/state/learned/MEMORY.md && " +
           "echo c > src/c.txt && echo more >> sub/.pigeon/keep.txt && echo new > sub/.pigeon/new.txt",
       },
       undefined

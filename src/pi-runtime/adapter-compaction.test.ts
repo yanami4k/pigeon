@@ -107,7 +107,7 @@ function harness(
   faults: HarnessFaults = {}
 ): Harness {
   const root = mkdtempSync(join(tmpdir(), "pigeon-compaction-"));
-  const sessions = join(root, ".pigeon", "sessions");
+  const sessions = join(root, ".pigeon", "state", "sessions");
   const sessionId = newSessionId();
   const store = openSessionStoreWriter({
     sessionsRoot: sessions,

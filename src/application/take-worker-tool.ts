@@ -13,8 +13,10 @@ import {
   OverlayError,
   type OverlayResult,
   overlayWorkerChanges,
+  workerOverlayPaths,
 } from "../execution/worker-overlay.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
+import { isUnderPigeonDir } from "../state/paths.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import { type SpawnWorkerSlot, TAKE_WORKER_TOOL } from "./spawn-worker-tool.ts";
@@ -65,6 +67,42 @@ export interface TakeWorkerDetails {
   worker: string;
   result?: OverlayResult;
   rejected?: "unknown" | "running" | "worktree-gone" | "no-start" | "unbound" | "failed";
+}
+
+// 决策 340：叠回会写到项目 .pigeon 下的文件（受保护路径）。叠回取用与脚本整批收回据此按受保护路径请示（逐次人批、放权不算，
+// yolo 放行），免得放权经叠回绕开审批。算不出（worker 不在、未收尾、工作树已清理等）给空清单，由取用本身如实报错
+export function protectedOverlayPaths(
+  target: { base: string; worktree: string },
+  repoRoot: string
+): string[] {
+  if (!existsSync(target.worktree)) return [];
+  try {
+    return workerOverlayPaths({
+      repoRoot,
+      base: target.base,
+      worktreePath: target.worktree,
+    }).filter(isUnderPigeonDir);
+  } catch {
+    return [];
+  }
+}
+
+// 一个 worker 名对应的叠回目标（已收尾、有工作树与起点快照的才有）
+function overlayTargetOf(
+  host: { orchestrator: Pick<WorkerOrchestrator, "status"> },
+  worker: string
+): { base: string; worktree: string } | undefined {
+  const status = host.orchestrator.status().find((entry) => entry.name === worker.trim());
+  if (
+    status === undefined ||
+    status.state === "running" ||
+    status.state === "queued" ||
+    status.workspace.kind !== "git-worktree" ||
+    status.workspace.baseCommit === undefined
+  ) {
+    return undefined;
+  }
+  return { base: status.workspace.baseCommit, worktree: status.workspace.path };
 }
 
 // 取用一个 worker 的改动并给出文字（工具与终端界面的 /take 共用）
@@ -141,15 +179,26 @@ function reply(text: string, details: TakeWorkerDetails): PigeonToolResult<TakeW
 }
 
 // 与 spawn_worker 共用同一个槽：编排器建好后 bind 一次，两件工具都能用
-export function createTakeWorkerTool(
-  slot: SpawnWorkerSlot
-): PigeonAgentTool<typeof TakeWorkerParamsSchema, TakeWorkerDetails> {
+export function createTakeWorkerTool(slot: SpawnWorkerSlot): PigeonAgentTool<
+  typeof TakeWorkerParamsSchema,
+  TakeWorkerDetails
+> & {
+  inspectProtectedPaths(args: unknown): string[];
+} {
   return {
     name: TAKE_WORKER_TOOL,
     label: TAKE_WORKER_TOOL,
     description: TAKE_WORKER_DESCRIPTION,
     parameters: TakeWorkerParamsSchema,
     executionMode: "sequential",
+    // 决策 340：治理层据此把写 .pigeon 的叠回按受保护路径处理（只读判定，不叠加）
+    inspectProtectedPaths(args: unknown): string[] {
+      const host = slot.host;
+      const worker = (args as { worker?: unknown } | null)?.worker;
+      if (host === undefined || typeof worker !== "string") return [];
+      const target = overlayTargetOf(host, worker);
+      return target !== undefined ? protectedOverlayPaths(target, host.governanceRoot) : [];
+    },
     async execute(_toolCallId, params): Promise<PigeonToolResult<TakeWorkerDetails>> {
       const host = slot.host;
       if (host === undefined) {

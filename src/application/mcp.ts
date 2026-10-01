@@ -2,26 +2,31 @@
 // 会话开始时读两份配置（畸形响亮失败）、为每个 server 建连接并并发启动（单个 server 起不来不挡会话，
 // 其工具不暴露并记问题）、把工具映射进注册表形态；roots 广告为本会话的工作区根（worker 即其工作树）。
 // summary 在每个 Run 开始时取一次，写进 Run 开始条目：工具集的注解 / 配置 / 实际档位与冲突，server 当前状态。
+// /reload 重建运行面时（决策 340）给出旧会话 reuse：启动定义未变（且仍连着）的 server 沿用旧连接、不重启，只按新配置
+// 重新映射工具（风险档可能改了）；连接按引用计数关闭——新旧两个会话都持有它，旧会话关闭时它不断开，
+// 新会话装配失败关闭时也不断开（旧运行面照旧可用）。
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { McpServerConnection, renderPromptText } from "../mcp/client.ts";
 import { bridgeMcpServer, type McpBridgedTool, mcpToolName } from "../mcp/registry-bridge.ts";
 import { createMcpTransport } from "../mcp/transport.ts";
-import { loadMcpConfig } from "../persistence/mcp-config.ts";
+import { canonicalJson } from "../state/hashing.ts";
 import type { McpConfig, McpLaunch, McpServerConfig } from "../state/mcp-config.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
 
 export interface McpSessionOptions {
-  // .mcp.json 与 .pigeon/mcp.json 所在（主仓库根）
+  // 主仓库根
   governanceRoot: string;
   // server 进程工作目录与 roots（worker 即其工作树）
   workspaceRoot: string;
-  // 缺省从治理根读取
-  config?: McpConfig;
+  // 决策 325：取自本会话的设置快照（.mcp.json 与设置的 mcp 一节合并后的结果）；不在这里读文件
+  config: McpConfig;
   // 缺省按启动定义创建真实传输；测试注入内存传输
   createTransport?: (launch: McpLaunch, server: McpServerConfig) => Transport;
   maxRestarts?: number;
   backoffMs?: (attempt: number) => number;
   connectTimeoutMs?: number;
+  // 旧会话（/reload 重建时给）：启动定义未变的 server 沿用它的连接
+  reuse?: McpSession;
 }
 
 export interface McpSummary {
@@ -72,25 +77,67 @@ export function noMcpSession(): Promise<McpSession> {
   return startMcpSession({ governanceRoot: ".", workspaceRoot: ".", config: { servers: [] } });
 }
 
+// 连接的启动定义与持有它的会话数（沿用判定与按引用关闭）
+const launchOf = new WeakMap<McpServerConnection, string>();
+const holders = new WeakMap<McpServerConnection, number>();
+
+function hold(connection: McpServerConnection): void {
+  holders.set(connection, (holders.get(connection) ?? 0) + 1);
+}
+
+async function release(connection: McpServerConnection): Promise<void> {
+  const count = (holders.get(connection) ?? 1) - 1;
+  holders.set(connection, count);
+  if (count <= 0) {
+    await connection.close();
+  }
+}
+
+// 旧会话里启动定义与工作区根（roots）相同、仍连着的同名连接
+function reusable(
+  previous: McpSession | undefined,
+  server: McpServerConfig,
+  workspaceRoot: string
+): McpServerConnection | undefined {
+  const found = previous?.connections.find((connection) => connection.name === server.name);
+  return found !== undefined &&
+    found.state === "connected" &&
+    launchOf.get(found) === canonicalJson({ launch: server.launch, roots: workspaceRoot })
+    ? found
+    : undefined;
+}
+
 export async function startMcpSession(options: McpSessionOptions): Promise<McpSession> {
-  const config = options.config ?? loadMcpConfig(options.governanceRoot);
-  const connections = config.servers.map(
-    (server) =>
-      new McpServerConnection({
-        server,
-        roots: [options.workspaceRoot],
-        createTransport: (launch) =>
-          options.createTransport !== undefined
-            ? options.createTransport(launch, server)
-            : createMcpTransport(launch, { cwd: options.workspaceRoot }),
-        ...(options.maxRestarts !== undefined ? { maxRestarts: options.maxRestarts } : {}),
-        ...(options.backoffMs !== undefined ? { backoffMs: options.backoffMs } : {}),
-        ...(options.connectTimeoutMs !== undefined
-          ? { connectTimeoutMs: options.connectTimeoutMs }
-          : {}),
-      })
-  );
-  await Promise.all(connections.map((connection) => connection.start()));
+  const config = options.config;
+  const fresh: McpServerConnection[] = [];
+  const connections = config.servers.map((server) => {
+    const kept = reusable(options.reuse, server, options.workspaceRoot);
+    if (kept !== undefined) {
+      hold(kept);
+      return kept;
+    }
+    const connection = new McpServerConnection({
+      server,
+      roots: [options.workspaceRoot],
+      createTransport: (launch) =>
+        options.createTransport !== undefined
+          ? options.createTransport(launch, server)
+          : createMcpTransport(launch, { cwd: options.workspaceRoot }),
+      ...(options.maxRestarts !== undefined ? { maxRestarts: options.maxRestarts } : {}),
+      ...(options.backoffMs !== undefined ? { backoffMs: options.backoffMs } : {}),
+      ...(options.connectTimeoutMs !== undefined
+        ? { connectTimeoutMs: options.connectTimeoutMs }
+        : {}),
+    });
+    launchOf.set(
+      connection,
+      canonicalJson({ launch: server.launch, roots: options.workspaceRoot })
+    );
+    hold(connection);
+    fresh.push(connection);
+    return connection;
+  });
+  await Promise.all(fresh.map((connection) => connection.start()));
   const tools: McpBridgedTool[] = [];
   const problems: string[] = [];
   const taken = new Set<string>();
@@ -152,6 +199,7 @@ export async function startMcpSession(options: McpSessionOptions): Promise<McpSe
       }
     }
   }
+  let closed = false;
   return {
     tools,
     prompts,
@@ -181,7 +229,9 @@ export async function startMcpSession(options: McpSessionOptions): Promise<McpSe
       }),
     }),
     close: async () => {
-      await Promise.all(connections.map((connection) => connection.close()));
+      if (closed) return;
+      closed = true;
+      await Promise.all(connections.map((connection) => release(connection)));
     },
   };
 }

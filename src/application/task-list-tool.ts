@@ -1,6 +1,6 @@
 // 任务清单（决策 294 B1）：update_tasks 建立与更新、list_tasks 查看。只记录不调度——不派出、不按依赖排序或拦截；每项有标题与状态，
 // 可选标注依赖的项与对应的 worker 标签。清单存进会话：每次更新后的整份清单随 update_tasks 的工具结果（details）写进会话文件，
-// 续聊时从会话里最后一次更新还原。配置开关缺省开（.pigeon/orchestration.json 的 taskList），跑批器各条件不注册。
+// 续聊时从会话里最后一次更新还原。配置开关缺省开（设置的 orchestration 一节的 taskList），跑批器各条件不注册。
 // 两件都是只读档：只改本会话内存里的清单，不读写工作区，不经审批。说明文字为定稿原文。
 import { type Static, Type } from "typebox";
 import type { AgentMessage } from "../pi-runtime/index.ts";

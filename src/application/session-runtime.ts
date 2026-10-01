@@ -18,6 +18,7 @@ import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { storeAttemptLabel } from "../state/session-judge.ts";
+import { emptySettingsSnapshot, mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
@@ -93,8 +94,11 @@ export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
 }
 
 export interface OpenSessionRuntimeRequest {
-  // 治理根：.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在
+  // 治理根：.pigeon/（设置、程序状态、常驻 Memory、Skill）所在
   governanceRoot: string;
+  // 决策 325：本会话的设置快照（入口在会话开始时读一次并确认过会执行命令的条目；本会话内各处都从它取）。
+  // 缺省为空快照（不读任何设置文件）；日常入口一律显式给出
+  settings?: SettingsSnapshot;
   sessionId: SessionId;
   streamFn: StreamFn;
   flags: SessionRuntimeFlags;
@@ -104,8 +108,16 @@ export interface OpenSessionRuntimeRequest {
   resume?: boolean;
   // MCP 启动提示（启动问题与注解配置冲突）：cli 打 stdout、tui 打 stderr，由调用方决定
   onMcpNote?: (note: string) => void;
-  // 缺省按治理根与作用域工作区根启动真实 MCP 会话；测试注入替身
-  startMcp?: (scope: { governanceRoot: string; workspaceRoot: string }) => Promise<McpSession>;
+  // 缺省按治理根与作用域工作区根启动真实 MCP 会话；测试注入替身。reuse 为 /reload 时的旧 MCP 会话（沿用未变的连接）
+  startMcp?: (scope: {
+    governanceRoot: string;
+    workspaceRoot: string;
+    reuse?: McpSession;
+  }) => Promise<McpSession>;
+  // 决策 340：/reload 在同一会话上按新快照重建时给出旧运行面——内容未变的 MCP 连接沿用（只重启改过的、停掉删掉的、
+  // 启动新加的），系统提示里开局冻结的部分（常驻 Memory、推送的记忆、本地 Skill 目录）沿用开局读到的内容、不重读文件；
+  // 由设置决定的部分（工具清单与说明、MCP 一段等）按新快照装配。旧运行面由调用方在新运行面建好后释放
+  reloadFrom?: RuntimeBundle;
   // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
   // M7（决策 071）：会话级验证命令——冻结进注入快照；配置时挂 Run 结束后的独立验证
@@ -176,6 +188,7 @@ export async function openSessionRuntime(
       "容器工作区暂不支持失败自动分叉重试：分叉要在宿主的工作区上打快照、到独立工作树里续跑，而容器工作区在执行端另一侧"
     );
   }
+  const settings = request.settings ?? emptySettingsSnapshot(request.governanceRoot);
   // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略；新建会话与主会话即治理根
   const scope = sessionRuntimeScope(request.governanceRoot, request.sessionId);
   const restoredGrants =
@@ -187,11 +200,19 @@ export async function openSessionRuntime(
     request.workspaceHost !== undefined
       ? () => noMcpSession()
       : (request.startMcp ??
-        ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot })));
+        ((target) =>
+          startMcpSession({
+            ...target,
+            workspaceRoot: target.workspaceRoot,
+            config: mcpConfigOf(settings),
+          })));
+  const reuseMcp = request.reloadFrom?.mcp;
   const mcp = await startMcp({
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
+    ...(reuseMcp !== undefined ? { reuse: reuseMcp } : {}),
   });
+  const frozenPrompt = request.reloadFrom?.frozenPrompt;
   const learnedMemory = interactiveLearnedMemory(request.flags, request.warn, request.loopGuard);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
@@ -206,6 +227,7 @@ export async function openSessionRuntime(
       streamFn: request.streamFn,
       workspaceRoot: scope.workspaceRoot,
       governanceRoot: request.governanceRoot,
+      settings,
       ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
       sessionId: request.sessionId,
       yolo: request.flags.yolo,
@@ -239,6 +261,7 @@ export async function openSessionRuntime(
       ...(request.taskList === true ? { taskList: true } : {}),
       ...(request.webTools !== undefined ? { webTools: request.webTools } : {}),
       ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
+      ...(frozenPrompt !== undefined ? { frozenPrompt } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];
@@ -313,6 +336,7 @@ export async function openSessionRuntime(
             ? { compaction: request.flags.compaction }
             : {}),
           ...(request.verify !== undefined ? { verify: request.verify } : {}),
+          settings,
           ...pushedMemoryRunOptions(request.flags),
           ...(startMcp !== undefined
             ? {

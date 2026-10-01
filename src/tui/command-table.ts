@@ -18,6 +18,8 @@ export interface CommandAvailability {
   inWorkerSession?(): boolean;
   // 决策 309：脚本编排的命令面在场（缺省即不在场）
   scripts?(): boolean;
+  // 决策 340：/reload 重读设置（缺省即不在场）
+  reload?(): boolean;
 }
 
 export interface SlashCommandSpec {
@@ -152,6 +154,13 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     usage: "/orchestrate <任务> [额度 ¥5|$2|300k]",
     whileRunning: { allow: true },
     available: (host) => host.scripts?.() === true && !host.inSandbox(),
+  },
+  // 决策 340：重读三层设置，新快照自下一轮起生效；会重建运行面，运行中拒绝
+  {
+    name: "reload",
+    usage: "/reload [confirm|skip]",
+    whileRunning: { allow: false, reason: `${MAIN_STATE}（重读设置并重建运行面）` },
+    available: (host) => host.reload?.() === true,
   },
   {
     name: "export",

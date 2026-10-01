@@ -53,8 +53,8 @@ function fixture(): Fixture {
   writeFileSync(join(main, "u.txt"), "untracked in main\n");
   const snap = snapshotWorkdir({ repoRoot: main, ref: "refs/pigeon/worker-start/w" });
   assert.equal(snap.snapshot, true);
-  const worker = join(main, ".pigeon", "worktrees", "s-w");
-  mkdirSync(join(main, ".pigeon", "worktrees"), { recursive: true });
+  const worker = join(main, ".pigeon", "state", "worktrees", "s-w");
+  mkdirSync(join(main, ".pigeon", "state", "worktrees"), { recursive: true });
   git(main, "worktree", "add", "-q", "-b", "pigeon/w", worker, snap.commit);
   return {
     main,
@@ -298,5 +298,39 @@ test("主工作目录里该路径是目录或符号链接：不写、列为冲�
     );
   } finally {
     f.cleanup();
+  }
+});
+
+test("决策 325：worker 改了仓库已跟踪的 .pigeon/settings.json——作为项目内容照常叠加；个人设置与程序状态不带", () => {
+  const main = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-overlay-settings-")));
+  try {
+    git(main, "init", "-q", "-b", "main");
+    git(main, "config", "user.email", "pigeon@example.invalid");
+    git(main, "config", "user.name", "pigeon-test");
+    git(main, "config", "core.autocrlf", "false");
+    mkdirSync(join(main, ".pigeon"));
+    writeFileSync(join(main, ".pigeon", ".gitignore"), "state/\nsettings.local.json\n");
+    writeFileSync(join(main, ".pigeon", "settings.json"), "{}\n");
+    writeFileSync(join(main, "a.txt"), "a\n");
+    git(main, "add", ".");
+    git(main, "commit", "-q", "-m", "init");
+    const snap = snapshotWorkdir({ repoRoot: main, ref: "refs/pigeon/worker-start/w" });
+    const worker = join(main, ".pigeon", "state", "worktrees", "s-w");
+    mkdirSync(join(main, ".pigeon", "state", "worktrees"), { recursive: true });
+    git(main, "worktree", "add", "-q", "-b", "pigeon/w", worker, snap.commit);
+    writeFileSync(join(worker, ".pigeon", "settings.json"), '{"commands":{}}\n');
+    writeFileSync(join(worker, ".pigeon", "settings.local.json"), "{}\n");
+    mkdirSync(join(worker, ".pigeon", "state"), { recursive: true });
+    writeFileSync(join(worker, ".pigeon", "state", "x.json"), "{}\n");
+    const result = overlayWorkerChanges({
+      repoRoot: main,
+      base: snap.commit,
+      worktreePath: worker,
+    });
+    assert.deepEqual(result.applied, [".pigeon/settings.json"]);
+    assert.equal(readFileSync(join(main, ".pigeon", "settings.json"), "utf8"), '{"commands":{}}\n');
+    assert.equal(existsSync(join(main, ".pigeon", "settings.local.json")), false);
+  } finally {
+    rmSync(main, { recursive: true, force: true });
   }
 });

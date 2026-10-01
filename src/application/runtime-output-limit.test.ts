@@ -43,7 +43,7 @@ for (const [label, maxOutputTokens, expected] of [
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       });
       assert.deepEqual(seen, [expected]);
-      const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), result.sessionId);
+      const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), result.sessionId);
       assert.ok(loaded !== undefined, "会话存储里应有本会话");
       assert.equal(loaded.view.runs.length, 1);
       assert.equal(loaded.view.runs[0]?.start.model.maxOutputTokens, expected);

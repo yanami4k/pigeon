@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { SessionId } from "../state/ids.ts";
+import { mapLegacyWorktreePath } from "../state/paths.ts";
 import { storeWorkerSpawned } from "../state/session-judge.ts";
 import type { DelegatedPolicy, WorkerRole, WorkerWorkspace } from "../state/session-payloads.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -31,7 +32,7 @@ export function sessionRuntimeScope(
   // M7（决策 077）：分支会话回到它自己的工作树（主会话形态，不是委派）
   const branch = view.metadata?.branch;
   if (branch !== undefined) {
-    return { workspaceRoot: existingWorktree("分支", branch.workspace) };
+    return { workspaceRoot: existingWorktree(governanceRoot, "分支", branch.workspace) };
   }
   const worker = view.metadata?.worker;
   const parentSessionId = view.parentSessionId;
@@ -57,13 +58,19 @@ export function sessionRuntimeScope(
   });
 }
 
-function existingWorktree(kind: string, workspace: { path: string; branch: string }): string {
-  if (!existsSync(workspace.path)) {
+// 决策 325：工作树移入 .pigeon/state/worktrees 之前的会话记着旧位置的绝对路径，按旧前缀到新前缀映射后再找
+function existingWorktree(
+  governanceRoot: string,
+  kind: string,
+  workspace: { path: string; branch: string }
+): string {
+  const located = mapLegacyWorktreePath(governanceRoot, workspace.path);
+  if (!existsSync(located)) {
     throw new Error(
-      `${kind}工作树已不存在：${workspace.path}（分支 ${workspace.branch} 仍可用 git 查看）`
+      `${kind}工作树已不存在：${located}（分支 ${workspace.branch} 仍可用 git 查看）`
     );
   }
-  return workspace.path;
+  return located;
 }
 
 function scopeOf(
@@ -75,5 +82,5 @@ function scopeOf(
   if (workspace.kind === "none") {
     return { workspaceRoot: governanceRoot, ...delegated };
   }
-  return { workspaceRoot: existingWorktree("worker ", workspace), ...delegated };
+  return { workspaceRoot: existingWorktree(governanceRoot, "worker ", workspace), ...delegated };
 }

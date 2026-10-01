@@ -17,7 +17,7 @@ import { runTraceCommand } from "./trace.ts";
 test("trace：父会话列出 worker（已收尾给结果与进入命令、未收尾标注 resume 入口、孤立收尾归异常）；worker 会话回指父会话", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-trace-workers-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const parent = createFixtureSession({ sessionsDir });
     parent.startRun({ task: "派活" });
     const done = spawnFixtureWorker(parent, { sessionsDir, name: "fix-a", task: "改" });

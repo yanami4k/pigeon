@@ -1,11 +1,12 @@
 // 后台补做复盘（决策 283、284）与复盘模型（296）在治理根下的读写：配置 .pigeon/memory-review.json（人手写，只读；缺失即缺省，
-// 畸形响亮失败，形态同 web.json）与状态目录 .pigeon/review-backfill/（上线时刻、租约、补做记录）。
+// 畸形响亮失败，形态同 web.json）与状态目录 .pigeon/state/review-backfill/（上线时刻、租约、补做记录）。
 // 租约：每个会话一个租约文件 leases/<会话号>.json，写明持有者（进程号与本次启动的随机标识）与时刻，过了到期时刻即视为失效。
 // 读、判、写三步在同一把按会话号的独占锁里做（exclusive-lock.ts：持有进程已死即接管），同时开着的几个 Pigeon 不会同时领到
 // 同一个会话；锁只在这三步之间持有，复盘期间靠租约文件本身挡住别的进程。
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Value } from "typebox/value";
+import { memoryReviewConfigPathOf, reviewBackfillDirOf } from "../state/paths.ts";
 import {
   type BackfillLease,
   BackfillLeaseSchema,
@@ -25,11 +26,11 @@ import { acquireExclusiveLock, ExclusiveLockError } from "./exclusive-lock.ts";
 export class MemoryReviewConfigError extends Error {}
 
 export function memoryReviewConfigPath(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", "memory-review.json");
+  return memoryReviewConfigPathOf(governanceRoot);
 }
 
 export function reviewBackfillDir(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", "review-backfill");
+  return reviewBackfillDirOf(governanceRoot);
 }
 
 // 读配置：补做的生效数值与复盘模型（没指定即缺省）；文件缺失取缺省，畸形响亮失败

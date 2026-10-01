@@ -16,9 +16,9 @@
 // 决策 267：pigeon 不带子命令即启动本界面（命令行对话改由 pigeon --line 进入）。
 // 决策 286：pigeon --continue 接本项目最近的主会话、--resume <id> 接指定会话（启动时直接打开，不另建空会话），
 // --resume 不带会话号开壳后弹出会话选择器；运行期告警在壳接管终端期间落消息区（之前与之后照旧写标准错误输出）；
-// 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/tui-history.json。
+// 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/state/tui-history.json。
 // 决策 301：编排面接上编排器的只读观察口、发消息与续做（编排面板、树形视图、进入 worker 会话），树形视图按任务清单标注。
-import path from "node:path";
+import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createSessionAttemptRunner } from "../application/attempt-group.ts";
@@ -52,6 +52,13 @@ import {
   openSessionRuntime,
   pushedMemoryRunOptions,
 } from "../application/session-runtime.ts";
+import {
+  openSessionSettings,
+  parseTrustAnswer,
+  type TrustChoice,
+  trustPromptText,
+} from "../application/session-settings.ts";
+import { createSettingsReloader } from "../application/settings-reload.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
@@ -62,10 +69,12 @@ import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
-import { loadLoopGuardConfig } from "../persistence/loop-guard-config.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
+import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
+import { tuiLogDirOf } from "../state/paths.ts";
+import { loopGuardSettingsOf, webSectionOf } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
@@ -84,6 +93,20 @@ const USAGE =
   "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
+
+// 决策 326 ③：壳接管终端之前，在标准错误输出上逐行问答确认会执行命令的配置
+async function askTrustOnStderr(entries: readonly TrustEntry[]): Promise<TrustChoice> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    for (;;) {
+      const answer = await rl.question(`${trustPromptText(entries)}\n> `);
+      const choice = parseTrustAnswer(answer);
+      if (choice !== undefined) return choice;
+    }
+  } finally {
+    rl.close();
+  }
+}
 
 async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
@@ -104,17 +127,26 @@ async function main(argv: string[]): Promise<void> {
   // 工作区准备（决策 034）：realpath 规范化，与 cli 入口同一份；
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
-  // 决策 297–303：编排设定——.pigeon/orchestration.json（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
-  const orchestration = orchestrationSettingsOf(flags, workspaceRoot);
-  // 决策 308：打转检测——.pigeon/loop-guard.json（缺失取缺省即开着；畸形在接管终端之前响亮失败）
-  const loopGuard = loadLoopGuardConfig(workspaceRoot);
+  // 决策 325、326：旧布局检查、读三层设置成本会话快照、确认会执行命令的条目（壳接管终端之前，行内问答）。
+  // 本进程内的会话（含 /resume 换绑、worker、沙箱会话）都用这一份快照，直到 /reload 换上新快照（决策 340）
+  let settings = await openSessionSettings(workspaceRoot, {
+    confirmation: { kind: "interactive", ask: askTrustOnStderr },
+    notice: (line) => console.error(line),
+  });
+  // 决策 297–303：编排设定——设置的 orchestration 一节（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
+  let orchestration = orchestrationSettingsOf(flags, settings);
+  // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
+  let loopGuard = loopGuardSettingsOf(settings);
   // 决策 296：复盘模型（配置里指定时，压缩前、收尾、补做三种复盘都用它）
   applyReviewModelConfig(flags, workspaceRoot);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
-  const webTools = webToolsEnabled(flags)
-    ? resolveWebTools({ governanceRoot: workspaceRoot })
-    : undefined;
-  const webToolsOption = webTools !== undefined ? { webTools } : {};
+  const webToolsFor = (snapshot: typeof settings) => {
+    const webTools = webToolsEnabled(flags)
+      ? resolveWebTools({ config: webSectionOf(snapshot) })
+      : undefined;
+    return webTools !== undefined ? { webTools } : {};
+  };
+  let webToolsOption = webToolsFor(settings);
   // 决策 286：启动时打开哪个会话（新会话，或 --continue / --resume <id> 直接续接）；会话不存在等在接管终端前报错
   const target = resolveStartTarget(workspaceRoot, continued.mode, flags.sandbox !== undefined);
   if (target.kind === "new" && target.note !== undefined) {
@@ -208,6 +240,7 @@ async function main(argv: string[]): Promise<void> {
           // 决策 314：金额额度要模型有价格；决策 313：脚本卡住的判定时长
           pricing: () => modelPricing(flags.provider, bundle.adapter.transcript()),
           stallMs: orchestration.scriptStallMs,
+          settings: bundle.settings,
           emit: (line) => {
             shellHolder.current?.addSystem(line);
             shellHolder.current?.render();
@@ -276,6 +309,7 @@ async function main(argv: string[]): Promise<void> {
   const sandbox: Sandbox | undefined = await startSandbox({
     flags,
     governanceRoot: workspaceRoot,
+    settings,
     sessionId,
     ...(resumed ? { resume: true } : {}),
     log: (line) => console.error(`[沙箱] ${line}`),
@@ -284,6 +318,7 @@ async function main(argv: string[]): Promise<void> {
   });
   const mainOpened = await openSessionRuntime({
     governanceRoot: workspaceRoot,
+    settings,
     sessionId,
     streamFn,
     flags,
@@ -319,7 +354,8 @@ async function main(argv: string[]): Promise<void> {
     terminal: new ProcessTerminal(),
     runtime: slot.bundle.adapter,
     sessionId: slot.sessionId,
-    logDir: path.join(workspaceRoot, ".pigeon"),
+    // 决策 325：终端界面日志在程序状态目录下
+    logDir: tuiLogDirOf(workspaceRoot),
     // 决策 286：状态栏的模型与跨启动的输入历史
     model: `${flags.provider}/${flags.modelId}`,
     provider: flags.provider,
@@ -329,6 +365,7 @@ async function main(argv: string[]): Promise<void> {
       root: workspaceRoot,
       store: slot.bundle.grantStore,
       configRules: slot.bundle.configGrants,
+      layeredRules: slot.bundle.settings.grants,
     },
     // S4：/sessions 会话列表（命令层在 application/session-list.ts，与 cli 同一份）
     sessions: { root: workspaceRoot },
@@ -345,6 +382,66 @@ async function main(argv: string[]): Promise<void> {
     // 旧运行面不受影响，壳继续留在原会话
     // 沙箱会话里不提供换绑（命令给出原因）
     ...(sandbox !== undefined ? {} : { resume: resumeOptions() }),
+    // 决策 340：/reload 重读设置，新快照自下一轮起生效
+    reload: createSettingsReloader({
+      current: () => settings,
+      busy: () =>
+        slot.workers
+          ?.status()
+          .some((worker) => worker.state === "running" || worker.state === "queued") === true
+          ? "有 worker 仍在运行：先 /cancel 或等其收尾，再 /reload"
+          : undefined,
+      sandboxSessionId: () => (sandbox !== undefined ? slot.sessionId : undefined),
+      apply: async (snapshot) => {
+        // 新快照与由它得出的编排设定、打转检测、联网工具一并换上，再按新快照在同一会话上重建运行面：内容未变的 MCP 连接
+        // 与系统提示里开局冻结的部分沿用旧运行面的（reloadFrom），只重启改过的服务
+        settings = snapshot;
+        orchestration = orchestrationSettingsOf(flags, snapshot);
+        loopGuard = loopGuardSettingsOf(snapshot);
+        webToolsOption = webToolsFor(snapshot);
+        await slot.bundle.sessionStore.flush();
+        const opened = await openSessionRuntime({
+          governanceRoot: workspaceRoot,
+          settings,
+          sessionId: slot.sessionId,
+          streamFn,
+          flags,
+          ...verifyOption(flags, workspaceRoot),
+          ...retryOption(flags),
+          ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+          ...spawnWorkerOption(flags, orchestration),
+          taskList: orchestration.taskList,
+          ...webToolsOption,
+          warn,
+          loopGuard,
+          createApprovalHandler: createHandler,
+          resume: true,
+          reloadFrom: slot.bundle,
+          onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
+        });
+        const bundle = opened.bundle;
+        guardMainAgent(bundle);
+        const workers =
+          sandbox === undefined ? workersFor(opened, opened.scope.parentSessionId) : undefined;
+        const previous = slot;
+        slot = {
+          sessionId: previous.sessionId,
+          bundle,
+          ...(workers !== undefined ? { workers } : {}),
+        };
+        await disposeRuntime(previous.bundle).catch(() => {});
+        shellHolder.current?.rebindSession(slot.sessionId, {
+          runtime: bundle.adapter,
+          grants: {
+            root: workspaceRoot,
+            store: bundle.grantStore,
+            configRules: bundle.configGrants,
+            layeredRules: bundle.settings.grants,
+          },
+          ...(workers !== undefined ? { workers } : {}),
+        });
+      },
+    }),
     // 决策 294 B1：/tasks 查看当前会话的任务清单（换绑后跟着当前会话）
     tasks: () => {
       const list = slot.bundle.taskList;
@@ -377,6 +474,7 @@ async function main(argv: string[]): Promise<void> {
         // 决策 3b：会话 grant 种子还原。两者与 MCP 启动一并在 session-runtime.ts（与 cli resume 同一份）
         const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
+          settings,
           sessionId: targetId,
           streamFn,
           flags,
@@ -408,6 +506,7 @@ async function main(argv: string[]): Promise<void> {
             root: workspaceRoot,
             store: bundle.grantStore,
             configRules: bundle.configGrants,
+            layeredRules: bundle.settings.grants,
           },
           workers,
         };

@@ -102,13 +102,39 @@ test("治理目录 .pigeon 不进快照：只有会话文件在变时不算文�
   try {
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
     checkpointer.beforeChange();
-    mkdirSync(join(dir, ".pigeon", "sessions"), { recursive: true });
-    writeFileSync(join(dir, ".pigeon", "sessions", "x.jsonl"), "{}\n");
+    mkdirSync(join(dir, ".pigeon", "state", "sessions"), { recursive: true });
+    writeFileSync(join(dir, ".pigeon", "state", "sessions", "x.jsonl"), "{}\n");
     assert.equal(checkpointer.afterChange(), undefined);
     writeFileSync(join(dir, "a.txt"), "changed\n");
     const snapshot = checkpointer.afterChange();
     assert.ok(snapshot !== undefined);
-    assert.throws(() => git(dir, ["show", `${snapshot.commit}:.pigeon/sessions/x.jsonl`]));
+    assert.throws(() => git(dir, ["show", `${snapshot.commit}:.pigeon/state/sessions/x.jsonl`]));
+  } finally {
+    cleanup();
+  }
+});
+
+test("决策 325：仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容——快照里照常在、改动照进；个人设置不进", () => {
+  const { dir, cleanup } = repo();
+  try {
+    mkdirSync(join(dir, ".pigeon", "skills", "s"), { recursive: true });
+    writeFileSync(join(dir, ".pigeon", "settings.json"), "{}\n");
+    writeFileSync(join(dir, ".pigeon", "skills", "s", "SKILL.md"), "skill\n");
+    git(dir, ["add", "."]);
+    git(dir, ["commit", "-q", "-m", "track settings"]);
+    const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
+    checkpointer.beforeChange();
+    writeFileSync(join(dir, ".pigeon", "settings.local.json"), "{}\n");
+    assert.equal(checkpointer.afterChange(), undefined, "只动了个人设置不算文件改变");
+    writeFileSync(join(dir, ".pigeon", "settings.json"), '{"commands":{}}\n');
+    const snapshot = checkpointer.afterChange();
+    assert.ok(snapshot !== undefined);
+    assert.equal(
+      git(dir, ["show", `${snapshot.commit}:.pigeon/settings.json`]),
+      '{"commands":{}}\n'
+    );
+    assert.equal(git(dir, ["show", `${snapshot.commit}:.pigeon/skills/s/SKILL.md`]), "skill\n");
+    assert.throws(() => git(dir, ["show", `${snapshot.commit}:.pigeon/settings.local.json`]));
   } finally {
     cleanup();
   }
@@ -120,8 +146,8 @@ test(".pigeon 已被 .gitignore 忽略的仓库：照常生成快照（不因忽
     writeFileSync(join(dir, ".gitignore"), ".pigeon/\n");
     git(dir, ["add", ".gitignore"]);
     git(dir, ["commit", "-q", "-m", "ignore"]);
-    mkdirSync(join(dir, ".pigeon", "sessions"), { recursive: true });
-    writeFileSync(join(dir, ".pigeon", "sessions", "x.jsonl"), "{}\n");
+    mkdirSync(join(dir, ".pigeon", "state", "sessions"), { recursive: true });
+    writeFileSync(join(dir, ".pigeon", "state", "sessions", "x.jsonl"), "{}\n");
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
     checkpointer.beforeChange();
     writeFileSync(join(dir, "a.txt"), "changed\n");

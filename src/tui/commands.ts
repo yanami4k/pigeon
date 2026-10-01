@@ -17,6 +17,7 @@ import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { LayeredGrantRule } from "../state/settings.ts";
 import {
   type CommandAvailability,
   unknownCommandText,
@@ -34,6 +35,8 @@ export interface TuiGrantsContext {
   root: string;
   store: SessionGrantStore;
   configRules: readonly ConfigGrantRule[];
+  // 决策 325：放权规则连同所在层与层内序号（/grants 按层列出）
+  layeredRules?: readonly LayeredGrantRule[];
 }
 
 // 壳侧窄接口：命令分发需要的当前会话上下文与壳动作
@@ -56,6 +59,8 @@ export interface CommandsHost {
   takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
+  // 决策 340：/reload 重读设置（装配方给了重载入口才在场）
+  readonly reloadCommand?: ((args: readonly string[]) => void) | undefined;
   // 决策 294 B1：任务清单（排好的文字）；undefined = 清单没开；缺省 = /tasks 不可用
   tasks?(): string | undefined;
   // 决策 301：/agents 切换树形视图
@@ -74,6 +79,7 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     hasGrants: () => host.grants() !== undefined,
     inSandbox: () => host.sandbox?.() !== undefined,
     tasks: () => host.tasks !== undefined,
+    reload: () => host.reloadCommand !== undefined,
     scripts: () => host.scriptCommands?.() !== undefined,
     workers: () => {
       const workers = host.workers();
@@ -198,7 +204,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     // 决策 294 B1：/tasks 查看任务清单（完整的清单显示留给编排二段）
     if (tokens[0] === "tasks" && host.tasks !== undefined) {
       host.addSystem(
-        host.tasks() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
+        host.tasks() ?? "任务清单没有开（设置 orchestration 一节的 taskList 为 false）。"
       );
       return;
     }
@@ -240,6 +246,11 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       host.compactCommand(compactFocusOf(value));
       return;
     }
+    // 决策 340：/reload 重读设置（结果与待确认条目写进消息区）
+    if (tokens[0] === "reload" && host.reloadCommand !== undefined) {
+      host.reloadCommand(tokens.slice(1));
+      return;
+    }
     // S4：/resume <sessionId> 冷恢复对账 + 换绑续跑（异步流程，见 resume-view.ts）
     if (tokens[0] === "resume" && host.resumeConfigured()) {
       host.resumeCommand(tokens[1]);
@@ -251,6 +262,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         root: grants.root,
         store: grants.store,
         configRules: grants.configRules,
+        ...(grants.layeredRules !== undefined ? { layeredRules: grants.layeredRules } : {}),
         sessionId: host.sessionId(),
         write: (text) => {
           host.addSystem(text.trimEnd());

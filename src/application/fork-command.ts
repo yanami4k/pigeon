@@ -105,7 +105,12 @@ export async function runForkCommand(input: {
     ...(input.opened.checkpoints !== undefined
       ? { checkpointer: input.opened.checkpoints.checkpointer }
       : {}),
-    run: { ...input.run, ...(nextInput !== undefined ? { input: nextInput } : {}) },
+    // 决策 325：分支沿用来源会话的设置快照
+    run: {
+      settings: input.opened.bundle.settings,
+      ...input.run,
+      ...(nextInput !== undefined ? { input: nextInput } : {}),
+    },
   });
   return [
     `已分叉：分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条 ｜ 快照 ${result.checkpoint.commit.slice(0, 12)}`,

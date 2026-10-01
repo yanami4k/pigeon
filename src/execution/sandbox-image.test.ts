@@ -4,24 +4,32 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { loadSettings } from "../persistence/settings.ts";
+import { sandboxConfigOf } from "../state/settings.ts";
 import { fakeSandboxDocker } from "./sandbox-docker-fixtures.ts";
-import {
-  ensureSandboxImage,
-  GENERIC_DOCKERFILE,
-  loadSandboxConfig,
-  resolveSandboxImage,
-} from "./sandbox-image.ts";
+import { ensureSandboxImage, GENERIC_DOCKERFILE, resolveSandboxImage } from "./sandbox-image.ts";
 
+// 决策 325：沙箱配置是项目共享设置的 sandbox 一节（字符串原样写成设置文件，用来造不是合法 JSON 的情形）
 function project(config?: unknown): string {
   const root = mkdtempSync(join(tmpdir(), "pigeon-sandbox-image-"));
   if (config !== undefined) {
     mkdirSync(join(root, ".pigeon"));
     writeFileSync(
-      join(root, ".pigeon", "sandbox.json"),
-      typeof config === "string" ? config : JSON.stringify(config)
+      join(root, ".pigeon", "settings.json"),
+      typeof config === "string" ? config : JSON.stringify({ sandbox: config })
     );
   }
   return root;
+}
+
+// 经设置快照取 sandbox 一节（用户级指到空的临时目录）
+function loadSandboxConfig(root: string) {
+  const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-home-"));
+  try {
+    return sandboxConfigOf(loadSettings(root, { homeDir: home }));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 test("通用镜像的 Dockerfile 在仓库里：Ubuntu 24.04，含 git、Python 3、ripgrep，Node 24 取官方二进制包并校验，以非 root 用户运行", () => {
@@ -121,7 +129,7 @@ test("项目配置可改用任一镜像名或项目自己的 Dockerfile；畸形
     assert.match(spec.image, /^pigeon-sandbox-project:[0-9a-f]{12}$/);
     assert.equal(spec.kind === "build" ? spec.context : undefined, join(byFile, "ci"));
     for (const root of broken) {
-      assert.throws(() => loadSandboxConfig(root), /沙箱配置/);
+      assert.throws(() => loadSandboxConfig(root), /settings\.json|sandbox/);
     }
     assert.deepEqual(loadSandboxConfig(project()), {});
   } finally {

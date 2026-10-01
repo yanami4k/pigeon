@@ -127,7 +127,7 @@ test("端到端：失败自动分叉重试一次跑通，来源与分支两个�
       retryOnFail: 1,
     });
     assert.equal(result.retries?.[0]?.label, "Passed");
-    const sessionsDir = join(dir, ".pigeon", "sessions");
+    const sessionsDir = join(dir, ".pigeon", "state", "sessions");
     const source = viewOf(sessionsDir, result.sessionId);
     assert.equal(source.header.cwd, dir);
     const starts = customs<RunStartData>(source.entries, SessionEntryType.RunStart);
@@ -244,7 +244,7 @@ test("手动分叉时来源写者在本进程，先落盘再分叉；分叉条�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const sessionsDir = join(dir, ".pigeon", "sessions");
+    const sessionsDir = join(dir, ".pigeon", "state", "sessions");
     const source = viewOf(sessionsDir, sourceId);
     const [fork] = customs<ForkData>(source.entries, SessionEntryType.Fork);
     const third = messages(source.entries)[2];
@@ -282,7 +282,7 @@ test("撞轮数上限的 Run 收尾条目记轮数上限（原因随中止请求
       maxTurns: 1,
     });
     assert.equal(result.status, "turn-limit");
-    const view = viewOf(join(dir, ".pigeon", "sessions"), result.sessionId);
+    const view = viewOf(join(dir, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(
       customs<RunEndData>(view.entries, SessionEntryType.RunEnd).map((data) => data.ending),
       ["turn-limit"]
@@ -322,7 +322,7 @@ test("授权建立与撤销写进会话存储；worker 会话的来历写进文�
     });
     bundle.grantStore.revoke(grant.grantId);
     await disposeRuntime(bundle);
-    const view = viewOf(join(root, ".pigeon", "sessions"), sessionId);
+    const view = viewOf(join(root, ".pigeon", "state", "sessions"), sessionId);
     const grants = customs<GrantData>(view.entries, SessionEntryType.Grant);
     assert.deepEqual(
       grants.map((data) => [data.event, data.grantId]),
@@ -424,7 +424,7 @@ test("转接：授权与 worker 两族的落盘口把输入转成会话存储条
 test("会话存储建不起文件时向标准错误输出告警一次，运行照常完成", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-store-fault-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     mkdirSync(sessionsDir, { recursive: true });
     // 会话存储要建的子目录位置被一个普通文件占着
     writeFileSync(join(sessionsDir, sessionDirectoryName(root)), "占位");
@@ -459,7 +459,7 @@ test("会话存储建不起文件时向标准错误输出告警一次，运行�
 test("会话根下有同号的旧格式平铺文件：新存储照常新建自己的文件、不读也不改旧文件，不告警", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-store-legacy-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     // 迁移之前创建的会话：会话根下只有平铺的旧格式文件
     const sessionId = writeLegacySessionFile(sessionsDir, newSessionId());
     const legacyPath = join(sessionsDir, `${sessionId}.jsonl`);

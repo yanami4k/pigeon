@@ -18,7 +18,6 @@
 // 297：每次运行结束后，等本次派出的 worker 全部结束、把完成通知当新的一轮处理完，这一步才往下走（验证、回炉、收尾复盘）；
 // 释放运行面之前停掉仍在跑的 worker（撞上限、外部中止时），等其收尾记录写进本会话。执行端另一侧的工作区（容器）与分支会话不注册。
 // 任务清单（294 B1）：开着时给主 agent 注册两件清单工具
-import path from "node:path";
 import type { ScriptLauncher } from "../execution/script-sandbox.ts";
 import { assertMemoryLimit } from "../memory/pushed.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
@@ -37,9 +36,11 @@ import {
   type OrchestrationSettings,
 } from "../state/orchestration-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
+import { pigeonRel, sessionsDirOf } from "../state/paths.ts";
 import type { EvalVerdict, ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
 import type { BranchHeaderInput } from "../state/session-payloads.ts";
+import type { SettingsSnapshot } from "../state/settings.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { StepStartMark, WorkspaceHost } from "../tools/workspace-host.ts";
 import { type VerifyAttemptResult, verifyAttempt } from "./attempt-verify.ts";
@@ -109,6 +110,8 @@ export const HEADLESS_EXIT_CODES: Readonly<Record<HeadlessStatus, number>> = {
 export interface HeadlessRunOptions {
   task: string;
   governanceRoot: string;
+  // 决策 325：本次运行的设置快照（pigeon run 由入口读好并确认过会执行命令的条目；缺省为空快照，跑批器如此）
+  settings?: SettingsSnapshot;
   workspaceRoot: string;
   // 决策 098：执行端；缺省为 workspaceRoot 上的本地实现（容器工作区由调用方注入，workspaceRoot 为宿主侧占位目录）
   workspaceHost?: WorkspaceHost;
@@ -248,7 +251,7 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
   if (options.verify === undefined) {
     throw new Error(
       `设了回炉轮数（${rounds}）却没有验证命令：回炉靠验证结论决定修不修，` +
-        "请用 --verify-command 或项目验证配置（.pigeon/verify.json）给出验证命令"
+        `请用 --verify-command 或项目验证配置（${pigeonRel("verify.json")}）给出验证命令`
     );
   }
   if ((options.retryOnFail ?? 0) > 0) {
@@ -378,6 +381,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   // 本次运行与收尾复盘共用的装配参数（工具定义因此相同）
   const surface: Omit<DetachedRuntimeRequest, "sessionId"> = {
     governanceRoot: options.governanceRoot,
+    ...(options.settings !== undefined ? { settings: options.settings } : {}),
     workspaceRoot: options.workspaceRoot,
     ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
     streamFn: options.streamFn,
@@ -488,6 +492,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
           scripts = createSessionScripts({
             orchestrator,
             governanceRoot: options.governanceRoot,
+            settings: bundle.settings,
             sessionId,
             flush: () => bundle.sessionStore.flush(),
             ...(notices !== undefined ? { notices } : {}),
@@ -724,7 +729,7 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
     }
     await handle.dispose();
   }
-  const sessionsDir = path.join(options.governanceRoot, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(options.governanceRoot);
   const metricsBefore = readRunOutcome(sessionsDir, sessionId, toolTiers).metrics;
   // M7（决策 071）：尝试收尾后在工作区独立执行验证命令（运行面没装起来、没有 Run 时不跑）；
   // 回炉开启时验证已在释放之前做过，不再跑

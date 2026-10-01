@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
+import { isProgramOwnedPath } from "../state/paths.ts";
 import { repoToplevel, workdirTree } from "./workdir-snapshot.ts";
 
 // 中途失败时带上已经写进去的部分（叠加不设撤销，调用方据此如实交代）
@@ -99,15 +100,19 @@ function writeBlob(top: string, path: string, blob: string, target: string, mode
   }
 }
 
-export function overlayWorkerChanges(input: OverlayInput): OverlayResult {
+// worker 相对起点改过的文件（状态与路径；程序状态与个人设置不算）。叠加与"叠回内容是否含受保护路径"的判定共用
+function workerChanges(input: OverlayInput): {
+  top: string;
+  base: string;
+  workerTree: string;
+  changes: Array<{ status: string; path: string }>;
+} {
   const top = repoToplevel(input.repoRoot);
-  const topResolved = resolve(top);
   const workerTree = workdirTree(repoToplevel(input.worktreePath));
   const base = git(top, ["rev-parse", "--verify", "-q", `${input.base}^{commit}`]);
   if (base === "") {
     throw new OverlayError(`起点快照不存在：${input.base}`);
   }
-  const result: OverlayResult = { applied: [], unchanged: [], conflicts: [], deletedByWorker: [] };
   // worker 相对起点的改动：状态与路径成对，NUL 分隔
   const parts = git(top, [
     "diff-tree",
@@ -122,11 +127,26 @@ export function overlayWorkerChanges(input: OverlayInput): OverlayResult {
   for (let index = 0; index + 1 < parts.length; index += 2) {
     const status = parts[index] ?? "";
     const path = parts[index + 1] ?? "";
-    if (status === "" || path === "" || path === ".pigeon" || path.startsWith(".pigeon/")) {
+    if (status === "" || path === "" || isProgramOwnedPath(path)) {
       continue;
     }
     changes.push({ status: status.charAt(0), path });
   }
+  return { top, base, workerTree, changes };
+}
+
+// 叠回会写到的路径（相对仓库根，正斜杠；worker 删除的不算——叠加不删文件）
+export function workerOverlayPaths(input: OverlayInput): string[] {
+  return workerChanges(input)
+    .changes.filter((change) => change.status !== "D")
+    .map((change) => change.path)
+    .sort();
+}
+
+export function overlayWorkerChanges(input: OverlayInput): OverlayResult {
+  const { top, base, workerTree, changes } = workerChanges(input);
+  const topResolved = resolve(top);
+  const result: OverlayResult = { applied: [], unchanged: [], conflicts: [], deletedByWorker: [] };
   const scratch = mkdtempSync(join(tmpdir(), "pigeon-overlay-"));
   try {
     applyChanges(top, topResolved, base, workerTree, changes, scratch, result);

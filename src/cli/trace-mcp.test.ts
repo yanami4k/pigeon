@@ -11,7 +11,7 @@ import { runTraceCommand } from "./trace.ts";
 test("trace Run 头列出 MCP 冲突、不可用 server 与清单变更", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-trace-mcp-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir });
     session.startRun({
       task: "用 mcp",

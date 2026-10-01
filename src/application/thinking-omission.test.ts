@@ -40,7 +40,7 @@ async function run(persistThinking: boolean | undefined) {
   return {
     root,
     sessionId: result.sessionId,
-    sessionsDir: join(root, ".pigeon", "sessions"),
+    sessionsDir: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });

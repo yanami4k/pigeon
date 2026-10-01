@@ -12,7 +12,7 @@ import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 function withRoot(run: (root: string, sessionsDir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-cmd-"));
-  return run(root, join(root, ".pigeon", "sessions")).finally(() =>
+  return run(root, join(root, ".pigeon", "state", "sessions")).finally(() =>
     rmSync(root, { recursive: true, force: true })
   );
 }

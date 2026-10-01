@@ -247,7 +247,7 @@ function harness(options: {
   const workspaces: WorkspaceProvider = {
     plan: ({ name }) => ({
       kind: "git-worktree",
-      path: join(root, ".pigeon", "worktrees", name),
+      path: join(root, ".pigeon", "state", "worktrees", name),
       branch: `pigeon/${name}`,
     }),
     create: () => {},

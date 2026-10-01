@@ -62,7 +62,7 @@ export function evaluateToolPolicy(
     const origin =
       grant.source === "session-grant"
         ? `会话放权 ${grant.refId}`
-        : `固化规则 ${grant.refId}（.pigeon/grants.json）`;
+        : `固化规则 ${grant.refId}（设置的 permissions 一节）`;
     return {
       kind: "auto-allow",
       reason: `${origin} 命中：${toolName} 免审放行（账本记 ${

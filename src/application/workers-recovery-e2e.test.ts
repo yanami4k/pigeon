@@ -43,7 +43,7 @@ test("worker 崩溃冷恢复：父会话标注未收尾，worker 会话留悬空
     writeFileSync(join(repo, "a.ts"), original);
     git(repo, ["add", "a.ts"]);
     git(repo, ["commit", "-q", "-m", "init"]);
-    const sessionsDir = join(repo, ".pigeon", "sessions");
+    const sessionsDir = join(repo, ".pigeon", "state", "sessions");
 
     // 父会话派出 worker，进程随后死亡：父会话文件里只有派出条目
     const parentId = newSessionId();
@@ -197,7 +197,7 @@ test("worker 崩溃冷恢复：父会话标注未收尾，worker 会话留悬空
 test("旧格式会话续跑：明确报错并指向只读的旧版代码，不进入续会话、不在会话存储里建文件", async () => {
   const repo = mkdtempSync(join(tmpdir(), "pigeon-worker-recovery-legacy-"));
   try {
-    const sessionsDir = join(repo, ".pigeon", "sessions");
+    const sessionsDir = join(repo, ".pigeon", "state", "sessions");
     const legacyId = writeLegacySessionFile(sessionsDir);
     let entered = false;
     await assert.rejects(

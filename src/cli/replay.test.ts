@@ -61,7 +61,7 @@ function editCall(content: string): EditFileParams {
 
 // 经真实 Adapter 跑一次（写进会话存储）：读、改（批准）、再改（人工拒绝）、收尾
 async function scriptSession(root: string): Promise<{ sessionId: SessionId; runId: RunId }> {
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const sessionId = newSessionId();
   const store = openSessionStoreWriter({
     sessionsRoot: sessionsDir,
@@ -129,7 +129,7 @@ test("replay 报告（真实运行）：运行头终态与分类，时间线按�
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
     const output = runReplayCommand({ root, runId, sessionId });
-    const run = loadSessionView(join(root, ".pigeon", "sessions"), sessionId)?.runs[0];
+    const run = loadSessionView(join(root, ".pigeon", "state", "sessions"), sessionId)?.runs[0];
     assert.ok(run !== undefined);
     const lines = output.split("\n");
     assert.equal(
@@ -177,7 +177,7 @@ test("replay 报告（真实运行）：运行头终态与分类，时间线按�
 
 test("replay 报告：七种自定义条目原位呈现（快照、验证、worker、分叉、授权、收尾）", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir, cwd: root });
     const runId = session.startRun({ task: "改" });
     session.toolTurn({ name: "edit_file", checkpoint: true });
@@ -228,7 +228,9 @@ test("replay 报告：七种自定义条目原位呈现（快照、验证、work
 
 test("replay 报告：有开始无收尾的 Run 标注「记录到此中断」+ 未知分类", () =>
   withRoot(async (root) => {
-    const session = createFixtureSession({ sessionsDir: join(root, ".pigeon", "sessions") });
+    const session = createFixtureSession({
+      sessionsDir: join(root, ".pigeon", "state", "sessions"),
+    });
     const runId = session.startRun({ task: "改" });
     session.assistant({ toolCalls: [{ name: "edit_file" }] });
     const { sessionId } = await session.close();
@@ -240,7 +242,7 @@ test("replay 报告：有开始无收尾的 Run 标注「记录到此中断」+ 
 test("replay 命令只读：正被写入（末行撕裂）的会话照常回放，会话文件字节、目录清单与工作区均不变", () =>
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const files = readdirSync(sessionsDir, { recursive: true })
       .map((file) => join(sessionsDir, String(file)))
       .filter((path) => path.endsWith(".jsonl"));
@@ -260,7 +262,7 @@ test("replay 命令只读：正被写入（末行撕裂）的会话照常回放�
 test("replay 命令：未知 Run/会话响亮失败并列出可选项；--session 定位与跨会话扫描；歧义要求消歧", () =>
   withRoot(async (root) => {
     const { sessionId, runId } = await scriptSession(root);
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
 
     assert.throws(
       () => runReplayCommand({ root, runId, sessionId: newSessionId() }),

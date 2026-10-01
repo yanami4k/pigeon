@@ -1,8 +1,7 @@
-// 联网工具的装配（决策 287–291）：按 .pigeon/web.json 与环境变量决定搜索后端并建出后端实例（key 只在实例的闭包里，
+// 联网工具的装配（决策 287–291）：按设置快照的 web 一节与环境变量决定搜索后端并建出后端实例（key 只在实例的闭包里，
 // 不进配置对象、不打印）；抓取上限取配置或缺省；提炼器用本会话同一个模型接入（温度 0、不带工具、有输出上限），
 // 提炼请求的用量交回工具，由工具写进结果的 modelUsage 计入本会话花费。
 // 注册范围由各入口决定：交互入口与 pigeon run 缺省装上；--sandbox-network off 不装（291）；跑批器各条件不装（265 的先例）。
-import { loadWebConfig } from "../persistence/web-config.ts";
 import {
   completeWithoutTools,
   DEEPSEEK_ANTHROPIC_BASE_URL,
@@ -19,7 +18,9 @@ import {
   DEFAULT_SEARCH_MAX_RESULTS,
   DEFAULT_SEARCH_TIMEOUT_MS,
   type SearchBackendId,
-  type WebConfigFile,
+  TAVILY_KEY_ENV,
+  type WebSection,
+  ZAI_KEY_ENV,
 } from "../state/web-config.ts";
 import { createAnthropicSearchBackend } from "../web/backends/anthropic-search.ts";
 import { createTavilySearchBackend, TAVILY_DEFAULT_BASE_URL } from "../web/backends/tavily.ts";
@@ -34,9 +35,8 @@ import type { FetchLimits } from "../web/fetch.ts";
 import type { DnsLookup, Transport } from "../web/network.ts";
 import type { WebSearchSetup } from "../web/tools.ts";
 
-// 智谱与 Tavily 的 key 的环境变量名（配置里的 apiKey 优先）
-export const ZAI_KEY_ENV = "ZAI_API_KEY";
-export const TAVILY_KEY_ENV = "TAVILY_API_KEY";
+// 智谱与 Tavily 的 key 的环境变量名（决策 325：key 只从环境变量读）
+export { TAVILY_KEY_ENV, ZAI_KEY_ENV };
 
 // 装配根接收的联网工具配置：在场即注册两件工具
 export interface WebToolsConfig {
@@ -49,17 +49,16 @@ export interface WebToolsConfig {
 }
 
 export interface ResolveWebToolsOptions {
-  governanceRoot: string;
+  // 决策 325：设置快照的 web 一节（不读文件；没有即全部取缺省）
+  config: WebSection | undefined;
   // key 的来源（缺省 process.env；测试注入）
   env?: Record<string, string | undefined>;
-  // 测试注入：不读磁盘上的配置（显式给 undefined 也算注入：不读磁盘）
-  config?: WebConfigFile | undefined;
 }
 
 // 读配置、挑后端、取 key。缺 key 不在装配时报错（工具仍注册），调用时按 unavailable 的文字回话，文字里不带 key
 export function resolveWebTools(options: ResolveWebToolsOptions): WebToolsConfig {
   const env = options.env ?? process.env;
-  const config = options.config ?? loadWebConfig(options.governanceRoot);
+  const config = options.config;
   const search = config?.search;
   const backendId: SearchBackendId = search?.backend ?? DEFAULT_SEARCH_BACKEND;
   const timeoutMs = search?.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS;
@@ -84,7 +83,7 @@ export function resolveWebTools(options: ResolveWebToolsOptions): WebToolsConfig
             defaultMaxResults,
           };
   } else if (backendId === "zai") {
-    const apiKey = search?.zai?.apiKey ?? env[ZAI_KEY_ENV];
+    const apiKey = env[ZAI_KEY_ENV];
     setup =
       apiKey !== undefined && apiKey !== ""
         ? {
@@ -96,11 +95,11 @@ export function resolveWebTools(options: ResolveWebToolsOptions): WebToolsConfig
             defaultMaxResults,
           }
         : {
-            unavailable: `搜索后端 zai 缺少 key：在 .pigeon/web.json 的 search.zai.apiKey 或环境变量 ${ZAI_KEY_ENV} 里给出`,
+            unavailable: `搜索后端 zai 缺少 key：请设置环境变量 ${ZAI_KEY_ENV}`,
             defaultMaxResults,
           };
   } else {
-    const apiKey = search?.tavily?.apiKey ?? env[TAVILY_KEY_ENV];
+    const apiKey = env[TAVILY_KEY_ENV];
     setup =
       apiKey !== undefined && apiKey !== ""
         ? {
@@ -112,7 +111,7 @@ export function resolveWebTools(options: ResolveWebToolsOptions): WebToolsConfig
             defaultMaxResults,
           }
         : {
-            unavailable: `搜索后端 tavily 缺少 key：在 .pigeon/web.json 的 search.tavily.apiKey 或环境变量 ${TAVILY_KEY_ENV} 里给出`,
+            unavailable: `搜索后端 tavily 缺少 key：请设置环境变量 ${TAVILY_KEY_ENV}`,
             defaultMaxResults,
           };
   }

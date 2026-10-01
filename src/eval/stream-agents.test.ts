@@ -1192,7 +1192,7 @@ test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py
       finished("修好了"),
     ],
   });
-  const sessions = join(workDir, ".pigeon", "sessions");
+  const sessions = join(workDir, ".pigeon", "state", "sessions");
   try {
     const first = await pigeonStepAgent({
       streamFn,

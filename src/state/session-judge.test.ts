@@ -35,7 +35,7 @@ import {
 async function withSessions(body: (sessionsDir: string, root: string) => Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), "pigeon-judge-"));
   try {
-    await body(join(root, ".pigeon", "sessions"), root);
+    await body(join(root, ".pigeon", "state", "sessions"), root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

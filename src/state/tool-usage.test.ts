@@ -43,7 +43,7 @@ test("details 里的 modelUsage 读取：形状对才认；累加就地修改", 
 test("运行指标与会话摘要把工具结果里的模型用量一并计入", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tool-usage-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const s = createFixtureSession({ sessionsDir, cwd: root });
     s.startRun({ task: "读网页" });
     s.toolTurn({

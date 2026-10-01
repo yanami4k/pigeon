@@ -4,7 +4,6 @@
 // 旧视图里的回执、确证、熔断记录、待对账与落盘缺口随这些记录停写（184）与断号诊断去掉（181）不再呈现；
 // 工具调用的审批结果与出错归类改读工具结果消息上的运行面标记，工具级失败分类由 storeToolOutcomes 现算。
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import {
   approvalVerdict,
   evalVerdictLabel,
@@ -20,6 +19,7 @@ import {
   loadSessionView,
 } from "../persistence/session-catalog.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import {
   type StoreMessage,
   type StoreToolOutcome,
@@ -308,7 +308,7 @@ export function missingSessionError(sessionsDir: string, sessionId: string): Err
 }
 
 export interface TraceCommandOptions {
-  // 工作区根（会话在 <root>/.pigeon/sessions/）
+  // 工作区根（会话在 <root>/.pigeon/state/sessions/）
   root: string;
   sessionId: string;
   runId?: string;
@@ -318,7 +318,7 @@ export interface TraceCommandOptions {
 
 // 只读渲染入口：会话不存在/Run 不存在时响亮报错并列出可选项，绝不静默产出空报告
 export function runTraceCommand(options: TraceCommandOptions): string {
-  const sessionsDir = join(options.root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(options.root);
   const view = loadSessionView(sessionsDir, options.sessionId);
   if (view === undefined) {
     throw missingSessionError(sessionsDir, options.sessionId);

@@ -25,7 +25,7 @@ const ENTRY = "- [L1] 事实：甲事实\n  引用：a.ts\n  理由：乙理由\
 const MEMORY_TEXT = `${MEMORY_FILE_HEADER}${ENTRY}`;
 
 function seed(root: string): void {
-  mkdirSync(join(root, ".pigeon", "learned"), { recursive: true });
+  mkdirSync(join(root, ".pigeon", "state", "learned"), { recursive: true });
   writeFileSync(memoryFileOf(root), MEMORY_TEXT);
   mkdirSync(join(root, ".pigeon", "memory"), { recursive: true });
   writeFileSync(join(root, ".pigeon", "memory", "rules.md"), "人写的规矩\n");
@@ -50,7 +50,7 @@ function deps(root: string, extra: Partial<RuntimeDeps> = {}): RuntimeDeps {
 }
 
 function runStarts(root: string, sessionId: string): RunStartData[] {
-  const located = locateSessionFile(join(root, ".pigeon", "sessions"), sessionId);
+  const located = locateSessionFile(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(located !== undefined);
   const loaded = loadStoreSessionFile(located.path);
   assert.ok(loaded !== undefined);
@@ -79,7 +79,7 @@ test("开着：推送段在常驻 Memory 之后、Skill 目录之前；update_me
       await bundle.sessionStore.flush();
       const [start] = runStarts(root, bundle.adapter.sessionId);
       assert.deepEqual(start?.learnedMemory, {
-        path: ".pigeon/learned/MEMORY.md",
+        path: ".pigeon/state/learned/MEMORY.md",
         hash: createHash("sha256").update(MEMORY_TEXT).digest("hex"),
         bytes: Buffer.byteLength(MEMORY_TEXT),
         entries: 1,

@@ -46,7 +46,7 @@ test("告警出口切换：接管期间交给壳，之前与之后写标准错�
 
 test("会话存储告警：终端界面运行期间落消息区、只说一次、不写标准错误输出", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-warn-"));
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   mkdirSync(sessionsDir, { recursive: true });
   // 会话存储要建的子目录位置被一个普通文件占着：每次写都失败
   writeFileSync(join(sessionsDir, sessionDirectoryName(root)), "占位");

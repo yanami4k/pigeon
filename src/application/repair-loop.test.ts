@@ -108,7 +108,7 @@ const done = (text = "改好了"): FakeReply => ({ text });
 
 // 读新会话存储里的会话视图（会话必须存在）
 function sessionOf(root: string, sessionId: string): StoreSessionView {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
   return loaded.view;
 }
@@ -310,7 +310,7 @@ test("回炉三轮都失败：这一步以失败收尾，工作区保留 agent �
 
 // 把会话文件截到最后一条验证记录条目之前：即进程崩溃在"最后一个回炉 Run 结束之后、它的验证落盘之前"留下的会话文件
 function truncateBeforeLastVerification(root: string, sessionId: string): void {
-  const located = locateSessionFile(join(root, ".pigeon", "sessions"), sessionId);
+  const located = locateSessionFile(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(located !== undefined, "会话存储里应有会话文件");
   const file = located.path;
   const lines = readFileSync(file, "utf8").split("\n");
@@ -475,7 +475,7 @@ test("启动即报错：设了回炉轮数却没有验证命令", async () => {
       /回炉.*验证命令/
     );
     assert.equal(streamFn.calls.length, 0, "装配之前就拒绝");
-    assert.equal(existsSync(join(repo.root, ".pigeon", "sessions")), false);
+    assert.equal(existsSync(join(repo.root, ".pigeon", "state", "sessions")), false);
   } finally {
     repo.cleanup();
   }

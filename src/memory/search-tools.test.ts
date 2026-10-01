@@ -32,7 +32,7 @@ const SESSION = asSessionId("sess_01JAAAAAA30000000000000000");
 
 function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-tools-"));
-  return run(join(root, ".pigeon", "sessions")).finally(() =>
+  return run(join(root, ".pigeon", "state", "sessions")).finally(() =>
     rmSync(root, { recursive: true, force: true })
   );
 }

@@ -3,7 +3,6 @@
 // schema 不符或命令全是空白 → 响亮失败。验证命令决定成败标签，语义不明绝不静默降级为"未配置"。
 // 写入方只有人（手工编辑），本模块只读；形态与 commands.json / grants.json / mcp.json 三份项目配置一致。
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Value } from "typebox/value";
 import {
   VERIFY_CONFIG_VERSION,
@@ -11,6 +10,7 @@ import {
   VerifyConfigFileSchema,
   type VerifyStep,
 } from "../state/attempt-config.ts";
+import { verifyConfigPathOf } from "../state/paths.ts";
 import {
   isKnownCheckTool,
   normalizeStepCwd,
@@ -24,7 +24,7 @@ export class VerifyConfigError extends Error {}
 export const DEFAULT_PROJECT_VERIFY_TIMEOUT_MS = 5 * 60_000;
 
 export function verifyConfigPath(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", "verify.json");
+  return verifyConfigPathOf(governanceRoot);
 }
 
 // 项目级验证命令；未配置返回 undefined。命名分步（决策 159）在场时 command 为各步的展示串，超时按每步各自计时

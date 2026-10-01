@@ -12,6 +12,7 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { sha256Hex } from "../state/hashing.ts";
 import { newSessionId } from "../state/ids.ts";
+import { mergeMcpConfig } from "../state/mcp-config.ts";
 import { TOOL_RESULT_MARK_KEY } from "../state/session-judge.ts";
 import { startMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
@@ -20,17 +21,14 @@ test("MCP prompts 进 Skill Catalog 并可由 load_skill 读取留痕；需要�
   const root = mkdtempSync(join(tmpdir(), "pigeon-mcp-prompts-"));
   try {
     mkdirSync(join(root, ".pigeon"), { recursive: true });
-    writeFileSync(
-      join(root, ".pigeon", "mcp.json"),
-      JSON.stringify({
-        version: 1,
-        servers: { fx: { launch: { command: "node", args: ["x.js"] } } },
-      })
-    );
+    // 决策 325：server 定义在项目共享设置的 mcp 一节
+    const mcpSection = { servers: { fx: { launch: { command: "node", args: ["x.js"] } } } };
+    writeFileSync(join(root, ".pigeon", "settings.json"), JSON.stringify({ mcp: mcpSection }));
     const fixtures: FixtureServer[] = [];
     const mcp = await startMcpSession({
       governanceRoot: root,
       workspaceRoot: root,
+      config: mergeMcpConfig(undefined, mcpSection).config,
       createTransport: () => {
         const { fixture, clientTransport } = createFixtureServer({
           tools: [],
@@ -92,7 +90,7 @@ test("MCP prompts 进 Skill Catalog 并可由 load_skill 读取留痕；需要�
     } finally {
       await disposeRuntime(bundle);
     }
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(loaded !== undefined, "会话存储里应有本会话");
     const run = loaded.view.runs[0];
     // 读取摘要：load_skill 工具结果的 details（去掉运行面挂的审批闸标记）

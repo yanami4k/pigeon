@@ -55,7 +55,7 @@ function looping(): FakeStreamFn {
 }
 
 function sessionOf(root: string, sessionId: string): StoreSessionView {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined);
   return loaded.view;
 }

@@ -292,7 +292,7 @@ test("回炉路径：分步配置下各步全跑，回炉反馈发回的是失�
     const feedback = JSON.stringify(messages.findLast((message) => message.role === "user"));
     assert.ok(feedback.includes("失败的步骤：内容"), feedback);
     assert.ok(feedback.includes("a.txt=half"), feedback);
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), result.sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.ok(loaded !== undefined);
     assert.deepEqual(
       loaded.view.verifications.map((record) => record.data.steps?.map((entry) => entry.verdict)),

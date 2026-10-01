@@ -27,7 +27,7 @@ function usage(input: number, output: number, cacheRead: number, total: number) 
 test("会话摘要合计 token 与成本并在会话列表呈现；trace Run 头显示启动快照，每轮显示 usage", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-usage-view-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir });
     session.startRun({
       task: "读",

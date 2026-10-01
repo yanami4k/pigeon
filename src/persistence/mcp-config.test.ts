@@ -1,18 +1,24 @@
-// MCP 配置读取（M5.7 S1，决策 051）：.mcp.json 给 server 启动定义，.pigeon/mcp.json 给风险档覆盖
-// （无 .mcp.json 时也可直接定义 server）；两份合并冲突以 .pigeon/mcp.json 为准；未列出的工具落
-// defaultTier（缺省 write）；畸形一律响亮失败。
+// MCP 配置读取（M5.7 S1，决策 051；决策 325）：.mcp.json 给 server 启动定义，设置的 mcp 一节给风险档覆盖
+// （无 .mcp.json 时也可直接定义 server）；两份合并冲突以设置为准；未列出的工具落
+// defaultTier（缺省 write）；畸形一律响亮失败。经设置快照读取（用户级指到空的临时目录）。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { resolveMcpToolTier } from "../state/mcp-config.ts";
-import {
-  dotMcpJsonPath,
-  loadMcpConfig,
-  McpConfigError,
-  pigeonMcpConfigPath,
-} from "./mcp-config.ts";
+import { dotMcpJsonPathOf, projectSettingsPath } from "../state/paths.ts";
+import { mcpConfigOf } from "../state/settings.ts";
+import { loadSettings } from "./settings.ts";
+
+function loadMcpConfig(root: string) {
+  const home = mkdtempSync(join(tmpdir(), "pigeon-mcp-home-"));
+  try {
+    return mcpConfigOf(loadSettings(root, { homeDir: home }));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
 
 interface Files {
   dotMcp?: string;
@@ -23,11 +29,22 @@ function withFiles(files: Files, run: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "pigeon-mcp-config-"));
   try {
     if (files.dotMcp !== undefined) {
-      writeFileSync(dotMcpJsonPath(root), files.dotMcp);
+      writeFileSync(dotMcpJsonPathOf(root), files.dotMcp);
     }
     if (files.pigeon !== undefined) {
+      // 旧 .pigeon/mcp.json 的内容（去掉 version）即设置的 mcp 一节；不是合法 JSON 的原样写入
       mkdirSync(join(root, ".pigeon"), { recursive: true });
-      writeFileSync(pigeonMcpConfigPath(root), files.pigeon);
+      let section: unknown;
+      try {
+        const { version: _version, ...rest } = JSON.parse(files.pigeon) as Record<string, unknown>;
+        section = rest;
+      } catch {
+        section = undefined;
+      }
+      writeFileSync(
+        projectSettingsPath(root),
+        section === undefined ? files.pigeon : JSON.stringify({ mcp: section })
+      );
     }
     run(root);
   } finally {
@@ -81,7 +98,7 @@ test("MCP 配置：只有 .mcp.json——stdio 与 http 两种启动定义按名
   );
 });
 
-test("MCP 配置：只有 .pigeon/mcp.json——直接定义 server 与逐工具风险档、read 工具带路径约束", () => {
+test("MCP 配置：只有设置的 mcp 一节——直接定义 server 与逐工具风险档、read 工具带路径约束", () => {
   withFiles(
     {
       pigeon: JSON.stringify({
@@ -101,7 +118,7 @@ test("MCP 配置：只有 .pigeon/mcp.json——直接定义 server 与逐工具
     (root) => {
       const fs = serverNamed(root, "fs");
       assert.deepEqual(fs.launch, { command: "node", args: ["server.js", "."] });
-      assert.equal(fs.launchSource, ".pigeon/mcp.json");
+      assert.equal(fs.launchSource, "settings");
       assert.equal(fs.defaultTier, "exec");
       assert.deepEqual(resolveMcpToolTier(fs, "read_text_file"), {
         tier: "read",
@@ -113,7 +130,7 @@ test("MCP 配置：只有 .pigeon/mcp.json——直接定义 server 与逐工具
   );
 });
 
-test("MCP 配置：两份合并——同名启动定义冲突以 .pigeon/mcp.json 为准；只给风险档覆盖时沿用 .mcp.json 的启动定义", () => {
+test("MCP 配置：两份合并——同名启动定义冲突以设置为准；只给风险档覆盖时沿用 .mcp.json 的启动定义", () => {
   withFiles(
     {
       dotMcp: JSON.stringify({
@@ -133,7 +150,7 @@ test("MCP 配置：两份合并——同名启动定义冲突以 .pigeon/mcp.jso
     (root) => {
       const everything = serverNamed(root, "everything");
       assert.deepEqual(everything.launch, { command: "node", args: ["local-everything.js"] });
-      assert.equal(everything.launchSource, ".pigeon/mcp.json");
+      assert.equal(everything.launchSource, "settings");
       const fs = serverNamed(root, "fs");
       assert.deepEqual(fs.launch, { command: "npx", args: ["server-filesystem", "."] });
       assert.equal(fs.launchSource, ".mcp.json");
@@ -185,9 +202,9 @@ test("MCP 配置：畸形与语义不明一律响亮失败", () => {
     { dotMcp: JSON.stringify({ servers: {} }) },
     { dotMcp: JSON.stringify({ mcpServers: { a: { type: "sse", url: "http://x" } } }) },
     { dotMcp: JSON.stringify({ mcpServers: { a: { args: ["no-command"] } } }) },
-    { pigeon: JSON.stringify({ version: 2, servers: {} }) },
+    { pigeon: JSON.stringify({ servers: {}, extra: 1 }) },
     { pigeon: JSON.stringify({ version: 1, servers: { a: { defaultTier: "admin", launch } } }) },
-    // .pigeon 里的 server 没有启动定义、.mcp.json 也没有同名 server
+    // 设置里的 server 没有启动定义、.mcp.json 也没有同名 server
     { pigeon: JSON.stringify({ version: 1, servers: { ghost: { defaultTier: "read" } } }) },
     // 路径约束只属于 read 工具
     {
@@ -203,7 +220,7 @@ test("MCP 配置：畸形与语义不明一律响亮失败", () => {
   ];
   for (const files of cases) {
     withFiles(files, (root) => {
-      assert.throws(() => loadMcpConfig(root), McpConfigError, JSON.stringify(files));
+      assert.throws(() => loadMcpConfig(root), Error, JSON.stringify(files));
     });
   }
 });

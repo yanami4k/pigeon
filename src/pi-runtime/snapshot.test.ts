@@ -153,7 +153,7 @@ test("v13 字段：推送的记忆与复盘标记可选；旧的审阅字段照�
   const withMemory = {
     ...snapshot,
     learnedMemory: {
-      path: ".pigeon/learned/MEMORY.md",
+      path: ".pigeon/state/learned/MEMORY.md",
       hash: HASH,
       bytes: 10,
       entries: 1,

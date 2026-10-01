@@ -2,7 +2,7 @@
 // 断言面：
 //   - /grants 渲染会话 grant + 固化规则（createdAt/命中次数/作用域/出处，口径同
 //     application/grants.ts 的 listGrants），含空列表文案；
-//   - /revoke <id> 后 store 状态（立即停免审）；/grants save <id> 写 .pigeon/grants.json；
+//   - /revoke <id> 后 store 状态（立即停免审）；/grants save <id> 写 .pigeon/settings.local.json 的 permissions 一节；
 //   - 未知命令与命令失败（语法/语义错误）如实呈现（同 REPL 口径）；
 //   - busy 期间斜杠命令同样被拒绝（决策 027 语义不开旁路）；
 //   - 命令层只有一份：TUI 只换 write 投影，治理语义零新增（决策 030）。
@@ -125,7 +125,7 @@ test("/grants 空列表：如实说明无生效项（文案同 listGrants 口径
     const flat = screenFlat(term);
     assert.ok(flat.includes("> /grants"), `命令回显\n${flat}`);
     assert.ok(flat.includes("会话放权（0）："), flat);
-    assert.ok(flat.includes("固化规则（0，来自 .pigeon/grants.json）："), flat);
+    assert.ok(flat.includes("固化规则（0，三层设置的 permissions 一节）："), flat);
     assert.ok(
       flat.includes("（无——审批提示可用 [a]/[d] 创建会话放权，/grants save <id> 升格固化）"),
       `空列表文案\n${flat}`
@@ -156,7 +156,7 @@ test("/grants 列出会话 grant（createdAt/命中/作用域/首调）与固化
     assert.ok(flat.includes("创建 20"), `createdAt 时间列\n${flat}`);
     assert.ok(flat.includes("命中 0 次"), `命中计数\n${flat}`);
     assert.ok(flat.includes("首调 tc-1"), `首调摘要\n${flat}`);
-    assert.ok(flat.includes("固化规则（1，来自 .pigeon/grants.json）："), flat);
+    assert.ok(flat.includes("固化规则（1，三层设置的 permissions 一节）："), flat);
     assert.ok(flat.includes("config#0 ｜ read_file ｜ 工具级（不限目录）"), `固化规则行\n${flat}`);
     assert.ok(flat.includes("升格 2023-11-14 22:13"), `升格时间\n${flat}`);
     assert.ok(flat.includes("出处 会话"), `出处\n${flat}`);
@@ -181,10 +181,14 @@ test("/revoke <id>：store 立即移除（停免审），回显同 cli 措辞；
     term.input("\r");
     await settle();
     const rules = loadGrantConfig(root);
-    assert.equal(rules.length, 1, "grants.json 应写入一条固化规则");
+    assert.equal(rules.length, 1, "项目个人设置应写入一条固化规则");
     assert.equal(rules[0]?.promotedFrom.grantId, grant.grantId);
     assert.equal(rules[0]?.promotedFrom.sessionId, SESSION_ID);
-    assert.ok(screenFlat(term).includes(`已升格 ${grant.grantId} → .pigeon/grants.json`));
+    assert.ok(
+      screenFlat(term).includes(
+        `已升格 ${grant.grantId} → .pigeon/settings.local.json 的 permissions 一节`
+      )
+    );
 
     // /revoke：会话 grant 立即停免审
     term.input(`/revoke ${grant.grantId}`);

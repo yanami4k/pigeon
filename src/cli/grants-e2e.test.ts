@@ -47,7 +47,7 @@ function editCall(content: string, oldLine: string, newLine: string): EditFilePa
 
 // 会话存储写者（同生产：取跨进程单写者锁；已有会话文件即续写）；写入故障收进 faults
 function openStore(root: string, sessionId: SessionId, faults: unknown[]): SessionStoreWriter {
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const existing = locateSessionFile(sessionsDir, sessionId);
   return openSessionStoreWriter({
     sessionsRoot: sessionsDir,
@@ -61,7 +61,7 @@ function openStore(root: string, sessionId: SessionId, faults: unknown[]): Sessi
 
 // 会话文件里各工具结果上审批闸的批准来源（按出现顺序）
 function gateSources(root: string, sessionId: SessionId): Array<string | undefined> {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, "会话文件应在会话存储里");
   return loaded.view.runs.flatMap((run) =>
     run.messages
@@ -248,7 +248,7 @@ test("端到端（会话生命周期）：[a] 建 grant → human:grant 免审 �
     // 会话存储：授权建立与撤销各一条（撤销后生效集为空）；三次调用的审批闸决定依次是人工、会话放权、人工
     await sessionStore.flush();
     assert.deepEqual(faults, []);
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), SESSION_A);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), SESSION_A);
     assert.ok(loaded !== undefined);
     assert.deepEqual(
       loaded.view.grants.map(({ data }) => [data.event, data.grantId]),
@@ -279,7 +279,7 @@ test("端到端（会话生命周期）：[a] 建 grant → human:grant 免审 �
 test("端到端（升格 + 冷恢复）：/grants save 写配置 → 新进程会话 grant 静默续命 → 撤销后 policy:config", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-e2e-b-"));
   writeFileSync(join(root, "a.ts"), "alpha\n");
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const faults: unknown[] = [];
   let sessionStore = openStore(root, SESSION_B, faults);
   try {

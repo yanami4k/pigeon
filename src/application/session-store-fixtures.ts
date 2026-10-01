@@ -4,7 +4,7 @@
 // 只供测试使用，不从任何桶文件导出。
 //
 // 用法：
-//   const root = mkdtempSync(...); const sessionsDir = join(root, ".pigeon", "sessions");
+//   const root = mkdtempSync(...); const sessionsDir = join(root, ".pigeon", "state", "sessions");
 //   const s = createFixtureSession({ sessionsDir, cwd: root });
 //   const runId = s.startRun({ task: "改 a.txt" });            // Run 开始 + 任务消息
 //   s.toolTurn({ name: "edit_file", args: {...}, result: "ok" }); // 助手发起工具调用 + 工具结果
@@ -464,7 +464,7 @@ export async function forkFixture(input: {
     },
   });
   await source.close();
-  const cwd = input.cwd ?? `${input.sessionsDir}/../../.pigeon/worktrees/${branchSessionId}`;
+  const cwd = input.cwd ?? `${input.sessionsDir}/../../.pigeon/state/worktrees/${branchSessionId}`;
   const path = await forkSessionFile({
     sessionsRoot: input.sessionsDir,
     source: { sessionId: input.sourceSessionId, path: located.path },

@@ -40,6 +40,8 @@ export interface ApprovalRequest {
   // 决策 303（脚本部分）：请求来自脚本编排派出的 worker——运行号与脚本名；kind 为"同类"的描述，在场即面板提供
   // "本次脚本内同类都允许"（高危命令不给 kind，照常逐次请示）
   readonly script?: { readonly runId: string; readonly title?: string; readonly kind?: string };
+  // 决策 326 ①：写入落在受保护路径（项目的 .pigeon 目录下）时在场，为其展示写法；须人逐次批准，放权不适用
+  readonly protectedPath?: string;
 }
 
 // 会话 grant 的创建面（SessionGrantStore 满足）
@@ -113,6 +115,14 @@ export function execCommandLine(request: ApprovalRequest): string | undefined {
     return undefined;
   }
   return `命令${request.needsShell === true ? "（经 shell）" : ""}：${command}`;
+}
+
+// 受保护路径一行（决策 326 ①，cli 与 tui 共用）；不是受保护路径返回 undefined
+export function protectedPathLine(request: ApprovalRequest): string | undefined {
+  if (request.protectedPath === undefined) {
+    return undefined;
+  }
+  return `受保护路径：${request.protectedPath}（Pigeon 的配置与状态目录；须逐次批准，会话放权与配置放权都不适用）`;
 }
 
 // exec 档 [a] 键的提示文案（cli 与 tui 共用）

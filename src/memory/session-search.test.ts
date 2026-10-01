@@ -47,7 +47,7 @@ async function collect(iterable: AsyncIterable<SessionSearchHit>): Promise<Sessi
 
 function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-"));
-  return run(join(root, ".pigeon", "sessions")).finally(() =>
+  return run(join(root, ".pigeon", "state", "sessions")).finally(() =>
     rmSync(root, { recursive: true, force: true })
   );
 }

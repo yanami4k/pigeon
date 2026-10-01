@@ -112,7 +112,7 @@ function base(root: string, streamFn: StreamFn): HeadlessRunOptions {
 }
 
 function sessionEntries(root: string, sessionId: string) {
-  const located = locateSessionFile(join(root, ".pigeon", "sessions"), sessionId);
+  const located = locateSessionFile(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(located !== undefined, `会话 ${sessionId} 没有文件`);
   const loaded = loadStoreSessionFile(located.path);
   assert.ok(loaded !== undefined);
@@ -133,7 +133,7 @@ function runStarts(root: string, sessionId: string): RunStartData[] {
 
 // 来源会话主分支上最后一条消息条目（条目号与序号）
 function lastMessageEntry(root: string, sessionId: string): { id: string; seq: number } {
-  const located = locateSessionFile(join(root, ".pigeon", "sessions"), sessionId);
+  const located = locateSessionFile(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(located !== undefined);
   const view = readSessionFile(located.path);
   assert.ok(view !== undefined);
@@ -432,7 +432,7 @@ test("复盘模型（296）：指定后压缩前与收尾复盘都用它，干�
 
 test("开关关掉：不推送、不注册记忆工具、不复盘", () =>
   withRoot(async (root) => {
-    mkdirSync(join(root, ".pigeon", "learned"), { recursive: true });
+    mkdirSync(join(root, ".pigeon", "state", "learned"), { recursive: true });
     writeFileSync(
       memoryFileOf(root),
       `${MEMORY_FILE_HEADER}- [L1] 事实：甲\n  引用：a\n  理由：r\n`

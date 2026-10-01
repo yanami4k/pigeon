@@ -21,7 +21,7 @@ function status(name: string, state: WorkerStatus["state"], turns = 0): WorkerSt
     startedAt: 0,
     workspace: {
       kind: "git-worktree",
-      path: `/repo/.pigeon/worktrees/x-${name}`,
+      path: `/repo/.pigeon/state/worktrees/x-${name}`,
       branch: `pigeon/${name}`,
     },
   };
@@ -57,7 +57,7 @@ test("收尾摘要：状态、分支、改动文件、自述与工作树位置�
     turns: 2,
     workspace: {
       kind: "git-worktree",
-      path: "/repo/.pigeon/worktrees/x-fix-a",
+      path: "/repo/.pigeon/state/worktrees/x-fix-a",
       branch: "pigeon/fix-a",
     },
     result: {
@@ -73,7 +73,7 @@ test("收尾摘要：状态、分支、改动文件、自述与工作树位置�
   );
   assert.ok(text.includes("分支 pigeon/fix-a ｜ 改动 2 个文件：a.ts、b.ts\n"), text);
   assert.ok(text.includes("自述：改好了（已截断，全文见 worker 会话）"), text);
-  assert.ok(text.includes("工作树 /repo/.pigeon/worktrees/x-fix-a"), text);
+  assert.ok(text.includes("工作树 /repo/.pigeon/state/worktrees/x-fix-a"), text);
 
   const failed = renderWorkerOutcome({
     sessionId,

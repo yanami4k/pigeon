@@ -2,10 +2,10 @@
 // --json 退出时打印一行结构化结果，退出码按终态映射；任务描述可从 stdin 读。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HEADLESS_EXIT_CODES } from "../application/headless.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
@@ -13,6 +13,8 @@ import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));
+const CLI_HOME = mkdtempSync(join(tmpdir(), "pigeon-cli-home-"));
+after(() => rmSync(CLI_HOME, { recursive: true, force: true }));
 const FIXTURES = pathToFileURL(
   fileURLToPath(new URL("../pi-runtime/fixtures.ts", import.meta.url))
 ).href;
@@ -34,6 +36,8 @@ function runCli(args: string[], input?: string) {
     ...(input !== undefined ? { input } : {}),
     timeout: 60_000,
     windowsHide: true,
+    // 用户级目录指到临时目录（不读写真实的 ~/.pigeon）
+    env: { ...process.env, HOME: CLI_HOME, USERPROFILE: CLI_HOME },
   });
 }
 
@@ -108,7 +112,10 @@ test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-c
     // 因无审批通道而拒绝的写调用计入需审批次数（需要人来批的一次）
     assert.equal(result.approvalsNeeded, 1);
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), ORIGINAL);
-    const session = loadSessionView(join(root, ".pigeon", "sessions"), String(result.sessionId));
+    const session = loadSessionView(
+      join(root, ".pigeon", "state", "sessions"),
+      String(result.sessionId)
+    );
     assert.ok(session !== undefined);
     const calls = session.runs.flatMap((run) => run.toolCalls);
     assert.deepEqual(
@@ -147,6 +154,68 @@ test("pigeon run：模型请求失败时终态 failed，退出码按映射表", 
     assert.equal(HEADLESS_EXIT_CODES.completed, 0);
     const codes = Object.values(HEADLESS_EXIT_CODES);
     assert.equal(new Set(codes).size, codes.length);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("决策 326 ③：项目里有未确认的会执行命令的配置——pigeon run 开跑前退出、退出码非 0、逐条列出；加 --trust-config 只对本次放行", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-run-trust-"));
+  try {
+    mkdirSync(join(root, ".pigeon"), { recursive: true });
+    writeFileSync(
+      join(root, ".pigeon", "settings.json"),
+      JSON.stringify({ commands: { commands: { test: "npm test" } } })
+    );
+    writeFileSync(
+      join(root, ".mcp.json"),
+      JSON.stringify({ mcpServers: { fx: { command: "node", args: ["fx.js"] } } })
+    );
+    const streamFn = writeStreamFnModule(root, { replies: [{ text: "完成" }] });
+    const refused = runCli(["run", "随便", "--root", root, "--stream-fn", streamFn, "--json"]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /命令短名 test：npm test/);
+    assert.match(refused.stderr, /MCP 服务 fx：node fx\.js/);
+    assert.match(refused.stderr, /--trust-config/);
+    assert.equal(existsSync(join(root, ".pigeon", "state", "sessions")), false, "没有开跑");
+    // 放行只对本次：MCP 服务按配置启动（这里的 fx.js 不存在，启动失败只提示、不挡运行）
+    const allowed = runCli([
+      "run",
+      "随便",
+      "--root",
+      root,
+      "--stream-fn",
+      streamFn,
+      "--json",
+      "--trust-config",
+    ]);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    const again = runCli(["run", "随便", "--root", root, "--stream-fn", streamFn, "--json"]);
+    assert.notEqual(again.status, 0, "放行不记指纹，下次仍要确认");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("决策 325：启动遇旧配置文件即报错并提示 pigeon migrate-config（不自动迁移）；迁移后照常开跑", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-run-legacy-"));
+  try {
+    mkdirSync(join(root, ".pigeon"), { recursive: true });
+    writeFileSync(
+      join(root, ".pigeon", "orchestration.json"),
+      JSON.stringify({ version: 1, maxConcurrent: 2 })
+    );
+    const streamFn = writeStreamFnModule(root, { replies: [{ text: "完成" }] });
+    const refused = runCli(["run", "随便", "--root", root, "--stream-fn", streamFn, "--json"]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /\.pigeon\/orchestration\.json/);
+    assert.match(refused.stderr, /pigeon migrate-config/);
+    assert.ok(existsSync(join(root, ".pigeon", "orchestration.json")), "不自动迁移");
+    const migrated = runCli(["migrate-config", "--root", root]);
+    assert.equal(migrated.status, 0, migrated.stderr);
+    assert.match(migrated.stdout, /已迁移 \.pigeon\/orchestration\.json/);
+    const ran = runCli(["run", "随便", "--root", root, "--stream-fn", streamFn, "--json"]);
+    assert.equal(ran.status, 0, ran.stderr);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

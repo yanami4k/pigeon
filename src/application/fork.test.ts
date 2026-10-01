@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -23,6 +24,7 @@ import { NotGitWorkspaceError } from "../orchestration/checkpoint.ts";
 import { sessionFileLockPath } from "../persistence/session-lock.ts";
 import { listSessionFiles, locateSessionFile } from "../persistence/session-reader.ts";
 import { type LoadedStoreSession, loadStoreSession } from "../persistence/session-view.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { ForkError, runForkBranch } from "./fork.ts";
@@ -47,7 +49,7 @@ function git(cwd: string, args: string[]): string {
 
 // 读会话存储里的会话（必须存在）
 function storeSession(dir: string, sessionId: string): LoadedStoreSession {
-  const loaded = loadStoreSession(join(dir, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(dir, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, `会话存储里应有会话 ${sessionId}`);
   return loaded;
 }
@@ -247,7 +249,11 @@ test("非 git 工作区发起分叉：明确报错，不降级、不留分叉条
       NotGitWorkspaceError
     );
     assert.equal(storeSession(dir, result.sessionId).view.forks.length, 0);
-    assert.equal(listSessionFiles(join(dir, ".pigeon", "sessions")).length, 1, "不建分支会话文件");
+    assert.equal(
+      listSessionFiles(join(dir, ".pigeon", "state", "sessions")).length,
+      1,
+      "不建分支会话文件"
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
@@ -266,7 +272,7 @@ test("冷会话被另一进程持有：来源分叉条目写不成，在建工�
       homeDir: home,
       startMcp: noMcp,
     });
-    const sessionsDir = join(dir, ".pigeon", "sessions");
+    const sessionsDir = join(dir, ".pigeon", "state", "sessions");
     const sourcePath = locateSessionFile(sessionsDir, result.sessionId)?.path;
     assert.ok(sourcePath !== undefined);
     const runId = storeSession(dir, result.sessionId).view.runs[0]?.runId;
@@ -314,7 +320,7 @@ test("冷会话被另一进程持有：来源分叉条目写不成，在建工�
       worktreesBefore,
       "没有建任何工作树"
     );
-    assert.equal(existsSync(join(dir, ".pigeon", "worktrees")), false);
+    assert.equal(existsSync(join(dir, ".pigeon", "state", "worktrees")), false);
     assert.equal(readFileSync(sourcePath, "utf8"), sourceBefore, "来源会话文件原样不动");
     assert.equal(listSessionFiles(sessionsDir).length, 1, "不建分支会话文件");
     assert.ok(existsSync(sessionFileLockPath(sourcePath)), "持有进程的锁没有被误删");
@@ -357,6 +363,51 @@ test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注
       [],
       "来源会话没有未收尾的 Run"
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("--retry-on-fail：重试沿用本次运行的设置快照（项目个人设置里的 edit_file 放权在重试时同样生效）", async () => {
+  const { dir, home, cleanup } = repo();
+  try {
+    mkdirSync(join(dir, ".pigeon"), { recursive: true });
+    writeFileSync(
+      join(dir, ".pigeon", "settings.local.json"),
+      JSON.stringify({
+        permissions: {
+          grants: [
+            {
+              tool: "edit_file",
+              promotedFrom: {
+                grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                firstCall: { toolCallId: "t0", args: {} },
+                promotedAt: 1,
+              },
+            },
+          ],
+        },
+      })
+    );
+    const result = await runHeadless({
+      task: "把 a.txt 改成 new",
+      governanceRoot: dir,
+      workspaceRoot: dir,
+      settings: loadSettings(dir, { homeDir: home }),
+      streamFn: createFakeStreamFn({
+        replies: [edit("wrong\n"), { text: "改好了" }, edit("new\n"), { text: "这次对了" }],
+      }),
+      // 不放手、无人值守：写操作只能凭放权放行
+      yolo: false,
+      homeDir: home,
+      startMcp: noMcp,
+      verify: VERIFY,
+      retryOnFail: 1,
+    });
+    assert.equal(result.label, "Failed");
+    assert.equal(result.retries?.length, 1);
+    assert.equal(result.retries?.[0]?.label, "Passed", "重试里的编辑同样凭放权放行");
   } finally {
     cleanup();
   }

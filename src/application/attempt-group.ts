@@ -3,11 +3,11 @@
 // 全部收尾后从会话存储现算各尝试的标签交回（决策 180）。
 // 失败自动分叉重试不叠加在并行同任务派发上（决策 079）。
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 import type { WorkerOrchestrator, WorkerOrigin, WorkerOutcome } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { SessionId } from "../state/ids.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { SessionEntrySink } from "../state/session-entries.ts";
 import {
   type StoreAttempt,
@@ -63,7 +63,7 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
     throw new Error("并行同任务派发至少需要 2 个尝试");
   }
   const taskKey = input.taskKey ?? newTaskKey();
-  const sessionsDir = path.join(input.governanceRoot, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(input.governanceRoot);
   const ids = Array.from({ length: input.count }, () =>
     input.orchestrator.spawn({
       role: input.role,

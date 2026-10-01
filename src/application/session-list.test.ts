@@ -17,7 +17,7 @@ function makeRoot(): { root: string; sessionsDir: string; cleanup: () => void } 
   const root = mkdtempSync(join(tmpdir(), "pigeon-session-cmd-"));
   return {
     root,
-    sessionsDir: join(root, ".pigeon", "sessions"),
+    sessionsDir: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }

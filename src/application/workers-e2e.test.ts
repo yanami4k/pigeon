@@ -38,7 +38,7 @@ test("并行 worker：两个 implementer 各写自己的工作树，主工作区
     git(repo, ["commit", "-q", "-m", "init"]);
 
     const parentId = newSessionId();
-    const sessionsDir = join(repo, ".pigeon", "sessions");
+    const sessionsDir = join(repo, ".pigeon", "state", "sessions");
     const faults: unknown[] = [];
     const parentStore = openSessionStoreWriter({
       sessionsRoot: sessionsDir,

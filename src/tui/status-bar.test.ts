@@ -160,7 +160,7 @@ test("DeepSeek 会话：回复自带价格为 0 时状态栏按官方人民币�
 test("DeepSeek 会话续接：主会话、worker 与复盘的记录同样按人民币价目累计", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-cost-deepseek-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const peak = Date.UTC(2026, 8, 29, 2, 0, 0);
     const main = createFixtureSession({ sessionsDir });
     main.startRun({ task: "主任务" });
@@ -210,7 +210,7 @@ test("DeepSeek 会话续接：主会话、worker 与复盘的记录同样按人�
 test("续接会话从会话记录累计已有花费：主会话 + 其 worker + 其复盘；别的会话与无关子会话不计", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-cost-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const main = createFixtureSession({ sessionsDir });
     main.startRun({ task: "主任务" });
     main.assistant({ text: "好", usage: usageOf(1000, 0.05) });
@@ -255,7 +255,7 @@ test("续接会话从会话记录累计已有花费：主会话 + 其 worker + �
 test("本会话运行期间收尾的 worker 花费计入；没收尾的不计", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-child-cost-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const mainId = newSessionId();
     const { shell, term, runtime, cleanup } = makeShell({ sessionId: mainId, root });
     try {

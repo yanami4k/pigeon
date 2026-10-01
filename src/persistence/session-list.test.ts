@@ -19,7 +19,7 @@ import { listSessionSummaries } from "./session-list.ts";
 function makeDir(): { dir: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-session-list-"));
   return {
-    dir: join(root, ".pigeon", "sessions"),
+    dir: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }

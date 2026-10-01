@@ -15,6 +15,8 @@ export interface PendingApproval {
   resolve: (result: ApprovalPanelResult) => void;
   // 决策 303（脚本部分）：面板提供 [s] 本次脚本内同类都允许
   scriptKind?: boolean;
+  // 决策 326 ①：受保护路径的请示只收 [y]/[n]/[r]，不收放权键
+  protectedPath?: boolean;
 }
 
 // 壳侧窄接口：模态状态的读写与壳动作（状态本体在壳里）
@@ -65,7 +67,10 @@ export function askApprovalPanel(
   const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
   const pending: PendingApproval = {
     resolve,
-    ...(request.script?.kind !== undefined ? { scriptKind: true } : {}),
+    ...(request.script?.kind !== undefined && request.protectedPath === undefined
+      ? { scriptKind: true }
+      : {}),
+    ...(request.protectedPath !== undefined ? { protectedPath: true } : {}),
   };
   host.setPendingApproval(pending);
   host.updateStatus();
@@ -166,8 +171,7 @@ export function handleModalKey(host: ModalHost, data: string): { consume: true }
     if (
       key === "y" ||
       key === "n" ||
-      key === "a" ||
-      key === "d" ||
+      ((key === "a" || key === "d") && approval.protectedPath !== true) ||
       (key === "s" && approval.scriptKind === true)
     ) {
       host.setPendingApproval(null);

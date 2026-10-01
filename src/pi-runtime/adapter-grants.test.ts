@@ -40,10 +40,10 @@ function makeWorkspace(files: Record<string, string> = {}): { root: string; clea
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-// 真实会话存储写者（会话根 <root>/.pigeon/sessions）；existingPath 在场即续写已有文件（模拟冷重启后重新打开）
+// 真实会话存储写者（会话根 <root>/.pigeon/state/sessions）；existingPath 在场即续写已有文件（模拟冷重启后重新打开）
 function openStore(root: string, sessionId: SessionId, existingPath?: string): SessionStoreWriter {
   return openSessionStoreWriter({
-    sessionsRoot: join(root, ".pigeon", "sessions"),
+    sessionsRoot: join(root, ".pigeon", "state", "sessions"),
     sessionId,
     cwd: root,
     lock: acquireSessionFileLock,
@@ -53,7 +53,7 @@ function openStore(root: string, sessionId: SessionId, existingPath?: string): S
 
 // 读回会话存储里的视图（调用方已 close 写者）
 function readStore(root: string, sessionId: SessionId): StoreSessionView {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, "会话存储里应有该会话的文件");
   return loaded.view;
 }
@@ -393,11 +393,11 @@ test("不变式⑤崩溃恢复：授权建立条目落会话存储 → 冷读还
   }
 });
 
-test("不变式⑥ malformed grants.json 响亮失败（治理配置 fail-closed，不静默忽略）", () => {
+test("不变式⑥ 畸形的放权配置响亮失败（治理配置 fail-closed，不静默忽略）", () => {
   const { root, cleanup } = makeWorkspace();
   try {
     mkdirSync(join(root, ".pigeon"), { recursive: true });
-    writeFileSync(join(root, ".pigeon", "grants.json"), "{ 坏", "utf8");
+    writeFileSync(join(root, ".pigeon", "settings.local.json"), "{ 坏", "utf8");
     assert.throws(() => loadGrantConfig(root), /不是合法 JSON/);
   } finally {
     cleanup();

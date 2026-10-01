@@ -193,10 +193,12 @@ class SessionBuilder:
 
 
 def write_job(run_dir: Path, condition: str, attempt: int, steps: dict[int, list[SessionBuilder]],
-              snapshots: dict[int, str] | None = None) -> Path:
-    """一个作业目录：steps 为 {步序: 这一步新增的会话}；会话清单逐步累积。snapshots 为 {步序: 开工时 MEMORY.md 文本}。"""
+              snapshots: dict[int, str] | None = None, layout: str = "legacy") -> Path:
+    """一个作业目录：steps 为 {步序: 这一步新增的会话}；会话清单逐步累积。snapshots 为 {步序: 开工时 MEMORY.md 文本}。
+    layout 为会话根的布局：legacy 即 .pigeon/sessions（正式跑的数据），state 即决策 325 起的 .pigeon/state/sessions。"""
     job = run_dir / "streams" / f"tasks-{condition}-{attempt}"
-    sess_dir = job / ".pigeon" / "sessions" / "--job-workspace--"
+    root = job / ".pigeon" / ("state" if layout == "state" else "") / "sessions"
+    sess_dir = root / "--job-workspace--"
     sess_dir.mkdir(parents=True, exist_ok=True)
     listing: list[str] = []
     for seq in sorted(steps):

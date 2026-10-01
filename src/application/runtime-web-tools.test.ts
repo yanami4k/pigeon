@@ -81,7 +81,7 @@ test("worker 与主会话同样拿到两件工具：父策略里有且装配给�
       await handle.run("看看");
       await handle.dispose();
       seen.push(
-        loadStoreSession(join(root, ".pigeon", "sessions"), sessionId)?.view.runs[0]?.start
+        loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId)?.view.runs[0]?.start
           .advertisedTools ?? []
       );
     }

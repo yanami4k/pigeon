@@ -168,6 +168,7 @@ test("命令放行表：只读类与 /cancel、/quit 运行中可用，其余逐
     "fork",
     "spawn",
     "take",
+    "reload",
     "export",
   ]);
   for (const name of rejected) {

@@ -41,7 +41,7 @@ function assistant(): AgentMessage {
 
 async function writeOne(persistThinking: boolean | undefined) {
   const root = mkdtempSync(join(tmpdir(), "pigeon-thinking-"));
-  const sessions = join(root, ".pigeon", "sessions");
+  const sessions = join(root, ".pigeon", "state", "sessions");
   const writer = openSessionStoreWriter({
     sessionsRoot: sessions,
     sessionId: "sess_T",

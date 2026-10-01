@@ -15,9 +15,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { ApprovalRequest } from "../approvals/handler.ts";
 import { snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import { WorkerOrchestrator, type WorkerStatus } from "../orchestration/workers.ts";
-import { newSessionId } from "../state/ids.ts";
+import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { newGrantId, newSessionId } from "../state/ids.ts";
+import { buildRuntime, disposeRuntime } from "./runtime.ts";
+import { collectApprover } from "./script-host.ts";
 import { SpawnWorkerBudget, SpawnWorkerSlot } from "./spawn-worker-tool.ts";
 import {
   createTakeWorkerTool,
@@ -48,8 +52,8 @@ function fixture() {
   git(main, "commit", "-q", "-m", "init");
   writeFileSync(join(main, "a.txt"), "a1 main\na2\na3\n");
   const snap = snapshotWorkdir({ repoRoot: main, ref: "refs/pigeon/worker-start/fix-a" });
-  const worktree = join(main, ".pigeon", "worktrees", "s-fix-a");
-  mkdirSync(join(main, ".pigeon", "worktrees"), { recursive: true });
+  const worktree = join(main, ".pigeon", "state", "worktrees", "s-fix-a");
+  mkdirSync(join(main, ".pigeon", "state", "worktrees"), { recursive: true });
   git(main, "worktree", "add", "-q", "-b", "pigeon/fix-a", worktree, snap.commit);
   // noBase：派出记录里没有起点（没注入起点提供者的旧记录）
   const status = (state: WorkerStatus["state"], noBase = false): WorkerStatus => ({
@@ -294,5 +298,148 @@ test("派出后 refs/pigeon/ 下不留该 worker 的起点引用；gc 之后 tak
     assert.deepEqual(orchestrator.errors(), []);
   } finally {
     rmSync(main, { recursive: true, force: true });
+  }
+});
+
+// 决策 340：叠回内容写到 .pigeon 下（仓库已跟踪的 .pigeon/settings.json）时，take_worker 按受保护路径处理——放权不算、逐次问人、
+// 请示里列出这些路径；yolo 放行；叠回内容不含 .pigeon 时放权照常生效
+function protectedFixture(touchPigeon: boolean) {
+  const main = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-take-protected-")));
+  git(main, "init", "-q", "-b", "main");
+  git(main, "config", "user.email", "pigeon@example.invalid");
+  git(main, "config", "user.name", "pigeon-test");
+  mkdirSync(join(main, ".pigeon"));
+  writeFileSync(join(main, ".pigeon", ".gitignore"), "state/\nsettings.local.json\n");
+  writeFileSync(join(main, ".pigeon", "settings.json"), "{}\n");
+  writeFileSync(join(main, "a.txt"), "a\n");
+  git(main, "add", ".");
+  git(main, "commit", "-q", "-m", "init");
+  const snap = snapshotWorkdir({ repoRoot: main, ref: "refs/pigeon/worker-start/fix-a" });
+  const worktree = join(main, ".pigeon", "state", "worktrees", "s-fix-a");
+  mkdirSync(join(main, ".pigeon", "state", "worktrees"), { recursive: true });
+  git(main, "worktree", "add", "-q", "-b", "pigeon/fix-a", worktree, snap.commit);
+  writeFileSync(join(worktree, "a.txt"), "A\n");
+  if (touchPigeon) {
+    writeFileSync(join(worktree, ".pigeon", "settings.json"), '{"permissions":{}}\n');
+  }
+  const slot = new SpawnWorkerSlot();
+  const status: WorkerStatus = {
+    sessionId: newSessionId(),
+    name: "fix-a",
+    role: "implementer",
+    state: "completed",
+    turns: 1,
+    branch: "pigeon/fix-a",
+    startedAt: 0,
+    workspace: {
+      kind: "git-worktree",
+      path: worktree,
+      branch: "pigeon/fix-a",
+      baseCommit: snap.commit,
+    },
+  };
+  slot.bind({
+    orchestrator: {
+      status: () => [status],
+      spawn: () => {
+        throw new Error("不派");
+      },
+      awaitResult: () => Promise.reject(new Error("不等")),
+      cancel: async () => {},
+      wait: () => Promise.reject(new Error("不等")),
+      send: async () => "delivered" as const,
+      subscribe: () => () => {},
+    },
+    governanceRoot: main,
+    budget: new SpawnWorkerBudget({ maxAgentSpawns: 16 }),
+    spawnAttempts: () => Promise.reject(new Error("不派")),
+  });
+  return { main, slot, cleanup: () => rmSync(main, { recursive: true, force: true }) };
+}
+
+async function takeWithGrant(touchPigeon: boolean, yolo: boolean) {
+  const f = protectedFixture(touchPigeon);
+  const asked: ApprovalRequest[] = [];
+  const bundle = buildRuntime({
+    streamFn: createFakeStreamFn({
+      replies: [
+        { text: "取", toolCalls: [{ name: "take_worker", args: { worker: "fix-a" } }] },
+        { text: "完" },
+      ],
+    }),
+    workspaceRoot: f.main,
+    sessionId: newSessionId(),
+    yolo,
+    provider: "fake",
+    modelId: "fake",
+    spawnWorker: f.slot,
+    configGrants: [
+      {
+        tool: "take_worker",
+        promotedFrom: {
+          grantId: newGrantId(),
+          sessionId: newSessionId(),
+          firstCall: { toolCallId: "t0", args: {} },
+          promotedAt: 1,
+        },
+      },
+    ],
+    createApprovalHandler: () => async (request) => {
+      asked.push(request);
+      return { approved: false };
+    },
+  });
+  try {
+    await bundle.adapter.run("取");
+    return { asked, settings: readFileSync(join(f.main, ".pigeon", "settings.json"), "utf8") };
+  } finally {
+    await disposeRuntime(bundle);
+    f.cleanup();
+  }
+}
+
+test("决策 340：叠回内容含 .pigeon 下的路径时 take_worker 按受保护路径请示（配置放权不算），请示里列出这些路径", async () => {
+  const { asked, settings } = await takeWithGrant(true, false);
+  assert.deepEqual(
+    asked.map((request) => [request.toolName, request.protectedPath]),
+    [["take_worker", ".pigeon/settings.json"]]
+  );
+  assert.equal(settings, "{}\n", "没批准即不叠回");
+  const plain = await takeWithGrant(false, false);
+  assert.deepEqual(plain.asked, [], "不含 .pigeon 时配置放权照常免审");
+  const yolo = await takeWithGrant(true, true);
+  assert.deepEqual(yolo.asked, [], "yolo 放行");
+  assert.equal(yolo.settings, '{"permissions":{}}\n');
+});
+
+test("决策 340：脚本整批收回含 .pigeon 下的路径时按受保护路径请示，放权不算", async () => {
+  const f = protectedFixture(true);
+  try {
+    const status = f.slot.host?.orchestrator.status()[0];
+    assert.ok(status?.workspace.kind === "git-worktree");
+    const asked: ApprovalRequest[] = [];
+    const approve = collectApprover(f.main, {
+      yolo: false,
+      grants: { match: () => ({ granted: true }) },
+      handler: async (request) => {
+        asked.push(request);
+        return { approved: false };
+      },
+    });
+    const target = {
+      name: "fix-a",
+      worktree: status.workspace.path,
+      base: status.workspace.baseCommit ?? "",
+    };
+    assert.equal(
+      await approve({ runId: "r1", title: "脚本", workers: ["fix-a"], targets: [target] }),
+      false
+    );
+    assert.deepEqual(
+      asked.map((request) => request.protectedPath),
+      [".pigeon/settings.json"]
+    );
+  } finally {
+    f.cleanup();
   }
 });

@@ -1,7 +1,8 @@
 // 工作区快照（M7 S5，决策 078）：只在写操作或命令确实改变文件后，用 git 底层命令在临时索引上生成快照提交——
 // 临时 GIT_INDEX_FILE（以用户索引为起点复制一份，只为复用文件状态缓存）→ add -A → write-tree → commit-tree → update-ref，
 // 挂到 refs/pigeon/checkpoints/<会话>/<序号>。用户的工作区、暂存区、当前分支与 HEAD 一律不碰；
-// 治理目录 .pigeon 不进快照（会话文件在变不算文件改变）。快照成链：首个快照的父提交是改前基线（首次改动之前的
+// 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 不进快照（会话文件在变不算文件改变；决策 325 起
+// 仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容，照常进快照）。快照成链：首个快照的父提交是改前基线（首次改动之前的
 // 工作区状态），之后每个快照的父提交是上一个快照。分叉时从分叉点之前最近的快照开独立工作树（见 S6）。
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
 import { execFileSync } from "node:child_process";
@@ -10,6 +11,7 @@ import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
+import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
 
 export const CHECKPOINT_REF_PREFIX = "refs/pigeon/checkpoints/";
 
@@ -129,7 +131,7 @@ export function createCheckpointer(input: {
       // 改为加完再从临时索引里摘掉
       git(
         workspaceRoot,
-        ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ".pigeon"],
+        ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ...PROGRAM_OWNED_PATHS],
         env
       );
       return git(workspaceRoot, ["write-tree"], env).trim();

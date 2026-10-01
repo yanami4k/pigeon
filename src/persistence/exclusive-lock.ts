@@ -98,6 +98,13 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+// 锁文件是否正被一个仍存活的进程持有（迁移命令据此拒绝挪动正在使用的状态；会话锁与本锁的持有者记录同形）
+export function lockHeldByLiveProcess(path: string): { pid: number } | undefined {
+  const holder = readHolder(path);
+  if (holder === "missing" || holder === "malformed") return undefined;
+  return holderAlive(holder) ? { pid: holder.pid } : undefined;
+}
+
 // 先写临时文件再硬链接成锁文件（与会话锁同一手法）：锁文件一出现就带着完整的持有者记录。
 // 不能分"独占创建空文件、再写内容"两步——那中间的 0 字节窗口会被另一个进程读成损坏锁并直接接管，
 // 结果两个进程同时认为自己持锁，而独占锁挡的恰恰就是这个

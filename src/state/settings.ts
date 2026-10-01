@@ -1,0 +1,360 @@
+// 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
+// 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
+// - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard；
+//   另有只许写在用户级的 trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
+// - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；唯一例外是 permissions 的放权规则三层并集生效。
+// - 响亮失败：顶层或节内的未知键、写在设置里的 key、写在项目级的 trustedDirectories，一律指出文件、键与所在层。
+// 以后各段往 SETTINGS_SECTIONS 里加节（钩子、记忆），合并与未知键检查随之生效。
+import path from "node:path";
+import type { TSchema } from "typebox";
+import { type Static, Type } from "typebox";
+import { Value } from "typebox/value";
+import { COMMAND_NAME_PATTERN, type CommandsConfig, CommandsSectionSchema } from "./commands.ts";
+import { type ConfigGrantRule, PermissionsSectionSchema } from "./grants.ts";
+import {
+  LoopGuardSectionSchema,
+  type LoopGuardSettings,
+  loopGuardSettings,
+} from "./loop-guard-config.ts";
+import { type DotMcpJson, type McpConfig, McpSectionSchema, mergeMcpConfig } from "./mcp-config.ts";
+import {
+  OrchestrationSectionSchema,
+  type OrchestrationSettings,
+  orchestrationSettings,
+} from "./orchestration-config.ts";
+import {
+  type SandboxConfig,
+  SandboxSectionSchema,
+  sandboxConfigProblems,
+} from "./sandbox-config.ts";
+import { WorkerRoleSchema } from "./session-payloads.ts";
+import { WEB_KEY_FIELDS, type WebSection, WebSectionSchema } from "./web-config.ts";
+
+// 三层，按优先级从低到高
+export const SETTINGS_LAYERS = ["user", "project", "local"] as const;
+export type SettingsLayer = (typeof SETTINGS_LAYERS)[number];
+
+export const SETTINGS_LAYER_LABELS: Readonly<Record<SettingsLayer, string>> = {
+  user: "用户级",
+  project: "项目共享",
+  local: "项目个人",
+};
+
+// 各节：节名 → schema（节名 camelCase）
+export const SETTINGS_SECTIONS = {
+  mcp: McpSectionSchema,
+  permissions: PermissionsSectionSchema,
+  commands: CommandsSectionSchema,
+  orchestration: OrchestrationSectionSchema,
+  web: WebSectionSchema,
+  sandbox: SandboxSectionSchema,
+  loopGuard: LoopGuardSectionSchema,
+} as const satisfies Record<string, TSchema>;
+export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
+
+// 顶层的非节键
+export const SCHEMA_KEY = "$schema";
+export const TRUSTED_DIRECTORIES_KEY = "trustedDirectories";
+
+export const SettingsFileSchema = Type.Object(
+  {
+    $schema: Type.Optional(Type.String()),
+    mcp: Type.Optional(McpSectionSchema),
+    permissions: Type.Optional(PermissionsSectionSchema),
+    commands: Type.Optional(CommandsSectionSchema),
+    orchestration: Type.Optional(OrchestrationSectionSchema),
+    web: Type.Optional(WebSectionSchema),
+    sandbox: Type.Optional(SandboxSectionSchema),
+    loopGuard: Type.Optional(LoopGuardSectionSchema),
+    trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  },
+  { additionalProperties: false }
+);
+export type SettingsFile = Static<typeof SettingsFileSchema>;
+
+// 一层的出处（报错与确认清单里用）
+export interface SettingsSource {
+  layer: SettingsLayer;
+  // 文件的展示写法（如 .pigeon/settings.json、~/.pigeon/settings.json）
+  file: string;
+}
+
+export function describeSource(source: SettingsSource): string {
+  return `${source.file}（${SETTINGS_LAYER_LABELS[source.layer]}）`;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// 信任目录的写法：绝对路径，或 ~ 本身、~/ 开头（展开为用户主目录）
+export function isTrustedDirectoryForm(dir: string): boolean {
+  return dir === "~" || dir.startsWith("~/") || path.isAbsolute(dir);
+}
+
+// typebox 校验失败的逐条说明
+export function schemaProblems(schema: TSchema, value: unknown, prefix: string): string[] {
+  return [...Value.Errors(schema, value)].map((failure) => {
+    const where = "instancePath" in failure ? String(failure.instancePath) : "";
+    return `${prefix}${where === "" ? "/" : where}：${failure.message}`;
+  });
+}
+
+// 校验一层设置文件的内容；返回校验通过的内容或逐条问题（问题文字已带文件与层）
+export function validateSettingsLayer(
+  raw: unknown,
+  source: SettingsSource
+): { file: SettingsFile } | { problems: string[] } {
+  const where = describeSource(source);
+  if (!isPlainObject(raw)) {
+    return { problems: [`设置文件 ${where}：顶层须为对象`] };
+  }
+  const problems: string[] = [];
+  for (const key of Object.keys(raw)) {
+    if (key === SCHEMA_KEY) continue;
+    if (key === TRUSTED_DIRECTORIES_KEY) {
+      if (source.layer !== "user") {
+        problems.push(
+          `设置文件 ${where}：${TRUSTED_DIRECTORIES_KEY} 只能写在用户级设置里（项目不能为自己免于确认）`
+        );
+      } else if (Array.isArray(raw[key])) {
+        // 只接受绝对路径或 ~ 开头（展开为用户主目录）：相对路径随启动目录而变，免检范围不可预料
+        for (const dir of raw[key] as unknown[]) {
+          if (typeof dir === "string" && !isTrustedDirectoryForm(dir)) {
+            problems.push(
+              `设置文件 ${where}：${TRUSTED_DIRECTORIES_KEY} 里的 ${dir} 不是绝对路径（只接受绝对路径或 ~ 开头）`
+            );
+          }
+        }
+      }
+      continue;
+    }
+    if (!Object.hasOwn(SETTINGS_SECTIONS, key)) {
+      problems.push(
+        `设置文件 ${where}：未知键 ${key}（可用 ${[SCHEMA_KEY, ...Object.keys(SETTINGS_SECTIONS), TRUSTED_DIRECTORIES_KEY].join("、")}）`
+      );
+      continue;
+    }
+    const section = raw[key];
+    const schema = SETTINGS_SECTIONS[key as SettingsSectionName];
+    if (!isPlainObject(section)) {
+      problems.push(`设置文件 ${where}：${key} 一节须为对象`);
+      continue;
+    }
+    // key 不进设置文件（先于未知键检查，给出应设的环境变量名）
+    if (key === "web") {
+      problems.push(...webKeyProblems(section, where));
+    }
+    const known = new Set(Object.keys(schema.properties as Record<string, unknown>));
+    for (const inner of Object.keys(section)) {
+      if (!known.has(inner)) {
+        problems.push(
+          `设置文件 ${where}：${key} 一节里的未知键 ${inner}（可用 ${[...known].join("、")}）`
+        );
+      }
+    }
+  }
+  if (problems.length > 0) {
+    return { problems };
+  }
+  if (!Value.Check(SettingsFileSchema, raw)) {
+    return { problems: schemaProblems(SettingsFileSchema, raw, `设置文件 ${where}：`) };
+  }
+  return { file: raw as SettingsFile };
+}
+
+// web 一节里写了 key：逐个报出应设的环境变量
+function webKeyProblems(section: Record<string, unknown>, where: string): string[] {
+  const problems: string[] = [];
+  const search = section.search;
+  if (!isPlainObject(search)) return problems;
+  for (const { backend, env } of WEB_KEY_FIELDS) {
+    const backendSection = search[backend];
+    if (isPlainObject(backendSection) && Object.hasOwn(backendSection, "apiKey")) {
+      problems.push(
+        `设置文件 ${where}：web.search.${backend}.apiKey 不能写在设置文件里——key 只从环境变量读，请设置 ${env} 并删掉这一项`
+      );
+    }
+  }
+  return problems;
+}
+
+// 深合并：对象按键逐层合并，标量与数组由高优先层整体替换
+export function mergeSettingsValue(base: unknown, over: unknown): unknown {
+  if (over === undefined) return base;
+  if (isPlainObject(base) && isPlainObject(over)) {
+    const merged: Record<string, unknown> = { ...base };
+    for (const [key, value] of Object.entries(over)) {
+      merged[key] = mergeSettingsValue(base[key], value);
+    }
+    return merged;
+  }
+  return over;
+}
+
+// 一条放权规则及其所在层与在该层里的序号（/revoke config#N 只按项目个人一层的序号移除）
+export interface LayeredGrantRule {
+  layer: SettingsLayer;
+  index: number;
+  rule: ConfigGrantRule;
+}
+
+// 合并后的设置：各节已合并（permissions 除外，放权规则另列并集），trustedDirectories 只来自用户级
+export interface MergedSettings {
+  mcp?: Static<typeof McpSectionSchema>;
+  commands?: Static<typeof CommandsSectionSchema>;
+  orchestration?: Static<typeof OrchestrationSectionSchema>;
+  web?: WebSection;
+  sandbox?: SandboxConfig;
+  loopGuard?: Static<typeof LoopGuardSectionSchema>;
+  trustedDirectories: string[];
+}
+
+// 每节由哪些层给出（确认清单写明来自哪一层）
+export type SectionSources = Partial<Record<SettingsSectionName, SettingsLayer[]>>;
+
+export interface MergeResult {
+  merged: MergedSettings;
+  grants: LayeredGrantRule[];
+  sectionSources: SectionSources;
+  // 每个命令短名最终取自哪一层
+  commandSources: Record<string, SettingsLayer>;
+}
+
+// 三层合并（层按优先级从低到高给）
+export function mergeSettingsLayers(
+  layers: ReadonlyArray<{ layer: SettingsLayer; file: SettingsFile }>
+): MergeResult {
+  let merged: Record<string, unknown> = {};
+  const grants: LayeredGrantRule[] = [];
+  const sectionSources: SectionSources = {};
+  const commandSources: Record<string, SettingsLayer> = {};
+  for (const { layer, file } of layers) {
+    for (const name of Object.keys(SETTINGS_SECTIONS) as SettingsSectionName[]) {
+      const section = file[name];
+      if (section === undefined) continue;
+      sectionSources[name] = [...(sectionSources[name] ?? []), layer];
+      if (name === "permissions") continue;
+      merged = mergeSettingsValue(merged, { [name]: section }) as Record<string, unknown>;
+    }
+    for (const commandName of Object.keys(file.commands?.commands ?? {})) {
+      commandSources[commandName] = layer;
+    }
+    (file.permissions?.grants ?? []).forEach((rule, index) => {
+      grants.push({ layer, index, rule });
+    });
+  }
+  // 并集按优先级从高到低排列（项目个人在前）
+  grants.sort((a, b) => SETTINGS_LAYERS.indexOf(b.layer) - SETTINGS_LAYERS.indexOf(a.layer));
+  const user = layers.find((entry) => entry.layer === "user")?.file;
+  return {
+    merged: {
+      ...(merged as Omit<MergedSettings, "trustedDirectories">),
+      trustedDirectories: [...(user?.trustedDirectories ?? [])],
+    },
+    grants,
+    sectionSources,
+    commandSources,
+  };
+}
+
+// 合并后的组合判据（跨层才看得出的问题：角色引用了别层也没有的短名、轮数不递增、image 与 dockerfile 同时给出、MCP 语义不明）
+export function mergedSettingsProblems(merged: MergedSettings, dotMcp?: DotMcpJson): string[] {
+  const problems: string[] = [];
+  const commands = merged.commands?.commands ?? {};
+  for (const name of Object.keys(commands)) {
+    if (!COMMAND_NAME_PATTERN.test(name)) {
+      problems.push(`commands：短名不合法：${name}`);
+    }
+  }
+  for (const [role, names] of Object.entries(merged.commands?.roles ?? {})) {
+    if (!Value.Check(WorkerRoleSchema, role)) {
+      problems.push(`commands：未知角色：${role}`);
+    }
+    for (const name of names) {
+      if (!Object.hasOwn(commands, name)) {
+        problems.push(`commands：角色 ${role} 引用了未登记的短名：${name}`);
+      }
+    }
+  }
+  const loop = loopGuardSettings(merged.loopGuard);
+  if ("problem" in loop) {
+    problems.push(`loopGuard：${loop.problem}`);
+  }
+  for (const problem of sandboxConfigProblems(merged.sandbox ?? {})) {
+    problems.push(`sandbox：${problem}`);
+  }
+  problems.push(...mergeMcpConfig(dotMcp, merged.mcp).problems.map((p) => `mcp：${p}`));
+  return problems;
+}
+
+// ---- 会话快照的各节取值（会话开始时读一次，本会话内各处都从快照取）----
+
+export interface SettingsSnapshot {
+  // 项目根（治理根）
+  root: string;
+  // 各层文件（展示写法与是否存在）
+  sources: ReadonlyArray<SettingsSource & { exists: boolean }>;
+  merged: MergedSettings;
+  grants: readonly LayeredGrantRule[];
+  sectionSources: SectionSources;
+  commandSources: Readonly<Record<string, SettingsLayer>>;
+  // 项目根 .mcp.json 的内容（一并冻结）
+  dotMcp?: DotMcpJson;
+  // 决策 326 ③：启动时选了"本次不用"的会执行命令的条目（类型:标识）；worker 与沙箱会话随快照沿用
+  excluded?: readonly string[];
+  // sandbox 一节指向的项目 Dockerfile 在读快照那一刻的内容（并入指纹；/reload 据此比出 Dockerfile 的变化）
+  dockerfileContent?: string;
+}
+
+// 空快照：没有任何设置文件（测试与跑批器的缺省）
+export function emptySettingsSnapshot(root: string): SettingsSnapshot {
+  return {
+    root,
+    sources: [],
+    merged: { trustedDirectories: [] },
+    grants: [],
+    sectionSources: {},
+    commandSources: {},
+  };
+}
+
+export function commandsConfigOf(snapshot: SettingsSnapshot): CommandsConfig {
+  return {
+    commands: { ...(snapshot.merged.commands?.commands ?? {}) },
+    roles: { ...(snapshot.merged.commands?.roles ?? {}) },
+  };
+}
+
+export function configGrantRulesOf(snapshot: SettingsSnapshot): ConfigGrantRule[] {
+  return snapshot.grants.map((entry) => entry.rule);
+}
+
+export function orchestrationSettingsOf(snapshot: SettingsSnapshot): OrchestrationSettings {
+  return orchestrationSettings(snapshot.merged.orchestration);
+}
+
+export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettings {
+  const resolved = loopGuardSettings(snapshot.merged.loopGuard);
+  if ("problem" in resolved) {
+    // 读取快照时已校验，到这里说明快照是手工拼的
+    throw new Error(`打转检测设置不对：${resolved.problem}`);
+  }
+  return resolved.settings;
+}
+
+export function webSectionOf(snapshot: SettingsSnapshot): WebSection | undefined {
+  return snapshot.merged.web;
+}
+
+export function sandboxConfigOf(snapshot: SettingsSnapshot): SandboxConfig {
+  return snapshot.merged.sandbox ?? {};
+}
+
+export function mcpConfigOf(snapshot: SettingsSnapshot): McpConfig {
+  const { config, problems } = mergeMcpConfig(snapshot.dotMcp, snapshot.merged.mcp);
+  if (problems.length > 0) {
+    throw new Error(`MCP 配置校验失败：${problems.join("；")}`);
+  }
+  return config;
+}

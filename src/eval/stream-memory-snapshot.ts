@@ -1,12 +1,13 @@
-// 记忆快照（决策 191）：每一步开工前，把作业目录（治理根）下的 .pigeon/learned/ 整体复制为该步的快照；这一步作废重做、
+// 记忆快照（决策 191）：每一步开工前，把作业目录（治理根）下的 .pigeon/state/learned/ 整体复制为该步的快照；这一步作废重做、
 // 或进程死在这一步中途之后续跑时，先把记忆恢复成这份快照，再重做这一步。第 N 步的快照即第 N-1 步完成时的记忆，
 // 同一步已有快照就只恢复、不重取。快照整个目录：MEMORY.md 与另存的下一个编号（next-id）一并带上
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { memoryFileFacts } from "../memory/learned-store.ts";
+import { learnedDirOf as learnedDirPath } from "../state/paths.ts";
 
 export function learnedDirOf(jobDir: string): string {
-  return path.join(jobDir, ".pigeon", "learned");
+  return learnedDirPath(jobDir);
 }
 
 export function learnedSnapshotOf(jobDir: string, seq: number): string {

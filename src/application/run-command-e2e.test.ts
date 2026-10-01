@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
@@ -31,7 +32,7 @@ function sha256(text: string): string {
 
 // 读会话存储里本会话的全部工具结果消息（按顺序）与授权条目
 function storeFacts(root: string, sessionId: string) {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined, "会话存储里应有本会话");
   const toolResults = loaded.view.runs
     .flatMap((run) => run.messages.map((ref) => ref.message))
@@ -141,13 +142,13 @@ test("run_command：exec 每次都问且显示完整命令；[a] 精确命令放
   }
 });
 
-test("tester 角色：只能运行 commands.json 为它登记的命令（短名展开），清单外拒绝且不产生副作用", async () => {
+test("tester 角色：只能运行设置 commands 一节为它登记的命令（短名展开），清单外拒绝且不产生副作用", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-run-command-tester-"));
   try {
     mkdirSync(join(root, ".pigeon"), { recursive: true });
     writeFileSync(
-      join(root, ".pigeon", "commands.json"),
-      JSON.stringify({ version: 1, commands: { hello: COMMAND_A }, roles: { tester: ["hello"] } })
+      join(root, ".pigeon", "settings.json"),
+      JSON.stringify({ commands: { commands: { hello: COMMAND_A }, roles: { tester: ["hello"] } } })
     );
     const sessionId = newSessionId();
     const bundle = buildRuntime({
@@ -160,6 +161,8 @@ test("tester 角色：只能运行 commands.json 为它登记的命令（短名�
       }),
       workspaceRoot: root,
       homeDir: root,
+      // 决策 325：短名与角色清单取自设置快照
+      settings: loadSettings(root, { homeDir: mkdtempSync(join(tmpdir(), "pigeon-run-home-")) }),
       sessionId,
       yolo: true,
       toolPolicy: { allow: ["read_file", "run_command"], deny: [], approvalMode: "yolo" },

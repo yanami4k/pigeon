@@ -36,7 +36,7 @@ function mainBranch(
 function tempRoot(): { sessions: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-store-compaction-"));
   return {
-    sessions: join(root, ".pigeon", "sessions"),
+    sessions: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
