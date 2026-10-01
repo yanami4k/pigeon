@@ -1,0 +1,9 @@
+# 决策 337：工作流里的 action 钉到完整 commit SHA，由 Dependabot 每周提升级 PR。
+# 不含 npm 生态：pi 与 TypeScript 锁定版本，另行决定。
+# 代码审查工作流里取审查插件的提交号（claude-code-review.yml 的 PLUGIN_SHA）不在 Dependabot 管辖内，须手动更新。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
