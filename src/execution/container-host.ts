@@ -24,6 +24,8 @@ import {
   type HostFileSnapshot,
   LISTING_SKIPPED_DIRS,
   LISTING_SKIPPED_ROOT_DIRS,
+  type MemoryLimitExceeded,
+  memoryLimitText,
   type WorkspaceHost,
 } from "../tools/workspace-host.ts";
 
@@ -121,6 +123,12 @@ export interface ContainerHostOptions {
   stepStartRef?: string;
   // 辅助调用（解析路径、读写文件、列清单、重启容器）的超时，缺省 60 秒
   helperTimeoutMs?: number;
+  // 决策 333：容器设了内存上限时在场——每条命令前后读容器 cgroup 的 oom_kill 计数，计数增加即判超出上限；
+  // 读不到计数时，退出码 137 判"可能超出"。label 为上限的可读写法；counterFiles 为计数所在文件（缺省 cgroup v2 的
+  // memory.events 与 v1 的 memory.oom_control，依次取第一个读得到的；测试注入）
+  memoryLimit?: { label: string; counterFiles?: readonly string[] };
+  // 运行中给人看的一行（超出内存上限等）
+  onNotice?: (line: string) => void;
 }
 
 const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
@@ -129,6 +137,19 @@ const EXIT_MISSING = 3;
 // 决策 334：要写的文件是符号链接（标准输出为其指向）、写入前重新解析得到别的路径（标准输出为新的解析结果）
 const EXIT_SYMLINK = 5;
 const EXIT_CHANGED = 6;
+// 决策 333：容器 cgroup 里 oom_kill 计数所在的文件（cgroup v2、v1）；依次取第一个读得到且有该行的，都没有即退出码 4
+export const OOM_COUNTER_FILES: readonly string[] = [
+  "/sys/fs/cgroup/memory.events",
+  "/sys/fs/cgroup/memory/memory.oom_control",
+];
+const OOM_COUNT_SCRIPT = [
+  'for f in "$@"; do',
+  '  [ -r "$f" ] || continue',
+  `  n="$(sed -n 's/^oom_kill //p' "$f")"`,
+  '  [ -n "$n" ] && { echo "$n"; exit 0; }',
+  "done",
+  "exit 4",
+].join("\n");
 // 写工具的解析：模型给的路径本身是符号链接即报出指向，否则同 RESOLVE_SCRIPT
 const RESOLVE_FOR_WRITE_SCRIPT = `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }; [ -e "$1" ] || exit ${EXIT_MISSING}; readlink -f -- "$1"`;
 // 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己
@@ -234,6 +255,153 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
 
   const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
 
+  // agent 命令的执行（文件头 ①–③）
+  const runExec = (plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> => {
+    const collected = createHeadCollector(execOptions.maxOutputBytes);
+    // OCI 运行时与守护进程的报错可能落在任一输出流：两路各留一小段开头用来识别
+    let stderrHead = "";
+    let stdoutHead = "";
+    return new Promise((resolve, reject) => {
+      let timedOut = false;
+      let terminating: Promise<void> | undefined;
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(dockerProgram, execArgs(false, [plan.program, ...plan.args]), {
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
+      } catch (error) {
+        reject(
+          new ContainerHostError(
+            `docker 拉不起来：${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+        return;
+      }
+      child.stdout?.on("data", (chunk: Buffer) => {
+        collected.push(chunk);
+        if (stdoutHead.length < 2048) {
+          stdoutHead += chunk.toString("utf8");
+        }
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        collected.push(chunk);
+        if (stderrHead.length < 2048) {
+          stderrHead += chunk.toString("utf8");
+        }
+      });
+      // 终止：杀客户端只断开连接，容器内进程仍在跑；重启容器才杀得干净（见文件头 ①）
+      const terminate = (): void => {
+        if (terminating === undefined) {
+          child.kill("SIGKILL");
+          terminating = restart();
+        }
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, execOptions.timeoutMs);
+      const onAbort = (): void => terminate();
+      execOptions.signal?.addEventListener("abort", onAbort, { once: true });
+      if (execOptions.signal?.aborted === true) {
+        terminate();
+      }
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        execOptions.signal?.removeEventListener("abort", onAbort);
+      };
+      child.on("error", (error) => {
+        cleanup();
+        reject(new ContainerHostError(`docker 拉不起来：${error.message}`));
+      });
+      child.on("close", (code, signal) => {
+        cleanup();
+        const settle = (): void => {
+          const output = collected.finish();
+          if (terminating !== undefined) {
+            resolve({ spawned: true, exitCode: null, timedOut, ...output });
+            return;
+          }
+          // 进程没起来（OCI 运行时报错）：程序不存在还原为 ENOENT、不可执行为 EACCES，与本地实现同一口径；
+          // 其余（如工作目录不存在）是容器侧的环境问题
+          const ociFailure = [stderrHead, stdoutHead].find((head) =>
+            /^OCI runtime exec failed/m.test(head)
+          );
+          if ((code === 126 || code === 127) && ociFailure !== undefined) {
+            const missing =
+              /executable file not found|no such file or directory/i.test(ociFailure) &&
+              !/chdir to cwd/i.test(ociFailure);
+            if (!missing && !/permission denied/i.test(ociFailure)) {
+              reject(new ContainerHostError(`容器内进程起不来：${ociFailure.trim()}`));
+              return;
+            }
+            const spawnError: NodeJS.ErrnoException = new Error(ociFailure.trim());
+            spawnError.code = missing ? "ENOENT" : "EACCES";
+            resolve({ spawned: false, spawnError, exitCode: null, timedOut, ...output });
+            return;
+          }
+          if (daemonFailure({ exitCode: code, stderr: stderrHead })) {
+            reject(new ContainerHostError(`容器不可用：${stderrHead.trim()}`));
+            return;
+          }
+          resolve({
+            spawned: true,
+            exitCode: code,
+            ...(signal !== null ? { signal } : {}),
+            timedOut,
+            ...output,
+          });
+        };
+        if (terminating !== undefined) {
+          // 等容器重启完成再交还结果：下一条命令不会撞上正在重启的容器
+          terminating.then(settle, reject);
+        } else {
+          settle();
+        }
+      });
+    });
+  };
+
+  // 容器的 oom_kill 计数；读不到为 undefined
+  const counterFiles = options.memoryLimit?.counterFiles ?? OOM_COUNTER_FILES;
+  const readOomKills = async (): Promise<number | undefined> => {
+    try {
+      const result = await helper(false, trustedShell(OOM_COUNT_SCRIPT, ...counterFiles));
+      const text = result.stdout.toString("utf8").trim();
+      return result.exitCode === 0 && /^\d+$/.test(text) ? Number(text) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // 决策 333：设了内存上限时，命令前后比 oom_kill 计数；超出即在结果上标出，并给人报一行
+  const execWithMemoryCheck = async (
+    plan: HostExecPlan,
+    execOptions: HostExecOptions,
+    limit: string
+  ): Promise<HostExecResult> => {
+    const before = await readOomKills();
+    const result = await runExec(plan, execOptions);
+    // 超时与中止会重启容器（计数随之归零），程序没起来也无从谈起
+    if (!result.spawned || result.exitCode === null) {
+      return result;
+    }
+    const after = before === undefined ? undefined : await readOomKills();
+    const exceeded: MemoryLimitExceeded | undefined =
+      before !== undefined && after !== undefined
+        ? after > before
+          ? { limit, certain: true }
+          : undefined
+        : result.exitCode === 137
+          ? { limit, certain: false }
+          : undefined;
+    if (exceeded === undefined) {
+      return result;
+    }
+    options.onNotice?.(`${memoryLimitText(exceeded)}（${[plan.program, ...plan.args].join(" ")}）`);
+    return { ...result, memoryLimitExceeded: exceeded };
+  };
+
   return {
     platform: "linux",
     root,
@@ -283,109 +451,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
     },
     exec(plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> {
-      const collected = createHeadCollector(execOptions.maxOutputBytes);
-      // OCI 运行时与守护进程的报错可能落在任一输出流：两路各留一小段开头用来识别
-      let stderrHead = "";
-      let stdoutHead = "";
-      return new Promise((resolve, reject) => {
-        let timedOut = false;
-        let terminating: Promise<void> | undefined;
-        let child: ReturnType<typeof spawn>;
-        try {
-          child = spawn(dockerProgram, execArgs(false, [plan.program, ...plan.args]), {
-            stdio: ["ignore", "pipe", "pipe"],
-            windowsHide: true,
-          });
-        } catch (error) {
-          reject(
-            new ContainerHostError(
-              `docker 拉不起来：${error instanceof Error ? error.message : String(error)}`
-            )
-          );
-          return;
-        }
-        child.stdout?.on("data", (chunk: Buffer) => {
-          collected.push(chunk);
-          if (stdoutHead.length < 2048) {
-            stdoutHead += chunk.toString("utf8");
-          }
-        });
-        child.stderr?.on("data", (chunk: Buffer) => {
-          collected.push(chunk);
-          if (stderrHead.length < 2048) {
-            stderrHead += chunk.toString("utf8");
-          }
-        });
-        // 终止：杀客户端只断开连接，容器内进程仍在跑；重启容器才杀得干净（见文件头 ①）
-        const terminate = (): void => {
-          if (terminating === undefined) {
-            child.kill("SIGKILL");
-            terminating = restart();
-          }
-        };
-        const timer = setTimeout(() => {
-          timedOut = true;
-          terminate();
-        }, execOptions.timeoutMs);
-        const onAbort = (): void => terminate();
-        execOptions.signal?.addEventListener("abort", onAbort, { once: true });
-        if (execOptions.signal?.aborted === true) {
-          terminate();
-        }
-        const cleanup = (): void => {
-          clearTimeout(timer);
-          execOptions.signal?.removeEventListener("abort", onAbort);
-        };
-        child.on("error", (error) => {
-          cleanup();
-          reject(new ContainerHostError(`docker 拉不起来：${error.message}`));
-        });
-        child.on("close", (code, signal) => {
-          cleanup();
-          const settle = (): void => {
-            const output = collected.finish();
-            if (terminating !== undefined) {
-              resolve({ spawned: true, exitCode: null, timedOut, ...output });
-              return;
-            }
-            // 进程没起来（OCI 运行时报错）：程序不存在还原为 ENOENT、不可执行为 EACCES，与本地实现同一口径；
-            // 其余（如工作目录不存在）是容器侧的环境问题
-            const ociFailure = [stderrHead, stdoutHead].find((head) =>
-              /^OCI runtime exec failed/m.test(head)
-            );
-            if ((code === 126 || code === 127) && ociFailure !== undefined) {
-              const missing =
-                /executable file not found|no such file or directory/i.test(ociFailure) &&
-                !/chdir to cwd/i.test(ociFailure);
-              if (!missing && !/permission denied/i.test(ociFailure)) {
-                reject(new ContainerHostError(`容器内进程起不来：${ociFailure.trim()}`));
-                return;
-              }
-              const spawnError: NodeJS.ErrnoException = new Error(ociFailure.trim());
-              spawnError.code = missing ? "ENOENT" : "EACCES";
-              resolve({ spawned: false, spawnError, exitCode: null, timedOut, ...output });
-              return;
-            }
-            if (daemonFailure({ exitCode: code, stderr: stderrHead })) {
-              reject(new ContainerHostError(`容器不可用：${stderrHead.trim()}`));
-              return;
-            }
-            resolve({
-              spawned: true,
-              exitCode: code,
-              ...(signal !== null ? { signal } : {}),
-              timedOut,
-              ...output,
-            });
-          };
-          if (terminating !== undefined) {
-            // 等容器重启完成再交还结果：下一条命令不会撞上正在重启的容器
-            terminating.then(settle, reject);
-          } else {
-            settle();
-          }
-        });
-      });
+      return options.memoryLimit === undefined
+        ? runExec(plan, execOptions)
+        : execWithMemoryCheck(plan, execOptions, options.memoryLimit.label);
     },
     async listFiles(limit): Promise<HostFileSnapshot> {
       // 不跟进两份名单里的目录（与本地实现同一口径：任意层级按名字，工作区根下的只认根下那一个目录）；

@@ -33,6 +33,22 @@ export interface HostExecResult {
   outputHash: string;
   // 截断后的输出文本（开头部分）
   output: string;
+  // 决策 333：命令因超出沙箱内存上限被杀（容器实现在设了内存上限时判定）
+  memoryLimitExceeded?: MemoryLimitExceeded;
+}
+
+// 超出内存上限：certain 为容器内存事件的 oom_kill 计数在命令前后增加；读不到计数、命令以 137 结束时为 false（可能）
+export interface MemoryLimitExceeded {
+  // 上限的可读写法（如 8 GiB）
+  limit: string;
+  certain: boolean;
+}
+
+// 给 agent 与人的同一句：明确报出超出沙箱内存上限及其数值，免得当作普通报错反复重试
+export function memoryLimitText(exceeded: MemoryLimitExceeded): string {
+  return exceeded.certain
+    ? `超出沙箱内存上限 ${exceeded.limit}：命令或它起的进程被内核终止（OOM）。原样重试多半还会被杀，先减少并行度或内存占用`
+    : `可能超出沙箱内存上限 ${exceeded.limit}：命令以退出码 137 结束（被 SIGKILL 终止），读不到容器的内存事件计数，无法确认`;
 }
 
 // 文件清单不跟进的目录，本地与容器实现共用这一份口径。
