@@ -51,7 +51,7 @@
 
 ## 程序状态目录 `.pigeon/state/`
 
-程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、学到的记忆（`learned/` 与 `learned.lock`）、worker 工作树（`worktrees/`）、补做复盘记录（`review-backfill/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（配置确认记录 `config-trust.json`）在 `~/.pigeon/state/`。
+程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、学到的记忆（`learned/` 与 `learned.lock`）、worker 工作树（`worktrees/`）、补做复盘记录（`review-backfill/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（配置确认记录 `config-trust.json`、迁移备份 `migration-backup/`）在 `~/.pigeon/state/`。
 
 人写的内容留在原处：`.pigeon/skills`、`~/.pigeon/skills`、`.pigeon/memory`、`~/.pigeon/preferences.md`。
 
@@ -65,7 +65,7 @@ Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时�
 pigeon migrate-config [--root <项目根>]
 ```
 
-- 7 个旧配置文件各成一节写入设置：`permissions` 写项目个人 `.pigeon/settings.local.json`，其余写项目共享 `.pigeon/settings.json`；旧文件挪进 `.pigeon/state/migration-backup/<原名>.bak`（在程序状态目录下，不进快照、不被提交；旧 `web.json` 里可能有 key）。
+- 7 个旧配置文件各成一节写入设置：`permissions` 写项目个人 `.pigeon/settings.local.json`，其余写项目共享 `.pigeon/settings.json`；处理过的旧文件一律挪出仓库，原名原文放进用户级 `~/.pigeon/state/migration-backup/<项目目录名>-<哈希>/`（按项目的规范化路径分目录），迁移结束打印这个位置；仓库里不留备份（旧 `web.json` 里可能有 key，留在仓库里会进快照、沙箱容器与 worker 工作树，也可能被提交）。要取回 key 时从备份里找，改设为环境变量。
 - 每次迁移都确保 `.pigeon/.gitignore`。
 - `web.json` 里的 key 不写入，打印应设的环境变量名。
 - 旧位置的程序状态移入 `.pigeon/state/`；worker 工作树用 `git worktree move` 移动。

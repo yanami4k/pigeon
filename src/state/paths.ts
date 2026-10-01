@@ -8,6 +8,7 @@
 // - 旧布局（迁移命令与启动检查用）：7 个旧配置文件与旧位置的程序状态。
 import { homedir } from "node:os";
 import path from "node:path";
+import { sha256Hex } from "./hashing.ts";
 
 // 目录名本身（只此一处字面量）
 export const PIGEON_DIR = ".pigeon";
@@ -71,16 +72,6 @@ export function worktreesDirOf(root: string): string {
 
 export function reviewBackfillDirOf(root: string): string {
   return path.join(projectStateDir(root), "review-backfill");
-}
-
-// 迁移备份（决策 325）：迁移命令挪走的旧文件一律放这里（在程序状态目录下，不进快照、不被提交；旧 web.json 里可能有 key）
-export function migrationBackupDirOf(root: string): string {
-  return path.join(projectStateDir(root), "migration-backup");
-}
-
-// 某个旧文件（相对 .pigeon 的名字）的备份位置
-export function migrationBackupPathOf(root: string, name: string): string {
-  return path.join(migrationBackupDirOf(root), `${name}.bak`);
 }
 
 export function promptHistoryPathOf(root: string): string {
@@ -150,6 +141,17 @@ export function userSettingsPath(homeDir: string = homedir()): string {
 
 export function userStateDir(homeDir: string = homedir()): string {
   return path.join(homeDir, PIGEON_DIR, STATE_DIR);
+}
+
+// 迁移备份（决策 341）：迁移命令挪走的旧文件放在用户级程序状态下按项目分开的目录，仓库里不留备份（旧 web.json 里可能有 key）。
+// 目录名取项目目录名加规范化路径的 sha256 前 12 位：同名项目不相撞，人也认得出是哪个项目。规范化由调用方做
+export function migrationBackupDirOf(normalizedRoot: string, homeDir: string = homedir()): string {
+  const name = path.basename(normalizedRoot).replace(/[^\p{L}\p{N}._-]/gu, "_") || "root";
+  return path.join(
+    userStateDir(homeDir),
+    "migration-backup",
+    `${name}-${sha256Hex(normalizedRoot).slice(0, 12)}`
+  );
 }
 
 // 会执行命令的配置的内容指纹记录（决策 326 ③）
