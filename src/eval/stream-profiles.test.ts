@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { clearMarkedProcesses } from "./stream-agents.ts";
 import {
@@ -620,7 +621,9 @@ test("人的 pytest 配置以 root 写到容器里 agent 不可写的位置（/o
     const calls = readFileSync(log, "utf8")
       .split("\n")
       .filter((l) => l !== "")
-      .map((l) => JSON.parse(l) as string[]);
+      .map((l) => JSON.parse(l) as string[])
+      // 探测容器有无 timeout 的调用（决策 335）不算
+      .filter((c) => !c.some((a) => a.includes(TIMEOUT_PROBE_SCRIPT)));
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-i", "-u", "0"]);
     assert.ok(calls[0]?.join(" ").includes("/opt/stream/human-pytest"));

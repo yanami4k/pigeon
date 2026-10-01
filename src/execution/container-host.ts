@@ -143,6 +143,8 @@ export interface HelperResult {
   exitCode: number | null;
   stdout: Buffer;
   stderr: string;
+  // 到了限时：容器内 timeout 终止了命令，或客户端被兜底杀掉
+  timedOut?: boolean;
 }
 
 export function createContainerWorkspaceHost(options: ContainerHostOptions): WorkspaceHost {
@@ -153,20 +155,31 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     "-e",
     `${key}=${value}`,
   ]);
-  const execArgs = (interactive: boolean, command: readonly string[]): string[] => [
-    ...dockerPrefix,
-    "exec",
+  const docker = [dockerProgram, ...dockerPrefix];
+  const execFlags = (interactive: boolean): string[] => [
     ...(interactive ? ["-i"] : []),
     "-w",
     root,
     ...envArgs,
+  ];
+  const execArgs = (interactive: boolean, command: readonly string[]): string[] => [
+    ...dockerPrefix,
+    "exec",
+    ...execFlags(interactive),
     options.container,
     ...command,
   ];
 
-  // 辅助调用：输出整体收下（文件内容、解析结果）
-  const helper = (args: string[], input?: string): Promise<HelperResult> =>
-    dockerOnce([dockerProgram], args, helperTimeoutMs, input);
+  // 辅助调用：输出整体收下（文件内容、解析结果）；容器内以 timeout 限时（决策 335，见 containerHelperExec）
+  const helper = (interactive: boolean, command: readonly string[], input?: string) =>
+    containerHelperExec({
+      docker,
+      container: options.container,
+      flags: execFlags(interactive),
+      command,
+      timeoutMs: helperTimeoutMs,
+      ...(input !== undefined ? { stdin: input } : {}),
+    });
 
   const daemonFailure = (result: { exitCode: number | null; stderr: string }): boolean =>
     result.exitCode === null ||
@@ -200,7 +213,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
   const resolveRoot = async (): Promise<string> => {
     if (realRoot === undefined) {
-      const result = await helper(execArgs(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", root]));
+      const result = await helper(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", root]);
       realRoot = checkResolved(root, result, result.stdout.toString("utf8"), undefined);
     }
     return realRoot;
@@ -209,7 +222,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   // 在工作区根执行一个辅助命令，失败即抛环境错误；返回标准输出
   // 执行端自己的命令（取起点、还原受保护文件）：以固定 PATH 执行，不经过 agent 能改指的链接
   const must = async (command: string[], what: string): Promise<Buffer> => {
-    const result = await helper(execArgs(false, trustedCommand(command)));
+    const result = await helper(false, trustedCommand(command));
     if (daemonFailure(result)) {
       throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
     }
@@ -219,26 +232,19 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     return result.stdout;
   };
 
-  const restart = async (): Promise<void> => {
-    const result = await helper([...dockerPrefix, "restart", "-t", "0", options.container]);
-    if (result.exitCode !== 0) {
-      throw new ContainerHostError(`容器重启失败：${result.stderr.trim()}`);
-    }
-  };
+  const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
 
   return {
     platform: "linux",
     root,
     async resolveExisting(inputPath) {
       const base = await resolveRoot();
-      const result = await helper(execArgs(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", inputPath]));
+      const result = await helper(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", inputPath]);
       return checkResolved(inputPath, result, result.stdout.toString("utf8"), base);
     },
     async resolveForWrite(inputPath) {
       const base = await resolveRoot();
-      const result = await helper(
-        execArgs(false, trustedShell(RESOLVE_FOR_WRITE_SCRIPT, inputPath))
-      );
+      const result = await helper(false, trustedShell(RESOLVE_FOR_WRITE_SCRIPT, inputPath));
       const stdout = result.stdout.toString("utf8");
       if (result.exitCode === EXIT_SYMLINK) {
         throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
@@ -246,14 +252,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return checkResolved(inputPath, result, stdout, base);
     },
     async isFile(resolvedPath) {
-      const result = await helper(execArgs(false, ["test", "-f", resolvedPath]));
+      const result = await helper(false, ["test", "-f", resolvedPath]);
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
       }
       return result.exitCode === 0;
     },
     async readText(resolvedPath) {
-      const result = await helper(execArgs(false, ["cat", "--", resolvedPath]));
+      const result = await helper(false, ["cat", "--", resolvedPath]);
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`读取失败：${resolvedPath}（${result.stderr.trim()}）`);
       }
@@ -261,10 +267,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     },
     async writeText(resolvedPath, content) {
       // 截断重写同一个文件：权限与属主不变；写入前复核路径（决策 334）
-      const result = await helper(
-        execArgs(true, trustedShell(WRITE_SCRIPT, resolvedPath)),
-        content
-      );
+      const result = await helper(true, trustedShell(WRITE_SCRIPT, resolvedPath), content);
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
       }
@@ -394,7 +397,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const script =
         `find . \\( ${pruned} \\) -prune -o -type f ` +
         `-exec stat -c '%n\t%s:%y' {} + | head -n ${limit + 1}`;
-      const result = await helper(execArgs(false, ["sh", "-c", script]));
+      const result = await helper(false, ["sh", "-c", script]);
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
       }
@@ -502,7 +505,11 @@ export function dockerOnce(
     }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error) => {
@@ -515,14 +522,138 @@ export function dockerOnce(
         exitCode: code,
         stdout: Buffer.concat(stdout),
         stderr: Buffer.concat(stderr).toString("utf8"),
+        ...(killed ? { timedOut: true } : {}),
       });
     });
   });
 }
 
+// 决策 335：Pigeon 自己发往容器的辅助命令（路径解析、读写文件、文件清单、快照与交回所用的 git 等）在容器内以 timeout
+// 限时，到时只终止该命令（先 TERM，过 HELPER_KILL_AFTER_S 秒仍在即 KILL），不重启容器，agent 在后台起的进程不受影响；
+// 客户端超时比容器内限时多出 HELPER_CLIENT_GRACE_MS，作兜底。每个容器首次使用时探测有无 timeout（结果缓存在内存里），
+// 没有时退回原做法：客户端到时杀掉，并重启容器（重启终结容器内的全部进程，见文件头 ①）；兜底的客户端超时同样重启。
+const HELPER_KILL_AFTER_S = 2;
+const HELPER_CLIENT_GRACE_MS = 3_000;
+// 探测本身的限时（探测不经 timeout）
+const PROBE_TIMEOUT_MS = 30_000;
+const TIMEOUT_EXIT_CODES: readonly number[] = [124, 137, 143];
+// 探测脚本（测试据它认出探测调用）
+export const TIMEOUT_PROBE_SCRIPT = "command -v timeout";
+// 容器 → timeout 的绝对路径（没有为 undefined）；键为 docker 调用前缀与容器名，容器起停时作废
+const timeoutCommands = new Map<string, string | undefined>();
+
+function probeKey(docker: readonly string[], container: string): string {
+  return JSON.stringify([docker, container]);
+}
+
+export function forgetContainerProbe(docker: readonly string[], container: string): void {
+  timeoutCommands.delete(probeKey(docker, container));
+}
+
+// 容器里 timeout 的绝对路径：以固定 PATH 从系统目录解析（不经 agent 能改指的链接）；探测不成（容器不可用等）不缓存
+async function containerTimeoutCommand(
+  docker: readonly string[],
+  container: string
+): Promise<string | undefined> {
+  const key = probeKey(docker, container);
+  if (timeoutCommands.has(key)) {
+    return timeoutCommands.get(key);
+  }
+  const result = await dockerOnce(
+    docker,
+    ["exec", container, ...trustedShell(TIMEOUT_PROBE_SCRIPT)],
+    PROBE_TIMEOUT_MS
+  );
+  const found = result.stdout.toString("utf8").trim();
+  if (result.exitCode === 0 && found.startsWith("/")) {
+    timeoutCommands.set(key, found);
+    return found;
+  }
+  // command -v 找不到时退出码非零；守护进程层面的失败与探测超时不算"没有"，下次再探
+  if (
+    result.timedOut !== true &&
+    !/^(Error response from daemon|Cannot connect to)/m.test(result.stderr)
+  ) {
+    timeoutCommands.set(key, undefined);
+  }
+  return undefined;
+}
+
+// 重启容器：终结容器内的全部进程，可写层保留
+export async function restartContainer(
+  docker: readonly string[],
+  container: string,
+  timeoutMs: number = DEFAULT_HELPER_TIMEOUT_MS
+): Promise<void> {
+  const result = await dockerOnce(docker, ["restart", "-t", "0", container], timeoutMs);
+  if (result.exitCode !== 0) {
+    throw new ContainerHostError(`容器重启失败：${result.stderr.trim()}`);
+  }
+}
+
+// 在容器内执行一条辅助命令（flags 为 exec 与容器名之间的参数：-i、-u、-w、-e 等）
+export async function containerHelperExec(input: {
+  docker: readonly string[];
+  container: string;
+  flags: readonly string[];
+  command: readonly string[];
+  timeoutMs: number;
+  stdin?: string | Buffer;
+}): Promise<HelperResult> {
+  const timeoutCommand = await containerTimeoutCommand(input.docker, input.container);
+  const seconds = Math.max(1, Math.ceil(input.timeoutMs / 1000));
+  // 经 /bin/sh 起 timeout（$0 为其绝对路径）：命令自己的环境与 PATH 照旧
+  const command =
+    timeoutCommand === undefined
+      ? input.command
+      : [
+          "/bin/sh",
+          "-c",
+          `exec "$0" -k ${HELPER_KILL_AFTER_S} ${seconds} "$@"`,
+          timeoutCommand,
+          ...input.command,
+        ];
+  const clientTimeoutMs =
+    timeoutCommand === undefined
+      ? input.timeoutMs
+      : (seconds + HELPER_KILL_AFTER_S) * 1000 + HELPER_CLIENT_GRACE_MS;
+  const startedAt = Date.now();
+  const result = await dockerOnce(
+    input.docker,
+    ["exec", ...input.flags, input.container, ...command],
+    clientTimeoutMs,
+    input.stdin
+  );
+  if (result.timedOut === true) {
+    // 客户端被杀：容器内的命令可能还在，重启容器杀干净
+    let note = `辅助命令超过 ${Math.round(clientTimeoutMs / 1000)} 秒未结束，已重启容器`;
+    try {
+      await restartContainer(input.docker, input.container);
+    } catch (error) {
+      note = `辅助命令超过 ${Math.round(clientTimeoutMs / 1000)} 秒未结束，${error instanceof Error ? error.message : String(error)}`;
+    }
+    return { ...result, stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}${note}` };
+  }
+  // timeout 到时的退出码：GNU 为 124（TERM 后结束）或 137（KILL），busybox 为被信号终止的 143 或 137；
+  // 以实际耗时佐证，免得把命令自己的同值退出码当成超时
+  if (
+    timeoutCommand !== undefined &&
+    TIMEOUT_EXIT_CODES.includes(result.exitCode ?? -1) &&
+    Date.now() - startedAt >= seconds * 1000
+  ) {
+    return {
+      ...result,
+      timedOut: true,
+      stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}辅助命令超过 ${seconds} 秒，已在容器内终止`,
+    };
+  }
+  return result;
+}
+
 // 起一个常驻容器当工作区：主进程只负责占位（--init 让 1 号进程回收孤儿），活都经 exec 进去干
 export async function startWorkspaceContainer(options: StartContainerOptions): Promise<void> {
   const docker = options.docker ?? ["docker"];
+  forgetContainerProbe(docker, options.name);
   const result = await dockerOnce(
     docker,
     [
@@ -549,6 +680,7 @@ export async function removeWorkspaceContainer(
   name: string,
   docker: readonly string[] = ["docker"]
 ): Promise<void> {
+  forgetContainerProbe(docker, name);
   const result = await dockerOnce(docker, ["rm", "-f", name], 120_000);
   if (result.exitCode !== 0 && !/No such container/i.test(result.stderr)) {
     throw new ContainerHostError(`容器移除失败（${name}）：${result.stderr.trim()}`);
@@ -586,24 +718,31 @@ export async function containerExec(input: {
   stdin?: string | Buffer;
   // 以哪个用户执行（缺省为镜像的用户）
   user?: string;
-}): Promise<{ exitCode: number | null; stdout: string; stdoutBytes: Buffer; stderr: string }> {
-  const result = await dockerOnce(
-    input.docker ?? ["docker"],
-    [
-      "exec",
+}): Promise<{
+  exitCode: number | null;
+  stdout: string;
+  stdoutBytes: Buffer;
+  stderr: string;
+  timedOut: boolean;
+}> {
+  // 决策 335：容器内以 timeout 限时，到时只终止该命令
+  const result = await containerHelperExec({
+    docker: input.docker ?? ["docker"],
+    container: input.container,
+    flags: [
       ...(input.stdin !== undefined ? ["-i"] : []),
       ...(input.user !== undefined ? ["-u", input.user] : []),
       ...(input.workdir !== undefined ? ["-w", input.workdir] : []),
-      input.container,
-      ...input.command,
     ],
-    input.timeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS,
-    input.stdin
-  );
+    command: input.command,
+    timeoutMs: input.timeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS,
+    ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
+  });
   return {
     exitCode: result.exitCode,
     stdout: result.stdout.toString("utf8"),
     stdoutBytes: result.stdout,
     stderr: result.stderr,
+    timedOut: result.timedOut === true,
   };
 }

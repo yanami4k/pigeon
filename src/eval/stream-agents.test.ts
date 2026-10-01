@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { listSessionFiles } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
@@ -1278,10 +1279,12 @@ test("Pigeon agent：这一步在容器里执行的每条命令都带本步标�
       const kills = calls.filter((a) => a.some((x) => x.includes("PIGEON_STEP_MARKER=$1")));
       const marker = kills[0]?.at(-1) ?? "";
       assert.match(marker, /^pigeon-step-[0-9a-f]{16}$/, `${what}：清理按本步标记`);
-      // 跑批器自己的收尾（清进程、清残留的 git 锁文件）不算这一步执行的命令
+      // 跑批器自己的收尾（清进程、清残留的 git 锁文件）与探测容器有无 timeout（决策 335）不算这一步执行的命令
       const work = calls.filter(
         (a) =>
-          a[0] === "exec" && !kills.includes(a) && !a.some((x) => x.includes(".git/index.lock"))
+          a[0] === "exec" &&
+          !kills.includes(a) &&
+          !a.some((x) => x.includes(".git/index.lock") || x.includes(TIMEOUT_PROBE_SCRIPT))
       );
       assert.ok(work.length > 0, `${what}：这一步在容器里执行过命令`);
       for (const a of work) {
