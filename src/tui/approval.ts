@@ -109,15 +109,21 @@ export function approvalBlockText(
   if (request.diffPreview !== undefined) {
     lines.push("改动预览：", request.diffPreview);
   }
-  const scriptKey = request.script?.kind !== undefined ? ` / ${SCRIPT_KIND_KEY_LABEL}` : "";
+  const scriptKey =
+    request.script?.kind !== undefined && request.protectedPath === undefined
+      ? ` / ${SCRIPT_KIND_KEY_LABEL}`
+      : "";
   lines.push(
-    (request.host !== undefined
-      ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${hostGrantKeyLabel(request)}`
-      : request.tier === "exec"
-        ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
-        : directoryGrant
-          ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
-          : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许") + scriptKey
+    // 决策 326 ①：受保护路径的请示只有批准一次或拒绝，不提供放权键与"同类都允许"
+    (request.protectedPath !== undefined
+      ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明"
+      : request.host !== undefined
+        ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${hostGrantKeyLabel(request)}`
+        : request.tier === "exec"
+          ? `批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / ${execGrantKeyLabel(request)}`
+          : directoryGrant
+            ? "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许 / [d] 本会话允许(仅限当前调用所在目录)"
+            : "批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明 / [a] 本会话允许") + scriptKey
   );
   return lines.join("\n");
 }
@@ -152,6 +158,14 @@ export function createTuiApprovalHandler(
     if (result.key === "cancel") {
       panel.noteApproval(`审批结果：人工拒绝（${result.reason}）`);
       return { approved: false, reason: result.reason };
+    }
+    // 受保护路径：面板不收放权键；万一收到按批准一次处理，不建放权
+    if (
+      request.protectedPath !== undefined &&
+      (result.key === "a" || result.key === "d" || result.key === "s")
+    ) {
+      panel.noteApproval(verdictLine("approved", "human"));
+      return { approved: true };
     }
     if (result.key === "a" || result.key === "d") {
       // 与 cli 版同一份放权作用域（approvals/handler.ts grantScopeFor）

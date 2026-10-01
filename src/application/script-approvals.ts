@@ -54,8 +54,9 @@ function commandKind(command: string, needsShell: boolean): ScriptApprovalKind |
   return { key: `command\n${head}`, text: `跑命令 ${head}` };
 }
 
-// 一个请求的同类；高危或说不清的给 undefined（面板不提供 [s]）
+// 一个请求的同类；高危或说不清的给 undefined（面板不提供 [s]）。写受保护路径（决策 326 ①）的请示没有同类：逐次批准
 export function scriptApprovalKind(request: ApprovalRequest): ScriptApprovalKind | undefined {
+  if (request.protectedPath !== undefined) return undefined;
   const args = request.args as { command?: unknown; path?: unknown } | undefined;
   if (request.command !== undefined || typeof args?.command === "string") {
     return commandKind(request.command ?? String(args?.command ?? ""), request.needsShell === true);

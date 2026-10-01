@@ -172,9 +172,7 @@ export function createHostProtectedPathResolver(host: {
   };
   return async (target) => {
     if (target === "") return undefined;
-    const lexical = posix.isAbsolute(target)
-      ? posix.normalize(target)
-      : posix.join(root, target);
+    const lexical = posix.isAbsolute(target) ? posix.normalize(target) : posix.join(root, target);
     const byName = under(posix.join(root, PIGEON_DIR), lexical);
     if (byName !== undefined) return display(byName);
     // 逐层向上找最深的已存在一层，经执行端解析后拼回其余部分

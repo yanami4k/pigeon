@@ -105,10 +105,7 @@ import {
   WAIT_WORKERS_TOOL,
   WORKER_STATUS_TOOL,
 } from "./orchestration-tools.ts";
-import {
-  createHostProtectedPathResolver,
-  createProtectedPathResolver,
-} from "./protected-paths.ts";
+import { createHostProtectedPathResolver, createProtectedPathResolver } from "./protected-paths.ts";
 import {
   createOrchestrateTool,
   ORCHESTRATE_TOOL,
