@@ -121,7 +121,7 @@ import {
 } from "./resume-view.ts";
 import { type PickerKey, SessionPicker } from "./session-picker.ts";
 import { familyKindLabel, SessionTree } from "./session-tree.ts";
-import { type BackfillStatus, StatusBar } from "./status-bar.ts";
+import { StatusBar } from "./status-bar.ts";
 import { WorkerActivityTracker } from "./worker-activity.ts";
 import {
   hasFadingWorkers,
@@ -765,13 +765,7 @@ export class PigeonTuiShell
     this.refreshCost();
   }
 
-  // 后台补做复盘的进度（283、284）：状态栏显示第几个、共几个、花了多少；undefined 即不再显示
-  setBackfillProgress(progress: BackfillStatus | undefined): void {
-    this.statusBar.update({ backfill: progress });
-    this.tui.requestRender();
-  }
-
-  // 运行期告警（复盘、压缩、会话存储、工作区快照等）：终端界面运行期间落消息区，文案与去重由告警方负责
+  // 运行期告警（压缩、会话存储、工作区快照等）：终端界面运行期间落消息区，文案与去重由告警方负责
   addWarning(line: string): void {
     this.flow.addSystem(line);
     this.tui.requestRender();

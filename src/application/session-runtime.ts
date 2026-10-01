@@ -5,7 +5,7 @@
 // cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
-// 决策 286：运行期告警（会话存储、压缩前复盘、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
+// 决策 286：运行期告警（会话存储、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
 // 不给即照旧写标准错误输出（逐行对话与其余调用方不变）。
 
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
@@ -14,7 +14,6 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
-import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { storeAttemptLabel } from "../state/session-judge.ts";
@@ -24,7 +23,6 @@ import { type AttemptVerification, attachAttemptVerification } from "./attempt-v
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { runRetryOnFail } from "./fork.ts";
 import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
-import type { ReviewModelChoice } from "./memory-review.ts";
 import {
   buildRuntime,
   disposeRuntime,
@@ -53,41 +51,24 @@ export interface SessionRuntimeFlags {
   // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）与学到的记忆的总量上限
   pushedMemory?: boolean;
   memoryLimitChars?: number;
-  // 决策 296：复盘模型（日常入口读 .pigeon/memory-review.json 给出；没指定即缺省）
-  reviewModel?: ReviewModelChoice;
 }
 
-// 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省；打转检测按设定挂上，308）
-function interactiveLearnedMemory(
-  flags: SessionRuntimeFlags,
-  warn?: WarnSink,
-  loopGuard?: LoopGuardSettings
-): LearnedMemoryConfig | undefined {
+// 交互会话的推送记忆配置：{冲突处理} 填交互版
+function interactiveLearnedMemory(flags: SessionRuntimeFlags): LearnedMemoryConfig | undefined {
   return flags.pushedMemory === true
     ? {
         conflict: "interactive",
-        ...(warn !== undefined || loopGuard !== undefined
-          ? {
-              review: {
-                ...(warn !== undefined ? { warn } : {}),
-                ...(loopGuard !== undefined ? { loopGuard } : {}),
-              },
-            }
-          : {}),
         ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
-        ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
       }
     : undefined;
 }
 
-// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关、上限与复盘模型
+// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关与上限
 export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
   pushedMemory?: boolean;
   memoryLimitChars?: number;
-  reviewModel?: ReviewModelChoice;
 } {
   return {
-    ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
     ...(flags.pushedMemory === true ? { pushedMemory: true } : {}),
     ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
   };
@@ -129,8 +110,6 @@ export interface OpenSessionRuntimeRequest {
   webTools?: WebToolsConfig;
   // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
   warn?: WarnSink;
-  // 决策 308：打转检测设定——此处只给压缩前复盘挂上；主 agent 由入口自己挂（叫停后的交代各入口不同）
-  loopGuard?: LoopGuardSettings;
 }
 
 export interface OpenedSessionRuntime {
@@ -202,7 +181,7 @@ export async function openSessionRuntime(
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
   });
-  const learnedMemory = interactiveLearnedMemory(request.flags, request.warn, request.loopGuard);
+  const learnedMemory = interactiveLearnedMemory(request.flags);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker

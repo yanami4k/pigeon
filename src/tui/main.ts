@@ -4,7 +4,6 @@ import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createSessionAttemptRunner } from "../application/attempt-group.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import {
-  applyReviewModelConfig,
   type LaunchFlags,
   orchestrationSettingsOf,
   parseLaunchFlags,
@@ -13,7 +12,6 @@ import {
   webToolsEnabled,
 } from "../application/launch-flags.ts";
 import { promptHistoryStore } from "../application/prompt-history.ts";
-import { type BackfillProgress, runReviewBackfill } from "../application/review-backfill.ts";
 import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
 import {
   closeSandbox,
@@ -42,7 +40,7 @@ import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
 import { renderTaskList } from "../application/task-list-tool.ts";
-import { closeTuiSession, recordTuiExit } from "../application/tui-exit.ts";
+import { closeTuiSession } from "../application/tui-exit.ts";
 import { resolveWebTools } from "../application/web-tools.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
@@ -55,7 +53,6 @@ import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { tuiLogDirOf } from "../state/paths.ts";
 import { loopGuardSettingsOf, webSectionOf } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
-import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
 import { guardTuiAgent } from "./loop-guard-view.ts";
 import { PigeonTuiShell, type TuiShellOptions, type TuiWorkersFace } from "./shell.ts";
@@ -63,8 +60,6 @@ import { switchableWarn } from "./warn-sink.ts";
 
 // 退出时等 worker 收尾记录落盘的上限（毫秒）：超时仍退出，缺 settled 由冷侧如实标注
 const WORKER_SHUTDOWN_GRACE_MS = 5000;
-// 退出时等后台补做中止收尾（交还租约、删临时工作树）的上限（毫秒）：超时仍退出，租约到期后自然失效
-const BACKFILL_SHUTDOWN_GRACE_MS = 2000;
 
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
@@ -116,8 +111,6 @@ async function main(argv: string[]): Promise<void> {
   const orchestration = orchestrationSettingsOf(flags, settings);
   // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
   const loopGuard = loopGuardSettingsOf(settings);
-  // 决策 296：复盘模型（配置里指定时，压缩前、收尾、补做三种复盘都用它）
-  applyReviewModelConfig(flags, workspaceRoot);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
   const webTools = webToolsEnabled(flags)
     ? resolveWebTools({ config: webSectionOf(settings) })
@@ -303,7 +296,6 @@ async function main(argv: string[]): Promise<void> {
     taskList: orchestration.taskList,
     ...webToolsOption,
     warn,
-    loopGuard,
     createApprovalHandler: createHandler,
     // 决策 183、286：--continue / --resume <id> 直接续接——还原对话上下文
     ...(resumed ? { resume: true } : {}),
@@ -398,7 +390,6 @@ async function main(argv: string[]): Promise<void> {
           taskList: orchestration.taskList,
           ...webToolsOption,
           warn,
-          loopGuard,
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,
@@ -408,12 +399,8 @@ async function main(argv: string[]): Promise<void> {
         const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
         slot = { sessionId: targetId, bundle, workers };
-        // 换走的会话在本进程里到此结束：释放后同样记下退出快照（283），供之后补做复盘读代码
-        void disposeRuntime(previous.bundle)
-          .then(() =>
-            recordTuiExit({ governanceRoot: workspaceRoot, sessionId: previous.sessionId })
-          )
-          .catch(() => {});
+        // 换走的会话在本进程里到此结束
+        void disposeRuntime(previous.bundle).catch(() => {});
         return {
           runtime: bundle.adapter,
           grants: {
@@ -436,60 +423,13 @@ async function main(argv: string[]): Promise<void> {
   } else if (target.picker) {
     shell.openSessionPicker();
   }
-  // 决策 283、284：启动后在后台静默补做未复盘的会话，不挡输入；进度在状态栏（286），消息区只留失败与全部补完各一行。
-  // 推送记忆关着时不补
-  const backfillStop = new AbortController();
-  let backfillLast: BackfillProgress | undefined;
-  const backfillDone: Promise<unknown> = flags.pushedMemory
-    ? new Promise((resolve) => setTimeout(resolve, 0))
-        .then(() =>
-          runReviewBackfill({
-            governanceRoot: workspaceRoot,
-            currentSessionId: sessionId,
-            streamFn,
-            provider: flags.provider,
-            modelId: flags.modelId,
-            persistThinking: flags.persistThinking,
-            ...(flags.thinkingLevel !== undefined ? { thinkingLevel: flags.thinkingLevel } : {}),
-            ...(flags.memoryLimitChars !== undefined
-              ? { memoryLimitChars: flags.memoryLimitChars }
-              : {}),
-            ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
-            loopGuard,
-            abortSignal: backfillStop.signal,
-            warn,
-            observe: (progress) => {
-              backfillLast = progress;
-              shell.setBackfillProgress(backfillStatusOf(progress));
-            },
-          })
-        )
-        .then((summary) => {
-          shell.setBackfillProgress(undefined);
-          const line = backfillSummaryLine(summary, backfillLast);
-          if (line !== undefined) shell.addSystem(line);
-          shell.render();
-        })
-        .catch((error: unknown) => {
-          shell.addSystem(
-            `后台补做复盘没有进行：${error instanceof Error ? error.message : String(error)}`
-          );
-          shell.render();
-        })
-    : Promise.resolve();
-  // 进程级退出（283）：不复盘、立即收尾——叫停后台补做（在途的复盘中止，等它交还租约、删掉临时工作树，有上限），
-  // 取消在跑的 worker 并等其收尾记录落盘（有上限），释放当前运行面，沙箱会话交回，记下退出快照，退进程。
+  // 进程级退出（283）：立即收尾——取消在跑的 worker 并等其收尾记录落盘（有上限），释放当前运行面，沙箱会话交回，退进程。
   // 壳已停止，worker 排队中的审批按拒绝处理，不会吊住取消
   function release(): void {
     const current = slot;
     // 壳已停：此后的告警写回标准错误输出
     warnSink.detach();
-    backfillStop.abort();
     void (async () => {
-      await Promise.race([
-        backfillDone,
-        new Promise((resolve) => setTimeout(resolve, BACKFILL_SHUTDOWN_GRACE_MS)),
-      ]);
       await closeTuiSession({
         governanceRoot: workspaceRoot,
         sessionId: current.sessionId,

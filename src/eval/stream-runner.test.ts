@@ -683,7 +683,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("推送格的复盘（191、192、235）：结果行记复盘事实；复盘花费取复盘前后的计量差单列，agent 的轮数、用量、花费与墙钟都不含复盘；不推送的格子复盘为 null", async () => {
+  test("复盘随决策 331 删除：推送格与不推送的格子复盘字段一律为 null，agent 的轮数、用量与花费即整步的计量", async () => {
     const t = await toy();
     try {
       const zero: GatewayMeter = {
@@ -705,48 +705,20 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
         resetPeak: () => {},
       };
-      const bump = (key: string, by: Partial<GatewayMeter>) => {
-        const m = meters.get(key) ?? zero;
-        meters.set(key, {
-          ...m,
-          requests: m.requests + (by.requests ?? 0),
-          input: m.input + (by.input ?? 0),
-          output: m.output + (by.output ?? 0),
-          costCny: m.costCny + (by.costCny ?? 0),
-          accountRequests: [(m.accountRequests[0] ?? 0) + (by.requests ?? 0)],
-        });
-      };
       const agent = scriptedAgent((input) => {
         const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
         // agent 本身：2 次请求、110 token、0.25 元
-        bump(key, { requests: 2, input: 100, output: 10, costCny: 0.25 });
+        const m = meters.get(key) ?? zero;
+        meters.set(key, {
+          ...m,
+          requests: m.requests + 2,
+          input: m.input + 100,
+          output: m.output + 10,
+          costCny: m.costCny + 0.25,
+          accountRequests: [(m.accountRequests[0] ?? 0) + 2],
+        });
         solve(input);
-        if (!input.condition.pushedMemory) return { wallMs: 50 };
-        // 复盘：跑批器给的计量口在复盘前后各读一次（与 Pigeon 的步 agent 同一做法），做差即复盘的计量
-        assert.ok(input.meter !== undefined);
-        const before = input.meter();
-        bump(key, { requests: 3, input: 40, output: 5, costCny: 0.1 });
-        const after = input.meter();
-        return {
-          wallMs: 50,
-          review: {
-            closing: 1,
-            preCompaction: 1,
-            turns: 99,
-            tokens: 999,
-            wallMs: 20,
-            hitLimit: true,
-            failures: ["压缩前：模拟失败"],
-            meter: {
-              ...zero,
-              requests: after.requests - before.requests,
-              input: after.input - before.input,
-              output: after.output - before.output,
-              costCny: after.costCny - before.costCny,
-              accountRequests: [after.requests - before.requests],
-            },
-          },
-        };
+        return { wallMs: 50 };
       });
       const summary = await runStreams(
         options(t, {
@@ -757,26 +729,15 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         })
       );
       const rows = readStreamResults(summary.resultsFile);
-      const pushed = rows.find((r) => r.condition === "push-only");
-      const plain = rows.find((r) => r.condition === "neither");
-      assert.ok(pushed !== undefined && plain !== undefined);
-      assert.deepEqual(pushed.review, {
-        closing: 1,
-        preCompaction: 1,
-        turns: 3,
-        tokens: 45,
-        wallMs: 20,
-        hitLimit: true,
-        failures: ["压缩前：模拟失败"],
-      });
-      assert.equal(pushed.hitReviewBudget, true);
-      assert.equal(pushed.gateway?.reviewCostCny?.toFixed(6), (0.1).toFixed(6));
-      assert.equal(pushed.gateway?.costCny?.toFixed(6), (0.25).toFixed(6));
-      assert.deepEqual([pushed.turns, pushed.usage.totalTokens, pushed.agentWallMs], [2, 110, 30]);
-      assert.equal(plain.review, null);
-      assert.equal(plain.hitReviewBudget, null);
-      assert.equal(plain.gateway?.reviewCostCny, null);
-      assert.deepEqual([plain.turns, plain.usage.totalTokens, plain.agentWallMs], [2, 110, 50]);
+      for (const condition of ["push-only", "neither"]) {
+        const row = rows.find((r) => r.condition === condition);
+        assert.ok(row !== undefined);
+        assert.equal(row.review, null);
+        assert.equal(row.hitReviewBudget, null);
+        assert.equal(row.gateway?.reviewCostCny, null);
+        assert.equal(row.gateway?.costCny?.toFixed(6), (0.25).toFixed(6));
+        assert.deepEqual([row.turns, row.usage.totalTokens, row.agentWallMs], [2, 110, 50]);
+      }
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

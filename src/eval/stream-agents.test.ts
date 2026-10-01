@@ -552,12 +552,8 @@ for (const condition of ["search-push", "search-only", "push-only", "neither"] a
           verify: FIXED_GATE,
         })
       );
-      // 四格都开回炉：修满 3 轮；推送格另有一次收尾复盘（复盘沿用同一套工具定义）
-      assert.equal(
-        counting.seen.calls,
-        CONDITION_SPECS[condition].pushedMemory ? 9 : 8,
-        "四格都开回炉：修满 3 轮"
-      );
+      // 四格都开回炉：修满 3 轮（复盘随决策 331 删除，推送格不再多一次请求）
+      assert.equal(counting.seen.calls, 8, "四格都开回炉：修满 3 轮");
       assert.equal(counting.seen.peak, 1);
       assert.deepEqual([...counting.seen.tools].sort(), PIGEON_STREAM_TOOLS[condition]);
     } finally {
@@ -1074,18 +1070,8 @@ test("Pigeon agent：推送格打开推送记忆——系统提示带推送段�
         pushed,
         condition
       );
-      if (pushed) {
-        // 干活两次请求，收尾复盘一次
-        assert.equal(inner.calls.length, 3, condition);
-        assert.equal(out.review?.closing, 1);
-        assert.equal(out.review?.preCompaction, 0);
-        assert.deepEqual(out.review?.failures, []);
-        assert.equal(out.review?.meter?.requests, 1);
-        assert.equal(out.review?.meter?.costCny.toFixed(6), (0.01).toFixed(6));
-      } else {
-        assert.equal(inner.calls.length, 2, condition);
-        assert.equal(out.review, undefined);
-      }
+      // 干活两次请求；复盘随决策 331 删除，推送格不再多出复盘请求
+      assert.equal(inner.calls.length, 2, condition);
     } finally {
       ws.cleanup();
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

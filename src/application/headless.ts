@@ -54,8 +54,6 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ...(options.memoryLimitChars !== undefined
         ? { memoryLimitChars: options.memoryLimitChars }
         : {}),
-      ...(options.reviewBudget !== undefined ? { reviewBudget: options.reviewBudget } : {}),
-      ...(options.reviewModel !== undefined ? { reviewModel: options.reviewModel } : {}),
       ...(options.warn !== undefined ? { warn: options.warn } : {}),
       ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
       ...(options.verify !== undefined ? { verify: options.verify } : {}),

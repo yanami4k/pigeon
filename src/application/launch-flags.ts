@@ -5,7 +5,6 @@
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 
 import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
-import { loadMemoryReviewConfig } from "../persistence/review-backfill-store.ts";
 import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { VerifyConfig } from "../state/attempt-config.ts";
@@ -15,7 +14,6 @@ import {
   orchestrationSettingsOf as orchestrationSectionOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
-import { type ReviewModelChoice, reviewModelChoice } from "./memory-review.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
@@ -76,12 +74,10 @@ export interface LaunchFlags {
   // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
   repairRounds?: number;
   // 决策 191、244：推送记忆——日常入口缺省开着（与会话检索开关的缺省一致），--no-pushed-memory 关掉（关掉即不推送、
-  // 不注册记忆工具、不复盘）；--memory-limit <字符数> 学到的记忆的总量上限（缺省 12,000）。cli REPL / resume、tui 与
+  // 不注册记忆工具）；--memory-limit <字符数> 学到的记忆的总量上限（缺省 12,000）。cli REPL / resume、tui 与
   // pigeon run 接受
   pushedMemory: boolean;
   memoryLimitChars?: number;
-  // 决策 296：复盘模型——不是启动参数，由日常入口在准备好工作区后读 .pigeon/memory-review.json 填入（applyReviewModelConfig）
-  reviewModel?: ReviewModelChoice;
   // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
   // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
   compaction?: CompactionConfigInput;
@@ -350,13 +346,4 @@ export function resolveVerifyConfig(
 // 参数给 0 即关闭，压过项目配置；轮数与验证命令分别取来源，缺验证命令时由运行入口启动报错
 export function resolveRepairRounds(flags: LaunchFlags, governanceRoot: string): number {
   return flags.repairRounds ?? loadProjectRepairRounds(governanceRoot) ?? 0;
-}
-
-// 决策 296：日常入口（终端界面、命令行对话与续跑、pigeon run）读复盘配置里的复盘模型填进启动参数；配置畸形响亮失败。
-// 跑批器不经这里，复盘仍用各步本身的模型
-export function applyReviewModelConfig(flags: LaunchFlags, governanceRoot: string): void {
-  const reviewModel = reviewModelChoice(loadMemoryReviewConfig(governanceRoot).reviewModel);
-  if (reviewModel !== undefined) {
-    flags.reviewModel = reviewModel;
-  }
 }

@@ -56,7 +56,6 @@ import {
   buildRuntime,
   disposeRuntime,
   type LearnedMemoryConfig,
-  type ReviewSessionConfig,
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
@@ -90,8 +89,7 @@ export interface WorkerRuntimeDeps {
   // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
   temperature?: number;
   taskDirective?: string;
-  // 决策 191、217：推送记忆——worker 与常驻 Memory 同样处理：父会话开着即带推送段与记忆工具（冲突处理的填法、上限同父会话），
-  // 不做压缩前复盘（压缩前回调只给无父会话的运行面）
+  // 决策 191、217：推送记忆——worker 与常驻 Memory 同样处理：父会话开着即带推送段与记忆工具（冲突处理的填法、上限同父会话）
   learnedMemory?: LearnedMemoryConfig;
   // M6（决策 064 子裁决 ③）：角色的模型接入覆盖列（缺省取 roles.ts 的角色表，第一版四个角色都留空）
   roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
@@ -202,10 +200,8 @@ export function sessionWorkerRuntimeFactory(
     deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
   // 决策 188、218：worker 继承父运行面的压缩配置（显式传入时以传入值为准）；父运行面没给即产品缺省
   const compaction = deps.compaction ?? deps.bundle.adapter.compactionConfig();
-  // 决策 191、217：worker 继承父运行面的推送记忆（开着才带），不做压缩前复盘
-  const parentLearned = deps.learnedMemory ?? deps.bundle.learnedMemory;
-  const learnedMemory =
-    parentLearned !== undefined ? { ...parentLearned, review: false as const } : undefined;
+  // 决策 191、217：worker 继承父运行面的推送记忆（开着才带）
+  const learnedMemory = deps.learnedMemory ?? deps.bundle.learnedMemory;
   return createWorkerRuntimeFactory({
     streamFnFor: () => deps.streamFn,
     provider: deps.provider,
@@ -269,11 +265,10 @@ interface RuntimeSurface {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）；worker 取主会话的配置
   compaction?: CompactionConfigInput;
-  // 决策 192、207：压缩前回调；只有无父会话的运行面会给
+  // 压缩前回调；只有无父会话的运行面会给
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217：推送记忆（在场即开着）；复盘运行面另带复盘设定
+  // 决策 191、217：推送记忆（在场即开着）
   learnedMemory?: LearnedMemoryConfig;
-  reviewSession?: ReviewSessionConfig;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
@@ -479,9 +474,8 @@ export interface DetachedRuntimeRequest {
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217：推送记忆（在场即开着）；复盘运行面另带复盘设定
+  // 决策 191、217：推送记忆（在场即开着）
   learnedMemory?: LearnedMemoryConfig;
-  reviewSession?: ReviewSessionConfig;
   startMcp?: () => Promise<McpSession>;
   // M7（决策 071）：会话级验证命令冻结进注入快照
   verify?: VerifyConfig;
@@ -552,7 +546,6 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       ? { beforeCompaction: surface.beforeCompaction }
       : {}),
     ...(surface.learnedMemory !== undefined ? { learnedMemory: surface.learnedMemory } : {}),
-    ...(surface.reviewSession !== undefined ? { reviewSession: surface.reviewSession } : {}),
     ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
     ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),

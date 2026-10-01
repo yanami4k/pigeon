@@ -36,11 +36,9 @@ export interface StreamRunIdentity {
         maxOutputTokens: number | null;
         // 上下文压缩的实际生效配置（188、218）：没给参数即产品缺省；加这一项之前写下的身份头没有它，续跑即判为不同
         compaction?: CompactionConfig;
-        // 推送记忆（191、221、223、243）：学到的记忆的总量上限（字符）、复盘模板版本与复盘上限，实际生效的值（没给即缺省）；
-        // 与压缩配置同一口径，加这几项之前写下的身份头没有它们，续跑即判为不同
+        // 推送记忆（191、223）：学到的记忆的总量上限（字符），实际生效的值（没给即缺省）；与压缩配置同一口径，
+        // 加这一项之前写下的身份头没有它，续跑即判为不同。复盘模板版本与复盘上限随复盘删除（331）不再记
         memoryLimitChars?: number;
-        reviewTemplate?: string;
-        reviewBudget?: { maxTurns: number; wallClockMs: number };
         // 主 agent 派 worker（265）：实际生效的值（各条件都关掉）；与压缩配置同一口径，加这一项之前写下的身份头没有它，续跑即判为不同
         spawnWorkers?: boolean;
         // 联网工具（291 与 265 的先例）：实际生效的值（各条件都关掉）；同一口径

@@ -7,12 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { ReviewBackfillSummary } from "../application/review-backfill.ts";
-import { emptyCostTally } from "../application/session-cost.ts";
 import { createFixtureSession, spawnFixtureWorker } from "../application/session-store-fixtures.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
-import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { ScriptedRuntime, usageOf } from "./runtime-fixtures.ts";
 import { PigeonTuiShell } from "./shell.ts";
 import { formatCost, statusBarText } from "./status-bar.ts";
@@ -287,79 +284,15 @@ test("本会话运行期间收尾的 worker 花费计入；没收尾的不计", 
   }
 });
 
-test("后台补做进度进状态栏（第几个、共几个、花了多少）；消息区只留失败或全部补完一行", async () => {
-  const { shell, term, cleanup } = makeShell({});
-  try {
-    shell.start();
-    await settle();
-    const cost = { cost: 0.01, pricedTokens: 1000, cny: 0, cnyTokens: 0, unpricedTokens: 0 };
-    shell.setBackfillProgress(
-      backfillStatusOf({ planned: 5, current: 2, completed: 1, failed: 0, cost })
-    );
-    await settle();
-    assert.ok(lastLine(term).includes("backfill 2/5 $0.0100"), lastLine(term));
-    assert.ok(!screenText(term).includes("后台补做复盘"), "进度不进消息区");
-    assert.ok(lastLine(term).includes("cost $0 "), "补做花费不并入本会话");
-    shell.setBackfillProgress(
-      backfillStatusOf({ planned: 5, completed: 5, failed: 0, cost: emptyCostTally() })
-    );
-    await settle();
-    assert.ok(!lastLine(term).includes("backfill"), "不在补时不显示");
-  } finally {
-    cleanup();
-  }
-  const summary = (over: Partial<ReviewBackfillSummary>): ReviewBackfillSummary => ({
-    planned: 2,
-    completed: [],
-    failed: [],
-    stale: [],
-    busy: [],
-    ...over,
-  });
-  const done = [newSessionId(), newSessionId()];
-  const last = {
-    planned: 2,
-    completed: 2,
-    failed: 0,
-    cost: { cost: 0.02, pricedTokens: 10, cny: 0, cnyTokens: 0, unpricedTokens: 0 },
-  };
-  assert.equal(
-    backfillSummaryLine(summary({ completed: done }), last),
-    "后台补做复盘：全部补完（2 个，花费 $0.0200）"
-  );
-  assert.equal(
-    backfillSummaryLine(
-      summary({
-        completed: [done[0] as SessionId],
-        failed: [{ sessionId: done[1] as SessionId, error: "超时" }],
-      }),
-      last
-    ),
-    "后台补做复盘：1 个失败，留待下次启动重试（首个原因：超时）"
-  );
-  assert.equal(backfillSummaryLine(summary({ planned: 0 }), undefined), undefined);
-});
-
-test("窄终端按优先级截断、不折行：先换短写法，再依次去掉补做、模型、花费，上下文用量留到最后", async () => {
+test("窄终端按优先级截断、不折行：先换短写法，再依次去掉模型、花费，上下文用量留到最后", async () => {
   const state = {
     model: "deepseek/deepseek-chat",
     context: { tokens: 50_000, contextWindow: 200_000 },
     cost: { cost: 1.23456, pricedTokens: 1, cny: 0, cnyTokens: 0, unpricedTokens: 0 },
-    backfill: {
-      planned: 5,
-      current: 3,
-      completed: 2,
-      failed: 0,
-      cost: { cost: 0.1, pricedTokens: 1, cny: 0, cnyTokens: 0, unpricedTokens: 0 },
-    },
   };
   assert.equal(
     statusBarText(state, 200),
-    "deepseek/deepseek-chat | ctx 25% (50k/200k) | cost $1.2346 | backfill 3/5 $0.1000"
-  );
-  assert.equal(
-    statusBarText(state, 70),
-    "deepseek/deepseek-chat | ctx 25% | cost $1.23 | backfill 3/5"
+    "deepseek/deepseek-chat | ctx 25% (50k/200k) | cost $1.2346"
   );
   assert.equal(statusBarText(state, 50), "deepseek/deepseek-chat | ctx 25% | cost $1.23");
   assert.equal(statusBarText(state, 30), "ctx 25% | cost $1.23");
