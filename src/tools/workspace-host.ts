@@ -69,9 +69,13 @@ export interface WorkspaceHost {
   readonly root: string;
   // 路径围栏：把模型给的路径解析成工作区内既有目标的规范路径；不存在或解析后越出工作区根抛 WorkspacePathError
   resolveExisting(inputPath: string): Promise<string>;
-  // 以下三个只接受 resolveExisting 返回的规范路径
+  // 写工具用的解析（决策 334）：同 resolveExisting，另在模型给的路径本身是符号链接时拒写（WorkspaceWriteRefusedError），
+  // 报出其指向
+  resolveForWrite(inputPath: string): Promise<string>;
+  // 以下三个只接受 resolveExisting / resolveForWrite 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;
+  // 写入前复核（决策 334）：重新解析须仍得到 resolvedPath 本身，路径变了或目标成了符号链接即拒写（WorkspaceWriteRefusedError）
   writeText(resolvedPath: string, content: string): Promise<void>;
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留
   exec(plan: HostExecPlan, options: HostExecOptions): Promise<HostExecResult>;

@@ -11,7 +11,12 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { createHeadCollector } from "../tools/local-host.ts";
-import { WorkspacePathError, WorkspacePathNotFoundError } from "../tools/paths.ts";
+import {
+  pathChanged,
+  symlinkRefused,
+  WorkspacePathError,
+  WorkspacePathNotFoundError,
+} from "../tools/paths.ts";
 import {
   type HostExecOptions,
   type HostExecPlan,
@@ -121,6 +126,18 @@ export interface ContainerHostOptions {
 const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
 // 路径不存在时辅助脚本用的退出码
 const EXIT_MISSING = 3;
+// 决策 334：要写的文件是符号链接（标准输出为其指向）、写入前重新解析得到别的路径（标准输出为新的解析结果）
+const EXIT_SYMLINK = 5;
+const EXIT_CHANGED = 6;
+// 写工具的解析：模型给的路径本身是符号链接即报出指向，否则同 RESOLVE_SCRIPT
+const RESOLVE_FOR_WRITE_SCRIPT = `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }; [ -e "$1" ] || exit ${EXIT_MISSING}; readlink -f -- "$1"`;
+// 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己
+const WRITE_SCRIPT = [
+  `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }`,
+  `[ -e "$1" ] || exit ${EXIT_MISSING}`,
+  `t="$(readlink -f -- "$1")"; [ "$t" = "$1" ] || { printf '%s\\n' "$t"; exit ${EXIT_CHANGED}; }`,
+  'cat > "$1"',
+].join("\n");
 
 export interface HelperResult {
   exitCode: number | null;
@@ -217,6 +234,17 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const result = await helper(execArgs(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", inputPath]));
       return checkResolved(inputPath, result, result.stdout.toString("utf8"), base);
     },
+    async resolveForWrite(inputPath) {
+      const base = await resolveRoot();
+      const result = await helper(
+        execArgs(false, trustedShell(RESOLVE_FOR_WRITE_SCRIPT, inputPath))
+      );
+      const stdout = result.stdout.toString("utf8");
+      if (result.exitCode === EXIT_SYMLINK) {
+        throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
+      }
+      return checkResolved(inputPath, result, stdout, base);
+    },
     async isFile(resolvedPath) {
       const result = await helper(execArgs(false, ["test", "-f", resolvedPath]));
       if (daemonFailure(result)) {
@@ -232,11 +260,21 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return result.stdout.toString("utf8");
     },
     async writeText(resolvedPath, content) {
-      // 截断重写同一个文件：权限与属主不变
+      // 截断重写同一个文件：权限与属主不变；写入前复核路径（决策 334）
       const result = await helper(
-        execArgs(true, ["sh", "-c", 'cat > "$1"', "sh", resolvedPath]),
+        execArgs(true, trustedShell(WRITE_SCRIPT, resolvedPath)),
         content
       );
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      const stdout = result.stdout.toString("utf8").replace(/\n$/, "");
+      if (result.exitCode === EXIT_SYMLINK) {
+        throw symlinkRefused(resolvedPath, stdout);
+      }
+      if (result.exitCode === EXIT_MISSING || result.exitCode === EXIT_CHANGED) {
+        throw pathChanged(resolvedPath, result.exitCode === EXIT_CHANGED ? stdout : undefined);
+      }
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
       }
