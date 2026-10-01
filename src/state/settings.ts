@@ -5,6 +5,7 @@
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；唯一例外是 permissions 的放权规则三层并集生效。
 // - 响亮失败：顶层或节内的未知键、写在设置里的 key、写在项目级的 trustedDirectories，一律指出文件、键与所在层。
 // 以后各段往 SETTINGS_SECTIONS 里加节（钩子、记忆），合并与未知键检查随之生效。
+import path from "node:path";
 import type { TSchema } from "typebox";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -86,6 +87,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// 信任目录的写法：绝对路径，或 ~ 本身、~/ 开头（展开为用户主目录）
+export function isTrustedDirectoryForm(dir: string): boolean {
+  return dir === "~" || dir.startsWith("~/") || path.isAbsolute(dir);
+}
+
 // typebox 校验失败的逐条说明
 export function schemaProblems(schema: TSchema, value: unknown, prefix: string): string[] {
   return [...Value.Errors(schema, value)].map((failure) => {
@@ -111,6 +117,15 @@ export function validateSettingsLayer(
         problems.push(
           `设置文件 ${where}：${TRUSTED_DIRECTORIES_KEY} 只能写在用户级设置里（项目不能为自己免于确认）`
         );
+      } else if (Array.isArray(raw[key])) {
+        // 只接受绝对路径或 ~ 开头（展开为用户主目录）：相对路径随启动目录而变，免检范围不可预料
+        for (const dir of raw[key] as unknown[]) {
+          if (typeof dir === "string" && !isTrustedDirectoryForm(dir)) {
+            problems.push(
+              `设置文件 ${where}：${TRUSTED_DIRECTORIES_KEY} 里的 ${dir} 不是绝对路径（只接受绝对路径或 ~ 开头）`
+            );
+          }
+        }
       }
       continue;
     }

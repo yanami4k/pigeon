@@ -143,6 +143,13 @@ test("trustedDirectories 只能写在用户级：项目共享与项目个人写�
       /trustedDirectories 只能写在用户级设置里/
     );
   }
+  // 只接受绝对路径或 ~ 开头；相对路径报错
+  valid("user", { trustedDirectories: ["~", "~/code"] });
+  assert.match(
+    problemsOf("user", { trustedDirectories: ["work"] }).join("\n"),
+    /work 不是绝对路径/
+  );
+  assert.match(problemsOf("user", { trustedDirectories: ["./a"] }).join("\n"), /不是绝对路径/);
   const { merged } = snapshotOf({ user: { trustedDirectories: ["/work"] } });
   assert.deepEqual(merged.trustedDirectories, ["/work"]);
 });
