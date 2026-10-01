@@ -369,7 +369,7 @@ async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
     "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
-    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--json]（任务描述缺省从 stdin 读）";
+    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令的配置）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;

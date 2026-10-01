@@ -13,8 +13,10 @@ import {
   ConfigNotConfirmedError,
   confirmSessionConfig,
   openSessionSettings,
+  parseTrustAnswer,
   pendingTrustEntries,
   type TrustChoice,
+  trustPromptText,
 } from "./session-settings.ts";
 
 const made: string[] = [];
@@ -157,4 +159,21 @@ test("无人值守：未确认即报错并逐条列出、说明 --trust-config�
   });
   assert.deepEqual(commandsConfigOf(allowed).commands, { test: "npm test" });
   assert.ok(!existsSync(configTrustPathOf(home)), "放行不记指纹");
+});
+
+test("行内问答：列出每条（来自哪一层、类型、标识、完整命令），a / s / q 三种回答，认不出的再问", () => {
+  const { root, home } = setup();
+  const entries = pendingTrustEntries(loadSettings(root, { homeDir: home }), home);
+  const text = trustPromptText(entries);
+  assert.match(text, /\[项目共享\] 命令短名 test：npm test/);
+  assert.match(text, /\[\.mcp\.json\] MCP 服务 fx：node fx\.js/);
+  assert.match(
+    text,
+    /\[项目共享\] 沙箱配置 sandbox：.*Dockerfile ci\/Dockerfile 内容 sha256 [0-9a-f]{12}/
+  );
+  assert.match(text, /a 全部确认并记下 ｜ s 本次不用这些条目 ｜ q 退出/);
+  assert.equal(parseTrustAnswer(" A "), "trust");
+  assert.equal(parseTrustAnswer("s"), "skip");
+  assert.equal(parseTrustAnswer("q"), "quit");
+  assert.equal(parseTrustAnswer("yes"), undefined);
 });
