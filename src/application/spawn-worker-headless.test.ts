@@ -36,6 +36,8 @@ function repo(files: Record<string, string>): string {
   git(root, ["init", "-q"]);
   git(root, ["config", "user.email", "t@example.com"]);
   git(root, ["config", "user.name", "t"]);
+  // 关掉换行转换：否则全局 core.autocrlf=true 的机器上 worker 工作树检出会把 \n 变成 \r\n
+  git(root, ["config", "core.autocrlf", "false"]);
   writeFileSync(join(root, ".gitignore"), ".pigeon/\n");
   for (const [file, content] of Object.entries(files)) {
     writeFileSync(join(root, file), content);

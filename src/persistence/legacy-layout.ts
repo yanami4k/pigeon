@@ -10,6 +10,7 @@ import {
   legacyConfigPath,
   legacyStatePath,
   pigeonRel,
+  userPigeonRel,
   userPreferencesPath,
 } from "../state/paths.ts";
 
@@ -35,7 +36,7 @@ const REMOVED_LEGACY = [
 ] as const;
 
 // 用户级旧偏好（决策 330：迁移命令改名为 ~/.pigeon/AGENTS.md）；homeDir 缺省时不查用户级
-const USER_PREFERENCES_NAME = "~/.pigeon/preferences.md";
+const USER_PREFERENCES_NAME = userPigeonRel("preferences.md");
 
 export function findLegacyLayout(root: string, options: { homeDir?: string } = {}): LegacyItem[] {
   const items: LegacyItem[] = [];
