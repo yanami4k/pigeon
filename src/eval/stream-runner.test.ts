@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
-import { runHeadless } from "../application/headless.ts";
+import { runHeadless } from "../application/headless-core.ts";
 import { createSessionSearch } from "../memory/session-search.ts";
 import { listSessionFiles, sessionFileName } from "../persistence/session-reader.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -156,7 +156,6 @@ function scriptedAgent(script: Script): StepAgent & { calls: StepAgentInput[] } 
         turns: 3,
         usage: { ...ZERO_USAGE, totalTokens: 100 },
         wallMs: 5,
-        repair: null,
         ...extra,
       };
     },
@@ -287,7 +286,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         score: 1,
         passToPass: { failed: 0, total: 3 },
         solved: true,
-        failedCases: { failToPass: [], passToPass: [], truncated: false },
+        failedCases: { failToPass: [], passToPass: [] },
         excludedFlaky: 0,
       });
       assert.deepEqual(last?.quality, { typeErrors: 0, formatErrors: null, layerViolations: null });
@@ -306,15 +305,11 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         [false, true],
         "第 5 步的容器在第 1 步进行时已预先开好"
       );
-      // 分步验证配置写进作业的治理根，形状与 .pigeon/verify.json 一致
-      assert.deepEqual(
-        JSON.parse(
-          readFileSync(
-            join(t.base, "out", "streams", "tasks-neither-1", ".pigeon", "verify.json"),
-            "utf8"
-          )
-        ),
-        { version: 1, steps: toyRuntime.verifySteps, timeoutMs: 1_800_000 }
+      // 验证门随决策 322/327 删除：作业治理根不再写 verify.json
+      assert.equal(
+        existsSync(join(t.base, "out", "streams", "tasks-neither-1", ".pigeon", "verify.json")),
+        false,
+        "不再写 verify.json"
       );
       // 每步的环境用完即弃
       assert.deepEqual(readdirSync(join(t.base, "envs", "ws")), []);
@@ -383,34 +378,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("回炉最终不通过的题判为失败，记下回炉轮数与结论；下一题仍从人的代码开工，不受它影响", async () => {
-    const t = await toy();
-    try {
-      const agent = scriptedAgent((input) => {
-        const root = input.target.root;
-        if (input.step.seq === 1) {
-          write(root, { "src/a.txt": "wrong\n" });
-          return { repair: { rounds: 2, finalVerdict: "fail" } };
-        }
-        write(root, { "src/b.txt": "beta\n" });
-        return { repair: { rounds: 0, finalVerdict: "pass" } };
-      });
-      const summary = await runStreams(
-        options(t, { agents: { pigeon: agent }, conditions: ["search-only"] })
-      );
-      const rows = readStreamResults(summary.resultsFile);
-      assert.deepEqual(
-        rows.map((r) => [r.seq, r.outcome, r.repairRounds, r.finalVerdict]),
-        [
-          [1, "failed", 2, "fail"],
-          [5, "passed", 0, "pass"],
-        ]
-      );
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
   test("判题的全量运行在报告写出前被杀、一条结果都没拿到：两类用例的分母仍按人这一侧，要做到的与不许挂的全部计为未通过", async () => {
     // a 的测试在 a.txt 写成 wrong 时把跑测试的外壳杀掉：人的代码与起点上都照常出结果，写错了的 agent 代码上整次运行拿不到报告
     const t = await toy(
@@ -419,7 +386,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     try {
       const agent = scriptedAgent((input) => {
         write(input.target.root, { "src/a.txt": "wrong\n" });
-        return { repair: { rounds: 3, finalVerdict: "fail" } };
+        return undefined;
       });
       const summary = await runStreams(
         options(t, { agents: { pigeon: agent }, conditions: ["search-only"], maxSteps: 1 })
@@ -433,7 +400,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       assert.deepEqual(r1?.judging?.failedCases, {
         failToPass: ["src/a.test.sh::case", "src/base.test.sh::case"],
         passToPass: ["src/keep.test.sh::case"],
-        truncated: false,
       });
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -907,15 +873,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           `${ignore}：判题时没有 agent 新建的 conftest`
         );
         assert.deepEqual(atStep5, [], `${ignore}：下一题开工时不在工作区里`);
-        // 回炉前删 conftest 用的人树按起点：人在该步之前的树里的全部路径
-        assert.deepEqual(
-          [...(agent.calls[0]?.humanTree ?? [])].sort(),
-          t.human
-            .tree(agent.calls[0]?.step.parent ?? "")
-            .map((e) => e.path)
-            .sort(),
-          `${ignore}：交给 agent 的人树`
-        );
       } finally {
         rmSync(t.base, { recursive: true, force: true });
       }
@@ -952,32 +909,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       } finally {
         rmSync(t.base, { recursive: true, force: true });
       }
-    }
-  });
-
-  test("交给 agent 的人写测试集按起点：人在该步之前的树里的测试与测试辅助文件，人在该步新写的不在其内", async () => {
-    const t = await toy();
-    try {
-      const runtime: typeof toyRuntime = { ...toyRuntime, autoloadedTestHelper: "conftest.sh" };
-      const agent = scriptedAgent(solve);
-      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
-      assert.deepEqual(
-        agent.calls.map((c) => [
-          c.step.seq,
-          [...(c.humanTestFiles ?? [])].sort(),
-          [...(c.humanTests ?? [])].sort(),
-        ]),
-        [
-          [1, ["src/base.test.sh", "src/keep.test.sh"], ["src/base.test.sh", "src/keep.test.sh"]],
-          [
-            5,
-            ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
-            ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"],
-          ],
-        ]
-      );
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
     }
   });
 
@@ -1302,21 +1233,15 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("条件表（193、194）：四格都是 Pigeon、开 3 轮回炉，按能否检索与有无推送各开关；最简 agent 不开回炉；各条件原样交给 agent", async () => {
+  test("条件表（193、194）：四格都是 Pigeon，按能否检索与有无推送各开关；验证门与回炉随决策 322/327 删除，条件不再有回炉轮数；各条件原样交给 agent", async () => {
     assert.deepEqual(
-      Object.values(CONDITION_SPECS).map((c) => [
-        c.name,
-        c.agent,
-        c.repairRounds,
-        c.sessionSearch,
-        c.pushedMemory,
-      ]),
+      Object.values(CONDITION_SPECS).map((c) => [c.name, c.agent, c.sessionSearch, c.pushedMemory]),
       [
-        ["search-push", "pigeon", 3, true, true],
-        ["search-only", "pigeon", 3, true, false],
-        ["push-only", "pigeon", 3, false, true],
-        ["neither", "pigeon", 3, false, false],
-        ["minimal", "minimal", 0, false, false],
+        ["search-push", "pigeon", true, true],
+        ["search-only", "pigeon", true, false],
+        ["push-only", "pigeon", false, true],
+        ["neither", "pigeon", false, false],
+        ["minimal", "minimal", false, false],
       ]
     );
     const t = await toy();
@@ -1467,73 +1392,12 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("结果行记下验证前还原人写测试的次数：取步结果的 repair.humanTestRestores；未开回炉的条件为 null", async () => {
-    const t = await toy();
-    try {
-      const agent = scriptedAgent((input) => {
-        solve(input);
-        return input.condition.repairRounds > 0
-          ? { repair: { rounds: 1, finalVerdict: "pass", humanTestRestores: 2 } }
-          : undefined;
-      });
-      const summary = await runStreams(
-        options(t, {
-          agents: { pigeon: agent, minimal: agent },
-          conditions: ["search-only", "minimal"],
-          maxSteps: 1,
-          concurrency: 1,
-        })
-      );
-      assert.deepEqual(
-        readStreamResults(summary.resultsFile).map((r) => [r.condition, r.humanTestRestores]),
-        [
-          ["search-only", 2],
-          ["minimal", null],
-        ]
-      );
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
-  test("结果行记下验证工具故障的次数（决策 170 ③）：取步结果的 repair.toolFaults，缺省按 0；未开回炉的条件为 null", async () => {
-    const t = await toy();
-    try {
-      const agent = scriptedAgent((input) => {
-        solve(input);
-        if (input.condition.repairRounds === 0) return undefined;
-        return input.step.seq === 1
-          ? { repair: { rounds: 1, finalVerdict: "pass", toolFaults: 3 } }
-          : { repair: { rounds: 0, finalVerdict: "pass" } };
-      });
-      const summary = await runStreams(
-        options(t, {
-          agents: { pigeon: agent, minimal: agent },
-          conditions: ["search-only", "minimal"],
-          maxSteps: 2,
-          concurrency: 1,
-        })
-      );
-      assert.deepEqual(
-        readStreamResults(summary.resultsFile).map((r) => [r.condition, r.seq, r.verifyToolFaults]),
-        [
-          ["search-only", 1, 3],
-          ["search-only", 5, 0],
-          ["minimal", 1, null],
-          ["minimal", 5, null],
-        ]
-      );
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
   test("空回复异常结束（决策 170 ②）照常判题、留行，不作废重做", async () => {
     const t = await toy();
     try {
       const agent = scriptedAgent((input) => {
         solve(input);
-        return { status: "empty-reply", repair: { rounds: 0, finalVerdict: "fail" } };
+        return { status: "empty-reply" };
       });
       const summary = await runStreams(
         options(t, {
@@ -1673,7 +1537,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
             // 第一步：真实地跑一次 headless，会话留在治理根
             sessionIds.kept = (await headless(kept)).sessionId;
             write(input.target.root, { "src/a.txt": "alpha\n" });
-            return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5, repair: null };
+            return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5 };
           }
           if (calls.length === 2) {
             // 第二步第一次尝试：同一工作区再跑一次 headless，然后报被打断
@@ -1686,7 +1550,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
               turns: 1,
               usage: ZERO_USAGE,
               wallMs: 5,
-              repair: null,
               interrupted: "模型服务故障",
             };
           }
@@ -1695,8 +1558,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
             keptHits: await hitsOf(sessionsDir, kept),
             sessions: listSessionFiles(sessionsDir).map((f) => f.sessionId),
           });
-          solve(input);
-          return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5, repair: null };
+          return { status: "completed", turns: 1, usage: ZERO_USAGE, wallMs: 5 };
         },
       };
       const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
@@ -1928,7 +1790,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
               turns: 1,
               usage: ZERO_USAGE,
               wallMs: 5,
-              repair: null,
             };
             if (calls.length === 1) {
               addQueue(key, 31_000);
@@ -2950,7 +2811,6 @@ test("放行之后、agent 开始之前出错（例如读网关计量失败）�
       turns: 1,
       usage: ZERO_USAGE,
       wallMs: 1,
-      repair: null,
     })),
     /读计量失败/
   );

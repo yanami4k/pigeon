@@ -39,7 +39,6 @@ function snapshot(): InjectionSnapshot {
     memory: [],
     skills: [],
     createdAt: 1700000000000,
-    repairRounds: 2,
   };
 }
 
@@ -117,7 +116,6 @@ test("写会话存储：Run 开始带本次配置与系统提示全文，完整�
   assert.equal(start.runId, result.runId);
   assert.equal(start.systemPrompt, SYSTEM_PROMPT);
   assert.equal(start.taskDirective, "只改需要改的");
-  assert.equal(start.repairRounds, 2);
   assert.deepEqual(start.advertisedTools, ["echo"]);
   assert.deepEqual(start.policy, { allow: ["echo"], deny: [], approvalMode: "yolo" });
   assert.deepEqual(start.model, {

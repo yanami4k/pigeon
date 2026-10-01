@@ -1,5 +1,5 @@
 // 日常沙箱与推送记忆的交汇处（决策 192、207、237、245、252）：沙箱会话开着推送记忆时，收尾顺序为
-// 最后一次验证 → 收尾复盘 → 交回分支 → 删除容器；收尾复盘与压缩前复盘的 read_file 都经同一个容器执行端，复盘不启动 MCP；
+// 收尾复盘 → 交回分支 → 删除容器；收尾复盘与压缩前复盘的 read_file 都经同一个容器执行端，复盘不启动 MCP；
 // update_memory 写宿主治理根下的 .pigeon/state/learned/MEMORY.md，不经容器执行端。容器以假 docker 代替，工作区是真 git 仓库。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -144,7 +144,7 @@ const REVIEW_READS_AND_WRITES: FakeReply[] = [
   { text: "记好了" },
 ];
 
-test("pigeon run --sandbox 开着推送：最后一次验证 → 收尾复盘（容器仍在、read_file 读容器里的文件、不启动 MCP）→ 交回分支 → 删除容器；记忆写在宿主", async () => {
+test("pigeon run --sandbox 开着推送：收尾复盘（容器仍在、read_file 读容器里的文件、不启动 MCP）→ 交回分支 → 删除容器；记忆写在宿主", async () => {
   const repo = makeRepo();
   const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-memory-home-"));
   const fake = fakeSandboxDocker();
@@ -183,7 +183,6 @@ test("pigeon run --sandbox 开着推送：最后一次验证 → 收尾复盘（
         skillRoots: [],
         memoryRoots: [],
         pushedMemory: true,
-        verify: { command: "test -f inside.txt", timeoutMs: 30_000, source: "flag" },
       },
       {
         flags: { sandbox: { network: "on", approval: "yolo" } },
@@ -197,14 +196,13 @@ test("pigeon run --sandbox 开着推送：最后一次验证 → 收尾复盘（
       }
     );
     assert.equal(result.status, "completed", result.errorMessage);
-    assert.equal(result.verification?.verdict, "pass");
     assert.deepEqual(
       (result.reviews ?? []).map((review) => [review.kind, review.status]),
       [["closing", "completed"]]
     );
-    // 最后一次验证在复盘之前：复盘指令里的验证结论是这次验证的结论
+    // 决策 322：验证门已删除，复盘指令里的验证结论一行固定为"本次没有运行验证门"
     const instruction = textOf(reviewCalls[0]?.at(-1));
-    assert.ok(instruction.includes("验证门的最终结论：通过\n"), instruction);
+    assert.ok(instruction.includes("验证门的最终结论：本次没有运行验证门\n"), instruction);
     // 复盘期间容器仍在、还没交回
     assert.ok(seen.length >= 2, "复盘发了两次请求");
     assert.ok(

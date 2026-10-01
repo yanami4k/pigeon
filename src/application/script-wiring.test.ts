@@ -17,7 +17,7 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
-import { runHeadlessOnce } from "./headless-core.ts";
+import { runHeadless } from "./headless-core.ts";
 import { messageLines } from "./history.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import {
@@ -240,7 +240,7 @@ test("pigeon run：任务描述算作点名；脚本的汇总作为新的一轮�
   });
   const worker = createFakeStreamFn({ replies: [{ text: "查完了" }] });
   const texts: string[] = [];
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "把这件事做了",
     governanceRoot: root,
     workspaceRoot: root,
@@ -289,7 +289,7 @@ test("pigeon run 的总额度计入脚本派出的 worker 用的 token：用完�
     ],
   });
   const worker = createFakeStreamFn({ replies: [{ text: "做了", contextTokens: 5000 }] });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "做两步",
     governanceRoot: root,
     workspaceRoot: root,
@@ -309,7 +309,7 @@ test("实验条件不注册提交编排脚本的工具（265）：跑批器各�
   const root = gitRoot();
   for (const spec of Object.values(CONDITION_SPECS).filter((entry) => entry.agent === "pigeon")) {
     let tools: readonly string[] = [];
-    await runHeadlessOnce({
+    await runHeadless({
       task: `看一眼（${SCRIPT_KEYWORD}）`,
       governanceRoot: root,
       workspaceRoot: root,

@@ -17,7 +17,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import { orchestrationSettingsOf as orchestrationSectionOf } from "../state/settings.ts";
-import { runHeadlessOnce } from "./headless-core.ts";
+import { runHeadless } from "./headless-core.ts";
 import { orchestrationSettingsOf, parseLaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
@@ -170,10 +170,10 @@ test("任务清单开关：给了才注册、只给主会话；编排配置缺�
 
 async function headlessTools(
   root: string,
-  options: Partial<Parameters<typeof runHeadlessOnce>[0]>
+  options: Partial<Parameters<typeof runHeadless>[0]>
 ): Promise<readonly string[]> {
   let tools: readonly string[] = [];
-  await runHeadlessOnce({
+  await runHeadless({
     task: "看一眼",
     governanceRoot: root,
     workspaceRoot: root,

@@ -27,7 +27,7 @@ export interface TuiWorkersFace {
   awaitResult(sessionId: SessionId): Promise<WorkerOutcome>;
   // 决策 279：/take <worker 名> 把已收尾 worker 自己的改动叠进工作目录，返回与 take_worker 工具同一套文字；主会话才有
   take?(name: string): Promise<string>;
-  // M7（决策 069）：并行派发同一任务的 N 个尝试，各自收尾后验证，全部收尾后交回各尝试的标签；主会话才有
+  // M7（决策 069）：并行派发同一任务的 N 个尝试，全部收尾后交回各份的结果（322：不再贴标签）；主会话才有
   spawnAttempts?(request: {
     role: string;
     task: string;

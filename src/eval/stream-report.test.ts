@@ -21,7 +21,7 @@ function line(
       score: total === 0 ? null : passed / total,
       passToPass: { failed: p2pFailed, total: 10 },
       solved: total === 0 ? null : passed === total && p2pFailed === 0,
-      failedCases: { failToPass: [], passToPass: [], truncated: false },
+      failedCases: { failToPass: [], passToPass: [] },
       excludedFlaky: 0,
     },
     ...rest,
@@ -143,6 +143,7 @@ test("报告：每步得分表（分段与合并）、多遍均值与范围、�
   assert.match(md, /\| 1 \| 1\/2 \| 0\/2 \|/);
   assert.match(md, /旧口径的结果行 1 条/);
   assert.doesNotMatch(md, /终点|补跑/);
+  assert.doesNotMatch(md, /验证工具故障/, "次要指标表不再有验证工具故障一列（决策 322/327）");
 });
 
 test("报告的设置一节（269）：开跑时的代码提交号，以及 infoLog 里每一次显式放行的时刻、新提交号与原因；没有身份头即不写这一节", () => {
@@ -195,18 +196,4 @@ test("报告的设置一节（269）：开跑时的代码提交号，以及 info
   assert.match(dirty, /开跑时的代码：提交 aaa1111（有未提交改动；经 --allow-dirty-harness 放行）/);
   assert.match(dirty, /显式放行的代码更换：无/);
   assert.doesNotMatch(renderStreamReport(lines, { title: "无身份头", segments }), /## 设置/);
-});
-
-test("报告：次要指标单列验证工具故障的步次（决策 170 ③）——第一遍各步合计；未开回炉的条件记为—", () => {
-  const lines = [
-    line("neither", 1, [1, 1], { verifyToolFaults: 2 }),
-    line("neither", 5, [1, 1], { verifyToolFaults: 1 }),
-    line("neither", 1, [1, 1], { attempt: 2, verifyToolFaults: 5 }),
-    line("minimal", 1, [1, 1], { verifyToolFaults: null }),
-  ];
-  const md = renderStreamReport(lines, { title: "工具故障", segments });
-  const secondary = md.slice(md.indexOf("## 次要指标"));
-  assert.match(secondary, /\| 依赖环境选不出而作废的步 \| 验证工具故障（步次） \|/);
-  assert.match(secondary, /^\| neither \|.*\| 3 \|$/m);
-  assert.match(secondary, /^\| minimal \|.*\| — \|$/m);
 });

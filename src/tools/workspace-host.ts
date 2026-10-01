@@ -35,6 +35,10 @@ export interface HostExecResult {
   outputHash: string;
   // 截断后的输出文本（开头部分）
   output: string;
+  // 分开的两路输出开头（各自截到实现上限：本机与容器都是 64 KiB）；需要区分 stdout 与 stderr 的调用方用（钩子协议），
+  // 其余调用方照旧读 output
+  stdout: string;
+  stderr: string;
 }
 
 // 文件清单不跟进的目录，本地与容器实现共用这一份口径。
@@ -49,14 +53,6 @@ export interface HostFileSnapshot {
   files: Map<string, string>;
   // 清单超过上限，不完整
   truncated: boolean;
-}
-
-// 这一步的起点（决策 154②）：开工时的提交
-export interface StepStartMark {
-  commit: string;
-  // "开工时的树"挂在起点提交之下的提交（含开工时未提交的改动，如跑批器预置的人写测试；不含被忽略的文件）：
-  // 验证前据它还原受保护的文件
-  baseCommit?: string;
 }
 
 // 快照引用（占位）：实现自定的不透明标识（宿主为独立 GIT_DIR 里的提交，容器为容器内同构提交加镜像提交）
@@ -84,12 +80,4 @@ export interface WorkspaceHost {
   // 尚未迁到本接口；容器实现未提供。迁移时两个实现各自落在这两个方法上，调用方不得判断工作区形状
   snapshot?(): Promise<WorkspaceSnapshotRef>;
   fork?(ref: WorkspaceSnapshotRef): Promise<WorkspaceHost>;
-  // 记下这一步的起点（决策 154②）：开工时的提交与"开工时的树"。容器实现提供；宿主侧由 checkpoint.ts 的快照改前基线给出
-  markStepStart?(): Promise<StepStartMark>;
-  // 验证前还原受保护的文件：与开工时的树（mark.baseCommit）相比被改动或删除、且 isProtected 认定受保护的文件，
-  // 恢复成开工时的版本（不进暂存区）；开工时不在的文件（agent 新建的）不动。返回还原了的路径。容器实现提供
-  restoreProtectedFromStepStart?(
-    mark: StepStartMark,
-    isProtected: (path: string) => boolean
-  ): Promise<string[]>;
 }

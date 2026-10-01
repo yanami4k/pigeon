@@ -10,7 +10,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { buildRuntime } from "./runtime.ts";
 
 interface AdvertisedTool {

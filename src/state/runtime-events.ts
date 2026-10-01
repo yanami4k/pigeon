@@ -2,12 +2,6 @@
 // 借用的配置摘要形状与验证三值。本文件不依赖上游类型——上游事件到这些形状的映射在 pi-runtime 完成
 // （§2 边界规则：上游交互只经 PiRuntimeAdapter）。
 import { type Static, Type } from "typebox";
-import {
-  AttemptBudgetSchema,
-  RepairRoundsSchema,
-  RetryOnFailSchema,
-  VerifyConfigSchema,
-} from "./attempt-config.ts";
 import { Sha256HexSchema } from "./hashing.ts";
 import {
   MemoryManifestEntrySchema,
@@ -153,14 +147,8 @@ export const RunStartedPayloadSchema = Type.Object({
   mcpServers: Type.Optional(Type.Array(McpServerStatusSchema)),
   // 决策 137：后台审阅配置字段已删除。本对象非严格（未设 additionalProperties: false），
   // v10 至 v15 旧记录里的 review 字段读取时忽略
-  // M7（决策 071 / 079）：本会话的验证命令与失败自动分叉重试次数（冻结快照值，加法式可缺省）
-  verify: Type.Optional(VerifyConfigSchema),
-  retryOnFail: Type.Optional(RetryOnFailSchema),
-  // M8（决策 087）：本次尝试的预算（冻结快照值，加法式可缺省）——回放据此沿用同一预算，不得放宽
-  budget: Type.Optional(AttemptBudgetSchema),
-  // 回炉轮数（决策 142 / 143；冻结快照值，只在开启时在场）：一步里的每次 Run 都带同一个值，
-  // 这一步的成败由它与这一步最后一次验证记录推出（state/session-judge.ts），不另记
-  repairRounds: Type.Optional(RepairRoundsSchema),
+  // 决策 322：验证命令、失败自动分叉重试与回炉轮数已删除。本对象非严格（未设 additionalProperties: false），
+  // 旧记录里的 verify、retryOnFail、repairRounds 字段读取时忽略
   // 结构化记忆（决策 134 / 157；加法式可缺省）：开关、挑选方式、开局给了哪几条（冻结快照值，每个 Run 同值），
   // 以及本 Run 作为回炉轮收到了哪几条（只在回炉 Run 上在场）。决策 174 删除结构化记忆后已停写，只为旧会话照常可读而保留
   structuredMemory: Type.Optional(

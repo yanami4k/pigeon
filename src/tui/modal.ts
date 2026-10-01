@@ -41,6 +41,9 @@ export interface ModalHost {
   addApprovalLine?(line: string): void;
   // 决策 301：当前不在主会话视图（审批块里给主会话的请求写明来源）；缺省即在
   outsideMainView?(): boolean;
+  // 决策 323、324：审批面板出现时的 Notification 钩子（只作副作用）——面板出现记
+  // permission_prompt；请求来自 worker（请示汇到本会话）另记 worker_approval；缺省不通知
+  notifyApprovalHook?(notificationType: string, message: string): void;
 }
 
 function approvalLine(host: ModalHost, line: string): void {
@@ -63,7 +66,12 @@ export function askApprovalPanel(
   if (host.pendingApproval() !== null) {
     return Promise.resolve({ key: "cancel", reason: APPROVAL_CANCEL_BUSY });
   }
-  approvalLine(host, approvalBlockText(request, directoryGrant, host.outsideMainView?.() === true));
+  const panelText = approvalBlockText(request, directoryGrant, host.outsideMainView?.() === true);
+  // 决策 323、324：面板出现的两个实际时刻——审批面板出现（permission_prompt），以及 worker 的
+  // 请示汇到本会话（worker_approval，请求带来源会话与 worker 标签时另记一条）
+  host.notifyApprovalHook?.("permission_prompt", panelText);
+  if (request.worker !== undefined) host.notifyApprovalHook?.("worker_approval", panelText);
+  approvalLine(host, panelText);
   const { promise, resolve } = Promise.withResolvers<ApprovalPanelResult>();
   const pending: PendingApproval = {
     resolve,

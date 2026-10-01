@@ -1,6 +1,5 @@
-// 日常沙箱的会话接线（决策 237、245–248）：pigeon run --sandbox 在容器里干活、验证命令经执行端在容器里执行、返回前交回；
-// 分叉在起容器之前报错；改回逐条询问时仍接交互审批、[d] 不建目录放权；沙箱会话不启动 MCP 服务，开沙箱时列出已配置的
-// 服务名（决策 252）。容器以假 docker 代替，工作区是真 git 仓库。
+// 日常沙箱的会话接线（决策 237、245–248）：pigeon run --sandbox 在容器里干活、返回前交回；改回逐条询问时仍接交互审批、
+// [d] 不建目录放权；沙箱会话不启动 MCP 服务，开沙箱时列出已配置的服务名（决策 252）。容器以假 docker 代替，工作区是真 git 仓库。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -15,12 +14,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { noMcpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
-import {
-  runHeadlessInSandbox,
-  runSandboxCommand,
-  SANDBOX_FORK_UNSUPPORTED,
-  startSandbox,
-} from "./sandbox-session.ts";
+import { runHeadlessInSandbox, runSandboxCommand, startSandbox } from "./sandbox-session.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -59,7 +53,7 @@ function countingMcp() {
   return { counter, start };
 }
 
-test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器里执行；返回前交回成分支并删除容器，宿主工作目录不变", async () => {
+test("pigeon run --sandbox：agent 在容器里改文件；返回前交回成分支并删除容器，宿主工作目录不变", async () => {
   const repo = makeRepo();
   const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-home-"));
   const fake = fakeSandboxDocker();
@@ -88,7 +82,6 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
         // 决策 325：入口在会话开始时读好的设置快照（MCP 服务名取自它）
         settings: loadSettings(repo, { homeDir: home }),
         // 只有在容器的工作区里执行才能通过
-        verify: { command: "test -f made.txt", timeoutMs: 30_000, source: "flag" },
         startMcp: mcp.start,
       },
       {
@@ -103,7 +96,6 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
       }
     );
     assert.equal(result.status, "completed", result.errorMessage);
-    assert.equal(result.verification?.verdict, "pass", "验证命令在容器里执行");
     assert.equal(result.sandbox?.branch, `pigeon/sandbox-${sessionId}`);
     assert.equal(git(repo, "show", `pigeon/sandbox-${sessionId}:made.txt`), "ok");
     assert.equal(existsSync(join(repo, "made.txt")), false, "宿主工作目录不变");
@@ -124,25 +116,10 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
   }
 });
 
-test("沙箱里开失败自动分叉重试：起容器之前报错说明原因", async () => {
+test("不给 --sandbox 不开沙箱", async () => {
   const repo = makeRepo();
   const fake = fakeSandboxDocker();
   try {
-    await assert.rejects(
-      startSandbox({
-        flags: { ...SANDBOX_FLAGS, retryOnFail: 1 },
-        governanceRoot: repo,
-        sessionId: newSessionId(),
-        log: () => {},
-        overrides: {
-          docker: fake.docker,
-          containerRoot: fake.containerRoot,
-          cacheRoot: fake.cacheRoot,
-        },
-      }),
-      (error: Error) => error.message === SANDBOX_FORK_UNSUPPORTED
-    );
-    assert.deepEqual(fake.state().calls, [], "没有调用 docker");
     assert.equal(
       await startSandbox({
         flags: {},
@@ -225,7 +202,7 @@ test("pigeon sandbox cache | clear-cache：查看占用与清空共用下载缓�
   }
 });
 
-test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不建目录放权，[a] 照常；不启动 MCP；分叉重试在装配前被拒", async () => {
+test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不建目录放权，[a] 照常；不启动 MCP", async () => {
   const governance = mkdtempSync(join(tmpdir(), "pigeon-sandbox-prompt-"));
   const workspace = mkdtempSync(join(tmpdir(), "pigeon-sandbox-prompt-ws-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-prompt-home-"));
@@ -263,10 +240,6 @@ test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不�
     const plain = await openSessionRuntime({ ...local, sessionId: newSessionId() });
     await disposeRuntime(plain.bundle);
     assert.equal(mcp.counter.calls, 1);
-    await assert.rejects(
-      openSessionRuntime({ ...base, sessionId: newSessionId(), retryOnFail: 1 }),
-      /不支持失败自动分叉重试/
-    );
   } finally {
     cleanup();
     for (const dir of [governance, workspace, home]) rmSync(dir, { recursive: true, force: true });

@@ -27,7 +27,6 @@ import {
   type SessionHeaderMetadata,
 } from "../state/session-entries.ts";
 import type {
-  AttemptVerifiedInput,
   BranchHeaderInput,
   ChildSettledInput,
   ChildSpawnedInput,
@@ -125,31 +124,6 @@ export function openSessionStore(input: {
 }
 
 // ---- 写入输入 → 条目 ----
-
-export function verificationEntry(input: AttemptVerifiedInput): SessionCustomEntry {
-  return {
-    customType: SessionEntryType.Verification,
-    data: {
-      version: SESSION_ENTRY_VERSION,
-      ...(input.runId !== undefined ? { runId: input.runId } : {}),
-      target: input.target,
-      command: [...input.command],
-      exitCode: input.exitCode,
-      ...(input.signal !== undefined ? { signal: input.signal } : {}),
-      timedOut: input.timedOut,
-      ...(input.error !== undefined ? { error: input.error } : {}),
-      durationMs: input.durationMs,
-      outputBytes: input.outputBytes,
-      outputHash: input.outputHash,
-      output: input.output,
-      truncated: input.truncated,
-      workspace: input.workspace,
-      verdict: input.verdict,
-      verifiedAt: input.verifiedAt,
-      ...(input.steps !== undefined ? { steps: input.steps.map((step) => ({ ...step })) } : {}),
-    },
-  };
-}
 
 export function checkpointEntry(
   runId: RunId,

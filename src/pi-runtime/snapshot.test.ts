@@ -28,7 +28,7 @@ function makeSnapshot(): InjectionSnapshot {
 }
 
 test("当前版本快照（结构化 memory 清单 + 可选推理档位 + 可选单轮输出上限）JSON 往返后校验通过", () => {
-  assert.equal(INJECTION_SNAPSHOT_VERSION, 13);
+  assert.equal(INJECTION_SNAPSHOT_VERSION, 14);
   const snapshot = makeSnapshot();
   const revived: unknown = JSON.parse(JSON.stringify(snapshot));
   assert.ok(Value.Check(InjectionSnapshotSchema, revived));
@@ -74,42 +74,30 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
   }
 });
 
-// M7 S3 / S6（决策 071 / 079）：v7 顶层加验证命令配置与失败自动分叉重试次数，按会话冻结
-test("v7 字段：可选的验证命令配置与失败自动分叉重试次数；缺省合法", () => {
-  const snapshot = makeSnapshot();
-  assert.ok(
-    Value.Check(InjectionSnapshotSchema, {
-      ...snapshot,
-      verify: { command: "npm test", timeoutMs: 1000 },
-      retryOnFail: 2,
-    })
-  );
-  assert.ok(
-    !Value.Check(InjectionSnapshotSchema, { ...snapshot, verify: { command: "", timeoutMs: 1 } })
-  );
-  assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, retryOnFail: -1 }));
+// 决策 322：v14 顶层删除验证命令、失败自动分叉重试与回炉轮数；对象非严格，带这三个字段的旧快照照常通过校验
+test("v14：verify、retryOnFail、repairRounds 已删除，带这三个字段的旧快照照常通过校验", () => {
+  const legacy = {
+    ...makeSnapshot(),
+    verify: { command: "npm test", timeoutMs: 1000 },
+    retryOnFail: 2,
+    repairRounds: 3,
+  };
+  assert.ok(Value.Check(InjectionSnapshotSchema, legacy));
 });
 
-// M8 S1 / S3（决策 081 / 087）：v8 顶层加本次尝试的预算，验证命令加来源字段
-test("v8 字段：预算三项与验证命令来源可选；非正整数预算被拒", () => {
+// M8（决策 087）：v8 顶层加本次尝试的预算
+test("v8 字段：预算三项可选；非正整数预算被拒", () => {
   const snapshot = makeSnapshot();
   assert.ok(
     Value.Check(InjectionSnapshotSchema, {
       ...snapshot,
       budget: { maxTurns: 40, wallClockMs: 1_800_000, maxTokens: 100_000 },
-      verify: { command: "npm test", timeoutMs: 1000, source: "project" },
     })
   );
   assert.ok(Value.Check(InjectionSnapshotSchema, { ...snapshot, budget: {} }));
   for (const budget of [{ maxTurns: 0 }, { wallClockMs: -1 }, { maxTokens: 1.5 }]) {
     assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, budget }));
   }
-  assert.ok(
-    !Value.Check(InjectionSnapshotSchema, {
-      ...snapshot,
-      verify: { command: "npm test", timeoutMs: 1, source: "guess" },
-    })
-  );
 });
 
 test("v9 字段：采样温度可选、取值 0 到 2", () => {
@@ -129,15 +117,6 @@ test("v9 字段：采样温度可选、取值 0 到 2", () => {
         model: { ...snapshot.model, temperature },
       })
     );
-  }
-});
-
-// 决策 142 / 143：v10 顶层加回炉轮数，只在开启时在场（至少 1）
-test("v10 字段：回炉轮数可选、至少 1", () => {
-  const snapshot = makeSnapshot();
-  assert.ok(Value.Check(InjectionSnapshotSchema, { ...snapshot, repairRounds: 3 }));
-  for (const repairRounds of [0, -1, 1.5]) {
-    assert.ok(!Value.Check(InjectionSnapshotSchema, { ...snapshot, repairRounds }));
   }
 });
 
@@ -171,18 +150,13 @@ test("v13 字段：推送的记忆与复盘标记可选；旧的审阅字段照�
   );
 });
 
-// 决策 134 / 157 / 159：v12 顶层加结构化记忆的开局留痕、verify 加可选命名分步
-test("v12 字段：结构化记忆留痕与验证分步可选", () => {
+// 决策 134 / 157：v12 顶层加结构化记忆的开局留痕
+test("v12 字段：结构化记忆留痕可选", () => {
   const snapshot = makeSnapshot();
   assert.ok(
     Value.Check(InjectionSnapshotSchema, {
       ...snapshot,
       structuredMemory: { enabled: true, selection: "auto", opening: ["mem_1"] },
-      verify: {
-        command: "[格式] npm run lint",
-        timeoutMs: 1000,
-        steps: [{ name: "格式", command: "npm run lint" }],
-      },
     })
   );
   assert.ok(

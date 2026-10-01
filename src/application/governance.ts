@@ -13,6 +13,7 @@ import type {
   ToolCallProposal,
   ToolGovernance,
   ToolGovernanceFactory,
+  ToolHookPort,
 } from "../pi-runtime/governance.ts";
 import { type BreakerScope, breakerCountKey, InterceptStreak } from "../state/breaker.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
@@ -65,6 +66,9 @@ export interface ToolGovernanceOptions {
   // 决策 326 ①：受保护路径判定（项目的 .pigeon 目录）。写入类文件工具的 path 落在其上时：会话放权与配置放权都不放行、
   // worker 自己工作树内的默认放行也不适用，须人逐次批准（yolo 下放行，拒绝名单照常优先）。缺省不判定
   protectedPath?: (target: string) => string | undefined | Promise<string | undefined>;
+  // 决策 323 / 324：PreToolUse 钩子（在审批之前执行）。拒绝 > 要人确认 > 放行；放行只免掉人工审批这一步
+  // （拒绝名单、路径围栏与受保护路径照常生效）；改过的参数重新经过全部检查并以新参数执行
+  preToolUseHooks?: ToolHookPort["preToolUse"];
 }
 
 // 决策 302 所说的写层文件工具：改文件的内置工具（两种编辑模式都叫 edit_file）
@@ -105,6 +109,8 @@ class GovernedToolCalls implements ToolGovernance {
   readonly #protectedPath:
     | ((target: string) => string | undefined | Promise<string | undefined>)
     | undefined;
+  // 决策 324：PreToolUse 钩子（在审批之前执行）
+  readonly #preToolUseHooks: ToolHookPort["preToolUse"] | undefined;
   // ToolExecution 账本：toolCallId → 记录
   readonly #executions = new Map<string, ToolExecution>();
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
@@ -135,6 +141,7 @@ class GovernedToolCalls implements ToolGovernance {
     this.#workspaceRoot = options.workspaceRoot;
     this.#ownWorkspaceWrites = options.ownWorkspaceWrites === true;
     this.#protectedPath = options.protectedPath;
+    this.#preToolUseHooks = options.preToolUseHooks;
     // 广告了未在注册表登记的工具 = 配置错误，构造期 fail-fast
     for (const name of host.tools.keys()) {
       if (!this.#registry.has(name)) {
@@ -218,9 +225,40 @@ class GovernedToolCalls implements ToolGovernance {
 
   async #decideInner(call: ToolCallProposal): Promise<GovernanceVerdict> {
     const { toolName, toolCallId } = call;
-    // rawArgs 快照（spike S5）：账本留模型原始参数。决策 1 无改参通道，
-    // 原始参数 = 批准参数 = 执行参数，无需写回 ctx.args。
-    const rawArgs = structuredClone(call.args);
+    // 决策 324：PreToolUse 钩子在审批之前执行（拒绝 > 要人确认 > 放行）。钩子改过的参数重新经过全部检查，
+    // 账本、审批与执行都按改后的参数走（钩子自身出错不拦只提示，由钩子调度记进运行记录）
+    const hookDecision = await this.#preToolUseDecision(toolName, toolCallId, call.args);
+    if (hookDecision?.decision === "deny") {
+      const deniedReason = hookDecision.reason ?? "钩子拒绝";
+      const proposed = proposeToolExecution({
+        toolCallId,
+        toolName,
+        rawArgs: structuredClone(call.args),
+        at: Date.now(),
+      });
+      let record = advanceToolExecution(proposed, "approval", Date.now());
+      record = recordDecision(record, {
+        outcome: "rejected",
+        approvedBy: "policy:hook",
+        reason: deniedReason,
+        reasonSource: "system-default",
+        decidedAt: Date.now(),
+      });
+      this.#executions.set(toolCallId, record);
+      this.#runToolCallIds.push(toolCallId);
+      return this.#blockWithBreaker(toolName, call.args, deniedReason, "fingerprint");
+    }
+    // 钩子放行/要人确认的标记：放行只免掉人工审批这一步（拒绝名单、路径围栏与受保护路径照常生效），
+    // 要人确认跳过自动放行直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）
+    const hookAllow = hookDecision?.decision === "allow";
+    // rawArgs 快照（spike S5）：账本留实际评估的参数——钩子改过参数时即改后的参数（原始参数 = 批准参数 = 执行参数）
+    const rawArgs = structuredClone(
+      hookDecision?.updatedInput !== undefined ? hookDecision.updatedInput : call.args
+    );
+    const allowVerdict = (): GovernanceVerdict =>
+      hookDecision?.updatedInput !== undefined
+        ? { kind: "allow", updatedArgs: rawArgs }
+        : { kind: "allow" };
     const proposed = proposeToolExecution({ toolCallId, toolName, rawArgs, at: Date.now() });
     let record = advanceToolExecution(proposed, "approval", Date.now());
     this.#executions.set(toolCallId, record);
@@ -263,6 +301,10 @@ class GovernedToolCalls implements ToolGovernance {
         kind: "auto-allow",
         reason: `worker 在自己的工作树内改文件，默认放行：${toolName}`,
       };
+    }
+    // 决策 324：钩子要人确认——跳过一切自动放行，直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）
+    if (hookDecision?.decision === "ask") {
+      decision = { kind: "prompt", reason: hookDecision.reason ?? "钩子要求人确认" };
     }
 
     // deny 清单绝对 / 未注册 fail-closed：自动拒绝，不弹人工审批
@@ -308,7 +350,25 @@ class GovernedToolCalls implements ToolGovernance {
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
-      return { kind: "allow" };
+      return allowVerdict();
+    }
+
+    // 决策 324：钩子放行——只免掉人工审批这一步。受保护路径（326 ①）要人逐次批准，不在此列；
+    // 钩子的要人确认（ask）已在上方把 decision 改成 prompt，同样走到这里时按普通审批走
+    if (hookAllow && protectedTarget === undefined) {
+      record = recordDecision(record, {
+        outcome: "approved",
+        approvedBy: "policy:hook",
+        ...(hookDecision?.reason !== undefined
+          ? { reason: hookDecision.reason, reasonSource: "system-default" as const }
+          : {}),
+        decidedAt: Date.now(),
+      });
+      this.#authorizeShell(toolName, toolCallId, needsShell);
+      record = advanceToolExecution(record, "dispatch", Date.now());
+      record = advanceToolExecution(record, "execution", Date.now());
+      this.#executions.set(toolCallId, record);
+      return allowVerdict();
     }
 
     // prompt：必须人工批准；未配置审批通道 = fail-closed 拒绝
@@ -378,7 +438,24 @@ class GovernedToolCalls implements ToolGovernance {
     record = advanceToolExecution(record, "dispatch", Date.now());
     record = advanceToolExecution(record, "execution", Date.now());
     this.#executions.set(toolCallId, record);
-    return { kind: "allow" };
+    return allowVerdict();
+  }
+
+  // PreToolUse 钩子的判定（决策 324）：钩子在审批之前执行；钩子自身异常不拦只记（不改变治理结论）
+  async #preToolUseDecision(
+    toolName: string,
+    toolCallId: string,
+    args: unknown
+  ): Promise<
+    { decision: "allow" | "ask" | "deny"; reason?: string; updatedInput?: unknown } | undefined
+  > {
+    if (this.#preToolUseHooks === undefined) return undefined;
+    try {
+      return await this.#preToolUseHooks({ toolCallId, toolName, args });
+    } catch (error) {
+      this.#host.reportError(error);
+      return undefined;
+    }
   }
 
   // 写入类文件工具（写档、按工作区限定路径）的 path 落在受保护路径上时返回其展示写法

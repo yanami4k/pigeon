@@ -6,9 +6,7 @@
 
 import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
 import { loadMemoryReviewConfig } from "../persistence/review-backfill-store.ts";
-import { loadProjectRepairRounds, loadVerifyConfig } from "../persistence/verify-config.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
-import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
 import {
@@ -20,15 +18,13 @@ import { type ReviewModelChoice, reviewModelChoice } from "./memory-review.ts";
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
 
-// M7（决策 071）：验证命令缺省超时（5 分钟）
-export const DEFAULT_VERIFY_TIMEOUT_MS = 5 * 60_000;
-
 // 无取值的开关型 flag（resume 的参数切分按此判断是否吞下一个参数）
 export const VALUELESS_FLAGS = new Set([
   "--yolo",
   "--no-persist-thinking",
   "--no-pushed-memory",
   "--no-spawn-workers",
+  "--no-hooks",
   "--sandbox",
   "--sandbox-from-head",
 ]);
@@ -53,6 +49,8 @@ export interface LaunchFlags {
   // 模型接入模块说明符：--stream-fn 优先，其次环境变量 PIGEON_STREAM_FN
   streamFnSpec?: string;
   yolo: boolean;
+  // 决策 324：--no-hooks 只对本次运行停用全部钩子（清空清单并置 disableAllHooks）；各入口一律接受
+  noHooks: boolean;
   provider: string;
   modelId: string;
   // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
@@ -67,14 +65,6 @@ export interface LaunchFlags {
   temperature?: number;
   // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（仅 TUI 接受）
   historyLimit?: number;
-  // M7（决策 071）：--verify-command <命令> 与 --verify-timeout <毫秒>——尝试收尾后由程序独立执行的验证命令；
-  // cli REPL / resume、tui 与 pigeon run 接受
-  verifyCommand?: string;
-  verifyTimeoutMs?: number;
-  // M7（决策 079）：--retry-on-fail <K> 失败自动分叉重试次数（缺省 0 关闭）；cli REPL / resume、tui 与 pigeon run 接受
-  retryOnFail?: number;
-  // 决策 142 / 143：--repair-rounds <N> 回炉轮数（0 为关闭）；只有 pigeon run 接受（REPL / TUI 与 worker 路径不做回炉）
-  repairRounds?: number;
   // 决策 191、244：推送记忆——日常入口缺省开着（与会话检索开关的缺省一致），--no-pushed-memory 关掉（关掉即不推送、
   // 不注册记忆工具、不复盘）；--memory-limit <字符数> 学到的记忆的总量上限（缺省 12,000）。cli REPL / resume、tui 与
   // pigeon run 接受
@@ -114,12 +104,6 @@ export interface ParseLaunchFlagsOptions {
   historyLimit?: boolean;
   // 是否接受 --temperature（只有把它交给运行面的 Eval 入口；其余入口当作未知参数，不静默忽略）
   temperature?: boolean;
-  // 是否接受验证命令参数（cli / tui 主会话与 pigeon run；eval 沿用 task.json 的验证器，不接受）
-  verify?: boolean;
-  // 是否接受 --retry-on-fail（cli / tui 主会话与 pigeon run）
-  retry?: boolean;
-  // 是否接受 --repair-rounds（只有 pigeon run）
-  repair?: boolean;
   // 是否接受 --no-pushed-memory 与 --memory-limit（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
   pushedMemory?: boolean;
   // 是否接受 --sandbox 及其参数（终端界面、命令行对话与续跑、pigeon run）
@@ -134,6 +118,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
   const flags: LaunchFlags = {
     root: options.cwd ?? process.cwd(),
     yolo: false,
+    noHooks: false,
     provider: DEFAULT_MODEL_PLACEHOLDER.provider,
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
@@ -154,6 +139,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     const flag = argv[i];
     if (flag === "--yolo") {
       flags.yolo = true;
+    } else if (flag === "--no-hooks") {
+      flags.noHooks = true;
     } else if (flag === "--sandbox" && options.sandbox === true) {
       sandbox = true;
     } else if (flag === "--sandbox-from-head" && options.sandbox === true) {
@@ -232,30 +219,6 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--history-limit 需要正整数（${usage}）`);
       }
       flags.historyLimit = value;
-    } else if (flag === "--verify-command" && options.verify === true) {
-      const value = argv[++i];
-      if (value === undefined || value.trim() === "") {
-        throw new Error(`--verify-command 缺少取值（一行命令）（${usage}）`);
-      }
-      flags.verifyCommand = value;
-    } else if (flag === "--verify-timeout" && options.verify === true) {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`--verify-timeout 需要正整数（毫秒）（${usage}）`);
-      }
-      flags.verifyTimeoutMs = value;
-    } else if (flag === "--retry-on-fail" && options.retry === true) {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--retry-on-fail 需要非负整数（0 表示关闭）（${usage}）`);
-      }
-      flags.retryOnFail = value;
-    } else if (flag === "--repair-rounds" && options.repair === true) {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--repair-rounds 需要非负整数（0 表示关闭）（${usage}）`);
-      }
-      flags.repairRounds = value;
     } else if (flag !== undefined && COMPACTION_FLAGS[flag] !== undefined) {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 1) {
@@ -322,34 +285,6 @@ export function resolveStreamFnSpec(flags: LaunchFlags, usage: string): string {
     );
   }
   return flags.streamFnSpec;
-}
-
-// 验证命令配置（决策 071）：由启动参数得出，会话开始时冻结进注入快照；未给命令即未配置
-export function verifyConfigOf(flags: LaunchFlags): VerifyConfig | undefined {
-  if (flags.verifyCommand === undefined) {
-    return undefined;
-  }
-  return {
-    command: flags.verifyCommand,
-    timeoutMs: flags.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS,
-    source: "flag",
-  };
-}
-
-// 验证命令的三级来源（M8 S1，决策 081）：启动参数 > 项目配置（.pigeon/verify.json）> 未配置。
-// 启动参数在场时整条配置取启动参数——两级逐字段混合会让"这次尝试用的是哪条命令、多长超时"
-// 取决于两份来源的组合，事后不可读。项目配置畸形一律响亮失败，不静默降级为未配置。
-export function resolveVerifyConfig(
-  flags: LaunchFlags,
-  governanceRoot: string
-): VerifyConfig | undefined {
-  return verifyConfigOf(flags) ?? loadVerifyConfig(governanceRoot, DEFAULT_VERIFY_TIMEOUT_MS);
-}
-
-// 回炉轮数的来源（决策 142 / 143）：启动参数 > 项目验证配置（.pigeon/verify.json 的 repairRounds）> 0（关闭）。
-// 参数给 0 即关闭，压过项目配置；轮数与验证命令分别取来源，缺验证命令时由运行入口启动报错
-export function resolveRepairRounds(flags: LaunchFlags, governanceRoot: string): number {
-  return flags.repairRounds ?? loadProjectRepairRounds(governanceRoot) ?? 0;
 }
 
 // 决策 296：日常入口（终端界面、命令行对话与续跑、pigeon run）读复盘配置里的复盘模型填进启动参数；配置畸形响亮失败。

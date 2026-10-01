@@ -255,3 +255,57 @@ test("迁移备份不在仓库里：git status 与快照提交里都没有备份
   // 仓库里任何地方都没有原文
   assert.throws(() => execFileSync("grep", ["-rl", "tvly-secret", root]), "仓库目录里没有 key");
 });
+
+test("verify.json（决策 322）：不并入设置——挪进备份目录，打印改写为收尾（Stop）钩子的示例；旧布局检查列为已退役", () => {
+  const root = repo();
+  const homeDir = home();
+  write(join(root, ".pigeon", "verify.json"), {
+    version: 1,
+    command: "npm test",
+    timeoutMs: 300000,
+  });
+  // 启动检查把 verify.json 列为旧文件（已退役，措辞不含"并入三层设置"）
+  const legacy = findLegacyLayout(root);
+  assert.deepEqual(
+    legacy.map((item) => [item.name, item.retired === true]),
+    [["verify.json", true]]
+  );
+  const result = migrate(root, homeDir);
+  assert.equal(result.changed, true);
+  assert.ok(!existsSync(join(root, ".pigeon", "verify.json")), "原文件已挪走");
+  const backupDir = migrationBackupLocation(root, homeDir);
+  assert.ok(existsSync(join(backupDir, "verify.json")), "原文进了备份目录");
+  const text = result.lines.join("\n");
+  assert.ok(text.includes('"Stop"'), "打印 Stop 钩子示例");
+  assert.ok(text.includes('"command": "npm test"'), `示例用原命令填好：${text}`);
+  // 不写入任何设置节
+  assert.ok(!existsSync(projectSettingsPath(root)), "不生成 settings.json");
+  // 重复执行无事可做
+  assert.equal(migrate(root, homeDir).changed, false);
+  assert.deepEqual(findLegacyLayout(root), []);
+});
+
+test("verify.json 分步配置：按各步命令以 && 连接，带执行目录的步包一层 cd", () => {
+  const root = repo();
+  const homeDir = home();
+  write(join(root, ".pigeon", "verify.json"), {
+    version: 1,
+    steps: [
+      { name: "类型", command: "tsc --noEmit" },
+      { name: "测试", command: "pytest tests", cwd: "pkg" },
+    ],
+  });
+  const result = migrate(root, homeDir);
+  const text = result.lines.join("\n");
+  assert.ok(
+    text.includes('"command": "tsc --noEmit && ( cd pkg && pytest tests )"'),
+    `分步按 && 连接：${text}`
+  );
+});
+
+test("verify.json 既没有 command 也没有 steps：报错且不挪走", () => {
+  const root = repo();
+  write(join(root, ".pigeon", "verify.json"), { version: 1 });
+  assert.throws(() => migrate(root), MigrationError);
+  assert.ok(existsSync(join(root, ".pigeon", "verify.json")), "原文件保留");
+});

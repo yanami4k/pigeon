@@ -31,6 +31,8 @@
 //    读当前上下文的 token 数与模型窗口（状态栏用）。没有订阅者时行为与此前逐字节一致，eval stream、pigeon run 与
 //    逐行对话不订阅，实验路径不受影响。
 import {
+  type AfterToolCallContext,
+  type AfterToolCallResult,
   Agent,
   type AgentEvent,
   type AgentLoopTurnUpdate,
@@ -77,7 +79,7 @@ import type {
   ContextCompactor,
 } from "./compaction.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
-import type { ToolGovernance, ToolGovernanceFactory } from "./governance.ts";
+import type { ToolGovernance, ToolGovernanceFactory, ToolHookPort } from "./governance.ts";
 import type { SessionStoreSink } from "./session-store.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
@@ -190,6 +192,9 @@ export interface PiRuntimeAdapterOptions {
   // 决策 264：同一次回复里的多个工具调用可否并行执行；缺省串行（决策 2）。只有注册了可并行的派 worker 工具时装配根才打开：
   // 上游在同一批调用里只要有一个标为串行的工具就整批串行，写与命令工具因而照旧逐个执行、逐个审批
   parallelTools?: boolean;
+  // 决策 324：工具事件钩子——PreToolUse 交治理实例（在审批之前），PostToolUse / PostToolUseFailure
+  // 在此接 afterToolCall（工具执行之后）：替换结果文本、把理由与上下文补进结果。缺省不挂
+  toolHooks?: ToolHookPort;
 }
 
 export class PiRuntimeAdapter {
@@ -205,6 +210,10 @@ export class PiRuntimeAdapter {
   readonly #unsubscribe: () => void;
   // M5.5 S0（决策 049）：本 Adapter 绑定的治理实例
   readonly #governance: ToolGovernance;
+  // 决策 324：工具事件钩子（afterToolCall 转发用；PreToolUse 走治理实例）
+  readonly #toolHooks: ToolHookPort | undefined;
+  // 决策 324：PreToolUse 钩子改过的参数（toolCallId → 改后的参数）：执行时替换上游校验后的参数
+  readonly #updatedArgs = new Map<string, unknown>();
   // D3（M4 S5）：本 Run 的 message_end 累计序号——Run 内序号。序号推进无条件（abort/合成失败消息也占序号，
   // 写盘失败不重排后续序号），保证"条目序 = transcript 追加序"在任何故障路径下成立
   #runEntrySeq = 0;
@@ -270,6 +279,7 @@ export class PiRuntimeAdapter {
       advertised.map((tool) => [tool.name, this.#wrapToolErrorCapture(tool)])
     );
     // 治理绑定宿主能力；广告工具未在注册表登记时在此构造期 fail-fast
+    this.#toolHooks = options.toolHooks;
     this.#governance = options.governance({
       policy,
       tools,
@@ -278,6 +288,8 @@ export class PiRuntimeAdapter {
       reportError: (error) => {
         this.#listenerErrors.push(error);
       },
+      // 决策 324：工具事件钩子（PreToolUse 由治理实例在审批之前调用）
+      ...(options.toolHooks !== undefined ? { toolHooks: options.toolHooks } : {}),
     });
 
     this.#agent = new Agent({
@@ -289,6 +301,8 @@ export class PiRuntimeAdapter {
       toolExecution: options.parallelTools === true ? "parallel" : "sequential",
       // M3 审批闸（spike S2a：block 可靠，reason 逐字反馈模型）；M5.5 S0 起只转发治理判定
       beforeToolCall: (context) => this.#forwardDecide(context),
+      // 决策 324：工具执行之后（PostToolUse / PostToolUseFailure）——替换结果文本与补上下文
+      afterToolCall: (context) => this.#forwardAfterToolCall(context),
       // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们
       convertToLlm,
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
@@ -898,12 +912,56 @@ export class PiRuntimeAdapter {
         args: context.toolCall.arguments,
         preparedArgs: context.args,
       });
-      return verdict.kind === "block" ? { block: true, reason: verdict.reason } : undefined;
+      if (verdict.kind === "block") {
+        return { block: true, reason: verdict.reason };
+      }
+      // 决策 324：钩子改过的参数——执行时替换上游按原参数校验过的 args（账本已按改后参数记录）
+      if (verdict.updatedArgs !== undefined) {
+        this.#updatedArgs.set(context.toolCall.id, verdict.updatedArgs);
+      }
+      return undefined;
     } catch (error) {
       return {
         block: true,
         reason: `治理判定异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
       };
+    }
+  }
+
+  // afterToolCall 转发（决策 324）：PostToolUse / PostToolUseFailure——成功走前者、失败走后者；
+  // 替换的结果文本（updatedToolOutput）整份替换正文，补的理由与上下文（decision block 的 reason、additionalContext）
+  // 追加为结果末尾的一个文本块；钩子自身出错只记进内部异常清单，不改变工具结果
+  async #forwardAfterToolCall(
+    context: AfterToolCallContext
+  ): Promise<AfterToolCallResult | undefined> {
+    if (this.#toolHooks?.toolFinished === undefined) return undefined;
+    try {
+      const text = context.result.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+      const outcome = await this.#toolHooks.toolFinished({
+        toolCallId: context.toolCall.id,
+        toolName: context.toolCall.name,
+        args: context.args,
+        isError: context.isError,
+        text,
+      });
+      if (outcome === undefined) return undefined;
+      const extra: Array<{ type: "text"; text: string }> = [];
+      if (outcome.contextText !== undefined) {
+        extra.push({ type: "text", text: outcome.contextText });
+      }
+      if (outcome.replaceText !== undefined) {
+        return { content: [{ type: "text", text: outcome.replaceText }, ...extra] };
+      }
+      if (extra.length > 0) {
+        return { content: [...context.result.content, ...extra] };
+      }
+      return undefined;
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return undefined;
     }
   }
 
@@ -914,8 +972,18 @@ export class PiRuntimeAdapter {
     return {
       ...tool,
       execute: async (toolCallId, params, signal, onUpdate) => {
+        // 决策 324：PreToolUse 钩子改过的参数——用改后的参数执行（治理已按它重新过完全部检查）
+        const updated = this.#updatedArgs.get(toolCallId);
+        if (updated !== undefined) {
+          this.#updatedArgs.delete(toolCallId);
+        }
         try {
-          return await tool.execute(toolCallId, params, signal, onUpdate);
+          return await tool.execute(
+            toolCallId,
+            updated !== undefined ? updated : params,
+            signal,
+            onUpdate
+          );
         } catch (error) {
           this.#toolErrorKinds.set(toolCallId, classifyToolError(error));
           throw error;
@@ -1071,10 +1139,7 @@ export class PiRuntimeAdapter {
           memory: structuredClone(snapshot.memory),
           skills: structuredClone(snapshot.skills),
           ...structuredClone(extras),
-          ...(snapshot.verify !== undefined ? { verify: structuredClone(snapshot.verify) } : {}),
-          ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
           ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
-          ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
           // 决策 188、218：本次的压缩配置
           ...(this.#compactor !== undefined ? { compaction: { ...this.#compactor.config } } : {}),
           // 决策 191、192、207：推送的记忆与复盘标记

@@ -100,6 +100,10 @@ export interface WorkerRuntimeHandle {
   notify?(text: string): string | undefined;
   noticeDelivered?(key: string): boolean;
   withdrawNotice?(key: string): boolean;
+  // 决策 324：运行面就绪（MCP 启动可能异步）——入口层在第一条输入之前跑 SessionStart 等钩子用。
+  // 返回类型在编排层不指明（application 层的 RuntimeBundle 依赖本层，不能反向引用）：由 application 装配方收窄。
+  // 不实现即运行面同步就绪（调用方自行从 onBundle 拿）
+  ready?(): Promise<unknown>;
   // 决策 298：会话记录位置（worker 会话文件的路径）；不实现即结果里不带
   transcript?(): Promise<string | undefined>;
   // 决策 299：本 worker 再派出时的落盘口（它自己的会话存储）；不实现即不能作派出方

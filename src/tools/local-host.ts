@@ -91,16 +91,30 @@ export function createHeadCollector(maxBytes: number): HeadCollector {
 // 终止后等 close 的宽限（毫秒）：孙进程占着输出管道时 close 迟迟不来，超时形同虚设，故到点销毁管道、按结果收尾
 const KILL_GRACE_MS = 5000;
 
+// 分开的 stdout / stderr 各自保留的开头上限
+export const HOST_SEPARATE_STREAM_CAP = 64 * 1024;
+
 function runLocalProcess(
   plan: HostExecPlan,
   cwd: string,
   options: HostExecOptions
 ): Promise<HostExecResult> {
   const collected = createHeadCollector(options.maxOutputBytes);
+  const stdoutOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
+  const stderrOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
   let timedOut = false;
   const finish = (
-    partial: Omit<HostExecResult, "outputBytes" | "outputHash" | "output" | "timedOut">
-  ): HostExecResult => ({ ...partial, timedOut, ...collected.finish() });
+    partial: Omit<
+      HostExecResult,
+      "outputBytes" | "outputHash" | "output" | "timedOut" | "stdout" | "stderr"
+    >
+  ): HostExecResult => ({
+    ...partial,
+    timedOut,
+    ...collected.finish(),
+    stdout: stdoutOnly.finish().output,
+    stderr: stderrOnly.finish().output,
+  });
   return new Promise((resolve) => {
     let settled = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
@@ -132,8 +146,14 @@ function runLocalProcess(
       );
       return;
     }
-    child.stdout?.on("data", (chunk: Buffer) => collected.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => collected.push(chunk));
+    child.stdout?.on("data", (chunk: Buffer) => {
+      collected.push(chunk);
+      stdoutOnly.push(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      collected.push(chunk);
+      stderrOnly.push(chunk);
+    });
     // 超时与中止都 SIGKILL 整组并给宽限：close 在宽限内不来（孙进程仍占管道）就销毁管道、按当前结果收尾
     const terminate = () => {
       killProcessTree(child, "SIGKILL");

@@ -49,6 +49,8 @@ def runner_row(cell, seq, attempt, passed, total, *, keep_failed=0, cost=0.4, re
         "diff": f"streams/tasks-{CELL_TO_CONDITION[cell]}-{attempt}/diffs/step-{seq}.diff",
         "envOpenMs": 1000,
         "judged": True,
+        # 决策 327：repairRounds / finalVerdict / humanTestRestores / verifyToolFaults 已退役，新结果行不再写；
+        # 这里保留它们验证"读到旧结果行里的这些字段时忽略、不报错"
         "repairRounds": None if cell == "M" else 0,
         "finalVerdict": None if cell == "M" else "pass",
         "humanTestRestores": None if cell == "M" else 0,

@@ -29,7 +29,6 @@ import {
   orchestrationSettingsOf,
   parseLaunchFlags,
   resolveStreamFnSpec,
-  resolveVerifyConfig,
   webToolsEnabled,
 } from "../application/launch-flags.ts";
 import { promptHistoryStore } from "../application/prompt-history.ts";
@@ -74,7 +73,7 @@ import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { tuiLogDirOf } from "../state/paths.ts";
-import { loopGuardSettingsOf, webSectionOf } from "../state/settings.ts";
+import { loopGuardSettingsOf, webSectionOf, withHooksDisabled } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { backfillStatusOf, backfillSummaryLine } from "./backfill-view.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
@@ -90,8 +89,8 @@ const BACKFILL_SHUTDOWN_GRACE_MS = 2000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
-  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
+  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-hooks] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
 // 决策 326 ③：壳接管终端之前，在标准错误输出上逐行问答确认会执行命令的配置
@@ -117,8 +116,6 @@ async function main(argv: string[]): Promise<void> {
   const flags: LaunchFlags = parseLaunchFlags(continued.argv, {
     usage: USAGE,
     historyLimit: true,
-    verify: true,
-    retry: true,
     pushedMemory: true,
     sandbox: true,
     spawnWorkers: true,
@@ -133,6 +130,8 @@ async function main(argv: string[]): Promise<void> {
     confirmation: { kind: "interactive", ask: askTrustOnStderr },
     notice: (line) => console.error(line),
   });
+  // 决策 324：--no-hooks 只对本次运行停用全部钩子（清单清空 + disableAllHooks，随快照冻进运行面）
+  if (flags.noHooks) settings = withHooksDisabled(settings);
   // 决策 297–303：编排设定——设置的 orchestration 一节（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
   let orchestration = orchestrationSettingsOf(flags, settings);
   // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
@@ -198,7 +197,6 @@ async function main(argv: string[]): Promise<void> {
       loopGuard,
     };
     const orchestrator = createSessionWorkers(deps);
-    const verify = resolveVerifyConfig(flags, workspaceRoot);
     // 决策 264：主会话注册了 spawn_worker 时绑定编排器；agent 派出的个数按一次运行（每条输入）计
     if (opened.spawnWorker !== undefined && parentSessionId === undefined) {
       let runKey: string | undefined;
@@ -210,8 +208,6 @@ async function main(argv: string[]): Promise<void> {
         orchestrator,
         governanceRoot: workspaceRoot,
         hostSessionId: bundle.adapter.sessionId,
-        hostStore: bundle.sessionStore,
-        ...(verify !== undefined ? { verify } : {}),
         runKey: () => runKey,
         // 决策 297：完成通知进主 agent 的下一轮，空闲时叫醒它；通知同时显示在消息区
         target: bundle.adapter,
@@ -274,13 +270,7 @@ async function main(argv: string[]): Promise<void> {
             // 决策 279：/take 与 take_worker 同一套逻辑与文字
             take: async (name: string) =>
               takeWorkerChanges({ orchestrator, governanceRoot: workspaceRoot }, name).text,
-            spawnAttempts: createSessionAttemptRunner({
-              orchestrator,
-              governanceRoot: workspaceRoot,
-              hostLog: { sessionId: bundle.adapter.sessionId },
-              hostStore: bundle.sessionStore,
-              ...(verify !== undefined ? { verify } : {}),
-            }),
+            spawnAttempts: createSessionAttemptRunner({ orchestrator }),
             // M7（决策 079）：/fork 手动分叉
             fork: (args: string) =>
               runForkCommand({
@@ -296,7 +286,6 @@ async function main(argv: string[]): Promise<void> {
                   ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
                   ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
                   ...pushedMemoryRunOptions(flags),
-                  ...(verify !== undefined ? { verify } : {}),
                 },
               }),
           }
@@ -320,8 +309,6 @@ async function main(argv: string[]): Promise<void> {
     sessionId,
     streamFn,
     flags,
-    ...verifyOption(flags, workspaceRoot),
-    ...retryOption(flags),
     ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
     ...spawnWorkerOption(flags, orchestration),
     taskList: orchestration.taskList,
@@ -331,6 +318,8 @@ async function main(argv: string[]): Promise<void> {
     createApprovalHandler: createHandler,
     // 决策 183、286：--continue / --resume <id> 直接续接——还原对话上下文
     ...(resumed ? { resume: true } : {}),
+    // 决策 324：钩子拦下或出错的一行提示落消息区（壳尚未接管终端时落壳持有格，接管后进消息区）
+    hooksNotice: (line) => shellHolder.current?.addSystem(line),
     onMcpNote: (note) => {
       console.error(`[mcp] ${note}`);
     },
@@ -365,6 +354,10 @@ async function main(argv: string[]): Promise<void> {
       configRules: slot.bundle.configGrants,
       layeredRules: slot.bundle.settings.grants,
     },
+    // 决策 323、324：本会话的钩子面（会话级事件与 /hooks；清单随开局快照冻结，/reload 换新的）
+    hooks: mainBundle.hooks,
+    // 决策 323：收尾钩子的连续拦截上限取设置快照（/reload 后跟着变）
+    stopHookCap: () => settings.merged.stopHookBlockCap,
     // S4：/sessions 会话列表（命令层在 application/session-list.ts，与 cli 同一份）
     sessions: { root: workspaceRoot },
     // M5 S2（决策 038 / 045）：/search 命令上下文与 /resume 历史渲染上限
@@ -404,8 +397,6 @@ async function main(argv: string[]): Promise<void> {
           sessionId: slot.sessionId,
           streamFn,
           flags,
-          ...verifyOption(flags, workspaceRoot),
-          ...retryOption(flags),
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
           ...spawnWorkerOption(flags, orchestration),
           taskList: orchestration.taskList,
@@ -415,6 +406,7 @@ async function main(argv: string[]): Promise<void> {
           createApprovalHandler: createHandler,
           resume: true,
           reloadFrom: slot.bundle,
+          hooksNotice: (line) => shellHolder.current?.addSystem(line),
           onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
         });
         const bundle = opened.bundle;
@@ -427,6 +419,9 @@ async function main(argv: string[]): Promise<void> {
           bundle,
           ...(workers !== undefined ? { workers } : {}),
         };
+        // 决策 323、324：换走旧运行面前跑旧会话的 SessionEnd（reason "switch"），记录落在本会话文件；
+        // 壳 rebindSession 随后会为重建后的会话跑 SessionStart（source "resume"）
+        await shellHolder.current?.endSession("switch");
         await disposeRuntime(previous.bundle).catch(() => {});
         shellHolder.current?.rebindSession(slot.sessionId, {
           runtime: bundle.adapter,
@@ -437,6 +432,7 @@ async function main(argv: string[]): Promise<void> {
             layeredRules: bundle.settings.grants,
           },
           ...(workers !== undefined ? { workers } : {}),
+          hooks: bundle.hooks,
         });
       },
     }),
@@ -476,8 +472,6 @@ async function main(argv: string[]): Promise<void> {
           sessionId: targetId,
           streamFn,
           flags,
-          ...verifyOption(flags, workspaceRoot),
-          ...retryOption(flags),
           ...spawnWorkerOption(flags, orchestration),
           taskList: orchestration.taskList,
           ...webToolsOption,
@@ -486,12 +480,16 @@ async function main(argv: string[]): Promise<void> {
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,
+          hooksNotice: (line) => shellHolder.current?.addSystem(line),
         });
         const bundle = opened.bundle;
         guardMainAgent(bundle);
         const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
         slot = { sessionId: targetId, bundle, workers };
+        // 决策 323、324：换走旧会话前跑它的 SessionEnd（reason "switch"）——记录要落在旧会话文件，
+        // 必须在释放旧运行面之前；壳 rebindSession 随后会为新会话跑 SessionStart（source "resume"）
+        await shellHolder.current?.endSession("switch");
         // 换走的会话在本进程里到此结束：释放后同样记下退出快照（283），供之后补做复盘读代码
         void disposeRuntime(previous.bundle)
           .then(() =>
@@ -507,12 +505,16 @@ async function main(argv: string[]): Promise<void> {
             layeredRules: bundle.settings.grants,
           },
           workers,
+          hooks: bundle.hooks,
         };
       },
     };
   }
   faceHolder.current = shell;
   shellHolder.current = shell;
+  // 决策 323、324：壳接管终端之前跑一次 SessionStart——续跑类入口（--continue / --resume <id>）为
+  // "resume"，否则 "startup"；补的上下文存进壳、下一条输入带上
+  await shell.beginSession(resumed ? "resume" : "startup");
   shell.start();
   warnSink.attach((line) => shell.addWarning(line));
   if (target.kind === "resume") {
@@ -574,6 +576,8 @@ async function main(argv: string[]): Promise<void> {
         backfillDone,
         new Promise((resolve) => setTimeout(resolve, BACKFILL_SHUTDOWN_GRACE_MS)),
       ]);
+      // 决策 323、324：退出前跑一次 SessionEnd（reason "exit"）——必须在释放运行面之前，记录才落盘
+      await shellHolder.current?.endSession("exit");
       await closeTuiSession({
         governanceRoot: workspaceRoot,
         sessionId: current.sessionId,
@@ -604,17 +608,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   });
 }
 
-// M7（决策 071）/ M8（决策 081）：会话级验证命令——启动参数 > 项目配置 > 未配置（未配置时不传）
-function verifyOption(
-  flags: LaunchFlags,
-  governanceRoot: string
-): {
-  verify?: NonNullable<ReturnType<typeof resolveVerifyConfig>>;
-} {
-  const verify = resolveVerifyConfig(flags, governanceRoot);
-  return verify !== undefined ? { verify } : {};
-}
-
 // 决策 264–267：派 worker 开着时每个打开的会话一个工具槽（只给主会话注册，沙箱与 worker 会话由装配层略过）
 // 决策 309：脚本编排随派 worker 一并给（每个打开的会话一个槽与点名状态）
 function spawnWorkerOption(
@@ -627,9 +620,4 @@ function spawnWorkerOption(
         scriptOrchestration: new ScriptSlot(new ScriptGate(scriptGateSettingsOf(orchestration))),
       }
     : {};
-}
-
-// M7（决策 079）：失败自动分叉重试次数
-function retryOption(flags: LaunchFlags): { retryOnFail?: number } {
-  return flags.retryOnFail !== undefined ? { retryOnFail: flags.retryOnFail } : {};
 }

@@ -59,7 +59,7 @@ import {
   LOAD_SKILL_TOOL,
   loadSkillRegistration,
 } from "../skills/load-skill-tool.ts";
-import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
+import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { MemoryReviewTag, ReviewCoverage } from "../state/learned-memory.ts";
@@ -72,6 +72,7 @@ import {
   configGrantRulesOf,
   emptySettingsSnapshot,
   type SettingsSnapshot,
+  withHooksDisabled,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -96,6 +97,7 @@ import {
   webSearchRegistration,
 } from "../web/tools.ts";
 import { createToolGovernance } from "./governance.ts";
+import { SessionHooks } from "./hooks.ts";
 import type { McpSession } from "./mcp.ts";
 import {
   assertReviewBudget,
@@ -209,19 +211,16 @@ export interface RuntimeDeps {
   taskDirective?: string;
   // M9：采样温度——装配层包装 streamFn 传入，并写进注入快照 model 段；缺省不设（由 provider 决定）
   temperature?: number;
-  // M7（决策 071 / 079）：会话级验证命令与失败自动分叉重试次数——冻结进注入快照并随 Run 开始条目落盘
-  verify?: VerifyConfig;
-  retryOnFail?: number;
   // M8（决策 087）：本次尝试的预算——冻结进注入快照并随 Run 开始条目落盘
   budget?: AttemptBudget;
-  // 决策 142 / 143：回炉轮数（只在开启时给）——冻结进注入快照并随 Run 开始条目落盘
-  repairRounds?: number;
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
   // 决策 177：worker 与分支会话的来历，新建会话文件时写进文件头
   storeLineage?: StoreLineage;
   // 会话存储故障告警的出口（缺省标准错误输出；测试注入）
   storeWarn?: WarnSink;
+  // 决策 324：钩子拦下或出错时的一行提示（终端界面落消息区；缺省静默）
+  hooksNotice?: WarnSink;
   // 决策 193：能否检索历史会话。关掉时不注册 search_sessions 与 read_session_entry，系统提示去掉提到它们的那一句；
   // 缺省开着（日常使用与 193 之前逐字一致）
   sessionSearch?: boolean;
@@ -323,6 +322,8 @@ export interface RuntimeBundle {
   configGrants: readonly ConfigGrantRule[];
   // 决策 325：本会话的设置快照（worker 按它继承，/grants 按它列出各层的放权规则）
   settings: SettingsSnapshot;
+  // 决策 323 / 324：会话级钩子（冻结的清单、执行、记录与提示；入口层据此跑 SessionStart/Stop 等会话级事件）
+  hooks: SessionHooks;
   // M5.7 S3：本运行面持有的 MCP 会话（disposeRuntime 一并关闭）
   mcp?: McpSession;
   // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
@@ -405,6 +406,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     onFault: storeFaultWarner(deps.storeWarn),
     persistThinking: deps.persistThinking ?? true,
   });
+  // 决策 323 / 324 / 326 ②：会话级钩子——清单随设置快照冻结；执行位置按执行端（本机/容器，host:true 的在宿主）；
+  // 运行记录写进本会话（pigeon.hook 条目）；拦下或出错经 hooksNotice 给一行提示
+  const sessionHooks = new SessionHooks({
+    sessionId: deps.sessionId,
+    governanceRoot,
+    workspaceRoot: deps.workspaceRoot,
+    platform: workspaceHost.platform,
+    hooks: settings.hooks,
+    disableAllHooks: settings.merged.disableAllHooks,
+    sink: sessionStore,
+    ...(deps.hooksNotice !== undefined ? { notice: deps.hooksNotice } : {}),
+    ...(deps.workspaceHost !== undefined ? { workspaceHost: deps.workspaceHost } : {}),
+  });
+  // PreToolUse 钩子的 additionalContext 随工具结果交给模型：按 toolCallId 暂存，afterToolCall 时一并追加
+  const preToolContexts = new Map<string, string[]>();
   // 决策 3b：会话 grant 运行态——续跑时以会话存储里生效的授权为种子（建立减撤销）
   const grantStore = new SessionGrantStore({
     workspaceRoot: deps.workspaceRoot,
@@ -665,6 +681,20 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           await preCompactionReview(info);
           await deps.beforeCompaction?.(info);
         };
+  // 决策 323 / 324：PreCompact 钩子——压缩之前通知（只通知、不能拦：给压缩结果仍是压缩）。
+  // matcher 匹配触发位置：turn / run-start 记 auto，手动压缩记 manual
+  const hooksBeforeCompaction: BeforeCompaction | undefined = sessionHooks
+    .list()
+    .some((hook) => hook.event === "PreCompact")
+    ? async (info) => {
+        const trigger = info.trigger === "manual" ? "manual" : "auto";
+        await sessionHooks.runEvent("PreCompact", trigger, {
+          trigger,
+          custom_instructions: info.customInstructions ?? null,
+        });
+        await beforeCompaction?.(info);
+      }
+    : beforeCompaction;
   // 占位模型对象（真实模型元数据在模型接入插件里）：压缩摘要请求与网页提炼请求共用
   const placeholderModel = {
     id: deps.modelId,
@@ -685,7 +715,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ? fixTemperature(deps.streamFn, deps.temperature)
         : deps.streamFn,
     model: placeholderModel,
-    ...(beforeCompaction !== undefined ? { beforeCompaction } : {}),
+    ...(hooksBeforeCompaction !== undefined ? { beforeCompaction: hooksBeforeCompaction } : {}),
   });
   // 决策 289：提炼器——本会话同一个模型接入，温度 0，不带工具，有输出上限；不套单轮输出上限与温度的包装，选项直接给
   const webToolset =
@@ -745,10 +775,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
             },
           }
         : {}),
-      ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
-      ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
-      ...(deps.repairRounds !== undefined ? { repairRounds: deps.repairRounds } : {}),
     },
     // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: limitOutputTokens(
@@ -809,6 +836,34 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         workspaceRoot: deps.workspaceRoot,
         // 决策 302：worker 改自己工作树内的文件默认放行
         ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
+        // 决策 324：PreToolUse 钩子——在审批之前执行；拒绝 > 要人确认 > 放行；放行只免人工审批这一步，
+        // 改过的参数重新经过全部检查（交付给执行侧替换）
+        preToolUseHooks: async (input) => {
+          const report = await sessionHooks.runEvent("PreToolUse", input.toolName, {
+            tool_name: input.toolName,
+            tool_input: input.args,
+            tool_use_id: input.toolCallId,
+          });
+          if (report.additionalContext.length > 0) {
+            preToolContexts.set(input.toolCallId, [...report.additionalContext]);
+          }
+          if (report.blocked !== undefined) {
+            return { decision: "deny", reason: report.blocked.reason };
+          }
+          if (report.ask !== undefined) {
+            return {
+              decision: "ask",
+              ...(report.ask.reason !== undefined ? { reason: report.ask.reason } : {}),
+            };
+          }
+          if (report.updatedInput !== undefined) {
+            return { decision: "allow", updatedInput: report.updatedInput };
+          }
+          if (report.allow === true) {
+            return { decision: "allow" };
+          }
+          return undefined;
+        },
         // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按宿主上的真实路径判定，容器工作区经执行端在容器里判定）
         protectedPath:
           deps.workspaceHost !== undefined
@@ -828,7 +883,48 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
     // 决策 264：注册了派 worker 工具时，同一次回复里的多个派出并行执行
     ...(spawnSlot !== undefined ? { parallelTools: true } : {}),
+    // 决策 324：工具结束后的钩子（PostToolUse / PostToolUseFailure）——替换结果文本或把理由与上下文补进结果
+    toolHooks: {
+      toolFinished: async (input) => {
+        const event = input.isError ? "PostToolUseFailure" : "PostToolUse";
+        const report = await sessionHooks.runEvent(event, input.toolName, {
+          tool_name: input.toolName,
+          tool_input: input.args,
+          tool_use_id: input.toolCallId,
+          ...(input.isError ? { error: input.text } : { tool_response: input.text }),
+        });
+        const contexts = [
+          ...(preToolContexts.get(input.toolCallId) ?? []),
+          ...report.additionalContext,
+        ];
+        preToolContexts.delete(input.toolCallId);
+        // PostToolUse 的 decision:"block" 把理由交给模型（追加在工具结果之后）
+        const reasons = report.runs
+          .filter((run) => run.decisionBlock === true && run.reason !== undefined)
+          .map((run) => run.reason as string);
+        const appended = [...contexts, ...reasons];
+        const replaceText =
+          typeof report.updatedToolOutput === "string" ? report.updatedToolOutput : undefined;
+        if (replaceText === undefined && appended.length === 0) return undefined;
+        return {
+          ...(replaceText !== undefined ? { replaceText } : {}),
+          ...(appended.length > 0 ? { contextText: appended.join("\n\n") } : {}),
+        };
+      },
+    },
   });
+  // 决策 323：PostCompact 钩子——压缩完成后通知（无决策能力；触发位置 turn / run-start 记 auto、manual 记 manual）
+  if (sessionHooks.list().some((hook) => hook.event === "PostCompact")) {
+    adapter.subscribeCompaction((notice) => {
+      if (notice.kind === "compacted") {
+        const trigger = notice.trigger === "manual" ? "manual" : "auto";
+        void sessionHooks.runEvent("PostCompact", trigger, {
+          trigger,
+          compact_summary: "",
+        });
+      }
+    });
+  }
   const toolTiers = new Map(
     registry.list().map((registration) => [registration.name, registration.tier])
   );
@@ -838,6 +934,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     grantStore,
     configGrants,
     settings,
+    hooks: sessionHooks,
     toolTiers,
     frozenPrompt: {
       residentMemory,
@@ -850,17 +947,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   };
 }
 
-// 复盘运行面的装配参数：与来源同一份（工具定义因此相同），换会话号与初始消息，系统提示取来源原文；不带验证、回炉、
-// 失败重试、压缩前回调与会话来历；预算取复盘上限；推送照开（注册 update_memory）但不再嵌套压缩前复盘
+// 复盘运行面的装配参数：与来源同一份（工具定义因此相同），换会话号与初始消息，系统提示取来源原文；不带压缩前回调与
+// 会话来历；预算取复盘上限；推送照开（注册 update_memory）但不再嵌套压缩前复盘
 export function reviewRuntimeDeps(
   deps: RuntimeDeps,
   review: { sessionId: SessionId; initialMessages: AgentMessage[] },
   session: ReviewSessionConfig
 ): RuntimeDeps {
   const {
-    verify: _verify,
-    retryOnFail: _retryOnFail,
-    repairRounds: _repairRounds,
     beforeCompaction: _beforeCompaction,
     storeLineage: _storeLineage,
     restoredGrants: _restoredGrants,
@@ -874,6 +968,8 @@ export function reviewRuntimeDeps(
   const reviewModel = learnedMemory?.reviewModel;
   return {
     ...base,
+    // 决策 324：复盘是程序内部运行面，不接使用者配的钩子
+    ...(base.settings !== undefined ? { settings: withHooksDisabled(base.settings) } : {}),
     ...(reviewModel !== undefined
       ? { provider: reviewModel.provider, modelId: reviewModel.modelId }
       : {}),

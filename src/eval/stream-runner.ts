@@ -21,7 +21,7 @@ import {
 import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
-import { sessionsDirOf, verifyConfigPathOf } from "../state/paths.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
@@ -53,9 +53,6 @@ import {
   pinTestConfigFromTree,
   STRANDS_CASE_TIMEOUT_SEC,
   type StreamRepoRuntime,
-  type StreamVerifyStep,
-  verifyConfigFile,
-  verifyScript,
 } from "./stream-profiles.ts";
 import { type ReportIdentity, renderStreamReport } from "./stream-report.ts";
 import {
@@ -80,12 +77,11 @@ import {
 import { runWorkQueue } from "./work-queue.ts";
 
 // 条件表（193、194、217）：记忆的 2 × 2——能否检索历史会话（sessionSearch）× 有无推送记忆（pushedMemory），四格都是
-// 完整 Pigeon、开验证门与 3 轮回炉；最简 agent 另走启动器、不开回炉，作外部参照
+// 完整 Pigeon；最简 agent 另走启动器，作外部参照。
+// 决策 327：验证门与回炉随 322 删除，四格暂不带检查；下次实验接检查的方式随出题规则另行设计
 export interface ConditionSpec {
   name: StreamCondition;
   agent: "pigeon" | "minimal";
-  // 回炉轮数上限（143）；0 为不开回炉。回炉到上限仍不通过即以失败收尾（172 / 173）
-  repairRounds: number;
   // 能否检索历史会话：关掉时 Pigeon 不注册两件会话检索工具，系统提示不提它们
   sessionSearch: boolean;
   // 有无推送记忆：透传给 headless（推送记忆另行施工，打开时 headless 暂时报错）
@@ -96,35 +92,30 @@ export const CONDITION_SPECS: Record<StreamCondition, ConditionSpec> = {
   "search-push": {
     name: "search-push",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: true,
     pushedMemory: true,
   },
   "search-only": {
     name: "search-only",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: true,
     pushedMemory: false,
   },
   "push-only": {
     name: "push-only",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: false,
     pushedMemory: true,
   },
   neither: {
     name: "neither",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: false,
     pushedMemory: false,
   },
   minimal: {
     name: "minimal",
     agent: "minimal",
-    repairRounds: 0,
     sessionSearch: false,
     pushedMemory: false,
   },
@@ -153,9 +144,6 @@ export interface StepAgentInput {
   condition: ConditionSpec;
   target: AgentTarget;
   budget: StepBudget;
-  // 开回炉的条件按它验证：这条流的分步验证（各步名称、命令与执行目录，Pigeon 原样交给 headless，逐步出结论）、
-  // 由它派生的一行命令（交 sh -c、在工作区根执行，给只认一条命令的 agent）与超时
-  verify: { steps: readonly StreamVerifyStep[]; command: string; timeoutMs: number };
   // 宿主上给这个作业用的目录（会话账本等）
   workDir: string;
   // 跑批器按步中止（本作业在网关排队超时等）：agent 与限额信号同一条路径停下（中止 agent、清掉容器里的进程），
@@ -165,14 +153,6 @@ export interface StepAgentInput {
   modelBaseUrl?: string;
   // 经网关时，读这个作业此刻的计量：推送格在每次复盘前后各读一次，做差即复盘的请求数、token 与花费（235）
   meter?: () => GatewayMeter;
-  // 人在该步之前的树（起点）里的测试与测试辅助文件：回炉验证前只还原（并计数）这些——agent 改了人的旧测试即还原成
-  // 起点的版本；人在该步新写的测试 agent 看不到，不在其列（198）
-  humanTestFiles?: ReadonlySet<string>;
-  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）、起点树里人的测试文件与起点树里的全部路径：回炉验证前按与
-  // 判题前同一规则删掉 agent 放的、覆盖人写测试的这类文件（起点树里有的一律不删，例如仓库根的 conftest.py）
-  autoloadedTestHelper?: string;
-  humanTests?: readonly string[];
-  humanTree?: readonly string[];
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守
@@ -256,15 +236,6 @@ export interface StepAgentResult {
   turns: number;
   usage: TurnUsage;
   wallMs: number;
-  // 开回炉的条件：用了几轮、最后一次验证结论（无法判定为 null）；未开回炉为 null
-  repair: {
-    rounds: number;
-    finalVerdict: "pass" | "fail" | null;
-    // 验证之前发现 agent 改过人写测试并还原的次数（容器模式的 Pigeon 给出；缺省按 0 记）
-    humanTestRestores?: number;
-    // 各次验证里标了工具故障（检查工具自身崩溃，重跑一次仍崩溃，决策 170 ③）的步数合计（缺省按 0 记）
-    toolFaults?: number;
-  } | null;
   // 这一步被打断（模型服务故障、限额）：整题作废、不留行
   interrupted?: string;
   // 推送格的复盘（191、192、207）：没推送的条件缺省
@@ -627,13 +598,6 @@ async function runStreamJob(
   // 目录名必须同时含这两者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });
-  // 分步验证配置另存一份在作业的治理根，供事后查看这个作业验证的是什么（Pigeon 的验证不读它：跑批器每步把分步配置
-  // 直接交给步 agent）；不写进容器工作区
-  mkdirSync(path.dirname(verifyConfigPathOf(jobDir)), { recursive: true });
-  writeAtomic(
-    verifyConfigPathOf(jobDir),
-    `${JSON.stringify(verifyConfigFile(options.runtime.verifySteps, options.judgeTimeoutMs ?? 1_800_000), null, 2)}\n`
-  );
   // 每步完成时治理根里的会话文件清单（相对会话根的路径，含工作目录编码子目录）：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出
   const sessionsFile = (seq: number) => path.join(jobDir, `sessions-${seq}.json`);
   const lines = readStreamResults(resultsFile);
@@ -1140,10 +1104,6 @@ async function runStep(
     envOpenMs,
     envPrefetched,
     judged: false,
-    repairRounds: null,
-    finalVerdict: null,
-    humanTestRestores: null,
-    verifyToolFaults: null,
     agentChangedDeps: null,
     judging: null,
     baselineUnavailable: classes.unbuildable,
@@ -1183,9 +1143,6 @@ async function runStep(
       voidOnAccessError(step.seq, error);
     }
     const startTree = await ws.worktreeTree();
-    // 回炉验证前的保护按起点的树（8.2）：agent 改了人的旧测试即还原成起点的版本；人在该步新写的测试它看不到
-    const startPaths = options.human.tree(step.parent).map((e) => e.path);
-    const classify = (p: string) => options.runtime.profile.classifyFile(p);
     const key = streamJobKey(job);
     const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
       agent.run({
@@ -1195,22 +1152,7 @@ async function runStep(
         condition: spec,
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
-        verify: {
-          steps: options.runtime.verifySteps,
-          command: verifyScript(options.runtime.verifySteps),
-          timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
-        },
         workDir: jobDir,
-        humanTestFiles: new Set(
-          startPaths.filter((p) => classify(p) === "test" || classify(p) === "testaux")
-        ),
-        ...(options.runtime.autoloadedTestHelper !== undefined
-          ? {
-              autoloadedTestHelper: options.runtime.autoloadedTestHelper,
-              humanTests: startPaths.filter((p) => classify(p) === "test"),
-              humanTree: startPaths,
-            }
-          : {}),
         ...(options.gateway !== undefined
           ? {
               modelBaseUrl: options.gateway.jobBaseUrl(key),
@@ -1304,10 +1246,6 @@ async function runStep(
       diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
       envOpenMs,
       envPrefetched,
-      repairRounds: result.repair?.rounds ?? null,
-      finalVerdict: result.repair?.finalVerdict ?? null,
-      humanTestRestores: result.repair === null ? null : (result.repair.humanTestRestores ?? 0),
-      verifyToolFaults: result.repair === null ? null : (result.repair.toolFaults ?? 0),
       agentChangedDeps,
       memoryAtEnd,
       hitStepBudget,

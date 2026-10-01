@@ -1,11 +1,11 @@
-// 会话树分叉与续跑（M7 S6，决策 068 / 077 / 078 / 079；账本重构 177）。
+// 会话树分叉与续跑（M7 S6，决策 068 / 077 / 078；账本重构 177；失败自动分叉重试随决策 322 删除）。
 // 分叉顺序：a. 从会话存储读来源会话（本进程写者先落盘），核对分叉点、找分叉点之前最近的快照 → b. 在来源会话文件里记分叉条目
 // （写不成就不分叉：冷会话被另一进程持有时按会话锁失败）→ c. 从快照开独立工作树 → d. 用 pi 的 fork 把分叉点（含）之前的
 // 历史复制进分支会话的新文件，文件头记来源会话与分支来历；分支运行面随后打开这个文件续写。
 // 续跑（078 / 077）：以 buildSessionContext 从分支文件还原的消息作为 Agent 初始状态；分支是新的 Pigeon 会话。
 // 分叉点末条是用户消息或工具结果时不给新输入直接续跑，末条是助手消息时必须给新输入。非 git 工作区发起分叉明确报错，
 // 不降级，也不留任何记录。来源会话在会话存储里没有文件时明确报错（旧格式会话不读，187）。
-// 失败自动分叉重试（079）：尝试标为失败时从本次任务开始处（该 Run 第 1 条）分叉重试，最多 K 次，不注入任何提示。
+// ForkTrigger 的 "retry-on-fail" 保留在 schema 里供读旧会话，新会话不再产生
 
 import {
   type Checkpointer,
@@ -17,7 +17,7 @@ import { addWorktree, mainRepoRoot } from "../orchestration/worktree.ts";
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { AgentMessage } from "../pi-runtime/index.ts";
 import { sessionContextMessages } from "../pi-runtime/session-store.ts";
-import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
+import { newSessionId, type SessionId } from "../state/ids.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import { storeCheckpointBefore, storeMessageAt } from "../state/session-judge.ts";
 import type {
@@ -26,7 +26,7 @@ import type {
   ForkTrigger,
   GitWorktreeWorkspace,
 } from "../state/session-payloads.ts";
-import { type HeadlessRunOptions, runHeadlessOnce } from "./headless-core.ts";
+import { type HeadlessRunOptions, runHeadless } from "./headless-core.ts";
 import { beginStoreFork, type SessionStoreWriter, storeFaultWarner } from "./session-store.ts";
 import { sessionRuntimeScope } from "./worker-scope.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -179,7 +179,6 @@ export type ForkRunOptions = Omit<
   | "initialMessages"
   | "continueFromHistory"
   | "onBundle"
-  | "retryOnFail"
 >;
 
 export interface ForkBranchRequest extends Omit<ForkRequest, "input"> {
@@ -192,7 +191,6 @@ export interface ForkBranchResult {
   workspace: GitWorktreeWorkspace;
   status: string;
   label: OutcomeLabel;
-  verified: boolean;
 }
 
 export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBranchResult> {
@@ -206,7 +204,7 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
     ...(request.checkpointer !== undefined ? { checkpointer: request.checkpointer } : {}),
     ...(input !== undefined ? { input } : {}),
   });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     ...run,
     task: input ?? "",
     governanceRoot: request.governanceRoot,
@@ -229,41 +227,5 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
     workspace: prepared.workspace,
     status: result.status,
     label: result.label,
-    verified: result.verification !== undefined,
   };
-}
-
-export interface RetryOutcome {
-  retries: ForkBranchResult[];
-}
-
-// 失败自动分叉重试（079）：从本次任务开始处分叉，最多 K 次，某次不再是失败即停
-export async function runRetryOnFail(input: {
-  governanceRoot: string;
-  sourceSessionId: SessionId;
-  sourceStore?: SessionStoreWriter;
-  runId: RunId;
-  retries: number;
-  run: ForkRunOptions;
-  // 来源会话的运行面还在时传入它的快照器实例（同一会话只能有一个实例）
-  checkpointer?: Checkpointer;
-}): Promise<RetryOutcome> {
-  const forkPoint: ForkPoint = { runId: input.runId, runSeq: 1 };
-  const results: ForkBranchResult[] = [];
-  for (let attempt = 0; attempt < input.retries; attempt++) {
-    const branch = await runForkBranch({
-      governanceRoot: input.governanceRoot,
-      sourceSessionId: input.sourceSessionId,
-      ...(input.sourceStore !== undefined ? { sourceStore: input.sourceStore } : {}),
-      forkPoint,
-      trigger: "retry-on-fail",
-      ...(input.checkpointer !== undefined ? { checkpointer: input.checkpointer } : {}),
-      run: input.run,
-    });
-    results.push(branch);
-    if (branch.label !== "Failed") {
-      break;
-    }
-  }
-  return { retries: results };
 }

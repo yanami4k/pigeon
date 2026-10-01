@@ -17,7 +17,7 @@ import {
   toolResultMark,
 } from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 const ORIGINAL = "alpha\nbeta\ngamma\n";

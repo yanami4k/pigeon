@@ -45,7 +45,6 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
     third = (third_pass_decision(df, spent=spent_summary(info["spend"]), minimal_reserve=args.minimal_reserve)
              if passes == {2} else None)
     common_settings(info["settings"])
-    faults = {str(c): float(g["verify_tool_faults"].sum()) for c, g in df.groupby("cell") if g["verify_tool_faults"].notna().any()}
     interface = None
     if args.unguessable is not None:
         # 接口不可猜的敏感性分析（316）：剔除用例的逐行结果优先取与原结果行一致的重判结果
@@ -55,7 +54,7 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
             rejudged=rejudged, rejudge_inconsistent=inconsistent, expected_tasks=tasks, baseline_unavailable=no_baseline)
     elif args.case_results:
         raise ValueError("--case-results 要与 --unguessable 一起给")
-    return formal_result(primary, secondary, third, info, faults, interface)
+    return formal_result(primary, secondary, third, info, interface)
 
 
 def run_calibration(args: argparse.Namespace) -> dict[str, Any]:

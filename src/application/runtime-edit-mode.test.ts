@@ -9,7 +9,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { REPLACE_EDIT_DESCRIPTION } from "../tools/replace-edit.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加
 const TRUNCATION_GUIDANCE =

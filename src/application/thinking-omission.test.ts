@@ -9,7 +9,7 @@ import { createReadSessionEntryTool } from "../memory/search-tools.ts";
 import { createSessionSearch, type SessionSearchHit } from "../memory/session-search.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { loadSessionHistory } from "./history.ts";
 import type { McpSession } from "./mcp.ts";
 

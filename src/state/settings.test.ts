@@ -12,6 +12,7 @@ import {
   type SettingsLayer,
   type SettingsSnapshot,
   validateSettingsLayer,
+  withHooksDisabled,
 } from "./settings.ts";
 
 const FILES: Record<SettingsLayer, string> = {
@@ -174,4 +175,136 @@ test("合并后的组合判据：角色引用了各层都没有的短名、轮�
     project: { commands: { roles: { tester: ["test"] } } },
   });
   assert.deepEqual(mergedSettingsProblems(ok.merged), []);
+});
+
+// 决策 323 / 324：hooks 一节是并列合并的第二个例外——各层条目都生效（不去重事件或 matcher），
+// 只有「同一事件、同一 matcher、命令完全相同」才只留一份（第一份为准）。
+test("hooks：三层条目并列生效（各层各命中一条都保留）；同一事件同一 matcher 下命令完全相同的只留一份；sectionSources 记录各层", () => {
+  const snapshot = snapshotOf({
+    user: {
+      hooks: { SessionStart: [{ hooks: [{ type: "command", command: "node start.mjs" }] }] },
+    },
+    project: {
+      hooks: {
+        // 与用户级逐字相同（事件、matcher 都缺省、命令相同）：合并后只留用户级那一份
+        SessionStart: [{ hooks: [{ type: "command", command: "node start.mjs" }] }],
+        PreToolUse: [
+          { matcher: "edit_file", hooks: [{ type: "command", command: "node guard.mjs" }] },
+        ],
+      },
+    },
+    local: {
+      hooks: {
+        // 同事件、不同 matcher、不同命令：并列保留
+        PreToolUse: [
+          {
+            matcher: "run_command",
+            hooks: [{ type: "command", command: "node cmd-guard.mjs", host: true, timeout: 5 }],
+          },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(
+    snapshot.hooks.map((hook) => [hook.layer, hook.event, hook.matcher, hook.command, hook.host]),
+    [
+      ["user", "SessionStart", undefined, "node start.mjs", false],
+      ["project", "PreToolUse", "edit_file", "node guard.mjs", false],
+      ["local", "PreToolUse", "run_command", "node cmd-guard.mjs", true],
+    ]
+  );
+  // timeout 是秒（照 Claude Code 的配置写法），进合并后换算成毫秒
+  assert.equal(snapshot.hooks[2]?.timeoutMs, 5000);
+  assert.deepEqual(snapshot.sectionSources.hooks, ["user", "project", "local"]);
+  // 同一层内命令相同但 matcher 不同：不去重
+  const sameLayer = snapshotOf({
+    local: {
+      hooks: {
+        PreToolUse: [
+          { matcher: "edit_file", hooks: [{ type: "command", command: "node same.mjs" }] },
+          { matcher: "run_command", hooks: [{ type: "command", command: "node same.mjs" }] },
+        ],
+      },
+    },
+  });
+  assert.equal(sameLayer.hooks.length, 2);
+});
+
+test("disableAllHooks 与 stopHookBlockCap：三层按标量覆盖（高优先层说了算），缺省分别 false 与 8", () => {
+  // 只有低优先层给了 true：仍然生效
+  const userOnly = snapshotOf({
+    user: { disableAllHooks: true },
+    project: { commands: { commands: { test: "npm test" } } },
+  });
+  assert.equal(userOnly.merged.disableAllHooks, true);
+  assert.equal(userOnly.merged.stopHookBlockCap, 8);
+  // 高优先层（项目个人）用 false 覆盖低优先层的 true
+  const localWins = snapshotOf({
+    user: { disableAllHooks: true, stopHookBlockCap: 20 },
+    local: { disableAllHooks: false, stopHookBlockCap: 3 },
+  });
+  assert.equal(localWins.merged.disableAllHooks, false);
+  assert.equal(localWins.merged.stopHookBlockCap, 3);
+  // 项目共享高优先于用户级
+  const projectWins = snapshotOf({
+    user: { stopHookBlockCap: 20 },
+    project: { stopHookBlockCap: 2 },
+  });
+  assert.equal(projectWins.merged.stopHookBlockCap, 2);
+  assert.equal(projectWins.merged.disableAllHooks, false);
+});
+
+test("钩子校验：非法 matcher 报问题、未知事件名被拒；未知顶层键的可用清单里有 disableAllHooks 与 stopHookBlockCap", () => {
+  // matcher 须是合法正则；点名事件与原文
+  const badMatcher = problemsOf("project", {
+    hooks: { PreToolUse: [{ matcher: "([", hooks: [{ type: "command", command: "node x.mjs" }] }] },
+  });
+  assert.match(badMatcher.join("\n"), /hooks\.PreToolUse：matcher 不是合法正则：\(\[/);
+  // 缺省、空串与 "*" 都匹配全部，不算非法
+  valid("local", {
+    hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "node x.mjs" }] }] },
+  });
+  // hooks 一节的键限 13 个事件名：写错事件名即被拒（按节内未知键报出）
+  const badEvent = problemsOf("user", {
+    hooks: { PreToolCall: [{ hooks: [{ type: "command", command: "node x.mjs" }] }] },
+  });
+  assert.match(badEvent.join("\n"), /hooks 一节里的未知键 PreToolCall/);
+  // 未知顶层键的报错文案列出全部可用键（含两个钩子顶层开关）
+  const unknownKey = problemsOf("project", { hookz: {} }).join("\n");
+  assert.match(unknownKey, /未知键 hookz/);
+  assert.match(unknownKey, /disableAllHooks/);
+  assert.match(unknownKey, /stopHookBlockCap/);
+  // 开关类型与取值范围由 schema 兜底
+  assert.ok(problemsOf("local", { stopHookBlockCap: 0 }).length > 0);
+  assert.ok(problemsOf("local", { disableAllHooks: "yes" }).length > 0);
+});
+
+test("withHooksDisabled：清单清空、disableAllHooks 置位，其余各节原样；不改原快照", () => {
+  const snapshot = snapshotOf({
+    project: {
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: "node stop.mjs" }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: "node prompt.mjs" }] }],
+      },
+      commands: { commands: { test: "npm test" } },
+      loopGuard: { remindAt: 4 },
+      orchestration: { maxConcurrent: 3 },
+    },
+  });
+  assert.equal(snapshot.hooks.length, 2);
+  const off = withHooksDisabled(snapshot);
+  assert.deepEqual(off.hooks, []);
+  assert.equal(off.merged.disableAllHooks, true);
+  // 其余各节逐字不变
+  assert.equal(off.merged.stopHookBlockCap, snapshot.merged.stopHookBlockCap);
+  assert.deepEqual(off.merged.commands, snapshot.merged.commands);
+  assert.deepEqual(off.merged.loopGuard, snapshot.merged.loopGuard);
+  assert.deepEqual(off.merged.orchestration, snapshot.merged.orchestration);
+  assert.deepEqual(off.sectionSources, snapshot.sectionSources);
+  assert.deepEqual(off.grants, snapshot.grants);
+  assert.deepEqual(off.commandSources, snapshot.commandSources);
+  assert.equal(off.root, snapshot.root);
+  // 原快照不动（不改就地）
+  assert.equal(snapshot.merged.disableAllHooks, false);
+  assert.equal(snapshot.hooks.length, 2);
 });

@@ -1,16 +1,12 @@
 // 新会话存储的自定义条目（决策 176 / 182 / 184）：会话文件是 pi 的 v4 JSONL 会话树，消息以 pi 消息条目完整存储（179），
 // Pigeon 自有的事实只以 custom 条目挂进树里（上游 entry 与 record 类型封闭，写入未知类型"写时不报、读时整个文件打不开"）。
-// 除消息外只写八种：Run 开始、Run 收尾、验证记录、代码快照、worker 派出与收尾、分叉、授权建立与撤销、终端界面退出（283）。
+// 除消息外只写九种：Run 开始、Run 收尾、验证记录（旧会话只读）、代码快照、worker 派出与收尾、分叉、授权建立与撤销、
+// 终端界面退出（283）、钩子运行（323）。
 // 条目数据的形状与版本由 Pigeon 自己负责（上游读盘只要求 customType 是字符串）：每种数据都带 version，读者按它分派。
 // worker 与分支会话的来历不写成条目，放进会话文件头的 metadata（只在创建与分叉时写一次，177）。
 // 本文件只定义形状与写入接口，纯类型、无 IO；写者在 pi-runtime/session-store.ts，只读读取器在 persistence/session-reader.ts。
 import { type Static, Type } from "typebox";
-import {
-  AttemptBudgetSchema,
-  RepairRoundsSchema,
-  RetryOnFailSchema,
-  VerifyConfigSchema,
-} from "./attempt-config.ts";
+import { AttemptBudgetSchema } from "./attempt-config.ts";
 import { Sha256HexSchema } from "./hashing.ts";
 import { GrantIdSchema, RunIdSchema, SessionIdSchema } from "./ids.ts";
 import { MemoryReviewTagSchema, PushedMemoryManifestSchema } from "./learned-memory.ts";
@@ -29,9 +25,8 @@ import {
   WorkerRoleSchema,
   WorkerWorkspaceSchema,
 } from "./session-payloads.ts";
-import { VerifyStepResultSchema } from "./verify-steps.ts";
 
-// 七种自定义条目的 customType（加 pigeon. 前缀，与上游或其他应用写的 custom 条目区分）
+// 八种自定义条目的 customType（加 pigeon. 前缀，与上游或其他应用写的 custom 条目区分）
 export const SessionEntryType = {
   RunStart: "pigeon.run-start",
   RunEnd: "pigeon.run-end",
@@ -41,6 +36,7 @@ export const SessionEntryType = {
   Fork: "pigeon.fork",
   Grant: "pigeon.grant",
   Exit: "pigeon.exit",
+  Hook: "pigeon.hook",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -75,10 +71,9 @@ export const RunStartDataSchema = Type.Object({
   skills: run.skills,
   mcpTools: run.mcpTools,
   mcpServers: run.mcpServers,
-  verify: Type.Optional(VerifyConfigSchema),
-  retryOnFail: Type.Optional(RetryOnFailSchema),
   budget: Type.Optional(AttemptBudgetSchema),
-  repairRounds: Type.Optional(RepairRoundsSchema),
+  // 决策 322：验证命令、失败自动分叉重试与回炉轮数已删除。本对象非严格（未设 additionalProperties: false），
+  // 旧记录里的 verify、retryOnFail、repairRounds 字段读取时忽略
   // 上下文压缩配置（188、218）：运行面没有压缩（测试装配）时不带
   compaction: Type.Optional(CompactionConfigSchema),
   // 推送的记忆（191）：推送开着时记开局冻结的 MEMORY.md 身份（路径、哈希、字节数、条数、上限），与常驻 Memory 分开
@@ -99,7 +94,8 @@ export const RunStopCauseSchema = Type.Union([
 export type RunStopCause = Static<typeof RunStopCauseSchema>;
 
 // Run 的结束方式：正常完成、撞轮数 / 墙钟 / token 上限、打转叫停、熔断、中止、出错，以及空回复异常结束
-// （empty-reply：空回复重试一次仍空，见 pi-runtime/adapter.ts 的 isEmptyReply）
+// （empty-reply：空回复重试一次仍空，见 pi-runtime/adapter.ts 的 isEmptyReply）。
+// 决策 322 / 323：stop-hook-limit = 收尾钩子连续拦截到上限后照常结束（不贴失败标签）
 export const RunEndingSchema = Type.Union([
   Type.Literal("completed"),
   Type.Literal("turn-limit"),
@@ -110,6 +106,7 @@ export const RunEndingSchema = Type.Union([
   Type.Literal("aborted"),
   Type.Literal("error"),
   Type.Literal("empty-reply"),
+  Type.Literal("stop-hook-limit"),
 ]);
 export type RunEnding = Static<typeof RunEndingSchema>;
 
@@ -126,10 +123,17 @@ export const RunEndDataSchema = Type.Object({
 });
 export type RunEndData = Static<typeof RunEndDataSchema>;
 
-// 验证记录的一步：在旧的各步结论上加"工具故障"标记——检查工具本身崩溃（以各检查工具公开的非正常退出码识别，
-// 重跑一次仍崩）时标记，整体结论只看其余步（决策 170 ③；识别表见 state/verify-steps.ts）
+// 验证记录的一步（决策 159 / 170 ③）：决策 322 删除验证门后验证记录已停写，本 schema 只为旧会话照常可读而保留
+// （原 VerifyStepResultSchema 在 state/verify-steps.ts，随删除并入此处，含工具故障标记）
 export const VerificationStepSchema = Type.Object({
-  ...VerifyStepResultSchema.properties,
+  name: Type.String({ minLength: 1 }),
+  exitCode: Type.Union([Type.Integer(), Type.Null()]),
+  verdict: EvalVerdictSchema,
+  output: Type.String(),
+  truncated: Type.Boolean(),
+  // 这一步的执行目录（相对工作区根）；缺省即工作区根
+  cwd: Type.Optional(Type.String({ minLength: 1 })),
+  // 检查工具自身崩溃的标记：整体结论只看不带此标记的步
   toolFault: Type.Optional(Type.Literal(true)),
 });
 export type VerificationStep = Static<typeof VerificationStepSchema>;
@@ -280,6 +284,25 @@ export const ExitDataSchema = Type.Object({
 });
 export type ExitData = Static<typeof ExitDataSchema>;
 
+// 钩子的一次运行（决策 323 / 324）：事件、命令、退出码、用时、结论与输出摘要。
+// 结论按事件各自的语义记（放行 / 拦下 / 要求确认 / 补上下文 / 只通知 / 钩子自身出错）；输出摘要为 stdout 与 stderr 的截尾
+export const HookRunDataSchema = Type.Object({
+  version: VERSION,
+  // 写入时该会话的活动 Run（会话级事件如 SessionStart 无 Run 时缺省）
+  runId: Type.Optional(RunIdSchema),
+  event: Type.String({ minLength: 1 }),
+  command: Type.String({ minLength: 1 }),
+  matcher: Type.Optional(Type.String()),
+  exitCode: Type.Union([Type.Integer(), Type.Null()]),
+  timedOut: Type.Boolean(),
+  durationMs: Type.Integer({ minimum: 0 }),
+  // 结论：allow / deny / ask / block / context / notify / pass / error / limit（词表见 application/hooks.ts）
+  conclusion: Type.String({ minLength: 1 }),
+  // stdout 与 stderr 的摘要（截尾；空即缺省）
+  output: Type.Optional(Type.String()),
+});
+export type HookRunData = Static<typeof HookRunDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -289,7 +312,8 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Worker; data: WorkerData }
   | { customType: typeof SessionEntryType.Fork; data: ForkData }
   | { customType: typeof SessionEntryType.Grant; data: GrantData }
-  | { customType: typeof SessionEntryType.Exit; data: ExitData };
+  | { customType: typeof SessionEntryType.Exit; data: ExitData }
+  | { customType: typeof SessionEntryType.Hook; data: HookRunData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -301,6 +325,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Fork]: ForkDataSchema,
   [SessionEntryType.Grant]: GrantDataSchema,
   [SessionEntryType.Exit]: ExitDataSchema,
+  [SessionEntryType.Hook]: HookRunDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。

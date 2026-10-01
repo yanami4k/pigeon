@@ -10,7 +10,7 @@
 // 宿主环境变量不进容器：容器内环境由镜像与本实现的 env 选项决定。
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { createHeadCollector } from "../tools/local-host.ts";
+import { createHeadCollector, HOST_SEPARATE_STREAM_CAP } from "../tools/local-host.ts";
 import { WorkspacePathError, WorkspacePathNotFoundError } from "../tools/paths.ts";
 import {
   type HostExecOptions,
@@ -26,60 +26,6 @@ import {
 export class ContainerHostError extends Error {
   readonly pigeonToolErrorKind = "environment";
 }
-
-// 这一步的起点缺了"开工时的树"：无法按起点还原受保护的文件
-export class StepStartLostError extends Error {}
-
-// 一次还原的路径条数上限：避免撞上命令行长度限制
-const RESTORE_BATCH = 200;
-// "开工时的树"的提交：复制真实索引到临时索引，在其上 add -A 写成树，以起点提交（$1）为父提交；打印新提交
-const START_TREE_SCRIPT = [
-  "set -e",
-  'idx="$(git rev-parse --git-path index)"; tmp="$idx.pigeon-start"; rm -f "$tmp"',
-  '[ -f "$idx" ] && cp "$idx" "$tmp"',
-  'export GIT_INDEX_FILE="$tmp"',
-  "git add -A",
-  'tree="$(git write-tree)"',
-  'rm -f "$tmp"',
-  'git -c user.name=pigeon -c user.email=pigeon@localhost commit-tree "$tree" -p "$1" -m "pigeon step start"',
-].join("\n");
-// 与开工时的树（$1）相比，现在被改动、删除或换了类型的文件（不含新建的）：同样在临时索引上 add -A 写成树再比，
-// 不动真实索引与工作区；路径以 NUL 分隔
-// agent 能改的 git 设置不得影响跑批器自己的 git 操作：不执行 .git/hooks 里的钩子，不跑 fsmonitor 程序
-const SAFE_GIT = 'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; };';
-// 相对开工时的树改过的路径：临时索引从开工时的树读起（不沿用工作区索引，agent 在里面设的 skip-worktree 与
-// assume-unchanged 标记因此不起作用），再把工作区全部加进来比较
-const CHANGED_SINCE_START_SCRIPT = [
-  "set -e",
-  SAFE_GIT,
-  'idx="$(g rev-parse --git-path index)"; tmp="$idx.pigeon-now"; rm -f "$tmp"',
-  'export GIT_INDEX_FILE="$tmp"',
-  'g read-tree "$1"',
-  "g add -A",
-  'tree="$(g write-tree)"',
-  'rm -f "$tmp"',
-  'g diff-tree -r -z --name-only --no-renames --diff-filter=MDT "$1" "$tree"',
-].join("\n");
-
-// 把给定路径还原成开工时的版本：先去掉工作区索引里这些路径的 skip-worktree 与 assume-unchanged 标记（否则检出会跳过
-// 它们；标记要以参数给路径才生效，--stdin 读入的路径不带标记操作；两种标记一次只认最后一个，分两次去），再检出
-// （换成了目录的也由检出换回文件）、取消暂存；全程不执行钩子
-const UNMARK = "git -c core.hooksPath=/dev/null -c core.fsmonitor=false update-index";
-// agent 留下的未解决冲突（merge、stash pop 等）先收成干净的索引：去掉进行中的合并状态，冲突路径按工作区里的样子暂存，
-// 否则去标记会报 Unable to mark file、这一步被当成服务故障
-const SETTLE_CONFLICTS = [
-  'gd="$(g rev-parse --git-dir)";',
-  'rm -f -- "$gd/MERGE_HEAD" "$gd/MERGE_MSG" "$gd/MERGE_MODE" "$gd/AUTO_MERGE" "$gd/CHERRY_PICK_HEAD" "$gd/REVERT_HEAD" &&',
-  "g diff -z --name-only --diff-filter=U | xargs -0 -r git -c core.hooksPath=/dev/null -c core.fsmonitor=false add -A -- &&",
-].join(" ");
-const RESTORE_FROM_START_SCRIPT = [
-  SAFE_GIT,
-  'base="$1"; shift;',
-  SETTLE_CONFLICTS,
-  `g ls-files -z -- "$@" | xargs -0 -r ${UNMARK} --no-skip-worktree -- &&`,
-  `g ls-files -z -- "$@" | xargs -0 -r ${UNMARK} --no-assume-unchanged -- &&`,
-  'g checkout -q "$base" -- "$@" && g reset -q -- "$@"',
-].join(" ");
 
 // 跑批器与执行端自己在容器里执行的内部命令用的 shell：/bin/sh 取绝对路径（docker exec 按镜像的 PATH 找 sh，而镜像的
 // PATH 可能以 agent 能改指的链接开头，例如 /opt/venv/bin），脚本开头把系统目录放到 PATH 最前（sh、find、git、chmod、
@@ -97,10 +43,6 @@ export function trustedShell(script: string, ...args: readonly string[]): string
     ...args,
   ];
 }
-// 以固定 PATH 执行一条命令（argv[0] 从系统目录解析）
-export function trustedCommand(argv: readonly string[]): string[] {
-  return trustedShell('exec "$@"', ...argv);
-}
 
 export interface ContainerHostOptions {
   // 容器名或 id（须已在运行）
@@ -111,9 +53,6 @@ export interface ContainerHostOptions {
   docker?: readonly string[];
   // 每次 exec 带入容器的环境变量（如外部基准镜像里激活测试环境所需的 PATH）
   env?: Readonly<Record<string, string>>;
-  // 给"开工时的树"建的引用（如 refs/pigeon/step-start/<流>/<步>）：开工时的树是挂在起点提交下的独立提交，没有引用会被
-  // 垃圾回收；有了引用，它随流历史一起导出，事后取得到
-  stepStartRef?: string;
   // 辅助调用（解析路径、读写文件、列清单、重启容器）的超时，缺省 60 秒
   helperTimeoutMs?: number;
 }
@@ -189,19 +128,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     return realRoot;
   };
 
-  // 在工作区根执行一个辅助命令，失败即抛环境错误；返回标准输出
-  // 执行端自己的命令（取起点、还原受保护文件）：以固定 PATH 执行，不经过 agent 能改指的链接
-  const must = async (command: string[], what: string): Promise<Buffer> => {
-    const result = await helper(execArgs(false, trustedCommand(command)));
-    if (daemonFailure(result)) {
-      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
-    }
-    if (result.exitCode !== 0) {
-      throw new ContainerHostError(`${what}失败：${result.stderr.trim()}`);
-    }
-    return result.stdout;
-  };
-
   const restart = async (): Promise<void> => {
     const result = await helper([...dockerPrefix, "restart", "-t", "0", options.container]);
     if (result.exitCode !== 0) {
@@ -243,6 +169,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     },
     exec(plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> {
       const collected = createHeadCollector(execOptions.maxOutputBytes);
+      // 分开的两路输出（钩子协议要区分 stdout 与 stderr；上限同本机）
+      const stdoutOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
+      const stderrOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
       // OCI 运行时与守护进程的报错可能落在任一输出流：两路各留一小段开头用来识别
       let stderrHead = "";
       let stdoutHead = "";
@@ -265,12 +194,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         }
         child.stdout?.on("data", (chunk: Buffer) => {
           collected.push(chunk);
+          stdoutOnly.push(chunk);
           if (stdoutHead.length < 2048) {
             stdoutHead += chunk.toString("utf8");
           }
         });
         child.stderr?.on("data", (chunk: Buffer) => {
           collected.push(chunk);
+          stderrOnly.push(chunk);
           if (stderrHead.length < 2048) {
             stderrHead += chunk.toString("utf8");
           }
@@ -302,7 +233,11 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         child.on("close", (code, signal) => {
           cleanup();
           const settle = (): void => {
-            const output = collected.finish();
+            const output = {
+              ...collected.finish(),
+              stdout: stdoutOnly.finish().output,
+              stderr: stderrOnly.finish().output,
+            };
             if (terminating !== undefined) {
               resolve({ spawned: true, exitCode: null, timedOut, ...output });
               return;
@@ -376,58 +311,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return { files, truncated };
     },
     findLauncherScript: () => undefined,
-    async markStepStart() {
-      const commit = (await must(["git", "rev-parse", "--verify", "HEAD"], "取起点提交"))
-        .toString("utf8")
-        .trim();
-      // "开工时的树"：在临时索引上 add -A（不含被忽略的）写成树，挂在起点提交之下；不动真实索引与工作区
-      const base = await must(["sh", "-c", START_TREE_SCRIPT, "sh", commit], "记下开工时的树");
-      const baseCommit = base.toString("utf8").trim();
-      if (options.stepStartRef !== undefined) {
-        await must(
-          [
-            "git",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "update-ref",
-            "--no-deref",
-            options.stepStartRef,
-            baseCommit,
-          ],
-          "给开工时的树建引用"
-        );
-      }
-      return { commit, baseCommit };
-    },
-    async restoreProtectedFromStepStart(mark, isProtected) {
-      if (mark.baseCommit === undefined) {
-        throw new StepStartLostError("这一步的起点没有开工时的树，无法还原受保护的文件");
-      }
-      const changed = (
-        await must(
-          ["sh", "-c", CHANGED_SINCE_START_SCRIPT, "sh", mark.baseCommit],
-          "比对开工时的树"
-        )
-      )
-        .toString("utf8")
-        .split("\0")
-        .filter((p) => p !== "" && isProtected(p));
-      // 检出开工时的版本再取消暂存
-      for (let i = 0; i < changed.length; i += RESTORE_BATCH) {
-        await must(
-          [
-            "sh",
-            "-c",
-            RESTORE_FROM_START_SCRIPT,
-            "sh",
-            mark.baseCommit,
-            ...changed.slice(i, i + RESTORE_BATCH),
-          ],
-          "还原受保护的文件"
-        );
-      }
-      return changed;
-    },
   };
 }
 

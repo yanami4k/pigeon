@@ -204,6 +204,14 @@ function renderRun(
             ? ` ｜ 目标 会话 ${shortId(data.target.sessionId)} Run ${shortId(data.target.runId)}`
             : "")
       );
+    } else if (item.kind === "hook") {
+      // 钩子运行（323 / 324）：事件、命令、退出码、用时、结论
+      const data = item.data;
+      lines.push(
+        `  钩子 ${data.event}${data.matcher !== undefined ? `（匹配 ${data.matcher}）` : ""}：${data.conclusion} ｜ ` +
+          `退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ${data.durationMs} 毫秒 ｜ ` +
+          `命令 ${data.command}${data.output !== undefined ? ` ｜ 输出 ${data.output}` : ""}`
+      );
     }
   }
   for (const turn of run.turns) {

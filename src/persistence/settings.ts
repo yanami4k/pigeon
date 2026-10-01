@@ -110,6 +110,7 @@ export function loadSettings(root: string, options: LoadSettingsOptions = {}): S
     sources,
     merged: result.merged,
     grants: result.grants,
+    hooks: result.hooks,
     sectionSources: result.sectionSources,
     commandSources: result.commandSources,
     ...(dotMcp !== undefined ? { dotMcp } : {}),

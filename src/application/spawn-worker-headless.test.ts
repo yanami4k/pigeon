@@ -1,7 +1,7 @@
 // pigeon run 里主 agent 派 worker（决策 264–268、297、300、302、303）：真实编排器与 git 工作树、假模型。派出立即返回；
 // 一次运行在全部 worker 结束、完成通知作为新的一轮处理完之后才结束；主 agent 还在跑时结束的 worker 的通知进它的下一轮；
 // worker 的 token 计入本次运行的 token 上限，撞了即停掉主 agent 与在跑的 worker；撞上时间上限时在跑的 worker 停掉收尾；
-// 无人值守时 worker 需请示即停下、以可恢复错误交回，其余 worker 照常；多份尝试按验证命令给每份标签，汇总一条通知。
+// 无人值守时 worker 需请示即停下、以可恢复错误交回，其余 worker 照常；多份尝试全部结束后汇总一条通知，交回各份的改动与摘要。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -14,7 +14,7 @@ import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtu
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
-import { runHeadlessOnce } from "./headless-core.ts";
+import { runHeadless } from "./headless-core.ts";
 import { SPAWN_WORKER_TEXTS } from "./spawn-worker-tool.ts";
 import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
 
@@ -159,7 +159,7 @@ test("pigeon run 等全部 worker 结束、完成通知作为新的一轮处理�
       { text: "收到通知，做完了" },
     ],
   });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "MAIN 派一个慢的",
     governanceRoot: root,
     workspaceRoot: root,
@@ -206,7 +206,7 @@ test("主 agent 还在跑时结束的 worker：通知进它这次运行的下一
       { text: "看到通知了" },
     ],
   });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "MAIN 派一个快的",
     governanceRoot: root,
     workspaceRoot: root,
@@ -243,7 +243,7 @@ test("主 agent 还在跑时结束的 worker：通知进它这次运行的下一
 
 test("worker 的 token 计入本次运行的 token 上限：撞了即停掉主 agent 与在跑的 worker", async () => {
   const root = repo({ "a.txt": "a\n" });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "MAIN 派一个去读",
     governanceRoot: root,
     workspaceRoot: root,
@@ -280,7 +280,7 @@ test("worker 的 token 计入本次运行的 token 上限：撞了即停掉主 a
 
 test("撞上时间上限：在跑的 worker 停掉并收尾，收尾记录写进本会话", async () => {
   const root = repo({ "a.txt": "a\n" });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "MAIN 派一个慢的",
     governanceRoot: root,
     workspaceRoot: root,
@@ -315,7 +315,7 @@ test("撞上时间上限：在跑的 worker 停掉并收尾，收尾记录写进
 
 test("无人值守：worker 要跑命令即停下、以可恢复错误交回，其余 worker 照常完成（改自己工作树不请示）", async () => {
   const root = repo({ "a.txt": "a\n" });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "MAIN 派两个",
     governanceRoot: root,
     workspaceRoot: root,
@@ -394,37 +394,30 @@ test("无人值守：worker 要跑命令即停下、以可恢复错误交回，�
   );
 });
 
-test("给了总数上限：pigeon run 的一次运行是一整次交办，回炉各轮与首轮共用派出个数", async () => {
-  const root = repo({ "a.txt": "a\n", "fail.mjs": "process.exit(1);\n" });
+test("给了总数上限：pigeon run 的一次运行是一整次交办，通知轮里再派也算进同一次运行的派出个数", async () => {
+  const root = repo({ "a.txt": "a\n" });
   const spawnOnce = {
     text: "派",
     toolCalls: [{ name: "spawn_worker", args: { role: "explorer", task: "WORKER 看看" } }],
   };
-  // 每个运行的开头（最后一条是用户消息：任务、回炉反馈或通知）派一个，其余回合收工
-  const main = createFakeStreamFn({ replies: [spawnOnce] });
-  const done = createFakeStreamFn({ replies: [{ text: "收工" }] });
-  const mainFn = ((model, context, options) =>
-    context.messages.at(-1)?.role === "user" &&
-    !firstUserText({ ...context, messages: [context.messages.at(-1) as never] }).includes(
-      "worker 通知"
-    )
-      ? main(model, context, options)
-      : done(model, context, options)) as StreamFn;
-  const result = await runHeadlessOnce({
+  const spawnAgain = {
+    text: "再派",
+    toolCalls: [{ name: "spawn_worker", args: { role: "explorer", task: "WORKER 再看看" } }],
+  };
+  const result = await runHeadless({
     task: "MAIN 看看",
     governanceRoot: root,
     workspaceRoot: root,
     yolo: true,
     spawnWorkers: true,
     orchestration: { ...DEFAULT_ORCHESTRATION_SETTINGS, maxWorkersPerRun: 1 },
-    verify: { command: "node fail.mjs", timeoutMs: 60_000, source: "flag" },
-    repairRounds: 1,
     streamFn: routed([
-      ["MAIN", mainFn],
+      // 任务轮派一个；worker 完成通知进新一轮后再派一个——同一次运行，撞上限
+      ["MAIN", { replies: [spawnOnce, { text: "等通知" }, spawnAgain, { text: "收工" }] }],
       ["WORKER", { replies: [{ text: "看过了" }] }],
     ]),
   });
-  assert.equal(result.repair?.rounds, 1);
+  assert.equal(result.status, "completed");
   const results = spawnResults(root, result.sessionId);
   assert.deepEqual(results, [spawned("explorer-1"), SPAWN_WORKER_TEXTS.spawnLimit(1)]);
   // 决策 279：仓库干净时起点就是 HEAD，通知末行写明派出时没有未提交的文件与取用方式
@@ -437,19 +430,14 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，回炉
   );
 });
 
-test("多份尝试：各份在自己的工作树里按验证命令标签，全部结束后汇总一条通知", async () => {
-  const root = repo({
-    "a.txt": "x\n",
-    "check.mjs":
-      'import { readFileSync } from "node:fs";\nprocess.exit(readFileSync("a.txt", "utf8") === "A\\n" ? 0 : 1);\n',
-  });
-  const result = await runHeadlessOnce({
+test("多份尝试：各份在自己的工作树里改，全部结束后汇总一条通知交回各份的改动与摘要", async () => {
+  const root = repo({ "a.txt": "x\n" });
+  const result = await runHeadless({
     task: "MAIN 派两份",
     governanceRoot: root,
     workspaceRoot: root,
     yolo: true,
     spawnWorkers: true,
-    verify: { command: "node check.mjs", timeoutMs: 60_000, source: "flag" },
     streamFn: routed([
       [
         "MAIN",
@@ -488,7 +476,7 @@ test("多份尝试：各份在自己的工作树里按验证命令标签，全�
   });
   assert.equal(result.status, "completed");
   assert.deepEqual(spawnResults(root, result.sessionId), [
-    "已并行派出 2 份：implementer-1、implementer-2。全部结束并验证后会有一条通知，给出每份的验证标签。",
+    "已并行派出 2 份：implementer-1、implementer-2。全部结束后会有一条通知，交回各份的改动与摘要。",
   ]);
   const notices = userTexts(root, result.sessionId).filter((text) =>
     text.startsWith(WORKER_NOTICE_PREFIX)
@@ -498,15 +486,15 @@ test("多份尝试：各份在自己的工作树里按验证命令标签，全�
     withoutStart(notices[0] ?? ""),
     WORKER_NOTICE_PREFIX +
       [
-        "第 1 份（通过）：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.txt。摘要：改好了",
-        "第 2 份（通过）：worker implementer-2（implementer）已完成。分支：pigeon/implementer-2。改动的文件（1）：a.txt。摘要：改好了",
+        "第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.txt。摘要：改好了",
+        "第 2 份：worker implementer-2（implementer）已完成。分支：pigeon/implementer-2。改动的文件（1）：a.txt。摘要：改好了",
       ].join("\n\n")
   );
 });
 
 test("放开嵌套（2 层）：主会话派的 worker 再派下一层并等它结束，通知进上层 worker 的会话；派出与收尾记在各自的派出方", async () => {
   const root = repo({ "a.txt": "a\n" });
-  const result = await runHeadlessOnce({
+  const result = await runHeadless({
     task: "MAIN 拆两层",
     governanceRoot: root,
     workspaceRoot: root,

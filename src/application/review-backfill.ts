@@ -66,7 +66,6 @@ import {
   type ReviewModelChoice,
   runMemoryReview,
 } from "./memory-review.ts";
-import { repairFailureSummary } from "./repair-loop.ts";
 import {
   type CostTally,
   emptyCostTally,
@@ -297,7 +296,8 @@ export function readSourceOf(
   return { kind: "workdir", reason: "会话没有退出记录（进程可能被直接结束）" };
 }
 
-// 验证结论：来源主分支上最后一条验证记录，按收尾复盘的同一填法（242、250）
+// 验证结论：来源主分支上最后一条验证记录，按收尾复盘的同一填法（242、250）。
+// 决策 322：验证记录已停写，本函数只为旧会话的补做复盘读旧记录；失败摘要就地拼"验证命令、退出码、输出末尾"
 export function backfillVerdict(main: readonly StoredEntry[]): string {
   let last: VerificationData | undefined;
   for (const entry of main) {
@@ -313,11 +313,12 @@ export function backfillVerdict(main: readonly StoredEntry[]): string {
     verdict: last.verdict,
     faultedSteps: faulted.map((step) => step.name),
     allFaulted: steps.length > 0 && faulted.length === steps.length,
-    failureSummary: repairFailureSummary({
-      command: last.command.join(" "),
-      outcome: { exitCode: last.exitCode, output: last.output, truncated: last.truncated },
-      ...(last.steps !== undefined ? { steps: last.steps } : {}),
-    }),
+    failureSummary: [
+      `验证命令：${last.command.join(" ")}`,
+      `退出码：${last.exitCode ?? "无"}`,
+      last.truncated ? "输出末尾（已截断）：" : "输出末尾：",
+      last.output.trimEnd() === "" ? "（无输出）" : last.output.trimEnd(),
+    ].join("\n"),
   };
   return reviewVerdictText(input);
 }

@@ -13,7 +13,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { type RunStartData, SessionEntryType } from "../state/session-entries.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
 const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";

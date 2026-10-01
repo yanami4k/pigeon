@@ -1,5 +1,6 @@
 // 判定类读者的原生视图（账本重构第二段）：经真实写者造会话文件（测试夹具），读回后逐项现算——Run 级失败分类、成败标签、
-// 回炉一步、运行指标与需审批次数、工具级失败分类、尝试切片、生效授权、worker 派出、分叉点之前的快照、分支文件的复制段。
+// 运行指标与需审批次数、工具级失败分类、旧会话验证记录的标签现算（回炉已随决策 322 删除）、生效授权、worker 派出、
+// 分叉点之前的快照、分支文件的复制段。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,11 +23,8 @@ import {
   storeAttemptFacts,
   storeAttemptLabel,
   storeCheckpointBefore,
-  storeRepairStepOutcome,
   storeRunFailure,
   storeRunMetrics,
-  storeStepRuns,
-  storeTaskAttempt,
   storeToolOutcomes,
   storeWorkerSpawned,
   TOOL_RESULT_MARK_KEY,
@@ -157,45 +155,52 @@ test("成败标签：验证结论压过终态；撞上限无验证判失败；�
   });
 });
 
-test("回炉一步：整步取最后一个 Run 的验证与收尾；最后一个 Run 没有验证记录即未收尾（未知）", async () => {
+test("旧会话的验证记录照常现算标签：同一 Run 的验证结论压过终态；回炉已删除，多个 Run 各自现算、不再整步归组", async () => {
   await withSessions(async (sessionsDir, root) => {
+    // 旧回炉会话（322 之前写下）：首个 Run 验证未通过、第二个 Run 验证通过——删除回炉后不再有整步口径，
+    // 各 Run 按自己的验证记录现算
     const s = createFixtureSession({ sessionsDir, cwd: root });
-    const config = { repairRounds: 2 };
-    const first = s.startRun({ task: "修", config });
+    const first = s.startRun({ task: "修" });
     s.assistant({ text: "修了" });
     s.endRun();
     s.verification({ verdict: "fail" });
-    const second = s.startRun({ task: "反馈", config });
+    const second = s.startRun({ task: "反馈" });
     s.assistant({ text: "又修了" });
     s.endRun();
     s.verification({ verdict: "pass" });
     const view = await viewOf(s, sessionsDir);
-    assert.deepEqual(storeStepRuns(view, first), [first, second]);
-    assert.equal(storeAttemptLabel(view, first), "Passed");
-    assert.deepEqual(storeRepairStepOutcome(view), { rounds: 1, verdict: "pass" });
-    const attempt = storeTaskAttempt({ governanceRoot: root, view });
-    assert.equal(attempt.runId, first);
-    assert.equal(attempt.turns, 2);
-    assert.equal(attempt.label, "Passed");
+    assert.equal(storeAttemptLabel(view, first), "Failed");
+    assert.equal(storeAttemptLabel(view, second), "Passed");
   });
   await withSessions(async (sessionsDir, root) => {
+    // 旧回炉会话里最后一个 Run 没有验证记录：该 Run 正常收尾、无验证结论，现算为未知（不向前找别的 Run 的记录）
     const s = createFixtureSession({ sessionsDir, cwd: root });
-    const config = { repairRounds: 2 };
-    const first = s.startRun({ task: "修", config });
+    const first = s.startRun({ task: "修" });
     s.assistant({ text: "修了" });
     s.endRun();
     s.verification({ verdict: "fail" });
-    s.startRun({ task: "反馈", config });
+    const second = s.startRun({ task: "反馈" });
     s.assistant({ text: "又修了" });
     s.endRun();
     const view = await viewOf(s, sessionsDir);
-    assert.equal(storeAttemptFacts(view, first).hasRunEnded, false);
-    assert.equal(storeAttemptLabel(view, first), "Unknown");
-    assert.deepEqual(storeRepairStepOutcome(view), { rounds: 1 });
+    assert.equal(storeAttemptLabel(view, first), "Failed");
+    assert.equal(storeAttemptLabel(view, second), "Unknown");
   });
 });
 
-test("运行指标：轮次、工具调用、用量按整步汇总；需审批次数只计 yolo 下写档与命令档、过了审批闸的调用", async () => {
+test("收尾钩子拦截到上限（stop-hook-limit）：不贴失败标签，现算为未知", async () => {
+  await withSessions(async (sessionsDir, root) => {
+    const s = createFixtureSession({ sessionsDir, cwd: root });
+    const run = s.startRun({ task: "做" });
+    s.assistant({ text: "好了" });
+    s.endRun({ ending: "stop-hook-limit" });
+    const view = await viewOf(s, sessionsDir);
+    assert.equal(storeAttemptFacts(view, run).limitHit, false);
+    assert.equal(storeAttemptLabel(view, run), "Unknown");
+  });
+});
+
+test("运行指标：轮次、工具调用、用量汇总；需审批次数只计 yolo 下写档与命令档、过了审批闸的调用", async () => {
   await withSessions(async (sessionsDir, root) => {
     const s = createFixtureSession({ sessionsDir, cwd: root });
     s.startRun({
@@ -319,7 +324,7 @@ test("工具级失败分类：成功、策略拒绝、中止、上游拦截与�
   });
 });
 
-test("尝试切片：worker 尝试的验证记录落在父会话，经额外来源现算标签并给出验证记录引用", async () => {
+test("旧会话的验证记录：worker 尝试的验证记录落在父会话，经额外来源现算标签", async () => {
   await withSessions(async (sessionsDir, root) => {
     const host = createFixtureSession({ sessionsDir, cwd: root });
     host.startRun({ task: "派" });
@@ -335,18 +340,12 @@ test("尝试切片：worker 尝试的验证记录落在父会话，经额外来�
     });
     host.endRun();
     const hostView = await viewOf(host, sessionsDir);
-    const alone = storeTaskAttempt({ governanceRoot: root, view: workerView });
-    assert.equal(alone.label, "Unknown");
-    const attempt = storeTaskAttempt({
-      governanceRoot: root,
-      view: workerView,
-      verificationSources: [hostView],
-    });
-    assert.equal(attempt.label, "Passed");
-    assert.deepEqual(attempt.entryRange, { from: 1, to: 4 });
-    assert.equal(attempt.turns, 2);
-    assert.equal(attempt.verification?.sessionId, host.sessionId);
-    assert.equal(attempt.verification?.recordId, hostView.verifications[0]?.entryId);
+    // 没有额外来源读不到父会话里的验证记录：现算为未知
+    assert.equal(storeAttemptLabel(workerView, workerRun), "Unknown");
+    assert.equal(
+      storeAttemptLabel(workerView, workerRun, { verificationSources: [hostView] }),
+      "Passed"
+    );
     // 父会话里派出这个 worker 的记录（委派策略从这里还原）
     assert.equal(storeWorkerSpawned(hostView, worker.sessionId)?.name, "fix-a");
     assert.equal(workerView.metadata?.worker?.name, "fix-a");

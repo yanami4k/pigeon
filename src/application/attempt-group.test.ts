@@ -1,11 +1,10 @@
-// 并行同任务派发（M7 S4，决策 069 / 071）：真实 git 仓库 + 真实装配根 + 假模型。
+// 并行同任务派发（M7 S4，决策 069 / 071；验证与标签随决策 322 删除）：真实 git 仓库 + 真实装配根 + 假模型。
 // - 并行派发同一任务的多个 worker 共享任务标识（派出请求里带同一个标识），父会话写 worker 派出条目；
-// - 每个尝试收尾后由程序在该尝试的工作树里独立执行验证命令，结果落父会话的验证记录条目；
-// - 全部收尾后从会话存储现算各尝试的标签交回；
+// - 全部收尾后交回各份的结果（状态、工作树、改动与摘要），各份的对错由主 agent 或人比较；
 // - 宿主会话里引用尝试的记录不凭空造出 Run（不误报崩溃残留）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -22,9 +21,7 @@ function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-const NODE = `"${process.execPath}"`;
-
-function repoWithCheck(): { repo: string; home: string; cleanup: () => void } {
+function repo(): { repo: string; home: string; cleanup: () => void } {
   const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-attempts-")));
   const home = mkdtempSync(join(tmpdir(), "pigeon-attempts-home-"));
   git(repo, ["init", "-q", "-b", "main"]);
@@ -32,10 +29,6 @@ function repoWithCheck(): { repo: string; home: string; cleanup: () => void } {
   git(repo, ["config", "user.name", "pigeon-test"]);
   git(repo, ["config", "core.autocrlf", "false"]);
   writeFileSync(join(repo, "a.txt"), "old\n");
-  writeFileSync(
-    join(repo, "check.mjs"),
-    'import { readFileSync } from "node:fs";\nprocess.exit(readFileSync("a.txt", "utf8") === "new\\n" ? 0 : 1);\n'
-  );
   git(repo, ["add", "."]);
   git(repo, ["commit", "-q", "-m", "init"]);
   return {
@@ -48,7 +41,7 @@ function repoWithCheck(): { repo: string; home: string; cleanup: () => void } {
   };
 }
 
-// 按 worker 名给剧本：写对的写 new，写错的写 wrong
+// 按 worker 名给剧本：各份写各的内容
 function attemptScript(content: string) {
   return createFakeStreamFn({
     replies: [
@@ -65,7 +58,7 @@ function attemptScript(content: string) {
 
 function setup(repo: string, home: string, scripts: Record<string, string>) {
   const hostId = newSessionId();
-  // 宿主会话的会话存储写者：worker 派出与收尾、验证记录都写在这里
+  // 宿主会话的会话存储写者：worker 派出与收尾都写在这里
   const faults: unknown[] = [];
   const hostStore = openSessionStore({
     sessionsDir: join(repo, ".pigeon", "state", "sessions"),
@@ -99,7 +92,7 @@ function setup(repo: string, home: string, scripts: Record<string, string>) {
     taskKeys.push(request.taskKey);
     return spawn(request);
   };
-  return { hostId, hostLog: { sessionId: hostId }, hostStore, orchestrator, faults, taskKeys };
+  return { hostId, hostStore, orchestrator, faults, taskKeys };
 }
 
 function hostView(repo: string, hostId: string): StoreSessionView {
@@ -108,42 +101,44 @@ function hostView(repo: string, hostId: string): StoreSessionView {
   return loaded.view;
 }
 
-test("一成一败：共享任务标识、各自工作树里独立验证、从会话存储现算标签；宿主会话不误报崩溃残留", async () => {
-  const { repo, home, cleanup } = repoWithCheck();
+test("两份各改各的：共享任务标识、各份在自己的工作树里改，全部收尾后交回各份结果；宿主会话不误报崩溃残留", async () => {
+  const { repo: dir, home, cleanup } = repo();
   try {
-    const { hostId, hostLog, hostStore, orchestrator, faults, taskKeys } = setup(repo, home, {
+    const contentByName: Record<string, string> = {
       "implementer-1": "new\n",
       "implementer-2": "wrong\n",
-    });
+    };
+    const { hostId, hostStore, orchestrator, faults, taskKeys } = setup(dir, home, contentByName);
     const result = await runAttemptGroup({
       orchestrator,
-      governanceRoot: repo,
-      hostLog,
-      hostStore,
       role: "implementer",
       task: "把 a.txt 的内容改成 new",
       count: 2,
-      verify: { command: `${NODE} check.mjs`, timeoutMs: 30_000 },
     });
     await hostStore.close();
-    assert.deepEqual(result.errors, []);
     assert.deepEqual(faults, []);
-    assert.deepEqual(result.attempts.map((attempt) => attempt.label).sort(), ["Failed", "Passed"]);
+    assert.equal(result.outcomes.length, 2);
+    assert.ok(result.outcomes.every((outcome) => outcome.status === "completed"));
 
-    const host = hostView(repo, hostId);
-    const attempts = host.workers.flatMap((record) =>
+    const host = hostView(dir, hostId);
+    const spawned = host.workers.flatMap((record) =>
       record.data.event === "spawned" && record.data.role === "implementer" ? [record.data] : []
     );
-    assert.equal(attempts.length, 2);
+    assert.equal(spawned.length, 2);
     assert.ok(result.taskKey.length > 0);
     assert.deepEqual(taskKeys, [result.taskKey, result.taskKey], "共享任务标识");
-    assert.equal(host.verifications.length, 2);
-    const verdicts = host.verifications.map((record) => record.data.verdict).sort();
-    assert.deepEqual(verdicts, ["fail", "pass"]);
-    for (const { data: record } of host.verifications) {
-      const spawned = attempts.find((item) => item.childSessionId === record.target.sessionId);
-      assert.ok(spawned !== undefined && spawned.workspace.kind === "git-worktree");
-      assert.equal(record.workspace, spawned.workspace.path, "在该尝试的工作树里执行");
+    // 各份在自己的工作树里改：交回的工作树与派出记录一一对应，内容各是各的剧本
+    for (const outcome of result.outcomes) {
+      const record = spawned.find((item) => item.childSessionId === outcome.sessionId);
+      assert.ok(record !== undefined && record.workspace.kind === "git-worktree");
+      assert.deepEqual(outcome.workspace, record.workspace);
+      if (outcome.workspace.kind === "git-worktree") {
+        assert.equal(
+          readFileSync(join(outcome.workspace.path, "a.txt"), "utf8"),
+          contentByName[outcome.name]
+        );
+      }
+      assert.equal(outcome.result?.summary, "改好了");
     }
     assert.deepEqual(host.runs, [], "引用型记录不凭空造 Run");
   } finally {
@@ -151,32 +146,34 @@ test("一成一败：共享任务标识、各自工作树里独立验证、从�
   }
 });
 
-test("全成功：各尝试的标签随结果交回", async () => {
-  const { repo, home, cleanup } = repoWithCheck();
+test("全做完：各份的结果随收尾全部交回", async () => {
+  const { repo: dir, home, cleanup } = repo();
   try {
-    const { hostId, hostLog, hostStore, orchestrator } = setup(repo, home, {});
+    const { hostId, hostStore, orchestrator } = setup(dir, home, {});
     const result = await runAttemptGroup({
       orchestrator,
-      governanceRoot: repo,
-      hostLog,
-      hostStore,
       role: "implementer",
       task: "把 a.txt 的内容改成 new",
       count: 2,
-      verify: { command: `${NODE} check.mjs`, timeoutMs: 30_000 },
     });
     await hostStore.close();
     assert.deepEqual(
-      result.attempts.map((attempt) => attempt.label),
-      ["Passed", "Passed"]
+      result.outcomes.map((outcome) => outcome.status),
+      ["completed", "completed"]
     );
-    const host = hostView(repo, hostId);
     assert.deepEqual(
-      result.attempts.map((attempt) => attempt.verification?.sessionId),
-      [hostId, hostId],
-      "验证记录落在宿主会话里，标签据此现算"
+      result.outcomes.map((outcome) => outcome.result?.summary),
+      ["改好了", "改好了"]
     );
-    assert.equal(host.verifications.length, 2);
+    const host = hostView(dir, hostId);
+    assert.deepEqual(
+      host.workers
+        .filter((record) => record.data.event === "settled")
+        .map((record) => record.data.childSessionId)
+        .sort(),
+      result.outcomes.map((outcome) => outcome.sessionId).sort(),
+      "各份的收尾记录都写进宿主会话"
+    );
   } finally {
     cleanup();
   }

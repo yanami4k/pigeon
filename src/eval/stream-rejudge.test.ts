@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
-import { FAILED_CASES_CAP, judgeStep, type StepJudging } from "./stream-classes.ts";
+import { judgeStep, type StepJudging } from "./stream-classes.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
 import {
@@ -170,14 +170,14 @@ function judging(overrides: Partial<StepJudging> = {}): StepJudging {
     score: 0.5,
     passToPass: { failed: 0, total: 3 },
     solved: false,
-    failedCases: { failToPass: ["f::x"], passToPass: [], truncated: false },
+    failedCases: { failToPass: ["f::x"], passToPass: [] },
     excludedFlaky: 0,
     ...overrides,
   };
 }
 
 describe("重判：一致性核对", () => {
-  test("逐项一致即无差异；任一计数、失败用例或截断不同都列出", () => {
+  test("逐项一致即无差异；任一计数或失败用例不同都列出", () => {
     assert.deepEqual(compareJudging(judging(), judging()), []);
     const diff = compareJudging(
       judging(),
@@ -190,24 +190,31 @@ describe("重判：一致性核对", () => {
     assert.deepEqual(
       compareJudging(
         judging(),
-        judging({ failedCases: { failToPass: ["f::y"], passToPass: [], truncated: false } })
+        judging({ failedCases: { failToPass: ["f::y"], passToPass: [] } })
       ).map((d) => d.split("：")[0]),
       ["要做到的失败用例"]
     );
   });
 
-  test("重判不截断：与原行比前 FAILED_CASES_CAP 条，截断标记按全部条数推出", () => {
-    const ids = Array.from(
-      { length: FAILED_CASES_CAP + 3 },
-      (_, k) => `f::${String(k).padStart(3, "0")}`
-    );
-    const classes = { failToPass: ids, passToPass: [], excludedFlaky: [] };
-    const original = judgeStep(classes, []);
-    const full = judgeStep(classes, [], Number.POSITIVE_INFINITY);
-    assert.equal(full.failedCases.failToPass.length, ids.length);
-    assert.equal(original.failedCases.truncated, true);
+  test("失败用例全记不截断（327）；旧结果行带截断标记（327 起不再写）时只比它记下的前缀", () => {
+    const ids = Array.from({ length: 23 }, (_, k) => `f::${String(k).padStart(3, "0")}`);
+    const classes = { failToPass: ids, passToPass: [] as string[], excludedFlaky: [] as string[] };
+    const full = judgeStep(classes, []);
+    assert.equal(full.failedCases.failToPass.length, ids.length, "全记不截断");
+    // 旧结果行：只记前 20 条并带 truncated 标记——重判的全集与它记下的前缀一致即无差异
+    const original = judging({
+      failToPass: { passed: 0, total: ids.length },
+      score: 0,
+      passToPass: { failed: 0, total: 0 },
+      solved: false,
+      failedCases: {
+        failToPass: ids.slice(0, 20),
+        passToPass: [],
+        truncated: true,
+      } as StepJudging["failedCases"],
+    });
     assert.deepEqual(compareJudging(original, full), []);
-    // 原行没截断而重判失败的更多：截断标记不一致
+    // 原行没截断而重判失败的更多：全长逐项比，计数先比出差异
     const fewer = judgeStep(
       classes,
       ids.slice(0, 5).map((id) => ({ id, file: "f", outcome: "passed" as const }))
@@ -285,7 +292,6 @@ describe("重判：与正式跑同一判题路径（假 agent、本地假容器�
       for (const l of lines) {
         assert.equal(l.consistent, true);
         assert.equal(l.complete, true);
-        assert.equal(l.judging.failedCases.truncated, false);
         const orig = rows.find(
           (r) => r.seq === l.seq && r.attempt === l.attempt && r.condition === l.condition
         );

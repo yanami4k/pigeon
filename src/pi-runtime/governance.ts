@@ -23,6 +23,8 @@ export interface GovernanceHost {
   abort(): void;
   // 内部异常观察口（Adapter.listenerErrors）：不改变结果的故障记在这里
   reportError(error: unknown): void;
+  // 工具事件钩子（决策 324）：在场时 PreToolUse 在审批之前、PostToolUse/PostToolUseFailure 在执行之后
+  readonly toolHooks?: ToolHookPort;
 }
 
 // 一次工具调用的判定输入
@@ -35,8 +37,37 @@ export interface ToolCallProposal {
   preparedArgs: unknown;
 }
 
-// 判定结果：放行，或带理由的阻断（理由由 Adapter 原样交回上游，逐字成为模型可见的 toolResult）
-export type GovernanceVerdict = { kind: "allow" } | { kind: "block"; reason: string };
+// PreToolUse 钩子的结论（决策 324）：拒绝 > 要人确认 > 放行；放行只免掉人工审批这一步
+export interface PreToolUseHookDecision {
+  decision: "allow" | "ask" | "deny";
+  reason?: string;
+  // 钩子改过的参数（在场时按新参数重新经过全部检查，执行也用新参数）
+  updatedInput?: unknown;
+}
+
+// 工具事件钩子端口（决策 323 / 324）：实现在 application（会话级钩子调度）；
+// PreToolUse 在审批之前执行，工具结束后的事件（PostToolUse / PostToolUseFailure）在执行之后
+export interface ToolHookPort {
+  preToolUse?(input: {
+    toolCallId: string;
+    toolName: string;
+    args: unknown;
+  }): Promise<PreToolUseHookDecision | undefined>;
+  // 工具结束：isError 区分成功与失败事件；text 为结果文本（PostToolUse 的 updatedToolOutput 按它替换）
+  toolFinished?(input: {
+    toolCallId: string;
+    toolName: string;
+    args: unknown;
+    isError: boolean;
+    text: string;
+  }): Promise<{ replaceText?: string; contextText?: string } | undefined>;
+}
+
+// 判定结果：放行，或带理由的阻断（理由由 Adapter 原样交回上游，逐字成为模型可见的 toolResult）；
+// 钩子改过参数时 updatedArgs 交给执行侧替换（只由 PreToolUse 钩子产生）
+export type GovernanceVerdict =
+  | { kind: "allow"; updatedArgs?: unknown }
+  | { kind: "block"; reason: string };
 
 // 本 Run 的治理结论（RunResult 的活侧来源）
 export interface GovernanceRunOutcome {

@@ -23,6 +23,7 @@ import {
   unknownCommandText,
   WORKER_SESSION_ONLY,
 } from "./command-table.ts";
+import { renderHooksView, type TuiHooksFace } from "./hooks-view.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
 
 // 沙箱会话的命令面（与 shell.ts 的 TuiSandboxFace 同形）
@@ -68,6 +69,8 @@ export interface CommandsHost {
   // 决策 309：脚本编排的命令面（缺省 = /orchestrate 不可用）与以人的输入提交一条（空闲即发、运行中排队）
   scriptCommands?(): ScriptCommands | undefined;
   submitInput?(text: string): void;
+  // 决策 323、324：本会话的钩子面（/hooks 的只读清单）；缺省 = /hooks 不可用
+  hooksView?(): TuiHooksFace | undefined;
 }
 
 // 命令表判断可用性用的只读面
@@ -80,6 +83,7 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     inSandbox: () => host.sandbox?.() !== undefined,
     tasks: () => host.tasks !== undefined,
     reload: () => host.reloadCommand !== undefined,
+    hooks: () => host.hooksView?.() !== undefined,
     scripts: () => host.scriptCommands?.() !== undefined,
     workers: () => {
       const workers = host.workers();
@@ -245,6 +249,14 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     if (tokens[0] === "compact") {
       host.compactCommand(compactFocusOf(value));
       return;
+    }
+    // 决策 323、324：/hooks 只读列出生效的钩子与停用开关（清单随会话冻结，清单与开关取自钩子面）
+    if (tokens[0] === "hooks") {
+      const hooks = host.hooksView?.();
+      if (hooks !== undefined) {
+        host.addSystem(renderHooksView(hooks));
+        return;
+      }
     }
     // 决策 340：/reload 重读设置（结果与待确认条目写进消息区）
     if (tokens[0] === "reload" && host.reloadCommand !== undefined) {

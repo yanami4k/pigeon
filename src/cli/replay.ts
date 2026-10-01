@@ -37,6 +37,7 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   worker: "pigeon.worker",
   fork: "pigeon.fork",
   grant: "pigeon.grant",
+  hook: "pigeon.hook",
 };
 
 // 单条条目的关键字段摘要（各类型的要点，通俗措辞）
@@ -132,6 +133,14 @@ function itemDetail(item: ViewItem): string {
       }
       const scope = data.pathPrefix !== undefined ? `，仅限目录 ${data.pathPrefix}` : "（工具级）";
       return `放权创建 ${shortId(data.grantId)} ｜ ${data.tool}${scope} ｜ 首调 ${data.firstCall.toolCallId}`;
+    }
+    case "hook": {
+      const data = item.data;
+      return (
+        `钩子 ${data.event}${data.matcher !== undefined ? `（匹配 ${data.matcher}）` : ""} ｜ ${data.conclusion} ｜ ` +
+        `退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ${data.durationMs} 毫秒 ｜ ` +
+        `命令 ${data.command}`
+      );
     }
   }
 }

@@ -6,12 +6,12 @@
 // - 悬账：带工具调用而没有工具结果的助手消息（续跑时补的"结果未知"工具结果同样算，它只说明结果不明）；
 // - 验证结论：验证记录条目；
 // - 工具级失败分类与需审批次数：工具结果消息 details 里运行面挂的标记（错误归类与审批闸决定），没有标记时退回按消息正文与策略判。
-import type { AttemptRef, OutcomeLabel } from "./attempt-ref.ts";
+import type { OutcomeLabel } from "./attempt-ref.ts";
 import { classifyRunOutcome, type FailureClass } from "./classification.ts";
 import type { ActiveGrant } from "./grants.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import { type AttemptOutcomeFacts, labelAttempt } from "./outcome-label.ts";
-import type { EvalVerdict, TurnUsage } from "./runtime-events.ts";
+import type { TurnUsage } from "./runtime-events.ts";
 import {
   type CheckpointData,
   type ForkData,
@@ -400,24 +400,6 @@ function pendingToolCallsOf(run: StoreRun): number {
   return pending;
 }
 
-// ---- 回炉一步（决策 142 / 143 / 154 修订），同 repair-step.ts 的口径 ----
-
-export function storeRepairRounds(view: StoreSessionView): number {
-  return view.runs[0]?.start.repairRounds ?? 0;
-}
-
-export function storeStepRuns(view: StoreSessionView, runId: RunId): RunId[] {
-  if (storeRepairRounds(view) === 0) {
-    return [runId];
-  }
-  const runs = view.runs.map((run) => run.runId);
-  return runs.includes(runId) ? runs : [runId];
-}
-
-export function storeLastStepRun(view: StoreSessionView, runId: RunId): RunId {
-  return storeStepRuns(view, runId).at(-1) ?? runId;
-}
-
 // 某个 Run 上验证时间最晚的一条验证记录；sources 为其他可能承载它的会话（worker 尝试的验证落在父会话里）
 export function storeLastVerification(
   view: StoreSessionView,
@@ -440,48 +422,23 @@ export function storeLastVerification(
   return best;
 }
 
-export interface StoreRepairStepOutcome {
-  rounds: number;
-  verdict?: EvalVerdict;
-}
-
-// 回炉一步的结果；回炉未开启返回 undefined
-export function storeRepairStepOutcome(view: StoreSessionView): StoreRepairStepOutcome | undefined {
-  if (storeRepairRounds(view) === 0) {
-    return undefined;
-  }
-  const lastRun = view.runs.at(-1)?.runId;
-  const last = lastRun !== undefined ? storeLastVerification(view, lastRun) : undefined;
-  return {
-    rounds: Math.max(0, view.runs.length - 1),
-    ...(last !== undefined ? { verdict: last.record.data.verdict } : {}),
-  };
-}
-
-// ---- 成败标签（决策 072，判定顺序见 outcome-label.ts） ----
+// ---- 成败标签（决策 072，判定顺序见 outcome-label.ts）----
+// 决策 322：回炉已删除，不再有"整步"口径——一次尝试即一个 Run；旧回炉会话按被问的那个 Run 现算（不再按整步归组）
 
 export function storeAttemptFacts(
   view: StoreSessionView,
   runId: RunId,
   options: { verificationSources?: readonly StoreSessionView[] } = {}
 ): AttemptOutcomeFacts {
-  const stepRuns = storeStepRuns(view, runId);
-  const lastRunId = stepRuns.at(-1) ?? runId;
-  const lastRun = findRun(view, lastRunId);
-  const last = storeLastVerification(view, lastRunId, options.verificationSources);
-  // 回炉开启时最后一个 Run 没有验证记录即这一步未收尾，与缺收尾条目同样现算为未知
-  const stepClosed =
-    storeRepairRounds(view) === 0 || storeLastVerification(view, lastRunId) !== undefined;
-  const pendingCount = stepRuns.reduce((sum, id) => {
-    const run = findRun(view, id);
-    return sum + (run !== undefined ? pendingToolCallsOf(run) : 0);
-  }, 0);
+  const run = findRun(view, runId);
+  // 旧会话的验证记录照常读（贴旧标签用）；新会话不再有验证记录
+  const last = storeLastVerification(view, runId, options.verificationSources);
   return {
-    hasRunEnded: stepClosed && lastRun?.end !== undefined,
-    pendingCount,
-    failure: lastRun !== undefined ? storeRunFailure(lastRun) : { category: "unknown" },
-    limitHit: limitHitOf(lastRun),
-    ...(lastRun?.end?.ending === "looping" ? { looping: true } : {}),
+    hasRunEnded: run?.end !== undefined,
+    pendingCount: run !== undefined ? pendingToolCallsOf(run) : 0,
+    failure: run !== undefined ? storeRunFailure(run) : { category: "unknown" },
+    limitHit: limitHitOf(run),
+    ...(run?.end?.ending === "looping" ? { looping: true } : {}),
     ...(last !== undefined ? { verdict: last.record.data.verdict } : {}),
   };
 }
@@ -494,60 +451,10 @@ export function storeAttemptLabel(
   return labelAttempt(storeAttemptFacts(view, runId, options));
 }
 
-// ---- 尝试切片（决策 070）：一次尝试 = 尝试会话的首个 Run，回炉时轮次按整步计、收尾取整步最后一个 Run ----
-
-export interface StoreAttempt extends AttemptRef {
-  turns: number;
-  endedAt?: number;
-}
+// ---- 尝试切片（决策 070）----
 
 export function storeFirstRun(view: StoreSessionView): RunId | undefined {
   return view.runs[0]?.runId;
-}
-
-// 一个 Run 的最末条目号：本 Run 的消息条数；收尾条目记的消息数更大时以它为准
-export function storeLastRunSeq(view: StoreSessionView, runId: RunId): number {
-  const run = findRun(view, runId);
-  return Math.max(run?.messages.length ?? 0, run?.end?.messageCount ?? 0);
-}
-
-export function storeTaskAttempt(input: {
-  governanceRoot: string;
-  view: StoreSessionView;
-  runId?: RunId;
-  fromRunSeq?: number;
-  verificationSources?: readonly StoreSessionView[];
-}): StoreAttempt {
-  const { view } = input;
-  const runId = input.runId ?? storeFirstRun(view);
-  if (runId === undefined) {
-    throw new Error(`会话 ${view.sessionId} 没有任何 Run，不能作为一次尝试`);
-  }
-  const sources = input.verificationSources ?? [];
-  const stepRuns = storeStepRuns(view, runId);
-  let turns = 0;
-  let endedAt: number | undefined;
-  for (const id of stepRuns) {
-    const run = findRun(view, id);
-    turns += run?.messages.filter((ref) => ref.message.role === "assistant").length ?? 0;
-    if (run?.end !== undefined) {
-      endedAt = run.end.endedAt;
-    }
-  }
-  const from = input.fromRunSeq ?? 1;
-  const last = storeLastVerification(view, storeLastStepRun(view, runId), sources);
-  return {
-    governanceRoot: input.governanceRoot,
-    sessionId: view.sessionId,
-    runId,
-    entryRange: { from, to: Math.max(from, storeLastRunSeq(view, runId)) },
-    label: storeAttemptLabel(view, runId, { verificationSources: sources }),
-    turns,
-    ...(endedAt !== undefined ? { endedAt } : {}),
-    ...(last !== undefined
-      ? { verification: { sessionId: last.sessionId, recordId: last.record.entryId as never } }
-      : {}),
-  };
 }
 
 // ---- 工具级失败分类（Q4：由消息、工具档位与审批模式现算） ----
@@ -730,10 +637,8 @@ export function storeRunMetrics(
       usage: zeroUsage(),
     };
   }
-  const runs = storeStepRuns(view, runId).flatMap((id) => {
-    const run = findRun(view, id);
-    return run !== undefined ? [run] : [];
-  });
+  const first = findRun(view, runId);
+  const runs = first !== undefined ? [first] : [];
   const usage = zeroUsage();
   let turns = 0;
   let toolCalls = 0;
@@ -767,7 +672,8 @@ export function storeRunMetrics(
       }
     }
   }
-  const lastRun = findRun(view, storeLastStepRun(view, runId));
+  // 决策 322：不再有整步口径——一次运行会话的指标取首个（唯一被问的）Run
+  const lastRun = findRun(view, runId);
   return {
     runId,
     failure: lastRun !== undefined ? storeRunFailure(lastRun) : { category: "unknown" },

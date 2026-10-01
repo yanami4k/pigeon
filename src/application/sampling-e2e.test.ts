@@ -9,7 +9,7 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { parseLaunchFlags } from "./launch-flags.ts";
 
 // 会话存储里本会话第一个 Run 开始条目的模型摘要

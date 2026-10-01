@@ -151,13 +151,15 @@ export function resolveWorkerRef(workers: readonly WorkerStatus[], ref: string):
   return found;
 }
 
-// M7（决策 069）：并行同任务派发的收尾摘要——各尝试的会话与标签
+// M7（决策 069）：并行同任务派发的收尾摘要——各尝试的会话与状态（决策 322：不再贴标签，由人比较各份的改动与摘要）
 export function renderAttemptGroupOutcome(result: {
   taskKey: string;
-  attempts: ReadonlyArray<{ sessionId: string; label: string }>;
+  outcomes: ReadonlyArray<{ sessionId: string; name: string; status: string }>;
 }): string {
   return [
     `== 并行尝试收尾 ｜ 任务标识 ${result.taskKey} ==`,
-    ...result.attempts.map((attempt) => `  会话 ${attempt.sessionId} ｜ ${attempt.label}`),
+    ...result.outcomes.map(
+      (outcome) => `  会话 ${outcome.sessionId} ｜ ${outcome.name} ｜ ${outcome.status}`
+    ),
   ].join("\n");
 }

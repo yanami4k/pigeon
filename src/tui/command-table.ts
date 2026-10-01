@@ -20,6 +20,8 @@ export interface CommandAvailability {
   scripts?(): boolean;
   // 决策 340：/reload 重读设置（缺省即不在场）
   reload?(): boolean;
+  // 决策 323、324：/hooks 看本会话生效的钩子（缺省即不在场）
+  hooks?(): boolean;
 }
 
 export interface SlashCommandSpec {
@@ -154,6 +156,13 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     usage: "/orchestrate <任务> [额度 ¥5|$2|300k]",
     whileRunning: { allow: true },
     available: (host) => host.scripts?.() === true && !host.inSandbox(),
+  },
+  // 决策 323、324：/hooks 只读列出生效的钩子与停用开关，运行中可用
+  {
+    name: "hooks",
+    usage: "/hooks",
+    whileRunning: { allow: true },
+    available: (host) => host.hooks?.() === true,
   },
   // 决策 340：重读三层设置，新快照自下一轮起生效；会重建运行面，运行中拒绝
   {

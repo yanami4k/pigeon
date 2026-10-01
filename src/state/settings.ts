@@ -1,16 +1,29 @@
 // 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
-// - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard；
-//   另有只许写在用户级的 trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
-// - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；唯一例外是 permissions 的放权规则三层并集生效。
-// - 响亮失败：顶层或节内的未知键、写在设置里的 key、写在项目级的 trustedDirectories，一律指出文件、键与所在层。
-// 以后各段往 SETTINGS_SECTIONS 里加节（钩子、记忆），合并与未知键检查随之生效。
+// - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
+//   hooks（决策 323/324）；另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
+//   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
+// - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
+//   hooks 各层的条目并列生效（同一事件同一 matcher 下命令完全相同的只留一份）。
+// - 响亮失败：顶层或节内的未知键、写在设置里的 key、写在项目级的 trustedDirectories、非法的钩子 matcher，一律指出文件、键与所在层。
+// 以后各段往 SETTINGS_SECTIONS 里加节（记忆），合并与未知键检查随之生效。
 import path from "node:path";
 import type { TSchema } from "typebox";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { COMMAND_NAME_PATTERN, type CommandsConfig, CommandsSectionSchema } from "./commands.ts";
 import { type ConfigGrantRule, PermissionsSectionSchema } from "./grants.ts";
+import {
+  DEFAULT_STOP_HOOK_BLOCK_CAP,
+  DISABLE_ALL_HOOKS_KEY,
+  type HooksSection,
+  HooksSectionSchema,
+  hooksOfLayer,
+  hooksSectionProblems,
+  type LayeredHook,
+  mergeHookLayers,
+  STOP_HOOK_BLOCK_CAP_KEY,
+} from "./hooks.ts";
 import {
   LoopGuardSectionSchema,
   type LoopGuardSettings,
@@ -47,6 +60,7 @@ export const SETTINGS_SECTIONS = {
   commands: CommandsSectionSchema,
   orchestration: OrchestrationSectionSchema,
   web: WebSectionSchema,
+  hooks: HooksSectionSchema,
   sandbox: SandboxSectionSchema,
   loopGuard: LoopGuardSectionSchema,
 } as const satisfies Record<string, TSchema>;
@@ -55,6 +69,8 @@ export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 // 顶层的非节键
 export const SCHEMA_KEY = "$schema";
 export const TRUSTED_DIRECTORIES_KEY = "trustedDirectories";
+// 顶层键：停用全部钩子（324）与收尾钩子连续拦截上限（323）
+export { DISABLE_ALL_HOOKS_KEY, STOP_HOOK_BLOCK_CAP_KEY };
 
 export const SettingsFileSchema = Type.Object(
   {
@@ -66,6 +82,9 @@ export const SettingsFileSchema = Type.Object(
     web: Type.Optional(WebSectionSchema),
     sandbox: Type.Optional(SandboxSectionSchema),
     loopGuard: Type.Optional(LoopGuardSectionSchema),
+    hooks: Type.Optional(HooksSectionSchema),
+    [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
+    [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   },
   { additionalProperties: false }
@@ -111,7 +130,9 @@ export function validateSettingsLayer(
   }
   const problems: string[] = [];
   for (const key of Object.keys(raw)) {
-    if (key === SCHEMA_KEY) continue;
+    if (key === SCHEMA_KEY || key === DISABLE_ALL_HOOKS_KEY || key === STOP_HOOK_BLOCK_CAP_KEY) {
+      continue;
+    }
     if (key === TRUSTED_DIRECTORIES_KEY) {
       if (source.layer !== "user") {
         problems.push(
@@ -131,7 +152,7 @@ export function validateSettingsLayer(
     }
     if (!Object.hasOwn(SETTINGS_SECTIONS, key)) {
       problems.push(
-        `设置文件 ${where}：未知键 ${key}（可用 ${[SCHEMA_KEY, ...Object.keys(SETTINGS_SECTIONS), TRUSTED_DIRECTORIES_KEY].join("、")}）`
+        `设置文件 ${where}：未知键 ${key}（可用 ${[SCHEMA_KEY, ...Object.keys(SETTINGS_SECTIONS), TRUSTED_DIRECTORIES_KEY, DISABLE_ALL_HOOKS_KEY, STOP_HOOK_BLOCK_CAP_KEY].join("、")}）`
       );
       continue;
     }
@@ -144,6 +165,10 @@ export function validateSettingsLayer(
     // key 不进设置文件（先于未知键检查，给出应设的环境变量名）
     if (key === "web") {
       problems.push(...webKeyProblems(section, where));
+    }
+    // 钩子的 matcher 须是合法正则（其余由 schema 校验）
+    if (key === "hooks") {
+      problems.push(...hooksSectionProblems(section as HooksSection));
     }
     const known = new Set(Object.keys(schema.properties as Record<string, unknown>));
     for (const inner of Object.keys(section)) {
@@ -199,7 +224,8 @@ export interface LayeredGrantRule {
   rule: ConfigGrantRule;
 }
 
-// 合并后的设置：各节已合并（permissions 除外，放权规则另列并集），trustedDirectories 只来自用户级
+// 合并后的设置：各节已合并（permissions 除外，放权规则另列并集；hooks 不按键合并——各层条目并列生效、
+// 同一事件同一 matcher 下命令完全相同的只留一份，另列），trustedDirectories 只来自用户级
 export interface MergedSettings {
   mcp?: Static<typeof McpSectionSchema>;
   commands?: Static<typeof CommandsSectionSchema>;
@@ -208,6 +234,10 @@ export interface MergedSettings {
   sandbox?: SandboxConfig;
   loopGuard?: Static<typeof LoopGuardSectionSchema>;
   trustedDirectories: string[];
+  // 停用全部钩子（324）：三层按标量覆盖（高优先层说了算），缺省 false
+  disableAllHooks: boolean;
+  // 收尾钩子连续拦截上限（323）：缺省 8
+  stopHookBlockCap: number;
 }
 
 // 每节由哪些层给出（确认清单写明来自哪一层）
@@ -216,6 +246,8 @@ export type SectionSources = Partial<Record<SettingsSectionName, SettingsLayer[]
 export interface MergeResult {
   merged: MergedSettings;
   grants: LayeredGrantRule[];
+  // 三层并列的钩子清单（已去重；层序按优先级从低到高）
+  hooks: LayeredHook[];
   sectionSources: SectionSources;
   // 每个命令短名最终取自哪一层
   commandSources: Record<string, SettingsLayer>;
@@ -227,15 +259,26 @@ export function mergeSettingsLayers(
 ): MergeResult {
   let merged: Record<string, unknown> = {};
   const grants: LayeredGrantRule[] = [];
+  const hookLayers: LayeredHook[][] = [];
   const sectionSources: SectionSources = {};
   const commandSources: Record<string, SettingsLayer> = {};
+  let disableAllHooks = false;
+  let stopHookBlockCap = DEFAULT_STOP_HOOK_BLOCK_CAP;
   for (const { layer, file } of layers) {
     for (const name of Object.keys(SETTINGS_SECTIONS) as SettingsSectionName[]) {
       const section = file[name];
       if (section === undefined) continue;
       sectionSources[name] = [...(sectionSources[name] ?? []), layer];
-      if (name === "permissions") continue;
+      // hooks 不按键合并：各层条目并列生效（324）
+      if (name === "permissions" || name === "hooks") continue;
       merged = mergeSettingsValue(merged, { [name]: section }) as Record<string, unknown>;
+    }
+    hookLayers.push(hooksOfLayer(file.hooks, layer));
+    if (file[DISABLE_ALL_HOOKS_KEY] !== undefined) {
+      disableAllHooks = file[DISABLE_ALL_HOOKS_KEY];
+    }
+    if (file[STOP_HOOK_BLOCK_CAP_KEY] !== undefined) {
+      stopHookBlockCap = file[STOP_HOOK_BLOCK_CAP_KEY];
     }
     for (const commandName of Object.keys(file.commands?.commands ?? {})) {
       commandSources[commandName] = layer;
@@ -249,10 +292,16 @@ export function mergeSettingsLayers(
   const user = layers.find((entry) => entry.layer === "user")?.file;
   return {
     merged: {
-      ...(merged as Omit<MergedSettings, "trustedDirectories">),
+      ...(merged as Omit<
+        MergedSettings,
+        "trustedDirectories" | "disableAllHooks" | "stopHookBlockCap"
+      >),
       trustedDirectories: [...(user?.trustedDirectories ?? [])],
+      disableAllHooks,
+      stopHookBlockCap,
     },
     grants,
+    hooks: mergeHookLayers(hookLayers),
     sectionSources,
     commandSources,
   };
@@ -297,6 +346,8 @@ export interface SettingsSnapshot {
   sources: ReadonlyArray<SettingsSource & { exists: boolean }>;
   merged: MergedSettings;
   grants: readonly LayeredGrantRule[];
+  // 三层并列的钩子清单（已去重；会话开始时随快照冻结，326 ②）
+  hooks: readonly LayeredHook[];
   sectionSources: SectionSources;
   commandSources: Readonly<Record<string, SettingsLayer>>;
   // 项目根 .mcp.json 的内容（一并冻结）
@@ -312,7 +363,12 @@ export function emptySettingsSnapshot(root: string): SettingsSnapshot {
   return {
     root,
     sources: [],
-    merged: { trustedDirectories: [] },
+    merged: {
+      trustedDirectories: [],
+      disableAllHooks: false,
+      stopHookBlockCap: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    },
+    hooks: [],
     grants: [],
     sectionSources: {},
     commandSources: {},
@@ -323,6 +379,16 @@ export function commandsConfigOf(snapshot: SettingsSnapshot): CommandsConfig {
   return {
     commands: { ...(snapshot.merged.commands?.commands ?? {}) },
     roles: { ...(snapshot.merged.commands?.roles ?? {}) },
+  };
+}
+
+// 停用全部钩子的快照副本（决策 324：启动参数只对本次运行停用全部钩子；复盘等程序内部运行面也不接钩子）：
+// 清单清空、开关置位；其余各节原样
+export function withHooksDisabled(snapshot: SettingsSnapshot): SettingsSnapshot {
+  return {
+    ...snapshot,
+    hooks: [],
+    merged: { ...snapshot.merged, disableAllHooks: true },
   };
 }
 

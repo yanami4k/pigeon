@@ -60,11 +60,11 @@ FIELD_MAP: dict[str, str] = {
     "memory_entries_after": "memoryAtEnd.entries",
     "hit_step_budget": "hitStepBudget",
     "hit_review_budget": "hitReviewBudget",
-    "verify_tool_faults": "verifyToolFaults",
     "baseline_unavailable": "baselineUnavailable",
 }
 
-# 每条题步结果行必须带的顶层字段（值可以为 null）
+# 每条题步结果行必须带的顶层字段（值可以为 null）。
+# 决策 327：验证门退役后新行不带 verifyToolFaults（旧行带它照常读、不再使用）
 REQUIRED_TOP = (
     "condition",
     "attempt",
@@ -81,7 +81,6 @@ REQUIRED_TOP = (
     "hitReviewBudget",
     "review",
     "gateway",
-    "verifyToolFaults",
     "runIdentity",
 )
 

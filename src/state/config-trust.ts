@@ -6,11 +6,18 @@
 // 信任目录只来自用户级设置的 trustedDirectories：项目规范化路径位于其中任一目录之下时免于确认。
 import path from "node:path";
 import { canonicalJson, sha256Hex } from "./hashing.ts";
+import type { LayeredHook } from "./hooks.ts";
 import type { McpLaunch } from "./mcp-config.ts";
 import { mergeMcpConfig } from "./mcp-config.ts";
 import { SETTINGS_LAYER_LABELS, type SettingsLayer, type SettingsSnapshot } from "./settings.ts";
 
-export const TRUST_ENTRY_KINDS = ["command", "sandbox", "mcp-server", "permission"] as const;
+export const TRUST_ENTRY_KINDS = [
+  "command",
+  "sandbox",
+  "mcp-server",
+  "permission",
+  "hook",
+] as const;
 export type TrustEntryKind = (typeof TRUST_ENTRY_KINDS)[number];
 
 export const TRUST_KIND_LABELS: Readonly<Record<TrustEntryKind, string>> = {
@@ -18,6 +25,7 @@ export const TRUST_KIND_LABELS: Readonly<Record<TrustEntryKind, string>> = {
   sandbox: "沙箱配置",
   "mcp-server": "MCP 服务",
   permission: "放行规则",
+  hook: "钩子",
 };
 
 export interface TrustEntry {
@@ -118,7 +126,34 @@ export function trustEntriesOf(input: TrustEntriesInput): TrustEntry[] {
       fingerprint,
     });
   }
+  // 钩子（决策 324/326 ③）：逐条按内容记指纹、逐条确认（三层都算——命令由谁给出都得经使用者确认）
+  const hooks = new Set<string>();
+  for (const hook of snapshot.hooks) {
+    const fingerprint = hookFingerprintOf(hook);
+    if (hooks.has(fingerprint)) continue;
+    hooks.add(fingerprint);
+    entries.push({
+      kind: "hook",
+      id: `${hook.event}:${fingerprint.slice(0, 12)}`,
+      origin: SETTINGS_LAYER_LABELS[hook.layer],
+      summary: `事件 ${hook.event}${hook.matcher !== undefined ? `、匹配 ${hook.matcher}` : ""}：${hook.command}${hook.host ? "（在宿主执行）" : ""}`,
+      fingerprint,
+    });
+  }
   return entries;
+}
+
+// 钩子条目的指纹：事件、matcher、命令、超时与执行位置一起算（内容一变即另一条）
+export function hookFingerprintOf(hook: LayeredHook): string {
+  return sha256Hex(
+    canonicalJson({
+      event: hook.event,
+      matcher: hook.matcher ?? null,
+      command: hook.command,
+      timeoutMs: hook.timeoutMs ?? null,
+      host: hook.host,
+    })
+  );
 }
 
 function permissionFingerprintOf(rule: unknown): string {
@@ -159,6 +194,10 @@ export function withoutTrustEntries(
   const servers = new Set(excluded.filter((e) => e.kind === "mcp-server").map((e) => e.id));
   const dropSandbox = excluded.some((e) => e.kind === "sandbox");
   const rules = new Set(excluded.filter((e) => e.kind === "permission").map((e) => e.fingerprint));
+  // 钩子以内容为标识（决策 326 ③）：本次不用的条目按其指纹整条去掉
+  const hookFingerprints = new Set(
+    excluded.filter((e) => e.kind === "hook").map((e) => e.fingerprint)
+  );
   const grants =
     rules.size > 0
       ? snapshot.grants.filter(
@@ -207,6 +246,10 @@ export function withoutTrustEntries(
     ...rest,
     merged,
     grants,
+    hooks:
+      hookFingerprints.size > 0
+        ? snapshot.hooks.filter((hook) => !hookFingerprints.has(hookFingerprintOf(hook)))
+        : snapshot.hooks,
     ...(dotMcp !== undefined ? { dotMcp } : {}),
     excluded: [...(snapshot.excluded ?? []), ...excluded.map((entry) => trustKeyOf(entry))],
   };
@@ -224,7 +267,7 @@ export function revertTrustEntries(
   let dotMcp = next.dotMcp;
   const dropped: TrustEntry[] = [];
   for (const entry of entries) {
-    if (entry.kind === "permission") {
+    if (entry.kind === "permission" || entry.kind === "hook") {
       dropped.push(entry);
     } else if (entry.kind === "command") {
       const previous = current.merged.commands?.commands?.[entry.id];

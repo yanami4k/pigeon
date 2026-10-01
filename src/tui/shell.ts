@@ -55,6 +55,7 @@ import {
 import { compactionNoticeText, manualCompactionText } from "../application/compaction-text.ts";
 import { failureBadge } from "../application/format.ts";
 import { loadSessionHistory } from "../application/history.ts";
+import type { HookEventReport } from "../application/hooks.ts";
 import type { PromptHistoryStore } from "../application/prompt-history.ts";
 import { listRecentMainSessions } from "../application/recent-sessions.ts";
 import type { ScriptCommands } from "../application/script-commands.ts";
@@ -85,6 +86,7 @@ import type {
   ToolResultNotice,
 } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
+import { DEFAULT_STOP_HOOK_BLOCK_CAP } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { TurnCompletedPayload } from "../state/runtime-events.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
@@ -102,6 +104,7 @@ import {
   handleSlashCommand as dispatchSlashCommand,
   type TuiGrantsContext,
 } from "./commands.ts";
+import type { TuiHooksFace } from "./hooks-view.ts";
 import { createPromptEditor } from "./input-editor.ts";
 import { InputQueue } from "./input-queue.ts";
 import { attachToolResultTo, MessageFlow, projectRuntimeEvent } from "./message-flow.ts";
@@ -171,7 +174,11 @@ export interface TuiRuntimeFace {
 }
 
 // /resume 换绑产物（S4）：目标会话的新运行面与新治理上下文（形状定义在 resume-view.ts）
-export type TuiSessionBinding = SessionBinding<TuiRuntimeFace, TuiGrantsContext, TuiWorkersFace>;
+export interface TuiSessionBinding
+  extends SessionBinding<TuiRuntimeFace, TuiGrantsContext, TuiWorkersFace> {
+  // 决策 323/324：目标会话的钩子面——换绑后本会话的会话级事件用它（各会话的清单随各自的快照冻结）
+  hooks?: TuiHooksFace;
+}
 
 export interface TuiShellOptions {
   terminal: Terminal;
@@ -225,6 +232,10 @@ export interface TuiShellOptions {
   onHumanInput?: (text: string) => void;
   // 决策 309、312、301：/orchestrate 的命令面（跟着当前会话）；缺省 = 命令不可用
   scriptCommands?: () => ScriptCommands | undefined;
+  // 决策 323、324：当前会话的钩子面（会话级事件与 /hooks）；缺省 = 本会话不接钩子
+  hooks?: TuiHooksFace;
+  // 决策 323：收尾钩子的连续拦截上限（取设置快照的 merged.stopHookBlockCap，/reload 后跟着变）；缺省 8
+  stopHookCap?: () => number;
 }
 
 // 决策 301：界面所处的视图——主会话、整屏的树形视图、进入的 worker 会话
@@ -291,7 +302,12 @@ export class PigeonTuiShell
     runtime: TuiRuntimeFace;
     grants?: TuiGrantsContext;
     workers?: TuiWorkersFace;
+    hooks?: TuiHooksFace;
   };
+  // 决策 323、324：SessionStart 补的上下文（待下一条输入前缀）；换绑换会话时清掉
+  private hookContexts: string[] = [];
+  // 决策 323：本轮是否被外部取消（Esc / 打转叫停）——取消过的一轮不跑 Stop 钩子
+  private runCancelled = false;
   // start/stop 的 dispose 对称面：壳级监听器在此成对登记（S5 的同位置留位）；
   // 运行面订阅单独登记——/resume 换绑时只退订运行面，壳级监听（模态键控）不动
   private readonly disposers: Array<() => void> = [];
@@ -323,6 +339,7 @@ export class PigeonTuiShell
     this.current = { sessionId: options.sessionId, runtime: options.runtime };
     if (options.grants !== undefined) this.current.grants = options.grants;
     if (options.workers !== undefined) this.current.workers = options.workers;
+    if (options.hooks !== undefined) this.current.hooks = options.hooks;
     if (options.tasks !== undefined) this.tasks = options.tasks;
     this.tui = new TuiMainScreen(options.terminal, false, options.logDir);
     this.input = createPromptEditor(this.tui, options.promptHistory?.load() ?? []);
@@ -586,14 +603,45 @@ export class PigeonTuiShell
     }
     this.flow.addUserEcho(value);
     this.running = true;
+    this.runCancelled = false;
     this.updateStatus();
     this.tui.requestRender();
     // 决策 309：点名只看人的这条输入
     this.options.onHumanInput?.(value);
-    // 唯一提交通道：application API（当前会话运行面——/resume 换绑后是新面）。终态摘要
-    // 在 run() 决议后落（status/failure 是 promise 载荷，run.ended 事件只有 messageCount
-    // 生命周期事实）
-    this.current.runtime.run(value).then(
+    // 决策 323、324：UserPromptSubmit 挡在每条输入前——可拦下、可补上下文；随后才是唯一提交通道
+    //（application API：当前会话运行面——/resume 换绑后是新面）。终态摘要在 run() 决议后落
+    void this.runWithHooks(value);
+  }
+
+  // 决策 323、324：UserPromptSubmit——拦下则这一条不跑（理由落消息区），补的上下文与 SessionStart
+  // 待用上下文一起前缀给本次输入。钩子出错如实提示，不挡提交
+  private async runWithHooks(value: string): Promise<void> {
+    let input = value;
+    const hooks = this.current.hooks;
+    if (hooks !== undefined && !hooks.disabled) {
+      try {
+        const report = await hooks.runEvent("UserPromptSubmit", "", { prompt: value });
+        for (const line of report.systemMessages) this.flow.addSystem(line);
+        const blocked =
+          report.blocked?.reason ??
+          (report.continueFalse !== undefined
+            ? (report.continueFalse.stopReason ?? "钩子要求整个会话停止")
+            : undefined);
+        if (blocked !== undefined) {
+          this.flow.addSystem(`输入被钩子拦下：${blocked}`);
+          this.finishRun();
+          return;
+        }
+        const contexts = [...this.hookContexts, ...report.additionalContext];
+        this.hookContexts = [];
+        if (contexts.length > 0) input = `${contexts.join("\n\n")}\n\n${value}`;
+      } catch (error) {
+        this.flow.addSystem(
+          `钩子出错（UserPromptSubmit）：${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+    this.current.runtime.run(input).then(
       (result) => this.handleRunEnd(result),
       (error: unknown) => this.handleRunEnd(null, error)
     );
@@ -617,6 +665,7 @@ export class PigeonTuiShell
       (runtime.pendingNotices?.() ?? 0) > 0
     ) {
       this.running = true;
+      this.runCancelled = false;
       this.updateStatus();
       runtime.runNotices().then(
         (result) => this.handleRunEnd(result),
@@ -1104,6 +1153,8 @@ export class PigeonTuiShell
   requestInterrupt(cause?: RunStopCause): void {
     if (this.interrupting) return;
     this.interrupting = true;
+    // 决策 323：被取消的一轮不跑 Stop 钩子（外部取消与打转叫停都算）
+    this.runCancelled = true;
     this.flow.addSystem("[cancel] interrupt requested; waiting for run to settle");
     // pi 惯例：中断时排队内容退回输入框，不在中断后自动发出
     this.restoreQueueToEditor();
@@ -1142,6 +1193,56 @@ export class PigeonTuiShell
     }
   }
 
+  // ---- 决策 323、324：会话级钩子（SessionStart / SessionEnd / Notification 与 /hooks）----
+
+  // SessionStart：装配方在壳接管终端之前（首次）调用；补的上下文存起来当作下一条输入的前缀，
+  // 消息区提示一行。source：首次启动 "startup"、续跑或换绑/重建 "resume"
+  async beginSession(source: "startup" | "resume"): Promise<void> {
+    this.hookContexts = [];
+    const hooks = this.current.hooks;
+    if (hooks === undefined || hooks.disabled) return;
+    try {
+      const report = await hooks.runEvent("SessionStart", source, { source });
+      for (const line of report.systemMessages) this.flow.addSystem(line);
+      this.hookContexts = [...report.additionalContext];
+      if (this.hookContexts.length > 0) {
+        this.flow.addSystem("[hooks] SessionStart 补的上下文将在下一条输入带上");
+      }
+    } catch (error) {
+      this.flow.addSystem(
+        `钩子出错（SessionStart）：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    this.tui.requestRender();
+  }
+
+  // SessionEnd：退出前（reason "exit"）与换绑/重建换走旧会话前（reason "switch"）调用；
+  // 必须在释放运行面之前跑，记录才落在本会话文件里
+  async endSession(reason: "exit" | "switch"): Promise<void> {
+    const hooks = this.current.hooks;
+    if (hooks === undefined || hooks.disabled) return;
+    try {
+      await hooks.runEvent("SessionEnd", reason, { reason });
+    } catch {
+      // 收尾钩子出错不挡退出（记录已在 SessionHooks 里如实落盘）
+    }
+  }
+
+  // 决策 323、324：Notification（只作副作用）——审批面板出现时 permission_prompt；
+  // worker 的请示汇到本会话时另记 worker_approval（message 用面板提示原文）
+  notifyApprovalHook(notificationType: string, message: string): void {
+    const hooks = this.current.hooks;
+    if (hooks === undefined || hooks.disabled) return;
+    void hooks
+      .runEvent("Notification", notificationType, { message, notification_type: notificationType })
+      .catch(() => undefined);
+  }
+
+  // /hooks 的只读面（跟着当前会话；/resume 换绑与 /reload 重建后是新会话的面）
+  hooksView(): TuiHooksFace | undefined {
+    return this.current.hooks;
+  }
+
   // 换绑（S4）：会话上下文一体替换（sessionId + 运行面 + 治理上下文），chrome 标题跟进，
   // 运行面订阅先退旧再订新；消息区内容保留（对账报告与重建说明是恢复的证据链呈现）
   rebindSession(sessionId: SessionId, binding: TuiSessionBinding): void {
@@ -1149,9 +1250,16 @@ export class PigeonTuiShell
     this.leaveWorkerSession();
     this.showView("main");
     this.tracker.clear();
-    this.current = { sessionId, runtime: binding.runtime };
-    if (binding.grants !== undefined) this.current.grants = binding.grants;
-    if (binding.workers !== undefined) this.current.workers = binding.workers;
+    this.current = {
+      sessionId,
+      runtime: binding.runtime,
+      ...(binding.grants !== undefined ? { grants: binding.grants } : {}),
+      ...(binding.workers !== undefined ? { workers: binding.workers } : {}),
+      ...(binding.hooks !== undefined ? { hooks: binding.hooks } : {}),
+    };
+    // 决策 323、324：换到新会话——SessionStart（source "resume"）补的上下文归新会话；
+    // 旧会话的 SessionEnd 由装配方在释放旧运行面前跑
+    void this.beginSession("resume");
     this.activeRunId = null;
     // S5：落盘失败警告计数随运行面一起换绑——新面的 listenerErrors 从零起算
     this.reportedListenerErrors = 0;
@@ -1647,8 +1755,19 @@ export class PigeonTuiShell
   }
 
   private handleRunEnd(result: RunResult | null, error?: unknown): void {
-    this.running = false;
     this.activeRunId = null;
+    this.renderRunSummary(result, error);
+    // D2 可见化（S5）：每次 run 收尾复查落盘失败（增量报数，同 repl 口径）
+    this.warnEvidenceGaps();
+    this.refreshContext();
+    this.collectChildCosts();
+    // 决策 323、324：Stop 钩子在一轮收尾后跑（拦下即接着跑新一轮）；跑完才真正空闲并发排队输入
+    void this.afterRun(result);
+  }
+
+  // 一轮收尾的终态摘要（S5）：status + stopReason + 四分类徽章（failureBadge，与 cli trace
+  // 同口径）+ syntheticFailure 标注（若有）+ errorMessage（若有）
+  private renderRunSummary(result: RunResult | null, error?: unknown): void {
     if (result !== null) {
       // 终态摘要（S5）：status + stopReason + 四分类徽章（failureBadge，与 cli trace
       // 同口径）+ syntheticFailure 标注（若有）+ errorMessage（若有）
@@ -1663,13 +1782,66 @@ export class PigeonTuiShell
       const message = error instanceof Error ? error.message : String(error);
       this.flow.addSystem(`== run: error | ${message} ==`);
     }
-    // D2 可见化（S5）：每次 run 收尾复查落盘失败（增量报数，同 repl 口径）
-    this.warnEvidenceGaps();
-    this.refreshContext();
-    this.collectChildCosts();
+  }
+
+  // 一轮真正收尾：空闲下来、刷新状态并发排队输入（Stop 钩子跑完之后）
+  private finishRun(): void {
+    this.running = false;
     this.updateStatus();
     this.tui.requestRender();
     this.drainQueue();
+  }
+
+  // 决策 323、324：一轮收尾后的 Stop 钩子。外部取消过、run 自身报错或钩子停用即直接收尾；
+  // 拦下（或补了上下文）即把理由/上下文作为新一轮输入接着跑，连续拦到上限（stopHookBlockCap，
+  // 缺省 8）后不再理会并提示一行。stop_hook_active 首次 false、继续后 true
+  private async afterRun(result: RunResult | null): Promise<void> {
+    try {
+      if (result === null || this.runCancelled) return;
+      const hooks = this.current.hooks;
+      if (hooks === undefined || hooks.disabled) return;
+      const cap = this.options.stopHookCap?.() ?? DEFAULT_STOP_HOOK_BLOCK_CAP;
+      let stopHookActive = false;
+      let blockedCount = 0;
+      for (;;) {
+        let report: HookEventReport;
+        try {
+          report = await hooks.runEvent("Stop", "", { stop_hook_active: stopHookActive });
+        } catch (error) {
+          this.flow.addSystem(
+            `钩子出错（Stop）：${error instanceof Error ? error.message : String(error)}`
+          );
+          return;
+        }
+        for (const line of report.systemMessages) this.flow.addSystem(line);
+        const wantsContinue = report.blocked !== undefined || report.additionalContext.length > 0;
+        if (!wantsContinue) return;
+        if (blockedCount >= cap) {
+          this.flow.addSystem(`[hooks] Stop 钩子连续拦下 ${cap} 次，已到上限，不再接着跑`);
+          return;
+        }
+        blockedCount += 1;
+        stopHookActive = true;
+        const reason = report.blocked?.reason;
+        if (reason !== undefined) {
+          this.flow.addSystem(`[hooks] Stop 拦下，理由作为新一轮输入继续：${reason}`);
+        }
+        const next = [...report.additionalContext, ...(reason !== undefined ? [reason] : [])].join(
+          "\n\n"
+        );
+        const continued = await this.current.runtime.run(next);
+        this.renderRunSummary(continued);
+        this.warnEvidenceGaps();
+        this.refreshContext();
+        this.collectChildCosts();
+        this.updateStatus();
+        this.tui.requestRender();
+        // 外部取消（Esc / 打转叫停）或本轮以中断收尾：不再接着跑
+        if (this.runCancelled || continued.status === "aborted") return;
+      }
+    } finally {
+      this.finishRun();
+    }
   }
 
   private handleDelta(delta: StreamTextDelta): void {

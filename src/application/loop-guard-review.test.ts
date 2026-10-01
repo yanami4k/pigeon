@@ -7,7 +7,7 @@ import { memoryFileOf } from "../memory/learned-store.ts";
 import { reviewBackfillDir } from "../persistence/review-backfill-store.ts";
 import type { FakeReply } from "../pi-runtime/fixtures.ts";
 import { DEFAULT_LOOP_GUARD_SETTINGS } from "../state/loop-guard-config.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { type ReviewOutcome, reviewWarner } from "./memory-review.ts";
 import { runReviewBackfill } from "./review-backfill.ts";
 import {

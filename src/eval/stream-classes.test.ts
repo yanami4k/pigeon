@@ -92,7 +92,7 @@ test("两类用例（274）：人在该步没改的测试文件在 parent 侧整
   });
 });
 
-test("每步计分（196、201）：得分为要做到的通过比例；做成要求要做到的全过且不许挂的无一失败；缺席的用例算没过；失败编号截断", () => {
+test("每步计分（196、201）：得分为要做到的通过比例；做成要求要做到的全过且不许挂的无一失败；缺席的用例算没过；失败编号全记不截断", () => {
   const classes = {
     failToPass: ["a::1", "a::2", "a::3", "a::4"],
     passToPass: ["b::1", "b::2"],
@@ -110,7 +110,7 @@ test("每步计分（196、201）：得分为要做到的通过比例；做成�
     score: 0.5,
     passToPass: { failed: 0, total: 2 },
     solved: false,
-    failedCases: { failToPass: ["a::3", "a::4"], passToPass: [], truncated: false },
+    failedCases: { failToPass: ["a::3", "a::4"], passToPass: [] },
     excludedFlaky: 1,
   });
   const allF2p = run({
@@ -120,18 +120,20 @@ test("每步计分（196、201）：得分为要做到的通过比例；做成�
     "a::4": "passed",
     "b::1": "passed",
   });
-  const j = judgeStep(classes, allF2p, 1);
+  const j = judgeStep(classes, allF2p);
   assert.equal(j.score, 1);
   assert.equal(j.solved, false, "不许挂的有一条没过即不算做成");
   assert.deepEqual(j.passToPass, { failed: 1, total: 2 });
   const full = judgeStep(classes, [...allF2p, ...run({ "b::2": "passed" })]);
   assert.equal(full.solved, true);
-  const capped = judgeStep(classes, [], 1);
-  assert.deepEqual(capped.failedCases, {
-    failToPass: ["a::1"],
-    passToPass: ["b::1"],
-    truncated: true,
-  });
+  // 失败编号全记（327）：超过原上限 20 条也全记
+  const many = {
+    failToPass: Array.from({ length: 25 }, (_, k) => `m::${k}`),
+    passToPass: [] as string[],
+    excludedFlaky: [] as string[],
+  };
+  const uncapped = judgeStep(many, []);
+  assert.deepEqual(uncapped.failedCases, { failToPass: many.failToPass, passToPass: [] });
 });
 
 test("要做到的为零的步：得分与做成都为空（不进主判据分母），不许挂的照常统计", () => {

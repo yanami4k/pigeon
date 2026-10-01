@@ -1,13 +1,14 @@
 // pigeon migrate-config（决策 325）：把旧布局迁到三层设置与 .pigeon/state/。由人发起，启动时只报错不自动迁移。
-// 写成可扩展的步骤清单：每步先只读地给出要做的事与拦住的问题（plan），全部步骤都没有拦住的问题才逐步执行（apply）；
-// 钩子一段加"verify.json → 打印改写为收尾钩子的示例并改名备份"，记忆一段加 memory-review.json 与旧记忆的处理。
-// 本段的三步：
+// 写成可扩展的步骤清单：每步先只读地给出要做的事与拦住的问题（plan），全部步骤都没有拦住的问题才逐步执行（apply）。
+// 本段的四步（④ 为本轮新增）：
 //   ① 旧配置：7 个旧文件各成一节写入设置（permissions 写项目个人 .pigeon/settings.local.json，其余写项目共享
 //      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件挪出
 //      仓库，进用户级本项目的备份目录（决策 341，迁移结束打印位置；仓库里不留备份）。目标文件已存在时合并进去：
 //      同一节两边都有且内容不同即报错停下、不覆盖；
 //   ② 程序状态：会话、学到的记忆与其锁、补做复盘记录、输入历史、终端界面日志挪进 .pigeon/state/ 对应位置；
 //   ③ worker 工作树：git worktree move 到 .pigeon/state/worktrees/。
+//   ④ 退役的 verify.json（决策 322）：不并入设置——挪进备份目录，并打印把原验证命令改写为收尾（Stop）钩子的
+//      配置示例（分步配置按各步命令以 && 连接）。
 // 有锁被存活进程占用（会话正开着、worker 正在运行）或工作树被锁定时拒绝并说明。可重复执行：没有要做的事即如实说明。
 import { execFileSync } from "node:child_process";
 import {
@@ -44,6 +45,7 @@ import {
   SETTINGS_FILE,
   STATE_DIR,
   sessionsDirOf,
+  verifyConfigPathOf,
   worktreesDirOf,
 } from "../state/paths.ts";
 import { type SettingsLayer, validateSettingsLayer } from "../state/settings.ts";
@@ -435,11 +437,77 @@ export const legacyWorktreesStep: MigrationStep = {
   },
 };
 
+// ---- ④ 退役的 verify.json（决策 322 / 325）----
+
+// 从旧 verify.json 的 command 或 steps 拼出一行收尾钩子命令：分步配置按各步命令以 && 连接（带执行目录的步包一层 cd）
+function stopHookCommandOf(parsed: { command?: unknown; steps?: unknown }): string {
+  if (typeof parsed.command === "string" && parsed.command.trim() !== "") {
+    return parsed.command;
+  }
+  if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+    const commands = parsed.steps.map((step: unknown) => {
+      if (!isPlainObject(step) || typeof step.command !== "string" || step.command.trim() === "") {
+        throw new MigrationError(
+          `${pigeonRel("verify.json")} 的 steps 里有缺 command 的步，无法拼出收尾钩子命令`
+        );
+      }
+      return typeof step.cwd === "string" && step.cwd.trim() !== ""
+        ? `( cd ${step.cwd} && ${step.command} )`
+        : step.command;
+    });
+    return commands.join(" && ");
+  }
+  throw new MigrationError(
+    `${pigeonRel("verify.json")} 里既没有 command 也没有 steps，无法拼出收尾钩子命令`
+  );
+}
+
+export const verifyJsonStep: MigrationStep = {
+  id: "verify-json",
+  title: "退役的验证配置",
+  plan(ctx) {
+    return existsSync(verifyConfigPathOf(ctx.root))
+      ? {
+          todo: [
+            `${pigeonRel("verify.json")} → 挪进备份目录（验证门已删除，不并入设置），并打印改写为收尾钩子的示例`,
+          ],
+          blockers: [],
+        }
+      : { todo: [], blockers: [] };
+  },
+  apply(ctx) {
+    const source = verifyConfigPathOf(ctx.root);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(source, "utf8"));
+    } catch (error) {
+      throw new MigrationError(
+        `${pigeonRel("verify.json")} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (!isPlainObject(raw)) {
+      throw new MigrationError(`${pigeonRel("verify.json")} 顶层须为对象`);
+    }
+    const command = stopHookCommandOf(raw);
+    ctx.backups.push(moveToMigrationBackup(ctx.root, source, "verify.json", ctx.homeDir));
+    return [
+      `已挪走 ${pigeonRel("verify.json")}：验证门、回炉与失败自动分叉重试已删除，verify.json 不并入设置`,
+      `如需同等的收尾检查，把原来的验证命令配成收尾（Stop）钩子——在 ${pigeonRel("settings.json")} 里加：`,
+      `  "hooks": {`,
+      `    "Stop": [`,
+      `      { "hooks": [{ "type": "command", "command": ${JSON.stringify(command)} }] }`,
+      `    ]`,
+      `  }`,
+    ];
+  },
+};
+
 // 本段的步骤清单（以后各段在此追加）
 export const MIGRATION_STEPS: readonly MigrationStep[] = [
   legacyConfigStep,
   legacyStateStep,
   legacyWorktreesStep,
+  verifyJsonStep,
 ];
 
 export interface MigrateConfigResult {

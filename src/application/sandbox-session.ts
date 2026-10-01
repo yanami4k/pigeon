@@ -25,14 +25,14 @@ import {
   type SettingsSnapshot,
   sandboxConfigOf,
 } from "../state/settings.ts";
-import { type HeadlessRetryResult, type HeadlessRunOptions, runHeadless } from "./headless.ts";
+import { type HeadlessRunOptions, type HeadlessRunResult, runHeadless } from "./headless-core.ts";
 import type { LaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
 
 export { exportNotice, SANDBOX_CLEAN_COMMAND, type Sandbox, type SandboxExport };
 
 export const SANDBOX_FORK_UNSUPPORTED =
-  "沙箱里暂不支持分叉（/fork 与失败自动分叉重试）：分叉要在宿主的 git 工作区上打快照、到独立工作树里续跑，" +
+  "沙箱里暂不支持分叉（/fork）：分叉要在宿主的 git 工作区上打快照、到独立工作树里续跑，" +
   "而沙箱的工作区在容器里";
 export const SANDBOX_WORKERS_UNSUPPORTED =
   "沙箱里暂不支持派 worker（/spawn、/cancel、/workers、/take）：worker 在宿主的 git 工作树里干活，会越出沙箱";
@@ -46,7 +46,7 @@ export type SandboxOverrides = Pick<
 >;
 
 export interface StartSandboxInput {
-  flags: Pick<LaunchFlags, "sandbox" | "retryOnFail">;
+  flags: Pick<LaunchFlags, "sandbox">;
   governanceRoot: string;
   sessionId: string;
   // 续跑：从该会话交回过的分支起步
@@ -62,9 +62,6 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
   const launch = input.flags.sandbox;
   if (launch === undefined) {
     return undefined;
-  }
-  if ((input.flags.retryOnFail ?? 0) > 0) {
-    throw new Error(SANDBOX_FORK_UNSUPPORTED);
   }
   // 决策 252：沙箱会话不启动 MCP 服务；配置了的列出来说明不可用，没配不提示
   const settings = input.settings ?? emptySettingsSnapshot(input.governanceRoot);
@@ -128,7 +125,7 @@ export async function exportSandbox(sandbox: Sandbox): Promise<string> {
   }
 }
 
-export interface SandboxedHeadlessResult extends HeadlessRetryResult {
+export interface SandboxedHeadlessResult extends HeadlessRunResult {
   // 交回的分支（交回失败时缺省，原因见 sandboxNotice）
   sandbox?: SandboxExport;
   sandboxNotice?: string;
@@ -148,7 +145,7 @@ export async function runHeadlessInSandbox(
   if (sandbox === undefined) {
     throw new Error("runHeadlessInSandbox 需要 --sandbox");
   }
-  let result: HeadlessRetryResult;
+  let result: HeadlessRunResult;
   try {
     // 决策 252：不启动 MCP 服务
     result = await runHeadless({ ...options, workspaceHost: sandbox.host, startMcp: noMcpSession });

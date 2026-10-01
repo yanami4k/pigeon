@@ -1,5 +1,5 @@
 // 复盘（决策 191、192、207、221、240、242、243）：headless 的收尾复盘与压缩前复盘。
-// 分叉目标为最后一条消息、位置 at；沿用原会话冻结的系统提示与工具定义；指令里的当前记忆现读；{验证结论} 按最后一次验证填；
+// 分叉目标为最后一条消息、位置 at；沿用原会话冻结的系统提示与工具定义；指令里的当前记忆现读；验证结论一行固定为"本次没有运行验证门"（验证门已随决策 322 删除）；
 // 只放行 read_file 与 update_memory；复盘会话的 Run 开始条目记种类与模板版本；复盘失败或撞上限不改变这一步的结果；
 // 复盘上限独立于这一步的上限；压缩前复盘经压缩前回调触发、用压缩前指令；开关关掉即不推送、不注册工具、不复盘。
 import assert from "node:assert/strict";
@@ -18,7 +18,7 @@ import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { type RunStartData, SessionEntryType } from "../state/session-entries.ts";
-import { type HeadlessRunOptions, runHeadless } from "./headless.ts";
+import { type HeadlessRunOptions, runHeadless } from "./headless-core.ts";
 
 const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";
 const REFUSAL = "复盘中只能使用 read_file 与 update_memory，这次调用没有执行。";
@@ -233,27 +233,6 @@ test("收尾复盘：从最后一条消息（含）分叉；沿用冻结的系�
     assert.ok(byTool.get("update_memory")?.startsWith("已新增 L2"));
     assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "一\n");
     assert.ok(readFileSync(memoryFileOf(root), "utf8").includes("- [L2] 事实：复盘记下的事实"));
-  }));
-
-test('收尾复盘的验证结论：通过填"通过"，未通过填回炉反馈的同一份失败摘要', () =>
-  withRoot(async (root) => {
-    for (const [command, expected] of [
-      ["node --version", "\n验证门的最终结论：通过\n"],
-      [
-        'node -e "process.exit(3)"',
-        '\n验证门的最终结论：未通过：验证命令：node -e "process.exit(3)"\n退出码：3\n输出末尾：\n（无输出）\n',
-      ],
-    ] as const) {
-      const { streamFn, calls } = routed({ main: [{ text: "好了" }], review: [{ text: "不记" }] });
-      const result = await runHeadless({
-        ...base(root, streamFn),
-        verify: { command, timeoutMs: 60_000, source: "flag" },
-      });
-      assert.equal(result.reviews?.[0]?.status, "completed");
-      const reviewCall = calls.find((call) => call.kind === "review");
-      const instruction = textOf(reviewCall?.messages.at(-1) as LoggedMessage);
-      assert.ok(instruction.includes(expected), instruction);
-    }
   }));
 
 test("复盘失败不改变这一步的结果：去重告警写出，结果里记下失败原因", () =>

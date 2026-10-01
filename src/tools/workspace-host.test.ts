@@ -55,6 +55,8 @@ function memoryHost(initial: Record<string, string>) {
         outputBytes: 5,
         outputHash: "0".repeat(64),
         output: "hello",
+        stdout: "hello",
+        stderr: "",
       };
     },
     async listFiles() {

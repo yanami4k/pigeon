@@ -32,8 +32,9 @@ import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/comp
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
-import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
+import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { EventEnvelope } from "../state/events.ts";
+import { DEFAULT_STOP_HOOK_BLOCK_CAP } from "../state/hooks.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
@@ -50,6 +51,7 @@ import { mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import type { SessionHooks } from "./hooks.ts";
 import { loopGuardWatcher } from "./loop-guard.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import {
@@ -276,10 +278,6 @@ interface RuntimeSurface {
   reviewSession?: ReviewSessionConfig;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
-  // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
-  verify?: VerifyConfig;
-  // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照）
-  retryOnFail?: number;
   // 决策 264–267：派 worker 的开关（headless 主会话会给；层数放开时未到最底层的 worker 也给，299）
   spawnWorker?: SpawnWorkerSlot;
   // 决策 309：提交编排脚本的工具槽（只有 headless 主会话会给）
@@ -292,8 +290,6 @@ interface RuntimeSurface {
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
   budget?: AttemptBudget;
-  // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
-  repairRounds?: number;
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -390,7 +386,6 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
                 orchestrator: nestedOrchestrator,
                 governanceRoot: request.governanceRoot,
                 hostSessionId: request.sessionId,
-                hostStore: bundle.sessionStore,
                 target: bundle.adapter,
                 from: request.sessionId,
               }).notices;
@@ -400,8 +395,62 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
       ...(deps.settingsSnapshot !== undefined ? { settings: deps.settingsSnapshot } : {}),
     });
+    // 决策 323 / 324：SubagentStart（派出/续做前，可补上下文）与 SubagentStop（worker 收尾，可拦住接着干；
+    // 连续拦截到上限后照常结束）。钩子取本 worker 运行面自己的（随设置快照冻结）
+    const hooksOf = async (): Promise<SessionHooks | undefined> => {
+      // 端口返回 unknown（编排层不依赖 application），此处收窄到 RuntimeBundle（生产者唯一：本层装配）
+      const bundle = (await handle.ready?.()) as RuntimeBundle | undefined;
+      return bundle?.hooks ?? nestedBundle?.hooks;
+    };
+    const runWithSubagentHooks = async (
+      task: string,
+      runOnce: (input: string) => Promise<WorkerRunResult>
+    ): Promise<WorkerRunResult> => {
+      const hooks = await hooksOf();
+      let input = task;
+      let stopActive = false;
+      let blockedCount = 0;
+      const cap = deps.settingsSnapshot?.merged.stopHookBlockCap ?? DEFAULT_STOP_HOOK_BLOCK_CAP;
+      if (hooks !== undefined) {
+        const start = await hooks.runEvent("SubagentStart", request.role, {
+          agent_id: request.sessionId,
+          agent_type: request.role,
+        });
+        if (start.continueFalse !== undefined) {
+          return { status: "aborted" };
+        }
+        if (start.additionalContext.length > 0) {
+          input = `${start.additionalContext.join("\n\n")}\n\n${task}`;
+        }
+      }
+      for (;;) {
+        const result = await runOnce(input);
+        if (hooks === undefined) {
+          return result;
+        }
+        const stop = await hooks.runEvent("SubagentStop", request.role, {
+          agent_id: request.sessionId,
+          agent_type: request.role,
+          stop_hook_active: stopActive,
+          last_assistant_message: handle.summary(),
+        });
+        const wantsContinue = stop.blocked !== undefined || stop.additionalContext.length > 0;
+        if (!wantsContinue || blockedCount >= cap) {
+          return result;
+        }
+        blockedCount += 1;
+        stopActive = true;
+        input = [
+          ...stop.additionalContext,
+          ...(stop.blocked !== undefined ? [stop.blocked.reason] : []),
+        ].join("\n\n");
+      }
+    };
     if (nestedOrchestrator === undefined) {
-      return handle;
+      return {
+        ...handle,
+        run: (task) => runWithSubagentHooks(task, (input) => handle.run(input)),
+      };
     }
     // 能再派的 worker：自己的运行结束后等它派出的 worker 全部结束、把通知处理完才算结束；被中止时一并停掉它派出的
     let halted = false;
@@ -433,7 +482,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     };
     return {
       ...handle,
-      run: async (task) => settleChildren(await handle.run(task)),
+      run: (task) => runWithSubagentHooks(task, (input) => handle.run(input).then(settleChildren)),
       interrupt: async (cause) => {
         halted = true;
         await Promise.allSettled(
@@ -483,9 +532,6 @@ export interface DetachedRuntimeRequest {
   learnedMemory?: LearnedMemoryConfig;
   reviewSession?: ReviewSessionConfig;
   startMcp?: () => Promise<McpSession>;
-  // M7（决策 071）：会话级验证命令冻结进注入快照
-  verify?: VerifyConfig;
-  retryOnFail?: number;
   // 决策 264–267：派 worker 的开关
   spawnWorker?: SpawnWorkerSlot;
   // 决策 309：提交编排脚本的工具槽（只有 headless 主会话会给）
@@ -496,8 +542,6 @@ export interface DetachedRuntimeRequest {
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
   budget?: AttemptBudget;
-  // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
-  repairRounds?: number;
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -553,8 +597,6 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       : {}),
     ...(surface.learnedMemory !== undefined ? { learnedMemory: surface.learnedMemory } : {}),
     ...(surface.reviewSession !== undefined ? { reviewSession: surface.reviewSession } : {}),
-    ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
-    ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
     ...(surface.scriptOrchestration !== undefined
       ? { scriptOrchestration: surface.scriptOrchestration }
@@ -563,7 +605,6 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
     ...(surface.webTools !== undefined ? { webTools: surface.webTools } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
-    ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
     ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
     ...(surface.settings !== undefined ? { settings: surface.settings } : {}),
@@ -634,6 +675,8 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   const { adapter } = bundle;
   return {
     run: (task) => adapter.run(task),
+    // 决策 324：运行面就绪（同步就绪即当场给出）
+    ready: () => Promise.resolve(bundle),
     interrupt: (cause) => adapter.interrupt(cause),
     subscribe: (listener) => adapter.subscribe(listener),
     subscribeRounds: (listener) => adapter.subscribeRounds(listener),
@@ -693,6 +736,8 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       }
       return current.adapter.run(task);
     },
+    // 决策 324：等运行面就绪（装配失败即拒绝，与 run 同一出口）
+    ready: () => settled,
     interrupt: async (cause) => {
       if (bundle === undefined) {
         interruptedEarly = true;

@@ -115,7 +115,7 @@ export async function runForkCommand(input: {
   return [
     `已分叉：分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条 ｜ 快照 ${result.checkpoint.commit.slice(0, 12)}`,
     `  分支会话 ${result.branchSessionId} ｜ 工作树 ${result.workspace.path}（分支 ${result.workspace.branch}）`,
-    `  终态 ${result.status} ｜ 标签 ${result.label}${result.verified ? "" : "（未配置验证命令）"}`,
+    `  终态 ${result.status} ｜ 标签 ${result.label}`,
     `  进入分支：resume ${result.branchSessionId}`,
   ].join("\n");
 }

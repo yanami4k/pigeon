@@ -370,11 +370,6 @@ async function runStreamExperimentLocked(
       agents.pigeon = pigeonStepAgent({
         ...streamPigeonOptions(options.pigeon),
         docker,
-        // 回炉验证前还原人写的测试与测试辅助文件（按这条流的运行方式归类）
-        humanTestFile: (file) => {
-          const kind = runtime.profile.classifyFile(file);
-          return kind === "test" || kind === "testaux";
-        },
         streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId),
         // 限额信号一到即中止在途的一步（反正要作废重做）
         limits,

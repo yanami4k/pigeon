@@ -4,12 +4,11 @@
 //   新分支是新的 Pigeon 会话，文件头指向来源会话与分叉点；用户工作区不受影响；
 // - 非 git 工作区发起分叉明确报错，不降级、不留分叉条目；
 // - 冷会话被另一进程持有时，来源分叉条目写不成，在建工作树之前报错，不留工作树与分支文件；
-// - --retry-on-fail：尝试标为失败时从本次任务开始处分叉重试（不注入任何提示）。
+// - 分支续跑沿用来源尝试的采样温度与工作方式指令（决策 087 修订、110：同一个模型换一个温度就是换了尺子）。
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -24,16 +23,15 @@ import { NotGitWorkspaceError } from "../orchestration/checkpoint.ts";
 import { sessionFileLockPath } from "../persistence/session-lock.ts";
 import { listSessionFiles, locateSessionFile } from "../persistence/session-reader.ts";
 import { type LoadedStoreSession, loadStoreSession } from "../persistence/session-view.ts";
-import { loadSettings } from "../persistence/settings.ts";
-import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
+import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { ForkError, runForkBranch } from "./fork.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
-const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
   prompts: [],
@@ -89,10 +87,6 @@ function repo(): { dir: string; home: string; cleanup: () => void } {
   git(dir, ["config", "core.autocrlf", "false"]);
   writeFileSync(join(dir, ".gitignore"), ".pigeon/\n");
   writeFileSync(join(dir, "a.txt"), "old\n");
-  writeFileSync(
-    join(dir, "check.mjs"),
-    'import { readFileSync } from "node:fs";\nprocess.exit(readFileSync("a.txt", "utf8") === "new\\n" ? 0 : 1);\n'
-  );
   git(dir, ["add", "."]);
   git(dir, ["commit", "-q", "-m", "init"]);
   return {
@@ -115,8 +109,6 @@ const edit = (content: string) => ({
   ],
 });
 
-const VERIFY = { command: `${NODE} check.mjs`, timeoutMs: 30_000 };
-
 test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照开独立工作树，分支文件复制分叉点之前的历史，分支消息只到分叉点", async () => {
   const { dir, home, cleanup } = repo();
   try {
@@ -128,13 +120,11 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
       flags: { yolo: true, provider: "custom", modelId: "custom", persistThinking: true },
       startMcp: noMcp,
       homeDir: home,
-      verify: VERIFY,
     });
     let branch: Awaited<ReturnType<typeof runForkBranch>>;
     const branchModel = createFakeStreamFn({ replies: [edit("new\n"), { text: "这次对了" }] });
     try {
       await opened.bundle.adapter.run("把 a.txt 改成 new");
-      await opened.verification?.idle();
       await opened.bundle.sessionStore.flush();
       const source = storeSession(dir, sourceId).view;
       const runId = source.runs[0]?.runId;
@@ -153,7 +143,6 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
           yolo: true,
           homeDir: home,
           startMcp: noMcp,
-          verify: VERIFY,
         },
       });
     } finally {
@@ -185,11 +174,7 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
     assert.ok(existsSync(header.workspace.path));
     assert.equal(readFileSync(join(header.workspace.path, "a.txt"), "utf8"), "new\n");
     assert.equal(readFileSync(join(dir, "a.txt"), "utf8"), "wrong\n", "用户工作区不受分支影响");
-    assert.equal(branch.label, "Passed");
-    assert.deepEqual(
-      storeBranch.view.verifications.map((record) => record.data.workspace),
-      [header.workspace.path]
-    );
+    assert.equal(branch.label, "Unknown", "无验证而正常完成记未知（决策 322）");
 
     const firstCall = branchModel.calls[0]?.context.messages ?? [];
     assert.equal(firstCall.length, 1, "分支初始消息只到分叉点（任务消息）");
@@ -329,85 +314,60 @@ test("冷会话被另一进程持有：来源分叉条目写不成，在建工�
   }
 });
 
-test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注入提示）", async () => {
+test("分叉沿用来源尝试的采样温度与工作方式指令：分支的调用选项与 Run 开始条目与来源尝试一致（决策 087 修订、110）", async () => {
   const { dir, home, cleanup } = repo();
   try {
-    const model = createFakeStreamFn({
-      replies: [edit("wrong\n"), { text: "改好了" }, edit("new\n"), { text: "这次对了" }],
-    });
-    const result = await runHeadless({
+    const calls: Array<{ temperature: unknown; systemPrompt: string }> = [];
+    const track =
+      (fake: FakeStreamFn): StreamFn =>
+      (model, context, options) => {
+        calls.push({
+          temperature: (options as { temperature?: unknown } | undefined)?.temperature,
+          systemPrompt: context.systemPrompt ?? "",
+        });
+        return fake(model, context, options);
+      };
+    const directive = "Your task is to make a.txt read new.";
+    const source = await runHeadless({
       task: "把 a.txt 改成 new",
       governanceRoot: dir,
       workspaceRoot: dir,
-      streamFn: model,
+      streamFn: track(createFakeStreamFn({ replies: [edit("new\n"), { text: "改好了" }] })),
       yolo: true,
       homeDir: home,
       startMcp: noMcp,
-      verify: VERIFY,
-      retryOnFail: 1,
+      temperature: 0,
+      taskDirective: directive,
     });
-    assert.equal(result.label, "Failed");
-    assert.equal(result.retries?.length, 1);
-    assert.equal(result.retries?.[0]?.label, "Passed");
-    const source = storeSession(dir, result.sessionId).view;
-    assert.equal(source.runs[0]?.start.retryOnFail, 1);
-    assert.equal(source.forks.length, 1);
-    const forked = source.forks[0]?.data;
-    assert.equal(forked?.trigger, "retry-on-fail");
-    assert.equal(forked?.forkPoint.runSeq, 1, "从本次任务开始处分叉");
-    const retryCall = model.calls[2]?.context.messages ?? [];
-    assert.equal(retryCall.length, 1, "重试不注入任何提示");
-    assert.equal(result.retries?.[0]?.branchSessionId, forked?.branchSessionId);
-    assert.deepEqual(
-      source.runs.filter((run) => run.end === undefined),
-      [],
-      "来源会话没有未收尾的 Run"
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-test("--retry-on-fail：重试沿用本次运行的设置快照（项目个人设置里的 edit_file 放权在重试时同样生效）", async () => {
-  const { dir, home, cleanup } = repo();
-  try {
-    mkdirSync(join(dir, ".pigeon"), { recursive: true });
-    writeFileSync(
-      join(dir, ".pigeon", "settings.local.json"),
-      JSON.stringify({
-        permissions: {
-          grants: [
-            {
-              tool: "edit_file",
-              promotedFrom: {
-                grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
-                sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
-                firstCall: { toolCallId: "t0", args: {} },
-                promotedAt: 1,
-              },
-            },
-          ],
-        },
-      })
-    );
-    const result = await runHeadless({
-      task: "把 a.txt 改成 new",
+    const runId = storeSession(dir, source.sessionId).view.runs[0]?.runId;
+    assert.ok(runId !== undefined);
+    const branch = await runForkBranch({
       governanceRoot: dir,
-      workspaceRoot: dir,
-      settings: loadSettings(dir, { homeDir: home }),
-      streamFn: createFakeStreamFn({
-        replies: [edit("wrong\n"), { text: "改好了" }, edit("new\n"), { text: "这次对了" }],
-      }),
-      // 不放手、无人值守：写操作只能凭放权放行
-      yolo: false,
-      homeDir: home,
-      startMcp: noMcp,
-      verify: VERIFY,
-      retryOnFail: 1,
+      sourceSessionId: source.sessionId,
+      forkPoint: { runId, runSeq: 1 },
+      trigger: "manual",
+      run: {
+        streamFn: track(createFakeStreamFn({ replies: [edit("new\n"), { text: "改好了" }] })),
+        provider: "custom",
+        modelId: "custom",
+        yolo: true,
+        homeDir: home,
+        startMcp: noMcp,
+        temperature: 0,
+        taskDirective: directive,
+      },
     });
-    assert.equal(result.label, "Failed");
-    assert.equal(result.retries?.length, 1);
-    assert.equal(result.retries?.[0]?.label, "Passed", "重试里的编辑同样凭放权放行");
+    // 来源两轮、分支两轮：每一次调用都带温度 0 与同一句指令
+    assert.equal(calls.length, 4);
+    for (const call of calls) {
+      assert.equal(call.temperature, 0);
+      assert.ok(call.systemPrompt.endsWith(directive));
+    }
+    // 分支会话自己的 Run（不含从来源复制过来的那一段）的开始条目
+    const branchView = storeSession(dir, branch.branchSessionId).view;
+    assert.equal(branchView.runs.length, 1);
+    assert.equal(branchView.runs[0]?.start.model.temperature, 0);
+    assert.equal(branchView.runs[0]?.start.taskDirective, directive);
   } finally {
     cleanup();
   }

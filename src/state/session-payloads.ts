@@ -1,10 +1,8 @@
-// 会话事实的载荷形状（决策 177 / 184）：worker 编排、分叉、授权与验证各写入点交给新会话存储的输入，以及它们共用的
+// 会话事实的载荷形状（决策 177 / 184）：worker 编排、分叉与授权各写入点交给新会话存储的输入，以及它们共用的
 // 子结构（角色、工作区、委派策略、上限、分叉点、快照引用）。纯类型、无 IO；写成哪种自定义条目或文件头见 session-entries.ts。
+// 决策 322：验证记录已停写，AttemptVerifiedInput 随验证门删除；旧会话里的验证条目形状留在 session-entries.ts 供读取
 import { type Static, Type } from "typebox";
-import { Sha256HexSchema } from "./hashing.ts";
 import { GrantIdSchema, RunIdSchema, SessionIdSchema } from "./ids.ts";
-import { EvalVerdictSchema } from "./runtime-events.ts";
-import { VerifyStepResultSchema } from "./verify-steps.ts";
 
 // worker 角色（M5.5 S2，决策 040；M8 决策 082 加验证器）。
 // 决策 137 / 158：reviewer、distiller、verifier 已停用、不再派出；取值保留，项目命令配置里仍记着它们，删值会使其读不出。
@@ -215,32 +213,6 @@ export const ChildSettledInputSchema = Type.Object({
   script: Type.Optional(ScriptSettleTagSchema),
 });
 export type ChildSettledInput = Static<typeof ChildSettledInputSchema>;
-
-// 通用验证记录（M7，决策 071）：尝试收尾后由程序在该尝试的工作区执行配置的验证命令，模型看不到；
-// target 指明对应的会话与 Run
-export const AttemptVerifiedInputSchema = Type.Object({
-  ...OptionalRunId,
-  target: Type.Object({ sessionId: SessionIdSchema, runId: RunIdSchema }),
-  // 实际执行的参数数组
-  command: Type.Array(Type.String()),
-  exitCode: Type.Union([Type.Integer(), Type.Null()]),
-  signal: Type.Optional(Type.String()),
-  timedOut: Type.Boolean(),
-  // 验证命令自身故障（拉不起进程、工作区不存在）
-  error: Type.Optional(Type.String()),
-  durationMs: Type.Integer({ minimum: 0 }),
-  outputBytes: Type.Integer({ minimum: 0 }),
-  outputHash: Sha256HexSchema,
-  output: Type.String(),
-  truncated: Type.Boolean(),
-  // 执行验证的工作区（尝试所在的工作树或工作区根）
-  workspace: Type.String({ minLength: 1 }),
-  verdict: EvalVerdictSchema,
-  verifiedAt: Type.Integer({ minimum: 0 }),
-  // 决策 159：分步配置下的各步结论；单条命令配置不带
-  steps: Type.Optional(Type.Array(VerifyStepResultSchema, { minItems: 1 })),
-});
-export type AttemptVerifiedInput = Static<typeof AttemptVerifiedInputSchema>;
 
 // 分叉（M7，决策 077）：写进来源会话；新分支标识即分支会话号
 export const SessionForkedInputSchema = Type.Object({

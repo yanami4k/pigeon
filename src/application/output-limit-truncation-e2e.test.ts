@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { toolResultMark } from "../state/session-judge.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 
 const ORIGINAL = "alpha\nbeta\ngamma\n";
 

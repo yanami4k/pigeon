@@ -1,21 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { test } from "node:test";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
-import { listSessionFiles } from "../persistence/session-reader.ts";
-import { loadStoreSession } from "../persistence/session-view.ts";
-import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
+import { createFakeStreamFn, createGate } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import type { GatewayMeter } from "./model-gateway.ts";
 import {
@@ -48,9 +38,8 @@ function input(workDir: string, overrides: Partial<StepAgentInput> = {}): StepAg
     prompt: "do it",
     condition: CONDITION_SPECS.minimal,
     target: { container: "box", root: "/testbed" },
-    // 墙钟给宽：机器负载高时回炉几轮的用例也跑得完；要测预算的用例显式给预算
+    // 墙钟给宽：机器负载高时也跑得完；要测预算的用例显式给预算
     budget: { maxTurns: 150, wallClockMs: 600_000 },
-    verify: { steps: [{ name: "验证", command: "true" }], command: "true", timeoutMs: 60_000 },
     workDir,
     ...overrides,
   };
@@ -75,8 +64,8 @@ test("命令式 agent：请求文件带题面、工作说明、容器与预算�
     const agent = commandStepAgent({ command: [process.execPath, launcher], docker: NO_RESIDUE });
     const out = await agent.run(input(dir));
     assert.deepEqual(
-      [out.status, out.turns, out.usage.totalTokens, out.usage.input, out.repair],
-      ["completed", 10, 10, 7, null]
+      [out.status, out.turns, out.usage.totalTokens, out.usage.input],
+      ["completed", 10, 10, 7]
     );
     const { stepMarker, ...request } = JSON.parse(
       readFileSync(join(dir, "minimal", "step-7", "request.json"), "utf8")
@@ -365,13 +354,6 @@ function containerWorkspace(dir: string) {
   return { testbed, ...localDockerHost(testbed) };
 }
 
-// a.txt 为 fixed 才通过的一步验证
-const FIXED_GATE = {
-  steps: [{ name: "验证", command: "grep -qx fixed a.txt" }],
-  command: "grep -qx fixed a.txt",
-  timeoutMs: 60_000,
-};
-
 const editTo = (from: string, to: string) => ({
   text: `把 ${from} 改成 ${to}`,
   toolCalls: [
@@ -379,43 +361,7 @@ const editTo = (from: string, to: string) => ({
   ],
 });
 
-test("Pigeon agent：开回炉的条件按分步验证在容器里回炉，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动，结果带回回炉字段", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  try {
-    const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({
-        replies: [
-          editTo("bug", "w1"),
-          { text: "好了" },
-          editTo("w1", "w2"),
-          { text: "好了" },
-          editTo("w2", "w3"),
-          { text: "好了" },
-          editTo("w3", "w4"),
-          { text: "好了" },
-        ],
-      }),
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-    });
-    const out = await agent.run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: FIXED_GATE,
-      })
-    );
-    assert.deepEqual(out.repair, { rounds: 3, finalVerdict: "fail" });
-    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w4\n");
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：一步期间来了限额信号即中止在途的运行（不跑满、不验证、不回炉），报被打断交给跑批器作废重做", async () => {
+test("Pigeon agent：一步期间来了限额信号即中止在途的运行（不跑满），报被打断交给跑批器作废重做", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   try {
@@ -452,11 +398,6 @@ test("Pigeon agent：一步期间来了限额信号即中止在途的运行（�
       input(join(dir, "job"), {
         condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
-        verify: {
-          steps: [{ name: "验证", command: "touch verified.flag; exit 1" }],
-          command: "touch verified.flag; exit 1",
-          timeoutMs: 60_000,
-        },
       })
     );
     await firstCall;
@@ -467,9 +408,7 @@ test("Pigeon agent：一步期间来了限额信号即中止在途的运行（�
     const out = await running;
     assert.equal(out.status, "aborted");
     assert.match(out.interrupted ?? "", /限额信号/);
-    assert.equal(out.repair, null);
     assert.equal(inner.calls.length, 1, "中止后不再请求模型");
-    assert.equal(existsSync(join(ws.testbed, "verified.flag")), false, "不验证");
     assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "bug\n");
   } finally {
     ws.cleanup();
@@ -512,7 +451,7 @@ const PIGEON_STREAM_TOOLS = {
 } as const;
 
 for (const condition of ["search-push", "search-only", "push-only", "neither"] as const) {
-  test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用与回炉），工具清单里没有派生 agent 或 worker 的工具，会话检索工具随条件的开关增减`, async () => {
+  test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用），工具清单里没有派生 agent 或 worker 的工具，会话检索工具随条件的开关增减`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     try {
@@ -530,12 +469,6 @@ for (const condition of ["search-push", "search-only", "push-only", "neither"] a
               ],
             },
             { text: "好了" },
-            editTo("w1", "w2"),
-            { text: "好了" },
-            editTo("w2", "w3"),
-            { text: "好了" },
-            editTo("w3", "w4"),
-            { text: "好了" },
           ],
         })
       );
@@ -549,14 +482,13 @@ for (const condition of ["search-push", "search-only", "push-only", "neither"] a
         input(join(dir, "job"), {
           condition: CONDITION_SPECS[condition],
           target: { container: "box", root: ws.containerRoot },
-          verify: FIXED_GATE,
         })
       );
-      // 四格都开回炉：修满 3 轮；推送格另有一次收尾复盘（复盘沿用同一套工具定义）
+      // 干活两轮（一轮两个工具调用 + 收尾一轮）；推送格另有一次收尾复盘（复盘沿用同一套工具定义）
       assert.equal(
         counting.seen.calls,
-        CONDITION_SPECS[condition].pushedMemory ? 9 : 8,
-        "四格都开回炉：修满 3 轮"
+        CONDITION_SPECS[condition].pushedMemory ? 3 : 2,
+        "干活两轮"
       );
       assert.equal(counting.seen.peak, 1);
       assert.deepEqual([...counting.seen.tools].sort(), PIGEON_STREAM_TOOLS[condition]);
@@ -567,399 +499,35 @@ for (const condition of ["search-push", "search-only", "push-only", "neither"] a
   });
 }
 
-test("Pigeon agent：开工前已来了限额信号（起点记好之后、第一轮之前）即一轮都不跑；验证进行中来了信号，验证一结束即停、不再回炉", async () => {
+test("Pigeon agent：开工前已来了限额信号（起点记好之后、第一轮之前）即一轮都不跑", async () => {
   // 开工前：控制器已是暂停状态
-  {
-    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-    const ws = containerWorkspace(dir);
-    try {
-      const inner = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
-      const agent = pigeonStepAgent({
-        streamFn: inner,
-        yolo: true,
-        docker: ws.docker,
-        homeDir: join(dir, "home"),
-        limits: { state: "paused", signals: 1 },
-      });
-      const out = await agent.run(
-        input(join(dir, "job"), {
-          condition: CONDITION_SPECS["search-only"],
-          target: { container: "box", root: ws.containerRoot },
-          verify: FIXED_GATE,
-        })
-      );
-      assert.equal(out.status, "aborted");
-      assert.match(out.interrupted ?? "", /限额信号/);
-      assert.equal(inner.calls.length, 0, "一轮都没跑");
-    } finally {
-      ws.cleanup();
-      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    }
-  }
-  // 验证进行中：第 2 次验证（后面还能回炉）与第 4 次验证（修满 3 轮后的最后一次，不过即以失败收尾）
-  for (const at of [2, 4]) {
-    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-    const ws = containerWorkspace(dir);
-    try {
-      // 每轮都改错；中止在第 at 次验证中途到达
-      const inner = createFakeStreamFn({
-        replies: [
-          editTo("bug", "w1"),
-          { text: "好了" },
-          editTo("w1", "w2"),
-          { text: "好了" },
-          editTo("w2", "w3"),
-          { text: "好了" },
-          editTo("w3", "w4"),
-          { text: "好了" },
-        ],
-      });
-      const listeners = new Set<() => void>();
-      const limits = {
-        state: "running",
-        signals: 0,
-        subscribe(listener: () => void) {
-          listeners.add(listener);
-          return () => listeners.delete(listener);
-        },
-      };
-      const agent = pigeonStepAgent({
-        streamFn: inner,
-        yolo: true,
-        docker: ws.docker,
-        homeDir: join(dir, "home"),
-        limits,
-      });
-      const counter = join(ws.testbed, ".git", "verify-count");
-      const running = agent.run(
-        input(join(dir, "job"), {
-          condition: CONDITION_SPECS["search-only"],
-          target: { container: "box", root: ws.containerRoot },
-          verify: {
-            steps: [
-              {
-                name: "验证",
-                command: "echo x >> .git/verify-count; sleep 2; grep -qx fixed a.txt",
-              },
-            ],
-            command: "echo x >> .git/verify-count; sleep 2; grep -qx fixed a.txt",
-            timeoutMs: 60_000,
-          },
-        })
-      );
-      const verifies = () =>
-        existsSync(counter)
-          ? readFileSync(counter, "utf8")
-              .split("\n")
-              .filter((l) => l).length
-          : 0;
-      while (verifies() < at) await new Promise((r) => setTimeout(r, 50));
-      limits.signals += 1;
-      for (const l of [...listeners]) l();
-      const out = await running;
-      assert.equal(out.status, "aborted");
-      assert.match(out.interrupted ?? "", /限额信号/);
-      assert.equal(verifies(), at, `第 ${at} 次：验证之后没有再回炉、再验证`);
-      assert.equal(inner.calls.length, 2 * at, `第 ${at} 次：没有再调模型`);
-      assert.equal(out.repair, null);
-      assert.equal(
-        readFileSync(join(ws.testbed, "a.txt"), "utf8"),
-        `w${at}\n`,
-        `第 ${at} 次：工作区是 agent 改到的样子（由跑批器作废）`
-      );
-    } finally {
-      ws.cleanup();
-      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    }
-  }
-});
-
-test("Pigeon agent：每步开工时的树建了引用（挂在起点提交之下、含未提交的人写测试），回炉验证前按它还原受保护的文件", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
-  const git = (cwd: string, ...args: string[]) =>
-    execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
   try {
-    // 开工时有未提交的人写测试：开工时的树因此是挂在起点提交下的独立提交
-    writeFileSync(join(ws.testbed, "check.sh"), "grep -qx fixed a.txt\n");
-    const startCommit = git(ws.testbed, "rev-parse", "HEAD");
+    const inner = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
     const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
+      streamFn: inner,
       yolo: true,
       docker: ws.docker,
       homeDir: join(dir, "home"),
-    });
-    await agent.run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: FIXED_GATE,
-      })
-    );
-    // 开工时的树只记在引用上（Run 开始条目不再带它）：引用指向挂在起点提交之下的提交，树里有未提交的人写测试
-    const ref = "refs/pigeon/step-start/s1/7";
-    const recorded = git(ws.testbed, "rev-parse", ref);
-    assert.equal(git(ws.testbed, "cat-file", "-t", recorded), "commit");
-    assert.notEqual(recorded, startCommit);
-    assert.equal(git(ws.testbed, "rev-parse", `${recorded}^`), startCommit);
-    assert.equal(git(ws.testbed, "show", `${recorded}:check.sh`), "grep -qx fixed a.txt");
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：每次回炉验证之前删掉 agent 放的、覆盖人写测试的 conftest——验证照样失败，修满轮数后以失败收尾", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
-  mkdirSync(join(ws.testbed, "tests"));
-  writeFileSync(join(ws.testbed, "tests", "check.sh"), "grep -qx fixed a.txt\n");
-  git("add", "-A");
-  git("commit", "-q", "-m", "human test");
-  // agent 每轮都放一个让 sh 恒成功的 conftest（相当于把失败的用例跳过），再把代码改错
-  const cheat = (from: string, to: string) => ({
-    text: "放 conftest",
-    toolCalls: [
-      {
-        name: "run_command",
-        args: { command: "printf 'sh() { return 0; }\\n' > tests/conftest.sh" },
-      },
-      {
-        name: "edit_file",
-        args: { path: "a.txt", old_string: `${from}\n`, new_string: `${to}\n` },
-      },
-    ],
-  });
-  try {
-    const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({
-        replies: [
-          cheat("bug", "w1"),
-          { text: "好了" },
-          cheat("w1", "w2"),
-          { text: "好了" },
-          cheat("w2", "w3"),
-          { text: "好了" },
-          cheat("w3", "w4"),
-          { text: "好了" },
-        ],
-      }),
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-    });
-    const load = "[ -f tests/conftest.sh ] && . ./tests/conftest.sh; sh tests/check.sh";
-    const out = await agent.run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: { steps: [{ name: "测试", command: load }], command: load, timeoutMs: 60_000 },
-        humanTestFiles: new Set(["tests/check.sh"]),
-        autoloadedTestHelper: "conftest.sh",
-        humanTests: ["tests/check.sh"],
-      })
-    );
-    assert.deepEqual([out.repair?.rounds, out.repair?.finalVerdict], [3, "fail"]);
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：回炉验证之前删 conftest 与判题前同一口径——人在该步树里的（例如仓库根的 conftest，不属于测试文件）不删、不改", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
-  mkdirSync(join(ws.testbed, "tests"));
-  writeFileSync(join(ws.testbed, "tests", "check.sh"), "grep -qx fixed a.txt\n");
-  writeFileSync(join(ws.testbed, "conftest.sh"), "# human hooks\n");
-  git("add", "-A");
-  git("commit", "-q", "-m", "human files");
-  try {
-    const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] }),
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-    });
-    const load = "sh tests/check.sh";
-    const out = await agent.run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: { steps: [{ name: "测试", command: load }], command: load, timeoutMs: 60_000 },
-        humanTestFiles: new Set(["tests/check.sh"]),
-        autoloadedTestHelper: "conftest.sh",
-        humanTests: ["tests/check.sh"],
-        humanTree: ["a.txt", "conftest.sh", "tests/check.sh"],
-      })
-    );
-    assert.equal(out.repair?.finalVerdict, "pass");
-    assert.equal(
-      readFileSync(join(ws.testbed, "conftest.sh"), "utf8"),
-      "# human hooks\n",
-      "人写的根 conftest 还在"
-    );
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：验证前把人写测试还原成开工时的版本——agent 改测试断言让它在自己的代码上通过，验证照样失败，修满轮数后以失败收尾，结果记下还原次数", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  // 跑批器在开工前预置的人写测试（未提交）：a.txt 须为 fixed
-  const check = "grep -qx fixed a.txt\n";
-  writeFileSync(join(ws.testbed, "check.sh"), check);
-  const loosen = {
-    path: "check.sh",
-    old_string: "grep -qx fixed a.txt\n",
-    new_string: "grep -qx w1 a.txt\n",
-  };
-  const cheat = { text: "改测试", toolCalls: [{ name: "edit_file", args: loosen }] };
-  try {
-    const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({
-        replies: [
-          {
-            text: "改代码也改测试",
-            toolCalls: [
-              {
-                name: "edit_file",
-                args: { path: "a.txt", old_string: "bug\n", new_string: "w1\n" },
-              },
-              { name: "edit_file", args: loosen },
-            ],
-          },
-          { text: "好了" },
-          cheat,
-          { text: "好了" },
-          cheat,
-          { text: "好了" },
-          cheat,
-          { text: "好了" },
-        ],
-      }),
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-      humanTestFile: (file) => file === "check.sh",
+      limits: { state: "paused", signals: 1 },
     });
     const out = await agent.run(
       input(join(dir, "job"), {
         condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
-        verify: {
-          steps: [{ name: "测试", command: "sh check.sh" }],
-          command: "sh check.sh",
-          timeoutMs: 60_000,
-        },
       })
     );
-    assert.deepEqual(out.repair, {
-      rounds: 3,
-      finalVerdict: "fail",
-      humanTestRestores: 4,
-    });
-    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w1\n");
-    assert.equal(readFileSync(join(ws.testbed, "check.sh"), "utf8"), check);
+    assert.equal(out.status, "aborted");
+    assert.match(out.interrupted ?? "", /限额信号/);
+    assert.equal(inner.calls.length, 0, "一轮都没跑");
   } finally {
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
 
-test("Pigeon agent：回炉验证前只还原并计数人在这一步的测试；agent 早先落地的自己的测试随它改，不还原、不计数", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: ws.testbed });
-  // 开工时已落地：人写的 check.sh 与 agent 早先步骤写的 agent_check.sh（按归类两者都是测试）
-  writeFileSync(join(ws.testbed, "check.sh"), "grep -qx fixed a.txt\n");
-  writeFileSync(join(ws.testbed, "agent_check.sh"), "grep -qx fixed a.txt\n");
-  git("add", "-A");
-  git("commit", "-q", "-m", "tests");
-  try {
-    const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({
-        replies: [
-          {
-            text: "修代码，也改自己早先的测试",
-            toolCalls: [
-              {
-                name: "edit_file",
-                args: { path: "a.txt", old_string: "bug\n", new_string: "fixed\n" },
-              },
-              {
-                name: "edit_file",
-                args: {
-                  path: "agent_check.sh",
-                  old_string: "grep -qx fixed a.txt\n",
-                  new_string: "grep -q fixed a.txt\n",
-                },
-              },
-            ],
-          },
-          { text: "好了" },
-        ],
-      }),
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-      humanTestFile: (file) => file.endsWith("check.sh"),
-    });
-    const out = await agent.run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: {
-          steps: [{ name: "测试", command: "sh check.sh" }],
-          command: "sh check.sh",
-          timeoutMs: 60_000,
-        },
-        humanTestFiles: new Set(["check.sh"]),
-      })
-    );
-    assert.equal(out.repair?.finalVerdict, "pass");
-    assert.equal(out.repair?.humanTestRestores, 0);
-    assert.equal(
-      readFileSync(join(ws.testbed, "agent_check.sh"), "utf8"),
-      "grep -q fixed a.txt\n",
-      "agent 自己的测试保留它的改动"
-    );
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：回炉轮数为 0 时不验证、不回炉，结果不带回炉字段", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  try {
-    const agent = pigeonStepAgent({
-      streamFn: createFakeStreamFn({ replies: [editTo("bug", "w1"), { text: "好了" }] }),
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-    });
-    const out = await agent.run(
-      input(join(dir, "job"), {
-        condition: { ...CONDITION_SPECS.neither, repairRounds: 0 },
-        target: { container: "box", root: ws.containerRoot },
-        verify: FIXED_GATE,
-      })
-    );
-    assert.equal(out.repair, null);
-    assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w1\n");
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：空回复异常结束不是模型服务故障——不报被打断（照常判题、不作废重做），也不再回炉", async () => {
+test("Pigeon agent：一步期间来了限额信号即中止在途的运行（不跑满），报被打断交给跑批器作废重做", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
   try {
@@ -976,13 +544,11 @@ test("Pigeon agent：空回复异常结束不是模型服务故障——不报�
       input(join(dir, "job"), {
         condition: CONDITION_SPECS["search-only"],
         target: { container: "box", root: ws.containerRoot },
-        verify: FIXED_GATE,
       })
     );
     assert.equal(out.status, "empty-reply");
     assert.equal(out.interrupted, undefined);
     assert.equal(streamFn.calls.length, 3);
-    assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "fail" });
     assert.equal(readFileSync(join(ws.testbed, "a.txt"), "utf8"), "w1\n");
   } finally {
     ws.cleanup();
@@ -990,38 +556,7 @@ test("Pigeon agent：空回复异常结束不是模型服务故障——不报�
   }
 });
 
-test("Pigeon agent：验证里检查工具自身崩溃（重跑一次仍崩溃）不判失败、不回炉，步结果带工具故障次数", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  try {
-    const streamFn = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
-    const agent = pigeonStepAgent({
-      streamFn,
-      yolo: true,
-      docker: ws.docker,
-      homeDir: join(dir, "home"),
-    });
-    const steps = [
-      { name: "验证", command: "grep -qx fixed a.txt" },
-      { name: "mypy", command: "echo 'please use --show-traceback'; exit 2", tool: "mypy" },
-    ];
-    const out = await agent.run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: { steps, command: "[验证] …；[mypy] …", timeoutMs: 60_000 },
-      })
-    );
-    assert.equal(streamFn.calls.length, 2, "不开回炉轮");
-    assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "pass", toolFaults: 1 });
-    assert.equal(out.interrupted, undefined);
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：推送格打开推送记忆——系统提示带推送段（无人值守版）、带 update_memory，最后一次验证之后收尾复盘；复盘前后读网关计量，结果带复盘事实；不推送的格子都没有", async () => {
+test("Pigeon agent：推送格打开推送记忆——系统提示带推送段（无人值守版）、带 update_memory，收尾有复盘；复盘前后读网关计量，结果带复盘事实；不推送的格子都没有", async () => {
   for (const condition of ["search-push", "push-only", "neither"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
@@ -1051,11 +586,9 @@ test("Pigeon agent：推送格打开推送记忆——系统提示带推送段�
         input(join(dir, "job"), {
           condition: CONDITION_SPECS[condition],
           target: { container: "box", root: ws.containerRoot },
-          verify: FIXED_GATE,
           meter,
         })
       );
-      assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "pass" }, condition);
       const pushed = CONDITION_SPECS[condition].pushedMemory;
       const first = inner.calls[0];
       assert.ok(first !== undefined);
@@ -1093,150 +626,6 @@ test("Pigeon agent：推送格打开推送记忆——系统提示带推送段�
   }
 });
 
-// 分步验证用的小仓库：v.mjs <步名> 在本步执行目录下扫描 *.py 里每行 "# FAILS_UNLESS <文件> <标记> <测试名>"，
-// <文件> 不含 <标记> 即该测试失败，只对"子测试"一步生效并按 pytest 短汇总报出；其余步一律通过
-const STEPWISE_VERIFY_SCRIPT = String.raw`import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
-const step = process.argv[2];
-const root = process.cwd();
-const files = [];
-const walk = (dir) => {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if ([".git", ".pigeon", "node_modules", "v.mjs"].includes(entry.name)) continue;
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) walk(full);
-    else files.push(relative(root, full).split("\\").join("/"));
-  }
-};
-walk(root);
-const read = (file) => { try { return readFileSync(join(root, file), "utf8"); } catch { return ""; } };
-const out = [];
-if (step === "子测试") {
-  const failing = [];
-  for (const file of files.filter((name) => name.endsWith(".py"))) {
-    for (const match of read(file).matchAll(/# FAILS_UNLESS (\S+) (\S+) (\S+)/g)) {
-      if (!read(match[1]).includes(match[2])) failing.push({ file, name: match[3] });
-    }
-  }
-  if (failing.length > 0) {
-    out.push("=========================== short test summary info ============================");
-    for (const test of failing) out.push("FAILED " + test.file + "::" + test.name + " - AssertionError: assert False");
-    out.push("========================= " + failing.length + " failed, 1 passed in 0.10s =========================");
-  }
-}
-process.stdout.write(out.join("\n") + (out.length > 0 ? "\n" : "一切正常\n"));
-process.exit(out.length > 0 ? 1 : 0);
-`;
-
-function makeStepwiseRepo(files: Record<string, string>) {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-stepwise-")));
-  const home = mkdtempSync(join(tmpdir(), "pigeon-stepwise-home-"));
-  const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
-  const write = (file: string, content: string) => {
-    mkdirSync(dirname(join(root, file)), { recursive: true });
-    writeFileSync(join(root, file), content);
-  };
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "user.email", "pigeon@example.invalid"]);
-  git(["config", "user.name", "pigeon-test"]);
-  git(["config", "core.autocrlf", "false"]);
-  write("v.mjs", STEPWISE_VERIFY_SCRIPT);
-  write(".gitignore", ".pigeon/\n");
-  for (const [file, content] of Object.entries(files)) write(file, content);
-  git(["add", "-A"]);
-  git(["commit", "-q", "-m", "init"]);
-  return {
-    root,
-    home,
-    cleanup: () => {
-      rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-      rmSync(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    },
-  };
-}
-
-// 一次回复里的若干处替换编辑
-function edits(...changes: Array<[path: string, from: string, to: string]>): FakeReply {
-  return {
-    text: "改一下",
-    toolCalls: changes.map(([path, from, to]) => ({
-      name: "edit_file",
-      args: { path, old_string: from, new_string: to },
-    })),
-  };
-}
-
-const finished = (text = "好了"): FakeReply => ({ text });
-
-test("Pigeon agent：分步验证原样接到 headless——三步在 strands-py 下各出结论；pytest 失败、回炉修好，回炉反馈按步列出", async () => {
-  const repo = makeStepwiseRepo({
-    "strands-py/src/pkg/mod.py": "VALUE = 1  # VALUE_OK\n",
-    "strands-py/tests/test_mod.py":
-      "# FAILS_UNLESS src/pkg/mod.py VALUE_OK test_value\ndef test_value():\n    pass\n",
-  });
-  const docker = localDockerHost(repo.root);
-  const workDir = mkdtempSync(join(tmpdir(), "pigeon-stream-job-"));
-  const node = `"${process.execPath}"`;
-  const steps = ["格式", "类型", "子测试"].map((name) => ({
-    name,
-    command: `${node} ../v.mjs ${name}`,
-    cwd: "strands-py",
-  }));
-  const verify = { command: "不应被用到的单条命令", steps, timeoutMs: 60_000 };
-  const streamFn = createFakeStreamFn({
-    replies: [
-      edits(["strands-py/src/pkg/mod.py", "  # VALUE_OK", ""]),
-      finished(),
-      edits(["strands-py/src/pkg/mod.py", "VALUE = 1", "VALUE = 1  # VALUE_OK again"]),
-      finished("修好了"),
-    ],
-  });
-  const sessions = join(workDir, ".pigeon", "state", "sessions");
-  try {
-    const first = await pigeonStepAgent({
-      streamFn,
-      yolo: true,
-      docker: docker.docker,
-      homeDir: repo.home,
-    }).run(
-      input(workDir, {
-        prompt: "以往的一步",
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: docker.containerRoot },
-        verify,
-      })
-    );
-    assert.deepEqual([first.repair?.rounds, first.repair?.finalVerdict], [1, "pass"]);
-    const files = listSessionFiles(sessions);
-    assert.equal(files.length, 1);
-    const firstId = files[0]?.sessionId;
-    assert.ok(firstId !== undefined);
-    const verified = (loadStoreSession(sessions, firstId)?.view.verifications ?? []).map(
-      (record) => record.data
-    );
-    assert.equal(verified.length, 2, "首轮与回炉一轮各一条验证记录");
-    // 首轮三步各出结论，都在 strands-py 下执行
-    assert.deepEqual(
-      verified[0]?.steps?.map((s) => [s.name, s.cwd, s.verdict]),
-      [
-        ["格式", "strands-py", "pass"],
-        ["类型", "strands-py", "pass"],
-        ["子测试", "strands-py", "fail"],
-      ]
-    );
-    // 回炉反馈按步列出：失败步与已通过步分开，附失败步的输出末尾，不是整条命令的输出截尾
-    const feedback = JSON.stringify(streamFn.calls[2]?.context.messages.at(-1));
-    assert.match(feedback, /失败的步骤：子测试/);
-    assert.match(feedback, /已通过的步骤：格式、类型/);
-    assert.match(feedback, /test_value/);
-    assert.doesNotMatch(feedback, /验证命令：/);
-  } finally {
-    docker.cleanup();
-    rmSync(workDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    repo.cleanup();
-  }
-});
-
 test("Pigeon agent：这一步在容器里执行的每条命令都带本步标记，步结束后按同一标记清理残留进程；清不净即报被打断，这一步作废", async () => {
   for (const [what, answer] of [
     ["清净了", "0"],
@@ -1268,7 +657,6 @@ test("Pigeon agent：这一步在容器里执行的每条命令都带本步标�
       }).run(
         input(join(dir, "job"), {
           target: { container: "box", root: ws.containerRoot },
-          verify: FIXED_GATE,
         })
       );
       const calls = readFileSync(log, "utf8")
@@ -1306,86 +694,6 @@ test("Pigeon agent：这一步在容器里执行的每条命令都带本步标�
   }
 });
 
-test("Pigeon agent：每次回炉验证之前先按本步标记清一遍后台进程、删掉验证门的报告，步结束后再清一遍", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  try {
-    const log = join(dir, "docker.log");
-    const wrapper = join(dir, "docker-wrapper.mjs");
-    writeFileSync(
-      wrapper,
-      [
-        'import { appendFileSync } from "node:fs";',
-        'import { spawnSync } from "node:child_process";',
-        "const args = process.argv.slice(2);",
-        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");`,
-        'if (args.some((a) => a.includes("PIGEON_STEP_MARKER=$1"))) { process.stdout.write("0\\n"); process.exit(0); }',
-        `const r = spawnSync(${JSON.stringify(ws.docker[0])}, [${JSON.stringify(ws.docker[1])}, ...args], { stdio: "inherit" });`,
-        "process.exit(r.status ?? 1);",
-      ].join("\n")
-    );
-    const out = await pigeonStepAgent({
-      streamFn: createFakeStreamFn({
-        replies: [
-          editTo("bug", "w1"),
-          { text: "好了" },
-          editTo("w1", "w2"),
-          { text: "好了" },
-          editTo("w2", "w3"),
-          { text: "好了" },
-          editTo("w3", "w4"),
-          { text: "好了" },
-        ],
-      }),
-      yolo: true,
-      docker: [process.execPath, wrapper],
-      homeDir: join(dir, "home"),
-    }).run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: FIXED_GATE,
-      })
-    );
-    assert.equal(out.repair?.rounds, 3);
-    const calls = readFileSync(log, "utf8")
-      .split("\n")
-      .filter((l) => l !== "")
-      .map((l) => JSON.parse(l) as string[]);
-    const tag = (a: string[]) =>
-      a.some((x) => x.includes("PIGEON_STEP_MARKER=$1"))
-        ? "清"
-        : a.some((x) => x.includes("grep -qx fixed a.txt"))
-          ? "验"
-          : a.some((x) => x.includes("/tmp/pigeon-gate-junit.xml"))
-            ? "删报告"
-            : null;
-    const seq = calls.map(tag).filter((x) => x !== null);
-    assert.deepEqual(
-      seq,
-      [
-        "清",
-        "删报告",
-        "验",
-        "清",
-        "删报告",
-        "验",
-        "清",
-        "删报告",
-        "验",
-        "清",
-        "删报告",
-        "验",
-        "清",
-      ],
-      "每次验证之前先清进程、删报告，步结束后再清一遍"
-    );
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
 test("Pigeon agent：清完进程后容器里没有 git 进程在跑，就删掉残留的 .git/index.lock（agent 在途的 git 命令被杀时留下的）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
   const ws = containerWorkspace(dir);
@@ -1405,54 +713,12 @@ test("Pigeon agent：清完进程后容器里没有 git 进程在跑，就删掉
       homeDir: join(dir, "home"),
     }).run(
       input(join(dir, "job"), {
-        condition: { ...CONDITION_SPECS.neither, repairRounds: 0 },
+        condition: CONDITION_SPECS.neither,
         target: { container: "box", root: ws.containerRoot },
       })
     );
     assert.equal(out.interrupted, undefined);
     assert.equal(existsSync(join(ws.testbed, ".git", "index.lock")), false);
-  } finally {
-    ws.cleanup();
-    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-  }
-});
-
-test("Pigeon agent：回炉验证之前清进程清不净即中止这一步、一次验证都不跑，报被打断", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
-  const ws = containerWorkspace(dir);
-  try {
-    const log = join(dir, "docker.log");
-    const wrapper = join(dir, "docker-wrapper.mjs");
-    writeFileSync(
-      wrapper,
-      [
-        'import { appendFileSync } from "node:fs";',
-        'import { spawnSync } from "node:child_process";',
-        "const args = process.argv.slice(2);",
-        `appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");`,
-        'if (args.some((a) => a.includes("PIGEON_STEP_MARKER=$1"))) { process.stdout.write("1\\n"); process.exit(0); }',
-        `const r = spawnSync(${JSON.stringify(ws.docker[0])}, [${JSON.stringify(ws.docker[1])}, ...args], { stdio: "inherit" });`,
-        "process.exit(r.status ?? 1);",
-      ].join("\n")
-    );
-    const out = await pigeonStepAgent({
-      streamFn: createFakeStreamFn({ replies: [editTo("bug", "w1"), { text: "好了" }] }),
-      yolo: true,
-      docker: [process.execPath, wrapper],
-      homeDir: join(dir, "home"),
-    }).run(
-      input(join(dir, "job"), {
-        condition: CONDITION_SPECS["search-only"],
-        target: { container: "box", root: ws.containerRoot },
-        verify: FIXED_GATE,
-      })
-    );
-    assert.equal(out.status, "aborted");
-    assert.match(out.interrupted ?? "", /清理不净/);
-    const verified = readFileSync(log, "utf8")
-      .split("\n")
-      .filter((l) => l.includes("grep -qx fixed a.txt")).length;
-    assert.equal(verified, 0, "一次验证都不跑");
   } finally {
     ws.cleanup();
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

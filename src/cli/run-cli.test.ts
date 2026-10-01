@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { HEADLESS_EXIT_CODES } from "../application/headless.ts";
+import { HEADLESS_EXIT_CODES } from "../application/headless-core.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
@@ -192,6 +192,59 @@ test("决策 326 ③：项目里有未确认的会执行命令的配置——pig
     assert.equal(allowed.status, 0, allowed.stderr);
     const again = runCli(["run", "随便", "--root", root, "--stream-fn", streamFn, "--json"]);
     assert.notEqual(again.status, 0, "放行不记指纹，下次仍要确认");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("决策 324：--no-hooks 只对本次运行停用全部钩子——Stop 钩子脚本不被执行", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-run-nohooks-"));
+  try {
+    mkdirSync(join(root, ".pigeon"), { recursive: true });
+    // 钩子脚本：被跑起来就在项目根落一个标记文件（cwd 是工作区根，PIGEON_PROJECT_DIR 是治理根）
+    writeFileSync(
+      join(root, "hook.mjs"),
+      'import { writeFileSync } from "node:fs";\n' +
+        'import { join } from "node:path";\n' +
+        'writeFileSync(join(process.env.PIGEON_PROJECT_DIR, "hook-ran.marker"), "stop\\n");\n'
+    );
+    writeFileSync(
+      join(root, ".pigeon", "settings.json"),
+      JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: "command", command: "node hook.mjs" }] }] },
+      })
+    );
+    const streamFn = writeStreamFnModule(root, { replies: [{ text: "完成" }] });
+    const marker = join(root, "hook-ran.marker");
+    // 正控：不带 --no-hooks 时 Stop 钩子在收尾跑，标记文件落盘（证明钩子链路确实在跑，下面的断言才有意义）
+    const ran = runCli([
+      "run",
+      "随便",
+      "--root",
+      root,
+      "--stream-fn",
+      streamFn,
+      "--json",
+      "--trust-config",
+    ]);
+    assert.equal(ran.status, 0, `${ran.stdout}\n${ran.stderr}`);
+    assert.ok(existsSync(marker), "不带 --no-hooks 时 Stop 钩子应执行");
+    rmSync(marker);
+    // 带 --no-hooks：本次运行不接钩子，脚本一次都不跑
+    const skipped = runCli([
+      "run",
+      "随便",
+      "--root",
+      root,
+      "--stream-fn",
+      streamFn,
+      "--json",
+      "--trust-config",
+      "--no-hooks",
+    ]);
+    assert.equal(skipped.status, 0, `${skipped.stdout}\n${skipped.stderr}`);
+    assert.equal(existsSync(marker), false, "--no-hooks 时钩子脚本不得执行");
+    assert.equal(lastJsonLine(skipped.stdout).status, "completed", "停用钩子不影响正常跑完");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

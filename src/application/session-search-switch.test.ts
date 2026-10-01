@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 
 const SEARCH_SENTENCE =
   "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +

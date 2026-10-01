@@ -7,6 +7,7 @@ import {
   DEFAULT_MODEL_PLACEHOLDER,
   parseLaunchFlags,
   resolveStreamFnSpec,
+  VALUELESS_FLAGS,
 } from "./launch-flags.ts";
 
 const USAGE = "用法：测试";
@@ -78,6 +79,14 @@ test("取值校验：推理档位、Memory 预算、单轮输出上限非法即�
   assert.throws(() => parseLaunchFlags(["--nope"], { usage: USAGE, env: {} }), /未知参数/);
 });
 
+test("决策 324：--no-hooks 是无取值开关（缺省关，各入口一律接受）", () => {
+  assert.equal(parseLaunchFlags([], { usage: USAGE, env: {} }).noHooks, false);
+  const flags = parseLaunchFlags(["--no-hooks"], { usage: USAGE, env: {} });
+  assert.equal(flags.noHooks, true);
+  // 参数切分按无取值处理：下一个参数不被它吞掉
+  assert.ok(VALUELESS_FLAGS.has("--no-hooks"));
+});
+
 test("--history-limit 只属 TUI：允许时解析为正整数，未允许时按未知参数处理", () => {
   const tuiFlags = parseLaunchFlags(["--history-limit", "120"], {
     usage: USAGE,
@@ -123,9 +132,17 @@ test("开关与取值型参数照常解析：--yolo / --no-persist-thinking / --
 
 test("审阅与自动验证参数已随第一版学习闭环退役（决策 137）：--no-review、--review-every、--auto-verify 按未知参数响亮失败", () => {
   for (const argv of [["--no-review"], ["--review-every", "4"], ["--auto-verify"]]) {
-    assert.throws(
-      () => parseLaunchFlags(argv, { usage: USAGE, env: {}, verify: true, retry: true }),
-      /未知参数/
-    );
+    assert.throws(() => parseLaunchFlags(argv, { usage: USAGE, env: {} }), /未知参数/);
+  }
+});
+
+test("验证门、回炉与失败自动分叉重试的参数已随决策 322 删除：--verify-command、--verify-timeout、--retry-on-fail、--repair-rounds 按未知参数响亮失败", () => {
+  for (const argv of [
+    ["--verify-command", "npm test"],
+    ["--verify-timeout", "1000"],
+    ["--retry-on-fail", "1"],
+    ["--repair-rounds", "2"],
+  ]) {
+    assert.throws(() => parseLaunchFlags(argv, { usage: USAGE, env: {} }), /未知参数/);
   }
 });

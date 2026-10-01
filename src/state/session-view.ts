@@ -15,6 +15,7 @@ import {
   type ForkData,
   type GrantData,
   HEADER_METADATA_KEY,
+  type HookRunData,
   type RunEndData,
   type RunStartData,
   SESSION_ENTRY_SCHEMAS,
@@ -111,7 +112,8 @@ export type ViewItem =
   | { kind: "checkpoint"; entryId: string; timestamp: number; data: CheckpointData }
   | { kind: "worker"; entryId: string; timestamp: number; data: WorkerData }
   | { kind: "fork"; entryId: string; timestamp: number; data: ForkData }
-  | { kind: "grant"; entryId: string; timestamp: number; data: GrantData };
+  | { kind: "grant"; entryId: string; timestamp: number; data: GrantData }
+  | { kind: "hook"; entryId: string; timestamp: number; data: HookRunData };
 
 // 一次工具调用：助手消息里的调用块与对应的工具结果消息（按工具调用号在同一 Run 内配对）
 export interface ViewToolCall {
@@ -308,6 +310,7 @@ const CUSTOM_KINDS = {
   [SessionEntryType.Worker]: "worker",
   [SessionEntryType.Fork]: "fork",
   [SessionEntryType.Grant]: "grant",
+  [SessionEntryType.Hook]: "hook",
 } as const;
 
 // 自定义条目 → 时间线条目；不是 Pigeon 的条目返回 undefined，数据不合 schema 记告警
