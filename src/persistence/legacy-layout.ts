@@ -57,7 +57,9 @@ export function legacyLayoutMessage(items: readonly LegacyItem[]): string {
       ? [`  旧配置文件：${configs.join("、")}（已并入三层 settings.json）`]
       : []),
     ...(items.some((item) => item.retired === true)
-      ? [`  已退役的配置文件：${pigeonRel("verify.json")}（验证门已删除；迁移时打印改写为收尾钩子的示例）`]
+      ? [
+          `  已退役的配置文件：${pigeonRel("verify.json")}（验证门已删除；迁移时打印改写为收尾钩子的示例）`,
+        ]
       : []),
     ...(states.length > 0
       ? [`  旧位置的程序状态：${states.join("、")}（已移到 ${pigeonRel("state")}/ 下）`]
