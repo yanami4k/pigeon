@@ -86,7 +86,7 @@ export interface StreamResultLine {
     humanRuns: BaselineRunFacts[];
     humanSlowest: { id: string; seconds: number } | null;
   } | null;
-  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里 .pigeon/learned/MEMORY.md 的字节数、条目数与条目
+  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里 .pigeon/state/learned/MEMORY.md 的字节数、条目数与条目
   // 部分的字符数（文件头不计，223 的上限按它算）；文件不在记 0
   memoryAtStart: MemoryFacts | null;
   // 这一步 agent 运行与收尾复盘都结束之后（判题之前）的记忆大小，口径同上；最后一步的即一遍结束时的记忆。复盘接入之前

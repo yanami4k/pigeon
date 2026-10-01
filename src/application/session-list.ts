@@ -1,10 +1,14 @@
+// Session 列表命令层（M4 S5，D5：派生投影的安静渲染——默认只给时间 + Run 数；M2 S4 自 cli/session.ts 归位，
+// 方向同决策 030）：cli 与 tui 两个 Actor 共用同一份查询与排版，命令层不 import 任何 Actor；输出是纯字符串，
+// cli 写 stdout，tui 投影到消息区。读新会话存储；旧列表唯一的突出项"待对账"随写操作回执停写（184）不再有来源。
+// 迁移之前的旧格式会话不列出，末尾给一行计数提示（新代码不读旧格式，187 / 211）。
 import { legacySessionsNote } from "../persistence/session-catalog.ts";
 import { listSessionSummaries } from "../persistence/session-list.ts";
 import { sessionsDirOf } from "../state/paths.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 
 export interface SessionListCommandOptions {
-  // 工作区根（会话在 <root>/.pigeon/sessions/）
+  // 工作区根（会话在 <root>/.pigeon/state/sessions/）
   root: string;
   filters?: SessionListFilters;
 }

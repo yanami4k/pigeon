@@ -308,7 +308,7 @@ export function missingSessionError(sessionsDir: string, sessionId: string): Err
 }
 
 export interface TraceCommandOptions {
-  // 工作区根（会话在 <root>/.pigeon/sessions/）
+  // 工作区根（会话在 <root>/.pigeon/state/sessions/）
   root: string;
   sessionId: string;
   runId?: string;

@@ -1,3 +1,6 @@
+// 脚本编排的会话侧装配（决策 309–314）：把运行器接到本会话的编排器与真实能力上——容器（日常沙箱的通用镜像）、主目录快照、
+// 叠加收回、收回的请示（放手模式或已放权即直接做，否则经审批通道请示一次；没有审批通道即不批）、重启后从会话里找回，
+// 以及结束汇总的去处（与 worker 完成通知同一条队列）。
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { assertDockerAvailable } from "../execution/sandbox.ts";
 import { ensureSandboxImage, resolveSandboxImage } from "../execution/sandbox-image.ts";

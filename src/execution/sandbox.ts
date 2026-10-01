@@ -1,5 +1,5 @@
 // 日常沙箱（决策 237、245–248）：日常入口（终端界面、命令行对话、pigeon run）可选在一个一次性的 Docker 容器里工作。
-// 本模块只管容器的生命周期与改动交回，工具经容器执行端（container-host.ts）读写与执行；会话文件、.pigeon/learned 等
+// 本模块只管容器的生命周期与改动交回，工具经容器执行端（container-host.ts）读写与执行；会话文件、.pigeon/state/learned 等
 // 仍在宿主的治理根，不进容器。
 //   开工（278）：缺省把工作目录里未提交的改动（含未被 .gitignore 忽略的新文件）拍成以 HEAD 为父的快照提交（workdir-snapshot.ts，
 //         引用 refs/pigeon/sandbox-start/<会话号>），从它打 git bundle，经标准输入送进新容器，在容器里建仓库并检出到

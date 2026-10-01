@@ -2,12 +2,12 @@
 // 会话存储写者 + grant 运行态。审批 handler 由调用方注入（cli 传 REPL 问答版，tui 传面板版）——
 // 工厂形态而非成品：装配根先建 grantStore，审批提示的 [a]/[d] 放权键需要它，
 // 故调用方给一个"拿到 store 再造 handler"的工厂。
-// 会话存储（决策 176 / 210）：<governanceRoot>/.pigeon/sessions/<工作目录编码>/ 下的 pi 会话文件（M5.5 S1 治理根缺省
+// 会话存储（决策 176 / 210）：<governanceRoot>/.pigeon/state/sessions/<工作目录编码>/ 下的 pi 会话文件（M5.5 S1 治理根缺省
 // 同工作区根），交给 Adapter 写消息与 Run 起止，授权经落盘口写入；续跑复用同一 sessionId 打开同一文件续写；
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
 // 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
-// 推送记忆（决策 191、217、227、244）：开着时会话开始读 .pigeon/learned/MEMORY.md 推入系统提示（常驻 Memory 之后、Skill 目录之前）
+// 推送记忆（决策 191、217、227、244）：开着时会话开始读 .pigeon/state/learned/MEMORY.md 推入系统提示（常驻 Memory 之后、Skill 目录之前）
 // 并注册 update_memory；上下文压缩之前先复盘一次（192、207）。复盘运行面也在这里装：系统提示取来源冻结的原文，工具定义不变，
 // 执行时只放行 read_file 与 update_memory（240）
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
@@ -180,7 +180,7 @@ export interface RuntimeDeps {
   memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖；缺省 off
   thinkingLevel?: ThinkingLevel;
-  // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受 .pigeon/commands.json 为该角色登记的
+  // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受设置的 commands 一节为该角色登记的
   // 命令（未登记即一条都不许）；主会话缺省，不受清单限制
   commandRole?: WorkerRole;
   // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
