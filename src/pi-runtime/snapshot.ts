@@ -13,7 +13,7 @@ import {
   SkillManifestEntrySchema,
   StructuredMemoryManifestSchema,
 } from "../state/injection-manifest.ts";
-import { PushedMemoryManifestSchema } from "../state/learned-memory.ts";
+import { PushedMemoryLayersSchema } from "../state/learned-memory.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
@@ -35,7 +35,8 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // 段落本身已拼进 systemPrompt），verify 增可选命名分步——均可缺省
 // v13（决策 191、192、207）：顶层增加推送的记忆 learnedMemory（开局冻结的 MEMORY.md 身份，段落本身已拼进 systemPrompt）
 // 与复盘标记 memoryReview（复盘会话的种类与模板版本；不叫 review，免得与 v11 删掉的旧审阅字段同名，旧快照照常可读）——均可缺省
-// v14（决策 331）：删除复盘标记 memoryReview（复盘随之删除；会话记录里旧 Run 开始条目的该字段照常可读，见 session-entries.ts）
+// v14（决策 331、332）：删除复盘标记 memoryReview（复盘随之删除）；推送的记忆由单层的 learnedMemory 改为两层的 pushedMemory
+// （各层身份与记忆文字的版本）。会话记录里旧 Run 开始条目的两个旧字段照常可读，见 session-entries.ts
 export const INJECTION_SNAPSHOT_VERSION = 14;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
@@ -99,8 +100,8 @@ export const InjectionSnapshotSchema = Type.Object({
   repairRounds: Type.Optional(RepairRoundsSchema),
   // 结构化记忆的开局留痕（决策 134 / 157）：决策 174 删除结构化记忆后已停写，只为旧会话与 v12 快照照常可读而保留
   structuredMemory: Type.Optional(StructuredMemoryManifestSchema),
-  // 推送的记忆（决策 191）：推送开着时在场，记开局冻结的 MEMORY.md 身份与上限；与常驻 Memory 的清单分开
-  learnedMemory: Type.Optional(PushedMemoryManifestSchema),
+  // 推送的记忆（决策 332）：推送开着时在场，记开局冻结的两层记忆的身份、上限与记忆文字的版本
+  pushedMemory: Type.Optional(PushedMemoryLayersSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;

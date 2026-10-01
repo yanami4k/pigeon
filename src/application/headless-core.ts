@@ -1,5 +1,5 @@
 import type { ScriptLauncher } from "../execution/script-sandbox.ts";
-import { assertMemoryLimit } from "../memory/pushed.ts";
+import type { MemoryLayer } from "../memory/learned.ts";
 import type { MemoryRoot } from "../memory/resident.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
@@ -10,6 +10,7 @@ import type { VerifyConfig } from "../state/attempt-config.ts";
 import type { FailureClass } from "../state/classification.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
+import type { MemoryLimits } from "../state/memory-config.ts";
 import {
   DEFAULT_ORCHESTRATION_SETTINGS,
   type OrchestrationSettings,
@@ -117,10 +118,12 @@ export interface HeadlessRunOptions {
   beforeCompaction?: BeforeCompaction;
   // 运行时告警的出口（自动压缩没压成、压缩前回调失败；缺省标准错误输出，同一类只说一次；测试注入）
   warn?: WarnSink;
-  // 决策 191、193：推送记忆（开局把记忆整份推入系统提示、带 update_memory）；缺省关着
+  // 决策 191、193、331：推送记忆（开局把两层记忆整份推入系统提示）；无人值守，只推送、不注册 update_memory。缺省关着
   pushedMemory?: boolean;
-  // 学到的记忆的总量上限（字符，按码点计）；缺省 12,000
-  memoryLimitChars?: number;
+  // 学到的记忆的两层上限（字符，按码点计）；缺省取设置快照的 memory 一节
+  memoryLimits?: MemoryLimits;
+  // 推送哪几层；缺省两层（跑批器只推项目级）
+  memoryLayers?: readonly MemoryLayer[];
   // 决策 264–267：派 worker（给主 agent 注册 spawn_worker）；缺省关着——pigeon run 由启动参数缺省打开，跑批器各条件明确关掉。
   // 注入了执行端（容器工作区）或是分支会话时不注册
   spawnWorkers?: boolean;
@@ -241,7 +244,6 @@ function assertRepairSetup(options: HeadlessRunOptions): number {
 export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
   const repairRounds = assertRepairSetup(options);
   const pushed = options.pushedMemory === true;
-  assertMemoryLimit(options.memoryLimitChars);
   // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 在宿主一侧、不是 agent 干活的工作区。分叉（失败自动重试、分支会话）
   // 要在它上面打 git 快照、到独立工作树里续跑——对容器里的工作区只会得到假结果，装配前一律拒绝。
   // 会话验证命令与回炉的验证一样经执行端在容器里执行（日常沙箱，决策 237），不在此列
@@ -262,11 +264,11 @@ export async function runHeadlessOnce(options: HeadlessRunOptions): Promise<Head
   // 这一步的墙钟
   let deadline = options.wallClockMs !== undefined ? startedAt + options.wallClockMs : undefined;
   let timer: NodeJS.Timeout | undefined;
-  // 推送记忆（191）：无人值守——{冲突处理} 填无人值守版
+  // 推送记忆（191、331）：无人值守——只推送，不给写入配置（冲突处理随之为无人值守版）
   const learnedMemory: LearnedMemoryConfig | undefined = pushed
     ? {
-        conflict: "unattended",
-        ...(options.memoryLimitChars !== undefined ? { limitChars: options.memoryLimitChars } : {}),
+        ...(options.memoryLimits !== undefined ? { limits: options.memoryLimits } : {}),
+        ...(options.memoryLayers !== undefined ? { layers: options.memoryLayers } : {}),
       }
     : undefined;
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录

@@ -37,7 +37,7 @@ import {
   TASK_CHAIN_SCOPE,
   TASK_PROMPT_LAYOUT,
 } from "./stream-manifest.ts";
-import { learnedDirOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
+import { memoryFileOf, snapshotOrRestoreMemory } from "./stream-memory-snapshot.ts";
 import { gateFromSteps, runJunitOnce, strandsRuntime } from "./stream-profiles.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
@@ -530,16 +530,16 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("记忆快照（191）：每步开工前取 .pigeon/state/learned/ 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
+  test("记忆快照（191、332）：每步开工前取项目级记忆 .pigeon/state/memory.md 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
     const t = await toy();
     try {
       const memoryOf = (workDir: string) => {
-        const file = join(learnedDirOf(workDir), "MEMORY.md");
+        const file = memoryFileOf(workDir);
         return existsSync(file) ? readFileSync(file, "utf8") : null;
       };
       const remember = (workDir: string, text: string) => {
-        mkdirSync(learnedDirOf(workDir), { recursive: true });
-        writeFileSync(join(learnedDirOf(workDir), "MEMORY.md"), text);
+        mkdirSync(dirname(memoryFileOf(workDir)), { recursive: true });
+        writeFileSync(memoryFileOf(workDir), text);
       };
       const seen: [number, string | null][] = [];
       let attempts = 0;
@@ -549,24 +549,24 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           remember(input.workDir, "作废尝试写下的\n");
           return { interrupted: "模型服务故障" };
         }
-        // 第 1 步之后一条，第 5 步之后两条（229 的条目格式）
-        remember(input.workDir, input.step.seq === 1 ? "- [L1] 甲\n" : "- [L1] 甲\n- [L2] 乙乙\n");
+        // 第 1 步之后一条，第 5 步之后两条（332 的条目格式）
+        remember(input.workDir, input.step.seq === 1 ? "- [P1] 甲\n" : "- [P1] 甲\n- [P2] 乙乙\n");
         return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
       const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
       // 模拟第 5 步开工、取过快照之后进程被杀：记忆里留着半截写下的东西
-      snapshotOrRestoreLearned(jobDir, 5);
+      snapshotOrRestoreMemory(jobDir, 5);
       remember(jobDir, "崩溃前半截写下的\n");
       const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
       assert.deepEqual(seen, [
         [1, null],
         [1, null],
-        [5, "- [L1] 甲\n"],
+        [5, "- [P1] 甲\n"],
       ]);
-      assert.equal(memoryOf(jobDir), "- [L1] 甲\n- [L2] 乙乙\n");
+      assert.equal(memoryOf(jobDir), "- [P1] 甲\n- [P2] 乙乙\n");
       // 结果行记开工时（恢复快照之后）与步末（agent 结束之后）的记忆大小：作废尝试与崩溃前半截写下的都不计
-      const one = { bytes: Buffer.byteLength("- [L1] 甲\n"), entries: 1, entryChars: 9 };
+      const one = { bytes: Buffer.byteLength("- [P1] 甲\n"), entries: 1, entryChars: 9 };
       assert.deepEqual(
         readStreamResults(summary.resultsFile).map((r) => [r.seq, r.memoryAtStart, r.memoryAtEnd]),
         [
@@ -574,11 +574,11 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           [
             5,
             one,
-            { bytes: Buffer.byteLength("- [L1] 甲\n- [L2] 乙乙\n"), entries: 2, entryChars: 19 },
+            { bytes: Buffer.byteLength("- [P1] 甲\n- [P2] 乙乙\n"), entries: 2, entryChars: 19 },
           ],
         ]
       );
-      assert.deepEqual(readdirSync(join(jobDir, "learned-snapshots")).sort(), ["step-1", "step-5"]);
+      assert.deepEqual(readdirSync(join(jobDir, "memory-snapshots")).sort(), ["step-1", "step-5"]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

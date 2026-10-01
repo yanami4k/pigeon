@@ -1077,9 +1077,9 @@ export class PiRuntimeAdapter {
           ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
           // 决策 188、218：本次的压缩配置
           ...(this.#compactor !== undefined ? { compaction: { ...this.#compactor.config } } : {}),
-          // 决策 191：推送的记忆
-          ...(snapshot.learnedMemory !== undefined
-            ? { learnedMemory: { ...snapshot.learnedMemory } }
+          // 决策 332：推送的记忆
+          ...(snapshot.pushedMemory !== undefined
+            ? { pushedMemory: structuredClone(snapshot.pushedMemory) }
             : {}),
         },
       });

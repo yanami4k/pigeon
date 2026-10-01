@@ -27,6 +27,7 @@ import {
   buildRuntime,
   disposeRuntime,
   type LearnedMemoryConfig,
+  type MemoryWriteConfig,
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
@@ -48,30 +49,21 @@ export interface SessionRuntimeFlags {
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
-  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）与学到的记忆的总量上限
+  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）
   pushedMemory?: boolean;
-  memoryLimitChars?: number;
 }
 
-// 交互会话的推送记忆配置：{冲突处理} 填交互版
-function interactiveLearnedMemory(flags: SessionRuntimeFlags): LearnedMemoryConfig | undefined {
-  return flags.pushedMemory === true
-    ? {
-        conflict: "interactive",
-        ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
-      }
-    : undefined;
+// 交互会话的推送记忆配置（决策 331）：有人对话，给写入配置（注册 update_memory、推送段带写入说明）；两层上限取设置快照
+function interactiveLearnedMemory(
+  flags: SessionRuntimeFlags,
+  write: MemoryWriteConfig | undefined
+): LearnedMemoryConfig | undefined {
+  return flags.pushedMemory === true ? (write !== undefined ? { write } : {}) : undefined;
 }
 
-// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关与上限
-export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
-  pushedMemory?: boolean;
-  memoryLimitChars?: number;
-} {
-  return {
-    ...(flags.pushedMemory === true ? { pushedMemory: true } : {}),
-    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
-  };
+// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关，只推送
+export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): { pushedMemory?: boolean } {
+  return flags.pushedMemory === true ? { pushedMemory: true } : {};
 }
 
 export interface OpenSessionRuntimeRequest {
@@ -108,6 +100,8 @@ export interface OpenSessionRuntimeRequest {
   taskList?: boolean;
   // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
   webTools?: WebToolsConfig;
+  // 决策 331：写记忆的入口与写入后的提示（终端界面与 --line 给；推送记忆关着时不生效）
+  memoryWrite?: MemoryWriteConfig;
   // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
   warn?: WarnSink;
 }
@@ -181,7 +175,7 @@ export async function openSessionRuntime(
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
   });
-  const learnedMemory = interactiveLearnedMemory(request.flags);
+  const learnedMemory = interactiveLearnedMemory(request.flags, request.memoryWrite);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker

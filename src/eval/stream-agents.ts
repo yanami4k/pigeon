@@ -12,6 +12,7 @@ import { createContainerWorkspaceHost, trustedShell } from "../execution/contain
 import type { CompactionConfigInput, StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_LOOP_GUARD_SETTINGS } from "../state/loop-guard-config.ts";
+import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { verifyStepsDisplay } from "../state/verify-steps.ts";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
@@ -63,7 +64,7 @@ export interface PigeonStepAgentOptions {
   temperature?: number;
   // 决策 188、218：上下文压缩的配置；缺省为产品缺省（实际几乎不触发），集成冒烟调低触发点验证压缩
   compaction?: CompactionConfigInput;
-  // 推送格（191、223）：学到的记忆的总量上限（缺省 12,000 字符）
+  // 推送格（191、332）：项目级学到的记忆的上限（缺省 4,000 字符）。跑批器只推项目级（作业目录里的记忆），不读使用者的用户级记忆
   memoryLimitChars?: number;
   provider?: string;
   modelId?: string;
@@ -182,9 +183,13 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           ...(pushed
             ? {
                 pushedMemory: true,
-                ...(options.memoryLimitChars !== undefined
-                  ? { memoryLimitChars: options.memoryLimitChars }
-                  : {}),
+                memoryLayers: ["project"],
+                memoryLimits: {
+                  ...DEFAULT_MEMORY_LIMITS,
+                  ...(options.memoryLimitChars !== undefined
+                    ? { project: options.memoryLimitChars }
+                    : {}),
+                },
               }
             : {}),
           // 回炉（142、143、154）：验证经执行端在该流的容器里执行，修满轮数仍失败即以失败收尾、容器工作区保留 agent 的改动。

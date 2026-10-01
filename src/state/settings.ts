@@ -1,6 +1,7 @@
 // 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard；
+//   另有学到的记忆的两层上限 memory（决策 332）；
 //   另有只许写在用户级的 trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；唯一例外是 permissions 的放权规则三层并集生效。
 // - 响亮失败：顶层或节内的未知键、写在设置里的 key、写在项目级的 trustedDirectories，一律指出文件、键与所在层。
@@ -16,6 +17,7 @@ import {
   loopGuardSettings,
 } from "./loop-guard-config.ts";
 import { type DotMcpJson, type McpConfig, McpSectionSchema, mergeMcpConfig } from "./mcp-config.ts";
+import { type MemoryLimits, MemorySectionSchema, memoryLimits } from "./memory-config.ts";
 import {
   OrchestrationSectionSchema,
   type OrchestrationSettings,
@@ -48,6 +50,7 @@ export const SETTINGS_SECTIONS = {
   web: WebSectionSchema,
   sandbox: SandboxSectionSchema,
   loopGuard: LoopGuardSectionSchema,
+  memory: MemorySectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -65,6 +68,7 @@ export const SettingsFileSchema = Type.Object(
     web: Type.Optional(WebSectionSchema),
     sandbox: Type.Optional(SandboxSectionSchema),
     loopGuard: Type.Optional(LoopGuardSectionSchema),
+    memory: Type.Optional(MemorySectionSchema),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   },
   { additionalProperties: false }
@@ -192,6 +196,7 @@ export interface MergedSettings {
   web?: WebSection;
   sandbox?: SandboxConfig;
   loopGuard?: Static<typeof LoopGuardSectionSchema>;
+  memory?: Static<typeof MemorySectionSchema>;
   trustedDirectories: string[];
 }
 
@@ -315,6 +320,11 @@ export function configGrantRulesOf(snapshot: SettingsSnapshot): ConfigGrantRule[
 
 export function orchestrationSettingsOf(snapshot: SettingsSnapshot): OrchestrationSettings {
   return orchestrationSettings(snapshot.merged.orchestration);
+}
+
+// 学到的记忆的两层上限（决策 332）：合并后的 memory 一节，不给的取缺省
+export function memoryLimitsOf(snapshot: SettingsSnapshot): MemoryLimits {
+  return memoryLimits(snapshot.merged.memory);
 }
 
 export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettings {

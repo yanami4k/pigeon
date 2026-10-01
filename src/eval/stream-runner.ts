@@ -45,7 +45,7 @@ import {
   taskPromptOf,
 } from "./stream-manifest.ts";
 import type { TestCaseResult } from "./stream-measure.ts";
-import { memoryFactsOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
+import { memoryFactsOf, snapshotOrRestoreMemory } from "./stream-memory-snapshot.ts";
 import {
   type CaseRun,
   countQuality,
@@ -701,7 +701,7 @@ async function runStreamJob(
         await limits?.ready();
         attempt += 1;
         // 记忆（191）：还没有这一步的快照即取一份；已有（作废重做、崩溃后续跑）即把记忆恢复成它
-        snapshotOrRestoreLearned(jobDir, step.seq);
+        snapshotOrRestoreMemory(jobDir, step.seq);
         const memoryAtStart = memoryFactsOf(jobDir);
         const sessionsBefore = new Set(sessionFilesOf(jobDir));
         try {

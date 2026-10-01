@@ -101,6 +101,7 @@ import {
   type CommandsHost,
   handleSlashCommand as dispatchSlashCommand,
   type TuiGrantsContext,
+  type TuiMemoryFace,
 } from "./commands.ts";
 import { createPromptEditor } from "./input-editor.ts";
 import { InputQueue } from "./input-queue.ts";
@@ -223,6 +224,8 @@ export interface TuiShellOptions {
   onHumanInput?: (text: string) => void;
   // 决策 309、312、301：/orchestrate 的命令面（跟着当前会话）；缺省 = 命令不可用
   scriptCommands?: () => ScriptCommands | undefined;
+  // 决策 331：/memory 的命令面（记忆按项目与用户分层，不跟会话走）；缺省 = 命令不可用
+  memory?: TuiMemoryFace;
 }
 
 // 决策 301：界面所处的视图——主会话、整屏的树形视图、进入的 worker 会话
@@ -632,6 +635,23 @@ export class PigeonTuiShell
   // 决策 309：/orchestrate 的命令面（CommandsHost）
   scriptCommands(): ScriptCommands | undefined {
     return this.options.scriptCommands?.();
+  }
+
+  // 决策 331：/memory 的命令面（CommandsHost）
+  memory(): TuiMemoryFace | undefined {
+    return this.options.memory;
+  }
+
+  // 决策 331：暂停界面执行一段要独占终端的动作（/memory edit 打开编辑器），结束后恢复界面并整屏重画
+  suspendFor<T>(work: () => T): T {
+    if (!this.started) return work();
+    this.tui.stop();
+    try {
+      return work();
+    } finally {
+      this.tui.start();
+      this.tui.requestRender(true);
+    }
   }
 
   // 以人的输入提交一条（/orchestrate 发起）：空闲即发，运行中排队

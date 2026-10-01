@@ -17,7 +17,7 @@ import { listSessionFiles } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, createGate, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import type { GatewayMeter } from "./model-gateway.ts";
+import { projectMemoryPathOf, userMemoryPathOf } from "../state/paths.ts";
 import {
   clearMarkedProcesses,
   commandStepAgent,
@@ -497,17 +497,11 @@ function countingStreamFn(inner: StreamFn) {
 
 // Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多两件
 // 检索工具（193），推送格多记忆工具（217）
+// 决策 331：跑批器只推送记忆、不带 update_memory，推送格与不推送的格子工具清单相同
 const PIGEON_STREAM_TOOLS = {
-  "search-push": [
-    "edit_file",
-    "read_file",
-    "read_session_entry",
-    "run_command",
-    "search_sessions",
-    "update_memory",
-  ],
+  "search-push": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
   "search-only": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
-  "push-only": ["edit_file", "read_file", "run_command", "update_memory"],
+  "push-only": ["edit_file", "read_file", "run_command"],
   neither: ["edit_file", "read_file", "run_command"],
 } as const;
 
@@ -1017,59 +1011,48 @@ test("Pigeon agent：验证里检查工具自身崩溃（重跑一次仍崩溃�
   }
 });
 
-test("Pigeon agent：推送格打开推送记忆——系统提示带推送段（无人值守版）、带 update_memory，最后一次验证之后收尾复盘；复盘前后读网关计量，结果带复盘事实；不推送的格子都没有", async () => {
+test("Pigeon agent：推送格打开推送记忆——系统提示带作业目录里的项目级记忆（无人值守版），不带 update_memory、不读用户级记忆；不推送的格子都没有", async () => {
   for (const condition of ["search-push", "push-only", "neither"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     try {
+      const jobDir = join(dir, "job");
+      const home = join(dir, "home");
+      const projectEntry = "- [P1] 作业目录里的项目级记忆";
+      const userEntry = "- [U1] 使用者的用户级记忆";
+      mkdirSync(dirname(projectMemoryPathOf(jobDir)), { recursive: true });
+      writeFileSync(projectMemoryPathOf(jobDir), `${projectEntry}\n`);
+      mkdirSync(dirname(userMemoryPathOf(home)), { recursive: true });
+      writeFileSync(userMemoryPathOf(home), `${userEntry}\n`);
       const inner = createFakeStreamFn({ replies: [editTo("bug", "fixed"), { text: "好了" }] });
       const agent = pigeonStepAgent({
         streamFn: inner,
         yolo: true,
         docker: ws.docker,
-        homeDir: join(dir, "home"),
-      });
-      // 假计量：请求数即模型请求次数，每次 0.01 元
-      const meter = (): GatewayMeter => ({
-        requests: inner.calls.length,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        costCny: inner.calls.length / 100,
-        upstreamFailures: 0,
-        queueMs: 0,
-        peakInFlight: 0,
-        peakInputTokens: 0,
-        accountRequests: [inner.calls.length],
+        homeDir: home,
       });
       const out = await agent.run(
-        input(join(dir, "job"), {
+        input(jobDir, {
           condition: CONDITION_SPECS[condition],
           target: { container: "box", root: ws.containerRoot },
           verify: FIXED_GATE,
-          meter,
         })
       );
       assert.deepEqual(out.repair, { rounds: 0, finalVerdict: "pass" }, condition);
       const pushed = CONDITION_SPECS[condition].pushedMemory;
       const first = inner.calls[0];
       assert.ok(first !== undefined);
+      const prompt = first.context.systemPrompt ?? "";
+      assert.equal(prompt.includes("## 学到的记忆"), pushed, condition);
+      assert.equal(prompt.includes(projectEntry), pushed, condition);
       assert.equal(
-        first.context.systemPrompt?.includes("## 学到的记忆") === true,
+        prompt.includes("当前任务的要求与某条记忆冲突时，按当前任务的要求做"),
         pushed,
         condition
       );
-      assert.equal(
-        first.context.systemPrompt?.includes("当前任务的要求与某条记忆冲突时") === true,
-        false,
-        "空记忆用没有条目的一版"
-      );
-      assert.equal(
-        (first.context.tools ?? []).some((tool) => tool.name === "update_memory"),
-        pushed,
-        condition
-      );
+      assert.ok(!prompt.includes(userEntry), "跑批器不读使用者的用户级记忆");
+      assert.ok(!prompt.includes("update_memory"), condition);
+      assert.ok(!(first.context.tools ?? []).some((tool) => tool.name === "update_memory"));
       // 干活两次请求；复盘随决策 331 删除，推送格不再多出复盘请求
       assert.equal(inner.calls.length, 2, condition);
     } finally {

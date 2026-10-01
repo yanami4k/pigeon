@@ -30,7 +30,12 @@ import {
 import { LOOP_GUARD_TEXTS } from "../application/loop-guard.ts";
 import { MIGRATE_CONFIG_USAGE, runMigrateConfig } from "../application/migrate-config.ts";
 import { runResumeFlow } from "../application/resume.ts";
-import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import {
+  disposeRuntime,
+  loadStreamFn,
+  type MemoryWriteConfig,
+  type RuntimeBundle,
+} from "../application/runtime.ts";
 import {
   closeSandbox,
   exportSandbox,
@@ -75,6 +80,7 @@ import {
 import { runStreamRejudge } from "../eval/stream-rejudge.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
+import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
@@ -322,6 +328,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           ...retryOption(flags),
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
           ...webToolsOption(flags, settings),
+          // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
+          memoryWrite: lineMemoryWrite(write),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
@@ -365,7 +373,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] [--repair-rounds <N>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令的配置）";
   let task: string | undefined;
   let json = false;
@@ -460,7 +468,6 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
     // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守
     pushedMemory: flags.pushedMemory,
-    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
     // 决策 309：脚本编排随派 worker 打开，任务描述算作点名
@@ -749,7 +756,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
-    "[--memory-limit <字符数，缺省 12000>] " +
+    "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
     '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
@@ -837,7 +844,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
         // 决策 218：压缩阈值用产品缺省；集成冒烟可经参数调低
         ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
-        // 推送格（191、223）：记忆上限，没给即缺省
+        // 推送格（191、332）：项目级记忆的上限，没给即缺省
         ...(memoryLimitChars !== undefined ? { memoryLimitChars } : {}),
       }
     : undefined;
@@ -1157,6 +1164,8 @@ async function lineMain(argv: string[]): Promise<void> {
       ...retryOption(flags),
       ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
       ...webToolsOption(flags, settings),
+      // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
+      memoryWrite: lineMemoryWrite(write),
       // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
       createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
       onMcpNote: (note) => {
@@ -1211,7 +1220,7 @@ export const TOP_LEVEL_HELP = [
 
 // 命令行对话与续跑接受的启动参数
 const SESSION_FLAGS_HINT =
-  "--yolo / --no-persist-thinking / --no-pushed-memory / --memory-limit / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
+  "--yolo / --no-persist-thinking / --no-pushed-memory / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --verify-command / --verify-timeout / --retry-on-fail / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
 
 // 决策 237：沙箱的提示行
 // 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败
@@ -1293,6 +1302,14 @@ function verifyOption(
 // M7（决策 079）：失败自动分叉重试次数
 function retryOption(flags: LaunchFlags): { retryOnFail?: number } {
   return flags.retryOnFail !== undefined ? { retryOnFail: flags.retryOnFail } : {};
+}
+
+// 决策 331：命令行对话写记忆的入口——来源记"命令行对话"，写入后打印一行
+function lineMemoryWrite(write: (text: string) => void): MemoryWriteConfig {
+  return {
+    source: "line",
+    onWritten: (notice) => write(`${memoryWriteNoticeLine(notice)}\n`),
+  };
 }
 
 // M7（决策 079）：/fork 手动分叉——分支沿用本会话的模型接入、审批模式与验证命令

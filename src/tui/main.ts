@@ -11,8 +11,19 @@ import {
   resolveVerifyConfig,
   webToolsEnabled,
 } from "../application/launch-flags.ts";
+import {
+  editMemoryLayer,
+  memoryViewText,
+  resolveEditor,
+  spawnEditor,
+} from "../application/memory-command.ts";
 import { promptHistoryStore } from "../application/prompt-history.ts";
-import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import {
+  disposeRuntime,
+  loadStreamFn,
+  type MemoryWriteConfig,
+  type RuntimeBundle,
+} from "../application/runtime.ts";
 import {
   closeSandbox,
   exportSandbox,
@@ -46,12 +57,13 @@ import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
+import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { tuiLogDirOf } from "../state/paths.ts";
-import { loopGuardSettingsOf, webSectionOf } from "../state/settings.ts";
+import { loopGuardSettingsOf, memoryLimitsOf, webSectionOf } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
 import { guardTuiAgent } from "./loop-guard-view.ts";
@@ -64,7 +76,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-budget <字符数>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] [--verify-command <命令>] [--verify-timeout <毫秒>] [--retry-on-fail <K>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
@@ -135,6 +147,16 @@ async function main(argv: string[]): Promise<void> {
     approvalQueue.wrap(createTuiApprovalHandler(grants, () => faceHolder.current));
   // 决策 297：worker 完成通知显示在消息区、空闲时叫醒主 agent——壳晚于编排器构造，晚绑定
   const shellHolder: { current: PigeonTuiShell | undefined } = { current: undefined };
+  // 决策 331：有人对话，带记忆工具；写入后在消息区显示一行记下的内容与层级（壳晚于运行面构造，晚绑定）
+  const memoryWrite: MemoryWriteConfig = {
+    source: "tui",
+    onWritten: (notice) => {
+      shellHolder.current?.addSystem(memoryWriteNoticeLine(notice));
+      shellHolder.current?.render();
+    },
+  };
+  // 决策 331、332：/memory 的上下文（两层上限取本会话的设置快照）
+  const memoryContext = { governanceRoot: workspaceRoot, limits: memoryLimitsOf(settings) };
   // 决策 309–314：各会话的脚本编排（运行器、命令面与点名状态），按会话的运行面取
   const scriptsOf = new WeakMap<
     RuntimeBundle,
@@ -296,6 +318,7 @@ async function main(argv: string[]): Promise<void> {
     taskList: orchestration.taskList,
     ...webToolsOption,
     warn,
+    memoryWrite,
     createApprovalHandler: createHandler,
     // 决策 183、286：--continue / --resume <id> 直接续接——还原对话上下文
     ...(resumed ? { resume: true } : {}),
@@ -359,6 +382,18 @@ async function main(argv: string[]): Promise<void> {
     onHumanInput: (text) => scriptsOf.get(slot.bundle)?.gate.humanInput(text),
     scripts: () => scriptsOf.get(slot.bundle)?.runs.nodes() ?? [],
     scriptCommands: () => scriptsOf.get(slot.bundle)?.commands,
+    // 决策 331：/memory 查看与编辑两层记忆（编辑时暂停界面打开 $VISUAL / $EDITOR）
+    memory: {
+      view: () => memoryViewText(memoryContext),
+      edit: (layer) =>
+        editMemoryLayer(memoryContext, layer, {
+          ...editorOption(),
+          // 壳晚于选项构造：经持有格取
+          run: (editor, file) =>
+            shellHolder.current?.suspendFor(() => spawnEditor(editor, file)) ??
+            spawnEditor(editor, file),
+        }),
+    },
     // S5+（裁决 033）：双击 Ctrl+C / /quit 的真实退出路径——壳内已先 stop()
     //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
     onExit: release,
@@ -390,6 +425,7 @@ async function main(argv: string[]): Promise<void> {
           taskList: orchestration.taskList,
           ...webToolsOption,
           warn,
+          memoryWrite,
           createApprovalHandler: createHandler,
           // 决策 183：还原对话上下文，悬空的工具调用补"结果未知"的工具结果
           resume: true,
@@ -483,6 +519,12 @@ function spawnWorkerOption(
         scriptOrchestration: new ScriptSlot(new ScriptGate(scriptGateSettingsOf(orchestration))),
       }
     : {};
+}
+
+// 决策 331：/memory edit 用的编辑器（$VISUAL 优先，其次 $EDITOR；都没有即不给，命令给出文件路径）
+function editorOption(): { editor?: string } {
+  const editor = resolveEditor();
+  return editor !== undefined ? { editor } : {};
 }
 
 // M7（决策 079）：失败自动分叉重试次数

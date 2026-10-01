@@ -86,11 +86,12 @@ export interface StreamResultLine {
     humanRuns: BaselineRunFacts[];
     humanSlowest: { id: string; seconds: number } | null;
   } | null;
-  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里 .pigeon/learned/MEMORY.md 的字节数、条目数与条目
+  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里项目级记忆（决策 332 起为 .pigeon/state/memory.md，
+  // 之前为 .pigeon/learned/MEMORY.md）的字节数、条目数与条目
   // 部分的字符数（文件头不计，223 的上限按它算）；文件不在记 0
   memoryAtStart: MemoryFacts | null;
-  // 这一步 agent 运行与收尾复盘都结束之后（判题之前）的记忆大小，口径同上；最后一步的即一遍结束时的记忆。复盘接入之前
-  // 照样在 agent 结束后记。依赖环境选不出而没跑 agent 的步为 null
+  // 这一步 agent 运行结束之后（判题之前）的记忆大小，口径同上；最后一步的即一遍结束时的记忆（决策 331 删除复盘之前，
+  // 记在收尾复盘之后）。依赖环境选不出而没跑 agent 的步为 null
   memoryAtEnd: MemoryFacts | null;
   // 这一步是否撞了宽上限（171）：agent 以撞轮数或墙钟上限收尾（终态 turn-limit / wall-clock-limit），或轮数、墙钟
   // （含验证门与回炉）达到上限。没跑 agent 为 null

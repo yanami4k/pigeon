@@ -70,7 +70,7 @@ test("会话检索关掉时模型硬调检索工具：按未注册的工具拒�
   assert.doesNotMatch(off.lastMessages, /命中片段只是线索/);
 });
 
-test("推送记忆打开：headless 照常装配运行，推送段与记忆工具随开关出现", async () => {
+test("推送记忆打开：headless 照常装配运行；无人值守只推送、不注册记忆工具，两层都空时不推这一段", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-pushed-memory-"));
   try {
     const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
@@ -82,12 +82,13 @@ test("推送记忆打开：headless 照常装配运行，推送段与记忆工�
       yolo: true,
       skillRoots: [],
       memoryRoots: [],
+      homeDir: root,
       pushedMemory: true,
     });
     assert.equal(result.status, "completed");
     const first = streamFn.calls[0];
-    assert.ok(first?.context.systemPrompt?.includes("## 学到的记忆"));
-    assert.ok((first?.context.tools ?? []).some((tool) => tool.name === "update_memory"));
+    assert.ok(!first?.context.systemPrompt?.includes("## 学到的记忆"));
+    assert.ok(!(first?.context.tools ?? []).some((tool) => tool.name === "update_memory"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

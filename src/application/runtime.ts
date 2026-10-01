@@ -7,8 +7,8 @@
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
 // 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
-// 推送记忆（决策 191、217、227、244）：开着时会话开始读学到的记忆推入系统提示（常驻 Memory 之后、Skill 目录之前）
-// 并注册 update_memory。复盘（收尾、压缩前、补做）随决策 331 删除
+// 推送记忆（决策 191、331、332）：开着时会话开始读两层学到的记忆推入系统提示（常驻 Memory 之后、Skill 目录之前）；
+// 只有有人对话的入口另给写入配置，注册 update_memory、推送段带"被纠正时记下"的说明。复盘（收尾、压缩前、补做）随决策 331 删除
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
 // 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
 import { existsSync } from "node:fs";
@@ -16,7 +16,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { assertMemoryLimit, loadPushedMemory, type MemoryConflictMode } from "../memory/pushed.ts";
+import type { MemoryLayer } from "../memory/learned.ts";
+import { loadPushedMemory } from "../memory/pushed.ts";
 import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
 import {
   createReadSessionEntryTool,
@@ -27,6 +28,8 @@ import {
 } from "../memory/search-tools.ts";
 import {
   createUpdateMemoryTool,
+  type MemorySource,
+  type MemoryWriteNotice,
   UPDATE_MEMORY_TOOL,
   updateMemoryRegistration,
 } from "../memory/update-memory-tool.ts";
@@ -50,6 +53,7 @@ import {
 import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { MemoryLimits } from "../state/memory-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
@@ -57,6 +61,7 @@ import {
   commandsConfigOf,
   configGrantRulesOf,
   emptySettingsSnapshot,
+  memoryLimitsOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
@@ -205,7 +210,7 @@ export interface RuntimeDeps {
   compaction?: CompactionConfigInput;
   // 压缩前回调；缺省不挂
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217、244：推送记忆。在场即开着——开局推送 MEMORY.md、注册 update_memory；缺省关着
+  // 决策 191、244、331、332：推送记忆。在场即开着——开局推送两层记忆；带写入配置时另注册 update_memory。缺省关着
   // （装配层缺省；日常入口由启动参数缺省打开，跑批器按条件明确指定）
   learnedMemory?: LearnedMemoryConfig;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
@@ -227,10 +232,22 @@ export interface RuntimeDeps {
 
 // 推送记忆的配置
 export interface LearnedMemoryConfig {
-  // {冲突处理} 的填法：交互使用（命令行对话、终端界面）/ 无人值守（pigeon run、跑批）
-  conflict: MemoryConflictMode;
-  // 总量上限（字符，按码点计）；缺省 12,000
-  limitChars?: number;
+  // 两层上限（字符，按码点计）；缺省取设置快照的 memory 一节（不给的取缺省 4,000）
+  limits?: MemoryLimits;
+  // 推送哪几层；缺省两层（跑批器只推项目级：不读使用者的用户级记忆）
+  layers?: readonly MemoryLayer[];
+  // 决策 331：写入。在场即注册 update_memory，推送段带写入说明与交互版的冲突处理；只由有人对话的入口给（终端界面主会话
+  // 含沙箱会话、--line）。委派策略在场（worker 与续开的 worker 会话）时不生效
+  write?: MemoryWriteConfig;
+}
+
+export interface MemoryWriteConfig {
+  // 来源（哪个入口）：工具补在每条的〔〕里
+  source: MemorySource;
+  // 写入后调用：入口在消息区显示一行记下的内容与层级
+  onWritten?: (notice: MemoryWriteNotice) => void;
+  // 记日期用的时钟（测试注入）
+  now?: () => Date;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -287,7 +304,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 压缩配置畸形在打开会话文件之前响亮失败
   const compactionConfig = resolveCompactionConfig(deps.compaction);
   const learned = deps.learnedMemory;
-  assertMemoryLimit(learned?.limitChars);
   // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
   // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（缺省 off）时温度照常下发
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
@@ -377,9 +393,17 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       registry.register(registration);
     }
   }
-  // 决策 217：推送开着时注册记忆工具（写档、只写 learned/、免审批）
-  if (learned !== undefined) {
-    registry.register(updateMemoryRegistration(governanceRoot));
+  // 决策 331：只有带写入配置的主会话注册记忆工具（写档、只写两层记忆文件、免审批）；worker 只推送
+  const memoryLimits = learned?.limits ?? memoryLimitsOf(settings);
+  const memoryWrite =
+    learned?.write !== undefined && deps.toolPolicy === undefined ? learned.write : undefined;
+  if (memoryWrite !== undefined) {
+    registry.register(
+      updateMemoryRegistration({
+        governanceRoot,
+        ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+      })
+    );
   }
   // 决策 264–267：派 worker 的工具——只给主会话；沙箱（执行端在场）不注册。worker 自己（委派策略在场）只在层数放开、
   // 它还没到最底层时由装配方给一个本层的槽（299：槽的派出方所在层大于 0），此时不给 take_worker（叠加只往主工作目录）
@@ -435,13 +459,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
     ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
   });
-  // 决策 191：会话开始读学到的记忆，整份推入、即冻结；清单进 Run 开始条目
+  // 决策 191、332：会话开始读两层学到的记忆，整份推入、即冻结；清单进 Run 开始条目
   const pushedMemory =
     learned !== undefined
       ? loadPushedMemory({
           governanceRoot,
-          conflict: learned.conflict,
-          ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
+          ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+          limits: memoryLimits,
+          writable: memoryWrite !== undefined,
+          ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
         })
       : undefined;
   const editSentence = replaceMode
@@ -483,7 +509,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "edit_file",
     RUN_COMMAND_TOOL,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL] : []),
-    ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
+    ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
     ...(spawnSlot !== undefined
@@ -595,7 +621,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       memory: residentMemory.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
-      ...(pushedMemory !== undefined ? { learnedMemory: pushedMemory.manifest } : {}),
+      ...(pushedMemory !== undefined
+        ? { pushedMemory: structuredClone(pushedMemory.manifest) }
+        : {}),
       ...(deps.verify !== undefined ? { verify: { ...deps.verify } } : {}),
       ...(deps.retryOnFail !== undefined ? { retryOnFail: deps.retryOnFail } : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
@@ -625,12 +653,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(sessionSearch
         ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
         : []),
-      ...(learned !== undefined
+      ...(memoryWrite !== undefined
         ? [
             createUpdateMemoryTool({
               governanceRoot,
+              ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
               sessionId: deps.sessionId,
-              ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
+              source: memoryWrite.source,
+              limits: memoryLimits,
+              ...(memoryWrite.onWritten !== undefined ? { onWritten: memoryWrite.onWritten } : {}),
+              ...(memoryWrite.now !== undefined ? { now: memoryWrite.now } : {}),
             }),
           ]
         : []),

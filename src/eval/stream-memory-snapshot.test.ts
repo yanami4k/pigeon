@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
-  learnedDirOf,
-  learnedSnapshotOf,
   memoryFactsOf,
-  snapshotOrRestoreLearned,
+  memoryFileOf,
+  memorySnapshotOf,
+  snapshotOrRestoreMemory,
 } from "./stream-memory-snapshot.ts";
 
 function withJobDir(fn: (jobDir: string) => void): void {
-  const jobDir = mkdtempSync(join(tmpdir(), "pigeon-learned-snapshot-"));
+  const jobDir = mkdtempSync(join(tmpdir(), "pigeon-memory-snapshot-"));
   try {
     fn(jobDir);
   } finally {
@@ -19,78 +19,71 @@ function withJobDir(fn: (jobDir: string) => void): void {
   }
 }
 
-test("记忆快照：每步开工前整体复制 .pigeon/state/learned/；同一步再开工（作废重做、续跑）即恢复成那份快照，不重取", () =>
+function remember(jobDir: string, text: string): void {
+  mkdirSync(dirname(memoryFileOf(jobDir)), { recursive: true });
+  writeFileSync(memoryFileOf(jobDir), text);
+}
+
+test("记忆快照：每步开工前复制项目级记忆 .pigeon/state/memory.md；同一步再开工（作废重做、续跑）即恢复成那份快照，不重取", () =>
   withJobDir((jobDir) => {
-    const learned = learnedDirOf(jobDir);
-    mkdirSync(join(learned, "sub"), { recursive: true });
-    writeFileSync(join(learned, "MEMORY.md"), "第 1 步之前的记忆\n");
-    writeFileSync(join(learned, "sub", "note.md"), "细节\n");
-    assert.equal(snapshotOrRestoreLearned(jobDir, 1), "taken");
+    assert.equal(memoryFileOf(jobDir), join(jobDir, ".pigeon", "state", "memory.md"));
+    remember(jobDir, "第 1 步之前的记忆\n");
+    assert.equal(snapshotOrRestoreMemory(jobDir, 1), "taken");
     assert.equal(
-      readFileSync(join(learnedSnapshotOf(jobDir, 1), "learned", "MEMORY.md"), "utf8"),
+      readFileSync(join(memorySnapshotOf(jobDir, 1), "memory.md"), "utf8"),
       "第 1 步之前的记忆\n"
     );
-    // 第 1 步的尝试改了记忆、加了文件，随后作废：重做前恢复成快照，多出的文件也不留
-    writeFileSync(join(learned, "MEMORY.md"), "作废尝试写下的\n");
-    writeFileSync(join(learned, "stray.md"), "x\n");
-    assert.equal(snapshotOrRestoreLearned(jobDir, 1), "restored");
-    assert.equal(readFileSync(join(learned, "MEMORY.md"), "utf8"), "第 1 步之前的记忆\n");
-    assert.equal(readFileSync(join(learned, "sub", "note.md"), "utf8"), "细节\n");
-    assert.equal(existsSync(join(learned, "stray.md")), false);
+    // 第 1 步的尝试改了记忆，随后作废：重做前恢复成快照
+    remember(jobDir, "作废尝试写下的\n");
+    assert.equal(snapshotOrRestoreMemory(jobDir, 1), "restored");
+    assert.equal(readFileSync(memoryFileOf(jobDir), "utf8"), "第 1 步之前的记忆\n");
     // 第 1 步完成后的记忆成为第 2 步的快照
-    writeFileSync(join(learned, "MEMORY.md"), "第 1 步完成后的记忆\n");
-    assert.equal(snapshotOrRestoreLearned(jobDir, 2), "taken");
+    remember(jobDir, "第 1 步完成后的记忆\n");
+    assert.equal(snapshotOrRestoreMemory(jobDir, 2), "taken");
     assert.equal(
-      readFileSync(join(learnedSnapshotOf(jobDir, 2), "learned", "MEMORY.md"), "utf8"),
+      readFileSync(join(memorySnapshotOf(jobDir, 2), "memory.md"), "utf8"),
       "第 1 步完成后的记忆\n"
     );
     assert.equal(
-      readFileSync(join(learnedSnapshotOf(jobDir, 1), "learned", "MEMORY.md"), "utf8"),
+      readFileSync(join(memorySnapshotOf(jobDir, 1), "memory.md"), "utf8"),
       "第 1 步之前的记忆\n",
       "早先的快照不被改写"
     );
   }));
 
-test("记忆快照：开工时还没有记忆目录也取一份（记下「没有」）；恢复时把作废尝试新建的记忆目录删掉", () =>
+test("记忆快照：开工时还没有记忆文件也取一份（记下「没有」）；恢复时把作废尝试新建的记忆文件删掉", () =>
   withJobDir((jobDir) => {
-    assert.equal(snapshotOrRestoreLearned(jobDir, 3), "taken");
-    assert.equal(existsSync(join(learnedSnapshotOf(jobDir, 3), "learned")), false);
-    mkdirSync(learnedDirOf(jobDir), { recursive: true });
-    writeFileSync(join(learnedDirOf(jobDir), "MEMORY.md"), "作废尝试写下的\n");
-    assert.equal(snapshotOrRestoreLearned(jobDir, 3), "restored");
-    assert.equal(existsSync(learnedDirOf(jobDir)), false);
+    assert.equal(snapshotOrRestoreMemory(jobDir, 3), "taken");
+    assert.equal(existsSync(join(memorySnapshotOf(jobDir, 3), "memory.md")), false);
+    remember(jobDir, "作废尝试写下的\n");
+    assert.equal(snapshotOrRestoreMemory(jobDir, 3), "restored");
+    assert.equal(existsSync(memoryFileOf(jobDir)), false);
   }));
 
 test("记忆快照：上次取到一半留下的临时目录不算快照，重取时先清掉", () =>
   withJobDir((jobDir) => {
-    const tmp = `${learnedSnapshotOf(jobDir, 4)}.tmp`;
-    mkdirSync(join(tmp, "learned"), { recursive: true });
-    writeFileSync(join(tmp, "learned", "half.md"), "半份\n");
-    mkdirSync(learnedDirOf(jobDir), { recursive: true });
-    writeFileSync(join(learnedDirOf(jobDir), "MEMORY.md"), "完整的\n");
-    assert.equal(snapshotOrRestoreLearned(jobDir, 4), "taken");
+    const tmp = `${memorySnapshotOf(jobDir, 4)}.tmp`;
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(join(tmp, "half.md"), "半份\n");
+    remember(jobDir, "完整的\n");
+    assert.equal(snapshotOrRestoreMemory(jobDir, 4), "taken");
     assert.equal(existsSync(tmp), false);
-    assert.equal(existsSync(join(learnedSnapshotOf(jobDir, 4), "learned", "half.md")), false);
-    assert.equal(
-      readFileSync(join(learnedSnapshotOf(jobDir, 4), "learned", "MEMORY.md"), "utf8"),
-      "完整的\n"
-    );
+    assert.equal(existsSync(join(memorySnapshotOf(jobDir, 4), "half.md")), false);
+    assert.equal(readFileSync(join(memorySnapshotOf(jobDir, 4), "memory.md"), "utf8"), "完整的\n");
   }));
 
-test("开工时的记忆大小：文件不在记 0；条目数按「- [L编号]」开头的行数，条目字符数从第一条起按码点计（文件头不计）", () =>
+test("开工时的记忆大小：文件不在记 0；条目数按「- [P编号]」开头的行数，条目字符数从第一条起按码点计（文件头不计）", () =>
   withJobDir((jobDir) => {
     assert.deepEqual(memoryFactsOf(jobDir), { bytes: 0, entries: 0, entryChars: 0 });
-    mkdirSync(learnedDirOf(jobDir), { recursive: true });
-    const header = "# 学到的记忆\n<!-- 说明 -->\n\n";
-    const entries =
-      "- [L1] 事实：甲\n  引用：a.py\n  理由：乙\n- [L3] 事实：丙\n  引用：user\n  理由：丁\n";
-    writeFileSync(join(learnedDirOf(jobDir), "MEMORY.md"), header + entries);
+    const header = "# 学到的记忆（本项目）\n<!-- 说明 -->\n\n";
+    const entries = "- [P1] 甲 〔2026-10-01 · 终端界面 · 会话 sess_1〕\n- [P3] 丙\n";
+    remember(jobDir, header + entries);
     assert.deepEqual(memoryFactsOf(jobDir), {
       bytes: Buffer.byteLength(header + entries),
       entries: 2,
       entryChars: [...entries].length,
     });
-    writeFileSync(join(learnedDirOf(jobDir), "MEMORY.md"), header);
+    remember(jobDir, header);
     assert.deepEqual(memoryFactsOf(jobDir), {
       bytes: Buffer.byteLength(header),
       entries: 0,
