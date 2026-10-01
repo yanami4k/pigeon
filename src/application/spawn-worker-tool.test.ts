@@ -17,7 +17,6 @@ import {
 } from "../orchestration/workers.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type SessionId } from "../state/ids.ts";
-import type { OutcomeLabel } from "../state/outcome-label.ts";
 import {
   createMessageWorkerTool,
   createStopWorkerTool,
@@ -57,8 +56,7 @@ const FINAL_PARAMS = {
   role: "worker 的角色，决定它能用的工具，见工具说明",
   task: "子任务的完整说明：目标、相关文件、完成的标准",
   name: "worker 的名字，用于分支名与状态显示；不给即自动生成",
-  attempts:
-    "同一任务并行派出的份数；给了即各做一份，做完后按验证命令给每份标上通过、未通过或未知，全部交回",
+  attempts: "同一任务并行派出的份数；给了即各做一份，全部做完后交回各份的改动与摘要，由你比较",
   label: "可选的标签，原样出现在这个 worker 的通知与结果里，便于对应任务清单里的项",
 };
 
@@ -453,7 +451,7 @@ test("固定情形的返回文字逐字为定稿原文", () => {
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.attemptsSpawned(["a-1", "a-2"]),
-    "已并行派出 2 份：a-1、a-2。全部结束并验证后会有一条通知，给出每份的验证标签。"
+    "已并行派出 2 份：a-1、a-2。全部结束后会有一条通知，交回各份的改动与摘要。"
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.stalled({ name: "w", role: "tester", branch: "pigeon/w" }, 10),
@@ -762,11 +760,10 @@ test("worker 每一轮的 token 回报给额度的持有方", async () => {
   assert.deepEqual(h.tokens, [7, 7, 7]);
 });
 
-test("多份尝试：派出即返回名单，后台跑完按验证标签汇总一条通知；已由 wait 交回的一份只写一句", async () => {
-  const labels: OutcomeLabel[] = ["Passed", "Failed", "Unknown"];
+test("多份尝试：派出即返回名单，后台跑完交回各份汇总一条通知；已由 wait 交回的一份只写一句", async () => {
   let requested: { role: string; task: string; count: number; label?: string } | undefined;
   const gate = Promise.withResolvers<void>();
-  const ids = labels.map(() => newSessionId() as SessionId);
+  const ids = [1, 2, 3].map(() => newSessionId() as SessionId);
   const h = harness({
     scriptFor: () => ({ behavior: "complete" }),
     spawnAttempts: async (request) => {
@@ -778,8 +775,8 @@ test("多份尝试：派出即返回名单，后台跑完按验证标签汇总�
       };
       request.onSpawned(ids);
       await gate.promise;
-      const outcomes: WorkerOutcome[] = labels.map((_, index) => ({
-        sessionId: ids[index] as SessionId,
+      const outcomes: WorkerOutcome[] = ids.map((id, index) => ({
+        sessionId: id,
         name: `implementer-${index + 1}`,
         role: "implementer",
         status: index === 2 ? "turn-limit" : "completed",
@@ -796,19 +793,14 @@ test("多份尝试：派出即返回名单，后台跑完按验证标签汇总�
           branch: `pigeon/implementer-${index + 1}`,
         },
       }));
-      return {
-        outcomes,
-        labels: new Map(
-          outcomes.map((outcome, index) => [outcome.sessionId, labels[index] ?? "Unknown"])
-        ),
-      };
+      return { outcomes };
     },
   });
   const text = await call(h, { role: "implementer", task: "修 a", attempts: 3, label: "T2" });
   assert.deepEqual(requested, { role: "implementer", task: "修 a", count: 3, label: "T2" });
   assert.equal(
     text,
-    `已并行派出 3 份：${ids.join("、")}。全部结束并验证后会有一条通知，给出每份的验证标签。`
+    `已并行派出 3 份：${ids.join("、")}。全部结束后会有一条通知，交回各份的改动与摘要。`
   );
   assert.equal(h.target.pendingNotices(), 0);
   // 第 2 份已由 wait_workers 交回（组内记下）
@@ -820,9 +812,9 @@ test("多份尝试：派出即返回名单，后台跑完按验证标签汇总�
     WORKER_NOTICE_PREFIX +
       "标签 T2：" +
       [
-        "第 1 份（通过）：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份",
-        "第 2 份（未通过）：worker implementer-2 的结果已由 wait_workers 交回。",
-        "第 3 份（未知）：worker implementer-3（implementer）撞上轮数上限，没有做完。分支：pigeon/implementer-3。已改动的文件（1）：a.ts。摘要：第 3 份",
+        "第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份",
+        "第 2 份：worker implementer-2 的结果已由 wait_workers 交回。",
+        "第 3 份：worker implementer-3（implementer）撞上轮数上限，没有做完。分支：pigeon/implementer-3。已改动的文件（1）：a.ts。摘要：第 3 份",
       ].join("\n\n")
   );
   assert.equal(h.budget.spawned(), 3);

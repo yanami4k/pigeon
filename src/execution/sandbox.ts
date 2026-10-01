@@ -388,6 +388,8 @@ const CLONE_SCRIPT = [
   'cat > "$b"',
   "git init -q .",
   'git symbolic-ref HEAD "refs/heads/$2"',
+  // 行尾按字节保真：宿主侧（含本机测试的假 docker）系统配置可能是 autocrlf=true，检出会被转成 CRLF
+  "git config core.autocrlf false",
   'git fetch -q "$b" "$1"',
   'git update-ref "refs/heads/$2" FETCH_HEAD',
   'git reset -q --hard "refs/heads/$2"',
