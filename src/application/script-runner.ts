@@ -130,7 +130,13 @@ export interface ScriptRunnerDeps {
   // 把一个 worker 自己的改动三方叠进主工作目录
   overlay: (target: CollectTarget) => OverlayResult;
   // 整批收回的请示：放手模式或已放权时直接批
-  approveCollect: (input: { runId: string; title: string; workers: string[] }) => Promise<boolean>;
+  approveCollect: (input: {
+    runId: string;
+    title: string;
+    workers: string[];
+    // 决策 340：各 worker 的叠回目标（据此判定叠回内容是否写到受保护路径 .pigeon）
+    targets?: readonly CollectTarget[];
+  }) => Promise<boolean>;
   // 重启后按运行号从会话里找回（只限本会话）
   restore?: (runId: string) => Promise<RestoredScriptRun | undefined>;
   // 脚本开跑时登记一条待发的汇总（pigeon run 据此等它），返回发出的函数
@@ -910,6 +916,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       runId: run.runId,
       title: run.spec.name,
       workers: targets.map((target) => target.name),
+      targets,
     });
     if (!approved) {
       return { kind: "skipped", reason: "人没有批准" };

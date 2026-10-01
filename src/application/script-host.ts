@@ -33,6 +33,7 @@ import {
 import { ORCHESTRATE_TOOL } from "./script-texts.ts";
 import { emptyCostTally, mergeCostTally, sessionCostTally } from "./session-cost.ts";
 import { TAKE_WORKER_TOOL } from "./spawn-worker-tool.ts";
+import { protectedOverlayPaths } from "./take-worker-tool.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
 
 // Docker 不可用或镜像准备不成：工具据此回"Docker 不可用"
@@ -89,18 +90,23 @@ export function collectApprover(
   governanceRoot: string,
   approval: CollectApproval
 ): ScriptRunnerDeps["approveCollect"] {
-  return async ({ runId, title, workers }) => {
+  return async ({ runId, title, workers, targets }) => {
     if (approval.yolo) return true;
     const args = { workers };
+    // 决策 340：叠回内容写到 .pigeon 下时按受保护路径请示——放权不算，逐次问人，请示里列出这些路径
+    const protectedPaths = (targets ?? []).flatMap((target) =>
+      protectedOverlayPaths(target, governanceRoot)
+    );
     if (
-      approval.grants?.match(TAKE_WORKER_TOOL, args) != null ||
-      matchConfigGrants(
-        approval.configGrants ?? [],
-        governanceRoot,
-        TAKE_WORKER_TOOL,
-        args,
-        false
-      ) !== null
+      protectedPaths.length === 0 &&
+      (approval.grants?.match(TAKE_WORKER_TOOL, args) != null ||
+        matchConfigGrants(
+          approval.configGrants ?? [],
+          governanceRoot,
+          TAKE_WORKER_TOOL,
+          args,
+          false
+        ) !== null)
     ) {
       return true;
     }
@@ -111,6 +117,9 @@ export function collectApprover(
       args,
       tier: "write",
       script: { runId, title },
+      ...(protectedPaths.length > 0
+        ? { protectedPath: [...new Set(protectedPaths)].join("、") }
+        : {}),
     });
     return decision.approved;
   };

@@ -120,6 +120,11 @@ export function localSettingsLockPathOf(root: string): string {
   return `${projectLocalSettingsPath(root)}.lock`;
 }
 
+// 相对仓库根的路径（正斜杠）是否在项目的 .pigeon 下：叠回 worker 改动时据此找出写受保护路径的文件（决策 340）
+export function isUnderPigeonDir(relativePosixPath: string): boolean {
+  return relativePosixPath === PIGEON_DIR || relativePosixPath.startsWith(`${PIGEON_DIR}/`);
+}
+
 // 快照、checkpoint 与 worker 叠加排除的程序路径（相对仓库根，正斜杠）：只排除程序状态与个人设置；
 // 可提交的 .pigeon/settings.json 与 .pigeon/skills 是项目内容，照常进快照
 export const PROGRAM_OWNED_PATHS: readonly string[] = [

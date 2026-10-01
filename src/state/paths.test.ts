@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   configTrustPathOf,
   isProgramOwnedPath,
+  isUnderPigeonDir,
   mapLegacyWorktreePath,
   projectLocalSettingsPath,
   sessionsDirOf,
@@ -27,6 +28,9 @@ test("快照与叠加排除的只是程序状态与个人设置；可提交的�
   assert.equal(isProgramOwnedPath(".pigeon/settings.json"), false);
   assert.equal(isProgramOwnedPath(".pigeon/skills/x/SKILL.md"), false);
   assert.equal(isProgramOwnedPath(".pigeon/stateful.txt"), false);
+  assert.equal(isUnderPigeonDir(".pigeon/settings.json"), true);
+  assert.equal(isUnderPigeonDir(".pigeonx/a"), false);
+  assert.equal(isUnderPigeonDir("src/.pigeon/x"), false);
 });
 
 test("旧工作树位置映射：旧前缀下的换到新前缀，其余原样", () => {

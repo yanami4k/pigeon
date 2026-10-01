@@ -383,6 +383,20 @@ class GovernedToolCalls implements ToolGovernance {
 
   // 写入类文件工具（写档、按工作区限定路径）的 path 落在受保护路径上时返回其展示写法
   async #protectedTargetOf(toolName: string, args: unknown): Promise<string | undefined> {
+    // 决策 340：叠回 worker 改动的工具（take_worker）会写到 .pigeon 下时同样按受保护路径处理，请示里列出这些路径
+    const tool = this.#host.tools.get(toolName);
+    if (
+      tool !== undefined &&
+      "inspectProtectedPaths" in tool &&
+      typeof tool.inspectProtectedPaths === "function"
+    ) {
+      try {
+        const paths = (tool.inspectProtectedPaths as (args: unknown) => string[])(args);
+        return paths.length > 0 ? paths.join("、") : undefined;
+      } catch {
+        return undefined;
+      }
+    }
     if (this.#protectedPath === undefined) {
       return undefined;
     }
