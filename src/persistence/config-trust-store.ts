@@ -1,4 +1,4 @@
-// 会执行命令的配置的确认记录（决策 326 ③）：用户级 ~/.pigeon/state/config-trust.json，按项目规范化路径 + 条目键记指纹；
+// 会执行命令或放权的配置的确认记录（决策 326 ③、341）：用户级 ~/.pigeon/state/config-trust.json，按项目规范化路径 + 条目键记指纹；
 // 原子写入，读改写在独占锁里做（两个窗口同时确认不互相覆盖）。另给出沙箱配置指向的项目 Dockerfile 的内容（并入指纹）。
 // 记录畸形时响亮失败（指出文件），不当作空记录——当作空只会让人重复确认，但掩盖了文件被改坏。
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
