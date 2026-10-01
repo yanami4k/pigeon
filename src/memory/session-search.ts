@@ -143,34 +143,50 @@ export interface PastSessionsFilter {
   until?: number;
 }
 
-// 当前会话所在的整棵会话树：沿父会话上溯到根（父会话没有记录或成环即止），再收下父链能走到根的全部会话
+// 当前会话所在的整棵会话树：沿父会话上溯一次找到根（父会话没有记录或成环即止），再按子会话表从根广度优先走一遍。
+// 两步都带已访问集合：会话头损坏成环时照样终止，环上与环下挂着的会话都算在这一家里
 export function sessionFamily(
   current: string,
   parentOf: ReadonlyMap<string, string | undefined>
 ): Set<string> {
-  const rootOf = (start: string): string => {
-    const seen = new Set<string>();
-    let id = start;
-    for (;;) {
-      seen.add(id);
-      const parent = parentOf.get(id);
-      if (parent === undefined || seen.has(parent)) {
-        return id;
-      }
-      id = parent;
+  const climbed = new Set<string>([current]);
+  let root = current;
+  for (;;) {
+    const parent = parentOf.get(root);
+    if (parent === undefined || climbed.has(parent)) {
+      break;
     }
-  };
-  const root = rootOf(current);
-  const family = new Set<string>([current, root]);
-  for (const id of parentOf.keys()) {
-    if (rootOf(id) === root) {
-      family.add(id);
+    climbed.add(parent);
+    root = parent;
+  }
+  const children = new Map<string, string[]>();
+  for (const [id, parent] of parentOf) {
+    if (parent !== undefined) {
+      const list = children.get(parent);
+      if (list === undefined) {
+        children.set(parent, [id]);
+      } else {
+        list.push(id);
+      }
     }
   }
+  const family = new Set<string>([root]);
+  const queue = [root];
+  for (let index = 0; index < queue.length; index++) {
+    for (const child of children.get(queue[index] as string) ?? []) {
+      if (!family.has(child)) {
+        family.add(child);
+        queue.push(child);
+      }
+    }
+  }
+  // 当前会话不在表里（文件还没写出、也没给父会话）时根就是它自己，上面已收下
+  family.add(current);
   return family;
 }
 
-// 以前的会话（从旧到新）：读全部会话的可搜内容（经缓存），排除当前会话所在的会话树，再按创建时间范围筛；顺手清理缓存
+// 以前的会话（从旧到新）：时间窗口内的会话读可搜内容（经缓存），窗口外的只读文件头取父会话（判会话树用）；
+// 排除当前会话所在的会话树；顺手清理缓存
 export function loadPastSessions(
   sessionsDir: string,
   source: SessionSearchSource,
@@ -180,14 +196,20 @@ export function loadPastSessions(
 ): SessionSearchEntry[] {
   const refs = listSessionRefs(sessionsDir);
   const current = filter.current;
-  const loaded: Array<{ createdAt: number; entry: SessionSearchEntry }> = [];
+  const loaded: SessionSearchEntry[] = [];
   const parentOf = new Map<string, string | undefined>();
   for (const ref of refs) {
-    if (current !== undefined && ref.sessionId === current.sessionId) {
-      // 当前会话正在写：不抽取、不缓存，只取文件头里的父会话
+    const createdAt = sessionRefTime(ref);
+    const inWindow =
+      (filter.since === undefined || createdAt >= filter.since) &&
+      (filter.until === undefined || createdAt <= filter.until);
+    const isCurrent = current !== undefined && ref.sessionId === current.sessionId;
+    if (isCurrent || !inWindow) {
+      // 当前会话正在写、窗口外的会话不在结果里：不抽取、不缓存，只取文件头里的父会话
       parentOf.set(
         ref.sessionId,
-        current.parentSessionId ?? readSessionHeader(ref.path)?.parentSessionId
+        (isCurrent ? current?.parentSessionId : undefined) ??
+          readSessionHeader(ref.path)?.parentSessionId
       );
       continue;
     }
@@ -196,7 +218,7 @@ export function loadPastSessions(
       continue;
     }
     parentOf.set(entry.info.sessionId, entry.info.parentSessionId);
-    loaded.push({ createdAt: sessionRefTime(ref), entry });
+    loaded.push(entry);
   }
   if (current !== undefined && current.parentSessionId !== undefined) {
     parentOf.set(current.sessionId, current.parentSessionId);
@@ -209,14 +231,7 @@ export function loadPastSessions(
       () => new Set(listSessionFiles(sessionsDir).map((file) => file.sessionId))
     );
   }
-  return loaded
-    .filter(
-      ({ createdAt, entry }) =>
-        !family.has(entry.info.sessionId) &&
-        (filter.since === undefined || createdAt >= filter.since) &&
-        (filter.until === undefined || createdAt <= filter.until)
-    )
-    .map(({ entry }) => entry);
+  return loaded.filter((entry) => !family.has(entry.info.sessionId));
 }
 
 interface Ranked {

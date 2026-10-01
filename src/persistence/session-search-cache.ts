@@ -165,7 +165,13 @@ export function pruneSessionSearchCache(
   }
   const remove = (name: string) => rmSync(join(cacheDir, name), { force: true });
   const orphans: Array<{ name: string; sessionId: string }> = [];
-  const live = liveSessionIds();
+  let live: ReadonlySet<string>;
+  try {
+    live = liveSessionIds();
+  } catch {
+    // 列会话根失败（子目录正好消失等）：这次不清理
+    return;
+  }
   for (const name of names) {
     try {
       if (name.endsWith(TEMP_SUFFIX)) {
@@ -185,7 +191,12 @@ export function pruneSessionSearchCache(
   if (orphans.length === 0) {
     return;
   }
-  const confirmed = liveSessionIds();
+  let confirmed: ReadonlySet<string>;
+  try {
+    confirmed = liveSessionIds();
+  } catch {
+    return;
+  }
   for (const orphan of orphans) {
     if (!confirmed.has(orphan.sessionId)) {
       try {

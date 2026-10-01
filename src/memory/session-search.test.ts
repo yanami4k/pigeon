@@ -23,6 +23,7 @@ import {
   DEFAULT_SNIPPET_CHARS,
   type SessionSearchHit,
   type SessionSearchResult,
+  sessionFamily,
 } from "./session-search.ts";
 
 const OLD = asSessionId("sess_01JAAAAAA10000000000000000");
@@ -432,7 +433,7 @@ test("排序只保留前 limit 条：与不设上限时排序结果的前 limit 
       await seed(dir, id, (s) => {
         s.startRun({ task: `${words[index]} 开始` });
         for (let n = 0; n < 12; n++) {
-          s.user(words.filter((_, k) => (n + index + k) % 3 !== 0).join(" ") + ` 第 ${n} 条`);
+          s.user(`${words.filter((_, k) => (n + index + k) % 3 !== 0).join(" ")} 第 ${n} 条`);
         }
         s.endRun();
       });
@@ -469,4 +470,39 @@ test("决策 339 ⑥：检索时顺手清理会话文件已不在会话根下的
     rmSync(moved.path);
     assert.equal((await search.search({ keywords: ["needle"] })).total, 1);
     assert.deepEqual(readdirSync(cacheDir).sort(), [`${OLD}.json`, `${OLD}.tools.json`]);
+  }));
+
+test("会话树：会话头损坏成环时照样终止，环上与挂在环上的会话都算一家；不相干的不算", () => {
+  // A ↔ B 成环，D 挂在 B 下，E 挂在 D 下；U 不相干
+  const parentOf = new Map<string, string | undefined>([
+    ["A", "B"],
+    ["B", "A"],
+    ["D", "B"],
+    ["E", "D"],
+    ["U", undefined],
+  ]);
+  for (const current of ["A", "B", "D", "E"]) {
+    assert.deepEqual([...sessionFamily(current, parentOf)].sort(), ["A", "B", "D", "E"], current);
+  }
+  assert.deepEqual([...sessionFamily("U", parentOf)], ["U"]);
+  // 当前会话不在表里（文件还没写出、也没给父会话）：只有它自己
+  assert.deepEqual([...sessionFamily("X", parentOf)], ["X"]);
+});
+
+test("时间窗口外的会话不读全文、不进缓存；窗口内同一家的会话照样排除", () =>
+  withDir(async (dir) => {
+    const family = await seedFamily(dir);
+    const cacheDir = join(dir, "..", "search-cache");
+    const since = sessionCreatedAt(MID);
+    const hits = await collect(
+      createSessionSearch(dir, { cacheDir }).search({
+        keywords: ["4242"],
+        current: { sessionId: family.child1 },
+        since,
+      })
+    );
+    assert.deepEqual(hits, []);
+    const cached = readdirSync(cacheDir);
+    assert.ok(!cached.some((name) => name.startsWith(OLD)), cached.join(","));
+    assert.ok(cached.includes(`${family.child2}.json`), cached.join(","));
   }));

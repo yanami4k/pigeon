@@ -69,7 +69,7 @@ test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找
   const list = createListSessionsTool({ sessionsDir: "x" });
   assert.equal(
     search.description,
-    "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉）。" +
+    "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中）。" +
       SCOPE +
       "缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；" +
       "要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。" +
@@ -86,7 +86,7 @@ test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找
   );
   assert.equal(
     list.description,
-    "列出本项目以前的会话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉），从新到旧，每个给出会话编号、开始时间（UTC）、" +
+    "列出本项目以前的会话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中），从新到旧，每个给出会话编号、开始时间（UTC）、" +
       "第一句使用者的话（截断到 60 字）与改动过的文件（edit_file 的写入与 run_command 报告的文件变化）。" +
       "可按开始时间筛选（since、until，写 YYYY-MM-DD 或 ISO 时间，含两端），" +
       "也可按文件路径筛选（path：改动过的文件路径里含这一段即算，写前缀亦可）；" +
@@ -480,6 +480,8 @@ test("决策 339 ⑤：list_sessions 按时间范围与文件路径（子串、�
     );
     assert.equal(DEFAULT_LIST_SESSIONS_LIMIT, 20);
     await assert.rejects(tool.execute("t", { since: "上周" }), /无法识别的时间：上周/);
+    // 规范化后为空的路径（只写了 ./）报错，不当作不筛选
+    await assert.rejects(tool.execute("t", { path: "./" }), /path 规范化后为空：\.\//);
   }));
 
 test("list_sessions：改动文件超过 10 个时文本与 details 都只带前 10 个与总数；路径筛选词与存储同一规范化（./ 与反斜杠）", () =>

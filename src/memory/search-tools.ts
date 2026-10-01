@@ -13,6 +13,7 @@ import type { SessionId } from "../state/ids.ts";
 import { pigeonRel } from "../state/paths.ts";
 import {
   LIST_SESSIONS_TOOL,
+  normalizeChangedPath,
   READ_SESSION_ENTRY_TOOL,
   SEARCH_SESSIONS_TOOL,
   type SessionCatalogInfo,
@@ -152,7 +153,7 @@ export function createSearchSessionsTool(
     name: SEARCH_SESSIONS_TOOL,
     label: SEARCH_SESSIONS_TOOL,
     description:
-      "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉）。" +
+      "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中）。" +
       SCOPE_GUIDANCE +
       "缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；" +
       "要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。" +
@@ -271,7 +272,7 @@ export function createListSessionsTool(
     name: LIST_SESSIONS_TOOL,
     label: LIST_SESSIONS_TOOL,
     description:
-      "列出本项目以前的会话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉），从新到旧，每个给出会话编号、开始时间（UTC）、" +
+      "列出本项目以前的会话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中），从新到旧，每个给出会话编号、开始时间（UTC）、" +
       `第一句使用者的话（截断到 ${FIRST_USER_TEXT_CHARS} 字）与改动过的文件（edit_file 的写入与 run_command 报告的文件变化）。` +
       "可按开始时间筛选（since、until，写 YYYY-MM-DD 或 ISO 时间，含两端），" +
       "也可按文件路径筛选（path：改动过的文件路径里含这一段即算，写前缀亦可）；" +
@@ -282,6 +283,11 @@ export function createListSessionsTool(
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ListSessionsDetails>> {
       const args = Value.Parse(ListSessionsParamsSchema, params);
+      if (args.path !== undefined && normalizeChangedPath(args.path) === "") {
+        throw new SessionToolError(
+          `path 规范化后为空：${args.path}（要按文件筛选请给出路径里的一段，不筛选就不给 path）`
+        );
+      }
       const limit = Math.min(
         args.limit ?? DEFAULT_LIST_SESSIONS_LIMIT,
         DEFAULT_LIST_SESSIONS_LIMIT

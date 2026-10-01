@@ -338,3 +338,29 @@ test("目录信息里存父会话：worker 会话的缓存带派出它的会话�
     assert.equal(cached.source.load(ref, { toolOutput: false })?.info.parentSessionId, SESSION);
     assert.deepEqual(cached.reads, []);
   }));
+
+test("清理时列会话根失败（子目录正好消失等）：跳过这次清理，不抛错", () =>
+  withDirs(async ({ sessionsDir, cacheDir }) => {
+    await seed(sessionsDir, (s) => {
+      s.startRun({ task: "照常" });
+      s.endRun();
+    });
+    countingSource(cacheDir).source.load(onlyRef(sessionsDir), { toolOutput: false });
+    const before = readdirSync(cacheDir).sort();
+    assert.doesNotThrow(() =>
+      pruneSessionSearchCache(cacheDir, () => {
+        throw new Error("ENOENT");
+      })
+    );
+    let calls = 0;
+    assert.doesNotThrow(() =>
+      pruneSessionSearchCache(cacheDir, () => {
+        calls += 1;
+        if (calls > 1) {
+          throw new Error("ENOENT");
+        }
+        return new Set<string>();
+      })
+    );
+    assert.deepEqual(readdirSync(cacheDir).sort(), before);
+  }));
