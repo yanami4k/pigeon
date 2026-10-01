@@ -349,6 +349,8 @@
 | 333 | 日常沙箱容器缺省设资源上限：内存取本机内存的一半（交换区同值、不另占），进程数 4096，CPU 缺省不限；三项可在 settings 中修改、写 0 为不限；命令因超出内存上限被杀（退出码 137）时，向 agent 与人明确报出超出沙箱内存上限 | 审计安全项第 1 件 | M11 |
 | 334 | 编辑工具写入前复核路径：写前重新解析真实路径并与检查时比对，不一致即拒写并说明路径已变；要写的文件本身是符号链接即拒写并说明其指向；不做逐级安全打开 | 审计安全项第 2 件 | M11 |
 | 335 | 容器辅助命令（路径解析、读写文件、文件清单、快照与交回所用的 git 等）在容器内以 timeout 限时，到时只终止该命令、不重启容器，客户端超时略长作兜底；镜像没有 timeout 命令时退回杀客户端并重启容器；日常沙箱容器不加 --rm，维持异常退出后可取回改动、以清理命令删除的做法 | 审计安全项第 3 件 | M11 |
+| 336 | 加 CI 工作流：推送到 main 与每个 PR 时在 GitHub 托管的 Ubuntu 运行器上以 Node 24 跑 npm ci 与 npm run verify，所用 action 钉到完整 commit SHA；缺实验镜像的真容器用例照现有逻辑跳过，pigeon-verify 上的全量验收照旧作最终验收 | 工程设施第 1 件 | M11 |
+| 337 | 两个 Claude 工作流所用的 action 与代码审查插件一律钉到完整 commit SHA（注明原版本号），开启 Dependabot 定期提升级 PR；触发者须有写权限由该 action 自身检查，id-token: write 为其缺省认证所需，均维持 | 工程设施第 2 件 | M11 |
 
 ## 条目
 
@@ -3009,4 +3011,18 @@
 - 事实：执行端对 agent 命令的超时做法是杀掉 docker exec 客户端并重启整个容器，使容器内进程全部结束（src/execution/container-host.ts 开头注释：只杀客户端会把容器内进程留成孤儿）。Pigeon 自己发往容器的辅助命令（路径解析、读写文件、文件清单、快照与交回所用的 git 等）经另一条路执行，缺省超时 60 秒，到时只杀客户端，容器内进程继续运行，可能长期占着资源或 git 的锁。日常沙箱容器不带 --rm 属有意为之：异常退出后容器保留，可取回未交回的改动，以清理命令删除；脚本编排容器带 --rm。
 - 结论：辅助命令在容器内以 timeout 限时执行，到时只终止该命令，不重启容器；客户端超时略长于容器内限时，作兜底。镜像中没有 timeout 命令时退回杀客户端并重启容器。日常沙箱容器维持不加 --rm。
 - 理由：只终止卡住的那条辅助命令，不连带结束 agent 在后台运行的进程；缺少 timeout 时仍有彻底的退路。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 336 CI 跑 verify（设计）
+
+- 事实：仓库只有 @claude 助手与 PR 自动审查两个工作流，没有跑 npm run verify 的；测试只在施工时本地与验收时 pigeon-verify 上跑，直接推到 main 或合并时顺带的改动可能未经测试。package.json 要求 Node >=22.19.0 <25、npm 11，沙箱镜像为 Node 24；缺实验镜像的真容器用例自动跳过；以 root 运行时有一条用例假红，GitHub 托管运行器不以 root 运行；公开仓库使用托管运行器不计费。
+- 结论：新增工作流，推送到 main 与每个 PR 时在 Ubuntu 托管运行器上以 Node 24 执行 npm ci 与 npm run verify，所用 action 钉到完整 commit SHA。真容器用例照现有逻辑跳过；pigeon-verify 上的全量验收照旧，作最终验收。
+- 理由：每次推送与 PR 都有测试结论可看，挡住未经测试的改动进入 main；全量含真容器用例的验收仍须在验证服务器上进行。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 337 Claude 工作流的加固（设计）
+
+- 事实：两个 Claude 工作流以标签引用 action（actions/checkout@v4、anthropics/claude-code-action@v1），审查工作流另从 anthropics/claude-code 主分支安装代码审查插件；标签可被改指到其他提交。GitHub 官方安全指南：钉到完整 commit SHA 是把 action 当作不可变版本使用的唯一办法。claude-code-action 官方文档：只有对仓库有写权限的使用者能触发；id-token: write 为其缺省 GitHub App 认证路径所需。
+- 结论：两个工作流中的 action 与代码审查插件一律钉到完整 commit SHA，并以注释注明原版本号；开启 Dependabot，定期提升级这些 SHA 的 PR；新增的 CI 工作流同样处理。触发权限与 id-token: write 维持现状。
+- 理由：防止上游被篡改后，工作流带着令牌与仓库权限执行被替换的代码；由 Dependabot 提升级 PR，避免钉住后长期不更新。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
