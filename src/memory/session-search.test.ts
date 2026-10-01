@@ -3,7 +3,7 @@
 // 检索工具自身的输出永不进检索、排除当前会话；角色过滤、创建时间范围、上限与总数；分支会话的复制段不重复命中、
 // 会话根下的旧格式平铺文件不检索也不报错、读正被写入的文件不改文件。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,10 +11,12 @@ import {
   createFixtureSession,
   type FixtureSession,
   forkFixture,
+  spawnFixtureWorker,
   tearTail,
 } from "../application/session-store-fixtures.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
-import { asSessionId, type SessionId } from "../state/ids.ts";
+import { listSessionFiles } from "../persistence/session-reader.ts";
+import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { sessionCreatedAt } from "../state/session-summary.ts";
 import {
   createSessionSearch,
@@ -123,7 +125,7 @@ test("决策 339 ①：排除当前会话；其余会话照常命中", () =>
     });
     const search = createSessionSearch(dir);
     assert.deepEqual(
-      (await collect(search.search({ keywords: ["needle"], excludeSessionId: NEW }))).map(
+      (await collect(search.search({ keywords: ["needle"], current: { sessionId: NEW } }))).map(
         (hit) => hit.sessionId
       ),
       [OLD]
@@ -360,4 +362,111 @@ test("空关键词响亮拒绝；无会话目录返回零命中", () =>
     const search = createSessionSearch(join(dir, "不存在"));
     await assert.rejects(collect(search.search({ keywords: ["  "] })), /至少需要一个关键词/);
     assert.deepEqual(await collect(search.search({ keywords: ["x"] })), []);
+  }));
+
+// 一家会话：主会话 P 派出 worker C1、C2（题面含 PR 4242），P 分叉出 F；另有不相干的 U
+async function seedFamily(dir: string) {
+  const unrelated = await seed(dir, OLD, (s) => {
+    s.startRun({ task: "PR 4242 以前的讨论" });
+    s.endRun();
+  });
+  const parent = createFixtureSession({ sessionsDir: dir, sessionId: MID });
+  const runId = parent.startRun({ task: "修 PR 4242 的超时" });
+  parent.assistant({ text: "派 worker 去看 4242" });
+  const c1 = spawnFixtureWorker(parent, { sessionsDir: dir, name: "w1", task: "PR 4242 的测试" });
+  c1.startRun({ task: "PR 4242 的测试" });
+  c1.endRun();
+  const { sessionId: child1 } = await c1.close();
+  const c2 = spawnFixtureWorker(parent, { sessionsDir: dir, name: "w2", task: "PR 4242 的文档" });
+  c2.startRun({ task: "PR 4242 的文档" });
+  c2.endRun();
+  const { sessionId: child2 } = await c2.close();
+  parent.endRun();
+  await parent.close();
+  const fork = await forkFixture({ sessionsDir: dir, sourceSessionId: MID, runId, runSeq: 2 });
+  fork.startRun({ task: "分叉里再看 4242" });
+  fork.endRun();
+  const { sessionId: forked } = await fork.close();
+  return { unrelated, parent: MID, child1, child2, forked };
+}
+
+test("决策 339 ①：排除当前会话所在的整棵会话树——父查不到子与分叉，子查不到父与兄弟，分叉查不到来源与其 worker；不相干的照常命中", () =>
+  withDir(async (dir) => {
+    const family = await seedFamily(dir);
+    const cacheDir = join(dir, "..", "search-cache");
+    // 两遍：第一遍从会话文件抽取，第二遍父会话取自缓存
+    for (let round = 0; round < 2; round++) {
+      const search = createSessionSearch(dir, { cacheDir });
+      for (const current of [family.parent, family.child1, family.child2, family.forked]) {
+        const hits = await collect(
+          search.search({ keywords: ["4242"], current: { sessionId: current } })
+        );
+        assert.deepEqual(
+          [...new Set(hits.map((hit) => hit.sessionId))],
+          [OLD],
+          `当前会话 ${current}`
+        );
+      }
+    }
+    // 不给当前会话时全家都在
+    const all = await collect(createSessionSearch(dir).search({ keywords: ["4242"] }));
+    assert.equal(new Set(all.map((hit) => hit.sessionId)).size, 5);
+  }));
+
+test("决策 339 ①：当前会话的文件还没写出时，按调用方给的父会话排除那一家", () =>
+  withDir(async (dir) => {
+    const family = await seedFamily(dir);
+    const hits = await collect(
+      createSessionSearch(dir).search({
+        keywords: ["4242"],
+        current: { sessionId: newSessionId(), parentSessionId: family.child1 },
+      })
+    );
+    assert.deepEqual([...new Set(hits.map((hit) => hit.sessionId))], [OLD]);
+  }));
+
+test("排序只保留前 limit 条：与不设上限时排序结果的前 limit 条一致", () =>
+  withDir(async (dir) => {
+    const words = ["alpha", "beta", "gamma"];
+    for (const [index, id] of [OLD, MID, NEW].entries()) {
+      await seed(dir, id, (s) => {
+        s.startRun({ task: `${words[index]} 开始` });
+        for (let n = 0; n < 12; n++) {
+          s.user(words.filter((_, k) => (n + index + k) % 3 !== 0).join(" ") + ` 第 ${n} 条`);
+        }
+        s.endRun();
+      });
+    }
+    const search = createSessionSearch(dir);
+    const query = { keywords: words };
+    const all = await search.search(query);
+    for (const limit of [1, 5, 17]) {
+      const top = await search.search(query, { limit });
+      assert.equal(top.total, all.total);
+      assert.deepEqual(
+        top.hits.map((hit) => hit.entryId),
+        all.hits.slice(0, limit).map((hit) => hit.entryId)
+      );
+    }
+  }));
+
+test("决策 339 ⑥：检索时顺手清理会话文件已不在会话根下的缓存", () =>
+  withDir(async (dir) => {
+    await seed(dir, OLD, (s) => {
+      s.startRun({ task: "needle 留着" });
+      s.endRun();
+    });
+    await seed(dir, NEW, (s) => {
+      s.startRun({ task: "needle 会被移走" });
+      s.endRun();
+    });
+    const cacheDir = join(dir, "..", "search-cache");
+    const search = createSessionSearch(dir, { cacheDir });
+    assert.equal((await search.search({ keywords: ["needle"] })).total, 2);
+    assert.equal(readdirSync(cacheDir).length, 4);
+    const moved = listSessionFiles(dir).find((file) => file.sessionId === NEW);
+    assert.ok(moved !== undefined);
+    rmSync(moved.path);
+    assert.equal((await search.search({ keywords: ["needle"] })).total, 1);
+    assert.deepEqual(readdirSync(cacheDir).sort(), [`${OLD}.json`, `${OLD}.tools.json`]);
   }));

@@ -1,5 +1,6 @@
 // 决策 339 ⑥：会话检索的缓存——命中缓存时不读会话文件；会话文件大小或修改时间变了即重抽；格式版本不符即重建；
-// 缓存损坏时丢弃重建、不报错中断；写缓存原子写入，多个进程并发检索同一批会话时缓存不损坏；缓存目录不可写时检索照常。
+// 缓存损坏时丢弃重建、不报错中断；写缓存原子写入，多个进程并发检索同一批会话时缓存不损坏；缓存目录不可写时检索照常；
+// 会话文件已不在的缓存与崩溃留下的旧临时文件被清理；目录信息里存父会话。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
@@ -18,11 +19,17 @@ import { pathToFileURL } from "node:url";
 import {
   createFixtureSession,
   type FixtureSession,
+  spawnFixtureWorker,
 } from "../application/session-store-fixtures.ts";
 import { asSessionId, type SessionId } from "../state/ids.ts";
 import { listSessionRefs, readSessionView } from "./session-catalog.ts";
 import type { SessionFileRef } from "./session-reader.ts";
-import { createSessionSearchSource, SESSION_SEARCH_CACHE_VERSION } from "./session-search-cache.ts";
+import {
+  createSessionSearchSource,
+  pruneSessionSearchCache,
+  SESSION_SEARCH_CACHE_VERSION,
+  STALE_TEMP_MS,
+} from "./session-search-cache.ts";
 
 const SESSION = asSessionId("sess_01JAAAAAA30000000000000000");
 
@@ -261,4 +268,73 @@ test("并发写不损坏：多个进程同时对同一批会话首次检索，�
       assert.equal(check.source.load(ref, { toolOutput: true })?.toolOutput?.length, 1);
     }
     assert.deepEqual(check.reads, [], "并发写下的缓存全部有效，不必重抽");
+  }));
+
+test("清理：会话文件已不在会话根下的缓存删掉（删前再列一次确认），超过一小时的临时文件删掉，其余不动", () =>
+  withDirs(async ({ sessionsDir, cacheDir }) => {
+    const kept = asSessionId("sess_01JAAAAAA10000000000000000");
+    await seed(
+      sessionsDir,
+      (s) => {
+        s.startRun({ task: "留着" });
+        s.endRun();
+      },
+      kept
+    );
+    const gone = asSessionId("sess_01JAAAAAA20000000000000000");
+    const gonePath = await seed(
+      sessionsDir,
+      (s) => {
+        s.startRun({ task: "会被移走" });
+        s.endRun();
+      },
+      gone
+    );
+    const born = asSessionId("sess_01JAAAAAA40000000000000000");
+    const { source } = countingSource(cacheDir);
+    for (const ref of listSessionRefs(sessionsDir)) {
+      source.load(ref, { toolOutput: true });
+    }
+    rmSync(gonePath);
+    // 第一次列出时还没有、删前再列时已出现的会话（另一进程刚建）：不删
+    writeFileSync(join(cacheDir, `${born}.json`), "{}");
+    const now = Date.now();
+    const staleTemp = join(cacheDir, `${kept}.json.123.abcd.tmp`);
+    const freshTemp = join(cacheDir, `${kept}.json.456.ef01.tmp`);
+    writeFileSync(staleTemp, "{");
+    writeFileSync(freshTemp, "{");
+    utimesSync(
+      staleTemp,
+      new Date(now - STALE_TEMP_MS - 1000),
+      new Date(now - STALE_TEMP_MS - 1000)
+    );
+    const listings = [new Set([kept]), new Set([kept, born])];
+    let calls = 0;
+    pruneSessionSearchCache(cacheDir, () => listings[Math.min(calls++, 1)] as Set<string>, now);
+    assert.deepEqual(
+      readdirSync(cacheDir).sort(),
+      [`${kept}.json`, `${kept}.json.456.ef01.tmp`, `${kept}.tools.json`, `${born}.json`].sort()
+    );
+    assert.equal(calls, 2);
+  }));
+
+test("目录信息里存父会话：worker 会话的缓存带派出它的会话号，命中缓存时照样取到", () =>
+  withDirs(async ({ sessionsDir, cacheDir }) => {
+    const parent = createFixtureSession({ sessionsDir, sessionId: SESSION });
+    parent.startRun({ task: "主会话" });
+    const child = spawnFixtureWorker(parent, { sessionsDir, name: "w1", task: "活" });
+    child.startRun({ task: "活" });
+    child.endRun();
+    const { sessionId: childId } = await child.close();
+    parent.endRun();
+    await parent.close();
+    const ref = listSessionRefs(sessionsDir).find((item) => item.sessionId === childId);
+    assert.ok(ref !== undefined);
+    assert.equal(
+      countingSource(cacheDir).source.load(ref, { toolOutput: false })?.info.parentSessionId,
+      SESSION
+    );
+    const cached = countingSource(cacheDir);
+    assert.equal(cached.source.load(ref, { toolOutput: false })?.info.parentSessionId, SESSION);
+    assert.deepEqual(cached.reads, []);
   }));

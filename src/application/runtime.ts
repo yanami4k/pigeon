@@ -214,7 +214,7 @@ export interface RuntimeDeps {
   storeLineage?: StoreLineage;
   // 会话存储故障告警的出口（缺省标准错误输出；测试注入）
   storeWarn?: WarnSink;
-  // 决策 193：能否检索历史会话。关掉时不注册 search_sessions 与 read_session_entry，系统提示去掉提到它们的那一句；
+  // 决策 193：能否检索历史会话。关掉时不注册 search_sessions、read_session_entry 与 list_sessions（339），系统提示去掉提到它们的那一句；
   // 缺省开着（日常使用与 193 之前逐字一致）
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
@@ -428,11 +428,17 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
   // 决策 193 的开关关掉时一件都不注册
   const sessionSearch = deps.sessionSearch ?? true;
-  // 决策 339：检索与目录排除当前会话；可搜文本缓存在 .pigeon/state/search-cache/
+  // 决策 339：检索与目录排除当前会话所在的整棵会话树（父会话取本会话的来历：worker 的派出方、分支的来源）；
+  // 可搜文本缓存在 .pigeon/state/search-cache/
+  const lineageParent =
+    deps.storeLineage?.worker?.parentSessionId ?? deps.storeLineage?.branch?.sourceSessionId;
   const sessionToolOptions = {
     sessionsDir,
     cacheDir: sessionSearchCacheDirOf(governanceRoot),
-    currentSessionId: deps.sessionId,
+    current: {
+      sessionId: deps.sessionId,
+      ...(lineageParent !== undefined ? { parentSessionId: lineageParent } : {}),
+    },
   };
   if (sessionSearch) {
     for (const registration of sessionToolRegistrations(sessionsDir)) {

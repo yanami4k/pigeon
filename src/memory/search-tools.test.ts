@@ -12,6 +12,7 @@ import { createToolGovernance } from "../application/governance.ts";
 import {
   createFixtureSession,
   type FixtureSession,
+  spawnFixtureWorker,
 } from "../application/session-store-fixtures.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
@@ -68,7 +69,7 @@ test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找
   const list = createListSessionsTool({ sessionsDir: "x" });
   assert.equal(
     search.description,
-    "检索本项目以前会话里的对话（不含当前会话）。" +
+    "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉）。" +
       SCOPE +
       "缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；" +
       "要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。" +
@@ -85,7 +86,7 @@ test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找
   );
   assert.equal(
     list.description,
-    "列出本项目以前的会话（不含当前会话），从新到旧，每个给出会话编号、开始时间（UTC）、" +
+    "列出本项目以前的会话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉），从新到旧，每个给出会话编号、开始时间（UTC）、" +
       "第一句使用者的话（截断到 60 字）与改动过的文件（edit_file 的写入与 run_command 报告的文件变化）。" +
       "可按开始时间筛选（since、until，写 YYYY-MM-DD 或 ISO 时间，含两端），" +
       "也可按文件路径筛选（path：改动过的文件路径里含这一段即算，写前缀亦可）；" +
@@ -351,7 +352,7 @@ test("决策 339 ①：search_sessions 与 list_sessions 排除当前会话；re
       },
       current
     );
-    const options = { sessionsDir: dir, currentSessionId: current };
+    const options = { sessionsDir: dir, current: { sessionId: current } };
     const search = await createSearchSessionsTool(options).execute("t1", { keywords: ["needle"] });
     assert.deepEqual(
       search.details.hits.map((hit) => hit.sessionId),
@@ -421,6 +422,14 @@ test("决策 339 ⑤：list_sessions 典型输出逐字——从新到旧，会�
       ].join("\n")
     );
     assert.equal(result.details.total, 2);
+    // details 与给模型的文本同样截断
+    assert.deepEqual(result.details.sessions[0], {
+      sessionId: SESSION,
+      createdAt: sessionCreatedAt(SESSION),
+      firstUserText: `把登录页的超时改成 30 秒，${"并且".repeat(22)}并…`,
+      changedFiles: ["src/login.ts", "src/new.ts", "package.json", "src/old.ts"],
+      changedFileCount: 4,
+    });
     assert.equal(result.details.limited, false);
   }));
 
@@ -471,4 +480,63 @@ test("决策 339 ⑤：list_sessions 按时间范围与文件路径（子串、�
     );
     assert.equal(DEFAULT_LIST_SESSIONS_LIMIT, 20);
     await assert.rejects(tool.execute("t", { since: "上周" }), /无法识别的时间：上周/);
+  }));
+
+test("list_sessions：改动文件超过 10 个时文本与 details 都只带前 10 个与总数；路径筛选词与存储同一规范化（./ 与反斜杠）", () =>
+  withDir(async (dir) => {
+    const files = Array.from({ length: 12 }, (_, index) => `src/f${index}.ts`);
+    await seed(dir, (s) => {
+      s.startRun({ task: "改很多文件" });
+      for (const file of files) {
+        s.toolTurn({ name: "edit_file", args: { path: `./${file}` } });
+      }
+      s.endRun();
+    });
+    const tool = createListSessionsTool({ sessionsDir: dir });
+    const result = await tool.execute("t1", {});
+    assert.deepEqual(result.details.sessions[0]?.changedFiles, files.slice(0, 10));
+    assert.equal(result.details.sessions[0]?.changedFileCount, 12);
+    assert.match(textOf(result), /src\/f9\.ts 等 12 个\n/);
+    for (const path of ["./src/f11.ts", "src\\f11.ts", ".\\src\\f11", "src/f11.ts"]) {
+      assert.deepEqual(
+        (await tool.execute("t2", { path })).details.sessions.map((info) => info.sessionId),
+        [SESSION],
+        path
+      );
+    }
+  }));
+
+test("决策 339 ①：list_sessions 不列当前会话所在的这一组会话（父会话里列不出它派出的 worker，worker 里列不出父会话与兄弟）", () =>
+  withDir(async (dir) => {
+    const parent = createFixtureSession({ sessionsDir: dir, sessionId: SESSION });
+    parent.startRun({ task: "主会话" });
+    const children: string[] = [];
+    for (const name of ["w1", "w2"]) {
+      const child = spawnFixtureWorker(parent, { sessionsDir: dir, name, task: `${name} 的活` });
+      child.startRun({ task: `${name} 的活` });
+      child.endRun();
+      children.push((await child.close()).sessionId);
+    }
+    parent.endRun();
+    await parent.close();
+    const other = asSessionId("sess_01JAAAAAA10000000000000000");
+    await seed(
+      dir,
+      (s) => {
+        s.startRun({ task: "不相干" });
+        s.endRun();
+      },
+      other
+    );
+    for (const current of [SESSION, ...children]) {
+      const listed = await createListSessionsTool({
+        sessionsDir: dir,
+        current: { sessionId: current },
+      }).execute("t", {});
+      assert.deepEqual(
+        listed.details.sessions.map((info) => info.sessionId),
+        [other],
+        current
+      );
+    }
   }));

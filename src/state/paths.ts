@@ -3,7 +3,8 @@
 // 纯路径计算，无 IO；用户主目录可注入（测试指到临时目录，不碰真实的 ~/.pigeon）。
 // - 人写的内容留在原处：.pigeon/settings.json（可提交）、.pigeon/skills、.pigeon/memory、~/.pigeon/settings.json、
 //   ~/.pigeon/skills、~/.pigeon/preferences.md，以及本段不并入的 .pigeon/verify.json 与 .pigeon/memory-review.json。
-// - 程序写的状态在 .pigeon/state/（不提交）：会话、学到的记忆、worker 工作树、补做复盘记录、输入历史、终端界面日志；
+// - 程序写的状态在 .pigeon/state/（不提交）：会话、学到的记忆、worker 工作树、补做复盘记录、输入历史、终端界面日志、
+//   会话检索的缓存（search-cache，决策 339）；
 //   用户级的程序状态（配置内容指纹）在 ~/.pigeon/state/。
 // - 旧布局（迁移命令与启动检查用）：7 个旧配置文件与旧位置的程序状态。
 import { homedir } from "node:os";

@@ -32,6 +32,8 @@ export interface SearchDoc {
 
 export interface SessionCatalogInfo {
   sessionId: string;
+  // 文件头里的父会话（派出它的会话，或分叉的来源会话）；主会话没有
+  parentSessionId?: string;
   // 会话开始时间（毫秒；与会话排序同一口径，由调用方给出）
   createdAt: number;
   // 第一句使用者的话（原文，不截断；没有为空串）
@@ -85,11 +87,16 @@ function stringList(value: unknown): string[] {
 }
 
 // 改动过的文件：edit_file 成功写入的 path；run_command 结果 details 里的文件变化报告
+// 文件路径的规范写法：反斜杠换成正斜杠、去掉开头的 ./。存储与会话目录的路径筛选共用
+export function normalizeChangedPath(file: string): string {
+  return file.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+}
+
 function changedFilesOf(view: SessionView): string[] {
   const files: string[] = [];
   const seen = new Set<string>();
   const add = (file: string) => {
-    const normalized = file.replace(/\\/g, "/").replace(/^\.\//, "");
+    const normalized = normalizeChangedPath(file);
     if (normalized !== "" && !seen.has(normalized)) {
       seen.add(normalized);
       files.push(normalized);
@@ -150,6 +157,7 @@ export function extractSessionSearch(view: SessionView, createdAt: number): Sess
   return {
     info: {
       sessionId: view.sessionId,
+      ...(view.parentSessionId !== undefined ? { parentSessionId: view.parentSessionId } : {}),
       createdAt,
       firstUserText: firstUserText ?? "",
       changedFiles: changedFilesOf(view),

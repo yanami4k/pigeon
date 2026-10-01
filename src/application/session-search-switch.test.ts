@@ -12,9 +12,10 @@ import {
 } from "../memory/search-tools.ts";
 import { listSessionRefs } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
-import type { SessionId } from "../state/ids.ts";
+import { newSessionId, type SessionId } from "../state/ids.ts";
 import { sessionsDirOf } from "../state/paths.ts";
 import { runHeadless } from "./headless.ts";
+import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
 const SEARCH_SENTENCE =
   "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
@@ -152,6 +153,69 @@ test("决策 339 ①⑥：装配出的检索工具排除本次运行自己的会
         `${earlier.result.sessionId}.json`
       )
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("决策 339 ①：worker 运行面的检索排除派出它的会话（父会话取自本运行面的来历，不等 worker 自己的会话文件写出）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-search-lineage-"));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-search-lineage-home-"));
+  try {
+    const headless = (task: string) =>
+      runHeadless({
+        task,
+        governanceRoot: root,
+        workspaceRoot: root,
+        streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+        yolo: true,
+        homeDir: home,
+        skillRoots: [],
+        memoryRoots: [],
+      });
+    const earlier = await headless("PR 4242 以前的讨论");
+    const parent = await headless("PR 4242 主会话");
+    const streamFn = createFakeStreamFn({
+      replies: [
+        { text: "", toolCalls: [{ name: SEARCH_SESSIONS_TOOL, args: { keywords: ["4242"] } }] },
+        { text: "好" },
+      ],
+    });
+    const bundle = buildRuntime({
+      streamFn,
+      workspaceRoot: root,
+      sessionId: newSessionId(),
+      yolo: true,
+      provider: "fake-provider",
+      modelId: "fake-model",
+      homeDir: home,
+      skillRoots: [],
+      memoryRoots: [],
+      storeLineage: {
+        worker: {
+          parentSessionId: parent.sessionId,
+          worker: { name: "w1", role: "explorer" },
+          workspace: { kind: "none" },
+          startedAt: Date.now(),
+        },
+      },
+    });
+    try {
+      await bundle.adapter.run("worker 的活");
+    } finally {
+      await disposeRuntime(bundle);
+    }
+    const output = (streamFn.calls.at(-1)?.context.messages ?? [])
+      .flatMap((message) =>
+        message.role === "toolResult"
+          ? message.content.map((block) => (block.type === "text" ? block.text : ""))
+          : []
+      )
+      .join("");
+    assert.match(output, /^命中 1 条/);
+    assert.ok(output.includes(earlier.sessionId), output);
+    assert.ok(!output.includes(parent.sessionId), output);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

@@ -4,10 +4,20 @@
 //   两份各自带格式版本与来源戳（会话文件路径、大小、修改时间），各自校验。
 // - 来源戳在读会话文件之前取：读的过程中文件又被追加，戳就比内容旧，下次比对不符即重抽，不会把新内容当作旧戳缓存住。
 // - 大小或修改时间变了、版本不符、文件损坏（不是 JSON、形状不对）都当作未命中：重抽并覆盖，不报错中断检索。
-// - 写入走同目录临时文件改名（atomic-write.ts），多个会话并发检索同一会话时各写各的临时文件，目标上只会是某一份完整内容。
-//   写缓存失败（目录不可写等）只是少了缓存，检索照常返回。
+// - 写入走同目录临时文件改名，多个会话并发检索同一会话时各写各的临时文件，目标上只会是某一份完整内容。不做 fsync：
+//   缓存坏了只是丢弃重建，不需要落盘保证。写缓存失败（目录不可写等）只是少了缓存，检索照常返回。
+// - 清理（pruneSessionSearchCache）：会话文件已不在会话根下的缓存、崩溃留下的超过一小时的临时文件，检索与列目录时顺手删掉。
 // 读会话文件经只读读取器，从不写会话文件。读取函数可注入（测试以计数验证命中缓存时不读会话文件）。
-import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
@@ -17,12 +27,11 @@ import {
   type SessionCatalogInfo,
 } from "../state/session-search-text.ts";
 import type { SessionView } from "../state/session-view.ts";
-import { writeFileAtomic } from "./atomic-write.ts";
 import { readSessionView, sessionRefTime } from "./session-catalog.ts";
 import type { SessionFileRef } from "./session-reader.ts";
 
 // 缓存格式版本：抽取口径或文件形状一变即加一，旧缓存随之整体重建
-export const SESSION_SEARCH_CACHE_VERSION = 1;
+export const SESSION_SEARCH_CACHE_VERSION = 2;
 
 const SourceSchema = Type.Object({
   path: Type.String(),
@@ -46,6 +55,7 @@ const MainFileSchema = Type.Object({
   source: SourceSchema,
   info: Type.Object({
     sessionId: Type.String(),
+    parentSessionId: Type.Optional(Type.String()),
     createdAt: Type.Number(),
     firstUserText: Type.String(),
     changedFiles: Type.Array(Type.String()),
@@ -105,12 +115,85 @@ const isMainFile = (value: unknown): value is Static<typeof MainFileSchema> =>
 const isToolsFile = (value: unknown): value is Static<typeof ToolsFileSchema> =>
   toolsFileCheck.Check(value);
 
+const MAIN_SUFFIX = ".json";
+const TOOLS_SUFFIX = ".tools.json";
+const TEMP_SUFFIX = ".tmp";
+// 临时文件超过这个时长仍在，视为崩溃遗留
+export const STALE_TEMP_MS = 60 * 60 * 1000;
+
+// 同目录临时文件写满后改名覆盖目标（不 fsync）
 function writeCacheFile(cacheDir: string, name: string, value: unknown): void {
+  const target = join(cacheDir, name);
+  const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}${TEMP_SUFFIX}`;
   try {
     mkdirSync(cacheDir, { recursive: true });
-    writeFileAtomic(join(cacheDir, name), JSON.stringify(value));
+    writeFileSync(temp, JSON.stringify(value));
+    renameSync(temp, target);
   } catch {
     // 只是少了缓存：下次照常重抽
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      // 目录本身不可用：没有临时文件可删
+    }
+  }
+}
+
+// 缓存文件名 → 会话号；临时文件与不认识的文件返回 undefined
+function cacheSessionIdOf(name: string): string | undefined {
+  if (name.endsWith(TEMP_SUFFIX)) {
+    return undefined;
+  }
+  if (name.endsWith(TOOLS_SUFFIX)) {
+    return name.slice(0, -TOOLS_SUFFIX.length);
+  }
+  return name.endsWith(MAIN_SUFFIX) ? name.slice(0, -MAIN_SUFFIX.length) : undefined;
+}
+
+// 清理缓存目录：会话文件已不在会话根下的缓存（liveSessionIds 列出会话根下现有的会话号；先列一次找出孤儿，删前再列一次，
+// 只删两次都不在的），以及修改时间早于 now − STALE_TEMP_MS 的临时文件。任何失败都忽略
+export function pruneSessionSearchCache(
+  cacheDir: string,
+  liveSessionIds: () => ReadonlySet<string>,
+  now: number = Date.now()
+): void {
+  let names: string[];
+  try {
+    names = readdirSync(cacheDir);
+  } catch {
+    return;
+  }
+  const remove = (name: string) => rmSync(join(cacheDir, name), { force: true });
+  const orphans: Array<{ name: string; sessionId: string }> = [];
+  const live = liveSessionIds();
+  for (const name of names) {
+    try {
+      if (name.endsWith(TEMP_SUFFIX)) {
+        if (statSync(join(cacheDir, name)).mtimeMs < now - STALE_TEMP_MS) {
+          remove(name);
+        }
+        continue;
+      }
+      const sessionId = cacheSessionIdOf(name);
+      if (sessionId !== undefined && !live.has(sessionId)) {
+        orphans.push({ name, sessionId });
+      }
+    } catch {
+      // 并发删除等：跳过
+    }
+  }
+  if (orphans.length === 0) {
+    return;
+  }
+  const confirmed = liveSessionIds();
+  for (const orphan of orphans) {
+    if (!confirmed.has(orphan.sessionId)) {
+      try {
+        remove(orphan.name);
+      } catch {
+        // 跳过
+      }
+    }
   }
 }
 
@@ -128,8 +211,8 @@ export function createSessionSearchSource(
       } catch {
         return undefined;
       }
-      const mainName = `${ref.sessionId}.json`;
-      const toolsName = `${ref.sessionId}.tools.json`;
+      const mainName = `${ref.sessionId}${MAIN_SUFFIX}`;
+      const toolsName = `${ref.sessionId}${TOOLS_SUFFIX}`;
       if (cacheDir !== undefined) {
         const main = readCacheFile(join(cacheDir, mainName), isMainFile, source);
         const tools = parts.toolOutput

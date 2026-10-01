@@ -3,7 +3,7 @@
 //     缺省只搜对话正文，工具输出以 includeToolOutput 显式打开；
 //   - read_session_entry：按条目号返回一条消息的完整内容块，满足 §3.3 结论回查原文（可读任一会话，含当前会话）；
 //   - list_sessions：会话目录，列出以前的会话及其开始时间、第一句使用者的话与改动过的文件，可按时间与文件筛选。
-// 检索与目录排除当前会话，三件工具自身的输出永不进检索；可搜文本按会话文件缓存（决策 339 ⑥）。
+// 检索与目录排除当前会话所在的整棵会话树，三件工具自身的输出永不进检索；可搜文本按会话文件缓存（决策 339 ⑥）。
 // 三者都是 read 档（§3.9 第 5 档自动放行），调用天然落 tool.proposed / tool.settled——模型翻了
 // 哪些旧账在 trace 可见。范围只限本项目 .pigeon/state/sessions，目录与缓存位置由装配根注入。
 import { type Static, Type } from "typebox";
@@ -21,7 +21,11 @@ import type { ViewBlock, ViewMessage } from "../state/session-view.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import { listSessionDirectory } from "./session-directory.ts";
-import { createSessionSearch, type SessionSearchHit } from "./session-search.ts";
+import {
+  type CurrentSession,
+  createSessionSearch,
+  type SessionSearchHit,
+} from "./session-search.ts";
 
 export { LIST_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL };
 export const DEFAULT_SEARCH_TOOL_LIMIT = 20;
@@ -89,8 +93,20 @@ export interface ReadSessionEntryDetails {
   role: string;
 }
 
+// 会话目录里的一个会话：与给模型的文本同样截断（details 随工具结果存进会话文件，不带全文与全部文件）
+export interface ListedSession {
+  sessionId: string;
+  createdAt: number;
+  // 截断后的第一句（空白压平，超长加省略号；没有为"（无）"）
+  firstUserText: string;
+  // 至多前 10 个改动文件
+  changedFiles: string[];
+  // 改动文件总数
+  changedFileCount: number;
+}
+
 export interface ListSessionsDetails {
-  sessions: SessionCatalogInfo[];
+  sessions: ListedSession[];
   // 符合条件的会话总数
   total: number;
   // 超过上限，只列出了最新的若干个
@@ -101,8 +117,8 @@ export interface SessionToolsOptions {
   sessionsDir: string;
   // 决策 339 ⑥：可搜文本与目录信息的缓存目录；缺省不缓存
   cacheDir?: string;
-  // 决策 339 ①：当前会话（检索与目录都排除它；read_session_entry 不受影响）
-  currentSessionId?: string;
+  // 决策 339 ①：当前会话（检索与目录排除它所在的整棵会话树；read_session_entry 不受影响）
+  current?: CurrentSession;
   maxHits?: number;
   maxBytes?: number;
 }
@@ -136,7 +152,7 @@ export function createSearchSessionsTool(
     name: SEARCH_SESSIONS_TOOL,
     label: SEARCH_SESSIONS_TOOL,
     description:
-      "检索本项目以前会话里的对话（不含当前会话）。" +
+      "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉）。" +
       SCOPE_GUIDANCE +
       "缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；" +
       "要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。" +
@@ -154,9 +170,7 @@ export function createSearchSessionsTool(
         {
           keywords: args.keywords,
           includeToolOutput,
-          ...(options.currentSessionId !== undefined
-            ? { excludeSessionId: options.currentSessionId }
-            : {}),
+          ...(options.current !== undefined ? { current: options.current } : {}),
         },
         { limit }
       );
@@ -229,14 +243,23 @@ function firstWords(text: string): string {
   return flat.length > FIRST_USER_TEXT_CHARS ? `${flat.slice(0, FIRST_USER_TEXT_CHARS)}…` : flat;
 }
 
-function formatSession(info: SessionCatalogInfo): string {
-  const files = info.changedFiles;
+function listedSession(info: SessionCatalogInfo): ListedSession {
+  return {
+    sessionId: info.sessionId,
+    createdAt: info.createdAt,
+    firstUserText: firstWords(info.firstUserText),
+    changedFiles: info.changedFiles.slice(0, LISTED_FILES),
+    changedFileCount: info.changedFiles.length,
+  };
+}
+
+function formatSession(session: ListedSession): string {
   const listed =
-    files.length === 0
+    session.changedFileCount === 0
       ? "（无）"
-      : `${files.slice(0, LISTED_FILES).join("、")}${files.length > LISTED_FILES ? ` 等 ${files.length} 个` : ""}`;
+      : `${session.changedFiles.join("、")}${session.changedFileCount > session.changedFiles.length ? ` 等 ${session.changedFileCount} 个` : ""}`;
   return (
-    `- ${info.sessionId}｜${minuteTime(info.createdAt)}｜第一句：${firstWords(info.firstUserText)}\n` +
+    `- ${session.sessionId}｜${minuteTime(session.createdAt)}｜第一句：${session.firstUserText}\n` +
     `  改动文件：${listed}`
   );
 }
@@ -248,7 +271,7 @@ export function createListSessionsTool(
     name: LIST_SESSIONS_TOOL,
     label: LIST_SESSIONS_TOOL,
     description:
-      "列出本项目以前的会话（不含当前会话），从新到旧，每个给出会话编号、开始时间（UTC）、" +
+      "列出本项目以前的会话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉），从新到旧，每个给出会话编号、开始时间（UTC）、" +
       `第一句使用者的话（截断到 ${FIRST_USER_TEXT_CHARS} 字）与改动过的文件（edit_file 的写入与 run_command 报告的文件变化）。` +
       "可按开始时间筛选（since、until，写 YYYY-MM-DD 或 ISO 时间，含两端），" +
       "也可按文件路径筛选（path：改动过的文件路径里含这一段即算，写前缀亦可）；" +
@@ -266,9 +289,7 @@ export function createListSessionsTool(
       const result = listSessionDirectory(
         options.sessionsDir,
         {
-          ...(options.currentSessionId !== undefined
-            ? { excludeSessionId: options.currentSessionId }
-            : {}),
+          ...(options.current !== undefined ? { current: options.current } : {}),
           ...(args.since !== undefined ? { since: parseListTime(args.since, "start") } : {}),
           ...(args.until !== undefined ? { until: parseListTime(args.until, "end") } : {}),
           ...(args.path !== undefined ? { path: args.path } : {}),
@@ -282,26 +303,27 @@ export function createListSessionsTool(
         args.path !== undefined ? `path 含 ${args.path}` : "",
       ].filter((item) => item !== "");
       const condition = filters.length > 0 ? `；条件：${filters.join("，")}` : "";
-      const limited = result.total > result.sessions.length;
+      const sessions = result.sessions.map(listedSession);
+      const limited = result.total > sessions.length;
       const lines: string[] = [];
-      if (result.sessions.length === 0) {
+      if (sessions.length === 0) {
         lines.push(
           `没有符合条件的以前会话${condition !== "" ? `（${condition.slice(1)}）` : ""}。`
         );
       } else {
         lines.push(
-          `以前的会话 ${result.sessions.length} 个（从新到旧，时间为 UTC${condition}）：`,
-          ...result.sessions.map(formatSession)
+          `以前的会话 ${sessions.length} 个（从新到旧，时间为 UTC${condition}）：`,
+          ...sessions.map(formatSession)
         );
         lines.push(
           limited
-            ? `已截断：共 ${result.total} 个符合条件，只列出最新的 ${result.sessions.length} 个；可用 since、until 或 path 收窄。`
+            ? `已截断：共 ${result.total} 个符合条件，只列出最新的 ${sessions.length} 个；可用 since、until 或 path 收窄。`
             : "未截断：符合条件的会话已全部列出。"
         );
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        details: { sessions: result.sessions, total: result.total, limited },
+        details: { sessions, total: result.total, limited },
       };
     },
   };

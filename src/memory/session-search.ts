@@ -1,5 +1,6 @@
 // Session Search 内容级检索（M5 S2，决策 038；决策 339 改进）：给 agent 一个能翻本项目旧会话的 grep。
-// - 范围：本项目会话根下的全部会话，排除当前会话（调用方给出会话号；续接的会话与当前是同一文件，同样排除）。
+// - 范围：本项目会话根下的全部会话，排除当前会话所在的整棵会话树（沿文件头的父会话上溯到根，根与它的各级 worker、分叉都排除；
+//   续接的会话与当前是同一文件，同样排除）。
 // - 缺省只搜对话正文（使用者的话与模型回复的文字，不含思考与工具调用）；工具输出须显式打开。会话检索三件工具自身的
 //   输出永不进检索（抽取口径见 state/session-search-text.ts）。
 // - 关键词大小写不敏感、按字面子串匹配、不接受正则（模型给正则是 ReDoS 面，元字符一律按字面）；任一命中即算，
@@ -9,10 +10,12 @@
 // 分支会话文件开头从来源复制来的历史不重复产出命中（它属于来源会话）。跑批器作废重做时把作废尝试的会话文件移出会话根，
 // 检索自然看不到它们。
 import { listSessionRefs, sessionRefTime } from "../persistence/session-catalog.ts";
-import type { SessionFileRef } from "../persistence/session-reader.ts";
+import { listSessionFiles, readSessionHeader } from "../persistence/session-reader.ts";
 import {
   createSessionSearchSource,
+  pruneSessionSearchCache,
   type SessionSearchCacheOptions,
+  type SessionSearchEntry,
   type SessionSearchSource,
 } from "../persistence/session-search-cache.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
@@ -30,8 +33,8 @@ export interface SessionSearchQuery {
   includeToolOutput?: boolean;
   // 角色过滤（在搜索范围之内再筛）；给了 toolResult 即连同工具输出一起搜
   roles?: readonly SessionMessageRole[];
-  // 不搜的会话（当前会话）
-  excludeSessionId?: string;
+  // 当前会话：它所在的整棵会话树都不搜
+  current?: CurrentSession;
   // 会话创建时间范围（毫秒，含两端）
   since?: number;
   until?: number;
@@ -127,21 +130,93 @@ export function buildSnippet(
   return `${start > 0 ? "…" : ""}${flat.slice(start, clippedEnd)}${clippedEnd < flat.length ? "…" : ""}`;
 }
 
-// 会话根下要看的会话（从旧到新）：排除给定会话，按创建时间范围预筛（不读文件）
-export function candidateRefs(
-  sessionsDir: string,
-  filter: { excludeSessionId?: string; since?: number; until?: number }
-): SessionFileRef[] {
-  return listSessionRefs(sessionsDir).filter((ref) => {
-    if (filter.excludeSessionId !== undefined && ref.sessionId === filter.excludeSessionId) {
-      return false;
+export interface CurrentSession {
+  sessionId: string;
+  // 父会话（worker 的派出方、分叉的来源）；不给时读当前会话文件的文件头
+  parentSessionId?: string;
+}
+
+export interface PastSessionsFilter {
+  current?: CurrentSession;
+  // 会话创建时间范围（毫秒，含两端）
+  since?: number;
+  until?: number;
+}
+
+// 当前会话所在的整棵会话树：沿父会话上溯到根（父会话没有记录或成环即止），再收下父链能走到根的全部会话
+export function sessionFamily(
+  current: string,
+  parentOf: ReadonlyMap<string, string | undefined>
+): Set<string> {
+  const rootOf = (start: string): string => {
+    const seen = new Set<string>();
+    let id = start;
+    for (;;) {
+      seen.add(id);
+      const parent = parentOf.get(id);
+      if (parent === undefined || seen.has(parent)) {
+        return id;
+      }
+      id = parent;
     }
-    const createdAt = sessionRefTime(ref);
-    return (
-      (filter.since === undefined || createdAt >= filter.since) &&
-      (filter.until === undefined || createdAt <= filter.until)
+  };
+  const root = rootOf(current);
+  const family = new Set<string>([current, root]);
+  for (const id of parentOf.keys()) {
+    if (rootOf(id) === root) {
+      family.add(id);
+    }
+  }
+  return family;
+}
+
+// 以前的会话（从旧到新）：读全部会话的可搜内容（经缓存），排除当前会话所在的会话树，再按创建时间范围筛；顺手清理缓存
+export function loadPastSessions(
+  sessionsDir: string,
+  source: SessionSearchSource,
+  filter: PastSessionsFilter,
+  parts: { toolOutput: boolean },
+  cacheDir?: string
+): SessionSearchEntry[] {
+  const refs = listSessionRefs(sessionsDir);
+  const current = filter.current;
+  const loaded: Array<{ createdAt: number; entry: SessionSearchEntry }> = [];
+  const parentOf = new Map<string, string | undefined>();
+  for (const ref of refs) {
+    if (current !== undefined && ref.sessionId === current.sessionId) {
+      // 当前会话正在写：不抽取、不缓存，只取文件头里的父会话
+      parentOf.set(
+        ref.sessionId,
+        current.parentSessionId ?? readSessionHeader(ref.path)?.parentSessionId
+      );
+      continue;
+    }
+    const entry = source.load(ref, parts);
+    if (entry === undefined) {
+      continue;
+    }
+    parentOf.set(entry.info.sessionId, entry.info.parentSessionId);
+    loaded.push({ createdAt: sessionRefTime(ref), entry });
+  }
+  if (current !== undefined && current.parentSessionId !== undefined) {
+    parentOf.set(current.sessionId, current.parentSessionId);
+  }
+  const family =
+    current !== undefined ? sessionFamily(current.sessionId, parentOf) : new Set<string>();
+  if (cacheDir !== undefined) {
+    pruneSessionSearchCache(
+      cacheDir,
+      () => new Set(listSessionFiles(sessionsDir).map((file) => file.sessionId))
     );
-  });
+  }
+  return loaded
+    .filter(
+      ({ createdAt, entry }) =>
+        !family.has(entry.info.sessionId) &&
+        (filter.since === undefined || createdAt >= filter.since) &&
+        (filter.until === undefined || createdAt <= filter.until)
+    )
+    .map(({ entry }) => entry);
 }
 
 interface Ranked {
@@ -157,28 +232,37 @@ export function createSessionSearch(
 ): SessionSearch {
   const source = createSessionSearchSource(cache);
   return {
-    search: async (query, options = {}) => runSearch(sessionsDir, source, query, options),
+    search: async (query, options = {}) =>
+      runSearch(sessionsDir, source, query, options, cache.cacheDir),
   };
+}
+
+// 排序：命中的不同关键词数从多到少；同数按消息时间从新到旧；同一时刻按会话与会话内先后从后到前
+function compareRanked(a: Ranked, b: Ranked): number {
+  return (
+    b.hit.matchedKeywords.length - a.hit.matchedKeywords.length ||
+    b.hit.timestamp - a.hit.timestamp ||
+    b.order - a.order
+  );
 }
 
 function runSearch(
   sessionsDir: string,
   source: SessionSearchSource,
   query: SessionSearchQuery,
-  options: SessionSearchOptions
+  options: SessionSearchOptions,
+  cacheDir: string | undefined
 ): SessionSearchResult {
   const keywords = normalizeKeywords(query.keywords);
   const roles = query.roles !== undefined ? new Set<string>(query.roles) : undefined;
   const toolOutput = query.includeToolOutput === true || roles?.has("toolResult") === true;
-  const limit = options.limit ?? Number.POSITIVE_INFINITY;
+  const limit = Math.max(0, options.limit ?? Number.POSITIVE_INFINITY);
   const snippetChars = options.snippetChars ?? DEFAULT_SNIPPET_CHARS;
-  const ranked: Ranked[] = [];
+  // 只留排在前 limit 的命中（连同全文，摘录最后才做）；其余只计数
+  const top: Ranked[] = [];
+  let total = 0;
   let order = 0;
-  for (const ref of candidateRefs(sessionsDir, query)) {
-    const entry = source.load(ref, { toolOutput });
-    if (entry === undefined) {
-      continue;
-    }
+  for (const entry of loadPastSessions(sessionsDir, source, query, { toolOutput }, cacheDir)) {
     for (const doc of [...entry.conversation, ...(entry.toolOutput ?? [])]) {
       order += 1;
       if (roles !== undefined && !roles.has(doc.role)) {
@@ -188,7 +272,8 @@ function runSearch(
       if (matched.length === 0) {
         continue;
       }
-      ranked.push({
+      total += 1;
+      const candidate: Ranked = {
         hit: {
           sessionId: entry.info.sessionId as SessionId,
           entryId: doc.entryId,
@@ -201,17 +286,22 @@ function runSearch(
         },
         text: doc.text,
         order,
-      });
+      };
+      if (top.length >= limit) {
+        const last = top.at(-1);
+        if (last === undefined || compareRanked(candidate, last) >= 0) {
+          continue;
+        }
+        top.pop();
+      }
+      let index = top.length;
+      while (index > 0 && compareRanked(candidate, top[index - 1] as Ranked) < 0) {
+        index -= 1;
+      }
+      top.splice(index, 0, candidate);
     }
   }
-  // 命中的不同关键词数从多到少；同数按消息时间从新到旧；同一时刻按会话与会话内先后从后到前
-  ranked.sort(
-    (a, b) =>
-      b.hit.matchedKeywords.length - a.hit.matchedKeywords.length ||
-      b.hit.timestamp - a.hit.timestamp ||
-      b.order - a.order
-  );
-  const hits = ranked.slice(0, Math.max(0, limit)).map(({ hit, text }) => ({
+  const hits = top.map(({ hit, text }) => ({
     ...hit,
     snippet: buildSnippet(
       text,
@@ -219,5 +309,5 @@ function runSearch(
       snippetChars
     ),
   }));
-  return { hits, total: ranked.length };
+  return { hits, total };
 }

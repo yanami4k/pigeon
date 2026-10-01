@@ -120,7 +120,7 @@ export interface HeadlessRunOptions {
   temperature?: number;
   // M9：任务源给的系统指令——追加进 system prompt 并随之冻结；任务说明（task）不受影响
   taskDirective?: string;
-  // 决策 193：能否检索历史会话（缺省开着）；关掉时两件会话检索工具不注册，系统提示不提它们
+  // 决策 193：能否检索历史会话（缺省开着）；关掉时三件会话检索工具（339 加 list_sessions）不注册，系统提示不提它们
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省，集成冒烟可调低触发点
   compaction?: CompactionConfigInput;
