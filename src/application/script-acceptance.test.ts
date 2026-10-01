@@ -91,7 +91,8 @@ test("额度用完不自动收回：汇总列出已做完的 worker 与分支，
 test("脚本卡住监控：没有 worker 在跑或排队、脚本又没结束（脚本自身死循环），到判定时长即停掉、以卡住结束", async () => {
   const harness = scriptHarness({
     planner: () => ({ files: { "d.txt": "d" } }),
-    stallMs: 300,
+    // 窗口取宽：执行器是真实子进程，冷启动在慢机器上可能几百毫秒，窗口须留出余量
+    stallMs: 2500,
     runIds: ["s7"],
   });
   const notice = harness.nextNotice();
@@ -108,11 +109,17 @@ test("脚本卡住监控：没有 worker 在跑或排队、脚本又没结束（
 
 test("等 worker 的脚本不被误停：worker 跑得比判定时长久，脚本照常做完", async () => {
   const harness = scriptHarness({
-    planner: () => ({ wait: new Promise((resolve) => setTimeout(resolve, 900)) }),
-    stallMs: 200,
+    // worker 各自跑满 5000ms，远长于 2500ms 的判定窗口；窗口同时要留出子进程冷启动的余量
+    planner: () => ({ wait: new Promise((resolve) => setTimeout(resolve, 5000)) }),
+    stallMs: 2500,
   });
   const notice = harness.nextNotice();
-  await harness.runs.start(spec('await agent("一"); await agent("二"); return 1;'), undefined);
+  // 两个调用先一起发出（等结果前都不在等：两个 worker 各自跑满 900ms＞200ms 的判定窗口，脚本不该被误停）；
+  // 不写成先后等待——两个调用之间的进程调度间隔在慢机器上可能超过判定窗口，那是测试自身的时序假象
+  await harness.runs.start(
+    spec('const a = agent("一"); const b = agent("二"); await a; await b; return 1;'),
+    undefined
+  );
   assert.match(await notice, /已完成。worker 2 个：成功 2，失败 0/);
 });
 

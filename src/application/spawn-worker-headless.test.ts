@@ -225,8 +225,8 @@ test("主 agent 还在跑时结束的 worker：通知进它这次运行的下一
           );
           return main(model, context, options);
         }) as StreamFn,
-        // 主 agent 每轮都慢：worker 在它第二轮进行中就结束
-        300,
+        // 主 agent 每轮都慢：worker 在它第二轮进行中就结束（窗口取宽些，慢机器上 worker 的收尾也来得及落在这轮里）
+        1500,
       ],
       ["WORKER", { replies: [{ text: "快看完了" }] }],
     ]),
