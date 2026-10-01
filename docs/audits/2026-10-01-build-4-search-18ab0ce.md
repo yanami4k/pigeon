@@ -194,3 +194,90 @@ list_sessions：
 - 写缓存非原子时的并发损坏未能用用例稳定复现（见第四节最后一行）。
 - 量测脚本不入库（按说明不进 verify）；造数据的规模与计时方式见第五节。
 - 未清理会话文件已不在会话根下的旧缓存文件（见"待确认的取舍"第 11 条）。
+
+## 十二、审查后修改
+
+基线仍为 18ab0ce，在 64506a1 之后追加。
+
+### 改动
+
+1. 排除范围扩到当前会话所在的整棵会话树。
+   - memory/session-search.ts 新增 sessionFamily 与 loadPastSessions：读全部会话的可搜内容（经缓存），从当前会话沿父会话上溯到根（父会话没有记录或成环即止），排除父链能走到这个根的全部会话（根、各级 worker、分叉），再按时间范围筛。检索与会话目录共用（session-directory.ts 改走它，原 candidateRefs 删去）。
+   - 当前会话的父会话：调用方给出时用它，否则读当前会话文件的文件头（只读首行）。runtime.ts 从本运行面的来历取（worker 的派出方、分支的来源）——worker 运行中自己的会话文件可能还没写出（见变异 MF11）。
+   - 查询与工具选项由 excludeSessionId / currentSessionId 改为 current: { sessionId, parentSessionId? }。
+   - 目录信息存 parentSessionId（state/session-search-text.ts），缓存格式版本 1 → 2。
+   - search_sessions 与 list_sessions 的说明把"（不含当前会话）"改为"（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉）"；两件一并改，保持一致。第八节"待确认的取舍"第 6 条（worker 只排除自己、不排除父会话）据此作废。
+2. 写缓存不再 fsync：session-search-cache.ts 自写"同目录临时文件写满后改名"，不再经 atomic-write.ts。改名失败与目录不可用时临时文件的删除也包在 try 里（原写法在目录不可用时 rmSync 本身会抛 ENOTDIR，由"缓存目录不可写"一条用例抓到）。第八节第 13 条随之作废。
+3. list_sessions 的 details 与文本同样截断：details.sessions 每项为 { sessionId, createdAt, firstUserText（截断后）, changedFiles（至多前 10 个）, changedFileCount }，不再带全文与全部文件。
+4. 路径筛选词与存储同一规范化：state/session-search-text.ts 导出 normalizeChangedPath（反斜杠换正斜杠、去掉开头的一个或多个 ./），存储与 session-directory.ts 的筛选词都走它。
+5. 内存：检索只保留排在前 limit 的命中（连同全文，摘录最后才做），其余只计数；插入按同一比较函数找位置。limit 缺省（只在用例里）时保留全部。
+6. 缓存清理：session-search-cache.ts 新增 pruneSessionSearchCache，检索与列目录时调用。会话文件已不在会话根下的缓存——先列一次会话根找出孤儿，删前再列一次，只删两次都不在的；修改时间早于一小时前的 .tmp 临时文件。任何失败都忽略。
+7. 旧注释与文档：runtime.ts、headless-core.ts 的开关注释与 memory/index.ts 的模块头改为三件工具；paths.ts 头注释的状态目录清单加 search-cache；tui/command-table.ts 的 /search 用法改为 `/search <关键词...> [--tool-output] [--role …] [--limit N]`；docs/configuration.md 的缺省范围改为"当前会话所在的这一组会话"，补"人用的 /search 不排除当前会话"与缓存清理一句。
+
+### 用例
+
+- 新增 9 条：
+  - memory/session-search.test.ts 4：整棵会话树（父查不到子与分叉，子查不到父与兄弟，分叉查不到来源与其 worker，不相干的照常命中；跑两遍，第二遍父会话取自缓存）；当前会话文件未写出时按给出的父会话排除；只保留前 limit 条与全排序的前 limit 条一致（limit 1、5、17）；检索时清理孤儿缓存。
+  - memory/search-tools.test.ts 2：改动文件超过 10 个时文本与 details 都只带前 10 个与总数、路径筛选词 ./ 与反斜杠的四种写法都命中；list_sessions 在父会话与两个 worker 里都只列出不相干的会话。
+  - persistence/session-search-cache.test.ts 2：清理（孤儿缓存删除、删前再列时出现的不删、旧临时文件删除、新临时文件不动）；目录信息存父会话且命中缓存时照样取到。
+  - application/session-search-switch.test.ts 1：经 buildRuntime 装配带 worker 来历的运行面，检索不出派出它的会话。
+- 改写：search-tools.test.ts 的说明冻结（两处措辞）、list_sessions 典型输出一条加 details 的逐字断言、①一条改用 current 选项；session-search.test.ts 排除一条改用 current。
+- 总数：1528 条（上次 1519，+9）。
+
+### 变异验证
+
+| 变异 | 结果 |
+|---|---|
+| MF1 只排除当前会话本身（不建会话树） | session-search.test.ts 整棵会话树、文件未写出两条，search-tools.test.ts list_sessions 一组会话一条，共 3 条变红 |
+| MF2 不读当前会话的文件头 | 整棵会话树与 list_sessions 一组会话两条变红 |
+| MF3 只收当前会话与根（不收兄弟、子与分叉） | 同 MF1 三条变红 |
+| MF4 details 不截断改动文件 | "改动文件超过 10 个…"精确变红 |
+| MF5 筛选词不规范化 | 同上精确变红 |
+| MF6 清理删前不再列一次 | 缓存"清理…"精确变红 |
+| MF7 临时文件不看时长一律删 | 同上精确变红 |
+| MF8 不删孤儿缓存 | 同上精确变红 |
+| MF9 前 limit 已满时不再替换 | "只保留前 limit 条…"精确变红 |
+| MF10 检索与列目录不调清理 | "检索时顺手清理…"精确变红（该条即为此补上，补之前不变红） |
+| MF11 装配不把来历里的父会话传给检索工具 | session-search-switch.test.ts"worker 运行面的检索排除派出它的会话…"精确变红（该条即为此补上，补之前不变红） |
+
+### 耗时重测
+
+量测方法同第五节（同一份 150 个会话、77.9 MiB 的数据，缓存先删后测），两次运行：
+
+| 场景 | 第一次 | 第二次 |
+|---|---|---|
+| 只搜正文，首次（无缓存） | 1.81 s | 1.19 s |
+| 只搜正文，再次（有缓存） | 0.06 s | 0.04 s |
+| 连同工具输出，首次（无缓存） | 1.34 s | 1.24 s |
+| 连同工具输出，再次（有缓存） | 0.55–0.62 s | 0.55–0.62 s |
+| 会话目录，首次（无缓存） | 1.15 s | 1.05 s |
+| 会话目录，再次（有缓存） | 0.03 s | 0.03 s |
+
+去掉 fsync 后首次检索为 1.05–1.34 s（带 fsync 时 1.57–1.72 s）；第一次运行的"只搜正文，首次"1.81 s 为进程冷启动后的第一次读盘。有缓存时的耗时不变。
+
+### 待确认的取舍（追加）
+
+15. 会话树按父链判定：父会话的会话文件已不在会话根下时，上溯止于该处，断开的两段各成一棵树（当前会话只排除自己这一段）。
+16. 当前会话的父会话以调用方给出的为准（装配层取本运行面的来历），不给时才读文件头；续接的主会话没有来历，文件头也没有父会话，树根就是它自己。
+17. 清理只在给了缓存目录时做（日常入口都给）；只删两次列会话根都不在的会话的缓存，与另一进程刚建的会话交错时最多少删、不会多删已列出的会话。
+
+### verify
+
+见下方"verify（审查后）"。
+
+### 待过目的文字（修订）
+
+第九节中 search_sessions 与 list_sessions 两段改为下文（只改了括号里排除范围的说法）；read_session_entry、注册描述与系统提示那一句不变。
+
+search_sessions：
+
+> 检索本项目以前会话里的对话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉）。能找到的：以前会话里的讨论、试过的做法及其结果、使用者说过的话（要求、偏好、纠正）。找不到的：当前任务的背景（以当前任务的说明为准）、最新的代码（以前会话里看到的代码可能已经过时）。代码现状请直接读代码，代码的来历用 git log 与 git blame。缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。关键词大小写不敏感、按字面子串匹配、不支持正则，最多 8 个，任一命中即列出；结果按命中的关键词数从多到少、同数从新到旧排序，每条标出命中了哪些关键词，最多 20 条。命中片段只是线索，结论必须用 read_session_entry 按 entryId 回查原文；想先浏览以前有哪些会话、哪些会话改过某个文件，用 list_sessions。
+
+list_sessions：
+
+> 列出本项目以前的会话（不含当前会话所在的这一组会话：派出它的会话、它派出的 worker 与分叉），从新到旧，每个给出会话编号、开始时间（UTC）、第一句使用者的话（截断到 60 字）与改动过的文件（edit_file 的写入与 run_command 报告的文件变化）。可按开始时间筛选（since、until，写 YYYY-MM-DD 或 ISO 时间，含两端），也可按文件路径筛选（path：改动过的文件路径里含这一段即算，写前缀亦可）；最多 20 个，超出时说明共有多少个。用来先浏览以前做过什么、哪些会话动过某个文件，再用 search_sessions 检索、read_session_entry 读原文。能找到的：以前会话里的讨论、试过的做法及其结果、使用者说过的话（要求、偏好、纠正）。找不到的：当前任务的背景（以当前任务的说明为准）、最新的代码（以前会话里看到的代码可能已经过时）。代码现状请直接读代码，代码的来历用 git log 与 git blame。
+
+### verify（审查后）
+
+- lint：通过；check：通过；deps：0 违规（`npm run verify` 在 test 一步因已知失败退出，deps 单独执行）。
+- test：1528 条，通过 1515，失败 3，跳过 10。失败与跳过同第六节（stream-profiles 两条为 Node 22，stream-workspace 一条为以 root 运行；跳过为真容器与 root 权限用例）。
