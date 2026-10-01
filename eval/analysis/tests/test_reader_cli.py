@@ -402,6 +402,22 @@ class TestSessions:
         write_job(tmp_path, "search-only", 1, {1: [s01]})
         return write_run(tmp_path, rows)
 
+    def test_reads_state_layout(self, tmp_path):
+        """决策 325 起会话在 .pigeon/state/sessions；新布局与旧布局读出同样的计数。"""
+        rows = [runner_row("01", 1, 1, 1, 2)]
+        s01 = SessionBuilder("s01").run_start()
+        s01.assistant("找", calls=[("q1", "search_sessions", {"keywords": ["a"]})])
+        s01.result("q1", "search_sessions", {"hits": [{"sessionId": "k1"}]})
+        legacy, state = tmp_path / "legacy", tmp_path / "state"
+        write_job(legacy, "search-only", 1, {1: [s01]})
+        write_job(state, "search-only", 1, {1: [s01]}, layout="state")
+        assert (state / "streams" / "tasks-search-only-1" / ".pigeon" / "state" / "sessions").is_dir()
+        a, _ = load_table([write_run(legacy, rows)])
+        b, _ = load_table([write_run(state, rows)])
+        ra = a[(a.cell == "01") & (a.task == 1)].iloc[0]
+        rb = b[(b.cell == "01") & (b.task == 1)].iloc[0]
+        assert ra.search_calls_search_sessions == rb.search_calls_search_sessions == 1
+
     def test_counts_step1(self, tmp_path):
         df, info = load_table([self.build(tmp_path)])
         r = df[(df.cell == "11") & (df.task == 1)].iloc[0]
