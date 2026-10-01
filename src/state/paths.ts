@@ -73,6 +73,16 @@ export function reviewBackfillDirOf(root: string): string {
   return path.join(projectStateDir(root), "review-backfill");
 }
 
+// 迁移备份（决策 325）：迁移命令挪走的旧文件一律放这里（在程序状态目录下，不进快照、不被提交；旧 web.json 里可能有 key）
+export function migrationBackupDirOf(root: string): string {
+  return path.join(projectStateDir(root), "migration-backup");
+}
+
+// 某个旧文件（相对 .pigeon 的名字）的备份位置
+export function migrationBackupPathOf(root: string, name: string): string {
+  return path.join(migrationBackupDirOf(root), `${name}.bak`);
+}
+
 export function promptHistoryPathOf(root: string): string {
   return path.join(projectStateDir(root), "tui-history.json");
 }
@@ -108,11 +118,6 @@ export function dotMcpJsonPathOf(root: string): string {
 // 设置文件里放权一节的写入锁（/grants save 与 /revoke）
 export function localSettingsLockPathOf(root: string): string {
   return `${projectLocalSettingsPath(root)}.lock`;
-}
-
-// 受保护路径（决策 326 ①）：项目的 .pigeon 目录下任何路径
-export function isUnderPigeonDir(relativePosixPath: string): boolean {
-  return relativePosixPath === PIGEON_DIR || relativePosixPath.startsWith(`${PIGEON_DIR}/`);
 }
 
 // 快照、checkpoint 与 worker 叠加排除的程序路径（相对仓库根，正斜杠）：只排除程序状态与个人设置；

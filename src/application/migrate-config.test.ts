@@ -1,5 +1,5 @@
 // pigeon migrate-config（决策 325）：7 个旧文件迁入设置各节（permissions 进项目个人，其余进项目共享）、去掉 version、
-// web.json 的 key 不落盘并给出环境变量名、旧文件改名为 .bak；旧位置的程序状态挪进 .pigeon/state/；worker 工作树经
+// web.json 的 key 不写进设置并给出环境变量名、旧文件挪进 .pigeon/state/migration-backup/（不进快照、不被提交）；旧位置的程序状态挪进 .pigeon/state/；worker 工作树经
 // git worktree move 挪位后 git worktree list 指向新位置；重复执行无事可做；同一节内容冲突时报错且什么都不改；
 // 锁被存活进程占用时拒绝。
 import assert from "node:assert/strict";
@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import { findLegacyLayout } from "../persistence/legacy-layout.ts";
 import { loadSettings } from "../persistence/settings.ts";
 import {
@@ -82,7 +83,7 @@ function legacyFiles(root: string): void {
   write(join(pigeon, "loop-guard.json"), { version: 1, stopAt: 30 });
 }
 
-test("7 个旧文件迁入设置各节：去掉 version；key 不落盘并给出环境变量名；旧文件改名为 .bak；重复执行无事可做", () => {
+test("7 个旧文件迁入设置各节：去掉 version；key 不进设置并给出环境变量名；旧文件挪进备份目录；重复执行无事可做", () => {
   const root = repo();
   legacyFiles(root);
   const result = runMigrateConfig(root);
@@ -92,7 +93,7 @@ test("7 个旧文件迁入设置各节：去掉 version；key 不落盘并给出
   assert.ok(!text.includes("sk-secret-zai"), "不打印 key");
   const shared = readFileSync(projectSettingsPath(root), "utf8");
   const local = readFileSync(projectLocalSettingsPath(root), "utf8");
-  assert.ok(!shared.includes("sk-secret-zai") && !local.includes("sk-secret-zai"), "key 不落盘");
+  assert.ok(!shared.includes("sk-secret-zai") && !local.includes("sk-secret-zai"), "key 不进设置");
   assert.deepEqual(Object.keys(JSON.parse(shared)).sort(), [
     "commands",
     "loopGuard",
@@ -112,7 +113,10 @@ test("7 个旧文件迁入设置各节：去掉 version；key 不落盘并给出
     "loop-guard",
   ]) {
     assert.ok(!existsSync(join(root, ".pigeon", `${name}.json`)), name);
-    assert.ok(existsSync(join(root, ".pigeon", `${name}.json.bak`)), `${name}.bak`);
+    assert.ok(
+      existsSync(join(root, ".pigeon", "state", "migration-backup", `${name}.json.bak`)),
+      `${name}.bak`
+    );
   }
   // 迁移后的设置能照常读出各节
   const home = mkdtempSync(join(tmpdir(), "pigeon-migrate-home-"));
@@ -196,4 +200,25 @@ test("锁被存活进程占用（有会话或 worker 正在运行）或工作树
   git(root, "worktree", "lock", legacyTree);
   assert.throws(() => runMigrateConfig(root), /工作树被锁定/);
   assert.ok(existsSync(legacyTree));
+});
+
+test("迁移备份不进快照、不被提交：只迁项目共享层的 web.json 时也写 .pigeon/.gitignore，备份与 key 不出现在快照提交与 git status 里", () => {
+  const root = repo();
+  write(join(root, ".pigeon", "web.json"), {
+    version: 1,
+    search: { backend: "tavily", tavily: { apiKey: "tvly-secret" } },
+  });
+  runMigrateConfig(root);
+  assert.equal(
+    readFileSync(join(root, ".pigeon", ".gitignore"), "utf8"),
+    "state/\nsettings.local.json\n"
+  );
+  const status = git(root, "status", "--porcelain", "--untracked-files=all");
+  assert.ok(!status.includes("migration-backup") && !status.includes("web.json"), status);
+  assert.match(status, /\.pigeon\/settings\.json/);
+  const snap = snapshotWorkdir({ repoRoot: root, ref: "refs/pigeon/worker-start/t" });
+  const tree = git(root, "ls-tree", "-r", "--name-only", snap.commit);
+  assert.ok(!tree.includes("migration-backup") && !tree.includes("web.json"), tree);
+  // git grep 找不到时退出码为 1
+  assert.throws(() => git(root, "grep", "-I", "-l", "tvly-secret", snap.commit), "快照里没有 key");
 });

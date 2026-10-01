@@ -3,8 +3,9 @@
 // 钩子一段加"verify.json → 打印改写为收尾钩子的示例并改名备份"，记忆一段加 memory-review.json 与旧记忆的处理。
 // 本段的三步：
 //   ① 旧配置：7 个旧文件各成一节写入设置（permissions 写项目个人 .pigeon/settings.local.json，其余写项目共享
-//      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件改名为
-//      <原名>.bak。目标文件已存在时合并进去：同一节两边都有且内容不同即报错停下、不覆盖；
+//      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件挪进
+//      .pigeon/state/migration-backup/<原名>.bak（备份在程序状态目录下，不进快照、不被提交）。目标文件已存在时合并进去：
+//      同一节两边都有且内容不同即报错停下、不覆盖；
 //   ② 程序状态：会话、学到的记忆与其锁、补做复盘记录、输入历史、终端界面日志挪进 .pigeon/state/ 对应位置；
 //   ③ worker 工作树：git worktree move 到 .pigeon/state/worktrees/。
 // 有锁被存活进程占用（会话正开着、worker 正在运行）或工作树被锁定时拒绝并说明。可重复执行：没有要做的事即如实说明。
@@ -22,6 +23,11 @@ import {
 import path from "node:path";
 import { writeFileAtomic } from "../persistence/atomic-write.ts";
 import { lockHeldByLiveProcess } from "../persistence/exclusive-lock.ts";
+import {
+  migrationBackupConflict,
+  migrationBackupLabel,
+  moveToMigrationBackup,
+} from "../persistence/migration-backup.ts";
 import { ensurePigeonGitignore } from "../persistence/settings.ts";
 import { canonicalJson } from "../state/hashing.ts";
 import {
@@ -32,6 +38,7 @@ import {
   legacyStatePath,
   pigeonRel,
   projectLocalSettingsPath,
+  projectPigeonDir,
   projectSettingsPath,
   SETTINGS_FILE,
   STATE_DIR,
@@ -154,8 +161,9 @@ function plannedConfigs(root: string): {
   const blockers: string[] = [];
   for (const legacy of LEGACY_CONFIG_FILES) {
     if (!existsSync(legacyConfigPath(root, legacy.file))) continue;
-    if (existsSync(`${legacyConfigPath(root, legacy.file)}.bak`)) {
-      blockers.push(`${pigeonRel(`${legacy.file}.bak`)} 已存在，不覆盖备份；请先处理它`);
+    const occupied = migrationBackupConflict(root, legacy.file);
+    if (occupied !== undefined) {
+      blockers.push(occupied);
       continue;
     }
     try {
@@ -203,7 +211,7 @@ export const legacyConfigStep: MigrationStep = {
     return {
       todo: converted.map(
         (item) =>
-          `${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节（原文件改名为 ${pigeonRel(`${item.file}.bak`)}）`
+          `${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节（原文件备份为 ${migrationBackupLabel(item.file)}）`
       ),
       blockers,
     };
@@ -222,9 +230,9 @@ export const legacyConfigStep: MigrationStep = {
     }
     for (const item of converted) {
       const source = legacyConfigPath(ctx.root, item.file);
-      renameSync(source, `${source}.bak`);
+      const backup = moveToMigrationBackup(ctx.root, source, item.file, (line) => lines.push(line));
       lines.push(
-        `已迁移 ${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节；原文件改名为 ${pigeonRel(`${item.file}.bak`)}`
+        `已迁移 ${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节；原文件备份为 ${backup}`
       );
       for (const env of item.keyEnvs) {
         lines.push(`  ${pigeonRel(item.file)} 里的 key 没有写入设置：请改设环境变量 ${env}`);
@@ -449,6 +457,10 @@ export function runMigrateConfig(
     return { changed: false, lines: ["没有要迁移的内容：配置与程序状态已是新布局"] };
   }
   const lines: string[] = [];
+  // 每次迁移都确保 .pigeon/.gitignore（程序状态与备份不被提交；只迁项目共享层的文件时也一样）
+  if (existsSync(projectPigeonDir(root))) {
+    ensurePigeonGitignore(root, (line) => lines.push(line));
+  }
   for (const { step } of pending) {
     lines.push(`${step.title}：`);
     lines.push(...step.apply(ctx).map((line) => `  ${line}`));
