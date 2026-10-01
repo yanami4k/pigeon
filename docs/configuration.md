@@ -25,7 +25,7 @@
 | `commands` | 命令短名 `commands` 与角色允许清单 `roles` | `.pigeon/commands.json` |
 | `orchestration` | worker 并发、层数、上限、卡住判定、任务清单、脚本编排 | `.pigeon/orchestration.json` |
 | `web` | 搜索后端与地址、抓取上限 | `.pigeon/web.json` |
-| `sandbox` | 沙箱镜像（`image` 或项目自己的 `dockerfile`、`context`）与通用镜像的构建参数 `build` | `.pigeon/sandbox.json` |
+| `sandbox` | 沙箱镜像（`image` 或项目自己的 `dockerfile`、`context`）、通用镜像的构建参数 `build`、容器资源上限（`memory`、`pids`、`cpus`） | `.pigeon/sandbox.json` |
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 与 `.pigeon/memory-review.json` 暂不并入，照旧读取。
@@ -44,6 +44,16 @@
   "loopGuard": { "stopAt": 30 }
 }
 ```
+
+## 沙箱资源上限
+
+`sandbox` 一节可给容器设三项资源上限：写 `0` 为不限，不写取缺省。
+
+- `memory`：内存上限，`0` 或数字加单位 k/m/g/t（不分大小写，按 1024 进位，如 `"8g"`、`"512m"`）；交换区不另占（`--memory-swap` 取同值）。缺省为 Docker 所在机器内存的一半（取 `docker info` 的 MemTotal，向下取整到 MiB；读不到时本次不设内存上限并说明）。低于 6m（Docker 的下限）报错。
+- `pids`：进程数上限，非负整数；缺省 4096。
+- `cpus`：CPU 核数上限，非负数（可带小数）；缺省不限。
+
+设了内存上限时，执行端在每条命令前后读容器 cgroup 的 oom_kill 计数：计数增加即报"超出沙箱内存上限 <数值>"（agent 在 `run_command` 的结果里看到，人另收到一行提示）；读不到计数而命令以退出码 137 结束时报"可能超出沙箱内存上限 <数值>"。
 
 ## key 走环境变量
 
