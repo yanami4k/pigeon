@@ -2,7 +2,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "typebox/value";
-import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
+import {
+  LIST_SESSIONS_TOOL,
+  READ_SESSION_ENTRY_TOOL,
+  SEARCH_SESSIONS_TOOL,
+} from "../memory/search-tools.ts";
 import { WorkerRoleSchema } from "../state/session-payloads.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import {
@@ -18,6 +22,7 @@ const FULL = [
   "edit_file",
   SEARCH_SESSIONS_TOOL,
   READ_SESSION_ENTRY_TOOL,
+  LIST_SESSIONS_TOOL,
   WEB_SEARCH_TOOL,
   WEB_FETCH_TOOL,
 ];
@@ -34,6 +39,7 @@ test("委派策略：父策略齐全时按角色给默认工具，审批模式�
     "read_file",
     SEARCH_SESSIONS_TOOL,
     READ_SESSION_ENTRY_TOOL,
+    LIST_SESSIONS_TOOL,
     WEB_SEARCH_TOOL,
     WEB_FETCH_TOOL,
   ]);

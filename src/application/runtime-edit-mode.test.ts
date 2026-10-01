@@ -23,7 +23,7 @@ const HASHLINE_PROMPT =
   // 审批与 run_command 的说法按执行端与审批状态生成（170 ④）；本文件的运行一律 yolo、本地执行端
   "写操作自动批准。" +
   runCommandTexts({ platform: process.platform, approval: "yolo" }).prompt +
-  "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
+  "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
   "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
 
 const HASHLINE_EDIT_DESCRIPTION =

@@ -9,6 +9,7 @@ import {
   isUnderPigeonDir,
   mapLegacyWorktreePath,
   projectLocalSettingsPath,
+  sessionSearchCacheDirOf,
   sessionsDirOf,
   userSettingsPath,
   worktreesDirOf,
@@ -17,6 +18,7 @@ import {
 test("位置：程序状态在 .pigeon/state/ 下；用户级在注入的主目录下", () => {
   assert.equal(sessionsDirOf("/p"), join("/p", ".pigeon", "state", "sessions"));
   assert.equal(worktreesDirOf("/p"), join("/p", ".pigeon", "state", "worktrees"));
+  assert.equal(sessionSearchCacheDirOf("/p"), join("/p", ".pigeon", "state", "search-cache"));
   assert.equal(projectLocalSettingsPath("/p"), join("/p", ".pigeon", "settings.local.json"));
   assert.equal(userSettingsPath("/h"), join("/h", ".pigeon", "settings.json"));
   assert.equal(configTrustPathOf("/h"), join("/h", ".pigeon", "state", "config-trust.json"));

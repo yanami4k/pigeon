@@ -8,7 +8,11 @@
 // 决策 287–291：联网的两件工具（web_search、web_fetch）三种角色都带——与主会话同样拿到、同样的审批规则（父策略里有才带；
 // 沙箱断网档与跑批器各条件的父策略里没有，角色也不带）。
 import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
-import { READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL } from "../memory/search-tools.ts";
+import {
+  LIST_SESSIONS_TOOL,
+  READ_SESSION_ENTRY_TOOL,
+  SEARCH_SESSIONS_TOOL,
+} from "../memory/search-tools.ts";
 import { UPDATE_MEMORY_TOOL } from "../memory/update-memory-tool.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { DelegatedPolicy, WorkerRole } from "../state/session-payloads.ts";
@@ -27,7 +31,13 @@ export const WORKER_ROLES: readonly ActiveWorkerRole[] = ["explorer", "implement
 const WEB_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] as const;
 
 export const ROLE_TOOLS: Readonly<Record<ActiveWorkerRole, readonly string[]>> = {
-  explorer: ["read_file", SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, ...WEB_TOOLS],
+  explorer: [
+    "read_file",
+    SEARCH_SESSIONS_TOOL,
+    READ_SESSION_ENTRY_TOOL,
+    LIST_SESSIONS_TOOL,
+    ...WEB_TOOLS,
+  ],
   implementer: ["read_file", "edit_file", ...WEB_TOOLS],
   tester: ["read_file", "run_command", ...WEB_TOOLS],
 };

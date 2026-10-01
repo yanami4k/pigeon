@@ -57,6 +57,11 @@ export function sessionsDirOf(root: string): string {
   return path.join(projectStateDir(root), "sessions");
 }
 
+// 决策 339：会话检索的缓存（每个会话文件抽出的可搜文本与目录信息）
+export function sessionSearchCacheDirOf(root: string): string {
+  return path.join(projectStateDir(root), "search-cache");
+}
+
 export function learnedDirOf(root: string): string {
   return path.join(projectStateDir(root), "learned");
 }

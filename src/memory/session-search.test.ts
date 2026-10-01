@@ -1,5 +1,6 @@
-// M5 S2（决策 038）：内容级 Session Search 扫描器测试——从新到旧逐会话读新会话存储（决策 181 / 185），
-// 多词与、大小写不敏感、元字符按字面、角色过滤、复用 SessionListFilters、上限即停；分支会话的复制段不重复命中、
+// M5 S2（决策 038；决策 339 改进）：内容级 Session Search 扫描器测试——读新会话存储（决策 181 / 185），
+// 任一关键词命中、按命中的不同关键词数排序再按新旧、大小写不敏感、元字符按字面；缺省只搜对话正文、工具输出显式打开、
+// 检索工具自身的输出永不进检索、排除当前会话；角色过滤、创建时间范围、上限与总数；分支会话的复制段不重复命中、
 // 会话根下的旧格式平铺文件不检索也不报错、读正被写入的文件不改文件。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -19,6 +20,7 @@ import {
   createSessionSearch,
   DEFAULT_SNIPPET_CHARS,
   type SessionSearchHit,
+  type SessionSearchResult,
 } from "./session-search.ts";
 
 const OLD = asSessionId("sess_01JAAAAAA10000000000000000");
@@ -37,12 +39,8 @@ async function seed(
   return (loadSessionView(dir, sessionId)?.messages ?? []).map((message) => message.entryId);
 }
 
-async function collect(iterable: AsyncIterable<SessionSearchHit>): Promise<SessionSearchHit[]> {
-  const hits: SessionSearchHit[] = [];
-  for await (const hit of iterable) {
-    hits.push(hit);
-  }
-  return hits;
+async function collect(result: Promise<SessionSearchResult>): Promise<SessionSearchHit[]> {
+  return (await result).hits;
 }
 
 function withDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -52,14 +50,14 @@ function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   );
 }
 
-test("从新到旧逐会话；多词为与、大小写不敏感；命中带条目号、Run 内序号、时间与含关键词的片段", () =>
+test("决策 339 ④：任一关键词命中即列出，按命中的不同关键词数从多到少、同数从新到旧；大小写不敏感；命中标出关键词", () =>
   withDir(async (dir) => {
     const oldIds = await seed(dir, OLD, (s) => {
       s.startRun({ task: "Deploy the API gateway" });
       s.assistant({ text: "gateway 已部署" });
       s.endRun();
     });
-    await seed(dir, MID, (s) => {
+    const midIds = await seed(dir, MID, (s) => {
       s.startRun({ task: "只提到 deploy" });
       s.endRun();
     });
@@ -69,17 +67,71 @@ test("从新到旧逐会话；多词为与、大小写不敏感；命中带条�
     });
 
     const hits = await collect(
-      createSessionSearch(dir).search({ keywords: ["deploy", "GATEWAY"] })
+      createSessionSearch(dir).search({ keywords: ["deploy", "GATEWAY", "无此词"] })
     );
     assert.deepEqual(
-      hits.map((hit) => [hit.sessionId, hit.entryId, hit.runSeq, hit.role]),
+      hits.map((hit) => [hit.sessionId, hit.entryId, hit.runSeq, hit.role, hit.matchedKeywords]),
       [
-        [NEW, newIds[0], 1, "user"],
-        [OLD, oldIds[0], 1, "user"],
+        [NEW, newIds[0], 1, "user", ["deploy", "GATEWAY"]],
+        [OLD, oldIds[0], 1, "user", ["deploy", "GATEWAY"]],
+        [MID, midIds[0], 1, "user", ["deploy"]],
+        [OLD, oldIds[1], 2, "assistant", ["GATEWAY"]],
       ]
     );
     assert.ok(hits[1]?.snippet.includes("Deploy the API gateway"));
     assert.equal(typeof hits[0]?.timestamp, "number");
+  }));
+
+test("决策 339 ④：同数时按消息时间从新到旧，不按会话先后（旧会话里后写的消息排在前）", () =>
+  withDir(async (dir) => {
+    // 条目时间是写入时刻：每段写完关闭、隔几毫秒再写下一段
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 5));
+    const old = createFixtureSession({ sessionsDir: dir, sessionId: OLD });
+    old.startRun({ task: "needle 早" });
+    old.endRun();
+    const { path } = await old.close();
+    await pause();
+    await seed(dir, NEW, (s) => {
+      s.startRun({ task: "needle 中" });
+      s.endRun();
+    });
+    await pause();
+    const reopened = createFixtureSession({ sessionsDir: dir, sessionId: OLD, existingPath: path });
+    reopened.startRun({ task: "needle 晚" });
+    reopened.endRun();
+    await reopened.close();
+    const hits = await collect(createSessionSearch(dir).search({ keywords: ["needle"] }));
+    assert.deepEqual(
+      hits.map((hit) => [hit.sessionId, hit.snippet]),
+      [
+        [OLD, "needle 晚"],
+        [NEW, "needle 中"],
+        [OLD, "needle 早"],
+      ]
+    );
+  }));
+
+test("决策 339 ①：排除当前会话；其余会话照常命中", () =>
+  withDir(async (dir) => {
+    await seed(dir, OLD, (s) => {
+      s.startRun({ task: "needle 以前" });
+      s.endRun();
+    });
+    await seed(dir, NEW, (s) => {
+      s.startRun({ task: "needle 当前" });
+      s.endRun();
+    });
+    const search = createSessionSearch(dir);
+    assert.deepEqual(
+      (await collect(search.search({ keywords: ["needle"], excludeSessionId: NEW }))).map(
+        (hit) => hit.sessionId
+      ),
+      [OLD]
+    );
+    assert.deepEqual(
+      (await collect(search.search({ keywords: ["needle"] }))).map((hit) => hit.sessionId),
+      [NEW, OLD]
+    );
   }));
 
 test("Run 内序号由 Run 开始条目现算：第二个 Run 的消息从 1 起数", () =>
@@ -97,34 +149,73 @@ test("Run 内序号由 Run 开始条目现算：第二个 Run 的消息从 1 起
     assert.deepEqual(
       hits.map((hit) => [hit.runId, hit.runSeq, hit.role]),
       [
-        [runs[1]?.runId, 1, "user"],
         [runs[1]?.runId, 2, "assistant"],
+        [runs[1]?.runId, 1, "user"],
       ]
     );
   }));
 
-test("角色过滤：只搜 toolResult 时命中带工具名；thinking 与工具调用名可检索", () =>
+test("决策 339 ②：缺省只搜对话正文——思考、工具调用名与参数、工具输出都不搜；工具输出显式打开或按 toolResult 角色过滤才搜", () =>
   withDir(async (dir) => {
     await seed(dir, NEW, (s) => {
       s.startRun({ task: "查一下 token" });
-      s.assistant({ thinking: "先想想 token 在哪", toolCalls: [{ name: "read_file" }] });
-      s.toolResult({ toolCallId: "tc-1", toolName: "read_file", text: "token=abc" });
+      s.assistant({
+        thinking: "先想想 secret 在哪",
+        text: "我来读",
+        toolCalls: [{ name: "read_file", args: { path: "argpath.ts" } }],
+      });
+      s.toolResult({ toolCallId: "tc-1", toolName: "read_file", text: "token=abc output-only" });
       s.endRun();
     });
     const search = createSessionSearch(dir);
-    const results = await collect(search.search({ keywords: ["token"], roles: ["toolResult"] }));
-    assert.equal(results.length, 1);
-    assert.equal(results[0]?.role, "toolResult");
-    assert.equal(results[0]?.toolName, "read_file");
+    for (const keyword of ["secret", "read_file", "argpath", "output-only"]) {
+      assert.deepEqual(await collect(search.search({ keywords: [keyword] })), [], keyword);
+    }
     assert.deepEqual(
-      (await collect(search.search({ keywords: ["read_file"], roles: ["assistant"] }))).map(
+      (await collect(search.search({ keywords: ["token"] }))).map((hit) => hit.role),
+      ["user"]
+    );
+    const opened = await collect(search.search({ keywords: ["token"], includeToolOutput: true }));
+    assert.deepEqual(
+      opened.map((hit) => [hit.role, hit.toolName]),
+      [
+        ["toolResult", "read_file"],
+        ["user", undefined],
+      ]
+    );
+    const byRole = await collect(search.search({ keywords: ["token"], roles: ["toolResult"] }));
+    assert.deepEqual(
+      byRole.map((hit) => hit.role),
+      ["toolResult"]
+    );
+    assert.deepEqual(
+      (await collect(search.search({ keywords: ["我来读"], roles: ["assistant"] }))).map(
         (hit) => hit.runSeq
       ),
       [2]
     );
+  }));
+
+test("决策 339 ③：三件检索工具自身的输出永不进检索，打开工具输出时也不进；它们的调用参数也不进", () =>
+  withDir(async (dir) => {
+    await seed(dir, NEW, (s) => {
+      s.startRun({ task: "开始" });
+      for (const name of ["search_sessions", "read_session_entry", "list_sessions"]) {
+        s.toolTurn({ name, args: { keywords: ["echo-arg"] }, result: `echo-out ${name}` });
+      }
+      s.toolTurn({ name: "run_command", result: "echo-out run_command" });
+      s.endRun();
+    });
+    const search = createSessionSearch(dir);
     assert.deepEqual(
-      (await collect(search.search({ keywords: ["先想想"] }))).map((hit) => hit.role),
-      ["assistant"]
+      (await collect(search.search({ keywords: ["echo-out"], includeToolOutput: true }))).map(
+        (hit) => hit.toolName
+      ),
+      ["run_command"]
+    );
+    assert.deepEqual(
+      await collect(search.search({ keywords: ["echo-arg"], includeToolOutput: true })),
+      []
     );
   }));
 
@@ -166,7 +257,7 @@ test("完整存储不截断：64 KiB 之后的内容也可命中；片段是关�
     assert.ok(snippet.length <= DEFAULT_SNIPPET_CHARS + 2, `片段过长：${snippet.length}`);
   }));
 
-test("上限即停：给定 limit 后只产出 limit 条", () =>
+test("上限：给定 limit 后只给出排序后的前 limit 条，总数照实", () =>
   withDir(async (dir) => {
     await seed(dir, NEW, (s) => {
       s.startRun({ task: "match 0" });
@@ -175,17 +266,15 @@ test("上限即停：给定 limit 后只产出 limit 条", () =>
       }
       s.endRun();
     });
-    const hits = await collect(
-      createSessionSearch(dir).search({ keywords: ["match"] }, { limit: 3 })
-    );
-    assert.equal(hits.length, 3);
+    const result = await createSessionSearch(dir).search({ keywords: ["match"] }, { limit: 3 });
+    assert.equal(result.hits.length, 3);
+    assert.equal(result.total, 5);
   }));
 
-test("复用 SessionListFilters：tool 只搜用过该工具的会话，since 按会话创建时间", () =>
+test("创建时间范围：since 与 until 按会话创建时间（含两端）", () =>
   withDir(async (dir) => {
     await seed(dir, OLD, (s) => {
       s.startRun({ task: "alpha 老会话" });
-      s.toolTurn({ name: "read_file" });
       s.endRun();
     });
     await seed(dir, NEW, (s) => {
@@ -194,51 +283,15 @@ test("复用 SessionListFilters：tool 只搜用过该工具的会话，since �
     });
     const search = createSessionSearch(dir);
     assert.deepEqual(
-      (await collect(search.search({ keywords: ["alpha"], filters: { tool: "read_file" } }))).map(
+      (await collect(search.search({ keywords: ["alpha"], since: sessionCreatedAt(NEW) }))).map(
         (hit) => hit.sessionId
       ),
-      [OLD]
-    );
-    assert.deepEqual(
-      (
-        await collect(
-          search.search({ keywords: ["alpha"], filters: { since: sessionCreatedAt(NEW) } })
-        )
-      ).map((hit) => hit.sessionId),
       [NEW]
     );
-  }));
-
-test("复用 SessionListFilters：class 按工具级失败分类过滤（工具结果上的环境异常标记）", () =>
-  withDir(async (dir) => {
-    await seed(dir, OLD, (s) => {
-      s.startRun({ task: "alpha 环境异常" });
-      const [id = ""] = s.assistant({ toolCalls: [{ name: "edit_file" }] });
-      s.toolResult({
-        toolCallId: id,
-        toolName: "edit_file",
-        text: "EACCES",
-        isError: true,
-        details: {
-          pigeon: {
-            errorKind: "environment",
-            gate: { outcome: "approved", approvedBy: "policy:yolo" },
-          },
-        },
-      });
-      s.assistant({ text: "改不了" });
-      s.endRun();
-    });
-    await seed(dir, NEW, (s) => {
-      s.startRun({ task: "alpha 正常" });
-      s.toolTurn({ name: "edit_file" });
-      s.endRun();
-    });
-    const search = createSessionSearch(dir);
     assert.deepEqual(
-      (
-        await collect(search.search({ keywords: ["alpha"], filters: { class: "infrastructure" } }))
-      ).map((hit) => hit.sessionId),
+      (await collect(search.search({ keywords: ["alpha"], until: sessionCreatedAt(OLD) }))).map(
+        (hit) => hit.sessionId
+      ),
       [OLD]
     );
   }));

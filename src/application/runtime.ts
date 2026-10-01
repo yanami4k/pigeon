@@ -21,8 +21,10 @@ import { assertMemoryLimit, loadPushedMemory, type MemoryConflictMode } from "..
 import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
 import { REVIEW_TEMPLATE_VERSION, type ReviewKind } from "../memory/review-text.ts";
 import {
+  createListSessionsTool,
   createReadSessionEntryTool,
   createSearchSessionsTool,
+  LIST_SESSIONS_TOOL,
   READ_SESSION_ENTRY_TOOL,
   SEARCH_SESSIONS_TOOL,
   sessionToolRegistrations,
@@ -54,7 +56,7 @@ import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { MemoryReviewTag, ReviewCoverage } from "../state/learned-memory.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
-import { sessionsDirOf } from "../state/paths.ts";
+import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import {
@@ -423,8 +425,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
-  // M5 S2（决策 038）：Session Search 的两个 read 档工具，范围只限本项目会话目录；决策 193 的开关关掉时不注册
+  // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
+  // 决策 193 的开关关掉时一件都不注册
   const sessionSearch = deps.sessionSearch ?? true;
+  // 决策 339：检索与目录排除当前会话；可搜文本缓存在 .pigeon/state/search-cache/
+  const sessionToolOptions = {
+    sessionsDir,
+    cacheDir: sessionSearchCacheDirOf(governanceRoot),
+    currentSessionId: deps.sessionId,
+  };
   if (sessionSearch) {
     for (const registration of sessionToolRegistrations(sessionsDir)) {
       registry.register(registration);
@@ -509,7 +518,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     WRITE_APPROVAL_SENTENCES[approval] +
     commandTexts.prompt +
     (sessionSearch
-      ? "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
+      ? "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
         "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
       : "") +
     (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
@@ -536,7 +545,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "read_file",
     "edit_file",
     RUN_COMMAND_TOOL,
-    ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL] : []),
+    ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
     ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
@@ -738,7 +747,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           : {}),
       }),
       ...(sessionSearch
-        ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
+        ? [
+            createSearchSessionsTool(sessionToolOptions),
+            createReadSessionEntryTool(sessionToolOptions),
+            createListSessionsTool(sessionToolOptions),
+          ]
         : []),
       ...(learned !== undefined
         ? [

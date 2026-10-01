@@ -495,18 +495,26 @@ function countingStreamFn(inner: StreamFn) {
   return { fn, seen };
 }
 
-// Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多两件
-// 检索工具（193），推送格多记忆工具（217）
+// Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多三件
+// 检索工具（193；339 加 list_sessions），推送格多记忆工具（217）
 const PIGEON_STREAM_TOOLS = {
   "search-push": [
     "edit_file",
+    "list_sessions",
     "read_file",
     "read_session_entry",
     "run_command",
     "search_sessions",
     "update_memory",
   ],
-  "search-only": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
+  "search-only": [
+    "edit_file",
+    "list_sessions",
+    "read_file",
+    "read_session_entry",
+    "run_command",
+    "search_sessions",
+  ],
   "push-only": ["edit_file", "read_file", "run_command", "update_memory"],
   neither: ["edit_file", "read_file", "run_command"],
 } as const;
