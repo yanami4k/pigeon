@@ -64,7 +64,7 @@ export interface ToolGovernanceOptions {
   ownWorkspaceWrites?: boolean;
   // 决策 326 ①：受保护路径判定（项目的 .pigeon 目录）。写入类文件工具的 path 落在其上时：会话放权与配置放权都不放行、
   // worker 自己工作树内的默认放行也不适用，须人逐次批准（yolo 下放行，拒绝名单照常优先）。缺省不判定
-  protectedPath?: (target: string) => string | undefined;
+  protectedPath?: (target: string) => string | undefined | Promise<string | undefined>;
 }
 
 // 决策 302 所说的写层文件工具：改文件的内置工具（两种编辑模式都叫 edit_file）
@@ -102,7 +102,9 @@ class GovernedToolCalls implements ToolGovernance {
   readonly #configGrants: readonly ConfigGrantRule[];
   readonly #workspaceRoot: string | undefined;
   readonly #ownWorkspaceWrites: boolean;
-  readonly #protectedPath: ((target: string) => string | undefined) | undefined;
+  readonly #protectedPath:
+    | ((target: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
   // ToolExecution 账本：toolCallId → 记录
   readonly #executions = new Map<string, ToolExecution>();
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
@@ -234,7 +236,7 @@ class GovernedToolCalls implements ToolGovernance {
     // 决策 290：网络档工具只读判定这次调用要访问的主机——审批面板显示它，[a] 建按网站的放权
     const host = this.#inspectHost(toolName, rawArgs);
     // 决策 326 ①：写入类文件工具写受保护路径——放权（会话与配置）一概不参与求值，worker 的默认放行也不适用
-    const protectedTarget = this.#protectedTargetOf(toolName, rawArgs);
+    const protectedTarget = await this.#protectedTargetOf(toolName, rawArgs);
     const grantHit =
       protectedTarget !== undefined
         ? null
@@ -380,7 +382,7 @@ class GovernedToolCalls implements ToolGovernance {
   }
 
   // 写入类文件工具（写档、按工作区限定路径）的 path 落在受保护路径上时返回其展示写法
-  #protectedTargetOf(toolName: string, args: unknown): string | undefined {
+  async #protectedTargetOf(toolName: string, args: unknown): Promise<string | undefined> {
     if (this.#protectedPath === undefined) {
       return undefined;
     }

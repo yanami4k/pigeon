@@ -105,7 +105,10 @@ import {
   WAIT_WORKERS_TOOL,
   WORKER_STATUS_TOOL,
 } from "./orchestration-tools.ts";
-import { createProtectedPathResolver } from "./protected-paths.ts";
+import {
+  createHostProtectedPathResolver,
+  createProtectedPathResolver,
+} from "./protected-paths.ts";
 import {
   createOrchestrateTool,
   ORCHESTRATE_TOOL,
@@ -775,12 +778,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         workspaceRoot: deps.workspaceRoot,
         // 决策 302：worker 改自己工作树内的文件默认放行
         ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
-        // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按真实路径判定，容器工作区只做词法判定）
-        protectedPath: createProtectedPathResolver({
-          workspaceRoot: deps.workspaceRoot,
-          governanceRoot,
-          realPaths: deps.workspaceHost === undefined,
-        }),
+        // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按宿主上的真实路径判定，容器工作区经执行端在容器里判定）
+        protectedPath:
+          deps.workspaceHost !== undefined
+            ? createHostProtectedPathResolver(deps.workspaceHost)
+            : createProtectedPathResolver({
+                workspaceRoot: deps.workspaceRoot,
+                governanceRoot,
+                realPaths: true,
+              }),
       })
     ),
     sessionId: deps.sessionId,
