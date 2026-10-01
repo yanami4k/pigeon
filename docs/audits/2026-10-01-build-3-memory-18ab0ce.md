@@ -89,3 +89,9 @@
 ### 顺带发现
 
 - session-search-switch.test.ts 原有一条 runHeadless 用例没给 homeDir，推送记忆开着时会读真实主目录下的用户级记忆；已改为给临时目录。
+
+### 中断后收到的补充（决策 341）
+
+- 上文"下一步顺序"第 1 条里"备份放到 stateBackupDirOf（.pigeon/state/backup）"作废：迁移命令处理过的旧文件一律移出仓库，放到用户级 ~/.pigeon/state/ 下按项目分开的备份目录，仓库里不留备份。
+- 本段新增的迁移步骤（memory-review.json、旧的学到的记忆、补做复盘记录、.pigeon/memory/；preferences.md 改名为 ~/.pigeon/AGENTS.md 那步除外）照此位置先写一个最小实现，审计注明"合并时改用第一段的备份函数"。
+- state/paths.ts 里已加的 stateBackupDirOf 随之改为用户级按项目分开的位置，或删掉。
