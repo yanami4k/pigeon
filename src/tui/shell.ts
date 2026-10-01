@@ -447,7 +447,7 @@ export class PigeonTuiShell
     // 决策 189：每次压缩（自动或手动）在消息区提示一行压缩前后的 token 数
     const unsubscribeCompaction = runtime.subscribeCompaction?.((notice) => {
       this.flow.addSystem(`[compact] ${compactionNoticeText(notice)}`);
-      // 压缩后上下文用量随之下降；压缩前复盘的花费在其收尾后计入
+      // 压缩后上下文用量随之下降
       this.refreshContext();
       this.collectChildCosts();
       this.tui.requestRender();

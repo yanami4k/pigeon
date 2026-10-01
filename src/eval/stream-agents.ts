@@ -177,7 +177,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent & {
           spawnWorkers: STREAM_SPAWN_WORKERS,
           // 决策 294：任务清单同样不带（明确关掉）
           taskList: STREAM_TASK_LIST,
-          // 决策 308：打转检测同样关掉（主 agent、复盘都不挂；轮数与豁免照缺省，只改开关）
+          // 决策 308：打转检测同样关掉（主 agent 不挂；轮数与豁免照缺省，只改开关）
           loopGuard: { ...DEFAULT_LOOP_GUARD_SETTINGS, enabled: STREAM_LOOP_GUARD },
           // 决策 309：提交编排脚本的工具同样不带（明确关掉）
           scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,

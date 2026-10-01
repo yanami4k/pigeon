@@ -16,7 +16,7 @@
 // 决策 267：pigeon 不带子命令即启动本界面（命令行对话改由 pigeon --line 进入）。
 // 决策 286：pigeon --continue 接本项目最近的主会话、--resume <id> 接指定会话（启动时直接打开，不另建空会话），
 // --resume 不带会话号开壳后弹出会话选择器；运行期告警在壳接管终端期间落消息区（之前与之后照旧写标准错误输出）；
-// 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/state/tui-history.json。
+// 输入历史按项目存在 .pigeon/state/tui-history.json。
 // 决策 301：编排面接上编排器的只读观察口、发消息与续做（编排面板、树形视图、进入 worker 会话），树形视图按任务清单标注。
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";

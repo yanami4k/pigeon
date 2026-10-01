@@ -109,7 +109,7 @@ export interface OpenSessionRuntimeRequest {
   webTools?: WebToolsConfig;
   // 决策 331：写记忆的入口与写入后的提示（终端界面与 --line 给；推送记忆关着时不生效）
   memoryWrite?: MemoryWriteConfig;
-  // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
+  // 决策 286：运行期告警的出口（会话存储、压缩前回调、工作区快照）；缺省写标准错误输出
   warn?: WarnSink;
 }
 

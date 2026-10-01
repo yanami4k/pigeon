@@ -10,12 +10,10 @@
 // 这一步以失败收尾，工作区保留 agent 的改动、不做回退（决策 172 / 173）。各轮与首次共用同一个总预算（轮次、墙钟与 token；
 // 验证命令的耗时也算在墙钟里）。一步的成败以最后一次验证为准，由 Run 开始条目里冻结的回炉轮数与最后一次验证记录推出
 // （state/session-judge.ts），不新增记录。
-// 推送记忆（决策 191、192、207、217）：开着时开局推入学到的记忆、带 update_memory；上下文压缩之前先复盘一次（期间这一步的墙钟
-// 暂停，复盘不占这一步的宽上限，171），最后一次验证之后、返回之前做收尾复盘，复盘做完才算这一步结束。复盘失败或撞上限都不改变
-// 这一步的结果，经去重告警写标准错误输出，并记进结果
+// 推送记忆（决策 191、217、331）：开着时开局推入学到的记忆（两层，决策 332）；无人值守，只推送、不注册 update_memory
 // 派 worker（决策 264–268、297–303）：开着时给主 agent 注册 spawn_worker 与等待等积木，装一个编排器（无人值守：worker 需请示时
 // 不等，作为可恢复错误交回，303）；worker 用的 token 计入本次运行的 token 上限，撞了即停掉主 agent 与在跑的 worker、拒绝再派。
-// 297：每次运行结束后，等本次派出的 worker 全部结束、把完成通知当新的一轮处理完，这一步才往下走（验证、回炉、收尾复盘）；
+// 297：每次运行结束后，等本次派出的 worker 全部结束、把完成通知当新的一轮处理完，这一步才往下走（验证、回炉）；
 // 释放运行面之前停掉仍在跑的 worker（撞上限、外部中止时），等其收尾记录写进本会话。执行端另一侧的工作区（容器）与分支会话不注册。
 // 任务清单（294 B1）：开着时给主 agent 注册两件清单工具
 import type { ScriptLauncher } from "../execution/script-sandbox.ts";
@@ -133,7 +131,7 @@ export interface HeadlessRunOptions {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省，集成冒烟可调低触发点
   compaction?: CompactionConfigInput;
-  // 决策 192、207：压缩前回调（压缩前复盘的挂点）；缺省不挂
+  // 决策 192、207：压缩前回调（通用挂点，尚无生产入口设置它）；缺省不挂
   beforeCompaction?: BeforeCompaction;
   // 运行时告警的出口（自动压缩没压成、压缩前回调失败；缺省标准错误输出，同一类只说一次；测试注入）
   warn?: WarnSink;
@@ -158,7 +156,7 @@ export interface HeadlessRunOptions {
   // 决策 287–291：联网工具的配置——在场即给主会话与 worker 注册两件工具；缺省不注册（pigeon run 由启动参数缺省给出，
   // --sandbox-network off 不给；跑批器各条件不给）
   webTools?: WebToolsConfig;
-  // 决策 305–308：打转检测设定——主 agent、worker 与复盘都挂；缺省不挂（pigeon run 按项目配置缺省打开，跑批器各条件明确关掉）
+  // 决策 305–308：打转检测设定——主 agent 与 worker 都挂；缺省不挂（pigeon run 按项目配置缺省打开，跑批器各条件明确关掉）
   loopGuard?: LoopGuardSettings;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
