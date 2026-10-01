@@ -14,7 +14,12 @@ import {
   userSettingsPath,
 } from "../state/paths.ts";
 import { commandsConfigOf, mcpConfigOf } from "../state/settings.ts";
-import { assertNoLegacyLayout, findLegacyLayout, LegacyLayoutError } from "./legacy-layout.ts";
+import {
+  assertNoLegacyLayout,
+  findLegacyLayout,
+  LegacyLayoutError,
+  legacyLayoutMessage,
+} from "./legacy-layout.ts";
 import { ensureProjectStateDir, loadSettings, SettingsError } from "./settings.ts";
 
 function dirs(): { root: string; home: string; cleanup: () => void } {
@@ -129,28 +134,61 @@ test(".pigeon/.gitignore：第一次建状态目录时写入两行；已存在�
   }
 });
 
-test("旧布局：7 个旧配置文件与旧位置的状态任一在场即报错并提示 pigeon migrate-config；verify.json 与 memory-review.json 不算", () => {
-  const { root, cleanup } = dirs();
+test("旧布局：旧配置文件、旧位置的状态与已删除功能的遗留任一在场即报错并提示 pigeon migrate-config；verify.json 不算", () => {
+  const { root, home, cleanup } = dirs();
   try {
     write(join(root, ".pigeon", "verify.json"), {});
-    write(join(root, ".pigeon", "memory-review.json"), {});
     write(join(root, ".pigeon", "skills", "x", "SKILL.md"), "---\n");
-    assert.deepEqual(findLegacyLayout(root), []);
-    assertNoLegacyLayout(root);
+    assert.deepEqual(findLegacyLayout(root, { homeDir: home }), []);
+    assertNoLegacyLayout(root, { homeDir: home });
     write(join(root, ".pigeon", "grants.json"), {});
     mkdirSync(join(root, ".pigeon", "sessions"), { recursive: true });
     assert.deepEqual(
-      findLegacyLayout(root).map((item) => item.name),
+      findLegacyLayout(root, { homeDir: home }).map((item) => item.name),
       ["grants.json", "sessions"]
     );
     assert.throws(
-      () => assertNoLegacyLayout(root),
+      () => assertNoLegacyLayout(root, { homeDir: home }),
       (error: unknown) =>
         error instanceof LegacyLayoutError &&
         /\.pigeon\/grants\.json/.test(error.message) &&
         /\.pigeon\/sessions/.test(error.message) &&
         /pigeon migrate-config/.test(error.message)
     );
+    // 已删除功能的遗留（决策 331、330）：复盘配置、补做复盘记录、旧学到的记忆（新旧两处）、旧人写说明、用户级偏好
+    for (const rel of [
+      "review-backfill",
+      join("state", "review-backfill"),
+      "learned",
+      join("state", "learned"),
+      "memory",
+    ]) {
+      mkdirSync(join(root, ".pigeon", rel), { recursive: true });
+    }
+    for (const rel of ["memory-review.json", "learned.lock", join("state", "learned.lock")]) {
+      write(join(root, ".pigeon", rel), "{}");
+    }
+    write(join(home, ".pigeon", "preferences.md"), "旧偏好\n");
+    const names = findLegacyLayout(root, { homeDir: home }).map((item) => item.name);
+    for (const name of [
+      "memory-review.json",
+      "review-backfill",
+      join("state", "review-backfill"),
+      "learned",
+      "learned.lock",
+      join("state", "learned"),
+      join("state", "learned.lock"),
+      "memory",
+      "~/.pigeon/preferences.md",
+    ]) {
+      assert.ok(names.includes(name), `${name} 应列为旧文件，实际：${names.join("、")}`);
+    }
+    // 不传 homeDir 时不查用户级
+    assert.ok(!findLegacyLayout(root).some((item) => item.name === "~/.pigeon/preferences.md"));
+    const message = legacyLayoutMessage(findLegacyLayout(root, { homeDir: home }));
+    assert.match(message, /memory-review\.json/);
+    assert.match(message, /preferences\.md/);
+    assert.match(message, /pigeon migrate-config/);
   } finally {
     cleanup();
   }

@@ -126,7 +126,7 @@ export async function openSessionSettings(
   root: string,
   options: OpenSessionSettingsOptions
 ): Promise<SettingsSnapshot> {
-  assertNoLegacyLayout(root);
+  assertNoLegacyLayout(root, options.homeDir !== undefined ? { homeDir: options.homeDir } : {});
   ensureProjectStateDir(root, options.notice);
   const snapshot = loadSettings(
     root,

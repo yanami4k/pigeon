@@ -68,7 +68,7 @@ export function projectMemoryLockPathOf(root: string): string {
   return path.join(projectStateDir(root), "memory.lock");
 }
 
-// 旧的学到的记忆（单层、三行一条；决策 332 不迁移，迁移命令改名备份）与它的锁
+// 旧的学到的记忆（单层、三行一条；决策 332 不迁移，迁移命令挪出仓库进用户级备份）与它的锁
 export function learnedDirOf(root: string): string {
   return path.join(projectStateDir(root), "learned");
 }
@@ -81,7 +81,7 @@ export function worktreesDirOf(root: string): string {
   return path.join(projectStateDir(root), "worktrees");
 }
 
-// 旧的补做复盘记录（决策 331 删除补做，迁移命令改名备份）
+// 旧的补做复盘记录（决策 331 删除补做；迁移命令挪出仓库进用户级备份）
 export function reviewBackfillDirOf(root: string): string {
   return path.join(projectStateDir(root), "review-backfill");
 }
@@ -93,11 +93,6 @@ export function promptHistoryPathOf(root: string): string {
 // 终端界面日志所在目录（日志文件名由终端界面自定）
 export function tuiLogDirOf(root: string): string {
   return path.join(projectStateDir(root), "logs");
-}
-
-// 迁移命令的备份目录（改名备份的旧文件放在这里，不进会话快照与仓库）
-export function stateBackupDirOf(root: string): string {
-  return path.join(projectStateDir(root), "backup");
 }
 
 // 人写内容（位置不变）
@@ -220,13 +215,11 @@ export function legacyConfigPath(root: string, file: string): string {
   return path.join(root, PIGEON_DIR, file);
 }
 
-// 旧位置的程序状态 → 新位置（相对 .pigeon 的名字；worktrees 由 git worktree move 迁移）
+// 旧位置的程序状态 → 新位置（相对 .pigeon 的名字；worktrees 由 git worktree move 迁移）。
+// 旧学到的记忆与补做复盘记录不在此列：决策 331、341 起由迁移命令直接挪出仓库进用户级备份
 export const LEGACY_STATE_ENTRIES = [
   { name: "sessions", target: (root: string) => sessionsDirOf(root) },
-  { name: "learned", target: (root: string) => learnedDirOf(root) },
-  { name: "learned.lock", target: (root: string) => learnedLockPathOf(root) },
   { name: "worktrees", target: (root: string) => worktreesDirOf(root) },
-  { name: "review-backfill", target: (root: string) => reviewBackfillDirOf(root) },
   { name: "tui-history.json", target: (root: string) => promptHistoryPathOf(root) },
   // 终端界面日志（文件名由终端界面库给出）
   { name: "pi-debug.log", target: (root: string) => path.join(tuiLogDirOf(root), "pi-debug.log") },

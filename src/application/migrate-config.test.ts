@@ -22,7 +22,6 @@ import { findLegacyLayout } from "../persistence/legacy-layout.ts";
 import { migrationBackupLocation } from "../persistence/migration-backup.ts";
 import { loadSettings } from "../persistence/settings.ts";
 import {
-  learnedDirOf,
   projectLocalSettingsPath,
   projectSettingsPath,
   promptHistoryPathOf,
@@ -187,16 +186,23 @@ test("目标设置已有同一节且内容不同：报错停下，什么都不�
   });
 });
 
-test("旧位置的程序状态挪进 .pigeon/state/；worker 工作树经 git worktree move 挪位，git worktree list 指向新位置", () => {
+test("旧位置的程序状态挪进 .pigeon/state/；worker 工作树经 git worktree move 挪位，git worktree list 指向新位置；旧学到的记忆挪进备份", () => {
   const root = repo();
+  const homeDir = home();
   write(join(root, ".pigeon", "sessions", "enc", "s.jsonl"), "{}\n");
   write(join(root, ".pigeon", "learned", "MEMORY.md"), "- x\n");
   write(join(root, ".pigeon", "tui-history.json"), '{"version":1,"entries":[]}');
   const legacyTree = join(root, ".pigeon", "worktrees", "sess-w1");
   git(root, "worktree", "add", "-q", "-b", "pigeon/w1", legacyTree);
-  migrate(root);
+  migrate(root, homeDir);
   assert.ok(existsSync(join(sessionsDirOf(root), "enc", "s.jsonl")));
-  assert.ok(existsSync(join(learnedDirOf(root), "MEMORY.md")));
+  // 旧学到的记忆不再挪进 state/：整个目录连同锁挪进用户级备份（决策 331、341）
+  assert.ok(!existsSync(join(root, ".pigeon", "learned")), "旧 learned 目录已挪走");
+  assert.equal(
+    readFileSync(join(migrationBackupLocation(root, homeDir), "learned", "MEMORY.md"), "utf8"),
+    "- x\n",
+    "旧学到的记忆原文进备份"
+  );
   assert.ok(existsSync(promptHistoryPathOf(root)));
   const moved = join(worktreesDirOf(root), "sess-w1");
   assert.ok(existsSync(join(moved, "a.txt")));
@@ -257,4 +263,77 @@ test("迁移备份不在仓库里：git status 与快照提交里都没有备份
   assert.throws(() => git(root, "grep", "-I", "-l", "tvly-secret", snap.commit), "快照里没有 key");
   // 仓库里任何地方都没有原文
   assert.throws(() => execFileSync("grep", ["-rl", "tvly-secret", root]), "仓库目录里没有 key");
+});
+
+test("已删除功能的遗留挪出仓库到用户级备份（决策 331、341）：旧学到的记忆两处与锁、补做复盘记录两处、复盘配置、旧人写说明；重复执行无事可做", () => {
+  const root = repo();
+  const homeDir = home();
+  write(join(root, ".pigeon", "state", "learned", "MEMORY.md"), "- 旧的\n");
+  write(join(root, ".pigeon", "state", "learned.lock"), "{}");
+  write(join(root, ".pigeon", "learned.lock"), "{}");
+  write(join(root, ".pigeon", "review-backfill", "r.json"), "{}");
+  write(join(root, ".pigeon", "state", "review-backfill", "r2.json"), "{}");
+  write(join(root, ".pigeon", "memory-review.json"), { version: 1 });
+  write(join(root, ".pigeon", "memory", "notes.md"), "人写的旧说明\n");
+  const result = migrate(root, homeDir);
+  const backup = migrationBackupLocation(root, homeDir);
+  assert.equal(result.changed, true);
+  assert.match(result.lines.join("\n"), /把其中内容并入项目的 AGENTS\.md/);
+  for (const rel of [
+    join("state", "learned"),
+    join("state", "learned.lock"),
+    "learned.lock",
+    "review-backfill",
+    join("state", "review-backfill"),
+    "memory-review.json",
+    "memory",
+  ]) {
+    assert.ok(!existsSync(join(root, ".pigeon", rel)), `${rel} 已挪出仓库`);
+  }
+  for (const name of [
+    join("state", "learned"),
+    join("state", "learned.lock"),
+    "learned.lock",
+    "review-backfill",
+    join("state", "review-backfill"),
+    "memory-review.json",
+    "memory",
+  ]) {
+    assert.ok(existsSync(join(backup, name)), `备份里有 ${name}`);
+  }
+  assert.equal(readFileSync(join(backup, "memory", "notes.md"), "utf8"), "人写的旧说明\n");
+  assert.equal(readFileSync(join(backup, "state", "learned", "MEMORY.md"), "utf8"), "- 旧的\n");
+  const again = migrate(root, homeDir);
+  assert.equal(again.changed, false);
+});
+
+test("~/.pigeon/preferences.md 改名为 ~/.pigeon/AGENTS.md；目标已存在即拦阻、什么都不改", () => {
+  const root = repo();
+  const homeDir = home();
+  write(join(homeDir, ".pigeon", "preferences.md"), "用户级旧说明\n");
+  const result = migrate(root, homeDir);
+  assert.ok(!existsSync(join(homeDir, ".pigeon", "preferences.md")));
+  assert.equal(readFileSync(join(homeDir, ".pigeon", "AGENTS.md"), "utf8"), "用户级旧说明\n");
+  assert.match(result.lines.join("\n"), /AGENTS\.md/);
+  // 目标已存在：拦阻，一切原样
+  const home2 = home();
+  write(join(home2, ".pigeon", "preferences.md"), "旧\n");
+  write(join(home2, ".pigeon", "AGENTS.md"), "已有\n");
+  assert.throws(() => migrate(root, home2), /AGENTS\.md 已存在/);
+  assert.equal(readFileSync(join(home2, ".pigeon", "preferences.md"), "utf8"), "旧\n");
+  assert.equal(readFileSync(join(home2, ".pigeon", "AGENTS.md"), "utf8"), "已有\n");
+});
+
+test("迁移备份位置已被占用：拦阻、不覆盖，仓库里的旧文件原样", () => {
+  const root = repo();
+  const homeDir = home();
+  write(join(root, ".pigeon", "memory-review.json"), { version: 1 });
+  write(join(migrationBackupLocation(root, homeDir), "memory-review.json"), "已占用");
+  assert.throws(() => migrate(root, homeDir), /已存在/);
+  assert.ok(existsSync(join(root, ".pigeon", "memory-review.json")), "旧文件原样");
+  assert.equal(
+    readFileSync(join(migrationBackupLocation(root, homeDir), "memory-review.json"), "utf8"),
+    "已占用",
+    "已有备份不被覆盖"
+  );
 });
