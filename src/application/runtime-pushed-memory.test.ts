@@ -350,3 +350,62 @@ for (const role of ["explorer", "implementer", "tester"] as const) {
     }
   });
 }
+
+test("功能：记下纠正、下次照做——第一会话经 update_memory 记下，第二会话的系统提示带这一条（层级、来源、日期、会话编号正确）", () =>
+  withRoot("pigeon-pushed-correction-", async (root) => {
+    seed(root);
+    const flags = {
+      yolo: true,
+      provider: "custom",
+      modelId: "custom",
+      persistThinking: true,
+      pushedMemory: true,
+    };
+    // 第一会话（--line 入口）：使用者给出纠正，模型调 update_memory 记下
+    const first = await openSessionRuntime({
+      governanceRoot: root,
+      sessionId: newSessionId(),
+      streamFn: createFakeStreamFn({
+        replies: [
+          {
+            text: "记一条",
+            toolCalls: [
+              {
+                name: "update_memory",
+                args: { action: "add", layer: "user", content: "回复先给结论" },
+              },
+            ],
+          },
+          { text: "记好了" },
+        ],
+      }),
+      flags,
+      homeDir: homeOf(root),
+      memoryWrite: { source: "line", now: () => TODAY },
+      startMcp: async () => fakeMcp(),
+    });
+    const firstSessionId = first.bundle.adapter.sessionId;
+    try {
+      await first.bundle.adapter.run("以后回复都先给结论");
+    } finally {
+      await disposeRuntime(first.bundle);
+    }
+    const expected = `- [U2] 回复先给结论 〔2026-10-01 · 命令行对话 · 会话 ${firstSessionId}〕`;
+    assert.ok(readMemory(root, "user").includes(expected), "落盘到用户级");
+    // 第二会话：系统提示里出现这一条
+    const second = await openSessionRuntime({
+      governanceRoot: root,
+      sessionId: newSessionId(),
+      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      flags,
+      homeDir: homeOf(root),
+      memoryWrite: { source: "line", now: () => TODAY },
+      startMcp: async () => fakeMcp(),
+    });
+    try {
+      const prompt = second.bundle.adapter.snapshot().context.systemPrompt;
+      assert.ok(prompt.includes(expected), "第二会话的系统提示带上一会话记下的纠正");
+    } finally {
+      await disposeRuntime(second.bundle);
+    }
+  }));
