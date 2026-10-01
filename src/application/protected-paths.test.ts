@@ -282,3 +282,73 @@ test("沙箱（容器执行端）：写成容器内绝对路径的 .pigeon 写�
     cleanup();
   }
 });
+
+test("判定：符号链接与 .. 组合——POSIX 把链接替换发生在 .. 之前；Windows 与词法一致（复审 P2 回归）", () => {
+  const root = project();
+  mkdirSync(join(root, "a", "b"), { recursive: true });
+  symlinkSync(join(root, "a", "b"), join(root, "lnk"));
+  const resolve = createProtectedPathResolver({
+    workspaceRoot: root,
+    governanceRoot: root,
+    realPaths: true,
+  });
+  if (process.platform === "win32") {
+    // Windows 与词法一致：.. 文本折叠先行
+    assert.equal(resolve("lnk/../../.pigeon/x"), undefined);
+    assert.equal(resolve("lnk/../.pigeon/x"), ".pigeon/x");
+    return;
+  }
+  // POSIX：lnk 先替换为 a/b，.. 作用于替换后的真实路径——/a/.pigeon/x 不受保护，/.pigeon/x 受保护
+  assert.equal(resolve("lnk/../.pigeon/x"), undefined);
+  assert.equal(resolve("lnk/../../.pigeon/x"), ".pigeon/x");
+  assert.equal(resolve(join(root, "lnk", "..", "..", ".pigeon", "x")), ".pigeon/x");
+  // 不带 .. 的写法照旧（词法捷径不变）
+  assert.equal(resolve(".pigeon/x"), ".pigeon/x");
+  assert.equal(resolve(join(root, "a", ".pigeon", "x")), undefined);
+});
+
+test("容器判定：符号链接与 .. 组合按容器内核顺序（复审 P2 回归）；词法捷径与出区围栏不变", async () => {
+  // 桩执行端：POSIX readlink -f 语义（链接先替换、.. 再作用于替换后路径），越出 /work 或不存在即拒
+  const dirs = new Set(["/work", "/work/.pigeon", "/work/a", "/work/a/b", "/work/sub"]);
+  const resolveRaw = (input: string): string | undefined => {
+    const p = input.replace(/^\/work\/lnk(?=\/|$)/, "/work/a/b");
+    // 折叠 . 与 ..（.. 作用于已替换后的真实路径）
+    const out: string[] = [];
+    for (const seg of p.split("/")) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") {
+        out.pop();
+        continue;
+      }
+      out.push(seg);
+    }
+    const target = `/${out.join("/")}`;
+    // POSIX realpath：除最后一段外各段都须存在，存在即返回规范化后的完整目标
+    if (dirs.has(target)) return target;
+    const parent = target.replace(/\/[^/]*$/, "");
+    if (parent !== "" && dirs.has(parent)) return target;
+    return undefined;
+  };
+  const { createHostProtectedPathResolver } = await import("./protected-paths.ts");
+  const resolve = createHostProtectedPathResolver({
+    root: "/work",
+    resolveExisting: (inputPath) => {
+      const hit = resolveRaw(inputPath);
+      return hit === undefined ? Promise.reject(new Error("不存在")) : Promise.resolve(hit);
+    },
+  });
+  // 链接后跟两层 ..：真实落点是 /work/.pigeon/x（受保护），词法折叠曾把它判成不受保护
+  assert.equal(await resolve("/work/lnk/../../.pigeon/x"), ".pigeon/x");
+  assert.equal(await resolve("lnk/../../.pigeon/x"), ".pigeon/x");
+  // 链接后跟一层 ..：真实落点是 /work/a/.pigeon/x（子目录同名，不受保护），词法折叠曾误报受保护
+  assert.equal(await resolve("/work/lnk/../.pigeon/x"), undefined);
+  // 目录内用 .. 回到 .pigeon：受保护
+  assert.equal(await resolve("/work/sub/../.pigeon/x"), ".pigeon/x");
+  // 词法捷径与既有判定照旧
+  assert.equal(await resolve(".pigeon/x"), ".pigeon/x");
+  assert.equal(await resolve("/work/.pigeon/x"), ".pigeon/x");
+  assert.equal(await resolve("plain.txt"), undefined);
+  assert.equal(await resolve("/work/a/.pigeon/x"), undefined);
+  // 越出工作区根的写法不受保护（写入侧由执行端围栏拒绝）
+  assert.equal(await resolve("/work/../etc/x"), undefined);
+});

@@ -129,14 +129,20 @@ test(".pigeon/.gitignore：第一次建状态目录时写入两行；已存在�
   }
 });
 
-test("旧布局：7 个旧配置文件与旧位置的状态任一在场即报错并提示 pigeon migrate-config；verify.json 与 memory-review.json 不算", () => {
+test("旧布局：7 个旧配置文件与旧位置的状态任一在场即报错并提示 pigeon migrate-config；memory-review.json 不算，verify.json 按已退役列入", () => {
   const { root, cleanup } = dirs();
   try {
-    write(join(root, ".pigeon", "verify.json"), {});
     write(join(root, ".pigeon", "memory-review.json"), {});
     write(join(root, ".pigeon", "skills", "x", "SKILL.md"), "---\n");
     assert.deepEqual(findLegacyLayout(root), []);
     assertNoLegacyLayout(root);
+    write(join(root, ".pigeon", "verify.json"), {});
+    assert.deepEqual(
+      findLegacyLayout(root).map((item) => [item.name, item.retired === true]),
+      [["verify.json", true]]
+    );
+    assert.throws(() => assertNoLegacyLayout(root), /verify\.json/);
+    rmSync(join(root, ".pigeon", "verify.json"));
     write(join(root, ".pigeon", "grants.json"), {});
     mkdirSync(join(root, ".pigeon", "sessions"), { recursive: true });
     assert.deepEqual(

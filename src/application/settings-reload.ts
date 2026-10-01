@@ -74,20 +74,16 @@ function sectionValue(snapshot: SettingsSnapshot, name: string): unknown {
   return (snapshot.merged as unknown as Record<string, unknown>)[name];
 }
 
-// 按人的选择形成新快照：确认即记下指纹并生效；不确认即这些条目沿用当前快照的内容
+// 按人的选择形成新快照：确认即生效（指纹在运行面重建成功后由调用方记下）；不确认即这些条目沿用当前快照的内容
 export function applySettingsReload(
   plan: SettingsReloadPlan,
   choice: "trust" | "skip",
   options: { homeDir?: string } = {}
 ): SettingsReloadResult {
-  const homeDir = options.homeDir ?? homedir();
+  void options;
   let snapshot = plan.next;
-  if (plan.pending.length > 0) {
-    if (choice === "trust") {
-      recordTrustedEntries(plan.current.root, plan.pending, homeDir);
-    } else {
-      snapshot = revertTrustEntries(plan.next, plan.current, plan.pending);
-    }
+  if (plan.pending.length > 0 && choice === "skip") {
+    snapshot = revertTrustEntries(plan.next, plan.current, plan.pending);
   }
   const changedSections = [...Object.keys(SETTINGS_SECTIONS), "trustedDirectories"].filter(
     (name) =>
@@ -182,6 +178,10 @@ export function createSettingsReloader(
     const result = applySettingsReload(plan, choice, homeOption);
     if (result.changedSections.length > 0) {
       await deps.apply(result.snapshot);
+    }
+    // 重建成功才记下确认指纹：重建失败时保持未确认状态，/reload 会再列出这些条目（复审 P2）
+    if (choice === "trust" && plan.pending.length > 0) {
+      recordTrustedEntries(plan.current.root, plan.pending, homeOption.homeDir ?? homedir());
     }
     const sandboxSession = deps.sandboxSessionId?.();
     return [

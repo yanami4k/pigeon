@@ -353,3 +353,33 @@ test("有 worker 在跑等不能重载时如实拒绝；沙箱会话里 sandbox 
     "用法：/reload（重读设置）｜/reload confirm（确认列出的条目并生效）｜/reload skip（不确认，沿用原内容）",
   ]);
 });
+
+test("确认指纹在重建成功后才记下：重建失败保持未确认，/reload 再列出、可重试（复审 P2 回归）", async () => {
+  const root = temp("pigeon-reload-retry-");
+  const home = temp("pigeon-reload-home-");
+  write(projectSettingsPath(root), { commands: { commands: { mark: "git tag a" } } });
+  const { loadSettings } = await import("../persistence/settings.ts");
+  let currentSnapshot = loadSettings(root, { homeDir: home });
+  write(projectSettingsPath(root), { commands: { commands: { mark: "git tag b" } } });
+  let attempts = 0;
+  const reload = createSettingsReloader({
+    current: () => currentSnapshot,
+    apply: (next) => {
+      attempts += 1;
+      if (attempts === 1) return Promise.reject(new Error("装配失败"));
+      currentSnapshot = next;
+      return Promise.resolve();
+    },
+    homeDir: home,
+  });
+  const listed = (await reload([])).join("\n");
+  assert.match(listed, /命令短名 mark：git tag b/);
+  await assert.rejects(reload(["confirm"]), /装配失败/);
+  // 指纹未落盘、当前快照未换：再次 /reload 仍列出同一条目，可重试
+  const relisted = (await reload([])).join("\n");
+  assert.match(relisted, /命令短名 mark：git tag b/);
+  const done = (await reload(["confirm"])).join("\n");
+  assert.match(done, /改了 commands 节/);
+  assert.equal(attempts, 2);
+  assert.deepEqual(await reload([]), ["设置没有变化"]);
+});

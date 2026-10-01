@@ -30,18 +30,19 @@ function realOrResolved(target: string): string {
   }
 }
 
-// 路径上已存在的最深一层按 realpath 解析，其余部分原样拼回（要写的文件往往还不存在）
-export function resolveThroughExisting(target: string): string {
-  const absolute = path.resolve(target);
+// 路径上已存在的最深一层按 realpath 解析，其余部分原样拼回（要写的文件往往还不存在）。
+// 输入为绝对路径时不再词法折叠：POSIX 内核把符号链接替换发生在 ".." 之前，先折叠会改变解析结果
+// （容器判定同口径，见 createHostProtectedPathResolver）
+export function resolveThroughExisting(absoluteTarget: string): string {
   const rest: string[] = [];
-  let current = absolute;
+  let current = absoluteTarget;
   for (;;) {
     if (existsSync(current)) {
       return path.join(realOrResolved(current), ...rest.reverse());
     }
     const parent = path.dirname(current);
     if (parent === current) {
-      return absolute;
+      return absoluteTarget;
     }
     rest.push(path.basename(current));
     current = parent;
@@ -112,18 +113,29 @@ export function createProtectedPathResolver(options: ProtectedPathOptions): Prot
   };
   return (target) => {
     if (target === "") return undefined;
-    // 词法判定（含容器工作区）
     const lexical = path.resolve(options.workspaceRoot, target);
-    const byName = check(
-      lexical,
-      path.resolve(options.workspaceRoot),
-      path.resolve(options.governanceRoot),
-      (root) => [path.join(root, PIGEON_DIR)]
-    );
+    // POSIX 的符号链接替换发生在 ".." 之前，词法折叠会改变解析结果：含 ".." 段的写法不走词法捷径，
+    // 交给下面的真实路径判定（Windows 文本折叠与内核解析一致，词法结果正确）
+    const hasDots =
+      process.platform !== "win32" && options.realPaths && target.split(/[\\/]/).includes("..");
+    const byName = hasDots
+      ? undefined
+      : check(
+          lexical,
+          path.resolve(options.workspaceRoot),
+          path.resolve(options.governanceRoot),
+          (root) => [path.join(root, PIGEON_DIR)]
+        );
     if (byName !== undefined || !options.realPaths) return byName;
-    // 真实路径判定：符号链接解析后落进 .pigeon 的也算；.pigeon 本身是符号链接时，它指向的目录同样受保护
+    // 真实路径判定：符号链接解析后落进 .pigeon 的也算；.pigeon 本身是符号链接时，它指向的目录同样受保护。
+    // 含 ".." 的写法保留原始路径（内核把符号链接替换发生在 ".." 之前）
+    const resolved = resolveThroughExisting(
+      hasDots && !path.isAbsolute(target)
+        ? `${path.resolve(options.workspaceRoot)}${path.sep}${target}`
+        : lexical
+    );
     return check(
-      resolveThroughExisting(lexical),
+      resolved,
       realOrResolved(options.workspaceRoot),
       realOrResolved(options.governanceRoot),
       (root) => [path.join(root, PIGEON_DIR), realOrResolved(path.join(root, PIGEON_DIR))]
@@ -172,12 +184,25 @@ export function createHostProtectedPathResolver(host: {
   };
   return async (target) => {
     if (target === "") return undefined;
-    const lexical = posix.isAbsolute(target) ? posix.normalize(target) : posix.join(root, target);
-    const byName = under(posix.join(root, PIGEON_DIR), lexical);
-    if (byName !== undefined) return display(byName);
-    // 逐层向上找最深的已存在一层，经执行端解析后拼回其余部分
+    // 含 ".." 段的写法不走词法捷径：POSIX 内核把符号链接替换发生在 ".." 之前，
+    // 词法折叠会改变解析结果（与本地判定器同一口径）
+    const hasDots = target.split("/").includes("..");
+    if (!hasDots) {
+      const lexical = posix.isAbsolute(target) ? posix.normalize(target) : posix.join(root, target);
+      const byName = under(posix.join(root, PIGEON_DIR), lexical);
+      if (byName !== undefined) return display(byName);
+    }
+    // 逐层向上找最深的已存在一层，经执行端解析后拼回其余部分；
+    // 含 ".." 的写法保留原始路径（内核顺序），不以词法折叠先行
+    const start = hasDots
+      ? posix.isAbsolute(target)
+        ? target
+        : `${root.replace(/\/+$/, "")}/${target}`
+      : posix.isAbsolute(target)
+        ? posix.normalize(target)
+        : posix.join(root, target);
     const rest: string[] = [];
-    let current = lexical;
+    let current = start;
     for (;;) {
       const resolved = await tryResolve(current);
       if (resolved !== undefined) {

@@ -384,31 +384,34 @@ async function main(argv: string[]): Promise<void> {
           : undefined,
       sandboxSessionId: () => (sandbox !== undefined ? slot.sessionId : undefined),
       apply: async (snapshot) => {
-        // 新快照与由它得出的编排设定、打转检测、联网工具一并换上，再按新快照在同一会话上重建运行面：内容未变的 MCP 连接
-        // 与系统提示里开局冻结的部分沿用旧运行面的（reloadFrom），只重启改过的服务
-        settings = snapshot;
-        orchestration = orchestrationSettingsOf(flags, snapshot);
-        loopGuard = loopGuardSettingsOf(snapshot);
-        webToolsOption = webToolsFor(snapshot);
+        // 先建后换（复审 P2）：重建成功才换上这些闭包变量；重建失败时旧快照、旧编排设定与旧运行面都保持不变，
+        // /reload 会照当前快照重新列出待确认条目、可重试
+        const nextOrchestration = orchestrationSettingsOf(flags, snapshot);
+        const nextLoopGuard = loopGuardSettingsOf(snapshot);
+        const nextWebTools = webToolsFor(snapshot);
         await slot.bundle.sessionStore.flush();
         const opened = await openSessionRuntime({
           governanceRoot: workspaceRoot,
-          settings,
+          settings: snapshot,
           sessionId: slot.sessionId,
           streamFn,
           flags,
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-          ...spawnWorkerOption(flags, orchestration),
-          taskList: orchestration.taskList,
-          ...webToolsOption,
+          ...spawnWorkerOption(flags, nextOrchestration),
+          taskList: nextOrchestration.taskList,
+          ...nextWebTools,
           warn,
-          loopGuard,
+          loopGuard: nextLoopGuard,
           createApprovalHandler: createHandler,
           resume: true,
           reloadFrom: slot.bundle,
           hooksNotice: (line) => shellHolder.current?.addSystem(line),
           onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
         });
+        settings = snapshot;
+        orchestration = nextOrchestration;
+        loopGuard = nextLoopGuard;
+        webToolsOption = nextWebTools;
         const bundle = opened.bundle;
         guardMainAgent(bundle);
         const workers =
