@@ -1,3 +1,23 @@
+// Pigeon TUI 入口（M2 S2 壳 + S3 审批面板与 /grants 视图 + S4 会话列表与恢复入口）。
+// 用法：pigeon [--yolo] [--root <工作区根>] --stream-fn <模块路径>（亦可 node src/tui/main.ts 直接启动）
+//   [--provider <名>] [--model <id>]
+// 审批 handler（决策 025 的注入点）：面板版——prompt 档在消息区渲染审批块，四键
+// [y/n/a/d] 决议（S3）；deny/grant/固化配置/yolo/read 五档在 Adapter 排律内求值，
+// 不经过 handler（src/tools/policy.ts 六档排律）。
+// 恢复入口（S4）：/resume <sessionId> 的对账流程在 application/resume.ts；本入口提供
+// rebind 工厂——按 cli resume 同一配方（restoredGrants 种子 + buildRuntime + 旧运行面
+// 释放）装配目标会话运行面，壳换绑后同 sessionId 续跑（重启 TUI 恢复已有会话的路径：
+// 重启后进 /resume）。
+// M5.5 S4（决策 040）：主会话与各 worker 的审批经同一队列汇聚到面板（一次一个）；每个会话运行面
+// 配一个编排器（/spawn /cancel /workers）；恢复 worker 会话时回到它自己的工作树与委派策略，
+// 且其编排器按深度 1 拒绝再派。一个窗口一个进程：退出时先取消在跑的 worker 并等其收尾记录落盘。
+// 决策 264–268：主会话另给主 agent 注册 spawn_worker（--no-spawn-workers 关掉；沙箱里不派 worker），与 /spawn 共用同一个
+// 编排器——同时在跑的上限对人派的与 agent 派的一并计算；agent 派出的个数按每条输入（一次运行）计。
+// 决策 267：pigeon 不带子命令即启动本界面（命令行对话改由 pigeon --line 进入）。
+// 决策 286：pigeon --continue 接本项目最近的主会话、--resume <id> 接指定会话（启动时直接打开，不另建空会话），
+// --resume 不带会话号开壳后弹出会话选择器；运行期告警在壳接管终端期间落消息区（之前与之后照旧写标准错误输出）；
+// 后台补做复盘的进度进状态栏，消息区只留失败与"全部补完"各一行；输入历史按项目存在 .pigeon/state/tui-history.json。
+// 决策 301：编排面接上编排器的只读观察口、发消息与续做（编排面板、树形视图、进入 worker 会话），树形视图按任务清单标注。
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
@@ -47,6 +67,7 @@ import {
   type TrustChoice,
   trustPromptText,
 } from "../application/session-settings.ts";
+import { createSettingsReloader } from "../application/settings-reload.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
@@ -114,20 +135,23 @@ async function main(argv: string[]): Promise<void> {
   // 它同时是治理根（.pigeon/ 恒在主仓库根，决策 040）
   const workspaceRoot = prepareWorkspace(flags.root);
   // 决策 325、326：旧布局检查、读三层设置成本会话快照、确认会执行命令的条目（壳接管终端之前，行内问答）。
-  // 本进程内的会话（含 /resume 换绑、worker、沙箱会话）都用这一份快照
-  const settings = await openSessionSettings(workspaceRoot, {
+  // 本进程内的会话（含 /resume 换绑、worker、沙箱会话）都用这一份快照，直到 /reload 换上新快照（决策 340）
+  let settings = await openSessionSettings(workspaceRoot, {
     confirmation: { kind: "interactive", ask: askTrustOnStderr },
     notice: (line) => console.error(line),
   });
   // 决策 297–303：编排设定——设置的 orchestration 一节（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
-  const orchestration = orchestrationSettingsOf(flags, settings);
+  let orchestration = orchestrationSettingsOf(flags, settings);
   // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
-  const loopGuard = loopGuardSettingsOf(settings);
+  let loopGuard = loopGuardSettingsOf(settings);
   // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
-  const webTools = webToolsEnabled(flags)
-    ? resolveWebTools({ config: webSectionOf(settings) })
-    : undefined;
-  const webToolsOption = webTools !== undefined ? { webTools } : {};
+  const webToolsFor = (snapshot: typeof settings) => {
+    const webTools = webToolsEnabled(flags)
+      ? resolveWebTools({ config: webSectionOf(snapshot) })
+      : undefined;
+    return webTools !== undefined ? { webTools } : {};
+  };
+  let webToolsOption = webToolsFor(settings);
   // 决策 286：启动时打开哪个会话（新会话，或 --continue / --resume <id> 直接续接）；会话不存在等在接管终端前报错
   const target = resolveStartTarget(workspaceRoot, continued.mode, flags.sandbox !== undefined);
   if (target.kind === "new" && target.note !== undefined) {
@@ -371,6 +395,65 @@ async function main(argv: string[]): Promise<void> {
     // 旧运行面不受影响，壳继续留在原会话
     // 沙箱会话里不提供换绑（命令给出原因）
     ...(sandbox !== undefined ? {} : { resume: resumeOptions() }),
+    // 决策 340：/reload 重读设置，新快照自下一轮起生效
+    reload: createSettingsReloader({
+      current: () => settings,
+      busy: () =>
+        slot.workers
+          ?.status()
+          .some((worker) => worker.state === "running" || worker.state === "queued") === true
+          ? "有 worker 仍在运行：先 /cancel 或等其收尾，再 /reload"
+          : undefined,
+      sandboxSessionId: () => (sandbox !== undefined ? slot.sessionId : undefined),
+      apply: async (snapshot) => {
+        // 新快照与由它得出的编排设定、打转检测、联网工具一并换上，再按新快照在同一会话上重建运行面：内容未变的 MCP 连接
+        // 与系统提示里开局冻结的部分沿用旧运行面的（reloadFrom），只重启改过的服务
+        settings = snapshot;
+        orchestration = orchestrationSettingsOf(flags, snapshot);
+        loopGuard = loopGuardSettingsOf(snapshot);
+        webToolsOption = webToolsFor(snapshot);
+        await slot.bundle.sessionStore.flush();
+        const opened = await openSessionRuntime({
+          governanceRoot: workspaceRoot,
+          settings,
+          sessionId: slot.sessionId,
+          streamFn,
+          flags,
+          ...verifyOption(flags, workspaceRoot),
+          ...retryOption(flags),
+          ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+          ...spawnWorkerOption(flags, orchestration),
+          taskList: orchestration.taskList,
+          ...webToolsOption,
+          warn,
+          createApprovalHandler: createHandler,
+          resume: true,
+          reloadFrom: slot.bundle,
+          onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
+        });
+        const bundle = opened.bundle;
+        guardMainAgent(bundle);
+        const workers =
+          sandbox === undefined ? workersFor(opened, opened.scope.parentSessionId) : undefined;
+        const previous = slot;
+        slot = {
+          sessionId: previous.sessionId,
+          bundle,
+          ...(workers !== undefined ? { workers } : {}),
+        };
+        await disposeRuntime(previous.bundle).catch(() => {});
+        shellHolder.current?.rebindSession(slot.sessionId, {
+          runtime: bundle.adapter,
+          grants: {
+            root: workspaceRoot,
+            store: bundle.grantStore,
+            configRules: bundle.configGrants,
+            layeredRules: bundle.settings.grants,
+          },
+          ...(workers !== undefined ? { workers } : {}),
+        });
+      },
+    }),
     // 决策 294 B1：/tasks 查看当前会话的任务清单（换绑后跟着当前会话）
     tasks: () => {
       const list = slot.bundle.taskList;

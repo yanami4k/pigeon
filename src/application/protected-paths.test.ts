@@ -2,16 +2,28 @@
 // worker 自己工作树内的默认放行也不适用；yolo 下放行；符号链接指进 .pigeon 的写入同样要批；批准提示写明受保护路径。
 // 判定本身（词法、真实路径、大小写）另有单元用例。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { ApprovalRequest } from "../approvals/handler.ts";
+import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import { asGrantId, newSessionId } from "../state/ids.ts";
+import { noMcpSession } from "./mcp.ts";
 import { createProtectedPathResolver } from "./protected-paths.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
+import { openSessionRuntime } from "./session-runtime.ts";
 
 const roots: string[] = [];
 after(() => {
@@ -202,4 +214,71 @@ test("判定：worker 的工作树在治理根的 .pigeon/state 下——树里�
   assert.equal(resolve("src/new.ts"), undefined);
   assert.equal(resolve(".pigeon/settings.json"), ".pigeon/settings.json");
   assert.equal(resolve("up/settings.json"), ".pigeon/settings.json");
+});
+
+test("沙箱（容器执行端）：写成容器内绝对路径的 .pigeon 写入、经容器里的符号链接写进 .pigeon 都要人批；配置放权对普通文件照常生效", async () => {
+  const governance = mkdtempSync(join(tmpdir(), "pigeon-protected-gov-"));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-protected-home-"));
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), "pigeon-protected-box-")));
+  roots.push(governance, home, workspace);
+  const { host, containerRoot, cleanup } = localDockerHost(workspace);
+  try {
+    mkdirSync(join(workspace, ".pigeon"), { recursive: true });
+    writeFileSync(join(workspace, ".pigeon", "settings.json"), "a\n");
+    writeFileSync(join(workspace, "plain.txt"), "a\n");
+    symlinkSync(".pigeon", join(workspace, "cfg"));
+    mkdirSync(join(governance, ".pigeon"), { recursive: true });
+    writeFileSync(
+      join(governance, ".pigeon", "settings.local.json"),
+      JSON.stringify({ permissions: { grants: [configRule] } })
+    );
+    const absolute = `${containerRoot}/.pigeon/settings.json`;
+    const edits = (target: string) => [
+      { text: "读", toolCalls: [{ name: "read_file", args: { path: target } }] },
+      {
+        text: "改",
+        toolCalls: [
+          { name: "edit_file", args: { path: target, old_string: "a", new_string: "B" } },
+        ],
+      },
+    ];
+    const asked: ApprovalRequest[] = [];
+    const opened = await openSessionRuntime({
+      governanceRoot: governance,
+      settings: loadSettings(governance, { homeDir: home }),
+      sessionId: newSessionId(),
+      streamFn: createFakeStreamFn({
+        replies: [
+          ...edits(absolute),
+          ...edits("cfg/new.json"),
+          ...edits("plain.txt"),
+          { text: "完" },
+        ],
+      }),
+      flags: { yolo: false, provider: "fake", modelId: "fake", persistThinking: true },
+      workspaceHost: host,
+      homeDir: home,
+      startMcp: noMcpSession,
+      createApprovalHandler: () => async (request) => {
+        asked.push(request);
+        return { approved: false };
+      },
+    });
+    try {
+      await opened.bundle.adapter.run("改");
+    } finally {
+      await disposeRuntime(opened.bundle);
+    }
+    assert.deepEqual(
+      asked.map((request) => [request.toolName, request.protectedPath]),
+      [
+        ["edit_file", ".pigeon/settings.json"],
+        ["edit_file", ".pigeon/new.json"],
+      ]
+    );
+    assert.equal(readFileSync(join(workspace, ".pigeon", "settings.json"), "utf8"), "a\n");
+    assert.equal(readFileSync(join(workspace, "plain.txt"), "utf8"), "B\n");
+  } finally {
+    cleanup();
+  }
 });

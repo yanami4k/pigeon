@@ -9,6 +9,7 @@
 //   旧的人写说明（.pigeon/memory/、~/.pigeon/preferences.md）。
 import { homedir } from "node:os";
 import path from "node:path";
+import { sha256Hex } from "./hashing.ts";
 
 // 目录名本身（只此一处字面量）
 export const PIGEON_DIR = ".pigeon";
@@ -129,7 +130,7 @@ export function localSettingsLockPathOf(root: string): string {
   return `${projectLocalSettingsPath(root)}.lock`;
 }
 
-// 受保护路径（决策 326 ①）：项目的 .pigeon 目录下任何路径
+// 相对仓库根的路径（正斜杠）是否在项目的 .pigeon 下：叠回 worker 改动时据此找出写受保护路径的文件（决策 340）
 export function isUnderPigeonDir(relativePosixPath: string): boolean {
   return relativePosixPath === PIGEON_DIR || relativePosixPath.startsWith(`${PIGEON_DIR}/`);
 }
@@ -159,6 +160,17 @@ export function userSettingsPath(homeDir: string = homedir()): string {
 
 export function userStateDir(homeDir: string = homedir()): string {
   return path.join(homeDir, PIGEON_DIR, STATE_DIR);
+}
+
+// 迁移备份（决策 341）：迁移命令挪走的旧文件放在用户级程序状态下按项目分开的目录，仓库里不留备份（旧 web.json 里可能有 key）。
+// 目录名取项目目录名加规范化路径的 sha256 前 12 位：同名项目不相撞，人也认得出是哪个项目。规范化由调用方做
+export function migrationBackupDirOf(normalizedRoot: string, homeDir: string = homedir()): string {
+  const name = path.basename(normalizedRoot).replace(/[^\p{L}\p{N}._-]/gu, "_") || "root";
+  return path.join(
+    userStateDir(homeDir),
+    "migration-backup",
+    `${name}-${sha256Hex(normalizedRoot).slice(0, 12)}`
+  );
 }
 
 // 会执行命令的配置的内容指纹记录（决策 326 ③）

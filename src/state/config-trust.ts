@@ -1,6 +1,7 @@
 // 会执行命令的配置按内容确认（决策 326 ③）：纯判据，无 IO。
-// 条目：三层设置里 commands 一节的每个短名、sandbox 一节（含其指向的项目 Dockerfile 的内容）、以及 MCP 服务的每个启动定义
-// （项目根 .mcp.json 与设置 mcp 一节里给了 launch 的）。按"条目"建模，钩子一段把每个钩子加进来。
+// 条目：三层设置里 commands 一节的每个短名、sandbox 一节（含其指向的项目 Dockerfile 的内容）、MCP 服务的每个启动定义
+// （项目根 .mcp.json 与设置 mcp 一节里给了 launch 的），以及项目共享层 permissions 一节的每条放行规则（决策 341；
+// 用户级与项目个人层的放权由使用者自己写入，直接生效、不列为条目）。按"条目"建模，钩子一段把每个钩子加进来。
 // 指纹：条目内容的规范化 JSON（键排序）的 sha256；Dockerfile 再并入文件内容。内容与上次确认记下的不同（含首次出现）即未确认。
 // 信任目录只来自用户级设置的 trustedDirectories：项目规范化路径位于其中任一目录之下时免于确认。
 import path from "node:path";
@@ -9,18 +10,19 @@ import type { McpLaunch } from "./mcp-config.ts";
 import { mergeMcpConfig } from "./mcp-config.ts";
 import { SETTINGS_LAYER_LABELS, type SettingsLayer, type SettingsSnapshot } from "./settings.ts";
 
-export const TRUST_ENTRY_KINDS = ["command", "sandbox", "mcp-server"] as const;
+export const TRUST_ENTRY_KINDS = ["command", "sandbox", "mcp-server", "permission"] as const;
 export type TrustEntryKind = (typeof TRUST_ENTRY_KINDS)[number];
 
 export const TRUST_KIND_LABELS: Readonly<Record<TrustEntryKind, string>> = {
   command: "命令短名",
   sandbox: "沙箱配置",
   "mcp-server": "MCP 服务",
+  permission: "放行规则",
 };
 
 export interface TrustEntry {
   kind: TrustEntryKind;
-  // 条目标识（短名、server 名；沙箱为 sandbox）
+  // 条目标识（短名、server 名；沙箱为 sandbox；放行规则为指纹前 12 位，内容一变即是另一条）
   id: string;
   // 来自哪里（层的说法或 .mcp.json）
   origin: string;
@@ -101,7 +103,26 @@ export function trustEntriesOf(input: TrustEntriesInput): TrustEntry[] {
       fingerprint: sha256Hex(canonicalJson(server.launch)),
     });
   }
+  // 项目共享层的放行规则：逐条按整条规则的规范化 JSON 记指纹（同样内容的多条只列一次）
+  const rules = new Set<string>();
+  for (const { layer, rule } of snapshot.grants) {
+    if (layer !== "project") continue;
+    const fingerprint = permissionFingerprintOf(rule);
+    if (rules.has(fingerprint)) continue;
+    rules.add(fingerprint);
+    entries.push({
+      kind: "permission",
+      id: fingerprint.slice(0, 12),
+      origin: SETTINGS_LAYER_LABELS.project,
+      summary: canonicalJson(rule),
+      fingerprint,
+    });
+  }
   return entries;
+}
+
+function permissionFingerprintOf(rule: unknown): string {
+  return sha256Hex(canonicalJson(rule));
 }
 
 // 确认记录：条目键 → 指纹
@@ -128,7 +149,7 @@ export function withinTrustedDirectory(
   });
 }
 
-// 去掉本次不用的条目：短名（连同角色清单里对它的引用）、沙箱一节、MCP 服务
+// 去掉本次不用的条目：短名（连同角色清单里对它的引用）、沙箱一节、MCP 服务、项目共享层的放行规则
 export function withoutTrustEntries(
   snapshot: SettingsSnapshot,
   excluded: readonly TrustEntry[]
@@ -137,6 +158,13 @@ export function withoutTrustEntries(
   const commandNames = new Set(excluded.filter((e) => e.kind === "command").map((e) => e.id));
   const servers = new Set(excluded.filter((e) => e.kind === "mcp-server").map((e) => e.id));
   const dropSandbox = excluded.some((e) => e.kind === "sandbox");
+  const rules = new Set(excluded.filter((e) => e.kind === "permission").map((e) => e.fingerprint));
+  const grants =
+    rules.size > 0
+      ? snapshot.grants.filter(
+          (entry) => entry.layer !== "project" || !rules.has(permissionFingerprintOf(entry.rule))
+        )
+      : snapshot.grants;
   const merged = { ...snapshot.merged };
   if (commandNames.size > 0 && merged.commands !== undefined) {
     const commands = Object.fromEntries(
@@ -148,7 +176,10 @@ export function withoutTrustEntries(
         names.filter((name) => !commandNames.has(name)),
       ])
     );
-    merged.commands = { commands, roles };
+    merged.commands = {
+      commands,
+      ...(merged.commands.roles !== undefined ? { roles } : {}),
+    };
   }
   if (dropSandbox) {
     delete merged.sandbox;
@@ -175,9 +206,63 @@ export function withoutTrustEntries(
   return {
     ...rest,
     merged,
+    grants,
     ...(dotMcp !== undefined ? { dotMcp } : {}),
     excluded: [...(snapshot.excluded ?? []), ...excluded.map((entry) => trustKeyOf(entry))],
   };
+}
+
+// /reload 时不确认的条目沿用原内容（决策 340）：把新快照里这些条目换回当前快照里的样子；当前快照里没有的即不启用。
+// 放行规则以内容为标识，有变化即是当前快照里没有的一条，一律不启用
+export function revertTrustEntries(
+  next: SettingsSnapshot,
+  current: SettingsSnapshot,
+  entries: readonly TrustEntry[]
+): SettingsSnapshot {
+  if (entries.length === 0) return next;
+  const merged = { ...next.merged };
+  let dotMcp = next.dotMcp;
+  const dropped: TrustEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "permission") {
+      dropped.push(entry);
+    } else if (entry.kind === "command") {
+      const previous = current.merged.commands?.commands?.[entry.id];
+      if (previous === undefined) {
+        dropped.push(entry);
+        continue;
+      }
+      merged.commands = {
+        ...merged.commands,
+        commands: { ...(merged.commands?.commands ?? {}), [entry.id]: previous },
+      };
+    } else if (entry.kind === "sandbox") {
+      if (current.merged.sandbox === undefined) {
+        delete merged.sandbox;
+      } else {
+        merged.sandbox = current.merged.sandbox;
+      }
+    } else {
+      const previousSettings = current.merged.mcp?.servers?.[entry.id];
+      const previousDot = current.dotMcp?.mcpServers[entry.id];
+      const servers = { ...(merged.mcp?.servers ?? {}) };
+      if (previousSettings === undefined) delete servers[entry.id];
+      else servers[entry.id] = previousSettings;
+      merged.mcp = { ...merged.mcp, servers };
+      const dotServers = { ...(dotMcp?.mcpServers ?? {}) };
+      if (previousDot === undefined) delete dotServers[entry.id];
+      else dotServers[entry.id] = previousDot;
+      dotMcp = { ...dotMcp, mcpServers: dotServers };
+    }
+  }
+  const { dotMcp: _old, ...rest } = next;
+  const reverted: SettingsSnapshot = {
+    ...rest,
+    merged,
+    ...(dotMcp !== undefined ? { dotMcp } : {}),
+  };
+  // 原来没有的短名与放行规则：照"本次不用"去掉（短名连同角色清单里的引用）
+  return withoutTrustEntries(reverted, dropped);
 }
 
 // 给人看的一行

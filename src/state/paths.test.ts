@@ -8,6 +8,7 @@ import {
   isProgramOwnedPath,
   isUnderPigeonDir,
   mapLegacyWorktreePath,
+  migrationBackupDirOf,
   projectLocalSettingsPath,
   sessionsDirOf,
   userSettingsPath,
@@ -22,6 +23,16 @@ test("位置：程序状态在 .pigeon/state/ 下；用户级在注入的主目�
   assert.equal(configTrustPathOf("/h"), join("/h", ".pigeon", "state", "config-trust.json"));
 });
 
+test("迁移备份在用户级程序状态下按项目分开：目录名为项目目录名加规范化路径的哈希，同名项目不相撞", () => {
+  const a = migrationBackupDirOf("/w/one/app", "/h");
+  const b = migrationBackupDirOf("/w/two/app", "/h");
+  assert.equal(join(a, ".."), join("/h", ".pigeon", "state", "migration-backup"));
+  assert.match(a, /app-[0-9a-f]{12}$/);
+  assert.notEqual(a, b);
+  assert.equal(migrationBackupDirOf("/w/one/app", "/h"), a, "同一项目总是同一目录");
+  assert.match(migrationBackupDirOf("/w/my app:x", "/h"), /my_app_x-[0-9a-f]{12}$/);
+});
+
 test("快照与叠加排除的只是程序状态与个人设置；可提交的设置与技能不排除", () => {
   assert.equal(isProgramOwnedPath(".pigeon/state/sessions/a.jsonl"), true);
   assert.equal(isProgramOwnedPath(".pigeon/settings.local.json"), true);
@@ -29,6 +40,7 @@ test("快照与叠加排除的只是程序状态与个人设置；可提交的�
   assert.equal(isProgramOwnedPath(".pigeon/skills/x/SKILL.md"), false);
   assert.equal(isProgramOwnedPath(".pigeon/stateful.txt"), false);
   assert.equal(isUnderPigeonDir(".pigeon/settings.json"), true);
+  assert.equal(isUnderPigeonDir(".pigeonx/a"), false);
   assert.equal(isUnderPigeonDir("src/.pigeon/x"), false);
 });
 

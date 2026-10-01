@@ -5,6 +5,7 @@
 // 另含：项目程序状态目录 .pigeon/state/ 与 .pigeon/.gitignore 的建立（第一次建状态目录或个人设置时写入 .gitignore）。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import path from "node:path";
 import type { DotMcpJson } from "../state/mcp-config.ts";
 import {
   dotMcpJsonPathOf,
@@ -95,6 +96,15 @@ export function loadSettings(root: string, options: LoadSettingsOptions = {}): S
   if (problems.length > 0) {
     throw new SettingsError(`设置合并后校验失败：${problems.join("；")}`);
   }
+  const dockerfile = result.merged.sandbox?.dockerfile;
+  let dockerfileContent: string | undefined;
+  if (dockerfile !== undefined) {
+    try {
+      dockerfileContent = readFileSync(path.resolve(root, dockerfile), "utf8");
+    } catch {
+      dockerfileContent = undefined;
+    }
+  }
   return {
     root,
     sources,
@@ -103,6 +113,7 @@ export function loadSettings(root: string, options: LoadSettingsOptions = {}): S
     sectionSources: result.sectionSources,
     commandSources: result.commandSources,
     ...(dotMcp !== undefined ? { dotMcp } : {}),
+    ...(dockerfileContent !== undefined ? { dockerfileContent } : {}),
   };
 }
 

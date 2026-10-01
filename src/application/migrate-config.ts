@@ -3,8 +3,9 @@
 // 钩子一段加"verify.json → 打印改写为收尾钩子的示例并改名备份"，记忆一段加 memory-review.json 与旧记忆的处理。
 // 本段的三步：
 //   ① 旧配置：7 个旧文件各成一节写入设置（permissions 写项目个人 .pigeon/settings.local.json，其余写项目共享
-//      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件改名为
-//      <原名>.bak。目标文件已存在时合并进去：同一节两边都有且内容不同即报错停下、不覆盖；
+//      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件挪出
+//      仓库，进用户级本项目的备份目录（决策 341，迁移结束打印位置；仓库里不留备份）。目标文件已存在时合并进去：
+//      同一节两边都有且内容不同即报错停下、不覆盖；
 //   ② 程序状态：会话、学到的记忆与其锁、补做复盘记录、输入历史、终端界面日志挪进 .pigeon/state/ 对应位置；
 //   ③ worker 工作树：git worktree move 到 .pigeon/state/worktrees/。
 // 有锁被存活进程占用（会话正开着、worker 正在运行）或工作树被锁定时拒绝并说明。可重复执行：没有要做的事即如实说明。
@@ -19,9 +20,15 @@ import {
   rmdirSync,
   statSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { writeFileAtomic } from "../persistence/atomic-write.ts";
 import { lockHeldByLiveProcess } from "../persistence/exclusive-lock.ts";
+import {
+  migrationBackupConflict,
+  migrationBackupLocation,
+  moveToMigrationBackup,
+} from "../persistence/migration-backup.ts";
 import { ensurePigeonGitignore } from "../persistence/settings.ts";
 import { canonicalJson } from "../state/hashing.ts";
 import {
@@ -32,6 +39,7 @@ import {
   legacyStatePath,
   pigeonRel,
   projectLocalSettingsPath,
+  projectPigeonDir,
   projectSettingsPath,
   SETTINGS_FILE,
   STATE_DIR,
@@ -45,6 +53,10 @@ export const MIGRATE_CONFIG_USAGE = "用法：pigeon migrate-config [--root <项
 
 export interface MigrationContext {
   root: string;
+  // 用户主目录（迁移备份在其下；测试注入临时目录）
+  homeDir: string;
+  // 本次挪进备份目录的位置（迁移结束据此打印备份目录）
+  backups: string[];
 }
 
 export interface MigrationPlan {
@@ -145,7 +157,10 @@ function readTarget(file: string, label: string): Record<string, unknown> {
 }
 
 // 算出两层目标文件迁移后的内容；冲突与校验问题进 blockers
-function plannedConfigs(root: string): {
+function plannedConfigs(
+  root: string,
+  homeDir: string
+): {
   converted: ConvertedConfig[];
   targets: Map<Exclude<SettingsLayer, "user">, Record<string, unknown>>;
   blockers: string[];
@@ -154,8 +169,9 @@ function plannedConfigs(root: string): {
   const blockers: string[] = [];
   for (const legacy of LEGACY_CONFIG_FILES) {
     if (!existsSync(legacyConfigPath(root, legacy.file))) continue;
-    if (existsSync(`${legacyConfigPath(root, legacy.file)}.bak`)) {
-      blockers.push(`${pigeonRel(`${legacy.file}.bak`)} 已存在，不覆盖备份；请先处理它`);
+    const occupied = migrationBackupConflict(root, legacy.file, homeDir);
+    if (occupied !== undefined) {
+      blockers.push(occupied);
       continue;
     }
     try {
@@ -199,17 +215,17 @@ export const legacyConfigStep: MigrationStep = {
   id: "legacy-config",
   title: "旧配置文件并入设置",
   plan(ctx) {
-    const { converted, blockers } = plannedConfigs(ctx.root);
+    const { converted, blockers } = plannedConfigs(ctx.root, ctx.homeDir);
     return {
       todo: converted.map(
         (item) =>
-          `${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节（原文件改名为 ${pigeonRel(`${item.file}.bak`)}）`
+          `${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节（原文件挪进备份目录）`
       ),
       blockers,
     };
   },
   apply(ctx) {
-    const { converted, targets, blockers } = plannedConfigs(ctx.root);
+    const { converted, targets, blockers } = plannedConfigs(ctx.root, ctx.homeDir);
     if (blockers.length > 0) {
       throw new MigrationError(blockers.join("\n"));
     }
@@ -222,9 +238,9 @@ export const legacyConfigStep: MigrationStep = {
     }
     for (const item of converted) {
       const source = legacyConfigPath(ctx.root, item.file);
-      renameSync(source, `${source}.bak`);
+      ctx.backups.push(moveToMigrationBackup(ctx.root, source, item.file, ctx.homeDir));
       lines.push(
-        `已迁移 ${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节；原文件改名为 ${pigeonRel(`${item.file}.bak`)}`
+        `已迁移 ${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节；原文件已挪进备份目录`
       );
       for (const env of item.keyEnvs) {
         lines.push(`  ${pigeonRel(item.file)} 里的 key 没有写入设置：请改设环境变量 ${env}`);
@@ -434,9 +450,10 @@ export interface MigrateConfigResult {
 // 先逐步检查，全部没有拦住的问题才逐步执行
 export function runMigrateConfig(
   root: string,
-  steps: readonly MigrationStep[] = MIGRATION_STEPS
+  options: { homeDir?: string; steps?: readonly MigrationStep[] } = {}
 ): MigrateConfigResult {
-  const ctx: MigrationContext = { root };
+  const steps = options.steps ?? MIGRATION_STEPS;
+  const ctx: MigrationContext = { root, homeDir: options.homeDir ?? homedir(), backups: [] };
   const plans = steps.map((step) => ({ step, plan: step.plan(ctx) }));
   const blockers = plans.flatMap(({ step, plan }) =>
     plan.blockers.map((blocker) => `[${step.title}] ${blocker}`)
@@ -449,9 +466,16 @@ export function runMigrateConfig(
     return { changed: false, lines: ["没有要迁移的内容：配置与程序状态已是新布局"] };
   }
   const lines: string[] = [];
+  // 每次迁移都确保 .pigeon/.gitignore（程序状态与个人设置不被提交；只迁项目共享层的文件时也一样）
+  if (existsSync(projectPigeonDir(root))) {
+    ensurePigeonGitignore(root, (line) => lines.push(line));
+  }
   for (const { step } of pending) {
     lines.push(`${step.title}：`);
     lines.push(...step.apply(ctx).map((line) => `  ${line}`));
+  }
+  if (ctx.backups.length > 0) {
+    lines.push(`迁移挪走的旧文件原文备份在 ${migrationBackupLocation(root, ctx.homeDir)}`);
   }
   return { changed: true, lines };
 }

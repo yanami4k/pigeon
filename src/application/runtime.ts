@@ -2,7 +2,7 @@
 // 会话存储写者 + grant 运行态。审批 handler 由调用方注入（cli 传 REPL 问答版，tui 传面板版）——
 // 工厂形态而非成品：装配根先建 grantStore，审批提示的 [a]/[d] 放权键需要它，
 // 故调用方给一个"拿到 store 再造 handler"的工厂。
-// 会话存储（决策 176 / 210）：<governanceRoot>/.pigeon/sessions/<工作目录编码>/ 下的 pi 会话文件（M5.5 S1 治理根缺省
+// 会话存储（决策 176 / 210）：<governanceRoot>/.pigeon/state/sessions/<工作目录编码>/ 下的 pi 会话文件（M5.5 S1 治理根缺省
 // 同工作区根），交给 Adapter 写消息与 Run 起止，授权经落盘口写入；续跑复用同一 sessionId 打开同一文件续写；
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
@@ -17,9 +17,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { loadAgentsInstructions } from "../memory/agents-md.ts";
+import { type AgentsMdInstructions, loadAgentsInstructions } from "../memory/agents-md.ts";
 import type { MemoryLayer } from "../memory/learned.ts";
-import { loadPushedMemory } from "../memory/pushed.ts";
+import { loadPushedMemory, type PushedMemory } from "../memory/pushed.ts";
 import {
   createReadSessionEntryTool,
   createSearchSessionsTool,
@@ -45,7 +45,12 @@ import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
-import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
+import {
+  type LocalSkillScan,
+  loadSkillCatalog,
+  type SkillRoot,
+  scanLocalSkills,
+} from "../skills/catalog.ts";
 import {
   createLoadSkillTool,
   LOAD_SKILL_TOOL,
@@ -97,7 +102,7 @@ import {
   WAIT_WORKERS_TOOL,
   WORKER_STATUS_TOOL,
 } from "./orchestration-tools.ts";
-import { createProtectedPathResolver } from "./protected-paths.ts";
+import { createHostProtectedPathResolver, createProtectedPathResolver } from "./protected-paths.ts";
 import {
   createOrchestrateTool,
   ORCHESTRATE_TOOL,
@@ -170,7 +175,7 @@ export interface RuntimeDeps {
   homeDir?: string;
   // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖；缺省 off
   thinkingLevel?: ThinkingLevel;
-  // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受 .pigeon/commands.json 为该角色登记的
+  // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受设置的 commands 一节为该角色登记的
   // 命令（未登记即一条都不许）；主会话缺省，不受清单限制
   commandRole?: WorkerRole;
   // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
@@ -212,6 +217,8 @@ export interface RuntimeDeps {
   // 决策 191、244、331、332：推送记忆。在场即开着——开局推送两层记忆；带写入配置时另注册 update_memory。缺省关着
   // （装配层缺省；日常入口由启动参数缺省打开，跑批器按条件明确指定）
   learnedMemory?: LearnedMemoryConfig;
+  // 决策 340：/reload 重建时沿用旧运行面开局读到的人写说明（AGENTS.md）、推送的记忆与本地 Skill 扫描结果（不重读文件）
+  frozenPrompt?: FrozenSessionPrompt;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
@@ -265,6 +272,14 @@ export const WEB_TOOLS_SENTENCE =
   "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
   "web_fetch 只交回按问题提炼的结果，不交回网页原文。";
 
+// 系统提示里会话开始时读取并冻结的部分（决策 191、330、332）：人写的说明（AGENTS.md）、
+// 推送的记忆、本地 Skill 的扫描结果。/reload 重建运行面时沿用（决策 340），不重读文件
+export interface FrozenSessionPrompt {
+  instructions: AgentsMdInstructions;
+  pushedMemory?: PushedMemory;
+  localSkills: LocalSkillScan;
+}
+
 export interface RuntimeBundle {
   adapter: PiRuntimeAdapter;
   // 本会话的会话存储写者（决策 176）
@@ -286,6 +301,8 @@ export interface RuntimeBundle {
   instructionsNotice?: string;
   // 决策 294 B1：任务清单开着时在场（续聊时从会话还原、/tasks 查看）
   taskList?: TaskList;
+  // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
+  frozenPrompt: FrozenSessionPrompt;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -455,23 +472,27 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 330：会话开始读人写的说明（AGENTS.md），拼进 system prompt 一次即冻结（不走 transformContext）；清单进注入快照，
   // 会话中途改文件下个会话才生效。本地工作区从工作区根往上读（worker 即它自己的工作树）；沙箱读宿主上的工作区（治理根），
   // 与本机会话内容一致
+  // 决策 340：/reload 重建运行面时沿用开局冻结的内容（不重读文件）
+  const frozen = deps.frozenPrompt;
   const instructions =
     deps.agentsMd === false
       ? { section: "", manifest: [] }
-      : loadAgentsInstructions({
+      : (frozen?.instructions ??
+        loadAgentsInstructions({
           workspaceRoot: deps.workspaceHost === undefined ? deps.workspaceRoot : governanceRoot,
           ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-        });
+        }));
   // 决策 191、332：会话开始读两层学到的记忆，整份推入、即冻结；清单进 Run 开始条目
   const pushedMemory =
     learned !== undefined
-      ? loadPushedMemory({
+      ? (frozen?.pushedMemory ??
+        loadPushedMemory({
           governanceRoot,
           ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
           limits: memoryLimits,
           writable: memoryWrite !== undefined,
           ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
-        })
+        }))
       : undefined;
   const editSentence = replaceMode
     ? "你是 Pigeon 编程助手。用 read_file 读取文件（每行形如「行号| 内容」），" +
@@ -490,12 +511,19 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
+  // 本地 Skill 开局扫描一次（/reload 沿用）；MCP server 的 prompts 随本运行面的 MCP 会话
+  const localSkills =
+    frozen?.localSkills ??
+    scanLocalSkills({
+      workspaceRoot: governanceRoot,
+      ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+      ...(deps.skillRoots !== undefined ? { roots: deps.skillRoots } : {}),
+    });
   const skillCatalog = loadSkillCatalog({
     workspaceRoot: governanceRoot,
-    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    local: localSkills,
     // M5.7 S4（043 口径）：MCP server 的 prompts 以 server 为来源进同一目录
     ...(deps.mcp !== undefined && deps.mcp.prompts.length > 0 ? { prompts: deps.mcp.prompts } : {}),
-    ...(deps.skillRoots !== undefined ? { roots: deps.skillRoots } : {}),
   });
   const hasSkills = skillCatalog.skills.length > 0;
   if (hasSkills) {
@@ -693,12 +721,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       workspaceRoot: deps.workspaceRoot,
       // 决策 302：worker 改自己工作树内的文件默认放行
       ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
-      // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按真实路径判定，容器工作区只做词法判定）
-      protectedPath: createProtectedPathResolver({
-        workspaceRoot: deps.workspaceRoot,
-        governanceRoot,
-        realPaths: deps.workspaceHost === undefined,
-      }),
+      // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按宿主上的真实路径判定，容器工作区经执行端在容器里判定）
+      protectedPath:
+        deps.workspaceHost !== undefined
+          ? createHostProtectedPathResolver(deps.workspaceHost)
+          : createProtectedPathResolver({
+              workspaceRoot: deps.workspaceRoot,
+              governanceRoot,
+              realPaths: true,
+            }),
     }),
     sessionId: deps.sessionId,
     sessionStore,
@@ -719,6 +750,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     configGrants,
     settings,
     toolTiers,
+    frozenPrompt: {
+      instructions,
+      ...(pushedMemory !== undefined ? { pushedMemory } : {}),
+      localSkills,
+    },
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),
     ...("notice" in instructions && instructions.notice !== undefined

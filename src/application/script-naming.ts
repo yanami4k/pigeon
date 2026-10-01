@@ -64,7 +64,7 @@ export interface ScriptGateSettings {
   defaultBudget?: ScriptBudget;
 }
 
-// 项目配置（.pigeon/orchestration.json 的 script 段）→ 点名的设定；缺省额度写法不对即响亮失败
+// 项目配置（设置的 orchestration 一节的 script 段）→ 点名的设定；缺省额度写法不对即响亮失败
 export function scriptGateSettingsOf(settings: {
   scriptModelDecides: boolean;
   scriptBudget?: string;

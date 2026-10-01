@@ -3,7 +3,7 @@
 //   - read_session_entry：按条目号返回一条消息的完整内容块，满足 §3.3 结论回查原文。
 // 两者经只读读取器读新会话存储（决策 181 / 185）；agent 可见的说明与输出冻结，只去掉了治理邻居与正文哈希两部分。
 // 两者都是 read 档（§3.9 第 5 档自动放行），调用天然落 tool.proposed / tool.settled——模型翻了
-// 哪些旧账在 trace 可见。范围只限本项目 .pigeon/sessions，目录由装配根注入。
+// 哪些旧账在 trace 可见。范围只限本项目 .pigeon/state/sessions，目录由装配根注入。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";

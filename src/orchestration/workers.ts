@@ -192,7 +192,7 @@ export interface WorkspaceProvider {
   changedFiles(workspace: WorkerWorkspace): string[];
 }
 
-// 仓库根与治理根分开传（M6.5 S2）：工作树与分支建在仓库根上，目录放在治理根的 .pigeon/worktrees 下。
+// 仓库根与治理根分开传（M6.5 S2）：工作树与分支建在仓库根上，目录放在治理根的 .pigeon/state/worktrees 下。
 // 主会话派 worker 时两者同为主仓库根；Eval 的治理根是输出目录
 export function gitWorktreeWorkspaces(roots: {
   repoRoot: string;

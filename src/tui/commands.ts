@@ -66,6 +66,8 @@ export interface CommandsHost {
   takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
+  // 决策 340：/reload 重读设置（装配方给了重载入口才在场）
+  readonly reloadCommand?: ((args: readonly string[]) => void) | undefined;
   // 决策 294 B1：任务清单（排好的文字）；undefined = 清单没开；缺省 = /tasks 不可用
   tasks?(): string | undefined;
   // 决策 301：/agents 切换树形视图
@@ -86,6 +88,7 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     hasGrants: () => host.grants() !== undefined,
     inSandbox: () => host.sandbox?.() !== undefined,
     tasks: () => host.tasks !== undefined,
+    reload: () => host.reloadCommand !== undefined,
     scripts: () => host.scriptCommands?.() !== undefined,
     memory: () => host.memory?.() !== undefined,
     workers: () => {
@@ -279,6 +282,11 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）
     if (tokens[0] === "compact") {
       host.compactCommand(compactFocusOf(value));
+      return;
+    }
+    // 决策 340：/reload 重读设置（结果与待确认条目写进消息区）
+    if (tokens[0] === "reload" && host.reloadCommand !== undefined) {
+      host.reloadCommand(tokens.slice(1));
       return;
     }
     // S4：/resume <sessionId> 冷恢复对账 + 换绑续跑（异步流程，见 resume-view.ts）

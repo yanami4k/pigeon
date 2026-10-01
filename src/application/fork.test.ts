@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -23,6 +24,7 @@ import { NotGitWorkspaceError } from "../orchestration/checkpoint.ts";
 import { sessionFileLockPath } from "../persistence/session-lock.ts";
 import { listSessionFiles, locateSessionFile } from "../persistence/session-reader.ts";
 import { type LoadedStoreSession, loadStoreSession } from "../persistence/session-view.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { ForkError, runForkBranch } from "./fork.ts";
@@ -361,6 +363,51 @@ test("--retry-on-fail 1：首次失败后从任务开始处分叉重试（不注
       [],
       "来源会话没有未收尾的 Run"
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("--retry-on-fail：重试沿用本次运行的设置快照（项目个人设置里的 edit_file 放权在重试时同样生效）", async () => {
+  const { dir, home, cleanup } = repo();
+  try {
+    mkdirSync(join(dir, ".pigeon"), { recursive: true });
+    writeFileSync(
+      join(dir, ".pigeon", "settings.local.json"),
+      JSON.stringify({
+        permissions: {
+          grants: [
+            {
+              tool: "edit_file",
+              promotedFrom: {
+                grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                firstCall: { toolCallId: "t0", args: {} },
+                promotedAt: 1,
+              },
+            },
+          ],
+        },
+      })
+    );
+    const result = await runHeadless({
+      task: "把 a.txt 改成 new",
+      governanceRoot: dir,
+      workspaceRoot: dir,
+      settings: loadSettings(dir, { homeDir: home }),
+      streamFn: createFakeStreamFn({
+        replies: [edit("wrong\n"), { text: "改好了" }, edit("new\n"), { text: "这次对了" }],
+      }),
+      // 不放手、无人值守：写操作只能凭放权放行
+      yolo: false,
+      homeDir: home,
+      startMcp: noMcp,
+      verify: VERIFY,
+      retryOnFail: 1,
+    });
+    assert.equal(result.label, "Failed");
+    assert.equal(result.retries?.length, 1);
+    assert.equal(result.retries?.[0]?.label, "Passed", "重试里的编辑同样凭放权放行");
   } finally {
     cleanup();
   }

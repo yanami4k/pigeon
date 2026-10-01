@@ -208,3 +208,34 @@ test("终端边界净化（决策 036）：REPL 终态摘要 errorMessage 携带
   );
   assert.ok(!out.includes("\x1b"), "原始 ESC 字节不得写出");
 });
+
+test("决策 326 ①：受保护路径的请示只问 [y/N]；答 a 不建放权、按拒绝处理", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-approval-"));
+  try {
+    const store = new SessionGrantStore({ workspaceRoot: root });
+    const outputs: string[] = [];
+    const answers = ["a", ""];
+    const handler = createCliApprovalHandler(
+      async (prompt) => {
+        outputs.push(prompt);
+        return answers.shift() ?? "";
+      },
+      (text) => outputs.push(text),
+      { grants: store }
+    );
+    const decision = await handler(
+      makeRequest({
+        args: { path: ".pigeon/settings.json" },
+        protectedPath: ".pigeon/settings.json",
+      })
+    );
+    assert.deepEqual(decision, { approved: false });
+    assert.equal(store.list().length, 0);
+    const text = outputs.join("");
+    assert.ok(text.includes("受保护路径：.pigeon/settings.json"), text);
+    assert.ok(text.includes("批准执行？[y/N]"), text);
+    assert.ok(!text.includes("[a] 本会话允许"), text);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

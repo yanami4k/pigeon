@@ -20,7 +20,7 @@ export type ActiveWorkerRole = Extract<WorkerRole, "explorer" | "implementer" | 
 
 export const WORKER_ROLES: readonly ActiveWorkerRole[] = ["explorer", "implementer", "tester"];
 
-// 角色默认工具（ROADMAP §M5.5 角色表）；tester 的 run_command 另受 .pigeon/commands.json 角色清单限定（048）
+// 角色默认工具（ROADMAP §M5.5 角色表）；tester 的 run_command 另受设置的 commands 一节角色清单限定（048）
 // 联网的两件工具三种角色都带（287–291）
 const WEB_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] as const;
 

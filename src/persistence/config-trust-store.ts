@@ -1,4 +1,4 @@
-// 会执行命令的配置的确认记录（决策 326 ③）：用户级 ~/.pigeon/state/config-trust.json，按项目规范化路径 + 条目键记指纹；
+// 会执行命令或放权的配置的确认记录（决策 326 ③、341）：用户级 ~/.pigeon/state/config-trust.json，按项目规范化路径 + 条目键记指纹；
 // 原子写入，读改写在独占锁里做（两个窗口同时确认不互相覆盖）。另给出沙箱配置指向的项目 Dockerfile 的内容（并入指纹）。
 // 记录畸形时响亮失败（指出文件），不当作空记录——当作空只会让人重复确认，但掩盖了文件被改坏。
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -81,10 +81,11 @@ export function recordTrustedEntries(
   }
 }
 
-// 沙箱配置指向的项目 Dockerfile 的内容（不在或读不出为 undefined）
+// 沙箱配置指向的项目 Dockerfile 的内容：取读快照那一刻记下的；没记下（手工拼的快照）才现读，不在或读不出为 undefined
 export function sandboxDockerfileContent(snapshot: SettingsSnapshot): string | undefined {
   const dockerfile = snapshot.merged.sandbox?.dockerfile;
   if (dockerfile === undefined) return undefined;
+  if (snapshot.dockerfileContent !== undefined) return snapshot.dockerfileContent;
   try {
     return readFileSync(path.resolve(snapshot.root, dockerfile), "utf8");
   } catch {

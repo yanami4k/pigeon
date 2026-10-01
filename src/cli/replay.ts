@@ -172,7 +172,7 @@ export function renderRunReplay(
 }
 
 export interface ReplayCommandOptions {
-  // 工作区根（会话在 <root>/.pigeon/sessions/）
+  // 工作区根（会话在 <root>/.pigeon/state/sessions/）
   root: string;
   runId: string;
   // 缺省时跨会话扫描定位 Run；歧义（同 runId 出现在多个会话）响亮失败要求消歧

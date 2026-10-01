@@ -222,3 +222,43 @@ test("自动压缩没压成与压缩前回调失败：消息区各提示一行�
     rmSync(logDir, { recursive: true, force: true });
   }
 });
+
+test("决策 340：/reload 交给装配方的重载入口，参数原样交出、结果逐行进消息区；没给重载入口即未知命令", async () => {
+  const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-reload-"));
+  const term = new MockTerminal(100, 24);
+  const calls: string[][] = [];
+  const shell = new PigeonTuiShell({
+    terminal: term,
+    runtime: new FakeRuntime(),
+    sessionId: newSessionId(),
+    logDir,
+    reload: async (args) => {
+      calls.push([...args]);
+      return ["已重读设置，自下一轮起生效：改了 permissions 节"];
+    },
+  });
+  try {
+    shell.start();
+    await settle();
+    term.input("/reload confirm");
+    term.input("\r");
+    await settle();
+    assert.deepEqual(calls, [["confirm"]]);
+    assert.ok(screenFlat(term).includes("改了 permissions 节"), screenFlat(term));
+  } finally {
+    shell.stop();
+    rmSync(logDir, { recursive: true, force: true });
+  }
+  const { shell: plain, term: plainTerm, logDir: plainLog } = makeShell();
+  try {
+    plain.start();
+    await settle();
+    plainTerm.input("/reload");
+    plainTerm.input("\r");
+    await settle();
+    assert.ok(screenFlat(plainTerm).includes("未知命令：/reload"), screenFlat(plainTerm));
+  } finally {
+    plain.stop();
+    rmSync(plainLog, { recursive: true, force: true });
+  }
+});

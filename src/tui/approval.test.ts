@@ -365,3 +365,36 @@ test("集成：真实 adapter 审批闸挂起等按键——[y] 批准后写副�
     rmSync(logDir, { recursive: true, force: true });
   }
 });
+
+test("决策 326 ①：受保护路径的请示只给 [y]/[n]/[r]——不显示放权键，按 [a]/[d] 不决议、不建放权", async () => {
+  const { shell, term, store, handler, cleanup } = makePanel();
+  try {
+    shell.start();
+    await settle();
+    const pending = handler({
+      ...REQUEST,
+      args: { path: ".pigeon/settings.json" },
+      protectedPath: ".pigeon/settings.json",
+    });
+    await settle();
+    const text = screenFlat(term);
+    assert.ok(text.includes("受保护路径：.pigeon/settings.json"), text);
+    assert.ok(text.includes("批准执行？[y] 批准一次 / [n] 拒绝 / [r] 拒绝并说明"), text);
+    assert.ok(!text.includes("[a] 本会话允许"), text);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    term.input("a");
+    term.input("d");
+    await settle();
+    assert.equal(settled, false, "放权键不决议");
+    assert.equal(store.list().length, 0, "不建放权");
+    term.input("y");
+    assert.deepEqual(await pending, { approved: true });
+    assert.equal(store.list().length, 0);
+  } finally {
+    shell.stop();
+    cleanup();
+  }
+});

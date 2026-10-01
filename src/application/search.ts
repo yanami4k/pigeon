@@ -1,3 +1,7 @@
+// /search 命令层（M5 S2，决策 038）：人的入口，cli REPL 与 tui 共用同一份解析与排版
+// （同 030 / 031 方向）；输出是纯字符串，命中片段经 sanitizeTerminalText 净化后才出命令层
+//（036：正文是半信任内容）。检索本身在 memory/session-search.ts，本层不另起扫描。
+// 迁移之前的旧格式会话不检索，末尾给一行计数提示（187 / 211）。
 import {
   createSessionSearch,
   type SessionMessageRole,
@@ -16,7 +20,7 @@ const USAGE =
   "（多词为与，大小写不敏感，按字面匹配）\n";
 
 export interface SearchCommandOptions {
-  // 工作区根（会话目录在 <root>/.pigeon/sessions/）
+  // 工作区根（会话目录在 <root>/.pigeon/state/sessions/）
   root: string;
   // /search 之后的词元
   args: readonly string[];

@@ -20,6 +20,8 @@ export interface CommandAvailability {
   scripts?(): boolean;
   // 决策 331：/memory 的命令面在场（缺省即不在场）
   memory?(): boolean;
+  // 决策 340：/reload 重读设置（缺省即不在场）
+  reload?(): boolean;
 }
 
 export interface SlashCommandSpec {
@@ -167,6 +169,13 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     usage: "/memory edit project|user",
     whileRunning: { allow: false, reason: "它会暂停界面、打开编辑器" },
     available: (host) => host.memory?.() === true,
+  },
+  // 决策 340：重读三层设置，新快照自下一轮起生效；会重建运行面，运行中拒绝
+  {
+    name: "reload",
+    usage: "/reload [confirm|skip]",
+    whileRunning: { allow: false, reason: `${MAIN_STATE}（重读设置并重建运行面）` },
+    available: (host) => host.reload?.() === true,
   },
   {
     name: "export",

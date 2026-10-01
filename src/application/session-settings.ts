@@ -1,7 +1,8 @@
 // 会话开始时的设置（决策 325、326）：各入口（终端界面、--line 与 pigeon resume、pigeon run）共用的一段——
 //   ① 旧布局检查：发现旧配置文件或旧位置的程序状态即报错，提示运行 pigeon migrate-config（不自动迁移）；
 //   ② 读三层设置与 .mcp.json，形成本会话的设置快照（本会话内各处都从快照取，中途改文件不生效）；
-//   ③ 第三道防线：会执行命令的条目（命令短名、沙箱配置连同项目 Dockerfile、MCP 服务启动定义）内容与上次确认不同
+//   ③ 第三道防线：会执行命令或放权的条目（命令短名、沙箱配置连同项目 Dockerfile、MCP 服务启动定义、项目共享层的
+//      放行规则〔决策 341〕）内容与上次确认不同
 //      （含首次出现）时——交互入口列出请人选"全部确认 / 本次不用 / 退出"，确认即记下指纹；无人值守（pigeon run）报错退出，
 //      加 --trust-config 只对本次运行放行、不记指纹。项目位于用户级 trustedDirectories 之下时免于确认。
 // worker 与沙箱会话沿用派出它的会话的快照（含确认结果），不再询问。
@@ -83,7 +84,7 @@ function dockerfileOption(content: string | undefined): { dockerfileContent?: st
 // 无人值守遇到未确认条目的报错文字
 export function unattendedTrustMessage(entries: readonly TrustEntry[]): string {
   return [
-    `以下会执行命令的配置尚未确认（首次出现或内容有变），无人值守运行不执行它们：`,
+    `以下会执行命令或放权的配置尚未确认（首次出现或内容有变），无人值守运行不用它们：`,
     ...entries.map((entry) => `  ${describeTrustEntry(entry)}`),
     `确认无误后可在终端界面里确认并记下，或加 ${TRUST_CONFIG_FLAG} 只对本次运行放行（不记下）。`,
   ].join("\n");
@@ -117,7 +118,7 @@ export async function confirmSessionConfig(
     );
     return withoutTrustEntries(snapshot, pending);
   }
-  throw new ConfigNotConfirmedError("未确认会执行命令的配置，已退出");
+  throw new ConfigNotConfirmedError("未确认会执行命令或放权的配置，已退出");
 }
 
 // 会话开始：旧布局检查 → 程序状态目录 → 读设置 → 确认会执行命令的条目
@@ -137,7 +138,7 @@ export async function openSessionSettings(
 // 交互确认的问答文字（终端界面接管终端之前与 --line 共用）：列出条目，返回提示语
 export function trustPromptText(entries: readonly TrustEntry[]): string {
   return [
-    "以下会执行命令的配置首次出现或内容有变，请确认：",
+    "以下会执行命令或放权的配置首次出现或内容有变，请确认：",
     ...entries.map((entry) => `  ${describeTrustEntry(entry)}`),
     "a 全部确认并记下 ｜ s 本次不用这些条目 ｜ q 退出",
   ].join("\n");

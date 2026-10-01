@@ -4,7 +4,8 @@
 // - 词法：工具参数 path 按工作区根解析后落在 <工作区根>/.pigeon 或 <治理根>/.pigeon 之下；
 // - 真实路径（本地工作区）：路径上已存在的最深一层按 realpath 解析（符号链接指进 .pigeon 的也算），再拼上其余部分比较；
 // - 大小写不敏感的文件系统上按不敏感比较（探测工作区根所在文件系统，探不出时按平台缺省：macOS、Windows 不敏感）。
-// 容器工作区（沙箱）只做词法判定：宿主上的 realpath 对容器里的路径没有意义。run_command 等命令写入不在此列（由第三道防线兜底）。
+// 容器工作区（沙箱）在容器里判定：路径按容器的工作区根以正斜杠规范化（含写成容器内绝对路径的写法），再经执行端在容器里解析
+// 路径上最深的已存在一层（容器里的符号链接指进 .pigeon 的同样算）。run_command 等命令写入不在此列（由第三道防线兜底）。
 import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { PIGEON_DIR, pigeonRel } from "../state/paths.ts";
@@ -127,5 +128,72 @@ export function createProtectedPathResolver(options: ProtectedPathOptions): Prot
       realOrResolved(options.governanceRoot),
       (root) => [path.join(root, PIGEON_DIR), realOrResolved(path.join(root, PIGEON_DIR))]
     );
+  };
+}
+
+// 容器工作区的判定（决策 326 ①）：执行端只给"解析既有路径"一种能力，要写的文件往往还不存在，故从目标逐层向上找最深的
+// 已存在一层，经执行端解析（容器内 readlink -f）后拼回其余部分，再与容器工作区根的 .pigeon 比较；解析越出工作区根
+// （执行端拒绝）或一层也找不到时只按词法结果。工作区根与 .pigeon 本身也经执行端解析一次（它们可能是链接）
+export function createHostProtectedPathResolver(host: {
+  root: string;
+  resolveExisting(inputPath: string): Promise<string>;
+}): (target: string) => Promise<string | undefined> {
+  const posix = path.posix;
+  const root = posix.normalize(host.root);
+  const display = (relative: string) =>
+    relative === "" ? pigeonRel() : pigeonRel(...relative.split("/"));
+  const under = (dir: string, target: string): string | undefined => {
+    const relative = posix.relative(dir, target);
+    return relative === "" || (!relative.startsWith("..") && !posix.isAbsolute(relative))
+      ? relative
+      : undefined;
+  };
+  const tryResolve = async (target: string): Promise<string | undefined> => {
+    try {
+      return await host.resolveExisting(target);
+    } catch {
+      return undefined;
+    }
+  };
+  let realDirs: Promise<string[]> | undefined;
+  const pigeonDirs = (): Promise<string[]> => {
+    realDirs ??= (async () => {
+      const realRoot = (await tryResolve(root)) ?? root;
+      const realPigeon = await tryResolve(posix.join(root, PIGEON_DIR));
+      return [
+        ...new Set([
+          posix.join(root, PIGEON_DIR),
+          posix.join(realRoot, PIGEON_DIR),
+          ...(realPigeon !== undefined ? [realPigeon] : []),
+        ]),
+      ];
+    })();
+    return realDirs;
+  };
+  return async (target) => {
+    if (target === "") return undefined;
+    const lexical = posix.isAbsolute(target) ? posix.normalize(target) : posix.join(root, target);
+    const byName = under(posix.join(root, PIGEON_DIR), lexical);
+    if (byName !== undefined) return display(byName);
+    // 逐层向上找最深的已存在一层，经执行端解析后拼回其余部分
+    const rest: string[] = [];
+    let current = lexical;
+    for (;;) {
+      const resolved = await tryResolve(current);
+      if (resolved !== undefined) {
+        const real = posix.join(resolved, ...rest.reverse());
+        for (const dir of await pigeonDirs()) {
+          const hit = under(dir, real);
+          if (hit !== undefined) return display(hit);
+        }
+        return undefined;
+      }
+      const parent = posix.dirname(current);
+      if (parent === current || under(root, parent) === undefined) {
+        return undefined;
+      }
+      rest.push(posix.basename(current));
+      current = parent;
+    }
   };
 }
