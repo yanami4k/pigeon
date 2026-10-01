@@ -391,7 +391,8 @@ async function main(argv: string[]): Promise<void> {
           : undefined,
       sandboxSessionId: () => (sandbox !== undefined ? slot.sessionId : undefined),
       apply: async (snapshot) => {
-        // 新快照与由它得出的编排设定、打转检测、联网工具一并换上，再按新快照在同一会话上重建运行面（MCP 服务随之重启）
+        // 新快照与由它得出的编排设定、打转检测、联网工具一并换上，再按新快照在同一会话上重建运行面：内容未变的 MCP 连接
+        // 与系统提示里开局冻结的部分沿用旧运行面的（reloadFrom），只重启改过的服务
         settings = snapshot;
         orchestration = orchestrationSettingsOf(flags, snapshot);
         loopGuard = loopGuardSettingsOf(snapshot);
@@ -413,6 +414,7 @@ async function main(argv: string[]): Promise<void> {
           loopGuard,
           createApprovalHandler: createHandler,
           resume: true,
+          reloadFrom: slot.bundle,
           onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
         });
         const bundle = opened.bundle;

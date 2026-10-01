@@ -49,6 +49,15 @@ export interface SkillCatalogOptions {
   // （候选链已退役，决策 137；磁盘上的旧目录是用户数据，不删）缺省不加载，
   // 只在这里显式列出时加载
   roots?: readonly SkillRoot[];
+  // 决策 340：已扫描好的本地 Skill（/reload 重建时沿用开局的扫描结果，不重读文件）；在场时不扫描
+  local?: LocalSkillScan;
+}
+
+// 本地 Skill 的扫描结果（项目级与用户级，或显式给定的根）：会话开始时冻结
+export interface LocalSkillScan {
+  entries: readonly SkillEntry[];
+  problems: readonly string[];
+  roots: readonly string[];
 }
 
 export interface SkillEntry {
@@ -191,7 +200,10 @@ function scanConfiguredRoot(root: SkillRoot): { entries: SkillEntry[]; problems:
   return scanRoot(root.path, "configured", root.label);
 }
 
-export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
+// 扫描本地 Skill 根
+export function scanLocalSkills(
+  options: Pick<SkillCatalogOptions, "workspaceRoot" | "homeDir" | "roots">
+): LocalSkillScan {
   const projectRoot = projectSkillsDir(options.workspaceRoot);
   const userRoot = userSkillsDir(options.homeDir ?? homedir());
   const scanned =
@@ -201,8 +213,20 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
           scanRoot(projectRoot, "project", pigeonRel("skills")),
           scanRoot(userRoot, "user", userPigeonRel("skills")),
         ];
-  const localEntries = scanned.flatMap((result) => result.entries);
-  const problems = scanned.flatMap((result) => result.problems);
+  return {
+    entries: scanned.flatMap((result) => result.entries),
+    problems: scanned.flatMap((result) => result.problems),
+    roots:
+      options.roots !== undefined
+        ? options.roots.map((root) => root.path)
+        : [projectRoot, userRoot],
+  };
+}
+
+export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
+  const local = options.local ?? scanLocalSkills(options);
+  const localEntries = local.entries;
+  const problems = [...local.problems];
   const mcpEntries: SkillEntry[] = (options.prompts ?? []).map((input) => ({
     name: input.name,
     description: input.description ?? "（无简介）",
@@ -254,10 +278,7 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
       files: skill.files,
     })),
     section,
-    roots:
-      options.roots !== undefined
-        ? options.roots.map((root) => root.path)
-        : [projectRoot, userRoot],
+    roots: [...local.roots],
     problems,
   };
 }

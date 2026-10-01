@@ -1,8 +1,9 @@
 // /reload 重读设置（决策 340）：终端界面在会话中途重读三层设置，形成新快照。
 // - 执行命令类配置（命令短名、沙箱配置连同 Dockerfile、MCP 启动定义）与项目共享层的放行规则（决策 341）相对当前快照
 //   有变化（含首次出现）、且未经确认的条目，照启动时的确认流程列出请人确认；确认的记下指纹并生效，不确认的沿用当前快照里的内容（原来没有的就不启用）。
-// - 新快照自下一轮起生效：此后派出的 worker、新开的脚本编排用新快照；运行面按新快照重建，MCP 服务随之重启（内容有变的
-//   重启、删掉的停止、新加的启动，结果行里分别列出）。正在跑的沙箱容器不重建，sandbox 一节有变化时另给一行提示。
+// - 新快照自下一轮起生效：此后派出的 worker、新开的脚本编排用新快照；运行面按新快照重建，MCP 只动有变化的服务（启动定义
+//   改了的重启、删掉的停止、新加的启动，结果行里分别列出；未变的沿用原连接），系统提示里开局冻结的部分（常驻 Memory、
+//   推送的记忆、本地 Skill 目录）沿用开局读到的内容。正在跑的沙箱容器不重建，sandbox 一节有变化时另给一行提示。
 // - pigeon run 与 --line 不设重载。
 // 本模块只算"读出什么、要问什么、改了哪些节"；问人与重建运行面在终端界面入口。
 import { homedir } from "node:os";
@@ -93,11 +94,12 @@ export function applySettingsReload(
       canonicalJson(sectionValue(plan.current, name) ?? null) !==
       canonicalJson(sectionValue(snapshot, name) ?? null)
   );
+  // 按启动定义比较：只改风险档的服务沿用连接、不重启（与 MCP 会话的沿用判定一致）
   const servers = (target: SettingsSnapshot) =>
     new Map(
       mergeMcpConfig(target.dotMcp, target.merged.mcp).config.servers.map((server) => [
         server.name,
-        canonicalJson(server),
+        canonicalJson(server.launch),
       ])
     );
   const oldServers = servers(plan.current);

@@ -17,8 +17,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import { assertMemoryLimit, loadPushedMemory, type MemoryConflictMode } from "../memory/pushed.ts";
-import { loadResidentMemory, type MemoryRoot } from "../memory/resident.ts";
+import {
+  assertMemoryLimit,
+  loadPushedMemory,
+  type MemoryConflictMode,
+  type PushedMemory,
+} from "../memory/pushed.ts";
+import { loadResidentMemory, type MemoryRoot, type ResidentMemory } from "../memory/resident.ts";
 import { REVIEW_TEMPLATE_VERSION, type ReviewKind } from "../memory/review-text.ts";
 import {
   createReadSessionEntryTool,
@@ -43,7 +48,12 @@ import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
-import { loadSkillCatalog, type SkillRoot } from "../skills/catalog.ts";
+import {
+  type LocalSkillScan,
+  loadSkillCatalog,
+  type SkillRoot,
+  scanLocalSkills,
+} from "../skills/catalog.ts";
 import {
   createLoadSkillTool,
   LOAD_SKILL_TOOL,
@@ -222,6 +232,8 @@ export interface RuntimeDeps {
   // 决策 191、217、244：推送记忆。在场即开着——开局推送 MEMORY.md、注册 update_memory、压缩前复盘；缺省关着
   // （装配层缺省；日常入口由启动参数缺省打开，跑批器按条件明确指定）
   learnedMemory?: LearnedMemoryConfig;
+  // 决策 340：/reload 重建时沿用旧运行面开局读到的常驻 Memory、推送的记忆与本地 Skill 扫描结果（不重读文件）
+  frozenPrompt?: FrozenSessionPrompt;
   // 决策 191、192：本运行面是一次复盘——系统提示取来源会话冻结的原文（工具定义照常装配，与来源相同），执行时只放行
   // read_file 与 update_memory，Run 开始条目记复盘种类与模板版本。只由复盘装配时给
   reviewSession?: ReviewSessionConfig;
@@ -294,6 +306,14 @@ export const WEB_TOOLS_SENTENCE =
   "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
   "web_fetch 只交回按问题提炼的结果，不交回网页原文。";
 
+// 系统提示里会话开始时读取并冻结的部分（决策 042、043、191）：常驻 Memory（项目 .pigeon/memory 与用户偏好）、
+// 推送的记忆、本地 Skill 的扫描结果。/reload 重建运行面时沿用（决策 340），不重读文件
+export interface FrozenSessionPrompt {
+  residentMemory: ResidentMemory;
+  pushedMemory?: PushedMemory;
+  localSkills: LocalSkillScan;
+}
+
 export interface RuntimeBundle {
   adapter: PiRuntimeAdapter;
   // 本会话的会话存储写者（决策 176）
@@ -313,6 +333,8 @@ export interface RuntimeBundle {
   learnedMemory?: LearnedMemoryConfig;
   // 决策 294 B1：任务清单开着时在场（续聊时从会话还原、/tasks 查看）
   taskList?: TaskList;
+  // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
+  frozenPrompt: FrozenSessionPrompt;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -482,21 +504,26 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   }
   // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
   // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
-  const residentMemory = loadResidentMemory({
-    workspaceRoot: governanceRoot,
-    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-    ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
-    ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
-  });
+  // 决策 340：/reload 重建时沿用开局读到的内容
+  const frozen = deps.frozenPrompt;
+  const residentMemory =
+    frozen?.residentMemory ??
+    loadResidentMemory({
+      workspaceRoot: governanceRoot,
+      ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+      ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
+      ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
+    });
   // 决策 191：会话开始读学到的记忆，整份推入、即冻结；清单进 Run 开始条目。复盘运行面也读一次（记下复盘开始时的记忆），
   // 但系统提示用来源的原文
   const pushedMemory =
     learned !== undefined
-      ? loadPushedMemory({
+      ? (frozen?.pushedMemory ??
+        loadPushedMemory({
           governanceRoot,
           conflict: learned.conflict,
           ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
-        })
+        }))
       : undefined;
   const editSentence = replaceMode
     ? "你是 Pigeon 编程助手。用 read_file 读取文件（每行形如「行号| 内容」），" +
@@ -515,12 +542,19 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
+  // 本地 Skill 开局扫描一次（/reload 沿用）；MCP server 的 prompts 随本运行面的 MCP 会话
+  const localSkills =
+    frozen?.localSkills ??
+    scanLocalSkills({
+      workspaceRoot: governanceRoot,
+      ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+      ...(deps.skillRoots !== undefined ? { roots: deps.skillRoots } : {}),
+    });
   const skillCatalog = loadSkillCatalog({
     workspaceRoot: governanceRoot,
-    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    local: localSkills,
     // M5.7 S4（043 口径）：MCP server 的 prompts 以 server 为来源进同一目录
     ...(deps.mcp !== undefined && deps.mcp.prompts.length > 0 ? { prompts: deps.mcp.prompts } : {}),
-    ...(deps.skillRoots !== undefined ? { roots: deps.skillRoots } : {}),
   });
   const hasSkills = skillCatalog.skills.length > 0;
   if (hasSkills) {
@@ -805,6 +839,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     configGrants,
     settings,
     toolTiers,
+    frozenPrompt: {
+      residentMemory,
+      ...(pushedMemory !== undefined ? { pushedMemory } : {}),
+      localSkills,
+    },
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),
     ...(taskList !== undefined ? { taskList } : {}),
