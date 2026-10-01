@@ -81,10 +81,11 @@ export function recordTrustedEntries(
   }
 }
 
-// 沙箱配置指向的项目 Dockerfile 的内容（不在或读不出为 undefined）
+// 沙箱配置指向的项目 Dockerfile 的内容：取读快照那一刻记下的；没记下（手工拼的快照）才现读，不在或读不出为 undefined
 export function sandboxDockerfileContent(snapshot: SettingsSnapshot): string | undefined {
   const dockerfile = snapshot.merged.sandbox?.dockerfile;
   if (dockerfile === undefined) return undefined;
+  if (snapshot.dockerfileContent !== undefined) return snapshot.dockerfileContent;
   try {
     return readFileSync(path.resolve(snapshot.root, dockerfile), "utf8");
   } catch {

@@ -188,6 +188,8 @@ export interface TuiShellOptions {
   // rebind 由装配方注入：对账收口后按目标 sessionId 重建运行面（restoredGrants 种子）
   // 并释放旧运行面；缺省 = /resume 不可用
   resume?: ResumeOptions<TuiSessionBinding>;
+  // 决策 340：/reload 重读设置——返回给人看的行（装配方实现：重读、确认、换上新快照并重建运行面）
+  reload?: (args: readonly string[]) => Promise<string[]>;
   // S5+（裁决 033）：优雅退出回调——双击 Ctrl+C / /quit 触发；壳先 stop() 再回调。
   // 注入使测试绝不真退进程；缺省 = 退出只停壳（装配方必须注入真实退出路径）
   onExit?: () => void;
@@ -1031,6 +1033,27 @@ export class PigeonTuiShell
       return;
     }
     dispatchResumeCommand(this, arg);
+  }
+
+  // 决策 340：/reload——重读期间与 Run 同样占住输入；结果逐行写进消息区
+  get reloadCommand(): ((args: readonly string[]) => void) | undefined {
+    const reload = this.options.reload;
+    if (reload === undefined) return undefined;
+    return (args) => {
+      this.running = true;
+      this.updateStatus();
+      this.tui.requestRender();
+      const finish = (lines: readonly string[]): void => {
+        this.running = false;
+        for (const line of lines) this.flow.addSystem(line);
+        this.updateStatus();
+        this.tui.requestRender();
+        this.drainQueue();
+      };
+      reload(args).then(finish, (error: unknown) =>
+        finish([`重读设置失败：${error instanceof Error ? error.message : String(error)}`])
+      );
+    };
   }
 
   // 决策 189：/compact [重点] 手动压缩——压缩期间与 Run 同样占住输入（输入排队，决策 286）；压成时的一行提示由订阅给出，

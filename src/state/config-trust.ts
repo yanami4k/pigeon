@@ -148,7 +148,10 @@ export function withoutTrustEntries(
         names.filter((name) => !commandNames.has(name)),
       ])
     );
-    merged.commands = { commands, roles };
+    merged.commands = {
+      commands,
+      ...(merged.commands.roles !== undefined ? { roles } : {}),
+    };
   }
   if (dropSandbox) {
     delete merged.sandbox;
@@ -178,6 +181,56 @@ export function withoutTrustEntries(
     ...(dotMcp !== undefined ? { dotMcp } : {}),
     excluded: [...(snapshot.excluded ?? []), ...excluded.map((entry) => trustKeyOf(entry))],
   };
+}
+
+// /reload 时不确认的条目沿用原内容（决策 340）：把新快照里这些条目换回当前快照里的样子；当前快照里没有的即不启用
+export function revertTrustEntries(
+  next: SettingsSnapshot,
+  current: SettingsSnapshot,
+  entries: readonly TrustEntry[]
+): SettingsSnapshot {
+  if (entries.length === 0) return next;
+  const merged = { ...next.merged };
+  let dotMcp = next.dotMcp;
+  const dropped: TrustEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "command") {
+      const previous = current.merged.commands?.commands?.[entry.id];
+      if (previous === undefined) {
+        dropped.push(entry);
+        continue;
+      }
+      merged.commands = {
+        ...merged.commands,
+        commands: { ...(merged.commands?.commands ?? {}), [entry.id]: previous },
+      };
+    } else if (entry.kind === "sandbox") {
+      if (current.merged.sandbox === undefined) {
+        delete merged.sandbox;
+      } else {
+        merged.sandbox = current.merged.sandbox;
+      }
+    } else {
+      const previousSettings = current.merged.mcp?.servers?.[entry.id];
+      const previousDot = current.dotMcp?.mcpServers[entry.id];
+      const servers = { ...(merged.mcp?.servers ?? {}) };
+      if (previousSettings === undefined) delete servers[entry.id];
+      else servers[entry.id] = previousSettings;
+      merged.mcp = { ...merged.mcp, servers };
+      const dotServers = { ...(dotMcp?.mcpServers ?? {}) };
+      if (previousDot === undefined) delete dotServers[entry.id];
+      else dotServers[entry.id] = previousDot;
+      dotMcp = { ...dotMcp, mcpServers: dotServers };
+    }
+  }
+  const { dotMcp: _old, ...rest } = next;
+  const reverted: SettingsSnapshot = {
+    ...rest,
+    merged,
+    ...(dotMcp !== undefined ? { dotMcp } : {}),
+  };
+  // 原来没有的短名：照"本次不用"去掉（连同角色清单里的引用）
+  return withoutTrustEntries(reverted, dropped);
 }
 
 // 给人看的一行

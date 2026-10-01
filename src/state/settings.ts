@@ -303,6 +303,8 @@ export interface SettingsSnapshot {
   dotMcp?: DotMcpJson;
   // 决策 326 ③：启动时选了"本次不用"的会执行命令的条目（类型:标识）；worker 与沙箱会话随快照沿用
   excluded?: readonly string[];
+  // sandbox 一节指向的项目 Dockerfile 在读快照那一刻的内容（并入指纹；/reload 据此比出 Dockerfile 的变化）
+  dockerfileContent?: string;
 }
 
 // 空快照：没有任何设置文件（测试与跑批器的缺省）
