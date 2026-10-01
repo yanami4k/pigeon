@@ -1,1 +1,2 @@
-export * from "./check-command.ts";
+// execution 层的入口：各模块按文件直接引用，此处不再汇总导出（检查命令随验证门删除，决策 322）。
+export {};
