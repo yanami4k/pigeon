@@ -20,6 +20,7 @@ import {
   sandboxLimitsSummary,
 } from "../execution/sandbox.ts";
 import type { SessionId } from "../state/ids.ts";
+import { sandboxLimitSettingsOf } from "../state/sandbox-config.ts";
 import {
   emptySettingsSnapshot,
   mcpConfigOf,
@@ -80,6 +81,8 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
     sessionId: input.sessionId,
     network: launch.network,
     sandboxConfig: sandboxConfigOf(settings),
+    // 决策 333：资源上限取自设置的 sandbox 一节（缺项取缺省）
+    limits: sandboxLimitSettingsOf(sandboxConfigOf(settings)),
     ...(input.resume === true ? { resume: true } : {}),
     // 决策 278：--sandbox-from-head 只从最新提交开工
     ...(launch.fromHead === true ? { fromHead: true } : {}),

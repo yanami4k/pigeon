@@ -3,7 +3,7 @@
 // 服务名（决策 252）。容器以假 docker 代替，工作区是真 git 仓库。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,6 +13,7 @@ import { fakeSandboxDocker } from "../execution/sandbox-docker-fixtures.ts";
 import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
+import { projectSettingsPath } from "../state/paths.ts";
 import { noMcpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import {
@@ -117,6 +118,52 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
       logs.join("｜")
     );
     assert.deepEqual(fake.state().containers, {}, "交回后删除容器");
+  } finally {
+    fake.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("资源上限取自设置的 sandbox 一节（决策 333）：写 0 的项不带参数，给了的按设置；就绪提示写明上限", async () => {
+  const repo = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-home-"));
+  const fake = fakeSandboxDocker();
+  try {
+    mkdirSync(join(repo, ".pigeon"), { recursive: true });
+    writeFileSync(
+      projectSettingsPath(repo),
+      JSON.stringify({ sandbox: { memory: "2g", pids: 0, cpus: 2 } })
+    );
+    const logs: string[] = [];
+    const sandbox = await startSandbox({
+      flags: SANDBOX_FLAGS,
+      governanceRoot: repo,
+      sessionId: "sess_LIM",
+      settings: loadSettings(repo, { homeDir: home }),
+      log: (line) => logs.push(line),
+      overrides: {
+        docker: fake.docker,
+        image: { kind: "image", image: "sandbox-test:latest" },
+        containerRoot: fake.containerRoot,
+        cacheRoot: fake.cacheRoot,
+      },
+    });
+    assert.ok(sandbox !== undefined);
+    try {
+      const args = fake.state().containers["pigeon-sandbox-sess_LIM"]?.args ?? [];
+      const at = (flag: string) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+      assert.equal(at("--memory"), String(2 * 1024 ** 3), args.join(" "));
+      assert.equal(at("--memory-swap"), String(2 * 1024 ** 3));
+      assert.equal(at("--pids-limit"), undefined, "写 0 为不限");
+      assert.equal(at("--cpus"), "2");
+      assert.ok(
+        logs.some((line) => line.includes("内存上限 2 GiB、进程数上限 不限、CPU 上限 2 核")),
+        logs.join("｜")
+      );
+    } finally {
+      await sandbox.discard();
+    }
   } finally {
     fake.cleanup();
     rmSync(repo, { recursive: true, force: true });
