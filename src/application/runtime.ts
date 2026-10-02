@@ -574,7 +574,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "edit_file",
     RUN_COMMAND_TOOL,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
-    ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
+    ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
     ...(spawnSlot !== undefined
