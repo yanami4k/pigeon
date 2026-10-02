@@ -52,9 +52,8 @@ import {
 import { wrapScriptApprovals } from "../application/script-approvals.ts";
 import { type ScriptCommands, scriptCommands } from "../application/script-commands.ts";
 import { createSessionScripts, modelPricing } from "../application/script-host.ts";
-import { ScriptGate, scriptGateSettingsOf } from "../application/script-naming.ts";
+import type { ScriptGate } from "../application/script-naming.ts";
 import type { ScriptRuns } from "../application/script-runner.ts";
-import { ScriptSlot } from "../application/script-tool.ts";
 import {
   type OpenedSessionRuntime,
   openSessionRuntime,
@@ -68,7 +67,6 @@ import {
 } from "../application/session-settings.ts";
 import { createSettingsReloader } from "../application/settings-reload.ts";
 import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
-import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
 import { renderTaskList } from "../application/task-list-tool.ts";
 import { closeTuiSession } from "../application/tui-exit.ts";
@@ -81,7 +79,6 @@ import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
-import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { tuiLogDirOf } from "../state/paths.ts";
 import {
   loopGuardSettingsOf,
@@ -92,6 +89,11 @@ import {
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
 import { guardTuiAgent } from "./loop-guard-view.ts";
+import {
+  type MainReloadContext,
+  reopenMainSessionForReload,
+  spawnWorkerOption,
+} from "./main-reload.ts";
 import { PigeonTuiShell, type TuiShellOptions, type TuiWorkersFace } from "./shell.ts";
 import { switchableWarn } from "./warn-sink.ts";
 
@@ -325,6 +327,20 @@ async function main(argv: string[]): Promise<void> {
     // 决策 333：运行中的提示（命令超出内存上限）经告警出口：壳接管终端期间落消息区
     notice: (line) => warn(`[沙箱] ${line}`),
   });
+  // 决策 340：/reload 重建主会话运行面时跨快照不变的部分（重建本身在 main-reload.ts）
+  const reloadContext: MainReloadContext = {
+    governanceRoot: workspaceRoot,
+    streamFn,
+    flags,
+    ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+    warn,
+    createApprovalHandler: createHandler,
+    memoryWrite,
+    memoryContext,
+    webToolsFor,
+    hooksNotice: (line) => shellHolder.current?.addSystem(line),
+    onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
+  };
   const mainOpened = await openSessionRuntime({
     governanceRoot: workspaceRoot,
     settings,
@@ -410,36 +426,12 @@ async function main(argv: string[]): Promise<void> {
       apply: async (snapshot) => {
         // 先建后换（复审 P2）：重建成功才换上这些闭包变量；重建失败时旧快照、旧编排设定与旧运行面都保持不变，
         // /reload 会照当前快照重新列出待确认条目、可重试
-        const nextOrchestration = orchestrationSettingsOf(flags, snapshot);
-        const nextLoopGuard = loopGuardSettingsOf(snapshot);
-        const nextWebTools = webToolsFor(snapshot);
-        await slot.bundle.sessionStore.flush();
-        const opened = await openSessionRuntime({
-          governanceRoot: workspaceRoot,
-          settings: snapshot,
-          sessionId: slot.sessionId,
-          streamFn,
-          flags,
-          ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-          ...spawnWorkerOption(flags, nextOrchestration),
-          taskList: nextOrchestration.taskList,
-          ...nextWebTools,
-          warn,
-          loopGuard: nextLoopGuard,
-          createApprovalHandler: createHandler,
-          // 决策 331：/reload 重建的运行面照常注册 update_memory（审查修复：此前漏传，重载后丢失）
-          memoryWrite,
-          resume: true,
-          reloadFrom: slot.bundle,
-          hooksNotice: (line) => shellHolder.current?.addSystem(line),
-          onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
-        });
+        const reloaded = await reopenMainSessionForReload(reloadContext, snapshot, slot);
+        const opened = reloaded.opened;
         settings = snapshot;
-        // /memory 的上限按新快照更新（审查修复：此前沿用开局快照）
-        memoryContext.limits = memoryLimitsOf(snapshot);
-        orchestration = nextOrchestration;
-        loopGuard = nextLoopGuard;
-        webToolsOption = nextWebTools;
+        orchestration = reloaded.orchestration;
+        loopGuard = reloaded.loopGuard;
+        webToolsOption = reloaded.webTools;
         const bundle = opened.bundle;
         guardMainAgent(bundle);
         const workers =
@@ -604,20 +596,6 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
-}
-
-// 决策 264–267：派 worker 开着时每个打开的会话一个工具槽（只给主会话注册，沙箱与 worker 会话由装配层略过）
-// 决策 309：脚本编排随派 worker 一并给（每个打开的会话一个槽与点名状态）
-function spawnWorkerOption(
-  flags: LaunchFlags,
-  orchestration: OrchestrationSettings
-): { spawnWorker?: SpawnWorkerSlot; scriptOrchestration?: ScriptSlot } {
-  return flags.spawnWorkers
-    ? {
-        spawnWorker: new SpawnWorkerSlot(spawnWorkerSettingsOf(orchestration)),
-        scriptOrchestration: new ScriptSlot(new ScriptGate(scriptGateSettingsOf(orchestration))),
-      }
-    : {};
 }
 
 // 决策 331：/memory edit 用的编辑器（$VISUAL 优先，其次 $EDITOR；都没有即不给，命令给出文件路径）

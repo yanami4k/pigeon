@@ -458,7 +458,9 @@ test("新增钩子后 /reload：列为人确认，confirm 后新钩子随新快�
   }
 });
 
-test("/reload 重建后 update_memory 仍注册且可写（整体审查修复回归：重建漏传 memoryWrite 即丢）", async () => {
+// 本用例的会话辅助函数自己传 memoryWrite，验证的是运行面重建本身；终端界面实际的重建路径（main.ts 的 apply 所调）
+// 见 tui/main-reload.test.ts
+test("/reload 重建后 update_memory 仍注册且可写（运行面级）", async () => {
   const root = temp("pigeon-reload-memw-");
   const home = temp("pigeon-reload-memw-home-");
   const remember = {
