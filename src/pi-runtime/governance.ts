@@ -37,11 +37,14 @@ export interface ToolCallProposal {
   preparedArgs: unknown;
 }
 
-// PreToolUse 钩子的结论（决策 324）：拒绝 > 要人确认 > 放行；放行只免掉人工审批这一步
+// PreToolUse 钩子的结论（决策 324）：拒绝 > 要人确认 > 放行；放行只免掉人工审批这一步。
+// decision 可缺省：钩子只改参数、不放行（updatedInput 单独在场时不改变治理结论，只换参数）
 export interface PreToolUseHookDecision {
-  decision: "allow" | "ask" | "deny";
+  decision?: "allow" | "ask" | "deny";
   reason?: string;
-  // 钩子改过的参数（在场时按新参数重新经过全部检查，执行也用新参数）
+  // 钩子的 continue:false（压过 decision）：阻断本调用并在这批工具后停下——停止本轮处理
+  terminate?: boolean;
+  // 钩子改过的参数（在场时按新参数重新经过全部检查，预览与执行都用新参数；本身不含放行含义）
   updatedInput?: unknown;
 }
 
@@ -67,7 +70,8 @@ export interface ToolHookPort {
 // 钩子改过参数时 updatedArgs 交给执行侧替换（只由 PreToolUse 钩子产生）
 export type GovernanceVerdict =
   | { kind: "allow"; updatedArgs?: unknown }
-  | { kind: "block"; reason: string };
+  // terminate：钩子的 continue:false——阻断本调用并提示上游在这批工具后停下（停止本轮处理）
+  | { kind: "block"; reason: string; terminate?: boolean };
 
 // 本 Run 的治理结论（RunResult 的活侧来源）
 export interface GovernanceRunOutcome {

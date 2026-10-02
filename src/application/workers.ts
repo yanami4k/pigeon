@@ -405,13 +405,17 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       let stopActive = false;
       let blockedCount = 0;
       const cap = deps.settingsSnapshot?.merged.stopHookBlockCap ?? DEFAULT_STOP_HOOK_BLOCK_CAP;
+      // 决策 322：收尾钩子的输出（拦截理由与补充上下文）随结果交回——多份尝试的汇总各带各的
+      const hookOutputs: string[] = [];
+      const withOutputs = (result: WorkerRunResult): WorkerRunResult =>
+        hookOutputs.length > 0 ? { ...result, hookOutputs } : result;
       if (hooks !== undefined) {
         const start = await hooks.runEvent("SubagentStart", request.role, {
           agent_id: request.sessionId,
           agent_type: request.role,
         });
         if (start.continueFalse !== undefined) {
-          return { status: "aborted" };
+          return withOutputs({ status: "aborted" });
         }
         if (start.additionalContext.length > 0) {
           input = `${start.additionalContext.join("\n\n")}\n\n${task}`;
@@ -428,9 +432,15 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
           stop_hook_active: stopActive,
           last_assistant_message: handle.summary(),
         });
+        hookOutputs.push(
+          ...stop.additionalContext,
+          ...(stop.blocked !== undefined ? [stop.blocked.reason] : [])
+        );
+        // continue:false 压过拦截：worker 停止处理，不再续跑
+        if (stop.continueFalse !== undefined) return withOutputs(result);
         const wantsContinue = stop.blocked !== undefined || stop.additionalContext.length > 0;
         if (!wantsContinue || blockedCount >= cap) {
-          return result;
+          return withOutputs(result);
         }
         blockedCount += 1;
         stopActive = true;

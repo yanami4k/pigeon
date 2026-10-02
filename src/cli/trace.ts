@@ -20,6 +20,7 @@ import {
 } from "../persistence/session-catalog.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import type { HookRunData } from "../state/session-entries.ts";
 import {
   type StoreMessage,
   type StoreToolOutcome,
@@ -35,6 +36,15 @@ import type {
   ViewToolCall,
 } from "../state/session-view.ts";
 import { isSyntheticFailure } from "../state/session-view.ts";
+
+// 钩子运行（323 / 324）的一行：事件、命令、退出码、用时、结论
+function hookLine(data: HookRunData): string {
+  return (
+    `钩子 ${data.event}${data.matcher !== undefined ? `（匹配 ${data.matcher}）` : ""}：${data.conclusion} ｜ ` +
+    `退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ${data.durationMs} 毫秒 ｜ ` +
+    `命令 ${data.command}${data.output !== undefined ? ` ｜ 输出 ${data.output}` : ""}`
+  );
+}
 
 const MCP_SERVER_STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>> = {
   idle: "未启动",
@@ -205,13 +215,7 @@ function renderRun(
             : "")
       );
     } else if (item.kind === "hook") {
-      // 钩子运行（323 / 324）：事件、命令、退出码、用时、结论
-      const data = item.data;
-      lines.push(
-        `  钩子 ${data.event}${data.matcher !== undefined ? `（匹配 ${data.matcher}）` : ""}：${data.conclusion} ｜ ` +
-          `退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ${data.durationMs} 毫秒 ｜ ` +
-          `命令 ${data.command}${data.output !== undefined ? ` ｜ 输出 ${data.output}` : ""}`
-      );
+      lines.push(`  ${hookLine(item.data)}`);
     }
   }
   for (const turn of run.turns) {
@@ -284,6 +288,17 @@ export function renderSessionTrace(
       lines.push("");
     }
     renderRun(view, run, lines, options);
+  }
+  // 会话级的钩子运行（323：SessionStart / SessionEnd 等窗口外事件没有所属 Run）
+  const sessionHooks = view.sessionItems.filter(
+    (item): item is Extract<ViewItem, { kind: "hook" }> => item.kind === "hook"
+  );
+  if (sessionHooks.length > 0) {
+    lines.push("");
+    lines.push("会话级条目：");
+    for (const item of sessionHooks) {
+      lines.push(`  ${hookLine(item.data)}`);
+    }
   }
   // 会话级异常项：孤立的收尾、读取时跳过的行与条目如实报告，不猜测挂接
   if (view.orphanSettleds.length > 0 || view.warnings.length > 0) {

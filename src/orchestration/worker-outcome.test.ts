@@ -14,6 +14,7 @@ import {
   gitWorktreeWorkspaces,
   WorkerOrchestrator,
   type WorkerOrchestratorOptions,
+  type WorkerRunResult,
   type WorkerRuntimeHandle,
   type WorkerRuntimeRequest,
   WorkerSpawnError,
@@ -23,9 +24,11 @@ import {
 class FakeRuntime implements WorkerRuntimeHandle {
   disposed = false;
   readonly #structured: unknown;
+  readonly #hookOutputs: string[] | undefined;
 
-  constructor(structured?: unknown) {
+  constructor(structured?: unknown, hookOutputs?: string[]) {
     this.#structured = structured;
+    this.#hookOutputs = hookOutputs;
   }
 
   subscribe(listener: (event: EventEnvelope) => void): () => void {
@@ -33,8 +36,11 @@ class FakeRuntime implements WorkerRuntimeHandle {
     return () => {};
   }
 
-  async run(): Promise<{ status: "completed" }> {
-    return { status: "completed" };
+  async run(): Promise<WorkerRunResult> {
+    return {
+      status: "completed",
+      ...(this.#hookOutputs !== undefined ? { hookOutputs: this.#hookOutputs } : {}),
+    };
   }
 
   async interrupt(): Promise<void> {}
@@ -52,7 +58,9 @@ class FakeRuntime implements WorkerRuntimeHandle {
   }
 }
 
-function setup(options: { structured?: unknown; workspaces?: WorkspaceProvider } = {}) {
+function setup(
+  options: { structured?: unknown; hookOutputs?: string[]; workspaces?: WorkspaceProvider } = {}
+) {
   const spawned: ChildSpawnedInput[] = [];
   const settled: ChildSettledInput[] = [];
   const requests: WorkerRuntimeRequest[] = [];
@@ -84,7 +92,7 @@ function setup(options: { structured?: unknown; workspaces?: WorkspaceProvider }
     },
     createRuntime: (request) => {
       requests.push(request);
-      return new FakeRuntime(options.structured);
+      return new FakeRuntime(options.structured, options.hookOutputs);
     },
     approvals: async () => ({ approved: true }),
     workspaces,
@@ -124,6 +132,17 @@ test("收尾结果可携带结构化内容：进 outcome 与 child.settled；运
   assert.equal(plain.result?.structured, undefined, "不提供结构化结果时字段缺省");
 });
 
+test("收尾钩子的输出随结果交回（决策 322：多份尝试各带各的钩子输出）；没有输出时字段缺省", async () => {
+  const withOutputs = setup({ hookOutputs: ["还差边界用例", "覆盖率 85%"] });
+  const first = withOutputs.orchestrator.spawn({ role: "explorer", task: "看看" });
+  const outcome = await withOutputs.orchestrator.awaitResult(first);
+  assert.deepEqual(outcome.hookOutputs, ["还差边界用例", "覆盖率 85%"]);
+
+  const without = setup();
+  const second = without.orchestrator.spawn({ role: "explorer", task: "看看" });
+  const plain = await without.orchestrator.awaitResult(second);
+  assert.equal(plain.hookOutputs, undefined, "没有钩子输出时字段缺省");
+});
 test("git 工作区提供者：可派出的角色一律规划 git 工作树", () => {
   const provider = gitWorktreeWorkspaces({ repoRoot: "/repo", governanceRoot: "/repo" });
   const sessionId = newSessionId();

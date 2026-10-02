@@ -304,8 +304,23 @@ export interface SpawnWorkerDetails {
 }
 
 // 一个 worker 收尾后交回的文字（通知与多份尝试的汇总用）。决策 279（271 修订）：有工作树的 worker 另起一行写明起点快照与只取其
-// 自身改动的取用方式（额度用完的文字不加）。时限取自设定（等审批的文字要写）
+// 自身改动的取用方式（额度用完的文字不加）。时限取自设定（等审批的文字要写）。
+// 决策 322：收尾钩子的输出（SubagentStop 的拦截理由与补充上下文）附在末尾
 export function workerOutcomeText(
+  outcome: WorkerOutcome,
+  budgetExhausted = false,
+  settings: Pick<
+    SpawnWorkerSettings,
+    "approvalTimeoutMs" | "stallMs"
+  > = DEFAULT_SPAWN_WORKER_SETTINGS
+): string {
+  const text = workerOutcomeTextBase(outcome, budgetExhausted, settings);
+  const outputs = outcome.hookOutputs ?? [];
+  if (outputs.length === 0) return text;
+  return `${text}\n钩子输出：\n${outputs.map((line) => `  ${line}`).join("\n")}`;
+}
+
+function workerOutcomeTextBase(
   outcome: WorkerOutcome,
   budgetExhausted = false,
   settings: Pick<

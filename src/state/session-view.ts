@@ -163,6 +163,8 @@ export interface SessionView {
   // 本会话自己的全部条目（跳过复制段），按文件顺序
   items: ViewItem[];
   runs: ViewRun[];
+  // 会话级条目：不属于任何 Run 的自定义条目（窗口外的钩子运行记录等；trace 单列一节展示）
+  sessionItems: ViewItem[];
   // 本会话自己的全部消息（跳过复制段；不在任何 Run 之后的消息不计入）
   messages: ViewMessage[];
   children: ViewChild[];
@@ -392,6 +394,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
       ? copiedPrefixLength(input.entries, metadata.branch.forkPoint)
       : 0;
   const items: ViewItem[] = [];
+  const sessionItems: ViewItem[] = [];
   const runs: ViewRun[] = [];
   const runById = new Map<string, ViewRun>();
   const messages: ViewMessage[] = [];
@@ -437,6 +440,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
     const runId = customRunId(item);
     const owner = runId !== undefined ? runById.get(runId) : undefined;
     if (owner === undefined) {
+      sessionItems.push(item);
       continue;
     }
     owner.items.push(item);
@@ -502,6 +506,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
     ...(metadata?.branch !== undefined ? { branch: metadata.branch } : {}),
     copiedEntries,
     items,
+    sessionItems,
     runs,
     messages,
     children,

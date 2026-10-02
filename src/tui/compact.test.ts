@@ -76,6 +76,7 @@ class FakeRuntime implements TuiRuntimeFace {
         kind: "compacted",
         trigger: outcome.trigger,
         tokensBefore: outcome.tokensBefore,
+        messages: [],
         tokensAfter: outcome.tokensAfter,
       });
     }
@@ -136,12 +137,14 @@ test("自动压缩：运行面发出压缩提示时，消息区同样提示一�
       trigger: "turn",
       tokensBefore: 990_000,
       tokensAfter: 21_000,
+      messages: [],
     });
     runtime.emit({
       kind: "compacted",
       trigger: "run-start",
       tokensBefore: 985_000,
       tokensAfter: 20_500,
+      messages: [],
     });
     await settle();
     const text = screenFlat(term);

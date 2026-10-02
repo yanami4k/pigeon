@@ -21,7 +21,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import { asGrantId, newSessionId } from "../state/ids.ts";
 import { noMcpSession } from "./mcp.ts";
-import { createProtectedPathResolver } from "./protected-paths.ts";
+import { createHostProtectedPathResolver, createProtectedPathResolver } from "./protected-paths.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
@@ -291,7 +291,9 @@ test("沙箱（容器执行端）：写成容器内绝对路径的 .pigeon 写�
   }
 });
 
-test("判定：符号链接与 .. 组合——POSIX 把链接替换发生在 .. 之前；Windows 与词法一致（复审 P2 回归）", () => {
+test("判定：符号链接与 .. 组合——词法先折叠再 realpath，与写入路径同一口径（复审 P1 回归）", {
+  skip: NO_SYMLINKS,
+}, () => {
   const root = project();
   mkdirSync(join(root, "a", "b"), { recursive: true });
   symlinkSync(join(root, "a", "b"), join(root, "lnk"));
@@ -300,56 +302,46 @@ test("判定：符号链接与 .. 组合——POSIX 把链接替换发生在 .. 
     governanceRoot: root,
     realPaths: true,
   });
-  if (process.platform === "win32") {
-    // Windows 与词法一致：.. 文本折叠先行
-    assert.equal(resolve("lnk/../../.pigeon/x"), undefined);
-    assert.equal(resolve("lnk/../.pigeon/x"), ".pigeon/x");
-    return;
-  }
-  // POSIX：lnk 先替换为 a/b，.. 作用于替换后的真实路径——/a/.pigeon/x 不受保护，/.pigeon/x 受保护
-  assert.equal(resolve("lnk/../.pigeon/x"), undefined);
-  assert.equal(resolve("lnk/../../.pigeon/x"), ".pigeon/x");
-  assert.equal(resolve(join(root, "lnk", "..", "..", ".pigeon", "x")), ".pigeon/x");
-  // 不带 .. 的写法照旧（词法捷径不变）
+  // 写入侧（决策 334）先折叠再 realpath：lnk/../.pigeon/x 折叠后落在工作区 .pigeon——受保护
+  assert.equal(resolve("lnk/../.pigeon/x"), ".pigeon/x");
+  // 折叠后落在工作区之外——不受保护（与写入实际落点一致）
+  assert.equal(resolve("lnk/../../.pigeon/x"), undefined);
+  // 不带 .. 的写法照旧：realpath 判定不变
   assert.equal(resolve(".pigeon/x"), ".pigeon/x");
   assert.equal(resolve(join(root, "a", ".pigeon", "x")), undefined);
+  assert.equal(resolve(join(root, "lnk", ".pigeon", "x")), undefined);
 });
 
-test("容器判定：符号链接与 .. 组合按容器内核顺序（复审 P2 回归）；词法捷径与出区围栏不变", async () => {
-  // 桩执行端：POSIX readlink -f 语义（链接先替换、.. 再作用于替换后路径），越出 /work 或不存在即拒
+test("容器判定：符号链接与 .. 组合按容器内核顺序（复审 P1 回归）；词法捷径与出区围栏不变", async () => {
+  // 桩执行端：与真实脚本同口径——[ -e ] 要求整条路径存在（POSIX 内核把符号链接替换发生在 ".." 之前），
+  // 存在即返回 readlink -f 的规范化结果，否则拒绝
   const dirs = new Set(["/work", "/work/.pigeon", "/work/a", "/work/a/b", "/work/sub"]);
-  const resolveRaw = (input: string): string | undefined => {
-    const p = input.replace(/^\/work\/lnk(?=\/|$)/, "/work/a/b");
-    // 折叠 . 与 ..（.. 作用于已替换后的真实路径）
+  const kernel = (input: string): string => {
     const out: string[] = [];
-    for (const seg of p.split("/")) {
+    for (const seg of input.split("/")) {
       if (seg === "" || seg === ".") continue;
       if (seg === "..") {
         out.pop();
         continue;
       }
       out.push(seg);
+      // 符号链接替换发生在 ".." 之前：遇到 /work/lnk 立即换成其指向
+      if (`/${out.join("/")}` === "/work/lnk") out.splice(out.length - 1, 1, "a", "b");
     }
-    const target = `/${out.join("/")}`;
-    // POSIX realpath：除最后一段外各段都须存在，存在即返回规范化后的完整目标
-    if (dirs.has(target)) return target;
-    const parent = target.replace(/\/[^/]*$/, "");
-    if (parent !== "" && dirs.has(parent)) return target;
-    return undefined;
+    return `/${out.join("/")}`;
   };
-  const { createHostProtectedPathResolver } = await import("./protected-paths.ts");
   const resolve = createHostProtectedPathResolver({
     root: "/work",
     resolveExisting: (inputPath) => {
-      const hit = resolveRaw(inputPath);
-      return hit === undefined ? Promise.reject(new Error("不存在")) : Promise.resolve(hit);
+      const real = kernel(inputPath);
+      return dirs.has(real) ? Promise.resolve(real) : Promise.reject(new Error("不存在"));
     },
   });
-  // 链接后跟两层 ..：真实落点是 /work/.pigeon/x（受保护），词法折叠曾把它判成不受保护
+  // 链接后跟一层 ..：内核落点是 /work/a/.pigeon/x（子目录同名，不受保护），词法折叠曾误报受保护
+  assert.equal(await resolve("/work/lnk/../.pigeon/x"), undefined);
+  // 链接后跟两层 ..：内核落点是 /work/.pigeon/x（受保护），词法折叠曾把它判成不受保护
   assert.equal(await resolve("/work/lnk/../../.pigeon/x"), ".pigeon/x");
   assert.equal(await resolve("lnk/../../.pigeon/x"), ".pigeon/x");
-  // 链接后跟一层 ..：真实落点是 /work/a/.pigeon/x（子目录同名，不受保护），词法折叠曾误报受保护
-  assert.equal(await resolve("/work/lnk/../.pigeon/x"), undefined);
   // 目录内用 .. 回到 .pigeon：受保护
   assert.equal(await resolve("/work/sub/../.pigeon/x"), ".pigeon/x");
   // 词法捷径与既有判定照旧

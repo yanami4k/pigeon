@@ -3,10 +3,11 @@
 // SessionEnd 收尾被调用（reason=exit）、StopFailure 在 Run 出错收尾时被调用。
 // 钩子脚本全部是真进程（临时目录 .mjs，经 node 启动），事件信息以 JSON 经标准输入交给脚本。
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { runTraceCommand } from "../cli/trace.ts";
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { LayeredHook } from "../state/hooks.ts";
 import { emptySettingsSnapshot, type SettingsSnapshot } from "../state/settings.ts";
@@ -204,6 +205,44 @@ test("Stop 连续拦截到上限：stopHookBlockCap=2 → status stop-hook-limit
   assert.ok(userTexts(streamFn.calls[2]).some((text) => text.includes("永不停止")));
 });
 
+test("trace 列出钩子运行：PreToolUse / PostToolUse 挂在 Run 上，Stop 记为会话级条目", async () => {
+  const { root, home } = workspace();
+  writeFileSync(join(root, "a.ts"), "alpha\n");
+  const noop = script(root, "noop.mjs", [
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {});",
+  ]);
+  const streamFn = createFakeStreamFn({
+    replies: [
+      { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+      { text: "完" },
+    ],
+  });
+  const result = await runHeadless({
+    task: "读一下",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn,
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(root, [
+      hook("PreToolUse", `node "${noop}"`, { matcher: "read_file" }),
+      hook("PostToolUse", `node "${noop}"`, { matcher: "read_file" }),
+      hook("Stop", `node "${noop}"`),
+    ]),
+  });
+  assert.equal(result.status, "completed");
+  const trace = runTraceCommand({ root, sessionId: result.sessionId });
+  // 位置即归属：Pre/Post 在 Run 一节内（挂上了 runId），Stop 在会话级一节
+  const runAt = trace.indexOf("Run ");
+  const preAt = trace.indexOf("钩子 PreToolUse（匹配 read_file）");
+  const postAt = trace.indexOf("钩子 PostToolUse（匹配 read_file）");
+  const sessionAt = trace.indexOf("会话级条目：");
+  const stopAt = trace.indexOf("钩子 Stop");
+  assert.ok(runAt >= 0 && preAt > runAt && postAt > runAt, trace);
+  assert.ok(sessionAt > postAt && stopAt > sessionAt, trace);
+});
+
 test("SessionEnd：运行结束后脚本被调用一次，脚步收到的 reason 为 exit", async () => {
   const { root, home } = workspace();
   const stdinFile = join(root, "session-end.json");
@@ -224,10 +263,12 @@ test("SessionEnd：运行结束后脚本被调用一次，脚步收到的 reason
   assert.equal(sent.reason, "exit");
 });
 
-test("StopFailure：Run 以 failed 收尾时脚本被调用，error 字段非空", async () => {
+test("StopFailure：Run 以 failed 收尾时脚本被调用（error 字段非空），Stop 不再被调用（复审 P2）", async () => {
   const { root, home } = workspace();
   const stdinFile = join(root, "stop-failure.json");
+  const stopFile = join(root, "stop-called.json");
   const file = script(root, "stop-failure.mjs", captureStdinScript(stdinFile));
+  const stopHook = script(root, "stop.mjs", captureStdinScript(stopFile));
   const result = await runHeadless({
     task: "干不了",
     governanceRoot: root,
@@ -239,7 +280,10 @@ test("StopFailure：Run 以 failed 收尾时脚本被调用，error 字段非空
     }),
     yolo: true,
     homeDir: home,
-    settings: settingsWith(root, [hook("StopFailure", `node "${file}"`)]),
+    settings: settingsWith(root, [
+      hook("StopFailure", `node "${file}"`),
+      hook("Stop", `node "${stopHook}"`),
+    ]),
   });
   assert.equal(result.status, "failed");
   assert.ok(existsSync(stdinFile), "Run 出错收尾时 StopFailure 脚本应被调用");
@@ -247,4 +291,63 @@ test("StopFailure：Run 以 failed 收尾时脚本被调用，error 字段非空
   assert.equal(sent.hook_event_name, "StopFailure");
   assert.ok(typeof sent.error === "string" && sent.error.length > 0, JSON.stringify(sent));
   assert.match(String(sent.error), /模拟 provider 故障/);
+  assert.equal(existsSync(stopFile), false, "出错收尾的 Run 不再跑 Stop");
+});
+
+test("Stop 钩子 continue:false：不开新一轮，理由进提示、运行照常收尾（复审 P2）", async () => {
+  const { root, home } = workspace();
+  const file = script(root, "stop-all.mjs", [
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    "  process.stdout.write(JSON.stringify({ continue: false, stopReason: '收工-CF' }));",
+    "});",
+  ]);
+  const streamFn = createFakeStreamFn({ replies: [{ text: "一轮回复" }, { text: "不应出现" }] });
+  const result = await runHeadless({
+    task: "干活",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn,
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(root, [hook("Stop", `node "${file}"`)]),
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(streamFn.calls.length, 1, "continue:false 不再开新一轮");
+});
+
+test("PreToolUse 钩子 continue:false：调用被拦、这批工具后停下（不再问模型），理由模型可见（复审 P2）", async () => {
+  const { root, home } = workspace();
+  writeFileSync(join(root, "a.ts"), "alpha\n");
+  const file = script(root, "stop-pre.mjs", [
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    "  process.stdout.write(JSON.stringify({ continue: false, stopReason: '停手-CF' }));",
+    "});",
+  ]);
+  const streamFn = createFakeStreamFn({
+    replies: [
+      { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+      { text: "不应再问" },
+    ],
+  });
+  const result = await runHeadless({
+    task: "读一下",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn,
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(root, [hook("PreToolUse", `node "${file}"`)]),
+  });
+  assert.equal(streamFn.calls.length, 1, "continue:false 在这批工具后停下，不再问模型");
+  assert.notEqual(result.status, "failed", JSON.stringify(result));
+  // 拦下的理由逐字落进会话里的工具结果（模型可见的载体）
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
+  const entries = readdirSync(sessionsDir, { recursive: true })
+    .map(String)
+    .filter((name) => name.includes(result.sessionId) && name.endsWith(".jsonl"));
+  assert.equal(entries.length, 1, JSON.stringify(entries));
+  const content = readFileSync(join(sessionsDir, entries[0] ?? ""), "utf8");
+  assert.ok(content.includes("停手-CF"), "会话记录里应有钩子的停止理由");
 });

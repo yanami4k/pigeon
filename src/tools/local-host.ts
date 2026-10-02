@@ -147,9 +147,12 @@ function runLocalProcess(
         windowsVerbatimArguments: plan.verbatim,
         // 以独立进程组拉起：超时或中止时对整组发信号，覆盖子进程再起的 node / pytest 等孙进程
         ...processGroupSpawnOptions(),
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [options.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       });
       trackChild(child);
+      // 标准输入（钩子事件 JSON）：写完即收尾，命令读完自行结束
+      child.stdin?.on("error", () => {});
+      if (options.stdin !== undefined) child.stdin?.end(options.stdin, "utf8");
     } catch (error) {
       settle(() =>
         finish({ spawned: false, spawnError: error as NodeJS.ErrnoException, exitCode: null })

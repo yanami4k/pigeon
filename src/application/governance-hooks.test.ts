@@ -173,6 +173,61 @@ test("updatedInput：verdict.updatedArgs 与账本 rawArgs 都是改后参数", 
   assert.equal(records[0]?.decision?.approvedBy, "policy:hook");
 });
 
+test("updatedInput 不带放行含义：write 档只改参数不给结论时仍要人工审批（审批看到的是新参数）", async () => {
+  // 无审批通道：只给 updatedInput 的钩子不能把 write 档变成自动放行
+  const noChannel = harness({
+    preToolUseHooks: async () => ({ updatedInput: { path: "b.ts" } }),
+  });
+  const blocked = await noChannel.governance.decide(call("edit_file", { path: "a.ts" }));
+  assert.deepEqual(blocked, { kind: "block", reason: "策略要求人工审批但未配置审批通道" });
+
+  // 有审批通道：请求里是人要看的新参数；批准后按新参数执行
+  const requests: unknown[] = [];
+  const withChannel = harness({
+    preToolUseHooks: async () => ({ updatedInput: { path: "b.ts" } }),
+    approvalHandler: async (request) => {
+      requests.push(request.args);
+      return { approved: true };
+    },
+  });
+  const verdict = await withChannel.governance.decide(call("edit_file", { path: "a.ts" }));
+  assert.deepEqual(requests, [{ path: "b.ts" }]);
+  assert.deepEqual(verdict, { kind: "allow", updatedArgs: { path: "b.ts" } });
+  assert.equal(withChannel.governance.decisionOf("tc-1")?.approvedBy, "human");
+});
+
+test("ask 与 updatedInput 并存：进人工审批且保留新参数", async () => {
+  const requests: unknown[] = [];
+  const h = harness({
+    preToolUseHooks: async () => ({
+      decision: "ask",
+      reason: "钩子要人看一眼",
+      updatedInput: { path: "b.ts" },
+    }),
+    approvalHandler: async (request) => {
+      requests.push(request.args);
+      return { approved: true };
+    },
+  });
+  const verdict = await h.governance.decide(call("edit_file", { path: "a.ts" }));
+  assert.deepEqual(requests, [{ path: "b.ts" }]);
+  assert.deepEqual(verdict, { kind: "allow", updatedArgs: { path: "b.ts" } });
+});
+
+test("updatedInput 不合参数模式：当钩子出错处理——记异常、按原参数走", async () => {
+  const h = harness({
+    // edit_file 的参数模式要求 path 为 string；给个不合模式的
+    preToolUseHooks: async () => ({ decision: "allow", updatedInput: { path: 42 } }),
+  });
+  const verdict = await h.governance.decide(call("edit_file", { path: "a.ts" }));
+  // 放行照旧（钩子 allow 生效），但执行用原参数
+  assert.deepEqual(verdict, { kind: "allow" });
+  assert.equal(h.errors.length, 1);
+  assert.match(String(h.errors[0]), /updatedInput 不合 edit_file 的参数模式/);
+  const records: ToolExecution[] = h.governance.toolExecutions();
+  assert.deepEqual(records[0]?.rawArgs, { path: "a.ts" }, "账本留原参数");
+});
+
 test("deny 清单仍绝对：钩子 allow 与 updatedInput 都不豁免 deny 名单工具", async () => {
   const h = harness(
     { preToolUseHooks: async () => ({ decision: "allow", updatedInput: { path: "b.ts" } }) },
@@ -184,6 +239,29 @@ test("deny 清单仍绝对：钩子 allow 与 updatedInput 都不豁免 deny 名
     blocked.kind === "block" ? blocked.reason : "",
     /deny 清单精确匹配，任何模式一律拒绝：edit_file/
   );
+  const decision = h.governance.decisionOf("tc-1");
+  assert.equal(decision?.outcome, "rejected");
+  assert.equal(decision?.approvedBy, "policy:deny");
+});
+
+test("ask 只收紧不放行：deny 清单工具配 ask 钩子仍被拒绝，不进人工审批", async () => {
+  let asked = 0;
+  const h = harness(
+    {
+      preToolUseHooks: async () => ({ decision: "ask", reason: "钩子要人看一眼" }),
+      approvalHandler: async () => {
+        asked += 1;
+        return { approved: true };
+      },
+    },
+    { deny: ["edit_file"] }
+  );
+  const blocked = await h.governance.decide(call("edit_file", { path: "a.ts" }));
+  assert.match(
+    blocked.kind === "block" ? blocked.reason : "",
+    /deny 清单精确匹配，任何模式一律拒绝：edit_file/
+  );
+  assert.equal(asked, 0);
   const decision = h.governance.decisionOf("tc-1");
   assert.equal(decision?.outcome, "rejected");
   assert.equal(decision?.approvedBy, "policy:deny");

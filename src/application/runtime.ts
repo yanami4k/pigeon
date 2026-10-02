@@ -60,7 +60,7 @@ import {
 } from "../skills/load-skill-tool.ts";
 import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
-import type { SessionId } from "../state/ids.ts";
+import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
@@ -366,6 +366,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     onFault: storeFaultWarner(deps.storeWarn),
     persistThinking: deps.persistThinking ?? true,
   });
+  // 170 ④：本会话的审批状态——委派策略在场时取其审批模式，否则取 yolo 旗标；非 yolo 时看有没有注入审批通道。
+  // run_command 的三处说明与系统提示里的审批说法都按它与执行端的平台生成，不写死本地、人工批准的说法；
+  // 钩子 JSON 的 permission_mode 也用它（324）
+  const approvalMode = deps.toolPolicy?.approvalMode ?? (deps.yolo ? "yolo" : "prompt");
   // 决策 323 / 324 / 326 ②：会话级钩子——清单随设置快照冻结；执行位置按执行端（本机/容器，host:true 的在宿主）；
   // 运行记录写进本会话（pigeon.hook 条目）；拦下或出错经 hooksNotice 给一行提示
   const sessionHooks = new SessionHooks({
@@ -376,8 +380,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     hooks: settings.hooks,
     disableAllHooks: settings.merged.disableAllHooks,
     sink: sessionStore,
+    // 记录挂活动 Run（adapter 在下方创建；钩子只在运行期触发，届时 adapter 已就位）
+    activeRunId: (): RunId | undefined => adapter.currentRunId(),
     ...(deps.hooksNotice !== undefined ? { notice: deps.hooksNotice } : {}),
     ...(deps.workspaceHost !== undefined ? { workspaceHost: deps.workspaceHost } : {}),
+    permissionMode: approvalMode,
   });
   // PreToolUse 钩子的 additionalContext 随工具结果交给模型：按 toolCallId 暂存，afterToolCall 时一并追加
   const preToolContexts = new Map<string, string[]>();
@@ -389,9 +396,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // 执行端另一侧的工作区不建目录限定的放权
     pathScoped: deps.workspaceHost === undefined,
   });
-  // 170 ④：本会话的审批状态——委派策略在场时取其审批模式，否则取 yolo 旗标；非 yolo 时看有没有注入审批通道。
-  // run_command 的三处说明与系统提示里的审批说法都按它与执行端的平台生成，不写死本地、人工批准的说法
-  const approvalMode = deps.toolPolicy?.approvalMode ?? (deps.yolo ? "yolo" : "prompt");
   const approval: RunCommandApproval =
     approvalMode === "yolo" ? "yolo" : deps.createApprovalHandler !== undefined ? "prompt" : "none";
   const commandTexts = runCommandTexts({ platform: workspaceHost.platform, approval });
@@ -777,20 +781,33 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         if (report.additionalContext.length > 0) {
           preToolContexts.set(input.toolCallId, [...report.additionalContext]);
         }
+        // 决策 324：continue:false 压过 decision——停止本轮处理：阻断本调用并在这批工具后停下
+        if (report.continueFalse !== undefined) {
+          return {
+            decision: "deny",
+            terminate: true,
+            reason:
+              report.blocked?.reason ?? report.continueFalse.stopReason ?? "钩子要求停止本轮处理",
+          };
+        }
         if (report.blocked !== undefined) {
           return { decision: "deny", reason: report.blocked.reason };
         }
+        // updatedInput 不带放行含义：只换参数；结论只看 blocked / ask / allow
+        const updated =
+          report.updatedInput !== undefined ? { updatedInput: report.updatedInput } : {};
         if (report.ask !== undefined) {
           return {
             decision: "ask",
             ...(report.ask.reason !== undefined ? { reason: report.ask.reason } : {}),
+            ...updated,
           };
         }
-        if (report.updatedInput !== undefined) {
-          return { decision: "allow", updatedInput: report.updatedInput };
-        }
         if (report.allow === true) {
-          return { decision: "allow" };
+          return { decision: "allow", ...updated };
+        }
+        if (report.updatedInput !== undefined) {
+          return { ...updated };
         }
         return undefined;
       },
@@ -847,9 +864,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     adapter.subscribeCompaction((notice) => {
       if (notice.kind === "compacted") {
         const trigger = notice.trigger === "manual" ? "manual" : "auto";
+        // compact_summary 给真实摘要（复审 P2：不再给空串）：压缩后的上下文里 role 为
+        // compactionSummary 的消息带 summary 字符串（上游 harness/compaction 的形状）
+        const summaryMessage = notice.messages.find(
+          (message) => (message as { role?: unknown }).role === "compactionSummary"
+        ) as { summary?: unknown } | undefined;
+        const compactSummary =
+          typeof summaryMessage?.summary === "string" ? summaryMessage.summary : "";
         void sessionHooks.runEvent("PostCompact", trigger, {
           trigger,
-          compact_summary: "",
+          compact_summary: compactSummary,
         });
       }
     });

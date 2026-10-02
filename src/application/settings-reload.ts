@@ -21,8 +21,8 @@ import {
 } from "../state/config-trust.ts";
 import { canonicalJson } from "../state/hashing.ts";
 import { mergeMcpConfig } from "../state/mcp-config.ts";
-import { SETTINGS_SECTIONS, type SettingsSnapshot } from "../state/settings.ts";
-import { pendingTrustEntries } from "./session-settings.ts";
+import { SETTINGS_SECTIONS, type SettingsSnapshot, withHooksDisabled } from "../state/settings.ts";
+import { localSettingsTracked, pendingTrustEntries } from "./session-settings.ts";
 
 export interface SettingsReloadPlan {
   current: SettingsSnapshot;
@@ -46,16 +46,20 @@ function entriesOf(snapshot: SettingsSnapshot): TrustEntry[] {
   return trustEntriesOf({
     snapshot,
     ...(content !== undefined ? { dockerfileContent: content } : {}),
+    // 决策 342：项目个人层被 git 跟踪时按共享层确认
+    ...(localSettingsTracked(snapshot.root) ? { localLayerTracked: true } : {}),
   });
 }
 
-// 读新设置，算出须人确认的条目（读不出即抛错，当前快照不变）
+// 读新设置，算出须人确认的条目（读不出即抛错，当前快照不变）。
+// hooksDisabled：--no-hooks 是本次运行的进程级开关，重读出的新快照同样停用钩子（复审 P2）
 export function planSettingsReload(
   current: SettingsSnapshot,
-  options: { homeDir?: string } = {}
+  options: { homeDir?: string; hooksDisabled?: boolean } = {}
 ): SettingsReloadPlan {
   const homeDir = options.homeDir ?? homedir();
-  const next = loadSettings(current.root, { homeDir });
+  const loaded = loadSettings(current.root, { homeDir });
+  const next = options.hooksDisabled === true ? withHooksDisabled(loaded) : loaded;
   const before = new Map(entriesOf(current).map((entry) => [trustKeyOf(entry), entry.fingerprint]));
   const changed = new Set(
     entriesOf(next)
@@ -83,7 +87,9 @@ export function applySettingsReload(
   void options;
   let snapshot = plan.next;
   if (plan.pending.length > 0 && choice === "skip") {
-    snapshot = revertTrustEntries(plan.next, plan.current, plan.pending);
+    snapshot = revertTrustEntries(plan.next, plan.current, plan.pending, {
+      localLayerTracked: localSettingsTracked(plan.current.root),
+    });
   }
   const changedSections = [...Object.keys(SETTINGS_SECTIONS), "trustedDirectories"].filter(
     (name) =>
@@ -136,8 +142,9 @@ export const RELOAD_USAGE =
 export interface SettingsReloaderDeps {
   // 当前快照
   current(): SettingsSnapshot;
-  // 新快照生效：换上新快照并按它重建运行面（自下一轮起生效）
   apply(snapshot: SettingsSnapshot): Promise<void>;
+  // --no-hooks（本次运行停用全部钩子）：重读出的新快照也停用，reload 不把钩子带回来
+  hooksDisabled?: boolean;
   // 现在不能重载的原因（有 worker 在跑等）；可以即 undefined
   busy?(): string | undefined;
   // 沙箱会话的会话号（在沙箱里才给）：sandbox 一节有变化时提示退出后续跑才对容器生效
@@ -150,7 +157,10 @@ export function createSettingsReloader(
   deps: SettingsReloaderDeps
 ): (args: readonly string[]) => Promise<string[]> {
   let pending: SettingsReloadPlan | undefined;
-  const homeOption = deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {};
+  const homeOption = {
+    ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+    ...(deps.hooksDisabled === true ? { hooksDisabled: true } : {}),
+  };
   return async (args) => {
     const busy = deps.busy?.();
     if (busy !== undefined) return [busy];

@@ -64,6 +64,8 @@ export interface TrustEntriesInput {
   snapshot: SettingsSnapshot;
   // 沙箱配置指向的项目 Dockerfile 的内容（读不到为 undefined）；由读取方给出
   dockerfileContent?: string;
+  // 决策 342：项目个人层 .pigeon/settings.local.json 被 git 跟踪时按共享层对待——其中的放行规则纳入按内容确认
+  localLayerTracked?: boolean;
 }
 
 // 快照里会执行命令的条目
@@ -111,17 +113,20 @@ export function trustEntriesOf(input: TrustEntriesInput): TrustEntry[] {
       fingerprint: sha256Hex(canonicalJson(server.launch)),
     });
   }
-  // 项目共享层的放行规则：逐条按整条规则的规范化 JSON 记指纹（同样内容的多条只列一次）
+  // 项目共享层的放行规则：逐条按整条规则的规范化 JSON 记指纹（同样内容的多条只列一次）；
+  // 决策 342：项目个人层被 git 跟踪时，其中的放行规则同样纳入确认（内容可能来自他人）
   const rules = new Set<string>();
   for (const { layer, rule } of snapshot.grants) {
-    if (layer !== "project") continue;
+    const confirmable =
+      layer === "project" || (input.localLayerTracked === true && layer === "local");
+    if (!confirmable) continue;
     const fingerprint = permissionFingerprintOf(rule);
     if (rules.has(fingerprint)) continue;
     rules.add(fingerprint);
     entries.push({
       kind: "permission",
       id: fingerprint.slice(0, 12),
-      origin: SETTINGS_LAYER_LABELS.project,
+      origin: SETTINGS_LAYER_LABELS[layer],
       summary: canonicalJson(rule),
       fingerprint,
     });
@@ -187,7 +192,8 @@ export function withinTrustedDirectory(
 // 去掉本次不用的条目：短名（连同角色清单里对它的引用）、沙箱一节、MCP 服务、项目共享层的放行规则
 export function withoutTrustEntries(
   snapshot: SettingsSnapshot,
-  excluded: readonly TrustEntry[]
+  excluded: readonly TrustEntry[],
+  options: { localLayerTracked?: boolean } = {}
 ): SettingsSnapshot {
   if (excluded.length === 0) return snapshot;
   const commandNames = new Set(excluded.filter((e) => e.kind === "command").map((e) => e.id));
@@ -201,7 +207,10 @@ export function withoutTrustEntries(
   const grants =
     rules.size > 0
       ? snapshot.grants.filter(
-          (entry) => entry.layer !== "project" || !rules.has(permissionFingerprintOf(entry.rule))
+          (entry) =>
+            (entry.layer !== "project" &&
+              !(options.localLayerTracked === true && entry.layer === "local")) ||
+            !rules.has(permissionFingerprintOf(entry.rule))
         )
       : snapshot.grants;
   const merged = { ...snapshot.merged };
@@ -260,7 +269,8 @@ export function withoutTrustEntries(
 export function revertTrustEntries(
   next: SettingsSnapshot,
   current: SettingsSnapshot,
-  entries: readonly TrustEntry[]
+  entries: readonly TrustEntry[],
+  options: { localLayerTracked?: boolean } = {}
 ): SettingsSnapshot {
   if (entries.length === 0) return next;
   const merged = { ...next.merged };
@@ -305,7 +315,7 @@ export function revertTrustEntries(
     ...(dotMcp !== undefined ? { dotMcp } : {}),
   };
   // 原来没有的短名与放行规则：照"本次不用"去掉（短名连同角色清单里的引用）
-  return withoutTrustEntries(reverted, dropped);
+  return withoutTrustEntries(reverted, dropped, options);
 }
 
 // 给人看的一行

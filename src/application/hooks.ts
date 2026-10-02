@@ -91,6 +91,8 @@ export interface SessionHooksOptions {
   disableAllHooks: boolean;
   // 会话存储写入面（缺省不记）
   sink?: { append(entry: SessionCustomEntry): void };
+  // 审批档（钩子 JSON 的 permission_mode；复审 P2 补上）
+  permissionMode?: string;
   // 记录里附的活动 Run（会话级事件常缺省）
   activeRunId?: () => string | undefined;
   // 终端界面的一行提示（拦下或出错时调用；缺省静默）
@@ -279,12 +281,21 @@ export class SessionHooks {
       ran: false,
     };
     if (this.#options.disableAllHooks) return report;
-    const matched = this.#options.hooks.filter(
-      (hook) => hook.event === event && hookMatcherMatchesLocal(hook.matcher, matcherTarget)
-    );
+    // 一次事件命中的全部钩子按命令（与执行位置）去重，同一事件内不再看 matcher：
+    // 同一命令在两层用不同 matcher 时，对同一目标只跑一次（复审 P2）
+    const seenCommands = new Set<string>();
+    const matched = this.#options.hooks.filter((hook) => {
+      if (hook.event !== event || !hookMatcherMatchesLocal(hook.matcher, matcherTarget)) {
+        return false;
+      }
+      const key = JSON.stringify([hook.command, hook.host]);
+      if (seenCommands.has(key)) return false;
+      seenCommands.add(key);
+      return true;
+    });
     if (matched.length === 0) return report;
     report.ran = true;
-    const env: NodeJS.ProcessEnv = {
+    const hostEnv: NodeJS.ProcessEnv = {
       ...(this.#options.env ?? process.env),
       PIGEON_PROJECT_DIR: this.#options.governanceRoot,
     };
@@ -292,24 +303,35 @@ export class SessionHooks {
     const runViaHost = this.#options.runViaHost ?? runHookCommandViaHost;
     const results = await Promise.all(
       matched.map(async (hook) => {
+        // 沙箱会话在容器里执行；host:true 的钩子在宿主执行。经执行端时 cwd 与 PIGEON_PROJECT_DIR
+        // 用容器内的工作区根（hook-runner 再按此组环境变量）
+        const throughHost = this.#options.workspaceHost !== undefined && !hook.host;
+        const cwd =
+          throughHost && this.#options.workspaceHost !== undefined
+            ? this.#options.workspaceHost.root
+            : this.#options.workspaceRoot;
         const input = {
           session_id: this.#options.sessionId,
-          cwd: this.#options.workspaceRoot,
+          cwd,
           hook_event_name: event,
+          ...(this.#options.permissionMode !== undefined
+            ? { permission_mode: this.#options.permissionMode }
+            : {}),
           ...fields,
         };
         const stdin = `${JSON.stringify(input)}\n`;
         const timeoutMs = hookTimeoutMs(event, hook);
         const execInput = {
           command: hook.command,
-          cwd: this.#options.workspaceRoot,
-          platform: this.#options.platform,
+          cwd,
+          platform: throughHost
+            ? (this.#options.workspaceHost?.platform ?? this.#options.platform)
+            : this.#options.platform,
           stdin,
           timeoutMs,
-          env,
+          env: hostEnv,
           ...(options.signal !== undefined ? { signal: options.signal } : {}),
         };
-        // 沙箱会话在容器里执行；host:true 的钩子在宿主执行
         const outcome =
           this.#options.workspaceHost !== undefined && !hook.host
             ? await runViaHost(this.#options.workspaceHost, execInput)
@@ -383,6 +405,8 @@ export class SessionHooks {
     if (notice === undefined) return;
     if (record.conclusion === "deny" || record.conclusion === "block") {
       notice(`钩子拦下（${record.hook.event}）：${record.reason ?? record.hook.command}`);
+    } else if (record.continueFalse === true) {
+      notice(`钩子要求停止（${record.hook.event}）：${record.stopReason ?? record.hook.command}`);
     } else if (record.conclusion === "error") {
       notice(`钩子出错（${record.hook.event}）：${record.reason ?? record.hook.command}`);
     }

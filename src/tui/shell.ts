@@ -1808,12 +1808,23 @@ export class PigeonTuiShell
 
   // 决策 323、324：一轮收尾后的 Stop 钩子。外部取消过、run 自身报错或钩子停用即直接收尾；
   // 拦下（或补了上下文）即把理由/上下文作为新一轮输入接着跑，连续拦到上限（stopHookBlockCap，
-  // 缺省 8）后不再理会并提示一行。stop_hook_active 首次 false、继续后 true
+  // 缺省 8）后不再理会并提示一行。stop_hook_active 首次 false、继续后 true。
+  // 出错收尾的 Run 不跑 Stop——它的通知是 StopFailure（复审 P2：与 headless 同一口径）
   private async afterRun(result: RunResult | null): Promise<void> {
     try {
       if (result === null || this.runCancelled) return;
       const hooks = this.current.hooks;
       if (hooks === undefined || hooks.disabled) return;
+      if (result.status === "failed") {
+        try {
+          await hooks.runEvent("StopFailure", "", { error: result.errorMessage ?? "unknown" });
+        } catch (error) {
+          this.flow.addSystem(
+            `钩子出错（StopFailure）：${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+        return;
+      }
       const cap = this.options.stopHookCap?.() ?? DEFAULT_STOP_HOOK_BLOCK_CAP;
       let stopHookActive = false;
       let blockedCount = 0;
@@ -1828,12 +1839,10 @@ export class PigeonTuiShell
           return;
         }
         for (const line of report.systemMessages) this.flow.addSystem(line);
+        // continue:false 压过拦截：整个会话停止处理，不再开新一轮
+        if (report.continueFalse !== undefined) return;
         const wantsContinue = report.blocked !== undefined || report.additionalContext.length > 0;
         if (!wantsContinue) return;
-        if (blockedCount >= cap) {
-          this.flow.addSystem(`[hooks] Stop 钩子连续拦下 ${cap} 次，已到上限，不再接着跑`);
-          return;
-        }
         blockedCount += 1;
         stopHookActive = true;
         const reason = report.blocked?.reason;

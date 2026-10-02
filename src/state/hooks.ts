@@ -101,13 +101,14 @@ export function hooksOfLayer(
 }
 
 // 三层合并（324）：各层条目并列生效（不去重事件或 matcher）；同一事件同一 matcher 下命令完全相同的只留一份。
+// 键按 JSON 数组序列化：字段各自成元，不拼串（拼串在 "Bash"+"x" 与 "Bas"+"hx" 这类边界上撞车）
 // 层序即传入序（按优先级从低到高）
 export function mergeHookLayers(layers: readonly LayeredHook[][]): LayeredHook[] {
   const seen = new Set<string>();
   const out: LayeredHook[] = [];
   for (const list of layers) {
     for (const hook of list) {
-      const key = `${hook.event}${hook.matcher ?? ""}${hook.command}`;
+      const key = JSON.stringify([hook.event, hook.matcher ?? null, hook.command, hook.host]);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(hook);

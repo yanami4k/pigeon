@@ -159,13 +159,21 @@ test("shell 启动计划：Windows 经 cmd.exe /d /s /c 去掉首尾一对引号
   assert.deepEqual(posix, { program: "/bin/sh", args: ["-c", "npm test"], verbatim: false });
 });
 
-test("经执行端执行：计划为 /bin/sh -c，输出与退出码映射回结果", async () => {
-  const seen: Array<{ program: string; args: string[] }> = [];
+test("经执行端执行：计划为 /bin/sh -c，stdin 透传、PIGEON_PROJECT_DIR 取容器内根，输出与退出码映射回结果", async () => {
+  const seen: Array<{
+    program: string;
+    args: string[];
+    env: NodeJS.ProcessEnv;
+    stdin: string | undefined;
+  }> = [];
   const host = {
     platform: "linux",
     root: "/testbed",
-    async exec(plan: { program: string; args: string[] }): Promise<HostExecResult> {
-      seen.push({ program: plan.program, args: plan.args });
+    async exec(
+      plan: { program: string; args: string[] },
+      options: { env: NodeJS.ProcessEnv; stdin?: string | undefined }
+    ): Promise<HostExecResult> {
+      seen.push({ program: plan.program, args: plan.args, env: options.env, stdin: options.stdin });
       return {
         spawned: true,
         exitCode: 2,
@@ -182,11 +190,19 @@ test("经执行端执行：计划为 /bin/sh -c，输出与退出码映射回结
     command: "gate.sh",
     cwd: "/testbed",
     platform: "linux",
-    stdin: "{}\n",
+    stdin: '{"hook_event_name":"Stop"}\n',
     timeoutMs: 1000,
-    env: {},
+    env: { HOST_ONLY: "x" },
   });
-  assert.deepEqual(seen, [{ program: "/bin/sh", args: ["-c", "gate.sh"] }]);
+  assert.deepEqual(seen, [
+    {
+      program: "/bin/sh",
+      args: ["-c", "gate.sh"],
+      // 宿主环境不渗进容器：只有 PIGEON_PROJECT_DIR，取容器内的工作区根
+      env: { PIGEON_PROJECT_DIR: "/testbed" },
+      stdin: '{"hook_event_name":"Stop"}\n',
+    },
+  ]);
   assert.equal(outcome.exitCode, 2);
   assert.equal(outcome.stdout, "json-out");
   assert.equal(outcome.stderr, "oops");
@@ -259,19 +275,26 @@ test("真容器：钩子在容器内执行（容器内写标记、宿主侧没�
   });
   try {
     const outcome = await runHookCommandViaHost(sandbox.host, {
+      // stdin 落进容器文件、PIGEON_PROJECT_DIR 回显、两路输出分开取回
       command:
-        "mkdir -p .hook-mark && printf inside > .hook-mark/x && printf out && printf err >&2",
+        'mkdir -p .hook-mark && cat > .hook-mark/stdin.json && printf inside > .hook-mark/x && printf %s "$PIGEON_PROJECT_DIR" && printf err >&2',
       cwd: sandbox.host.root,
       platform: sandbox.host.platform,
-      stdin: "",
+      stdin: '{"hook_event_name":"Stop"}\n',
       timeoutMs: 60_000,
       env: process.env,
     });
     assert.equal(outcome.exitCode, 0);
-    assert.equal(outcome.stdout, "out");
+    assert.equal(outcome.stdout, sandbox.host.root, "PIGEON_PROJECT_DIR 为容器内的工作区根");
     assert.equal(outcome.stderr, "err\n");
     const marker = await sandbox.host.resolveExisting(".hook-mark/x");
     assert.equal(await sandbox.host.readText(marker), "inside");
+    const stdinMarker = await sandbox.host.resolveExisting(".hook-mark/stdin.json");
+    assert.equal(
+      await sandbox.host.readText(stdinMarker),
+      '{"hook_event_name":"Stop"}\n',
+      "事件 JSON 经标准输入进容器"
+    );
     assert.equal(existsSync(join(repo, ".hook-mark")), false, "标记只落在容器内，宿主侧没有");
   } finally {
     await sandbox.discard();

@@ -70,6 +70,8 @@ export interface WorkerRunResult {
   errorMessage?: string;
   runId?: RunId;
   emptyReply?: boolean;
+  // 收尾钩子的输出（决策 322：SubagentStop 的拦截理由与补充上下文，逐轮累计；多份尝试的汇总随结果交回）
+  hookOutputs?: string[];
 }
 
 // 派出方的派出与收尾落盘口（装配根接到派出方会话的会话存储）
@@ -393,6 +395,8 @@ export interface WorkerOutcome {
   origin?: WorkerOrigin;
   // 决策 298：会话记录位置（运行面给出时在场）
   transcript?: string;
+  // 收尾钩子的输出（SubagentStop 的拦截理由与补充上下文，逐轮累计；322：多份尝试交回各份的钩子输出）
+  hookOutputs?: string[];
   durationMs?: number;
 }
 
@@ -1254,8 +1258,10 @@ export class WorkerOrchestrator {
     let status: ChildSettledStatus;
     let error: string | undefined;
     let errorKind: WorkerErrorKind | undefined;
+    let hookOutputs: string[] | undefined;
     try {
       const run: WorkerRunResult = skipRun ? { status: "aborted" } : await runtime.run(input);
+      hookOutputs = run.hookOutputs;
       if (run.status === "completed") {
         status = "completed";
       } else if (run.status === "aborted") {
@@ -1353,6 +1359,7 @@ export class WorkerOrchestrator {
         ? { recoverable: true, blocked: entry.blocked }
         : {}),
       ...(result !== undefined ? { result } : {}),
+      ...(hookOutputs !== undefined && hookOutputs.length > 0 ? { hookOutputs } : {}),
       ...(transcript !== undefined ? { transcript } : {}),
       durationMs: skipRun ? 0 : this.#now() - runStartedAt,
     };

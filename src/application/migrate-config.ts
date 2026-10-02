@@ -542,14 +542,37 @@ export const verifyJsonStep: MigrationStep = {
   id: "verify-json",
   title: "退役的验证配置",
   plan(ctx) {
-    return existsSync(verifyConfigPathOf(ctx.root))
-      ? {
-          todo: [
-            `${pigeonRel("verify.json")} → 挪进备份目录（验证门已删除，不并入设置），并打印改写为收尾钩子的示例`,
-          ],
-          blockers: [],
-        }
-      : { todo: [], blockers: [] };
+    const source = verifyConfigPathOf(ctx.root);
+    if (!existsSync(source)) return { todo: [], blockers: [] };
+    // 校验在 plan 阶段（复审 P2：先检查后执行——不合法即拦住，不走到 apply 才炸）
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(source, "utf8"));
+    } catch (error) {
+      return {
+        todo: [],
+        blockers: [
+          `${pigeonRel("verify.json")} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+        ],
+      };
+    }
+    if (!isPlainObject(raw)) {
+      return { todo: [], blockers: [`${pigeonRel("verify.json")} 顶层须为对象`] };
+    }
+    try {
+      stopHookCommandOf(raw);
+    } catch (error) {
+      return {
+        todo: [],
+        blockers: [error instanceof Error ? error.message : String(error)],
+      };
+    }
+    return {
+      todo: [
+        `${pigeonRel("verify.json")} → 挪进备份目录（验证门已删除，不并入设置），并打印改写为收尾钩子的示例`,
+      ],
+      blockers: [],
+    };
   },
   apply(ctx) {
     const source = verifyConfigPathOf(ctx.root);
@@ -564,7 +587,10 @@ export const verifyJsonStep: MigrationStep = {
     if (!isPlainObject(raw)) {
       throw new MigrationError(`${pigeonRel("verify.json")} 顶层须为对象`);
     }
-    const command = stopHookCommandOf(raw);
+    // 决策 324：收尾钩子以退出码 2 + stderr 拦下；普通命令失败时输出在 stdout、退出码非 2 拦不住——
+    // 示例把输出导到 stderr、失败时以 2 退出（复审 P2：原样印出的 npm test 拦不住）
+    const base = stopHookCommandOf(raw);
+    const command = base.includes(" && ") ? `( ${base} ) 1>&2 || exit 2` : `${base} 1>&2 || exit 2`;
     ctx.backups.push(moveToMigrationBackup(ctx.root, source, "verify.json", ctx.homeDir));
     return [
       `已挪走 ${pigeonRel("verify.json")}：验证门、回炉与失败自动分叉重试已删除，verify.json 不并入设置`,

@@ -6,6 +6,7 @@
 //      （含首次出现）时——交互入口列出请人选"全部确认 / 本次不用 / 退出"，确认即记下指纹；无人值守（pigeon run）报错退出，
 //      加 --trust-config 只对本次运行放行、不记指纹。项目位于用户级 trustedDirectories 之下时免于确认。
 // worker 与沙箱会话沿用派出它的会话的快照（含确认结果），不再询问。
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import {
   loadTrustRecord,
@@ -59,6 +60,20 @@ function trustedDirectoriesOf(snapshot: SettingsSnapshot, homeDir: string): stri
   );
 }
 
+// 决策 342：项目个人层 .pigeon/settings.local.json 被 git 跟踪时按共享层对待
+// （.gitignore 挡不住强制添加；克隆来的仓库里它可能来自他人）。非 git 仓库或未被跟踪即 false
+export function localSettingsTracked(root: string): boolean {
+  try {
+    execFileSync("git", ["ls-files", "--error-unmatch", ".pigeon/settings.local.json"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // 本会话里未确认的条目（信任目录之下的项目一律为空）
 export function pendingTrustEntries(
   snapshot: SettingsSnapshot,
@@ -73,6 +88,7 @@ export function pendingTrustEntries(
   const entries = trustEntriesOf({
     snapshot,
     ...dockerfileOption(sandboxDockerfileContent(snapshot)),
+    ...(localSettingsTracked(snapshot.root) ? { localLayerTracked: true } : {}),
   });
   return untrustedEntries(entries, loadTrustRecord(snapshot.root, homeDir));
 }
@@ -116,7 +132,9 @@ export async function confirmSessionConfig(
     options.notice?.(
       `本次不用以下未确认的配置：${pending.map((entry) => `${entry.kind}:${entry.id}`).join("、")}`
     );
-    return withoutTrustEntries(snapshot, pending);
+    return withoutTrustEntries(snapshot, pending, {
+      localLayerTracked: localSettingsTracked(snapshot.root),
+    });
   }
   throw new ConfigNotConfirmedError("未确认会执行命令或放权的配置，已退出");
 }

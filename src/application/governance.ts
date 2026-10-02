@@ -5,11 +5,13 @@
 // 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游 prepareToolCall
 // 在 hook 前拦截，事件级连续计数熔断兜底（spikes/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
 import path from "node:path";
+import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import type {
   GovernanceHost,
   GovernanceRunOutcome,
   GovernanceVerdict,
+  PreToolUseHookDecision,
   ToolCallProposal,
   ToolGovernance,
   ToolGovernanceFactory,
@@ -227,7 +229,20 @@ class GovernedToolCalls implements ToolGovernance {
     const { toolName, toolCallId } = call;
     // 决策 324：PreToolUse 钩子在审批之前执行（拒绝 > 要人确认 > 放行）。钩子改过的参数重新经过全部检查，
     // 账本、审批与执行都按改后的参数走（钩子自身出错不拦只提示，由钩子调度记进运行记录）
-    const hookDecision = await this.#preToolUseDecision(toolName, toolCallId, call.args);
+    let hookDecision = await this.#preToolUseDecision(toolName, toolCallId, call.args);
+    // 改后的参数先过工具的参数模式：不合格当钩子自身出错——记异常、按原参数继续（与钩子抛错同一口径）
+    if (hookDecision?.updatedInput !== undefined) {
+      const schema = this.#registry.get(toolName)?.parameters;
+      if (schema !== undefined && !Value.Check(schema, hookDecision.updatedInput)) {
+        this.#host.reportError(
+          new Error(
+            `PreToolUse 钩子给的 updatedInput 不合 ${toolName} 的参数模式，按钩子出错处理：用原参数`
+          )
+        );
+        const { updatedInput: _dropped, ...rest } = hookDecision;
+        hookDecision = rest;
+      }
+    }
     if (hookDecision?.decision === "deny") {
       const deniedReason = hookDecision.reason ?? "钩子拒绝";
       const proposed = proposeToolExecution({
@@ -246,7 +261,11 @@ class GovernedToolCalls implements ToolGovernance {
       });
       this.#executions.set(toolCallId, record);
       this.#runToolCallIds.push(toolCallId);
-      return this.#blockWithBreaker(toolName, call.args, deniedReason, "fingerprint");
+      // continue:false（terminate）：阻断本调用并提示上游在这批工具后停下——停止本轮处理
+      return {
+        ...this.#blockWithBreaker(toolName, call.args, deniedReason, "fingerprint"),
+        ...(hookDecision.terminate === true ? { terminate: true } : {}),
+      };
     }
     // 钩子放行/要人确认的标记：放行只免掉人工审批这一步（拒绝名单、路径围栏与受保护路径照常生效），
     // 要人确认跳过自动放行直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）
@@ -302,8 +321,9 @@ class GovernedToolCalls implements ToolGovernance {
         reason: `worker 在自己的工作树内改文件，默认放行：${toolName}`,
       };
     }
-    // 决策 324：钩子要人确认——跳过一切自动放行，直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）
-    if (hookDecision?.decision === "ask") {
+    // 决策 324：钩子要人确认——跳过一切自动放行，直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）；
+    // 只收紧不放行：deny 清单的拒绝是绝对的，ask 不覆盖
+    if (hookDecision?.decision === "ask" && decision.kind !== "deny") {
       decision = { kind: "prompt", reason: hookDecision.reason ?? "钩子要求人确认" };
     }
 
@@ -385,12 +405,15 @@ class GovernedToolCalls implements ToolGovernance {
       return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
     }
     const tier = this.#registry.get(toolName)?.tier;
-    // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
+    // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）。
+    // 钩子改过参数时按改后参数生成预览（已经过参数模式校验），否则用上游校验过的参数
     let diffPreview: string | undefined;
     const tool = this.#host.tools.get(toolName);
     if (tool !== undefined && "preview" in tool && typeof tool.preview === "function") {
       try {
-        diffPreview = await tool.preview(call.preparedArgs);
+        diffPreview = await tool.preview(
+          hookDecision?.updatedInput !== undefined ? rawArgs : call.preparedArgs
+        );
       } catch {
         diffPreview = undefined;
       }
@@ -446,9 +469,7 @@ class GovernedToolCalls implements ToolGovernance {
     toolName: string,
     toolCallId: string,
     args: unknown
-  ): Promise<
-    { decision: "allow" | "ask" | "deny"; reason?: string; updatedInput?: unknown } | undefined
-  > {
+  ): Promise<PreToolUseHookDecision | undefined> {
     if (this.#preToolUseHooks === undefined) return undefined;
     try {
       return await this.#preToolUseHooks({ toolCallId, toolName, args });

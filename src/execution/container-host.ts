@@ -115,16 +115,22 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     `${key}=${value}`,
   ]);
   const docker = [dockerProgram, ...dockerPrefix];
-  const execFlags = (interactive: boolean): string[] => [
+  const execFlags = (interactive: boolean, extraEnv?: NodeJS.ProcessEnv): string[] => [
     ...(interactive ? ["-i"] : []),
     "-w",
     root,
     ...envArgs,
+    // 单次调用带过白名单的环境变量（钩子的 PIGEON_PROJECT_DIR 等）
+    ...Object.entries(extraEnv ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
   ];
-  const execArgs = (interactive: boolean, command: readonly string[]): string[] => [
+  const execArgs = (
+    interactive: boolean,
+    command: readonly string[],
+    extraEnv?: NodeJS.ProcessEnv
+  ): string[] => [
     ...dockerPrefix,
     "exec",
-    ...execFlags(interactive),
+    ...execFlags(interactive, extraEnv),
     options.container,
     ...command,
   ];
@@ -194,10 +200,17 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       let terminating: Promise<void> | undefined;
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(dockerProgram, execArgs(false, [plan.program, ...plan.args]), {
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true,
-        });
+        child = spawn(
+          dockerProgram,
+          execArgs(execOptions.stdin !== undefined, [plan.program, ...plan.args], execOptions.env),
+          {
+            stdio: [execOptions.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+            windowsHide: true,
+          }
+        );
+        // 标准输入（钩子事件 JSON）：写完即收尾，容器内命令读完自行结束
+        child.stdin?.on("error", () => {});
+        if (execOptions.stdin !== undefined) child.stdin?.end(execOptions.stdin, "utf8");
       } catch (error) {
         reject(
           new ContainerHostError(

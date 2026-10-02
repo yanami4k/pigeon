@@ -153,7 +153,7 @@ pigeon migrate-config [--root <项目根>]
   "hooks": {
     "Stop": [
       {
-        "hooks": [{ "type": "command", "command": "npm test", "timeout": 600 }]
+        "hooks": [{ "type": "command", "command": "npm test 1>&2 || exit 2", "timeout": 600 }]
       }
     ],
     "PreToolUse": [
@@ -220,13 +220,13 @@ pigeon migrate-config [--root <项目根>]
 
 ### 示例
 
-收尾时跑测试（原验证门的替代）：
+收尾时跑测试（原验证门的替代）。拦下靠退出码 2 与 stderr：命令失败时把输出导到 stderr 并以 2 退出（`1>&2 || exit 2`），否则失败的输出落在 stdout、退出码非 2，拦不住：
 
 ```json
 {
   "hooks": {
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "npm test" }] }
+      { "hooks": [{ "type": "command", "command": "npm test 1>&2 || exit 2" }] }
     ]
   }
 }

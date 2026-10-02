@@ -300,8 +300,8 @@ async function resumeMain(argv: string[]): Promise<void> {
       confirmation: { kind: "interactive", ask: lineTrustAsker(ask, write) },
       notice: (line) => write(`${line}\n`),
     });
-    // 决策 324：--no-hooks 只对本次运行停用全部钩子
-    if (flags.noHooks) settings = withHooksDisabled(settings);
+    // 决策 324：命令行对话（resume 进的 REPL 与 --line）不接钩子——无论旗标与否一律停用全部钩子
+    settings = withHooksDisabled(settings);
     await runResumeFlow({
       root: workspaceRoot,
       sessionId: sessionIdArg,

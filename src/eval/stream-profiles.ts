@@ -124,16 +124,8 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
   },
 ];
 
-// .pigeon/verify.json 的内容：分步验证配置（version 1，steps 与单条 command 二选一）
-export function verifyConfigFile(
-  steps: readonly StreamVerifyStep[],
-  timeoutMs: number
-): { version: 1; steps: readonly StreamVerifyStep[]; timeoutMs: number } {
-  return { version: 1, steps, timeoutMs };
-}
-
 // 由分步派生的一行验证命令（交 sh -c）：各步全跑、各带标题，没过的步另打一行"== 步名 未通过 =="，任一步失败即
-// 不通过（与分步验证"各步全跑、各出结论"同一口径）。回炉的验证、维护步的验证门与开跑前置检查都用它
+// 不通过（与分步验证"各步全跑、各出结论"同一口径）。跑批器把它配成实验会话的收尾（Stop）钩子（决策 327）
 export function verifyScript(steps: readonly StreamVerifyStep[]): string {
   const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   const parts = steps.map(

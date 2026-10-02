@@ -104,6 +104,7 @@ export class ScriptedRuntime implements TuiRuntimeFace {
       trigger: "manual",
       tokensBefore,
       tokensAfter,
+      messages: [],
     };
     for (const listener of this.compactionListeners) listener(notice);
   }

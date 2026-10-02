@@ -229,6 +229,18 @@ test("hooks：三层条目并列生效（各层各命中一条都保留）；同
     },
   });
   assert.equal(sameLayer.hooks.length, 2);
+  // 键按字段序列化而非拼串：matcher "Bash"+命令 "x" 与 matcher "Bas"+命令 "hx" 是两条不同钩子（复审 P2）
+  const collision = snapshotOf({
+    local: {
+      hooks: {
+        PreToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "x" }] },
+          { matcher: "Bas", hooks: [{ type: "command", command: "hx" }] },
+        ],
+      },
+    },
+  });
+  assert.equal(collision.hooks.length, 2);
 });
 
 test("disableAllHooks 与 stopHookBlockCap：三层按标量覆盖（高优先层说了算），缺省分别 false 与 8", () => {

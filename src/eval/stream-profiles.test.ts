@@ -22,7 +22,6 @@ import {
   STRANDS_VERIFY_STEPS,
   strandsProfile,
   strandsRuntime,
-  verifyConfigFile,
 } from "./stream-profiles.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
@@ -414,12 +413,6 @@ test("分步验证：本仓库流三步（类型、测试、分层；格式另�
     "-c",
     `cd strands-py && ${STRANDS_VERIFY_STEPS[1]?.command}`,
   ]);
-  // 写进 .pigeon/verify.json 的形状：与分步验证配置同一形状（version、steps、timeoutMs）
-  assert.deepEqual(verifyConfigFile(STRANDS_VERIFY_STEPS, 1_800_000), {
-    version: 1,
-    steps: STRANDS_VERIFY_STEPS,
-    timeoutMs: 1_800_000,
-  });
 });
 
 test("验证门由分步派生：各步全跑、各自带标题，任一步失败即不通过（失败之后的步照样跑）", async () => {

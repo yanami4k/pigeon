@@ -48,6 +48,7 @@ function harness(
     disableAllHooks?: boolean;
     workspaceHost?: WorkspaceHost;
     activeRunId?: () => string | undefined;
+    permissionMode?: string;
   } = {}
 ): Harness {
   const records: SessionCustomEntry[] = [];
@@ -78,6 +79,7 @@ function harness(
     runViaHost: viaRunner,
     ...(opts.workspaceHost !== undefined ? { workspaceHost: opts.workspaceHost } : {}),
     ...(opts.activeRunId !== undefined ? { activeRunId: opts.activeRunId } : {}),
+    ...(opts.permissionMode !== undefined ? { permissionMode: opts.permissionMode } : {}),
     env: {},
   });
   return { hooks: sessionHooks, records, notices, inputs, viaHost };
@@ -86,8 +88,8 @@ function harness(
 const EDIT_FIELDS = { tool_name: "edit_file", tool_input: { path: "a.ts" }, tool_use_id: "tc-1" };
 const PATH_TARGET = "edit_file";
 
-test("事件信息以 JSON 经标准输入交给命令：公共字段 + 事件字段 + PIGEON_PROJECT_DIR", async () => {
-  const h = harness([hook()]);
+test("事件信息以 JSON 经标准输入交给命令：公共字段 + 事件字段 + PIGEON_PROJECT_DIR 与 permission_mode", async () => {
+  const h = harness([hook()], { permissionMode: "prompt" });
   await h.hooks.runEvent("PreToolUse", PATH_TARGET, EDIT_FIELDS);
   assert.equal(h.inputs.length, 1);
   const parsed = JSON.parse(h.inputs[0]?.stdin ?? "") as Record<string, unknown>;
@@ -95,6 +97,7 @@ test("事件信息以 JSON 经标准输入交给命令：公共字段 + 事件�
   assert.equal(parsed.hook_event_name, "PreToolUse");
   assert.equal(parsed.tool_name, "edit_file");
   assert.equal(parsed.cwd, "D:/proj");
+  assert.equal(parsed.permission_mode, "prompt");
   assert.deepEqual(parsed.tool_input, { path: "a.ts" });
   assert.equal(h.inputs[0]?.env?.PIGEON_PROJECT_DIR, "D:/proj");
   // 没有命中的事件不执行
@@ -279,6 +282,29 @@ test("执行位置：沙箱会话经执行端；host:true 的在宿主执行", a
   assert.deepEqual(
     h.inputs.map((input) => input.command),
     ["host.sh"]
+  );
+});
+
+test("同一命令在一次事件里只跑一次：不同 matcher 的两层都命中时按命令（与执行位置）去重（复审 P2）", async () => {
+  const h = harness(
+    [
+      hook({ matcher: "read_file", command: "check.sh", layer: "user" }),
+      hook({ matcher: "read", command: "check.sh", layer: "project" }),
+      // 执行位置不同（host:true）是另一条：不去重
+      hook({ matcher: "read_file", command: "check.sh", host: true, layer: "project" }),
+    ],
+    { workspaceHost: {} as WorkspaceHost }
+  );
+  await h.hooks.runEvent("PreToolUse", "read_file", EDIT_FIELDS);
+  assert.deepEqual(
+    h.viaHost.map((input) => input.command),
+    ["check.sh"],
+    "同命令同执行位置只跑一次（第一份为准）"
+  );
+  assert.deepEqual(
+    h.inputs.map((input) => input.command),
+    ["check.sh"],
+    "host:true 是另一执行位置，照常跑"
   );
 });
 

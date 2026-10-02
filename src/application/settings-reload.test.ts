@@ -12,6 +12,7 @@ import { after, test } from "node:test";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { createFixtureServer } from "../mcp/fixtures.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
@@ -21,12 +22,17 @@ import {
   projectSettingsPath,
   userMemoryPathOf,
 } from "../state/paths.ts";
-import { commandsConfigOf, mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
+import {
+  commandsConfigOf,
+  mcpConfigOf,
+  type SettingsSnapshot,
+  withHooksDisabled,
+} from "../state/settings.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { disposeRuntime, type RuntimeBundle } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import { openSessionSettings, pendingTrustEntries } from "./session-settings.ts";
-import { createSettingsReloader } from "./settings-reload.ts";
+import { createSettingsReloader, planSettingsReload } from "./settings-reload.ts";
 
 const made: string[] = [];
 after(() => {
@@ -399,4 +405,20 @@ test("确认指纹在重建成功后才记下：重建失败保持未确认，/r
   assert.match(done, /改了 commands 节/);
   assert.equal(attempts, 2);
   assert.deepEqual(await reload([]), ["设置没有变化"]);
+});
+test("--no-hooks 时 /reload 不把钩子带回来：重读出的新快照同样停用（复审 P2 回归）", () => {
+  const root = temp("pigeon-reload-nohooks-");
+  const home = temp("pigeon-reload-nohooks-home-");
+  write(projectSettingsPath(root), {
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }] },
+  });
+  const current = withHooksDisabled(loadSettings(root, { homeDir: home }));
+  assert.equal(current.hooks.length, 0);
+  // 对照：不带开关的重读会把设置里的钩子带回来
+  const plain = planSettingsReload(current, { homeDir: home });
+  assert.equal(plain.next.hooks.length, 1);
+  // 带 --no-hooks 的重读：新快照仍停用
+  const plan = planSettingsReload(current, { homeDir: home, hooksDisabled: true });
+  assert.equal(plan.next.hooks.length, 0);
+  assert.equal(plan.next.merged.disableAllHooks, true);
 });

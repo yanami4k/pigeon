@@ -161,10 +161,12 @@ export async function runHookCommandViaHost(
     };
   }
   const result = await host.exec(plan, {
-    env,
+    // 宿主环境不渗进容器：只带协议要求的 PIGEON_PROJECT_DIR，值为容器内的工作区根
+    env: { PIGEON_PROJECT_DIR: host.root },
     timeoutMs: input.timeoutMs,
     maxOutputBytes: HOOK_STREAM_CAP,
     signal: input.signal,
+    stdin: input.stdin,
   });
   return {
     spawned: result.spawned,

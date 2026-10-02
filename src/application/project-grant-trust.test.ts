@@ -3,6 +3,7 @@
 // pigeon run 遇未确认即报错退出，--trust-config 只放行本次；信任目录免检；用户级与项目个人层的放权不需确认。
 // /reload 时新出现的项目规则随其他条目列出，skip 不生效、confirm 生效。用户级一律指到临时目录。
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -231,3 +232,38 @@ test("/reload：新出现的项目规则随其他条目列出；确认前与 ski
   assert.equal((await runOnce(root, home, settings)).approvedBy, "policy:config");
   assert.deepEqual(pendingTrustEntries(settings, home), [], "确认即记下指纹");
 });
+
+// 决策 342：项目个人层被 git 跟踪时按共享层对待——其中的放行规则纳入按内容确认，未确认不生效；
+// 未被跟踪时照旧直接生效
+test("settings.local.json 被 git 跟踪：其中的放行规则列入确认，未确认不生效；未被跟踪照旧直接生效", async () => {
+  const root = temp("pigeon-trust-tracked-");
+  const home = temp("pigeon-trust-tracked-home-");
+  write(projectLocalSettingsPath(root), { permissions: { grants: [RUN_ANYTHING] } });
+  // 未被跟踪：个人层放权直接生效，不在待确认清单里
+  const plain = await openSessionSettings(root, {
+    homeDir: home,
+    confirmation: { kind: "unattended", trustConfig: false },
+  });
+  assert.equal(configGrantRulesOf(plain).length, 1);
+  assert.deepEqual(pendingTrustEntries(plain, home), []);
+
+  // 强制添加进 git（.gitignore 挡不住）：同一条规则变成须确认
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+  execFileSync("git", ["add", "-f", ".pigeon/settings.local.json"], { cwd: root });
+  const pending = pendingTrustEntries(await loadable(root, home), home);
+  assert.equal(pending.length, 1, JSON.stringify(pending.map((e) => [e.kind, e.origin])));
+  assert.equal(pending[0]?.kind, "permission");
+  assert.match(pending[0]?.origin ?? "", /个人/);
+  // 无人值守遇未确认即报错退出（--trust-config 才放行本次）
+  await assert.rejects(
+    openSessionSettings(root, {
+      homeDir: home,
+      confirmation: { kind: "unattended", trustConfig: false },
+    }),
+    ConfigNotConfirmedError
+  );
+});
+
+async function loadable(root: string, home: string): Promise<SettingsSnapshot> {
+  return loadSettings(root, { homeDir: home });
+}

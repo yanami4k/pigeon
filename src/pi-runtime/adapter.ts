@@ -136,7 +136,14 @@ export interface StreamTextDelta {
 // 压缩提示（189）：界面据此各提示一行——压成了（压缩前后的 token 数）、自动压缩没压成（原因；本轮按原上下文继续；
 // 被中断的不提示）、压缩前回调失败（原因；压缩照常进行）。手动压缩没压成时结果直接交回调用方，不另发提示
 export type CompactionNotice =
-  | { kind: "compacted"; trigger: CompactionTrigger; tokensBefore: number; tokensAfter: number }
+  // messages：压缩后的上下文（钩子 PostCompact 的 compact_summary 从中取真实摘要）
+  | {
+      kind: "compacted";
+      trigger: CompactionTrigger;
+      tokensBefore: number;
+      tokensAfter: number;
+      messages: AgentMessage[];
+    }
   | {
       kind: "incomplete";
       trigger: Exclude<CompactionTrigger, "manual">;
@@ -461,6 +468,12 @@ export class PiRuntimeAdapter {
       this.#currentRunId = null;
       settle();
     }
+  }
+
+  // 当前活动 Run（无活动 Run 时为 undefined）：钩子运行记录（决策 324）据此挂到 Run 上，
+  // 窗口外的事件（SessionStart 等）记为会话级条目
+  currentRunId(): RunId | undefined {
+    return this.#currentRunId ?? undefined;
   }
 
   // 空回复重试（决策 170 ②）：上游一次运行以空回复收尾时，其 agent_end 已被暂扣（见 #recordAndForward）。
@@ -814,6 +827,7 @@ export class PiRuntimeAdapter {
         trigger,
         tokensBefore: outcome.tokensBefore,
         tokensAfter: outcome.tokensAfter,
+        messages: outcome.messages,
       });
     } else if (trigger !== "manual" && !signal.aborted) {
       this.#notifyCompaction({ kind: "incomplete", trigger, outcome });
@@ -913,7 +927,11 @@ export class PiRuntimeAdapter {
         preparedArgs: context.args,
       });
       if (verdict.kind === "block") {
-        return { block: true, reason: verdict.reason };
+        return {
+          block: true,
+          reason: verdict.reason,
+          ...(verdict.terminate === true ? { terminate: true } : {}),
+        };
       }
       // 决策 324：钩子改过的参数——执行时替换上游按原参数校验过的 args（账本已按改后参数记录）
       if (verdict.updatedArgs !== undefined) {

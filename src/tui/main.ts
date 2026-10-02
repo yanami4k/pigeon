@@ -398,6 +398,8 @@ async function main(argv: string[]): Promise<void> {
     // 决策 340：/reload 重读设置，新快照自下一轮起生效
     reload: createSettingsReloader({
       current: () => settings,
+      // 决策 324：--no-hooks 是本次运行的进程级开关，/reload 重读出的新快照同样停用钩子
+      ...(flags.noHooks ? { hooksDisabled: true } : {}),
       busy: () =>
         slot.workers
           ?.status()

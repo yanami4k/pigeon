@@ -286,7 +286,11 @@ test("verify.json（决策 322）：不并入设置——挪进备份目录，�
   assert.ok(existsSync(join(backupDir, "verify.json")), "原文进了备份目录");
   const text = result.lines.join("\n");
   assert.ok(text.includes('"Stop"'), "打印 Stop 钩子示例");
-  assert.ok(text.includes('"command": "npm test"'), `示例用原命令填好：${text}`);
+  // 复审 P2：示例必须是拦得住的写法——失败时输出进 stderr、以退出码 2 收尾
+  assert.ok(
+    text.includes('"command": "npm test 1>&2 || exit 2"'),
+    `示例用原命令填好且能拦下：${text}`
+  );
   // 不写入任何设置节
   assert.ok(!existsSync(projectSettingsPath(root)), "不生成 settings.json");
   // 重复执行无事可做
@@ -307,8 +311,8 @@ test("verify.json 分步配置：按各步命令以 && 连接，带执行目录�
   const result = migrate(root, homeDir);
   const text = result.lines.join("\n");
   assert.ok(
-    text.includes('"command": "tsc --noEmit && ( cd pkg && pytest tests )"'),
-    `分步按 && 连接：${text}`
+    text.includes('"command": "( tsc --noEmit && ( cd pkg && pytest tests ) ) 1>&2 || exit 2"'),
+    `分步按 && 连接、整组导 stderr 后以 2 退出：${text}`
   );
 });
 

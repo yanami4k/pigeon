@@ -787,6 +787,8 @@ test("多份尝试：派出即返回名单，后台跑完交回各份汇总一�
           summary: `第 ${index + 1} 份`,
           summaryTruncated: false,
         },
+        // 决策 322：各份的收尾钩子输出随汇总交回
+        ...(index === 0 ? { hookOutputs: ["还差错误路径用例"] } : {}),
         workspace: {
           kind: "git-worktree",
           path: `/w/${index + 1}`,
@@ -812,7 +814,7 @@ test("多份尝试：派出即返回名单，后台跑完交回各份汇总一�
     WORKER_NOTICE_PREFIX +
       "标签 T2：" +
       [
-        "第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份",
+        "第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份\n钩子输出：\n  还差错误路径用例",
         "第 2 份：worker implementer-2 的结果已由 wait_workers 交回。",
         "第 3 份：worker implementer-3（implementer）撞上轮数上限，没有做完。分支：pigeon/implementer-3。已改动的文件（1）：a.ts。摘要：第 3 份",
       ].join("\n\n")

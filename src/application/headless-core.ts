@@ -509,12 +509,14 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     }
     // 决策 323 / 324：Stop 钩子——收尾拦住要求接着干（理由作为新一轮输入），连续拦截到上限
     // （缺省 8，设置里 stopHookBlockCap 可改）后不再理会、照常结束，结束原因记 stop-hook-limit
+    // 决策 324 复审：以出错收尾（failed）的 Run 不跑 Stop——它的通知是 StopFailure（下一段）
     if (
       hooks !== undefined &&
       run !== undefined &&
       !externallyAborted &&
       limitHit === undefined &&
-      status !== "aborted"
+      status !== "aborted" &&
+      status !== "failed"
     ) {
       const stopCap = options.settings?.merged.stopHookBlockCap ?? DEFAULT_STOP_HOOK_BLOCK_CAP;
       let stopHookActive = false;
@@ -524,6 +526,8 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
           stop_hook_active: stopHookActive,
           last_assistant_message: handle.summary(),
         });
+        // continue:false 压过拦截：整个会话停止处理，不再开新一轮（理由由钩子提示给出）
+        if (report.continueFalse !== undefined) break;
         const wantsContinue = report.blocked !== undefined || report.additionalContext.length > 0;
         if (!wantsContinue) break;
         if (blockedCount >= stopCap) {

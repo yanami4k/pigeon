@@ -20,6 +20,8 @@ export interface HostExecOptions {
   // 只保留输出开头的这么多字节；字节数与哈希按全量计
   maxOutputBytes: number;
   signal: AbortSignal | undefined;
+  // 交给命令的标准输入（钩子协议把事件 JSON 经标准输入交给命令）
+  stdin?: string;
 }
 
 export interface HostExecResult {
