@@ -200,7 +200,7 @@ pigeon migrate-config [--root <项目根>]
 
 ### 协议
 
-事件信息以 JSON 经标准输入交给命令（公共字段：`session_id`、`cwd`、`hook_event_name`；各事件自己的字段如 `tool_name`/`tool_input`/`tool_use_id`、`prompt`、`source`、`trigger`、`stop_hook_active`、`last_assistant_message`、`error`、`message` 等照 Claude Code）。环境变量 `PIGEON_PROJECT_DIR` 指向项目根。
+事件信息以 JSON 经标准输入交给命令（公共字段：`session_id`、`cwd`、`hook_event_name`、`permission_mode`（本会话的审批档：`yolo` 或 `prompt`）；各事件自己的字段如 `tool_name`/`tool_input`/`tool_use_id`、`prompt`、`source`、`trigger`、`stop_hook_active`、`last_assistant_message`、`error`、`message` 等照 Claude Code）。环境变量 `PIGEON_PROJECT_DIR` 指向项目根。
 
 退出码：`0` 放行；`2` 拦下（标准错误为理由）；其他为钩子自身出错，不拦只提示。标准输出可以是一个 JSON 对象：
 
@@ -212,11 +212,13 @@ pigeon migrate-config [--root <项目根>]
     "additionalContext": "补的上下文", "updatedToolOutput": "替换后的工具结果" } }
 ```
 
-同一事件命中多个钩子时并行执行；每个钩子的运行写入会话记录（事件、命令、退出码、用时、结论、输出摘要），`pigeon trace` 与会话回放显示；终端界面在拦下或出错时显示一行提示，`/hooks` 列出生效的钩子及其来自哪一层。
+`continue: false` 结束本轮处理：工具类事件里给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示），这批工具之后不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
+
+同一事件命中多个钩子时并行执行；每个钩子的运行写入会话记录（事件、命令、退出码、用时、结论、输出摘要），`pigeon trace` 与会话回放显示：Run 之内的挂在该 Run 下，Run 之外的收尾类（`Stop`、`StopFailure`、`SubagentStop`、自动压缩的 `PostCompact`）挂刚结束的 Run，其余（`SessionStart`、下一条消息的 `UserPromptSubmit`、手动压缩、`Notification`、`SessionEnd` 等）为会话级条目；终端界面在拦下或出错时显示一行提示，`/hooks` 列出生效的钩子及其来自哪一层。
 
 ### 执行位置
 
-钩子在工作区所在处执行：本机会话在本机、沙箱会话在容器里（经执行端）；`host: true` 的单个钩子指定在宿主执行。超时或取消时杀掉整棵进程树（非 Windows 用独立进程组、Windows 用 `taskkill /T /F`）。`pigeon --line` 不接钩子；实验跑批器不读使用者的用户级与项目级钩子。
+钩子在工作区所在处执行：本机会话在本机、沙箱会话在容器里（经执行端）；`host: true` 的单个钩子指定在宿主执行。超时或取消时杀掉整棵进程树（非 Windows 用独立进程组、Windows 用 `taskkill /T /F`）。容器里的钩子以容器内的 `timeout` 限时，到时只终止该钩子、不重启容器（`timeout` 不认 `-k` 时用不带 `-k` 的写法；镜像里没有 `timeout` 时退回断开并重启容器）。`pigeon --line` 不接钩子；实验跑批器不读使用者的用户级与项目级钩子。
 
 ### 示例
 
