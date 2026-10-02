@@ -2,7 +2,7 @@
 // 返回叠入、冲突、worker 删除三份清单。取不取由主 agent（本工具）或人（终端界面的 /take，同一套文字）决定。
 // - 叠加本身在执行层 worker-overlay.ts：只写 worker 改过的文件，不删除不回退，冲突不写入、worker 分支与工作树原样保留，
 //   不设撤销。
-// - 续接后从会话记录找回的上次运行的 worker（previous-workers.ts）：已收尾的照常可取，只有派出没有收尾的不可取用。
+// - 续接后从会话记录找回的之前运行的 worker（previous-workers.ts）：已收尾的照常可取，只有派出没有收尾的不可取用。
 // - 取用依赖 worker 的工作树还在（日常使用里工作树不自动清理，由人用 git worktree remove 处理；跑批器每次运行收尾自行清理）；
 //   工作树已清理即返回明确的一句。
 // - 写工作目录，归写档、按写操作审批；与 spawn_worker 共用同一个工具槽（编排器与治理根），注册范围相同（265–267：只给终端
@@ -62,7 +62,7 @@ export const TAKE_WORKER_TEXTS = {
   noStart: (name: string) => `worker ${name} 没有记录起点快照，改动无法取用。`,
   // 续接后从会话记录找回的、只有派出没有收尾的（权威链审计 ②）
   interrupted: (name: string) =>
-    `worker ${name} 是上次运行派出的，随上次进程退出而中断、没有交回结果，改动不可取用；它的分支与工作树留在原处。`,
+    `worker ${name} 是之前的运行派出的，随上次进程退出而中断、没有交回结果，改动不可取用；它的分支与工作树留在原处。`,
   failed: (name: string, reason: string, applied: readonly string[]) =>
     `取用 worker ${name} 的改动失败：${reason}。已叠入的文件（${applied.length}）：${fileList(applied)}。`,
 } as const;

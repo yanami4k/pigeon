@@ -130,7 +130,7 @@ export function handleCancelCommand(
     return;
   }
   const target = resolveWorkerRef(workers.status(), ref);
-  // 续接后找回的上次运行的 worker：不在本进程运行
+  // 续接后找回的之前运行的 worker：不在本进程运行
   if (target.previousRun !== undefined) {
     host.addSystem(previousRunWorkerText(target, "cancel"));
     return;

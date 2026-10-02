@@ -81,7 +81,7 @@ export class WorkerNotices {
     this.#deliver(text);
   }
 
-  // 为某个 worker 递一段通知并记下键（续接时补递上次运行没递出的完成通知）：等待工具交回它的结果时照常撤回或只交回一句
+  // 为某个 worker 递一段通知并记下键（续接时补递之前的运行没递出的完成通知）：等待工具交回它的结果时照常撤回或只交回一句
   postFor(id: SessionId, text: string): void {
     this.#keys.set(id, this.#deliver(text));
   }

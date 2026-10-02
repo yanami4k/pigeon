@@ -1,7 +1,7 @@
-// 续接时找回上次运行的 worker（会话权威链审计 ②、③）：真实 git 仓库、真实编排器与工作树、假模型。
+// 续接时找回之前运行的 worker（会话权威链审计 ②、③）：真实 git 仓库、真实编排器与工作树、假模型。
 // 第一次运行：主 agent 用 spawn_worker 派出 w1，w1 改了 b.txt 后收尾；它的完成通知还在内存队列里时运行面释放（模拟进程退出）；
-// 另记一个只有派出、没有收尾的 worker half。续接后：w1 的状态标明来自上次运行、take_worker 取用成功；half 标为中断、
-// 不可取用；对上次运行的 worker 发取消、发消息、补批续做给出明确说明；没递出的完成通知补递一条、只发一次。
+// 另记一个只有派出、没有收尾的 worker half。续接后：w1 的状态标明来自之前的运行、take_worker 取用成功；half 标为中断、
+// 不可取用；对之前运行的 worker 发取消、发消息、补批续做给出明确说明；没递出的完成通知补递一条、只发一次。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -123,7 +123,7 @@ async function openMain(
   return { opened, orchestrator, notices: bound.notices };
 }
 
-test("续接：上次运行收尾未取用的 worker 照常可取，中断的不可取用；取消、发消息、补批续做给出明确说明；没递出的通知补递一次", async () => {
+test("续接：之前的运行收尾未取用的 worker 照常可取，中断的不可取用；取消、发消息、补批续做给出明确说明；没递出的通知补递一次", async () => {
   const { root, home } = repo();
   const sessionId = newSessionId();
   const streamFn = routed([
@@ -234,7 +234,7 @@ test("续接：上次运行收尾未取用的 worker 照常可取，中断的不
     const halfId = statuses.find((worker) => worker.name === "half")?.sessionId as SessionId;
     await assert.rejects(
       second.orchestrator.cancel(halfId),
-      /是上次运行派出的，随上次进程退出而中断/
+      /是之前的运行派出的，随上次进程退出而中断/
     );
     assert.throws(() => second.orchestrator.send(w1 as SessionId, "x"), /收不到消息/);
     assert.throws(() => second.orchestrator.resume(w1 as SessionId), /续接后不能对它补批续做/);

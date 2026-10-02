@@ -968,6 +968,8 @@ export class PiRuntimeAdapter {
     context: AfterToolCallContext
   ): Promise<AfterToolCallResult | undefined> {
     if (this.#toolHooks?.toolFinished === undefined) return undefined;
+    // 钩子已要求停止（continue:false）：同批其余调用（并行批次里已准备好、仍在执行的）不再跑收尾钩子
+    if (this.#hookStopReason !== undefined) return undefined;
     try {
       const text = context.result.content
         .filter((block) => block.type === "text")

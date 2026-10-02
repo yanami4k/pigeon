@@ -229,8 +229,8 @@ test("经执行端执行：/bin/sh -c 包一层容器内 timeout（先试 -k、�
   assert.equal(call?.stdin, '{"hook_event_name":"Stop"}\n');
   assert.equal(
     call?.timeoutMs,
-    2_000,
-    "短预算：客户端兜底在容器内 TERM（1 秒）与 KILL 宽限（1 秒）之后"
+    3_000,
+    "短预算：客户端兜底在容器内 TERM（1 秒）与 KILL 宽限（1 秒）之后另留 1 秒"
   );
   assert.equal(outcome.exitCode, 2);
   assert.equal(outcome.stdout, "json-out");
@@ -292,7 +292,7 @@ test("经执行端执行：容器内 timeout 的 124、137、143 用满限时记
   assert.equal(quick.timedOut, false, "钩子自己很快以 137 退出：不是超时");
 });
 
-test("经执行端执行：客户端兜底与预算相称——SessionEnd 的 1.5 秒为 3 秒，30 秒的预算为 40 秒", async () => {
+test("经执行端执行：客户端兜底在容器内 KILL 之后另留余量——SessionEnd 的 1.5 秒为 4 秒，30 秒的预算为 40 秒", async () => {
   const seen: Array<{ timeoutMs: number }> = [];
   const host = stubHost(async () => ({}), seen);
   for (const timeoutMs of [1500, 30_000]) {
@@ -306,7 +306,7 @@ test("经执行端执行：客户端兜底与预算相称——SessionEnd 的 1.
   }
   assert.deepEqual(
     seen.map((call) => call.timeoutMs),
-    [3_000, 40_000]
+    [4_000, 40_000]
   );
 });
 

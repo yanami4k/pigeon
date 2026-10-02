@@ -1645,7 +1645,7 @@ export class PigeonTuiShell
     const workers = this.current.workers;
     const status = this.workerStatuses().find((worker) => worker.sessionId === sessionId);
     if (workers === undefined || status === undefined) return;
-    // 续接后找回的上次运行的 worker：不在本进程运行
+    // 续接后找回的之前运行的 worker：不在本进程运行
     if (status.previousRun !== undefined) {
       write(previousRunWorkerText(status, "cancel"));
       return;
@@ -1709,7 +1709,7 @@ export class PigeonTuiShell
       }
       return;
     }
-    // 续接后找回的上次运行的 worker：只读，话留在输入框
+    // 续接后找回的之前运行的 worker：只读，话留在输入框
     if (status.previousRun !== undefined) {
       this.input.setText(value);
       flow.addSystem(previousRunWorkerText(status, "send"));

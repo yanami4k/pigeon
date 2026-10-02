@@ -12,15 +12,15 @@ export type {
   WorkerStatus,
 } from "../orchestration/workers.ts";
 // 决策 301：进入 worker 会话补批时，人另附的话前面同样写这一句
-// 权威链审计 ②：对续接后找回的上次运行的 worker 发取消、发消息、补批续做时的说明
+// 权威链审计 ②：对续接后找回的之前运行的 worker 发取消、发消息、补批续做时的说明
 export { previousRunWorkerText, resumeApprovalText } from "../orchestration/workers.ts";
 
-// 续接后找回的上次运行的 worker 在状态里的标注（worker_status 与 /workers 共用）
+// 续接后找回的之前运行的 worker 在状态里的标注（worker_status 与 /workers 共用）
 export function previousRunNote(status: Pick<WorkerStatus, "previousRun">): string {
   return status.previousRun === "settled"
-    ? "（来自上次运行）"
+    ? "（来自之前的运行）"
     : status.previousRun === "interrupted"
-      ? "（来自上次运行，随进程退出而中断，不可取用）"
+      ? "（来自之前的运行，随进程退出而中断，不可取用）"
       : "";
 }
 

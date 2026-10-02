@@ -73,13 +73,14 @@ Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时�
 
 ## worker 与续接
 
-worker 的派出与收尾成对记在派出它的会话里（缺收尾即进程中途退出）；工作树在 `.pigeon/state/worktrees/` 下，不自动清理。终端界面续接主会话（`pigeon --continue`、`pigeon --resume <id>`、`/resume`，以及 `/reload` 在同一会话上重建运行面）时，从会话记录找回上次运行的 worker：
+worker 的派出与收尾成对记在派出它的会话里（缺收尾即进程中途退出）；工作树在 `.pigeon/state/worktrees/` 下，不自动清理。终端界面续接主会话（`pigeon --continue`、`pigeon --resume <id>`、`/resume`，以及 `/reload` 在同一会话上重建运行面）时，从会话记录找回之前运行的 worker：
 
-- 上次运行中已收尾的：`worker_status`、`/workers` 照常列出，标明"来自上次运行"；`take_worker` 与 `/take` 照常取用（工作树已清理时如实说明）；`wait_workers` 立即交回其结果。
+- 之前的运行中已收尾的：`worker_status`、`/workers` 照常列出，标明"来自之前的运行"；`take_worker` 与 `/take` 照常取用（工作树已清理时如实说明）；`wait_workers` 立即交回其结果。
 - 只有派出、没有收尾的：标为随进程退出而中断，不可取用；它的分支与工作树留在原处。
-- 对上次运行的 worker 发取消（`stop_worker`、`/cancel`、`/stop`）、发消息（`message_worker`、在 worker 会话里输入）、补批续做（`/approve`）：给出明确说明，不报"找不到"；要接着做请另派一个 worker。
+- "之前的运行"不分进程：`/reload` 重建运行面后，本进程此前派出、已收尾的 worker 同样这样标注（`/reload` 在有 worker 在跑时拒绝，不会有中断的）。
+- 对之前运行的 worker 发取消（`stop_worker`、`/cancel`、`/stop`）、发消息（`message_worker`、在 worker 会话里输入）、补批续做（`/approve`）：给出明确说明，不报"找不到"；要接着做请另派一个 worker。
 - 找回的记录不在本进程运行，不计入同时在跑的上限；新派的 worker 不与它们重名。
-- 模型派出的 worker 的完成通知末行带 worker 会话号。上次运行中已收尾、完成通知却没有出现在主分支的使用者消息里（进程在通知递出之前退出）、也没有经 `wait_workers` 交回过结果的，续接时补递一条（开头注明是续接后补递），随下一次运行交给模型；已递出的不重复。
+- 模型派出的 worker 的完成通知末行带 worker 会话号。之前的运行中已收尾、完成通知却没有出现在主分支的使用者消息里（进程在通知递出之前退出）、也没有经 `wait_workers` 交回过结果的，续接时补递一条（开头注明是续接后补递），随下一次运行交给模型；已递出的不重复。
 
 `pigeon --line` 与 `pigeon resume` 不派 worker，没有要找回的记录。
 
@@ -224,7 +225,7 @@ pigeon migrate-config [--root <项目根>]
     "additionalContext": "补的上下文", "updatedToolOutput": "替换后的工具结果" } }
 ```
 
-`continue: false` 结束本轮处理：工具类事件里给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示），这批工具之后不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
+`continue: false` 结束本轮处理：`PreToolUse` 给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示）；`PostToolUse`/`PostToolUseFailure` 给出时，同批里尚未准备的调用一律拦下，而并行批次里已经准备好（`PreToolUse` 与审批已过）的调用仍会执行完，只是不再跑它们的收尾钩子（终端界面主会话缺省并行执行可并行的工具：`read_file`、联网工具、会话检索工具、`spawn_worker`、`load_skill` 等）。两种情形下这批工具之后都不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
 
 同一事件命中多个钩子时并行执行；每个钩子的运行写入会话记录（事件、命令、退出码、用时、结论、输出摘要），`pigeon trace` 与会话回放显示：Run 之内的挂在该 Run 下，Run 之外的收尾类（`Stop`、`StopFailure`、`SubagentStop`、自动压缩的 `PostCompact`）挂刚结束的 Run，其余（`SessionStart`、下一条消息的 `UserPromptSubmit`、手动压缩、`Notification`、`SessionEnd` 等）为会话级条目；终端界面在拦下或出错时显示一行提示，`/hooks` 列出生效的钩子及其来自哪一层。
 

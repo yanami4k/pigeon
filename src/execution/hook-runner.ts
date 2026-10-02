@@ -172,8 +172,10 @@ export async function runHookCommandViaHost(
   const seconds = Math.max(1, Math.ceil(input.timeoutMs / 1000));
   const short = input.timeoutMs <= SHORT_BUDGET_MS;
   const killAfterS = short ? 1 : 5;
-  // 客户端兜底：容器内 KILL 之后再等一会儿（短预算不另加，长预算加 5 秒）；SessionEnd 1.5 秒的预算即 3 秒
-  const clientTimeoutMs = (seconds + killAfterS) * 1000 + (short ? 0 : 5_000);
+  // 客户端兜底：容器内 KILL 之后再等一会儿（短预算加 1 秒、长预算加 5 秒）——客户端计时从 docker 客户端启动起算，
+  // 容器内的 timeout 要等 docker exec 起来、跑完 -k 探测才开始，没有余量时兜底会抢在容器内 KILL 之前而重启容器；
+  // SessionEnd 1.5 秒的预算即 4 秒
+  const clientTimeoutMs = (seconds + killAfterS) * 1000 + (short ? 1_000 : 5_000);
   const wrapped = containerHookScript(input.command, seconds, killAfterS);
   const plan = hookShellPlan(wrapped, "linux", env);
   if (input.signal?.aborted === true) {

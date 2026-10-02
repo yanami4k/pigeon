@@ -814,3 +814,54 @@ test("toolHooks.toolFinished：只给 contextText 时原正文保留，补充文
     cleanup();
   }
 });
+
+// 决策 324：PostToolUse 返回 continue:false 之后，同批其余调用（并行批次里已准备好、仍在执行的）不再跑收尾钩子
+test("toolHooks.toolFinished：一个调用要求停止后，同批稍后收尾的调用不再跑收尾钩子，也不再问模型", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "a\n", "b.ts": "b\n" });
+  try {
+    const read = createReadFileTool(root);
+    // b.ts 晚一点执行完：它的收尾一定在 a.ts 的停止信号之后
+    const slowRead: typeof read = {
+      ...read,
+      execute: async (id, params, signal, onUpdate) => {
+        if (params.path === "b.ts") await new Promise((resolve) => setTimeout(resolve, 100));
+        return read.execute(id, params, signal, onUpdate);
+      },
+    };
+    const seen: string[] = [];
+    const streamFn = createFakeStreamFn({
+      replies: [
+        {
+          text: "读两个",
+          toolCalls: [
+            { name: "read_file", args: { path: "a.ts" } },
+            { name: "read_file", args: { path: "b.ts" } },
+          ],
+        },
+        { text: "不应再问" },
+      ],
+    });
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "prompt" }),
+      streamFn,
+      governance: createToolGovernance({ registry: makeRegistry() }),
+      tools: [slowRead],
+      parallelTools: true,
+      toolHooks: {
+        toolFinished: async (input) => {
+          const path = (input.args as { path: string }).path;
+          seen.push(path);
+          return path === "a.ts" ? { stopReason: "停-并行" } : undefined;
+        },
+      },
+    });
+    const result = await adapter.run("读文件");
+    assert.deepEqual(seen, ["a.ts"]);
+    assert.equal(streamFn.calls.length, 1);
+    assert.equal(result.status, "aborted");
+    assert.match(result.errorMessage ?? "", /钩子要求停止：停-并行/);
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});

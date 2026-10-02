@@ -363,20 +363,20 @@ export interface WorkerStatus {
   script?: ScriptSpawnTag;
   // 已收尾的在场：结构化结果
   outcome?: WorkerOutcome;
-  // 续接时从会话记录重建的、上次运行派出的 worker（权威链审计 ②）：settled 为上次运行中已收尾，
+  // 续接时从会话记录重建的、之前的运行派出的 worker（权威链审计 ②）：settled 为之前的运行中已收尾，
   // interrupted 为只有派出、没有收尾（随上次进程退出而中断）。只供查询与取用，不在本进程运行、不占并发额度
   previousRun?: "settled" | "interrupted";
 }
 
-// 对上次运行的 worker 发取消、发消息、补批续做时的说明（不报"找不到"）
+// 对之前运行的 worker 发取消、发消息、补批续做时的说明（不报"找不到"）
 export function previousRunWorkerText(
   status: Pick<WorkerStatus, "name" | "previousRun">,
   action: "cancel" | "send" | "resume"
 ): string {
   const base =
     status.previousRun === "interrupted"
-      ? `worker ${status.name} 是上次运行派出的，随上次进程退出而中断`
-      : `worker ${status.name} 是上次运行派出的，已在上次运行中收尾`;
+      ? `worker ${status.name} 是之前的运行派出的，随上次进程退出而中断`
+      : `worker ${status.name} 是之前的运行派出的，已在之前的运行中收尾`;
   switch (action) {
     case "cancel":
       return `${base}，不在运行，无需取消。`;
@@ -511,7 +511,7 @@ export class WorkerOrchestrator {
   readonly #maxConcurrent: number;
   readonly #maxDepth: number;
   readonly #workers = new Map<SessionId, WorkerEntry>();
-  // 续接时从会话记录重建的上次运行的 worker（只读：不运行、不占空位）
+  // 续接时从会话记录重建的之前运行的 worker（只读：不运行、不占空位）
   readonly #previous = new Map<SessionId, WorkerStatus>();
   // 等空位的：按先后开跑（排队的 worker 与借出空位后要收回的等待方）
   readonly #queue: Array<{ key: SessionId; start: () => void }> = [];
@@ -750,7 +750,7 @@ export class WorkerOrchestrator {
     return sessionId;
   }
 
-  // 续接时登记上次运行的 worker（权威链审计 ②）：查询状态、等结果与取用照常可用；不运行、不计入同时在跑的上限，
+  // 续接时登记之前运行的 worker（权威链审计 ②）：查询状态、等结果与取用照常可用；不运行、不计入同时在跑的上限，
   // 取消、发消息、补批续做给出明确说明。与本进程派出的同号即不登记
   restorePrevious(workers: readonly WorkerStatus[]): void {
     for (const worker of workers) {
@@ -798,7 +798,7 @@ export class WorkerOrchestrator {
     sessionIds: readonly SessionId[],
     options: { mode: "any" | "all"; timeoutMs: number; signal?: AbortSignal; waiter?: SessionId }
   ): Promise<WaitResult> {
-    // 上次运行的 worker 已是定局：结果立即交回，其余照常等
+    // 之前运行的 worker 已是定局：结果立即交回，其余照常等
     const previous = sessionIds.flatMap((id) => {
       const outcome = this.#previous.get(id)?.outcome;
       return outcome !== undefined ? [outcome] : [];
@@ -1488,7 +1488,7 @@ export class WorkerOrchestrator {
   }
 
   #nextName(role: WorkerRole): string {
-    // 上次运行的 worker 的名字同样占着（取用与查询按名字找）
+    // 之前运行的 worker 的名字同样占着（取用与查询按名字找）
     const taken = new Set(
       [...this.#workers.values(), ...this.#previous.values()].map((worker) => worker.name)
     );

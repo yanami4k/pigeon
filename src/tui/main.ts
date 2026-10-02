@@ -221,7 +221,7 @@ async function main(argv: string[]): Promise<void> {
       loopGuard,
     };
     const orchestrator = createSessionWorkers(deps);
-    // 权威链审计 ②、③：续接的主会话从会话记录找回上次运行的 worker，补递没递出的完成通知（有通知队列时）
+    // 权威链审计 ②、③：续接的主会话从会话记录找回之前运行的 worker，补递没递出的完成通知（有通知队列时）
     let notices: WorkerNotices | undefined;
     // 决策 264：主会话注册了 spawn_worker 时绑定编排器；agent 派出的个数按一次运行（每条输入）计
     if (opened.spawnWorker !== undefined && parentSessionId === undefined) {

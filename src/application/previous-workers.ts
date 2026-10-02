@@ -1,9 +1,9 @@
-// 续接时找回上次运行的 worker（会话权威链审计 ②、③）：编排器的 worker 注册表只在内存，交互会话续接后从会话视图的
+// 续接时找回之前运行的 worker（会话权威链审计 ②、③）：编排器的 worker 注册表只在内存，交互会话续接后从会话视图的
 // children（派出与收尾条目成对写入会话）重建，照脚本编排续跑的做法（script-host.ts 的 restoreScriptRun）。
-// - 上次运行中已收尾的：查询状态、等结果与取用（take_worker、/take）照常可用，状态里标明来自上次运行；
+// - 之前的运行中已收尾的：查询状态、等结果与取用（take_worker、/take）照常可用，状态里标明来自之前的运行；
 // - 只有派出、没有收尾的：随上次进程退出而中断，不可取用；
 // - 对它们发取消、发消息、补批续做：编排器给出明确说明（不报"找不到"）；重建的记录不运行、不计入同时在跑的上限。
-// 另：上次运行中已收尾、由模型派出、完成通知却没有作为消息出现在主分支上的 worker（通知还在内存队列里时进程退出），
+// 另：之前的运行中已收尾、由模型派出、完成通知却没有作为消息出现在主分支上的 worker（通知还在内存队列里时进程退出），
 // 续接时补递一条。通知是否已递出看主分支上的使用者消息里有没有通知末行的 worker 会话号；等待工具（wait_workers）
 // 已交回其结果的不补递（同一结果不在对话里出现两遍）。
 import type { WorkerOrchestrator, WorkerOutcome, WorkerStatus } from "../orchestration/workers.ts";
@@ -22,7 +22,7 @@ import { sessionsDirOf } from "./workspace.ts";
 
 // 续接后补递的通知开头一句
 export const REDELIVERED_NOTICE_LEAD =
-  "（续接后补递：这个 worker 在上次运行中已收尾，当时的完成通知没有递出）";
+  "（续接后补递：这个 worker 在之前的运行中已收尾，当时的完成通知没有递出）";
 
 // 中断的 worker 交回的原因
 export const INTERRUPTED_WORKER_ERROR = "随上次进程退出而中断，没有交回结果";
@@ -84,7 +84,7 @@ function outcomeOf(child: ViewChild, origin: WorkerOutcome["origin"]): WorkerOut
   };
 }
 
-// 会话视图里本会话派出的 worker → 上次运行的 worker 状态（派出先后为序）
+// 会话视图里本会话派出的 worker → 之前运行的 worker 状态（派出先后为序）
 export function previousWorkersOf(view: SessionView): WorkerStatus[] {
   const agent = agentSpawnedIds(view);
   return view.children.map((child) => {
@@ -116,7 +116,7 @@ export function previousWorkersOf(view: SessionView): WorkerStatus[] {
   });
 }
 
-// 要补递完成通知的：模型派出的（不含脚本编排派的）、上次运行中已收尾、主分支的使用者消息里没有它的会话号、
+// 要补递完成通知的：模型派出的（不含脚本编排派的）、之前的运行中已收尾、主分支的使用者消息里没有它的会话号、
 // 也没有由等待工具交回过结果的
 export function undeliveredWorkerOutcomes(
   view: SessionView,
@@ -146,7 +146,7 @@ export function undeliveredWorkerOutcomes(
   });
 }
 
-// 续接时调用：把上次运行的 worker 登记到编排器；给了通知队列即补递没递出的完成通知。返回登记与补递的个数
+// 续接时调用：把之前运行的 worker 登记到编排器；给了通知队列即补递没递出的完成通知。返回登记与补递的个数
 export function restorePreviousWorkers(input: {
   orchestrator: Pick<WorkerOrchestrator, "restorePrevious">;
   view: SessionView | undefined;
