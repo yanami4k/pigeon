@@ -370,6 +370,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // run_command 的三处说明与系统提示里的审批说法都按它与执行端的平台生成，不写死本地、人工批准的说法；
   // 钩子 JSON 的 permission_mode 也用它（324）
   const approvalMode = deps.toolPolicy?.approvalMode ?? (deps.yolo ? "yolo" : "prompt");
+  // 最近一个已收尾的 Run：收尾类钩子（Stop / StopFailure / SubagentStop、PostCompact 等）在 Run 窗口外触发，
+  // 记录挂到刚结束的那个 Run（整体审查修复：此前它们没有 runId，trace 里挂不到 Run 下）
+  let lastEndedRunId: RunId | undefined;
   // 决策 323 / 324 / 326 ②：会话级钩子——清单随设置快照冻结；执行位置按执行端（本机/容器，host:true 的在宿主）；
   // 运行记录写进本会话（pigeon.hook 条目）；拦下或出错经 hooksNotice 给一行提示
   const sessionHooks = new SessionHooks({
@@ -380,11 +383,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     hooks: settings.hooks,
     disableAllHooks: settings.merged.disableAllHooks,
     sink: sessionStore,
-    // 记录挂活动 Run（adapter 在下方创建；钩子只在运行期触发，届时 adapter 已就位）
-    activeRunId: (): RunId | undefined => adapter.currentRunId(),
+    // 记录挂活动 Run（adapter 在下方创建；钩子只在运行期触发，届时 adapter 已就位）；
+    // Run 窗口外的收尾类钩子挂刚结束的 Run（run.ended 时记下，见下方订阅）
+    activeRunId: (): RunId | undefined => adapter.currentRunId() ?? lastEndedRunId,
     ...(deps.hooksNotice !== undefined ? { notice: deps.hooksNotice } : {}),
     ...(deps.workspaceHost !== undefined ? { workspaceHost: deps.workspaceHost } : {}),
-    permissionMode: approvalMode,
   });
   // PreToolUse 钩子的 additionalContext 随工具结果交给模型：按 toolCallId 暂存，afterToolCall 时一并追加
   const preToolContexts = new Map<string, string[]>();
@@ -851,13 +854,26 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         const appended = [...contexts, ...reasons];
         const replaceText =
           typeof report.updatedToolOutput === "string" ? report.updatedToolOutput : undefined;
-        if (replaceText === undefined && appended.length === 0) return undefined;
+        if (
+          replaceText === undefined &&
+          appended.length === 0 &&
+          report.continueFalse === undefined
+        )
+          return undefined;
         return {
           ...(replaceText !== undefined ? { replaceText } : {}),
           ...(appended.length > 0 ? { contextText: appended.join("\n\n") } : {}),
+          // continue:false（决策 324 复审）：整轮结束，理由显示给人
+          ...(report.continueFalse !== undefined
+            ? { stopReason: report.continueFalse.stopReason ?? "钩子要求停止本轮处理" }
+            : {}),
         };
       },
     },
+  });
+  // 收尾类钩子的归属：Run 收尾事件到达后记下这个 Run（adapter.currentRunId 在窗口外已清空）
+  adapter.subscribe((event) => {
+    if (event.kind === "run.ended") lastEndedRunId = event.runId;
   });
   // 决策 323：PostCompact 钩子——压缩完成后通知（无决策能力；触发位置 turn / run-start 记 auto、manual 记 manual）
   if (sessionHooks.list().some((hook) => hook.event === "PostCompact")) {

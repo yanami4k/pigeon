@@ -93,7 +93,13 @@ export function applySettingsReload(
       localLayerTracked: localSettingsTracked(plan.current.root),
     });
   }
-  const changedSections = [...Object.keys(SETTINGS_SECTIONS), "trustedDirectories"].filter(
+  // 顶层标量也在比较之列（整体审查修复：disableAllHooks 与 stopHookBlockCap 不在任何节里）
+  const changedSections = [
+    ...Object.keys(SETTINGS_SECTIONS),
+    "trustedDirectories",
+    "disableAllHooks",
+    "stopHookBlockCap",
+  ].filter(
     (name) =>
       canonicalJson(sectionValue(plan.current, name) ?? null) !==
       canonicalJson(sectionValue(snapshot, name) ?? null)

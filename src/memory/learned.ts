@@ -111,13 +111,15 @@ function parseEntryLine(line: string, layer: MemoryLayer): MemoryEntry | undefin
 }
 
 export function parseMemory(text: string, layer: MemoryLayer): ParsedMemory {
-  const offset = entriesOffset(text);
+  // Windows 编辑器存的 CRLF 先规范成 LF 再解析（写回即新格式）
+  const normalized = text.replace(/\r\n/g, "\n");
+  const offset = entriesOffset(normalized);
   if (offset < 0) {
-    return { ok: true, doc: { header: text, entries: [], trailer: "" } };
+    return { ok: true, doc: { header: normalized, entries: [], trailer: "" } };
   }
-  const header = text.slice(0, offset);
+  const header = normalized.slice(0, offset);
   const firstLine = header === "" ? 1 : header.split("\n").length;
-  const region = text.slice(offset);
+  const region = normalized.slice(offset);
   // 文件尾：最后一个非空行之后的换行与空行
   const trailerMatch = /\n[\s]*$/.exec(region);
   const trailer = trailerMatch !== null ? trailerMatch[0] : "";

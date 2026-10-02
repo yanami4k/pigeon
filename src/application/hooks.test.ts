@@ -308,6 +308,19 @@ test("同一命令在一次事件里只跑一次：不同 matcher 的两层都�
   );
 });
 
+test("本机会话按实际执行位置去重：host:true 与 host:false 的同一命令只跑一次（整体审查修复）", async () => {
+  const h = harness([
+    hook({ matcher: "read_file", command: "check.sh", host: false }),
+    hook({ matcher: "read_file", command: "check.sh", host: true }),
+  ]);
+  await h.hooks.runEvent("PreToolUse", "read_file", EDIT_FIELDS);
+  assert.deepEqual(
+    h.inputs.map((input) => input.command),
+    ["check.sh"],
+    "本机会话里两个执行位置都在本机：同一命令只跑一次"
+  );
+});
+
 test("interpretHookRun 直测：0 + 无输出记 pass；0 + additionalContext 记 context", () => {
   const pass = interpretHookRun("Stop", hook(), outcome());
   assert.equal(pass.conclusion, "pass");

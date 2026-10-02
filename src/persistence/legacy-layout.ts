@@ -4,6 +4,7 @@
 // 收尾钩子的示例）。启动时（终端界面、pigeon run、--line、pigeon resume；worker 与沙箱会话随派出它的
 // 会话）发现任一项即报错，提示运行 pigeon migrate-config，不自动迁移。
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   LEGACY_CONFIG_FILES,
@@ -61,8 +62,10 @@ export function findLegacyLayout(root: string, options: { homeDir?: string } = {
       items.push({ kind: "removed", name, path: item });
     }
   }
-  if (options.homeDir !== undefined) {
-    const preferences = userPreferencesPath(options.homeDir);
+  // 用户级旧文件（~/.pigeon/preferences.md）同样列入：缺省按真实主目录（决策 341 审查：此前只在传了
+  // homeDir 时查，日常入口都没传，用户级检查从不触发）
+  {
+    const preferences = userPreferencesPath(options.homeDir ?? homedir());
     if (existsSync(preferences)) {
       items.push({ kind: "removed", name: USER_PREFERENCES_NAME, path: preferences });
     }

@@ -2,7 +2,8 @@
 // 事件信息以 JSON 经标准输入交给命令；stdout 与 stderr 分开取回（协议要区分：stdout 是 JSON 输出，stderr 是拦下理由）。
 // 超时或取消时杀掉整棵进程树：非 Windows 以独立进程组起子进程、杀整组；Windows 用 taskkill /T /F（tools/process-tree.ts）。
 // 执行位置（324）：本机会话在本机、沙箱会话在容器里（经执行端），单个钩子可指定在宿主执行——两路执行器在本文件；
-// 容器内的超时先按执行端现有做法（重启容器终止），第二步合入沙箱一段后改为容器内 timeout 加客户端兜底。
+// 容器内钩子的超时：容器内 timeout 限时（只杀超时的钩子进程，不重启容器），客户端稍宽的限时兜底（镜像里没有
+// timeout 时退回原做法：客户端断开并按执行端惯例重启容器）。
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHeadCollector } from "../tools/local-host.ts";
 import {
@@ -141,15 +142,22 @@ export function runHookCommandLocal(input: HookCommandInput): Promise<HookComman
   return promise;
 }
 
-// 经执行端在容器里执行（沙箱会话的钩子，324）：命令以 /bin/sh -c 在容器内的工作区根跑；
-// 超时与取消沿用执行端的做法（客户端断开并重启容器，见 container-host.ts）；两路输出由执行端分开取回
+// 经执行端在容器里执行（沙箱会话的钩子，324）：命令以 /bin/sh -c 在容器内的工作区根跑。
+// 超时：容器内 timeout -k 限时（只杀钩子进程组，不重启容器；timeout 退出码 124 记为超时——钩子自己以 124
+// 退出无法区分，接受这一误报面）；客户端限时放宽 10 秒兜底：容器里没有 timeout 或卡住不动时退回执行端
+// 的既有做法（断开并重启容器）。两路输出由执行端分开取回
 export async function runHookCommandViaHost(
   host: WorkspaceHost,
   input: HookCommandInput
 ): Promise<HookCommandOutcome> {
   const started = Date.now();
   const env = input.env ?? process.env;
-  const plan = hookShellPlan(input.command, "linux", env);
+  const seconds = Math.max(1, Math.ceil(input.timeoutMs / 1000));
+  const quoted = `'${input.command.replace(/'/g, "'\\''")}'`;
+  const wrapped =
+    `if command -v timeout >/dev/null 2>&1; then timeout -k 5 ${seconds} sh -c ${quoted}; ` +
+    `else sh -c ${quoted}; fi`;
+  const plan = hookShellPlan(wrapped, "linux", env);
   if (input.signal?.aborted === true) {
     return {
       spawned: false,
@@ -163,7 +171,8 @@ export async function runHookCommandViaHost(
   const result = await host.exec(plan, {
     // 宿主环境不渗进容器：只带协议要求的 PIGEON_PROJECT_DIR，值为容器内的工作区根
     env: { PIGEON_PROJECT_DIR: host.root },
-    timeoutMs: input.timeoutMs,
+    // 客户端兜底放宽 10 秒：正常情形容器内 timeout 先到期
+    timeoutMs: input.timeoutMs + 10_000,
     maxOutputBytes: HOOK_STREAM_CAP,
     signal: input.signal,
     stdin: input.stdin,
@@ -171,7 +180,8 @@ export async function runHookCommandViaHost(
   return {
     spawned: result.spawned,
     exitCode: result.exitCode,
-    timedOut: result.timedOut,
+    // 容器内 timeout 以 124 退出：按超时记（不重启容器）；客户端兜底兜住时执行端已标 timedOut
+    timedOut: result.timedOut || result.exitCode === 124,
     durationMs: Date.now() - started,
     stdout: result.stdout,
     stderr: result.stderr,

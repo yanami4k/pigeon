@@ -26,7 +26,19 @@ import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
 // Windows 上建符号链接要开发者模式或管理员；没有就跳过（与 eval/stream-workspace.test.ts 同一写法）
-const NO_SYMLINKS = process.platform === "win32" ? "Windows 上建不了原生符号链接" : false;
+// 先试建一次符号链接，只在权限不足（EPERM/EACCES）时跳过——有权限的 Windows 机器照跑
+const NO_SYMLINKS = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-symlink-probe-"));
+  try {
+    symlinkSync(join(dir, "target"), join(dir, "lnk"));
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EPERM" || code === "EACCES" ? "本机建不了符号链接（权限不足）" : false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
 const roots: string[] = [];
 after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });

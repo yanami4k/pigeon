@@ -114,7 +114,7 @@ test("等 worker 的脚本不被误停：worker 跑得比判定时长久，脚�
     stallMs: 2500,
   });
   const notice = harness.nextNotice();
-  // 两个调用先一起发出（等结果前都不在等：两个 worker 各自跑满 900ms＞200ms 的判定窗口，脚本不该被误停）；
+  // 两个调用先一起发出（等结果前都不在等：两个 worker 各自跑满 5000ms＞2500ms 的判定窗口，脚本不该被误停）；
   // 不写成先后等待——两个调用之间的进程调度间隔在慢机器上可能超过判定窗口，那是测试自身的时序假象
   await harness.runs.start(
     spec('const a = agent("一"); const b = agent("二"); await a; await b; return 1;'),

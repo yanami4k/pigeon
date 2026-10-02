@@ -549,6 +549,11 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
               ? (limitHit ?? "aborted")
               : run.status;
         errorMessage = run.errorMessage;
+        // 续跑这一轮出错：循环停（出错的那一轮触发 StopFailure、不再触发 Stop；终态如实记出错，
+        // 不被 stop-hook-limit 盖掉——整体审查修复）
+        if (run.status === "failed") {
+          break;
+        }
         if (externallyAborted) {
           status = "aborted";
           break;

@@ -102,7 +102,7 @@
 
 - 合入第一段最终版 a17c013（merge --no-ff，提交 dfe4c97）：冲突 14 个文件，其中 review-backfill-store.ts 与 review-backfill.ts 按本段删除复盘的方向取删除；runtime.ts 的 FrozenSessionPrompt 改为新形态（人写的说明 instructions、两层推送的记忆 pushedMemory、本地 Skill 目录 localSkills），复盘运行面（reviewSession、gateReviewTools、常驻 Memory）整路删除，受保护路径与 ownWorkspaceWrites 保留第一段新版；command-table.ts 两处与 input-queue.test.ts 为两侧各加命令（/memory 一族与 /reload），全部保留；tui/main.ts 的 /reload 重建去掉 loopGuard 入参（新签名里没有，loopGuard 由外层按新快照重算）。pigeon run 的用法串不再列 --memory-limit（日常入口已删该参数，跑批器保留），--trust-config 说明取第一段的"会执行命令或放权的配置"。
 - 迁移命令新增两步（提交 3241310）：已删除功能的遗留（旧学到的记忆两处与锁、补做复盘记录两处、memory-review.json、.pigeon/memory/）经 moveToMigrationBackup 挪出仓库到用户级备份目录，.pigeon/memory/ 另打印"把其中内容并入项目的 AGENTS.md"；~/.pigeon/preferences.md 改名为 ~/.pigeon/AGENTS.md，目标已存在即拦阻、不覆盖。LEGACY_STATE_ENTRIES 去掉 learned、learned.lock、review-backfill（不再挪进 state/，免得两步对同一项各算一遍）；stateBackupDirOf 随之删除（无引用）。
-- 启动检查（同提交）：legacy-layout 把上述遗留与 ~/.pigeon/preferences.md 列为旧文件（新增 kind removed），用户级只在给了 homeDir 时检查；openSessionSettings 把 homeDir 传下去。
+- 启动检查（同提交）：legacy-layout 把上述遗留与 ~/.pigeon/preferences.md 列为旧文件（新增 kind removed），用户级检查最初只在给了 homeDir 时做；后经审查发现日常入口都没传、该项从不触发，已改为缺省按真实主目录（homedir()）检查（见 build-2 审计的整体审查后修改一节）。
 - 功能测试"记下纠正、下次照做"（提交 53d2904）：脚本模型，第一会话（--line 入口）经 update_memory 记下纠正，第二会话的系统提示带这一条（层级、来源、日期、第一会话的会话编号逐字断言）。仓库里没有接真模型、缺 key 时跳过的测试写法（src 下没有以环境变量存在与否跳过的真模型用例），按施工说明不加真模型用例。
 - /reload 冻结复用（merge 提交内）：重写 settings-reload.test.ts 的冻结用例为 AGENTS.md + 两层记忆 + Skill 目录——中途改这些文件后 /reload，那几段不变（不重读文件），由设置决定的 MCP 一段按新快照变。
 - docs/configuration.md（提交 6d0a4e5）：memory 一节、两层记忆的位置与上限、/memory 与 /memory edit、AGENTS.md 读取规则与 32 KiB、迁移命令新增步骤、启动检查口径、/reload 冻结部分的表述。
@@ -186,7 +186,7 @@
 
 1. 合并后 FrozenSessionPrompt 不再含常驻 Memory（随本段删除），改含人写的说明（AGENTS.md）；/reload 沿用开局读到的 AGENTS.md 与两层记忆、不重读文件，与决策 340 的"系统提示里开局冻结的部分沿用"一致，只是冻结内容的构成随本段变化。
 2. 迁移新增步骤的备份一律用第一段的 moveToMigrationBackup（决策 341 的位置），合并前写的"最小实现"不需要存在：合并在一次提交内完成，直接走共用函数。stateBackupDirOf 无引用，删除。
-3. 启动检查的用户级一项（~/.pigeon/preferences.md）只在调用方给了 homeDir 时检查；日常入口都传。不给时不查（worker 等不注入 homeDir 的场景不误报别人的主目录）。
+3. 启动检查的用户级一项（~/.pigeon/preferences.md）最初只在调用方给了 homeDir 时检查，写作时认为日常入口都传——实际都没传，该项从不触发；已改为缺省按真实主目录（homedir()）检查（见 build-2 审计的整体审查后修改一节）。
 4. 旧会话 trace 用例断言"Run 1 个"（渲染不报错、Run 计入），不断言任务文本——trace 报告里 Run 一节不含任务原文。
 
 ### 顺带发现（范围外，不修）

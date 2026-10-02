@@ -427,12 +427,16 @@ async function main(argv: string[]): Promise<void> {
           warn,
           loopGuard: nextLoopGuard,
           createApprovalHandler: createHandler,
+          // 决策 331：/reload 重建的运行面照常注册 update_memory（审查修复：此前漏传，重载后丢失）
+          memoryWrite,
           resume: true,
           reloadFrom: slot.bundle,
           hooksNotice: (line) => shellHolder.current?.addSystem(line),
           onMcpNote: (note) => shellHolder.current?.addSystem(`[mcp] ${note}`),
         });
         settings = snapshot;
+        // /memory 的上限按新快照更新（审查修复：此前沿用开局快照）
+        memoryContext.limits = memoryLimitsOf(snapshot);
         orchestration = nextOrchestration;
         loopGuard = nextLoopGuard;
         webToolsOption = nextWebTools;

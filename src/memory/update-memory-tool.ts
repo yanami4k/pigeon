@@ -127,8 +127,9 @@ function sizeList(entries: readonly MemoryEntry[], layer: MemoryLayer): string {
 
 // 一处文字里的换行与首尾空白：每条只占一行，换行并成一个空格；〔〕留给工具补的来处，内容里换成普通括号
 function oneLine(text: string): string {
+  // 折叠一切换行（含 Unicode 行分隔符 \u2028/\u2029）：记忆一行一条
   return text
-    .replace(/\s*[\r\n]+\s*/g, " ")
+    .replace(/\s*[\r\n\u2028\u2029]+\s*/g, " ")
     .replace(/〔/g, "（")
     .replace(/〕/g, "）")
     .trim();

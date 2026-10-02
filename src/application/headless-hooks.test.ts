@@ -205,7 +205,7 @@ test("Stop 连续拦截到上限：stopHookBlockCap=2 → status stop-hook-limit
   assert.ok(userTexts(streamFn.calls[2]).some((text) => text.includes("永不停止")));
 });
 
-test("trace 列出钩子运行：PreToolUse / PostToolUse 挂在 Run 上，Stop 记为会话级条目", async () => {
+test("trace 列出钩子运行：PreToolUse / PostToolUse / Stop 挂在 Run 上，SessionStart 记为会话级条目", async () => {
   const { root, home } = workspace();
   writeFileSync(join(root, "a.ts"), "alpha\n");
   const noop = script(root, "noop.mjs", [
@@ -229,18 +229,20 @@ test("trace 列出钩子运行：PreToolUse / PostToolUse 挂在 Run 上，Stop 
       hook("PreToolUse", `node "${noop}"`, { matcher: "read_file" }),
       hook("PostToolUse", `node "${noop}"`, { matcher: "read_file" }),
       hook("Stop", `node "${noop}"`),
+      hook("SessionStart", `node "${noop}"`),
     ]),
   });
   assert.equal(result.status, "completed");
   const trace = runTraceCommand({ root, sessionId: result.sessionId });
-  // 位置即归属：Pre/Post 在 Run 一节内（挂上了 runId），Stop 在会话级一节
+  // 位置即归属：三个都在 Run 一节内（整体审查修复：Stop 挂刚结束的 Run）；SessionStart 在任何 Run 之前，会话级
   const runAt = trace.indexOf("Run ");
   const preAt = trace.indexOf("钩子 PreToolUse（匹配 read_file）");
   const postAt = trace.indexOf("钩子 PostToolUse（匹配 read_file）");
-  const sessionAt = trace.indexOf("会话级条目：");
   const stopAt = trace.indexOf("钩子 Stop");
-  assert.ok(runAt >= 0 && preAt > runAt && postAt > runAt, trace);
-  assert.ok(sessionAt > postAt && stopAt > sessionAt, trace);
+  const sessionAt = trace.indexOf("会话级条目：");
+  const startAt = trace.indexOf("钩子 SessionStart");
+  assert.ok(runAt >= 0 && preAt > runAt && postAt > runAt && stopAt > runAt, trace);
+  assert.ok(sessionAt > stopAt && startAt > sessionAt, trace);
 });
 
 test("SessionEnd：运行结束后脚本被调用一次，脚步收到的 reason 为 exit", async () => {
@@ -341,7 +343,9 @@ test("PreToolUse 钩子 continue:false：调用被拦、这批工具后停下（
     settings: settingsWith(root, [hook("PreToolUse", `node "${file}"`)]),
   });
   assert.equal(streamFn.calls.length, 1, "continue:false 在这批工具后停下，不再问模型");
-  assert.notEqual(result.status, "failed", JSON.stringify(result));
+  // 整轮结束（不只是该调用）：终态中止、理由如实记、显示给人
+  assert.equal(result.status, "aborted", JSON.stringify(result));
+  assert.match(result.errorMessage ?? "", /钩子要求停止：停手-CF/);
   // 拦下的理由逐字落进会话里的工具结果（模型可见的载体）
   const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const entries = readdirSync(sessionsDir, { recursive: true })
@@ -350,4 +354,101 @@ test("PreToolUse 钩子 continue:false：调用被拦、这批工具后停下（
   assert.equal(entries.length, 1, JSON.stringify(entries));
   const content = readFileSync(join(sessionsDir, entries[0] ?? ""), "utf8");
   assert.ok(content.includes("停手-CF"), "会话记录里应有钩子的停止理由");
+});
+
+test("PostToolUse 钩子 continue:false：整轮结束（不再问模型），终态中止、理由如实记（整体审查修复）", async () => {
+  const { root, home } = workspace();
+  writeFileSync(join(root, "a.ts"), "alpha\n");
+  const stopFile = join(root, "stop-called.txt");
+  const post = script(root, "stop-after.mjs", [
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    "  process.stdout.write(JSON.stringify({ continue: false, stopReason: '后停-CF' }));",
+    "});",
+  ]);
+  const stop = script(root, "stop.mjs", [
+    `import { writeFileSync } from 'node:fs';`,
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    `  writeFileSync(${JSON.stringify("STOPMARK")}, '');`,
+    "});",
+  ]);
+  const stopMarked = join(root, "STOPMARK");
+  const streamFn = createFakeStreamFn({
+    replies: [
+      { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+      { text: "不应再问" },
+    ],
+  });
+  const result = await runHeadless({
+    task: "读一下",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn,
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(root, [
+      hook("PostToolUse", `node "${post}"`),
+      hook("Stop", `node "${stop}"`),
+    ]),
+  });
+  assert.equal(result.status, "aborted");
+  assert.match(result.errorMessage ?? "", /钩子要求停止：后停-CF/);
+  assert.equal(
+    userTexts(streamFn.calls[1]).includes("不应再问") === false && streamFn.calls.length <= 2,
+    true,
+    "整轮结束：第二轮（若有）随即被中止，内容不生效"
+  );
+  assert.equal(existsSync(stopMarked), false, "被钩子停下的整轮不再触发 Stop");
+});
+
+test("Stop 拦下后续跑的那一轮出错：循环停、触发 StopFailure、终态如实记出错（不被 stop-hook-limit 盖掉）", async () => {
+  const { root, home } = workspace();
+  const stopCount = join(root, "stop-count.txt");
+  const failCount = join(root, "fail-count.txt");
+  const counter = (target: string) => [
+    "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    `  const c = ${JSON.stringify(target)};`,
+    "  const n = existsSync(c) ? Number(readFileSync(c, 'utf8')) : 0;",
+    "  writeFileSync(c, String(n + 1));",
+    "  process.exit(2);",
+    "});",
+  ];
+  const stopHook = script(root, "stop-always.mjs", counter("STOPCOUNT"));
+  const failHook = script(root, "fail.mjs", [
+    "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    `  const c = ${JSON.stringify("FAILCOUNT")};`,
+    "  const n = existsSync(c) ? Number(readFileSync(c, 'utf8')) : 0;",
+    "  writeFileSync(c, String(n + 1));",
+    "});",
+  ]);
+  const streamFn = createFakeStreamFn({
+    replies: [{ text: "一轮" }, { text: "二轮" }],
+    failOnCall: 2,
+    failureMessage: "续跑撞上故障",
+  });
+  const result = await runHeadless({
+    task: "干活",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn,
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(
+      root,
+      [hook("Stop", `node "${stopHook}"`), hook("StopFailure", `node "${failHook}"`)],
+      { stopHookBlockCap: 5 }
+    ),
+  });
+  assert.equal(result.status, "failed", JSON.stringify(result));
+  assert.equal(readFileSync(join(root, "STOPCOUNT"), "utf8"), "1", "Stop 只拦了一次（出错即停）");
+  assert.equal(
+    readFileSync(join(root, "FAILCOUNT"), "utf8"),
+    "1",
+    "出错的那一轮触发了 StopFailure"
+  );
 });

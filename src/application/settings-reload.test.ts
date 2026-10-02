@@ -1,11 +1,11 @@
 // /reload 重读设置（决策 340）：改放权后重读，下一轮即生效；改命令短名后重读须确认，不确认沿用原内容、原来没有的不启用；
 // MCP 只重启内容有变的服务：未变的连接沿用（不重启、旧运行面释放后仍连着），删掉的停止、改过的重启、新加的启动，
-// 结果行列出改了哪些节；系统提示里开局冻结的部分（常驻 Memory、Skill 目录）不随重读变，由设置决定的部分按新快照变；
+// 结果行列出改了哪些节；系统提示里开局冻结的部分（人写的说明、推送的记忆、本地 Skill 目录）不随重读变，由设置决定的部分按新快照变；
 // 没有变化如实说明；有 worker 在跑时拒绝。
 // 运行面重建照终端界面入口的做法：同一会话上按新快照重开（reloadFrom 给出旧运行面、还原上下文），再释放旧的。
 // 用户级一律指到临时目录。
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -128,6 +128,8 @@ async function session(
       },
       homeDir: home,
       startMcp,
+      // 与终端界面主会话一致：有人对话，带记忆写入（决策 331）
+      memoryWrite: { source: "tui" },
       createApprovalHandler: () => async (request) => {
         asked.push(request);
         return { approved: true };
@@ -454,4 +456,62 @@ test("新增钩子后 /reload：列为人确认，confirm 后新钩子随新快�
   } finally {
     await s.dispose();
   }
+});
+
+test("/reload 重建后 update_memory 仍注册且可写（整体审查修复回归：重建漏传 memoryWrite 即丢）", async () => {
+  const root = temp("pigeon-reload-memw-");
+  const home = temp("pigeon-reload-memw-home-");
+  const remember = {
+    text: "记",
+    toolCalls: [
+      {
+        name: "update_memory",
+        args: { action: "add", layer: "project", content: "提交信息用英文" },
+      },
+    ],
+  };
+  const s = await session(
+    root,
+    home,
+    createFakeStreamFn({ replies: [remember, { text: "好" }] }),
+    undefined,
+    true
+  );
+  try {
+    const before = s.bundle().adapter.snapshot().tools.advertised;
+    assert.ok(before.includes("update_memory"), "开局就注册");
+    // 改一处设置触发重建（memory 一节的上限）
+    write(projectSettingsPath(root), { memory: { projectLimitChars: 5000 } });
+    await s.reload([]);
+    const after = s.bundle().adapter.snapshot().tools.advertised;
+    assert.ok(after.includes("update_memory"), "重建后仍注册");
+    const memRun = await s.run("记一下");
+    assert.equal(memRun.status, "completed", JSON.stringify(memRun.errorMessage));
+    const lastExec = memRun.toolExecutions.at(-1);
+    assert.equal(lastExec?.state, "settled", JSON.stringify(lastExec));
+    const memoryFile = join(root, ".pigeon", "state", "memory.md");
+    assert.ok(
+      existsSync(memoryFile) && readFileSync(memoryFile, "utf8").includes("提交信息用英文")
+    );
+  } finally {
+    await s.dispose();
+  }
+});
+
+test("顶层钩子开关的变化 /reload 读得出：disableAllHooks 与 stopHookBlockCap 列入改了哪些节（整体审查修复）", async () => {
+  const root = temp("pigeon-reload-toplevel-");
+  const home = temp("pigeon-reload-toplevel-home-");
+  const current = loadSettings(root, { homeDir: home });
+  write(projectSettingsPath(root), { disableAllHooks: true, stopHookBlockCap: 3 });
+  let applied = 0;
+  const reload = createSettingsReloader({
+    current: () => current,
+    apply: async () => {
+      applied += 1;
+    },
+    homeDir: home,
+  });
+  const lines = (await reload([])).join("\n");
+  assert.match(lines, /disableAllHooks、stopHookBlockCap|stopHookBlockCap、disableAllHooks/, lines);
+  assert.equal(applied, 1, "有变化即重建");
 });

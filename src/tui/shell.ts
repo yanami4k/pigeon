@@ -26,7 +26,7 @@
 // - 审批面板（S3，决策 029）、取消键（S5 裁决 032）与退出三层形态（S5+ 裁决 033）的交互语义见 modal.ts；
 //   壳停止时挂起的审批 fail-closed 按拒绝处理（理由逐字）。
 // - 决策 286 其余各项：输入框为 pi-tui Editor（input-editor.ts，多行、粘贴保留换行、历史跨启动保留）；输入框下方一行
-//   状态栏（status-bar.ts：模型、上下文用量、本会话花费、后台补做进度）；工具调用行下方显示结果（缺省收起，Ctrl+O
+//   状态栏（status-bar.ts：模型、上下文用量、本会话花费）；工具调用行下方显示结果（缺省收起，Ctrl+O
 //   展开或收起全部）；/resume 不带会话号弹出会话选择器（session-picker.ts）；运行期告警经 addWarning 落消息区。
 // - 斜杠命令（S3，决策 030）：/grants /revoke /grants save 走 application/grants.ts 的
 //   命令层（与 cli REPL 同一份），输出经 write 回调投影到消息区——零新增治理语义。
@@ -1812,7 +1812,8 @@ export class PigeonTuiShell
   // 出错收尾的 Run 不跑 Stop——它的通知是 StopFailure（复审 P2：与 headless 同一口径）
   private async afterRun(result: RunResult | null): Promise<void> {
     try {
-      if (result === null || this.runCancelled) return;
+      // 中止收尾（含钩子 continue:false 停下的整轮）：不再跑 Stop（整体审查修复）
+      if (result === null || this.runCancelled || result.status === "aborted") return;
       const hooks = this.current.hooks;
       if (hooks === undefined || hooks.disabled) return;
       if (result.status === "failed") {
@@ -1863,6 +1864,20 @@ export class PigeonTuiShell
         this.collectChildCosts();
         this.updateStatus();
         this.tui.requestRender();
+        // 续跑这一轮出错：循环停，这一轮触发 StopFailure、不再触发 Stop，终态如实记出错
+        // （整体审查修复：此前只在中止时停，出错会继续触发 Stop 且可能被 stop-hook-limit 盖住）
+        if (continued.status === "failed") {
+          try {
+            await hooks.runEvent("StopFailure", "", {
+              error: continued.errorMessage ?? "unknown",
+            });
+          } catch (error) {
+            this.flow.addSystem(
+              `钩子出错（StopFailure）：${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+          return;
+        }
         // 外部取消（Esc / 打转叫停）或本轮以中断收尾：不再接着跑
         if (this.runCancelled || continued.status === "aborted") return;
       }

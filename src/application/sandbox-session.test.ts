@@ -2,7 +2,7 @@
 // [d] 不建目录放权；沙箱会话不启动 MCP 服务，开沙箱时列出已配置的服务名（决策 252）。容器以假 docker 代替，工作区是真 git 仓库。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -287,6 +287,63 @@ test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不�
     const plain = await openSessionRuntime({ ...local, sessionId: newSessionId() });
     await disposeRuntime(plain.bundle);
     assert.equal(mcp.counter.calls, 1);
+  } finally {
+    cleanup();
+    for (const dir of [governance, workspace, home]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 决策 331：沙箱会话（执行端在容器）照常注册 update_memory；写入落在宿主上的记忆文件（治理根在宿主侧）
+test("沙箱会话注册 update_memory：写入落在宿主上的记忆文件", async () => {
+  const governance = mkdtempSync(join(tmpdir(), "pigeon-sandbox-mem-"));
+  const workspace = mkdtempSync(join(tmpdir(), "pigeon-sandbox-mem-ws-"));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-mem-home-"));
+  const { host, cleanup } = localDockerHost(workspace);
+  try {
+    const opened = await openSessionRuntime({
+      governanceRoot: governance,
+      streamFn: createFakeStreamFn({
+        replies: [
+          {
+            text: "记",
+            toolCalls: [
+              {
+                name: "update_memory",
+                args: { action: "add", layer: "project", content: "沙箱里也能记" },
+              },
+            ],
+          },
+          { text: "好" },
+        ],
+      }),
+      sessionId: newSessionId(),
+      flags: {
+        yolo: true,
+        provider: "custom",
+        modelId: "custom",
+        persistThinking: true,
+        pushedMemory: true,
+      },
+      workspaceHost: host,
+      homeDir: home,
+      memoryWrite: { source: "tui" },
+    });
+    try {
+      assert.ok(
+        opened.bundle.adapter.snapshot().tools.advertised.includes("update_memory"),
+        "沙箱会话广告 update_memory"
+      );
+      const run = await opened.bundle.adapter.run("记一下");
+      assert.equal(run.status, "completed");
+      const memoryFile = join(governance, ".pigeon", "state", "memory.md");
+      assert.ok(existsSync(memoryFile), "记忆文件写在宿主治根下");
+      assert.ok(
+        readFileSync(memoryFile, "utf8").includes("沙箱里也能记"),
+        "内容落在宿主上的记忆文件"
+      );
+    } finally {
+      await disposeRuntime(opened.bundle);
+    }
   } finally {
     cleanup();
     for (const dir of [governance, workspace, home]) rmSync(dir, { recursive: true, force: true });

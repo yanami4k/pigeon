@@ -19,15 +19,16 @@ const SESSION_ID: SessionId = newSessionId();
 class StubRuntime implements TuiRuntimeFace {
   readonly runs: string[] = [];
 
-  private readonly result: RunResult;
+  private readonly results: RunResult[];
 
-  constructor(result: RunResult) {
-    this.result = result;
+  constructor(...results: RunResult[]) {
+    this.results = results;
   }
 
   run(input: string): Promise<RunResult> {
     this.runs.push(input);
-    return Promise.resolve(this.result);
+    const next = this.results.length > 1 ? this.results.shift() : this.results[0];
+    return Promise.resolve(next as RunResult);
   }
 
   interrupt(): Promise<void> {
@@ -75,20 +76,23 @@ class StubHooks implements TuiHooksFace {
 
 function makeShell(
   result: RunResult,
-  hooks: StubHooks
-): { shell: PigeonTuiShell; cleanup: () => void } {
+  hooks: StubHooks,
+  ...moreResults: RunResult[]
+): { shell: PigeonTuiShell; runtime: StubRuntime; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tui-stop-"));
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-stop-log-"));
   const term = new MockTerminal(80, 24);
+  const runtime = new StubRuntime(result, ...moreResults);
   const shell = new PigeonTuiShell({
     terminal: term,
-    runtime: new StubRuntime(result),
+    runtime,
     sessionId: SESSION_ID,
     logDir,
     hooks,
   });
   return {
     shell,
+    runtime,
     cleanup: () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(logDir, { recursive: true, force: true });
@@ -148,6 +152,47 @@ test("Stop 钩子 continue:false：不再开新一轮（复审 P2 回归）", as
       ["Stop"],
       "continue:false 只跑那一次 Stop"
     );
+  } finally {
+    shell.stop();
+    cleanup();
+  }
+});
+
+test("Stop 拦下后续跑的那一轮出错：循环停、那一轮触发 StopFailure、不再触发 Stop（整体审查修复）", async () => {
+  const hooks = new StubHooks({
+    Stop: {
+      runs: [],
+      additionalContext: [],
+      systemMessages: [],
+      ran: true,
+      blocked: { reason: "接着干" },
+    },
+  });
+  const ok: RunResult = {
+    runId: newRunId(),
+    status: "completed",
+    turns: 1,
+    failure: null,
+  } as unknown as RunResult;
+  const failed: RunResult = {
+    runId: newRunId(),
+    status: "failed",
+    errorMessage: "续跑撞上故障",
+    turns: 1,
+    failure: null,
+  } as unknown as RunResult;
+  const { shell, runtime, cleanup } = makeShell(ok, hooks, failed);
+  try {
+    shell.start();
+    await settle();
+    shell.submitInput("干活");
+    await settle();
+    await settle();
+    assert.equal(runtime.runs.length, 2, "只续跑了一轮");
+    const stops = hooks.events.filter((event) => event === "Stop").length;
+    const failures = hooks.events.filter((event) => event === "StopFailure").length;
+    assert.equal(stops, 1, "出错后不再触发 Stop");
+    assert.equal(failures, 1, "出错的那一轮触发 StopFailure");
   } finally {
     shell.stop();
     cleanup();

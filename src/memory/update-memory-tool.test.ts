@@ -327,3 +327,9 @@ test("人改坏格式：拒绝写入并指出文件与行号，文件原样不�
     );
     assert.equal(fx.read("project"), broken);
   }));
+
+test("Unicode 行分隔符也折叠：\\u2028 与 \\u2029 当换行并成一个空格", () =>
+  withFixture(async (fx) => {
+    await fx.call({ action: "add", content: "第一段\u2028第二段\u2029第三段" });
+    assert.match(fx.read("project"), /- \[P1\] 第一段 第二段 第三段 〔/);
+  }));

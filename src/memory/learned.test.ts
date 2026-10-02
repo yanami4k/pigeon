@@ -42,6 +42,19 @@ test("逐字往返：规范写法的文件解析后序列化回去逐字相同�
   assert.equal(nextId(parsed.doc.entries), 5);
 });
 
+test("CRLF 文件照常解析：先规范成 LF（Windows 编辑器存的文件能读，写回即 LF）", () => {
+  const crlf = PROJECT.replaceAll("\n", "\r\n");
+  const parsed = parseMemory(crlf, "project");
+  assert.ok(parsed.ok);
+  assert.deepEqual(
+    parsed.doc.entries.map((entry) => entry.id),
+    [1, 3, 4]
+  );
+  assert.equal(parsed.doc.entries[0]?.content, "提交信息用英文祈使句，不加类型前缀");
+  // 写回即规范形态（与 LF 原文逐字相同）
+  assert.equal(serializeMemory(parsed.doc, "project"), PROJECT);
+});
+
 test("逐字往返：末尾没有换行、末尾多余空行、文件头被人改过、没有条目，都原样保留", () => {
   const body = PROJECT.slice(PROJECT.indexOf("- [P1]"));
   for (const text of [

@@ -194,7 +194,7 @@ pigeon migrate-config [--root <项目根>]
 | `SubagentStop` | worker 收尾 | 拦住要求接着干、补上下文 |
 | `PreCompact` | 上下文压缩之前 | 只通知，不能拦（拦下压缩会让下一次请求超长出错） |
 | `PostCompact` | 压缩完成之后 | 只作副作用 |
-| `Notification` | 需要使用者注意时 | 只作副作用 |
+| `Notification` | 需要使用者注意时：终端界面审批面板出现（`notification_type` 为 `permission_prompt`）、worker 的请示汇到主会话（`worker_approval`）；`message` 为面板提示原文 | 只作副作用 |
 
 `PreToolUse` 的结论合并：拒绝 > 要人确认 > 放行。**放行只免掉人工审批这一步**——拒绝名单、路径围栏与受保护路径照常生效；改过的参数重新经过全部检查。工具类事件在 worker 内同样触发；`Stop`/`SubagentStop` 连续拦截到上限（`stopHookBlockCap`）后不再理会、照常结束，结束原因记为"收尾钩子拦截到上限"（不贴失败标签）。
 

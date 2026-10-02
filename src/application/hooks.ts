@@ -281,14 +281,16 @@ export class SessionHooks {
       ran: false,
     };
     if (this.#options.disableAllHooks) return report;
-    // 一次事件命中的全部钩子按命令（与执行位置）去重，同一事件内不再看 matcher：
-    // 同一命令在两层用不同 matcher 时，对同一目标只跑一次（复审 P2）
+    // 一次事件命中的全部钩子按命令与实际执行位置去重，同一事件内不再看 matcher（复审 P2）；
+    // 执行位置按本次会话归一：本机会话里 host:true 与 host:false 都在本机执行，是同一位置
+    const localSession = this.#options.workspaceHost === undefined;
     const seenCommands = new Set<string>();
     const matched = this.#options.hooks.filter((hook) => {
       if (hook.event !== event || !hookMatcherMatchesLocal(hook.matcher, matcherTarget)) {
         return false;
       }
-      const key = JSON.stringify([hook.command, hook.host]);
+      const location = localSession || hook.host ? "host" : "container";
+      const key = JSON.stringify([hook.command, location]);
       if (seenCommands.has(key)) return false;
       seenCommands.add(key);
       return true;

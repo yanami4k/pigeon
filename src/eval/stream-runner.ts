@@ -151,8 +151,6 @@ export interface StepAgentInput {
   abortSignal?: AbortSignal;
   // 经网关时，这个作业的模型接入地址（决策 155）
   modelBaseUrl?: string;
-  // 经网关时，读这个作业此刻的计量：推送格在每次复盘前后各读一次，做差即复盘的请求数、token 与花费（235）
-  meter?: () => GatewayMeter;
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守
@@ -1139,12 +1137,7 @@ async function runStep(
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
         workDir: jobDir,
-        ...(options.gateway !== undefined
-          ? {
-              modelBaseUrl: options.gateway.jobBaseUrl(key),
-              meter: () => (options.gateway as StreamModelGateway).meter(key),
-            }
-          : {}),
+        ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
         abortSignal,
       })
     );

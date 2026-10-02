@@ -589,8 +589,8 @@ export const verifyJsonStep: MigrationStep = {
     }
     // 决策 324：收尾钩子以退出码 2 + stderr 拦下；普通命令失败时输出在 stdout、退出码非 2 拦不住——
     // 示例把输出导到 stderr、失败时以 2 退出（复审 P2：原样印出的 npm test 拦不住）
-    const base = stopHookCommandOf(raw);
-    const command = base.includes(" && ") ? `( ${base} ) 1>&2 || exit 2` : `${base} 1>&2 || exit 2`;
+    // 一律包一层子命令组：a && b、a; b 这类复合命令也整体导 stderr、整体以 2 退出（整体审查修复）
+    const command = `( ${stopHookCommandOf(raw)} ) 1>&2 || exit 2`;
     ctx.backups.push(moveToMigrationBackup(ctx.root, source, "verify.json", ctx.homeDir));
     return [
       `已挪走 ${pigeonRel("verify.json")}：验证门、回炉与失败自动分叉重试已删除，verify.json 不并入设置`,

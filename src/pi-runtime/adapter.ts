@@ -253,6 +253,8 @@ export class PiRuntimeAdapter {
   #turnCompaction: { messages: AgentMessage[]; stateLength: number } | undefined;
   // 当前 Run 是否来过中止请求（任何来源；每个 Run 开始时清空）：来过即不再为空回复重试
   #interruptRequested = false;
+  // 钩子的 continue:false（决策 324）：整轮停止——置位后中止 agent 循环，终态如实记这个理由
+  #hookStopReason: string | undefined;
   // 空回复重试（决策 170 ②）：本 Run 是否已重试过；等待重试时暂扣的那次 agent_end（重试那次的 agent_end 才是本 Run 的收尾）
   #emptyReplyRetried = false;
   #deferredRunEnd: AgentEvent | undefined;
@@ -425,6 +427,7 @@ export class PiRuntimeAdapter {
     this.#stopCause = undefined;
     this.#turnCompaction = undefined;
     this.#interruptRequested = false;
+    this.#hookStopReason = undefined;
     this.#emptyReplyRetried = false;
     this.#deferredRunEnd = undefined;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
@@ -926,7 +929,16 @@ export class PiRuntimeAdapter {
         args: context.toolCall.arguments,
         preparedArgs: context.args,
       });
+      // continue:false 已置位：本批其余调用一律拦下并带 terminate——整批提前结束（同批调用照样停下）
+      if (this.#hookStopReason !== undefined) {
+        return { block: true, reason: this.#hookStopReason, terminate: true };
+      }
       if (verdict.kind === "block") {
+        // continue:false（terminate）：整轮结束——记理由；本批经 terminate 提前收尾，不调 abort
+        // （abort 在假流不遵守中止信号时会多发一次模型请求；terminate 让批干净地停）
+        if (verdict.terminate === true) {
+          this.#hookStopReason = verdict.reason;
+        }
         return {
           block: true,
           reason: verdict.reason,
@@ -966,6 +978,11 @@ export class PiRuntimeAdapter {
         text,
       });
       if (outcome === undefined) return undefined;
+      // continue:false：整轮结束（决策 324 复审：PostToolUse 也生效，不只是 PreToolUse）
+      if (outcome.stopReason !== undefined) {
+        this.#hookStopReason = outcome.stopReason;
+        this.#agent.abort();
+      }
       const extra: Array<{ type: "text"; text: string }> = [];
       if (outcome.contextText !== undefined) {
         extra.push({ type: "text", text: outcome.contextText });
@@ -1219,6 +1236,20 @@ export class PiRuntimeAdapter {
     const emptyReply = lastAssistant !== undefined && isEmptyReply(lastAssistant);
     const errorMessage = emptyReply ? EMPTY_REPLY_ERROR : this.#agent.state.errorMessage;
     let status: RunTerminalStatus;
+    if (this.#hookStopReason !== undefined) {
+      // 钩子的 continue:false：整轮被钩子停下——终态中止，原因如实交出（stopReason 显示给人）
+      status = "aborted";
+      return {
+        runId,
+        status,
+        errorMessage: `钩子要求停止：${this.#hookStopReason}`,
+        syntheticFailure: false,
+        failure: null,
+        advertisedTools,
+        toolExecutions: this.#governance.runOutcome().toolExecutions,
+        emptyReply: false,
+      };
+    }
     if (emptyReply) {
       status = "failed";
     } else if (stopReason === "aborted") {

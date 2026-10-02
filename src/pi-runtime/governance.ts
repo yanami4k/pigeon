@@ -63,7 +63,7 @@ export interface ToolHookPort {
     args: unknown;
     isError: boolean;
     text: string;
-  }): Promise<{ replaceText?: string; contextText?: string } | undefined>;
+  }): Promise<{ replaceText?: string; contextText?: string; stopReason?: string } | undefined>;
 }
 
 // 判定结果：放行，或带理由的阻断（理由由 Adapter 原样交回上游，逐字成为模型可见的 toolResult）；

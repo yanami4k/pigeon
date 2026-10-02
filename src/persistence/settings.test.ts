@@ -189,8 +189,24 @@ test("旧布局：旧配置文件、旧位置的状态与已删除功能的遗�
     ]) {
       assert.ok(names.includes(name), `${name} 应列为旧文件，实际：${names.join("、")}`);
     }
-    // 不传 homeDir 时不查用户级
-    assert.ok(!findLegacyLayout(root).some((item) => item.name === "~/.pigeon/preferences.md"));
+    // 不传 homeDir 时按真实主目录查用户级（决策 341 审查修复：缺省 homedir()）——
+    // 把 HOME/USERPROFILE 指到临时目录验证（homedir() 读这两个环境变量）
+    const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      assert.ok(
+        findLegacyLayout(root).some((item) => item.name === "~/.pigeon/preferences.md"),
+        "缺省 homedir() 时用户级旧偏好也要列出"
+      );
+      assert.throws(() => assertNoLegacyLayout(root), LegacyLayoutError);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = savedProfile;
+    }
     const message = legacyLayoutMessage(findLegacyLayout(root, { homeDir: home }));
     assert.match(message, /memory-review\.json/);
     assert.match(message, /verify\.json/);

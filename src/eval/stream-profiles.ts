@@ -10,8 +10,8 @@ export const PIGEON_TEST_TIMEOUT_MS = 120_000;
 // 并断言两者按字典序排列，而同一毫秒内生成的 ULID 随机部分不保证单调，人的代码上也时过时不过，判不出 agent 的代码好坏
 export const PIGEON_FLAKY_TEST = "listSessionIds：列目录得会话清单（D1：ULID 字典序即时间序）";
 
-// 验证的一个命名分步：一行命令（经 sh 执行），可指定在工作区根下的哪个目录执行。形状与 .pigeon/verify.json 的
-// 分步验证配置一致；跑批器把它写进每个作业的治理根，回炉按它逐步验证；验证门（维护步的判定）由同一份分步派生
+// 验证的一个命名分步：一行命令（经 sh 执行），可指定在工作区根下的哪个目录执行。决策 322 后：实验侧不再设验证门；
+// 这份分步供人的基准验证用——跑批器由它派生基准门命令（gateFromSteps，stream-baseline 的 gateAt 逐步验证人的仓库）
 export interface StreamVerifyStep {
   name: string;
   command: string;
@@ -280,7 +280,7 @@ export interface StreamRepoRuntime {
     layer: QualityCheck | null;
   };
   profile: RepoProfile;
-  // 分步验证：写进每个作业治理根的 .pigeon/verify.json，开回炉的条件按它逐步验证
+  // 分步验证：人的基准的门命令由它派生（verifyScript → gateFromSteps → stream-baseline）；各步名称也进结果行的分步结论
   verifySteps: readonly StreamVerifyStep[];
   // 跑用例的方式（命令模板与单条超时等）：人的基准缓存的身份之一，改了它，已落盘的基准不再复用
   casesCommand: string;
