@@ -36,6 +36,7 @@ import {
   resolveEditor,
   spawnEditor,
 } from "../application/memory-command.ts";
+import { restoreSessionWorkers } from "../application/previous-workers.ts";
 import { promptHistoryStore } from "../application/prompt-history.ts";
 import {
   disposeRuntime,
@@ -71,6 +72,7 @@ import { takeWorkerChanges } from "../application/take-worker-tool.ts";
 import { renderTaskList } from "../application/task-list-tool.ts";
 import { closeTuiSession } from "../application/tui-exit.ts";
 import { resolveWebTools } from "../application/web-tools.ts";
+import type { WorkerNotices } from "../application/worker-notices.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
@@ -219,6 +221,8 @@ async function main(argv: string[]): Promise<void> {
       loopGuard,
     };
     const orchestrator = createSessionWorkers(deps);
+    // 权威链审计 ②、③：续接的主会话从会话记录找回上次运行的 worker，补递没递出的完成通知（有通知队列时）
+    let notices: WorkerNotices | undefined;
     // 决策 264：主会话注册了 spawn_worker 时绑定编排器；agent 派出的个数按一次运行（每条输入）计
     if (opened.spawnWorker !== undefined && parentSessionId === undefined) {
       let runKey: string | undefined;
@@ -239,6 +243,7 @@ async function main(argv: string[]): Promise<void> {
           shellHolder.current?.render();
         },
       });
+      notices = bound.notices;
       // 决策 309–314：脚本编排的运行器——汇总与 worker 完成通知同一条队列；收回按写操作请示（放手模式或已放权即直接做）
       const scriptSlot = opened.scriptOrchestration;
       if (scriptSlot !== undefined) {
@@ -273,6 +278,15 @@ async function main(argv: string[]): Promise<void> {
           gate: scriptSlot.gate,
         });
       }
+    }
+    if (opened.restored !== undefined && parentSessionId === undefined) {
+      restoreSessionWorkers({
+        orchestrator,
+        governanceRoot: workspaceRoot,
+        sessionId: bundle.adapter.sessionId,
+        ...(notices !== undefined ? { notices } : {}),
+        ...(opened.spawnWorker !== undefined ? { settings: opened.spawnWorker.settings } : {}),
+      });
     }
     return {
       // 人用 /spawn 派出的：收尾显示在消息区，不另发完成通知

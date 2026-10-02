@@ -138,7 +138,11 @@ const spawned = (name: string, role = "explorer") =>
 // 决策 279：每段返回文字末尾另起一行写起点与取用方式（提交号随仓库变）；比对定稿文字时去掉这一行，格式另在一处专门核对
 const START_LINE =
   /\n起点：(提交|快照) [0-9a-f]{12}（(派出时没有未提交的文件|含派出时 \d+ 个未提交的文件)）；要把它的改动叠进你的工作目录，调用 take_worker（worker=[a-z0-9-]+）。/g;
-const withoutStart = (text: string): string => text.replace(START_LINE, "");
+// 通知末行的 worker 会话号（续接时据它判定通知是否已递出）同样随会话变，格式另在 spawn-worker-tool.test 核对
+const MARKER_LINE = /\n（worker 会话 sess_[0-9A-Z]+）/g;
+const withoutMarker = (text: string): string => text.replace(MARKER_LINE, "");
+const withoutStart = (text: string): string =>
+  text.replace(START_LINE, "").replace(MARKER_LINE, "");
 
 const readLoop = {
   replies: [
@@ -427,7 +431,9 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，通知
     text.includes("explorer-1（explorer）已完成")
   );
   assert.equal(
-    notice?.split("\n").at(-1),
+    withoutMarker(notice ?? "")
+      .split("\n")
+      .at(-1),
     `起点：提交 ${git(root, ["rev-parse", "HEAD"]).slice(0, 12)}（派出时没有未提交的文件）；要把它的改动叠进你的工作目录，调用 take_worker（worker=explorer-1）。`
   );
 });

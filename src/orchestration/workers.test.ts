@@ -432,3 +432,108 @@ test("起点的 release：建好工作区后调一次；建工作区失败也调
   assert.equal((await throwing.orchestrator.awaitResult(other)).status, "completed");
   assert.equal(throwing.orchestrator.errors().length, 1);
 });
+
+// 续接时登记的上次运行的 worker（权威链审计 ②）：一个已收尾、一个中断
+function previousWorkers(parentSessionId: SessionId) {
+  const workspace = (name: string): WorkerWorkspace => ({
+    kind: "git-worktree",
+    path: `/virtual/prev-${name}`,
+    branch: `pigeon/${name}`,
+  });
+  const settledId = newSessionId();
+  const interruptedId = newSessionId();
+  const base = { role: "implementer" as const, turns: 2, startedAt: 1, depth: 1, parentSessionId };
+  return {
+    settledId,
+    interruptedId,
+    statuses: [
+      {
+        ...base,
+        sessionId: settledId,
+        name: "implementer-1",
+        state: "completed" as const,
+        workspace: workspace("implementer-1"),
+        previousRun: "settled" as const,
+        outcome: {
+          sessionId: settledId,
+          name: "implementer-1",
+          role: "implementer" as const,
+          status: "completed" as const,
+          turns: 2,
+          workspace: workspace("implementer-1"),
+        },
+      },
+      {
+        ...base,
+        sessionId: interruptedId,
+        name: "half",
+        state: "aborted" as const,
+        workspace: workspace("half"),
+        previousRun: "interrupted" as const,
+        outcome: {
+          sessionId: interruptedId,
+          name: "half",
+          role: "implementer" as const,
+          status: "aborted" as const,
+          turns: 0,
+          workspace: workspace("half"),
+        },
+      },
+    ],
+  };
+}
+
+test("上次运行的 worker：查询与等结果照常；取消、发消息、补批续做给出明确说明，不报找不到", async () => {
+  const { orchestrator } = setup();
+  const prev = previousWorkers(newSessionId());
+  orchestrator.restorePrevious(prev.statuses);
+  assert.deepEqual(
+    orchestrator.status().map((status) => [status.name, status.state, status.previousRun]),
+    [
+      ["implementer-1", "completed", "settled"],
+      ["half", "aborted", "interrupted"],
+    ]
+  );
+  assert.equal((await orchestrator.awaitResult(prev.settledId)).status, "completed");
+  const waited = await orchestrator.wait([prev.settledId, prev.interruptedId], {
+    mode: "all",
+    timeoutMs: 1000,
+  });
+  assert.deepEqual(
+    waited.settled.map((outcome) => outcome.name),
+    ["implementer-1", "half"]
+  );
+  assert.equal(waited.timedOut, false);
+  await assert.rejects(orchestrator.cancel(prev.interruptedId), (error: unknown) => {
+    assert.ok(error instanceof WorkerSpawnError);
+    assert.equal(
+      error.message,
+      "worker half 是上次运行派出的，随上次进程退出而中断，不在运行，无需取消。"
+    );
+    return true;
+  });
+  assert.throws(
+    () => orchestrator.send(prev.settledId, "接着"),
+    /worker implementer-1 是上次运行派出的，已在上次运行中收尾，不在运行，收不到消息。$/
+  );
+  assert.throws(
+    () => orchestrator.resume(prev.settledId, { approve: true }),
+    /续接后不能对它补批续做，要接着做请另派一个 worker。/
+  );
+});
+
+test("上次运行的 worker 不计入同时在跑的上限，新派的不与它们重名", async () => {
+  const { orchestrator } = setup({ maxConcurrent: 1, behavior: "hang" });
+  const prev = previousWorkers(newSessionId());
+  orchestrator.restorePrevious(prev.statuses);
+  const id = orchestrator.spawn({ role: "implementer", task: "新活" });
+  const fresh = orchestrator.status().find((status) => status.sessionId === id);
+  assert.equal(fresh?.state, "running", "上限 1 时新派的仍直接开跑（重建的记录不占空位）");
+  assert.equal(fresh?.name, "implementer-2", "名字跳过上次运行的 implementer-1");
+  assert.throws(
+    () => orchestrator.spawn({ role: "implementer", task: "同名", name: "half" }),
+    /worker 名已被占用：half/
+  );
+  await orchestrator.cancel(id);
+  await orchestrator.awaitResult(id);
+});

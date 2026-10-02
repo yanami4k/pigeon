@@ -392,7 +392,12 @@ export function workerNoticeText(
   > = DEFAULT_SPAWN_WORKER_SETTINGS
 ): string {
   const text = workerOutcomeText(outcome, budgetExhausted, settings);
-  return outcome.label !== undefined ? `标签 ${outcome.label}：${text}` : text;
+  return `${outcome.label !== undefined ? `标签 ${outcome.label}：${text}` : text}\n${workerNoticeMarker(outcome.sessionId)}`;
+}
+
+// 完成通知里可识别的 worker 会话号（权威链审计 ③）：续接时据主分支上的使用者消息里有没有它判定通知是否已递出
+export function workerNoticeMarker(sessionId: string): string {
+  return `（worker 会话 ${sessionId}）`;
 }
 
 function reply(text: string, details: SpawnWorkerDetails): PigeonToolResult<SpawnWorkerDetails> {
@@ -539,7 +544,8 @@ async function spawnAttempts(
             SPAWN_WORKER_TEXTS.attempt(index + 1) +
             (host.notices?.claimedInGroup(outcome.sessionId) === true
               ? SPAWN_WORKER_TEXTS.attemptClaimed(outcome.name)
-              : workerOutcomeText(outcome, host.budget.exhausted, settings))
+              : workerOutcomeText(outcome, host.budget.exhausted, settings)) +
+            `\n${workerNoticeMarker(outcome.sessionId)}`
         )
         .join("\n\n");
       host.notices?.postGroup(spawnedIds, label !== undefined ? `标签 ${label}：${text}` : text);
@@ -547,7 +553,8 @@ async function spawnAttempts(
     (error: unknown) => {
       host.notices?.postGroup(
         spawnedIds,
-        `多份尝试收尾异常：${error instanceof Error ? error.message : String(error)}`
+        `多份尝试收尾异常：${error instanceof Error ? error.message : String(error)}\n` +
+          spawnedIds.map(workerNoticeMarker).join("")
       );
     }
   );

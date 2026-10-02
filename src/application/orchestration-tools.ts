@@ -5,7 +5,12 @@
 // 同一结果不在对话里出现两遍（297）：等待期间结束的 worker 不另发通知；已结束、通知还没递出的撤回通知、交回完整结果；
 // 通知已递出的只交回一句。
 import { type Static, Type } from "typebox";
-import type { WaitResult, WorkerOutcome, WorkerStatus } from "../orchestration/workers.ts";
+import {
+  previousRunWorkerText,
+  type WaitResult,
+  type WorkerOutcome,
+  type WorkerStatus,
+} from "../orchestration/workers.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
@@ -19,7 +24,7 @@ import {
   WAIT_WORKERS_TOOL,
   WORKER_STATUS_TOOL,
 } from "./spawn-worker-tool.ts";
-import { workerStateLabel } from "./workers-commands.ts";
+import { previousRunNote, workerStateLabel } from "./workers-commands.ts";
 
 export { MESSAGE_WORKER_TOOL, STOP_WORKER_TOOL, WAIT_WORKERS_TOOL, WORKER_STATUS_TOOL };
 
@@ -176,7 +181,7 @@ export function statusLine(status: WorkerStatus, now: number): string {
     return `${head}。`;
   }
   const summary = status.outcome.result?.summary ?? "";
-  return `${head}。结果摘要：${summary.length > 200 ? `${summary.slice(0, 200)}…` : summary}`;
+  return `${head}${previousRunNote(status)}。结果摘要：${summary.length > 200 ? `${summary.slice(0, 200)}…` : summary}`;
 }
 
 // ---- 执行 ----
@@ -353,6 +358,12 @@ export function createMessageWorkerTool(
           delivered: false,
         });
       }
+      if (worker.previousRun !== undefined) {
+        return reply(previousRunWorkerText(worker, "send"), {
+          worker: worker.name,
+          delivered: false,
+        });
+      }
       if (worker.state !== "running" && worker.state !== "queued") {
         return reply(ORCHESTRATION_TEXTS.messageSettled(worker.name), {
           worker: worker.name,
@@ -394,6 +405,12 @@ export function createStopWorkerTool(
       if (worker === undefined) {
         return reply(ORCHESTRATION_TEXTS.unknown(params.worker), {
           worker: params.worker,
+          stopped: false,
+        });
+      }
+      if (worker.previousRun !== undefined) {
+        return reply(previousRunWorkerText(worker, "cancel"), {
+          worker: worker.name,
           stopped: false,
         });
       }

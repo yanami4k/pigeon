@@ -363,6 +363,28 @@ export interface WorkerStatus {
   script?: ScriptSpawnTag;
   // 已收尾的在场：结构化结果
   outcome?: WorkerOutcome;
+  // 续接时从会话记录重建的、上次运行派出的 worker（权威链审计 ②）：settled 为上次运行中已收尾，
+  // interrupted 为只有派出、没有收尾（随上次进程退出而中断）。只供查询与取用，不在本进程运行、不占并发额度
+  previousRun?: "settled" | "interrupted";
+}
+
+// 对上次运行的 worker 发取消、发消息、补批续做时的说明（不报"找不到"）
+export function previousRunWorkerText(
+  status: Pick<WorkerStatus, "name" | "previousRun">,
+  action: "cancel" | "send" | "resume"
+): string {
+  const base =
+    status.previousRun === "interrupted"
+      ? `worker ${status.name} 是上次运行派出的，随上次进程退出而中断`
+      : `worker ${status.name} 是上次运行派出的，已在上次运行中收尾`;
+  switch (action) {
+    case "cancel":
+      return `${base}，不在运行，无需取消。`;
+    case "send":
+      return `${base}，不在运行，收不到消息。`;
+    case "resume":
+      return `${base}；续接后不能对它补批续做，要接着做请另派一个 worker。`;
+  }
 }
 
 // 决策 303：搁下的请示——补批续做时据此放行同一个调用
@@ -489,6 +511,8 @@ export class WorkerOrchestrator {
   readonly #maxConcurrent: number;
   readonly #maxDepth: number;
   readonly #workers = new Map<SessionId, WorkerEntry>();
+  // 续接时从会话记录重建的上次运行的 worker（只读：不运行、不占空位）
+  readonly #previous = new Map<SessionId, WorkerStatus>();
   // 等空位的：按先后开跑（排队的 worker 与借出空位后要收回的等待方）
   readonly #queue: Array<{ key: SessionId; start: () => void }> = [];
   #running = 0;
@@ -582,7 +606,9 @@ export class WorkerOrchestrator {
     }
     const name = request.name ?? this.#nextName(role);
     assertWorkerName(name);
-    if ([...this.#workers.values()].some((worker) => worker.name === name)) {
+    if (
+      [...this.#workers.values(), ...this.#previous.values()].some((worker) => worker.name === name)
+    ) {
       throw new WorkerSpawnError(`worker 名已被占用：${name}`);
     }
     const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
@@ -724,8 +750,18 @@ export class WorkerOrchestrator {
     return sessionId;
   }
 
+  // 续接时登记上次运行的 worker（权威链审计 ②）：查询状态、等结果与取用照常可用；不运行、不计入同时在跑的上限，
+  // 取消、发消息、补批续做给出明确说明。与本进程派出的同号即不登记
+  restorePrevious(workers: readonly WorkerStatus[]): void {
+    for (const worker of workers) {
+      if (worker.previousRun === undefined || this.#workers.has(worker.sessionId)) continue;
+      this.#previous.set(worker.sessionId, worker);
+    }
+  }
+
   // 取消走 interrupt（abort → waitForIdle）；排队中的直接出队、不开跑；已收尾的 worker 无操作
   async cancel(sessionId: SessionId): Promise<void> {
+    this.#rejectPrevious(sessionId, "cancel");
     const entry = this.#require(sessionId);
     if (entry.state !== "running" && entry.state !== "queued") {
       return;
@@ -744,10 +780,15 @@ export class WorkerOrchestrator {
   }
 
   status(): WorkerStatus[] {
-    return [...this.#workers.values()].map((entry) => this.#statusOf(entry));
+    return [
+      ...this.#previous.values(),
+      ...[...this.#workers.values()].map((entry) => this.#statusOf(entry)),
+    ];
   }
 
   awaitResult(sessionId: SessionId): Promise<WorkerOutcome> {
+    const previous = this.#previous.get(sessionId)?.outcome;
+    if (previous !== undefined) return Promise.resolve(previous);
     return this.#require(sessionId).done;
   }
 
@@ -757,6 +798,27 @@ export class WorkerOrchestrator {
     sessionIds: readonly SessionId[],
     options: { mode: "any" | "all"; timeoutMs: number; signal?: AbortSignal; waiter?: SessionId }
   ): Promise<WaitResult> {
+    // 上次运行的 worker 已是定局：结果立即交回，其余照常等
+    const previous = sessionIds.flatMap((id) => {
+      const outcome = this.#previous.get(id)?.outcome;
+      return outcome !== undefined ? [outcome] : [];
+    });
+    if (previous.length > 0) {
+      const live = sessionIds.filter((id) => !this.#previous.has(id));
+      const rest =
+        options.mode === "any" || live.length === 0
+          ? {
+              settled: [],
+              pending: live.map((id) => this.#statusOf(this.#require(id))),
+              timedOut: false,
+            }
+          : await this.wait(live, options);
+      return {
+        settled: [...previous, ...rest.settled],
+        pending: rest.pending,
+        timedOut: rest.timedOut,
+      };
+    }
     const entries = sessionIds.map((id) => this.#require(id));
     const settledNow = entries.filter((entry) => entry.outcome !== undefined);
     const alreadyDone =
@@ -817,6 +879,7 @@ export class WorkerOrchestrator {
   // 交回是否送达：进了它的下一轮为 delivered；它在那之前结束（最后一轮之后才递到、正在收尾）为 undelivered，没递出的撤回，
   // 不静默丢掉（验收修订）。运行面不支持查询送达的，递出即按 delivered
   send(sessionId: SessionId, text: string): Promise<"delivered" | "undelivered"> {
+    this.#rejectPrevious(sessionId, "send");
     const entry = this.#require(sessionId);
     if (entry.state !== "running" && entry.state !== "queued") {
       throw new WorkerSpawnError(`worker ${entry.name} 已收尾，收不到消息`);
@@ -862,6 +925,7 @@ export class WorkerOrchestrator {
   // 决策 303：补批续做——已收尾的 worker 回到同一个会话与工作树接着做。approve 为真且它是因请示搁下的，放行它重新发起的
   // 同一个调用（只放行一次）；message 为续做时交给它的话（缺省按是否补批给出）。重新占额度，收尾照常发事件、写收尾记录
   resume(sessionId: SessionId, options: { approve?: boolean; message?: string } = {}): void {
+    this.#rejectPrevious(sessionId, "resume");
     const entry = this.#require(sessionId);
     if (entry.outcome === undefined) {
       throw new WorkerSpawnError(`worker ${entry.name} 还没收尾，不需要续做`);
@@ -1408,6 +1472,13 @@ export class WorkerOrchestrator {
     }
   }
 
+  #rejectPrevious(sessionId: SessionId, action: "cancel" | "send" | "resume"): void {
+    const previous = this.#previous.get(sessionId);
+    if (previous !== undefined) {
+      throw new WorkerSpawnError(previousRunWorkerText(previous, action));
+    }
+  }
+
   #require(sessionId: SessionId): WorkerEntry {
     const entry = this.#workers.get(sessionId);
     if (entry === undefined) {
@@ -1417,7 +1488,10 @@ export class WorkerOrchestrator {
   }
 
   #nextName(role: WorkerRole): string {
-    const taken = new Set([...this.#workers.values()].map((worker) => worker.name));
+    // 上次运行的 worker 的名字同样占着（取用与查询按名字找）
+    const taken = new Set(
+      [...this.#workers.values(), ...this.#previous.values()].map((worker) => worker.name)
+    );
     let index = 1;
     while (taken.has(`${role}-${index}`)) {
       index += 1;

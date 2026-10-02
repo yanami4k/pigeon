@@ -71,6 +71,18 @@ Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时�
 
 快照、checkpoint 与 worker 改动叠加只排除 `.pigeon/state` 与 `.pigeon/settings.local.json`；仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills` 是项目内容，照常进快照与叠加。列目录与命令的文件变化报告仍不列整个 `.pigeon`。
 
+## worker 与续接
+
+worker 的派出与收尾成对记在派出它的会话里（缺收尾即进程中途退出）；工作树在 `.pigeon/state/worktrees/` 下，不自动清理。终端界面续接主会话（`pigeon --continue`、`pigeon --resume <id>`、`/resume`，以及 `/reload` 在同一会话上重建运行面）时，从会话记录找回上次运行的 worker：
+
+- 上次运行中已收尾的：`worker_status`、`/workers` 照常列出，标明"来自上次运行"；`take_worker` 与 `/take` 照常取用（工作树已清理时如实说明）；`wait_workers` 立即交回其结果。
+- 只有派出、没有收尾的：标为随进程退出而中断，不可取用；它的分支与工作树留在原处。
+- 对上次运行的 worker 发取消（`stop_worker`、`/cancel`、`/stop`）、发消息（`message_worker`、在 worker 会话里输入）、补批续做（`/approve`）：给出明确说明，不报"找不到"；要接着做请另派一个 worker。
+- 找回的记录不在本进程运行，不计入同时在跑的上限；新派的 worker 不与它们重名。
+- 模型派出的 worker 的完成通知末行带 worker 会话号。上次运行中已收尾、完成通知却没有出现在主分支的使用者消息里（进程在通知递出之前退出）、也没有经 `wait_workers` 交回过结果的，续接时补递一条（开头注明是续接后补递），随下一次运行交给模型；已递出的不重复。
+
+`pigeon --line` 与 `pigeon resume` 不派 worker，没有要找回的记录。
+
 ## 记忆与人写的说明
 
 学到的记忆分两层，一行一条，整份在会话开始时推入系统提示并冻结（会话中途改文件下个会话才生效）：

@@ -70,6 +70,7 @@ import {
 import { type FamilyNode, loadSessionFamily } from "../application/session-family.ts";
 import type { TaskItem } from "../application/task-list-tool.ts";
 import {
+  previousRunWorkerText,
   renderWorkerOutcome,
   resumeApprovalText,
   type WorkerActivity,
@@ -1644,6 +1645,11 @@ export class PigeonTuiShell
     const workers = this.current.workers;
     const status = this.workerStatuses().find((worker) => worker.sessionId === sessionId);
     if (workers === undefined || status === undefined) return;
+    // 续接后找回的上次运行的 worker：不在本进程运行
+    if (status.previousRun !== undefined) {
+      write(previousRunWorkerText(status, "cancel"));
+      return;
+    }
     if (!isActiveWorker(status)) {
       write(`worker ${status.name} 已收尾（${workerStateWord(status)}），无需停止`);
       return;
@@ -1685,6 +1691,10 @@ export class PigeonTuiShell
       if (name === "stop") {
         this.stopWorker(sessionId, (line) => flow.addSystem(line));
       } else if (name === "approve") {
+        if (status.previousRun !== undefined) {
+          flow.addSystem(previousRunWorkerText(status, "resume"));
+          return;
+        }
         this.approveWorker(status, value.trim().slice("/approve".length).trim(), flow);
       } else if (name === "agents") {
         this.toggleTree();
@@ -1697,6 +1707,12 @@ export class PigeonTuiShell
       } else if (name === "quit") {
         this.requestExit();
       }
+      return;
+    }
+    // 续接后找回的上次运行的 worker：只读，话留在输入框
+    if (status.previousRun !== undefined) {
+      this.input.setText(value);
+      flow.addSystem(previousRunWorkerText(status, "send"));
       return;
     }
     // 已收尾的 worker 会话只读：发话不续做，话留在输入框（停在等审批的用 /approve 补批续做）

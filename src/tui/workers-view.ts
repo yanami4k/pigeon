@@ -3,6 +3,8 @@
 // 决策 301：原先输入框上方的 worker 状态行由编排面板（worker-panel.ts）取代；/workers 的每行与面板同一排版（列全部 worker）。
 import {
   parseSpawnCommand,
+  previousRunNote,
+  previousRunWorkerText,
   renderAttemptGroupOutcome,
   renderWorkerOutcome,
   resolveWorkerRef,
@@ -128,6 +130,11 @@ export function handleCancelCommand(
     return;
   }
   const target = resolveWorkerRef(workers.status(), ref);
+  // 续接后找回的上次运行的 worker：不在本进程运行
+  if (target.previousRun !== undefined) {
+    host.addSystem(previousRunWorkerText(target, "cancel"));
+    return;
+  }
   if (target.state !== "running") {
     host.addSystem(`worker ${target.name} 已收尾（${workerStateLabel(target.state)}），无需取消`);
     return;
@@ -192,7 +199,7 @@ export function renderWorkersTable(
     `workers (${statuses.length}):`,
     ...statuses.flatMap((status) => [
       `  ${workerRowText(status, tracker, now, columns)}`,
-      `    ${status.role} | ${status.branch !== undefined ? `branch ${status.branch}` : "no workspace"} | session ${status.sessionId}`,
+      `    ${status.role} | ${status.branch !== undefined ? `branch ${status.branch}` : "no workspace"} | session ${status.sessionId}${previousRunNote(status)}`,
     ]),
   ].join("\n");
 }

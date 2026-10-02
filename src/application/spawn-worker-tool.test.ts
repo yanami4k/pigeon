@@ -512,15 +512,21 @@ test("完成通知：worker 结束时一条带标签的通知递给派出方并�
   });
   await call(h, { role: "implementer", task: "改 a", name: "fix-a", label: "T1" });
   await until(() => h.target.pendingNotices() === 1);
+  const fixA = h.orchestrator.status().find((worker) => worker.name === "fix-a")?.sessionId;
+  // 末行为可识别的 worker 会话号（续接时据它判定通知是否已递出）
   assert.equal(
     h.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}标签 T1：worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（2）：a.ts、b.ts。摘要：改好了`
+    `${WORKER_NOTICE_PREFIX}标签 T1：worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（2）：a.ts、b.ts。摘要：改好了\n（worker 会话 ${fixA}）`
   );
   assert.equal(h.wakes, 1);
   await call(h, { role: "explorer", task: "看看", name: "long" });
   await until(() => h.target.pendingNotices() === 2);
   const id = h.orchestrator.status().find((worker) => worker.name === "long")?.sessionId;
-  assert.ok(h.target.queue[1]?.text.endsWith(`（摘要已截断，全文在 worker 会话 ${id} 里）`));
+  assert.ok(
+    h.target.queue[1]?.text.endsWith(
+      `（摘要已截断，全文在 worker 会话 ${id} 里）\n（worker 会话 ${id}）`
+    )
+  );
   // 人派的（human）与程序派的（program）不发通知
   h.orchestrator.spawn({ role: "explorer", task: "人派", name: "by-human", origin: "human" });
   h.orchestrator.spawn({ role: "explorer", task: "程序派", name: "by-program" });
@@ -538,7 +544,7 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
   await until(() => turns.target.pendingNotices() === 1);
   assert.equal(
     turns.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}worker w（explorer）撞上轮数上限，没有做完。分支：pigeon/w。已改动的文件（1）：x.ts。摘要：做了一半`
+    `${WORKER_NOTICE_PREFIX}worker w（explorer）撞上轮数上限，没有做完。分支：pigeon/w。已改动的文件（1）：x.ts。摘要：做了一半\n（worker 会话 ${turns.orchestrator.status()[0]?.sessionId}）`
   );
   const clock = harness({ scriptFor: () => ({ behavior: "hang" }), wallClockMs: 20 });
   await call(clock, { role: "tester", task: "跑", name: "t" });
@@ -564,7 +570,7 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
   await until(() => cancelled.target.pendingNotices() === 1);
   assert.equal(
     cancelled.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}worker slow（implementer）被取消。分支 pigeon/slow 上可能有部分改动。`
+    `${WORKER_NOTICE_PREFIX}worker slow（implementer）被取消。分支 pigeon/slow 上可能有部分改动。\n（worker 会话 ${cancelled.orchestrator.status()[0]?.sessionId}）`
   );
   assert.equal(
     textOf(await cancelled.stop.execute("s", { worker: "slow" })),
@@ -814,9 +820,9 @@ test("多份尝试：派出即返回名单，后台跑完交回各份汇总一�
     WORKER_NOTICE_PREFIX +
       "标签 T2：" +
       [
-        "第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份\n钩子输出：\n  还差错误路径用例",
-        "第 2 份：worker implementer-2 的结果已由 wait_workers 交回。",
-        "第 3 份：worker implementer-3（implementer）撞上轮数上限，没有做完。分支：pigeon/implementer-3。已改动的文件（1）：a.ts。摘要：第 3 份",
+        `第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份\n钩子输出：\n  还差错误路径用例\n（worker 会话 ${ids[0]}）`,
+        `第 2 份：worker implementer-2 的结果已由 wait_workers 交回。\n（worker 会话 ${ids[1]}）`,
+        `第 3 份：worker implementer-3（implementer）撞上轮数上限，没有做完。分支：pigeon/implementer-3。已改动的文件（1）：a.ts。摘要：第 3 份\n（worker 会话 ${ids[2]}）`,
       ].join("\n\n")
   );
   assert.equal(h.budget.spawned(), 3);
