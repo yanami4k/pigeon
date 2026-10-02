@@ -2,7 +2,7 @@
 // 超时杀掉整棵进程树（孙进程不留活口）、PIGEON_PROJECT_DIR 透传、shell 启动计划（Windows cmd.exe / POSIX /bin/sh）、
 // 经执行端在容器里执行（假执行端断言计划与输出映射）。
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -159,7 +159,7 @@ test("shell 启动计划：Windows 经 cmd.exe /d /s /c 去掉首尾一对引号
   assert.deepEqual(posix, { program: "/bin/sh", args: ["-c", "npm test"], verbatim: false });
 });
 
-test("经执行端执行：/bin/sh -c 包一层容器内 timeout（客户端放宽 10 秒兜底），stdin 透传、PIGEON_PROJECT_DIR 取容器内根；timeout 的 124 记为超时", async () => {
+test("经执行端执行：/bin/sh -c 包一层容器内 timeout（先试 -k、不认退回不带 -k），客户端兜底在 KILL 宽限之后，stdin 透传、PIGEON_PROJECT_DIR 取容器内根；timeout 的 124 记为超时", async () => {
   const seen: Array<{
     program: string;
     args: string[];
@@ -175,7 +175,8 @@ test("经执行端执行：/bin/sh -c 包一层容器内 timeout（客户端放�
       options: { env: NodeJS.ProcessEnv; stdin?: string | undefined; timeoutMs: number }
     ): Promise<HostExecResult> {
       if (plan.args[1]?.includes("SLOW")) {
-        // 模拟容器内 timeout 到期：退出码 124
+        // 模拟容器内 timeout 到期：用满限时后以 124 退出
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         return {
           spawned: true,
           exitCode: 124,
@@ -220,13 +221,17 @@ test("经执行端执行：/bin/sh -c 包一层容器内 timeout（客户端放�
   const wrappedScript = call?.args[1] ?? "";
   assert.match(
     wrappedScript,
-    /^if command -v timeout .+; then timeout -k 5 1 sh -c 'gate\.sh'; else sh -c 'gate\.sh'; fi$/,
+    /^if timeout -k 1 1 true .+; then timeout -k 1 1 sh -c 'gate\.sh'; elif timeout 1 true .+; then timeout 1 sh -c 'gate\.sh'; else sh -c 'gate\.sh'; fi$/,
     wrappedScript
   );
   // 宿主环境不渗进容器：只有 PIGEON_PROJECT_DIR，取容器内的工作区根
   assert.deepEqual(call?.env, { PIGEON_PROJECT_DIR: "/testbed" });
   assert.equal(call?.stdin, '{"hook_event_name":"Stop"}\n');
-  assert.equal(call?.timeoutMs, 11_000, "客户端兜底放宽 10 秒");
+  assert.equal(
+    call?.timeoutMs,
+    2_000,
+    "短预算：客户端兜底在容器内 TERM（1 秒）与 KILL 宽限（1 秒）之后"
+  );
   assert.equal(outcome.exitCode, 2);
   assert.equal(outcome.stdout, "json-out");
   assert.equal(outcome.stderr, "oops");
@@ -239,6 +244,107 @@ test("经执行端执行：/bin/sh -c 包一层容器内 timeout（客户端放�
     timeoutMs: 1000,
   });
   assert.equal(timed.timedOut, true);
+});
+
+function stubHost(
+  respond: (plan: { program: string; args: string[] }) => Promise<Partial<HostExecResult>>,
+  seen: Array<{ timeoutMs: number }> = []
+): WorkspaceHost {
+  return {
+    platform: "linux",
+    root: "/testbed",
+    async exec(plan: { program: string; args: string[] }, options: { timeoutMs: number }) {
+      seen.push({ timeoutMs: options.timeoutMs });
+      return {
+        spawned: true,
+        exitCode: 0,
+        timedOut: false,
+        outputBytes: 0,
+        outputHash: "0".repeat(64),
+        output: "",
+        stdout: "",
+        stderr: "",
+        ...(await respond(plan)),
+      };
+    },
+  } as unknown as WorkspaceHost;
+}
+
+test("经执行端执行：容器内 timeout 的 124、137、143 用满限时记为超时，未到限时的同值退出码照常记为钩子出错", async () => {
+  for (const code of [124, 137, 143]) {
+    const host = stubHost(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      return { exitCode: code };
+    });
+    const outcome = await runHookCommandViaHost(host, {
+      command: "x",
+      cwd: "/testbed",
+      platform: "linux",
+      stdin: "{}\n",
+      timeoutMs: 1000,
+    });
+    assert.equal(outcome.timedOut, true, `退出码 ${code}`);
+  }
+  const quick = await runHookCommandViaHost(
+    stubHost(async () => ({ exitCode: 137 })),
+    { command: "x", cwd: "/testbed", platform: "linux", stdin: "{}\n", timeoutMs: 5000 }
+  );
+  assert.equal(quick.timedOut, false, "钩子自己很快以 137 退出：不是超时");
+});
+
+test("经执行端执行：客户端兜底与预算相称——SessionEnd 的 1.5 秒为 3 秒，30 秒的预算为 40 秒", async () => {
+  const seen: Array<{ timeoutMs: number }> = [];
+  const host = stubHost(async () => ({}), seen);
+  for (const timeoutMs of [1500, 30_000]) {
+    await runHookCommandViaHost(host, {
+      command: "x",
+      cwd: "/testbed",
+      platform: "linux",
+      stdin: "{}\n",
+      timeoutMs,
+    });
+  }
+  assert.deepEqual(
+    seen.map((call) => call.timeoutMs),
+    [3_000, 40_000]
+  );
+});
+
+// 包裹脚本在真 shell 里跑（本机 /bin/sh 代替容器）：PATH 前置一个假 timeout，模拟不认 -k 的旧 busybox 与没有 timeout 的镜像
+test("包裹脚本：timeout 不认 -k 时退回不带 -k 的写法，没有 timeout 时直接执行——钩子都照常跑", {
+  skip: process.platform === "win32" ? "Windows 上没有 /bin/sh" : false,
+}, async () => {
+  const run = async (fakeTimeout: string): Promise<string> => {
+    const dir = scriptDir();
+    writeFileSync(join(dir, "timeout"), fakeTimeout, { mode: 0o755 });
+    const host = stubHost(async (plan) => {
+      const result = spawnSync(plan.program, plan.args, {
+        env: { PATH: `${dir}:${process.env.PATH ?? ""}` },
+        input: "{}\n",
+        encoding: "utf8",
+      });
+      return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
+    });
+    const outcome = await runHookCommandViaHost(host, {
+      command: "printf 'ran:%s' \"$(cat)\"",
+      cwd: "/testbed",
+      platform: "linux",
+      stdin: "{}\n",
+      timeoutMs: 1000,
+    });
+    assert.equal(outcome.exitCode, 0, outcome.stderr);
+    return outcome.stdout;
+  };
+  // 旧 busybox：见到 -k 即报用法错误；不带 -k 时丢掉限时参数照常执行
+  const noKill = [
+    "#!/bin/sh",
+    'if [ "$1" = "-k" ]; then echo "timeout: unrecognized option -k" >&2; exit 1; fi',
+    "shift",
+    'exec "$@"',
+  ].join("\n");
+  assert.equal(await run(noKill), "ran:{}");
+  // 没有 timeout：两种写法都起不来
+  assert.equal(await run("#!/bin/sh\nexit 127\n"), "ran:{}");
 });
 
 // ---- 真容器（决策 324：沙箱会话的钩子在容器里执行；没有 Docker 或镜像时跳过，与沙箱用例同一约定）----

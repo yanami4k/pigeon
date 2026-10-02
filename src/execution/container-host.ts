@@ -502,10 +502,19 @@ const HELPER_CLIENT_GRACE_MS = 3_000;
 // 探测本身的限时（探测不经 timeout）
 const PROBE_TIMEOUT_MS = 30_000;
 const TIMEOUT_EXIT_CODES: readonly number[] = [124, 137, 143];
-// 探测脚本（测试据它认出探测调用）
-export const TIMEOUT_PROBE_SCRIPT = "command -v timeout";
-// 容器 → timeout 的绝对路径（没有为 undefined）；键为 docker 调用前缀与容器名，容器起停时作废
-const timeoutCommands = new Map<string, string | undefined>();
+// 探测脚本（测试据它认出探测调用）：找到 timeout 后再试它认不认 -k（busybox 1.35 之前的 timeout 不认）——
+// 认即输出路径与 k，不认而能以"秒数 命令"的写法限时即只输出路径，两样都不行按没有 timeout 处理
+export const TIMEOUT_PROBE_SCRIPT =
+  "t=$(command -v timeout) || exit 1; " +
+  'if "$t" -k 1 1 true >/dev/null 2>&1; then printf \'%s\\nk\\n\' "$t"; ' +
+  'elif "$t" 1 true >/dev/null 2>&1; then printf \'%s\\n\' "$t"; else exit 1; fi';
+// 容器里可用的 timeout：绝对路径与是否认 -k
+interface ContainerTimeout {
+  path: string;
+  killAfter: boolean;
+}
+// 容器 → 可用的 timeout（没有为 undefined）；键为 docker 调用前缀与容器名，容器起停时作废
+const timeoutCommands = new Map<string, ContainerTimeout | undefined>();
 
 function probeKey(docker: readonly string[], container: string): string {
   return JSON.stringify([docker, container]);
@@ -515,11 +524,11 @@ export function forgetContainerProbe(docker: readonly string[], container: strin
   timeoutCommands.delete(probeKey(docker, container));
 }
 
-// 容器里 timeout 的绝对路径：以固定 PATH 从系统目录解析（不经 agent 能改指的链接）；探测不成（容器不可用等）不缓存
+// 容器里 timeout 的绝对路径与是否认 -k：以固定 PATH 从系统目录解析（不经 agent 能改指的链接）；探测不成（容器不可用等）不缓存
 async function containerTimeoutCommand(
   docker: readonly string[],
   container: string
-): Promise<string | undefined> {
+): Promise<ContainerTimeout | undefined> {
   const key = probeKey(docker, container);
   if (timeoutCommands.has(key)) {
     return timeoutCommands.get(key);
@@ -529,8 +538,9 @@ async function containerTimeoutCommand(
     ["exec", container, ...trustedShell(TIMEOUT_PROBE_SCRIPT)],
     PROBE_TIMEOUT_MS
   );
-  const found = result.stdout.toString("utf8").trim();
-  if (result.exitCode === 0 && found.startsWith("/")) {
+  const [path = "", mode] = result.stdout.toString("utf8").trim().split("\n");
+  if (result.exitCode === 0 && path.startsWith("/")) {
+    const found = { path, killAfter: mode === "k" };
     timeoutCommands.set(key, found);
     return found;
   }
@@ -567,15 +577,17 @@ export async function containerHelperExec(input: {
 }): Promise<HelperResult> {
   const timeoutCommand = await containerTimeoutCommand(input.docker, input.container);
   const seconds = Math.max(1, Math.ceil(input.timeoutMs / 1000));
-  // 经 /bin/sh 起 timeout（$0 为其绝对路径）：命令自己的环境与 PATH 照旧
+  // 经 /bin/sh 起 timeout（$0 为其绝对路径）：命令自己的环境与 PATH 照旧；不认 -k 的 timeout 只限时、不补 KILL
   const command =
     timeoutCommand === undefined
       ? input.command
       : [
           "/bin/sh",
           "-c",
-          `exec "$0" -k ${HELPER_KILL_AFTER_S} ${seconds} "$@"`,
-          timeoutCommand,
+          timeoutCommand.killAfter
+            ? `exec "$0" -k ${HELPER_KILL_AFTER_S} ${seconds} "$@"`
+            : `exec "$0" ${seconds} "$@"`,
+          timeoutCommand.path,
           ...input.command,
         ];
   const clientTimeoutMs =

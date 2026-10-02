@@ -142,10 +142,27 @@ export function runHookCommandLocal(input: HookCommandInput): Promise<HookComman
   return promise;
 }
 
+// 容器内 timeout 到时的退出码（同 container-host 的辅助命令）：GNU 为 124（TERM 后结束）或 137（再 KILL），
+// busybox 为被信号终止的 143 或 137
+const HOOK_TIMEOUT_EXIT_CODES: readonly number[] = [124, 137, 143];
+// 短预算（SessionEnd 缺省 1.5 秒）的 KILL 宽限与客户端兜底放宽量都按比例收窄，与预算相称
+const SHORT_BUDGET_MS = 5_000;
+
+// 容器内 timeout 的包裹：先试带 -k 的写法（busybox 1.35 之前的 timeout 不认 -k），不认即退回不带 -k 的写法，
+// 两种都起不来（镜像里没有 timeout）即直接执行、由客户端限时兜底
+export function containerHookScript(command: string, seconds: number, killAfterS: number): string {
+  const quoted = `'${command.replace(/'/g, "'\\''")}'`;
+  return (
+    `if timeout -k 1 1 true >/dev/null 2>&1; then timeout -k ${killAfterS} ${seconds} sh -c ${quoted}; ` +
+    `elif timeout 1 true >/dev/null 2>&1; then timeout ${seconds} sh -c ${quoted}; ` +
+    `else sh -c ${quoted}; fi`
+  );
+}
+
 // 经执行端在容器里执行（沙箱会话的钩子，324）：命令以 /bin/sh -c 在容器内的工作区根跑。
-// 超时：容器内 timeout -k 限时（只杀钩子进程组，不重启容器；timeout 退出码 124 记为超时——钩子自己以 124
-// 退出无法区分，接受这一误报面）；客户端限时放宽 10 秒兜底：容器里没有 timeout 或卡住不动时退回执行端
-// 的既有做法（断开并重启容器）。两路输出由执行端分开取回
+// 超时：容器内 timeout 限时（只杀钩子进程组，不重启容器；124、137、143 且用时到了限时记为超时——钩子自己在限时之后
+// 以同值退出无法区分，接受这一误报面）；客户端限时稍宽作兜底（容器内 TERM 与 KILL 宽限之后）：容器里没有 timeout
+// 或卡住不动时退回执行端的既有做法（断开并重启容器）。两路输出由执行端分开取回
 export async function runHookCommandViaHost(
   host: WorkspaceHost,
   input: HookCommandInput
@@ -153,10 +170,11 @@ export async function runHookCommandViaHost(
   const started = Date.now();
   const env = input.env ?? process.env;
   const seconds = Math.max(1, Math.ceil(input.timeoutMs / 1000));
-  const quoted = `'${input.command.replace(/'/g, "'\\''")}'`;
-  const wrapped =
-    `if command -v timeout >/dev/null 2>&1; then timeout -k 5 ${seconds} sh -c ${quoted}; ` +
-    `else sh -c ${quoted}; fi`;
+  const short = input.timeoutMs <= SHORT_BUDGET_MS;
+  const killAfterS = short ? 1 : 5;
+  // 客户端兜底：容器内 KILL 之后再等一会儿（短预算不另加，长预算加 5 秒）；SessionEnd 1.5 秒的预算即 3 秒
+  const clientTimeoutMs = (seconds + killAfterS) * 1000 + (short ? 0 : 5_000);
+  const wrapped = containerHookScript(input.command, seconds, killAfterS);
   const plan = hookShellPlan(wrapped, "linux", env);
   if (input.signal?.aborted === true) {
     return {
@@ -171,8 +189,8 @@ export async function runHookCommandViaHost(
   const result = await host.exec(plan, {
     // 宿主环境不渗进容器：只带协议要求的 PIGEON_PROJECT_DIR，值为容器内的工作区根
     env: { PIGEON_PROJECT_DIR: host.root },
-    // 客户端兜底放宽 10 秒：正常情形容器内 timeout 先到期
-    timeoutMs: input.timeoutMs + 10_000,
+    // 客户端兜底：正常情形容器内 timeout 先到期
+    timeoutMs: clientTimeoutMs,
     maxOutputBytes: HOOK_STREAM_CAP,
     signal: input.signal,
     stdin: input.stdin,
@@ -180,8 +198,12 @@ export async function runHookCommandViaHost(
   return {
     spawned: result.spawned,
     exitCode: result.exitCode,
-    // 容器内 timeout 以 124 退出：按超时记（不重启容器）；客户端兜底兜住时执行端已标 timedOut
-    timedOut: result.timedOut || result.exitCode === 124,
+    // 容器内 timeout 到时：按超时记（不重启容器），以实际用时佐证，免得把钩子自己的同值退出码当成超时；
+    // 客户端兜底兜住时执行端已标 timedOut
+    timedOut:
+      result.timedOut ||
+      (HOOK_TIMEOUT_EXIT_CODES.includes(result.exitCode ?? -1) &&
+        Date.now() - started >= seconds * 1000),
     durationMs: Date.now() - started,
     stdout: result.stdout,
     stderr: result.stderr,

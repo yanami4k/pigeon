@@ -22,7 +22,8 @@ const SKIP =
       ? "本机没有 timeout 或 mkfifo"
       : false;
 
-// 本机执行的假 docker：exec 在 -w 给出的目录里直接运行；每次调用记一行；FAKE_NO_TIMEOUT=1 时探测报"没有 timeout"
+// 本机执行的假 docker：exec 在 -w 给出的目录里直接运行；每次调用记一行；FAKE_NO_TIMEOUT=1 时探测报"没有 timeout"，
+// FAKE_NO_KILL_AFTER=1 时探测报"有 timeout、不认 -k"
 const FAKE = `
 import { appendFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -39,7 +40,14 @@ for (;;) {
   break;
 }
 const [program, ...rest] = args.slice(i + 1);
-if (process.env.FAKE_NO_TIMEOUT === "1" && rest.some((a) => a.includes(${JSON.stringify(TIMEOUT_PROBE_SCRIPT)}))) process.exit(1);
+const probing = rest.some((a) => a.includes(${JSON.stringify(TIMEOUT_PROBE_SCRIPT)}));
+if (process.env.FAKE_NO_TIMEOUT === "1" && probing) process.exit(1);
+// 旧 busybox：有 timeout 但不认 -k——探测只报路径（本机的 timeout 不带 -k 照样能用）
+if (process.env.FAKE_NO_KILL_AFTER === "1" && probing) {
+  const found = spawnSync("sh", ["-c", "command -v timeout"], { encoding: "utf8" }).stdout.trim();
+  process.stdout.write(found + "\\n");
+  process.exit(0);
+}
 // 输出经本进程转交（不把本进程的管道传给命令）：客户端被杀时，留在"容器里"的命令不会把客户端的管道挂住
 const r = spawnSync(program, rest, { cwd, input: interactive ? readFileSync(0) : "" });
 process.stdout.write(r.stdout ?? "");
@@ -47,7 +55,7 @@ process.stderr.write(r.stderr ?? "");
 process.exit(r.status ?? 1);
 `;
 
-function setup(options: { noTimeout?: boolean } = {}) {
+function setup(options: { noTimeout?: boolean; noKillAfter?: boolean } = {}) {
   const base = mkdtempSync(join(tmpdir(), "pigeon-helper-timeout-"));
   const root = join(base, "ws");
   execFileSync("mkdir", ["-p", root]);
@@ -55,9 +63,14 @@ function setup(options: { noTimeout?: boolean } = {}) {
   const log = join(base, "calls.jsonl");
   writeFileSync(script, FAKE);
   writeFileSync(log, "");
-  const previous = { log: process.env.FAKE_LOG, noTimeout: process.env.FAKE_NO_TIMEOUT };
+  const previous = {
+    log: process.env.FAKE_LOG,
+    noTimeout: process.env.FAKE_NO_TIMEOUT,
+    noKillAfter: process.env.FAKE_NO_KILL_AFTER,
+  };
   process.env.FAKE_LOG = log;
   process.env.FAKE_NO_TIMEOUT = options.noTimeout === true ? "1" : "0";
+  process.env.FAKE_NO_KILL_AFTER = options.noKillAfter === true ? "1" : "0";
   // 每个用例用不同的容器名：探测结果按容器缓存
   const container = `box-${base.slice(-6)}`;
   const docker = [process.execPath, script];
@@ -84,6 +97,7 @@ function setup(options: { noTimeout?: boolean } = {}) {
       for (const [key, value] of [
         ["FAKE_LOG", previous.log],
         ["FAKE_NO_TIMEOUT", previous.noTimeout],
+        ["FAKE_NO_KILL_AFTER", previous.noKillAfter],
       ] as const) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -155,6 +169,30 @@ describe("容器辅助命令的超时（本机执行的假 docker）", { skip: S
       );
     } finally {
       if (background !== undefined && alive(background)) process.kill(background, "SIGKILL");
+      f.cleanup();
+    }
+  });
+
+  test("timeout 不认 -k（旧 busybox）：退回不带 -k 的写法，卡住的辅助命令仍在容器内被终止、不重启容器", async () => {
+    const f = setup({ noKillAfter: true });
+    try {
+      const target = await f.host.resolveExisting("stuck.fifo");
+      await assert.rejects(f.host.readText(target), (error: unknown) => {
+        assert.ok(error instanceof ContainerHostError);
+        assert.match(error.message, /辅助命令超过 1 秒，已在容器内终止/);
+        return true;
+      });
+      assert.equal(readersOf(f.fifo), "", "卡住的辅助命令已不在");
+      const calls = f.calls();
+      assert.equal(
+        calls.some((call) => call[0] === "restart"),
+        false,
+        "不重启容器"
+      );
+      const read = calls.find((call) => call.includes("cat"));
+      assert.deepEqual(read?.slice(-7, -4), ["/bin/sh", "-c", 'exec "$0" 1 "$@"']);
+      assert.match(read?.at(-4) ?? "", /^\/.*timeout$/);
+    } finally {
       f.cleanup();
     }
   });
