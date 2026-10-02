@@ -286,7 +286,7 @@ test("真容器：钩子在容器内执行（容器内写标记、宿主侧没�
     });
     assert.equal(outcome.exitCode, 0);
     assert.equal(outcome.stdout, sandbox.host.root, "PIGEON_PROJECT_DIR 为容器内的工作区根");
-    assert.equal(outcome.stderr, "err\n");
+    assert.equal(outcome.stderr, "err");
     const marker = await sandbox.host.resolveExisting(".hook-mark/x");
     assert.equal(await sandbox.host.readText(marker), "inside");
     const stdinMarker = await sandbox.host.resolveExisting(".hook-mark/stdin.json");
