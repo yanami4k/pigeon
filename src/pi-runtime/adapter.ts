@@ -312,6 +312,9 @@ export class PiRuntimeAdapter {
       beforeToolCall: (context) => this.#forwardDecide(context),
       // 决策 324：工具执行之后（PostToolUse / PostToolUseFailure）——替换结果文本与补上下文
       afterToolCall: (context) => this.#forwardAfterToolCall(context),
+      // 决策 324：钩子 continue:false 置位后这一轮收尾即停——上游只在整批每个调用都 terminate 时提前结束，
+      // 混合批次（前面的调用已放行）与排队的 steer 消息都会让循环继续，故在轮末另行判停
+      shouldStopAfterTurn: () => this.#hookStopReason !== undefined,
       // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们
       convertToLlm,
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
@@ -922,6 +925,10 @@ export class PiRuntimeAdapter {
   // error toolResult）。治理实现承诺自身不抛；接缝仍兜一层——实现若抛，按 fail-closed 阻断，
   // 不交给上游的"hook 抛错降级为错误文案"路径
   async #forwardDecide(context: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> {
+    // continue:false 已置位：本批其余调用一律拦下并带 terminate，不再交治理判定——停下后不再执行钩子、不再请示
+    if (this.#hookStopReason !== undefined) {
+      return { block: true, reason: this.#hookStopReason, terminate: true };
+    }
     try {
       const verdict = await this.#governance.decide({
         toolCallId: context.toolCall.id,
@@ -929,10 +936,6 @@ export class PiRuntimeAdapter {
         args: context.toolCall.arguments,
         preparedArgs: context.args,
       });
-      // continue:false 已置位：本批其余调用一律拦下并带 terminate——整批提前结束（同批调用照样停下）
-      if (this.#hookStopReason !== undefined) {
-        return { block: true, reason: this.#hookStopReason, terminate: true };
-      }
       if (verdict.kind === "block") {
         // continue:false（terminate）：整轮结束——记理由；本批经 terminate 提前收尾，不调 abort
         // （abort 在假流不遵守中止信号时会多发一次模型请求；terminate 让批干净地停）
@@ -1039,8 +1042,14 @@ export class PiRuntimeAdapter {
       if (event.type === "turn_end" && this.#roundListeners.size > 0) {
         this.#notifyRound(runId, event.message, event.toolResults);
       }
-      // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）
-      if (event.type === "turn_end" && this.#notices.length > 0 && !this.#interruptRequested) {
+      // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）；
+      // 钩子要求停止（continue:false）时这一轮之后即停，通知留在本地队列待下一次运行
+      if (
+        event.type === "turn_end" &&
+        this.#notices.length > 0 &&
+        !this.#interruptRequested &&
+        this.#hookStopReason === undefined
+      ) {
         for (const message of this.#takeNotices()) {
           this.#agent.steer(message);
         }

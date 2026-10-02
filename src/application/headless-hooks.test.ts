@@ -359,7 +359,6 @@ test("PreToolUse 钩子 continue:false：调用被拦、这批工具后停下（
 test("PostToolUse 钩子 continue:false：整轮结束（不再问模型），终态中止、理由如实记（整体审查修复）", async () => {
   const { root, home } = workspace();
   writeFileSync(join(root, "a.ts"), "alpha\n");
-  const stopFile = join(root, "stop-called.txt");
   const post = script(root, "stop-after.mjs", [
     "let data = '';",
     "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
@@ -394,18 +393,12 @@ test("PostToolUse 钩子 continue:false：整轮结束（不再问模型），�
   });
   assert.equal(result.status, "aborted");
   assert.match(result.errorMessage ?? "", /钩子要求停止：后停-CF/);
-  assert.equal(
-    userTexts(streamFn.calls[1]).includes("不应再问") === false && streamFn.calls.length <= 2,
-    true,
-    "整轮结束：第二轮（若有）随即被中止，内容不生效"
-  );
+  assert.equal(streamFn.calls.length, 1, "整轮结束：不再问模型");
   assert.equal(existsSync(stopMarked), false, "被钩子停下的整轮不再触发 Stop");
 });
 
 test("Stop 拦下后续跑的那一轮出错：循环停、触发 StopFailure、终态如实记出错（不被 stop-hook-limit 盖掉）", async () => {
   const { root, home } = workspace();
-  const stopCount = join(root, "stop-count.txt");
-  const failCount = join(root, "fail-count.txt");
   const counter = (target: string) => [
     "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
     "let data = '';",
@@ -451,4 +444,69 @@ test("Stop 拦下后续跑的那一轮出错：循环停、触发 StopFailure、
     "1",
     "出错的那一轮触发了 StopFailure"
   );
+});
+
+test("Stop 拦下后续跑的那一轮被钩子停下（aborted）：循环停、Stop 不再跑，终态与理由如实", async () => {
+  const { root, home } = workspace();
+  writeFileSync(join(root, "a.ts"), "alpha\n");
+  const stopHook = script(root, "stop-always.mjs", [
+    "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    `  const c = ${JSON.stringify(join(root, "STOPCOUNT"))};`,
+    "  const n = existsSync(c) ? Number(readFileSync(c, 'utf8')) : 0;",
+    "  writeFileSync(c, String(n + 1));",
+    "  process.stderr.write('接着干');",
+    "  process.exit(2);",
+    "});",
+  ]);
+  const preHook = script(root, "pre-stop.mjs", [
+    "let data = '';",
+    "process.stdin.on('data', (chunk) => (data += chunk)).on('end', () => {",
+    "  process.stdout.write(JSON.stringify({ continue: false, stopReason: '续跑里停-CF' }));",
+    "});",
+  ]);
+  const streamFn = createFakeStreamFn({
+    replies: [
+      { text: "一轮" },
+      { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+      { text: "不应再问" },
+    ],
+  });
+  const result = await runHeadless({
+    task: "干活",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn,
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(
+      root,
+      [hook("Stop", `node "${stopHook}"`), hook("PreToolUse", `node "${preHook}"`)],
+      { stopHookBlockCap: 3 }
+    ),
+  });
+  assert.equal(result.status, "aborted", JSON.stringify(result));
+  assert.match(result.errorMessage ?? "", /钩子要求停止：续跑里停-CF/);
+  assert.equal(readFileSync(join(root, "STOPCOUNT"), "utf8"), "1", "续跑那轮被停下后 Stop 不再跑");
+  assert.equal(streamFn.calls.length, 2, "初始一轮 + 续跑一轮，不再多问");
+});
+
+test("Stop 钩子输入带 permission_mode（经 headless 装配，不由测试注入）", async () => {
+  const { root, home } = workspace();
+  const stdinFile = join(root, "stop.json");
+  const file = script(root, "stop.mjs", captureStdinScript(stdinFile));
+  const result = await runHeadless({
+    task: "干活",
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn: createFakeStreamFn({ replies: [{ text: "完成" }] }),
+    yolo: true,
+    homeDir: home,
+    settings: settingsWith(root, [hook("Stop", `node "${file}"`)]),
+  });
+  assert.equal(result.status, "completed");
+  const sent = JSON.parse(readFileSync(stdinFile, "utf8")) as Record<string, unknown>;
+  assert.equal(sent.hook_event_name, "Stop");
+  assert.equal(sent.permission_mode, "yolo");
 });

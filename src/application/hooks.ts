@@ -93,8 +93,8 @@ export interface SessionHooksOptions {
   sink?: { append(entry: SessionCustomEntry): void };
   // 审批档（钩子 JSON 的 permission_mode；复审 P2 补上）
   permissionMode?: string;
-  // 记录里附的活动 Run（会话级事件常缺省）
-  activeRunId?: () => string | undefined;
+  // 记录里附的 Run（按事件与匹配对象定归属；会话级事件返回缺省）
+  activeRunId?: (event: HookEventName, matcherTarget: string) => string | undefined;
   // 终端界面的一行提示（拦下或出错时调用；缺省静默）
   notice?: (line: string) => void;
   // 沙箱：容器执行端（缺省本机执行）
@@ -344,7 +344,7 @@ export class SessionHooks {
     for (const { hook, outcome } of results) {
       const record = interpretHookRun(event, hook, outcome);
       report.runs.push(record);
-      this.#record(record);
+      this.#record(record, matcherTarget);
       this.#notice(record);
       if (record.systemMessage !== undefined) report.systemMessages.push(record.systemMessage);
       if (record.additionalContext !== undefined) {
@@ -378,10 +378,10 @@ export class SessionHooks {
     return report;
   }
 
-  #record(record: HookRunRecord): void {
+  #record(record: HookRunRecord, matcherTarget: string): void {
     const sink = this.#options.sink;
     if (sink === undefined) return;
-    const runId = this.#options.activeRunId?.() ?? this.#runId;
+    const runId = this.#options.activeRunId?.(record.hook.event, matcherTarget) ?? this.#runId;
     const summary = capText(
       record.outcome.stderr !== "" ? record.outcome.stderr : record.outcome.stdout
     );

@@ -60,6 +60,7 @@ import {
 } from "../skills/load-skill-tool.ts";
 import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
+import type { HookEventName } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
@@ -267,6 +268,13 @@ const WRITE_APPROVAL_SENTENCES: Readonly<Record<RunCommandApproval, string>> = {
   none: "需要批准的写操作会被拒绝（本会话没有人工审批通道）。",
 };
 
+// 在 Run 窗口外触发、记录挂刚结束的 Run 的收尾类钩子事件（自动压缩的 PostCompact 另按触发位置判）
+const RUN_TAIL_HOOK_EVENTS: ReadonlySet<HookEventName> = new Set([
+  "Stop",
+  "StopFailure",
+  "SubagentStop",
+]);
+
 // 系统提示里联网工具的说法（决策 287、289）：只在注册了两件工具时追加
 export const WEB_TOOLS_SENTENCE =
   "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
@@ -370,8 +378,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // run_command 的三处说明与系统提示里的审批说法都按它与执行端的平台生成，不写死本地、人工批准的说法；
   // 钩子 JSON 的 permission_mode 也用它（324）
   const approvalMode = deps.toolPolicy?.approvalMode ?? (deps.yolo ? "yolo" : "prompt");
-  // 最近一个已收尾的 Run：收尾类钩子（Stop / StopFailure / SubagentStop、PostCompact 等）在 Run 窗口外触发，
-  // 记录挂到刚结束的那个 Run（整体审查修复：此前它们没有 runId，trace 里挂不到 Run 下）
+  // 最近一个已收尾的 Run：收尾类钩子（Stop / StopFailure / SubagentStop、自动压缩的 PostCompact）在 Run 窗口外触发，
+  // 记录挂到刚结束的那个 Run；其余 Run 之外的钩子（下一条消息的 UserPromptSubmit、手动压缩、Notification、
+  // SessionEnd 等）按会话级记录，不挂上一个 Run
   let lastEndedRunId: RunId | undefined;
   // 决策 323 / 324 / 326 ②：会话级钩子——清单随设置快照冻结；执行位置按执行端（本机/容器，host:true 的在宿主）；
   // 运行记录写进本会话（pigeon.hook 条目）；拦下或出错经 hooksNotice 给一行提示
@@ -384,10 +393,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     disableAllHooks: settings.merged.disableAllHooks,
     sink: sessionStore,
     // 记录挂活动 Run（adapter 在下方创建；钩子只在运行期触发，届时 adapter 已就位）；
-    // Run 窗口外的收尾类钩子挂刚结束的 Run（run.ended 时记下，见下方订阅）
-    activeRunId: (): RunId | undefined => adapter.currentRunId() ?? lastEndedRunId,
+    // Run 窗口外只有收尾类钩子挂刚结束的 Run（run.ended 时记下，见下方订阅）
+    activeRunId: (event, matcherTarget): RunId | undefined =>
+      adapter.currentRunId() ??
+      (RUN_TAIL_HOOK_EVENTS.has(event) || (event === "PostCompact" && matcherTarget === "auto")
+        ? lastEndedRunId
+        : undefined),
     ...(deps.hooksNotice !== undefined ? { notice: deps.hooksNotice } : {}),
     ...(deps.workspaceHost !== undefined ? { workspaceHost: deps.workspaceHost } : {}),
+    permissionMode: approvalMode,
   });
   // PreToolUse 钩子的 additionalContext 随工具结果交给模型：按 toolCallId 暂存，afterToolCall 时一并追加
   const preToolContexts = new Map<string, string[]>();
