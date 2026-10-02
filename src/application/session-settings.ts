@@ -24,6 +24,7 @@ import {
   withinTrustedDirectory,
   withoutTrustEntries,
 } from "../state/config-trust.ts";
+import { LOCAL_SETTINGS_FILE, pigeonRel } from "../state/paths.ts";
 import type { SettingsSnapshot } from "../state/settings.ts";
 
 export { LegacyLayoutError } from "../persistence/legacy-layout.ts";
@@ -64,7 +65,7 @@ function trustedDirectoriesOf(snapshot: SettingsSnapshot, homeDir: string): stri
 // （.gitignore 挡不住强制添加；克隆来的仓库里它可能来自他人）。非 git 仓库或未被跟踪即 false
 export function localSettingsTracked(root: string): boolean {
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", ".pigeon/settings.local.json"], {
+    execFileSync("git", ["ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)], {
       cwd: root,
       stdio: "ignore",
     });
