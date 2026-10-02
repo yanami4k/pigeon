@@ -1843,6 +1843,10 @@ export class PigeonTuiShell
         if (report.continueFalse !== undefined) return;
         const wantsContinue = report.blocked !== undefined || report.additionalContext.length > 0;
         if (!wantsContinue) return;
+        if (blockedCount >= cap) {
+          this.flow.addSystem(`[hooks] Stop 钩子连续拦下 ${cap} 次，已到上限，不再接着跑`);
+          return;
+        }
         blockedCount += 1;
         stopHookActive = true;
         const reason = report.blocked?.reason;
