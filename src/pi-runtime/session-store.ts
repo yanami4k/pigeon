@@ -143,6 +143,8 @@ function startCore(key: string, options: SessionStoreWriterOptions): WriterCore 
     path: undefined,
     release: undefined,
   };
+  // 先登记再开始打开：打开失败（含同步抛出的加锁失败）时的摘除总在登记之后
+  openCores.set(key, core);
   core.tail = (async () => {
     const repo = createSessionRepo(options.sessionsRoot);
     try {
@@ -173,6 +175,10 @@ function startCore(key: string, options: SessionStoreWriterOptions): WriterCore 
       core.release?.();
       core.release = undefined;
       core.session = undefined;
+      // 打开失败即从注册表摘除：此后同一会话的打开总是重新尝试，不共用这个失效的核心
+      if (openCores.get(key) === core) {
+        openCores.delete(key);
+      }
       report(options.onFault, "打开", error);
     }
   })();
@@ -185,7 +191,6 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
   let core = openCores.get(key);
   if (core === undefined) {
     core = startCore(key, options);
-    openCores.set(key, core);
   } else {
     core.refs += 1;
   }
