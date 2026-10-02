@@ -12,7 +12,6 @@
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";
-import type { MemoryRoot } from "../memory/resident.ts";
 import {
   ROLE_MODEL_OVERRIDES,
   ROLE_THINKING_LEVELS,
@@ -58,7 +57,6 @@ import {
   buildRuntime,
   disposeRuntime,
   type LearnedMemoryConfig,
-  type ReviewSessionConfig,
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
@@ -92,8 +90,7 @@ export interface WorkerRuntimeDeps {
   // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
   temperature?: number;
   taskDirective?: string;
-  // 决策 191、217：推送记忆——worker 与常驻 Memory 同样处理：父会话开着即带推送段与记忆工具（冲突处理的填法、上限同父会话），
-  // 不做压缩前复盘（压缩前回调只给无父会话的运行面）
+  // 决策 191、331：推送记忆——父会话开着即带推送段（上限同父会话）；worker 只推送，不带记忆工具
   learnedMemory?: LearnedMemoryConfig;
   // M6（决策 064 子裁决 ③）：角色的模型接入覆盖列（缺省取 roles.ts 的角色表，第一版四个角色都留空）
   roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
@@ -204,10 +201,8 @@ export function sessionWorkerRuntimeFactory(
     deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
   // 决策 188、218：worker 继承父运行面的压缩配置（显式传入时以传入值为准）；父运行面没给即产品缺省
   const compaction = deps.compaction ?? deps.bundle.adapter.compactionConfig();
-  // 决策 191、217：worker 继承父运行面的推送记忆（开着才带），不做压缩前复盘
-  const parentLearned = deps.learnedMemory ?? deps.bundle.learnedMemory;
-  const learnedMemory =
-    parentLearned !== undefined ? { ...parentLearned, review: false as const } : undefined;
+  // 决策 191、217：worker 继承父运行面的推送记忆（开着才带）
+  const learnedMemory = deps.learnedMemory ?? deps.bundle.learnedMemory;
   return createWorkerRuntimeFactory({
     streamFnFor: () => deps.streamFn,
     provider: deps.provider,
@@ -256,9 +251,9 @@ interface RuntimeSurface {
   thinkingLevel?: ThinkingLevel;
   homeDir?: string;
   persistThinking?: boolean;
-  memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
+  agentsMd?: boolean;
   // 决策 061：编辑模式（缺省 hashline）
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
@@ -271,11 +266,10 @@ interface RuntimeSurface {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）；worker 取主会话的配置
   compaction?: CompactionConfigInput;
-  // 决策 192、207：压缩前回调；只有无父会话的运行面会给
+  // 压缩前回调；只有无父会话的运行面会给
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217：推送记忆（在场即开着）；复盘运行面另带复盘设定
+  // 决策 191、217：推送记忆（在场即开着）
   learnedMemory?: LearnedMemoryConfig;
-  reviewSession?: ReviewSessionConfig;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
   // 决策 264–267：派 worker 的开关（headless 主会话会给；层数放开时未到最底层的 worker 也给，299）
@@ -516,9 +510,9 @@ export interface DetachedRuntimeRequest {
   thinkingLevel?: ThinkingLevel;
   homeDir?: string;
   persistThinking?: boolean;
-  memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
+  agentsMd?: boolean;
   editMode?: EditMode;
   maxOutputTokens?: number;
   temperature?: number;
@@ -528,9 +522,8 @@ export interface DetachedRuntimeRequest {
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217：推送记忆（在场即开着）；复盘运行面另带复盘设定
+  // 决策 191、217：推送记忆（在场即开着）
   learnedMemory?: LearnedMemoryConfig;
-  reviewSession?: ReviewSessionConfig;
   startMcp?: () => Promise<McpSession>;
   // 决策 264–267：派 worker 的开关
   spawnWorker?: SpawnWorkerSlot;
@@ -581,11 +574,8 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       : {}),
     ...(surface.homeDir !== undefined ? { homeDir: surface.homeDir } : {}),
     ...(surface.persistThinking !== undefined ? { persistThinking: surface.persistThinking } : {}),
-    ...(surface.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: surface.memoryBudgetChars }
-      : {}),
     ...(surface.skillRoots !== undefined ? { skillRoots: surface.skillRoots } : {}),
-    ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
+    ...(surface.agentsMd !== undefined ? { agentsMd: surface.agentsMd } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
@@ -596,7 +586,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       ? { beforeCompaction: surface.beforeCompaction }
       : {}),
     ...(surface.learnedMemory !== undefined ? { learnedMemory: surface.learnedMemory } : {}),
-    ...(surface.reviewSession !== undefined ? { reviewSession: surface.reviewSession } : {}),
+
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
     ...(surface.scriptOrchestration !== undefined
       ? { scriptOrchestration: surface.scriptOrchestration }

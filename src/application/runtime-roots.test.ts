@@ -30,8 +30,9 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
         promotedAt: 1_757_000_000_000,
       },
     });
-    mkdirSync(join(governanceRoot, ".pigeon", "memory"), { recursive: true });
-    writeFileSync(join(governanceRoot, ".pigeon", "memory", "conventions.md"), "暗号：治理根\n");
+    // 决策 330：人写的说明从工作区根往上读（worker 即它自己的工作树）；治理根的 AGENTS.md 不读
+    writeFileSync(join(workspaceRoot, "AGENTS.md"), "暗号：工作区\n");
+    writeFileSync(join(governanceRoot, "AGENTS.md"), "暗号：治理根\n");
 
     const editArgs: EditFileParams = {
       path: "a.ts",
@@ -71,9 +72,10 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
       assert.equal(result.toolExecutions[0]?.decision?.approvedBy, "policy:config");
       // 工具围栏在工作区根
       assert.equal(readFileSync(join(workspaceRoot, "a.ts"), "utf8"), "alpha\nBETA\n");
-      // 常驻 Memory 来自治理根
-      assert.equal(bundle.adapter.snapshot().memory[0]?.path, ".pigeon/memory/conventions.md");
-      assert.ok(bundle.adapter.snapshot().context.systemPrompt.includes("暗号：治理根"));
+      // 人写的说明来自工作区根
+      assert.equal(bundle.adapter.snapshot().memory[0]?.path, "AGENTS.md");
+      assert.ok(bundle.adapter.snapshot().context.systemPrompt.includes("暗号：工作区"));
+      assert.ok(!bundle.adapter.snapshot().context.systemPrompt.includes("暗号：治理根"));
     } finally {
       await bundle.adapter.dispose();
       await bundle.sessionStore.close();

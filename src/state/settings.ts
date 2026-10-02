@@ -1,12 +1,13 @@
 // 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
-//   hooks（决策 323/324）；另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
+//   hooks（决策 323/324）与学到的记忆的两层上限 memory（决策 332）；
+//   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
 //   hooks 各层的条目并列生效（同一事件同一 matcher 下命令完全相同的只留一份）。
 // - 响亮失败：顶层或节内的未知键、写在设置里的 key、写在项目级的 trustedDirectories、非法的钩子 matcher，一律指出文件、键与所在层。
-// 以后各段往 SETTINGS_SECTIONS 里加节（记忆），合并与未知键检查随之生效。
+// 以后各段往 SETTINGS_SECTIONS 里加节，合并与未知键检查随之生效。
 import path from "node:path";
 import type { TSchema } from "typebox";
 import { type Static, Type } from "typebox";
@@ -30,6 +31,7 @@ import {
   loopGuardSettings,
 } from "./loop-guard-config.ts";
 import { type DotMcpJson, type McpConfig, McpSectionSchema, mergeMcpConfig } from "./mcp-config.ts";
+import { type MemoryLimits, MemorySectionSchema, memoryLimits } from "./memory-config.ts";
 import {
   OrchestrationSectionSchema,
   type OrchestrationSettings,
@@ -63,6 +65,7 @@ export const SETTINGS_SECTIONS = {
   hooks: HooksSectionSchema,
   sandbox: SandboxSectionSchema,
   loopGuard: LoopGuardSectionSchema,
+  memory: MemorySectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -83,6 +86,7 @@ export const SettingsFileSchema = Type.Object(
     sandbox: Type.Optional(SandboxSectionSchema),
     loopGuard: Type.Optional(LoopGuardSectionSchema),
     hooks: Type.Optional(HooksSectionSchema),
+    memory: Type.Optional(MemorySectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -233,6 +237,7 @@ export interface MergedSettings {
   web?: WebSection;
   sandbox?: SandboxConfig;
   loopGuard?: Static<typeof LoopGuardSectionSchema>;
+  memory?: Static<typeof MemorySectionSchema>;
   trustedDirectories: string[];
   // 停用全部钩子（324）：三层按标量覆盖（高优先层说了算），缺省 false
   disableAllHooks: boolean;
@@ -398,6 +403,11 @@ export function configGrantRulesOf(snapshot: SettingsSnapshot): ConfigGrantRule[
 
 export function orchestrationSettingsOf(snapshot: SettingsSnapshot): OrchestrationSettings {
   return orchestrationSettings(snapshot.merged.orchestration);
+}
+
+// 学到的记忆的两层上限（决策 332）：合并后的 memory 一节，不给的取缺省
+export function memoryLimitsOf(snapshot: SettingsSnapshot): MemoryLimits {
+  return memoryLimits(snapshot.merged.memory);
 }
 
 export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettings {

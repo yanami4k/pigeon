@@ -36,6 +36,8 @@ function repo(files: Record<string, string>): string {
   git(root, ["init", "-q"]);
   git(root, ["config", "user.email", "t@example.com"]);
   git(root, ["config", "user.name", "t"]);
+  // 关掉换行转换：否则全局 core.autocrlf=true 的机器上 worker 工作树检出会把 \n 变成 \r\n
+  git(root, ["config", "core.autocrlf", "false"]);
   writeFileSync(join(root, ".gitignore"), ".pigeon/\n");
   for (const [file, content] of Object.entries(files)) {
     writeFileSync(join(root, file), content);
@@ -223,8 +225,8 @@ test("主 agent 还在跑时结束的 worker：通知进它这次运行的下一
           );
           return main(model, context, options);
         }) as StreamFn,
-        // 主 agent 每轮都慢：worker 在它第二轮进行中就结束
-        300,
+        // 主 agent 每轮都慢：worker 在它第二轮进行中就结束（窗口取宽些，慢机器上 worker 的收尾也来得及落在这轮里）
+        1500,
       ],
       ["WORKER", { replies: [{ text: "快看完了" }] }],
     ]),

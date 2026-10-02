@@ -103,6 +103,7 @@ import {
   type CommandsHost,
   handleSlashCommand as dispatchSlashCommand,
   type TuiGrantsContext,
+  type TuiMemoryFace,
 } from "./commands.ts";
 import type { TuiHooksFace } from "./hooks-view.ts";
 import { createPromptEditor } from "./input-editor.ts";
@@ -124,7 +125,7 @@ import {
 } from "./resume-view.ts";
 import { type PickerKey, SessionPicker } from "./session-picker.ts";
 import { familyKindLabel, SessionTree } from "./session-tree.ts";
-import { type BackfillStatus, StatusBar } from "./status-bar.ts";
+import { StatusBar } from "./status-bar.ts";
 import { WorkerActivityTracker } from "./worker-activity.ts";
 import {
   hasFadingWorkers,
@@ -236,6 +237,8 @@ export interface TuiShellOptions {
   hooks?: TuiHooksFace;
   // 决策 323：收尾钩子的连续拦截上限（取设置快照的 merged.stopHookBlockCap，/reload 后跟着变）；缺省 8
   stopHookCap?: () => number;
+  // 决策 331：/memory 的命令面（记忆按项目与用户分层，不跟会话走）；缺省 = 命令不可用
+  memory?: TuiMemoryFace;
 }
 
 // 决策 301：界面所处的视图——主会话、整屏的树形视图、进入的 worker 会话
@@ -461,7 +464,7 @@ export class PigeonTuiShell
     // 决策 189：每次压缩（自动或手动）在消息区提示一行压缩前后的 token 数
     const unsubscribeCompaction = runtime.subscribeCompaction?.((notice) => {
       this.flow.addSystem(`[compact] ${compactionNoticeText(notice)}`);
-      // 压缩后上下文用量随之下降；压缩前复盘的花费在其收尾后计入
+      // 压缩后上下文用量随之下降
       this.refreshContext();
       this.collectChildCosts();
       this.tui.requestRender();
@@ -685,6 +688,23 @@ export class PigeonTuiShell
     return this.options.scriptCommands?.();
   }
 
+  // 决策 331：/memory 的命令面（CommandsHost）
+  memory(): TuiMemoryFace | undefined {
+    return this.options.memory;
+  }
+
+  // 决策 331：暂停界面执行一段要独占终端的动作（/memory edit 打开编辑器），结束后恢复界面并整屏重画
+  suspendFor<T>(work: () => T): T {
+    if (!this.started) return work();
+    this.tui.stop();
+    try {
+      return work();
+    } finally {
+      this.tui.start();
+      this.tui.requestRender(true);
+    }
+  }
+
   // 以人的输入提交一条（/orchestrate 发起）：空闲即发，运行中排队
   submitInput(text: string): void {
     if (this.isBusy()) {
@@ -816,13 +836,7 @@ export class PigeonTuiShell
     this.refreshCost();
   }
 
-  // 后台补做复盘的进度（283、284）：状态栏显示第几个、共几个、花了多少；undefined 即不再显示
-  setBackfillProgress(progress: BackfillStatus | undefined): void {
-    this.statusBar.update({ backfill: progress });
-    this.tui.requestRender();
-  }
-
-  // 运行期告警（复盘、压缩、会话存储、工作区快照等）：终端界面运行期间落消息区，文案与去重由告警方负责
+  // 运行期告警（压缩、会话存储、工作区快照等）：终端界面运行期间落消息区，文案与去重由告警方负责
   addWarning(line: string): void {
     this.flow.addSystem(line);
     this.tui.requestRender();

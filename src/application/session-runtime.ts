@@ -5,7 +5,7 @@
 // cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
-// 决策 286：运行期告警（会话存储、压缩前复盘、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
+// 决策 286：运行期告警（会话存储、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
 // 不给即照旧写标准错误输出（逐行对话与其余调用方不变）。
 
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
@@ -19,11 +19,11 @@ import { emptySettingsSnapshot, mcpConfigOf, type SettingsSnapshot } from "../st
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
-import type { ReviewModelChoice } from "./memory-review.ts";
 import {
   buildRuntime,
   disposeRuntime,
   type LearnedMemoryConfig,
+  type MemoryWriteConfig,
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
@@ -41,55 +41,28 @@ export interface SessionRuntimeFlags {
   modelId: string;
   persistThinking: boolean;
   thinkingLevel?: ThinkingLevel;
-  memoryBudgetChars?: number;
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
-  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）与学到的记忆的总量上限
+  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）
   pushedMemory?: boolean;
-  memoryLimitChars?: number;
-  // 决策 296：复盘模型（日常入口读 .pigeon/memory-review.json 给出；没指定即缺省）
-  reviewModel?: ReviewModelChoice;
 }
 
-// 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省；打转检测按设定挂上，308）
+// 交互会话的推送记忆配置（决策 331）：有人对话，给写入配置（注册 update_memory、推送段带写入说明）；两层上限取设置快照
 function interactiveLearnedMemory(
   flags: SessionRuntimeFlags,
-  warn?: WarnSink,
-  loopGuard?: LoopGuardSettings
+  write: MemoryWriteConfig | undefined
 ): LearnedMemoryConfig | undefined {
-  return flags.pushedMemory === true
-    ? {
-        conflict: "interactive",
-        ...(warn !== undefined || loopGuard !== undefined
-          ? {
-              review: {
-                ...(warn !== undefined ? { warn } : {}),
-                ...(loopGuard !== undefined ? { loopGuard } : {}),
-              },
-            }
-          : {}),
-        ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
-        ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
-      }
-    : undefined;
+  return flags.pushedMemory === true ? (write !== undefined ? { write } : {}) : undefined;
 }
 
-// 从交互会话派生的无人值守运行（/fork 分支）的推送记忆参数：沿用开关、上限与复盘模型
-export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
-  pushedMemory?: boolean;
-  memoryLimitChars?: number;
-  reviewModel?: ReviewModelChoice;
-} {
-  return {
-    ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
-    ...(flags.pushedMemory === true ? { pushedMemory: true } : {}),
-    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
-  };
+// 从交互会话派生的无人值守运行（/fork 分支）的推送记忆参数：沿用开关，只推送（复盘与记忆上限已随 331/332 移走）
+export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): { pushedMemory?: boolean } {
+  return flags.pushedMemory === true ? { pushedMemory: true } : {};
 }
 
 export interface OpenSessionRuntimeRequest {
-  // 治理根：.pigeon/（设置、程序状态、常驻 Memory、Skill）所在
+  // 治理根：.pigeon/（设置、程序状态、Skill）所在
   governanceRoot: string;
   // 决策 325：本会话的设置快照（入口在会话开始时读一次并确认过会执行命令的条目；本会话内各处都从它取）。
   // 缺省为空快照（不读任何设置文件）；日常入口一律显式给出
@@ -126,11 +99,13 @@ export interface OpenSessionRuntimeRequest {
   taskList?: boolean;
   // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
   webTools?: WebToolsConfig;
-  // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
+  // 决策 331：写记忆的入口与写入后的提示（终端界面与 --line 给；推送记忆关着时不生效）
+  memoryWrite?: MemoryWriteConfig;
+  // 决策 286：运行期告警的出口（会话存储、压缩前回调、工作区快照）；缺省写标准错误输出
   warn?: WarnSink;
   // 决策 324：钩子拦下或出错时的一行提示的出口（终端界面落消息区）；缺省静默
   hooksNotice?: WarnSink;
-  // 决策 308：打转检测设定——此处只给压缩前复盘挂上；主 agent 由入口自己挂（叫停后的交代各入口不同）
+  // 决策 308：打转检测设定——此处挂到压缩与运行面内的用点；主 agent 由入口自己挂（叫停后的交代各入口不同）
   loopGuard?: LoopGuardSettings;
 }
 
@@ -197,7 +172,7 @@ export async function openSessionRuntime(
     ...(reuseMcp !== undefined ? { reuse: reuseMcp } : {}),
   });
   const frozenPrompt = request.reloadFrom?.frozenPrompt;
-  const learnedMemory = interactiveLearnedMemory(request.flags, request.warn, request.loopGuard);
+  const learnedMemory = interactiveLearnedMemory(request.flags, request.memoryWrite);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker
@@ -220,9 +195,6 @@ export async function openSessionRuntime(
       persistThinking: request.flags.persistThinking,
       ...(request.flags.thinkingLevel !== undefined
         ? { thinkingLevel: request.flags.thinkingLevel }
-        : {}),
-      ...(request.flags.memoryBudgetChars !== undefined
-        ? { memoryBudgetChars: request.flags.memoryBudgetChars }
         : {}),
       ...(request.flags.maxOutputTokens !== undefined
         ? { maxOutputTokens: request.flags.maxOutputTokens }

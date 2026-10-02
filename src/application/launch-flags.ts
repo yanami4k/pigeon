@@ -5,7 +5,7 @@
 // 真实模型元数据由 streamFn 插件提供，占位只是身份标签；历史会话标签不做映射。
 
 import { SANDBOX_NETWORKS, type SandboxNetwork } from "../execution/sandbox.ts";
-import { loadMemoryReviewConfig } from "../persistence/review-backfill-store.ts";
+
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/runtime-events.ts";
@@ -13,7 +13,6 @@ import {
   orchestrationSettingsOf as orchestrationSectionOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
-import { type ReviewModelChoice, reviewModelChoice } from "./memory-review.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
@@ -55,8 +54,6 @@ export interface LaunchFlags {
   modelId: string;
   // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
   persistThinking: boolean;
-  // M5 S3（决策 042）：--memory-budget <字符数> 常驻 Memory 预算（缺省 8000）
-  memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
   thinkingLevel?: ThinkingLevel;
   // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384）
@@ -66,12 +63,8 @@ export interface LaunchFlags {
   // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（仅 TUI 接受）
   historyLimit?: number;
   // 决策 191、244：推送记忆——日常入口缺省开着（与会话检索开关的缺省一致），--no-pushed-memory 关掉（关掉即不推送、
-  // 不注册记忆工具、不复盘）；--memory-limit <字符数> 学到的记忆的总量上限（缺省 12,000）。cli REPL / resume、tui 与
-  // pigeon run 接受
+  // 不注册记忆工具）。cli REPL / resume、tui 与 pigeon run 接受。两层上限在设置的 memory 一节（决策 332），不设启动参数
   pushedMemory: boolean;
-  memoryLimitChars?: number;
-  // 决策 296：复盘模型——不是启动参数，由日常入口在准备好工作区后读 .pigeon/memory-review.json 填入（applyReviewModelConfig）
-  reviewModel?: ReviewModelChoice;
   // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
   // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
   compaction?: CompactionConfigInput;
@@ -104,7 +97,7 @@ export interface ParseLaunchFlagsOptions {
   historyLimit?: boolean;
   // 是否接受 --temperature（只有把它交给运行面的 Eval 入口；其余入口当作未知参数，不静默忽略）
   temperature?: boolean;
-  // 是否接受 --no-pushed-memory 与 --memory-limit（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
+  // 是否接受 --no-pushed-memory（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
   pushedMemory?: boolean;
   // 是否接受 --sandbox 及其参数（终端界面、命令行对话与续跑、pigeon run）
   sandbox?: boolean;
@@ -176,18 +169,6 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       }
     } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
       flags.pushedMemory = false;
-    } else if (flag === "--memory-limit" && options.pushedMemory === true) {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`--memory-limit 需要正整数（字符数）（${usage}）`);
-      }
-      flags.memoryLimitChars = value;
-    } else if (flag === "--memory-budget") {
-      const value = Number(argv[++i]);
-      if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`--memory-budget 需要非负整数（字符数）（${usage}）`);
-      }
-      flags.memoryBudgetChars = value;
     } else if (flag === "--thinking") {
       const value = argv[++i];
       if (value === undefined || !isThinkingLevel(value)) {
@@ -285,13 +266,4 @@ export function resolveStreamFnSpec(flags: LaunchFlags, usage: string): string {
     );
   }
   return flags.streamFnSpec;
-}
-
-// 决策 296：日常入口（终端界面、命令行对话与续跑、pigeon run）读复盘配置里的复盘模型填进启动参数；配置畸形响亮失败。
-// 跑批器不经这里，复盘仍用各步本身的模型
-export function applyReviewModelConfig(flags: LaunchFlags, governanceRoot: string): void {
-  const reviewModel = reviewModelChoice(loadMemoryReviewConfig(governanceRoot).reviewModel);
-  if (reviewModel !== undefined) {
-    flags.reviewModel = reviewModel;
-  }
 }

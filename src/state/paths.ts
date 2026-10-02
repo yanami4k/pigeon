@@ -1,11 +1,12 @@
 // Pigeon 自己的目录与文件位置（决策 325）：项目的 .pigeon 目录、三层 settings 文件、程序状态目录 .pigeon/state/ 及其下各子目录、
 // 用户级 ~/.pigeon 下的对应位置，全部在这里给出；其余源码一律经本模块取路径，不自拼 ".pigeon"（边界用例守住）。
 // 纯路径计算，无 IO；用户主目录可注入（测试指到临时目录，不碰真实的 ~/.pigeon）。
-// - 人写的内容留在原处：.pigeon/settings.json（可提交）、.pigeon/skills、.pigeon/memory、~/.pigeon/settings.json、
-//   ~/.pigeon/skills、~/.pigeon/preferences.md，以及本段不并入的 .pigeon/verify.json 与 .pigeon/memory-review.json。
-// - 程序写的状态在 .pigeon/state/（不提交）：会话、学到的记忆、worker 工作树、补做复盘记录、输入历史、终端界面日志；
-//   用户级的程序状态（配置内容指纹）在 ~/.pigeon/state/。
-// - 旧布局（迁移命令与启动检查用）：7 个旧配置文件与旧位置的程序状态。
+// - 人写的内容：.pigeon/settings.json（可提交）、.pigeon/skills、~/.pigeon/settings.json、~/.pigeon/skills、
+//   ~/.pigeon/AGENTS.md（用户级说明，决策 330），以及本段不并入的 .pigeon/verify.json。项目的说明是仓库里的 AGENTS.md，不在 .pigeon 下。
+// - 程序写的状态在 .pigeon/state/（不提交）：会话、学到的记忆（项目级）、worker 工作树、输入历史、终端界面日志、迁移命令的备份；
+//   用户级的程序状态（配置内容指纹、学到的记忆的用户级）在 ~/.pigeon/state/。
+// - 旧布局（迁移命令与启动检查用）：7 个旧配置文件、旧位置的程序状态、旧的学到的记忆、复盘配置与补做复盘记录、
+//   旧的人写说明（.pigeon/memory/、~/.pigeon/preferences.md）。
 import { homedir } from "node:os";
 import path from "node:path";
 import { sha256Hex } from "./hashing.ts";
@@ -58,6 +59,16 @@ export function sessionsDirOf(root: string): string {
   return path.join(projectStateDir(root), "sessions");
 }
 
+// 学到的记忆，项目级（决策 332）与它的写入锁
+export function projectMemoryPathOf(root: string): string {
+  return path.join(projectStateDir(root), "memory.md");
+}
+
+export function projectMemoryLockPathOf(root: string): string {
+  return path.join(projectStateDir(root), "memory.lock");
+}
+
+// 旧的学到的记忆（单层、三行一条；决策 332 不迁移，迁移命令挪出仓库进用户级备份）与它的锁
 export function learnedDirOf(root: string): string {
   return path.join(projectStateDir(root), "learned");
 }
@@ -70,6 +81,7 @@ export function worktreesDirOf(root: string): string {
   return path.join(projectStateDir(root), "worktrees");
 }
 
+// 旧的补做复盘记录（决策 331 删除补做；迁移命令挪出仓库进用户级备份）
 export function reviewBackfillDirOf(root: string): string {
   return path.join(projectStateDir(root), "review-backfill");
 }
@@ -88,15 +100,17 @@ export function projectSkillsDir(root: string): string {
   return path.join(root, PIGEON_DIR, "skills");
 }
 
+// 旧的项目级人写说明（决策 330 改读 AGENTS.md；迁移命令改名备份）
 export function projectMemoryDir(root: string): string {
   return path.join(root, PIGEON_DIR, "memory");
 }
 
-// 本段不并入、原样读取的两份（钩子一段与记忆一段各自删除）
+// 本段不并入、原样读取的一份（钩子一段删除）
 export function verifyConfigPathOf(root: string): string {
   return path.join(root, PIGEON_DIR, "verify.json");
 }
 
+// 旧的复盘配置（决策 331 删除复盘；迁移命令改名备份）
 export function memoryReviewConfigPathOf(root: string): string {
   return path.join(root, PIGEON_DIR, "memory-review.json");
 }
@@ -163,8 +177,23 @@ export function userSkillsDir(homeDir: string = homedir()): string {
   return path.join(homeDir, PIGEON_DIR, "skills");
 }
 
+// 旧的用户级人写说明（决策 330：迁移命令改名为 ~/.pigeon/AGENTS.md）
 export function userPreferencesPath(homeDir: string = homedir()): string {
   return path.join(homeDir, PIGEON_DIR, "preferences.md");
+}
+
+// 用户级人写说明（决策 330）
+export function userAgentsMdPath(homeDir: string = homedir()): string {
+  return path.join(homeDir, PIGEON_DIR, "AGENTS.md");
+}
+
+// 学到的记忆，用户级（决策 332）与它的写入锁
+export function userMemoryPathOf(homeDir: string = homedir()): string {
+  return path.join(userStateDir(homeDir), "memory.md");
+}
+
+export function userMemoryLockPathOf(homeDir: string = homedir()): string {
+  return path.join(userStateDir(homeDir), "memory.lock");
 }
 
 // ---- 旧布局（决策 325 迁移）----
@@ -186,13 +215,11 @@ export function legacyConfigPath(root: string, file: string): string {
   return path.join(root, PIGEON_DIR, file);
 }
 
-// 旧位置的程序状态 → 新位置（相对 .pigeon 的名字；worktrees 由 git worktree move 迁移）
+// 旧位置的程序状态 → 新位置（相对 .pigeon 的名字；worktrees 由 git worktree move 迁移）。
+// 旧学到的记忆与补做复盘记录不在此列：决策 331、341 起由迁移命令直接挪出仓库进用户级备份
 export const LEGACY_STATE_ENTRIES = [
   { name: "sessions", target: (root: string) => sessionsDirOf(root) },
-  { name: "learned", target: (root: string) => learnedDirOf(root) },
-  { name: "learned.lock", target: (root: string) => learnedLockPathOf(root) },
   { name: "worktrees", target: (root: string) => worktreesDirOf(root) },
-  { name: "review-backfill", target: (root: string) => reviewBackfillDirOf(root) },
   { name: "tui-history.json", target: (root: string) => promptHistoryPathOf(root) },
   // 终端界面日志（文件名由终端界面库给出）
   { name: "pi-debug.log", target: (root: string) => path.join(tuiLogDirOf(root), "pi-debug.log") },

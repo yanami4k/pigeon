@@ -22,6 +22,9 @@ import {
 } from "./migration-backup.ts";
 
 const made: string[] = [];
+
+// Windows 上建符号链接要开发者模式或管理员；没有就跳过（与 eval/stream-workspace.test.ts 同一写法）
+const NO_SYMLINKS = process.platform === "win32" ? "Windows 上建不了原生符号链接" : false;
 after(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
@@ -52,7 +55,7 @@ test("旧文件挪进用户级本项目的备份目录：原文不变，仓库�
   assert.equal(readFileSync(target, "utf8"), '{"key":"k-1"}', "已有备份原样");
 });
 
-test("经符号链接打开的同一项目落到同一备份目录", () => {
+test("经符号链接打开的同一项目落到同一备份目录", { skip: NO_SYMLINKS }, () => {
   const root = temp("pigeon-backup-real-");
   const home = temp("pigeon-backup-home-");
   const link = join(temp("pigeon-backup-link-"), "via");

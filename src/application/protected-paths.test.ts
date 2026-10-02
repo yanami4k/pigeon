@@ -25,6 +25,8 @@ import { createProtectedPathResolver } from "./protected-paths.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
+// Windows 上建符号链接要开发者模式或管理员；没有就跳过（与 eval/stream-workspace.test.ts 同一写法）
+const NO_SYMLINKS = process.platform === "win32" ? "Windows 上建不了原生符号链接" : false;
 const roots: string[] = [];
 after(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
@@ -147,7 +149,7 @@ test("worker 在自己工作树里写 .pigeon 要人批（不再默认放行）�
   );
 });
 
-test("符号链接指进 .pigeon：经链接写入同样要人批", async () => {
+test("符号链接指进 .pigeon：经链接写入同样要人批", { skip: NO_SYMLINKS }, async () => {
   const root = project();
   symlinkSync(join(root, ".pigeon"), join(root, "cfg"));
   const asked = await runEdits(root, "cfg/settings.json", { restoredGrants: [sessionGrant] });
@@ -157,7 +159,9 @@ test("符号链接指进 .pigeon：经链接写入同样要人批", async () => 
   );
 });
 
-test("判定：词法与真实路径；子目录里同名的普通文件夹不算；大小写不敏感的文件系统按不敏感比较", () => {
+test("判定：词法与真实路径；子目录里同名的普通文件夹不算；大小写不敏感的文件系统按不敏感比较", {
+  skip: NO_SYMLINKS,
+}, () => {
   const root = project();
   mkdirSync(join(root, "sub", ".pigeon"), { recursive: true });
   symlinkSync(join(root, ".pigeon"), join(root, "link"));
@@ -199,7 +203,9 @@ test("判定：词法与真实路径；子目录里同名的普通文件夹不�
   assert.equal(sensitive(".PIGEON/Settings.json"), undefined);
 });
 
-test("判定：worker 的工作树在治理根的 .pigeon/state 下——树里的普通文件不算，树自己的 .pigeon 与指回治理根 .pigeon 的链接算", () => {
+test("判定：worker 的工作树在治理根的 .pigeon/state 下——树里的普通文件不算，树自己的 .pigeon 与指回治理根 .pigeon 的链接算", {
+  skip: NO_SYMLINKS,
+}, () => {
   const root = project();
   const tree = join(root, ".pigeon", "state", "worktrees", "s-w1");
   mkdirSync(join(tree, ".pigeon"), { recursive: true });
@@ -216,7 +222,9 @@ test("判定：worker 的工作树在治理根的 .pigeon/state 下——树里�
   assert.equal(resolve("up/settings.json"), ".pigeon/settings.json");
 });
 
-test("沙箱（容器执行端）：写成容器内绝对路径的 .pigeon 写入、经容器里的符号链接写进 .pigeon 都要人批；配置放权对普通文件照常生效", async () => {
+test("沙箱（容器执行端）：写成容器内绝对路径的 .pigeon 写入、经容器里的符号链接写进 .pigeon 都要人批；配置放权对普通文件照常生效", {
+  skip: NO_SYMLINKS,
+}, async () => {
   const governance = mkdtempSync(join(tmpdir(), "pigeon-protected-gov-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-protected-home-"));
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), "pigeon-protected-box-")));

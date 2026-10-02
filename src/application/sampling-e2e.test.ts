@@ -52,7 +52,7 @@ test("headless：给了温度，调用选项、注入快照摘要（Run 开始�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       temperature: 0,
     });
     assert.equal(withTemperature.status, "completed");
@@ -70,7 +70,7 @@ test("headless：给了温度，调用选项、注入快照摘要（Run 开始�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     assert.ok(plain.seen.every((options) => !("temperature" in options)));
     assert.equal("temperature" in startedModel(sessionsDir, without.sessionId), false);
@@ -113,7 +113,7 @@ test("推理开启时温度不生效：调用选项里不带温度，Run 开始�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       thinking: "high",
       temperature: 0,
     });

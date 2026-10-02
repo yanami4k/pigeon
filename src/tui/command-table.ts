@@ -18,6 +18,8 @@ export interface CommandAvailability {
   inWorkerSession?(): boolean;
   // 决策 309：脚本编排的命令面在场（缺省即不在场）
   scripts?(): boolean;
+  // 决策 331：/memory 的命令面在场（缺省即不在场）
+  memory?(): boolean;
   // 决策 340：/reload 重读设置（缺省即不在场）
   reload?(): boolean;
   // 决策 323、324：/hooks 看本会话生效的钩子（缺省即不在场）
@@ -164,6 +166,19 @@ export const SLASH_COMMANDS: readonly SlashCommandSpec[] = [
     whileRunning: { allow: true },
     available: (host) => host.hooks?.() === true,
   },
+  // 决策 331：查看两层记忆只读，运行中可用；编辑要暂停界面打开编辑器，运行中拒绝
+  {
+    name: "memory",
+    usage: "/memory",
+    whileRunning: { allow: true },
+    available: (host) => host.memory?.() === true,
+  },
+  {
+    name: "memory edit",
+    usage: "/memory edit project|user",
+    whileRunning: { allow: false, reason: "它会暂停界面、打开编辑器" },
+    available: (host) => host.memory?.() === true,
+  },
   // 决策 340：重读三层设置，新快照自下一轮起生效；会重建运行面，运行中拒绝
   {
     name: "reload",
@@ -216,7 +231,7 @@ export function resumeUsageText(): string {
 export function rejectWhileRunning(value: string): string | undefined {
   const spec = lookupSlashCommand(slashTokens(value));
   if (spec === undefined || spec.whileRunning.allow) return undefined;
-  return `运行中不能用 ${spec.usage.split(" ")[0]}${spec.name === "grants save" ? " save" : ""}：${spec.whileRunning.reason}。等本轮结束或按 Esc 中断后再用；输入已留在输入框`;
+  return `运行中不能用 /${spec.name}：${spec.whileRunning.reason}。等本轮结束或按 Esc 中断后再用；输入已留在输入框`;
 }
 
 // 决策 301：worker 会话里收到的斜杠命令——能用的返回 undefined，不能用的返回给人看的一行（未知命令同样说明）

@@ -152,7 +152,7 @@ test("pigeon run：缺省不注册、开了才注册；跑批器五个条件（�
       sessionSearch: spec.sessionSearch,
       pushedMemory: spec.pushedMemory,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     assert.ok(tools.includes("read_file"), spec.name);
     assert.ok(!tools.includes(SPAWN_WORKER_TOOL), `${spec.name}：${tools.join("、")}`);

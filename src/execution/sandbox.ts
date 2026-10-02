@@ -381,12 +381,14 @@ export function residualNotice(residual: readonly SandboxContainerInfo[]): strin
   );
 }
 
-// 在容器里建仓库：bundle 从标准输入读入，取出起点引用（$1）检出到沙箱分支（$2）
+// 在容器里建仓库：bundle 从标准输入读入，取出起点引用（$1）检出到沙箱分支（$2）。
+// core.autocrlf 关掉：容器里的仓库不套用宿主全局配置的换行转换，工作区内容与快照逐字节一致
 const CLONE_SCRIPT = [
   "set -e",
   'b="$(mktemp)"',
   'cat > "$b"',
   "git init -q .",
+  "git config core.autocrlf false",
   'git symbolic-ref HEAD "refs/heads/$2"',
   // 行尾按字节保真：宿主侧（含本机测试的假 docker）系统配置可能是 autocrlf=true，检出会被转成 CRLF
   "git config core.autocrlf false",

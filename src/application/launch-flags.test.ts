@@ -63,14 +63,14 @@ test("未配置模型接入：响亮失败并指出两种配置方式", () => {
   );
 });
 
-test("取值校验：推理档位、Memory 预算、单轮输出上限非法即失败；未知参数响亮失败", () => {
+test("取值校验：推理档位、单轮输出上限非法即失败；未知参数响亮失败；--memory-budget 随常驻 Memory 删除（决策 330）为未知参数", () => {
   assert.throws(
     () => parseLaunchFlags(["--thinking", "turbo"], { usage: USAGE, env: {} }),
     /--thinking/
   );
   assert.throws(
-    () => parseLaunchFlags(["--memory-budget", "-1"], { usage: USAGE, env: {} }),
-    /--memory-budget/
+    () => parseLaunchFlags(["--memory-budget", "4000"], { usage: USAGE, env: {} }),
+    /未知参数/
   );
   assert.throws(
     () => parseLaunchFlags(["--max-output-tokens", "0"], { usage: USAGE, env: {} }),
@@ -113,8 +113,6 @@ test("开关与取值型参数照常解析：--yolo / --no-persist-thinking / --
       "kimi-for-coding",
       "--thinking",
       "medium",
-      "--memory-budget",
-      "4000",
       "--max-output-tokens",
       "2048",
     ],
@@ -126,7 +124,6 @@ test("开关与取值型参数照常解析：--yolo / --no-persist-thinking / --
   assert.equal(flags.provider, "kimi-coding");
   assert.equal(flags.modelId, "kimi-for-coding");
   assert.equal(flags.thinkingLevel, "medium");
-  assert.equal(flags.memoryBudgetChars, 4000);
   assert.equal(flags.maxOutputTokens, 2048);
 });
 

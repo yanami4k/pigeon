@@ -8,16 +8,16 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { runHeadless } from "../application/headless-core.ts";
-import type { ReviewBudget, ReviewOutcome } from "../application/memory-review.ts";
 import { createContainerWorkspaceHost, trustedShell } from "../execution/container-host.ts";
 import type { CompactionConfigInput, StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_LOOP_GUARD_SETTINGS } from "../state/loop-guard-config.ts";
+import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
-import type { StepAgent, StepAgentResult, StepReviewFacts } from "./stream-runner.ts";
+import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
 import { IN_STREAM_CONTAINER, STALE_GIT_LOCKS } from "./stream-workspace.ts";
 
 // 工作方式指令：与外部基准同一句的写法（对齐公开最简实现的措辞），把"修 issue"换成"实现用户消息里描述的改动"。
@@ -55,9 +55,8 @@ export interface PigeonStepAgentOptions {
   temperature?: number;
   // 决策 188、218：上下文压缩的配置；缺省为产品缺省（实际几乎不触发），集成冒烟调低触发点验证压缩
   compaction?: CompactionConfigInput;
-  // 推送格（191、223、243）：学到的记忆的总量上限（缺省 12,000 字符）与复盘上限（缺省 40 轮、15 分钟）
+  // 推送格（191、332）：项目级学到的记忆的上限（缺省 4,000 字符）。跑批器只推项目级（作业目录里的记忆），不读使用者的用户级记忆
   memoryLimitChars?: number;
-  reviewBudget?: ReviewBudget;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -127,11 +126,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
       mkdirSync(placeholder, { recursive: true });
       const abort = new AbortController();
       const stopWatch = watchLimits(options.limits, input.abortSignal, () => abort.abort());
-      // 推送格的复盘：每次复盘前后各读一次这个作业的网关计量，做差累加即复盘的请求数、token 与花费
       const pushed = input.condition.pushedMemory;
-      const reviews: ReviewOutcome[] = [];
-      let reviewMeter: GatewayMeter | undefined;
-      let meterBefore: GatewayMeter | undefined;
       let run: Awaited<ReturnType<typeof runHeadless>>;
       try {
         run = await runHeadless({
@@ -145,41 +140,28 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
           maxTurns: input.budget.maxTurns,
           wallClockMs: input.budget.wallClockMs,
           skillRoots: [],
-          memoryRoots: [],
+          // 决策 330：跑批器不读人写的说明（作业目录里的 AGENTS.md 与使用者的用户级说明都不进条件）
+          agentsMd: false,
           taskDirective: STREAM_WORK_DIRECTIVE,
-          // 记忆条件（193）：能否检索历史会话 × 有无推送记忆（推送格带记忆工具、压缩前与收尾复盘）
+          // 记忆条件（193）：能否检索历史会话 × 有无推送记忆
           sessionSearch: input.condition.sessionSearch,
           // 决策 265：各条件都不带主 agent 派 worker 的能力（明确关掉，不依赖缺省；身份头记这一项）
           spawnWorkers: STREAM_SPAWN_WORKERS,
           // 决策 294：任务清单同样不带（明确关掉）
           taskList: STREAM_TASK_LIST,
-          // 决策 308：打转检测同样关掉（主 agent、复盘都不挂；轮数与豁免照缺省，只改开关）
+          // 决策 308：打转检测同样关掉（主 agent 不挂；轮数与豁免照缺省，只改开关）
           loopGuard: { ...DEFAULT_LOOP_GUARD_SETTINGS, enabled: STREAM_LOOP_GUARD },
           // 决策 309：提交编排脚本的工具同样不带（明确关掉）
           scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
           ...(pushed
             ? {
                 pushedMemory: true,
-                ...(options.memoryLimitChars !== undefined
-                  ? { memoryLimitChars: options.memoryLimitChars }
-                  : {}),
-                ...(options.reviewBudget !== undefined
-                  ? { reviewBudget: options.reviewBudget }
-                  : {}),
-                onReview: {
-                  started: () => {
-                    meterBefore = input.meter?.();
-                  },
-                  ended: (outcome: ReviewOutcome) => {
-                    reviews.push(outcome);
-                    const after = input.meter?.();
-                    if (after !== undefined && meterBefore !== undefined) {
-                      const delta = meterDelta(after, meterBefore);
-                      reviewMeter =
-                        reviewMeter === undefined ? delta : addMeters(reviewMeter, delta);
-                    }
-                    meterBefore = undefined;
-                  },
+                memoryLayers: ["project"],
+                memoryLimits: {
+                  ...DEFAULT_MEMORY_LIMITS,
+                  ...(options.memoryLimitChars !== undefined
+                    ? { project: options.memoryLimitChars }
+                    : {}),
                 },
               }
             : {}),
@@ -238,47 +220,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
         ...(providerFailed
           ? { interrupted: `模型服务故障（终态 ${run.status}）：${run.errorMessage ?? ""}` }
           : {}),
-        ...(pushed ? { review: reviewFactsOf(reviews, reviewMeter) } : {}),
       };
     },
-  };
-}
-
-// 两段计量差相加（峰值取较大者）
-function addMeters(a: GatewayMeter, b: GatewayMeter): GatewayMeter {
-  return {
-    requests: a.requests + b.requests,
-    input: a.input + b.input,
-    output: a.output + b.output,
-    cacheRead: a.cacheRead + b.cacheRead,
-    cacheWrite: a.cacheWrite + b.cacheWrite,
-    costCny: a.costCny + b.costCny,
-    upstreamFailures: a.upstreamFailures + b.upstreamFailures,
-    queueMs: a.queueMs + b.queueMs,
-    peakInFlight: Math.max(a.peakInFlight, b.peakInFlight),
-    peakInputTokens: Math.max(a.peakInputTokens, b.peakInputTokens),
-    accountRequests: a.accountRequests.map((n, i) => n + (b.accountRequests[i] ?? 0)),
-  };
-}
-
-// 这一步各次复盘的合计（结果行 review 的来源）
-export function reviewFactsOf(
-  reviews: readonly ReviewOutcome[],
-  meter: GatewayMeter | undefined
-): StepReviewFacts {
-  return {
-    closing: reviews.filter((review) => review.kind === "closing").length,
-    preCompaction: reviews.filter((review) => review.kind === "pre-compaction").length,
-    turns: reviews.reduce((sum, review) => sum + review.turns, 0),
-    tokens: reviews.reduce((sum, review) => sum + review.tokens, 0),
-    wallMs: reviews.reduce((sum, review) => sum + review.wallMs, 0),
-    hitLimit: reviews.some((review) => review.hitLimit),
-    failures: reviews.flatMap((review) =>
-      review.error !== undefined
-        ? [`${review.kind === "closing" ? "收尾" : "压缩前"}：${review.error}`]
-        : []
-    ),
-    ...(meter !== undefined ? { meter } : {}),
   };
 }
 

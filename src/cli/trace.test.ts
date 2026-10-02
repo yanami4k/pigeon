@@ -350,3 +350,38 @@ test("trace 报告：读取时跳过的行归异常项；分支会话标来源�
     // 复制来的来源 Run 不算分支会话的 Run
     assert.throws(() => runTraceCommand({ root, sessionId: branchId, runId }), /该会话无 Run/);
   }));
+
+test("旧会话含复盘与旧推送记忆字段（决策 331 之前的 Run 开始条目）：trace 照常渲染、不报错", () =>
+  withRoot(async (root) => {
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
+    const fixture = createFixtureSession({ sessionsDir });
+    fixture.startRun({ task: "旧会话" });
+    fixture.assistant({ text: "旧回复" });
+    fixture.endRun();
+    const { sessionId, path } = await fixture.close();
+    // 复盘删除前的 Run 开始条目：data 里带 memoryReview 与旧的 learnedMemory 字段
+    const lines = readFileSync(path, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const entry = JSON.parse(line) as {
+          type?: string;
+          customType?: string;
+          data?: Record<string, unknown>;
+        };
+        if (entry.type === "custom" && entry.customType === "pigeon.run-start" && entry.data) {
+          entry.data.memoryReview = { kind: "closing", template: "v1" };
+          entry.data.learnedMemory = {
+            path: ".pigeon/state/learned/MEMORY.md",
+            hash: "0".repeat(64),
+            bytes: 1,
+            entries: 1,
+            limitChars: 4000,
+          };
+        }
+        return JSON.stringify(entry);
+      });
+    writeFileSync(path, `${lines.join("\n")}\n`);
+    const trace = runTraceCommand({ root, sessionId });
+    assert.ok(trace.includes("Run 1 个"), trace);
+  }));

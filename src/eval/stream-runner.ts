@@ -45,7 +45,7 @@ import {
   taskPromptOf,
 } from "./stream-manifest.ts";
 import type { TestCaseResult } from "./stream-measure.ts";
-import { memoryFactsOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
+import { memoryFactsOf, snapshotOrRestoreMemory } from "./stream-memory-snapshot.ts";
 import {
   type CaseRun,
   countQuality,
@@ -238,20 +238,6 @@ export interface StepAgentResult {
   wallMs: number;
   // 这一步被打断（模型服务故障、限额）：整题作废、不留行
   interrupted?: string;
-  // 推送格的复盘（191、192、207）：没推送的条件缺省
-  review?: StepReviewFacts;
-}
-
-// 这一步的各次复盘合计：收尾与压缩前各几次、轮数、token、墙钟、是否撞复盘上限、失败原因；经网关时另带复盘期间的计量差
-export interface StepReviewFacts {
-  closing: number;
-  preCompaction: number;
-  turns: number;
-  tokens: number;
-  wallMs: number;
-  hitLimit: boolean;
-  failures: string[];
-  meter?: GatewayMeter;
 }
 
 export interface StepAgent {
@@ -679,7 +665,7 @@ async function runStreamJob(
         await limits?.ready();
         attempt += 1;
         // 记忆（191）：还没有这一步的快照即取一份；已有（作废重做、崩溃后续跑）即把记忆恢复成它
-        snapshotOrRestoreLearned(jobDir, step.seq);
+        snapshotOrRestoreMemory(jobDir, step.seq);
         const memoryAtStart = memoryFactsOf(jobDir);
         const sessionsBefore = new Set(sessionFilesOf(jobDir));
         try {
@@ -1172,20 +1158,17 @@ async function runStep(
     }
     let gatewayFacts: StreamGatewayFacts | null = null;
     const delta = admitted.delta;
-    // 复盘（191、192、207）另记、不算 agent 的：轮数、token、花费与墙钟都从 agent 的部分里减掉（复盘不占这一步的宽上限，171）
-    const review = result.review;
-    const reviewMeter = review?.meter;
     if (delta !== undefined) {
       // 各条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
-      // 花费与上下文峰值从网关计量读：花费按步做差，峰值取收尾时的值（每步开始时已重记）；
-      // 推送格的复盘花费按复盘前后的计量做差单列，agent 的花费不含它；不推送的条件复盘花费为 null
-      const agentDelta = reviewMeter !== undefined ? meterDelta(delta, reviewMeter) : delta;
+      // 花费与上下文峰值从网关计量读：花费按步做差，峰值取收尾时的值（每步开始时已重记）。
+      // 复盘随决策 331 删除，复盘花费恒为 null（字段留在结果行里，旧行照常可读）
+      const agentDelta = delta;
       gatewayFacts = {
         queueMs: delta.queueMs,
         accountRequests: delta.accountRequests,
         peakInFlight: delta.peakInFlight,
         costCny: agentDelta.costCny,
-        reviewCostCny: review !== undefined ? (reviewMeter?.costCny ?? 0) : null,
+        reviewCostCny: null,
         peakInputTokens: delta.peakInputTokens,
       };
       result = {
@@ -1202,35 +1185,12 @@ async function runStep(
         },
       };
     }
-    if (review !== undefined) {
-      result = { ...result, wallMs: Math.max(0, result.wallMs - review.wallMs) };
-    }
-    const reviewFacts =
-      review === undefined
-        ? null
-        : {
-            closing: review.closing,
-            preCompaction: review.preCompaction,
-            // 经网关时轮数与 token 取复盘期间的计量差（与 agent 同一口径），否则取复盘会话自己数的
-            turns: reviewMeter?.requests ?? review.turns,
-            tokens:
-              reviewMeter !== undefined
-                ? reviewMeter.input +
-                  reviewMeter.output +
-                  reviewMeter.cacheRead +
-                  reviewMeter.cacheWrite
-                : review.tokens,
-            wallMs: review.wallMs,
-            hitLimit: review.hitLimit,
-            failures: review.failures,
-          };
     const budget = options.budget ?? DEFAULT_STEP_BUDGET;
     hitStepBudget =
       result.status === "turn-limit" ||
       result.status === "wall-clock-limit" ||
       result.turns >= budget.maxTurns ||
       result.wallMs >= budget.wallClockMs;
-    // 收尾复盘在 agent 部分里（headless 返回之前）做完：步末的记忆大小在复盘之后记
     memoryAtEnd = memoryFactsOf(jobDir);
     const agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
     // agent 自己提交、切分支或让 HEAD 游离过的，先挪回起点；再存下它相对开工时的改动（代替延续式的流历史）
@@ -1249,8 +1209,9 @@ async function runStep(
       agentChangedDeps,
       memoryAtEnd,
       hitStepBudget,
-      review: reviewFacts,
-      hitReviewBudget: reviewFacts?.hitLimit ?? null,
+      // 复盘随决策 331 删除：两项恒为 null（字段留在结果行里，旧行照常可读）
+      review: null,
+      hitReviewBudget: null,
       status: result.status,
       turns: result.turns,
       usage: result.usage,

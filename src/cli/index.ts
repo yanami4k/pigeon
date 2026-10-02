@@ -18,7 +18,6 @@ import { failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless-core.ts";
 import {
-  applyReviewModelConfig,
   type LaunchFlags,
   orchestrationSettingsOf,
   parseLaunchFlags,
@@ -27,10 +26,14 @@ import {
   webToolsEnabled,
 } from "../application/launch-flags.ts";
 import { LOOP_GUARD_TEXTS } from "../application/loop-guard.ts";
-import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
 import { MIGRATE_CONFIG_USAGE, runMigrateConfig } from "../application/migrate-config.ts";
 import { runResumeFlow } from "../application/resume.ts";
-import { disposeRuntime, loadStreamFn, type RuntimeBundle } from "../application/runtime.ts";
+import {
+  disposeRuntime,
+  loadStreamFn,
+  type MemoryWriteConfig,
+  type RuntimeBundle,
+} from "../application/runtime.ts";
 import {
   closeSandbox,
   exportSandbox,
@@ -75,6 +78,7 @@ import {
 import { runStreamRejudge } from "../eval/stream-rejudge.ts";
 import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
+import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
@@ -288,7 +292,6 @@ async function resumeMain(argv: string[]): Promise<void> {
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
   // 工作区准备（决策 034）：realpath 规范化，与 tui 入口同一份
   const workspaceRoot = prepareWorkspace(flags.root);
-  applyReviewModelConfig(flags, workspaceRoot);
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   try {
@@ -326,6 +329,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           resume: true,
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
           ...webToolsOption(flags, settings),
+          // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
+          memoryWrite: lineMemoryWrite(write),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
           createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
           onMcpNote: (note) => {
@@ -336,6 +341,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           throw error;
         });
         const { bundle } = opened;
+        // 决策 330：人写的说明超出上限被截断时提示一行
+        if (bundle.instructionsNotice !== undefined) write(`${bundle.instructionsNotice}\n`);
         try {
           await runRepl({
             adapter: bundle.adapter,
@@ -369,7 +376,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--memory-limit <字符数>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置）";
   let task: string | undefined;
   let json = false;
@@ -436,7 +443,6 @@ async function runMain(argv: string[]): Promise<void> {
   });
   // 决策 324：--no-hooks 只对本次运行停用全部钩子
   if (flags.noHooks) settings = withHooksDisabled(settings);
-  applyReviewModelConfig(flags, workspaceRoot);
   // 决策 297–303：编排设定——设置的 orchestration 一节（缺失取缺省），--worker-concurrency 与 --worker-limit 优先
   const orchestration = orchestrationSettingsOf(flags, settings);
   // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
@@ -453,18 +459,12 @@ async function runMain(argv: string[]): Promise<void> {
     modelId: flags.modelId,
     persistThinking: flags.persistThinking,
     ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
-    ...(flags.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: flags.memoryBudgetChars }
-      : {}),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(wallClockMs !== undefined ? { wallClockMs } : {}),
     ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
     ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
-    // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守，收尾复盘在最后一次验证之后
+    // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守
     pushedMemory: flags.pushedMemory,
-    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
-    // 决策 296：复盘模型（配置里指定时）
-    ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
     // 决策 309：脚本编排随派 worker 打开，任务描述算作点名
@@ -748,7 +748,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
-    "[--memory-limit <字符数，缺省 12000>] [--review-max-turns N（缺省 40）] [--review-wall-clock-min N（缺省 15）] " +
+    "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
     '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
@@ -773,8 +773,6 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--baseline",
     "--spend-limit-cny",
     "--memory-limit",
-    "--review-max-turns",
-    "--review-wall-clock-min",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -825,8 +823,6 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
   const needsPigeon = conditions.some((c) => c !== "minimal");
   const memoryLimitChars = positive("--memory-limit");
-  const reviewMaxTurns = positive("--review-max-turns");
-  const reviewMinutes = positive("--review-wall-clock-min");
   const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
   const accounts = gatewayAccountsFromEnv(process.env);
   const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
@@ -840,16 +836,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
         // 决策 218：压缩阈值用产品缺省；集成冒烟可经参数调低
         ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
-        // 推送格（191、223、243）：记忆上限与复盘上限，没给即缺省（12,000 字符；40 轮、15 分钟）
+        // 推送格（191、332）：项目级记忆的上限，没给即缺省
         ...(memoryLimitChars !== undefined ? { memoryLimitChars } : {}),
-        ...(reviewMaxTurns !== undefined || reviewMinutes !== undefined
-          ? {
-              reviewBudget: {
-                maxTurns: reviewMaxTurns ?? DEFAULT_REVIEW_BUDGET.maxTurns,
-                wallClockMs: (reviewMinutes ?? DEFAULT_REVIEW_BUDGET.wallClockMs / 60_000) * 60_000,
-              },
-            }
-          : {}),
       }
     : undefined;
   const promptFormat = values.get("--prompt-format");
@@ -1136,7 +1124,6 @@ async function lineMain(argv: string[]): Promise<void> {
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, startUsage));
   // 工作区准备（决策 034）：realpath 规范化（工具路径围栏以它为准）
   const workspaceRoot = prepareWorkspace(flags.root);
-  applyReviewModelConfig(flags, workspaceRoot);
   const write = writeOut;
   const { ask, close } = createAsker(process.stdin, write);
   const sessionId = newSessionId();
@@ -1167,6 +1154,8 @@ async function lineMain(argv: string[]): Promise<void> {
       flags,
       ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
       ...webToolsOption(flags, settings),
+      // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
+      memoryWrite: lineMemoryWrite(write),
       // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
       createApprovalHandler: (grants) => createCliApprovalHandler(ask, write, { grants }),
       onMcpNote: (note) => {
@@ -1179,6 +1168,8 @@ async function lineMain(argv: string[]): Promise<void> {
     throw error;
   }
   const { bundle } = opened;
+  // 决策 330：人写的说明超出上限被截断时提示一行
+  if (bundle.instructionsNotice !== undefined) write(`${bundle.instructionsNotice}\n`);
   try {
     await runRepl({
       adapter: bundle.adapter,
@@ -1221,7 +1212,7 @@ export const TOP_LEVEL_HELP = [
 
 // 命令行对话与续跑接受的启动参数
 const SESSION_FLAGS_HINT =
-  "--yolo / --no-persist-thinking / --no-pushed-memory / --no-hooks（本次运行不接钩子）/ --memory-limit / --memory-budget / --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
+  "--yolo / --no-persist-thinking / --no-pushed-memory / --no-hooks（本次运行不接钩子）/ --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
 
 // 决策 237：沙箱的提示行
 // 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败
@@ -1277,6 +1268,14 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
+}
+
+// 决策 331：命令行对话写记忆的入口——来源记"命令行对话"，写入后打印一行
+function lineMemoryWrite(write: (text: string) => void): MemoryWriteConfig {
+  return {
+    source: "line",
+    onWritten: (notice) => write(`${memoryWriteNoticeLine(notice)}\n`),
+  };
 }
 
 // M7（决策 079）：/fork 手动分叉——分支沿用本会话的模型接入与审批模式

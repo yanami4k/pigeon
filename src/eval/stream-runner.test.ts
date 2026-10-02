@@ -37,7 +37,7 @@ import {
   TASK_CHAIN_SCOPE,
   TASK_PROMPT_LAYOUT,
 } from "./stream-manifest.ts";
-import { learnedDirOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
+import { memoryFileOf, snapshotOrRestoreMemory } from "./stream-memory-snapshot.ts";
 import { gateFromSteps, runJunitOnce, strandsRuntime } from "./stream-profiles.ts";
 import { readStreamResults, ZERO_USAGE } from "./stream-results.ts";
 import {
@@ -496,16 +496,16 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("记忆快照（191）：每步开工前取 .pigeon/state/learned/ 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
+  test("记忆快照（191、332）：每步开工前取项目级记忆 .pigeon/state/memory.md 的快照；作废重做前恢复成快照（作废尝试写下的不留）；进程死在一步中途之后续跑，同样恢复成那一步的快照", async () => {
     const t = await toy();
     try {
       const memoryOf = (workDir: string) => {
-        const file = join(learnedDirOf(workDir), "MEMORY.md");
+        const file = memoryFileOf(workDir);
         return existsSync(file) ? readFileSync(file, "utf8") : null;
       };
       const remember = (workDir: string, text: string) => {
-        mkdirSync(learnedDirOf(workDir), { recursive: true });
-        writeFileSync(join(learnedDirOf(workDir), "MEMORY.md"), text);
+        mkdirSync(dirname(memoryFileOf(workDir)), { recursive: true });
+        writeFileSync(memoryFileOf(workDir), text);
       };
       const seen: [number, string | null][] = [];
       let attempts = 0;
@@ -515,24 +515,24 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           remember(input.workDir, "作废尝试写下的\n");
           return { interrupted: "模型服务故障" };
         }
-        // 第 1 步之后一条，第 5 步之后两条（229 的条目格式）
-        remember(input.workDir, input.step.seq === 1 ? "- [L1] 甲\n" : "- [L1] 甲\n- [L2] 乙乙\n");
+        // 第 1 步之后一条，第 5 步之后两条（332 的条目格式）
+        remember(input.workDir, input.step.seq === 1 ? "- [P1] 甲\n" : "- [P1] 甲\n- [P2] 乙乙\n");
         return solve(input);
       });
       await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 1 }));
       const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
       // 模拟第 5 步开工、取过快照之后进程被杀：记忆里留着半截写下的东西
-      snapshotOrRestoreLearned(jobDir, 5);
+      snapshotOrRestoreMemory(jobDir, 5);
       remember(jobDir, "崩溃前半截写下的\n");
       const summary = await runStreams(options(t, { agents: { pigeon: agent }, maxSteps: 2 }));
       assert.deepEqual(seen, [
         [1, null],
         [1, null],
-        [5, "- [L1] 甲\n"],
+        [5, "- [P1] 甲\n"],
       ]);
-      assert.equal(memoryOf(jobDir), "- [L1] 甲\n- [L2] 乙乙\n");
+      assert.equal(memoryOf(jobDir), "- [P1] 甲\n- [P2] 乙乙\n");
       // 结果行记开工时（恢复快照之后）与步末（agent 结束之后）的记忆大小：作废尝试与崩溃前半截写下的都不计
-      const one = { bytes: Buffer.byteLength("- [L1] 甲\n"), entries: 1, entryChars: 9 };
+      const one = { bytes: Buffer.byteLength("- [P1] 甲\n"), entries: 1, entryChars: 9 };
       assert.deepEqual(
         readStreamResults(summary.resultsFile).map((r) => [r.seq, r.memoryAtStart, r.memoryAtEnd]),
         [
@@ -540,11 +540,11 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           [
             5,
             one,
-            { bytes: Buffer.byteLength("- [L1] 甲\n- [L2] 乙乙\n"), entries: 2, entryChars: 19 },
+            { bytes: Buffer.byteLength("- [P1] 甲\n- [P2] 乙乙\n"), entries: 2, entryChars: 19 },
           ],
         ]
       );
-      assert.deepEqual(readdirSync(join(jobDir, "learned-snapshots")).sort(), ["step-1", "step-5"]);
+      assert.deepEqual(readdirSync(join(jobDir, "memory-snapshots")).sort(), ["step-1", "step-5"]);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -649,7 +649,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("推送格的复盘（191、192、235）：结果行记复盘事实；复盘花费取复盘前后的计量差单列，agent 的轮数、用量、花费与墙钟都不含复盘；不推送的格子复盘为 null", async () => {
+  test("复盘随决策 331 删除：推送格与不推送的格子复盘字段一律为 null，agent 的轮数、用量与花费即整步的计量", async () => {
     const t = await toy();
     try {
       const zero: GatewayMeter = {
@@ -671,48 +671,20 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
         resetPeak: () => {},
       };
-      const bump = (key: string, by: Partial<GatewayMeter>) => {
-        const m = meters.get(key) ?? zero;
-        meters.set(key, {
-          ...m,
-          requests: m.requests + (by.requests ?? 0),
-          input: m.input + (by.input ?? 0),
-          output: m.output + (by.output ?? 0),
-          costCny: m.costCny + (by.costCny ?? 0),
-          accountRequests: [(m.accountRequests[0] ?? 0) + (by.requests ?? 0)],
-        });
-      };
       const agent = scriptedAgent((input) => {
         const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
         // agent 本身：2 次请求、110 token、0.25 元
-        bump(key, { requests: 2, input: 100, output: 10, costCny: 0.25 });
+        const m = meters.get(key) ?? zero;
+        meters.set(key, {
+          ...m,
+          requests: m.requests + 2,
+          input: m.input + 100,
+          output: m.output + 10,
+          costCny: m.costCny + 0.25,
+          accountRequests: [(m.accountRequests[0] ?? 0) + 2],
+        });
         solve(input);
-        if (!input.condition.pushedMemory) return { wallMs: 50 };
-        // 复盘：跑批器给的计量口在复盘前后各读一次（与 Pigeon 的步 agent 同一做法），做差即复盘的计量
-        assert.ok(input.meter !== undefined);
-        const before = input.meter();
-        bump(key, { requests: 3, input: 40, output: 5, costCny: 0.1 });
-        const after = input.meter();
-        return {
-          wallMs: 50,
-          review: {
-            closing: 1,
-            preCompaction: 1,
-            turns: 99,
-            tokens: 999,
-            wallMs: 20,
-            hitLimit: true,
-            failures: ["压缩前：模拟失败"],
-            meter: {
-              ...zero,
-              requests: after.requests - before.requests,
-              input: after.input - before.input,
-              output: after.output - before.output,
-              costCny: after.costCny - before.costCny,
-              accountRequests: [after.requests - before.requests],
-            },
-          },
-        };
+        return { wallMs: 50 };
       });
       const summary = await runStreams(
         options(t, {
@@ -723,26 +695,15 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         })
       );
       const rows = readStreamResults(summary.resultsFile);
-      const pushed = rows.find((r) => r.condition === "push-only");
-      const plain = rows.find((r) => r.condition === "neither");
-      assert.ok(pushed !== undefined && plain !== undefined);
-      assert.deepEqual(pushed.review, {
-        closing: 1,
-        preCompaction: 1,
-        turns: 3,
-        tokens: 45,
-        wallMs: 20,
-        hitLimit: true,
-        failures: ["压缩前：模拟失败"],
-      });
-      assert.equal(pushed.hitReviewBudget, true);
-      assert.equal(pushed.gateway?.reviewCostCny?.toFixed(6), (0.1).toFixed(6));
-      assert.equal(pushed.gateway?.costCny?.toFixed(6), (0.25).toFixed(6));
-      assert.deepEqual([pushed.turns, pushed.usage.totalTokens, pushed.agentWallMs], [2, 110, 30]);
-      assert.equal(plain.review, null);
-      assert.equal(plain.hitReviewBudget, null);
-      assert.equal(plain.gateway?.reviewCostCny, null);
-      assert.deepEqual([plain.turns, plain.usage.totalTokens, plain.agentWallMs], [2, 110, 50]);
+      for (const condition of ["push-only", "neither"]) {
+        const row = rows.find((r) => r.condition === condition);
+        assert.ok(row !== undefined);
+        assert.equal(row.review, null);
+        assert.equal(row.hitReviewBudget, null);
+        assert.equal(row.gateway?.reviewCostCny, null);
+        assert.equal(row.gateway?.costCny?.toFixed(6), (0.25).toFixed(6));
+        assert.deepEqual([row.turns, row.usage.totalTokens, row.agentWallMs], [2, 110, 50]);
+      }
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -1519,7 +1480,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           yolo: true,
           sessionId: newSessionId(),
           skillRoots: [],
-          memoryRoots: [],
+          agentsMd: false,
           homeDir: join(t.base, "home"),
         });
       const hitsOf = async (sessionsDir: string, keyword: string) => {

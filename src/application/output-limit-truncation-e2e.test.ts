@@ -38,7 +38,7 @@ test("截断与熔断：length 停止的工具调用不执行、文件不变；�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       editMode: "replace",
       maxTurns: 10,
     });

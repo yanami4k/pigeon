@@ -1,6 +1,6 @@
 # 配置与状态目录
 
-本页说明 Pigeon 的设置文件、程序状态目录、迁移命令与配置相关的安全防线（决策 325、326、340、341）。
+本页说明 Pigeon 的设置文件、程序状态目录、记忆与人写的说明、迁移命令与配置相关的安全防线（决策 325、326、328–332、340、341）。
 
 ## 三层设置
 
@@ -28,8 +28,9 @@
 | `sandbox` | 沙箱镜像（`image` 或项目自己的 `dockerfile`、`context`）与通用镜像的构建参数 `build` | `.pigeon/sandbox.json` |
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
+| `memory` | 学到的记忆的两层上限：`projectLimitChars`、`userLimitChars`，缺省各 4,000 字符 | — |
 
-各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/memory-review.json` 暂不并入，照旧读取；`.pigeon/verify.json` 已随验证门退役（决策 322），启动时按旧配置报错，迁移命令把它挪进备份目录并打印改写为收尾钩子的示例。
+各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
 另有顶层键 `disableAllHooks`（停用全部钩子）与 `stopHookBlockCap`（收尾钩子连续拦截上限，缺省 8），以及只能写在用户级的 `trustedDirectories`（路径数组，只接受绝对路径或 `~` 开头），见下文第三道防线。
 
@@ -52,13 +53,25 @@
 
 ## 程序状态目录 `.pigeon/state/`
 
-程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、学到的记忆（`learned/` 与 `learned.lock`）、worker 工作树（`worktrees/`）、补做复盘记录（`review-backfill/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（配置确认记录 `config-trust.json`、迁移备份 `migration-backup/`）在 `~/.pigeon/state/`。
+程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、项目级学到的记忆（`memory.md` 与 `memory.lock`）、worker 工作树（`worktrees/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（用户级学到的记忆 `memory.md`、配置确认记录 `config-trust.json`、迁移备份 `migration-backup/`）在 `~/.pigeon/state/`。
 
-人写的内容留在原处：`.pigeon/skills`、`~/.pigeon/skills`、`.pigeon/memory`、`~/.pigeon/preferences.md`。
+人写的内容：`.pigeon/skills`、`~/.pigeon/skills` 留在原处；人写的说明改读 AGENTS.md（见下文"记忆与人写的说明"），旧的 `.pigeon/memory/` 与 `~/.pigeon/preferences.md` 不再读取，由迁移命令处理。
 
 Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时，若 `.pigeon/.gitignore` 不存在，写入一份，内容为 `state/` 与 `settings.local.json` 两行；已存在则不改，缺这两行时在终端提示一行。
 
 快照、checkpoint 与 worker 改动叠加只排除 `.pigeon/state` 与 `.pigeon/settings.local.json`；仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills` 是项目内容，照常进快照与叠加。列目录与命令的文件变化报告仍不列整个 `.pigeon`。
+
+## 记忆与人写的说明
+
+学到的记忆分两层，一行一条，整份在会话开始时推入系统提示并冻结（会话中途改文件下个会话才生效）：
+
+- 项目级 `.pigeon/state/memory.md`、用户级 `~/.pigeon/state/memory.md`；行形如 `- [P3] 内容 〔2026-10-01 · 终端界面 · 会话 sess_…〕`（编号项目级 P 开头、用户级 U 开头；〔〕一段由工具补上日期、来源与会话编号，人手加的条目可缺）。
+- 记使用者的偏好、纠正与代码之外的项目信息（外部资料的位置、约定、背景）；能从代码与 git 历史看出的内容不记。
+- 两层各限 4,000 字符（设置的 `memory` 一节可改）。写满时新增或改长都会被拒绝，拒绝文字给出当前用量与还差多少；改短或等长一律放行。
+- 写入用 `update_memory` 工具（带 `layer` 参数，新增、按编号替换、按编号删除），写入不审批，写入后消息区提示一行。只有有人对话的入口（终端界面主会话含沙箱会话、`pigeon --line`）带这个工具；`pigeon run`、worker、跑批器只推送记忆。
+- 终端界面里 `/memory` 查看两层的内容、位置与用量；`/memory edit project|user` 用 `$VISUAL`/`$EDITOR` 编辑（存盘后校验格式与上限，不合格保留原内容）。
+
+人写的说明读 AGENTS.md：用户级 `~/.pigeon/AGENTS.md` 在前，项目级从仓库根到工作目录逐层拼接（某层没有 AGENTS.md 而有 CLAUDE.md 时读该层的 CLAUDE.md；不越过仓库根；不在 git 仓库里只读工作目录本身）。合计上限 32 KiB（按 UTF-8 字节），超出部分截断并在推送内容末尾与终端各提示一行。会话开始时读取并冻结。
 
 ## 迁移命令
 
@@ -71,11 +84,13 @@ pigeon migrate-config [--root <项目根>]
 - `web.json` 里的 key 不写入，打印应设的环境变量名。
 - `.pigeon/verify.json` 不并入设置：验证门已随决策 322 退役，迁移把它挪进备份目录，并打印把原验证命令改写为收尾（Stop）钩子的配置示例（分步配置按各步命令以 `&&` 连接）。
 - 旧位置的程序状态移入 `.pigeon/state/`；worker 工作树用 `git worktree move` 移动。
+- 已删除功能的遗留挪出仓库进用户级备份目录：旧学到的记忆（`.pigeon/learned/`、`.pigeon/state/learned/` 与它们的锁）、补做复盘记录（`.pigeon/review-backfill`、`.pigeon/state/review-backfill`）、复盘配置 `.pigeon/memory-review.json`、旧人写说明 `.pigeon/memory/`（另打印提示"把其中内容并入项目的 AGENTS.md"）。
+- 用户级旧偏好 `~/.pigeon/preferences.md` 改名为 `~/.pigeon/AGENTS.md`；目标已存在即拦阻、不覆盖。
 - 目标设置文件已存在时合并进去；同一节两边都有且内容不同则报错停下，不覆盖。
 - 有 Pigeon 会话或 worker 正在运行（锁被占用）、或工作树被锁定时拒绝并说明。
 - 可重复执行；没有要迁移的内容时如实说明。
 
-启动时（终端界面、`pigeon --line`、`pigeon resume`、`pigeon run`）发现任一旧配置文件或旧位置的状态即报错，提示运行 `pigeon migrate-config`，不自动迁移。
+启动时（终端界面、`pigeon --line`、`pigeon resume`、`pigeon run`）发现任一旧配置文件、旧位置的状态或已删除功能的遗留（复盘配置与补做记录、旧学到的记忆、`.pigeon/memory/`、`~/.pigeon/preferences.md`）即报错，提示运行 `pigeon migrate-config`，不自动迁移。
 
 ## 会话中途重读设置：`/reload`
 
@@ -84,7 +99,7 @@ pigeon migrate-config [--root <项目根>]
 - 执行命令类配置（命令短名、沙箱配置连同 Dockerfile、MCP 启动定义、钩子）与项目共享层的放行规则有变化（含首次出现）且未经确认的条目，照启动时的确认流程列出；`/reload confirm` 全部确认（记下指纹）并生效，`/reload skip` 不确认，这些条目沿用原内容，原来没有的不启用。新快照里的钩子自 `/reload` 起按新快照生效（终端界面在拦下或出错时的提示、`/hooks` 的清单随之更新）。
 - 新快照自下一轮起生效：放权、命令短名、编排设定等此后即按新快照；此后派出的 worker、新开的脚本编排用新快照；运行面按新快照重建，结果行列出改了哪些节与重启、停止、启动的服务。
 - MCP 服务只动有变化的：启动定义改了的重启，删掉的停止，新加的启动；启动定义未变的沿用原连接、不重启（只改风险档也不重启），服务自己的状态（例如浏览器类服务的登录与页面）得以保留。
-- 系统提示里会话开始时读取并冻结的部分不随 `/reload` 变：常驻 Memory（`.pigeon/memory` 与 `~/.pigeon/preferences.md`）、推送的记忆、Skill 目录沿用开局读到的内容，中途改这些文件要到下个会话才生效；由设置决定的部分（工具清单与工具说明、MCP 一段等）按新快照变。
+- 系统提示里会话开始时读取并冻结的部分不随 `/reload` 变：人写的说明（AGENTS.md）、推送的两层记忆、Skill 目录沿用开局读到的内容，中途改这些文件要到下个会话才生效；由设置决定的部分（工具清单与工具说明、MCP 一段等）按新快照变。
 - 正在跑的沙箱容器不重建：在沙箱会话里 `/reload` 且 `sandbox` 一节有变化时，提示退出后用 `pigeon resume <会话号> --sandbox` 续跑才对本会话的容器生效。
 - 有 worker 在跑或主 agent 正在运行时不重读。
 - `pigeon run` 与 `pigeon --line` 不设重载。

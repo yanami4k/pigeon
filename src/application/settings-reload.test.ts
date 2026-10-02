@@ -15,7 +15,12 @@ import { createFixtureServer } from "../mcp/fixtures.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
-import { learnedDirOf, projectLocalSettingsPath, projectSettingsPath } from "../state/paths.ts";
+import {
+  projectLocalSettingsPath,
+  projectMemoryPathOf,
+  projectSettingsPath,
+  userMemoryPathOf,
+} from "../state/paths.ts";
 import { commandsConfigOf, mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import { disposeRuntime, type RuntimeBundle } from "./runtime.ts";
@@ -272,18 +277,19 @@ test("MCP 定义变化后 /reload：只重启内容有变的服务——未变�
   }
 });
 
-test("系统提示里开局冻结的部分不随 /reload 变：中途改 .pigeon/memory 与 Skill 后重读，那几段不变；由设置决定的部分按新快照变", async () => {
+test("系统提示里开局冻结的部分不随 /reload 变：中途改 AGENTS.md、两层记忆与 Skill 后重读，那几段不变；由设置决定的部分按新快照变", async () => {
   const root = temp("pigeon-reload-frozen-");
   const home = temp("pigeon-reload-home-");
-  mkdirSync(join(root, ".pigeon", "memory"), { recursive: true });
-  writeFileSync(join(root, ".pigeon", "memory", "notes.md"), "开局写下的约定\n");
+  writeFileSync(join(root, "AGENTS.md"), "开局写下的约定\n");
   mkdirSync(join(root, ".pigeon", "skills", "alpha"), { recursive: true });
   writeFileSync(
     join(root, ".pigeon", "skills", "alpha", "SKILL.md"),
     "---\nname: alpha\ndescription: 开局的技能\n---\n正文\n"
   );
-  mkdirSync(learnedDirOf(root), { recursive: true });
-  writeFileSync(join(learnedDirOf(root), "MEMORY.md"), "- 开局学到的一条\n");
+  mkdirSync(join(root, ".pigeon", "state"), { recursive: true });
+  writeFileSync(join(projectMemoryPathOf(root)), "- [P1] 开局学到的一条\n");
+  mkdirSync(join(home, ".pigeon", "state"), { recursive: true });
+  writeFileSync(userMemoryPathOf(home), "- [U1] 用户级开局的一条\n");
   const s = await session(
     root,
     home,
@@ -297,10 +303,11 @@ test("系统提示里开局冻结的部分不随 /reload 变：中途改 .pigeon
     assert.match(before, /开局写下的约定/);
     assert.match(before, /alpha：开局的技能/);
     assert.match(before, /开局学到的一条/);
+    assert.match(before, /用户级开局的一条/);
     assert.ok(!before.includes("## 外部工具"));
-    writeFileSync(join(root, ".pigeon", "memory", "notes.md"), "中途改过的约定\n");
-    writeFileSync(join(root, ".pigeon", "memory", "more.md"), "中途新加的记忆\n");
-    writeFileSync(join(learnedDirOf(root), "MEMORY.md"), "- 中途学到的一条\n");
+    writeFileSync(join(root, "AGENTS.md"), "中途改过的约定\n");
+    writeFileSync(projectMemoryPathOf(root), "- [P1] 中途学到的一条\n");
+    writeFileSync(userMemoryPathOf(home), "- [U1] 用户级中途的一条\n");
     mkdirSync(join(root, ".pigeon", "skills", "beta"), { recursive: true });
     writeFileSync(
       join(root, ".pigeon", "skills", "beta", "SKILL.md"),
@@ -313,14 +320,15 @@ test("系统提示里开局冻结的部分不随 /reload 变：中途改 .pigeon
     assert.match(after, /## 外部工具/, "由设置决定的部分（MCP 一段）按新快照变");
     assert.ok(s.bundle().adapter.snapshot().tools.advertised.includes("mcp__fx__echo"));
     assert.match(after, /开局写下的约定/);
-    assert.ok(
-      !after.includes("中途改过的约定") && !after.includes("中途新加的记忆"),
-      "常驻 Memory 不变"
-    );
+    assert.ok(!after.includes("中途改过的约定"), "人写的说明不重读");
     assert.match(after, /alpha：开局的技能/);
     assert.ok(!after.includes("beta"), "Skill 目录不变");
     assert.match(after, /开局学到的一条/);
-    assert.ok(!after.includes("中途学到的一条"), "推送的记忆不变");
+    assert.match(after, /用户级开局的一条/);
+    assert.ok(
+      !after.includes("中途学到的一条") && !after.includes("用户级中途的一条"),
+      "两层推送的记忆不变"
+    );
   } finally {
     await s.dispose();
   }

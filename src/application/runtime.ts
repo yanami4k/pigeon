@@ -7,9 +7,9 @@
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
 // 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
-// 推送记忆（决策 191、217、227、244）：开着时会话开始读 .pigeon/state/learned/MEMORY.md 推入系统提示（常驻 Memory 之后、Skill 目录之前）
-// 并注册 update_memory；上下文压缩之前先复盘一次（192、207）。复盘运行面也在这里装：系统提示取来源冻结的原文，工具定义不变，
-// 执行时只放行 read_file 与 update_memory（240）
+// 人写的说明（决策 330）：会话开始读 AGENTS.md（用户级与仓库根到工作目录逐层）推入系统提示，合计上限 32 KiB。
+// 推送记忆（决策 191、331、332）：开着时会话开始读两层学到的记忆推入系统提示（人写的说明之后、Skill 目录之前）；
+// 只有有人对话的入口另给写入配置，注册 update_memory、推送段带"被纠正时记下"的说明。复盘（收尾、压缩前、补做）随决策 331 删除
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
 // 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
 import { existsSync } from "node:fs";
@@ -17,14 +17,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalHandler } from "../approvals/handler.ts";
-import {
-  assertMemoryLimit,
-  loadPushedMemory,
-  type MemoryConflictMode,
-  type PushedMemory,
-} from "../memory/pushed.ts";
-import { loadResidentMemory, type MemoryRoot, type ResidentMemory } from "../memory/resident.ts";
-import { REVIEW_TEMPLATE_VERSION, type ReviewKind } from "../memory/review-text.ts";
+import { type AgentsMdInstructions, loadAgentsInstructions } from "../memory/agents-md.ts";
+import type { MemoryLayer } from "../memory/learned.ts";
+import { loadPushedMemory, type PushedMemory } from "../memory/pushed.ts";
 import {
   createReadSessionEntryTool,
   createSearchSessionsTool,
@@ -34,6 +29,8 @@ import {
 } from "../memory/search-tools.ts";
 import {
   createUpdateMemoryTool,
+  type MemorySource,
+  type MemoryWriteNotice,
   UPDATE_MEMORY_TOOL,
   updateMemoryRegistration,
 } from "../memory/update-memory-tool.ts";
@@ -62,8 +59,7 @@ import {
 import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
-import type { MemoryReviewTag, ReviewCoverage } from "../state/learned-memory.ts";
-import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
+import type { MemoryLimits } from "../state/memory-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
@@ -71,6 +67,7 @@ import {
   commandsConfigOf,
   configGrantRulesOf,
   emptySettingsSnapshot,
+  memoryLimitsOf,
   type SettingsSnapshot,
   withHooksDisabled,
 } from "../state/settings.ts";
@@ -99,16 +96,6 @@ import {
 import { createToolGovernance } from "./governance.ts";
 import { SessionHooks } from "./hooks.ts";
 import type { McpSession } from "./mcp.ts";
-import {
-  assertReviewBudget,
-  DEFAULT_REVIEW_BUDGET,
-  gateReviewTools,
-  type ReviewBudget,
-  type ReviewModelChoice,
-  type ReviewObserver,
-  reviewWarner,
-  runMemoryReview,
-} from "./memory-review.ts";
 import {
   createOrchestrationTools,
   MESSAGE_WORKER_TOOL,
@@ -162,7 +149,7 @@ export interface RuntimeDeps {
   // 决策 248：日常沙箱改回逐条询问时置 false——注入执行端时仍接交互审批，但会话放权不建目录限定（[d] 按批准一次处理）；
   // 缺省不放开，注入执行端时带审批通道即报错
   pathScopedGrants?: boolean;
-  // M5.5 S1（决策 040）：治理根——.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在；
+  // M5.5 S1（决策 040）：治理根——.pigeon/（设置、程序状态、Skill）所在；
   // 缺省同工作区根。worker 的工作区根是自己的 git 工作树，治理根恒为主仓库根
   governanceRoot?: string;
   // M5.5 S2（决策 040）：委派策略（worker）——在场时 allow 与已注册工具取交、deny 与审批模式照搬，
@@ -186,10 +173,8 @@ export interface RuntimeDeps {
   restoredGrants?: readonly ActiveGrant[];
   // M5 S1（决策 045）：thinking 正文是否持久化进会话存储；缺省 true，Actor 以旗标关闭
   persistThinking?: boolean;
-  // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
+  // 用户级目录（~/.pigeon：AGENTS.md、Skill、学到的记忆的用户级）所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
-  // M5 S3（决策 042）：常驻 Memory 字符预算（缺省 8000，约 2000 token）
-  memoryBudgetChars?: number;
   // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖；缺省 off
   thinkingLevel?: ThinkingLevel;
   // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受设置的 commands 一节为该角色登记的
@@ -198,10 +183,10 @@ export interface RuntimeDeps {
   // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
   // 缺省 = 本会话没有外部工具
   mcp?: McpSession;
-  // M6.5（决策 059）：显式 Skill 根与 Memory 根——在场时只用给定的根（空数组 = 不注入），不扫治理根与用户级目录；
-  // Eval 三条件由 skillRoots 切换，memoryRoots 一律为空
+  // M6.5（决策 059）：显式 Skill 根——在场时只用给定的根（空数组 = 不注入），不扫治理根与用户级目录
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读。跑批器与只测装配的用例关掉（对照实验里说明不是变量，任何一层都不能漏进来）
+  agentsMd?: boolean;
   // 决策 061：编辑模式，缺省 hashline（缺省时装配出的工具与 system prompt 逐字不变）
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
@@ -226,16 +211,13 @@ export interface RuntimeDeps {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
   compaction?: CompactionConfigInput;
-  // 决策 192、207：压缩前回调（压缩前复盘的挂点）；缺省不挂
+  // 压缩前回调；缺省不挂
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217、244：推送记忆。在场即开着——开局推送 MEMORY.md、注册 update_memory、压缩前复盘；缺省关着
+  // 决策 191、244、331、332：推送记忆。在场即开着——开局推送两层记忆；带写入配置时另注册 update_memory。缺省关着
   // （装配层缺省；日常入口由启动参数缺省打开，跑批器按条件明确指定）
   learnedMemory?: LearnedMemoryConfig;
-  // 决策 340：/reload 重建时沿用旧运行面开局读到的常驻 Memory、推送的记忆与本地 Skill 扫描结果（不重读文件）
+  // 决策 340：/reload 重建时沿用旧运行面开局读到的人写说明（AGENTS.md）、推送的记忆与本地 Skill 扫描结果（不重读文件）
   frozenPrompt?: FrozenSessionPrompt;
-  // 决策 191、192：本运行面是一次复盘——系统提示取来源会话冻结的原文（工具定义照常装配，与来源相同），执行时只放行
-  // read_file 与 update_memory，Run 开始条目记复盘种类与模板版本。只由复盘装配时给
-  reviewSession?: ReviewSessionConfig;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
@@ -253,40 +235,24 @@ export interface RuntimeDeps {
   webTools?: WebToolsConfig;
 }
 
-// 复盘运行面的设定：种类、来源会话冻结的系统提示原文与来源会话号（refs 里的 user 补来源会话的编号——用户的话说在来源会话里）
-export interface ReviewSessionConfig {
-  kind: ReviewKind;
-  systemPrompt: string;
-  sourceSessionId: SessionId;
-  // 覆盖到来源会话的哪一条记录（283 补充）：分叉点，Run 开始条目的复盘标记记下它
-  covers?: ReviewCoverage;
-  // 终端界面启动时后台补做的复盘（283、295）：读代码的来处与此前的覆盖位置
-  backfill?: NonNullable<MemoryReviewTag["backfill"]>;
-}
-
 // 推送记忆的配置
 export interface LearnedMemoryConfig {
-  // {冲突处理} 的填法：交互使用（命令行对话、终端界面）/ 无人值守（pigeon run、跑批）
-  conflict: MemoryConflictMode;
-  // 总量上限（字符，按码点计）；缺省 12,000
-  limitChars?: number;
-  // 压缩前复盘：缺省开着、上限取缺省；false 即不做（worker 与复盘运行面自己）
-  review?: MemoryReviewSettings | false;
-  // 复盘模型（决策 296）：在场即本会话的复盘（压缩前、收尾）改用它；缺省用会话本身的模型
-  reviewModel?: ReviewModelChoice;
+  // 两层上限（字符，按码点计）；缺省取设置快照的 memory 一节（不给的取缺省 4,000）
+  limits?: MemoryLimits;
+  // 推送哪几层；缺省两层（跑批器只推项目级：不读使用者的用户级记忆）
+  layers?: readonly MemoryLayer[];
+  // 决策 331：写入。在场即注册 update_memory，推送段带写入说明与交互版的冲突处理；只由有人对话的入口给（终端界面主会话
+  // 含沙箱会话、--line）。委派策略在场（worker 与续开的 worker 会话）时不生效
+  write?: MemoryWriteConfig;
 }
 
-export interface MemoryReviewSettings {
-  // 复盘上限（缺省 40 轮、15 分钟）
-  budget?: ReviewBudget;
-  // 每次复盘开始与结束时调用
-  observer?: ReviewObserver;
-  // 复盘失败与撞上限的告警出口（缺省标准错误输出，同一类只说一次）
-  warn?: WarnSink;
-  // 外部中止（跑批器作废这一步等）：在途的复盘随之中止
-  abortSignal?: AbortSignal;
-  // 决策 307、308：打转检测设定（压缩前复盘挂上；叫停这次复盘，已写入的记忆保留）；缺省不挂
-  loopGuard?: LoopGuardSettings;
+export interface MemoryWriteConfig {
+  // 来源（哪个入口）：工具补在每条的〔〕里
+  source: MemorySource;
+  // 写入后调用：入口在消息区显示一行记下的内容与层级
+  onWritten?: (notice: MemoryWriteNotice) => void;
+  // 记日期用的时钟（测试注入）
+  now?: () => Date;
 }
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
@@ -305,10 +271,10 @@ export const WEB_TOOLS_SENTENCE =
   "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
   "web_fetch 只交回按问题提炼的结果，不交回网页原文。";
 
-// 系统提示里会话开始时读取并冻结的部分（决策 042、043、191）：常驻 Memory（项目 .pigeon/memory 与用户偏好）、
+// 系统提示里会话开始时读取并冻结的部分（决策 191、330、332）：人写的说明（AGENTS.md）、
 // 推送的记忆、本地 Skill 的扫描结果。/reload 重建运行面时沿用（决策 340），不重读文件
 export interface FrozenSessionPrompt {
-  residentMemory: ResidentMemory;
+  instructions: AgentsMdInstructions;
   pushedMemory?: PushedMemory;
   localSkills: LocalSkillScan;
 }
@@ -332,6 +298,8 @@ export interface RuntimeBundle {
   disposers?: Array<() => Promise<void>>;
   // 推送记忆开着时在场（worker 按它继承）
   learnedMemory?: LearnedMemoryConfig;
+  // 决策 330：人写的说明超出 32 KiB 被截断时给终端的一行提示（入口打出）；没截断时缺省
+  instructionsNotice?: string;
   // 决策 294 B1：任务清单开着时在场（续聊时从会话还原、/tasks 查看）
   taskList?: TaskList;
   // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
@@ -355,15 +323,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 压缩配置畸形在打开会话文件之前响亮失败
   const compactionConfig = resolveCompactionConfig(deps.compaction);
   const learned = deps.learnedMemory;
-  assertMemoryLimit(learned?.limitChars);
-  // 压缩前复盘（192、207）：推送开着、不是复盘运行面自己、没有明说不做时开着
-  const reviewSettings =
-    learned !== undefined && learned.review !== false && deps.reviewSession === undefined
-      ? (learned.review ?? {})
-      : undefined;
-  if (reviewSettings?.budget !== undefined) {
-    assertReviewBudget(reviewSettings.budget);
-  }
   // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
   // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（缺省 off）时温度照常下发
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
@@ -468,9 +427,17 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       registry.register(registration);
     }
   }
-  // 决策 217：推送开着时注册记忆工具（写档、只写 learned/、免审批）
-  if (learned !== undefined) {
-    registry.register(updateMemoryRegistration(governanceRoot));
+  // 决策 331：只有带写入配置的主会话注册记忆工具（写档、只写两层记忆文件、免审批）；worker 只推送
+  const memoryLimits = learned?.limits ?? memoryLimitsOf(settings);
+  const memoryWrite =
+    learned?.write !== undefined && deps.toolPolicy === undefined ? learned.write : undefined;
+  if (memoryWrite !== undefined) {
+    registry.register(
+      updateMemoryRegistration({
+        governanceRoot,
+        ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+      })
+    );
   }
   // 决策 264–267：派 worker 的工具——只给主会话；沙箱（执行端在场）不注册。worker 自己（委派策略在场）只在层数放开、
   // 它还没到最底层时由装配方给一个本层的槽（299：槽的派出方所在层大于 0），此时不给 take_worker（叠加只往主工作目录）
@@ -518,27 +485,29 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     registry.register(webSearchRegistration());
     registry.register(webFetchRegistration());
   }
-  // M5 S3（决策 042）：会话开始读常驻 Memory，拼进 system prompt 一次即冻结（不走 transformContext）；
-  // 清单进 InjectionSnapshot v3，会话中途改文件下个会话才生效
-  // 决策 340：/reload 重建时沿用开局读到的内容
+  // 决策 330：会话开始读人写的说明（AGENTS.md），拼进 system prompt 一次即冻结（不走 transformContext）；清单进注入快照，
+  // 会话中途改文件下个会话才生效。本地工作区从工作区根往上读（worker 即它自己的工作树）；沙箱读宿主上的工作区（治理根），
+  // 与本机会话内容一致
+  // 决策 340：/reload 重建运行面时沿用开局冻结的内容（不重读文件）
   const frozen = deps.frozenPrompt;
-  const residentMemory =
-    frozen?.residentMemory ??
-    loadResidentMemory({
-      workspaceRoot: governanceRoot,
-      ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-      ...(deps.memoryBudgetChars !== undefined ? { budgetChars: deps.memoryBudgetChars } : {}),
-      ...(deps.memoryRoots !== undefined ? { roots: deps.memoryRoots } : {}),
-    });
-  // 决策 191：会话开始读学到的记忆，整份推入、即冻结；清单进 Run 开始条目。复盘运行面也读一次（记下复盘开始时的记忆），
-  // 但系统提示用来源的原文
+  const instructions =
+    deps.agentsMd === false
+      ? { section: "", manifest: [] }
+      : (frozen?.instructions ??
+        loadAgentsInstructions({
+          workspaceRoot: deps.workspaceHost === undefined ? deps.workspaceRoot : governanceRoot,
+          ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+        }));
+  // 决策 191、332：会话开始读两层学到的记忆，整份推入、即冻结；清单进 Run 开始条目
   const pushedMemory =
     learned !== undefined
       ? (frozen?.pushedMemory ??
         loadPushedMemory({
           governanceRoot,
-          conflict: learned.conflict,
-          ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
+          ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+          limits: memoryLimits,
+          writable: memoryWrite !== undefined,
+          ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
         }))
       : undefined;
   const editSentence = replaceMode
@@ -587,7 +556,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "edit_file",
     RUN_COMMAND_TOOL,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL] : []),
-    ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
+    ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
     ...(spawnSlot !== undefined
@@ -609,19 +578,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
         "server 不可用时这些工具会报错，改用内置工具继续。"
       : "";
-  // 复盘运行面沿用来源会话冻结的系统提示原文（命中缓存，也不让复盘看到开局之后改过的记忆段）
-  const systemPrompt =
-    deps.reviewSession?.systemPrompt ??
-    [
-      basePrompt,
-      residentMemory.section,
-      pushedMemory?.section ?? "",
-      skillCatalog.section,
-      mcpSection,
-      deps.taskDirective ?? "",
-    ]
-      .filter((section) => section !== "")
-      .join("\n\n");
+  const systemPrompt = [
+    basePrompt,
+    instructions.section,
+    pushedMemory?.section ?? "",
+    skillCatalog.section,
+    mcpSection,
+    deps.taskDirective ?? "",
+  ]
+    .filter((section) => section !== "")
+    .join("\n\n");
   const delegated = deps.toolPolicy;
   const policy: ToolPolicy =
     delegated !== undefined
@@ -637,52 +603,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 188：压缩服务。摘要请求与主请求同一个模型接入，只套温度（摘要从不请求推理，温度总能生效）；
   // 不套单轮输出上限包装——它会盖掉上游给摘要定的输出上限（0.8 倍预留与模型输出上限的较小者）。
   // 模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供上游定摘要请求的选项
-  // 决策 192、207：压缩前复盘——推送开着时，压缩真正执行之前从本会话分叉复盘一次（三个触发位置都经这个回调），
-  // 再调用调用方给的压缩前回调。复盘改动的记忆不影响本会话（开工时已推入）；复盘失败不挡压缩
-  const warnReview = reviewWarner(reviewSettings?.warn);
-  const preCompactionReview: BeforeCompaction | undefined =
-    reviewSettings !== undefined && learned !== undefined
-      ? async (info) => {
-          const observer = reviewSettings.observer;
-          observer?.started?.("pre-compaction");
-          await sessionStore.flush();
-          const signals = [info.signal, reviewSettings.abortSignal].filter(
-            (signal): signal is AbortSignal => signal !== undefined
-          );
-          const outcome = await runMemoryReview({
-            kind: "pre-compaction",
-            governanceRoot,
-            sourceSessionId: deps.sessionId,
-            budget: reviewSettings.budget ?? DEFAULT_REVIEW_BUDGET,
-            abortSignal: AbortSignal.any(signals),
-            ...(reviewSettings.loopGuard !== undefined
-              ? { loopGuard: reviewSettings.loopGuard }
-              : {}),
-            open: (review) =>
-              reviewHandle(
-                buildRuntime(
-                  reviewRuntimeDeps(deps, review, {
-                    kind: "pre-compaction",
-                    systemPrompt,
-                    sourceSessionId: deps.sessionId,
-                    covers: review.covers,
-                  })
-                )
-              ),
-          });
-          warnReview(outcome);
-          observer?.ended?.(outcome);
-        }
-      : undefined;
-  const beforeCompaction: BeforeCompaction | undefined =
-    preCompactionReview === undefined
-      ? deps.beforeCompaction
-      : async (info) => {
-          await preCompactionReview(info);
-          await deps.beforeCompaction?.(info);
-        };
-  // 决策 323 / 324：PreCompact 钩子——压缩之前通知（只通知、不能拦：给压缩结果仍是压缩）。
-  // matcher 匹配触发位置：turn / run-start 记 auto，手动压缩记 manual
+  // 决策 323 / 324：PreCompact 钩子——压缩之前通知（只通知、不能拦：拦下压缩会使下一次请求超长出错）。
+  // matcher 匹配触发位置：turn / run-start 记 auto，手动压缩记 manual（331：压缩前复盘已删除，回调只剩调用方的）
   const hooksBeforeCompaction: BeforeCompaction | undefined = sessionHooks
     .list()
     .some((hook) => hook.event === "PreCompact")
@@ -692,9 +614,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           trigger,
           custom_instructions: info.customInstructions ?? null,
         });
-        await beforeCompaction?.(info);
+        await deps.beforeCompaction?.(info);
       }
-    : beforeCompaction;
+    : deps.beforeCompaction;
   // 占位模型对象（真实模型元数据在模型接入插件里）：压缩摘要请求与网页提炼请求共用
   const placeholderModel = {
     id: deps.modelId,
@@ -757,23 +679,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         systemPrompt,
         ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       },
-      memory: residentMemory.manifest,
+      memory: instructions.manifest,
       skills: skillCatalog.manifest,
       createdAt: Date.now(),
-      ...(pushedMemory !== undefined ? { learnedMemory: pushedMemory.manifest } : {}),
-      ...(deps.reviewSession !== undefined
-        ? {
-            memoryReview: {
-              kind: deps.reviewSession.kind,
-              template: REVIEW_TEMPLATE_VERSION,
-              ...(deps.reviewSession.covers !== undefined
-                ? { covers: { ...deps.reviewSession.covers } }
-                : {}),
-              ...(deps.reviewSession.backfill !== undefined
-                ? { backfill: structuredClone(deps.reviewSession.backfill) }
-                : {}),
-            },
-          }
+      ...(pushedMemory !== undefined
+        ? { pushedMemory: structuredClone(pushedMemory.manifest) }
         : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
     },
@@ -801,12 +711,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(sessionSearch
         ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
         : []),
-      ...(learned !== undefined
+      ...(memoryWrite !== undefined
         ? [
             createUpdateMemoryTool({
               governanceRoot,
-              sessionId: deps.reviewSession?.sourceSessionId ?? deps.sessionId,
-              ...(learned.limitChars !== undefined ? { limitChars: learned.limitChars } : {}),
+              ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+              sessionId: deps.sessionId,
+              source: memoryWrite.source,
+              limits: memoryLimits,
+              ...(memoryWrite.onWritten !== undefined ? { onWritten: memoryWrite.onWritten } : {}),
+              ...(memoryWrite.now !== undefined ? { now: memoryWrite.now } : {}),
             }),
           ]
         : []),
@@ -820,61 +734,58 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(taskList !== undefined ? createTaskListTools(taskList) : []),
       ...webToolset,
     ],
-    // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter；复盘运行面在前面加一道闸，只放行两件工具（240）
-    governance: gateReviewTools(
-      deps.reviewSession !== undefined,
-      createToolGovernance({
-        registry,
-        // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
-        // 交互实现由 Actor 注入（决策 025）；无审批通道时不传，prompt 档 fail-closed
-        ...(deps.createApprovalHandler !== undefined
-          ? { approvalHandler: deps.createApprovalHandler(grantStore) }
-          : {}),
-        // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
-        sessionGrants: grantStore,
-        configGrants,
-        workspaceRoot: deps.workspaceRoot,
-        // 决策 302：worker 改自己工作树内的文件默认放行
-        ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
-        // 决策 324：PreToolUse 钩子——在审批之前执行；拒绝 > 要人确认 > 放行；放行只免人工审批这一步，
-        // 改过的参数重新经过全部检查（交付给执行侧替换）
-        preToolUseHooks: async (input) => {
-          const report = await sessionHooks.runEvent("PreToolUse", input.toolName, {
-            tool_name: input.toolName,
-            tool_input: input.args,
-            tool_use_id: input.toolCallId,
-          });
-          if (report.additionalContext.length > 0) {
-            preToolContexts.set(input.toolCallId, [...report.additionalContext]);
-          }
-          if (report.blocked !== undefined) {
-            return { decision: "deny", reason: report.blocked.reason };
-          }
-          if (report.ask !== undefined) {
-            return {
-              decision: "ask",
-              ...(report.ask.reason !== undefined ? { reason: report.ask.reason } : {}),
-            };
-          }
-          if (report.updatedInput !== undefined) {
-            return { decision: "allow", updatedInput: report.updatedInput };
-          }
-          if (report.allow === true) {
-            return { decision: "allow" };
-          }
-          return undefined;
-        },
-        // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按宿主上的真实路径判定，容器工作区经执行端在容器里判定）
-        protectedPath:
-          deps.workspaceHost !== undefined
-            ? createHostProtectedPathResolver(deps.workspaceHost)
-            : createProtectedPathResolver({
-                workspaceRoot: deps.workspaceRoot,
-                governanceRoot,
-                realPaths: true,
-              }),
-      })
-    ),
+    // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
+    governance: createToolGovernance({
+      registry,
+      // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
+      // 交互实现由 Actor 注入（决策 025）；无审批通道时不传，prompt 档 fail-closed
+      ...(deps.createApprovalHandler !== undefined
+        ? { approvalHandler: deps.createApprovalHandler(grantStore) }
+        : {}),
+      // M4 S6（决策 3 + D6）：grant 求值件——排律 deny → 会话 grant → 配置 grant → yolo → read → prompt
+      sessionGrants: grantStore,
+      configGrants,
+      workspaceRoot: deps.workspaceRoot,
+      // 决策 302：worker 改自己工作树内的文件默认放行
+      ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
+      // 决策 324：PreToolUse 钩子——在审批之前执行；拒绝 > 要人确认 > 放行；放行只免人工审批这一步，
+      // 改过的参数重新经过全部检查（交付给执行侧替换）
+      preToolUseHooks: async (input) => {
+        const report = await sessionHooks.runEvent("PreToolUse", input.toolName, {
+          tool_name: input.toolName,
+          tool_input: input.args,
+          tool_use_id: input.toolCallId,
+        });
+        if (report.additionalContext.length > 0) {
+          preToolContexts.set(input.toolCallId, [...report.additionalContext]);
+        }
+        if (report.blocked !== undefined) {
+          return { decision: "deny", reason: report.blocked.reason };
+        }
+        if (report.ask !== undefined) {
+          return {
+            decision: "ask",
+            ...(report.ask.reason !== undefined ? { reason: report.ask.reason } : {}),
+          };
+        }
+        if (report.updatedInput !== undefined) {
+          return { decision: "allow", updatedInput: report.updatedInput };
+        }
+        if (report.allow === true) {
+          return { decision: "allow" };
+        }
+        return undefined;
+      },
+      // 决策 326 ①：项目的 .pigeon 为受保护路径（本地工作区按宿主上的真实路径判定，容器工作区经执行端在容器里判定）
+      protectedPath:
+        deps.workspaceHost !== undefined
+          ? createHostProtectedPathResolver(deps.workspaceHost)
+          : createProtectedPathResolver({
+              workspaceRoot: deps.workspaceRoot,
+              governanceRoot,
+              realPaths: true,
+            }),
+    }),
     sessionId: deps.sessionId,
     sessionStore,
     compaction: compactor,
@@ -937,73 +848,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     hooks: sessionHooks,
     toolTiers,
     frozenPrompt: {
-      residentMemory,
+      instructions,
       ...(pushedMemory !== undefined ? { pushedMemory } : {}),
       localSkills,
     },
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),
-    ...(taskList !== undefined ? { taskList } : {}),
-  };
-}
-
-// 复盘运行面的装配参数：与来源同一份（工具定义因此相同），换会话号与初始消息，系统提示取来源原文；不带压缩前回调与
-// 会话来历；预算取复盘上限；推送照开（注册 update_memory）但不再嵌套压缩前复盘
-export function reviewRuntimeDeps(
-  deps: RuntimeDeps,
-  review: { sessionId: SessionId; initialMessages: AgentMessage[] },
-  session: ReviewSessionConfig
-): RuntimeDeps {
-  const {
-    beforeCompaction: _beforeCompaction,
-    storeLineage: _storeLineage,
-    restoredGrants: _restoredGrants,
-    budget: _budget,
-    initialMessages: _initialMessages,
-    learnedMemory,
-    ...base
-  } = deps;
-  const settings = learnedMemory?.review;
-  const budget = (settings !== false ? settings?.budget : undefined) ?? DEFAULT_REVIEW_BUDGET;
-  const reviewModel = learnedMemory?.reviewModel;
-  return {
-    ...base,
-    // 决策 324：复盘是程序内部运行面，不接使用者配的钩子
-    ...(base.settings !== undefined ? { settings: withHooksDisabled(base.settings) } : {}),
-    ...(reviewModel !== undefined
-      ? { provider: reviewModel.provider, modelId: reviewModel.modelId }
+    ...("notice" in instructions && instructions.notice !== undefined
+      ? { instructionsNotice: instructions.notice }
       : {}),
-    sessionId: review.sessionId,
-    initialMessages: review.initialMessages,
-    reviewSession: session,
-    budget: { maxTurns: budget.maxTurns, wallClockMs: budget.wallClockMs },
-    ...(learnedMemory !== undefined ? { learnedMemory: { ...learnedMemory, review: false } } : {}),
-  };
-}
-
-// 复盘运行面的句柄：释放时只停运行面、关会话文件，不关 MCP 会话（与来源共用，来源还在用）
-export function reviewHandle(bundle: RuntimeBundle): {
-  run: RuntimeBundle["adapter"]["run"];
-  interrupt: RuntimeBundle["adapter"]["interrupt"];
-  subscribe: RuntimeBundle["adapter"]["subscribe"];
-  subscribeRounds: RuntimeBundle["adapter"]["subscribeRounds"];
-  notify: RuntimeBundle["adapter"]["notify"];
-  dispose(): Promise<void>;
-} {
-  const { adapter, sessionStore } = bundle;
-  return {
-    run: (task) => adapter.run(task),
-    interrupt: (cause) => adapter.interrupt(cause),
-    subscribe: (listener) => adapter.subscribe(listener),
-    subscribeRounds: (listener) => adapter.subscribeRounds(listener),
-    notify: (text) => adapter.notify(text),
-    dispose: async () => {
-      try {
-        await adapter.dispose();
-      } finally {
-        await sessionStore.close();
-      }
-    },
+    ...(taskList !== undefined ? { taskList } : {}),
   };
 }
 

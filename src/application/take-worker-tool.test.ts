@@ -308,7 +308,7 @@ function protectedFixture(touchPigeon: boolean) {
   git(main, "init", "-q", "-b", "main");
   git(main, "config", "user.email", "pigeon@example.invalid");
   git(main, "config", "user.name", "pigeon-test");
-  // 检出按字节比对：本机系统配置 autocrlf=true 会把检出转成 CRLF
+  // 关掉换行转换：否则全局 core.autocrlf=true 的机器上叠回会把 \n 变成 \r\n
   git(main, "config", "core.autocrlf", "false");
   mkdirSync(join(main, ".pigeon"));
   writeFileSync(join(main, ".pigeon", ".gitignore"), "state/\nsettings.local.json\n");

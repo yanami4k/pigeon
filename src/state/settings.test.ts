@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   configGrantRulesOf,
   emptySettingsSnapshot,
+  memoryLimitsOf,
   mergedSettingsProblems,
   mergeSettingsLayers,
   type SettingsFile,
@@ -307,4 +308,24 @@ test("withHooksDisabled：清单清空、disableAllHooks 置位，其余各节�
   // 原快照不动（不改就地）
   assert.equal(snapshot.merged.disableAllHooks, false);
   assert.equal(snapshot.hooks.length, 2);
+});
+test("memory 一节（决策 332）：两层上限各自可设，未知键与非正整数报错；按键逐层合并，不给的取缺省 4,000", () => {
+  const { merged } = snapshotOf({
+    user: { memory: { projectLimitChars: 1000, userLimitChars: 2000 } },
+    project: { memory: { projectLimitChars: 3000 } },
+  });
+  assert.deepEqual(merged.memory, { projectLimitChars: 3000, userLimitChars: 2000 });
+  assert.deepEqual(
+    memoryLimitsOf(
+      snapshotOf({ user: { memory: { userLimitChars: 2000 } }, local: { memory: {} } })
+    ),
+    { project: 4000, user: 2000 }
+  );
+  assert.deepEqual(memoryLimitsOf(emptySettingsSnapshot("/p")), { project: 4000, user: 4000 });
+  assert.match(
+    problemsOf("project", { memory: { limitChars: 10 } }).join("\n"),
+    /\.pigeon\/settings\.json（项目共享）：memory 一节里的未知键 limitChars/
+  );
+  assert.ok(problemsOf("user", { memory: { userLimitChars: 0 } }).length > 0);
+  assert.ok(problemsOf("user", { memory: { projectLimitChars: 1.5 } }).length > 0);
 });

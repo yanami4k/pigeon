@@ -16,9 +16,7 @@
 // 释放运行面之前停掉仍在跑的 worker（撞上限、外部中止时），等其收尾记录写进本会话。执行端另一侧的工作区（容器）与分支会话不注册。
 // 任务清单（294 B1）：开着时给主 agent 注册两件清单工具
 import type { ScriptLauncher } from "../execution/script-sandbox.ts";
-import { assertMemoryLimit } from "../memory/pushed.ts";
-import type { MemoryRoot } from "../memory/resident.ts";
-import { reviewVerdictText } from "../memory/review-text.ts";
+import type { MemoryLayer } from "../memory/learned.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
@@ -28,6 +26,7 @@ import type { FailureClass } from "../state/classification.ts";
 import { DEFAULT_STOP_HOOK_BLOCK_CAP } from "../state/hooks.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
+import type { MemoryLimits } from "../state/memory-config.ts";
 import {
   DEFAULT_ORCHESTRATION_SETTINGS,
   type OrchestrationSettings,
@@ -45,16 +44,6 @@ import { compactionWarner } from "./compaction-text.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
 import { attachLoopGuard, type LoopStop } from "./loop-guard.ts";
 import type { McpSession } from "./mcp.ts";
-import {
-  assertReviewBudget,
-  DEFAULT_REVIEW_BUDGET,
-  type ReviewBudget,
-  type ReviewModelChoice,
-  type ReviewObserver,
-  type ReviewOutcome,
-  reviewWarner,
-  runMemoryReview,
-} from "./memory-review.ts";
 import type { LearnedMemoryConfig, RuntimeBundle } from "./runtime.ts";
 import { createSessionScripts, modelPricing } from "./script-host.ts";
 import { ScriptGate, scriptGateSettingsOf } from "./script-naming.ts";
@@ -124,8 +113,8 @@ export interface HeadlessRunOptions {
   // 外部中止（调用方的限额看守等）：在途的运行立即中止、不再回炉，终态记 aborted，不写撞上限记录
   abortSignal?: AbortSignal;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
-  memoryBudgetChars?: number;
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读，跑批器关掉
+  agentsMd?: boolean;
   homeDir?: string;
   persistThinking?: boolean;
   sessionId?: SessionId;
@@ -141,20 +130,16 @@ export interface HeadlessRunOptions {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省，集成冒烟可调低触发点
   compaction?: CompactionConfigInput;
-  // 决策 192、207：压缩前回调（压缩前复盘的挂点）；缺省不挂
+  // 决策 192、207：压缩前回调（通用挂点，尚无生产入口设置它）；缺省不挂
   beforeCompaction?: BeforeCompaction;
   // 运行时告警的出口（自动压缩没压成、压缩前回调失败；缺省标准错误输出，同一类只说一次；测试注入）
   warn?: WarnSink;
-  // 决策 191、193：推送记忆（开局把记忆整份推入系统提示、带 update_memory、压缩前与收尾复盘）；缺省关着
+  // 决策 191、193、331：推送记忆（开局把两层记忆整份推入系统提示）；无人值守，只推送、不注册 update_memory。缺省关着
   pushedMemory?: boolean;
-  // 学到的记忆的总量上限（字符，按码点计）；缺省 12,000
-  memoryLimitChars?: number;
-  // 复盘上限（每次复盘各自计；缺省 40 轮、15 分钟，243）
-  reviewBudget?: ReviewBudget;
-  // 复盘模型（决策 296）：日常入口按配置给，在场即压缩前与收尾复盘都用它；跑批器不给（复盘用这一步本身的模型）
-  reviewModel?: ReviewModelChoice;
-  // 每次复盘开始与结束时调用（跑批器据此在复盘前后读网关计量）
-  onReview?: ReviewObserver;
+  // 学到的记忆的两层上限（字符，按码点计）；缺省取设置快照的 memory 一节
+  memoryLimits?: MemoryLimits;
+  // 推送哪几层；缺省两层（跑批器只推项目级）
+  memoryLayers?: readonly MemoryLayer[];
   // 决策 264–267：派 worker（给主 agent 注册 spawn_worker）；缺省关着——pigeon run 由启动参数缺省打开，跑批器各条件明确关掉。
   // 注入了执行端（容器工作区）或是分支会话时不注册
   spawnWorkers?: boolean;
@@ -170,7 +155,7 @@ export interface HeadlessRunOptions {
   // 决策 287–291：联网工具的配置——在场即给主会话与 worker 注册两件工具；缺省不注册（pigeon run 由启动参数缺省给出，
   // --sandbox-network off 不给；跑批器各条件不给）
   webTools?: WebToolsConfig;
-  // 决策 305–308：打转检测设定——主 agent、worker 与复盘都挂；缺省不挂（pigeon run 按项目配置缺省打开，跑批器各条件明确关掉）
+  // 决策 305–308：打转检测设定——主 agent 与 worker 都挂；缺省不挂（pigeon run 按项目配置缺省打开，跑批器各条件明确关掉）
   loopGuard?: LoopGuardSettings;
   // 测试注入 MCP 会话；缺省按治理根的 MCP 配置启动
   startMcp?: () => Promise<McpSession>;
@@ -199,17 +184,12 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   errorMessage?: string;
   // 由会话现算的标签（决策 322：不再有"通过"——验证门已删除，正常做完记未知）
   label: OutcomeLabel;
-  // 推送记忆开着时在场：这一步的各次复盘（压缩前的按发生先后，收尾的在最后）
-  reviews?: ReviewOutcome[];
   // 打转叫停时在场（307）：计数与重复的调用（收尾说明用）
   looping?: LoopStop;
 }
 
 export async function runHeadless(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
   const pushed = options.pushedMemory === true;
-  assertMemoryLimit(options.memoryLimitChars);
-  const reviewBudget = options.reviewBudget ?? DEFAULT_REVIEW_BUDGET;
-  assertReviewBudget(reviewBudget);
   // 护栏（112 的延伸）：注入了执行端时 workspaceRoot 在宿主一侧、不是 agent 干活的工作区。分支会话
   // 要在它上面打 git 快照、到独立工作树里续跑——对容器里的工作区只会得到假结果，装配前一律拒绝
   if (options.workspaceHost !== undefined && options.branchHeader !== undefined) {
@@ -220,52 +200,16 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
   }
   const sessionId = options.sessionId ?? newSessionId();
   const startedAt = Date.now();
-  // 这一步的墙钟：压缩前复盘期间暂停（复盘不占这一步的宽上限，171），复盘结束后顺延
+  // 这一步的墙钟
   let deadline = options.wallClockMs !== undefined ? startedAt + options.wallClockMs : undefined;
   let timer: NodeJS.Timeout | undefined;
-  let pausedAt: number | undefined;
-  let armClock = (): void => {};
-  const pauseClock = (): void => {
-    clearTimeout(timer);
-    timer = undefined;
-    pausedAt = Date.now();
-  };
-  const resumeClock = (): void => {
-    if (pausedAt !== undefined && deadline !== undefined) {
-      deadline += Date.now() - pausedAt;
-    }
-    pausedAt = undefined;
-    armClock();
-  };
-  const reviews: ReviewOutcome[] = [];
-  const warnReview = reviewWarner(options.warn);
-  // 推送记忆（191）：无人值守——{冲突处理} 填无人值守版；压缩前复盘由运行面在压缩前回调里做
+  // 推送记忆（191、331）：无人值守——只推送，不给写入配置（冲突处理随之为无人值守版）
   const learnedMemory: LearnedMemoryConfig | undefined = pushed
     ? {
-        conflict: "unattended",
-        ...(options.memoryLimitChars !== undefined ? { limitChars: options.memoryLimitChars } : {}),
-        ...(options.reviewModel !== undefined ? { reviewModel: options.reviewModel } : {}),
-        review: {
-          budget: reviewBudget,
-          observer: {
-            started: (kind) => {
-              pauseClock();
-              options.onReview?.started?.(kind);
-            },
-            ended: (outcome) => {
-              reviews.push(outcome);
-              options.onReview?.ended?.(outcome);
-              resumeClock();
-            },
-          },
-          ...(options.warn !== undefined ? { warn: options.warn } : {}),
-          ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
-          ...(options.loopGuard !== undefined ? { loopGuard: options.loopGuard } : {}),
-        },
+        ...(options.memoryLimits !== undefined ? { limits: options.memoryLimits } : {}),
+        ...(options.memoryLayers !== undefined ? { layers: options.memoryLayers } : {}),
       }
     : undefined;
-  // 开局冻结的系统提示原文：收尾复盘沿用它
-  let frozenSystemPrompt: string | undefined;
   // 运行面装起来后拿到的装配结果：回炉在释放之前经它的会话文件落验证记录
   let liveBundle: RuntimeBundle | undefined;
   // 已注册工具的风险档位（需审批次数按它现算；运行面没装起来时为空）
@@ -298,7 +242,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
   let notices: WorkerNotices | undefined;
   // worker 每收尾一轮用的 token（计入本次运行的 token 上限；运行开始前接好）
   let addWorkerTokens: (tokens: number) => void = () => {};
-  // 本次运行与收尾复盘共用的装配参数（工具定义因此相同）
+  // 本次运行的装配参数
   const surface: Omit<DetachedRuntimeRequest, "sessionId"> = {
     governanceRoot: options.governanceRoot,
     ...(options.settings !== undefined ? { settings: options.settings } : {}),
@@ -312,11 +256,8 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.thinking !== undefined ? { thinkingLevel: options.thinking } : {}),
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
     ...(options.persistThinking !== undefined ? { persistThinking: options.persistThinking } : {}),
-    ...(options.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: options.memoryBudgetChars }
-      : {}),
     ...(options.skillRoots !== undefined ? { skillRoots: options.skillRoots } : {}),
-    ...(options.memoryRoots !== undefined ? { memoryRoots: options.memoryRoots } : {}),
+    ...(options.agentsMd !== undefined ? { agentsMd: options.agentsMd } : {}),
     ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
     ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
@@ -325,7 +266,6 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
     ...(options.startMcp !== undefined ? { startMcp: options.startMcp } : {}),
     ...(learnedMemory !== undefined ? { learnedMemory } : {}),
-    // 收尾复盘与本次运行同一份工具定义；复盘的执行闸不放行 spawn_worker
     ...(spawnSlot !== undefined ? { spawnWorker: spawnSlot } : {}),
     ...(scriptSlot !== undefined ? { scriptOrchestration: scriptSlot } : {}),
     ...(options.taskList === true ? { taskList: true } : {}),
@@ -347,6 +287,10 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
+      // 决策 330：人写的说明超出上限被截断时提示一行（告警出口，缺省标准错误输出）
+      if (bundle.instructionsNotice !== undefined) {
+        (options.warn ?? ((line: string) => console.error(line)))(bundle.instructionsNotice);
+      }
       // 决策 305–307：打转检测挂在主 agent 上——提醒进下一轮；计到叫停轮数即以打转中止
       const detachLoopGuard = attachLoopGuard(bundle.adapter, options.loopGuard, (found) => {
         if (limitHit === undefined) {
@@ -355,7 +299,6 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
         stop("looping");
       });
       bundle.disposers = [...(bundle.disposers ?? []), async () => detachLoopGuard()];
-      frozenSystemPrompt = bundle.adapter.snapshot().context.systemPrompt;
       // 决策 189：无头运行没人看压缩提示——自动压缩没压成与压缩前回调失败写标准错误输出，同一类只说一次
       bundle.adapter.subscribeCompaction(compactionWarner(options.warn));
       toolTiers = bundle.toolTiers;
@@ -462,12 +405,9 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       stop("token-limit");
     }
   };
-  armClock = () => {
-    if (deadline !== undefined) {
-      timer = setTimeout(() => stop("wall-clock-limit"), Math.max(0, deadline - Date.now()));
-    }
-  };
-  armClock();
+  if (deadline !== undefined) {
+    timer = setTimeout(() => stop("wall-clock-limit"), Math.max(0, deadline - Date.now()));
+  }
   let externallyAborted = false;
   const onAbort = () => {
     externallyAborted = true;
@@ -649,53 +589,12 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
   }
   const sessionsDir = sessionsDirOf(options.governanceRoot);
   const metricsBefore = readRunOutcome(sessionsDir, sessionId, toolTiers).metrics;
-  // 收尾复盘（192）：返回之前；这一步有 Run、没被外部中止时才做。复盘做完才算这一步结束。
-  // 决策 322：验证门已删除，验证结论一行固定为"本次没有运行验证门"
-  if (
-    learnedMemory !== undefined &&
-    frozenSystemPrompt !== undefined &&
-    metricsBefore.runId !== undefined &&
-    !externallyAborted
-  ) {
-    const systemPrompt = frozenSystemPrompt;
-    options.onReview?.started?.("closing");
-    const outcome = await runMemoryReview({
-      kind: "closing",
-      governanceRoot: options.governanceRoot,
-      sourceSessionId: sessionId,
-      verdict: reviewVerdictText({ ran: false }),
-      budget: reviewBudget,
-      ...(options.abortSignal !== undefined ? { abortSignal: options.abortSignal } : {}),
-      ...(options.loopGuard !== undefined ? { loopGuard: options.loopGuard } : {}),
-      open: (review) =>
-        createDetachedRuntime({
-          ...surface,
-          ...(options.reviewModel !== undefined
-            ? { provider: options.reviewModel.provider, modelId: options.reviewModel.modelId }
-            : {}),
-          sessionId: review.sessionId,
-          initialMessages: review.initialMessages,
-          reviewSession: {
-            kind: "closing",
-            systemPrompt,
-            sourceSessionId: sessionId,
-            covers: review.covers,
-          },
-          learnedMemory: { ...learnedMemory, review: false },
-          budget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
-        }),
-    });
-    reviews.push(outcome);
-    warnReview(outcome);
-    options.onReview?.ended?.(outcome);
-  }
   const outcome = readRunOutcome(sessionsDir, sessionId, toolTiers);
   const metrics = outcome.metrics;
   return {
     sessionId,
     status,
     ...metrics,
-    ...(pushed ? { reviews } : {}),
     label: outcome.label,
     ...(status === "looping" && looping !== undefined ? { looping } : {}),
     durationMs: Date.now() - startedAt,

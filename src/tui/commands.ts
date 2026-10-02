@@ -5,6 +5,7 @@
 // 决策 286：未知命令列出的可用命令从命令表（command-table.ts）按当前会话生成，以后加命令不再漏。
 import { compactFocusOf } from "../application/compaction-text.ts";
 import { runGrantCommand } from "../application/grants.ts";
+import { MEMORY_COMMAND_USAGE } from "../application/memory-command.ts";
 import {
   SANDBOX_FORK_UNSUPPORTED,
   SANDBOX_RESUME_UNSUPPORTED,
@@ -29,6 +30,12 @@ import type { TuiWorkersFace } from "./workers-view.ts";
 // 沙箱会话的命令面（与 shell.ts 的 TuiSandboxFace 同形）
 interface CommandsSandboxFace {
   exportChanges(): Promise<string>;
+}
+
+// 决策 331：/memory 的命令面——查看两层记忆、按层编辑（编辑期间界面暂停，编辑器退出后恢复）
+export interface TuiMemoryFace {
+  view(): string;
+  edit(layer: "project" | "user"): Promise<string>;
 }
 
 // TUI 治理命令上下文（/grants /revoke /grants save；决策 030）
@@ -71,6 +78,8 @@ export interface CommandsHost {
   submitInput?(text: string): void;
   // 决策 323、324：本会话的钩子面（/hooks 的只读清单）；缺省 = /hooks 不可用
   hooksView?(): TuiHooksFace | undefined;
+  // 决策 331：/memory 的命令面（缺省 = /memory 不可用）
+  memory?(): TuiMemoryFace | undefined;
 }
 
 // 命令表判断可用性用的只读面
@@ -85,6 +94,7 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     reload: () => host.reloadCommand !== undefined,
     hooks: () => host.hooksView?.() !== undefined,
     scripts: () => host.scriptCommands?.() !== undefined,
+    memory: () => host.memory?.() !== undefined,
     workers: () => {
       const workers = host.workers();
       return workers === undefined
@@ -243,6 +253,34 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         return;
       }
       host.submitInput(commandInputText(task));
+      return;
+    }
+    // 决策 331：/memory 查看两层记忆；/memory edit project|user 用编辑器修改一层（存盘后校验，不合格保留原内容）
+    const memory = host.memory?.();
+    if (tokens[0] === "memory" && memory !== undefined) {
+      if (tokens.length === 1) {
+        host.addSystem(memory.view());
+        return;
+      }
+      const layer = tokens[2];
+      if (
+        tokens[1] === "edit" &&
+        tokens.length === 3 &&
+        (layer === "project" || layer === "user")
+      ) {
+        void memory.edit(layer).then(
+          (text) => {
+            host.addSystem(text);
+            host.render();
+          },
+          (error: unknown) => {
+            host.addSystem(`命令失败：${error instanceof Error ? error.message : String(error)}`);
+            host.render();
+          }
+        );
+        return;
+      }
+      host.addSystem(MEMORY_COMMAND_USAGE);
       return;
     }
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）

@@ -1,13 +1,17 @@
 // pigeon migrate-config（决策 325）：把旧布局迁到三层设置与 .pigeon/state/。由人发起，启动时只报错不自动迁移。
 // 写成可扩展的步骤清单：每步先只读地给出要做的事与拦住的问题（plan），全部步骤都没有拦住的问题才逐步执行（apply）。
-// 本段的四步（④ 为本轮新增）：
+// 六步：
 //   ① 旧配置：7 个旧文件各成一节写入设置（permissions 写项目个人 .pigeon/settings.local.json，其余写项目共享
 //      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件挪出
 //      仓库，进用户级本项目的备份目录（决策 341，迁移结束打印位置；仓库里不留备份）。目标文件已存在时合并进去：
 //      同一节两边都有且内容不同即报错停下、不覆盖；
-//   ② 程序状态：会话、学到的记忆与其锁、补做复盘记录、输入历史、终端界面日志挪进 .pigeon/state/ 对应位置；
-//   ③ worker 工作树：git worktree move 到 .pigeon/state/worktrees/。
-//   ④ 退役的 verify.json（决策 322）：不并入设置——挪进备份目录，并打印把原验证命令改写为收尾（Stop）钩子的
+//   ② 程序状态：会话、输入历史、终端界面日志挪进 .pigeon/state/ 对应位置；
+//   ③ 已删除功能的遗留（记忆一段，决策 330、331）：旧学到的记忆两处与其锁、补做复盘记录两处、复盘配置
+//      memory-review.json、旧人写说明 .pigeon/memory/ 一律挪出仓库进用户级备份目录（仓库里不留备份）；
+//      .pigeon/memory/ 另打印提示"把其中内容并入项目的 AGENTS.md"；
+//   ④ 用户级旧偏好（决策 330）：~/.pigeon/preferences.md 改名为 ~/.pigeon/AGENTS.md，目标已存在即拦阻、不覆盖；
+//   ⑤ worker 工作树：git worktree move 到 .pigeon/state/worktrees/；
+//   ⑥ 退役的 verify.json（决策 322）：不并入设置——挪进备份目录，并打印把原验证命令改写为收尾（Stop）钩子的
 //      配置示例（分步配置按各步命令以 && 连接）。
 // 有锁被存活进程占用（会话正开着、worker 正在运行）或工作树被锁定时拒绝并说明。可重复执行：没有要做的事即如实说明。
 import { execFileSync } from "node:child_process";
@@ -45,6 +49,8 @@ import {
   SETTINGS_FILE,
   STATE_DIR,
   sessionsDirOf,
+  userAgentsMdPath,
+  userPreferencesPath,
   verifyConfigPathOf,
   worktreesDirOf,
 } from "../state/paths.ts";
@@ -323,7 +329,77 @@ export const legacyStateStep: MigrationStep = {
   },
 };
 
-// ---- ③ worker 工作树 ----
+// ---- ④ 已删除功能的遗留（记忆一段，决策 330、331、341）----
+
+// 挪出仓库进用户级备份的遗留（相对 .pigeon 的源 → 备份目录里的名字；同名两处各自分开）
+const OBSOLETE_MEMORY_ITEMS: readonly { source: string; backup: string }[] = [
+  { source: "learned", backup: "learned" },
+  { source: "learned.lock", backup: "learned.lock" },
+  { source: path.join("state", "learned"), backup: path.join("state", "learned") },
+  { source: path.join("state", "learned.lock"), backup: path.join("state", "learned.lock") },
+  { source: "review-backfill", backup: "review-backfill" },
+  { source: path.join("state", "review-backfill"), backup: path.join("state", "review-backfill") },
+  { source: "memory-review.json", backup: "memory-review.json" },
+  { source: "memory", backup: "memory" },
+];
+
+export const obsoleteMemoryStep: MigrationStep = {
+  id: "obsolete-memory",
+  title: "已删除功能的遗留挪出仓库",
+  plan(ctx) {
+    const todo: string[] = [];
+    const blockers: string[] = [];
+    for (const item of OBSOLETE_MEMORY_ITEMS) {
+      if (!existsSync(legacyStatePath(ctx.root, item.source))) continue;
+      const conflict = migrationBackupConflict(ctx.root, item.backup, ctx.homeDir);
+      if (conflict !== undefined) {
+        blockers.push(conflict);
+        continue;
+      }
+      todo.push(`${pigeonRel(item.source)} → 备份目录（${item.backup}）`);
+    }
+    return { todo, blockers };
+  },
+  apply(ctx) {
+    const lines: string[] = [];
+    for (const item of OBSOLETE_MEMORY_ITEMS) {
+      const source = legacyStatePath(ctx.root, item.source);
+      if (!existsSync(source)) continue;
+      ctx.backups.push(moveToMigrationBackup(ctx.root, source, item.backup, ctx.homeDir));
+      lines.push(`已挪走 ${pigeonRel(item.source)}（进备份目录 ${item.backup}）`);
+      if (item.source === "memory") {
+        lines.push("  把其中内容并入项目的 AGENTS.md");
+      }
+    }
+    return lines;
+  },
+};
+
+// ---- ⑤ 用户级旧偏好改名（决策 330）----
+
+export const userPreferencesStep: MigrationStep = {
+  id: "user-preferences",
+  title: "用户级旧偏好改名为 AGENTS.md",
+  plan(ctx) {
+    const source = userPreferencesPath(ctx.homeDir);
+    if (!existsSync(source)) return { todo: [], blockers: [] };
+    const target = userAgentsMdPath(ctx.homeDir);
+    if (existsSync(target)) {
+      return {
+        todo: [],
+        blockers: [`${target} 已存在，不覆盖；请手工把 ${source} 的内容并入后再运行`],
+      };
+    }
+    return { todo: [`${source} → ${target}`], blockers: [] };
+  },
+  apply(ctx) {
+    const source = userPreferencesPath(ctx.homeDir);
+    if (!existsSync(source)) return [];
+    const target = userAgentsMdPath(ctx.homeDir);
+    renameSync(source, target);
+    return [`已改名 ${source} → ${target}`];
+  },
+};
 
 interface WorktreeInfo {
   path: string;
@@ -437,7 +513,7 @@ export const legacyWorktreesStep: MigrationStep = {
   },
 };
 
-// ---- ④ 退役的 verify.json（决策 322 / 325）----
+// ---- ⑥ 退役的 verify.json（决策 322 / 325）----
 
 // 从旧 verify.json 的 command 或 steps 拼出一行收尾钩子命令：分步配置按各步命令以 && 连接（带执行目录的步包一层 cd）
 function stopHookCommandOf(parsed: { command?: unknown; steps?: unknown }): string {
@@ -502,10 +578,12 @@ export const verifyJsonStep: MigrationStep = {
   },
 };
 
-// 本段的步骤清单（以后各段在此追加）
+// 步骤清单：先检查后执行（全部步骤的 plan 都没有拦住的问题才逐步 apply），以后各段在此追加
 export const MIGRATION_STEPS: readonly MigrationStep[] = [
   legacyConfigStep,
   legacyStateStep,
+  obsoleteMemoryStep,
+  userPreferencesStep,
   legacyWorktreesStep,
   verifyJsonStep,
 ];

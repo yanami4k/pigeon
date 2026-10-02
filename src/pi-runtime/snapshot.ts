@@ -8,7 +8,7 @@ import {
   SkillManifestEntrySchema,
   StructuredMemoryManifestSchema,
 } from "../state/injection-manifest.ts";
-import { MemoryReviewTagSchema, PushedMemoryManifestSchema } from "../state/learned-memory.ts";
+import { PushedMemoryLayersSchema } from "../state/learned-memory.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
@@ -30,8 +30,10 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // 段落本身已拼进 systemPrompt），verify 增可选命名分步——均可缺省
 // v13（决策 191、192、207）：顶层增加推送的记忆 learnedMemory（开局冻结的 MEMORY.md 身份，段落本身已拼进 systemPrompt）
 // 与复盘标记 memoryReview（复盘会话的种类与模板版本；不叫 review，免得与 v11 删掉的旧审阅字段同名，旧快照照常可读）——均可缺省
-// v14（决策 322）：顶层删除验证命令 verify、失败自动分叉重试 retryOnFail 与回炉轮数 repairRounds——验证门、回炉与
-// 失败自动分叉重试整体退役。对象非严格，旧快照里的这三个字段读取时忽略；版本推进只为让版本号对应形状
+// v14（决策 322）：顶层删除验证命令 verify、失败自动分叉重试 retryOnFail 与回炉轮数 repairRounds（验证门、回炉与
+// 失败自动分叉重试整体退役）；并随 331、332：删除复盘标记 memoryReview（复盘随之删除）、推送的记忆由单层的
+// learnedMemory 改为两层的 pushedMemory（各层身份与记忆文字的版本）。对象非严格，旧快照里的这些字段读取时忽略；
+// 会话记录里旧 Run 开始条目的两个旧字段照常可读，见 session-entries.ts
 export const INJECTION_SNAPSHOT_VERSION = 14;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
@@ -71,12 +73,12 @@ export const InjectionSnapshotSchema = Type.Object({
     advertised: Type.Array(Type.String()),
   }),
   context: Type.Object({
-    // 会话开始时拼好的完整 system prompt（基础提示 + 常驻 Memory 段 + Skill 目录段），冻结后不再变
+    // 会话开始时拼好的完整 system prompt（基础提示 + 人写的说明段 + 推送记忆段 + Skill 目录段），冻结后不再变
     systemPrompt: Type.String(),
     // 任务源给的工作方式指令原文（已追加在 systemPrompt 末尾；缺省 = 没有）
     taskDirective: Type.Optional(Type.String({ minLength: 1 })),
   }),
-  // 常驻 Memory 冻结清单（决策 042）：注入走 system prompt 追加段，不走 transformContext；
+  // 人写的说明冻结清单（决策 330；之前为常驻 Memory，决策 042）：注入走 system prompt 追加段，不走 transformContext；
   // transformContext 留给 M10 外部 Provider 的逐调用动态召回
   memory: Type.Array(MemoryManifestEntrySchema),
   // Skill Catalog 冻结清单（决策 043）：每个 Skill 目录下全部文件的哈希清单，load_skill 读取时比对
@@ -91,10 +93,8 @@ export const InjectionSnapshotSchema = Type.Object({
   budget: Type.Optional(AttemptBudgetSchema),
   // 结构化记忆的开局留痕（决策 134 / 157）：决策 174 删除结构化记忆后已停写，只为旧会话与 v12 快照照常可读而保留
   structuredMemory: Type.Optional(StructuredMemoryManifestSchema),
-  // 推送的记忆（决策 191）：推送开着时在场，记开局冻结的 MEMORY.md 身份与上限；与常驻 Memory 的清单分开
-  learnedMemory: Type.Optional(PushedMemoryManifestSchema),
-  // 复盘会话（决策 175、192、207）：复盘种类（收尾 / 压缩前）与模板版本；普通会话缺省
-  memoryReview: Type.Optional(MemoryReviewTagSchema),
+  // 推送的记忆（决策 332）：推送开着时在场，记开局冻结的两层记忆的身份、上限与记忆文字的版本
+  pushedMemory: Type.Optional(PushedMemoryLayersSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;
