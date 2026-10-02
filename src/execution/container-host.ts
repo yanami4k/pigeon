@@ -120,8 +120,10 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     "-w",
     root,
     ...envArgs,
-    // 单次调用带过白名单的环境变量（钩子的 PIGEON_PROJECT_DIR 等）
-    ...Object.entries(extraEnv ?? {}).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+    // 单次调用只放行 PIGEON_* 协议变量（钩子的 PIGEON_PROJECT_DIR）：宿主环境的其余变量不渗进容器
+    ...Object.entries(extraEnv ?? {})
+      .filter(([key]) => key.startsWith("PIGEON_"))
+      .flatMap(([key, value]) => ["-e", `${key}=${value}`]),
   ];
   const execArgs = (
     interactive: boolean,
