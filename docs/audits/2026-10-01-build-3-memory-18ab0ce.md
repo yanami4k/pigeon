@@ -112,7 +112,7 @@
 
 新增 5 条：migrate-config 3 条（已删除功能的遗留挪备份、preferences.md 改名与拦阻、备份位置占用拦阻）、runtime-pushed-memory 1 条（功能测试）、trace 1 条（旧会话）。改写 3 条：migrate-config 的旧状态挪位（learned 改断言进备份）、settings.test 的旧布局（新遗留全列出）、settings-reload 的冻结（新形态）。
 
-### 变异验证（本次接手后）
+### 变异验证（自 dfe4c97 起）
 
 | 变异 | 结果 |
 |---|---|
@@ -182,7 +182,7 @@
 > 项目级：# 学到的记忆（本项目）　+ 注释行：<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit project 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->
 > 用户级：# 学到的记忆（所有项目）　+ 注释行：<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit user 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->
 
-### 待确认的取舍（本次接手后）
+### 待确认的取舍（自 dfe4c97 起）
 
 1. 合并后 FrozenSessionPrompt 不再含常驻 Memory（随本段删除），改含人写的说明（AGENTS.md）；/reload 沿用开局读到的 AGENTS.md 与两层记忆、不重读文件，与决策 340 的"系统提示里开局冻结的部分沿用"一致，只是冻结内容的构成随本段变化。
 2. 迁移新增步骤的备份一律用第一段的 moveToMigrationBackup（决策 341 的位置），合并前写的"最小实现"不需要存在：合并在一次提交内完成，直接走共用函数。stateBackupDirOf 无引用，删除。

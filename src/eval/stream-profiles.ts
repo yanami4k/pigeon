@@ -40,7 +40,7 @@ export const PIGEON_VERIFY_STEPS: readonly StreamVerifyStep[] = [
 //   --continue-on-collection-errors：一个文件收集出错不中断整次运行，其余用例照常跑（缺省会一条都不跑）；
 //   --reruns 2：与其 CI 一致，失败的用例重跑两次，其间通过即算通过（时过时不过的用例不因一次失败判错）；
 //   pytest 在报告写完后若因残留线程或事件循环不退出，外壳等 5 秒后杀掉它；通过与否看报告里有没有失败或出错的用例
-//   （不依赖计数属性）；简短汇总里写明超时的用例与收集出错的文件，即验证门给 agent 的反馈；
+//   （不依赖计数属性）；简短汇总里写明超时的用例与收集出错的文件，即人的基准所用检查的输出摘要；
 //   单条超时：其仓库配置为 90 秒、signal 方式，这里显式写死同一值（验证门、判题、全量测量与人的基准同一口径），
 //   并以 --rerun-except Timeout 让超时失败的用例不再重跑——带 --reruns 时，超时失败的用例在重跑里挂住后超时不再生效，
 //   会一直挂到外层上限。这是与其 CI 唯一的差别：超时失败的用例不重跑，其余失败照常重跑两次
@@ -51,8 +51,8 @@ export const STRANDS_CASE_TIMEOUT_SEC = 90;
 
 // pytest 一律用人在该步的配置（与"agent 不许改人写测试"同一口径）：agent 在工作区里新建或修改的 pytest.ini、tox.ini、
 // setup.cfg 与 pyproject.toml 的 pytest 段一概不起作用。跑批器在判题、全量测量、人的基准与验证门之前，按 pytest 自己
-// 找配置的先后从人的树里取出那一份，原名以 root 身份写到容器里这个目录（归 root、agent 不可写：Pigeon 回炉的验证门也
-// 读它，放在 agent 可写处就能被改掉骗过验证），pytest 以 -c 指定它、--rootdir 固定为 strands-py。pyproject.toml 的
+// 找配置的先后从人的树里取出那一份，原名以 root 身份写到容器里这个目录（归 root、agent 不可写：判题与测量也
+// 读它，放在 agent 可写处就能被改掉骗过检查），pytest 以 -c 指定它、--rootdir 固定为 strands-py。pyproject.toml 的
 // 其余部分不替换（依赖环境本来就按人的声明选）。目录可由环境变量改到别处（只供本机测试用）
 export const STRANDS_PYTEST_CONFIG_DIR = "/opt/stream/human-pytest";
 export const PYTEST_CONFIG_DIR_ENV = "PIGEON_PYTEST_CONFIG_DIR";
@@ -125,7 +125,8 @@ export const STRANDS_VERIFY_STEPS: readonly StreamVerifyStep[] = [
 ];
 
 // 由分步派生的一行验证命令（交 sh -c）：各步全跑、各带标题，没过的步另打一行"== 步名 未通过 =="，任一步失败即
-// 不通过（与分步验证"各步全跑、各出结论"同一口径）。跑批器把它配成实验会话的收尾（Stop）钩子（决策 327）
+// 不通过（与分步验证"各步全跑、各出结论"同一口径）。用作人的基准所用的检查（gateFromSteps → stream-baseline）；
+// 实验会话不接它（决策 327：四格暂不带检查）
 export function verifyScript(steps: readonly StreamVerifyStep[]): string {
   const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   const parts = steps.map(
