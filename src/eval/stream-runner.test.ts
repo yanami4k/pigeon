@@ -1483,13 +1483,8 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           agentsMd: false,
           homeDir: join(t.base, "home"),
         });
-      const hitsOf = async (sessionsDir: string, keyword: string) => {
-        let hits = 0;
-        for await (const _ of createSessionSearch(sessionsDir).search({ keywords: [keyword] })) {
-          hits += 1;
-        }
-        return hits;
-      };
+      const hitsOf = async (sessionsDir: string, keyword: string) =>
+        (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).total;
       const agent: StepAgent = {
         async run(input) {
           calls.push(input);

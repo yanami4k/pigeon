@@ -2,11 +2,12 @@
 // 用户级 ~/.pigeon 下的对应位置，全部在这里给出；其余源码一律经本模块取路径，不自拼 ".pigeon"（边界用例守住）。
 // 纯路径计算，无 IO；用户主目录可注入（测试指到临时目录，不碰真实的 ~/.pigeon）。
 // - 人写的内容：.pigeon/settings.json（可提交）、.pigeon/skills、~/.pigeon/settings.json、~/.pigeon/skills、
-//   ~/.pigeon/AGENTS.md（用户级说明，决策 330），以及本段不并入的 .pigeon/verify.json。项目的说明是仓库里的 AGENTS.md，不在 .pigeon 下。
-// - 程序写的状态在 .pigeon/state/（不提交）：会话、学到的记忆（项目级）、worker 工作树、输入历史、终端界面日志、迁移命令的备份；
+//   ~/.pigeon/AGENTS.md（用户级说明，决策 330），以及已退役的 .pigeon/verify.json（决策 322）。项目的说明是仓库里的 AGENTS.md，不在 .pigeon 下。
+// - 程序写的状态在 .pigeon/state/（不提交）：会话、学到的记忆（项目级）、worker 工作树、输入历史、终端界面日志、
+//   会话检索的缓存（search-cache，决策 339）、迁移命令的备份；
 //   用户级的程序状态（配置内容指纹、学到的记忆的用户级）在 ~/.pigeon/state/。
 // - 旧布局（迁移命令与启动检查用）：7 个旧配置文件、旧位置的程序状态、旧的学到的记忆、复盘配置与补做复盘记录、
-//   旧的人写说明（.pigeon/memory/、~/.pigeon/preferences.md）。
+//   旧的人写说明（.pigeon/memory/、~/.pigeon/preferences.md）、退役的 verify.json。
 import { homedir } from "node:os";
 import path from "node:path";
 import { sha256Hex } from "./hashing.ts";
@@ -66,6 +67,11 @@ export function projectMemoryPathOf(root: string): string {
 
 export function projectMemoryLockPathOf(root: string): string {
   return path.join(projectStateDir(root), "memory.lock");
+}
+
+// 决策 339：会话检索的缓存（每个会话文件抽出的可搜文本与目录信息）
+export function sessionSearchCacheDirOf(root: string): string {
+  return path.join(projectStateDir(root), "search-cache");
 }
 
 // 旧的学到的记忆（单层、三行一条；决策 332 不迁移，迁移命令挪出仓库进用户级备份）与它的锁

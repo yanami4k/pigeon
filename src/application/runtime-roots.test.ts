@@ -1,7 +1,7 @@
 // 治理根与工作区根分离（M5.5 S1，决策 040）：会话文件、固化 grant 配置、常驻 Memory 取治理根
 // 的 .pigeon/；工具路径围栏取工作区根。worker 的工作区是自己的 git 工作树，治理根恒在主仓库根。
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";

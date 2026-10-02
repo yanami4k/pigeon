@@ -14,7 +14,6 @@ import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_LOOP_GUARD_SETTINGS } from "../state/loop-guard-config.ts";
 import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
-import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";

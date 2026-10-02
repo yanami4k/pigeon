@@ -1,45 +1,47 @@
-// Session Search 内容级检索（M5 S2，决策 038）：给 agent 一个能翻本项目旧会话的 grep。
-// 全文扫描：按会话从新到旧，经只读读取器逐个读新会话存储的会话文件（决策 181 / 185），搜消息条目；关键词大小写不敏感
-// 子串匹配、多词为与、不接受正则（模型给正则是 ReDoS 面，元字符一律按字面）；对外只暴露命中流
-// 接口，将来换成索引或语义检索时换实现不换调用方（查询是结构化对象、命中预留 score）。
+// Session Search 内容级检索（M5 S2，决策 038；决策 339 改进）：给 agent 一个能翻本项目旧会话的 grep。
+// - 范围：本项目会话根下的全部会话，排除当前会话所在的整棵会话树（沿文件头的父会话上溯到根，根与它的各级 worker、分叉都排除；
+//   续接的会话与当前是同一文件，同样排除）。
+// - 缺省只搜对话正文（使用者的话与模型回复的文字，不含思考与工具调用）；工具输出须显式打开。会话检索三件工具自身的
+//   输出永不进检索（抽取口径见 state/session-search-text.ts）。
+// - 关键词大小写不敏感、按字面子串匹配、不接受正则（模型给正则是 ReDoS 面，元字符一律按字面）；任一命中即算，
+//   按命中的不同关键词数从多到少排序，同数按消息时间从新到旧；每条命中带它命中了哪些关键词。
+// - 每个会话的可搜文本按文件大小与修改时间缓存（persistence/session-search-cache.ts），再次检索只读缓存。
 // 命中只是线索（§3.3）：结论须经 read_session_entry 回查原文。
 // 分支会话文件开头从来源复制来的历史不重复产出命中（它属于来源会话）。跑批器作废重做时把作废尝试的会话文件移出会话根，
 // 检索自然看不到它们。
-// 无状态、无索引、无后台：扫描结果不落盘（015 派生不落库）。
+import { listSessionRefs, sessionRefTime } from "../persistence/session-catalog.ts";
+import { listSessionFiles, readSessionHeader } from "../persistence/session-reader.ts";
 import {
-  listSessionRefs,
-  readSessionView,
-  sessionRefTime,
-} from "../persistence/session-catalog.ts";
+  createSessionSearchSource,
+  pruneSessionSearchCache,
+  type SessionSearchCacheOptions,
+  type SessionSearchEntry,
+  type SessionSearchSource,
+} from "../persistence/session-search-cache.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
-import { matchesSessionFilters, type SessionListFilters } from "../state/session-summary.ts";
-import { summarizeSessionView, type ViewBlock } from "../state/session-view.ts";
 
-// 消息角色：pi 消息的三种与上游扩展消息的四种，另有 system（不对应会话里的消息，检索从不产出）
-export type SessionMessageRole =
-  | "user"
-  | "assistant"
-  | "toolResult"
-  | "system"
-  | "custom"
-  | "bashExecution"
-  | "branchSummary"
-  | "compactionSummary";
+// 消息角色：检索只产出这三种
+export type SessionMessageRole = "user" | "assistant" | "toolResult";
 
 // 片段窗口（字符）：命中关键词附近约 200 字
 export const DEFAULT_SNIPPET_CHARS = 200;
 
 export interface SessionSearchQuery {
-  // 多词为与；大小写不敏感；按字面子串匹配
+  // 任一命中即可；大小写不敏感；按字面子串匹配
   keywords: readonly string[];
-  // 角色过滤；缺省 = 除 system 以外全部角色（system prompt 每会话重复一份，搜它只是噪声）
+  // 打开后连同工具输出一起搜；缺省只搜对话正文
+  includeToolOutput?: boolean;
+  // 角色过滤（在搜索范围之内再筛）；给了 toolResult 即连同工具输出一起搜
   roles?: readonly SessionMessageRole[];
-  // 复用会话列表的工具 / 分类 / 时间过滤（M4 SessionListFilters）
-  filters?: SessionListFilters;
+  // 当前会话：它所在的整棵会话树都不搜
+  current?: CurrentSession;
+  // 会话创建时间范围（毫秒，含两端）
+  since?: number;
+  until?: number;
 }
 
 export interface SessionSearchOptions {
-  // 命中数上限：达到即停止扫描（上限即停，不读后续文件）
+  // 结果条数上限：排序后取前若干条
   limit?: number;
   snippetChars?: number;
 }
@@ -54,60 +56,54 @@ export interface SessionSearchHit {
   // 条目写入时刻
   timestamp: number;
   snippet: string;
+  // 命中的关键词（按查询里的先后，取查询里的写法）
+  matchedKeywords: string[];
   toolName?: string;
   // 语义检索（M10）的相关度预留；全文扫描不给
   score?: number;
 }
 
-export interface SessionSearch {
-  search(
-    query: SessionSearchQuery,
-    options?: SessionSearchOptions
-  ): AsyncIterable<SessionSearchHit>;
+export interface SessionSearchResult {
+  // 排序后的前 limit 条
+  hits: SessionSearchHit[];
+  // 命中总条数（不受 limit 限制）
+  total: number;
 }
 
-const DEFAULT_ROLES: readonly SessionMessageRole[] = [
-  "user",
-  "assistant",
-  "toolResult",
-  "custom",
-  "bashExecution",
-  "branchSummary",
-  "compactionSummary",
-];
+export interface SessionSearch {
+  search(query: SessionSearchQuery, options?: SessionSearchOptions): Promise<SessionSearchResult>;
+}
 
-// 关键词规范化：去首尾空白、转小写、丢空词；一个都不剩响亮拒绝（空查询不是"全部"）
-export function normalizeKeywords(keywords: readonly string[]): string[] {
-  const normalized = keywords
-    .map((keyword) => keyword.trim().toLowerCase())
-    .filter((keyword) => keyword.length > 0);
+export interface NormalizedKeyword {
+  // 查询里的写法（去首尾空白）
+  original: string;
+  lower: string;
+}
+
+// 关键词规范化：去首尾空白、丢空词、按小写去重；一个都不剩响亮拒绝（空查询不是"全部"）
+export function normalizeKeywords(keywords: readonly string[]): NormalizedKeyword[] {
+  const normalized: NormalizedKeyword[] = [];
+  const seen = new Set<string>();
+  for (const keyword of keywords) {
+    const original = keyword.trim();
+    const lower = original.toLowerCase();
+    if (lower.length > 0 && !seen.has(lower)) {
+      seen.add(lower);
+      normalized.push({ original, lower });
+    }
+  }
   if (normalized.length === 0) {
     throw new Error("Session Search 至少需要一个关键词");
   }
   return normalized;
 }
 
-// 字面子串匹配（多词为与）：includes 不解释任何元字符
-export function matchesAllKeywords(
+// 字面子串匹配：includes 不解释任何元字符；返回命中的关键词
+export function matchedKeywords(
   haystackLower: string,
-  keywordsLower: readonly string[]
-): boolean {
-  return keywordsLower.every((keyword) => haystackLower.includes(keyword));
-}
-
-// 可检索文本：text 与 thinking 正文、工具调用名；图片与未知块不可检索
-export function searchableText(blocks: readonly ViewBlock[]): string {
-  const parts: string[] = [];
-  for (const block of blocks) {
-    if (block.type === "text") {
-      parts.push(block.text);
-    } else if (block.type === "thinking") {
-      parts.push(block.thinking);
-    } else if (block.type === "toolCall") {
-      parts.push(block.name);
-    }
-  }
-  return parts.join("\n");
+  keywords: readonly NormalizedKeyword[]
+): NormalizedKeyword[] {
+  return keywords.filter((keyword) => haystackLower.includes(keyword.lower));
 }
 
 // 命中片段：空白压成单空格；以最早出现的关键词为锚取窗口，两端被裁时加省略号
@@ -134,67 +130,199 @@ export function buildSnippet(
   return `${start > 0 ? "…" : ""}${flat.slice(start, clippedEnd)}${clippedEnd < flat.length ? "…" : ""}`;
 }
 
-export function createSessionSearch(sessionsDir: string): SessionSearch {
+export interface CurrentSession {
+  sessionId: string;
+  // 父会话（worker 的派出方、分叉的来源）；不给时读当前会话文件的文件头
+  parentSessionId?: string;
+}
+
+export interface PastSessionsFilter {
+  current?: CurrentSession;
+  // 会话创建时间范围（毫秒，含两端）
+  since?: number;
+  until?: number;
+}
+
+// 当前会话所在的整棵会话树：沿父会话上溯一次找到根（父会话没有记录或成环即止），再按子会话表从根广度优先走一遍。
+// 两步都带已访问集合：会话头损坏成环时照样终止，环上与环下挂着的会话都算在这一家里
+export function sessionFamily(
+  current: string,
+  parentOf: ReadonlyMap<string, string | undefined>
+): Set<string> {
+  const climbed = new Set<string>([current]);
+  let root = current;
+  for (;;) {
+    const parent = parentOf.get(root);
+    if (parent === undefined || climbed.has(parent)) {
+      break;
+    }
+    climbed.add(parent);
+    root = parent;
+  }
+  const children = new Map<string, string[]>();
+  for (const [id, parent] of parentOf) {
+    if (parent !== undefined) {
+      const list = children.get(parent);
+      if (list === undefined) {
+        children.set(parent, [id]);
+      } else {
+        list.push(id);
+      }
+    }
+  }
+  const family = new Set<string>([root]);
+  const queue = [root];
+  for (let index = 0; index < queue.length; index++) {
+    for (const child of children.get(queue[index] as string) ?? []) {
+      if (!family.has(child)) {
+        family.add(child);
+        queue.push(child);
+      }
+    }
+  }
+  // 当前会话不在表里（文件还没写出、也没给父会话）时根就是它自己，上面已收下
+  family.add(current);
+  return family;
+}
+
+// 以前的会话（从旧到新）：时间窗口内的会话读可搜内容（经缓存），窗口外的只读文件头取父会话（判会话树用）；
+// 排除当前会话所在的会话树；顺手清理缓存
+export function loadPastSessions(
+  sessionsDir: string,
+  source: SessionSearchSource,
+  filter: PastSessionsFilter,
+  parts: { toolOutput: boolean },
+  cacheDir?: string
+): SessionSearchEntry[] {
+  const refs = listSessionRefs(sessionsDir);
+  const current = filter.current;
+  const loaded: SessionSearchEntry[] = [];
+  const parentOf = new Map<string, string | undefined>();
+  for (const ref of refs) {
+    const createdAt = sessionRefTime(ref);
+    const inWindow =
+      (filter.since === undefined || createdAt >= filter.since) &&
+      (filter.until === undefined || createdAt <= filter.until);
+    const isCurrent = current !== undefined && ref.sessionId === current.sessionId;
+    if (isCurrent || !inWindow) {
+      // 当前会话正在写、窗口外的会话不在结果里：不抽取、不缓存，只取文件头里的父会话
+      parentOf.set(
+        ref.sessionId,
+        (isCurrent ? current?.parentSessionId : undefined) ??
+          readSessionHeader(ref.path)?.parentSessionId
+      );
+      continue;
+    }
+    const entry = source.load(ref, parts);
+    if (entry === undefined) {
+      continue;
+    }
+    parentOf.set(entry.info.sessionId, entry.info.parentSessionId);
+    loaded.push(entry);
+  }
+  if (current !== undefined && current.parentSessionId !== undefined) {
+    parentOf.set(current.sessionId, current.parentSessionId);
+  }
+  const family =
+    current !== undefined ? sessionFamily(current.sessionId, parentOf) : new Set<string>();
+  if (cacheDir !== undefined) {
+    pruneSessionSearchCache(
+      cacheDir,
+      () => new Set(listSessionFiles(sessionsDir).map((file) => file.sessionId))
+    );
+  }
+  return loaded.filter((entry) => !family.has(entry.info.sessionId));
+}
+
+interface Ranked {
+  hit: Omit<SessionSearchHit, "snippet">;
+  text: string;
+  // 会话从旧到新的序号与会话内的先后：同数同时刻时的次序
+  order: number;
+}
+
+export function createSessionSearch(
+  sessionsDir: string,
+  cache: SessionSearchCacheOptions = {}
+): SessionSearch {
+  const source = createSessionSearchSource(cache);
   return {
-    search: (query, options = {}) => scanSessions(sessionsDir, query, options),
+    search: async (query, options = {}) =>
+      runSearch(sessionsDir, source, query, options, cache.cacheDir),
   };
 }
 
-async function* scanSessions(
+// 排序：命中的不同关键词数从多到少；同数按消息时间从新到旧；同一时刻按会话与会话内先后从后到前
+function compareRanked(a: Ranked, b: Ranked): number {
+  return (
+    b.hit.matchedKeywords.length - a.hit.matchedKeywords.length ||
+    b.hit.timestamp - a.hit.timestamp ||
+    b.order - a.order
+  );
+}
+
+function runSearch(
   sessionsDir: string,
+  source: SessionSearchSource,
   query: SessionSearchQuery,
-  options: SessionSearchOptions
-): AsyncGenerator<SessionSearchHit> {
+  options: SessionSearchOptions,
+  cacheDir: string | undefined
+): SessionSearchResult {
   const keywords = normalizeKeywords(query.keywords);
-  const roles = new Set<string>(query.roles ?? DEFAULT_ROLES);
-  const limit = options.limit ?? Number.POSITIVE_INFINITY;
+  const roles = query.roles !== undefined ? new Set<string>(query.roles) : undefined;
+  const toolOutput = query.includeToolOutput === true || roles?.has("toolResult") === true;
+  const limit = Math.max(0, options.limit ?? Number.POSITIVE_INFINITY);
   const snippetChars = options.snippetChars ?? DEFAULT_SNIPPET_CHARS;
-  const filters = query.filters ?? {};
-  if (limit <= 0) {
-    return;
-  }
-  let emitted = 0;
-  // 从新到旧（会话创建时间序）
-  for (const ref of listSessionRefs(sessionsDir).reverse()) {
-    const createdAt = sessionRefTime(ref);
-    if (filters.since !== undefined && createdAt < filters.since) {
-      continue;
-    }
-    if (filters.until !== undefined && createdAt > filters.until) {
-      continue;
-    }
-    const view = readSessionView(ref);
-    if (view === undefined) {
-      continue;
-    }
-    if (
-      (filters.tool !== undefined || filters.class !== undefined) &&
-      !matchesSessionFilters(summarizeSessionView(view), filters)
-    ) {
-      continue;
-    }
-    for (const message of view.messages) {
-      if (!roles.has(message.role)) {
+  // 只留排在前 limit 的命中（连同全文，摘录最后才做）；其余只计数
+  const top: Ranked[] = [];
+  let total = 0;
+  let order = 0;
+  for (const entry of loadPastSessions(sessionsDir, source, query, { toolOutput }, cacheDir)) {
+    for (const doc of [...entry.conversation, ...(entry.toolOutput ?? [])]) {
+      order += 1;
+      if (roles !== undefined && !roles.has(doc.role)) {
         continue;
       }
-      const text = searchableText(message.blocks);
-      if (!matchesAllKeywords(text.toLowerCase(), keywords)) {
+      const matched = matchedKeywords(doc.text.toLowerCase(), keywords);
+      if (matched.length === 0) {
         continue;
       }
-      yield {
-        sessionId: view.sessionId,
-        entryId: message.entryId,
-        runId: message.runId,
-        runSeq: message.runSeq,
-        role: message.role as SessionMessageRole,
-        timestamp: message.timestamp,
-        snippet: buildSnippet(text, keywords, snippetChars),
-        ...(message.toolName !== undefined ? { toolName: message.toolName } : {}),
+      total += 1;
+      const candidate: Ranked = {
+        hit: {
+          sessionId: entry.info.sessionId as SessionId,
+          entryId: doc.entryId,
+          runId: doc.runId as RunId,
+          runSeq: doc.runSeq,
+          role: doc.role as SessionMessageRole,
+          timestamp: doc.timestamp,
+          matchedKeywords: matched.map((keyword) => keyword.original),
+          ...(doc.toolName !== undefined ? { toolName: doc.toolName } : {}),
+        },
+        text: doc.text,
+        order,
       };
-      emitted += 1;
-      if (emitted >= limit) {
-        return;
+      if (top.length >= limit) {
+        const last = top.at(-1);
+        if (last === undefined || compareRanked(candidate, last) >= 0) {
+          continue;
+        }
+        top.pop();
       }
+      let index = top.length;
+      while (index > 0 && compareRanked(candidate, top[index - 1] as Ranked) < 0) {
+        index -= 1;
+      }
+      top.splice(index, 0, candidate);
     }
   }
+  const hits = top.map(({ hit, text }) => ({
+    ...hit,
+    snippet: buildSnippet(
+      text,
+      keywords.filter((k) => hit.matchedKeywords.includes(k.original)).map((k) => k.lower),
+      snippetChars
+    ),
+  }));
+  return { hits, total };
 }

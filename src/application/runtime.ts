@@ -21,8 +21,10 @@ import { type AgentsMdInstructions, loadAgentsInstructions } from "../memory/age
 import type { MemoryLayer } from "../memory/learned.ts";
 import { loadPushedMemory, type PushedMemory } from "../memory/pushed.ts";
 import {
+  createListSessionsTool,
   createReadSessionEntryTool,
   createSearchSessionsTool,
+  LIST_SESSIONS_TOOL,
   READ_SESSION_ENTRY_TOOL,
   SEARCH_SESSIONS_TOOL,
   sessionToolRegistrations,
@@ -60,7 +62,7 @@ import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
-import { sessionsDirOf } from "../state/paths.ts";
+import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import {
@@ -69,7 +71,6 @@ import {
   emptySettingsSnapshot,
   memoryLimitsOf,
   type SettingsSnapshot,
-  withHooksDisabled,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -206,7 +207,7 @@ export interface RuntimeDeps {
   storeWarn?: WarnSink;
   // 决策 324：钩子拦下或出错时的一行提示（终端界面落消息区；缺省静默）
   hooksNotice?: WarnSink;
-  // 决策 193：能否检索历史会话。关掉时不注册 search_sessions 与 read_session_entry，系统提示去掉提到它们的那一句；
+  // 决策 193：能否检索历史会话。关掉时不注册 search_sessions、read_session_entry 与 list_sessions（339），系统提示去掉提到它们的那一句；
   // 缺省开着（日常使用与 193 之前逐字一致）
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
@@ -420,8 +421,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
-  // M5 S2（决策 038）：Session Search 的两个 read 档工具，范围只限本项目会话目录；决策 193 的开关关掉时不注册
+  // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
+  // 决策 193 的开关关掉时一件都不注册
   const sessionSearch = deps.sessionSearch ?? true;
+  // 决策 339：检索与目录排除当前会话所在的整棵会话树（父会话取本会话的来历：worker 的派出方、分支的来源）；
+  // 可搜文本缓存在 .pigeon/state/search-cache/
+  const lineageParent =
+    deps.storeLineage?.worker?.parentSessionId ?? deps.storeLineage?.branch?.sourceSessionId;
+  const sessionToolOptions = {
+    sessionsDir,
+    cacheDir: sessionSearchCacheDirOf(governanceRoot),
+    current: {
+      sessionId: deps.sessionId,
+      ...(lineageParent !== undefined ? { parentSessionId: lineageParent } : {}),
+    },
+  };
   if (sessionSearch) {
     for (const registration of sessionToolRegistrations(sessionsDir)) {
       registry.register(registration);
@@ -521,7 +535,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     WRITE_APPROVAL_SENTENCES[approval] +
     commandTexts.prompt +
     (sessionSearch
-      ? "需要以前会话里的信息时，用 search_sessions 按关键词检索本项目历史消息，" +
+      ? "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
         "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
       : "") +
     (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
@@ -555,8 +569,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "read_file",
     "edit_file",
     RUN_COMMAND_TOOL,
-    ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL] : []),
-    ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
+    ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
+    ...(learned !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
     ...mcpTools.map((bridged) => bridged.name),
     ...(spawnSlot !== undefined
@@ -709,7 +723,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           : {}),
       }),
       ...(sessionSearch
-        ? [createSearchSessionsTool({ sessionsDir }), createReadSessionEntryTool({ sessionsDir })]
+        ? [
+            createSearchSessionsTool(sessionToolOptions),
+            createReadSessionEntryTool(sessionToolOptions),
+            createListSessionsTool(sessionToolOptions),
+          ]
         : []),
       ...(memoryWrite !== undefined
         ? [

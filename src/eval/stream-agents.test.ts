@@ -434,12 +434,25 @@ function countingStreamFn(inner: StreamFn) {
   return { fn, seen };
 }
 
-// Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多两件
-// 检索工具（193），推送格多记忆工具（217）
-// 决策 331：跑批器只推送记忆、不带 update_memory，推送格与不推送的格子工具清单相同
+// Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多三件
+// 检索工具（193；339 加 list_sessions）；决策 331：跑批器只推送记忆、不带 update_memory，推送格与不推送的格子工具清单相同
 const PIGEON_STREAM_TOOLS = {
-  "search-push": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
-  "search-only": ["edit_file", "read_file", "read_session_entry", "run_command", "search_sessions"],
+  "search-push": [
+    "edit_file",
+    "list_sessions",
+    "read_file",
+    "read_session_entry",
+    "run_command",
+    "search_sessions",
+  ],
+  "search-only": [
+    "edit_file",
+    "list_sessions",
+    "read_file",
+    "read_session_entry",
+    "run_command",
+    "search_sessions",
+  ],
   "push-only": ["edit_file", "read_file", "run_command"],
   neither: ["edit_file", "read_file", "run_command"],
 } as const;
@@ -566,7 +579,7 @@ test("Pigeon agent：推送格打开推送记忆——系统提示带作业目�
         docker: ws.docker,
         homeDir: home,
       });
-      const out = await agent.run(
+      await agent.run(
         input(jobDir, {
           condition: CONDITION_SPECS[condition],
           target: { container: "box", root: ws.containerRoot },
