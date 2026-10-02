@@ -96,7 +96,8 @@ export function createReplaceEditTool(
 
 // 读 + 围栏 + 唯一匹配预检 + 内存落地（零写副作用）
 async function planReplace(host: WorkspaceHost, args: ReplaceEditParams) {
-  const resolvedPath = await host.resolveExisting(args.path);
+  // 决策 334：要写的文件本身是符号链接即拒写
+  const resolvedPath = await host.resolveForWrite(args.path);
   if (!(await host.isFile(resolvedPath))) {
     throw new ReplaceEditError(`不是常规文件：${args.path}`);
   }

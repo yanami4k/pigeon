@@ -156,7 +156,7 @@ export default {
       comment:
         "web（决策 287–291：联网搜索与抓取、内网防护、搜索后端适配、两件工具）只依赖 state 与 tools；" +
         "提炼的模型接入由 application 经回调注入，web 自身不触达 pi-runtime / persistence / application / Actor 层。",
-      from: { path: "^src/web/", pathNot: ".test.ts$" },
+      from: { path: "^src/web/", pathNot: "\\.test\\.ts$" },
       to: { path: "^src/", pathNot: "^src/(web|state|tools)/" },
     },
     {

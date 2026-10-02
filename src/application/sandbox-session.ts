@@ -17,8 +17,10 @@ import {
   SANDBOX_CLEAR_CACHE_COMMAND,
   type Sandbox,
   type SandboxExport,
+  sandboxLimitsSummary,
 } from "../execution/sandbox.ts";
 import type { SessionId } from "../state/ids.ts";
+import { sandboxLimitSettingsOf } from "../state/sandbox-config.ts";
 import {
   emptySettingsSnapshot,
   mcpConfigOf,
@@ -54,6 +56,8 @@ export interface StartSandboxInput {
   // 决策 325：本会话的设置快照（镜像配置取 sandbox 一节，MCP 服务名取合并后的配置）
   settings?: SettingsSnapshot;
   log: (line: string) => void;
+  // 运行中给人看的提示（命令超出沙箱内存上限等）；缺省同 log
+  notice?: (line: string) => void;
   overrides?: SandboxOverrides;
 }
 
@@ -74,10 +78,13 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
     sessionId: input.sessionId,
     network: launch.network,
     sandboxConfig: sandboxConfigOf(settings),
+    // 决策 333：资源上限取自设置的 sandbox 一节（缺项取缺省）
+    limits: sandboxLimitSettingsOf(sandboxConfigOf(settings)),
     ...(input.resume === true ? { resume: true } : {}),
     // 决策 278：--sandbox-from-head 只从最新提交开工
     ...(launch.fromHead === true ? { fromHead: true } : {}),
     log: input.log,
+    ...(input.notice !== undefined ? { notice: input.notice } : {}),
     ...input.overrides,
   });
   input.log(sandboxReadyNotice(sandbox));
@@ -99,7 +106,7 @@ export function sandboxReadyNotice(sandbox: Sandbox): string {
       : `从 ${sandbox.startLabel} 的 ${sandbox.startCommit.slice(0, 12)} 起步`;
   return (
     `沙箱已就绪：容器 ${sandbox.container}（镜像 ${sandbox.image}，${sandbox.network === "on" ? "联网" : "断网"}，` +
-    `下载缓存共用卷 ${sandbox.cacheVolume}），${start}；改动交回到分支 ${sandbox.branch}，` +
+    `下载缓存共用卷 ${sandbox.cacheVolume}；${sandboxLimitsSummary(sandbox.limits)}），${start}；改动交回到分支 ${sandbox.branch}，` +
     "会话结束时自动交回，会话中可用 /export 手动交回"
   );
 }

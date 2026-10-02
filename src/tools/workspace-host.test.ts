@@ -34,6 +34,9 @@ function memoryHost(initial: Record<string, string>) {
       }
       return target;
     },
+    async resolveForWrite(inputPath) {
+      return host.resolveExisting(inputPath);
+    },
     async isFile(resolvedPath) {
       return files.has(resolvedPath);
     },

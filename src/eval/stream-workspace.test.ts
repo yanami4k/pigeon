@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
@@ -206,7 +207,12 @@ test("家目录下的用户级文件（195 补口）：删掉给定的相对路�
 });
 
 test("家目录下的用户级文件删不掉（所在目录不可写）：报访问错误（调用方把这一步作废），不当作已清", {
-  skip: process.platform === "win32" ? "Windows 上 chmod 不收走写权限" : false,
+  skip:
+    process.platform === "win32"
+      ? "Windows 上 chmod 不收走写权限"
+      : process.getuid?.() === 0
+        ? "以 root 运行，0555 挡不住删除"
+        : false,
 }, async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-home-locked-"));
   const home = join(base, "home");
@@ -244,7 +250,9 @@ test("容器里的 root 操作：跑批器写 agent 不可写的位置时以 doc
     const calls = readFileSync(log, "utf8")
       .split("\n")
       .filter((l) => l !== "")
-      .map((l) => JSON.parse(l) as string[]);
+      .map((l) => JSON.parse(l) as string[])
+      // 探测容器有无 timeout 的调用（决策 335）不算
+      .filter((c) => !c.some((a) => a.includes(TIMEOUT_PROBE_SCRIPT)));
     assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-u", "0", "-w"]);
     assert.ok(
       calls.slice(1).every((c) => !c.includes("-u")),

@@ -19,7 +19,7 @@ export function assertKeepsWorkspaceOffline(runArgs: readonly string[]): void {
       PROXY_ENV_ARG.test(envValue ?? "");
     if (NETWORK_OPENING_ARG.test(arg) || setsProxy) {
       throw new Error(
-        `工作区容器必须保持无网络：附加参数里不得出现 ${arg}（判分阶段的代理请用 judgeProxy，它只作用于评测容器）`
+        `工作区容器必须保持无网络：附加参数里不得出现 ${arg}（工作区容器恒为断网：模型调用由宿主上的跑批进程经模型网关发出，不经容器网络）`
       );
     }
   });

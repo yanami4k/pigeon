@@ -39,6 +39,22 @@ export interface HostExecResult {
   // 其余调用方照旧读 output
   stdout: string;
   stderr: string;
+  // 决策 333：命令因超出沙箱内存上限被杀（容器实现在设了内存上限时判定）
+  memoryLimitExceeded?: MemoryLimitExceeded;
+}
+
+// 超出内存上限：certain 为容器内存事件的 oom_kill 计数在命令前后增加；读不到计数、命令以 137 结束时为 false（可能）
+export interface MemoryLimitExceeded {
+  // 上限的可读写法（如 8 GiB）
+  limit: string;
+  certain: boolean;
+}
+
+// 给 agent 与人的同一句：明确报出超出沙箱内存上限及其数值，免得当作普通报错反复重试
+export function memoryLimitText(exceeded: MemoryLimitExceeded): string {
+  return exceeded.certain
+    ? `超出沙箱内存上限 ${exceeded.limit}：命令或它起的进程被内核终止（OOM）。原样重试多半还会被杀，先减少并行度或内存占用`
+    : `可能超出沙箱内存上限 ${exceeded.limit}：命令以退出码 137 结束（被 SIGKILL 终止），读不到容器的内存事件计数，无法确认`;
 }
 
 // 文件清单不跟进的目录，本地与容器实现共用这一份口径。
@@ -67,9 +83,13 @@ export interface WorkspaceHost {
   readonly root: string;
   // 路径围栏：把模型给的路径解析成工作区内既有目标的规范路径；不存在或解析后越出工作区根抛 WorkspacePathError
   resolveExisting(inputPath: string): Promise<string>;
-  // 以下三个只接受 resolveExisting 返回的规范路径
+  // 写工具用的解析（决策 334）：同 resolveExisting，另在模型给的路径本身是符号链接时拒写（WorkspaceWriteRefusedError），
+  // 报出其指向
+  resolveForWrite(inputPath: string): Promise<string>;
+  // 以下三个只接受 resolveExisting / resolveForWrite 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;
+  // 写入前复核（决策 334）：重新解析须仍得到 resolvedPath 本身，路径变了或目标成了符号链接即拒写（WorkspaceWriteRefusedError）
   writeText(resolvedPath: string, content: string): Promise<void>;
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留
   exec(plan: HostExecPlan, options: HostExecOptions): Promise<HostExecResult>;

@@ -5,7 +5,11 @@ import { createHash } from "node:crypto";
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { resolveWorkspacePath } from "./paths.ts";
+import {
+  assertWritePathUnchanged,
+  resolveWorkspacePath,
+  resolveWorkspaceWritePath,
+} from "./paths.ts";
 import {
   killProcessTree,
   processGroupSpawnOptions,
@@ -38,11 +42,17 @@ export function createLocalWorkspaceHost(
     async resolveExisting(inputPath) {
       return resolveWorkspacePath(workspaceRoot, inputPath);
     },
+    async resolveForWrite(inputPath) {
+      return resolveWorkspaceWritePath(workspaceRoot, inputPath);
+    },
     async isFile(resolvedPath) {
       return (await stat(resolvedPath)).isFile();
     },
     readText: (resolvedPath) => readFile(resolvedPath, "utf8"),
-    writeText: (resolvedPath, content) => writeFile(resolvedPath, content, "utf8"),
+    async writeText(resolvedPath, content) {
+      assertWritePathUnchanged(resolvedPath);
+      await writeFile(resolvedPath, content, "utf8");
+    },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
     async listFiles(limit) {
       return snapshotLocalFiles(workspaceRoot, limit);

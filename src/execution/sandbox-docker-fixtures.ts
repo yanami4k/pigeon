@@ -1,7 +1,8 @@
 // 测试夹具：模拟日常沙箱用到的 docker 子命令的假 docker CLI。容器的状态（名字、标签、run 参数、镜像）记在一个 JSON 文件里；
 // exec 在 -w 给出的本机目录里直接运行（"容器内"路径即本机路径），git、sh 都是本机的真程序。只供测试使用。
-//   version / image inspect / pull / build / run / exec / ps / rm / restart / volume rm / system df
-// 镜像是否带 git 由状态里的 noGit 名单决定：名单里的镜像，exec git 按 OCI 运行时"找不到程序"失败。
+//   version / info / image inspect / pull / build / run / exec / ps / rm / restart / volume rm / system df
+// 镜像是否带 git 由状态里的 noGit 名单决定：名单里的镜像，exec git 按 OCI 运行时"找不到程序"失败（经容器内 timeout 限时的
+// 按 timeout 找不到程序失败）。
 // 卷：run 带 -v <名>:<路径> 时自动建卷（与真 docker 一致）；volume rm 在有容器挂着时按"volume is in use"失败；
 // system df -v --format '{{json .Volumes}}' 按真 docker 的字段名（Name、Size、Links）输出卷清单。
 import { execFileSync } from "node:child_process";
@@ -20,6 +21,10 @@ save();
 const fail = (code, text) => { process.stderr.write(text + "\\n"); process.exit(code); };
 const sub = args[0];
 if (sub === "version") { process.stdout.write("fake\\n"); process.exit(0); }
+if (sub === "info") {
+  if (state.memTotal === null) fail(1, "Error response from daemon: info unavailable");
+  process.stdout.write(String(state.memTotal) + "\\n"); process.exit(0);
+}
 if (sub === "image" && args[1] === "inspect") {
   const name = args[args.length - 1];
   if (!state.images.includes(name)) fail(1, "Error: No such image: " + name);
@@ -39,7 +44,7 @@ if (sub === "build") {
 }
 if (sub === "run") {
   let i = 1; let name; const labels = {};
-  const valued = new Set(["--name", "--label", "--user", "-e", "--network", "--memory", "-v", "--mount"]);
+  const valued = new Set(["--name", "--label", "--user", "-e", "--network", "--memory", "--memory-swap", "--pids-limit", "--cpus", "-v", "--mount"]);
   const volumes = [];
   for (; i < args.length; i++) {
     const a = args[i];
@@ -106,7 +111,11 @@ for (;;) {
 const container = state.containers[args[i]];
 if (container === undefined) fail(1, "Error response from daemon: No such container: " + args[i]);
 let [program, ...rest] = args.slice(i + 1);
-if (program === "git" && state.noGit.includes(container.image)) {
+// 辅助命令经容器内 timeout 限时（/bin/sh -c 'exec "$0" -k …' <timeout> <命令…>）：按里面的命令判有没有 git
+const wrapped = program === "/bin/sh" && /^exec "\\$0" -k /.test(rest[1] ?? "");
+const inner = wrapped ? rest[3] : program;
+if (inner === "git" && state.noGit.includes(container.image)) {
+  if (wrapped) fail(127, "timeout: failed to run command 'git': No such file or directory");
   fail(127, 'OCI runtime exec failed: exec failed: unable to start container process: exec: "git": executable file not found in $PATH: unknown');
 }
 if (program === "/bin/sh" && process.platform === "win32") program = "sh";
@@ -132,6 +141,8 @@ export interface FakeDockerState {
   imageUsers: Record<string, string>;
   pullable: string[];
   noGit: string[];
+  // docker info 报的守护进程所在机器内存总量（字节）；null 表示读不到
+  memTotal: number | null;
   buildFails: boolean;
   builds: string[][];
   containers: Record<string, FakeContainer>;
@@ -169,6 +180,7 @@ export function fakeSandboxDocker(initial: Partial<FakeDockerState> = {}): FakeS
     imageUsers: { "sandbox-test:latest": "pigeon" },
     pullable: [],
     noGit: [],
+    memTotal: 16 * 1024 ** 3,
     buildFails: false,
     builds: [],
     containers: {},

@@ -322,6 +322,8 @@ async function main(argv: string[]): Promise<void> {
     sessionId,
     ...(resumed ? { resume: true } : {}),
     log: (line) => console.error(`[沙箱] ${line}`),
+    // 决策 333：运行中的提示（命令超出内存上限）经告警出口：壳接管终端期间落消息区
+    notice: (line) => warn(`[沙箱] ${line}`),
   });
   const mainOpened = await openSessionRuntime({
     governanceRoot: workspaceRoot,

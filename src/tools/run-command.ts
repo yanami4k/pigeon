@@ -15,7 +15,13 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { PIGEON_DIR } from "../state/paths.ts";
 import { createLocalWorkspaceHost, windowsScript } from "./local-host.ts";
-import type { HostExecPlan, HostFileSnapshot, WorkspaceHost } from "./workspace-host.ts";
+import {
+  type HostExecPlan,
+  type HostFileSnapshot,
+  type MemoryLimitExceeded,
+  memoryLimitText,
+  type WorkspaceHost,
+} from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
 export const RUN_COMMAND_TOOL = "run_command";
@@ -100,6 +106,8 @@ export interface ExecEvidence {
   output: string;
   truncated: boolean;
   fileChanges: FileChanges;
+  // 决策 333：超出沙箱内存上限
+  memoryLimitExceeded?: MemoryLimitExceeded;
 }
 
 // 只读检查结果：实际执行的命令串与执行路径
@@ -407,6 +415,9 @@ export function createRunCommandTool(
         output: run.output,
         truncated: run.outputBytes > maxOutputBytes,
         fileChanges: diffFiles(before, after),
+        ...(run.memoryLimitExceeded !== undefined
+          ? { memoryLimitExceeded: run.memoryLimitExceeded }
+          : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
@@ -526,6 +537,9 @@ function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
   const lines = [
     `$ ${evidence.command}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
     `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
+    ...(evidence.memoryLimitExceeded !== undefined
+      ? [memoryLimitText(evidence.memoryLimitExceeded)]
+      : []),
     evidence.output,
   ];
   if (evidence.truncated) {
