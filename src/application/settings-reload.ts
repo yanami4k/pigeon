@@ -74,6 +74,8 @@ export function planSettingsReload(
 
 function sectionValue(snapshot: SettingsSnapshot, name: string): unknown {
   if (name === "permissions") return snapshot.grants.map((entry) => entry.rule);
+  // hooks 一节合并成快照的钩子清单（merged 里没有这一节），比较按合并结果
+  if (name === "hooks") return snapshot.hooks;
   if (name === "mcp") return { section: snapshot.merged.mcp, dotMcp: snapshot.dotMcp };
   return (snapshot.merged as unknown as Record<string, unknown>)[name];
 }

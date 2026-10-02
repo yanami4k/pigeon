@@ -5,7 +5,7 @@
 // 运行面重建照终端界面入口的做法：同一会话上按新快照重开（reloadFrom 给出旧运行面、还原上下文），再释放旧的。
 // 用户级一律指到临时目录。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -421,4 +421,37 @@ test("--no-hooks 时 /reload 不把钩子带回来：重读出的新快照同样
   const plan = planSettingsReload(current, { homeDir: home, hooksDisabled: true });
   assert.equal(plan.next.hooks.length, 0);
   assert.equal(plan.next.merged.disableAllHooks, true);
+});
+
+test("新增钩子后 /reload：列为人确认，confirm 后新钩子随新快照在下一轮真跑（决策 340/324）", async () => {
+  const root = temp("pigeon-reload-hook-");
+  const home = temp("pigeon-reload-hook-home-");
+  writeFileSync(join(root, "a.txt"), "a\n");
+  const marker = join(root, "hook-ran.txt");
+  const hookScript = join(root, "mark.mjs");
+  writeFileSync(
+    hookScript,
+    `import { writeFileSync } from 'node:fs';\nlet d='';\nprocess.stdin.on('data',(c)=>(d+=c)).on('end',()=>writeFileSync(${JSON.stringify(marker)},d));`
+  );
+  const read = [
+    { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.txt" } }] },
+    { text: "好" },
+  ];
+  const s = await session(root, home, createFakeStreamFn({ replies: [...read, ...read] }));
+  try {
+    await s.run("第一遍");
+    assert.equal(existsSync(marker), false, "开局没有钩子");
+    // 中途在项目共享层加钩子：/reload 列为须确认
+    write(projectSettingsPath(root), {
+      hooks: { PreToolUse: [{ hooks: [{ type: "command", command: `node "${hookScript}"` }] }] },
+    });
+    const listed = (await s.reload([])).join("\n");
+    assert.match(listed, /钩子 .*PreToolUse/, listed);
+    await s.reload(["confirm"]);
+    assert.equal(s.bundle().hooks?.list().length, 1, "新快照带上新钩子");
+    await s.run("第二遍");
+    assert.equal(existsSync(marker), true, "confirm 后新钩子在下一轮真跑");
+  } finally {
+    await s.dispose();
+  }
 });
