@@ -4,12 +4,16 @@
   "private": true,
   "type": "module",
   "packageManager": "npm@11.6.2",
+  "bin": {
+    "pigeon": "dist/pigeon.mjs"
+  },
   "engines": {
     "node": ">=22.19.0 <25",
     "npm": ">=11 <12"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bundle": "node scripts/build-bundle.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"src/**/*.test.ts\"",
     "lint": "biome check .",
@@ -30,6 +34,7 @@
     "@modelcontextprotocol/server-filesystem": "2026.8.31",
     "@types/node": "24.13.3",
     "dependency-cruiser": "18.2.0",
+    "esbuild": "0.28.2",
     "typescript": "6.0.3"
   },
   "overrides": {
