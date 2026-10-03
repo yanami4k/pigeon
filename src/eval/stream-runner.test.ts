@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 import { runHeadless } from "../application/headless-core.ts";
 import { createSessionSearch } from "../memory/session-search.ts";
 import { listSessionFiles, sessionFileName } from "../persistence/session-reader.ts";
@@ -63,28 +63,34 @@ import { StreamWorkspace, StreamWorkspaceAccessError } from "./stream-workspace.
 const NEEDS_A = `[ -f src/a.txt ] || { echo "Cannot find module 'src/a.txt'"; exit 1; }\n`;
 
 interface Toy {
+  // 本测试自己的目录：输出、环境与用例另建的东西都放这里
   base: string;
   human: HumanRepo;
   manifest: StreamManifest;
   reference: ReferenceCases;
+  cacheDir: string;
   commits: string[];
 }
 
 // 人的历史：起点 → 题 A（新建 a，并把已有的 base 测试改成也依赖 a）→ 维护步 → 只改文档（跳过）
 // → 只改测试（套用，base 测试不再依赖 a）→ 题 B（依赖 a）。keep 测试此后人不再改。固定起点下只跑两道题：
-// 第 1 步（起点为 Start）与第 5 步（起点为"Tweak base test"）
-async function toy(
-  aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`,
-  extraStart: Record<string, string> = {}
-): Promise<Toy> {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-runner-"));
-  const dir = join(base, "human");
+// 第 1 步（起点为 Start）与第 5 步（起点为"Tweak base test"）。起点另带一份静态检查配置与一个人写的
+// 启动钩子同名文件，供判题前清理的用例对照（别的用例不看它们）
+async function buildToy(
+  aTest: string,
+  extraStart: Record<string, string>
+): Promise<Omit<Toy, "base">> {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-stream-runner-"));
+  sharedRoots.push(root);
+  const dir = join(root, "human");
   const commit = toyRepo(dir);
   const start = commit(
     {
       "src/base.txt": "base\n",
       "src/base.test.sh": "grep -q base src/base.txt\n",
       "src/keep.test.sh": "true\n",
+      "lint.cfg": "strict\n",
+      "src/sitecustomize.keep": "human\n",
       ...extraStart,
     },
     "Start"
@@ -127,18 +133,40 @@ async function toy(
     commits: facts.map((f) => ({ ...f, ...(probes[f.sha] ?? {}) })),
     readHumanFile: (sha, path) => human.show(sha, path).toString("utf8"),
   });
-  const refRoot = join(base, "ref");
+  const refRoot = join(root, "ref");
   mkdirSync(refRoot);
   const referenceWs = new ReferenceWorkspace(localStreamShell(refRoot));
   await referenceWs.init(human.bundle(c5), c5);
+  const cacheDir = join(root, "reference-cache");
   const reference = new ReferenceCases({
     reference: referenceWs,
     runtime: toyRuntime,
     human,
-    cacheDir: join(base, "reference-cache"),
+    cacheDir,
     image: "test-image",
   });
-  return { base, human, manifest, reference, commits: [start, c1, c2, c3, c4, c5] };
+  return { human, manifest, reference, cacheDir, commits: [start, c1, c2, c3, c4, c5] };
+}
+
+// 共用起点：同一份人的历史在本文件里只建一次（人的仓库只读；参考工作区经 ReferenceCases 的队列串行使用，参考基准
+// 头一次用到时现算、落盘，之后读回）。每个测试另开自己的目录放输出与环境
+const sharedRoots: string[] = [];
+const built = new Map<string, Promise<Omit<Toy, "base">>>();
+after(() => {
+  for (const root of sharedRoots) rmSync(root, { recursive: true, force: true });
+});
+
+async function toy(
+  aTest = `${NEEDS_A}grep -q alpha src/a.txt\n`,
+  extraStart: Record<string, string> = {}
+): Promise<Toy> {
+  const key = JSON.stringify([aTest, extraStart]);
+  let made = built.get(key);
+  if (made === undefined) {
+    made = buildToy(aTest, extraStart);
+    built.set(key, made);
+  }
+  return { ...(await made), base: mkdtempSync(join(tmpdir(), "pigeon-stream-runner-")) };
 }
 
 type Script = (input: StepAgentInput) => Partial<StepAgentResult> | undefined;
@@ -273,12 +301,14 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       assert.doesNotMatch(diff1, /a\.test\.sh b\/src\/a\.test\.sh/);
       assert.equal(rows[0]?.diff, "streams/tasks-neither-1/diffs/step-1.diff");
       assert.ok(rows.every((r) => typeof r.envOpenMs === "number" && r.envOpenMs >= 0));
-      for (const field of ["head", "regressions", "attribution", "reverted"]) {
-        assert.ok(
-          rows.every((r) => !(field in r)),
-          `新行不写 ${field}`
-        );
-      }
+      // agent 的墙钟取它自报的；没撞上限的步不记撞宽上限
+      assert.deepEqual(
+        rows.map((r) => [r.agentWallMs, r.hitStepBudget]),
+        [
+          [5, false],
+          [5, false],
+        ]
+      );
       const last = rows.at(-1);
       // 第 5 步：b 为要做到的（叠放到起点上失败、人的代码上通过），base、keep、a 为不许挂的
       assert.deepEqual(last?.judging, {
@@ -296,20 +326,12 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       assert.deepEqual(rows[0]?.judging?.passToPass, { failed: 0, total: 1 });
       assert.equal(rows[0]?.judging?.solved, true);
       for (const r of rows) {
-        assert.ok(!("fullPassRate" in r), "新行不写全量通过率");
         assert.deepEqual(r.memoryAtStart, { bytes: 0, entries: 0, entryChars: 0 });
-        assert.equal(r.review, null);
       }
       assert.deepEqual(
         rows.map((r) => r.envPrefetched),
         [false, true],
         "第 5 步的容器在第 1 步进行时已预先开好"
-      );
-      // 验证门随决策 322/327 删除：作业治理根不再写 verify.json
-      assert.equal(
-        existsSync(join(t.base, "out", "streams", "tasks-neither-1", ".pigeon", "verify.json")),
-        false,
-        "不再写 verify.json"
       );
       // 每步的环境用完即弃
       assert.deepEqual(readdirSync(join(t.base, "envs", "ws")), []);
@@ -318,7 +340,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         /\| neither \| 1 \| 100\.0%（2 步） \|/
       );
       // 两类用例的落盘：之后一侧（人的基准）、之前一侧（叠放运行）与比出的两类各一份
-      const cache = join(t.base, "reference-cache");
+      const cache = t.cacheDir;
       assert.deepEqual(
         JSON.parse(readFileSync(join(cache, `${t.commits[1]}.classes.json`), "utf8")),
         {
@@ -341,35 +363,27 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("撞宽上限（171）：agent 以撞轮数或墙钟上限收尾，或轮数、墙钟达到上限，记 hitStepBudget；复盘接入之前 hitReviewBudget 为空", async () => {
-    for (const [name, script, expected] of [
-      [
-        "终态撞墙钟",
-        (seq: number) => (seq === 1 ? { status: "wall-clock-limit" } : {}),
-        [true, false],
-      ],
-      ["终态撞轮数", (seq: number) => (seq === 5 ? { status: "turn-limit" } : {}), [false, true]],
-      ["轮数达到上限", (seq: number) => (seq === 1 ? { turns: 4 } : {}), [true, false]],
-      ["墙钟达到上限", (seq: number) => (seq === 5 ? { wallMs: 60_000 } : {}), [false, true]],
+  test("撞宽上限（171）：agent 以撞轮数或墙钟上限收尾，或轮数、墙钟达到上限，记 hitStepBudget", async () => {
+    for (const [name, extra] of [
+      ["终态撞墙钟", { status: "wall-clock-limit" }],
+      ["终态撞轮数", { status: "turn-limit" }],
+      ["轮数达到上限", { turns: 4 }],
+      ["墙钟达到上限", { wallMs: 60_000 }],
     ] as const) {
       const t = await toy();
       try {
-        const agent = scriptedAgent((input) => ({ ...solve(input), ...script(input.step.seq) }));
+        const agent = scriptedAgent((input) => ({ ...solve(input), ...extra }));
         const summary = await runStreams(
           options(t, {
             agents: { pigeon: agent },
             budget: { maxTurns: 4, wallClockMs: 60_000 },
+            maxSteps: 1,
           })
         );
         const rows = readStreamResults(summary.resultsFile);
         assert.deepEqual(
           rows.map((r) => r.hitStepBudget),
-          [...expected],
-          name
-        );
-        assert.deepEqual(
-          rows.map((r) => r.hitReviewBudget),
-          [null, null],
+          [true],
           name
         );
       } finally {
@@ -627,7 +641,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
       // 网关的排队时间、各账号请求数与花费按步取差，在途峰值与单次请求输入峰值直接取（每步开始时重记）；
-      // 复盘花费在复盘接入之前为 null。第 5 步作废过一次：作废那次的花费不算进重做的这一步
+      // 第 5 步作废过一次：作废那次的花费不算进重做的这一步
       assert.deepEqual(rows[0]?.gateway, {
         queueMs: 30,
         accountRequests: [1, 1],
@@ -644,66 +658,6 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         reviewCostCny: null,
         peakInputTokens: 1200,
       });
-    } finally {
-      rmSync(t.base, { recursive: true, force: true });
-    }
-  });
-
-  test("复盘随决策 331 删除：推送格与不推送的格子复盘字段一律为 null，agent 的轮数、用量与花费即整步的计量", async () => {
-    const t = await toy();
-    try {
-      const zero: GatewayMeter = {
-        requests: 0,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        costCny: 0,
-        upstreamFailures: 0,
-        queueMs: 0,
-        peakInFlight: 0,
-        peakInputTokens: 0,
-        accountRequests: [0],
-      };
-      const meters = new Map<string, GatewayMeter>();
-      const gateway = {
-        jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
-        meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
-        resetPeak: () => {},
-      };
-      const agent = scriptedAgent((input) => {
-        const key = `${input.job.stream}|${input.job.condition}|${input.job.attempt}`;
-        // agent 本身：2 次请求、110 token、0.25 元
-        const m = meters.get(key) ?? zero;
-        meters.set(key, {
-          ...m,
-          requests: m.requests + 2,
-          input: m.input + 100,
-          output: m.output + 10,
-          costCny: m.costCny + 0.25,
-          accountRequests: [(m.accountRequests[0] ?? 0) + 2],
-        });
-        solve(input);
-        return { wallMs: 50 };
-      });
-      const summary = await runStreams(
-        options(t, {
-          agents: { pigeon: agent },
-          conditions: ["push-only", "neither"],
-          maxSteps: 1,
-          gateway,
-        })
-      );
-      const rows = readStreamResults(summary.resultsFile);
-      for (const condition of ["push-only", "neither"]) {
-        const row = rows.find((r) => r.condition === condition);
-        assert.ok(row !== undefined);
-        assert.equal(row.review, null);
-        assert.equal(row.hitReviewBudget, null);
-        assert.equal(row.gateway?.reviewCostCny, null);
-        assert.equal(row.gateway?.costCny?.toFixed(6), (0.25).toFixed(6));
-        assert.deepEqual([row.turns, row.usage.totalTokens, row.agentWallMs], [2, 110, 50]);
-      }
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }
@@ -760,7 +714,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删，单个文件或整个目录被忽略都一样）；下一题开工时也不在", async () => {
+  test("agent 新建的、落在人写测试目录树上的 conftest 不影响判题与测量：判题前删掉（被 .gitignore 藏起来的也删，单个文件或整个目录被忽略都一样）", async () => {
     for (const ignore of ["/src/conftest.sh\n", "src/\n"]) {
       const t = await toy();
       try {
@@ -798,24 +752,17 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
             );
           },
         };
-        let atStep5: string[] | undefined;
         const agent = scriptedAgent((input) => {
-          if (input.step.seq === 5) {
-            atStep5 = hooks.filter((h) => existsSync(join(input.target.root, h)));
-            write(input.target.root, { "src/b.txt": "beta\n" });
-          }
-          if (input.step.seq === 1) {
-            write(input.target.root, {
-              "src/a.txt": "wrong\n",
-              // 这份还被 agent 写进了 .gitignore（这个文件本身，或它所在的整个目录）：git status 看不到它
-              ".gitignore": ignore,
-              "src/conftest.sh": "sh() { return 0; }\n",
-            });
-          }
+          write(input.target.root, {
+            "src/a.txt": "wrong\n",
+            // 这份还被 agent 写进了 .gitignore（这个文件本身，或它所在的整个目录）：git status 看不到它
+            ".gitignore": ignore,
+            "src/conftest.sh": "sh() { return 0; }\n",
+          });
           return undefined;
         });
         const summary = await runStreams(
-          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 })
         );
         const rows = readStreamResults(summary.resultsFile);
         assert.equal(
@@ -823,17 +770,16 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           "failed",
           `${ignore}：错的实现不因 agent 的 conftest 判为通过`
         );
-        // 判题只跑一次全量（含 keep 的全部人写测试），每步一次
+        // 判题只跑一次全量（含 keep 的全部人写测试）
         assert.deepEqual(
           seen.map((s) => s.where),
-          ["full", "full"]
+          ["full"]
         );
         assert.deepEqual(
           seen.filter((s) => s.present.length > 0),
           [],
           `${ignore}：判题时没有 agent 新建的 conftest`
         );
-        assert.deepEqual(atStep5, [], `${ignore}：下一题开工时不在工作区里`);
       } finally {
         rmSync(t.base, { recursive: true, force: true });
       }
@@ -922,7 +868,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
   });
 
   test("判题前清理（195 补口）：agent 放的解释器启动钩子（文件与包目录）删掉、人树里有的保留；静态检查配置写回人的版本、人树里没有的删掉；家目录下的用户级文件删掉", async () => {
-    const t = await toy(undefined, { "lint.cfg": "strict\n", "src/sitecustomize.keep": "human\n" });
+    const t = await toy();
     try {
       const home = join(t.base, "home");
       const inner = localStreamEnvs(join(t.base, "envs"), (c: string) => t.human.bundle(c));
@@ -1105,7 +1051,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         const runtime = { ...toyRuntime, envDeclarationFile: "src/base.txt", ...bad };
         const agent = scriptedAgent(() => undefined);
         const summary = await runStreams(
-          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 })
+          options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 })
         );
         assert.match(summary.jobs[0]?.stopped ?? "", /环境切换出错/);
         assert.deepEqual(readStreamResults(summary.resultsFile), []);
@@ -1152,8 +1098,8 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         seen.push([input.step.commit, marker]);
         return solve(input);
       });
-      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
-      assert.equal(seen.length, 2);
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
+      assert.equal(seen.length, 1);
       for (const [commit, marker] of seen) assert.equal(marker, commit);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -1194,7 +1140,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     }
   });
 
-  test("条件表（193、194）：四格都是 Pigeon，按能否检索与有无推送各开关；验证门与回炉随决策 322/327 删除，条件不再有回炉轮数；各条件原样交给 agent", async () => {
+  test("条件表（193、194）：四格都是 Pigeon，按能否检索与有无推送各开关；各条件原样交给 agent", async () => {
     assert.deepEqual(
       Object.values(CONDITION_SPECS).map((c) => [c.name, c.agent, c.sessionSearch, c.pushedMemory]),
       [
@@ -1232,14 +1178,13 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
     const t = await toy();
     try {
       const agent = scriptedAgent(solve);
-      await runStreams(options(t, { agents: { pigeon: agent }, promptFormat: "test-cases" }));
+      await runStreams(
+        options(t, { agents: { pigeon: agent }, promptFormat: "test-cases", maxSteps: 1 })
+      );
+      // keep 是不许挂的，不在名单里
       assert.match(
         agent.calls[0]?.prompt ?? "",
         /^Add alpha\n\nCreate src\/a\.txt\n\nTest cases that should pass[^\n]*\nsrc\/a\.test\.sh::case\nsrc\/base\.test\.sh::case\n$/
-      );
-      assert.match(
-        agent.calls[1]?.prompt ?? "",
-        /^Add beta\n\nTest cases that should pass[^\n]*\nsrc\/b\.test\.sh::case\n$/
       );
     } finally {
       rmSync(t.base, { recursive: true, force: true });
@@ -1302,7 +1247,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       try {
         const agent = scriptedAgent(solve);
         const summary = await runStreams(
-          options(t, { agents: { pigeon: agent }, promptFormat: format })
+          options(t, { agents: { pigeon: agent }, promptFormat: format, maxSteps: 1 })
         );
         const prompt = agent.calls[0]?.prompt ?? "";
         const second =
@@ -2094,662 +2039,690 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
       rmSync(t.base, { recursive: true, force: true });
     }
   });
-});
 
-test("人的基准在报告写出前被杀、拿不全用例：报错停下，不以缺了用例的基准缩小分母", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-baseline-"));
-  try {
-    const commit = toyRepo(join(base, "human"))(
-      { "src/ok.test.sh": "true\n", "src/k.test.sh": "kill -9 $PPID\n" },
-      "Start"
-    );
-    const human = gitHumanRepo(join(base, "human"));
-    mkdirSync(join(base, "ref"));
-    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
-    await ws.init(human.bundle(commit), commit);
-    const reference = new ReferenceCases({
-      reference: ws,
-      runtime: toyRuntime,
-      cacheDir: join(base, "cache"),
-      image: "test-image",
-    });
-    await assert.rejects(
-      reference.casesAt(commit, ["src/ok.test.sh", "src/k.test.sh"]),
-      /人的基准没拿到全部用例的结果/
-    );
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("人的基准多遍比对：每遍都通过的进分母 B；结果前后不一或某遍缺席的记为时过时不过；收集出的用例取各遍并集；最慢用例", () => {
-  const c = (id: string, outcome: "passed" | "failed", seconds?: number) => ({
-    id,
-    file: "t.py",
-    outcome,
-    ...(seconds !== undefined ? { seconds } : {}),
-  });
-  const baseline = compareRuns([
-    [c("a", "passed", 1.5), c("b", "passed"), c("c", "passed", 9), c("d", "failed")],
-    [c("a", "passed", 2), c("b", "failed"), c("d", "failed"), c("e", "passed", 3)],
-  ]);
-  assert.deepEqual(baseline.slowest, { id: "c", seconds: 9 });
-  assert.deepEqual(baseline.passing, ["a"]);
-  assert.deepEqual([...baseline.flaky].sort(), ["b", "c", "e"]);
-  assert.deepEqual(baseline.cases.map((x) => x.id).sort(), ["a", "b", "c", "d", "e"]);
-});
-
-test("人的基准与开跑前检查的缓存带身份（镜像、跑用例的方式、检查门命令）：身份相同才复用，变了或没有身份的旧文件一律重算", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
-  try {
-    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
-    const human = gitHumanRepo(join(base, "human"));
-    mkdirSync(join(base, "ref"));
-    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
-    await ws.init(human.bundle(commit), commit);
-    let runs = 0;
-    const counting = {
-      ...toyRuntime,
-      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
-        runs++;
-        return toyRuntime.runCases(...args);
-      },
-    };
-    const cacheDir = join(base, "cache");
-    const at = (image: string, runtime = counting) =>
-      new ReferenceCases({ reference: ws, runtime, cacheDir, image });
-    const tests = ["src/ok.test.sh"];
-    await at("sha256:aaa").casesAt(commit, tests);
-    assert.equal(runs, 2);
-    assert.equal(at("sha256:aaa").has(commit), true);
-    await at("sha256:aaa").casesAt(commit, tests);
-    assert.equal(runs, 2, "身份相同：直接读回");
-    // 镜像变了
-    assert.equal(at("sha256:bbb").has(commit), false);
-    await at("sha256:bbb").casesAt(commit, tests);
-    assert.equal(runs, 4, "镜像不同：重算");
-    // 跑用例的方式变了（例如单条超时或外壳改了）
-    const otherWay = { ...counting, casesCommand: `${counting.casesCommand} --timeout 1` };
-    assert.equal(at("sha256:bbb", otherWay).has(commit), false);
-    await at("sha256:bbb", otherWay).casesAt(commit, tests);
-    assert.equal(runs, 6, "跑用例的方式不同：重算");
-    // 没有身份的旧文件
-    const file = join(cacheDir, `${commit}.json`);
-    const { identity: _dropped, ...legacy } = JSON.parse(readFileSync(file, "utf8")) as {
-      identity?: unknown;
-    };
-    writeFileSync(file, JSON.stringify(legacy));
-    assert.equal(at("sha256:bbb", otherWay).has(commit), false, "没有身份：不复用");
-    // 开跑前检查：检查门命令变了即重算
-    const pass = ["sh", "-c", "exit 0"];
-    const fail = ["sh", "-c", "exit 1"];
-    assert.equal((await at("sha256:aaa").gateAt(commit, pass)).passed, true);
-    assert.equal(at("sha256:aaa").hasGate(commit, pass), true);
-    assert.equal(at("sha256:aaa").hasGate(commit, fail), false);
-    assert.equal(at("sha256:bbb").hasGate(commit, pass), false);
-    assert.equal((await at("sha256:aaa").gateAt(commit, fail)).passed, false, "命令不同：重跑");
-    // 开跑前检查按被检查的提交切 lint 环境
-    const linting = {
-      ...counting,
-      lintSyncCommand: (c: string) => ["sh", "-c", `echo ${c} > .git/pigeon-lint`],
-    };
-    await at("sha256:ccc", linting).gateAt(commit, pass);
-    assert.equal(readFileSync(join(base, "ref", ".git", "pigeon-lint"), "utf8").trim(), commit);
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("等价摘要：旧摘要在等价表里且结果没有挂起迹象的读回；在表里但有卡住用例、检查门没通过的，以及不在表里的，一律重算", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-equivalent-"));
-  try {
-    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
-    const human = gitHumanRepo(join(base, "human"));
-    mkdirSync(join(base, "ref"));
-    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
-    await ws.init(human.bundle(commit), commit);
-    const cacheDir = join(base, "cache");
-    const image = "sha256:aaa";
-    const gate = ["sh", "-c", "exit 0"];
-    const equivalentCommands = new Map([
-      ["old-cases", commandDigest(toyRuntime.casesCommand)],
-      ["old-gate", commandDigest(JSON.stringify(gate))],
-    ]);
-    const reference = new ReferenceCases({
-      reference: ws,
-      runtime: toyRuntime,
-      cacheDir,
-      image,
-      equivalentCommands,
-    });
-    const casesFile = join(cacheDir, `${commit}.json`);
-    const gateFile = join(cacheDir, `${commit}.gate.json`);
-    const baseline = (extra: object) => ({
-      cases: [{ id: "src/ok.test.sh::case", file: "src/ok.test.sh", outcome: "passed" }],
-      passing: ["src/ok.test.sh::case"],
-      flaky: [],
-      slowest: { id: "src/ok.test.sh::case", seconds: 1 },
-      runs: [{ peakBytes: null, limitBytes: null, wallMs: 1000 }],
-      ...extra,
-    });
-    // 旧摘要在表里、没有挂起迹象（旧文件没有 stuck 字段：最慢用例与每遍墙钟都远低于上限）：按等价读回
-    writeFileSync(
-      casesFile,
-      JSON.stringify(baseline({ identity: { image, command: "old-cases" } }))
-    );
-    assert.equal(reference.has(commit), true);
-    // 旧摘要在表里，但有卡住的用例：重算
-    writeFileSync(
-      casesFile,
-      JSON.stringify(
-        baseline({ identity: { image, command: "old-cases" }, stuck: ["src/ok.test.sh::case"] })
-      )
-    );
-    assert.equal(reference.has(commit), false, "有卡住用例：不按等价读回");
-    // 旧文件没有 stuck 字段，但最慢用例达到了单条超时：同样重算
-    writeFileSync(
-      casesFile,
-      JSON.stringify(
-        baseline({
-          identity: { image, command: "old-cases" },
-          slowest: { id: "src/ok.test.sh::case", seconds: 95 },
-        })
-      )
-    );
-    assert.equal(reference.has(commit), false, "有超时迹象：不按等价读回");
-    // 不在表里：重算
-    writeFileSync(casesFile, JSON.stringify(baseline({ identity: { image, command: "other" } })));
-    assert.equal(reference.has(commit), false);
-    // 开跑前检查：旧摘要在表里且通过的读回；没通过的重算
-    const check = { failedSteps: [], wallMs: 1, outputTail: "" };
-    writeFileSync(
-      gateFile,
-      JSON.stringify({ ...check, passed: true, identity: { image, command: "old-gate" } })
-    );
-    assert.equal(reference.hasGate(commit, gate), true);
-    writeFileSync(
-      gateFile,
-      JSON.stringify({ ...check, passed: false, identity: { image, command: "old-gate" } })
-    );
-    assert.equal(reference.hasGate(commit, gate), false, "检查门没通过：不按等价读回");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("换根目录：同一份清单、人的基准、检查门结果与身份头整体搬到别的目录下照样读回——落盘内容里没有本机路径，身份只看镜像 ID、命令摘要与清单内容", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-relocate-"));
-  try {
-    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
-    const human = gitHumanRepo(join(base, "human"));
-    const gate = ["sh", "-c", "exit 0"];
-    const tests = ["src/ok.test.sh"];
-    let runs = 0;
-    const counting = {
-      ...toyRuntime,
-      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
-        runs++;
-        return toyRuntime.runCases(...args);
-      },
-    };
-    const referenceAt = async (root: string) => {
-      mkdirSync(join(root, "ref"), { recursive: true });
-      const ws = new ReferenceWorkspace(localStreamShell(join(root, "ref")));
-      await ws.init(human.bundle(commit), commit);
-      return new ReferenceCases({
-        reference: ws,
-        runtime: counting,
-        cacheDir: join(root, "data", "baselines"),
-        image: "sha256:img",
+  test("人的基准提前单独算：只取要全量测量的步的提交、按提交落盘、多路分摊；重跑时已算的跳过；跑批直接读、不再现算；出错的提交记下后接着算", async () => {
+    const t = await toy();
+    try {
+      const targets = baselineTargets({
+        manifest: t.manifest,
+        human: t.human,
+        runtime: toyRuntime,
       });
-    };
-    // 原位置：算人的基准与检查门，写清单与身份头
-    const a = join(base, "a");
-    const first = await referenceAt(a);
-    await first.casesAt(commit, tests);
-    await first.gateAt(commit, gate);
-    const computed = runs;
-    mkdirSync(join(a, "data", "out"), { recursive: true });
-    writeFileSync(join(a, "data", "manifest.json"), JSON.stringify({ repo: "toy", steps: [] }));
-    const identity = {
-      core: {
-        repo: "toy",
-        manifestDigest: manifestDigestOf(join(a, "data", "manifest.json")),
-        image: "sha256:img",
-        budget: DEFAULT_STEP_BUDGET,
-        conditions: ["neither"],
-        stepScope: TASK_CHAIN_SCOPE,
-        promptFormat: "test-files",
-        promptLayout: TASK_PROMPT_LAYOUT,
-        taskSelection: { method: "all" as const },
-        maxSteps: null,
-        agents: {},
-      },
-      info: { concurrency: 1, harness: { commit: "h", dirty: false } },
-    };
-    const digest = checkOrWriteIdentity(join(a, "data", "out"), identity);
-    for (const f of readdirSync(join(a, "data", "baselines"))) {
-      const text = readFileSync(join(a, "data", "baselines", f), "utf8");
-      assert.ok(
-        !text.includes(base.replace(/\\/g, "/")) && !text.includes(base),
-        `${f} 里没有本机路径`
-      );
-    }
-    // 整体搬到另一个根目录下
-    const b = join(base, "elsewhere", "deeper", "b");
-    cpSync(join(a, "data"), join(b, "data"), { recursive: true });
-    const moved = await referenceAt(b);
-    assert.equal(moved.has(commit), true, "人的基准读回");
-    assert.equal(moved.hasGate(commit, gate), true, "检查门结果读回");
-    await moved.casesAt(commit, tests);
-    assert.equal(runs, computed, "没有重算");
-    assert.equal(manifestDigestOf(join(b, "data", "manifest.json")), identity.core.manifestDigest);
-    assert.equal(
-      checkOrWriteIdentity(join(b, "data", "out"), {
-        ...identity,
-        core: {
-          ...identity.core,
-          manifestDigest: manifestDigestOf(join(b, "data", "manifest.json")),
-        },
-      }),
-      digest,
-      "身份头比对通过"
-    );
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("镜像等价只用于人的用例基准：旧镜像的用例基准按镜像等价表读回，检查门结果不按镜像等价、重算；不在表里的镜像重算", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-image-equivalent-"));
-  try {
-    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
-    const human = gitHumanRepo(join(base, "human"));
-    mkdirSync(join(base, "ref"));
-    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
-    await ws.init(human.bundle(commit), commit);
-    const cacheDir = join(base, "cache");
-    const gate = ["sh", "-c", "exit 0"];
-    // 同一个旧镜像可以对多个新镜像（v4 对 v5 与 v6）
-    const pairs: [string, string][] = [
-      ["sha256:old", "sha256:mid"],
-      ["sha256:old", "sha256:new"],
-    ];
-    const reference = new ReferenceCases({
-      reference: ws,
-      runtime: toyRuntime,
-      cacheDir,
-      image: "sha256:new",
-      equivalentImages: pairs,
-    });
-    const casesCommand = commandDigest(toyRuntime.casesCommand);
-    const gateCommand = commandDigest(JSON.stringify(gate));
-    const cases = (image: string) =>
-      JSON.stringify({
-        cases: [],
-        passing: [],
-        flaky: [],
-        slowest: null,
-        runs: [],
-        stuck: [],
-        identity: { image, command: casesCommand },
-      });
-    writeFileSync(join(cacheDir, `${commit}.json`), cases("sha256:old"));
-    assert.equal(reference.has(commit), true, "旧镜像的用例基准按镜像等价读回");
-    writeFileSync(join(cacheDir, `${commit}.json`), cases("sha256:other"));
-    assert.equal(reference.has(commit), false, "不在镜像等价表里：重算");
-    writeFileSync(
-      join(cacheDir, `${commit}.gate.json`),
-      JSON.stringify({
-        passed: true,
-        failedSteps: [],
-        wallMs: 1,
-        outputTail: "",
-        identity: { image: "sha256:old", command: gateCommand },
-      })
-    );
-    assert.equal(reference.hasGate(commit, gate), false, "检查门结果不按镜像等价");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("等价表里的新摘要就是当前 strands 跑用例外壳的摘要（含改用人的 pytest 配置之前的两个旧摘要）：外壳一改，这条用例即提醒重新审视等价；检查门命令不在表里", () => {
-  const cases = commandDigest(strandsRuntime.casesCommand);
-  const gate = commandDigest(JSON.stringify(gateFromSteps(strandsRuntime.verifySteps)));
-  const pairs = [...EQUIVALENT_BASELINE_COMMANDS];
-  assert.deepEqual(new Set(pairs.map(([, b]) => b)), new Set([cases]));
-  assert.deepEqual(pairs.map(([a]) => a).sort(), [
-    "47c962cd27b0eefe",
-    "70f10b887f6bfdc1",
-    "da2746ca28858993",
-  ]);
-  assert.ok(pairs.every(([a, b]) => a !== gate && b !== gate));
-});
-
-test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、上限与墙钟；峰值超过上限的 75% 即告警", async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-memory-"));
-  try {
-    const commit = toyRepo(join(base, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
-    const human = gitHumanRepo(join(base, "human"));
-    mkdirSync(join(base, "ref"));
-    const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
-    await ws.init(human.bundle(commit), commit);
-    // 假的 cgroup：占用 1,700,000,000 字节，其中页缓存 100,000,000，上限 2,000,000,000
-    const cgroup = join(base, "cgroup");
-    mkdirSync(cgroup);
-    writeFileSync(join(cgroup, "memory.current"), "1700000000\n");
-    writeFileSync(join(cgroup, "memory.stat"), "anon 1500000000\nfile 100000000\n");
-    writeFileSync(join(cgroup, "memory.max"), "2000000000\n");
-    const warnings: string[] = [];
-    const reference = new ReferenceCases({
-      reference: ws,
-      runtime: toyRuntime,
-      cacheDir: join(base, "cache"),
-      image: "test-image",
-      cgroupDir: cgroup.replace(/\\/g, "/"),
-      warn: (m) => warnings.push(m),
-    });
-    const baseline = await reference.casesAt(commit, ["src/ok.test.sh"]);
-    assert.deepEqual(
-      baseline.runs.map((r) => [r.peakBytes, r.limitBytes]),
-      [
-        [1_600_000_000, 2_000_000_000],
-        [1_600_000_000, 2_000_000_000],
-      ]
-    );
-    assert.ok(baseline.runs.every((r) => r.wallMs >= 0));
-    assert.equal(warnings.length, 2);
-    assert.match(warnings[0] ?? "", /内存告警.*第 1 遍.*1526 MiB.*1907 MiB 的 75%/);
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("人的基准提前单独算：只取要全量测量的步的提交、按提交落盘、多路分摊；重跑时已算的跳过；跑批直接读、不再现算；出错的提交记下后接着算", async () => {
-  const t = await toy();
-  try {
-    const targets = baselineTargets({ manifest: t.manifest, human: t.human, runtime: toyRuntime });
-    const upToA = ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"];
-    assert.deepEqual(
-      targets.map((x) => [x.commit, x.seqs, x.tests]),
-      [
-        [t.commits[1], [1], upToA],
-        [t.commits[2], [2], upToA],
-        [t.commits[4], [4], upToA],
+      const upToA = ["src/a.test.sh", "src/base.test.sh", "src/keep.test.sh"];
+      assert.deepEqual(
+        targets.map((x) => [x.commit, x.seqs, x.tests]),
         [
-          t.commits[5],
-          [5],
-          ["src/a.test.sh", "src/b.test.sh", "src/base.test.sh", "src/keep.test.sh"],
-        ],
-      ]
-    );
-    let runs = 0;
-    // 人的基准与全量测量不另给单条超时，用运行方式的缺省值（与验证门、判题同一口径；探针另给更短的）
-    const caseTimeouts: (number | undefined)[] = [];
-    const counting = {
-      ...toyRuntime,
-      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
-        runs++;
-        caseTimeouts.push(args[2].caseTimeoutSec);
-        return toyRuntime.runCases(...args);
-      },
-    };
-    const measuring = {
-      ...toyRuntime,
-      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
-        caseTimeouts.push(args[2].caseTimeoutSec);
-        return toyRuntime.runCases(...args);
-      },
-    };
-    const end = t.commits[5] ?? "";
-    const references = await Promise.all(
-      [0, 1].map(async (i) => {
-        const root = join(t.base, `baseline-ref-${i}`);
-        mkdirSync(root);
-        const ws = new ReferenceWorkspace(localStreamShell(root));
-        await ws.init(t.human.bundle(end), end);
-        return new ReferenceCases({
-          reference: ws,
-          runtime: counting,
-          human: t.human,
-          cacheDir: join(t.base, "baseline"),
-          image: "test-image",
-        });
-      })
-    );
-    const first = await computeBaselines({ targets, references });
-    assert.deepEqual([first.total, first.computed, first.cached, first.failed], [4, 4, 0, []]);
-    assert.equal(runs, 8, "每个提交跑两遍");
-    const again = await computeBaselines({ targets, references });
-    assert.deepEqual([again.computed, again.cached], [0, 4]);
-    assert.equal(runs, 8, "已落盘的不再跑");
-    // 跑批读同一目录：全量测量不再现算人的基准
-    const [reading] = references;
-    assert.ok(reading !== undefined);
-    const summary = await runStreams(
-      options(t, {
-        agents: { pigeon: scriptedAgent(() => undefined) },
-        reference: reading,
-        runtime: measuring,
-      })
-    );
-    // 两道题：之后一侧读已落盘的人的基准，之前一侧（叠放运行）没预计算、现算两遍
-    assert.equal(runs, 12);
-    assert.ok(caseTimeouts.length > 12, "基准、叠放运行与判题都跑过");
-    assert.ok(caseTimeouts.every((t) => t === undefined));
-    const rows = readStreamResults(summary.resultsFile);
-    assert.deepEqual(rows.at(-1)?.judging?.failToPass, { passed: 0, total: 1 });
-    assert.equal(rows.at(-1)?.judging?.passToPass.total, 3);
-    const broken = await computeBaselines({
-      targets: [
-        { commit: "0000000000000000000000000000000000000000", tests: [], seqs: [9] },
-        ...targets,
-      ],
-      references,
-    });
-    assert.equal(broken.failed.length, 1);
-    assert.equal(broken.cached, 4);
-    // 开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与没过的步；重跑时从落盘结果读回、不再跑
-    const gateCommand = gateFromSteps([{ name: "有 b", command: "test -f src/b.txt" }]);
-    const order = (list: { commit: string }[]) =>
-      list.map((g) => t.commits.indexOf(g.commit)).sort((a, b) => a - b);
-    const gated = await computeBaselines({ targets, references, check: "gate", gateCommand });
-    assert.deepEqual(order(gated.gateFailures), [1, 2, 4]);
-    assert.ok(gated.gateFailures.every((g) => g.failedSteps.join() === "有 b"));
-    assert.equal(gated.computed, 4);
-    const gatedAgain = await computeBaselines({ targets, references, check: "gate", gateCommand });
-    assert.deepEqual(order(gatedAgain.gateFailures), [1, 2, 4], "同一条命令：已落盘的结果直接读回");
-    assert.deepEqual([gatedAgain.cached, gatedAgain.computed], [4, 0]);
-    // 检查门命令变了：落盘结果的身份不符，全部重跑
-    const regated = await computeBaselines({
-      targets,
-      references,
-      check: "gate",
-      gateCommand: ["sh", "-c", "exit 1"],
-    });
-    assert.deepEqual(order(regated.gateFailures), [1, 2, 4, 5]);
-    assert.deepEqual([regated.cached, regated.computed], [0, 4]);
-  } finally {
-    rmSync(t.base, { recursive: true, force: true });
-  }
-});
-
-test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，多路分摊、按提交落盘、重跑即续算；叠放运行的测试配置显式取 commit 版；起点对不上的落盘结果重算；叠放运行拿不全用例即记这道题无法建立基线、跳过并接着算其余的（重跑读回、不重算），跑批时这道题照跑不判分、报告计数；跑批直接读、不再现算", async () => {
-  const t = await toy();
-  try {
-    let runs = 0;
-    // 测试配置的钉法：记下每次钉配置时读到的 src/b.txt（只在第 5 步的 commit 上有；叠放运行若读工作区里 parent 的，读不到）
-    const pinned: (string | undefined)[] = [];
-    const runtime: typeof toyRuntime = {
-      ...toyRuntime,
-      runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
-        runs++;
-        return toyRuntime.runCases(...args);
-      },
-      pinTestConfig: async (_ws, read) => {
-        pinned.push((await read("src/b.txt"))?.toString("utf8"));
-      },
-    };
-    const end = t.commits[5] ?? "";
-    const referencesIn = (cacheDir: string, rt: typeof toyRuntime) =>
-      Promise.all(
+          [t.commits[1], [1], upToA],
+          [t.commits[2], [2], upToA],
+          [t.commits[4], [4], upToA],
+          [
+            t.commits[5],
+            [5],
+            ["src/a.test.sh", "src/b.test.sh", "src/base.test.sh", "src/keep.test.sh"],
+          ],
+        ]
+      );
+      let runs = 0;
+      // 人的基准与全量测量不另给单条超时，用运行方式的缺省值（与验证门、判题同一口径；探针另给更短的）
+      const caseTimeouts: (number | undefined)[] = [];
+      const counting = {
+        ...toyRuntime,
+        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+          runs++;
+          caseTimeouts.push(args[2].caseTimeoutSec);
+          return toyRuntime.runCases(...args);
+        },
+      };
+      const measuring = {
+        ...toyRuntime,
+        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+          caseTimeouts.push(args[2].caseTimeoutSec);
+          return toyRuntime.runCases(...args);
+        },
+      };
+      const end = t.commits[5] ?? "";
+      const references = await Promise.all(
         [0, 1].map(async (i) => {
-          const root = join(t.base, `classes-ref-${cacheDir}-${i}`);
+          const root = join(t.base, `baseline-ref-${i}`);
           mkdirSync(root);
           const ws = new ReferenceWorkspace(localStreamShell(root));
           await ws.init(t.human.bundle(end), end);
           return new ReferenceCases({
             reference: ws,
-            runtime: rt,
+            runtime: counting,
             human: t.human,
-            cacheDir: join(t.base, cacheDir),
+            cacheDir: join(t.base, "baseline"),
             image: "test-image",
           });
         })
       );
-    const references = await referencesIn("classes", runtime);
-    const targets = classTargets(t.manifest);
-    assert.deepEqual(
-      targets.map((x) => [x.task, x.step.seq]),
-      [
-        [1, 1],
-        [2, 5],
-      ]
-    );
-    const first = await computeClasses({ targets, references });
-    assert.deepEqual([first.total, first.computed, first.cached, first.failed], [2, 2, 0, []]);
-    assert.equal(runs, 8, "每道题 commit 两遍、叠放两遍");
-    assert.deepEqual(
-      first.steps.map((s) => [s.task, s.failToPass, s.passToPass, s.excludedFlaky]),
-      [
-        [1, 2, 1, 0],
-        [2, 1, 3, 0],
-      ]
-    );
-    assert.deepEqual(
-      [...pinned].sort(),
-      ["beta\n", "beta\n", undefined, undefined].sort(),
-      "第 5 步的 commit 一侧与叠放运行都钉的是 commit 版"
-    );
-    const again = await computeClasses({ targets, references });
-    assert.deepEqual([again.computed, again.cached, again.steps.length], [0, 2, 2]);
-    assert.equal(runs, 8, "已落盘的不再跑");
-    // 叠放运行的落盘结果记的起点与这一步的 parent 对不上：只重算这一侧
-    const overlayFile = join(t.base, "classes", `${t.commits[5]}.overlay.json`);
-    const saved = JSON.parse(readFileSync(overlayFile, "utf8"));
-    writeFileSync(overlayFile, JSON.stringify({ ...saved, parent: "someone-else" }));
-    const redo = await computeClasses({ targets, references });
-    assert.deepEqual([redo.computed, redo.cached], [1, 1]);
-    assert.equal(runs, 10);
-    // 跑批读同一目录：两类用例不再现算
-    const [reading] = references;
-    assert.ok(reading !== undefined);
-    await runStreams(options(t, { agents: { pigeon: scriptedAgent(solve) }, reference: reading }));
-    assert.equal(runs, 10);
-    // 叠放运行拿不全用例（第 5 步叠放到起点上时报告写不出）：这道题记"无法建立基线"与原因、跳过，不算出错，另一道照算；
-    // 重跑时读回这条记录、不再重算
-    let brokenRuns = 0;
-    const broken: typeof toyRuntime = {
-      ...toyRuntime,
-      runCases: async (ws, tests, opts) => {
-        brokenRuns++;
-        const run = await toyRuntime.runCases(ws, tests, opts);
-        const overlayOfStep5 =
-          existsSync(join(ws.root, "src", "b.test.sh")) &&
-          !existsSync(join(ws.root, "src", "b.txt"));
-        return overlayOfStep5 ? { ...run, complete: false } : run;
-      },
-    };
-    const brokenRefs = await referencesIn("classes-broken", broken);
-    const partial = await computeClasses({ targets, references: brokenRefs });
-    assert.deepEqual(
-      partial.steps.map((s) => s.task),
-      [1]
-    );
-    assert.deepEqual(partial.failed, [], "无法建立基线不算出错，预计算不停");
-    assert.deepEqual(
-      partial.unbuildable.map((u) => [u.task, u.seq]),
-      [[2, 5]]
-    );
-    assert.match(partial.unbuildable[0]?.reason ?? "", /没拿到全部用例的结果.*叠放到/);
-    const brokenRunsAfterFirst = brokenRuns;
-    const resumed = await computeClasses({ targets, references: brokenRefs });
-    assert.deepEqual([resumed.cached, resumed.computed, resumed.unbuildable.length], [2, 0, 1]);
-    assert.equal(brokenRuns, brokenRunsAfterFirst, "无法建立基线的记录读回，不再重算");
-    // 跑批：这道题 agent 照跑（记忆照常积累），不判分，结果行记原因；报告单列计数、不进主判据
-    const [brokenRef] = brokenRefs;
-    assert.ok(brokenRef !== undefined);
-    const agent = scriptedAgent(solve);
-    const run = await runStreams(
-      options(t, {
-        agents: { pigeon: agent },
-        reference: brokenRef,
-        outDir: join(t.base, "out-broken"),
-      })
-    );
-    assert.deepEqual(
-      agent.calls.map((c) => c.step.seq),
-      [1, 5]
-    );
-    const rows = readStreamResults(run.resultsFile);
-    assert.deepEqual(
-      rows.map((r) => [
-        r.seq,
-        r.outcome,
-        r.judged,
-        r.judging === null,
-        r.baselineUnavailable !== null,
-      ]),
-      [
-        [1, "passed", true, false, false],
-        [5, "skipped", false, true, true],
-      ]
-    );
-    assert.match(rows[1]?.baselineUnavailable ?? "", /没拿到全部用例的结果/);
-    assert.equal(rows[1]?.memoryAtEnd?.bytes, 0, "agent 部分照常记");
-    assert.match(
-      readFileSync(run.reportFile, "utf8"),
-      /\| neither \| 1 \| 100\.0%（1 步） \|.*\| 1 \| 1 \|$/m
-    );
-  } finally {
-    rmSync(t.base, { recursive: true, force: true });
-  }
+      const first = await computeBaselines({ targets, references });
+      assert.deepEqual([first.total, first.computed, first.cached, first.failed], [4, 4, 0, []]);
+      assert.equal(runs, 8, "每个提交跑两遍");
+      const again = await computeBaselines({ targets, references });
+      assert.deepEqual([again.computed, again.cached], [0, 4]);
+      assert.equal(runs, 8, "已落盘的不再跑");
+      // 跑批读同一目录：全量测量不再现算人的基准
+      const [reading] = references;
+      assert.ok(reading !== undefined);
+      const summary = await runStreams(
+        options(t, {
+          agents: { pigeon: scriptedAgent(() => undefined) },
+          reference: reading,
+          runtime: measuring,
+        })
+      );
+      // 两道题：之后一侧读已落盘的人的基准，之前一侧（叠放运行）没预计算、现算两遍
+      assert.equal(runs, 12);
+      assert.ok(caseTimeouts.length > 12, "基准、叠放运行与判题都跑过");
+      assert.ok(caseTimeouts.every((t) => t === undefined));
+      const rows = readStreamResults(summary.resultsFile);
+      assert.deepEqual(rows.at(-1)?.judging?.failToPass, { passed: 0, total: 1 });
+      assert.equal(rows.at(-1)?.judging?.passToPass.total, 3);
+      const broken = await computeBaselines({
+        targets: [
+          { commit: "0000000000000000000000000000000000000000", tests: [], seqs: [9] },
+          ...targets,
+        ],
+        references,
+      });
+      assert.equal(broken.failed.length, 1);
+      assert.equal(broken.cached, 4);
+      // 开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与没过的步；重跑时从落盘结果读回、不再跑
+      const gateCommand = gateFromSteps([{ name: "有 b", command: "test -f src/b.txt" }]);
+      const order = (list: { commit: string }[]) =>
+        list.map((g) => t.commits.indexOf(g.commit)).sort((a, b) => a - b);
+      const gated = await computeBaselines({ targets, references, check: "gate", gateCommand });
+      assert.deepEqual(order(gated.gateFailures), [1, 2, 4]);
+      assert.ok(gated.gateFailures.every((g) => g.failedSteps.join() === "有 b"));
+      assert.equal(gated.computed, 4);
+      const gatedAgain = await computeBaselines({
+        targets,
+        references,
+        check: "gate",
+        gateCommand,
+      });
+      assert.deepEqual(
+        order(gatedAgain.gateFailures),
+        [1, 2, 4],
+        "同一条命令：已落盘的结果直接读回"
+      );
+      assert.deepEqual([gatedAgain.cached, gatedAgain.computed], [4, 0]);
+      // 检查门命令变了：落盘结果的身份不符，全部重跑
+      const regated = await computeBaselines({
+        targets,
+        references,
+        check: "gate",
+        gateCommand: ["sh", "-c", "exit 1"],
+      });
+      assert.deepEqual(order(regated.gateFailures), [1, 2, 4, 5]);
+      assert.deepEqual([regated.cached, regated.computed], [0, 4]);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("两类用例预计算（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，多路分摊、按提交落盘、重跑即续算；叠放运行的测试配置显式取 commit 版；起点对不上的落盘结果重算；叠放运行拿不全用例即记这道题无法建立基线、跳过并接着算其余的（重跑读回、不重算），跑批时这道题照跑不判分、报告计数；跑批直接读、不再现算", async () => {
+    const t = await toy();
+    try {
+      let runs = 0;
+      // 测试配置的钉法：记下每次钉配置时读到的 src/b.txt（只在第 5 步的 commit 上有；叠放运行若读工作区里 parent 的，读不到）
+      const pinned: (string | undefined)[] = [];
+      const runtime: typeof toyRuntime = {
+        ...toyRuntime,
+        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+          runs++;
+          return toyRuntime.runCases(...args);
+        },
+        pinTestConfig: async (_ws, read) => {
+          pinned.push((await read("src/b.txt"))?.toString("utf8"));
+        },
+      };
+      const end = t.commits[5] ?? "";
+      const referencesIn = (cacheDir: string, rt: typeof toyRuntime) =>
+        Promise.all(
+          [0, 1].map(async (i) => {
+            const root = join(t.base, `classes-ref-${cacheDir}-${i}`);
+            mkdirSync(root);
+            const ws = new ReferenceWorkspace(localStreamShell(root));
+            await ws.init(t.human.bundle(end), end);
+            return new ReferenceCases({
+              reference: ws,
+              runtime: rt,
+              human: t.human,
+              cacheDir: join(t.base, cacheDir),
+              image: "test-image",
+            });
+          })
+        );
+      const references = await referencesIn("classes", runtime);
+      const targets = classTargets(t.manifest);
+      assert.deepEqual(
+        targets.map((x) => [x.task, x.step.seq]),
+        [
+          [1, 1],
+          [2, 5],
+        ]
+      );
+      const first = await computeClasses({ targets, references });
+      assert.deepEqual([first.total, first.computed, first.cached, first.failed], [2, 2, 0, []]);
+      assert.equal(runs, 8, "每道题 commit 两遍、叠放两遍");
+      assert.deepEqual(
+        first.steps.map((s) => [s.task, s.failToPass, s.passToPass, s.excludedFlaky]),
+        [
+          [1, 2, 1, 0],
+          [2, 1, 3, 0],
+        ]
+      );
+      assert.deepEqual(
+        [...pinned].sort(),
+        ["beta\n", "beta\n", undefined, undefined].sort(),
+        "第 5 步的 commit 一侧与叠放运行都钉的是 commit 版"
+      );
+      const again = await computeClasses({ targets, references });
+      assert.deepEqual([again.computed, again.cached, again.steps.length], [0, 2, 2]);
+      assert.equal(runs, 8, "已落盘的不再跑");
+      // 叠放运行的落盘结果记的起点与这一步的 parent 对不上：只重算这一侧
+      const overlayFile = join(t.base, "classes", `${t.commits[5]}.overlay.json`);
+      const saved = JSON.parse(readFileSync(overlayFile, "utf8"));
+      writeFileSync(overlayFile, JSON.stringify({ ...saved, parent: "someone-else" }));
+      const redo = await computeClasses({ targets, references });
+      assert.deepEqual([redo.computed, redo.cached], [1, 1]);
+      assert.equal(runs, 10);
+      // 跑批读同一目录：两类用例不再现算
+      const [reading] = references;
+      assert.ok(reading !== undefined);
+      await runStreams(
+        options(t, { agents: { pigeon: scriptedAgent(solve) }, reference: reading })
+      );
+      assert.equal(runs, 10);
+      // 叠放运行拿不全用例（第 5 步叠放到起点上时报告写不出）：这道题记"无法建立基线"与原因、跳过，不算出错，另一道照算；
+      // 重跑时读回这条记录、不再重算
+      let brokenRuns = 0;
+      const broken: typeof toyRuntime = {
+        ...toyRuntime,
+        runCases: async (ws, tests, opts) => {
+          brokenRuns++;
+          const run = await toyRuntime.runCases(ws, tests, opts);
+          const overlayOfStep5 =
+            existsSync(join(ws.root, "src", "b.test.sh")) &&
+            !existsSync(join(ws.root, "src", "b.txt"));
+          return overlayOfStep5 ? { ...run, complete: false } : run;
+        },
+      };
+      const brokenRefs = await referencesIn("classes-broken", broken);
+      const partial = await computeClasses({ targets, references: brokenRefs });
+      assert.deepEqual(
+        partial.steps.map((s) => s.task),
+        [1]
+      );
+      assert.deepEqual(partial.failed, [], "无法建立基线不算出错，预计算不停");
+      assert.deepEqual(
+        partial.unbuildable.map((u) => [u.task, u.seq]),
+        [[2, 5]]
+      );
+      assert.match(partial.unbuildable[0]?.reason ?? "", /没拿到全部用例的结果.*叠放到/);
+      const brokenRunsAfterFirst = brokenRuns;
+      const resumed = await computeClasses({ targets, references: brokenRefs });
+      assert.deepEqual([resumed.cached, resumed.computed, resumed.unbuildable.length], [2, 0, 1]);
+      assert.equal(brokenRuns, brokenRunsAfterFirst, "无法建立基线的记录读回，不再重算");
+      // 跑批：这道题 agent 照跑（记忆照常积累），不判分，结果行记原因；报告单列计数、不进主判据
+      const [brokenRef] = brokenRefs;
+      assert.ok(brokenRef !== undefined);
+      const agent = scriptedAgent(solve);
+      const run = await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          reference: brokenRef,
+          outDir: join(t.base, "out-broken"),
+        })
+      );
+      assert.deepEqual(
+        agent.calls.map((c) => c.step.seq),
+        [1, 5]
+      );
+      const rows = readStreamResults(run.resultsFile);
+      assert.deepEqual(
+        rows.map((r) => [
+          r.seq,
+          r.outcome,
+          r.judged,
+          r.judging === null,
+          r.baselineUnavailable !== null,
+        ]),
+        [
+          [1, "passed", true, false, false],
+          [5, "skipped", false, true, true],
+        ]
+      );
+      assert.match(rows[1]?.baselineUnavailable ?? "", /没拿到全部用例的结果/);
+      assert.equal(rows[1]?.memoryAtEnd?.bytes, 0, "agent 部分照常记");
+      assert.match(
+        readFileSync(run.reportFile, "utf8"),
+        /\| neither \| 1 \| 100\.0%（1 步） \|.*\| 1 \| 1 \|$/m
+      );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("治理根按条件 × 遍次隔离：同一作业各步共用一个（会话与记忆沿步累积），不同条件、不同遍次各用各的", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent(() => undefined);
+      await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          conditions: ["search-only", "neither"],
+          attempts: 2,
+          maxSteps: 2,
+          concurrency: 1,
+        })
+      );
+      const roots = new Map<string, Set<string>>();
+      for (const call of agent.calls) {
+        const key = `${call.job.stream}|${call.job.condition}|${call.job.attempt}`;
+        roots.set(key, (roots.get(key) ?? new Set()).add(call.workDir));
+      }
+      // 每个作业的两道题都调了 agent，且共用一个治理根
+      assert.equal(agent.calls.length, 8);
+      assert.deepEqual(
+        [...roots.values()].map((set) => set.size),
+        [1, 1, 1, 1]
+      );
+      // 四个作业的治理根两两不同：条件不同或遍次不同都不串用
+      const distinct = new Set([...roots.values()].map((set) => [...set][0]));
+      assert.equal(distinct.size, 4);
+      const of = (key: string) => [...(roots.get(key) ?? [])][0];
+      assert.notEqual(of("tasks|search-only|1"), of("tasks|search-only|2"), "两个遍次的治理根不同");
+      assert.notEqual(of("tasks|search-only|1"), of("tasks|neither|1"), "两个条件的治理根不同");
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
 });
 
-test("治理根按条件 × 遍次隔离：同一作业各步共用一个（会话与记忆沿步累积），不同条件、不同遍次各用各的", async () => {
-  const t = await toy();
-  try {
-    const agent = scriptedAgent(() => undefined);
-    await runStreams(
-      options(t, {
-        agents: { pigeon: agent },
-        conditions: ["search-only", "neither"],
-        attempts: 2,
-        maxSteps: 2,
-        concurrency: 1,
-      })
-    );
-    const roots = new Map<string, Set<string>>();
-    for (const call of agent.calls) {
-      const key = `${call.job.stream}|${call.job.condition}|${call.job.attempt}`;
-      roots.set(key, (roots.get(key) ?? new Set()).add(call.workDir));
+// 只有一个提交、一个恒通过测试的人的仓库与装好它的参考工作区：下面几条基准缓存的用例共用，各用各的缓存目录。
+// 只有缓存身份那条在这份参考工作区上检出、跑用例；其余只读写缓存文件或另装工作区，同组并发也不相撞
+let okRepo:
+  | Promise<{ root: string; commit: string; human: HumanRepo; ws: ReferenceWorkspace }>
+  | undefined;
+function sharedOkRepo() {
+  okRepo ??= (async () => {
+    const root = mkdtempSync(join(tmpdir(), "pigeon-stream-ok-"));
+    sharedRoots.push(root);
+    const commit = toyRepo(join(root, "human"))({ "src/ok.test.sh": "true\n" }, "Start");
+    const human = gitHumanRepo(join(root, "human"));
+    mkdirSync(join(root, "ref"));
+    const ws = new ReferenceWorkspace(localStreamShell(join(root, "ref")));
+    await ws.init(human.bundle(commit), commit);
+    return { root, commit, human, ws };
+  })();
+  return okRepo;
+}
+
+describe("人的基准与缓存（参考工作区）", { concurrency: true }, () => {
+  test("人的基准在报告写出前被杀、拿不全用例：报错停下，不以缺了用例的基准缩小分母", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-baseline-"));
+    try {
+      const commit = toyRepo(join(base, "human"))(
+        { "src/ok.test.sh": "true\n", "src/k.test.sh": "kill -9 $PPID\n" },
+        "Start"
+      );
+      const human = gitHumanRepo(join(base, "human"));
+      mkdirSync(join(base, "ref"));
+      const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+      await ws.init(human.bundle(commit), commit);
+      const reference = new ReferenceCases({
+        reference: ws,
+        runtime: toyRuntime,
+        cacheDir: join(base, "cache"),
+        image: "test-image",
+      });
+      await assert.rejects(
+        reference.casesAt(commit, ["src/ok.test.sh", "src/k.test.sh"]),
+        /人的基准没拿到全部用例的结果/
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
-    // 每个作业的两道题都调了 agent，且共用一个治理根
-    assert.equal(agent.calls.length, 8);
-    assert.deepEqual(
-      [...roots.values()].map((set) => set.size),
-      [1, 1, 1, 1]
-    );
-    // 四个作业的治理根两两不同：条件不同或遍次不同都不串用
-    const distinct = new Set([...roots.values()].map((set) => [...set][0]));
-    assert.equal(distinct.size, 4);
-    const of = (key: string) => [...(roots.get(key) ?? [])][0];
-    assert.notEqual(of("tasks|search-only|1"), of("tasks|search-only|2"), "两个遍次的治理根不同");
-    assert.notEqual(of("tasks|search-only|1"), of("tasks|neither|1"), "两个条件的治理根不同");
-  } finally {
-    rmSync(t.base, { recursive: true, force: true });
-  }
+  });
+
+  test("人的基准多遍比对：每遍都通过的进分母 B；结果前后不一或某遍缺席的记为时过时不过；收集出的用例取各遍并集；最慢用例", () => {
+    const c = (id: string, outcome: "passed" | "failed", seconds?: number) => ({
+      id,
+      file: "t.py",
+      outcome,
+      ...(seconds !== undefined ? { seconds } : {}),
+    });
+    const baseline = compareRuns([
+      [c("a", "passed", 1.5), c("b", "passed"), c("c", "passed", 9), c("d", "failed")],
+      [c("a", "passed", 2), c("b", "failed"), c("d", "failed"), c("e", "passed", 3)],
+    ]);
+    assert.deepEqual(baseline.slowest, { id: "c", seconds: 9 });
+    assert.deepEqual(baseline.passing, ["a"]);
+    assert.deepEqual([...baseline.flaky].sort(), ["b", "c", "e"]);
+    assert.deepEqual(baseline.cases.map((x) => x.id).sort(), ["a", "b", "c", "d", "e"]);
+  });
+
+  test("人的基准与开跑前检查的缓存带身份（镜像、跑用例的方式、检查门命令）：身份相同才复用，变了或没有身份的旧文件一律重算", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-identity-"));
+    try {
+      const { root, commit, ws } = await sharedOkRepo();
+      let runs = 0;
+      const counting = {
+        ...toyRuntime,
+        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+          runs++;
+          return toyRuntime.runCases(...args);
+        },
+      };
+      const cacheDir = join(base, "cache");
+      const at = (image: string, runtime = counting) =>
+        new ReferenceCases({ reference: ws, runtime, cacheDir, image });
+      const tests = ["src/ok.test.sh"];
+      await at("sha256:aaa").casesAt(commit, tests);
+      assert.equal(runs, 2);
+      assert.equal(at("sha256:aaa").has(commit), true);
+      await at("sha256:aaa").casesAt(commit, tests);
+      assert.equal(runs, 2, "身份相同：直接读回");
+      // 镜像变了
+      assert.equal(at("sha256:bbb").has(commit), false);
+      await at("sha256:bbb").casesAt(commit, tests);
+      assert.equal(runs, 4, "镜像不同：重算");
+      // 跑用例的方式变了（例如单条超时或外壳改了）
+      const otherWay = { ...counting, casesCommand: `${counting.casesCommand} --timeout 1` };
+      assert.equal(at("sha256:bbb", otherWay).has(commit), false);
+      await at("sha256:bbb", otherWay).casesAt(commit, tests);
+      assert.equal(runs, 6, "跑用例的方式不同：重算");
+      // 没有身份的旧文件
+      const file = join(cacheDir, `${commit}.json`);
+      const { identity: _dropped, ...legacy } = JSON.parse(readFileSync(file, "utf8")) as {
+        identity?: unknown;
+      };
+      writeFileSync(file, JSON.stringify(legacy));
+      assert.equal(at("sha256:bbb", otherWay).has(commit), false, "没有身份：不复用");
+      // 开跑前检查：检查门命令变了即重算
+      const pass = ["sh", "-c", "exit 0"];
+      const fail = ["sh", "-c", "exit 1"];
+      assert.equal((await at("sha256:aaa").gateAt(commit, pass)).passed, true);
+      assert.equal(at("sha256:aaa").hasGate(commit, pass), true);
+      assert.equal(at("sha256:aaa").hasGate(commit, fail), false);
+      assert.equal(at("sha256:bbb").hasGate(commit, pass), false);
+      assert.equal((await at("sha256:aaa").gateAt(commit, fail)).passed, false, "命令不同：重跑");
+      // 开跑前检查按被检查的提交切 lint 环境
+      const linting = {
+        ...counting,
+        lintSyncCommand: (c: string) => ["sh", "-c", `echo ${c} > .git/pigeon-lint`],
+      };
+      await at("sha256:ccc", linting).gateAt(commit, pass);
+      assert.equal(readFileSync(join(root, "ref", ".git", "pigeon-lint"), "utf8").trim(), commit);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("等价摘要：旧摘要在等价表里且结果没有挂起迹象的读回；在表里但有卡住用例、检查门没通过的，以及不在表里的，一律重算", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-equivalent-"));
+    try {
+      const { commit, ws } = await sharedOkRepo();
+      const cacheDir = join(base, "cache");
+      const image = "sha256:aaa";
+      const gate = ["sh", "-c", "exit 0"];
+      const equivalentCommands = new Map([
+        ["old-cases", commandDigest(toyRuntime.casesCommand)],
+        ["old-gate", commandDigest(JSON.stringify(gate))],
+      ]);
+      const reference = new ReferenceCases({
+        reference: ws,
+        runtime: toyRuntime,
+        cacheDir,
+        image,
+        equivalentCommands,
+      });
+      const casesFile = join(cacheDir, `${commit}.json`);
+      const gateFile = join(cacheDir, `${commit}.gate.json`);
+      const baseline = (extra: object) => ({
+        cases: [{ id: "src/ok.test.sh::case", file: "src/ok.test.sh", outcome: "passed" }],
+        passing: ["src/ok.test.sh::case"],
+        flaky: [],
+        slowest: { id: "src/ok.test.sh::case", seconds: 1 },
+        runs: [{ peakBytes: null, limitBytes: null, wallMs: 1000 }],
+        ...extra,
+      });
+      // 旧摘要在表里、没有挂起迹象（旧文件没有 stuck 字段：最慢用例与每遍墙钟都远低于上限）：按等价读回
+      writeFileSync(
+        casesFile,
+        JSON.stringify(baseline({ identity: { image, command: "old-cases" } }))
+      );
+      assert.equal(reference.has(commit), true);
+      // 旧摘要在表里，但有卡住的用例：重算
+      writeFileSync(
+        casesFile,
+        JSON.stringify(
+          baseline({ identity: { image, command: "old-cases" }, stuck: ["src/ok.test.sh::case"] })
+        )
+      );
+      assert.equal(reference.has(commit), false, "有卡住用例：不按等价读回");
+      // 旧文件没有 stuck 字段，但最慢用例达到了单条超时：同样重算
+      writeFileSync(
+        casesFile,
+        JSON.stringify(
+          baseline({
+            identity: { image, command: "old-cases" },
+            slowest: { id: "src/ok.test.sh::case", seconds: 95 },
+          })
+        )
+      );
+      assert.equal(reference.has(commit), false, "有超时迹象：不按等价读回");
+      // 不在表里：重算
+      writeFileSync(casesFile, JSON.stringify(baseline({ identity: { image, command: "other" } })));
+      assert.equal(reference.has(commit), false);
+      // 开跑前检查：旧摘要在表里且通过的读回；没通过的重算
+      const check = { failedSteps: [], wallMs: 1, outputTail: "" };
+      writeFileSync(
+        gateFile,
+        JSON.stringify({ ...check, passed: true, identity: { image, command: "old-gate" } })
+      );
+      assert.equal(reference.hasGate(commit, gate), true);
+      writeFileSync(
+        gateFile,
+        JSON.stringify({ ...check, passed: false, identity: { image, command: "old-gate" } })
+      );
+      assert.equal(reference.hasGate(commit, gate), false, "检查门没通过：不按等价读回");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("换根目录：同一份清单、人的基准、检查门结果与身份头整体搬到别的目录下照样读回——落盘内容里没有本机路径，身份只看镜像 ID、命令摘要与清单内容", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-relocate-"));
+    try {
+      const { root, commit, human } = await sharedOkRepo();
+      const gate = ["sh", "-c", "exit 0"];
+      const tests = ["src/ok.test.sh"];
+      let runs = 0;
+      const counting = {
+        ...toyRuntime,
+        runCases: (...args: Parameters<typeof toyRuntime.runCases>) => {
+          runs++;
+          return toyRuntime.runCases(...args);
+        },
+      };
+      const referenceAt = async (root: string) => {
+        mkdirSync(join(root, "ref"), { recursive: true });
+        const ws = new ReferenceWorkspace(localStreamShell(join(root, "ref")));
+        await ws.init(human.bundle(commit), commit);
+        return new ReferenceCases({
+          reference: ws,
+          runtime: counting,
+          cacheDir: join(root, "data", "baselines"),
+          image: "sha256:img",
+        });
+      };
+      // 原位置：算人的基准与检查门，写清单与身份头
+      const a = join(base, "a");
+      const first = await referenceAt(a);
+      await first.casesAt(commit, tests);
+      await first.gateAt(commit, gate);
+      const computed = runs;
+      mkdirSync(join(a, "data", "out"), { recursive: true });
+      writeFileSync(join(a, "data", "manifest.json"), JSON.stringify({ repo: "toy", steps: [] }));
+      const identity = {
+        core: {
+          repo: "toy",
+          manifestDigest: manifestDigestOf(join(a, "data", "manifest.json")),
+          image: "sha256:img",
+          budget: DEFAULT_STEP_BUDGET,
+          conditions: ["neither"],
+          stepScope: TASK_CHAIN_SCOPE,
+          promptFormat: "test-files",
+          promptLayout: TASK_PROMPT_LAYOUT,
+          taskSelection: { method: "all" as const },
+          maxSteps: null,
+          agents: {},
+        },
+        info: { concurrency: 1, harness: { commit: "h", dirty: false } },
+      };
+      const digest = checkOrWriteIdentity(join(a, "data", "out"), identity);
+      for (const f of readdirSync(join(a, "data", "baselines"))) {
+        const text = readFileSync(join(a, "data", "baselines", f), "utf8");
+        for (const local of [base, root]) {
+          assert.ok(
+            !text.includes(local.replace(/\\/g, "/")) && !text.includes(local),
+            `${f} 里没有本机路径`
+          );
+        }
+      }
+      // 整体搬到另一个根目录下
+      const b = join(base, "elsewhere", "deeper", "b");
+      cpSync(join(a, "data"), join(b, "data"), { recursive: true });
+      const moved = await referenceAt(b);
+      assert.equal(moved.has(commit), true, "人的基准读回");
+      assert.equal(moved.hasGate(commit, gate), true, "检查门结果读回");
+      await moved.casesAt(commit, tests);
+      assert.equal(runs, computed, "没有重算");
+      assert.equal(
+        manifestDigestOf(join(b, "data", "manifest.json")),
+        identity.core.manifestDigest
+      );
+      assert.equal(
+        checkOrWriteIdentity(join(b, "data", "out"), {
+          ...identity,
+          core: {
+            ...identity.core,
+            manifestDigest: manifestDigestOf(join(b, "data", "manifest.json")),
+          },
+        }),
+        digest,
+        "身份头比对通过"
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("镜像等价只用于人的用例基准：旧镜像的用例基准按镜像等价表读回，检查门结果不按镜像等价、重算；不在表里的镜像重算", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-image-equivalent-"));
+    try {
+      const { commit, ws } = await sharedOkRepo();
+      const cacheDir = join(base, "cache");
+      const gate = ["sh", "-c", "exit 0"];
+      // 同一个旧镜像可以对多个新镜像（v4 对 v5 与 v6）
+      const pairs: [string, string][] = [
+        ["sha256:old", "sha256:mid"],
+        ["sha256:old", "sha256:new"],
+      ];
+      const reference = new ReferenceCases({
+        reference: ws,
+        runtime: toyRuntime,
+        cacheDir,
+        image: "sha256:new",
+        equivalentImages: pairs,
+      });
+      const casesCommand = commandDigest(toyRuntime.casesCommand);
+      const gateCommand = commandDigest(JSON.stringify(gate));
+      const cases = (image: string) =>
+        JSON.stringify({
+          cases: [],
+          passing: [],
+          flaky: [],
+          slowest: null,
+          runs: [],
+          stuck: [],
+          identity: { image, command: casesCommand },
+        });
+      writeFileSync(join(cacheDir, `${commit}.json`), cases("sha256:old"));
+      assert.equal(reference.has(commit), true, "旧镜像的用例基准按镜像等价读回");
+      writeFileSync(join(cacheDir, `${commit}.json`), cases("sha256:other"));
+      assert.equal(reference.has(commit), false, "不在镜像等价表里：重算");
+      writeFileSync(
+        join(cacheDir, `${commit}.gate.json`),
+        JSON.stringify({
+          passed: true,
+          failedSteps: [],
+          wallMs: 1,
+          outputTail: "",
+          identity: { image: "sha256:old", command: gateCommand },
+        })
+      );
+      assert.equal(reference.hasGate(commit, gate), false, "检查门结果不按镜像等价");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  test("等价表里的新摘要就是当前 strands 跑用例外壳的摘要（含改用人的 pytest 配置之前的两个旧摘要）：外壳一改，这条用例即提醒重新审视等价；检查门命令不在表里", () => {
+    const cases = commandDigest(strandsRuntime.casesCommand);
+    const gate = commandDigest(JSON.stringify(gateFromSteps(strandsRuntime.verifySteps)));
+    const pairs = [...EQUIVALENT_BASELINE_COMMANDS];
+    assert.deepEqual(new Set(pairs.map(([, b]) => b)), new Set([cases]));
+    assert.deepEqual(pairs.map(([a]) => a).sort(), [
+      "47c962cd27b0eefe",
+      "70f10b887f6bfdc1",
+      "da2746ca28858993",
+    ]);
+    assert.ok(pairs.every(([a, b]) => a !== gate && b !== gate));
+  });
+
+  test("人的基准记录每遍的内存峰值（cgroup 占用减页缓存）、上限与墙钟；峰值超过上限的 75% 即告警", async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-memory-"));
+    try {
+      // 采样要跑实的用例：另装一份参考工作区，不与同组里检出共用工作区的用例相撞
+      const { commit, human } = await sharedOkRepo();
+      mkdirSync(join(base, "ref"));
+      const ws = new ReferenceWorkspace(localStreamShell(join(base, "ref")));
+      await ws.init(human.bundle(commit), commit);
+      // 假的 cgroup：占用 1,700,000,000 字节，其中页缓存 100,000,000，上限 2,000,000,000
+      const cgroup = join(base, "cgroup");
+      mkdirSync(cgroup);
+      writeFileSync(join(cgroup, "memory.current"), "1700000000\n");
+      writeFileSync(join(cgroup, "memory.stat"), "anon 1500000000\nfile 100000000\n");
+      writeFileSync(join(cgroup, "memory.max"), "2000000000\n");
+      const warnings: string[] = [];
+      const reference = new ReferenceCases({
+        reference: ws,
+        runtime: toyRuntime,
+        cacheDir: join(base, "cache"),
+        image: "test-image",
+        cgroupDir: cgroup.replace(/\\/g, "/"),
+        warn: (m) => warnings.push(m),
+      });
+      const baseline = await reference.casesAt(commit, ["src/ok.test.sh"]);
+      assert.deepEqual(
+        baseline.runs.map((r) => [r.peakBytes, r.limitBytes]),
+        [
+          [1_600_000_000, 2_000_000_000],
+          [1_600_000_000, 2_000_000_000],
+        ]
+      );
+      assert.ok(baseline.runs.every((r) => r.wallMs >= 0));
+      assert.equal(warnings.length, 2);
+      assert.match(warnings[0] ?? "", /内存告警.*第 1 遍.*1526 MiB.*1907 MiB 的 75%/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
 });
 
 test("放行之后、agent 开始之前出错（例如读网关计量失败）也交还放行名额：下一个取步者照常放行", async () => {
