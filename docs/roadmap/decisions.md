@@ -76,7 +76,7 @@
 | 060 | Eval 结果落 docs/audits/eval/<日期>-<基线>/：results.jsonl 与 report.md 入库，实验会话用该目录下独立治理根不入库（已随 205 删除） | M6.5 开工第 5、6 件 | M6.5 |
 | 061 | 编辑格式对照：只加一组 replace 式编辑工具，hashline 基线复用 M6.5 冒烟无 Skill 24 次；锚点容错搁置 | 编辑格式对照裁决 2026-09-15 | Eval / 编辑工具 |
 | 062 | 编辑工具默认改用 replace，hashline 保留为可选并留作后续优化方向 | 编辑格式对照裁决 2026-09-15 第 2 件 | 编辑工具 |
-| 063 | 失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做 | 失控止损裁决 2026-09-15 | 运行时 / 无人值守 |
+| 063 | 失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做（缺省值已改，见 347） | 失控止损裁决 2026-09-15 | 运行时 / 无人值守 |
 | 064 | Reviewer 复用 worker 编排：工作区加"无工作区"成员、补只读快照工具、候选由 Controller 从收尾结果落盘，另加 `pigeon review` 薄壳（已随 137 退役） | M6 前置第 1 件 | M6 |
 | 065 | 候选暂存：正文按哈希不可变写入暂存目录，状态由账本记录现算，改内容即新候选并标记取代（已随 137 退役） | M6 前置第 2 件 | M6 |
 | 066 | TUI 新增 [r] 拒绝并说明；决定记录加理由来源字段（人写 / 系统默认），不升 Event Log 版本（理由来源随 184 不再落盘） | M6 前置第 3 件 | M6 前置 |
@@ -357,6 +357,10 @@
 | 341 | 项目共享层 .pigeon/settings.json 中 permissions 的放行规则纳入按内容确认：逐条记指纹，终端界面启动与 /reload 时列出请人确认，pigeon run 遇未确认即开跑前报错退出，信任目录免检；用户级与项目个人层的放权照旧直接生效。迁移命令处理过的旧配置文件移出仓库，放到用户级 ~/.pigeon/state/ 下按项目分开的备份目录并打印位置，仓库内不留备份（个人层文件被 git 跟踪时按共享层确认，见 342） | 钩子与配置第 8 件 | M11 |
 | 342 | .pigeon/settings.local.json 被 git 跟踪时按项目共享层对待：其中的放行规则与执行命令类配置须经按内容确认才生效（终端界面启动与 /reload 时列出，pigeon run 遇未确认即报错退出，信任目录免检）；未被跟踪时照旧直接生效 | 钩子与配置第 9 件 | M11 |
 | 343 | 删除 Claude 代码审查工作流：本仓库以本地合并后推送 main 为主、少开 PR，Dependabot 的 PR 不触发审查，该工作流自加入起未实际审查过；以后改用 PR 时再按需加回。claude.yml 与 CI 工作流不变 | 工程设施第 3 件 | M11 |
+| 344 | 一个会话开多个沙箱的范围：每个 worker 用自己的容器，起点与结果并回沿用 262、276、279；产品沙箱会话与实验跑批器的作业容器都支持派 worker；施工仍暂缓（277） | 多沙箱补充第 1 件 | M11 |
+| 345 | worker 容器的资源上限缺省按机器自动分：内存上限为 Docker 所在机器内存 ÷（同时可跑的 worker 数 + 1），交换区同值；进程数上限同主容器（4096）；不设 CPU 上限；均可在设置里改；主容器照旧取机器内存的一半；随多沙箱施工落地 | 多沙箱补充第 2 件 | M11 |
+| 346 | 联网工具可以关：设置 web 一节加 enabled（缺省 true），启动参数 --no-web 只对本次运行关；关掉时 web_search 与 web_fetch 都不注册，系统提示不提联网 | 联网补充第 1 件 | M11 |
+| 347 | 单轮输出上限缺省跟模型的上限走：不配置时按模型定义的上限发（DeepSeek 为 393,216），由 provider 按剩余上下文收窄；模型定义没有上限时发 32,000；--max-output-tokens 与跑批器配置照留 | 输出上限重盘 | 运行时 |
 
 ## 条目
 
@@ -877,8 +881,9 @@
 - 落地（2026-09-15）：依赖缺省 hashline 的既有测试改为显式传 hashline，断言不删；已知边界：resume 后旧会话历史里 hashline 格式的读取输出配 replace 版工具；eval/skills/pigeon-coding-pitfalls/ 第 1 节讲 hashline 用法，本轮不改。
 - 详情：docs/decisions/edit-format-decisions.md 裁决第 4 条。
 
-### 063 失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做（事实）
+### 063 〔部分已改〕失控止损：单轮输出上限缺省 16,384 可配、system prompt 加截断后拆小引导；流式重复检测暂不做（事实）
 
+- 状态：部分已改——缺省值改为跟模型的上限走，见 347；可配置、截断引导与流式重复检测不做照旧。判断现状以代码为准，下文为当时的原文。
 - 结论：单轮输出上限缺省 16,384 token，可配置（cli、tui、headless、`pigeon run`、`pigeon eval` 以参数覆盖，worker 继承父运行面的值），由装配层包装 streamFn、以 maxTokens 传入，模型定义值更小时取更小者；上限值写进注入快照的 model 段（加法式升版）。system prompt 在两种编辑模式下都加一句截断引导：工具调用若因输出上限未执行，把改动拆成几次较小的调用重发，不要原样重发；单次编辑只改需要改的那一段。流式重复检测与提前掐断本轮不做，以 Eval 结果行的撞输出上限轮数观察失控频率，明显上升时再议。
 - 理由：16,384 远高于正常轮次的最大输出、约能把一次失控的耗时减半，正常输出不会被截断；上游对 length 停止的消息不执行其中工具调用，截断不会造成残缺写入。
 - 锚点：src/pi-runtime/output-limit.ts（streamFn 包装）；src/application/runtime.ts（装配、`TRUNCATION_GUIDANCE`、快照 model 段）；src/pi-runtime/snapshot.ts（注入快照 v5）；src/state/runtime-events.ts 与 src/pi-runtime/adapter.ts（run.started 的 model 摘要）；src/application/workers.ts（worker 继承）；src/application/headless.ts、src/eval/runner.ts、src/cli/index.ts、src/tui/main.ts（`maxOutputTokens` 与 `--max-output-tokens`）；测试 src/pi-runtime/output-limit.test.ts、src/application/runtime-output-limit.test.ts、src/application/workers-output-limit.test.ts、src/application/runtime-edit-mode.test.ts、src/application/output-limit-truncation-e2e.test.ts。
@@ -3084,4 +3089,32 @@
 - 事实：claude-code-review.yml 在 PR 开出、更新与重开时以 claude-code-action 加代码审查插件审查改动、发行内评论；未指定模型，取 Claude Code 对所用订阅账号的缺省模型，用量计入该订阅。自加入起，加入它的 PR 上因工作流文件与默认分支不一致而跳过；Dependabot 的两个 PR 上因发起者为机器人而拒绝运行，且 Dependabot 触发的运行取不到仓库密钥。本仓库以本地合并后推送 main 为主，很少开 PR。
 - 结论：删除该工作流，以及 Dependabot 配置里关于其插件提交号的注释；claude.yml 与 CI 工作流不变。以后改用 PR 时再按需加回。
 - 理由：照现有工作方式它几乎不会运行，留着只多一处需维护的钉住版本。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 344 一个会话开多个沙箱的范围（设计）
+
+- 事实：worker 以宿主上的 git 工作树隔离；用注入的执行端（沙箱会话、实验跑批器的作业容器）时不注册派 worker 的工具，因为宿主上没有这份代码的仓库可建工作树，也没有给 worker 的容器。262、276、279 已定 worker 容器的起点与结果并回，277 将多沙箱暂缓。
+- 结论：多沙箱落地时，每个 worker 用自己的容器（同一镜像、同样的网络档与资源限制），从主工作区的快照开工，收尾时分支取回宿主、再送进主容器作普通分支，不自动合并，取用在主容器里做三方叠加；产品沙箱会话与实验跑批器的作业容器都支持派 worker，跑批器以同一接口提供给 worker 起容器的能力，判题只看主容器。施工仍按 277 暂缓。
+- 理由：先把范围定下，日后施工时不必再盘；眼下没有必须依赖它的工作。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 345 worker 容器的资源上限（设计）
+
+- 事实：333 定日常沙箱容器缺省内存上限为机器内存的一半；worker 缺省最多同时 8 个，若每个也取一半则严重超配。
+- 结论：worker 容器缺省内存上限 = Docker 所在机器内存 ÷（同时可跑的 worker 数 + 1），交换区同值；进程数上限同主容器（4096）；不设 CPU 上限；都可在设置里改。主容器照旧取一半。
+- 理由：按同时可跑的数目平分，最坏情况下各容器合计不超出机器内存；与 333 同样防止单个容器拖垮整机。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 346 联网工具的开关（设计）
+
+- 事实：pigeon run 与终端界面的 web_search、web_fetch 缺省注册，没有启动参数或设置能关，只有沙箱的断网档会不注册；web_search 走模型服务商的服务端搜索，经模型接口发出，只限制网络到模型接口时仍能成功。
+- 结论：设置 web 一节加 enabled（布尔，缺省 true），启动参数 --no-web 只对本次运行关；关掉时两件工具都不注册，系统提示里不提联网；写法与 --no-hooks、--no-spawn-workers 一致。
+- 理由：有些运行需要明确不联网（离线评测、做题时不让查到外部答案、只想用本地资料），现有手段只有沙箱断网档，且挡不住经模型接口的服务端搜索。
+- 详情：docs/decisions/stream-memory-decisions.md（本地）。
+
+### 347 单轮输出上限跟模型的上限走（设计）
+
+- 事实：063 定缺省 16,384，为无人值守时止损；DeepSeek 模型定义也写 16,384。DeepSeek 允许 1 至 393,216，推理内容计入其中，不设时关思考缺省 8K、开思考 64K、max 档 128K。打转检测（305–308）按轮比较，管轮与轮之间的重复，管不到一轮之内停不下来的输出。
+- 结论：不配置时不再由 Pigeon 另设上限，按模型定义的上限发（DeepSeek 模型定义改为 393,216），由 provider 按剩余上下文收窄；模型定义没有上限时发 32,000。`--max-output-tokens` 与跑批器的配置项照留，供需要止损的运行使用；截断引导照留。流式重复检测仍不做。
+- 理由：16,384 在开思考时会被推理内容吃掉、留不出回答与工具调用，也会截断较大的单次写入；轮与轮之间的打转已由打转检测接住，一轮之内失控的代价有限（按价目约一元多），而压低上限的代价落在每一次正常的长输出上。
 - 详情：docs/decisions/stream-memory-decisions.md（本地）。
