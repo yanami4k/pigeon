@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_THINKING_LEVEL } from "../pi-runtime/index.ts";
-import { STREAM_DEFAULT_TEMPERATURE } from "./stream-agents.ts";
+import { DEFAULT_THINKING_LEVEL } from "../pi-runtime/index.ts";
+import { STREAM_DEFAULT_TEMPERATURE, STREAM_MAX_OUTPUT_TOKENS } from "./stream-agents.ts";
 
 const RUN_MINI = readFileSync(
   new URL("../../eval/stream/mini/run_mini.py", import.meta.url),
@@ -17,8 +17,8 @@ function constant(name: string): string {
   return (match[1] ?? "").trim();
 }
 
-test("最简 agent 的单次输出上限、温度、思考开关与 Pigeon 的缺省值相同，且确实用在发给 litellm 的参数里", () => {
-  assert.equal(Number(constant("MAX_OUTPUT_TOKENS")), DEFAULT_MAX_OUTPUT_TOKENS);
+test("最简 agent 的单次输出上限、温度、思考开关与跑批器 Pigeon 进程内条件的缺省值相同，且确实用在发给 litellm 的参数里", () => {
+  assert.equal(Number(constant("MAX_OUTPUT_TOKENS")), STREAM_MAX_OUTPUT_TOKENS);
   assert.equal(Number(constant("TEMPERATURE")), STREAM_DEFAULT_TEMPERATURE);
   // Pigeon 缺省不请求推理（off），pi-ai 据此发 thinking disabled；最简 agent 显式发同一个值
   assert.equal(DEFAULT_THINKING_LEVEL, "off");

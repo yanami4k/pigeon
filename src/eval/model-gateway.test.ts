@@ -18,6 +18,7 @@ import {
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
+import { STREAM_MAX_OUTPUT_TOKENS } from "./stream-agents.ts";
 
 // 可控时钟：短于 autoBelowMs 的定时在下一轮事件循环即触发，其余等 advance 拨到；virtual 为真时 now 只随 advance 走，
 // 否则为真实时间加上拨快的量。set 记下每次定时的毫秒数
@@ -357,7 +358,12 @@ test("网关：Pigeon 的模型接入经网关走通上游 SDK——路径、真
   await withGateway(
     [{ status: 200, body: ANTHROPIC_SSE, contentType: "text/event-stream" }],
     async (g, up) => {
-      const streamFn = gatewayStreamFn(g.jobBaseUrl("s1|no-gate|1"));
+      // 与跑批器同样的接法：模型上限取跑批器自己的 16,384
+      const streamFn = gatewayStreamFn(
+        g.jobBaseUrl("s1|no-gate|1"),
+        "deepseek-flash",
+        STREAM_MAX_OUTPUT_TOKENS
+      );
       const stream = await streamFn(
         {} as never,
         { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] } as never,
@@ -374,7 +380,7 @@ test("网关：Pigeon 的模型接入经网关走通上游 SDK——路径、真
       assert.equal(text, "你好");
       assert.equal(up.seen[0]?.path, "/v1/messages");
       assert.equal(up.seen[0]?.key, "key-one");
-      // 自构模型对象的请求参数（决策 203）：模型名 deepseek-flash、显式关思考、单次输出上限 16384
+      // 自构模型对象的请求参数（决策 203、347）：模型名 deepseek-flash、显式关思考、单次输出上限为跑批器给的 16384
       const sent = JSON.parse(up.seen[0]?.body ?? "{}") as Record<string, unknown>;
       assert.equal(sent.model, "deepseek-flash");
       assert.deepEqual(sent.thinking, { type: "disabled" });

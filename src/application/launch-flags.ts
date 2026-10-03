@@ -62,7 +62,7 @@ export interface LaunchFlags {
   persistThinking: boolean;
   // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
   thinkingLevel?: ThinkingLevel;
-  // 决策 063：--max-output-tokens <n> 单轮输出上限（缺省 16,384）
+  // 决策 063、347：--max-output-tokens <n> 单轮输出上限（缺省不设：跟模型，按模型定义的上限发、由 provider 按剩余上下文收窄）
   maxOutputTokens?: number;
   // M9：--temperature <n> 采样温度（0 到 2；缺省不设，由 provider 决定）
   temperature?: number;

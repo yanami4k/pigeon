@@ -8,7 +8,6 @@ import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
 import {
-  DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_LEVEL,
   GATEWAY_PROVIDER,
   GATEWAY_UPSTREAM_BASE_URL,
@@ -29,6 +28,7 @@ import {
   type PigeonStepAgentOptions,
   pigeonStepAgent,
   STREAM_LOOP_GUARD,
+  STREAM_MAX_OUTPUT_TOKENS,
   STREAM_SCRIPT_ORCHESTRATION,
   STREAM_SPAWN_WORKERS,
   STREAM_TASK_LIST,
@@ -127,7 +127,7 @@ export function streamPigeonOptions(
 }
 
 // Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限、压缩配置与记忆上限记运行时的
-// 缺省值（off、16,384、产品缺省的压缩配置、项目级记忆上限 4,000 字符），不记 null；温度没给即由服务端决定，记 null。
+// 缺省值（off、跑批器自己的 16,384、产品缺省的压缩配置、项目级记忆上限 4,000 字符），不记 null；温度没给即由服务端决定，记 null。
 // 复盘随决策 331 删除，身份头不再记复盘模板版本与复盘上限，改记记忆文字的版本（之前写下的身份头与之不同，续跑即判为不同）
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
   return {
@@ -135,7 +135,7 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     modelId: pigeon.modelId ?? modelId,
     temperature: pigeon.temperature ?? null,
     thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
-    maxOutputTokens: pigeon.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: pigeon.maxOutputTokens ?? STREAM_MAX_OUTPUT_TOKENS,
     compaction: resolveCompactionConfig(pigeon.compaction),
     memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMITS.project,
     // 决策 328、332：推送段的文字版本（文字一改即换条件，续跑判为不同）
@@ -368,7 +368,7 @@ async function runStreamExperimentLocked(
       agents.pigeon = pigeonStepAgent({
         ...streamPigeonOptions(options.pigeon),
         docker,
-        streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId),
+        streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId, STREAM_MAX_OUTPUT_TOKENS),
         // 限额信号一到即中止在途的一步（反正要作废重做）
         limits,
       });

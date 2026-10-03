@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { streamSimple as realStreamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { loadStreamFn } from "../application/runtime.ts";
 import { DEEPSEEK_ANTHROPIC_BASE_URL, deepseekModel } from "./deepseek-model.ts";
 import {
@@ -11,6 +12,7 @@ import {
   DEEPSEEK_BASE_URL_ENV,
   resolveDeepSeekBaseUrl,
 } from "./deepseek-stream.ts";
+import { gatewayStreamFn } from "./gateway-stream.ts";
 import { limitOutputTokens } from "./output-limit.ts";
 import { fixTemperature } from "./sampling.ts";
 
@@ -34,7 +36,7 @@ test("日常 DeepSeek 接入：缺 DEEPSEEK_API_KEY 即响亮报错；空值同�
   assert.throws(() => createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "" }), /缺少 DEEPSEEK_API_KEY/);
 });
 
-test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同一份模型对象（deepseek-flash、anthropic-messages、reasoning 为真、1M 窗口、输出上限 16384）；key 取自环境变量", async () => {
+test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同一份模型对象（deepseek-flash、anthropic-messages、reasoning 为真、1M 窗口、输出上限 393,216）；key 取自环境变量", async () => {
   const { calls, stream } = fakeStream();
   const fn = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-daily" }, stream);
   await fn(placeholder, context, {});
@@ -50,7 +52,7 @@ test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同�
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1_000_000,
-    maxTokens: 16_384,
+    maxTokens: 393_216,
   });
   assert.equal(DEEPSEEK_ANTHROPIC_BASE_URL, "https://api.deepseek.com/anthropic");
   assert.equal(sent?.options.apiKey, "sk-daily");
@@ -133,4 +135,85 @@ test("DEEPSEEK_BASE_URL：给了就用作模型基址；没给或为空用官方
   }
   assert.equal(resolveDeepSeekBaseUrl({}), DEEPSEEK_ANTHROPIC_BASE_URL);
   assert.equal(DEEPSEEK_BASE_URL_ENV, "DEEPSEEK_BASE_URL");
+});
+
+// 实际请求体：用真的 streamSimple，经调用选项注入假的 fetch，捕获发往端点的地址与请求体（不连任何真实接口）
+async function captureRequest(
+  fn: StreamFn,
+  options: Record<string, unknown>,
+  messages: unknown[] = []
+): Promise<{ url: string; body: Record<string, unknown> }> {
+  let captured: { url: string; body: Record<string, unknown> } | undefined;
+  const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    captured = { url: String(url), body: JSON.parse(String(init?.body)) };
+    return new Response(
+      JSON.stringify({
+        type: "error",
+        error: { type: "invalid_request_error", message: "假上游" },
+      }),
+      { status: 400, headers: { "content-type": "application/json" } }
+    );
+  }) as typeof fetch;
+  const stream = await fn(
+    placeholder,
+    { messages } as never,
+    {
+      ...options,
+      fetch: fakeFetch,
+      maxRetries: 0,
+    } as never
+  );
+  await stream.result();
+  assert.ok(captured !== undefined, "应当发出一次请求");
+  return captured;
+}
+
+// 一条约 70 万 token 的用户消息（pi-ai 按 4 字符一个 token 估算）：1M 窗口剩下的不到 393,216
+const LONG_CONTEXT = [{ role: "user", content: "字".repeat(2_800_000), timestamp: 0 }];
+const NARROWED = 1_000_000 - 700_000 - 4096;
+
+test("单轮输出上限跟模型走（决策 347）：未配置时实际请求的 max_tokens 为 393,216，并随上下文收窄；开思考时同样", async () => {
+  const fn = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-daily" }, realStreamSimple);
+  const plain = await captureRequest(fn, {});
+  assert.equal(plain.url, "https://api.deepseek.com/anthropic/v1/messages");
+  assert.equal(plain.body.max_tokens, 393_216);
+  const thinking = await captureRequest(fn, { reasoning: "high" });
+  assert.equal(thinking.body.max_tokens, 393_216);
+  const long = await captureRequest(fn, {}, LONG_CONTEXT);
+  assert.equal(long.body.max_tokens, NARROWED);
+  const longThinking = await captureRequest(fn, { reasoning: "high" }, LONG_CONTEXT);
+  assert.equal(longThinking.body.max_tokens, NARROWED);
+});
+
+test("配置了单轮输出上限：实际请求取配置值与模型上限的较小者（经 Pigeon 的包装）", async () => {
+  const fn = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-daily" }, realStreamSimple);
+  const small = await captureRequest(limitOutputTokens(fn, 4096), {});
+  assert.equal(small.body.max_tokens, 4096);
+  const large = await captureRequest(limitOutputTokens(fn, 500_000), {});
+  assert.equal(large.body.max_tokens, 393_216);
+});
+
+test("DEEPSEEK_BASE_URL：实际请求发往给定的根拼 /v1/messages", async () => {
+  const fn = createDeepSeekStreamFn(
+    { DEEPSEEK_API_KEY: "sk-daily", DEEPSEEK_BASE_URL: "http://127.0.0.1:9/ds" },
+    realStreamSimple
+  );
+  const sent = await captureRequest(fn, {});
+  assert.equal(sent.url, "http://127.0.0.1:9/ds/v1/messages");
+});
+
+test("网关接入与自带接入共用取值：未配置按模型上限；跑批器给的模型上限（16,384）开思考时请求与改动前一致", async () => {
+  const plain = await captureRequest(gatewayStreamFn("http://127.0.0.1:9/j/x"), {});
+  assert.equal(plain.url, "http://127.0.0.1:9/j/x/v1/messages");
+  assert.equal(plain.body.max_tokens, 393_216);
+  const capped = gatewayStreamFn("http://127.0.0.1:9/j/x", "deepseek-flash", 16_384);
+  const configured = await captureRequest(limitOutputTokens(capped, 16_384), {
+    reasoning: "high",
+  });
+  assert.equal(configured.body.max_tokens, 16_384);
+  const noThinking = await captureRequest(limitOutputTokens(capped, 16_384), {});
+  assert.equal(noThinking.body.max_tokens, 16_384);
+  // 模型对象没有上限时按 32,000 发
+  const unbounded = gatewayStreamFn("http://127.0.0.1:9/j/x", "deepseek-flash", 0);
+  assert.equal((await captureRequest(unbounded, {})).body.max_tokens, 32_000);
 });

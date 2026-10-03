@@ -44,7 +44,7 @@ import {
   resolveCompactionConfig,
 } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
-import { DEFAULT_MAX_OUTPUT_TOKENS, limitOutputTokens } from "../pi-runtime/output-limit.ts";
+import { limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
 import {
@@ -189,9 +189,10 @@ export interface RuntimeDeps {
   skillRoots?: readonly SkillRoot[];
   // 决策 330：读不读人写的说明（AGENTS.md）；缺省读。跑批器与只测装配的用例关掉（对照实验里说明不是变量，任何一层都不能漏进来）
   agentsMd?: boolean;
-  // 决策 061：编辑模式，缺省 hashline（缺省时装配出的工具与 system prompt 逐字不变）
+  // 决策 061：编辑模式，缺省见 tools/edit-mode.ts 的 DEFAULT_EDIT_MODE（现为 replace）
   editMode?: EditMode;
-  // 决策 063：单轮输出上限（缺省 16,384）——装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段
+  // 决策 063、347：单轮输出上限——配置了才在装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段；未配置不包装、
+  // 不写（表示跟模型：按模型定义的上限发，由 provider 按剩余上下文收窄）
   maxOutputTokens?: number;
   // M9：任务源给的系统指令（如外部基准的工作方式指令）——原样追加为 system prompt 的一段，随整段 system prompt
   // 冻结进注入快照（Run 开始条目记系统提示全文）。只说工作方式，不含任务内容；缺省不加
@@ -319,8 +320,11 @@ export interface RuntimeBundle {
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 061：编辑工具按模式装配，工具名都叫 edit_file；hashline 分支与 061 之前逐字一致
   const replaceMode = (deps.editMode ?? DEFAULT_EDIT_MODE) === "replace";
-  const maxOutputTokens = deps.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
-  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) {
+  const maxOutputTokens = deps.maxOutputTokens;
+  if (
+    maxOutputTokens !== undefined &&
+    (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1)
+  ) {
     throw new Error(`单轮输出上限需要正整数：${maxOutputTokens}`);
   }
   if (
@@ -663,7 +667,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     input: ["text" as const],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: compactionConfig.contextWindow,
-    maxTokens: maxOutputTokens,
+    // 未配置输出上限时为 0（占位不知道真实模型的上限；压缩摘要的输出上限此时只按预留量取）
+    maxTokens: maxOutputTokens ?? 0,
   };
   const compactor = new ContextCompactor({
     config: compactionConfig,
@@ -698,7 +703,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         provider: deps.provider,
         id: deps.modelId,
         ...(deps.thinkingLevel !== undefined ? { thinkingLevel: deps.thinkingLevel } : {}),
-        maxOutputTokens,
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         ...(appliedTemperature !== undefined ? { temperature: appliedTemperature } : {}),
         ...(deps.temperature !== undefined && appliedTemperature === undefined
           ? {
@@ -722,8 +727,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         : {}),
       ...(deps.budget !== undefined ? { budget: { ...deps.budget } } : {}),
     },
-    // 决策 063：单轮输出上限在装配层包装 streamFn 传入，上游与 provider 插件不改
-    streamFn: limitOutputTokens(
+    // 决策 063、347：配置了单轮输出上限才在装配层包装 streamFn 传入，上游与 provider 插件不改
+    streamFn: withOutputLimit(
       appliedTemperature !== undefined
         ? fixTemperature(deps.streamFn, appliedTemperature)
         : deps.streamFn,
@@ -974,4 +979,9 @@ export async function loadStreamFn(specifier: string): Promise<StreamFn> {
     throw new Error(`streamFn 模块 ${specifier} 没有默认导出函数`);
   }
   return module.default as StreamFn;
+}
+
+// 配置了单轮输出上限才包装；未配置原样返回（跟模型）
+function withOutputLimit(streamFn: StreamFn, maxOutputTokens: number | undefined): StreamFn {
+  return maxOutputTokens !== undefined ? limitOutputTokens(streamFn, maxOutputTokens) : streamFn;
 }

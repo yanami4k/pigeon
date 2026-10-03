@@ -37,6 +37,9 @@ export const STREAM_TASK_LIST = false;
 export const STREAM_LOOP_GUARD = false;
 // 决策 309 与 265 的先例：实验条件不注册提交编排脚本的工具（明确关掉；身份头照记这一项）
 export const STREAM_SCRIPT_ORCHESTRATION = false;
+// 决策 347 改产品缺省（未配置即跟模型）之后，跑批器进程内条件的单轮输出上限仍为 16,384：没配置时显式传这个值，
+// 身份头照记；跑批的网关接入也以它作模型上限（沿用改动前 DeepSeek 模型定义的 16,384），开思考时发出的请求与改动前一致
+export const STREAM_MAX_OUTPUT_TOKENS = 16_384;
 
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;
@@ -165,9 +168,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
               }
             : {}),
           ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
-          ...(options.maxOutputTokens !== undefined
-            ? { maxOutputTokens: options.maxOutputTokens }
-            : {}),
+          maxOutputTokens: options.maxOutputTokens ?? STREAM_MAX_OUTPUT_TOKENS,
           ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
           ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
           ...(options.provider !== undefined ? { provider: options.provider } : {}),

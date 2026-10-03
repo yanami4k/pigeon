@@ -54,7 +54,7 @@ export type {
   ToolGovernance,
   ToolGovernanceFactory,
 } from "./governance.ts";
-export { DEFAULT_MAX_OUTPUT_TOKENS } from "./output-limit.ts";
+export { FALLBACK_MODEL_MAX_TOKENS } from "./output-limit.ts";
 export { isContextOverflowError } from "./overflow.ts";
 export {
   INJECTION_SNAPSHOT_VERSION,
