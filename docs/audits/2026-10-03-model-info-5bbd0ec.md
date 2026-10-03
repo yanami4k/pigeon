@@ -87,3 +87,24 @@
 ## verify 的实际运行情况
 
 服务器 pigeon-verify（8 vCPU、31 GB 内存、Node 24.12.0），提交 8cdac8d，一条前台命令依次跑完：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`（运行前无别的测试在跑）、`npm run deps`，全过，全程约 110 秒。测试 1,639 项：通过 1,637，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：578 个模块，无违规。
+
+## 补记：验收修正
+
+改法（提交 6399dee）：
+- 价格全为 0 的一层在合并时就当作没给价格，继续往下层取（`model-info.ts` 的 `given`），会话记录的来源即实际取到的那一层；查询不再单独判全 0。
+- pi-ai 目录加载失败（导入出错或没有 `getBuiltinModel`）：`loadCatalogLookup(warn, importModule)` 告警一行并返回 undefined，各项按未知处理，接入模块照常启动；`loadStreamFn` 加可选的告警出口（缺省标准错误输出）。
+- 跑批网关接入给的输出上限不是正整数时（如 0），`deepseekModelInfo` 不声明 `maxTokens`（按未知处理），Run 开始条目不再出现违反最小值 1 的值。
+- 实际服务方：设置的 `cache.servedBy` > 声明的 `servedBy` > 声明的 `baseUrl` 主机名查已知服务方（`cache-rules.ts` 的 `SERVED_BY_HOSTS`，一处常量：DeepSeek、Anthropic、OpenAI、Gemini API、Vertex、Bedrock、Moonshot 与 Kimi、百炼（DashScope 与 MaaS）、智谱、xAI、Mistral 的接口主机，整段匹配）> provider 标签。Run 开始条目的 `cacheRule` 加 `servedByFrom`（settings、declared、host、provider）。声明加 `baseUrl`、`servedBy` 两个字段；自带 DeepSeek 的声明写明 `servedBy` 为 deepseek（端点根改指转发代理或经跑批网关时也是）。
+- 声明仍非严格；既不是 pi-ai 模型字段（0.84.4 的 `Model`）、也不是 modelInfo 字段的顶层键，加载时告警一行并忽略（`DECLARATION_KEYS`）。
+- 缓存规则表：行可列精确型号（`models`），匹配度为精确型号 > 最长前缀 > 兜底行。OpenAI 的"5.5 之前"一行改为逐个列出（`gpt-5` 精确，`gpt-3.5`、`gpt-4`、`gpt-5-`、`gpt-5.1` 至 `gpt-5.4`、`chatgpt-4o`、`o1`、`o3`、`o4` 前缀），OpenAI 下没有兜底行，未列出的型号（如 gpt-7）为未知。Vertex 上的 Gemini 分为 2.5 及以后（`gemini-2.5`、`gemini-3` 前缀，命中 0.1 倍）与 2.0（显式命中 0.25 倍，隐式未知）两行，补原文引句；其余 Gemini 型号为未知。Kimi 不另收写入费的一行只列文档点名的 kimi-k2.7、kimi-k2.7-highspeed、kimi-k2.6（精确型号），kimi-k2.7-code 等落到兜底行（写入倍率未知）。DeepSeek 的写入倍率改记未知（价格页只有输入的命中、未命中与输出三项，未写写入费），补价格页按输入输出 token 计费的引句。智谱的最小前缀改记未知（"建议 500 Token 以上"是建议值），删去"以价格表为准"的说法，命中倍率仍记未知。
+- 出处检查脚本于 2026-10-03 重跑：20 行全部通过。
+- `docs/configuration.md` 的"模型信息"一节补上全 0 价格、目录加载失败、`servedBy` 与不认识字段的告警、服务方的取法与没有兜底行的服务方。
+
+测试：
+- `cache-rules.test.ts`（4 项）：查找的匹配度（精确型号、最长前缀、兜底、不串行、查不到）；首批表的细分（含 gpt-7 与 Vertex 上的 gemini-flash-latest 为未知、kimi-k2.7-code 落兜底行、Vertex 的 2.0 与 2.5+ 分行）；主机名判定（整段匹配，带后缀的冒名主机与回环地址不判），主机表里的服务方在规则表里都有行；表的每行有出处，依据类别为 unstated 时秒数未知、为 fixed、minimum、typical 时秒数已知，长档不短于短档，已知的写入倍率不小于 1、命中倍率小于 1。原"档位的数不小于 0"一项删去。
+- `model-info.test.ts`（8 项）：新增全 0 价格逐层跳过；服务方一项改为声明真实的 `baseUrl`，依次验主机名、声明、设置三层的优先与回落到 provider 标签；设置逐项覆盖与查不到为全未知单列一项。
+- `runtime-model-info.test.ts`（4 项）：加载时 pi-ai 模型字段不告警、不认识的顶层键告警；目录查询的解析（美元、窗口为 0 当作没给）与导入失败、没有查询函数时的告警与兜底；Run 开始条目带 `servedByFrom`；自带 DeepSeek 声明服务方，网关输出上限为 0 时不声明。
+
+变异（服务器）：设置与声明换位 → 2 项变红；全 0 价格不跳过 → 1 项变红；声明的服务方不生效（主机名先于声明）→ 1 项变红；不看主机名 → 1 项变红；设置的服务方不生效 → 2 项变红；精确型号不优先 → 2 项变红；前缀不匹配的行也收 → 2 项变红；查表不按服务方筛 → 4 项变红；均还原后逐字一致。
+
+verify：服务器 pigeon-verify，提交 6399dee，一条前台命令依次跑完 `npm run lint`、`npm run check`、`node --test --test-concurrency=2 "src/**/*.test.ts"`（运行前另有两家的测试在跑）、`npm run deps`，全过，全程约 245 秒。测试 1,643 项：通过 1,641，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：578 个模块，无违规。
