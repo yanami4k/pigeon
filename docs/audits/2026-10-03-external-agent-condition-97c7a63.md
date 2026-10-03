@@ -137,3 +137,31 @@
 变异：去掉网关的免除判定（一律经 `stripCustomToolType`），网关用例 1 项、真容器完整一步 1 项变红；跑批器登记外部条件时不声明逐字转发，真容器完整一步 1 项变红；还原后逐字一致。
 
 verify：提交 50b0474，同一台服务器：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`、`npm run deps` 依次全过。测试 1,621 项：通过 1,619，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：572 个模块，无违规。测试建的容器与网络都已删除。
+
+## 补记：输出上限、外部 agent 条件与网络档的修正
+
+改法（提交 613441e）：
+- 跑批器进程内条件的网关接入（`stream-experiment.ts` 的 `streamGatewayStreamFn`）：没配置单轮输出上限时以 16,384 作模型上限传给 `gatewayStreamFn`；配置了的不另设模型上限，按 DeepSeek 模型定义的上限与配置值取较小者，配置值原样生效。此前配置了大于 16,384 的值、不开思考时，请求被压到 16,384，而身份与 `agentSettings` 记的是配置值。
+- 外部 agent 配置的附加环境变量：在 `SECRET_ENV` 之外另查 `EXTERNAL_SECRET_ENV`（`(^|_)KEYS?(_|$)`、`PASS`、`COOKIE`、`BEARER`、`SESSION`、`CERT`，不分大小写），任一命中即拒绝；`launcherEnv` 用的 `SECRET_ENV` 不变。
+- 只通网关的网络：建网加 `-o com.docker.network.bridge.enable_icc=false`，同一网络上的容器之间不互连。
+- 逐字转发的作业：网关加可选的 `model`（本批的模型名，跑批装配传入）；逐字转发的作业上只读地解析请求体的 `model`，不是合法 JSON、缺 `model` 或与本批不符即回 400（`invalid_request_error`，说明请求的与本批的模型名），不发往上游，计入该作业计量的 `rejectedRequests`（只在发生时出现）；结果行的 `gateway` 段在本步有被拒的请求时带 `rejectedRequests`。请求体的字节不改。其余作业不核对。
+- 外部条件的墙钟：在清进程与拷产物之前取。
+- 拷出的文件：容器的请求目录拷到 `try-<序号>/io/`；请求文件由宿主另写一份可信副本到 `try-<序号>/request.json`；结果文件经 `readLauncherResult` 读，`lstat` 不是普通文件（符号链接、目录等）即拒读，按读不到处理（终态 unknown）。
+- 工具目录：解析后的路径含逗号、引号或换行即拒绝（原样拼进 `--mount`）；是根目录或家目录即拒绝。
+- 假启动器自报 `turns` 为 99，结果行仍记网关请求数 1。
+- 文字：`eval/analysis/README.md` 删去与分析读入无关的逐字转发说明（只留在 `--external-agent` 的用法注释）；`docs/configuration.md` 写明"模型定义没有上限时发 32,000"只适用于跑批网关的接入或第三方自构的模型，自带的 DeepSeek 为 393,216；`src/cli/index.ts` 的入口注释改为"内置条件断网，外部 agent 条件接只通模型网关的网络"；`DEEPSEEK_BASE_URL` 非法时报错里的地址去掉用户名与密码（`redactUserinfo`）；网络档用例的公网探测目标换成文档保留地址（TEST-NET-3），断言不变。
+
+测试：
+- `deepseek-stream.test.ts`：跑批器进程内条件的网关接入，没配置时开与不开思考都发 16,384，配置 32,000、不开思考时发 32,000（真的 `streamSimple`，假 fetch 捕获请求体）；非法地址的报错脱敏（带协议、无协议、只有用户名三种）。
+- `stream-external.test.ts`：`DEEPSEEK_KEY`、`OPENAI_KEY`、`ACCESS_KEY`、`KEY`、`KEY_ID`、`SIGNING_KEYS`、`DB_PASS`、`PASSPHRASE`、`SESSION_COOKIE`、`BEARER`、`HTTP_BEARER_VALUE`、`SESSION_ID`、`CLIENT_CERT` 拒绝，`KEYBOARD_LAYOUT`、`MONKEY_MODE` 等放行；结果文件是指向宿主路径的符号链接即拒读、目录拒读、普通文件照读；工具目录含逗号、双引号、单引号、换行，以及根目录、家目录都拒绝。
+- `model-gateway.test.ts`：逐字转发的作业 model 不符、不是 JSON、缺 model 都回 400、上游一次未收到、`rejectedRequests` 为 3；相符的逐字转发；进程内条件不核对、不出现该字段；按步做差带上被拒的次数。
+- 真容器（`gateway-network.test.ts`）：网络的 `enable_icc` 为 false；两个容器各在 8080 监听（各自从回环连得上），互相连对方的 8080 都连不上，两者都能经网关的作业地址拿到 200。
+- 真容器（`stream-external-docker.test.ts`）：网关带本批模型名，假启动器的请求通过核对、逐字到达上游；可信的请求副本与拷出的请求内容一致；结果、产物在 `io/` 下；轮数为网关请求数 1（启动器自报 99）。
+
+变异（本机）：没配置也传 16,384 → 1 项变红；去掉更严的密钥名规则 → 1 项变红；去掉 model 核对 → 1 项变红；工具目录的逗号引号、根目录、家目录检查各去掉 → 各 1 项变红；去掉脱敏 → 1 项变红；均还原后逐字一致。
+
+变异（服务器）：建网时把互连打开 → 网络选项的断言变红；再去掉该断言、互连打开 → 一个容器连上了另一个容器的 8080，"互相连不通"的断言变红；结果文件去掉普通文件检查 → 链接到宿主文件的内容被读出，1 项变红；不写可信的请求副本 → 真容器完整一步 1 项变红；结果行不取网关请求数 → 轮数为启动器自报的 99，真容器完整一步 1 项变红；均还原后逐字一致，测试建的容器与网络都已删除。
+
+真容器（服务器 pigeon-verify 重新开机后，同一规格，镜像未改动）：网络档 3 项、外部 agent 条件 3 项与配置等单元用例 13 项全部通过；宿主一侧地址上能连的常见端口与网关端口仍为 22 与网关端口；公网 TCP 为 `ENETUNREACH`，公网 DNS 为 `EAI_AGAIN`。
+
+verify：提交 613441e：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`、`npm run deps` 依次全过。测试 1,627 项：通过 1,625，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：572 个模块，无违规。
