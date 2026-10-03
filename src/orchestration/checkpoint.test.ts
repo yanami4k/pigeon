@@ -43,7 +43,7 @@ function userState(dir: string) {
   };
 }
 
-test("文件确实改变后生成快照提交并挂 ref；用户工作区、暂存区、当前分支与 HEAD 均不受影响", () => {
+test("文件确实改变后生成快照提交并挂 ref；用户工作区、暂存区、当前分支与 HEAD 均不受影响", async () => {
   const { dir, cleanup } = repo();
   try {
     // 用户自己的状态：一处已暂存、一处未暂存、一个未跟踪文件
@@ -55,11 +55,11 @@ test("文件确实改变后生成快照提交并挂 ref；用户工作区、暂�
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId });
     const before = userState(dir);
 
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     assert.deepEqual(userState(dir), before, "记基线不碰用户状态");
     writeFileSync(join(dir, "a.txt"), "two\n");
     const beforeSnapshot = { ...userState(dir) };
-    const first = checkpointer.afterChange();
+    const first = await checkpointer.afterChange();
     assert.ok(first !== undefined, "文件改变后生成快照");
     assert.deepEqual(userState(dir), beforeSnapshot, "打快照不碰工作区、暂存区、分支与 HEAD");
     assert.equal(first.ref, `${CHECKPOINT_REF_PREFIX}${sessionId}/1`);
@@ -80,12 +80,12 @@ test("文件确实改变后生成快照提交并挂 ref；用户工作区、暂�
     assert.equal(git(dir, ["rev-parse", `${first.commit}^`]).trim(), first.baseCommit);
 
     // 没有改动：不生成快照
-    checkpointer.beforeChange();
-    assert.equal(checkpointer.afterChange(), undefined);
+    await checkpointer.beforeChange();
+    assert.equal(await checkpointer.afterChange(), undefined);
 
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     writeFileSync(join(dir, "a.txt"), "three\n");
-    const second = checkpointer.afterChange();
+    const second = await checkpointer.afterChange();
     assert.ok(second !== undefined);
     assert.equal(second.ref, `${CHECKPOINT_REF_PREFIX}${sessionId}/2`);
     assert.equal(second.baseCommit, undefined, "只有首个快照带基线");
@@ -97,16 +97,16 @@ test("文件确实改变后生成快照提交并挂 ref；用户工作区、暂�
   }
 });
 
-test("治理目录 .pigeon 不进快照：只有会话文件在变时不算文件改变", () => {
+test("治理目录 .pigeon 不进快照：只有会话文件在变时不算文件改变", async () => {
   const { dir, cleanup } = repo();
   try {
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     mkdirSync(join(dir, ".pigeon", "state", "sessions"), { recursive: true });
     writeFileSync(join(dir, ".pigeon", "state", "sessions", "x.jsonl"), "{}\n");
-    assert.equal(checkpointer.afterChange(), undefined);
+    assert.equal(await checkpointer.afterChange(), undefined);
     writeFileSync(join(dir, "a.txt"), "changed\n");
-    const snapshot = checkpointer.afterChange();
+    const snapshot = await checkpointer.afterChange();
     assert.ok(snapshot !== undefined);
     assert.throws(() => git(dir, ["show", `${snapshot.commit}:.pigeon/state/sessions/x.jsonl`]));
   } finally {
@@ -114,7 +114,7 @@ test("治理目录 .pigeon 不进快照：只有会话文件在变时不算文�
   }
 });
 
-test("决策 325：仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容——快照里照常在、改动照进；个人设置不进", () => {
+test("决策 325：仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容——快照里照常在、改动照进；个人设置不进", async () => {
   const { dir, cleanup } = repo();
   try {
     mkdirSync(join(dir, ".pigeon", "skills", "s"), { recursive: true });
@@ -123,11 +123,11 @@ test("决策 325：仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills �
     git(dir, ["add", "."]);
     git(dir, ["commit", "-q", "-m", "track settings"]);
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     writeFileSync(join(dir, ".pigeon", "settings.local.json"), "{}\n");
-    assert.equal(checkpointer.afterChange(), undefined, "只动了个人设置不算文件改变");
+    assert.equal(await checkpointer.afterChange(), undefined, "只动了个人设置不算文件改变");
     writeFileSync(join(dir, ".pigeon", "settings.json"), '{"commands":{}}\n');
-    const snapshot = checkpointer.afterChange();
+    const snapshot = await checkpointer.afterChange();
     assert.ok(snapshot !== undefined);
     assert.equal(
       git(dir, ["show", `${snapshot.commit}:.pigeon/settings.json`]),
@@ -140,7 +140,7 @@ test("决策 325：仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills �
   }
 });
 
-test(".pigeon 已被 .gitignore 忽略的仓库：照常生成快照（不因忽略项报错）", () => {
+test(".pigeon 已被 .gitignore 忽略的仓库：照常生成快照（不因忽略项报错）", async () => {
   const { dir, cleanup } = repo();
   try {
     writeFileSync(join(dir, ".gitignore"), ".pigeon/\n");
@@ -149,9 +149,9 @@ test(".pigeon 已被 .gitignore 忽略的仓库：照常生成快照（不因忽
     mkdirSync(join(dir, ".pigeon", "state", "sessions"), { recursive: true });
     writeFileSync(join(dir, ".pigeon", "state", "sessions", "x.jsonl"), "{}\n");
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     writeFileSync(join(dir, "a.txt"), "changed\n");
-    const snapshot = checkpointer.afterChange();
+    const snapshot = await checkpointer.afterChange();
     assert.ok(snapshot !== undefined);
     assert.equal(git(dir, ["show", `${snapshot.commit}:a.txt`]), "changed\n");
   } finally {
@@ -159,13 +159,13 @@ test(".pigeon 已被 .gitignore 忽略的仓库：照常生成快照（不因忽
   }
 });
 
-test("现状快照：分叉时没有任何快照也能给出当前文件状态的提交（同样不碰用户状态）", () => {
+test("现状快照：分叉时没有任何快照也能给出当前文件状态的提交（同样不碰用户状态）", async () => {
   const { dir, cleanup } = repo();
   try {
     writeFileSync(join(dir, "a.txt"), "dirty\n");
     const before = userState(dir);
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
-    const current = checkpointer.snapshotNow();
+    const current = await checkpointer.snapshotNow();
     assert.deepEqual(userState(dir), before);
     assert.equal(git(dir, ["show", `${current.commit}:a.txt`]), "dirty\n");
     assert.equal(git(dir, ["rev-parse", current.ref]).trim(), current.commit);

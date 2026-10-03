@@ -306,7 +306,8 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       if (options.workspaceHost === undefined && options.branchHeader !== undefined) {
         const checkpoints = attachCheckpoints({ bundle, workspaceRoot: options.workspaceRoot });
         if (checkpoints !== undefined) {
-          bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
+          // 决策 350：收尾之前先等未完成的快照拍完（有上限）
+          bundle.disposers = [...(bundle.disposers ?? []), () => checkpoints.close()];
         }
       }
       // 决策 264–268：派 worker 的编排器（决策 279：worker 从治理根连同未提交改动的快照开工；无人值守，不接审批通道）

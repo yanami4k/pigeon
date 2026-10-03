@@ -30,6 +30,8 @@
 //    （界面展开工具输出与 diff 用；同 subscribeStream 不落盘、不进 events()、不改事件载荷与会话记录），contextUsage
 //    读当前上下文的 token 数与模型窗口（状态栏用）。没有订阅者时行为与此前逐字节一致，eval stream、pigeon run 与
 //    逐行对话不订阅，实验路径不受影响。
+// 13. 代码快照移出关键路径（决策 350）：addToolGate 登记工具执行前的等待口（审批之后、真正执行之前逐个等待），
+//    快照器在此等未完成的快照拍完；等待方自己保证有上限，抛异常只进 listenerErrors、不挡工具执行。没有登记时行为不变。
 import {
   type AfterToolCallContext,
   type AfterToolCallResult,
@@ -244,6 +246,8 @@ export class PiRuntimeAdapter {
   readonly #compactor: ContextCompactor | undefined;
   readonly #compactionListeners = new Set<(notice: CompactionNotice) => void>();
   readonly #toolResultListeners = new Set<(notice: ToolResultNotice) => void>();
+  // 决策 350：工具执行前的等待口
+  readonly #toolGates = new Set<() => Promise<void>>();
   readonly #roundListeners = new Set<(round: TurnRoundNotice) => void>();
   // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
   #compactionAbort: AbortController | undefined;
@@ -592,6 +596,12 @@ export class PiRuntimeAdapter {
   subscribeToolResults(listener: (notice: ToolResultNotice) => void): () => void {
     this.#toolResultListeners.add(listener);
     return () => this.#toolResultListeners.delete(listener);
+  }
+
+  // 决策 350：登记工具执行前的等待口（审批之后、真正执行之前）；返回撤销函数
+  addToolGate(gate: () => Promise<void>): () => void {
+    this.#toolGates.add(gate);
+    return () => this.#toolGates.delete(gate);
   }
 
   // 观察口（305）：订阅整轮（一轮的工具调用与返回结果，一轮结束时）。在本轮的待递通知转入下一轮之前发出——
@@ -1016,6 +1026,13 @@ export class PiRuntimeAdapter {
         const updated = this.#updatedArgs.get(toolCallId);
         if (updated !== undefined) {
           this.#updatedArgs.delete(toolCallId);
+        }
+        for (const gate of this.#toolGates) {
+          try {
+            await gate();
+          } catch (error) {
+            this.#listenerErrors.push(error);
+          }
         }
         try {
           return await tool.execute(

@@ -241,7 +241,8 @@ export async function openSessionRuntime(
           })
         : undefined;
     if (checkpoints !== undefined) {
-      bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
+      // 决策 350：退出会话之前先等未完成的快照拍完（有上限）
+      bundle.disposers = [...(bundle.disposers ?? []), () => checkpoints.close()];
     }
     return {
       bundle,

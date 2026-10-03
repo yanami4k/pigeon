@@ -125,6 +125,8 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
     const branchModel = createFakeStreamFn({ replies: [edit("new\n"), { text: "这次对了" }] });
     try {
       await opened.bundle.adapter.run("把 a.txt 改成 new");
+      // 决策 350：快照在后台拍，先等它拍完
+      await opened.checkpoints?.settle();
       await opened.bundle.sessionStore.flush();
       const source = storeSession(dir, sourceId).view;
       const runId = source.runs[0]?.runId;

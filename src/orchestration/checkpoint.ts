@@ -1,13 +1,19 @@
 // 工作区快照（M7 S5，决策 078）：只在写操作或命令确实改变文件后，用 git 底层命令在临时索引上生成快照提交——
-// 临时 GIT_INDEX_FILE（以用户索引为起点复制一份，只为复用文件状态缓存）→ add -A → write-tree → commit-tree → update-ref，
+// 临时 GIT_INDEX_FILE（首次以用户索引为起点复制一份，只为复用文件状态缓存）→ add -A → write-tree → commit-tree → update-ref，
 // 挂到 refs/pigeon/checkpoints/<会话>/<序号>。用户的工作区、暂存区、当前分支与 HEAD 一律不碰；
 // 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 不进快照（会话文件在变不算文件改变；决策 325 起
 // 仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容，照常进快照）。快照成链：首个快照的父提交是改前基线（首次改动之前的
 // 工作区状态），之后每个快照的父提交是上一个快照。分叉时从分叉点之前最近的快照开独立工作树（见 S6）。
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
-import { execFileSync } from "node:child_process";
+// 决策 350：git 一律异步执行（快照在后台拍，不占事件循环），同一实例的操作经串行队列逐个执行；单条命令有上限，
+// 调用方可传中止信号提前杀掉。会话内复用同一个临时索引（add -A 只处理增量），索引路径与已有快照编号只在首次操作时取一次；
+// 某条命令失败或被中止时丢弃临时索引（可能留下半截内容或锁文件），下次从用户索引重新复制。
+// racy-git 保护：git 只在条目的文件修改时间不早于索引文件的修改时间时才比内容，所以索引文件的修改时间不能晚于其中条目
+// 最后一次入索引的时间。复制出的副本修改时间是"现在"，必须设回用户索引的修改时间；此后临时索引只由 git 自己写，
+// 写时对处在临界时刻的条目抹掉长度，下次必比内容，复用不破坏这一保护。
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
@@ -28,13 +34,15 @@ export interface CheckpointResult {
 
 export interface Checkpointer {
   // 写或命令工具执行前调用：会话首次改动之前记下基线树（只在内存里，不生成提交）
-  beforeChange(): void;
+  beforeChange(signal?: AbortSignal): Promise<void>;
   // 工具落定后调用：文件树与上一次（快照或基线）不同则生成快照；没有改变返回 undefined
-  afterChange(): CheckpointResult | undefined;
+  afterChange(signal?: AbortSignal): Promise<CheckpointResult | undefined>;
   // 现状快照：分叉时没有可用快照，给出当前文件状态的提交（挂 ref，不接入快照链）
-  snapshotNow(): CheckpointResult;
+  snapshotNow(): Promise<CheckpointResult>;
   // 给已有提交挂一个快照 ref（改前基线在分叉时被引用，防止被 git 回收）；返回 ref
-  pin(commit: string): string;
+  pin(commit: string): Promise<string>;
+  // 排队的操作做完后删掉临时索引；之后再用会重新复制
+  close(): Promise<void>;
 }
 
 // 快照提交的作者身份固定，不依赖用户的 git 配置
@@ -48,7 +56,20 @@ const IDENTITY = {
 // 列表类命令在大仓库里输出可达数十 MiB：缺省 1 MiB 的上限会报 ENOBUFS
 const GIT_MAX_BUFFER = 256 * 1024 * 1024;
 
-function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
+// 单条 git 命令的上限：git 卡住时到点杀掉，排在后面的操作不会被永远堵住
+const GIT_TIMEOUT_MS = 60_000;
+
+function failure(args: string[], error: unknown, stderr: unknown): CheckpointError {
+  const detail =
+    typeof stderr === "string" && stderr.trim() !== ""
+      ? stderr.trim()
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  return new CheckpointError(`git ${args.join(" ")} 失败：${detail}`);
+}
+
+function gitSync(cwd: string, args: string[]): string {
   try {
     return execFileSync("git", args, {
       cwd,
@@ -56,23 +77,44 @@ function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
       maxBuffer: GIT_MAX_BUFFER,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-      ...(env !== undefined ? { env: { ...process.env, ...env } } : {}),
     });
   } catch (error) {
-    const stderr = (error as { stderr?: unknown }).stderr;
-    const detail =
-      typeof stderr === "string" && stderr.trim() !== ""
-        ? stderr.trim()
-        : error instanceof Error
-          ? error.message
-          : String(error);
-    throw new CheckpointError(`git ${args.join(" ")} 失败：${detail}`);
+    throw failure(args, error, (error as { stderr?: unknown }).stderr);
   }
+}
+
+function git(
+  cwd: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal | undefined } = {}
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: GIT_MAX_BUFFER,
+        timeout: GIT_TIMEOUT_MS,
+        windowsHide: true,
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.env !== undefined ? { env: { ...process.env, ...options.env } } : {}),
+      },
+      (error, stdout, stderr) => {
+        if (error !== null) {
+          reject(failure(args, error, stderr));
+        } else {
+          resolve(stdout);
+        }
+      }
+    );
+  });
 }
 
 export function isGitWorkspace(workspaceRoot: string): boolean {
   try {
-    return git(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]).trim() === "true";
+    return gitSync(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]).trim() === "true";
   } catch {
     return false;
   }
@@ -80,6 +122,26 @@ export function isGitWorkspace(workspaceRoot: string): boolean {
 
 export function checkpointRefPrefix(sessionId: SessionId): string {
   return `${CHECKPOINT_REF_PREFIX}${sessionId}/`;
+}
+
+// 进程退出时清掉还在用的临时索引（会话没走到 close 的情况）
+const liveIndexFiles = new Set<string>();
+let exitHookInstalled = false;
+function removeIndexFile(file: string): void {
+  rmSync(file, { force: true });
+  rmSync(`${file}.lock`, { force: true });
+  liveIndexFiles.delete(file);
+}
+function trackIndexFile(file: string): void {
+  liveIndexFiles.add(file);
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.once("exit", () => {
+      for (const live of [...liveIndexFiles]) {
+        removeIndexFile(live);
+      }
+    });
+  }
 }
 
 export function createCheckpointer(input: {
@@ -91,76 +153,129 @@ export function createCheckpointer(input: {
     throw new NotGitWorkspaceError(`工作区不是 git 工作区，不能生成快照：${workspaceRoot}`);
   }
   const prefix = checkpointRefPrefix(sessionId);
-  // 恢复的会话接着已有快照编号与快照链
-  const existing = git(workspaceRoot, ["for-each-ref", "--format=%(refname) %(objectname)", prefix])
-    .split(/\r?\n/)
-    .filter((line) => line.trim() !== "")
-    .map((line) => {
-      const [ref = "", commit = ""] = line.split(" ");
-      return { n: Number(ref.slice(prefix.length)), commit };
-    })
-    .filter((entry) => Number.isInteger(entry.n))
-    .sort((left, right) => left.n - right.n);
-  let counter = existing.at(-1)?.n ?? 0;
-  let previous: string | undefined = existing.at(-1)?.commit;
-  let lastTree: string | undefined =
-    previous !== undefined
-      ? git(workspaceRoot, ["rev-parse", `${previous}^{tree}`]).trim()
-      : undefined;
+  const run = (args: string[], env?: NodeJS.ProcessEnv, signal?: AbortSignal) =>
+    git(workspaceRoot, args, { ...(env !== undefined ? { env } : {}), signal });
+
+  // 同一实例的操作逐个执行：临时索引、序号与快照链都是实例内的共享状态
+  let tail: Promise<unknown> = Promise.resolve();
+  const serial = <T>(work: () => Promise<T>): Promise<T> => {
+    const result = tail.then(work);
+    tail = result.catch(() => undefined);
+    return result;
+  };
+
+  let initialized = false;
+  let counter = 0;
+  let previous: string | undefined;
+  let lastTree: string | undefined;
+  let realIndex = "";
   let baseTree: string | undefined;
   // 首次改动之前记基线失败：之后看到的树已是改后的，不能当改前基线——此后不再产出改前基线，
   // 读改前基线的地方因此得到"没有起点"，而不是一个改到一半的状态
   let baseLost = false;
+  let indexFile: string | undefined;
 
-  // 工作区当前文件树：临时索引上 add -A（排除治理目录）再 write-tree
-  const currentTree = (): string => {
-    const indexFile = join(tmpdir(), `pigeon-index-${randomBytes(8).toString("hex")}`);
-    try {
-      const realIndex = git(workspaceRoot, [
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-path",
-        "index",
-      ]).trim();
-      if (existsSync(realIndex)) {
-        copyFileSync(realIndex, indexFile);
-      }
-      const env = { GIT_INDEX_FILE: indexFile };
-      git(workspaceRoot, ["add", "-A", "--", "."], env);
-      // 治理目录不进快照：不能用排除路径写法（.pigeon 已被 .gitignore 忽略时 git add 会因路径命中忽略项报错），
-      // 改为加完再从临时索引里摘掉
-      git(
-        workspaceRoot,
-        ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ...PROGRAM_OWNED_PATHS],
-        env
-      );
-      return git(workspaceRoot, ["write-tree"], env).trim();
-    } finally {
-      rmSync(indexFile, { force: true });
+  // 恢复的会话接着已有快照编号与快照链；用户索引的位置会话内不变
+  const init = async (signal?: AbortSignal): Promise<void> => {
+    if (initialized) {
+      return;
+    }
+    const existing = (
+      await run(["for-each-ref", "--format=%(refname) %(objectname)", prefix], undefined, signal)
+    )
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== "")
+      .map((line) => {
+        const [ref = "", commit = ""] = line.split(" ");
+        return { n: Number(ref.slice(prefix.length)), commit };
+      })
+      .filter((entry) => Number.isInteger(entry.n))
+      .sort((left, right) => left.n - right.n);
+    const last = existing.at(-1);
+    const tree =
+      last !== undefined
+        ? (await run(["rev-parse", `${last.commit}^{tree}`], undefined, signal)).trim()
+        : undefined;
+    realIndex = (
+      await run(["rev-parse", "--path-format=absolute", "--git-path", "index"], undefined, signal)
+    ).trim();
+    counter = last?.n ?? 0;
+    previous = last?.commit;
+    lastTree = tree;
+    initialized = true;
+  };
+
+  const dropIndex = (): void => {
+    if (indexFile !== undefined) {
+      removeIndexFile(indexFile);
+      indexFile = undefined;
     }
   };
 
-  const headCommit = (): string | undefined => {
+  // 工作区当前文件树：临时索引上 add -A（排除治理目录）再 write-tree
+  const currentTree = async (signal?: AbortSignal): Promise<string> => {
+    if (indexFile === undefined) {
+      const file = join(tmpdir(), `pigeon-index-${randomBytes(8).toString("hex")}`);
+      trackIndexFile(file);
+      if (existsSync(realIndex)) {
+        // 先取修改时间再复制：其间用户索引若被改写，副本只会比取到的时间新，设回的时间只会偏早（偏早只多比内容）。
+        // Date 只到毫秒、向下取整，同样不会晚于原值
+        const { atime, mtime } = statSync(realIndex);
+        copyFileSync(realIndex, file);
+        utimesSync(file, atime, mtime);
+      }
+      indexFile = file;
+    }
+    const env = { GIT_INDEX_FILE: indexFile };
     try {
-      return git(workspaceRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]).trim() || undefined;
+      await run(["add", "-A", "--", "."], env, signal);
+      // 治理目录不进快照：不能用排除路径写法（.pigeon 已被 .gitignore 忽略时 git add 会因路径命中忽略项报错），
+      // 改为加完再从临时索引里摘掉
+      await run(
+        ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ...PROGRAM_OWNED_PATHS],
+        env,
+        signal
+      );
+      return (await run(["write-tree"], env, signal)).trim();
+    } catch (error) {
+      dropIndex();
+      throw error;
+    }
+  };
+
+  const headCommit = async (): Promise<string | undefined> => {
+    try {
+      return (await run(["rev-parse", "--verify", "--quiet", "HEAD"])).trim() || undefined;
     } catch {
       return undefined;
     }
   };
 
-  const commitTree = (tree: string, parent: string | undefined, message: string): string =>
-    git(
-      workspaceRoot,
-      ["commit-tree", tree, ...(parent !== undefined ? ["-p", parent] : []), "-m", message],
-      IDENTITY
+  const commitTree = async (
+    tree: string,
+    parent: string | undefined,
+    message: string,
+    signal?: AbortSignal
+  ): Promise<string> =>
+    (
+      await run(
+        ["commit-tree", tree, ...(parent !== undefined ? ["-p", parent] : []), "-m", message],
+        IDENTITY,
+        signal
+      )
     ).trim();
 
   // ref 写入一律带旧值守卫：新建传 null（git 的空旧值即"该 ref 必须不存在"），更新传旧提交号做比较交换。
   // 同一会话若有并发的快照器实例（序号计数各在各的内存里，构造时从 refs 读到同一个起点），后写者会撞上同一个序号；
   // 这里明确报错，不静默覆盖——被覆盖的快照会失去唯一引用，之后可能被 git 回收，钉住的改前基线随之丢失。
-  const writeRef = (ref: string, commit: string, expected: string | null): void => {
+  const writeRef = async (
+    ref: string,
+    commit: string,
+    expected: string | null,
+    signal?: AbortSignal
+  ): Promise<void> => {
     try {
-      git(workspaceRoot, ["update-ref", ref, commit, expected ?? ""]);
+      await run(["update-ref", ref, commit, expected ?? ""], undefined, signal);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CheckpointError(
@@ -171,70 +286,94 @@ export function createCheckpointer(input: {
     }
   };
 
-  const nextRef = (commit: string): string => {
+  const nextRef = async (commit: string, signal?: AbortSignal): Promise<string> => {
     counter += 1;
     const ref = `${prefix}${counter}`;
-    writeRef(ref, commit, null);
+    await writeRef(ref, commit, null, signal);
     return ref;
   };
 
   return {
-    beforeChange: () => {
-      if (lastTree === undefined && baseTree === undefined && !baseLost) {
+    beforeChange: (signal) =>
+      serial(async () => {
         try {
-          baseTree = currentTree();
+          await init(signal);
+          if (lastTree === undefined && baseTree === undefined && !baseLost) {
+            baseTree = await currentTree(signal);
+          }
         } catch (error) {
-          baseLost = true;
+          // 初始化失败同样算基线丢失：还没记下基线时就不能再记
+          if (baseTree === undefined) {
+            baseLost = true;
+          }
           throw error;
         }
-      }
-    },
-    afterChange: () => {
-      const tree = currentTree();
-      const reference = lastTree ?? baseTree;
-      if (reference === undefined) {
-        if (baseLost) {
-          // 基线丢了：现状照样打成快照（不带改前基线），账本因此留下"有快照、无改前基线"，续跑也认得出起点丢失
-          const commit = commitTree(
-            tree,
-            headCommit(),
-            `pigeon checkpoint ${sessionId} #${counter + 1}`
-          );
-          const ref = nextRef(commit);
-          previous = commit;
-          lastTree = tree;
-          return { ref, commit, tree };
+      }),
+    afterChange: (signal) =>
+      serial(async () => {
+        await init(signal);
+        const tree = await currentTree(signal);
+        const reference = lastTree ?? baseTree;
+        if (reference === undefined) {
+          if (baseLost) {
+            // 基线丢了：现状照样打成快照（不带改前基线），账本因此留下"有快照、无改前基线"，续跑也认得出起点丢失
+            const commit = await commitTree(
+              tree,
+              await headCommit(),
+              `pigeon checkpoint ${sessionId} #${counter + 1}`,
+              signal
+            );
+            const ref = await nextRef(commit, signal);
+            previous = commit;
+            lastTree = tree;
+            return { ref, commit, tree };
+          }
+          // 没有记过基线：把现状当基线，本次不算改变
+          baseTree = tree;
+          return undefined;
         }
-        // 没有记过基线：把现状当基线，本次不算改变
-        baseTree = tree;
-        return undefined;
-      }
-      if (tree === reference) {
-        return undefined;
-      }
-      let baseCommit: string | undefined;
-      if (previous === undefined && baseTree !== undefined && !baseLost) {
-        baseCommit = commitTree(baseTree, headCommit(), `pigeon checkpoint ${sessionId} base`);
-      }
-      const commit = commitTree(
-        tree,
-        previous ?? baseCommit,
-        `pigeon checkpoint ${sessionId} #${counter + 1}`
-      );
-      const ref = nextRef(commit);
-      previous = commit;
-      lastTree = tree;
-      return { ref, commit, tree, ...(baseCommit !== undefined ? { baseCommit } : {}) };
-    },
-    snapshotNow: () => {
-      const tree = currentTree();
-      const commit = commitTree(
-        tree,
-        previous ?? headCommit(),
-        `pigeon checkpoint ${sessionId} now`
-      );
-      return { ref: nextRef(commit), commit, tree };
-    },
-    pin: (commit) => nextRef(commit),
+        if (tree === reference) {
+          return undefined;
+        }
+        let baseCommit: string | undefined;
+        if (previous === undefined && baseTree !== undefined && !baseLost) {
+          baseCommit = await commitTree(
+            baseTree,
+            await headCommit(),
+            `pigeon checkpoint ${sessionId} base`,
+            signal
+          );
+        }
+        const commit = await commitTree(
+          tree,
+          previous ?? baseCommit,
+          `pigeon checkpoint ${sessionId} #${counter + 1}`,
+          signal
+        );
+        const ref = await nextRef(commit, signal);
+        previous = commit;
+        lastTree = tree;
+        return { ref, commit, tree, ...(baseCommit !== undefined ? { baseCommit } : {}) };
+      }),
+    snapshotNow: () =>
+      serial(async () => {
+        await init();
+        const tree = await currentTree();
+        const commit = await commitTree(
+          tree,
+          previous ?? (await headCommit()),
+          `pigeon checkpoint ${sessionId} now`
+        );
+        return { ref: await nextRef(commit), commit, tree };
+      }),
+    pin: (commit) =>
+      serial(async () => {
+        await init();
+        return nextRef(commit);
+      }),
+    close: () =>
+      serial(async () => {
+        dropIndex();
+      }),
   };
 }

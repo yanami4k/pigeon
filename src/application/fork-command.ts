@@ -102,8 +102,12 @@ export async function runForkCommand(input: {
     forkPoint,
     trigger: "manual",
     // 复用运行面已挂的快照器实例：同一会话只能有一个实例，否则两边各自算序号会写同一个 ref
+    // 决策 350：分叉之前先等本会话未完成的快照拍完
     ...(input.opened.checkpoints !== undefined
-      ? { checkpointer: input.opened.checkpoints.checkpointer }
+      ? {
+          checkpointer: input.opened.checkpoints.checkpointer,
+          settleCheckpoints: input.opened.checkpoints.settle,
+        }
       : {}),
     // 决策 325：分支沿用来源会话的设置快照
     run: {

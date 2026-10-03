@@ -14,6 +14,7 @@ import { type AttemptOutcomeFacts, labelAttempt } from "./outcome-label.ts";
 import type { TurnUsage } from "./runtime-events.ts";
 import {
   type CheckpointData,
+  type CheckpointMarkData,
   type ForkData,
   type GrantData,
   type RunEndData,
@@ -51,12 +52,18 @@ export interface StoreMessageRef {
   message: StoreMessage;
 }
 
-// 代码快照：afterRunSeq 同旧记录的口径——快照打在工具落定时，下一条消息就是该调用的工具结果，快照归到那一条
-// （所属 Run 里前面已有的消息条数加一）
+// 代码快照：afterRunSeq 是快照归属的条目号，即该调用的工具结果消息的序号。决策 350 起记录自带条目号（runSeq）；
+// 没有的旧记录打在工具落定时、下一条消息就是该调用的工具结果，由位置取得（所属 Run 里前面已有的消息条数加一）
 export interface StoreCheckpoint {
   entryId: string;
   data: CheckpointData;
   afterRunSeq: number;
+}
+
+// 快照的拍摄标记（决策 350）
+export interface StoreCheckpointMark {
+  entryId: string;
+  data: CheckpointMarkData;
 }
 
 export interface StoreRun {
@@ -65,6 +72,7 @@ export interface StoreRun {
   end?: RunEndData;
   messages: StoreMessageRef[];
   checkpoints: StoreCheckpoint[];
+  marks: StoreCheckpointMark[];
 }
 
 export interface StoreRecord<T> {
@@ -164,7 +172,7 @@ export function storeSessionView(input: {
     const current = runs.at(-1);
     const start = customData<RunStartData>(entry, SessionEntryType.RunStart);
     if (start !== undefined) {
-      runs.push({ runId: start.runId, start, messages: [], checkpoints: [] });
+      runs.push({ runId: start.runId, start, messages: [], checkpoints: [], marks: [] });
       continue;
     }
     const end = customData<RunEndData>(entry, SessionEntryType.RunEnd);
@@ -186,8 +194,18 @@ export function storeSessionView(input: {
       run?.checkpoints.push({
         entryId: entry.id,
         data: checkpoint,
-        afterRunSeq: run.messages.length + 1,
+        afterRunSeq: checkpoint.runSeq ?? run.messages.length + 1,
       });
+      continue;
+    }
+    const mark = customData<CheckpointMarkData>(entry, SessionEntryType.CheckpointMark);
+    if (mark !== undefined) {
+      runs
+        .find((candidate) => candidate.runId === mark.runId)
+        ?.marks.push({
+          entryId: entry.id,
+          data: mark,
+        });
       continue;
     }
     const verification = customData<VerificationData>(entry, SessionEntryType.Verification);
@@ -725,25 +743,60 @@ export function storeWorkerSpawned(
   return undefined;
 }
 
+// 分叉点之前最近的代码快照的查找结果：拍成的快照（或改前基线），或者没拍成的那一次的拍摄标记
+export type StoreCheckpointAt =
+  | { commit: string; ref?: string; unfinished?: undefined }
+  | { unfinished: CheckpointMarkData; commit?: undefined; ref?: undefined };
+
+// 一个 Run 里没拍成的快照：有拍摄标记，同一调用既没有快照条目、也没有 unchanged 标记（只有 shooting 即拍完之前进程退出，
+// 或标了 failed）；取该调用最后一条标记
+function unfinishedMarks(run: StoreRun): CheckpointMarkData[] {
+  const settled = new Set(run.checkpoints.map((checkpoint) => checkpoint.data.toolCallId));
+  const last = new Map<string, CheckpointMarkData>();
+  for (const { data } of run.marks) {
+    if (data.state === "unchanged") {
+      settled.add(data.toolCallId);
+    }
+    last.set(data.toolCallId, data);
+  }
+  return [...last.values()].filter((data) => !settled.has(data.toolCallId));
+}
+
 // 分叉点之前最近的代码快照（同 checkpoint-ref.ts 的口径）：分叉点所在 Run 里归属条目号不大于 runSeq 的最后一个快照，
-// 没有则取更早 Run 的最后一个；仍没有即该点早于首次改动，取首个快照的改前基线；整个会话都没改过文件返回 undefined
+// 没有则取更早 Run 的最后一个；仍没有即该点早于首次改动，取首个快照的改前基线；整个会话都没改过文件返回 undefined。
+// 决策 350：按条目号找，不依赖记录在文件中的位置；最近的那一次没拍成时返回它的拍摄标记（分叉入口据此明确报错），
+// 不退回更早的快照
 export function storeCheckpointBefore(
   view: StoreSessionView,
   point: { runId: RunId; runSeq: number }
-): { commit: string; ref?: string } | undefined {
+): StoreCheckpointAt | undefined {
   const pointIndex = view.runs.findIndex((run) => run.runId === point.runId);
-  let best: { commit: string; ref: string } | undefined;
+  let best: { seq: number; at: StoreCheckpointAt } | undefined;
   for (const [index, run] of view.runs.entries()) {
-    for (const checkpoint of run.checkpoints) {
-      const before =
-        index < pointIndex || (index === pointIndex && checkpoint.afterRunSeq <= point.runSeq);
-      if (before) {
-        best = { commit: checkpoint.data.commit, ref: checkpoint.data.ref };
+    if (index > pointIndex) {
+      break;
+    }
+    const limit = index === pointIndex ? point.runSeq : Number.POSITIVE_INFINITY;
+    const candidates: Array<{ seq: number; at: StoreCheckpointAt }> = [
+      ...run.checkpoints.map((checkpoint) => ({
+        seq: checkpoint.afterRunSeq,
+        at: { commit: checkpoint.data.commit, ref: checkpoint.data.ref },
+      })),
+      ...unfinishedMarks(run).map((mark) => ({ seq: mark.runSeq, at: { unfinished: mark } })),
+    ];
+    // 本 Run 里归属条目号不大于界限的最后一个；同号保留文件中靠后的（旧记录同号时的口径）
+    let latest: { seq: number; at: StoreCheckpointAt } | undefined;
+    for (const candidate of candidates) {
+      if (candidate.seq <= limit && (latest === undefined || candidate.seq >= latest.seq)) {
+        latest = candidate;
       }
+    }
+    if (latest !== undefined) {
+      best = latest;
     }
   }
   if (best !== undefined) {
-    return best;
+    return best.at;
   }
   for (const run of view.runs) {
     for (const checkpoint of run.checkpoints) {
