@@ -11,10 +11,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test \"src/**/*.test.ts\"",
+    "test": "node scripts/run-tests.mjs fast",
+    "test:slow": "node scripts/run-tests.mjs slow",
     "lint": "biome check .",
     "deps": "dependency-cruiser src",
-    "verify": "npm run lint && npm run check && npm run test && npm run deps"
+    "verify": "npm run lint && npm run check && npm run test && npm run deps",
+    "verify:full": "npm run lint && npm run check && node scripts/run-tests.mjs all && npm run deps"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.4",
