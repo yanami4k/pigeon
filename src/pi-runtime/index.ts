@@ -32,7 +32,12 @@ export {
   DEEPSEEK_MODEL_ID,
   deepseekModel,
 } from "./deepseek-model.ts";
-export { createDeepSeekStreamFn, DEEPSEEK_KEY_ENV } from "./deepseek-stream.ts";
+export {
+  createDeepSeekStreamFn,
+  DEEPSEEK_BASE_URL_ENV,
+  DEEPSEEK_KEY_ENV,
+  resolveDeepSeekBaseUrl,
+} from "./deepseek-stream.ts";
 export { isSyntheticFailureMessage, normalizePiEvent, turnUsageOf } from "./events.ts";
 export {
   DEFAULT_GATEWAY_MODEL_ID,

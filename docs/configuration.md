@@ -75,6 +75,8 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 
 设置文件里没有任何 key 字段。智谱搜索的 key 从环境变量 `ZAI_API_KEY` 读，Tavily 的从 `TAVILY_API_KEY` 读，DeepSeek 用模型接入同一个环境变量。在 `web` 一节里写了 `apiKey` 即报错，并给出应设的环境变量名。
 
+自带的 DeepSeek 模型接入另读环境变量 `DEEPSEEK_BASE_URL`：给了就用它作 Anthropic 兼容端点的根（请求照旧发到 `<根>/v1/messages`），没给或为空时用官方地址；它须为 http 或 https 地址，否则启动时报错（报错里带上该地址，不带 key）。`web_search` 的 DeepSeek 后端在设置里显式给了 `web.search.deepseek.baseUrl` 时以设置为准，没给时同样跟这个环境变量。
+
 ## 程序状态目录 `.pigeon/state/`
 
 程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、项目级学到的记忆（`memory.md` 与 `memory.lock`）、worker 工作树（`worktrees/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（用户级学到的记忆 `memory.md`、配置确认记录 `config-trust.json`、迁移备份 `migration-backup/`）在 `~/.pigeon/state/`。

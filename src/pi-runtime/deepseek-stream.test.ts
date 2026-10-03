@@ -6,7 +6,11 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { loadStreamFn } from "../application/runtime.ts";
 import { DEEPSEEK_ANTHROPIC_BASE_URL, deepseekModel } from "./deepseek-model.ts";
-import { createDeepSeekStreamFn } from "./deepseek-stream.ts";
+import {
+  createDeepSeekStreamFn,
+  DEEPSEEK_BASE_URL_ENV,
+  resolveDeepSeekBaseUrl,
+} from "./deepseek-stream.ts";
 import { limitOutputTokens } from "./output-limit.ts";
 import { fixTemperature } from "./sampling.ts";
 
@@ -95,4 +99,38 @@ test("日常 DeepSeek 接入入口：经 loadStreamFn 按文件路径加载得�
   }
   assert.match(stderr, /缺少 DEEPSEEK_API_KEY 环境变量/);
   assert.doesNotMatch(stderr, /should-not-appear/);
+});
+
+// DeepSeek 端点根（环境变量 DEEPSEEK_BASE_URL）：给了就用它作 Anthropic 兼容端点的根，请求照旧拼 /v1/messages；
+// 没给或为空用官方地址；不是 http/https 地址时启动即报错（报错里有地址，没有 key）
+test("DEEPSEEK_BASE_URL：给了就用作模型基址；没给或为空用官方地址；非法值启动即报错", async () => {
+  const sentBase = async (env: Record<string, string | undefined>) => {
+    const { calls, stream } = fakeStream();
+    const fn = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-daily", ...env }, stream);
+    await fn(placeholder, context, {});
+    return calls[0]?.model.baseUrl;
+  };
+  assert.equal(await sentBase({}), DEEPSEEK_ANTHROPIC_BASE_URL);
+  assert.equal(await sentBase({ DEEPSEEK_BASE_URL: "" }), DEEPSEEK_ANTHROPIC_BASE_URL);
+  assert.equal(
+    await sentBase({ DEEPSEEK_BASE_URL: "http://127.0.0.1:8080/anthropic" }),
+    "http://127.0.0.1:8080/anthropic"
+  );
+  assert.equal(
+    await sentBase({ DEEPSEEK_BASE_URL: "https://proxy.example.com/ds" }),
+    "https://proxy.example.com/ds"
+  );
+  for (const bad of ["ftp://example.com/anthropic", "api.deepseek.com/anthropic", "not a url"]) {
+    assert.throws(
+      () => createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-secret-value", DEEPSEEK_BASE_URL: bad }),
+      (error: Error) =>
+        /DEEPSEEK_BASE_URL/.test(error.message) &&
+        /http 或 https/.test(error.message) &&
+        error.message.includes(bad) &&
+        !error.message.includes("sk-secret-value"),
+      bad
+    );
+  }
+  assert.equal(resolveDeepSeekBaseUrl({}), DEEPSEEK_ANTHROPIC_BASE_URL);
+  assert.equal(DEEPSEEK_BASE_URL_ENV, "DEEPSEEK_BASE_URL");
 });

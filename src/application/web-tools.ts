@@ -5,9 +5,9 @@
 // 不装（291、346，判定在 launch-flags 的 webToolsEnabled）；跑批器各条件不装（265 的先例）。
 import {
   completeWithoutTools,
-  DEEPSEEK_ANTHROPIC_BASE_URL,
   DEEPSEEK_KEY_ENV,
   DEEPSEEK_MODEL_ID,
+  resolveDeepSeekBaseUrl,
   type StreamFn,
 } from "../pi-runtime/index.ts";
 import {
@@ -52,8 +52,10 @@ export interface WebToolsConfig {
 export interface ResolveWebToolsOptions {
   // 决策 325：设置快照的 web 一节（不读文件；没有即全部取缺省）
   config: WebSection | undefined;
-  // key 的来源（缺省 process.env；测试注入）
+  // key 与 DEEPSEEK_BASE_URL 的来源（缺省 process.env；测试注入）
   env?: Record<string, string | undefined>;
+  // 测试注入：DeepSeek 搜索后端发请求用的 fetch
+  searchFetch?: typeof fetch;
 }
 
 // 读配置、挑后端、取 key。缺 key 不在装配时报错（工具仍注册），调用时按 unavailable 的文字回话，文字里不带 key
@@ -72,10 +74,12 @@ export function resolveWebTools(options: ResolveWebToolsOptions): WebToolsConfig
         ? {
             backend: createAnthropicSearchBackend({
               id: "deepseek",
-              baseUrl: search?.deepseek?.baseUrl ?? DEEPSEEK_ANTHROPIC_BASE_URL,
+              // 设置里显式给了地址以设置为准；没给时跟模型接入同一个环境变量 DEEPSEEK_BASE_URL，再没有用官方地址
+              baseUrl: search?.deepseek?.baseUrl ?? resolveDeepSeekBaseUrl(env),
               model: search?.deepseek?.model ?? DEEPSEEK_MODEL_ID,
               apiKey,
               timeoutMs,
+              ...(options.searchFetch !== undefined ? { fetchImpl: options.searchFetch } : {}),
             }),
             defaultMaxResults,
           }

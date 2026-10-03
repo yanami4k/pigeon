@@ -77,3 +77,58 @@ test("配置选智谱或 Tavily：key 只取环境变量；没有时说明点名
   });
   assert.match(tavilyMissing.search.unavailable ?? "", /TAVILY_API_KEY/);
 });
+
+// web_search 的 DeepSeek 后端基址：设置里显式给了 baseUrl 以设置为准；没给时跟环境变量 DEEPSEEK_BASE_URL；都没有用官方地址。
+// 用假 fetch 捕获实际请求的地址
+test("DeepSeek 搜索后端的基址优先次序：设置 > 环境变量 DEEPSEEK_BASE_URL > 官方地址；非法环境变量装配即报错", async () => {
+  const requestedUrl = async (
+    env: Record<string, string | undefined>,
+    section: WebSection | undefined
+  ): Promise<string> => {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string | URL) => {
+      urls.push(String(url));
+      return new Response(JSON.stringify({ content: [] }), { status: 200 });
+    }) as typeof fetch;
+    const tools = resolveWebTools({
+      env: { DEEPSEEK_API_KEY: "sk-ds", ...env },
+      config: section,
+      searchFetch: fetchImpl,
+    });
+    await tools.search.backend?.search({ query: "q", maxResults: 5 });
+    assert.equal(urls.length, 1);
+    return urls[0] ?? "";
+  };
+  assert.equal(await requestedUrl({}, undefined), "https://api.deepseek.com/anthropic/v1/messages");
+  assert.equal(
+    await requestedUrl({ DEEPSEEK_BASE_URL: "http://127.0.0.1:9/ds" }, undefined),
+    "http://127.0.0.1:9/ds/v1/messages"
+  );
+  assert.equal(
+    await requestedUrl(
+      { DEEPSEEK_BASE_URL: "http://127.0.0.1:9/ds" },
+      config({ search: { deepseek: { baseUrl: "https://configured.example.com/a" } } })
+    ),
+    "https://configured.example.com/a/v1/messages"
+  );
+  assert.equal(
+    await requestedUrl({ DEEPSEEK_BASE_URL: "" }, config({ search: { deepseek: { model: "m" } } })),
+    "https://api.deepseek.com/anthropic/v1/messages"
+  );
+  assert.throws(
+    () =>
+      resolveWebTools({
+        env: { DEEPSEEK_API_KEY: "sk-ds", DEEPSEEK_BASE_URL: "ftp://x" },
+        config: undefined,
+      }),
+    /DEEPSEEK_BASE_URL/
+  );
+  // 设置里显式给了地址时，不看环境变量（非法值也不影响）
+  assert.equal(
+    await requestedUrl(
+      { DEEPSEEK_BASE_URL: "ftp://x" },
+      config({ search: { deepseek: { baseUrl: "https://configured.example.com/a" } } })
+    ),
+    "https://configured.example.com/a/v1/messages"
+  );
+});
