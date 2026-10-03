@@ -111,3 +111,8 @@
 - 提交 814ac64：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`、`npm run deps` 依次全过。测试 1,619 项：通过 1,617，失败 0，跳过 2（两项只在 Windows 上运行的用例）；真容器用例全部实际运行。deps：572 个模块，无违规。
 - 全端口扫描另以 `PIGEON_GATEWAY_NET_SCAN=1` 单独运行一次（缺省只扫常见端口与网关端口）。
 - 含本审计的提交上另跑一次 verify，结果追加在下一节。
+
+## 含本审计的提交上的 verify
+
+- 提交 077f261（在 814ac64 之上只加本审计文件），同一台服务器：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`、`npm run deps` 依次全过。测试 1,619 项：通过 1,617，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：572 个模块，无违规。
+- 服务器上以本分支测试前缀命名的容器与网络已全部删除（其中一个容器与一张网络留自一次被超时终止的测试运行）；实验镜像与其余镜像未改动。
