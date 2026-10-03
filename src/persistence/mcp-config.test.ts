@@ -224,3 +224,9 @@ test("MCP 配置：畸形与语义不明一律响亮失败", () => {
     });
   }
 });
+
+test("MCP 配置：.mcp.json 校验失败时报错指出出错的位置（instancePath），不是一律写成 /", () => {
+  withFiles({ dotMcp: JSON.stringify({ mcpServers: { a: { args: ["no-command"] } } }) }, (root) => {
+    assert.throws(() => loadMcpConfig(root), /\.mcp\.json 校验失败：.*\/mcpServers\/a/);
+  });
+});

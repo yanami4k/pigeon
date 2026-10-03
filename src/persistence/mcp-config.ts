@@ -4,6 +4,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Value } from "typebox/value";
 import { type DotMcpJson, DotMcpJsonSchema } from "../state/mcp-config.ts";
+import { schemaProblems } from "../state/settings.ts";
 
 export class McpConfigError extends Error {}
 
@@ -20,12 +21,8 @@ export function readDotMcpJson(path: string): DotMcpJson | undefined {
     );
   }
   if (!Value.Check(DotMcpJsonSchema, raw)) {
-    const problems = [...Value.Errors(DotMcpJsonSchema, raw)]
-      .map((failure) => {
-        const where = "path" in failure ? failure.path : "/";
-        return `${where === "" ? "/" : where}：${failure.message}`;
-      })
-      .join("；");
+    // 出错位置取 typebox 的 instancePath，与设置文件的校验报错同一写法
+    const problems = schemaProblems(DotMcpJsonSchema, raw, "").join("；");
     throw new McpConfigError(`.mcp.json 校验失败：${path}：${problems}`);
   }
   return raw as DotMcpJson;
