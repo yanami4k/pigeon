@@ -23,7 +23,7 @@ import {
   parseLaunchFlags,
   resolveStreamFnSpec,
   VALUELESS_FLAGS,
-  webToolsEnabled,
+  webToolsOptionOf,
 } from "../application/launch-flags.ts";
 import { LOOP_GUARD_TEXTS } from "../application/loop-guard.ts";
 import { MIGRATE_CONFIG_USAGE, runMigrateConfig } from "../application/migrate-config.ts";
@@ -52,7 +52,6 @@ import {
   type TrustChoice,
   trustPromptText,
 } from "../application/session-settings.ts";
-import { resolveWebTools } from "../application/web-tools.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
@@ -85,12 +84,7 @@ import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { pigeonRel } from "../state/paths.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
-import {
-  loopGuardSettingsOf,
-  type SettingsSnapshot,
-  webSectionOf,
-  withHooksDisabled,
-} from "../state/settings.ts";
+import { loopGuardSettingsOf, withHooksDisabled } from "../state/settings.ts";
 import { EDIT_MODES, type EditMode, isEditMode } from "../tools/edit-mode.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
@@ -278,7 +272,7 @@ async function resumeMain(argv: string[]): Promise<void> {
     }
   }
   const usage =
-    "用法：pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>] [--no-hooks]";
+    "用法：pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>] [--no-hooks] [--no-web]";
   if (sessionIdArg === undefined) {
     throw new Error(usage);
   }
@@ -328,7 +322,7 @@ async function resumeMain(argv: string[]): Promise<void> {
           flags,
           resume: true,
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-          ...webToolsOption(flags, settings),
+          ...webToolsOptionOf(flags, settings),
           // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
           memoryWrite: lineMemoryWrite(write),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
@@ -376,7 +370,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-web] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置）";
   let task: string | undefined;
   let json = false;
@@ -473,7 +467,7 @@ async function runMain(argv: string[]): Promise<void> {
     // 决策 294 B1：任务清单按编排配置（缺省开）
     taskList: orchestration.taskList,
     // 决策 287–291：联网工具缺省给出，--sandbox-network off 不给
-    ...webToolsOption(flags, settings),
+    ...webToolsOptionOf(flags, settings),
     loopGuard,
   };
   // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
@@ -1153,7 +1147,7 @@ async function lineMain(argv: string[]): Promise<void> {
       streamFn,
       flags,
       ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-      ...webToolsOption(flags, settings),
+      ...webToolsOptionOf(flags, settings),
       // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
       memoryWrite: lineMemoryWrite(write),
       // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
@@ -1212,19 +1206,9 @@ export const TOP_LEVEL_HELP = [
 
 // 命令行对话与续跑接受的启动参数
 const SESSION_FLAGS_HINT =
-  "--yolo / --no-persist-thinking / --no-pushed-memory / --no-hooks（本次运行不接钩子）/ --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
+  "--yolo / --no-persist-thinking / --no-pushed-memory / --no-hooks（本次运行不接钩子）/ --no-web（本次运行不给联网工具）/ --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
 
 // 决策 237：沙箱的提示行
-// 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败
-function webToolsOption(
-  flags: LaunchFlags,
-  settings: SettingsSnapshot
-): { webTools?: ReturnType<typeof resolveWebTools> } {
-  return webToolsEnabled(flags)
-    ? { webTools: resolveWebTools({ config: webSectionOf(settings) }) }
-    : {};
-}
-
 // 决策 326 ③：命令行对话的行内问答确认会执行命令的配置（输入结束按退出处理）
 function lineTrustAsker(
   ask: (prompt: string) => Promise<string | null>,

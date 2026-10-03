@@ -12,7 +12,10 @@ import { isThinkingLevel, THINKING_LEVELS, type ThinkingLevel } from "../state/r
 import {
   orchestrationSettingsOf as orchestrationSectionOf,
   type SettingsSnapshot,
+  webSectionOf,
 } from "../state/settings.ts";
+import type { WebSection } from "../state/web-config.ts";
+import { resolveWebTools, type WebToolsConfig } from "./web-tools.ts";
 
 // 三个入口共用的模型占位缺省（决策 067）
 export const DEFAULT_MODEL_PLACEHOLDER = { provider: "custom", modelId: "custom" } as const;
@@ -24,6 +27,7 @@ export const VALUELESS_FLAGS = new Set([
   "--no-pushed-memory",
   "--no-spawn-workers",
   "--no-hooks",
+  "--no-web",
   "--sandbox",
   "--sandbox-from-head",
 ]);
@@ -50,6 +54,8 @@ export interface LaunchFlags {
   yolo: boolean;
   // 决策 324：--no-hooks 只对本次运行停用全部钩子（清空清单并置 disableAllHooks）；各入口一律接受
   noHooks: boolean;
+  // 决策 346：--no-web 只对本次运行不给联网工具（web_search、web_fetch 不注册，系统提示不带联网那句）；各入口一律接受
+  noWeb: boolean;
   provider: string;
   modelId: string;
   // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
@@ -112,6 +118,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     root: options.cwd ?? process.cwd(),
     yolo: false,
     noHooks: false,
+    noWeb: false,
     provider: DEFAULT_MODEL_PLACEHOLDER.provider,
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
@@ -134,6 +141,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       flags.yolo = true;
     } else if (flag === "--no-hooks") {
       flags.noHooks = true;
+    } else if (flag === "--no-web") {
+      flags.noWeb = true;
     } else if (flag === "--sandbox" && options.sandbox === true) {
       sandbox = true;
     } else if (flag === "--sandbox-from-head" && options.sandbox === true) {
@@ -238,10 +247,29 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
   return flags;
 }
 
-// 联网工具给不给（决策 291）：沙箱开断网档时不给——两件工具由宿主代为联网，不受容器断网约束，选断网就一并关掉；
-// 其余情形（不开沙箱、沙箱联网）都给
-export function webToolsEnabled(flags: Pick<LaunchFlags, "sandbox">): boolean {
+// 联网工具给不给（决策 291、346）：判定只在这一处。三者任一成立就不给——
+// 本次运行带 --no-web；设置的 web.enabled 为 false（三层按标量覆盖，缺省 true）；沙箱开断网档（两件工具由宿主代为联网，
+// 不受容器断网约束，选断网就一并关掉）。其余情形都给
+export function webToolsEnabled(
+  flags: Pick<LaunchFlags, "sandbox" | "noWeb">,
+  web: WebSection | undefined
+): boolean {
+  if (flags.noWeb) return false;
+  if (web?.enabled === false) return false;
   return flags.sandbox?.network !== "off";
+}
+
+// 交给装配根的联网工具选项：给就按快照的 web 一节建出配置（配置畸形在此响亮失败），不给就不带 webTools。
+// 各入口启动与终端界面 /reload 后都经这里，按当时的设置快照重算；worker 照父运行面拿同一份
+export function webToolsOptionOf(
+  flags: Pick<LaunchFlags, "sandbox" | "noWeb">,
+  snapshot: SettingsSnapshot,
+  env?: Record<string, string | undefined>
+): { webTools?: WebToolsConfig } {
+  const web = webSectionOf(snapshot);
+  return webToolsEnabled(flags, web)
+    ? { webTools: resolveWebTools({ config: web, ...(env !== undefined ? { env } : {}) }) }
+    : {};
 }
 
 // 编排设定（决策 297–303）：设置快照的 orchestration 一节（缺失取缺省），启动参数给了的两项以参数为准

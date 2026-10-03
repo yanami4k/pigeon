@@ -28,7 +28,7 @@ import {
   orchestrationSettingsOf,
   parseLaunchFlags,
   resolveStreamFnSpec,
-  webToolsEnabled,
+  webToolsOptionOf,
 } from "../application/launch-flags.ts";
 import {
   editMemoryLayer,
@@ -71,7 +71,6 @@ import { bindSpawnWorkers } from "../application/spawn-worker-host.ts";
 import { takeWorkerChanges } from "../application/take-worker-tool.ts";
 import { renderTaskList } from "../application/task-list-tool.ts";
 import { closeTuiSession } from "../application/tui-exit.ts";
-import { resolveWebTools } from "../application/web-tools.ts";
 import type { WorkerNotices } from "../application/worker-notices.ts";
 import { createSessionWorkers } from "../application/workers.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
@@ -82,12 +81,7 @@ import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { tuiLogDirOf } from "../state/paths.ts";
-import {
-  loopGuardSettingsOf,
-  memoryLimitsOf,
-  webSectionOf,
-  withHooksDisabled,
-} from "../state/settings.ts";
+import { loopGuardSettingsOf, memoryLimitsOf, withHooksDisabled } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
 import { resolveStartTarget, takeContinueFlags } from "./continue-flags.ts";
 import { guardTuiAgent } from "./loop-guard-view.ts";
@@ -105,7 +99,7 @@ const WORKER_SHUTDOWN_GRACE_MS = 5000;
 // 参数解析与装配都在 application 层（决策 067）：启动参数在 launch-flags.ts（与 cli、headless 同一份、
 // 同一批缺省），会话运行面在 session-runtime.ts（作用域、grant 种子、MCP 启动、装配失败关 server）
 const USAGE =
-  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-hooks] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
+  "用法：pigeon [--yolo] [--no-persist-thinking] [--no-pushed-memory] [--no-hooks] [--no-web] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--history-limit <n>] [--root <dir>] --stream-fn <模块路径> " +
   "[--provider <名>] [--model <id>] [--thinking <档位>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
   "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--continue | --resume [sessionId]]（命令行对话用 pigeon --line；其余子命令见 pigeon --help）";
 
@@ -152,13 +146,9 @@ async function main(argv: string[]): Promise<void> {
   let orchestration = orchestrationSettingsOf(flags, settings);
   // 决策 308：打转检测——设置的 loopGuard 一节（缺失取缺省即开着）
   let loopGuard = loopGuardSettingsOf(settings);
-  // 决策 287–291：联网工具——沙箱断网档不给；配置畸形在此响亮失败
-  const webToolsFor = (snapshot: typeof settings) => {
-    const webTools = webToolsEnabled(flags)
-      ? resolveWebTools({ config: webSectionOf(snapshot) })
-      : undefined;
-    return webTools !== undefined ? { webTools } : {};
-  };
+  // 决策 287–291、346：联网工具——--no-web、web.enabled 为 false、沙箱断网档任一成立就不给；配置畸形在此响亮失败。
+  // /reload 换上新快照后经同一函数重算
+  const webToolsFor = (snapshot: typeof settings) => webToolsOptionOf(flags, snapshot);
   let webToolsOption = webToolsFor(settings);
   // 决策 286：启动时打开哪个会话（新会话，或 --continue / --resume <id> 直接续接）；会话不存在等在接管终端前报错
   const target = resolveStartTarget(workspaceRoot, continued.mode, flags.sandbox !== undefined);

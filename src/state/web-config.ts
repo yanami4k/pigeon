@@ -1,4 +1,5 @@
 // 联网工具的配置 schema（决策 288、289；决策 325 起为 settings.json 的 web 一节）。
+// enabled 是总开关（决策 346，缺省 true）。
 // search.backend 选搜索后端（缺省 deepseek：经 DeepSeek 的 Anthropic 接口请服务端搜索，用现有的 key）；智谱（zai）与
 // Tavily 的 key 只从环境变量读（ZAI_API_KEY、TAVILY_API_KEY），设置文件里没有任何 key 字段——写了即报错并给出应设的环境变量名
 // （决策 325：key 离开文件，模型读不到）。key 只在进程内持有，绝不打印、不落日志。fetch 段是抓取的上限（超时、字节数、
@@ -30,6 +31,8 @@ const Closed = { additionalProperties: false } as const;
 // 各后端的连接参数：key 一律取环境变量，这里只能改地址与模型名
 export const WebSectionSchema = Type.Object(
   {
+    // 决策 346：联网工具总开关（缺省 true）；false 时两件工具都不注册、系统提示不带联网那句。三层按标量覆盖
+    enabled: Type.Optional(Type.Boolean()),
     search: Type.Optional(
       Type.Object(
         {

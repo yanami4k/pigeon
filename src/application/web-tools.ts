@@ -1,7 +1,8 @@
 // 联网工具的装配（决策 287–291）：按设置快照的 web 一节与环境变量决定搜索后端并建出后端实例（key 只在实例的闭包里，
 // 不进配置对象、不打印）；抓取上限取配置或缺省；提炼器用本会话同一个模型接入（温度 0、不带工具、有输出上限），
 // 提炼请求的用量交回工具，由工具写进结果的 modelUsage 计入本会话花费。
-// 注册范围由各入口决定：交互入口与 pigeon run 缺省装上；--sandbox-network off 不装（291）；跑批器各条件不装（265 的先例）。
+// 注册范围由各入口决定：交互入口与 pigeon run 缺省装上；--no-web、设置 web.enabled 为 false、--sandbox-network off 任一成立
+// 不装（291、346，判定在 launch-flags 的 webToolsEnabled）；跑批器各条件不装（265 的先例）。
 import {
   completeWithoutTools,
   DEEPSEEK_ANTHROPIC_BASE_URL,
