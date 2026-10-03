@@ -32,6 +32,10 @@ import {
 } from "../state/orchestration-config.ts";
 import type { OutcomeLabel } from "../state/outcome-label.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import type {
+  RepetitionGuardSettings,
+  TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
 import type { BranchHeaderInput } from "../state/session-payloads.ts";
@@ -121,6 +125,9 @@ export interface HeadlessRunOptions {
   editMode?: EditMode;
   // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照；跑批器显式给出）
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   // M9：采样温度（缺省不设）；冻结进注入快照并随 Run 开始条目 落盘
   temperature?: number;
   // M9：任务源给的系统指令——追加进 system prompt 并随之冻结；任务说明（task）不受影响
@@ -259,6 +266,10 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.agentsMd !== undefined ? { agentsMd: options.agentsMd } : {}),
     ...(options.editMode !== undefined ? { editMode: options.editMode } : {}),
     ...(options.maxOutputTokens !== undefined ? { maxOutputTokens: options.maxOutputTokens } : {}),
+    ...(options.truncationContinuation !== undefined
+      ? { truncationContinuation: options.truncationContinuation }
+      : {}),
+    ...(options.repetitionGuard !== undefined ? { repetitionGuard: options.repetitionGuard } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
     ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),

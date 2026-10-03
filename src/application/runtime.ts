@@ -64,6 +64,10 @@ import type { HookEventName } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import type {
+  RepetitionGuardSettings,
+  TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import {
@@ -71,7 +75,9 @@ import {
   configGrantRulesOf,
   emptySettingsSnapshot,
   memoryLimitsOf,
+  repetitionGuardOf,
   type SettingsSnapshot,
+  truncationContinuationOf,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -194,6 +200,9 @@ export interface RuntimeDeps {
   // 决策 063、347：单轮输出上限——配置了才在装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段；未配置不包装、
   // 不写（表示跟模型：按模型定义的上限发，由 provider 按剩余上下文收窄）
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测的生效设定——缺省取设置快照（不给的项取缺省：都开、omp 档、掐断）；跑批器显式给出
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   // M9：任务源给的系统指令（如外部基准的工作方式指令）——原样追加为 system prompt 的一段，随整段 system prompt
   // 冻结进注入快照（Run 开始条目记系统提示全文）。只说工作方式，不含任务内容；缺省不加
   taskDirective?: string;
@@ -357,6 +366,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = sessionsDirOf(governanceRoot);
   // 决策 325：设置快照（会话开始时已读好、校验过）；放权规则取三层并集
   const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
+  const continuation = deps.truncationContinuation ?? truncationContinuationOf(settings);
+  const repetition = deps.repetitionGuard ?? repetitionGuardOf(settings);
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -851,6 +862,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
     // 决策 264：注册了派 worker 工具时，同一次回复里的多个派出并行执行
     ...(spawnSlot !== undefined ? { parallelTools: true } : {}),
+    // 决策 367：撞上限续跑与流式重复检测（关掉的不传）
+    ...(continuation.enabled ? { truncationContinuation: continuation } : {}),
+    ...(repetition.enabled ? { repetitionGuard: repetition } : {}),
     // 决策 324：工具结束后的钩子（PostToolUse / PostToolUseFailure）——替换结果文本或把理由与上下文补进结果
     toolHooks: {
       toolFinished: async (input) => {

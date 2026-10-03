@@ -1,6 +1,6 @@
 # 配置与状态目录
 
-本页说明 Pigeon 的设置文件、程序状态目录、记忆与人写的说明、迁移命令与配置相关的安全防线（决策 325、326、328–332、340、341）。
+本页说明 Pigeon 的设置文件、程序状态目录、记忆与人写的说明、迁移命令与配置相关的安全防线（决策 325、326、328–332、340、341、367）。
 
 ## 三层设置
 
@@ -29,6 +29,8 @@
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
 | `memory` | 学到的记忆的两层上限：`projectLimitChars`、`userLimitChars`，缺省各 4,000 字符 | — |
+| `truncationContinuation` | 撞上限续跑的开关与两个次数上限（见下文"撞上限续跑与流式重复检测"） | 新节 |
+| `repetitionGuard` | 流式重复检测的开关、模式、档位与各项参数（同上） | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -76,6 +78,51 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 不配置时 Pigeon 不另设单轮输出上限：按模型定义的上限发，由 provider 按剩余上下文收窄。自带的 DeepSeek 接入按官方上限 393,216 发。"模型定义没有上限（`maxTokens` 缺失或不为正）时发 32,000"只适用于跑批网关的接入或第三方模块自构的模型对象，不涉及自带的 DeepSeek。启动参数 `--max-output-tokens <n>` 设了上限时，取它与模型上限中较小的那个；设了的值记进注入快照与运行开始条目的 model 段，没设的不记（表示跟模型），worker 照派出它的运行面。
 
 经 `--stream-fn` / `PIGEON_STREAM_FN` 接入的第三方模块，交给 provider 的模型对象须带 `maxTokens`（模型的单次输出上限）：Pigeon 交给模块的只是身份占位，看不到模块里的真实模型对象，不配置上限时就按模块自己的模型对象发。
+
+## 撞上限续跑与流式重复检测
+
+两项都缺省开启，各入口（终端界面、命令行对话与续跑、`pigeon run`、worker、`/fork`）行为一致；worker 照派出它的会话的设置快照。
+
+**续跑**（`truncationContinuation`）：一条回复因输出上限截断、且没有工具调用时，本次运行不收尾：从发给模型的上下文里去掉这条回复，追加一条提示（上条回复被截断、未执行任何工具，不要重复前文，简短说明下一步并直接发出一个工具调用），然后接着跑。截断的回复照留在会话文件里，但移出主分支（会话树的叶子退回它之前），续跑（`pigeon resume`、`/resume`、worker 续做）与分叉按主分支还原的上下文同样不含它；主分支上它的位置是一条续跑记录（`pigeon.continuation`：截断的来由、本次运行第几次、连续第几次），其后是那条提示。截断里带工具调用的照旧：工具调用判为未执行、提示重发。计数与打转检测分开。
+
+| 键 | 缺省 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 开关 |
+| `maxConsecutive` | `2` | 连续续跑的上限；中间有一条回复没触发续跑即清零 |
+| `maxPerRun` | `5` | 一次运行（一次 `pigeon run`、终端界面里的一次提问）合计续跑的上限 |
+
+用尽即照原样收尾（以截断的回复结束，终态完成、停止原因 length）。
+
+**流式重复检测**（`repetitionGuard`）：包在模型调用外层，与服务商无关；只看正文与思考，不看工具参数。判据两种：
+
+- 逐字周期：每收到 `checkIntervalChars` 个新字符，看最近 `windowChars` 个字符的末尾是否由同一单元首尾相接重复构成。单元不超过 `maxPeriodChars`，须含文字（纯标点、数字、空白不算）；单元不超过 `shortPeriodChars` 的要重复 `shortMinRepeats` 遍且覆盖 `shortMinRepeatedChars` 字，更长的要重复 `minRepeats` 遍且覆盖 `minRepeatedChars` 字。
+- 段落相似度：按空行切段（没有空行时到 `segmentMaxChars` 强制切），规范化后短于 `segmentMinChars` 的段不计；每段与最近 `segmentWindow` 段比较词三元组的相似度（中日韩文字逐字成词），达 `similarity` 算近似；攒满 `minSegments` 段之后，近似段（含本段）达 `minCluster` 即命中。
+
+`mode` 为 `abort`（掐断，缺省）时，命中即中止本条回复，截至命中处的内容以停止原因 length 收尾、交给上面的续跑；为 `log`（只记录）时照常转发，本条回复里同一通道的同一判据只记第一次。每次命中写一条会话记录（`pigeon.repetition`：判据、通道、周期长度、重复次数、起点、触发位置与模式；位置是本条回复里该通道的字符偏移，字符按 UTF-16 码元计）。
+
+`preset` 选参数的底子，节里单独给的参数覆盖它：
+
+| 参数 | `omp`（缺省） | `wide`（试跑用） |
+| --- | --- | --- |
+| `checkIntervalChars` | 128 | 128 |
+| `windowChars` | 4096 | 49152 |
+| `maxPeriodChars` | 1024 | 16384 |
+| `minRepeats` / `minRepeatedChars` | 3 / 1024 | 3 / 2000 |
+| `shortPeriodChars` / `shortMinRepeats` / `shortMinRepeatedChars` | 60 / 4 / 180 | 0（不分短周期）/ 4 / 180 |
+| `similarity` | 0.8 | 0.8 |
+| `segmentMaxChars` / `segmentMinChars` | 700 / 60 | 700 / 60 |
+| `segmentWindow` / `minSegments` / `minCluster` | 16 / 8 / 4 | 16 / 8 / 4 |
+
+`omp` 档照 oh-my-pi 的同名检测；`wide` 档用于"只记录"的试跑，看命中与误报再定缺省。`windowChars` 须不小于 `maxPeriodChars × minRepeats`，否则启动时报错。
+
+```json
+{
+  "truncationContinuation": { "maxPerRun": 3 },
+  "repetitionGuard": { "mode": "log", "preset": "wide" }
+}
+```
+
+跑批器（`pigeon eval stream`）不读设置文件，用参数给出，只对 Pigeon 条件生效：`--continuation on|off`、`--continuation-max-consecutive <n>`、`--continuation-max-per-run <n>`、`--repetition-guard on|off`、`--repetition-mode abort|log`、`--repetition-preset omp|wide`，缺省同上。实际生效值（检测含全部参数）记进身份头与结果行的 Pigeon 一段；加这两项之前写下的身份头没有它们，续跑即判为不同条件。
 
 ## key 走环境变量
 

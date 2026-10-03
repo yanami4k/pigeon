@@ -38,6 +38,10 @@ import type { SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import type {
+  RepetitionGuardSettings,
+  TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
   BranchHeaderInput,
@@ -258,6 +262,9 @@ interface RuntimeSurface {
   editMode?: EditMode;
   // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照；worker 用主会话的快照）——目前只有跑批器显式给出
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   // M9：采样温度（缺省不设）——目前只有无父会话的运行面（headless 与 Eval）会给；worker 不继承
   temperature?: number;
   // M9：任务源给的系统指令（追加进 system prompt 并随之冻结）；同上，只有无父会话的运行面会给
@@ -525,6 +532,9 @@ export interface DetachedRuntimeRequest {
   agentsMd?: boolean;
   editMode?: EditMode;
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照）
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   temperature?: number;
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）
@@ -588,6 +598,10 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.agentsMd !== undefined ? { agentsMd: surface.agentsMd } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
+    ...(surface.truncationContinuation !== undefined
+      ? { truncationContinuation: surface.truncationContinuation }
+      : {}),
+    ...(surface.repetitionGuard !== undefined ? { repetitionGuard: surface.repetitionGuard } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
     ...(surface.sessionSearch !== undefined ? { sessionSearch: surface.sessionSearch } : {}),
