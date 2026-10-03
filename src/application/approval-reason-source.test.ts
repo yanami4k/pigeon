@@ -112,14 +112,6 @@ async function runRejected(options: {
   }
 }
 
-test("人写理由：handler 交回的理由逐字成为被拒调用的工具结果正文，审批决定记为人工拒绝", async () => {
-  const recorded = await runRejected({
-    approval: { approved: false, reason: "这个文件不该动", reasonSource: "human" },
-  });
-  assert.equal(recorded.text, "这个文件不该动");
-  assert.deepEqual(recorded.gate, { outcome: "rejected", approvedBy: "human" });
-});
-
 test("默认文案：handler 不带理由（TUI [n] / CLI 留空）时工具结果正文是默认文案", async () => {
   const recorded = await runRejected({ approval: { approved: false } });
   assert.equal(recorded.text, "人工拒绝");

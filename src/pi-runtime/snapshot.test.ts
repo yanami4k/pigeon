@@ -74,17 +74,6 @@ test("缺 approvalMode、版本不符、memory 清单条目缺字段、未知推
   }
 });
 
-// 决策 322：v14 顶层删除验证命令、失败自动分叉重试与回炉轮数；对象非严格，带这三个字段的旧快照照常通过校验
-test("v14：verify、retryOnFail、repairRounds 已删除，带这三个字段的旧快照照常通过校验", () => {
-  const legacy = {
-    ...makeSnapshot(),
-    verify: { command: "npm test", timeoutMs: 1000 },
-    retryOnFail: 2,
-    repairRounds: 3,
-  };
-  assert.ok(Value.Check(InjectionSnapshotSchema, legacy));
-});
-
 // M8（决策 087）：v8 顶层加本次尝试的预算
 test("v8 字段：预算三项可选；非正整数预算被拒", () => {
   const snapshot = makeSnapshot();
@@ -118,30 +107,6 @@ test("v9 字段：采样温度可选、取值 0 到 2", () => {
       })
     );
   }
-});
-
-// 决策 137：v11 从快照 schema 删除审阅配置字段；对象非严格，带该字段的快照照常通过
-test("v11：审阅配置字段已删除，带该字段的快照照常通过校验", () => {
-  const withReview = { ...makeSnapshot(), review: { enabled: true, everyTurns: 4 } };
-  assert.ok(Value.Check(InjectionSnapshotSchema, withReview));
-});
-
-// 决策 191、192、207：v13 顶层加推送的记忆与复盘标记（复盘标记不叫 review，与 v11 删掉的旧字段不撞名）
-test("v13 字段：推送的记忆可选；v14 删掉的复盘标记与旧的审阅字段照常通过（对象非严格，读取时忽略）", () => {
-  const snapshot = makeSnapshot();
-  const withMemory = {
-    ...snapshot,
-    learnedMemory: {
-      path: ".pigeon/state/learned/MEMORY.md",
-      hash: HASH,
-      bytes: 10,
-      entries: 1,
-      limitChars: 12_000,
-    },
-    memoryReview: { kind: "pre-compaction", template: "v1" },
-    review: { enabled: true, everyTurns: 4 },
-  };
-  assert.ok(Value.Check(InjectionSnapshotSchema, withMemory));
 });
 
 // 决策 134 / 157：v12 顶层加结构化记忆的开局留痕

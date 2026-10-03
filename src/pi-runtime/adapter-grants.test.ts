@@ -1,7 +1,8 @@
 // M4 S6：Grant 体系治理接线测试——fake streamFn 驱动真实 pi-agent-core Agent，
-// 验证排律（deny → 会话 grant → 配置 grant → yolo → read 自动 → prompt）、approvedBy
-// 扩展（human:grant / policy:config + grantRef 回指）、撤销立即生效、崩溃恢复还原（授权条目落会话存储）、
-// 熔断独立性与读调用的审批闸标记八条不变式。
+// 验证排律（deny → 会话 grant → 配置 grant → yolo → read 自动 → prompt）中与 grant 相关的五条不变式：
+// deny 压过 grant、approvedBy 扩展（human:grant / policy:config + grantRef 回指）、撤销立即生效、
+// 崩溃恢复还原（授权条目落会话存储）；另测目录限定 grant 与会话 grant 优先于配置规则。
+// 畸形配置、熔断、读调用自动放行见 grants-config.test.ts、adapter-tools.test.ts。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,7 +24,6 @@ import {
 } from "../state/session-judge.ts";
 import { createEditFileTool, type EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
-import { createReadFileTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
 import { createFakeStreamFn } from "./fixtures.ts";
@@ -88,14 +88,6 @@ function makeSnapshot(
 
 function makeRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
-  registry.register({
-    name: "read_file",
-    description: "读取工作区内文件内容",
-    parameters: Type.Object({ path: Type.String() }),
-    tier: "read",
-    pathConfinement: { kind: "workspace" },
-    executionMode: "parallel",
-  });
   registry.register({
     name: "edit_file",
     description: "hashline 锚定稀疏编辑",
@@ -388,89 +380,6 @@ test("不变式⑤崩溃恢复：授权建立条目落会话存储 → 冷读还
     });
     await adapter.dispose();
     await second.close();
-  } finally {
-    cleanup();
-  }
-});
-
-test("不变式⑥ 畸形的放权配置响亮失败（治理配置 fail-closed，不静默忽略）", () => {
-  const { root, cleanup } = makeWorkspace();
-  try {
-    mkdirSync(join(root, ".pigeon"), { recursive: true });
-    writeFileSync(join(root, ".pigeon", "settings.local.json"), "{ 坏", "utf8");
-    assert.throws(() => loadGrantConfig(root), /不是合法 JSON/);
-  } finally {
-    cleanup();
-  }
-});
-
-test("不变式⑦熔断独立于授权：grant 生效期间幽灵工具名连击照样落闸 abort", async () => {
-  const original = "alpha\n";
-  const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  try {
-    const store = new SessionGrantStore({ workspaceRoot: root });
-    store.create({ tool: "edit_file", firstCall: { toolCallId: "tc-seed", args: {} } });
-    const phantomReplies = Array.from({ length: 4 }, () => ({
-      text: "",
-      toolCalls: [{ name: "delete_everything", args: {} }],
-    }));
-    const adapter = new PiRuntimeAdapter({
-      snapshot: makeSnapshot({ allow: ["edit_file"] }),
-      streamFn: createFakeStreamFn({ replies: [...phantomReplies, { text: "放弃" }] }),
-      governance: createToolGovernance({
-        registry: makeRegistry(),
-        sessionGrants: store,
-        workspaceRoot: root,
-      }),
-      tools: [createEditFileTool(root)],
-    });
-    const result = await adapter.run("胡闹");
-    // 事件级熔断（上游拦截连击）与 grant 授权无关——照样落闸
-    assert.equal(result.status, "aborted");
-    assert.equal(result.failure?.category, "cancelled");
-    assert.equal(result.failure?.breaker, true);
-    const breaker = adapter.events().find((event) => event.kind === "run.ended");
-    assert.ok(breaker);
-    await adapter.dispose();
-  } finally {
-    cleanup();
-  }
-});
-
-test("不变式⑧读调用：read_file 自动放行（policy:auto），RunResult 与会话存储里的审批闸标记一致", async () => {
-  const { root, cleanup } = makeWorkspace({ "a.ts": "one\ntwo\n" });
-  const sessionId = asSessionId("sess_01J5Z7K8W9ABCDEFGHJKMNPRTV");
-  try {
-    const sessionStore = openStore(root, sessionId);
-    const adapter = new PiRuntimeAdapter({
-      snapshot: makeSnapshot({ allow: ["read_file", "edit_file"] }),
-      streamFn: createFakeStreamFn({
-        replies: [
-          { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
-          { text: "完" },
-        ],
-      }),
-      governance: createToolGovernance({
-        registry: makeRegistry(),
-      }),
-      tools: [createReadFileTool(root)],
-      sessionStore,
-      sessionId,
-    });
-    const result = await adapter.run("读文件");
-    assert.equal(result.status, "completed");
-    assert.equal(result.toolExecutions.length, 1);
-    assert.equal(result.toolExecutions[0]?.toolName, "read_file");
-    assert.equal(result.toolExecutions[0]?.decision?.approvedBy, "policy:auto");
-    await adapter.dispose();
-    await sessionStore.close();
-
-    // 会话存储：恰一条 read_file 工具结果，标记为自动放行、无错误归类；读调用不产生授权条目
-    const view = readStore(root, sessionId);
-    assert.deepEqual(marksOf(view, "read_file"), [
-      { gate: { outcome: "approved", approvedBy: "policy:auto" } },
-    ]);
-    assert.equal(view.grants.length, 0);
   } finally {
     cleanup();
   }

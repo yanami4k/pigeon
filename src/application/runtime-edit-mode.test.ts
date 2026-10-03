@@ -73,13 +73,6 @@ async function advertised(editMode: EditMode | undefined) {
   }
 }
 
-test("两种编辑模式的 system prompt 都包含截断后拆小引导（决策 063）", async () => {
-  for (const editMode of ["hashline", "replace"] as const) {
-    const { systemPrompt } = await advertised(editMode);
-    assert.ok(systemPrompt?.includes(TRUNCATION_GUIDANCE), `${editMode}：${systemPrompt}`);
-  }
-});
-
 test("编辑模式显式 hashline：edit_file 与 read_file 的描述和参数与决策 061 之前逐字一致；system prompt 的 hashline 编辑句不变并追加截断引导", async () => {
   const { systemPrompt, edit, read } = await advertised("hashline");
   assert.equal(systemPrompt, HASHLINE_PROMPT);
@@ -104,4 +97,6 @@ test("编辑模式缺省为 replace：不传编辑模式时装配出 replace 版
   assert.match(read?.description ?? "", /不要带行号前缀/);
   assert.match(systemPrompt ?? "", /old_string/);
   assert.doesNotMatch(systemPrompt ?? "", /N#TAG/);
+  // 截断后拆小引导（决策 063）：replace 模式同样追加（hashline 模式由上一条的全文比对覆盖）
+  assert.ok(systemPrompt?.includes(TRUNCATION_GUIDANCE), `replace：${systemPrompt}`);
 });

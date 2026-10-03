@@ -48,6 +48,15 @@ test("委派策略：父策略齐全时按角色给默认工具，审批模式�
     WEB_SEARCH_TOOL,
     WEB_FETCH_TOOL,
   ]);
+  // tester 只在父策略允许时拿到 run_command（决策 048），子集构造不因角色扩权
+  const withExec = {
+    allow: ["read_file", "edit_file", "run_command"],
+    deny: [],
+    approvalMode: "prompt" as const,
+  };
+  const tester = deriveWorkerPolicy(withExec, "tester");
+  assert.deepEqual(tester.allow, ["read_file", "run_command"]);
+  assert.doesNotThrow(() => assertPolicySubset(tester, withExec));
   // 父策略里没有联网工具（沙箱断网档、跑批器各条件）时角色也不带
   const offline = { allow: ["read_file", "edit_file"], deny: [], approvalMode: "prompt" as const };
   assert.deepEqual(deriveWorkerPolicy(offline, "implementer").allow, ["read_file", "edit_file"]);

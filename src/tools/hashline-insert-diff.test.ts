@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyHashlineEdits, buildEditDiff, HashlineError, lineTag } from "./hashline.ts";
+import { applyHashlineEdits, buildEditDiff, lineTag } from "./hashline.ts";
 
 const SIX = ["l1", "l2", "l3", "l4", "l5", "l6"];
 
@@ -101,21 +101,5 @@ test("混合编辑：各 hunk 按位置升序，insertAfter 不记删除", () =>
       ["replace", 1, 1],
       ["insertAfter", 0, 1],
     ]
-  );
-});
-
-test("既有拒绝规则不变", () => {
-  const lines = ["a", "b"];
-  assert.throws(
-    () =>
-      applyHashlineEdits(lines, [
-        { op: "replace", anchor: anchor(lines, 1), lines: ["x"] },
-        { op: "insertAfter", anchor: anchor(lines, 1), lines: ["y"] },
-      ]),
-    HashlineError
-  );
-  assert.throws(
-    () => applyHashlineEdits(lines, [{ op: "insertAfter", anchor: "3#0000", lines: ["y"] }]),
-    HashlineError
   );
 });

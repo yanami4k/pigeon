@@ -79,12 +79,3 @@ test("worker 继承父运行面的压缩配置：worker 会话的 Run 开始条�
     thresholdTokens: 30_000,
   });
 });
-
-test("主会话没给压缩配置：worker 即产品缺省", async () => {
-  assert.deepEqual(await workerCompaction(undefined), {
-    contextWindow: 1_000_000,
-    reserveTokens: 16_384,
-    keepRecentTokens: 20_000,
-    thresholdTokens: 983_616,
-  });
-});

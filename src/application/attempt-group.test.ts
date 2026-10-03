@@ -140,32 +140,6 @@ test("两份各改各的：共享任务标识、各份在自己的工作树里�
       }
       assert.equal(outcome.result?.summary, "改好了");
     }
-    assert.deepEqual(host.runs, [], "引用型记录不凭空造 Run");
-  } finally {
-    cleanup();
-  }
-});
-
-test("全做完：各份的结果随收尾全部交回", async () => {
-  const { repo: dir, home, cleanup } = repo();
-  try {
-    const { hostId, hostStore, orchestrator } = setup(dir, home, {});
-    const result = await runAttemptGroup({
-      orchestrator,
-      role: "implementer",
-      task: "把 a.txt 的内容改成 new",
-      count: 2,
-    });
-    await hostStore.close();
-    assert.deepEqual(
-      result.outcomes.map((outcome) => outcome.status),
-      ["completed", "completed"]
-    );
-    assert.deepEqual(
-      result.outcomes.map((outcome) => outcome.result?.summary),
-      ["改好了", "改好了"]
-    );
-    const host = hostView(dir, hostId);
     assert.deepEqual(
       host.workers
         .filter((record) => record.data.event === "settled")
@@ -174,6 +148,7 @@ test("全做完：各份的结果随收尾全部交回", async () => {
       result.outcomes.map((outcome) => outcome.sessionId).sort(),
       "各份的收尾记录都写进宿主会话"
     );
+    assert.deepEqual(host.runs, [], "引用型记录不凭空造 Run");
   } finally {
     cleanup();
   }

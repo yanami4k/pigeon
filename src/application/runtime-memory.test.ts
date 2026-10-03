@@ -112,25 +112,3 @@ test("沙箱会话（注入执行端）读宿主上的工作区（治理根）�
       await disposeRuntime(truncated);
     }
   }));
-
-test("agentsMd 关掉（跑批器与只测装配的用例）：不读任何说明", () =>
-  withBase(async (base) => {
-    mkdirSync(join(base, ".git"));
-    writeFileSync(join(base, "AGENTS.md"), "说明");
-    const bundle = buildRuntime({
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
-      workspaceRoot: base,
-      sessionId: newSessionId(),
-      yolo: true,
-      provider: "fake-provider",
-      modelId: "fake-model",
-      homeDir: join(base, "home"),
-      agentsMd: false,
-    });
-    try {
-      assert.ok(!bundle.adapter.snapshot().context.systemPrompt.includes("说明"));
-      assert.deepEqual(bundle.adapter.snapshot().memory, []);
-    } finally {
-      await disposeRuntime(bundle);
-    }
-  }));

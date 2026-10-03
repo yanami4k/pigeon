@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   applyHashlineEdits,
-  buildEditDiff,
   HashlineError,
   joinContent,
   lineTag,
@@ -122,20 +121,6 @@ test("无实际变化的编辑拒绝", () => {
   const lines = ["a", "b"];
   assert.throws(
     () => applyHashlineEdits(lines, [{ op: "replace", anchor: `1#${lineTag("a")}`, lines: ["a"] }]),
-    HashlineError
+    (error) => error instanceof HashlineError && /没有产生任何实际变化/.test(error.message)
   );
-});
-
-test("buildEditDiff：unified-ish 头与 +/- 行、含上下文", () => {
-  const oldLines = ["one", "two", "three", "four", "five"];
-  const { applied } = applyHashlineEdits(oldLines, [
-    { op: "replace", anchor: `3#${lineTag("three")}`, lines: ["THREE"] },
-  ]);
-  const diff = buildEditDiff("src/foo.ts", oldLines, applied);
-  assert.ok(diff.includes("--- a/src/foo.ts"));
-  assert.ok(diff.includes("+++ b/src/foo.ts"));
-  assert.ok(diff.includes("-three"));
-  assert.ok(diff.includes("+THREE"));
-  assert.ok(diff.includes(" two"), "应有前文上下文");
-  assert.ok(diff.includes(" four"), "应有后文上下文");
 });

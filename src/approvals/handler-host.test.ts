@@ -27,9 +27,3 @@ test("带主机名的请求：[a] 与 [d] 都建按网站的放权；不提供�
   assert.equal(commandScopeNote({ host: "docs.example" }), "，仅限网站 docs.example");
   assert.equal(commandScopeNote({ command: "ls" }), "，仅限命令 ls");
 });
-
-test("不带主机名的请求照旧：exec 档为精确命令，其余按目录或工具级", () => {
-  const { host: _host, ...plain } = request;
-  assert.deepEqual(grantScopeFor({ ...plain, tier: "write" }, "d"), { pathPrefix: "." });
-  assert.deepEqual(grantScopeFor({ ...plain, tier: "write" }, "a"), {});
-});

@@ -127,6 +127,8 @@ test("web_search 免审批；web_fetch 第一次访问某网站问人，[a] 以�
   assert.doesNotMatch(prompts[0] ?? "", /\[d\]/);
   assert.match(prompts[1] ?? "", /\[a\] 以后都允许访问 other\.example/);
   assert.match(outputs.join(""), /网站：docs\.example/);
+  // 提示里工具、网站、参数三行相连
+  assert.match(outputs.join(""), /工具：web_fetch\n网站：docs\.example\n参数：/);
   assert.match(
     outputs.join(""),
     /已创建会话放权 grant_[0-9A-Z]+（web_fetch，仅限网站 docs\.example）/
@@ -138,6 +140,11 @@ test("web_search 免审批；web_fetch 第一次访问某网站问人，[a] 以�
       ["web_fetch", "docs.example", 1],
       ["web_fetch", "other.example", 0],
     ]
+  );
+  // 按网站的放权不带目录限定
+  assert.deepEqual(
+    grants.map((grant) => grant.pathPrefix),
+    [undefined, undefined]
   );
   // 第二次访问 docs.example 的放行回指第一条放权
   assert.deepEqual(result.toolExecutions[2]?.decision?.grantRef, {

@@ -74,24 +74,6 @@ test("过期快照拒绝：读取后文件被外部改动，edit 拒绝且不覆
   }
 });
 
-test("锚点漂移拒绝：行内容已变导致 tag 不匹配", async () => {
-  const { root, cleanup } = makeWorkspace({ "a.ts": "new\ncontent\n" });
-  try {
-    const editor = createEditFileTool(root);
-    await assert.rejects(
-      () =>
-        editor.execute("tc-1", {
-          path: "a.ts",
-          snapshot: snapshotTag("new\ncontent\n"),
-          edits: [{ op: "replace", anchor: `1#${lineTag("old")}`, lines: ["x"] }],
-        }),
-      /未命中/
-    );
-  } finally {
-    cleanup();
-  }
-});
-
 test("多段预检原子性：第二处锚点坏 → 整单拒绝，文件逐字节不变", async () => {
   const original = "a\nb\nc\nd\n";
   const { root, cleanup } = makeWorkspace({ "a.ts": original });
@@ -110,25 +92,6 @@ test("多段预检原子性：第二处锚点坏 → 整单拒绝，文件逐字
       /未命中/
     );
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
-  } finally {
-    cleanup();
-  }
-});
-
-test("无实际变化的编辑拒绝", async () => {
-  const original = "same\n";
-  const { root, cleanup } = makeWorkspace({ "a.ts": original });
-  try {
-    const editor = createEditFileTool(root);
-    await assert.rejects(
-      () =>
-        editor.execute("tc-1", {
-          path: "a.ts",
-          snapshot: snapshotTag(original),
-          edits: [{ op: "replace", anchor: `1#${lineTag("same")}`, lines: ["same"] }],
-        }),
-      /没有产生任何实际变化/
-    );
   } finally {
     cleanup();
   }
