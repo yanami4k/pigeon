@@ -1893,3 +1893,113 @@ test("工具定义的 type：请求体不是合法 JSON、不是对象或 tools 
     }
   );
 });
+
+// 作业地址（外部 agent 条件的网络档一并收紧）：作业地址带每作业的随机串，登记过才转发，而且只转发 POST …/v1/messages；
+// 其余一律 404、不发往上游。请求体原样转发，只替换 key 头
+test("网关：未登记的作业、错的随机串、非 messages 路径或非 POST 都回 404，且不发往上游", async () => {
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      const registered = g.jobBaseUrl("s1|ext-x|1");
+      const token = registered.split("/").at(-1) ?? "";
+      assert.match(token, /^[0-9a-f]{32}$/);
+      assert.equal(g.jobBaseUrl("s1|ext-x|1"), registered, "同一作业取到同一地址");
+      assert.notEqual(g.jobBaseUrl("s1|ext-x|2").split("/").at(-1), token, "每作业一个随机串");
+      const wrongToken = token.replace(/^./, token[0] === "0" ? "1" : "0");
+      const cases: Array<{ label: string; url: string; method?: string }> = [
+        {
+          label: "未登记的作业",
+          url: `${g.baseUrl}/j/${encodeURIComponent("s1|neither|9")}/${token}/v1/messages`,
+        },
+        {
+          label: "错的随机串",
+          url: `${g.baseUrl}/j/${encodeURIComponent("s1|ext-x|1")}/${wrongToken}/v1/messages`,
+        },
+        {
+          label: "缺随机串（旧地址）",
+          url: `${g.baseUrl}/j/${encodeURIComponent("s1|ext-x|1")}/v1/messages`,
+        },
+        { label: "非 messages 路径", url: `${registered}/v1/models` },
+        { label: "messages 的子路径", url: `${registered}/v1/messages/count_tokens` },
+        { label: "非 POST", url: `${registered}/v1/messages`, method: "GET" },
+        { label: "路径外", url: `${g.baseUrl}/v1/messages` },
+      ];
+      for (const { label, url, method } of cases) {
+        const res = await fetch(url, {
+          method: method ?? "POST",
+          headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+          ...(method === "GET" ? {} : { body: JSON.stringify({ stream: true }) }),
+        });
+        assert.equal(res.status, 404, label);
+        await res.text();
+      }
+      assert.equal(up.seen.length, 0, "一律不发往上游");
+      // 登记过的作业地址照常转发（带查询串也认）
+      const ok = await fetch(`${registered}/v1/messages?beta=true`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body: JSON.stringify({ stream: true }),
+      });
+      assert.equal(ok.status, 200);
+      await ok.text();
+      assert.equal(up.seen.length, 1);
+      assert.equal(up.seen[0]?.path, "/v1/messages?beta=true");
+      assert.equal(g.meter("s1|ext-x|1").requests, 1);
+    }
+  );
+});
+
+test("网关：带未知字段的请求体逐字到达上游，只替换 key 头", async () => {
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      const raw =
+        '{"model":"deepseek-flash", "max_tokens":32000,"output_config":{"effort":"high","x":[1,2]},' +
+        '"messages":[{"role":"user","content":"hi"}],"stream":true,"unknown_top":null}';
+      const res = await fetch(`${g.jobBaseUrl("s1|ext-x|1")}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body: raw,
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(up.seen[0]?.body, raw);
+      assert.equal(up.seen[0]?.key, "key-one");
+    }
+  );
+});
+
+test("网关：在跑批内部网络的地址上再听一份，同一套路由与计量；没听之前要这个地址即报错", async () => {
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      assert.throws(() => g.jobBaseUrl("s1|ext-x|1", "internal"), /listenInternal/);
+      const internalBase = await g.listenInternal("127.0.0.1");
+      assert.notEqual(internalBase, g.baseUrl);
+      await assert.rejects(g.listenInternal("127.0.0.1"), /已在/);
+      const viaInternal = g.jobBaseUrl("s1|ext-x|1", "internal");
+      assert.ok(viaInternal.startsWith(`${internalBase}/j/`));
+      assert.equal(
+        viaInternal.split("/").at(-1),
+        g.jobBaseUrl("s1|ext-x|1").split("/").at(-1),
+        "两处监听上同一作业同一随机串"
+      );
+      const res = await fetch(`${viaInternal}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body: JSON.stringify({ stream: true }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(up.seen.length, 1);
+      assert.equal(g.meter("s1|ext-x|1").requests, 1);
+      const stray = await fetch(`${internalBase}/j/x/${"0".repeat(32)}/v1/messages`, {
+        method: "POST",
+        body: "{}",
+      });
+      assert.equal(stray.status, 404);
+      await stray.text();
+      assert.equal(up.seen.length, 1);
+    }
+  );
+});
