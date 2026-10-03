@@ -183,7 +183,7 @@ export function spawnWorkerParamsSchema(taskList: boolean) {
   return Type.Object({
     role: Type.Union(
       [Type.Literal("explorer"), Type.Literal("implementer"), Type.Literal("tester")],
-      { description: "worker 的角色，决定它能用的工具，见工具说明" }
+      { description: "worker 的角色，不给 tools 时决定它能用的工具，见工具说明" }
     ),
     task: Type.String({ description: "子任务的完整说明：目标、相关文件、完成的标准" }),
     name: Type.Optional(
