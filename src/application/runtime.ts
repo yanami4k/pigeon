@@ -71,14 +71,19 @@ import {
   configGrantRulesOf,
   emptySettingsSnapshot,
   memoryLimitsOf,
+  readDenyOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
-import { asWorkspaceHost } from "../tools/local-host.ts";
+import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
-import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
+import {
+  createReadFileTool,
+  type OutsideReadMode,
+  ReadFileParamsSchema,
+} from "../tools/read-file.ts";
 import { ToolRegistry, type ToolRiskTier } from "../tools/registry.ts";
 import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace-edit.ts";
 import {
@@ -316,6 +321,13 @@ export interface RuntimeBundle {
   frozenPrompt: FrozenSessionPrompt;
 }
 
+// 决策 355：工作区以外的读取按审批状态放行——放手模式自动放行、有审批通道经人批准、无人值守拒绝
+const OUTSIDE_READ_MODES: Readonly<Record<RunCommandApproval, OutsideReadMode>> = {
+  yolo: "allowed",
+  prompt: "approval",
+  none: "refused",
+};
+
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 061：编辑工具按模式装配，工具名都叫 edit_file；hashline 分支与 061 之前逐字一致
@@ -341,7 +353,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
   const appliedTemperature = reasoningEnabled ? undefined : deps.temperature;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
-  const workspaceHost = deps.workspaceHost ?? asWorkspaceHost(deps.workspaceRoot);
+  // 本机执行端：禁读名单里的 ~ 按注入的家目录展开（测试指到临时目录）
+  const workspaceHost =
+    deps.workspaceHost ??
+    createLocalWorkspaceHost(
+      deps.workspaceRoot,
+      deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}
+    );
   // 护栏（M9）：按路径限定的放权（会话 grant 的目录限定、固化规则的 pathPrefix）以宿主路径判定，对非本地的工作区
   // 只会静默失配。路径放权在这类工作区下暂不支持：带审批通道的交互场景直接拒绝装配（审批面板的 [d] 就是目录放权）
   if (
@@ -735,9 +753,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       maxOutputTokens
     ),
     tools: [
-      replaceMode
-        ? createReadFileTool(workspaceHost, { editMode: "replace" })
-        : createReadFileTool(workspaceHost),
+      createReadFileTool(workspaceHost, {
+        ...(replaceMode ? { editMode: "replace" as const } : {}),
+        outsideReads: OUTSIDE_READ_MODES[approval],
+        readDeny: readDenyOf(settings),
+      }),
       replaceMode ? createReplaceEditTool(workspaceHost) : createEditFileTool(workspaceHost),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,

@@ -40,6 +40,7 @@ import {
   grantScopeFor,
   hostGrantKeyLabel,
   offersDirectoryGrant,
+  outsidePathLine,
   protectedPathLine,
 } from "../approvals/handler.ts";
 
@@ -96,6 +97,10 @@ export function approvalBlockText(
   const protectedLine = protectedPathLine(request);
   if (protectedLine !== undefined) {
     lines.push(protectedLine);
+  }
+  const outsideLine = outsidePathLine(request);
+  if (outsideLine !== undefined) {
+    lines.push(outsideLine);
   }
   const commandLine = execCommandLine(request);
   if (commandLine !== undefined) {

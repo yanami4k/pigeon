@@ -10,7 +10,7 @@
 | 项目共享 | `.pigeon/settings.json` | 可提交 |
 | 项目个人 | `.pigeon/settings.local.json` | 不提交 |
 
-优先级：项目个人 > 项目共享 > 用户级。合并规则：对象按键逐层合并，标量与数组由高优先层整体替换；唯一例外是 `permissions` 的放权规则，三层并集生效（项目共享层的规则须先经确认，见下文第三道防线）。
+优先级：项目个人 > 项目共享 > 用户级。合并规则：对象按键逐层合并，标量与数组由高优先层整体替换；例外是 `permissions` 一节：放权规则三层并集生效（项目共享层的规则须先经确认，见下文第三道防线），禁读名单的追加项 `readDeny` 也取三层并集。
 
 设置在会话开始时读一次，形成本会话的设置快照；会话中途改文件不生效，下次启动或在终端界面里 `/reload` 之后才生效（见下文）。worker、沙箱会话与脚本编排沿用派出它的会话的快照。
 
@@ -21,7 +21,7 @@
 | 节 | 内容 | 原文件 |
 | --- | --- | --- |
 | `mcp` | MCP 服务的风险档覆盖（`servers.<名>.defaultTier`、`tools`），也可用 `launch` 直接定义服务 | `.pigeon/mcp.json` |
-| `permissions` | 固化的放权规则 `grants`；`/grants save` 写入项目个人一层，`/revoke config#N` 从中删除；写在项目共享层的规则须经确认才生效 | `.pigeon/grants.json` |
+| `permissions` | 固化的放权规则 `grants`；`/grants save` 写入项目个人一层，`/revoke config#N` 从中删除；写在项目共享层的规则须经确认才生效。读档禁读名单的追加项 `readDeny`（见下文"读档工具：工作区外只读与禁读名单"） | `.pigeon/grants.json` |
 | `commands` | 命令短名 `commands` 与角色允许清单 `roles` | `.pigeon/commands.json` |
 | `orchestration` | worker 并发、层数、上限、卡住判定、任务清单、脚本编排 | `.pigeon/orchestration.json` |
 | `web` | 联网工具总开关 `enabled`、搜索后端与地址、抓取上限（见下文"联网工具的开关"） | `.pigeon/web.json` |
@@ -162,6 +162,20 @@ pigeon migrate-config [--root <项目根>]
 - 正在跑的沙箱容器不重建：在沙箱会话里 `/reload` 且 `sandbox` 一节有变化时，提示退出后用 `pigeon resume <会话号> --sandbox` 续跑才对本会话的容器生效。
 - 有 worker 在跑或主 agent 正在运行时不重读。
 - `pigeon run` 与 `pigeon --line` 不设重载。
+
+## 读档工具：工作区外只读与禁读名单
+
+`read_file` 可以只读工作区以外的文件（决策 355）：`--yolo` 下自动放行；不开放手模式时须经人批准，审批面板标明"工作区以外（只读）"与解析后的真实路径，可批准一次、按所在目录放权或按工具放权；没有审批通道（`pigeon run` 等无人值守运行）时拒绝。写与编辑仍限工作区。沙箱会话按容器里的路径判定。
+
+禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径，指向这些位置的链接同样不读。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
+
+设置 `permissions.readDeny` 可往名单上追加（`~` 开头或绝对路径，三层并集），不能删减内置项：
+
+```json
+{ "permissions": { "readDeny": ["~/.config/gh", "/etc/ssl/private"] } }
+```
+
+禁读名单只管读档工具；`run_command` 经 shell 读文件不在此列，由命令审批把关。
 
 ## 三道防线
 

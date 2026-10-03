@@ -2,8 +2,9 @@
 // 路径围栏沿用 paths.ts 的 realpath 口径；进程执行、文件清单与 .cmd / .bat 解析从 run-command.ts 原样平移，行为不变。
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   assertWritePathUnchanged,
@@ -16,6 +17,7 @@ import {
   trackChild,
   untrackChild,
 } from "./process-tree.ts";
+import { denyWithinRoot, resolveDenyEntriesLocal, resolveLocalReadPath } from "./read-deny.ts";
 import {
   type HostExecOptions,
   type HostExecPlan,
@@ -29,6 +31,8 @@ import {
 export interface LocalHostOptions {
   // 平台（缺省 process.platform；测试注入）
   platform?: NodeJS.Platform;
+  // 禁读名单里 ~ 展开用的家目录（缺省 os.homedir()；测试注入临时目录）
+  homeDir?: string;
 }
 
 export function createLocalWorkspaceHost(
@@ -44,6 +48,16 @@ export function createLocalWorkspaceHost(
     },
     async resolveForWrite(inputPath) {
       return resolveWorkspaceWritePath(workspaceRoot, inputPath);
+    },
+    async resolveForRead(inputPath, deny) {
+      return resolveLocalReadPath(workspaceRoot, inputPath, deny, options.homeDir ?? homedir());
+    },
+    async readDenyWithin(deny) {
+      return denyWithinRoot(
+        realpathSync(workspaceRoot),
+        resolveDenyEntriesLocal(deny, options.homeDir ?? homedir()),
+        path
+      );
     },
     async isFile(resolvedPath) {
       return (await stat(resolvedPath)).isFile();

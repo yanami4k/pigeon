@@ -4,6 +4,7 @@
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
+import type { ReadTarget } from "./read-deny.ts";
 
 // 一次执行的进程参数：direct 直接给出程序与参数；shell 与 cmd.exe 启动器由工具按平台拼好后同样以此形态交来
 export interface HostExecPlan {
@@ -88,7 +89,14 @@ export interface WorkspaceHost {
   // 写工具用的解析（决策 334）：同 resolveExisting，另在模型给的路径本身是符号链接时拒写（WorkspaceWriteRefusedError），
   // 报出其指向
   resolveForWrite(inputPath: string): Promise<string>;
-  // 以下三个只接受 resolveExisting / resolveForWrite 返回的规范路径
+  // 决策 355：读档的解析——不限工作区：给出符号链接解析后的真实路径与它是否落在工作区根之外；落在禁读名单 deny
+  //（~ 按本执行端的家目录展开）之内抛 ReadDeniedError，不存在抛 WorkspacePathNotFoundError。
+  // 可选：没有实现的执行端读档只限工作区之内（照 resolveExisting）
+  resolveForRead?(inputPath: string, deny: readonly string[]): Promise<ReadTarget>;
+  // 决策 355 / 368：禁读名单里落在工作区根之内的部分，相对工作区根（正斜杠；工作区根整片禁读时为 "."）；
+  // grep、glob 据此滤掉结果。可选：没有实现的执行端不滤
+  readDenyWithin?(deny: readonly string[]): Promise<string[]>;
+  // 以下三个只接受 resolveExisting / resolveForWrite / resolveForRead 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;
   // 写入前复核（决策 334）：重新解析须仍得到 resolvedPath 本身，路径变了或目标成了符号链接即拒写（WorkspaceWriteRefusedError）

@@ -42,6 +42,8 @@ export interface ApprovalRequest {
   readonly script?: { readonly runId: string; readonly title?: string; readonly kind?: string };
   // 决策 326 ①：写入落在受保护路径（项目的 .pigeon 目录下）时在场，为其展示写法；须人逐次批准，放权不适用
   readonly protectedPath?: string;
+  // 决策 355：读档工具要读工作区以外的文件时在场，为其真实路径（面板标明；[a]/[d] 照常建放权）
+  readonly outsidePath?: string;
 }
 
 // 会话 grant 的创建面（SessionGrantStore 满足）
@@ -123,6 +125,14 @@ export function protectedPathLine(request: ApprovalRequest): string | undefined 
     return undefined;
   }
   return `受保护路径：${request.protectedPath}（Pigeon 的配置与状态目录；须逐次批准，会话放权与配置放权都不适用）`;
+}
+
+// 工作区以外的读取一行（决策 355，cli 与 tui 共用）；不是工作区外读取返回 undefined
+export function outsidePathLine(request: ApprovalRequest): string | undefined {
+  if (request.outsidePath === undefined) {
+    return undefined;
+  }
+  return `工作区以外（只读）：${request.outsidePath}`;
 }
 
 // exec 档 [a] 键的提示文案（cli 与 tui 共用）

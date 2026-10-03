@@ -31,9 +31,16 @@ export const ConfigGrantRuleSchema = Type.Object({
 });
 export type ConfigGrantRule = Static<typeof ConfigGrantRuleSchema>;
 
+// 决策 355：读档禁读名单的追加项——~ 开头（按执行端的家目录展开）或绝对路径。三层并集，只能往内置名单上加，不能删减
+export const ReadDenyEntrySchema = Type.String({
+  minLength: 1,
+  pattern: "^(~([/\\\\].*)?|/.*|[A-Za-z]:[/\\\\].*|\\\\\\\\.*)$",
+});
+
 export const PermissionsSectionSchema = Type.Object(
   {
     grants: Type.Optional(Type.Array(ConfigGrantRuleSchema)),
+    readDeny: Type.Optional(Type.Array(ReadDenyEntrySchema)),
   },
   { additionalProperties: false }
 );

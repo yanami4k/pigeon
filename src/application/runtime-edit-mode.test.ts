@@ -32,10 +32,12 @@ const HASHLINE_EDIT_DESCRIPTION =
   "操作：replace（换 anchor 到 endAnchor 的行）/ insertAfter（anchor 后插入）/ delete（删行）。" +
   "多处编辑全部预检通过才落盘；文件读后已变化（快照过期）会被拒绝，需重新 read_file。";
 
+// 决策 355：本文件的运行一律 yolo，工作区以外的文件也可读，开头与末尾随之改写
 const HASHLINE_READ_DESCRIPTION =
-  "读取工作区内文本文件。输出每行带锚点前缀 N#TAG（N 为行号，TAG 为内容哈希），" +
+  "读取文本文件。输出每行带锚点前缀 N#TAG（N 为行号，TAG 为内容哈希），" +
   "头部 [PATH#TAG] 是全文件快照。edit_file 编辑时必须使用本工具给出的锚点与快照；" +
-  "文件被截断时按提示的 offset 继续读取。";
+  "文件被截断时按提示的 offset 继续读取。" +
+  "工作区以外的文件也可读（用绝对路径），只读、不能改；凭据目录（如 ~/.ssh）不可读。";
 
 interface AdvertisedTool {
   name: string;

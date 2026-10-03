@@ -18,6 +18,13 @@ import {
   WorkspacePathNotFoundError,
 } from "../tools/paths.ts";
 import {
+  deniedEntry,
+  denyWithinRoot,
+  ReadDeniedError,
+  type ResolvedDenyEntry,
+  readDeniedMessage,
+} from "../tools/read-deny.ts";
+import {
   type HostExecOptions,
   type HostExecPlan,
   type HostExecResult,
@@ -90,6 +97,18 @@ const OOM_COUNT_SCRIPT = [
 ].join("\n");
 // 写工具的解析：模型给的路径本身是符号链接即报出指向，否则同 RESOLVE_SCRIPT
 const RESOLVE_FOR_WRITE_SCRIPT = `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }; [ -e "$1" ] || exit ${EXIT_MISSING}; readlink -f -- "$1"`;
+// 决策 355：读档解析（不限工作区）与禁读名单在容器里的真实路径。第一个参数为目标（空串即只解析名单），其后为名单各项；
+// 输出以 NUL 分隔：给了目标时先是目标的真实路径，再按项各两段——展开 ~（容器内的家目录）后的字面路径、它存在时的真实路径
+//（不存在为空串）。经 trustedShell 执行：readlink 从系统目录解析，agent 改不了
+const READ_RESOLVE_SCRIPT = [
+  't="$1"; shift',
+  `if [ -n "$t" ]; then [ -e "$t" ] || exit ${EXIT_MISSING}; r="$(readlink -f -- "$t")" && [ -n "$r" ] || exit 1; printf '%s\\0' "$r"; fi`,
+  'for p in "$@"; do',
+  `  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/\${p#"~/"}" ;; esac`,
+  `  printf '%s\\0' "$p"`,
+  `  if [ -e "$p" ]; then printf '%s\\0' "$(readlink -f -- "$p")"; else printf '\\0'; fi`,
+  "done",
+].join("\n");
 // 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己
 const WRITE_SCRIPT = [
   `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }`,
@@ -184,6 +203,32 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       realRoot = checkResolved(root, result, result.stdout.toString("utf8"), undefined);
     }
     return realRoot;
+  };
+
+  // 决策 355：目标（空串即不解析目标）与禁读名单在容器里的真实路径，一次 exec
+  const resolveReadPaths = async (
+    inputPath: string,
+    deny: readonly string[]
+  ): Promise<{ target: string; entries: ResolvedDenyEntry[] }> => {
+    const result = await helper(false, trustedShell(READ_RESOLVE_SCRIPT, inputPath, ...deny));
+    if (daemonFailure(result)) {
+      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+    }
+    if (result.exitCode === EXIT_MISSING) {
+      throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
+    }
+    const fields = result.stdout.toString("utf8").split("\0");
+    const offset = inputPath === "" ? 0 : 1;
+    const target = inputPath === "" ? "" : (fields[0] ?? "");
+    if (result.exitCode !== 0 || (inputPath !== "" && target === "")) {
+      throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+    }
+    const entries = deny.map((entry, index) => {
+      const literal = fields[offset + index * 2] ?? "";
+      const real = fields[offset + index * 2 + 1] ?? "";
+      return { entry, paths: [...new Set([literal, real].filter((value) => value !== ""))] };
+    });
+    return { target, entries };
   };
 
   const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
@@ -367,6 +412,20 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
       }
       return checkResolved(inputPath, result, stdout, base);
+    },
+    async resolveForRead(inputPath, deny) {
+      const base = await resolveRoot();
+      const { target, entries } = await resolveReadPaths(inputPath, deny);
+      const entry = deniedEntry(target, entries, path.posix);
+      if (entry !== undefined) {
+        throw new ReadDeniedError(readDeniedMessage(inputPath, entry));
+      }
+      return { path: target, outside: !insideRoot(base, target) };
+    },
+    async readDenyWithin(deny) {
+      const base = await resolveRoot();
+      const { entries } = await resolveReadPaths("", deny);
+      return denyWithinRoot(base, entries, path.posix);
     },
     async isFile(resolvedPath) {
       const result = await helper(false, ["test", "-f", resolvedPath]);
