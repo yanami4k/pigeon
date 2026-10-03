@@ -6,13 +6,12 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { packageFileUrl } from "../state/package-paths.ts";
 import type { SandboxConfig } from "../state/sandbox-config.ts";
 import { dockerOnce } from "./container-host.ts";
 
-// 通用镜像的 Dockerfile（仓库内）
-export const GENERIC_DOCKERFILE = fileURLToPath(
-  new URL("../../docker/sandbox/Dockerfile", import.meta.url)
-);
+// 通用镜像的 Dockerfile（随包，源码与打包产物运行时都在包根下）
+export const GENERIC_DOCKERFILE = fileURLToPath(packageFileUrl("docker/sandbox/Dockerfile"));
 export const GENERIC_IMAGE_REPO = "pigeon-sandbox";
 export const PROJECT_IMAGE_REPO = "pigeon-sandbox-project";
 export const DEFAULT_BASE_IMAGE = "ubuntu:24.04";

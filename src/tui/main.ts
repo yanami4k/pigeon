@@ -80,6 +80,7 @@ import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import { FROM_BUNDLE } from "../state/package-paths.ts";
 import { tuiLogDirOf } from "../state/paths.ts";
 import { loopGuardSettingsOf, memoryLimitsOf, withHooksDisabled } from "../state/settings.ts";
 import { createTuiApprovalHandler, type TuiApprovalFace } from "./approval.ts";
@@ -117,7 +118,7 @@ async function askTrustOnStderr(entries: readonly TrustEntry[]): Promise<TrustCh
   }
 }
 
-async function main(argv: string[]): Promise<void> {
+export async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警（壳接管终端前打到 stderr）
   for (const warning of probeUpstreamVersions().warnings) {
     console.error(warning);
@@ -594,8 +595,12 @@ async function main(argv: string[]): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
-// 仅作为入口直接运行时执行；被 import 时不启动 TUI
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// 仅作为入口直接运行时执行；被 import 时不启动 TUI。打包产物里由产物入口（src/bundle-entry.ts）分派，这里不判断
+if (
+  !FROM_BUNDLE &&
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

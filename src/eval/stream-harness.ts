@@ -2,6 +2,7 @@
 // 单独成一个叶子模块，身份头、结果行与跑批器都只依赖它、互不成环
 import { fileURLToPath } from "node:url";
 import { describeHead } from "../orchestration/worktree.ts";
+import { packageFileUrl } from "../state/package-paths.ts";
 
 // harness 版本：Pigeon 仓库 HEAD 短号与是否有未提交改动
 export interface HarnessRef {
@@ -17,7 +18,7 @@ export function describeHarness(ref: HarnessRef | undefined): string {
 // 本源码所在仓库（Pigeon）的版本；读不到时如实记 unknown
 export function currentHarnessRef(): HarnessRef {
   try {
-    return describeHead(fileURLToPath(new URL(".", import.meta.url)));
+    return describeHead(fileURLToPath(packageFileUrl("./")));
   } catch {
     return { commit: "unknown", dirty: false };
   }

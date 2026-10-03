@@ -8,10 +8,10 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { packageFileUrl } from "../state/package-paths.ts";
 
-export const SCRIPT_EXECUTOR_FILE = fileURLToPath(
-  new URL("../../docker/script/executor.cjs", import.meta.url)
-);
+// 执行器（随包，源码与打包产物运行时都在包根下）
+export const SCRIPT_EXECUTOR_FILE = fileURLToPath(packageFileUrl("docker/script/executor.cjs"));
 
 // 容器的资源上限
 export const SCRIPT_CONTAINER_LIMITS = {

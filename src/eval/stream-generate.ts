@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
+import { packageFileUrl } from "../state/package-paths.ts";
 import { assertKeepsWorkspaceOffline, WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import {
   collectStreamFacts,
@@ -147,7 +148,7 @@ export function assembleImageContext(input: {
   variants?: readonly { name: string; commit: string }[];
 }): string[] {
   const human = gitHumanRepo(input.repoDir);
-  const assets = new URL("../../eval/stream/", import.meta.url);
+  const assets = packageFileUrl("eval/stream/");
   mkdirSync(input.outDir, { recursive: true });
   const written: string[] = [];
   const put = (name: string, content: Buffer | string) => {
