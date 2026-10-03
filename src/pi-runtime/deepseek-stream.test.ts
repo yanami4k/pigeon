@@ -6,10 +6,12 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { streamSimple as realStreamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { loadStreamFn } from "../application/runtime.ts";
+import { streamGatewayStreamFn } from "../eval/stream-experiment.ts";
 import { DEEPSEEK_ANTHROPIC_BASE_URL, deepseekModel } from "./deepseek-model.ts";
 import {
   createDeepSeekStreamFn,
   DEEPSEEK_BASE_URL_ENV,
+  redactUserinfo,
   resolveDeepSeekBaseUrl,
 } from "./deepseek-stream.ts";
 import { gatewayStreamFn } from "./gateway-stream.ts";
@@ -216,4 +218,35 @@ test("网关接入与自带接入共用取值：未配置按模型上限；跑�
   // 模型对象没有上限时按 32,000 发
   const unbounded = gatewayStreamFn("http://127.0.0.1:9/j/x", "deepseek-flash", 0);
   assert.equal((await captureRequest(unbounded, {})).body.max_tokens, 32_000);
+});
+
+test("跑批器进程内条件的网关接入：没配置时以 16,384 作模型上限（开不开思考都发 16,384）；配置了 32,000 时原样发 32,000，不被压到 16,384", async () => {
+  const url = "http://127.0.0.1:9/j/x";
+  const unconfigured = limitOutputTokens(
+    streamGatewayStreamFn(url, "deepseek-flash", undefined),
+    16_384
+  );
+  assert.equal((await captureRequest(unconfigured, {})).body.max_tokens, 16_384);
+  assert.equal((await captureRequest(unconfigured, { reasoning: "high" })).body.max_tokens, 16_384);
+  const configured = limitOutputTokens(
+    streamGatewayStreamFn(url, "deepseek-flash", 32_000),
+    32_000
+  );
+  assert.equal((await captureRequest(configured, {})).body.max_tokens, 32_000);
+});
+
+test("DEEPSEEK_BASE_URL 非法时的报错：地址里的用户名与密码脱敏，其余照原样", () => {
+  for (const [bad, shown, hidden] of [
+    ["ftp://alice:s3cret@proxy.example.com/ds", "ftp://***@proxy.example.com/ds", "s3cret"],
+    ["bob:hunter2@proxy.example.com/ds", "***@proxy.example.com/ds", "hunter2"],
+    ["ftp://token-only@h/x", "ftp://***@h/x", "token-only"],
+  ] as const) {
+    assert.throws(
+      () => createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-x", DEEPSEEK_BASE_URL: bad }),
+      (error: Error) => error.message.includes(shown) && !error.message.includes(hidden),
+      bad
+    );
+  }
+  assert.equal(redactUserinfo("ftp://example.com/a"), "ftp://example.com/a");
+  assert.equal(redactUserinfo("not a url"), "not a url");
 });

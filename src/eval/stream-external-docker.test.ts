@@ -115,6 +115,8 @@ async function runOneStep(mode: string, wallClockMs: number, graceMs: number) {
   });
   const gateway = await startModelGateway({
     upstreamBaseUrl: up.url,
+    // 本批的模型：外部条件的请求逐字转发，网关只读地核对 model（假启动器发的就是这个）
+    model: "deepseek-flash",
     accounts: [{ key: "key-one", concurrency: 2 }],
     limits,
     probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
@@ -190,6 +192,7 @@ test("外部 agent 条件（真容器）：完整一步——经网关发请求�
         "external",
         `step-${row.seq}`,
         "try-1",
+        "io",
         "artifacts",
         "sent-body.json"
       ),
@@ -211,13 +214,15 @@ test("外部 agent 条件（真容器）：完整一步——经网关发请求�
       `step-${row.seq}`,
       "try-1"
     );
-    assert.ok(existsSync(join(tryDir, "result.json")), "结果文件拷出");
-    assert.ok(existsSync(join(tryDir, "request.json")), "请求文件拷出");
+    // 容器里的请求目录拷到 io/ 下（不可信）；请求文件另由宿主写一份可信副本在 try 目录
+    assert.ok(existsSync(join(tryDir, "io", "result.json")), "结果文件拷出");
+    assert.ok(existsSync(join(tryDir, "io", "request.json")), "容器里的请求文件拷出");
     assert.match(
-      readFileSync(join(tryDir, "artifacts", "trace.txt"), "utf8"),
+      readFileSync(join(tryDir, "io", "artifacts", "trace.txt"), "utf8"),
       /cwd=\/testbed marker=pigeon-step-/
     );
     const request = JSON.parse(readFileSync(join(tryDir, "request.json"), "utf8"));
+    assert.deepEqual(request, JSON.parse(readFileSync(join(tryDir, "io", "request.json"), "utf8")));
     assert.deepEqual(Object.keys(request).sort(), [
       "directive",
       "maxTurns",
@@ -253,7 +258,10 @@ test("外部 agent 条件（真容器）：墙钟到点即杀掉 docker exec 与
       `step-${row?.seq}`,
       "try-1"
     );
-    assert.ok(existsSync(join(tryDir, "artifacts", "started.txt")), "被杀之前写的产物照样拷出");
+    assert.ok(
+      existsSync(join(tryDir, "io", "artifacts", "started.txt")),
+      "被杀之前写的产物照样拷出"
+    );
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

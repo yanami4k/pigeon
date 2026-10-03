@@ -13,6 +13,7 @@ import {
   GATEWAY_UPSTREAM_BASE_URL,
   gatewayStreamFn,
   resolveCompactionConfig,
+  type StreamFn,
 } from "../pi-runtime/index.ts";
 import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
@@ -131,6 +132,18 @@ export interface StreamExperimentOptions {
 }
 
 export type StreamPigeonOptions = Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor" | "yolo">;
+
+// 进程内条件经网关的模型接入：没配置单轮输出上限时以跑批器自己的 16,384 作模型上限（开思考时发出的请求与决策 347
+// 之前一致）；配置了的不另设模型上限，按 DeepSeek 模型定义的上限与配置值取较小者，配置值原样生效
+export function streamGatewayStreamFn(
+  baseUrl: string,
+  modelId: string,
+  configuredMaxOutputTokens: number | undefined
+): StreamFn {
+  return configuredMaxOutputTokens === undefined
+    ? gatewayStreamFn(baseUrl, modelId, STREAM_MAX_OUTPUT_TOKENS)
+    : gatewayStreamFn(baseUrl, modelId);
+}
 
 // 延续式跑批无人值守：Pigeon 各条件一律放权（yolo），不依赖调用方记得传——没有审批通道时，prompt 档的写与执行
 // 一律被拒，条件就不再是"完整 Pigeon"
@@ -411,7 +424,8 @@ async function runStreamExperimentLocked(
       agents.pigeon = pigeonStepAgent({
         ...streamPigeonOptions(options.pigeon),
         docker,
-        streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId, STREAM_MAX_OUTPUT_TOKENS),
+        streamFnFor: (baseUrl) =>
+          streamGatewayStreamFn(baseUrl, modelId, options.pigeon?.maxOutputTokens),
         // 限额信号一到即中止在途的一步（反正要作废重做）
         limits,
       });
@@ -529,6 +543,8 @@ export async function startGatewayAndLimits(
   });
   gateway = await startModelGateway({
     upstreamBaseUrl: GATEWAY_UPSTREAM_BASE_URL,
+    // 外部 agent 条件的请求逐字转发，网关只读地核对其 model 与本批一致
+    model: settings.modelId,
     accounts: settings.accounts,
     limits,
     // 探测：max_tokens 1、关思考（不发 thinking 时 DeepSeek 默认开思考，只回一个思考块），探针实测 200

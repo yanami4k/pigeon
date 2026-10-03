@@ -1204,6 +1204,7 @@ async function runStep(
         costCny: agentDelta.costCny,
         reviewCostCny: null,
         peakInputTokens: delta.peakInputTokens,
+        ...((delta.rejectedRequests ?? 0) > 0 ? { rejectedRequests: delta.rejectedRequests } : {}),
       };
       result = {
         ...result,

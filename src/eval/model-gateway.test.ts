@@ -2052,3 +2052,66 @@ test("网关：同一作业前后对逐字转发的声明不一致即报错；�
     assert.throws(() => g.jobBaseUrl("s1|neither|1", { verbatimBody: true }), /前后声明不一致/);
   });
 });
+
+// 逐字转发的作业（外部 agent 条件）：网关只读地核对请求体的 model，与本批的模型不符（或核对不了）即回一个说得清楚的 400、
+// 不发往上游、记到该作业的 rejectedRequests；请求体的字节不改。进程内条件的作业不核对
+test("网关：逐字转发的作业 model 与本批不符即 400、不发往上游、记到该作业上；相符的逐字转发；进程内条件的作业不核对", async () => {
+  const up = await fakeUpstream([
+    { status: 200, body: SSE, contentType: "text/event-stream" },
+    { status: 200, body: SSE, contentType: "text/event-stream" },
+  ]);
+  const l = limits();
+  const g = await startModelGateway({
+    upstreamBaseUrl: up.url,
+    model: "deepseek-flash",
+    accounts: [{ key: "key-one", concurrency: 2 }],
+    limits: l,
+    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+    clock: testClock({ virtual: true }).clock,
+    warn: () => {},
+  });
+  try {
+    const ext = g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true });
+    const send = async (base: string, body: string) => {
+      const res = await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body,
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    const wrong = await send(ext, '{ "model":"other-model", "max_tokens":1 }');
+    assert.equal(wrong.status, 400);
+    const message = (JSON.parse(wrong.text) as { error: { message: string } }).error.message;
+    assert.match(message, /"other-model"/);
+    assert.match(message, /deepseek-flash/);
+    const notJson = await send(ext, "{not json");
+    assert.equal(notJson.status, 400);
+    assert.match(notJson.text, /不是合法 JSON/);
+    const missing = await send(ext, '{"max_tokens":1}');
+    assert.equal(missing.status, 400);
+    assert.match(missing.text, /缺 model/);
+    assert.equal(up.seen.length, 0, "都不发往上游");
+    assert.equal(g.meter("s1|ext-x|1").rejectedRequests, 3);
+    assert.equal(g.meter("s1|ext-x|1").requests, 0);
+    const right = '{ "model":"deepseek-flash",  "max_tokens":1, "x_unknown":{} }';
+    assert.equal((await send(ext, right)).status, 200);
+    assert.equal(up.seen[0]?.body, right, "相符的逐字转发");
+    // 进程内条件：不核对 model
+    assert.equal((await send(g.jobBaseUrl("s1|neither|1"), '{"model":"other-model"}')).status, 200);
+    assert.equal(up.seen.length, 2);
+    assert.equal(g.meter("s1|neither|1").rejectedRequests, undefined);
+    // 按步做差带上被拒的次数；没有被拒的作业不出现这个字段
+    const before = g.meter("s1|ext-x|1");
+    await send(ext, '{"model":"x"}');
+    assert.equal(meterDelta(g.meter("s1|ext-x|1"), before).rejectedRequests, 1);
+    assert.equal(
+      "rejectedRequests" in meterDelta(g.meter("s1|neither|1"), g.meter("s1|neither|1")),
+      false
+    );
+  } finally {
+    await g.close();
+    l.close();
+    await up.close();
+  }
+});

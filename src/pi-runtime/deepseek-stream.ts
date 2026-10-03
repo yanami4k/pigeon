@@ -26,10 +26,18 @@ export function resolveDeepSeekBaseUrl(env: Record<string, string | undefined>):
   }
   if (protocol !== "http:" && protocol !== "https:") {
     throw new Error(
-      `环境变量 ${DEEPSEEK_BASE_URL_ENV} 须为 http 或 https 地址（Anthropic 兼容端点的根，请求拼 /v1/messages），现为：${raw}`
+      `环境变量 ${DEEPSEEK_BASE_URL_ENV} 须为 http 或 https 地址（Anthropic 兼容端点的根，请求拼 /v1/messages），现为：${redactUserinfo(raw)}`
     );
   }
   return raw;
+}
+
+// 报错里的地址去掉用户名与密码（"…//用户:密码@主机" 或无协议的 "用户:密码@主机"）
+export function redactUserinfo(address: string): string {
+  return address.replace(
+    /^([a-z][a-z0-9+.-]*:\/\/)?[^/?#@\s]*@/i,
+    (_m, scheme?: string) => `${scheme ?? ""}***@`
+  );
 }
 
 export function createDeepSeekStreamFn(

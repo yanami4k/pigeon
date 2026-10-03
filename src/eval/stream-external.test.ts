@@ -9,9 +9,10 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { externalAgentsFor } from "./stream-experiment.ts";
@@ -25,6 +26,7 @@ import {
   normalizeExcludePath,
   parseExternalAgentConfig,
   parseSelfReport,
+  readLauncherResult,
   toolDirDigest,
 } from "./stream-external.ts";
 import { checkOrWriteIdentity, type StreamRunIdentity } from "./stream-identity.ts";
@@ -131,6 +133,20 @@ test(
       "SSH_PRIVATE_KEY",
       "ANTHROPIC_AUTH_TOKEN",
       "auth_header",
+      // SECRET_ENV 之外、配置校验另行拒绝的
+      "DEEPSEEK_KEY",
+      "OPENAI_KEY",
+      "ACCESS_KEY",
+      "KEY",
+      "KEY_ID",
+      "SIGNING_KEYS",
+      "DB_PASS",
+      "PASSPHRASE",
+      "SESSION_COOKIE",
+      "BEARER",
+      "HTTP_BEARER_VALUE",
+      "SESSION_ID",
+      "CLIENT_CERT",
     ]) {
       assert.throws(
         () => parseExternalAgentConfig({ ...valid(tools), env: { [name]: "x" } }, "c.json", dir),
@@ -149,6 +165,14 @@ test(
       () => parseExternalAgentConfig({ ...valid(tools), env: { "A-B": "x" } }, "c.json", dir),
       /变量名/
     );
+    // 不像密钥的照常放行（KEY 只在独立成段时算）
+    for (const name of ["KEYBOARD_LAYOUT", "MONKEY_MODE", "LOG_LEVEL", "AGENT_MODE", "PATH"]) {
+      assert.deepEqual(
+        parseExternalAgentConfig({ ...valid(tools), env: { [name]: "x" } }, "c.json", dir).env,
+        { [name]: "x" },
+        name
+      );
+    }
     assert.throws(
       () => parseExternalAgentConfig({ ...valid(tools), env: { A: 1 } }, "c.json", dir),
       /须为字符串/
@@ -445,5 +469,53 @@ test(
     assert.ok(!ext.includes("none"));
     assert.ok(ext.includes("type=bind,source=/host/tools,target=/opt/pigeon-agent,readonly"));
     assert.ok(!ext.includes("--user"), "用户照镜像的 USER");
+  })
+);
+
+test(
+  "结果文件不可信：是指向宿主路径的符号链接即拒读；普通文件照读，不是 JSON 对象为 undefined",
+  withTmp((dir) => {
+    const hostFile = path.join(dir, "host-secret.json");
+    writeFileSync(hostFile, JSON.stringify({ status: "completed", report: { leaked: true } }));
+    const io = path.join(dir, "io");
+    mkdirSync(io);
+    const result = path.join(io, "result.json");
+    let linked = true;
+    try {
+      symlinkSync(hostFile, result);
+    } catch {
+      linked = false;
+    }
+    if (linked) assert.equal(readLauncherResult(result), undefined, "链接到宿主路径的结果文件拒读");
+    rmSync(result, { force: true });
+    writeFileSync(result, JSON.stringify({ status: "completed", turns: 3 }));
+    assert.deepEqual(readLauncherResult(result), { status: "completed", turns: 3 });
+    writeFileSync(result, "[1,2]");
+    assert.equal(readLauncherResult(result), undefined);
+    assert.equal(readLauncherResult(path.join(io, "missing.json")), undefined);
+    mkdirSync(path.join(io, "dir.json"));
+    assert.equal(readLauncherResult(path.join(io, "dir.json")), undefined, "目录不是普通文件");
+  })
+);
+
+test(
+  "工具目录：含逗号、引号或换行的路径拒绝（原样拼进 --mount 会改变参数含义）；根目录与家目录拒绝",
+  withTmp((dir) => {
+    const comma = path.join(dir, "a,b");
+    mkdirSync(comma);
+    for (const [label, toolDir, pattern] of [
+      ["逗号", comma, /逗号、引号或换行/],
+      ["双引号", path.join(dir, 'a"b'), /逗号、引号或换行/],
+      ["单引号", path.join(dir, "a'b"), /逗号、引号或换行/],
+      ["换行", path.join(dir, "a\nb"), /逗号、引号或换行/],
+      ["根目录", path.parse(dir).root, /根目录/],
+      ["家目录", homedir(), /家目录/],
+    ] as const) {
+      assert.throws(
+        () => parseExternalAgentConfig({ ...valid(toolDir), toolDir }, "c.json", dir),
+        (error: Error) => error instanceof ExternalAgentConfigError && pattern.test(error.message),
+        label
+      );
+    }
   })
 );

@@ -151,6 +151,8 @@ export interface StreamGatewayFacts {
   // 本步单次请求送进模型的输入 token 最大值（上下文峰值，218）：读网关计量的 peakInputTokens（每步开始时重置）；
   // 旧结果行没有这个字段
   peakInputTokens?: number;
+  // 本步被网关拒绝转发的请求数（外部 agent 条件的请求 model 与本批不符等）；没有拒绝即不出现
+  rejectedRequests?: number;
 }
 
 export interface StepReview {

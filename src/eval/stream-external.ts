@@ -23,7 +23,9 @@ import {
   readFileSync,
   readlinkSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   dockerOnce,
@@ -68,6 +70,13 @@ const RESERVED_ENV = new Set([
   "PIGEON_STREAM_CONTAINER",
 ]);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// 配置里的附加变量名的密钥规则：比启动器环境去密钥用的 SECRET_ENV 更严（两条都查）——名字里有独立的 KEY 段（DEEPSEEK_KEY、
+// ACCESS_KEY、KEY_ID 等），或含 PASS、COOKIE、BEARER、SESSION、CERT 的，一律当作密钥拒绝
+export const EXTERNAL_SECRET_ENV = /(^|_)KEYS?(_|$)|PASS|COOKIE|BEARER|SESSION|CERT/i;
+
+export function looksLikeSecretEnv(name: string): boolean {
+  return SECRET_ENV.test(name) || EXTERNAL_SECRET_ENV.test(name);
+}
 
 export interface ExternalAgentConfig {
   name: string;
@@ -109,6 +118,10 @@ export function parseExternalAgentConfig(
   if (typeof toolDirRaw !== "string" || toolDirRaw.trim() === "")
     fail("缺 toolDir（宿主上的工具目录）");
   const toolDir = path.resolve(baseDir, toolDirRaw as string);
+  // 工具目录原样拼进 docker 的 --mount：逗号、引号与换行会改变挂载参数的含义，一律拒绝；根目录与家目录不能整个挂进容器
+  if (/[,"'\r\n]/.test(toolDir)) fail(`toolDir 不得含逗号、引号或换行：${toolDir}`);
+  if (path.parse(toolDir).root === toolDir) fail(`toolDir 不能是根目录：${toolDir}`);
+  if (path.resolve(homedir()) === toolDir) fail(`toolDir 不能是家目录：${toolDir}`);
   if (!existsSync(toolDir) || !statSync(toolDir).isDirectory()) {
     fail(`toolDir 不是存在的目录：${toolDir}`);
   }
@@ -142,7 +155,7 @@ export function parseExternalAgentConfig(
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(envRaw as Record<string, unknown>)) {
     if (!ENV_NAME.test(key)) fail(`env 的变量名 ${key} 不合法`);
-    if (SECRET_ENV.test(key)) fail(`env 不得含密钥类变量：${key}（真 key 只在模型网关里）`);
+    if (looksLikeSecretEnv(key)) fail(`env 不得含密钥类变量：${key}（真 key 只在模型网关里）`);
     if (RESERVED_ENV.has(key)) fail(`env 的 ${key} 由跑批器设置，不能在配置里给`);
     if (typeof value !== "string" || value.includes("\0")) fail(`env 的 ${key} 须为字符串`);
     env[key] = value as string;
@@ -300,7 +313,27 @@ export async function selfReportOf(
   }
 }
 
-// 这一步的产物在宿主作业目录下的位置：external/step-<步序>/try-<第几次>，重做取下一个没用过的序号
+// 读启动器的结果文件：拷出来的文件不可信——不是普通文件（符号链接等）即拒读，读不出或不是 JSON 对象同样为 undefined
+export function readLauncherResult(file: string): Record<string, unknown> | undefined {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(file);
+  } catch {
+    return undefined;
+  }
+  if (!st.isFile()) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// 这一步的产物在宿主作业目录下的位置：external/step-<步序>/try-<第几次>，重做取下一个没用过的序号。其下 request.json
+// 为宿主写的可信副本，io/ 为从容器拷出的请求目录（结果文件与产物，不可信）
 export function artifactsDirFor(workDir: string, seq: number): string {
   const stepDir = path.join(workDir, "external", `step-${seq}`);
   mkdirSync(stepDir, { recursive: true });
@@ -399,12 +432,17 @@ export function externalStepAgent(options: ExternalStepAgentOptions): StepAgent 
         abortSignal: input.abortSignal,
         label: `外部 agent ${config.name} 的启动命令`,
       });
+      // 墙钟只算启动器本身（拷产物之前取）
+      const wallMs = Date.now() - started;
       // 不论怎么结束，先清掉容器里的进程（docker exec 客户端被杀时容器里的进程不随之退出）
       const cleared = await clearMarkedProcesses(docker, container, marker, root);
-      // 请求目录（含结果文件与产物）拷到宿主作业目录下；重做不覆盖
+      // 请求目录（含结果文件与产物）拷到宿主作业目录的 io/ 下；请求另由宿主写一份可信副本，不用容器里拷出的那份；
+      // 重做不覆盖
       const outDir = artifactsDirFor(input.workDir, input.step.seq);
-      await dockerOnce(docker, ["cp", `${container}:${EXTERNAL_IO_DIR}/.`, outDir], 300_000);
-      const wallMs = Date.now() - started;
+      writeFileSync(path.join(outDir, "request.json"), JSON.stringify(request));
+      const ioDir = path.join(outDir, "io");
+      mkdirSync(ioDir);
+      await dockerOnce(docker, ["cp", `${container}:${EXTERNAL_IO_DIR}/.`, ioDir], 300_000);
       if (!cleared) {
         return {
           status: "aborted",
@@ -426,21 +464,14 @@ export function externalStepAgent(options: ExternalStepAgentOptions): StepAgent 
               : `限额信号：外部 agent ${config.name} 已中止`,
         };
       }
-      const resultFile = path.join(outDir, "result.json");
-      if (ended === "timeout" || !existsSync(resultFile)) {
-        return {
-          status: ended === "timeout" ? "wall-clock-limit" : "unknown",
-          turns: 0,
-          usage: ZERO_USAGE,
-          wallMs,
-        };
+      if (ended === "timeout") {
+        return { status: "wall-clock-limit", turns: 0, usage: ZERO_USAGE, wallMs };
       }
-      let raw: LauncherResult;
-      try {
-        raw = JSON.parse(readFileSync(resultFile, "utf8")) as LauncherResult;
-      } catch {
+      const parsed = readLauncherResult(path.join(ioDir, "result.json"));
+      if (parsed === undefined) {
         return { status: "unknown", turns: 0, usage: ZERO_USAGE, wallMs };
       }
+      const raw = parsed as LauncherResult;
       const report =
         typeof raw.report === "object" && raw.report !== null && !Array.isArray(raw.report)
           ? (raw.report as Record<string, unknown>)

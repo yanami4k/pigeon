@@ -60,6 +60,8 @@ export interface GatewayMeter {
   peakInputTokens: number;
   // 这个作业成功转发的请求落在各账号上的次数（按账号编号，下标 0 为账号 1）
   accountRequests: number[];
+  // 网关拒绝转发的请求数（逐字转发的作业里 model 与本批的模型不符等）；没有拒绝过即不出现
+  rejectedRequests?: number;
 }
 
 export interface GatewayAccount {
@@ -161,6 +163,8 @@ const REAL_CLOCK: GatewayClock = {
 export interface ModelGatewayOptions {
   // 上游的 Anthropic Messages 基址（不带末尾斜杠），如 https://host/anthropic
   upstreamBaseUrl: string;
+  // 本批的模型名：给了即在逐字转发的作业（外部 agent 条件）上只读地核对请求体的 model，不符即回 400、不发往上游
+  model?: string;
   accounts: readonly GatewayAccount[];
   limits: LimitController;
   // 探测用的极小请求（非流式）
@@ -273,6 +277,27 @@ const DROP_RESPONSE_HEADERS = new Set([
 
 function anthropicError(type: string, message: string): string {
   return JSON.stringify({ type: "error", error: { type, message } });
+}
+
+// 请求体的 model 与本批的模型不符时给出说明；相符为 undefined。只解析，不改写
+export function modelMismatch(body: Buffer, expected: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return `网关拒绝转发：请求体不是合法 JSON，核对不了 model（本批的模型为 ${expected}）`;
+  }
+  const model =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as { model?: unknown }).model
+      : undefined;
+  if (typeof model !== "string") {
+    return `网关拒绝转发：请求体缺 model 字段（本批的模型为 ${expected}）`;
+  }
+  if (model !== expected) {
+    return `网关拒绝转发：请求的 model 为 ${JSON.stringify(model)}，与本批的模型 ${expected} 不符（外部 agent 须用本批的模型）`;
+  }
+  return undefined;
 }
 
 function emptyMeter(accounts: number): GatewayMeter {
@@ -882,8 +907,19 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     });
     // 逐字转发按登记时的声明定（外部 agent 条件），不看请求内容
     const raw = await readAll(req);
-    const body = jobTokens.get(job)?.verbatimBody === true ? raw : stripCustomToolType(raw);
+    const verbatim = jobTokens.get(job)?.verbatimBody === true;
+    const body = verbatim ? raw : stripCustomToolType(raw);
     if (abort.signal.aborted) return;
+    // 逐字转发的作业：只读地核对 model（请求体的字节不改），与本批的模型不符即回 400、记到这个作业上
+    if (verbatim && options.model !== undefined) {
+      const mismatch = modelMismatch(raw, options.model);
+      if (mismatch !== undefined) {
+        const m = meterOf(job);
+        m.rejectedRequests = (m.rejectedRequests ?? 0) + 1;
+        send(res, 400, anthropicError("invalid_request_error", mismatch));
+        return;
+      }
+    }
     const inFlight = (jobInFlight.get(job) ?? 0) + 1;
     jobInFlight.set(job, inFlight);
     const meter = meterOf(job);
@@ -1185,5 +1221,8 @@ export function meterDelta(after: GatewayMeter, before: GatewayMeter): GatewayMe
     peakInFlight: after.peakInFlight,
     peakInputTokens: after.peakInputTokens,
     accountRequests: after.accountRequests.map((n, i) => n - (before.accountRequests[i] ?? 0)),
+    ...(after.rejectedRequests !== undefined || before.rejectedRequests !== undefined
+      ? { rejectedRequests: (after.rejectedRequests ?? 0) - (before.rejectedRequests ?? 0) }
+      : {}),
   };
 }

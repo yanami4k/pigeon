@@ -69,7 +69,8 @@ if (mode === "hang") {
     resultFile,
     JSON.stringify({
       status: "completed",
-      turns: 1,
+      // 自报的轮数故意与网关请求数（1）不同：结果行应取网关请求数
+      turns: 99,
       usage: { input: 1, output: 2, totalTokens: 3 },
       report: { fake: true, httpStatus, cwd: process.cwd(), sawRequestRoot: request.root },
     })

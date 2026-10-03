@@ -1,7 +1,8 @@
 // 跑批的"只通网关"网络档（实验设施，只给外部 agent 条件）：每次跑批建一张 docker 内部网络（--internal，不通外网，
 // 名字带跑批前缀），跑批进程内置的模型网关再听这张网络在宿主一侧的地址（网桥的网关地址）；外部 agent 条件的作业容器接这张
 // 网络，经网关地址只能连到模型网关。Pigeon 进程内条件与最简 agent 的作业容器照旧 --network none（WORKSPACE_NETWORK_ARGS），
-// 不接这张网络。跑批结束与开跑前的残留清理都删它：先强制移除仍接在网络上的容器（都是本跑批的作业容器），再删网络。
+// 不接这张网络。网桥关掉容器之间的互连（enable_icc=false）：外部 agent 条件的作业容器彼此连不通，各自只能连到宿主一侧。
+// 跑批结束与开跑前的残留清理都删它：先强制移除仍接在网络上的容器（都是本跑批的作业容器），再删网络。
 import { dockerOnce } from "../execution/container-host.ts";
 
 export interface GatewayNetwork {
@@ -28,7 +29,16 @@ export async function createGatewayNetwork(
   await removeGatewayNetwork(name, docker);
   const created = await dockerOnce(
     docker,
-    ["network", "create", "--internal", "--label", `pigeon.stream=${prefix}`, name],
+    [
+      "network",
+      "create",
+      "--internal",
+      "-o",
+      "com.docker.network.bridge.enable_icc=false",
+      "--label",
+      `pigeon.stream=${prefix}`,
+      name,
+    ],
     60_000
   );
   if (created.exitCode !== 0) {
