@@ -1,7 +1,10 @@
 // 派 worker 时的工具清单与作用范围（决策 360）：清单只能取派出方能交出的工具（主会话专用的、deny 的、没有的一律拒绝），
 // 不给即按角色预设；范围须是 worker 有的工具、种类对得上、路径相对工作树根且不含 .. 或绝对路径、命令前缀不含 shell 语法；
-// 嵌套派出时只能比派出方更窄，没另给即沿用。
+// 嵌套派出时只能比派出方更窄，没另给即沿用；范围路径自身或上级是符号链接即拒（在 worker 起点所在的工作目录里查）。
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { ToolScope } from "../state/session-payloads.ts";
 import { assertPolicySubset, deriveWorkerPolicy, WorkerPolicyError } from "./roles.ts";
@@ -124,4 +127,34 @@ test("嵌套派出：派出方限定过的工具只能更窄，没另给即沿�
       worker
     )
   );
+});
+
+test("范围路径经过符号链接即拒派出（含嵌套派出借链接放宽），理由里写明真实路径；真实路径照常", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-roles-links-"));
+  try {
+    mkdirSync(join(root, "src"));
+    mkdirSync(join(root, "docs"));
+    try {
+      symlinkSync(join(root, "docs"), join(root, "src", "link"), "dir");
+    } catch (error) {
+      t.skip(`本机不能建符号链接（${(error as NodeJS.ErrnoException).code}）`);
+      return;
+    }
+    const linked = [{ tool: "read_file", paths: ["src/link"] }];
+    assert.throws(
+      () => deriveWorkerPolicy(PARENT, "tester", { scopes: linked, root }),
+      (error: unknown) => error instanceof WorkerPolicyError && error.message.includes("docs")
+    );
+    assert.deepEqual(
+      deriveWorkerPolicy(PARENT, "tester", {
+        scopes: [{ tool: "read_file", paths: ["src", "docs"] }],
+        root,
+      }).scopes,
+      [{ tool: "read_file", paths: ["src", "docs"] }]
+    );
+    const worker = { ...PARENT, deny: [], scopes: [{ tool: "read_file", paths: ["src"] }] };
+    refused(() => deriveWorkerPolicy(worker, "tester", { scopes: linked, root }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

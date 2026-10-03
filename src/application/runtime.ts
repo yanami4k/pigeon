@@ -772,6 +772,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         approval,
         commands: commandsConfig.commands,
         ...(roleAllowlist !== undefined ? { allowlist: roleAllowlist } : {}),
+        // 决策 360：带命令前缀范围时程序只按 PATH 解析
+        ...(delegated?.scopes?.some((scope) => scope.tool === RUN_COMMAND_TOOL) === true
+          ? { pathOnly: true }
+          : {}),
       }),
       ...(sessionSearch
         ? [

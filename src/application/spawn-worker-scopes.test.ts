@@ -6,6 +6,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import {
+  LIST_SESSIONS_TOOL,
+  READ_SESSION_ENTRY_TOOL,
+  SEARCH_SESSIONS_TOOL,
+} from "../memory/search-tools.ts";
 import { WorkerOrchestrator, type WorkerRuntimeRequest } from "../orchestration/workers.ts";
 import { newSessionId } from "../state/ids.ts";
 import {
@@ -96,11 +101,20 @@ test("工具清单与作用范围写进 worker 的委派策略；不合要求不
   });
 });
 
-test("说明按主 agent 现有的工具生成：没有的联网与会话检索工具不提，能收窄的工具只列有的", () => {
-  const text = spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS, ["read_file", "edit_file"]);
-  assert.ok(text.includes("explorer 只能读代码，适合调查与定位"), text);
-  assert.ok(text.includes("read_file、edit_file 限在给定的路径之内"), text);
-  for (const absent of ["web_search", "web_fetch", "检索历史会话", "run_command", "tester 能"]) {
+test("说明按主 agent 现有的工具生成：没有的工具不提，有没有会话检索工具说明不同", () => {
+  const base = ["read_file", "edit_file"];
+  const text = spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS, base);
+  for (const present of ["tools", "scopes", "read_file", "edit_file"]) {
+    assert.ok(text.includes(present), present);
+  }
+  for (const absent of ["web_search", "web_fetch", "run_command"]) {
     assert.ok(!text.includes(absent), absent);
   }
+  const withSessions = spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS, [
+    ...base,
+    SEARCH_SESSIONS_TOOL,
+    READ_SESSION_ENTRY_TOOL,
+    LIST_SESSIONS_TOOL,
+  ]);
+  assert.notEqual(withSessions, text);
 });

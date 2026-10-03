@@ -24,6 +24,7 @@ import {
   normalizeScopePath,
   SCOPABLE_TOOLS,
   scopeKindOf,
+  scopePathLinkProblem,
   scopeWithin,
 } from "../tools/tool-scope.ts";
 
@@ -100,6 +101,8 @@ export interface WorkerToolRequest {
   // 工具清单；不给即按角色取预设
   tools?: readonly string[];
   scopes?: readonly ToolScope[];
+  // worker 起点所在的工作目录：在场即查范围路径自身或其上级是不是符号链接（是即拒，范围路径须为真实路径）
+  root?: string;
 }
 
 // 派出方能交给 worker 的工具：它自己有的（不在 deny 里），去掉主会话专用的
@@ -121,7 +124,7 @@ export function deriveWorkerPolicy(
   const allow = [...chosen, ...orchestration].filter(
     (tool) => parent.allow.includes(tool) && !deny.includes(tool)
   );
-  const scopes = workerScopes(parent, allow, options.scopes ?? []);
+  const scopes = workerScopes(parent, allow, options.scopes ?? [], options.root);
   return {
     allow,
     deny,
@@ -155,11 +158,13 @@ function checkedTools(parent: ToolPolicyLike, tools: readonly string[]): string[
   return unique;
 }
 
-// 作用范围：每件工具至多一份，须是 worker 有的工具、种类与登记表（tool-scope.ts）对得上；派出方限定了的工具只能更窄，没另给即沿用派出方的
+// 作用范围：每件工具至多一份，须是 worker 有的工具、种类与登记表（tool-scope.ts）对得上；派出方限定了的工具只能更窄，没另给即沿用派出方的。
+// 范围路径不经符号链接（派出时查），"更窄"按字面包含即是按真实路径包含
 function workerScopes(
   parent: ScopedPolicy,
   allow: readonly string[],
-  given: readonly ToolScope[]
+  given: readonly ToolScope[],
+  root: string | undefined
 ): ToolScope[] {
   const inherited = parent.scopes ?? [];
   const seen = new Set<string>();
@@ -172,7 +177,7 @@ function workerScopes(
     if (!allow.includes(scope.tool)) {
       throw new WorkerPolicyError(`worker 没有 ${scope.tool}，不能给它作用范围`);
     }
-    const normalized = normalizedScope(scope);
+    const normalized = normalizedScope(scope, root);
     const outer = inherited.find((candidate) => candidate.tool === scope.tool);
     if (outer !== undefined && !scopeWithin(normalized, outer)) {
       throw new WorkerPolicyError(`${scope.tool} 的作用范围不能比派出方的宽`);
@@ -187,7 +192,7 @@ function workerScopes(
   return scopes;
 }
 
-function normalizedScope(scope: ToolScope): ToolScope {
+function normalizedScope(scope: ToolScope, root: string | undefined): ToolScope {
   const { tool, paths, commandPrefixes } = scope;
   const kind = scopeKindOf(tool);
   if (kind === "commandPrefixes") {
@@ -214,7 +219,13 @@ function normalizedScope(scope: ToolScope): ToolScope {
         `作用范围的路径须相对 worker 工作树的根，不能用 .. 或绝对路径：${bad.given}`
       );
     }
-    return { tool, paths: [...new Set(normalized.map((entry) => entry.path as string))] };
+    const unique = [...new Set(normalized.map((entry) => entry.path as string))];
+    const linked = root !== undefined ? unique.map((dir) => scopePathLinkProblem(root, dir)) : [];
+    const problem = linked.find((reason) => reason !== undefined);
+    if (problem !== undefined) {
+      throw new WorkerPolicyError(problem);
+    }
+    return { tool, paths: unique };
   }
   throw new WorkerPolicyError(
     `${tool} 不能附加作用范围（可以附加的：${Object.keys(SCOPABLE_TOOLS).join("、")}）`

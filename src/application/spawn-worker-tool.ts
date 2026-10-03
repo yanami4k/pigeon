@@ -211,7 +211,7 @@ export function spawnWorkerParamsSchema(taskList: boolean) {
           paths: Type.Optional(
             Type.Array(Type.String(), {
               minItems: 1,
-              description: `${scopableOf("paths").join("、")} 用：相对 worker 工作树根的路径，目录含其下全部；不能用 .. 或绝对路径`,
+              description: `${scopableOf("paths").join("、")} 用：相对 worker 工作树根的路径，须是不经符号链接的真实路径，目录含其下全部；不能用 .. 或绝对路径`,
             })
           ),
           commandPrefixes: Type.Optional(

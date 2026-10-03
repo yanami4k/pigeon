@@ -1,10 +1,13 @@
 // worker 工具的作用范围（决策 360）：派 worker 时可给某件工具附加范围，只能比派出方更窄——文件类工具限路径（相对 worker
-// 工作树的根，目录含其下全部；按解析符号链接后的真实路径判定），跑命令限命令前缀。本模块是可附加范围的工具登记表与判定本身：
-// 范围的规整、范围之间的包含、一次调用是否越界。
+// 工作树的根，目录含其下全部），跑命令限命令前缀。本模块是可附加范围的工具登记表与判定本身：范围的规整、范围之间的包含、
+// 派出时范围路径是否经过符号链接、一次调用是否越界。
+// 路径的判定：调用目标解析成真实路径（含符号链接），须落在范围路径的字面位置之内（只把工作树根取真实路径，范围路径本身不解析）。
+// 派出时范围路径自身或其上级是符号链接即拒，故范围路径都是真实路径；worker 事后建或改符号链接也绕不出范围（代价：范围路径
+// 要写真实路径）。路径上有悬空的符号链接即越界。
 // 派出参数的校验在 orchestration/roles.ts，逐调用的拒绝在治理层（application/governance.ts）。
 // 命令前缀按词比对，且只放行不经 shell 的单条命令：管道、重定向、串联、命令替换与换行一律越界，免得用 ; && | 把别的命令接在
 // 合规的开头后面。
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { ToolScope } from "../state/session-payloads.ts";
 import { isOutsideRelative } from "./paths.ts";
@@ -84,17 +87,31 @@ export function scopeWithin(inner: ToolScope, outer: ToolScope): boolean {
   return true;
 }
 
-// 真实路径：解析到最近一级已存在的上级再接上其余部分（目标可以还不存在，如将要新建的文件）
-function realOf(target: string): string {
+function exists(target: string): boolean {
+  try {
+    lstatSync(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 真实路径：目标还不存在时取最近一级存在的上级的真实路径再接上其余部分（如将要新建的文件）；
+// 路径上有悬空的符号链接（在却解析不了）或解析出别的错，给 undefined
+function realOf(target: string): string | undefined {
   const rest: string[] = [];
   let current = target;
   for (;;) {
     try {
       return path.join(realpathSync(current), ...rest);
-    } catch {
+    } catch (error) {
       const parent = path.dirname(current);
-      if (parent === current) {
-        return target;
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+        exists(current) ||
+        parent === current
+      ) {
+        return undefined;
       }
       rest.unshift(path.basename(current));
       current = parent;
@@ -102,7 +119,7 @@ function realOf(target: string): string {
   }
 }
 
-// 路径是否落在范围内（解析符号链接后比较；win32 下 path.relative 不分大小写）
+// 路径是否落在范围内：目标的真实路径落在某条范围路径的字面位置之内（win32 下 path.relative 不分大小写）
 export function pathWithinScope(
   workspaceRoot: string,
   scopePaths: readonly string[],
@@ -115,9 +132,40 @@ export function pathWithinScope(
     return false;
   }
   const target = realOf(path.resolve(root, inputPath));
-  return scopePaths.some(
-    (scope) => !isOutsideRelative(path.relative(realOf(path.resolve(root, scope)), target))
+  return (
+    target !== undefined &&
+    scopePaths.some((scope) => !isOutsideRelative(path.relative(path.resolve(root, scope), target)))
   );
+}
+
+// 派出时查范围路径：自身或某一级上级是符号链接时给出拒绝理由（指向工作树内即写明真实路径），否则 undefined
+export function scopePathLinkProblem(workspaceRoot: string, scopePath: string): string | undefined {
+  let root: string;
+  try {
+    root = realpathSync(workspaceRoot);
+  } catch {
+    return undefined;
+  }
+  let current = root;
+  for (const part of scopePath === "." ? [] : scopePath.split("/")) {
+    current = path.join(current, part);
+    let isLink: boolean;
+    try {
+      isLink = lstatSync(current).isSymbolicLink();
+    } catch {
+      return undefined;
+    }
+    if (isLink) {
+      const real = realOf(path.join(root, scopePath));
+      const relative = real !== undefined ? path.relative(root, real) : undefined;
+      if (relative === undefined || isOutsideRelative(relative)) {
+        return `范围路径 ${scopePath} 经符号链接指向工作树之外或不存在的位置，不能用作作用范围`;
+      }
+      const target = relative === "" ? "." : relative.replaceAll("\\", "/");
+      return `范围路径 ${scopePath} 经符号链接指向 ${target}，请改用真实路径 ${target}`;
+    }
+  }
+  return undefined;
 }
 
 // 一次调用越出作用范围时给出拒绝理由（原样交给模型）；在范围内给 undefined。
@@ -142,6 +190,10 @@ export function scopeViolation(
   }
   if (scope.commandPrefixes !== undefined) {
     const inspection = call.inspection;
+    // 本就执行不了的（如只按 PATH 找不到程序、引号未闭合）交回原因
+    if (inspection?.mode === "invalid" && inspection.error !== undefined) {
+      return inspection.error;
+    }
     const words = scope.commandPrefixes.map((prefix) => commandPrefixWords(prefix) ?? []);
     const single =
       inspection !== undefined &&

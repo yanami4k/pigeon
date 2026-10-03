@@ -609,10 +609,18 @@ export class WorkerOrchestrator {
       throw new WorkerSpawnError("任务不能为空");
     }
     const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
+    // 决策 360：范围路径在 worker 起点所在的工作目录里查符号链接——接力为上游 worker 的工作树，嵌套为派出方 worker 的
+    // 工作树，其余为主工作目录（治理根）
+    const scopeRoot =
+      request.start !== undefined && "from" in request.start
+        ? request.start.from
+        : fromEntry?.workspace.kind === "git-worktree"
+          ? fromEntry.workspace.path
+          : this.#options.governanceRoot;
     const policy = deriveWorkerPolicy(basePolicy, role, {
       orchestration: depth < this.#maxDepth,
       ...(request.tools !== undefined ? { tools: request.tools } : {}),
-      ...(request.scopes !== undefined ? { scopes: request.scopes } : {}),
+      ...(request.scopes !== undefined ? { scopes: request.scopes, root: scopeRoot } : {}),
     });
     assertPolicySubset(policy, basePolicy);
     const name = request.name ?? this.#nextName(role);
