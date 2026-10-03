@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadSessionView } from "../persistence/session-catalog.ts";
+import { LEGACY_READER_HINT, loadSessionView } from "../persistence/session-catalog.ts";
 import { runSearchCommand } from "./search.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
 import { writeLegacySessionFile } from "./session-view-fixtures.ts";
@@ -74,9 +74,7 @@ test("/search 末尾提示会话根下未列出的旧格式会话条数；没有
     const output = await runSearchCommand({ root, args: ["部署"] });
     assert.match(output, /命中 1 条/);
     assert.ok(
-      output.endsWith(
-        "另有 2 个旧格式会话（迁移之前创建）未列出；旧格式会话请用只读的旧版代码 455d88d 读取\n"
-      ),
+      output.endsWith(`另有 2 个旧格式会话（迁移之前创建）未列出；${LEGACY_READER_HINT}\n`),
       output
     );
   }));

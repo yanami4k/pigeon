@@ -91,16 +91,18 @@ test("已叠入：只取 worker 自己的改动写进主工作目录；worker �
     writeFileSync(join(f.worktree, "n.txt"), "new\n");
     rmSync(join(f.worktree, "d.txt"));
     const { text, details } = takeWorkerChanges(f.host([f.status("completed")]), "fix-a");
-    assert.equal(
-      text,
-      "已把 worker fix-a 的改动叠进工作目录。叠入的文件（2）：b.txt、n.txt。冲突未写入的文件（0）：无。worker 删除的文件（1，未删）：d.txt。"
-    );
-    assert.deepEqual(details.result, {
+    const expected = {
       applied: ["b.txt", "n.txt"],
       unchanged: [],
       conflicts: [],
       deletedByWorker: ["d.txt"],
-    });
+    };
+    // 文字由定稿模板按同一份结果生成（模板原文在冲突一条核对）
+    assert.equal(
+      text,
+      TAKE_WORKER_TEXTS.taken("fix-a", expected, { worktree: f.worktree, base: f.base })
+    );
+    assert.deepEqual(details.result, expected);
     assert.equal(readFileSync(join(f.main, "b.txt"), "utf8"), "b1\nb2 worker\nb3\n");
     assert.equal(readFileSync(join(f.main, "n.txt"), "utf8"), "new\n");
     assert.equal(
@@ -241,7 +243,11 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
     const taken = await tool.execute("c2", { worker: "fix-a" }, undefined);
     assert.equal(
       taken.content[0]?.type === "text" ? taken.content[0].text : "",
-      "已把 worker fix-a 的改动叠进工作目录。叠入的文件（1）：n.txt。冲突未写入的文件（0）：无。worker 删除的文件（0，未删）：无。"
+      TAKE_WORKER_TEXTS.taken(
+        "fix-a",
+        { applied: ["n.txt"], unchanged: [], conflicts: [], deletedByWorker: [] },
+        { worktree: f.worktree, base: f.base }
+      )
     );
     assert.equal(readFileSync(join(f.main, "n.txt"), "utf8"), "new\n");
   } finally {

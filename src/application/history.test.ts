@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { LEGACY_READER_HINT } from "../persistence/session-catalog.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import {
@@ -112,10 +113,7 @@ test("分支会话只画自己的部分；未收尾的 Run 没有结束标记；
     const legacy = newSessionId();
     writeFileSync(join(sessionsDir, `${legacy}.jsonl`), "");
     assert.deepEqual(pairs(loadSessionHistory(root, legacy)), [
-      [
-        "notice",
-        "[旧格式会话（迁移之前创建），这里不显示历史；旧格式会话请用只读的旧版代码 455d88d 读取]",
-      ],
+      ["notice", `[旧格式会话（迁移之前创建），这里不显示历史；${LEGACY_READER_HINT}]`],
     ]);
     assert.deepEqual(pairs(loadSessionHistory(root, newSessionId())), [
       ["notice", "[该会话在会话存储里没有记录，这里不显示历史]"],

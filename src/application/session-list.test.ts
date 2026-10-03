@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { LEGACY_READER_HINT } from "../persistence/session-catalog.ts";
 import { asSessionId, type SessionId } from "../state/ids.ts";
 import { sessionCreatedAt } from "../state/session-summary.ts";
 import { runSessionListCommand } from "./session-list.ts";
@@ -102,8 +103,7 @@ test("session list：旧格式会话（会话根下平铺的 sess_<ULID>.jsonl�
     writeFileSync(join(sessionsDir, `${SECOND}.jsonl`), "");
     writeFileSync(join(sessionsDir, `${FIRST}.jsonl`), "");
     writeFileSync(join(sessionsDir, `${FIRST}.messages.jsonl`), "");
-    const notice =
-      "另有 1 个旧格式会话（迁移之前创建）未列出；旧格式会话请用只读的旧版代码 455d88d 读取";
+    const notice = `另有 1 个旧格式会话（迁移之前创建）未列出；${LEGACY_READER_HINT}`;
     assert.equal(
       runSessionListCommand({ root }),
       `${minute(SECOND)}  1 个 Run  ${SECOND}\n${notice}\n`

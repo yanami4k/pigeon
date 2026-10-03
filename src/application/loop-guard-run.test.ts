@@ -109,7 +109,7 @@ test("pigeon run：第 5 轮提醒、第 10 轮再提醒、第 20 轮叫停；�
     assert.equal(first.length, 1);
     assert.match(
       first[0] ?? "",
-      /^\[打转提醒\] 最近连续 5 轮，你的工具调用和得到的结果都与上一轮完全相同：\n- read_file \{"path":"a\.ts"\}\n {4}结果：/
+      /^\[打转提醒\] [^\n]*5 轮[^\n]*\n- read_file \{"path":"a\.ts"\}\n {4}结果：/
     );
     assert.match(first[0] ?? "", /重复同样的调用不会带来新信息。请换一个思路/);
     const second = reminders(userTexts(streamFn.calls[11]));

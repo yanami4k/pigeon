@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { MEMORY_CONFLICT_TEXTS } from "../memory/pushed.ts";
 import { createFakeStreamFn, createGate } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { projectMemoryPathOf, userMemoryPathOf } from "../state/paths.ts";
@@ -593,11 +594,8 @@ test("Pigeon agent：推送格打开推送记忆——系统提示带作业目�
       const prompt = first.context.systemPrompt ?? "";
       assert.equal(prompt.includes("## 学到的记忆"), pushed, condition);
       assert.equal(prompt.includes(projectEntry), pushed, condition);
-      assert.equal(
-        prompt.includes("当前任务的要求与某条记忆冲突时，按当前任务的要求做"),
-        pushed,
-        condition
-      );
+      // 跑批器是无人值守的入口：推送段带无人值守版的冲突处理
+      assert.equal(prompt.includes(MEMORY_CONFLICT_TEXTS.unattended), pushed, condition);
       assert.ok(!prompt.includes(userEntry), "跑批器不读使用者的用户级记忆");
       assert.ok(!prompt.includes("update_memory"), condition);
       assert.ok(!(first.context.tools ?? []).some((tool) => tool.name === "update_memory"));

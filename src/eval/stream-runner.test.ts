@@ -1208,21 +1208,12 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         const summary = await runStreams(
           options(t, { agents: { pigeon: agent }, promptFormat: format })
         );
-        const second =
+        // 两段名单的说明行只核对开头（同 stream-manifest.test 的写法），其余逐行核对结构与名单
+        const expected =
           format === "test-files"
-            ? "Other test files already in the repository that currently fail and should pass after the change:\nsrc/other.test.sh\nsrc/z.test.sh\n"
-            : "Other test cases in test files already in the repository that currently fail and should pass after the change:\nsrc/other.test.sh::case\nsrc/z.test.sh::case\n";
-        const first =
-          format === "test-files"
-            ? "src/a.test.sh\nsrc/base.test.sh"
-            : "src/a.test.sh::case\nsrc/base.test.sh::case";
-        assert.equal(
-          agent.calls[0]?.prompt,
-          `Add alpha\n\nCreate src/a.txt\n\n${
-            format === "test-files" ? "Test files" : "Test cases"
-          } that should pass${(agent.calls[0]?.prompt ?? "").split("should pass")[1]?.split("\n")[0]}\n${first}\n\n${second}`,
-          format
-        );
+            ? /^Add alpha\n\nCreate src\/a\.txt\n\nTest files that should pass[^\n]*\nsrc\/a\.test\.sh\nsrc\/base\.test\.sh\n\nOther test files[^\n]*:\nsrc\/other\.test\.sh\nsrc\/z\.test\.sh\n$/
+            : /^Add alpha\n\nCreate src\/a\.txt\n\nTest cases that should pass[^\n]*\nsrc\/a\.test\.sh::case\nsrc\/base\.test\.sh::case\n\nOther test cases[^\n]*:\nsrc\/other\.test\.sh::case\nsrc\/z\.test\.sh::case\n$/;
+        assert.match(agent.calls[0]?.prompt ?? "", expected, format);
         assert.doesNotMatch(
           agent.calls[1]?.prompt ?? "",
           /Other test/,
@@ -1250,11 +1241,12 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           options(t, { agents: { pigeon: agent }, promptFormat: format, maxSteps: 1 })
         );
         const prompt = agent.calls[0]?.prompt ?? "";
+        // 第二段说明行只核对开头（同 stream-manifest.test 的写法）
         const second =
           format === "test-files"
-            ? "Other test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.sh\n"
-            : "Other test cases in test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.sh::case\n";
-        assert.ok(prompt.endsWith(`\n\n${second}`), `${format}：${prompt}`);
+            ? /\n\nOther test files[^\n]*:\nsrc\/z\.test\.sh\n$/
+            : /\n\nOther test cases[^\n]*:\nsrc\/z\.test\.sh::case\n$/;
+        assert.match(prompt, second, `${format}：${prompt}`);
         assert.doesNotMatch(prompt, /other\.test\.sh/, `${format}：第二段不列整文件收集失败的文件`);
         const [r1] = readStreamResults(summary.resultsFile);
         assert.deepEqual(r1?.judging?.failToPass, { passed: 3, total: 3 });

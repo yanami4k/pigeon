@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { orchestrationSettingsOf, parseLaunchFlags } from "../application/launch-flags.ts";
+import { SPAWN_WORKER_TEXTS } from "../application/spawn-worker-tool.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { emptySettingsSnapshot } from "../state/settings.ts";
 import { routeTopLevel, TOP_LEVEL_HELP, TUI_ENTRY } from "./index.ts";
@@ -133,10 +134,9 @@ test("pigeon run：主 agent 同一次回复派两个 worker（派出即返回�
       .join("");
   assert.deepEqual(
     calls.filter((call) => call.toolName === "spawn_worker").map((call) => textOf(call)),
-    [
-      "已派出 worker fix-a（implementer），分支 pigeon/fix-a。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
-      "已派出 worker fix-b（implementer），分支 pigeon/fix-b。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
-    ]
+    ["fix-a", "fix-b"].map((name) =>
+      SPAWN_WORKER_TEXTS.spawned({ name, role: "implementer", branch: `pigeon/${name}` })
+    )
   );
   const waited = calls.find((call) => call.toolName === "wait_workers");
   assert.ok(waited !== undefined);
@@ -292,7 +292,7 @@ export default (model, context, options) => {
         .join("")
     );
   assert.deepEqual(texts, [
-    "已派出 worker look-a（explorer），分支 pigeon/look-a。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。",
-    "本次运行派出的 worker 已达 1 个上限。不要再派；用已有的结果，或自己完成。",
+    SPAWN_WORKER_TEXTS.spawned({ name: "look-a", role: "explorer", branch: "pigeon/look-a" }),
+    SPAWN_WORKER_TEXTS.spawnLimit(1),
   ]);
 });

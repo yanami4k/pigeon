@@ -133,11 +133,10 @@ function childStatuses(root: string, sessionId: string): Record<string, string |
 }
 
 const spawned = (name: string, role = "explorer") =>
-  `已派出 worker ${name}（${role}），分支 pigeon/${name}。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。`;
+  SPAWN_WORKER_TEXTS.spawned({ name, role, branch: `pigeon/${name}` });
 
-// 决策 279：每段返回文字末尾另起一行写起点与取用方式（提交号随仓库变）；比对定稿文字时去掉这一行，格式另在一处专门核对
-const START_LINE =
-  /\n起点：(提交|快照) [0-9a-f]{12}（(派出时没有未提交的文件|含派出时 \d+ 个未提交的文件)）；要把它的改动叠进你的工作目录，调用 take_worker（worker=[a-z0-9-]+）。/g;
+// 决策 279：每段返回文字末尾另起一行写起点与取用方式（提交号随仓库变）；比对收尾文字时去掉这一行，格式另在一处专门核对
+const START_LINE = /\n起点：[^\n]*/g;
 // 通知末行的 worker 会话号（续接时据它判定通知是否已递出）同样随会话变，格式另在 spawn-worker-tool.test 核对
 const MARKER_LINE = /\n（worker 会话 sess_[0-9A-Z]+）/g;
 const withoutMarker = (text: string): string => text.replace(MARKER_LINE, "");
@@ -192,7 +191,14 @@ test("pigeon run 等全部 worker 结束、完成通知作为新的一轮处理�
   assert.equal(users.length, 2);
   assert.equal(
     withoutStart(users[1] ?? ""),
-    `${WORKER_NOTICE_PREFIX}worker slow（explorer）已完成。分支：pigeon/slow。改动的文件（0）：无。摘要：看完了`
+    WORKER_NOTICE_PREFIX +
+      SPAWN_WORKER_TEXTS.completed({
+        name: "slow",
+        role: "explorer",
+        branch: "pigeon/slow",
+        files: [],
+        summary: "看完了",
+      })
   );
   assert.deepEqual(childStatuses(root, result.sessionId), { slow: "completed" });
 });
@@ -385,12 +391,13 @@ test("无人值守：worker 要跑命令即停下、以可恢复错误交回，�
   const notices = userTexts(root, result.sessionId).filter((text) =>
     text.startsWith(WORKER_NOTICE_PREFIX)
   );
+  const awaiting = SPAWN_WORKER_TEXTS.awaitingApproval(
+    { name: "runner", role: "tester", branch: "pigeon/runner" },
+    "跑命令 node -v",
+    { kind: "unattended" }
+  );
   assert.ok(
-    notices.some((text) =>
-      text.includes(
-        "worker runner（tester）停在等审批：要跑命令 node -v，无人值守运行没有人审批。分支 pigeon/runner 上有已做的部分；人补批后它可以接着做。"
-      )
-    ),
+    notices.some((text) => text.includes(awaiting)),
     notices.join("\n")
   );
   // 决策 302：implementer 改自己工作树里的文件没有请示，照常完成
@@ -434,7 +441,10 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，通知
     withoutMarker(notice ?? "")
       .split("\n")
       .at(-1),
-    `起点：提交 ${git(root, ["rev-parse", "HEAD"]).slice(0, 12)}（派出时没有未提交的文件）；要把它的改动叠进你的工作目录，调用 take_worker（worker=explorer-1）。`
+    SPAWN_WORKER_TEXTS.start(
+      { commit: git(root, ["rev-parse", "HEAD"]), snapshot: false, files: [] },
+      "explorer-1"
+    )
   );
 });
 
@@ -484,19 +494,25 @@ test("多份尝试：各份在自己的工作树里改，全部结束后汇总�
   });
   assert.equal(result.status, "completed");
   assert.deepEqual(spawnResults(root, result.sessionId), [
-    "已并行派出 2 份：implementer-1、implementer-2。全部结束后会有一条通知，交回各份的改动与摘要。",
+    SPAWN_WORKER_TEXTS.attemptsSpawned(["implementer-1", "implementer-2"]),
   ]);
   const notices = userTexts(root, result.sessionId).filter((text) =>
     text.startsWith(WORKER_NOTICE_PREFIX)
   );
   assert.equal(notices.length, 1);
+  // 各份按「第 N 份：」起头、空行相隔，各自在自己的分支上改了 a.txt
+  const attempt = (index: number) =>
+    SPAWN_WORKER_TEXTS.attempt(index) +
+    SPAWN_WORKER_TEXTS.completed({
+      name: `implementer-${index}`,
+      role: "implementer",
+      branch: `pigeon/implementer-${index}`,
+      files: ["a.txt"],
+      summary: "改好了",
+    });
   assert.equal(
     withoutStart(notices[0] ?? ""),
-    WORKER_NOTICE_PREFIX +
-      [
-        "第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.txt。摘要：改好了",
-        "第 2 份：worker implementer-2（implementer）已完成。分支：pigeon/implementer-2。改动的文件（1）：a.txt。摘要：改好了",
-      ].join("\n\n")
+    WORKER_NOTICE_PREFIX + [attempt(1), attempt(2)].join("\n\n")
   );
 });
 

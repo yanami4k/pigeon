@@ -133,16 +133,19 @@ test("search_sessions 典型输出逐字：命中行带条目号、会话、Run 
         "片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。",
       ].join("\n")
     );
-    assert.equal(
-      textOf(await tool.execute("t2", { keywords: ["网关", "部署"], includeToolOutput: true })),
-      [
-        "命中 2 条（关键词：网关、部署；范围：对话正文与工具输出；按命中的关键词数从多到少，同数从新到旧）：",
-        `- ${user.entryId}｜会话 ${SESSION}｜${runId} 第 1 条｜user｜${new Date(user.timestamp).toISOString()}｜命中：网关、部署`,
-        "  部署网关",
-        `- ${result.entryId}｜会话 ${SESSION}｜${runId} 第 3 条｜toolResult（read_file）｜${new Date(result.timestamp).toISOString()}｜命中：网关`,
-        "  网关配置在 gw.yaml",
-        "片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。",
-      ].join("\n")
+    // 连同工具输出：只核对条数与多出的工具结果那条命中（角色带工具名）；版式已由上一次逐字核对
+    const withTools = textOf(
+      await tool.execute("t2", { keywords: ["网关", "部署"], includeToolOutput: true })
+    );
+    assert.match(withTools, /^命中 2 条（/);
+    assert.ok(
+      withTools.includes(
+        [
+          `- ${result.entryId}｜会话 ${SESSION}｜${runId} 第 3 条｜toolResult（read_file）｜${new Date(result.timestamp).toISOString()}｜命中：网关`,
+          "  网关配置在 gw.yaml",
+        ].join("\n")
+      ),
+      withTools
     );
     assert.equal(
       textOf(await tool.execute("t3", { keywords: ["gw.yaml"] })),

@@ -10,6 +10,7 @@ import type {
   WorkerWorkspace,
 } from "../state/session-payloads.ts";
 import {
+  previousRunWorkerText,
   WorkerDepthError,
   WorkerOrchestrator,
   type WorkerOrchestratorOptions,
@@ -508,13 +509,17 @@ test("之前运行的 worker：查询与等结果照常；取消、发消息、�
     assert.ok(error instanceof WorkerSpawnError);
     assert.equal(
       error.message,
-      "worker half 是之前的运行派出的，随上次进程退出而中断，不在运行，无需取消。"
+      previousRunWorkerText({ name: "half", previousRun: "interrupted" }, "cancel")
     );
     return true;
   });
   assert.throws(
     () => orchestrator.send(prev.settledId, "接着"),
-    /worker implementer-1 是之前的运行派出的，已在之前的运行中收尾，不在运行，收不到消息。$/
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message.endsWith(
+        previousRunWorkerText({ name: "implementer-1", previousRun: "settled" }, "send")
+      )
   );
   assert.throws(
     () => orchestrator.resume(prev.settledId, { approve: true }),

@@ -15,6 +15,7 @@ import {
   tearTail,
 } from "../application/session-store-fixtures.ts";
 import { writeLegacySessionFile } from "../application/session-view-fixtures.ts";
+import { LEGACY_READER_HINT } from "../persistence/session-catalog.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
@@ -301,7 +302,7 @@ test("trace 命令：会话不存在时报错并列出已有会话；旧格式�
       (error: unknown) =>
         error instanceof Error &&
         error.message ===
-          `会话 ${legacy} 是旧格式会话（迁移之前创建），这里不读；旧格式会话请用只读的旧版代码 455d88d 读取`
+          `会话 ${legacy} 是旧格式会话（迁移之前创建），这里不读；${LEGACY_READER_HINT}`
     );
 
     const filtered = runTraceCommand({ root, sessionId, runId });

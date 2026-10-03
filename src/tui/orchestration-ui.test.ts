@@ -10,7 +10,11 @@ import { test } from "node:test";
 import { createFixtureSession } from "../application/session-store-fixtures.ts";
 import { textRun } from "../application/session-view-fixtures.ts";
 import type { TaskItem } from "../application/task-list-tool.ts";
-import type { WorkerActivity, WorkerRef } from "../application/workers-commands.ts";
+import {
+  resumeApprovalText,
+  type WorkerActivity,
+  type WorkerRef,
+} from "../application/workers-commands.ts";
 import { sessionsDirOf } from "../application/workspace.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope } from "../state/events.ts";
@@ -449,10 +453,8 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     const second = h.runtime("ship");
     assert.equal(second.request.sessionId, id);
     assert.equal(second.request.resume, true);
-    assert.equal(
-      second.inputs[0],
-      "人已批准你之前等待审批的调用（跑命令 npm test）。请重新发起这个调用，然后接着完成任务。\n顺便跑 lint"
-    );
+    // 补批的话（带等审批的那个调用）在前，人另附的话另起一行在后
+    assert.equal(second.inputs[0], `${resumeApprovalText("跑命令 npm test")}\n顺便跑 lint`);
     // 重新发起的同一个调用直接放行，不再问人
     const decision = await second.ask("npm test");
     assert.equal(decision.approved, true);
