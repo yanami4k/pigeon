@@ -12,6 +12,8 @@
 // 只有有人对话的入口另给写入配置，注册 update_memory、推送段带"被纠正时记下"的说明。复盘（收尾、压缩前、补做）随决策 331 删除
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
 // 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
+// 模型信息（决策 362）：接入模块可具名导出 modelInfo，加载时随 StreamFn 登记；装配时按设置 > 声明 > pi-ai 目录 > 未知逐项取值，
+// 写进每个 Run 的开始条目并放在运行面上供查询（state/model-info.ts 的 modelProfile）。不改裁剪、压缩或输出上限的行为
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -43,7 +45,15 @@ import {
   ContextCompactor,
   resolveCompactionConfig,
 } from "../pi-runtime/compaction.ts";
-import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
+import {
+  type AgentMessage,
+  declarationComplete,
+  loadCatalogLookup,
+  modelAccessOf,
+  parseModelInfoDeclaration,
+  registerModelAccess,
+  type StreamFn,
+} from "../pi-runtime/index.ts";
 import { limitOutputTokens } from "../pi-runtime/output-limit.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
@@ -63,6 +73,12 @@ import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { HookEventName } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
+import {
+  type ModelInfoDeclaration,
+  type ResolvedModelInfo,
+  resolveModelInfo,
+  runModelInfoRecord,
+} from "../state/model-info.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
@@ -71,6 +87,7 @@ import {
   configGrantRulesOf,
   emptySettingsSnapshot,
   memoryLimitsOf,
+  modelInfoSectionOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
@@ -138,7 +155,7 @@ import {
   taskListRegistrations,
   UPDATE_TASKS_TOOL,
 } from "./task-list-tool.ts";
-import type { WarnSink } from "./warnings.ts";
+import { stderrWarn, type WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
 export interface RuntimeDeps {
@@ -314,6 +331,8 @@ export interface RuntimeBundle {
   taskList?: TaskList;
   // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
   frozenPrompt: FrozenSessionPrompt;
+  // 决策 362：本运行面所用的模型信息（逐项带来源）与缓存规则
+  modelInfo: ResolvedModelInfo;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -357,6 +376,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = sessionsDirOf(governanceRoot);
   // 决策 325：设置快照（会话开始时已读好、校验过）；放权规则取三层并集
   const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
+  // 决策 362：本次所用的模型信息（身份取接入模块的声明，没有则取启动参数的标签）
+  const access = modelAccessOf(deps.streamFn);
+  const modelSection = modelInfoSectionOf(settings);
+  const modelInfo = resolveModelInfo({
+    launch: { provider: deps.provider, id: deps.modelId },
+    ...(access?.declared !== undefined ? { declared: access.declared } : {}),
+    ...(access?.catalog !== undefined ? { catalog: access.catalog } : {}),
+    ...(modelSection !== undefined ? { section: modelSection } : {}),
+  });
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -848,6 +876,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     compaction: compactor,
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 Run 开始条目；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
+    modelInfo: runModelInfoRecord(modelInfo),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
     // 决策 264：注册了派 worker 工具时，同一次回复里的多个派出并行执行
     ...(spawnSlot !== undefined ? { parallelTools: true } : {}),
@@ -924,6 +953,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     settings,
     hooks: sessionHooks,
     toolTiers,
+    modelInfo,
     frozenPrompt: {
       instructions,
       ...(pushedMemory !== undefined ? { pushedMemory } : {}),
@@ -961,7 +991,10 @@ export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）。归位装配根（M2 S2）：它是模型接入的
 // 装载件，与 buildRuntime 同属"装配"职责；cli 与 tui 两个 Actor 都从本层取，避免 Actor 互依
-export async function loadStreamFn(specifier: string): Promise<StreamFn> {
+export async function loadStreamFn(
+  specifier: string,
+  warn: WarnSink = stderrWarn
+): Promise<StreamFn> {
   // 说明符判定：磁盘上存在的相对/绝对路径一律按文件加载（tmp/x.mjs 这类含分隔符的
   // 相对路径也是文件，不能交给裸说明符解析）；否则按裸包名 import
   const asFile = path.resolve(specifier);
@@ -978,7 +1011,25 @@ export async function loadStreamFn(specifier: string): Promise<StreamFn> {
   if (typeof module.default !== "function") {
     throw new Error(`streamFn 模块 ${specifier} 没有默认导出函数`);
   }
-  return module.default as StreamFn;
+  const streamFn = module.default as StreamFn;
+  // 决策 362：可选的具名导出 modelInfo（不合规即报错，不认识的顶层键告警）；声明没给全价格、窗口与输出上限时另加载
+  // pi-ai 自带目录备查（加载失败告警，按未知处理）
+  let declared: ModelInfoDeclaration | undefined;
+  if (module.modelInfo !== undefined) {
+    const parsed = parseModelInfoDeclaration(module.modelInfo, `streamFn 模块 ${specifier}`);
+    declared = parsed.declared;
+    if (parsed.unknownKeys.length > 0) {
+      warn(
+        `streamFn 模块 ${specifier} 导出的 modelInfo 有不认识的字段 ${parsed.unknownKeys.join("、")}（不是 pi-ai 模型字段，也不是 modelInfo 的字段），已忽略`
+      );
+    }
+  }
+  const catalog = declarationComplete(declared) ? undefined : await loadCatalogLookup(warn);
+  registerModelAccess(streamFn, {
+    ...(declared !== undefined ? { declared } : {}),
+    ...(catalog !== undefined ? { catalog } : {}),
+  });
+  return streamFn;
 }
 
 // 配置了单轮输出上限才包装；未配置原样返回（跟模型）

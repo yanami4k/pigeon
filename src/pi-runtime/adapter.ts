@@ -57,6 +57,7 @@ import { classifyRunOutcome, type FailureClass } from "../state/classification.t
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { LoopRound } from "../state/loop-guard.ts";
+import type { RunModelInfo } from "../state/model-info.ts";
 import {
   type RunStartedPayload,
   RuntimeEventKind,
@@ -189,6 +190,8 @@ export interface PiRuntimeAdapterOptions {
   // M5.7 S3（决策 052）：Run 开始条目的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
   // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
   runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+  // 决策 362：本次所用的模型信息与每一项的来源（装配根解析好交来），每个 Run 开始条目照记；缺省不记
+  modelInfo?: RunModelInfo;
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
   initialMessages?: AgentMessage[];
   // 新会话存储的写入面（决策 176）；缺省不写
@@ -233,6 +236,7 @@ export class PiRuntimeAdapter {
   #currentRunId: RunId | null = null;
   #disposed = false;
   readonly #runStartedExtras: PiRuntimeAdapterOptions["runStartedExtras"];
+  readonly #modelInfo: RunModelInfo | undefined;
   readonly #sessionStore: SessionStoreSink | undefined;
   // 当前 Run 被我们的上限中止的原因（interrupt 时给出；每个 Run 开始时清空）
   #stopCause: RunStopCause | undefined;
@@ -273,6 +277,7 @@ export class PiRuntimeAdapter {
     this.sessionId = options.sessionId ?? newSessionId();
 
     this.#runStartedExtras = options.runStartedExtras;
+    this.#modelInfo = options.modelInfo;
     this.#sessionStore = options.sessionStore;
     this.#compactor = options.compaction;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
@@ -1192,6 +1197,8 @@ export class PiRuntimeAdapter {
           ...(snapshot.pushedMemory !== undefined
             ? { pushedMemory: structuredClone(snapshot.pushedMemory) }
             : {}),
+          // 决策 362：本次所用的模型信息与来源
+          ...(this.#modelInfo !== undefined ? { modelInfo: structuredClone(this.#modelInfo) } : {}),
         },
       });
     } catch (error) {

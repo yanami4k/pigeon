@@ -1,6 +1,6 @@
 # 配置与状态目录
 
-本页说明 Pigeon 的设置文件、程序状态目录、记忆与人写的说明、迁移命令与配置相关的安全防线（决策 325、326、328–332、340、341）。
+本页说明 Pigeon 的设置文件、程序状态目录、记忆与人写的说明、模型信息、迁移命令与配置相关的安全防线（决策 325、326、328–332、340、341、362）。
 
 ## 三层设置
 
@@ -29,6 +29,7 @@
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
 | `memory` | 学到的记忆的两层上限：`projectLimitChars`、`userLimitChars`，缺省各 4,000 字符 | — |
+| `modelInfo` | 按模型手填的价格、上下文窗口、单次输出上限与缓存规则的覆盖（见下文"模型信息"） | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -76,6 +77,65 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 不配置时 Pigeon 不另设单轮输出上限：按模型定义的上限发，由 provider 按剩余上下文收窄。自带的 DeepSeek 接入按官方上限 393,216 发。"模型定义没有上限（`maxTokens` 缺失或不为正）时发 32,000"只适用于跑批网关的接入或第三方模块自构的模型对象，不涉及自带的 DeepSeek。启动参数 `--max-output-tokens <n>` 设了上限时，取它与模型上限中较小的那个；设了的值记进注入快照与运行开始条目的 model 段，没设的不记（表示跟模型），worker 照派出它的运行面。
 
 经 `--stream-fn` / `PIGEON_STREAM_FN` 接入的第三方模块，交给 provider 的模型对象须带 `maxTokens`（模型的单次输出上限）：Pigeon 交给模块的只是身份占位，看不到模块里的真实模型对象，不配置上限时就按模块自己的模型对象发。
+
+## 模型信息
+
+Pigeon 为每次运行确定所用模型的价格、上下文窗口与单次输出上限，并查出该服务方的提示缓存规则（决策 362）。这些信息写进每个 Run 的开始条目（`modelInfo`，每一项带来源），供后续的上下文裁剪等功能查询；本身不改变裁剪、压缩或输出上限的行为。
+
+模型身份：接入模块声明了 `provider` 与 `id` 就用声明的，否则用启动参数 `--provider`、`--model` 的标签。
+
+价格、窗口、输出上限逐项取值，优先级从高到低：
+
+1. 设置 `modelInfo.models` 里该模型的手填值（来源记为 settings）；
+2. 接入模块声明的（declared）；
+3. 按 provider 与模型名查 pi-ai 自带的模型目录（catalog；价格为美元/百万 token）；
+4. 都没有记为未知（unknown）。
+
+每一项单独取：价格可以来自目录，窗口来自声明。价格的四个数（`input`、`output`、`cacheRead`、`cacheWrite`，每百万 token）与币种 `currency` 算一项，整体取自同一来源；四个数全为 0 的一层当作没给价格，继续往下层取。pi-ai 目录加载失败时打一行告警，未声明的项按未知处理，不影响启动。
+
+### 接入模块声明模型信息
+
+`--stream-fn` / `PIGEON_STREAM_FN` 指向的模块除默认导出的 StreamFn 外，可以再具名导出 `modelInfo`，字段取 pi-ai 模型对象的那一套，另可写实际服务方 `servedBy`，各项可缺省（直接导出一个 pi-ai 模型对象也可以；既不是 pi-ai 模型字段、也不是 `modelInfo` 字段的顶层键不用，启动时打一行告警）：
+
+```js
+export default streamFn;
+export const modelInfo = {
+  provider: "acme",
+  id: "acme-large",
+  cost: { input: 2, output: 8, cacheRead: 0.2, cacheWrite: 2.5, currency: "USD" },
+  contextWindow: 256000,
+  maxTokens: 32000,
+};
+```
+
+`currency` 缺省为 USD。不导出 `modelInfo` 的老模块照常可用；导出了但字段不合规，启动时报错并指出字段。自带的 DeepSeek 接入声明官方人民币非高峰价（`currency` 为 CNY；高峰加价由计费另算）；它交给 pi-ai 的模型对象价格仍为 0，现有的花费计算与状态栏不变。
+
+### 设置里的覆盖值
+
+`modelInfo.models` 的键是 `"<provider>/<模型名>"`（按上面的模型身份匹配，不合这一格式的键报错），值可写：
+
+- `cost`：四个价格与 `currency` 须写全（三层按键合并，币种必填才不会沿用低层的币种）；
+- `contextWindow`、`maxTokens`：正整数；
+- `cache`：缓存规则的覆盖。`servedBy` 指明按哪家服务方的规则查表（经代理或兼容端点访问时用），`mode`（auto、explicit、both、none）、`minPrefixTokens`，以及 `short`、`long` 两档的 `seconds`、`basis`、`refreshOnHit`、`writeMultiplier`、`readMultiplier`，写了的项逐项盖在表里查到的规则上。
+
+```json
+{
+  "modelInfo": {
+    "models": {
+      "my-proxy/claude-sonnet-5": {
+        "contextWindow": 200000,
+        "cache": { "servedBy": "anthropic" }
+      }
+    }
+  }
+}
+```
+
+### 缓存规则表
+
+缓存规则按实际服务方查，不按接口格式（经 Anthropic 兼容端点访问 DeepSeek，查的是 DeepSeek 的规则）。实际服务方的取法：设置里的 `cache.servedBy` > 声明里的 `servedBy` > 按声明的 `baseUrl` 主机名查已知服务方（如 `api.deepseek.com`、`api.anthropic.com`、`api.openai.com`）> provider 标签。同一服务方下可再按精确型号或模型名前缀细分；有的服务方没有兜底行，表里没列出的型号各项未知。每行记缓存方式、短长两档的保留时长（秒数或未知，依据类别为 fixed、minimum、typical、best-effort 或 unstated）、命中是否续期、写缓存与命中按输入价的倍数、如何开启、最小可缓存前缀，以及出处（URL、取用日期、原文引句）。查不到的服务方各项记为未知，由用到它的功能各自保守处理。
+
+表的出处可手动复核：`node scripts/check-cache-rule-sources.ts` 逐行抓取出处页面，确认原文引句还在，不在的行标为"需复核"并列出（需要经代理上网时另设 `NODE_USE_ENV_PROXY=1`）。这个脚本不进 CI。
 
 ## key 走环境变量
 
