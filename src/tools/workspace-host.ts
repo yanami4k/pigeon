@@ -96,6 +96,9 @@ export interface WorkspaceHost {
   // 决策 355 / 368：禁读名单里落在工作区根之内的部分，相对工作区根（正斜杠；工作区根整片禁读时为 "."）；
   // grep、glob 据此滤掉结果。可选：没有实现的执行端不滤
   readDenyWithin?(deny: readonly string[]): Promise<string[]>;
+  // 决策 368：工作区内文件（相对工作区根的路径）的修改时间（毫秒）；取不到的不在结果里。glob 据此排序。
+  // 可选：没有实现的执行端 glob 按路径排序
+  fileMtimes?(relPaths: readonly string[]): Promise<Map<string, number>>;
   // 以下三个只接受 resolveExisting / resolveForWrite / resolveForRead 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;

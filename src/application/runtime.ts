@@ -73,6 +73,7 @@ import {
   memoryLimitsOf,
   readDenyOf,
   type SettingsSnapshot,
+  searchLimitsOf,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -93,6 +94,11 @@ import {
   RunCommandParamsSchema,
   runCommandTexts,
 } from "../tools/run-command.ts";
+import {
+  createSearchTools,
+  READ_ONLY_SEARCH_TOOLS,
+  searchToolRegistrations,
+} from "../tools/search-tools.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
   createWebFetchTool,
@@ -438,6 +444,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const approval: RunCommandApproval =
     approvalMode === "yolo" ? "yolo" : deps.createApprovalHandler !== undefined ? "prompt" : "none";
   const commandTexts = runCommandTexts({ platform: workspaceHost.platform, approval });
+  // 决策 368：grep、glob 的上限与禁读名单；本机执行端先用随包附带的 ripgrep，容器里用容器自己的
+  const searchLimits = searchLimitsOf(settings);
+  const searchOptions = {
+    readDeny: readDenyOf(settings),
+    bundledRipgrep: deps.workspaceHost === undefined,
+  };
   const registry = new ToolRegistry();
   registry.register({
     name: "read_file",
@@ -464,6 +476,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
+  // 决策 368：grep、glob——只读工具（读档审批、可并行），登记点见 tools/search-tools.ts
+  for (const registration of searchToolRegistrations()) {
+    registry.register(registration);
+  }
   // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
   // 决策 193 的开关关掉时一件都不注册
   const sessionSearch = deps.sessionSearch ?? true;
@@ -612,6 +628,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "read_file",
     "edit_file",
     RUN_COMMAND_TOOL,
+    ...READ_ONLY_SEARCH_TOOLS,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
     ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
@@ -767,6 +784,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ...(deps.commandRole !== undefined
           ? { allowlist: commandsConfig.roles[deps.commandRole] ?? [] }
           : {}),
+      }),
+      ...createSearchTools(workspaceHost, {
+        grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults },
+        glob: { ...searchOptions, maxResults: searchLimits.globMaxResults },
       }),
       ...(sessionSearch
         ? [

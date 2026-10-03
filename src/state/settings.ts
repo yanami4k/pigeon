@@ -43,6 +43,7 @@ import {
   sandboxConfigProblems,
 } from "./sandbox-config.ts";
 import { WorkerRoleSchema } from "./session-payloads.ts";
+import { type SearchLimits, searchLimits, ToolsSectionSchema } from "./tools-config.ts";
 import { WEB_KEY_FIELDS, type WebSection, WebSectionSchema } from "./web-config.ts";
 
 // 三层，按优先级从低到高
@@ -66,6 +67,7 @@ export const SETTINGS_SECTIONS = {
   sandbox: SandboxSectionSchema,
   loopGuard: LoopGuardSectionSchema,
   memory: MemorySectionSchema,
+  tools: ToolsSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -87,6 +89,7 @@ export const SettingsFileSchema = Type.Object(
     loopGuard: Type.Optional(LoopGuardSectionSchema),
     hooks: Type.Optional(HooksSectionSchema),
     memory: Type.Optional(MemorySectionSchema),
+    tools: Type.Optional(ToolsSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -238,6 +241,7 @@ export interface MergedSettings {
   sandbox?: SandboxConfig;
   loopGuard?: Static<typeof LoopGuardSectionSchema>;
   memory?: Static<typeof MemorySectionSchema>;
+  tools?: Static<typeof ToolsSectionSchema>;
   // 决策 355：读档禁读名单的追加项，三层并集（permissions.readDeny；只能往内置名单上加）
   readDeny?: string[];
   trustedDirectories: string[];
@@ -429,6 +433,11 @@ export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettin
 // 决策 355：设置追加的读档禁读项（三层并集）；内置名单在 tools/read-deny.ts
 export function readDenyOf(snapshot: SettingsSnapshot): string[] {
   return [...(snapshot.merged.readDeny ?? [])];
+}
+
+// 决策 368：grep、glob 的结果条数上限（tools 一节，不给的取缺省）
+export function searchLimitsOf(snapshot: SettingsSnapshot): SearchLimits {
+  return searchLimits(snapshot.merged.tools);
 }
 
 export function webSectionOf(snapshot: SettingsSnapshot): WebSection | undefined {

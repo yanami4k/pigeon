@@ -109,6 +109,8 @@ const READ_RESOLVE_SCRIPT = [
   `  if [ -e "$p" ]; then printf '%s\\0' "$(readlink -f -- "$p")"; else printf '\\0'; fi`,
   "done",
 ].join("\n");
+// 决策 368：glob 按修改时间排序——标准输入给出 NUL 分隔的相对路径，每行输出"秒数 路径"；取不到的文件不输出
+const MTIMES_SCRIPT = "xargs -0 stat -c '%Y %n' -- 2>/dev/null; exit 0";
 // 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己
 const WRITE_SCRIPT = [
   `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }`,
@@ -426,6 +428,25 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const base = await resolveRoot();
       const { entries } = await resolveReadPaths("", deny);
       return denyWithinRoot(base, entries, path.posix);
+    },
+    async fileMtimes(relPaths) {
+      const times = new Map<string, number>();
+      if (relPaths.length === 0) {
+        return times;
+      }
+      // 文件清单经标准输入以 NUL 分隔交给 xargs，不进命令行；stat 从系统目录解析
+      const result = await helper(true, trustedShell(MTIMES_SCRIPT), `${relPaths.join("\0")}\0`);
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      for (const line of result.stdout.toString("utf8").split("\n")) {
+        const space = line.indexOf(" ");
+        const seconds = Number(line.slice(0, space));
+        if (space > 0 && Number.isFinite(seconds)) {
+          times.set(line.slice(space + 1).replace(/^\.\//, ""), seconds * 1000);
+        }
+      }
+      return times;
     },
     async isFile(resolvedPath) {
       const result = await helper(false, ["test", "-f", resolvedPath]);

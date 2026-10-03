@@ -29,6 +29,7 @@
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
 | `memory` | 学到的记忆的两层上限：`projectLimitChars`、`userLimitChars`，缺省各 4,000 字符 | — |
+| `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个） | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -167,7 +168,7 @@ pigeon migrate-config [--root <项目根>]
 
 `read_file` 可以只读工作区以外的文件（决策 355）：`--yolo` 下自动放行；不开放手模式时须经人批准，审批面板标明"工作区以外（只读）"与解析后的真实路径，可批准一次、按所在目录放权或按工具放权；没有审批通道（`pigeon run` 等无人值守运行）时拒绝。写与编辑仍限工作区。沙箱会话按容器里的路径判定。
 
-禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径，指向这些位置的链接同样不读。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
+禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具（`read_file`、`grep`、`glob`）一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径，指向这些位置的链接同样不读。`grep`、`glob` 的结果里滤掉这些路径，并在末尾注明"已按禁读名单略去 N 条"。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
 
 设置 `permissions.readDeny` 可往名单上追加（`~` 开头或绝对路径，三层并集），不能删减内置项：
 
@@ -176,6 +177,8 @@ pigeon migrate-config [--root <项目根>]
 ```
 
 禁读名单只管读档工具；`run_command` 经 shell 读文件不在此列，由命令审批把关。
+
+`grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
 
 ## 三道防线
 

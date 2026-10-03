@@ -59,6 +59,22 @@ export function createLocalWorkspaceHost(
         path
       );
     },
+    async fileMtimes(relPaths) {
+      const times = new Map<string, number>();
+      // 分批并发，免得一次开上万个文件句柄
+      for (let start = 0; start < relPaths.length; start += 256) {
+        await Promise.all(
+          relPaths.slice(start, start + 256).map(async (rel) => {
+            try {
+              times.set(rel, (await stat(path.join(workspaceRoot, rel))).mtimeMs);
+            } catch {
+              // 列出之后被删除的文件：不在结果里
+            }
+          })
+        );
+      }
+      return times;
+    },
     async isFile(resolvedPath) {
       return (await stat(resolvedPath)).isFile();
     },
