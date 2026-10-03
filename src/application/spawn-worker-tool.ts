@@ -9,9 +9,16 @@
 // - worker 在后台跑，主 agent 这一轮结束、被中断都不影响它们；结果与工作树跨轮保留，可稍后收回（294 ⑤）。
 // - 注册范围（265–267）：只给终端界面与 pigeon run 的主会话注册（层数放开时另给未到底层的 worker，299）；命令行对话、沙箱会话与
 //   跑批器各条件都不注册。审批照现有规矩（266）：本工具只读档、不经审批，worker 各自的调用按 302、303 走。
+// - 决策 360：可给工具清单（只能取主 agent 现有工具的子集，不给即按角色取预设）与各工具的作用范围（只能更窄）；
+//   校验在编排器派出时做（roles.ts），不合要求即不派、退还额度，按专门的文字回话。
 import { type Static, Type } from "typebox";
+import {
+  LIST_SESSIONS_TOOL,
+  READ_SESSION_ENTRY_TOOL,
+  SEARCH_SESSIONS_TOOL,
+} from "../memory/search-tools.ts";
 import { isGitWorkspace } from "../orchestration/checkpoint.ts";
-import { isWorkerRole, WORKER_ROLES } from "../orchestration/roles.ts";
+import { isWorkerRole, WORKER_ROLES, WorkerPolicyError } from "../orchestration/roles.ts";
 import type {
   WorkerOrchestrator,
   WorkerOutcome,
@@ -23,7 +30,11 @@ import {
   DEFAULT_ORCHESTRATION_SETTINGS,
   type OrchestrationSettings,
 } from "../state/orchestration-config.ts";
+import type { ToolScope } from "../state/session-payloads.ts";
+import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
+import { RUN_COMMAND_TOOL } from "../tools/run-command.ts";
+import { SCOPABLE_TOOLS } from "../tools/tool-scope.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
 import { workerStartLine } from "./workers-commands.ts";
@@ -92,8 +103,58 @@ function nestingClause(settings: SpawnWorkerSettings): string {
   return below > 0 ? `；它还能往下再派 ${below} 层 worker。` : "，也不能再派 worker。";
 }
 
-// 工具说明（定稿原文；数值与两处随配置的句子取自设定）
-export function spawnWorkerDescription(settings: SpawnWorkerSettings): string {
+// 决策 360：说明里提到的工具按主 agent 当前已注册的工具生成（available 为它的工具名单；不给即按都在）
+type ToolPresence = (tool: string) => boolean;
+
+// 可附加作用范围的工具，按范围种类取自登记表（tool-scope.ts）
+function scopableOf(kind: "paths" | "commandPrefixes", has: ToolPresence = () => true): string[] {
+  return Object.keys(SCOPABLE_TOOLS).filter((tool) => SCOPABLE_TOOLS[tool] === kind && has(tool));
+}
+
+// 角色一句：各角色的能力取预设与主 agent 现有工具的交集
+function rolesSentence(has: ToolPresence): string {
+  const read = has("read_file");
+  const sessions = [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL].every(has);
+  const explorer = [...(read ? ["读代码"] : []), ...(sessions ? ["检索历史会话"] : [])];
+  const web = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL].filter(has);
+  const clauses = [
+    ...(explorer.length > 0 ? [`explorer 只能${explorer.join("与")}，适合调查与定位`] : []),
+    ...(has("edit_file")
+      ? [`implementer 能${read ? "读写文件" : "改文件"}、不能跑命令，适合按明确的方案改代码`]
+      : []),
+    ...(has(RUN_COMMAND_TOOL)
+      ? [`tester 能${read ? "读文件与跑命令" : "跑命令"}、不能改文件，适合运行与诊断测试`]
+      : []),
+    ...(web.length > 0 ? [`三种角色另外都能用 ${web.join(" 与 ")} 查资料`] : []),
+  ];
+  return `不给 tools 时，角色决定 worker 能用的工具：${clauses.join("；")}。`;
+}
+
+// 工具清单与作用范围一句：能收窄的工具取登记表与主 agent 现有工具的交集
+function toolsSentence(has: ToolPresence): string {
+  const pathTools = scopableOf("paths", has);
+  const commandTools = scopableOf("commandPrefixes", has);
+  const narrowing = [
+    ...(pathTools.length > 0 ? [`${pathTools.join("、")} 限在给定的路径之内`] : []),
+    ...(commandTools.length > 0
+      ? [`${commandTools.join("、")} 只能运行以给定前缀开头、不经 shell 的单条命令`]
+      : []),
+  ];
+  return (
+    "要别的组合就给 tools：只能从你自己现在能用的工具里选（派 worker、写记忆、任务清单一类除外），没列的工具 worker 没有。" +
+    (narrowing.length > 0
+      ? `还可以用 scopes 收窄某件工具：${narrowing.join("，")}；越出范围的调用会被拒绝。`
+      : "") +
+    (has(RUN_COMMAND_TOOL) ? "worker 跑命令与你同一套审批规则。" : "")
+  );
+}
+
+// 工具说明（定稿原文；数值与两处随配置的句子取自设定，提到的工具取自主 agent 当前的工具）
+export function spawnWorkerDescription(
+  settings: SpawnWorkerSettings,
+  available?: readonly string[]
+): string {
+  const has: ToolPresence = (tool) => available === undefined || available.includes(tool);
   return [
     "派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要。",
     "worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。",
@@ -103,7 +164,8 @@ export function spawnWorkerDescription(settings: SpawnWorkerSettings): string {
         : ""),
     "何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。",
     `任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问${nestingClause(settings)}`,
-    "角色决定 worker 能用的工具：explorer 只能读代码与检索历史会话，适合调查与定位；implementer 能读写文件、不能跑命令，适合按明确的方案改代码；tester 能读文件与跑命令、不能改文件，适合运行与诊断测试。三种角色另外都能用 web_search 与 web_fetch 查资料。",
+    rolesSentence(has),
+    toolsSentence(has),
     "worker 的改动不会自动并入你的分支：看过交回的分支与摘要后，由你决定合不合、怎么合。",
   ].join("\n");
 }
@@ -121,7 +183,7 @@ export function spawnWorkerParamsSchema(taskList: boolean) {
   return Type.Object({
     role: Type.Union(
       [Type.Literal("explorer"), Type.Literal("implementer"), Type.Literal("tester")],
-      { description: "worker 的角色，决定它能用的工具，见工具说明" }
+      { description: "worker 的角色，不给 tools 时决定它能用的工具，见工具说明" }
     ),
     task: Type.String({ description: "子任务的完整说明：目标、相关文件、完成的标准" }),
     name: Type.Optional(
@@ -136,6 +198,32 @@ export function spawnWorkerParamsSchema(taskList: boolean) {
       })
     ),
     label: Type.Optional(Type.String({ description: labelDescription(taskList) })),
+    tools: Type.Optional(
+      Type.Array(Type.String(), {
+        minItems: 1,
+        description: "worker 能用的工具名单，只能从你现在能用的工具里选；不给即按角色的预设",
+      })
+    ),
+    scopes: Type.Optional(
+      Type.Array(
+        Type.Object({
+          tool: Type.String({ description: "要收窄的工具，须是 worker 有的" }),
+          paths: Type.Optional(
+            Type.Array(Type.String(), {
+              minItems: 1,
+              description: `${scopableOf("paths").join("、")} 用：相对 worker 工作树根的路径，须是不经符号链接的真实路径，目录含其下全部；不能用 .. 或绝对路径`,
+            })
+          ),
+          commandPrefixes: Type.Optional(
+            Type.Array(Type.String(), {
+              minItems: 1,
+              description: `${scopableOf("commandPrefixes").join("、")} 用：允许的命令开头（按词比对），如 npm test`,
+            })
+          ),
+        }),
+        { description: "可选，把某几件工具的作用范围收窄，每件一项" }
+      )
+    ),
   });
 }
 export const SpawnWorkerParamsSchema = spawnWorkerParamsSchema(true);
@@ -177,6 +265,8 @@ export const SPAWN_WORKER_TEXTS = {
     `本次运行派出的 worker 已达 ${max} 个上限。不要再派；用已有的结果，或自己完成。`,
   budgetExhausted: "本次运行的额度已用完，不能再派 worker；正在跑的 worker 已停止。",
   notGit: "当前工作区不是 git 仓库，不能派 worker。",
+  // 决策 360：工具清单或作用范围不合要求（理由来自编排器的校验）
+  badTools: (reason: string) => `没有派出：${reason}。`,
   unknownRole: (role: string) => `没有角色 ${role}；可选：${WORKER_ROLES.join("、")}。`,
   emptyTask: "task 不能为空：写清目标、相关文件与完成的标准。",
   // 决策 279（271 修订）：另起一行写明起点快照与只取其自身改动的取用方式
@@ -239,6 +329,12 @@ export class SpawnWorkerBudget {
     return true;
   }
 
+  // 决策 360：校验不过、一个都没派出时退还
+  refund(count: number): void {
+    this.#sync();
+    this.#spawned = Math.max(0, this.#spawned - count);
+  }
+
   #sync(): void {
     const key = this.#runKey();
     if (key !== this.#key) {
@@ -254,6 +350,8 @@ export interface SpawnAttemptsRequest {
   task: string;
   count: number;
   label?: string;
+  tools?: readonly string[];
+  scopes?: readonly ToolScope[];
   onSpawned: (sessionIds: readonly string[]) => void;
 }
 
@@ -300,7 +398,14 @@ export class SpawnWorkerSlot {
 export interface SpawnWorkerDetails {
   // 本次调用派出的 worker 会话；拒绝时为空
   sessionIds: string[];
-  rejected?: "not-git" | "unknown-role" | "empty-task" | "spawn-limit" | "budget" | "unbound";
+  rejected?:
+    | "not-git"
+    | "unknown-role"
+    | "empty-task"
+    | "spawn-limit"
+    | "budget"
+    | "unbound"
+    | "bad-tools";
 }
 
 // 一个 worker 收尾后交回的文字（通知与多份尝试的汇总用）。决策 279（271 修订）：有工作树的 worker 另起一行写明起点快照与只取其
@@ -404,6 +509,30 @@ function reply(text: string, details: SpawnWorkerDetails): PigeonToolResult<Spaw
   return { content: [{ type: "text", text }], details };
 }
 
+// 决策 360：工具清单与作用范围的参数（给了才带）
+function toolRequestOf(params: SpawnWorkerParams): {
+  tools?: readonly string[];
+  scopes?: readonly ToolScope[];
+} {
+  return {
+    ...(params.tools !== undefined ? { tools: params.tools } : {}),
+    ...(params.scopes !== undefined ? { scopes: params.scopes } : {}),
+  };
+}
+
+// 校验不过：一个都没派出，退还额度
+function rejectTools(
+  host: SpawnWorkerHost,
+  count: number,
+  error: WorkerPolicyError
+): PigeonToolResult<SpawnWorkerDetails> {
+  host.budget.refund(count);
+  return reply(SPAWN_WORKER_TEXTS.badTools(error.message), {
+    sessionIds: [],
+    rejected: "bad-tools",
+  });
+}
+
 // 派出前的检查：按定稿文字回话的几种情形
 function precheck(
   host: SpawnWorkerHost,
@@ -434,13 +563,15 @@ function precheck(
   return undefined;
 }
 
+// available：派出方当前已注册的工具（说明按它生成，360）；不给即按都在
 export function createSpawnWorkerTool(
-  slot: SpawnWorkerSlot
+  slot: SpawnWorkerSlot,
+  available?: readonly string[]
 ): PigeonAgentTool<ReturnType<typeof spawnWorkerParamsSchema>, SpawnWorkerDetails> {
   return {
     name: SPAWN_WORKER_TOOL,
     label: SPAWN_WORKER_TOOL,
-    description: spawnWorkerDescription(slot.settings),
+    description: spawnWorkerDescription(slot.settings, available),
     parameters: spawnWorkerParamsSchema(slot.settings.taskList),
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SpawnWorkerDetails>> {
@@ -477,8 +608,12 @@ export function createSpawnWorkerTool(
           ...(label !== undefined ? { label } : {}),
           origin: "agent",
           ...(host.from !== undefined ? { from: host.from } : {}),
+          ...toolRequestOf(params),
         });
       } catch (error) {
+        if (error instanceof WorkerPolicyError) {
+          return rejectTools(host, count, error);
+        }
         const name = params.name ?? params.role;
         return reply(
           SPAWN_WORKER_TEXTS.failed(
@@ -516,6 +651,7 @@ async function spawnAttempts(
     task: params.task,
     count: params.attempts ?? 2,
     ...(label !== undefined ? { label } : {}),
+    ...toolRequestOf(params),
     onSpawned: (spawned) => {
       ids = spawned as SessionId[];
       host.notices?.group(ids);
@@ -526,6 +662,9 @@ async function spawnAttempts(
     try {
       await running;
     } catch (error) {
+      if (error instanceof WorkerPolicyError) {
+        return rejectTools(host, params.attempts ?? 2, error);
+      }
       return reply(
         SPAWN_WORKER_TEXTS.failed(
           { name: params.role, role: params.role, branch: worktreeBranchFor(params.role) },

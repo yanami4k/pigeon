@@ -20,6 +20,7 @@ import type {
 import { type BreakerScope, breakerCountKey, InterceptStreak } from "../state/breaker.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
+import type { ToolScope } from "../state/session-payloads.ts";
 import {
   advanceToolExecution,
   proposeToolExecution,
@@ -32,6 +33,7 @@ import type { HostScopedTool } from "../tools/host-scope.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import type { CommandInspection, ExecCommandTool } from "../tools/run-command.ts";
+import { scopeViolation } from "../tools/tool-scope.ts";
 
 // M4 S6（决策 3）：会话 grant 匹配注入面——approvals/grant-store.ts 的 SessionGrantStore
 // 满足该结构；测试可注入假实现。match 纯求值（无副作用）；命中计数在放行实际生效后
@@ -71,6 +73,8 @@ export interface ToolGovernanceOptions {
   // 决策 323 / 324：PreToolUse 钩子（在审批之前执行）。拒绝 > 要人确认 > 放行；放行只免掉人工审批这一步
   // （拒绝名单、路径围栏与受保护路径照常生效）；改过的参数重新经过全部检查并以新参数执行
   preToolUseHooks?: ToolHookPort["preToolUse"];
+  // 决策 360：worker 各工具的作用范围（委派策略里有才给）——越界的调用与拒绝名单同样绝对地拒绝，放权、yolo、钩子放行都不豁免
+  scopes?: readonly ToolScope[];
 }
 
 // 决策 302 所说的写层文件工具：改文件的内置工具（两种编辑模式都叫 edit_file）
@@ -113,6 +117,8 @@ class GovernedToolCalls implements ToolGovernance {
     | undefined;
   // 决策 324：PreToolUse 钩子（在审批之前执行）
   readonly #preToolUseHooks: ToolHookPort["preToolUse"] | undefined;
+  // 决策 360：worker 各工具的作用范围
+  readonly #scopes: readonly ToolScope[];
   // ToolExecution 账本：toolCallId → 记录
   readonly #executions = new Map<string, ToolExecution>();
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
@@ -144,6 +150,7 @@ class GovernedToolCalls implements ToolGovernance {
     this.#ownWorkspaceWrites = options.ownWorkspaceWrites === true;
     this.#protectedPath = options.protectedPath;
     this.#preToolUseHooks = options.preToolUseHooks;
+    this.#scopes = options.scopes ?? [];
     // 广告了未在注册表登记的工具 = 配置错误，构造期 fail-fast
     for (const name of host.tools.keys()) {
       if (!this.#registry.has(name)) {
@@ -290,6 +297,27 @@ class GovernedToolCalls implements ToolGovernance {
     // 048 修订：exec 工具只读判定这条命令是否需 shell——需 shell 时只有带 shell 标记的放权能免审
     const inspection = this.#inspectCommand(toolName, rawArgs);
     const needsShell = inspection?.needsShell === true;
+    // 决策 360：越出 worker 的作用范围即拒（按参数指纹计熔断：改到范围内重提照常判定）
+    const scope = this.#scopes.find((candidate) => candidate.tool === toolName);
+    const outOfScope =
+      scope !== undefined
+        ? scopeViolation(scope, {
+            ...(this.#workspaceRoot !== undefined ? { workspaceRoot: this.#workspaceRoot } : {}),
+            args: rawArgs,
+            ...(inspection !== undefined ? { inspection } : {}),
+          })
+        : undefined;
+    if (outOfScope !== undefined) {
+      record = recordDecision(record, {
+        outcome: "rejected",
+        approvedBy: "policy:deny",
+        reason: outOfScope,
+        reasonSource: "system-default",
+        decidedAt: Date.now(),
+      });
+      this.#executions.set(toolCallId, record);
+      return this.#blockWithBreaker(toolName, rawArgs, outOfScope, "fingerprint");
+    }
     // 决策 290：网络档工具只读判定这次调用要访问的主机——审批面板显示它，[a] 建按网站的放权
     const host = this.#inspectHost(toolName, rawArgs);
     // 决策 326 ①：写入类文件工具写受保护路径——放权（会话与配置）一概不参与求值，worker 的默认放行也不适用

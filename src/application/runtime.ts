@@ -81,7 +81,7 @@ import {
 } from "../state/model-info.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
-import type { WorkerRole } from "../state/session-payloads.ts";
+import type { ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import {
   commandsConfigOf,
   configGrantRulesOf,
@@ -105,6 +105,7 @@ import {
   RunCommandParamsSchema,
   runCommandTexts,
 } from "../tools/run-command.ts";
+import { scopePromptSentence } from "../tools/tool-scope.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
   createWebFetchTool,
@@ -172,8 +173,8 @@ export interface RuntimeDeps {
   // 缺省同工作区根。worker 的工作区根是自己的 git 工作树，治理根恒为主仓库根
   governanceRoot?: string;
   // M5.5 S2（决策 040）：委派策略（worker）——在场时 allow 与已注册工具取交、deny 与审批模式照搬，
-  // yolo 旗标不再参与；缺省按 yolo 旗标给全部内置工具
-  toolPolicy?: ToolPolicyLike;
+  // yolo 旗标不再参与；缺省按 yolo 旗标给全部内置工具。决策 360：另可带各工具的作用范围（交治理层逐调用判定）
+  toolPolicy?: ToolPolicyLike & { readonly scopes?: readonly ToolScope[] };
   sessionId: SessionId;
   yolo: boolean;
   provider: string;
@@ -196,8 +197,8 @@ export interface RuntimeDeps {
   homeDir?: string;
   // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖；缺省 off
   thinkingLevel?: ThinkingLevel;
-  // M5.5 S5（决策 048）：worker 角色——在场时 run_command 只接受设置的 commands 一节为该角色登记的
-  // 命令（未登记即一条都不许）；主会话缺省，不受清单限制
+  // M5.5 S5（决策 048）：worker 角色——设置的 commands 一节为该角色登记了命令时，run_command 只接受登记的命令
+  // （决策 360：作额外限制；没登记的角色与主会话同一规则）；主会话缺省，不受清单限制
   commandRole?: WorkerRole;
   // M5.7 S3（决策 041 / 051 / 052）：已启动的 MCP 会话（Actor 在装配前异步启动，worker 按其工作树各起一份）；
   // 缺省 = 本会话没有外部工具
@@ -292,6 +293,29 @@ const RUN_TAIL_HOOK_EVENTS: ReadonlySet<HookEventName> = new Set([
   "StopFailure",
   "SubagentStop",
 ]);
+
+// 系统提示开头一句：介绍读与改两件文件工具。worker 只介绍它有的（决策 360）；两件都在时即原有的整句
+function fileToolsSentence(replaceMode: boolean, read: boolean, edit: boolean): string {
+  const readPart = replaceMode
+    ? "用 read_file 读取文件（每行形如「行号| 内容」）"
+    : "用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照）";
+  const editPart = replaceMode
+    ? "用 edit_file 按原文替换编辑（old_string 须与文件原文逐字一致且在文件里恰好出现一次，不要带行号前缀）"
+    : "用 edit_file 按锚点编辑";
+  const parts = [...(read ? [readPart] : []), ...(edit ? [editPart] : [])];
+  return `你是 Pigeon 编程助手。${parts.length > 0 ? `${parts.join("，")}。` : ""}`;
+}
+
+// 决策 360：worker 没给的工具不注册——注册表只留委派策略里有的
+function registrySubset(source: ToolRegistry, names: readonly string[]): ToolRegistry {
+  const subset = new ToolRegistry();
+  for (const registration of source.list()) {
+    if (names.includes(registration.name)) {
+      subset.register(registration);
+    }
+  }
+  return subset;
+}
 
 // 系统提示里联网工具的说法（决策 287、289）：只在注册了两件工具时追加
 export const WEB_TOOLS_SENTENCE =
@@ -395,8 +419,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       );
     }
   }
-  // M5.5 S5（决策 048）：可选的命令短名与角色允许清单（取自设置快照的 commands 一节）
+  // M5.5 S5（决策 048）：可选的命令短名与角色允许清单（取自设置快照的 commands 一节）；
+  // 决策 360：为该角色登记了才限定，没登记的不限（tester 缺省即可跑命令，与主会话同一审批规则）
   const commandsConfig = commandsConfigOf(settings);
+  const roleAllowlist =
+    deps.commandRole !== undefined ? commandsConfig.roles[deps.commandRole] : undefined;
   // 会话存储写者在配置校验之后打开（装配早期抛错时不留下空的会话文件）
   const sessionStore = openSessionStore({
     sessionsDir,
@@ -577,21 +604,20 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
         }))
       : undefined;
-  const editSentence = replaceMode
-    ? "你是 Pigeon 编程助手。用 read_file 读取文件（每行形如「行号| 内容」），" +
-      "用 edit_file 按原文替换编辑（old_string 须与文件原文逐字一致且在文件里恰好出现一次，不要带行号前缀）。"
-    : "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
-      "用 edit_file 按锚点编辑。";
+  // 决策 360：worker（委派策略在场）的提示只介绍它有的工具，并交代作用范围；主会话的工具一律在场，提示不变
+  const delegatedAllow = deps.toolPolicy?.allow;
+  const offered = (...names: string[]): boolean =>
+    delegatedAllow === undefined || names.every((name) => delegatedAllow.includes(name));
   const basePrompt =
-    editSentence +
-    TRUNCATION_GUIDANCE +
-    WRITE_APPROVAL_SENTENCES[approval] +
-    commandTexts.prompt +
-    (sessionSearch
+    fileToolsSentence(replaceMode, offered("read_file"), offered("edit_file")) +
+    (offered("edit_file") ? TRUNCATION_GUIDANCE + WRITE_APPROVAL_SENTENCES[approval] : "") +
+    (offered(RUN_COMMAND_TOOL) ? commandTexts.prompt : "") +
+    (sessionSearch && offered(SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL)
       ? "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
         "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
       : "") +
-    (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
+    (webTools !== undefined && offered(WEB_SEARCH_TOOL, WEB_FETCH_TOOL) ? WEB_TOOLS_SENTENCE : "") +
+    scopePromptSentence(deps.toolPolicy?.scopes ?? []);
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
   // 本地 Skill 开局扫描一次（/reload 沿用）；MCP server 的 prompts 随本运行面的 MCP 会话
@@ -640,16 +666,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(taskList !== undefined ? [UPDATE_TASKS_TOOL, LIST_TASKS_TOOL] : []),
     ...(webTools !== undefined ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
   ];
-  const mcpSection =
-    mcpTools.length > 0
-      ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
-        "server 不可用时这些工具会报错，改用内置工具继续。"
-      : "";
+  const mcpSection = mcpTools.some((bridged) => offered(bridged.name))
+    ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
+      "server 不可用时这些工具会报错，改用内置工具继续。"
+    : "";
   const systemPrompt = [
     basePrompt,
     instructions.section,
     pushedMemory?.section ?? "",
-    skillCatalog.section,
+    offered(LOAD_SKILL_TOOL) ? skillCatalog.section : "",
     mcpSection,
     deps.taskDirective ?? "",
   ]
@@ -664,6 +689,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           approvalMode: delegated.approvalMode,
         }
       : { allow: toolNames, deny: [], approvalMode: deps.yolo ? "yolo" : "prompt" };
+  const governedRegistry =
+    delegated !== undefined ? registrySubset(registry, policy.allow) : registry;
   // Run 开始条目的附加摘要：MCP 工具集与 server 状态（有 server 时）
   const mcpSummary = mcp !== undefined && mcp.connections.length > 0 ? mcp : undefined;
   const runStartedExtras = mcpSummary !== undefined ? () => mcpSummary.summary() : undefined;
@@ -772,8 +799,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         host: workspaceHost,
         approval,
         commands: commandsConfig.commands,
-        ...(deps.commandRole !== undefined
-          ? { allowlist: commandsConfig.roles[deps.commandRole] ?? [] }
+        ...(roleAllowlist !== undefined ? { allowlist: roleAllowlist } : {}),
+        // 决策 360：带命令前缀范围时程序只按 PATH 解析
+        ...(delegated?.scopes?.some((scope) => scope.tool === RUN_COMMAND_TOOL) === true
+          ? { pathOnly: true }
           : {}),
       }),
       ...(sessionSearch
@@ -799,7 +828,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
       ...(spawnSlot !== undefined
-        ? [createSpawnWorkerTool(spawnSlot), ...createOrchestrationTools(spawnSlot)]
+        ? [createSpawnWorkerTool(spawnSlot, policy.allow), ...createOrchestrationTools(spawnSlot)]
         : []),
       ...(takeSlot !== undefined ? [createTakeWorkerTool(takeSlot)] : []),
       ...(scriptSlot !== undefined ? [createOrchestrateTool(scriptSlot)] : []),
@@ -808,7 +837,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ],
     // M5.5 S0（决策 049）：装配根组装工具调用治理后注入 Adapter
     governance: createToolGovernance({
-      registry,
+      registry: governedRegistry,
       // M4 S6（决策 3）：审批提示四键 [y]/[n]/[a]/[d]——[a]/[d] 经 store 创建会话 grant；
       // 交互实现由 Actor 注入（决策 025）；无审批通道时不传，prompt 档 fail-closed
       ...(deps.createApprovalHandler !== undefined
@@ -820,6 +849,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       workspaceRoot: deps.workspaceRoot,
       // 决策 302：worker 改自己工作树内的文件默认放行
       ...(deps.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
+      // 决策 360：worker 各工具的作用范围
+      ...(delegated?.scopes !== undefined ? { scopes: delegated.scopes } : {}),
       // 决策 324：PreToolUse 钩子——在审批之前执行；拒绝 > 要人确认 > 放行；放行只免人工审批这一步，
       // 改过的参数重新经过全部检查（交付给执行侧替换）
       preToolUseHooks: async (input) => {
@@ -943,7 +974,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     });
   }
   const toolTiers = new Map(
-    registry.list().map((registration) => [registration.name, registration.tier])
+    governedRegistry.list().map((registration) => [registration.name, registration.tier])
   );
   return {
     adapter,

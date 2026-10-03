@@ -14,7 +14,7 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { PIGEON_DIR } from "../state/paths.ts";
-import { createLocalWorkspaceHost, windowsScript } from "./local-host.ts";
+import { createLocalWorkspaceHost, windowsPathProgram, windowsScript } from "./local-host.ts";
 import {
   type HostExecPlan,
   type HostFileSnapshot,
@@ -124,6 +124,8 @@ export interface CommandInspection {
   argv?: string[];
   // 启动器路径下解析到的 .cmd / .bat
   scriptPath?: string;
+  // 决策 360：只按 PATH 解析出的程序绝对路径（直接执行时启动它，参数数组仍是原样）
+  program?: string;
 }
 
 // 可选能力：只读检查、按调用授予 shell（治理层使用）
@@ -149,6 +151,8 @@ export interface RunCommandOptions {
   platform?: NodeJS.Platform;
   // 本会话的审批状态（只影响工具说明，审批本身由治理层判定）；缺省按有人工审批
   approval?: RunCommandApproval;
+  // 决策 360：带命令前缀范围的 worker——Windows 上程序只按 PATH 解析（不查工作树根与当前目录），显式写出路径的照旧
+  pathOnly?: boolean;
 }
 
 // 审批状态（170 ④）：yolo 为命令自动批准；prompt 为有人工审批通道；none 为没有审批通道（无人值守又未放权），
@@ -280,6 +284,7 @@ export function createRunCommandTool(
   const env = allowedEnv(options.env ?? process.env);
   // 治理层按调用授予的 shell 确认（一次一用）
   const shellAuthorized = new Set<string>();
+  const pathOnly = options.pathOnly === true && platform === "win32";
 
   const resolve = (input: string): { command: string; alias?: string } => {
     const trimmed = input.trim();
@@ -323,9 +328,34 @@ export function createRunCommandTool(
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    const scriptPath = host.findLauncherScript(argv[0] ?? "", env);
+    const first = argv[0] ?? "";
+    let program: string | undefined;
+    if (pathOnly && !first.includes("/") && !first.includes("\\")) {
+      program = windowsPathProgram(first, env);
+      if (program === undefined) {
+        return {
+          ...base,
+          mode: "invalid",
+          needsShell: false,
+          argv,
+          error: `在 PATH 里找不到程序 ${first}（带命令前缀范围时不从工作树里找程序）`,
+        };
+      }
+    }
+    const scriptPath =
+      program === undefined
+        ? host.findLauncherScript(first, env)
+        : /\.(cmd|bat)$/i.test(program)
+          ? program
+          : undefined;
     if (scriptPath === undefined) {
-      return { ...base, mode: "direct", needsShell: false, argv };
+      return {
+        ...base,
+        mode: "direct",
+        needsShell: false,
+        argv,
+        ...(program !== undefined ? { program } : {}),
+      };
     }
     const offending = argv.find((arg) => !LAUNCHER_ARG_PATTERN.test(arg));
     if (offending === undefined && !/["%]/.test(scriptPath)) {
@@ -476,8 +506,8 @@ function spawnPlan(
         }
       : { program: "/bin/sh", args: ["-c", inspection.command], verbatim: false };
   }
-  const [program = "", ...args] = inspection.argv ?? [];
-  return { program, args, verbatim: false };
+  const [first = "", ...args] = inspection.argv ?? [];
+  return { program: inspection.program ?? first, args, verbatim: false };
 }
 
 export interface McpLaunchPlan {

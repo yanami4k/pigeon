@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import type { WorkerOrchestrator, WorkerOrigin, WorkerOutcome } from "../orchestration/workers.ts";
 import type { SessionId } from "../state/ids.ts";
-import type { WorkerLimits } from "../state/session-payloads.ts";
+import type { ToolScope, WorkerLimits } from "../state/session-payloads.ts";
 
 export interface AttemptGroupInput {
   orchestrator: Pick<WorkerOrchestrator, "spawn" | "awaitResult">;
@@ -17,6 +17,9 @@ export interface AttemptGroupInput {
   label?: string;
   origin?: WorkerOrigin;
   from?: SessionId;
+  // 决策 360：各份共用的工具清单与作用范围
+  tools?: readonly string[];
+  scopes?: readonly ToolScope[];
   // 派出后（收尾前）回报派出的会话，供 Actor 回显
   onSpawned?: (sessionIds: readonly string[]) => void;
 }
@@ -44,6 +47,8 @@ export async function runAttemptGroup(input: AttemptGroupInput): Promise<Attempt
       ...(input.label !== undefined ? { label: input.label } : {}),
       ...(input.origin !== undefined ? { origin: input.origin } : {}),
       ...(input.from !== undefined ? { from: input.from } : {}),
+      ...(input.tools !== undefined ? { tools: input.tools } : {}),
+      ...(input.scopes !== undefined ? { scopes: input.scopes } : {}),
     })
   );
   input.onSpawned?.(ids);

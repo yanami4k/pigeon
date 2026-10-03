@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | `mcp` | MCP 服务的风险档覆盖（`servers.<名>.defaultTier`、`tools`），也可用 `launch` 直接定义服务 | `.pigeon/mcp.json` |
 | `permissions` | 固化的放权规则 `grants`；`/grants save` 写入项目个人一层，`/revoke config#N` 从中删除；写在项目共享层的规则须经确认才生效 | `.pigeon/grants.json` |
-| `commands` | 命令短名 `commands` 与角色允许清单 `roles` | `.pigeon/commands.json` |
+| `commands` | 命令短名 `commands` 与角色允许清单 `roles`（为某角色登记了，该角色的 worker 只能跑清单里的命令；没登记的角色不受此限） | `.pigeon/commands.json` |
 | `orchestration` | worker 并发、层数、上限、卡住判定、任务清单、脚本编排 | `.pigeon/orchestration.json` |
 | `web` | 联网工具总开关 `enabled`、搜索后端与地址、抓取上限（见下文"联网工具的开关"） | `.pigeon/web.json` |
 | `sandbox` | 沙箱镜像（`image` 或项目自己的 `dockerfile`、`context`）、通用镜像的构建参数 `build`、容器资源上限（`memory`、`pids`、`cpus`） | `.pigeon/sandbox.json` |
@@ -155,6 +155,8 @@ Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时�
 
 ## worker 与续接
 
+派 worker 时可以给工具清单（`spawn_worker` 的 `tools`），只能取主 agent 当前有的工具，写记忆、取用 worker 改动、编排脚本与任务清单不能交给 worker；不给即按角色的预设（explorer、implementer、tester）。还可以给某件工具附加作用范围（`scopes`），只能更窄：`read_file`、`edit_file` 限在相对 worker 工作树根的路径之内——范围路径须是不经符号链接的真实路径（自身或上级是符号链接即拒绝派出），调用的目标解析符号链接后须落在其内；`run_command` 只能运行以给定前缀开头、不经 shell 的单条命令，Windows 上程序只按 PATH 解析、不从工作树里找。越出范围的调用一律拒绝，放权、`--yolo` 与钩子放行都不豁免。没给的工具不注册，worker 的系统提示也只介绍它有的工具。worker 跑命令与主会话同一套审批规则；设置里为该角色登记的命令清单作额外限制。
+
 worker 的派出与收尾成对记在派出它的会话里（缺收尾即进程中途退出）；工作树在 `.pigeon/state/worktrees/` 下，不自动清理。终端界面续接主会话（`pigeon --continue`、`pigeon --resume <id>`、`/resume`，以及 `/reload` 在同一会话上重建运行面）时，从会话记录找回之前运行的 worker：
 
 - 之前的运行中已收尾的：`worker_status`、`/workers` 照常列出，标明"来自之前的运行"；`take_worker` 与 `/take` 照常取用（工作树已清理时如实说明）；`wait_workers` 立即交回其结果。
@@ -190,7 +192,7 @@ agent 可以查本项目以前的会话，共三件工具，都是只读、免�
 
 缓存：每个会话文件抽出的可搜文本与目录信息缓存在 `.pigeon/state/search-cache/`，每个会话两份（`<会话号>.json` 存目录信息与对话正文，`<会话号>.tools.json` 存工具输出），按会话文件的大小与修改时间判断是否过期，过期或损坏即重建；会话文件已不在的缓存与崩溃留下的临时文件在检索时顺手清理。可随时删除整个目录，下次检索时重建。
 
-三件工具同进同出：终端界面、`--line` 命令行对话与 `pigeon run` 的主会话缺省都带，worker 只有 explorer 角色带。使用者在终端界面与 `--line` 对话里用 `/search` 命令检索，走同一套检索与缓存，加 `--tool-output` 连同工具输出一起搜；人用的 `/search` 不排除当前会话。
+三件工具同进同出：终端界面、`--line` 命令行对话与 `pigeon run` 的主会话缺省都带；worker 按角色预设只有 explorer 带，派出时给了工具清单的照清单。使用者在终端界面与 `--line` 对话里用 `/search` 命令检索，走同一套检索与缓存，加 `--tool-output` 连同工具输出一起搜；人用的 `/search` 不排除当前会话。
 
 ## 迁移命令
 

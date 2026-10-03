@@ -254,6 +254,25 @@ export function windowsScript(
   return undefined;
 }
 
+// 决策 360：只按 PATH 找程序（不查工作树根与当前目录，PATH 里的相对目录也跳过）：不带扩展名的同一目录里 .exe / .com 优先于
+// .cmd / .bat；找不到给 undefined。带命令前缀范围的 worker 在 Windows 上用它，免得工作树里的同名程序顶替前缀写的程序
+export function windowsPathProgram(program: string, env: NodeJS.ProcessEnv): string | undefined {
+  const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+  const extensions = path.extname(program) !== "" ? [""] : [".exe", ".com", ".cmd", ".bat"];
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) {
+      continue;
+    }
+    for (const extension of extensions) {
+      const candidate = path.join(dir, `${program}${extension}`);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
 // 工作树文件清单：相对路径 → 大小与修改时间签名；跳过符号链接、目录联接与 workspace-host.ts 两份名单里的目录
 function snapshotLocalFiles(root: string, limit: number): HostFileSnapshot {
   const files = new Map<string, string>();
