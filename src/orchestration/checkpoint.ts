@@ -7,7 +7,7 @@
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
@@ -124,6 +124,11 @@ export function createCheckpointer(input: {
       ]).trim();
       if (existsSync(realIndex)) {
         copyFileSync(realIndex, indexFile);
+        // 复制会把修改时间刷成现在，破坏 git 对"同一秒内改动"的保护：git 只对修改时间不早于索引文件修改时间的条目
+        // 重新比内容，其余只比 stat（秒级时间、大小）。文件在上次入索引的同一秒里改过、长度没变时，复制件的新时间
+        // 会让 git 认为它没改、快照漏掉这次改动。把复制件的时间设回真索引的，保护照旧生效
+        const { atime, mtime } = statSync(realIndex);
+        utimesSync(indexFile, atime, mtime);
       }
       const env = { GIT_INDEX_FILE: indexFile };
       git(workspaceRoot, ["add", "-A", "--", "."], env);
