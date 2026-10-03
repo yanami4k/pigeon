@@ -42,3 +42,8 @@
 2. 派 worker 时，Pigeon 自己写下且尚未提交的 `.pigeon/.gitignore` 计为"派出时 1 个未提交的文件"带进 worker 的起点快照；文件确属项目内容，只是提示容易让人以为工作目录里有别的未提交改动。
 3. 沙箱会话的审批档缺省为 yolo；此档下 agent 用文件工具写 `/workspace/.pigeon/...` 放行，与决策 326"--yolo 下放行"一致；要人批须 `--sandbox-approval prompt`。
 4. update_memory 在格式损坏时让模型"请告知用户用 /memory edit 修复"，而 `pigeon --line` 与 `pigeon resume` 的命令行对话注册了 update_memory 却没有 `/memory` 命令。属待项目负责人过目的文字，本次未改。
+
+## 五、合入 main
+
+- 次序：以 main（101bbc7）为基，先 `git merge --no-ff` 决策分支 claude/dazzling-mccarthy-p9xgdf（a592637），再 `git merge --no-ff` 本分支。两次都无文本冲突；第二次 docs/roadmap/decisions.md 自动合并，合并后索引 342 行、编号 001–342 连续无重复、详情段 342 个、无冲突标记。
+- 合并后的树在验证服务器上重跑 `npm ci` 与 `npm run verify`（环境同第一节）：lint 536 个文件通过，check 通过，test 1,587 条、1,585 通过、0 失败、2 跳过（仅 Windows 的 .cmd 用例），用时 67 秒；deps 564 个模块、4,071 条依赖、无违规。本节写入后只多了这份审计的文字，代码与测试不变。
