@@ -14,6 +14,7 @@ import {
   PushedMemoryLayersSchema,
   PushedMemoryManifestSchema,
 } from "./learned-memory.ts";
+import { RunModelInfoSchema } from "./model-info.ts";
 import { EvalVerdictSchema, GitObjectIdSchema, RunStartedPayloadSchema } from "./runtime-events.ts";
 import {
   CheckpointRefSchema,
@@ -82,6 +83,8 @@ export const RunStartDataSchema = Type.Object({
   compaction: Type.Optional(CompactionConfigSchema),
   // 推送的记忆（332）：推送开着时记开局冻结的两层记忆的身份（层、路径、哈希、字节数、条数、上限）与记忆文字的版本
   pushedMemory: Type.Optional(PushedMemoryLayersSchema),
+  // 本次所用的模型信息与每一项的来源（362：设置、接入模块声明、pi-ai 目录、未知）；加法式不升版本，此前的记录无此字段
+  modelInfo: Type.Optional(RunModelInfoSchema),
   // 旧的推送记忆（191，332 之前的单层 MEMORY.md）：不再产生，只为读旧会话保留
   learnedMemory: Type.Optional(PushedMemoryManifestSchema),
   // 复盘会话（175、192、207）：复盘种类与模板版本。决策 331 删除复盘后不再产生，只为读旧会话保留

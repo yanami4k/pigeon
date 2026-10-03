@@ -31,6 +31,7 @@ export {
   DEEPSEEK_ANTHROPIC_BASE_URL,
   DEEPSEEK_MODEL_ID,
   deepseekModel,
+  deepseekModelInfo,
 } from "./deepseek-model.ts";
 export {
   createDeepSeekStreamFn,
@@ -54,6 +55,14 @@ export type {
   ToolGovernance,
   ToolGovernanceFactory,
 } from "./governance.ts";
+export {
+  declarationComplete,
+  loadCatalogLookup,
+  type ModelAccessInfo,
+  modelAccessOf,
+  parseModelInfoDeclaration,
+  registerModelAccess,
+} from "./model-access.ts";
 export { FALLBACK_MODEL_MAX_TOKENS } from "./output-limit.ts";
 export { isContextOverflowError } from "./overflow.ts";
 export {
