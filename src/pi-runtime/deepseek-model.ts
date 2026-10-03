@@ -39,7 +39,8 @@ export function deepseekModel(
   };
 }
 
-// 写缓存：Anthropic 兼容端点的 cache_creation_input_tokens 实测恒为 0、价目没有单列，出现时按未命中价计（同 model-pricing.ts）
+// 写缓存：Anthropic 兼容端点的 cache_creation_input_tokens 实测恒为 0、价目没有单列，出现时按未命中价计（同 model-pricing.ts）。
+// 实际服务方恒为 DeepSeek（端点根改指转发代理或经跑批网关时也是）。输出上限不是正整数时不声明（按未知处理）
 export function deepseekModelInfo(
   modelId = DEEPSEEK_MODEL_ID,
   maxTokens = DEEPSEEK_MAX_TOKENS
@@ -47,6 +48,7 @@ export function deepseekModelInfo(
   return {
     provider: DEEPSEEK_PROVIDER,
     id: modelId,
+    servedBy: DEEPSEEK_PROVIDER,
     cost: {
       input: PRICE_CNY_PER_MTOK.cacheMiss,
       output: PRICE_CNY_PER_MTOK.output,
@@ -55,6 +57,6 @@ export function deepseekModelInfo(
       currency: "CNY",
     },
     contextWindow: DEEPSEEK_CONTEXT_WINDOW,
-    maxTokens,
+    ...(Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
   };
 }

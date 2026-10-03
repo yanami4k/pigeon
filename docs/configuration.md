@@ -91,11 +91,11 @@ Pigeon 为每次运行确定所用模型的价格、上下文窗口与单次输�
 3. 按 provider 与模型名查 pi-ai 自带的模型目录（catalog；价格为美元/百万 token）；
 4. 都没有记为未知（unknown）。
 
-每一项单独取：价格可以来自目录，窗口来自声明。价格的四个数（`input`、`output`、`cacheRead`、`cacheWrite`，每百万 token）与币种 `currency` 算一项，整体取自同一来源。
+每一项单独取：价格可以来自目录，窗口来自声明。价格的四个数（`input`、`output`、`cacheRead`、`cacheWrite`，每百万 token）与币种 `currency` 算一项，整体取自同一来源；四个数全为 0 的一层当作没给价格，继续往下层取。pi-ai 目录加载失败时打一行告警，未声明的项按未知处理，不影响启动。
 
 ### 接入模块声明模型信息
 
-`--stream-fn` / `PIGEON_STREAM_FN` 指向的模块除默认导出的 StreamFn 外，可以再具名导出 `modelInfo`，字段取 pi-ai 模型对象的那一套，各项可缺省（直接导出一个 pi-ai 模型对象也可以，多余字段不看）：
+`--stream-fn` / `PIGEON_STREAM_FN` 指向的模块除默认导出的 StreamFn 外，可以再具名导出 `modelInfo`，字段取 pi-ai 模型对象的那一套，另可写实际服务方 `servedBy`，各项可缺省（直接导出一个 pi-ai 模型对象也可以；既不是 pi-ai 模型字段、也不是 `modelInfo` 字段的顶层键不用，启动时打一行告警）：
 
 ```js
 export default streamFn;
@@ -133,7 +133,7 @@ export const modelInfo = {
 
 ### 缓存规则表
 
-缓存规则按实际服务方查，不按接口格式（经 Anthropic 兼容端点访问 DeepSeek，查的是 DeepSeek 的规则），同一服务方下可再按模型名前缀细分。每行记缓存方式、短长两档的保留时长（秒数或未知，依据类别为 fixed、minimum、typical、best-effort 或 unstated）、命中是否续期、写缓存与命中按输入价的倍数、如何开启、最小可缓存前缀，以及出处（URL、取用日期、原文引句）。查不到的服务方各项记为未知，由用到它的功能各自保守处理。
+缓存规则按实际服务方查，不按接口格式（经 Anthropic 兼容端点访问 DeepSeek，查的是 DeepSeek 的规则）。实际服务方的取法：设置里的 `cache.servedBy` > 声明里的 `servedBy` > 按声明的 `baseUrl` 主机名查已知服务方（如 `api.deepseek.com`、`api.anthropic.com`、`api.openai.com`）> provider 标签。同一服务方下可再按精确型号或模型名前缀细分；有的服务方没有兜底行，表里没列出的型号各项未知。每行记缓存方式、短长两档的保留时长（秒数或未知，依据类别为 fixed、minimum、typical、best-effort 或 unstated）、命中是否续期、写缓存与命中按输入价的倍数、如何开启、最小可缓存前缀，以及出处（URL、取用日期、原文引句）。查不到的服务方各项记为未知，由用到它的功能各自保守处理。
 
 表的出处可手动复核：`node scripts/check-cache-rule-sources.ts` 逐行抓取出处页面，确认原文引句还在，不在的行标为"需复核"并列出（需要经代理上网时另设 `NODE_USE_ENV_PROXY=1`）。这个脚本不进 CI。
 

@@ -1,6 +1,7 @@
 // 缓存规则表（决策 362）：各家服务方的提示缓存怎么开、留多久、写入与读取按输入价的几倍、最小可缓存前缀，以及出处。
 // 按实际服务方定键，不按接口格式：经 Anthropic 兼容端点访问 DeepSeek，查的是 DeepSeek 的规则；同一服务方下可再按模型名前缀
-// 细分（取最长的匹配前缀，没有前缀的行是该服务方的兜底）。查不到的服务方给全未知的规则，由用到它的功能各自保守处理。
+// 细分（精确型号优先，其次最长的匹配前缀；既无型号也无前缀的行是该服务方的兜底，没有兜底行的服务方下匹配不到的型号为未知）。
+// 查不到的服务方给全未知的规则，由用到它的功能各自保守处理。实际服务方另可按接口地址的主机名判定（SERVED_BY_HOSTS）。
 // 两档：short 是较短或缺省的一档，long 是较长或须另开的一档；只有一档的服务方只填 short。
 // 依据类别：fixed 文档给的确定时长；minimum 至少这么久（可能更久）；typical 通常这么久（不保证）；best-effort 尽力而为、
 // 可随时清除（秒数取原文说法的保守下限）；unstated 文档没写。
@@ -48,7 +49,8 @@ export interface CacheRuleRow {
   id: string;
   // 实际服务方：pi-ai 的 provider 名与常见别名
   servedBy: readonly string[];
-  // 模型名前缀；缺省 = 该服务方的兜底行
+  // 精确型号与模型名前缀；两者都缺省 = 该服务方的兜底行
+  models?: readonly string[];
   modelPrefixes?: readonly string[];
   rule: CacheRule;
 }
@@ -68,6 +70,7 @@ const VERTEX_CLAUDE_URL =
   "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/prompt-caching?hl=en";
 const BEDROCK_URL = "https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html";
 const DEEPSEEK_URL = "https://api-docs.deepseek.com/zh-cn/guides/kv_cache/";
+const DEEPSEEK_PRICING_URL = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing";
 const KIMI_URL = "https://platform.kimi.com/docs/guide/context-caching";
 const KIMI_PRICING_URL = "https://platform.kimi.com/docs/pricing/chat";
 const BAILIAN_URL = "https://help.aliyun.com/zh/model-studio/context-cache";
@@ -170,6 +173,39 @@ const KIMI_SHORT_ENABLE =
   "缺省即开（Chat Completions、Responses 接口）；Anthropic 接口须带 cache_control 才写入，不带只读";
 const KIMI_LONG_ENABLE = "TTL 设为 1h";
 
+// Vertex 上 Gemini 的两档（2.5 及以后与 2.0 只差命中倍率）
+const vertexGeminiImplicit = (read: number | Unknown): RetentionTier => ({
+  seconds: "unknown",
+  basis: "unstated",
+  refreshOnHit: "unknown",
+  writeMultiplier: 1,
+  readMultiplier: read,
+  enable: "隐式缓存：缺省开，无存储费",
+});
+const vertexGeminiExplicit = (read: number): RetentionTier => ({
+  seconds: 3600,
+  basis: "fixed",
+  refreshOnHit: false,
+  writeMultiplier: 1,
+  readMultiplier: read,
+  enable: "显式缓存：缺省 60 分钟、最短 1 分钟、无上限，按存储时长另收存储费",
+});
+const VERTEX_GEMINI_SOURCES: readonly CacheRuleSource[] = [
+  src(VERTEX_GEMINI_URL, "There are no storage costs for implicit caching."),
+  src(
+    VERTEX_GEMINI_URL,
+    "you're billed for the input tokens used to create the cache at the standard input token price."
+  ),
+  src(
+    VERTEX_GEMINI_URL,
+    "On Gemini 2.5 or later models, this discount is 90%; on Gemini 2.0 models, this discount is 75%."
+  ),
+  src(
+    VERTEX_GEMINI_CREATE_URL,
+    "The default expiration time of a context cache is 60 minutes after it's created."
+  ),
+];
+
 const BEDROCK_CLAUDE_PREFIXES = ["", "us.", "eu.", "apac.", "au.", "jp.", "global.", "us-gov."].map(
   (region) => `${region}anthropic.claude`
 );
@@ -225,6 +261,20 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
   {
     id: "openai/earlier",
     servedBy: ["openai"],
+    models: ["gpt-5"],
+    modelPrefixes: [
+      "gpt-3.5",
+      "gpt-4",
+      "gpt-5-",
+      "gpt-5.1",
+      "gpt-5.2",
+      "gpt-5.3",
+      "gpt-5.4",
+      "chatgpt-4o",
+      "o1",
+      "o3",
+      "o4",
+    ],
     rule: {
       mode: "auto",
       short: {
@@ -245,7 +295,7 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
         OPENAI_EXTENDED_SOURCE,
         src(OPENAI_URL, "No additional cache-write charge"),
       ],
-      note: "in_memory 无活动约 5–10 分钟、至多 1 小时；24h 档通常约 30 分钟、最长 24 小时；最小前缀随请求设置而变；读取倍率按模型不同",
+      note: "GPT-5.5 之前的型号逐个列出；in_memory 无活动约 5–10 分钟、至多 1 小时；24h 档通常约 30 分钟、最长 24 小时；最小前缀随请求设置而变；读取倍率按模型不同。OpenAI 下没有兜底行，未列出的型号为未知",
     },
   },
   {
@@ -328,40 +378,35 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
     },
   },
   {
-    id: "google-vertex/gemini",
+    id: "google-vertex/gemini-2.5+",
     servedBy: ["google-vertex"],
-    modelPrefixes: ["gemini-"],
+    modelPrefixes: ["gemini-2.5", "gemini-3"],
     rule: {
       mode: "both",
-      short: {
-        seconds: "unknown",
-        basis: "unstated",
-        refreshOnHit: "unknown",
-        writeMultiplier: 1,
-        readMultiplier: 0.1,
-        enable: "隐式缓存：缺省开，无存储费",
-      },
-      long: {
-        seconds: 3600,
-        basis: "fixed",
-        refreshOnHit: false,
-        writeMultiplier: 1,
-        readMultiplier: 0.1,
-        enable: "显式缓存：缺省 60 分钟、最短 1 分钟、无上限，按存储时长另收存储费",
-      },
+      short: vertexGeminiImplicit(0.1),
+      long: vertexGeminiExplicit(0.1),
       minPrefixTokens: { min: 2048, max: 4096 },
       sources: [
-        src(VERTEX_GEMINI_URL, "There are no storage costs for implicit caching."),
+        ...VERTEX_GEMINI_SOURCES,
         src(
           VERTEX_GEMINI_URL,
-          "you're billed for the input tokens used to create the cache at the standard input token price."
-        ),
-        src(
-          VERTEX_GEMINI_CREATE_URL,
-          "The default expiration time of a context cache is 60 minutes after it's created."
+          "Implicit caching provides a 90% discount on cached tokens compared to standard input tokens."
         ),
       ],
-      note: "命中折扣 2.5 及以后为 90%（2.0 显式为 75%）；最短 1 分钟与最小前缀（Gemini 2 系 2048、3 系 4096）只在表格里",
+      note: "最短 1 分钟与最小前缀（2.5 系 2048、3 系 4096）只在表格里",
+    },
+  },
+  {
+    id: "google-vertex/gemini-2.0",
+    servedBy: ["google-vertex"],
+    modelPrefixes: ["gemini-2.0"],
+    rule: {
+      mode: "both",
+      short: vertexGeminiImplicit("unknown"),
+      long: vertexGeminiExplicit(0.25),
+      minPrefixTokens: { min: 2048, max: 2048 },
+      sources: VERTEX_GEMINI_SOURCES,
+      note: "显式命中折扣 75%；隐式命中折扣未按型号写明；最短 1 分钟与最小前缀只在表格里",
     },
   },
   {
@@ -461,7 +506,7 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
         seconds: 3600,
         basis: "best-effort",
         refreshOnHit: "unknown",
-        writeMultiplier: 1,
+        writeMultiplier: "unknown",
         readMultiplier: "unknown",
         enable: "缺省即开，无需改代码",
       },
@@ -470,8 +515,9 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
         src(DEEPSEEK_URL, "上下文硬盘缓存技术对所有用户默认开启，用户无需修改代码即可享用"),
         src(DEEPSEEK_URL, "缓存系统是“尽力而为”，不保证 100% 缓存命中"),
         src(DEEPSEEK_URL, "缓存不再使用后会自动被清空，时间一般为几个小时到几天"),
+        src(DEEPSEEK_PRICING_URL, "我们将根据模型输入和输出的总 token 数进行计量计费。"),
       ],
-      note: "原文清除时间“一般为几个小时到几天”，秒数取保守下限 1 小时；价格页只有命中与未命中两档、没有写入计费项；缓存前缀单元须完整匹配才命中",
+      note: "原文清除时间“一般为几个小时到几天”，秒数取保守下限 1 小时；价格页只有输入（缓存命中）、输入（缓存未命中）与输出三项，未写写入费，写入倍率记未知；缓存前缀单元须完整匹配才命中",
     },
   },
   {
@@ -506,14 +552,14 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
   {
     id: "kimi/k2.6-k2.7",
     servedBy: ["moonshotai", "moonshotai-cn", "kimi-coding", "moonshot", "kimi"],
-    modelPrefixes: ["kimi-k2.6", "kimi-k2.7"],
+    models: ["kimi-k2.7", "kimi-k2.7-highspeed", "kimi-k2.6"],
     rule: {
       mode: "auto",
       short: kimiTier(300, 1, KIMI_SHORT_ENABLE),
       long: kimiTier(3600, 1, KIMI_LONG_ENABLE),
       minPrefixTokens: "unknown",
       sources: KIMI_SOURCES,
-      note: "文档点名 kimi-k2.7、kimi-k2.7-highspeed、kimi-k2.6 不支持 Cache Write（不另收写入费）",
+      note: "只列文档点名不支持 Cache Write 的 kimi-k2.7、kimi-k2.7-highspeed、kimi-k2.6（不另收写入费）",
     },
   },
   {
@@ -568,14 +614,14 @@ export const CACHE_RULES: readonly CacheRuleRow[] = [
         readMultiplier: "unknown",
         enable: "隐式缓存：缺省即开",
       },
-      minPrefixTokens: { min: 500, max: 500 },
+      minPrefixTokens: "unknown",
       sources: [
         src(ZHIPU_URL, "隐式缓存，智能识别重复的上下文内容，无需手动配置"),
         src(ZHIPU_URL, "重复的前缀内容必须足够长（建议 500 Token 以上）"),
         src(ZHIPU_URL, "按优惠价格计费（通常为标准价格的 50%）"),
         src(ZHIPU_PRICING_URL, "缓存存储当前限时免费。本页暂不展示免费期结束后的标准价格"),
       ],
-      note: "最小前缀 500 是建议值；命中价缓存页写通常 50%，价格表实际约 22%–25%，以价格表为准；另有缓存存储费（目前限时免费）",
+      note: "缓存页建议重复前缀 500 Token 以上，是建议值、不是下限，最小前缀记未知；命中价缓存页写通常 50%，价格表上约 22%–25%，两页不一致，命中倍率记未知；另有缓存存储费（目前限时免费）",
     },
   },
   {
@@ -644,27 +690,50 @@ export const UNKNOWN_CACHE_RULE: CacheRule = {
   sources: [],
 };
 
-// 按实际服务方与模型名查表：该服务方下取最长的匹配前缀所在的行，都不匹配取兜底行；查不到为 undefined
+// 一行与型号的匹配度：精确型号最高，其次前缀长度，兜底行为 0，不匹配为 -1
+function matchScore(row: CacheRuleRow, modelId: string): number {
+  if (row.models === undefined && row.modelPrefixes === undefined) return 0;
+  if (row.models?.includes(modelId)) return Number.MAX_SAFE_INTEGER;
+  const prefixes = (row.modelPrefixes ?? []).filter((prefix) => modelId.startsWith(prefix));
+  return Math.max(-1, ...prefixes.map((prefix) => prefix.length));
+}
+
+// 按实际服务方与模型名查表：该服务方下取匹配度最高的行；查不到为 undefined
 export function findCacheRule(
   servedBy: string,
   modelId: string,
   rows: readonly CacheRuleRow[] = CACHE_RULES
 ): CacheRuleRow | undefined {
-  let best: { row: CacheRuleRow; length: number } | undefined;
+  let best: { row: CacheRuleRow; score: number } | undefined;
   for (const row of rows) {
     if (!row.servedBy.includes(servedBy)) continue;
-    const length =
-      row.modelPrefixes === undefined
-        ? 0
-        : Math.max(
-            -1,
-            ...row.modelPrefixes.filter((p) => modelId.startsWith(p)).map((p) => p.length)
-          );
-    if (length >= 0 && (best === undefined || length > best.length)) {
-      best = { row, length };
+    const score = matchScore(row, modelId);
+    if (score >= 0 && (best === undefined || score > best.score)) {
+      best = { row, score };
     }
   }
   return best?.row;
+}
+
+// 已知服务方的接口主机：按接口地址的主机名（整段匹配）判定实际服务方，值为表里该服务方的一个名字
+export const SERVED_BY_HOSTS: ReadonlyArray<{ host: RegExp; servedBy: string }> = [
+  { host: /^api\.deepseek\.com$/, servedBy: "deepseek" },
+  { host: /^api\.anthropic\.com$/, servedBy: "anthropic" },
+  { host: /^api\.openai\.com$/, servedBy: "openai" },
+  { host: /^generativelanguage\.googleapis\.com$/, servedBy: "google" },
+  { host: /^([a-z0-9-]+-)?aiplatform\.googleapis\.com$/, servedBy: "google-vertex" },
+  { host: /^bedrock-runtime(-fips)?\.[a-z0-9-]+\.amazonaws\.com$/, servedBy: "amazon-bedrock" },
+  { host: /^api\.moonshot\.(cn|ai)$/, servedBy: "moonshot" },
+  { host: /^api\.kimi\.com$/, servedBy: "kimi" },
+  { host: /^dashscope(-intl|-us)?\.aliyuncs\.com$/, servedBy: "dashscope" },
+  { host: /\.maas\.aliyuncs\.com$/, servedBy: "alibaba-bailian" },
+  { host: /^(open\.bigmodel\.cn|api\.z\.ai)$/, servedBy: "zhipu" },
+  { host: /^api\.x\.ai$/, servedBy: "xai" },
+  { host: /^api\.mistral\.ai$/, servedBy: "mistral" },
+];
+
+export function servedByOfHost(host: string): string | undefined {
+  return SERVED_BY_HOSTS.find((entry) => entry.host.test(host))?.servedBy;
 }
 
 // ---- 设置里的覆盖（modelInfo 一节各模型的 cache；schema 在 model-info.ts）----

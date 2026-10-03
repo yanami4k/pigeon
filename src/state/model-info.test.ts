@@ -1,5 +1,5 @@
 // 模型信息的逐项取值（决策 362）：设置 > 接入模块声明 > pi-ai 目录 > 未知，每项单独取；价格整体取自同一来源；
-// 缓存规则按实际服务方查；查询给出命中、未命中、写缓存三价（带币种）。
+// 价格全为 0 的一层当作没给；缓存规则按实际服务方查（设置 > 声明 > 接口主机名 > provider 标签）；查询给出三价（带币种）。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type CatalogLookup, modelProfile, resolveModelInfo } from "./model-info.ts";
@@ -50,6 +50,22 @@ test("价格整体取：设置的价格连同币种盖掉声明的；声明不�
   assert.equal(lookups, 0);
 });
 
+test("价格全为 0 的一层当作没给价格，往下层取，来源记实际取到的那一层", () => {
+  const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, currency: "USD" };
+  const info = resolveModelInfo({
+    launch: { provider: "acme", id: "m1" },
+    declared: { cost: zero, contextWindow: 1, maxTokens: 1 },
+    catalog,
+    section: { models: { "acme/m1": { cost: zero } } },
+  });
+  assert.deepEqual(info.cost, { source: "catalog", value: USD });
+  const none = resolveModelInfo({
+    launch: { provider: "acme", id: "m1" },
+    declared: { cost: zero },
+  });
+  assert.deepEqual(none.cost, { source: "unknown" });
+});
+
 test("身份：声明的 provider 与模型名优先于启动参数的标签，设置与目录都按它匹配", () => {
   const seen: string[] = [];
   const info = resolveModelInfo({
@@ -68,10 +84,37 @@ test("身份：声明的 provider 与模型名优先于启动参数的标签，�
   assert.equal(resolveModelInfo({ launch: { provider: "p", id: "m" } }).identity, "launch");
 });
 
-test("缓存规则按实际服务方查：经兼容端点的 DeepSeek 查 DeepSeek；设置可指明服务方并逐项覆盖", () => {
-  const deepseek = resolveModelInfo({ launch: { provider: "deepseek", id: "deepseek-flash" } });
-  assert.equal(deepseek.cache.row, "deepseek");
-  assert.equal(deepseek.cache.rule.mode, "auto");
+test("服务方：设置 > 声明 > 接口地址的主机名 > provider 标签；经兼容端点访问的 DeepSeek 按主机名查 DeepSeek", () => {
+  const served = (declared: { baseUrl?: string; servedBy?: string }, settings?: string) => {
+    const { cache } = resolveModelInfo({
+      launch: { provider: "acme", id: "deepseek-flash" },
+      declared,
+      ...(settings !== undefined
+        ? { section: { models: { "acme/deepseek-flash": { cache: { servedBy: settings } } } } }
+        : {}),
+    });
+    return [cache.servedBy, cache.servedByFrom, cache.row];
+  };
+  const viaAnthropicApi = { baseUrl: "https://api.deepseek.com/anthropic" };
+  assert.deepEqual(served(viaAnthropicApi), ["deepseek", "host", "deepseek"]);
+  assert.deepEqual(served({ ...viaAnthropicApi, servedBy: "anthropic" }), [
+    "anthropic",
+    "declared",
+    "anthropic",
+  ]);
+  assert.deepEqual(served({ ...viaAnthropicApi, servedBy: "anthropic" }, "kimi"), [
+    "kimi",
+    "settings",
+    "kimi",
+  ]);
+  assert.deepEqual(served({ baseUrl: "http://127.0.0.1:8080/v1" }), [
+    "acme",
+    "provider",
+    undefined,
+  ]);
+});
+
+test("设置可逐项覆盖查到的规则；查不到的服务方规则全未知", () => {
   const proxied = resolveModelInfo({
     launch: { provider: "my-proxy", id: "claude-sonnet-5" },
     section: {
@@ -80,7 +123,6 @@ test("缓存规则按实际服务方查：经兼容端点的 DeepSeek 查 DeepSe
       },
     },
   });
-  assert.deepEqual([proxied.cache.servedBy, proxied.cache.row], ["anthropic", "anthropic"]);
   assert.equal(proxied.cache.overridden, true);
   assert.equal(proxied.cache.rule.short?.seconds, 120);
   assert.equal(proxied.cache.rule.short?.writeMultiplier, 1.25);
@@ -89,7 +131,7 @@ test("缓存规则按实际服务方查：经兼容端点的 DeepSeek 查 DeepSe
   assert.equal(unknown.cache.rule.mode, "unknown");
 });
 
-test("查询：命中、未命中、写缓存三价带币种；写入不另收费时写缓存价取未命中价；价格全 0 或未知即三者未知", () => {
+test("查询：命中、未命中、写缓存三价带币种；写入不另收费时写缓存价取未命中价；价格未知即三者未知", () => {
   const profile = (cost: typeof USD) =>
     modelProfile(resolveModelInfo({ launch: { provider: "acme", id: "m" }, declared: { cost } }))
       .prices;
@@ -101,10 +143,6 @@ test("查询：命中、未命中、写缓存三价带币种；写入不另收�
     write: 1,
   });
   const unknown = { currency: "unknown", hit: "unknown", miss: "unknown", write: "unknown" };
-  assert.deepEqual(
-    profile({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, currency: "USD" }),
-    unknown
-  );
   assert.deepEqual(
     modelProfile(resolveModelInfo({ launch: { provider: "acme", id: "m" } })).prices,
     unknown

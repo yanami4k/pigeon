@@ -155,7 +155,7 @@ import {
   taskListRegistrations,
   UPDATE_TASKS_TOOL,
 } from "./task-list-tool.ts";
-import type { WarnSink } from "./warnings.ts";
+import { stderrWarn, type WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
 export interface RuntimeDeps {
@@ -991,7 +991,10 @@ export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
 
 // 加载用户提供的 StreamFn 模块（默认导出必须是函数）。归位装配根（M2 S2）：它是模型接入的
 // 装载件，与 buildRuntime 同属"装配"职责；cli 与 tui 两个 Actor 都从本层取，避免 Actor 互依
-export async function loadStreamFn(specifier: string): Promise<StreamFn> {
+export async function loadStreamFn(
+  specifier: string,
+  warn: WarnSink = stderrWarn
+): Promise<StreamFn> {
   // 说明符判定：磁盘上存在的相对/绝对路径一律按文件加载（tmp/x.mjs 这类含分隔符的
   // 相对路径也是文件，不能交给裸说明符解析）；否则按裸包名 import
   const asFile = path.resolve(specifier);
@@ -1009,14 +1012,22 @@ export async function loadStreamFn(specifier: string): Promise<StreamFn> {
     throw new Error(`streamFn 模块 ${specifier} 没有默认导出函数`);
   }
   const streamFn = module.default as StreamFn;
-  // 决策 362：可选的具名导出 modelInfo（不合规即报错）；声明没给全价格、窗口与输出上限时另加载 pi-ai 自带目录备查
-  const declared: ModelInfoDeclaration | undefined =
-    module.modelInfo === undefined
-      ? undefined
-      : parseModelInfoDeclaration(module.modelInfo, `streamFn 模块 ${specifier}`);
+  // 决策 362：可选的具名导出 modelInfo（不合规即报错，不认识的顶层键告警）；声明没给全价格、窗口与输出上限时另加载
+  // pi-ai 自带目录备查（加载失败告警，按未知处理）
+  let declared: ModelInfoDeclaration | undefined;
+  if (module.modelInfo !== undefined) {
+    const parsed = parseModelInfoDeclaration(module.modelInfo, `streamFn 模块 ${specifier}`);
+    declared = parsed.declared;
+    if (parsed.unknownKeys.length > 0) {
+      warn(
+        `streamFn 模块 ${specifier} 导出的 modelInfo 有不认识的字段 ${parsed.unknownKeys.join("、")}（不是 pi-ai 模型字段，也不是 modelInfo 的字段），已忽略`
+      );
+    }
+  }
+  const catalog = declarationComplete(declared) ? undefined : await loadCatalogLookup(warn);
   registerModelAccess(streamFn, {
     ...(declared !== undefined ? { declared } : {}),
-    ...(declarationComplete(declared) ? {} : { catalog: await loadCatalogLookup() }),
+    ...(catalog !== undefined ? { catalog } : {}),
   });
   return streamFn;
 }
