@@ -89,3 +89,10 @@ spawn_worker（`application/spawn-worker-tool.ts`、`attempt-group.ts`、`spawn-
 - grep、glob、write_file 合并后：在 `SCOPABLE_TOOLS` 各加一行；grep、glob 加进 explorer 预设（`ROLE_TOOLS` 处已注明）。它们的路径参数若不叫 `path`，或缺省为工作区根，`scopeViolation` 取参数处需随之调整。
 - 作用范围按宿主路径判定；worker 不在容器工作区里运行，沙箱会话不派 worker。
 - 冷恢复 worker 会话（`sessionRuntimeScope`）原本不套角色命令清单，本段未改；范围随委派策略还原，照常生效。
+
+## 七、verify
+
+- 在构建服务器上运行（8 vCPU、31 GB 内存，Linux，Node 24.12.0），提交 9463009（代码与测试为 db43ba4，其后只改文档）。
+- `npm run verify` 的四步分别运行：lint、tsc 类型检查、全量测试（`node --test --test-concurrency=3`，另有一家的测试同时在跑）、依赖规则，全部通过。
+- 全量测试 1636 项：通过 1634，跳过 2（两项 Windows `.cmd` 用例，只在 Windows 上运行），失败 0。总用时约 155 秒，其中测试约 136 秒。
+- 依赖规则：577 个模块、4189 条依赖，无违规。
