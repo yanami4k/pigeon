@@ -116,3 +116,24 @@
 
 - 提交 077f261（在 814ac64 之上只加本审计文件），同一台服务器：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`、`npm run deps` 依次全过。测试 1,619 项：通过 1,617，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：572 个模块，无违规。
 - 服务器上以本分支测试前缀命名的容器与网络已全部删除（其中一个容器与一张网络留自一次被超时终止的测试运行）；实验镜像与其余镜像未改动。
+
+## 补记：sshd 可达、跑批器进程内条件的输出上限、custom 的去除
+
+- sshd 可达：照现状接受，不加防火墙，不改代码（事实见第四节"宿主一侧地址上的端口"）。
+- 跑批器进程内条件的输出上限：照现状保留 16,384——`STREAM_MAX_OUTPUT_TOKENS` 与跑批器给 `gatewayStreamFn` 传 16,384 的做法不变。
+- custom 的去除：外部 agent 条件免除。
+
+改法（`model-gateway.ts`、`stream-runner.ts`、`stream-external.ts`）：
+- `jobBaseUrl(job, options)` 的第二个参数改为选项 `{ on?, verbatimBody? }`（`on` 即原来的监听选择）。登记作业时记下随机串与是否逐字转发；同一作业前后声明不一致即报错。
+- 转发时按登记的声明取：逐字转发的作业，请求体一字不改，只替换 key 头；其余作业照旧经 `stripCustomToolType` 去掉工具定义里的 `"type": "custom"`。判定只看登记时的声明，不看请求内容。
+- `ConditionSpec` 加 `verbatimRequestBody`；`externalConditionSpec` 置为真。跑批器登记外部条件的作业地址时带 `{ on: "internal", verbatimBody: true }`；内置条件仍以 `jobBaseUrl(key)` 登记，调用不变。
+- 说明：`--external-agent` 的用法注释（`src/cli/index.ts`）与 `eval/analysis/README.md` 讲外部条件的一处，各加同一段：外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 `"type": "custom"`（例如 litellm 的 Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段。
+
+测试：
+- `model-gateway.test.ts`（2 项，假上游）：同一份带 `"type": "custom"` 工具定义、未知字段与非规整空白（换行、制表符、冒号与逗号两侧的空格）的请求体，经外部条件的作业地址发出，上游收到的字节与发出的逐字相同，key 头为真 key；经进程内条件的作业地址发出，custom 被去掉、其余字段（含未知字段）保留。同一作业前后声明不一致即报错，一致时取到同一地址。原有网关用例照常通过。
+- 真容器（`stream-external-docker.test.ts` 的完整一步）：假启动器发出带 custom 工具、未知字段与非规整空白的请求体并把发出的字节存进产物；上游收到的字节与之逐字相同。
+- `stream-external.test.ts`：外部条件的条件说明带 `verbatimRequestBody: true`。
+
+变异：去掉网关的免除判定（一律经 `stripCustomToolType`），网关用例 1 项、真容器完整一步 1 项变红；跑批器登记外部条件时不声明逐字转发，真容器完整一步 1 项变红；还原后逐字一致。
+
+verify：提交 50b0474，同一台服务器：`npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`、`npm run deps` 依次全过。测试 1,621 项：通过 1,619，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：572 个模块，无违规。测试建的容器与网络都已删除。
