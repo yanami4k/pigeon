@@ -1973,11 +1973,11 @@ test("网关：在跑批内部网络的地址上再听一份，同一套路由�
   await withGateway(
     [{ status: 200, body: SSE, contentType: "text/event-stream" }],
     async (g, up) => {
-      assert.throws(() => g.jobBaseUrl("s1|ext-x|1", "internal"), /listenInternal/);
+      assert.throws(() => g.jobBaseUrl("s1|ext-x|1", { on: "internal" }), /listenInternal/);
       const internalBase = await g.listenInternal("127.0.0.1");
       assert.notEqual(internalBase, g.baseUrl);
       await assert.rejects(g.listenInternal("127.0.0.1"), /已在/);
-      const viaInternal = g.jobBaseUrl("s1|ext-x|1", "internal");
+      const viaInternal = g.jobBaseUrl("s1|ext-x|1", { on: "internal" });
       assert.ok(viaInternal.startsWith(`${internalBase}/j/`));
       assert.equal(
         viaInternal.split("/").at(-1),
@@ -2002,4 +2002,53 @@ test("网关：在跑批内部网络的地址上再听一份，同一套路由�
       assert.equal(up.seen.length, 1);
     }
   );
+});
+
+// 外部 agent 条件的作业地址（登记时声明逐字转发）：请求体一字不改，只替换 key 头；进程内条件与最简 agent 的作业地址照旧
+// 去除工具定义里的 "type": "custom"。判定按登记时的声明，不看请求内容
+const CUSTOM_TOOL_BODY =
+  '{ "model":"deepseek-flash",\n  "max_tokens" : 32000, "output_config":{"effort":"high"},' +
+  '"tools":[{"type":"custom","name":"bash","input_schema":{"type":"object"}},{"name":"read","input_schema":{}}],' +
+  '\t"messages":[{"role":"user","content":"hi"}], "stream":true, "unknown_top":[1, 2 ,3] }';
+
+test("网关：同一份带 custom 工具、未知字段与非规整空白的请求体——外部条件的作业地址逐字到达上游，进程内条件的去掉 custom、其余字段保留", async () => {
+  await withGateway(
+    [
+      { status: 200, body: SSE, contentType: "text/event-stream" },
+      { status: 200, body: SSE, contentType: "text/event-stream" },
+    ],
+    async (g, up) => {
+      const send = async (base: string) => {
+        const res = await fetch(`${base}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+          body: CUSTOM_TOOL_BODY,
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+      };
+      await send(g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true }));
+      await send(g.jobBaseUrl("s1|neither|1"));
+      assert.equal(up.seen.length, 2);
+      // 外部条件：逐字相同，只换了 key 头
+      assert.equal(up.seen[0]?.body, CUSTOM_TOOL_BODY);
+      assert.equal(up.seen[0]?.key, "key-one");
+      // 进程内条件：custom 去掉，其余字段保留
+      const expected = JSON.parse(CUSTOM_TOOL_BODY);
+      delete expected.tools[0].type;
+      assert.deepEqual(JSON.parse(up.seen[1]?.body ?? "{}"), expected);
+      assert.doesNotMatch(up.seen[1]?.body ?? "", /"custom"/);
+      assert.equal(up.seen[1]?.key, "key-one");
+    }
+  );
+});
+
+test("网关：同一作业前后对逐字转发的声明不一致即报错；一致时取到同一地址", async () => {
+  await withGateway([], async (g) => {
+    const first = g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true });
+    assert.equal(g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true }), first);
+    assert.throws(() => g.jobBaseUrl("s1|ext-x|1"), /前后声明不一致/);
+    g.jobBaseUrl("s1|neither|1");
+    assert.throws(() => g.jobBaseUrl("s1|neither|1", { verbatimBody: true }), /前后声明不一致/);
+  });
 });

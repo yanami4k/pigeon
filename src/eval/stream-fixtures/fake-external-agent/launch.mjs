@@ -1,7 +1,8 @@
 // 测试用的假外部 agent 启动器（外部 agent 条件的测试夹具，不是真的 agent）：以只读方式挂进作业容器，由跑批器用
 // docker exec 在工作区根运行：node launch.mjs <请求文件> <结果文件>；带 --identity 时只打印自报的版本。
 // 行为由环境变量 FAKE_EXTERNAL_MODE 决定（经外部 agent 配置的附加环境变量给）：
-//   work（缺省）：经网关发一次模型请求（请求体带一个未知字段），改工作区里的 src/a.txt，在排除路径 .agent-state 下写
+//   work（缺省）：经网关发一次模型请求（请求体带 custom 工具、未知字段与非规整空白，发出的字节存进产物），改工作区里的
+//               src/a.txt，在排除路径 .agent-state 下写
 //               文件并建一个带提交的嵌套 git 工作树，往产物目录写一个文件，结果文件带 report；
 //   hang：起一个后台 sleep 后一直不退出（测墙钟到点被杀）。
 import { execFileSync, spawn } from "node:child_process";
@@ -24,10 +25,12 @@ if (mode === "hang") {
   writeFileSync(path.join(artifacts, "started.txt"), "hang\n");
   setInterval(() => {}, 1000);
 } else {
+  // 带 "type": "custom" 的工具定义、未知字段与非规整空白：外部条件的作业地址上应逐字到达上游；发出的字节另存进产物
   const body =
-    '{"model":"' +
-    request.model +
-    '","max_tokens":1,"output_config":{"fake":true},"messages":[{"role":"user","content":"hi"}]}';
+    `{ "model":"${request.model}",\n  "max_tokens" : 1, "output_config":{"fake":true},` +
+    '"tools":[{"type":"custom","name":"bash","input_schema":{"type":"object"}}],' +
+    '\t"messages":[{"role":"user","content":"hi"}] }';
+  writeFileSync(path.join(artifacts, "sent-body.json"), body);
   let httpStatus = null;
   try {
     const res = await fetch(`${process.env.PIGEON_MODEL_BASE_URL}/v1/messages`, {

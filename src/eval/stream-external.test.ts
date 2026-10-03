@@ -179,6 +179,7 @@ test("排除路径的规整与条件说明、作业容器参数", () => {
     pushedMemory: false,
     network: "gateway-only",
     excludePaths: [".s"],
+    verbatimRequestBody: true,
   });
   assert.deepEqual(externalContainerArgs(config, "net-1"), [
     "--network",

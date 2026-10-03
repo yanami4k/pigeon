@@ -3,7 +3,8 @@
 // 上游为 DeepSeek 的 Anthropic 兼容端点（错误正文为 OpenAI 形状，分类口径见 model-limits.ts）。
 //   接入：每个作业用独立路径前缀 /j/<作业>/<随机串>/，网关据此把用量归到作业上；随机串每作业一个（32 位十六进制，不可猜），
 //        作业地址经 jobBaseUrl 登记后才转发，而且只转发 POST …/v1/messages，其余（未登记、随机串不对、别的路径或方法）一律
-//        回 404、不发往上游；请求体原样转发（只有工具的 type 为 custom 时去掉该字段，见 stripCustomToolType），只替换 key 头；
+//        回 404、不发往上游；请求体原样转发、只替换 key 头：进程内条件与最简 agent 的作业地址上，工具的 type 为 custom 时
+//        去掉该字段（见 stripCustomToolType）；登记时声明逐字转发的作业地址（外部 agent 条件）一概不改写；
 //        agent 进程与容器只拿到网关地址，真 key 只在网关里注入；
 //   账号：一个 key 一个账号，各有并发上限（缺省按官方单账号上限 2500）；请求挑在途占比最低的可用账号，全满则排队
 //        （排队时间记到作业上，计入该步墙钟；客户端中止即出队）；同一账号内不轮换 key；每次派发记下当时的退避轮次与该账号的上限；
@@ -198,8 +199,9 @@ export interface AccountStatus {
 export interface ModelGateway {
   baseUrl: string;
   // 作业的接入地址（首次调用即登记这个作业、给它一个随机串；之后同一作业取到同一串）。on 为 internal 时用跑批内部网络
-  // 上的监听地址（须先 listenInternal），缺省用回环地址
-  jobBaseUrl(job: string, on?: GatewayListener): string;
+  // 上的监听地址（须先 listenInternal），缺省用回环地址；verbatimBody 为真时这个作业的请求体逐字转发、不去除 custom
+  // （外部 agent 条件；登记时即定，同一作业前后声明不一致即报错）
+  jobBaseUrl(job: string, options?: JobAddressOptions): string;
   // 再听一个地址（跑批内部网络在宿主一侧的地址）：同一套路由与计量；返回该地址上的基址。只能听一次
   listenInternal(host: string): Promise<string>;
   meter(job: string): GatewayMeter;
@@ -227,6 +229,12 @@ export interface ModelGateway {
 
 // 网关的监听：回环地址（进程内条件与宿主上的启动器）或跑批内部网络在宿主一侧的地址（外部 agent 条件）
 export type GatewayListener = "loopback" | "internal";
+
+export interface JobAddressOptions {
+  on?: GatewayListener;
+  // 请求体逐字转发（外部 agent 条件）：不去除工具定义里的 "type": "custom"
+  verbatimBody?: boolean;
+}
 
 // 作业地址的路由：/j/<作业>/<随机串>/v1/messages（可带查询串）；只认这一种，其余为 undefined
 const JOB_ROUTE = /^\/j\/([^/?]+)\/([0-9a-f]{32})(\/v1\/messages)(\?.*)?$/;
@@ -840,10 +848,10 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     return headers;
   };
 
-  // 登记过的作业 → 随机串
-  const jobTokens = new Map<string, string>();
+  // 登记过的作业 → 随机串与是否逐字转发请求体
+  const jobTokens = new Map<string, { token: string; verbatimBody: boolean }>();
   const registered = (job: string, token: string): boolean => {
-    const expected = jobTokens.get(job);
+    const expected = jobTokens.get(job)?.token;
     if (expected === undefined) return false;
     const a = Buffer.from(expected, "utf8");
     const b = Buffer.from(token, "utf8");
@@ -872,7 +880,9 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     res.on("close", () => {
       if (!res.writableFinished) abort.abort();
     });
-    const body = stripCustomToolType(await readAll(req));
+    // 逐字转发按登记时的声明定（外部 agent 条件），不看请求内容
+    const raw = await readAll(req);
+    const body = jobTokens.get(job)?.verbatimBody === true ? raw : stripCustomToolType(raw);
     if (abort.signal.aborted) return;
     const inFlight = (jobInFlight.get(job) ?? 0) + 1;
     jobInFlight.set(job, inFlight);
@@ -1031,22 +1041,29 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
   const baseUrl = await listenOn(server, "127.0.0.1");
   // 跑批内部网络上的监听（外部 agent 条件用）
   let internal: { server: http.Server; baseUrl: string } | undefined;
-  const tokenOf = (job: string): string => {
-    let token = jobTokens.get(job);
-    if (token === undefined) {
-      token = randomBytes(16).toString("hex");
-      jobTokens.set(job, token);
+  const tokenOf = (job: string, verbatimBody: boolean): string => {
+    const existing = jobTokens.get(job);
+    if (existing !== undefined) {
+      if (existing.verbatimBody !== verbatimBody) {
+        throw new Error(
+          `作业 ${job} 已登记为${existing.verbatimBody ? "" : "不"}逐字转发请求体，前后声明不一致`
+        );
+      }
+      return existing.token;
     }
+    const token = randomBytes(16).toString("hex");
+    jobTokens.set(job, { token, verbatimBody });
     return token;
   };
   return {
     baseUrl,
-    jobBaseUrl: (job, on = "loopback") => {
+    jobBaseUrl: (job, options = {}) => {
+      const on = options.on ?? "loopback";
       if (on === "internal" && internal === undefined) {
         throw new Error("网关还没有在跑批内部网络上监听（先 listenInternal）");
       }
       const base = on === "internal" ? (internal?.baseUrl ?? baseUrl) : baseUrl;
-      return `${base}/j/${encodeURIComponent(job)}/${tokenOf(job)}`;
+      return `${base}/j/${encodeURIComponent(job)}/${tokenOf(job, options.verbatimBody === true)}`;
     },
     async listenInternal(host) {
       if (internal !== undefined) throw new Error("网关已在跑批内部网络上监听");

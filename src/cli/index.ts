@@ -738,7 +738,9 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
 // 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
-// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）；
+// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）。
+// 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
+// Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 

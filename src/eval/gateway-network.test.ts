@@ -113,7 +113,7 @@ test("只通网关的网络（真容器）：容器能连到网关、连不上�
     const result = await probeInContainer(
       container,
       probeScript([
-        gateway.jobBaseUrl("s|ext-x|1", "internal"),
+        gateway.jobBaseUrl("s|ext-x|1", { on: "internal" }),
         "1.1.1.1",
         network.hostAddress,
         ports,

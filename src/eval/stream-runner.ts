@@ -94,6 +94,8 @@ export interface ConditionSpec {
   network?: "gateway-only";
   // 提取改动时起止两次都排除的工作区路径（外部 agent 自己的状态目录等）；缺省不排除
   excludePaths?: readonly string[];
+  // 网关上这个条件的请求体逐字转发（外部 agent 条件）：登记作业地址时声明，不去除工具定义里的 "type": "custom"
+  verbatimRequestBody?: boolean;
 }
 
 export const CONDITION_SPECS: Record<BuiltinStreamCondition, ConditionSpec> = {
@@ -174,10 +176,13 @@ export interface StepAgentInput {
   modelBaseUrl?: string;
 }
 
-// 网关对跑批器露出的：作业的接入地址（on 为 internal 时取跑批内部网络上的地址，只给外部 agent 条件）、作业的计量、
+// 网关对跑批器露出的：作业的接入地址（外部 agent 条件取跑批内部网络上的地址，并登记为请求体逐字转发）、作业的计量、
 // 每步开始时重记在途峰值、排队看守
 export interface StreamModelGateway {
-  jobBaseUrl(job: string, on?: "loopback" | "internal"): string;
+  jobBaseUrl(
+    job: string,
+    options?: { on?: "loopback" | "internal"; verbatimBody?: boolean }
+  ): string;
   meter(job: string): GatewayMeter;
   resetPeak(job: string): void;
   watchQueue?(job: string, thresholdMs: number, listener: () => void): () => void;
@@ -1166,8 +1171,11 @@ async function runStep(
         ...(options.gateway !== undefined
           ? {
               modelBaseUrl:
-                spec.network === "gateway-only"
-                  ? options.gateway.jobBaseUrl(key, "internal")
+                spec.network === "gateway-only" || spec.verbatimRequestBody === true
+                  ? options.gateway.jobBaseUrl(key, {
+                      ...(spec.network === "gateway-only" ? { on: "internal" as const } : {}),
+                      ...(spec.verbatimRequestBody === true ? { verbatimBody: true } : {}),
+                    })
                   : options.gateway.jobBaseUrl(key),
             }
           : {}),

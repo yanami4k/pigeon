@@ -180,9 +180,23 @@ test("外部 agent 条件（真容器）：完整一步——经网关发请求�
     assert.equal(row.agentReport?.fake, true);
     assert.equal(row.agentReport?.httpStatus, 200);
     assert.equal(row.agentReport?.cwd, "/testbed");
-    // 请求体逐字到达上游（未知字段 output_config 在）
+    // 外部条件的作业地址上请求体逐字到达上游（带 custom 工具、未知字段 output_config 与非规整空白，一字不改）
     assert.equal(upstreamBodies.length, 1);
-    assert.match(upstreamBodies[0] ?? "", /"output_config":\{"fake":true\}/);
+    const sent = readFileSync(
+      join(
+        outDir,
+        "streams",
+        "tasks-ext-fake-1",
+        "external",
+        `step-${row.seq}`,
+        "try-1",
+        "artifacts",
+        "sent-body.json"
+      ),
+      "utf8"
+    );
+    assert.match(sent, /"type":"custom"/);
+    assert.equal(upstreamBodies[0], sent);
     // 别处的改动照常进 diff、照常判题；排除路径（含其中的嵌套 git 工作树）不进 diff
     assert.equal(row.outcome, "passed");
     const diff = readFileSync(join(outDir, row.diff ?? ""), "utf8");

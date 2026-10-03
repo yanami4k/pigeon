@@ -178,7 +178,7 @@ export function externalConditionOf(
   return `${EXTERNAL_CONDITION_PREFIX}${config.name}` as ExternalStreamCondition;
 }
 
-// 外部 agent 条件的条件说明：agent 键即条件名；作业容器接只通网关的网络；提取改动时排除配置里的路径
+// 外部 agent 条件的条件说明：agent 键即条件名；作业容器接只通网关的网络；网关上请求体逐字转发；提取改动时排除配置里的路径
 export function externalConditionSpec(config: ExternalAgentConfig): ConditionSpec {
   const name = externalConditionOf(config);
   return {
@@ -188,6 +188,7 @@ export function externalConditionSpec(config: ExternalAgentConfig): ConditionSpe
     pushedMemory: false,
     network: "gateway-only",
     excludePaths: [...config.excludePaths],
+    verbatimRequestBody: true,
   };
 }
 
