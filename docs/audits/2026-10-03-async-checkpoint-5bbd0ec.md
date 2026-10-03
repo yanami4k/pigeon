@@ -115,3 +115,7 @@
 - 机器：服务器 pigeon-verify，8 vCPU、31 GB 内存，Node v24.12.0；同时有别的施工会话在跑测试，按负载取测试并发 2。
 - 树与 6ccfdde 相同的提交上：`npm run lint`（545 个文件，无问题）、`npm run check`、`npm run deps`（574 个模块，无违规）通过。测试按目录分四批，每批一条前台命令，用 `node --test --test-concurrency=2`：application 376 项，tui 与 cli 201 项，eval 与 tools 424 项（跳过 2 项），其余目录 633 项。合计 1,634 项，通过 1,632，失败 0，跳过 2。application 这一批第一次跑出 `session-store.test.ts` 的那 1 项（第 5 处改动），改后单独重跑该文件通过。
 - 含本审计的提交上另跑一次 verify，结果追加在下一节。
+
+## 含本审计的提交上的 verify
+
+- 提交 d2dcd59（在 6ccfdde 之上只加本审计文件），同一台服务器，同时有别的施工会话在跑测试：`npm run lint`（545 个文件，无问题）、`npm run check`、`npm run deps`（574 个模块，无违规）通过。测试用 `node --test --test-concurrency=2` 分两批前台运行：application、tui、cli 577 项全过；其余目录 1,057 项，通过 1,055，跳过 2。合计 1,634 项，通过 1,632，失败 0，跳过 2。
