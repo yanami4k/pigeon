@@ -96,3 +96,9 @@ spawn_worker（`application/spawn-worker-tool.ts`、`attempt-group.ts`、`spawn-
 - `npm run verify` 的四步分别运行：lint、tsc 类型检查、全量测试（`node --test --test-concurrency=3`，另有一家的测试同时在跑）、依赖规则，全部通过。
 - 全量测试 1636 项：通过 1634，跳过 2（两项 Windows `.cmd` 用例，只在 Windows 上运行），失败 0。总用时约 155 秒，其中测试约 136 秒。
 - 依赖规则：577 个模块、4189 条依赖，无违规。
+
+## 八、role 参数说明
+
+- 改法：`spawn_worker` 的 `role` 参数说明由「worker 的角色，决定它能用的工具，见工具说明」改为「worker 的角色，不给 tools 时决定它能用的工具，见工具说明」（提交 552d034）。
+- 改动过的现有测试：`src/application/spawn-worker-tool.test.ts` 的 `FINAL_PARAMS.role` 随之更新。
+- verify：在同一台构建服务器上，提交 552d034，四步全部通过；全量测试 1636 项，通过 1634，跳过 2（同上两项 Windows 用例），失败 0；总用时约 152 秒。
