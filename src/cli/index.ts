@@ -62,6 +62,7 @@ import {
   runStreamClasses,
   runStreamExperiment,
 } from "../eval/stream-experiment.ts";
+import { loadExternalAgentConfig } from "../eval/stream-external.ts";
 import {
   assembleImageContext,
   generateStreamManifest,
@@ -75,7 +76,11 @@ import {
   type TaskPromptFormat,
 } from "../eval/stream-manifest.ts";
 import { runStreamRejudge } from "../eval/stream-rejudge.ts";
-import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
+import {
+  isExternalCondition,
+  STREAM_CONDITIONS,
+  type StreamCondition,
+} from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
@@ -732,13 +737,15 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 各条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
 // 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
+// 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
+// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
 async function evalStreamMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
-    `--conditions ${STREAM_CONDITIONS.join(",")} [--attempts N] [--concurrency N] [--max-steps K] ` +
+    `--conditions ${STREAM_CONDITIONS.join(",")}[,ext-<名字>…] [--external-agent <配置文件>]… [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
@@ -770,6 +777,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
+  // 外部 agent 的配置文件：可重复给
+  const externalAgentFiles: string[] = [];
   // 不带取值的开关：不交给模型参数的解析
   let allowDirtyHarness = false;
   for (let i = 0; i < argv.length; i++) {
@@ -777,6 +786,11 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     if (arg === undefined) continue;
     if (arg === "--allow-dirty-harness") {
       allowDirtyHarness = true;
+    } else if (arg === "--external-agent") {
+      const value = argv[++i];
+      if (value === undefined || value === "")
+        throw new Error(`--external-agent 需要配置文件（${usage}）`);
+      externalAgentFiles.push(value);
     } else if (own.has(arg)) {
       const value = argv[++i];
       if (value === undefined) throw new Error(`${arg} 需要取值（${usage}）`);
@@ -810,12 +824,16 @@ async function evalStreamMain(argv: string[]): Promise<void> {
       : undefined;
   const conditions = list("--conditions") ?? [];
   for (const c of conditions) {
-    if (!(STREAM_CONDITIONS as readonly string[]).includes(c)) {
-      throw new Error(`未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}）`);
+    if (!(STREAM_CONDITIONS as readonly string[]).includes(c) && !isExternalCondition(c)) {
+      throw new Error(
+        `未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}，或 ext-<外部 agent 的名字>）`
+      );
     }
   }
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
-  const needsPigeon = conditions.some((c) => c !== "minimal");
+  const needsPigeon = conditions.some((c) => c !== "minimal" && !isExternalCondition(c));
+  // 外部 agent 的配置在开跑前解析、校验（与所跑条件的对应在 runStreamExperiment 里查）
+  const externalAgents = externalAgentFiles.map((file) => loadExternalAgentConfig(file));
   const memoryLimitChars = positive("--memory-limit");
   const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
   const accounts = gatewayAccountsFromEnv(process.env);
@@ -897,6 +915,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     },
     ...(pigeon !== undefined ? { pigeon } : {}),
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
+    ...(externalAgents.length > 0 ? { externalAgents } : {}),
     ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
     ...(attempts !== undefined ? { attempts } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),

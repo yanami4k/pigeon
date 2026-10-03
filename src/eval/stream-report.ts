@@ -8,6 +8,7 @@
 // 输出目录有身份头时，最前面另有设置一节：开跑时的代码版本与每一次显式放行的代码更换（269）
 import { describeHarness, type HarnessRef } from "./stream-harness.ts";
 import {
+  isExternalCondition,
   STREAM_CONDITIONS,
   type StreamCondition,
   type StreamResultLine,
@@ -68,9 +69,11 @@ function sum(values: readonly number[]): number {
   return values.reduce((a, b) => a + b, 0);
 }
 
+// 报告里的条件顺序：内置条件按 STREAM_CONDITIONS 的顺序在前，外部 agent 条件（ext-<名字>）按名字排在后面
 function conditionsIn(lines: readonly StreamResultLine[]): StreamCondition[] {
   const present = new Set(lines.map((l) => l.condition));
-  return STREAM_CONDITIONS.filter((c) => present.has(c));
+  const external = [...present].filter((c) => isExternalCondition(c)).sort();
+  return [...STREAM_CONDITIONS.filter((c) => present.has(c)), ...external];
 }
 
 // 已按两类用例判过的行

@@ -16,6 +16,7 @@ import {
 } from "../pi-runtime/index.ts";
 import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
+import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
 import {
   assertConcurrencyFits,
   type GatewayAccount,
@@ -43,6 +44,16 @@ import {
   computeBaselines,
   computeClasses,
 } from "./stream-baseline.ts";
+import {
+  type ExternalAgentConfig,
+  externalAgentIdentity,
+  externalConditionOf,
+  externalConditionSpec,
+  externalContainerArgs,
+  externalStepAgent,
+  selfReportOf,
+  toolDirDigest,
+} from "./stream-external.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { STREAM_RUNTIMES } from "./stream-generate.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
@@ -62,8 +73,9 @@ import {
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
-import type { StreamCondition } from "./stream-results.ts";
+import { isExternalCondition, type StreamCondition } from "./stream-results.ts";
 import {
+  type ConditionSpec,
   dockerStreamEnvs,
   lockOutDir,
   ReferenceCases,
@@ -105,6 +117,8 @@ export interface StreamExperimentOptions {
   pigeon?: StreamPigeonOptions;
   // 最简 agent 的启动器命令；缺省则该条件的作业停止并说明
   minimalCommand?: readonly string[];
+  // 外部 agent 条件（实验设施）的配置：条件 ext-<名字> 各需一份；作业容器接只通网关的跑批内部网络
+  externalAgents?: readonly ExternalAgentConfig[];
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
   // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
@@ -303,6 +317,21 @@ async function runStreamExperimentLocked(
     options.minimalCommand === undefined
       ? undefined
       : { model: modelId, ...miniIdentityOf(options.minimalCommand) };
+  // 外部 agent 条件：每个条件须有配置，配置须对应所跑的条件；身份段在批次开始时算一次（工具目录摘要、自报的版本）
+  const externals = externalAgentsFor(options);
+  const externalSettings: Record<string, Record<string, unknown>> = {};
+  for (const config of externals) {
+    externalSettings[externalConditionOf(config)] = externalAgentIdentity(
+      config,
+      toolDirDigest(config.toolDir),
+      await selfReportOf(config, {
+        image: options.image,
+        container: `${prefix}-ext-identity-${config.name}`,
+        docker,
+        ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
+      })
+    );
+  }
   mkdirSync(outDir, { recursive: true });
   // 代码版本只取一次：身份头比对的与结果行记的是同一个
   const harness = currentHarnessRef();
@@ -323,6 +352,7 @@ async function runStreamExperimentLocked(
         agents: {
           ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
           ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+          ...externalSettings,
         },
       },
       // 路数与账号数只记不比：换机器、加账号后可以续跑
@@ -343,6 +373,19 @@ async function runStreamExperimentLocked(
     options.concurrency ?? 4,
     path.join(outDir, GATEWAY_SPEND_FILE)
   );
+  // 只通网关的跑批内部网络：有外部 agent 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
+  let network: Awaited<ReturnType<typeof createGatewayNetwork>> | undefined;
+  if (externals.length > 0) {
+    try {
+      network = await createGatewayNetwork(prefix, docker);
+      await liveGateway.listenInternal(network.hostAddress);
+    } catch (error) {
+      if (network !== undefined) await removeGatewayNetwork(network.name, docker).catch(() => {});
+      await liveGateway.close();
+      limits.close();
+      throw error;
+    }
+  }
   const shutdown = options.shutdownSignal;
   if (shutdown !== undefined) {
     const onShutdown = () => limits.shutdown(String(shutdown.reason ?? "收到停止信号"));
@@ -363,7 +406,7 @@ async function runStreamExperimentLocked(
       ],
     });
     await referenceWs.init(human.bundle(manifest.rangeEnd), manifest.rangeEnd);
-    const agents: Partial<Record<"pigeon" | "minimal", StepAgent>> = {};
+    const agents: Partial<Record<ConditionSpec["agent"], StepAgent>> = {};
     if (options.pigeon !== undefined) {
       agents.pigeon = pigeonStepAgent({
         ...streamPigeonOptions(options.pigeon),
@@ -381,6 +424,16 @@ async function runStreamExperimentLocked(
         limits,
       });
     }
+    const externalArgs = new Map<string, string[]>();
+    const conditionSpecs: Record<string, ConditionSpec> = {};
+    for (const config of externals) {
+      const condition = externalConditionOf(config);
+      agents[condition] = externalStepAgent({ config, docker, model: modelId, limits });
+      conditionSpecs[condition] = externalConditionSpec(config);
+      if (network !== undefined) {
+        externalArgs.set(condition, externalContainerArgs(config, network.name));
+      }
+    }
     return await runStreams({
       outDirLocked: true,
       manifest,
@@ -393,8 +446,10 @@ async function runStreamExperimentLocked(
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
+        ...(externals.length > 0 ? { conditionArgs: (c) => externalArgs.get(c) } : {}),
       }),
       agents,
+      ...(externals.length > 0 ? { conditionSpecs } : {}),
       reference,
       outDir,
       conditions: options.conditions,
@@ -409,6 +464,7 @@ async function runStreamExperimentLocked(
       agentSettings: {
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
         ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+        ...externalSettings,
       },
       ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
       ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
@@ -418,9 +474,41 @@ async function runStreamExperimentLocked(
     });
   } finally {
     await removeWorkspaceContainer(referenceName, docker).catch(() => {});
+    if (network !== undefined) await removeGatewayNetwork(network.name, docker).catch(() => {});
     await liveGateway.close();
     limits.close();
   }
+}
+
+// 外部 agent 条件的配置与所跑条件对上：每个 ext- 条件须有同名配置，每份配置须对应一个所跑的条件，名字不得重复
+export function externalAgentsFor(
+  options: Pick<StreamExperimentOptions, "conditions" | "externalAgents">
+): ExternalAgentConfig[] {
+  const configs = options.externalAgents ?? [];
+  const byCondition = new Map<string, ExternalAgentConfig>();
+  for (const config of configs) {
+    const condition = externalConditionOf(config);
+    if (byCondition.has(condition)) throw new Error(`外部 agent 的名字重复：${config.name}`);
+    byCondition.set(condition, config);
+  }
+  for (const condition of options.conditions) {
+    if (isExternalCondition(condition) && !byCondition.has(condition)) {
+      throw new Error(
+        `条件 ${condition} 没有外部 agent 配置（用 --external-agent <配置文件> 给出）`
+      );
+    }
+  }
+  for (const condition of byCondition.keys()) {
+    if (!(options.conditions as readonly string[]).includes(condition)) {
+      throw new Error(
+        `给了外部 agent 配置却没跑它的条件 ${condition}（在 --conditions 里加上，或去掉这份配置）`
+      );
+    }
+  }
+  return options.conditions.flatMap((c) => {
+    const config = byCondition.get(c);
+    return config !== undefined ? [config] : [];
+  });
 }
 
 // 网关花费累计的落盘文件（在输出目录下）：续跑时接着累计

@@ -631,3 +631,28 @@ def test_cli_rejects_missing_field(tmp_path):
     f = write_run(tmp_path / "run", rows, ident=identity(FORMAL_CONDITIONS))
     with pytest.raises(ResultFieldError, match="hitStepBudget"):
         main(["formal", "--results", str(f), "--out", str(tmp_path / "o"), "--tasks", tasks_file(tmp_path)])
+
+
+class TestExternalConditions:
+    """外部 agent 条件（跑批器的实验设施）：条件名 ext-<名字>，格子即条件名；不是 Pigeon，不要求 Pigeon 的身份段、
+    不读会话文件。"""
+
+    def test_condition_cell(self):
+        from pigeon_analysis.reader import condition_cell, is_pigeon_cell
+
+        assert condition_cell("ext-foo-2") == "ext-foo-2"
+        assert condition_cell("search-push") == "11" and condition_cell("minimal") == "M"
+        for bad in ("ext-", "ext-Foo", "ext-a_b", "external", None, 3):
+            assert condition_cell(bad) is None
+        assert is_pigeon_cell("01") and not is_pigeon_cell("M") and not is_pigeon_cell("ext-foo")
+
+    def test_row_maps_to_own_cell(self):
+        r = row_to_record(runner_row("M", 3, 1, 2, 4, condition="ext-foo", agentReport={"k": 1}))
+        assert r is not None and r["cell"] == "ext-foo" and r["task"] == 3 and r["f_total"] == 4
+
+    def test_load_table_with_only_external_and_minimal(self, tmp_path):
+        rows = [runner_row("M", 1, 1, 1, 2), runner_row("M", 1, 1, 2, 2, condition="ext-foo")]
+        f = write_run(tmp_path / "run", rows, ident=identity(("minimal", "ext-foo"), pigeon=False))
+        df, info = load_table([f])
+        assert sorted(df["cell"].tolist()) == ["M", "ext-foo"]
+        assert info["records"] == 2
