@@ -95,7 +95,7 @@ Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时�
 
 ## worker 与续接
 
-派 worker 时可以给工具清单（`spawn_worker` 的 `tools`），只能取主 agent 当前有的工具，写记忆、取用 worker 改动、编排脚本与任务清单不能交给 worker；不给即按角色的预设（explorer、implementer、tester）。还可以给某件工具附加作用范围（`scopes`），只能更窄：`read_file`、`edit_file` 限在相对 worker 工作树根的路径之内（按解析符号链接后的真实路径判定），`run_command` 只能运行以给定前缀开头、不经 shell 的单条命令。越出范围的调用一律拒绝，放权、`--yolo` 与钩子放行都不豁免。没给的工具不注册，worker 的系统提示也只介绍它有的工具。worker 跑命令与主会话同一套审批规则；设置里为该角色登记的命令清单作额外限制。
+派 worker 时可以给工具清单（`spawn_worker` 的 `tools`），只能取主 agent 当前有的工具，写记忆、取用 worker 改动、编排脚本与任务清单不能交给 worker；不给即按角色的预设（explorer、implementer、tester）。还可以给某件工具附加作用范围（`scopes`），只能更窄：`read_file`、`edit_file` 限在相对 worker 工作树根的路径之内——范围路径须是不经符号链接的真实路径（自身或上级是符号链接即拒绝派出），调用的目标解析符号链接后须落在其内；`run_command` 只能运行以给定前缀开头、不经 shell 的单条命令，Windows 上程序只按 PATH 解析、不从工作树里找。越出范围的调用一律拒绝，放权、`--yolo` 与钩子放行都不豁免。没给的工具不注册，worker 的系统提示也只介绍它有的工具。worker 跑命令与主会话同一套审批规则；设置里为该角色登记的命令清单作额外限制。
 
 worker 的派出与收尾成对记在派出它的会话里（缺收尾即进程中途退出）；工作树在 `.pigeon/state/worktrees/` 下，不自动清理。终端界面续接主会话（`pigeon --continue`、`pigeon --resume <id>`、`/resume`，以及 `/reload` 在同一会话上重建运行面）时，从会话记录找回之前运行的 worker：
 
