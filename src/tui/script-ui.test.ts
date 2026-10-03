@@ -14,15 +14,46 @@ import { ScriptGate } from "../application/script-naming.ts";
 import { commandInputText } from "../application/script-texts.ts";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
+import { localScriptLauncher, type ScriptProcess } from "../execution/script-sandbox.ts";
 import { newSessionId } from "../state/ids.ts";
 import { approvalBlockText, createTuiApprovalHandler } from "./approval.ts";
 import { until } from "./orchestration-fixtures.ts";
 import { ScriptedRuntime } from "./runtime-fixtures.ts";
 import { PigeonTuiShell } from "./shell.ts";
-import { MockTerminal, screenFlat, settle } from "./testing.ts";
+import { MockTerminal, screenFlat, screenText, settle } from "./testing.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
 
 const CTRL_X = "\x18";
+
+// 等屏幕与等汇总的上限（与夹具 until 同为 15 秒）。脚本派 worker 时编排器同步跑 git（建工作树、收尾时
+// git status）：Linux 上一次几毫秒，Windows 上一次约 0.3 秒（CPU 被争用时更长），一条用例要过好几个 worker
+const WAIT_MS = 15_000;
+// 收尾时等脚本运行结束的上限，到点即杀执行器子进程
+const CLOSE_MS = 5_000;
+
+// 等屏幕上出现一段文字。按键之后的回显不能靠固定的 settle()：批准之后 worker 随即收尾，编排器在同一串调用里
+// 同步跑 git status，接着下一个 worker 又同步建工作树；Windows 上这几百毫秒把界面的节流重绘推到 settle 的
+// 80ms 之后，断言读到的还是按键前的屏幕（Linux 上 git 快，碰不到）
+async function untilScreen(term: MockTerminal, text: string): Promise<void> {
+  const deadline = Date.now() + WAIT_MS;
+  while (!screenFlat(term).includes(text)) {
+    if (Date.now() > deadline) assert.fail(`屏幕上没有等到「${text}」：\n${screenText(term)}`);
+    await settle(10);
+  }
+}
+
+// 等一个承诺兑现（汇总通知之类），有上限：卡住即判失败，用例走到 finally 收尾，不吊在这里
+async function within<T>(promise: Promise<T>, what: string, ms = WAIT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what}没有等到`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function type(term: MockTerminal, text: string): Promise<void> {
   if (text.length > 1 && text.endsWith("\r")) {
@@ -34,8 +65,11 @@ async function type(term: MockTerminal, text: string): Promise<void> {
   await settle();
 }
 
-// 与终端界面入口同形的装配：编排面、脚本的树形视图数据与命令面、点名入口、包在审批外面的同类放行
+// 与终端界面入口同形的装配：编排面、脚本的树形视图数据与命令面、点名入口、包在审批外面的同类放行。
+// 用例在 finally 里调返回的 close 收尾（见 closeScript）
 function scriptShell(planner: (input: PlanInput) => WorkerPlan | Promise<WorkerPlan>) {
+  // 本用例起的执行器子进程：收尾时兜底杀掉
+  const procs = new Set<ScriptProcess>();
   const shellHolder: { current?: PigeonTuiShell } = {};
   const asked: ApprovalRequest[] = [];
   const grants = new SessionGrantStore({ workspaceRoot: "/nonexistent" });
@@ -54,6 +88,14 @@ function scriptShell(planner: (input: PlanInput) => WorkerPlan | Promise<WorkerP
     display: (line) => {
       shellHolder.current?.addSystem(line);
       shellHolder.current?.render();
+    },
+    launcher: async () => {
+      const launch = localScriptLauncher();
+      return (input) => {
+        const proc = launch(input);
+        procs.add(proc);
+        return proc;
+      };
     },
   });
   runsHolder.current = harness.runs;
@@ -85,14 +127,35 @@ function scriptShell(planner: (input: PlanInput) => WorkerPlan | Promise<WorkerP
     onHumanInput: (text) => gate.humanInput(text),
   });
   shellHolder.current = shell;
-  return { harness, shell, term, runtime, gate, asked };
+  const close = () => closeScript(harness, shell, procs);
+  return { harness, shell, term, runtime, gate, asked, close };
+}
+
+// 收尾（用例通过与否都走）：先停在跑的脚本（在跑的 worker 被中断，其余调用不再派），再停壳（挂着的审批按拒绝
+// 收口），再中断仍在跑的 worker（壳停之后才来的请示被拒，worker 要等中断才交回）；等运行结束有上限，到点杀掉
+// 执行器子进程。不这样收尾，失败的用例会留下等中断的 worker 与活着的执行器子进程（管道让事件循环一直不空），
+// 进程要等 worker 的卡住判定（10 分钟）到点、脚本跑完才退出
+async function closeScript(
+  harness: ReturnType<typeof scriptHarness>,
+  shell: PigeonTuiShell,
+  procs: ReadonlySet<ScriptProcess>
+): Promise<void> {
+  const { orchestrator, runs } = harness;
+  const live = runs.running();
+  await Promise.allSettled(live.map((runId) => runs.stop(runId)));
+  shell.stop();
+  await Promise.allSettled(orchestrator.status().map((w) => orchestrator.cancel(w.sessionId)));
+  const settled = Promise.allSettled(live.map((runId) => runs.settled(runId)));
+  await within(settled, "脚本运行收尾", CLOSE_MS).catch(() => {});
+  await Promise.allSettled([...procs].map((proc) => proc.kill()));
+  runs.dispose();
 }
 
 const script = (source: string, phases: string[] = []) => ({ name: "t", phases, script: source });
 
 test("开跑的计划行、log 行与结束汇总进消息区；树形视图接上脚本与阶段两层，面板照常列出各 worker", async () => {
   const release = Promise.withResolvers<void>();
-  const { harness, shell, term } = scriptShell((input) =>
+  const { harness, shell, term, close } = scriptShell((input) =>
     input.task === "查" ? { wait: release.promise } : {}
   );
   shell.start();
@@ -117,7 +180,7 @@ test("开跑的计划行、log 行与结束汇总进消息区；树形视图接�
     assert.ok(tree.includes("phase 调查  running"), tree);
     assert.ok(tree.includes("[X] stop script"), tree);
     release.resolve();
-    await done;
+    await within(done, "脚本的汇总");
     await settle(150);
     const after = screenFlat(term);
     assert.ok(after.includes(`script t (${runId})  done`), after);
@@ -125,12 +188,12 @@ test("开跑的计划行、log 行与结束汇总进消息区；树形视图接�
     await type(term, CTRL_X);
     assert.ok(screenFlat(term).includes(`[脚本通知] 脚本 t（运行号 ${runId}）已完成。`));
   } finally {
-    shell.stop();
+    await close();
   }
 });
 
 test("界面上停止整个脚本：树形视图里选中脚本下的 worker 按 X；/orchestrate stop；在跑的 worker 停下，结果照常交回", async () => {
-  const { harness, shell, term } = scriptShell(() => ({ hang: true }));
+  const { harness, shell, term, close } = scriptShell(() => ({ hang: true }));
   shell.start();
   try {
     const done = harness.nextNotice();
@@ -143,7 +206,7 @@ test("界面上停止整个脚本：树形视图里选中脚本下的 worker 按
     await until(() => harness.sink.spawned.length === 2, "派出两个");
     await type(term, CTRL_X);
     await type(term, "X");
-    const summary = await done;
+    const summary = await within(done, "停止后的汇总");
     assert.match(
       summary,
       new RegExp(`脚本 t（运行号 ${runId}）已停止。worker 2 个：成功 0，失败 2`)
@@ -158,14 +221,15 @@ test("界面上停止整个脚本：树形视图里选中脚本下的 worker 按
     const other = await harness.runs.start(script('await agent("四");'), undefined);
     await until(() => harness.sink.spawned.length === 3, "派出第四个");
     await type(term, "/orchestrate stop\r");
-    assert.match(await second, new RegExp(`运行号 ${other}）已停止`));
+    const stopped = await within(second, "/orchestrate stop 之后的汇总");
+    assert.match(stopped, new RegExp(`运行号 ${other}）已停止`));
   } finally {
-    shell.stop();
+    await close();
   }
 });
 
 test("/orchestrate 发起：以人的输入提交，交给模型的文字带关键词，点名与额度生效；下一条没带即收回", async () => {
-  const { shell, term, runtime, gate } = scriptShell(() => ({}));
+  const { shell, term, runtime, gate, close } = scriptShell(() => ({}));
   shell.start();
   try {
     await type(term, "/orchestrate 给各模块补测试 额度 ¥5\r");
@@ -177,12 +241,12 @@ test("/orchestrate 发起：以人的输入提交，交给模型的文字带关�
     await type(term, "/orchestrate\r");
     assert.ok(screenFlat(term).includes("用法：/orchestrate <任务>"));
   } finally {
-    shell.stop();
+    await close();
   }
 });
 
 test("审批：本次脚本内同类都允许只对本脚本内同类生效；高危命令不提供 [s]，照常逐次请示", async () => {
-  const { harness, shell, term, asked } = scriptShell((input) => ({
+  const { harness, shell, term, asked, close } = scriptShell((input) => ({
     ask: input.task.startsWith("删") ? "rm -rf build" : "npm test",
   }));
   shell.start();
@@ -193,23 +257,21 @@ test("审批：本次脚本内同类都允许只对本脚本内同类生效；�
       undefined
     );
     await until(() => asked.length === 1, "第一次请示");
-    await settle();
-    assert.ok(screenFlat(term).includes("[s] 本次脚本内同类都允许"), screenFlat(term));
+    await untilScreen(term, "[s] 本次脚本内同类都允许");
     await type(term, "s");
-    assert.ok(
-      screenFlat(term).includes("已允许本次脚本内同类调用（跑命令 npm test），脚本结束即失效")
-    );
+    // 按 s 之后第一个 worker 随即收尾（同步 git），回显要等重绘：等它出现，不靠固定的 settle
+    await untilScreen(term, "已允许本次脚本内同类调用（跑命令 npm test），脚本结束即失效");
     // 第二个 npm test 不再请示；rm 照常请示且不提供 [s]
     await until(() => asked.length === 2, "rm 的请示");
-    await settle();
     assert.equal(asked[1]?.args && (asked[1].args as { command: string }).command, "rm -rf build");
     assert.equal(asked[1]?.script?.kind, undefined);
+    await untilScreen(term, "命令：rm -rf build");
     const rmBlock = screenFlat(term).split("—— 人工审批 ——").at(-1) ?? "";
     assert.ok(!rmBlock.includes("[s]"), rmBlock);
     await type(term, "s");
     assert.ok(screenFlat(term).includes("state: approval"), "按 s 不起作用，仍在等审批");
     await type(term, "y");
-    await first;
+    await within(first, "第一个脚本的汇总");
     // 另一个脚本里照常请示
     const second = harness.nextNotice();
     await harness.runs.start(script('await agent("三"); return 1;'), undefined);
@@ -218,15 +280,15 @@ test("审批：本次脚本内同类都允许只对本脚本内同类生效；�
     assert.equal(third?.command, "npm test");
     await settle();
     await type(term, "y");
-    await second;
+    await within(second, "另一个脚本的汇总");
     assert.equal(asked.length, 3);
   } finally {
-    shell.stop();
+    await close();
   }
 });
 
 test("收回的请示：来源写明脚本与运行号，按 take_worker 的写操作请示一次", async () => {
-  const { harness, shell } = scriptShell(() => ({ files: { "n.txt": "n\n" } }));
+  const { harness, shell, close } = scriptShell(() => ({ files: { "n.txt": "n\n" } }));
   shell.start();
   try {
     // 夹具的收回请示直接批；这里只看面板的写法
@@ -244,9 +306,9 @@ test("收回的请示：来源写明脚本与运行号，按 take_worker 的写�
       script('const r = await agent("写"); return { collect: [r] };'),
       undefined
     );
-    assert.match(await done, /收回：叠入 n\.txt/);
+    assert.match(await within(done, "收回后的汇总"), /收回：叠入 n\.txt/);
     assert.equal(harness.collectRequests.length, 1);
   } finally {
-    shell.stop();
+    await close();
   }
 });

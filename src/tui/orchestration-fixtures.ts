@@ -228,9 +228,10 @@ export function orchestrationHarness(
   return { orchestrator, face, runtime, runtimes, stopAll };
 }
 
-// 等到条件成立（逐个事件循环轮次；上限约 2 秒）
+// 等到条件成立（逐个事件循环轮次）。上限只决定真失败时多久报出来：机器忙（多个进程抢 CPU、内存换页）时
+// 进程可能整段停上几秒，2 秒的上限会把本该成立的条件误报为失败，故放宽到 15 秒；条件一成立即返回，不拖慢通过的用例
 export async function until(check: () => boolean, what = "等待的条件"): Promise<void> {
-  const deadline = Date.now() + 2000;
+  const deadline = Date.now() + 15_000;
   while (!check()) {
     if (Date.now() > deadline) throw new Error(`${what}没有成立`);
     await new Promise((resolve) => setTimeout(resolve, 5));
