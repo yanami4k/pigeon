@@ -13,6 +13,12 @@ import type { CompactionConfigInput, StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_LOOP_GUARD_SETTINGS } from "../state/loop-guard-config.ts";
 import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
+import {
+  DEFAULT_REPETITION_GUARD,
+  DEFAULT_TRUNCATION_CONTINUATION,
+  type RepetitionGuardSettings,
+  type TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
@@ -60,6 +66,9 @@ export interface PigeonStepAgentOptions {
   compaction?: CompactionConfigInput;
   // 推送格（191、332）：项目级学到的记忆的上限（缺省 4,000 字符）。跑批器只推项目级（作业目录里的记忆），不读使用者的用户级记忆
   memoryLimitChars?: number;
+  // 决策 367：撞上限续跑与流式重复检测；缺省同产品缺省（续跑开、连续 2 次、合计 5 次，检测开、omp 档、掐断）
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -156,6 +165,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
           loopGuard: { ...DEFAULT_LOOP_GUARD_SETTINGS, enabled: STREAM_LOOP_GUARD },
           // 决策 309：提交编排脚本的工具同样不带（明确关掉）
           scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
+          // 决策 367：撞上限续跑与流式重复检测显式给出（不依赖设置快照的缺省；身份头记这两项）
+          truncationContinuation: options.truncationContinuation ?? DEFAULT_TRUNCATION_CONTINUATION,
+          repetitionGuard: options.repetitionGuard ?? DEFAULT_REPETITION_GUARD,
           ...(pushed
             ? {
                 pushedMemory: true,

@@ -8,6 +8,10 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CompactionConfig } from "../pi-runtime/index.ts";
+import type {
+  RepetitionGuardSettings,
+  TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import { describeHarness, type HarnessRef } from "./stream-harness.ts";
 import type { StepBudget } from "./stream-runner.ts";
 
@@ -55,6 +59,9 @@ export interface StreamRunIdentity {
         loopGuard?: boolean;
         // 提交编排脚本的工具 orchestrate（294 D、309）：各条件关掉；同一口径
         scriptOrchestration?: boolean;
+        // 撞上限续跑与流式重复检测（367）：实际生效的值；加这两项之前写下的身份头没有它们，续跑即判为不同
+        truncationContinuation?: TruncationContinuationSettings;
+        repetitionGuard?: RepetitionGuardSettings;
       };
       minimal?: {
         model: string;

@@ -16,6 +16,10 @@ import {
   type StreamFn,
 } from "../pi-runtime/index.ts";
 import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
+import {
+  DEFAULT_REPETITION_GUARD,
+  DEFAULT_TRUNCATION_CONTINUATION,
+} from "../state/runaway-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
 import {
@@ -181,6 +185,11 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     loopGuard: STREAM_LOOP_GUARD,
     // 决策 309：提交编排脚本的工具在各条件里的实际生效值（关）
     scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
+    // 决策 367：撞上限续跑与流式重复检测的实际生效值（没给参数即产品缺省；检测记模式、档位与全部参数）
+    truncationContinuation: {
+      ...(pigeon.truncationContinuation ?? DEFAULT_TRUNCATION_CONTINUATION),
+    },
+    repetitionGuard: structuredClone(pigeon.repetitionGuard ?? DEFAULT_REPETITION_GUARD),
   };
 }
 

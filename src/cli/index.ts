@@ -88,6 +88,10 @@ import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { pigeonRel } from "../state/paths.ts";
+import {
+  repetitionGuardSettings,
+  truncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { loopGuardSettingsOf, withHooksDisabled } from "../state/settings.ts";
 import { EDIT_MODES, type EditMode, isEditMode } from "../tools/edit-mode.ts";
@@ -741,6 +745,8 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）。
 // 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
 // Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
+// 撞上限续跑与流式重复检测（决策 367）：--continuation、--continuation-max-consecutive、--continuation-max-per-run、
+// --repetition-guard、--repetition-mode、--repetition-preset，只对 Pigeon 条件生效，缺省同产品缺省，生效值记进身份头；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
@@ -752,6 +758,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
+    "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
+    "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
     '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
@@ -776,6 +784,12 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--baseline",
     "--spend-limit-cny",
     "--memory-limit",
+    "--continuation",
+    "--continuation-max-consecutive",
+    "--continuation-max-per-run",
+    "--repetition-guard",
+    "--repetition-mode",
+    "--repetition-preset",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -837,6 +851,32 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   // 外部 agent 的配置在开跑前解析、校验（与所跑条件的对应在 runStreamExperiment 里查）
   const externalAgents = externalAgentFiles.map((file) => loadExternalAgentConfig(file));
   const memoryLimitChars = positive("--memory-limit");
+  const oneOf = <T extends string>(name: string, choices: readonly T[]): T | undefined => {
+    const raw = values.get(name);
+    if (raw === undefined) return undefined;
+    if (!(choices as readonly string[]).includes(raw)) {
+      throw new Error(`${name} 可选 ${choices.join("、")}（${usage}）`);
+    }
+    return raw as T;
+  };
+  // 决策 367：撞上限续跑与流式重复检测（只对 Pigeon 条件生效；没给的项取产品缺省）
+  const continuationSwitch = oneOf("--continuation", ["on", "off"] as const);
+  const maxConsecutive = positive("--continuation-max-consecutive");
+  const maxPerRun = positive("--continuation-max-per-run");
+  const truncationContinuation = truncationContinuationSettings({
+    ...(continuationSwitch !== undefined ? { enabled: continuationSwitch === "on" } : {}),
+    ...(maxConsecutive !== undefined ? { maxConsecutive } : {}),
+    ...(maxPerRun !== undefined ? { maxPerRun } : {}),
+  });
+  const repetitionSwitch = oneOf("--repetition-guard", ["on", "off"] as const);
+  const repetitionMode = oneOf("--repetition-mode", ["abort", "log"] as const);
+  const repetitionPreset = oneOf("--repetition-preset", ["omp", "wide"] as const);
+  const repetition = repetitionGuardSettings({
+    ...(repetitionSwitch !== undefined ? { enabled: repetitionSwitch === "on" } : {}),
+    ...(repetitionMode !== undefined ? { mode: repetitionMode } : {}),
+    ...(repetitionPreset !== undefined ? { preset: repetitionPreset } : {}),
+  });
+  if ("problem" in repetition) throw new Error(`流式重复检测参数不对：${repetition.problem}`);
   const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
   const accounts = gatewayAccountsFromEnv(process.env);
   const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
@@ -852,6 +892,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
         // 推送格（191、332）：项目级记忆的上限，没给即缺省
         ...(memoryLimitChars !== undefined ? { memoryLimitChars } : {}),
+        truncationContinuation,
+        repetitionGuard: repetition.settings,
       }
     : undefined;
   const promptFormat = values.get("--prompt-format");
