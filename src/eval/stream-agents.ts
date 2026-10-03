@@ -37,6 +37,10 @@ export const STREAM_TASK_LIST = false;
 export const STREAM_LOOP_GUARD = false;
 // 决策 309 与 265 的先例：实验条件不注册提交编排脚本的工具（明确关掉；身份头照记这一项）
 export const STREAM_SCRIPT_ORCHESTRATION = false;
+// 决策 347 改产品缺省（未配置即跟模型）之后，跑批器进程内条件的单轮输出上限仍为 16,384：没配置时显式传这个值，
+// 身份头照记；没配置时跑批的网关接入也以它作模型上限（沿用改动前 DeepSeek 模型定义的 16,384），开思考时发出的请求与
+// 改动前一致。配置了上限时不另设模型上限，配置值原样生效（见 stream-experiment.ts 的 streamGatewayStreamFn）
+export const STREAM_MAX_OUTPUT_TOKENS = 16_384;
 
 export function streamTemperature(requested: number | undefined): number {
   return requested ?? STREAM_DEFAULT_TEMPERATURE;
@@ -165,9 +169,7 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
               }
             : {}),
           ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
-          ...(options.maxOutputTokens !== undefined
-            ? { maxOutputTokens: options.maxOutputTokens }
-            : {}),
+          maxOutputTokens: options.maxOutputTokens ?? STREAM_MAX_OUTPUT_TOKENS,
           ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
           ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
           ...(options.provider !== undefined ? { provider: options.provider } : {}),
@@ -245,7 +247,7 @@ export interface CommandStepAgentOptions {
 }
 
 // 密钥类变量的名字：真 key 只在跑批进程内置的网关里，启动器只拿到网关地址与占位 key
-const SECRET_ENV = /(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|AUTH)/i;
+export const SECRET_ENV = /(API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|AUTH)/i;
 
 // 启动器的环境：宿主环境去掉密钥类变量
 export function launcherEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -323,6 +325,71 @@ export async function clearMarkedProcesses(
   return false;
 }
 
+// 宿主上的启动器进程（最简 agent 的启动器；外部 agent 条件的 docker exec 客户端）：起进程，到 budgetMs 连同进程组一起
+// 杀掉（timeout）；这一步期间有限额信号或跑批器按步中止即同样杀掉（paused）；正常退出为 done。环境为去掉密钥类变量的
+// 宿主环境
+export function superviseLauncher(spec: {
+  program: string;
+  args: readonly string[];
+  budgetMs: number;
+  limits: CommandStepAgentOptions["limits"];
+  abortSignal: AbortSignal | undefined;
+  label: string;
+}): Promise<"done" | "timeout" | "paused"> {
+  return new Promise<"done" | "timeout" | "paused">((resolve, reject) => {
+    const child = spawn(spec.program, [...spec.args], {
+      env: launcherEnv(),
+      stdio: ["ignore", "ignore", "inherit"],
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+    let why: "done" | "timeout" | "paused" = "done";
+    const kill = (reason: "timeout" | "paused") => {
+      if (why !== "done") return;
+      why = reason;
+      if (process.platform !== "win32" && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      } else {
+        child.kill("SIGKILL");
+      }
+    };
+    const timer = setTimeout(() => kill("timeout"), spec.budgetMs);
+    const limits = spec.limits;
+    const signalsAtStart = limits?.signals ?? 0;
+    // 限额信号与跑批器的按步中止同一条路径：杀掉启动器，之后按标记清掉容器里的进程
+    const check = () => {
+      if (spec.abortSignal?.aborted === true) {
+        kill("paused");
+        return;
+      }
+      if (limits === undefined) return;
+      if (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart) kill("paused");
+    };
+    const unsubscribe = limits?.subscribe?.(check);
+    spec.abortSignal?.addEventListener("abort", check);
+    const watch = setInterval(check, 500);
+    check();
+    const done = () => {
+      clearTimeout(timer);
+      clearInterval(watch);
+      unsubscribe?.();
+      spec.abortSignal?.removeEventListener("abort", check);
+    };
+    child.on("error", (error) => {
+      done();
+      reject(new Error(`${spec.label}拉不起来：${error.message}`));
+    });
+    child.on("close", () => {
+      done();
+      resolve(why);
+    });
+  });
+}
+
 export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
   return {
     async run(input): Promise<StepAgentResult> {
@@ -349,61 +416,13 @@ export function commandStepAgent(options: CommandStepAgentOptions): StepAgent {
       );
       const started = Date.now();
       const [program = "", ...args] = options.command;
-      const ended = await new Promise<"done" | "timeout" | "paused">((resolve, reject) => {
-        const child = spawn(program, [...args, requestFile, resultFile], {
-          env: launcherEnv(),
-          stdio: ["ignore", "ignore", "inherit"],
-          windowsHide: true,
-          detached: process.platform !== "win32",
-        });
-        let why: "done" | "timeout" | "paused" = "done";
-        const kill = (reason: "timeout" | "paused") => {
-          if (why !== "done") return;
-          why = reason;
-          if (process.platform !== "win32" && child.pid !== undefined) {
-            try {
-              process.kill(-child.pid, "SIGKILL");
-            } catch {
-              child.kill("SIGKILL");
-            }
-          } else {
-            child.kill("SIGKILL");
-          }
-        };
-        const timer = setTimeout(
-          () => kill("timeout"),
-          input.budget.wallClockMs + (options.graceMs ?? 30_000)
-        );
-        const limits = options.limits;
-        const signalsAtStart = limits?.signals ?? 0;
-        // 限额信号与跑批器的按步中止同一条路径：杀掉启动器，之后按标记清掉容器里的进程
-        const check = () => {
-          if (input.abortSignal?.aborted === true) {
-            kill("paused");
-            return;
-          }
-          if (limits === undefined) return;
-          if (limits.state !== "running" || (limits.signals ?? 0) !== signalsAtStart)
-            kill("paused");
-        };
-        const unsubscribe = limits?.subscribe?.(check);
-        input.abortSignal?.addEventListener("abort", check);
-        const watch = setInterval(check, 500);
-        check();
-        const done = () => {
-          clearTimeout(timer);
-          clearInterval(watch);
-          unsubscribe?.();
-          input.abortSignal?.removeEventListener("abort", check);
-        };
-        child.on("error", (error) => {
-          done();
-          reject(new Error(`最简 agent 启动器拉不起来：${error.message}`));
-        });
-        child.on("close", () => {
-          done();
-          resolve(why);
-        });
+      const ended = await superviseLauncher({
+        program,
+        args: [...args, requestFile, resultFile],
+        budgetMs: input.budget.wallClockMs + (options.graceMs ?? 30_000),
+        limits: options.limits,
+        abortSignal: input.abortSignal,
+        label: "最简 agent 启动器",
       });
       // 不论怎么结束（正常收尾、墙钟到、限额被杀），先清掉它在容器里留下的进程、确认没有残留，再交回判题与落地
       if (

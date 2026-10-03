@@ -198,7 +198,8 @@ def load_session_metrics(run_dir: Path, rows: Iterable[dict[str, Any]], cell_of:
     mem_entries: dict[tuple[str, int, int], float] = {}
     for row in rows:
         cell = cell_of.get(row.get("condition"))
-        if cell is None or cell == "M":
+        # 只有四格（完整 Pigeon）有会话文件：最简 agent（M）与外部 agent 条件（格子为 ext-<名字>）都跳过
+        if cell is None or cell == "M" or cell.startswith("ext-"):
             continue
         key = (row["condition"], int(row["attempt"]))
         jobs.setdefault(key, []).append(int(row["seq"]))

@@ -24,7 +24,7 @@
 | `permissions` | 固化的放权规则 `grants`；`/grants save` 写入项目个人一层，`/revoke config#N` 从中删除；写在项目共享层的规则须经确认才生效 | `.pigeon/grants.json` |
 | `commands` | 命令短名 `commands` 与角色允许清单 `roles` | `.pigeon/commands.json` |
 | `orchestration` | worker 并发、层数、上限、卡住判定、任务清单、脚本编排 | `.pigeon/orchestration.json` |
-| `web` | 搜索后端与地址、抓取上限 | `.pigeon/web.json` |
+| `web` | 联网工具总开关 `enabled`、搜索后端与地址、抓取上限（见下文"联网工具的开关"） | `.pigeon/web.json` |
 | `sandbox` | 沙箱镜像（`image` 或项目自己的 `dockerfile`、`context`）、通用镜像的构建参数 `build`、容器资源上限（`memory`、`pids`、`cpus`） | `.pigeon/sandbox.json` |
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
@@ -57,9 +57,31 @@
 
 设了内存上限时，执行端在每条命令前后读容器 cgroup 的 oom_kill 计数：计数增加即报"超出沙箱内存上限 <数值>"（agent 在 `run_command` 的结果里看到，人另收到一行提示）；读不到计数而命令以退出码 137 结束时报"可能超出沙箱内存上限 <数值>"。
 
+## 联网工具的开关
+
+`web_search` 与 `web_fetch` 在终端界面、命令行对话与续跑、`pigeon run` 中缺省注册。下面三者任一成立就不给这两件工具：两件都不注册，系统提示里也不出现介绍联网工具的那一句。
+
+- 设置 `web.enabled` 为 `false`（布尔，缺省 `true`；三层按标量覆盖，高优先层说了算）。
+- 启动参数 `--no-web`：只对本次运行生效，与 `--no-hooks`、`--no-spawn-workers` 的写法一致；各入口都接受。
+- 沙箱断网档（`--sandbox --sandbox-network off`）。
+
+worker 照派出它的运行面：父运行面没有联网工具，worker 也没有。终端界面里 `/reload` 之后按新设置重算。
+
+```json
+{ "web": { "enabled": false } }
+```
+
+## 单轮输出上限
+
+不配置时 Pigeon 不另设单轮输出上限：按模型定义的上限发，由 provider 按剩余上下文收窄。自带的 DeepSeek 接入按官方上限 393,216 发。"模型定义没有上限（`maxTokens` 缺失或不为正）时发 32,000"只适用于跑批网关的接入或第三方模块自构的模型对象，不涉及自带的 DeepSeek。启动参数 `--max-output-tokens <n>` 设了上限时，取它与模型上限中较小的那个；设了的值记进注入快照与运行开始条目的 model 段，没设的不记（表示跟模型），worker 照派出它的运行面。
+
+经 `--stream-fn` / `PIGEON_STREAM_FN` 接入的第三方模块，交给 provider 的模型对象须带 `maxTokens`（模型的单次输出上限）：Pigeon 交给模块的只是身份占位，看不到模块里的真实模型对象，不配置上限时就按模块自己的模型对象发。
+
 ## key 走环境变量
 
 设置文件里没有任何 key 字段。智谱搜索的 key 从环境变量 `ZAI_API_KEY` 读，Tavily 的从 `TAVILY_API_KEY` 读，DeepSeek 用模型接入同一个环境变量。在 `web` 一节里写了 `apiKey` 即报错，并给出应设的环境变量名。
+
+自带的 DeepSeek 模型接入另读环境变量 `DEEPSEEK_BASE_URL`：给了就用它作 Anthropic 兼容端点的根（请求照旧发到 `<根>/v1/messages`），没给或为空时用官方地址；它须为 http 或 https 地址，否则启动时报错（报错里带上该地址，不带 key）。`web_search` 的 DeepSeek 后端在设置里显式给了 `web.search.deepseek.baseUrl` 时以设置为准，没给时同样跟这个环境变量。
 
 ## 程序状态目录 `.pigeon/state/`
 

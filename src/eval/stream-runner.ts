@@ -56,6 +56,8 @@ import {
 } from "./stream-profiles.ts";
 import { type ReportIdentity, renderStreamReport } from "./stream-report.ts";
 import {
+  type BuiltinStreamCondition,
+  type ExternalStreamCondition,
   lastCompletedStep,
   MEMORY_WARN_RATIO,
   type MemoryFacts,
@@ -77,18 +79,26 @@ import {
 import { runWorkQueue } from "./work-queue.ts";
 
 // 条件表（193、194、217）：记忆的 2 × 2——能否检索历史会话（sessionSearch）× 有无推送记忆（pushedMemory），四格都是
-// 完整 Pigeon；最简 agent 另走启动器，作外部参照。
+// 完整 Pigeon；最简 agent 另走启动器，作外部参照。外部 agent 条件（ext-<名字>，实验设施）不在表里，由调用方按配置文件
+// 给出条件说明（RunStreamsOptions.conditionSpecs）：agent 键即条件名，作业容器接只通网关的网络，提取改动时排除配置里的路径。
 // 决策 327：验证门与回炉随 322 删除，四格暂不带检查；下次实验接检查的方式随出题规则另行设计
 export interface ConditionSpec {
   name: StreamCondition;
-  agent: "pigeon" | "minimal";
+  // 用哪个 agent：内置条件为 pigeon 或 minimal；外部 agent 条件为条件名本身（ext-<名字>）
+  agent: "pigeon" | "minimal" | ExternalStreamCondition;
   // 能否检索历史会话：关掉时 Pigeon 不注册两件会话检索工具，系统提示不提它们
   sessionSearch: boolean;
   // 有无推送记忆：透传给 headless（推送记忆另行施工，打开时 headless 暂时报错）
   pushedMemory: boolean;
+  // 作业容器的网络档：缺省断网（--network none）；gateway-only 为只通模型网关的跑批内部网络（只给外部 agent 条件）
+  network?: "gateway-only";
+  // 提取改动时起止两次都排除的工作区路径（外部 agent 自己的状态目录等）；缺省不排除
+  excludePaths?: readonly string[];
+  // 网关上这个条件的请求体逐字转发（外部 agent 条件）：登记作业地址时声明，不去除工具定义里的 "type": "custom"
+  verbatimRequestBody?: boolean;
 }
 
-export const CONDITION_SPECS: Record<StreamCondition, ConditionSpec> = {
+export const CONDITION_SPECS: Record<BuiltinStreamCondition, ConditionSpec> = {
   "search-push": {
     name: "search-push",
     agent: "pigeon",
@@ -120,6 +130,19 @@ export const CONDITION_SPECS: Record<StreamCondition, ConditionSpec> = {
     pushedMemory: false,
   },
 };
+
+// 条件说明：内置条件查表，外部 agent 条件取调用方给的说明；都没有即报错
+export function conditionSpecOf(
+  options: Pick<RunStreamsOptions, "conditionSpecs">,
+  condition: StreamCondition
+): ConditionSpec {
+  const spec =
+    (CONDITION_SPECS as Record<string, ConditionSpec | undefined>)[condition] ??
+    options.conditionSpecs?.[condition];
+  if (spec === undefined)
+    throw new Error(`条件 ${condition} 没有说明（外部 agent 条件须给配置文件）`);
+  return spec;
+}
 
 // 每步总预算（147）：各条件同一个，包括轮数与墙钟，回炉的消耗计入其中；先按 150 轮、30 分钟，试跑后定死
 export interface StepBudget {
@@ -153,9 +176,13 @@ export interface StepAgentInput {
   modelBaseUrl?: string;
 }
 
-// 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守
+// 网关对跑批器露出的：作业的接入地址（外部 agent 条件取跑批内部网络上的地址，并登记为请求体逐字转发）、作业的计量、
+// 每步开始时重记在途峰值、排队看守
 export interface StreamModelGateway {
-  jobBaseUrl(job: string): string;
+  jobBaseUrl(
+    job: string,
+    options?: { on?: "loopback" | "internal"; verbatimBody?: boolean }
+  ): string;
   meter(job: string): GatewayMeter;
   resetPeak(job: string): void;
   watchQueue?(job: string, thresholdMs: number, listener: () => void): () => void;
@@ -236,6 +263,8 @@ export interface StepAgentResult {
   wallMs: number;
   // 这一步被打断（模型服务故障、限额）：整题作废、不留行
   interrupted?: string;
+  // 外部 agent 的启动器写在结果文件里的 report（任意 JSON 对象）：原样记进结果行的 agentReport
+  report?: Record<string, unknown>;
 }
 
 export interface StepAgent {
@@ -408,6 +437,8 @@ export interface RunStreamsOptions {
   human: HumanRepo;
   envs: StreamEnvFactory;
   agents: Partial<Record<ConditionSpec["agent"], StepAgent>>;
+  // 外部 agent 条件的说明（按条件名）；内置条件取 CONDITION_SPECS
+  conditionSpecs?: Readonly<Record<string, ConditionSpec>>;
   reference: HumanReferenceCases;
   outDir: string;
   conditions: readonly StreamCondition[];
@@ -573,7 +604,7 @@ async function runStreamJob(
   steps: readonly StreamStep[],
   resultsFile: string
 ): Promise<number | null> {
-  const spec = CONDITION_SPECS[job.condition];
+  const spec = conditionSpecOf(options, job.condition);
   const agent = options.agents[spec.agent];
   if (agent === undefined)
     throw new Error(`条件 ${job.condition} 需要的 agent（${spec.agent}）没有接入`);
@@ -1126,7 +1157,7 @@ async function runStep(
       if (error instanceof EnvSelectionError) return notRun(envOpenMs, error);
       voidOnAccessError(step.seq, error);
     }
-    const startTree = await ws.worktreeTree();
+    const startTree = await ws.worktreeTree(spec.excludePaths);
     const key = streamJobKey(job);
     const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
       agent.run({
@@ -1137,7 +1168,17 @@ async function runStep(
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
         workDir: jobDir,
-        ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
+        ...(options.gateway !== undefined
+          ? {
+              modelBaseUrl:
+                spec.network === "gateway-only" || spec.verbatimRequestBody === true
+                  ? options.gateway.jobBaseUrl(key, {
+                      ...(spec.network === "gateway-only" ? { on: "internal" as const } : {}),
+                      ...(spec.verbatimRequestBody === true ? { verbatimBody: true } : {}),
+                    })
+                  : options.gateway.jobBaseUrl(key),
+            }
+          : {}),
         abortSignal,
       })
     );
@@ -1163,6 +1204,7 @@ async function runStep(
         costCny: agentDelta.costCny,
         reviewCostCny: null,
         peakInputTokens: delta.peakInputTokens,
+        ...((delta.rejectedRequests ?? 0) > 0 ? { rejectedRequests: delta.rejectedRequests } : {}),
       };
       result = {
         ...result,
@@ -1193,7 +1235,7 @@ async function runStep(
     mkdirSync(path.join(jobDir, "diffs"), { recursive: true });
     writeAtomic(
       path.join(jobDir, "diffs", diffName),
-      await ws.diffTrees(startTree, await ws.worktreeTree())
+      await ws.diffTrees(startTree, await ws.worktreeTree(spec.excludePaths))
     );
     const agentPart = {
       diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
@@ -1211,6 +1253,7 @@ async function runStep(
       agentWallMs: result.wallMs,
       gateway: gatewayFacts,
       admissionWaitMs: admitted.admissionWaitMs,
+      ...(result.report !== undefined ? { agentReport: result.report } : {}),
     };
     // 这道题无法建立基线（⑤）：agent 照跑（记忆照常积累），不判分，结果行记原因，不进主判据
     if (classes.unbuildable !== null) {
@@ -1283,6 +1326,8 @@ export function dockerStreamEnvs(input: {
   log?: (line: string) => void;
   // 闸门不成立时的告警（缺省写标准错误，只报一次）
   warn?: (line: string) => void;
+  // 按条件替换网络参数（外部 agent 条件：接只通网关的跑批内部网络、只读挂载工具目录）；返回 undefined 的条件照旧断网
+  conditionArgs?: (condition: StreamCondition) => readonly string[] | undefined;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
   const root = input.root ?? STREAM_CONTAINER_ROOT;
@@ -1305,7 +1350,7 @@ export function dockerStreamEnvs(input: {
         name: container,
         docker,
         runArgs: [
-          ...WORKSPACE_NETWORK_ARGS,
+          ...(input.conditionArgs?.(job.condition) ?? WORKSPACE_NETWORK_ARGS),
           // 标明这是跑批器起的作业容器：清 agent 进程时据此除 init 与主命令外全清（见 KILL_STEP_PROCESSES）
           "-e",
           "PIGEON_STREAM_CONTAINER=1",

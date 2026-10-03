@@ -117,9 +117,9 @@ export interface HeadlessRunOptions {
   homeDir?: string;
   persistThinking?: boolean;
   sessionId?: SessionId;
-  // 决策 061：编辑模式，缺省 hashline
+  // 决策 061：编辑模式，缺省见 tools/edit-mode.ts 的 DEFAULT_EDIT_MODE（现为 replace）
   editMode?: EditMode;
-  // 决策 063：单轮输出上限（缺省 16,384）
+  // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
   // M9：采样温度（缺省不设）；冻结进注入快照并随 Run 开始条目 落盘
   temperature?: number;

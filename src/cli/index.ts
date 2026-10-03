@@ -23,7 +23,7 @@ import {
   parseLaunchFlags,
   resolveStreamFnSpec,
   VALUELESS_FLAGS,
-  webToolsEnabled,
+  webToolsOptionOf,
 } from "../application/launch-flags.ts";
 import { LOOP_GUARD_TEXTS } from "../application/loop-guard.ts";
 import { MIGRATE_CONFIG_USAGE, runMigrateConfig } from "../application/migrate-config.ts";
@@ -52,7 +52,6 @@ import {
   type TrustChoice,
   trustPromptText,
 } from "../application/session-settings.ts";
-import { resolveWebTools } from "../application/web-tools.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
@@ -63,6 +62,7 @@ import {
   runStreamClasses,
   runStreamExperiment,
 } from "../eval/stream-experiment.ts";
+import { loadExternalAgentConfig } from "../eval/stream-external.ts";
 import {
   assembleImageContext,
   generateStreamManifest,
@@ -76,7 +76,11 @@ import {
   type TaskPromptFormat,
 } from "../eval/stream-manifest.ts";
 import { runStreamRejudge } from "../eval/stream-rejudge.ts";
-import { STREAM_CONDITIONS, type StreamCondition } from "../eval/stream-results.ts";
+import {
+  isExternalCondition,
+  STREAM_CONDITIONS,
+  type StreamCondition,
+} from "../eval/stream-results.ts";
 import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
 import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
@@ -85,12 +89,7 @@ import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { pigeonRel } from "../state/paths.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
-import {
-  loopGuardSettingsOf,
-  type SettingsSnapshot,
-  webSectionOf,
-  withHooksDisabled,
-} from "../state/settings.ts";
+import { loopGuardSettingsOf, withHooksDisabled } from "../state/settings.ts";
 import { EDIT_MODES, type EditMode, isEditMode } from "../tools/edit-mode.ts";
 import { createCliApprovalHandler } from "./approval-ui.ts";
 import { createAsker, runRepl, sanitizedWriter } from "./repl.ts";
@@ -278,7 +277,7 @@ async function resumeMain(argv: string[]): Promise<void> {
     }
   }
   const usage =
-    "用法：pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>] [--no-hooks]";
+    "用法：pigeon resume <sessionId> [--yolo] [--root <dir>] --stream-fn <模块路径> [--provider <p>] [--model <m>] [--no-hooks] [--no-web]";
   if (sessionIdArg === undefined) {
     throw new Error(usage);
   }
@@ -328,7 +327,7 @@ async function resumeMain(argv: string[]): Promise<void> {
           flags,
           resume: true,
           ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-          ...webToolsOption(flags, settings),
+          ...webToolsOptionOf(flags, settings),
           // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
           memoryWrite: lineMemoryWrite(write),
           // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
@@ -376,7 +375,7 @@ async function resumeMain(argv: string[]): Promise<void> {
 async function runMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
-    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-web] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置）";
   let task: string | undefined;
   let json = false;
@@ -473,7 +472,7 @@ async function runMain(argv: string[]): Promise<void> {
     // 决策 294 B1：任务清单按编排配置（缺省开）
     taskList: orchestration.taskList,
     // 决策 287–291：联网工具缺省给出，--sandbox-network off 不给
-    ...webToolsOption(flags, settings),
+    ...webToolsOptionOf(flags, settings),
     loopGuard,
   };
   // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
@@ -733,18 +732,22 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]
 //   [--accept-harness-change "<原因>"（续跑时代码版本不符的显式放行，记进身份头与报告）]
 //   [--allow-dirty-harness（首次开跑时放行未提交改动或读不到的提交号，开发自测用，记进身份头与报告）]：
-// 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开断网容器从人在
-// 该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
+// 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开容器（内置条件
+// 断网，外部 agent 条件接只通模型网关的网络）从人在该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
 // 各条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
 // 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
+// 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
+// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）。
+// 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
+// Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
 async function evalStreamMain(argv: string[]): Promise<void> {
   const usage =
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
-    `--conditions ${STREAM_CONDITIONS.join(",")} [--attempts N] [--concurrency N] [--max-steps K] ` +
+    `--conditions ${STREAM_CONDITIONS.join(",")}[,ext-<名字>…] [--external-agent <配置文件>]… [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
@@ -776,6 +779,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
+  // 外部 agent 的配置文件：可重复给
+  const externalAgentFiles: string[] = [];
   // 不带取值的开关：不交给模型参数的解析
   let allowDirtyHarness = false;
   for (let i = 0; i < argv.length; i++) {
@@ -783,6 +788,11 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     if (arg === undefined) continue;
     if (arg === "--allow-dirty-harness") {
       allowDirtyHarness = true;
+    } else if (arg === "--external-agent") {
+      const value = argv[++i];
+      if (value === undefined || value === "")
+        throw new Error(`--external-agent 需要配置文件（${usage}）`);
+      externalAgentFiles.push(value);
     } else if (own.has(arg)) {
       const value = argv[++i];
       if (value === undefined) throw new Error(`${arg} 需要取值（${usage}）`);
@@ -816,12 +826,16 @@ async function evalStreamMain(argv: string[]): Promise<void> {
       : undefined;
   const conditions = list("--conditions") ?? [];
   for (const c of conditions) {
-    if (!(STREAM_CONDITIONS as readonly string[]).includes(c)) {
-      throw new Error(`未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}）`);
+    if (!(STREAM_CONDITIONS as readonly string[]).includes(c) && !isExternalCondition(c)) {
+      throw new Error(
+        `未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}，或 ext-<外部 agent 的名字>）`
+      );
     }
   }
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
-  const needsPigeon = conditions.some((c) => c !== "minimal");
+  const needsPigeon = conditions.some((c) => c !== "minimal" && !isExternalCondition(c));
+  // 外部 agent 的配置在开跑前解析、校验（与所跑条件的对应在 runStreamExperiment 里查）
+  const externalAgents = externalAgentFiles.map((file) => loadExternalAgentConfig(file));
   const memoryLimitChars = positive("--memory-limit");
   const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
   const accounts = gatewayAccountsFromEnv(process.env);
@@ -903,6 +917,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     },
     ...(pigeon !== undefined ? { pigeon } : {}),
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
+    ...(externalAgents.length > 0 ? { externalAgents } : {}),
     ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
     ...(attempts !== undefined ? { attempts } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
@@ -1153,7 +1168,7 @@ async function lineMain(argv: string[]): Promise<void> {
       streamFn,
       flags,
       ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
-      ...webToolsOption(flags, settings),
+      ...webToolsOptionOf(flags, settings),
       // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
       memoryWrite: lineMemoryWrite(write),
       // 决策 025：审批 handler 由 Actor 注入——cli 传 REPL 问答版
@@ -1212,19 +1227,9 @@ export const TOP_LEVEL_HELP = [
 
 // 命令行对话与续跑接受的启动参数
 const SESSION_FLAGS_HINT =
-  "--yolo / --no-persist-thinking / --no-pushed-memory / --no-hooks（本次运行不接钩子）/ --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
+  "--yolo / --no-persist-thinking / --no-pushed-memory / --no-hooks（本次运行不接钩子）/ --no-web（本次运行不给联网工具）/ --thinking / --max-output-tokens / --context-window / --compact-threshold / --compact-keep / --root / --stream-fn / --provider / --model / --sandbox / --sandbox-network on|off / --sandbox-approval yolo|prompt / --sandbox-from-head（只从最新提交开工，不带未提交的改动）";
 
 // 决策 237：沙箱的提示行
-// 决策 287–291：联网工具的配置——沙箱断网档不给；配置畸形在此响亮失败
-function webToolsOption(
-  flags: LaunchFlags,
-  settings: SettingsSnapshot
-): { webTools?: ReturnType<typeof resolveWebTools> } {
-  return webToolsEnabled(flags)
-    ? { webTools: resolveWebTools({ config: webSectionOf(settings) }) }
-    : {};
-}
-
 // 决策 326 ③：命令行对话的行内问答确认会执行命令的配置（输入结束按退出处理）
 function lineTrustAsker(
   ask: (prompt: string) => Promise<string | null>,

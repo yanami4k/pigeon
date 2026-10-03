@@ -9,9 +9,29 @@ import type { StreamStepKind } from "./stream-manifest.ts";
 import type { CountPassRate } from "./stream-measure.ts";
 
 // 条件（193、194、217）：记忆的 2 × 2——能否检索历史会话 × 有无推送记忆，四格都开验证门与回炉；另加最简 agent 作外部参照
-export type StreamCondition = "search-push" | "search-only" | "push-only" | "neither" | "minimal";
+export type BuiltinStreamCondition =
+  | "search-push"
+  | "search-only"
+  | "push-only"
+  | "neither"
+  | "minimal";
+// 外部 agent 条件（实验设施）：ext-<名字>，名字取自宿主上的外部 agent 配置文件（见 stream-external.ts）
+export type ExternalStreamCondition = `ext-${string}`;
+export type StreamCondition = BuiltinStreamCondition | ExternalStreamCondition;
 
-export const STREAM_CONDITIONS: readonly StreamCondition[] = [
+export const EXTERNAL_CONDITION_PREFIX = "ext-";
+// 外部 agent 的名字：小写字母或数字开头，其后为小写字母、数字与连字符，至多 32 个字符
+export const EXTERNAL_AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+export function isExternalCondition(condition: string): condition is ExternalStreamCondition {
+  return (
+    condition.startsWith(EXTERNAL_CONDITION_PREFIX) &&
+    EXTERNAL_AGENT_NAME.test(condition.slice(EXTERNAL_CONDITION_PREFIX.length))
+  );
+}
+
+// 内置条件，按报告里的顺序
+export const STREAM_CONDITIONS: readonly BuiltinStreamCondition[] = [
   "search-push",
   "search-only",
   "push-only",
@@ -116,6 +136,8 @@ export interface StreamResultLine {
   admissionWaitMs: number | null;
   harnessRef: HarnessRef;
   error?: string;
+  // 外部 agent 条件的启动器在结果文件里写的 report（任意 JSON 对象），原样记下；只有外部 agent 条件、且启动器写了才有
+  agentReport?: Record<string, unknown>;
 }
 
 export interface StreamGatewayFacts {
@@ -129,6 +151,8 @@ export interface StreamGatewayFacts {
   // 本步单次请求送进模型的输入 token 最大值（上下文峰值，218）：读网关计量的 peakInputTokens（每步开始时重置）；
   // 旧结果行没有这个字段
   peakInputTokens?: number;
+  // 本步被网关拒绝转发的请求数（外部 agent 条件的请求 model 与本批不符等）；没有拒绝即不出现
+  rejectedRequests?: number;
 }
 
 export interface StepReview {

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -25,6 +26,23 @@ CONDITION_TO_CELL = {
     "search-push": "11",
     "minimal": "M",
 }
+
+# 外部 agent 条件（跑批器的实验设施）：条件名 ext-<名字>，格子即条件名本身；不是 Pigeon，没有会话文件与 Pigeon 的身份段
+EXTERNAL_CONDITION = re.compile(r"^ext-[a-z0-9][a-z0-9-]{0,31}$")
+
+
+def condition_cell(condition: Any) -> str | None:
+    """条件名 → 格子：内置条件查表，外部 agent 条件为条件名本身；认不出的返回 None。"""
+    if not isinstance(condition, str):
+        return None
+    if condition in CONDITION_TO_CELL:
+        return CONDITION_TO_CELL[condition]
+    return condition if EXTERNAL_CONDITION.match(condition) else None
+
+
+def is_pigeon_cell(cell: str | None) -> bool:
+    """四格之一（完整 Pigeon）：最简 agent 与外部 agent 条件都不是。"""
+    return cell is not None and cell != "M" and not EXTERNAL_CONDITION.match(cell)
 
 # 规整表列 → 结果行字段（点号表示嵌套）
 FIELD_MAP: dict[str, str] = {
@@ -138,7 +156,7 @@ def read_jsonl(paths: Iterable[str | Path]) -> list[tuple[Path, int, dict[str, A
 
 
 def is_task_row(row: dict[str, Any]) -> bool:
-    return row.get("kind") == "task" and row.get("condition") in CONDITION_TO_CELL
+    return row.get("kind") == "task" and condition_cell(row.get("condition")) is not None
 
 
 def missing_fields(row: dict[str, Any]) -> list[str]:
@@ -167,10 +185,11 @@ def row_to_record(row: dict[str, Any], where: str = "结果行") -> dict[str, An
     """一条结果行 → 规整表的一条记录；不是题的步、条件不认识的返回 None。缺字段即报错。"""
     if row.get("kind") is not None and row.get("kind") != "task":
         return None
-    if row.get("condition") not in CONDITION_TO_CELL:
+    cell = condition_cell(row.get("condition"))
+    if cell is None:
         return None
     check_row(row, where)
-    rec: dict[str, Any] = {"cell": CONDITION_TO_CELL[row["condition"]]}
+    rec: dict[str, Any] = {"cell": cell}
     for col, path in FIELD_MAP.items():
         rec[col] = _num(_get(row, path))
     # baselineUnavailable 为 string | null：非空即为无法建立基线的原因文字，记 1；null 或空串记 0。不按布尔真假判断
@@ -302,7 +321,7 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
     spend_info: list[dict[str, Any]] = []
     session_counts: dict[tuple[str, int, int], dict[str, float]] = {}
     for run_dir, dir_rows in by_dir.items():
-        needs_pigeon = any(CONDITION_TO_CELL[r["condition"]] != "M" for r in dir_rows)
+        needs_pigeon = any(is_pigeon_cell(condition_cell(r["condition"])) for r in dir_rows)
         ident = read_identity(run_dir, needs_pigeon)
         for r in dir_rows:
             if r["runIdentity"] is not None and r["runIdentity"] != ident["digest"]:
@@ -310,7 +329,8 @@ def load_table(paths: Iterable[str | Path]) -> tuple[pd.DataFrame, dict[str, Any
                     f"结果行的身份摘要 {r['runIdentity']} 与 identity.json 的 {ident['digest']} 不一致"
                     f"（{run_dir.name}：condition={r['condition']}，attempt={r['attempt']}，seq={r['seq']}）")
         settings.append(ident)
-        counts, info = load_session_metrics(run_dir, dir_rows, CONDITION_TO_CELL)
+        cell_of = {r["condition"]: condition_cell(r["condition"]) for r in dir_rows}
+        counts, info = load_session_metrics(run_dir, dir_rows, cell_of)
         session_counts.update(counts)
         sessions_info.append({"dir": run_dir.name, "digest": ident["digest"], **info})
         spend_info.append({"dir": run_dir.name, **read_gateway_spend(run_dir), "rowsCny": rows_cost(dir_rows)})
@@ -411,7 +431,7 @@ def failed_case_lists(paths: Iterable[str | Path]) -> dict[tuple[str, int, int],
         j = row["judging"]
         failed = list(_get(j, "failedCases.failToPass", []) or [])
         n_failed = int(j["failToPass"]["total"]) - int(j["failToPass"]["passed"])
-        out[(CONDITION_TO_CELL[row["condition"]], int(row["seq"]), int(row["attempt"]))] = {
+        out[(condition_cell(row["condition"]), int(row["seq"]), int(row["attempt"]))] = {
             "failed": failed, "complete": len(failed) == n_failed}
     return out
 
@@ -422,10 +442,10 @@ def rejudged_case_lists(paths: Iterable[str | Path]) -> tuple[dict[tuple[str, in
     good: dict[tuple[str, int, int], list[str]] = {}
     bad: dict[tuple[str, int, int], dict[str, Any]] = {}
     for f, k, row in read_jsonl(paths):
-        cond = row.get("condition")
-        if cond not in CONDITION_TO_CELL:
+        cell = condition_cell(row.get("condition"))
+        if cell is None:
             continue
-        key = (CONDITION_TO_CELL[cond], int(row["seq"]), int(row["attempt"]))
+        key = (cell, int(row["seq"]), int(row["attempt"]))
         if row.get("consistent") is True and row.get("complete") is True:
             good[key] = list(row["judging"]["failedCases"]["failToPass"])
             bad.pop(key, None)

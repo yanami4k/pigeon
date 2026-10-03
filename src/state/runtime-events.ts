@@ -117,7 +117,7 @@ export const RunStartedPayloadSchema = Type.Object({
     id: Type.String({ minLength: 1 }),
     // M5.5 S5（决策 050）：本 Run 的推理档位（冻结快照值；M5 记录无此字段）
     thinkingLevel: Type.Optional(ThinkingLevelSchema),
-    // 决策 063：本 Run 的单轮输出上限（冻结快照值；加法式可缺省，决策 063 之前的记录无此字段）
+    // 决策 063：本 Run 的单轮输出上限（冻结快照值；加法式可缺省，决策 063 之前的记录无此字段；决策 347 起未配置即不记，表示跟模型）
     maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
     // M9：本 Run 的采样温度（冻结快照值；加法式可缺省——缺省 = 未设，由 provider 决定）
     temperature: Type.Optional(Type.Number({ minimum: 0, maximum: 2 })),

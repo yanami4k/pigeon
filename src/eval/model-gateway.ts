@@ -1,6 +1,11 @@
-// 跑批进程内置的模型网关（决策 155、234）：只听回环地址，说 Anthropic Messages 协议，全部条件的模型请求都经它转发；
+// 跑批进程内置的模型网关（决策 155、234）：听回环地址，说 Anthropic Messages 协议，全部条件的模型请求都经它转发；外部 agent
+// 条件另需它再听跑批内部网络在宿主一侧的地址（listenInternal，见 gateway-network.ts）；
 // 上游为 DeepSeek 的 Anthropic 兼容端点（错误正文为 OpenAI 形状，分类口径见 model-limits.ts）。
-//   接入：每个作业用独立路径前缀 /j/<作业>/，网关据此把用量归到作业上；agent 进程与容器只拿到网关地址，真 key 只在网关里注入；
+//   接入：每个作业用独立路径前缀 /j/<作业>/<随机串>/，网关据此把用量归到作业上；随机串每作业一个（32 位十六进制，不可猜），
+//        作业地址经 jobBaseUrl 登记后才转发，而且只转发 POST …/v1/messages，其余（未登记、随机串不对、别的路径或方法）一律
+//        回 404、不发往上游；请求体原样转发、只替换 key 头：进程内条件与最简 agent 的作业地址上，工具的 type 为 custom 时
+//        去掉该字段（见 stripCustomToolType）；登记时声明逐字转发的作业地址（外部 agent 条件）一概不改写；
+//        agent 进程与容器只拿到网关地址，真 key 只在网关里注入；
 //   账号：一个 key 一个账号，各有并发上限（缺省按官方单账号上限 2500）；请求挑在途占比最低的可用账号，全满则排队
 //        （排队时间记到作业上，计入该步墙钟；客户端中止即出队）；同一账号内不轮换 key；每次派发记下当时的退避轮次与该账号的上限；
 //   429 与 503：该账号按退避轮次逐级退避（5、15、45 秒）：只有本轮派出的请求（冷却结束之后派出）再撞才升级，同时在途的
@@ -21,6 +26,7 @@
 //   花费（决策 235）：每条成功的请求（含网关自己的探测）按请求开始与结束时刻逐条计价（state/model-pricing.ts），记到作业上并
 //   计入全局累计；全局累计落盘，进程重启或续跑时接着累计；累计到上限即交给限额控制器停批。
 //   计时（退避、探测间隔、重试等待、上限回升、计价时刻）都经可注入的时钟；close() 取消全部未到的定时。
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -54,6 +60,8 @@ export interface GatewayMeter {
   peakInputTokens: number;
   // 这个作业成功转发的请求落在各账号上的次数（按账号编号，下标 0 为账号 1）
   accountRequests: number[];
+  // 网关拒绝转发的请求数（逐字转发的作业里 model 与本批的模型不符等）；没有拒绝过即不出现
+  rejectedRequests?: number;
 }
 
 export interface GatewayAccount {
@@ -155,6 +163,8 @@ const REAL_CLOCK: GatewayClock = {
 export interface ModelGatewayOptions {
   // 上游的 Anthropic Messages 基址（不带末尾斜杠），如 https://host/anthropic
   upstreamBaseUrl: string;
+  // 本批的模型名：给了即在逐字转发的作业（外部 agent 条件）上只读地核对请求体的 model，不符即回 400、不发往上游
+  model?: string;
   accounts: readonly GatewayAccount[];
   limits: LimitController;
   // 探测用的极小请求（非流式）
@@ -192,7 +202,12 @@ export interface AccountStatus {
 
 export interface ModelGateway {
   baseUrl: string;
-  jobBaseUrl(job: string): string;
+  // 作业的接入地址（首次调用即登记这个作业、给它一个随机串；之后同一作业取到同一串）。on 为 internal 时用跑批内部网络
+  // 上的监听地址（须先 listenInternal），缺省用回环地址；verbatimBody 为真时这个作业的请求体逐字转发、不去除 custom
+  // （外部 agent 条件；登记时即定，同一作业前后声明不一致即报错）
+  jobBaseUrl(job: string, options?: JobAddressOptions): string;
+  // 再听一个地址（跑批内部网络在宿主一侧的地址）：同一套路由与计量；返回该地址上的基址。只能听一次
+  listenInternal(host: string): Promise<string>;
   meter(job: string): GatewayMeter;
   // 这个作业此刻在途（含排队）的模型请求数
   jobInFlight(job: string): number;
@@ -216,6 +231,32 @@ export interface ModelGateway {
   close(): Promise<void>;
 }
 
+// 网关的监听：回环地址（进程内条件与宿主上的启动器）或跑批内部网络在宿主一侧的地址（外部 agent 条件）
+export type GatewayListener = "loopback" | "internal";
+
+export interface JobAddressOptions {
+  on?: GatewayListener;
+  // 请求体逐字转发（外部 agent 条件）：不去除工具定义里的 "type": "custom"
+  verbatimBody?: boolean;
+}
+
+// 作业地址的路由：/j/<作业>/<随机串>/v1/messages（可带查询串）；只认这一种，其余为 undefined
+const JOB_ROUTE = /^\/j\/([^/?]+)\/([0-9a-f]{32})(\/v1\/messages)(\?.*)?$/;
+
+export function parseJobRoute(
+  url: string
+): { job: string; token: string; rest: string } | undefined {
+  const match = JOB_ROUTE.exec(url);
+  if (match === null) return undefined;
+  let job: string;
+  try {
+    job = decodeURIComponent(match[1] ?? "");
+  } catch {
+    return undefined;
+  }
+  return { job, token: match[2] ?? "", rest: `${match[3] ?? ""}${match[4] ?? ""}` };
+}
+
 const DROP_REQUEST_HEADERS = new Set([
   "host",
   "connection",
@@ -236,6 +277,27 @@ const DROP_RESPONSE_HEADERS = new Set([
 
 function anthropicError(type: string, message: string): string {
   return JSON.stringify({ type: "error", error: { type, message } });
+}
+
+// 请求体的 model 与本批的模型不符时给出说明；相符为 undefined。只解析，不改写
+export function modelMismatch(body: Buffer, expected: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return `网关拒绝转发：请求体不是合法 JSON，核对不了 model（本批的模型为 ${expected}）`;
+  }
+  const model =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as { model?: unknown }).model
+      : undefined;
+  if (typeof model !== "string") {
+    return `网关拒绝转发：请求体缺 model 字段（本批的模型为 ${expected}）`;
+  }
+  if (model !== expected) {
+    return `网关拒绝转发：请求的 model 为 ${JSON.stringify(model)}，与本批的模型 ${expected} 不符（外部 agent 须用本批的模型）`;
+  }
+  return undefined;
 }
 
 function emptyMeter(accounts: number): GatewayMeter {
@@ -811,14 +873,29 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     return headers;
   };
 
+  // 登记过的作业 → 随机串与是否逐字转发请求体
+  const jobTokens = new Map<string, { token: string; verbatimBody: boolean }>();
+  const registered = (job: string, token: string): boolean => {
+    const expected = jobTokens.get(job)?.token;
+    if (expected === undefined) return false;
+    const a = Buffer.from(expected, "utf8");
+    const b = Buffer.from(token, "utf8");
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse) => {
-    const match = /^\/j\/([^/]+)(\/.*)$/.exec(req.url ?? "");
-    if (match === null) {
-      send(res, 404, anthropicError("not_found_error", "网关路径应为 /j/<作业>/…"));
+    // 只转发登记过的作业地址上的 POST …/v1/messages：其余一律 404，不读请求体、不发往上游
+    const route = req.method === "POST" ? parseJobRoute(req.url ?? "") : undefined;
+    if (route === undefined || !registered(route.job, route.token)) {
+      req.resume();
+      send(
+        res,
+        404,
+        anthropicError("not_found_error", "网关只转发登记过的作业地址上的 POST …/v1/messages")
+      );
       return;
     }
-    const job = decodeURIComponent(match[1] ?? "");
-    const rest = match[2] ?? "/";
+    const { job, rest } = route;
     if (options.limits.state !== "running") {
       paused(res);
       return;
@@ -828,8 +905,21 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     res.on("close", () => {
       if (!res.writableFinished) abort.abort();
     });
-    const body = stripCustomToolType(await readAll(req));
+    // 逐字转发按登记时的声明定（外部 agent 条件），不看请求内容
+    const raw = await readAll(req);
+    const verbatim = jobTokens.get(job)?.verbatimBody === true;
+    const body = verbatim ? raw : stripCustomToolType(raw);
     if (abort.signal.aborted) return;
+    // 逐字转发的作业：只读地核对 model（请求体的字节不改），与本批的模型不符即回 400、记到这个作业上
+    if (verbatim && options.model !== undefined) {
+      const mismatch = modelMismatch(raw, options.model);
+      if (mismatch !== undefined) {
+        const m = meterOf(job);
+        m.rejectedRequests = (m.rejectedRequests ?? 0) + 1;
+        send(res, 400, anthropicError("invalid_request_error", mismatch));
+        return;
+      }
+    }
     const inFlight = (jobInFlight.get(job) ?? 0) + 1;
     jobInFlight.set(job, inFlight);
     const meter = meterOf(job);
@@ -963,19 +1053,61 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     }
   };
 
-  const server = http.createServer((req, res) => {
-    handle(req, res).catch((error: unknown) => {
-      const reason = scrubKeys(error instanceof Error ? error.message : String(error), keys);
-      if (!res.headersSent) send(res, 502, anthropicError("api_error", `网关转发失败：${reason}`));
-      else res.destroy();
+  const newServer = () =>
+    http.createServer((req, res) => {
+      handle(req, res).catch((error: unknown) => {
+        const reason = scrubKeys(error instanceof Error ? error.message : String(error), keys);
+        if (!res.headersSent)
+          send(res, 502, anthropicError("api_error", `网关转发失败：${reason}`));
+        else res.destroy();
+      });
     });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as AddressInfo).port;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const listenOn = async (server: http.Server, host: string): Promise<string> => {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, host, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    const port = (server.address() as AddressInfo).port;
+    return `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
+  };
+  const server = newServer();
+  const baseUrl = await listenOn(server, "127.0.0.1");
+  // 跑批内部网络上的监听（外部 agent 条件用）
+  let internal: { server: http.Server; baseUrl: string } | undefined;
+  const tokenOf = (job: string, verbatimBody: boolean): string => {
+    const existing = jobTokens.get(job);
+    if (existing !== undefined) {
+      if (existing.verbatimBody !== verbatimBody) {
+        throw new Error(
+          `作业 ${job} 已登记为${existing.verbatimBody ? "" : "不"}逐字转发请求体，前后声明不一致`
+        );
+      }
+      return existing.token;
+    }
+    const token = randomBytes(16).toString("hex");
+    jobTokens.set(job, { token, verbatimBody });
+    return token;
+  };
   return {
     baseUrl,
-    jobBaseUrl: (job) => `${baseUrl}/j/${encodeURIComponent(job)}`,
+    jobBaseUrl: (job, options = {}) => {
+      const on = options.on ?? "loopback";
+      if (on === "internal" && internal === undefined) {
+        throw new Error("网关还没有在跑批内部网络上监听（先 listenInternal）");
+      }
+      const base = on === "internal" ? (internal?.baseUrl ?? baseUrl) : baseUrl;
+      return `${base}/j/${encodeURIComponent(job)}/${tokenOf(job, options.verbatimBody === true)}`;
+    },
+    async listenInternal(host) {
+      if (internal !== undefined) throw new Error("网关已在跑批内部网络上监听");
+      const extra = newServer();
+      const url = await listenOn(extra, host);
+      internal = { server: extra, baseUrl: url };
+      return url;
+    },
     meter: (job) => {
       const m = meterOf(job);
       let queueMs = m.queueMs;
@@ -1062,8 +1194,15 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
         for (const stop of [...timers]) stop();
         for (const finish of [...wakeOnClose]) finish();
         pump();
-        server.closeAllConnections();
-        server.close(() => resolve());
+        const servers = [server, ...(internal !== undefined ? [internal.server] : [])];
+        let open = servers.length;
+        for (const s of servers) {
+          s.closeAllConnections();
+          s.close(() => {
+            open -= 1;
+            if (open === 0) resolve();
+          });
+        }
       }),
   };
 }
@@ -1082,5 +1221,8 @@ export function meterDelta(after: GatewayMeter, before: GatewayMeter): GatewayMe
     peakInFlight: after.peakInFlight,
     peakInputTokens: after.peakInputTokens,
     accountRequests: after.accountRequests.map((n, i) => n - (before.accountRequests[i] ?? 0)),
+    ...(after.rejectedRequests !== undefined || before.rejectedRequests !== undefined
+      ? { rejectedRequests: (after.rejectedRequests ?? 0) - (before.rejectedRequests ?? 0) }
+      : {}),
   };
 }

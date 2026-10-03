@@ -13,6 +13,7 @@ import {
   clearMarkedProcesses,
   commandStepAgent,
   pigeonStepAgent,
+  STREAM_MAX_OUTPUT_TOKENS,
   STREAM_WORK_DIRECTIVE,
   streamTemperature,
 } from "./stream-agents.ts";
@@ -850,4 +851,41 @@ test("作业容器里（真容器）：判题前删掉家目录下的用户级 s
 test("Pigeon 条件的采样温度缺省固定为 0；显式给出的值原样沿用", () => {
   assert.equal(streamTemperature(undefined), 0);
   assert.equal(streamTemperature(0.4), 0.4);
+});
+
+test("Pigeon agent：没配单轮输出上限时显式按跑批器自己的 16,384 发（不随产品缺省改为跟模型）；配了的原样用", async () => {
+  assert.equal(STREAM_MAX_OUTPUT_TOKENS, 16_384);
+  for (const [configured, expected] of [
+    [undefined, 16_384],
+    [4096, 4096],
+  ] as const) {
+    const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-limit-"));
+    const ws = containerWorkspace(dir);
+    try {
+      const seen: unknown[] = [];
+      const inner = createFakeStreamFn({ replies: [{ text: "好" }] });
+      const streamFn: StreamFn = (model, context, opts) => {
+        seen.push(opts?.maxTokens);
+        return inner(model, context, opts);
+      };
+      const agent = pigeonStepAgent({
+        streamFn,
+        yolo: true,
+        docker: ws.docker,
+        homeDir: join(dir, "home"),
+        ...(configured !== undefined ? { maxOutputTokens: configured } : {}),
+      });
+      const out = await agent.run(
+        input(join(dir, "job"), {
+          condition: CONDITION_SPECS["search-only"],
+          target: { container: "box", root: ws.containerRoot },
+        })
+      );
+      assert.equal(out.status, "completed", JSON.stringify(out));
+      assert.deepEqual(seen, [expected]);
+    } finally {
+      ws.cleanup();
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    }
+  }
 });

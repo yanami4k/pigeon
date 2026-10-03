@@ -18,6 +18,7 @@ import {
   startModelGateway,
 } from "./model-gateway.ts";
 import { LimitController, PROBE_SCHEDULE_MS } from "./model-limits.ts";
+import { STREAM_MAX_OUTPUT_TOKENS } from "./stream-agents.ts";
 
 // 可控时钟：短于 autoBelowMs 的定时在下一轮事件循环即触发，其余等 advance 拨到；virtual 为真时 now 只随 advance 走，
 // 否则为真实时间加上拨快的量。set 记下每次定时的毫秒数
@@ -357,7 +358,12 @@ test("网关：Pigeon 的模型接入经网关走通上游 SDK——路径、真
   await withGateway(
     [{ status: 200, body: ANTHROPIC_SSE, contentType: "text/event-stream" }],
     async (g, up) => {
-      const streamFn = gatewayStreamFn(g.jobBaseUrl("s1|no-gate|1"));
+      // 与跑批器同样的接法：模型上限取跑批器自己的 16,384
+      const streamFn = gatewayStreamFn(
+        g.jobBaseUrl("s1|no-gate|1"),
+        "deepseek-flash",
+        STREAM_MAX_OUTPUT_TOKENS
+      );
       const stream = await streamFn(
         {} as never,
         { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] } as never,
@@ -374,7 +380,7 @@ test("网关：Pigeon 的模型接入经网关走通上游 SDK——路径、真
       assert.equal(text, "你好");
       assert.equal(up.seen[0]?.path, "/v1/messages");
       assert.equal(up.seen[0]?.key, "key-one");
-      // 自构模型对象的请求参数（决策 203）：模型名 deepseek-flash、显式关思考、单次输出上限 16384
+      // 自构模型对象的请求参数（决策 203、347）：模型名 deepseek-flash、显式关思考、单次输出上限为跑批器给的 16384
       const sent = JSON.parse(up.seen[0]?.body ?? "{}") as Record<string, unknown>;
       assert.equal(sent.model, "deepseek-flash");
       assert.deepEqual(sent.thinking, { type: "disabled" });
@@ -1886,4 +1892,226 @@ test("工具定义的 type：请求体不是合法 JSON、不是对象或 tools 
       );
     }
   );
+});
+
+// 作业地址（外部 agent 条件的网络档一并收紧）：作业地址带每作业的随机串，登记过才转发，而且只转发 POST …/v1/messages；
+// 其余一律 404、不发往上游。请求体原样转发，只替换 key 头
+test("网关：未登记的作业、错的随机串、非 messages 路径或非 POST 都回 404，且不发往上游", async () => {
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      const registered = g.jobBaseUrl("s1|ext-x|1");
+      const token = registered.split("/").at(-1) ?? "";
+      assert.match(token, /^[0-9a-f]{32}$/);
+      assert.equal(g.jobBaseUrl("s1|ext-x|1"), registered, "同一作业取到同一地址");
+      assert.notEqual(g.jobBaseUrl("s1|ext-x|2").split("/").at(-1), token, "每作业一个随机串");
+      const wrongToken = token.replace(/^./, token[0] === "0" ? "1" : "0");
+      const cases: Array<{ label: string; url: string; method?: string }> = [
+        {
+          label: "未登记的作业",
+          url: `${g.baseUrl}/j/${encodeURIComponent("s1|neither|9")}/${token}/v1/messages`,
+        },
+        {
+          label: "错的随机串",
+          url: `${g.baseUrl}/j/${encodeURIComponent("s1|ext-x|1")}/${wrongToken}/v1/messages`,
+        },
+        {
+          label: "缺随机串（旧地址）",
+          url: `${g.baseUrl}/j/${encodeURIComponent("s1|ext-x|1")}/v1/messages`,
+        },
+        { label: "非 messages 路径", url: `${registered}/v1/models` },
+        { label: "messages 的子路径", url: `${registered}/v1/messages/count_tokens` },
+        { label: "非 POST", url: `${registered}/v1/messages`, method: "GET" },
+        { label: "路径外", url: `${g.baseUrl}/v1/messages` },
+      ];
+      for (const { label, url, method } of cases) {
+        const res = await fetch(url, {
+          method: method ?? "POST",
+          headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+          ...(method === "GET" ? {} : { body: JSON.stringify({ stream: true }) }),
+        });
+        assert.equal(res.status, 404, label);
+        await res.text();
+      }
+      assert.equal(up.seen.length, 0, "一律不发往上游");
+      // 登记过的作业地址照常转发（带查询串也认）
+      const ok = await fetch(`${registered}/v1/messages?beta=true`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body: JSON.stringify({ stream: true }),
+      });
+      assert.equal(ok.status, 200);
+      await ok.text();
+      assert.equal(up.seen.length, 1);
+      assert.equal(up.seen[0]?.path, "/v1/messages?beta=true");
+      assert.equal(g.meter("s1|ext-x|1").requests, 1);
+    }
+  );
+});
+
+test("网关：带未知字段的请求体逐字到达上游，只替换 key 头", async () => {
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      const raw =
+        '{"model":"deepseek-flash", "max_tokens":32000,"output_config":{"effort":"high","x":[1,2]},' +
+        '"messages":[{"role":"user","content":"hi"}],"stream":true,"unknown_top":null}';
+      const res = await fetch(`${g.jobBaseUrl("s1|ext-x|1")}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body: raw,
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(up.seen[0]?.body, raw);
+      assert.equal(up.seen[0]?.key, "key-one");
+    }
+  );
+});
+
+test("网关：在跑批内部网络的地址上再听一份，同一套路由与计量；没听之前要这个地址即报错", async () => {
+  await withGateway(
+    [{ status: 200, body: SSE, contentType: "text/event-stream" }],
+    async (g, up) => {
+      assert.throws(() => g.jobBaseUrl("s1|ext-x|1", { on: "internal" }), /listenInternal/);
+      const internalBase = await g.listenInternal("127.0.0.1");
+      assert.notEqual(internalBase, g.baseUrl);
+      await assert.rejects(g.listenInternal("127.0.0.1"), /已在/);
+      const viaInternal = g.jobBaseUrl("s1|ext-x|1", { on: "internal" });
+      assert.ok(viaInternal.startsWith(`${internalBase}/j/`));
+      assert.equal(
+        viaInternal.split("/").at(-1),
+        g.jobBaseUrl("s1|ext-x|1").split("/").at(-1),
+        "两处监听上同一作业同一随机串"
+      );
+      const res = await fetch(`${viaInternal}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body: JSON.stringify({ stream: true }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(up.seen.length, 1);
+      assert.equal(g.meter("s1|ext-x|1").requests, 1);
+      const stray = await fetch(`${internalBase}/j/x/${"0".repeat(32)}/v1/messages`, {
+        method: "POST",
+        body: "{}",
+      });
+      assert.equal(stray.status, 404);
+      await stray.text();
+      assert.equal(up.seen.length, 1);
+    }
+  );
+});
+
+// 外部 agent 条件的作业地址（登记时声明逐字转发）：请求体一字不改，只替换 key 头；进程内条件与最简 agent 的作业地址照旧
+// 去除工具定义里的 "type": "custom"。判定按登记时的声明，不看请求内容
+const CUSTOM_TOOL_BODY =
+  '{ "model":"deepseek-flash",\n  "max_tokens" : 32000, "output_config":{"effort":"high"},' +
+  '"tools":[{"type":"custom","name":"bash","input_schema":{"type":"object"}},{"name":"read","input_schema":{}}],' +
+  '\t"messages":[{"role":"user","content":"hi"}], "stream":true, "unknown_top":[1, 2 ,3] }';
+
+test("网关：同一份带 custom 工具、未知字段与非规整空白的请求体——外部条件的作业地址逐字到达上游，进程内条件的去掉 custom、其余字段保留", async () => {
+  await withGateway(
+    [
+      { status: 200, body: SSE, contentType: "text/event-stream" },
+      { status: 200, body: SSE, contentType: "text/event-stream" },
+    ],
+    async (g, up) => {
+      const send = async (base: string) => {
+        const res = await fetch(`${base}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+          body: CUSTOM_TOOL_BODY,
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+      };
+      await send(g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true }));
+      await send(g.jobBaseUrl("s1|neither|1"));
+      assert.equal(up.seen.length, 2);
+      // 外部条件：逐字相同，只换了 key 头
+      assert.equal(up.seen[0]?.body, CUSTOM_TOOL_BODY);
+      assert.equal(up.seen[0]?.key, "key-one");
+      // 进程内条件：custom 去掉，其余字段保留
+      const expected = JSON.parse(CUSTOM_TOOL_BODY);
+      delete expected.tools[0].type;
+      assert.deepEqual(JSON.parse(up.seen[1]?.body ?? "{}"), expected);
+      assert.doesNotMatch(up.seen[1]?.body ?? "", /"custom"/);
+      assert.equal(up.seen[1]?.key, "key-one");
+    }
+  );
+});
+
+test("网关：同一作业前后对逐字转发的声明不一致即报错；一致时取到同一地址", async () => {
+  await withGateway([], async (g) => {
+    const first = g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true });
+    assert.equal(g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true }), first);
+    assert.throws(() => g.jobBaseUrl("s1|ext-x|1"), /前后声明不一致/);
+    g.jobBaseUrl("s1|neither|1");
+    assert.throws(() => g.jobBaseUrl("s1|neither|1", { verbatimBody: true }), /前后声明不一致/);
+  });
+});
+
+// 逐字转发的作业（外部 agent 条件）：网关只读地核对请求体的 model，与本批的模型不符（或核对不了）即回一个说得清楚的 400、
+// 不发往上游、记到该作业的 rejectedRequests；请求体的字节不改。进程内条件的作业不核对
+test("网关：逐字转发的作业 model 与本批不符即 400、不发往上游、记到该作业上；相符的逐字转发；进程内条件的作业不核对", async () => {
+  const up = await fakeUpstream([
+    { status: 200, body: SSE, contentType: "text/event-stream" },
+    { status: 200, body: SSE, contentType: "text/event-stream" },
+  ]);
+  const l = limits();
+  const g = await startModelGateway({
+    upstreamBaseUrl: up.url,
+    model: "deepseek-flash",
+    accounts: [{ key: "key-one", concurrency: 2 }],
+    limits: l,
+    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+    clock: testClock({ virtual: true }).clock,
+    warn: () => {},
+  });
+  try {
+    const ext = g.jobBaseUrl("s1|ext-x|1", { verbatimBody: true });
+    const send = async (base: string, body: string) => {
+      const res = await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": "placeholder" },
+        body,
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    const wrong = await send(ext, '{ "model":"other-model", "max_tokens":1 }');
+    assert.equal(wrong.status, 400);
+    const message = (JSON.parse(wrong.text) as { error: { message: string } }).error.message;
+    assert.match(message, /"other-model"/);
+    assert.match(message, /deepseek-flash/);
+    const notJson = await send(ext, "{not json");
+    assert.equal(notJson.status, 400);
+    assert.match(notJson.text, /不是合法 JSON/);
+    const missing = await send(ext, '{"max_tokens":1}');
+    assert.equal(missing.status, 400);
+    assert.match(missing.text, /缺 model/);
+    assert.equal(up.seen.length, 0, "都不发往上游");
+    assert.equal(g.meter("s1|ext-x|1").rejectedRequests, 3);
+    assert.equal(g.meter("s1|ext-x|1").requests, 0);
+    const right = '{ "model":"deepseek-flash",  "max_tokens":1, "x_unknown":{} }';
+    assert.equal((await send(ext, right)).status, 200);
+    assert.equal(up.seen[0]?.body, right, "相符的逐字转发");
+    // 进程内条件：不核对 model
+    assert.equal((await send(g.jobBaseUrl("s1|neither|1"), '{"model":"other-model"}')).status, 200);
+    assert.equal(up.seen.length, 2);
+    assert.equal(g.meter("s1|neither|1").rejectedRequests, undefined);
+    // 按步做差带上被拒的次数；没有被拒的作业不出现这个字段
+    const before = g.meter("s1|ext-x|1");
+    await send(ext, '{"model":"x"}');
+    assert.equal(meterDelta(g.meter("s1|ext-x|1"), before).rejectedRequests, 1);
+    assert.equal(
+      "rejectedRequests" in meterDelta(g.meter("s1|neither|1"), g.meter("s1|neither|1")),
+      false
+    );
+  } finally {
+    await g.close();
+    l.close();
+    await up.close();
+  }
 });

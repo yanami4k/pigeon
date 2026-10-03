@@ -83,7 +83,7 @@ export interface WorkerRuntimeDeps {
   startMcp?: (request: WorkerRuntimeRequest) => Promise<McpSession>;
   // 决策 061 / 062：编辑模式（缺省 replace）
   editMode?: EditMode;
-  // 决策 063：单轮输出上限（缺省 16,384）
+  // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置——worker 按主会话同一配置跑（缺省为产品缺省）
   compaction?: CompactionConfigInput;
@@ -254,9 +254,9 @@ interface RuntimeSurface {
   skillRoots?: readonly SkillRoot[];
   // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
   agentsMd?: boolean;
-  // 决策 061：编辑模式（缺省 hashline）
+  // 决策 061：编辑模式（缺省见 tools/edit-mode.ts 的 DEFAULT_EDIT_MODE，现为 replace）
   editMode?: EditMode;
-  // 决策 063：单轮输出上限（缺省 16,384）
+  // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
   // M9：采样温度（缺省不设）——目前只有无父会话的运行面（headless 与 Eval）会给；worker 不继承
   temperature?: number;

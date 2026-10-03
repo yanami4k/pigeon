@@ -319,20 +319,30 @@ export class StreamWorkspace {
   }
 
   // 工作区此刻的树（被跟踪文件与未忽略的未跟踪文件）：用临时索引从 HEAD 起暂存全部、写出树对象，返回树的哈希；
-  // 不动真的暂存区。开工时与收工时各取一次，两者之差即 agent 在这一步的改动
-  async worktreeTree(): Promise<string> {
+  // 不动真的暂存区。开工时与收工时各取一次，两者之差即 agent 在这一步的改动。
+  // exclude（外部 agent 条件）：这些工作区相对路径不暂存（按字面路径排除，其下的嵌套 git 工作树也不进树），起止两次
+  // 用同一份；不给或为空时脚本与之前逐字一致
+  async worktreeTree(exclude?: readonly string[]): Promise<string> {
+    const excluded = exclude ?? [];
     const r = await this.must(
       [
         SANITIZE_GIT_CONFIG,
         'gd="$(git rev-parse --git-dir)" && t="$gd/pigeon-tree-index" && rm -f -- "$t"',
         'GIT_INDEX_FILE="$t" git read-tree HEAD',
-        'GIT_INDEX_FILE="$t" git add -A',
+        excluded.length === 0
+          ? 'GIT_INDEX_FILE="$t" git add -A'
+          : 'GIT_INDEX_FILE="$t" git add -A -- . "$@"',
         'tree="$(GIT_INDEX_FILE="$t" git write-tree)"',
         'rm -f -- "$t"',
         'echo "$tree"',
       ].join(" && "),
       "读取工作区的树",
-      { timeoutMs: 300_000 }
+      {
+        timeoutMs: 300_000,
+        ...(excluded.length === 0
+          ? {}
+          : { args: excluded.map((p) => `:(top,exclude,literal)${p}`) }),
+      }
     );
     return r.stdout.trim();
   }

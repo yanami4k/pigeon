@@ -3,6 +3,7 @@
 按正式跑分析计划（主判据、次要判据、设计灵敏度、校准取值规则、报告措辞）计算，输入为跑批器的输出目录：
 
 - results.jsonl：每格、每题、每遍一行；缺了该有的字段即报错并指明文件、行与字段；
+  外部 agent 条件（跑批器的实验设施，条件名 ext-<名字>）读成以条件名为格的行：不是 Pigeon，不要求身份头里的 Pigeon 段、不读会话文件；四格与最简 agent 的分析不受影响；
 - identity.json（与 results.jsonl 同目录）：报告的设置一节、难度关的题面格式、压缩触发点取自这里；
 - streams/tasks-<条件>-<遍次>/：会话清单 sessions-<步序>.json、.pigeon/state/sessions（旧布局为 .pigeon/sessions，两种都能读）下的会话文件与开工记忆快照
   learned-snapshots/step-<步序>/，记忆使用与检索的计数、复盘的 token 细分取自这里；没有这个目录时这些计数记为无来源。

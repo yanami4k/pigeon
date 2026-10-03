@@ -32,7 +32,12 @@ export {
   DEEPSEEK_MODEL_ID,
   deepseekModel,
 } from "./deepseek-model.ts";
-export { createDeepSeekStreamFn, DEEPSEEK_KEY_ENV } from "./deepseek-stream.ts";
+export {
+  createDeepSeekStreamFn,
+  DEEPSEEK_BASE_URL_ENV,
+  DEEPSEEK_KEY_ENV,
+  resolveDeepSeekBaseUrl,
+} from "./deepseek-stream.ts";
 export { isSyntheticFailureMessage, normalizePiEvent, turnUsageOf } from "./events.ts";
 export {
   DEFAULT_GATEWAY_MODEL_ID,
@@ -49,7 +54,7 @@ export type {
   ToolGovernance,
   ToolGovernanceFactory,
 } from "./governance.ts";
-export { DEFAULT_MAX_OUTPUT_TOKENS } from "./output-limit.ts";
+export { FALLBACK_MODEL_MAX_TOKENS } from "./output-limit.ts";
 export { isContextOverflowError } from "./overflow.ts";
 export {
   INJECTION_SNAPSHOT_VERSION,
