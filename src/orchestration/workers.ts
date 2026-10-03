@@ -27,6 +27,7 @@ import type {
   ChildSpawnedInput,
   DelegatedPolicy,
   ScriptSpawnTag,
+  ToolScope,
   WorkerErrorKind,
   WorkerLimits,
   WorkerRole,
@@ -337,6 +338,9 @@ export interface SpawnRequest {
   start?: { point: WorkerStartPoint } | { from: string };
   // 决策 312：脚本编排派出的调用——运行号、指纹与接力的上游，写进派出与收尾条目
   script?: ScriptSpawnTag;
+  // 决策 360：工具清单（缺省按角色取预设）与各工具的作用范围，校验不过即不派（零记录零工作区）
+  tools?: readonly string[];
+  scopes?: readonly ToolScope[];
 }
 
 // queued：已派出、等空位开跑（决策 268）
@@ -604,6 +608,13 @@ export class WorkerOrchestrator {
     if (task === "") {
       throw new WorkerSpawnError("任务不能为空");
     }
+    const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
+    const policy = deriveWorkerPolicy(basePolicy, role, {
+      orchestration: depth < this.#maxDepth,
+      ...(request.tools !== undefined ? { tools: request.tools } : {}),
+      ...(request.scopes !== undefined ? { scopes: request.scopes } : {}),
+    });
+    assertPolicySubset(policy, basePolicy);
     const name = request.name ?? this.#nextName(role);
     assertWorkerName(name);
     if (
@@ -611,9 +622,6 @@ export class WorkerOrchestrator {
     ) {
       throw new WorkerSpawnError(`worker 名已被占用：${name}`);
     }
-    const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
-    const policy = deriveWorkerPolicy(basePolicy, role, { orchestration: depth < this.#maxDepth });
-    assertPolicySubset(policy, basePolicy);
     const limits: WorkerLimits = {
       ...DEFAULT_WORKER_LIMITS,
       ...this.#options.defaultLimits,

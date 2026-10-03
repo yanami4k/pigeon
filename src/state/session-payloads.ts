@@ -37,11 +37,21 @@ export function isGitWorktreeWorkspace(
   return workspace.kind === "git-worktree";
 }
 
-// 委派策略摘要：与 InjectionSnapshot.tools.policy 同形（state 是叶子层，不引 tools 的 schema）
+// 决策 360：worker 某件工具的作用范围（只能比派出方更窄）——文件类工具限工作区相对路径（目录含其下），跑命令限命令前缀
+export const ToolScopeSchema = Type.Object({
+  tool: Type.String({ minLength: 1 }),
+  paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
+  commandPrefixes: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
+});
+export type ToolScope = Static<typeof ToolScopeSchema>;
+
+// 委派策略摘要：与 InjectionSnapshot.tools.policy 同形（state 是叶子层，不引 tools 的 schema）；
+// scopes 为决策 360 的作用范围，派出记录里有才在场（之前的记录没有，即不限）
 export const DelegatedPolicySchema = Type.Object({
   allow: Type.Array(Type.String({ minLength: 1 })),
   deny: Type.Array(Type.String({ minLength: 1 })),
   approvalMode: Type.Union([Type.Literal("prompt"), Type.Literal("yolo")]),
+  scopes: Type.Optional(Type.Array(ToolScopeSchema)),
 });
 export type DelegatedPolicy = Static<typeof DelegatedPolicySchema>;
 

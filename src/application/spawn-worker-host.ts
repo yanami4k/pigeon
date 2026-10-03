@@ -62,6 +62,8 @@ export function bindSpawnWorkers(input: BindSpawnWorkersInput): BoundSpawnWorker
         origin: "agent",
         ...(request.label !== undefined ? { label: request.label } : {}),
         ...(input.from !== undefined ? { from: input.from } : {}),
+        ...(request.tools !== undefined ? { tools: request.tools } : {}),
+        ...(request.scopes !== undefined ? { scopes: request.scopes } : {}),
         onSpawned: request.onSpawned,
       });
       return { outcomes: result.outcomes };

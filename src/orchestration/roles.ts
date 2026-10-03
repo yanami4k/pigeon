@@ -6,16 +6,26 @@
 // 决策 331：worker 只推送记忆、不带记忆工具（写记忆的工具只给有人对话的入口）；决策 249 的"三种角色另带记忆工具"随之取消。
 // 决策 287–291：联网的两件工具（web_search、web_fetch）三种角色都带——与主会话同样拿到、同样的审批规则（父策略里有才带；
 // 沙箱断网档与跑批器各条件的父策略里没有，角色也不带）。
+// 决策 360：派出时可给工具清单，只能取派出方现有工具的子集（主会话专用的除外），不给即按角色取预设——三个角色退化为三份预设；
+// 可给每件工具附加作用范围（文件类限路径、跑命令限命令前缀），只能比派出方更窄，派出方限定了的工具没另给即原样沿用。
 import { MCP_TOOL_PREFIX } from "../mcp/registry-bridge.ts";
 import {
   LIST_SESSIONS_TOOL,
   READ_SESSION_ENTRY_TOOL,
   SEARCH_SESSIONS_TOOL,
 } from "../memory/search-tools.ts";
+import { UPDATE_MEMORY_TOOL } from "../memory/update-memory-tool.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
-import type { DelegatedPolicy, WorkerRole } from "../state/session-payloads.ts";
+import type { DelegatedPolicy, ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
+import {
+  commandPrefixWords,
+  normalizeScopePath,
+  SCOPABLE_TOOLS,
+  scopeKindOf,
+  scopeWithin,
+} from "../tools/tool-scope.ts";
 
 export class WorkerPolicyError extends Error {}
 
@@ -24,11 +34,12 @@ export type ActiveWorkerRole = Extract<WorkerRole, "explorer" | "implementer" | 
 
 export const WORKER_ROLES: readonly ActiveWorkerRole[] = ["explorer", "implementer", "tester"];
 
-// 角色默认工具（ROADMAP §M5.5 角色表）；tester 的 run_command 另受设置的 commands 一节角色清单限定（048）
-// 联网的两件工具三种角色都带（287–291）
+// 角色预设（ROADMAP §M5.5 角色表；360 起是派出时没给工具清单的缺省）；run_command 另受设置的 commands 一节为该角色登记的
+// 清单限定（048；360 起登记了才限）。联网的两件工具三种角色都带（287–291）
 const WEB_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] as const;
 
 export const ROLE_TOOLS: Readonly<Record<ActiveWorkerRole, readonly string[]>> = {
+  // grep、glob 两件读档工具（决策 368）合并后加进 explorer 预设
   explorer: [
     "read_file",
     SEARCH_SESSIONS_TOOL,
@@ -68,26 +79,151 @@ export const NESTED_ORCHESTRATION_TOOLS: readonly string[] = [
   "stop_worker",
 ];
 
+// 决策 360：不能交给 worker 的工具——写记忆（331：worker 只推送）、取用 worker 改动（279：叠加只往主工作目录）、
+// 提交编排脚本（309）与任务清单（294 B1）只给主会话；派出与等待等编排工具按层数自动给（299），也不在清单里选。
+// 名字与 application 层的工具名一致（本层不依赖 application）
+export const MAIN_ONLY_TOOLS: readonly string[] = [
+  UPDATE_MEMORY_TOOL,
+  "take_worker",
+  "orchestrate",
+  "update_tasks",
+  "list_tasks",
+  ...NESTED_ORCHESTRATION_TOOLS,
+];
+
+// 带作用范围的策略：派出方是 worker 时它自己的范围也在场（主会话没有）
+export type ScopedPolicy = ToolPolicyLike & { readonly scopes?: readonly ToolScope[] };
+
+export interface WorkerToolRequest {
+  // 层数未满时另带编排工具（299）
+  orchestration?: boolean;
+  // 工具清单；不给即按角色取预设
+  tools?: readonly string[];
+  scopes?: readonly ToolScope[];
+}
+
+// 派出方能交给 worker 的工具：它自己有的（不在 deny 里），去掉主会话专用的
+export function delegableTools(parent: ToolPolicyLike): string[] {
+  return parent.allow.filter(
+    (tool) => !parent.deny.includes(tool) && !MAIN_ONLY_TOOLS.includes(tool)
+  );
+}
+
 export function deriveWorkerPolicy(
-  parent: ToolPolicyLike,
+  parent: ScopedPolicy,
   role: ActiveWorkerRole,
-  options: { orchestration?: boolean } = {}
+  options: WorkerToolRequest = {}
 ): DelegatedPolicy {
   const deny = [...new Set(parent.deny)];
+  const orchestration = options.orchestration === true ? NESTED_ORCHESTRATION_TOOLS : [];
+  const chosen =
+    options.tools !== undefined ? checkedTools(parent, options.tools) : presetTools(parent, role);
+  const allow = [...chosen, ...orchestration].filter(
+    (tool) => parent.allow.includes(tool) && !deny.includes(tool)
+  );
+  const scopes = workerScopes(parent, allow, options.scopes ?? []);
+  return {
+    allow,
+    deny,
+    approvalMode: parent.approvalMode,
+    ...(scopes.length > 0 ? { scopes } : {}),
+  };
+}
+
+function presetTools(parent: ToolPolicyLike, role: ActiveWorkerRole): string[] {
   // M5.7 S4：implementer 另继承父策略里的 MCP 工具（外部写工具照样逐次审批）；其余角色不继承
   const inherited =
     role === "implementer"
       ? parent.allow.filter((tool) => tool.startsWith(`${MCP_TOOL_PREFIX}__`))
       : [];
-  const orchestration = options.orchestration === true ? NESTED_ORCHESTRATION_TOOLS : [];
-  const allow = [...ROLE_TOOLS[role], ...inherited, ...orchestration].filter(
-    (tool) => parent.allow.includes(tool) && !deny.includes(tool)
-  );
-  return { allow, deny, approvalMode: parent.approvalMode };
+  return [...ROLE_TOOLS[role], ...inherited];
 }
 
-// 第二道校验（决策 040 修订）：子策略的 allow 必须全在父 allow 里且不碰父 deny
-export function assertPolicySubset(child: ToolPolicyLike, parent: ToolPolicyLike): void {
+// 给了清单：去重后逐件须是派出方能交出的工具，否则整次拒绝（不悄悄剔除，免得 worker 少了以为有的工具）
+function checkedTools(parent: ToolPolicyLike, tools: readonly string[]): string[] {
+  const unique = [...new Set(tools.map((tool) => tool.trim()))];
+  if (unique.length === 0 || unique.includes("")) {
+    throw new WorkerPolicyError("工具清单不能为空，也不能有空的工具名");
+  }
+  const delegable = delegableTools(parent);
+  const outside = unique.filter((tool) => !delegable.includes(tool));
+  if (outside.length > 0) {
+    throw new WorkerPolicyError(
+      `这些工具不能交给 worker：${outside.join("、")}（可选：${delegable.join("、")}）`
+    );
+  }
+  return unique;
+}
+
+// 作用范围：每件工具至多一份，须是 worker 有的工具、种类与登记表（tool-scope.ts）对得上；派出方限定了的工具只能更窄，没另给即沿用派出方的
+function workerScopes(
+  parent: ScopedPolicy,
+  allow: readonly string[],
+  given: readonly ToolScope[]
+): ToolScope[] {
+  const inherited = parent.scopes ?? [];
+  const seen = new Set<string>();
+  const scopes: ToolScope[] = [];
+  for (const scope of given) {
+    if (seen.has(scope.tool)) {
+      throw new WorkerPolicyError(`${scope.tool} 的作用范围给了不止一份`);
+    }
+    seen.add(scope.tool);
+    if (!allow.includes(scope.tool)) {
+      throw new WorkerPolicyError(`worker 没有 ${scope.tool}，不能给它作用范围`);
+    }
+    const normalized = normalizedScope(scope);
+    const outer = inherited.find((candidate) => candidate.tool === scope.tool);
+    if (outer !== undefined && !scopeWithin(normalized, outer)) {
+      throw new WorkerPolicyError(`${scope.tool} 的作用范围不能比派出方的宽`);
+    }
+    scopes.push(normalized);
+  }
+  for (const outer of inherited) {
+    if (allow.includes(outer.tool) && !seen.has(outer.tool)) {
+      scopes.push(outer);
+    }
+  }
+  return scopes;
+}
+
+function normalizedScope(scope: ToolScope): ToolScope {
+  const { tool, paths, commandPrefixes } = scope;
+  const kind = scopeKindOf(tool);
+  if (kind === "commandPrefixes") {
+    if (paths !== undefined || commandPrefixes === undefined || commandPrefixes.length === 0) {
+      throw new WorkerPolicyError(`${tool} 的作用范围只能给 commandPrefixes`);
+    }
+    const prefixes = [...new Set(commandPrefixes.map((prefix) => prefix.trim()))];
+    const bad = prefixes.find((prefix) => commandPrefixWords(prefix) === undefined);
+    if (bad !== undefined) {
+      throw new WorkerPolicyError(
+        `命令前缀须是一条不经 shell 的命令的开头（不含管道、重定向、串联、命令替换或换行）：${bad}`
+      );
+    }
+    return { tool, commandPrefixes: prefixes };
+  }
+  if (kind === "paths") {
+    if (commandPrefixes !== undefined || paths === undefined || paths.length === 0) {
+      throw new WorkerPolicyError(`${tool} 的作用范围只能给 paths`);
+    }
+    const normalized = paths.map((given) => ({ given, path: normalizeScopePath(given) }));
+    const bad = normalized.find((entry) => entry.path === undefined);
+    if (bad !== undefined) {
+      throw new WorkerPolicyError(
+        `作用范围的路径须相对 worker 工作树的根，不能用 .. 或绝对路径：${bad.given}`
+      );
+    }
+    return { tool, paths: [...new Set(normalized.map((entry) => entry.path as string))] };
+  }
+  throw new WorkerPolicyError(
+    `${tool} 不能附加作用范围（可以附加的：${Object.keys(SCOPABLE_TOOLS).join("、")}）`
+  );
+}
+
+// 第二道校验（决策 040 修订）：子策略的 allow 必须全在父 allow 里且不碰父 deny；
+// 决策 360：父策略限定了范围的工具，子策略须带不比它宽的范围
+export function assertPolicySubset(child: ScopedPolicy, parent: ScopedPolicy): void {
   const widened = child.allow.filter(
     (tool) => !parent.allow.includes(tool) || parent.deny.includes(tool)
   );
@@ -100,5 +236,15 @@ export function assertPolicySubset(child: ToolPolicyLike, parent: ToolPolicyLike
   }
   if (child.approvalMode === "yolo" && parent.approvalMode !== "yolo") {
     throw new WorkerPolicyError("worker 审批模式不能高于父策略（父 prompt 不派 yolo 子）");
+  }
+  const widenedScopes = (parent.scopes ?? []).filter((outer) => {
+    if (!child.allow.includes(outer.tool)) return false;
+    const inner = child.scopes?.find((scope) => scope.tool === outer.tool);
+    return inner === undefined || !scopeWithin(inner, outer);
+  });
+  if (widenedScopes.length > 0) {
+    throw new WorkerPolicyError(
+      `worker 的作用范围超出父策略：${widenedScopes.map((scope) => scope.tool).join("、")}`
+    );
   }
 }
