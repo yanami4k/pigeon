@@ -49,6 +49,8 @@ def runner_row(cell, seq, attempt, passed, total, *, keep_failed=0, cost=0.4, re
         "diff": f"streams/tasks-{CELL_TO_CONDITION[cell]}-{attempt}/diffs/step-{seq}.diff",
         "envOpenMs": 1000,
         "judged": True,
+        # 决策 327：repairRounds / finalVerdict / humanTestRestores / verifyToolFaults 已退役，新结果行不再写；
+        # 这里保留它们验证"读到旧结果行里的这些字段时忽略、不报错"
         "repairRounds": None if cell == "M" else 0,
         "finalVerdict": None if cell == "M" else "pass",
         "humanTestRestores": None if cell == "M" else 0,
@@ -193,10 +195,12 @@ class SessionBuilder:
 
 
 def write_job(run_dir: Path, condition: str, attempt: int, steps: dict[int, list[SessionBuilder]],
-              snapshots: dict[int, str] | None = None) -> Path:
-    """一个作业目录：steps 为 {步序: 这一步新增的会话}；会话清单逐步累积。snapshots 为 {步序: 开工时 MEMORY.md 文本}。"""
+              snapshots: dict[int, str] | None = None, layout: str = "legacy") -> Path:
+    """一个作业目录：steps 为 {步序: 这一步新增的会话}；会话清单逐步累积。snapshots 为 {步序: 开工时 MEMORY.md 文本}。
+    layout 为会话根的布局：legacy 即 .pigeon/sessions（正式跑的数据），state 即决策 325 起的 .pigeon/state/sessions。"""
     job = run_dir / "streams" / f"tasks-{condition}-{attempt}"
-    sess_dir = job / ".pigeon" / "sessions" / "--job-workspace--"
+    root = job / ".pigeon" / ("state" if layout == "state" else "") / "sessions"
+    sess_dir = root / "--job-workspace--"
     sess_dir.mkdir(parents=True, exist_ok=True)
     listing: list[str] = []
     for seq in sorted(steps):

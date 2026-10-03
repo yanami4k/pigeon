@@ -6,11 +6,11 @@
 // 旧格式会话（迁移之前创建）不能续跑，明确报错（187：旧会话由只读的旧版代码读，211）。
 // 输出依赖注入（决策 025）：cli 打终端，tui 打消息区；WriteFn 与 cli/repl.ts 的同名类型结构同型，定义留在本层
 // 是为了不引入 application → cli 的反向依赖（application-is-controller 巡航规则）。
-import { join } from "node:path";
 import { hasLegacySessionFile, LEGACY_READER_HINT } from "../persistence/session-catalog.ts";
 import { listSessionFiles } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { sessionContextMessages } from "../pi-runtime/session-store.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import { danglingToolCalls, type StoreMessage } from "../state/session-judge.ts";
 
 // 提问函数：返回一行输入；EOF/流关闭返回 null（与 cli/repl.ts 的 AskFn 结构同型）
@@ -19,7 +19,7 @@ export type AskFn = (prompt: string) => Promise<string | null>;
 export type WriteFn = (text: string) => void;
 
 export interface ResumeFlowOptions {
-  // 治理根（会话文件在 <root>/.pigeon/sessions/）
+  // 治理根（会话文件在 <root>/.pigeon/state/sessions/）
   root: string;
   sessionId: string;
   write: WriteFn;
@@ -29,7 +29,7 @@ export interface ResumeFlowOptions {
 
 // 续跑前的报告：将还原的消息条数、未收尾的 Run、悬空的工具调用（真正的还原在续会话入口装配运行面时做）
 export function describeResume(root: string, sessionId: string): string[] {
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(root);
   const loaded = loadStoreSession(sessionsDir, sessionId);
   if (loaded === undefined) {
     if (hasLegacySessionFile(sessionsDir, sessionId)) {

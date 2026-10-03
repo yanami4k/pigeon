@@ -51,17 +51,8 @@ export interface StreamResultLine {
   attribution?: string | null;
   // 本步是否做了判定（题为 true）
   judged: boolean;
-  // 回炉：未开回炉的条件为 null
-  repairRounds: number | null;
-  finalVerdict: "pass" | "fail" | null;
-  // 撤回拆除（决策 173）之前写下的旧结果行才有：是否撤回、撤回是否因预算先于轮数用尽。新行不写，只读兼容
-  reverted?: boolean;
-  repairBudgetExhausted?: boolean | null;
-  // 验证之前发现 agent 改过人写测试并还原的次数（每次验证至多计 1）；未开回炉为 null
-  humanTestRestores: number | null;
-  // 验证工具故障的次数（决策 170 ③）：这一步各次验证里检查工具自身崩溃、重跑一次仍崩溃的步数合计（不计入验证结论）；
-  // 未开回炉或没跑 agent 为 null。这个字段之前写下的旧结果行没有它
-  verifyToolFaults: number | null;
+  // 验证门与回炉的字段（repairRounds、finalVerdict、humanTestRestores、verifyToolFaults）随决策 322/327 退役：
+  // 移到 LEGACY_STREAM_RESULT_FIELDS——旧结果行才带，新行不写，读取照常接受、不再使用
   // agent 是否改了依赖声明文件（与人在该步的版本不同）：切环境一律按人的声明，这里只记下；没有依赖声明或没跑 agent 为 null
   agentChangedDeps: boolean | null;
   // 人的代码在这一步没过验证门（清单里的标记，见开跑前置检查）
@@ -86,11 +77,12 @@ export interface StreamResultLine {
     humanRuns: BaselineRunFacts[];
     humanSlowest: { id: string; seconds: number } | null;
   } | null;
-  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里 .pigeon/learned/MEMORY.md 的字节数、条目数与条目
+  // 这一步开工时（记忆快照取定或恢复之后、agent 开始之前）作业治理根里项目级记忆（决策 332 起为 .pigeon/state/memory.md，
+  // 之前为 .pigeon/learned/MEMORY.md）的字节数、条目数与条目
   // 部分的字符数（文件头不计，223 的上限按它算）；文件不在记 0
   memoryAtStart: MemoryFacts | null;
-  // 这一步 agent 运行与收尾复盘都结束之后（判题之前）的记忆大小，口径同上；最后一步的即一遍结束时的记忆。复盘接入之前
-  // 照样在 agent 结束后记。依赖环境选不出而没跑 agent 的步为 null
+  // 这一步 agent 运行结束之后（判题之前）的记忆大小，口径同上；最后一步的即一遍结束时的记忆（决策 331 删除复盘之前，
+  // 记在收尾复盘之后）。依赖环境选不出而没跑 agent 的步为 null
   memoryAtEnd: MemoryFacts | null;
   // 这一步是否撞了宽上限（171）：agent 以撞轮数或墙钟上限收尾（终态 turn-limit / wall-clock-limit），或轮数、墙钟
   // （含验证门与回炉）达到上限。没跑 agent 为 null
@@ -177,10 +169,6 @@ export const STREAM_RESULT_FIELDS = [
   "diff",
   "envOpenMs",
   "judged",
-  "repairRounds",
-  "finalVerdict",
-  "humanTestRestores",
-  "verifyToolFaults",
   "agentChangedDeps",
   "humanFailsGate",
   "runIdentity",
@@ -206,7 +194,7 @@ export const STREAM_RESULT_FIELDS = [
 ] as const;
 
 // 旧结果行才带、新行不再写的字段（决策 173 的撤回字段；193 固定起点之前的 HEAD、回归数与失败归因；196、201 两类用例
-// 计分之前的全量测试通过率）：读取照常接受
+// 计分之前的全量测试通过率；322/327 的验证门与回炉字段）：读取照常接受
 export const LEGACY_STREAM_RESULT_FIELDS = [
   "reverted",
   "repairBudgetExhausted",
@@ -214,6 +202,10 @@ export const LEGACY_STREAM_RESULT_FIELDS = [
   "regressions",
   "attribution",
   "fullPassRate",
+  "repairRounds",
+  "finalVerdict",
+  "humanTestRestores",
+  "verifyToolFaults",
 ] as const;
 
 export interface StreamJobId {

@@ -5,7 +5,6 @@
 // 与 trace 的区别：trace 按轮次与工具调用聚合；replay 是原始时间流——该 Run 的全部条目（Run 开始、消息、代码快照、
 // 验证、worker、分叉、授权、Run 收尾）按会话文件里的顺序逐条呈现。
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import { evalVerdictLabel, failureBadge, shortId, summarizeArgs } from "../application/format.ts";
 import { messageLines } from "../application/history.ts";
 import {
@@ -13,6 +12,7 @@ import {
   loadSessionView,
   readSessionView,
 } from "../persistence/session-catalog.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
 import {
   isSyntheticFailure,
@@ -37,6 +37,7 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   worker: "pigeon.worker",
   fork: "pigeon.fork",
   grant: "pigeon.grant",
+  hook: "pigeon.hook",
 };
 
 // 单条条目的关键字段摘要（各类型的要点，通俗措辞）
@@ -133,6 +134,14 @@ function itemDetail(item: ViewItem): string {
       const scope = data.pathPrefix !== undefined ? `，仅限目录 ${data.pathPrefix}` : "（工具级）";
       return `放权创建 ${shortId(data.grantId)} ｜ ${data.tool}${scope} ｜ 首调 ${data.firstCall.toolCallId}`;
     }
+    case "hook": {
+      const data = item.data;
+      return (
+        `钩子 ${data.event}${data.matcher !== undefined ? `（匹配 ${data.matcher}）` : ""} ｜ ${data.conclusion} ｜ ` +
+        `退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ${data.durationMs} 毫秒 ｜ ` +
+        `命令 ${data.command}`
+      );
+    }
   }
 }
 
@@ -172,7 +181,7 @@ export function renderRunReplay(
 }
 
 export interface ReplayCommandOptions {
-  // 工作区根（会话在 <root>/.pigeon/sessions/）
+  // 工作区根（会话在 <root>/.pigeon/state/sessions/）
   root: string;
   runId: string;
   // 缺省时跨会话扫描定位 Run；歧义（同 runId 出现在多个会话）响亮失败要求消歧
@@ -183,7 +192,7 @@ export interface ReplayCommandOptions {
 
 // 只读渲染入口：Run/会话不存在或歧义时响亮报错并列出可选项，绝不静默产出空报告
 export function runReplayCommand(options: ReplayCommandOptions): string {
-  const sessionsDir = join(options.root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(options.root);
   const renderOptions: ReplayRenderOptions = { withContent: options.withContent === true };
   if (options.sessionId !== undefined) {
     const view = loadSessionView(sessionsDir, options.sessionId);

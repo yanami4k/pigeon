@@ -5,6 +5,7 @@
 // 决策 286：未知命令列出的可用命令从命令表（command-table.ts）按当前会话生成，以后加命令不再漏。
 import { compactFocusOf } from "../application/compaction-text.ts";
 import { runGrantCommand } from "../application/grants.ts";
+import { MEMORY_COMMAND_USAGE } from "../application/memory-command.ts";
 import {
   SANDBOX_FORK_UNSUPPORTED,
   SANDBOX_RESUME_UNSUPPORTED,
@@ -17,11 +18,13 @@ import { runSessionListCommand } from "../application/session-list.ts";
 import type { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import type { LayeredGrantRule } from "../state/settings.ts";
 import {
   type CommandAvailability,
   unknownCommandText,
   WORKER_SESSION_ONLY,
 } from "./command-table.ts";
+import { renderHooksView, type TuiHooksFace } from "./hooks-view.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
 
 // 沙箱会话的命令面（与 shell.ts 的 TuiSandboxFace 同形）
@@ -29,11 +32,19 @@ interface CommandsSandboxFace {
   exportChanges(): Promise<string>;
 }
 
+// 决策 331：/memory 的命令面——查看两层记忆、按层编辑（编辑期间界面暂停，编辑器退出后恢复）
+export interface TuiMemoryFace {
+  view(): string;
+  edit(layer: "project" | "user"): Promise<string>;
+}
+
 // TUI 治理命令上下文（/grants /revoke /grants save；决策 030）
 export interface TuiGrantsContext {
   root: string;
   store: SessionGrantStore;
   configRules: readonly ConfigGrantRule[];
+  // 决策 325：放权规则连同所在层与层内序号（/grants 按层列出）
+  layeredRules?: readonly LayeredGrantRule[];
 }
 
 // 壳侧窄接口：命令分发需要的当前会话上下文与壳动作
@@ -56,6 +67,8 @@ export interface CommandsHost {
   takeCommand(workers: TuiWorkersFace, name: string | undefined): void;
   resumeCommand(arg: string | undefined): void;
   compactCommand(focus: string | undefined): void;
+  // 决策 340：/reload 重读设置（装配方给了重载入口才在场）
+  readonly reloadCommand?: ((args: readonly string[]) => void) | undefined;
   // 决策 294 B1：任务清单（排好的文字）；undefined = 清单没开；缺省 = /tasks 不可用
   tasks?(): string | undefined;
   // 决策 301：/agents 切换树形视图
@@ -63,6 +76,10 @@ export interface CommandsHost {
   // 决策 309：脚本编排的命令面（缺省 = /orchestrate 不可用）与以人的输入提交一条（空闲即发、运行中排队）
   scriptCommands?(): ScriptCommands | undefined;
   submitInput?(text: string): void;
+  // 决策 323、324：本会话的钩子面（/hooks 的只读清单）；缺省 = /hooks 不可用
+  hooksView?(): TuiHooksFace | undefined;
+  // 决策 331：/memory 的命令面（缺省 = /memory 不可用）
+  memory?(): TuiMemoryFace | undefined;
 }
 
 // 命令表判断可用性用的只读面
@@ -74,7 +91,10 @@ export function commandAvailability(host: CommandsHost): CommandAvailability {
     hasGrants: () => host.grants() !== undefined,
     inSandbox: () => host.sandbox?.() !== undefined,
     tasks: () => host.tasks !== undefined,
+    reload: () => host.reloadCommand !== undefined,
+    hooks: () => host.hooksView?.() !== undefined,
     scripts: () => host.scriptCommands?.() !== undefined,
+    memory: () => host.memory?.() !== undefined,
     workers: () => {
       const workers = host.workers();
       return workers === undefined
@@ -198,7 +218,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
     // 决策 294 B1：/tasks 查看任务清单（完整的清单显示留给编排二段）
     if (tokens[0] === "tasks" && host.tasks !== undefined) {
       host.addSystem(
-        host.tasks() ?? "任务清单没有开（.pigeon/orchestration.json 的 taskList 为 false）。"
+        host.tasks() ?? "任务清单没有开（设置 orchestration 一节的 taskList 为 false）。"
       );
       return;
     }
@@ -235,9 +255,50 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
       host.submitInput(commandInputText(task));
       return;
     }
+    // 决策 331：/memory 查看两层记忆；/memory edit project|user 用编辑器修改一层（存盘后校验，不合格保留原内容）
+    const memory = host.memory?.();
+    if (tokens[0] === "memory" && memory !== undefined) {
+      if (tokens.length === 1) {
+        host.addSystem(memory.view());
+        return;
+      }
+      const layer = tokens[2];
+      if (
+        tokens[1] === "edit" &&
+        tokens.length === 3 &&
+        (layer === "project" || layer === "user")
+      ) {
+        void memory.edit(layer).then(
+          (text) => {
+            host.addSystem(text);
+            host.render();
+          },
+          (error: unknown) => {
+            host.addSystem(`命令失败：${error instanceof Error ? error.message : String(error)}`);
+            host.render();
+          }
+        );
+        return;
+      }
+      host.addSystem(MEMORY_COMMAND_USAGE);
+      return;
+    }
     // 决策 189：/compact [重点] 手动压缩（重点作为摘要的附加说明）
     if (tokens[0] === "compact") {
       host.compactCommand(compactFocusOf(value));
+      return;
+    }
+    // 决策 323、324：/hooks 只读列出生效的钩子与停用开关（清单随会话冻结，清单与开关取自钩子面）
+    if (tokens[0] === "hooks") {
+      const hooks = host.hooksView?.();
+      if (hooks !== undefined) {
+        host.addSystem(renderHooksView(hooks));
+        return;
+      }
+    }
+    // 决策 340：/reload 重读设置（结果与待确认条目写进消息区）
+    if (tokens[0] === "reload" && host.reloadCommand !== undefined) {
+      host.reloadCommand(tokens.slice(1));
       return;
     }
     // S4：/resume <sessionId> 冷恢复对账 + 换绑续跑（异步流程，见 resume-view.ts）
@@ -251,6 +312,7 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         root: grants.root,
         store: grants.store,
         configRules: grants.configRules,
+        ...(grants.layeredRules !== undefined ? { layeredRules: grants.layeredRules } : {}),
         sessionId: host.sessionId(),
         write: (text) => {
           host.addSystem(text.trimEnd());

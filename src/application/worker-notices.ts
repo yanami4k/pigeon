@@ -81,6 +81,11 @@ export class WorkerNotices {
     this.#deliver(text);
   }
 
+  // 为某个 worker 递一段通知并记下键（续接时补递之前的运行没递出的完成通知）：等待工具交回它的结果时照常撤回或只交回一句
+  postFor(id: SessionId, text: string): void {
+    this.#keys.set(id, this.#deliver(text));
+  }
+
   // 决策 309–313：程序在后台做、结束时发一条的（脚本编排）——开始时登记，发出前算作还有未交回的结果（drainWorkers 等它）；
   // 返回发出的函数，文字原样递出（前缀由调用方给），只发一次
   hold(): (text: string) => void {

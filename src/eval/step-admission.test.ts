@@ -145,7 +145,7 @@ function lanes(g: ModelGateway, limits: LimitController) {
           signal: abortSignal,
         });
         await r.text();
-        return { status: "done", turns: 1, usage: ZERO_USAGE, wallMs: 0, repair: null };
+        return { status: "done", turns: 1, usage: ZERO_USAGE, wallMs: 0 };
       } catch {
         events.push(`aborted ${lane}`);
         return {
@@ -153,7 +153,6 @@ function lanes(g: ModelGateway, limits: LimitController) {
           turns: 0,
           usage: ZERO_USAGE,
           wallMs: 0,
-          repair: null,
           interrupted: "按步中止",
         };
       } finally {

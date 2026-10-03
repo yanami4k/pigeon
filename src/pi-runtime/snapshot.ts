@@ -2,18 +2,13 @@
 // 上游 pi-agent-core 在每个 Run 开始时自行拷贝 context 与 loop config（agent.js createContextSnapshot /
 // createLoopConfig），Adapter 在其之上再冻结一份治理侧快照，作为重建等价 Run 的依据。
 import { type Static, Type } from "typebox";
-import {
-  AttemptBudgetSchema,
-  RepairRoundsSchema,
-  RetryOnFailSchema,
-  VerifyConfigSchema,
-} from "../state/attempt-config.ts";
+import { AttemptBudgetSchema } from "../state/attempt-config.ts";
 import {
   MemoryManifestEntrySchema,
   SkillManifestEntrySchema,
   StructuredMemoryManifestSchema,
 } from "../state/injection-manifest.ts";
-import { MemoryReviewTagSchema, PushedMemoryManifestSchema } from "../state/learned-memory.ts";
+import { PushedMemoryLayersSchema } from "../state/learned-memory.ts";
 import { ThinkingLevelSchema } from "../state/runtime-events.ts";
 import { ApprovalModeSchema } from "../tools/policy.ts";
 
@@ -28,14 +23,18 @@ import { ApprovalModeSchema } from "../tools/policy.ts";
 // v9（M9）：model 段增加采样温度 temperature（评测固定采样；缺省 = 未设，由 provider 决定）与"请求了但未生效"的
 // temperatureIgnored（推理开启时上游不把温度交给 provider），context 段增加任务源给的工作方式指令 taskDirective（原文，
 // 已拼进 systemPrompt；单列是为了回放与冻结项核对能取到原文）。v9 尚未入库，三个字段一次加齐、均可缺省
-// v10（决策 142 / 143）：顶层增加回炉轮数 repairRounds（只在开启时在场；按会话冻结）
+// v10（决策 142 / 143）：顶层增加回炉轮数 repairRounds（只在开启时在场；按会话冻结）——v14 已随决策 322 删除
 // v11（决策 137）：删除 v6 引入的顶层审阅配置 review（第一版学习闭环退役）。对象非严格，
 // 旧快照里的该字段读取时忽略；版本推进只为让版本号对应形状
 // v12（决策 134 / 157 / 159）：顶层增加结构化记忆的开局留痕 structuredMemory（开关、挑选方式、开局给了哪几条；
 // 段落本身已拼进 systemPrompt），verify 增可选命名分步——均可缺省
 // v13（决策 191、192、207）：顶层增加推送的记忆 learnedMemory（开局冻结的 MEMORY.md 身份，段落本身已拼进 systemPrompt）
 // 与复盘标记 memoryReview（复盘会话的种类与模板版本；不叫 review，免得与 v11 删掉的旧审阅字段同名，旧快照照常可读）——均可缺省
-export const INJECTION_SNAPSHOT_VERSION = 13;
+// v14（决策 322）：顶层删除验证命令 verify、失败自动分叉重试 retryOnFail 与回炉轮数 repairRounds（验证门、回炉与
+// 失败自动分叉重试整体退役）；并随 331、332：删除复盘标记 memoryReview（复盘随之删除）、推送的记忆由单层的
+// learnedMemory 改为两层的 pushedMemory（各层身份与记忆文字的版本）。对象非严格，旧快照里的这些字段读取时忽略；
+// 会话记录里旧 Run 开始条目的两个旧字段照常可读，见 session-entries.ts
+export const INJECTION_SNAPSHOT_VERSION = 14;
 
 // 逐调用判定语义在 src/tools/policy.ts；此处冻结形状。allow 约束广告给模型的工具集，
 // deny 清单绝对（任何模式精确匹配即拒）；approvalMode 决定非 deny 工具走人工批准还是批发授权。
@@ -74,12 +73,12 @@ export const InjectionSnapshotSchema = Type.Object({
     advertised: Type.Array(Type.String()),
   }),
   context: Type.Object({
-    // 会话开始时拼好的完整 system prompt（基础提示 + 常驻 Memory 段 + Skill 目录段），冻结后不再变
+    // 会话开始时拼好的完整 system prompt（基础提示 + 人写的说明段 + 推送记忆段 + Skill 目录段），冻结后不再变
     systemPrompt: Type.String(),
     // 任务源给的工作方式指令原文（已追加在 systemPrompt 末尾；缺省 = 没有）
     taskDirective: Type.Optional(Type.String({ minLength: 1 })),
   }),
-  // 常驻 Memory 冻结清单（决策 042）：注入走 system prompt 追加段，不走 transformContext；
+  // 人写的说明冻结清单（决策 330；之前为常驻 Memory，决策 042）：注入走 system prompt 追加段，不走 transformContext；
   // transformContext 留给 M10 外部 Provider 的逐调用动态召回
   memory: Type.Array(MemoryManifestEntrySchema),
   // Skill Catalog 冻结清单（决策 043）：每个 Skill 目录下全部文件的哈希清单，load_skill 读取时比对
@@ -88,20 +87,14 @@ export const InjectionSnapshotSchema = Type.Object({
   createdAt: Type.Integer({ minimum: 0 }),
   // 决策 137：后台审阅配置字段（v6 引入）在 v11 删除。本对象非严格（未设 additionalProperties: false），
   // 旧快照里的 review 字段读取时忽略
-  // 会话级验证命令（M7，决策 071）：尝试收尾后由程序在工作区独立执行；未配置缺省（标签为未知）
-  verify: Type.Optional(VerifyConfigSchema),
-  // 失败自动分叉重试次数（M7，决策 079）：缺省即 0（关闭）
-  retryOnFail: Type.Optional(RetryOnFailSchema),
+  // 决策 322：verify、retryOnFail、repairRounds 三字段已删除（v7–v13 的字段说明见上文版本史）。本对象非严格
+  // （未设 additionalProperties: false），旧快照里的这三个字段读取时忽略
   // 本次尝试的预算（M8，决策 087）：回放沿用它，不得放宽；各项缺省即该项不设限
   budget: Type.Optional(AttemptBudgetSchema),
-  // 回炉轮数（决策 142 / 143）：只在开启时在场；缺省即关闭
-  repairRounds: Type.Optional(RepairRoundsSchema),
   // 结构化记忆的开局留痕（决策 134 / 157）：决策 174 删除结构化记忆后已停写，只为旧会话与 v12 快照照常可读而保留
   structuredMemory: Type.Optional(StructuredMemoryManifestSchema),
-  // 推送的记忆（决策 191）：推送开着时在场，记开局冻结的 MEMORY.md 身份与上限；与常驻 Memory 的清单分开
-  learnedMemory: Type.Optional(PushedMemoryManifestSchema),
-  // 复盘会话（决策 175、192、207）：复盘种类（收尾 / 压缩前）与模板版本；普通会话缺省
-  memoryReview: Type.Optional(MemoryReviewTagSchema),
+  // 推送的记忆（决策 332）：推送开着时在场，记开局冻结的两层记忆的身份、上限与记忆文字的版本
+  pushedMemory: Type.Optional(PushedMemoryLayersSchema),
 });
 
 export type InjectionSnapshot = Static<typeof InjectionSnapshotSchema>;

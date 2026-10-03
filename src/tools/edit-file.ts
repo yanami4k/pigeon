@@ -121,7 +121,8 @@ export function createEditFileTool(
 // 读 + 围栏 + 快照预检 + 内存落地（零写副作用）；任一编辑失败整单抛错，文件零改动。
 // execute 与 preview 共享同一预检路径，保证"预览所见 = 执行所得"。
 async function planEdits(host: WorkspaceHost, args: EditFileParams) {
-  const resolvedPath = await host.resolveExisting(args.path);
+  // 决策 334：要写的文件本身是符号链接即拒写
+  const resolvedPath = await host.resolveForWrite(args.path);
   if (!(await host.isFile(resolvedPath))) {
     throw new EditFileError(`不是常规文件：${args.path}`);
   }

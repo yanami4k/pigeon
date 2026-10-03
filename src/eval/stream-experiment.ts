@@ -5,10 +5,8 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { DEFAULT_REVIEW_BUDGET } from "../application/memory-review.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
-import { DEFAULT_MEMORY_LIMIT_CHARS } from "../memory/learned.ts";
-import { REVIEW_TEMPLATE_VERSION } from "../memory/review-text.ts";
+import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_THINKING_LEVEL,
@@ -17,6 +15,7 @@ import {
   gatewayStreamFn,
   resolveCompactionConfig,
 } from "../pi-runtime/index.ts";
+import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import {
   assertConcurrencyFits,
@@ -127,11 +126,10 @@ export function streamPigeonOptions(
   return { ...pigeon, yolo: true };
 }
 
-// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限、压缩配置、记忆上限与复盘上限记运行时的
-// 缺省值（off、16,384、产品缺省的压缩配置、12,000 字符、40 轮与 15 分钟），不记 null；温度没给即由服务端决定，记 null；
-// 复盘模板版本记当前的 v1
+// Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限、压缩配置与记忆上限记运行时的
+// 缺省值（off、16,384、产品缺省的压缩配置、项目级记忆上限 4,000 字符），不记 null；温度没给即由服务端决定，记 null。
+// 复盘随决策 331 删除，身份头不再记复盘模板版本与复盘上限，改记记忆文字的版本（之前写下的身份头与之不同，续跑即判为不同）
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
-  const reviewBudget = pigeon.reviewBudget ?? DEFAULT_REVIEW_BUDGET;
   return {
     provider: pigeon.provider ?? GATEWAY_PROVIDER,
     modelId: pigeon.modelId ?? modelId,
@@ -139,9 +137,9 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
     maxOutputTokens: pigeon.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
     compaction: resolveCompactionConfig(pigeon.compaction),
-    memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMIT_CHARS,
-    reviewTemplate: REVIEW_TEMPLATE_VERSION,
-    reviewBudget: { maxTurns: reviewBudget.maxTurns, wallClockMs: reviewBudget.wallClockMs },
+    memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMITS.project,
+    // 决策 328、332：推送段的文字版本（文字一改即换条件，续跑判为不同）
+    memoryTextVersion: MEMORY_TEXT_VERSION,
     // 决策 265：主 agent 派 worker 在各条件里的实际生效值
     spawnWorkers: STREAM_SPAWN_WORKERS,
     // 决策 291 与 265 的先例：联网工具在各条件里的实际生效值（关）
@@ -370,11 +368,6 @@ async function runStreamExperimentLocked(
       agents.pigeon = pigeonStepAgent({
         ...streamPigeonOptions(options.pigeon),
         docker,
-        // 回炉验证前还原人写的测试与测试辅助文件（按这条流的运行方式归类）
-        humanTestFile: (file) => {
-          const kind = runtime.profile.classifyFile(file);
-          return kind === "test" || kind === "testaux";
-        },
         streamFnFor: (baseUrl) => gatewayStreamFn(baseUrl, modelId),
         // 限额信号一到即中止在途的一步（反正要作废重做）
         limits,

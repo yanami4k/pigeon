@@ -20,7 +20,6 @@
 - memory_chars、memory_bytes、memory_entries：每步开工时 MEMORY.md 条目部分的字符数、字节数与条目数
 - memory_chars_after、memory_entries_after：每步复盘结束后的字符数与条目数（最后一步的即该遍结束值）
 - hit_step_budget、hit_review_budget：是否撞了每步 / 复盘的上限（1 / 0，未知为 NaN）
-- verify_tool_faults：验证工具故障的次数
 - baseline_unavailable：这道题无法建立两类用例的基线（1 / 0）：排除在主判据之外并单独计数
 - 其余以 mem_ 或 search_ 开头的列为记忆使用与检索的计数（取自会话文件）
 """
@@ -63,7 +62,6 @@ NUMERIC_COLUMNS = (
     "memory_entries",
     "hit_step_budget",
     "hit_review_budget",
-    "verify_tool_faults",
     "baseline_unavailable",
 )
 

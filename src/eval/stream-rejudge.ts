@@ -1,14 +1,15 @@
 // 按保存的改动重判（决策 270 ①、316）：不重跑 agent，只把每行存下的改动打回起点，照正式跑同一判题路径再判一次，取完整的
-// 逐用例结果——正式结果行里失败用例只记前 FAILED_CASES_CAP 条，按用例剔除后重算（316 的敏感性分析）要知道每条的结果。
+// 逐用例结果，供按用例剔除后重算（316 的敏感性分析）使用。
 // 判题路径与 runStep 相同：新开干净环境检出人在该步之前的代码，写入人在该步的环境文件并切依赖，打上保存的改动（即 agent
 // 开工到收工之间的树差），恢复被 agent 动过的测试与测试辅助文件（restoreTests）、判题前清理（cleanForJudging）、再切依赖，
 // 同步人在该步的全部测试后跑一次（judgeCases，与 judgeFull 共用），按预计算的两类用例计分。
-// 一致性核对是硬门槛：重判的计数与失败用例（前 FAILED_CASES_CAP 条）与原结果行逐项一致，这一行的逐用例结果才可用。
+// 一致性核对是硬门槛：重判的计数与失败用例与原结果行逐项一致，这一行的逐用例结果才可用
+// （决策 327 起失败用例全记；此前的旧结果行只记前 20 条并带 truncated 标记，对旧行只比前缀）。
 // 结果另存到输出目录下的 rejudge/cases.jsonl，原结果行一字不改；同一文件已有的行跳过，重跑即续做。
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { FAILED_CASES_CAP, judgeStep, type StepJudging } from "./stream-classes.ts";
+import { judgeStep, type StepJudging } from "./stream-classes.ts";
 import { imageIdentityOf, readManifest } from "./stream-experiment.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
@@ -51,12 +52,12 @@ export interface RejudgeLine {
   original: Omit<StepJudging, "failedCases"> & { failedCases: StepJudging["failedCases"] };
 }
 
-// 重判与原结果行逐项比对：两类计数、得分、做成、时过时不过数，以及失败用例的前 cap 条与是否截断
-export function compareJudging(
-  original: StepJudging,
-  rejudged: StepJudging,
-  cap = FAILED_CASES_CAP
-): string[] {
+// 重判与原结果行逐项比对：两类计数、得分、做成、时过时不过数与失败用例。
+// 327 起失败用例全记、没有截断标记；旧结果行可能带 truncated——旧行截断过即只比它记下的前缀，否则全长逐项比
+export function compareJudging(original: StepJudging, rejudged: StepJudging): string[] {
+  // 旧结果行的截断标记（327 起不再写）：以 in 窄化读取
+  const legacyTruncated =
+    "truncated" in original.failedCases && original.failedCases.truncated === true;
   const out: string[] = [];
   const same = (what: string, a: unknown, b: unknown) => {
     if (JSON.stringify(a) !== JSON.stringify(b))
@@ -72,17 +73,16 @@ export function compareJudging(
   same(
     "要做到的失败用例",
     original.failedCases.failToPass,
-    rejudged.failedCases.failToPass.slice(0, cap)
+    legacyTruncated
+      ? rejudged.failedCases.failToPass.slice(0, original.failedCases.failToPass.length)
+      : rejudged.failedCases.failToPass
   );
   same(
     "不许挂的失败用例",
     original.failedCases.passToPass,
-    rejudged.failedCases.passToPass.slice(0, cap)
-  );
-  same(
-    "失败用例截断",
-    original.failedCases.truncated,
-    rejudged.failedCases.failToPass.length > cap || rejudged.failedCases.passToPass.length > cap
+    legacyTruncated
+      ? rejudged.failedCases.passToPass.slice(0, original.failedCases.passToPass.length)
+      : rejudged.failedCases.passToPass
   );
   return out;
 }
@@ -179,7 +179,7 @@ export async function rejudgeRow(
     await syncEnv(options, ws, step.commit);
     const run = await judgeCases(options, ws, step);
     return {
-      judging: judgeStep(classes, run.cases, Number.POSITIVE_INFINITY),
+      judging: judgeStep(classes, run.cases),
       complete: run.complete,
     };
   } finally {

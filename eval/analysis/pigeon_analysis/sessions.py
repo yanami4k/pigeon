@@ -1,8 +1,9 @@
 """会话文件里的记忆使用与检索计数（分析计划第 3 节"记忆使用"与"效率"；决策 261）。
 
 结果行不记这些计数，来源是跑批输出目录里保留的会话文件：
-- 作业目录 streams/tasks-<条件>-<遍次>/ 即该作业的治理根；其下 sessions-<步序>.json 为该步完成时 .pigeon/sessions 下全部
-  会话文件的清单（相对会话根、分隔符为 /、逐步累积）。某步的会话 = 该步清单减去同一作业上一个完成步的清单；
+- 作业目录 streams/tasks-<条件>-<遍次>/ 即该作业的治理根；其下 sessions-<步序>.json 为该步完成时会话根下全部
+  会话文件的清单（相对会话根、分隔符为 /、逐步累积）。会话根为 .pigeon/state/sessions（决策 325 起的布局）；
+  此前的布局（正式跑的数据）为 .pigeon/sessions，两种都能读：新位置在即用新位置，否则用旧位置。某步的会话 = 该步清单减去同一作业上一个完成步的清单；
   作废尝试的会话已被跑批器移出治理根，不在清单里。
 - 会话文件为 pi v4 JSONL：首行文件头，其余每行一个条目；消息条目 type 为 message，自定义条目 type 为 custom。
   复盘会话由干活的会话分叉而来，开头带着干活会话的历史副本；其自己的部分从带 memoryReview 的 pigeon.run-start 条目开始，
@@ -20,6 +21,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 RUN_START = "pigeon.run-start"
+
+
+def sessions_root(job: Path) -> Path:
+    """作业的会话根：决策 325 起在 .pigeon/state/sessions，此前在 .pigeon/sessions（正式跑的数据是旧布局）。"""
+    current = job / ".pigeon" / "state" / "sessions"
+    return current if current.is_dir() else job / ".pigeon" / "sessions"
 UPDATE_MEMORY = "update_memory"
 READ_FILE = "read_file"
 SEARCH_SESSIONS = "search_sessions"
@@ -208,7 +215,8 @@ def load_session_metrics(run_dir: Path, rows: Iterable[dict[str, Any]], cell_of:
             listing = set(_read_json(job / f"sessions-{seq}.json", "会话清单"))
             new = sorted(listing - before)
             before = listing
-            sessions = [read_session(job / ".pigeon" / "sessions" / rel) for rel in new]
+            root = sessions_root(job)
+            sessions = [read_session(root / rel) for rel in new]
             files += len(sessions)
             refs: set[str] = set()
             if push:

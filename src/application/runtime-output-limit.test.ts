@@ -9,7 +9,7 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
 function recording() {
@@ -39,11 +39,11 @@ for (const [label, maxOutputTokens, expected] of [
         yolo: true,
         homeDir: home,
         skillRoots: [],
-        memoryRoots: [],
+        agentsMd: false,
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       });
       assert.deepEqual(seen, [expected]);
-      const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), result.sessionId);
+      const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), result.sessionId);
       assert.ok(loaded !== undefined, "会话存储里应有本会话");
       assert.equal(loaded.view.runs.length, 1);
       assert.equal(loaded.view.runs[0]?.start.model.maxOutputTokens, expected);
@@ -70,7 +70,7 @@ test("输出上限装配：注入快照 model 段写入 maxOutputTokens（缺省
         modelId: "fake-model-1",
         homeDir: root,
         skillRoots: [],
-        memoryRoots: [],
+        agentsMd: false,
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       });
       try {

@@ -1,10 +1,11 @@
 // worker 工作树管理（M5.5 S1，决策 040）：隔离工作区第一版为 git 工作树。
-// 目录 <治理根>/.pigeon/worktrees/<sessionId>-<name>（带会话编号：两个窗口的同名 worker 不撞目录），
+// 目录 <治理根>/.pigeon/state/worktrees/<sessionId>-<name>（带会话编号：两个窗口的同名 worker 不撞目录），
 // 分支 pigeon/<name>（同名分支已存在时由 git 响亮拒绝）。git 经参数数组直接调用，不经 shell；
 // 名字先按白名单校验再进参数，杜绝被当成选项或路径穿越。合并由人用 git 完成，本模块不合并。
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { SessionId } from "../state/ids.ts";
+import { worktreesDirOf } from "../state/paths.ts";
 
 export class WorktreeError extends Error {}
 
@@ -38,7 +39,7 @@ export function worktreePathFor(
   sessionId: SessionId,
   name: string
 ): string {
-  return join(governanceRoot, ".pigeon", "worktrees", `${sessionId}-${name}`);
+  return join(worktreesDirOf(governanceRoot), `${sessionId}-${name}`);
 }
 
 export function worktreeBranchFor(name: string): string {
@@ -56,7 +57,7 @@ export function workerStartRefFor(name: string): string {
 export interface AddWorktreeInput {
   // 主仓库根：工作树与分支建在它上面
   repoRoot: string;
-  // M6.5 S2（决策 057）：工作树目录所在的治理根（放在其 .pigeon/worktrees 下）；缺省同仓库根（主会话派 worker）。
+  // M6.5 S2（决策 057）：工作树目录所在的治理根（放在其 .pigeon/state/worktrees 下）；缺省同仓库根（主会话派 worker）。
   // Eval 的治理根是输出目录，与仓库根分开
   governanceRoot?: string;
   sessionId: SessionId;

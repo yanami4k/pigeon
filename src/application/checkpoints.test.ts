@@ -80,7 +80,7 @@ test("写工具改变文件后生成快照，快照条目夹在发起调用的�
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(loaded !== undefined);
     const entries = loaded.main;
     const indexes = entries.flatMap((entry, index) => (isCheckpointEntry(entry) ? [index] : []));
@@ -152,7 +152,7 @@ test("非 git 工作区：不打快照，运行照常", async () => {
     } finally {
       await disposeRuntime(opened.bundle);
     }
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(loaded !== undefined);
     assert.equal(loaded.view.runs.length, 1);
     assert.equal(loaded.main.filter((entry) => isCheckpointEntry(entry)).length, 0);

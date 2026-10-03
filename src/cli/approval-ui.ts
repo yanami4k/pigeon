@@ -17,6 +17,7 @@ import {
   grantScopeFor,
   hostGrantKeyLabel,
   offersDirectoryGrant,
+  protectedPathLine,
 } from "../approvals/handler.ts";
 import type { AskFn, WriteFn } from "./repl.ts";
 
@@ -39,6 +40,10 @@ export function createCliApprovalHandler(
       write(`${source}\n`);
     }
     write(`工具：${request.toolName}\n`);
+    const protectedLine = protectedPathLine(request);
+    if (protectedLine !== undefined) {
+      write(`${protectedLine}\n`);
+    }
     const commandLine = execCommandLine(request);
     if (commandLine !== undefined) {
       write(`${commandLine}\n`);
@@ -53,8 +58,9 @@ export function createCliApprovalHandler(
     }
     // [d] 仅在调用带 path 参数时提供（决策 3a：目录限定的前提是调用可定位目录）；exec 档无 [d]；
     // 不能建目录放权的会话（日常沙箱，决策 253）同样不提供
+    // 决策 326 ①：受保护路径的请示只有批准一次或拒绝，不提供放权键
     const prompt =
-      grants === undefined
+      grants === undefined || request.protectedPath !== undefined
         ? "批准执行？[y/N] "
         : request.host !== undefined
           ? `批准执行？[y] 批准一次 / [n] 拒绝 / ${hostGrantKeyLabel(request)} `
@@ -65,7 +71,7 @@ export function createCliApprovalHandler(
               : "批准执行？[y] 批准一次 / [n] 拒绝 / [a] 本会话允许 ";
     const answer = await ask(prompt);
     const normalized = answer?.trim().toLowerCase() ?? "";
-    if (normalized === "a" || normalized === "d") {
+    if ((normalized === "a" || normalized === "d") && request.protectedPath === undefined) {
       if (grants === undefined) {
         // 无放权通道时 a/d 不具语义——按拒绝流程走（理由可空，由 Adapter 落默认文案）
         const reasonInput = await ask("拒绝理由（可空，将逐字反馈给模型）：");

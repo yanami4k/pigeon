@@ -2,8 +2,8 @@
 // worker 结束时一条通知进主 agent 的下一轮（worker-notices.ts），需要结果才能往下做时用 wait_workers 等（orchestration-tools.ts）。
 // 执行模式为可并行，一次回复里多次调用即连续派出。工具说明、参数说明与各情形的返回文字按定稿原文（含 297 起的改写），
 // 数值取自配置（取缺省时逐字即定稿原文）。
-// - 底层只用会话编排器现有的派出（workers.ts），不另写一套 worker 生命周期；attempts 走现有的并行同任务派发与验证标签
-//   （attempt-group.ts），在后台跑，全部结束并验证后发一条带各份标签的通知。
+// - 底层只用会话编排器现有的派出（workers.ts），不另写一套 worker 生命周期；attempts 走现有的并行同任务派发
+//   （attempt-group.ts），在后台跑，全部结束后发一条交回各份改动与摘要的通知（决策 322：不再贴验证标签，由主 agent 或人比较）。
 // - 额度（300）：同时在跑的上限由编排器排队实现（人派的一并计算）；不设总数上限，给了 --worker-limit（或配置 maxWorkersPerRun）
 //   时一次运行里 agent 派的个数在这里计，满了按定稿文字拒绝；本次运行的总额度用完时拒绝再派（正在跑的由额度的持有方停掉）。
 // - worker 在后台跑，主 agent 这一轮结束、被中断都不影响它们；结果与工作树跨轮保留，可稍后收回（294 ⑤）。
@@ -23,7 +23,6 @@ import {
   DEFAULT_ORCHESTRATION_SETTINGS,
   type OrchestrationSettings,
 } from "../state/orchestration-config.ts";
-import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
@@ -133,7 +132,7 @@ export function spawnWorkerParamsSchema(taskList: boolean) {
         minimum: 2,
         maximum: 4,
         description:
-          "同一任务并行派出的份数；给了即各做一份，做完后按验证命令给每份标上通过、未通过或未知，全部交回",
+          "同一任务并行派出的份数；给了即各做一份，全部做完后交回各份的改动与摘要，由你比较",
       })
     ),
     label: Type.Optional(Type.String({ description: labelDescription(taskList) })),
@@ -149,7 +148,7 @@ export const SPAWN_WORKER_TEXTS = {
       w.label !== undefined ? `，标签 ${w.label}` : ""
     }。它结束时会有通知；需要结果才能往下做时用 ${WAIT_WORKERS_TOOL} 等。`,
   attemptsSpawned: (names: readonly string[]) =>
-    `已并行派出 ${names.length} 份：${names.join("、")}。全部结束并验证后会有一条通知，给出每份的验证标签。`,
+    `已并行派出 ${names.length} 份：${names.join("、")}。全部结束后会有一条通知，交回各份的改动与摘要。`,
   completed: (w: WorkerFacts) =>
     `worker ${w.name}（${w.role}）已完成。分支：${w.branch}。改动的文件（${w.files.length}）：${fileList(w.files)}。摘要：${w.summary}`,
   truncated: (sessionId: string) => `（摘要已截断，全文在 worker 会话 ${sessionId} 里）`,
@@ -171,7 +170,7 @@ export const SPAWN_WORKER_TEXTS = {
     `worker ${w.name}（${w.role}）停在等审批：要${action}，${
       why.kind === "timeout" ? `${why.minutes} 分钟内无人批准` : "无人值守运行没有人审批"
     }。分支 ${w.branch} 上有已做的部分；人补批后它可以接着做。`,
-  attempt: (index: number, verdict: "通过" | "未通过" | "未知") => `第 ${index} 份（${verdict}）：`,
+  attempt: (index: number) => `第 ${index} 份：`,
   // 多份尝试里已由 wait_workers 交回过的一份
   attemptClaimed: (name: string) => `worker ${name} 的结果已由 ${WAIT_WORKERS_TOOL} 交回。`,
   spawnLimit: (max: number) =>
@@ -261,8 +260,6 @@ export interface SpawnAttemptsRequest {
 export interface SpawnAttemptsResult {
   // 按派出顺序
   outcomes: WorkerOutcome[];
-  // 会话号 → 由会话现算的标签（按验证命令；未配置即未知）
-  labels: ReadonlyMap<string, OutcomeLabel>;
 }
 
 // 工具执行时要用的会话侧能力（装配方在编排器建好后绑定）
@@ -306,17 +303,24 @@ export interface SpawnWorkerDetails {
   rejected?: "not-git" | "unknown-role" | "empty-task" | "spawn-limit" | "budget" | "unbound";
 }
 
-const VERDICT_TEXT: Readonly<Record<OutcomeLabel, "通过" | "未通过" | "未知">> = {
-  Passed: "通过",
-  Failed: "未通过",
-  Unknown: "未知",
-  Abandoned: "未知",
-  InfrastructureError: "未知",
-};
-
 // 一个 worker 收尾后交回的文字（通知与多份尝试的汇总用）。决策 279（271 修订）：有工作树的 worker 另起一行写明起点快照与只取其
-// 自身改动的取用方式（额度用完的文字不加）。时限取自设定（等审批的文字要写）
+// 自身改动的取用方式（额度用完的文字不加）。时限取自设定（等审批的文字要写）。
+// 决策 322：收尾钩子的输出（SubagentStop 的拦截理由与补充上下文）附在末尾
 export function workerOutcomeText(
+  outcome: WorkerOutcome,
+  budgetExhausted = false,
+  settings: Pick<
+    SpawnWorkerSettings,
+    "approvalTimeoutMs" | "stallMs"
+  > = DEFAULT_SPAWN_WORKER_SETTINGS
+): string {
+  const text = workerOutcomeTextBase(outcome, budgetExhausted, settings);
+  const outputs = outcome.hookOutputs ?? [];
+  if (outputs.length === 0) return text;
+  return `${text}\n钩子输出：\n${outputs.map((line) => `  ${line}`).join("\n")}`;
+}
+
+function workerOutcomeTextBase(
   outcome: WorkerOutcome,
   budgetExhausted = false,
   settings: Pick<
@@ -388,7 +392,12 @@ export function workerNoticeText(
   > = DEFAULT_SPAWN_WORKER_SETTINGS
 ): string {
   const text = workerOutcomeText(outcome, budgetExhausted, settings);
-  return outcome.label !== undefined ? `标签 ${outcome.label}：${text}` : text;
+  return `${outcome.label !== undefined ? `标签 ${outcome.label}：${text}` : text}\n${workerNoticeMarker(outcome.sessionId)}`;
+}
+
+// 完成通知里可识别的 worker 会话号（权威链审计 ③）：续接时据主分支上的使用者消息里有没有它判定通知是否已递出
+export function workerNoticeMarker(sessionId: string): string {
+  return `（worker 会话 ${sessionId}）`;
 }
 
 function reply(text: string, details: SpawnWorkerDetails): PigeonToolResult<SpawnWorkerDetails> {
@@ -494,7 +503,7 @@ export function createSpawnWorkerTool(
   };
 }
 
-// 多份尝试（069 / 071）：并行同任务派发在后台跑；派出即返回名单，全部结束并验证后发一条带各份标签的通知
+// 多份尝试（069；322 起不再贴验证标签）：并行同任务派发在后台跑；派出即返回名单，全部结束后发一条交回各份的通知
 async function spawnAttempts(
   host: SpawnWorkerHost,
   settings: SpawnWorkerSettings,
@@ -532,13 +541,11 @@ async function spawnAttempts(
       const text = result.outcomes
         .map(
           (outcome, index) =>
-            SPAWN_WORKER_TEXTS.attempt(
-              index + 1,
-              VERDICT_TEXT[result.labels.get(outcome.sessionId) ?? "Unknown"]
-            ) +
+            SPAWN_WORKER_TEXTS.attempt(index + 1) +
             (host.notices?.claimedInGroup(outcome.sessionId) === true
               ? SPAWN_WORKER_TEXTS.attemptClaimed(outcome.name)
-              : workerOutcomeText(outcome, host.budget.exhausted, settings))
+              : workerOutcomeText(outcome, host.budget.exhausted, settings)) +
+            `\n${workerNoticeMarker(outcome.sessionId)}`
         )
         .join("\n\n");
       host.notices?.postGroup(spawnedIds, label !== undefined ? `标签 ${label}：${text}` : text);
@@ -546,7 +553,8 @@ async function spawnAttempts(
     (error: unknown) => {
       host.notices?.postGroup(
         spawnedIds,
-        `多份尝试收尾异常：${error instanceof Error ? error.message : String(error)}`
+        `多份尝试收尾异常：${error instanceof Error ? error.message : String(error)}\n` +
+          spawnedIds.map(workerNoticeMarker).join("")
       );
     }
   );

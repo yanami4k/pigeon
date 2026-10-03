@@ -80,7 +80,7 @@ async function scriptSession(
   replies: Parameters<typeof createFakeStreamFn>[0]["replies"],
   sessionId: SessionId = newSessionId()
 ): Promise<{ sessionId: SessionId; runId: RunId }> {
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const existing = locateSessionFile(sessionsDir, sessionId);
   const store = openSessionStoreWriter({
     sessionsRoot: sessionsDir,
@@ -190,7 +190,7 @@ test("trace 报告：大参数截断，超长内容不完整外泄", () =>
 
 test("trace 报告：有开始无收尾的 Run 徽章为未知，会话头计崩溃残留；未配对的工具调用标无结果", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir });
     session.startRun({ task: "改" });
     session.assistant({ toolCalls: [{ name: "edit_file", args: { path: "a.ts" } }] });
@@ -206,7 +206,7 @@ test("trace 报告：有开始无收尾的 Run 徽章为未知，会话头计崩
 
 test("trace 报告：撞上限、上游合成失败、代码快照与验证记录照实呈现", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir, cwd: root });
     session.startRun({ task: "改" });
     session.toolTurn({ name: "edit_file", args: { path: "a.ts" }, checkpoint: true });
@@ -235,7 +235,7 @@ test("trace 报告：撞上限、上游合成失败、代码快照与验证记�
 
 test("trace 报告：空回复异常结束分类为业务失败；验证记录里工具故障的步单列（决策 170 ② ③）", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const session = createFixtureSession({ sessionsDir, cwd: root });
     session.startRun({ task: "改" });
     session.assistant({ text: "" });
@@ -260,7 +260,7 @@ test("trace 报告：空回复异常结束分类为业务失败；验证记录�
 test("trace 命令只读：正被写入（末行撕裂）的会话照常出报告，全部会话文件字节与工作区不变", () =>
   withRoot(async (root) => {
     const { sessionId } = await scriptSession(root, EDIT_SCRIPT);
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const files = readdirSync(sessionsDir, { recursive: true })
       .map((file) => join(sessionsDir, String(file)))
       .filter((path) => path.endsWith(".jsonl"));
@@ -295,7 +295,7 @@ test("trace 命令：会话不存在时报错并列出已有会话；旧格式�
         return true;
       }
     );
-    const legacy = writeLegacySessionFile(join(root, ".pigeon", "sessions"));
+    const legacy = writeLegacySessionFile(join(root, ".pigeon", "state", "sessions"));
     assert.throws(
       () => runTraceCommand({ root, sessionId: legacy }),
       (error: unknown) =>
@@ -318,7 +318,7 @@ test("trace 命令：会话不存在时报错并列出已有会话；旧格式�
 
 test("trace 报告：读取时跳过的行归异常项；分支会话标来源、不重复画复制来的历史", () =>
   withRoot(async (root) => {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const source = createFixtureSession({ sessionsDir });
     const runId = source.startRun({ task: "来源" });
     source.assistant({ text: "来源回复" });
@@ -349,4 +349,39 @@ test("trace 报告：读取时跳过的行归异常项；分支会话标来源�
     assert.equal(headers.length, 1, branchTrace);
     // 复制来的来源 Run 不算分支会话的 Run
     assert.throws(() => runTraceCommand({ root, sessionId: branchId, runId }), /该会话无 Run/);
+  }));
+
+test("旧会话含复盘与旧推送记忆字段（决策 331 之前的 Run 开始条目）：trace 照常渲染、不报错", () =>
+  withRoot(async (root) => {
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
+    const fixture = createFixtureSession({ sessionsDir });
+    fixture.startRun({ task: "旧会话" });
+    fixture.assistant({ text: "旧回复" });
+    fixture.endRun();
+    const { sessionId, path } = await fixture.close();
+    // 复盘删除前的 Run 开始条目：data 里带 memoryReview 与旧的 learnedMemory 字段
+    const lines = readFileSync(path, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const entry = JSON.parse(line) as {
+          type?: string;
+          customType?: string;
+          data?: Record<string, unknown>;
+        };
+        if (entry.type === "custom" && entry.customType === "pigeon.run-start" && entry.data) {
+          entry.data.memoryReview = { kind: "closing", template: "v1" };
+          entry.data.learnedMemory = {
+            path: ".pigeon/state/learned/MEMORY.md",
+            hash: "0".repeat(64),
+            bytes: 1,
+            entries: 1,
+            limitChars: 4000,
+          };
+        }
+        return JSON.stringify(entry);
+      });
+    writeFileSync(path, `${lines.join("\n")}\n`);
+    const trace = runTraceCommand({ root, sessionId });
+    assert.ok(trace.includes("Run 1 个"), trace);
   }));

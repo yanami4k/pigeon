@@ -21,6 +21,7 @@ import {
 import path from "node:path";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { type GatewayMeter, meterDelta } from "./model-gateway.ts";
@@ -44,7 +45,7 @@ import {
   taskPromptOf,
 } from "./stream-manifest.ts";
 import type { TestCaseResult } from "./stream-measure.ts";
-import { memoryFactsOf, snapshotOrRestoreLearned } from "./stream-memory-snapshot.ts";
+import { memoryFactsOf, snapshotOrRestoreMemory } from "./stream-memory-snapshot.ts";
 import {
   type CaseRun,
   countQuality,
@@ -52,9 +53,6 @@ import {
   pinTestConfigFromTree,
   STRANDS_CASE_TIMEOUT_SEC,
   type StreamRepoRuntime,
-  type StreamVerifyStep,
-  verifyConfigFile,
-  verifyScript,
 } from "./stream-profiles.ts";
 import { type ReportIdentity, renderStreamReport } from "./stream-report.ts";
 import {
@@ -79,12 +77,11 @@ import {
 import { runWorkQueue } from "./work-queue.ts";
 
 // 条件表（193、194、217）：记忆的 2 × 2——能否检索历史会话（sessionSearch）× 有无推送记忆（pushedMemory），四格都是
-// 完整 Pigeon、开验证门与 3 轮回炉；最简 agent 另走启动器、不开回炉，作外部参照
+// 完整 Pigeon；最简 agent 另走启动器，作外部参照。
+// 决策 327：验证门与回炉随 322 删除，四格暂不带检查；下次实验接检查的方式随出题规则另行设计
 export interface ConditionSpec {
   name: StreamCondition;
   agent: "pigeon" | "minimal";
-  // 回炉轮数上限（143）；0 为不开回炉。回炉到上限仍不通过即以失败收尾（172 / 173）
-  repairRounds: number;
   // 能否检索历史会话：关掉时 Pigeon 不注册两件会话检索工具，系统提示不提它们
   sessionSearch: boolean;
   // 有无推送记忆：透传给 headless（推送记忆另行施工，打开时 headless 暂时报错）
@@ -95,35 +92,30 @@ export const CONDITION_SPECS: Record<StreamCondition, ConditionSpec> = {
   "search-push": {
     name: "search-push",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: true,
     pushedMemory: true,
   },
   "search-only": {
     name: "search-only",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: true,
     pushedMemory: false,
   },
   "push-only": {
     name: "push-only",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: false,
     pushedMemory: true,
   },
   neither: {
     name: "neither",
     agent: "pigeon",
-    repairRounds: 3,
     sessionSearch: false,
     pushedMemory: false,
   },
   minimal: {
     name: "minimal",
     agent: "minimal",
-    repairRounds: 0,
     sessionSearch: false,
     pushedMemory: false,
   },
@@ -152,9 +144,6 @@ export interface StepAgentInput {
   condition: ConditionSpec;
   target: AgentTarget;
   budget: StepBudget;
-  // 开回炉的条件按它验证：这条流的分步验证（各步名称、命令与执行目录，Pigeon 原样交给 headless，逐步出结论）、
-  // 由它派生的一行命令（交 sh -c、在工作区根执行，给只认一条命令的 agent）与超时
-  verify: { steps: readonly StreamVerifyStep[]; command: string; timeoutMs: number };
   // 宿主上给这个作业用的目录（会话账本等）
   workDir: string;
   // 跑批器按步中止（本作业在网关排队超时等）：agent 与限额信号同一条路径停下（中止 agent、清掉容器里的进程），
@@ -162,16 +151,6 @@ export interface StepAgentInput {
   abortSignal?: AbortSignal;
   // 经网关时，这个作业的模型接入地址（决策 155）
   modelBaseUrl?: string;
-  // 经网关时，读这个作业此刻的计量：推送格在每次复盘前后各读一次，做差即复盘的请求数、token 与花费（235）
-  meter?: () => GatewayMeter;
-  // 人在该步之前的树（起点）里的测试与测试辅助文件：回炉验证前只还原（并计数）这些——agent 改了人的旧测试即还原成
-  // 起点的版本；人在该步新写的测试 agent 看不到，不在其列（198）
-  humanTestFiles?: ReadonlySet<string>;
-  // 测试框架自动加载的辅助文件名（strands 为 conftest.py）、起点树里人的测试文件与起点树里的全部路径：回炉验证前按与
-  // 判题前同一规则删掉 agent 放的、覆盖人写测试的这类文件（起点树里有的一律不删，例如仓库根的 conftest.py）
-  autoloadedTestHelper?: string;
-  humanTests?: readonly string[];
-  humanTree?: readonly string[];
 }
 
 // 网关对跑批器露出的：作业的接入地址、作业的计量、每步开始时重记在途峰值、排队看守
@@ -255,31 +234,8 @@ export interface StepAgentResult {
   turns: number;
   usage: TurnUsage;
   wallMs: number;
-  // 开回炉的条件：用了几轮、最后一次验证结论（无法判定为 null）；未开回炉为 null
-  repair: {
-    rounds: number;
-    finalVerdict: "pass" | "fail" | null;
-    // 验证之前发现 agent 改过人写测试并还原的次数（容器模式的 Pigeon 给出；缺省按 0 记）
-    humanTestRestores?: number;
-    // 各次验证里标了工具故障（检查工具自身崩溃，重跑一次仍崩溃，决策 170 ③）的步数合计（缺省按 0 记）
-    toolFaults?: number;
-  } | null;
   // 这一步被打断（模型服务故障、限额）：整题作废、不留行
   interrupted?: string;
-  // 推送格的复盘（191、192、207）：没推送的条件缺省
-  review?: StepReviewFacts;
-}
-
-// 这一步的各次复盘合计：收尾与压缩前各几次、轮数、token、墙钟、是否撞复盘上限、失败原因；经网关时另带复盘期间的计量差
-export interface StepReviewFacts {
-  closing: number;
-  preCompaction: number;
-  turns: number;
-  tokens: number;
-  wallMs: number;
-  hitLimit: boolean;
-  failures: string[];
-  meter?: GatewayMeter;
 }
 
 export interface StepAgent {
@@ -398,7 +354,7 @@ export const QUEUE_VOID_STOP = 30;
 // 治理根里的会话文件（决策 210 的布局：会话根下按工作目录编码的子目录、文件名为创建时间加会话号，另有同目录的锁文件），
 // 以相对会话根的路径（分隔符一律为 /）标识，逐个文件区分：同一工作目录下前后几次尝试的会话落在同一个子目录里
 function sessionFilesOf(jobDir: string): string[] {
-  const dir = path.join(jobDir, ".pigeon", "sessions");
+  const dir = sessionsDirOf(jobDir);
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile())
@@ -417,7 +373,7 @@ function quarantineSessions(
   keep: ReadonlySet<string>,
   label: string
 ): number {
-  const dir = path.join(jobDir, ".pigeon", "sessions");
+  const dir = sessionsDirOf(jobDir);
   const stray = sessionFilesOf(jobDir).filter((f) => !keep.has(f));
   if (stray.length > 0) {
     const target = path.join(outDir, "voided", jobDirName(job), label);
@@ -626,13 +582,6 @@ async function runStreamJob(
   // 目录名必须同时含这两者
   const jobDir = path.join(options.outDir, "streams", jobDirName(job));
   mkdirSync(jobDir, { recursive: true });
-  // 分步验证配置另存一份在作业的治理根，供事后查看这个作业验证的是什么（Pigeon 的验证不读它：跑批器每步把分步配置
-  // 直接交给步 agent）；不写进容器工作区
-  mkdirSync(path.join(jobDir, ".pigeon"), { recursive: true });
-  writeAtomic(
-    path.join(jobDir, ".pigeon", "verify.json"),
-    `${JSON.stringify(verifyConfigFile(options.runtime.verifySteps, options.judgeTimeoutMs ?? 1_800_000), null, 2)}\n`
-  );
   // 每步完成时治理根里的会话文件清单（相对会话根的路径，含工作目录编码子目录）：续跑时不在上一个完成步清单里的会话（进程死在一步中途留下的）一律移出
   const sessionsFile = (seq: number) => path.join(jobDir, `sessions-${seq}.json`);
   const lines = readStreamResults(resultsFile);
@@ -714,7 +663,7 @@ async function runStreamJob(
         await limits?.ready();
         attempt += 1;
         // 记忆（191）：还没有这一步的快照即取一份；已有（作废重做、崩溃后续跑）即把记忆恢复成它
-        snapshotOrRestoreLearned(jobDir, step.seq);
+        snapshotOrRestoreMemory(jobDir, step.seq);
         const memoryAtStart = memoryFactsOf(jobDir);
         const sessionsBefore = new Set(sessionFilesOf(jobDir));
         try {
@@ -1139,10 +1088,6 @@ async function runStep(
     envOpenMs,
     envPrefetched,
     judged: false,
-    repairRounds: null,
-    finalVerdict: null,
-    humanTestRestores: null,
-    verifyToolFaults: null,
     agentChangedDeps: null,
     judging: null,
     baselineUnavailable: classes.unbuildable,
@@ -1182,9 +1127,6 @@ async function runStep(
       voidOnAccessError(step.seq, error);
     }
     const startTree = await ws.worktreeTree();
-    // 回炉验证前的保护按起点的树（8.2）：agent 改了人的旧测试即还原成起点的版本；人在该步新写的测试它看不到
-    const startPaths = options.human.tree(step.parent).map((e) => e.path);
-    const classify = (p: string) => options.runtime.profile.classifyFile(p);
     const key = streamJobKey(job);
     const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
       agent.run({
@@ -1194,28 +1136,8 @@ async function runStep(
         condition: spec,
         target: env.target,
         budget: options.budget ?? DEFAULT_STEP_BUDGET,
-        verify: {
-          steps: options.runtime.verifySteps,
-          command: verifyScript(options.runtime.verifySteps),
-          timeoutMs: options.judgeTimeoutMs ?? 1_800_000,
-        },
         workDir: jobDir,
-        humanTestFiles: new Set(
-          startPaths.filter((p) => classify(p) === "test" || classify(p) === "testaux")
-        ),
-        ...(options.runtime.autoloadedTestHelper !== undefined
-          ? {
-              autoloadedTestHelper: options.runtime.autoloadedTestHelper,
-              humanTests: startPaths.filter((p) => classify(p) === "test"),
-              humanTree: startPaths,
-            }
-          : {}),
-        ...(options.gateway !== undefined
-          ? {
-              modelBaseUrl: options.gateway.jobBaseUrl(key),
-              meter: () => (options.gateway as StreamModelGateway).meter(key),
-            }
-          : {}),
+        ...(options.gateway !== undefined ? { modelBaseUrl: options.gateway.jobBaseUrl(key) } : {}),
         abortSignal,
       })
     );
@@ -1229,20 +1151,17 @@ async function runStep(
     }
     let gatewayFacts: StreamGatewayFacts | null = null;
     const delta = admitted.delta;
-    // 复盘（191、192、207）另记、不算 agent 的：轮数、token、花费与墙钟都从 agent 的部分里减掉（复盘不占这一步的宽上限，171）
-    const review = result.review;
-    const reviewMeter = review?.meter;
     if (delta !== undefined) {
       // 各条件同一口径：轮数即成功转发的模型请求数，token 取网关读到的用量
-      // 花费与上下文峰值从网关计量读：花费按步做差，峰值取收尾时的值（每步开始时已重记）；
-      // 推送格的复盘花费按复盘前后的计量做差单列，agent 的花费不含它；不推送的条件复盘花费为 null
-      const agentDelta = reviewMeter !== undefined ? meterDelta(delta, reviewMeter) : delta;
+      // 花费与上下文峰值从网关计量读：花费按步做差，峰值取收尾时的值（每步开始时已重记）。
+      // 复盘随决策 331 删除，复盘花费恒为 null（字段留在结果行里，旧行照常可读）
+      const agentDelta = delta;
       gatewayFacts = {
         queueMs: delta.queueMs,
         accountRequests: delta.accountRequests,
         peakInFlight: delta.peakInFlight,
         costCny: agentDelta.costCny,
-        reviewCostCny: review !== undefined ? (reviewMeter?.costCny ?? 0) : null,
+        reviewCostCny: null,
         peakInputTokens: delta.peakInputTokens,
       };
       result = {
@@ -1259,35 +1178,12 @@ async function runStep(
         },
       };
     }
-    if (review !== undefined) {
-      result = { ...result, wallMs: Math.max(0, result.wallMs - review.wallMs) };
-    }
-    const reviewFacts =
-      review === undefined
-        ? null
-        : {
-            closing: review.closing,
-            preCompaction: review.preCompaction,
-            // 经网关时轮数与 token 取复盘期间的计量差（与 agent 同一口径），否则取复盘会话自己数的
-            turns: reviewMeter?.requests ?? review.turns,
-            tokens:
-              reviewMeter !== undefined
-                ? reviewMeter.input +
-                  reviewMeter.output +
-                  reviewMeter.cacheRead +
-                  reviewMeter.cacheWrite
-                : review.tokens,
-            wallMs: review.wallMs,
-            hitLimit: review.hitLimit,
-            failures: review.failures,
-          };
     const budget = options.budget ?? DEFAULT_STEP_BUDGET;
     hitStepBudget =
       result.status === "turn-limit" ||
       result.status === "wall-clock-limit" ||
       result.turns >= budget.maxTurns ||
       result.wallMs >= budget.wallClockMs;
-    // 收尾复盘在 agent 部分里（headless 返回之前）做完：步末的记忆大小在复盘之后记
     memoryAtEnd = memoryFactsOf(jobDir);
     const agentChangedDeps = await agentChangedDeclaration(options, ws, step.commit);
     // agent 自己提交、切分支或让 HEAD 游离过的，先挪回起点；再存下它相对开工时的改动（代替延续式的流历史）
@@ -1303,15 +1199,12 @@ async function runStep(
       diff: path.posix.join("streams", jobDirName(job), "diffs", diffName),
       envOpenMs,
       envPrefetched,
-      repairRounds: result.repair?.rounds ?? null,
-      finalVerdict: result.repair?.finalVerdict ?? null,
-      humanTestRestores: result.repair === null ? null : (result.repair.humanTestRestores ?? 0),
-      verifyToolFaults: result.repair === null ? null : (result.repair.toolFaults ?? 0),
       agentChangedDeps,
       memoryAtEnd,
       hitStepBudget,
-      review: reviewFacts,
-      hitReviewBudget: reviewFacts?.hitLimit ?? null,
+      // 复盘随决策 331 删除：两项恒为 null（字段留在结果行里，旧行照常可读）
+      review: null,
+      hitReviewBudget: null,
       status: result.status,
       turns: result.turns,
       usage: result.usage,

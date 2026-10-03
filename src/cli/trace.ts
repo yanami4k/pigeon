@@ -4,7 +4,6 @@
 // 旧视图里的回执、确证、熔断记录、待对账与落盘缺口随这些记录停写（184）与断号诊断去掉（181）不再呈现；
 // 工具调用的审批结果与出错归类改读工具结果消息上的运行面标记，工具级失败分类由 storeToolOutcomes 现算。
 import { createHash } from "node:crypto";
-import { join } from "node:path";
 import {
   approvalVerdict,
   evalVerdictLabel,
@@ -20,6 +19,8 @@ import {
   loadSessionView,
 } from "../persistence/session-catalog.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
+import { sessionsDirOf } from "../state/paths.ts";
+import type { HookRunData } from "../state/session-entries.ts";
 import {
   type StoreMessage,
   type StoreToolOutcome,
@@ -35,6 +36,15 @@ import type {
   ViewToolCall,
 } from "../state/session-view.ts";
 import { isSyntheticFailure } from "../state/session-view.ts";
+
+// 钩子运行（323 / 324）的一行：事件、命令、退出码、用时、结论
+function hookLine(data: HookRunData): string {
+  return (
+    `钩子 ${data.event}${data.matcher !== undefined ? `（匹配 ${data.matcher}）` : ""}：${data.conclusion} ｜ ` +
+    `退出码 ${data.exitCode ?? "无"}${data.timedOut ? "（超时）" : ""} ｜ ${data.durationMs} 毫秒 ｜ ` +
+    `命令 ${data.command}${data.output !== undefined ? ` ｜ 输出 ${data.output}` : ""}`
+  );
+}
 
 const MCP_SERVER_STATE_LABEL: Readonly<Record<McpServerStatus["state"], string>> = {
   idle: "未启动",
@@ -204,6 +214,8 @@ function renderRun(
             ? ` ｜ 目标 会话 ${shortId(data.target.sessionId)} Run ${shortId(data.target.runId)}`
             : "")
       );
+    } else if (item.kind === "hook") {
+      lines.push(`  ${hookLine(item.data)}`);
     }
   }
   for (const turn of run.turns) {
@@ -277,6 +289,17 @@ export function renderSessionTrace(
     }
     renderRun(view, run, lines, options);
   }
+  // 会话级的钩子运行（323：SessionStart / SessionEnd 等窗口外事件没有所属 Run）
+  const sessionHooks = view.sessionItems.filter(
+    (item): item is Extract<ViewItem, { kind: "hook" }> => item.kind === "hook"
+  );
+  if (sessionHooks.length > 0) {
+    lines.push("");
+    lines.push("会话级条目：");
+    for (const item of sessionHooks) {
+      lines.push(`  ${hookLine(item.data)}`);
+    }
+  }
   // 会话级异常项：孤立的收尾、读取时跳过的行与条目如实报告，不猜测挂接
   if (view.orphanSettleds.length > 0 || view.warnings.length > 0) {
     lines.push("");
@@ -308,7 +331,7 @@ export function missingSessionError(sessionsDir: string, sessionId: string): Err
 }
 
 export interface TraceCommandOptions {
-  // 工作区根（会话在 <root>/.pigeon/sessions/）
+  // 工作区根（会话在 <root>/.pigeon/state/sessions/）
   root: string;
   sessionId: string;
   runId?: string;
@@ -318,7 +341,7 @@ export interface TraceCommandOptions {
 
 // 只读渲染入口：会话不存在/Run 不存在时响亮报错并列出可选项，绝不静默产出空报告
 export function runTraceCommand(options: TraceCommandOptions): string {
-  const sessionsDir = join(options.root, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(options.root);
   const view = loadSessionView(sessionsDir, options.sessionId);
   if (view === undefined) {
     throw missingSessionError(sessionsDir, options.sessionId);

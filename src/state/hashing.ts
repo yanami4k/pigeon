@@ -1,5 +1,5 @@
 // 哈希与文本小工具：sha256 十六进制串、规范序列化、UTF-8 字节上限截断。state 叶子，无 IO
-// （node:crypto 只做哈希计算）。常驻 Memory 与 Skill 的清单哈希、load_skill 的正文截断、会话视图的块哈希共用
+// （node:crypto 只做哈希计算）。人写的说明（AGENTS.md）与 Skill 的清单哈希、load_skill 的正文截断、会话视图的块哈希共用
 import { createHash } from "node:crypto";
 import { Type } from "typebox";
 

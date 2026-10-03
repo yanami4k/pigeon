@@ -1,11 +1,11 @@
 // 终端界面的输入历史（决策 286 第 1 项）：↑↓ 翻看的历史跨启动保留、按项目分开——存在项目治理根的
-// .pigeon/tui-history.json，不进会话记录与账本。条数上限 100，与 pi-tui 编辑器内置的历史上限一致（超出的最旧条目丢弃）。
+// .pigeon/state/tui-history.json，不进会话记录与账本。条数上限 100，与 pi-tui 编辑器内置的历史上限一致（超出的最旧条目丢弃）。
 // 读不出（文件缺失、畸形）按空历史处理；写失败静默放弃（历史是便利功能，不挡输入）。写入先写临时文件再改名，不留半截文件。
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname } from "node:path";
+import { promptHistoryPathOf } from "../state/paths.ts";
 
 export const PROMPT_HISTORY_LIMIT = 100;
-const HISTORY_FILE = "tui-history.json";
 
 export interface PromptHistoryStore {
   // 从旧到新
@@ -14,7 +14,7 @@ export interface PromptHistoryStore {
 }
 
 function historyPath(governanceRoot: string): string {
-  return join(governanceRoot, ".pigeon", HISTORY_FILE);
+  return promptHistoryPathOf(governanceRoot);
 }
 
 function readEntries(path: string): string[] {
@@ -46,7 +46,7 @@ export function promptHistoryStore(governanceRoot: string): PromptHistoryStore {
       const entries = readEntries(path);
       if (entries.at(-1) !== trimmed) entries.push(trimmed);
       try {
-        mkdirSync(join(governanceRoot, ".pigeon"), { recursive: true });
+        mkdirSync(dirname(path), { recursive: true });
         const temp = `${path}.${process.pid}.tmp`;
         writeFileSync(
           temp,

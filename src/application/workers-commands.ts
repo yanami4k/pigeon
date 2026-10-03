@@ -12,7 +12,17 @@ export type {
   WorkerStatus,
 } from "../orchestration/workers.ts";
 // 决策 301：进入 worker 会话补批时，人另附的话前面同样写这一句
-export { resumeApprovalText } from "../orchestration/workers.ts";
+// 权威链审计 ②：对续接后找回的之前运行的 worker 发取消、发消息、补批续做时的说明
+export { previousRunWorkerText, resumeApprovalText } from "../orchestration/workers.ts";
+
+// 续接后找回的之前运行的 worker 在状态里的标注（worker_status 与 /workers 共用）
+export function previousRunNote(status: Pick<WorkerStatus, "previousRun">): string {
+  return status.previousRun === "settled"
+    ? "（来自之前的运行）"
+    : status.previousRun === "interrupted"
+      ? "（来自之前的运行，随进程退出而中断，不可取用）"
+      : "";
+}
 
 export class WorkerCommandError extends Error {}
 
@@ -151,13 +161,15 @@ export function resolveWorkerRef(workers: readonly WorkerStatus[], ref: string):
   return found;
 }
 
-// M7（决策 069）：并行同任务派发的收尾摘要——各尝试的会话与标签
+// M7（决策 069）：并行同任务派发的收尾摘要——各尝试的会话与状态（决策 322：不再贴标签，由人比较各份的改动与摘要）
 export function renderAttemptGroupOutcome(result: {
   taskKey: string;
-  attempts: ReadonlyArray<{ sessionId: string; label: string }>;
+  outcomes: ReadonlyArray<{ sessionId: string; name: string; status: string }>;
 }): string {
   return [
     `== 并行尝试收尾 ｜ 任务标识 ${result.taskKey} ==`,
-    ...result.attempts.map((attempt) => `  会话 ${attempt.sessionId} ｜ ${attempt.label}`),
+    ...result.outcomes.map(
+      (outcome) => `  会话 ${outcome.sessionId} ｜ ${outcome.name} ｜ ${outcome.status}`
+    ),
   ].join("\n");
 }

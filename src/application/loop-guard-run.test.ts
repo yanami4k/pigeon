@@ -1,6 +1,6 @@
 // 打转检测在 pigeon run 上（决策 305–308）：真实装配根 + 重复同一轮的假模型。
 // 新状态 looping 与退出码、提醒进下一轮并留在会话记录、第 20 轮叫停且之后不再发模型请求、Run 收尾记结束方式为打转、
-// 照常验证不再回炉、标签算失败、失败自动分叉重试照常、关掉即不管；真实形状（每轮两条相同的 run_command）。
+// 叫停后照常结束（验证与回炉已随决策 322 删除）、标签算失败、关掉即不管；真实形状（每轮两条相同的 run_command）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -14,7 +14,7 @@ import {
   DISABLED_LOOP_GUARD_SETTINGS,
 } from "../state/loop-guard-config.ts";
 import type { StoreSessionView } from "../state/session-judge.ts";
-import { HEADLESS_EXIT_CODES, runHeadless } from "./headless.ts";
+import { HEADLESS_EXIT_CODES, runHeadless } from "./headless-core.ts";
 import { loadSessionHistory } from "./history.ts";
 import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
 
@@ -55,7 +55,7 @@ function looping(): FakeStreamFn {
 }
 
 function sessionOf(root: string, sessionId: string): StoreSessionView {
-  const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+  const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined);
   return loaded.view;
 }
@@ -136,45 +136,7 @@ test("pigeon run：第 5 轮提醒、第 10 轮再提醒、第 20 轮叫停；�
   }
 });
 
-test("pigeon run：开了验证照常验证（通过也算失败）；开了回炉不再回炉", async () => {
-  const repo = makeRepo();
-  try {
-    const passed = await runHeadless({
-      task: "看看 a.ts",
-      governanceRoot: repo.root,
-      workspaceRoot: repo.root,
-      streamFn: looping(),
-      yolo: true,
-      homeDir: repo.home,
-      maxTurns: 200,
-      loopGuard: DEFAULT_LOOP_GUARD_SETTINGS,
-      verify: { command: `${NODE} -e "process.exit(0)"`, timeoutMs: 30_000, source: "flag" },
-    });
-    assert.equal(passed.status, "looping");
-    assert.equal(passed.verification?.verdict, "pass");
-    assert.equal(passed.label, "Failed");
-    const repaired = await runHeadless({
-      task: "看看 a.ts",
-      governanceRoot: repo.root,
-      workspaceRoot: repo.root,
-      streamFn: looping(),
-      yolo: true,
-      homeDir: repo.home,
-      maxTurns: 200,
-      loopGuard: DEFAULT_LOOP_GUARD_SETTINGS,
-      verify: { command: `${NODE} -e "process.exit(1)"`, timeoutMs: 30_000, source: "flag" },
-      repairRounds: 3,
-    });
-    assert.equal(repaired.status, "looping");
-    assert.deepEqual(repaired.repair, { rounds: 0, verdict: "fail", closed: true });
-    assert.equal(sessionOf(repo.root, repaired.sessionId).runs.length, 1);
-    assert.equal(repaired.label, "Failed");
-  } finally {
-    repo.cleanup();
-  }
-});
-
-test("pigeon run：开了失败自动分叉重试照常重试（重试的尝试同样挂打转检测）", async () => {
+test("pigeon run：打转叫停后照常结束——不多开 Run，标签算失败", async () => {
   const repo = makeRepo();
   try {
     const result = await runHeadless({
@@ -186,14 +148,10 @@ test("pigeon run：开了失败自动分叉重试照常重试（重试的尝试�
       homeDir: repo.home,
       maxTurns: 200,
       loopGuard: DEFAULT_LOOP_GUARD_SETTINGS,
-      retryOnFail: 1,
     });
     assert.equal(result.status, "looping");
-    assert.equal(result.retries?.length, 1);
-    assert.equal(result.retries?.[0]?.label, "Failed");
-    const branch = result.retries?.[0]?.branchSessionId;
-    assert.ok(branch !== undefined);
-    assert.equal(sessionOf(repo.root, branch).runs.at(-1)?.end?.ending, "looping");
+    assert.equal(result.label, "Failed");
+    assert.equal(sessionOf(repo.root, result.sessionId).runs.length, 1, "照常结束，不多开 Run");
   } finally {
     repo.cleanup();
   }

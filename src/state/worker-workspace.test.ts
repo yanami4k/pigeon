@@ -15,7 +15,7 @@ test("工作区联合：git-worktree 与 none 两种形状都通过；缺字段�
   assert.ok(
     Value.Check(WorkerWorkspaceSchema, {
       kind: "git-worktree",
-      path: "/repo/.pigeon/worktrees/w",
+      path: "/repo/.pigeon/state/worktrees/w",
       branch: "pigeon/w",
     })
   );
@@ -23,7 +23,7 @@ test("工作区联合：git-worktree 与 none 两种形状都通过；缺字段�
     Value.Check(WorkerWorkspaceSchema, {
       kind: "git-worktree",
       baseCommit: "a".repeat(40),
-      path: "/repo/.pigeon/worktrees/w",
+      path: "/repo/.pigeon/state/worktrees/w",
       branch: "pigeon/w",
     }),
     "可选起点提交（决策 082）"
@@ -35,7 +35,7 @@ test("工作区联合：git-worktree 与 none 两种形状都通过；缺字段�
     !Value.Check(WorkerWorkspaceSchema, {
       kind: "git-worktree",
       baseCommit: "not-a-commit",
-      path: "/repo/.pigeon/worktrees/w",
+      path: "/repo/.pigeon/state/worktrees/w",
       branch: "pigeon/w",
     }),
     "起点提交必须是完整提交号"
@@ -45,7 +45,7 @@ test("工作区联合：git-worktree 与 none 两种形状都通过；缺字段�
 test("工作区类型谓词：只有 git 工作树形状判为真", () => {
   const worktree: WorkerWorkspace = {
     kind: "git-worktree",
-    path: "/repo/.pigeon/worktrees/w",
+    path: "/repo/.pigeon/state/worktrees/w",
     branch: "pigeon/w",
   };
   assert.equal(isGitWorktreeWorkspace(worktree), true);

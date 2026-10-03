@@ -1,0 +1,33 @@
+# 决策 336：推送到 main 与每个 PR 时跑 npm ci 与 npm run verify（lint + check + test + deps）。
+# 真容器用例在没有实验镜像时照现有逻辑跳过；含真容器用例的全量验收另在验证服务器上进行。
+# 所用 action 钉到完整 commit SHA（决策 337），由 Dependabot 提升级 PR。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify
+        run: npm run verify

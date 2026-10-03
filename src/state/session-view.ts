@@ -15,6 +15,7 @@ import {
   type ForkData,
   type GrantData,
   HEADER_METADATA_KEY,
+  type HookRunData,
   type RunEndData,
   type RunStartData,
   SESSION_ENTRY_SCHEMAS,
@@ -111,7 +112,8 @@ export type ViewItem =
   | { kind: "checkpoint"; entryId: string; timestamp: number; data: CheckpointData }
   | { kind: "worker"; entryId: string; timestamp: number; data: WorkerData }
   | { kind: "fork"; entryId: string; timestamp: number; data: ForkData }
-  | { kind: "grant"; entryId: string; timestamp: number; data: GrantData };
+  | { kind: "grant"; entryId: string; timestamp: number; data: GrantData }
+  | { kind: "hook"; entryId: string; timestamp: number; data: HookRunData };
 
 // 一次工具调用：助手消息里的调用块与对应的工具结果消息（按工具调用号在同一 Run 内配对）
 export interface ViewToolCall {
@@ -161,6 +163,8 @@ export interface SessionView {
   // 本会话自己的全部条目（跳过复制段），按文件顺序
   items: ViewItem[];
   runs: ViewRun[];
+  // 会话级条目：不属于任何 Run 的自定义条目（窗口外的钩子运行记录等；trace 单列一节展示）
+  sessionItems: ViewItem[];
   // 本会话自己的全部消息（跳过复制段；不在任何 Run 之后的消息不计入）
   messages: ViewMessage[];
   children: ViewChild[];
@@ -308,6 +312,7 @@ const CUSTOM_KINDS = {
   [SessionEntryType.Worker]: "worker",
   [SessionEntryType.Fork]: "fork",
   [SessionEntryType.Grant]: "grant",
+  [SessionEntryType.Hook]: "hook",
 } as const;
 
 // 自定义条目 → 时间线条目；不是 Pigeon 的条目返回 undefined，数据不合 schema 记告警
@@ -389,6 +394,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
       ? copiedPrefixLength(input.entries, metadata.branch.forkPoint)
       : 0;
   const items: ViewItem[] = [];
+  const sessionItems: ViewItem[] = [];
   const runs: ViewRun[] = [];
   const runById = new Map<string, ViewRun>();
   const messages: ViewMessage[] = [];
@@ -434,6 +440,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
     const runId = customRunId(item);
     const owner = runId !== undefined ? runById.get(runId) : undefined;
     if (owner === undefined) {
+      sessionItems.push(item);
       continue;
     }
     owner.items.push(item);
@@ -499,6 +506,7 @@ export function buildSessionView(input: SessionFileInput): SessionView {
     ...(metadata?.branch !== undefined ? { branch: metadata.branch } : {}),
     copiedEntries,
     items,
+    sessionItems,
     runs,
     messages,
     children,

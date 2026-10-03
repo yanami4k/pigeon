@@ -1,7 +1,7 @@
 // 工作目录快照（决策 278、279 共用）：把工作目录的当前状态——受跟踪文件的当前内容，加上未跟踪且未被 .gitignore
 // 忽略的新文件——写成一个以 HEAD 为父的提交，挂在 refs/pigeon/ 下的专用引用上，防止被 git 回收。沙箱开工（278）与
 // 本机派 worker（279）都从它起步。做法沿用 078 的临时索引快照：复制用户索引为临时 GIT_INDEX_FILE（只为复用文件状态
-// 缓存）→ add -A → 治理目录 .pigeon 还原到 HEAD 的样子 → write-tree → commit-tree → update-ref；用户的工作目录、
+// 缓存）→ add -A → 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 还原到 HEAD 的样子（决策 325）→ write-tree → commit-tree → update-ref；用户的工作目录、
 // 暂存区、当前分支与 HEAD 一律不碰。工作目录与 HEAD 没有差别时直接用 HEAD，不另建提交、不挂引用。
 // 快照引用的清理由调用方在相应生命周期收尾时做（worker 分支删除、沙箱会话收尾）。git 经参数数组直接调用，不经 shell。
 import { execFileSync } from "node:child_process";
@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
 
 export class WorkdirSnapshotError extends Error {}
 
@@ -97,7 +98,7 @@ export function workdirTree(top: string): string {
     }
     const env = { GIT_INDEX_FILE: indexFile };
     git(top, ["add", "-A", "--", "."], env);
-    git(top, ["reset", "-q", "--", ".pigeon"], env);
+    git(top, ["reset", "-q", "--", ...PROGRAM_OWNED_PATHS], env);
     return git(top, ["write-tree"], env).trim();
   } finally {
     rmSync(indexFile, { force: true });
@@ -153,41 +154,5 @@ export function readSnapshotRef(repoRoot: string, ref: string): string | undefin
     return commit === "" ? undefined : commit;
   } catch {
     return undefined;
-  }
-}
-
-// ---- 后台补做复盘的读取根（决策 283）：从退出快照或沙箱交回的提交检出临时工作树，用完删除 ----
-
-// 提交在仓库里是否还在
-export function commitExists(repoRoot: string, commit: string): boolean {
-  try {
-    git(repoRoot, ["cat-file", "-e", `${commit}^{commit}`]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// 本地分支的最新提交；分支不存在或不是 git 工作区返回 undefined
-export function branchTip(repoRoot: string, branch: string): string | undefined {
-  return readSnapshotRef(repoRoot, `refs/heads/${branch}`);
-}
-
-// 在 dir 检出 commit 的临时工作树（分离头指针，不建分支、不动当前分支与工作目录）
-export function addDetachedWorktree(repoRoot: string, dir: string, commit: string): void {
-  git(repoRoot, ["worktree", "add", "--detach", "--force", dir, commit]);
-}
-
-// 删除临时工作树：先按 git 的方式删，删不掉再直接删目录并清掉登记
-export function removeWorktree(repoRoot: string, dir: string): void {
-  try {
-    git(repoRoot, ["worktree", "remove", "--force", "--force", dir]);
-  } catch {
-    rmSync(dir, { recursive: true, force: true });
-    try {
-      git(repoRoot, ["worktree", "prune"]);
-    } catch {
-      // 登记没清掉只是多一条过期登记，git 之后会自行清理
-    }
   }
 }

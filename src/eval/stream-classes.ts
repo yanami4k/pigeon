@@ -67,9 +67,6 @@ export function classifyCases(
   };
 }
 
-// 结果行里失败用例编号每类最多记这么多条
-export const FAILED_CASES_CAP = 20;
-
 export interface StepJudging {
   // 要做到的：agent 代码上通过的条数与总数
   failToPass: { passed: number; total: number };
@@ -79,8 +76,8 @@ export interface StepJudging {
   passToPass: { failed: number; total: number };
   // 做成（196）：要做到的全过且不许挂的无一失败；要做到的为零时为 null
   solved: boolean | null;
-  // 没通过的用例编号（两类各自截断到 FAILED_CASES_CAP 条）
-  failedCases: { failToPass: string[]; passToPass: string[]; truncated: boolean };
+  // 没通过的用例编号（两类全记；决策 327：不再截断——旧结果行的 failedCases 可能带 truncated 标记，读取时忽略）
+  failedCases: { failToPass: string[]; passToPass: string[] };
   // 因时过时不过而两类都不进的用例数
   excludedFlaky: number;
 }
@@ -88,8 +85,7 @@ export interface StepJudging {
 // 按两类集合给 agent 代码上跑出的全量结果计分：没有结果（缺席、收集失败）的用例算没通过
 export function judgeStep(
   classes: CaseClasses,
-  agentCases: readonly TestCaseResult[],
-  cap = FAILED_CASES_CAP
+  agentCases: readonly TestCaseResult[]
 ): StepJudging {
   const passed = new Set(agentCases.filter((c) => c.outcome === "passed").map((c) => c.id));
   const f2pFailed = classes.failToPass.filter((id) => !passed.has(id));
@@ -101,11 +97,7 @@ export function judgeStep(
     score: total === 0 ? null : f2pPassed / total,
     passToPass: { failed: p2pFailed.length, total: classes.passToPass.length },
     solved: total === 0 ? null : f2pFailed.length === 0 && p2pFailed.length === 0,
-    failedCases: {
-      failToPass: f2pFailed.slice(0, cap),
-      passToPass: p2pFailed.slice(0, cap),
-      truncated: f2pFailed.length > cap || p2pFailed.length > cap,
-    },
+    failedCases: { failToPass: f2pFailed, passToPass: p2pFailed },
     excludedFlaky: classes.excludedFlaky.length,
   };
 }

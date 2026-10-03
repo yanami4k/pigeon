@@ -60,7 +60,7 @@ async function runRejected(options: {
 }): Promise<{ text: string; gate: unknown }> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-reason-source-"));
   writeFileSync(join(root, "a.ts"), ORIGINAL);
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const sessionId = newSessionId();
   const faults: unknown[] = [];
   const sessionStore = openSessionStore({

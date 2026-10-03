@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { STREAM_SPAWN_WORKERS, STREAM_WEB_TOOLS } from "../eval/stream-agents.ts";
-import { REVIEW_ALLOWED_TOOLS } from "../memory/review-text.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -81,7 +80,7 @@ test("worker 与主会话同样拿到两件工具：父策略里有且装配给�
       await handle.run("看看");
       await handle.dispose();
       seen.push(
-        loadStoreSession(join(root, ".pigeon", "sessions"), sessionId)?.view.runs[0]?.start
+        loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId)?.view.runs[0]?.start
           .advertisedTools ?? []
       );
     }
@@ -91,9 +90,7 @@ test("worker 与主会话同样拿到两件工具：父策略里有且装配给�
   }
 });
 
-test("跑批器各条件不注册联网工具（身份头照记）；复盘运行面只放行 read_file 与 update_memory，两件工具不在其中", () => {
+test("跑批器各条件不注册联网工具（身份头照记）", () => {
   assert.equal(STREAM_WEB_TOOLS, false);
   assert.equal(STREAM_SPAWN_WORKERS, false);
-  assert.ok(!REVIEW_ALLOWED_TOOLS.includes(WEB_SEARCH_TOOL));
-  assert.ok(!REVIEW_ALLOWED_TOOLS.includes(WEB_FETCH_TOOL));
 });

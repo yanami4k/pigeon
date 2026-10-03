@@ -1,5 +1,5 @@
 // 思考不持久化（045）端到端：headless 运行打开该选项时，会话存储不存思考正文——历史与读原文提示
-// "未持久化，N 字节"，检索搜不到思考正文；选项缺省时思考照存照显。
+// "未持久化，N 字节"，检索搜不到思考正文；选项缺省时思考照存照显（读原文可见；决策 339 起检索一律不搜思考内容）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import { createReadSessionEntryTool } from "../memory/search-tools.ts";
 import { createSessionSearch, type SessionSearchHit } from "../memory/session-search.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { loadSessionHistory } from "./history.ts";
 import type { McpSession } from "./mcp.ts";
 
@@ -40,7 +40,7 @@ async function run(persistThinking: boolean | undefined) {
   return {
     root,
     sessionId: result.sessionId,
-    sessionsDir: join(root, ".pigeon", "sessions"),
+    sessionsDir: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
@@ -49,11 +49,7 @@ async function run(persistThinking: boolean | undefined) {
 }
 
 async function hits(sessionsDir: string, keyword: string): Promise<SessionSearchHit[]> {
-  const found: SessionSearchHit[] = [];
-  for await (const hit of createSessionSearch(sessionsDir).search({ keywords: [keyword] })) {
-    found.push(hit);
-  }
-  return found;
+  return (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).hits;
 }
 
 test("选项关闭：历史与读原文提示未持久化与字节数，检索搜不到思考正文", async () => {
@@ -87,12 +83,23 @@ test("选项关闭：历史与读原文提示未持久化与字节数，检索�
   }
 });
 
-test("选项缺省：思考照存，历史与检索照常呈现思考正文", async () => {
+test("选项缺省：思考照存，历史与读原文照常呈现思考正文；检索不搜思考内容（决策 339）", async () => {
   const t = await run(undefined);
   try {
     const history = loadSessionHistory(t.root, t.sessionId).map((line) => line.text);
     assert.equal(history[1], `~ ${THINKING}`);
-    assert.equal((await hits(t.sessionsDir, THINKING)).length, 1);
+    const assistant = loadSessionView(t.sessionsDir, t.sessionId)?.messages[1];
+    assert.ok(assistant !== undefined);
+    const text = (
+      await createReadSessionEntryTool({ sessionsDir: t.sessionsDir }).execute("t", {
+        entryId: assistant.entryId,
+      })
+    ).content
+      .map((block) => ("text" in block ? block.text : ""))
+      .join("");
+    assert.ok(text.includes(`[thinking] ${THINKING}`));
+    // 决策 339 ②：检索只搜对话正文，思考内容不在其中
+    assert.deepEqual(await hits(t.sessionsDir, THINKING), []);
   } finally {
     t.cleanup();
   }

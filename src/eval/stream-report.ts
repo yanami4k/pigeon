@@ -340,8 +340,8 @@ export function renderStreamReport(
   out.push(
     "## 次要指标（第一遍）",
     "",
-    "| 条件 | 类型错误（各步合计） | 格式错误（各步合计） | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 | 依赖环境选不出而作废的步 | 验证工具故障（步次） |",
-    "|---|---|---|---|---|---|---|---|---|"
+    "| 条件 | 类型错误（各步合计） | 格式错误（各步合计） | 轮数 | token（未命中输入 / 缓存命中 / 输出） | 墙钟（分） | 限额暂停 | 依赖环境选不出而作废的步 |",
+    "|---|---|---|---|---|---|---|---|"
   );
   for (const c of conditions) {
     const rows = firstAll.filter((l) => l.condition === c);
@@ -356,7 +356,7 @@ export function renderStreamReport(
         rows.map((l) => l.usage.output)
       )} | ${(sum(rows.map((l) => l.wallMs)) / 60_000).toFixed(1)} | ${sum(
         rows.map((l) => l.limitPauses.length)
-      )} | ${rows.filter((l) => l.outcome === "skipped").length} | ${q((l) => l.verifyToolFaults)} |`
+      )} | ${rows.filter((l) => l.outcome === "skipped").length} |`
     );
   }
   out.push("");

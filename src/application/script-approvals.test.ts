@@ -7,6 +7,7 @@ import {
   SCRIPT_KIND_DENY_COMMANDS,
   SCRIPT_KIND_DENY_PROGRAMS,
   scriptApprovalKind,
+  wrapScriptApprovals,
 } from "./script-approvals.ts";
 
 const run = (command: string, needsShell = false): ApprovalRequest => ({
@@ -92,4 +93,33 @@ test("网络档取网站；其余工具取工具加目录，无路径取工具",
     scriptApprovalKind({ toolName: "mcp__x__y", toolCallId: "c", args: {} })?.text,
     "调用 mcp__x__y"
   );
+});
+
+test("决策 326 ①：写受保护路径的请示没有同类——不给 [s]，同类已放行也照常请示", async () => {
+  const protectedWrite: ApprovalRequest = {
+    toolName: "edit_file",
+    toolCallId: "c",
+    args: { path: ".pigeon/settings.json" },
+    protectedPath: ".pigeon/settings.json",
+    script: { runId: "r1" },
+  };
+  assert.equal(scriptApprovalKind(protectedWrite), undefined);
+  const asked: ApprovalRequest[] = [];
+  const allowed = new Set([`tool\nedit_file\n.pigeon`, "tool\nedit_file"]);
+  const wrapped = wrapScriptApprovals(
+    async (request) => {
+      asked.push(request);
+      return { approved: false };
+    },
+    () => ({
+      title: () => "脚本",
+      allows: (_runId, key) => allowed.has(key),
+      allow: (_runId, key) => {
+        allowed.add(key);
+      },
+    })
+  );
+  assert.deepEqual(await wrapped(protectedWrite), { approved: false });
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0]?.script?.kind, undefined);
 });

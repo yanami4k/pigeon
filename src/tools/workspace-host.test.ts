@@ -34,6 +34,9 @@ function memoryHost(initial: Record<string, string>) {
       }
       return target;
     },
+    async resolveForWrite(inputPath) {
+      return host.resolveExisting(inputPath);
+    },
     async isFile(resolvedPath) {
       return files.has(resolvedPath);
     },
@@ -55,6 +58,8 @@ function memoryHost(initial: Record<string, string>) {
         outputBytes: 5,
         outputHash: "0".repeat(64),
         output: "hello",
+        stdout: "hello",
+        stderr: "",
       };
     },
     async listFiles() {

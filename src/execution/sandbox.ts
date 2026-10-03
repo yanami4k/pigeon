@@ -1,5 +1,5 @@
 // 日常沙箱（决策 237、245–248）：日常入口（终端界面、命令行对话、pigeon run）可选在一个一次性的 Docker 容器里工作。
-// 本模块只管容器的生命周期与改动交回，工具经容器执行端（container-host.ts）读写与执行；会话文件、.pigeon/learned 等
+// 本模块只管容器的生命周期与改动交回，工具经容器执行端（container-host.ts）读写与执行；会话文件、.pigeon/state/learned 等
 // 仍在宿主的治理根，不进容器。
 //   开工（278）：缺省把工作目录里未提交的改动（含未被 .gitignore 忽略的新文件）拍成以 HEAD 为父的快照提交（workdir-snapshot.ts，
 //         引用 refs/pigeon/sandbox-start/<会话号>），从它打 git bundle，经标准输入送进新容器，在容器里建仓库并检出到
@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { SandboxConfig } from "../state/sandbox-config.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
   containerExec,
@@ -26,12 +27,7 @@ import {
   removeWorkspaceContainer,
   startWorkspaceContainer,
 } from "./container-host.ts";
-import {
-  ensureSandboxImage,
-  loadSandboxConfig,
-  resolveSandboxImage,
-  type SandboxImageSpec,
-} from "./sandbox-image.ts";
+import { ensureSandboxImage, resolveSandboxImage, type SandboxImageSpec } from "./sandbox-image.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "./workdir-snapshot.ts";
 
 // 联网档位（246）：缺省联网，可改为断网；以后可加"只放行包管理源"一档而不改用法
@@ -95,6 +91,86 @@ export function sandboxCacheArgs(
   ];
 }
 
+// 决策 333：日常沙箱容器的资源上限。缺省内存上限为 Docker 守护进程所在机器内存的一半（取 docker info 的 MemTotal：
+// DOCKER_HOST 可指向远程机器，本进程的 os.totalmem() 不一定是容器所在的机器），交换区不另占（--memory-swap 取同值）；
+// 进程数上限 4096；CPU 不限。三项可在设置里改，写 0 为不限（接入点：OpenSandboxOptions.limits）。去能力与禁止提权不在此列
+export const SANDBOX_DEFAULT_PIDS_LIMIT = 4096;
+
+// 设置给出的上限（缺项取缺省；0 为不限）
+export interface SandboxLimitSettings {
+  memoryBytes?: number;
+  pids?: number;
+  cpus?: number;
+}
+
+// 生效的上限（0 为不限）
+export interface SandboxLimits {
+  memoryBytes: number;
+  pids: number;
+  cpus: number;
+}
+
+// Docker 守护进程所在机器的内存总量（字节）；读不到为 undefined
+export async function dockerMemTotal(
+  docker: readonly string[] = ["docker"]
+): Promise<number | undefined> {
+  try {
+    const result = await dockerOnce(docker, ["info", "--format", "{{.MemTotal}}"], 30_000);
+    const text = result.stdout.toString("utf8").trim();
+    const bytes = Number(text);
+    return result.exitCode === 0 && /^\d+$/.test(text) && bytes > 0 ? bytes : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// 缺省内存上限取 memTotal 的一半（向下取整到 MiB）；memTotal 读不到时为 0（不限）
+export function resolveSandboxLimits(
+  settings: SandboxLimitSettings | undefined,
+  memTotal: number | undefined
+): SandboxLimits {
+  const mib = 1024 * 1024;
+  const defaultMemory = memTotal === undefined ? 0 : Math.floor(memTotal / 2 / mib) * mib;
+  return {
+    memoryBytes: settings?.memoryBytes ?? defaultMemory,
+    pids: settings?.pids ?? SANDBOX_DEFAULT_PIDS_LIMIT,
+    cpus: settings?.cpus ?? 0,
+  };
+}
+
+// docker run 的上限参数：0 的那项不带（不限）
+export function sandboxLimitArgs(limits: SandboxLimits): string[] {
+  return [
+    ...(limits.memoryBytes > 0
+      ? ["--memory", String(limits.memoryBytes), "--memory-swap", String(limits.memoryBytes)]
+      : []),
+    ...(limits.pids > 0 ? ["--pids-limit", String(limits.pids)] : []),
+    ...(limits.cpus > 0 ? ["--cpus", String(limits.cpus)] : []),
+  ];
+}
+
+// 字节数的可读写法：整 GiB / MiB 不带小数，其余保留一位
+export function formatBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return `${text} ${units[unit]}`;
+}
+
+// 给人看的上限摘要（就绪提示用）
+export function sandboxLimitsSummary(limits: SandboxLimits): string {
+  return [
+    `内存上限 ${limits.memoryBytes > 0 ? formatBytes(limits.memoryBytes) : "不限"}`,
+    `进程数上限 ${limits.pids > 0 ? limits.pids : "不限"}`,
+    `CPU ${limits.cpus > 0 ? `上限 ${limits.cpus} 核` : "不限"}`,
+  ].join("、");
+}
+
 export function sandboxBranch(sessionId: string): string {
   return `pigeon/sandbox-${sessionId}`;
 }
@@ -141,6 +217,8 @@ export interface Sandbox {
   readonly startSnapshot?: SandboxStartSnapshot;
   // 决策 280：挂进容器的共用下载缓存卷
   readonly cacheVolume: string;
+  // 决策 333：容器的资源上限（0 为不限）
+  readonly limits: SandboxLimits;
   // 工具经它读写容器里的工作区
   readonly host: WorkspaceHost;
   // 把改动交回成宿主仓库里的 pigeon/sandbox-<会话号>（会话中可多次调用）
@@ -160,8 +238,10 @@ export interface OpenSandboxOptions {
   resume?: boolean;
   // 决策 278：只从当前分支的最新提交开工，不带未提交的改动（缺省带）；续跑不看这一项
   fromHead?: boolean;
-  // 镜像来源（缺省按项目的 .pigeon/sandbox.json 与环境变量解析）
+  // 镜像来源（缺省按 sandboxConfig 与环境变量解析）
   image?: SandboxImageSpec;
+  // 决策 325：本会话设置快照的 sandbox 一节（缺省空配置，即通用镜像）
+  sandboxConfig?: SandboxConfig;
   docker?: readonly string[];
   // 容器内的工作区根（缺省 /workspace；测试的假 docker 指到本机临时目录）
   containerRoot?: string;
@@ -170,6 +250,12 @@ export interface OpenSandboxOptions {
   cacheRoot?: string;
   // 开工时给人看的提示（带入的未提交改动、残留容器、首次构建镜像）
   log?: (line: string) => void;
+  // 运行中给人看的提示（命令超出内存上限等）；缺省同 log
+  notice?: (line: string) => void;
+  // 决策 333：资源上限的设置（缺项取缺省）
+  limits?: SandboxLimitSettings;
+  // 决策 333：容器里 oom_kill 计数所在的文件（缺省按 cgroup v2、v1 的位置；测试改到别处）
+  oomCounterFiles?: readonly string[];
 }
 
 interface GitResult {
@@ -383,13 +469,17 @@ export function residualNotice(residual: readonly SandboxContainerInfo[]): strin
   );
 }
 
-// 在容器里建仓库：bundle 从标准输入读入，取出起点引用（$1）检出到沙箱分支（$2）
+// 在容器里建仓库：bundle 从标准输入读入，取出起点引用（$1）检出到沙箱分支（$2）。
+// core.autocrlf 关掉：容器里的仓库不套用宿主全局配置的换行转换，工作区内容与快照逐字节一致
 const CLONE_SCRIPT = [
   "set -e",
   'b="$(mktemp)"',
   'cat > "$b"',
   "git init -q .",
+  "git config core.autocrlf false",
   'git symbolic-ref HEAD "refs/heads/$2"',
+  // 行尾按字节保真：宿主侧（含本机测试的假 docker）系统配置可能是 autocrlf=true，检出会被转成 CRLF
+  "git config core.autocrlf false",
   'git fetch -q "$b" "$1"',
   'git update-ref "refs/heads/$2" FETCH_HEAD',
   'git reset -q --hard "refs/heads/$2"',
@@ -468,10 +558,16 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
   }
 
   // 镜像先就位（首次构建可能要几分钟）：之后再拍快照，快照引用不会因镜像构建或拉取失败而留下
-  const spec =
-    options.image ?? resolveSandboxImage(options.repoRoot, loadSandboxConfig(options.repoRoot));
+  const spec = options.image ?? resolveSandboxImage(options.repoRoot, options.sandboxConfig ?? {});
   const image = await ensureSandboxImage(spec, { docker, log });
   const runAsFallbackUser = await imageRunsAsRoot(image, docker, log);
+  // 决策 333：资源上限；内存未设时按守护进程所在机器内存的一半，读不到即不设并说明
+  const memTotal =
+    options.limits?.memoryBytes === undefined ? await dockerMemTotal(docker) : undefined;
+  const limits = resolveSandboxLimits(options.limits, memTotal);
+  if (options.limits?.memoryBytes === undefined && memTotal === undefined) {
+    log("读不到 Docker 所在机器的内存总量（docker info 的 MemTotal），本次沙箱不设内存上限");
+  }
 
   const branchLabel = hostGit(repo, ["symbolic-ref", "--short", "-q", "HEAD"]).stdout.trim();
   const baseLabel = branchLabel !== "" ? branchLabel : head.stdout.trim().slice(0, 12);
@@ -580,6 +676,8 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
         ...sandboxCacheArgs(cacheVolume, cacheRoot),
         // 以非 root 用户运行；家目录用 /tmp（任何镜像里都可写）
         ...(runAsFallbackUser ? ["--user", SANDBOX_FALLBACK_USER, "-e", "HOME=/tmp"] : []),
+        // 决策 333：内存（交换区不另占）、进程数、CPU 上限
+        ...sandboxLimitArgs(limits),
       ],
     });
   } catch (error) {
@@ -597,7 +695,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
       throw new Error(
         `镜像 ${image} 里没有可用的 git（git --version 失败：${(git.stderr || git.stdout).trim()}）：` +
           "沙箱要在容器里用 git 建仓库、把改动提交成分支交回。请换用带 git 的镜像" +
-          "（.pigeon/sandbox.json 的 image 或 dockerfile），或去掉该配置用 Pigeon 自带的通用镜像"
+          "（设置 sandbox 一节的 image 或 dockerfile），或去掉该配置用 Pigeon 自带的通用镜像"
       );
     }
     const uid = await containerExec({ container, docker, command: ["id", "-u"] });
@@ -643,7 +741,23 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
   // 开箱即删快照引用（决策 278 修订）：快照提交已进容器的仓库，交回的分支含它；引用只护住拍快照到开箱这一段
   dropStartRef();
 
-  const host = createContainerWorkspaceHost({ container, root: workspaceRoot, docker });
+  // 决策 333：设了内存上限时，执行端判定命令是否因超出上限被杀，并给人报一行
+  const host = createContainerWorkspaceHost({
+    container,
+    root: workspaceRoot,
+    docker,
+    ...(limits.memoryBytes > 0
+      ? {
+          memoryLimit: {
+            label: formatBytes(limits.memoryBytes),
+            ...(options.oomCounterFiles !== undefined
+              ? { counterFiles: options.oomCounterFiles }
+              : {}),
+          },
+        }
+      : {}),
+    onNotice: options.notice ?? log,
+  });
   let closed: SandboxExport | undefined;
 
   const exportChanges = async (): Promise<SandboxExport> => {
@@ -719,6 +833,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     startCommit,
     ...(startSnapshot !== undefined ? { startSnapshot } : {}),
     cacheVolume,
+    limits,
     host,
     exportChanges,
     async close() {

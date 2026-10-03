@@ -380,6 +380,33 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
     assert.equal(next.output.trim(), "alive");
   });
 
+  test("辅助命令超时（决策 335）：卡住的辅助命令在容器内被终止，容器不重启，agent 在后台起的进程仍在", async () => {
+    const quick = createContainerWorkspaceHost({ container: name, root, helperTimeoutMs: 1000 });
+    const made = await sh(`mkfifo ${root}/stuck.fifo`);
+    assert.equal(made.exitCode, 0, made.stderr);
+    const startedBefore = spawnSync("docker", ["inspect", "-f", "{{.State.StartedAt}}", name], {
+      encoding: "utf8",
+    }).stdout;
+    const background = await quick.exec(
+      { program: "sh", args: ["-c", "sleep 600 >/dev/null 2>&1 & echo $!"], verbatim: false },
+      execOptions()
+    );
+    const pid = background.output.trim();
+    await assert.rejects(quick.readText(`${root}/stuck.fifo`), /辅助命令超过 1 秒，已在容器内终止/);
+    const processes = await sh("ps");
+    assert.doesNotMatch(
+      processes.stdout,
+      /cat -- \/work\/stuck\.fifo/,
+      `残留进程：\n${processes.stdout}`
+    );
+    assert.equal((await sh(`kill -0 ${pid}`)).exitCode, 0, "agent 的后台进程仍在");
+    const startedAfter = spawnSync("docker", ["inspect", "-f", "{{.State.StartedAt}}", name], {
+      encoding: "utf8",
+    }).stdout;
+    assert.equal(startedAfter, startedBefore, "容器没有重启");
+    await sh(`kill ${pid}; rm -f ${root}/stuck.fifo`);
+  });
+
   test("文件清单：不含版本库元数据；命令造成的新增、修改、删除在 run_command 的文件变化里可见；超时经工具上抛为环境错误", async () => {
     const listed = await host.listFiles(100);
     assert.equal(listed.truncated, false);
@@ -416,7 +443,7 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
 
   test("文件清单跳过工作区根下的 .pigeon：治理目录里的新增与修改不进文件变化，子目录里同名的普通文件夹照常报出", async () => {
     const made = await sh(
-      `mkdir -p ${root}/.pigeon/sessions ${root}/sub/.pigeon && printf '{}\\n' > ${root}/.pigeon/sessions/s.jsonl && ` +
+      `mkdir -p ${root}/.pigeon/state/sessions ${root}/sub/.pigeon && printf '{}\\n' > ${root}/.pigeon/state/sessions/s.jsonl && ` +
         `printf 'keep\\n' > ${root}/sub/.pigeon/keep.txt`
     );
     assert.equal(made.exitCode, 0, made.stderr);
@@ -433,7 +460,7 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
       "c4",
       {
         command:
-          "echo '{}' >> .pigeon/sessions/s.jsonl && mkdir -p .pigeon/learned && echo fact > .pigeon/learned/MEMORY.md && " +
+          "echo '{}' >> .pigeon/state/sessions/s.jsonl && mkdir -p .pigeon/state/learned && echo fact > .pigeon/state/learned/MEMORY.md && " +
           "echo c > src/c.txt && echo more >> sub/.pigeon/keep.txt && echo new > sub/.pigeon/new.txt",
       },
       undefined

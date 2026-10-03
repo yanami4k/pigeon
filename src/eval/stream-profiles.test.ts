@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { clearMarkedProcesses } from "./stream-agents.ts";
 import {
@@ -21,7 +22,6 @@ import {
   STRANDS_VERIFY_STEPS,
   strandsProfile,
   strandsRuntime,
-  verifyConfigFile,
 } from "./stream-profiles.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import {
@@ -413,12 +413,6 @@ test("分步验证：本仓库流三步（类型、测试、分层；格式另�
     "-c",
     `cd strands-py && ${STRANDS_VERIFY_STEPS[1]?.command}`,
   ]);
-  // 写进 .pigeon/verify.json 的形状：与分步验证配置同一形状（version、steps、timeoutMs）
-  assert.deepEqual(verifyConfigFile(STRANDS_VERIFY_STEPS, 1_800_000), {
-    version: 1,
-    steps: STRANDS_VERIFY_STEPS,
-    timeoutMs: 1_800_000,
-  });
 });
 
 test("验证门由分步派生：各步全跑、各自带标题，任一步失败即不通过（失败之后的步照样跑）", async () => {
@@ -620,7 +614,9 @@ test("人的 pytest 配置以 root 写到容器里 agent 不可写的位置（/o
     const calls = readFileSync(log, "utf8")
       .split("\n")
       .filter((l) => l !== "")
-      .map((l) => JSON.parse(l) as string[]);
+      .map((l) => JSON.parse(l) as string[])
+      // 探测容器有无 timeout 的调用（决策 335）不算
+      .filter((c) => !c.some((a) => a.includes(TIMEOUT_PROBE_SCRIPT)));
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0]?.slice(0, 4), ["exec", "-i", "-u", "0"]);
     assert.ok(calls[0]?.join(" ").includes("/opt/stream/human-pytest"));

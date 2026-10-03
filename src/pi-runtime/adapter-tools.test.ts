@@ -683,3 +683,185 @@ test("人工拒绝保留指纹计数：模型改参重提是期望的修订循�
     cleanup();
   }
 });
+
+// 决策 324：afterToolCall 转发——成功走 PostToolUse、失败走 PostToolUseFailure（同一端口用 isError 区分）
+test("toolHooks.toolFinished：成功调用 isError=false、失败调用 isError=true；text 为工具结果正文", async () => {
+  const original = "alpha\nbeta\ngamma\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    const seen: Array<{ toolName: string; isError: boolean; text: string }> = [];
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "prompt" }),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+          { text: "再读", toolCalls: [{ name: "read_file", args: { path: "missing.ts" } }] },
+          { text: "完成" },
+        ],
+      }),
+      governance: createToolGovernance({ registry: makeRegistry() }),
+      tools: [createReadFileTool(root)],
+      toolHooks: {
+        toolFinished: async (input) => {
+          seen.push({ toolName: input.toolName, isError: input.isError, text: input.text });
+          return undefined;
+        },
+      },
+    });
+
+    const result = await adapter.run("读文件");
+    assert.equal(result.status, "completed");
+    assert.deepEqual(
+      seen.map((entry) => [entry.toolName, entry.isError]),
+      [
+        ["read_file", false],
+        ["read_file", true],
+      ]
+    );
+    // 成功那次收到的是 read_file 的正文（带 hashline 锚点）
+    assert.match(seen[0]?.text ?? "", /alpha/);
+    assert.match(seen[0]?.text ?? "", /#/);
+    // 失败那次收到的是错误正文（读不存在的文件），非空
+    assert.ok((seen[1]?.text ?? "").length > 0, JSON.stringify(seen[1]));
+    assert.doesNotMatch(seen[1]?.text ?? "", /alpha/);
+
+    const results = adapter.transcript().filter((message) => message.role === "toolResult");
+    assert.deepEqual(
+      results.map((message) => (message.role === "toolResult" ? message.isError : null)),
+      [false, true]
+    );
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("toolHooks.toolFinished：replaceText 整份替换工具结果，contextText 追加为末尾文本块", async () => {
+  const original = "alpha\nbeta\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "prompt" }),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+          { text: "完成" },
+        ],
+      }),
+      governance: createToolGovernance({ registry: makeRegistry() }),
+      tools: [createReadFileTool(root)],
+      toolHooks: {
+        toolFinished: async () => ({ replaceText: "替换后的正文", contextText: "补充的上下文" }),
+      },
+    });
+
+    const result = await adapter.run("读文件");
+    assert.equal(result.status, "completed");
+    const toolResult = adapter.transcript().find((message) => message.role === "toolResult");
+    if (toolResult === undefined || toolResult.role !== "toolResult") {
+      throw new Error("应有工具结果消息");
+    }
+    assert.equal(toolResult.isError, false);
+    assert.deepEqual(
+      toolResult.content.map((block) => block.type),
+      ["text", "text"]
+    );
+    assert.deepEqual(
+      toolResult.content.map((block) => (block.type === "text" ? block.text : "")),
+      ["替换后的正文", "补充的上下文"]
+    );
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+test("toolHooks.toolFinished：只给 contextText 时原正文保留，补充文本追加在末尾", async () => {
+  const original = "alpha\nbeta\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "prompt" }),
+      streamFn: createFakeStreamFn({
+        replies: [
+          { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+          { text: "完成" },
+        ],
+      }),
+      governance: createToolGovernance({ registry: makeRegistry() }),
+      tools: [createReadFileTool(root)],
+      toolHooks: {
+        toolFinished: async () => ({ contextText: "补充的上下文" }),
+      },
+    });
+
+    const result = await adapter.run("读文件");
+    assert.equal(result.status, "completed");
+    const toolResult = adapter.transcript().find((message) => message.role === "toolResult");
+    if (toolResult === undefined || toolResult.role !== "toolResult") {
+      throw new Error("应有工具结果消息");
+    }
+    assert.equal(toolResult.content.length, 2);
+    const first = toolResult.content[0];
+    const last = toolResult.content[1];
+    assert.ok(first?.type === "text" && first.text.includes("alpha"), JSON.stringify(toolResult));
+    assert.ok(last?.type === "text" && last.text === "补充的上下文", JSON.stringify(toolResult));
+
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+// 决策 324：PostToolUse 返回 continue:false 之后，同批其余调用（并行批次里已准备好、仍在执行的）不再跑收尾钩子
+test("toolHooks.toolFinished：一个调用要求停止后，同批稍后收尾的调用不再跑收尾钩子，也不再问模型", async () => {
+  const { root, cleanup } = makeWorkspace({ "a.ts": "a\n", "b.ts": "b\n" });
+  try {
+    const read = createReadFileTool(root);
+    // b.ts 晚一点执行完：它的收尾一定在 a.ts 的停止信号之后
+    const slowRead: typeof read = {
+      ...read,
+      execute: async (id, params, signal, onUpdate) => {
+        if (params.path === "b.ts") await new Promise((resolve) => setTimeout(resolve, 100));
+        return read.execute(id, params, signal, onUpdate);
+      },
+    };
+    const seen: string[] = [];
+    const streamFn = createFakeStreamFn({
+      replies: [
+        {
+          text: "读两个",
+          toolCalls: [
+            { name: "read_file", args: { path: "a.ts" } },
+            { name: "read_file", args: { path: "b.ts" } },
+          ],
+        },
+        { text: "不应再问" },
+      ],
+    });
+    const adapter = new PiRuntimeAdapter({
+      snapshot: makeSnapshot({ allow: ["read_file"], approvalMode: "prompt" }),
+      streamFn,
+      governance: createToolGovernance({ registry: makeRegistry() }),
+      tools: [slowRead],
+      parallelTools: true,
+      toolHooks: {
+        toolFinished: async (input) => {
+          const path = (input.args as { path: string }).path;
+          seen.push(path);
+          return path === "a.ts" ? { stopReason: "停-并行" } : undefined;
+        },
+      },
+    });
+    const result = await adapter.run("读文件");
+    assert.deepEqual(seen, ["a.ts"]);
+    assert.equal(streamFn.calls.length, 1);
+    assert.equal(result.status, "aborted");
+    assert.match(result.errorMessage ?? "", /钩子要求停止：停-并行/);
+    await adapter.dispose();
+  } finally {
+    cleanup();
+  }
+});

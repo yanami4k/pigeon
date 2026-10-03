@@ -24,7 +24,8 @@ export type ToolExecutionState = Static<typeof ToolExecutionStateSchema>;
 // 批准来源：human（运行时人工批准）/ policy:yolo（人事先批发授权，决策 4）/
 // policy:auto（prompt 模式下按 read 层规则自动放行）/ policy:deny（deny 清单自动拒绝——
 // 策略拒绝不能伪装成人工或 yolo 决定）/ human:grant（命中会话级 grant，M4 S6 决策 3）/
-// policy:config（命中 .pigeon/grants.json 固化规则，M4 S6 D6）。
+// policy:config（命中设置的 permissions 一节固化规则，M4 S6 D6）/ policy:hook（PreToolUse 钩子放行，
+// 决策 324——只免掉人工审批这一步；钩子拒绝同样记 policy:hook 的 rejected）。
 // grantRef：human:grant / policy:config 的回指出处——每次自动放行账本回指具体 grant
 // 或配置条目，可审计"这次写操作凭什么没问人"（决策 3）；无 grant 出处的决定缺省
 export const ToolExecutionDecisionSchema = Type.Object({
@@ -36,6 +37,7 @@ export const ToolExecutionDecisionSchema = Type.Object({
     Type.Literal("policy:deny"),
     Type.Literal("human:grant"),
     Type.Literal("policy:config"),
+    Type.Literal("policy:hook"),
   ]),
   grantRef: Type.Optional(
     Type.Object({

@@ -74,7 +74,7 @@ test("装配根：注入审批 handler 的 bundle 跑通 prompt 模式写调用�
       await bundle.sessionStore.close();
     }
     // 审批决定落会话存储：edit_file 的工具结果消息上挂着"人工批准"的审批闸标记，且只有这一条工具结果
-    const loaded = loadStoreSession(join(root, ".pigeon", "sessions"), sessionId);
+    const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(loaded !== undefined, "会话存储里应有本会话");
     const results = (loaded.view.runs[0]?.messages ?? [])
       .map((ref) => ref.message)

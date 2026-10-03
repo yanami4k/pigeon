@@ -65,7 +65,7 @@ function repeatLead(stop: Pick<LoopStop, "count" | "alternating">): string {
     : `最近连续 ${stop.count} 轮，你的工具调用和得到的结果都与上一轮完全相同：`;
 }
 
-// 定稿文字：两版提醒、终端界面的叫停说明、worker 的打转原因、pigeon run 的收尾说明、复盘的告警
+// 定稿文字：两版提醒、终端界面的叫停说明、worker 的打转原因、pigeon run 的收尾说明
 export const LOOP_GUARD_TEXTS = {
   remind: (stop: LoopStop) =>
     `${LOOP_REMINDER_PREFIX}${repeatLead(stop)}\n${patternDetail(stop)}\n` +
@@ -85,8 +85,6 @@ export const LOOP_GUARD_TEXTS = {
   // pigeon run：收尾说明（终态一行之后）
   runStopped: (stop: LoopStop) =>
     `检测到打转：连续 ${stop.count} 轮重复同样的工具调用与结果，本次运行已叫停。重复的调用：${loopCallsSummary(stop)}`,
-  // 复盘：告警（同一类只说一次）；后果由调用方接在后面（这一步的结果不受影响 / 视同已复盘）
-  reviewStopped: (label: string) => `${label}因打转被叫停：已写入的记忆照常保留`,
 };
 
 // 挂打转检测的运行面：整轮观察口与通知队列

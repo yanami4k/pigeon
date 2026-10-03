@@ -1,5 +1,5 @@
 // 新会话存储的写者（决策 176–181 / 184 / 206 / 210）：以 pi-agent-core 0.84.4 的 JsonlSessionRepo 为存储，
-// 会话根为 .pigeon/sessions，照 pi 原生布局按工作目录编码分子目录、文件名为创建时间加会话号；以 Pigeon 自己的会话号创建。
+// 会话根为 .pigeon/state/sessions，照 pi 原生布局按工作目录编码分子目录、文件名为创建时间加会话号；以 Pigeon 自己的会话号创建。
 // - 写者用 pi 的打开；跨进程单写者锁由调用方注入（persistence/session-lock.ts，按会话文件加锁）。不注入 fsync（178）。
 // - 消息以 pi 消息条目完整存储，不截断、不写旁置正文文件（179）；写入前剥掉值为 undefined 的键（上游序列化会拒绝）。
 // - 只写 custom 条目（state/session-entries.ts 的七种），不写未知的 entry 或 record 类型（上游写时不报、读时整个文件打不开）。
@@ -76,7 +76,7 @@ export class SessionStoreFault extends Error {
 }
 
 export interface SessionStoreWriterOptions {
-  // 会话根（.pigeon/sessions）
+  // 会话根（.pigeon/state/sessions）
   sessionsRoot: string;
   sessionId: string;
   // 会话的工作目录：新建文件时决定子目录，并记进文件头
@@ -143,6 +143,8 @@ function startCore(key: string, options: SessionStoreWriterOptions): WriterCore 
     path: undefined,
     release: undefined,
   };
+  // 先登记再开始打开：打开失败（含同步抛出的加锁失败）时的摘除总在登记之后
+  openCores.set(key, core);
   core.tail = (async () => {
     const repo = createSessionRepo(options.sessionsRoot);
     try {
@@ -173,6 +175,10 @@ function startCore(key: string, options: SessionStoreWriterOptions): WriterCore 
       core.release?.();
       core.release = undefined;
       core.session = undefined;
+      // 打开失败即从注册表摘除：此后同一会话的打开总是重新尝试，不共用这个失效的核心
+      if (openCores.get(key) === core) {
+        openCores.delete(key);
+      }
       report(options.onFault, "打开", error);
     }
   })();
@@ -185,7 +191,6 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
   let core = openCores.get(key);
   if (core === undefined) {
     core = startCore(key, options);
-    openCores.set(key, core);
   } else {
     core.refs += 1;
   }

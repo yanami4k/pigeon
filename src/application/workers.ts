@@ -10,10 +10,8 @@
 // 决策 301：运行面的流式正文与工具结果两个只读观察口一并交给编排器；编排器只在有观察者（终端界面）时订阅，
 // pigeon run、eval stream 与逐行对话不订，实验路径不受影响。
 
-import path from "node:path";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";
-import type { MemoryRoot } from "../memory/resident.ts";
 import {
   ROLE_MODEL_OVERRIDES,
   ROLE_THINKING_LEVELS,
@@ -28,17 +26,18 @@ import type {
 } from "../orchestration/workers.ts";
 import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { workerStartRefFor } from "../orchestration/worktree.ts";
-import { loadMcpConfig } from "../persistence/mcp-config.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
-import type { AttemptBudget, VerifyConfig } from "../state/attempt-config.ts";
+import type { AttemptBudget } from "../state/attempt-config.ts";
 import type { EventEnvelope } from "../state/events.ts";
+import { DEFAULT_STOP_HOOK_BLOCK_CAP } from "../state/hooks.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
   BranchHeaderInput,
@@ -47,16 +46,17 @@ import type {
   WorkerLimits,
   WorkerRole,
 } from "../state/session-payloads.ts";
+import { mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import type { SessionHooks } from "./hooks.ts";
 import { loopGuardWatcher } from "./loop-guard.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
 import {
   buildRuntime,
   disposeRuntime,
   type LearnedMemoryConfig,
-  type ReviewSessionConfig,
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
@@ -90,8 +90,7 @@ export interface WorkerRuntimeDeps {
   // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
   temperature?: number;
   taskDirective?: string;
-  // 决策 191、217：推送记忆——worker 与常驻 Memory 同样处理：父会话开着即带推送段与记忆工具（冲突处理的填法、上限同父会话），
-  // 不做压缩前复盘（压缩前回调只给无父会话的运行面）
+  // 决策 191、331：推送记忆——父会话开着即带推送段（上限同父会话）；worker 只推送，不带记忆工具
   learnedMemory?: LearnedMemoryConfig;
   // M6（决策 064 子裁决 ③）：角色的模型接入覆盖列（缺省取 roles.ts 的角色表，第一版四个角色都留空）
   roleModelOverrides?: Readonly<Partial<Record<WorkerRole, RoleModelOverride>>>;
@@ -105,6 +104,8 @@ export interface WorkerRuntimeDeps {
   nesting?: { settings: OrchestrationSettings; orchestrator: () => WorkerOrchestrator | undefined };
   // 决策 286：worker 会话存储告警的出口（终端界面运行期间落消息区）；缺省标准错误输出
   storeWarn?: WarnSink;
+  // 决策 325：设置快照——worker 用派出它的会话的快照（不重读设置文件）；缺省为空快照
+  settingsSnapshot?: SettingsSnapshot;
 }
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
@@ -200,10 +201,8 @@ export function sessionWorkerRuntimeFactory(
     deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
   // 决策 188、218：worker 继承父运行面的压缩配置（显式传入时以传入值为准）；父运行面没给即产品缺省
   const compaction = deps.compaction ?? deps.bundle.adapter.compactionConfig();
-  // 决策 191、217：worker 继承父运行面的推送记忆（开着才带），不做压缩前复盘
-  const parentLearned = deps.learnedMemory ?? deps.bundle.learnedMemory;
-  const learnedMemory =
-    parentLearned !== undefined ? { ...parentLearned, review: false as const } : undefined;
+  // 决策 191、217：worker 继承父运行面的推送记忆（开着才带）
+  const learnedMemory = deps.learnedMemory ?? deps.bundle.learnedMemory;
   return createWorkerRuntimeFactory({
     streamFnFor: () => deps.streamFn,
     provider: deps.provider,
@@ -226,6 +225,8 @@ export function sessionWorkerRuntimeFactory(
     ...(deps.webTools !== undefined ? { webTools: deps.webTools } : {}),
     ...(deps.nesting !== undefined ? { nesting: deps.nesting } : {}),
     ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
+    // 决策 325：worker 沿用父运行面的设置快照（含启动时的确认结果）
+    settingsSnapshot: deps.bundle.settings,
   });
 }
 
@@ -242,7 +243,7 @@ interface RuntimeSurface {
   yolo: boolean;
   // 委派策略（worker）；缺省 = 全部内置工具，审批模式按 yolo 旗标
   policy?: DelegatedPolicy;
-  // worker 角色：run_command 套 .pigeon/commands.json 的角色清单；缺省 = 不套清单
+  // worker 角色：run_command 套设置里 commands 一节的角色清单；缺省 = 不套清单
   role?: WorkerRole;
   approvalHandler?: ApprovalHandler;
   // worker 会话头；缺省 = 普通会话（headless）
@@ -250,9 +251,9 @@ interface RuntimeSurface {
   thinkingLevel?: ThinkingLevel;
   homeDir?: string;
   persistThinking?: boolean;
-  memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
+  agentsMd?: boolean;
   // 决策 061：编辑模式（缺省 hashline）
   editMode?: EditMode;
   // 决策 063：单轮输出上限（缺省 16,384）
@@ -265,17 +266,12 @@ interface RuntimeSurface {
   sessionSearch?: boolean;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）；worker 取主会话的配置
   compaction?: CompactionConfigInput;
-  // 决策 192、207：压缩前回调；只有无父会话的运行面会给
+  // 压缩前回调；只有无父会话的运行面会给
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217：推送记忆（在场即开着）；复盘运行面另带复盘设定
+  // 决策 191、217：推送记忆（在场即开着）
   learnedMemory?: LearnedMemoryConfig;
-  reviewSession?: ReviewSessionConfig;
   // 缺省在治理根有 MCP 配置时以工作区根启动 MCP 会话
   startMcp?: () => Promise<McpSession>;
-  // M7（决策 071）：会话级验证命令（headless 与分支续跑冻结进注入快照）
-  verify?: VerifyConfig;
-  // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照）
-  retryOnFail?: number;
   // 决策 264–267：派 worker 的开关（headless 主会话会给；层数放开时未到最底层的 worker 也给，299）
   spawnWorker?: SpawnWorkerSlot;
   // 决策 309：提交编排脚本的工具槽（只有 headless 主会话会给）
@@ -288,8 +284,6 @@ interface RuntimeSurface {
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
   budget?: AttemptBudget;
-  // 决策 142 / 143：回炉轮数（只有 headless 在开启时给）
-  repairRounds?: number;
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -297,6 +291,8 @@ interface RuntimeSurface {
   onBundle?: (bundle: RuntimeBundle) => void;
   // 决策 286：会话存储告警的出口；缺省标准错误输出
   storeWarn?: WarnSink;
+  // 决策 325：本会话的设置快照（缺省为空快照）
+  settings?: SettingsSnapshot;
 }
 
 // M8（决策 087）：派出记录的上限即该 worker 尝试的预算——两者同一组值，冻结进注入快照后回放才能沿用。
@@ -346,7 +342,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       modelId: override?.modelId ?? deps.modelId,
       yolo: request.policy.approvalMode === "yolo",
       policy: request.policy,
-      // M5.5 S5（决策 048）：run_command 按角色套 .pigeon/commands.json 的允许清单
+      // M5.5 S5（决策 048）：run_command 按角色套设置里 commands 一节的允许清单
       role: request.role,
       // 决策 266：无人值守时不接审批通道（prompt 档 fail-closed，与 headless 主会话同一口径）
       ...(deps.unattended === true ? {} : { approvalHandler: request.approvalHandler }),
@@ -384,7 +380,6 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
                 orchestrator: nestedOrchestrator,
                 governanceRoot: request.governanceRoot,
                 hostSessionId: request.sessionId,
-                hostStore: bundle.sessionStore,
                 target: bundle.adapter,
                 from: request.sessionId,
               }).notices;
@@ -392,9 +387,74 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
           }
         : {}),
       ...(deps.storeWarn !== undefined ? { storeWarn: deps.storeWarn } : {}),
+      ...(deps.settingsSnapshot !== undefined ? { settings: deps.settingsSnapshot } : {}),
     });
+    // 决策 323 / 324：SubagentStart（派出/续做前，可补上下文）与 SubagentStop（worker 收尾，可拦住接着干；
+    // 连续拦截到上限后照常结束）。钩子取本 worker 运行面自己的（随设置快照冻结）
+    const hooksOf = async (): Promise<SessionHooks | undefined> => {
+      // 端口返回 unknown（编排层不依赖 application），此处收窄到 RuntimeBundle（生产者唯一：本层装配）
+      const bundle = (await handle.ready?.()) as RuntimeBundle | undefined;
+      return bundle?.hooks ?? nestedBundle?.hooks;
+    };
+    const runWithSubagentHooks = async (
+      task: string,
+      runOnce: (input: string) => Promise<WorkerRunResult>
+    ): Promise<WorkerRunResult> => {
+      const hooks = await hooksOf();
+      let input = task;
+      let stopActive = false;
+      let blockedCount = 0;
+      const cap = deps.settingsSnapshot?.merged.stopHookBlockCap ?? DEFAULT_STOP_HOOK_BLOCK_CAP;
+      // 决策 322：收尾钩子的输出（拦截理由与补充上下文）随结果交回——多份尝试的汇总各带各的
+      const hookOutputs: string[] = [];
+      const withOutputs = (result: WorkerRunResult): WorkerRunResult =>
+        hookOutputs.length > 0 ? { ...result, hookOutputs } : result;
+      if (hooks !== undefined) {
+        const start = await hooks.runEvent("SubagentStart", request.role, {
+          agent_id: request.sessionId,
+          agent_type: request.role,
+        });
+        if (start.continueFalse !== undefined) {
+          return withOutputs({ status: "aborted" });
+        }
+        if (start.additionalContext.length > 0) {
+          input = `${start.additionalContext.join("\n\n")}\n\n${task}`;
+        }
+      }
+      for (;;) {
+        const result = await runOnce(input);
+        if (hooks === undefined) {
+          return result;
+        }
+        const stop = await hooks.runEvent("SubagentStop", request.role, {
+          agent_id: request.sessionId,
+          agent_type: request.role,
+          stop_hook_active: stopActive,
+          last_assistant_message: handle.summary(),
+        });
+        hookOutputs.push(
+          ...stop.additionalContext,
+          ...(stop.blocked !== undefined ? [stop.blocked.reason] : [])
+        );
+        // continue:false 压过拦截：worker 停止处理，不再续跑
+        if (stop.continueFalse !== undefined) return withOutputs(result);
+        const wantsContinue = stop.blocked !== undefined || stop.additionalContext.length > 0;
+        if (!wantsContinue || blockedCount >= cap) {
+          return withOutputs(result);
+        }
+        blockedCount += 1;
+        stopActive = true;
+        input = [
+          ...stop.additionalContext,
+          ...(stop.blocked !== undefined ? [stop.blocked.reason] : []),
+        ].join("\n\n");
+      }
+    };
     if (nestedOrchestrator === undefined) {
-      return handle;
+      return {
+        ...handle,
+        run: (task) => runWithSubagentHooks(task, (input) => handle.run(input)),
+      };
     }
     // 能再派的 worker：自己的运行结束后等它派出的 worker 全部结束、把通知处理完才算结束；被中止时一并停掉它派出的
     let halted = false;
@@ -426,7 +486,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     };
     return {
       ...handle,
-      run: async (task) => settleChildren(await handle.run(task)),
+      run: (task) => runWithSubagentHooks(task, (input) => handle.run(input).then(settleChildren)),
       interrupt: async (cause) => {
         halted = true;
         await Promise.allSettled(
@@ -440,7 +500,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
 
 // 补批续做（303）：worker 会话文件里的主分支还原成对话；悬空的工具调用补"结果未知"
 function restoreWorkerMessages(request: WorkerRuntimeRequest): AgentMessage[] {
-  const sessionsDir = path.join(request.governanceRoot, ".pigeon", "sessions");
+  const sessionsDir = sessionsDirOf(request.governanceRoot);
   const loaded = loadStoreSession(sessionsDir, request.sessionId);
   if (loaded === undefined) {
     throw new Error(`找不到 worker 会话 ${request.sessionId} 的会话文件，无法续做`);
@@ -460,9 +520,9 @@ export interface DetachedRuntimeRequest {
   thinkingLevel?: ThinkingLevel;
   homeDir?: string;
   persistThinking?: boolean;
-  memoryBudgetChars?: number;
   skillRoots?: readonly SkillRoot[];
-  memoryRoots?: readonly MemoryRoot[];
+  // 决策 330：读不读人写的说明（AGENTS.md）；缺省读
+  agentsMd?: boolean;
   editMode?: EditMode;
   maxOutputTokens?: number;
   temperature?: number;
@@ -472,13 +532,9 @@ export interface DetachedRuntimeRequest {
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
   beforeCompaction?: BeforeCompaction;
-  // 决策 191、217：推送记忆（在场即开着）；复盘运行面另带复盘设定
+  // 决策 191、217：推送记忆（在场即开着）
   learnedMemory?: LearnedMemoryConfig;
-  reviewSession?: ReviewSessionConfig;
   startMcp?: () => Promise<McpSession>;
-  // M7（决策 071）：会话级验证命令冻结进注入快照
-  verify?: VerifyConfig;
-  retryOnFail?: number;
   // 决策 264–267：派 worker 的开关
   spawnWorker?: SpawnWorkerSlot;
   // 决策 309：提交编排脚本的工具槽（只有 headless 主会话会给）
@@ -489,13 +545,13 @@ export interface DetachedRuntimeRequest {
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
   budget?: AttemptBudget;
-  // 决策 142 / 143：回炉轮数冻结进注入快照（只有 headless 在开启时给）
-  repairRounds?: number;
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
   // 决策 286：会话存储告警的出口；缺省标准错误输出
   storeWarn?: WarnSink;
+  // 决策 325：本会话的设置快照（pigeon run 由入口读好给出；缺省为空快照）
+  settings?: SettingsSnapshot;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -528,11 +584,8 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       : {}),
     ...(surface.homeDir !== undefined ? { homeDir: surface.homeDir } : {}),
     ...(surface.persistThinking !== undefined ? { persistThinking: surface.persistThinking } : {}),
-    ...(surface.memoryBudgetChars !== undefined
-      ? { memoryBudgetChars: surface.memoryBudgetChars }
-      : {}),
     ...(surface.skillRoots !== undefined ? { skillRoots: surface.skillRoots } : {}),
-    ...(surface.memoryRoots !== undefined ? { memoryRoots: surface.memoryRoots } : {}),
+    ...(surface.agentsMd !== undefined ? { agentsMd: surface.agentsMd } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
@@ -543,9 +596,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       ? { beforeCompaction: surface.beforeCompaction }
       : {}),
     ...(surface.learnedMemory !== undefined ? { learnedMemory: surface.learnedMemory } : {}),
-    ...(surface.reviewSession !== undefined ? { reviewSession: surface.reviewSession } : {}),
-    ...(surface.verify !== undefined ? { verify: surface.verify } : {}),
-    ...(surface.retryOnFail !== undefined ? { retryOnFail: surface.retryOnFail } : {}),
+
     ...(surface.spawnWorker !== undefined ? { spawnWorker: surface.spawnWorker } : {}),
     ...(surface.scriptOrchestration !== undefined
       ? { scriptOrchestration: surface.scriptOrchestration }
@@ -554,18 +605,21 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
     ...(surface.webTools !== undefined ? { webTools: surface.webTools } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
-    ...(surface.repairRounds !== undefined ? { repairRounds: surface.repairRounds } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
     ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
+    ...(surface.settings !== undefined ? { settings: surface.settings } : {}),
   };
-  // MCP 配置畸形在此响亮失败（派出失败）
+  // MCP 配置取自设置快照（会话开始时已校验；不重读文件）
+  const mcpConfig =
+    surface.settings !== undefined ? mcpConfigOf(surface.settings) : { servers: [] };
   const startMcp =
     surface.startMcp ??
-    (loadMcpConfig(surface.governanceRoot).servers.length > 0
+    (mcpConfig.servers.length > 0
       ? () =>
           startMcpSession({
             governanceRoot: surface.governanceRoot,
             workspaceRoot: surface.workspaceRoot,
+            config: mcpConfig,
           })
       : undefined);
   const open = (deps: RuntimeDeps): RuntimeBundle => {
@@ -621,6 +675,8 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   const { adapter } = bundle;
   return {
     run: (task) => adapter.run(task),
+    // 决策 324：运行面就绪（同步就绪即当场给出）
+    ready: () => Promise.resolve(bundle),
     interrupt: (cause) => adapter.interrupt(cause),
     subscribe: (listener) => adapter.subscribe(listener),
     subscribeRounds: (listener) => adapter.subscribeRounds(listener),
@@ -680,6 +736,8 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       }
       return current.adapter.run(task);
     },
+    // 决策 324：等运行面就绪（装配失败即拒绝，与 run 同一出口）
+    ready: () => settled,
     interrupt: async (cause) => {
       if (bundle === undefined) {
         interruptedEarly = true;

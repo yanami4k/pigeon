@@ -9,7 +9,7 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
-import { runHeadless } from "./headless.ts";
+import { runHeadless } from "./headless-core.ts";
 import { parseLaunchFlags } from "./launch-flags.ts";
 
 // 会话存储里本会话第一个 Run 开始条目的模型摘要
@@ -52,13 +52,13 @@ test("headless：给了温度，调用选项、注入快照摘要（Run 开始�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       temperature: 0,
     });
     assert.equal(withTemperature.status, "completed");
     assert.ok(fixed.seen.length > 0);
     assert.ok(fixed.seen.every((options) => options.temperature === 0));
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     assert.equal(startedModel(sessionsDir, withTemperature.sessionId).temperature, 0);
 
     const plain = capturing();
@@ -70,7 +70,7 @@ test("headless：给了温度，调用选项、注入快照摘要（Run 开始�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     assert.ok(plain.seen.every((options) => !("temperature" in options)));
     assert.equal("temperature" in startedModel(sessionsDir, without.sessionId), false);
@@ -113,14 +113,14 @@ test("推理开启时温度不生效：调用选项里不带温度，Run 开始�
       yolo: true,
       homeDir: home,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
       thinking: "high",
       temperature: 0,
     });
     assert.equal(result.status, "completed");
     assert.ok(run.seen.length > 0);
     assert.ok(run.seen.every((options) => !("temperature" in options)));
-    const model = startedModel(join(root, ".pigeon", "sessions"), result.sessionId);
+    const model = startedModel(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.equal("temperature" in model, false);
     assert.deepEqual(model.temperatureIgnored, { requested: 0, reason: "reasoning-enabled" });
   } finally {

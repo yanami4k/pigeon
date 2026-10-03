@@ -5,7 +5,11 @@ import { createHash } from "node:crypto";
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { resolveWorkspacePath } from "./paths.ts";
+import {
+  assertWritePathUnchanged,
+  resolveWorkspacePath,
+  resolveWorkspaceWritePath,
+} from "./paths.ts";
 import {
   killProcessTree,
   processGroupSpawnOptions,
@@ -38,11 +42,17 @@ export function createLocalWorkspaceHost(
     async resolveExisting(inputPath) {
       return resolveWorkspacePath(workspaceRoot, inputPath);
     },
+    async resolveForWrite(inputPath) {
+      return resolveWorkspaceWritePath(workspaceRoot, inputPath);
+    },
     async isFile(resolvedPath) {
       return (await stat(resolvedPath)).isFile();
     },
     readText: (resolvedPath) => readFile(resolvedPath, "utf8"),
-    writeText: (resolvedPath, content) => writeFile(resolvedPath, content, "utf8"),
+    async writeText(resolvedPath, content) {
+      assertWritePathUnchanged(resolvedPath);
+      await writeFile(resolvedPath, content, "utf8");
+    },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
     async listFiles(limit) {
       return snapshotLocalFiles(workspaceRoot, limit);
@@ -91,16 +101,30 @@ export function createHeadCollector(maxBytes: number): HeadCollector {
 // 终止后等 close 的宽限（毫秒）：孙进程占着输出管道时 close 迟迟不来，超时形同虚设，故到点销毁管道、按结果收尾
 const KILL_GRACE_MS = 5000;
 
+// 分开的 stdout / stderr 各自保留的开头上限
+export const HOST_SEPARATE_STREAM_CAP = 64 * 1024;
+
 function runLocalProcess(
   plan: HostExecPlan,
   cwd: string,
   options: HostExecOptions
 ): Promise<HostExecResult> {
   const collected = createHeadCollector(options.maxOutputBytes);
+  const stdoutOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
+  const stderrOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
   let timedOut = false;
   const finish = (
-    partial: Omit<HostExecResult, "outputBytes" | "outputHash" | "output" | "timedOut">
-  ): HostExecResult => ({ ...partial, timedOut, ...collected.finish() });
+    partial: Omit<
+      HostExecResult,
+      "outputBytes" | "outputHash" | "output" | "timedOut" | "stdout" | "stderr"
+    >
+  ): HostExecResult => ({
+    ...partial,
+    timedOut,
+    ...collected.finish(),
+    stdout: stdoutOnly.finish().output,
+    stderr: stderrOnly.finish().output,
+  });
   return new Promise((resolve) => {
     let settled = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
@@ -123,17 +147,26 @@ function runLocalProcess(
         windowsVerbatimArguments: plan.verbatim,
         // 以独立进程组拉起：超时或中止时对整组发信号，覆盖子进程再起的 node / pytest 等孙进程
         ...processGroupSpawnOptions(),
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [options.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       });
       trackChild(child);
+      // 标准输入（钩子事件 JSON）：写完即收尾，命令读完自行结束
+      child.stdin?.on("error", () => {});
+      if (options.stdin !== undefined) child.stdin?.end(options.stdin, "utf8");
     } catch (error) {
       settle(() =>
         finish({ spawned: false, spawnError: error as NodeJS.ErrnoException, exitCode: null })
       );
       return;
     }
-    child.stdout?.on("data", (chunk: Buffer) => collected.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => collected.push(chunk));
+    child.stdout?.on("data", (chunk: Buffer) => {
+      collected.push(chunk);
+      stdoutOnly.push(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      collected.push(chunk);
+      stderrOnly.push(chunk);
+    });
     // 超时与中止都 SIGKILL 整组并给宽限：close 在宽限内不来（孙进程仍占管道）就销毁管道、按当前结果收尾
     const terminate = () => {
       killProcessTree(child, "SIGKILL");

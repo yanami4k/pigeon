@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runHeadlessOnce } from "../application/headless-core.ts";
+import { runHeadless } from "../application/headless-core.ts";
 import { createFixtureSession, spawnFixtureWorker } from "../application/session-store-fixtures.ts";
 import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
@@ -17,7 +17,7 @@ import { runTraceCommand } from "./trace.ts";
 test("trace：父会话列出 worker（已收尾给结果与进入命令、未收尾标注 resume 入口、孤立收尾归异常）；worker 会话回指父会话", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-trace-workers-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const parent = createFixtureSession({ sessionsDir });
     parent.startRun({ task: "派活" });
     const done = spawnFixtureWorker(parent, { sessionsDir, name: "fix-a", task: "改" });
@@ -125,7 +125,7 @@ test("trace（真实运行）：主 agent 派 worker 的会话——spawn_worker
   try {
     initRepo(root, { "a.txt": "a\n" });
     // 无人值守的 prompt 模式（不是 yolo）：只读档的调用由策略自动放行，spawn_worker 与 read_file 同样不经人批
-    const result = await runHeadlessOnce({
+    const result = await runHeadless({
       task: "MAIN 派两个",
       governanceRoot: root,
       workspaceRoot: root,

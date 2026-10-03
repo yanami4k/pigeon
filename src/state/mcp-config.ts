@@ -1,10 +1,8 @@
 // MCP 配置（M5.7 S1，决策 051）：server 启动定义沿用 .mcp.json 的 mcpServers 形状；风险档覆盖旁置在
-// .pigeon/mcp.json（版本化 schema，无 .mcp.json 时也可在此直接定义 server）。两份合并冲突以
-// .pigeon/mcp.json 为准；未列出的工具落 server 的 defaultTier，缺省 write——外部工具默认要审批。
-// 本模块只放 schema 与纯合并判据；文件读取在 persistence/mcp-config.ts。
+// settings.json 的 mcp 一节（决策 325，原 .pigeon/mcp.json；无 .mcp.json 时也可在此直接定义 server）。两份合并冲突以
+// 设置为准；未列出的工具落 server 的 defaultTier，缺省 write——外部工具默认要审批。
+// 本模块只放 schema 与纯合并判据；文件读取在 persistence/mcp-config.ts 与 persistence/settings.ts。
 import { type Static, Type } from "typebox";
-
-export const MCP_CONFIG_VERSION = 1;
 
 // 风险档：与 tools/registry.ts 的 ToolRiskTier 同一组字面量（state 是叶子，不反向依赖 tools）
 export const McpToolTierSchema = Type.Union([
@@ -53,26 +51,35 @@ export const DotMcpJsonSchema = Type.Object({
 });
 export type DotMcpJson = Static<typeof DotMcpJsonSchema>;
 
-export const McpToolOverrideSchema = Type.Object({
-  tier: McpToolTierSchema,
-  pathConfinement: Type.Optional(McpPathConfinementSchema),
-});
+export const McpToolOverrideSchema = Type.Object(
+  {
+    tier: McpToolTierSchema,
+    pathConfinement: Type.Optional(McpPathConfinementSchema),
+  },
+  { additionalProperties: false }
+);
 export type McpToolOverride = Static<typeof McpToolOverrideSchema>;
 
-export const McpServerEntrySchema = Type.Object({
-  defaultTier: Type.Optional(McpToolTierSchema),
-  tools: Type.Optional(Type.Record(Type.String({ minLength: 1 }), McpToolOverrideSchema)),
-  launch: Type.Optional(McpLaunchSchema),
-});
+export const McpServerEntrySchema = Type.Object(
+  {
+    defaultTier: Type.Optional(McpToolTierSchema),
+    tools: Type.Optional(Type.Record(Type.String({ minLength: 1 }), McpToolOverrideSchema)),
+    launch: Type.Optional(McpLaunchSchema),
+  },
+  { additionalProperties: false }
+);
 
-// .pigeon/mcp.json
-export const McpConfigFileSchema = Type.Object({
-  version: Type.Literal(MCP_CONFIG_VERSION),
-  servers: Type.Record(Type.String(), McpServerEntrySchema),
-});
-export type McpConfigFile = Static<typeof McpConfigFileSchema>;
+// settings.json 的 mcp 一节
+export const McpSectionSchema = Type.Object(
+  {
+    servers: Type.Optional(Type.Record(Type.String(), McpServerEntrySchema)),
+  },
+  { additionalProperties: false }
+);
+export type McpSection = Static<typeof McpSectionSchema>;
 
-export type McpLaunchSource = ".mcp.json" | ".pigeon/mcp.json";
+// 启动定义的来处：项目根 .mcp.json，或设置的 mcp 一节
+export type McpLaunchSource = ".mcp.json" | "settings";
 
 // 合并后的单个 server：启动定义已定、风险档覆盖已定
 export interface McpServerConfig {
@@ -95,11 +102,11 @@ export interface McpToolTierResolution {
   configured: boolean;
 }
 
-// 两份配置合并：server 名取并集；启动定义 .pigeon 优先，其次 .mcp.json；风险档只来自 .pigeon。
+// 两份配置合并：server 名取并集；启动定义设置优先，其次 .mcp.json；风险档只来自设置。
 // 语义不明（无启动定义、路径约束挂在非 read 工具上、名字不合法）一律列进 problems，由读取方响亮失败
 export function mergeMcpConfig(
   dotMcp: DotMcpJson | undefined,
-  pigeon: McpConfigFile | undefined
+  pigeon: McpSection | undefined
 ): { config: McpConfig; problems: string[] } {
   const problems: string[] = [];
   const fromDotMcp = dotMcp?.mcpServers ?? {};
@@ -117,13 +124,13 @@ export function mergeMcpConfig(
     let launchSource: McpLaunchSource;
     if (entry?.launch !== undefined) {
       launch = entry.launch;
-      launchSource = ".pigeon/mcp.json";
+      launchSource = "settings";
     } else if (dotLaunch !== undefined) {
       launch = dotLaunch;
       launchSource = ".mcp.json";
     } else {
       problems.push(
-        `server ${name} 没有启动定义（.pigeon/mcp.json 未给 launch，.mcp.json 也没有同名 server）`
+        `server ${name} 没有启动定义（设置的 mcp 一节未给 launch，.mcp.json 也没有同名 server）`
       );
       continue;
     }

@@ -35,7 +35,7 @@ test("Skill 文本要求使用被 deny 的工具：照样被 deny 清单拦下�
   );
   try {
     const catalog = loadSkillCatalog({ workspaceRoot: root, homeDir: home });
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const sessionId = newSessionId();
     const sessionStore = openSessionStoreWriter({
       sessionsRoot: sessionsDir,

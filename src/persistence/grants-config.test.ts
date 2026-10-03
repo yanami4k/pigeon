@@ -46,28 +46,29 @@ test("grants 配置：合法文件载入规则（含 promotedFrom 出处）", ()
     writeFileSync(
       grantsConfigPath(root),
       JSON.stringify({
-        version: 1,
-        grants: [
-          {
-            tool: "edit_file",
-            pathPrefix: "src",
-            promotedFrom: {
-              grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
-              sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
-              firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
-              promotedAt: 1_757_000_000_000,
+        permissions: {
+          grants: [
+            {
+              tool: "edit_file",
+              pathPrefix: "src",
+              promotedFrom: {
+                grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                firstCall: { toolCallId: "toolu_01ABC", args: { path: "src/a.ts" } },
+                promotedAt: 1_757_000_000_000,
+              },
             },
-          },
-          {
-            tool: "read_file",
-            promotedFrom: {
-              grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRT",
-              sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
-              firstCall: { toolCallId: "toolu_01DEF", args: { path: "b.ts" } },
-              promotedAt: 1_757_000_000_001,
+            {
+              tool: "read_file",
+              promotedFrom: {
+                grantId: "grant_01J5Z7K8W9ABCDEFGHJKMNPQRT",
+                sessionId: "sess_01J5Z7K8W9ABCDEFGHJKMNPQRS",
+                firstCall: { toolCallId: "toolu_01DEF", args: { path: "b.ts" } },
+                promotedAt: 1_757_000_000_001,
+              },
             },
-          },
-        ],
+          ],
+        },
       }),
       "utf8"
     );
@@ -92,34 +93,34 @@ test("grants 配置：畸形文件响亮失败（JSON 语法错 / schema 违反�
       (error: unknown) => {
         assert.ok(error instanceof GrantsConfigError);
         assert.ok(error.message.includes("不是合法 JSON"), error.message);
-        assert.ok(error.message.includes("grants.json"), error.message);
+        assert.ok(error.message.includes("settings.local.json（项目个人）"), error.message);
         return true;
       }
     );
 
     writeFileSync(
       grantsConfigPath(root),
-      JSON.stringify({ version: 1, grants: [{ tool: "edit_file" }] }),
+      JSON.stringify({ permissions: { grants: [{ tool: "edit_file" }] } }),
       "utf8"
     );
     assert.throws(
       () => loadGrantConfig(root),
       (error: unknown) => {
         assert.ok(error instanceof GrantsConfigError);
-        assert.ok(error.message.includes("校验失败"), error.message);
+        assert.ok(error.message.includes("permissions"), error.message);
         assert.ok(error.message.includes("promotedFrom"), error.message);
         return true;
       }
     );
 
-    writeFileSync(grantsConfigPath(root), JSON.stringify({ version: 2, grants: [] }), "utf8");
+    writeFileSync(grantsConfigPath(root), JSON.stringify({ grants: [] }), "utf8");
     assert.throws(() => loadGrantConfig(root), GrantsConfigError);
   } finally {
     cleanup();
   }
 });
 
-test("升格写入：appendGrantConfigRule 新建/追加 .pigeon/grants.json，出处字段逐字保留", () => {
+test("升格写入：appendGrantConfigRule 新建/追加项目个人设置的 permissions 一节，出处字段逐字保留，其余各节原样", () => {
   const { root, cleanup } = makeWorkspace();
   try {
     const rule = {
@@ -132,6 +133,11 @@ test("升格写入：appendGrantConfigRule 新建/追加 .pigeon/grants.json，�
         promotedAt: 1_757_000_000_000,
       },
     };
+    mkdirSync(join(root, ".pigeon"), { recursive: true });
+    writeFileSync(
+      grantsConfigPath(root),
+      JSON.stringify({ commands: { commands: { t: "npm test" } }, $schema: "x" })
+    );
     appendGrantConfigRule(root, rule);
     const { pathPrefix: _omit, ...toolOnly } = rule;
     // 第二条规则来自另一个 grant（同 grantId 二次升格会被去重拒绝，见决策 ② 用例）
@@ -144,13 +150,15 @@ test("升格写入：appendGrantConfigRule 新建/追加 .pigeon/grants.json，�
     assert.equal(rules.length, 2);
     assert.deepEqual(rules[0], rule);
     assert.equal(rules[1]?.tool, "read_file");
-    // 文件可读（人可读配置，D6）且含 version 字段（M0 迁移管线路由依据）
+    // 文件可读（人可读配置，D6）；文件里其余各节原样保留
     const onDisk = JSON.parse(readFileSync(grantsConfigPath(root), "utf8")) as {
-      version: number;
-      grants: unknown[];
+      permissions: { grants: unknown[] };
+      commands: unknown;
+      $schema: string;
     };
-    assert.equal(onDisk.version, 1);
-    assert.equal(onDisk.grants.length, 2);
+    assert.equal(onDisk.permissions.grants.length, 2);
+    assert.deepEqual(onDisk.commands, { commands: { t: "npm test" } });
+    assert.equal(onDisk.$schema, "x");
   } finally {
     cleanup();
   }
@@ -175,6 +183,11 @@ test("升格去重（note-6 / 决策 ②）：同一 grantId 二次升格响亮�
       promotedFrom: { ...rule.promotedFrom, grantId: newGrantId() },
     });
     appendGrantConfigRule(root, rule);
+    // 第一次建个人设置时写下 .pigeon/.gitignore
+    assert.equal(
+      readFileSync(join(root, ".pigeon", ".gitignore"), "utf8"),
+      "state/\nsettings.local.json\n"
+    );
     assert.equal(findPromotedRuleIndex(loadGrantConfig(root), grantId), 1);
     const bytesBefore = readFileSync(grantsConfigPath(root), "utf8");
     assert.throws(

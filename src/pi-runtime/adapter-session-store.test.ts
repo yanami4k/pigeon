@@ -39,7 +39,6 @@ function snapshot(): InjectionSnapshot {
     memory: [],
     skills: [],
     createdAt: 1700000000000,
-    repairRounds: 2,
   };
 }
 
@@ -117,7 +116,6 @@ test("写会话存储：Run 开始带本次配置与系统提示全文，完整�
   assert.equal(start.runId, result.runId);
   assert.equal(start.systemPrompt, SYSTEM_PROMPT);
   assert.equal(start.taskDirective, "只改需要改的");
-  assert.equal(start.repairRounds, 2);
   assert.deepEqual(start.advertisedTools, ["echo"]);
   assert.deepEqual(start.policy, { allow: ["echo"], deny: [], approvalMode: "yolo" });
   assert.deepEqual(start.model, {
@@ -264,7 +262,7 @@ test("写会话存储：写入面抛错不中断运行，运行事件与对话�
 
 test("写会话存储：接真实写者，文件里每个 Run 的开始、消息与收尾按序写全，消息与 transcript 同序同数", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-store-"));
-  const sessionsDir = join(root, ".pigeon", "sessions");
+  const sessionsDir = join(root, ".pigeon", "state", "sessions");
   const sessionId = newSessionId();
   const store = openSessionStoreWriter({
     sessionsRoot: sessionsDir,

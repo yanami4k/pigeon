@@ -31,6 +31,8 @@
 //    读当前上下文的 token 数与模型窗口（状态栏用）。没有订阅者时行为与此前逐字节一致，eval stream、pigeon run 与
 //    逐行对话不订阅，实验路径不受影响。
 import {
+  type AfterToolCallContext,
+  type AfterToolCallResult,
   Agent,
   type AgentEvent,
   type AgentLoopTurnUpdate,
@@ -77,7 +79,7 @@ import type {
   ContextCompactor,
 } from "./compaction.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
-import type { ToolGovernance, ToolGovernanceFactory } from "./governance.ts";
+import type { ToolGovernance, ToolGovernanceFactory, ToolHookPort } from "./governance.ts";
 import type { SessionStoreSink } from "./session-store.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
@@ -134,7 +136,14 @@ export interface StreamTextDelta {
 // 压缩提示（189）：界面据此各提示一行——压成了（压缩前后的 token 数）、自动压缩没压成（原因；本轮按原上下文继续；
 // 被中断的不提示）、压缩前回调失败（原因；压缩照常进行）。手动压缩没压成时结果直接交回调用方，不另发提示
 export type CompactionNotice =
-  | { kind: "compacted"; trigger: CompactionTrigger; tokensBefore: number; tokensAfter: number }
+  // messages：压缩后的上下文（钩子 PostCompact 的 compact_summary 从中取真实摘要）
+  | {
+      kind: "compacted";
+      trigger: CompactionTrigger;
+      tokensBefore: number;
+      tokensAfter: number;
+      messages: AgentMessage[];
+    }
   | {
       kind: "incomplete";
       trigger: Exclude<CompactionTrigger, "manual">;
@@ -190,6 +199,9 @@ export interface PiRuntimeAdapterOptions {
   // 决策 264：同一次回复里的多个工具调用可否并行执行；缺省串行（决策 2）。只有注册了可并行的派 worker 工具时装配根才打开：
   // 上游在同一批调用里只要有一个标为串行的工具就整批串行，写与命令工具因而照旧逐个执行、逐个审批
   parallelTools?: boolean;
+  // 决策 324：工具事件钩子——PreToolUse 交治理实例（在审批之前），PostToolUse / PostToolUseFailure
+  // 在此接 afterToolCall（工具执行之后）：替换结果文本、把理由与上下文补进结果。缺省不挂
+  toolHooks?: ToolHookPort;
 }
 
 export class PiRuntimeAdapter {
@@ -205,6 +217,10 @@ export class PiRuntimeAdapter {
   readonly #unsubscribe: () => void;
   // M5.5 S0（决策 049）：本 Adapter 绑定的治理实例
   readonly #governance: ToolGovernance;
+  // 决策 324：工具事件钩子（afterToolCall 转发用；PreToolUse 走治理实例）
+  readonly #toolHooks: ToolHookPort | undefined;
+  // 决策 324：PreToolUse 钩子改过的参数（toolCallId → 改后的参数）：执行时替换上游校验后的参数
+  readonly #updatedArgs = new Map<string, unknown>();
   // D3（M4 S5）：本 Run 的 message_end 累计序号——Run 内序号。序号推进无条件（abort/合成失败消息也占序号，
   // 写盘失败不重排后续序号），保证"条目序 = transcript 追加序"在任何故障路径下成立
   #runEntrySeq = 0;
@@ -237,6 +253,8 @@ export class PiRuntimeAdapter {
   #turnCompaction: { messages: AgentMessage[]; stateLength: number } | undefined;
   // 当前 Run 是否来过中止请求（任何来源；每个 Run 开始时清空）：来过即不再为空回复重试
   #interruptRequested = false;
+  // 钩子的 continue:false（决策 324）：整轮停止——置位后中止 agent 循环，终态如实记这个理由
+  #hookStopReason: string | undefined;
   // 空回复重试（决策 170 ②）：本 Run 是否已重试过；等待重试时暂扣的那次 agent_end（重试那次的 agent_end 才是本 Run 的收尾）
   #emptyReplyRetried = false;
   #deferredRunEnd: AgentEvent | undefined;
@@ -270,6 +288,7 @@ export class PiRuntimeAdapter {
       advertised.map((tool) => [tool.name, this.#wrapToolErrorCapture(tool)])
     );
     // 治理绑定宿主能力；广告工具未在注册表登记时在此构造期 fail-fast
+    this.#toolHooks = options.toolHooks;
     this.#governance = options.governance({
       policy,
       tools,
@@ -278,6 +297,8 @@ export class PiRuntimeAdapter {
       reportError: (error) => {
         this.#listenerErrors.push(error);
       },
+      // 决策 324：工具事件钩子（PreToolUse 由治理实例在审批之前调用）
+      ...(options.toolHooks !== undefined ? { toolHooks: options.toolHooks } : {}),
     });
 
     this.#agent = new Agent({
@@ -289,6 +310,11 @@ export class PiRuntimeAdapter {
       toolExecution: options.parallelTools === true ? "parallel" : "sequential",
       // M3 审批闸（spike S2a：block 可靠，reason 逐字反馈模型）；M5.5 S0 起只转发治理判定
       beforeToolCall: (context) => this.#forwardDecide(context),
+      // 决策 324：工具执行之后（PostToolUse / PostToolUseFailure）——替换结果文本与补上下文
+      afterToolCall: (context) => this.#forwardAfterToolCall(context),
+      // 决策 324：钩子 continue:false 置位后这一轮收尾即停——上游只在整批每个调用都 terminate 时提前结束，
+      // 混合批次（前面的调用已放行）与排队的 steer 消息都会让循环继续，故在轮末另行判停
+      shouldStopAfterTurn: () => this.#hookStopReason !== undefined,
       // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们
       convertToLlm,
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
@@ -404,6 +430,7 @@ export class PiRuntimeAdapter {
     this.#stopCause = undefined;
     this.#turnCompaction = undefined;
     this.#interruptRequested = false;
+    this.#hookStopReason = undefined;
     this.#emptyReplyRetried = false;
     this.#deferredRunEnd = undefined;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
@@ -447,6 +474,12 @@ export class PiRuntimeAdapter {
       this.#currentRunId = null;
       settle();
     }
+  }
+
+  // 当前活动 Run（无活动 Run 时为 undefined）：钩子运行记录（决策 324）据此挂到 Run 上，
+  // 窗口外的事件（SessionStart 等）记为会话级条目
+  currentRunId(): RunId | undefined {
+    return this.#currentRunId ?? undefined;
   }
 
   // 空回复重试（决策 170 ②）：上游一次运行以空回复收尾时，其 agent_end 已被暂扣（见 #recordAndForward）。
@@ -800,6 +833,7 @@ export class PiRuntimeAdapter {
         trigger,
         tokensBefore: outcome.tokensBefore,
         tokensAfter: outcome.tokensAfter,
+        messages: outcome.messages,
       });
     } else if (trigger !== "manual" && !signal.aborted) {
       this.#notifyCompaction({ kind: "incomplete", trigger, outcome });
@@ -891,6 +925,10 @@ export class PiRuntimeAdapter {
   // error toolResult）。治理实现承诺自身不抛；接缝仍兜一层——实现若抛，按 fail-closed 阻断，
   // 不交给上游的"hook 抛错降级为错误文案"路径
   async #forwardDecide(context: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> {
+    // continue:false 已置位：本批其余调用一律拦下并带 terminate，不再交治理判定——停下后不再执行钩子、不再请示
+    if (this.#hookStopReason !== undefined) {
+      return { block: true, reason: this.#hookStopReason, terminate: true };
+    }
     try {
       const verdict = await this.#governance.decide({
         toolCallId: context.toolCall.id,
@@ -898,12 +936,72 @@ export class PiRuntimeAdapter {
         args: context.toolCall.arguments,
         preparedArgs: context.args,
       });
-      return verdict.kind === "block" ? { block: true, reason: verdict.reason } : undefined;
+      if (verdict.kind === "block") {
+        // continue:false（terminate）：整轮结束——记理由；本批经 terminate 提前收尾，不调 abort
+        // （abort 在假流不遵守中止信号时会多发一次模型请求；terminate 让批干净地停）
+        if (verdict.terminate === true) {
+          this.#hookStopReason = verdict.reason;
+        }
+        return {
+          block: true,
+          reason: verdict.reason,
+          ...(verdict.terminate === true ? { terminate: true } : {}),
+        };
+      }
+      // 决策 324：钩子改过的参数——执行时替换上游按原参数校验过的 args（账本已按改后参数记录）
+      if (verdict.updatedArgs !== undefined) {
+        this.#updatedArgs.set(context.toolCall.id, verdict.updatedArgs);
+      }
+      return undefined;
     } catch (error) {
       return {
         block: true,
         reason: `治理判定异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
       };
+    }
+  }
+
+  // afterToolCall 转发（决策 324）：PostToolUse / PostToolUseFailure——成功走前者、失败走后者；
+  // 替换的结果文本（updatedToolOutput）整份替换正文，补的理由与上下文（decision block 的 reason、additionalContext）
+  // 追加为结果末尾的一个文本块；钩子自身出错只记进内部异常清单，不改变工具结果
+  async #forwardAfterToolCall(
+    context: AfterToolCallContext
+  ): Promise<AfterToolCallResult | undefined> {
+    if (this.#toolHooks?.toolFinished === undefined) return undefined;
+    // 钩子已要求停止（continue:false）：同批其余调用（并行批次里已准备好、仍在执行的）不再跑收尾钩子
+    if (this.#hookStopReason !== undefined) return undefined;
+    try {
+      const text = context.result.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+      const outcome = await this.#toolHooks.toolFinished({
+        toolCallId: context.toolCall.id,
+        toolName: context.toolCall.name,
+        args: context.args,
+        isError: context.isError,
+        text,
+      });
+      if (outcome === undefined) return undefined;
+      // continue:false：整轮结束（决策 324 复审：PostToolUse 也生效，不只是 PreToolUse）
+      if (outcome.stopReason !== undefined) {
+        this.#hookStopReason = outcome.stopReason;
+        this.#agent.abort();
+      }
+      const extra: Array<{ type: "text"; text: string }> = [];
+      if (outcome.contextText !== undefined) {
+        extra.push({ type: "text", text: outcome.contextText });
+      }
+      if (outcome.replaceText !== undefined) {
+        return { content: [{ type: "text", text: outcome.replaceText }, ...extra] };
+      }
+      if (extra.length > 0) {
+        return { content: [...context.result.content, ...extra] };
+      }
+      return undefined;
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return undefined;
     }
   }
 
@@ -914,8 +1012,18 @@ export class PiRuntimeAdapter {
     return {
       ...tool,
       execute: async (toolCallId, params, signal, onUpdate) => {
+        // 决策 324：PreToolUse 钩子改过的参数——用改后的参数执行（治理已按它重新过完全部检查）
+        const updated = this.#updatedArgs.get(toolCallId);
+        if (updated !== undefined) {
+          this.#updatedArgs.delete(toolCallId);
+        }
         try {
-          return await tool.execute(toolCallId, params, signal, onUpdate);
+          return await tool.execute(
+            toolCallId,
+            updated !== undefined ? updated : params,
+            signal,
+            onUpdate
+          );
         } catch (error) {
           this.#toolErrorKinds.set(toolCallId, classifyToolError(error));
           throw error;
@@ -936,8 +1044,14 @@ export class PiRuntimeAdapter {
       if (event.type === "turn_end" && this.#roundListeners.size > 0) {
         this.#notifyRound(runId, event.message, event.toolResults);
       }
-      // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）
-      if (event.type === "turn_end" && this.#notices.length > 0 && !this.#interruptRequested) {
+      // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）；
+      // 钩子要求停止（continue:false）时这一轮之后即停，通知留在本地队列待下一次运行
+      if (
+        event.type === "turn_end" &&
+        this.#notices.length > 0 &&
+        !this.#interruptRequested &&
+        this.#hookStopReason === undefined
+      ) {
         for (const message of this.#takeNotices()) {
           this.#agent.steer(message);
         }
@@ -1071,18 +1185,12 @@ export class PiRuntimeAdapter {
           memory: structuredClone(snapshot.memory),
           skills: structuredClone(snapshot.skills),
           ...structuredClone(extras),
-          ...(snapshot.verify !== undefined ? { verify: structuredClone(snapshot.verify) } : {}),
-          ...(snapshot.retryOnFail !== undefined ? { retryOnFail: snapshot.retryOnFail } : {}),
           ...(snapshot.budget !== undefined ? { budget: { ...snapshot.budget } } : {}),
-          ...(snapshot.repairRounds !== undefined ? { repairRounds: snapshot.repairRounds } : {}),
           // 决策 188、218：本次的压缩配置
           ...(this.#compactor !== undefined ? { compaction: { ...this.#compactor.config } } : {}),
-          // 决策 191、192、207：推送的记忆与复盘标记
-          ...(snapshot.learnedMemory !== undefined
-            ? { learnedMemory: { ...snapshot.learnedMemory } }
-            : {}),
-          ...(snapshot.memoryReview !== undefined
-            ? { memoryReview: { ...snapshot.memoryReview } }
+          // 决策 332：推送的记忆
+          ...(snapshot.pushedMemory !== undefined
+            ? { pushedMemory: structuredClone(snapshot.pushedMemory) }
             : {}),
         },
       });
@@ -1139,6 +1247,20 @@ export class PiRuntimeAdapter {
     const emptyReply = lastAssistant !== undefined && isEmptyReply(lastAssistant);
     const errorMessage = emptyReply ? EMPTY_REPLY_ERROR : this.#agent.state.errorMessage;
     let status: RunTerminalStatus;
+    if (this.#hookStopReason !== undefined) {
+      // 钩子的 continue:false：整轮被钩子停下——终态中止，原因如实交出（stopReason 显示给人）
+      status = "aborted";
+      return {
+        runId,
+        status,
+        errorMessage: `钩子要求停止：${this.#hookStopReason}`,
+        syntheticFailure: false,
+        failure: null,
+        advertisedTools,
+        toolExecutions: this.#governance.runOutcome().toolExecutions,
+        emptyReply: false,
+      };
+    }
     if (emptyReply) {
       status = "failed";
     } else if (stopReason === "aborted") {

@@ -21,7 +21,7 @@ const CONFIG: McpConfig = {
     {
       name: "fx",
       launch: { command: "node", args: ["x.js"] },
-      launchSource: ".pigeon/mcp.json",
+      launchSource: "settings",
       defaultTier: "write",
       tools: {},
     },
@@ -106,7 +106,7 @@ test("worker 的 MCP 会话：按工作树启动，roots 为工作树路径；�
     assert.equal(handle.summary(), "完成");
     await handle.dispose();
     assert.equal(sessions[0]?.connections[0]?.state, "closed");
-    const worker = loadSessionView(join(root, ".pigeon", "sessions"), sessionId);
+    const worker = loadSessionView(join(root, ".pigeon", "state", "sessions"), sessionId);
     assert.ok(worker !== undefined);
     // 写档 MCP 工具经审批放行并执行：worker 会话里唯一的调用有结果、未出错，审批闸标记为人工批准
     const calls = worker.runs.flatMap((run) => run.toolCalls);

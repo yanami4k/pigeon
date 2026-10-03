@@ -15,7 +15,7 @@ import { runTraceCommand } from "./trace.ts";
 test("旧格式会话（带结构化记忆留痕的旧会话所在）：显示读者只给旧格式会话提示并指向旧版代码", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-legacy-memory-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const sessionId = writeLegacySessionFile(sessionsDir);
     const runId = newRunId();
 

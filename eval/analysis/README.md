@@ -4,7 +4,7 @@
 
 - results.jsonl：每格、每题、每遍一行；缺了该有的字段即报错并指明文件、行与字段；
 - identity.json（与 results.jsonl 同目录）：报告的设置一节、难度关的题面格式、压缩触发点取自这里；
-- streams/tasks-<条件>-<遍次>/：会话清单 sessions-<步序>.json、.pigeon/sessions 下的会话文件与开工记忆快照
+- streams/tasks-<条件>-<遍次>/：会话清单 sessions-<步序>.json、.pigeon/state/sessions（旧布局为 .pigeon/sessions，两种都能读）下的会话文件与开工记忆快照
   learned-snapshots/step-<步序>/，记忆使用与检索的计数、复盘的 token 细分取自这里；没有这个目录时这些计数记为无来源。
 
 ## 安装

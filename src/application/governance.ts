@@ -5,14 +5,17 @@
 // 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游 prepareToolCall
 // 在 hook 前拦截，事件级连续计数熔断兜底（spikes/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
 import path from "node:path";
+import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import type {
   GovernanceHost,
   GovernanceRunOutcome,
   GovernanceVerdict,
+  PreToolUseHookDecision,
   ToolCallProposal,
   ToolGovernance,
   ToolGovernanceFactory,
+  ToolHookPort,
 } from "../pi-runtime/governance.ts";
 import { type BreakerScope, breakerCountKey, InterceptStreak } from "../state/breaker.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
@@ -51,7 +54,7 @@ export interface ToolGovernanceOptions {
   // M4 S6（决策 3）：会话 grant 存储——审批提示 [a]/[d] 键创建的放权由此注入求值；
   // 治理面运行时状态，不进 InjectionSnapshot（约束 4：grant 必须可撤销，与快照冻结矛盾）
   sessionGrants?: SessionGrantMatcher;
-  // M4 S6（D6）：固化配置规则（.pigeon/grants.json，启动时装载、会话内冻结）；
+  // M4 S6（D6）：固化配置规则（设置的 permissions 一节，启动时装载、会话内冻结）；
   // 命中记 approvedBy=policy:config，决定回指规则的 promotedFrom.grantId（收口决策 ①：稳定身份）
   configGrants?: readonly ConfigGrantRule[];
   // 目录限定匹配（pathPrefix）的 realpath 解析根；缺省 = 带 pathPrefix 的规则一律不匹配
@@ -62,10 +65,22 @@ export interface ToolGovernanceOptions {
   // 决策 302：worker 用写层文件工具改工作区根（它自己的工作树）内的文件默认放行——排在 deny、放权、免审、yolo、只读之后，
   // 原本要问人时生效；跑命令、读网页等其余动作照旧请示。只由 worker 装配时给
   ownWorkspaceWrites?: boolean;
+  // 决策 326 ①：受保护路径判定（项目的 .pigeon 目录）。写入类文件工具的 path 落在其上时：会话放权与配置放权都不放行、
+  // worker 自己工作树内的默认放行也不适用，须人逐次批准（yolo 下放行，拒绝名单照常优先）。缺省不判定
+  protectedPath?: (target: string) => string | undefined | Promise<string | undefined>;
+  // 决策 323 / 324：PreToolUse 钩子（在审批之前执行）。拒绝 > 要人确认 > 放行；放行只免掉人工审批这一步
+  // （拒绝名单、路径围栏与受保护路径照常生效）；改过的参数重新经过全部检查并以新参数执行
+  preToolUseHooks?: ToolHookPort["preToolUse"];
 }
 
 // 决策 302 所说的写层文件工具：改文件的内置工具（两种编辑模式都叫 edit_file）
 const OWN_WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set(["edit_file"]);
+
+// 调用的 path 参数（字符串才算）
+function pathArgOf(args: unknown): string | undefined {
+  const target = (args as { path?: unknown } | null)?.path;
+  return typeof target === "string" && target !== "" ? target : undefined;
+}
 
 // 调用的 path 参数落在工作区根之内（词法判定；工具自身另有工作区限定）
 function withinWorkspace(root: string, args: unknown): boolean {
@@ -93,6 +108,11 @@ class GovernedToolCalls implements ToolGovernance {
   readonly #configGrants: readonly ConfigGrantRule[];
   readonly #workspaceRoot: string | undefined;
   readonly #ownWorkspaceWrites: boolean;
+  readonly #protectedPath:
+    | ((target: string) => string | undefined | Promise<string | undefined>)
+    | undefined;
+  // 决策 324：PreToolUse 钩子（在审批之前执行）
+  readonly #preToolUseHooks: ToolHookPort["preToolUse"] | undefined;
   // ToolExecution 账本：toolCallId → 记录
   readonly #executions = new Map<string, ToolExecution>();
   // key 带粒度前缀——`tool\n<名字>`：policy:deny 系绝对拒绝（deny 清单 / 无审批通道
@@ -122,6 +142,8 @@ class GovernedToolCalls implements ToolGovernance {
     this.#configGrants = options.configGrants ?? [];
     this.#workspaceRoot = options.workspaceRoot;
     this.#ownWorkspaceWrites = options.ownWorkspaceWrites === true;
+    this.#protectedPath = options.protectedPath;
+    this.#preToolUseHooks = options.preToolUseHooks;
     // 广告了未在注册表登记的工具 = 配置错误，构造期 fail-fast
     for (const name of host.tools.keys()) {
       if (!this.#registry.has(name)) {
@@ -205,9 +227,57 @@ class GovernedToolCalls implements ToolGovernance {
 
   async #decideInner(call: ToolCallProposal): Promise<GovernanceVerdict> {
     const { toolName, toolCallId } = call;
-    // rawArgs 快照（spike S5）：账本留模型原始参数。决策 1 无改参通道，
-    // 原始参数 = 批准参数 = 执行参数，无需写回 ctx.args。
-    const rawArgs = structuredClone(call.args);
+    // 决策 324：PreToolUse 钩子在审批之前执行（拒绝 > 要人确认 > 放行）。钩子改过的参数重新经过全部检查，
+    // 账本、审批与执行都按改后的参数走（钩子自身出错不拦只提示，由钩子调度记进运行记录）
+    let hookDecision = await this.#preToolUseDecision(toolName, toolCallId, call.args);
+    // 改后的参数先过工具的参数模式：不合格当钩子自身出错——记异常、按原参数继续（与钩子抛错同一口径）
+    if (hookDecision?.updatedInput !== undefined) {
+      const schema = this.#registry.get(toolName)?.parameters;
+      if (schema !== undefined && !Value.Check(schema, hookDecision.updatedInput)) {
+        this.#host.reportError(
+          new Error(
+            `PreToolUse 钩子给的 updatedInput 不合 ${toolName} 的参数模式，按钩子出错处理：用原参数`
+          )
+        );
+        const { updatedInput: _dropped, ...rest } = hookDecision;
+        hookDecision = rest;
+      }
+    }
+    if (hookDecision?.decision === "deny") {
+      const deniedReason = hookDecision.reason ?? "钩子拒绝";
+      const proposed = proposeToolExecution({
+        toolCallId,
+        toolName,
+        rawArgs: structuredClone(call.args),
+        at: Date.now(),
+      });
+      let record = advanceToolExecution(proposed, "approval", Date.now());
+      record = recordDecision(record, {
+        outcome: "rejected",
+        approvedBy: "policy:hook",
+        reason: deniedReason,
+        reasonSource: "system-default",
+        decidedAt: Date.now(),
+      });
+      this.#executions.set(toolCallId, record);
+      this.#runToolCallIds.push(toolCallId);
+      // continue:false（terminate）：阻断本调用并提示上游在这批工具后停下——停止本轮处理
+      return {
+        ...this.#blockWithBreaker(toolName, call.args, deniedReason, "fingerprint"),
+        ...(hookDecision.terminate === true ? { terminate: true } : {}),
+      };
+    }
+    // 钩子放行/要人确认的标记：放行只免掉人工审批这一步（拒绝名单、路径围栏与受保护路径照常生效），
+    // 要人确认跳过自动放行直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）
+    const hookAllow = hookDecision?.decision === "allow";
+    // rawArgs 快照（spike S5）：账本留实际评估的参数——钩子改过参数时即改后的参数（原始参数 = 批准参数 = 执行参数）
+    const rawArgs = structuredClone(
+      hookDecision?.updatedInput !== undefined ? hookDecision.updatedInput : call.args
+    );
+    const allowVerdict = (): GovernanceVerdict =>
+      hookDecision?.updatedInput !== undefined
+        ? { kind: "allow", updatedArgs: rawArgs }
+        : { kind: "allow" };
     const proposed = proposeToolExecution({ toolCallId, toolName, rawArgs, at: Date.now() });
     let record = advanceToolExecution(proposed, "approval", Date.now());
     this.#executions.set(toolCallId, record);
@@ -222,13 +292,24 @@ class GovernedToolCalls implements ToolGovernance {
     const needsShell = inspection?.needsShell === true;
     // 决策 290：网络档工具只读判定这次调用要访问的主机——审批面板显示它，[a] 建按网站的放权
     const host = this.#inspectHost(toolName, rawArgs);
+    // 决策 326 ①：写入类文件工具写受保护路径——放权（会话与配置）一概不参与求值，worker 的默认放行也不适用
+    const protectedTarget = await this.#protectedTargetOf(toolName, rawArgs);
     const grantHit =
-      this.#sessionGrants?.match(toolName, rawArgs, { needsShell }) ??
-      matchConfigGrants(this.#configGrants, this.#workspaceRoot, toolName, rawArgs, needsShell);
+      protectedTarget !== undefined
+        ? null
+        : (this.#sessionGrants?.match(toolName, rawArgs, { needsShell }) ??
+          matchConfigGrants(
+            this.#configGrants,
+            this.#workspaceRoot,
+            toolName,
+            rawArgs,
+            needsShell
+          ));
     let decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined);
     // 决策 302：worker 改自己工作树内的文件，原本要问人的改为放行（记 policy:auto）
     if (
       decision.kind === "prompt" &&
+      protectedTarget === undefined &&
       this.#ownWorkspaceWrites &&
       this.#workspaceRoot !== undefined &&
       OWN_WORKSPACE_WRITE_TOOLS.has(toolName) &&
@@ -239,6 +320,11 @@ class GovernedToolCalls implements ToolGovernance {
         kind: "auto-allow",
         reason: `worker 在自己的工作树内改文件，默认放行：${toolName}`,
       };
+    }
+    // 决策 324：钩子要人确认——跳过一切自动放行，直接进人工审批（无审批通道即 fail-closed，与 prompt 档同一口径）；
+    // 只收紧不放行：deny 清单的拒绝是绝对的，ask 不覆盖
+    if (hookDecision?.decision === "ask" && decision.kind !== "deny") {
+      decision = { kind: "prompt", reason: hookDecision.reason ?? "钩子要求人确认" };
     }
 
     // deny 清单绝对 / 未注册 fail-closed：自动拒绝，不弹人工审批
@@ -284,7 +370,25 @@ class GovernedToolCalls implements ToolGovernance {
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
-      return { kind: "allow" };
+      return allowVerdict();
+    }
+
+    // 决策 324：钩子放行——只免掉人工审批这一步。受保护路径（326 ①）要人逐次批准，不在此列；
+    // 钩子的要人确认（ask）已在上方把 decision 改成 prompt，同样走到这里时按普通审批走
+    if (hookAllow && protectedTarget === undefined) {
+      record = recordDecision(record, {
+        outcome: "approved",
+        approvedBy: "policy:hook",
+        ...(hookDecision?.reason !== undefined
+          ? { reason: hookDecision.reason, reasonSource: "system-default" as const }
+          : {}),
+        decidedAt: Date.now(),
+      });
+      this.#authorizeShell(toolName, toolCallId, needsShell);
+      record = advanceToolExecution(record, "dispatch", Date.now());
+      record = advanceToolExecution(record, "execution", Date.now());
+      this.#executions.set(toolCallId, record);
+      return allowVerdict();
     }
 
     // prompt：必须人工批准；未配置审批通道 = fail-closed 拒绝
@@ -301,12 +405,15 @@ class GovernedToolCalls implements ToolGovernance {
       return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
     }
     const tier = this.#registry.get(toolName)?.tier;
-    // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）
+    // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）。
+    // 钩子改过参数时按改后参数生成预览（已经过参数模式校验），否则用上游校验过的参数
     let diffPreview: string | undefined;
     const tool = this.#host.tools.get(toolName);
     if (tool !== undefined && "preview" in tool && typeof tool.preview === "function") {
       try {
-        diffPreview = await tool.preview(call.preparedArgs);
+        diffPreview = await tool.preview(
+          hookDecision?.updatedInput !== undefined ? rawArgs : call.preparedArgs
+        );
       } catch {
         diffPreview = undefined;
       }
@@ -321,6 +428,7 @@ class GovernedToolCalls implements ToolGovernance {
       // 048 修订：面板原样显示将执行的命令串，需 shell 时标明
       ...(inspection !== undefined ? { command: inspection.command, needsShell } : {}),
       ...(host !== undefined ? { host } : {}),
+      ...(protectedTarget !== undefined ? { protectedPath: protectedTarget } : {}),
       // 出处 run：审批提示创建 grant（[a]/[d]）时写入 grant.created 事件
       runId: this.#host.activeRunId(),
     });
@@ -353,7 +461,49 @@ class GovernedToolCalls implements ToolGovernance {
     record = advanceToolExecution(record, "dispatch", Date.now());
     record = advanceToolExecution(record, "execution", Date.now());
     this.#executions.set(toolCallId, record);
-    return { kind: "allow" };
+    return allowVerdict();
+  }
+
+  // PreToolUse 钩子的判定（决策 324）：钩子在审批之前执行；钩子自身异常不拦只记（不改变治理结论）
+  async #preToolUseDecision(
+    toolName: string,
+    toolCallId: string,
+    args: unknown
+  ): Promise<PreToolUseHookDecision | undefined> {
+    if (this.#preToolUseHooks === undefined) return undefined;
+    try {
+      return await this.#preToolUseHooks({ toolCallId, toolName, args });
+    } catch (error) {
+      this.#host.reportError(error);
+      return undefined;
+    }
+  }
+
+  // 写入类文件工具（写档、按工作区限定路径）的 path 落在受保护路径上时返回其展示写法
+  async #protectedTargetOf(toolName: string, args: unknown): Promise<string | undefined> {
+    // 决策 340：叠回 worker 改动的工具（take_worker）会写到 .pigeon 下时同样按受保护路径处理，请示里列出这些路径
+    const tool = this.#host.tools.get(toolName);
+    if (
+      tool !== undefined &&
+      "inspectProtectedPaths" in tool &&
+      typeof tool.inspectProtectedPaths === "function"
+    ) {
+      try {
+        const paths = (tool.inspectProtectedPaths as (args: unknown) => string[])(args);
+        return paths.length > 0 ? paths.join("、") : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    if (this.#protectedPath === undefined) {
+      return undefined;
+    }
+    const registration = this.#registry.get(toolName);
+    if (registration?.tier !== "write" || registration.pathConfinement?.kind !== "workspace") {
+      return undefined;
+    }
+    const target = pathArgOf(args);
+    return target !== undefined ? this.#protectedPath(target) : undefined;
   }
 
   // exec 工具的只读命令检查（048 修订）；工具无此能力或检查失败返回 undefined（参数问题由执行时的校验报出）

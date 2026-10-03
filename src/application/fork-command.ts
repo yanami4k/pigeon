@@ -105,12 +105,17 @@ export async function runForkCommand(input: {
     ...(input.opened.checkpoints !== undefined
       ? { checkpointer: input.opened.checkpoints.checkpointer }
       : {}),
-    run: { ...input.run, ...(nextInput !== undefined ? { input: nextInput } : {}) },
+    // 决策 325：分支沿用来源会话的设置快照
+    run: {
+      settings: input.opened.bundle.settings,
+      ...input.run,
+      ...(nextInput !== undefined ? { input: nextInput } : {}),
+    },
   });
   return [
     `已分叉：分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条 ｜ 快照 ${result.checkpoint.commit.slice(0, 12)}`,
     `  分支会话 ${result.branchSessionId} ｜ 工作树 ${result.workspace.path}（分支 ${result.workspace.branch}）`,
-    `  终态 ${result.status} ｜ 标签 ${result.label}${result.verified ? "" : "（未配置验证命令）"}`,
+    `  终态 ${result.status} ｜ 标签 ${result.label}`,
     `  进入分支：resume ${result.branchSessionId}`,
   ].join("\n");
 }

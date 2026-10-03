@@ -14,7 +14,7 @@ import type { WorkerOutcome } from "../orchestration/workers.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { asWorkspaceHost } from "../tools/local-host.ts";
-import { runHeadlessOnce } from "./headless-core.ts";
+import { runHeadless } from "./headless-core.ts";
 import { noMcpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
@@ -115,10 +115,10 @@ test("会话运行面：终端界面给槽即注册并交回槽；命令行对�
 
 async function headlessTools(
   root: string,
-  options: Partial<Parameters<typeof runHeadlessOnce>[0]>
+  options: Partial<Parameters<typeof runHeadless>[0]>
 ): Promise<readonly string[]> {
   let tools: readonly string[] = [];
-  await runHeadlessOnce({
+  await runHeadless({
     task: "看一眼",
     governanceRoot: root,
     workspaceRoot: root,
@@ -152,7 +152,7 @@ test("pigeon run：缺省不注册、开了才注册；跑批器五个条件（�
       sessionSearch: spec.sessionSearch,
       pushedMemory: spec.pushedMemory,
       skillRoots: [],
-      memoryRoots: [],
+      agentsMd: false,
     });
     assert.ok(tools.includes("read_file"), spec.name);
     assert.ok(!tools.includes(SPAWN_WORKER_TOOL), `${spec.name}：${tools.join("、")}`);

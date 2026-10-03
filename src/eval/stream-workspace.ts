@@ -70,9 +70,6 @@ export class StreamWorkspaceError extends Error {
 
 const BUNDLE_PATH = ".git/pigeon-start.bundle";
 
-// 各步"开工时的树"的引用前缀（容器执行端在每步开工时建，见 container-host 的 stepStartRef）
-export const STEP_START_REFS = "refs/pigeon/step-start";
-
 // 跑批器自己的 git 操作不受 agent 能改的 git 设置左右：不读全局与系统配置（agent 能写 ~/.gitconfig），不执行 .git/hooks
 // 里的钩子、不跑 fsmonitor 程序、提交不签名（不调 gpg.program），提交身份固定（环境变量里的设置优先于仓库的
 // .git/config）。仓库 .git/config 里的 filter 驱动等由 SANITIZE_GIT_CONFIG 在跑批器的 git 操作之前清掉。只加在工作区

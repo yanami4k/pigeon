@@ -10,11 +10,18 @@
 // 白名单；墙钟超时终止；输出按字节截断并标记。审批语义不在本工具：exec 档永不自动放行、[a] 收窄为精确命令串，均由
 // 治理层判定。执行证据（命令、实际进程参数、是否经启动器、是否经 shell、退出码、输出哈希与截断输出、执行前后工作树
 // 文件清单差异）作为成功结果的 details 随工具结果消息记进会话存储。
-// .pigeon/commands.json 的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
+// 设置的 commands 一节的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { PIGEON_DIR } from "../state/paths.ts";
 import { createLocalWorkspaceHost, windowsScript } from "./local-host.ts";
-import type { HostExecPlan, HostFileSnapshot, WorkspaceHost } from "./workspace-host.ts";
+import {
+  type HostExecPlan,
+  type HostFileSnapshot,
+  type MemoryLimitExceeded,
+  memoryLimitText,
+  type WorkspaceHost,
+} from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
 export const RUN_COMMAND_TOOL = "run_command";
@@ -51,7 +58,7 @@ const ENV_ALLOWLIST = new Set([
 const SHELL_CHARS = new Set(["|", ";", "&", "<", ">", "`"]);
 
 export const RunCommandParamsSchema = Type.Object({
-  // 完整命令串，或 .pigeon/commands.json 登记的短名
+  // 完整命令串，或设置的 commands 一节登记的短名
   command: Type.String({ minLength: 1, maxLength: 4000 }),
 });
 export type RunCommandParams = Static<typeof RunCommandParamsSchema>;
@@ -99,6 +106,8 @@ export interface ExecEvidence {
   output: string;
   truncated: boolean;
   fileChanges: FileChanges;
+  // 决策 333：超出沙箱内存上限
+  memoryLimitExceeded?: MemoryLimitExceeded;
 }
 
 // 只读检查结果：实际执行的命令串与执行路径
@@ -128,7 +137,7 @@ export interface RunCommandOptions {
   // 决策 098：执行端——缺省为 workspaceRoot 上的本地实现；容器工作区由装配方注入容器实现。
   // 工具只调接口：平台、工作目录、进程终止与文件清单都由实现决定
   host?: WorkspaceHost;
-  // 短名 → 命令串（.pigeon/commands.json）
+  // 短名 → 命令串（设置的 commands 一节）
   commands?: Readonly<Record<string, string>>;
   // 在场 = 只允许清单内的短名或其展开命令（tester 等角色）
   allowlist?: readonly string[];
@@ -187,7 +196,7 @@ export function runCommandTexts(input: {
     prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令${promptShell}；${promptApproval}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
-      "可用 .pigeon/commands.json 登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 .pigeon）。",
+      `可用设置 commands 一节登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。`,
   };
 }
 
@@ -376,7 +385,7 @@ export function createRunCommandTool(
       if (!permitted(inspection.input, command)) {
         const names = options.allowlist?.join("、") ?? "";
         throw new RunCommandError(
-          `命令不在本角色允许清单内：${inspection.input}（只能运行 .pigeon/commands.json 为该角色登记的命令：${names === "" ? "未登记任何命令" : names}）`
+          `命令不在本角色允许清单内：${inspection.input}（只能运行设置 commands 一节为该角色登记的命令：${names === "" ? "未登记任何命令" : names}）`
         );
       }
       if (inspection.mode === "invalid") {
@@ -406,6 +415,9 @@ export function createRunCommandTool(
         output: run.output,
         truncated: run.outputBytes > maxOutputBytes,
         fileChanges: diffFiles(before, after),
+        ...(run.memoryLimitExceeded !== undefined
+          ? { memoryLimitExceeded: run.memoryLimitExceeded }
+          : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
@@ -475,7 +487,7 @@ export interface McpLaunchPlan {
   verbatim: boolean;
 }
 
-// MCP server 启动计划（M5.7 S2，复用 048）：启动命令来自人写的 .mcp.json / .pigeon/mcp.json，参数已是数组、
+// MCP server 启动计划（M5.7 S2，复用 048）：启动命令来自人写的 .mcp.json / 设置的 mcp 一节，参数已是数组、
 // 不经切分。非 Windows 或解析到可执行文件 = 直接 spawn；Windows 上解析到 .cmd / .bat 且参数全在保守字符集内 =
 // cmd.exe 启动器；否则以 shell 运行——配置由人写即人确认，字符集外参数加双引号，引号、百分号与换行
 // 在 cmd 里无法安全表达，直接拒绝（改用包装脚本）
@@ -525,6 +537,9 @@ function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
   const lines = [
     `$ ${evidence.command}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
     `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
+    ...(evidence.memoryLimitExceeded !== undefined
+      ? [memoryLimitText(evidence.memoryLimitExceeded)]
+      : []),
     evidence.output,
   ];
   if (evidence.truncated) {

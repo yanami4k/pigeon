@@ -34,7 +34,7 @@ class TestReader:
             "11", 7, 2, 3, 4, keep_failed=2, review_cost=0.1, peak=51_000,
             mem_start=memory(900, entries=6, size=950), mem_end=memory(1200, entries=8, size=1333),
             review=review_facts(turns=12, wall_ms=90_000, tokens=33_000, closing=1, pre=2, hit=True),
-            hitStepBudget=True, verifyToolFaults=3,
+            hitStepBudget=True,
         ))
         assert r["cell"] == "11" and r["task"] == 7 and r["pass_no"] == 2
         assert (r["f_passed"], r["f_total"], r["score"], r["solved"]) == (3, 4, 0.75, 0.0)
@@ -47,7 +47,6 @@ class TestReader:
         assert (r["review_closing"], r["review_pre_compaction"]) == (1, 2)
         assert (r["review_turns"], r["review_tokens"], r["review_wall_ms"]) == (12, 33_000, 90_000)
         assert (r["hit_step_budget"], r["hit_review_budget"]) == (1.0, 1.0)
-        assert r["verify_tool_faults"] == 3
         assert r["baseline_unavailable"] == 0.0
 
     def test_nulls_read_as_empty(self):
@@ -56,7 +55,7 @@ class TestReader:
         assert r["f_total"] is None and r["score"] is None and r["cost"] is None
         assert r["review_turns"] is None and r["hit_review_budget"] is None
 
-    @pytest.mark.parametrize("field", ["hitStepBudget", "hitReviewBudget", "memoryAtEnd", "verifyToolFaults", "review",
+    @pytest.mark.parametrize("field", ["hitStepBudget", "hitReviewBudget", "memoryAtEnd", "review",
                                        "gateway", "runIdentity", "baselineUnavailable", "kind"])
     def test_missing_top_field_raises(self, field):
         row = runner_row("11", 7, 2, 1, 2)
@@ -402,6 +401,22 @@ class TestSessions:
         write_job(tmp_path, "search-only", 1, {1: [s01]})
         return write_run(tmp_path, rows)
 
+    def test_reads_state_layout(self, tmp_path):
+        """决策 325 起会话在 .pigeon/state/sessions；新布局与旧布局读出同样的计数。"""
+        rows = [runner_row("01", 1, 1, 1, 2)]
+        s01 = SessionBuilder("s01").run_start()
+        s01.assistant("找", calls=[("q1", "search_sessions", {"keywords": ["a"]})])
+        s01.result("q1", "search_sessions", {"hits": [{"sessionId": "k1"}]})
+        legacy, state = tmp_path / "legacy", tmp_path / "state"
+        write_job(legacy, "search-only", 1, {1: [s01]})
+        write_job(state, "search-only", 1, {1: [s01]}, layout="state")
+        assert (state / "streams" / "tasks-search-only-1" / ".pigeon" / "state" / "sessions").is_dir()
+        a, _ = load_table([write_run(legacy, rows)])
+        b, _ = load_table([write_run(state, rows)])
+        ra = a[(a.cell == "01") & (a.task == 1)].iloc[0]
+        rb = b[(b.cell == "01") & (b.task == 1)].iloc[0]
+        assert ra.search_calls_search_sessions == rb.search_calls_search_sessions == 1
+
     def test_counts_step1(self, tmp_path):
         df, info = load_table([self.build(tmp_path)])
         r = df[(df.cell == "11") & (df.task == 1)].iloc[0]
@@ -505,7 +520,6 @@ def test_cli_formal_deterministic(tmp_path):
     assert res["primary"]["fEmptyTasks"] == [15]
     assert res["primary"]["nValid"] == 11
     assert res["thirdPass"] is not None  # 四格都是两遍
-    assert res["verifyToolFaults"] == {"00": 0.0, "01": 0.0, "10": 0.0, "11": 0.0}
     md = outs[0][0].decode("utf-8")
     assert "## 结论（主判据）" in md and "## 稳健性分析（混合模型）" in md
     assert "## 设置（身份头）" in md and "复盘模板 v1" in md and "触发点 983616 token" in md

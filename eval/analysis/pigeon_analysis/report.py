@@ -214,7 +214,7 @@ def formal_markdown(res: dict[str, Any]) -> str:
                 lines.append(f"- {LABELS[name]}：τ² = {_v(r['tau2'], 6)}，第 3 遍可把最小可分辨效果降低 {_v(r['reduction'], 1, 100)}%")
         d = tp.get("decision")
         lines.append(f"- 判定：{'补第 3 遍' if d else ('不补' if d is False else '无法判定（' + tp.get('reason', '') + '）')}")
-    lines += [""] + input_lines(res["input"], res.get("verifyToolFaults"))
+    lines += [""] + input_lines(res["input"])
     return "\n".join(lines)
 
 
@@ -314,7 +314,7 @@ def calibration_markdown(res: dict[str, Any]) -> str:
     if "sampleCheck" in c:
         sc = c["sampleCheck"]
         lines += ["## 抽题核对", "", f"- 按种子 {K.SAMPLE_SEED} 应抽 {sc['expected']}；与结果中的题一致：{'是' if sc['matches'] else '否'}", ""]
-    lines += input_lines(res["input"], None)
+    lines += input_lines(res["input"])
     return "\n".join(lines)
 
 
@@ -426,7 +426,7 @@ def settings_lines(settings: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def input_lines(info: dict[str, Any], faults: dict[str, Any] | None) -> list[str]:
+def input_lines(info: dict[str, Any]) -> list[str]:
     lines = ["## 输入", "", f"- 读入结果行 {info['rows']} 条，规整表记录 {info['records']} 条",
              f"- 结果行里整列为空的字段：{info['fieldsAbsent']}"]
     # 会话文件按输出目录逐个列出（摘要可以相同）；多于一个目录时另列各目录相加的合计
@@ -441,19 +441,16 @@ def input_lines(info: dict[str, Any], faults: dict[str, Any] | None) -> list[str
     if len(sessions) > 1:
         lines.append(f"- 会话文件合计（{len(usable)} 个可用目录相加）：{sum(s['jobs'] for s in usable)} 个作业、"
                      f"{sum(s['sessionFiles'] for s in usable)} 个会话文件")
-    if faults is not None:
-        lines.append("- 验证工具故障次数（各格合计）：" + ("；".join(f"{c} {_v(v, 0)}" for c, v in sorted(faults.items())) or "无"))
+    # 决策 327：验证门退役，不再汇总验证工具故障（旧结果行里的该字段读取时忽略）
     lines.append("")
     return lines
 
 
-def formal_result(primary, secondary, third_pass, input_info, verify_tool_faults=None,
-                  interface=None) -> dict[str, Any]:
+def formal_result(primary, secondary, third_pass, input_info, interface=None) -> dict[str, Any]:
     return {
         "kind": "formal",
         "interfaceSensitivity": interface,
         "interfaceConclusions": conclusion_sentences(interface["primary"]) if interface is not None else None,
-        "verifyToolFaults": verify_tool_faults,
         "primary": primary,
         "secondary": secondary,
         "conclusions": conclusion_sentences(primary),

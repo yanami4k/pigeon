@@ -140,8 +140,8 @@ test("硬性规则：.gitignore 里的文件不带进快照", () => {
 test("治理目录 .pigeon 不算改动：被忽略时不进快照；只有 .pigeon 在变时视作没有未提交改动", () => {
   const { dir, cleanup } = repo();
   try {
-    mkdirSync(join(dir, ".pigeon", "sessions"), { recursive: true });
-    writeFileSync(join(dir, ".pigeon", "sessions", "s.json"), "{}\n");
+    mkdirSync(join(dir, ".pigeon", "state", "sessions"), { recursive: true });
+    writeFileSync(join(dir, ".pigeon", "state", "sessions", "s.json"), "{}\n");
     const snap = snapshotWorkdir({ repoRoot: dir, ref: REF });
     assert.equal(snap.snapshot, false);
     assert.equal(snap.commit, git(dir, "rev-parse", "HEAD"));
@@ -150,22 +150,30 @@ test("治理目录 .pigeon 不算改动：被忽略时不进快照；只有 .pig
   }
 });
 
-test("受跟踪的 .pigeon 保持 HEAD 的样子：里面的改动不进快照，其余改动照带", () => {
+test("决策 325：受跟踪的 .pigeon/settings.json 是项目内容，改动照进快照；程序状态与个人设置不进快照", () => {
   const { dir, cleanup } = repo();
   try {
     writeFileSync(join(dir, ".gitignore"), "*.log\n");
     mkdirSync(join(dir, ".pigeon"));
+    writeFileSync(join(dir, ".pigeon", "settings.json"), "{}\n");
     writeFileSync(join(dir, ".pigeon", "verify.json"), "{}\n");
     git(dir, "add", "-A");
     git(dir, "commit", "-q", "-m", "track governance");
-    writeFileSync(join(dir, ".pigeon", "verify.json"), '{"changed":1}\n');
-    writeFileSync(join(dir, ".pigeon", "sessions.json"), "[]\n");
+    writeFileSync(join(dir, ".pigeon", "settings.json"), '{"changed":1}\n');
+    mkdirSync(join(dir, ".pigeon", "state", "sessions"), { recursive: true });
+    writeFileSync(join(dir, ".pigeon", "state", "sessions", "s.jsonl"), "{}\n");
+    writeFileSync(join(dir, ".pigeon", "settings.local.json"), "{}\n");
     writeFileSync(join(dir, "a.txt"), "two\n");
     const snap = snapshotWorkdir({ repoRoot: dir, ref: REF });
     assert.equal(snap.snapshot, true);
-    assert.deepEqual(snap.files, ["a.txt"]);
+    assert.deepEqual(snap.files, [".pigeon/settings.json", "a.txt"]);
+    assert.equal(git(dir, "show", `${snap.commit}:.pigeon/settings.json`), '{"changed":1}');
     assert.equal(git(dir, "show", `${snap.commit}:.pigeon/verify.json`), "{}");
-    assert.equal(git(dir, "ls-tree", "--name-only", snap.commit, ".pigeon/sessions.json"), "");
+    assert.equal(git(dir, "ls-tree", "-r", "--name-only", snap.commit, ".pigeon/state"), "");
+    assert.equal(
+      git(dir, "ls-tree", "--name-only", snap.commit, ".pigeon/settings.local.json"),
+      ""
+    );
   } finally {
     cleanup();
   }

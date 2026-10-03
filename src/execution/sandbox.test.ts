@@ -31,6 +31,8 @@ function makeRepo(): string {
   git(repo, "init", "-q", "-b", "main");
   git(repo, "config", "user.name", "t");
   git(repo, "config", "user.email", "t@example.invalid");
+  // 检出要与镜像里一致：本机系统配置 autocrlf=true 会把检出转成 CRLF（用例按字节比对）
+  git(repo, "config", "core.autocrlf", "false");
   writeFileSync(join(repo, "a.txt"), "one\n");
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "init");

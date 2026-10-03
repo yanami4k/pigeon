@@ -42,7 +42,7 @@ const crashHalfway = {
   },
 };
 
-test("grants.json 原子替换：升格写到一半崩溃，原文件逐字节不变且可载入", () => {
+test("放权配置原子替换：升格写到一半崩溃，原文件逐字节不变且可载入", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-atomic-"));
   try {
     const first = makeRule("edit_file");
@@ -56,13 +56,16 @@ test("grants.json 原子替换：升格写到一半崩溃，原文件逐字节�
     assert.equal(readFileSync(grantsConfigPath(root), "utf8"), before);
     assert.deepEqual(loadGrantConfig(root), [first]);
     // 失败路径清掉自己的临时文件
-    assert.deepEqual(readdirSync(dirname(grantsConfigPath(root))), ["grants.json"]);
+    assert.deepEqual(
+      readdirSync(dirname(grantsConfigPath(root))).filter((name) => name.endsWith(".tmp")),
+      []
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("grants.json 原子替换：移除规则写到一半崩溃，原文件不变", () => {
+test("放权配置原子替换：移除规则写到一半崩溃，原文件不变", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-atomic-"));
   try {
     const first = makeRule("edit_file");
@@ -79,11 +82,11 @@ test("grants.json 原子替换：移除规则写到一半崩溃，原文件不�
   }
 });
 
-test("grants.json 原子替换：真实崩溃残留的临时文件不影响载入与后续写入", () => {
+test("放权配置原子替换：真实崩溃残留的临时文件不影响载入与后续写入", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-grants-atomic-"));
   try {
     mkdirSync(join(root, ".pigeon"), { recursive: true });
-    writeFileSync(`${grantsConfigPath(root)}.4242.deadbeef.tmp`, '{"version":1,"gra');
+    writeFileSync(`${grantsConfigPath(root)}.4242.deadbeef.tmp`, '{"permissions":{"gra');
     assert.deepEqual(loadGrantConfig(root), []);
     const rule = makeRule("edit_file");
     appendGrantConfigRule(root, rule);

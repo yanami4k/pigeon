@@ -41,7 +41,7 @@ function deps(root: string, overrides: Partial<RuntimeDeps>): RuntimeDeps {
     modelId: "custom",
     homeDir: root,
     skillRoots: [],
-    memoryRoots: [],
+    agentsMd: false,
     ...overrides,
   };
 }

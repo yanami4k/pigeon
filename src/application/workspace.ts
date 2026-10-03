@@ -6,16 +6,14 @@
 //     restoredGrants 种子，崩溃恢复后会话 grant 静默继续有效；从会话存储的授权条目现算，会话存储里没有该会话即无种子。
 // Actor 不直接触碰 persistence 的写侧，巡航规则 actors-no-persistence-writes 守住这条边。
 import { realpathSync } from "node:fs";
-import { join } from "node:path";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { ActiveGrant } from "../state/grants.ts";
 import type { SessionId } from "../state/ids.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import { storeActiveGrants } from "../state/session-judge.ts";
 
-// 会话文件目录（D1：<workspaceRoot>/.pigeon/sessions/）——唯一约定，Actor 不自拼
-export function sessionsDirOf(workspaceRoot: string): string {
-  return join(workspaceRoot, ".pigeon", "sessions");
-}
+// 会话文件目录（决策 325：<workspaceRoot>/.pigeon/state/sessions/，位置由 state/paths.ts 给出）——Actor 经此取，不自拼
+export { sessionsDirOf };
 
 export function prepareWorkspace(root: string): string {
   const workspaceRoot = realpathSync(root);

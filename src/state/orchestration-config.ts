@@ -1,4 +1,4 @@
-// 编排的项目配置 .pigeon/orchestration.json（决策 297–303）：纯类型与缺省，无 IO。人手写，可缺省；各项不给即取缺省。
+// 编排的配置（决策 297–303；决策 325 起为 settings.json 的 orchestration 一节）：纯类型与缺省，无 IO。人手写，可缺省；各项不给即取缺省。
 // - maxConcurrent：同时在跑的 worker 上限（300，缺省 8；人派、模型派与程序派共用；启动参数 --worker-concurrency 优先）
 // - maxDepth：层数（299，缺省 1 即 worker 不能再派；放开时各层共用同一个编排器与并发额度）
 // - maxWorkersPerRun：一次运行里模型最多派出的个数（300 取消了缺省的总数上限；这里与启动参数 --worker-limit 都是可选的上限）
@@ -10,11 +10,8 @@
 //   写法同点名时的额度，如 "¥20"、"$5"、"2m"；缺省不限）
 import { type Static, Type } from "typebox";
 
-export const ORCHESTRATION_CONFIG_VERSION = 1;
-
-export const OrchestrationConfigFileSchema = Type.Object(
+export const OrchestrationSectionSchema = Type.Object(
   {
-    version: Type.Literal(ORCHESTRATION_CONFIG_VERSION),
     maxConcurrent: Type.Optional(Type.Integer({ minimum: 1 })),
     maxDepth: Type.Optional(Type.Integer({ minimum: 1 })),
     maxWorkersPerRun: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -43,7 +40,7 @@ export const OrchestrationConfigFileSchema = Type.Object(
   },
   { additionalProperties: false }
 );
-export type OrchestrationConfigFile = Static<typeof OrchestrationConfigFileSchema>;
+export type OrchestrationSection = Static<typeof OrchestrationSectionSchema>;
 
 // 生效的数值（毫秒为单位）
 export interface OrchestrationSettings {
@@ -76,7 +73,7 @@ export const DEFAULT_ORCHESTRATION_SETTINGS: Readonly<OrchestrationSettings> = {
 };
 
 export function orchestrationSettings(
-  file: OrchestrationConfigFile | undefined
+  file: OrchestrationSection | undefined
 ): OrchestrationSettings {
   const base = DEFAULT_ORCHESTRATION_SETTINGS;
   return {

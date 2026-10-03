@@ -36,7 +36,7 @@ function tempRoot(): { root: string; sessions: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "pigeon-store-"));
   return {
     root,
-    sessions: join(root, ".pigeon", "sessions"),
+    sessions: join(root, ".pigeon", "state", "sessions"),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -60,7 +60,7 @@ function options(
   return {
     sessionsRoot: sessions,
     sessionId,
-    cwd: dirname(dirname(sessions)),
+    cwd: dirname(dirname(dirname(sessions))),
     lock: acquireSessionFileLock,
     ...extra,
   };
@@ -181,6 +181,42 @@ test("写者：已有会话文件时打开续写，seq 接着原文件", async (
       [1, 2]
     );
     assert.deepEqual(view?.warnings, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test("写者：打开失败即从注册表摘除——同一会话再次打开会重新尝试并成功（先前失败的写者仍未关闭）", async () => {
+  const { sessions, cleanup } = tempRoot();
+  try {
+    const first = openSessionStoreWriter(options(sessions, "sess_R"));
+    first.appendMessage(userMessage("一"));
+    await first.close();
+    const path = locateSessionFile(sessions, "sess_R")?.path;
+    assert.ok(path !== undefined);
+    // 第一次续写打开失败（加锁抛错）
+    const faults: string[] = [];
+    const failed = openSessionStoreWriter(
+      options(sessions, "sess_R", {
+        existingPath: path,
+        lock: () => {
+          throw new Error("锁一时拿不到");
+        },
+        onFault: (fault) => faults.push(fault.message),
+      })
+    );
+    assert.equal(await failed.filePath(), undefined);
+    assert.equal(faults.length, 1, JSON.stringify(faults));
+    // 再次打开：不命中失效的核心，重新打开并写进去
+    const retried = openSessionStoreWriter(options(sessions, "sess_R", { existingPath: path }));
+    assert.equal(await retried.filePath(), path);
+    retried.appendMessage(userMessage("二"));
+    await retried.close();
+    await failed.close();
+    assert.deepEqual(
+      readSessionFile(path)?.entries.map((entry) => entry.seq),
+      [1, 2]
+    );
   } finally {
     cleanup();
   }

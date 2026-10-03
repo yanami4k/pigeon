@@ -138,7 +138,7 @@ test("worker 打转：提醒递进它的下一轮，第 20 轮叫停，以 loopi
   assert.equal(
     workerNoticeText(outcome),
     'worker spin（implementer）失败：打转，连续 20 轮重复同样的工具调用与结果，已被叫停。重复的调用：run_command {"command":"npm test"}。' +
-      "分支 pigeon/spin 上可能有部分改动。"
+      `分支 pigeon/spin 上可能有部分改动。\n（worker 会话 ${outcome.sessionId}）`
   );
 });
 

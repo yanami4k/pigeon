@@ -194,7 +194,7 @@ test("提醒后模式变了即清零；之后再打转，提醒照常再来", ()
 });
 
 test("改过的轮数照改后的触发", () => {
-  const resolved = loopGuardSettings({ version: 1, remindAt: 2, warnAt: 3, stopAt: 4 });
+  const resolved = loopGuardSettings({ remindAt: 2, warnAt: 3, stopAt: 4 });
   assert.ok("settings" in resolved);
   const verdicts = feed(
     new LoopDetector(resolved.settings),
@@ -211,7 +211,7 @@ test("改过的轮数照改后的触发", () => {
 });
 
 test("追加的豁免与缺省豁免合并", () => {
-  const resolved = loopGuardSettings({ version: 1, exemptTools: ["mcp__ci__poll"] });
+  const resolved = loopGuardSettings({ exemptTools: ["mcp__ci__poll"] });
   assert.ok("settings" in resolved);
   assert.deepEqual(resolved.settings.exemptTools, ["wait_workers", "mcp__ci__poll"]);
   const verdicts = feed(
@@ -231,10 +231,10 @@ test("配置缺省：开着、5/10/20、只豁免 wait_workers；轮数不递增
     stopAt: 20,
     exemptTools: ["wait_workers"],
   });
-  const bad = loopGuardSettings({ version: 1, warnAt: 5 });
+  const bad = loopGuardSettings({ warnAt: 5 });
   assert.ok("problem" in bad);
   assert.match(bad.problem, /递增/);
-  const equal = loopGuardSettings({ version: 1, remindAt: 3, warnAt: 8, stopAt: 8 });
+  const equal = loopGuardSettings({ remindAt: 3, warnAt: 8, stopAt: 8 });
   assert.ok("problem" in equal);
 });
 

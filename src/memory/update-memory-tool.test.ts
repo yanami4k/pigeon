@@ -1,215 +1,335 @@
-// 记忆工具 update_memory（决策 217、228、232；施工默认 Q12、Q13）：说明、参数与返回文字逐字照 B 第 2 节；增、按编号替换与删除；
-// 编号不复用；完全相同不新增；user 引用换成会话编号；写满即拒且判定在锁内；人改坏格式时拒写并指出行号。
+// 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v2；两层各自增、按编号替换与删除；
+// 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
+// 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
-import { MEMORY_FILE_HEADER } from "./learned.ts";
-import { memoryFileOf } from "./learned-store.ts";
+import { MEMORY_FILE_HEADERS, type MemoryLayer } from "./learned.ts";
+import { memoryLocation } from "./learned-store.ts";
 import {
   applyMemoryUpdate,
   createUpdateMemoryTool,
+  type MemoryWriteNotice,
+  memoryWriteNoticeLine,
   UPDATE_MEMORY_DESCRIPTION,
   type UpdateMemoryParams,
   UpdateMemoryParamsSchema,
   updateMemoryRegistration,
 } from "./update-memory-tool.ts";
 
-function withRoot(body: (root: string) => Promise<void>): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-update-memory-"));
-  return body(root).finally(() => rmSync(root, { recursive: true, force: true }));
-}
-
 const SESSION = "sess_01TEST";
+const TODAY = new Date(2026, 9, 1, 12, 0);
+// 工具补在行尾的来处（终端界面、本会话、2026-10-01）
+const ORIGIN = ` 〔2026-10-01 · 终端界面 · 会话 ${SESSION}〕`;
 
-async function call(root: string, params: UpdateMemoryParams, limitChars?: number) {
-  return applyMemoryUpdate(
-    {
-      governanceRoot: root,
-      sessionId: SESSION,
-      ...(limitChars !== undefined ? { limitChars } : {}),
-    },
-    params
-  );
+interface Fixture {
+  root: string;
+  home: string;
+  notices: MemoryWriteNotice[];
+  call(
+    params: Omit<UpdateMemoryParams, "layer"> & { layer?: MemoryLayer },
+    limits?: { project?: number; user?: number }
+  ): ReturnType<typeof applyMemoryUpdate>;
+  file(layer: MemoryLayer): string;
+  read(layer: MemoryLayer): string;
 }
 
-const add = (fact: string, refs: string[] = ["src/a.ts"], reason = "理由") =>
-  ({ action: "add", fact, refs, reason }) as const;
+function withFixture(body: (fx: Fixture) => Promise<void>): Promise<void> {
+  const base = mkdtempSync(join(tmpdir(), "pigeon-update-memory-"));
+  const root = join(base, "proj");
+  const home = join(base, "home");
+  mkdirSync(root);
+  mkdirSync(home);
+  const notices: MemoryWriteNotice[] = [];
+  const file = (layer: MemoryLayer) =>
+    memoryLocation(layer, { governanceRoot: root, homeDir: home }).file;
+  const fx: Fixture = {
+    root,
+    home,
+    notices,
+    call: (params, limits = {}) =>
+      applyMemoryUpdate(
+        {
+          governanceRoot: root,
+          homeDir: home,
+          sessionId: SESSION,
+          source: "tui",
+          limits: { project: limits.project ?? 4000, user: limits.user ?? 4000 },
+          onWritten: (notice) => notices.push(notice),
+          now: () => TODAY,
+        },
+        { layer: "project", ...params } as UpdateMemoryParams
+      ),
+    file,
+    read: (layer) => readFileSync(file(layer), "utf8"),
+  };
+  return body(fx).finally(() => rmSync(base, { recursive: true, force: true }));
+}
 
-test("工具说明与参数说明逐字照 B 第 2 节", () => {
+// 一行条目的字符数（连同结尾换行），按码点计——不经被测模块，独立算
+function lineChars(id: string, content: string): number {
+  return [...`- [${id}] ${content}${ORIGIN}\n`].length;
+}
+
+test("工具说明与参数说明为记忆文字 v2：两层、只写内容、取向、写满时新增或改长都会被拒绝", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
-    "新增、改写或删除本项目的学到的记忆（.pigeon/learned/MEMORY.md）。只写不读：记忆已在会话开始时放进系统提示。\n" +
-      "每条是一句陈述句的事实，不写成对自己的命令；附至少一处引用：代码写成 文件 或 文件::函数，来自用户明确要求而指不到代码的写 user（工具会补上本会话编号）；再附一句理由，写明依据。\n" +
-      "只记以后在本项目仍然成立、会影响做法、又不容易从代码一眼看出的事实；不记任务经过、只在本次改动里才成立的事、环境一时的故障、通用常识、从代码一读就知道的内容，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找，不记值本身）。\n" +
-      "记忆有总量上限，写满时新增会被拒绝，须先合并相近条目或删除过时条目。\n" +
-      "引用为用户要求的条目，只有用户在本次会话里改口时才改写或删除。"
+    "新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（.pigeon/state/memory.md），user 对所有项目（~/.pigeon/state/memory.md）。只写不读：两层记忆已在会话开始时放进系统提示。\n" +
+      "记用户的偏好、用户对你做法的纠正，以及从代码和 git 历史看不出的项目信息（外部资料在哪里、约定、背景）；不记能从代码或 git 历史看出的内容（代码结构、文件位置、实现细节、改过什么），不记任务经过，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找）。\n" +
+      "每条一句话，只写内容；编号、日期、来源与会话编号由工具补上。只对本项目成立的记在 project，对所有项目都成立的记在 user；拿不准记在哪一层时，先问用户。\n" +
+      "每层有字符上限，写满时新增或改长都会被拒绝，须先合并相近条目或删除过时条目。\n" +
+      "用户亲口要求的条目，只有用户改口时才改写或删除。"
   );
+  assert.doesNotMatch(UPDATE_MEMORY_DESCRIPTION, /引用|\[L|理由/);
   const props = UpdateMemoryParamsSchema.properties as unknown as Record<
-    "action" | "id" | "fact" | "refs" | "reason",
+    "action" | "layer" | "id" | "content",
     { description?: string }
   >;
+  assert.deepEqual(Object.keys(props).sort(), ["action", "content", "id", "layer"]);
   assert.equal(
     props.action.description,
     "add 新增一条；replace 用新内容整条替换编号指定的一条；remove 删除编号指定的一条"
   );
-  assert.equal(props.id.description, "条目编号，如 L3，见记忆全文里每条开头的方括号");
-  assert.equal(props.fact.description, "一句陈述句的事实、教训或做法");
+  assert.equal(props.layer.description, "project 只对本项目；user 对所有项目");
+  assert.equal(props.id.description, "条目编号，如 P3 或 U2，见记忆全文里每条开头的方括号");
   assert.equal(
-    props.refs.description,
-    '代码引用写成 path/to/file 或 path/to/file::symbol；来自用户明确要求、指不到代码的写 user，工具替换为"用户要求（会话 {会话编号}）"'
+    props.content.description,
+    "一句话写明要记的内容（不写编号、日期与来源，工具会补上）"
   );
-  assert.equal(props.reason.description, "一句理由：为什么这条值得记、依据是什么");
-  const tool = createUpdateMemoryTool({ governanceRoot: ".", sessionId: SESSION });
+  const tool = createUpdateMemoryTool({
+    governanceRoot: ".",
+    sessionId: SESSION,
+    source: "tui",
+    limits: { project: 1, user: 1 },
+  });
   assert.equal(tool.name, "update_memory");
   assert.equal(tool.description, UPDATE_MEMORY_DESCRIPTION);
 });
 
-test("治理档位为写、只写 learned/、免审批", () => {
-  const registration = updateMemoryRegistration("/proj");
+test("治理档位为写、只写两层记忆文件、免审批", () => {
+  const registration = updateMemoryRegistration({ governanceRoot: "/proj", homeDir: "/home/u" });
   assert.equal(registration.tier, "write");
   assert.equal(registration.approvalFree, true);
   assert.deepEqual(registration.pathConfinement, {
     kind: "roots",
-    roots: [join("/proj", ".pigeon", "learned")],
+    roots: [
+      join("/proj", ".pigeon", "state", "memory.md"),
+      join("/home/u", ".pigeon", "state", "memory.md"),
+    ],
   });
 });
 
-test("新增、替换、删除：返回文字逐字照 B 第 2 节；新建文件带文件头；已用按条目区码点计", () =>
-  withRoot(async (root) => {
-    const first = await call(root, add("甲事实"), 500);
-    const file = readFileSync(memoryFileOf(root), "utf8");
-    assert.ok(file.startsWith(MEMORY_FILE_HEADER));
-    const used1 = [...file.slice(MEMORY_FILE_HEADER.length)].length;
-    assert.equal(first.text, `已新增 L1（当前 ${used1}/500 字符）。`);
-    const second = await call(root, add("乙事实😀"), 500);
-    const used2 = [...readFileSync(memoryFileOf(root), "utf8").slice(MEMORY_FILE_HEADER.length)]
-      .length;
-    assert.equal(second.text, `已新增 L2（当前 ${used2}/500 字符）。`);
-    const replaced = await call(
-      root,
-      { action: "replace", id: "L1", fact: "甲改", refs: ["src/b.ts"], reason: "新理由" },
-      500
-    );
-    const used3 = [...readFileSync(memoryFileOf(root), "utf8").slice(MEMORY_FILE_HEADER.length)]
-      .length;
-    assert.equal(replaced.text, `已替换 L1（当前 ${used3}/500 字符）。`);
-    const removed = await call(root, { action: "remove", id: "L2" }, 500);
-    const used4 = [...readFileSync(memoryFileOf(root), "utf8").slice(MEMORY_FILE_HEADER.length)]
-      .length;
-    assert.equal(removed.text, `已删除 L2（当前 ${used4}/500 字符）。`);
+test("新增、替换、删除：两层各写各的文件；工具补编号、日期、来源与会话编号；新建文件带各层文件头；写入后交出提示", () =>
+  withFixture(async (fx) => {
+    const added = await fx.call({ action: "add", content: "提交信息用英文祈使句" });
+    const p1 = lineChars("P1", "提交信息用英文祈使句");
+    assert.equal(added.text, `已在项目级新增 P1（当前 ${p1}/4000 字符）。`);
     assert.equal(
-      readFileSync(memoryFileOf(root), "utf8"),
-      `${MEMORY_FILE_HEADER}- [L1] 事实：甲改\n  引用：src/b.ts\n  理由：新理由\n`
+      fx.read("project"),
+      `${MEMORY_FILE_HEADERS.project}- [P1] 提交信息用英文祈使句${ORIGIN}\n`
     );
+    const user = await fx.call({ action: "add", layer: "user", content: "回复用中文" });
+    const u1 = lineChars("U1", "回复用中文");
+    assert.equal(user.text, `已在用户级新增 U1（当前 ${u1}/4000 字符）。`);
+    assert.equal(fx.file("user"), join(fx.home, ".pigeon", "state", "memory.md"));
+    assert.equal(fx.read("user"), `${MEMORY_FILE_HEADERS.user}- [U1] 回复用中文${ORIGIN}\n`);
+    // 内容里的换行并成一个空格，〔〕换成普通括号（〔〕留给来处）
+    await fx.call({ action: "add", content: "设计文档\n在〔内部〕wiki" });
+    assert.match(fx.read("project"), /- \[P2\] 设计文档 在（内部）wiki 〔/);
+    const replaced = await fx.call({ action: "replace", id: "p1", content: "提交信息用英文" });
+    const p2 = lineChars("P2", "设计文档 在（内部）wiki");
+    const p1b = lineChars("P1", "提交信息用英文");
+    assert.equal(replaced.text, `已替换项目级 P1（当前 ${p1b + p2}/4000 字符）。`);
+    const removed = await fx.call({ action: "remove", id: "P2" });
+    assert.equal(removed.text, `已删除项目级 P2（当前 ${p1b}/4000 字符）。`);
+    assert.equal(
+      fx.read("project"),
+      `${MEMORY_FILE_HEADERS.project}- [P1] 提交信息用英文${ORIGIN}\n`
+    );
+    // 删掉最大编号之后再新增：编号取现有最大加一
+    const again = await fx.call({ action: "add", content: "另一条" });
+    assert.equal(again.details.id, "P2");
+    assert.deepEqual(fx.notices.map(memoryWriteNoticeLine), [
+      "[记忆] 已记下（项目级 P1）：提交信息用英文祈使句",
+      "[记忆] 已记下（用户级 U1）：回复用中文",
+      "[记忆] 已记下（项目级 P2）：设计文档 在（内部）wiki",
+      "[记忆] 已改写（项目级 P1）：提交信息用英文",
+      "[记忆] 已删除（项目级 P2）：设计文档 在（内部）wiki",
+      "[记忆] 已记下（项目级 P2）：另一条",
+    ]);
   }));
 
-test("编号不复用：删掉最大编号后再新增，编号接着往上走（跨进程另存）", () =>
-  withRoot(async (root) => {
-    await call(root, add("一"));
-    await call(root, add("二"));
-    await call(root, { action: "remove", id: "L2" });
-    const next = await call(root, add("三"));
-    assert.equal(next.details.id, "L3");
-    assert.equal(readFileSync(join(root, ".pigeon", "learned", "next-id"), "utf8"), "4\n");
-    // 人删了另存的编号：按现有最大编号续
-    rmSync(join(root, ".pigeon", "learned", "next-id"));
-    const after = await call(root, add("四"));
-    assert.equal(after.details.id, "L4");
-  }));
-
-test("完全相同（事实、引用、理由三项都相同）不新增；任一项不同即新增", () =>
-  withRoot(async (root) => {
-    await call(root, add("甲", ["a.ts", "b.ts"], "因为")); // L1
-    const dup = await call(root, add("甲", ["a.ts", "b.ts"], "因为"));
-    assert.equal(dup.text, "与 L1 完全相同，未新增。");
-    assert.equal(dup.details.written, false);
-    assert.equal((await call(root, add("甲", ["a.ts"], "因为"))).details.id, "L2");
-    assert.equal((await call(root, add("甲", ["a.ts", "b.ts"], "所以"))).details.id, "L3");
-  }));
-
-test("refs 里的 user 换成用户要求加本会话编号", () =>
-  withRoot(async (root) => {
-    await call(root, add("提交信息用英文祈使句", ["user", "src/a.ts"]));
-    assert.ok(
-      readFileSync(memoryFileOf(root), "utf8").includes(
-        "  引用：用户要求（会话 sess_01TEST）, src/a.ts\n"
-      )
-    );
-  }));
-
-test("缺字段或 refs 为空、编号不存在：返回文字逐字照 B 第 2 节，不写文件", () =>
-  withRoot(async (root) => {
-    const missing = "每条必须有 fact、reason 和至少一处 refs（文件、文件::函数，或 user）。";
-    assert.equal(
-      (await call(root, { action: "add", fact: "甲", refs: [], reason: "乙" })).text,
-      missing
-    );
-    assert.equal((await call(root, { action: "add", fact: "甲", refs: ["a"] })).text, missing);
-    assert.equal(
-      (await call(root, { action: "add", fact: " ", refs: ["a"], reason: "r" })).text,
-      missing
-    );
-    await call(root, add("一"));
-    await call(root, add("二"));
-    assert.equal(
-      (await call(root, { action: "remove", id: "L9" })).text,
-      "没有 L9；现有条目编号：L1、L2。"
-    );
-    assert.equal(
-      (await call(root, { action: "replace", id: "L9", fact: "x", refs: ["a"], reason: "y" })).text,
-      "没有 L9；现有条目编号：L1、L2。"
-    );
-  }));
-
-test("写满即拒：判的是写入后的条目区总字符数，拒绝文字逐字照 B 第 2 节；文件头不计入", () =>
-  withRoot(async (root) => {
-    const entry = "- [L1] 事实：一\n  引用：a\n  理由：r\n";
-    const limit = [...entry].length;
-    const first = await call(root, add("一", ["a"], "r"), limit);
-    assert.equal(first.text, `已新增 L1（当前 ${limit}/${limit} 字符）。`);
-    const full = await call(root, add("二😀", ["a"], "r"), limit);
-    const needed = [..."- [L2] 事实：二😀\n  引用：a\n  理由：r\n"].length;
+test("新增被拒（328）：写明当前用量、该条字数与还差多少，提示写短或先合并、删除；附现有条目编号与各条字数", () =>
+  withFixture(async (fx) => {
+    const a = lineChars("P1", "甲甲甲");
+    const b = lineChars("P2", "乙");
+    const limit = a + b + 5;
+    await fx.call({ action: "add", content: "甲甲甲" }, { project: limit });
+    await fx.call({ action: "add", content: "乙" }, { project: limit });
+    const used = a + b;
+    const needed = lineChars("P3", "丙丙丙丙丙丙丙😀");
+    const full = await fx.call({ action: "add", content: "丙丙丙丙丙丙丙😀" }, { project: limit });
     assert.equal(
       full.text,
-      `记忆已满：当前 ${limit}/${limit} 字符，这条需要 ${needed} 字符。先用 replace 合并相近条目，或用 remove 删掉过时条目，再新增。现有条目编号：L1。`
+      `项目级记忆已满，这条没有新增：当前 ${used}/${limit} 字符，这条需要 ${needed} 字符（含工具补上的编号、日期、来源与会话编号），还差 ${used + needed - limit} 字符。把这条写短，或先用 replace 合并相近条目、用 remove 删除过时条目，再新增。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
     );
-    // 替换成更长的同样按写满拒绝
-    const longer = await call(
-      root,
-      { action: "replace", id: "L1", fact: "一二", refs: ["a"], reason: "r" },
-      limit
-    );
-    assert.equal(longer.details.rejected, "full");
+    assert.equal(full.details.rejected, "full");
+    assert.equal(fx.notices.length, 2, "被拒不交出提示");
+    // 恰好放得下即放行
+    const fits = lineChars("P3", "丁");
+    const exact = await fx.call({ action: "add", content: "丁" }, { project: used + fits });
+    assert.equal(exact.details.written, true);
   }));
 
-test("写满判定在锁内：等锁期间另一处写满了记忆，拿到锁后现读现判、拒绝新增，不覆盖对方写的", () =>
-  withRoot(async (root) => {
-    const entry = "- [L1] 事实：一\n  引用：a\n  理由：r\n";
+test("替换被拒（328）：写明被替换条目现有字数、新内容字数、替换后总数与超出多少，提示把新内容至少写短超出的字数；附各条字数", () =>
+  withFixture(async (fx) => {
+    const a = lineChars("P1", "甲");
+    const b = lineChars("P2", "乙乙");
+    const limit = a + b + 3;
+    await fx.call({ action: "add", content: "甲" }, { project: limit });
+    await fx.call({ action: "add", content: "乙乙" }, { project: limit });
+    const newChars = lineChars("P1", "甲甲甲甲甲甲");
+    const after = a + b - a + newChars;
+    const rejected = await fx.call(
+      { action: "replace", id: "P1", content: "甲甲甲甲甲甲" },
+      { project: limit }
+    );
+    assert.equal(
+      rejected.text,
+      `替换后超出项目级上限，P1 没有替换：P1 现有 ${a} 字符，新内容 ${newChars} 字符（含工具补上的编号、日期、来源与会话编号），替换后共 ${after}/${limit} 字符，超出 ${after - limit} 字符。把新内容至少写短 ${after - limit} 字符，或先用 remove 删除别的过时条目，再替换。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
+    );
+    // 按提示把新内容写短超出的字数即放得下
+    const shortened = "甲".repeat(6 - (after - limit));
+    const ok = await fx.call(
+      { action: "replace", id: "P1", content: shortened },
+      { project: limit }
+    );
+    assert.equal(ok.details.written, true);
+    assert.equal(ok.details.usedChars, limit);
+  }));
+
+test("替换后变短或等长一律放行：即使该层已超上限（人手改出来的），也不拦减少用量的改写；新增照样拦", () =>
+  withFixture(async (fx) => {
+    const long = "甲".repeat(30);
+    await fx.call({ action: "add", content: long });
+    await fx.call({ action: "add", content: "乙" });
+    const used = lineChars("P1", long) + lineChars("P2", "乙");
+    const limit = used - 10;
+    const shorter = await fx.call(
+      { action: "replace", id: "P1", content: "甲".repeat(25) },
+      { project: limit }
+    );
+    assert.equal(shorter.details.written, true);
+    assert.equal(shorter.details.usedChars, used - 5);
+    const same = await fx.call({ action: "replace", id: "P2", content: "丙" }, { project: limit });
+    assert.equal(same.details.written, true);
+    const longer = await fx.call(
+      { action: "replace", id: "P2", content: "丙丙" },
+      { project: limit }
+    );
+    assert.equal(longer.details.rejected, "full");
+    const add = await fx.call({ action: "add", content: "丁" }, { project: limit });
+    assert.equal(add.details.rejected, "full");
+  }));
+
+test("两层分别计：项目级写满不影响用户级新增，拒绝文字里的用量、上限与条目只算本层", () =>
+  withFixture(async (fx) => {
+    const p = lineChars("P1", "甲");
+    const limits = { project: p, user: 4000 };
+    await fx.call({ action: "add", content: "甲" }, limits);
+    const projectFull = await fx.call({ action: "add", content: "乙" }, limits);
+    assert.match(
+      projectFull.text,
+      new RegExp(`^项目级记忆已满.*当前 ${p}/${p} 字符.*：P1：${p}。$`)
+    );
+    const user = await fx.call({ action: "add", layer: "user", content: "乙" }, limits);
+    const u = lineChars("U1", "乙");
+    assert.equal(user.text, `已在用户级新增 U1（当前 ${u}/4000 字符）。`);
+    const userFull = await fx.call(
+      { action: "add", layer: "user", content: "丙" },
+      { project: 4000, user: u }
+    );
+    assert.match(userFull.text, new RegExp(`^用户级记忆已满.*当前 ${u}/${u} 字符.*：U1：${u}。$`));
+  }));
+
+test("内容相同不新增；缺内容、缺层级、编号不存在或层前缀不符：按固定文字回话、不写文件", () =>
+  withFixture(async (fx) => {
+    await fx.call({ action: "add", content: "一" });
+    await fx.call({ action: "add", content: "二" });
+    assert.equal(
+      (await fx.call({ action: "add", content: " 一 " })).text,
+      "与项目级 P1 内容相同，未新增。"
+    );
+    assert.equal(
+      (await fx.call({ action: "add", content: "  " })).text,
+      "add 与 replace 需要 content：一句话写明要记的内容。"
+    );
+    assert.equal(
+      (await fx.call({ action: "replace", id: "P1" })).text,
+      "add 与 replace 需要 content：一句话写明要记的内容。"
+    );
+    const noLayer = await applyMemoryUpdate(
+      {
+        governanceRoot: fx.root,
+        sessionId: SESSION,
+        source: "line",
+        limits: { project: 9, user: 9 },
+      },
+      { action: "add", content: "x" } as unknown as UpdateMemoryParams
+    );
+    assert.equal(
+      noLayer.text,
+      "需要 layer：project（只对本项目）或 user（对所有项目）；拿不准时先问用户。"
+    );
+    assert.equal(
+      (await fx.call({ action: "remove", id: "P9" })).text,
+      "项目级没有 P9；现有条目编号：P1、P2。"
+    );
+    assert.equal(
+      (await fx.call({ action: "remove", id: "U1" })).text,
+      "项目级没有 U1；现有条目编号：P1、P2。"
+    );
+    assert.equal(
+      (await fx.call({ action: "remove", layer: "user", id: "U1" })).text,
+      "用户级没有 U1；现有条目编号：（没有条目）。"
+    );
+    assert.equal(fx.notices.length, 2);
+  }));
+
+test("写满判定在锁内：等锁期间另一处写满了这一层，拿到锁后现读现判、拒绝新增，不覆盖对方写的", () =>
+  withFixture(async (fx) => {
+    const entry = `- [P1] 一${ORIGIN}\n`;
     const limit = [...entry].length + 2;
-    // 另一个写者（另一进程的复盘等）正持有记忆锁
-    const release = acquireExclusiveLock(join(root, ".pigeon", "learned.lock"), "测试持锁");
-    const pending = call(root, add("二", ["a"], "r"), limit);
-    // 持锁期间对方写满
-    mkdirSync(join(root, ".pigeon", "learned"), { recursive: true });
-    writeFileSync(memoryFileOf(root), `${MEMORY_FILE_HEADER}${entry}`);
+    const location = memoryLocation("project", { governanceRoot: fx.root, homeDir: fx.home });
+    const release = acquireExclusiveLock(location.lock, "测试持锁");
+    const pending = fx.call({ action: "add", content: "二" }, { project: limit });
+    mkdirSync(dirname(location.file), { recursive: true });
+    writeFileSync(location.file, `${MEMORY_FILE_HEADERS.project}${entry}`);
     release();
     const result = await pending;
     assert.equal(result.details.rejected, "full");
-    assert.equal(readFileSync(memoryFileOf(root), "utf8"), `${MEMORY_FILE_HEADER}${entry}`);
+    assert.equal(fx.read("project"), `${MEMORY_FILE_HEADERS.project}${entry}`);
   }));
 
-test("人改坏格式：拒绝写入并指出行号，文件原样不动", () =>
-  withRoot(async (root) => {
-    mkdirSync(join(root, ".pigeon", "learned"), { recursive: true });
-    const broken = `${MEMORY_FILE_HEADER}- [L1] 事实：一\n引用：a\n  理由：r\n`;
-    writeFileSync(memoryFileOf(root), broken);
-    const result = await call(root, add("二"));
+test("人改坏格式：拒绝写入并指出文件与行号，文件原样不动", () =>
+  withFixture(async (fx) => {
+    const file = fx.file("project");
+    mkdirSync(dirname(file), { recursive: true });
+    const broken = `${MEMORY_FILE_HEADERS.project}- [P1] 一\n不是条目\n`;
+    writeFileSync(file, broken);
+    const result = await fx.call({ action: "add", content: "二" });
     assert.equal(
       result.text,
-      "MEMORY.md 第 5 行起格式不对，已拒绝写入，以免覆盖人的修改；请告知用户修复。"
+      ".pigeon/state/memory.md 第 5 行起格式不对，已拒绝写入，以免覆盖人的修改；请告知用户用 /memory edit project 修复。"
     );
-    assert.equal(readFileSync(memoryFileOf(root), "utf8"), broken);
+    assert.equal(fx.read("project"), broken);
+  }));
+
+test("Unicode 行分隔符也折叠：\\u2028 与 \\u2029 当换行并成一个空格", () =>
+  withFixture(async (fx) => {
+    await fx.call({ action: "add", content: "第一段\u2028第二段\u2029第三段" });
+    assert.match(fx.read("project"), /- \[P1\] 第一段 第二段 第三段 〔/);
   }));

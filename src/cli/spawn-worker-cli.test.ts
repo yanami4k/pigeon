@@ -10,9 +10,12 @@ import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { orchestrationSettingsOf, parseLaunchFlags } from "../application/launch-flags.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
+import { emptySettingsSnapshot } from "../state/settings.ts";
 import { routeTopLevel, TOP_LEVEL_HELP, TUI_ENTRY } from "./index.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));
+const CLI_HOME = mkdtempSync(join(tmpdir(), "pigeon-cli-home-"));
+after(() => rmSync(CLI_HOME, { recursive: true, force: true }));
 const FIXTURES = pathToFileURL(
   fileURLToPath(new URL("../pi-runtime/fixtures.ts", import.meta.url))
 ).href;
@@ -34,6 +37,8 @@ function runCli(args: string[], input = "") {
     input,
     timeout: 120_000,
     windowsHide: true,
+    // 用户级目录指到临时目录（不读写真实的 ~/.pigeon）
+    env: { ...process.env, HOME: CLI_HOME, USERPROFILE: CLI_HOME },
   });
 }
 
@@ -42,7 +47,7 @@ function runCli(args: string[], input = "") {
 function writeStreamFnModule(dir: string): string {
   const file = join(dir, "fake-stream-fn.mjs");
   const merge =
-    "cd .pigeon/worktrees/*-fix-a && git add -A && git commit -qm fix-a && cd ../../.. && git merge -q --no-edit pigeon/fix-a";
+    "cd .pigeon/state/worktrees/*-fix-a && git add -A && git commit -qm fix-a && cd ../../.. && git merge -q --no-edit pigeon/fix-a";
   writeFileSync(
     file,
     `import { createFakeStreamFn } from ${JSON.stringify(FIXTURES)};
@@ -119,7 +124,7 @@ test("pigeon run：主 agent 同一次回复派两个 worker（派出即返回�
   const lines = child.stdout.trim().split(/\r?\n/);
   const result = JSON.parse(lines[lines.length - 1] ?? "") as { status: string; sessionId: string };
   assert.equal(result.status, "completed");
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), result.sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
   assert.ok(view !== undefined);
   const calls = view.runs.flatMap((run) => run.toolCalls);
   const textOf = (call: (typeof calls)[number]) =>
@@ -209,7 +214,7 @@ test("启动参数：--worker-concurrency 与 --worker-limit 调两个上限，�
   roots.push(empty);
   const defaults = orchestrationSettingsOf(
     parseLaunchFlags([], { usage: "u", spawnWorkers: true }),
-    empty
+    emptySettingsSnapshot(empty)
   );
   assert.equal(defaults.maxConcurrent, 8);
   assert.equal(defaults.maxWorkersPerRun, undefined);
@@ -218,7 +223,7 @@ test("启动参数：--worker-concurrency 与 --worker-limit 调两个上限，�
       usage: "u",
       spawnWorkers: true,
     }),
-    empty
+    emptySettingsSnapshot(empty)
   );
   assert.equal(given.maxConcurrent, 2);
   assert.equal(given.maxWorkersPerRun, 5);
@@ -276,7 +281,7 @@ export default (model, context, options) => {
   assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
   const lines = child.stdout.trim().split(/\r?\n/);
   const result = JSON.parse(lines[lines.length - 1] ?? "") as { sessionId: string };
-  const view = loadSessionView(join(root, ".pigeon", "sessions"), result.sessionId);
+  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
   assert.ok(view !== undefined);
   const texts = view.runs
     .flatMap((run) => run.toolCalls)

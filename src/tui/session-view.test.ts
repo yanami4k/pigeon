@@ -155,7 +155,7 @@ test("/sessions：安静行（时间 + Run 数 + sessionId），与 cli 同一�
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const seed = async (crashedRun: boolean): Promise<SessionId> => {
       const session = createFixtureSession({ sessionsDir });
       session.startRun({ task: "t" });
@@ -225,7 +225,7 @@ test("/resume 全流程：报告将还原的上下文与悬空的工具调用 �
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const crashed = await writeStoreCrashedSession(sessionsDir, root, "edit_file");
     const tracker = makeRebindTracker();
     const oldRuntime = new FakeRuntime();
@@ -275,7 +275,7 @@ test("/resume 旧格式会话：明确报错、不换绑，原运行面不受影
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const legacy = writeLegacySessionFile(sessionsDir);
     const tracker = makeRebindTracker();
     const runtime = new FakeRuntime();
@@ -316,7 +316,7 @@ test("/resume grant 种子：恢复后 /grants 渲染新会话存储里的生效
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const granted = createFixtureSession({ sessionsDir, cwd: root });
     granted.startRun({ task: "读" });
     const grantId = granted.grantCreated({ tool: "read_file" });
@@ -365,7 +365,7 @@ test("/resume 会话不存在与空目录响亮报错；原运行面不受影响
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     await writeHealthySession(sessionsDir, "read_file");
     const tracker = makeRebindTracker();
     const runtime = new FakeRuntime();
@@ -408,7 +408,7 @@ test("/resume 会话不存在与空目录响亮报错；原运行面不受影响
       shell.stop();
     }
 
-    // 空目录：无 .pigeon/sessions 时如实说明尚无会话记录
+    // 空目录：无 .pigeon/state/sessions 时如实说明尚无会话记录
     const empty = makeRoot();
     try {
       const term2 = new MockTerminal(90, 30);
@@ -443,7 +443,7 @@ test("运行中 /sessions 放行、/resume 被拒并说明原因；收尾后 /re
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const crashed = await writeStoreCrashedSession(sessionsDir, root, "read_file");
     const tracker = makeRebindTracker();
     const runtime = new FakeRuntime();
@@ -497,7 +497,7 @@ test("换绑后旧运行面迟到事件不进消息区（退订彻底）", async
   const { root, cleanup } = makeRoot();
   const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-log-"));
   try {
-    const sessionsDir = join(root, ".pigeon", "sessions");
+    const sessionsDir = join(root, ".pigeon", "state", "sessions");
     const crashed = await writeStoreCrashedSession(sessionsDir, root, "read_file");
     const tracker = makeRebindTracker();
     const oldRuntime = new FakeRuntime();

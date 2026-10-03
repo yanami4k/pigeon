@@ -5,29 +5,25 @@
 // cli 与 tui 此前各写一份 buildWithMcp 与 resume 配方，缺省与提示口径不一；此处收成一份。
 // 先建后换语义不变：装配失败（如 grants.json 畸形）时先关掉已启动的 MCP server 再上抛，
 // 调用方的旧运行面不受影响。
-// 决策 286：运行期告警（会话存储、压缩前复盘、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
+// 决策 286：运行期告警（会话存储、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
 // 不给即照旧写标准错误输出（逐行对话与其余调用方不变）。
 
-import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
+import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
-import type { VerifyConfig } from "../state/attempt-config.ts";
-import type { RunId, SessionId } from "../state/ids.ts";
+import type { SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
-import type { OutcomeLabel } from "../state/outcome-label.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
-import { storeAttemptLabel } from "../state/session-judge.ts";
+import { emptySettingsSnapshot, mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
-import { type AttemptVerification, attachAttemptVerification } from "./attempt-verify.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
-import { runRetryOnFail } from "./fork.ts";
 import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
-import type { ReviewModelChoice } from "./memory-review.ts";
 import {
   buildRuntime,
   disposeRuntime,
   type LearnedMemoryConfig,
+  type MemoryWriteConfig,
   type RuntimeBundle,
   type RuntimeDeps,
 } from "./runtime.ts";
@@ -36,7 +32,7 @@ import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
-import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
+import { restoreGrantSeed } from "./workspace.ts";
 
 // 装配需要的运行参数（launch-flags.ts 的子集：解析出来直接传进来）
 export interface SessionRuntimeFlags {
@@ -45,56 +41,32 @@ export interface SessionRuntimeFlags {
   modelId: string;
   persistThinking: boolean;
   thinkingLevel?: ThinkingLevel;
-  memoryBudgetChars?: number;
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置（缺省为产品缺省）
   compaction?: CompactionConfigInput;
-  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）与学到的记忆的总量上限
+  // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）
   pushedMemory?: boolean;
-  memoryLimitChars?: number;
-  // 决策 296：复盘模型（日常入口读 .pigeon/memory-review.json 给出；没指定即缺省）
-  reviewModel?: ReviewModelChoice;
 }
 
-// 交互会话的推送记忆配置：{冲突处理} 填交互版；压缩前复盘照做（上限取缺省；打转检测按设定挂上，308）
+// 交互会话的推送记忆配置（决策 331）：有人对话，给写入配置（注册 update_memory、推送段带写入说明）；两层上限取设置快照
 function interactiveLearnedMemory(
   flags: SessionRuntimeFlags,
-  warn?: WarnSink,
-  loopGuard?: LoopGuardSettings
+  write: MemoryWriteConfig | undefined
 ): LearnedMemoryConfig | undefined {
-  return flags.pushedMemory === true
-    ? {
-        conflict: "interactive",
-        ...(warn !== undefined || loopGuard !== undefined
-          ? {
-              review: {
-                ...(warn !== undefined ? { warn } : {}),
-                ...(loopGuard !== undefined ? { loopGuard } : {}),
-              },
-            }
-          : {}),
-        ...(flags.memoryLimitChars !== undefined ? { limitChars: flags.memoryLimitChars } : {}),
-        ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
-      }
-    : undefined;
+  return flags.pushedMemory === true ? (write !== undefined ? { write } : {}) : undefined;
 }
 
-// 从交互会话派生的无人值守运行（失败自动分叉重试、/fork 分支）的推送记忆参数：沿用开关、上限与复盘模型
-export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): {
-  pushedMemory?: boolean;
-  memoryLimitChars?: number;
-  reviewModel?: ReviewModelChoice;
-} {
-  return {
-    ...(flags.reviewModel !== undefined ? { reviewModel: flags.reviewModel } : {}),
-    ...(flags.pushedMemory === true ? { pushedMemory: true } : {}),
-    ...(flags.memoryLimitChars !== undefined ? { memoryLimitChars: flags.memoryLimitChars } : {}),
-  };
+// 从交互会话派生的无人值守运行（/fork 分支）的推送记忆参数：沿用开关，只推送（复盘与记忆上限已随 331/332 移走）
+export function pushedMemoryRunOptions(flags: SessionRuntimeFlags): { pushedMemory?: boolean } {
+  return flags.pushedMemory === true ? { pushedMemory: true } : {};
 }
 
 export interface OpenSessionRuntimeRequest {
-  // 治理根：.pigeon/（会话文件、固化 grant 配置、常驻 Memory、Skill）所在
+  // 治理根：.pigeon/（设置、程序状态、Skill）所在
   governanceRoot: string;
+  // 决策 325：本会话的设置快照（入口在会话开始时读一次并确认过会执行命令的条目；本会话内各处都从它取）。
+  // 缺省为空快照（不读任何设置文件）；日常入口一律显式给出
+  settings?: SettingsSnapshot;
   sessionId: SessionId;
   streamFn: StreamFn;
   flags: SessionRuntimeFlags;
@@ -104,15 +76,19 @@ export interface OpenSessionRuntimeRequest {
   resume?: boolean;
   // MCP 启动提示（启动问题与注解配置冲突）：cli 打 stdout、tui 打 stderr，由调用方决定
   onMcpNote?: (note: string) => void;
-  // 缺省按治理根与作用域工作区根启动真实 MCP 会话；测试注入替身
-  startMcp?: (scope: { governanceRoot: string; workspaceRoot: string }) => Promise<McpSession>;
+  // 缺省按治理根与作用域工作区根启动真实 MCP 会话；测试注入替身。reuse 为 /reload 时的旧 MCP 会话（沿用未变的连接）
+  startMcp?: (scope: {
+    governanceRoot: string;
+    workspaceRoot: string;
+    reuse?: McpSession;
+  }) => Promise<McpSession>;
+  // 决策 340：/reload 在同一会话上按新快照重建时给出旧运行面——内容未变的 MCP 连接沿用（只重启改过的、停掉删掉的、
+  // 启动新加的），系统提示里开局冻结的部分（人写的说明、推送的记忆、本地 Skill 目录）沿用开局读到的内容、不重读文件；
+  // 由设置决定的部分（工具清单与说明、MCP 一段等）按新快照装配。旧运行面由调用方在新运行面建好后释放
+  reloadFrom?: RuntimeBundle;
   // M5 S3（决策 042）：用户级偏好所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
-  // M7（决策 071）：会话级验证命令——冻结进注入快照；配置时挂 Run 结束后的独立验证
-  verify?: VerifyConfig;
-  // M7（决策 079）：失败自动分叉重试次数（冻结进注入快照；主会话在尝试标为失败后后台分叉重试）
-  retryOnFail?: number;
-  // 决策 237：日常沙箱的执行端——工具与会话验证命令经它在容器里读写与执行；不在宿主上打快照，不支持失败自动分叉重试。
+  // 决策 237：日常沙箱的执行端——工具经它在容器里读写与执行；不在宿主上打快照。
   // 会话文件、放权与记忆仍在宿主的治理根
   workspaceHost?: WorkspaceHost;
   // 决策 264–267：派 worker 的工具槽（终端界面给；命令行对话不给）。只给主会话注册：worker 会话（深度 1）与沙箱会话不注册
@@ -123,21 +99,21 @@ export interface OpenSessionRuntimeRequest {
   taskList?: boolean;
   // 决策 287–291：联网工具的配置（在场即注册两件工具）；--sandbox-network off 时调用方不给
   webTools?: WebToolsConfig;
-  // 决策 286：运行期告警的出口（会话存储、压缩前复盘、工作区快照）；缺省写标准错误输出
+  // 决策 331：写记忆的入口与写入后的提示（终端界面与 --line 给；推送记忆关着时不生效）
+  memoryWrite?: MemoryWriteConfig;
+  // 决策 286：运行期告警的出口（会话存储、压缩前回调、工作区快照）；缺省写标准错误输出
   warn?: WarnSink;
-  // 决策 308：打转检测设定——此处只给压缩前复盘挂上；主 agent 由入口自己挂（叫停后的交代各入口不同）
+  // 决策 324：钩子拦下或出错时的一行提示的出口（终端界面落消息区）；缺省静默
+  hooksNotice?: WarnSink;
+  // 决策 308：打转检测设定——此处挂到压缩与运行面内的用点；主 agent 由入口自己挂（叫停后的交代各入口不同）
   loopGuard?: LoopGuardSettings;
 }
 
 export interface OpenedSessionRuntime {
   bundle: RuntimeBundle;
   scope: SessionRuntimeScope;
-  // 配置了验证命令时在场（运行面释放前等在跑的验证收尾）
-  verification?: AttemptVerification;
   // M7（决策 078）：git 工作区的主会话在场（分叉入口据此取快照器）
   checkpoints?: CheckpointAttachment;
-  // M7（决策 079）：后台失败自动分叉重试（开启时在场）
-  retry?: { idle(): Promise<void>; errors(): unknown[] };
   // 续跑时在场：还原了几条消息、为几个悬空的工具调用补了结果
   restored?: { messages: number; interrupted: number };
   // 注册了 spawn_worker 时在场：调用方建好编排器后绑定到这个槽上
@@ -171,11 +147,7 @@ async function restoreContext(bundle: RuntimeBundle): Promise<{
 export async function openSessionRuntime(
   request: OpenSessionRuntimeRequest
 ): Promise<OpenedSessionRuntime> {
-  if (request.workspaceHost !== undefined && (request.retryOnFail ?? 0) > 0) {
-    throw new Error(
-      "容器工作区暂不支持失败自动分叉重试：分叉要在宿主的工作区上打快照、到独立工作树里续跑，而容器工作区在执行端另一侧"
-    );
-  }
+  const settings = request.settings ?? emptySettingsSnapshot(request.governanceRoot);
   // M5.5 S4（决策 040）：worker 会话回到它自己的工作树与委派策略；新建会话与主会话即治理根
   const scope = sessionRuntimeScope(request.governanceRoot, request.sessionId);
   const restoredGrants =
@@ -187,12 +159,20 @@ export async function openSessionRuntime(
     request.workspaceHost !== undefined
       ? () => noMcpSession()
       : (request.startMcp ??
-        ((target) => startMcpSession({ ...target, workspaceRoot: target.workspaceRoot })));
+        ((target) =>
+          startMcpSession({
+            ...target,
+            workspaceRoot: target.workspaceRoot,
+            config: mcpConfigOf(settings),
+          })));
+  const reuseMcp = request.reloadFrom?.mcp;
   const mcp = await startMcp({
     governanceRoot: request.governanceRoot,
     workspaceRoot: scope.workspaceRoot,
+    ...(reuseMcp !== undefined ? { reuse: reuseMcp } : {}),
   });
-  const learnedMemory = interactiveLearnedMemory(request.flags, request.warn, request.loopGuard);
+  const frozenPrompt = request.reloadFrom?.frozenPrompt;
+  const learnedMemory = interactiveLearnedMemory(request.flags, request.memoryWrite);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
       ? request.spawnWorker
@@ -206,6 +186,7 @@ export async function openSessionRuntime(
       streamFn: request.streamFn,
       workspaceRoot: scope.workspaceRoot,
       governanceRoot: request.governanceRoot,
+      settings,
       ...(scope.toolPolicy !== undefined ? { toolPolicy: scope.toolPolicy } : {}),
       sessionId: request.sessionId,
       yolo: request.flags.yolo,
@@ -214,9 +195,6 @@ export async function openSessionRuntime(
       persistThinking: request.flags.persistThinking,
       ...(request.flags.thinkingLevel !== undefined
         ? { thinkingLevel: request.flags.thinkingLevel }
-        : {}),
-      ...(request.flags.memoryBudgetChars !== undefined
-        ? { memoryBudgetChars: request.flags.memoryBudgetChars }
         : {}),
       ...(request.flags.maxOutputTokens !== undefined
         ? { maxOutputTokens: request.flags.maxOutputTokens }
@@ -228,8 +206,6 @@ export async function openSessionRuntime(
         : {}),
       ...(restoredGrants !== undefined ? { restoredGrants } : {}),
       ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
-      ...(request.verify !== undefined ? { verify: { ...request.verify } } : {}),
-      ...(request.retryOnFail !== undefined ? { retryOnFail: request.retryOnFail } : {}),
       // 决策 237、248：沙箱的执行端；改回逐条询问时仍接交互审批，只是不建目录限定的放权
       ...(request.workspaceHost !== undefined
         ? { workspaceHost: request.workspaceHost, pathScopedGrants: false }
@@ -239,6 +215,8 @@ export async function openSessionRuntime(
       ...(request.taskList === true ? { taskList: true } : {}),
       ...(request.webTools !== undefined ? { webTools: request.webTools } : {}),
       ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
+      ...(request.hooksNotice !== undefined ? { hooksNotice: request.hooksNotice } : {}),
+      ...(frozenPrompt !== undefined ? { frozenPrompt } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];
@@ -265,119 +243,10 @@ export async function openSessionRuntime(
     if (checkpoints !== undefined) {
       bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
     }
-    // M7（决策 079）：主会话一次尝试标为失败后，后台从任务开始处分叉重试（最多 K 次）
-    const retryErrors: unknown[] = [];
-    const retryPending = new Set<Promise<void>>();
-    const retries = request.retryOnFail ?? 0;
-    // 这次尝试的标签：等本 Run 的收尾条目交给写者并落盘，再从会话存储现算；
-    // 会话存储里没有本会话的文件（写者打不开，已告警）时标签无从现算，按未知处理、不重试
-    const labelOf = async (runId: RunId): Promise<OutcomeLabel> => {
-      await bundle.adapter.settled();
-      await bundle.sessionStore.flush();
-      const loaded = loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId);
-      return loaded !== undefined ? storeAttemptLabel(loaded.view, runId) : "Unknown";
-    };
-    const startRetry = (runId: RunId): void => {
-      if (retries <= 0 || scope.parentSessionId !== undefined) {
-        return;
-      }
-      const task = labelOf(runId)
-        .then((label) => (label === "Failed" ? retryFrom(runId) : undefined))
-        .catch((error: unknown) => {
-          retryErrors.push(error);
-        });
-      retryPending.add(task);
-      task.finally(() => retryPending.delete(task)).catch(() => {});
-    };
-    const retryFrom = (runId: RunId): Promise<void> => {
-      const startMcp = request.startMcp;
-      const task = runRetryOnFail({
-        governanceRoot: request.governanceRoot,
-        sourceSessionId: request.sessionId,
-        sourceStore: bundle.sessionStore,
-        runId,
-        retries,
-        // 复用本会话运行面已挂的快照器实例（同一会话只能有一个实例，否则序号会撞车）
-        ...(checkpoints !== undefined ? { checkpointer: checkpoints.checkpointer } : {}),
-        run: {
-          streamFn: request.streamFn,
-          provider: request.flags.provider,
-          modelId: request.flags.modelId,
-          yolo: request.flags.yolo,
-          persistThinking: request.flags.persistThinking,
-          ...(request.flags.thinkingLevel !== undefined
-            ? { thinking: request.flags.thinkingLevel }
-            : {}),
-          ...(request.homeDir !== undefined ? { homeDir: request.homeDir } : {}),
-          ...(request.flags.compaction !== undefined
-            ? { compaction: request.flags.compaction }
-            : {}),
-          ...(request.verify !== undefined ? { verify: request.verify } : {}),
-          ...pushedMemoryRunOptions(request.flags),
-          ...(startMcp !== undefined
-            ? {
-                startMcp: () =>
-                  startMcp({
-                    governanceRoot: request.governanceRoot,
-                    workspaceRoot: scope.workspaceRoot,
-                  }),
-              }
-            : {}),
-        },
-      });
-      return task.then(() => undefined);
-    };
-    // M7（决策 071）：Run 结束后在工作区根独立执行验证命令，结果落本会话的通用验证记录
-    const verification =
-      request.verify !== undefined
-        ? attachAttemptVerification({
-            bundle,
-            config: request.verify,
-            workspaceRoot: scope.workspaceRoot,
-            // 沙箱：验证命令经执行端在容器里执行
-            ...(request.workspaceHost !== undefined ? { host: request.workspaceHost } : {}),
-            onVerified: (record) => startRetry(record.target.runId),
-          })
-        : undefined;
-    // 未配置验证命令时，在 Run 结束后按会话现算的标签判断（撞上限、熔断、业务失败）
-    const unsubscribeRetry =
-      request.verify === undefined && retries > 0
-        ? bundle.adapter.subscribe((event) => {
-            if (event.kind === "run.ended") {
-              startRetry(event.runId);
-            }
-          })
-        : undefined;
-    const retry =
-      retries > 0
-        ? {
-            idle: async () => {
-              await verification?.idle();
-              while (retryPending.size > 0) {
-                await Promise.allSettled([...retryPending]);
-              }
-            },
-            errors: () => [...retryErrors],
-          }
-        : undefined;
-    if (retry !== undefined) {
-      bundle.disposers = [
-        ...(bundle.disposers ?? []),
-        async () => {
-          unsubscribeRetry?.();
-          await retry.idle();
-        },
-      ];
-    }
-    if (verification !== undefined) {
-      bundle.disposers = [...(bundle.disposers ?? []), () => verification.stop()];
-    }
     return {
       bundle,
       scope,
-      ...(verification !== undefined ? { verification } : {}),
       ...(checkpoints !== undefined ? { checkpoints } : {}),
-      ...(retry !== undefined ? { retry } : {}),
       ...(restored !== undefined ? { restored } : {}),
       ...(spawnWorker !== undefined ? { spawnWorker } : {}),
       ...(scriptOrchestration !== undefined ? { scriptOrchestration } : {}),

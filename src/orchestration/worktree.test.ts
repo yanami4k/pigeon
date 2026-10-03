@@ -41,12 +41,12 @@ function makeRepo(): { repo: string; cleanup: () => void } {
   return { repo, cleanup: () => rmSync(repo, { recursive: true, force: true }) };
 }
 
-test("工作树：目录在 .pigeon/worktrees/<会话>-<名字>、分支 pigeon/<名字>，隔离写入，移除后清单不再列出", () => {
+test("工作树：目录在 .pigeon/state/worktrees/<会话>-<名字>、分支 pigeon/<名字>，隔离写入，移除后清单不再列出", () => {
   const { repo, cleanup } = makeRepo();
   try {
     const sessionId = newSessionId();
     const handle = addWorktree({ repoRoot: repo, sessionId, name: "fix-a" });
-    assert.equal(handle.path, join(repo, ".pigeon", "worktrees", `${sessionId}-fix-a`));
+    assert.equal(handle.path, join(repo, ".pigeon", "state", "worktrees", `${sessionId}-fix-a`));
     assert.equal(handle.branch, "pigeon/fix-a");
     assert.equal(readFileSync(join(handle.path, "a.txt"), "utf8"), "alpha\n");
     assert.equal(git(handle.path, ["branch", "--show-current"]).trim(), "pigeon/fix-a");

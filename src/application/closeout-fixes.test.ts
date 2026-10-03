@@ -1,8 +1,7 @@
-// M7 收口修复：三处缺陷的回归测试。
+// M7 收口修复：两处缺陷的回归测试（原第二处"并行派发里验证记录写入失败被吞"随决策 322 的验证删除失去对象）。
 // 一、快照 ref 序号竞态：同一会话在运行时只能存在一个快照器实例（序号计数在实例内存里），分叉入口复用运行面已挂的实例；
 //     update-ref 另加旧值守卫（新建用创建语义），并发写同号时明确失败而不是静默覆盖。
-// 二、并行同任务派发里验证记录写入失败被吞：与主会话挂载同口径，进错误清单。
-// 三、快照器的内部故障无人读：向标准错误输出告警，同一类故障只说一次，文案说明后果。
+// 二、快照器的内部故障无人读：向标准错误输出告警，同一类故障只说一次，文案说明后果。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -17,19 +16,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createCheckpointer } from "../orchestration/checkpoint.ts";
-import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
-import { runAttemptGroup } from "./attempt-group.ts";
 import { runForkCommand } from "./fork-command.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
-import { childFamilySink, openSessionStore } from "./session-store.ts";
 import { dedupedWarner } from "./warnings.ts";
-import { createWorkerRuntimeFactory } from "./workers.ts";
 
-const NODE = `"${process.execPath}"`;
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
   prompts: [],
@@ -173,61 +167,7 @@ test("快照 ref 旧值守卫：同一会话的两个快照器实例写同号时
   }
 });
 
-// ---- 二、验证记录写入失败被吞 ----
-
-test("并行同任务派发：验证记录写入失败进错误清单，不被吞掉", async () => {
-  const { dir, home, cleanup } = repo("pigeon-verify-errors-");
-  try {
-    const hostId = newSessionId();
-    // 宿主会话的真实写者承接 worker 派出与收尾；验证记录另经一个写入即抛错的写入面
-    const faults: unknown[] = [];
-    const hostStore = openSessionStore({
-      sessionsDir: join(dir, ".pigeon", "sessions"),
-      sessionId: hostId,
-      cwd: dir,
-      onFault: (fault) => faults.push(fault),
-    });
-    const orchestrator = new WorkerOrchestrator({
-      governanceRoot: dir,
-      session: { sessionId: hostId },
-      parentPolicy: { allow: ["read_file", "edit_file"], deny: [], approvalMode: "yolo" },
-      parentLog: childFamilySink(hostStore),
-      createRuntime: createWorkerRuntimeFactory({
-        provider: "fake-provider",
-        modelId: "fake-model",
-        homeDir: home,
-        streamFnFor: () =>
-          createFakeStreamFn({ replies: [edit("old\n", "new\n"), { text: "改好了" }] }),
-      }),
-      approvals: async () => ({ approved: true }),
-    });
-    const result = await runAttemptGroup({
-      orchestrator,
-      governanceRoot: dir,
-      hostLog: { sessionId: hostId },
-      hostStore: {
-        append: () => {
-          throw new Error("验证记录写失败");
-        },
-        flush: () => hostStore.flush(),
-      },
-      role: "implementer",
-      task: "把 a.txt 改成 new",
-      count: 2,
-      verify: { command: `${NODE} check.mjs`, timeoutMs: 30_000 },
-    });
-    await hostStore.close();
-    assert.equal(result.errors.length, 2, "两次验证的写入失败都进错误清单");
-    assert.ok(
-      result.errors.every((error) => String((error as Error).message).includes("验证记录写失败")),
-      "错误可见"
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-// ---- 三、内部故障无人读 ----
+// ---- 二、内部故障无人读 ----
 
 test("去重告警器：同一类故障只说一次，不同类各说一次", () => {
   const said: string[] = [];

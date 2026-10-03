@@ -1,25 +1,21 @@
-// 日常沙箱的会话接线（决策 237、245–248）：pigeon run --sandbox 在容器里干活、验证命令经执行端在容器里执行、返回前交回；
-// 分叉在起容器之前报错；改回逐条询问时仍接交互审批、[d] 不建目录放权；沙箱会话不启动 MCP 服务，开沙箱时列出已配置的
-// 服务名（决策 252）。容器以假 docker 代替，工作区是真 git 仓库。
+// 日常沙箱的会话接线（决策 237、245–248）：pigeon run --sandbox 在容器里干活、返回前交回；改回逐条询问时仍接交互审批、
+// [d] 不建目录放权；沙箱会话不启动 MCP 服务，开沙箱时列出已配置的服务名（决策 252）。容器以假 docker 代替，工作区是真 git 仓库。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PathScopedGrantUnsupportedError } from "../approvals/grant-store.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { fakeSandboxDocker } from "../execution/sandbox-docker-fixtures.ts";
+import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
+import { projectSettingsPath } from "../state/paths.ts";
 import { noMcpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
-import {
-  runHeadlessInSandbox,
-  runSandboxCommand,
-  SANDBOX_FORK_UNSUPPORTED,
-  startSandbox,
-} from "./sandbox-session.ts";
+import { runHeadlessInSandbox, runSandboxCommand, startSandbox } from "./sandbox-session.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -58,7 +54,7 @@ function countingMcp() {
   return { counter, start };
 }
 
-test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器里执行；返回前交回成分支并删除容器，宿主工作目录不变", async () => {
+test("pigeon run --sandbox：agent 在容器里改文件；返回前交回成分支并删除容器，宿主工作目录不变", async () => {
   const repo = makeRepo();
   const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-home-"));
   const fake = fakeSandboxDocker();
@@ -84,8 +80,9 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
         }),
         yolo: true,
         homeDir: home,
+        // 决策 325：入口在会话开始时读好的设置快照（MCP 服务名取自它）
+        settings: loadSettings(repo, { homeDir: home }),
         // 只有在容器的工作区里执行才能通过
-        verify: { command: "test -f made.txt", timeoutMs: 30_000, source: "flag" },
         startMcp: mcp.start,
       },
       {
@@ -100,7 +97,6 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
       }
     );
     assert.equal(result.status, "completed", result.errorMessage);
-    assert.equal(result.verification?.verdict, "pass", "验证命令在容器里执行");
     assert.equal(result.sandbox?.branch, `pigeon/sandbox-${sessionId}`);
     assert.equal(git(repo, "show", `pigeon/sandbox-${sessionId}:made.txt`), "ok");
     assert.equal(existsSync(join(repo, "made.txt")), false, "宿主工作目录不变");
@@ -121,25 +117,56 @@ test("pigeon run --sandbox：agent 在容器里改文件，验证命令在容器
   }
 });
 
-test("沙箱里开失败自动分叉重试：起容器之前报错说明原因", async () => {
+test("资源上限取自设置的 sandbox 一节（决策 333）：写 0 的项不带参数，给了的按设置；就绪提示写明上限", async () => {
+  const repo = makeRepo();
+  const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-home-"));
+  const fake = fakeSandboxDocker();
+  try {
+    mkdirSync(join(repo, ".pigeon"), { recursive: true });
+    writeFileSync(
+      projectSettingsPath(repo),
+      JSON.stringify({ sandbox: { memory: "2g", pids: 0, cpus: 2 } })
+    );
+    const logs: string[] = [];
+    const sandbox = await startSandbox({
+      flags: SANDBOX_FLAGS,
+      governanceRoot: repo,
+      sessionId: "sess_LIM",
+      settings: loadSettings(repo, { homeDir: home }),
+      log: (line) => logs.push(line),
+      overrides: {
+        docker: fake.docker,
+        image: { kind: "image", image: "sandbox-test:latest" },
+        containerRoot: fake.containerRoot,
+        cacheRoot: fake.cacheRoot,
+      },
+    });
+    assert.ok(sandbox !== undefined);
+    try {
+      const args = fake.state().containers["pigeon-sandbox-sess_LIM"]?.args ?? [];
+      const at = (flag: string) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
+      assert.equal(at("--memory"), String(2 * 1024 ** 3), args.join(" "));
+      assert.equal(at("--memory-swap"), String(2 * 1024 ** 3));
+      assert.equal(at("--pids-limit"), undefined, "写 0 为不限");
+      assert.equal(at("--cpus"), "2");
+      assert.ok(
+        logs.some((line) => line.includes("内存上限 2 GiB、进程数上限 不限、CPU 上限 2 核")),
+        logs.join("｜")
+      );
+    } finally {
+      await sandbox.discard();
+    }
+  } finally {
+    fake.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("不给 --sandbox 不开沙箱", async () => {
   const repo = makeRepo();
   const fake = fakeSandboxDocker();
   try {
-    await assert.rejects(
-      startSandbox({
-        flags: { ...SANDBOX_FLAGS, retryOnFail: 1 },
-        governanceRoot: repo,
-        sessionId: newSessionId(),
-        log: () => {},
-        overrides: {
-          docker: fake.docker,
-          containerRoot: fake.containerRoot,
-          cacheRoot: fake.cacheRoot,
-        },
-      }),
-      (error: Error) => error.message === SANDBOX_FORK_UNSUPPORTED
-    );
-    assert.deepEqual(fake.state().calls, [], "没有调用 docker");
     assert.equal(
       await startSandbox({
         flags: {},
@@ -222,7 +249,7 @@ test("pigeon sandbox cache | clear-cache：查看占用与清空共用下载缓�
   }
 });
 
-test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不建目录放权，[a] 照常；不启动 MCP；分叉重试在装配前被拒", async () => {
+test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不建目录放权，[a] 照常；不启动 MCP", async () => {
   const governance = mkdtempSync(join(tmpdir(), "pigeon-sandbox-prompt-"));
   const workspace = mkdtempSync(join(tmpdir(), "pigeon-sandbox-prompt-ws-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-prompt-home-"));
@@ -260,10 +287,63 @@ test("沙箱改回逐条询问：注入执行端时仍接交互审批，[d] 不�
     const plain = await openSessionRuntime({ ...local, sessionId: newSessionId() });
     await disposeRuntime(plain.bundle);
     assert.equal(mcp.counter.calls, 1);
-    await assert.rejects(
-      openSessionRuntime({ ...base, sessionId: newSessionId(), retryOnFail: 1 }),
-      /不支持失败自动分叉重试/
-    );
+  } finally {
+    cleanup();
+    for (const dir of [governance, workspace, home]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 决策 331：沙箱会话（执行端在容器）照常注册 update_memory；写入落在宿主上的记忆文件（治理根在宿主侧）
+test("沙箱会话注册 update_memory：写入落在宿主上的记忆文件", async () => {
+  const governance = mkdtempSync(join(tmpdir(), "pigeon-sandbox-mem-"));
+  const workspace = mkdtempSync(join(tmpdir(), "pigeon-sandbox-mem-ws-"));
+  const home = mkdtempSync(join(tmpdir(), "pigeon-sandbox-mem-home-"));
+  const { host, cleanup } = localDockerHost(workspace);
+  try {
+    const opened = await openSessionRuntime({
+      governanceRoot: governance,
+      streamFn: createFakeStreamFn({
+        replies: [
+          {
+            text: "记",
+            toolCalls: [
+              {
+                name: "update_memory",
+                args: { action: "add", layer: "project", content: "沙箱里也能记" },
+              },
+            ],
+          },
+          { text: "好" },
+        ],
+      }),
+      sessionId: newSessionId(),
+      flags: {
+        yolo: true,
+        provider: "custom",
+        modelId: "custom",
+        persistThinking: true,
+        pushedMemory: true,
+      },
+      workspaceHost: host,
+      homeDir: home,
+      memoryWrite: { source: "tui" },
+    });
+    try {
+      assert.ok(
+        opened.bundle.adapter.snapshot().tools.advertised.includes("update_memory"),
+        "沙箱会话广告 update_memory"
+      );
+      const run = await opened.bundle.adapter.run("记一下");
+      assert.equal(run.status, "completed");
+      const memoryFile = join(governance, ".pigeon", "state", "memory.md");
+      assert.ok(existsSync(memoryFile), "记忆文件写在宿主治根下");
+      assert.ok(
+        readFileSync(memoryFile, "utf8").includes("沙箱里也能记"),
+        "内容落在宿主上的记忆文件"
+      );
+    } finally {
+      await disposeRuntime(opened.bundle);
+    }
   } finally {
     cleanup();
     for (const dir of [governance, workspace, home]) rmSync(dir, { recursive: true, force: true });
