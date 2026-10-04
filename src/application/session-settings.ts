@@ -28,6 +28,7 @@ import {
 } from "../state/config-trust.ts";
 import { LOCAL_SETTINGS_FILE, pigeonRel } from "../state/paths.ts";
 import type { SettingsSnapshot } from "../state/settings.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 
 export { LegacyLayoutError } from "../persistence/legacy-layout.ts";
 export { SettingsError } from "../persistence/settings.ts";
@@ -71,10 +72,14 @@ export function localSettingsTracked(root: string): boolean {
     return false;
   }
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)], {
-      cwd: root,
-      stdio: "ignore",
-    });
+    execFileSync(
+      "git",
+      [...hardenedGitArgs(), "ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)],
+      {
+        cwd: root,
+        stdio: "ignore",
+      }
+    );
     return true;
   } catch {
     return false;

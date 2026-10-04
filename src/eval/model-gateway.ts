@@ -545,6 +545,9 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     if (overSpend()) {
       writeSpend();
       options.limits.spendLimitReached(spent.totalCny, spendLimit as number);
+    } else if (closed) {
+      // 网关已关闭（在途的请求关闭后才回完）：不再设定时，立即写定
+      writeSpend();
     } else if (spendFile !== undefined) {
       spendFlush ??= later(SPEND_FLUSH_MS, writeSpend);
     }

@@ -2,6 +2,7 @@
 // refs/pigeon/scripts/<运行号> 上保留到本次脚本收回或放弃为止；工作目录没有未提交改动时起点即 HEAD，同样挂上引用
 // （续跑沿用开跑时的起点，HEAD 之后移动也不影响）。续跑时按运行号读回。
 import { execFileSync } from "node:child_process";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import {
   deleteSnapshotRef,
   readSnapshotRef,
@@ -28,7 +29,7 @@ export function takeScriptSnapshot(repoRoot: string, runId: string): ScriptSnaps
   const ref = scriptSnapshotRef(runId);
   const snap = snapshotWorkdir({ repoRoot, ref });
   if (!snap.snapshot) {
-    execFileSync("git", ["update-ref", ref, snap.commit], {
+    execFileSync("git", [...hardenedGitArgs(), "update-ref", ref, snap.commit], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

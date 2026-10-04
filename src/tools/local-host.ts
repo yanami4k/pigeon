@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { type Dirent, existsSync } from "node:fs";
 import { lstat, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { hardenedGitArgs } from "./git-hardening.ts";
 import {
   assertWritePathUnchanged,
   resolveWorkspacePath,
@@ -42,7 +43,7 @@ export function createLocalWorkspaceHost(
   options: LocalHostOptions = {}
 ): WorkspaceHost {
   const platform = options.platform ?? process.platform;
-  // 工作区在 git 仓库里的前缀（会话内取一次）；不是 git 工作区为 undefined
+  // 工作区在 git 仓库里的前缀（会话内取一次）；不是 git 工作区、或工作区根被外层仓库忽略时为 undefined
   let gitPrefix: Promise<string | undefined> | undefined;
   // 决策 352：Windows 上程序查找（工作区根与 PATH 逐目录找 .cmd / .bat）按"查找方式 + PATH + 程序名"缓存，会话内有效。
   // 找到的脚本取用前确认仍在；没找到的在命令报"程序不存在"时作废
@@ -71,17 +72,20 @@ export function createLocalWorkspaceHost(
       return scanLocalFiles(workspaceRoot, limit);
     },
     async fileState(limit, before) {
-      gitPrefix ??= runGit(workspaceRoot, ["rev-parse", "--show-prefix"]).then((out) =>
-        out?.replace(/\r?\n$/, "")
-      );
+      gitPrefix ??= workspaceGitPrefix(workspaceRoot);
       const prefix = await gitPrefix;
       if (prefix !== undefined && before?.kind !== "scan") {
         const state = await localGitState(workspaceRoot, prefix, limit, before);
-        if (state !== undefined) {
-          return state;
-        }
+        // git status 失败（命令删了 .git、弄坏了索引等）：改用全量扫描并注明
+        return (
+          state ?? { kind: "scan", fallback: true, ...(await scanLocalFiles(workspaceRoot, limit)) }
+        );
       }
-      return { kind: "scan", ...(await scanLocalFiles(workspaceRoot, limit)) };
+      return {
+        kind: "scan",
+        ...(before?.kind === "scan" && before.fallback === true ? { fallback: true as const } : {}),
+        ...(await scanLocalFiles(workspaceRoot, limit)),
+      };
     },
     findLauncherScript(program, env) {
       if (platform !== "win32") {
@@ -381,46 +385,105 @@ async function scanLocalFiles(root: string, limit: number): Promise<HostFileSnap
   return { files, truncated };
 }
 
-// 在工作区根跑一条 git；失败（不是 git 工作区、没有 git、超时）为 undefined
+// 在 cwd 跑一条加固过的 git（git-hardening.ts）；失败（不是 git 工作区、没有 git、超时、非零退出）为 undefined
 function runGit(cwd: string, args: readonly string[]): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile(
       "git",
-      [...args],
+      [...hardenedGitArgs(), ...args],
       { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 60_000, windowsHide: true },
       (error, stdout) => resolve(error === null ? stdout : undefined)
     );
   });
 }
 
-// git 工作区的取证：git status 报出的路径（与命令前报出的路径）逐个取 lstat 签名；git 失败时 undefined（退回扫描）
+// 工作区在所在仓库里的前缀；不是 git 工作区为 undefined。工作区根本身被外层仓库忽略时同样为 undefined：
+// git status 不会报出被忽略目录里的任何改动，按非 git 工作区全量扫描
+async function workspaceGitPrefix(root: string): Promise<string | undefined> {
+  const out = await runGit(root, ["rev-parse", "--show-prefix"]);
+  if (out === undefined) {
+    return undefined;
+  }
+  const prefix = out.replace(/\r?\n$/, "");
+  if (prefix !== "" && (await runGit(root, ["check-ignore", "-q", "--", "."])) !== undefined) {
+    return undefined;
+  }
+  return prefix;
+}
+
+// 嵌套仓库与子模块往下取它们自己的 git status 的层数；更深的整棵扫描
+const NESTED_REPO_DEPTH = 3;
+
+// git 工作区的取证：git status 报出的路径（与命令前报出的路径）逐个取 lstat 签名。status 报出的目录里有 .git 的（嵌套仓库、
+// 子模块）不按目录签名比，逐个取它们自己的 status；取不到的、嵌套过深的那棵子树整棵扫描，文件按未跟踪记。
+// 工作区根所在仓库的 git status 失败时为 undefined（调用方退回全量扫描）
 async function localGitState(
   root: string,
   prefix: string,
   limit: number,
   before: HostFileState | undefined
 ): Promise<HostFileState | undefined> {
-  const output = await runGit(root, GIT_STATUS_ARGS);
-  if (output === undefined) {
+  const statuses = new Map<string, "tracked" | "untracked">();
+  const signatures = new Map<string, string>();
+  const sign = async (file: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> => {
+    try {
+      const fileStat = await lstat(path.join(root, file));
+      signatures.set(file, `${fileStat.size}:${fileStat.mtimeMs}`);
+      return fileStat;
+    } catch {
+      signatures.set(file, MISSING_SIGNATURE);
+      return undefined;
+    }
+  };
+  // 取一个仓库（dir 相对工作区根，空或以 / 结尾）的 status 合进 statuses；交回其中的嵌套仓库，失败为 undefined
+  const collect = async (
+    dir: string,
+    strip: string,
+    governance: boolean
+  ): Promise<string[] | undefined> => {
+    const output = await runGit(path.join(root, dir), GIT_STATUS_ARGS);
+    if (output === undefined) {
+      return undefined;
+    }
+    const nested: string[] = [];
+    await Promise.all(
+      [...parseGitStatus(output, strip, governance)].map(async ([file, status]) => {
+        const key = dir + file.replace(/\/$/, "");
+        const fileStat = await sign(key);
+        if (fileStat?.isDirectory() === true && existsSync(path.join(root, key, ".git"))) {
+          signatures.delete(key);
+          nested.push(`${key}/`);
+          return;
+        }
+        statuses.set(key, status);
+      })
+    );
+    return nested;
+  };
+  let queue = await collect("", prefix, true);
+  if (queue === undefined) {
     return undefined;
   }
-  const statuses = parseGitStatus(output, prefix);
-  const wanted = new Set([...statuses.keys()].slice(0, limit));
-  if (before?.kind === "git") {
-    for (const file of before.entries.keys()) {
-      wanted.add(file);
-    }
-  }
-  const signatures = new Map<string, string>();
-  await Promise.all(
-    [...wanted].map(async (file) => {
-      try {
-        const fileStat = await lstat(path.join(root, file));
-        signatures.set(file, `${fileStat.size}:${fileStat.mtimeMs}`);
-      } catch {
-        signatures.set(file, MISSING_SIGNATURE);
+  for (let depth = 1; queue.length > 0; depth += 1) {
+    const next: string[] = [];
+    for (const dir of queue) {
+      const inner = depth <= NESTED_REPO_DEPTH ? await collect(dir, "", false) : undefined;
+      if (inner !== undefined) {
+        next.push(...inner);
+        continue;
       }
-    })
-  );
+      const tree = await scanLocalFiles(path.join(root, dir), limit);
+      for (const [file, signature] of tree.files) {
+        statuses.set(dir + file, "untracked");
+        signatures.set(dir + file, signature);
+      }
+    }
+    queue = next;
+  }
+  if (before?.kind === "git") {
+    await Promise.all(
+      [...before.entries.keys()].filter((file) => !signatures.has(file)).map((file) => sign(file))
+    );
+  }
   return gitFileState(statuses, (file) => signatures.get(file) ?? MISSING_SIGNATURE, limit, before);
 }

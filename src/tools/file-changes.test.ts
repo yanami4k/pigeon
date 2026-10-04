@@ -22,7 +22,7 @@ function withScript(body: string, run: (command: string) => Promise<void>): Prom
   const script = join(dir, "change.mjs");
   writeFileSync(
     script,
-    `import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";\n${body}`
+    `import { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";\nconst touchLater = (file) => { const t = new Date(Date.now() + 60_000); utimesSync(file, t, t); };\n${body}`
   );
   return run(`"${process.execPath}" "${script}"`).finally(() =>
     rmSync(dir, { recursive: true, force: true })
@@ -49,12 +49,18 @@ test("git 工作区：新增、删除、修改、命令前已改又被改、改�
       "b.txt": "b\n",
       "c.txt": "c\n",
       "r.txt": "r\n",
+      "s.txt": "s1\n",
       ".gitignore": "ignored/\n*.log\n",
     });
     git("add", "-A");
     git("commit", "-q", "-m", "init");
     // 命令前已有改动：c.txt、r.txt 改过，u.txt 未跟踪
-    seed(root, { "c.txt": "c changed\n", "r.txt": "r changed\n", "u.txt": "u\n" });
+    seed(root, {
+      "c.txt": "c changed\n",
+      "r.txt": "r changed\n",
+      "s.txt": "s2\n",
+      "u.txt": "u\n",
+    });
     await withScript(
       [
         'writeFileSync("new.txt", "new\\n");',
@@ -62,6 +68,8 @@ test("git 工作区：新增、删除、修改、命令前已改又被改、改�
         'appendFileSync("a.txt", "more\\n");',
         'appendFileSync("c.txt", "again\\n");',
         'writeFileSync("r.txt", "r\\n");',
+        // 命令前已改、命令又改成同样大小：只有内容与修改时间变了
+        'writeFileSync("s.txt", "s3\\n"); touchLater("s.txt");',
         'mkdirSync("ignored", { recursive: true });',
         'writeFileSync("ignored/x.txt", "x\\n");',
         'writeFileSync("app.log", "log\\n");',
@@ -72,7 +80,7 @@ test("git 工作区：新增、删除、修改、命令前已改又被改、改�
         assert.deepEqual(await changesOf(root, command), {
           added: ["new.txt"],
           removed: ["b.txt"],
-          modified: ["a.txt", "c.txt", "r.txt"],
+          modified: ["a.txt", "c.txt", "r.txt", "s.txt"],
           truncated: false,
         });
       }
@@ -87,6 +95,7 @@ test("非 git 工作区：全量扫描，虚拟环境、构建产物与缓存目
   try {
     seed(root, {
       "src/z.ts": "z\n",
+      "src/same.ts": "aaaa\n",
       "dist/x.js": "x\n",
       ".venv/lib/y.py": "y\n",
       "__pycache__/m.pyc": "m\n",
@@ -95,6 +104,7 @@ test("非 git 工作区：全量扫描，虚拟环境、构建产物与缓存目
       [
         'appendFileSync("src/z.ts", "more\\n");',
         'writeFileSync("src/new.ts", "new\\n");',
+        'writeFileSync("src/same.ts", "bbbb\\n"); touchLater("src/same.ts");',
         'appendFileSync("dist/x.js", "more\\n");',
         'appendFileSync(".venv/lib/y.py", "more\\n");',
         'mkdirSync("build", { recursive: true });',
@@ -104,7 +114,7 @@ test("非 git 工作区：全量扫描，虚拟环境、构建产物与缓存目
         assert.deepEqual(await changesOf(root, command), {
           added: ["src/new.ts"],
           removed: [],
-          modified: ["src/z.ts"],
+          modified: ["src/same.ts", "src/z.ts"],
           truncated: false,
         });
       }

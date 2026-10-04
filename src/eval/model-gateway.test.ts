@@ -1626,7 +1626,7 @@ test("花费：每条请求按开始与结束时刻计价——跨入高峰的�
   }
 });
 
-test("花费累计落盘：每记一笔即整份写入；进程重启（新网关读同一文件）接着累计；文件认不出即拒绝启动", async () => {
+test("花费累计落盘：关闭时写定；进程重启（新网关读同一文件）接着累计；文件认不出即拒绝启动", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "pigeon-spend-"));
   const file = path.join(dir, "gateway-spend.json");
   try {

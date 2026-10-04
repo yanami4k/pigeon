@@ -85,8 +85,10 @@ export interface FileChanges {
   added: string[];
   removed: string[];
   modified: string[];
-  // 清单超过上限，差异不完整
+  // 清单超过上限，差异不完整（这时只报命令前后都在、签名变了的文件）
   truncated: boolean;
+  // 取证方式上的说明（git status 失败、改用全量扫描等）；没有为缺省
+  note?: string;
 }
 
 export interface ExecEvidence {
@@ -560,7 +562,11 @@ function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
       : "";
   lines.push(
     `文件变化：新增 ${changes.added.length} / 删除 ${changes.removed.length} / 修改 ${changes.modified.length}` +
-      (changes.truncated ? "（文件过多，差异不完整）" : "")
+      (changes.note !== undefined
+        ? `（${changes.note}）`
+        : changes.truncated
+          ? "（文件过多，差异不完整）"
+          : "")
   );
   for (const line of [
     listed("新增", changes.added),
@@ -597,7 +603,10 @@ async function observedRun(
     const after = observed.after ?? (await host.fileState?.(FILE_SNAPSHOT_LIMIT, observed.before));
     return {
       run: observed.result,
-      fileChanges: after !== undefined ? diffStates(observed.before, after) : incompleteChanges(),
+      fileChanges:
+        after !== undefined
+          ? diffStates(observed.before, after)
+          : incompleteChanges("命令后的取证没有取到，差异不完整"),
     };
   }
   if (host.fileState !== undefined) {
@@ -612,19 +621,30 @@ async function observedRun(
   return { run, fileChanges: diffFiles(before, after) };
 }
 
-function incompleteChanges(): FileChanges {
-  return { added: [], removed: [], modified: [], truncated: true };
+const SCAN_FALLBACK_NOTE = "git status 失败，改用全量扫描";
+
+function incompleteChanges(note: string): FileChanges {
+  return { added: [], removed: [], modified: [], truncated: true, note };
 }
 
 // 两次取证 → 文件变化。git 取证：签名变了即有变化；命令前没报出的路径在命令前是干净的——未跟踪即原本不存在，
-// 跟踪的原本存在；命令后不再报出的路径按补查的签名判断。取法前后不一（命令中途建了或删了版本库）时报不完整
+// 跟踪的原本存在；命令后不再报出的路径按补查的签名判断。取证不完整时，命令前后有一边缺的路径可能只是落在上限之外，
+// 只报两边都在、签名变了的。取法前后不一（命令中途建了、删了或弄坏了版本库）时报不完整并注明
 export function diffStates(before: HostFileState, after: HostFileState): FileChanges {
   if (before.kind === "scan" && after.kind === "scan") {
-    return diffFiles(before, after);
+    const changes = diffFiles(before, after);
+    return before.fallback === true || after.fallback === true
+      ? { ...changes, note: SCAN_FALLBACK_NOTE }
+      : changes;
   }
   if (before.kind !== "git" || after.kind !== "git") {
-    return incompleteChanges();
+    return incompleteChanges(
+      after.kind === "scan" && after.fallback === true
+        ? `命令后${SCAN_FALLBACK_NOTE}，与命令前的取证对不上，差异不完整`
+        : "命令执行期间建了版本库，与命令前的取证对不上，差异不完整"
+    );
   }
+  const truncated = before.truncated || after.truncated;
   const added: string[] = [];
   const removed: string[] = [];
   const modified: string[] = [];
@@ -633,33 +653,38 @@ export function diffStates(before: HostFileState, after: HostFileState): FileCha
     if (was !== undefined && was.signature === now.signature) {
       continue;
     }
+    if (truncated && was === undefined) {
+      continue;
+    }
     const existedBefore =
       was !== undefined ? was.signature !== MISSING_SIGNATURE : now.status !== "untracked";
     const existsAfter = now.signature !== MISSING_SIGNATURE;
     if (existedBefore && existsAfter) {
       modified.push(file);
+    } else if (truncated) {
     } else if (existsAfter) {
       added.push(file);
     } else if (existedBefore) {
       removed.push(file);
     }
   }
-  return {
-    added: added.sort(),
-    removed: removed.sort(),
-    modified: modified.sort(),
-    truncated: before.truncated || after.truncated,
-  };
+  return { added: added.sort(), removed: removed.sort(), modified: modified.sort(), truncated };
 }
 
+// 全量清单比对；清单不完整时只报两边都在、签名变了的（缺的一边可能只是落在上限之外）
 function diffFiles(before: HostFileSnapshot, after: HostFileSnapshot): FileChanges {
+  const truncated = before.truncated || after.truncated;
   return {
-    added: [...after.files.keys()].filter((file) => !before.files.has(file)).sort(),
-    removed: [...before.files.keys()].filter((file) => !after.files.has(file)).sort(),
+    added: truncated
+      ? []
+      : [...after.files.keys()].filter((file) => !before.files.has(file)).sort(),
+    removed: truncated
+      ? []
+      : [...before.files.keys()].filter((file) => !after.files.has(file)).sort(),
     modified: [...after.files]
       .filter(([file, signature]) => before.files.has(file) && before.files.get(file) !== signature)
       .map(([file]) => file)
       .sort(),
-    truncated: before.truncated || after.truncated,
+    truncated,
   };
 }

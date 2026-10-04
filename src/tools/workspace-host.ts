@@ -99,7 +99,8 @@ export interface HostFileSnapshot {
 // 签名；命令后的那次另把命令前报出、命令后不再报出的路径补查签名，状态记 clean。非 git 工作区：全量清单
 export type HostFileState =
   | { kind: "git"; entries: Map<string, GitFileEntry>; truncated: boolean }
-  | ({ kind: "scan" } & HostFileSnapshot);
+  // fallback：git 工作区里 git status 失败（命令删了 .git、弄坏了索引等），改用全量扫描
+  | ({ kind: "scan"; fallback?: true } & HostFileSnapshot);
 
 export interface GitFileEntry {
   status: "tracked" | "untracked" | "clean";
@@ -153,13 +154,11 @@ export interface WorkspaceHost {
   fork?(ref: WorkspaceSnapshotRef): Promise<WorkspaceHost>;
 }
 
-// git status 取候选的参数（决策 348）：含未跟踪文件、逐个列出未跟踪目录里的文件、不含被忽略的、不合并改名；只看工作区
-// 所在的子树；关掉 fsmonitor 钩子；不取可选的锁、不刷新使用者的索引（刷新要短暂占住 index.lock，使用者同时在终端或编辑器里
-// 跑 git 时可能报锁已存在）。代价是修改时间晚于索引的文件每次都要重算内容哈希
+// git status 取候选的参数（决策 348），接在 git-hardening.ts 的加固参数之后：不取可选的锁、不刷新使用者的索引（刷新要短暂
+// 占住 index.lock，使用者同时在终端或编辑器里跑 git 时可能报锁已存在；代价是修改时间晚于索引的文件每次都要重算内容哈希）；
+// 含未跟踪文件、逐个列出未跟踪目录里的文件、不含被忽略的、不合并改名；只看当前目录所在的子树
 export const GIT_STATUS_ARGS: readonly string[] = [
   "--no-optional-locks",
-  "-c",
-  "core.fsmonitor=",
   "status",
   "--porcelain=v1",
   "-z",
@@ -169,11 +168,13 @@ export const GIT_STATUS_ARGS: readonly string[] = [
   ".",
 ];
 
-// git status --porcelain=v1 -z 的输出 → 相对工作区根的路径与状态。路径在输出里相对仓库根，去掉工作区在仓库里的前缀；
-// 不在工作区内的与工作区根下治理目录里的不要。同一路径既有跟踪状态又有未跟踪（git rm --cached）时记跟踪
+// git status --porcelain=v1 -z 的输出 → 路径与状态。路径在输出里相对仓库根，去掉 prefix（工作区在仓库里的前缀；嵌套仓库
+// 为空），不以它开头的不要；governance 为真时（工作区根所在的仓库）另去掉工作区根下的治理目录。未跟踪的嵌套仓库以带结尾
+// 斜杠的目录出现，原样交回。同一路径既有跟踪状态又有未跟踪（git rm --cached）时记跟踪
 export function parseGitStatus(
   output: string,
-  prefix: string
+  prefix: string,
+  governance = true
 ): Map<string, "tracked" | "untracked"> {
   const statuses = new Map<string, "tracked" | "untracked">();
   for (const record of output.split("\0")) {
@@ -183,7 +184,8 @@ export function parseGitStatus(
     const file = record.slice(3 + prefix.length);
     if (
       file === "" ||
-      LISTING_SKIPPED_ROOT_DIRS.some((dir) => file === dir || file.startsWith(`${dir}/`))
+      (governance &&
+        LISTING_SKIPPED_ROOT_DIRS.some((dir) => file === dir || file.startsWith(`${dir}/`)))
     ) {
       continue;
     }
