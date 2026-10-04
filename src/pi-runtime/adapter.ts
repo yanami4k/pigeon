@@ -1191,11 +1191,16 @@ export class PiRuntimeAdapter {
     if (!compactor.exceeds(tokens)) {
       return { tokens, exceeds: false };
     }
-    const record = prune.beforeCompaction(messages);
+    let record: PruneRecord | undefined;
+    try {
+      record = prune.beforeCompaction(messages, (pending) => this.#writePrune(pending));
+    } catch (error) {
+      // 裁剪记录写不成：这次不裁，照常压缩
+      this.#listenerErrors.push(error);
+    }
     if (record === undefined) {
       return { tokens, exceeds: true };
     }
-    this.#recordPrune(record);
     const after = this.#sentTokens(compactor, messages);
     return { tokens: after, exceeds: compactor.exceeds(after) };
   }
@@ -1211,38 +1216,35 @@ export class PiRuntimeAdapter {
     return Math.max(0, compactor.check(view).tokens - prune.unsentTokens(freshUsageTime(view)));
   }
 
-  // 决策 361：请求之前的裁剪；出错照原样发出（上游约定这个挂点不抛）
+  // 决策 361：请求之前的裁剪。新裁出错（含裁剪记录写不成）时只应用已有的裁剪，前缀不变（上游约定这个挂点不抛）
   #pruneContext(messages: AgentMessage[]): AgentMessage[] {
     const prune = this.#prune;
     if (prune === undefined) {
       return messages;
     }
     try {
-      const { messages: pruned, record } = prune.beforeRequest(messages);
-      if (record !== undefined) {
-        this.#recordPrune(record);
-      }
-      return pruned;
+      return prune.beforeRequest(messages, (record) => this.#writePrune(record)).messages;
     } catch (error) {
       this.#listenerErrors.push(error);
-      return messages;
+      try {
+        return prune.view(messages);
+      } catch (viewError) {
+        this.#listenerErrors.push(viewError);
+        return messages;
+      }
     }
   }
 
-  // 每次裁剪写一条会话记录（续跑照记录重放）
-  #recordPrune(record: PruneRecord): void {
-    try {
-      this.#sessionStore?.append({
-        customType: SessionEntryType.Prune,
-        data: {
-          version: SESSION_ENTRY_VERSION,
-          ...(this.#currentRunId !== null ? { runId: this.#currentRunId } : {}),
-          ...record,
-        },
-      });
-    } catch (error) {
-      this.#listenerErrors.push(error);
-    }
+  // 每次裁剪先写一条会话记录（续跑照记录重放）；写不成即抛出，裁剪器据此不让这次裁剪生效
+  #writePrune(record: PruneRecord): void {
+    this.#sessionStore?.append({
+      customType: SessionEntryType.Prune,
+      data: {
+        version: SESSION_ENTRY_VERSION,
+        ...(this.#currentRunId !== null ? { runId: this.#currentRunId } : {}),
+        ...record,
+      },
+    });
   }
 
   // Run 开始之前的挂点：超过触发点即压缩并整体替换 Agent 的消息。返回压缩期间是否被中断

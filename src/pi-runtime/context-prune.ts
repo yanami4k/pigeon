@@ -1,13 +1,16 @@
 // 缓存感知的上下文裁剪（决策 361）：把最近几轮之外的部分工具结果换成写明原来是什么与怎么找回的固定占位，降低之后每轮的
 // 输入量。只换工具结果的正文，消息本身（工具调用号、工具名）留着，调用与结果的配对不变；用户的话、模型正文、工具调用参数、
 // 思考内容、开工状态块与变化通道的消息（都不是工具结果）一律不碰。
-// 候选（保护轮之外、尚未裁过）：被后来的读取覆盖或被整体覆写的过时读取；无事发生的结果（零命中的搜索与检索、无输出的成功
-// 命令，只随批顺带：不当改写起点，不计入下限与不等式）；不小于最小大小的较大旧结果。占位比原文还大的不算。
+// 候选（保护轮之外、尚未裁过）：被后来的读取覆盖或被整体覆写的过时读取；无事发生的结果（零命中的搜索与检索、没有结果也没有
+// 答案的网页搜索、退出码 0 且没有输出也没有文件变化的命令，只随批顺带：不当改写起点，不计入下限与不等式）；不小于最小大小的
+// 较大旧结果。占位比原文还大的不算。命令输出截断了而全文没落盘的不裁（上下文里的头尾两段是唯一副本，命令可能有副作用，不能
+// 指望重新运行）。
 // 时机：免费时机（压缩前、Run 开始时模型或工具集或系统提示与上一个 Run 不同、空闲超过缓存保留时长）一次裁光候选；其余
 // 每次请求之前按价格比算账——在候选中选改写起点使预计净省最大，满足 裁掉量 × N ≥（价格比 − 1）× 改写点之后的量 且裁掉量
 // 不小于最小批量才裁。token 量按上游的 estimateTokens（与压缩判定同一口径）。
-// 每次裁剪产出一条记录（各项换成的占位原文），组装请求时按工具调用号应用；续跑从会话记录取回，前缀逐字节一致。
-// 裁掉的命令输出还没落盘的先补落盘，占位给出虚拟路径；裁掉的读取在上下文里再没有同一文件的读写结果时不再算读过。
+// 每次裁剪产出一条记录（各项换成的占位原文），先写进会话记录再生效，组装请求时按工具调用号应用；续跑从会话记录取回，前缀
+// 逐字节一致。裁掉的命令输出还没落盘的先补落盘（空输出不落盘），补不成的不裁；占位给出虚拟路径，带文件变化的保留文件变化
+// 清单。裁掉的读取在上下文里再没有同一文件的读写结果时不再算读过。
 // 打转检测看的是上游 turn_end 事件里的原文，不受裁剪影响。
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
@@ -33,10 +36,17 @@ export interface PruneSeed {
 }
 
 export interface PruneEffects {
-  // 没落盘的命令输出补落盘，返回虚拟路径；落不了返回 undefined
+  // 没落盘的命令输出补落盘，返回虚拟路径；落不了返回 undefined 或抛错
   saveOutput?(text: string): string | undefined;
   // 这个文件不再算本会话读过
   forgetRead?(resolvedPath: string): void;
+}
+
+// 命令输出的落盘位置；partial 为只存了前 bytes 字节
+interface SavedOutput {
+  uri: string;
+  bytes: number;
+  partial: boolean;
 }
 
 const SEARCH_TOOLS = new Set(["grep", "glob", "search_sessions", "web_search"]);
@@ -44,6 +54,8 @@ const FILE_TOOLS = new Set(["read_file", "write_file", "edit_file"]);
 // 估算占位大小时代替还没落盘的虚拟路径（与真路径长度相当）
 const URI_STAND_IN = "pigeon://outputs/sess_00000000000000000000000000/000";
 const CLIP_CHARS = 160;
+// run_command 结果正文里文件变化一段的开头（tools/run-command.ts 的 resultText）
+const FILE_CHANGES_HEAD = "\n文件变化：";
 
 interface Candidate {
   index: number;
@@ -106,25 +118,29 @@ export class ContextPruner {
     return applyPrunes(messages, this.#placeholders);
   }
 
-  // 每次请求之前：免费时机一次裁光，否则按价格比算账；返回本次请求用的上下文与新的裁剪记录（没裁为 undefined）
-  beforeRequest(messages: readonly AgentMessage[]): {
-    messages: AgentMessage[];
-    record?: PruneRecord;
-  } {
+  // 每次请求之前：免费时机一次裁光，否则按价格比算账。新的裁剪先交 write 写进会话记录、再生效（write 抛错即不生效，
+  // 错误照抛）；返回本次请求用的上下文与新的裁剪记录（没裁为 undefined）
+  beforeRequest(
+    messages: readonly AgentMessage[],
+    write: (record: PruneRecord) => void = () => {}
+  ): { messages: AgentMessage[]; record?: PruneRecord } {
     let record: PruneRecord | undefined;
     if (this.settings.enabled) {
       const trigger = this.#changed ?? (this.#idle(messages) ? "idle" : undefined);
+      record = this.#prune(messages, trigger ?? "paid", write);
       this.#changed = undefined;
-      record = this.#prune(messages, trigger ?? "paid");
     }
     this.#lastRequestAt = this.#now();
     return { messages: this.view(messages), ...(record !== undefined ? { record } : {}) };
   }
 
-  // 压缩之前：一次裁光候选（压缩时机关着或总开关关着时不裁）
-  beforeCompaction(messages: readonly AgentMessage[]): PruneRecord | undefined {
+  // 压缩之前：一次裁光候选（压缩时机关着或总开关关着时不裁）；先写后生效同 beforeRequest
+  beforeCompaction(
+    messages: readonly AgentMessage[],
+    write: (record: PruneRecord) => void = () => {}
+  ): PruneRecord | undefined {
     if (!this.settings.enabled || !this.settings.onCompaction) return undefined;
-    return this.#prune(messages, "compaction");
+    return this.#prune(messages, "compaction", write);
   }
 
   // 在 since 时刻（估算所用那条助手 usage 的时刻）之后裁掉的 token：那份 usage 量的是裁剪之前发出的上下文，
@@ -148,31 +164,51 @@ export class ContextPruner {
     return last !== undefined && this.#now() - last > retention * 1000;
   }
 
-  #prune(messages: readonly AgentMessage[], trigger: PruneTrigger): PruneRecord | undefined {
+  #prune(
+    messages: readonly AgentMessage[],
+    trigger: PruneTrigger,
+    write: (record: PruneRecord) => void
+  ): PruneRecord | undefined {
     const view = this.view(messages);
     const sizes = view.map((message) => estimateTokens(message));
     const total = sizes.reduce((sum, size) => sum + size, 0);
-    const candidates = findCandidates(messages, view, sizes, this.#placeholders, this.settings);
-    const chosen =
-      trigger === "paid" ? choosePaid(candidates, sizes, total, this.settings) : candidates;
+    let candidates = findCandidates(messages, view, sizes, this.#placeholders, this.settings);
+    // 先算定各项的占位：命令输出要补落盘的现在补，补不成的不裁；付费时机去掉它们后重新选起点
+    const outputs = new Map<string, SavedOutput | undefined>();
+    let chosen: Candidate[] = [];
+    for (;;) {
+      chosen =
+        trigger === "paid" ? choosePaid(candidates, sizes, total, this.settings) : candidates;
+      const failed = new Set<string>();
+      for (const candidate of chosen) {
+        if (outputs.has(candidate.toolCallId)) continue;
+        const output = this.#outputOf(candidate);
+        if (output === null) failed.add(candidate.toolCallId);
+        else outputs.set(candidate.toolCallId, output);
+      }
+      if (failed.size === 0) break;
+      candidates = candidates.filter((candidate) => !failed.has(candidate.toolCallId));
+    }
     if (chosen.length === 0) return undefined;
     const items: PruneItem[] = chosen.map((candidate) => ({
       toolCallId: candidate.toolCallId,
       toolName: candidate.toolName,
       reason: candidate.reason,
       tokens: candidate.tokens,
-      placeholder: placeholderOf(candidate, this.#savedUri(candidate)),
+      placeholder: placeholderOf(candidate, outputs.get(candidate.toolCallId)),
     }));
-    for (const item of items) this.#placeholders.set(item.toolCallId, item.placeholder);
-    this.#forgetReads(messages, chosen);
-    const after = this.view(messages).reduce((sum, message) => sum + estimateTokens(message), 0);
+    const next = new Map(this.#placeholders);
+    for (const item of items) next.set(item.toolCallId, item.placeholder);
+    const after = applyPrunes(messages, next).reduce(
+      (sum, message) => sum + estimateTokens(message),
+      0
+    );
     const prunedTokens = Math.max(0, total - after);
     const first = chosen.reduce((min, candidate) => Math.min(min, candidate.index), view.length);
     const rewriteTokens = Math.max(0, after - prefixTokens(sizes, first));
     const free = trigger !== "paid";
     const prunedAt = this.#now();
-    this.#pruned.push({ at: prunedAt, tokens: prunedTokens });
-    return {
+    const record: PruneRecord = {
       trigger,
       items,
       priceRatio: this.settings.priceRatio,
@@ -185,22 +221,31 @@ export class ContextPruner {
       tokensAfter: after,
       prunedAt,
     };
+    // 先写进会话记录，再生效：写不成就不裁，内存与记录不会对不上
+    write(record);
+    for (const item of items) this.#placeholders.set(item.toolCallId, item.placeholder);
+    this.#forgetReads(messages, chosen);
+    this.#pruned.push({ at: prunedAt, tokens: prunedTokens });
+    return record;
   }
 
-  // 命令输出：已落盘的用原路径；没截断的整段输出现在补落盘
-  #savedUri(candidate: Candidate): string | undefined {
+  // 命令输出的落盘位置：已落盘的用原位置；没截断的非空输出现在补落盘；空输出不落盘（undefined）；补不成为 null
+  #outputOf(candidate: Candidate): SavedOutput | undefined | null {
     if (candidate.toolName !== "run_command") return undefined;
     const details = candidate.result.details as Details;
-    const saved = (details?.savedOutput as { uri?: unknown } | undefined)?.uri;
-    if (typeof saved === "string") return saved;
-    if (details?.truncated === false && typeof details.output === "string") {
-      try {
-        return this.#effects.saveOutput?.(details.output);
-      } catch {
-        return undefined;
-      }
+    const saved = savedOutputOf(details);
+    if (saved !== undefined) return saved;
+    if (details?.outputBytes === 0) return undefined;
+    if (details?.truncated !== false || typeof details.output !== "string") return null;
+    if (details.output === "") return undefined;
+    try {
+      const uri = this.#effects.saveOutput?.(details.output);
+      return uri !== undefined
+        ? { uri, bytes: Buffer.byteLength(details.output, "utf8"), partial: false }
+        : null;
+    } catch {
+      return null;
     }
-    return undefined;
   }
 
   // 裁掉的读取：上下文里再没有同一文件没裁的读写结果时，不再算读过
@@ -261,7 +306,7 @@ export function pruneSeedFromEntries(entries: readonly object[]): PruneSeed {
   return { placeholders, ...(signature !== undefined ? { signature } : {}) };
 }
 
-// 候选：保护轮之外、没裁过、没被中断的工具结果，按位置排序
+// 候选：保护轮之外、没裁过、没被中断、命令输出找得回的工具结果，按位置排序
 function findCandidates(
   messages: readonly AgentMessage[],
   view: readonly AgentMessage[],
@@ -284,9 +329,10 @@ function findCandidates(
   messages.forEach((message, index) => {
     if (message.role !== "toolResult" || pruned.has(message.toolCallId)) return;
     const call = calls.get(message.toolCallId);
-    // 找不到所属调用的、保护轮之内的、被中断补上的不裁
+    // 找不到所属调用的、保护轮之内的、被中断补上的、命令输出找不回的不裁
     if (call === undefined || call.turn >= firstProtected) return;
     if ((message.details as Details)?.pigeonInterrupted === true) return;
+    if (message.toolName === "run_command" && !outputRecoverable(message)) return;
     const tokens = sizes[index] ?? 0;
     const reason = classify(messages, index, message, tokens, settings);
     if (reason === undefined) return;
@@ -301,12 +347,25 @@ function findCandidates(
       args: call.args,
     };
     const stub = view[index] as ToolResultMessage;
-    const placeholder = placeholderOf(candidate, URI_STAND_IN);
+    const details = message.details as Details;
+    const standIn = savedOutputOf(details) ?? {
+      uri: URI_STAND_IN,
+      bytes: typeof details?.outputBytes === "number" ? details.outputBytes : 0,
+      partial: false,
+    };
+    const placeholder = placeholderOf(candidate, standIn);
     const saved =
       tokens - estimateTokens({ ...stub, content: [{ type: "text", text: placeholder }] });
     if (saved > 0) candidates.push({ ...candidate, saved });
   });
   return candidates;
+}
+
+// 命令输出裁掉之后找得回：已落盘，或没截断（整段在 details 里，可补落盘）；截断了而全文没落盘的找不回
+function outputRecoverable(result: ToolResultMessage): boolean {
+  const details = result.details as Details;
+  if (savedOutputOf(details) !== undefined) return true;
+  return details?.truncated === false && typeof details.output === "string";
 }
 
 function classify(
@@ -341,14 +400,48 @@ function isStaleRead(
   return false;
 }
 
-// 无事发生：零命中的搜索与检索、无结果的网页搜索、退出码 0 且没有输出的命令
+// 无事发生：零命中的搜索与检索、没有结果也没有答案的网页搜索、退出码 0 且没有输出也没有文件变化的命令
 function isEmptyResult(result: ToolResultMessage): boolean {
   if (result.isError) return false;
   const details = result.details as Details;
-  if (SEARCH_TOOLS.has(result.toolName)) {
-    return details?.total === 0 || details?.results === 0;
+  if (result.toolName === "web_search") {
+    return details?.results === 0 && details.answered === false;
   }
-  return result.toolName === "run_command" && details?.exitCode === 0 && details.outputBytes === 0;
+  if (SEARCH_TOOLS.has(result.toolName)) return details?.total === 0;
+  return (
+    result.toolName === "run_command" &&
+    details?.exitCode === 0 &&
+    details.outputBytes === 0 &&
+    !hasFileChanges(details)
+  );
+}
+
+// 命令前后有文件变化（或差异不完整、取证方式另有说明，即说不准没有变化）
+function hasFileChanges(details: Details): boolean {
+  const changes = details?.fileChanges as
+    | {
+        added?: unknown[];
+        removed?: unknown[];
+        modified?: unknown[];
+        truncated?: boolean;
+        note?: string;
+      }
+    | undefined;
+  if (changes === undefined) return true;
+  return (
+    (changes.added?.length ?? 0) > 0 ||
+    (changes.removed?.length ?? 0) > 0 ||
+    (changes.modified?.length ?? 0) > 0 ||
+    changes.truncated === true ||
+    changes.note !== undefined
+  );
+}
+
+function savedOutputOf(details: Details): SavedOutput | undefined {
+  const saved = details?.savedOutput as Partial<SavedOutput> | undefined;
+  return typeof saved?.uri === "string"
+    ? { uri: saved.uri, bytes: Number(saved.bytes ?? 0), partial: saved.partial === true }
+    : undefined;
 }
 
 // 付费时机：从新到旧累加非顺带候选的裁掉量，逐个起点检查下限与不等式，取预计净省最大的起点；起点及之后的候选
@@ -379,10 +472,10 @@ function choosePaid(
   return candidates.filter((candidate) => candidate.index >= start);
 }
 
-// 固定格式的占位：原来是什么（工具、对象、大小、为什么裁）与找回方式
+// 固定格式的占位：原来是什么（工具、对象、大小、为什么裁）与找回方式；命令带文件变化的另保留文件变化清单
 export function placeholderOf(
   candidate: Pick<Candidate, "toolName" | "reason" | "tokens" | "result" | "args">,
-  savedUri: string | undefined
+  output: SavedOutput | undefined
 ): string {
   const what = describeCall(candidate);
   const why =
@@ -391,7 +484,8 @@ export function placeholderOf(
       : candidate.reason === "empty"
         ? "没有结果"
         : "较大的旧结果";
-  return `[已裁剪] 这里原是 ${candidate.toolName} 的结果（${what}；约 ${candidate.tokens} token；${why}），为节省上下文已移出。找回：${recoveryOf(candidate.toolName, savedUri)}`;
+  const head = `[已裁剪] 这里原是 ${candidate.toolName} 的结果（${what}；约 ${candidate.tokens} token；${why}），为节省上下文已移出。找回：${recoveryOf(candidate, output)}`;
+  return `${head}${fileChangesOf(candidate)}`;
 }
 
 function describeCall(candidate: Pick<Candidate, "toolName" | "result" | "args">): string {
@@ -417,15 +511,32 @@ function describeCall(candidate: Pick<Candidate, "toolName" | "result" | "args">
   }
 }
 
-function recoveryOf(toolName: string, savedUri: string | undefined): string {
+function recoveryOf(
+  candidate: Pick<Candidate, "toolName" | "result">,
+  output: SavedOutput | undefined
+): string {
+  const { toolName } = candidate;
   if (toolName === "read_file")
     return "需要时用 read_file 重新读取（覆盖这个文件之前也须重新读取）。";
   if (toolName === "run_command") {
-    return savedUri !== undefined
-      ? `完整输出存为 ${savedUri}，可用 read_file 读取。`
-      : "需要时重新运行这条命令。";
+    if (output === undefined) return "这条命令没有输出。";
+    const saved = output.partial
+      ? `已保存的是输出的前 ${output.bytes} 字节（全文超过落盘上限），存为 ${output.uri}`
+      : `完整输出存为 ${output.uri}`;
+    return `${saved}，可用 read_file 读取（若已被清理，需要重新运行）。`;
   }
   return SEARCH_TOOLS.has(toolName) ? "需要时重新搜索。" : "需要时重新调用。";
+}
+
+// 命令结果正文里的文件变化一段（有变化或说不准时原样保留，换掉的只是输出部分）
+function fileChangesOf(candidate: Pick<Candidate, "toolName" | "result">): string {
+  if (candidate.toolName !== "run_command") return "";
+  if (!hasFileChanges(candidate.result.details as Details)) return "";
+  const text = candidate.result.content
+    .map((block) => (block.type === "text" ? block.text : ""))
+    .join("");
+  const at = text.lastIndexOf(FILE_CHANGES_HEAD);
+  return at >= 0 ? text.slice(at) : "";
 }
 
 function clip(text: string): string {

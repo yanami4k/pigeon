@@ -131,3 +131,43 @@ test("状态栏的用量按实际发出的上下文估算：裁剪之后的那�
     // 估算所用的仍是第二次回复的 usage（裁剪之前发出的上下文），裁掉的量要从中减去
     assert.equal(adapter.contextUsage()?.tokens, contextTokens(adapter.transcript()) - pruned);
   }));
+
+test("新裁出错时只应用已有的裁剪：之前的占位不撤，那次请求的前缀不变", () =>
+  withRoot(async (root) => {
+    writeFileSync(join(root, "big.txt"), "大文件的一行内容。\n".repeat(600));
+    writeFileSync(join(root, "small.txt"), "小\n");
+    const read = (path: string) => ({
+      text: `读 ${path}`,
+      toolCalls: [{ name: "read_file", args: { path } }],
+    });
+    const fake = createFakeStreamFn({
+      replies: [read("big.txt"), read("small.txt"), read("small.txt"), { text: "完" }],
+    });
+    const empty = emptySettingsSnapshot(root);
+    const contextPrune = { protectTurns: 1, priceRatio: 1, minBatchTokens: 0 };
+    let calls = 0;
+    const result = await runHeadless({
+      task: "读文件",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn: fake,
+      yolo: true,
+      homeDir: root,
+      skillRoots: [],
+      agentsMd: false,
+      settings: { ...empty, merged: { ...empty.merged, contextPrune } },
+      // 第四次请求之前的新裁出错
+      onBundle: (bundle) => {
+        const original = bundle.prune.beforeRequest.bind(bundle.prune);
+        bundle.prune.beforeRequest = (messages, write) => {
+          calls += 1;
+          if (calls === 4) throw new Error("模拟出错");
+          return original(messages, write);
+        };
+      },
+    });
+    assert.equal(result.status, "completed");
+    const prefix = (call: number) => JSON.stringify(fake.calls[call]?.context.messages.slice(0, 4));
+    assert.match(prefix(2), /\[已裁剪\]/);
+    assert.equal(prefix(3), prefix(2));
+  }));

@@ -1,9 +1,11 @@
 // 缓存感知的上下文裁剪（决策 361）：付费时机按 裁掉量 × N ≥（价格比 − 1）× 改写点之后的量 且不小于最小批量才裁；
 // 受保护的内容（用户的话、模型正文与思考、工具调用参数、状态消息、最近几轮的工具结果）不碰，调用与结果的配对保留；
 // 无事发生的结果只随批顺带；过时读取不论大小都算，裁掉的读取在上下文里再没有同一文件的读写时不再算读过；命令输出没落盘的
-// 先补落盘；免费时机（模型或工具集变化、空闲超时、压缩前）一次裁光；续跑照记录重放，逐字节一致。
+// 先补落盘（空输出不落盘），截断而全文没落盘的、补落盘失败的不裁，带文件变化的保留清单；先写进会话记录再生效；免费时机
+// （模型或工具集变化、空闲超时、压缩前）一次裁光；同一请求前裁两次不重复扣减；续跑照记录重放，逐字节一致，总开关关掉也照放。
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { estimateTokens } from "@earendil-works/pi-agent-core";
 import { type ContextPruneSettings, contextPruneSettings } from "../state/prune-config.ts";
 import { SESSION_ENTRY_VERSION, SessionEntryType } from "../state/session-entries.ts";
 import { STATUS_MARKER } from "../state/status-text.ts";
@@ -61,6 +63,9 @@ function turn(call: Call, id: string): AgentMessage[] {
     } as AgentMessage,
   ];
 }
+
+// 命令前后没有文件变化
+const NONE = { added: [], removed: [], modified: [], truncated: false };
 
 // 约 tokens 个 token 的文本（上游按 4 字符一个 token 估算）
 const sized = (tokens: number) => "x".repeat(tokens * 4);
@@ -122,7 +127,7 @@ test("受保护的内容不碰、调用与结果配对保留、传入的消息�
     ...conversation(
       [
         { name: "read_file", text: sized(2_000), args: { path: sized(1_000) } },
-        { name: "run_command", text: sized(2_000), args: { command: "make" } },
+        { name: "grep", text: sized(2_000), args: { pattern: "make" } },
       ],
       5,
       2_000
@@ -183,11 +188,16 @@ test("过时读取不论大小都算；同一文件在上下文里还有没裁�
   });
   const forgotten: string[] = [];
   const effects: PruneEffects = { forgetRead: (path) => forgotten.push(path) };
-  // a.txt 第 5–14 行之后被第 1–100 行的读取覆盖；b.txt 只读过一次
+  // a.txt 第 5–14 行之后被第 1–100 行的读取覆盖；b.txt 只读过一次；c.txt 之后读的第 20–30 行不覆盖第 1–10 行；
+  // d.txt 之后被 write_file 整体覆写（覆写的结果还在，不撤读取记录）
   const messages = conversation([
     read("a.txt", 5, 10, 50),
     read("a.txt", 1, 100, 50),
     read("b.txt", 1, 10, 1_000),
+    read("c.txt", 1, 10, 50),
+    read("c.txt", 20, 11, 50),
+    read("d.txt", 1, 10, 50),
+    { name: "write_file", text: "已覆盖", details: { resolvedPath: "/w/d.txt" } },
   ]);
   const record = new ContextPruner(settings(), effects).beforeCompaction(messages);
   assert.deepEqual(
@@ -195,6 +205,7 @@ test("过时读取不论大小都算；同一文件在上下文里还有没裁�
     [
       ["old0", "stale"],
       ["old2", "large"],
+      ["old5", "stale"],
     ]
   );
   assert.deepEqual(forgotten, ["/w/b.txt"]);
@@ -214,7 +225,13 @@ test("命令输出：已落盘的用原路径；没截断的整段输出补落�
       name: "run_command",
       text: output,
       args: { command: "make test" },
-      details: { truncated: false, output, exitCode: 0, outputBytes: output.length },
+      details: {
+        truncated: false,
+        output,
+        exitCode: 0,
+        outputBytes: output.length,
+        fileChanges: NONE,
+      },
     },
     {
       name: "run_command",
@@ -227,6 +244,103 @@ test("命令输出：已落盘的用原路径；没截断的整段输出补落�
   assert.deepEqual(saved, [output]);
   assert.match(record?.items[0]?.placeholder ?? "", /pigeon:\/\/outputs\/s1\/7/);
   assert.match(record?.items[1]?.placeholder ?? "", /pigeon:\/\/outputs\/s1\/3/);
+});
+
+test("命令：截断而全文没落盘的、补落盘失败的不裁；部分落盘照实写；带文件变化的保留清单；空输出不落盘", () => {
+  const saved: string[] = [];
+  const failing = sized(1_000);
+  const effects: PruneEffects = {
+    saveOutput: (text) => {
+      if (text === failing) throw new Error("磁盘满");
+      saved.push(text);
+      return "pigeon://outputs/s1/9";
+    },
+  };
+  const generated = "y".repeat(4_000);
+  const changes = "\n文件变化：新增 1 / 删除 0 / 修改 0\n新增：gen.txt";
+  const echo = `echo ${"x".repeat(800)}`;
+  const command = (text: string, details: Record<string, unknown>, run = "make"): Call => ({
+    name: "run_command",
+    text,
+    args: { command: run },
+    details: { exitCode: 0, fileChanges: NONE, ...details },
+  });
+  const messages = conversation([
+    command(sized(1_000), { truncated: true, outputBytes: 999_999, savedOutputError: "磁盘满" }),
+    command(failing, { truncated: false, output: failing, outputBytes: failing.length }),
+    command(sized(1_000), {
+      truncated: true,
+      outputBytes: 999_999,
+      savedOutput: { uri: "pigeon://outputs/s1/4", bytes: 1_000, partial: true },
+    }),
+    command(`$ gen\n退出码：0\n${generated}${changes}`, {
+      truncated: false,
+      output: generated,
+      outputBytes: generated.length,
+      fileChanges: { added: ["gen.txt"], removed: [], modified: [], truncated: false },
+    }),
+    command(`$ ${echo}\n退出码：0\n`, { truncated: false, output: "", outputBytes: 0 }, echo),
+    {
+      name: "web_search",
+      text: sized(200),
+      args: { query: "q" },
+      details: { results: 0, answered: true },
+    },
+  ]);
+  const record = new ContextPruner(settings(), effects).beforeCompaction(messages);
+  assert.deepEqual(
+    record?.items.map((item) => [item.toolCallId, item.reason]),
+    [
+      ["old2", "large"],
+      ["old3", "large"],
+      ["old4", "empty"],
+    ]
+  );
+  assert.deepEqual(saved, [generated]);
+  const [partial, withChanges, empty] = (record?.items ?? []).map((item) => item.placeholder);
+  assert.match(partial ?? "", /已保存的是输出的前 1000 字节.*pigeon:\/\/outputs\/s1\/4/);
+  assert.ok(withChanges?.endsWith(changes), withChanges);
+  assert.match(empty ?? "", /没有输出/);
+});
+
+test("先写进会话记录再生效：写不成时这次裁剪不生效、错误照抛，之后照常可裁", () => {
+  const messages = conversation([{ name: "read_file", text: sized(12_000) }]);
+  const pruner = new ContextPruner(settings({ priceRatio: 1 }));
+  assert.throws(
+    () =>
+      pruner.beforeRequest(messages, () => {
+        throw new Error("写不进");
+      }),
+    /写不进/
+  );
+  assert.equal(JSON.stringify(pruner.view(messages)), JSON.stringify(messages));
+  assert.deepEqual(pruner.seed().placeholders, []);
+  assert.notEqual(pruner.beforeRequest(messages).record, undefined);
+});
+
+test("同一请求前裁两次：第二次的裁剪前 token 数接着第一次的裁剪后，不重复扣减；还没随请求发出的是两次之和", () => {
+  const big: Call = { name: "read_file", text: sized(2_000) };
+  const small: Call = { name: "read_file", text: sized(10) };
+  const base = [
+    user("任务"),
+    ...turn(big, "a"),
+    ...turn(big, "b"),
+    ...["c", "d", "e", "f"].flatMap((id) => turn(small, id)),
+  ];
+  const pruner = new ContextPruner(
+    settings({ priceRatio: 1, minBatchTokens: 0 }),
+    {},
+    undefined,
+    () => 100
+  );
+  const first = pruner.beforeCompaction(base);
+  const appended = turn(small, "g");
+  const second = pruner.beforeRequest([...base, ...appended]).record;
+  assert.deepEqual([first?.items[0]?.toolCallId, second?.items[0]?.toolCallId], ["a", "b"]);
+  const added = appended.reduce((sum, message) => sum + estimateTokens(message), 0);
+  assert.equal(second?.tokensBefore, (first?.tokensAfter ?? 0) + added);
+  assert.equal(pruner.unsentTokens(0), (first?.prunedTokens ?? 0) + (second?.prunedTokens ?? 0));
+  assert.equal(pruner.unsentTokens(100), 0);
 });
 
 test("免费时机：模型或工具集与上一个 Run 不同、空闲超过保留时长，都一次裁光（不论价格比）", () => {
@@ -269,7 +383,13 @@ test("续跑照记录重放：从会话记录取回的裁剪应用到同样的�
   ];
   const seed = pruneSeedFromEntries(entries);
   assert.deepEqual(seed.signature, { model: "p/m", tools: ["read_file"], systemPrompt: "s" });
-  const resumed = new ContextPruner(settings({ enabled: false }), {}, seed);
+  // 总开关关掉：不再新裁（候选照样够格），旧记录照重放
+  const resumed = new ContextPruner(settings({ enabled: false, priceRatio: 1 }), {}, seed);
+  const again = resumed.beforeRequest([
+    ...messages,
+    ...turn({ name: "read_file", text: sized(12_000) }, "x"),
+  ]);
+  assert.equal(again.record, undefined);
   assert.equal(JSON.stringify(resumed.view(messages)), JSON.stringify(first.messages));
   const longer = [...messages, user("接着做")];
   const prefix = JSON.stringify(resumed.view(longer).slice(0, messages.length));
