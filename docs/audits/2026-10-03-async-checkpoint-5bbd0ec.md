@@ -112,10 +112,106 @@
 
 ## verify 的实际运行情况
 
-- 机器：服务器 pigeon-verify，8 vCPU、31 GB 内存，Node v24.12.0；同时有别的施工会话在跑测试，按负载取测试并发 2。
+- 机器：服务器 pigeon-verify，8 vCPU、31 GB 内存，Node v24.12.0；按服务器负载取测试并发 2。
 - 树与 6ccfdde 相同的提交上：`npm run lint`（545 个文件，无问题）、`npm run check`、`npm run deps`（574 个模块，无违规）通过。测试按目录分四批，每批一条前台命令，用 `node --test --test-concurrency=2`：application 376 项，tui 与 cli 201 项，eval 与 tools 424 项（跳过 2 项），其余目录 633 项。合计 1,634 项，通过 1,632，失败 0，跳过 2。application 这一批第一次跑出 `session-store.test.ts` 的那 1 项（第 5 处改动），改后单独重跑该文件通过。
 - 含本审计的提交上另跑一次 verify，结果追加在下一节。
 
 ## 含本审计的提交上的 verify
 
-- 提交 d2dcd59（在 6ccfdde 之上只加本审计文件），同一台服务器，同时有别的施工会话在跑测试：`npm run lint`（545 个文件，无问题）、`npm run check`、`npm run deps`（574 个模块，无违规）通过。测试用 `node --test --test-concurrency=2` 分两批前台运行：application、tui、cli 577 项全过；其余目录 1,057 项，通过 1,055，跳过 2。合计 1,634 项，通过 1,632，失败 0，跳过 2。
+- 提交 d2dcd59（在 6ccfdde 之上只加本审计文件），同一台服务器：`npm run lint`（545 个文件，无问题）、`npm run check`、`npm run deps`（574 个模块，无违规）通过。测试用 `node --test --test-concurrency=2` 分两批前台运行：application、tui、cli 577 项全过；其余目录 1,057 项，通过 1,055，跳过 2。合计 1,634 项，通过 1,632，失败 0，跳过 2。
+
+## 第二轮修复
+
+代码提交 3598273（在 23a3ccd 之上）。下文的"上文"指本审计前面各节；与上文不一致处以本节为准。
+
+### 一、run_command 之后一律拍
+
+- 问题：上文第一节"没改动不拍"以 run_command 的文件变化报告为证据。该报告由目录遍历比大小与修改时间得来：不列符号链接，跳过各层 node_modules 与根下整个 .pigeon，所以改权限、符号链接的增删改、仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills`、保留修改时间的同长度覆盖、PostToolUse 钩子改的文件，都会被判成没改动。结果是既不拍，也不留标记，分叉时退回更早的快照。
+- 改法：`evidenceShowsNoChange(result, failureHooks)` 只在以下条件同时成立时返回真：edit_file 出错，并且确定没有写入（工具结果的审批标记为拦下，或出错归类为域错误——原文不匹配、路径不对、写前复核拒写，都在写入之前抛出）；同时会话没有配置 PostToolUseFailure 钩子。其余一律拍，包括 run_command（不看文件变化报告）、编辑的环境类错误（可能写了一半）、其他写档工具。要不要新提交仍由快照比对文件树决定（"树没变不提交"照旧，写 unchanged 标记）。
+- 时序：是否开拍在工具结果消息落定时判断，上游的 afterToolCall（PostToolUse / PostToolUseFailure 钩子）先于工具结果消息，所以快照总在这些钩子跑完之后才开始。
+- 上文"工具证据显示没改动的从 4 个降到 0 个"不再成立：不改文件的命令每次起 3 个 git（`add`、`rm`、`write-tree`），写 unchanged 标记。
+
+### 二、基线没拍成时首次改动之前的分叉点明确报错
+
+- 问题：基线拍摄超时或失败时没有标记；或者会话里只有没拍成的标记。这两种情况下，首次改动之前的分叉点查不到快照与改前基线，`prepareFork` 会拍一张现状快照，得到的是改后的状态。
+- 改法：`storeCheckpointBefore` 在找不到候选、也没有改前基线时，若会话里有过快照条目或没拍成的标记，返回 `{ baseMissing: true }`；`prepareFork` 据此抛 `ForkError`，在写分叉条目、建工作树之前，不留记录。整个会话没有改过文件（没有快照、只有 unchanged 标记或没有标记）时照旧打现状快照。
+
+### 三、补齐等待点、退出顺序
+
+- 钩子：`SessionHooks.addGate`，`runEvent` 在有钩子命中时先依次等待登记的等待口，再运行钩子；快照挂载登记 `settle`。覆盖所有经 `runEvent` 运行的钩子，包括终端界面与无头运行里的 UserPromptSubmit、Stop、SessionEnd，以及治理里的 PreToolUse 和工具结束后的 PostToolUse。没有钩子命中时不等。
+- 终端界面换绑会话（`/resume`）与重建运行面：当前格记下快照挂载，换走旧运行面之前先 `settle`，再跑旧会话的 SessionEnd 与释放。新运行面在同一工作区上接着改文件，旧快照必须先拍完。
+- 退出顺序：`RuntimeBundle` 新增 `closers`，`disposeRuntime` 在 `adapter.dispose()`（中止在途 Run 并等它收尾）之后、MCP 与会话存储关闭之前执行。快照挂载的 `close`（等待、退订、删临时索引）由 `disposers` 移到 `closers`：在途工具被中止时，它的工具结果照样先写"拍摄中"、开拍，快照在会话存储关闭之前拍完落盘。原来快照挂载在 `disposers` 里，在运行面停下之前就退订了，被中止的最后一个工具结果既不拍也不留标记。
+
+### 四、快照器的 git 调用
+
+- 所有 git 调用都接上中止信号：`headCommit`，以及 `snapshotNow`、`pin` 新增的可选信号参数。`headCommit` 在中止时上抛，其余失败仍按"没有 HEAD"处理。
+- 异步 git 改为 `spawn`，以独立进程组拉起（非 Windows）。超时、中止或输出超过上限时用现有的 `killProcessTree` 杀整个进程树（Windows 为 `taskkill /T /F`），不再只杀 git 进程本身。
+- `dropIndex`：先清掉记下的临时索引路径（下次必定重新复制），再尽力删除文件；删除抛错不另上抛，调用方原来的错误照旧上抛。删不掉的文件留给进程退出时的清理再试一次。
+- 上文第四节"git 写索引时会把处在临界时刻的条目长度抹成 0"的说法不准确，更正为：git 写索引时按读入时的索引修改时间认出临界条目，只对其中内容已变的抹掉长度；内容没变的条目此刻确实干净，之后再改，文件修改时间必然变化，所以复用临时索引仍不破坏这一保护。代码注释同步更正。
+
+### 五、trace 与 replay 显示没拍成的快照
+
+- `session-view.ts`：新增 `checkpoint-mark` 时间线条目，原来这类条目被当作未知条目静默跳过；新增 `unfinishedCheckpointMarks`（标了 failed 的，与只有 shooting、同一调用既没有快照条目也没有别的标记的）与一行说明文字。
+- `pigeon trace`：没拍成的快照在对应工具调用下各占一行（"代码快照：快照没有拍成（原因）……"或"快照拍摄中断……"）。
+- `replay`：时间线上没拍成的标记各占一行；拍成的与文件没变的标记不占行，回放头部的条目数按显示的条目计。没有标记的旧会话输出不变。
+
+### 测试
+
+现有测试的改动：
+- `checkpoints.test.ts` 第一项：断言"快照器没有内部故障"之前先 `settle`，后台快照拍完再看。
+
+新增与改写的测试（`checkpoints-async.test.ts` 为本分支新增文件，本轮改写）：
+- 判定表改为新规则：编辑被拦下、编辑在写入之前出错时不拍；编辑写入时出错（环境异常）、编辑出错但配置了失败后的钩子、编辑成功、文件变化报告为空的命令、其他写档工具出错时都拍。
+- 文件变化报告为空的命令照拍，并写带条目号的快照条目。
+- 钩子运行之前先等：快照卡住时 Stop 钩子不运行，放行后才运行。
+- 遍历报告漏掉的七种改动，每种一项：改权限、新增符号链接、改符号链接的指向、删除符号链接、改仓库已跟踪的 `.pigeon/settings.json`、改 `.pigeon/skills` 下的文件、保留修改时间的同长度覆盖。真实 git 仓库加真实快照器，命令的文件变化报告为空，断言都拍到快照，并逐项核对快照里的权限、符号链接与内容。前四项只在非 Windows 上运行。
+- PostToolUse 钩子改的文件进快照：真实运行面，钩子在命令之后写一个文件，命令本身不改文件，快照里有这个文件。
+- 分叉之前先等：去掉了上文的固定延时，改为由测试手动放行的阻塞。运行收尾后先断言会话文件里只有"拍摄中"标记，再发起分叉，断言快照放行之前分叉不往下走，放行后分叉点取到刚拍完的快照。
+- 进程在拍完之前退出：除原有的"该分叉点报没拍成"外，首次改动之前的分叉点报"早于首次改动"（基线缺失），两次都不留分叉记录。
+- 退出时先停运行面再等快照：命令执行中释放运行面，命令被中止，会话文件里该工具结果有"拍摄中"与 unchanged 两条标记。
+- `src/state/checkpoint-marks.test.ts` 加一项：只有没拍成的标记、快照不带改前基线时报 baseMissing；只有文件没变的标记即从未改过文件。
+- `src/orchestration/checkpoint-index.test.ts`（新增，2 项）：
+  - racy-git 回归：关掉 ctime，所有时间显式设定。用户索引里一个条目与索引文件处在同一秒，文件在这一秒里被原地改成同样长度；断言基线与快照都是改后的内容。去掉复制后设回修改时间那一行，这一项变红。
+  - 临时索引弄坏后，这一次失败；下一次从用户索引重新复制，快照与改前基线都正确；关闭后临时索引删掉。
+- `src/cli/checkpoint-marks-display.test.ts`（新增，1 项）：拍成的、失败的、拍摄中断的各一次调用；trace 与 replay 各只多出两行，分别对应失败的与中断的。
+
+### 变异
+
+在服务器上逐个改回旧行为或去掉判定，跑八个相关测试文件；每个变异做完都还原，还原后工作区干净。
+
+| 变异 | 变红的测试文件 |
+|---|---|
+| 文件变化报告为空的命令不拍（旧规则） | checkpoints-async、checkpoints |
+| 编辑失败一律不拍 | checkpoints-async |
+| 不看失败后的钩子 | checkpoints-async |
+| 基线缺失不报 baseMissing | checkpoint-marks、checkpoints-async |
+| 分叉遇到基线缺失不报错 | checkpoints-async |
+| 钩子运行前不等 | checkpoints-async |
+| 快照收尾挂回 disposers（运行面停下之前退订） | checkpoints-async |
+| 临时索引出错后不丢弃 | checkpoint-index |
+| 复制索引后不设回修改时间 | checkpoint-index |
+| trace 不显示没拍成的快照 | checkpoint-marks-display |
+| replay 显示全部拍摄标记 | checkpoint-marks-display |
+| 分叉前不等 | checkpoints-async、closeout-fixes |
+| 工具执行前不等 | checkpoints-async、checkpoints、closeout-fixes、fork |
+
+终端界面换绑会话前的等待没有自动化测试（在终端界面装配根里），以代码审读为准。
+
+### 重新测量
+
+脚本与上文相同，只把替换快照收尾的位置改到 `closers`。同一台服务器，基线 5bbd0ec 与 3598273 交替运行，假模型零延迟，各两遍：
+
+| 指标 | 基线（两遍） | 3598273（两遍） |
+|---|---|---|
+| edit_file 工具结束到下一次请求，中位 | 39.7 / 39.2 ms | 0.3 / 0.3 ms |
+| run_command（没改文件）工具结束到下一次请求，中位 | 26.6 / 27.8 ms | 0.4 / 0.4 ms |
+| 快照起的 git 进程（30 次工具调用） | 156 / 156 | 127 / 127 |
+| 整个运行 | 1,714 / 1,767 ms | 1,379 / 1,203 ms |
+
+- 进程明细（3598273）：`for-each-ref` 1、`rev-parse` 2、`add` 31、`rm` 31、`write-tree` 31、`commit-tree` 16、`update-ref` 15。比上文的 82 个多出的 45 个，是 15 次不改文件的命令照拍（每次 3 个）。
+- 假模型每次请求延迟 300 ms 时，3598273 两遍整个运行为 9,955 / 9,885 ms，上文基线为 10,396 / 10,529 ms。
+- 这一轮测量时服务器负载较高，绝对值比上文高；表内两列是同一时段交替测得的。
+
+### verify
+
+- 提交 3598273，服务器 pigeon-verify：`npm run lint`（547 个文件，无问题）、`npm run check`、`npm run deps`（576 个模块，无违规）通过。测试分两批前台运行，并发按负载取：application、tui、cli 一批 588 项全过（并发 6）；其余目录一批 1,060 项，通过 1,058，跳过 2（并发 2）。合计 1,648 项，通过 1,646，失败 0，跳过 2。
