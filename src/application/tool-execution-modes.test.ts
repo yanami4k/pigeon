@@ -22,11 +22,13 @@ async function run(batches: Call[][], approve?: (preview?: string, file?: string
     const local = createLocalWorkspaceHost(root);
     const host: WorkspaceHost = {
       ...local,
-      async readText(resolved) {
+      // read_file 按字节读（读取记录按文件字节算哈希），在这里记下每次读取的起止
+      async readBytes(resolved) {
         events.push(`start ${basename(resolved)}`);
         await new Promise((resolve) => setTimeout(resolve, 30));
         events.push(`end ${basename(resolved)}`);
-        return local.readText(resolved);
+        const bytes = await local.readBytes?.(resolved);
+        return bytes ?? Buffer.from(await local.readText(resolved), "utf8");
       },
       exec(plan, options) {
         events.push("exec");

@@ -20,7 +20,6 @@ import type { DelegatedPolicy, ToolScope, WorkerRole } from "../state/session-pa
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { READ_ONLY_SEARCH_TOOLS } from "../tools/search-tools.ts";
-import { WRITE_FILE_TOOL } from "../tools/write-file.ts";
 import {
   commandPrefixWords,
   normalizeScopePath,
@@ -29,6 +28,7 @@ import {
   scopePathLinkProblem,
   scopeWithin,
 } from "../tools/tool-scope.ts";
+import { WRITE_FILE_TOOL } from "../tools/write-file.ts";
 
 export class WorkerPolicyError extends Error {}
 
