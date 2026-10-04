@@ -45,7 +45,8 @@ function sourceFiles(dir: string): string[] {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) return sourceFiles(full);
     if (!entry.name.endsWith(".ts")) return [];
-    if (entry.name.endsWith(".test.ts") || entry.name.endsWith("-fixtures.ts")) return [];
+    // 测试、基准与夹具不是产品源码
+    if (/\.(test|bench)\.ts$/.test(entry.name) || entry.name.endsWith("-fixtures.ts")) return [];
     return [full];
   });
 }

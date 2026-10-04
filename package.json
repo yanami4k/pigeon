@@ -24,6 +24,8 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/run-tests.mjs fast",
     "test:slow": "node scripts/run-tests.mjs slow",
+    "coverage": "node scripts/run-tests.mjs all --coverage.enabled",
+    "bench": "vitest bench --run --no-file-parallelism",
     "lint": "biome check .",
     "deps": "dependency-cruiser src",
     "verify": "npm run lint && npm run check && npm run test && npm run deps",
