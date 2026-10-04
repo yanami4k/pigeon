@@ -92,6 +92,7 @@ import type {
   CompactionTrigger,
   ContextCompactor,
 } from "./compaction.ts";
+import type { ContextPruner, PruneRecord } from "./context-prune.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import type { ToolGovernance, ToolGovernanceFactory, ToolHookPort } from "./governance.ts";
 import { guardRepetition, type RepetitionHit } from "./repetition-guard.ts";
@@ -235,6 +236,8 @@ export interface PiRuntimeAdapterOptions {
   truncationContinuation?: { maxConsecutive: number; maxPerRun: number };
   // 决策 367：流式重复检测的模式与参数，包在 streamFn 外层；缺省不检测
   repetitionGuard?: { mode: RepetitionGuardMode; params: RepetitionGuardParams };
+  // 决策 361：缓存感知的上下文裁剪——每次请求之前应用已有的裁剪并按时机新裁，压缩之前先裁；缺省不裁
+  prune?: ContextPruner;
 }
 
 // 决策 363：状态变化通道——Run 开始之前（首次、续跑后、压缩之后）、一批工具结果之后与轮间压缩之后、下一次请求之前各问一次；
@@ -292,6 +295,8 @@ export class PiRuntimeAdapter {
   // 决策 363：状态通道；压缩过之后的下一次要重发完整块；有工具结果的一轮把状态与通知留到轮间再入队
   readonly #status: StatusChannel | undefined;
   #statusCompacted = false;
+  // 决策 361：上下文裁剪
+  readonly #prune: ContextPruner | undefined;
   #deliverAfterTurn = false;
   readonly #roundListeners = new Set<(round: TurnRoundNotice) => void>();
   // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
@@ -334,6 +339,7 @@ export class PiRuntimeAdapter {
     this.#continuation = options.truncationContinuation;
     const repetition = options.repetitionGuard;
     this.#status = options.status;
+    this.#prune = options.prune;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -387,6 +393,8 @@ export class PiRuntimeAdapter {
       // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们。
       // 决策 363：状态消息上的标记交给模型之前去掉
       convertToLlm: (messages) => convertToLlm(messages.map(withoutStatusMarker)),
+      // 决策 361：每次请求之前应用上下文裁剪（返回新数组，不改 Agent 持有的消息）
+      transformContext: async (messages) => this.#pruneContext(messages),
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
       prepareNextTurnWithContext: (context, signal) => this.#compactBetweenTurns(context, signal),
       initialState: {
@@ -525,6 +533,12 @@ export class PiRuntimeAdapter {
       this.#listenerErrors.push(error);
     }
     this.#recordRunStart(runId, advertisedTools, extras);
+    // 决策 361：模型、工具集或系统提示与上一个 Run 不同，下一次请求之前一次裁光
+    this.#prune?.observeRun({
+      model: `${this.#snapshot.model.provider}/${this.#snapshot.model.id}`,
+      tools: advertisedTools,
+      systemPrompt: this.#snapshot.context.systemPrompt,
+    });
     let settle = (): void => {};
     this.#runSettled = new Promise<void>((resolve) => {
       settle = resolve;
@@ -1137,7 +1151,7 @@ export class PiRuntimeAdapter {
       if (compactor === undefined || this.#currentRunId === null) {
         return undefined;
       }
-      const { tokens, exceeds } = compactor.check(turn.context.messages);
+      const { tokens, exceeds } = this.#checkCompaction(compactor, turn.context.messages);
       if (!exceeds) {
         return undefined;
       }
@@ -1161,6 +1175,62 @@ export class PiRuntimeAdapter {
     }
   }
 
+  // 决策 361：压缩判定按裁剪后的上下文估算（裁了还没随请求发出的量从上一次用量里减去）；超过触发点时先一次裁光候选，
+  // 降到触发点以下即不再压缩
+  #checkCompaction(
+    compactor: ContextCompactor,
+    messages: readonly AgentMessage[]
+  ): { tokens: number; exceeds: boolean } {
+    const prune = this.#prune;
+    if (prune === undefined) {
+      return compactor.check(messages);
+    }
+    let tokens = Math.max(0, compactor.check(prune.view(messages)).tokens - prune.pendingTokens());
+    if (!compactor.exceeds(tokens)) {
+      return { tokens, exceeds: false };
+    }
+    const record = prune.beforeCompaction(messages);
+    if (record !== undefined) {
+      this.#recordPrune(record);
+      tokens = Math.max(0, tokens - record.prunedTokens);
+    }
+    return { tokens, exceeds: compactor.exceeds(tokens) };
+  }
+
+  // 决策 361：请求之前的裁剪；出错照原样发出（上游约定这个挂点不抛）
+  #pruneContext(messages: AgentMessage[]): AgentMessage[] {
+    const prune = this.#prune;
+    if (prune === undefined) {
+      return messages;
+    }
+    try {
+      const { messages: pruned, record } = prune.beforeRequest(messages);
+      if (record !== undefined) {
+        this.#recordPrune(record);
+      }
+      return pruned;
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return messages;
+    }
+  }
+
+  // 每次裁剪写一条会话记录（续跑照记录重放）
+  #recordPrune(record: PruneRecord): void {
+    try {
+      this.#sessionStore?.append({
+        customType: SessionEntryType.Prune,
+        data: {
+          version: SESSION_ENTRY_VERSION,
+          ...(this.#currentRunId !== null ? { runId: this.#currentRunId } : {}),
+          ...record,
+        },
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+  }
+
   // Run 开始之前的挂点：超过触发点即压缩并整体替换 Agent 的消息。返回压缩期间是否被中断
   async #compactBeforeRun(): Promise<boolean> {
     const compactor = this.#compactor;
@@ -1170,7 +1240,7 @@ export class PiRuntimeAdapter {
     const abort = new AbortController();
     this.#compactionAbort = abort;
     try {
-      const { tokens, exceeds } = compactor.check(this.#agent.state.messages);
+      const { tokens, exceeds } = this.#checkCompaction(compactor, this.#agent.state.messages);
       if (!exceeds) {
         return false;
       }

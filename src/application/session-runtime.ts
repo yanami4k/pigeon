@@ -10,6 +10,7 @@
 
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
+import { pruneSeedFromEntries } from "../pi-runtime/context-prune.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { SessionId } from "../state/ids.ts";
@@ -190,6 +191,13 @@ export async function openSessionRuntime(
       : recorded !== undefined
         ? statusFromEntries(recorded.main)
         : undefined;
+  // 决策 361：上下文裁剪的起点——/reload 接着旧运行面的，续跑取会话记录主分支里的裁剪与最后一个 Run 的开始条目
+  const pruneSeed =
+    request.reloadFrom !== undefined
+      ? request.reloadFrom.prune.seed()
+      : recorded !== undefined
+        ? pruneSeedFromEntries(recorded.main)
+        : undefined;
   const learnedMemory = interactiveLearnedMemory(request.flags, request.memoryWrite);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
@@ -237,6 +245,7 @@ export async function openSessionRuntime(
       ...(frozenPrompt !== undefined ? { frozenPrompt } : {}),
       ...(recordedSystemPrompt !== undefined ? { systemPrompt: recordedSystemPrompt } : {}),
       ...(statusSent !== undefined ? { statusSent } : {}),
+      ...(pruneSeed !== undefined ? { pruneSeed } : {}),
       ...(request.statusFacts !== undefined ? { statusFacts: request.statusFacts } : {}),
       mcp,
     });

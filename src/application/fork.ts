@@ -17,6 +17,7 @@ import {
 } from "../orchestration/checkpoint.ts";
 import { addWorktree, mainRepoRoot } from "../orchestration/worktree.ts";
 import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
+import { type PruneSeed, pruneSeedFromEntries } from "../pi-runtime/context-prune.ts";
 import type { AgentMessage } from "../pi-runtime/index.ts";
 import { sessionContextMessages } from "../pi-runtime/session-store.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
@@ -61,6 +62,8 @@ export interface PreparedFork {
   initialMessages: AgentMessage[];
   // 决策 363：状态变化通道的起点——分支会话记录里（分叉点之前）最后发出的一份；没有时首次给完整块
   statusSent: StatusHashes | undefined;
+  // 决策 361：上下文裁剪的起点——分支会话记录里的裁剪与最后一个 Run 的模型、工具集、系统提示
+  pruneSeed: PruneSeed;
   // 不给新输入，从已有消息续跑
   continueFromHistory: boolean;
 }
@@ -191,6 +194,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
       workspace,
       initialMessages: sessionContextMessages(branch.main),
       statusSent: statusFromEntries(branch.main),
+      pruneSeed: pruneSeedFromEntries(branch.main),
       continueFromHistory,
     };
   } finally {
@@ -208,6 +212,7 @@ export type ForkRunOptions = Omit<
   | "branchHeader"
   | "initialMessages"
   | "statusSent"
+  | "pruneSeed"
   | "continueFromHistory"
   | "onBundle"
 >;
@@ -246,6 +251,7 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
     sessionId: prepared.branchSessionId,
     initialMessages: prepared.initialMessages,
     ...(prepared.statusSent !== undefined ? { statusSent: prepared.statusSent } : {}),
+    pruneSeed: prepared.pruneSeed,
     continueFromHistory: prepared.continueFromHistory,
     branchHeader: {
       sourceSessionId: request.sourceSessionId,

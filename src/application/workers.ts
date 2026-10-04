@@ -28,6 +28,7 @@ import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { workerStartRefFor } from "../orchestration/worktree.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
+import { type PruneSeed, pruneSeedFromEntries } from "../pi-runtime/context-prune.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
@@ -251,6 +252,8 @@ interface RuntimeSurface {
   // 决策 363：续做与分叉续跑沿用的系统提示与状态变化通道的起点（取自会话记录）
   systemPrompt?: string;
   statusSent?: StatusHashes;
+  // 决策 361：上下文裁剪的起点（取自会话记录）
+  pruneSeed?: PruneSeed;
   sessionId: SessionId;
   governanceRoot: string;
   workspaceRoot: string;
@@ -399,6 +402,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(restored !== undefined ? { initialMessages: restored.messages } : {}),
       ...(restored?.systemPrompt !== undefined ? { systemPrompt: restored.systemPrompt } : {}),
       ...(restored?.statusSent !== undefined ? { statusSent: restored.statusSent } : {}),
+      ...(restored !== undefined ? { pruneSeed: restored.pruneSeed } : {}),
       ...(nestedSlot !== undefined ? { spawnWorker: nestedSlot } : {}),
       ...(nestedSlot !== undefined && nestedOrchestrator !== undefined
         ? {
@@ -532,6 +536,7 @@ function restoreWorkerSession(request: WorkerRuntimeRequest): {
   messages: AgentMessage[];
   systemPrompt: string | undefined;
   statusSent: StatusHashes | undefined;
+  pruneSeed: PruneSeed;
 } {
   const sessionsDir = sessionsDirOf(request.governanceRoot);
   const loaded = loadStoreSession(sessionsDir, request.sessionId);
@@ -543,6 +548,7 @@ function restoreWorkerSession(request: WorkerRuntimeRequest): {
     messages: [...messages, ...interrupted],
     systemPrompt: loaded.view.runs.at(-1)?.start.systemPrompt,
     statusSent: statusFromEntries(loaded.main),
+    pruneSeed: pruneSeedFromEntries(loaded.main),
   };
 }
 
@@ -596,6 +602,8 @@ export interface DetachedRuntimeRequest {
   statusFacts?: StatusFacts;
   // 决策 363：分叉续跑时状态变化通道的起点（分支会话记录里最后发出的一份）
   statusSent?: StatusHashes;
+  // 决策 361：分叉续跑时上下文裁剪的起点（取自分支会话记录）
+  pruneSeed?: PruneSeed;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -659,6 +667,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.statusFacts !== undefined ? { statusFacts: surface.statusFacts } : {}),
     ...(surface.systemPrompt !== undefined ? { systemPrompt: surface.systemPrompt } : {}),
     ...(surface.statusSent !== undefined ? { statusSent: surface.statusSent } : {}),
+    ...(surface.pruneSeed !== undefined ? { pruneSeed: surface.pruneSeed } : {}),
   };
   // MCP 配置取自设置快照（会话开始时已校验；不重读文件）
   const mcpConfig =
