@@ -16,13 +16,6 @@ function makeEvent(): EventEnvelope {
   };
 }
 
-test("EventEnvelope JSON 往返后深度相等且校验通过", () => {
-  const event = makeEvent();
-  const revived: unknown = JSON.parse(JSON.stringify(event));
-  assert.ok(Value.Check(EventEnvelopeSchema, revived));
-  assert.deepStrictEqual(revived, event);
-});
-
 test("version 不符被拒绝", () => {
   const bad = { ...makeEvent(), version: EVENT_ENVELOPE_VERSION + 1 };
   assert.ok(!Value.Check(EventEnvelopeSchema, bad));

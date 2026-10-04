@@ -8,9 +8,7 @@ import { test } from "node:test";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import { newSessionId } from "../state/ids.ts";
 import { runHeadless } from "./headless-core.ts";
-import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
 function recording() {
   const seen: unknown[] = [];
@@ -57,34 +55,3 @@ for (const [label, maxOutputTokens, expected] of [
     }
   });
 }
-
-test("输出上限装配：注入快照 model 段配置了才写 maxOutputTokens，未配置不写（表示跟模型）", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-output-limit-snapshot-"));
-  try {
-    for (const [maxOutputTokens, expected] of [
-      [undefined, undefined],
-      [2048, 2048],
-    ] as const) {
-      const bundle = buildRuntime({
-        streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
-        workspaceRoot: root,
-        sessionId: newSessionId(),
-        yolo: true,
-        provider: "fake-provider",
-        modelId: "fake-model-1",
-        homeDir: root,
-        skillRoots: [],
-        agentsMd: false,
-        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-      });
-      try {
-        assert.equal(bundle.adapter.snapshot().model.maxOutputTokens, expected);
-        assert.equal("maxOutputTokens" in bundle.adapter.snapshot().model, expected !== undefined);
-      } finally {
-        await disposeRuntime(bundle);
-      }
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});

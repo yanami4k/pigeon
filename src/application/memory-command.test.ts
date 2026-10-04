@@ -45,21 +45,29 @@ const editTo =
     return { ok: true };
   };
 
+// 文字里依次含有各关键片段（层名、路径、条数与用量、行号等），不逐字比对解释性的说法
+function assertInOrder(text: string, fragments: readonly string[]): void {
+  let from = 0;
+  for (const fragment of fragments) {
+    const at = text.indexOf(fragment, from);
+    assert.ok(at >= 0, `缺少「${fragment}」（或次序不对）：${text}`);
+    from = at + fragment.length;
+  }
+}
+
 test("查看：两层各列文件位置（展示写法与绝对路径）、条数与用量，后接条目原文；空的一层写上限；格式不对指出行号", () =>
   withCtx((ctx, file) => {
     write(file("project"), MEMORY_FILE_HEADERS.project + PROJECT);
-    assert.equal(
-      memoryViewText(ctx),
-      [
-        "学到的记忆（改动下次会话生效）",
-        `项目级（.pigeon/state/memory.md，${file("project")}）：共 1 条，${[...PROJECT].length}/200 字符\n${PROJECT.trimEnd()}`,
-        `用户级（~/.pigeon/state/memory.md，${file("user")}）：没有条目，上限 100 字符`,
-      ].join("\n\n")
-    );
+    assertInOrder(memoryViewText(ctx), [
+      `项目级（.pigeon/state/memory.md，${file("project")}）`,
+      `共 1 条，${[...PROJECT].length}/200 字符\n${PROJECT.trimEnd()}`,
+      `用户级（~/.pigeon/state/memory.md，${file("user")}）`,
+      "没有条目，上限 100 字符",
+    ]);
     write(file("user"), "- [U1] 甲\n乱写的一行\n");
     assert.match(
       memoryViewText(ctx),
-      /用户级.*：共 1 条，.*\n- \[U1\] 甲\n乱写的一行\n（第 2 行起格式不对：update_memory 拒绝写入这一层，请用 \/memory edit user 修复）$/
+      /用户级.*：共 1 条，.*\n- \[U1\] 甲\n乱写的一行\n（第 2 行起格式不对[^\n]*\/memory edit user[^\n]*）$/
     );
   }));
 
@@ -69,10 +77,11 @@ test("编辑：合格即保存（下次会话生效）并删掉编辑稿；没�
     const edited = `${MEMORY_FILE_HEADERS.project}${PROJECT}- [P2] 人手加的一条\n`;
     const saved = await editMemoryLayer(ctx, "project", { editor: "vi", run: editTo(edited) });
     const used = [...`${PROJECT}- [P2] 人手加的一条\n`].length;
-    assert.equal(
-      saved,
-      `已保存项目级记忆（.pigeon/state/memory.md）：共 2 条，${used}/200 字符，下次会话生效`
-    );
+    assertInOrder(saved, [
+      "已保存项目级记忆",
+      ".pigeon/state/memory.md",
+      `共 2 条，${used}/200 字符`,
+    ]);
     assert.equal(readFileSync(file("project"), "utf8"), edited);
     assert.equal(existsSync(memoryDraftPathOf(file("project"))), false);
     // 编辑稿初始为原文：原样存回即没有改动
@@ -94,10 +103,11 @@ test("编辑：合格即保存（下次会话生效）并删掉编辑稿；没�
       },
     });
     assert.match(fresh, /^已保存用户级记忆/);
-    assert.equal(
-      await editMemoryLayer(ctx, "user", {}),
-      `没有设置编辑器（$VISUAL 或 $EDITOR）：请直接编辑 ${file("user")}（用户级，一行一条，见文件头的说明），改动下次会话生效`
-    );
+    assertInOrder(await editMemoryLayer(ctx, "user", {}), [
+      "没有设置编辑器",
+      `请直接编辑 ${file("user")}`,
+      "用户级",
+    ]);
   }));
 
 test("编辑：格式不对、超出上限、编辑器出错、编辑期间原文件被改——一律报错并保留原内容，改过的内容留在编辑稿里", () =>
@@ -107,18 +117,23 @@ test("编辑：格式不对、超出上限、编辑器出错、编辑期间原�
     const draft = memoryDraftPathOf(file("project"));
     const headerLines = MEMORY_FILE_HEADERS.project.split("\n").length - 1;
     const broken = `${original}不是条目\n`;
-    assert.equal(
-      await editMemoryLayer(ctx, "project", { editor: "vi", run: editTo(broken) }),
-      `项目级记忆没有保存：第 ${headerLines + 2} 行起格式不对（一行一条：- [P编号] 内容，〔〕里的来处可省）；原内容未动，改过的内容留在 ${draft}`
-    );
+    assertInOrder(await editMemoryLayer(ctx, "project", { editor: "vi", run: editTo(broken) }), [
+      "项目级记忆没有保存",
+      `第 ${headerLines + 2} 行起格式不对`,
+      "原内容未动",
+      draft,
+    ]);
     assert.equal(readFileSync(file("project"), "utf8"), original);
     assert.equal(readFileSync(draft, "utf8"), broken);
     const long = `${original}- [P2] ${"长".repeat(200)}\n`;
     const used = [...`${PROJECT}- [P2] ${"长".repeat(200)}\n`].length;
-    assert.equal(
-      await editMemoryLayer(ctx, "project", { editor: "vi", run: editTo(long) }),
-      `项目级记忆没有保存：条目共 ${used} 字符，超出上限 200 字符 ${used - 200} 字符；原内容未动，改过的内容留在 ${draft}`
-    );
+    assertInOrder(await editMemoryLayer(ctx, "project", { editor: "vi", run: editTo(long) }), [
+      "项目级记忆没有保存",
+      `条目共 ${used} 字符`,
+      `超出上限 200 字符 ${used - 200} 字符`,
+      "原内容未动",
+      draft,
+    ]);
     assert.equal(readFileSync(file("project"), "utf8"), original);
     assert.equal(
       await editMemoryLayer(ctx, "project", {

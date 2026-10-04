@@ -74,6 +74,14 @@ function lineChars(id: string, content: string): number {
   return [...`- [${id}] ${content}${ORIGIN}\n`].length;
 }
 
+// 返回文字含有各关键片段（数值、编号、路径等），不逐字比对整句
+function assertIncludesAll(text: string, fragments: readonly string[]): void {
+  for (const fragment of fragments) {
+    assert.ok(text.includes(fragment), `缺少「${fragment}」：${text}`);
+  }
+}
+
+// 说明与参数说明全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"（版本号进跑批身份，文字一改即换条件）
 test("工具说明与参数说明为记忆文字 v2：两层、只写内容、取向、写满时新增或改长都会被拒绝", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
@@ -172,6 +180,7 @@ test("新增被拒（328）：写明当前用量、该条字数与还差多少�
     const used = a + b;
     const needed = lineChars("P3", "丙丙丙丙丙丙丙😀");
     const full = await fx.call({ action: "add", content: "丙丙丙丙丙丙丙😀" }, { project: limit });
+    // 写满被拒的文字属记忆文字 v2，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       full.text,
       `项目级记忆已满，这条没有新增：当前 ${used}/${limit} 字符，这条需要 ${needed} 字符（含工具补上的编号、日期、来源与会话编号），还差 ${used + needed - limit} 字符。把这条写短，或先用 replace 合并相近条目、用 remove 删除过时条目，再新增。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
@@ -197,6 +206,7 @@ test("替换被拒（328）：写明被替换条目现有字数、新内容字�
       { action: "replace", id: "P1", content: "甲甲甲甲甲甲" },
       { project: limit }
     );
+    // 写满被拒的文字属记忆文字 v2，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       rejected.text,
       `替换后超出项目级上限，P1 没有替换：P1 现有 ${a} 字符，新内容 ${newChars} 字符（含工具补上的编号、日期、来源与会话编号），替换后共 ${after}/${limit} 字符，超出 ${after - limit} 字符。把新内容至少写短 ${after - limit} 字符，或先用 remove 删除别的过时条目，再替换。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
@@ -321,10 +331,10 @@ test("人改坏格式：拒绝写入并指出文件与行号，文件原样不�
     const broken = `${MEMORY_FILE_HEADERS.project}- [P1] 一\n不是条目\n`;
     writeFileSync(file, broken);
     const result = await fx.call({ action: "add", content: "二" });
-    assert.equal(
-      result.text,
-      ".pigeon/state/memory.md 第 5 行起格式不对，已拒绝写入，以免覆盖人的修改；请告知用户用 /memory edit project 修复。"
-    );
+    assertIncludesAll(result.text, [
+      ".pigeon/state/memory.md 第 5 行起格式不对",
+      "/memory edit project",
+    ]);
     assert.equal(fx.read("project"), broken);
   }));
 

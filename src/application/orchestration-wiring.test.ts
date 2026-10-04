@@ -17,6 +17,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import { orchestrationSettingsOf as orchestrationSectionOf } from "../state/settings.ts";
+import { asWorkspaceHost } from "../tools/local-host.ts";
 import { runHeadless } from "./headless-core.ts";
 import { orchestrationSettingsOf, parseLaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
@@ -24,6 +25,7 @@ import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import {
   DEFAULT_SPAWN_WORKER_SETTINGS,
+  SPAWN_WORKER_TOOL,
   SpawnWorkerSlot,
   spawnWorkerSettingsOf,
 } from "./spawn-worker-tool.ts";
@@ -82,6 +84,15 @@ test("注册范围：主会话给槽即得五件积木与 take_worker；未到�
   for (const name of [...ORCHESTRATION_TOOLS, "take_worker"]) {
     assert.ok(main.includes(name), name);
   }
+  // 没给槽、执行端在场（沙箱）都不注册 spawn_worker
+  assert.ok(!(await advertised(baseDeps(root))).includes(SPAWN_WORKER_TOOL));
+  assert.ok(
+    !(
+      await advertised(
+        baseDeps(root, { spawnWorker: new SpawnWorkerSlot(), workspaceHost: asWorkspaceHost(root) })
+      )
+    ).includes(SPAWN_WORKER_TOOL)
+  );
   const workerPolicy = {
     allow: ["read_file", ...ORCHESTRATION_TOOLS],
     deny: [],
@@ -189,6 +200,7 @@ async function headlessTools(
 
 test("实验条件不注册本段新增的任何工具（265）：pigeon run 缺省不带清单、开了才带；跑批器四格一件都没有，身份头记关", async () => {
   const root = gitRoot();
+  assert.ok(!(await headlessTools(root, {})).includes(SPAWN_WORKER_TOOL));
   assert.ok(!(await headlessTools(root, {})).includes("update_tasks"));
   assert.ok((await headlessTools(root, { taskList: true })).includes("update_tasks"));
   const withWorkers = await headlessTools(root, { spawnWorkers: true });

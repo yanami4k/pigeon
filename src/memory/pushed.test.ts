@@ -38,6 +38,7 @@ function write(root: string, home: string, layer: MemoryLayer, text: string): vo
   writeFileSync(file, text);
 }
 
+// 推送段文字全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"（版本号进跑批身份，文字一改即换条件）
 test("推送段文字为记忆文字 v2：取向、AGENTS.md 优先、不再要求代码引用与编号引用", () => {
   assert.equal(
     PUSHED_MEMORY_INTRO,

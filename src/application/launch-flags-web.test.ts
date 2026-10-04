@@ -130,6 +130,8 @@ test("三种关法下两件工具与联网那句提示都不出现；缺省照�
         assert.equal(snapshot.tools.advertised.includes(WEB_SEARCH_TOOL), on, label);
         assert.equal(snapshot.tools.advertised.includes(WEB_FETCH_TOOL), on, label);
         assert.equal(snapshot.context.systemPrompt.includes(WEB_TOOLS_SENTENCE), on, label);
+        assert.equal(bundle.toolTiers.get(WEB_FETCH_TOOL), on ? "network" : undefined);
+        assert.equal(bundle.toolTiers.get(WEB_SEARCH_TOOL), on ? "read" : undefined);
       } finally {
         await bundle.adapter.dispose();
         await bundle.sessionStore.close();

@@ -2,7 +2,7 @@
 // 父会话留"派出未收尾"，worker 会话留没有结果的工具调用与没有收尾的 Run（会话列表与 trace 的呈现见
 // cli/trace-workers.test.ts、persistence/session-list.test.ts）；运行面范围把 worker 会话还原到它自己的工作树与
 // 委派策略；续跑报告将补"结果未知"的悬空调用后进入续会话入口（决策 183）。
-// 旧格式会话（迁移之前创建、会话根下平铺的文件）不能续跑，明确报错（187 / 211）。
+// 旧格式会话（迁移之前创建、会话根下平铺的文件）不能续跑，明确报错（187 / 211），见 resume.test.ts。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -12,7 +12,6 @@ import { test } from "node:test";
 import { addWorktree } from "../orchestration/worktree.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
-import { listSessionFiles } from "../persistence/session-reader.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { openSessionStoreWriter, type SessionStoreSink } from "../pi-runtime/session-store.ts";
@@ -25,7 +24,6 @@ import { ToolRegistry } from "../tools/registry.ts";
 import { createToolGovernance } from "./governance.ts";
 import { runResumeFlow } from "./resume.ts";
 import { childFamilySink } from "./session-store.ts";
-import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 import { sessionRuntimeScope } from "./worker-scope.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -189,33 +187,6 @@ test("worker 崩溃冷恢复：父会话标注未收尾，worker 会话留悬空
     assert.ok(report.includes(`会话 ${workerId} 续跑：还原对话上下文 2 条消息。`), report);
     assert.ok(report.includes("1 个 Run 没有收尾记录（进程死于中途）"), report);
     assert.ok(report.includes("末条助手消息有 1 个工具调用没有结果（edit_file）"), report);
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
-
-test("旧格式会话续跑：明确报错并指向只读的旧版代码，不进入续会话、不在会话存储里建文件", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "pigeon-worker-recovery-legacy-"));
-  try {
-    const sessionsDir = join(repo, ".pigeon", "state", "sessions");
-    const legacyId = writeLegacySessionFile(sessionsDir);
-    let entered = false;
-    await assert.rejects(
-      runResumeFlow({
-        root: repo,
-        sessionId: legacyId,
-        write: () => {},
-        enterRepl: async () => {
-          entered = true;
-        },
-      }),
-      (error: unknown) =>
-        error instanceof Error &&
-        error.message ===
-          `会话 ${legacyId} 是旧格式会话（迁移之前创建），不能续跑；旧格式会话请用只读的旧版代码 455d88d 读取`
-    );
-    assert.equal(entered, false);
-    assert.deepEqual(listSessionFiles(sessionsDir), []);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

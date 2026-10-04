@@ -3,7 +3,8 @@
 // "格式化"是把连续空格压成一个，"类型错误"是源文件里的 TYPE-ERROR 标记；junit 报告由一段 sh 逐文件写出，
 // 测试以退出码 5 结束即记为该文件整文件收集失败（"文件::<collection>"，与 pytest 收集失败的伪用例同形）。
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { RepoProfile, StreamFileKind } from "./stream-manifest.ts";
 import { runJunitOnce, type StreamRepoRuntime } from "./stream-profiles.ts";
@@ -84,8 +85,32 @@ export function toyRepo(
   };
 }
 
+// 起点模板：同一提交的起点在本进程里只经 bundle 建一次（与容器实现同一条路），之后每次打开复制一份。复制出的目录与
+// 重新建的相同（干净检出、历史已清理）；按提交号区分，提交号即内容，不同测试的仓库之间共用也不会串
+const templates = new Map<string, Promise<string>>();
+let templateRoot: string | undefined;
+
+function startTemplate(commit: string, bundleOf: (commit: string) => Buffer): Promise<string> {
+  let made = templates.get(commit);
+  if (made === undefined) {
+    if (templateRoot === undefined) {
+      const root = mkdtempSync(join(tmpdir(), "pigeon-stream-start-"));
+      templateRoot = root;
+      process.once("exit", () => rmSync(root, { recursive: true, force: true }));
+    }
+    const dir = join(templateRoot, commit);
+    made = (async () => {
+      mkdirSync(dir, { recursive: true });
+      await new StreamWorkspace(localStreamShell(dir)).initFromBundle(bundleOf(commit), commit);
+      return dir;
+    })();
+    templates.set(commit, made);
+  }
+  return made;
+}
+
 // 本地"假容器"：每次打开（每一步、每次重做）一个全新的临时目录，用本机 sh 执行同一批脚本；起点由宿主的人的仓库打
-// bundle 送入（与容器实现同一条路），用完删掉目录（与丢弃容器同一口径：被忽略的文件不跨步）
+// bundle 送入（与容器实现同一条路，同一提交只建一次、之后复制），用完删掉目录（与丢弃容器同一口径：被忽略的文件不跨步）
 export function localStreamEnvs(
   base: string,
   bundleOf: (commit: string) => Buffer
@@ -95,9 +120,10 @@ export function localStreamEnvs(
     async open(job, init) {
       opened += 1;
       const root = join(base, "ws", `${job.stream}-${job.condition}-${job.attempt}-${opened}`);
-      mkdirSync(root, { recursive: true });
+      const template = await startTemplate(init.startCommit, bundleOf);
+      mkdirSync(dirname(root), { recursive: true });
+      cpSync(template, root, { recursive: true });
       const ws = new StreamWorkspace(localStreamShell(root));
-      await ws.initFromBundle(bundleOf(init.startCommit), init.startCommit);
       return {
         ws,
         target: { container: "local", root },

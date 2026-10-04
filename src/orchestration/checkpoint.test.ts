@@ -3,7 +3,15 @@
 // 必须不触碰用户的工作区、暂存区、当前分支与 HEAD；治理目录 .pigeon 不进快照；非 git 工作区不打快照。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -169,6 +177,29 @@ test("现状快照：分叉时没有任何快照也能给出当前文件状态�
     assert.deepEqual(userState(dir), before);
     assert.equal(git(dir, ["show", `${current.commit}:a.txt`]), "dirty\n");
     assert.equal(git(dir, ["rev-parse", current.ref]).trim(), current.commit);
+  } finally {
+    cleanup();
+  }
+});
+
+test("同一秒内的改动、长度不变也打出快照：临时索引沿用真索引的修改时间，git 照常对这类条目重新比内容", () => {
+  const { dir, cleanup } = repo();
+  try {
+    // 用固定的时间戳造出"改动与上次入索引同在一秒"，不靠卡真实的秒边界：关掉 ctime 比对后，git 判断文件改没改
+    // 只看秒级修改时间、大小与 inode；a.txt 的新旧内容等长
+    git(dir, ["config", "core.trustctime", "false"]);
+    const second = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000);
+    const index = join(dir, ".git", "index");
+    utimesSync(join(dir, "a.txt"), second, second);
+    git(dir, ["update-index", "-q", "--refresh"]);
+    utimesSync(index, second, second);
+    const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
+    checkpointer.beforeChange();
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    utimesSync(join(dir, "a.txt"), second, second);
+    const snapshot = checkpointer.afterChange();
+    assert.ok(snapshot !== undefined, "改动被看见");
+    assert.equal(git(dir, ["show", `${snapshot.commit}:a.txt`]), "two\n");
   } finally {
     cleanup();
   }

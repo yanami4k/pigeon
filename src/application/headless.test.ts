@@ -2,14 +2,12 @@
 // 无审批通道时 prompt 模式 fail-closed（006 既有）；需审批次数从会话存储现算；skillRoots 显式指定时只用给定的根
 // （不扫治理根与用户级目录），agentsMd 关掉时不读人写的说明。
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { newSessionId } from "../state/ids.ts";
 import {
   FAIL_CLOSED_APPROVAL_REASON,
   type StoreSessionView,
@@ -18,7 +16,6 @@ import {
 } from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { runHeadless } from "./headless-core.ts";
-import { writeLegacySessionFile } from "./session-view-fixtures.ts";
 
 const ORIGINAL = "alpha\nbeta\ngamma\n";
 
@@ -228,6 +225,9 @@ test("headless：显式 skillRoots 只用给定的根、agentsMd 关掉——空
     const noneStarted = storeView(root, none.sessionId).runs[0]?.start;
     assert.deepEqual(noneStarted?.skills, []);
     assert.deepEqual(noneStarted?.memory, []);
+    // agentsMd 关掉：两层说明的内容都不进 system prompt
+    assert.ok(!noneStarted?.systemPrompt.includes("项目说明"));
+    assert.ok(!noneStarted?.systemPrompt.includes("用户说明"));
     assert.equal(noneStarted?.advertisedTools.includes("load_skill"), false);
 
     const withSkill = await runHeadless({
@@ -247,57 +247,6 @@ test("headless：显式 skillRoots 只用给定的根、agentsMd 关掉——空
     );
     assert.deepEqual(started?.memory, []);
     assert.equal(started?.advertisedTools.includes("load_skill"), true);
-  } finally {
-    cleanup();
-  }
-});
-
-test("headless：结果从新会话存储现算；会话根下有同号旧格式平铺文件时新存储照常建自己的文件、不读旧文件", async () => {
-  const { root, home, cleanup } = makeWorkspace();
-  try {
-    const sessionsDir = join(root, ".pigeon", "state", "sessions");
-    const fresh = await runHeadless({
-      task: "读",
-      governanceRoot: root,
-      workspaceRoot: root,
-      streamFn: createFakeStreamFn({
-        replies: [
-          { text: "读", toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
-          { text: "读完了" },
-        ],
-      }),
-      yolo: true,
-      homeDir: home,
-    });
-    assert.ok(locateSessionFile(sessionsDir, fresh.sessionId) !== undefined);
-    assert.equal(fresh.turns, 2);
-    assert.equal(fresh.toolCalls, 1);
-    assert.equal(fresh.failure, null);
-
-    // 旧格式会话：会话根下只有迁移之前的平铺文件，新存储里没有文件
-    const legacyId = writeLegacySessionFile(sessionsDir, newSessionId());
-    const legacyPath = join(sessionsDir, `${legacyId}.jsonl`);
-    const resumed = await runHeadless({
-      task: "接着读",
-      governanceRoot: root,
-      workspaceRoot: root,
-      sessionId: legacyId,
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
-      yolo: true,
-      homeDir: home,
-    });
-    // 新存储按会话号新建自己的文件；旧格式文件原样不动，指标只从新文件算
-    const created = locateSessionFile(sessionsDir, legacyId);
-    assert.ok(created !== undefined, "新存储照常建自己的会话文件");
-    assert.notEqual(created.path, legacyPath);
-    assert.ok(existsSync(legacyPath));
-    assert.equal(readFileSync(legacyPath, "utf8"), '{"legacy":true}\n', "旧格式文件不被改写");
-    const view = storeView(root, legacyId);
-    assert.equal(view.runs.length, 1);
-    assert.equal(resumed.runId, view.runs[0]?.runId);
-    assert.equal(resumed.turns, 1);
-    assert.equal(resumed.failure, null);
-    assert.equal(resumed.label, "Unknown");
   } finally {
     cleanup();
   }

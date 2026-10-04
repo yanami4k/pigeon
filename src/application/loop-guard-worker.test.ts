@@ -19,7 +19,7 @@ import {
 import type { RunStopCause } from "../state/session-entries.ts";
 import type { WorkerWorkspace } from "../state/session-payloads.ts";
 import { LOOP_REMINDER_PREFIX, loopGuardWatcher } from "./loop-guard.ts";
-import { workerNoticeText } from "./spawn-worker-tool.ts";
+import { SPAWN_WORKER_TEXTS, workerNoticeMarker, workerNoticeText } from "./spawn-worker-tool.ts";
 
 // 每轮同一条调用与同一结果，直到被中止；撞 maxRounds 即正常收尾
 class LoopingRuntime implements WorkerRuntimeHandle {
@@ -135,11 +135,11 @@ test("worker 打转：提醒递进它的下一轮，第 20 轮叫停，以 loopi
   assert.ok(runtime.notes.every((note) => note.startsWith(LOOP_REMINDER_PREFIX)));
   assert.match(runtime.notes[1] ?? "", /如果再重复 10 轮，本次运行将被叫停/);
   // 通知主 agent：套失败文字，写明重复的调用与分支上可能有部分改动
-  assert.equal(
-    workerNoticeText(outcome),
-    'worker spin（implementer）失败：打转，连续 20 轮重复同样的工具调用与结果，已被叫停。重复的调用：run_command {"command":"npm test"}。' +
-      `分支 pigeon/spin 上可能有部分改动。\n（worker 会话 ${outcome.sessionId}）`
+  const failed = SPAWN_WORKER_TEXTS.failed(
+    { name: "spin", role: "implementer", branch: "pigeon/spin" },
+    outcome.error ?? ""
   );
+  assert.equal(workerNoticeText(outcome), `${failed}\n${workerNoticeMarker(outcome.sessionId)}`);
 });
 
 test("worker：打转检测关掉时不挂观察者，跑到自己收尾", async () => {

@@ -159,6 +159,29 @@ test("trace 工具调用行：审批结果与出错归类照工具结果消息�
         `${want.id}\n${output}`
       );
     }
+    // 会话级：trace 出现的失败徽章集合 = 会话列表摘要的失败分类
+    const [summary] = listSessionSummaries(sessionsDir);
+    assert.ok(summary !== undefined && summary.sessionId === sessionId);
+    const badges = new Set(
+      output
+        .split("\n")
+        .flatMap((line) => [...line.matchAll(/分类：([^｜\n]+)/g)].map((match) => match[1]?.trim()))
+        .filter((badge) => badge !== undefined && badge !== "正常")
+    );
+    assert.deepEqual(
+      [...badges].sort(),
+      summary.failureClasses.map((category) => failureBadge({ category } as never)).sort()
+    );
+    assert.deepEqual([...badges].sort(), ["业务失败", "基础设施错误", "未知"].sort());
+    const view = loadSessionView(sessionsDir, sessionId);
+    assert.ok(view !== undefined);
+    // 逐个调用：trace 的分类行即 storeToolOutcomes 的结果
+    for (const outcome of view.toolOutcomes) {
+      assert.deepEqual(
+        callBlock(output, outcome.toolCallId).filter((line) => line.startsWith("分类：")),
+        [`分类：${failureBadge(outcome.failure)}`]
+      );
+    }
   }));
 
 test("trace 工具调用行：没有运行面标记的结果不显示审批与出错归类，分类退回按消息正文与策略判；悬空调用分类未知；以中止收尾的助手消息里的调用未执行", () =>
@@ -202,33 +225,4 @@ test("trace 工具调用行：没有运行面标记的结果不显示审批与�
         `${id}\n${output}`
       );
     }
-  }));
-
-test("trace 与会话列表同口径：同一会话里 trace 各行的分类（Run 级与工具级）与会话列表的失败分类一致", () =>
-  withRoot(async (root, sessionsDir) => {
-    const { sessionId } = await markedSession(sessionsDir, root);
-    const output = runTraceCommand({ root, sessionId });
-    const view = loadSessionView(sessionsDir, sessionId);
-    assert.ok(view !== undefined);
-    // 逐个调用：trace 的分类行即 storeToolOutcomes 的结果
-    for (const outcome of view.toolOutcomes) {
-      assert.deepEqual(
-        callBlock(output, outcome.toolCallId).filter((line) => line.startsWith("分类：")),
-        [`分类：${failureBadge(outcome.failure)}`]
-      );
-    }
-    // 会话级：trace 出现的失败徽章集合 = 会话列表摘要的失败分类
-    const [summary] = listSessionSummaries(sessionsDir);
-    assert.ok(summary !== undefined && summary.sessionId === sessionId);
-    const badges = new Set(
-      output
-        .split("\n")
-        .flatMap((line) => [...line.matchAll(/分类：([^｜\n]+)/g)].map((match) => match[1]?.trim()))
-        .filter((badge) => badge !== undefined && badge !== "正常")
-    );
-    assert.deepEqual(
-      [...badges].sort(),
-      summary.failureClasses.map((category) => failureBadge({ category } as never)).sort()
-    );
-    assert.deepEqual([...badges].sort(), ["业务失败", "基础设施错误", "未知"].sort());
   }));

@@ -330,6 +330,18 @@ test("跑批器的题面（198、213）：提交信息原文，其后一行说�
   assert.equal(DEFAULT_TASK_PROMPT_FORMAT, "test-files");
 });
 
+// 题面是实验输入，措辞冻结（决策 239）：两种格式、两段名单的说明句全仓只在这里逐字检查，一改即换了实验条件
+test("题面说明句逐字冻结（239）：两种格式下应通过的名单与仓库里本来就有、此刻失败的第二段名单", () => {
+  assert.equal(
+    taskPromptOf("Add a", "test-files", ["src/a.test.ts"], ["src/z.test.ts"]),
+    "Add a\n\nTest files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):\nsrc/a.test.ts\n\nOther test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.ts\n"
+  );
+  assert.equal(
+    taskPromptOf("Add a", "test-cases", ["src/a.test.ts::works"], ["src/z.test.ts::case"]),
+    "Add a\n\nTest cases that should pass after the change (in new or updated test files; their final versions are not in the repository and are added when the change is checked):\nsrc/a.test.ts::works\n\nOther test cases in test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.ts::case\n"
+  );
+});
+
 test("重置点切流：重置步的提交为下一条流的起点，重置步不属于任何流", () => {
   const big = Array.from({ length: 21 }, (_, i) => change(`docs/f${i}.md`));
   const m = compose([

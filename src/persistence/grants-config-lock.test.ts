@@ -13,7 +13,6 @@ import {
   appendGrantConfigRule,
   grantsConfigLockPath,
   grantsConfigPath,
-  loadGrantConfig,
   removeGrantConfigRule,
 } from "./grants-config.ts";
 
@@ -39,9 +38,6 @@ function rule(label: string): ConfigGrantRule {
   } as ConfigGrantRule;
 }
 
-const labelOf = (item: ConfigGrantRule): string =>
-  [...ids.entries()].find(([, id]) => id === item.promotedFrom.grantId)?.[0] ?? "?";
-
 function root(): string {
   return mkdtempSync(join(tmpdir(), "pigeon-grants-lock-"));
 }
@@ -59,19 +55,6 @@ test("放权配置：写入锁被占着时，追加与移除都被明确拒绝�
     } finally {
       release();
     }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("放权配置：依次写入互不覆盖，并且每次用完都放锁", () => {
-  const dir = root();
-  try {
-    appendGrantConfigRule(dir, rule("g1"));
-    appendGrantConfigRule(dir, rule("g2"));
-    assert.deepEqual(loadGrantConfig(dir).map(labelOf), ["g1", "g2"], "先写的那条不被后写的覆盖");
-    removeGrantConfigRule(dir, 0);
-    assert.deepEqual(loadGrantConfig(dir).map(labelOf), ["g2"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

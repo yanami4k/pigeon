@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LEGACY_READER_HINT } from "../persistence/session-catalog.ts";
+import { listSessionFiles } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -182,6 +183,8 @@ test("续跑：旧格式会话明确报错、不进入续会话；不存在的�
     );
     assert.equal(LEGACY_READER_HINT, "旧格式会话请用只读的旧版代码 455d88d 读取");
     assert.equal(entered, false);
+    // 不在会话存储里建文件
+    assert.deepEqual(listSessionFiles(sessionsDir), []);
 
     const present = createFixtureSession({ sessionsDir, cwd: dir });
     present.startRun({ task: "在" });

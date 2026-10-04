@@ -39,6 +39,7 @@ import {
   SpawnWorkerSlot,
   spawnWorkerDescription,
   spawnWorkerParamsSchema,
+  workerNoticeMarker,
   workerNoticeText,
 } from "./spawn-worker-tool.ts";
 import { type NoticeTarget, WORKER_NOTICE_PREFIX, WorkerNotices } from "./worker-notices.ts";
@@ -361,8 +362,9 @@ const settled = (h: Harness, name: string) =>
 test("spawn_worker 的说明与参数说明逐字为定稿原文；执行模式可并行", () => {
   const tool = createSpawnWorkerTool(new SpawnWorkerSlot());
   assert.equal(tool.name, "spawn_worker");
-  assert.equal(tool.description, FINAL_DESCRIPTION);
   assert.equal(spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS), FINAL_DESCRIPTION);
+  // 工具上挂的说明即按槽的设置生成的那份（接线）
+  assert.equal(tool.description, spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS));
   assert.equal(tool.executionMode, "parallel");
   const schema = spawnWorkerParamsSchema(true);
   const properties = schema.properties;
@@ -395,12 +397,10 @@ test("说明随配置变化：同时在跑的上限、给了才出现的总数�
     maxConcurrent: 2,
     maxAgentSpawns: 5,
   });
-  assert.ok(
-    text.includes(
-      "同时最多跑 2 个，多的排队。派出后可以接着做自己的事，但不要把派出去的活自己再做一遍。需要结果才能往下做时用 wait_workers 等；worker_status 查看进度，message_worker 给在跑的 worker 补充说明，stop_worker 停掉不再需要的。一次运行最多派 5 个。"
-    ),
-    text
-  );
+  assert.ok(text.includes("同时最多跑 2 个，多的排队"), text);
+  assert.ok(text.includes("一次运行最多派 5 个。"), text);
+  // 不给总数上限（缺省）时不提这一句
+  assert.ok(!spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS).includes("一次运行最多派"));
   const nested = spawnWorkerDescription({ ...DEFAULT_SPAWN_WORKER_SETTINGS, maxDepth: 3 });
   assert.ok(nested.includes("worker 不能向你提问；它还能往下再派 2 层 worker。"), nested);
   // 第二层的 worker 再派：新 worker 在第三层，已到底
@@ -495,7 +495,12 @@ test("派出立即返回：worker 还在跑时工具已交回名字与分支，�
   const text = await call(h, { role: "implementer", task: "改 a", name: "fix-a", label: "T1" });
   assert.equal(
     text,
-    "已派出 worker fix-a（implementer），分支 pigeon/fix-a，标签 T1。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。"
+    SPAWN_WORKER_TEXTS.spawned({
+      name: "fix-a",
+      role: "implementer",
+      branch: "pigeon/fix-a",
+      label: "T1",
+    })
   );
   assert.equal(h.orchestrator.status()[0]?.state, "running");
   assert.equal(h.target.pendingNotices(), 0);
@@ -514,10 +519,17 @@ test("完成通知：worker 结束时一条带标签的通知递给派出方并�
   await call(h, { role: "implementer", task: "改 a", name: "fix-a", label: "T1" });
   await until(() => h.target.pendingNotices() === 1);
   const fixA = h.orchestrator.status().find((worker) => worker.name === "fix-a")?.sessionId;
+  const completed = SPAWN_WORKER_TEXTS.completed({
+    name: "fix-a",
+    role: "implementer",
+    branch: "pigeon/fix-a",
+    files: ["a.ts", "b.ts"],
+    summary: "改好了",
+  });
   // 末行为可识别的 worker 会话号（续接时据它判定通知是否已递出）
   assert.equal(
     h.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}标签 T1：worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（2）：a.ts、b.ts。摘要：改好了\n（worker 会话 ${fixA}）`
+    `${WORKER_NOTICE_PREFIX}标签 T1：${completed}\n${workerNoticeMarker(fixA ?? "")}`
   );
   assert.equal(h.wakes, 1);
   await call(h, { role: "explorer", task: "看看", name: "long" });
@@ -543,9 +555,13 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
   });
   await call(turns, { role: "explorer", task: "查", name: "w" });
   await until(() => turns.target.pendingNotices() === 1);
+  const limitHit = SPAWN_WORKER_TEXTS.limitHit(
+    { name: "w", role: "explorer", branch: "pigeon/w", files: ["x.ts"], summary: "做了一半" },
+    "轮数"
+  );
   assert.equal(
     turns.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}worker w（explorer）撞上轮数上限，没有做完。分支：pigeon/w。已改动的文件（1）：x.ts。摘要：做了一半\n（worker 会话 ${turns.orchestrator.status()[0]?.sessionId}）`
+    `${WORKER_NOTICE_PREFIX}${limitHit}\n${workerNoticeMarker(turns.orchestrator.status()[0]?.sessionId ?? "")}`
   );
   const clock = harness({ scriptFor: () => ({ behavior: "hang" }), wallClockMs: 20 });
   await call(clock, { role: "tester", task: "跑", name: "t" });
@@ -569,9 +585,14 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
     "已停掉 worker slow；它已做的改动留在分支上，结果照常交回。"
   );
   await until(() => cancelled.target.pendingNotices() === 1);
+  const cancelledText = SPAWN_WORKER_TEXTS.cancelled({
+    name: "slow",
+    role: "implementer",
+    branch: "pigeon/slow",
+  });
   assert.equal(
     cancelled.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}worker slow（implementer）被取消。分支 pigeon/slow 上可能有部分改动。\n（worker 会话 ${cancelled.orchestrator.status()[0]?.sessionId}）`
+    `${WORKER_NOTICE_PREFIX}${cancelledText}\n${workerNoticeMarker(cancelled.orchestrator.status()[0]?.sessionId ?? "")}`
   );
   assert.equal(
     textOf(await cancelled.stop.execute("s", { worker: "slow" })),
@@ -671,17 +692,11 @@ test("派出前的检查：角色写错、task 为空、不是 git 仓库，都�
   const h = harness({ scriptFor: () => ({ behavior: "complete" }) });
   assert.equal(
     await call(h, { role: "reviewer" as SpawnWorkerParams["role"], task: "看" }),
-    "没有角色 reviewer；可选：explorer、implementer、tester。"
+    SPAWN_WORKER_TEXTS.unknownRole("reviewer")
   );
-  assert.equal(
-    await call(h, { role: "explorer", task: "  " }),
-    "task 不能为空：写清目标、相关文件与完成的标准。"
-  );
+  assert.equal(await call(h, { role: "explorer", task: "  " }), SPAWN_WORKER_TEXTS.emptyTask);
   const plain = harness({ scriptFor: () => ({ behavior: "complete" }), git: false });
-  assert.equal(
-    await call(plain, { role: "explorer", task: "看" }),
-    "当前工作区不是 git 仓库，不能派 worker。"
-  );
+  assert.equal(await call(plain, { role: "explorer", task: "看" }), SPAWN_WORKER_TEXTS.notGit);
   assert.equal(h.orchestrator.status().length, 0);
   assert.equal(plain.orchestrator.status().length, 0);
   assert.equal(h.budget.spawned(), 0);
@@ -743,7 +758,7 @@ test("给了总数上限（--worker-limit）：满了按定稿文字拒绝；人
   }
   assert.equal(
     await call(h, { role: "explorer", task: "第 4 个" }),
-    "本次运行派出的 worker 已达 3 个上限。不要再派；用已有的结果，或自己完成。"
+    SPAWN_WORKER_TEXTS.spawnLimit(3)
   );
   run = "run-2";
   assert.ok((await call(h, { role: "explorer", task: "新一次运行" })).startsWith("已派出"));
@@ -753,10 +768,7 @@ test("给了总数上限（--worker-limit）：满了按定稿文字拒绝；人
 test("本次运行的额度用完：拒绝再派，交回额度用完的文字", async () => {
   const h = harness({ scriptFor: () => ({ behavior: "complete" }) });
   h.budget.markExhausted();
-  assert.equal(
-    await call(h, { role: "explorer", task: "看" }),
-    "本次运行的额度已用完，不能再派 worker；正在跑的 worker 已停止。"
-  );
+  assert.equal(await call(h, { role: "explorer", task: "看" }), SPAWN_WORKER_TEXTS.budgetExhausted);
   assert.equal(h.orchestrator.status().length, 0);
 });
 
@@ -807,23 +819,28 @@ test("多份尝试：派出即返回名单，后台跑完交回各份汇总一�
   });
   const text = await call(h, { role: "implementer", task: "修 a", attempts: 3, label: "T2" });
   assert.deepEqual(requested, { role: "implementer", task: "修 a", count: 3, label: "T2" });
-  assert.equal(
-    text,
-    `已并行派出 3 份：${ids.join("、")}。全部结束后会有一条通知，交回各份的改动与摘要。`
-  );
+  assert.equal(text, SPAWN_WORKER_TEXTS.attemptsSpawned(ids));
   assert.equal(h.target.pendingNotices(), 0);
   // 第 2 份已由 wait_workers 交回（组内记下）
   h.notices.claim(ids[1] as SessionId);
   gate.resolve();
   await until(() => h.target.pendingNotices() === 1);
+  const facts = (index: number) => ({
+    name: `implementer-${index}`,
+    role: "implementer",
+    branch: `pigeon/implementer-${index}`,
+    files: ["a.ts"],
+    summary: `第 ${index} 份`,
+  });
+  // 各份按「第 N 份：」起头、空行相隔、各带会话标记；第 2 份只写一句（attemptClaimed 的唯一逐字检查）
   assert.equal(
     h.target.queue[0]?.text,
     WORKER_NOTICE_PREFIX +
       "标签 T2：" +
       [
-        `第 1 份：worker implementer-1（implementer）已完成。分支：pigeon/implementer-1。改动的文件（1）：a.ts。摘要：第 1 份\n钩子输出：\n  还差错误路径用例\n（worker 会话 ${ids[0]}）`,
-        `第 2 份：worker implementer-2 的结果已由 wait_workers 交回。\n（worker 会话 ${ids[1]}）`,
-        `第 3 份：worker implementer-3（implementer）撞上轮数上限，没有做完。分支：pigeon/implementer-3。已改动的文件（1）：a.ts。摘要：第 3 份\n（worker 会话 ${ids[2]}）`,
+        `${SPAWN_WORKER_TEXTS.attempt(1)}${SPAWN_WORKER_TEXTS.completed(facts(1))}\n钩子输出：\n  还差错误路径用例\n${workerNoticeMarker(ids[0] as SessionId)}`,
+        `第 2 份：worker implementer-2 的结果已由 wait_workers 交回。\n${workerNoticeMarker(ids[1] as SessionId)}`,
+        `${SPAWN_WORKER_TEXTS.attempt(3)}${SPAWN_WORKER_TEXTS.limitHit(facts(3), "轮数")}\n${workerNoticeMarker(ids[2] as SessionId)}`,
       ].join("\n\n")
   );
   assert.equal(h.budget.spawned(), 3);

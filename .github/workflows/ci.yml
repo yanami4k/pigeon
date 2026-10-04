@@ -1,4 +1,6 @@
-# 决策 336：推送到 main 与每个 PR 时跑 npm ci 与 npm run verify（lint + check + test + deps）。
+# 决策 336：推送到 main 与每个 PR 时跑 npm ci 与全量验证；决策 370 起 npm run verify 只跑快档测试，
+# CI 跑 npm run verify:full（lint + check + 快档与慢档测试 + deps）。本地合并后直推 main 时 CI 在推送之后才跑，
+# 合并前的全量验证由交付者自己跑 verify:full（见 docs/testing.md）。
 # 真容器用例在没有实验镜像时照现有逻辑跳过；含真容器用例的全量验收另在验证服务器上进行。
 # 所用 action 钉到完整 commit SHA（决策 337），由 Dependabot 提升级 PR。
 name: CI
@@ -30,7 +32,7 @@ jobs:
         run: npm ci
 
       - name: Verify
-        run: npm run verify
+        run: npm run verify:full
 
       # 决策 351：打包产物的冒烟测试（版本输出；用仓库假模型跑一次 pigeon run，确认发出第一个请求并正常结束）
       - name: Bundle smoke test

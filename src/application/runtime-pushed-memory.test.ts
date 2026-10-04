@@ -304,52 +304,50 @@ test("日常入口：推送缺省开着，--no-pushed-memory 关掉；--memory-l
   assert.throws(() => parseLaunchFlags(["--no-pushed-memory"], { usage }), /未知参数/);
 });
 
-// 决策 331：worker 只推送记忆、不带记忆工具；父会话带写入配置也一样
-for (const role of ["explorer", "implementer", "tester"] as const) {
-  test(`worker（${role}）：父会话推送且可写入时，系统提示带推送段，但不带写入说明、不广告 update_memory`, async () => {
-    const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-pushed-worker-")));
+// 决策 331：worker 只推送记忆、不带记忆工具；父会话带写入配置也一样。与角色无关（装配根只看委派策略在不在场），取一个角色
+test("worker（implementer）：父会话推送且可写入时，系统提示带推送段，但不带写入说明、不广告 update_memory", async () => {
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-pushed-worker-")));
+  try {
+    const git = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "pigeon@example.invalid"]);
+    git(["config", "user.name", "pigeon-test"]);
+    writeFileSync(join(repo, "a.ts"), "alpha\n");
+    git(["add", "a.ts"]);
+    git(["commit", "-q", "-m", "init"]);
+    seed(repo);
+    const parent = buildRuntime({
+      ...deps(repo, { streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }) }),
+      learnedMemory: { write: { source: "tui" } },
+    });
     try {
-      const git = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
-      git(["init", "-q", "-b", "main"]);
-      git(["config", "user.email", "pigeon@example.invalid"]);
-      git(["config", "user.name", "pigeon-test"]);
-      writeFileSync(join(repo, "a.ts"), "alpha\n");
-      git(["add", "a.ts"]);
-      git(["commit", "-q", "-m", "init"]);
-      seed(repo);
-      const parent = buildRuntime({
-        ...deps(repo, { streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }) }),
-        learnedMemory: { write: { source: "tui" } },
+      assert.ok(parent.adapter.snapshot().tools.advertised.includes("update_memory"));
+      const orchestrator = createSessionWorkers({
+        governanceRoot: repo,
+        bundle: parent,
+        approvals: async () => ({ approved: true }),
+        streamFn: createFakeStreamFn({ replies: [{ text: "做完了" }] }),
+        provider: "fake-provider",
+        modelId: "fake-model",
+        homeDir: homeOf(repo),
       });
-      try {
-        assert.ok(parent.adapter.snapshot().tools.advertised.includes("update_memory"));
-        const orchestrator = createSessionWorkers({
-          governanceRoot: repo,
-          bundle: parent,
-          approvals: async () => ({ approved: true }),
-          streamFn: createFakeStreamFn({ replies: [{ text: "做完了" }] }),
-          provider: "fake-provider",
-          modelId: "fake-model",
-          homeDir: homeOf(repo),
-        });
-        const workerId = orchestrator.spawn({ role, task: "看看", name: "w" });
-        const outcome = await orchestrator.awaitResult(workerId);
-        assert.equal(outcome.status, "completed", JSON.stringify(outcome));
-        const [start] = runStarts(repo, workerId);
-        assert.ok(start?.systemPrompt.includes(PROJECT_ENTRY.trimEnd()));
-        assert.ok(start?.systemPrompt.includes(MEMORY_CONFLICT_TEXTS.unattended));
-        assert.ok(!start?.systemPrompt.includes(MEMORY_WRITE_GUIDANCE));
-        assert.ok(!start?.advertisedTools.includes("update_memory"));
-        assert.ok(!start?.policy.allow.includes("update_memory"));
-        assert.equal(start?.pushedMemory?.layers.length, 2);
-      } finally {
-        await disposeRuntime(parent);
-      }
+      const workerId = orchestrator.spawn({ role: "implementer", task: "看看", name: "w" });
+      const outcome = await orchestrator.awaitResult(workerId);
+      assert.equal(outcome.status, "completed", JSON.stringify(outcome));
+      const [start] = runStarts(repo, workerId);
+      assert.ok(start?.systemPrompt.includes(PROJECT_ENTRY.trimEnd()));
+      assert.ok(start?.systemPrompt.includes(MEMORY_CONFLICT_TEXTS.unattended));
+      assert.ok(!start?.systemPrompt.includes(MEMORY_WRITE_GUIDANCE));
+      assert.ok(!start?.advertisedTools.includes("update_memory"));
+      assert.ok(!start?.policy.allow.includes("update_memory"));
+      assert.equal(start?.pushedMemory?.layers.length, 2);
     } finally {
-      rmSync(repo, { recursive: true, force: true });
+      await disposeRuntime(parent);
     }
-  });
-}
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test("功能：记下纠正、下次照做——第一会话经 update_memory 记下，第二会话的系统提示带这一条（层级、来源、日期、会话编号正确）", () =>
   withRoot("pigeon-pushed-correction-", async (root) => {

@@ -449,10 +449,11 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     const second = h.runtime("ship");
     assert.equal(second.request.sessionId, id);
     assert.equal(second.request.resume, true);
-    assert.equal(
-      second.inputs[0],
-      "人已批准你之前等待审批的调用（跑命令 npm test）。请重新发起这个调用，然后接着完成任务。\n顺便跑 lint"
-    );
+    // 补批的话（带等审批的那个调用）在前：说明已批准、点出那个调用、要它重新发起；人另附的话另起一行在后
+    const resumed = second.inputs[0] ?? "";
+    assert.match(resumed, /^人已批准你之前等待审批的调用（跑命令 npm test）。/);
+    assert.ok(resumed.includes("请重新发起这个调用"), resumed);
+    assert.ok(resumed.endsWith("。\n顺便跑 lint"), resumed);
     // 重新发起的同一个调用直接放行，不再问人
     const decision = await second.ask("npm test");
     assert.equal(decision.approved, true);

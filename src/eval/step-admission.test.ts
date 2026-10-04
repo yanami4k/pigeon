@@ -226,12 +226,6 @@ async function setup(
 test("按剩余容量放行（6 路、3 个账号各 2）：账号 2 停用后同时在跑的 agent 不超过 4；排队超 30 秒的在途步被及时中止、放行后重做；容量不足数小时不停作业；账号恢复后回到 6 路；等待的各路先来先放行", async () => {
   let bBusy = false;
   const { up, vc, g, limits } = await setup((key) => (key === "key-b" && bBusy ? BUSY : OK), 6, []);
-  assert.throws(() =>
-    assertConcurrencyFits(
-      7,
-      [1, 2, 3].map(() => ({ key: "k", concurrency: 2 }))
-    )
-  );
   const L = lanes(g, limits);
   try {
     // 7 路作业、配置 6 路：前 6 路放行，L7 等

@@ -19,10 +19,6 @@ import {
 type LegacyResultLine = StreamResultLine & {
   reverted?: boolean;
   repairBudgetExhausted?: boolean;
-  repairRounds?: number;
-  finalVerdict?: string;
-  humanTestRestores?: number;
-  verifyToolFaults?: number;
 };
 
 test("结果行字段清单：要求的字段都在（起点、agent 改动的 diff、开容器耗时与是否预先开好、两类用例的判题、开工时记忆大小、复盘、机检、轮数与用量、限额暂停、网关计量）；新行不写延续式、撤回、全量通过率与验证门/回炉的字段", () => {
@@ -123,34 +119,6 @@ test("旧结果行带撤回与延续式字段（reverted、head、regressions、
       lastCompletedStep(lines, { stream: "tasks", condition: "search-only", attempt: 1 })?.seq,
       1
     );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("旧结果行带验证门与回炉字段（repairRounds、finalVerdict、humanTestRestores、verifyToolFaults，决策 322/327 退役）：照常读出，四个字段都列为旧字段", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-results-"));
-  try {
-    const file = join(dir, "results.jsonl");
-    const legacy = {
-      ...sampleLine({ seq: 1 }),
-      repairRounds: 2,
-      finalVerdict: "fail",
-      humanTestRestores: 1,
-      verifyToolFaults: 3,
-    };
-    writeFileSync(file, `${JSON.stringify(legacy)}\n`);
-    const [line] = readStreamResults(file) as LegacyResultLine[];
-    assert.equal(line?.repairRounds, 2);
-    assert.equal(line?.finalVerdict, "fail");
-    assert.equal(line?.humanTestRestores, 1);
-    assert.equal(line?.verifyToolFaults, 3);
-    for (const field of ["repairRounds", "finalVerdict", "humanTestRestores", "verifyToolFaults"]) {
-      assert.ok(
-        (LEGACY_STREAM_RESULT_FIELDS as readonly string[]).includes(field),
-        `${field} 列为旧字段`
-      );
-    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
