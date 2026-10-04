@@ -10,7 +10,7 @@
 | 项目共享 | `.pigeon/settings.json` | 可提交 |
 | 项目个人 | `.pigeon/settings.local.json` | 不提交 |
 
-优先级：项目个人 > 项目共享 > 用户级。合并规则：对象按键逐层合并，标量与数组由高优先层整体替换；唯一例外是 `permissions` 的放权规则，三层并集生效（项目共享层的规则须先经确认，见下文第三道防线）。
+优先级：项目个人 > 项目共享 > 用户级。合并规则：对象按键逐层合并，标量与数组由高优先层整体替换；例外是 `permissions` 一节：放权规则三层并集生效（项目共享层的规则须先经确认，见下文第三道防线），禁读名单的追加项 `readDeny` 也取三层并集。
 
 设置在会话开始时读一次，形成本会话的设置快照；会话中途改文件不生效，下次启动或在终端界面里 `/reload` 之后才生效（见下文）。worker、沙箱会话与脚本编排沿用派出它的会话的快照。
 
@@ -21,7 +21,7 @@
 | 节 | 内容 | 原文件 |
 | --- | --- | --- |
 | `mcp` | MCP 服务的风险档覆盖（`servers.<名>.defaultTier`、`tools`），也可用 `launch` 直接定义服务 | `.pigeon/mcp.json` |
-| `permissions` | 固化的放权规则 `grants`；`/grants save` 写入项目个人一层，`/revoke config#N` 从中删除；写在项目共享层的规则须经确认才生效 | `.pigeon/grants.json` |
+| `permissions` | 固化的放权规则 `grants`；`/grants save` 写入项目个人一层，`/revoke config#N` 从中删除；写在项目共享层的规则须经确认才生效。读档禁读名单的追加项 `readDeny`（见下文"读档工具：工作区外只读与禁读名单"） | `.pigeon/grants.json` |
 | `commands` | 命令短名 `commands` 与角色允许清单 `roles`（为某角色登记了，该角色的 worker 只能跑清单里的命令；没登记的角色不受此限） | `.pigeon/commands.json` |
 | `orchestration` | worker 并发、层数、上限、卡住判定、任务清单、脚本编排 | `.pigeon/orchestration.json` |
 | `web` | 联网工具总开关 `enabled`、搜索后端与地址、抓取上限（见下文"联网工具的开关"） | `.pigeon/web.json` |
@@ -32,6 +32,7 @@
 | `modelInfo` | 按模型手填的价格、上下文窗口、单次输出上限与缓存规则的覆盖（见下文"模型信息"） | 新节 |
 | `truncationContinuation` | 撞上限续跑的开关与两个次数上限（见下文"撞上限续跑与流式重复检测"） | 新节 |
 | `repetitionGuard` | 流式重复检测的开关、模式、档位与各项参数（同上） | 新节 |
+| `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个） | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -278,6 +279,22 @@ pigeon migrate-config [--root <项目根>]
 - 正在跑的沙箱容器不重建：在沙箱会话里 `/reload` 且 `sandbox` 一节有变化时，提示退出后用 `pigeon resume <会话号> --sandbox` 续跑才对本会话的容器生效。
 - 有 worker 在跑或主 agent 正在运行时不重读。
 - `pigeon run` 与 `pigeon --line` 不设重载。
+
+## 读档工具：工作区外只读与禁读名单
+
+`read_file` 可以只读工作区以外的文件（决策 355）：`--yolo` 下自动放行；不开放手模式时须经人批准，审批面板标明"工作区以外（只读）"与解析后的真实路径，可批准一次、按所在目录放权或按工具放权；没有审批通道（`pigeon run` 等无人值守运行）时拒绝——但设置里固化的 `read_file` 放权（`permissions.grants`，按工具或按目录）照样放行，它就是人事先给的批准，与写档的放权同一口径。写与编辑仍限工作区。沙箱会话按容器里的路径判定。
+
+禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具（`read_file`、`grep`、`glob`）一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径（本机用系统的 realpath：Windows 上 8.3 短名、大小写与 `\\?\` 前缀都归一到同一写法），指向这些位置的链接同样不读；Windows 与 macOS 上不分大小写比较；Windows 上设备前缀（`\\?\`、`\\.\`）与数据流（`name:stream`、`::$DATA`）的写法直接拒绝；真实路径为 UNC 写法（`\\server\share`，含 `\\localhost\C$` 一类）且落在工作区以外的拒绝，工作区自身在网络共享或映射盘上时，其内照常。`grep`、`glob` 的 `path` 落在名单内即拒；结果逐个文件按真实路径过滤，禁读的与经符号链接指向工作区以外的都滤掉，文件名含换行或控制字符的文件一律略去，末尾注明各类略去的文件数；一次最多检查 20,000 个文件，超出或检查超时的略去并注明结果不完整。已知限制：硬链接指向同一文件、路径却不同，无法一般地识别；工作区经 UNC 写法打开且名单所列位置在其中时（如以 `\\localhost\C$\…` 打开家目录），名单按本机路径写，比对不中。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
+
+设置 `permissions.readDeny` 可往名单上追加（`~` 开头或绝对路径，三层并集），不能删减内置项：
+
+```json
+{ "permissions": { "readDeny": ["~/.config/gh", "/etc/ssl/private"] } }
+```
+
+禁读名单只管读档工具；`run_command` 经 shell 读文件不在此列，由命令审批把关。
+
+`grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。这些后端是 Pigeon 自己的辅助程序，不走 agent 的执行通道：程序先解析成绝对路径再启动（本机在 PATH 的绝对目录里找，跳过相对目录与工作区之内的目录，ripgrep 只用随包二进制；容器里系统目录优先），输出一律无歧义（rg 用 `--json`，git 用 `-z` 并把文件名含控制字符的文件排除在搜索之外，`grep -r` 降级先列出候选文件、按真实路径筛过再逐个搜，搜时先打开文件、按 `/proc` 给出的已打开文件的真实路径复核，没有 `/proc` 时不复核），git 不读系统与全局配置并关掉 `core.fsmonitor`，ripgrep 不读配置文件（`RIPGREP_CONFIG_PATH`）、`.ignore` 与全局 gitignore。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
 
 ## 三道防线
 

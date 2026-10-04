@@ -92,16 +92,22 @@ import {
   emptySettingsSnapshot,
   memoryLimitsOf,
   modelInfoSectionOf,
+  readDenyOf,
   repetitionGuardOf,
   type SettingsSnapshot,
+  searchLimitsOf,
   truncationContinuationOf,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
-import { asWorkspaceHost } from "../tools/local-host.ts";
+import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
-import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
+import {
+  createReadFileTool,
+  type OutsideReadMode,
+  ReadFileParamsSchema,
+} from "../tools/read-file.ts";
 import { ToolRegistry, type ToolRiskTier } from "../tools/registry.ts";
 import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace-edit.ts";
 import {
@@ -111,6 +117,11 @@ import {
   RunCommandParamsSchema,
   runCommandTexts,
 } from "../tools/run-command.ts";
+import {
+  createSearchTools,
+  READ_ONLY_SEARCH_TOOLS,
+  searchToolRegistrations,
+} from "../tools/search-tools.ts";
 import { scopePromptSentence } from "../tools/tool-scope.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
@@ -393,6 +404,13 @@ export interface RuntimeBundle {
   repetitionGuard: RepetitionGuardSettings;
 }
 
+// 决策 355：工作区以外的读取按审批状态放行——放手模式自动放行、有审批通道经人批准、无人值守拒绝
+const OUTSIDE_READ_MODES: Readonly<Record<RunCommandApproval, OutsideReadMode>> = {
+  yolo: "allowed",
+  prompt: "approval",
+  none: "refused",
+};
+
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
 export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 决策 061：编辑工具按模式装配，工具名都叫 edit_file；hashline 分支与 061 之前逐字一致
@@ -418,7 +436,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
   const appliedTemperature = reasoningEnabled ? undefined : deps.temperature;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
-  const workspaceHost = deps.workspaceHost ?? asWorkspaceHost(deps.workspaceRoot);
+  // 本机执行端：禁读名单里的 ~ 按注入的家目录展开（测试指到临时目录）
+  const workspaceHost =
+    deps.workspaceHost ??
+    createLocalWorkspaceHost(
+      deps.workspaceRoot,
+      deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}
+    );
   // 护栏（M9）：按路径限定的放权（会话 grant 的目录限定、固化规则的 pathPrefix）以宿主路径判定，对非本地的工作区
   // 只会静默失配。路径放权在这类工作区下暂不支持：带审批通道的交互场景直接拒绝装配（审批面板的 [d] 就是目录放权）
   if (
@@ -511,6 +535,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const approval: RunCommandApproval =
     approvalMode === "yolo" ? "yolo" : deps.createApprovalHandler !== undefined ? "prompt" : "none";
   const commandTexts = runCommandTexts({ platform: workspaceHost.platform, approval });
+  // 决策 368：grep、glob 的上限与禁读名单；本机执行端先用随包附带的 ripgrep，容器里用容器自己的
+  const searchLimits = searchLimitsOf(settings);
+  const searchOptions = {
+    readDeny: readDenyOf(settings),
+    bundledRipgrep: deps.workspaceHost === undefined,
+  };
   const registry = new ToolRegistry();
   registry.register({
     name: "read_file",
@@ -537,6 +567,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
+  // 决策 368：grep、glob——只读工具（读档审批、可并行），登记点见 tools/search-tools.ts
+  for (const registration of searchToolRegistrations()) {
+    registry.register(registration);
+  }
   // 决策 339：检索与目录排除当前会话所在的整棵会话树（父会话取本会话的来历：worker 的派出方、分支的来源）
   const lineageParent =
     deps.storeLineage?.worker?.parentSessionId ?? deps.storeLineage?.branch?.sourceSessionId;
@@ -759,6 +793,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "read_file",
     "edit_file",
     RUN_COMMAND_TOOL,
+    ...READ_ONLY_SEARCH_TOOLS,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
     ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
     ...(hasSkills ? [LOAD_SKILL_TOOL] : []),
@@ -908,9 +943,11 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       maxOutputTokens
     ),
     tools: [
-      replaceMode
-        ? createReadFileTool(workspaceHost, { editMode: "replace" })
-        : createReadFileTool(workspaceHost),
+      createReadFileTool(workspaceHost, {
+        ...(replaceMode ? { editMode: "replace" as const } : {}),
+        outsideReads: OUTSIDE_READ_MODES[approval],
+        readDeny: readDenyOf(settings),
+      }),
       replaceMode ? createReplaceEditTool(workspaceHost) : createEditFileTool(workspaceHost),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
@@ -922,6 +959,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ...(delegated?.scopes?.some((scope) => scope.tool === RUN_COMMAND_TOOL) === true
           ? { pathOnly: true }
           : {}),
+      }),
+      ...createSearchTools(workspaceHost, {
+        grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults },
+        glob: { ...searchOptions, maxResults: searchLimits.globMaxResults },
       }),
       ...(sessionSearch
         ? [

@@ -55,6 +55,7 @@ import {
   sandboxConfigProblems,
 } from "./sandbox-config.ts";
 import { WorkerRoleSchema } from "./session-payloads.ts";
+import { type SearchLimits, searchLimits, ToolsSectionSchema } from "./tools-config.ts";
 import { WEB_KEY_FIELDS, type WebSection, WebSectionSchema } from "./web-config.ts";
 
 // 三层，按优先级从低到高
@@ -81,6 +82,7 @@ export const SETTINGS_SECTIONS = {
   modelInfo: ModelInfoSectionSchema,
   truncationContinuation: TruncationContinuationSectionSchema,
   repetitionGuard: RepetitionGuardSectionSchema,
+  tools: ToolsSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -105,6 +107,7 @@ export const SettingsFileSchema = Type.Object(
     modelInfo: Type.Optional(ModelInfoSectionSchema),
     truncationContinuation: Type.Optional(TruncationContinuationSectionSchema),
     repetitionGuard: Type.Optional(RepetitionGuardSectionSchema),
+    tools: Type.Optional(ToolsSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -259,6 +262,9 @@ export interface MergedSettings {
   modelInfo?: ModelInfoSection;
   truncationContinuation?: TruncationContinuationSection;
   repetitionGuard?: RepetitionGuardSection;
+  tools?: Static<typeof ToolsSectionSchema>;
+  // 决策 355：读档禁读名单的追加项，三层并集（permissions.readDeny；只能往内置名单上加）
+  readDeny?: string[];
   trustedDirectories: string[];
   // 停用全部钩子（324）：三层按标量覆盖（高优先层说了算），缺省 false
   disableAllHooks: boolean;
@@ -290,6 +296,7 @@ export function mergeSettingsLayers(
   const commandSources: Record<string, SettingsLayer> = {};
   let disableAllHooks = false;
   let stopHookBlockCap = DEFAULT_STOP_HOOK_BLOCK_CAP;
+  const readDeny = new Set<string>();
   for (const { layer, file } of layers) {
     for (const name of Object.keys(SETTINGS_SECTIONS) as SettingsSectionName[]) {
       const section = file[name];
@@ -312,6 +319,9 @@ export function mergeSettingsLayers(
     (file.permissions?.grants ?? []).forEach((rule, index) => {
       grants.push({ layer, index, rule });
     });
+    for (const entry of file.permissions?.readDeny ?? []) {
+      readDeny.add(entry);
+    }
   }
   // 并集按优先级从高到低排列（项目个人在前）
   grants.sort((a, b) => SETTINGS_LAYERS.indexOf(b.layer) - SETTINGS_LAYERS.indexOf(a.layer));
@@ -322,6 +332,7 @@ export function mergeSettingsLayers(
         MergedSettings,
         "trustedDirectories" | "disableAllHooks" | "stopHookBlockCap"
       >),
+      ...(readDeny.size > 0 ? { readDeny: [...readDeny] } : {}),
       trustedDirectories: [...(user?.trustedDirectories ?? [])],
       disableAllHooks,
       stopHookBlockCap,
@@ -463,6 +474,16 @@ export function repetitionGuardOf(snapshot: SettingsSnapshot): RepetitionGuardSe
     throw new Error(`流式重复检测设置不对：${resolved.problem}`);
   }
   return resolved.settings;
+}
+
+// 决策 355：设置追加的读档禁读项（三层并集）；内置名单在 tools/read-deny.ts
+export function readDenyOf(snapshot: SettingsSnapshot): string[] {
+  return [...(snapshot.merged.readDeny ?? [])];
+}
+
+// 决策 368：grep、glob 的结果条数上限（tools 一节，不给的取缺省）
+export function searchLimitsOf(snapshot: SettingsSnapshot): SearchLimits {
+  return searchLimits(snapshot.merged.tools);
 }
 
 export function webSectionOf(snapshot: SettingsSnapshot): WebSection | undefined {

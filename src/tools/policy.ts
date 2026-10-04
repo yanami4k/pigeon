@@ -8,6 +8,7 @@
 //   3a. 免审批的写档工具（注册时标明，施工默认 Q12：只写学到的记忆）→ auto-allow，与审批模式无关
 //   4. yolo → 非 deny 全放行（人事先批发授权，账本上 approvedBy 记 policy:yolo）
 //   5. prompt → read 层自动放行；write / exec 层必须人工批准
+//      决策 355：读工作区以外的文件不在此列——read 层也要人工批准（无审批通道即 fail-closed 拒绝）
 // 注意：policy.allow 不参与逐调用判定——它约束的是广告给模型的工具集（Adapter 接线层职责）；
 // 逐调用判定只依赖注册表 + deny + grant 匹配 + 模式。
 import { type Static, Type } from "typebox";
@@ -44,12 +45,14 @@ export interface PolicyDecision {
 }
 
 // 注册表内查工具：fail-closed 由构造保证——调用方无法把未注册工具当作已注册求值。
-// grant 为命中出处时插入排律第 3 档（deny 之后、yolo 之前）
+// grant 为命中出处时插入排律第 3 档（deny 之后、yolo 之前）。
+// context.outsideWorkspaceRead（决策 355）：这次调用读工作区以外的文件——第 5 档 read 层不自动放行
 export function evaluateToolPolicy(
   registry: ToolRegistry,
   toolName: string,
   policy: ToolPolicyLike,
-  grant?: GrantEvaluation
+  grant?: GrantEvaluation,
+  context: { outsideWorkspaceRead?: boolean } = {}
 ): PolicyDecision {
   const registration = registry.get(toolName);
   if (registration === undefined) {
@@ -84,8 +87,11 @@ export function evaluateToolPolicy(
       reason: `yolo 模式事先批发授权：${toolName}（账本记 approvedBy=policy:yolo）`,
     };
   }
-  if (registration.tier === "read") {
+  if (registration.tier === "read" && context.outsideWorkspaceRead !== true) {
     return { kind: "auto-allow", reason: `只读工具自动放行：${toolName}` };
+  }
+  if (registration.tier === "read") {
+    return { kind: "prompt", reason: `读工作区以外的文件必须人工批准：${toolName}` };
   }
   return {
     kind: "prompt",

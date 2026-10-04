@@ -31,6 +31,7 @@ import {
 import { type GrantMatchOutcome, matchConfigGrants } from "../tools/grants.ts";
 import type { HostScopedTool } from "../tools/host-scope.ts";
 import { evaluateToolPolicy } from "../tools/policy.ts";
+import type { OutsideReadTool } from "../tools/read-file.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import type { CommandInspection, ExecCommandTool } from "../tools/run-command.ts";
 import { scopeViolation } from "../tools/tool-scope.ts";
@@ -320,6 +321,8 @@ class GovernedToolCalls implements ToolGovernance {
     }
     // 决策 290：网络档工具只读判定这次调用要访问的主机——审批面板显示它，[a] 建按网站的放权
     const host = this.#inspectHost(toolName, rawArgs);
+    // 决策 355：读档工具这次要读工作区以外的文件（真实路径）——read 层不自动放行，放行时按调用授予工具
+    const outsidePath = await this.#inspectOutsideRead(toolName, rawArgs);
     // 决策 326 ①：写入类文件工具写受保护路径——放权（会话与配置）一概不参与求值，worker 的默认放行也不适用
     const protectedTarget = await this.#protectedTargetOf(toolName, rawArgs);
     const grantHit =
@@ -333,7 +336,9 @@ class GovernedToolCalls implements ToolGovernance {
             rawArgs,
             needsShell
           ));
-    let decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined);
+    let decision = evaluateToolPolicy(this.#registry, toolName, policy, grantHit ?? undefined, {
+      outsideWorkspaceRead: outsidePath !== undefined,
+    });
     // 决策 302：worker 改自己工作树内的文件，原本要问人的改为放行（记 policy:auto）
     if (
       decision.kind === "prompt" &&
@@ -395,6 +400,7 @@ class GovernedToolCalls implements ToolGovernance {
       }
       // 需 shell 的命令到这里只有两种放行：带 shell 标记的放权（人确认过这条一模一样的命令）或 yolo（004）
       this.#authorizeShell(toolName, toolCallId, needsShell);
+      this.#authorizeOutsideRead(toolName, toolCallId, outsidePath);
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
@@ -413,6 +419,7 @@ class GovernedToolCalls implements ToolGovernance {
         decidedAt: Date.now(),
       });
       this.#authorizeShell(toolName, toolCallId, needsShell);
+      this.#authorizeOutsideRead(toolName, toolCallId, outsidePath);
       record = advanceToolExecution(record, "dispatch", Date.now());
       record = advanceToolExecution(record, "execution", Date.now());
       this.#executions.set(toolCallId, record);
@@ -421,16 +428,21 @@ class GovernedToolCalls implements ToolGovernance {
 
     // prompt：必须人工批准；未配置审批通道 = fail-closed 拒绝
     if (this.#approvalHandler === undefined) {
+      // 决策 355：读工作区以外的文件在无人值守时拒绝，理由点明路径
+      const reason =
+        outsidePath !== undefined
+          ? `读工作区以外的文件须经人批准，本次运行没有审批通道，拒绝：${outsidePath}`
+          : "策略要求人工审批但未配置审批通道";
       record = recordDecision(record, {
         outcome: "rejected",
         approvedBy: "policy:deny",
-        reason: "策略要求人工审批但未配置审批通道（fail-closed）",
+        reason: `${reason}（fail-closed）`,
         // 决策 066：策略兜底文案，非人写
         reasonSource: "system-default",
         decidedAt: Date.now(),
       });
       this.#executions.set(toolCallId, record);
-      return this.#blockWithBreaker(toolName, rawArgs, "策略要求人工审批但未配置审批通道", "tool");
+      return this.#blockWithBreaker(toolName, rawArgs, reason, "tool");
     }
     const tier = this.#registry.get(toolName)?.tier;
     // 写工具的 diff 预览：工具有 preview 能力就带上；预览失败不阻断审批（审批仍可看参数）。
@@ -456,6 +468,7 @@ class GovernedToolCalls implements ToolGovernance {
       // 048 修订：面板原样显示将执行的命令串，需 shell 时标明
       ...(inspection !== undefined ? { command: inspection.command, needsShell } : {}),
       ...(host !== undefined ? { host } : {}),
+      ...(outsidePath !== undefined ? { outsidePath } : {}),
       ...(protectedTarget !== undefined ? { protectedPath: protectedTarget } : {}),
       // 出处 run：审批提示创建 grant（[a]/[d]）时写入 grant.created 事件
       runId: this.#host.activeRunId(),
@@ -486,6 +499,7 @@ class GovernedToolCalls implements ToolGovernance {
     });
     // 人在面板上看到了原样命令串与"经 shell"并批准
     this.#authorizeShell(toolName, toolCallId, needsShell);
+    this.#authorizeOutsideRead(toolName, toolCallId, outsidePath);
     record = advanceToolExecution(record, "dispatch", Date.now());
     record = advanceToolExecution(record, "execution", Date.now());
     this.#executions.set(toolCallId, record);
@@ -561,6 +575,43 @@ class GovernedToolCalls implements ToolGovernance {
       return (tool as unknown as HostScopedTool).inspectHost(args);
     } catch {
       return undefined;
+    }
+  }
+
+  // 读档工具的只读越界检查（决策 355）；工具无此能力或检查失败返回 undefined（按工作区内处理，工具执行时自会拒读）
+  async #inspectOutsideRead(toolName: string, args: unknown): Promise<string | undefined> {
+    const tool = this.#host.tools.get(toolName);
+    if (
+      tool === undefined ||
+      !("inspectOutsideRead" in tool) ||
+      typeof tool.inspectOutsideRead !== "function"
+    ) {
+      return undefined;
+    }
+    try {
+      return await (tool as unknown as OutsideReadTool).inspectOutsideRead(args);
+    } catch {
+      return undefined;
+    }
+  }
+
+  // 放行一次工作区以外的读取（决策 355）：按调用授予，一次一用；放行途径与需 shell 的命令同一口径
+  //（放权、yolo、PreToolUse 钩子放行、人工批准）
+  #authorizeOutsideRead(
+    toolName: string,
+    toolCallId: string,
+    outsidePath: string | undefined
+  ): void {
+    if (outsidePath === undefined) {
+      return;
+    }
+    const tool = this.#host.tools.get(toolName);
+    if (
+      tool !== undefined &&
+      "authorizeOutsideRead" in tool &&
+      typeof tool.authorizeOutsideRead === "function"
+    ) {
+      (tool as unknown as OutsideReadTool).authorizeOutsideRead(toolCallId);
     }
   }
 
