@@ -83,6 +83,7 @@ export const RunStartDataSchema = Type.Object({
   skills: run.skills,
   mcpTools: run.mcpTools,
   mcpServers: run.mcpServers,
+  skippedTools: run.skippedTools,
   budget: Type.Optional(AttemptBudgetSchema),
   // 决策 322：验证命令、失败自动分叉重试与回炉轮数已删除。本对象非严格（未设 additionalProperties: false），
   // 旧记录里的 verify、retryOnFail、repairRounds 字段读取时忽略

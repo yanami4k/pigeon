@@ -190,7 +190,7 @@ export interface TurnRoundNotice extends LoopRound {
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
 export type ManualCompactionOutcome = CompactionOutcome | { kind: "skipped"; reason: "disabled" };
 
-type RunStartedExtras = Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+type RunStartedExtras = Pick<RunStartedPayload, "mcpTools" | "mcpServers" | "skippedTools">;
 
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
@@ -207,7 +207,8 @@ export interface PiRuntimeAdapterOptions {
   tools?: AgentTool[];
   // M5.7 S3（决策 052）：Run 开始条目的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
   // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
-  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+  // 决策 359：另带按环境没注册的工具与原因
+  runStartedExtras?: () => RunStartedExtras;
   // 决策 362：本次所用的模型信息与每一项的来源（装配根解析好交来），每个 Run 开始条目照记；缺省不记
   modelInfo?: RunModelInfo;
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
@@ -217,9 +218,9 @@ export interface PiRuntimeAdapterOptions {
   // 决策 188：上下文压缩（阈值、保留量、摘要请求的模型接入与压缩前回调）；缺省不压缩。压缩读写会话树，
   // 故只在新存储写入面带读分支与写压缩条目时生效
   compaction?: ContextCompactor;
-  // 决策 264：同一次回复里的多个工具调用可否并行执行；缺省串行（决策 2）。只有注册了可并行的派 worker 工具时装配根才打开：
-  // 上游在同一批调用里只要有一个标为串行的工具就整批串行，写与命令工具因而照旧逐个执行、逐个审批
-  parallelTools?: boolean;
+  // 决策 353：逐工具的执行模式（装配根按登记表给）；缺省一律串行。Agent 恒为并行模式，上游在同一批调用里只要有一件
+  // 标为串行就整批串行：纯读的一批同时执行，含写与命令的一批照旧逐个准备（含审批）、执行
+  executionModeOf?: (toolName: string) => "parallel" | "sequential";
   // 决策 324：工具事件钩子——PreToolUse 交治理实例（在审批之前），PostToolUse / PostToolUseFailure
   // 在此接 afterToolCall（工具执行之后）：替换结果文本、把理由与上下文补进结果。缺省不挂
   toolHooks?: ToolHookPort;
@@ -319,8 +320,13 @@ export class PiRuntimeAdapter {
     const advertised = (options.tools ?? []).filter((tool) => policy.allow.includes(tool.name));
     // 包装 execute 捕获错误分类（M4 S2，D7）：上游把工具异常转成 isError 结果后只剩
     // 消息字符串，域/环境归类必须在抛出源头留证；preview/探针等可选能力随 spread 保留
+    // 决策 353：执行模式以装配根的登记为准（覆盖工具自带的标记）
+    const modeOf = options.executionModeOf ?? (() => "sequential" as const);
     const tools: ReadonlyMap<string, AgentTool> = new Map(
-      advertised.map((tool) => [tool.name, this.#wrapToolErrorCapture(tool)])
+      advertised.map((tool) => [
+        tool.name,
+        { ...this.#wrapToolErrorCapture(tool), executionMode: modeOf(tool.name) },
+      ])
     );
     // 治理绑定宿主能力；广告工具未在注册表登记时在此构造期 fail-fast
     this.#toolHooks = options.toolHooks;
@@ -345,11 +351,9 @@ export class PiRuntimeAdapter {
               onHit: (hit) => this.#recordRepetition(repetition.mode, hit),
             })
           : options.streamFn,
-      // 决策 2：缺省 sequential——审批瓶颈是人，parallel 的交错观感错乱且写审批有顺序依赖。
-      // 依据：agent.js:134 构造选项读取、agent.js:299 传入 loop config、
-      // agent-loop.js:288 sequential 走逐 call 的 start→hook→execute→end 执行器。
-      // 决策 264：注册了派 worker 工具时改为 parallel——整批都是可并行工具才并行，含串行工具的批次仍整批串行
-      toolExecution: options.parallelTools === true ? "parallel" : "sequential",
+      // 决策 353：恒为 parallel，实际怎么跑由逐工具的执行模式决定（agent-loop.js:287：一批里有一件串行即整批走
+      // 逐 call 的 start→hook→execute→end 执行器）——写审批的顺序依赖与预览时机照旧（决策 2 的顾虑由此保留）
+      toolExecution: "parallel",
       // M3 审批闸（spike S2a：block 可靠，reason 逐字反馈模型）；M5.5 S0 起只转发治理判定
       beforeToolCall: (context) => this.#forwardDecide(context),
       // 决策 324：工具执行之后（PostToolUse / PostToolUseFailure）——替换结果文本与补上下文

@@ -6,9 +6,11 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { sessionFileName } from "../persistence/session-reader.ts";
 import { createFakeStreamFn, createGate } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import { projectMemoryPathOf, userMemoryPathOf } from "../state/paths.ts";
+import { newSessionId } from "../state/ids.ts";
+import { projectMemoryPathOf, sessionsDirOf, userMemoryPathOf } from "../state/paths.ts";
 import {
   clearMarkedProcesses,
   commandStepAgent,
@@ -463,6 +465,11 @@ for (const condition of ["search-push", "search-only", "push-only", "neither"] a
   test(`Pigeon agent（${condition}）：一步之内同时在途的模型请求至多 1 个（含一轮多个工具调用），工具清单里没有派生 agent 或 worker 的工具，会话检索工具随条件的开关增减`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
+    // 决策 359：本项目有历史会话才注册会话检索三件——作业目录里先放一个之前的会话
+    const earlier = { kind: "header", version: 4, id: newSessionId(), createdAt: 1, cwd: dir };
+    mkdirSync(join(sessionsDirOf(join(dir, "job")), "earlier"), { recursive: true });
+    const file = join(sessionsDirOf(join(dir, "job")), "earlier", sessionFileName(1, earlier.id));
+    writeFileSync(file, `${JSON.stringify(earlier)}\n`);
     try {
       const counting = countingStreamFn(
         createFakeStreamFn({

@@ -1,7 +1,7 @@
 // 记忆条件的两个开关（决策 193、217）：会话检索关掉时不注册 search_sessions、read_session_entry 与 list_sessions（339）、系统提示去掉提到它们
 // 的那一句，其余逐字不变；缺省照旧开着。推送记忆打开时 headless 在装配前报错（推送记忆另行施工）
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ import {
   SEARCH_SESSIONS_TOOL,
 } from "../memory/search-tools.ts";
 import { listSessionRefs } from "../persistence/session-catalog.ts";
+import { sessionFileName } from "../persistence/session-reader.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { sessionsDirOf } from "../state/paths.ts";
@@ -28,6 +29,11 @@ async function assembled(
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-switch-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-search-switch-home-"));
   try {
+    // 决策 359：本项目有历史会话才注册会话检索三件——先放一个之前的会话
+    const earlier = { kind: "header", version: 4, id: newSessionId(), createdAt: 1, cwd: root };
+    mkdirSync(join(sessionsDirOf(root), "earlier"), { recursive: true });
+    const file = join(sessionsDirOf(root), "earlier", sessionFileName(1, earlier.id));
+    writeFileSync(file, `${JSON.stringify(earlier)}\n`);
     const streamFn = createFakeStreamFn({ replies });
     const result = await runHeadless({
       task: "你好",

@@ -526,6 +526,7 @@ export async function main(argv: string[]): Promise<void> {
         if (bundle.instructionsNotice !== undefined) {
           shellHolder.current?.addSystem(bundle.instructionsNotice);
         }
+        if (bundle.toolsNotice !== undefined) shellHolder.current?.addSystem(bundle.toolsNotice);
         guardMainAgent(bundle);
         const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
@@ -557,6 +558,7 @@ export async function main(argv: string[]): Promise<void> {
   shell.start();
   // 决策 330：人写的说明超出上限被截断时在消息区提示一行
   if (mainBundle.instructionsNotice !== undefined) shell.addSystem(mainBundle.instructionsNotice);
+  if (mainBundle.toolsNotice !== undefined) shell.addSystem(mainBundle.toolsNotice);
   warnSink.attach((line) => shell.addWarning(line));
   if (target.kind === "resume") {
     shell.announceResumed(workspaceRoot, target.report);

@@ -348,6 +348,7 @@ async function resumeMain(argv: string[]): Promise<void> {
         const { bundle } = opened;
         // 决策 330：人写的说明超出上限被截断时提示一行
         if (bundle.instructionsNotice !== undefined) write(`${bundle.instructionsNotice}\n`);
+        if (bundle.toolsNotice !== undefined) write(`${bundle.toolsNotice}\n`);
         try {
           await runRepl({
             adapter: bundle.adapter,
@@ -1256,6 +1257,7 @@ async function lineMain(argv: string[]): Promise<void> {
   const { bundle } = opened;
   // 决策 330：人写的说明超出上限被截断时提示一行
   if (bundle.instructionsNotice !== undefined) write(`${bundle.instructionsNotice}\n`);
+  if (bundle.toolsNotice !== undefined) write(`${bundle.toolsNotice}\n`);
   try {
     await runRepl({
       adapter: bundle.adapter,

@@ -170,6 +170,13 @@ function renderRun(
       `工具 ${tools} ｜ Memory ${start.memory.length} 个（注入 ${injected}） ｜ Skill ${start.skills.length} 个 ｜ ` +
       `system prompt ${systemPromptHash.slice(0, 12)} ｜ 模型请求 ${run.turns.length} 次`
   );
+  // 决策 359：按环境没注册的工具与原因
+  if (start.skippedTools !== undefined && start.skippedTools.length > 0) {
+    const skipped = start.skippedTools.map(
+      (entry) => `${entry.tools.join("、")}（${entry.reason}）`
+    );
+    lines.push(`  没注册的工具：${skipped.join("；")}`);
+  }
   // M5.7 S3（决策 052）：MCP 工具集里注解与配置冲突的工具、非连接状态的 server、清单变更通知
   const conflicts = (start.mcpTools ?? []).filter((entry) => entry.conflict === true);
   if (conflicts.length > 0) {

@@ -145,6 +145,15 @@ export const RunStartedPayloadSchema = Type.Object({
   // 加法式不升版本；本会话没有 MCP server 时不带
   mcpTools: Type.Optional(Type.Array(McpToolsetEntrySchema)),
   mcpServers: Type.Optional(Type.Array(McpServerStatusSchema)),
+  // 决策 359：按环境没注册的工具与原因（加法式；都注册了时不带）
+  skippedTools: Type.Optional(
+    Type.Array(
+      Type.Object({
+        tools: Type.Array(Type.String({ minLength: 1 })),
+        reason: Type.String({ minLength: 1 }),
+      })
+    )
+  ),
   // 决策 137：后台审阅配置字段已删除。本对象非严格（未设 additionalProperties: false），
   // v10 至 v15 旧记录里的 review 字段读取时忽略
   // 决策 322：验证命令、失败自动分叉重试与回炉轮数已删除。本对象非严格（未设 additionalProperties: false），
