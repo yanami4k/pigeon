@@ -26,12 +26,12 @@ import { type LoadedStoreSession, loadStoreSession } from "../persistence/sessio
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
-import { isStatusText } from "./status-fixtures.ts";
 import { ForkError, runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
+import { isStatusText } from "./status-fixtures.ts";
 
 // 决策 363：开工状态块与状态追加是用户消息，但不是对话
 function isStatusMessage(message: { role: string; content?: unknown }): boolean {

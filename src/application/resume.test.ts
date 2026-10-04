@@ -15,13 +15,13 @@ import {
   INTERRUPTED_TOOL_RESULT_TEXT,
   storeAttemptFacts,
 } from "../state/session-judge.ts";
-import { isStatusText } from "./status-fixtures.ts";
 import type { McpSession } from "./mcp.ts";
 import { describeResume, runResumeFlow } from "./resume.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "./session-runtime.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
 import { writeLegacySessionFile } from "./session-view-fixtures.ts";
+import { isStatusText } from "./status-fixtures.ts";
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],

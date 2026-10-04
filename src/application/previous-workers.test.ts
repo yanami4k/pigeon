@@ -15,7 +15,6 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import { isStatusText } from "./status-fixtures.ts";
 import { noMcpSession } from "./mcp.ts";
 import {
   previousWorkersOf,
@@ -28,6 +27,7 @@ import { type OpenedSessionRuntime, openSessionRuntime } from "./session-runtime
 import { childFamilySink } from "./session-store.ts";
 import { bindSpawnWorkers } from "./spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import { TAKE_WORKER_TEXTS, takeWorkerChanges } from "./take-worker-tool.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
 import { createSessionWorkers } from "./workers.ts";

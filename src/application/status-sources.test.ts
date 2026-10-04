@@ -9,15 +9,23 @@ import { GIT_STATUS_ARGS, gitFailure, gitText, localStatusProbe } from "./status
 
 test("git 没有成功时按情形写原因：不是仓库、没装 git、超时、仓库属主不符、其余取报错第一行", () => {
   assert.equal(
-    gitText(gitFailure({ stderr: "fatal: not a git repository (or any of the parent directories): .git\n" })),
+    gitText(
+      gitFailure({
+        stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
+      })
+    ),
     "不是 git 仓库。"
   );
   assert.match(gitText(gitFailure({ missing: true, stderr: "" })), /^取不到 git 状态：没有装 git/);
-  assert.match(gitText(gitFailure({ timedOut: true, stderr: "" })), /^取不到 git 状态：git status 超过 \d+ 秒没有结束/);
+  assert.match(
+    gitText(gitFailure({ timedOut: true, stderr: "" })),
+    /^取不到 git 状态：git status 超过 \d+ 秒没有结束/
+  );
   assert.match(
     gitText(
       gitFailure({
-        stderr: "fatal: detected dubious ownership in repository at '/w'\nTo add an exception ...\n",
+        stderr:
+          "fatal: detected dubious ownership in repository at '/w'\nTo add an exception ...\n",
       })
     ),
     /^取不到 git 状态：仓库属主与当前用户不同，git 拒绝读取（dubious ownership/

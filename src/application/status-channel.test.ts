@@ -24,7 +24,6 @@ import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import { storeSessionView } from "../state/session-judge.ts";
 import { extractSessionSearch } from "../state/session-search-text.ts";
 import { resolveForkPoint } from "./fork-command.ts";
 import { runHeadless } from "./headless-core.ts";
@@ -501,7 +500,10 @@ test("没有工具结果、因通知接着跑的一轮触发的压缩：下一�
     }
     assert.equal(main.length, 2);
     const texts = userTexts(main[1]);
-    assert.match(texts.at(-2) ?? "", /^<pigeon-status>\n以下整段取代此前的全部开工状态。\n[\s\S]*约定一/);
+    assert.match(
+      texts.at(-2) ?? "",
+      /^<pigeon-status>\n以下整段取代此前的全部开工状态。\n[\s\S]*约定一/
+    );
     assert.match(texts.at(-1) ?? "", /有一条通知/);
   } finally {
     r.cleanup();

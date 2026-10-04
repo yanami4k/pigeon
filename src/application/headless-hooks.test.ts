@@ -11,8 +11,8 @@ import { runTraceCommand } from "../cli/trace.ts";
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { LayeredHook } from "../state/hooks.ts";
 import { emptySettingsSnapshot, type SettingsSnapshot } from "../state/settings.ts";
-import { isStatusText } from "./status-fixtures.ts";
 import { runHeadless } from "./headless-core.ts";
+import { isStatusText } from "./status-fixtures.ts";
 
 const made: string[] = [];
 after(() => {

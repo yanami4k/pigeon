@@ -86,7 +86,8 @@ export function gitFailure(failure: {
   if (/dubious ownership/i.test(failure.stderr)) {
     return {
       kind: "unavailable",
-      reason: "仓库属主与当前用户不同，git 拒绝读取（dubious ownership；需把该目录加进 safe.directory）",
+      reason:
+        "仓库属主与当前用户不同，git 拒绝读取（dubious ownership；需把该目录加进 safe.directory）",
     };
   }
   const line = failure.stderr
@@ -95,7 +96,10 @@ export function gitFailure(failure: {
     .find((text) => text !== "");
   return {
     kind: "unavailable",
-    reason: line !== undefined ? `git 报错：${line.slice(0, 200)}` : "git status 没有成功，也没有报错输出",
+    reason:
+      line !== undefined
+        ? `git 报错：${line.slice(0, 200)}`
+        : "git status 没有成功，也没有报错输出",
   };
 }
 

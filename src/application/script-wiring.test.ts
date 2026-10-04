@@ -17,7 +17,6 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
-import { isStatusText } from "./status-fixtures.ts";
 import { runHeadless } from "./headless-core.ts";
 import { messageLines } from "./history.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
@@ -31,6 +30,7 @@ import {
 import type { ScriptRuns } from "./script-runner.ts";
 import { commandInputText, ORCHESTRATE_TEXTS, orchestrateDescription } from "./script-texts.ts";
 import { ORCHESTRATE_TOOL, ScriptSlot } from "./script-tool.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
 
 const roots: string[] = [];

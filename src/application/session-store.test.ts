@@ -26,7 +26,6 @@ import {
   SessionEntryType,
   type WorkerData,
 } from "../state/session-entries.ts";
-import { isStatusText } from "./status-fixtures.ts";
 import { runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";
@@ -34,6 +33,7 @@ import { buildRuntime, disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import { childFamilySink, grantEventSink } from "./session-store.ts";
 import { writeLegacySessionFile } from "./session-view-fixtures.ts";
+import { isStatusText } from "./status-fixtures.ts";
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],

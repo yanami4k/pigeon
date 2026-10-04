@@ -126,7 +126,11 @@ test("发出以进了会话记录为准：给出的追加没进记录就被中�
   const tracker = new StatusTracker();
   assert.match(tracker.next(a, false) ?? "", /^<pigeon-status>/);
   assert.equal(tracker.sent(), undefined, "还没进记录");
-  assert.match(tracker.next(a, false) ?? "", /^<pigeon-status>\n开工状态/, "首块没进记录，再给一次");
+  assert.match(
+    tracker.next(a, false) ?? "",
+    /^<pigeon-status>\n开工状态/,
+    "首块没进记录，再给一次"
+  );
   tracker.delivered();
   assert.match(tracker.next(b, false) ?? "", /^<pigeon-status-update>/);
   // 追加被中止，没进记录：状态又变回 a 时不追加，变成 b 时照样追加
