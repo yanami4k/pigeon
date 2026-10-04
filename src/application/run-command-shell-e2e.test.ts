@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { loadSettings } from "../persistence/settings.ts";
@@ -15,6 +15,13 @@ import { newGrantId, newSessionId } from "../state/ids.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import type { ExecEvidence } from "../tools/run-command.ts";
 import { buildRuntime } from "./runtime.ts";
+
+// 用户级设置指到的空临时目录：这个测试结束后删掉
+function emptyHome(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
 
 // 取值并断言在场（替代非空断言）
 function required<T>(value: T | undefined): T {
@@ -60,7 +67,7 @@ function makeRuntime(
     workspaceRoot: root,
     homeDir: root,
     // 决策 325：放权规则取自设置快照（用户级指到另一个空的临时目录）
-    settings: loadSettings(root, { homeDir: mkdtempSync(join(tmpdir(), "pigeon-shell-home-")) }),
+    settings: loadSettings(root, { homeDir: emptyHome("pigeon-shell-home-") }),
     sessionId,
     yolo: options.yolo === true,
     provider: "fake-provider",

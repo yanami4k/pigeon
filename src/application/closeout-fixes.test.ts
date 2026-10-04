@@ -150,10 +150,10 @@ test("分叉复用运行面已挂的快照器：分叉前后的快照 ref 编号
 
 test("快照 ref 旧值守卫：同一会话的两个快照器实例写同号时明确失败，先写的 ref 原样还在", async () => {
   const { dir, cleanup } = repo("pigeon-cp-guard-");
+  const sessionId = newSessionId();
+  const first = createCheckpointer({ workspaceRoot: dir, sessionId });
+  const second = createCheckpointer({ workspaceRoot: dir, sessionId });
   try {
-    const sessionId = newSessionId();
-    const first = createCheckpointer({ workspaceRoot: dir, sessionId });
-    const second = createCheckpointer({ workspaceRoot: dir, sessionId });
     await first.beforeChange();
     await second.beforeChange();
     writeFileSync(join(dir, "a.txt"), "one\n");
@@ -163,6 +163,9 @@ test("快照 ref 旧值守卫：同一会话的两个快照器实例写同号时
     await assert.rejects(() => second.afterChange(), /拒绝覆盖/);
     assert.equal(git(dir, ["rev-parse", snapshot.ref]).trim(), snapshot.commit, "先写的没被覆盖");
   } finally {
+    // 关掉快照器：临时索引与忽略文件随之删除
+    await first.close();
+    await second.close();
     cleanup();
   }
 });

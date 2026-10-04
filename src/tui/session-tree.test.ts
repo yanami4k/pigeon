@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterAll, test } from "vitest";
 import { familyTotal, flattenFamily, loadSessionFamily } from "../application/session-family.ts";
 import {
   createFixtureSession,
@@ -24,6 +24,17 @@ import { orchestrationHarness } from "./orchestration-fixtures.ts";
 import { ScriptedRuntime } from "./runtime-fixtures.ts";
 import { PigeonTuiShell, type TuiSessionBinding } from "./shell.ts";
 import { MockTerminal, screenFlat, settle } from "./testing.ts";
+
+// 本文件建的临时目录在全部测试之后删掉（不靠进程退出时的清理）
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -230,7 +241,7 @@ function shellOn(family: Pick<Family, "root">, current: string) {
     terminal: term,
     runtime,
     sessionId: current as SessionId,
-    logDir: mkdtempSync(join(tmpdir(), "pigeon-session-tree-log-")),
+    logDir: tempDir("pigeon-session-tree-log-"),
     sessions: { root: family.root },
     resume: {
       root: family.root,

@@ -6,14 +6,26 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterEach, test } from "vitest";
 import { newSessionId } from "../state/ids.ts";
 import {
   CHECKPOINT_REF_PREFIX,
-  createCheckpointer,
+  type Checkpointer,
+  createCheckpointer as createCheckpointerOf,
   isGitWorkspace,
   NotGitWorkspaceError,
 } from "./checkpoint.ts";
+
+// 本文件建的快照器在每个测试后关掉：临时索引与忽略文件随之删除，不靠进程退出时的兜底清理
+const opened: Checkpointer[] = [];
+afterEach(async () => {
+  await Promise.all(opened.splice(0).map((checkpointer) => checkpointer.close()));
+});
+function createCheckpointer(input: Parameters<typeof createCheckpointerOf>[0]): Checkpointer {
+  const checkpointer = createCheckpointerOf(input);
+  opened.push(checkpointer);
+  return checkpointer;
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });

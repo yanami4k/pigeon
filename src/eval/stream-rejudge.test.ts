@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, test } from "vitest";
+import { afterAll, describe, test } from "vitest";
 import { judgeStep, type StepJudging } from "./stream-classes.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
@@ -23,7 +23,16 @@ import {
   type StreamEnvFactory,
 } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
-import { git, localStreamEnvs, toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
+import {
+  git,
+  localStreamEnvs,
+  removeStartTemplates,
+  toyRepo,
+  toyRuntime,
+} from "./stream-toy-fixtures.ts";
+
+// 本文件用到的起点模板在全部测试之后删掉
+afterAll(() => removeStartTemplates());
 
 const NEEDS_A = `[ -f src/a.txt ] || { echo "Cannot find module 'src/a.txt'"; exit 1; }\n`;
 

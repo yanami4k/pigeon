@@ -616,28 +616,33 @@ test("进程在拍完之前退出：该分叉点明确报错、不退回更早�
       workspaceRoot: root,
       checkpointer: { ...real, afterChange: () => new Promise(() => {}) },
     });
-    const { runId } = await opened.bundle.adapter.run("改");
-    // 模拟进程退出：不等快照、不写下文；分叉方只读到会话文件（不给等待口与快照器）
-    attached?.stop();
-    const forkAt = (runSeq: number) =>
-      runForkBranch({
-        governanceRoot: root,
-        sourceSessionId: sessionId,
-        sourceStore: opened.bundle.sessionStore,
-        forkPoint: { runId, runSeq },
-        trigger: "manual",
-        run: branchRun(home),
-      });
-    await assert.rejects(
-      () => forkAt(4),
-      (error) => error instanceof ForkError && /没有拍成/.test(error.message)
-    );
-    await assert.rejects(
-      () => forkAt(2),
-      (error) => error instanceof ForkError && /早于首次改动/.test(error.message)
-    );
-    const loaded = loadStoreSession(sessionsOf(root), sessionId);
-    assert.equal(loaded?.view.forks.length, 0, "不留分叉记录");
+    try {
+      const { runId } = await opened.bundle.adapter.run("改");
+      // 模拟进程退出：不等快照、不写下文；分叉方只读到会话文件（不给等待口与快照器）
+      attached?.stop();
+      const forkAt = (runSeq: number) =>
+        runForkBranch({
+          governanceRoot: root,
+          sourceSessionId: sessionId,
+          sourceStore: opened.bundle.sessionStore,
+          forkPoint: { runId, runSeq },
+          trigger: "manual",
+          run: branchRun(home),
+        });
+      await assert.rejects(
+        () => forkAt(4),
+        (error) => error instanceof ForkError && /没有拍成/.test(error.message)
+      );
+      await assert.rejects(
+        () => forkAt(2),
+        (error) => error instanceof ForkError && /早于首次改动/.test(error.message)
+      );
+      const loaded = loadStoreSession(sessionsOf(root), sessionId);
+      assert.equal(loaded?.view.forks.length, 0, "不留分叉记录");
+    } finally {
+      // 模拟的退出只停了挂件；这个用例自建的快照器在收尾时关掉，临时索引与忽略文件随之删除
+      await real.close();
+    }
   });
 });
 

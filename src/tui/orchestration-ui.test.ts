@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterAll, test } from "vitest";
 import { createFixtureSession } from "../application/session-store-fixtures.ts";
 import { textRun } from "../application/session-view-fixtures.ts";
 import type { TaskItem } from "../application/task-list-tool.ts";
@@ -22,6 +22,17 @@ import { PigeonTuiShell, type TuiShellOptions } from "./shell.ts";
 import { assertWidthsWithin, MockTerminal, screenFlat, settle } from "./testing.ts";
 import { WorkerActivityTracker } from "./worker-activity.ts";
 import type { OrchestrationScriptNode } from "./worker-tree.ts";
+
+// 本文件建的临时目录在全部测试之后删掉（不靠进程退出时的清理）
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 const DOWN = "\x1b[B";
 const RIGHT = "\x1b[C";
@@ -42,7 +53,7 @@ function shellWith(options: Partial<TuiShellOptions> & { cols?: number; rows?: n
     terminal: term,
     runtime,
     sessionId,
-    logDir: mkdtempSync(join(tmpdir(), "pigeon-tui-o2-")),
+    logDir: tempDir("pigeon-tui-o2-"),
     workerRefreshMs: 20,
     ...rest,
   });

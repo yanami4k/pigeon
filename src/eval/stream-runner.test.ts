@@ -57,7 +57,13 @@ import {
   syncEnv,
 } from "./stream-runner.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
-import { git, localStreamEnvs, toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
+import {
+  git,
+  localStreamEnvs,
+  removeStartTemplates,
+  toyRepo,
+  toyRuntime,
+} from "./stream-toy-fixtures.ts";
 import { StreamWorkspace, StreamWorkspaceAccessError } from "./stream-workspace.ts";
 
 const NEEDS_A = `[ -f src/a.txt ] || { echo "Cannot find module 'src/a.txt'"; exit 1; }\n`;
@@ -154,6 +160,7 @@ const sharedRoots: string[] = [];
 const built = new Map<string, Promise<Omit<Toy, "base">>>();
 afterAll(() => {
   for (const root of sharedRoots) rmSync(root, { recursive: true, force: true });
+  removeStartTemplates();
 });
 
 async function toy(
