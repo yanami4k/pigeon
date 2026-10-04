@@ -204,3 +204,54 @@
 
 - 服务器 pigeon-verify，提交 f59afc7：`npm run lint` 无问题；`npm run check` 无错误；`node --test --test-concurrency=2 "src/**/*.test.ts"`（服务器上另有两路测试在跑）：1,646 项，通过 1,642，失败 0，跳过 4（两项只在 Windows 上运行的 `.cmd` 用例与两项 Windows 专项）；`npm run deps`：586 个模块，无违规。四步合计 315 秒。真容器用例实际运行，未跳过。
 - Windows 本机：只运行 `read-deny.test.ts` 的两项 Windows 专项，通过（PATH 里有 git，8.3 短名一项实际测到）。
+
+## 第三轮复核修复（提交 c3e1acc）
+
+### UNC 工作区（决策 355）
+
+现状：上一轮对解析后为 UNC 写法的真实路径一律拒读；工作区在映射网络盘或网络共享上时，工作区自身的真实路径就是 UNC，读档全部被拒。
+
+改法（`tools/read-deny.ts`）：
+- 新增 `uncOutsideWorkspace`：真实路径为 UNC 写法且落在工作区以外才拒（`UnsupportedPathFormError`）；工作区自身在 UNC 上时，落在其内的照常放行，判定口径不变（Windows 上包含关系不分大小写）。
+- 输入写法的检查只拒设备前缀（`\\?\`、`\\.\`、`\??\`）与数据流；UNC 写法先解析，按解析后的真实路径判。
+- grep、glob 的结果分类不再单独处理 UNC：落在工作区以外的 UNC 路径照常记为工作区外。
+- 已知限制（写进 `docs/configuration.md`）：工作区经 UNC 写法打开、且名单所列位置在其中时（如以 `\\localhost\C$\…` 打开家目录），名单按本机路径写，比对不中。
+
+### grep -r 降级在筛选与读取之间的复核（决策 368）
+
+现状：筛选与逐个 grep 之间，文件或其上级目录被换成指向私钥的链接时，grep 会跟着读出（需有同一用户的并发进程）。
+
+改法（`tools/search-backend.ts`）：
+- 逐个搜的脚本对每个文件先 `command exec 3< "$f"` 打开，以 `readlink /proc/$$/fd/3` 取已打开文件的真实路径，写进分隔行（文件名之后、以 `\x01` 隔开），再 `grep <&3` 从已打开的文件读。TS 端把它与筛选时的真实路径比对，不同即这个文件的结果整份略去，计入 `uncheckedOmitted`。
+- 没有 `/proc`（如 macOS）时取不到已打开文件的真实路径，不复核，行为同上一轮。
+- 分类结果加 `realPaths`（各文件的真实路径）；`screenFiles` 改为返回相对路径到真实路径的映射。
+
+### 其余
+
+- 容器的批量取真实路径：每批先以 GNU `realpath -z -m` 解析到临时文件，退出码为 0（每个输入恰好一个输出）才按批输出；否则整批改为逐个 `readlink -f`、成对输出，后面的不会错位。实测 GNU `realpath -m` 对自指的链接、无权进入的目录与超长路径都不报错，故用例以测试替身模拟一项失败。
+- 逐个搜的脚本里的 grep 改用探测时以 `command -v grep` 取得、且位于系统目录的绝对路径；不在系统目录的不用。
+- `tools/local-host.ts` 的注释改为与实测一致：Node 以 `shell: false` 启动程序时不在当前目录查找；风险来自 PATH 里的相对目录或落在工作区之内的目录。
+
+### 测试
+
+- `src/tools/read-deny.test.ts`：新增 UNC 判定口径一项（纯函数，按 Windows 路径口径，任何平台都运行）：UNC 且在工作区外为真；UNC 工作区之内为假（含大小写不同）；非 UNC 为假；结果分类同一口径。新增 Windows 一项：以本机管理共享 `\\localhost\X$` 写出工作区，工作区内照常读，指向工作区以外的 UNC 拒读，本机写法的工作区外文件照常按工作区外处理（管理共享不可用时跳过）。原 Windows 专项的三种 UNC 写法改为解析后判（管理共享不可用时不测）。
+- `src/tools/search.test.ts`：换行名用例补一个真实存在的 `name.txt`（换行名被按行切开时，尾段会落到它名下）；新增"逐个搜时按已打开文件的真实路径复核"一项（有 `/proc` 时运行：包一层执行端，令筛选给出的真实路径与实际打开的不同，该文件的结果整份略去，`uncheckedOmitted` 为 1）；新增 20,000 上限一项（替身执行端：超出的 5 个不查、计入未检查，名字带换行的另计）。
+- `src/execution/container-search.test.ts`：新增按批对齐一项（带 GNU realpath 的镜像；测试替身 realpath 跳过一项、退出码 1；三项分别归可读、禁读、可读，检查完整）。
+- `src/execution/container-read.test.ts`：新增检查超时一项（busybox，辅助调用上限 1 秒，逐个 readlink 两万个路径：标明不完整）。
+
+变异（提交 c3e1acc，逐个改坏、只跑对应测试，均还原后工作树干净）：
+
+| 变异 | 运行处 | 结果 |
+| --- | --- | --- |
+| M12（改写）不拒收指向工作区以外的 UNC 路径 | Windows 本机 | Windows 专项与 UNC 工作区两项变红 |
+| M16 git 不排除文件名含控制字符的文件 | 服务器 | 冒号与换行一项变红 |
+| M17 grep -r 降级不按已打开文件的真实路径复核 | 服务器 | 复核一项变红 |
+| M18 UNC 判定不看是否落在工作区内 | 服务器 | UNC 判定口径一项变红 |
+| M19 容器批量解析有一项失败时照样按批对齐 | 服务器 | 按批对齐一项变红 |
+
+其余 M1–M11、M13–M15（含 Windows 本机的 M7、M8、M11w、M13）同在提交 c3e1acc 上重跑，均照旧变红；M11、M11w、M14 的改动点随代码改写。
+
+### verify
+
+- 服务器 pigeon-verify，提交 c3e1acc：`npm run lint` 无问题；`npm run check` 无错误；`node --test --test-concurrency=3 "src/**/*.test.ts"`：1,651 项，通过 1,646，失败 0，跳过 5（两项只在 Windows 上运行的 `.cmd` 用例与三项 Windows 专项）；`npm run deps`：586 个模块，无违规。四步合计 183 秒。真容器用例实际运行，未跳过。
+- Windows 本机：运行 `read-deny.test.ts` 中名称含"Windows"的 4 项（三项 Windows 专项与 UNC 判定口径一项），全部通过；管理共享的 UNC 小项与 8.3 短名实际测到。
