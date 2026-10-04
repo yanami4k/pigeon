@@ -57,6 +57,10 @@
 
 设了内存上限时，执行端在每条命令前后读容器 cgroup 的 oom_kill 计数：计数增加即报"超出沙箱内存上限 <数值>"（agent 在 `run_command` 的结果里看到，人另收到一行提示）；读不到计数而命令以退出码 137 结束时报"可能超出沙箱内存上限 <数值>"。
 
+## 按环境注册的工具
+
+会话开始时按当前环境决定注册哪些工具，只做本地检查（不连 docker、不发请求）：PATH 里找不到 docker 可执行文件不注册 `orchestrate`；工作区不是 git 仓库不注册 `spawn_worker` 那一组（`wait_workers`、`worker_status`、`message_worker`、`stop_worker`、`take_worker`）与 `orchestrate`；没有可用的搜索后端（缺 key）不注册 `web_search`；本项目没有本会话以外的会话不注册会话检索三件。工具清单在一次会话内固定，终端界面里 `/reload` 沿用开局的检查结果，环境变化下次会话生效。每次运行开始的记录里写明实际注册的工具，以及没注册的工具与原因。
+
 ## 联网工具的开关
 
 `web_search` 与 `web_fetch` 在终端界面、命令行对话与续跑、`pigeon run` 中缺省注册。下面三者任一成立就不给这两件工具：两件都不注册，系统提示里也不出现介绍联网工具的那一句。
@@ -64,6 +68,8 @@
 - 设置 `web.enabled` 为 `false`（布尔，缺省 `true`；三层按标量覆盖，高优先层说了算）。
 - 启动参数 `--no-web`：只对本次运行生效，与 `--no-hooks`、`--no-spawn-workers` 的写法一致；各入口都接受。
 - 沙箱断网档（`--sandbox --sandbox-network off`）。
+
+没有可用的搜索后端（缺 key）时只注册 `web_fetch`，系统提示里换成只讲 `web_fetch` 的一句（见上文"按环境注册的工具"）。
 
 worker 照派出它的运行面：父运行面没有联网工具，worker 也没有。终端界面里 `/reload` 之后按新设置重算。
 
@@ -130,7 +136,7 @@ agent 可以查本项目以前的会话，共三件工具，都是只读、免�
 
 缓存：每个会话文件抽出的可搜文本与目录信息缓存在 `.pigeon/state/search-cache/`，每个会话两份（`<会话号>.json` 存目录信息与对话正文，`<会话号>.tools.json` 存工具输出），按会话文件的大小与修改时间判断是否过期，过期或损坏即重建；会话文件已不在的缓存与崩溃留下的临时文件在检索时顺手清理。可随时删除整个目录，下次检索时重建。
 
-三件工具同进同出：终端界面、`--line` 命令行对话与 `pigeon run` 的主会话缺省都带，worker 只有 explorer 角色带。使用者在终端界面与 `--line` 对话里用 `/search` 命令检索，走同一套检索与缓存，加 `--tool-output` 连同工具输出一起搜；人用的 `/search` 不排除当前会话。
+三件工具同进同出：终端界面、`--line` 命令行对话与 `pigeon run` 的主会话缺省都带（本项目没有本会话以外的会话时三件都不注册），worker 只有 explorer 角色带。使用者在终端界面与 `--line` 对话里用 `/search` 命令检索，走同一套检索与缓存，加 `--tool-output` 连同工具输出一起搜；人用的 `/search` 不排除当前会话。
 
 ## 迁移命令
 
@@ -248,7 +254,7 @@ pigeon migrate-config [--root <项目根>]
     "additionalContext": "补的上下文", "updatedToolOutput": "替换后的工具结果" } }
 ```
 
-`continue: false` 结束本轮处理：`PreToolUse` 给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示）；`PostToolUse`/`PostToolUseFailure` 给出时，同批里尚未准备的调用一律拦下，而并行批次里已经准备好（`PreToolUse` 与审批已过）的调用仍会执行完，只是不再跑它们的收尾钩子（终端界面主会话缺省并行执行可并行的工具：`read_file`、联网工具、会话检索工具、`spawn_worker`、`load_skill` 等）。两种情形下这批工具之后都不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
+`continue: false` 结束本轮处理：`PreToolUse` 给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示）；`PostToolUse`/`PostToolUseFailure` 给出时，同批里尚未准备的调用一律拦下，而并行批次里已经准备好（`PreToolUse` 与审批已过）的调用仍会执行完，只是不再跑它们的收尾钩子（各环境里纯读的一批并行执行：`read_file`、会话检索三件、`web_search`、`web_fetch`；一批里有别的工具即整批逐个执行）。两种情形下这批工具之后都不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
 
 同一事件命中多个钩子时并行执行；每个钩子的运行写入会话记录（事件、命令、退出码、用时、结论、输出摘要），`pigeon trace` 与会话回放显示：Run 之内的挂在该 Run 下，Run 之外的收尾类（`Stop`、`StopFailure`、`SubagentStop`、自动压缩的 `PostCompact`）挂刚结束的 Run，其余（`SessionStart`、下一条消息的 `UserPromptSubmit`、手动压缩、`Notification`、`SessionEnd` 等）为会话级条目；终端界面在拦下或出错时显示一行提示，`/hooks` 列出生效的钩子及其来自哪一层。
 
