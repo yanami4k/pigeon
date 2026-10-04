@@ -31,7 +31,8 @@ async function run(batches: Call[][], approve?: (preview?: string, file?: string
         return bytes ?? Buffer.from(await local.readText(resolved), "utf8");
       },
       exec(plan, options) {
-        events.push("exec");
+        // 开工状态块也经执行端取 git 状态、列目录（决策 363），这里只记 run_command 起的命令
+        if (plan.program !== "git" && plan.program !== "ls") events.push("exec");
         return local.exec(plan, options);
       },
     };

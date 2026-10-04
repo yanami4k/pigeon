@@ -890,7 +890,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : localStatusProbe(deps.workspaceRoot);
   // 「审批」一节：写操作与 run_command 的审批说法（随审批模式变）；决策 360：worker 只说它有的工具
   const approvalSection = [
-    ...(offered("edit_file") || offered(WRITE_FILE_TOOL) ? [WRITE_APPROVAL_SENTENCES[approval]] : []),
+    ...(offered("edit_file") || offered(WRITE_FILE_TOOL)
+      ? [WRITE_APPROVAL_SENTENCES[approval]]
+      : []),
     ...(offered(RUN_COMMAND_TOOL) ? [commandTexts.approval] : []),
   ].join("\n");
   // 「联网」一节：决策 359 没注册 web_search 时只说 web_fetch；决策 360 worker 只说它有的

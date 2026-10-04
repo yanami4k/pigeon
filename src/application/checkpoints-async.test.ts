@@ -584,7 +584,8 @@ test("分叉之前先等未完成的快照拍完：快照卡住时分叉不往�
         governanceRoot: root,
         sourceSessionId: sessionId,
         sourceStore: opened.bundle.sessionStore,
-        forkPoint: { runId, runSeq: 3 },
+        // 开工状态块占 Run 的第 1 条消息（决策 363），其后序号整体后移一位
+        forkPoint: { runId, runSeq: 4 },
         trigger: "manual",
         checkpointer: blocked,
         settleCheckpoints: attached.settle,
@@ -627,11 +628,11 @@ test("进程在拍完之前退出：该分叉点明确报错、不退回更早�
         run: branchRun(home),
       });
     await assert.rejects(
-      () => forkAt(3),
+      () => forkAt(4),
       (error) => error instanceof ForkError && /没有拍成/.test(error.message)
     );
     await assert.rejects(
-      () => forkAt(1),
+      () => forkAt(2),
       (error) => error instanceof ForkError && /早于首次改动/.test(error.message)
     );
     const loaded = loadStoreSession(sessionsOf(root), sessionId);
