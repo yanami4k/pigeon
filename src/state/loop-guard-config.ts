@@ -26,8 +26,9 @@ export interface LoopGuardSettings {
   exemptTools: readonly string[];
 }
 
-// 缺省豁免：等待 worker 的工具（超时即原样返回"仍在跑"，是正当等待）。与 application 层的工具名常量一致（有用例对照）
-export const DEFAULT_LOOP_GUARD_EXEMPT_TOOLS: readonly string[] = ["wait_workers"];
+// 缺省豁免：等待 worker 的工具（超时即原样返回"仍在跑"，是正当等待）与读后台作业的工具（决策 365：不带等待的连续查询
+// 由它自己另计）。与 application 层、tools 层的工具名常量一致（有用例对照）
+export const DEFAULT_LOOP_GUARD_EXEMPT_TOOLS: readonly string[] = ["wait_workers", "job_output"];
 
 export const DEFAULT_LOOP_GUARD_SETTINGS: Readonly<LoopGuardSettings> = {
   enabled: true,

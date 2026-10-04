@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
+import { DEFAULT_MAX_BACKGROUND_JOBS } from "../state/tools-config.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
 import { runHeadless } from "./headless-core.ts";
@@ -59,7 +60,11 @@ test("容器执行端（linux）且自动批准：系统提示与 run_command �
       agentsMd: false,
     });
     const { systemPrompt, status, runCommand } = seen(streamFn);
-    const texts = runCommandTexts({ platform: "linux", approval: "yolo" });
+    const texts = runCommandTexts({
+      platform: "linux",
+      approval: "yolo",
+      backgroundJobs: DEFAULT_MAX_BACKGROUND_JOBS,
+    });
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
     assert.ok(status.includes(`写操作自动批准。\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);
@@ -84,7 +89,11 @@ test("本地无人值守且未放权（没有审批通道）：系统提示写�
       agentsMd: false,
     });
     const { systemPrompt, status, runCommand } = seen(streamFn);
-    const texts = runCommandTexts({ platform: process.platform, approval: "none" });
+    const texts = runCommandTexts({
+      platform: process.platform,
+      approval: "none",
+      backgroundJobs: DEFAULT_MAX_BACKGROUND_JOBS,
+    });
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
     assert.ok(
       status.includes(`需要批准的写操作会被拒绝（本会话没有人工审批通道）。\n${texts.approval}`),
@@ -114,7 +123,11 @@ test("本地有人工审批通道：系统提示与 run_command 说明照实写�
   try {
     await bundle.adapter.run("你好");
     const { systemPrompt, status, runCommand } = seen(streamFn);
-    const texts = runCommandTexts({ platform: process.platform, approval: "prompt" });
+    const texts = runCommandTexts({
+      platform: process.platform,
+      approval: "prompt",
+      backgroundJobs: DEFAULT_MAX_BACKGROUND_JOBS,
+    });
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
     assert.ok(status.includes(`写操作可能需要人工批准。\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);

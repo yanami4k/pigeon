@@ -57,6 +57,8 @@ export const DEFAULT_SELF_TIMED_TOOLS: readonly string[] = [
   "run_command",
   "web_search",
   "web_fetch",
+  // 决策 365：带等待时长的 job_output（至多 600 秒）
+  "job_output",
 ];
 // 自述摘要进 child.settled 的上限（全文在 worker 会话的消息里）
 export const WORKER_SUMMARY_MAX_CHARS = 2000;
