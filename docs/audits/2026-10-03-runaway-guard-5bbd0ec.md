@@ -88,3 +88,19 @@
 - 机器：服务器 pigeon-verify，8 vCPU、31 GB 内存，Docker 29.8.1，Node v24.12.0。
 - 提交 f181eee：`npm run lint`、`npm run check`、`node --test --test-concurrency=2 "src/**/*.test.ts"`、`npm run deps` 在一条前台命令里依次全过（服务器上另有会话的测试在跑，并发取 2），用时 226 秒。测试 1,641 项：通过 1,639，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：578 个模块，无违规。
 - 含本审计的提交上另跑一次 verify，结果追加在下一节。
+
+## 补记：trace 与 replay 显示两种新条目
+
+改法（提交 ebaf2cb）：
+- 会话原生视图（`state/session-view.ts`）的时间线条目加两种：`continuation`（`pigeon.continuation`）与 `repetition`（`pigeon.repetition`），按数据里的 runId 归属 Run，数据不合 schema 照旧记告警并跳过。
+- `application/format.ts` 加两个一行的格式化函数，trace 与 replay 共用：续跑为"续跑第 n 次：上条回复撞输出上限被截断，未执行工具"（来由为重复检测时写"被重复检测掐断"）；重复检测为"重复检测命中：判据（通道）｜ 周期（段落相似度写段长）｜ 重复次数 ｜ 已掐断或只记录"。
+- `cli/trace.ts`：Run 一节在验证、钩子之后各列一行。`cli/replay.ts`：时间线的条目类型名与条目摘要各加两种。
+- 会话检索（`state/session-search-text.ts`）只取视图里的消息，自定义条目本来不进检索，未改动；续跑时追加的提示是主分支上的一条用户消息，照常进检索。
+
+测试：`cli/runaway-display.test.ts`（1 项）：会话里写一条重复检测命中与一条续跑条目，trace 与 replay 的输出里各有一行续跑（次数与来由）、一行重复检测命中（判据、周期、重复次数、已掐断）。
+
+## 含本审计的提交上的 verify
+
+- 提交 c2f7845（在 f181eee 之上只加本审计文件）上的复跑：ssh 连接中途被对端重置，未取到结果。
+- 提交 ebaf2cb（在 c2f7845 之上加 trace 与 replay 的显示），同一台服务器：`npm run lint`、`npm run check`、`npm run deps` 全过（deps：579 个模块，无违规）；测试按目录分两批运行（服务器上另有会话的测试在跑，并发取 2）：eval 以外 1,326 项，通过 1,324，失败 0，跳过 2（两项只在 Windows 上运行的用例）；eval 316 项全部通过。合计 1,642 项，两批覆盖全部 286 个测试文件。
+- 本节所在的提交在 ebaf2cb 之上只改本审计文件。
