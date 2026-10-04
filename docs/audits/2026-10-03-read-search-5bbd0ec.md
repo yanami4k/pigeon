@@ -144,3 +144,63 @@
 
 - 服务器 pigeon-verify，提交 6d7a5e3：`npm run lint` 无问题；`npm run check` 无错误；`node --test --test-concurrency=3 "src/**/*.test.ts"`：1,643 项，通过 1,640，失败 0，跳过 3（两项只在 Windows 上运行的 `.cmd` 用例与本节的 Windows 专项）；`npm run deps`：586 个模块，无违规。四步合计 209 秒。真容器用例实际运行，未跳过。
 - Windows 本机（Node 24.12.0）：只运行 `read-deny.test.ts` 的 Windows 专项，通过；8.3 短名一项实际测到（卷上开着短名）。
+
+## 复核修复（提交 f59afc7）
+
+### 输出无歧义与结果归属（决策 368）
+
+现状：busybox 的 `grep -r` 输出没有 NUL 分隔，按第一处"冒号数字冒号"切出路径：名为 `a.txt:1:x`、指向私钥的链接被跟随读到时，私钥内容记到 `a.txt` 名下、按 `a.txt` 判成可读而交出；文件名带换行时，按行切分同样错位。
+
+改法（`tools/search-backend.ts`，取结果与筛选集中到 `runGrep`、`runListing`）：
+- rg：内容搜索用 `--json`（路径、行号、内容各为 JSON 字段；非 UTF-8 的文件名按不安全的名字处理），只列文件名用 `--null`。
+- git：先以 `git ls-files -z` 列出范围内的文件，名字含换行或控制字符的以 `:(exclude,literal)` 排除在搜索之外并计数；`git grep -z` 的输出因此不含这类路径。
+- grep -r 降级改为两段式：`find -print0` 列出普通文件（不列链接）→ 按文件名模式与 `.git` 过滤 → 按真实路径筛 → 允许的文件经标准输入逐行交给固定脚本，逐个 `grep -h`（GNU 另加 `-I`）；每个文件前输出一行分隔（`\x01`、本次 8 字节随机数的十六进制、空格与文件名），归属按分隔行记，文件内容伪造不了分隔行。
+- 三种后端的结果都经 `screenFiles`：文件名含换行或控制字符的略去，计入 `unsafeOmitted`；超出 20,000 个或检查超时、中止而未经检查的略去，计入 `uncheckedOmitted`；禁读的与经链接落在工作区外的分别计入 `deniedOmitted`、`outsideOmitted`。略去一律按文件计；末尾说明为"已按禁读名单略去 N 个文件""已略去经链接指向工作区以外的 N 个文件""已略去文件名含换行或控制字符的 N 个文件""N 个文件未及按真实路径检查（文件过多或检查超时），已略去，结果不完整"。git 与 grep -r 计入范围内所有名字不安全的文件，rg 计入其中有匹配的。
+- 执行端没有 `resolveForRead` 或 `classifyReadPaths` 时，grep、glob 报环境错误（失败即拒），不再照路径围栏解析或不过滤。
+- 识别 GNU grep 改为匹配 `(GNU grep)`；Windows 本机不用 grep -r 降级（要 `/bin/sh`）。
+- 文件名里的反斜杠只在 Windows 执行端上按分隔符处理。
+
+### UNC 路径（决策 355）
+
+现状：`\\localhost\C$\…\.ssh\id_rsa` 经系统 realpath 后仍是 UNC 写法，名单比对不中，只判成工作区外，放手模式下读出。
+
+改法（`tools/read-deny.ts`）：Windows 上以两个斜杠或反斜杠开头的写法（UNC 与设备前缀）一律拒收，抛 `UnsupportedPathFormError`；解析后的真实路径为 UNC 写法的同样拒读；grep、glob 的结果分类时记作工作区外。
+
+### 辅助程序的解析（决策 368）
+
+现状：本机 `execHelper` 把裸程序名交给进程启动，由 PATH 查找。实测：Node 在 Windows 上以 `shell: false` 启动程序时不在当前目录查找（只放在当前目录里的程序报 ENOENT）；PATH 里的相对目录（如 `.`）或落在工作区之内的目录，会让工作区里放好的同名程序被执行。
+
+改法（`tools/local-host.ts` 的 `resolveHelperProgram`）：启动前在 PATH 的绝对目录里把程序解析成绝对路径，跳过空项、相对目录与真实路径落在工作区之内的目录；Windows 只认 `.exe`、`.com`；找不到按程序不存在（`ENOENT`）处理。给了绝对路径的照用（随包的 ripgrep、`/bin/sh`）。
+
+### 检查的批量、超时与上限
+
+- 容器：分类脚本按 500 个一批；有 GNU `realpath -z -m` 时整批一次，没有时（busybox）逐个 `readlink -f`；输出带批标记，按批对齐。超时或输出被截断时标明不完整，未查到的计入 `uncheckedOmitted`，不再静默丢弃。
+- 本机：分类改为异步（`fs/promises` 的 realpath，与系统 realpath 同一语义），每批 64 个并发，批与批之间看中止信号；20,000 个的上限由 `screenFiles` 统一施加。
+- `classifyReadPaths` 加中止信号参数，返回 `{ classes, incomplete }`；`execHelper` 可带标准输入。
+
+### 文档
+
+`docs/configuration.md`：补 UNC 拒收、逐个文件过滤与各类略去、20,000 个的检查上限、辅助程序先解析成绝对路径、三种后端的无歧义输出。
+
+### 测试
+
+- `src/tools/read-deny.test.ts`：Windows 专项补 `\\localhost\…`、回环地址的 UNC 写法、`//localhost/…` 三种 UNC 写法；新增 Windows 一项——PATH 最前放 `.` 与工作区目录，工作区里放一个同名 `git.exe`（系统 `where.exe` 的副本），解析结果不在工作区内，后端探测仍认出真正的 git；分类一项跟着新的返回形态改。
+- `src/tools/search.test.ts`：新增"文件名带冒号或换行"一项，rg、git、grep -r 三种后端各跑一遍（工作区即家目录，含名字带冒号的普通文件、名字带冒号且指向私钥的链接、名字带换行的文件）：结果行归属准确，私钥与换行文件的内容不出现，`total`、`unsafeOmitted`、`deniedOmitted` 分别为 2、1、1；新增"rg 不读 .ignore"一项。
+- `src/execution/container-search.test.ts`：busybox 一项改为两段式的场景——名字带冒号、指向私钥的链接，指向工作区外的链接，`.git` 里的文件，名字带换行的文件；结果只有 `a.txt:1:foo here`，`total` 为 1，`unsafeOmitted` 为 1。
+- `src/execution/container-read.test.ts`：分类断言跟着新的返回形态改。
+
+变异（提交 f59afc7，逐个改坏、只跑对应测试，均还原后工作树干净）：
+
+| 变异 | 运行处 | 结果 |
+| --- | --- | --- |
+| M12 不拒收 UNC 路径（输入与解析后两处一并去掉） | Windows 本机 | Windows 专项变红 |
+| M13 本机辅助程序不解析成绝对路径 | Windows 本机 | 辅助程序一项变红 |
+| M14 grep -r 降级不按真实路径筛就逐个搜 | 服务器 | 冒号与换行一项变红 |
+| M15 不识别文件名里的换行与控制字符 | 服务器 | 冒号与换行一项、busybox 一项变红 |
+
+前两轮的 M1–M11（含 Windows 本机的 M7、M8、M11w）同在提交 f59afc7 上重跑，均照旧变红；M10 的改动点改为解析 `path` 时传空名单，M11 与 M11w 改为一律放行。
+
+### verify
+
+- 服务器 pigeon-verify，提交 f59afc7：`npm run lint` 无问题；`npm run check` 无错误；`node --test --test-concurrency=2 "src/**/*.test.ts"`（服务器上另有两路测试在跑）：1,646 项，通过 1,642，失败 0，跳过 4（两项只在 Windows 上运行的 `.cmd` 用例与两项 Windows 专项）；`npm run deps`：586 个模块，无违规。四步合计 315 秒。真容器用例实际运行，未跳过。
+- Windows 本机：只运行 `read-deny.test.ts` 的两项 Windows 专项，通过（PATH 里有 git，8.3 短名一项实际测到）。
