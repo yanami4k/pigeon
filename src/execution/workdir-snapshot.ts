@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 
 export class WorkdirSnapshotError extends Error {}
 
@@ -39,9 +40,10 @@ const IDENTITY = {
 // 列表类命令在大仓库里输出可达数十 MiB
 const GIT_MAX_BUFFER = 256 * 1024 * 1024;
 
+// 加固过的 git（tools/git-hardening.ts：不跑 fsmonitor、钩子与 .gitattributes 指派的过滤）
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", [...hardenedGitArgs(cwd), ...args], {
       cwd,
       encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,

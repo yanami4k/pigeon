@@ -9,7 +9,8 @@
 // 以 shell 运行的命令串与审批面板显示的字节一致，不做改写。工作目录固定为工作区根（worker 即其工作树）；环境变量只透传
 // 白名单；墙钟超时终止；输出按字节截断并标记。审批语义不在本工具：exec 档永不自动放行、[a] 收窄为精确命令串，均由
 // 治理层判定。执行证据（命令、实际进程参数、是否经启动器、是否经 shell、退出码、输出哈希与截断输出、执行前后工作树
-// 文件清单差异）作为成功结果的 details 随工具结果消息记进会话存储。
+// 文件清单差异）作为成功结果的 details 随工具结果消息记进会话存储。文件变化（决策 348）：git 工作区按命令前后两次
+// git status 找候选、比大小与修改时间（被忽略的不报）；非 git 工作区比全量清单；报告格式不变，空报告即命令没改动工作区。
 // 设置的 commands 一节的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -26,9 +27,13 @@ import {
 } from "./command-output.ts";
 import { createLocalWorkspaceHost, windowsPathProgram, windowsScript } from "./local-host.ts";
 import {
+  type HostExecOptions,
   type HostExecPlan,
+  type HostExecResult,
   type HostFileSnapshot,
+  type HostFileState,
   type MemoryLimitExceeded,
+  MISSING_SIGNATURE,
   memoryLimitText,
   type WorkspaceHost,
 } from "./workspace-host.ts";
@@ -124,8 +129,10 @@ export interface FileChanges {
   added: string[];
   removed: string[];
   modified: string[];
-  // 清单超过上限，差异不完整
+  // 清单超过上限，差异不完整（这时只报命令前后都在、签名变了的文件）
   truncated: boolean;
+  // 取证方式上的说明（git status 失败、改用全量扫描等）；没有为缺省
+  note?: string;
 }
 
 export interface ExecEvidence {
@@ -495,7 +502,6 @@ export function createRunCommandTool(
         throw new RunCommandError(tooLong);
       }
       const plan = spawnPlan(inspection, env, platform);
-      const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
       // 决策 356：截断时完整输出写进本会话落盘目录的下一个编号（没截断不建文件）；落盘目录不可用时照常执行、只是不落盘
       let slot: OutputSlot | undefined;
       let slotError: string | undefined;
@@ -506,7 +512,8 @@ export function createRunCommandTool(
           slotError = error instanceof Error ? error.message : String(error);
         }
       }
-      const run = await host.exec(plan, {
+      // 决策 348、349：命令与命令前后的文件变化取证经 observedRun（执行端能合成一次的合成一次）
+      const { run, fileChanges } = await observedRun(host, plan, {
         env,
         timeoutMs,
         maxOutputBytes: headBytes,
@@ -525,7 +532,6 @@ export function createRunCommandTool(
         run.tail !== undefined && saved === undefined && store !== undefined
           ? (slotError ?? run.fullOutputError)
           : undefined;
-      const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
       const evidence: ExecEvidence = {
         command,
         ...(alias !== undefined ? { alias } : {}),
@@ -544,13 +550,14 @@ export function createRunCommandTool(
         ...(run.outputLines !== undefined ? { outputLines: run.outputLines } : {}),
         ...(saved !== undefined ? { savedOutput: saved } : {}),
         ...(savedOutputError !== undefined ? { savedOutputError } : {}),
-        fileChanges: diffFiles(before, after),
+        fileChanges,
         ...(run.memoryLimitExceeded !== undefined
           ? { memoryLimitExceeded: run.memoryLimitExceeded }
           : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
+          host.forgetLauncherScript?.(inspection.argv?.[0] ?? plan.program);
           throw new RunCommandError(`命令不存在：${plan.program}`);
         }
         throw run.spawnError;
@@ -702,7 +709,11 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
       : "";
   lines.push(
     `文件变化：新增 ${changes.added.length} / 删除 ${changes.removed.length} / 修改 ${changes.modified.length}` +
-      (changes.truncated ? "（文件过多，差异不完整）" : "")
+      (changes.note !== undefined
+        ? `（${changes.note}）`
+        : changes.truncated
+          ? "（文件过多，差异不完整）"
+          : "")
   );
   for (const line of [
     listed("新增", changes.added),
@@ -726,14 +737,101 @@ export function allowedEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
+// 执行并取命令前后的文件变化：执行端能合成一次的合成一次（容器），否则前后各取一次证；
+// 只有文件清单的执行端（测试替身）按清单比对
+async function observedRun(
+  host: WorkspaceHost,
+  plan: HostExecPlan,
+  options: HostExecOptions
+): Promise<{ run: HostExecResult; fileChanges: FileChanges }> {
+  if (host.execObserved !== undefined) {
+    const observed = await host.execObserved(plan, options, FILE_SNAPSHOT_LIMIT);
+    // 超时、中止重启了容器，命令后的取证另取一次
+    const after = observed.after ?? (await host.fileState?.(FILE_SNAPSHOT_LIMIT, observed.before));
+    return {
+      run: observed.result,
+      fileChanges:
+        after !== undefined
+          ? diffStates(observed.before, after)
+          : incompleteChanges("命令后的取证没有取到，差异不完整"),
+    };
+  }
+  if (host.fileState !== undefined) {
+    const before = await host.fileState(FILE_SNAPSHOT_LIMIT);
+    const run = await host.exec(plan, options);
+    const after = await host.fileState(FILE_SNAPSHOT_LIMIT, before);
+    return { run, fileChanges: diffStates(before, after) };
+  }
+  const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+  const run = await host.exec(plan, options);
+  const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+  return { run, fileChanges: diffFiles(before, after) };
+}
+
+const SCAN_FALLBACK_NOTE = "git status 失败，改用全量扫描";
+
+function incompleteChanges(note: string): FileChanges {
+  return { added: [], removed: [], modified: [], truncated: true, note };
+}
+
+// 两次取证 → 文件变化。git 取证：签名变了即有变化；命令前没报出的路径在命令前是干净的——未跟踪即原本不存在，
+// 跟踪的原本存在；命令后不再报出的路径按补查的签名判断。取证不完整时，命令前后有一边缺的路径可能只是落在上限之外，
+// 只报两边都在、签名变了的。取法前后不一（命令中途建了、删了或弄坏了版本库）时报不完整并注明
+export function diffStates(before: HostFileState, after: HostFileState): FileChanges {
+  if (before.kind === "scan" && after.kind === "scan") {
+    const changes = diffFiles(before, after);
+    return before.fallback === true || after.fallback === true
+      ? { ...changes, note: SCAN_FALLBACK_NOTE }
+      : changes;
+  }
+  if (before.kind !== "git" || after.kind !== "git") {
+    return incompleteChanges(
+      after.kind === "scan" && after.fallback === true
+        ? `命令后${SCAN_FALLBACK_NOTE}，与命令前的取证对不上，差异不完整`
+        : "命令执行期间建了版本库，与命令前的取证对不上，差异不完整"
+    );
+  }
+  const truncated = before.truncated || after.truncated;
+  const added: string[] = [];
+  const removed: string[] = [];
+  const modified: string[] = [];
+  for (const [file, now] of after.entries) {
+    const was = before.entries.get(file);
+    if (was !== undefined && was.signature === now.signature) {
+      continue;
+    }
+    if (truncated && was === undefined) {
+      continue;
+    }
+    const existedBefore =
+      was !== undefined ? was.signature !== MISSING_SIGNATURE : now.status !== "untracked";
+    const existsAfter = now.signature !== MISSING_SIGNATURE;
+    if (existedBefore && existsAfter) {
+      modified.push(file);
+    } else if (truncated) {
+    } else if (existsAfter) {
+      added.push(file);
+    } else if (existedBefore) {
+      removed.push(file);
+    }
+  }
+  return { added: added.sort(), removed: removed.sort(), modified: modified.sort(), truncated };
+}
+
+// 全量清单比对；清单不完整时只报两边都在、签名变了的（缺的一边可能只是落在上限之外）
 function diffFiles(before: HostFileSnapshot, after: HostFileSnapshot): FileChanges {
+  const truncated = before.truncated || after.truncated;
   return {
-    added: [...after.files.keys()].filter((file) => !before.files.has(file)).sort(),
-    removed: [...before.files.keys()].filter((file) => !after.files.has(file)).sort(),
+    added: truncated
+      ? []
+      : [...after.files.keys()].filter((file) => !before.files.has(file)).sort(),
+    removed: truncated
+      ? []
+      : [...before.files.keys()].filter((file) => !after.files.has(file)).sort(),
     modified: [...after.files]
       .filter(([file, signature]) => before.files.has(file) && before.files.get(file) !== signature)
       .map(([file]) => file)
       .sort(),
-    truncated: before.truncated || after.truncated,
+    truncated,
   };
 }

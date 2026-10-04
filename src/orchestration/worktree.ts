@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { SessionId } from "../state/ids.ts";
 import { worktreesDirOf } from "../state/paths.ts";
+import { GIT_HARDENING_CONFIG, hardenedGitArgs } from "../tools/git-hardening.ts";
 
 export class WorktreeError extends Error {}
 
@@ -74,7 +75,9 @@ export function addWorktree(input: AddWorktreeInput): WorktreeHandle {
   }
   const path = worktreePathFor(input.governanceRoot ?? input.repoRoot, input.sessionId, input.name);
   const branch = worktreeBranchFor(input.name);
-  runGit(input.repoRoot, ["worktree", "add", "-b", branch, path, baseRef]);
+  // 建工作树要检出文件：只关钩子（post-checkout 等）与 fsmonitor，不加 --attr-source——检出照常按 .gitattributes
+  // 做行尾转换与过滤，工作树里的文件与正常检出一致
+  runGit(input.repoRoot, ["worktree", "add", "-b", branch, path, baseRef], GIT_HARDENING_CONFIG);
   return { name: input.name, sessionId: input.sessionId, path, branch };
 }
 
@@ -165,9 +168,14 @@ export function changedFiles(worktreePath: string): string[] {
   return [...files].sort();
 }
 
-function runGit(cwd: string, args: string[]): string {
+// 加固过的 git（tools/git-hardening.ts：不跑 fsmonitor、钩子与 .gitattributes 指派的过滤）；hardening 缺省为整套加固参数
+function runGit(
+  cwd: string,
+  args: string[],
+  hardening: readonly string[] = hardenedGitArgs(cwd)
+): string {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", [...hardening, ...args], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

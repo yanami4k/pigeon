@@ -7,12 +7,14 @@
 //      冲突的那部分，worker 的分支与工作树原样保留；
 //   ⑤ 逐文件用 git merge-file 三方合并，不依赖主仓库的暂存区，也不用会因主工作目录有未提交改动而整体失败的做法。
 // worker 的改动取它工作树的当前内容（可能未提交）：与快照同一种临时索引写成树对象，再与起点快照比对。
-// 三方的内容都取 git 里经清理过滤后的样子，写回时经 cat-file --filters 还原成工作树形式（行尾转换等按仓库配置）。
+// 三方的内容都取 git 里经清理过滤后的样子，写回时经 cat-file --filters 还原成工作树形式（core.autocrlf 等按仓库配置；
+// git 一律加固，.gitattributes 指派的过滤与行尾不生效，与 workdir-snapshot.ts 写树对象同一口径）。
 import { execFileSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { isProgramOwnedPath } from "../state/paths.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import { repoToplevel, workdirTree } from "./workdir-snapshot.ts";
 
 // 中途失败时带上已经写进去的部分（叠加不设撤销，调用方据此如实交代）
@@ -43,9 +45,11 @@ export interface OverlayResult {
 // 列表类命令在大仓库里输出可达数十 MiB
 const GIT_MAX_BUFFER = 256 * 1024 * 1024;
 
+// 加固过的 git（tools/git-hardening.ts，与 workdir-snapshot.ts 写 worker 工作树的树对象同一张表：不跑 fsmonitor 与钩子，
+// .gitattributes 指派的过滤与行尾不生效——三方内容与两边的树对象同一口径）
 function gitBuffer(cwd: string, args: string[], input?: Buffer): Buffer {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", [...hardenedGitArgs(cwd), ...args], {
       cwd,
       maxBuffer: GIT_MAX_BUFFER,
       stdio: [input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
@@ -261,6 +265,7 @@ function applyChanges(
       merged = execFileSync(
         "git",
         [
+          ...hardenedGitArgs(top),
           "merge-file",
           "-p",
           "-L",

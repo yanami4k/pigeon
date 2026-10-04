@@ -56,6 +56,7 @@ import {
 } from "../state/paths.ts";
 import { type SettingsLayer, validateSettingsLayer } from "../state/settings.ts";
 import { WEB_KEY_FIELDS } from "../state/web-config.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 
 export const MIGRATE_CONFIG_USAGE = "用法：pigeon migrate-config [--root <项目根>]";
 
@@ -409,7 +410,7 @@ interface WorktreeInfo {
 function gitWorktrees(root: string): WorktreeInfo[] {
   let out: string;
   try {
-    out = execFileSync("git", ["worktree", "list", "--porcelain"], {
+    out = execFileSync("git", [...hardenedGitArgs(root), "worktree", "list", "--porcelain"], {
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -492,7 +493,7 @@ export const legacyWorktreesStep: MigrationStep = {
       mkdirSync(path.dirname(target), { recursive: true });
       ensurePigeonGitignore(ctx.root, (line) => lines.push(line));
       if (known.has(realOrSelf(dir))) {
-        execFileSync("git", ["worktree", "move", dir, target], {
+        execFileSync("git", [...hardenedGitArgs(ctx.root), "worktree", "move", dir, target], {
           cwd: ctx.root,
           stdio: ["ignore", "pipe", "pipe"],
         });

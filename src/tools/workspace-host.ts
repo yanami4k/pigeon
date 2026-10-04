@@ -4,6 +4,7 @@
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
+import { WorkspaceContentChangedError } from "./paths.ts";
 import type { ReadPathClassification, ReadTarget } from "./read-deny.ts";
 
 // 系统程序所在的目录（root 所有、agent 改不了）：Pigeon 自己执行的程序按它们优先解析
@@ -89,8 +90,29 @@ export function memoryLimitText(exceeded: MemoryLimitExceeded): string {
 }
 
 // 文件清单不跟进的目录，本地与容器实现共用这一份口径。
-// 任意层级：版本库元数据与依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接）
-export const LISTING_SKIPPED_DIRS: readonly string[] = [".git", "node_modules"];
+// 任意层级：版本库元数据、依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接），以及常见的虚拟环境、
+// 构建产物与缓存目录（决策 348；git 工作区按 git status 找候选，不经这份名单）
+export const LISTING_SKIPPED_DIRS: readonly string[] = [
+  ".git",
+  "node_modules",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  "target",
+  ".tox",
+  ".nox",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  "__pycache__",
+  ".gradle",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".parcel-cache",
+  "coverage",
+];
 // 只在工作区根：Pigeon 自己的治理目录（会话记录、记忆、放权与各项配置在运行中持续写入，与 agent 所做无关）；
 // 子目录里同名的普通文件夹照常列出
 export const LISTING_SKIPPED_ROOT_DIRS: readonly string[] = [PIGEON_DIR];
@@ -100,6 +122,28 @@ export interface HostFileSnapshot {
   files: Map<string, string>;
   // 清单超过上限，不完整
   truncated: boolean;
+}
+
+// 文件变化的取证（决策 348）。git 工作区：git status 报出的路径（含未跟踪、不含被忽略；工作区根下的治理目录除外）及其
+// 签名；命令后的那次另把命令前报出、命令后不再报出的路径补查签名，状态记 clean。非 git 工作区：全量清单
+export type HostFileState =
+  | { kind: "git"; entries: Map<string, GitFileEntry>; truncated: boolean }
+  // fallback：git 工作区里 git status 失败（命令删了 .git、弄坏了索引等），改用全量扫描
+  | ({ kind: "scan"; fallback?: true } & HostFileSnapshot);
+
+export interface GitFileEntry {
+  status: "tracked" | "untracked" | "clean";
+  // 大小与修改时间（同 HostFileSnapshot 的口径）；文件不存在为 MISSING_SIGNATURE
+  signature: string;
+}
+
+export const MISSING_SIGNATURE = "-";
+
+// 一次被观测的执行：命令的结果与命令前后的取证；超时、中止等拿不到命令后取证时 after 缺省（调用方另取）
+export interface ObservedExec {
+  result: HostExecResult;
+  before: HostFileState;
+  after?: HostFileState;
 }
 
 // 快照引用（占位）：实现自定的不透明标识（宿主为独立 GIT_DIR 里的提交，容器为容器内同构提交加镜像提交）
@@ -130,6 +174,7 @@ export interface WorkspaceHost {
   ): Promise<ReadPathClassification>;
   // 决策 368：Pigeon 自己的只读辅助程序（grep、glob 的搜索后端）的执行，不走 agent 的执行通道——程序解析成系统目录里的
   // 绝对路径（本机跳过当前目录、相对目录与工作区之内的目录；容器里照 trustedShell 的取法：系统目录在前），屏蔽 git 的系统与全局配置，不带 RIPGREP_CONFIG_PATH；
+  // git 另加 git-hardening.ts 同一张表的加固参数（决策 348、352：关 fsmonitor 与钩子、以空树作属性来源）；
   // stdout 与 stderr 各自留到 maxOutputBytes。env 为调用方过了白名单的环境（容器实现不采用）。在工作区根执行。
   // 可选：没有实现的执行端 grep、glob 不可用
   execHelper?(
@@ -156,10 +201,121 @@ export interface WorkspaceHost {
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留
   exec(plan: HostExecPlan, options: HostExecOptions): Promise<HostExecResult>;
   listFiles(limit: number): Promise<HostFileSnapshot>;
+  // 决策 348：文件变化的取证；命令后的那次传入命令前的结果（沿用同一种取法）。缺省时调用方按 listFiles 比对
+  fileState?(limit: number, before?: HostFileState): Promise<HostFileState>;
+  // 决策 349：命令与命令前后的取证合成一次执行（容器实现）；缺省时调用方分三步做
+  execObserved?(plan: HostExecPlan, options: HostExecOptions, limit: number): Promise<ObservedExec>;
   // Windows 本地实现：程序解析到的 .cmd / .bat 路径；其余实现恒为 undefined
   findLauncherScript(program: string, env: NodeJS.ProcessEnv): string | undefined;
+  // 决策 352：命令报"程序不存在"时作废该程序的查找缓存（会话中途装上的程序）；没有缓存的实现不提供
+  forgetLauncherScript?(program: string): void;
   // 占位（098：快照与分叉挂同一层）。现状：宿主侧的快照与分叉仍由 orchestration/checkpoint.ts 直接调宿主 git，
   // 尚未迁到本接口；容器实现未提供。迁移时两个实现各自落在这两个方法上，调用方不得判断工作区形状
   snapshot?(): Promise<WorkspaceSnapshotRef>;
   fork?(ref: WorkspaceSnapshotRef): Promise<WorkspaceHost>;
+}
+
+// git status 取候选的参数（决策 348），接在 git-hardening.ts 的加固参数之后：不取可选的锁、不刷新使用者的索引（刷新要短暂
+// 占住 index.lock，使用者同时在终端或编辑器里跑 git 时可能报锁已存在；代价是修改时间晚于索引的文件每次都要重算内容哈希）；
+// 含未跟踪文件、逐个列出未跟踪目录里的文件、不含被忽略的、不合并改名；只看当前目录所在的子树
+export const GIT_STATUS_ARGS: readonly string[] = [
+  "--no-optional-locks",
+  "status",
+  "--porcelain=v1",
+  "-z",
+  "--untracked-files=all",
+  "--no-renames",
+  "--",
+  ".",
+];
+
+// git status --porcelain=v1 -z 的输出 → 路径与状态。路径在输出里相对仓库根，去掉 prefix（工作区在仓库里的前缀；嵌套仓库
+// 为空），不以它开头的不要；governance 为真时（工作区根所在的仓库）另去掉工作区根下的治理目录。未跟踪的嵌套仓库以带结尾
+// 斜杠的目录出现，原样交回。同一路径既有跟踪状态又有未跟踪（git rm --cached）时记跟踪
+export function parseGitStatus(
+  output: string,
+  prefix: string,
+  governance = true
+): Map<string, "tracked" | "untracked"> {
+  const statuses = new Map<string, "tracked" | "untracked">();
+  for (const record of output.split("\0")) {
+    if (record.length < 4 || !record.slice(3).startsWith(prefix)) {
+      continue;
+    }
+    const file = record.slice(3 + prefix.length);
+    if (
+      file === "" ||
+      (governance &&
+        LISTING_SKIPPED_ROOT_DIRS.some((dir) => file === dir || file.startsWith(`${dir}/`)))
+    ) {
+      continue;
+    }
+    const status = record.startsWith("??") ? "untracked" : "tracked";
+    if (statuses.get(file) !== "tracked") {
+      statuses.set(file, status);
+    }
+  }
+  return statuses;
+}
+
+// 组装 git 取证：超过上限的只留前 limit 个并标不完整；命令后的那次（给了 before）把命令前报出、这次没报出的路径补上，记 clean
+export function gitFileState(
+  statuses: ReadonlyMap<string, "tracked" | "untracked">,
+  signatureOf: (file: string) => string,
+  limit: number,
+  before?: HostFileState
+): HostFileState {
+  const entries = new Map<string, GitFileEntry>();
+  let truncated = false;
+  for (const [file, status] of statuses) {
+    if (entries.size >= limit) {
+      truncated = true;
+      break;
+    }
+    entries.set(file, { status, signature: signatureOf(file) });
+  }
+  if (before?.kind === "git") {
+    for (const file of before.entries.keys()) {
+      if (!entries.has(file)) {
+        entries.set(file, { status: "clean", signature: signatureOf(file) });
+      }
+    }
+    truncated ||= before.truncated;
+  }
+  return { kind: "git", entries, truncated };
+}
+
+// 写工具的预检与落盘（决策 349）：执行端可能以检视时读出的原文（审批之前）供预检——预检失败时先刷新检视再预检一次；
+// 写入时执行端复核原文未变，变了即刷新检视并抛 WorkspaceContentChangedError，这里用新原文重算一次再写（同"执行时重新预检"）。
+// 本地执行端每次现读，两处重试的结果与原先相同
+export async function planAndWrite<P extends { resolvedPath: string }>(input: {
+  host: WorkspaceHost;
+  inputPath: string;
+  plan: () => Promise<P>;
+  contentOf: (plan: P) => string;
+  signal: AbortSignal | undefined;
+}): Promise<P> {
+  let planned: P;
+  try {
+    planned = await input.plan();
+  } catch (error) {
+    try {
+      await input.host.resolveExisting(input.inputPath);
+    } catch {
+      throw error;
+    }
+    planned = await input.plan();
+  }
+  input.signal?.throwIfAborted();
+  try {
+    await input.host.writeText(planned.resolvedPath, input.contentOf(planned));
+  } catch (error) {
+    if (!(error instanceof WorkspaceContentChangedError)) {
+      throw error;
+    }
+    planned = await input.plan();
+    input.signal?.throwIfAborted();
+    await input.host.writeText(planned.resolvedPath, input.contentOf(planned));
+  }
+  return planned;
 }

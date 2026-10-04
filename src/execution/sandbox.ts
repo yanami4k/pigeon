@@ -18,6 +18,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import os from "node:os";
 import path from "node:path";
 import type { SandboxConfig } from "../state/sandbox-config.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
   containerExec,
@@ -264,8 +265,13 @@ interface GitResult {
   stderr: string;
 }
 
+// 宿主上的 git 一律加固（tools/git-hardening.ts：不跑 fsmonitor、钩子——取回沙箱分支时的 reference-transaction 等——与
+// .gitattributes 指派的过滤）
 function hostGit(repo: string, args: readonly string[]): GitResult {
-  const result = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", windowsHide: true });
+  const result = spawnSync("git", [...hardenedGitArgs(repo), "-C", repo, ...args], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
   if (result.error !== undefined) {
     return { code: null, stdout: "", stderr: result.error.message };
   }

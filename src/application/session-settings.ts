@@ -7,7 +7,9 @@
 //      加 --trust-config 只对本次运行放行、不记指纹。项目位于用户级 trustedDirectories 之下时免于确认。
 // worker 与沙箱会话沿用派出它的会话的快照（含确认结果），不再询问。
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import path from "node:path";
 import {
   loadTrustRecord,
   normalizeProjectPath,
@@ -26,6 +28,7 @@ import {
 } from "../state/config-trust.ts";
 import { LOCAL_SETTINGS_FILE, pigeonRel } from "../state/paths.ts";
 import type { SettingsSnapshot } from "../state/settings.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 
 export { LegacyLayoutError } from "../persistence/legacy-layout.ts";
 export { SettingsError } from "../persistence/settings.ts";
@@ -62,13 +65,21 @@ function trustedDirectoriesOf(snapshot: SettingsSnapshot, homeDir: string): stri
 }
 
 // 决策 342：项目个人层 .pigeon/settings.local.json 被 git 跟踪时按共享层对待
-// （.gitignore 挡不住强制添加；克隆来的仓库里它可能来自他人）。非 git 仓库或未被跟踪即 false
+// （.gitignore 挡不住强制添加；克隆来的仓库里它可能来自他人）。非 git 仓库或未被跟踪即 false；
+// 文件不在时没有这一层，不起 git 进程（决策 352）
 export function localSettingsTracked(root: string): boolean {
+  if (!existsSync(path.join(root, pigeonRel(LOCAL_SETTINGS_FILE)))) {
+    return false;
+  }
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)], {
-      cwd: root,
-      stdio: "ignore",
-    });
+    execFileSync(
+      "git",
+      [...hardenedGitArgs(root), "ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)],
+      {
+        cwd: root,
+        stdio: "ignore",
+      }
+    );
     return true;
   } catch {
     return false;

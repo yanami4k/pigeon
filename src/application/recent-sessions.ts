@@ -6,6 +6,7 @@ import { SANDBOX_START_REF_PREFIX, sandboxBranch } from "../execution/sandbox.ts
 import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { SessionView } from "../state/session-view.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import { isReviewSession } from "./session-cost.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
@@ -48,7 +49,13 @@ function sandboxSessionIds(governanceRoot: string): Set<string> {
   try {
     const refs = execFileSync(
       "git",
-      ["for-each-ref", "--format=%(refname)", branchParent, SANDBOX_START_REF_PREFIX],
+      [
+        ...hardenedGitArgs(governanceRoot),
+        "for-each-ref",
+        "--format=%(refname)",
+        branchParent,
+        SANDBOX_START_REF_PREFIX,
+      ],
       { cwd: governanceRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
     );
     for (const ref of refs.split("\n")) {

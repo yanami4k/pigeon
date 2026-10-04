@@ -27,6 +27,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
 import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import { killProcessTree, processGroupSpawnOptions } from "../tools/process-tree.ts";
 
 export const CHECKPOINT_REF_PREFIX = "refs/pigeon/checkpoints/";
@@ -79,9 +80,11 @@ function failure(args: string[], error: unknown, stderr: unknown): CheckpointErr
   return new CheckpointError(`git ${args.join(" ")} 失败：${detail}`);
 }
 
+// 本文件的 git（同步与异步两条）一律加固（tools/git-hardening.ts：不跑 fsmonitor、钩子与 .gitattributes 指派的过滤）。
+// 加固参数按目录缓存，构造快照器时的同步检查先取一次，之后的异步 git 不再为它阻塞
 function gitSync(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", args, {
+    return execFileSync("git", [...hardenedGitArgs(cwd), ...args], {
       cwd,
       encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,
@@ -106,7 +109,7 @@ function git(
       reject(failure(args, new Error("已中止"), undefined));
       return;
     }
-    const child = spawn("git", args, {
+    const child = spawn("git", [...hardenedGitArgs(cwd), ...args], {
       cwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],

@@ -8,17 +8,28 @@
 //   ③ 输出截断：与本地实现共用同一个收集器——全量计字节数与哈希，只留开头；
 //   ④ 路径映射：模型给的路径在容器内按工作区根解析（符号链接解析后）再判包含，宿主路径不参与。
 // 宿主环境变量不进容器：容器内环境由镜像与本实现的 env 选项决定。
+// 决策 349：每次工具调用尽量一次进容器——读文件 1 次（检视：解析、是否文件、原文与 cksum 一次拿到；读档时连同禁读名单的
+// 真实路径，决策 355），改文件 2 次（检视
+// 供审批预览与预检，写入脚本在同一次执行里复核路径、符号链接与 cksum 后写入），跑命令 1 次（命令前后的取证、命令本身与
+// 内存计数合在一个脚本里，输出以每次随机的分隔标记分段）。
+
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
+import { GIT_HARDENING_CONFIG } from "../tools/git-hardening.ts";
 import {
   collectorExtras,
   createHeadCollector,
   HOST_SEPARATE_STREAM_CAP,
 } from "../tools/local-host.ts";
 import {
-  hasControlChar,
+  controlCharsRefused,
+  gitMetadataRefused,
+  hasControlChars,
+  insideGitMetadata,
   pathChanged,
   symlinkRefused,
+  WorkspaceContentChangedError,
   WorkspacePathError,
   WorkspacePathNotFoundError,
   WorkspaceWriteRefusedError,
@@ -33,14 +44,19 @@ import {
   readDeniedMessage,
 } from "../tools/read-deny.ts";
 import {
+  gitFileState,
   type HostExecOptions,
   type HostExecPlan,
   type HostExecResult,
   type HostFileSnapshot,
+  type HostFileState,
   LISTING_SKIPPED_DIRS,
   LISTING_SKIPPED_ROOT_DIRS,
   type MemoryLimitExceeded,
+  MISSING_SIGNATURE,
   memoryLimitText,
+  type ObservedExec,
+  parseGitStatus,
   SYSTEM_PATH,
   type WorkspaceHost,
 } from "../tools/workspace-host.ts";
@@ -103,11 +119,41 @@ const OOM_COUNT_SCRIPT = [
   "done",
   "exit 4",
 ].join("\n");
-// 写工具的解析：模型给的路径本身是符号链接即报出指向，否则同 RESOLVE_SCRIPT
-const RESOLVE_FOR_WRITE_SCRIPT = `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }; [ -e "$1" ] || exit ${EXIT_MISSING}; readlink -f -- "$1"`;
-// 决策 355：读档解析（不限工作区）与禁读名单在容器里的真实路径。第一个参数为目标（空串即只解析名单），其后为名单各项；
-// 输出以 NUL 分隔：给了目标时先是目标的真实路径，再按项各两段——展开 ~（容器内的家目录）后的字面路径、它存在时的真实路径
-//（不存在为空串）。经 trustedShell 执行：readlink 从系统目录解析，agent 改不了
+// 决策 349：写入时原文已不是检视时那份（内容哈希不同）：不写，标准输出为就地重做的检视
+const EXIT_STALE = 7;
+// 容器内脚本共用的小函数：命令替换会吞掉结尾的换行，readlink 的结果先补一个哨兵字符再去掉，得到原样的路径（含换行与控制
+// 字符的路径交回后由执行端拒绝）；内容哈希有 sha256sum 即用它，没有退回 cksum（CRC32，能被有意造出碰撞）
+const SHELL_HELPERS = [
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  'NL="$(printf \'\\nx\')"; NL="${NL%x}"',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  'rl() { r="$(readlink -f -- "$1"; printf x)"; r="${r%x}"; r="${r%"$NL"}"; }',
+  'hs() { if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | cut -d " " -f 1; else cksum < "$1"; fi; }',
+].join("\n");
+// 检视（决策 349）：$1 为按工作区根写成绝对路径的输入。输出以 NUL 分隔：输入本身是否符号链接（1/0）、链接内容、解析结果、
+// 类型（F 文件、R 读不了的文件、D 目录、O 其他、M 不存在）、内容哈希，其后是原文（F 才有）。原文先拷进临时文件，
+// 哈希与交回的原文出自同一份字节
+const INSPECT_FUNCTION = [
+  SHELL_HELPERS,
+  "inspect() {",
+  '  l=0; lt=""',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  '  if [ -L "$1" ]; then l=1; lt="$(readlink -- "$1"; printf x)"; lt="${lt%x}"; lt="${lt%"$NL"}"; fi',
+  '  if [ ! -e "$1" ]; then printf \'%s\\0%s\\0\\0M\\0\\0\' "$l" "$lt"; return 0; fi',
+  '  rl "$1"',
+  '  if [ -f "$r" ]; then',
+  '    t="$(mktemp)" || return 1',
+  '    if ! cat -- "$r" > "$t" 2>/dev/null; then rm -f "$t"; printf \'%s\\0%s\\0%s\\0R\\0\\0\' "$l" "$lt" "$r"; return 0; fi',
+  '    printf \'%s\\0%s\\0%s\\0F\\0%s\\0\' "$l" "$lt" "$r" "$(hs "$t")"',
+  '    cat "$t"; rm -f "$t"; return 0',
+  "  fi",
+  '  if [ -d "$r" ]; then k=D; else k=O; fi',
+  '  printf \'%s\\0%s\\0%s\\0%s\\0\\0\' "$l" "$lt" "$r" "$k"',
+  "}",
+].join("\n");
+const INSPECT_SCRIPT = `${INSPECT_FUNCTION}\ninspect "$1"`;
+// 决策 355：禁读名单在容器里的真实路径。参数为名单各项；输出以 NUL 分隔，按项各两段——展开 ~（容器内的家目录）后的
+// 字面路径、它存在时的真实路径（不存在为空串）。经 trustedShell 执行：readlink 从系统目录解析，agent 改不了
 const DENY_ENTRIES_SCRIPT = [
   'for p in "$@"; do',
   `  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/\${p#"~/"}" ;; esac`,
@@ -115,10 +161,33 @@ const DENY_ENTRIES_SCRIPT = [
   `  if [ -e "$p" ]; then printf '%s\\0' "$(readlink -f -- "$p")"; else printf '\\0'; fi`,
   "done",
 ].join("\n");
-const READ_RESOLVE_SCRIPT = [
-  't="$1"; shift',
-  `if [ -n "$t" ]; then [ -e "$t" ] || exit ${EXIT_MISSING}; r="$(readlink -f -- "$t")" && [ -n "$r" ] || exit 1; printf '%s\\0' "$r"; fi`,
-  DENY_ENTRIES_SCRIPT,
+// 决策 355：读档的目标落在禁读名单内（标准输出为命中的那一项在名单里的序号）：不检视、不读出原文
+const EXIT_DENIED = 12;
+// 决策 355 合 349：读档解析（不限工作区）、禁读判定与检视一次进容器——第一个参数为目标（按工作区根写成的绝对路径，同
+// 检视），其后为名单各项。先输出名单各项（格式同 DENY_ENTRIES_SCRIPT：展开 ~ 后的字面路径、存在时的真实路径）；目标的
+// 真实路径等于某一项的这两者之一或落在其下（按路径段比：/root/.sshx 不算落在 /root/.ssh 之下）即输出该项序号、以
+// EXIT_DENIED 结束，不碰原文；都不中才检视（同 INSPECT_SCRIPT：解析结果、类型、内容哈希与原文）。工作区内外由执行端判定
+const READ_INSPECT_SCRIPT = [
+  INSPECT_FUNCTION,
+  'target="$1"; shift',
+  'tr=""; if [ -e "$target" ]; then rl "$target"; tr="$r"; fi',
+  'hit=""; i=0',
+  'for p in "$@"; do',
+  `  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/\${p#"~/"}" ;; esac`,
+  '  q=""; if [ -e "$p" ]; then rl "$p"; q="$r"; fi',
+  `  printf '%s\\0%s\\0' "$p" "$q"`,
+  '  if [ -z "$hit" ] && [ -n "$tr" ]; then',
+  '    for d in "$p" "$q"; do',
+  '      [ -n "$d" ] || continue',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  '      while [ "$d" != / ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done',
+  '      if [ "$d" = / ]; then hit=$i; else case "$tr" in "$d" | "$d"/*) hit=$i ;; esac; fi',
+  "    done",
+  "  fi",
+  "  i=$((i + 1))",
+  "done",
+  `if [ -n "$hit" ]; then printf '%s' "$hit"; exit ${EXIT_DENIED}; fi`,
+  'inspect "$target"',
 ].join("\n");
 // 决策 355 / 368：grep、glob 的结果逐个取真实路径——参数为名单各项（输出同上）；标准输入给出 NUL 分隔的相对路径，
 // 每 500 个一批。GNU 的 realpath（-z -m）整批解析全部成功（退出码 0：每个输入恰好一个输出）时，先输出
@@ -128,26 +197,42 @@ const CLASSIFY_SCRIPT = [
   DENY_ENTRIES_SCRIPT,
   `xargs -0 -n 500 /bin/sh -c 'o=""; if realpath -z -m -- / >/dev/null 2>&1 && o="$(mktemp)" && realpath -z -m -- "$@" > "$o" 2>/dev/null; then printf "B\\0%s\\0" "$#"; printf "%s\\0" "$@"; cat "$o"; else for f do r="$(readlink -f -- "$f")" || r=""; printf "P\\0%s\\0%s\\0" "$f" "$r"; done; fi; [ -n "$o" ] && rm -f "$o"; exit 0' sh`,
 ].join("\n");
-// 决策 368：Pigeon 自己的辅助程序（搜索后端）——经 trustedShell 执行，程序按系统目录优先解析，不带 ripgrep 配置
-const HELPER_EXEC_SCRIPT = 'unset RIPGREP_CONFIG_PATH; exec "$@"';
+// git-hardening.ts 的加固参数写成 shell 词（各项都不含单引号）
+const GIT_HARDENING_WORDS = GIT_HARDENING_CONFIG.map((arg) => `'${arg}'`).join(" ");
+// 决策 368：Pigeon 自己的辅助程序（搜索后端）——经 trustedShell 执行，程序按系统目录优先解析，不带 ripgrep 配置。
+// git 另加 git-hardening.ts 同一张表的加固参数，并照取证脚本的做法按当前目录所在仓库算空树作属性来源（git 不认
+// --attr-source 或不在仓库里时不加）
+const HELPER_EXEC_SCRIPT = [
+  "unset RIPGREP_CONFIG_PATH",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  'case "${1##*/}" in git) ;; *) exec "$@" ;; esac',
+  'g="$1"; shift',
+  `e="$("$g" ${GIT_HARDENING_WORDS} hash-object -t tree --stdin </dev/null 2>/dev/null)"`,
+  `if [ -n "$e" ] && "$g" "--attr-source=$e" version >/dev/null 2>&1; then exec "$g" "--attr-source=$e" ${GIT_HARDENING_WORDS} "$@"; fi`,
+  `exec "$g" ${GIT_HARDENING_WORDS} "$@"`,
+].join("\n");
 // 决策 368：glob 按修改时间排序——标准输入给出 NUL 分隔的相对路径，每行输出"秒数 路径"；取不到的文件不输出
 const MTIMES_SCRIPT = "xargs -0 stat -c '%Y %n' -- 2>/dev/null; exit 0";
-// 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己
+// 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己；
+// 给了内容哈希（$2）时原文须仍是检视时那份，否则不写、就地重做检视交回
 const WRITE_SCRIPT = [
+  INSPECT_FUNCTION,
   `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }`,
   `[ -e "$1" ] || exit ${EXIT_MISSING}`,
-  `t="$(readlink -f -- "$1")"; [ "$t" = "$1" ] || { printf '%s\\n' "$t"; exit ${EXIT_CHANGED}; }`,
+  `rl "$1"; [ "$r" = "$1" ] || { printf '%s' "$r"; exit ${EXIT_CHANGED}; }`,
+  `if [ -n "$2" ] && [ "$(hs "$1")" != "$2" ]; then inspect "$1"; exit ${EXIT_STALE}; fi`,
   'cat > "$1"',
 ].join("\n");
 // 决策 358（write_file）：$1 为模型给的路径（原样，不做词法折叠），$2 为工作区根。路径按字节原样使用：拆分只用参数展开、
 // 不用命令替换（命令替换会吃掉结尾的换行）；真实路径用 readlink -f 按内核顺序解析（l/.. 走链接目标的上级，与受保护路径
 // 的容器判定同一口径），取值时补一个点再去掉，保住结尾换行，输出以 NUL 分隔。
 // 目标已存在：本身是链接即拒写（EXIT_SYMLINK），否则输出真实路径、退出码 0；不存在：找路径上最深的已存在一层（须是目录，
-// 否则 EXIT_NOT_DIR），尚不存在的各段不得是空段、. 或 ..（EXIT_BAD_PART），输出那一层的真实路径与其余各段，退出码 EXIT_NEW
-const EXIT_NEW = 7;
-const EXIT_NOT_DIR = 8;
-const EXIT_EXISTS = 9;
-const EXIT_BAD_PART = 10;
+// 否则 EXIT_NOT_DIR），尚不存在的各段不得是空段、. 或 ..（EXIT_BAD_PART），输出那一层的真实路径与其余各段，退出码 EXIT_NEW。
+// 退出码接在 EXIT_STALE 之后，与其他脚本的不重叠
+const EXIT_NEW = 8;
+const EXIT_NOT_DIR = 9;
+const EXIT_EXISTS = 10;
+const EXIT_BAD_PART = 11;
 const RESOLVE_FOR_CREATE_SCRIPT = [
   'case "$1" in /*) p="$1" ;; *) p="$2/$1" ;; esac',
   `[ -L "$p" ] && { readlink -- "$p"; exit ${EXIT_SYMLINK}; }`,
@@ -179,6 +264,346 @@ const CREATE_SCRIPT = [
   'mkdir -p -- "$parent" || exit 1',
   `set -C; cat > "$1" || { [ -e "$1" ] && exit ${EXIT_EXISTS}; exit 1; }`,
 ].join("\n");
+// 工作区根的解析（每个执行端一次）：根的规范路径，NUL 之后是根下 .git 实际所在的目录（.git 是符号链接时为它的指向，
+// 是 gitfile 时为其中 gitdir 的指向；都不是为空）——写工具一律不写这里（版本库元数据）
+const ROOT_SCRIPT = [
+  SHELL_HELPERS,
+  `[ -e "$1" ] || exit ${EXIT_MISSING}`,
+  'rl "$1"; w="$r"; printf "%s\\0" "$w"',
+  'g="$w/.git"',
+  'if [ -L "$g" ]; then rl "$g"; printf "%s" "$r"; elif [ -f "$g" ]; then',
+  '  d="$(sed -n "s/^gitdir:[[:space:]]*//p" "$g" | head -n 1)"',
+  '  if [ -n "$d" ]; then case "$d" in /*) ;; *) d="$w/$d" ;; esac; rl "$d"; printf "%s" "$r"; fi',
+  "fi",
+].join("\n");
+
+// 一次检视的结果（决策 349）：key 为检视时用的绝对路径
+interface Inspection {
+  key: string;
+  // 输入本身是符号链接时的链接内容
+  symlink?: string;
+  // 解析结果；不存在时缺省
+  resolved?: string;
+  kind: "F" | "R" | "D" | "O" | "M";
+  digest?: string;
+  content?: Buffer;
+}
+
+function parseInspection(key: string, stdout: Buffer): Inspection | undefined {
+  const fields: string[] = [];
+  let position = 0;
+  for (let index = 0; index < 5; index += 1) {
+    const end = stdout.indexOf(0, position);
+    if (end < 0) {
+      return undefined;
+    }
+    fields.push(stdout.subarray(position, end).toString("utf8"));
+    position = end + 1;
+  }
+  const [link, linkText = "", resolved = "", kind = "", digest = ""] = fields;
+  if (kind !== "F" && kind !== "R" && kind !== "D" && kind !== "O" && kind !== "M") {
+    return undefined;
+  }
+  return {
+    key,
+    ...(link === "1" ? { symlink: linkText } : {}),
+    ...(resolved !== "" ? { resolved } : {}),
+    kind,
+    ...(kind === "F" ? { digest, content: stdout.subarray(position) } : {}),
+  };
+}
+
+// 嵌套仓库与子模块往下取它们自己的 git status 的层数；更深的整棵扫描（与本机实现同一口径）
+const NESTED_REPO_DEPTH = 3;
+
+// 决策 348、349：取证与命令合成一次执行的脚本。参数：模式（run 跑命令 / state 只取证）与命令。标准输入第一行是本次的随机串
+// （不在命令行与环境里，命令读不到），其余行是调用方给出的、要一并补查签名的路径（相对工作区根）。输出以"换行 + 随机串 +
+// 标记"分段：state（git / scan，git status 失败改扫描时另带 fallback）、repo（一个仓库的目录、去掉的前缀与 git status
+// 原始输出）、scanned（整棵扫描的子树）、truncated（候选超过上限）、stat（候选的签名）、oom、cmd（其后是命令输出）、end
+// （退出码；程序不存在为 missing、不可执行为 denied）、done。工作区根被外层仓库忽略时按非 git 工作区扫描；status 报出的
+// 目录里有 .git 的（嵌套仓库、子模块）逐个取它们自己的 status，取不到或过深的整棵扫描。命令以原来的 PATH、空标准输入、
+// 经 env 执行（只执行外部程序：内建命令与本脚本的函数一律按程序不存在处理）；脚本自己用的工具从系统目录解析，git 经
+// git-hardening.ts 同一张表加固，这些都不进命令的环境
+function observeScript(limit: number, oomFiles: readonly string[] | undefined): string {
+  const pruned = [
+    ...LISTING_SKIPPED_DIRS.map((name) => `-name ${name}`),
+    ...LISTING_SKIPPED_ROOT_DIRS.map((name) => `\\( -path ./${name} -type d \\)`),
+  ].join(" -o ");
+  const prunedTree = LISTING_SKIPPED_DIRS.map((name) => `-name ${name}`).join(" -o ");
+  const hardening = GIT_HARDENING_CONFIG.map((arg) => `'${arg}'`).join(" ");
+  const oom =
+    oomFiles === undefined
+      ? "oom() { :; }"
+      : [
+          "oom() {",
+          `  for f in ${oomFiles.map((file) => `'${file}'`).join(" ")}; do`,
+          '    [ -r "$f" ] || continue',
+          `    n="$(sed -n 's/^oom_kill //p' "$f")"`,
+          '    [ -n "$n" ] && { printf \'\\n%s oom %s\\n\' "$M" "$n"; return; }',
+          "  done",
+          "}",
+        ].join("\n");
+  return [
+    "IFS= read -r M || exit 90",
+    'mode="$1"; shift',
+    'P0="$PATH"',
+    `H="${SYSTEM_PATH}:$P0"`,
+    'PATH="$H"',
+    'A=""',
+    // 以空树作属性来源（git-hardening.ts 同一做法）：空树的编号按当前目录所在仓库的对象格式算，git 不认 --attr-source 时不加
+    "ga() {",
+    `  e="$(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git ${hardening} hash-object -t tree --stdin </dev/null 2>/dev/null)"`,
+    '  if [ -n "$e" ] && git "--attr-source=$e" version >/dev/null 2>&1; then A="--attr-source=$e"; else A=""; fi',
+    "}",
+    "ga",
+    `g() { env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git $A ${hardening} --no-optional-locks "$@"; }`,
+    'T="$(mktemp -d 2>/dev/null)" || { T="/tmp/pigeon-observe.$$"; mkdir -p "$T"; } || exit 91',
+    "trap 'rm -rf \"$T\"' EXIT",
+    'cat > "$T/given"',
+    "K=scan",
+    'if pre="$(g rev-parse --show-prefix 2>/dev/null)"; then K=git; fi',
+    'if [ "$K" = git ] && [ -n "$pre" ] && g check-ignore -q -- . 2>/dev/null; then K=scan; fi',
+    "repo() {",
+    '  ( cd "./$1" && ga && g status --porcelain=v1 -z --untracked-files=all --no-renames -- . ) > "$T/raw" 2>/dev/null || return 1',
+    '  printf \'\\n%s repo\\n%s\\n%s\\n\' "$M" "$1" "$2"',
+    '  cat "$T/raw"',
+    '  tr \'\\0\' \'\\n\' < "$T/raw" | cut -c4- | awk -v s="$2" -v d="$1" \'index($0, s) == 1 { print d substr($0, length(s) + 1) }\' > "$T/c"',
+    "  while IFS= read -r c; do",
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+    '    n="${c%/}"',
+    '    if [ -d "./$n" ] && [ -e "./$n/.git" ]; then printf \'%s/\\n\' "$n" >> "$T/next"; else printf \'%s\\n\' "$c" >> "$T/p"; fi',
+    '  done < "$T/c"',
+    "}",
+    "scantree() {",
+    '  printf \'\\n%s scanned\\n%s\\n\' "$M" "$1"',
+    `  find "./$1" \\( ${prunedTree} \\) -prune -o -type f -print 2>/dev/null | sed 's|^\\./||' >> "$T/p"`,
+    "}",
+    "gstate() {",
+    '  : > "$T/p"; : > "$T/next"',
+    '  repo "" "$pre" || return 1',
+    "  i=0",
+    '  while [ -s "$T/next" ]; do',
+    '    mv "$T/next" "$T/q"; : > "$T/next"; i=$((i + 1))',
+    `    while IFS= read -r d; do if [ "$i" -gt ${NESTED_REPO_DEPTH} ] || ! repo "$d" ""; then scantree "$d"; fi; done < "$T/q"`,
+    "  done",
+    '  sort -u "$T/p" > "$T/u"',
+    `  [ "$(( $(wc -l < "$T/u") ))" -gt ${limit} ] && printf '\\n%s truncated\\n' "$M"`,
+    `  head -n ${limit} "$T/u" > "$T/pp"`,
+    "  printf '\\n%s stat\\n' \"$M\"",
+    `  cat "$T/pp" "$T/before" "$T/given" 2>/dev/null | sort -u | tr '\\n' '\\0' | xargs -0 -r stat -c '%n\t%s:%y' -- 2>/dev/null`,
+    '  cp "$T/pp" "$T/before"',
+    "  return 0",
+    "}",
+    `sstate() { find . \\( ${pruned} \\) -prune -o -type f -exec stat -c '%n\t%s:%y' {} + 2>/dev/null | head -n ${limit + 1}; }`,
+    "state() {",
+    '  if [ "$K" = git ]; then',
+    '    if gstate > "$T/out"; then printf \'\\n%s state git\\n\' "$M"; cat "$T/out"; return; fi',
+    "    printf '\\n%s state scan fallback\\n' \"$M\"",
+    "  else",
+    "    printf '\\n%s state scan\\n' \"$M\"",
+    "  fi",
+    "  sstate",
+    "}",
+    oom,
+    // 程序是否在原来的 PATH 里（与 env 的查找一致：只找可执行文件，内建命令与函数不算）
+    "onpath() {",
+    '  set -f; o="$IFS"; IFS=:',
+    '  for d in $P0; do [ -n "$d" ] || d=.; if [ -f "$d/$1" ] && [ -x "$d/$1" ]; then IFS="$o"; set +f; return 0; fi; done',
+    '  IFS="$o"; set +f; return 1',
+    "}",
+    "state",
+    'rc=""',
+    'if [ "$mode" = run ]; then',
+    "  oom",
+    "  printf '\\n%s cmd\\n' \"$M\"",
+    '  PATH="$P0"',
+    '  case "$1" in',
+    '    */*) if [ ! -e "$1" ]; then rc=missing; elif [ -d "$1" ] || [ ! -x "$1" ]; then rc=denied; fi ;;',
+    '    *) onpath "$1" || rc=missing ;;',
+    "  esac",
+    '  if [ -z "$rc" ]; then env -- "$@" </dev/null; rc=$?; fi',
+    '  PATH="$H"',
+    '  printf \'\\n%s end %s\\n\' "$M" "$rc"',
+    "  state",
+    "  oom",
+    "fi",
+    "printf '\\n%s done\\n' \"$M\"",
+    'case "$rc" in missing) exit 127 ;; denied) exit 126 ;; "") exit 0 ;; *) exit "$rc" ;; esac',
+  ].join("\n");
+}
+
+// 输出里以"换行 + 随机串 + 空格"开头的标记行把内容切成段：words 为标记行的词，body 为到下一个标记之前的字节。
+// 随机串每次不同、命令不知道，命令输出里仿造不出标记
+function markedSections(output: Buffer, nonce: string): Array<{ words: string[]; body: Buffer }> {
+  const head = Buffer.from(`\n${nonce} `);
+  const starts: number[] = [];
+  for (let at = output.indexOf(head); at >= 0; at = output.indexOf(head, at + head.length)) {
+    starts.push(at);
+  }
+  return starts.map((start, index) => {
+    const lineEnd = output.indexOf(10, start + head.length);
+    const bodyStart = lineEnd < 0 ? output.length : lineEnd + 1;
+    const bodyEnd = starts[index + 1] ?? output.length;
+    return {
+      words: output
+        .subarray(start + head.length, lineEnd < 0 ? output.length : lineEnd)
+        .toString("utf8")
+        .split(" "),
+      body: output.subarray(bodyStart, Math.max(bodyStart, bodyEnd)),
+    };
+  });
+}
+
+// 签名行（路径 TAB 大小:修改时间）
+function statLines(body: Buffer | undefined): Array<readonly [string, string]> {
+  return (body?.toString("utf8") ?? "").split("\n").flatMap((line) => {
+    const tab = line.lastIndexOf("\t");
+    return tab > 0 ? [[line.slice(0, tab), line.slice(tab + 1)] as const] : [];
+  });
+}
+
+// 取证段 → HostFileState；没有取证段为 undefined
+function stateOfSections(
+  sections: ReadonlyArray<{ words: string[]; body: Buffer }>,
+  limit: number,
+  before?: HostFileState
+): HostFileState | undefined {
+  const state = sections.find((section) => section.words[0] === "state");
+  if (state === undefined) {
+    return undefined;
+  }
+  if (state.words[1] !== "git") {
+    const files = new Map<string, string>();
+    let truncated = false;
+    for (const [name, signature] of statLines(state.body)) {
+      if (files.size >= limit) {
+        truncated = true;
+        break;
+      }
+      files.set(name.replace(/^\.\//, ""), signature);
+    }
+    return {
+      kind: "scan",
+      ...(state.words[2] === "fallback" ? { fallback: true as const } : {}),
+      files,
+      truncated,
+    };
+  }
+  const statuses = new Map<string, "tracked" | "untracked">();
+  // 往下取了自己的 status 或整棵扫描的子树：它们在上一层里以目录出现，不按目录签名比
+  const subtrees: string[] = [];
+  for (const repo of sections.filter((section) => section.words[0] === "repo")) {
+    const first = repo.body.indexOf(10);
+    const second = repo.body.indexOf(10, first + 1);
+    if (first < 0 || second < 0) {
+      continue;
+    }
+    const dir = repo.body.subarray(0, first).toString("utf8");
+    const strip = repo.body.subarray(first + 1, second).toString("utf8");
+    if (dir !== "") {
+      subtrees.push(dir);
+    }
+    for (const [file, status] of parseGitStatus(
+      repo.body.subarray(second + 1).toString("utf8"),
+      strip,
+      dir === ""
+    )) {
+      statuses.set(dir + file.replace(/\/$/, ""), status);
+    }
+  }
+  const scanned = sections
+    .filter((section) => section.words[0] === "scanned")
+    .map((section) => section.body.toString("utf8").split("\n")[0] ?? "")
+    .filter((dir) => dir !== "");
+  for (const dir of [...subtrees, ...scanned]) {
+    statuses.delete(dir.replace(/\/$/, ""));
+  }
+  const signatures = new Map(
+    statLines(sections.find((section) => section.words[0] === "stat")?.body)
+  );
+  for (const file of signatures.keys()) {
+    if (!statuses.has(file) && scanned.some((dir) => file.startsWith(dir))) {
+      statuses.set(file, "untracked");
+    }
+  }
+  const result = gitFileState(
+    statuses,
+    (file) => signatures.get(file) ?? MISSING_SIGNATURE,
+    limit,
+    before
+  );
+  return sections.some((section) => section.words[0] === "truncated")
+    ? { ...result, truncated: true }
+    : result;
+}
+
+// 跑命令时的输出分流：命令前取证与命令后取证收下，命令输出（cmd 标记与 end 标记之间）交给收集器。各段按块收下、最后拼接一次；
+// 只把一小段不足一个标记长的尾巴留着与下一块一起查找，免得把切在两块之间的标记交出去。进入命令段与离开命令段时各回调一次
+// （命令的限时只计这一段）
+class ObservedOutput {
+  readonly #cmdMark: Buffer;
+  readonly #endMark: Buffer;
+  #phase: "pre" | "cmd" | "post" = "pre";
+  readonly #pre: Buffer[] = [];
+  readonly #post: Buffer[] = [];
+  #tail: Buffer = Buffer.alloc(0);
+  onCommandStart: (() => void) | undefined;
+  onCommandEnd: (() => void) | undefined;
+
+  constructor(nonce: string) {
+    this.#cmdMark = Buffer.from(`\n${nonce} cmd\n`);
+    this.#endMark = Buffer.from(`\n${nonce} end `);
+  }
+
+  get phase(): "pre" | "cmd" | "post" {
+    return this.#phase;
+  }
+
+  push(chunk: Buffer, sink: (bytes: Buffer) => void): void {
+    if (this.#phase === "post") {
+      this.#post.push(chunk);
+      return;
+    }
+    let window = this.#tail.length === 0 ? chunk : Buffer.concat([this.#tail, chunk]);
+    this.#tail = Buffer.alloc(0);
+    if (this.#phase === "pre") {
+      const at = window.indexOf(this.#cmdMark);
+      if (at < 0) {
+        const keep = Math.min(window.length, this.#cmdMark.length - 1);
+        this.#pre.push(window.subarray(0, window.length - keep));
+        this.#tail = window.subarray(window.length - keep);
+        return;
+      }
+      this.#pre.push(window.subarray(0, at));
+      window = window.subarray(at + this.#cmdMark.length);
+      this.#phase = "cmd";
+      this.onCommandStart?.();
+    }
+    const at = window.indexOf(this.#endMark);
+    if (at < 0) {
+      const keep = Math.min(window.length, this.#endMark.length - 1);
+      sink(window.subarray(0, window.length - keep));
+      this.#tail = window.subarray(window.length - keep);
+      return;
+    }
+    sink(window.subarray(0, at));
+    this.#post.push(window.subarray(at + this.#endMark.length));
+    this.#phase = "post";
+    this.onCommandEnd?.();
+  }
+
+  // 收尾：命令被终止、没等到 end 标记时，剩下的都算命令输出；返回命令前、命令后两段（没有的为 undefined）
+  finish(sink: (bytes: Buffer) => void): { pre: Buffer | undefined; post: Buffer | undefined } {
+    if (this.#phase === "pre") {
+      return { pre: undefined, post: undefined };
+    }
+    if (this.#phase === "cmd") {
+      sink(this.#tail);
+      return { pre: Buffer.concat(this.#pre), post: undefined };
+    }
+    return { pre: Buffer.concat(this.#pre), post: Buffer.concat(this.#post) };
+  }
+}
 
 export interface HelperResult {
   exitCode: number | null;
@@ -234,39 +659,26 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     result.exitCode === null ||
     /^(Error response from daemon|Cannot connect to)/m.test(result.stderr);
 
-  // 容器内解析：目标须存在；符号链接解析后的规范路径
-  const RESOLVE_SCRIPT = `[ -e "$1" ] || exit ${EXIT_MISSING}; readlink -f -- "$1"`;
-  let realRoot: string | undefined;
+  let rootInfo: { real: string; gitDir?: string } | undefined;
   const insideRoot = (base: string, target: string): boolean =>
     target === base || target.startsWith(base.endsWith("/") ? base : `${base}/`);
-  const checkResolved = (
-    inputPath: string,
-    result: { exitCode: number | null; stderr: string },
-    stdout: string,
-    base: string | undefined
-  ): string => {
-    if (daemonFailure(result)) {
-      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+  const resolveRootInfo = async (): Promise<{ real: string; gitDir?: string }> => {
+    if (rootInfo === undefined) {
+      const result = await helper(false, trustedShell(ROOT_SCRIPT, root));
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      const nul = result.stdout.indexOf(0);
+      const real = nul > 0 ? result.stdout.subarray(0, nul).toString("utf8") : "";
+      if (result.exitCode !== 0 || real === "" || hasControlChars(real)) {
+        throw new WorkspacePathError(`路径不存在或不可读：${root}`);
+      }
+      const gitDir = result.stdout.subarray(nul + 1).toString("utf8");
+      rootInfo = { real, ...(gitDir !== "" ? { gitDir } : {}) };
     }
-    const target = stdout.replace(/\n$/, "");
-    if (result.exitCode === EXIT_MISSING) {
-      throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
-    }
-    if (result.exitCode !== 0 || target === "") {
-      throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
-    }
-    if (base !== undefined && !insideRoot(base, target)) {
-      throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
-    }
-    return target;
+    return rootInfo;
   };
-  const resolveRoot = async (): Promise<string> => {
-    if (realRoot === undefined) {
-      const result = await helper(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", root]);
-      realRoot = checkResolved(root, result, result.stdout.toString("utf8"), undefined);
-    }
-    return realRoot;
-  };
+  const resolveRoot = async (): Promise<string> => (await resolveRootInfo()).real;
 
   // 脚本输出里从 offset 起的名单各项：每项两段（字面路径、存在时的真实路径）
   const denyEntriesOf = (
@@ -280,35 +692,118 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return { entry, paths: [...new Set([literal, real].filter((value) => value !== ""))] };
     });
 
-  // 决策 355：目标（空串即不解析目标）与禁读名单在容器里的真实路径，一次 exec
-  const resolveReadPaths = async (
-    inputPath: string,
-    deny: readonly string[]
-  ): Promise<{ target: string; entries: ResolvedDenyEntry[] }> => {
-    const result = await helper(false, trustedShell(READ_RESOLVE_SCRIPT, inputPath, ...deny));
+  const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
+
+  // 最近一次检视（决策 349）：exec、改写与新建时作废；写工具的解析在同一路径、其间没有 exec 与写入时直接取用。
+  // 读档解析（决策 355）通过禁读判定的检视同样留作最近一次检视
+  let lastInspection: Inspection | undefined;
+  // 检视用的绝对路径：与受保护路径判定（application/protected-paths.ts）同一写法——含 ".." 段的不折叠（内核先替换
+  // 符号链接再处理 ".."），其余按工作区根拼成规范的绝对路径。同一个文件经两处判定与读写得到同一个键
+  const inspectionKey = (inputPath: string): string => {
+    if (hasControlChars(inputPath)) {
+      throw controlCharsRefused(inputPath);
+    }
+    const hasDots = inputPath.split("/").includes("..");
+    if (path.posix.isAbsolute(inputPath)) {
+      return hasDots ? inputPath : path.posix.normalize(inputPath);
+    }
+    return hasDots ? `${root.replace(/\/+$/, "")}/${inputPath}` : path.posix.join(root, inputPath);
+  };
+  const inspect = async (key: string): Promise<Inspection> => {
+    const result = await helper(false, trustedShell(INSPECT_SCRIPT, key));
     if (daemonFailure(result)) {
       throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
     }
-    if (result.exitCode === EXIT_MISSING) {
+    const inspection = result.exitCode === 0 ? parseInspection(key, result.stdout) : undefined;
+    if (inspection === undefined) {
+      throw new WorkspacePathError(`路径不存在或不可读：${key}`);
+    }
+    lastInspection = inspection;
+    return inspection;
+  };
+  const inspectedPath = (inputPath: string, inspection: Inspection, base: string): string => {
+    if (inspection.kind === "M") {
       throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
     }
-    const fields = result.stdout.toString("utf8").split("\0");
-    const offset = inputPath === "" ? 0 : 1;
-    const target = inputPath === "" ? "" : (fields[0] ?? "");
-    if (result.exitCode !== 0 || (inputPath !== "" && target === "")) {
+    if (inspection.resolved === undefined) {
       throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
     }
-    return { target, entries: denyEntriesOf(fields, offset, deny) };
+    if (hasControlChars(inspection.resolved)) {
+      throw controlCharsRefused(inspection.resolved);
+    }
+    if (!insideRoot(base, inspection.resolved)) {
+      throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+    }
+    return inspection.resolved;
+  };
+  const inspectedFile = (resolvedPath: string): Inspection | undefined =>
+    lastInspection?.resolved === resolvedPath ? lastInspection : undefined;
+  // 版本库元数据一律不写（edit_file 的改写、write_file 的覆盖与新建共用）：任一级名为 .git，或落在根下 .git 实际所在的目录里
+  const refuseGitMetadata = async (
+    inputPath: string,
+    resolved: string,
+    base: string
+  ): Promise<void> => {
+    const gitDir = (await resolveRootInfo()).gitDir;
+    if (
+      insideGitMetadata(path.posix.relative(base, resolved)) ||
+      (gitDir !== undefined && insideRoot(gitDir, resolved))
+    ) {
+      throw gitMetadataRefused(inputPath);
+    }
+  };
+  // 决策 355 合 349：禁读判定与目标的检视，一次 exec（READ_INSPECT_SCRIPT）。落在名单内的在容器里即拒、不读出原文，
+  // 这里抛 ReadDeniedError；其余交回检视与名单各项的真实路径。不在这里留作最近一次检视
+  const inspectForRead = async (
+    key: string,
+    inputPath: string,
+    deny: readonly string[]
+  ): Promise<{ inspection: Inspection; entries: ResolvedDenyEntry[] }> => {
+    const result = await helper(false, trustedShell(READ_INSPECT_SCRIPT, key, ...deny));
+    if (daemonFailure(result)) {
+      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+    }
+    const fields: string[] = [];
+    let position = 0;
+    while (fields.length < deny.length * 2) {
+      const end = result.stdout.indexOf(0, position);
+      if (end < 0) {
+        break;
+      }
+      fields.push(result.stdout.subarray(position, end).toString("utf8"));
+      position = end + 1;
+    }
+    if (result.exitCode === EXIT_DENIED) {
+      // 序号取不到时报整份名单：命中即拒，不因输出不全放行
+      const index = result.stdout.subarray(position).toString("utf8");
+      const hit = /^\d+$/.test(index) ? deny[Number(index)] : undefined;
+      throw new ReadDeniedError(readDeniedMessage(inputPath, hit ?? deny.join("、")));
+    }
+    const inspection =
+      result.exitCode === 0 && fields.length === deny.length * 2
+        ? parseInspection(key, result.stdout.subarray(position))
+        : undefined;
+    if (inspection === undefined) {
+      throw new WorkspacePathError(`路径不存在或不可读：${key}`);
+    }
+    return { inspection, entries: denyEntriesOf(fields, 0, deny) };
   };
 
-  const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
-
-  // agent 命令的执行（文件头 ①–③）
+  // agent 命令的执行（文件头 ①–③）；给了 observe 时经观测脚本运行（决策 348、349），命令前后的取证另行交回。
+  // streamCap 为分开的两路输出各自保留的上限（缺省同本机；辅助程序另给）
   const runExec = (
     plan: HostExecPlan,
     execOptions: HostExecOptions,
-    streamCap: number = HOST_SEPARATE_STREAM_CAP
-  ): Promise<HostExecResult> => {
+    more: { observe?: { nonce: string; script: string }; streamCap?: number } = {}
+  ): Promise<HostExecResult & { pre?: Buffer; post?: Buffer }> => {
+    const { observe, streamCap = HOST_SEPARATE_STREAM_CAP } = more;
+    const observed = observe !== undefined ? new ObservedOutput(observe.nonce) : undefined;
+    const stdin = observe !== undefined ? `${observe.nonce}\n` : execOptions.stdin;
+    const command =
+      observe !== undefined
+        ? ["/bin/sh", "-c", observe.script, "sh", "run", plan.program, ...plan.args]
+        : [plan.program, ...plan.args];
+    // 头尾保留与全文落盘（决策 356）照常作用于收集器：观测时标准输出里只有命令段进收集器，取证段另行交回
     const collected = createHeadCollector(execOptions.maxOutputBytes, collectorExtras(execOptions));
     // 分开的两路输出（钩子协议要区分 stdout 与 stderr；上限同本机，辅助程序另给）
     const stdoutOnly = createHeadCollector(streamCap);
@@ -321,17 +816,13 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       let terminating: Promise<void> | undefined;
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(
-          dockerProgram,
-          execArgs(execOptions.stdin !== undefined, [plan.program, ...plan.args], execOptions.env),
-          {
-            stdio: [execOptions.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-            windowsHide: true,
-          }
-        );
-        // 标准输入（钩子事件 JSON）：写完即收尾，容器内命令读完自行结束
+        child = spawn(dockerProgram, execArgs(stdin !== undefined, command, execOptions.env), {
+          stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
+        // 标准输入（钩子事件 JSON，或观测脚本的随机串）：写完即收尾，容器内命令读完自行结束
         child.stdin?.on("error", () => {});
-        if (execOptions.stdin !== undefined) child.stdin?.end(execOptions.stdin, "utf8");
+        if (stdin !== undefined) child.stdin?.end(stdin, "utf8");
       } catch (error) {
         reject(
           new ContainerHostError(
@@ -340,11 +831,18 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         );
         return;
       }
-      child.stdout?.on("data", (chunk: Buffer) => {
+      const commandStdout = (chunk: Buffer): void => {
         collected.push(chunk);
         stdoutOnly.push(chunk);
         if (stdoutHead.length < 2048) {
           stdoutHead += chunk.toString("utf8");
+        }
+      };
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (observed !== undefined) {
+          observed.push(chunk, commandStdout);
+        } else {
+          commandStdout(chunk);
         }
       });
       child.stderr?.on("data", (chunk: Buffer) => {
@@ -361,10 +859,26 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           terminating = restart();
         }
       };
-      const timer = setTimeout(() => {
-        timedOut = true;
+      const expire = (): void => {
+        if (observed?.phase !== "post") {
+          timedOut = true;
+        }
         terminate();
-      }, execOptions.timeoutMs);
+      };
+      let timer = setTimeout(
+        expire,
+        observed !== undefined ? execOptions.timeoutMs + 2 * helperTimeoutMs : execOptions.timeoutMs
+      );
+      if (observed !== undefined) {
+        observed.onCommandStart = () => {
+          clearTimeout(timer);
+          timer = setTimeout(expire, execOptions.timeoutMs);
+        };
+        observed.onCommandEnd = () => {
+          clearTimeout(timer);
+          timer = setTimeout(expire, helperTimeoutMs);
+        };
+      }
       const onAbort = (): void => terminate();
       execOptions.signal?.addEventListener("abort", onAbort, { once: true });
       if (execOptions.signal?.aborted === true) {
@@ -381,10 +895,13 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       child.on("close", (code, signal) => {
         cleanup();
         const settle = (): void => {
+          const sections = observed?.finish(commandStdout);
           const output = {
             ...collected.finish(),
             stdout: stdoutOnly.finish().output,
             stderr: stderrOnly.finish().output,
+            ...(sections?.pre !== undefined ? { pre: sections.pre } : {}),
+            ...(sections?.post !== undefined ? { post: sections.post } : {}),
           };
           if (terminating !== undefined) {
             resolve({ spawned: true, exitCode: null, timedOut, ...output });
@@ -473,27 +990,49 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   return {
     platform: "linux",
     root,
+    // 每次现做一次检视（读文件、受保护路径判定都经这里）
     async resolveExisting(inputPath) {
       const base = await resolveRoot();
-      const result = await helper(false, ["sh", "-c", RESOLVE_SCRIPT, "sh", inputPath]);
-      return checkResolved(inputPath, result, result.stdout.toString("utf8"), base);
+      return inspectedPath(inputPath, await inspect(inspectionKey(inputPath)), base);
     },
+    // 同一路径刚检视过（其间没有 exec 与写入）即直接取用：审批预览、预检、执行之间不再重复进容器；
+    // 原文在这之后被改动的，由写入脚本按检视时的 cksum 复核拦下
     async resolveForWrite(inputPath) {
       const base = await resolveRoot();
-      const result = await helper(false, trustedShell(RESOLVE_FOR_WRITE_SCRIPT, inputPath));
-      const stdout = result.stdout.toString("utf8");
-      if (result.exitCode === EXIT_SYMLINK) {
-        throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
+      const key = inspectionKey(inputPath);
+      const inspection = lastInspection?.key === key ? lastInspection : await inspect(key);
+      if (inspection.symlink !== undefined) {
+        throw symlinkRefused(inputPath, inspection.symlink);
       }
-      return checkResolved(inputPath, result, stdout, base);
+      const resolved = inspectedPath(inputPath, inspection, base);
+      await refuseGitMetadata(inputPath, resolved, base);
+      return resolved;
     },
+    // 决策 355：读档解析不限工作区。禁读判定在容器里先于检视做（落在名单内的不读出原文），与目标的检视合成一次进容器
+    // （决策 349：读文件 1 次）；工作区内外在这里判定。通过禁读判定的检视留作最近一次检视，随后的 isFile、readText、
+    // readBytes 直接取用。执行端另按同一份名单复核一次（与 classifyReadPaths 同一口径），作兜底
     async resolveForRead(inputPath, deny) {
       const base = await resolveRoot();
-      const { target, entries } = await resolveReadPaths(inputPath, deny);
+      const { inspection, entries } = await inspectForRead(
+        inspectionKey(inputPath),
+        inputPath,
+        deny
+      );
+      if (inspection.kind === "M") {
+        throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
+      }
+      const target = inspection.resolved;
+      if (target === undefined) {
+        throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+      }
+      if (hasControlChars(target)) {
+        throw controlCharsRefused(target);
+      }
       const entry = deniedEntry(target, entries, POSIX_PATH_RULES);
       if (entry !== undefined) {
         throw new ReadDeniedError(readDeniedMessage(inputPath, entry));
       }
+      lastInspection = inspection;
       return { path: target, outside: !insideRoot(base, target) };
     },
     async classifyReadPaths(relPaths, deny, signal) {
@@ -547,11 +1086,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     },
     execHelper(program, args, execOptions) {
       const [shell = "/bin/sh", ...rest] = trustedShell(HELPER_EXEC_SCRIPT, program, ...args);
-      return runExec(
-        { program: shell, args: rest, verbatim: false },
-        execOptions,
-        execOptions.maxOutputBytes
-      );
+      return runExec({ program: shell, args: rest, verbatim: false }, execOptions, {
+        streamCap: execOptions.maxOutputBytes,
+      });
     },
     async fileMtimes(relPaths) {
       const times = new Map<string, number>();
@@ -573,6 +1110,10 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return times;
     },
     async isFile(resolvedPath) {
+      const inspected = inspectedFile(resolvedPath);
+      if (inspected !== undefined) {
+        return inspected.kind === "F" || inspected.kind === "R";
+      }
       const result = await helper(false, ["test", "-f", resolvedPath]);
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
@@ -580,6 +1121,10 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return result.exitCode === 0;
     },
     async readText(resolvedPath) {
+      const inspected = inspectedFile(resolvedPath);
+      if (inspected?.content !== undefined) {
+        return inspected.content.toString("utf8");
+      }
       const result = await helper(false, ["cat", "--", resolvedPath]);
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`读取失败：${resolvedPath}（${result.stderr.trim()}）`);
@@ -587,10 +1132,27 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return result.stdout.toString("utf8");
     },
     async writeText(resolvedPath, content) {
-      // 截断重写同一个文件：权限与属主不变；写入前复核路径（决策 334）
-      const result = await helper(true, trustedShell(WRITE_SCRIPT, resolvedPath), content);
+      // 截断重写同一个文件：权限与属主不变；写入前复核路径（决策 334）。内容出自这个文件的检视时，另复核原文仍是
+      // 检视时那份（决策 349）：变了即不写，就地重做的检视留作最近一次检视，抛 WorkspaceContentChangedError 让调用方重算
+      const inspected = inspectedFile(resolvedPath);
+      const expected = inspected?.kind === "F" ? inspected.digest : undefined;
+      lastInspection = undefined;
+      const result = await helper(
+        true,
+        trustedShell(WRITE_SCRIPT, resolvedPath, expected ?? ""),
+        content
+      );
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      if (result.exitCode === EXIT_STALE && inspected !== undefined) {
+        const fresh = parseInspection(inspected.key, result.stdout);
+        if (fresh !== undefined) {
+          lastInspection = fresh;
+        }
+        throw new WorkspaceContentChangedError(
+          `文件在预检之后被改动：${resolvedPath}，未写入（已重新读取原文）`
+        );
       }
       const stdout = result.stdout.toString("utf8").replace(/\n$/, "");
       if (result.exitCode === EXIT_SYMLINK) {
@@ -604,6 +1166,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
     },
     async resolveForCreate(inputPath) {
+      if (hasControlChars(inputPath)) {
+        throw controlCharsRefused(inputPath);
+      }
       const base = await resolveRoot();
       // 不做词法折叠：原样交给容器，按内核顺序解析（与受保护路径的容器判定同一口径）
       const result = await helper(false, trustedShell(RESOLVE_FOR_CREATE_SCRIPT, inputPath, root));
@@ -621,21 +1186,25 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         throw new WorkspacePathError(`路径里尚不存在的部分不能含空段、. 或 ..：${inputPath}`);
       }
       if (result.exitCode !== 0 && result.exitCode !== EXIT_NEW) {
-        return { path: checkResolved(inputPath, result, "", base), exists: true };
+        throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
       }
       const [real = "", rest = ""] = stdout.split("\0");
       const target = result.exitCode === EXIT_NEW ? `${real === "/" ? "" : real}${rest}` : real;
-      if (target === "" || hasControlChar(target)) {
+      if (target === "" || hasControlChars(target)) {
         throw new WorkspacePathError(
           `路径解析结果为空或含控制字符，拒绝写入：${JSON.stringify(target)}`
         );
       }
-      return {
-        path: checkResolved(inputPath, { ...result, exitCode: 0 }, target, base),
-        exists: result.exitCode === 0,
-      };
+      if (!insideRoot(base, target)) {
+        throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+      }
+      // 覆盖与新建都不写版本库元数据
+      await refuseGitMetadata(inputPath, target, base);
+      return { path: target, exists: result.exitCode === 0 };
     },
     async createText(resolvedPath, content) {
+      // 新建改变了工作区：最近一次检视作废
+      lastInspection = undefined;
       const result = await helper(true, trustedShell(CREATE_SCRIPT, resolvedPath), content);
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
@@ -651,6 +1220,11 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
     },
     async readBytes(resolvedPath) {
+      // 刚检视过这个文件（决策 349）即用检视时读出的原文，不再进容器
+      const inspected = inspectedFile(resolvedPath);
+      if (inspected?.content !== undefined) {
+        return inspected.content;
+      }
       const result = await helper(false, ["cat", "--", resolvedPath]);
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`读取失败：${resolvedPath}（${result.stderr.trim()}）`);
@@ -658,9 +1232,86 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return result.stdout;
     },
     exec(plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> {
+      lastInspection = undefined;
       return options.memoryLimit === undefined
         ? runExec(plan, execOptions)
         : execWithMemoryCheck(plan, execOptions, options.memoryLimit.label);
+    },
+    // 决策 348、349：命令与命令前后的取证、内存计数合成一次执行
+    async execObserved(plan, execOptions, limit): Promise<ObservedExec> {
+      lastInspection = undefined;
+      const nonce = randomBytes(16).toString("hex");
+      const memoryLimit = options.memoryLimit;
+      const run = await runExec(plan, execOptions, {
+        observe: {
+          nonce,
+          script: observeScript(limit, memoryLimit !== undefined ? counterFiles : undefined),
+        },
+      });
+      const { pre, post, ...rest } = run;
+      const beforeSections = pre !== undefined ? markedSections(pre, nonce) : [];
+      const before = stateOfSections(beforeSections, limit);
+      if (before === undefined) {
+        throw new ContainerHostError(`容器内的取证脚本没有运行：${rest.stderr.trim()}`);
+      }
+      if (post === undefined) {
+        // 超时或中止：容器已重启，命令后的取证由调用方另取
+        return { result: rest, before };
+      }
+      const newline = post.indexOf(10);
+      const ended = post.subarray(0, Math.max(newline, 0)).toString("utf8");
+      const afterSections = markedSections(post.subarray(Math.max(newline, 0)), nonce);
+      const completed = afterSections.some((section) => section.words[0] === "done");
+      const after = completed ? stateOfSections(afterSections, limit, before) : undefined;
+      let result: HostExecResult = rest;
+      if (ended === "missing" || ended === "denied") {
+        const spawnError: NodeJS.ErrnoException = new Error(`${plan.program}：${ended}`);
+        spawnError.code = ended === "missing" ? "ENOENT" : "EACCES";
+        result = { ...rest, spawned: false, spawnError, exitCode: null };
+      } else if (/^\d+$/.test(ended)) {
+        result = { ...rest, exitCode: Number(ended) };
+      }
+      if (memoryLimit !== undefined && result.spawned && result.exitCode !== null) {
+        const count = (sections: typeof afterSections) => {
+          const text = sections.find((section) => section.words[0] === "oom")?.words[1];
+          return text !== undefined && /^\d+$/.test(text) ? Number(text) : undefined;
+        };
+        const oomBefore = count(beforeSections);
+        const oomAfter = count(afterSections);
+        const exceeded: MemoryLimitExceeded | undefined =
+          oomBefore !== undefined && oomAfter !== undefined
+            ? oomAfter > oomBefore
+              ? { limit: memoryLimit.label, certain: true }
+              : undefined
+            : result.exitCode === 137
+              ? { limit: memoryLimit.label, certain: false }
+              : undefined;
+        if (exceeded !== undefined) {
+          options.onNotice?.(
+            `${memoryLimitText(exceeded)}（${[plan.program, ...plan.args].join(" ")}）`
+          );
+          result = { ...result, memoryLimitExceeded: exceeded };
+        }
+      }
+      return after !== undefined ? { result, before, after } : { result, before };
+    },
+    // 只取证（命令后的取证没能随命令一起取到时）：经辅助调用执行同一个脚本，补查命令前报出的路径
+    async fileState(limit, before): Promise<HostFileState> {
+      const nonce = randomBytes(16).toString("hex");
+      const given = before?.kind === "git" ? [...before.entries.keys()].join("\n") : "";
+      const result = await helper(
+        true,
+        ["/bin/sh", "-c", observeScript(limit, undefined), "sh", "state"],
+        `${nonce}\n${given}`
+      );
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      const state = stateOfSections(markedSections(result.stdout, nonce), limit, before);
+      if (state === undefined) {
+        throw new ContainerHostError(`容器内的取证脚本没有运行：${result.stderr.trim()}`);
+      }
+      return state;
     },
     async listFiles(limit): Promise<HostFileSnapshot> {
       // 不跟进两份名单里的目录（与本地实现同一口径：任意层级按名字，工作区根下的只认根下那一个目录）；
