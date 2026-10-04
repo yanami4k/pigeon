@@ -29,6 +29,7 @@
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
 | `memory` | 学到的记忆的两层上限：`projectLimitChars`、`userLimitChars`，缺省各 4,000 字符 | — |
+| `tools` | 工具的上限类设置，按工具分子键：`runCommand`（输出的头尾保留与落盘总量），见下文"工具的上限" | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -76,6 +77,22 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 不配置时 Pigeon 不另设单轮输出上限：按模型定义的上限发，由 provider 按剩余上下文收窄。自带的 DeepSeek 接入按官方上限 393,216 发。"模型定义没有上限（`maxTokens` 缺失或不为正）时发 32,000"只适用于跑批网关的接入或第三方模块自构的模型对象，不涉及自带的 DeepSeek。启动参数 `--max-output-tokens <n>` 设了上限时，取它与模型上限中较小的那个；设了的值记进注入快照与运行开始条目的 model 段，没设的不记（表示跟模型），worker 照派出它的运行面。
 
 经 `--stream-fn` / `PIGEON_STREAM_FN` 接入的第三方模块，交给 provider 的模型对象须带 `maxTokens`（模型的单次输出上限）：Pigeon 交给模块的只是身份占位，看不到模块里的真实模型对象，不配置上限时就按模块自己的模型对象发。
+
+## 工具的上限
+
+`tools` 一节按工具分子键（小驼峰），不写的项取缺省（决策 356）：
+
+| 键 | 含义 | 缺省 |
+| --- | --- | --- |
+| `tools.runCommand.outputHeadBytes` | run_command 输出超长时保留的开头 | 8192（8 KiB） |
+| `tools.runCommand.outputTailBytes` | 输出超长时保留的末尾 | 24576（24 KiB） |
+| `tools.runCommand.savedOutputsMaxBytes` | 每个会话落盘的完整输出总量上限，满了删最旧的 | 209715200（200 MiB） |
+
+run_command 的输出超过开头加末尾两段时，结果里留开头与末尾、中间注明省略的行数；完整输出存进会话自己的落盘目录 `.pigeon/state/outputs/<会话号>/`，结果给出虚拟路径 `pigeon://outputs/<编号>` 与总行数。read_file 认得这个前缀，直接从落盘目录读，不经执行端（沙箱会话同样如此）；虚拟路径只能是 `pigeon://outputs/` 加编号，指不到落盘目录以外。落盘文件随会话保存。
+
+```json
+{ "tools": { "runCommand": { "outputTailBytes": 32768 } } }
+```
 
 ## key 走环境变量
 

@@ -19,6 +19,10 @@ export interface HostExecOptions {
   timeoutMs: number;
   // 只保留输出开头的这么多字节；字节数与哈希按全量计
   maxOutputBytes: number;
+  // 决策 356：另保留输出末尾的这么多字节（缺省不留）；给了即另计输出总行数
+  tailBytes?: number;
+  // 决策 356：输出超过开头加末尾两段时，把全量输出写进这个宿主文件（至多 maxBytes 字节）；没超过不建文件
+  fullOutput?: { path: string; maxBytes: number };
   signal: AbortSignal | undefined;
   // 交给命令的标准输入（钩子协议把事件 JSON 经标准输入交给命令）
   stdin?: string;
@@ -35,8 +39,14 @@ export interface HostExecResult {
   outputBytes: number;
   // 全量输出（stdout 与 stderr 按到达顺序）的 sha256
   outputHash: string;
-  // 截断后的输出文本（开头部分）
+  // 截断后的输出文本（开头部分）；给了 tailBytes 且没超过开头加末尾时为全量输出
   output: string;
+  // 决策 356：输出末尾（给了 tailBytes 且输出超过开头加末尾两段时）
+  tail?: string;
+  // 决策 356：输出总行数（给了 tailBytes 时计）
+  outputLines?: number;
+  // 决策 356：全量输出已写进 fullOutput.path；partial 为超过写入上限，只写了前面部分
+  fullOutputSaved?: { bytes: number; partial: boolean };
   // 分开的两路输出开头（各自截到实现上限：本机与容器都是 64 KiB）；需要区分 stdout 与 stderr 的调用方用（钩子协议），
   // 其余调用方照旧读 output
   stdout: string;

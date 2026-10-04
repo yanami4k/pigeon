@@ -1,7 +1,7 @@
 // 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
-//   hooks（决策 323/324）与学到的记忆的两层上限 memory（决策 332）；
+//   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）与工具的上限类设置 tools（决策 356）；
 //   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
@@ -43,6 +43,11 @@ import {
   sandboxConfigProblems,
 } from "./sandbox-config.ts";
 import { WorkerRoleSchema } from "./session-payloads.ts";
+import {
+  type RunCommandOutputLimits,
+  runCommandOutputLimits,
+  ToolsSectionSchema,
+} from "./tools-config.ts";
 import { WEB_KEY_FIELDS, type WebSection, WebSectionSchema } from "./web-config.ts";
 
 // 三层，按优先级从低到高
@@ -66,6 +71,7 @@ export const SETTINGS_SECTIONS = {
   sandbox: SandboxSectionSchema,
   loopGuard: LoopGuardSectionSchema,
   memory: MemorySectionSchema,
+  tools: ToolsSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -87,6 +93,7 @@ export const SettingsFileSchema = Type.Object(
     loopGuard: Type.Optional(LoopGuardSectionSchema),
     hooks: Type.Optional(HooksSectionSchema),
     memory: Type.Optional(MemorySectionSchema),
+    tools: Type.Optional(ToolsSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -238,6 +245,7 @@ export interface MergedSettings {
   sandbox?: SandboxConfig;
   loopGuard?: Static<typeof LoopGuardSectionSchema>;
   memory?: Static<typeof MemorySectionSchema>;
+  tools?: Static<typeof ToolsSectionSchema>;
   trustedDirectories: string[];
   // 停用全部钩子（324）：三层按标量覆盖（高优先层说了算），缺省 false
   disableAllHooks: boolean;
@@ -408,6 +416,11 @@ export function orchestrationSettingsOf(snapshot: SettingsSnapshot): Orchestrati
 // 学到的记忆的两层上限（决策 332）：合并后的 memory 一节，不给的取缺省
 export function memoryLimitsOf(snapshot: SettingsSnapshot): MemoryLimits {
   return memoryLimits(snapshot.merged.memory);
+}
+
+// 决策 356：run_command 输出的头尾保留与落盘总量（tools 一节，不给的取缺省）
+export function runCommandOutputLimitsOf(snapshot: SettingsSnapshot): RunCommandOutputLimits {
+  return runCommandOutputLimits(snapshot.merged.tools);
 }
 
 export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettings {

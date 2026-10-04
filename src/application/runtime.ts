@@ -63,7 +63,7 @@ import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { HookEventName } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
-import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import { sessionOutputsDirOf, sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import {
@@ -71,8 +71,10 @@ import {
   configGrantRulesOf,
   emptySettingsSnapshot,
   memoryLimitsOf,
+  runCommandOutputLimitsOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
+import { CommandOutputStore } from "../tools/command-output.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
@@ -357,6 +359,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = sessionsDirOf(governanceRoot);
   // 决策 325：设置快照（会话开始时已读好、校验过）；放权规则取三层并集
   const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
+  // 决策 356：本会话的命令输出落盘目录，输出上限取设置的 tools 一节
+  const outputLimits = runCommandOutputLimitsOf(settings);
+  const outputStore = new CommandOutputStore(
+    sessionOutputsDirOf(governanceRoot, deps.sessionId),
+    outputLimits.savedOutputsMaxBytes
+  );
+  const readOptions = { outputs: outputStore };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -736,13 +745,18 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ),
     tools: [
       replaceMode
-        ? createReadFileTool(workspaceHost, { editMode: "replace" })
-        : createReadFileTool(workspaceHost),
+        ? createReadFileTool(workspaceHost, { editMode: "replace", ...readOptions })
+        : createReadFileTool(workspaceHost, readOptions),
       replaceMode ? createReplaceEditTool(workspaceHost) : createEditFileTool(workspaceHost),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
         host: workspaceHost,
         approval,
+        output: {
+          headBytes: outputLimits.headBytes,
+          tailBytes: outputLimits.tailBytes,
+          store: outputStore,
+        },
         commands: commandsConfig.commands,
         ...(deps.commandRole !== undefined
           ? { allowlist: commandsConfig.roles[deps.commandRole] ?? [] }

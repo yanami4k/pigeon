@@ -10,7 +10,11 @@
 // 宿主环境变量不进容器：容器内环境由镜像与本实现的 env 选项决定。
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { createHeadCollector, HOST_SEPARATE_STREAM_CAP } from "../tools/local-host.ts";
+import {
+  collectorExtras,
+  createHeadCollector,
+  HOST_SEPARATE_STREAM_CAP,
+} from "../tools/local-host.ts";
 import {
   pathChanged,
   symlinkRefused,
@@ -190,7 +194,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
 
   // agent 命令的执行（文件头 ①–③）
   const runExec = (plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> => {
-    const collected = createHeadCollector(execOptions.maxOutputBytes);
+    const collected = createHeadCollector(execOptions.maxOutputBytes, collectorExtras(execOptions));
     // 分开的两路输出（钩子协议要区分 stdout 与 stderr；上限同本机）
     const stdoutOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
     const stderrOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
