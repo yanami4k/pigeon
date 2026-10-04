@@ -287,8 +287,9 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     onBundle: (bundle) => {
       liveBundle = bundle;
       // 决策 330：人写的说明超出上限被截断时提示一行（告警出口，缺省标准错误输出）
-      if (bundle.instructionsNotice !== undefined) {
-        (options.warn ?? ((line: string) => console.error(line)))(bundle.instructionsNotice);
+      // 决策 359：开局没注册 web_search 的原因同样提示一行
+      for (const notice of [bundle.instructionsNotice, bundle.toolsNotice]) {
+        if (notice !== undefined) (options.warn ?? ((line: string) => console.error(line)))(notice);
       }
       // 决策 305–307：打转检测挂在主 agent 上——提醒进下一轮；计到叫停轮数即以打转中止
       const detachLoopGuard = attachLoopGuard(bundle.adapter, options.loopGuard, (found) => {

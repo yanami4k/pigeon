@@ -39,7 +39,7 @@ import type { WebSearchSetup } from "../web/tools.ts";
 // 智谱与 Tavily 的 key 的环境变量名（决策 325：key 只从环境变量读）
 export { TAVILY_KEY_ENV, ZAI_KEY_ENV };
 
-// 装配根接收的联网工具配置：在场即注册两件工具
+// 装配根接收的联网工具配置：在场即注册 web_fetch；有可用的搜索后端才另注册 web_search（决策 359）
 export interface WebToolsConfig {
   search: WebSearchSetup;
   fetch: FetchLimits;
@@ -58,7 +58,8 @@ export interface ResolveWebToolsOptions {
   searchFetch?: typeof fetch;
 }
 
-// 读配置、挑后端、取 key。缺 key 不在装配时报错（工具仍注册），调用时按 unavailable 的文字回话，文字里不带 key
+// 读配置、挑后端、取 key。缺 key 不在装配时报错：装配根不注册 web_search，unavailable 的文字作为没注册的原因记下并提示一行（决策 359），
+// 文字里不带 key
 export function resolveWebTools(options: ResolveWebToolsOptions): WebToolsConfig {
   const env = options.env ?? process.env;
   const config = options.config;

@@ -92,8 +92,11 @@ function nestingClause(settings: SpawnWorkerSettings): string {
   return below > 0 ? `；它还能往下再派 ${below} 层 worker。` : "，也不能再派 worker。";
 }
 
-// 工具说明（定稿原文；数值与两处随配置的句子取自设定）
-export function spawnWorkerDescription(settings: SpawnWorkerSettings): string {
+// 工具说明（定稿原文；数值与两处随配置的句子取自设定）。决策 359：联网那句只列派出方已注册的联网工具，一件都没有即不写
+export function spawnWorkerDescription(
+  settings: SpawnWorkerSettings,
+  webTools: readonly string[] = ["web_search", "web_fetch"]
+): string {
   return [
     "派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要。",
     "worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。",
@@ -103,7 +106,8 @@ export function spawnWorkerDescription(settings: SpawnWorkerSettings): string {
         : ""),
     "何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。",
     `任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问${nestingClause(settings)}`,
-    "角色决定 worker 能用的工具：explorer 只能读代码与检索历史会话，适合调查与定位；implementer 能读写文件、不能跑命令，适合按明确的方案改代码；tester 能读文件与跑命令、不能改文件，适合运行与诊断测试。三种角色另外都能用 web_search 与 web_fetch 查资料。",
+    "角色决定 worker 能用的工具：explorer 只能读代码与检索历史会话，适合调查与定位；implementer 能读写文件、不能跑命令，适合按明确的方案改代码；tester 能读文件与跑命令、不能改文件，适合运行与诊断测试。" +
+      (webTools.length > 0 ? `三种角色另外都能用 ${webTools.join(" 与 ")} 查资料。` : ""),
     "worker 的改动不会自动并入你的分支：看过交回的分支与摘要后，由你决定合不合、怎么合。",
   ].join("\n");
 }
@@ -434,13 +438,15 @@ function precheck(
   return undefined;
 }
 
+// webTools：派出方已注册的联网工具（说明的联网那句按它写，359）；缺省按两件都在
 export function createSpawnWorkerTool(
-  slot: SpawnWorkerSlot
+  slot: SpawnWorkerSlot,
+  webTools?: readonly string[]
 ): PigeonAgentTool<ReturnType<typeof spawnWorkerParamsSchema>, SpawnWorkerDetails> {
   return {
     name: SPAWN_WORKER_TOOL,
     label: SPAWN_WORKER_TOOL,
-    description: spawnWorkerDescription(slot.settings),
+    description: spawnWorkerDescription(slot.settings, webTools),
     parameters: spawnWorkerParamsSchema(slot.settings.taskList),
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SpawnWorkerDetails>> {

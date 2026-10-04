@@ -466,9 +466,10 @@ for (const condition of ["search-push", "search-only", "push-only", "neither"] a
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);
     // 决策 359：本项目有历史会话才注册会话检索三件——作业目录里先放一个之前的会话
-    const earlier = join(sessionsDirOf(join(dir, "job")), "earlier");
-    mkdirSync(earlier, { recursive: true });
-    writeFileSync(join(earlier, sessionFileName(Date.now() - 60_000, newSessionId())), "");
+    const earlier = { kind: "header", version: 4, id: newSessionId(), createdAt: 1, cwd: dir };
+    mkdirSync(join(sessionsDirOf(join(dir, "job")), "earlier"), { recursive: true });
+    const file = join(sessionsDirOf(join(dir, "job")), "earlier", sessionFileName(1, earlier.id));
+    writeFileSync(file, `${JSON.stringify(earlier)}\n`);
     try {
       const counting = countingStreamFn(
         createFakeStreamFn({

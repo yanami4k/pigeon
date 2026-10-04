@@ -327,6 +327,8 @@ export interface RuntimeBundle {
   learnedMemory?: LearnedMemoryConfig;
   // 决策 330：人写的说明超出 32 KiB 被截断时给终端的一行提示（入口打出）；没截断时缺省
   instructionsNotice?: string;
+  // 决策 359：开局没注册 web_search 的原因，或 /reload 时搜索后端改了要重启才生效（入口在终端提示一行）
+  toolsNotice?: string;
   // 决策 294 B1：任务清单开着时在场（续聊时从会话还原、/tasks 查看）
   taskList?: TaskList;
   // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
@@ -463,6 +465,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
+  // 决策 339：检索与目录排除当前会话所在的整棵会话树（父会话取本会话的来历：worker 的派出方、分支的来源）
+  const lineageParent =
+    deps.storeLineage?.worker?.parentSessionId ?? deps.storeLineage?.branch?.sourceSessionId;
+  const current = {
+    sessionId: deps.sessionId,
+    ...(lineageParent !== undefined ? { parentSessionId: lineageParent } : {}),
+  };
   // 决策 359：按环境只注册用得上的工具——会话开始时查一次（/reload 沿用开局的结果），没注册的连同原因记进 Run 开始条目
   const environment = toolEnvironmentProbe({
     ...(deps.frozenPrompt?.toolEnvironment !== undefined
@@ -470,7 +479,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : {}),
     governanceRoot,
     sessionsDir,
-    sessionId: deps.sessionId,
+    current,
+    searchBackend: deps.webTools?.search.backend !== undefined,
     ...(deps.env !== undefined ? { env: deps.env } : {}),
   });
   const skippedTools: SkippedTools[] = [];
@@ -479,7 +489,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     return false;
   };
   // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
-  // 决策 193 的开关关掉时一件都不注册；决策 359：本项目没有本会话以外的会话时也不注册
+  // 决策 193 的开关关掉时一件都不注册；决策 359：本会话所在的会话树以外没有会话（搜不到东西）时也不注册
   const sessionSearch =
     (deps.sessionSearch ?? true) &&
     (environment.check("sessionHistory") ||
@@ -487,10 +497,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL],
         "本项目没有历史会话"
       ));
-  // 决策 339：检索与目录排除当前会话所在的整棵会话树（父会话取本会话的来历：worker 的派出方、分支的来源）；
   // 可搜文本缓存在 .pigeon/state/search-cache/
-  const lineageParent =
-    deps.storeLineage?.worker?.parentSessionId ?? deps.storeLineage?.branch?.sourceSessionId;
   const sessionToolOptions = {
     sessionsDir,
     cacheDir: sessionSearchCacheDirOf(governanceRoot),
@@ -583,11 +590,22 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   }
   // 决策 287–291：联网工具——web_search 读档免审批，web_fetch 网络档按网站审批
   const webTools = deps.webTools;
-  // 决策 359：没有可用的搜索后端（缺 key）不注册 web_search，web_fetch 照常
+  // 决策 359：没有可用的搜索后端（缺 key）不注册 web_search，web_fetch 照常；/reload 沿用开局的决定
+  const searchReason = webTools?.search.unavailable ?? "没有可用的搜索后端";
   const webSearch =
     webTools !== undefined &&
-    (webTools.search.backend !== undefined ||
-      skip([WEB_SEARCH_TOOL], webTools.search.unavailable ?? "没有可用的搜索后端"));
+    (environment.check("webSearch") || skip([WEB_SEARCH_TOOL], searchReason));
+  // 开局没注册 web_search 时在终端提示一行；/reload 时搜索后端变了只提示重启后生效（本会话的工具清单不变）
+  const toolsNotice =
+    webTools === undefined
+      ? undefined
+      : deps.frozenPrompt === undefined
+        ? webSearch
+          ? undefined
+          : `web_search 没有注册：${searchReason}（改好后重启 Pigeon 生效）`
+        : webSearch !== (webTools.search.backend !== undefined)
+          ? "搜索后端的改动在重启 Pigeon 后生效，本会话的工具清单不变"
+          : undefined;
   if (webTools !== undefined) {
     if (webSearch) {
       registry.register(webSearchRegistration());
@@ -849,7 +867,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
       ...mcpTools.map((bridged) => bridged.tool),
       ...(spawnSlot !== undefined
-        ? [createSpawnWorkerTool(spawnSlot), ...createOrchestrationTools(spawnSlot)]
+        ? [
+            createSpawnWorkerTool(
+              spawnSlot,
+              toolNames.filter((name) => name === WEB_SEARCH_TOOL || name === WEB_FETCH_TOOL)
+            ),
+            ...createOrchestrationTools(spawnSlot),
+          ]
         : []),
       ...(takeSlot !== undefined ? [createTakeWorkerTool(takeSlot)] : []),
       ...(scriptSlot !== undefined ? [createOrchestrateTool(scriptSlot)] : []),
@@ -1014,6 +1038,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? { instructionsNotice: instructions.notice }
       : {}),
     ...(taskList !== undefined ? { taskList } : {}),
+    ...(toolsNotice !== undefined ? { toolsNotice } : {}),
   };
 }
 

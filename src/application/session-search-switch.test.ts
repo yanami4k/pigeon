@@ -30,8 +30,10 @@ async function assembled(
   const home = mkdtempSync(join(tmpdir(), "pigeon-search-switch-home-"));
   try {
     // 决策 359：本项目有历史会话才注册会话检索三件——先放一个之前的会话
+    const earlier = { kind: "header", version: 4, id: newSessionId(), createdAt: 1, cwd: root };
     mkdirSync(join(sessionsDirOf(root), "earlier"), { recursive: true });
-    writeFileSync(join(sessionsDirOf(root), "earlier", sessionFileName(1, newSessionId())), "");
+    const file = join(sessionsDirOf(root), "earlier", sessionFileName(1, earlier.id));
+    writeFileSync(file, `${JSON.stringify(earlier)}\n`);
     const streamFn = createFakeStreamFn({ replies });
     const result = await runHeadless({
       task: "你好",
