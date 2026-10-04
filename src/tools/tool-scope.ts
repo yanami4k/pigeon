@@ -10,6 +10,8 @@
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { ToolScope } from "../state/session-payloads.ts";
+import { GLOB_TOOL } from "./glob.ts";
+import { GREP_TOOL } from "./grep.ts";
 import { isOutsideRelative } from "./paths.ts";
 import { type CommandInspection, parseCommandLine, RUN_COMMAND_TOOL } from "./run-command.ts";
 
@@ -18,6 +20,9 @@ import { type CommandInspection, parseCommandLine, RUN_COMMAND_TOOL } from "./ru
 export const SCOPABLE_TOOLS: Readonly<Record<string, "paths" | "commandPrefixes">> = {
   read_file: "paths",
   edit_file: "paths",
+  // 决策 360：读类限目录——grep、glob 按 path 参数判定（不给 path 即越界）
+  [GREP_TOOL]: "paths",
+  [GLOB_TOOL]: "paths",
   [RUN_COMMAND_TOOL]: "commandPrefixes",
 };
 

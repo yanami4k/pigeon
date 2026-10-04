@@ -18,6 +18,7 @@ import { UPDATE_MEMORY_TOOL } from "../memory/update-memory-tool.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { DelegatedPolicy, ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
+import { READ_ONLY_SEARCH_TOOLS } from "../tools/search-tools.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import {
   commandPrefixWords,
@@ -40,9 +41,10 @@ export const WORKER_ROLES: readonly ActiveWorkerRole[] = ["explorer", "implement
 const WEB_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] as const;
 
 export const ROLE_TOOLS: Readonly<Record<ActiveWorkerRole, readonly string[]>> = {
-  // grep、glob 两件读档工具（决策 368）合并后加进 explorer 预设
+  // explorer 带 grep、glob 两件读档工具（决策 368）
   explorer: [
     "read_file",
+    ...READ_ONLY_SEARCH_TOOLS,
     SEARCH_SESSIONS_TOOL,
     READ_SESSION_ENTRY_TOOL,
     LIST_SESSIONS_TOOL,
