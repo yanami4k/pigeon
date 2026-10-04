@@ -553,6 +553,13 @@ export function summarizeSessionView(view: SessionView): SessionViewSummary {
       failureClasses.push(outcome.failure.category);
     }
   }
+  // 移出主分支的截断回复（决策 367）：用量记在续跑条目里，一并计入
+  for (const item of view.items) {
+    if (item.kind === "continuation" && item.data.droppedUsage !== undefined) {
+      totalTokens += item.data.droppedUsage.totalTokens;
+      totalCost += item.data.droppedUsage.cost.total;
+    }
+  }
   for (const message of view.messages) {
     if (message.usage !== undefined) {
       totalTokens += message.usage.totalTokens;

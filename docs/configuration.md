@@ -83,7 +83,7 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 
 两项都缺省开启，各入口（终端界面、命令行对话与续跑、`pigeon run`、worker、`/fork`）行为一致；worker 照派出它的会话的设置快照。
 
-**续跑**（`truncationContinuation`）：一条回复因输出上限截断、且没有工具调用时，本次运行不收尾：从发给模型的上下文里去掉这条回复，追加一条提示（上条回复被截断、未执行任何工具，不要重复前文，简短说明下一步并直接发出一个工具调用），然后接着跑。截断的回复照留在会话文件里，但移出主分支（会话树的叶子退回它之前），续跑（`pigeon resume`、`/resume`、worker 续做）与分叉按主分支还原的上下文同样不含它；主分支上它的位置是一条续跑记录（`pigeon.continuation`：截断的来由、本次运行第几次、连续第几次），其后是那条提示。截断里带工具调用的照旧：工具调用判为未执行、提示重发。计数与打转检测分开。
+**续跑**（`truncationContinuation`）：一条回复因输出上限截断、且没有工具调用时，本次运行不收尾：从发给模型的上下文里去掉这条回复，追加一条提示（上条回复被截断、未执行任何工具，不要重复前文，简短说明下一步并直接发出一个工具调用），然后接着跑。截断的回复照留在会话文件里，但移出主分支（会话树的叶子退回它之前），续跑（`pigeon resume`、`/resume`、worker 续做）与分叉按主分支还原的上下文同样不含它；主分支上它的位置是一条续跑记录（`pigeon.continuation`：截断的来由、本次运行第几次、连续第几次与截断回复的用量），其后是那条提示；轮数、用量与花费的统计（`pigeon run` 的结果、跑批结果行、会话列表）按续跑记录把截断的回复计回。回看历史时这条提示标明为续跑提示；打转检测不把截断的那一轮算作一轮。截断里带工具调用的照旧：工具调用判为未执行、提示重发。计数与打转检测分开。
 
 | 键 | 缺省 | 说明 |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 **流式重复检测**（`repetitionGuard`）：包在模型调用外层，与服务商无关；只看正文与思考，不看工具参数。判据两种：
 
 - 逐字周期：每收到 `checkIntervalChars` 个新字符，看最近 `windowChars` 个字符的末尾是否由同一单元首尾相接重复构成。单元不超过 `maxPeriodChars`，须含文字（纯标点、数字、空白不算）；单元不超过 `shortPeriodChars` 的要重复 `shortMinRepeats` 遍且覆盖 `shortMinRepeatedChars` 字，更长的要重复 `minRepeats` 遍且覆盖 `minRepeatedChars` 字。
-- 段落相似度：按空行切段（没有空行时到 `segmentMaxChars` 强制切），规范化后短于 `segmentMinChars` 的段不计；每段与最近 `segmentWindow` 段比较词三元组的相似度（中日韩文字逐字成词），达 `similarity` 算近似；攒满 `minSegments` 段之后，近似段（含本段）达 `minCluster` 即命中。
+- 段落相似度：按空行切段（没有空行时到 `segmentMaxChars` 强制切），去掉标题行后不含空白不足 `segmentMinChars` 个字符的段不计；每段与最近 `segmentWindow` 段比较词三元组的相似度（中日韩文字逐字成词），达 `similarity` 算近似；攒满 `minSegments` 段之后，近似段（含本段）达 `minCluster`、且最近连续 `minConsecutive` 段每段都与前一段近似才命中（防只差编号、人名的模板段误判）。
 
 `mode` 为 `abort`（掐断，缺省）时，命中即中止本条回复，截至命中处的内容以停止原因 length 收尾、交给上面的续跑；为 `log`（只记录）时照常转发，本条回复里同一通道的同一判据只记第一次。每次命中写一条会话记录（`pigeon.repetition`：判据、通道、周期长度、重复次数、起点、触发位置与模式；位置是本条回复里该通道的字符偏移，字符按 UTF-16 码元计）。
 
@@ -112,8 +112,9 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 | `similarity` | 0.8 | 0.8 |
 | `segmentMaxChars` / `segmentMinChars` | 700 / 60 | 700 / 60 |
 | `segmentWindow` / `minSegments` / `minCluster` | 16 / 8 / 4 | 16 / 8 / 4 |
+| `minConsecutive` | 3 | 3 |
 
-`omp` 档照 oh-my-pi 的同名检测；`wide` 档用于"只记录"的试跑，看命中与误报再定缺省。`windowChars` 须不小于 `maxPeriodChars × minRepeats`，否则启动时报错。
+`omp` 档照 oh-my-pi 的同名检测（段长按字符计与 `minConsecutive` 是 Pigeon 另加的防误报门槛）；`wide` 档用于"只记录"的试跑，看命中与误报再定缺省。`windowChars` 须不小于 `maxPeriodChars × minRepeats`，否则启动时报错。
 
 ```json
 {

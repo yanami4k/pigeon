@@ -323,6 +323,9 @@ export interface RuntimeBundle {
   taskList?: TaskList;
   // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
   frozenPrompt: FrozenSessionPrompt;
+  // 决策 367：本运行面实际生效的撞上限续跑与流式重复检测设定（worker 按它继承）
+  truncationContinuation: TruncationContinuationSettings;
+  repetitionGuard: RepetitionGuardSettings;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -938,6 +941,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     settings,
     hooks: sessionHooks,
     toolTiers,
+    truncationContinuation: continuation,
+    repetitionGuard: repetition,
     frozenPrompt: {
       instructions,
       ...(pushedMemory !== undefined ? { pushedMemory } : {}),

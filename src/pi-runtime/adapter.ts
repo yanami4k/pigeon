@@ -60,7 +60,11 @@ import { classifyRunOutcome, type FailureClass } from "../state/classification.t
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { LoopRound } from "../state/loop-guard.ts";
-import type { RepetitionGuardMode, RepetitionGuardParams } from "../state/runaway-config.ts";
+import {
+  type RepetitionGuardMode,
+  type RepetitionGuardParams,
+  TRUNCATION_CONTINUE_PROMPT,
+} from "../state/runaway-config.ts";
 import {
   type RunStartedPayload,
   RuntimeEventKind,
@@ -118,10 +122,6 @@ export interface RunResult {
 
 // 空回复重试仍空时的错误文本（Run 结果与收尾条目共用）
 export const EMPTY_REPLY_ERROR = "模型返回空回复（既无文字也无工具调用），重试一次仍为空回复";
-
-// 撞上限续跑（决策 367）时追加给模型的提示
-export const TRUNCATION_CONTINUE_PROMPT =
-  "上条回复被截断，未执行任何工具；不要重复前文，简短说明下一步并直接发出一个工具调用";
 
 // 撞上限续跑的对象（决策 367）：因输出上限截断（含被流式重复检测掐断）且没有工具调用的回复
 export function isTruncatedWithoutTools(message: AssistantMessage): boolean {
@@ -182,6 +182,8 @@ export interface ToolResultNotice {
 // 派生显示态，不落盘、不锚身份；参数与结果为深拷贝
 export interface TurnRoundNotice extends LoopRound {
   runId: RunId;
+  // 这一轮的回复因输出上限截断且没有工具调用（决策 367：续跑时从上下文去掉，打转检测不把它算作一轮）
+  truncated?: true;
 }
 
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
@@ -556,6 +558,8 @@ export class PiRuntimeAdapter {
   async #continueTruncated(): Promise<void> {
     this.#continuations += 1;
     this.#consecutiveContinuations += 1;
+    const dropped = this.#agent.state.messages.at(-1);
+    const usage = dropped?.role === "assistant" ? dropped.usage : undefined;
     this.#agent.state.messages = this.#agent.state.messages.slice(0, -1);
     const runId = this.#currentRunId;
     if (this.#sessionStore !== undefined && runId !== null) {
@@ -570,6 +574,25 @@ export class PiRuntimeAdapter {
             attempt: this.#continuations,
             consecutive: this.#consecutiveContinuations,
             continuedAt: Date.now(),
+            // 截断的回复移出主分支后，轮数与用量的统计按这里加回
+            ...(usage !== undefined
+              ? {
+                  droppedUsage: {
+                    input: usage.input,
+                    output: usage.output,
+                    cacheRead: usage.cacheRead,
+                    cacheWrite: usage.cacheWrite,
+                    totalTokens: usage.totalTokens,
+                    cost: {
+                      input: usage.cost.input,
+                      output: usage.cost.output,
+                      cacheRead: usage.cost.cacheRead,
+                      cacheWrite: usage.cost.cacheWrite,
+                      total: usage.cost.total,
+                    },
+                  },
+                }
+              : {}),
           },
         });
       } catch (error) {
@@ -577,11 +600,16 @@ export class PiRuntimeAdapter {
       }
     }
     await this.#restoreAfterTurnCompaction();
-    await this.#agent.prompt({
+    // 还原要等会话树的读取：其间来的中止请求或释放落空（上游没有活动运行），故照常发起再立即中止，以中止收尾（同 #runWith）
+    const started = this.#agent.prompt({
       role: "user",
       content: [{ type: "text", text: TRUNCATION_CONTINUE_PROMPT }],
       timestamp: Date.now(),
     });
+    if (this.#interruptRequested || this.#disposed) {
+      this.#agent.abort();
+    }
+    await started;
   }
 
   // 这次 agent_end 要不要暂扣、等撞上限续跑：配置了续跑、两个上限都没到、没来过中止请求、钩子没要求停止，
@@ -899,6 +927,9 @@ export class PiRuntimeAdapter {
             .filter((text) => text !== "")
             .join("\n"),
         })),
+        ...(message.role === "assistant" && isTruncatedWithoutTools(message)
+          ? { truncated: true as const }
+          : {}),
       });
     } catch (error) {
       this.#listenerErrors.push(error);

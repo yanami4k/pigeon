@@ -14,7 +14,12 @@ import {
   PushedMemoryLayersSchema,
   PushedMemoryManifestSchema,
 } from "./learned-memory.ts";
-import { EvalVerdictSchema, GitObjectIdSchema, RunStartedPayloadSchema } from "./runtime-events.ts";
+import {
+  EvalVerdictSchema,
+  GitObjectIdSchema,
+  RunStartedPayloadSchema,
+  TurnUsageSchema,
+} from "./runtime-events.ts";
 import {
   CheckpointRefSchema,
   ChildSettledStatusSchema,
@@ -313,7 +318,8 @@ export type HookRunData = Static<typeof HookRunDataSchema>;
 
 // 撞上限续跑（决策 367）：末条回复因输出上限截断（或被流式重复检测掐断）且没有工具调用，运行面不收尾、接着跑。
 // 被截断的回复留在会话文件里，但移出主分支（主分支的叶子退回它之前），模型上下文与续跑还原都不再含它；
-// 本条目挂在主分支上被截断回复的位置，其后是给模型的提示消息
+// 本条目挂在主分支上被截断回复的位置，其后是给模型的提示消息。被截断的回复是一次真实的模型请求：轮数与用量的统计
+// 按本条目把它加回（一条续跑条目算一轮，用量取 droppedUsage；截断的回复没有用量时缺省）
 export const ContinuationDataSchema = Type.Object({
   version: VERSION,
   runId: RunIdSchema,
@@ -323,6 +329,7 @@ export const ContinuationDataSchema = Type.Object({
   attempt: Type.Integer({ minimum: 1 }),
   consecutive: Type.Integer({ minimum: 1 }),
   continuedAt: Type.Integer({ minimum: 0 }),
+  droppedUsage: Type.Optional(TurnUsageSchema),
 });
 export type ContinuationData = Static<typeof ContinuationDataSchema>;
 

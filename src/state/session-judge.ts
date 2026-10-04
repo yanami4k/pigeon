@@ -14,6 +14,7 @@ import { type AttemptOutcomeFacts, labelAttempt } from "./outcome-label.ts";
 import type { TurnUsage } from "./runtime-events.ts";
 import {
   type CheckpointData,
+  type ContinuationData,
   type ForkData,
   type GrantData,
   type RunEndData,
@@ -65,6 +66,8 @@ export interface StoreRun {
   end?: RunEndData;
   messages: StoreMessageRef[];
   checkpoints: StoreCheckpoint[];
+  // 撞上限续跑（决策 367）：每条代表一条移出主分支的截断回复（一轮，带它的用量）
+  continuations: ContinuationData[];
 }
 
 export interface StoreRecord<T> {
@@ -164,7 +167,14 @@ export function storeSessionView(input: {
     const current = runs.at(-1);
     const start = customData<RunStartData>(entry, SessionEntryType.RunStart);
     if (start !== undefined) {
-      runs.push({ runId: start.runId, start, messages: [], checkpoints: [] });
+      runs.push({ runId: start.runId, start, messages: [], checkpoints: [], continuations: [] });
+      continue;
+    }
+    const continuation = customData<ContinuationData>(entry, SessionEntryType.Continuation);
+    if (continuation !== undefined) {
+      runs
+        .find((candidate) => candidate.runId === continuation.runId)
+        ?.continuations.push(continuation);
       continue;
     }
     const end = customData<RunEndData>(entry, SessionEntryType.RunEnd);
@@ -669,6 +679,13 @@ export function storeRunMetrics(
         usage.cost.cacheRead += turn.cost?.cacheRead ?? 0;
         usage.cost.cacheWrite += turn.cost?.cacheWrite ?? 0;
         usage.cost.total += turn.cost?.total ?? 0;
+      }
+    }
+    // 移出主分支的截断回复（决策 367）：各算一轮，用量加回
+    for (const continuation of run.continuations) {
+      turns += 1;
+      if (continuation.droppedUsage !== undefined) {
+        addTurnUsage(usage, continuation.droppedUsage);
       }
     }
   }
