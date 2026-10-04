@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { BUNDLE_ROLE_ENV } from "../state/package-paths.ts";
-import { routeTopLevel, TUI_ENTRY, tuiChildCommand } from "./index.ts";
+import { routeTopLevel, tuiChildCommand } from "./index.ts";
 
 const pkg = resolve("/pkg");
 
@@ -19,7 +19,6 @@ test("源码启动：子进程跑源码的 tui 入口，带上本进程的 node 
   assert.deepEqual(command, {
     args: ["--inspect", join(pkg, "src", "tui", "main.ts"), "--continue"],
   });
-  assert.ok(TUI_ENTRY.endsWith(join("tui", "main.ts")));
 });
 
 test("打包产物启动：子进程跑同一个产物、开 source map，经环境变量分派到终端界面", () => {

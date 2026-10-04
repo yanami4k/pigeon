@@ -2,11 +2,12 @@
 // 带 source map（不内嵌源码，按路径指回 src/ 下的源文件）；dist/pigeon.mjs 是启动器：先开 source map 再加载产物，报错按源码
 // 行号显示（产物自己开不了：开之前它已加载完），package.json 的 bin 指向它。
 // --stream-fn 指定的接入模块在运行时动态导入，不打进包。随包文件（docker/、eval/、package.json）按包根定位，见
-// src/state/package-paths.ts；上游三个包的版本在构建时写进产物（打包后用的就是这几个版本）。
-// 用法：npm run bundle
+// src/state/package-paths.ts；上游三个包的版本与构建戳（提交号与有无未提交改动，口径同 describeHead）在构建时写进产物。
+// 用法：npm run bundle（npm 安装本包时经 prepare 也跑）
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { describeHead } from "../src/orchestration/worktree.ts";
 import { UPSTREAM_PACKAGES } from "../src/pi-runtime/upstream-version.ts";
 
 const root = new URL("../", import.meta.url);
@@ -18,6 +19,14 @@ const upstreamVersions = Object.fromEntries(
     JSON.parse(readFileSync(at(`node_modules/${name}/package.json`), "utf8")).version,
   ])
 );
+
+// 不在 git 仓库里构建时如实记 unknown
+let harnessRef;
+try {
+  harnessRef = describeHead(at("."));
+} catch {
+  harnessRef = { commit: "unknown", dirty: false };
+}
 
 mkdirSync(at("dist"), { recursive: true });
 await build({
@@ -36,6 +45,7 @@ await build({
   define: {
     __PIGEON_BUNDLE__: "true",
     __PIGEON_UPSTREAM_VERSIONS__: JSON.stringify(upstreamVersions),
+    __PIGEON_HARNESS_REF__: JSON.stringify(harnessRef),
   },
   logLevel: "warning",
 });

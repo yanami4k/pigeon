@@ -69,6 +69,7 @@ import {
   STREAM_RUNTIMES,
   summarizeManifest,
 } from "../eval/stream-generate.ts";
+import { currentHarnessRef, describeHarness } from "../eval/stream-harness.ts";
 import {
   markHumanGateFailures,
   type StreamManifest,
@@ -999,7 +1000,7 @@ export async function main(argv: string[]): Promise<void> {
     return;
   }
   if (route.kind === "version") {
-    writeOut(`pigeon ${pigeonVersion()}\n`);
+    writeOut(`pigeon ${pigeonVersion()}（${describeHarness(currentHarnessRef())}）\n`);
     return;
   }
   if (route.kind === "tui") {

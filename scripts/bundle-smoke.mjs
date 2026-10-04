@@ -1,10 +1,11 @@
 // 打包产物的冒烟测试与计时（决策 351）。
-//   node scripts/bundle-smoke.mjs：CI 在构建后运行。pigeon --version 输出 package.json 的版本、没有告警；以仓库的假模型
+//   node scripts/bundle-smoke.mjs：CI 在构建后运行。pigeon --version 经启动器与直接运行产物（终端界面子进程即如此）各一次：
+//     只输出一行（入口只执行一次）、版本为 package.json 的版本、构建戳为当前提交、没有告警；以仓库的假模型
 //     （createFakeStreamFn）跑一次 pigeon run，确认发出了第一个请求并正常结束。
 //   node scripts/bundle-smoke.mjs --measure <N>：源码与打包产物交替各跑 N 次 pigeon run（假模型不加载仓库模块），记到第一个
 //     请求的时间（自进程启动起的毫秒）并取中位。
 // 每次运行用临时目录作工作区与家目录，不读写使用者的设置与记忆。
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,8 @@ const ENTRIES = {
   bundle: join(root, "dist", "pigeon.mjs"),
   source: join(root, "src", "cli", "index.ts"),
 };
+// 直接运行产物（终端界面子进程即如此）
+const BUNDLE_FILE = join(root, "dist", "pigeon-cli.mjs");
 const SMOKE_FAKE = join(root, "scripts", "smoke-stream-fn.ts");
 const MEASURE_FAKE = join(root, "scripts", "measure-stream-fn.mjs");
 
@@ -76,15 +79,22 @@ if (measureAt >= 0) {
   );
 } else {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const version = pigeon(ENTRIES.bundle, ["--version"]);
-  if (version.status !== 0 || version.stdout.trim() !== `pigeon ${pkg.version}`) {
-    throw new Error(
-      `pigeon --version 不符：${version.status}\n${version.stdout}\n${version.stderr}`
-    );
-  }
-  if (version.stderr.trim() !== "") {
-    throw new Error(`pigeon --version 有告警：\n${version.stderr}`);
+  // 构建戳的口径同 describeHead：短提交号；git status --porcelain 非空即有未提交改动
+  const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const dirty = git(["status", "--porcelain"]) !== "";
+  const commit = git(["rev-parse", "--short", "HEAD"]);
+  const expected = `pigeon ${pkg.version}（提交 ${commit}（${dirty ? "有" : "无"}未提交改动））`;
+  for (const entry of [ENTRIES.bundle, BUNDLE_FILE]) {
+    const version = pigeon(entry, ["--version"]);
+    if (version.status !== 0 || version.stdout !== `${expected}\n`) {
+      throw new Error(
+        `${entry} --version 应只输出一行 ${expected}：${version.status}\n${version.stdout}\n${version.stderr}`
+      );
+    }
+    if (version.stderr.trim() !== "") {
+      throw new Error(`${entry} --version 有告警：\n${version.stderr}`);
+    }
   }
   const ms = firstRequestMs(ENTRIES.bundle, SMOKE_FAKE);
-  console.log(`冒烟通过：${version.stdout.trim()}；pigeon run 第一个请求在 ${Math.round(ms)} 毫秒`);
+  console.log(`冒烟通过：${expected}；pigeon run 第一个请求在 ${Math.round(ms)} 毫秒`);
 }

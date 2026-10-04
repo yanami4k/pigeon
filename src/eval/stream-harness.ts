@@ -15,8 +15,15 @@ export function describeHarness(ref: HarnessRef | undefined): string {
   return `提交 ${ref?.commit ?? "unknown"}（${ref?.dirty === true ? "有" : "无"}未提交改动）`;
 }
 
-// 本源码所在仓库（Pigeon）的版本；读不到时如实记 unknown
+// 打包产物（决策 351）的构建戳：构建时的提交号与有无未提交改动（源码运行时没有这个名字）
+declare const __PIGEON_HARNESS_REF__: HarnessRef | undefined;
+
+// 本源码所在仓库（Pigeon）的版本；读不到时如实记 unknown。从打包产物运行时取构建戳：dist 不入库，拉了新代码而没重新打包时，
+// 包根的 HEAD 与在跑的代码对不上
 export function currentHarnessRef(): HarnessRef {
+  if (typeof __PIGEON_HARNESS_REF__ !== "undefined") {
+    return { ...__PIGEON_HARNESS_REF__ };
+  }
   try {
     return describeHead(fileURLToPath(packageFileUrl("./")));
   } catch {
