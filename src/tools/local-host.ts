@@ -2,12 +2,25 @@
 // 路径围栏沿用 paths.ts 的 realpath 口径；进程执行、文件清单与 .cmd / .bat 解析从 run-command.ts 原样平移，行为不变。
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import {
+  closeSync,
+  type Dirent,
+  existsSync,
+  constants as fsConstants,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
   assertWritePathUnchanged,
+  createWorkspaceFile,
+  resolveWorkspaceCreatePath,
   resolveWorkspacePath,
   resolveWorkspaceWritePath,
 } from "./paths.ts";
@@ -95,9 +108,16 @@ export function createLocalWorkspaceHost(
       return (await stat(resolvedPath)).isFile();
     },
     readText: (resolvedPath) => readFile(resolvedPath, "utf8"),
+    readBytes: (resolvedPath) => readFile(resolvedPath),
     async writeText(resolvedPath, content) {
       assertWritePathUnchanged(resolvedPath);
       await writeFile(resolvedPath, content, "utf8");
+    },
+    async resolveForCreate(inputPath) {
+      return resolveWorkspaceCreatePath(workspaceRoot, inputPath);
+    },
+    async createText(resolvedPath, content) {
+      createWorkspaceFile(resolvedPath, content);
     },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
     async listFiles(limit) {
@@ -170,35 +190,186 @@ export function asWorkspaceHost(workspace: string | WorkspaceHost): WorkspaceHos
   return typeof workspace === "string" ? createLocalWorkspaceHost(workspace) : workspace;
 }
 
-// 输出收集：全量计字节数与哈希，只留开头 maxBytes 字节（本地与容器实现共用）
+// 输出收集：全量计字节数与哈希，只留开头 maxBytes 字节（本地与容器实现共用）。
+// 决策 356：给了 tailBytes 另留末尾、另计总行数；给了 fullOutput 且输出超过开头加末尾两段时，从超过的那一刻起把全量输出
+// （含此前留在内存里的部分）写进文件，至多 fullOutput.maxBytes 字节。文件以独占方式新建、不跟随链接；建目录、打开或写入
+// 出错（磁盘满、文件已在、被换成链接）即停止落盘、关掉文件，照常给出头尾并在结果里写明原因，不让异常漏到数据回调外。
+// 开头与末尾按字节截取后对齐到 UTF-8 字符边界（不出现半个字符）
 export interface HeadCollector {
   push(chunk: Buffer): void;
   bytes(): number;
   // 收尾：哈希只能取一次
-  finish(): { outputBytes: number; outputHash: string; output: string };
+  finish(): Pick<
+    HostExecResult,
+    | "outputBytes"
+    | "outputHash"
+    | "output"
+    | "tail"
+    | "outputLines"
+    | "fullOutputSaved"
+    | "fullOutputError"
+  >;
 }
 
-export function createHeadCollector(maxBytes: number): HeadCollector {
+// Windows 没有 O_NOFOLLOW；独占新建本身不跟随最后一级的链接
+const SPILL_FLAGS =
+  fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+// 开头去掉末尾不完整的 UTF-8 字符
+function utf8Head(buffer: Buffer): Buffer {
+  let index = buffer.length - 1;
+  let continuation = 0;
+  while (index >= 0 && continuation < 3 && ((buffer[index] ?? 0) & 0xc0) === 0x80) {
+    index -= 1;
+    continuation += 1;
+  }
+  if (index < 0) return buffer;
+  const lead = buffer[index] ?? 0;
+  const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return width > continuation + 1 ? buffer.subarray(0, index) : buffer;
+}
+
+// 末尾去掉开头不完整的 UTF-8 字符（续字节）
+function utf8Tail(buffer: Buffer): Buffer {
+  let index = 0;
+  while (index < buffer.length && index < 3 && ((buffer[index] ?? 0) & 0xc0) === 0x80) index += 1;
+  return buffer.subarray(index);
+}
+
+export interface CollectorExtras {
+  tailBytes?: number;
+  fullOutput?: { path: string; maxBytes: number };
+}
+
+export function createHeadCollector(maxBytes: number, extras: CollectorExtras = {}): HeadCollector {
   const hash = createHash("sha256");
   const head: Buffer[] = [];
   let headBytes = 0;
   let outputBytes = 0;
+  const tailBytes = extras.tailBytes ?? 0;
+  // 末尾：最近 tailBytes 字节（按块存，超出的从前面丢）
+  const tail: Buffer[] = [];
+  let tailHeld = 0;
+  let newlines = 0;
+  let lastByte: number | undefined;
+  let spill: { fd: number; written: number; partial: boolean } | undefined;
+  let spillError: string | undefined;
+  const stopSpill = (error: unknown): void => {
+    spillError = error instanceof Error ? error.message : String(error);
+    if (spill !== undefined) {
+      try {
+        closeSync(spill.fd);
+      } catch {
+        // 已关
+      }
+      spill = undefined;
+    }
+  };
+  const spillWrite = (chunk: Buffer): void => {
+    if (spill === undefined || extras.fullOutput === undefined) return;
+    const room = extras.fullOutput.maxBytes - spill.written;
+    const piece = room < chunk.length ? chunk.subarray(0, Math.max(0, room)) : chunk;
+    try {
+      if (piece.length > 0) {
+        writeSync(spill.fd, piece);
+        spill.written += piece.length;
+      }
+    } catch (error) {
+      stopSpill(error);
+      return;
+    }
+    if (piece.length < chunk.length) spill.partial = true;
+  };
+  const tailBuffer = (): Buffer => Buffer.concat(tail).subarray(Math.max(0, tailHeld - tailBytes));
   return {
     push(chunk) {
       hash.update(chunk);
+      const before = outputBytes;
       outputBytes += chunk.length;
+      if (tailBytes > 0) {
+        for (const byte of chunk) if (byte === 0x0a) newlines += 1;
+        if (chunk.length > 0) lastByte = chunk[chunk.length - 1];
+        if (
+          extras.fullOutput !== undefined &&
+          spill === undefined &&
+          spillError === undefined &&
+          outputBytes > maxBytes + tailBytes
+        ) {
+          // 头一回超过：此前的输出全在开头与末尾两段里（开头之后的部分是末尾缓冲的最后 before − 开头 字节）；
+          // 先于本块进开头缓冲，免得本块的开头一段写两遍
+          try {
+            mkdirSync(path.dirname(extras.fullOutput.path), { recursive: true });
+            spill = {
+              fd: openSync(extras.fullOutput.path, SPILL_FLAGS, 0o600),
+              written: 0,
+              partial: false,
+            };
+          } catch (error) {
+            stopSpill(error);
+          }
+          spillWrite(Buffer.concat(head));
+          const kept = tailBuffer();
+          spillWrite(kept.subarray(kept.length - Math.max(0, before - headBytes)));
+        }
+        spillWrite(chunk);
+      }
       if (headBytes < maxBytes) {
         const piece = chunk.subarray(0, maxBytes - headBytes);
         head.push(piece);
         headBytes += piece.length;
       }
+      if (tailBytes <= 0) return;
+      tail.push(chunk);
+      tailHeld += chunk.length;
+      while (tail.length > 1 && tailHeld - (tail[0]?.length ?? 0) >= tailBytes) {
+        tailHeld -= tail.shift()?.length ?? 0;
+      }
     },
     bytes: () => outputBytes,
-    finish: () => ({
-      outputBytes,
-      outputHash: hash.digest("hex"),
-      output: Buffer.concat(head).toString("utf8"),
-    }),
+    finish: () => {
+      const headAll = Buffer.concat(head);
+      const headText = (outputBytes > headBytes ? utf8Head(headAll) : headAll).toString("utf8");
+      const base = { outputBytes, outputHash: hash.digest("hex") };
+      if (tailBytes <= 0) {
+        return { ...base, output: headText };
+      }
+      const outputLines = newlines + (lastByte !== undefined && lastByte !== 0x0a ? 1 : 0);
+      const kept = tailBuffer();
+      if (spill !== undefined) {
+        try {
+          closeSync(spill.fd);
+        } catch (error) {
+          stopSpill(error);
+        }
+      }
+      if (outputBytes <= maxBytes + tailBytes) {
+        // 没超过：开头之后的部分是末尾缓冲的最后 总量 − 开头 字节，拼回全量
+        const rest = kept.subarray(kept.length - Math.max(0, outputBytes - headBytes));
+        return {
+          ...base,
+          output: Buffer.concat([Buffer.concat(head), rest]).toString("utf8"),
+          outputLines,
+        };
+      }
+      return {
+        ...base,
+        output: headText,
+        tail: utf8Tail(kept).toString("utf8"),
+        outputLines,
+        ...(spill !== undefined && spillError === undefined
+          ? { fullOutputSaved: { bytes: spill.written, partial: spill.partial } }
+          : {}),
+        ...(spillError !== undefined ? { fullOutputError: spillError } : {}),
+      };
+    },
+  };
+}
+
+// 执行选项里与头尾保留、全文落盘有关的部分（本地与容器实现共用）
+export function collectorExtras(options: HostExecOptions): CollectorExtras {
+  return {
+    ...(options.tailBytes !== undefined ? { tailBytes: options.tailBytes } : {}),
+    ...(options.fullOutput !== undefined ? { fullOutput: options.fullOutput } : {}),
   };
 }
 
@@ -215,7 +386,7 @@ function runLocalProcess(
   // 分开的 stdout / stderr 各自保留的上限（缺省 HOST_SEPARATE_STREAM_CAP）
   streamCap: number = HOST_SEPARATE_STREAM_CAP
 ): Promise<HostExecResult> {
-  const collected = createHeadCollector(options.maxOutputBytes);
+  const collected = createHeadCollector(options.maxOutputBytes, collectorExtras(options));
   const stdoutOnly = createHeadCollector(streamCap);
   const stderrOnly = createHeadCollector(streamCap);
   let timedOut = false;

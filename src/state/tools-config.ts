@@ -1,21 +1,51 @@
-// 工具的上限类设置：settings.json 的 tools 一节，按工具分子键（决策 368 起）。目前只有 grep、glob 的结果条数上限；
-// read_file 的字节与单行上限、run_command 的头尾与落盘上限以后也放在这一节。
+// 工具的上限类设置：settings.json 的 tools 一节，按工具分子键（小驼峰）。grep、glob 的结果条数上限（决策 368），
+// read_file 的单次字节与单行字符上限（决策 357），run_command 的输出头尾与落盘总量（决策 356）；不给的取缺省。
 import { type Static, Type } from "typebox";
 
 export const DEFAULT_GREP_MAX_RESULTS = 200;
 export const DEFAULT_GLOB_MAX_RESULTS = 100;
+export const DEFAULT_READ_FILE_MAX_BYTES = 50 * 1024;
+export const DEFAULT_READ_FILE_MAX_LINE_CHARS = 2000;
+export const DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES = 8 * 1024;
+export const DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES = 24 * 1024;
+export const DEFAULT_SAVED_OUTPUTS_MAX_BYTES = 200 * 1024 * 1024;
+
+const Closed = { additionalProperties: false } as const;
 
 const MaxResultsSchema = Type.Object(
   { maxResults: Type.Optional(Type.Integer({ minimum: 1 })) },
-  { additionalProperties: false }
+  Closed
 );
 
 export const ToolsSectionSchema = Type.Object(
   {
     grep: Type.Optional(MaxResultsSchema),
     glob: Type.Optional(MaxResultsSchema),
+    readFile: Type.Optional(
+      Type.Object(
+        {
+          // 单次读取返回的正文至多这么多字节
+          maxBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+          // 单行超过这么多字符即截断并注明
+          maxLineChars: Type.Optional(Type.Integer({ minimum: 1 })),
+        },
+        Closed
+      )
+    ),
+    runCommand: Type.Optional(
+      Type.Object(
+        {
+          // 输出超长时保留的开头与末尾（字节）
+          outputHeadBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+          outputTailBytes: Type.Optional(Type.Integer({ minimum: 0 })),
+          // 每个会话落盘的完整输出总量上限（字节），满了删最旧的
+          savedOutputsMaxBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+        },
+        Closed
+      )
+    ),
   },
-  { additionalProperties: false }
+  Closed
 );
 export type ToolsSection = Static<typeof ToolsSectionSchema>;
 
@@ -28,5 +58,32 @@ export function searchLimits(section: ToolsSection | undefined): SearchLimits {
   return {
     grepMaxResults: section?.grep?.maxResults ?? DEFAULT_GREP_MAX_RESULTS,
     globMaxResults: section?.glob?.maxResults ?? DEFAULT_GLOB_MAX_RESULTS,
+  };
+}
+
+export interface ReadFileLimits {
+  maxBytes: number;
+  maxLineChars: number;
+}
+
+export function readFileLimits(section: ToolsSection | undefined): ReadFileLimits {
+  return {
+    maxBytes: section?.readFile?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES,
+    maxLineChars: section?.readFile?.maxLineChars ?? DEFAULT_READ_FILE_MAX_LINE_CHARS,
+  };
+}
+
+export interface RunCommandOutputLimits {
+  headBytes: number;
+  tailBytes: number;
+  savedOutputsMaxBytes: number;
+}
+
+export function runCommandOutputLimits(section: ToolsSection | undefined): RunCommandOutputLimits {
+  return {
+    headBytes: section?.runCommand?.outputHeadBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES,
+    tailBytes: section?.runCommand?.outputTailBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES,
+    savedOutputsMaxBytes:
+      section?.runCommand?.savedOutputsMaxBytes ?? DEFAULT_SAVED_OUTPUTS_MAX_BYTES,
   };
 }

@@ -14,6 +14,16 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { PIGEON_DIR } from "../state/paths.ts";
+import {
+  DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES,
+  DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES,
+} from "../state/tools-config.ts";
+import {
+  type CommandOutputStore,
+  composeOutput,
+  OUTPUTS_URI_PREFIX,
+  type OutputSlot,
+} from "./command-output.ts";
 import { createLocalWorkspaceHost, windowsPathProgram, windowsScript } from "./local-host.ts";
 import {
   type HostExecPlan,
@@ -27,6 +37,40 @@ import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.
 export const RUN_COMMAND_TOOL = "run_command";
 export const DEFAULT_RUN_COMMAND_TIMEOUT_MS = 120_000;
 export const DEFAULT_RUN_COMMAND_OUTPUT_BYTES = 32 * 1024;
+// 决策 358：命令串长度。参数 schema 的字符上限只防误传巨大参数；能否交给进程按执行端与平台另判（commandTooLong）
+export const RUN_COMMAND_MAX_CHARS = 65_536;
+// Linux 单个参数至多 128 KiB（命令串作为 sh -c 的一个参数，或经 docker exec 交进容器），按 UTF-8 字节计、留出余量
+export const POSIX_COMMAND_MAX_BYTES = 124 * 1024;
+// Windows 的进程命令行至多 32767 个 UTF-16 单位，经 cmd.exe 至多 8191 个字符（宿主为 Windows 时 docker 客户端也受前者限制）
+export const WINDOWS_COMMAND_MAX_CHARS = 32_000;
+export const WINDOWS_CMD_MAX_CHARS = 8_000;
+
+// 命令串超出本执行端能执行的长度时给出原因（不等到拉进程才以 E2BIG 之类失败）；platform 为命令执行的平台，
+// localPlatform 为拉起进程的宿主平台（容器执行端由宿主上的 docker 客户端拉起）
+export function commandTooLong(
+  command: string,
+  platform: NodeJS.Platform,
+  mode: CommandInspection["mode"],
+  localPlatform: NodeJS.Platform = process.platform
+): string | undefined {
+  const bytes = Buffer.byteLength(command, "utf8");
+  const limits: string[] = [];
+  if (platform !== "win32" && bytes > POSIX_COMMAND_MAX_BYTES) {
+    limits.push(`单个参数至多约 ${POSIX_COMMAND_MAX_BYTES} 字节（UTF-8）`);
+  }
+  if (localPlatform === "win32" || platform === "win32") {
+    const viaCmd = platform === "win32" && (mode === "shell" || mode === "launcher");
+    const max = viaCmd ? WINDOWS_CMD_MAX_CHARS : WINDOWS_COMMAND_MAX_CHARS;
+    if (command.length > max) {
+      limits.push(`Windows ${viaCmd ? "经 cmd.exe 的命令行" : "命令行"}至多约 ${max} 字符`);
+    }
+  }
+  if (limits.length === 0) return undefined;
+  return (
+    `命令过长（${bytes} 字节、${command.length} 字符），超过本执行端能执行的上限：${limits.join("；")}。` +
+    "请先用 write_file 把内容写成脚本文件，再用 run_command 运行该脚本"
+  );
+}
 // 工作树文件清单上限：超出不做完整差异比对（标记 truncated），避免大目录拖垮每次执行
 export const FILE_SNAPSHOT_LIMIT = 20_000;
 
@@ -59,7 +103,7 @@ const SHELL_CHARS = new Set(["|", ";", "&", "<", ">", "`"]);
 
 export const RunCommandParamsSchema = Type.Object({
   // 完整命令串，或设置的 commands 一节登记的短名
-  command: Type.String({ minLength: 1, maxLength: 4000 }),
+  command: Type.String({ minLength: 1, maxLength: RUN_COMMAND_MAX_CHARS }),
 });
 export type RunCommandParams = Static<typeof RunCommandParamsSchema>;
 
@@ -102,9 +146,16 @@ export interface ExecEvidence {
   outputBytes: number;
   // 全量输出（stdout 与 stderr 按到达顺序）的 sha256
   outputHash: string;
-  // 截断后的输出文本
+  // 截断后的输出文本（保留头尾时为开头一段）
   output: string;
   truncated: boolean;
+  // 决策 356：保留头尾且截断时的末尾一段与输出总行数
+  outputTail?: string;
+  outputLines?: number;
+  // 决策 356：完整输出的落盘位置（虚拟路径）；partial 为超过落盘上限只存了前面部分
+  savedOutput?: { uri: string; bytes: number; partial: boolean };
+  // 决策 356：截断了但全文未能保存的原因（磁盘满、落盘目录被换成链接等）
+  savedOutputError?: string;
   fileChanges: FileChanges;
   // 决策 333：超出沙箱内存上限
   memoryLimitExceeded?: MemoryLimitExceeded;
@@ -144,7 +195,10 @@ export interface RunCommandOptions {
   // 在场 = 只允许清单内的短名或其展开命令（tester 等角色）
   allowlist?: readonly string[];
   timeoutMs?: number;
+  // 旧口径：只留开头这么多字节、不留末尾（给了它且没给 output 即按旧口径）
   maxOutputBytes?: number;
+  // 决策 356：输出超长时保留的开头与末尾（缺省 8 KiB 与 24 KiB），与存完整输出的会话落盘目录（不给即不落盘）
+  output?: { headBytes?: number; tailBytes?: number; store?: CommandOutputStore };
   // 环境变量来源（缺省 process.env；只透传白名单）
   env?: NodeJS.ProcessEnv;
   // 平台（缺省 process.platform；决定 .cmd / .bat 解析与 shell 程序）；只对缺省的本地执行端生效，注入 host 时以 host 为准
@@ -200,7 +254,9 @@ export function runCommandTexts(input: {
     prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令${promptShell}；${promptApproval}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
-      `可用设置 commands 一节登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。`,
+      `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
+      `输出过长时自动保留开头与结尾，中间注明省略的行数，并把全文存为 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>，可用 read_file 按需读取，` +
+      "不必自己用 tail、head 截取。",
   };
 }
 
@@ -280,7 +336,15 @@ export function createRunCommandTool(
   const root = host.root;
   const platform = host.platform;
   const timeoutMs = options.timeoutMs ?? DEFAULT_RUN_COMMAND_TIMEOUT_MS;
-  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_BYTES;
+  // 决策 356：缺省保留开头与末尾；只给了旧口径的 maxOutputBytes 时只留开头
+  const legacyHeadOnly = options.output === undefined && options.maxOutputBytes !== undefined;
+  const headBytes = legacyHeadOnly
+    ? (options.maxOutputBytes as number)
+    : (options.output?.headBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES);
+  const tailBytes = legacyHeadOnly
+    ? 0
+    : (options.output?.tailBytes ?? DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES);
+  const store = options.output?.store;
   const env = allowedEnv(options.env ?? process.env);
   // 治理层按调用授予的 shell 确认（一次一用）
   const shellAuthorized = new Set<string>();
@@ -426,9 +490,41 @@ export function createRunCommandTool(
           `需要经 shell 运行（${inspection.shellReason}），未经人确认 shell，拒绝执行：${command}`
         );
       }
+      const tooLong = commandTooLong(command, platform, inspection.mode);
+      if (tooLong !== undefined) {
+        throw new RunCommandError(tooLong);
+      }
       const plan = spawnPlan(inspection, env, platform);
       const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
-      const run = await host.exec(plan, { env, timeoutMs, maxOutputBytes, signal });
+      // 决策 356：截断时完整输出写进本会话落盘目录的下一个编号（没截断不建文件）；落盘目录不可用时照常执行、只是不落盘
+      let slot: OutputSlot | undefined;
+      let slotError: string | undefined;
+      if (tailBytes > 0 && store !== undefined) {
+        try {
+          slot = store.next();
+        } catch (error) {
+          slotError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const run = await host.exec(plan, {
+        env,
+        timeoutMs,
+        maxOutputBytes: headBytes,
+        ...(tailBytes > 0 ? { tailBytes } : {}),
+        ...(slot !== undefined && store !== undefined
+          ? { fullOutput: { path: slot.file, maxBytes: store.maxBytes } }
+          : {}),
+        signal,
+      });
+      const saved =
+        slot !== undefined && run.fullOutputSaved !== undefined
+          ? { uri: slot.uri, ...run.fullOutputSaved }
+          : undefined;
+      if (slot !== undefined && saved !== undefined) store?.commit(slot);
+      const savedOutputError =
+        run.tail !== undefined && saved === undefined && store !== undefined
+          ? (slotError ?? run.fullOutputError)
+          : undefined;
       const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
       const evidence: ExecEvidence = {
         command,
@@ -443,7 +539,11 @@ export function createRunCommandTool(
         outputBytes: run.outputBytes,
         outputHash: run.outputHash,
         output: run.output,
-        truncated: run.outputBytes > maxOutputBytes,
+        truncated: run.outputBytes > headBytes + tailBytes,
+        ...(run.tail !== undefined ? { outputTail: run.tail } : {}),
+        ...(run.outputLines !== undefined ? { outputLines: run.outputLines } : {}),
+        ...(saved !== undefined ? { savedOutput: saved } : {}),
+        ...(savedOutputError !== undefined ? { savedOutputError } : {}),
         fileChanges: diffFiles(before, after),
         ...(run.memoryLimitExceeded !== undefined
           ? { memoryLimitExceeded: run.memoryLimitExceeded }
@@ -457,14 +557,14 @@ export function createRunCommandTool(
       }
       if (run.timedOut) {
         throw new RunCommandTimeoutError(
-          `命令超时（${timeoutMs} 毫秒）已终止：${command}\n${resultText(evidence, maxOutputBytes)}`
+          `命令超时（${timeoutMs} 毫秒）已终止：${command}\n${resultText(evidence, headBytes)}`
         );
       }
       if (signal?.aborted === true) {
         throw new Error(`命令被中止：${command}`);
       }
       return {
-        content: [{ type: "text", text: resultText(evidence, maxOutputBytes) }],
+        content: [{ type: "text", text: resultText(evidence, headBytes) }],
         details: evidence,
       };
     },
@@ -561,7 +661,7 @@ export function planMcpLaunch(input: {
   };
 }
 
-function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
+function resultText(evidence: ExecEvidence, headBytes: number): string {
   const changes = evidence.fileChanges;
   const route = evidence.shell ? "（经 shell）" : evidence.launcher ? "（经 cmd.exe 启动器）" : "";
   const lines = [
@@ -570,10 +670,31 @@ function resultText(evidence: ExecEvidence, maxOutputBytes: number): string {
     ...(evidence.memoryLimitExceeded !== undefined
       ? [memoryLimitText(evidence.memoryLimitExceeded)]
       : []),
-    evidence.output,
   ];
-  if (evidence.truncated) {
-    lines.push(`…（输出已截断：共 ${evidence.outputBytes} 字节，保留前 ${maxOutputBytes} 字节）`);
+  if (evidence.outputTail !== undefined) {
+    // 决策 356：开头、省略标注、末尾；存下了全文即给出虚拟路径与总行数
+    lines.push(
+      composeOutput({
+        head: evidence.output,
+        tail: evidence.outputTail,
+        totalBytes: evidence.outputBytes,
+        totalLines: evidence.outputLines ?? 0,
+      }).text
+    );
+    const saved = evidence.savedOutput;
+    if (saved !== undefined) {
+      lines.push(
+        `全文共 ${evidence.outputLines ?? 0} 行，已存为 ${saved.uri}，可用 read_file 按 offset 读取需要的一段` +
+          (saved.partial ? `（全文超过落盘上限，只存了前 ${saved.bytes} 字节）` : "")
+      );
+    } else if (evidence.savedOutputError !== undefined) {
+      lines.push(`全文未能保存（${evidence.savedOutputError}），只有上面的开头与末尾`);
+    }
+  } else {
+    lines.push(evidence.output);
+    if (evidence.truncated) {
+      lines.push(`…（输出已截断：共 ${evidence.outputBytes} 字节，保留前 ${headBytes} 字节）`);
+    }
   }
   const listed = (label: string, files: string[]) =>
     files.length > 0

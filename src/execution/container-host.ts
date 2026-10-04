@@ -10,12 +10,18 @@
 // 宿主环境变量不进容器：容器内环境由镜像与本实现的 env 选项决定。
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { createHeadCollector, HOST_SEPARATE_STREAM_CAP } from "../tools/local-host.ts";
 import {
+  collectorExtras,
+  createHeadCollector,
+  HOST_SEPARATE_STREAM_CAP,
+} from "../tools/local-host.ts";
+import {
+  hasControlChar,
   pathChanged,
   symlinkRefused,
   WorkspacePathError,
   WorkspacePathNotFoundError,
+  WorkspaceWriteRefusedError,
 } from "../tools/paths.ts";
 import {
   classifyRealPath,
@@ -132,6 +138,46 @@ const WRITE_SCRIPT = [
   `[ -e "$1" ] || exit ${EXIT_MISSING}`,
   `t="$(readlink -f -- "$1")"; [ "$t" = "$1" ] || { printf '%s\\n' "$t"; exit ${EXIT_CHANGED}; }`,
   'cat > "$1"',
+].join("\n");
+// 决策 358（write_file）：$1 为模型给的路径（原样，不做词法折叠），$2 为工作区根。路径按字节原样使用：拆分只用参数展开、
+// 不用命令替换（命令替换会吃掉结尾的换行）；真实路径用 readlink -f 按内核顺序解析（l/.. 走链接目标的上级，与受保护路径
+// 的容器判定同一口径），取值时补一个点再去掉，保住结尾换行，输出以 NUL 分隔。
+// 目标已存在：本身是链接即拒写（EXIT_SYMLINK），否则输出真实路径、退出码 0；不存在：找路径上最深的已存在一层（须是目录，
+// 否则 EXIT_NOT_DIR），尚不存在的各段不得是空段、. 或 ..（EXIT_BAD_PART），输出那一层的真实路径与其余各段，退出码 EXIT_NEW
+const EXIT_NEW = 7;
+const EXIT_NOT_DIR = 8;
+const EXIT_EXISTS = 9;
+const EXIT_BAD_PART = 10;
+const RESOLVE_FOR_CREATE_SCRIPT = [
+  'case "$1" in /*) p="$1" ;; *) p="$2/$1" ;; esac',
+  `[ -L "$p" ] && { readlink -- "$p"; exit ${EXIT_SYMLINK}; }`,
+  `if [ -e "$p" ]; then r="$(readlink -f -- "$p"; echo .)"; printf '%s\\0' "\${r%??}"; exit 0; fi`,
+  'd="$p"; rest=""',
+  'while [ ! -e "$d" ] && [ ! -L "$d" ]; do',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: shell 的参数展开
+  '  b="${d##*/}"',
+  `  case "$b" in "" | . | ..) exit ${EXIT_BAD_PART} ;; esac`,
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: shell 的参数展开
+  '  rest="/$b$rest"; d="${d%/*}"; [ -n "$d" ] || d=/',
+  "done",
+  `[ -d "$d" ] || exit ${EXIT_NOT_DIR}`,
+  'r="$(readlink -f -- "$d"; echo .)"',
+  `printf '%s\\0%s\\0' "\${r%??}" "$rest"; exit ${EXIT_NEW}`,
+].join("\n");
+// 新建（照 334 复核）：$1 为 resolveForCreate 给出的规范路径。目标已存在即不写；路径上最深的已存在一层重新解析须得到它自己；
+// 补建中间目录后以 noclobber 写入。同样只用参数展开拆路径
+const CREATE_SCRIPT = [
+  `if [ -e "$1" ] || [ -L "$1" ]; then exit ${EXIT_EXISTS}; fi`,
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: shell 的参数展开
+  'parent="${1%/*}"; [ -n "$parent" ] || parent=/',
+  'd="$parent"',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: shell 的参数展开
+  'while [ ! -e "$d" ] && [ ! -L "$d" ]; do d="${d%/*}"; [ -n "$d" ] || d=/; done',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: shell 的参数展开
+  'r="$(readlink -f -- "$d"; echo .)"; r="${r%??}"',
+  `[ "$r" = "$d" ] || { printf '%s' "$r"; exit ${EXIT_CHANGED}; }`,
+  'mkdir -p -- "$parent" || exit 1',
+  `set -C; cat > "$1" || { [ -e "$1" ] && exit ${EXIT_EXISTS}; exit 1; }`,
 ].join("\n");
 
 export interface HelperResult {
@@ -263,7 +309,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     execOptions: HostExecOptions,
     streamCap: number = HOST_SEPARATE_STREAM_CAP
   ): Promise<HostExecResult> => {
-    const collected = createHeadCollector(execOptions.maxOutputBytes);
+    const collected = createHeadCollector(execOptions.maxOutputBytes, collectorExtras(execOptions));
     // 分开的两路输出（钩子协议要区分 stdout 与 stderr；上限同本机，辅助程序另给）
     const stdoutOnly = createHeadCollector(streamCap);
     const stderrOnly = createHeadCollector(streamCap);
@@ -556,6 +602,60 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
       }
+    },
+    async resolveForCreate(inputPath) {
+      const base = await resolveRoot();
+      // 不做词法折叠：原样交给容器，按内核顺序解析（与受保护路径的容器判定同一口径）
+      const result = await helper(false, trustedShell(RESOLVE_FOR_CREATE_SCRIPT, inputPath, root));
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      const stdout = result.stdout.toString("utf8");
+      if (result.exitCode === EXIT_SYMLINK) {
+        throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
+      }
+      if (result.exitCode === EXIT_NOT_DIR) {
+        throw new WorkspacePathError(`路径上有一层不是目录：${inputPath}`);
+      }
+      if (result.exitCode === EXIT_BAD_PART) {
+        throw new WorkspacePathError(`路径里尚不存在的部分不能含空段、. 或 ..：${inputPath}`);
+      }
+      if (result.exitCode !== 0 && result.exitCode !== EXIT_NEW) {
+        return { path: checkResolved(inputPath, result, "", base), exists: true };
+      }
+      const [real = "", rest = ""] = stdout.split("\0");
+      const target = result.exitCode === EXIT_NEW ? `${real === "/" ? "" : real}${rest}` : real;
+      if (target === "" || hasControlChar(target)) {
+        throw new WorkspacePathError(
+          `路径解析结果为空或含控制字符，拒绝写入：${JSON.stringify(target)}`
+        );
+      }
+      return {
+        path: checkResolved(inputPath, { ...result, exitCode: 0 }, target, base),
+        exists: result.exitCode === 0,
+      };
+    },
+    async createText(resolvedPath, content) {
+      const result = await helper(true, trustedShell(CREATE_SCRIPT, resolvedPath), content);
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      if (result.exitCode === EXIT_EXISTS) {
+        throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+      }
+      if (result.exitCode === EXIT_CHANGED) {
+        throw pathChanged(resolvedPath, result.stdout.toString("utf8"));
+      }
+      if (result.exitCode !== 0) {
+        throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
+      }
+    },
+    async readBytes(resolvedPath) {
+      const result = await helper(false, ["cat", "--", resolvedPath]);
+      if (result.exitCode !== 0) {
+        throw new ContainerHostError(`读取失败：${resolvedPath}（${result.stderr.trim()}）`);
+      }
+      return result.stdout;
     },
     exec(plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> {
       return options.memoryLimit === undefined

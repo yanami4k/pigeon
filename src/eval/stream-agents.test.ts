@@ -452,6 +452,7 @@ const PIGEON_STREAM_TOOLS = {
     "read_session_entry",
     "run_command",
     "search_sessions",
+    "write_file",
   ],
   "search-only": [
     "edit_file",
@@ -462,9 +463,10 @@ const PIGEON_STREAM_TOOLS = {
     "read_session_entry",
     "run_command",
     "search_sessions",
+    "write_file",
   ],
-  "push-only": ["edit_file", "glob", "grep", "read_file", "run_command"],
-  neither: ["edit_file", "glob", "grep", "read_file", "run_command"],
+  "push-only": ["edit_file", "glob", "grep", "read_file", "run_command", "write_file"],
+  neither: ["edit_file", "glob", "grep", "read_file", "run_command", "write_file"],
 } as const;
 
 for (const condition of ["search-push", "search-only", "push-only", "neither"] as const) {

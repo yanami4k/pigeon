@@ -20,7 +20,7 @@ function textOf(result: { content: readonly { type: string; text?: string }[] })
   return result.content.map((block) => block.text ?? "").join("");
 }
 
-test("replace 编辑：原文唯一时替换并写回；回执形如「已在 X 应用 1 处替换（+a −b 行）」，不回传 diff 或锚点", async () => {
+test("replace 编辑：原文唯一时替换并写回；回执以「已在 X 应用 1 处替换（+a −b 行）」开头，不回传 diff 或锚点", async () => {
   const { root, cleanup } = makeWorkspace({ "a.ts": "alpha\nbeta\ngamma\n" });
   try {
     const tool = createReplaceEditTool(root);
@@ -30,7 +30,7 @@ test("replace 编辑：原文唯一时替换并写回；回执形如「已在 X 
       new_string: "BETA",
     });
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
-    assert.equal(textOf(result), "已在 a.ts 应用 1 处替换（+1 −1 行）");
+    assert.ok(textOf(result).startsWith("已在 a.ts 应用 1 处替换（+1 −1 行）"));
 
     const multi = await tool.execute("tc-2", {
       path: "a.ts",
@@ -38,7 +38,7 @@ test("replace 编辑：原文唯一时替换并写回；回执形如「已在 X 
       new_string: "delta",
     });
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\ndelta\n");
-    assert.equal(textOf(multi), "已在 a.ts 应用 1 处替换（+1 −2 行）");
+    assert.ok(textOf(multi).startsWith("已在 a.ts 应用 1 处替换（+1 −2 行）"));
   } finally {
     cleanup();
   }

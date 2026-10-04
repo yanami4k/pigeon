@@ -2,13 +2,25 @@
 // 输出与 edit_file 协同（M3 切片 2）：头部带全文件快照标签 [PATH#TAG]，每行带 hashline 锚点
 // N#TAG——edit_file 的快照预检与锚点寻址完全消费这里给出的标签。
 // 行为参考 harness/tools/read 笔记：offset 1-based；窗口截断时给出下一窗口提示。
+// 决策 357：单次正文至多 maxBytes 字节（缺省 50 KiB），单行超过 maxLineChars 字符（缺省 2000）截断并注明；按字节上限停下时
+// 照翻页提示给出续读的 offset。
+// 决策 356：pigeon://outputs/<会话号>/<编号> 是落盘的命令输出，在路径判定之前识别，直接从会话落盘目录流式读、只留需要的
+// 那段行，不经执行端。
+// 决策 358：成功读取（含分段）后在读取记录里记下整个文件字节的哈希，write_file 据此判断"读过且读后未变"；失败的读取不记。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import {
+  DEFAULT_READ_FILE_MAX_BYTES,
+  DEFAULT_READ_FILE_MAX_LINE_CHARS,
+  type ReadFileLimits,
+} from "../state/tools-config.ts";
+import { type CommandOutputStore, isOutputsUri, OutputPathError } from "./command-output.ts";
 import type { EditMode } from "./edit-mode.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
 import { WorkspacePathError } from "./paths.ts";
 import { type ReadTarget, readDenyList } from "./read-deny.ts";
+import type { FileReadTracker } from "./read-tracker.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
 
@@ -28,7 +40,7 @@ export const ReadFileParamsSchema = Type.Object({
 export type ReadFileParams = Static<typeof ReadFileParamsSchema>;
 
 export interface ReadFileDetails {
-  // 解析并围栏后的规范路径（本地为宿主绝对路径，容器工作区为容器内路径）
+  // 解析并围栏后的规范路径（本地为宿主绝对路径，容器工作区为容器内路径；落盘输出为宿主上的落盘文件）
   resolvedPath: string;
   // 全文件快照标签：edit_file 的 snapshot 参数来源
   snapshot: string;
@@ -36,6 +48,9 @@ export interface ReadFileDetails {
   offset: number;
   limit: number;
   returnedLines: number;
+  // 决策 357：本次截断显示的超长行数；按字节上限提前停下
+  truncatedLines?: number;
+  byteLimited?: boolean;
 }
 
 // 决策 355：工作区以外的读取怎样放行——放手模式自动放行（allowed）、非放手模式经人批准（approval）、
@@ -49,6 +64,21 @@ export interface ReadFileToolOptions {
   outsideReads?: OutsideReadMode;
   // 决策 355：设置追加的禁读项（permissions.readDeny）；内置名单总在
   readDeny?: readonly string[];
+  // 决策 357：单次字节与单行字符上限；缺省 50 KiB 与 2000
+  limits?: ReadFileLimits;
+  // 决策 356：本会话的落盘目录（不给即不认虚拟路径）
+  outputs?: CommandOutputStore;
+  // 决策 358：本会话的读取记录
+  reads?: FileReadTracker;
+}
+
+// 读到的内容：总行数、按行号取行，与读取成功后的收尾
+interface Loaded {
+  resolvedPath: string;
+  snapshot: string;
+  totalLines: number;
+  line(number: number): string;
+  done(): void;
 }
 
 // 工作区以外的文件未获授权：路径围栏错误的一种
@@ -85,6 +115,54 @@ export function createReadFileTool(
       ? host.resolveForRead(inputPath, deny)
       : { path: await host.resolveExisting(inputPath), outside: false };
   const lead = outsideReads === "refused" ? "读取工作区内文本文件。" : "读取文本文件。";
+  const maxBytes = options.limits?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES;
+  const maxLineChars = options.limits?.maxLineChars ?? DEFAULT_READ_FILE_MAX_LINE_CHARS;
+  // 取内容：虚拟路径先于路径判定，流式读会话落盘目录、只留需要的那段行；其余经执行端围栏后按字节整读。
+  // done 在读取成功（offset 合法、已排版）后才调用，那时才记进读取记录
+  const load = async (
+    inputPath: string,
+    offset: number,
+    limit: number,
+    approved: boolean
+  ): Promise<Loaded> => {
+    if (isOutputsUri(inputPath)) {
+      if (options.outputs === undefined) {
+        throw new OutputPathError(`本会话没有落盘的命令输出：${inputPath}`);
+      }
+      const window = await options.outputs.readWindow(inputPath, offset, limit);
+      return {
+        resolvedPath: window.file,
+        snapshot: window.sha256.slice(0, 16),
+        totalLines: window.totalLines,
+        line: (number) => window.lines[number - offset] ?? "",
+        done: () => {},
+      };
+    }
+    // 决策 355：工作区以外的文件须获授权；禁读名单由读档解析判定
+    const target = await resolveTarget(inputPath);
+    if (target.outside && !approved) {
+      throw new OutsideReadNotApprovedError(
+        `路径越出工作区根：${inputPath}（工作区以外的文件须经批准才能读）`
+      );
+    }
+    const resolvedPath = target.path;
+    if (!(await host.isFile(resolvedPath))) {
+      throw new ReadFileError(`不是常规文件：${inputPath}`);
+    }
+    const bytes =
+      host.readBytes !== undefined
+        ? await host.readBytes(resolvedPath)
+        : Buffer.from(await host.readText(resolvedPath), "utf8");
+    const raw = bytes.toString("utf8");
+    const { lines } = splitContent(raw);
+    return {
+      resolvedPath,
+      snapshot: snapshotTag(raw),
+      totalLines: lines.length,
+      line: (number) => lines[number - 1] ?? "",
+      done: () => options.reads?.record(resolvedPath, bytes),
+    };
+  };
   return {
     name: "read_file",
     label: "read_file",
@@ -115,21 +193,12 @@ export function createReadFileTool(
     async execute(toolCallId, params): Promise<PigeonToolResult<ReadFileDetails>> {
       const approved = outsideApproved.delete(toolCallId);
       const args = Value.Parse(ReadFileParamsSchema, params);
-      const target = await resolveTarget(args.path);
-      if (target.outside && !approved) {
-        throw new OutsideReadNotApprovedError(
-          `路径越出工作区根：${args.path}（工作区以外的文件须经批准才能读）`
-        );
-      }
-      const resolvedPath = target.path;
-      if (!(await host.isFile(resolvedPath))) {
-        throw new ReadFileError(`不是常规文件：${args.path}`);
-      }
-      const raw = await host.readText(resolvedPath);
-      const snapshot = snapshotTag(raw);
-      const { lines } = splitContent(raw);
-      const totalLines = lines.length;
+      const offset = args.offset ?? 1;
+      const limit = args.limit ?? DEFAULT_READ_LIMIT;
+      const loaded = await load(args.path, offset, limit, approved);
+      const { resolvedPath, snapshot, totalLines } = loaded;
       if (totalLines === 0) {
+        loaded.done();
         return {
           content: [
             {
@@ -147,28 +216,42 @@ export function createReadFileTool(
           },
         };
       }
-      const offset = args.offset ?? 1;
       if (offset > totalLines) {
         throw new ReadFileError(
           `offset ${offset} 超出文件范围（共 ${totalLines} 行）；请给出 1-${totalLines} 之间的 offset`
         );
       }
-      const limit = args.limit ?? DEFAULT_READ_LIMIT;
-      const end = Math.min(offset + limit - 1, totalLines);
-      const window = lines.slice(offset - 1, end);
-      const body = window
-        .map((line, index) =>
-          replaceMode ? `${offset + index}| ${line}` : `${offset + index}#${lineTag(line)}| ${line}`
-        )
-        .join("\n");
+      const last = Math.min(offset + limit - 1, totalLines);
+      // 逐行排版：超长行截断并注明；累计字节超过上限即停（至少给一行）
+      const rendered: string[] = [];
+      let bytes = 0;
+      let truncatedLines = 0;
+      let byteLimited = false;
+      for (let number = offset; number <= last; number += 1) {
+        const line = loaded.line(number);
+        const shown = line.length > maxLineChars ? clipLine(line, maxLineChars, number) : line;
+        const text = replaceMode ? `${number}| ${shown}` : `${number}#${lineTag(line)}| ${shown}`;
+        const size = Buffer.byteLength(text, "utf8") + 1;
+        if (rendered.length > 0 && bytes + size > maxBytes) {
+          byteLimited = true;
+          break;
+        }
+        if (shown !== line) truncatedLines += 1;
+        rendered.push(text);
+        bytes += size;
+      }
+      const end = offset + rendered.length - 1;
       const remaining = totalLines - end;
       const hint =
-        remaining > 0 ? `\n还有 ${remaining} 行未读，下一窗口参数 offset=${end + 1}` : "";
+        remaining > 0
+          ? `\n${byteLimited ? `本次输出已达 ${maxBytes} 字节上限；` : ""}还有 ${remaining} 行未读，下一窗口参数 offset=${end + 1}`
+          : "";
+      loaded.done();
       return {
         content: [
           {
             type: "text",
-            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${body}${hint}`,
+            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${rendered.join("\n")}${hint}`,
           },
         ],
         details: {
@@ -177,9 +260,22 @@ export function createReadFileTool(
           totalLines,
           offset,
           limit,
-          returnedLines: window.length,
+          returnedLines: rendered.length,
+          ...(truncatedLines > 0 ? { truncatedLines } : {}),
+          ...(byteLimited ? { byteLimited } : {}),
         },
       };
     },
   };
+}
+
+// 超长行只显示前 maxChars 个字符（不切断代理对），注明原长与看其余部分的办法
+function clipLine(line: string, maxChars: number, number: number): string {
+  let cut = maxChars;
+  const code = line.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  return (
+    `${line.slice(0, cut)}…（本行共 ${line.length} 字符，超过 ${maxChars} 已截断；` +
+    `其余部分可用 run_command 按字符截取，例如 sed -n '${number}p' 文件 | cut -c${cut + 1}-${cut + maxChars}）`
+  );
 }

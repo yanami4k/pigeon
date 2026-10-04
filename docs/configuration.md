@@ -32,7 +32,7 @@
 | `modelInfo` | 按模型手填的价格、上下文窗口、单次输出上限与缓存规则的覆盖（见下文"模型信息"） | 新节 |
 | `truncationContinuation` | 撞上限续跑的开关与两个次数上限（见下文"撞上限续跑与流式重复检测"） | 新节 |
 | `repetitionGuard` | 流式重复检测的开关、模式、档位与各项参数（同上） | 新节 |
-| `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个） | 新节 |
+| `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个）、`readFile`（单次字节与单行字符上限）、`runCommand`（输出的头尾保留与落盘总量），见下文"工具的上限" | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -191,6 +191,28 @@ export const modelInfo = {
 ```
 
 跑批器（`pigeon eval stream`）不读设置文件，用参数给出，只对 Pigeon 条件生效：`--continuation on|off`、`--continuation-max-consecutive <n>`、`--continuation-max-per-run <n>`、`--repetition-guard on|off`、`--repetition-mode abort|log`、`--repetition-preset omp|wide`，缺省同上。实际生效值（检测含全部参数）记进身份头与结果行的 Pigeon 一段；加这两项之前写下的身份头没有它们，续跑即判为不同条件。
+
+## 工具的上限
+
+`tools` 一节按工具分子键（小驼峰），不写的项取缺省（决策 356、357）：
+
+| 键 | 含义 | 缺省 |
+| --- | --- | --- |
+| `tools.grep.maxResults` | grep 至多列出的匹配条数（files_only 时为文件数），超出给出总数 | 200 |
+| `tools.glob.maxResults` | glob 至多列出的文件个数，超出给出总数 | 100 |
+| `tools.readFile.maxBytes` | read_file 单次返回的正文至多这么多字节，到了即停并给出续读的 offset | 51200（50 KiB） |
+| `tools.readFile.maxLineChars` | 单行超过这么多字符即截断显示并注明原长 | 2000 |
+| `tools.runCommand.outputHeadBytes` | run_command 输出超长时保留的开头 | 8192（8 KiB） |
+| `tools.runCommand.outputTailBytes` | 输出超长时保留的末尾 | 24576（24 KiB） |
+| `tools.runCommand.savedOutputsMaxBytes` | 每个会话落盘的完整输出总量上限，满了删最旧的 | 209715200（200 MiB） |
+
+run_command 的输出超过开头加末尾两段时，结果里留开头与末尾、中间注明省略的行数；完整输出存进会话自己的落盘目录 `.pigeon/state/outputs/<会话号>/`，结果给出虚拟路径 `pigeon://outputs/<会话号>/<编号>` 与总行数。read_file 认得这个前缀，直接从落盘目录读，不经执行端（沙箱会话同样如此）；虚拟路径只能是 `pigeon://outputs/` 加会话号加编号，会话只能是本会话或其分叉来源（别的会话的编号明确报错），指不到落盘目录以外。落盘目录在工作区的 `.pigeon/state` 里，任何一级被换成链接即拒绝读写；落盘出错（如磁盘满）时照常给出开头与末尾，并注明全文未能保存。落盘文件随会话保存。
+
+run_command 的命令串按执行端能执行的长度另判：Linux 与容器执行端至多约 124 KiB（UTF-8），Windows 命令行至多约 32000 字符、经 cmd.exe 约 8000 字符；超出时直接报错，建议先用 write_file 写成脚本再运行。
+
+```json
+{ "tools": { "readFile": { "maxBytes": 102400 }, "runCommand": { "outputTailBytes": 32768 } } }
+```
 
 ## key 走环境变量
 

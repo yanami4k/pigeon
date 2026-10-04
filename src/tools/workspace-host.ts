@@ -36,6 +36,10 @@ export interface HostExecOptions {
   timeoutMs: number;
   // 只保留输出开头的这么多字节；字节数与哈希按全量计
   maxOutputBytes: number;
+  // 决策 356：另保留输出末尾的这么多字节（缺省不留）；给了即另计输出总行数
+  tailBytes?: number;
+  // 决策 356：输出超过开头加末尾两段时，把全量输出写进这个宿主文件（至多 maxBytes 字节）；没超过不建文件
+  fullOutput?: { path: string; maxBytes: number };
   signal: AbortSignal | undefined;
   // 交给命令的标准输入（钩子协议把事件 JSON 经标准输入交给命令）
   stdin?: string;
@@ -52,8 +56,16 @@ export interface HostExecResult {
   outputBytes: number;
   // 全量输出（stdout 与 stderr 按到达顺序）的 sha256
   outputHash: string;
-  // 截断后的输出文本（开头部分）
+  // 截断后的输出文本（开头部分）；给了 tailBytes 且没超过开头加末尾时为全量输出
   output: string;
+  // 决策 356：输出末尾（给了 tailBytes 且输出超过开头加末尾两段时）
+  tail?: string;
+  // 决策 356：输出总行数（给了 tailBytes 时计）
+  outputLines?: number;
+  // 决策 356：全量输出已写进 fullOutput.path；partial 为超过写入上限，只写了前面部分
+  fullOutputSaved?: { bytes: number; partial: boolean };
+  // 决策 356：给了 fullOutput 但未能保存（磁盘满、文件已在或被换成链接等）的原因；此时照常给出头尾
+  fullOutputError?: string;
   // 分开的两路输出开头（各自截到实现上限：本机与容器都是 64 KiB）；需要区分 stdout 与 stderr 的调用方用（钩子协议），
   // 其余调用方照旧读 output
   stdout: string;
@@ -128,9 +140,17 @@ export interface WorkspaceHost {
   // 决策 368：工作区内文件（相对工作区根的路径）的修改时间（毫秒）；取不到的不在结果里。glob 据此排序。
   // 可选：没有实现的执行端 glob 按路径排序
   fileMtimes?(relPaths: readonly string[]): Promise<Map<string, number>>;
-  // 以下三个只接受 resolveExisting / resolveForWrite / resolveForRead 返回的规范路径
+  // 决策 358（write_file）：目标已存在时同 resolveForWrite（exists 为真）；不存在时按路径上最深的已存在一层的真实路径拼上
+  // 其余各段，须仍在工作区根内（exists 为假）。两个实现都有；可缺省只为测试里手拼的执行端
+  resolveForCreate?(inputPath: string): Promise<{ path: string; exists: boolean }>;
+  // 决策 358 照 334：新建 resolveForCreate 给出的不存在的路径——复核路径上最深的已存在一层未变，补建中间目录，目标已存在
+  // 即拒写（不覆盖）
+  createText?(resolvedPath: string, content: string): Promise<void>;
+  // 以下三个只接受 resolveExisting / resolveForWrite / resolveForCreate / resolveForRead 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;
+  // 决策 358：按字节读（读取记录按文件字节算哈希）；两个实现都有，缺省时调用方退回 readText
+  readBytes?(resolvedPath: string): Promise<Buffer>;
   // 写入前复核（决策 334）：重新解析须仍得到 resolvedPath 本身，路径变了或目标成了符号链接即拒写（WorkspaceWriteRefusedError）
   writeText(resolvedPath: string, content: string): Promise<void>;
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留

@@ -38,6 +38,7 @@ import {
   UPDATE_MEMORY_TOOL,
   updateMemoryRegistration,
 } from "../memory/update-memory-tool.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import {
   type BeforeCompaction,
@@ -79,7 +80,7 @@ import {
   resolveModelInfo,
   runModelInfoRecord,
 } from "../state/model-info.ts";
-import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import { outputsRootOf, sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type {
   RepetitionGuardSettings,
   TruncationContinuationSettings,
@@ -93,11 +94,14 @@ import {
   memoryLimitsOf,
   modelInfoSectionOf,
   readDenyOf,
+  readFileLimitsOf,
   repetitionGuardOf,
+  runCommandOutputLimitsOf,
   type SettingsSnapshot,
   searchLimitsOf,
   truncationContinuationOf,
 } from "../state/settings.ts";
+import { CommandOutputStore } from "../tools/command-output.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
@@ -108,6 +112,7 @@ import {
   type OutsideReadMode,
   ReadFileParamsSchema,
 } from "../tools/read-file.ts";
+import { FileReadTracker } from "../tools/read-tracker.ts";
 import { ToolRegistry, type ToolRiskTier } from "../tools/registry.ts";
 import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace-edit.ts";
 import {
@@ -124,6 +129,11 @@ import {
 } from "../tools/search-tools.ts";
 import { scopePromptSentence } from "../tools/tool-scope.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import {
+  createWriteFileTool,
+  WRITE_FILE_TOOL,
+  WriteFileParamsSchema,
+} from "../tools/write-file.ts";
 import {
   createWebFetchTool,
   createWebSearchTool,
@@ -469,6 +479,20 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   });
   const continuation = deps.truncationContinuation ?? truncationContinuationOf(settings);
   const repetition = deps.repetitionGuard ?? repetitionGuardOf(settings);
+  // 决策 356–358：本会话的命令输出落盘目录与读取记录（read_file、编辑与 write_file 共用），两个工具的上限取设置的 tools 一节
+  const outputLimits = runCommandOutputLimitsOf(settings);
+  // 虚拟路径带会话号：本会话之外只认分叉来源一路往上（分支会话复制来的历史里的路径指向来源会话的输出）；
+  // worker 会话不算（它的输出编号对派出方明确报错）
+  const forkSource = deps.storeLineage?.branch?.sourceSessionId;
+  const outputStore = new CommandOutputStore({
+    base: governanceRoot,
+    outputsRoot: outputsRootOf(governanceRoot),
+    sessionId: deps.sessionId,
+    maxBytes: outputLimits.savedOutputsMaxBytes,
+    ancestors: () => forkAncestors(sessionsDir, forkSource),
+  });
+  const reads = new FileReadTracker();
+  const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -554,6 +578,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     name: "edit_file",
     description: replaceMode ? "原文替换编辑" : "hashline 锚定稀疏编辑",
     parameters: replaceMode ? ReplaceEditParamsSchema : EditFileParamsSchema,
+    tier: "write",
+    pathConfinement: { kind: "workspace" },
+    executionMode: "sequential",
+  });
+  // 决策 358：新建或整体覆盖文件，与 edit_file 同为写档、工作区围栏（受保护路径与写档审批随之生效）
+  registry.register({
+    name: WRITE_FILE_TOOL,
+    description: "新建或整体覆盖文件",
+    parameters: WriteFileParamsSchema,
     tier: "write",
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
@@ -792,6 +825,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const toolNames = [
     "read_file",
     "edit_file",
+    WRITE_FILE_TOOL,
     RUN_COMMAND_TOOL,
     ...READ_ONLY_SEARCH_TOOLS,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
@@ -947,12 +981,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ...(replaceMode ? { editMode: "replace" as const } : {}),
         outsideReads: OUTSIDE_READ_MODES[approval],
         readDeny: readDenyOf(settings),
+        ...readOptions,
       }),
-      replaceMode ? createReplaceEditTool(workspaceHost) : createEditFileTool(workspaceHost),
+      replaceMode
+        ? createReplaceEditTool(workspaceHost, reads)
+        : createEditFileTool(workspaceHost, reads),
+      createWriteFileTool(workspaceHost, reads),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
         host: workspaceHost,
         approval,
+        output: {
+          headBytes: outputLimits.headBytes,
+          tailBytes: outputLimits.tailBytes,
+          store: outputStore,
+        },
         commands: commandsConfig.commands,
         ...(roleAllowlist !== undefined ? { allowlist: roleAllowlist } : {}),
         // 决策 360：带命令前缀范围时程序只按 PATH 解析
@@ -1239,4 +1282,17 @@ export async function loadStreamFn(
 // 配置了单轮输出上限才包装；未配置原样返回（跟模型）
 function withOutputLimit(streamFn: StreamFn, maxOutputTokens: number | undefined): StreamFn {
   return maxOutputTokens !== undefined ? limitOutputTokens(streamFn, maxOutputTokens) : streamFn;
+}
+
+// 分叉来源一路往上的会话号（决策 356 的虚拟路径用）：从本会话的分叉来源起，沿会话文件头的父会话往上，遇到 worker 会话或
+// 读不到即停；至多 20 层
+function forkAncestors(sessionsDir: string, source: string | undefined): string[] {
+  const chain: string[] = [];
+  let current = source;
+  while (current !== undefined && chain.length < 20 && !chain.includes(current)) {
+    chain.push(current);
+    const view = loadSessionView(sessionsDir, current);
+    current = view !== undefined && view.worker === undefined ? view.parentSessionId : undefined;
+  }
+  return chain;
 }

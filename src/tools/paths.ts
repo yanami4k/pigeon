@@ -1,6 +1,6 @@
 // 路径围栏：工具层的工作区根约束。上游 edit 工具零路径限制（见 harness/tools/edit 笔记 §5.7），
 // Pigeon 的工具实现必须在落地前自行解析并拒绝逃逸——与 registry 的 pathConfinement 声明对齐。
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export class WorkspacePathError extends Error {}
@@ -95,6 +95,24 @@ export function assertWritePathUnchanged(resolvedPath: string): void {
   }
 }
 
+// 写类工具（edit_file、write_file）的路径参数含换行或其他控制字符即拒绝：shell 与各层解析对这类字符的处理不一，
+// 实际落点可能与审批、受保护路径判定的对象不一致
+export function hasControlChar(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+export function assertWritePathText(inputPath: string): void {
+  if (hasControlChar(inputPath)) {
+    throw new WorkspaceWriteRefusedError(
+      `路径含换行或其他控制字符，拒绝写入：${JSON.stringify(inputPath)}`
+    );
+  }
+}
+
 export function symlinkRefused(inputPath: string, target: string): WorkspaceWriteRefusedError {
   return new WorkspaceWriteRefusedError(
     `要写的文件是符号链接（${inputPath} → ${target}），拒绝写入：请改为编辑它指向的文件`
@@ -109,4 +127,76 @@ export function pathChanged(
     `路径已变：${resolvedPath} 在检查之后${now === undefined ? "已不存在" : `改为解析到 ${now}`}，拒绝写入；` +
       "请重新 read_file 后再编辑"
   );
+}
+
+// 路径上最深的已存在一层（符号链接本身也算存在）与其下尚不存在的各段
+function deepestExisting(target: string): { existing: string; rest: string[] } {
+  const rest: string[] = [];
+  let current = target;
+  for (;;) {
+    try {
+      lstatSync(current);
+      return { existing: current, rest };
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return { existing: current, rest };
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+// 决策 358：write_file 的解析。目标已存在：同 resolveWorkspaceWritePath（模型给的路径本身是符号链接即拒写）；
+// 不存在：路径上最深的已存在一层按真实路径解析（须是目录），拼上其余各段，须仍在工作区根内
+export function resolveWorkspaceCreatePath(
+  workspaceRoot: string,
+  inputPath: string
+): { path: string; exists: boolean } {
+  const realRoot = realpathSync(workspaceRoot);
+  const given = path.resolve(realRoot, inputPath);
+  const { existing, rest } = deepestExisting(given);
+  if (rest.length === 0) {
+    return { path: resolveWorkspaceWritePath(workspaceRoot, inputPath), exists: true };
+  }
+  let realExisting: string;
+  try {
+    realExisting = realpathSync(existing);
+  } catch {
+    throw new WorkspacePathError(`路径上的 ${existing} 解析不了（悬空的符号链接？）：${inputPath}`);
+  }
+  if (!lstatSync(realExisting).isDirectory()) {
+    throw new WorkspacePathError(`路径上的 ${existing} 不是目录：${inputPath}`);
+  }
+  const target = path.join(realExisting, ...rest);
+  if (isOutsideRelative(path.relative(realRoot, target))) {
+    throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+  }
+  return { path: target, exists: false };
+}
+
+// 决策 358 照 334：新建前复核——路径上最深的已存在一层的真实路径须仍是它自己（没被换成符号链接），补建中间目录，
+// 以"不存在才建"写入；检查之后被别人建了即拒写，不覆盖
+export function createWorkspaceFile(resolvedPath: string, content: string): void {
+  const { existing, rest } = deepestExisting(resolvedPath);
+  if (rest.length === 0) {
+    throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+  }
+  let now: string | undefined;
+  try {
+    now = realpathSync(existing);
+  } catch {
+    now = undefined;
+  }
+  if (now !== existing) {
+    throw pathChanged(resolvedPath, now);
+  }
+  mkdirSync(path.dirname(resolvedPath), { recursive: true });
+  try {
+    writeFileSync(resolvedPath, content, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+    }
+    throw error;
+  }
 }

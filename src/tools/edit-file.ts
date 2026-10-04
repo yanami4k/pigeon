@@ -18,6 +18,8 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
+import { assertWritePathText } from "./paths.ts";
+import type { FileReadTracker } from "./read-tracker.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 export class EditFileError extends Error {}
@@ -63,8 +65,10 @@ export interface EditFileDetails {
 }
 
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
+// 决策 358：reads 为本会话的读取记录，成功写入后按写成的内容更新
 export function createEditFileTool(
-  workspace: string | WorkspaceHost
+  workspace: string | WorkspaceHost,
+  reads?: FileReadTracker
 ): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
   return {
@@ -91,6 +95,7 @@ export function createEditFileTool(
       // 唯一的副作用落盘点（写前最后查一次 abort；写后不可回滚，见上游 edit 笔记 §6.3）
       signal?.throwIfAborted();
       await host.writeText(plan.resolvedPath, newRaw);
+      reads?.record(plan.resolvedPath, Buffer.from(newRaw, "utf8"));
 
       const afterSnapshot = snapshotTag(newRaw);
       const diff = buildEditDiff(args.path, plan.split.lines, plan.applied);
@@ -122,6 +127,7 @@ export function createEditFileTool(
 // execute 与 preview 共享同一预检路径，保证"预览所见 = 执行所得"。
 async function planEdits(host: WorkspaceHost, args: EditFileParams) {
   // 决策 334：要写的文件本身是符号链接即拒写
+  assertWritePathText(args.path);
   const resolvedPath = await host.resolveForWrite(args.path);
   if (!(await host.isFile(resolvedPath))) {
     throw new EditFileError(`不是常规文件：${args.path}`);
