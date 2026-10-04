@@ -162,8 +162,9 @@ test("SHA-256 仓库：空树按仓库的对象格式算出，取证与代码快
       { added: ["b.txt"], removed: [], modified: ["a.txt"], truncated: false }
     );
     const checkpointer = createCheckpointer({ workspaceRoot: root, sessionId: newSessionId() });
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const snapshot = checkpointer.afterChange();
+    const snapshot = await checkpointer.afterChange();
     assert.match(snapshot?.commit ?? "", /^[0-9a-f]{64}$/);
+    await checkpointer.close();
   }));
