@@ -33,8 +33,10 @@ test("防注入：项目文件里伪造的结束标签与节标签逃不出所�
     ]),
     false
   );
+  // 开头一句说明里提到追加用的标签
   assert.deepEqual(visibleTags(block), [
     "<pigeon-status",
+    "<pigeon-status-update",
     "<pigeon-section",
     "</pigeon-section",
     "<pigeon-section",
