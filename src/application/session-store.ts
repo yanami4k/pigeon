@@ -20,6 +20,7 @@ import {
 } from "../pi-runtime/session-store.ts";
 import type { RunId } from "../state/ids.ts";
 import {
+  type CheckpointMarkState,
   SESSION_ENTRY_VERSION,
   type SessionCustomEntry,
   type SessionEntrySink,
@@ -127,7 +128,14 @@ export function openSessionStore(input: {
 
 export function checkpointEntry(
   runId: RunId,
-  payload: { ref: string; commit: string; tree: string; baseCommit?: string; toolCallId: string }
+  payload: {
+    ref: string;
+    commit: string;
+    tree: string;
+    baseCommit?: string;
+    toolCallId: string;
+    runSeq?: number;
+  }
 ): SessionCustomEntry {
   return {
     customType: SessionEntryType.Checkpoint,
@@ -135,10 +143,29 @@ export function checkpointEntry(
       version: SESSION_ENTRY_VERSION,
       runId,
       toolCallId: payload.toolCallId,
+      ...(payload.runSeq !== undefined ? { runSeq: payload.runSeq } : {}),
       ref: payload.ref,
       commit: payload.commit,
       tree: payload.tree,
       ...(payload.baseCommit !== undefined ? { baseCommit: payload.baseCommit } : {}),
+    },
+  };
+}
+
+// 快照的拍摄标记（决策 350）
+export function checkpointMarkEntry(
+  runId: RunId,
+  payload: { toolCallId: string; runSeq: number; state: CheckpointMarkState; reason?: string }
+): SessionCustomEntry {
+  return {
+    customType: SessionEntryType.CheckpointMark,
+    data: {
+      version: SESSION_ENTRY_VERSION,
+      runId,
+      toolCallId: payload.toolCallId,
+      runSeq: payload.runSeq,
+      state: payload.state,
+      ...(payload.reason !== undefined ? { reason: payload.reason } : {}),
     },
   };
 }

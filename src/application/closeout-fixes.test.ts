@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createCheckpointer } from "../orchestration/checkpoint.ts";
+import { CheckpointError, createCheckpointer } from "../orchestration/checkpoint.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { runForkCommand } from "./fork-command.ts";
@@ -148,19 +148,19 @@ test("分叉复用运行面已挂的快照器：分叉前后的快照 ref 编号
   }
 });
 
-test("快照 ref 旧值守卫：同一会话的两个快照器实例写同号时明确失败，先写的 ref 原样还在", () => {
+test("快照 ref 旧值守卫：同一会话的两个快照器实例写同号时明确失败，先写的 ref 原样还在", async () => {
   const { dir, cleanup } = repo("pigeon-cp-guard-");
   try {
     const sessionId = newSessionId();
     const first = createCheckpointer({ workspaceRoot: dir, sessionId });
     const second = createCheckpointer({ workspaceRoot: dir, sessionId });
-    first.beforeChange();
-    second.beforeChange();
+    await first.beforeChange();
+    await second.beforeChange();
     writeFileSync(join(dir, "a.txt"), "one\n");
-    const snapshot = first.afterChange();
+    const snapshot = await first.afterChange();
     assert.ok(snapshot !== undefined);
     writeFileSync(join(dir, "a.txt"), "two\n");
-    assert.throws(() => second.afterChange(), /拒绝覆盖/);
+    await assert.rejects(() => second.afterChange(), /拒绝覆盖/);
     assert.equal(git(dir, ["rev-parse", snapshot.ref]).trim(), snapshot.commit, "先写的没被覆盖");
   } finally {
     cleanup();
@@ -205,11 +205,18 @@ test("快照器内部故障：向标准错误告警一次，文案说明后果�
       const { lines } = await captureStderr(async () => {
         await opened.bundle.adapter.run("改一次");
         await opened.bundle.adapter.run("再改一次");
+        // 决策 350：快照在后台拍，等它们拍完（失败）再看
+        await opened.checkpoints?.settle();
       });
+      // 故障确实发生：记基线一次、两次改动的快照各一次，都是 git 失败（不是等待超时）
+      const errors = opened.checkpoints?.errors() ?? [];
+      assert.equal(errors.length, 3, `故障次数对得上：${errors.map(String).join(" | ")}`);
+      assert.ok(errors.every((error) => error instanceof CheckpointError));
       const warnings = lines.filter((line) => line.startsWith("工作区快照告警："));
       assert.equal(warnings.length, 1, `同一类故障只告警一次：${warnings.join(" | ")}`);
-      assert.match(warnings[0] ?? "", /该时点没有快照，从这里分叉会回退到更早的快照/);
-      assert.ok((opened.checkpoints?.errors().length ?? 0) >= 2, "故障仍进内部错误清单");
+      // 后果：从这里分叉明确报错，不退回更早的快照
+      assert.match(warnings[0] ?? "", /明确报错/);
+      assert.match(warnings[0] ?? "", /不退回/);
       assert.equal(readFileSync(join(dir, "a.txt"), "utf8"), "two\n", "运行照常收尾");
     } finally {
       renameSync(parked, gitDir);

@@ -5,6 +5,8 @@
 // 续跑（078 / 077）：以 buildSessionContext 从分支文件还原的消息作为 Agent 初始状态；分支是新的 Pigeon 会话。
 // 分叉点末条是用户消息或工具结果时不给新输入直接续跑，末条是助手消息时必须给新输入。非 git 工作区发起分叉明确报错，
 // 不降级，也不留任何记录。来源会话在会话存储里没有文件时明确报错（旧格式会话不读，187）。
+// 决策 350：读来源会话之前先等它未完成的快照拍完；分叉点之前最近的那一次快照没拍成（拍摄中断或失败）时明确报错，
+// 不退回更早的快照，也不留任何记录。
 // ForkTrigger 的 "retry-on-fail" 保留在 schema 里供读旧会话，新会话不再产生
 
 import {
@@ -45,6 +47,8 @@ export interface ForkRequest {
   // 序号计数在实例的内存里，两个实例会从 refs 读到同一个起点并写同一个序号。
   // 只有拿不到实例时（冷会话上的分叉）才缺省，由这里新建。
   checkpointer?: Checkpointer;
+  // 决策 350：来源会话的运行面在场时传入，读来源会话之前先等它未完成的快照拍完
+  settleCheckpoints?: () => Promise<void>;
   // 分叉点末条是助手消息时必须给新输入
   input?: string;
 }
@@ -67,7 +71,8 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
       `来源会话的工作区不是 git 工作区，不能分叉（不降级为只退对话）：${sourceWorkspace}`
     );
   }
-  // a. 读来源会话：本进程写者先落盘
+  // a. 读来源会话：未完成的快照先拍完，本进程写者再落盘
+  await request.settleCheckpoints?.();
   await request.sourceStore?.flush();
   const source = loadStoreSession(dir, sourceSessionId);
   if (source === undefined) {
@@ -82,23 +87,44 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
     throw new ForkError("分叉点是助手消息：续跑需要给出新的输入");
   }
   const branchSessionId = newSessionId();
+  const resolved = storeCheckpointBefore(source.view, forkPoint);
+  if (resolved?.unfinished !== undefined) {
+    const mark = resolved.unfinished;
+    throw new ForkError(
+      `分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条对应的代码快照没有拍成（第 ${mark.runSeq} 条工具结果，` +
+        `${mark.state === "failed" ? `拍摄失败：${mark.reason ?? "原因未记"}` : "拍摄中断：进程在拍完之前退出"}），` +
+        "不能从这里分叉；不退回更早的快照"
+    );
+  }
+  if (resolved?.baseMissing === true) {
+    throw new ForkError(
+      `分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条早于首次改动，而首次改动之前的工作区状态没有记下（基线没有拍成），` +
+        "不能从这里分叉；不拿改后的现状顶替"
+    );
+  }
   const checkpointer =
     request.checkpointer ??
     createCheckpointer({
       workspaceRoot: sourceWorkspace,
       sessionId: sourceSessionId,
     });
-  const resolved = storeCheckpointBefore(source.view, forkPoint);
   let checkpoint: CheckpointRef;
-  if (resolved?.ref !== undefined) {
-    checkpoint = { ref: resolved.ref, commit: resolved.commit };
-  } else if (resolved !== undefined) {
-    // 改前基线没有挂 ref：挂一个，防止被 git 回收
-    const pinned = checkpointer.pin(resolved.commit);
-    checkpoint = { ref: pinned, commit: resolved.commit };
-  } else {
-    const now = checkpointer.snapshotNow();
-    checkpoint = { ref: now.ref, commit: now.commit };
+  try {
+    if (resolved?.ref !== undefined) {
+      checkpoint = { ref: resolved.ref, commit: resolved.commit };
+    } else if (resolved !== undefined) {
+      // 改前基线没有挂 ref：挂一个，防止被 git 回收
+      const pinned = await checkpointer.pin(resolved.commit);
+      checkpoint = { ref: pinned, commit: resolved.commit };
+    } else {
+      const now = await checkpointer.snapshotNow();
+      checkpoint = { ref: now.ref, commit: now.commit };
+    }
+  } finally {
+    // 这里新建的快照器（冷会话）用完即关，删掉它的临时索引
+    if (request.checkpointer === undefined) {
+      await checkpointer.close();
+    }
   }
   // b. 来源会话记分叉条目（写不成就不分叉）
   const forked = {
@@ -202,6 +228,9 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
     forkPoint: request.forkPoint,
     trigger: request.trigger,
     ...(request.checkpointer !== undefined ? { checkpointer: request.checkpointer } : {}),
+    ...(request.settleCheckpoints !== undefined
+      ? { settleCheckpoints: request.settleCheckpoints }
+      : {}),
     ...(input !== undefined ? { input } : {}),
   });
   const result = await runHeadless({

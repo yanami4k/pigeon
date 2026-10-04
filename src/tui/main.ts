@@ -22,6 +22,7 @@ import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { createSessionAttemptRunner } from "../application/attempt-group.ts";
+import type { CheckpointAttachment } from "../application/checkpoints.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import {
   type LaunchFlags,
@@ -373,9 +374,16 @@ export async function main(argv: string[]): Promise<void> {
   const mainBundle = mainOpened.bundle;
   guardMainAgent(mainBundle);
   // 当前运行面持有格（S4）：/resume 换绑整体替换；进程退出只释放当前格。沙箱里不派 worker（会越出容器）
-  let slot: { sessionId: SessionId; bundle: RuntimeBundle; workers?: TuiWorkersFace } = {
+  // 决策 350：checkpoints 为本格的快照挂载，换走本格之前先等它未完成的快照
+  let slot: {
+    sessionId: SessionId;
+    bundle: RuntimeBundle;
+    workers?: TuiWorkersFace;
+    checkpoints?: CheckpointAttachment;
+  } = {
     sessionId,
     bundle: mainBundle,
+    ...(mainOpened.checkpoints !== undefined ? { checkpoints: mainOpened.checkpoints } : {}),
     ...(sandbox === undefined
       ? { workers: workersFor(mainOpened, mainOpened.scope.parentSessionId) }
       : {}),
@@ -442,10 +450,13 @@ export async function main(argv: string[]): Promise<void> {
         const workers =
           sandbox === undefined ? workersFor(opened, opened.scope.parentSessionId) : undefined;
         const previous = slot;
+        // 决策 350：换走旧运行面之前先等它未完成的快照拍完（新运行面在同一工作区上接着改文件）
+        await previous.checkpoints?.settle();
         slot = {
           sessionId: previous.sessionId,
           bundle,
           ...(workers !== undefined ? { workers } : {}),
+          ...(opened.checkpoints !== undefined ? { checkpoints: opened.checkpoints } : {}),
         };
         // 决策 323、324：换走旧运行面前跑旧会话的 SessionEnd（reason "switch"），记录落在本会话文件；
         // 壳 rebindSession 随后会为重建后的会话跑 SessionStart（source "resume"）
@@ -530,7 +541,14 @@ export async function main(argv: string[]): Promise<void> {
         guardMainAgent(bundle);
         const workers = workersFor(opened, opened.scope.parentSessionId);
         const previous = slot;
-        slot = { sessionId: targetId, bundle, workers };
+        // 决策 350：换走旧会话之前先等它未完成的快照拍完（新会话在同一工作区上接着改文件）
+        await previous.checkpoints?.settle();
+        slot = {
+          sessionId: targetId,
+          bundle,
+          workers,
+          ...(opened.checkpoints !== undefined ? { checkpoints: opened.checkpoints } : {}),
+        };
         // 决策 323、324：换走旧会话前跑它的 SessionEnd（reason "switch"）——记录要落在旧会话文件，
         // 必须在释放旧运行面之前；壳 rebindSession 随后会为新会话跑 SessionStart（source "resume"）
         await shellHolder.current?.endSession("switch");

@@ -24,6 +24,8 @@ import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
 import {
   isSyntheticFailure,
   type SessionView,
+  unfinishedCheckpointMarks,
+  unfinishedCheckpointText,
   type ViewItem,
   type ViewRun,
 } from "../state/session-view.ts";
@@ -41,6 +43,7 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   "run-end": "pigeon.run-end",
   verification: "pigeon.verification",
   checkpoint: "pigeon.checkpoint",
+  "checkpoint-mark": "pigeon.checkpoint-mark",
   worker: "pigeon.worker",
   fork: "pigeon.fork",
   grant: "pigeon.grant",
@@ -107,6 +110,8 @@ function itemDetail(item: ViewItem): string {
     }
     case "checkpoint":
       return `工作区快照 ${item.data.commit.slice(0, 12)} ｜ 工具调用 ${item.data.toolCallId}`;
+    case "checkpoint-mark":
+      return `${unfinishedCheckpointText(item.data)} ｜ 工具调用 ${item.data.toolCallId}`;
     case "worker": {
       const data = item.data;
       if (data.event === "spawned") {
@@ -173,12 +178,17 @@ export function renderRunReplay(
     run.end === undefined
       ? "Run 收尾缺失"
       : `结束方式 ${run.end.ending}，stopReason=${run.end.stopReason ?? run.turns.at(-1)?.assistant.stopReason ?? "无（无助手消息）"}`;
+  // 决策 350：拍摄标记只显示没拍成的（失败的、拍摄中断的各一行），拍成与文件没变的不占行
+  const unfinished = unfinishedCheckpointMarks(run.items);
+  const shown = run.items.filter(
+    (item) => item.kind !== "checkpoint-mark" || unfinished.get(item.data.toolCallId) === item.data
+  );
   const lines: string[] = [
     `回放 Run ${shortId(run.runId)} ｜ 会话 ${shortId(view.sessionId)} ｜ ` +
-      `条目 ${run.items.length} 条 ｜ 终态：${terminal} ｜ 分类：${failureBadge(run.failure)}`,
+      `条目 ${shown.length} 条 ｜ 终态：${terminal} ｜ 分类：${failureBadge(run.failure)}`,
     "",
   ];
-  for (const item of run.items) {
+  for (const item of shown) {
     lines.push(`${timeOf(item.timestamp)} ${ITEM_TYPE[item.kind]} ｜ ${itemDetail(item)}`);
     if (options.withContent === true && item.kind === "message") {
       for (const line of messageLines(item.message)) {

@@ -120,6 +120,8 @@ test("手动分叉时来源写者在本进程，先落盘再分叉；分叉条�
     let branchId: string;
     try {
       const run = await opened.bundle.adapter.run("把 a.txt 改成 new");
+      // 决策 350：快照在后台拍，先等它拍完
+      await opened.checkpoints?.settle();
       const branch = await runForkBranch({
         governanceRoot: dir,
         sourceSessionId: sourceId,

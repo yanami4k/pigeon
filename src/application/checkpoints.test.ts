@@ -1,5 +1,5 @@
 // 快照挂到运行面（M7 S5，决策 078）：写档或命令档工具提议时记基线、落定后文件确实改变才生成快照，
-// 在会话存储里写代码快照条目：条目紧跟在发起调用的助手消息之后、该调用的工具结果消息之前，以 toolCallId 对应，
+// 在会话存储里写代码快照条目：以 toolCallId 对应发起它的调用，决策 350 起写明条目号（快照在后台拍，条目位置不说明对应关系），
 // 快照与消息的对应关系因此可以只从会话文件查到。只读工具与没有改变文件的调用不打快照；非 git 工作区不打、不报错。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -54,7 +54,7 @@ const SCRIPT = [
   { text: "改好了" },
 ];
 
-test("写工具改变文件后生成快照，快照条目夹在发起调用的助手消息与其工具结果消息之间；只读工具不打快照", async () => {
+test("写工具改变文件后生成快照，快照条目写明工具调用号与条目号，按编号取到的就是该调用之后的工作区状态；只读工具不打快照", async () => {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-cp-runtime-")));
   const home = mkdtempSync(join(tmpdir(), "pigeon-cp-home-"));
   try {
@@ -76,6 +76,8 @@ test("写工具改变文件后生成快照，快照条目夹在发起调用的�
     });
     try {
       await opened.bundle.adapter.run("把 a.txt 改成 new");
+      // 决策 350：快照在后台拍，拍完再看有没有内部故障
+      await opened.checkpoints?.settle();
       assert.deepEqual(opened.checkpoints?.errors(), [], "快照器没有内部故障");
     } finally {
       await disposeRuntime(opened.bundle);
@@ -87,20 +89,20 @@ test("写工具改变文件后生成快照，快照条目夹在发起调用的�
     assert.equal(indexes.length, 1, "只有改变文件的写工具打快照");
     const at = indexes[0] ?? -1;
     const checkpoint = entries[at]?.data as CheckpointData;
-    // 前一条是发起 edit_file 调用的助手消息
-    const assistant = messageOf(entries[at - 1]);
-    assert.ok(assistant !== undefined && assistant.role === "assistant");
-    const editCall = (
-      assistant.content as Array<{ type: string; id?: string; name?: string }>
-    ).filter((block) => block.type === "toolCall");
+    // 工具调用号对应发起 edit_file 的那次调用
+    const editCalls = entries
+      .map((entry) => messageOf(entry))
+      .flatMap((message) =>
+        message?.role === "assistant"
+          ? (message.content as Array<{ type: string; id?: string; name?: string }>).filter(
+              (block) => block.type === "toolCall" && block.name === "edit_file"
+            )
+          : []
+      );
     assert.deepEqual(
-      editCall.map((block) => [block.name, block.id]),
-      [["edit_file", checkpoint.toolCallId]]
+      editCalls.map((block) => block.id),
+      [checkpoint.toolCallId]
     );
-    // 后一条是该调用的工具结果消息
-    const toolResult = messageOf(entries[at + 1]);
-    assert.equal(toolResult?.role, "toolResult");
-    assert.equal(toolResult?.toolCallId, checkpoint.toolCallId, "快照与工具结果消息对得上");
     assert.equal(git(root, ["show", `${checkpoint.commit}:a.txt`]), "new\n");
     assert.equal(git(root, ["show", `${checkpoint.baseCommit}:a.txt`]), "old\n");
     // 视图里快照归到该工具结果消息（所属 Run 里的第几条消息），按分叉点取快照的口径取到它
@@ -110,14 +112,16 @@ test("写工具改变文件后生成快照，快照条目夹在发起调用的�
     const resultSeq =
       run.messages.findIndex((ref) => ref.message.toolCallId === checkpoint.toolCallId) + 1;
     assert.ok(resultSeq > 0);
+    assert.equal(run.messages[resultSeq - 1]?.message.role, "toolResult");
+    assert.equal(checkpoint.runSeq, resultSeq, "记录写明的条目号是该调用的工具结果消息");
     assert.deepEqual(
       run.checkpoints.map((entry) => entry.afterRunSeq),
       [resultSeq]
     );
-    assert.equal(
-      storeCheckpointBefore(loaded.view, { runId: run.runId, runSeq: resultSeq })?.commit,
-      checkpoint.commit
-    );
+    // 按编号取到的快照：内容是 edit_file 之后的工作区状态
+    const found = storeCheckpointBefore(loaded.view, { runId: run.runId, runSeq: resultSeq });
+    assert.equal(found?.commit, checkpoint.commit);
+    assert.equal(git(root, ["show", `${found?.commit}:a.txt`]), "new\n");
     // 工具结果之前的分叉点取不到这个快照，只能取到改前基线
     assert.deepEqual(
       storeCheckpointBefore(loaded.view, { runId: run.runId, runSeq: resultSeq - 1 }),

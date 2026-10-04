@@ -241,7 +241,8 @@ export async function openSessionRuntime(
           })
         : undefined;
     if (checkpoints !== undefined) {
-      bundle.disposers = [...(bundle.disposers ?? []), async () => checkpoints.stop()];
+      // 决策 350：运行面停下之后、会话存储关闭之前等未完成的快照拍完（有上限）
+      bundle.closers = [...(bundle.closers ?? []), () => checkpoints.close()];
     }
     return {
       bundle,

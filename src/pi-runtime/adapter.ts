@@ -33,6 +33,8 @@
 // 13. 一轮之内的失控（决策 367）：撞上限续跑——末条回复因输出上限截断且没有工具调用时暂扣收尾（同空回复重试），从 Agent 的消息
 //    去掉它、会话存储里把它移出主分支并写一条续跑记录，再以一条提示接着跑；连续与每次 Run 合计各有上限，用尽照原样收尾。
 //    流式重复检测包在 streamFn 外层（repetition-guard.ts），每次命中写一条记录，掐断的回复以 length 收尾、交给续跑。
+// 14. 代码快照移出关键路径（决策 350）：addToolGate 登记工具执行前的等待口（审批之后、真正执行之前逐个等待），
+//    快照器在此等未完成的快照拍完；等待方自己保证有上限，抛异常只进 listenerErrors、不挡工具执行。没有登记时行为不变。
 import {
   type AfterToolCallContext,
   type AfterToolCallResult,
@@ -271,6 +273,8 @@ export class PiRuntimeAdapter {
   readonly #compactor: ContextCompactor | undefined;
   readonly #compactionListeners = new Set<(notice: CompactionNotice) => void>();
   readonly #toolResultListeners = new Set<(notice: ToolResultNotice) => void>();
+  // 决策 350：工具执行前的等待口
+  readonly #toolGates = new Set<() => Promise<void>>();
   readonly #roundListeners = new Set<(round: TurnRoundNotice) => void>();
   // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
   #compactionAbort: AbortController | undefined;
@@ -753,6 +757,12 @@ export class PiRuntimeAdapter {
     return () => this.#toolResultListeners.delete(listener);
   }
 
+  // 决策 350：登记工具执行前的等待口（审批之后、真正执行之前）；返回撤销函数
+  addToolGate(gate: () => Promise<void>): () => void {
+    this.#toolGates.add(gate);
+    return () => this.#toolGates.delete(gate);
+  }
+
   // 观察口（305）：订阅整轮（一轮的工具调用与返回结果，一轮结束时）。在本轮的待递通知转入下一轮之前发出——
   // 订阅方在回调里递的通知随即进下一轮；listener 抛异常只进 listenerErrors
   subscribeRounds(listener: (round: TurnRoundNotice) => void): () => void {
@@ -1178,6 +1188,13 @@ export class PiRuntimeAdapter {
         const updated = this.#updatedArgs.get(toolCallId);
         if (updated !== undefined) {
           this.#updatedArgs.delete(toolCallId);
+        }
+        for (const gate of this.#toolGates) {
+          try {
+            await gate();
+          } catch (error) {
+            this.#listenerErrors.push(error);
+          }
         }
         try {
           return await tool.execute(

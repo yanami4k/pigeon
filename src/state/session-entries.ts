@@ -42,6 +42,7 @@ export const SessionEntryType = {
   RunEnd: "pigeon.run-end",
   Verification: "pigeon.verification",
   Checkpoint: "pigeon.checkpoint",
+  CheckpointMark: "pigeon.checkpoint-mark",
   Worker: "pigeon.worker",
   Fork: "pigeon.fork",
   Grant: "pigeon.grant",
@@ -179,12 +180,15 @@ export const VerificationDataSchema = Type.Object({
 });
 export type VerificationData = Static<typeof VerificationDataSchema>;
 
-// 代码快照（078）：写档或命令档工具落定后工作区确有改动时打的快照提交。条目紧跟在发起调用的助手消息之后、
-// 该调用的工具结果消息之前（工具落定先于结果消息），以 toolCallId 对应；旧记录的 afterRunSeq 由位置取代
+// 代码快照（078）：写档或命令档工具落定后工作区确有改动时打的快照提交，以 toolCallId 对应发起它的工具调用。
+// 决策 350 起快照在工具结果交回之后于后台生成，条目落在文件里的位置不再说明它对应哪一条：runSeq 写明对应的条目号
+// （该调用的工具结果消息在所属 Run 里的序号）。没有 runSeq 的旧记录紧跟在发起调用的助手消息之后、该调用的工具结果
+// 消息之前，对应条目号由位置取得
 export const CheckpointDataSchema = Type.Object({
   version: VERSION,
   runId: RunIdSchema,
   toolCallId: Type.String({ minLength: 1 }),
+  runSeq: Type.Optional(Type.Integer({ minimum: 1 })),
   ref: Type.String({ minLength: 1 }),
   commit: GitObjectIdSchema,
   tree: GitObjectIdSchema,
@@ -192,6 +196,25 @@ export const CheckpointDataSchema = Type.Object({
   baseCommit: Type.Optional(GitObjectIdSchema),
 });
 export type CheckpointData = Static<typeof CheckpointDataSchema>;
+
+// 快照的拍摄标记（决策 350）：开拍之前先写 shooting；拍完得到快照写代码快照条目，文件没有改变写 unchanged，
+// 失败或等待超时写 failed。只有 shooting、没有下文（进程在拍完之前退出）或 failed 的快照，使对应分叉点明确报错
+export const CheckpointMarkStateSchema = Type.Union([
+  Type.Literal("shooting"),
+  Type.Literal("unchanged"),
+  Type.Literal("failed"),
+]);
+export type CheckpointMarkState = Static<typeof CheckpointMarkStateSchema>;
+export const CheckpointMarkDataSchema = Type.Object({
+  version: VERSION,
+  runId: RunIdSchema,
+  toolCallId: Type.String({ minLength: 1 }),
+  runSeq: Type.Integer({ minimum: 1 }),
+  state: CheckpointMarkStateSchema,
+  // failed 的原因
+  reason: Type.Optional(Type.String()),
+});
+export type CheckpointMarkData = Static<typeof CheckpointMarkDataSchema>;
 
 // worker 派出与收尾（040）：写在父会话文件里。派出先于建工作树落盘；派出失败以 spawn-failed 收尾，保证两者配对。
 // 旧记录的 taskKey 与结果里的 structured、receiptIds 不再写（前两者无读者，回执随 184 停写）
@@ -359,6 +382,7 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunEnd; data: RunEndData }
   | { customType: typeof SessionEntryType.Verification; data: VerificationData }
   | { customType: typeof SessionEntryType.Checkpoint; data: CheckpointData }
+  | { customType: typeof SessionEntryType.CheckpointMark; data: CheckpointMarkData }
   | { customType: typeof SessionEntryType.Worker; data: WorkerData }
   | { customType: typeof SessionEntryType.Fork; data: ForkData }
   | { customType: typeof SessionEntryType.Grant; data: GrantData }
@@ -373,6 +397,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.RunEnd]: RunEndDataSchema,
   [SessionEntryType.Verification]: VerificationDataSchema,
   [SessionEntryType.Checkpoint]: CheckpointDataSchema,
+  [SessionEntryType.CheckpointMark]: CheckpointMarkDataSchema,
   [SessionEntryType.Worker]: WorkerDataSchema,
   [SessionEntryType.Fork]: ForkDataSchema,
   [SessionEntryType.Grant]: GrantDataSchema,
