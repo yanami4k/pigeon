@@ -2115,3 +2115,31 @@ test("网关：逐字转发的作业 model 与本批不符即 400、不发往上
     await up.close();
   }
 });
+
+test("花费累计文件按间隔落盘（决策 352）：记一笔后不立即写，到 5 秒间隔写一次；关闭时写定最终值", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "pigeon-spend-"));
+  const file = path.join(dir, "gateway-spend.json");
+  const t = testClock({ autoBelowMs: 1000 });
+  const usage = { input_tokens: 1000, output_tokens: 10 };
+  const up = await timedUpstream({ t: 0 }, [
+    { endAt: 0, usage },
+    { endAt: 0, usage },
+  ]);
+  try {
+    const g = await spendGateway(up.url, t.clock, limits(), { file });
+    await (await post(g, "j")).text();
+    assert.throws(() => readFileSync(file, "utf8"), "记一笔后不立即落盘");
+    await t.advance(5_000);
+    assert.equal((JSON.parse(readFileSync(file, "utf8")) as { requests: number }).requests, 1);
+    await (await post(g, "j")).text();
+    const total = g.spend().totalCny;
+    await g.close();
+    const saved = JSON.parse(readFileSync(file, "utf8")) as { requests: number; totalCny: number };
+    assert.equal(saved.requests, 2);
+    assert.ok(near(saved.totalCny, total));
+  } finally {
+    await closeSpendGateways();
+    await up.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -391,6 +391,8 @@ async function readAll(req: http.IncomingMessage): Promise<Buffer> {
 // 没有这类项、不是合法 JSON、不是对象或 tools 不是数组时原样返回同一份字节（Pigeon 自己的请求不带该字段，
 // 前缀缓存不受影响）。其他 type 取值不碰
 function stripCustomToolType(body: Buffer): Buffer {
+  // 决策 352：请求体里根本没有 "custom" 字样即无需解析（Pigeon 自己的请求都是这样），原样返回
+  if (!body.includes('"custom"')) return body;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body.toString("utf8"));
@@ -436,6 +438,8 @@ function usageOf(
     return out;
   }
   for (const line of events) {
+    // 决策 352：只有 message_start 与 message_delta 带用量；其余事件（正文增量占绝大多数）不解析
+    if (!line.includes('"usage"')) continue;
     try {
       const event = JSON.parse(line.slice(5).trim()) as {
         type?: string;
@@ -450,6 +454,9 @@ function usageOf(
   }
   return out;
 }
+
+// 花费累计文件的落盘间隔（毫秒）
+const SPEND_FLUSH_MS = 5_000;
 
 export async function startModelGateway(options: ModelGatewayOptions): Promise<ModelGateway> {
   const accounts: AccountState[] = options.accounts
@@ -493,7 +500,8 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     }
     return m;
   };
-  // 花费的全局累计（含探测）：有落盘文件即接着累计；每记一笔即整份落盘（先写临时文件再改名，不留半截）
+  // 花费的全局累计（含探测）：有落盘文件即接着累计；整份落盘（先写临时文件再改名，不留半截）。决策 352：记一笔后
+  // 至多 SPEND_FLUSH_MS 毫秒再落盘（期间的各笔合并成一次写），到上限停批时与网关关闭时立即写定
   const spendFile = options.spend?.file;
   const spendLimit = options.spend?.limitCny ?? null;
   const spent: GatewaySpendRecord = {
@@ -512,6 +520,15 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     spent.peakRequests = saved.peakRequests ?? 0;
   }
   const overSpend = () => spendLimit !== null && spent.totalCny >= spendLimit;
+  let spendFlush: (() => void) | undefined;
+  const writeSpend = () => {
+    spendFlush?.();
+    spendFlush = undefined;
+    if (spendFile === undefined) return;
+    const tmp = `${spendFile}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(spent)}\n`);
+    renameSync(tmp, spendFile);
+  };
   // 记一条成功请求的花费：按开始与结束时刻计价，记到作业（探测没有作业）与全局累计；到上限即交给控制器停批
   const chargeRequest = (
     job: string | undefined,
@@ -525,12 +542,12 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     spent.requests += 1;
     if (peak) spent.peakRequests += 1;
     spent.updatedAt = new Date(endMs).toISOString();
-    if (spendFile !== undefined) {
-      const tmp = `${spendFile}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(spent)}\n`);
-      renameSync(tmp, spendFile);
+    if (overSpend()) {
+      writeSpend();
+      options.limits.spendLimitReached(spent.totalCny, spendLimit as number);
+    } else if (spendFile !== undefined) {
+      spendFlush ??= later(SPEND_FLUSH_MS, writeSpend);
     }
-    if (overSpend()) options.limits.spendLimitReached(spent.totalCny, spendLimit as number);
   };
   const label = (i: number) => `账号 ${i + 1}`;
   let closed = false;
@@ -1189,6 +1206,8 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     spend: () => ({ ...spent, limitCny: spendLimit }),
     close: () =>
       new Promise<void>((resolve) => {
+        // 决策 352：还没落盘的花费在关闭时写定
+        if (spendFlush !== undefined) writeSpend();
         closed = true;
         closing.abort();
         for (const stop of [...timers]) stop();

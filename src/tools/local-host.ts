@@ -44,6 +44,11 @@ export function createLocalWorkspaceHost(
   const platform = options.platform ?? process.platform;
   // 工作区在 git 仓库里的前缀（会话内取一次）；不是 git 工作区为 undefined
   let gitPrefix: Promise<string | undefined> | undefined;
+  // 决策 352：Windows 上程序查找（工作区根与 PATH 逐目录找 .cmd / .bat）按"查找方式 + PATH + 程序名"缓存，会话内有效。
+  // 找到的脚本取用前确认仍在；没找到的在命令报"程序不存在"时作废
+  const launchers = new Map<string, string | undefined>();
+  const launcherKey = (program: string, env: NodeJS.ProcessEnv) =>
+    `root-and-path\0${pathValueOf(env)}\0${program}`;
   return {
     platform,
     root: workspaceRoot,
@@ -78,7 +83,28 @@ export function createLocalWorkspaceHost(
       }
       return { kind: "scan", ...(await scanLocalFiles(workspaceRoot, limit)) };
     },
-    findLauncherScript: (program, env) => windowsScript(program, workspaceRoot, env, platform),
+    findLauncherScript(program, env) {
+      if (platform !== "win32") {
+        return undefined;
+      }
+      const key = launcherKey(program, env);
+      if (launchers.has(key)) {
+        const cached = launchers.get(key);
+        if (cached === undefined || existsSync(cached)) {
+          return cached;
+        }
+      }
+      const found = windowsScript(program, workspaceRoot, env, platform);
+      launchers.set(key, found);
+      return found;
+    },
+    forgetLauncherScript(program) {
+      for (const key of [...launchers.keys()]) {
+        if (key.endsWith(`\0${program}`)) {
+          launchers.delete(key);
+        }
+      }
+    },
   };
 }
 
@@ -226,6 +252,10 @@ function runLocalProcess(
   });
 }
 
+function pathValueOf(env: NodeJS.ProcessEnv): string {
+  return Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+}
+
 // Windows 下程序解析到的 .cmd / .bat 路径（非 Windows 或解析到可执行文件时返回 undefined）：
 // 显式带 .cmd / .bat 扩展名的按工作区根与 PATH 定位；不带扩展名的按工作区根、PATH 逐目录找，
 // 同一目录里 .exe / .com 优先（与 PATHEXT 的缺省次序一致）
@@ -238,7 +268,7 @@ export function windowsScript(
   if (platform !== "win32" || program === "") {
     return undefined;
   }
-  const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+  const pathValue = pathValueOf(env);
   const lower = program.toLowerCase();
   const hasSeparator = program.includes("/") || program.includes("\\");
   if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {

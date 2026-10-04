@@ -22,11 +22,24 @@ export function isOutsideRelative(rel: string): boolean {
   return rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
 }
 
+// 决策 352：工作区根的真实路径缓存起来（按根的写法；同一进程里换了根即另一条），每次解析不再重算
+const realRoots = new Map<string, string>();
+
+export function realRootOf(workspaceRoot: string): string {
+  const cached = realRoots.get(workspaceRoot);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const real = realpathSync(workspaceRoot);
+  realRoots.set(workspaceRoot, real);
+  return real;
+}
+
 // 把 inputPath 解析成工作区根内的真实绝对路径；逃逸（../、根外绝对路径、
 // 符号链接/junction 解析后越界）一律拒绝。目标必须已存在（realpath 解析符号链接的前提）——
 // M3 的 read/edit 都只面向既有文件。
 export function resolveWorkspacePath(workspaceRoot: string, inputPath: string): string {
-  const realRoot = realpathSync(workspaceRoot);
+  const realRoot = realRootOf(workspaceRoot);
   const resolved = path.resolve(realRoot, inputPath);
   let realTarget: string;
   try {
@@ -53,7 +66,7 @@ export function isPathInsideDir(workspaceRoot: string, dir: string, inputPath: s
   let realDir: string;
   let realTarget: string;
   try {
-    realRoot = realpathSync(workspaceRoot);
+    realRoot = realRootOf(workspaceRoot);
     realDir = realpathSync(path.resolve(realRoot, dir));
     realTarget = realpathSync(path.resolve(realRoot, inputPath));
   } catch {
@@ -67,7 +80,7 @@ export function isPathInsideDir(workspaceRoot: string, dir: string, inputPath: s
 //（路径上的目录是符号链接的照常解析）
 export function resolveWorkspaceWritePath(workspaceRoot: string, inputPath: string): string {
   const resolved = resolveWorkspacePath(workspaceRoot, inputPath);
-  const given = path.resolve(realpathSync(workspaceRoot), inputPath);
+  const given = path.resolve(realRootOf(workspaceRoot), inputPath);
   if (lstatSync(given).isSymbolicLink()) {
     throw symlinkRefused(inputPath, readlinkSync(given));
   }

@@ -91,6 +91,8 @@ function within(parent: string, child: string, caseInsensitive: boolean): string
 }
 
 export function createProtectedPathResolver(options: ProtectedPathOptions): ProtectedPathResolver {
+  // 决策 352：两个根的真实路径取一次（根下 .pigeon 的真实路径照旧每次现取：它可能在会话中途被建或被换成链接）
+  let realRoots: { workspace: string; governance: string } | undefined;
   const caseInsensitive =
     options.caseInsensitive ??
     (options.realPaths ? caseInsensitiveAt(options.workspaceRoot) : false);
@@ -123,10 +125,14 @@ export function createProtectedPathResolver(options: ProtectedPathOptions): Prot
     );
     if (byName !== undefined || !options.realPaths) return byName;
     // 真实路径判定：符号链接解析后落进 .pigeon 的也算；.pigeon 本身是符号链接时，它指向的目录同样受保护
+    realRoots ??= {
+      workspace: realOrResolved(options.workspaceRoot),
+      governance: realOrResolved(options.governanceRoot),
+    };
     return check(
       resolveThroughExisting(lexical),
-      realOrResolved(options.workspaceRoot),
-      realOrResolved(options.governanceRoot),
+      realRoots.workspace,
+      realRoots.governance,
       (root) => [path.join(root, PIGEON_DIR), realOrResolved(path.join(root, PIGEON_DIR))]
     );
   };

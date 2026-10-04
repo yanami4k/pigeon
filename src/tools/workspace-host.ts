@@ -145,6 +145,8 @@ export interface WorkspaceHost {
   execObserved?(plan: HostExecPlan, options: HostExecOptions, limit: number): Promise<ObservedExec>;
   // Windows 本地实现：程序解析到的 .cmd / .bat 路径；其余实现恒为 undefined
   findLauncherScript(program: string, env: NodeJS.ProcessEnv): string | undefined;
+  // 决策 352：命令报"程序不存在"时作废该程序的查找缓存（会话中途装上的程序）；没有缓存的实现不提供
+  forgetLauncherScript?(program: string): void;
   // 占位（098：快照与分叉挂同一层）。现状：宿主侧的快照与分叉仍由 orchestration/checkpoint.ts 直接调宿主 git，
   // 尚未迁到本接口；容器实现未提供。迁移时两个实现各自落在这两个方法上，调用方不得判断工作区形状
   snapshot?(): Promise<WorkspaceSnapshotRef>;

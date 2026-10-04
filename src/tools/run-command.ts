@@ -429,6 +429,7 @@ export function createRunCommandTool(
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
+          host.forgetLauncherScript?.(inspection.argv?.[0] ?? plan.program);
           throw new RunCommandError(`命令不存在：${plan.program}`);
         }
         throw run.spawnError;
