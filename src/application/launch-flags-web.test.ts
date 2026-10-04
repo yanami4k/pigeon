@@ -109,7 +109,10 @@ test("三种关法下两件工具与联网那句提示都不出现；缺省照�
       { label: "沙箱断网档", argv: ["--sandbox", "--sandbox-network", "off"], on: false },
     ];
     for (const { label, argv, web, on } of cases) {
-      const option = webToolsOptionOf(parse(argv), snapshotWithWeb(web), {});
+      // 决策 359：有搜索 key 才注册 web_search（假 key 只用于选出后端，装配时不发请求）
+      const option = webToolsOptionOf(parse(argv), snapshotWithWeb(web), {
+        DEEPSEEK_API_KEY: "test-key",
+      });
       assert.equal(option.webTools !== undefined, on, label);
       const bundle = buildRuntime({
         streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),

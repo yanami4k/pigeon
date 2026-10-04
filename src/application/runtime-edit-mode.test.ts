@@ -24,9 +24,8 @@ const HASHLINE_PROMPT =
   TRUNCATION_GUIDANCE +
   // 审批与 run_command 的说法按执行端与审批状态生成（170 ④）；本文件的运行一律 yolo、本地执行端
   "写操作自动批准。" +
-  runCommandTexts({ platform: process.platform, approval: "yolo" }).prompt +
-  "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
-  "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
+  // 决策 359：临时目录里没有历史会话，会话检索三件不注册，提示里也没有那一句
+  runCommandTexts({ platform: process.platform, approval: "yolo" }).prompt;
 
 const HASHLINE_EDIT_DESCRIPTION =
   "编辑工作区内已存在的文本文件。必须先用 read_file 读取：edits 按 N#TAG 锚点寻址" +

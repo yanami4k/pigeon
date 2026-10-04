@@ -15,7 +15,11 @@ import type { WebToolsConfig } from "./web-tools.ts";
 import { createWorkerRuntimeFactory } from "./workers.ts";
 
 const webTools: WebToolsConfig = {
-  search: { unavailable: "没配", defaultMaxResults: 5 },
+  // 决策 359：有可用的搜索后端才注册 web_search（假后端，不发请求）
+  search: {
+    backend: { id: "fake", search: async () => ({ backend: "fake", query: "", results: [] }) },
+    defaultMaxResults: 5,
+  },
   fetch: { timeoutMs: 1000, maxBytes: 1000, maxChars: 1000 },
   distillMaxTokens: 100,
 };

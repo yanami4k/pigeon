@@ -138,6 +138,11 @@ import {
   taskListRegistrations,
   UPDATE_TASKS_TOOL,
 } from "./task-list-tool.ts";
+import {
+  type SkippedTools,
+  type ToolEnvironment,
+  toolEnvironmentProbe,
+} from "./tool-environment.ts";
 import { toolExecutionModeOf } from "./tool-execution-modes.ts";
 import type { WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
@@ -222,6 +227,8 @@ export interface RuntimeDeps {
   learnedMemory?: LearnedMemoryConfig;
   // 决策 340：/reload 重建时沿用旧运行面开局读到的人写说明（AGENTS.md）、推送的记忆与本地 Skill 扫描结果（不重读文件）
   frozenPrompt?: FrozenSessionPrompt;
+  // 决策 359：查 PATH 用的环境变量（缺省 process.env；测试注入）
+  env?: NodeJS.ProcessEnv;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
@@ -280,6 +287,10 @@ const RUN_TAIL_HOOK_EVENTS: ReadonlySet<HookEventName> = new Set([
   "SubagentStop",
 ]);
 
+// 决策 359：没注册 web_search（缺搜索 key）时只说 web_fetch
+export const WEB_FETCH_SENTENCE =
+  "需要读取某个网页时，用 web_fetch 读取并说明要从中找什么；web_fetch 只交回按问题提炼的结果，不交回网页原文。";
+
 // 系统提示里联网工具的说法（决策 287、289）：只在注册了两件工具时追加
 export const WEB_TOOLS_SENTENCE =
   "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
@@ -291,6 +302,8 @@ export interface FrozenSessionPrompt {
   instructions: AgentsMdInstructions;
   pushedMemory?: PushedMemory;
   localSkills: LocalSkillScan;
+  // 决策 359：按环境注册工具的检查结果（/reload 沿用，一次会话内工具清单固定）
+  toolEnvironment?: ToolEnvironment;
 }
 
 export interface RuntimeBundle {
@@ -450,9 +463,30 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
+  // 决策 359：按环境只注册用得上的工具——会话开始时查一次（/reload 沿用开局的结果），没注册的连同原因记进 Run 开始条目
+  const environment = toolEnvironmentProbe({
+    ...(deps.frozenPrompt?.toolEnvironment !== undefined
+      ? { frozen: deps.frozenPrompt.toolEnvironment }
+      : {}),
+    governanceRoot,
+    sessionsDir,
+    sessionId: deps.sessionId,
+    ...(deps.env !== undefined ? { env: deps.env } : {}),
+  });
+  const skippedTools: SkippedTools[] = [];
+  const skip = (tools: string[], reason: string): false => {
+    skippedTools.push({ tools, reason });
+    return false;
+  };
   // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
-  // 决策 193 的开关关掉时一件都不注册
-  const sessionSearch = deps.sessionSearch ?? true;
+  // 决策 193 的开关关掉时一件都不注册；决策 359：本项目没有本会话以外的会话时也不注册
+  const sessionSearch =
+    (deps.sessionSearch ?? true) &&
+    (environment.check("sessionHistory") ||
+      skip(
+        [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL],
+        "本项目没有历史会话"
+      ));
   // 决策 339：检索与目录排除当前会话所在的整棵会话树（父会话取本会话的来历：worker 的派出方、分支的来源）；
   // 可搜文本缓存在 .pigeon/state/search-cache/
   const lineageParent =
@@ -488,11 +522,28 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     deps.spawnWorker !== undefined && deps.spawnWorker.settings.depth > 0
       ? deps.spawnWorker
       : undefined;
-  const spawnSlot =
+  const spawnCandidate =
     deps.workspaceHost === undefined
       ? deps.toolPolicy === undefined
         ? deps.spawnWorker
         : nestedSlot
+      : undefined;
+  // 决策 359：工作区不是 git 仓库时整组不注册
+  const spawnSlot =
+    spawnCandidate !== undefined &&
+    (environment.check("gitWorkspace") ||
+      skip(
+        [
+          SPAWN_WORKER_TOOL,
+          WAIT_WORKERS_TOOL,
+          WORKER_STATUS_TOOL,
+          MESSAGE_WORKER_TOOL,
+          STOP_WORKER_TOOL,
+          ...(nestedSlot === undefined ? [TAKE_WORKER_TOOL] : []),
+        ],
+        "工作区不是 git 仓库"
+      ))
+      ? spawnCandidate
       : undefined;
   const takeSlot = spawnSlot !== undefined && nestedSlot === undefined ? spawnSlot : undefined;
   if (spawnSlot !== undefined) {
@@ -506,10 +557,18 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // 决策 279：取用 worker 自身改动的工具与派 worker 同槽同范围（写档，按写操作审批）
     registry.register(takeWorkerRegistration());
   }
-  // 决策 309：提交编排脚本的工具——只给主会话；worker 与沙箱不注册
-  const scriptSlot =
+  // 决策 309：提交编排脚本的工具——只给主会话；worker 与沙箱不注册。决策 359：脚本派的 worker 要 git 工作区、脚本跑在
+  // docker 里，两样缺一即不注册
+  const scriptCandidate =
     deps.workspaceHost === undefined && deps.toolPolicy === undefined
       ? deps.scriptOrchestration
+      : undefined;
+  const scriptSlot =
+    scriptCandidate !== undefined &&
+    (environment.check("gitWorkspace") || skip([ORCHESTRATE_TOOL], "工作区不是 git 仓库")) &&
+    (environment.check("dockerOnPath") ||
+      skip([ORCHESTRATE_TOOL], "PATH 里找不到 docker 可执行文件"))
+      ? scriptCandidate
       : undefined;
   if (scriptSlot !== undefined) {
     registry.register(orchestrateRegistration());
@@ -524,8 +583,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   }
   // 决策 287–291：联网工具——web_search 读档免审批，web_fetch 网络档按网站审批
   const webTools = deps.webTools;
+  // 决策 359：没有可用的搜索后端（缺 key）不注册 web_search，web_fetch 照常
+  const webSearch =
+    webTools !== undefined &&
+    (webTools.search.backend !== undefined ||
+      skip([WEB_SEARCH_TOOL], webTools.search.unavailable ?? "没有可用的搜索后端"));
   if (webTools !== undefined) {
-    registry.register(webSearchRegistration());
+    if (webSearch) {
+      registry.register(webSearchRegistration());
+    }
     registry.register(webFetchRegistration());
   }
   // 决策 330：会话开始读人写的说明（AGENTS.md），拼进 system prompt 一次即冻结（不走 transformContext）；清单进注入快照，
@@ -568,7 +634,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
         "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
       : "") +
-    (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
+    (webTools !== undefined ? (webSearch ? WEB_TOOLS_SENTENCE : WEB_FETCH_SENTENCE) : "");
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
   // 本地 Skill 开局扫描一次（/reload 沿用）；MCP server 的 prompts 随本运行面的 MCP 会话
@@ -615,7 +681,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(takeSlot !== undefined ? [TAKE_WORKER_TOOL] : []),
     ...(scriptSlot !== undefined ? [ORCHESTRATE_TOOL] : []),
     ...(taskList !== undefined ? [UPDATE_TASKS_TOOL, LIST_TASKS_TOOL] : []),
-    ...(webTools !== undefined ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
+    ...(webTools !== undefined ? [...(webSearch ? [WEB_SEARCH_TOOL] : []), WEB_FETCH_TOOL] : []),
   ];
   const mcpSection =
     mcpTools.length > 0
@@ -643,7 +709,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : { allow: toolNames, deny: [], approvalMode: deps.yolo ? "yolo" : "prompt" };
   // Run 开始条目的附加摘要：MCP 工具集与 server 状态（有 server 时）
   const mcpSummary = mcp !== undefined && mcp.connections.length > 0 ? mcp : undefined;
-  const runStartedExtras = mcpSummary !== undefined ? () => mcpSummary.summary() : undefined;
+  // 决策 359：按环境没注册的工具与原因（有才带）
+  const runStartedExtras =
+    mcpSummary !== undefined || skippedTools.length > 0
+      ? () => ({
+          ...(mcpSummary !== undefined ? mcpSummary.summary() : {}),
+          ...(skippedTools.length > 0 ? { skippedTools: structuredClone(skippedTools) } : {}),
+        })
+      : undefined;
   // 决策 188：压缩服务。摘要请求与主请求同一个模型接入，只套温度（摘要从不请求推理，温度总能生效）；
   // 不套单轮输出上限包装——它会盖掉上游给摘要定的输出上限（0.8 倍预留与模型输出上限的较小者）。
   // 模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供上游定摘要请求的选项
@@ -688,7 +761,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const webToolset =
     webTools !== undefined
       ? [
-          createWebSearchTool(webTools.search),
+          ...(webSearch ? [createWebSearchTool(webTools.search)] : []),
           createWebFetchTool({
             limits: webTools.fetch,
             distill: createModelDistiller({
@@ -933,6 +1006,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       instructions,
       ...(pushedMemory !== undefined ? { pushedMemory } : {}),
       localSkills,
+      toolEnvironment: environment.result(),
     },
     ...(mcp !== undefined ? { mcp } : {}),
     ...(learned !== undefined ? { learnedMemory: learned } : {}),

@@ -171,7 +171,7 @@ export interface TurnRoundNotice extends LoopRound {
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
 export type ManualCompactionOutcome = CompactionOutcome | { kind: "skipped"; reason: "disabled" };
 
-type RunStartedExtras = Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+type RunStartedExtras = Pick<RunStartedPayload, "mcpTools" | "mcpServers" | "skippedTools">;
 
 export interface PiRuntimeAdapterOptions {
   snapshot: InjectionSnapshot;
@@ -188,7 +188,8 @@ export interface PiRuntimeAdapterOptions {
   tools?: AgentTool[];
   // M5.7 S3（决策 052）：Run 开始条目的附加摘要（MCP 工具集的注解 / 配置 / 实际档位与冲突、server 状态）——
   // 装配根注入，每个 Run 开始时取一次；结构类型，pi-runtime 不触达 mcp
-  runStartedExtras?: () => Pick<RunStartedPayload, "mcpTools" | "mcpServers">;
+  // 决策 359：另带按环境没注册的工具与原因
+  runStartedExtras?: () => RunStartedExtras;
   // M7（决策 077）：分叉续跑的 Agent 初始消息（由会话树 buildSessionContext 还原的分支消息）；缺省为空
   initialMessages?: AgentMessage[];
   // 新会话存储的写入面（决策 176）；缺省不写

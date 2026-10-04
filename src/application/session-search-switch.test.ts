@@ -28,6 +28,17 @@ async function assembled(
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-switch-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-search-switch-home-"));
   try {
+    // 决策 359：本项目有历史会话才注册会话检索三件——先跑一次留下一个会话
+    await runHeadless({
+      task: "之前",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      yolo: true,
+      homeDir: home,
+      skillRoots: [],
+      agentsMd: false,
+    });
     const streamFn = createFakeStreamFn({ replies });
     const result = await runHeadless({
       task: "你好",
