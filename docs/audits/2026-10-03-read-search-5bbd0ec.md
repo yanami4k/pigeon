@@ -78,3 +78,69 @@
 - 提交 18a03f8：`npm ci` 后，`npm run lint` 无问题；`npm run check` 无错误；`node --test --test-concurrency=3 "src/**/*.test.ts"`：1,640 项，通过 1,638，失败 0，跳过 2（两项只在 Windows 上运行的用例）；`npm run deps`：586 个模块，无违规。四步合计 167 秒。真容器用例实际运行，未跳过。
 - 提交 4acee69 单独检出：`biome check`、`tsc --noEmit`、`depcruise` 通过；第一件相关的 6 个测试文件 29 项全部通过。
 - 变异均在提交 18a03f8 上运行，见上两表；运行后测试建的容器均已删除。
+
+## 验收修复（提交 6d7a5e3）
+
+### 禁读名单的路径归一（决策 355）
+
+现状：本机按 JS 版 `realpathSync` 取真实路径、按字符串 `relative` 判包含。Windows 上 `\\?\C:\…\.ssh\id_rsa`（`relative` 得到绝对路径，判成不在名单内）、8.3 短名（`SSH~1\id_rsa`）、数据流写法（`.netrc::$DATA`）可绕过禁读名单；包含关系区分大小写。
+
+改法（`tools/read-deny.ts`）：
+- 本机取真实路径改用系统的 realpath（`realpathSync.native`），目标、工作区根与名单各项同一口径；Windows 上短名、大小写与 `\\?\` 前缀归一到同一写法。
+- 包含关系按执行端的比较口径判定（`PathRules`）：本机在 Windows 与 macOS 上不分大小写（`LOCAL_PATH_RULES`），容器按 posix、区分大小写（`POSIX_PATH_RULES`）。
+- Windows 上设备前缀（`\\?\`、`\\.\`、`\??\`，正反斜杠都算）与数据流写法（盘符之后再出现冒号）不经解析直接拒绝，抛 `UnsupportedPathFormError`（`WorkspacePathError` 的子类）。
+
+### grep、glob 的路径与结果过滤（决策 355、368）
+
+现状：`path` 参数只经路径围栏；结果按"名单落在工作区内的前缀"做区分大小写的前缀比对（`readDenyWithin`、`underDeniedPrefix`）。工作区包含家目录时，`path` 写成 `.SSH`、`SSH~1` 可把私钥内容搜出；busybox 的 `grep -r` 跟随指向文件的符号链接，能读出工作区外与禁读的文件。
+
+改法：
+- `searchStart` 照读档的规则解析 `path`（`resolveForRead`：真实路径、禁读名单、Windows 写法），落在禁读名单内（`ReadDeniedError`）或工作区外即拒。
+- 每条结果按真实路径分类：执行端新增可选方法 `classifyReadPaths(relPaths, deny)`，返回 `ok`、`denied`、`outside`（取不到真实路径的不在结果里）。本机逐条 `realpathSync.native`；容器一次 exec：经 `trustedShell` 运行固定脚本，名单各项照前解析，待查路径经标准输入以 NUL 分隔交给 `xargs`，逐条 `readlink -f`。三种后端的结果一律经 `screenByRealPath` 过滤：禁读的计入 `deniedOmitted`，经链接落在工作区外的计入新增的 `outsideOmitted`，末尾分别注明"已按禁读名单略去 N 条""已略去指向工作区以外的 N 条"。删去 `readDenyWithin`、`denyWithinRoot`、`underDeniedPrefix`。
+
+### 搜索后端的执行通道（决策 368）
+
+现状：后端经 `host.exec` 运行，即 agent 命令的执行通道：容器里程序按镜像的 PATH 解析，git 读系统、全局与仓库配置，ripgrep 读 `RIPGREP_CONFIG_PATH`。
+
+改法：
+- 执行端新增可选方法 `execHelper(program, args, options)`，供 Pigeon 自己的只读辅助程序使用。本机：环境经 `helperEnv` 处理（系统目录放到 PATH 最前，Windows 照旧；去掉 `RIPGREP_CONFIG_PATH`；`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CONFIG_NOSYSTEM=1`）。容器：经 `trustedShell`（系统目录在前，屏蔽 git 的全局与系统配置）运行固定脚本 `unset RIPGREP_CONFIG_PATH; exec "$@"`，程序与参数按位置传入。两路输出各自留到 `maxOutputBytes`（内部函数加分流上限参数，`exec` 的行为不变）。`SYSTEM_PATH` 移到 `tools/workspace-host.ts`，容器执行端改为引用。
+- 本机的 ripgrep 只用随包二进制的绝对路径，不再退到 PATH 上的 `rg`；容器里用系统 PATH 上的 `rg`。
+- git 的每次调用加 `-c core.fsmonitor=`（仓库配置里的 fsmonitor 会执行程序）。
+- 探测后端时退出码 126、127 按"程序不存在"处理（容器里经 shell 包装执行，找不到程序为 127）。
+- 执行端没有 `execHelper` 时 grep、glob 报环境错误。
+
+### 其余正确性
+
+- ripgrep 加 `--no-ignore-dot` 与 `--no-ignore-global`：不读 `.ignore`、`.rgignore` 与全局 gitignore，与 git（不读全局配置）的口径一致。
+- 结果只解析 stdout（此前解析的是 stdout 与 stderr 按到达顺序合并的输出），错误信息取自 stderr。
+- 文件名模式写错（如 `[z-a]`）抛 `GlobPatternError`（归模型侧的域错误），不再抛 `SyntaxError`；grep 与 glob 在运行后端之前先编译模式。
+
+### 文档
+
+`docs/configuration.md`：写明无人值守运行时，设置里固化的 `read_file` 放权照样放行工作区外读取（它就是人事先给的批准，与写档的放权同一口径）；写明本机用系统 realpath、Windows 与 macOS 不分大小写、Windows 的设备前缀与数据流写法直接拒绝；`grep`、`glob` 的 `path` 落在名单内即拒、结果逐条按真实路径过滤；硬链接无法一般地识别，是已知限制；搜索后端不走 agent 执行通道的做法。
+
+### 测试
+
+- `src/tools/read-deny.test.ts`：第二项改为测逐条分类（可读、禁读、经链接落在工作区外、已删除的不在结果里）。新增一项比较口径的纯函数测试（不分大小写时，`.SSH` 下的文件算落在 `~/.ssh` 之内，区分大小写时不算），任何平台都运行。新增一项 Windows 专项：大小写写法、8.3 短名（卷上开着短名时）、`\\?\`、`\\.\`、`//?/` 前缀、`::$DATA` 与 `:stream` 写法；grep 的 `path` 写成 `.SSH` 即拒，搜整个家目录时 `.ssh` 下的结果逐条滤掉并计数。别处显式跳过，跳过原因"只在 Windows 上有这些路径写法"。
+- `src/tools/search.test.ts`：上限一项改测 `details` 的 `total`、`shown`、`deniedOmitted`，不逐字测文案；加"`path` 经链接指向禁读目录即拒"；git 仓库的夹具在 `.git` 下放一个含 `foo` 的文件，断言搜不到（此前的"没有 .git"在没有这类文件时恒真）；加非法模式归 `GlobPatternError`。
+- `src/application/outside-read.test.ts`：面板文案的逐字比对改为断言审批请求里的 `outsidePath`。
+- `src/execution/container-read.test.ts`：`readDenyWithin` 的断言改为测容器里的逐条分类。
+- `src/execution/container-search.test.ts`：新增 busybox 跟随链接一项——工作区里放指向禁读文件与工作区外文件的链接、`.git` 下放含 `foo` 的文件，`grep -r` 的结果只剩工作区内的一条，`deniedOmitted` 与 `outsideOmitted` 各为 1。
+
+变异（提交 6d7a5e3，逐个改坏、只跑对应测试，均还原后工作树干净）：
+
+| 变异 | 运行处 | 结果 |
+| --- | --- | --- |
+| M7 本机取真实路径换回 JS 版 `realpathSync` | Windows 本机 | Windows 专项变红 |
+| M8 不拒收设备前缀与数据流写法 | Windows 本机 | Windows 专项变红 |
+| M11w grep、glob 的结果不逐条按真实路径过滤 | Windows 本机 | Windows 专项变红 |
+| M9 不分大小写的平台照样区分大小写 | 服务器 | 比较口径一项变红 |
+| M10 grep 的 `path` 不判禁读 | 服务器 | `search.test.ts` 上限一项变红 |
+| M11 grep、glob 的结果不逐条按真实路径过滤 | 服务器 | busybox 跟随链接一项变红 |
+
+原有的 M1–M6 同在提交 6d7a5e3 上重跑，均照旧变红（M3 的改动点改为 `POSIX_PATH_RULES` 的写法，M6 改为经 `execHelper` 交给 `sh -c`）。
+
+### verify
+
+- 服务器 pigeon-verify，提交 6d7a5e3：`npm run lint` 无问题；`npm run check` 无错误；`node --test --test-concurrency=3 "src/**/*.test.ts"`：1,643 项，通过 1,640，失败 0，跳过 3（两项只在 Windows 上运行的 `.cmd` 用例与本节的 Windows 专项）；`npm run deps`：586 个模块，无违规。四步合计 209 秒。真容器用例实际运行，未跳过。
+- Windows 本机（Node 24.12.0）：只运行 `read-deny.test.ts` 的 Windows 专项，通过；8.3 短名一项实际测到（卷上开着短名）。
