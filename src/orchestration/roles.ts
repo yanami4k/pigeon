@@ -20,6 +20,7 @@ import type { DelegatedPolicy, ToolScope, WorkerRole } from "../state/session-pa
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { READ_ONLY_SEARCH_TOOLS } from "../tools/search-tools.ts";
+import { WRITE_FILE_TOOL } from "../tools/write-file.ts";
 import {
   commandPrefixWords,
   normalizeScopePath,
@@ -50,7 +51,7 @@ export const ROLE_TOOLS: Readonly<Record<ActiveWorkerRole, readonly string[]>> =
     LIST_SESSIONS_TOOL,
     ...WEB_TOOLS,
   ],
-  implementer: ["read_file", "edit_file", ...WEB_TOOLS],
+  implementer: ["read_file", "edit_file", WRITE_FILE_TOOL, ...WEB_TOOLS],
   tester: ["read_file", "run_command", ...WEB_TOOLS],
 };
 

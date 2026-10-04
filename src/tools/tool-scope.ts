@@ -14,12 +14,14 @@ import { GLOB_TOOL } from "./glob.ts";
 import { GREP_TOOL } from "./grep.ts";
 import { isOutsideRelative } from "./paths.ts";
 import { type CommandInspection, parseCommandLine, RUN_COMMAND_TOOL } from "./run-command.ts";
+import { WRITE_FILE_TOOL } from "./write-file.ts";
 
 // 可附加作用范围的工具登记表：工具名 → 范围种类（paths 限路径或目录，commandPrefixes 限命令前缀）。
 // 派出参数的校验、spawn_worker 的说明与报错里的清单都从这里取；write_file（限路径）、grep 与 glob（限目录）合并后各加一行
 export const SCOPABLE_TOOLS: Readonly<Record<string, "paths" | "commandPrefixes">> = {
   read_file: "paths",
   edit_file: "paths",
+  [WRITE_FILE_TOOL]: "paths",
   // 决策 360：读类限目录——grep、glob 按 path 参数判定（不给 path 即越界）
   [GREP_TOOL]: "paths",
   [GLOB_TOOL]: "paths",
