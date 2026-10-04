@@ -32,7 +32,7 @@
 | `modelInfo` | 按模型手填的价格、上下文窗口、单次输出上限与缓存规则的覆盖（见下文"模型信息"） | 新节 |
 | `truncationContinuation` | 撞上限续跑的开关与两个次数上限（见下文"撞上限续跑与流式重复检测"） | 新节 |
 | `repetitionGuard` | 流式重复检测的开关、模式、档位与各项参数（同上） | 新节 |
-| `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个）、`readFile`（单次字节与单行字符上限）、`runCommand`（输出的头尾保留与落盘总量），见下文"工具的上限" | 新节 |
+| `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个）、`readFile`（单次字节与单行字符上限）、`runCommand`（输出的头尾保留与落盘总量、单次超时、后台作业的上限与收尾时限），见下文"工具的上限" | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -194,7 +194,7 @@ export const modelInfo = {
 
 ## 工具的上限
 
-`tools` 一节按工具分子键（小驼峰），不写的项取缺省（决策 356、357）：
+`tools` 一节按工具分子键（小驼峰），不写的项取缺省（决策 356、357、365）：
 
 | 键 | 含义 | 缺省 |
 | --- | --- | --- |
@@ -205,8 +205,30 @@ export const modelInfo = {
 | `tools.runCommand.outputHeadBytes` | run_command 输出超长时保留的开头 | 8192（8 KiB） |
 | `tools.runCommand.outputTailBytes` | 输出超长时保留的末尾 | 24576（24 KiB） |
 | `tools.runCommand.savedOutputsMaxBytes` | 每个会话落盘的完整输出总量上限，满了删最旧的 | 209715200（200 MiB） |
+| `tools.runCommand.timeoutSeconds` | 不给 `timeout_seconds` 时的单次超时（秒）；大于上限时按上限 | 120 |
+| `tools.runCommand.maxTimeoutSeconds` | `timeout_seconds` 的上限（秒），给得更大即拒绝执行 | 600 |
+| `tools.runCommand.maxBackgroundJobs` | 每个会话同时在跑的后台作业上限，超出即拒绝 | 2 |
+| `tools.runCommand.maxBackgroundJobsTotal` | 整次运行（同一进程里的主会话与各 worker）同时在跑的后台作业上限 | 8 |
+| `tools.runCommand.backgroundOutputMaxBytes` | 单个后台作业的输出文件上限，超出只留末尾 | 16777216（16 MiB） |
+| `tools.runCommand.backgroundCloseoutSeconds` | 无人值守收尾前等在跑作业的总时限（秒），计入运行的墙钟预算 | 600 |
 
 run_command 的输出超过开头加末尾两段时，结果里留开头与末尾、中间注明省略的行数；完整输出存进会话自己的落盘目录 `.pigeon/state/outputs/<会话号>/`，结果给出虚拟路径 `pigeon://outputs/<会话号>/<编号>` 与总行数。read_file 认得这个前缀，直接从落盘目录读，不经执行端（沙箱会话同样如此）；虚拟路径只能是 `pigeon://outputs/` 加会话号加编号，会话只能是本会话或其分叉来源（别的会话的编号明确报错），指不到落盘目录以外。落盘目录在工作区的 `.pigeon/state` 里，任何一级被换成链接即拒绝读写；read_file 只认 Pigeon 自己写下的那份：每份写成时在会话落盘目录的 `index.json` 记下设备号、inode、大小与 sha256，读时逐项核对，落盘文件被改动、换成链接或硬链接都拒绝读取。落盘出错（如磁盘满）时照常给出开头与末尾，并注明全文未能保存，不留半截文件。虚拟路径的行号只按换行（`\n`）计，与结果里的总行数一致。落盘文件随会话保存。
+
+### 单次超时与后台作业
+
+run_command 的单次超时缺省 120 秒，模型可用参数 `timeout_seconds` 另设，至多 600 秒（缺省与上限见上表，可改）；给得超过上限即拒绝执行并说明上限，不悄悄压到上限。到时终止整个进程组：本机 Linux/macOS 对整组发 SIGKILL，本机 Windows 杀进程树；容器执行端里命令以 setsid 另起进程组并带一个每次随机的标记环境变量，到时宿主另发一次辅助调用，按标记在容器里找到命令连同它的子孙进程杀掉（组长带标记的整组杀，再逐个杀带标记的），命令后的文件变化照常取到，不再重启容器。
+
+开发服务器、watch、长构建这类命令可带参数 `background: true` 在后台运行：立即交回作业号（j1、j2……），命令在执行端里接着跑，输出持续写进本会话的落盘目录（与上文完整输出同一处，单个文件超过上限只留末尾），作业结束后可用 read_file 按虚拟路径读全文。两件配套工具与 run_command 一同注册：`job_output` 读状态与上次查看之后的新增输出，可带 `wait_seconds`（至多 600）等它结束，不给作业号时等任意一个结束或列出全部作业；`job_kill` 停掉本会话的作业。`job_output` 是读类工具，可与其他读类工具并行；`job_kill` 串行。两者只看、只停本会话的作业，免审批。
+
+- 审批与钩子同前台命令：后台命令照样经 `PreToolUse`、审批与放权规则；`PostToolUse` 在启动时触发（这时的工具结果是启动回执，没有退出码与输出），作业结束不再触发钩子。
+- 后台作业不受单次超时约束，一直跑到结束、被 `job_kill` 停掉或会话结束；同时给 `timeout_seconds` 与 `background` 即拒绝。
+- 上限：每会话同时在跑的与整次运行同时在跑的各有上限，超出直接拒绝并列出在跑的作业，不排队。
+- 结束通知：作业结束时一条通知进模型的下一轮（与 worker 完成通知同一条队列；终端界面里模型空闲时叫醒它，通知同时显示在消息区）；还没递出时又有作业结束的合并成一条；已由 `job_output` 或 `job_kill` 交回结束状态的不再通知。
+- 与之后的命令重叠：后台作业与之后的命令同时运行（命令的逐条执行不约束后台作业），可能改同一批文件、占同一个端口。作业结束时以开始与结束的取证比出期间变化，扣除这期间 Pigeon 已知的前台改动（前台命令报出的与写工具改过的文件），注明可能不精确；有作业在跑时，前台命令的变化报告加一句提示；这期间拍的代码快照在会话记录里记下在跑的作业号；容器报内存超限时注明期间在跑的作业。
+- `job_output` 不计入打转检测；不带等待时长的连续查询另计，连续 5 次、作业又都没变化即拒绝，请模型带上等待时长或先做别的。
+- 终端界面按 Esc 只停当前这一轮，后台作业照跑；要停作业用 `job_kill`，或者结束会话。会话结束（退出终端界面、headless 运行结束或被中止、worker 被停）时停掉本会话全部作业并记下来由。沙箱会话交回前有作业在跑，先提示一行（会话中途 `/export` 时作业照跑，交回的可能是做到一半的样子）。
+- 无人值守（`pigeon run` 与 worker）：一次运行结束后还有作业在跑的，先交一条通知列出在跑的作业，让模型处理一轮（要结果就用 `job_output` 等，不要的用 `job_kill` 停掉）；之后再等剩下的作业，作业结束的通知交给模型跑一轮，直到没有在跑的作业。收尾总时限（`backgroundCloseoutSeconds`）从收尾开始起算，计入运行的墙钟预算，墙钟到了照常中止；收尾的每一轮照常计入轮数与 token 上限。总时限到了停掉余下的作业、把通知交给模型跑一轮，此后拒绝新开作业。worker 的作业归 worker 会话，收尾同样先等。跑批器（`pigeon eval stream`）不读设置文件，收尾总时限用参数 `--background-closeout-seconds` 给（缺省 600），实际取值记进身份头的 Pigeon 一段；跑批里的 Pigeon 条件同样带后台作业。
+- 善后：每个在跑的作业在 `.pigeon/state/jobs/` 下有一个记录文件（所属进程号、作业进程号与启动时间、标记，容器作业另记容器名），作业结束即删。Pigeon 异常退出后，下次启动时清理所属进程已不在的记录：本机按进程号找到进程，核对启动时间与标记（Windows 读不到别的进程的环境变量，改核对命令行）一致才杀整个进程组或进程树，不一致即当作进程号已被复用，不杀、只删记录；容器作业按标记查杀。续跑时，会话记录里只有启动、没有结束的作业提示模型已丢失。作业的启动与结束各记一条会话记录（`pigeon trace` 也显示）。
 
 run_command 的命令串按执行端能执行的长度另判：Linux 与容器执行端至多约 124 KiB（UTF-8），Windows 命令行至多约 32000 字符、经 cmd.exe 约 8000 字符；超出时直接报错，建议先用 write_file 写成脚本再运行。
 
@@ -222,7 +244,7 @@ run_command 的命令串按执行端能执行的长度另判：Linux 与容器�
 
 ## 程序状态目录 `.pigeon/state/`
 
-程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、项目级学到的记忆（`memory.md` 与 `memory.lock`）、worker 工作树（`worktrees/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（用户级学到的记忆 `memory.md`、配置确认记录 `config-trust.json`、迁移备份 `migration-backup/`）在 `~/.pigeon/state/`。
+程序写的东西都在 `.pigeon/state/` 下：会话（`sessions/`）、命令输出的落盘（`outputs/`）、在跑后台作业的记录（`jobs/`）、项目级学到的记忆（`memory.md` 与 `memory.lock`）、worker 工作树（`worktrees/`）、终端界面的输入历史（`tui-history.json`）与日志（`logs/`）。用户级的程序状态（用户级学到的记忆 `memory.md`、配置确认记录 `config-trust.json`、迁移备份 `migration-backup/`）在 `~/.pigeon/state/`。
 
 人写的内容：`.pigeon/skills`、`~/.pigeon/skills` 留在原处；人写的说明改读 AGENTS.md（见下文"记忆与人写的说明"），旧的 `.pigeon/memory/` 与 `~/.pigeon/preferences.md` 不再读取，由迁移命令处理。
 
@@ -377,7 +399,7 @@ pigeon migrate-config [--root <项目根>]
 | `SessionEnd` | 会话结束（退出、换绑、`pigeon run` 结束） | 只作副作用 |
 | `UserPromptSubmit` | 使用者的输入交给模型之前 | 拦下、补上下文；不能改写 |
 | `PreToolUse` | 工具调用之前、审批之前 | 拒绝、要人确认、放行、改参数、补上下文 |
-| `PostToolUse` | 工具调用成功之后 | 替换工具结果、把理由交给模型、补上下文 |
+| `PostToolUse` | 工具调用成功之后（后台运行的 run_command 在启动时） | 替换工具结果、把理由交给模型、补上下文 |
 | `PostToolUseFailure` | 工具调用失败之后 | 把理由交给模型、补上下文 |
 | `Stop` | 一轮回复收尾 | 拦住要求接着干、补上下文 |
 | `StopFailure` | 一轮以出错结束 | 只作副作用 |
@@ -403,7 +425,7 @@ pigeon migrate-config [--root <项目根>]
     "additionalContext": "补的上下文", "updatedToolOutput": "替换后的工具结果" } }
 ```
 
-`continue: false` 结束本轮处理：`PreToolUse` 给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示）；`PostToolUse`/`PostToolUseFailure` 给出时，同批里尚未准备的调用一律拦下，而并行批次里已经准备好（`PreToolUse` 与审批已过）的调用仍会执行完，只是不再跑它们的收尾钩子（各环境里纯读的一批并行执行：`read_file`、会话检索三件、`web_search`、`web_fetch`；一批里有别的工具即整批逐个执行）。两种情形下这批工具之后都不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
+`continue: false` 结束本轮处理：`PreToolUse` 给出时，本批其余调用一律拦下（不再执行它们的钩子、不再请示）；`PostToolUse`/`PostToolUseFailure` 给出时，同批里尚未准备的调用一律拦下，而并行批次里已经准备好（`PreToolUse` 与审批已过）的调用仍会执行完，只是不再跑它们的收尾钩子（各环境里纯读的一批并行执行：`read_file`、会话检索三件、`web_search`、`web_fetch`、`job_output`；一批里有别的工具即整批逐个执行）。两种情形下这批工具之后都不再问模型，本轮以中止收尾、原因记"钩子要求停止：<stopReason>"，也不再触发 `Stop`；`Stop` 拦下后续跑的那一轮以出错或中止收尾时，不再触发 `Stop`、终态如实记。
 
 同一事件命中多个钩子时并行执行；每个钩子的运行写入会话记录（事件、命令、退出码、用时、结论、输出摘要），`pigeon trace` 与会话回放显示：Run 之内的挂在该 Run 下，Run 之外的收尾类（`Stop`、`StopFailure`、`SubagentStop`、自动压缩的 `PostCompact`）挂刚结束的 Run，其余（`SessionStart`、下一条消息的 `UserPromptSubmit`、手动压缩、`Notification`、`SessionEnd` 等）为会话级条目；终端界面在拦下或出错时显示一行提示，`/hooks` 列出生效的钩子及其来自哪一层。
 
