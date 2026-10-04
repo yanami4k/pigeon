@@ -73,9 +73,16 @@ test("纯读的一批同时执行；读与命令混排的一批按顺序逐个�
     [read("a.txt"), read("b.txt")],
     [read("a.txt"), command, read("b.txt")],
   ]);
-  assert.deepEqual(events, [
-    ...["start a.txt", "start b.txt", "end a.txt", "end b.txt"],
-    ...["start a.txt", "end a.txt", "exec", "start b.txt", "end b.txt"],
+  // 纯读的一批：两个读取都在任何一个结束之前开始（同时执行；谁先起步不定）
+  assert.deepEqual([...events.slice(0, 2)].sort(), ["start a.txt", "start b.txt"]);
+  assert.deepEqual([...events.slice(2, 4)].sort(), ["end a.txt", "end b.txt"]);
+  // 混排的一批：按调用顺序逐个执行
+  assert.deepEqual(events.slice(4), [
+    "start a.txt",
+    "end a.txt",
+    "exec",
+    "start b.txt",
+    "end b.txt",
   ]);
 });
 
