@@ -9,15 +9,17 @@
 // 调用方可传中止信号提前杀掉。会话内复用同一个临时索引（add -A 只处理增量），索引路径与已有快照编号只在首次操作时取一次；
 // 某条命令失败或被中止时丢弃临时索引（可能留下半截内容或锁文件），下次从用户索引重新复制。
 // racy-git 保护：git 只在条目的文件修改时间不早于索引文件的修改时间时才比内容，所以索引文件的修改时间不能晚于其中条目
-// 最后一次入索引的时间。复制出的副本修改时间是"现在"，必须设回用户索引的修改时间；此后临时索引只由 git 自己写，
-// 写时对处在临界时刻的条目抹掉长度，下次必比内容，复用不破坏这一保护。
-import { execFile, execFileSync } from "node:child_process";
+// 最后一次入索引的时间。复制出的副本修改时间是"现在"，必须设回用户索引的修改时间；此后临时索引只由 git 自己写：
+// 写时按读入时的索引修改时间认出临界条目，其中内容已变的抹掉长度（下次必比内容），内容没变的此刻确实干净、之后再改
+// 修改时间必然变化，复用不破坏这一保护。
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
 import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import { killProcessTree, processGroupSpawnOptions } from "../tools/process-tree.ts";
 
 export const CHECKPOINT_REF_PREFIX = "refs/pigeon/checkpoints/";
 
@@ -38,9 +40,9 @@ export interface Checkpointer {
   // 工具落定后调用：文件树与上一次（快照或基线）不同则生成快照；没有改变返回 undefined
   afterChange(signal?: AbortSignal): Promise<CheckpointResult | undefined>;
   // 现状快照：分叉时没有可用快照，给出当前文件状态的提交（挂 ref，不接入快照链）
-  snapshotNow(): Promise<CheckpointResult>;
+  snapshotNow(signal?: AbortSignal): Promise<CheckpointResult>;
   // 给已有提交挂一个快照 ref（改前基线在分叉时被引用，防止被 git 回收）；返回 ref
-  pin(commit: string): Promise<string>;
+  pin(commit: string, signal?: AbortSignal): Promise<string>;
   // 排队的操作做完后删掉临时索引；之后再用会重新复制
   close(): Promise<void>;
 }
@@ -83,32 +85,70 @@ function gitSync(cwd: string, args: string[]): string {
   }
 }
 
+// 异步执行一条 git：到上限或收到中止信号即杀掉它的整个进程树（git 可能再起子进程，Windows 上只杀 git.exe 会留下它们），
+// 以独立进程组拉起（非 Windows）。输出超过上限同样杀掉并报错
 function git(
   cwd: string,
   args: string[],
   options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal | undefined } = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      args,
-      {
-        cwd,
-        encoding: "utf8",
-        maxBuffer: GIT_MAX_BUFFER,
-        timeout: GIT_TIMEOUT_MS,
-        windowsHide: true,
-        ...(options.signal !== undefined ? { signal: options.signal } : {}),
-        ...(options.env !== undefined ? { env: { ...process.env, ...options.env } } : {}),
-      },
-      (error, stdout, stderr) => {
-        if (error !== null) {
-          reject(failure(args, error, stderr));
-        } else {
-          resolve(stdout);
-        }
+    const { signal } = options;
+    if (signal?.aborted === true) {
+      reject(failure(args, new Error("已中止"), undefined));
+      return;
+    }
+    const child = spawn("git", args, {
+      cwd,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...processGroupSpawnOptions(),
+      ...(options.env !== undefined ? { env: { ...process.env, ...options.env } } : {}),
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let bytes = 0;
+    let killedFor: string | undefined;
+    const kill = (reason: string) => {
+      if (killedFor === undefined) {
+        killedFor = reason;
+        killProcessTree(child, "SIGKILL");
       }
+    };
+    const timer = setTimeout(
+      () => kill(`超过 ${GIT_TIMEOUT_MS} 毫秒未结束，已终止`),
+      GIT_TIMEOUT_MS
     );
+    const onAbort = () => kill("已中止");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.stdout.on("data", (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > GIT_MAX_BUFFER) {
+        kill("输出超过上限，已终止");
+        return;
+      }
+      stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    child.on("error", (error) => {
+      done();
+      reject(failure(args, error, undefined));
+    });
+    child.on("close", (code) => {
+      done();
+      const errorText = Buffer.concat(stderr).toString("utf8");
+      if (killedFor !== undefined) {
+        reject(failure(args, new Error(killedFor), undefined));
+      } else if (code !== 0) {
+        reject(failure(args, new Error(`退出码 ${code}`), errorText));
+      } else {
+        resolve(Buffer.concat(stdout).toString("utf8"));
+      }
+    });
   });
 }
 
@@ -205,10 +245,16 @@ export function createCheckpointer(input: {
     initialized = true;
   };
 
+  // 丢弃临时索引：先忘掉它（下次一定重新复制），再尽力删；删不掉不另抛，调用方原来的错误照旧上抛
   const dropIndex = (): void => {
-    if (indexFile !== undefined) {
-      removeIndexFile(indexFile);
-      indexFile = undefined;
+    const file = indexFile;
+    indexFile = undefined;
+    if (file !== undefined) {
+      try {
+        removeIndexFile(file);
+      } catch {
+        // 留下的文件由进程退出时的清理再试一次
+      }
     }
   };
 
@@ -243,10 +289,17 @@ export function createCheckpointer(input: {
     }
   };
 
-  const headCommit = async (): Promise<string | undefined> => {
+  const headCommit = async (signal?: AbortSignal): Promise<string | undefined> => {
     try {
-      return (await run(["rev-parse", "--verify", "--quiet", "HEAD"])).trim() || undefined;
-    } catch {
+      return (
+        (await run(["rev-parse", "--verify", "--quiet", "HEAD"], undefined, signal)).trim() ||
+        undefined
+      );
+    } catch (error) {
+      // 中止要上抛；其余（没有提交的新仓库）即没有 HEAD
+      if (signal?.aborted === true) {
+        throw error;
+      }
       return undefined;
     }
   };
@@ -319,7 +372,7 @@ export function createCheckpointer(input: {
             // 基线丢了：现状照样打成快照（不带改前基线），账本因此留下"有快照、无改前基线"，续跑也认得出起点丢失
             const commit = await commitTree(
               tree,
-              await headCommit(),
+              await headCommit(signal),
               `pigeon checkpoint ${sessionId} #${counter + 1}`,
               signal
             );
@@ -339,7 +392,7 @@ export function createCheckpointer(input: {
         if (previous === undefined && baseTree !== undefined && !baseLost) {
           baseCommit = await commitTree(
             baseTree,
-            await headCommit(),
+            await headCommit(signal),
             `pigeon checkpoint ${sessionId} base`,
             signal
           );
@@ -355,21 +408,22 @@ export function createCheckpointer(input: {
         lastTree = tree;
         return { ref, commit, tree, ...(baseCommit !== undefined ? { baseCommit } : {}) };
       }),
-    snapshotNow: () =>
+    snapshotNow: (signal) =>
       serial(async () => {
-        await init();
-        const tree = await currentTree();
+        await init(signal);
+        const tree = await currentTree(signal);
         const commit = await commitTree(
           tree,
-          previous ?? (await headCommit()),
-          `pigeon checkpoint ${sessionId} now`
+          previous ?? (await headCommit(signal)),
+          `pigeon checkpoint ${sessionId} now`,
+          signal
         );
-        return { ref: await nextRef(commit), commit, tree };
+        return { ref: await nextRef(commit, signal), commit, tree };
       }),
-    pin: (commit) =>
+    pin: (commit, signal) =>
       serial(async () => {
-        await init();
-        return nextRef(commit);
+        await init(signal);
+        return nextRef(commit, signal);
       }),
     close: () =>
       serial(async () => {

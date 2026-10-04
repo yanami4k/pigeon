@@ -743,10 +743,12 @@ export function storeWorkerSpawned(
   return undefined;
 }
 
-// 分叉点之前最近的代码快照的查找结果：拍成的快照（或改前基线），或者没拍成的那一次的拍摄标记
+// 分叉点之前最近的代码快照的查找结果：拍成的快照（或改前基线）；没拍成的那一次的拍摄标记；或者该点早于首次改动、
+// 而首次改动之前的状态没有记下（baseMissing）
 export type StoreCheckpointAt =
-  | { commit: string; ref?: string; unfinished?: undefined }
-  | { unfinished: CheckpointMarkData; commit?: undefined; ref?: undefined };
+  | { commit: string; ref?: string; unfinished?: undefined; baseMissing?: undefined }
+  | { unfinished: CheckpointMarkData; commit?: undefined; ref?: undefined; baseMissing?: undefined }
+  | { baseMissing: true; commit?: undefined; ref?: undefined; unfinished?: undefined };
 
 // 一个 Run 里没拍成的快照：有拍摄标记，同一调用既没有快照条目、也没有 unchanged 标记（只有 shooting 即拍完之前进程退出，
 // 或标了 failed）；取该调用最后一条标记
@@ -765,7 +767,8 @@ function unfinishedMarks(run: StoreRun): CheckpointMarkData[] {
 // 分叉点之前最近的代码快照（同 checkpoint-ref.ts 的口径）：分叉点所在 Run 里归属条目号不大于 runSeq 的最后一个快照，
 // 没有则取更早 Run 的最后一个；仍没有即该点早于首次改动，取首个快照的改前基线；整个会话都没改过文件返回 undefined。
 // 决策 350：按条目号找，不依赖记录在文件中的位置；最近的那一次没拍成时返回它的拍摄标记（分叉入口据此明确报错），
-// 不退回更早的快照
+// 不退回更早的快照。该点早于首次改动、会话里有过快照或没拍成的标记、却没有改前基线（基线没拍成）时返回 baseMissing——
+// 这时现状已是改后的状态，不能拿现状顶替
 export function storeCheckpointBefore(
   view: StoreSessionView,
   point: { runId: RunId; runSeq: number }
@@ -805,7 +808,10 @@ export function storeCheckpointBefore(
       }
     }
   }
-  return undefined;
+  const changed = view.runs.some(
+    (run) => run.checkpoints.length > 0 || unfinishedMarks(run).length > 0
+  );
+  return changed ? { baseMissing: true } : undefined;
 }
 
 // 分叉点 (runId, runSeq) 对应的消息

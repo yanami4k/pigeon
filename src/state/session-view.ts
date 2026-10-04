@@ -12,6 +12,7 @@ import { canonicalJson, sha256Hex } from "./hashing.ts";
 import type { RunId, SessionId } from "./ids.ts";
 import {
   type CheckpointData,
+  type CheckpointMarkData,
   type ForkData,
   type GrantData,
   HEADER_METADATA_KEY,
@@ -110,6 +111,8 @@ export type ViewItem =
   | { kind: "run-end"; entryId: string; timestamp: number; data: RunEndData }
   | { kind: "verification"; entryId: string; timestamp: number; data: VerificationData }
   | { kind: "checkpoint"; entryId: string; timestamp: number; data: CheckpointData }
+  // 决策 350：快照的拍摄标记
+  | { kind: "checkpoint-mark"; entryId: string; timestamp: number; data: CheckpointMarkData }
   | { kind: "worker"; entryId: string; timestamp: number; data: WorkerData }
   | { kind: "fork"; entryId: string; timestamp: number; data: ForkData }
   | { kind: "grant"; entryId: string; timestamp: number; data: GrantData }
@@ -309,6 +312,7 @@ const CUSTOM_KINDS = {
   [SessionEntryType.RunEnd]: "run-end",
   [SessionEntryType.Verification]: "verification",
   [SessionEntryType.Checkpoint]: "checkpoint",
+  [SessionEntryType.CheckpointMark]: "checkpoint-mark",
   [SessionEntryType.Worker]: "worker",
   [SessionEntryType.Fork]: "fork",
   [SessionEntryType.Grant]: "grant",
@@ -587,4 +591,34 @@ export function summarizeSessionView(view: SessionView): SessionViewSummary {
         }
       : {}),
   };
+}
+
+// 决策 350：一组条目里没拍成的快照——标了 failed 的，与只有 shooting、同一调用既没有快照条目也没有其他标记的（拍完之前进程退出）；
+// 键为工具调用号，值为该调用最后一条标记（trace 与 replay 各显示一行）
+export function unfinishedCheckpointMarks(
+  items: readonly ViewItem[]
+): Map<string, CheckpointMarkData> {
+  const settled = new Set<string>();
+  const last = new Map<string, CheckpointMarkData>();
+  for (const item of items) {
+    if (item.kind === "checkpoint") {
+      settled.add(item.data.toolCallId);
+    } else if (item.kind === "checkpoint-mark") {
+      if (item.data.state === "unchanged") {
+        settled.add(item.data.toolCallId);
+      }
+      last.set(item.data.toolCallId, item.data);
+    }
+  }
+  for (const toolCallId of settled) {
+    last.delete(toolCallId);
+  }
+  return last;
+}
+
+// 没拍成的快照的一行说明
+export function unfinishedCheckpointText(mark: CheckpointMarkData): string {
+  return mark.state === "failed"
+    ? `快照没有拍成（${mark.reason ?? "原因未记"}），从这里分叉会明确报错`
+    : "快照拍摄中断（进程在拍完之前退出），从这里分叉会明确报错";
 }

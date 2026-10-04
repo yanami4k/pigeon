@@ -76,6 +76,8 @@ test("写工具改变文件后生成快照，快照条目写明工具调用号�
     });
     try {
       await opened.bundle.adapter.run("把 a.txt 改成 new");
+      // 决策 350：快照在后台拍，拍完再看有没有内部故障
+      await opened.checkpoints?.settle();
       assert.deepEqual(opened.checkpoints?.errors(), [], "快照器没有内部故障");
     } finally {
       await disposeRuntime(opened.bundle);

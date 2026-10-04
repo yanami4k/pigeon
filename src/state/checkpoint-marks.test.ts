@@ -76,3 +76,36 @@ test("按条目号找快照：后台拍完的记录落在后面的消息之后�
   );
   assert.equal(at(second, 1)?.unfinished?.toolCallId, "c4", "更早 Run 的最后一次没拍成同样报出");
 });
+
+test("首次改动之前的分叉点：基线没拍成（只有没拍成的标记，或快照不带改前基线）报 baseMissing；只有文件没变的标记即从未改过文件", () => {
+  const run = newRunId();
+  const onlyUnfinished = sessionBuilder();
+  onlyUnfinished.run(run);
+  onlyUnfinished.message("user"); // 1
+  onlyUnfinished.message("assistant"); // 2
+  onlyUnfinished.message("toolResult"); // 3
+  onlyUnfinished.mark(run, "c1", 3, "shooting");
+  assert.deepEqual(storeCheckpointBefore(onlyUnfinished.view(), { runId: run, runSeq: 1 }), {
+    baseMissing: true,
+  });
+
+  const noBase = sessionBuilder();
+  noBase.run(run);
+  noBase.message("user"); // 1
+  noBase.message("assistant"); // 2
+  noBase.message("toolResult"); // 3
+  noBase.checkpoint(run, "c1", 3, sha("1"));
+  assert.deepEqual(storeCheckpointBefore(noBase.view(), { runId: run, runSeq: 2 }), {
+    baseMissing: true,
+  });
+  assert.equal(storeCheckpointBefore(noBase.view(), { runId: run, runSeq: 3 })?.commit, sha("1"));
+
+  const unchanged = sessionBuilder();
+  unchanged.run(run);
+  unchanged.message("user"); // 1
+  unchanged.message("assistant"); // 2
+  unchanged.message("toolResult"); // 3
+  unchanged.mark(run, "c1", 3, "shooting");
+  unchanged.mark(run, "c1", 3, "unchanged");
+  assert.equal(storeCheckpointBefore(unchanged.view(), { runId: run, runSeq: 1 }), undefined);
+});

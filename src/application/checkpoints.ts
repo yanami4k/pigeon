@@ -1,10 +1,10 @@
 // 快照挂到运行面（M7 S5，决策 078；决策 350 移出关键路径）：写档或命令档工具第一次提议时记基线（会话首次改动之前）；
-// 工具结果交回时先看工具自己的证据——编辑类失败、run_command 的文件变化报告为空且完整——显示没有改动就不拍；
-// 否则先写"拍摄中"标记（带工具调用号与条目号），再在后台拍快照，与下一次模型请求同时进行。拍完写代码快照条目
-// （ref、提交、树、改前基线、工具调用号、条目号），文件没有改变写 unchanged 标记，失败写 failed 标记。
+// 工具结果交回时（PostToolUse 钩子已跑完），除非工具自己的证据确定没有改动（见 evidenceShowsNoChange），一律先写
+// "拍摄中"标记（带工具调用号与条目号），再在后台拍快照，与下一次模型请求同时进行；要不要新提交由快照比对文件树决定。
+// 拍完写代码快照条目（ref、提交、树、改前基线、工具调用号、条目号），文件树没变写 unchanged 标记，失败写 failed 标记。
 // 从工具结束到下一次工具开始之间 Pigeon 不改工作区文件，后台拍到的与当场拍到的是同一状态；为此下一次工具执行
-// （Adapter 的工具执行前等待口）、分叉与退出会话之前先等未完成的快照拍完。等待有上限：超时即中止其 git 进程，
-// 该快照记为失败，对应分叉点明确报错，会话不挂住。
+// （Adapter 的工具执行前等待口）、任何钩子运行（钩子入口的等待口）、分叉、换绑会话与退出会话之前先等未完成的快照拍完。
+// 等待有上限：超时即中止其 git 进程，该快照记为失败，对应分叉点明确报错，会话不挂住。
 // 任何快照故障不影响运行，进内部错误清单，同时向标准错误输出一条说明后果的告警（同一类故障只说一次），不静默。
 // 决策 286：告警出口可由调用方给出（终端界面运行期间落消息区）；不给即照旧写标准错误输出。
 // 非 git 工作区不挂（不打快照、不报错；在非 git 工作区发起分叉时由分叉入口明确报错）。
@@ -16,7 +16,9 @@ import {
 import type { PiRuntimeAdapter, ToolResultNotice } from "../pi-runtime/adapter.ts";
 import type { RunId } from "../state/ids.ts";
 import type { CheckpointMarkState } from "../state/session-entries.ts";
+import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
 import type { ToolRiskTier } from "../tools/registry.ts";
+import type { SessionHooks } from "./hooks.ts";
 import type { RuntimeBundle } from "./runtime.ts";
 import { checkpointEntry, checkpointMarkEntry } from "./session-store.ts";
 import { dedupedWarner, failureDetail, type WarnSink } from "./warnings.ts";
@@ -45,29 +47,28 @@ export interface CheckpointHost {
   >;
   toolTiers: ReadonlyMap<string, ToolRiskTier>;
   sessionStore: Pick<RuntimeBundle["sessionStore"], "append">;
+  // 会话级钩子：运行任何钩子之前先等快照；配置了失败后的钩子时编辑失败也拍
+  hooks?: Pick<SessionHooks, "list" | "addGate">;
 }
 
-// 工具自己的证据显示没有改动（决策 350）：编辑类工具失败；命令带完整的文件变化报告且新增、删除、修改都为空。
-// 其余情况（命令出错没有报告、报告不完整、其他命令档工具）都要拍
+// 工具自己的证据确定没有改动（决策 350）：只有 edit_file 失败且确定没写——被审批或钩子拦下，或计划阶段的域错误
+// （原文不匹配、路径不对、写前复核拒写，都在写入之前抛出）——并且没有配置失败后运行的钩子（PostToolUseFailure 可能改文件）。
+// 其余一律拍：run_command 的文件变化报告是遍历比大小与修改时间得来的，漏掉权限、符号链接、治理目录里已跟踪的文件与
+// 保留修改时间的同长度覆盖，不能当作没改动的证据；写到一半失败的环境类错误也可能留下改动
 export function evidenceShowsNoChange(
-  tier: ToolRiskTier,
-  result: Pick<ToolResultNotice, "isError" | "details">
+  result: Pick<ToolResultNotice, "toolName" | "isError" | "details">,
+  failureHooks: boolean
 ): boolean {
-  if (tier === "write") {
-    return result.isError;
-  }
-  const changes =
-    typeof result.details === "object" && result.details !== null
-      ? (result.details as { fileChanges?: unknown }).fileChanges
-      : undefined;
-  if (typeof changes !== "object" || changes === null) {
+  if (result.toolName !== "edit_file" || !result.isError || failureHooks) {
     return false;
   }
-  const { added, removed, modified, truncated } = changes as Record<string, unknown>;
-  return (
-    truncated === false &&
-    [added, removed, modified].every((files) => Array.isArray(files) && files.length === 0)
-  );
+  const mark =
+    typeof result.details === "object" && result.details !== null
+      ? ((result.details as Record<string, unknown>)[TOOL_RESULT_MARK_KEY] as
+          | ToolResultMark
+          | undefined)
+      : undefined;
+  return mark?.gate?.outcome === "rejected" || mark?.errorKind === "domain";
 }
 
 interface Mark {
@@ -212,7 +213,9 @@ export function attachCheckpoints(options: {
   });
   const unsubscribeResults = bundle.adapter.subscribeToolResults((notice) => {
     const tier = tierOf(notice.toolName);
-    if ((tier !== "write" && tier !== "exec") || evidenceShowsNoChange(tier, notice)) {
+    const failureHooks =
+      bundle.hooks?.list().some((hook) => hook.event === "PostToolUseFailure") ?? false;
+    if ((tier !== "write" && tier !== "exec") || evidenceShowsNoChange(notice, failureHooks)) {
       return;
     }
     // 观察口在工具结果消息写进会话存储之后、同一次分派里调用：这时的条目号就是该工具结果消息的序号
@@ -244,10 +247,12 @@ export function attachCheckpoints(options: {
     );
   });
   const removeGate = bundle.adapter.addToolGate(settle);
+  const removeHookGate = bundle.hooks?.addGate(settle);
   const stop = () => {
     unsubscribe();
     unsubscribeResults();
     removeGate();
+    removeHookGate?.();
   };
   return {
     checkpointer,

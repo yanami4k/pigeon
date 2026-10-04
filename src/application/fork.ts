@@ -96,6 +96,12 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
         "不能从这里分叉；不退回更早的快照"
     );
   }
+  if (resolved?.baseMissing === true) {
+    throw new ForkError(
+      `分叉点 ${forkPoint.runId} 第 ${forkPoint.runSeq} 条早于首次改动，而首次改动之前的工作区状态没有记下（基线没有拍成），` +
+        "不能从这里分叉；不拿改后的现状顶替"
+    );
+  }
   const checkpointer =
     request.checkpointer ??
     createCheckpointer({

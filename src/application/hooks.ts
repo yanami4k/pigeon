@@ -247,6 +247,8 @@ function mergeReason(records: readonly HookRunRecord[]): string | undefined {
 export class SessionHooks {
   readonly #options: SessionHooksOptions;
   #runId: string | undefined;
+  // 决策 350：钩子运行前的等待口（快照器在此等未完成的快照拍完，钩子看到并可能改动的是拍完之后的工作区）
+  readonly #gates = new Set<() => Promise<void>>();
 
   constructor(options: SessionHooksOptions) {
     this.#options = options;
@@ -259,6 +261,12 @@ export class SessionHooks {
 
   get disabled(): boolean {
     return this.#options.disableAllHooks;
+  }
+
+  // 决策 350：登记钩子运行前的等待口（只在有钩子命中时等）；返回撤销函数。等待方自己保证有上限、不抛
+  addGate(gate: () => Promise<void>): () => void {
+    this.#gates.add(gate);
+    return () => this.#gates.delete(gate);
   }
 
   // 记录用：设置当前活动 Run（调用方在 Run 开始时更新）
@@ -296,6 +304,9 @@ export class SessionHooks {
       return true;
     });
     if (matched.length === 0) return report;
+    for (const gate of this.#gates) {
+      await gate();
+    }
     report.ran = true;
     const hostEnv: NodeJS.ProcessEnv = {
       ...(this.#options.env ?? process.env),

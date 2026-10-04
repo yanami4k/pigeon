@@ -20,7 +20,7 @@ import {
 } from "../persistence/session-catalog.ts";
 import type { McpServerStatus, McpToolsetEntry } from "../state/mcp-toolset.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import type { HookRunData } from "../state/session-entries.ts";
+import type { CheckpointMarkData, HookRunData } from "../state/session-entries.ts";
 import {
   type StoreMessage,
   type StoreToolOutcome,
@@ -35,7 +35,11 @@ import type {
   ViewRun,
   ViewToolCall,
 } from "../state/session-view.ts";
-import { isSyntheticFailure } from "../state/session-view.ts";
+import {
+  isSyntheticFailure,
+  unfinishedCheckpointMarks,
+  unfinishedCheckpointText,
+} from "../state/session-view.ts";
 
 // 钩子运行（323 / 324）的一行：事件、命令、退出码、用时、结论
 function hookLine(data: HookRunData): string {
@@ -74,6 +78,7 @@ function renderToolCall(
   call: ViewToolCall,
   outcome: StoreToolOutcome | undefined,
   checkpoints: ReadonlyMap<string, CheckpointItem>,
+  unfinished: ReadonlyMap<string, CheckpointMarkData>,
   lines: string[]
 ): void {
   lines.push(`    工具调用 ${call.toolCallId} [${call.toolName}]`);
@@ -107,6 +112,11 @@ function renderToolCall(
   const checkpoint = checkpoints.get(call.toolCallId);
   if (checkpoint !== undefined) {
     lines.push(`      代码快照：${checkpoint.data.commit.slice(0, 12)}（${checkpoint.data.ref}）`);
+  }
+  // 决策 350：没拍成的快照（失败、拍摄中断）
+  const unfinishedMark = unfinished.get(call.toolCallId);
+  if (unfinishedMark !== undefined) {
+    lines.push(`      代码快照：${unfinishedCheckpointText(unfinishedMark)}`);
   }
 }
 
@@ -218,6 +228,7 @@ function renderRun(
       lines.push(`  ${hookLine(item.data)}`);
     }
   }
+  const unfinished = unfinishedCheckpointMarks(run.items);
   for (const turn of run.turns) {
     const assistant = turn.assistant;
     let turnHeader =
@@ -235,7 +246,7 @@ function renderRun(
     }
     lines.push(turnHeader);
     for (const call of turn.toolCalls) {
-      renderToolCall(call, outcomes.get(call.toolCallId), checkpoints, lines);
+      renderToolCall(call, outcomes.get(call.toolCallId), checkpoints, unfinished, lines);
     }
   }
   if (options.withContent === true) {

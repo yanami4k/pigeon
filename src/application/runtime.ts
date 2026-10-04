@@ -306,6 +306,9 @@ export interface RuntimeBundle {
   toolTiers: ReadonlyMap<string, ToolRiskTier>;
   // M6：释放运行面前先执行的附加释放动作（快照器、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
+  // 决策 350：运行面停下（在途 Run 中止并收尾）之后、会话存储关闭之前执行的收尾动作——快照器在此等未完成的快照拍完
+  // （最后一个工具结果同样先写拍摄中标记、开拍），标记与快照条目因此都落在会话存储关闭之前
+  closers?: Array<() => Promise<void>>;
   // 推送记忆开着时在场（worker 按它继承）
   learnedMemory?: LearnedMemoryConfig;
   // 决策 330：人写的说明超出 32 KiB 被截断时给终端的一行提示（入口打出）；没截断时缺省
@@ -951,6 +954,13 @@ export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
   try {
     await bundle.adapter.dispose();
   } finally {
+    for (const close of bundle.closers?.splice(0) ?? []) {
+      try {
+        await close();
+      } catch {
+        // 同附加释放：失败不挡会话存储关闭
+      }
+    }
     try {
       await bundle.mcp?.close();
     } finally {
