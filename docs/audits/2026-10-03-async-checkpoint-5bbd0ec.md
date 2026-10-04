@@ -258,3 +258,52 @@
 ### verify
 
 - 提交 c40f386，服务器 pigeon-verify：`npm run lint`（548 个文件，无问题）、`npm run check`、`npm run deps`（577 个模块，无违规）通过。全量测试在负载下以并发 2 跑两遍，每遍分两批前台运行：application、tui、cli 588 项全过；其余目录 1,065 项，通过 1,063，跳过 2。两遍结果相同：合计 1,653 项，通过 1,651，失败 0，跳过 2。
+
+## 第四轮修复：改用临时忽略文件，成败只看退出码
+
+代码提交 6d91134（在 4a8c1ea 之上）。本节取代第三轮"改法"里排除路径与提示识别的做法；第三轮的问题描述、两处排除口径的差别仍然成立。
+
+### 问题
+
+第三轮用排除路径让 git 不进程序状态。这些路径已被 `.gitignore` 忽略时，git 以退出码 1 报"路径被忽略"，第三轮靠解析这句英文提示判成功，依赖 git 给人看的文字，随版本可能变。
+
+核实过的两种替代：
+- 通配写法的排除（如 `.pigeo[n]/state`）：路径已被忽略时返回 0，但路径没被忽略时 git 仍会进 `.pigeon/state`，读不到的目录照报 `unable to stat`，竞态还在，不采用。
+- 临时忽略文件：采用，见下。
+
+### 改法
+
+- 快照的 add 改为 `git -c core.excludesFile=<临时文件> add -A -- .`，不再带排除路径，也不再解析提示文字，成败只看退出码。
+- 临时文件的内容为用户原有的全局忽略文件，加上 `/<前缀>.pigeon/state` 与 `/<前缀>.pigeon/settings.local.json` 两条（`snapshotExcludes`）。这两处因此在任何仓库里都算被忽略，git 不进 `.pigeon/state`，也不收个人设置。git 进忽略文件规则判定的被忽略目录时不往下走，由此避开其中一闪而过的文件；没有显式点名被忽略的路径，也就不会触发退出码 1。
+  - 开头的 `/` 把路径锚在仓库根，前缀为工作区在仓库里的路径，前缀里的通配字符按字面转义。
+  - 不带结尾的 `/`，目录与文件都认。
+- 用户原有的全局忽略文件：配了 `core.excludesFile` 用它，没配用 git 的缺省位置（`$XDG_CONFIG_HOME/git/ignore`，没设该变量时为主目录下 `.config/git/ignore`）。读不到时临时文件只含这两条。
+- 仓库自己的 `.gitignore` 与 `.git/info/exclude` 照常生效，优先级高于全局忽略文件；其中若有否定规则把程序状态重新放出，git 会进这两处，这是仓库自己的选择。
+- 工作区前缀与用户索引的位置由同一次 `git rev-parse --show-prefix --path-format=absolute --git-path index` 取得；全局忽略文件的位置另由一次 `git config --path --get core.excludesFile` 取得。两者都只在首次操作时取，首次操作因此多起 1 个 git 进程，之后每次快照的进程数不变。
+- 临时文件放在系统临时目录（不在会话状态目录里），用时建；`close()` 时删除，进程退出时也清理。
+- `rm --cached` 照留：仓库若跟踪了程序状态里的文件，仍从临时索引摘掉。仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills` 照常进快照。
+
+### 测试
+
+- `src/orchestration/checkpoint-state-dir.test.ts` 改写为 8 项：
+  - 6 项矩阵：工作区在仓库根与子目录，各三种情形（程序状态没被忽略、只忽略程序状态、整个 `.pigeon` 被忽略）。每项都在 `.pigeon/state` 下放一个读不到其中条目的目录（只在非 Windows、非 root 用户下设权限），快照成功，不含程序状态，已跟踪的 `.pigeon/settings.json` 的改动进快照。
+  - 另起进程不停建删临时文件的同时连拍 30 次，每次都拍到，不含程序状态（第三轮已有，保留）。
+  - 用户原有的全局忽略规则（`*.log`）照常生效，`debug.log` 不进快照；配置的全局忽略文件读不到时，快照照样成功、照样不含程序状态。
+  - 第三轮的提示识别单测随识别函数删除。
+- `src/orchestration/checkpoint-index.test.ts`：关闭后临时索引与临时忽略文件都删掉。
+
+### 变异
+
+| 变异 | 变红的测试文件 |
+|---|---|
+| add 不带临时忽略文件 | checkpoint-state-dir |
+| 忽略文件里的路径不带工作区前缀 | checkpoint-state-dir |
+| 不带用户原有的全局忽略规则 | checkpoint-state-dir |
+| 改回字面的排除路径 | checkpoint-state-dir、orchestration/checkpoint |
+| close 不删临时忽略文件 | checkpoint-index |
+
+每个变异做完都还原，还原后工作区干净。
+
+### verify
+
+- 提交 6d91134，服务器 pigeon-verify：`npm run lint`（548 个文件，无问题）、`npm run check`、`npm run deps`（577 个模块，无违规）通过。全量测试在负载下以并发 2 跑两遍，每遍分两批前台运行：application、tui、cli 588 项全过；其余目录 1,068 项，通过 1,066，跳过 2。两遍结果相同：合计 1,656 项，通过 1,654，失败 0，跳过 2。
