@@ -123,3 +123,19 @@
 变异（服务器上逐个改坏后跑对应测试文件，12 项全部变红，还原后与提交内容一致）：本机写工具不拒写 `.git`；容器写工具不拒写 `.git`；git 不以空树作属性来源；git 不关 fsmonitor；本机 git status 失败时不标注改用扫描；容器 git status 失败时不标注改用扫描；直连执行回到 `"$@"`；随机串放进命令行；git 取证的签名去掉修改时间；扫描的签名去掉修改时间；嵌套仓库不往下取 status；被外层仓库忽略的工作区仍按 git 取证。
 
 verify：本分支的 `npm run verify` 即全量（lint、check、全部测试、deps），没有另设 verify:full。提交 a0b2910，服务器 pigeon-verify：`npm run lint`、`npm run check`、`npm run deps` 全过（deps：577 个模块，无违规）；测试按目录分两批运行（并发 3 与 2）：eval 以外 1,326 项，通过 1,324，失败 0，跳过 2（两项只在 Windows 上运行的用例）；eval 316 项全部通过。合计 1,642 项，两批覆盖全部 285 个测试文件。本节所在的提交在 a0b2910 之上只改本审计文件。
+
+## 补记：空树按仓库算出；过滤不生效的影响写入配置说明
+
+裁决：过滤（LFS 等）在 Pigeon 自己的 git 里不生效，接受，影响写进 `docs/configuration.md`；SHA-256 仓库要修。
+
+- 不再写死 SHA-1 的空树编号。`tools/git-hardening.ts` 的 `hardenedGitArgs(cwd)` 在该目录里跑 `git hash-object -t tree --stdin`（输入为空，不写入对象库，带前述两项加固），得到的编号随仓库的对象格式（SHA-1 为 40 位、SHA-256 为 64 位），再探测 git 是否认 `--attr-source`；结果按目录缓存在本进程内，一个会话里同一目录只算一次。不是仓库、算不出或 git 不认时只有 fsmonitor 与钩子两项。所有调用处改为传入这条 git 的工作目录：本机取证、代码快照、退出快照、脚本快照、启动时的设置层跟踪检查、最近会话。
+- 容器取证脚本同样不写死：每个仓库（工作区根与逐个取证的嵌套仓库）进目录后先算本仓库的空树、探测 `--attr-source`，再取 status，所以外层 SHA-1、嵌套 SHA-256 的混合情形也各用各的编号。
+- 前一节"SHA-256 格式的仓库里空树的编号不同，git 会报错，status 退回全量扫描，快照失败"这一代价随之消除。
+- `docs/configuration.md`：在 run_command 文件变化的说明之后写明 Pigeon 自己起的 git 不执行仓库配置的过滤、钩子与 fsmonitor，影响为文件变化报告照常；用 LFS 一类过滤的仓库里，快照存进大文件的真实内容而不是指针，本地对象库会变大。
+
+测试：
+- `tools/git-workspace.test.ts` 新增 SHA-256 仓库用例（`git init --object-format=sha256`）：一个文件的修改时间往后拨、内容不变（迫使 status 重算哈希，git 只在这时读属性来源，编号不对才会报错），命令新增一个文件、追加一个文件，变化照常报出且未标不完整；随后代码快照（beforeChange、改文件、afterChange）成功，提交编号为 64 位。
+- `execution/container-round-trips.test.ts` 新增容器上的 SHA-256 仓库用例，同样拨修改时间，变化照常报出、未改用扫描。
+- 服务器上 git 2.43 的实测：在 SHA-256 仓库里以 SHA-1 空树作 `--attr-source`，文件大小变了的 status 不报错（不读属性），需要重算哈希的 status 与 `git add` 报 "bad --attr-source"。这就是用例要拨修改时间的原因。
+
+变异（服务器上逐个改坏后跑对应测试文件，14 项全部变红，还原后与提交内容一致）：前一节 12 项，另加本机空树写死 SHA-1 的编号、容器空树写死 SHA-1 的编号两项。相关测试文件（git-workspace、file-changes、container-round-trips、container-host、checkpoint、workdir-snapshot、script-snapshot、run-command、session-settings、recent-sessions、launcher-cache 等）71 项，通过 69，失败 0，跳过 2；`tsc --noEmit` 与 biome 检查通过。全量 verify 由验收方在服务器上跑。
