@@ -26,7 +26,7 @@ import { type LoadedStoreSession, loadStoreSession } from "../persistence/sessio
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import { ForkError, runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";

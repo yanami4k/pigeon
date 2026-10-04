@@ -15,7 +15,7 @@ import {
   INTERRUPTED_TOOL_RESULT_TEXT,
   storeAttemptFacts,
 } from "../state/session-judge.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import type { McpSession } from "./mcp.ts";
 import { describeResume, runResumeFlow } from "./resume.ts";
 import { disposeRuntime } from "./runtime.ts";

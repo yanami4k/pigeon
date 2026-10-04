@@ -12,7 +12,7 @@ import { createFixtureSession, spawnFixtureWorker } from "../application/session
 import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "../application/status-fixtures.ts";
 import { runTraceCommand } from "./trace.ts";
 
 test("trace：父会话列出 worker（已收尾给结果与进入命令、未收尾标注 resume 入口、孤立收尾归异常）；worker 会话回指父会话", async () => {

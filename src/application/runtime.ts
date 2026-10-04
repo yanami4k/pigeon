@@ -7,8 +7,8 @@
 // 释放运行面时关闭
 // 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
 // 摘要请求与主请求同一个模型接入（跑批时即同一网关、同一计量与花费上限）
-// 人写的说明（决策 330）：会话开始读 AGENTS.md（用户级与仓库根到工作目录逐层）推入系统提示，合计上限 32 KiB。
-// 推送记忆（决策 191、331、332）：开着时会话开始读两层学到的记忆推入系统提示（人写的说明之后、Skill 目录之前）；
+// 人写的说明（决策 330、363）：读 AGENTS.md（用户级与仓库根到工作目录逐层）作开工状态块的「项目说明」一节，合计上限 32 KiB。
+// 推送记忆（决策 191、331、332、363）：开着时读两层学到的记忆作开工状态块的「记忆」一节；
 // 只有有人对话的入口另给写入配置，注册 update_memory、推送段带"被纠正时记下"的说明。复盘（收尾、压缩前、补做）随决策 331 删除
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
 // 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
@@ -53,6 +53,7 @@ import {
   NO_LOAD_SKILL_SENTENCE,
   type SkillRoot,
   scanLocalSkills,
+  skillTreeFingerprint,
 } from "../skills/catalog.ts";
 import {
   createLoadSkillTool,
@@ -129,9 +130,11 @@ import {
 } from "./spawn-worker-tool.ts";
 import {
   STATUS_AUTHORITY_SENTENCE,
+  type StatusHashes,
   type StatusSectionName,
   type StatusState,
   StatusTracker,
+  statusEntry,
 } from "./status-block.ts";
 import {
   dateText,
@@ -239,8 +242,9 @@ export interface RuntimeDeps {
   frozenPrompt?: FrozenSessionPrompt;
   // 决策 363：续跑沿用会话记录里最后一个 Run 开始条目记下的系统提示（不重新生成）；缺省按本会话现拼
   systemPrompt?: string;
-  // 决策 363：状态变化通道的起点——/reload 交来旧运行面最后发出的一份；缺省没有（首次给完整块；分叉续跑从初始消息还原）
-  statusSent?: StatusState;
+  // 决策 363：状态变化通道的起点（各节哈希）——/reload 交来旧运行面最后发出的一份，续跑、续做与分叉续跑取会话记录里
+  // 最后一条状态条目；缺省没有（首次给完整块）
+  statusSent?: StatusHashes;
   // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
   statusFacts?: StatusFacts;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
@@ -656,7 +660,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? hostStatusProbe(deps.workspaceHost)
       : localStatusProbe(deps.workspaceRoot);
   const approvalSection = `${WRITE_APPROVAL_SENTENCES[approval]}\n${commandTexts.approval}`;
+  const memorySection = (): string =>
+    learned !== undefined
+      ? loadPushedMemory({
+          governanceRoot,
+          ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+          limits: memoryLimits,
+          writable: memoryWrite !== undefined,
+          ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
+        }).section
+      : "";
+  // Skill 根的变动指纹：每次请求之前比一次（只 stat），变了才重取文件类各节、重新登记（load_skill 拒绝时说的"下一次请求之前
+  // 会重新登记"即靠它）
+  let skillPrint: string | undefined;
   const readSlowSections = async (): Promise<Map<StatusSectionName, string>> => {
+    skillPrint = skillTreeFingerprint(localSkills.roots);
     const [git, entries] = await Promise.all([statusProbe.gitState(), statusProbe.rootEntries()]);
     const agents =
       deps.agentsMd === false
@@ -684,16 +702,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       rescanned.section === "" || hasSkills
         ? rescanned.section
         : `${rescanned.section}\n${NO_LOAD_SKILL_SENTENCE}`;
-    const memory =
-      learned !== undefined
-        ? loadPushedMemory({
-            governanceRoot,
-            ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
-            limits: memoryLimits,
-            writable: memoryWrite !== undefined,
-            ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
-          }).section
-        : "";
+    const memory = memorySection();
     return new Map<StatusSectionName, string>([
       ["项目说明", agents],
       ["Skill 目录", skills],
@@ -730,32 +739,29 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     }
     return state;
   };
-  // 状态变化通道：首次与压缩之后给完整块，其余只给变了的节；续跑与分叉以对话里最后一份为起点，/reload 接着旧运行面发出的
-  const statusTracker = new StatusTracker(deps.statusSent);
-  if (deps.statusSent === undefined && deps.initialMessages !== undefined) {
-    statusTracker.restoreFrom(deps.initialMessages);
-  }
-  let statusTouched = false;
-  let memoryWrittenByModel = false;
-  const nextStatus = async (refresh: boolean, compacted: boolean) => {
-    const current = await currentStatus(refresh);
-    // 模型自己用 update_memory 写的记忆不回显：记成已发
-    if (memoryWrittenByModel) {
-      memoryWrittenByModel = false;
-      statusTracker.absorb("记忆", current.get("记忆"));
+  // 状态变化通道：首次与压缩之后给完整块，其余只给变了的节；起点见 statusSent。沿用的是旧会话的系统提示（没有权威层级
+  // 说明，还带"开局冻结"的旧说法）时，首次的完整块开头另加一句以本状态块为准
+  const statusTracker = new StatusTracker(deps.statusSent, {
+    legacyNote: !systemPrompt.includes(STATUS_AUTHORITY_SENTENCE),
+  });
+  // 每次发出（状态消息进了会话记录）与记成已发都把当时的各节哈希记进会话记录，续跑与分叉从记录取
+  const recordStatus = (hashes: StatusHashes | undefined) => {
+    if (hashes !== undefined) {
+      sessionStore.append(statusEntry(hashes));
     }
-    return statusTracker.next(current, compacted);
   };
+  let statusTouched = false;
   const statusChannel: StatusChannel = {
-    beforeRun: ({ compacted }) => {
+    beforeRun: async ({ compacted }) => {
       statusTouched = false;
-      return nextStatus(true, compacted);
+      return statusTracker.next(await currentStatus(true), compacted);
     },
-    betweenTurns: ({ compacted }) => {
-      const refresh = statusTouched;
+    betweenTurns: async ({ compacted }) => {
+      const refresh = statusTouched || skillTreeFingerprint(localSkills.roots) !== skillPrint;
       statusTouched = false;
-      return nextStatus(refresh, compacted);
+      return statusTracker.next(await currentStatus(refresh), compacted);
     },
+    delivered: () => recordStatus(statusTracker.delivered()),
   };
   const delegated = deps.toolPolicy;
   const policy: ToolPolicy =
@@ -1051,8 +1057,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     if (tier === "write" || tier === "exec") {
       statusTouched = true;
     }
+    // 模型自己写的记忆当即记成已发（连同会话记录），/reload 与续跑之后也不回显
     if (notice.toolName === UPDATE_MEMORY_TOOL && !notice.isError) {
-      memoryWrittenByModel = true;
+      const memory = memorySection();
+      recordStatus(statusTracker.absorb("记忆", memory === "" ? undefined : memory));
     }
   });
   const toolTiers = new Map(

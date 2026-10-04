@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { HEADLESS_EXIT_CODES } from "../application/headless-core.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "../application/status-fixtures.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));

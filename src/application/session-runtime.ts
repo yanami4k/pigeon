@@ -29,6 +29,7 @@ import {
 } from "./runtime.ts";
 import type { ScriptSlot } from "./script-tool.ts";
 import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import { statusFromEntries } from "./status-block.ts";
 import type { StatusFacts } from "./status-sources.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
@@ -142,8 +143,6 @@ async function restoreContext(bundle: RuntimeBundle): Promise<{
   }
   await bundle.sessionStore.flush();
   bundle.adapter.restoreMessages([...messages, ...interrupted]);
-  // 决策 363：状态变化通道以对话里最后一份为起点，续跑后第一次只追加变了的节
-  bundle.status.restoreFrom([...messages, ...interrupted]);
   // 决策 294 B1：任务清单从会话里最后一次更新还原
   bundle.taskList?.restore([...messages, ...interrupted]);
   return { messages: messages.length, interrupted: interrupted.length };
@@ -177,14 +176,20 @@ export async function openSessionRuntime(
     ...(reuseMcp !== undefined ? { reuse: reuseMcp } : {}),
   });
   const frozenPrompt = request.reloadFrom?.frozenPrompt;
-  // 决策 363：/reload 接着旧运行面最后发出的那份状态比对；续跑沿用会话记录里最后一个 Run 开始条目记下的系统提示
-  //（旧会话的系统提示里带人写的说明等，照旧沿用，状态块照新规则追加）
-  const statusSent = request.reloadFrom?.status.sent();
-  const recordedSystemPrompt =
+  // 决策 363：续跑沿用会话记录里最后一个 Run 开始条目记下的系统提示（旧会话的系统提示里带人写的说明等，照旧沿用，
+  // 状态块照新规则追加）。状态变化通道的起点：/reload 接着旧运行面最后发出的那份（含模型自己写的记忆记成已发的），
+  // 续跑取会话记录主分支最后一条状态条目；都没有时首次给完整块
+  const recorded =
     request.resume === true
-      ? loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId)?.view.runs.at(-1)
-          ?.start.systemPrompt
+      ? loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId)
       : undefined;
+  const recordedSystemPrompt = recorded?.view.runs.at(-1)?.start.systemPrompt;
+  const statusSent =
+    request.reloadFrom !== undefined
+      ? request.reloadFrom.status.sent()
+      : recorded !== undefined
+        ? statusFromEntries(recorded.main)
+        : undefined;
   const learnedMemory = interactiveLearnedMemory(request.flags, request.memoryWrite);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined

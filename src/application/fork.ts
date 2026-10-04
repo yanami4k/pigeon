@@ -28,6 +28,7 @@ import type {
 } from "../state/session-payloads.ts";
 import { type HeadlessRunOptions, runHeadless } from "./headless-core.ts";
 import { beginStoreFork, type SessionStoreWriter, storeFaultWarner } from "./session-store.ts";
+import { type StatusHashes, statusFromEntries } from "./status-block.ts";
 import { sessionRuntimeScope } from "./worker-scope.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
@@ -54,6 +55,8 @@ export interface PreparedFork {
   checkpoint: CheckpointRef;
   workspace: GitWorktreeWorkspace;
   initialMessages: AgentMessage[];
+  // 决策 363：状态变化通道的起点——分支会话记录里（分叉点之前）最后发出的一份；没有时首次给完整块
+  statusSent: StatusHashes | undefined;
   // 不给新输入，从已有消息续跑
   continueFromHistory: boolean;
 }
@@ -161,6 +164,7 @@ export async function prepareFork(request: ForkRequest): Promise<PreparedFork> {
       checkpoint,
       workspace,
       initialMessages: sessionContextMessages(branch.main),
+      statusSent: statusFromEntries(branch.main),
       continueFromHistory,
     };
   } finally {
@@ -177,6 +181,7 @@ export type ForkRunOptions = Omit<
   | "sessionId"
   | "branchHeader"
   | "initialMessages"
+  | "statusSent"
   | "continueFromHistory"
   | "onBundle"
 >;
@@ -211,6 +216,7 @@ export async function runForkBranch(request: ForkBranchRequest): Promise<ForkBra
     workspaceRoot: prepared.workspace.path,
     sessionId: prepared.branchSessionId,
     initialMessages: prepared.initialMessages,
+    ...(prepared.statusSent !== undefined ? { statusSent: prepared.statusSent } : {}),
     continueFromHistory: prepared.continueFromHistory,
     branchHeader: {
       sourceSessionId: request.sourceSessionId,

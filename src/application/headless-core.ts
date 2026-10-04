@@ -7,7 +7,7 @@
 // 从会话存储现算（决策 180，state/session-judge.ts）。
 // 决策 322：验证门、回炉与失败自动分叉重试已删除——本核心只跑一个 Run 到收尾；收尾检查由使用者自配的
 // 收尾钩子承担（323），成败不再由程序贴"通过"标签
-// 推送记忆（决策 191、193、331）：开着时开局把两层记忆整份推入系统提示；无人值守，只推送、不注册 update_memory；
+// 推送记忆（决策 191、193、331、363）：开着时把两层记忆整份放进开工状态块；无人值守，只推送、不注册 update_memory；
 // 收尾复盘与压缩前复盘已随决策 331 删除
 // 派 worker（决策 264–268、297–303）：开着时给主 agent 注册 spawn_worker 与等待等积木，装一个编排器（无人值守：worker 需请示时
 // 不等，作为可恢复错误交回，303）；worker 用的 token 计入本次运行的 token 上限，撞了即停掉主 agent 与在跑的 worker、拒绝再派。
@@ -54,6 +54,7 @@ import {
   SpawnWorkerSlot,
   spawnWorkerSettingsOf,
 } from "./spawn-worker-tool.ts";
+import type { StatusHashes } from "./status-block.ts";
 import type { StatusFacts } from "./status-sources.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
@@ -136,7 +137,7 @@ export interface HeadlessRunOptions {
   beforeCompaction?: BeforeCompaction;
   // 运行时告警的出口（自动压缩没压成、压缩前回调失败；缺省标准错误输出，同一类只说一次；测试注入）
   warn?: WarnSink;
-  // 决策 191、193、331：推送记忆（开局把两层记忆整份推入系统提示）；无人值守，只推送、不注册 update_memory。缺省关着
+  // 决策 191、193、331、363：推送记忆（两层记忆整份放进开工状态块）；无人值守，只推送、不注册 update_memory。缺省关着
   pushedMemory?: boolean;
   // 学到的记忆的两层上限（字符，按码点计）；缺省取设置快照的 memory 一节
   memoryLimits?: MemoryLimits;
@@ -164,6 +165,8 @@ export interface HeadlessRunOptions {
   // M7（决策 077）：分叉续跑——分支会话头、由会话树还原的初始消息、不给新输入从已有消息续跑
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
+  // 决策 363：分叉续跑时状态变化通道的起点（分支会话记录里最后发出的一份）
+  statusSent?: StatusHashes;
   continueFromHistory?: boolean;
   // 运行面装起来后的回调（挂会话树写穿）
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -288,6 +291,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     },
     ...(options.branchHeader !== undefined ? { branchHeader: options.branchHeader } : {}),
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
+    ...(options.statusSent !== undefined ? { statusSent: options.statusSent } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
       // 决策 330：人写的说明超出上限被截断时提示一行（告警出口，缺省标准错误输出）

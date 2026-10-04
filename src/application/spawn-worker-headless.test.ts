@@ -14,7 +14,7 @@ import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtu
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import { runHeadless } from "./headless-core.ts";
 import { SPAWN_WORKER_TEXTS } from "./spawn-worker-tool.ts";
 import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";

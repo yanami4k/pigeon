@@ -71,6 +71,7 @@ import {
   SessionEntryType,
 } from "../state/session-entries.ts";
 import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
+import { isStatusMessage, STATUS_MARKER, withoutStatusMarker } from "../state/status-text.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import type {
@@ -208,11 +209,13 @@ export interface PiRuntimeAdapterOptions {
   toolHooks?: ToolHookPort;
 }
 
-// 决策 363：状态变化通道——Run 开始之前（首次、续跑后、压缩之后）与一批工具结果之后、下一次请求之前各问一次；
-// 有要说的即作一条用户消息，放在本次输入之前或该批工具结果之后（照常进会话记录）。compacted 为此前压缩过（要重发完整块）
+// 决策 363：状态变化通道——Run 开始之前（首次、续跑后、压缩之后）、一批工具结果之后与轮间压缩之后、下一次请求之前各问一次；
+// 有要说的即作一条带标记（pigeonStatus）的用户消息，放在本次输入之前、该批工具结果之后或压缩后的上下文末尾（照常进会话记录）。
+// compacted 为此前压缩过（要重发完整块）。那条消息进了会话记录即调 delivered（通道据此记成已发）
 export interface StatusChannel {
   beforeRun(input: { compacted: boolean }): Promise<string | undefined>;
   betweenTurns(input: { compacted: boolean }): Promise<string | undefined>;
+  delivered(): void;
 }
 
 export class PiRuntimeAdapter {
@@ -331,8 +334,9 @@ export class PiRuntimeAdapter {
       // 决策 324：钩子 continue:false 置位后这一轮收尾即停——上游只在整批每个调用都 terminate 时提前结束，
       // 混合批次（前面的调用已放行）与排队的 steer 消息都会让循环继续，故在轮末另行判停
       shouldStopAfterTurn: () => this.#hookStopReason !== undefined,
-      // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们
-      convertToLlm,
+      // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们。
+      // 决策 363：状态消息上的标记交给模型之前去掉
+      convertToLlm: (messages) => convertToLlm(messages.map(withoutStatusMarker)),
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
       prepareNextTurnWithContext: (context, signal) => this.#compactBetweenTurns(context, signal),
       initialState: {
@@ -878,15 +882,51 @@ export class PiRuntimeAdapter {
     signal?: AbortSignal
   ): Promise<AgentLoopTurnUpdate | undefined> {
     const update = await this.#compactTurn(turn, signal);
+    const proceed = !this.#interruptRequested && this.#hookStopReason === undefined;
+    // 压缩抹掉了此前的状态块：不论本轮有没有工具结果，下一次请求之前都重发完整块。上游在已有待交消息（通知、排队的输入）时
+    // 压缩之后不再取 steer 队列，故直接放进压缩后的上下文末尾，并照常记进会话记录
+    const injected =
+      update?.context !== undefined && proceed ? await this.#injectStatus(update.context) : false;
     if (this.#deliverAfterTurn) {
       this.#deliverAfterTurn = false;
-      if (!this.#interruptRequested && this.#hookStopReason === undefined) {
-        for (const message of [...(await this.#statusMessages("turn")), ...this.#takeNotices()]) {
+      if (proceed) {
+        const status = injected ? [] : await this.#statusMessages("turn");
+        for (const message of [...status, ...this.#takeNotices()]) {
           this.#agent.steer(message);
         }
       }
     }
     return update;
+  }
+
+  // 轮间压缩之后的完整状态块：放进压缩后的上下文末尾，记进会话记录（占本 Run 一个条目序号），并补进压缩后的消息
+  //（Run 结束按会话树还原；读不到会话树时退回的那份也要有它）。放进去了返回 true
+  async #injectStatus(context: { messages: AgentMessage[] }): Promise<boolean> {
+    const [message] = await this.#statusMessages("turn");
+    if (message === undefined) {
+      return false;
+    }
+    context.messages.push(message);
+    this.#turnCompaction?.messages.push(message);
+    this.#runEntrySeq += 1;
+    if (this.#sessionStore !== undefined) {
+      try {
+        this.#sessionStore.appendMessage(structuredClone(message));
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+    this.#statusDelivered();
+    return true;
+  }
+
+  // 状态消息进了会话记录：告诉通道记成已发；通道出错只进 listenerErrors
+  #statusDelivered(): void {
+    try {
+      this.#status?.delivered();
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
   }
 
   // 决策 363：问状态通道要一条状态消息；通道出错只进 listenerErrors，这一次不带（压缩标记留着，下次照样重发完整块）
@@ -902,7 +942,14 @@ export class PiRuntimeAdapter {
       this.#statusCompacted = false;
       return text === undefined
         ? []
-        : [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }];
+        : [
+            {
+              role: "user",
+              content: [{ type: "text", text }],
+              timestamp: Date.now(),
+              [STATUS_MARKER]: true,
+            } as AgentMessage,
+          ];
     } catch (error) {
       this.#listenerErrors.push(error);
       return [];
@@ -1151,6 +1198,10 @@ export class PiRuntimeAdapter {
           } catch (error) {
             this.#listenerErrors.push(error);
           }
+        }
+        // 决策 363：状态消息记下了，通道据此记成已发
+        if (isStatusMessage(event.message)) {
+          this.#statusDelivered();
         }
         // 工具结果观察口（286）排在会话存储写入之后：它的任何故障都不影响本条的记录
         if (event.message.role === "toolResult" && this.#toolResultListeners.size > 0) {

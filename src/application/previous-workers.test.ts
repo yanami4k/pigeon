@@ -15,7 +15,7 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import { noMcpSession } from "./mcp.ts";
 import {
   previousWorkersOf,

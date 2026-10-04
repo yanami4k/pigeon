@@ -10,7 +10,7 @@ import {
 } from "../persistence/session-catalog.ts";
 import { sessionsDirOf } from "../state/paths.ts";
 import type { ViewMessage } from "../state/session-view.ts";
-import { isStatusText, statusSummary } from "../state/status-text.ts";
+import { isStatusMessage, statusSummary } from "../state/status-text.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
 import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
 import { SCRIPT_NOTICE_PREFIX } from "./script-texts.ts";
@@ -92,8 +92,8 @@ export function messageLines(
       if (block.text.length === 0) {
         continue;
       }
-      // 决策 363：开工状态块与状态追加不是人输入的话，回看时只显示一行（哪几节）
-      if (message.role === "user" && isStatusText(block.text)) {
+      // 决策 363：开工状态块与状态追加（按消息上的标记认）不是人输入的话，回看时只显示一行（哪几节）
+      if (isStatusMessage(message.raw)) {
         lines.push({ kind: "notice", text: statusSummary(block.text) });
         continue;
       }

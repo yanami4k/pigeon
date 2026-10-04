@@ -26,7 +26,7 @@ import {
   SessionEntryType,
   type WorkerData,
 } from "../state/session-entries.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusText } from "./status-fixtures.ts";
 import { runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";

@@ -4,7 +4,7 @@
 // 会话开始时扫描一次：给每个 Skill 目录下全部文件算哈希清单（冻结版本的证据，写进
 // InjectionSnapshot v3 的 skills 字段，load_skill 读取时比对）；启动只把名称、简介、路径追加进
 // system prompt，与人写的说明（AGENTS.md）同样在会话开始时冻结——大量 Skill 不线性膨胀初始上下文。
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { sha256Hex } from "../state/hashing.ts";
@@ -202,6 +202,47 @@ function scanConfiguredRoot(root: SkillRoot): { entries: SkillEntry[]; problems:
     };
   }
   return scanRoot(root.path, "configured", root.label);
+}
+
+// Skill 根下的变动指纹（决策 363）：各目录与文件的相对路径、大小与修改时间（只 stat，不读正文），每次请求之前比一次，
+// 变了才重新登记。根不存在记为缺；符号链接与目录联接不跟随（同登记）
+export function skillTreeFingerprint(roots: readonly string[]): string {
+  const parts: string[] = [];
+  const walk = (dir: string, relative: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      parts.push(`${relative}\0unreadable`);
+      return;
+    }
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const absolute = join(dir, entry.name);
+      const path = `${relative}/${entry.name}`;
+      try {
+        const stat = lstatSync(absolute);
+        if (stat.isSymbolicLink()) {
+          continue;
+        }
+        parts.push(`${path}\0${stat.isDirectory() ? "d" : stat.size}\0${stat.mtimeMs}`);
+        if (stat.isDirectory()) {
+          walk(absolute, path);
+        }
+      } catch {
+        parts.push(`${path}\0gone`);
+      }
+    }
+  };
+  for (const [index, root] of roots.entries()) {
+    try {
+      const stat = statSync(root);
+      parts.push(`#${index}\0${stat.mtimeMs}`);
+      walk(root, `#${index}`);
+    } catch {
+      parts.push(`#${index}\0missing`);
+    }
+  }
+  return parts.join("\n");
 }
 
 // 扫描本地 Skill 根

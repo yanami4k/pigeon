@@ -2,8 +2,9 @@
 // - 状态块随第一条输入作一条单独的用户消息发出；写档、命令档工具之后 git 状态变了，以追加放在该批工具结果之后，
 //   之前的消息一字不改（只追加不改写）；
 // - 续跑：系统提示与对话前缀逐字节不变，只追加变了的节，完全没变不追加；
-// - 压缩之后重发完整块；Skill 改动后 load_skill 按新登记读取；
-// - 读会话的地方（缺省分叉点、回看）跳过状态块。
+// - 压缩之后重发完整块（没有工具结果、因通知接着跑的一轮触发的压缩也一样）；Skill 改动后 load_skill 按新登记读取；
+// - /reload 与续跑接着最后发出的一份（模型自己写的记忆不回显）；旧会话续跑的完整块开头另加一句以本状态块为准；
+// - 读会话的地方（会话列表、检索、缺省分叉点、回看）按消息上的标记跳过状态块，人输入的以标签开头的话照常算人说的。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -17,17 +18,23 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
+import { sessionsDirOf } from "../state/paths.ts";
 import { storeSessionView } from "../state/session-judge.ts";
+import { extractSessionSearch } from "../state/session-search-text.ts";
 import { resolveForkPoint } from "./fork-command.ts";
 import { runHeadless } from "./headless-core.ts";
 import { messageLines } from "./history.ts";
 import type { McpSession } from "./mcp.ts";
-import { buildRuntime, disposeRuntime } from "./runtime.ts";
+import { listRecentMainSessions } from "./recent-sessions.ts";
+import { buildRuntime, disposeRuntime, type RuntimeBundle } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
+import { LEGACY_PROMPT_NOTE } from "./status-block.ts";
 import { statusTextOf, userTexts } from "./status-fixtures.ts";
 
 const noMcp = async (): Promise<McpSession> => ({
@@ -256,41 +263,93 @@ test("Skill 文件改动后：load_skill 按重新登记的内容读取，不再
   }
 });
 
-test("读会话的地方跳过状态块：缺省分叉点落在任务消息上，回看只显示一行", () => {
-  const block =
-    '<pigeon-status>\n开工状态（Pigeon 自动附上）。\n<pigeon-section name="环境">\n工作目录：/w\n</pigeon-section>\n</pigeon-status>';
-  const runId = "run_01M4300000000000000000000A";
-  const message = (role: string, text: string, id: string) => ({
-    type: "message",
-    id,
-    parentId: null,
-    message: { role, content: [{ type: "text", text }] },
-  });
-  const view = storeSessionView({
-    sessionId: newSessionId(),
-    entries: [
-      {
-        type: "custom",
-        id: "e0",
-        parentId: null,
-        customType: "pigeon.run-start",
-        data: { version: 1, runId },
-      },
-      message("user", block, "e1"),
-      message("user", "真正的任务", "e2"),
-      message("assistant", "好", "e3"),
-    ],
-  });
-  assert.deepEqual(resolveForkPoint(view, {}), { runId, runSeq: 2 });
-  assert.deepEqual(
-    messageLines({
-      role: "user",
-      entryId: "e1",
-      timestamp: 0,
-      blocks: [{ type: "text", text: block }],
-    } as never).map((line) => line.text),
-    ["[开工状态] 环境"]
-  );
+test("Skill 在两次请求之间被改（不经写档、命令档工具）：下一次请求之前即重新登记，load_skill 读到新内容", async () => {
+  const r = repo();
+  try {
+    const skillDir = join(r.root, ".pigeon", "skills", "deploy");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: deploy\ndescription: 部署\n---\n旧步骤\n"
+    );
+    const streamFn = createFakeStreamFn({
+      replies: [
+        { text: "看看", toolCalls: [{ name: "read_file", args: { path: "a.txt" } }] },
+        { text: "读", toolCalls: [{ name: "load_skill", args: { name: "deploy" } }] },
+        { text: "读完了" },
+      ],
+    });
+    const bundle = buildRuntime({
+      streamFn,
+      workspaceRoot: r.root,
+      sessionId: newSessionId(),
+      yolo: true,
+      provider: "fake",
+      modelId: "fake",
+      homeDir: r.home,
+    });
+    let changed = false;
+    bundle.adapter.subscribeRounds(() => {
+      if (!changed) {
+        changed = true;
+        writeFileSync(
+          join(skillDir, "SKILL.md"),
+          "---\nname: deploy\ndescription: 部署\n---\n新步骤，多写一句\n"
+        );
+      }
+    });
+    try {
+      await bundle.adapter.run("开始");
+    } finally {
+      await disposeRuntime(bundle);
+    }
+    const result = JSON.stringify(streamFn.calls.at(-1)?.context.messages.at(-1));
+    assert.match(result, /新步骤，多写一句/);
+    assert.doesNotMatch(result, /已变更/);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("读会话的地方按标记跳过状态块：会话列表的第一句、检索、缺省分叉点、回看；人输入的以 <pigeon-status> 开头的话照常算人说的", async () => {
+  const r = repo();
+  try {
+    const human = "<pigeon-status> 这是我自己打的一句";
+    const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
+    const opened = await openSessionRuntime({
+      governanceRoot: r.root,
+      sessionId: newSessionId(),
+      streamFn,
+      flags: { yolo: true, provider: "custom", modelId: "custom", persistThinking: true },
+      startMcp: noMcp,
+      homeDir: r.home,
+    });
+    try {
+      await opened.bundle.adapter.run(human);
+    } finally {
+      await disposeRuntime(opened.bundle);
+    }
+    const sessionId = opened.bundle.adapter.sessionId;
+    assert.equal(listRecentMainSessions(r.root)[0]?.firstInput, human);
+    const ref = listSessionRefs(sessionsDirOf(r.root)).find((item) => item.sessionId === sessionId);
+    const view = ref !== undefined ? readSessionView(ref) : undefined;
+    assert.ok(view !== undefined);
+    const [status, input] = view.messages;
+    assert.equal(status?.raw.pigeonStatus, true, "状态消息带标记存进会话记录");
+    assert.equal(input?.raw.pigeonStatus, undefined);
+    const search = extractSessionSearch(view, 0);
+    assert.ok(search.conversation.some((doc) => doc.text === human));
+    assert.ok(!search.conversation.some((doc) => doc.text.includes("开工状态（Pigeon 自动附上）")));
+    const store = loadStoreSession(sessionsDirOf(r.root), sessionId)?.view;
+    assert.ok(store !== undefined);
+    assert.equal(resolveForkPoint(store, {}).runSeq, 2, "缺省分叉点落在人输入的那条上");
+    assert.match(messageLines(status as never)[0]?.text ?? "", /^\[开工状态\] 项目说明、/);
+    assert.equal(messageLines(input as never)[0]?.text, `> ${human}`);
+    // 交给模型的请求里没有标记
+    assert.ok(!JSON.stringify(streamFn.calls[0]?.context.messages).includes("pigeonStatus"));
+  } finally {
+    r.cleanup();
+  }
 });
 
 test("旧会话续跑：沿用会话记录里的系统提示（其中带人写的说明等），开工状态块照新规则追加完整一份", async () => {
@@ -325,7 +384,125 @@ test("旧会话续跑：沿用会话记录里的系统提示（其中带人写�
     const texts = userTexts(call);
     assert.equal(texts[0], "旧任务");
     assert.match(texts.at(-2) ?? "", /^<pigeon-status>\n开工状态/);
+    // 旧系统提示里没有权威层级说明、还带"开局冻结"的旧说法：完整块开头另加一句以本状态块为准
+    assert.ok((texts.at(-2) ?? "").split("\n")[2] === LEGACY_PROMPT_NOTE);
     assert.equal(texts.at(-1), "继续");
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("/reload 与续跑接着最后发出的一份：不重发完整块；模型自己写的记忆在 /reload 之后、续跑之后都不回显", async () => {
+  const r = repo();
+  const sessionId = newSessionId();
+  const fake = createFakeStreamFn({
+    replies: [
+      {
+        text: "记",
+        toolCalls: [
+          {
+            name: "update_memory",
+            args: { action: "add", layer: "project", content: "提交信息用英文" },
+          },
+        ],
+      },
+      { text: "记好了" },
+      { text: "好" },
+      { text: "好" },
+    ],
+  });
+  const open = (extra: { resume?: true; reloadFrom?: RuntimeBundle } = {}) =>
+    openSessionRuntime({
+      governanceRoot: r.root,
+      sessionId,
+      streamFn: fake,
+      flags: {
+        yolo: true,
+        provider: "custom",
+        modelId: "custom",
+        persistThinking: true,
+        pushedMemory: true,
+      },
+      startMcp: noMcp,
+      homeDir: r.home,
+      memoryWrite: { source: "tui" },
+      ...extra,
+    });
+  try {
+    let bundle = (await open()).bundle;
+    await bundle.adapter.run("记一下");
+    assert.match(statusTextOf(fake.calls[0]), /<pigeon-section name="记忆">/);
+    assert.doesNotMatch(statusTextOf(fake.calls[1]), /「记忆」/, "本运行面内不回显");
+    // /reload：照终端界面的做法，先落盘，同一会话上带着旧运行面重开，再释放旧的
+    await bundle.sessionStore.flush();
+    const reloaded = (await open({ resume: true, reloadFrom: bundle })).bundle;
+    await disposeRuntime(bundle);
+    bundle = reloaded;
+    await bundle.adapter.run("继续");
+    await disposeRuntime(bundle);
+    assert.deepEqual(
+      userTexts(fake.calls[2]).slice(1),
+      ["记一下", "继续"],
+      "/reload 之后不重发完整块、不回显自己写的记忆"
+    );
+    // 续跑：从会话记录里最后一条状态条目接着比对
+    bundle = (await open({ resume: true })).bundle;
+    await bundle.adapter.run("再继续");
+    await disposeRuntime(bundle);
+    assert.deepEqual(
+      userTexts(fake.calls[3]).slice(1),
+      ["记一下", "继续", "再继续"],
+      "续跑之后同样不回显"
+    );
+  } finally {
+    r.cleanup();
+  }
+});
+
+test("没有工具结果、因通知接着跑的一轮触发的压缩：下一次请求之前照样重发完整块（排在通知之前）", async () => {
+  const r = repo();
+  try {
+    const fake = createFakeStreamFn({
+      replies: [
+        { text: "先说一段。".repeat(40), contextTokens: 5000 },
+        { text: "## Goal\n说话" },
+        { text: "收到通知", contextTokens: 300 },
+      ],
+    });
+    const main: FakeStreamFn["calls"] = [];
+    const streamFn: StreamFn = (model, context, options) => {
+      if (!(context.systemPrompt ?? "").startsWith("You are a context summarization assistant.")) {
+        main.push({ model, context: { ...context, messages: [...context.messages] } });
+      }
+      return fake(model, context, options);
+    };
+    const bundle = buildRuntime({
+      streamFn,
+      workspaceRoot: r.root,
+      sessionId: newSessionId(),
+      yolo: true,
+      provider: "fake",
+      modelId: "fake",
+      homeDir: r.home,
+      compaction: { thresholdTokens: 1000, keepRecentTokens: 20 },
+    });
+    let posted = false;
+    bundle.adapter.subscribeRounds(() => {
+      if (!posted) {
+        posted = true;
+        bundle.adapter.notify("[提醒] 有一条通知");
+      }
+    });
+    try {
+      const result = await bundle.adapter.run(`开始。${"背景说明。".repeat(60)}`);
+      assert.equal(result.status, "completed");
+    } finally {
+      await disposeRuntime(bundle);
+    }
+    assert.equal(main.length, 2);
+    const texts = userTexts(main[1]);
+    assert.match(texts.at(-2) ?? "", /^<pigeon-status>\n以下整段取代此前的全部开工状态。\n[\s\S]*约定一/);
+    assert.match(texts.at(-1) ?? "", /有一条通知/);
   } finally {
     r.cleanup();
   }

@@ -1,6 +1,11 @@
 // 测试设施（决策 363）：从假模型收到的一次调用里取开工状态块与状态追加。只给测试用
 import type { FakeStreamCall } from "../pi-runtime/fixtures.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { STATUS_TAG, STATUS_UPDATE_TAG } from "../state/status-text.ts";
+
+// 交给模型的请求里没有标记（交出之前已去掉），测试按正文开头辨认 Pigeon 附上的状态消息
+export function isStatusText(text: string): boolean {
+  return text.startsWith(`<${STATUS_TAG}>`) || text.startsWith(`<${STATUS_UPDATE_TAG}>`);
+}
 
 // 一次调用里全部用户消息的正文（开工状态块与状态追加也是用户消息）
 export function userTexts(call: FakeStreamCall | undefined): string[] {

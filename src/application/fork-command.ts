@@ -8,7 +8,7 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import type { RunId } from "../state/ids.ts";
 import { type StoreSessionView, storeMessageAt } from "../state/session-judge.ts";
 import type { ForkPoint } from "../state/session-payloads.ts";
-import { isStatusText } from "../state/status-text.ts";
+import { isStatusMessage } from "../state/status-text.ts";
 import { ForkError, type ForkRunOptions, runForkBranch } from "./fork.ts";
 import type { OpenedSessionRuntime } from "./session-runtime.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -53,23 +53,9 @@ export function parseForkCommand(raw: string): { at?: ForkAt; input?: string } {
 // 任务开始处：Run 里第一条人输入的用户消息（决策 363：跳过排在前面的开工状态块）；找不到时为第 1 条
 function taskSeqOf(session: StoreSessionView, runId: RunId): number {
   const messages = session.runs.find((run) => run.runId === runId)?.messages ?? [];
-  const index = messages.findIndex((ref) => {
-    if (ref.message.role !== "user") {
-      return false;
-    }
-    const content = ref.message.content;
-    const text =
-      typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content
-              .map((block: { type?: string; text?: string }) =>
-                block.type === "text" ? (block.text ?? "") : ""
-              )
-              .join("")
-          : "";
-    return !isStatusText(text);
-  });
+  const index = messages.findIndex(
+    (ref) => ref.message.role === "user" && !isStatusMessage(ref.message)
+  );
   return index >= 0 ? index + 1 : 1;
 }
 
