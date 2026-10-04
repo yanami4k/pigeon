@@ -98,6 +98,12 @@ export interface WorkspaceHost {
   // 写工具用的解析（决策 334）：同 resolveExisting，另在模型给的路径本身是符号链接时拒写（WorkspaceWriteRefusedError），
   // 报出其指向
   resolveForWrite(inputPath: string): Promise<string>;
+  // 决策 358（write_file）：目标已存在时同 resolveForWrite（exists 为真）；不存在时按路径上最深的已存在一层的真实路径拼上
+  // 其余各段，须仍在工作区根内（exists 为假）。两个实现都有；可缺省只为测试里手拼的执行端
+  resolveForCreate?(inputPath: string): Promise<{ path: string; exists: boolean }>;
+  // 决策 358 照 334：新建 resolveForCreate 给出的不存在的路径——复核路径上最深的已存在一层未变，补建中间目录，目标已存在
+  // 即拒写（不覆盖）
+  createText?(resolvedPath: string, content: string): Promise<void>;
   // 以下三个只接受 resolveExisting / resolveForWrite 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;

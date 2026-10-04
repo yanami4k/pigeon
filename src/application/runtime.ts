@@ -82,6 +82,7 @@ import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import { asWorkspaceHost } from "../tools/local-host.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { createReadFileTool, ReadFileParamsSchema } from "../tools/read-file.ts";
+import { FileReadTracker } from "../tools/read-tracker.ts";
 import { ToolRegistry, type ToolRiskTier } from "../tools/registry.ts";
 import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace-edit.ts";
 import {
@@ -92,6 +93,11 @@ import {
   runCommandTexts,
 } from "../tools/run-command.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import {
+  createWriteFileTool,
+  WRITE_FILE_TOOL,
+  WriteFileParamsSchema,
+} from "../tools/write-file.ts";
 import {
   createWebFetchTool,
   createWebSearchTool,
@@ -360,13 +366,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = sessionsDirOf(governanceRoot);
   // 决策 325：设置快照（会话开始时已读好、校验过）；放权规则取三层并集
   const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
-  // 决策 356、357：本会话的命令输出落盘目录，两个工具的上限取设置的 tools 一节
+  // 决策 356–358：本会话的命令输出落盘目录与读取记录（read_file、编辑与 write_file 共用），两个工具的上限取设置的 tools 一节
   const outputLimits = runCommandOutputLimitsOf(settings);
   const outputStore = new CommandOutputStore(
     sessionOutputsDirOf(governanceRoot, deps.sessionId),
     outputLimits.savedOutputsMaxBytes
   );
-  const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore };
+  const reads = new FileReadTracker();
+  const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -443,6 +450,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     name: "edit_file",
     description: replaceMode ? "原文替换编辑" : "hashline 锚定稀疏编辑",
     parameters: replaceMode ? ReplaceEditParamsSchema : EditFileParamsSchema,
+    tier: "write",
+    pathConfinement: { kind: "workspace" },
+    executionMode: "sequential",
+  });
+  // 决策 358：新建或整体覆盖文件，与 edit_file 同为写档、工作区围栏（受保护路径与写档审批随之生效）
+  registry.register({
+    name: WRITE_FILE_TOOL,
+    description: "新建或整体覆盖文件",
+    parameters: WriteFileParamsSchema,
     tier: "write",
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
@@ -603,6 +619,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const toolNames = [
     "read_file",
     "edit_file",
+    WRITE_FILE_TOOL,
     RUN_COMMAND_TOOL,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
     ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
@@ -748,7 +765,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       replaceMode
         ? createReadFileTool(workspaceHost, { editMode: "replace", ...readOptions })
         : createReadFileTool(workspaceHost, readOptions),
-      replaceMode ? createReplaceEditTool(workspaceHost) : createEditFileTool(workspaceHost),
+      replaceMode
+        ? createReplaceEditTool(workspaceHost, reads)
+        : createEditFileTool(workspaceHost, reads),
+      createWriteFileTool(workspaceHost, reads),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
         host: workspaceHost,

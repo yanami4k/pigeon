@@ -32,6 +32,8 @@ import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.
 export const RUN_COMMAND_TOOL = "run_command";
 export const DEFAULT_RUN_COMMAND_TIMEOUT_MS = 120_000;
 export const DEFAULT_RUN_COMMAND_OUTPUT_BYTES = 32 * 1024;
+// 决策 358：命令串长度上限（防误传巨大参数即可）
+export const RUN_COMMAND_MAX_CHARS = 65_536;
 // 工作树文件清单上限：超出不做完整差异比对（标记 truncated），避免大目录拖垮每次执行
 export const FILE_SNAPSHOT_LIMIT = 20_000;
 
@@ -64,7 +66,7 @@ const SHELL_CHARS = new Set(["|", ";", "&", "<", ">", "`"]);
 
 export const RunCommandParamsSchema = Type.Object({
   // 完整命令串，或设置的 commands 一节登记的短名
-  command: Type.String({ minLength: 1, maxLength: 4000 }),
+  command: Type.String({ minLength: 1, maxLength: RUN_COMMAND_MAX_CHARS }),
 });
 export type RunCommandParams = Static<typeof RunCommandParamsSchema>;
 

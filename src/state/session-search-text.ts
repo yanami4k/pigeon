@@ -4,8 +4,8 @@
 // - 工具输出：工具结果的文字，与正文分开存放，检索时以参数显式打开才取用。
 // - 会话检索三件工具（search_sessions、read_session_entry、list_sessions）自身的输出永不进检索（工具输出里也不收）；
 //   它们的调用是助手消息里的工具调用块，本就不进正文。
-// - 目录信息：会话号、开始时间、第一句使用者的话、改动过的文件（edit_file 成功写入的 path，与 run_command 结果
-//   details 里文件变化报告的新增、删除、修改）。
+// - 目录信息：会话号、开始时间、第一句使用者的话、改动过的文件（edit_file 与 write_file 成功写入的 path，与 run_command
+//   结果 details 里文件变化报告的新增、删除、修改）。
 // 分支会话开头从来源复制来的历史不在原生视图的消息里（属于来源会话），这里自然不抽。
 import type { SessionView, ViewBlock, ViewMessage } from "./session-view.ts";
 
@@ -50,7 +50,8 @@ export interface SessionSearchExtract {
 
 const CONVERSATION_ROLES: ReadonlySet<string> = new Set(["user", "assistant"]);
 const SEARCH_TOOLS: ReadonlySet<string> = new Set(SESSION_SEARCH_TOOL_NAMES);
-const EDIT_FILE_TOOL = "edit_file";
+// 成功调用即改动了参数里的 path 的工具
+const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set(["edit_file", "write_file"]);
 const RUN_COMMAND_TOOL = "run_command";
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -108,7 +109,7 @@ function changedFilesOf(view: SessionView): string[] {
       if (result === undefined || result.isError === true) {
         continue;
       }
-      if (call.toolName === EDIT_FILE_TOOL) {
+      if (FILE_WRITE_TOOLS.has(call.toolName)) {
         const path = isObject(call.arguments) ? call.arguments.path : undefined;
         if (typeof path === "string") {
           add(path);

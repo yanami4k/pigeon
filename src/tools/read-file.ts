@@ -5,6 +5,7 @@
 // 决策 357：单次正文至多 maxBytes 字节（缺省 50 KiB），单行超过 maxLineChars 字符（缺省 2000）截断并注明；按字节上限停下时
 // 照翻页提示给出续读的 offset。
 // 决策 356：pigeon://outputs/<编号> 是本会话落盘的命令输出，在路径判定之前识别，直接从会话落盘目录读，不经执行端。
+// 决策 358：成功读取（含分段）后在读取记录里记下整个文件的哈希，write_file 据此判断"读过且读后未变"。
 import { readFile } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -17,6 +18,7 @@ import { type CommandOutputStore, isOutputsUri, OutputPathError } from "./comman
 import type { EditMode } from "./edit-mode.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
+import type { FileReadTracker } from "./read-tracker.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
 
@@ -56,6 +58,8 @@ export interface ReadFileToolOptions {
   limits?: ReadFileLimits;
   // 决策 356：本会话的落盘目录（不给即不认虚拟路径）
   outputs?: CommandOutputStore;
+  // 决策 358：本会话的读取记录
+  reads?: FileReadTracker;
 }
 
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读取；工具不判断自己在哪
@@ -67,7 +71,7 @@ export function createReadFileTool(
   const replaceMode = options.editMode === "replace";
   const maxBytes = options.limits?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES;
   const maxLineChars = options.limits?.maxLineChars ?? DEFAULT_READ_FILE_MAX_LINE_CHARS;
-  // 取内容：虚拟路径先于路径判定，直接读会话落盘目录；其余经执行端围栏后读取
+  // 取内容：虚拟路径先于路径判定，直接读会话落盘目录；其余经执行端围栏后读取并记进读取记录
   const load = async (inputPath: string): Promise<{ resolvedPath: string; raw: string }> => {
     if (isOutputsUri(inputPath)) {
       if (options.outputs === undefined) {
@@ -81,6 +85,7 @@ export function createReadFileTool(
       throw new ReadFileError(`不是常规文件：${inputPath}`);
     }
     const raw = await host.readText(resolvedPath);
+    options.reads?.record(resolvedPath, raw);
     return { resolvedPath, raw };
   };
   return {

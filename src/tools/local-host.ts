@@ -16,6 +16,8 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertWritePathUnchanged,
+  createWorkspaceFile,
+  resolveWorkspaceCreatePath,
   resolveWorkspacePath,
   resolveWorkspaceWritePath,
 } from "./paths.ts";
@@ -61,6 +63,12 @@ export function createLocalWorkspaceHost(
     async writeText(resolvedPath, content) {
       assertWritePathUnchanged(resolvedPath);
       await writeFile(resolvedPath, content, "utf8");
+    },
+    async resolveForCreate(inputPath) {
+      return resolveWorkspaceCreatePath(workspaceRoot, inputPath);
+    },
+    async createText(resolvedPath, content) {
+      createWorkspaceFile(resolvedPath, content);
     },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
     async listFiles(limit) {

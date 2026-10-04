@@ -20,6 +20,7 @@ import {
   symlinkRefused,
   WorkspacePathError,
   WorkspacePathNotFoundError,
+  WorkspaceWriteRefusedError,
 } from "../tools/paths.ts";
 import {
   type HostExecOptions,
@@ -100,6 +101,28 @@ const WRITE_SCRIPT = [
   `[ -e "$1" ] || exit ${EXIT_MISSING}`,
   `t="$(readlink -f -- "$1")"; [ "$t" = "$1" ] || { printf '%s\\n' "$t"; exit ${EXIT_CHANGED}; }`,
   'cat > "$1"',
+].join("\n");
+// 决策 358（write_file）：$1 为按工作区根规范化后的绝对路径。目标已存在同 RESOLVE_FOR_WRITE_SCRIPT；不存在时找路径上最深的
+// 已存在一层（须是目录），输出其真实路径拼上其余各段，退出码 EXIT_NEW；那一层不是目录为 EXIT_NOT_DIR
+const EXIT_NEW = 7;
+const EXIT_NOT_DIR = 8;
+const EXIT_EXISTS = 9;
+const RESOLVE_FOR_CREATE_SCRIPT = [
+  `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT_SYMLINK}; }`,
+  `[ -e "$1" ] && { readlink -f -- "$1"; exit 0; }`,
+  'd="$1"; rest=""',
+  'while [ ! -e "$d" ] && [ ! -L "$d" ]; do rest="/$(basename -- "$d")$rest"; d="$(dirname -- "$d")"; done',
+  `[ -d "$d" ] || exit ${EXIT_NOT_DIR}`,
+  `printf '%s%s\\n' "$(readlink -f -- "$d")" "$rest"; exit ${EXIT_NEW}`,
+].join("\n");
+// 新建（照 334 复核）：目标已存在即不写；路径上最深的已存在一层重新解析须得到它自己；补建中间目录后以 noclobber 写入
+const CREATE_SCRIPT = [
+  `if [ -e "$1" ] || [ -L "$1" ]; then exit ${EXIT_EXISTS}; fi`,
+  'd="$(dirname -- "$1")"',
+  'while [ ! -e "$d" ] && [ ! -L "$d" ]; do d="$(dirname -- "$d")"; done',
+  `t="$(readlink -f -- "$d")"; [ "$t" = "$d" ] || { printf '%s\\n' "$t"; exit ${EXIT_CHANGED}; }`,
+  'mkdir -p -- "$(dirname -- "$1")" || exit 1',
+  `set -C; cat > "$1" || { [ -e "$1" ] && exit ${EXIT_EXISTS}; exit 1; }`,
 ].join("\n");
 
 export interface HelperResult {
@@ -398,6 +421,42 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       if (result.exitCode === EXIT_MISSING || result.exitCode === EXIT_CHANGED) {
         throw pathChanged(resolvedPath, result.exitCode === EXIT_CHANGED ? stdout : undefined);
+      }
+      if (result.exitCode !== 0) {
+        throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
+      }
+    },
+    async resolveForCreate(inputPath) {
+      const base = await resolveRoot();
+      // 先按工作区根词法规范化（折叠 ..），脚本里只剩真实的路径段
+      const absolute = path.posix.resolve(root, inputPath);
+      const result = await helper(false, trustedShell(RESOLVE_FOR_CREATE_SCRIPT, absolute));
+      const stdout = result.stdout.toString("utf8");
+      if (result.exitCode === EXIT_SYMLINK) {
+        throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
+      }
+      if (result.exitCode === EXIT_NOT_DIR) {
+        throw new WorkspacePathError(`路径上有一层不是目录：${inputPath}`);
+      }
+      if (result.exitCode === EXIT_NEW) {
+        const target = path.posix.normalize(stdout.replace(/\n$/, ""));
+        return {
+          path: checkResolved(inputPath, { ...result, exitCode: 0 }, target, base),
+          exists: false,
+        };
+      }
+      return { path: checkResolved(inputPath, result, stdout, base), exists: true };
+    },
+    async createText(resolvedPath, content) {
+      const result = await helper(true, trustedShell(CREATE_SCRIPT, resolvedPath), content);
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      if (result.exitCode === EXIT_EXISTS) {
+        throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+      }
+      if (result.exitCode === EXIT_CHANGED) {
+        throw pathChanged(resolvedPath, result.stdout.toString("utf8").replace(/\n$/, ""));
       }
       if (result.exitCode !== 0) {
         throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);

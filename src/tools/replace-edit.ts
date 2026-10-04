@@ -6,6 +6,7 @@
 //   ④ 预检在内存完成、零写副作用，审批预览 diff、内容证据探针与执行共享同一段预检；
 //   ⑤ 成功回执与 hashline 版形状对齐（"已在 X 应用 1 处替换（+a −b 行）"），不回传 diff 或锚点。
 // 工具名沿用 edit_file，写档、串行执行、工作区路径围栏与 hashline 版一致。
+// 决策 358：成功写入后按写成的内容更新本会话的读取记录。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
@@ -17,6 +18,7 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
+import type { FileReadTracker } from "./read-tracker.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
@@ -52,9 +54,10 @@ export const REPLACE_EDIT_DESCRIPTION =
   "old_string 须与文件原文逐字一致（含缩进与空白，不带行号前缀），且在文件里恰好出现一次，" +
   "出现多次时加上前后文使其唯一；old_string 与 new_string 相同会被拒绝。";
 
-// 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
+// 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写；reads 为本会话的读取记录（决策 358）
 export function createReplaceEditTool(
-  workspace: string | WorkspaceHost
+  workspace: string | WorkspaceHost,
+  reads?: FileReadTracker
 ): PigeonAgentTool<typeof ReplaceEditParamsSchema, ReplaceEditDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
   return {
@@ -72,6 +75,7 @@ export function createReplaceEditTool(
       const plan = await planReplace(host, args);
       signal?.throwIfAborted();
       await host.writeText(plan.resolvedPath, plan.newRaw);
+      reads?.record(plan.resolvedPath, plan.newRaw);
       const addedLines = plan.applied.added.length;
       const removedLines = plan.applied.removed.length;
       return {
@@ -162,8 +166,9 @@ function lineNumberAt(text: string, position: number): number {
   return line;
 }
 
-// 改前改后行数组去掉公共前缀与公共后缀，剩下的就是这 1 处替换涉及的行（+a −b 行与审批 diff 的依据）
-function changedSpan(oldLines: readonly string[], newLines: readonly string[]): AppliedEdit {
+// 改前改后行数组去掉公共前缀与公共后缀，剩下的就是这 1 处替换涉及的行（+a −b 行与审批 diff 的依据；write_file 的审批
+// diff 也用它）
+export function changedSpan(oldLines: readonly string[], newLines: readonly string[]): AppliedEdit {
   let prefix = 0;
   const maxPrefix = Math.min(oldLines.length, newLines.length);
   while (prefix < maxPrefix && oldLines[prefix] === newLines[prefix]) {
