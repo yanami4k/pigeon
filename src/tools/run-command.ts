@@ -660,6 +660,8 @@ export function createRunCommandTool(
           }
         } else if (run.fullOutputError !== undefined) {
           store.discard(slot);
+        } else {
+          store.release(slot);
         }
       }
       const savedOutputError =

@@ -87,7 +87,10 @@ export function createJobOutputTool(
     executionMode: "parallel",
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<JobToolDetails>> {
       const parsed = Value.Parse(JobOutputParamsSchema, params);
-      const waitMs = (parsed.wait_seconds ?? 0) * 1000;
+      // 无人值守收尾期间，等待不超过收尾的剩余时限
+      const cap = jobs.waitCapMs();
+      const waitMs = Math.min((parsed.wait_seconds ?? 0) * 1000, cap ?? Number.POSITIVE_INFINITY);
+      const waited = parsed.wait_seconds !== undefined && parsed.wait_seconds > 0;
       const all = jobs.list();
       if (all.length === 0) {
         return {
@@ -95,7 +98,7 @@ export function createJobOutputTool(
           details: details([]),
         };
       }
-      const idle = jobs.noteQuery(waitMs > 0);
+      const idle = jobs.noteQuery(waited);
       if (waitMs === 0 && idle >= JOB_IDLE_QUERY_LIMIT && jobs.running().length > 0) {
         throw new BackgroundJobError(
           `已连续 ${idle} 次不带 wait_seconds 查询后台作业，作业都还在跑、没有变化。` +
@@ -115,7 +118,7 @@ export function createJobOutputTool(
         const parts =
           ended.length > 0
             ? ended.map((job) => jobText(job, outputBytes))
-            : [`等了 ${parsed.wait_seconds} 秒，没有作业结束`];
+            : [`等了 ${Math.round(waitMs / 1000)} 秒，没有作业结束`];
         for (const job of ended) jobs.markReported(job);
         if (rest.length > 0) parts.push(`其余作业：\n${listText(rest)}`);
         return { content: [{ type: "text", text: parts.join("\n\n") }], details: details(all) };

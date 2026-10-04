@@ -4,8 +4,9 @@
 // - 会话记录：作业启动与结束各写一条（pigeon.background-job）。
 // - 无人值守收尾（headless 与 worker 的运行面）：一次运行结束后还有作业在跑的，先交一条"仍在跑"的通知让模型处理一轮
 //   （要结果就用 job_output 等，不要的用 job_kill 停掉），再等剩下的作业、把结束通知交给模型跑一轮，直到没有在跑的作业；
-//   收尾总时限（设置可改）从收尾开始起算，计入运行的墙钟预算（墙钟到了照常中止）；总时限到了即停掉余下的作业、把通知
-//   交给模型跑一轮，此后拒绝新开作业。收尾的每一轮照常计入运行的轮数与 token 上限。
+//   收尾总时限（设置可改）从收尾开始起算、每次运行各自计，计入运行的墙钟预算（墙钟到了照常中止）；收尾期间 job_output 的
+//   等待不超过剩余时限；总时限到了即停掉余下的作业、把通知交给模型跑一轮，此后本次运行拒绝新开作业；总时限为 0 即不等，
+//   直接停掉在跑的作业。收尾的每一轮照常计入运行的轮数与 token 上限。
 // - 善后：会话或运行结束时停掉全部作业（disposeRuntime）；崩溃后下次启动按记录清理（每个进程每个治理目录一次）；
 //   续跑时提示上一进程的作业已丢失。
 
@@ -142,9 +143,6 @@ export class JobNotices {
   }
 }
 
-// 收尾总时限的起点（同一会话多次进入收尾共用一个总时限）
-const closeoutDeadlines = new WeakMap<SessionJobs, number>();
-
 // 收尾开始时还有作业在跑：先交给模型的一条（只交一次）
 export function stillRunningText(jobs: readonly BackgroundJob[], now = Date.now()): string {
   const list = jobs
@@ -173,11 +171,9 @@ export async function settleBackgroundJobs<R>(input: {
     }
     const running = jobs.running();
     if (running.length === 0) break;
-    let deadline = closeoutDeadlines.get(jobs);
-    if (deadline === undefined) {
+    const { deadline, started } = jobs.beginCloseout(input.closeoutMs);
+    if (started && input.closeoutMs > 0) {
       // 收尾开始：总时限起算，先让模型处理一轮"仍在跑"
-      deadline = Date.now() + input.closeoutMs;
-      closeoutDeadlines.set(jobs, deadline);
       target.notify(`${JOB_NOTICE_PREFIX}${escapeStatusText(stillRunningText(running))}`);
       continue;
     }
@@ -253,19 +249,22 @@ const ORPHAN_RESULT_TEXT: Record<OrphanReport["result"], string> = {
   killed: "已停掉",
   gone: "进程已不在",
   reused: "进程号已被别的程序复用，没有动它",
-  "container-unavailable": "容器已不可用",
+  "container-unavailable": "容器已不可用，记录留到下次启动再试",
+  unknown: "查不到进程的情形，记录留到下次启动再试",
 };
 
 // 崩溃后下次启动：清理上一进程留下的作业（每个进程每个治理目录一次，后台进行），给人报一行
 export function cleanupOrphanedJobsOnce(
   governanceRoot: string,
-  warn?: (line: string) => void
+  warn?: (line: string) => void,
+  // 容器作业按标记查杀用的 docker 调用前缀（随执行端的配置；本机会话缺省 docker）
+  docker: readonly string[] = ["docker"]
 ): Promise<OrphanReport[]> {
   const dir = jobsDirOf(governanceRoot);
   if (cleanedDirs.has(dir)) return Promise.resolve([]);
   cleanedDirs.add(dir);
   return cleanupOrphanedJobs(dir, {
-    killContainer: (record) => killMarkedInContainer({ docker: ["docker"], ...record }),
+    killContainer: (record) => killMarkedInContainer({ docker, ...record }),
   }).then(
     (reports) => {
       for (const report of reports) {

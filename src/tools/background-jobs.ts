@@ -347,6 +347,8 @@ export class SessionJobs {
   readonly #reported = new Set<(job: BackgroundJob) => void>();
   #idleQueries = 0;
   #onEvent: ((event: BackgroundJobEvent) => void) | undefined;
+  // 本次运行的收尾：总时限的截止时刻（收尾开始时定，每次运行重新计）
+  #closeoutDeadline: number | undefined;
 
   constructor(options: SessionJobsOptions) {
     this.#options = options;
@@ -395,9 +397,31 @@ export class SessionJobs {
     return job;
   }
 
-  // 此后拒绝新开作业（无人值守收尾的总时限已到等）
+  // 此后拒绝新开作业（无人值守收尾的总时限已到等；下一次运行开始时解除）
   close(reason: string): void {
     this.#closed ??= reason;
+  }
+
+  // 决策 365：每次运行开始时调用——收尾的总时限与"拒绝新开"都按运行各自计
+  beginRun(): void {
+    this.#closeoutDeadline = undefined;
+    this.#closed = undefined;
+  }
+
+  // 本次运行的收尾：还没开始即以 ms 定下截止时刻并交回 started 为真；已开始的交回原截止时刻
+  beginCloseout(ms: number): { deadline: number; started: boolean } {
+    if (this.#closeoutDeadline !== undefined) {
+      return { deadline: this.#closeoutDeadline, started: false };
+    }
+    this.#closeoutDeadline = Date.now() + Math.max(0, ms);
+    return { deadline: this.#closeoutDeadline, started: true };
+  }
+
+  // job_output 的等待上限：收尾期间不超过剩余时限（不在收尾里为 undefined）
+  waitCapMs(): number | undefined {
+    return this.#closeoutDeadline === undefined
+      ? undefined
+      : Math.max(0, this.#closeoutDeadline - Date.now());
   }
 
   onSettled(listener: (job: BackgroundJob) => void): () => void {
@@ -769,10 +793,13 @@ export async function cleanupOrphanedJobs(
         ? "killed"
         : "container-unavailable";
     }
-    try {
-      unlinkSync(file);
-    } catch {
-      // 已不在
+    // 查询失败、认不出（unknown）或容器不可用的记录留着，下次启动再试
+    if (result !== "unknown" && result !== "container-unavailable") {
+      try {
+        unlinkSync(file);
+      } catch {
+        // 已不在
+      }
     }
     reports.push({
       sessionId: String(record.sessionId),

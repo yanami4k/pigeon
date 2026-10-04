@@ -587,7 +587,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(deps.previousJobs !== undefined ? { firstId: deps.previousJobs.lastId } : {}),
     });
   // 崩溃后下次启动：按记录清理上一进程留下的作业（后台进行，每个进程一次）
-  void cleanupOrphanedJobsOnce(governanceRoot, deps.storeWarn);
+  void cleanupOrphanedJobsOnce(governanceRoot, deps.storeWarn, workspaceHost.dockerPrefix);
   const reads = new FileReadTracker();
   const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
   // 决策 361：缓存感知的上下文裁剪——价格比与保留时长取本次的模型信息；裁掉的命令输出补落盘，裁掉的读取不再算读过

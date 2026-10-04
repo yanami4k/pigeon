@@ -270,6 +270,8 @@ export interface WorkspaceHost {
   // 决策 365：在工作区根启动一个后台作业（本机 Linux/macOS 以独立进程组、Windows 按进程树，容器里以 setsid 起组并带标记）。
   // 没有实现的执行端不能开后台作业
   startJob?(plan: HostExecPlan, options: HostJobOptions): HostJob;
+  // 决策 365：容器实现的 docker 调用前缀（崩溃后按标记清理容器作业时照用）；本地实现没有
+  readonly dockerPrefix?: readonly string[];
   // Windows 本地实现：程序解析到的 .cmd / .bat 路径；其余实现恒为 undefined
   findLauncherScript(program: string, env: NodeJS.ProcessEnv): string | undefined;
   // 决策 352：命令报"程序不存在"时作废该程序的查找缓存（会话中途装上的程序）；没有缓存的实现不提供

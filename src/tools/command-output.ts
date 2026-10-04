@@ -203,7 +203,8 @@ export class CommandOutputStore {
     return total;
   }
 
-  // 下一条输出的落盘位置：编号接着索引与目录里已有的最大编号（没落盘的不占号；写成或出错都前进，见 commit、discard）。
+  // 下一条输出的落盘位置：编号接着索引与目录里已有的最大编号，取号即占号（决策 365：后台作业取号后要到结束才写成，
+  // 其间别的作业与前台命令不得拿到同一编号）；没用上的号经 release 退回（只在它仍是最新的号时）。
   // 落盘目录被换成链接即抛 OutputPathError
   next(): OutputSlot {
     this.#assertNoLinks(this.dir);
@@ -219,6 +220,7 @@ export class CommandOutputStore {
       this.#last = last;
     }
     const id = this.#last + 1;
+    this.#last = id;
     return {
       id,
       file: path.join(this.dir, `${id}.log`),
@@ -282,6 +284,11 @@ export class CommandOutputStore {
       this.discard(slot);
       throw error;
     }
+  }
+
+  // 取了号没用上（输出没超过头尾两段、不落盘）：它仍是最新的号即退回，免得编号无谓地跳；之后已有人取号的不退
+  release(slot: OutputSlot): void {
+    if (this.#last === slot.id) this.#last = slot.id - 1;
   }
 
   // 没写成（打开或写入出错）：删掉临时文件，编号照常前进

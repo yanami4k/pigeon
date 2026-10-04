@@ -768,7 +768,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
     "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
-    "[--background-closeout-seconds <n，缺省 600>] " +
+    "[--background-closeout-seconds <n，缺省 600；0 为收尾不等、直接停掉作业>] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
     '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
@@ -870,7 +870,14 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     return raw as T;
   };
   // 决策 365：无人值守收尾等后台作业的总时限（只对 Pigeon 条件生效；缺省同产品缺省，生效值记进身份头）
-  const backgroundCloseoutSeconds = positive("--background-closeout-seconds");
+  const closeoutRaw = values.get("--background-closeout-seconds");
+  const backgroundCloseoutSeconds = closeoutRaw === undefined ? undefined : Number(closeoutRaw);
+  if (
+    backgroundCloseoutSeconds !== undefined &&
+    (!Number.isInteger(backgroundCloseoutSeconds) || backgroundCloseoutSeconds < 0)
+  ) {
+    throw new Error(`--background-closeout-seconds 需要非负整数（${usage}）`);
+  }
   // 决策 367：撞上限续跑与流式重复检测（只对 Pigeon 条件生效；没给的项取产品缺省）
   const continuationSwitch = oneOf("--continuation", ["on", "off"] as const);
   const maxConsecutive = positive("--continuation-max-consecutive");

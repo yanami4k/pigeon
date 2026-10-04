@@ -1,6 +1,6 @@
-// 后台作业的应用层接法（决策 365）：结束通知同一轮的合并成一条、已由 job_output 交回的撤回不重复；无人值守收尾先等作业、
-// 把通知交给模型，总时限到了停掉余下的并拒绝新开；续跑时认出上一进程丢失的作业；装配冒烟——headless 收尾等作业跑完、
-// 通知进模型的下一轮，墙钟到了中止并停掉作业、记下来由
+// 后台作业的应用层接法（决策 365）：结束通知同一轮的合并成一条、已由 job_output 交回的撤回不重复；无人值守收尾先交
+// 「仍在跑」让模型处理一轮、再等作业，总时限按每次运行各自计、到了停掉余下的并拒绝新开，总时限为 0 即直接停掉；续跑时
+// 认出上一进程丢失的作业；装配冒烟——headless 收尾、墙钟到了中止并停掉作业、运行出错不进收尾
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,9 +9,9 @@ import { test } from "node:test";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { SessionEntryType } from "../state/session-entries.ts";
-import { type BackgroundJob, JobPool, SessionJobs } from "../tools/background-jobs.ts";
+import { JobPool, SessionJobs } from "../tools/background-jobs.ts";
 import { CommandOutputStore } from "../tools/command-output.ts";
-import { createLocalWorkspaceHost } from "../tools/local-host.ts";
+import type { HostJobExit, WorkspaceHost } from "../tools/workspace-host.ts";
 import {
   backgroundJobEntry,
   JOB_NOTICE_PREFIX,
@@ -21,14 +21,13 @@ import {
 } from "./background-jobs.ts";
 import { runHeadless } from "./headless-core.ts";
 
-// 通知队列的替身：递出由测试控制
-function noticeTarget() {
+// 通知队列的替身：递出由测试控制；runNotices 递出全部并回调
+function noticeTarget(onRun: (runs: number) => void = () => {}) {
   const queued = new Map<string, string>();
   const delivered = new Set<string>();
   let seq = 0;
   let runs = 0;
   return {
-    queued,
     notify(text: string) {
       const key = `n${++seq}`;
       queued.set(key, text);
@@ -41,141 +40,158 @@ function noticeTarget() {
       for (const key of queued.keys()) delivered.add(key);
     },
     pending: () => [...queued].filter(([key]) => !delivered.has(key)).map(([, text]) => text),
+    all: () => [...queued.values()],
     runNotices: async () => {
       runs += 1;
       for (const key of queued.keys()) delivered.add(key);
+      onRun(runs);
       return { runs };
     },
     runs: () => runs,
   };
 }
 
-function fakeJob(id: string): BackgroundJob {
-  return {
-    id,
-    command: `cmd-${id}`,
-    startedAt: 0,
-    state: "exited",
-    endedAt: 1000,
-    exit: { exitCode: 0 },
-    killedBy: undefined,
-    outputUri: `pigeon://outputs/s/${id}`,
-    outputSaved: true,
-    outputError: undefined,
-    outputBytes: 0,
-    outputDropped: 0,
-    fileChanges: undefined,
-    readOffset: 0,
-    reported: false,
-    output: { read: () => ({ text: "", skipped: 0, end: 0 }) },
-  } as unknown as BackgroundJob;
-}
-
-test("结束通知：还没递出时又结束的合并成一条；job_output 交回的撤回；已递出的不再重复", () => {
-  const settled = new Set<(job: BackgroundJob) => void>();
-  const reported = new Set<(job: BackgroundJob) => void>();
-  const jobs = {
-    onSettled: (fn: (job: BackgroundJob) => void) => {
-      settled.add(fn);
-      return () => settled.delete(fn);
+// 替身执行端：作业何时结束由测试决定（finish），停止即以 SIGKILL 结束
+function controlledJobs() {
+  const state = mkdtempSync(join(tmpdir(), "pigeon-jobs-app-"));
+  const ends: Array<(exit: HostJobExit) => void> = [];
+  const host = {
+    platform: "linux",
+    root: "/w",
+    startJob: () => {
+      let end: (exit: HostJobExit) => void = () => {};
+      const done = new Promise<HostJobExit>((resolve) => {
+        end = resolve;
+      });
+      ends.push(end);
+      return {
+        done,
+        kill: async () => {
+          end({ exitCode: null, signal: "SIGKILL" });
+          await done;
+        },
+        record: async () => undefined,
+      };
     },
-    onReported: (fn: (job: BackgroundJob) => void) => {
-      reported.add(fn);
-      return () => reported.delete(fn);
-    },
-  } as unknown as SessionJobs;
-  const target = noticeTarget();
-  let woken = 0;
-  new JobNotices(jobs, target, { wake: () => (woken += 1) });
-  const [j1, j2, j3] = [fakeJob("j1"), fakeJob("j2"), fakeJob("j3")] as [
-    BackgroundJob,
-    BackgroundJob,
-    BackgroundJob,
-  ];
-  for (const fn of settled) fn(j1);
-  for (const fn of settled) fn(j2);
-  assert.equal(target.pending().length, 1);
-  assert.match(target.pending()[0] ?? "", /^\[后台作业通知\] 2 个后台作业已结束[\s\S]*j1[\s\S]*j2/);
-  j1.reported = true;
-  for (const fn of reported) fn(j1);
-  assert.equal(target.pending().length, 1);
-  assert.doesNotMatch(target.pending()[0] ?? "", /j1/);
-  target.deliverAll();
-  for (const fn of settled) fn(j3);
-  assert.deepEqual(
-    target.pending().map((text) => [/j2/.test(text), /j3/.test(text)]),
-    [[false, true]]
-  );
-  assert.equal(j2.reported, true);
-  assert.equal(woken, 3);
-});
-
-function localJobs(state: string, root: string) {
-  return new SessionJobs({
+  } as unknown as WorkspaceHost;
+  const jobs = new SessionJobs({
     sessionId: "s1",
-    host: createLocalWorkspaceHost(root),
+    host,
     store: new CommandOutputStore({
       base: state,
       outputsRoot: join(state, "outputs"),
       sessionId: "s1",
       maxBytes: 1024 * 1024,
     }),
-    pool: new JobPool({ total: 4 }),
-    perSession: 2,
+    pool: new JobPool({ total: 8 }),
+    perSession: 4,
     outputMaxBytes: 1024 * 1024,
   });
+  const start = (command: string) =>
+    jobs.start({ command, plan: { program: command, args: [], verbatim: false }, env: {} });
+  const finish = async (index: number) => {
+    ends[index]?.({ exitCode: 0 });
+    await jobs.wait(jobs.get(`j${index + 1}`), 5000);
+  };
+  return {
+    jobs,
+    start,
+    finish,
+    cleanup: async () => {
+      await jobs.killAll("aborted");
+      rmSync(state, { recursive: true, force: true });
+    },
+  };
 }
 
-test("无人值守收尾：先交一条「仍在跑」让模型处理一轮，再等作业结束、把通知交给模型；总时限到了停掉余下的作业并拒绝新开", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "pigeon-closeout-"));
-  const script = (name: string, body: string) => {
-    writeFileSync(join(dir, name), body);
-    return { program: process.execPath, args: [join(dir, name)], verbatim: false };
-  };
-  const jobs = localJobs(dir, dir);
-  const target = noticeTarget();
-  new JobNotices(jobs, target);
+test("结束通知：还没递出时又结束的合并成一条；经 markReported 交回的撤回；已递出的不再重复", async () => {
+  const c = controlledJobs();
   try {
-    await jobs.start({
-      command: "quick",
-      plan: script("q.mjs", "setTimeout(() => {}, 300);"),
-      env: process.env,
+    const target = noticeTarget();
+    let woken = 0;
+    new JobNotices(c.jobs, target, { wake: () => (woken += 1) });
+    for (const name of ["cmd-a", "cmd-b", "cmd-c"]) await c.start(name);
+    await c.finish(0);
+    await c.finish(1);
+    assert.equal(target.pending().length, 1);
+    const merged = target.pending()[0] ?? "";
+    assert.ok(
+      merged.startsWith(JOB_NOTICE_PREFIX) && merged.includes("cmd-a") && merged.includes("cmd-b")
+    );
+    c.jobs.markReported(c.jobs.get("j1"));
+    assert.equal(target.pending().length, 1);
+    assert.ok(!(target.pending()[0] ?? "").includes("cmd-a"));
+    target.deliverAll();
+    await c.finish(2);
+    assert.deepEqual(
+      target.pending().map((text) => [text.includes("cmd-b"), text.includes("cmd-c")]),
+      [[false, true]]
+    );
+    assert.equal(c.jobs.get("j2").reported, true);
+    assert.equal(woken, 3);
+  } finally {
+    await c.cleanup();
+  }
+});
+
+test("无人值守收尾：先交「仍在跑」让模型处理一轮，再等作业结束、把通知交给模型", async () => {
+  const c = controlledJobs();
+  try {
+    await c.start("cmd-quick");
+    const target = noticeTarget((runs) => {
+      if (runs === 1) void c.finish(0);
     });
-    const first = await settleBackgroundJobs({
-      jobs,
+    new JobNotices(c.jobs, target);
+    const settled = await settleBackgroundJobs({
+      jobs: c.jobs,
       target,
       stopped: () => false,
       closeoutMs: 30_000,
     });
-    assert.deepEqual(first, { last: { runs: 2 } });
-    assert.match(
-      [...target.queued.values()][0] ?? "",
-      /本次运行即将收尾，1 个后台作业仍在跑：j1（quick/
-    );
-    const late = localJobs(dir, dir);
-    const lateTarget = noticeTarget();
-    new JobNotices(late, lateTarget);
-    await late.start({
-      command: "long",
-      plan: script("l2.mjs", "setTimeout(() => {}, 300_000);"),
-      env: process.env,
-    });
-    await settleBackgroundJobs({
-      jobs: late,
-      target: lateTarget,
-      stopped: () => false,
-      closeoutMs: 300,
-    });
-    assert.equal(late.get("j1").killedBy, "closeout");
-    assert.equal(lateTarget.runs(), 2);
-    await assert.rejects(
-      late.start({ command: "again", plan: script("a.mjs", ""), env: process.env }),
-      /总时限已到/
-    );
-    await late.killAll("aborted");
+    assert.deepEqual(settled, { last: { runs: 2 } });
+    const [first = "", second = ""] = target.all();
+    assert.ok(first.includes("cmd-quick") && first.includes("job_kill"), first);
+    assert.ok(second.includes("cmd-quick") && !second.includes("job_kill"), second);
   } finally {
-    await jobs.killAll("aborted");
-    rmSync(dir, { recursive: true, force: true });
+    await c.cleanup();
+  }
+});
+
+test("收尾总时限按每次运行各自计：到了停掉余下的、本次运行拒绝新开；下一次运行重新计、照样先交「仍在跑」", async () => {
+  const c = controlledJobs();
+  try {
+    const target = noticeTarget();
+    new JobNotices(c.jobs, target);
+    await c.start("cmd-long");
+    await settleBackgroundJobs({ jobs: c.jobs, target, stopped: () => false, closeoutMs: 300 });
+    assert.equal(c.jobs.get("j1").killedBy, "closeout");
+    assert.equal(target.runs(), 2);
+    await assert.rejects(c.start("cmd-again"), /总时限/);
+    c.jobs.beginRun();
+    await c.start("cmd-next");
+    await settleBackgroundJobs({ jobs: c.jobs, target, stopped: () => false, closeoutMs: 300 });
+    assert.equal(c.jobs.get("j2").killedBy, "closeout");
+    assert.equal(
+      target.all().filter((text) => text.includes("cmd-next") && text.includes("job_kill")).length,
+      1
+    );
+  } finally {
+    await c.cleanup();
+  }
+});
+
+test("收尾总时限为 0：不交「仍在跑」、不等，直接停掉作业，结束通知交给模型一轮", async () => {
+  const c = controlledJobs();
+  try {
+    const target = noticeTarget();
+    new JobNotices(c.jobs, target);
+    await c.start("cmd-long");
+    await settleBackgroundJobs({ jobs: c.jobs, target, stopped: () => false, closeoutMs: 0 });
+    assert.equal(c.jobs.get("j1").killedBy, "closeout");
+    assert.equal(target.runs(), 1);
+    assert.ok(!target.all().some((text) => text.includes("job_kill")));
+  } finally {
+    await c.cleanup();
   }
 });
 
@@ -204,7 +220,12 @@ test("续跑：只有启动、没有结束记录的作业算丢失；作业号�
 });
 
 // 装配冒烟：headless 主会话开后台作业
-function backgroundRun(root: string, body: string) {
+function backgroundRun(
+  root: string,
+  body: string,
+  replies: Array<{ text: string }>,
+  failOnCall?: number
+) {
   const script = join(root, "..", `${root.split(/[\\/]/).pop()}-job.mjs`);
   writeFileSync(script, body);
   return createFakeStreamFn({
@@ -218,10 +239,9 @@ function backgroundRun(root: string, body: string) {
           },
         ],
       },
-      { text: "等作业结束" },
-      { text: "先等着" },
-      { text: "收到" },
+      ...replies,
     ],
+    ...(failOnCall !== undefined ? { failOnCall } : {}),
   });
 }
 
@@ -234,11 +254,24 @@ function jobEntries(root: string, sessionId: string) {
     .map((entry) => (entry as unknown as { data: { event: string; reason?: string } }).data);
 }
 
-test("装配：headless 收尾先让模型处理一轮「仍在跑」，再等作业跑完、结束通知进模型的下一轮；两件工具随 run_command 注册", async () => {
+async function inWorkspace(run: (root: string, home: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-jobs-headless-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-jobs-home-"));
   try {
-    const streamFn = backgroundRun(root, 'setTimeout(() => console.log("bg-done"), 1500);');
+    await run(root, home);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("装配：headless 收尾先让模型处理一轮「仍在跑」，再等作业跑完、结束通知进模型的下一轮；两件工具随 run_command 注册", () =>
+  inWorkspace(async (root, home) => {
+    const streamFn = backgroundRun(root, 'setTimeout(() => console.log("bg-done"), 1500);', [
+      { text: "等作业结束" },
+      { text: "先等着" },
+      { text: "收到" },
+    ]);
     const result = await runHeadless({
       task: "跑个后台作业",
       governanceRoot: root,
@@ -249,9 +282,10 @@ test("装配：headless 收尾先让模型处理一轮「仍在跑」，再等�
     });
     assert.equal(result.status, "completed");
     assert.equal(streamFn.calls.length, 4);
-    assert.match(
-      JSON.stringify(streamFn.calls[2]?.context.messages.at(-1)),
-      /本次运行即将收尾，1 个后台作业仍在跑/
+    const promptRound = JSON.stringify(streamFn.calls[2]?.context.messages.at(-1));
+    assert.ok(
+      promptRound.includes(JOB_NOTICE_PREFIX.trim()) && promptRound.includes("job_kill"),
+      promptRound
     );
     const lastInput = JSON.stringify(streamFn.calls[3]?.context.messages.at(-1));
     assert.ok(
@@ -264,17 +298,13 @@ test("装配：headless 收尾先让模型处理一轮「仍在跑」，再等�
       jobEntries(root, result.sessionId).map((data) => data.event),
       ["started", "ended"]
     );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
-  }
-});
+  }));
 
-test("装配：收尾等待计入墙钟，墙钟到了中止运行、停掉作业并记下来由", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-jobs-wall-"));
-  const home = mkdtempSync(join(tmpdir(), "pigeon-jobs-wall-home-"));
-  try {
-    const streamFn = backgroundRun(root, "setTimeout(() => {}, 300_000);");
+test("装配：收尾等待计入墙钟，墙钟到了以墙钟上限结束、停掉作业并记下来由", () =>
+  inWorkspace(async (root, home) => {
+    const streamFn = backgroundRun(root, "setTimeout(() => {}, 300_000);", [
+      { text: "等作业结束" },
+    ]);
     const result = await runHeadless({
       task: "跑个停不下的作业",
       governanceRoot: root,
@@ -284,7 +314,7 @@ test("装配：收尾等待计入墙钟，墙钟到了中止运行、停掉作�
       homeDir: home,
       wallClockMs: 1500,
     });
-    assert.notEqual(result.status, "completed");
+    assert.equal(result.status, "wall-clock-limit");
     assert.deepEqual(
       jobEntries(root, result.sessionId).map((data) => [data.event, data.reason]),
       [
@@ -292,8 +322,26 @@ test("装配：收尾等待计入墙钟，墙钟到了中止运行、停掉作�
         ["ended", "aborted"],
       ]
     );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
-  }
-});
+  }));
+
+test("装配：运行出错不进收尾轮，作业随运行面释放停掉并记下，终态保持出错", () =>
+  inWorkspace(async (root, home) => {
+    const streamFn = backgroundRun(root, "setTimeout(() => {}, 300_000);", [{ text: "不会到" }], 2);
+    const result = await runHeadless({
+      task: "跑个作业然后出错",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn,
+      yolo: true,
+      homeDir: home,
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(streamFn.calls.length, 2);
+    assert.deepEqual(
+      jobEntries(root, result.sessionId).map((data) => [data.event, data.reason]),
+      [
+        ["started", undefined],
+        ["ended", "aborted"],
+      ]
+    );
+  }));
