@@ -207,6 +207,7 @@ test("web_search：查询词与条数交给后端（条数缺省取配置），�
     backend: "fake",
     query: "pigeon harness",
     results: 2,
+    answered: true,
     [TOOL_RESULT_USAGE_KEY]: usage,
   });
   await tool.execute(

@@ -291,7 +291,7 @@ test("落盘总量满了从最旧的删起，刚写的那份保留，剩下的�
   const { root, store, cleanup } = workspace(40_000);
   try {
     for (let run = 0; run < 3; run += 1) await runLong(root, store);
-    assert.throws(() => store.resolve("pigeon://outputs/s1/1"), /已因落盘总量上限被清理/);
+    assert.throws(() => store.resolve("pigeon://outputs/s1/1"), /已按落盘总量上限清理/);
     assert.ok(store.resolve("pigeon://outputs/s1/3").file.endsWith("3.log"));
     assert.ok(store.totalBytes() <= 40_000, String(store.totalBytes()));
   } finally {
@@ -308,7 +308,7 @@ test("按配额删旧文件只删身份与记录一致的：被换成别的文�
     writeFileSync(first, "precious\n");
     await runLong(root, store);
     assert.equal(readFileSync(first, "utf8"), "precious\n");
-    assert.throws(() => store.resolve("pigeon://outputs/s1/1"), /已因落盘总量上限被清理/);
+    assert.throws(() => store.resolve("pigeon://outputs/s1/1"), /已按落盘总量上限清理/);
     assert.ok(store.totalBytes() <= 40_000, String(store.totalBytes()));
   } finally {
     cleanup();

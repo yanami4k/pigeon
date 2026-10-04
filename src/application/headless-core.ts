@@ -19,6 +19,7 @@ import type { MemoryLayer } from "../memory/learned.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
+import type { PruneSeed } from "../pi-runtime/context-prune.ts";
 import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { FailureClass } from "../state/classification.ts";
@@ -174,6 +175,8 @@ export interface HeadlessRunOptions {
   initialMessages?: AgentMessage[];
   // 决策 363：分叉续跑时状态变化通道的起点（分支会话记录里最后发出的一份）
   statusSent?: StatusHashes;
+  // 决策 361：分叉续跑时上下文裁剪的起点（取自分支会话记录）
+  pruneSeed?: PruneSeed;
   continueFromHistory?: boolean;
   // 运行面装起来后的回调（挂会话树写穿）
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -303,6 +306,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.branchHeader !== undefined ? { branchHeader: options.branchHeader } : {}),
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     ...(options.statusSent !== undefined ? { statusSent: options.statusSent } : {}),
+    ...(options.pruneSeed !== undefined ? { pruneSeed: options.pruneSeed } : {}),
     onBundle: (bundle) => {
       liveBundle = bundle;
       // 决策 330：人写的说明超出上限被截断时提示一行（告警出口，缺省标准错误输出）

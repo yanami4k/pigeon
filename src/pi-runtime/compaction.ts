@@ -101,6 +101,25 @@ function validUsageTokens(message: AgentMessage): number | undefined {
 // 只多一条：最近一次压缩摘要之前的助手 usage 已过期（它们量的是压缩前的整段上下文，保留段里的助手消息仍带着），
 // 不拿来用，没有新鲜 usage 时整段按字符估算。否则压缩刚完成、保留段里还带着旧 usage，下一轮会被判为仍然超限
 export function contextTokens(messages: readonly AgentMessage[]): number {
+  const { index: usageIndex, tokens: usageTokens } = freshUsage(messages);
+  let trailing = 0;
+  for (let index = usageIndex + 1; index < messages.length; index++) {
+    const message = messages[index];
+    if (message !== undefined) {
+      trailing += estimateTokens(message);
+    }
+  }
+  return usageTokens + trailing;
+}
+
+// 估算所用的那条助手 usage 的时刻（决策 361：在它之后裁掉的量还算在这份 usage 里）；没有可用的 usage 为 undefined
+export function freshUsageTime(messages: readonly AgentMessage[]): number | undefined {
+  const { index } = freshUsage(messages);
+  return index >= 0 ? messages[index]?.timestamp : undefined;
+}
+
+// 最近一次压缩摘要之后最后一条正常助手消息的位置与 usage；没有为 -1
+function freshUsage(messages: readonly AgentMessage[]): { index: number; tokens: number } {
   let summaryIndex = -1;
   for (let index = messages.length - 1; index >= 0; index--) {
     if (messages[index]?.role === "compactionSummary") {
@@ -125,14 +144,7 @@ export function contextTokens(messages: readonly AgentMessage[]): number {
     usageTokens = tokens;
     break;
   }
-  let trailing = 0;
-  for (let index = usageIndex + 1; index < messages.length; index++) {
-    const message = messages[index];
-    if (message !== undefined) {
-      trailing += estimateTokens(message);
-    }
-  }
-  return usageTokens + trailing;
+  return { index: usageIndex, tokens: usageTokens };
 }
 
 // 摘要请求的 Models 适配：只实现 completeSimple，经给定的 streamFn 发出并取回终态消息。其余方法上游压缩不用，调用即报错
@@ -226,6 +238,11 @@ export class ContextCompactor {
   check(messages: readonly AgentMessage[]): { tokens: number; exceeds: boolean } {
     const tokens = contextTokens(messages);
     return { tokens, exceeds: exceedsThreshold(tokens, this.config) };
+  }
+
+  // 给定的 token 数是否超过触发点（决策 361：裁剪之后按裁掉的量重判）
+  exceeds(tokens: number): boolean {
+    return exceedsThreshold(tokens, this.config);
   }
 
   // 执行一次压缩：读主分支、准备、判空、压缩前回调、生成摘要、写压缩条目、按会话树还原上下文。

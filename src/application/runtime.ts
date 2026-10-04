@@ -45,6 +45,7 @@ import {
   ContextCompactor,
   resolveCompactionConfig,
 } from "../pi-runtime/compaction.ts";
+import { ContextPruner, type PruneSeed } from "../pi-runtime/context-prune.ts";
 import {
   type AgentMessage,
   declarationComplete,
@@ -77,11 +78,13 @@ import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
 import {
   type ModelInfoDeclaration,
+  modelProfile,
   type ResolvedModelInfo,
   resolveModelInfo,
   runModelInfoRecord,
 } from "../state/model-info.ts";
 import { outputsRootOf, sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import { contextPruneSettings } from "../state/prune-config.ts";
 import type {
   RepetitionGuardSettings,
   TruncationContinuationSettings,
@@ -91,6 +94,7 @@ import type { ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import {
   commandsConfigOf,
   configGrantRulesOf,
+  contextPruneSectionOf,
   emptySettingsSnapshot,
   memoryLimitsOf,
   modelInfoSectionOf,
@@ -301,6 +305,9 @@ export interface RuntimeDeps {
   // 决策 363：状态变化通道的起点（各节哈希）——/reload 交来旧运行面最后发出的一份，续跑、续做与分叉续跑取会话记录里
   // 最后一条状态条目；缺省没有（首次给完整块）
   statusSent?: StatusHashes;
+  // 决策 361：上下文裁剪的起点（已有的裁剪与上一个 Run 的模型、工具集、系统提示）——/reload 交来旧运行面的，续跑、续做与
+  // 分叉续跑取自会话记录；缺省没有
+  pruneSeed?: PruneSeed;
   // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
   statusFacts?: StatusFacts;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
@@ -442,6 +449,8 @@ export interface RuntimeBundle {
   repetitionGuard: RepetitionGuardSettings;
   // 决策 363：状态变化通道（续跑时从会话记录还原，/reload 时把最后发出的一份交给新运行面）
   status: StatusTracker;
+  // 决策 361：上下文裁剪（/reload 时把已有的裁剪交给新运行面）
+  prune: ContextPruner;
 }
 
 // 决策 355：工作区以外的读取按审批状态放行——放手模式自动放行、有审批通道经人批准、无人值守拒绝
@@ -522,6 +531,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   });
   const reads = new FileReadTracker();
   const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
+  // 决策 361：缓存感知的上下文裁剪——价格比与保留时长取本次的模型信息；裁掉的命令输出补落盘，裁掉的读取不再算读过
+  const prune = new ContextPruner(
+    contextPruneSettings(contextPruneSectionOf(settings), modelProfile(modelInfo)),
+    {
+      saveOutput: (text) => outputStore.save(Buffer.from(text, "utf8")),
+      forgetRead: (resolvedPath) => reads.forget(resolvedPath),
+    },
+    deps.pruneSeed
+  );
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -1256,6 +1274,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     compaction: compactor,
     // 决策 363：开工状态块与状态变化通道
     status: statusChannel,
+    prune,
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 Run 开始条目；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
     modelInfo: runModelInfoRecord(modelInfo),
@@ -1354,6 +1373,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     truncationContinuation: continuation,
     repetitionGuard: repetition,
     status: statusTracker,
+    prune,
     frozenPrompt: {
       systemPrompt,
       instructions,

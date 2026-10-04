@@ -91,6 +91,8 @@ export class CommandOutputStore {
   #readable: ReadonlySet<string> | undefined;
   // 本会话的索引（编号 → 记录）；首次用到时从索引文件读入（续跑的会话接着用）
   #index: Map<number, OutputRecord> | undefined;
+  // 本会话按落盘总量上限清理掉的编号（决策 361：读到它们时明确说已被清理，不说编号不对）
+  #evicted: Set<number> | undefined;
   #last: number | undefined;
 
   constructor(options: CommandOutputStoreOptions) {
@@ -123,10 +125,12 @@ export class CommandOutputStore {
     }
   }
 
-  // 读某个会话的索引文件；没有、读不了或格式不对都按空索引（格式不对的条目跳过）
-  #readIndex(session: string): Map<number, OutputRecord> {
+  // 读某个会话的索引文件：各条记录与按总量上限清理掉的编号；没有、读不了或格式不对都按空索引（格式不对的条目跳过）
+  #readIndex(session: string): { records: Map<number, OutputRecord>; evicted: Set<number> } {
     const file = path.join(this.#outputsRoot, session, INDEX_FILE);
     const index = new Map<number, OutputRecord>();
+    const evicted = new Set<number>();
+    const loaded = { records: index, evicted };
     let parsed: unknown;
     try {
       this.#assertNoLinks(file);
@@ -137,20 +141,32 @@ export class CommandOutputStore {
         closeSync(fd);
       }
     } catch {
-      return index;
+      return loaded;
     }
-    const entries = (parsed as { entries?: unknown } | null)?.entries;
-    if (!Array.isArray(entries)) return index;
+    const { entries, evicted: gone } = (parsed ?? {}) as { entries?: unknown; evicted?: unknown };
+    if (Array.isArray(gone)) {
+      for (const id of gone) if (Number.isSafeInteger(id) && id > 0) evicted.add(id as number);
+    }
+    if (!Array.isArray(entries)) return loaded;
     for (const entry of entries as unknown[]) {
       const record = asRecord(entry);
       if (record !== undefined) index.set(record.id, record);
     }
-    return index;
+    return loaded;
   }
 
   #ownIndex(): Map<number, OutputRecord> {
-    this.#index ??= this.#readIndex(this.#sessionId);
+    if (this.#index === undefined) {
+      const loaded = this.#readIndex(this.#sessionId);
+      this.#index = loaded.records;
+      this.#evicted = loaded.evicted;
+    }
     return this.#index;
+  }
+
+  #ownEvicted(): Set<number> {
+    this.#ownIndex();
+    return this.#evicted as Set<number>;
   }
 
   // 索引整体写进临时文件（独占新建、不跟随链接）再改名
@@ -164,7 +180,8 @@ export class CommandOutputStore {
       0o600
     );
     try {
-      writeFileSync(fd, `${JSON.stringify({ entries: records })}\n`);
+      const evicted = [...this.#ownEvicted()].sort((a, b) => a - b);
+      writeFileSync(fd, `${JSON.stringify({ entries: records, evicted })}\n`);
     } catch (error) {
       closeSync(fd);
       removeQuietly(temp);
@@ -238,6 +255,35 @@ export class CommandOutputStore {
     }
   }
 
+  // 整段内容存成下一条（决策 361：裁剪掉的命令输出还没落盘的先补落盘）：同收集器，临时文件独占新建、不跟随链接，
+  // 打开后取身份、写完再提交。返回虚拟路径；出错抛出（临时文件已删、编号照常前进）
+  save(content: Uint8Array): string {
+    const slot = this.next();
+    let fd: number | undefined;
+    try {
+      fd = openSync(
+        slot.temp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW,
+        0o600
+      );
+      const stat = fstatSync(fd, { bigint: true });
+      writeFileSync(fd, content);
+      closeSync(fd);
+      fd = undefined;
+      this.commit(slot, {
+        bytes: content.length,
+        dev: String(stat.dev),
+        ino: String(stat.ino),
+        sha256: createHash("sha256").update(content).digest("hex"),
+      });
+      return slot.uri;
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      this.discard(slot);
+      throw error;
+    }
+  }
+
   // 没写成（打开或写入出错）：删掉临时文件，编号照常前进
   discard(slot: OutputSlot): void {
     this.#last = Math.max(this.#last ?? 0, slot.id);
@@ -264,6 +310,7 @@ export class CommandOutputStore {
         // 已不在
       }
       index.delete(record.id);
+      this.#ownEvicted().add(record.id);
       total -= record.size;
     }
   }
@@ -285,10 +332,18 @@ export class CommandOutputStore {
     }
     const file = path.join(this.#outputsRoot, session, `${idText}.log`);
     this.#assertNoLinks(file);
-    const index = session === this.#sessionId ? this.#ownIndex() : this.#readIndex(session);
-    const record = index.get(Number(idText));
+    const id = Number(idText);
+    const loaded =
+      session === this.#sessionId
+        ? { records: this.#ownIndex(), evicted: this.#ownEvicted() }
+        : this.#readIndex(session);
+    const record = loaded.records.get(id);
     if (record === undefined) {
-      throw new OutputPathError(`${uri} 不存在（编号不对，或已因落盘总量上限被清理）`);
+      throw new OutputPathError(
+        loaded.evicted.has(id)
+          ? `${uri}：该输出已按落盘总量上限清理，需要时重新运行命令`
+          : `${uri} 不存在（编号不对）`
+      );
     }
     return { file, record };
   }
