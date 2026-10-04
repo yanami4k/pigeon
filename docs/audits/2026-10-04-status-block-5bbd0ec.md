@@ -196,3 +196,7 @@ adapter（`src/pi-runtime/adapter.ts`）新增可选的 `status` 选项（`Statu
 - 机器：服务器 pigeon-verify，8 vCPU、31 GB 内存，Node v24.12.0；按服务器负载取测试并发。
 - 树与 24bf492 相同的提交上：`npm run lint`（549 个文件，无问题）、`npm run check`、`npm run deps`（578 个模块，无违规）通过。测试分两批前台运行（并发 3）：application、tui、cli 580 项全过；其余目录 1,056 项，通过 1,054，跳过 2。合计 1,636 项，通过 1,634，失败 0，跳过 2。
 - 含本审计的提交上另跑一次 verify，结果追加在下一节。
+
+## 含本审计的提交上的 verify
+
+- 提交 d0ca59f（在 24bf492 之上只加本审计文件），同一台服务器：`npm run lint`、`npm run check`、`npm run deps`（578 个模块，无违规）通过；测试分两批前台运行：application、tui、cli 580 项全过（并发 3）；其余目录 1,056 项，通过 1,054，跳过 2（并发 6）。合计 1,636 项，通过 1,634，失败 0，跳过 2。
