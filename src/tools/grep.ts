@@ -1,6 +1,6 @@
 // grep（tier: read）：在工作区内按正则搜索文件内容（决策 368）。只读工具：审批属读档（自动放行），可与其他读并行。
-// 后端（rg → git grep → grep -r）经执行端在本机或容器里运行，见 search-backend.ts；文件名模式、禁读名单（决策 355）、
-// 排序与上限在这里统一做。搜索范围限工作区（path 经路径围栏）。
+// 后端（rg → git grep → grep -r）经执行端在本机或容器里运行，取结果与按真实路径筛选见 search-backend.ts；
+// 文件名模式、排序与上限在这里做。搜索范围限工作区（path 照读档规则解析，禁读或工作区外即拒）。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { basenamePrefilter, fileFilter } from "./glob-match.ts";
@@ -8,21 +8,16 @@ import { readDenyList } from "./read-deny.ts";
 import {
   detectSearchBackend,
   type GrepRecord,
-  grepArgs,
   inGitDir,
   MAX_LINE_CHARS,
-  parseFileList,
-  parseGrepOutput,
+  type Omitted,
   relativeToStart,
   resultNotes,
-  runSearch,
-  SEARCH_OUTPUT_CAP,
+  runGrep,
   type SearchBackend,
   type SearchBackendKind,
   type SearchBackendOptions,
   SearchEnvironmentError,
-  SearchToolError,
-  screenByRealPath,
   searchStart,
 } from "./search-backend.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
@@ -42,15 +37,16 @@ export type GrepParams = Static<typeof GrepParamsSchema>;
 
 export interface GrepDetails {
   backend: SearchBackendKind;
-  // 匹配行数（files_only 时为文件数）；incomplete 时为"至少"
+  // 匹配行数（files_only 时为文件数）；incomplete 时为"超过"
   total: number;
   shown: number;
   // 输出超过上限，没有统计完
   incomplete: boolean;
-  // 按禁读名单略去的条数
+  // 略去的文件数：按禁读名单的、经链接指向工作区以外的、文件名含换行或控制字符的、未及检查的
   deniedOmitted: number;
-  // 经符号链接落在工作区以外、因而略去的条数
   outsideOmitted: number;
+  unsafeOmitted: number;
+  uncheckedOmitted: number;
 }
 
 export interface SearchToolOptions extends SearchBackendOptions {
@@ -93,12 +89,14 @@ export function backendCache(
   };
 }
 
-// 后端出错（退出码不是 0 或 1）且没有任何结果：正则写错等归模型侧，其余归环境
-export function backendFailure(stderr: string, exitCode: number | null): Error {
-  const message = stderr.trim().slice(0, 1000) || `退出码 ${exitCode}`;
-  return /regex|regular expression|parse error|Unmatched|Invalid|unmatched|invalid/.test(message)
-    ? new SearchToolError(`模式有误：${message}`)
-    : new SearchEnvironmentError(`搜索出错：${message}`);
+// 略去的文件数写进 details
+export function omittedDetails(omitted: Omitted) {
+  return {
+    deniedOmitted: omitted.denied,
+    outsideOmitted: omitted.outside,
+    unsafeOmitted: omitted.unsafe,
+    uncheckedOmitted: omitted.unchecked,
+  };
 }
 
 export function createGrepTool(
@@ -123,67 +121,42 @@ export function createGrepTool(
       const context = args.context ?? 0;
       const prefilter =
         backend.kind === "rg" && args.glob !== undefined ? basenamePrefilter(args.glob) : undefined;
-      const result = await runSearch(
+      const run = await runGrep(
         host,
-        backend.program,
-        grepArgs(backend, {
+        backend,
+        {
           pattern: args.pattern,
-          searchPath: start.rel,
+          start,
           ignoreCase: args.ignore_case === true,
           context,
           filesOnly,
           ...(prefilter !== undefined ? { prefilter } : {}),
-        }),
-        { ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}), signal }
+          keep: (relPath) => !inGitDir(relPath) && matchesGlob(relativeToStart(relPath, start)),
+        },
+        {
+          deny,
+          signal,
+          ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        }
       );
-      if (result.timedOut) {
-        throw new SearchEnvironmentError("搜索超时；请缩小范围（更具体的 path 或 glob）");
-      }
-      const incomplete = result.outputBytes > SEARCH_OUTPUT_CAP;
-      const keep = (relPath: string) =>
-        !inGitDir(relPath) && matchesGlob(relativeToStart(relPath, start));
-      const failed = result.exitCode !== 0 && result.exitCode !== 1;
-      const omitted = { denied: 0, outside: 0 };
       let lines: string[];
       let total: number;
       let shown: number;
       if (filesOnly) {
-        const nul = backend.kind !== "grep" || backend.gnu === true;
-        const candidates = [...new Set(parseFileList(result.stdout, nul))].filter(keep);
-        const readable = await screenByRealPath(host, candidates, deny, omitted, () => 1);
-        const files = candidates.filter(readable);
-        if (failed && files.length === 0) throw backendFailure(result.stderr, result.exitCode);
-        files.sort();
+        const files = [...run.files].sort();
         total = files.length;
         lines = files.slice(0, options.maxResults);
         shown = lines.length;
       } else {
-        const records = parseGrepOutput(backend, result.stdout).filter(
-          (record): record is Extract<GrepRecord, { kind: "line" }> =>
-            record.kind === "line" && keep(record.path)
-        );
-        const matchCount = new Map<string, number>();
-        for (const record of records) {
-          if (record.match) matchCount.set(record.path, (matchCount.get(record.path) ?? 0) + 1);
-        }
-        const readable = await screenByRealPath(
-          host,
-          [...new Set(records.map((record) => record.path))],
-          deny,
-          omitted,
-          (file) => matchCount.get(file) ?? 0
-        );
         // 按文件路径排序，同一文件内按行序；有上下文时不相连的段之间、文件之间用 -- 分隔
-        const byFile = new Map<string, Extract<GrepRecord, { kind: "line" }>[]>();
+        const byFile = new Map<string, GrepRecord[]>();
         total = 0;
-        for (const record of records) {
-          if (!readable(record.path)) continue;
+        for (const record of run.records) {
           if (record.match) total += 1;
           const list = byFile.get(record.path);
           if (list === undefined) byFile.set(record.path, [record]);
           else list.push(record);
         }
-        if (failed && byFile.size === 0) throw backendFailure(result.stderr, result.exitCode);
         lines = [];
         shown = 0;
         for (const file of [...byFile.keys()].sort()) {
@@ -202,9 +175,8 @@ export function createGrepTool(
       const notes = resultNotes({
         total,
         shown,
-        incomplete,
-        deniedOmitted: omitted.denied,
-        outsideOmitted: omitted.outside,
+        incomplete: run.incomplete,
+        omitted: run.omitted,
         unit: filesOnly ? "个文件" : "条匹配",
         measure: filesOnly ? "个" : "条",
         none: filesOnly ? "没有匹配的文件" : "没有匹配",
@@ -221,9 +193,8 @@ export function createGrepTool(
           backend: backend.kind,
           total,
           shown,
-          incomplete,
-          deniedOmitted: omitted.denied,
-          outsideOmitted: omitted.outside,
+          incomplete: run.incomplete,
+          ...omittedDetails(run.omitted),
         },
       };
     },

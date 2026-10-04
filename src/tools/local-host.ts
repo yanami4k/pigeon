@@ -2,7 +2,7 @@
 // 路径围栏沿用 paths.ts 的 realpath 口径；进程执行、文件清单与 .cmd / .bat 解析从 run-command.ts 原样平移，行为不变。
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -17,7 +17,12 @@ import {
   trackChild,
   untrackChild,
 } from "./process-tree.ts";
-import { classifyLocalReadPaths, resolveLocalReadPath } from "./read-deny.ts";
+import {
+  classifyLocalReadPaths,
+  containedIn,
+  LOCAL_PATH_RULES,
+  resolveLocalReadPath,
+} from "./read-deny.ts";
 import {
   type HostExecOptions,
   type HostExecPlan,
@@ -53,17 +58,23 @@ export function createLocalWorkspaceHost(
     async resolveForRead(inputPath, deny) {
       return resolveLocalReadPath(workspaceRoot, inputPath, deny, options.homeDir ?? homedir());
     },
-    async classifyReadPaths(relPaths, deny) {
-      return classifyLocalReadPaths(workspaceRoot, relPaths, deny, options.homeDir ?? homedir());
-    },
-    // 辅助程序：环境屏蔽 git 的全局与系统配置、不带 ripgrep 配置；两路输出各自留到 maxOutputBytes
-    execHelper: (program, args, execOptions) =>
-      runLocalProcess(
-        { program, args: [...args], verbatim: false },
+    classifyReadPaths: (relPaths, deny, signal) =>
+      classifyLocalReadPaths(workspaceRoot, relPaths, deny, options.homeDir ?? homedir(), signal),
+    // 辅助程序：先解析成绝对路径再启动（不在工作区里找程序）；环境屏蔽 git 的全局与系统配置、不带 ripgrep 配置；
+    // 两路输出各自留到 maxOutputBytes
+    async execHelper(program, args, execOptions) {
+      const env = helperEnv(execOptions.env, process.platform);
+      const resolved = resolveHelperProgram(program, env, workspaceRoot);
+      if (resolved === undefined) {
+        return programNotFound(program);
+      }
+      return runLocalProcess(
+        { program: resolved, args: [...args], verbatim: false },
         workspaceRoot,
-        { ...execOptions, env: helperEnv(execOptions.env, process.platform) },
+        { ...execOptions, env },
         execOptions.maxOutputBytes
-      ),
+      );
+    },
     async fileMtimes(relPaths) {
       const times = new Map<string, number>();
       // 分批并发，免得一次开上万个文件句柄
@@ -93,6 +104,63 @@ export function createLocalWorkspaceHost(
       return snapshotLocalFiles(workspaceRoot, limit);
     },
     findLauncherScript: (program, env) => windowsScript(program, workspaceRoot, env, platform),
+  };
+}
+
+// 辅助程序的绝对路径（决策 368）：给了绝对路径的照用；只给名字的在 PATH 的绝对目录里找，跳过空项、相对目录与工作区之内的
+// 目录——Windows 的进程启动会先在当前目录（即工作区）找程序，故不把裸名字交给它；Windows 只认 .exe、.com。找不到为 undefined
+export function resolveHelperProgram(
+  program: string,
+  env: NodeJS.ProcessEnv,
+  workspaceRoot: string
+): string | undefined {
+  if (path.isAbsolute(program)) return program;
+  if (/[\\/]/.test(program)) return undefined;
+  const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+  const names =
+    process.platform === "win32" && path.extname(program) === ""
+      ? [`${program}.exe`, `${program}.com`]
+      : [program];
+  let realRoot: string;
+  try {
+    realRoot = realpathSync.native(workspaceRoot);
+  } catch {
+    realRoot = path.resolve(workspaceRoot);
+  }
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (dir === "" || !path.isAbsolute(dir)) continue;
+    let realDir: string;
+    try {
+      realDir = realpathSync.native(dir);
+    } catch {
+      continue;
+    }
+    if (containedIn(realRoot, realDir, LOCAL_PATH_RULES)) continue;
+    for (const name of names) {
+      const candidate = path.join(realDir, name);
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch {
+        // 这个目录里没有
+      }
+    }
+  }
+  return undefined;
+}
+
+// 找不到程序：与启动失败同一形态（spawnError 的 code 为 ENOENT）
+function programNotFound(program: string): HostExecResult {
+  const error: NodeJS.ErrnoException = new Error(`找不到程序：${program}`);
+  error.code = "ENOENT";
+  const empty = createHeadCollector(0).finish();
+  return {
+    spawned: false,
+    spawnError: error,
+    exitCode: null,
+    timedOut: false,
+    ...empty,
+    stdout: "",
+    stderr: "",
   };
 }
 

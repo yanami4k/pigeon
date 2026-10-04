@@ -4,7 +4,7 @@
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
-import type { ReadPathClass, ReadTarget } from "./read-deny.ts";
+import type { ReadPathClassification, ReadTarget } from "./read-deny.ts";
 
 // 系统程序所在的目录（root 所有、agent 改不了）：Pigeon 自己执行的程序按它们优先解析
 export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -110,19 +110,20 @@ export interface WorkspaceHost {
   // 可选：没有实现的执行端读档只限工作区之内（照 resolveExisting）
   resolveForRead?(inputPath: string, deny: readonly string[]): Promise<ReadTarget>;
   // 决策 355 / 368：grep、glob 的结果（相对工作区根的路径）逐条按真实路径分类——可读、落在工作区外、禁读；
-  // 取不到真实路径的不在结果里。可选：没有实现的执行端不滤
+  // 取不到真实路径的不在结果里；检查超时或中止时标明不完整。可选：没有实现的执行端 grep、glob 不可用
   classifyReadPaths?(
     relPaths: readonly string[],
-    deny: readonly string[]
-  ): Promise<Map<string, ReadPathClass>>;
-  // 决策 368：Pigeon 自己的只读辅助程序（grep、glob 的搜索后端）的执行，不走 agent 的执行通道——程序按系统目录
-  // 解析（照 trustedShell 的取法：系统目录在前），屏蔽 git 的系统与全局配置，不带 RIPGREP_CONFIG_PATH；
+    deny: readonly string[],
+    signal?: AbortSignal
+  ): Promise<ReadPathClassification>;
+  // 决策 368：Pigeon 自己的只读辅助程序（grep、glob 的搜索后端）的执行，不走 agent 的执行通道——程序解析成系统目录里的
+  // 绝对路径（本机跳过当前目录、相对目录与工作区之内的目录；容器里照 trustedShell 的取法：系统目录在前），屏蔽 git 的系统与全局配置，不带 RIPGREP_CONFIG_PATH；
   // stdout 与 stderr 各自留到 maxOutputBytes。env 为调用方过了白名单的环境（容器实现不采用）。在工作区根执行。
   // 可选：没有实现的执行端 grep、glob 不可用
   execHelper?(
     program: string,
     args: readonly string[],
-    options: Omit<HostExecOptions, "stdin">
+    options: HostExecOptions
   ): Promise<HostExecResult>;
   // 决策 368：工作区内文件（相对工作区根的路径）的修改时间（毫秒）；取不到的不在结果里。glob 据此排序。
   // 可选：没有实现的执行端 glob 按路径排序

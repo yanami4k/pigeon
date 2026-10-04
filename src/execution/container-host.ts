@@ -114,11 +114,12 @@ const READ_RESOLVE_SCRIPT = [
   `if [ -n "$t" ]; then [ -e "$t" ] || exit ${EXIT_MISSING}; r="$(readlink -f -- "$t")" && [ -n "$r" ] || exit 1; printf '%s\\0' "$r"; fi`,
   DENY_ENTRIES_SCRIPT,
 ].join("\n");
-// 决策 355 / 368：grep、glob 的结果逐条取真实路径——参数为名单各项（输出同上），标准输入给出 NUL 分隔的相对路径，
-// 每条输出"相对路径 NUL 真实路径 NUL"（取不到为空串）
+// 决策 355 / 368：grep、glob 的结果逐个取真实路径——参数为名单各项（输出同上）；标准输入给出 NUL 分隔的相对路径，
+// 每 500 个一批。有 GNU 的 realpath（-z -m：每个输入恰好一个输出）时整批一次：先输出 "B NUL 个数 NUL" 与这批输入，再输出
+// 各自的真实路径；没有的（busybox）逐个 readlink -f，每个输出 "P NUL 输入 NUL 真实路径 NUL"（取不到为空串）
 const CLASSIFY_SCRIPT = [
   DENY_ENTRIES_SCRIPT,
-  `xargs -0 -n 200 /bin/sh -c 'for f do r="$(readlink -f -- "$f")" || r=""; printf "%s\\0%s\\0" "$f" "$r"; done' sh`,
+  `xargs -0 -n 500 /bin/sh -c 'if realpath -z -m -- / >/dev/null 2>&1; then printf "B\\0%s\\0" "$#"; printf "%s\\0" "$@"; realpath -z -m -- "$@"; else for f do r="$(readlink -f -- "$f")" || r=""; printf "P\\0%s\\0%s\\0" "$f" "$r"; done; fi' sh`,
 ].join("\n");
 // 决策 368：Pigeon 自己的辅助程序（搜索后端）——经 trustedShell 执行，程序按系统目录优先解析，不带 ripgrep 配置
 const HELPER_EXEC_SCRIPT = 'unset RIPGREP_CONFIG_PATH; exec "$@"';
@@ -448,9 +449,12 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       return { path: target, outside: !insideRoot(base, target) };
     },
-    async classifyReadPaths(relPaths, deny) {
+    async classifyReadPaths(relPaths, deny, signal) {
       const base = await resolveRoot();
       const classes = new Map<string, ReadPathClass>();
+      if (signal?.aborted === true) {
+        return { classes, incomplete: true };
+      }
       const result = await helper(
         true,
         trustedShell(CLASSIFY_SCRIPT, ...deny),
@@ -461,14 +465,36 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       const fields = result.stdout.toString("utf8").split("\0");
       const entries = denyEntriesOf(fields, 0, deny);
-      for (let index = deny.length * 2; index + 1 < fields.length; index += 2) {
-        const rel = fields[index] ?? "";
-        const real = fields[index + 1] ?? "";
-        if (rel !== "" && real !== "") {
+      const classify = (rel: string | undefined, real: string | undefined) => {
+        if (rel !== undefined && rel !== "" && real !== undefined && real !== "") {
           classes.set(rel, classifyRealPath(base, real, entries, POSIX_PATH_RULES));
         }
+      };
+      // 按批对齐；输出被截断（超时）即停，标明不完整
+      let complete = true;
+      let index = deny.length * 2;
+      while (index < fields.length - 1) {
+        const tag = fields[index];
+        if (tag === "B") {
+          const count = Number(fields[index + 1]);
+          const end = index + 2 + 2 * count;
+          if (!Number.isInteger(count) || count < 0 || end > fields.length - 1) {
+            complete = false;
+            break;
+          }
+          for (let at = 0; at < count; at += 1) {
+            classify(fields[index + 2 + at], fields[index + 2 + count + at]);
+          }
+          index = end;
+        } else if (tag === "P" && index + 2 < fields.length - 1) {
+          classify(fields[index + 1], fields[index + 2]);
+          index += 3;
+        } else {
+          complete = false;
+          break;
+        }
       }
-      return classes;
+      return { classes, incomplete: result.timedOut === true || !complete };
     },
     execHelper(program, args, execOptions) {
       const [shell = "/bin/sh", ...rest] = trustedShell(HELPER_EXEC_SCRIPT, program, ...args);

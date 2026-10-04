@@ -1,5 +1,5 @@
 // 容器里的 grep 与 glob（决策 368），真容器：各后端的结果与本机 rg 一致——busybox 覆盖 grep -r 与 find 降级，
-// 带 rg 与 git 的镜像覆盖 rg 与 git grep；busybox 的 grep -r 跟随指向文件的链接，结果按真实路径逐条过滤。没有 Docker、所需镜像或本机随包的 ripgrep 时跳过。
+// 带 rg 与 git 的镜像覆盖 rg 与 git grep；busybox 的 grep -r 降级先列普通文件、按真实路径筛过再逐个搜。没有 Docker、所需镜像或本机随包的 ripgrep 时跳过。
 // 带 git 的镜像取环境变量 PIGEON_SANDBOX_TEST_IMAGE，否则取本地已有的通用镜像（pigeon-sandbox:*）。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -103,7 +103,7 @@ test("带 rg 与 git 的镜像：git 仓库里 rg 与 git grep、不在仓库里
 
 const hasBusybox = dockerUp && docker("image", "inspect", "busybox:latest").status === 0;
 
-test("busybox 的 grep -r 跟随指向文件的链接：经链接读到的禁读文件与工作区外文件逐条滤掉并计数，.git 里的不出现", {
+test("busybox 的 grep -r 降级：先列普通文件、按真实路径筛过再逐个搜——名字带冒号的链接指向私钥、指向工作区外的链接、.git、名字带换行的文件都不出现，归属准确", {
   skip: hasBusybox ? false : "没有 Docker 或 busybox 镜像",
 }, async () => {
   const name = `pigeon-search-links-${process.pid}`;
@@ -117,7 +117,8 @@ test("busybox 的 grep -r 跟随指向文件的链接：经链接读到的禁读
         "-c",
         "mkdir -p /w/.git /root/.ssh /outside && printf 'foo here\\n' > /w/a.txt && " +
           "printf 'foo key\\n' > /root/.ssh/id && printf 'foo outside\\n' > /outside/x.txt && " +
-          "printf 'foo git\\n' > /w/.git/note && ln -s /root/.ssh/id /w/leak && ln -s /outside/x.txt /w/out",
+          "printf 'foo git\\n' > /w/.git/note && ln -s /root/.ssh/id '/w/a.txt:1:x' && " +
+          "ln -s /outside/x.txt /w/out && printf 'foo newline\\n' > '/w/nl\nname.txt'",
       ],
       workdir: "/",
       user: "root",
@@ -127,11 +128,9 @@ test("busybox 的 grep -r 跟随指向文件的链接：经链接读到的禁读
     const grep = createGrepTool(host, { maxResults: 50, only: "grep" });
     const result = await grep.execute("tc", { pattern: "foo" });
     const text = result.content.map((block) => ("text" in block ? block.text : "")).join("");
-    assert.deepEqual(
-      [result.details.total, result.details.deniedOmitted, result.details.outsideOmitted],
-      [1, 1, 1]
-    );
-    assert.doesNotMatch(text, /foo (key|outside|git)/);
+    assert.ok(text.split("\n").includes("a.txt:1:foo here"), text);
+    assert.doesNotMatch(text, /foo (key|outside|git|newline)/);
+    assert.deepEqual([result.details.total, result.details.unsafeOmitted], [1, 1]);
   } finally {
     await removeWorkspaceContainer(name);
   }

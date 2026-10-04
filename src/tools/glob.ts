@@ -1,24 +1,19 @@
 // glob（tier: read）：在工作区内按文件名模式找文件，按修改时间从新到旧排列（决策 368）。只读工具：审批属读档
 //（自动放行），可与其他读并行。文件清单经执行端由 rg --files、git ls-files 或 find 给出（遵守 .gitignore、跳过 .git，
-// 口径同 grep）；模式判定、禁读名单（决策 355）、排序与上限在这里统一做。
+// 口径同 grep），按文件名模式过滤后逐个文件按真实路径筛（见 search-backend.ts）；排序与上限在这里做。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { basenamePrefilter, globToRegExp } from "./glob-match.ts";
-import { backendCache, backendFailure, type SearchToolOptions } from "./grep.ts";
+import { backendCache, omittedDetails, type SearchToolOptions } from "./grep.ts";
 import { readDenyList } from "./read-deny.ts";
 import {
-  inGitDir,
-  listFilesArgs,
-  parseFileList,
   relativeToStart,
   resultNotes,
-  runSearch,
-  SEARCH_OUTPUT_CAP,
+  runListing,
   type SearchBackend,
   type SearchBackendKind,
   SearchEnvironmentError,
   SearchToolError,
-  screenByRealPath,
   searchStart,
 } from "./search-backend.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
@@ -37,8 +32,11 @@ export interface GlobDetails {
   total: number;
   shown: number;
   incomplete: boolean;
+  // 略去的文件数（同 grep）
   deniedOmitted: number;
   outsideOmitted: number;
+  unsafeOmitted: number;
+  uncheckedOmitted: number;
 }
 
 export function globDescription(maxResults: number): string {
@@ -77,31 +75,17 @@ export function createGlobTool(
       if (start.isFile) {
         throw new SearchToolError(`path 须是目录：${args.path}`);
       }
-      const listing = listFilesArgs(
-        backend,
-        start.rel,
-        backend.kind === "rg" ? basenamePrefilter(args.pattern) : undefined
-      );
-      const result = await runSearch(host, listing.program, listing.args, {
-        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      const listing = await runListing(host, backend, start, {
+        prefilter: backend.kind === "rg" ? basenamePrefilter(args.pattern) : undefined,
+        keep: (file) => matches.test(relativeToStart(file, start)),
+        deny,
         signal,
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       });
-      if (result.timedOut) {
-        throw new SearchEnvironmentError("列出文件超时；请缩小范围（更具体的 path）");
-      }
-      const incomplete = result.outputBytes > SEARCH_OUTPUT_CAP;
-      const candidates = [...new Set(parseFileList(result.stdout, listing.nul))].filter(
-        (file) => !inGitDir(file) && matches.test(relativeToStart(file, start))
-      );
-      const omitted = { denied: 0, outside: 0 };
-      const readable = await screenByRealPath(host, candidates, deny, omitted, () => 1);
-      const files = candidates.filter(readable);
-      if (result.exitCode !== 0 && result.exitCode !== 1 && files.length === 0) {
-        throw backendFailure(result.stderr, result.exitCode);
-      }
       // 按修改时间从新到旧，同一时间按路径；执行端给不出修改时间时按路径
-      const times = await host.fileMtimes?.(files);
-      const listed = times !== undefined ? files.filter((file) => times.has(file)) : files;
+      const times = await host.fileMtimes?.(listing.files);
+      const listed =
+        times !== undefined ? listing.files.filter((file) => times.has(file)) : listing.files;
       listed.sort(
         (a, b) => (times?.get(b) ?? 0) - (times?.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0)
       );
@@ -109,9 +93,8 @@ export function createGlobTool(
       const notes = resultNotes({
         total: listed.length,
         shown: shown.length,
-        incomplete,
-        deniedOmitted: omitted.denied,
-        outsideOmitted: omitted.outside,
+        incomplete: listing.incomplete,
+        omitted: listing.omitted,
         unit: "个文件",
         measure: "个",
         none: "没有匹配的文件",
@@ -123,9 +106,8 @@ export function createGlobTool(
           backend: backend.kind,
           total: listed.length,
           shown: shown.length,
-          incomplete,
-          deniedOmitted: omitted.denied,
-          outsideOmitted: omitted.outside,
+          incomplete: listing.incomplete,
+          ...omittedDetails(listing.omitted),
         },
       };
     },
