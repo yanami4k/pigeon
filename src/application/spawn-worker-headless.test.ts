@@ -14,6 +14,7 @@ import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtu
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
+import { isStatusText } from "../state/status-text.ts";
 import { runHeadless } from "./headless-core.ts";
 import { SPAWN_WORKER_TEXTS } from "./spawn-worker-tool.ts";
 import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
@@ -47,15 +48,23 @@ function repo(files: Record<string, string>): string {
   return root;
 }
 
-// 按会话的第一条用户消息分派剧本：主会话与各 worker 各走各的回复队列
+// 按会话的第一条人输入的用户消息分派剧本：主会话与各 worker 各走各的回复队列
 function firstUserText(context: Parameters<StreamFn>[1]): string {
-  const user = context.messages.find((message) => message.role === "user");
-  if (user === undefined) return "";
-  const content = (user as { content: unknown }).content;
-  if (typeof content === "string") return content;
-  return (content as Array<{ type: string; text?: string }>)
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .join("");
+  for (const message of context.messages) {
+    if (message.role !== "user") continue;
+    const content = (message as { content?: unknown }).content;
+    const text =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? (content as Array<{ type: string; text?: string }>)
+              .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+              .join("")
+          : "";
+    // 决策 363：开工状态块不是会话的第一条输入
+    if (!isStatusText(text)) return text;
+  }
+  return "";
 }
 
 function routed(
@@ -111,16 +120,20 @@ function spawnResults(root: string, sessionId: string): string[] {
 function userTexts(root: string, sessionId: string): string[] {
   const loaded = loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId);
   assert.ok(loaded !== undefined);
-  return restoreSessionContext(loaded.main)
-    .messages.filter((message) => message.role === "user")
-    .map((message) => {
-      const content = (message as { content: unknown }).content;
-      return typeof content === "string"
-        ? content
-        : (content as Array<{ type: string; text?: string }>)
-            .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-            .join("");
-    });
+  return (
+    restoreSessionContext(loaded.main)
+      .messages.filter((message) => message.role === "user")
+      .map((message) => {
+        const content = (message as { content: unknown }).content;
+        return typeof content === "string"
+          ? content
+          : (content as Array<{ type: string; text?: string }>)
+              .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+              .join("");
+      })
+      // 决策 363：开工状态块不是输入
+      .filter((text) => !isStatusText(text))
+  );
 }
 
 // 主会话派出的 worker 的收尾状态（按名字）

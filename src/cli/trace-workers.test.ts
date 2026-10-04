@@ -12,6 +12,7 @@ import { createFixtureSession, spawnFixtureWorker } from "../application/session
 import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
+import { isStatusText } from "../state/status-text.ts";
 import { runTraceCommand } from "./trace.ts";
 
 test("trace：父会话列出 worker（已收尾给结果与进入命令、未收尾标注 resume 入口、孤立收尾归异常）；worker 会话回指父会话", async () => {
@@ -82,15 +83,23 @@ function initRepo(root: string, files: Record<string, string>): void {
   git(root, ["commit", "-qm", "init"]);
 }
 
-// 按会话的第一条用户消息分派剧本：主会话与 worker 各走各的回复队列
+// 按会话的第一条人输入的用户消息分派剧本：主会话与 worker 各走各的回复队列
 function firstUserText(context: Parameters<StreamFn>[1]): string {
-  const user = context.messages.find((message) => message.role === "user");
-  if (user === undefined) return "";
-  const content = (user as { content: unknown }).content;
-  if (typeof content === "string") return content;
-  return (content as Array<{ type: string; text?: string }>)
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .join("");
+  for (const message of context.messages) {
+    if (message.role !== "user") continue;
+    const content = (message as { content?: unknown }).content;
+    const text =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? (content as Array<{ type: string; text?: string }>)
+              .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+              .join("")
+          : "";
+    // 决策 363：开工状态块不是会话的第一条输入
+    if (!isStatusText(text)) return text;
+  }
+  return "";
 }
 
 function routed(scripts: Array<[marker: string, behavior: FakeStreamBehavior]>): StreamFn {

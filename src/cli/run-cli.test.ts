@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { HEADLESS_EXIT_CODES } from "../application/headless-core.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
+import { isStatusText } from "../state/status-text.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -128,8 +129,12 @@ test("pigeon run：任务描述从 stdin 读；不带 --yolo 时写调用 fail-c
       outcome: "rejected",
       approvedBy: "policy:deny",
     });
-    // stdin 读到的任务进了 user 消息
-    const users = session.messages.filter((message) => message.role === "user");
+    // stdin 读到的任务进了 user 消息（决策 363：开工状态块另算）
+    const users = session.messages.filter(
+      (message) =>
+        message.role === "user" &&
+        !message.blocks.some((block) => block.type === "text" && isStatusText(block.text))
+    );
     assert.equal(users.length, 1);
     assert.ok(JSON.stringify(users[0]?.blocks).includes("改 beta"), JSON.stringify(users[0]));
   } finally {

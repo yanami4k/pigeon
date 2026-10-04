@@ -26,6 +26,7 @@ import {
   SessionEntryType,
   type WorkerData,
 } from "../state/session-entries.ts";
+import { isStatusText } from "../state/status-text.ts";
 import { runForkBranch } from "./fork.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";
@@ -101,8 +102,25 @@ function messages(entries: readonly StoredEntry[]): StoredEntry[] {
   return entries.filter((entry) => entry.type === "message");
 }
 
+// 决策 363：开工状态块与状态追加不是对话的一部分，比对角色时去掉
+function isStatusMessage(message: { role: string; content?: unknown }): boolean {
+  if (message.role !== "user") return false;
+  const content = message.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? (content as Array<{ type?: string; text?: string }>)
+            .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+            .join("")
+        : "";
+  return isStatusText(text);
+}
 function roles(entries: readonly StoredEntry[]): string[] {
-  return messages(entries).map((entry) => (entry.message as { role: string }).role);
+  return messages(entries)
+    .map((entry) => entry.message as { role: string; content?: unknown })
+    .filter((message) => !isStatusMessage(message))
+    .map((message) => message.role);
 }
 
 test("手动分叉时来源写者在本进程，先落盘再分叉；分叉条目与分支文件照写", async () => {

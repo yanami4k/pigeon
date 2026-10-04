@@ -17,6 +17,7 @@ import type { StreamFn } from "../pi-runtime/index.ts";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
+import { isStatusText } from "../state/status-text.ts";
 import { runHeadless } from "./headless-core.ts";
 import { messageLines } from "./history.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
@@ -202,16 +203,24 @@ test("斜杠命令点名：交给模型的文字带关键词；额度照写；�
   assert.throws(() => parseBudgetSetting("很多"), /缺省额度写法不对/);
 });
 
-// 主 agent 与 worker 各走各的回复：按首条用户消息里有没有 worker 任务的标记分流
+// 主 agent 与 worker 各走各的回复：按首条人输入的用户消息里有没有 worker 任务的标记分流
 function routedStreamFn(main: StreamFn, worker: StreamFn): StreamFn {
   return (model, context, options) => {
-    const first = context.messages[0];
+    // 决策 363：跳过排在前面的开工状态块，取第一条人输入的消息
     const text =
-      first !== undefined && first.role === "user"
-        ? typeof first.content === "string"
-          ? first.content
-          : first.content.map((block) => (block.type === "text" ? block.text : "")).join("")
-        : "";
+      context.messages
+        .flatMap((message) =>
+          message.role === "user"
+            ? [
+                typeof message.content === "string"
+                  ? message.content
+                  : message.content
+                      .map((block) => (block.type === "text" ? block.text : ""))
+                      .join(""),
+              ]
+            : []
+        )
+        .find((candidate) => !isStatusText(candidate)) ?? "";
     return text.includes("WORKER-TASK")
       ? worker(model, context, options)
       : main(model, context, options);
