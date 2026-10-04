@@ -5,7 +5,14 @@
 // 与 trace 的区别：trace 按轮次与工具调用聚合；replay 是原始时间流——该 Run 的全部条目（Run 开始、消息、代码快照、
 // 验证、worker、分叉、授权、Run 收尾）按会话文件里的顺序逐条呈现。
 import { createHash } from "node:crypto";
-import { evalVerdictLabel, failureBadge, shortId, summarizeArgs } from "../application/format.ts";
+import {
+  continuationLine,
+  evalVerdictLabel,
+  failureBadge,
+  repetitionLine,
+  shortId,
+  summarizeArgs,
+} from "../application/format.ts";
 import { messageLines } from "../application/history.ts";
 import {
   listSessionRefs,
@@ -38,6 +45,8 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   fork: "pigeon.fork",
   grant: "pigeon.grant",
   hook: "pigeon.hook",
+  continuation: "pigeon.continuation",
+  repetition: "pigeon.repetition",
 };
 
 // 单条条目的关键字段摘要（各类型的要点，通俗措辞）
@@ -142,6 +151,10 @@ function itemDetail(item: ViewItem): string {
         `命令 ${data.command}`
       );
     }
+    case "continuation":
+      return continuationLine(item.data);
+    case "repetition":
+      return repetitionLine(item.data);
   }
 }
 

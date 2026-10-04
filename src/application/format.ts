@@ -2,6 +2,7 @@
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { FailureClass } from "../state/classification.ts";
+import type { ContinuationData, RepetitionData } from "../state/session-entries.ts";
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
@@ -30,6 +31,23 @@ export function workerGrantScopeNote(request: {
 }
 
 // 稳定 id 短哈希：`exec_` 等前缀 + ULID 前 8 位 + 省略号；非稳定 id（toolCallId 等）原样
+// 撞上限续跑（决策 367）的一行（trace 与 replay 共用）
+export function continuationLine(data: ContinuationData): string {
+  const why = data.cause === "repetition" ? "被重复检测掐断" : "撞输出上限被截断";
+  return `续跑第 ${data.attempt} 次：上条回复${why}，未执行工具`;
+}
+
+// 流式重复检测命中（决策 367）的一行：判据（通道）、周期、重复次数、掐断与否
+export function repetitionLine(data: RepetitionData): string {
+  const criterion = data.criterion === "cycle" ? "逐字周期" : "段落相似度";
+  const channel = data.channel === "text" ? "正文" : "思考";
+  const period = data.criterion === "cycle" ? "周期" : "段长";
+  return (
+    `重复检测命中：${criterion}（${channel}）｜ ${period} ${data.periodChars} 字 ｜ ` +
+    `重复 ${data.repeats} 次 ｜ ${data.mode === "abort" ? "已掐断" : "只记录"}`
+  );
+}
+
 export function shortId(id: string): string {
   const match = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{8}/.exec(id);
   return match === null ? id : `${match[0]}…`;
