@@ -10,11 +10,11 @@
 
 改法：
 - 收集器加两个可选项（`HostExecOptions` 的 `tailBytes`、`fullOutput`）：给了 `tailBytes` 另留末尾、另计总行数；给了 `fullOutput` 且输出超过开头加末尾两段时，从超过的那一刻起把全量输出（含此前留在内存里的部分）写进宿主上的文件，至多 `fullOutput.maxBytes` 字节，超过即只写前面部分并标明。不给这两项时行为与原来一致（钩子、跑批器等其他调用方不受影响）。容器实现的输出同样在宿主一侧收集与落盘。
-- run_command：缺省保留开头 8 KiB 与末尾 24 KiB（总量仍为 32 KiB）；只给了旧口径 `maxOutputBytes` 的调用方照旧只留开头。截断时结果为开头（截在最后一个换行处）、省略标注（共多少字节与行，保留开头几行与末尾几行，中间省略几行、几字节）、末尾（从第一个换行之后起）；存下了全文即另起一行写明总行数与虚拟路径 `pigeon://outputs/<编号>`，可用 read_file 按 offset 读取。执行证据加 `outputTail`、`outputLines`、`savedOutput`。
+- run_command：缺省保留开头 8 KiB 与末尾 24 KiB（总量仍为 32 KiB）；只给了旧口径 `maxOutputBytes` 的调用方照旧只留开头。截断时结果为开头（截在最后一个换行处）、省略标注（共多少字节与行，保留开头几行与末尾几行，中间省略几行、几字节）、末尾（从第一个换行之后起）；存下了全文即另起一行写明总行数与虚拟路径 `pigeon://outputs/<会话号>/<编号>`，可用 read_file 按 offset 读取。执行证据加 `outputTail`、`outputLines`、`savedOutput`。
 - 落盘目录：`.pigeon/state/outputs/<会话号>/<编号>.log`（`state/paths.ts` 的 `sessionOutputsDirOf`），随会话保存；编号接着目录里已有的最大编号，没截断不建文件。`tools/command-output.ts` 的 `CommandOutputStore`：写成一份后按总量上限从最旧的删起（刚写的不删），缺省每会话 200 MiB。
-- read_file：路径以 `pigeon://` 开头即在路径判定之前处理，不经执行端、工作区内外与禁读判定，直接读会话落盘目录；只认 `pigeon://outputs/` 加正整数编号，其余写法（`..`、绝对路径、子路径、别的前缀、带扩展名）一律拒绝（`OutputPathError`，域错误）；编号不在（已被清理）同样报错并写明可能原因。
+- read_file：路径以 `pigeon://` 开头即在路径判定之前处理，不经执行端、工作区内外与禁读判定，直接读会话落盘目录；只认 `pigeon://outputs/` 加会话号加正整数编号，其余写法（`..`、绝对路径、子路径、别的前缀、带扩展名）一律拒绝（`OutputPathError`，域错误）；编号不在（已被清理）同样报错并写明可能原因。
 - 设置：新建 `tools` 一节（`state/tools-config.ts` 的 `ToolsSectionSchema`，小驼峰、按工具分子键），本件加 `tools.runCommand.outputHeadBytes`、`outputTailBytes`、`savedOutputsMaxBytes`；`settings.ts` 的 `runCommandOutputLimitsOf`。装配根为每个运行面建本会话的落盘目录，交给 run_command 与 read_file。
-- 工具说明：run_command 说明里"输出（超长截断）"改为写明输出过长时自动保留开头与结尾、中间注明省略的行数、全文存为 `pigeon://outputs/<编号>` 可用 read_file 按需读取、不必自己用 tail、head 截取。
+- 工具说明：run_command 说明里"输出（超长截断）"改为写明输出过长时自动保留开头与结尾、中间注明省略的行数、全文存为 `pigeon://outputs/<会话号>/<编号>` 可用 read_file 按需读取、不必自己用 tail、head 截取。
 - `docs/configuration.md`：各节表加 `tools` 一行，新增"工具的上限"一节。
 
 ## 二、read_file 安全上限（357，b48aa24）
@@ -94,3 +94,31 @@ hashline 模式（非缺省）的说明与回执不变：其说明有"与决策 
 变异（服务器）：write_file 不查控制字符 → 1 项变红；容器不查解析结果的控制字符 → 1 项变红；容器按词法折叠 `..` → 1 项变红；落盘目录不查链接 → 1 项变红；均还原后逐字一致。
 
 verify：服务器 pigeon-verify，提交 44a7bee，一条前台命令依次跑完 `npm run lint`、`npm run check`、`node --test --test-concurrency=2 "src/**/*.test.ts"`（运行前另有两个测试进程在跑）、`npm run deps`，全过，全程约 222 秒。测试 1,653 项：通过 1,651，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：583 个模块，无违规。
+
+## 补记：第二轮验收修正（03933f0）
+
+落盘文件的身份：
+- 本机执行端下，命令可以把落盘目录或 `<编号>.log` 换成符号链接、换成指向别的文件的硬链接，或改动内容；lstat 与打开之间有竞态，Windows 没有 `O_NOFOLLOW`，硬链接则不经任何链接检查。改为读取只认 Pigeon 自己写下的那份：收集器打开落盘文件后用 fstat 取设备号与 inode，写入的字节同时算 sha256（执行结果加 `fullOutputFile`）；写成后记进本会话的索引（落盘目录里的 `index.json`，每条为编号、大小、设备号、inode、sha256，整体写临时文件再改名）。read_file 读虚拟路径时先查索引（没有即"不存在"），打开后 fstat 核对设备号、inode 与大小，读完核对字节数与哈希，任何一项不符即拒绝，提示"落盘文件已被改动"。续跑的会话从索引文件接着用；分叉来源的输出按来源会话的索引核对。
+- 索引文件同样在命令改得动的目录里；要让索引认下别的文件，须写进那个文件的 sha256，即先读得到它，不另防。
+- 写入侧：落盘文件以独占方式新建、不跟随链接，写入侧若被引到别处，写的只是命令自己的输出，不超出命令本身的权限，不另防。
+
+写入与清理：
+- 先写临时名（`.<编号>.<随机>.tmp`），写成后改名为 `<编号>.log`，改名后 lstat 核对仍是写下的那个文件再记索引。打开或写入出错时删掉临时文件，编号照常前进，结果注明全文未能保存；此前写到一半出错会留下半截 `<编号>.log`，之后同一编号一律 EEXIST，本进程不再落盘。写入改为写到全部写完（单次只写进一部分时接着写）。
+- 按配额删旧文件只看索引：总量按索引计，从最旧的删起；删前 lstat 确认是普通文件且设备号、inode、大小与记录一致，不一致的不删、只从索引里去掉。
+
+分行：
+- 读落盘文件只按 `\n` 分行，`\r\n` 去掉行尾的 `\r`，单独的 `\r` 不算断行，总行数与 run_command 给出的同一口径（此前用 readline，单独的 `\r` 也算断行，进度条一类输出按 offset 会读错段）。
+
+分叉来源：
+- 来源改为从会话存储的文件头取（`application/output-ancestors.ts` 的 `outputAncestors`）：分支来历的来源会话，没有即父会话，一路往上，遇到 worker 会话或读不到即停，至多 20 层；本会话的文件还没写出时用运行面传入的来源。续接的分支会话不传来源也能读到来源会话的输出。
+
+测试：
+- `src/tools/command-output.test.ts`（共 14 项）：新增分行只按 `\n`（每行前带以 `\r` 结尾的进度，总行数与 run_command 一致，按 offset 读到对应的那行）；读取只认 Pigeon 写下的那份（原地改一个字节拒绝、改回原样可读、换成内容逐字节相同的另一个文件拒绝、换成硬链接拒绝）；换成符号链接拒绝；写到一半出错（替换 `fs.writeSync`，落盘的第二次写入起报 ENOSPC）照常给出头尾并注明原因、目录里不留文件、下一次照常落盘为编号 2 且可读；按配额删旧文件时被换成别的文件的不删、从索引里去掉；收集器落盘文件独占新建、已在的文件不覆盖并带上身份；落盘路径是符号链接（含悬空链接）时不跟随。分叉来源改为由来源会话自己跑命令写下输出。建符号链接的 3 项在 Windows 上显式跳过（Windows 上建不了原生符号链接）。
+- `src/tools/write-file.test.ts`（另加 1 项）：edit_file 两种模式下路径含制表符、换行、NUL 一律拒写，同名文件确实存在时也不改。
+- `src/application/output-ancestors.test.ts`（新，2 项）：分支的分支不传来源也认来源一路往上；worker 会话不认派出方；本会话文件还没写出时用传入的来源；来源指回自己的不算。
+
+变异（服务器）：读取不核对身份（去掉打开后的身份核对与读完的哈希核对）→ 1 项变红；出错不删临时文件（discard 直接返回）→ 1 项变红；均还原后逐字一致。
+
+verify：服务器 pigeon-verify，提交 03933f0，一条前台命令依次跑完 `npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`（运行前没有别的测试进程）、`npm run deps`，全过，全程约 100 秒。测试 1,663 项：通过 1,661，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：586 个模块，无违规。
+
+文字更新：本审计前文第一节的虚拟路径写法统一为 `pigeon://outputs/<会话号>/<编号>`。
