@@ -31,6 +31,22 @@ import { runHeadless } from "./headless-core.ts";
 import type { McpSession } from "./mcp.ts";
 import { disposeRuntime } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
+import { isStatusText } from "./status-fixtures.ts";
+
+// 决策 363：开工状态块与状态追加是用户消息，但不是对话
+function isStatusMessage(message: { role: string; content?: unknown }): boolean {
+  if (message.role !== "user") return false;
+  const content = message.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? (content as Array<{ type?: string; text?: string }>)
+            .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+            .join("")
+        : "";
+  return isStatusText(text);
+}
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
@@ -122,6 +138,7 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
       homeDir: home,
     });
     let branch: Awaited<ReturnType<typeof runForkBranch>>;
+    let taskSeq = 0;
     const branchModel = createFakeStreamFn({ replies: [edit("new\n"), { text: "这次对了" }] });
     try {
       await opened.bundle.adapter.run("把 a.txt 改成 new");
@@ -132,11 +149,17 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
       const runId = source.runs[0]?.runId;
       assert.ok(runId !== undefined);
       assert.equal(source.runs[0]?.checkpoints.length, 1);
+      // 任务消息的条目号（决策 363：排在它前面的是开工状态块）
+      taskSeq =
+        (source.runs[0]?.messages.findIndex(
+          (ref) => ref.message.role === "user" && !isStatusMessage(ref.message)
+        ) ?? -1) + 1;
+      assert.ok(taskSeq > 1);
       branch = await runForkBranch({
         governanceRoot: dir,
         sourceSessionId: sourceId,
         sourceStore: opened.bundle.sessionStore,
-        forkPoint: { runId, runSeq: 1 },
+        forkPoint: { runId, runSeq: taskSeq },
         trigger: "manual",
         run: {
           streamFn: branchModel,
@@ -178,23 +201,29 @@ test("分叉续跑：来源先记分叉条目，从分叉点前最近的快照�
     assert.equal(readFileSync(join(dir, "a.txt"), "utf8"), "wrong\n", "用户工作区不受分支影响");
     assert.equal(branch.label, "Unknown", "无验证而正常完成记未知（决策 322）");
 
-    const firstCall = branchModel.calls[0]?.context.messages ?? [];
+    // 分支初始消息只到分叉点（任务消息）；开工状态块与分支开工时的状态追加不算对话
+    const firstCall = (branchModel.calls[0]?.context.messages ?? []).filter(
+      (message) => !isStatusMessage(message)
+    );
     assert.equal(firstCall.length, 1, "分支初始消息只到分叉点（任务消息）");
     assert.equal(firstCall[0]?.role, "user");
 
     // 来源文件的分叉条目指向分叉点的消息条目；分支文件由 pi 的 fork 复制根到分叉点的历史，
     // 分支运行面在它上面续写；派生会话树不建
-    const taskEntry = storeSource.view.runs[0]?.messages[0]?.entryId;
+    const taskEntry = storeSource.view.runs[0]?.messages[taskSeq - 1]?.entryId;
     assert.ok(taskEntry !== undefined);
     assert.equal(forked.forkEntryId, taskEntry);
+    const copied = storeSource.main.findIndex((entry) => entry.id === taskEntry) + 1;
     assert.deepEqual(
-      storeBranch.main.slice(0, 2).map((entry) => entry.id),
-      [storeSource.main[0]?.id, taskEntry],
-      "分支文件开头是来源的 Run 开始条目与任务消息"
+      storeBranch.main.slice(0, copied).map((entry) => entry.id),
+      storeSource.main.slice(0, copied).map((entry) => entry.id),
+      "分支文件开头是来源的 Run 开始条目到任务消息"
     );
     assert.equal(storeBranch.view.runs.length, 1);
     assert.deepEqual(
-      storeBranch.view.runs[0]?.messages.map((ref) => ref.message.role),
+      storeBranch.view.runs[0]?.messages
+        .filter((ref) => !isStatusMessage(ref.message))
+        .map((ref) => ref.message.role),
       ["assistant", "toolResult", "assistant"],
       "分支自己的消息（改文件、工具结果、收尾回复）全部写进分支文件"
     );
@@ -363,7 +392,7 @@ test("分叉沿用来源尝试的采样温度与工作方式指令：分支的�
     assert.equal(calls.length, 4);
     for (const call of calls) {
       assert.equal(call.temperature, 0);
-      assert.ok(call.systemPrompt.endsWith(directive));
+      assert.ok(call.systemPrompt.includes(directive));
     }
     // 分支会话自己的 Run（不含从来源复制过来的那一段）的开始条目
     const branchView = storeSession(dir, branch.branchSessionId).view;

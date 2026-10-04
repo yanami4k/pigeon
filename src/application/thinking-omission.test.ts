@@ -56,13 +56,18 @@ test("选项关闭：历史与读原文提示未持久化与字节数，检索�
   const t = await run(false);
   try {
     const bytes = Buffer.byteLength(THINKING);
-    const history = loadSessionHistory(t.root, t.sessionId).map((line) => line.text);
+    // 决策 363：开工状态块回看时只占一行，与本测无关，去掉
+    const history = loadSessionHistory(t.root, t.sessionId)
+      .map((line) => line.text)
+      .filter((line) => !line.startsWith("[开工状态"));
     assert.deepEqual(history.slice(0, 3), [
       "> 说一句",
       `~ thinking（未持久化，${bytes} 字节）`,
       "好的",
     ]);
-    const assistant = loadSessionView(t.sessionsDir, t.sessionId)?.messages[1];
+    const assistant = loadSessionView(t.sessionsDir, t.sessionId)?.messages.find(
+      (message) => message.role === "assistant"
+    );
     assert.ok(assistant !== undefined);
     const text = (
       await createReadSessionEntryTool({ sessionsDir: t.sessionsDir }).execute("t", {
@@ -86,9 +91,14 @@ test("选项关闭：历史与读原文提示未持久化与字节数，检索�
 test("选项缺省：思考照存，历史与读原文照常呈现思考正文；检索不搜思考内容（决策 339）", async () => {
   const t = await run(undefined);
   try {
-    const history = loadSessionHistory(t.root, t.sessionId).map((line) => line.text);
+    // 决策 363：开工状态块回看时只占一行，与本测无关，去掉
+    const history = loadSessionHistory(t.root, t.sessionId)
+      .map((line) => line.text)
+      .filter((line) => !line.startsWith("[开工状态"));
     assert.equal(history[1], `~ ${THINKING}`);
-    const assistant = loadSessionView(t.sessionsDir, t.sessionId)?.messages[1];
+    const assistant = loadSessionView(t.sessionsDir, t.sessionId)?.messages.find(
+      (message) => message.role === "assistant"
+    );
     assert.ok(assistant !== undefined);
     const text = (
       await createReadSessionEntryTool({ sessionsDir: t.sessionsDir }).execute("t", {

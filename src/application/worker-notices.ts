@@ -12,6 +12,7 @@ import type {
   WorkerOutcome,
 } from "../orchestration/workers.ts";
 import type { SessionId } from "../state/ids.ts";
+import { escapeStatusText } from "./status-block.ts";
 
 // 派出方运行面上接收通知的一面（PiRuntimeAdapter 满足）
 export interface NoticeTarget {
@@ -165,8 +166,9 @@ export class WorkerNotices {
     this.#keys.set(worker.sessionId, key);
   }
 
+  // 决策 363：通知进用户消息的正文，里面的 worker 摘要等与开工状态块同一转义，伪造不出 pigeon 标签
   #deliver(text: string, prefix = WORKER_NOTICE_PREFIX): string {
-    const full = `${prefix}${text}`;
+    const full = `${prefix}${escapeStatusText(text)}`;
     const key = this.#options.target.notify(full);
     this.#options.onNotice?.(full);
     for (const listener of this.#listeners) {

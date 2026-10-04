@@ -8,6 +8,7 @@
 //   结果 details 里文件变化报告的新增、删除、修改）。
 // 分支会话开头从来源复制来的历史不在原生视图的消息里（属于来源会话），这里自然不抽。
 import type { SessionView, ViewBlock, ViewMessage } from "./session-view.ts";
+import { isStatusMessage } from "./status-text.ts";
 
 export const SEARCH_SESSIONS_TOOL = "search_sessions";
 export const READ_SESSION_ENTRY_TOOL = "read_session_entry";
@@ -139,6 +140,10 @@ export function extractSessionSearch(view: SessionView, createdAt: number): Sess
   for (const message of view.messages) {
     if (CONVERSATION_ROLES.has(message.role)) {
       const text = textOfBlocks(message.blocks);
+      // 决策 363：开工状态块与状态追加（按消息上的标记认）不是对话，不进检索、不当第一句
+      if (isStatusMessage(message.raw)) {
+        continue;
+      }
       if (message.role === "user" && firstUserText === undefined && text.trim() !== "") {
         firstUserText = text;
       }

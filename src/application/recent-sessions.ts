@@ -6,6 +6,7 @@ import { SANDBOX_START_REF_PREFIX, sandboxBranch } from "../execution/sandbox.ts
 import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { SessionView } from "../state/session-view.ts";
+import { isStatusMessage } from "../state/status-text.ts";
 import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import { isReviewSession } from "./session-cost.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -25,12 +26,10 @@ const FIRST_INPUT_CHARS = 60;
 
 function firstInputOf(view: SessionView): string {
   for (const message of view.messages) {
-    if (message.role !== "user") continue;
-    const text = message.blocks
-      .map((block) => (block.type === "text" ? block.text : ""))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
+    // 决策 363：开工状态块（按消息上的标记认）不是人输入的话
+    if (message.role !== "user" || isStatusMessage(message.raw)) continue;
+    const raw = message.blocks.map((block) => (block.type === "text" ? block.text : "")).join(" ");
+    const text = raw.replace(/\s+/g, " ").trim();
     if (text !== "") {
       return [...text].length > FIRST_INPUT_CHARS
         ? `${[...text].slice(0, FIRST_INPUT_CHARS).join("")}...`

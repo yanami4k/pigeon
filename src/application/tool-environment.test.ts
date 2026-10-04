@@ -20,6 +20,7 @@ import {
 import { ScriptGate } from "./script-naming.ts";
 import { ScriptSlot } from "./script-tool.ts";
 import { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 const SPAWN =
   "spawn_worker wait_workers worker_status message_worker stop_worker take_worker".split(" ");
@@ -35,7 +36,8 @@ const ALL = {
 const DOCKER = process.platform === "win32" ? "docker.exe" : "docker";
 const backend = { id: "fake", search: async () => ({ backend: "fake", query: "", results: [] }) };
 
-// 按给定环境装一个主会话运行面并跑一轮，交回广告的工具、Run 开始条目的没注册记录、提示与冻结内容
+// 按给定环境装一个主会话运行面并跑一轮，交回广告的工具、Run 开始条目的没注册记录、开工状态块（决策 363：联网的说法在它的
+// 联网一节）与冻结内容
 async function assemble(env: typeof ALL, frozenPrompt?: FrozenSessionPrompt) {
   const root = mkdtempSync(join(tmpdir(), "pigeon-tool-env-"));
   const bin = mkdtempSync(join(tmpdir(), "pigeon-tool-env-bin-"));
@@ -81,7 +83,7 @@ async function assemble(env: typeof ALL, frozenPrompt?: FrozenSessionPrompt) {
     return {
       absent: TOOLS.filter((tool) => !advertised.includes(tool)).sort(),
       skipped: loadStoreSession(sessionsDirOf(root), sessionId)?.view.runs[0]?.start.skippedTools,
-      prompt: bundle.adapter.snapshot().context.systemPrompt,
+      status: statusTextOf(streamFn.calls[0]),
       spawnText: tools.find((tool) => tool.name === "spawn_worker")?.description ?? "",
       notice: bundle.toolsNotice,
       frozen: bundle.frozenPrompt,
@@ -115,8 +117,8 @@ for (const [label, lacking, missing] of CASES) {
     const web = !missing.includes("web_search");
     assert.deepEqual(
       [
-        got.prompt.includes(WEB_TOOLS_SENTENCE),
-        got.prompt.includes(WEB_FETCH_SENTENCE),
+        got.status.includes(WEB_TOOLS_SENTENCE),
+        got.status.includes(WEB_FETCH_SENTENCE),
         got.notice !== undefined,
       ],
       [web, !web, !web]

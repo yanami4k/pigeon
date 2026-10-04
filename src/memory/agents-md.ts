@@ -1,4 +1,4 @@
-// 人写的说明（决策 330）：读 AGENTS.md，会话开始读一次即冻结（拼进系统提示，不走 transformContext）。
+// 人写的说明（决策 330、363）：读 AGENTS.md，作开工状态块的「项目说明」一节（不走 transformContext）；会话中变了即整节追加取代。
 // - 用户级：~/.pigeon/AGENTS.md（主目录可注入，测试指到临时目录）。
 // - 项目级：从仓库根到工作目录逐层读 AGENTS.md，自上而下拼接，不越过仓库根；某层没有 AGENTS.md 而有 CLAUDE.md 时读该层的
 //   CLAUDE.md。仓库根为工作目录往上第一个带 .git（目录或文件，worker 工作树里是文件）的目录；不在 git 仓库里时只读工作目录
@@ -30,7 +30,7 @@ export interface AgentsMdOptions {
 }
 
 export interface AgentsMdInstructions {
-  // 追加进系统提示的冻结段落；一份说明都没有时为空串
+  // 「项目说明」一节的正文；一份说明都没有时为空串
   section: string;
   // 冻结清单：用户级在前，项目级自仓库根往下
   manifest: MemoryManifestEntry[];
@@ -143,7 +143,7 @@ export function loadAgentsInstructions(options: AgentsMdOptions): AgentsMdInstru
       : undefined;
   const blocks = [
     "## 人写的说明（AGENTS.md）",
-    "以下内容在会话开始时读取并冻结；会话中修改这些文件要到下个会话才生效。",
+    "以下内容在会话开始时读取；会话中这些文件被改动时，改后的内容会整段追加。",
     ...parts,
     ...(overflow !== undefined ? [`（人写的说明${overflow}；需要时用 read_file 读取全文。）`] : []),
   ];

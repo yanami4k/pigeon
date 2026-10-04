@@ -50,6 +50,7 @@ export const SessionEntryType = {
   Hook: "pigeon.hook",
   Continuation: "pigeon.continuation",
   Repetition: "pigeon.repetition",
+  Status: "pigeon.status",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -376,6 +377,14 @@ export const RepetitionDataSchema = Type.Object({
 });
 export type RepetitionData = Static<typeof RepetitionDataSchema>;
 
+// 开工状态块最后发出的一份（决策 363）：节名 → 该节原文（转义前）的哈希。每次发出完整块或变化追加、
+// 以及模型自己写的记忆记成已发时写一条；续跑与分叉从主分支最后一条取，与当前状态比对，只追加变了的节
+export const StatusDataSchema = Type.Object({
+  version: VERSION,
+  sections: Type.Record(Type.String({ minLength: 1 }), Sha256HexSchema),
+});
+export type StatusData = Static<typeof StatusDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -389,7 +398,8 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Exit; data: ExitData }
   | { customType: typeof SessionEntryType.Hook; data: HookRunData }
   | { customType: typeof SessionEntryType.Continuation; data: ContinuationData }
-  | { customType: typeof SessionEntryType.Repetition; data: RepetitionData };
+  | { customType: typeof SessionEntryType.Repetition; data: RepetitionData }
+  | { customType: typeof SessionEntryType.Status; data: StatusData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -405,6 +415,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Hook]: HookRunDataSchema,
   [SessionEntryType.Continuation]: ContinuationDataSchema,
   [SessionEntryType.Repetition]: RepetitionDataSchema,
+  [SessionEntryType.Status]: StatusDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。

@@ -9,6 +9,7 @@ import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { buildRuntime } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 
 const NODE = `"${process.execPath}"`;
@@ -24,13 +25,15 @@ function call(name: string, args: Record<string, unknown>) {
   return { text: name, toolCalls: [{ name, args }] };
 }
 
-// 装一个委派策略为 read_file、run_command 且带范围的 tester（放手模式），跑完给定的调用，交回注册表、提示与各工具结果
+// 装一个委派策略为 read_file、run_command 且带范围的 tester（放手模式），跑完给定的调用，交回注册表、系统提示、
+// 开工状态块（决策 363：审批与联网的说法在状态块）与各工具结果
 async function runTester(options: {
   calls: ReturnType<typeof call>[];
   settings?: unknown;
 }): Promise<{
   tools: string[];
   prompt: string;
+  status: string;
   results: Array<{ isError: boolean; text: string }>;
 }> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-worker-tools-"));
@@ -42,8 +45,9 @@ async function runTester(options: {
       mkdirSync(join(root, ".pigeon"));
       writeFileSync(join(root, ".pigeon", "settings.json"), JSON.stringify(options.settings));
     }
+    const streamFn = createFakeStreamFn({ replies: [...options.calls, { text: "完成" }] });
     const bundle = buildRuntime({
-      streamFn: createFakeStreamFn({ replies: [...options.calls, { text: "完成" }] }),
+      streamFn,
       workspaceRoot: root,
       homeDir: root,
       settings: loadSettings(root, { homeDir: root }),
@@ -80,7 +84,7 @@ async function runTester(options: {
             ]
           : []
       );
-      return { tools, prompt, results };
+      return { tools, prompt, status: statusTextOf(streamFn.calls[0]), results };
     } finally {
       await bundle.adapter.dispose();
       await bundle.sessionStore.close();
@@ -91,7 +95,7 @@ async function runTester(options: {
 }
 
 test("worker 只有给了的工具与范围：注册与提示只含它们，越界即拒，没登记命令的 tester 在放手模式下能跑命令", async () => {
-  const { tools, prompt, results } = await runTester({
+  const { tools, prompt, status, results } = await runTester({
     calls: [
       call("read_file", { path: "scoped-dir/a.txt" }),
       call("read_file", { path: "other.txt" }),
@@ -103,8 +107,11 @@ test("worker 只有给了的工具与范围：注册与提示只含它们，越�
   for (const present of ["read_file", "run_command", "scoped-dir", `${NODE} -e`]) {
     assert.ok(prompt.includes(present), present);
   }
-  for (const absent of ["edit_file", "list_sessions", "web_search", "web_fetch"]) {
-    assert.ok(!prompt.includes(absent), absent);
+  // 状态块的审批一节只说 run_command，不说写操作；联网一节不出现（worker 没给联网工具）
+  assert.match(status, /name="审批"/);
+  assert.ok(status.includes("run_command："), status);
+  for (const absent of ["edit_file", "list_sessions", "web_search", "web_fetch", "写操作"]) {
+    assert.ok(!prompt.includes(absent) && !status.includes(absent), absent);
   }
   assert.deepEqual(
     results.map((result) => result.isError),

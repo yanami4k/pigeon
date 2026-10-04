@@ -49,6 +49,7 @@ import {
   closeSandbox,
   exportSandbox,
   type Sandbox,
+  sandboxStatusFacts,
   startSandbox,
 } from "../application/sandbox-session.ts";
 import { wrapScriptApprovals } from "../application/script-approvals.ts";
@@ -338,7 +339,9 @@ export async function main(argv: string[]): Promise<void> {
     governanceRoot: workspaceRoot,
     streamFn,
     flags,
-    ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+    ...(sandbox !== undefined
+      ? { workspaceHost: sandbox.host, statusFacts: sandboxStatusFacts(sandbox) }
+      : {}),
     warn,
     createApprovalHandler: createHandler,
     memoryWrite,
@@ -353,7 +356,9 @@ export async function main(argv: string[]): Promise<void> {
     sessionId,
     streamFn,
     flags,
-    ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+    ...(sandbox !== undefined
+      ? { workspaceHost: sandbox.host, statusFacts: sandboxStatusFacts(sandbox) }
+      : {}),
     ...spawnWorkerOption(flags, orchestration),
     taskList: orchestration.taskList,
     ...webToolsOption,

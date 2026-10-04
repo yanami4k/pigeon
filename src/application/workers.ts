@@ -68,6 +68,8 @@ import type { ScriptSlot } from "./script-tool.ts";
 import { childFamilySink } from "./session-store.ts";
 import { bindSpawnWorkers } from "./spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
+import { type StatusHashes, statusFromEntries } from "./status-block.ts";
+import type { StatusFacts } from "./status-sources.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { drainWorkers } from "./worker-notices.ts";
@@ -244,6 +246,11 @@ export function sessionWorkerRuntimeFactory(
 
 // 装配内核的输入：worker 与 headless 共用
 interface RuntimeSurface {
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用）
+  statusFacts?: StatusFacts;
+  // 决策 363：续做与分叉续跑沿用的系统提示与状态变化通道的起点（取自会话记录）
+  systemPrompt?: string;
+  statusSent?: StatusHashes;
   sessionId: SessionId;
   governanceRoot: string;
   workspaceRoot: string;
@@ -332,7 +339,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     const override = (deps.roleModelOverrides ?? ROLE_MODEL_OVERRIDES)[request.role];
     const roleStreamFn = deps.roleStreamFns?.[request.role];
     // 决策 303：补批续做——从会话文件还原对话（悬空的工具调用补"结果未知"），同一个会话号接着写
-    const restored = request.resume === true ? restoreWorkerMessages(request) : undefined;
+    const restored = request.resume === true ? restoreWorkerSession(request) : undefined;
     // 决策 299：层数放开且本 worker 没到最底层——另拿一个本层的派出槽，运行面装起来后绑到同一个编排器
     const depth = request.depth ?? 1;
     const nesting = deps.nesting;
@@ -388,7 +395,10 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
       // 决策 302：worker 改自己工作树内的文件默认放行
       ownWorkspaceWrites: true,
-      ...(restored !== undefined ? { initialMessages: restored } : {}),
+      // 决策 363：续做沿用会话记录里的系统提示，状态变化通道接着记录里最后发出的一份
+      ...(restored !== undefined ? { initialMessages: restored.messages } : {}),
+      ...(restored?.systemPrompt !== undefined ? { systemPrompt: restored.systemPrompt } : {}),
+      ...(restored?.statusSent !== undefined ? { statusSent: restored.statusSent } : {}),
       ...(nestedSlot !== undefined ? { spawnWorker: nestedSlot } : {}),
       ...(nestedSlot !== undefined && nestedOrchestrator !== undefined
         ? {
@@ -518,14 +528,22 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
 }
 
 // 补批续做（303）：worker 会话文件里的主分支还原成对话；悬空的工具调用补"结果未知"
-function restoreWorkerMessages(request: WorkerRuntimeRequest): AgentMessage[] {
+function restoreWorkerSession(request: WorkerRuntimeRequest): {
+  messages: AgentMessage[];
+  systemPrompt: string | undefined;
+  statusSent: StatusHashes | undefined;
+} {
   const sessionsDir = sessionsDirOf(request.governanceRoot);
   const loaded = loadStoreSession(sessionsDir, request.sessionId);
   if (loaded === undefined) {
     throw new Error(`找不到 worker 会话 ${request.sessionId} 的会话文件，无法续做`);
   }
   const { messages, interrupted } = restoreSessionContext(loaded.main);
-  return [...messages, ...interrupted];
+  return {
+    messages: [...messages, ...interrupted],
+    systemPrompt: loaded.view.runs.at(-1)?.start.systemPrompt,
+    statusSent: statusFromEntries(loaded.main),
+  };
 }
 
 export interface DetachedRuntimeRequest {
@@ -574,6 +592,10 @@ export interface DetachedRuntimeRequest {
   storeWarn?: WarnSink;
   // 决策 325：本会话的设置快照（pigeon run 由入口读好给出；缺省为空快照）
   settings?: SettingsSnapshot;
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
+  statusFacts?: StatusFacts;
+  // 决策 363：分叉续跑时状态变化通道的起点（分支会话记录里最后发出的一份）
+  statusSent?: StatusHashes;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -634,6 +656,9 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
     ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
     ...(surface.settings !== undefined ? { settings: surface.settings } : {}),
+    ...(surface.statusFacts !== undefined ? { statusFacts: surface.statusFacts } : {}),
+    ...(surface.systemPrompt !== undefined ? { systemPrompt: surface.systemPrompt } : {}),
+    ...(surface.statusSent !== undefined ? { statusSent: surface.statusSent } : {}),
   };
   // MCP 配置取自设置快照（会话开始时已校验；不重读文件）
   const mcpConfig =

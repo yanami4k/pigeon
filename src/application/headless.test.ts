@@ -16,6 +16,7 @@ import {
 } from "../state/session-judge.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { runHeadless } from "./headless-core.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 const ORIGINAL = "alpha\nbeta\ngamma\n";
 
@@ -212,11 +213,12 @@ test("headless：显式 skillRoots 只用给定的根、agentsMd 关掉——空
       "---\nname: pitfalls\ndescription: 踩过的坑\n---\n先读再改\n"
     );
 
+    const noneModel = createFakeStreamFn({ replies: [{ text: "好" }] });
     const none = await runHeadless({
       task: "你好",
       governanceRoot: root,
       workspaceRoot: root,
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      streamFn: noneModel,
       yolo: true,
       homeDir: home,
       skillRoots: [],
@@ -225,9 +227,11 @@ test("headless：显式 skillRoots 只用给定的根、agentsMd 关掉——空
     const noneStarted = storeView(root, none.sessionId).runs[0]?.start;
     assert.deepEqual(noneStarted?.skills, []);
     assert.deepEqual(noneStarted?.memory, []);
-    // agentsMd 关掉：两层说明的内容都不进 system prompt
-    assert.ok(!noneStarted?.systemPrompt.includes("项目说明"));
-    assert.ok(!noneStarted?.systemPrompt.includes("用户说明"));
+    // agentsMd 关掉：开工状态块（决策 363：人写的说明在它的「项目说明」一节）照常发出，但没有说明一节，两层内容都不在
+    const noneStatus = statusTextOf(noneModel.calls[0]);
+    assert.match(noneStatus, /name="环境"/);
+    assert.doesNotMatch(noneStatus, /name="项目说明"/);
+    assert.ok(!noneStatus.includes("用户说明"));
     assert.equal(noneStarted?.advertisedTools.includes("load_skill"), false);
 
     const withSkill = await runHeadless({

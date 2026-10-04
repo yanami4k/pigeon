@@ -1,6 +1,6 @@
 // M5 S4（决策 043）：load_skill 三重约束 fail-closed——realpath 后必须在该 Skill 目录内（含目录联接
 // 逃逸）、单文件上限默认 64 KiB 超出可见截断、来源只认登记过的 Skill 名；读取时比对开会话时的
-// 哈希清单，不符或新增文件拒绝并提示下个会话生效；每次成功读取的摘要作工具结果 details；scripts 只读不执行。
+// 哈希清单，不符或新增文件拒绝并提示重新登记后再读（决策 363）；每次成功读取的摘要作工具结果 details；scripts 只读不执行。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -177,15 +177,15 @@ test("大小约束：单文件超 64 KiB 可见截断并带全文哈希（去大
   }
 });
 
-test("会话中途改文件或新增文件：与冻结哈希清单不符即拒绝，提示下个会话生效（去哈希比对变红）", async () => {
+test("登记之后改文件或新增文件：与登记时的哈希清单不符即拒绝，提示重新登记后再读（去哈希比对变红）", async () => {
   const { skillDir, tool, loaded, cleanup } = makeSkill();
   try {
     writeFileSync(join(skillDir, "SKILL.md"), `${SKILL_MD}\n3. 偷偷加的一步`);
-    await assert.rejects(tool.execute("t1", { name: "deploy" }), /已变更.*下个会话生效/);
+    await assert.rejects(tool.execute("t1", { name: "deploy" }), /已变更.*重新登记/);
     writeFile(join(skillDir, "references", "new.md"), "会话中新增");
     await assert.rejects(
       tool.execute("t2", { name: "deploy", resource: "references/new.md" }),
-      /已变更.*下个会话生效/
+      /已变更.*重新登记/
     );
     assert.deepEqual(loaded, []);
   } finally {

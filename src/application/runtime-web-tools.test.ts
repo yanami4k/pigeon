@@ -1,6 +1,6 @@
 // 联网工具的注册范围（决策 287–291、265 的先例）：worker 与主会话同样拿到两件工具——父策略里有且装配给了 webTools 才广告。
-// 主会话给了才注册、系统提示追加一句、web_fetch 记为 network 档见 launch-flags-web.test.ts；跑批器各条件不注册
-// 在本文件的快档里钉住（身份头照记见慢档的 eval/stream-experiment.test.ts）。
+// 主会话给了才注册、开工状态块的联网一节带那句提示（决策 363）、web_fetch 记为 network 档见 launch-flags-web.test.ts；
+// 跑批器各条件不注册在本文件的快档里钉住（身份头照记见慢档的 eval/stream-experiment.test.ts）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

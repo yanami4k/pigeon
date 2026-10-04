@@ -35,6 +35,8 @@
 //    流式重复检测包在 streamFn 外层（repetition-guard.ts），每次命中写一条记录，掐断的回复以 length 收尾、交给续跑。
 // 14. 代码快照移出关键路径（决策 350）：addToolGate 登记工具执行前的等待口（审批之后、真正执行之前逐个等待），
 //    快照器在此等未完成的快照拍完；等待方自己保证有上限，抛异常只进 listenerErrors、不挡工具执行。没有登记时行为不变。
+// 15. 开工状态块与状态变化通道（决策 363）：挂了状态通道时，Run 开始之前与一批工具结果之后各问一次，状态消息作用户消息
+//    放在本次输入之前或该批工具结果之后（轮间压缩之后再交，压缩过即重发完整块）；没挂时行为不变。
 import {
   type AfterToolCallContext,
   type AfterToolCallResult,
@@ -80,6 +82,7 @@ import {
   SessionEntryType,
 } from "../state/session-entries.ts";
 import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
+import { isStatusMessage, STATUS_MARKER, withoutStatusMarker } from "../state/status-text.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import type {
@@ -220,6 +223,8 @@ export interface PiRuntimeAdapterOptions {
   // 决策 188：上下文压缩（阈值、保留量、摘要请求的模型接入与压缩前回调）；缺省不压缩。压缩读写会话树，
   // 故只在新存储写入面带读分支与写压缩条目时生效
   compaction?: ContextCompactor;
+  // 决策 363：开工状态块与状态变化通道；缺省不挂（行为与此前一致）
+  status?: StatusChannel;
   // 决策 353：逐工具的执行模式（装配根按登记表给）；缺省一律串行。Agent 恒为并行模式，上游在同一批调用里只要有一件
   // 标为串行就整批串行：纯读的一批同时执行，含写与命令的一批照旧逐个准备（含审批）、执行
   executionModeOf?: (toolName: string) => "parallel" | "sequential";
@@ -230,6 +235,15 @@ export interface PiRuntimeAdapterOptions {
   truncationContinuation?: { maxConsecutive: number; maxPerRun: number };
   // 决策 367：流式重复检测的模式与参数，包在 streamFn 外层；缺省不检测
   repetitionGuard?: { mode: RepetitionGuardMode; params: RepetitionGuardParams };
+}
+
+// 决策 363：状态变化通道——Run 开始之前（首次、续跑后、压缩之后）、一批工具结果之后与轮间压缩之后、下一次请求之前各问一次；
+// 有要说的即作一条带标记（pigeonStatus）的用户消息，放在本次输入之前、该批工具结果之后或压缩后的上下文末尾（照常进会话记录）。
+// compacted 为此前压缩过（要重发完整块）。那条消息进了会话记录即调 delivered（通道据此记成已发）
+export interface StatusChannel {
+  beforeRun(input: { compacted: boolean }): Promise<string | undefined>;
+  betweenTurns(input: { compacted: boolean }): Promise<string | undefined>;
+  delivered(): void;
 }
 
 export class PiRuntimeAdapter {
@@ -275,6 +289,10 @@ export class PiRuntimeAdapter {
   readonly #toolResultListeners = new Set<(notice: ToolResultNotice) => void>();
   // 决策 350：工具执行前的等待口
   readonly #toolGates = new Set<() => Promise<void>>();
+  // 决策 363：状态通道；压缩过之后的下一次要重发完整块；有工具结果的一轮把状态与通知留到轮间再入队
+  readonly #status: StatusChannel | undefined;
+  #statusCompacted = false;
+  #deliverAfterTurn = false;
   readonly #roundListeners = new Set<(round: TurnRoundNotice) => void>();
   // Run 开始之前与手动压缩的中止口（轮间压缩用 Agent 的中止信号）：interrupt 与 dispose 时一并中止
   #compactionAbort: AbortController | undefined;
@@ -315,6 +333,7 @@ export class PiRuntimeAdapter {
     this.#compactor = options.compaction;
     this.#continuation = options.truncationContinuation;
     const repetition = options.repetitionGuard;
+    this.#status = options.status;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -365,8 +384,9 @@ export class PiRuntimeAdapter {
       // 决策 324：钩子 continue:false 置位后这一轮收尾即停——上游只在整批每个调用都 terminate 时提前结束，
       // 混合批次（前面的调用已放行）与排队的 steer 消息都会让循环继续，故在轮末另行判停
       shouldStopAfterTurn: () => this.#hookStopReason !== undefined,
-      // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们
-      convertToLlm,
+      // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们。
+      // 决策 363：状态消息上的标记交给模型之前去掉
+      convertToLlm: (messages) => convertToLlm(messages.map(withoutStatusMarker)),
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
       prepareNextTurnWithContext: (context, signal) => this.#compactBetweenTurns(context, signal),
       initialState: {
@@ -401,16 +421,18 @@ export class PiRuntimeAdapter {
   }
 
   // 启动一次 Run 并等待其彻底收尾；返回终态判定结果。有待递的通知时连同输入一起交给模型（通知在前）
+  // 决策 363：状态通道给的状态消息排在最前（lead）
   async run(input: string): Promise<RunResult> {
-    if (this.#notices.length === 0) {
-      return this.#runWith(() => this.#agent.prompt(input));
-    }
-    return this.#runWith(() =>
-      this.#agent.prompt([
+    return this.#runWith((lead) => {
+      if (lead.length === 0 && this.#notices.length === 0) {
+        return this.#agent.prompt(input);
+      }
+      return this.#agent.prompt([
+        ...lead,
         ...this.#takeNotices(),
         { role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() },
-      ])
-    );
+      ]);
+    });
   }
 
   // 决策 297：递一条通知（作一条用户消息进模型的下一轮）；返回撤回与查询用的键
@@ -447,7 +469,7 @@ export class PiRuntimeAdapter {
     if (this.#notices.length === 0) {
       throw new Error("没有待递的通知");
     }
-    return this.#runWith(() => this.#agent.prompt(this.#takeNotices()));
+    return this.#runWith((lead) => this.#agent.prompt([...lead, ...this.#takeNotices()]));
   }
 
   #takeNotices(): AgentMessage[] {
@@ -461,10 +483,16 @@ export class PiRuntimeAdapter {
   // M7（决策 077 / 079）：不给新输入，从已有消息续跑（上游 continue：末条消息须是用户消息或工具结果）——
   // 分叉续跑与失败自动分叉重试用，不注入任何提示
   async continueRun(): Promise<RunResult> {
-    return this.#runWith(() => this.#agent.continue());
+    // 决策 363：状态消息经 steer 交给上游，续跑开头即取走
+    return this.#runWith((lead) => {
+      for (const message of lead) {
+        this.#agent.steer(message);
+      }
+      return this.#agent.continue();
+    });
   }
 
-  async #runWith(start: () => Promise<void>): Promise<RunResult> {
+  async #runWith(start: (lead: AgentMessage[]) => Promise<void>): Promise<RunResult> {
     this.#assertUsable();
     // 决策 2：run() 互斥——任何时刻最多一个待审批/执行中的 call
     if (this.#currentRunId !== null) {
@@ -486,6 +514,7 @@ export class PiRuntimeAdapter {
     this.#continuations = 0;
     this.#consecutiveContinuations = 0;
     this.#repetitionCutSeq = 0;
+    this.#deliverAfterTurn = false;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
     // 附加摘要每个 Run 取一次；取失败只进 listenerErrors，Run 开始条目缺 MCP 字段，不挡 Run 启动
@@ -504,8 +533,10 @@ export class PiRuntimeAdapter {
       // 决策 188：Run 开始之前的压缩挂点（上游 prepareNextTurn 不在首轮之前调用）。压缩期间被中断时，
       // 照常发起再立即中止：Agent 按上游的标准事件序列以中止收尾，不留半截 Run
       const interrupted = await this.#compactBeforeRun();
-      const started = start();
-      if (interrupted) {
+      // 决策 363：压缩之后再问状态（压缩过即重发完整块）；压缩期间被中断时不带
+      const lead = interrupted ? [] : await this.#statusMessages("run");
+      const started = start(lead);
+      if (interrupted || this.#interruptRequested) {
         this.#agent.abort();
       }
       await started;
@@ -812,6 +843,7 @@ export class PiRuntimeAdapter {
       );
       if (outcome.kind === "compacted") {
         this.#agent.state.messages = structuredClone(outcome.messages);
+        this.#statusCompacted = true;
       }
       return outcome;
     } finally {
@@ -1015,7 +1047,88 @@ export class PiRuntimeAdapter {
 
   // 轮间挂点（上游 prepareNextTurnWithContext）：本轮的消息都已交给新存储写者，超过触发点即压缩，返回替换后的上下文；
   // 未超过或压缩没有完成时返回 undefined（照原上下文继续）。上游对此回调无防护，这里绝不抛
+  // 轮间挂点：先压缩（需要时），再把留到轮间的状态消息与待递通知交给上游——上游在这之后、发下一次请求之前取走，
+  // 排在该批工具结果之后（决策 363）。中断或钩子要求停止时不交，留待下一次运行
   async #compactBetweenTurns(
+    turn: PrepareNextTurnContext,
+    signal?: AbortSignal
+  ): Promise<AgentLoopTurnUpdate | undefined> {
+    const update = await this.#compactTurn(turn, signal);
+    const proceed = !this.#interruptRequested && this.#hookStopReason === undefined;
+    // 压缩抹掉了此前的状态块：不论本轮有没有工具结果，下一次请求之前都重发完整块。上游在已有待交消息（通知、排队的输入）时
+    // 压缩之后不再取 steer 队列，故直接放进压缩后的上下文末尾，并照常记进会话记录
+    const injected =
+      update?.context !== undefined && proceed ? await this.#injectStatus(update.context) : false;
+    if (this.#deliverAfterTurn) {
+      this.#deliverAfterTurn = false;
+      if (proceed) {
+        const status = injected ? [] : await this.#statusMessages("turn");
+        for (const message of [...status, ...this.#takeNotices()]) {
+          this.#agent.steer(message);
+        }
+      }
+    }
+    return update;
+  }
+
+  // 轮间压缩之后的完整状态块：放进压缩后的上下文末尾，记进会话记录（占本 Run 一个条目序号），并补进压缩后的消息
+  //（Run 结束按会话树还原；读不到会话树时退回的那份也要有它）。放进去了返回 true
+  async #injectStatus(context: { messages: AgentMessage[] }): Promise<boolean> {
+    const [message] = await this.#statusMessages("turn");
+    if (message === undefined) {
+      return false;
+    }
+    context.messages.push(message);
+    this.#turnCompaction?.messages.push(message);
+    this.#runEntrySeq += 1;
+    if (this.#sessionStore !== undefined) {
+      try {
+        this.#sessionStore.appendMessage(structuredClone(message));
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+    this.#statusDelivered();
+    return true;
+  }
+
+  // 状态消息进了会话记录：告诉通道记成已发；通道出错只进 listenerErrors
+  #statusDelivered(): void {
+    try {
+      this.#status?.delivered();
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
+  }
+
+  // 决策 363：问状态通道要一条状态消息；通道出错只进 listenerErrors，这一次不带（压缩标记留着，下次照样重发完整块）
+  async #statusMessages(where: "run" | "turn"): Promise<AgentMessage[]> {
+    const status = this.#status;
+    if (status === undefined) {
+      return [];
+    }
+    try {
+      const input = { compacted: this.#statusCompacted };
+      const text =
+        where === "run" ? await status.beforeRun(input) : await status.betweenTurns(input);
+      this.#statusCompacted = false;
+      return text === undefined
+        ? []
+        : [
+            {
+              role: "user",
+              content: [{ type: "text", text }],
+              timestamp: Date.now(),
+              [STATUS_MARKER]: true,
+            } as AgentMessage,
+          ];
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return [];
+    }
+  }
+
+  async #compactTurn(
     turn: PrepareNextTurnContext,
     signal?: AbortSignal
   ): Promise<AgentLoopTurnUpdate | undefined> {
@@ -1040,6 +1153,7 @@ export class PiRuntimeAdapter {
         messages: outcome.messages,
         stateLength: this.#agent.state.messages.length,
       };
+      this.#statusCompacted = true;
       return { context: { ...turn.context, messages: structuredClone(outcome.messages) } };
     } catch (error) {
       this.#listenerErrors.push(error);
@@ -1063,6 +1177,7 @@ export class PiRuntimeAdapter {
       const outcome = await this.#runCompaction("run-start", tokens, abort.signal);
       if (outcome.kind === "compacted" && !abort.signal.aborted) {
         this.#agent.state.messages = structuredClone(outcome.messages);
+        this.#statusCompacted = true;
       }
       return abort.signal.aborted;
     } catch (error) {
@@ -1225,14 +1340,18 @@ export class PiRuntimeAdapter {
       }
       // 决策 297：一轮结束时把待递的通知转入上游的 steer 队列，上游随即在进入下一轮前取走（本轮没有工具调用时同样接着跑一轮）；
       // 钩子要求停止（continue:false）时这一轮之后即停，通知留在本地队列待下一次运行
+      // 决策 363：挂了状态通道时，有工具结果的一轮留到轮间（压缩之后）连同状态消息一起交（见 #compactBetweenTurns）
       if (
         event.type === "turn_end" &&
-        this.#notices.length > 0 &&
         !this.#interruptRequested &&
         this.#hookStopReason === undefined
       ) {
-        for (const message of this.#takeNotices()) {
-          this.#agent.steer(message);
+        if (this.#status !== undefined && event.toolResults.length > 0) {
+          this.#deliverAfterTurn = true;
+        } else if (this.#notices.length > 0) {
+          for (const message of this.#takeNotices()) {
+            this.#agent.steer(message);
+          }
         }
       }
       // 空回复要重试或撞上限要续跑时暂扣这次 agent_end：一个 Run 只发一次 run.ended（订阅方据它验证、收会话树），由最后那次的发出
@@ -1265,6 +1384,10 @@ export class PiRuntimeAdapter {
           } catch (error) {
             this.#listenerErrors.push(error);
           }
+        }
+        // 决策 363：状态消息记下了，通道据此记成已发
+        if (isStatusMessage(event.message)) {
+          this.#statusDelivered();
         }
         // 工具结果观察口（286）排在会话存储写入之后：它的任何故障都不影响本条的记录
         if (event.message.role === "toolResult" && this.#toolResultListeners.size > 0) {

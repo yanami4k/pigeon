@@ -22,6 +22,7 @@ import { disposeRuntime } from "./runtime.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "./session-runtime.ts";
 import { createFixtureSession } from "./session-store-fixtures.ts";
 import { writeLegacySessionFile } from "./session-view-fixtures.ts";
+import { isStatusText } from "./status-fixtures.ts";
 
 const noMcp = async (): Promise<McpSession> => ({
   tools: [],
@@ -49,7 +50,22 @@ function workspace() {
 const FLAGS = { yolo: true, provider: "custom", modelId: "custom", persistThinking: true };
 
 type Block = { type: string; text?: string };
-const roles = (messages: ReadonlyArray<{ role: string }>) => messages.map((m) => m.role);
+// 决策 363：开工状态块与状态追加不是对话的一部分，比对角色时去掉
+function isStatusMessage(message: { role: string; content?: unknown }): boolean {
+  if (message.role !== "user") return false;
+  const content = message.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? (content as Array<{ type?: string; text?: string }>)
+            .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
+            .join("")
+        : "";
+  return isStatusText(text);
+}
+const roles = (messages: ReadonlyArray<{ role: string; content?: unknown }>) =>
+  messages.filter((m) => !isStatusMessage(m)).map((m) => m.role);
 
 test("续跑：进程死在工具执行途中——还原上下文，悬空调用补“结果未知”的工具结果写进会话并交给模型，接着跑", async () => {
   const { dir, home, sessionsDir, cleanup } = workspace();

@@ -6,7 +6,7 @@
 // - 逐字往返：解析保留文件头原文与最后一条之后的换行、空行（文件尾），规范写法的文件序列化回去逐字相同。
 // - 条目区从第一个以"- "开头的行起，到文件尾都必须是规范的条目行；不合规即报出第一处不对的行号（人手改坏时工具据此拒绝
 //   写入，推送照原文推入）。文件头只认第一个"- "行之前的内容，原样保留、不校验。
-// - 上限只计条目区（文件头不计），单位为字符，按 Unicode 码点计；〔〕一段也计在内（它同样推入系统提示）。
+// - 上限只计条目区（文件头不计），单位为字符，按 Unicode 码点计；〔〕一段也计在内（它同样推送给模型）。
 
 import { pigeonRel, userPigeonRel } from "../state/paths.ts";
 
@@ -30,8 +30,8 @@ export const MEMORY_DISPLAY_PATHS: Readonly<Record<MemoryLayer, string>> = {
 };
 
 // 记忆文字的版本（推送段、工具说明、写满被拒的文字）：随 Run 开始条目落盘。v1 为决策 191–233 的原文（三行一条、单层），
-// v2 为决策 328、329、331、332 的文字
-export const MEMORY_TEXT_VERSION = "v2";
+// v2 为决策 328、329、331、332 的文字；v3 为决策 363 改的几句（推送段搬进开工状态块，会话中被改动时整段追加）
+export const MEMORY_TEXT_VERSION = "v3";
 
 // 新建文件时写入的文件头；已有文件的文件头原样保留
 export const MEMORY_FILE_HEADERS: Readonly<Record<MemoryLayer, string>> = {

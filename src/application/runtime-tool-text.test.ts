@@ -1,6 +1,6 @@
 // 工具说明与系统提示按实际执行端与审批状态生成（170 ④）：模型实际看到的系统提示与 run_command 说明，
 // 在容器执行端且自动批准时不再声称"不经 shell""每条命令都要人工批准"；本地有人工审批时照实说要批准；
-// 无人值守又没放权时说明未放行的会被拒绝
+// 无人值守又没放权时说明未放行的会被拒绝。决策 363：系统提示里 run_command 的一句与审批无关，审批的说法在开工状态块的审批一节
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
 import { runHeadless } from "./headless-core.ts";
 import { buildRuntime } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 interface AdvertisedTool {
   name: string;
@@ -23,6 +24,7 @@ function seen(streamFn: ReturnType<typeof createFakeStreamFn>) {
   const tools = (context?.tools ?? []) as unknown as AdvertisedTool[];
   return {
     systemPrompt: context?.systemPrompt ?? "",
+    status: statusTextOf(streamFn.calls[0]),
     runCommand: tools.find((tool) => tool.name === "run_command")?.description,
   };
 }
@@ -56,11 +58,12 @@ test("容器执行端（linux）且自动批准：系统提示与 run_command �
       skillRoots: [],
       agentsMd: false,
     });
-    const { systemPrompt, runCommand } = seen(streamFn);
+    const { systemPrompt, status, runCommand } = seen(streamFn);
     const texts = runCommandTexts({ platform: "linux", approval: "yolo" });
-    assert.ok(systemPrompt.includes(`写操作自动批准。${texts.prompt}`), systemPrompt);
+    assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
+    assert.ok(status.includes(`写操作自动批准。\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);
-    assert.doesNotMatch(systemPrompt, /人工批准|不经 shell/);
+    assert.doesNotMatch(systemPrompt + status, /人工批准|不经 shell/);
   } finally {
     d.cleanup();
   }
@@ -80,11 +83,12 @@ test("本地无人值守且未放权（没有审批通道）：系统提示写�
       skillRoots: [],
       agentsMd: false,
     });
-    const { systemPrompt, runCommand } = seen(streamFn);
+    const { systemPrompt, status, runCommand } = seen(streamFn);
     const texts = runCommandTexts({ platform: process.platform, approval: "none" });
+    assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
     assert.ok(
-      systemPrompt.includes(`需要批准的写操作会被拒绝（本会话没有人工审批通道）。${texts.prompt}`),
-      systemPrompt
+      status.includes(`需要批准的写操作会被拒绝（本会话没有人工审批通道）。\n${texts.approval}`),
+      status
     );
     assert.equal(runCommand, texts.tool);
   } finally {
@@ -109,9 +113,10 @@ test("本地有人工审批通道：系统提示与 run_command 说明照实写�
   });
   try {
     await bundle.adapter.run("你好");
-    const { systemPrompt, runCommand } = seen(streamFn);
+    const { systemPrompt, status, runCommand } = seen(streamFn);
     const texts = runCommandTexts({ platform: process.platform, approval: "prompt" });
-    assert.ok(systemPrompt.includes(`写操作可能需要人工批准。${texts.prompt}`), systemPrompt);
+    assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
+    assert.ok(status.includes(`写操作可能需要人工批准。\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);
   } finally {
     await bundle.adapter.dispose();

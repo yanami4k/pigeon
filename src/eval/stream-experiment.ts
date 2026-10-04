@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { STATUS_BLOCK_VERSION } from "../application/status-block.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
 import {
@@ -171,6 +172,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMITS.project,
     // 决策 328、332：推送段的文字版本（文字一改即换条件，续跑判为不同）
     memoryTextVersion: MEMORY_TEXT_VERSION,
+    // 决策 363：开工状态块的文字版本（看板或状态块的文字一改即换条件）
+    statusBlockVersion: STATUS_BLOCK_VERSION,
     // 决策 265：主 agent 派 worker 在各条件里的实际生效值
     spawnWorkers: STREAM_SPAWN_WORKERS,
     // 决策 291 与 265 的先例：联网工具在各条件里的实际生效值（关）

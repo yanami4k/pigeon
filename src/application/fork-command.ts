@@ -1,6 +1,6 @@
 // 手动分叉命令层（M7 S6，决策 079）：cli 与 tui 主会话共用一份。
 // 用法：/fork [--at <条目号> | --at <Run 号前缀>:<条目号>] ["新输入"]
-// - 缺省分叉点：最近一次 Run 的任务开始处（第 1 条）；只给条目号时指最近一次 Run；Run 号可用唯一前缀（trace 里显示的短号）；
+// - 缺省分叉点：最近一次 Run 的任务开始处（第一条人输入的消息，跳过开工状态块）；只给条目号时指最近一次 Run；Run 号可用唯一前缀（trace 里显示的短号）；
 // - 分叉点末条是用户消息或工具结果时不给新输入直接续跑；末条是助手消息时必须给新输入；
 // - 分支在独立工作树里续跑，跑完回报分支会话、工作树、终态与标签。
 // 分叉点从会话存储定位；本会话在会话存储里没有文件时明确报错。
@@ -8,6 +8,7 @@ import { loadStoreSession } from "../persistence/session-view.ts";
 import type { RunId } from "../state/ids.ts";
 import { type StoreSessionView, storeMessageAt } from "../state/session-judge.ts";
 import type { ForkPoint } from "../state/session-payloads.ts";
+import { isStatusMessage } from "../state/status-text.ts";
 import { ForkError, type ForkRunOptions, runForkBranch } from "./fork.ts";
 import type { OpenedSessionRuntime } from "./session-runtime.ts";
 import { sessionsDirOf } from "./workspace.ts";
@@ -49,6 +50,15 @@ export function parseForkCommand(raw: string): { at?: ForkAt; input?: string } {
   return { ...(at !== undefined ? { at } : {}), ...(input !== "" ? { input } : {}) };
 }
 
+// 任务开始处：Run 里第一条人输入的用户消息（决策 363：跳过排在前面的开工状态块）；找不到时为第 1 条
+function taskSeqOf(session: StoreSessionView, runId: RunId): number {
+  const messages = session.runs.find((run) => run.runId === runId)?.messages ?? [];
+  const index = messages.findIndex(
+    (ref) => ref.message.role === "user" && !isStatusMessage(ref.message)
+  );
+  return index >= 0 ? index + 1 : 1;
+}
+
 // 分叉点定位：Run 顺序取会话里 Run 开始条目的先后
 export function resolveForkPoint(session: StoreSessionView, at: ForkAt): ForkPoint {
   const runs: RunId[] = session.runs.map((run) => run.runId);
@@ -70,7 +80,7 @@ export function resolveForkPoint(session: StoreSessionView, at: ForkAt): ForkPoi
   if (runId === undefined) {
     throw new ForkCommandError("本会话还没有任何 Run，没有可分叉的位置");
   }
-  const runSeq = at.runSeq ?? 1;
+  const runSeq = at.runSeq ?? taskSeqOf(session, runId);
   if (storeMessageAt(session, { runId, runSeq }) === undefined) {
     throw new ForkCommandError(`该 Run 里没有第 ${runSeq} 条`);
   }

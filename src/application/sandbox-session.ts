@@ -30,6 +30,7 @@ import {
 import { type HeadlessRunOptions, type HeadlessRunResult, runHeadless } from "./headless-core.ts";
 import type { LaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
+import type { StatusFacts } from "./status-sources.ts";
 
 export { exportNotice, SANDBOX_CLEAN_COMMAND, type Sandbox, type SandboxExport };
 
@@ -98,6 +99,13 @@ export function mcpUnavailableNotice(servers: readonly string[]): string {
   );
 }
 
+// 决策 354：沙箱会话写进开工状态块环境一节的确知事实——沙箱档位；断网档时网络确知不可用（联网档不算确知能用）
+export function sandboxStatusFacts(sandbox: Pick<Sandbox, "network">): StatusFacts {
+  return sandbox.network === "on"
+    ? { sandbox: "容器沙箱（联网档）" }
+    : { sandbox: "容器沙箱（断网档）", network: "不可用（沙箱断网）" };
+}
+
 export function sandboxReadyNotice(sandbox: Sandbox): string {
   // 决策 278：带了快照时起点是快照提交，写明它是未提交改动的快照
   const start =
@@ -155,7 +163,12 @@ export async function runHeadlessInSandbox(
   let result: HeadlessRunResult;
   try {
     // 决策 252：不启动 MCP 服务
-    result = await runHeadless({ ...options, workspaceHost: sandbox.host, startMcp: noMcpSession });
+    result = await runHeadless({
+      ...options,
+      workspaceHost: sandbox.host,
+      statusFacts: sandboxStatusFacts(sandbox),
+      startMcp: noMcpSession,
+    });
   } catch (error) {
     // 装配前就被拒（参数不相容等）：没有改动可交回，直接删容器
     await sandbox.discard().catch(() => {});

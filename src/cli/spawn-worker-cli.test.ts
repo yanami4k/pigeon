@@ -74,9 +74,13 @@ let bStarted;
 const bStartedP = new Promise((resolve) => { bStarted = resolve; });
 let aFirst = true;
 function firstUser(context) {
-  const user = context.messages.find((m) => m.role === "user");
-  if (!user) return "";
-  return typeof user.content === "string" ? user.content : user.content.map((c) => c.text ?? "").join("");
+  // 决策 363：跳过排在前面的开工状态块
+  for (const m of context.messages) {
+    if (m.role !== "user") continue;
+    const text = typeof m.content === "string" ? m.content : m.content.map((c) => c.text ?? "").join("");
+    if (!text.startsWith("<pigeon-status")) return text;
+  }
+  return "";
 }
 export default async function (model, context, options) {
   const text = firstUser(context);

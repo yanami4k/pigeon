@@ -114,6 +114,12 @@ function watchLimits(
   };
 }
 
+// 决策 354：Pigeon 进程内条件写进开工状态块环境一节的确知事实
+export const STREAM_STATUS_FACTS = {
+  sandbox: "跑批作业容器（工具在容器里执行）",
+  network: "不可用（作业容器断网）",
+} as const;
+
 export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
   return {
     async run(input): Promise<StepAgentResult> {
@@ -146,6 +152,8 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
           governanceRoot: input.workDir,
           workspaceRoot: placeholder,
           workspaceHost: host,
+          // 决策 354：作业容器恒为 --network none（WORKSPACE_NETWORK_ARGS），网络确知不可用
+          statusFacts: STREAM_STATUS_FACTS,
           streamFn,
           yolo: options.yolo,
           sessionId: newSessionId(),

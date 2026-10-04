@@ -11,6 +11,7 @@ import {
 import { sessionsDirOf } from "../state/paths.ts";
 import { TRUNCATION_CONTINUE_PROMPT } from "../state/runaway-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
+import { isStatusMessage, statusSummary } from "../state/status-text.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
 import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
 import { SCRIPT_NOTICE_PREFIX } from "./script-texts.ts";
@@ -90,6 +91,11 @@ export function messageLines(
       });
     } else if (block.type === "text") {
       if (block.text.length === 0) {
+        continue;
+      }
+      // 决策 363：开工状态块与状态追加（按消息上的标记认）不是人输入的话，回看时只显示一行（哪几节）
+      if (isStatusMessage(message.raw)) {
+        lines.push({ kind: "notice", text: statusSummary(block.text) });
         continue;
       }
       // 进模型上下文的程序通知（打转提醒、worker 通知、脚本通知）虽以用户消息存下，回看时同实时一样显示成系统行，不像人输入的话
