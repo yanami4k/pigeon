@@ -56,6 +56,8 @@ export interface WebSearchDetails {
   backend: string;
   query: string;
   results: number;
+  // 后端给了非空的答案（决策 361：没有结果但带了答案的不算无事发生）
+  answered: boolean;
   [TOOL_RESULT_USAGE_KEY]?: TurnUsage;
 }
 
@@ -87,6 +89,7 @@ export function createWebSearchTool(
           backend: response.backend,
           query: response.query,
           results: response.results.length,
+          answered: (response.answer ?? "").trim() !== "",
           ...(response.usage !== undefined ? { [TOOL_RESULT_USAGE_KEY]: response.usage } : {}),
         },
       };
