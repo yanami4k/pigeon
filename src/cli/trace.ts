@@ -9,6 +9,7 @@ import {
   continuationLine,
   evalVerdictLabel,
   failureBadge,
+  pruneLine,
   repetitionLine,
   shortId,
   summarizeArgs,
@@ -239,6 +240,8 @@ function renderRun(
       lines.push(`  ${continuationLine(item.data)}`);
     } else if (item.kind === "repetition") {
       lines.push(`  ${repetitionLine(item.data)}`);
+    } else if (item.kind === "prune") {
+      lines.push(`  ${pruneLine(item.data)}`);
     }
   }
   const unfinished = unfinishedCheckpointMarks(run.items);

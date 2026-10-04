@@ -9,6 +9,7 @@ import {
   continuationLine,
   evalVerdictLabel,
   failureBadge,
+  pruneLine,
   repetitionLine,
   shortId,
   summarizeArgs,
@@ -50,6 +51,7 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   hook: "pigeon.hook",
   continuation: "pigeon.continuation",
   repetition: "pigeon.repetition",
+  prune: "pigeon.prune",
 };
 
 // 单条条目的关键字段摘要（各类型的要点，通俗措辞）
@@ -160,6 +162,8 @@ function itemDetail(item: ViewItem): string {
       return continuationLine(item.data);
     case "repetition":
       return repetitionLine(item.data);
+    case "prune":
+      return pruneLine(item.data);
   }
 }
 

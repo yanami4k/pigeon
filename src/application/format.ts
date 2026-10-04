@@ -2,7 +2,7 @@
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { FailureClass } from "../state/classification.ts";
-import type { ContinuationData, RepetitionData } from "../state/session-entries.ts";
+import type { ContinuationData, PruneData, RepetitionData } from "../state/session-entries.ts";
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
@@ -35,6 +35,25 @@ export function workerGrantScopeNote(request: {
 export function continuationLine(data: ContinuationData): string {
   const why = data.cause === "repetition" ? "被重复检测掐断" : "撞输出上限被截断";
   return `续跑第 ${data.attempt} 次：上条回复${why}，未执行工具`;
+}
+
+// 上下文裁剪（决策 361）的一行（trace 与 replay 共用）：时机、裁了几条、前后的上下文 token 数、估算的节省与代价
+// （按命中价折算的 token 当量）
+const PRUNE_TRIGGERS: Record<PruneData["trigger"], string> = {
+  compaction: "压缩之前",
+  model: "模型变了",
+  tools: "工具集变了",
+  "system-prompt": "系统提示变了",
+  idle: "空闲超过缓存保留时长",
+  paid: "按价格比",
+};
+
+export function pruneLine(data: PruneData): string {
+  return (
+    `上下文裁剪（${PRUNE_TRIGGERS[data.trigger]}）：裁了 ${data.items.length} 条 ｜ ` +
+    `${data.tokensBefore} → ${data.tokensAfter} token ｜ ` +
+    `估算节省 ${Math.round(data.estimatedSaving)}、代价 ${Math.round(data.estimatedCost)}`
+  );
 }
 
 // 流式重复检测命中（决策 367）的一行：判据（通道）、周期、重复次数、掐断与否

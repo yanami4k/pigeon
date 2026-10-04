@@ -18,6 +18,7 @@ import {
   type GrantData,
   HEADER_METADATA_KEY,
   type HookRunData,
+  type PruneData,
   type RepetitionData,
   type RunEndData,
   type RunStartData,
@@ -120,7 +121,9 @@ export type ViewItem =
   | { kind: "grant"; entryId: string; timestamp: number; data: GrantData }
   | { kind: "hook"; entryId: string; timestamp: number; data: HookRunData }
   | { kind: "continuation"; entryId: string; timestamp: number; data: ContinuationData }
-  | { kind: "repetition"; entryId: string; timestamp: number; data: RepetitionData };
+  | { kind: "repetition"; entryId: string; timestamp: number; data: RepetitionData }
+  // 决策 361：一次上下文裁剪
+  | { kind: "prune"; entryId: string; timestamp: number; data: PruneData };
 
 // 一次工具调用：助手消息里的调用块与对应的工具结果消息（按工具调用号在同一 Run 内配对）
 export interface ViewToolCall {
@@ -323,6 +326,7 @@ const CUSTOM_KINDS = {
   [SessionEntryType.Hook]: "hook",
   [SessionEntryType.Continuation]: "continuation",
   [SessionEntryType.Repetition]: "repetition",
+  [SessionEntryType.Prune]: "prune",
 } as const;
 
 // 自定义条目 → 时间线条目；不是 Pigeon 的条目返回 undefined，数据不合 schema 记告警
