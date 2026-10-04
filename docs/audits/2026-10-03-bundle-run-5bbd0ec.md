@@ -44,3 +44,21 @@
 ## verify 的实际运行情况
 
 服务器 pigeon-verify（8 vCPU、31 GB 内存、Node 24.12.0），提交 d930471，一条前台命令依次跑完 `npm run lint`、`npm run check`、`node --test --test-concurrency=6 "src/**/*.test.ts"`（运行前无别的测试在跑）、`npm run deps`、`npm run bundle` 与 `node scripts/bundle-smoke.mjs`，全过，全程约 140 秒。测试 1,632 项：通过 1,630，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：576 个模块，无违规。
+
+## 补记：验收修正
+
+改法（提交 a85e6dd）：
+- 构建戳：`scripts/build-bundle.mjs` 构建时按 `describeHead` 的口径（短提交号；`git status --porcelain` 非空即有未提交改动）取提交号与有无未提交改动，以 `__PIGEON_HARNESS_REF__` 写进产物；不在 git 仓库里构建时记 unknown。`eval/stream-harness.ts` 的 `currentHarnessRef` 从产物运行时用构建戳（dist 不入库，拉了新代码而没重新打包时包根的 HEAD 与在跑的代码对不上），从源码运行照旧读包根的 HEAD。`pigeon --version` 输出版本并带上这一项，如 `pigeon 0.0.0（提交 a85e6dd（无未提交改动））`。
+- npm 打包：package.json 加 `files`（dist 下的启动器、产物与 source map，docker/，eval/stream/），`npm pack --dry-run` 列出的即这些文件与 package.json；加 `prepare`（`npm run bundle`），从 git 安装与 `npm ci` 时都会构建产物。服务器上 `npm ci` 连同这一步共约 3.9 秒，其中构建产物约 0.6 秒。
+- 原 `build` 脚本（`tsc -p tsconfig.json`，输出到 dist）在 CI、文档、docker 与脚本里都没有用处，删去；tsconfig 改为只检查不输出（`noEmit`，去掉 rootDir、outDir、declaration、sourceMap），`include` 加 `scripts/**/*.ts`（`scripts/smoke-stream-fn.ts` 纳入 `npm run check`）。
+- 冒烟：`pigeon --version` 经启动器与直接运行 `dist/pigeon-cli.mjs`（终端界面子进程即如此）各一次，须只输出一行、版本为 package.json 的版本、构建戳为当前提交、没有告警。
+- `src/cli/tui-child.test.ts` 删去与 `spawn-worker-cli.test.ts` 重复的一条断言（tui 入口路径）。
+
+反向验证（服务器）：去掉 `cli/index.ts` 里"是否被直接运行"判断前的 `!FROM_BUNDLE`，重新打包后冒烟失败（直接运行产物时入口执行两遍，`--version` 不止一行）；去掉 `tui/main.ts` 里同一判断，重新打包后冒烟同样失败；均还原后冒烟通过，没有留下进程。
+
+已知限制（打包后仍从 node_modules 加载，或可能失败）：
+- `src/mcp/transport.ts` 以变量说明符动态导入 MCP SDK 的 Streamable HTTP 传输，不打进产物，运行时从 node_modules 加载。
+- pi-tui 的原生模块按 node_modules 定位，不打进产物。
+- pi-ai 的 Bedrock 与 OAuth 线路以变量动态导入相对路径的模块，打包后会到 dist 下找而失败；Pigeon 目前走不到这两条线路。
+
+verify：服务器 pigeon-verify，提交 a85e6dd，一条前台命令依次跑完 `npm run lint`、`npm run check`、`node --test --test-concurrency=2 "src/**/*.test.ts"`（运行前另有六个测试进程在跑）、`npm run deps`、`npm run bundle` 与 `node scripts/bundle-smoke.mjs`，全过，全程约 264 秒。测试 1,632 项：通过 1,630，失败 0，跳过 2（两项只在 Windows 上运行的用例）。deps：576 个模块，无违规。
