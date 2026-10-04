@@ -28,7 +28,7 @@ import { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { workerStartRefFor } from "../orchestration/worktree.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import type { BeforeCompaction, CompactionConfigInput } from "../pi-runtime/compaction.ts";
-import type { AgentMessage, StreamFn } from "../pi-runtime/index.ts";
+import type { AgentMessage, RunResult, StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { SkillRoot } from "../skills/catalog.ts";
 import type { AttemptBudget } from "../state/attempt-config.ts";
@@ -54,6 +54,7 @@ import { mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import { settleBackgroundJobs } from "./background-jobs.ts";
 import type { SessionHooks } from "./hooks.ts";
 import { loopGuardWatcher } from "./loop-guard.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";
@@ -280,6 +281,8 @@ interface RuntimeSurface {
   // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照；worker 用主会话的快照）——目前只有跑批器显式给出
   truncationContinuation?: TruncationContinuationSettings;
   repetitionGuard?: RepetitionGuardSettings;
+  // 决策 365：无人值守收尾等后台作业的总时限（缺省取设置快照）
+  jobCloseoutMs?: number;
   // M9：采样温度（缺省不设）——目前只有无父会话的运行面（headless 与 Eval）会给；worker 不继承
   temperature?: number;
   // M9：任务源给的系统指令（追加进 system prompt 并随之冻结）；同上，只有无父会话的运行面会给
@@ -565,6 +568,8 @@ export interface DetachedRuntimeRequest {
   // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照）
   truncationContinuation?: TruncationContinuationSettings;
   repetitionGuard?: RepetitionGuardSettings;
+  // 决策 365：无人值守收尾等后台作业的总时限（缺省取设置快照；跑批器显式给出）
+  jobCloseoutMs?: number;
   temperature?: number;
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）
@@ -636,6 +641,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
       ? { truncationContinuation: surface.truncationContinuation }
       : {}),
     ...(surface.repetitionGuard !== undefined ? { repetitionGuard: surface.repetitionGuard } : {}),
+    ...(surface.jobCloseoutMs !== undefined ? { jobCloseoutMs: surface.jobCloseoutMs } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
     ...(surface.sessionSearch !== undefined ? { sessionSearch: surface.sessionSearch } : {}),
@@ -722,13 +728,51 @@ function summaryOf(bundle: RuntimeBundle): string {
     .trim();
 }
 
+// 决策 365：无人值守的运行面（headless 与 worker）——一次运行正常结束后，本会话开过后台作业的，先等在跑的作业、把结束
+// 通知交给模型跑一轮，直到没有在跑的作业（收尾总时限到即停掉余下的）；运行面被中断即不再等
+async function runSettlingJobs(
+  bundle: RuntimeBundle,
+  run: () => Promise<RunResult>,
+  halted: () => boolean
+): Promise<RunResult> {
+  const first = await run();
+  const jobs = bundle.jobs;
+  if (jobs === undefined || first.status !== "completed" || jobs.list().length === 0 || halted()) {
+    return first;
+  }
+  const { last } = await settleBackgroundJobs({
+    jobs,
+    target: {
+      pendingNotices: () => bundle.adapter.pendingNotices(),
+      runNotices: () => bundle.adapter.runNotices(),
+      notify: (text) => bundle.adapter.notify(text),
+    },
+    stopped: halted,
+    closeoutMs: bundle.jobCloseoutMs,
+  });
+  const result = last ?? first;
+  // 等作业时被中断（墙钟、上限、外部中止、worker 被停）：按中止交回
+  return halted() && jobs.running().length > 0 ? { ...result, status: "aborted" } : result;
+}
+
 function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   const { adapter } = bundle;
+  let halted = false;
   return {
-    run: (task) => adapter.run(task),
+    run: (task) => {
+      halted = false;
+      return runSettlingJobs(
+        bundle,
+        () => adapter.run(task),
+        () => halted
+      );
+    },
     // 决策 324：运行面就绪（同步就绪即当场给出）
     ready: () => Promise.resolve(bundle),
-    interrupt: (cause) => adapter.interrupt(cause),
+    interrupt: (cause) => {
+      halted = true;
+      return adapter.interrupt(cause);
+    },
     subscribe: (listener) => adapter.subscribe(listener),
     subscribeRounds: (listener) => adapter.subscribeRounds(listener),
     summary: () => summaryOf(bundle),
@@ -752,6 +796,7 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
 function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
   let bundle: RuntimeBundle | undefined;
   let interruptedEarly = false;
+  let halted = false;
   // 就绪前订阅的监听器 → 就绪后的退订函数
   const early = new Map<(event: EventEnvelope) => void, () => void>();
   // 决策 301、305：就绪前的只读观察（流式正文、工具结果、整轮）→ 就绪后的退订函数
@@ -785,7 +830,12 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
       if (interruptedEarly) {
         return { status: "aborted" };
       }
-      return current.adapter.run(task);
+      halted = false;
+      return runSettlingJobs(
+        current,
+        () => current.adapter.run(task),
+        () => halted
+      );
     },
     // 决策 324：等运行面就绪（装配失败即拒绝，与 run 同一出口）
     ready: () => settled,
@@ -794,6 +844,7 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
         interruptedEarly = true;
         return;
       }
+      halted = true;
       await bundle.adapter.interrupt(cause);
     },
     subscribe: (listener) => {

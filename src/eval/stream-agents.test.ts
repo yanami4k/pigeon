@@ -442,12 +442,14 @@ function countingStreamFn(inner: StreamFn) {
 
 // Pigeon 条件的工具清单（跑批不给 skill、不配 MCP）：没有派生子 agent 或 worker 的工具；能检索历史会话的格子多三件
 // 检索工具（193；339 加 list_sessions）；决策 331：跑批器只推送记忆、不带 update_memory，推送格与不推送的格子工具清单相同；
-// 决策 368：各条件都带 grep 与 glob（跑批里的 Pigeon 与产品一致）
+// 决策 368：各条件都带 grep 与 glob（跑批里的 Pigeon 与产品一致）；决策 365：同样带后台作业的两件工具
 const PIGEON_STREAM_TOOLS = {
   "search-push": [
     "edit_file",
     "glob",
     "grep",
+    "job_kill",
+    "job_output",
     "list_sessions",
     "read_file",
     "read_session_entry",
@@ -459,6 +461,8 @@ const PIGEON_STREAM_TOOLS = {
     "edit_file",
     "glob",
     "grep",
+    "job_kill",
+    "job_output",
     "list_sessions",
     "read_file",
     "read_session_entry",
@@ -466,8 +470,26 @@ const PIGEON_STREAM_TOOLS = {
     "search_sessions",
     "write_file",
   ],
-  "push-only": ["edit_file", "glob", "grep", "read_file", "run_command", "write_file"],
-  neither: ["edit_file", "glob", "grep", "read_file", "run_command", "write_file"],
+  "push-only": [
+    "edit_file",
+    "glob",
+    "grep",
+    "job_kill",
+    "job_output",
+    "read_file",
+    "run_command",
+    "write_file",
+  ],
+  neither: [
+    "edit_file",
+    "glob",
+    "grep",
+    "job_kill",
+    "job_output",
+    "read_file",
+    "run_command",
+    "write_file",
+  ],
 } as const;
 
 for (const condition of ["search-push", "search-only", "push-only", "neither"] as const) {

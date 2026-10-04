@@ -81,7 +81,12 @@ import {
   resolveModelInfo,
   runModelInfoRecord,
 } from "../state/model-info.ts";
-import { outputsRootOf, sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import {
+  jobsDirOf,
+  outputsRootOf,
+  sessionSearchCacheDirOf,
+  sessionsDirOf,
+} from "../state/paths.ts";
 import type {
   RepetitionGuardSettings,
   TruncationContinuationSettings,
@@ -89,6 +94,7 @@ import type {
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import {
+  backgroundJobLimitsOf,
   commandsConfigOf,
   configGrantRulesOf,
   emptySettingsSnapshot,
@@ -98,14 +104,29 @@ import {
   readFileLimitsOf,
   repetitionGuardOf,
   runCommandOutputLimitsOf,
+  runCommandTimeoutsOf,
   type SettingsSnapshot,
   searchLimitsOf,
   truncationContinuationOf,
 } from "../state/settings.ts";
+import {
+  JOB_KILL_TOOL,
+  JOB_OUTPUT_TOOL,
+  jobPoolFor,
+  SessionJobs,
+} from "../tools/background-jobs.ts";
 import { CommandOutputStore } from "../tools/command-output.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
+import {
+  createJobKillTool,
+  createJobOutputTool,
+  JOB_KILL_DESCRIPTION,
+  JOB_OUTPUT_DESCRIPTION,
+  JobKillParamsSchema,
+  JobOutputParamsSchema,
+} from "../tools/job-tools.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import {
@@ -141,6 +162,14 @@ import {
   webFetchRegistration,
   webSearchRegistration,
 } from "../web/tools.ts";
+import {
+  backgroundJobEntry,
+  cleanupOrphanedJobsOnce,
+  JOB_NOTICE_PREFIX,
+  JobNotices,
+  lostJobsText,
+  type PreviousJobs,
+} from "./background-jobs.ts";
 import { createToolGovernance } from "./governance.ts";
 import { SessionHooks } from "./hooks.ts";
 import type { McpSession } from "./mcp.ts";
@@ -174,6 +203,7 @@ import {
   spawnWorkerRegistration,
 } from "./spawn-worker-tool.ts";
 import {
+  escapeStatusText,
   STATUS_AUTHORITY_SENTENCE,
   type StatusHashes,
   type StatusSectionName,
@@ -303,6 +333,11 @@ export interface RuntimeDeps {
   statusSent?: StatusHashes;
   // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
   statusFacts?: StatusFacts;
+  // 决策 365：/reload 交来旧运行面的后台作业（连同它的落盘目录），新运行面接着管；续跑时会话记录里上一进程的作业
+  reloadJobs?: SessionJobs;
+  previousJobs?: PreviousJobs;
+  // 无人值守收尾等后台作业的总时限（缺省取设置的 tools.runCommand.backgroundCloseoutSeconds；跑批器显式给出）
+  jobCloseoutMs?: number;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
@@ -420,6 +455,12 @@ export interface RuntimeBundle {
   mcp?: McpSession;
   // M7（决策 078）：已注册工具的风险档位（快照只在写档与命令档工具之后打）
   toolTiers: ReadonlyMap<string, ToolRiskTier>;
+  // 决策 365：本会话的后台作业与结束通知（disposeRuntime 停掉全部作业；/reload 交给新运行面后置空）、无人值守收尾的总时限
+  jobs?: SessionJobs | undefined;
+  jobNotices?: JobNotices | undefined;
+  jobCloseoutMs: number;
+  // 后台作业的会话记录改写到本运行面（/reload 交接失败、作业留在旧运行面时用）
+  bindJobEvents: () => void;
   // M6：释放运行面前先执行的附加释放动作（快照器、验证与失败重试的退订与收尾）；按登记顺序执行，失败不挡后续
   disposers?: Array<() => Promise<void>>;
   // 决策 350：运行面停下（在途 Run 中止并收尾）之后、会话存储关闭之前执行的收尾动作——快照器在此等未完成的快照拍完
@@ -513,13 +554,31 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const outputLimits = runCommandOutputLimitsOf(settings);
   // 虚拟路径带会话号：本会话之外只认分叉来源一路往上（来源取自会话存储，续接的分支会话同样认得；见 output-ancestors.ts）
   const forkSource = deps.storeLineage?.branch?.sourceSessionId;
-  const outputStore = new CommandOutputStore({
-    base: governanceRoot,
-    outputsRoot: outputsRootOf(governanceRoot),
-    sessionId: deps.sessionId,
-    maxBytes: outputLimits.savedOutputsMaxBytes,
-    ancestors: () => outputAncestors(sessionsDir, deps.sessionId, forkSource),
-  });
+  const outputStore =
+    deps.reloadJobs?.store ??
+    new CommandOutputStore({
+      base: governanceRoot,
+      outputsRoot: outputsRootOf(governanceRoot),
+      sessionId: deps.sessionId,
+      maxBytes: outputLimits.savedOutputsMaxBytes,
+      ancestors: () => outputAncestors(sessionsDir, deps.sessionId, forkSource),
+    });
+  // 决策 365：单次超时与后台作业（每会话一份作业表，整次运行共用一个作业池；/reload 接着用旧运行面的）
+  const commandTimeouts = runCommandTimeoutsOf(settings);
+  const jobLimits = backgroundJobLimitsOf(settings);
+  const jobs =
+    deps.reloadJobs ??
+    new SessionJobs({
+      sessionId: deps.sessionId,
+      host: workspaceHost,
+      store: outputStore,
+      pool: jobPoolFor(jobsDirOf(governanceRoot), jobLimits.total),
+      perSession: jobLimits.perSession,
+      outputMaxBytes: jobLimits.outputMaxBytes,
+      ...(deps.previousJobs !== undefined ? { firstId: deps.previousJobs.lastId } : {}),
+    });
+  // 崩溃后下次启动：按记录清理上一进程留下的作业（后台进行，每个进程一次）
+  void cleanupOrphanedJobsOnce(governanceRoot, deps.storeWarn);
   const reads = new FileReadTracker();
   const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
@@ -629,6 +688,25 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
+  // 决策 365：后台作业的两件工具——只看、只停本会话的作业，按读档登记（免审批）；job_output 可并行，job_kill 串行
+  if (jobs.available) {
+    registry.register({
+      name: JOB_OUTPUT_TOOL,
+      description: JOB_OUTPUT_DESCRIPTION,
+      parameters: JobOutputParamsSchema,
+      tier: "read",
+      pathConfinement: { kind: "none" },
+      executionMode: "parallel",
+    });
+    registry.register({
+      name: JOB_KILL_TOOL,
+      description: JOB_KILL_DESCRIPTION,
+      parameters: JobKillParamsSchema,
+      tier: "read",
+      pathConfinement: { kind: "none" },
+      executionMode: "sequential",
+    });
+  }
   // 决策 368：grep、glob——只读工具（读档审批、可并行），登记点见 tools/search-tools.ts
   for (const registration of searchToolRegistrations()) {
     registry.register(registration);
@@ -850,6 +928,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     "edit_file",
     WRITE_FILE_TOOL,
     RUN_COMMAND_TOOL,
+    ...(jobs.available ? [JOB_OUTPUT_TOOL, JOB_KILL_TOOL] : []),
     ...READ_ONLY_SEARCH_TOOLS,
     ...(sessionSearch ? [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL] : []),
     ...(memoryWrite !== undefined ? [UPDATE_MEMORY_TOOL] : []),
@@ -1149,7 +1228,12 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ...(delegated?.scopes?.some((scope) => scope.tool === RUN_COMMAND_TOOL) === true
           ? { pathOnly: true }
           : {}),
+        // 决策 365：单次超时的缺省与上限、后台作业
+        timeoutMs: commandTimeouts.defaultSeconds * 1000,
+        maxTimeoutMs: commandTimeouts.maxSeconds * 1000,
+        jobs,
       }),
+      ...(jobs.available ? [createJobOutputTool(jobs), createJobKillTool(jobs)] : []),
       ...createSearchTools(workspaceHost, {
         grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults },
         glob: { ...searchOptions, maxResults: searchLimits.globMaxResults },
@@ -1308,6 +1392,35 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   adapter.subscribe((event) => {
     if (event.kind === "run.ended") lastEndedRunId = event.runId;
   });
+  // 决策 365：后台作业的会话记录与结束通知挂到本运行面；续跑时告诉模型上一进程的作业已丢失
+  const bindJobEvents = (): void =>
+    jobs.setEventSink((event) =>
+      sessionStore.append(backgroundJobEntry(event, adapter.currentRunId()))
+    );
+  bindJobEvents();
+  const jobNotices = new JobNotices(jobs, adapter);
+  const lostJobs = deps.previousJobs?.lost ?? [];
+  if (lostJobs.length > 0) {
+    adapter.notify(`${JOB_NOTICE_PREFIX}${escapeStatusText(lostJobsText(lostJobs))}`);
+    deps.storeWarn?.(lostJobsText(lostJobs));
+  }
+  // 写工具改过的文件记作前台改动（作业结束时从期间变化里扣除）；job_output 以外的工具调用清零不带等待的连续查询
+  const relativeToRoot = (resolved: string): string =>
+    (deps.workspaceHost !== undefined
+      ? path.posix.relative(workspaceHost.root, resolved)
+      : path.relative(deps.workspaceRoot, resolved)
+    ).replaceAll("\\", "/");
+  adapter.subscribeToolResults((notice) => {
+    if (notice.toolName !== JOB_OUTPUT_TOOL) jobs.resetQueries();
+    const resolved = (notice.details as { resolvedPath?: unknown } | undefined)?.resolvedPath;
+    if (
+      !notice.isError &&
+      typeof resolved === "string" &&
+      registry.get(notice.toolName)?.tier === "write"
+    ) {
+      jobs.noteForegroundChanges([relativeToRoot(resolved)]);
+    }
+  });
   // 决策 323：PostCompact 钩子——压缩完成后通知（无决策能力；触发位置 turn / run-start 记 auto、manual 记 manual）
   if (sessionHooks.list().some((hook) => hook.event === "PostCompact")) {
     adapter.subscribeCompaction((notice) => {
@@ -1350,6 +1463,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     settings,
     hooks: sessionHooks,
     toolTiers,
+    jobs,
+    jobNotices,
+    jobCloseoutMs: deps.jobCloseoutMs ?? jobLimits.closeoutSeconds * 1000,
+    bindJobEvents,
     modelInfo,
     truncationContinuation: continuation,
     repetitionGuard: repetition,
@@ -1374,6 +1491,14 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
 // 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话存储写者；
 // 前一步失败不跳过后续
 export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
+  // 决策 365：会话或运行结束时停掉本会话全部在跑的后台作业（结束记录落在会话存储关闭之前）；/reload 交出去的不在这里
+  bundle.jobNotices?.dispose();
+  try {
+    await bundle.jobs?.killAll("aborted");
+  } catch {
+    // 停不掉的由崩溃清理兜底
+  }
+  bundle.jobs?.dispose();
   for (const dispose of bundle.disposers?.splice(0) ?? []) {
     try {
       await dispose();

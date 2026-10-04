@@ -3,6 +3,7 @@
 // 决策 331 删除补做复盘后，退出时不再拍工作目录快照、不再写退出条目（它们只供补做读代码）；旧会话里已有的退出条目照常可读。
 import type { SandboxExport } from "../execution/sandbox.ts";
 import type { SessionId } from "../state/ids.ts";
+import { handbackJobsNotice } from "./background-jobs.ts";
 import { disposeRuntime, type RuntimeBundle } from "./runtime.ts";
 import type { WarnSink } from "./warnings.ts";
 
@@ -39,6 +40,11 @@ export async function closeTuiSession(input: CloseTuiSessionInput): Promise<void
       Promise.allSettled(running.map((worker) => workers.awaitResult(worker.sessionId))),
       new Promise((resolve) => setTimeout(resolve, input.workerGraceMs)),
     ]);
+  }
+  // 决策 365：交回沙箱前有后台作业在跑先提示（随后随运行面释放停掉）
+  if (input.closeSandbox !== undefined) {
+    const warning = handbackJobsNotice(input.bundle.jobs, "close");
+    if (warning !== undefined) input.log?.(warning);
   }
   await disposeRuntime(input.bundle);
   if (input.closeSandbox !== undefined) {

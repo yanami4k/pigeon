@@ -50,6 +50,7 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   hook: "pigeon.hook",
   continuation: "pigeon.continuation",
   repetition: "pigeon.repetition",
+  "background-job": "pigeon.background-job",
 };
 
 // 单条条目的关键字段摘要（各类型的要点，通俗措辞）
@@ -160,6 +161,13 @@ function itemDetail(item: ViewItem): string {
       return continuationLine(item.data);
     case "repetition":
       return repetitionLine(item.data);
+    case "background-job": {
+      // 决策 365：后台作业的启动与结束
+      const data = item.data;
+      return data.event === "started"
+        ? `后台作业启动 ｜ ${data.jobId} ｜ 命令 ${data.command}`
+        : `后台作业结束 ｜ ${data.jobId} ｜ ${data.state}${data.reason !== undefined ? `（${data.reason}）` : ""} ｜ 退出码 ${data.exitCode ?? "无"} ｜ 输出 ${data.outputBytes} 字节`;
+    }
   }
 }
 

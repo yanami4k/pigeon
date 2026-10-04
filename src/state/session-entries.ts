@@ -51,6 +51,7 @@ export const SessionEntryType = {
   Continuation: "pigeon.continuation",
   Repetition: "pigeon.repetition",
   Status: "pigeon.status",
+  BackgroundJob: "pigeon.background-job",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -195,6 +196,8 @@ export const CheckpointDataSchema = Type.Object({
   tree: GitObjectIdSchema,
   // 本会话首个快照的改前基线
   baseCommit: Type.Optional(GitObjectIdSchema),
+  // 决策 365：拍摄时在跑的后台作业（作业号）；这时的快照可能含作业做到一半的改动
+  backgroundJobs: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 });
 export type CheckpointData = Static<typeof CheckpointDataSchema>;
 
@@ -385,6 +388,40 @@ export const StatusDataSchema = Type.Object({
 });
 export type StatusData = Static<typeof StatusDataSchema>;
 
+// 后台作业的启动与结束（决策 365）：各写一条。启动记作业号、命令、标记与输出的虚拟路径；结束记结局（exited 正常退出、
+// killed 被停掉、failed 没能启动）、退出码、停掉的来由（job_kill、会话结束 aborted、收尾时限 closeout）与输出字节数。
+// 只有启动、没有结束的作业属于已退出的进程，续跑时提示已丢失
+const JobIdSchema = Type.String({ minLength: 1 });
+export const BackgroundJobStartedDataSchema = Type.Object({
+  version: VERSION,
+  event: Type.Literal("started"),
+  runId: Type.Optional(RunIdSchema),
+  jobId: JobIdSchema,
+  command: Type.String({ minLength: 1 }),
+  marker: Type.String({ minLength: 1 }),
+  output: Type.String({ minLength: 1 }),
+  toolCallId: Type.Optional(Type.String({ minLength: 1 })),
+});
+export const BackgroundJobEndedDataSchema = Type.Object({
+  version: VERSION,
+  event: Type.Literal("ended"),
+  runId: Type.Optional(RunIdSchema),
+  jobId: JobIdSchema,
+  state: Type.Union([Type.Literal("exited"), Type.Literal("killed"), Type.Literal("failed")]),
+  exitCode: Type.Union([Type.Integer(), Type.Null()]),
+  signal: Type.Optional(Type.String()),
+  reason: Type.Optional(
+    Type.Union([Type.Literal("job_kill"), Type.Literal("aborted"), Type.Literal("closeout")])
+  ),
+  output: Type.Optional(Type.String({ minLength: 1 })),
+  outputBytes: Type.Integer({ minimum: 0 }),
+});
+export const BackgroundJobDataSchema = Type.Union([
+  BackgroundJobStartedDataSchema,
+  BackgroundJobEndedDataSchema,
+]);
+export type BackgroundJobData = Static<typeof BackgroundJobDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -399,7 +436,8 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Hook; data: HookRunData }
   | { customType: typeof SessionEntryType.Continuation; data: ContinuationData }
   | { customType: typeof SessionEntryType.Repetition; data: RepetitionData }
-  | { customType: typeof SessionEntryType.Status; data: StatusData };
+  | { customType: typeof SessionEntryType.Status; data: StatusData }
+  | { customType: typeof SessionEntryType.BackgroundJob; data: BackgroundJobData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -416,6 +454,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Continuation]: ContinuationDataSchema,
   [SessionEntryType.Repetition]: RepetitionDataSchema,
   [SessionEntryType.Status]: StatusDataSchema,
+  [SessionEntryType.BackgroundJob]: BackgroundJobDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。

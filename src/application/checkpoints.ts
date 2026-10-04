@@ -47,6 +47,8 @@ export interface CheckpointHost {
   >;
   toolTiers: ReadonlyMap<string, ToolRiskTier>;
   sessionStore: Pick<RuntimeBundle["sessionStore"], "append">;
+  // 决策 365：拍摄时在跑的后台作业记进快照条目
+  jobs?: Pick<NonNullable<RuntimeBundle["jobs"]>, "running"> | undefined;
   // 会话级钩子：运行任何钩子之前先等快照；配置了失败后的钩子时编辑失败也拍
   hooks?: Pick<SessionHooks, "list" | "addGate">;
 }
@@ -225,6 +227,8 @@ export function attachCheckpoints(options: {
       runSeq: bundle.adapter.entrySeq(),
     };
     writeMark(mark, "shooting");
+    // 决策 365：拍摄时在跑的后台作业记进快照条目（这时的快照可能含作业做到一半的改动）
+    const backgroundJobs = bundle.jobs?.running().map((job) => job.id) ?? [];
     start(
       (signal) => checkpointer.afterChange(signal),
       (snapshot) => {
@@ -240,6 +244,7 @@ export function attachCheckpoints(options: {
             ...(snapshot.baseCommit !== undefined ? { baseCommit: snapshot.baseCommit } : {}),
             toolCallId: mark.toolCallId,
             runSeq: mark.runSeq,
+            ...(backgroundJobs.length > 0 ? { backgroundJobs } : {}),
           })
         );
       },

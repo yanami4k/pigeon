@@ -17,6 +17,7 @@ import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { emptySettingsSnapshot, mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import { previousJobsOf } from "./background-jobs.ts";
 import { attachCheckpoints, type CheckpointAttachment } from "./checkpoints.ts";
 import { describeMcpStartup, type McpSession, noMcpSession, startMcpSession } from "./mcp.ts";
 import {
@@ -184,6 +185,10 @@ export async function openSessionRuntime(
       ? loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId)
       : undefined;
   const recordedSystemPrompt = recorded?.view.runs.at(-1)?.start.systemPrompt;
+  // 决策 365：/reload 接着管旧运行面的后台作业；续跑时取会话记录里上一进程的作业（已丢失的与用过的作业号）
+  const reloadJobs = request.reloadFrom?.jobs;
+  const previousJobs =
+    reloadJobs === undefined && recorded !== undefined ? previousJobsOf(recorded.main) : undefined;
   const statusSent =
     request.reloadFrom !== undefined
       ? request.reloadFrom.status.sent()
@@ -238,6 +243,8 @@ export async function openSessionRuntime(
       ...(recordedSystemPrompt !== undefined ? { systemPrompt: recordedSystemPrompt } : {}),
       ...(statusSent !== undefined ? { statusSent } : {}),
       ...(request.statusFacts !== undefined ? { statusFacts: request.statusFacts } : {}),
+      ...(reloadJobs !== undefined ? { reloadJobs } : {}),
+      ...(previousJobs !== undefined ? { previousJobs } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];
@@ -245,11 +252,22 @@ export async function openSessionRuntime(
       try {
         restored = await restoreContext(bundle);
       } catch (error) {
-        // 运行面已建好：释放它再上抛（MCP 会话由下方的装配失败出口关闭），调用方的旧运行面不受影响
+        // 运行面已建好：释放它再上抛（MCP 会话由下方的装配失败出口关闭），调用方的旧运行面不受影响——
+        // 交接来的后台作业留在旧运行面（不随新运行面停掉，会话记录改写回旧运行面）
         const { mcp: _mcp, ...withoutMcp } = bundle;
+        if (reloadJobs !== undefined) {
+          withoutMcp.jobs = undefined;
+          request.reloadFrom?.bindJobEvents();
+        }
         await disposeRuntime(withoutMcp);
         throw error;
       }
+    }
+    // 交接成功：旧运行面不再管这些作业（释放旧运行面时不停掉，旧的通知退订）
+    if (request.reloadFrom !== undefined && reloadJobs !== undefined) {
+      request.reloadFrom.jobNotices?.dispose();
+      request.reloadFrom.jobNotices = undefined;
+      request.reloadFrom.jobs = undefined;
     }
     // M7（决策 078）：主会话在 git 工作区里打快照（写或命令确实改变文件后）；worker 会话不挂
     // 执行端另一侧的工作区（沙箱）不在宿主上打快照

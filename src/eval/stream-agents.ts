@@ -20,6 +20,7 @@ import {
   type TruncationContinuationSettings,
 } from "../state/runaway-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
+import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 import { ZERO_USAGE } from "./stream-results.ts";
 import type { StepAgent, StepAgentResult } from "./stream-runner.ts";
@@ -69,6 +70,8 @@ export interface PigeonStepAgentOptions {
   // 决策 367：撞上限续跑与流式重复检测；缺省同产品缺省（续跑开、连续 2 次、合计 5 次，检测开、omp 档、掐断）
   truncationContinuation?: TruncationContinuationSettings;
   repetitionGuard?: RepetitionGuardSettings;
+  // 决策 365：无人值守收尾等后台作业的总时限（秒；缺省同产品缺省 600）
+  backgroundCloseoutSeconds?: number;
   provider?: string;
   modelId?: string;
   homeDir?: string;
@@ -176,6 +179,9 @@ export function pigeonStepAgent(options: PigeonStepAgentOptions): StepAgent {
           // 决策 367：撞上限续跑与流式重复检测显式给出（不依赖设置快照的缺省；身份头记这两项）
           truncationContinuation: options.truncationContinuation ?? DEFAULT_TRUNCATION_CONTINUATION,
           repetitionGuard: options.repetitionGuard ?? DEFAULT_REPETITION_GUARD,
+          // 决策 365：收尾等后台作业的总时限显式给出（身份头记这一项）
+          backgroundCloseoutSeconds:
+            options.backgroundCloseoutSeconds ?? DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
           ...(pushed
             ? {
                 pushedMemory: true,
