@@ -10,30 +10,16 @@ export default defineConfig({
   test: {
     include: tier === "slow" ? slow : ["src/**/*.test.ts"],
     exclude: [...configDefaults.exclude, ...(tier === "fast" ? slow : [])],
-    // 每个 worker 是独立的子进程（与 node:test 每个文件一个进程最接近）；测试文件之间是否隔离见 isolate
+    // 每个 worker 是独立的子进程；同一 worker 里的测试文件之间不隔离（实测：两档全部约 58 秒，隔离约 85 秒，
+    // 多种并发与打乱文件顺序下都没有串扰）。怀疑串扰时用 PIGEON_TEST_ISOLATE=1 切回每个文件隔离复查
     pool: "forks",
-    isolate: process.env.PIGEON_TEST_ISOLATE !== "0",
+    isolate: process.env.PIGEON_TEST_ISOLATE === "1",
     // node:test 不限时；长用例（真容器、跑批）照旧由各自的 timeout 选项或外层把关
     testTimeout: 600_000,
     hookTimeout: 600_000,
     // describe.concurrent 的组内并发上限（node:test 的 concurrency: true 不设上限）
     maxConcurrency: 64,
-    // 第三方依赖预打包：每个 worker 不再逐个加载第三方模块的大量小文件
-    deps: {
-      optimizer: {
-        ssr: {
-          enabled: process.env.PIGEON_TEST_OPTIMIZE !== "0",
-          include: [
-            "@earendil-works/pi-agent-core",
-            "@earendil-works/pi-ai",
-            "@earendil-works/pi-tui",
-            "@modelcontextprotocol/sdk",
-            "typebox",
-            "turndown",
-          ],
-        },
-      },
-    },
+    // 不做第三方依赖预打包：不隔离之后加载模块只占约 2%，依赖改为内联再预打包反而多出转译开销（实测慢 2–4 秒）
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
