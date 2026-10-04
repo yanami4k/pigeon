@@ -1,11 +1,12 @@
 // 联网工具的注册范围（决策 287–291、265 的先例）：worker 与主会话同样拿到两件工具——父策略里有且装配给了 webTools 才广告。
-// 主会话给了才注册、系统提示追加一句、web_fetch 记为 network 档见 launch-flags-web.test.ts；跑批器各条件不注册见
-// eval/stream-experiment.test.ts。
+// 主会话给了才注册、系统提示追加一句、web_fetch 记为 network 档见 launch-flags-web.test.ts；跑批器各条件不注册
+// 在本文件的快档里钉住（身份头照记见慢档的 eval/stream-experiment.test.ts）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { STREAM_SPAWN_WORKERS, STREAM_WEB_TOOLS } from "../eval/stream-agents.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -54,4 +55,9 @@ test("worker 与主会话同样拿到两件工具：父策略里有且装配给�
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("跑批器各条件不注册联网工具，也不派 worker", () => {
+  assert.equal(STREAM_WEB_TOOLS, false);
+  assert.equal(STREAM_SPAWN_WORKERS, false);
 });

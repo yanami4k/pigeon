@@ -93,4 +93,6 @@ test("编辑模式缺省为 replace：不传编辑模式时装配出 replace 版
   assert.doesNotMatch(systemPrompt ?? "", /N#TAG/);
   // 截断后拆小引导（决策 063）：replace 模式同样追加（hashline 模式由上一条核对）
   assert.ok(systemPrompt?.includes(TRUNCATION_GUIDANCE), `replace：${systemPrompt}`);
+  // 引导的关键说法（常量本身在这里用字面片段钉住）
+  assert.match(TRUNCATION_GUIDANCE, /输出上限未执行[^。]*拆成几次较小的调用重发，不要原样重发/);
 });

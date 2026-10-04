@@ -226,7 +226,10 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
   test("固定起点：只跑题（维护步、套用步、跳过步不跑），每步从人在该步之前的代码新开干净环境，agent 上一步的改动不带进下一步；题面为提交信息加应通过的测试文件路径、不附内容；人在该步新写或改过的测试开工时不在、判题时放入；每步存下 agent 的改动；结果行记起点与开容器耗时", async () => {
     const t = await toy();
     try {
-      const seen: Record<number, { a: boolean; b: boolean; baseTest: string; stray: boolean }> = {};
+      const seen: Record<
+        number,
+        { a: boolean; b: boolean; baseTest: string; stray: boolean; ignored: boolean }
+      > = {};
       const agent = scriptedAgent((input) => {
         const root = input.target.root;
         seen[input.step.seq] = {
@@ -234,6 +237,7 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
           b: existsSync(join(root, "src", "b.test.sh")),
           baseTest: readFileSync(join(root, "src", "base.test.sh"), "utf8"),
           stray: existsSync(join(root, "src", "agent.test.sh")),
+          ignored: existsSync(join(root, "build", "out.txt")),
         };
         if (input.step.seq === 1) {
           write(root, {
@@ -242,6 +246,9 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
             // 也都不带进下一步
             "src/keep.test.sh": "exit 1\n",
             "src/agent.test.sh": "true\n",
+            // 被 .gitignore 忽略的文件：git 看不到它，同样不带进下一步
+            ".gitignore": "build/\n",
+            "build/out.txt": "stale\n",
           });
           git(root, "add", "-A");
           git(
@@ -280,12 +287,14 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         b: false,
         baseTest: "grep -q base src/base.txt\n",
         stray: false,
+        ignored: false,
       });
       assert.deepEqual(seen[5], {
         a: true,
         b: false,
         baseTest: "grep -q base src/base.txt && true\n",
         stray: false,
+        ignored: false,
       });
       // 题面：提交信息原文，其后一行说明与应通过的测试文件路径，不附测试内容
       assert.match(
@@ -1098,8 +1107,10 @@ describe("固定起点跑批（假 agent、本地假容器）", { concurrency: t
         seen.push([input.step.commit, marker]);
         return solve(input);
       });
-      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 1 }));
-      assert.equal(seen.length, 1);
+      await runStreams(options(t, { agents: { pigeon: agent }, runtime, maxSteps: 2 }));
+      // 两步各切到该步人的提交：两步取到的值不同，且各等于该步的提交
+      assert.equal(seen.length, 2);
+      assert.notEqual(seen[0]?.[1], seen[1]?.[1]);
       for (const [commit, marker] of seen) assert.equal(marker, commit);
     } finally {
       rmSync(t.base, { recursive: true, force: true });

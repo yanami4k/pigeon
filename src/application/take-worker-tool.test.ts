@@ -97,11 +97,12 @@ test("已叠入：只取 worker 自己的改动写进主工作目录；worker �
       conflicts: [],
       deletedByWorker: ["d.txt"],
     };
-    // 文字由定稿模板按同一份结果生成（模板原文在冲突一条核对）
-    assert.equal(
-      text,
-      TAKE_WORKER_TEXTS.taken("fix-a", expected, { worktree: f.worktree, base: f.base })
-    );
+    // 关键片段（模板原文在冲突一条逐字核对，那条删除个数为 0）：叠入的文件与个数；没有冲突时不给查看命令；
+    // worker 删除的文件个数非零时照列、注明未删
+    assert.ok(text.includes("叠入的文件（2）：b.txt、n.txt。"), text);
+    assert.ok(text.includes("冲突未写入的文件（0）：无。"), text);
+    assert.ok(!text.includes("git -C"), text);
+    assert.ok(text.endsWith("worker 删除的文件（1，未删）：d.txt。"), text);
     assert.deepEqual(details.result, expected);
     assert.equal(readFileSync(join(f.main, "b.txt"), "utf8"), "b1\nb2 worker\nb3\n");
     assert.equal(readFileSync(join(f.main, "n.txt"), "utf8"), "new\n");
