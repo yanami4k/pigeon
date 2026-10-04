@@ -154,9 +154,10 @@ export interface WorkspaceHost {
 }
 
 // git status 取候选的参数（决策 348）：含未跟踪文件、逐个列出未跟踪目录里的文件、不含被忽略的、不合并改名；只看工作区
-// 所在的子树；关掉 fsmonitor 钩子。不加 --no-optional-locks：git 可顺带刷新索引里的文件状态（与人在终端里跑 git status
-// 相同；索引被别的进程锁着时只是不刷新），否则修改时间晚于索引的文件每次都要重算内容哈希
+// 所在的子树；关掉 fsmonitor 钩子；不取可选的锁、不刷新使用者的索引（刷新要短暂占住 index.lock，使用者同时在终端或编辑器里
+// 跑 git 时可能报锁已存在）。代价是修改时间晚于索引的文件每次都要重算内容哈希
 export const GIT_STATUS_ARGS: readonly string[] = [
+  "--no-optional-locks",
   "-c",
   "core.fsmonitor=",
   "status",

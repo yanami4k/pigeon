@@ -196,7 +196,7 @@ function observeScript(limit: number, oomFiles: readonly string[] | undefined): 
     'P0="$PATH"',
     `H="${SYSTEM_PATH}:$P0"`,
     'PATH="$H"',
-    'g() { env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor= "$@"; }',
+    'g() { env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git --no-optional-locks -c core.fsmonitor= "$@"; }',
     'T="$(mktemp -d 2>/dev/null)" || { T="/tmp/pigeon-observe.$$"; mkdir -p "$T"; } || exit 91',
     "trap 'rm -rf \"$T\"' EXIT",
     'cat > "$T/given"',
