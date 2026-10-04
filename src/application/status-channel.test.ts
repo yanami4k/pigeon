@@ -464,7 +464,10 @@ test("没有工具结果、因通知接着跑的一轮触发的压缩：下一�
     const fake = createFakeStreamFn({
       replies: [
         // 填充文字逐句不同，免得触发流式重复检测（决策 367）
-        { text: Array.from({ length: 40 }, (_, i) => `第${i + 1}句。`).join(""), contextTokens: 5000 },
+        {
+          text: Array.from({ length: 40 }, (_, i) => `第${i + 1}句。`).join(""),
+          contextTokens: 5000,
+        },
         { text: "## Goal\n说话" },
         { text: "收到通知", contextTokens: 300 },
       ],
