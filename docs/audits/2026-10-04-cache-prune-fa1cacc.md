@@ -66,3 +66,22 @@
 服务器 pigeon-verify，提交 4d8f4a2，`TEST_CONCURRENCY=6 npm run verify:full`（运行前没有别的测试进程），一条前台命令跑完，全过，约 108 秒。lint、check 通过；测试 1,783 项（快档与慢档）：通过 1,778，失败 0，跳过 5（只在 Windows 上运行的用例）；deps：640 个模块，无违规。
 
 开发中按目录跑 pi-runtime、application、state 三组测试时，`src/application/sandbox-session.test.ts` 的真容器用例在 4 路并发下失败过 1 次；单独跑两次与在基线上跑都通过，verify:full 里也通过。
+
+## 补记：状态栏用量与时间线（a1ebb86、3801529）
+
+状态栏用量（a1ebb86）：
+- `contextUsage()` 改按实际发出的上下文估算，与压缩判定同一口径（适配器的 `#sentTokens`）：按裁剪后的消息估算，再减去在所用那条助手 usage 之后裁掉的量——那份 usage 量的是裁剪之前发出的上下文。所用 usage 的时刻由 `compaction.ts` 新导出的 `freshUsageTime` 给出（与 `contextTokens` 共用同一段查找：最近一次压缩摘要之后最后一条正常助手消息）；没有可用 usage 时整段按裁剪后的消息估算，不再减。
+- 裁剪器改为记下本进程各次裁剪的时刻与裁掉量（`unsentTokens(since)`），取代前一版"请求发出即清零"的待扣量：前一版在裁剪之后的那次请求出错、没有新 usage 时，估算仍含着裁掉的量。压缩前先裁之后的重判同样按 `#sentTokens` 重算。
+- 裁剪记录的 `tokensBefore`、`tokensAfter` 为裁剪前后整段上下文按字符估算的 token 数。
+
+时间线（3801529）：
+- 会话视图认 `pigeon.prune` 条目（`ViewItem` 的 `prune`），trace 与 replay 各列一行（`format.ts` 的 `pruneLine`）：时机、裁了几条、前后的上下文 token 数、估算的节省与代价。
+- 会话检索只按消息建索引，不收裁剪条目。
+
+测试：
+- `src/application/context-prune-wiring.test.ts` 另加 1 项：裁剪之后的那次请求以流错误收尾（没有新 usage），`contextUsage()` 等于按 Agent 持有的原始消息估算的值减去裁掉的量。
+- 新增 `src/cli/prune-display.test.ts`（1 项）：trace 与 replay 各显示一行，含时机、条数、前后 token 数与估算的节省。
+
+变异（服务器）：`contextUsage()` 退回按未裁剪的消息估算 → 1 项变红；还原后逐字一致。
+
+verify:full：服务器 pigeon-verify，提交 3801529，`TEST_CONCURRENCY=6 npm run verify:full`（运行前没有别的测试进程），一条前台命令跑完，全过，约 108 秒。测试 1,785 项：通过 1,780，失败 0，跳过 5（只在 Windows 上运行的用例）；deps：641 个模块，无违规。
