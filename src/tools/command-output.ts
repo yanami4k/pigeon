@@ -238,6 +238,35 @@ export class CommandOutputStore {
     }
   }
 
+  // 整段内容存成下一条（决策 361：裁剪掉的命令输出还没落盘的先补落盘）：同收集器，临时文件独占新建、不跟随链接，
+  // 打开后取身份、写完再提交。返回虚拟路径；出错抛出（临时文件已删、编号照常前进）
+  save(content: Uint8Array): string {
+    const slot = this.next();
+    let fd: number | undefined;
+    try {
+      fd = openSync(
+        slot.temp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW,
+        0o600
+      );
+      const stat = fstatSync(fd, { bigint: true });
+      writeFileSync(fd, content);
+      closeSync(fd);
+      fd = undefined;
+      this.commit(slot, {
+        bytes: content.length,
+        dev: String(stat.dev),
+        ino: String(stat.ino),
+        sha256: createHash("sha256").update(content).digest("hex"),
+      });
+      return slot.uri;
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      this.discard(slot);
+      throw error;
+    }
+  }
+
   // 没写成（打开或写入出错）：删掉临时文件，编号照常前进
   discard(slot: OutputSlot): void {
     this.#last = Math.max(this.#last ?? 0, slot.id);

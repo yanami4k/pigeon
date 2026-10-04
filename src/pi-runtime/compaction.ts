@@ -228,6 +228,11 @@ export class ContextCompactor {
     return { tokens, exceeds: exceedsThreshold(tokens, this.config) };
   }
 
+  // 给定的 token 数是否超过触发点（决策 361：裁剪之后按裁掉的量重判）
+  exceeds(tokens: number): boolean {
+    return exceedsThreshold(tokens, this.config);
+  }
+
   // 执行一次压缩：读主分支、准备、判空、压缩前回调、生成摘要、写压缩条目、按会话树还原上下文。
   // 从不抛：失败以 failed 返回，压缩前回调的故障交给 onHookError
   async run(
