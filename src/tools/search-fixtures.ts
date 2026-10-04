@@ -50,7 +50,11 @@ export function makeSearchTree(git: boolean) {
     writeFileSync(full, content);
     utimesSync(full, 1_700_000_000 + index * 100, 1_700_000_000 + index * 100);
   });
-  if (git) execFileSync("git", ["init", "-q", root]);
+  if (git) {
+    execFileSync("git", ["init", "-q", root]);
+    // .git 里放一个含 foo 的文件：搜索须跳过 .git
+    writeFileSync(join(root, ".git", "pigeon-note.txt"), "foo in git dir\n");
+  }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 

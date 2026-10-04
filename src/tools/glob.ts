@@ -5,7 +5,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { basenamePrefilter, globToRegExp } from "./glob-match.ts";
 import { backendCache, backendFailure, type SearchToolOptions } from "./grep.ts";
-import { readDenyList, underDeniedPrefix } from "./read-deny.ts";
+import { readDenyList } from "./read-deny.ts";
 import {
   inGitDir,
   listFilesArgs,
@@ -18,6 +18,7 @@ import {
   type SearchBackendKind,
   SearchEnvironmentError,
   SearchToolError,
+  screenByRealPath,
   searchStart,
 } from "./search-backend.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
@@ -37,6 +38,7 @@ export interface GlobDetails {
   shown: number;
   incomplete: boolean;
   deniedOmitted: number;
+  outsideOmitted: number;
 }
 
 export function globDescription(maxResults: number): string {
@@ -62,6 +64,8 @@ export function createGlobTool(
     executionMode: "parallel",
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<GlobDetails>> {
       const args = Value.Parse(GlobParamsSchema, params);
+      // 文件名模式先编译：写错即报给模型，不跑后端
+      const matches = globToRegExp(args.pattern);
       const backend = await backendOf();
       // Windows 本机的 find 是另一个程序：没有 rg 与 git 时不降级
       if (backend.kind === "grep" && host.platform === "win32") {
@@ -69,7 +73,7 @@ export function createGlobTool(
           "本机没有 ripgrep 与 git，无法列出文件；可改用 run_command"
         );
       }
-      const start = await searchStart(host, args.path ?? ".");
+      const start = await searchStart(host, args.path ?? ".", deny);
       if (start.isFile) {
         throw new SearchToolError(`path 须是目录：${args.path}`);
       }
@@ -86,15 +90,12 @@ export function createGlobTool(
         throw new SearchEnvironmentError("列出文件超时；请缩小范围（更具体的 path）");
       }
       const incomplete = result.outputBytes > SEARCH_OUTPUT_CAP;
-      const denied = (await host.readDenyWithin?.(deny)) ?? [];
-      const matches = globToRegExp(args.pattern);
-      let deniedOmitted = 0;
-      const files: string[] = [];
-      for (const file of new Set(parseFileList(result.output, listing.nul))) {
-        if (inGitDir(file) || !matches.test(relativeToStart(file, start))) continue;
-        if (underDeniedPrefix(file, denied)) deniedOmitted += 1;
-        else files.push(file);
-      }
+      const candidates = [...new Set(parseFileList(result.stdout, listing.nul))].filter(
+        (file) => !inGitDir(file) && matches.test(relativeToStart(file, start))
+      );
+      const omitted = { denied: 0, outside: 0 };
+      const readable = await screenByRealPath(host, candidates, deny, omitted, () => 1);
+      const files = candidates.filter(readable);
       if (result.exitCode !== 0 && result.exitCode !== 1 && files.length === 0) {
         throw backendFailure(result.stderr, result.exitCode);
       }
@@ -109,7 +110,8 @@ export function createGlobTool(
         total: listed.length,
         shown: shown.length,
         incomplete,
-        deniedOmitted,
+        deniedOmitted: omitted.denied,
+        outsideOmitted: omitted.outside,
         unit: "个文件",
         measure: "个",
         none: "没有匹配的文件",
@@ -122,7 +124,8 @@ export function createGlobTool(
           total: listed.length,
           shown: shown.length,
           incomplete,
-          deniedOmitted,
+          deniedOmitted: omitted.denied,
+          outsideOmitted: omitted.outside,
         },
       };
     },

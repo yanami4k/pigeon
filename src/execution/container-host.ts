@@ -18,9 +18,11 @@ import {
   WorkspacePathNotFoundError,
 } from "../tools/paths.ts";
 import {
+  classifyRealPath,
   deniedEntry,
-  denyWithinRoot,
+  POSIX_PATH_RULES,
   ReadDeniedError,
+  type ReadPathClass,
   type ResolvedDenyEntry,
   readDeniedMessage,
 } from "../tools/read-deny.ts";
@@ -33,6 +35,7 @@ import {
   LISTING_SKIPPED_ROOT_DIRS,
   type MemoryLimitExceeded,
   memoryLimitText,
+  SYSTEM_PATH,
   type WorkspaceHost,
 } from "../tools/workspace-host.ts";
 
@@ -44,8 +47,7 @@ export class ContainerHostError extends Error {
 // 跑批器与执行端自己在容器里执行的内部命令用的 shell：/bin/sh 取绝对路径（docker exec 按镜像的 PATH 找 sh，而镜像的
 // PATH 可能以 agent 能改指的链接开头，例如 /opt/venv/bin），脚本开头把系统目录放到 PATH 最前（sh、find、git、chmod、
 // timeout、rm 等都从 root 所有的系统目录解析）。只放到最前、不整个替换：本机测试的假 docker 在本机执行，本机的 git 在
-// 系统目录之外；跑批器用到的工具在镜像里都位于系统目录，两种做法等效
-export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+// 系统目录之外；跑批器用到的工具在镜像里都位于系统目录，两种做法等效。系统目录 SYSTEM_PATH 见 tools/workspace-host.ts
 // 同时屏蔽全局与系统 git 配置（agent 能写 ~/.gitconfig，其中的 filter 驱动会在执行端的 git add 里被执行），并让 python
 // 不加载用户目录下的 site（~/.local 下的 .pth、usercustomize 与同名包；切换依赖环境的脚本以 stream 身份跑 python）
 export function trustedShell(script: string, ...args: readonly string[]): string[] {
@@ -100,15 +102,26 @@ const RESOLVE_FOR_WRITE_SCRIPT = `[ -L "$1" ] && { readlink -- "$1"; exit ${EXIT
 // 决策 355：读档解析（不限工作区）与禁读名单在容器里的真实路径。第一个参数为目标（空串即只解析名单），其后为名单各项；
 // 输出以 NUL 分隔：给了目标时先是目标的真实路径，再按项各两段——展开 ~（容器内的家目录）后的字面路径、它存在时的真实路径
 //（不存在为空串）。经 trustedShell 执行：readlink 从系统目录解析，agent 改不了
-const READ_RESOLVE_SCRIPT = [
-  't="$1"; shift',
-  `if [ -n "$t" ]; then [ -e "$t" ] || exit ${EXIT_MISSING}; r="$(readlink -f -- "$t")" && [ -n "$r" ] || exit 1; printf '%s\\0' "$r"; fi`,
+const DENY_ENTRIES_SCRIPT = [
   'for p in "$@"; do',
   `  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/\${p#"~/"}" ;; esac`,
   `  printf '%s\\0' "$p"`,
   `  if [ -e "$p" ]; then printf '%s\\0' "$(readlink -f -- "$p")"; else printf '\\0'; fi`,
   "done",
 ].join("\n");
+const READ_RESOLVE_SCRIPT = [
+  't="$1"; shift',
+  `if [ -n "$t" ]; then [ -e "$t" ] || exit ${EXIT_MISSING}; r="$(readlink -f -- "$t")" && [ -n "$r" ] || exit 1; printf '%s\\0' "$r"; fi`,
+  DENY_ENTRIES_SCRIPT,
+].join("\n");
+// 决策 355 / 368：grep、glob 的结果逐条取真实路径——参数为名单各项（输出同上），标准输入给出 NUL 分隔的相对路径，
+// 每条输出"相对路径 NUL 真实路径 NUL"（取不到为空串）
+const CLASSIFY_SCRIPT = [
+  DENY_ENTRIES_SCRIPT,
+  `xargs -0 -n 200 /bin/sh -c 'for f do r="$(readlink -f -- "$f")" || r=""; printf "%s\\0%s\\0" "$f" "$r"; done' sh`,
+].join("\n");
+// 决策 368：Pigeon 自己的辅助程序（搜索后端）——经 trustedShell 执行，程序按系统目录优先解析，不带 ripgrep 配置
+const HELPER_EXEC_SCRIPT = 'unset RIPGREP_CONFIG_PATH; exec "$@"';
 // 决策 368：glob 按修改时间排序——标准输入给出 NUL 分隔的相对路径，每行输出"秒数 路径"；取不到的文件不输出
 const MTIMES_SCRIPT = "xargs -0 stat -c '%Y %n' -- 2>/dev/null; exit 0";
 // 写入前复核后截断重写（同一次 exec 里复核与写入，空隙尽量小）：目标不得是符号链接、须仍在、重新解析须得到它自己
@@ -207,6 +220,18 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     return realRoot;
   };
 
+  // 脚本输出里从 offset 起的名单各项：每项两段（字面路径、存在时的真实路径）
+  const denyEntriesOf = (
+    fields: readonly string[],
+    offset: number,
+    deny: readonly string[]
+  ): ResolvedDenyEntry[] =>
+    deny.map((entry, index) => {
+      const literal = fields[offset + index * 2] ?? "";
+      const real = fields[offset + index * 2 + 1] ?? "";
+      return { entry, paths: [...new Set([literal, real].filter((value) => value !== ""))] };
+    });
+
   // 决策 355：目标（空串即不解析目标）与禁读名单在容器里的真实路径，一次 exec
   const resolveReadPaths = async (
     inputPath: string,
@@ -225,22 +250,21 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     if (result.exitCode !== 0 || (inputPath !== "" && target === "")) {
       throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
     }
-    const entries = deny.map((entry, index) => {
-      const literal = fields[offset + index * 2] ?? "";
-      const real = fields[offset + index * 2 + 1] ?? "";
-      return { entry, paths: [...new Set([literal, real].filter((value) => value !== ""))] };
-    });
-    return { target, entries };
+    return { target, entries: denyEntriesOf(fields, offset, deny) };
   };
 
   const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
 
   // agent 命令的执行（文件头 ①–③）
-  const runExec = (plan: HostExecPlan, execOptions: HostExecOptions): Promise<HostExecResult> => {
+  const runExec = (
+    plan: HostExecPlan,
+    execOptions: HostExecOptions,
+    streamCap: number = HOST_SEPARATE_STREAM_CAP
+  ): Promise<HostExecResult> => {
     const collected = createHeadCollector(execOptions.maxOutputBytes);
-    // 分开的两路输出（钩子协议要区分 stdout 与 stderr；上限同本机）
-    const stdoutOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
-    const stderrOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
+    // 分开的两路输出（钩子协议要区分 stdout 与 stderr；上限同本机，辅助程序另给）
+    const stdoutOnly = createHeadCollector(streamCap);
+    const stderrOnly = createHeadCollector(streamCap);
     // OCI 运行时与守护进程的报错可能落在任一输出流：两路各留一小段开头用来识别
     let stderrHead = "";
     let stdoutHead = "";
@@ -418,16 +442,41 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     async resolveForRead(inputPath, deny) {
       const base = await resolveRoot();
       const { target, entries } = await resolveReadPaths(inputPath, deny);
-      const entry = deniedEntry(target, entries, path.posix);
+      const entry = deniedEntry(target, entries, POSIX_PATH_RULES);
       if (entry !== undefined) {
         throw new ReadDeniedError(readDeniedMessage(inputPath, entry));
       }
       return { path: target, outside: !insideRoot(base, target) };
     },
-    async readDenyWithin(deny) {
+    async classifyReadPaths(relPaths, deny) {
       const base = await resolveRoot();
-      const { entries } = await resolveReadPaths("", deny);
-      return denyWithinRoot(base, entries, path.posix);
+      const classes = new Map<string, ReadPathClass>();
+      const result = await helper(
+        true,
+        trustedShell(CLASSIFY_SCRIPT, ...deny),
+        relPaths.length > 0 ? `${relPaths.join("\0")}\0` : ""
+      );
+      if (daemonFailure(result)) {
+        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      }
+      const fields = result.stdout.toString("utf8").split("\0");
+      const entries = denyEntriesOf(fields, 0, deny);
+      for (let index = deny.length * 2; index + 1 < fields.length; index += 2) {
+        const rel = fields[index] ?? "";
+        const real = fields[index + 1] ?? "";
+        if (rel !== "" && real !== "") {
+          classes.set(rel, classifyRealPath(base, real, entries, POSIX_PATH_RULES));
+        }
+      }
+      return classes;
+    },
+    execHelper(program, args, execOptions) {
+      const [shell = "/bin/sh", ...rest] = trustedShell(HELPER_EXEC_SCRIPT, program, ...args);
+      return runExec(
+        { program: shell, args: rest, verbatim: false },
+        execOptions,
+        execOptions.maxOutputBytes
+      );
     },
     async fileMtimes(relPaths) {
       const times = new Map<string, number>();

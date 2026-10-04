@@ -24,7 +24,7 @@ import { createReplaceEditTool, ReplaceEditParamsSchema } from "../tools/replace
 import { createToolGovernance, type ToolGovernanceOptions } from "./governance.ts";
 
 function layout() {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "pigeon-outside-read-")));
+  const base = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-outside-read-")));
   const ws = join(base, "ws");
   const home = join(base, "home");
   mkdirSync(join(base, "lib", "pkg"), { recursive: true });
@@ -147,16 +147,16 @@ test("非放手模式：工作区内不问人；工作区外问人（请求带�
   try {
     const store = new SessionGrantStore({ workspaceRoot: ws });
     const answers = ["n", "d"];
-    const prompts: string[] = [];
-    const outputs: string[] = [];
-    const approvalHandler = createCliApprovalHandler(
-      async (prompt) => {
-        prompts.push(prompt);
-        return prompt.startsWith("拒绝理由") ? "" : (answers.shift() ?? "n");
-      },
-      (text) => outputs.push(text),
+    const requests: ApprovalRequest[] = [];
+    const cli = createCliApprovalHandler(
+      async (prompt) => (prompt.startsWith("拒绝理由") ? "" : (answers.shift() ?? "n")),
+      () => {},
       { grants: store }
     );
+    const approvalHandler: ApprovalHandler = async (request) => {
+      requests.push(request);
+      return cli(request);
+    };
     const pkg = join(base, "lib", "pkg");
     const { decisions, results } = await run({
       ws,
@@ -181,7 +181,11 @@ test("非放手模式：工作区内不问人；工作区外问人（请求带�
     assert.doesNotMatch(results[1] ?? "", /lib a/);
     assert.match(results[2] ?? "", /lib a/);
     assert.match(results[3] ?? "", /lib b/);
-    assert.ok(outputs.join("").includes(`工作区以外（只读）：${join(pkg, "a.js")}`));
+    // 只有工作区外的两次问了人，请求带解析后的真实路径
+    assert.deepEqual(
+      requests.map((request) => request.outsidePath),
+      [join(pkg, "a.js"), join(pkg, "a.js")]
+    );
     assert.deepEqual(
       store.list().map((grant) => [grant.tool, grant.pathPrefix]),
       [["read_file", pkg]]

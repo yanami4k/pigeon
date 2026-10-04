@@ -166,9 +166,9 @@ pigeon migrate-config [--root <项目根>]
 
 ## 读档工具：工作区外只读与禁读名单
 
-`read_file` 可以只读工作区以外的文件（决策 355）：`--yolo` 下自动放行；不开放手模式时须经人批准，审批面板标明"工作区以外（只读）"与解析后的真实路径，可批准一次、按所在目录放权或按工具放权；没有审批通道（`pigeon run` 等无人值守运行）时拒绝。写与编辑仍限工作区。沙箱会话按容器里的路径判定。
+`read_file` 可以只读工作区以外的文件（决策 355）：`--yolo` 下自动放行；不开放手模式时须经人批准，审批面板标明"工作区以外（只读）"与解析后的真实路径，可批准一次、按所在目录放权或按工具放权；没有审批通道（`pigeon run` 等无人值守运行）时拒绝——但设置里固化的 `read_file` 放权（`permissions.grants`，按工具或按目录）照样放行，它就是人事先给的批准，与写档的放权同一口径。写与编辑仍限工作区。沙箱会话按容器里的路径判定。
 
-禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具（`read_file`、`grep`、`glob`）一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径，指向这些位置的链接同样不读。`grep`、`glob` 的结果里滤掉这些路径，并在末尾注明"已按禁读名单略去 N 条"。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
+禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具（`read_file`、`grep`、`glob`）一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径（本机用系统的 realpath：Windows 上 8.3 短名、大小写与 `\\?\` 前缀都归一到同一写法），指向这些位置的链接同样不读；Windows 与 macOS 上不分大小写比较；Windows 上设备前缀（`\\?\`、`\\.\`）与数据流（`name:stream`、`::$DATA`）的写法直接拒绝。`grep`、`glob` 的 `path` 落在名单内即拒；结果逐条按真实路径过滤，禁读的与经符号链接指向工作区以外的都滤掉，末尾注明略去的条数。已知限制：硬链接指向同一文件、路径却不同，无法一般地识别。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
 
 设置 `permissions.readDeny` 可往名单上追加（`~` 开头或绝对路径，三层并集），不能删减内置项：
 
@@ -178,7 +178,7 @@ pigeon migrate-config [--root <项目根>]
 
 禁读名单只管读档工具；`run_command` 经 shell 读文件不在此列，由命令审批把关。
 
-`grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
+`grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。这些后端是 Pigeon 自己的辅助程序，不走 agent 的执行通道：程序按系统目录优先解析（本机的 ripgrep 只用随包二进制的绝对路径），git 不读系统与全局配置并关掉 `core.fsmonitor`，ripgrep 不读配置文件（`RIPGREP_CONFIG_PATH`）、`.ignore` 与全局 gitignore。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
 
 ## 三道防线
 

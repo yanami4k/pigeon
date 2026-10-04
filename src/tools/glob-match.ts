@@ -4,6 +4,19 @@
 
 const REGEX_SPECIAL = /[.+^$()|{}[\]\\/*?]/;
 
+// 文件名模式写错（如字符类 [z-a] 的范围颠倒）：给模型的错误
+export class GlobPatternError extends Error {
+  readonly pigeonToolErrorKind = "domain";
+}
+
+function compile(source: string, pattern: string): RegExp {
+  try {
+    return new RegExp(source);
+  } catch {
+    throw new GlobPatternError(`文件名模式有误：${pattern}`);
+  }
+}
+
 function escapeChar(char: string): string {
   return REGEX_SPECIAL.test(char) ? `\\${char}` : char;
 }
@@ -65,9 +78,9 @@ export function globToRegExp(pattern: string): RegExp {
   }
   // 不成对的 {：按字面处理整段模式
   if (braces > 0) {
-    return new RegExp(`^${[...pattern].map(escapeChar).join("")}$`);
+    return compile(`^${[...pattern].map(escapeChar).join("")}$`, pattern);
   }
-  return new RegExp(`^${source}$`);
+  return compile(`^${source}$`, pattern);
 }
 
 // grep 的文件过滤（同 ripgrep -g 的习惯）：模式里没有 / 时只比文件名，有 / 时比相对搜索起点的路径

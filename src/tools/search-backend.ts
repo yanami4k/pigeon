@@ -1,12 +1,16 @@
 // grep 与 glob 的搜索后端（决策 368）：经执行端在本机或容器里运行——优先 ripgrep，没有则 git grep（工作区在 git
 // 仓库里时），再退到 grep -r；glob 的文件清单同样依次用 rg --files、git ls-files、find。
-// 本机先用随包附带的 ripgrep（@vscode/ripgrep：按平台拆成可选依赖，二进制直接打在包里，安装时不联网下载；MIT）。
+// 本机只用随包附带的 ripgrep（@vscode/ripgrep：按平台拆成可选依赖，二进制直接打在包里，安装时不联网下载；MIT），
+// 取其绝对路径；容器里用容器自己的。后端是 Pigeon 自己的辅助程序，经执行端的 execHelper 运行、不走 agent 的执行通道：
+// 程序按系统目录优先解析，git 不读系统与全局配置、关掉 fsmonitor，ripgrep 不读配置文件、不读 .ignore 与全局 gitignore——
+// 免审的只读工具不执行 agent 事先放好的程序或配置。
 // 传给后端的参数一律是数组、不经 shell（模式里的 shell 特殊字符原样交给后端）；模式以 -e 给出、路径放在 -- 之后，
 // 以 - 开头也不会被当成选项。
 // .gitignore：rg 与 git 只在 git 仓库里遵守（rg 缺省如此，git 本就如此）；不在 git 仓库里时三种后端都不按它过滤，口径一致。
 // 后端只负责列出候选与原始匹配；文件名模式、禁读名单与排序由调用方统一做。
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { WorkspacePathError } from "./paths.ts";
 import { allowedEnv } from "./run-command.ts";
 import type { HostExecResult, WorkspaceHost } from "./workspace-host.ts";
 
@@ -23,13 +27,21 @@ export class SearchEnvironmentError extends Error {
 // 单行最多给出的字符数（决策 368），超出截断并注明
 export const MAX_LINE_CHARS = 2000;
 
-// 搜索起点：path 参数经路径围栏解析（限工作区），给出相对工作区根的写法（正斜杠，根为 "."）与它是不是文件
+// 搜索起点：path 参数照读档的规则解析（真实路径、禁读名单、Windows 的设备前缀与数据流写法），落在禁读名单内或
+// 工作区外即拒；给出相对工作区根的写法（正斜杠，根为 "."）与它是不是文件。执行端没有读档解析时照路径围栏解析
 export async function searchStart(
   host: WorkspaceHost,
-  inputPath: string
+  inputPath: string,
+  deny: readonly string[]
 ): Promise<{ rel: string; isFile: boolean }> {
-  const root = await host.resolveExisting(".");
-  const target = await host.resolveExisting(inputPath);
+  const resolve = async (input: string): Promise<string> => {
+    if (host.resolveForRead === undefined) return host.resolveExisting(input);
+    const resolved = await host.resolveForRead(input, deny);
+    if (resolved.outside) throw new WorkspacePathError(`路径越出工作区根：${input}`);
+    return resolved.path;
+  };
+  const root = await resolve(".");
+  const target = await resolve(inputPath);
   const p = host.platform === "win32" ? path.win32 : path.posix;
   const rel = p.relative(root, target).split(p.sep).join("/");
   return { rel: rel === "" ? "." : rel, isFile: await host.isFile(target) };
@@ -53,7 +65,7 @@ export interface SearchBackend {
 }
 
 export interface SearchBackendOptions {
-  // 本机执行端：先试随包附带的 ripgrep（容器执行端不给，用容器里的 rg）
+  // 本机执行端：只用随包附带的 ripgrep（绝对路径）；容器执行端不给，用容器里的 rg
   bundledRipgrep?: boolean;
   // 只用这一种后端（测试各后端结果一致）
   only?: SearchBackendKind;
@@ -81,15 +93,15 @@ export function runSearch(
   args: string[],
   options: { timeoutMs?: number; signal?: AbortSignal | undefined; maxOutputBytes?: number } = {}
 ): Promise<HostExecResult> {
-  return host.exec(
-    { program, args, verbatim: false },
-    {
-      env: allowedEnv(process.env),
-      timeoutMs: options.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS,
-      maxOutputBytes: options.maxOutputBytes ?? SEARCH_OUTPUT_CAP,
-      signal: options.signal,
-    }
-  );
+  if (host.execHelper === undefined) {
+    throw new SearchEnvironmentError("本执行端不支持 grep、glob");
+  }
+  return host.execHelper(program, args, {
+    env: allowedEnv(process.env),
+    timeoutMs: options.timeoutMs ?? DEFAULT_SEARCH_TIMEOUT_MS,
+    maxOutputBytes: options.maxOutputBytes ?? SEARCH_OUTPUT_CAP,
+    signal: options.signal,
+  });
 }
 
 async function probe(host: WorkspaceHost, program: string, args: string[]) {
@@ -98,7 +110,13 @@ async function probe(host: WorkspaceHost, program: string, args: string[]) {
       timeoutMs: PROBE_TIMEOUT_MS,
       maxOutputBytes: 4096,
     });
-    return result.spawned && result.spawnError === undefined ? result : undefined;
+    // 容器里经 shell 包装执行：程序不存在为 127、不可执行为 126
+    return result.spawned &&
+      result.spawnError === undefined &&
+      result.exitCode !== 126 &&
+      result.exitCode !== 127
+      ? result
+      : undefined;
   } catch {
     return undefined;
   }
@@ -111,15 +129,13 @@ export async function detectSearchBackend(
 ): Promise<SearchBackend | undefined> {
   const wants = (kind: SearchBackendKind) => options.only === undefined || options.only === kind;
   if (wants("rg")) {
-    const bundled = options.bundledRipgrep === true ? await bundledRipgrepPath() : undefined;
-    for (const program of [bundled, "rg"]) {
-      if (program !== undefined && (await probe(host, program, ["--version"]))?.exitCode === 0) {
-        return { kind: "rg", program };
-      }
+    const program = options.bundledRipgrep === true ? await bundledRipgrepPath() : "rg";
+    if (program !== undefined && (await probe(host, program, ["--version"]))?.exitCode === 0) {
+      return { kind: "rg", program };
     }
   }
   if (wants("git")) {
-    const inside = await probe(host, "git", ["rev-parse", "--is-inside-work-tree"]);
+    const inside = await probe(host, "git", [...GIT_SAFE, "rev-parse", "--is-inside-work-tree"]);
     if (inside?.exitCode === 0 && inside.stdout.trim() === "true") {
       return { kind: "git", program: "git" };
     }
@@ -137,6 +153,19 @@ export async function detectSearchBackend(
   return undefined;
 }
 
+// git 的每次调用都关掉 fsmonitor（仓库配置里的 fsmonitor 会执行程序），系统与全局配置由 execHelper 屏蔽
+const GIT_SAFE = ["-c", "core.fsmonitor=", "-c", "core.quotepath=off"];
+
+// ripgrep 的共同参数：不读配置文件；不读 .ignore、.rgignore 与全局 gitignore（与 git 的口径一致）；含隐藏文件、跳过 .git
+const RG_COMMON = [
+  "--no-config",
+  "--no-ignore-dot",
+  "--no-ignore-global",
+  "--hidden",
+  "--glob",
+  "!.git",
+];
+
 export interface GrepQuery {
   pattern: string;
   // 搜索起点：相对工作区根（正斜杠；根为 "."）
@@ -152,10 +181,7 @@ export function grepArgs(backend: SearchBackend, query: GrepQuery): string[] {
   const context = query.context > 0 && !query.filesOnly ? ["-C", String(query.context)] : [];
   if (backend.kind === "rg") {
     return [
-      "--no-config",
-      "--hidden",
-      "--glob",
-      "!.git",
+      ...RG_COMMON,
       "--no-heading",
       "--with-filename",
       "--line-number",
@@ -178,8 +204,7 @@ export function grepArgs(backend: SearchBackend, query: GrepQuery): string[] {
   if (backend.kind === "git") {
     // -z 下匹配行与上下文行都以 NUL 分隔字段：带 --column 时匹配行多一个列号字段，据此区分
     return [
-      "-c",
-      "core.quotepath=off",
+      ...GIT_SAFE,
       "grep",
       "--no-color",
       "-I",
@@ -286,11 +311,8 @@ export function listFilesArgs(
     return {
       program: backend.program,
       args: [
-        "--no-config",
+        ...RG_COMMON,
         "--files",
-        "--hidden",
-        "--glob",
-        "!.git",
         "--null",
         "--no-messages",
         ...(prefilter !== undefined
@@ -306,8 +328,7 @@ export function listFilesArgs(
     return {
       program: "git",
       args: [
-        "-c",
-        "core.quotepath=off",
+        ...GIT_SAFE,
         "ls-files",
         "-z",
         "--cached",
@@ -343,6 +364,8 @@ export function resultNotes(input: {
   // 输出超过上限，没有统计完（total 为"至少"）
   incomplete: boolean;
   deniedOmitted: number;
+  // 经符号链接落在工作区以外、因而略去的条数
+  outsideOmitted: number;
   unit: string;
   measure: string;
   none: string;
@@ -360,7 +383,31 @@ export function resultNotes(input: {
   if (input.deniedOmitted > 0) {
     notes.push(`已按禁读名单略去 ${input.deniedOmitted} 条`);
   }
+  if (input.outsideOmitted > 0) {
+    notes.push(`已略去指向工作区以外的 ${input.outsideOmitted} 条`);
+  }
   return notes;
+}
+
+// 逐条按真实路径筛（决策 355 / 368，三种后端一律如此）：可读的留下；禁读的与经符号链接落在工作区外的略去，
+// 按 weight（每个文件计几条）计入 omitted；取不到真实路径的（列出之后被删）略去不计。执行端没有分类能力时全部留下
+export async function screenByRealPath(
+  host: WorkspaceHost,
+  relPaths: readonly string[],
+  deny: readonly string[],
+  omitted: { denied: number; outside: number },
+  weight: (relPath: string) => number
+): Promise<(relPath: string) => boolean> {
+  if (host.classifyReadPaths === undefined) {
+    return () => true;
+  }
+  const classes = await host.classifyReadPaths(relPaths, deny);
+  for (const rel of relPaths) {
+    const kind = classes.get(rel);
+    if (kind === "denied") omitted.denied += weight(rel);
+    else if (kind === "outside") omitted.outside += weight(rel);
+  }
+  return (rel) => classes.get(rel) === "ok";
 }
 
 // 路径里有 .git 这一段（不支持 --exclude-dir 的 grep 与 find 的结果在这里再滤一次）

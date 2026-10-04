@@ -4,7 +4,23 @@
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
-import type { ReadTarget } from "./read-deny.ts";
+import type { ReadPathClass, ReadTarget } from "./read-deny.ts";
+
+// 系统程序所在的目录（root 所有、agent 改不了）：Pigeon 自己执行的程序按它们优先解析
+export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+// Pigeon 自己执行的辅助程序的环境：系统目录放到 PATH 最前（Windows 照旧），屏蔽 git 的全局与系统配置
+//（其中的 filter、fsmonitor 等会执行程序），不带 ripgrep 的配置文件
+export function helperEnv(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && key.toUpperCase() !== "RIPGREP_CONFIG_PATH") env[key] = value;
+  }
+  if (platform !== "win32") env.PATH = `${SYSTEM_PATH}${env.PATH ? `:${env.PATH}` : ""}`;
+  env.GIT_CONFIG_GLOBAL = "/dev/null";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  return env;
+}
 
 // 一次执行的进程参数：direct 直接给出程序与参数；shell 与 cmd.exe 启动器由工具按平台拼好后同样以此形态交来
 export interface HostExecPlan {
@@ -93,9 +109,21 @@ export interface WorkspaceHost {
   //（~ 按本执行端的家目录展开）之内抛 ReadDeniedError，不存在抛 WorkspacePathNotFoundError。
   // 可选：没有实现的执行端读档只限工作区之内（照 resolveExisting）
   resolveForRead?(inputPath: string, deny: readonly string[]): Promise<ReadTarget>;
-  // 决策 355 / 368：禁读名单里落在工作区根之内的部分，相对工作区根（正斜杠；工作区根整片禁读时为 "."）；
-  // grep、glob 据此滤掉结果。可选：没有实现的执行端不滤
-  readDenyWithin?(deny: readonly string[]): Promise<string[]>;
+  // 决策 355 / 368：grep、glob 的结果（相对工作区根的路径）逐条按真实路径分类——可读、落在工作区外、禁读；
+  // 取不到真实路径的不在结果里。可选：没有实现的执行端不滤
+  classifyReadPaths?(
+    relPaths: readonly string[],
+    deny: readonly string[]
+  ): Promise<Map<string, ReadPathClass>>;
+  // 决策 368：Pigeon 自己的只读辅助程序（grep、glob 的搜索后端）的执行，不走 agent 的执行通道——程序按系统目录
+  // 解析（照 trustedShell 的取法：系统目录在前），屏蔽 git 的系统与全局配置，不带 RIPGREP_CONFIG_PATH；
+  // stdout 与 stderr 各自留到 maxOutputBytes。env 为调用方过了白名单的环境（容器实现不采用）。在工作区根执行。
+  // 可选：没有实现的执行端 grep、glob 不可用
+  execHelper?(
+    program: string,
+    args: readonly string[],
+    options: Omit<HostExecOptions, "stdin">
+  ): Promise<HostExecResult>;
   // 决策 368：工作区内文件（相对工作区根的路径）的修改时间（毫秒）；取不到的不在结果里。glob 据此排序。
   // 可选：没有实现的执行端 glob 按路径排序
   fileMtimes?(relPaths: readonly string[]): Promise<Map<string, number>>;

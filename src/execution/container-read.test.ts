@@ -56,7 +56,9 @@ test("容器里读档：工作区外按容器内路径判定；禁读名单按�
         denied
       );
     }
-    assert.deepEqual(await host.readDenyWithin?.(deny), []);
+    // grep、glob 的结果逐条分类：经链接指向禁读处的记禁读，取不到真实路径的不在结果里
+    const classes = await host.classifyReadPaths?.(["a.txt", "keys/id", "missing"], deny);
+    assert.deepEqual(Object.fromEntries(classes ?? []), { "a.txt": "ok", "keys/id": "denied" });
     // 工具：未经授权拒读，授权后读到内容（一次一用）
     const tool = createReadFileTool(host, { outsideReads: "allowed" });
     await assert.rejects(

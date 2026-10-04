@@ -2,7 +2,7 @@
 // 路径围栏沿用 paths.ts 的 realpath 口径；进程执行、文件清单与 .cmd / .bat 解析从 run-command.ts 原样平移，行为不变。
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -17,12 +17,13 @@ import {
   trackChild,
   untrackChild,
 } from "./process-tree.ts";
-import { denyWithinRoot, resolveDenyEntriesLocal, resolveLocalReadPath } from "./read-deny.ts";
+import { classifyLocalReadPaths, resolveLocalReadPath } from "./read-deny.ts";
 import {
   type HostExecOptions,
   type HostExecPlan,
   type HostExecResult,
   type HostFileSnapshot,
+  helperEnv,
   LISTING_SKIPPED_DIRS,
   LISTING_SKIPPED_ROOT_DIRS,
   type WorkspaceHost,
@@ -52,13 +53,17 @@ export function createLocalWorkspaceHost(
     async resolveForRead(inputPath, deny) {
       return resolveLocalReadPath(workspaceRoot, inputPath, deny, options.homeDir ?? homedir());
     },
-    async readDenyWithin(deny) {
-      return denyWithinRoot(
-        realpathSync(workspaceRoot),
-        resolveDenyEntriesLocal(deny, options.homeDir ?? homedir()),
-        path
-      );
+    async classifyReadPaths(relPaths, deny) {
+      return classifyLocalReadPaths(workspaceRoot, relPaths, deny, options.homeDir ?? homedir());
     },
+    // 辅助程序：环境屏蔽 git 的全局与系统配置、不带 ripgrep 配置；两路输出各自留到 maxOutputBytes
+    execHelper: (program, args, execOptions) =>
+      runLocalProcess(
+        { program, args: [...args], verbatim: false },
+        workspaceRoot,
+        { ...execOptions, env: helperEnv(execOptions.env, process.platform) },
+        execOptions.maxOutputBytes
+      ),
     async fileMtimes(relPaths) {
       const times = new Map<string, number>();
       // 分批并发，免得一次开上万个文件句柄
@@ -137,11 +142,13 @@ export const HOST_SEPARATE_STREAM_CAP = 64 * 1024;
 function runLocalProcess(
   plan: HostExecPlan,
   cwd: string,
-  options: HostExecOptions
+  options: HostExecOptions,
+  // 分开的 stdout / stderr 各自保留的上限（缺省 HOST_SEPARATE_STREAM_CAP）
+  streamCap: number = HOST_SEPARATE_STREAM_CAP
 ): Promise<HostExecResult> {
   const collected = createHeadCollector(options.maxOutputBytes);
-  const stdoutOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
-  const stderrOnly = createHeadCollector(HOST_SEPARATE_STREAM_CAP);
+  const stdoutOnly = createHeadCollector(streamCap);
+  const stderrOnly = createHeadCollector(streamCap);
   let timedOut = false;
   const finish = (
     partial: Omit<

@@ -1,9 +1,10 @@
 // 容器里的 grep 与 glob（决策 368），真容器：各后端的结果与本机 rg 一致——busybox 覆盖 grep -r 与 find 降级，
-// 带 rg 与 git 的镜像覆盖 rg 与 git grep。没有 Docker、所需镜像或本机随包的 ripgrep 时跳过。
+// 带 rg 与 git 的镜像覆盖 rg 与 git grep；busybox 的 grep -r 跟随指向文件的链接，结果按真实路径逐条过滤。没有 Docker、所需镜像或本机随包的 ripgrep 时跳过。
 // 带 git 的镜像取环境变量 PIGEON_SANDBOX_TEST_IMAGE，否则取本地已有的通用镜像（pigeon-sandbox:*）。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { createGrepTool } from "../tools/grep.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import { bundledRipgrepPath, type SearchBackendKind } from "../tools/search-backend.ts";
 import {
@@ -98,4 +99,40 @@ test("带 rg 与 git 的镜像：git 仓库里 rg 与 git grep、不在仓库里
     ["/tmp/work-git", true, ["rg", "git"]],
     ["/tmp/work-plain", false, ["rg", "grep"]],
   ]);
+});
+
+const hasBusybox = dockerUp && docker("image", "inspect", "busybox:latest").status === 0;
+
+test("busybox 的 grep -r 跟随指向文件的链接：经链接读到的禁读文件与工作区外文件逐条滤掉并计数，.git 里的不出现", {
+  skip: hasBusybox ? false : "没有 Docker 或 busybox 镜像",
+}, async () => {
+  const name = `pigeon-search-links-${process.pid}`;
+  await removeWorkspaceContainer(name);
+  await startWorkspaceContainer({ image: "busybox:latest", name });
+  try {
+    const made = await containerExec({
+      container: name,
+      command: [
+        "sh",
+        "-c",
+        "mkdir -p /w/.git /root/.ssh /outside && printf 'foo here\\n' > /w/a.txt && " +
+          "printf 'foo key\\n' > /root/.ssh/id && printf 'foo outside\\n' > /outside/x.txt && " +
+          "printf 'foo git\\n' > /w/.git/note && ln -s /root/.ssh/id /w/leak && ln -s /outside/x.txt /w/out",
+      ],
+      workdir: "/",
+      user: "root",
+    });
+    assert.equal(made.exitCode, 0, made.stderr);
+    const host = createContainerWorkspaceHost({ container: name, root: "/w" });
+    const grep = createGrepTool(host, { maxResults: 50, only: "grep" });
+    const result = await grep.execute("tc", { pattern: "foo" });
+    const text = result.content.map((block) => ("text" in block ? block.text : "")).join("");
+    assert.deepEqual(
+      [result.details.total, result.details.deniedOmitted, result.details.outsideOmitted],
+      [1, 1, 1]
+    );
+    assert.doesNotMatch(text, /foo (key|outside|git)/);
+  } finally {
+    await removeWorkspaceContainer(name);
+  }
 });

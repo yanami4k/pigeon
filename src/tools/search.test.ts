@@ -2,13 +2,14 @@
 // 遵守 .gitignore、跳过 .git、含隐藏文件；上限与总数提示；模式里的 shell 特殊字符原样交给后端、不被解释；
 // 以 - 开头的模式与目录不被当成选项；禁读名单的路径从结果里滤掉并注明条数。机器上没有的后端跳过。
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createGlobTool } from "./glob.ts";
-import { globToRegExp } from "./glob-match.ts";
+import { GlobPatternError, globToRegExp } from "./glob-match.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
+import { ReadDeniedError } from "./read-deny.ts";
 import { detectSearchBackend, type SearchBackendKind } from "./search-backend.ts";
 import { makeSearchTree, searchOutputs } from "./search-fixtures.ts";
 
@@ -39,7 +40,8 @@ for (const git of [true, false]) {
       const all = first?.grep[0] ?? "";
       assert.match(all, /^\.hidden\/h\.ts:1:foo hidden$/m);
       assert.match(all, /^-dash\/d\.ts:1:foo dash$/m);
-      assert.doesNotMatch(all, /\.git\//);
+      // git 仓库的 .git 里放了含 foo 的文件（见夹具），搜不到
+      assert.doesNotMatch(all, /\.git\/|in git dir/);
       assert.equal(/ignored\/x\.ts|x\.log/.test(all), !git, all);
       assert.equal(first?.grep[2], "src/a.ts-1-alpha foo\nsrc/a.ts:2:beta\nsrc/a.ts-3-foo:bar");
       // shell 特殊字符原样当正则：命中那一行，且没有任何命令被执行
@@ -58,32 +60,32 @@ for (const git of [true, false]) {
   });
 }
 
-test("上限：超出给出总数并提示缩小范围；files_only 与 glob 同样；禁读名单的路径滤掉并注明条数", async () => {
+test("上限给出总数（grep、files_only、glob）；禁读的路径逐条滤掉并计数；path 经链接指向禁读目录即拒", async () => {
   const { root, cleanup } = makeSearchTree(true);
   try {
+    // 工作区就是家目录：~/.ssh 在工作区内；keys 是指向它的链接
     mkdirSync(join(root, ".ssh"));
     writeFileSync(join(root, ".ssh", "id_rsa"), "foo key\n");
-    // 工作区就是家目录：~/.ssh 在工作区内
+    symlinkSync(join(root, ".ssh"), join(root, "keys"), "junction");
     const host = createLocalWorkspaceHost(root, { homeDir: root });
     const grep = createGrepTool(host, { maxResults: 5, bundledRipgrep: true });
     const result = await grep.execute("tc", { pattern: "foo" });
-    const lines = text(result).split("\n");
-    assert.equal(lines.filter((line) => /:\d+:/.test(line)).length, 5);
-    assert.ok(result.details.total > 5);
-    assert.ok(
-      lines.includes(
-        `共 ${result.details.total} 条匹配，只列出前 5 条；请缩小范围（更具体的 pattern、path 或 glob）`
-      )
-    );
-    assert.ok(lines.includes("已按禁读名单略去 1 条"));
-    assert.ok(!lines.some((line) => line.includes(".ssh")));
+    assert.equal(result.details.shown, 5);
+    assert.ok(result.details.total > 5, String(result.details.total));
+    assert.equal(result.details.deniedOmitted, 1);
+    assert.doesNotMatch(text(result), /foo key/);
     const fewer = createGrepTool(host, { maxResults: 3, bundledRipgrep: true });
-    const files = text(await fewer.execute("tc", { pattern: "foo", files_only: true }));
-    assert.match(files, /共 5 个文件，只列出前 3 个/);
+    const files = await fewer.execute("tc", { pattern: "foo", files_only: true });
+    assert.deepEqual(
+      [files.details.total, files.details.shown, files.details.deniedOmitted],
+      [5, 3, 1]
+    );
     const glob = createGlobTool(host, { maxResults: 2, bundledRipgrep: true });
-    const listed = text(await glob.execute("tc", { pattern: "**/*" }));
-    assert.match(listed, /共 \d+ 个文件，只列出前 2 个；请缩小范围/);
-    assert.match(listed, /已按禁读名单略去 1 条/);
+    const listed = await glob.execute("tc", { pattern: "**/*" });
+    assert.equal(listed.details.shown, 2);
+    assert.ok(listed.details.total > 2, String(listed.details.total));
+    assert.equal(listed.details.deniedOmitted, 1);
+    await assert.rejects(grep.execute("tc", { pattern: "foo", path: "keys" }), ReadDeniedError);
   } finally {
     cleanup();
   }
@@ -108,4 +110,6 @@ test("文件名模式：* 不跨目录，** 跨任意层，? 一个字符，[...
   for (const [pattern, target, expected] of cases) {
     assert.equal(globToRegExp(pattern).test(target), expected, `${pattern} ~ ${target}`);
   }
+  // 写错的模式归给模型的错误
+  assert.throws(() => globToRegExp("[z-a]"), GlobPatternError);
 });
