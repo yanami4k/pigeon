@@ -2,8 +2,8 @@
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
 //   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）、模型信息的覆盖值 modelInfo（决策 362）、撞上限续跑
-//   truncationContinuation、流式重复检测 repetitionGuard（决策 367）与工具的上限类设置 tools（决策 356、357、368）；
-//   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
+//   truncationContinuation、流式重复检测 repetitionGuard（决策 367）、工具的上限类设置 tools（决策 356、357、368）与
+//   上下文裁剪 contextPrune（决策 361）；另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
 //   hooks 各层的条目并列生效（同一事件同一 matcher 下命令完全相同的只留一份）。
@@ -39,6 +39,7 @@ import {
   type OrchestrationSettings,
   orchestrationSettings,
 } from "./orchestration-config.ts";
+import { type ContextPruneSection, ContextPruneSectionSchema } from "./prune-config.ts";
 import {
   type RepetitionGuardSection,
   RepetitionGuardSectionSchema,
@@ -91,6 +92,7 @@ export const SETTINGS_SECTIONS = {
   truncationContinuation: TruncationContinuationSectionSchema,
   repetitionGuard: RepetitionGuardSectionSchema,
   tools: ToolsSectionSchema,
+  contextPrune: ContextPruneSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -116,6 +118,7 @@ export const SettingsFileSchema = Type.Object(
     truncationContinuation: Type.Optional(TruncationContinuationSectionSchema),
     repetitionGuard: Type.Optional(RepetitionGuardSectionSchema),
     tools: Type.Optional(ToolsSectionSchema),
+    contextPrune: Type.Optional(ContextPruneSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -271,6 +274,7 @@ export interface MergedSettings {
   truncationContinuation?: TruncationContinuationSection;
   repetitionGuard?: RepetitionGuardSection;
   tools?: Static<typeof ToolsSectionSchema>;
+  contextPrune?: ContextPruneSection;
   // 决策 355：读档禁读名单的追加项，三层并集（permissions.readDeny；只能往内置名单上加）
   readDeny?: string[];
   trustedDirectories: string[];
@@ -457,6 +461,11 @@ export function memoryLimitsOf(snapshot: SettingsSnapshot): MemoryLimits {
 // 模型信息的覆盖值（决策 362）：合并后的 modelInfo 一节
 export function modelInfoSectionOf(snapshot: SettingsSnapshot): ModelInfoSection | undefined {
   return snapshot.merged.modelInfo;
+}
+
+// 决策 361：上下文裁剪一节（缺省值与按模型信息算的价格比由 prune-config.ts 补）
+export function contextPruneSectionOf(snapshot: SettingsSnapshot): ContextPruneSection | undefined {
+  return snapshot.merged.contextPrune;
 }
 
 // 决策 357：read_file 的单次字节与单行字符上限（tools 一节，不给的取缺省）

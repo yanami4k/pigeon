@@ -51,6 +51,7 @@ export const SessionEntryType = {
   Continuation: "pigeon.continuation",
   Repetition: "pigeon.repetition",
   Status: "pigeon.status",
+  Prune: "pigeon.prune",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -385,6 +386,42 @@ export const StatusDataSchema = Type.Object({
 });
 export type StatusData = Static<typeof StatusDataSchema>;
 
+// 一次上下文裁剪（决策 361）：裁了哪些工具结果（按工具调用号）、各换成什么占位、为什么算候选、原来估算的 token 数；
+// 时机；估算的代价与节省（按命中价折算的 token 当量：代价为改写点之后的量 ×（价格比 − 1），节省为裁掉量 × N；免费时机
+// 代价为 0）；前后的上下文 token 数。组装请求时依次应用，续跑照记录重放；原文照旧在会话记录里
+export const PruneDataSchema = Type.Object({
+  version: VERSION,
+  runId: Type.Optional(RunIdSchema),
+  trigger: Type.Union([
+    Type.Literal("compaction"),
+    Type.Literal("model"),
+    Type.Literal("tools"),
+    Type.Literal("system-prompt"),
+    Type.Literal("idle"),
+    Type.Literal("paid"),
+  ]),
+  items: Type.Array(
+    Type.Object({
+      toolCallId: Type.String({ minLength: 1 }),
+      toolName: Type.String(),
+      reason: Type.Union([Type.Literal("stale"), Type.Literal("empty"), Type.Literal("large")]),
+      tokens: Type.Integer({ minimum: 0 }),
+      placeholder: Type.String({ minLength: 1 }),
+    }),
+    { minItems: 1 }
+  ),
+  priceRatio: Type.Number({ minimum: 1 }),
+  horizonTurns: Type.Integer({ minimum: 1 }),
+  prunedTokens: Type.Integer({ minimum: 0 }),
+  rewriteTokens: Type.Integer({ minimum: 0 }),
+  estimatedCost: Type.Number({ minimum: 0 }),
+  estimatedSaving: Type.Number({ minimum: 0 }),
+  tokensBefore: Type.Integer({ minimum: 0 }),
+  tokensAfter: Type.Integer({ minimum: 0 }),
+  prunedAt: Type.Integer({ minimum: 0 }),
+});
+export type PruneData = Static<typeof PruneDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -399,7 +436,8 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Hook; data: HookRunData }
   | { customType: typeof SessionEntryType.Continuation; data: ContinuationData }
   | { customType: typeof SessionEntryType.Repetition; data: RepetitionData }
-  | { customType: typeof SessionEntryType.Status; data: StatusData };
+  | { customType: typeof SessionEntryType.Status; data: StatusData }
+  | { customType: typeof SessionEntryType.Prune; data: PruneData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -416,6 +454,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Continuation]: ContinuationDataSchema,
   [SessionEntryType.Repetition]: RepetitionDataSchema,
   [SessionEntryType.Status]: StatusDataSchema,
+  [SessionEntryType.Prune]: PruneDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。
