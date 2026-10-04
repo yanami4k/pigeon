@@ -1,4 +1,4 @@
-// 人写的说明（决策 330）：读 AGENTS.md，会话开始读一次即冻结（拼进系统提示，不走 transformContext）。
+// 人写的说明（决策 330、363）：读 AGENTS.md，作开工状态块的「项目说明」一节（不走 transformContext）；会话中变了即整节追加取代。
 // - 用户级：~/.pigeon/AGENTS.md（主目录可注入，测试指到临时目录）。
 // - 项目级：从仓库根到工作目录逐层读 AGENTS.md，自上而下拼接，不越过仓库根；某层没有 AGENTS.md 而有 CLAUDE.md 时读该层的
 //   CLAUDE.md。仓库根为工作目录往上第一个带 .git（目录或文件，worker 工作树里是文件）的目录；不在 git 仓库里时只读工作目录
@@ -30,7 +30,7 @@ export interface AgentsMdOptions {
 }
 
 export interface AgentsMdInstructions {
-  // 追加进系统提示的冻结段落；一份说明都没有时为空串
+  // 「项目说明」一节的正文；一份说明都没有时为空串
   section: string;
   // 冻结清单：用户级在前，项目级自仓库根往下
   manifest: MemoryManifestEntry[];
