@@ -18,7 +18,7 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
-import type { WorkspaceHost } from "./workspace-host.ts";
+import { planAndWrite, type WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 export class EditFileError extends Error {}
 
@@ -86,11 +86,16 @@ export function createEditFileTool(
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<EditFileDetails>> {
       const args = Value.Parse(EditFileParamsSchema, params);
-      const plan = await planEdits(host, args);
+      // 唯一的副作用落盘点（写前最后查一次 abort；写后不可回滚，见上游 edit 笔记 §6.3）；
+      // 决策 349：预检与落盘经 planAndWrite（写入时原文已变即用新原文重算一次，快照预检照样兜底）
+      const plan = await planAndWrite({
+        host,
+        inputPath: args.path,
+        plan: () => planEdits(host, args),
+        contentOf: (planned) => joinContent(planned.newLines, planned.split),
+        signal,
+      });
       const newRaw = joinContent(plan.newLines, plan.split);
-      // 唯一的副作用落盘点（写前最后查一次 abort；写后不可回滚，见上游 edit 笔记 §6.3）
-      signal?.throwIfAborted();
-      await host.writeText(plan.resolvedPath, newRaw);
 
       const afterSnapshot = snapshotTag(newRaw);
       const diff = buildEditDiff(args.path, plan.split.lines, plan.applied);

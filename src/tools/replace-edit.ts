@@ -17,7 +17,7 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
-import type { WorkspaceHost } from "./workspace-host.ts";
+import { planAndWrite, type WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
 // 域错误（模型给的原文不对、不唯一或无变化）；带归类标记，tools/error-kind.ts 读标记归 domain
@@ -69,9 +69,14 @@ export function createReplaceEditTool(
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<ReplaceEditDetails>> {
       const args = Value.Parse(ReplaceEditParamsSchema, params);
-      const plan = await planReplace(host, args);
-      signal?.throwIfAborted();
-      await host.writeText(plan.resolvedPath, plan.newRaw);
+      // 决策 349：预检与落盘经 planAndWrite（写入时原文已变即用新原文重算一次）
+      const plan = await planAndWrite({
+        host,
+        inputPath: args.path,
+        plan: () => planReplace(host, args),
+        contentOf: (planned) => planned.newRaw,
+        signal,
+      });
       const addedLines = plan.applied.added.length;
       const removedLines = plan.applied.removed.length;
       return {

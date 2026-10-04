@@ -4,6 +4,7 @@
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
+import { WorkspaceContentChangedError } from "./paths.ts";
 
 // 一次执行的进程参数：direct 直接给出程序与参数；shell 与 cmd.exe 启动器由工具按平台拼好后同样以此形态交来
 export interface HostExecPlan {
@@ -216,4 +217,39 @@ export function gitFileState(
     truncated ||= before.truncated;
   }
   return { kind: "git", entries, truncated };
+}
+
+// 写工具的预检与落盘（决策 349）：执行端可能以检视时读出的原文（审批之前）供预检——预检失败时先刷新检视再预检一次；
+// 写入时执行端复核原文未变，变了即刷新检视并抛 WorkspaceContentChangedError，这里用新原文重算一次再写（同"执行时重新预检"）。
+// 本地执行端每次现读，两处重试的结果与原先相同
+export async function planAndWrite<P extends { resolvedPath: string }>(input: {
+  host: WorkspaceHost;
+  inputPath: string;
+  plan: () => Promise<P>;
+  contentOf: (plan: P) => string;
+  signal: AbortSignal | undefined;
+}): Promise<P> {
+  let planned: P;
+  try {
+    planned = await input.plan();
+  } catch (error) {
+    try {
+      await input.host.resolveExisting(input.inputPath);
+    } catch {
+      throw error;
+    }
+    planned = await input.plan();
+  }
+  input.signal?.throwIfAborted();
+  try {
+    await input.host.writeText(planned.resolvedPath, input.contentOf(planned));
+  } catch (error) {
+    if (!(error instanceof WorkspaceContentChangedError)) {
+      throw error;
+    }
+    planned = await input.plan();
+    input.signal?.throwIfAborted();
+    await input.host.writeText(planned.resolvedPath, input.contentOf(planned));
+  }
+  return planned;
 }

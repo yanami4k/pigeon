@@ -11,6 +11,10 @@ export class WorkspacePathNotFoundError extends WorkspacePathError {}
 // 决策 334：写入前复核不通过（路径在检查之后变了，或要写的文件是符号链接），拒写
 export class WorkspaceWriteRefusedError extends WorkspacePathError {}
 
+// 决策 349：写入前复核发现原文已不是预检时读到的那份（容器执行端按检视时的 cksum 复核），拒写；执行端已刷新检视，
+// 调用方据此重读重算一次
+export class WorkspaceContentChangedError extends WorkspaceWriteRefusedError {}
+
 // path.relative 的结果是否表示越界：恰好是 ..、以 .. 加路径分隔符开头、或是绝对路径（win32 跨盘符时给出绝对路径）。
 // 只看"以 .. 开头"会把名字本身以两个点开头的合法文件或目录（..notes.txt、..cache/）误判为越界。
 // 路径围栏与 Skill 资源围栏共用这一口径
