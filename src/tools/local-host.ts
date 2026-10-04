@@ -7,6 +7,7 @@ import {
   type Dirent,
   existsSync,
   constants as fsConstants,
+  fstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -87,8 +88,9 @@ export function asWorkspaceHost(workspace: string | WorkspaceHost): WorkspaceHos
 
 // 输出收集：全量计字节数与哈希，只留开头 maxBytes 字节（本地与容器实现共用）。
 // 决策 356：给了 tailBytes 另留末尾、另计总行数；给了 fullOutput 且输出超过开头加末尾两段时，从超过的那一刻起把全量输出
-// （含此前留在内存里的部分）写进文件，至多 fullOutput.maxBytes 字节。文件以独占方式新建、不跟随链接；建目录、打开或写入
-// 出错（磁盘满、文件已在、被换成链接）即停止落盘、关掉文件，照常给出头尾并在结果里写明原因，不让异常漏到数据回调外。
+// （含此前留在内存里的部分）写进文件，至多 fullOutput.maxBytes 字节。文件以独占方式新建、不跟随链接，打开后记下它的设备号
+// 与 inode，写入的字节同时算 sha256（落盘存储据此核对身份）；建目录、打开或写入出错（磁盘满、文件已在、被换成链接）即停止
+// 落盘、关掉文件，照常给出头尾并在结果里写明原因，不让异常漏到数据回调外。
 // 开头与末尾按字节截取后对齐到 UTF-8 字符边界（不出现半个字符）
 export interface HeadCollector {
   push(chunk: Buffer): void;
@@ -102,6 +104,7 @@ export interface HeadCollector {
     | "tail"
     | "outputLines"
     | "fullOutputSaved"
+    | "fullOutputFile"
     | "fullOutputError"
   >;
 }
@@ -147,7 +150,16 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
   let tailHeld = 0;
   let newlines = 0;
   let lastByte: number | undefined;
-  let spill: { fd: number; written: number; partial: boolean } | undefined;
+  let spill:
+    | {
+        fd: number;
+        written: number;
+        partial: boolean;
+        dev: string;
+        ino: string;
+        hash: ReturnType<typeof createHash>;
+      }
+    | undefined;
   let spillError: string | undefined;
   const stopSpill = (error: unknown): void => {
     spillError = error instanceof Error ? error.message : String(error);
@@ -165,9 +177,13 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
     const room = extras.fullOutput.maxBytes - spill.written;
     const piece = room < chunk.length ? chunk.subarray(0, Math.max(0, room)) : chunk;
     try {
-      if (piece.length > 0) {
-        writeSync(spill.fd, piece);
-        spill.written += piece.length;
+      // 普通文件也可能只写进一部分（如磁盘将满）：写到全部写完，写不进去即出错
+      for (let done = 0; done < piece.length; ) {
+        const wrote = writeSync(spill.fd, piece, done);
+        if (wrote <= 0) throw new Error("落盘写不进去");
+        spill.hash.update(piece.subarray(done, done + wrote));
+        done += wrote;
+        spill.written += wrote;
       }
     } catch (error) {
       stopSpill(error);
@@ -194,10 +210,21 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
           // 先于本块进开头缓冲，免得本块的开头一段写两遍
           try {
             mkdirSync(path.dirname(extras.fullOutput.path), { recursive: true });
+            const fd = openSync(extras.fullOutput.path, SPILL_FLAGS, 0o600);
+            let identity: { dev: bigint; ino: bigint };
+            try {
+              identity = fstatSync(fd, { bigint: true });
+            } catch (error) {
+              closeSync(fd);
+              throw error;
+            }
             spill = {
-              fd: openSync(extras.fullOutput.path, SPILL_FLAGS, 0o600),
+              fd,
               written: 0,
               partial: false,
+              dev: String(identity.dev),
+              ino: String(identity.ino),
+              hash: createHash("sha256"),
             };
           } catch (error) {
             stopSpill(error);
@@ -252,7 +279,10 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
         tail: utf8Tail(kept).toString("utf8"),
         outputLines,
         ...(spill !== undefined && spillError === undefined
-          ? { fullOutputSaved: { bytes: spill.written, partial: spill.partial } }
+          ? {
+              fullOutputSaved: { bytes: spill.written, partial: spill.partial },
+              fullOutputFile: { dev: spill.dev, ino: spill.ino, sha256: spill.hash.digest("hex") },
+            }
           : {}),
         ...(spillError !== undefined ? { fullOutputError: spillError } : {}),
       };

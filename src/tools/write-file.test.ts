@@ -1,7 +1,8 @@
 // write_file（决策 358）：新建（含中间目录）；覆盖已存在的文件须本会话读过且读后未变，读过（含分段）或本工具写过即可；
 // 目标是符号链接拒写，链接与它指向的文件都不变。受保护路径的拒写在 application/write-file-protected.test.ts。
-// 另：路径含控制字符拒写；新建越出工作区根、检查后被别人建了、检查后路径上的目录被换成链接都拒写；失败的读取不算读过；
-// 读取记录按文件字节判断；审批预览逐行分段；run_command 长命令照常执行，超出执行端能执行的长度直接给出明确错误。
+// 另：路径含控制字符拒写（write_file 与 edit_file 两种模式）；新建越出工作区根、检查后被别人建了、检查后路径上的目录被
+// 换成链接都拒写；失败的读取不算读过；读取记录按文件字节判断；审批预览逐行分段；run_command 长命令照常执行，超出执行端
+// 能执行的长度直接给出明确错误。
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -16,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createEditFileTool } from "./edit-file.ts";
 import {
   createWorkspaceFile,
   resolveWorkspaceCreatePath,
@@ -24,6 +26,7 @@ import {
 } from "./paths.ts";
 import { createReadFileTool } from "./read-file.ts";
 import { FileReadTracker } from "./read-tracker.ts";
+import { createReplaceEditTool } from "./replace-edit.ts";
 import { commandTooLong, createRunCommandTool, RunCommandError } from "./run-command.ts";
 import { createWriteFileTool, lineDiff, WriteFileError } from "./write-file.ts";
 
@@ -107,6 +110,33 @@ test("路径含换行或其他控制字符一律拒写，什么也不建", () =>
       );
     }
     assert.equal(existsSync(join(root, ".pigeon\n")), false);
+  }));
+
+test("edit_file 两种模式：路径含控制字符一律拒写，同名文件确实存在时也不改", () =>
+  withRoot(async (root) => {
+    // Windows 的文件名不能含控制字符：那里只验拒写本身
+    const named = process.platform !== "win32";
+    if (named) writeFileSync(join(root, "a\tb.txt"), "old\n");
+    const replace = createReplaceEditTool(root);
+    const hashline = createEditFileTool(root);
+    for (const path of ["a\tb.txt", "a\nb.txt", "a\u0000b.txt"]) {
+      await assert.rejects(
+        () => replace.execute("e", { path, old_string: "old", new_string: "new" }),
+        WorkspaceWriteRefusedError,
+        JSON.stringify(path)
+      );
+      await assert.rejects(
+        () =>
+          hashline.execute("e", {
+            path,
+            snapshot: "0".repeat(16),
+            edits: [{ op: "replace", anchor: "1#0000", lines: ["new"] }],
+          }),
+        WorkspaceWriteRefusedError,
+        JSON.stringify(path)
+      );
+    }
+    if (named) assert.equal(readFileSync(join(root, "a\tb.txt"), "utf8"), "old\n");
   }));
 
 test(
