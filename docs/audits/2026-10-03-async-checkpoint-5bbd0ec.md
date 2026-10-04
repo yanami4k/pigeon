@@ -216,3 +216,45 @@
 
 - 提交 3598273，服务器 pigeon-verify：`npm run lint`（547 个文件，无问题）、`npm run check`、`npm run deps`（576 个模块，无违规）通过。测试分两批前台运行，并发按负载取：application、tui、cli 一批 588 项全过（并发 6）；其余目录一批 1,060 项，通过 1,058，跳过 2（并发 2）。合计 1,648 项，通过 1,646，失败 0，跳过 2。
 - 提交 1dccb4e（在 3598273 之上只改本审计文件），同一台服务器：`npm run lint`、`npm run check`、`npm run deps` 通过；测试并发 2，分两批：588 项全过；1,060 项，通过 1,058，跳过 2。合计 1,648 项，通过 1,646，失败 0，跳过 2。
+
+## 第三轮修复：快照的 add 不进程序状态目录
+
+代码提交 c40f386（在 8320b3a 之上）。
+
+### 问题
+
+快照改到后台以后，`git add -A -- .` 扫描工作区时，会话存储可能正在同一工作区的 `.pigeon/state` 下建删临时锁文件。文件在 git 列出目录与读取它的属性之间消失，git 报 `fatal: unable to stat '….jsonl.lock.….tmp': No such file or directory`，整次 add 失败，这张快照记为失败。原先同步拍时快照与会话写入不并发，没有暴露。项目的 `.gitignore` 若没有排除 `.pigeon/state`，真实使用中同样会撞上。
+
+### 改法
+
+- `currentTree` 的 add 改为 `git -c advice.addIgnoredFile=false add -A -- . ':(exclude).pigeon/state' ':(exclude).pigeon/settings.local.json'`（排除路径取 `PROGRAM_OWNED_PATHS`），git 不进这两处，扫不到其中一闪而过的文件。基线、增量快照与现状快照都经同一个 `currentTree`。在服务器上用一个读不到其中条目的目录（权限 600）核实过：不带排除时 add 报同样的 `unable to stat` 并失败，带排除时成功。
+- 这些路径已被 `.gitignore` 忽略时，git 照样加完其余文件，但会以退出码 1 报"路径被忽略"。新增 `onlyIgnoredOwnedPaths`：退出码为 1、标准错误输出首行是这句提示、其后列出的每一行都是被排除的路径或忽略了它们的上级目录（整个 `.pigeon` 被忽略时 git 列出 `.pigeon`）时，算成功；其余一律失败。提示按英文判定，这条 git 以 `LC_ALL=C`、空 `LANGUAGE` 运行。
+- 之后的 `rm --cached` 照留：排除路径不动已在索引里的条目，仓库若跟踪了程序状态里的文件，仍从临时索引摘掉。
+- 仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills` 不在排除之列，照常进快照。
+
+### 两处排除口径的差别
+
+- run_command 的文件变化报告（`LISTING_SKIPPED_DIRS` 与 `LISTING_SKIPPED_ROOT_DIRS`）：任意层级跳过 `.git` 与 `node_modules`，工作区根下跳过整个 `.pigeon`，不列符号链接，被 `.gitignore` 忽略的文件照列。
+- 快照：只排除根下的 `.pigeon/state` 与 `.pigeon/settings.local.json`；`.pigeon` 下其余文件（已跟踪的 `settings.json`、`skills`）照常进快照；被 `.gitignore` 忽略的文件不进（git 的口径）；各层 `node_modules` 是否进快照取决于是否被忽略；符号链接按 git 记为链接。
+- 第二轮起 run_command 之后一律拍快照、不看文件变化报告，两者口径不同不影响快照该不该拍。
+
+### 测试（`src/orchestration/checkpoint-state-dir.test.ts`，新增，5 项）
+
+- 另起一个进程不停在 `.pigeon/state/sessions` 下建删临时文件，同时连拍 30 次改动的快照：每次都拍到，内容正确，快照里不含 `.pigeon/state` 与 `.pigeon/settings.local.json`。测试仓库不忽略 `.pigeon/state`。
+- `.pigeon/state` 下有一个读不到其中条目的目录：快照照样成功。只在非 Windows、非 root 用户下运行。
+- 只忽略程序状态、整个 `.pigeon` 被忽略两种仓库：快照成功，已跟踪的 `.pigeon/settings.json` 的改动进快照，快照里不含程序状态。
+- `onlyIgnoredOwnedPaths`：只列被排除路径或其上级时认，列出别的路径、没有列出路径或其他错误时不认。
+
+### 变异
+
+| 变异 | 变红的测试文件 |
+|---|---|
+| add 不带排除路径 | checkpoint-state-dir |
+| 不认"路径被忽略"的提示 | checkpoint-state-dir、orchestration/checkpoint |
+| 提示里列出别的路径也认 | checkpoint-state-dir |
+
+每个变异做完都还原，还原后工作区干净。
+
+### verify
+
+- 提交 c40f386，服务器 pigeon-verify：`npm run lint`（548 个文件，无问题）、`npm run check`、`npm run deps`（577 个模块，无违规）通过。全量测试在负载下以并发 2 跑两遍，每遍分两批前台运行：application、tui、cli 588 项全过；其余目录 1,065 项，通过 1,063，跳过 2。两遍结果相同：合计 1,653 项，通过 1,651，失败 0，跳过 2。
