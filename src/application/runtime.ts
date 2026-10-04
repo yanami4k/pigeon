@@ -36,6 +36,7 @@ import {
   UPDATE_MEMORY_TOOL,
   updateMemoryRegistration,
 } from "../memory/update-memory-tool.ts";
+import { loadSessionView } from "../persistence/session-catalog.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
 import {
   type BeforeCompaction,
@@ -63,7 +64,7 @@ import type { ActiveGrant, ConfigGrantRule } from "../state/grants.ts";
 import type { HookEventName } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
-import { sessionOutputsDirOf, sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import { outputsRootOf, sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { WorkerRole } from "../state/session-payloads.ts";
 import {
@@ -368,10 +369,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
   // 决策 356–358：本会话的命令输出落盘目录与读取记录（read_file、编辑与 write_file 共用），两个工具的上限取设置的 tools 一节
   const outputLimits = runCommandOutputLimitsOf(settings);
-  const outputStore = new CommandOutputStore(
-    sessionOutputsDirOf(governanceRoot, deps.sessionId),
-    outputLimits.savedOutputsMaxBytes
-  );
+  // 虚拟路径带会话号：本会话之外只认分叉来源一路往上（分支会话复制来的历史里的路径指向来源会话的输出）；
+  // worker 会话不算（它的输出编号对派出方明确报错）
+  const forkSource = deps.storeLineage?.branch?.sourceSessionId;
+  const outputStore = new CommandOutputStore({
+    base: governanceRoot,
+    outputsRoot: outputsRootOf(governanceRoot),
+    sessionId: deps.sessionId,
+    maxBytes: outputLimits.savedOutputsMaxBytes,
+    ancestors: () => forkAncestors(sessionsDir, forkSource),
+  });
   const reads = new FileReadTracker();
   const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
@@ -1019,4 +1026,17 @@ export async function loadStreamFn(specifier: string): Promise<StreamFn> {
 // 配置了单轮输出上限才包装；未配置原样返回（跟模型）
 function withOutputLimit(streamFn: StreamFn, maxOutputTokens: number | undefined): StreamFn {
   return maxOutputTokens !== undefined ? limitOutputTokens(streamFn, maxOutputTokens) : streamFn;
+}
+
+// 分叉来源一路往上的会话号（决策 356 的虚拟路径用）：从本会话的分叉来源起，沿会话文件头的父会话往上，遇到 worker 会话或
+// 读不到即停；至多 20 层
+function forkAncestors(sessionsDir: string, source: string | undefined): string[] {
+  const chain: string[] = [];
+  let current = source;
+  while (current !== undefined && chain.length < 20 && !chain.includes(current)) {
+    chain.push(current);
+    const view = loadSessionView(sessionsDir, current);
+    current = view !== undefined && view.worker === undefined ? view.parentSessionId : undefined;
+  }
+  return chain;
 }

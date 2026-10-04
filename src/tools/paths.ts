@@ -95,6 +95,24 @@ export function assertWritePathUnchanged(resolvedPath: string): void {
   }
 }
 
+// 写类工具（edit_file、write_file）的路径参数含换行或其他控制字符即拒绝：shell 与各层解析对这类字符的处理不一，
+// 实际落点可能与审批、受保护路径判定的对象不一致
+export function hasControlChar(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+export function assertWritePathText(inputPath: string): void {
+  if (hasControlChar(inputPath)) {
+    throw new WorkspaceWriteRefusedError(
+      `路径含换行或其他控制字符，拒绝写入：${JSON.stringify(inputPath)}`
+    );
+  }
+}
+
 export function symlinkRefused(inputPath: string, target: string): WorkspaceWriteRefusedError {
   return new WorkspaceWriteRefusedError(
     `要写的文件是符号链接（${inputPath} → ${target}），拒绝写入：请改为编辑它指向的文件`

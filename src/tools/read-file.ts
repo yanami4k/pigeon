@@ -4,9 +4,9 @@
 // 行为参考 harness/tools/read 笔记：offset 1-based；窗口截断时给出下一窗口提示。
 // 决策 357：单次正文至多 maxBytes 字节（缺省 50 KiB），单行超过 maxLineChars 字符（缺省 2000）截断并注明；按字节上限停下时
 // 照翻页提示给出续读的 offset。
-// 决策 356：pigeon://outputs/<编号> 是本会话落盘的命令输出，在路径判定之前识别，直接从会话落盘目录读，不经执行端。
-// 决策 358：成功读取（含分段）后在读取记录里记下整个文件的哈希，write_file 据此判断"读过且读后未变"。
-import { readFile } from "node:fs/promises";
+// 决策 356：pigeon://outputs/<会话号>/<编号> 是落盘的命令输出，在路径判定之前识别，直接从会话落盘目录流式读、只留需要的
+// 那段行，不经执行端。
+// 决策 358：成功读取（含分段）后在读取记录里记下整个文件字节的哈希，write_file 据此判断"读过且读后未变"；失败的读取不记。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -62,6 +62,15 @@ export interface ReadFileToolOptions {
   reads?: FileReadTracker;
 }
 
+// 读到的内容：总行数、按行号取行，与读取成功后的收尾
+interface Loaded {
+  resolvedPath: string;
+  snapshot: string;
+  totalLines: number;
+  line(number: number): string;
+  done(): void;
+}
+
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读取；工具不判断自己在哪
 export function createReadFileTool(
   workspace: string | WorkspaceHost,
@@ -71,22 +80,39 @@ export function createReadFileTool(
   const replaceMode = options.editMode === "replace";
   const maxBytes = options.limits?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES;
   const maxLineChars = options.limits?.maxLineChars ?? DEFAULT_READ_FILE_MAX_LINE_CHARS;
-  // 取内容：虚拟路径先于路径判定，直接读会话落盘目录；其余经执行端围栏后读取并记进读取记录
-  const load = async (inputPath: string): Promise<{ resolvedPath: string; raw: string }> => {
+  // 取内容：虚拟路径先于路径判定，流式读会话落盘目录、只留需要的那段行；其余经执行端围栏后按字节整读。
+  // done 在读取成功（offset 合法、已排版）后才调用，那时才记进读取记录
+  const load = async (inputPath: string, offset: number, limit: number): Promise<Loaded> => {
     if (isOutputsUri(inputPath)) {
       if (options.outputs === undefined) {
         throw new OutputPathError(`本会话没有落盘的命令输出：${inputPath}`);
       }
-      const file = options.outputs.resolve(inputPath);
-      return { resolvedPath: file, raw: await readFile(file, "utf8") };
+      const window = await options.outputs.readWindow(inputPath, offset, limit);
+      return {
+        resolvedPath: window.file,
+        snapshot: window.sha256.slice(0, 16),
+        totalLines: window.totalLines,
+        line: (number) => window.lines[number - offset] ?? "",
+        done: () => {},
+      };
     }
     const resolvedPath = await host.resolveExisting(inputPath);
     if (!(await host.isFile(resolvedPath))) {
       throw new ReadFileError(`不是常规文件：${inputPath}`);
     }
-    const raw = await host.readText(resolvedPath);
-    options.reads?.record(resolvedPath, raw);
-    return { resolvedPath, raw };
+    const bytes =
+      host.readBytes !== undefined
+        ? await host.readBytes(resolvedPath)
+        : Buffer.from(await host.readText(resolvedPath), "utf8");
+    const raw = bytes.toString("utf8");
+    const { lines } = splitContent(raw);
+    return {
+      resolvedPath,
+      snapshot: snapshotTag(raw),
+      totalLines: lines.length,
+      line: (number) => lines[number - 1] ?? "",
+      done: () => options.reads?.record(resolvedPath, bytes),
+    };
   };
   return {
     name: "read_file",
@@ -101,11 +127,12 @@ export function createReadFileTool(
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ReadFileDetails>> {
       const args = Value.Parse(ReadFileParamsSchema, params);
-      const { resolvedPath, raw } = await load(args.path);
-      const snapshot = snapshotTag(raw);
-      const { lines } = splitContent(raw);
-      const totalLines = lines.length;
+      const offset = args.offset ?? 1;
+      const limit = args.limit ?? DEFAULT_READ_LIMIT;
+      const loaded = await load(args.path, offset, limit);
+      const { resolvedPath, snapshot, totalLines } = loaded;
       if (totalLines === 0) {
+        loaded.done();
         return {
           content: [
             {
@@ -123,13 +150,11 @@ export function createReadFileTool(
           },
         };
       }
-      const offset = args.offset ?? 1;
       if (offset > totalLines) {
         throw new ReadFileError(
           `offset ${offset} 超出文件范围（共 ${totalLines} 行）；请给出 1-${totalLines} 之间的 offset`
         );
       }
-      const limit = args.limit ?? DEFAULT_READ_LIMIT;
       const last = Math.min(offset + limit - 1, totalLines);
       // 逐行排版：超长行截断并注明；累计字节超过上限即停（至少给一行）
       const rendered: string[] = [];
@@ -137,8 +162,8 @@ export function createReadFileTool(
       let truncatedLines = 0;
       let byteLimited = false;
       for (let number = offset; number <= last; number += 1) {
-        const line = lines[number - 1] ?? "";
-        const shown = line.length > maxLineChars ? clipLine(line, maxLineChars) : line;
+        const line = loaded.line(number);
+        const shown = line.length > maxLineChars ? clipLine(line, maxLineChars, number) : line;
         const text = replaceMode ? `${number}| ${shown}` : `${number}#${lineTag(line)}| ${shown}`;
         const size = Buffer.byteLength(text, "utf8") + 1;
         if (rendered.length > 0 && bytes + size > maxBytes) {
@@ -155,6 +180,7 @@ export function createReadFileTool(
         remaining > 0
           ? `\n${byteLimited ? `本次输出已达 ${maxBytes} 字节上限；` : ""}还有 ${remaining} 行未读，下一窗口参数 offset=${end + 1}`
           : "";
+      loaded.done();
       return {
         content: [
           {
@@ -177,10 +203,13 @@ export function createReadFileTool(
   };
 }
 
-// 超长行只显示前 maxChars 个字符（不切断代理对）并注明原长
-function clipLine(line: string, maxChars: number): string {
+// 超长行只显示前 maxChars 个字符（不切断代理对），注明原长与看其余部分的办法
+function clipLine(line: string, maxChars: number, number: number): string {
   let cut = maxChars;
   const code = line.charCodeAt(cut - 1);
   if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
-  return `${line.slice(0, cut)}…（本行共 ${line.length} 字符，超过 ${maxChars} 已截断）`;
+  return (
+    `${line.slice(0, cut)}…（本行共 ${line.length} 字符，超过 ${maxChars} 已截断；` +
+    `其余部分可用 run_command 按字符截取，例如 sed -n '${number}p' 文件 | cut -c${cut + 1}-${cut + maxChars}）`
+  );
 }

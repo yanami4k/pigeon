@@ -19,6 +19,7 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
+import { assertWritePathText } from "./paths.ts";
 import type { FileReadTracker } from "./read-tracker.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
@@ -78,7 +79,7 @@ export function createReplaceEditTool(
       const plan = await planReplace(host, args);
       signal?.throwIfAborted();
       await host.writeText(plan.resolvedPath, plan.newRaw);
-      reads?.record(plan.resolvedPath, plan.newRaw);
+      reads?.record(plan.resolvedPath, Buffer.from(plan.newRaw, "utf8"));
       const addedLines = plan.applied.added.length;
       const removedLines = plan.applied.removed.length;
       return {
@@ -106,6 +107,7 @@ export function createReplaceEditTool(
 // 读 + 围栏 + 唯一匹配预检 + 内存落地（零写副作用）
 async function planReplace(host: WorkspaceHost, args: ReplaceEditParams) {
   // 决策 334：要写的文件本身是符号链接即拒写
+  assertWritePathText(args.path);
   const resolvedPath = await host.resolveForWrite(args.path);
   if (!(await host.isFile(resolvedPath))) {
     throw new ReplaceEditError(`不是常规文件：${args.path}`);

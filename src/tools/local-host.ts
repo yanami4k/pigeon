@@ -6,6 +6,7 @@ import {
   closeSync,
   type Dirent,
   existsSync,
+  constants as fsConstants,
   mkdirSync,
   openSync,
   readdirSync,
@@ -60,6 +61,7 @@ export function createLocalWorkspaceHost(
       return (await stat(resolvedPath)).isFile();
     },
     readText: (resolvedPath) => readFile(resolvedPath, "utf8"),
+    readBytes: (resolvedPath) => readFile(resolvedPath),
     async writeText(resolvedPath, content) {
       assertWritePathUnchanged(resolvedPath);
       await writeFile(resolvedPath, content, "utf8");
@@ -85,15 +87,48 @@ export function asWorkspaceHost(workspace: string | WorkspaceHost): WorkspaceHos
 
 // 输出收集：全量计字节数与哈希，只留开头 maxBytes 字节（本地与容器实现共用）。
 // 决策 356：给了 tailBytes 另留末尾、另计总行数；给了 fullOutput 且输出超过开头加末尾两段时，从超过的那一刻起把全量输出
-// （含此前留在内存里的部分）写进文件，至多 fullOutput.maxBytes 字节
+// （含此前留在内存里的部分）写进文件，至多 fullOutput.maxBytes 字节。文件以独占方式新建、不跟随链接；建目录、打开或写入
+// 出错（磁盘满、文件已在、被换成链接）即停止落盘、关掉文件，照常给出头尾并在结果里写明原因，不让异常漏到数据回调外。
+// 开头与末尾按字节截取后对齐到 UTF-8 字符边界（不出现半个字符）
 export interface HeadCollector {
   push(chunk: Buffer): void;
   bytes(): number;
   // 收尾：哈希只能取一次
   finish(): Pick<
     HostExecResult,
-    "outputBytes" | "outputHash" | "output" | "tail" | "outputLines" | "fullOutputSaved"
+    | "outputBytes"
+    | "outputHash"
+    | "output"
+    | "tail"
+    | "outputLines"
+    | "fullOutputSaved"
+    | "fullOutputError"
   >;
+}
+
+// Windows 没有 O_NOFOLLOW；独占新建本身不跟随最后一级的链接
+const SPILL_FLAGS =
+  fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+// 开头去掉末尾不完整的 UTF-8 字符
+function utf8Head(buffer: Buffer): Buffer {
+  let index = buffer.length - 1;
+  let continuation = 0;
+  while (index >= 0 && continuation < 3 && ((buffer[index] ?? 0) & 0xc0) === 0x80) {
+    index -= 1;
+    continuation += 1;
+  }
+  if (index < 0) return buffer;
+  const lead = buffer[index] ?? 0;
+  const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return width > continuation + 1 ? buffer.subarray(0, index) : buffer;
+}
+
+// 末尾去掉开头不完整的 UTF-8 字符（续字节）
+function utf8Tail(buffer: Buffer): Buffer {
+  let index = 0;
+  while (index < buffer.length && index < 3 && ((buffer[index] ?? 0) & 0xc0) === 0x80) index += 1;
+  return buffer.subarray(index);
 }
 
 export interface CollectorExtras {
@@ -113,13 +148,30 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
   let newlines = 0;
   let lastByte: number | undefined;
   let spill: { fd: number; written: number; partial: boolean } | undefined;
+  let spillError: string | undefined;
+  const stopSpill = (error: unknown): void => {
+    spillError = error instanceof Error ? error.message : String(error);
+    if (spill !== undefined) {
+      try {
+        closeSync(spill.fd);
+      } catch {
+        // 已关
+      }
+      spill = undefined;
+    }
+  };
   const spillWrite = (chunk: Buffer): void => {
     if (spill === undefined || extras.fullOutput === undefined) return;
     const room = extras.fullOutput.maxBytes - spill.written;
     const piece = room < chunk.length ? chunk.subarray(0, Math.max(0, room)) : chunk;
-    if (piece.length > 0) {
-      writeSync(spill.fd, piece);
-      spill.written += piece.length;
+    try {
+      if (piece.length > 0) {
+        writeSync(spill.fd, piece);
+        spill.written += piece.length;
+      }
+    } catch (error) {
+      stopSpill(error);
+      return;
     }
     if (piece.length < chunk.length) spill.partial = true;
   };
@@ -135,12 +187,21 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
         if (
           extras.fullOutput !== undefined &&
           spill === undefined &&
+          spillError === undefined &&
           outputBytes > maxBytes + tailBytes
         ) {
           // 头一回超过：此前的输出全在开头与末尾两段里（开头之后的部分是末尾缓冲的最后 before − 开头 字节）；
           // 先于本块进开头缓冲，免得本块的开头一段写两遍
-          mkdirSync(path.dirname(extras.fullOutput.path), { recursive: true });
-          spill = { fd: openSync(extras.fullOutput.path, "w"), written: 0, partial: false };
+          try {
+            mkdirSync(path.dirname(extras.fullOutput.path), { recursive: true });
+            spill = {
+              fd: openSync(extras.fullOutput.path, SPILL_FLAGS, 0o600),
+              written: 0,
+              partial: false,
+            };
+          } catch (error) {
+            stopSpill(error);
+          }
           spillWrite(Buffer.concat(head));
           const kept = tailBuffer();
           spillWrite(kept.subarray(kept.length - Math.max(0, before - headBytes)));
@@ -161,14 +222,21 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
     },
     bytes: () => outputBytes,
     finish: () => {
-      const headText = Buffer.concat(head).toString("utf8");
+      const headAll = Buffer.concat(head);
+      const headText = (outputBytes > headBytes ? utf8Head(headAll) : headAll).toString("utf8");
       const base = { outputBytes, outputHash: hash.digest("hex") };
       if (tailBytes <= 0) {
         return { ...base, output: headText };
       }
       const outputLines = newlines + (lastByte !== undefined && lastByte !== 0x0a ? 1 : 0);
       const kept = tailBuffer();
-      if (spill !== undefined) closeSync(spill.fd);
+      if (spill !== undefined) {
+        try {
+          closeSync(spill.fd);
+        } catch (error) {
+          stopSpill(error);
+        }
+      }
       if (outputBytes <= maxBytes + tailBytes) {
         // 没超过：开头之后的部分是末尾缓冲的最后 总量 − 开头 字节，拼回全量
         const rest = kept.subarray(kept.length - Math.max(0, outputBytes - headBytes));
@@ -181,11 +249,12 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
       return {
         ...base,
         output: headText,
-        tail: kept.toString("utf8"),
+        tail: utf8Tail(kept).toString("utf8"),
         outputLines,
-        ...(spill !== undefined
+        ...(spill !== undefined && spillError === undefined
           ? { fullOutputSaved: { bytes: spill.written, partial: spill.partial } }
           : {}),
+        ...(spillError !== undefined ? { fullOutputError: spillError } : {}),
       };
     },
   };

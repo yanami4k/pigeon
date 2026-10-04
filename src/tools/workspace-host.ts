@@ -47,6 +47,8 @@ export interface HostExecResult {
   outputLines?: number;
   // 决策 356：全量输出已写进 fullOutput.path；partial 为超过写入上限，只写了前面部分
   fullOutputSaved?: { bytes: number; partial: boolean };
+  // 决策 356：给了 fullOutput 但未能保存（磁盘满、文件已在或被换成链接等）的原因；此时照常给出头尾
+  fullOutputError?: string;
   // 分开的两路输出开头（各自截到实现上限：本机与容器都是 64 KiB）；需要区分 stdout 与 stderr 的调用方用（钩子协议），
   // 其余调用方照旧读 output
   stdout: string;
@@ -107,6 +109,8 @@ export interface WorkspaceHost {
   // 以下三个只接受 resolveExisting / resolveForWrite 返回的规范路径
   isFile(resolvedPath: string): Promise<boolean>;
   readText(resolvedPath: string): Promise<string>;
+  // 决策 358：按字节读（读取记录按文件字节算哈希）；两个实现都有，缺省时调用方退回 readText
+  readBytes?(resolvedPath: string): Promise<Buffer>;
   // 写入前复核（决策 334）：重新解析须仍得到 resolvedPath 本身，路径变了或目标成了符号链接即拒写（WorkspaceWriteRefusedError）
   writeText(resolvedPath: string, content: string): Promise<void>;
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留

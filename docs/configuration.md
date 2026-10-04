@@ -90,7 +90,9 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 | `tools.runCommand.outputTailBytes` | 输出超长时保留的末尾 | 24576（24 KiB） |
 | `tools.runCommand.savedOutputsMaxBytes` | 每个会话落盘的完整输出总量上限，满了删最旧的 | 209715200（200 MiB） |
 
-run_command 的输出超过开头加末尾两段时，结果里留开头与末尾、中间注明省略的行数；完整输出存进会话自己的落盘目录 `.pigeon/state/outputs/<会话号>/`，结果给出虚拟路径 `pigeon://outputs/<编号>` 与总行数。read_file 认得这个前缀，直接从落盘目录读，不经执行端（沙箱会话同样如此）；虚拟路径只能是 `pigeon://outputs/` 加编号，指不到落盘目录以外。落盘文件随会话保存。
+run_command 的输出超过开头加末尾两段时，结果里留开头与末尾、中间注明省略的行数；完整输出存进会话自己的落盘目录 `.pigeon/state/outputs/<会话号>/`，结果给出虚拟路径 `pigeon://outputs/<会话号>/<编号>` 与总行数。read_file 认得这个前缀，直接从落盘目录读，不经执行端（沙箱会话同样如此）；虚拟路径只能是 `pigeon://outputs/` 加会话号加编号，会话只能是本会话或其分叉来源（别的会话的编号明确报错），指不到落盘目录以外。落盘目录在工作区的 `.pigeon/state` 里，任何一级被换成链接即拒绝读写；落盘出错（如磁盘满）时照常给出开头与末尾，并注明全文未能保存。落盘文件随会话保存。
+
+run_command 的命令串按执行端能执行的长度另判：Linux 与容器执行端至多约 124 KiB（UTF-8），Windows 命令行至多约 32000 字符、经 cmd.exe 约 8000 字符；超出时直接报错，建议先用 write_file 写成脚本再运行。
 
 ```json
 { "tools": { "readFile": { "maxBytes": 102400 }, "runCommand": { "outputTailBytes": 32768 } } }

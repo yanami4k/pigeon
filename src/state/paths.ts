@@ -60,9 +60,13 @@ export function sessionsDirOf(root: string): string {
   return path.join(projectStateDir(root), "sessions");
 }
 
-// 决策 356：会话自己的落盘目录——run_command 截断时存下的完整输出（pigeon://outputs/<编号> 指向这里）
+// 决策 356：各会话的落盘目录所在（run_command 截断时存下的完整输出；pigeon://outputs/<会话号>/<编号> 指向其下的会话目录）
+export function outputsRootOf(root: string): string {
+  return path.join(projectStateDir(root), "outputs");
+}
+
 export function sessionOutputsDirOf(root: string, sessionId: string): string {
-  return path.join(projectStateDir(root), "outputs", sessionId);
+  return path.join(outputsRootOf(root), sessionId);
 }
 
 // 学到的记忆，项目级（决策 332）与它的写入锁
