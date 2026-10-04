@@ -63,6 +63,18 @@ test("容器里读档：工作区外按容器内路径判定；禁读名单按�
       "a.txt": "ok",
       "keys/id": "denied",
     });
+    // 检查超时：未查完的标明不完整（逐个 readlink 两万个路径，上限 1 秒）
+    const slow = createContainerWorkspaceHost({
+      container: name,
+      root: "/work",
+      helperTimeoutMs: 1000,
+    });
+    await slow.resolveForRead?.("a.txt", deny);
+    const partial = await slow.classifyReadPaths?.(
+      Array.from({ length: 20_000 }, () => "a.txt"),
+      deny
+    );
+    assert.equal(partial?.incomplete, true);
     // 工具：未经授权拒读，授权后读到内容（一次一用）
     const tool = createReadFileTool(host, { outsideReads: "allowed" });
     await assert.rejects(

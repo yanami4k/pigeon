@@ -4,7 +4,8 @@
 // 它存在时另取其真实路径（~/.ssh 本身是符号链接时，指向处同样禁读）。~ 按执行端的家目录展开（容器里是容器内的家目录）。
 // 本机取真实路径用系统的 realpath（realpathSync.native）：Windows 上把 8.3 短名、大小写与 \\?\ 前缀归一到同一写法；
 // Windows 与 macOS 的缺省文件系统不分大小写，包含关系也不分大小写比较。Windows 上设备前缀（\\?\、\\.\）与
-// 数据流（name:stream、::$DATA）的写法与 UNC 路径不经解析直接拒绝，解析后落到 UNC 的同样拒绝。
+// 数据流（name:stream、::$DATA）的写法不经解析直接拒绝；真实路径为 UNC 写法且落在工作区以外的拒绝（工作区自身在
+// 网络共享或映射盘上时，其内照常放行）。
 // 名单写成一处常量；设置的 permissions.readDeny 只能往上追加，不能删减。
 // 只管读档工具：run_command 经 shell 读文件不在此列（由命令审批把关）。已知限制：硬链接指向同一文件、路径却不同，
 // 无法一般地识别。
@@ -105,18 +106,27 @@ export function readDeniedMessage(inputPath: string, entry: string): string {
   return `禁读：${inputPath} 落在凭据位置 ${entry} 之内，读档工具一律不读（决策 355）`;
 }
 
-// Windows 上不经解析直接拒绝的写法：以两个斜杠或反斜杠开头的（UNC 路径 \\server\share、\\localhost\C$，设备前缀
-// \\?\、\\.\，正反斜杠都算）、NT 前缀 \??\，以及数据流（盘符之后再出现冒号）
+// Windows 上不经解析直接拒绝的写法：设备前缀（\\?\、\\.\，正反斜杠都算）、NT 前缀 \??\，以及数据流（盘符之后再
+// 出现冒号）。UNC 写法（\\server\share）先解析，按解析后的真实路径判（见 uncOutsideWorkspace）
 export function unsupportedWindowsPathForm(inputPath: string): boolean {
-  if (/^[\\/]{2}/.test(inputPath) || /^[\\/]\?\?[\\/]/.test(inputPath)) {
+  if (/^[\\/]{2}[?.](?:[\\/]|$)/.test(inputPath) || /^[\\/]\?\?[\\/]/.test(inputPath)) {
     return true;
   }
   return (/^[A-Za-z]:/.test(inputPath) ? inputPath.slice(2) : inputPath).includes(":");
 }
 
-// Windows 上解析后落到 UNC 写法的真实路径（经链接或映射到网络共享）同样拒读：名单按本机路径写，比对不中
-function uncRealPath(realTarget: string): boolean {
-  return process.platform === "win32" && /^[\\/]{2}/.test(realTarget);
+// 真实路径是 UNC 写法、且落在工作区以外：拒读（名单按本机路径写，\\localhost\C$\… 这类写法比对不中）。
+// 工作区自身在网络共享或映射盘上（真实路径是 UNC）时，落在工作区之内的照常放行。只在 Windows 的路径口径下成立
+export function uncOutsideWorkspace(
+  realRoot: string,
+  realTarget: string,
+  rules: PathRules
+): boolean {
+  return (
+    rules.p.sep === "\\" &&
+    /^[\\/]{2}/.test(realTarget) &&
+    !containedIn(realRoot, realTarget, rules)
+  );
 }
 
 function realpathOrUndefined(target: string): string | undefined {
@@ -147,7 +157,7 @@ export function resolveLocalReadPath(
   home: string
 ): ReadTarget {
   if (process.platform === "win32" && unsupportedWindowsPathForm(inputPath)) {
-    throw new UnsupportedPathFormError(`不支持的路径写法（UNC、设备前缀或数据流）：${inputPath}`);
+    throw new UnsupportedPathFormError(`不支持的路径写法（设备前缀或数据流）：${inputPath}`);
   }
   const realRoot = realpathSync.native(workspaceRoot);
   let realTarget: string;
@@ -159,8 +169,10 @@ export function resolveLocalReadPath(
       ? new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`)
       : new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
   }
-  if (uncRealPath(realTarget)) {
-    throw new UnsupportedPathFormError(`不支持的路径写法（解析后为 UNC 路径）：${inputPath}`);
+  if (uncOutsideWorkspace(realRoot, realTarget, LOCAL_PATH_RULES)) {
+    throw new UnsupportedPathFormError(
+      `不支持的路径写法（指向工作区以外的 UNC 路径）：${inputPath}`
+    );
   }
   const entry = deniedEntry(realTarget, resolveDenyEntriesLocal(deny, home), LOCAL_PATH_RULES);
   if (entry !== undefined) {
@@ -169,7 +181,7 @@ export function resolveLocalReadPath(
   return { path: realTarget, outside: !containedIn(realRoot, realTarget, LOCAL_PATH_RULES) };
 }
 
-// 一条结果的分类：先看禁读（落在工作区外的禁读也记禁读），再看是否落在工作区外
+// 一条结果的分类：先看禁读（落在工作区外的禁读也记禁读），再看是否落在工作区外（指向工作区以外的 UNC 路径也在此列）
 export function classifyRealPath(
   realRoot: string,
   realTarget: string,
@@ -182,18 +194,18 @@ export function classifyRealPath(
   return containedIn(realRoot, realTarget, rules) ? "ok" : "outside";
 }
 
-// 结果分类：可读、禁读、经链接落在工作区外；取不到真实路径的不在 classes 里。incomplete 为检查中途超时或中止，
-// 后面的没查到
+// 结果分类：可读、禁读、经链接落在工作区外，另给各自的真实路径（grep -r 降级据此复核实际打开的文件）；取不到真实
+// 路径的不在结果里。incomplete 为检查中途超时或中止，后面的没查到
 export interface ReadPathClassification {
   classes: Map<string, ReadPathClass>;
+  realPaths: Map<string, string>;
   incomplete: boolean;
 }
 
 // 一次并发检查的文件数
 const CLASSIFY_BATCH = 64;
 
-// 本机：grep、glob 的结果（相对工作区根的路径）逐个按真实路径分类——异步分批，每批之间看中止信号；
-// 解析后为 UNC 写法的记工作区外
+// 本机：grep、glob 的结果（相对工作区根的路径）逐个按真实路径分类——异步分批，每批之间看中止信号
 export async function classifyLocalReadPaths(
   workspaceRoot: string,
   relPaths: readonly string[],
@@ -204,9 +216,10 @@ export async function classifyLocalReadPaths(
   const realRoot = await realpath(workspaceRoot);
   const entries = resolveDenyEntriesLocal(deny, home);
   const classes = new Map<string, ReadPathClass>();
+  const realPaths = new Map<string, string>();
   for (let start = 0; start < relPaths.length; start += CLASSIFY_BATCH) {
     if (signal?.aborted === true) {
-      return { classes, incomplete: true };
+      return { classes, realPaths, incomplete: true };
     }
     await Promise.all(
       relPaths.slice(start, start + CLASSIFY_BATCH).map(async (rel) => {
@@ -216,14 +229,10 @@ export async function classifyLocalReadPaths(
         } catch {
           return;
         }
-        classes.set(
-          rel,
-          uncRealPath(real)
-            ? "outside"
-            : classifyRealPath(realRoot, real, entries, LOCAL_PATH_RULES)
-        );
+        classes.set(rel, classifyRealPath(realRoot, real, entries, LOCAL_PATH_RULES));
+        realPaths.set(rel, real);
       })
     );
   }
-  return { classes, incomplete: false };
+  return { classes, realPaths, incomplete: false };
 }

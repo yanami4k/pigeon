@@ -7,14 +7,15 @@
 // 传给后端的参数一律是数组、不经 shell 拼接（模式里的 shell 特殊字符原样交给后端）；模式以 -e 给出、路径放在 -- 之后，
 // 以 - 开头也不会被当成选项。
 // 输出一律无歧义：rg 用 --json（只列文件名时用 --null），git 用 -z 并先按字面路径排除文件名含控制字符的文件；
-// grep -r 降级改为先列出候选文件、按真实路径筛过，只对允许的文件逐个搜（-h，不输出文件名），归属由这里按分隔行记。
+// grep -r 降级改为先列出候选文件、按真实路径筛过，只对允许的文件逐个搜（-h，不输出文件名），归属由这里按分隔行记；
+// 逐个搜时先打开文件，按 /proc 给出的已打开文件的真实路径复核（没有 /proc 时不复核）。
 // 每条结果都按真实路径筛（禁读的、经链接落在工作区外的略去）；文件名含换行或控制字符的一律略去。
 // .gitignore：rg 与 git 只在 git 仓库里遵守（rg 缺省如此，git 本就如此）；不在 git 仓库里时三种后端都不按它过滤，口径一致。
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { allowedEnv } from "./run-command.ts";
-import type { HostExecResult, WorkspaceHost } from "./workspace-host.ts";
+import { type HostExecResult, SYSTEM_PATH, type WorkspaceHost } from "./workspace-host.ts";
 
 // 模型侧的错误（正则写错、path 不是目录）
 export class SearchToolError extends Error {
@@ -155,11 +156,14 @@ export async function detectSearchBackend(
     }
   }
   if (wants("grep") && host.platform !== "win32") {
-    const version = await probe(host, "grep", ["-V"]);
+    // 逐个搜的脚本里用 grep 的绝对路径：只认系统目录里的
+    const located = (await probe(host, "/bin/sh", ["-c", "command -v grep"]))?.stdout.trim() ?? "";
+    const inSystemDir = SYSTEM_PATH.split(":").includes(path.posix.dirname(located));
+    const version = inSystemDir ? await probe(host, located, ["-V"]) : undefined;
     if (version !== undefined) {
       return {
         kind: "grep",
-        program: "grep",
+        program: located,
         gnu: version.exitCode === 0 && /\(GNU grep\)/.test(version.output),
       };
     }
@@ -181,13 +185,19 @@ const RG_COMMON = [
   "--no-messages",
 ];
 
-// grep -r 降级：标准输入逐行给出允许的文件（文件名已确认不含换行与控制字符），对每个文件先打一行分隔（\x01、本次的
-// 随机数、空格与文件名），再以 -h 搜它；第一个参数为随机数，其后为 grep 的选项与模式。文件内容无从伪造分隔行
+// grep -r 降级：标准输入逐行给出允许的文件（文件名已确认不含换行与控制字符）。对每个文件先打开（文件描述符 3），
+// 再打一行分隔（\x01、本次的随机数、空格、文件名、\x01、/proc 给出的已打开文件的真实路径；没有 /proc 时为空），
+// 然后从已打开的文件读给 grep（-h）——筛选与读取之间文件被换成链接时，交回的真实路径与筛选时的不同，结果即略去。
+// 第一个参数为随机数，第二个为 grep 的绝对路径，其后为 grep 的选项与模式。文件内容无从伪造分隔行
 const GREP_EACH_SCRIPT = [
-  "nonce=$1; shift",
+  "nonce=$1; g=$2; shift 2",
   "while IFS= read -r f; do",
-  `  printf '\\001%s %s\\n' "$nonce" "$f"`,
-  '  grep "$@" -- "$f"',
+  '  [ -f "$f" ] && [ -r "$f" ] || continue',
+  '  command exec 3< "$f" || continue',
+  '  r="$(readlink "/proc/$$/fd/3" 2>/dev/null)" || r=""',
+  `  printf '\\001%s %s\\001%s\\n' "$nonce" "$f" "$r"`,
+  '  "$g" "$@" <&3',
+  "  exec 3<&-",
   "done",
   "exit 0",
 ].join("\n");
@@ -255,7 +265,7 @@ export async function screenFiles(
   deny: readonly string[],
   omitted: Omitted,
   signal: AbortSignal | undefined
-): Promise<Set<string>> {
+): Promise<Map<string, string>> {
   if (host.classifyReadPaths === undefined) {
     throw new SearchEnvironmentError("本执行端不能按真实路径检查结果，grep、glob 不可用");
   }
@@ -266,12 +276,12 @@ export async function screenFiles(
   }
   const checked = safe.slice(0, SCREEN_LIMIT);
   omitted.unchecked += safe.length - checked.length;
-  const allowed = new Set<string>();
+  const allowed = new Map<string, string>();
   if (checked.length === 0) return allowed;
-  const { classes, incomplete } = await host.classifyReadPaths(checked, deny, signal);
+  const { classes, realPaths, incomplete } = await host.classifyReadPaths(checked, deny, signal);
   for (const rel of checked) {
     const kind = classes.get(rel);
-    if (kind === "ok") allowed.add(rel);
+    if (kind === "ok") allowed.set(rel, realPaths.get(rel) ?? "");
     else if (kind === "denied") omitted.denied += 1;
     else if (kind === "outside") omitted.outside += 1;
     else if (incomplete) omitted.unchecked += 1;
@@ -498,16 +508,14 @@ export async function runGrep(
   const candidates = query.start.isFile
     ? [query.start.rel]
     : nulList((await exec(host, "find", findArgs(query.start.rel), context)).stdout, platform);
-  const allowed = [
-    ...(await screenFiles(
-      host,
-      candidates.filter(query.keep),
-      context.deny,
-      omitted,
-      context.signal
-    )),
-  ];
-  if (allowed.length === 0) {
+  const allowed = await screenFiles(
+    host,
+    candidates.filter(query.keep),
+    context.deny,
+    omitted,
+    context.signal
+  );
+  if (allowed.size === 0) {
     return { records: [], files: [], omitted, incomplete: false };
   }
   const nonce = randomBytes(8).toString("hex");
@@ -524,20 +532,26 @@ export async function runGrep(
   const result = await exec(
     host,
     "/bin/sh",
-    ["-c", GREP_EACH_SCRIPT, "sh", nonce, ...flags],
+    ["-c", GREP_EACH_SCRIPT, "sh", nonce, backend.program, ...flags],
     context,
-    `${allowed.join("\n")}\n`
+    `${[...allowed.keys()].join("\n")}\n`
   );
   const marker = `\u0001${nonce} `;
   const records: GrepRecord[] = [];
   const matched = new Set<string>();
+  // 分隔行里交回的真实路径与筛选时的不同（其间被换成了链接）：这个文件的结果整份略去
+  const changed = new Set<string>();
   let current: string | undefined;
   for (const line of result.stdout.split("\n")) {
     if (line.startsWith(marker)) {
-      current = line.slice(marker.length);
+      const rest = line.slice(marker.length);
+      const split = rest.indexOf("\u0001");
+      current = split < 0 ? rest : rest.slice(0, split);
+      const opened = split < 0 ? "" : rest.slice(split + 1);
+      if (opened !== "" && opened !== allowed.get(current)) changed.add(current);
       continue;
     }
-    if (current === undefined || line === "") continue;
+    if (current === undefined || line === "" || changed.has(current)) continue;
     if (query.filesOnly) {
       matched.add(current);
       continue;
@@ -552,13 +566,14 @@ export async function runGrep(
       });
     }
   }
+  omitted.unchecked += changed.size;
   if (records.length === 0 && matched.size === 0 && result.stderr.trim() !== "") {
     const failure = backendFailure(result.stderr, result.exitCode);
     if (failure instanceof SearchToolError) throw failure;
   }
   return {
-    records,
-    files: allowed.filter((file) => matched.has(file)),
+    records: records.filter((record) => !changed.has(record.path)),
+    files: [...allowed.keys()].filter((file) => matched.has(file) && !changed.has(file)),
     omitted,
     incomplete: result.outputBytes > SEARCH_OUTPUT_CAP,
   };

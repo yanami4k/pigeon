@@ -108,7 +108,8 @@ export function createLocalWorkspaceHost(
 }
 
 // 辅助程序的绝对路径（决策 368）：给了绝对路径的照用；只给名字的在 PATH 的绝对目录里找，跳过空项、相对目录与工作区之内的
-// 目录——Windows 的进程启动会先在当前目录（即工作区）找程序，故不把裸名字交给它；Windows 只认 .exe、.com。找不到为 undefined
+// 目录——进程启动按 PATH 找程序（Node 以 shell: false 启动时不在当前目录找），PATH 里的相对目录或落在工作区之内的目录
+// 会让工作区里放好的同名程序被执行，故不把裸名字交给它；Windows 只认 .exe、.com。找不到为 undefined
 export function resolveHelperProgram(
   program: string,
   env: NodeJS.ProcessEnv,

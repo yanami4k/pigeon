@@ -10,8 +10,15 @@ import { GlobPatternError, globToRegExp } from "./glob-match.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
 import { ReadDeniedError } from "./read-deny.ts";
-import { detectSearchBackend, type SearchBackendKind } from "./search-backend.ts";
+import {
+  detectSearchBackend,
+  noneOmitted,
+  SCREEN_LIMIT,
+  type SearchBackendKind,
+  screenFiles,
+} from "./search-backend.ts";
 import { makeSearchTree, searchOutputs } from "./search-fixtures.ts";
+import type { WorkspaceHost } from "./workspace-host.ts";
 
 const text = (result: { content: Array<{ type: string; text?: string }> }) =>
   result.content.map((block) => block.text ?? "").join("");
@@ -103,6 +110,8 @@ test("文件名带冒号或换行：三种后端的结果归属准确，名字�
     writeFileSync(join(root, "a.txt:1:x"), "foo colon\n");
     symlinkSync(join(root, ".ssh", "id_rsa"), join(root, "b.txt:2:y"));
     writeFileSync(join(root, "nl\nname.txt"), "foo newline\n");
+    // 换行名被按行切开时尾段会落到真实存在的 name.txt 名下
+    writeFileSync(join(root, "name.txt"), "plain\n");
     const host = createLocalWorkspaceHost(root, { homeDir: root });
     for (const only of ["rg", "git", "grep"] as const) {
       if ((await detectSearchBackend(host, { only, bundledRipgrep: true })) === undefined) {
@@ -138,6 +147,57 @@ test("rg 不读 .ignore（与 git 的口径一致）", async (t) => {
   } finally {
     cleanup();
   }
+});
+
+test("grep -r 降级：逐个搜时按已打开文件的真实路径复核，与筛选时不同的文件整份略去", {
+  skip: existsSync("/proc/self/fd") ? false : "没有 /proc，不复核",
+}, async (t) => {
+  const { root, cleanup } = makeSearchTree(false);
+  try {
+    const base = createLocalWorkspaceHost(root, { homeDir: join(root, "no-home") });
+    if ((await detectSearchBackend(base, { only: "grep" })) === undefined) {
+      t.skip("本机没有 grep");
+      return;
+    }
+    const classify = base.classifyReadPaths;
+    if (classify === undefined) throw new Error("本机执行端应能按真实路径分类");
+    // 模拟筛选之后 src/b.md 被换掉：筛选时给出的真实路径与逐个搜时实际打开的不同
+    const host: WorkspaceHost = {
+      ...base,
+      classifyReadPaths: async (relPaths, deny, signal) => {
+        const result = await classify.call(base, relPaths, deny, signal);
+        if (result.realPaths.has("src/b.md")) result.realPaths.set("src/b.md", "/elsewhere/b.md");
+        return result;
+      },
+    };
+    const grep = createGrepTool(host, { maxResults: 50, only: "grep" });
+    const result = await grep.execute("tc", { pattern: "foo" });
+    assert.doesNotMatch(text(result), /foo in md/);
+    assert.equal(result.details.uncheckedOmitted, 1);
+    assert.ok(result.details.total > 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("一次最多按真实路径检查 20,000 个文件：超出的不查、略去并计数；文件名含控制字符的另计", async () => {
+  const sizes: number[] = [];
+  const host = {
+    classifyReadPaths: async (relPaths: readonly string[]) => {
+      sizes.push(relPaths.length);
+      return {
+        classes: new Map(relPaths.map((rel) => [rel, "ok" as const])),
+        realPaths: new Map(relPaths.map((rel) => [rel, `/w/${rel}`])),
+        incomplete: false,
+      };
+    },
+  } as unknown as WorkspaceHost;
+  const omitted = noneOmitted();
+  const names = Array.from({ length: SCREEN_LIMIT + 5 }, (_, index) => `f${index}`);
+  const allowed = await screenFiles(host, [...names, "bad\nname"], [], omitted, undefined);
+  assert.deepEqual(sizes, [SCREEN_LIMIT]);
+  assert.equal(allowed.size, SCREEN_LIMIT);
+  assert.deepEqual(omitted, { denied: 0, outside: 0, unsafe: 1, unchecked: 5 });
 });
 
 test("文件名模式：* 不跨目录，** 跨任意层，? 一个字符，[...] 与 {a,b}", () => {

@@ -115,11 +115,12 @@ const READ_RESOLVE_SCRIPT = [
   DENY_ENTRIES_SCRIPT,
 ].join("\n");
 // 决策 355 / 368：grep、glob 的结果逐个取真实路径——参数为名单各项（输出同上）；标准输入给出 NUL 分隔的相对路径，
-// 每 500 个一批。有 GNU 的 realpath（-z -m：每个输入恰好一个输出）时整批一次：先输出 "B NUL 个数 NUL" 与这批输入，再输出
-// 各自的真实路径；没有的（busybox）逐个 readlink -f，每个输出 "P NUL 输入 NUL 真实路径 NUL"（取不到为空串）
+// 每 500 个一批。GNU 的 realpath（-z -m）整批解析全部成功（退出码 0：每个输入恰好一个输出）时，先输出
+// "B NUL 个数 NUL" 与这批输入，再输出各自的真实路径；有一项失败或没有这种 realpath（busybox）时，整批改为逐个
+// readlink -f、成对输出 "P NUL 输入 NUL 真实路径 NUL"（取不到为空串），不会错位
 const CLASSIFY_SCRIPT = [
   DENY_ENTRIES_SCRIPT,
-  `xargs -0 -n 500 /bin/sh -c 'if realpath -z -m -- / >/dev/null 2>&1; then printf "B\\0%s\\0" "$#"; printf "%s\\0" "$@"; realpath -z -m -- "$@"; else for f do r="$(readlink -f -- "$f")" || r=""; printf "P\\0%s\\0%s\\0" "$f" "$r"; done; fi' sh`,
+  `xargs -0 -n 500 /bin/sh -c 'o=""; if realpath -z -m -- / >/dev/null 2>&1 && o="$(mktemp)" && realpath -z -m -- "$@" > "$o" 2>/dev/null; then printf "B\\0%s\\0" "$#"; printf "%s\\0" "$@"; cat "$o"; else for f do r="$(readlink -f -- "$f")" || r=""; printf "P\\0%s\\0%s\\0" "$f" "$r"; done; fi; [ -n "$o" ] && rm -f "$o"; exit 0' sh`,
 ].join("\n");
 // 决策 368：Pigeon 自己的辅助程序（搜索后端）——经 trustedShell 执行，程序按系统目录优先解析，不带 ripgrep 配置
 const HELPER_EXEC_SCRIPT = 'unset RIPGREP_CONFIG_PATH; exec "$@"';
@@ -452,8 +453,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     async classifyReadPaths(relPaths, deny, signal) {
       const base = await resolveRoot();
       const classes = new Map<string, ReadPathClass>();
+      const realPaths = new Map<string, string>();
       if (signal?.aborted === true) {
-        return { classes, incomplete: true };
+        return { classes, realPaths, incomplete: true };
       }
       const result = await helper(
         true,
@@ -468,6 +470,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const classify = (rel: string | undefined, real: string | undefined) => {
         if (rel !== undefined && rel !== "" && real !== undefined && real !== "") {
           classes.set(rel, classifyRealPath(base, real, entries, POSIX_PATH_RULES));
+          realPaths.set(rel, real);
         }
       };
       // 按批对齐；输出被截断（超时）即停，标明不完整
@@ -494,7 +497,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           break;
         }
       }
-      return { classes, incomplete: result.timedOut === true || !complete };
+      return { classes, realPaths, incomplete: result.timedOut === true || !complete };
     },
     execHelper(program, args, execOptions) {
       const [shell = "/bin/sh", ...rest] = trustedShell(HELPER_EXEC_SCRIPT, program, ...args);

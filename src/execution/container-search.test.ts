@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
+import { readDenyList } from "../tools/read-deny.ts";
 import { bundledRipgrepPath, type SearchBackendKind } from "../tools/search-backend.ts";
 import {
   CONTAINER_TREE_SCRIPT,
@@ -99,6 +100,57 @@ test("带 rg 与 git 的镜像：git 仓库里 rg 与 git grep、不在仓库里
     ["/tmp/work-git", true, ["rg", "git"]],
     ["/tmp/work-plain", false, ["rg", "grep"]],
   ]);
+});
+
+test("容器里按批取真实路径：一批里有一项解析失败时整批改为逐个成对输出，后面的不错位", {
+  skip: skipReason(image),
+}, async () => {
+  const name = `pigeon-classify-${process.pid}`;
+  await removeWorkspaceContainer(name);
+  await startWorkspaceContainer({ image: image ?? "", name });
+  try {
+    // 测试替身 /usr/local/bin/realpath（系统目录里排在 /usr/bin 之前）：跳过名为 bad 的输入、其余照常，有跳过即退出码 1
+    const fake = [
+      "#!/bin/sh",
+      "status=0",
+      'for a in "$@"; do',
+      '  case "$a" in -z|-m|--) continue ;; esac',
+      '  if [ "$a" = bad ]; then status=1; continue; fi',
+      '  /usr/bin/realpath -z -m -- "$a" || status=1',
+      "done",
+      'exit "$status"',
+    ].join("\n");
+    const made = await containerExec({
+      container: name,
+      command: [
+        "sh",
+        "-c",
+        'printf "%s\\n" "$1" > /usr/local/bin/realpath && chmod 755 /usr/local/bin/realpath && ' +
+          "mkdir -p /tmp/w /secret && printf k > /secret/id && chmod 755 /secret && chmod 644 /secret/id && " +
+          "printf a > /tmp/w/a.txt && printf b > /tmp/w/bad && ln -s /secret/id /tmp/w/keys && " +
+          "chmod -R a+rwX /tmp/w",
+        "sh",
+        fake,
+      ],
+      workdir: "/",
+      user: "root",
+    });
+    assert.equal(made.exitCode, 0, made.stderr);
+    const host = createContainerWorkspaceHost({ container: name, root: "/tmp/w" });
+    const result = await host.classifyReadPaths?.(
+      ["bad", "keys", "a.txt"],
+      readDenyList(["/secret"])
+    );
+    assert.equal(result?.incomplete, false);
+    // bad 是真实存在的普通文件，替身 realpath 跳过它；退回逐个成对后三项各归其类
+    assert.deepEqual(Object.fromEntries(result?.classes ?? []), {
+      bad: "ok",
+      keys: "denied",
+      "a.txt": "ok",
+    });
+  } finally {
+    await removeWorkspaceContainer(name);
+  }
 });
 
 const hasBusybox = dockerUp && docker("image", "inspect", "busybox:latest").status === 0;

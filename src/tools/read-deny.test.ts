@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -19,11 +20,13 @@ import { createGrepTool } from "./grep.ts";
 import { createLocalWorkspaceHost, resolveHelperProgram } from "./local-host.ts";
 import {
   BUILTIN_READ_DENY,
+  classifyRealPath,
   containedIn,
   deniedEntry,
   ReadDeniedError,
   readDenyList,
   UnsupportedPathFormError,
+  uncOutsideWorkspace,
 } from "./read-deny.ts";
 import { detectSearchBackend } from "./search-backend.ts";
 
@@ -123,6 +126,53 @@ test("工作区就是家目录：工作区内的禁读同样拒；grep、glob �
   }
 });
 
+const windowsOnly = process.platform === "win32" ? false : "只在 Windows 上有这些路径写法";
+
+test("UNC 判定口径：真实路径为 UNC 且落在工作区以外的拒；工作区自身在 UNC 上时其内照常（Windows 路径口径）", () => {
+  const rules = { p: path.win32, insensitive: true };
+  assert.equal(
+    uncOutsideWorkspace("C:\\ws", "\\\\localhost\\C$\\Users\\u\\.ssh\\id_rsa", rules),
+    true
+  );
+  assert.equal(
+    uncOutsideWorkspace("\\\\srv\\share\\ws", "\\\\srv\\share\\ws\\src\\a.ts", rules),
+    false
+  );
+  assert.equal(uncOutsideWorkspace("\\\\srv\\share\\ws", "\\\\SRV\\Share\\WS\\b.ts", rules), false);
+  assert.equal(
+    uncOutsideWorkspace("\\\\srv\\share\\ws", "\\\\srv\\share\\other\\a.ts", rules),
+    true
+  );
+  assert.equal(uncOutsideWorkspace("C:\\ws", "D:\\lib\\a.js", rules), false);
+  // grep、glob 的结果分类同一口径
+  assert.equal(classifyRealPath("\\\\srv\\share\\ws", "\\\\srv\\share\\ws\\a.ts", [], rules), "ok");
+  assert.equal(classifyRealPath("C:\\ws", "\\\\localhost\\C$\\ws\\a.ts", [], rules), "outside");
+});
+
+test("Windows：工作区在网络共享上（以本机管理共享 \\\\localhost\\X$ 模拟）时，其内照常读，指向工作区以外的 UNC 拒读", {
+  skip: windowsOnly,
+}, async (t) => {
+  const { base, ws, home, cleanup } = layout();
+  try {
+    const toUnc = (local: string) => `\\\\localhost\\${local[0]}$${local.slice(2)}`;
+    if (!existsSync(toUnc(ws))) {
+      t.skip("本机管理共享不可用");
+      return;
+    }
+    const host = createLocalWorkspaceHost(toUnc(ws), { homeDir: home });
+    const deny = readDenyList();
+    assert.equal((await host.resolveForRead?.("a.txt", deny))?.outside, false);
+    await assert.rejects(
+      host.resolveForRead?.(toUnc(join(base, "lib", "dep.js")), deny) ?? Promise.resolve(),
+      UnsupportedPathFormError
+    );
+    // 本机路径写法的工作区外文件照常按工作区外处理（读取须经批准，见 read_file）
+    assert.equal((await host.resolveForRead?.(join(base, "lib", "dep.js"), deny))?.outside, true);
+  } finally {
+    cleanup();
+  }
+});
+
 test("不分大小写的平台：包含关系与禁读判定按不分大小写比较", () => {
   const rules = { p: path.posix, insensitive: true };
   const entries = [{ entry: "~/.ssh", paths: ["/home/u/.ssh"] }];
@@ -136,7 +186,6 @@ test("不分大小写的平台：包含关系与禁读判定按不分大小写�
 });
 
 // Windows 上的路径别名：大小写、8.3 短名、\\?\ 与 \\.\ 前缀、数据流；grep 的 path 与结果同样按真实路径判
-const windowsOnly = process.platform === "win32" ? false : "只在 Windows 上有这些路径写法";
 
 test("Windows：大小写、8.3 短名、设备前缀与数据流的写法都绕不过禁读名单；grep 的 path 与结果同样", {
   skip: windowsOnly,
@@ -155,11 +204,15 @@ test("Windows：大小写、8.3 短名、设备前缀与数据流的写法都绕
     await rejects(`//?/${key}`, UnsupportedPathFormError);
     await rejects(`${key}::$DATA`, UnsupportedPathFormError);
     await rejects(`${join(home, "notes.txt")}:hidden`, UnsupportedPathFormError);
-    // UNC 写法（含指向本机盘符共享的）一律拒收
+    // UNC 写法（含指向本机盘符共享的）：解析后为工作区以外的 UNC 路径，拒收；管理共享不可用时不测
     const unc = key.replace(/^([A-Za-z]):/, "$1$");
-    await rejects(`\\\\localhost\\${unc}`, UnsupportedPathFormError);
-    await rejects(`\\\\127.0.0.1\\${unc}`, UnsupportedPathFormError);
-    await rejects(`//localhost/${unc.replace(/\\/g, "/")}`, UnsupportedPathFormError);
+    if (existsSync(`\\\\localhost\\${unc}`)) {
+      await rejects(`\\\\localhost\\${unc}`, UnsupportedPathFormError);
+      await rejects(`\\\\127.0.0.1\\${unc}`, UnsupportedPathFormError);
+      await rejects(`//localhost/${unc.replace(/\\/g, "/")}`, UnsupportedPathFormError);
+    } else {
+      t.diagnostic("本机管理共享不可用，UNC 三项未测");
+    }
     // 8.3 短名：卷上开着短名时才有
     const short = spawnSync(
       "cmd",

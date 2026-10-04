@@ -168,7 +168,7 @@ pigeon migrate-config [--root <项目根>]
 
 `read_file` 可以只读工作区以外的文件（决策 355）：`--yolo` 下自动放行；不开放手模式时须经人批准，审批面板标明"工作区以外（只读）"与解析后的真实路径，可批准一次、按所在目录放权或按工具放权；没有审批通道（`pigeon run` 等无人值守运行）时拒绝——但设置里固化的 `read_file` 放权（`permissions.grants`，按工具或按目录）照样放行，它就是人事先给的批准，与写档的放权同一口径。写与编辑仍限工作区。沙箱会话按容器里的路径判定。
 
-禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具（`read_file`、`grep`、`glob`）一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径（本机用系统的 realpath：Windows 上 8.3 短名、大小写与 `\\?\` 前缀都归一到同一写法），指向这些位置的链接同样不读；Windows 与 macOS 上不分大小写比较；Windows 上设备前缀（`\\?\`、`\\.\`）、UNC 路径（`\\server\share`，含 `\\localhost\C$` 一类）与数据流（`name:stream`、`::$DATA`）的写法直接拒绝，解析后落到 UNC 写法的同样拒绝。`grep`、`glob` 的 `path` 落在名单内即拒；结果逐个文件按真实路径过滤，禁读的与经符号链接指向工作区以外的都滤掉，文件名含换行或控制字符的文件一律略去，末尾注明各类略去的文件数；一次最多检查 20,000 个文件，超出或检查超时的略去并注明结果不完整。已知限制：硬链接指向同一文件、路径却不同，无法一般地识别。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
+禁读名单：`~/.ssh`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker/config.json`、`~/.netrc`、`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`，以及 Pigeon 自己的用户级设置 `~/.pigeon/settings.json`（`mcp` 一节里服务的 `env` 可能带令牌）。读档工具（`read_file`、`grep`、`glob`）一律不读这些位置，放手模式也不例外，工作区内外都一样（工作区是家目录或它的上级时，`~/.ssh` 就在工作区内）；判定按符号链接解析后的真实路径（本机用系统的 realpath：Windows 上 8.3 短名、大小写与 `\\?\` 前缀都归一到同一写法），指向这些位置的链接同样不读；Windows 与 macOS 上不分大小写比较；Windows 上设备前缀（`\\?\`、`\\.\`）与数据流（`name:stream`、`::$DATA`）的写法直接拒绝；真实路径为 UNC 写法（`\\server\share`，含 `\\localhost\C$` 一类）且落在工作区以外的拒绝，工作区自身在网络共享或映射盘上时，其内照常。`grep`、`glob` 的 `path` 落在名单内即拒；结果逐个文件按真实路径过滤，禁读的与经符号链接指向工作区以外的都滤掉，文件名含换行或控制字符的文件一律略去，末尾注明各类略去的文件数；一次最多检查 20,000 个文件，超出或检查超时的略去并注明结果不完整。已知限制：硬链接指向同一文件、路径却不同，无法一般地识别；工作区经 UNC 写法打开且名单所列位置在其中时（如以 `\\localhost\C$\…` 打开家目录），名单按本机路径写，比对不中。`~` 按执行端的家目录展开（沙箱里是容器内的家目录）。
 
 设置 `permissions.readDeny` 可往名单上追加（`~` 开头或绝对路径，三层并集），不能删减内置项：
 
@@ -178,7 +178,7 @@ pigeon migrate-config [--root <项目根>]
 
 禁读名单只管读档工具；`run_command` 经 shell 读文件不在此列，由命令审批把关。
 
-`grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。这些后端是 Pigeon 自己的辅助程序，不走 agent 的执行通道：程序先解析成绝对路径再启动（本机在 PATH 的绝对目录里找，跳过相对目录与工作区之内的目录，ripgrep 只用随包二进制；容器里系统目录优先），输出一律无歧义（rg 用 `--json`，git 用 `-z` 并把文件名含控制字符的文件排除在搜索之外，`grep -r` 降级先列出候选文件、按真实路径筛过再逐个搜），git 不读系统与全局配置并关掉 `core.fsmonitor`，ripgrep 不读配置文件（`RIPGREP_CONFIG_PATH`）、`.ignore` 与全局 gitignore。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
+`grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。这些后端是 Pigeon 自己的辅助程序，不走 agent 的执行通道：程序先解析成绝对路径再启动（本机在 PATH 的绝对目录里找，跳过相对目录与工作区之内的目录，ripgrep 只用随包二进制；容器里系统目录优先），输出一律无歧义（rg 用 `--json`，git 用 `-z` 并把文件名含控制字符的文件排除在搜索之外，`grep -r` 降级先列出候选文件、按真实路径筛过再逐个搜，搜时先打开文件、按 `/proc` 给出的已打开文件的真实路径复核，没有 `/proc` 时不复核），git 不读系统与全局配置并关掉 `core.fsmonitor`，ripgrep 不读配置文件（`RIPGREP_CONFIG_PATH`）、`.ignore` 与全局 gitignore。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
 
 ## 三道防线
 
