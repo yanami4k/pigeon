@@ -109,8 +109,9 @@ test("killProcessTree：终止整组，子进程再起的孙进程在宽限内�
 test("killTrackedChildren：进程退出兜底把仍在跑的子进程组一并终止", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-ptree-exit-"));
   let grandchildPid = 0;
+  let spawned: Awaited<ReturnType<typeof spawnGrandchild>> | undefined;
   try {
-    const spawned = await spawnGrandchild(dir);
+    spawned = await spawnGrandchild(dir);
     grandchildPid = spawned.grandchildPid;
     trackChild(spawned.child);
     assert.equal(isAlive(grandchildPid), true);
@@ -125,7 +126,8 @@ test("killTrackedChildren：进程退出兜底把仍在跑的子进程组一并�
         // 已退出
       }
     }
-    // untrack 以免影响其他用例
+    // 解除跟踪：跟踪表是模块级的，同一个 worker 后面的测试文件还在用，不能留着已被杀掉的子进程
+    if (spawned !== undefined) untrackChild(spawned.child);
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 });
