@@ -1,7 +1,7 @@
 // 容器执行端每次工具调用的进容器次数（决策 349）：读文件 1 次；改文件 2 次（受保护路径判定与审批预览共用一次检视，写入
 // 1 次）；跑命令 1 次（命令前后的取证与内存计数合在一起）。审批之后原文被改动的，按新原文重算后写入，不把审批前的内容写回；
 // 检视时是符号链接的照样拒写；写工具不写 .git；命令拿不到当次的随机串、仿造不出分隔标记，直连执行只跑外部程序；命令删了
-// .git 时改用全量扫描并注明，嵌套仓库里的改动照常报出。用计数版的假 docker（在本机执行）数次数
+// .git 时改用全量扫描并注明，嵌套仓库里的改动照常报出，SHA-256 仓库照常取证。用计数版的假 docker（在本机执行）数次数
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -12,6 +12,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -254,6 +255,39 @@ test("容器：写工具不写 .git；嵌套仓库里的改动照常报出；命
     assert.equal(existsSync(join(h.root, ".git")), false);
     assert.equal(broken.details.fileChanges.truncated, true);
     assert.match(broken.details.fileChanges.note ?? "", /改用全量扫描/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("容器：SHA-256 仓库按它的对象格式算空树，文件变化照常取到", async () => {
+  const h = counted();
+  try {
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+        cwd: h.root,
+        stdio: "ignore",
+      });
+    git("init", "-q", "--object-format=sha256");
+    writeFileSync(join(h.root, "x.txt"), "x\n");
+    git("add", "x.txt");
+    git("commit", "-q", "-m", "seed");
+    // 修改时间往后挪：status 要重算内容哈希，此时才读属性来源，空树编号不对会报错
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(join(h.root, "x.txt"), later, later);
+    const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host });
+    tool.authorizeShell("s");
+    const result = await tool.execute(
+      "s",
+      { command: "echo more >> x.txt && echo n > new.txt" },
+      undefined
+    );
+    assert.deepEqual(result.details.fileChanges, {
+      added: ["new.txt"],
+      removed: [],
+      modified: ["x.txt"],
+      truncated: false,
+    });
   } finally {
     h.cleanup();
   }

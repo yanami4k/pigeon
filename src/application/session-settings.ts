@@ -74,7 +74,7 @@ export function localSettingsTracked(root: string): boolean {
   try {
     execFileSync(
       "git",
-      [...hardenedGitArgs(), "ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)],
+      [...hardenedGitArgs(root), "ls-files", "--error-unmatch", pigeonRel(LOCAL_SETTINGS_FILE)],
       {
         cwd: root,
         stdio: "ignore",

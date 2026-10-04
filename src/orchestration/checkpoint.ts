@@ -52,7 +52,7 @@ const GIT_MAX_BUFFER = 256 * 1024 * 1024;
 // 加固过的 git（tools/git-hardening.ts：不跑 fsmonitor、钩子与 .gitattributes 指派的过滤）
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   try {
-    return execFileSync("git", [...hardenedGitArgs(), ...args], {
+    return execFileSync("git", [...hardenedGitArgs(cwd), ...args], {
       cwd,
       encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,

@@ -15,7 +15,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { GIT_ATTR_SOURCE_ARG, GIT_HARDENING_CONFIG } from "../tools/git-hardening.ts";
+import { GIT_HARDENING_CONFIG } from "../tools/git-hardening.ts";
 import { createHeadCollector, HOST_SEPARATE_STREAM_CAP } from "../tools/local-host.ts";
 import {
   controlCharsRefused,
@@ -233,7 +233,12 @@ function observeScript(limit: number, oomFiles: readonly string[] | undefined): 
     `H="${SYSTEM_PATH}:$P0"`,
     'PATH="$H"',
     'A=""',
-    `git ${GIT_ATTR_SOURCE_ARG} version >/dev/null 2>&1 && A="${GIT_ATTR_SOURCE_ARG}"`,
+    // 以空树作属性来源（git-hardening.ts 同一做法）：空树的编号按当前目录所在仓库的对象格式算，git 不认 --attr-source 时不加
+    "ga() {",
+    `  e="$(env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git ${hardening} hash-object -t tree --stdin </dev/null 2>/dev/null)"`,
+    '  if [ -n "$e" ] && git "--attr-source=$e" version >/dev/null 2>&1; then A="--attr-source=$e"; else A=""; fi',
+    "}",
+    "ga",
     `g() { env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git $A ${hardening} --no-optional-locks "$@"; }`,
     'T="$(mktemp -d 2>/dev/null)" || { T="/tmp/pigeon-observe.$$"; mkdir -p "$T"; } || exit 91',
     "trap 'rm -rf \"$T\"' EXIT",
@@ -242,7 +247,7 @@ function observeScript(limit: number, oomFiles: readonly string[] | undefined): 
     'if pre="$(g rev-parse --show-prefix 2>/dev/null)"; then K=git; fi',
     'if [ "$K" = git ] && [ -n "$pre" ] && g check-ignore -q -- . 2>/dev/null; then K=scan; fi',
     "repo() {",
-    '  ( cd "./$1" && g status --porcelain=v1 -z --untracked-files=all --no-renames -- . ) > "$T/raw" 2>/dev/null || return 1',
+    '  ( cd "./$1" && ga && g status --porcelain=v1 -z --untracked-files=all --no-renames -- . ) > "$T/raw" 2>/dev/null || return 1',
     '  printf \'\\n%s repo\\n%s\\n%s\\n\' "$M" "$1" "$2"',
     '  cat "$T/raw"',
     '  tr \'\\0\' \'\\n\' < "$T/raw" | cut -c4- | awk -v s="$2" -v d="$1" \'index($0, s) == 1 { print d substr($0, length(s) + 1) }\' > "$T/c"',

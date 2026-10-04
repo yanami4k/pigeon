@@ -14,6 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { createCheckpointer } from "../orchestration/checkpoint.ts";
+import { newSessionId } from "../state/ids.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
 import { createReplaceEditTool } from "./replace-edit.ts";
 import { createRunCommandTool } from "./run-command.ts";
@@ -27,8 +29,8 @@ function git(cwd: string, ...args: string[]): void {
   });
 }
 
-function seedRepo(root: string, files: Record<string, string>): void {
-  git(root, "init", "-q");
+function seedRepo(root: string, files: Record<string, string>, init: string[] = []): void {
+  git(root, "init", "-q", ...init);
   for (const [file, text] of Object.entries(files)) {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), text);
@@ -144,4 +146,24 @@ test("嵌套仓库：status 报出的目录里有 .git 的，取它自己的 sta
       ),
       { added: ["inner/new.txt"], removed: [], modified: ["inner/x.txt"], truncated: false }
     );
+  }));
+
+test("SHA-256 仓库：空树按仓库的对象格式算出，取证与代码快照都照常", () =>
+  withDirs(1, async (root) => {
+    seedRepo(root, { "a.txt": "a\n", "c.txt": "c\n" }, ["--object-format=sha256"]);
+    // 修改时间往后挪：status 要重算内容哈希，此时才读属性来源，空树编号不对会报错
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(join(root, "c.txt"), later, later);
+    assert.deepEqual(
+      await changesAfter(
+        root,
+        'appendFileSync("a.txt", "more\\n"); writeFileSync("b.txt", "b\\n");'
+      ),
+      { added: ["b.txt"], removed: [], modified: ["a.txt"], truncated: false }
+    );
+    const checkpointer = createCheckpointer({ workspaceRoot: root, sessionId: newSessionId() });
+    checkpointer.beforeChange();
+    writeFileSync(join(root, "a.txt"), "changed\n");
+    const snapshot = checkpointer.afterChange();
+    assert.match(snapshot?.commit ?? "", /^[0-9a-f]{64}$/);
   }));

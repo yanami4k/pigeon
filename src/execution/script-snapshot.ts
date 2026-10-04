@@ -29,7 +29,7 @@ export function takeScriptSnapshot(repoRoot: string, runId: string): ScriptSnaps
   const ref = scriptSnapshotRef(runId);
   const snap = snapshotWorkdir({ repoRoot, ref });
   if (!snap.snapshot) {
-    execFileSync("git", [...hardenedGitArgs(), "update-ref", ref, snap.commit], {
+    execFileSync("git", [...hardenedGitArgs(repoRoot), "update-ref", ref, snap.commit], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

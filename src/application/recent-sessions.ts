@@ -50,7 +50,7 @@ function sandboxSessionIds(governanceRoot: string): Set<string> {
     const refs = execFileSync(
       "git",
       [
-        ...hardenedGitArgs(),
+        ...hardenedGitArgs(governanceRoot),
         "for-each-ref",
         "--format=%(refname)",
         branchParent,

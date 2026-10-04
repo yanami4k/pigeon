@@ -390,7 +390,7 @@ function runGit(cwd: string, args: readonly string[]): Promise<string | undefine
   return new Promise((resolve) => {
     execFile(
       "git",
-      [...hardenedGitArgs(), ...args],
+      [...hardenedGitArgs(cwd), ...args],
       { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 60_000, windowsHide: true },
       (error, stdout) => resolve(error === null ? stdout : undefined)
     );
