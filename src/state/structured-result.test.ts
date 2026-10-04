@@ -2,7 +2,7 @@
 // 再用 ```json 围栏给出结果。解析取最后一个能解析成对象的 json 围栏块；没有围栏时取整段或首个 { 到末个 } 之间；
 // 都解析不了视为没有结构化结果，不抛。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { structuredResultOf } from "./structured-result.ts";
 
 test("整段 JSON 与只有围栏的回复照旧解析", () => {

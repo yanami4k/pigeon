@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
 import type { IConfiguration, ICruiseOptions } from "dependency-cruiser";
 import { cruise } from "dependency-cruiser";
+import { test } from "vitest";
 
 // 动态 import 的合理例外：.dependency-cruiser.js 在 rootDir(src) 之外且是纯 JS，
 // tsc 无法静态 import；此处必须运行期读取同一份规则本体。

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { SkillLoadedPayload } from "../state/runtime-events.ts";
 import { loadSkillCatalog } from "./catalog.ts";
 import { createLoadSkillTool, LoadSkillError } from "./load-skill-tool.ts";

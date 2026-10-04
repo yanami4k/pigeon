@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
@@ -30,7 +30,7 @@ import {
 import { createSettingsReloader } from "./settings-reload.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

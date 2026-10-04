@@ -4,7 +4,7 @@
 //（013：流式载荷是上游浅拷贝 partial）——正文持久化只走 message_end 的完整消息；
 // listener 自包 try/catch 进 listenerErrors，绝不毒化 Run。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import { SessionEntryType } from "../state/session-entries.ts";
 import { PiRuntimeAdapter, type StreamTextDelta } from "./adapter.ts";

@@ -1,7 +1,7 @@
 // 学到的记忆的文件格式（决策 332）：一行一条，编号带层前缀，〔〕里是日期、来源与会话编号；逐字往返、改坏时指出行号、
 // 上限只计条目区且按码点计。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   countChars,
   entryChars,

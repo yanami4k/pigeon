@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, test } from "node:test";
+import { describe, test } from "vitest";
 import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { localStreamShell } from "./stream-shell-fixtures.ts";
@@ -86,7 +86,7 @@ async function freshWorkspace(base: string, name = "ws") {
 }
 
 // 每个用例各起一个临时仓库、互不相干，并发跑（历史清理里的 gc 在 Windows 上慢）
-describe("流工作区（本机 sh 真跑同一批脚本）", { concurrency: true }, () => {
+describe.concurrent("流工作区（本机 sh 真跑同一批脚本）", () => {
   test(
     "流起点：从 bundle 检出人的起点代码，历史清到只剩当前（无标签、未来对象不在），预装依赖目录保留",
     withTemp(async (base) => {
@@ -206,29 +206,31 @@ test("家目录下的用户级文件（195 补口）：删掉给定的相对路�
   }
 });
 
-test("家目录下的用户级文件删不掉（所在目录不可写）：报访问错误（调用方把这一步作废），不当作已清", {
-  skip:
-    process.platform === "win32"
-      ? "Windows 上 chmod 不收走写权限"
-      : process.getuid?.() === 0
-        ? "以 root 运行，0555 挡不住删除"
-        : false,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-home-locked-"));
-  const home = join(base, "home");
-  try {
-    const root = join(base, "ws");
-    mkdirSync(root);
-    mkdirSync(join(home, ".config", "mypy"), { recursive: true });
-    writeFileSync(join(home, ".config", "mypy", "config"), "[mypy]\n");
-    execFileSync("chmod", ["0555", join(home, ".config")]);
-    const ws = new StreamWorkspace(localStreamShell(root), { homeDir: home });
-    await assert.rejects(ws.clearHomePaths([".config/mypy"]), StreamWorkspaceAccessError);
-  } finally {
-    execFileSync("chmod", ["-R", "u+rwX", base]);
-    rmSync(base, { recursive: true, force: true });
+test.skipIf(
+  process.platform === "win32"
+    ? "Windows 上 chmod 不收走写权限"
+    : process.getuid?.() === 0
+      ? "以 root 运行，0555 挡不住删除"
+      : false
+)(
+  "家目录下的用户级文件删不掉（所在目录不可写）：报访问错误（调用方把这一步作废），不当作已清",
+  async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-home-locked-"));
+    const home = join(base, "home");
+    try {
+      const root = join(base, "ws");
+      mkdirSync(root);
+      mkdirSync(join(home, ".config", "mypy"), { recursive: true });
+      writeFileSync(join(home, ".config", "mypy", "config"), "[mypy]\n");
+      execFileSync("chmod", ["0555", join(home, ".config")]);
+      const ws = new StreamWorkspace(localStreamShell(root), { homeDir: home });
+      await assert.rejects(ws.clearHomePaths([".config/mypy"]), StreamWorkspaceAccessError);
+    } finally {
+      execFileSync("chmod", ["-R", "u+rwX", base]);
+      rmSync(base, { recursive: true, force: true });
+    }
   }
-});
+);
 
 test("容器里的 root 操作：跑批器写 agent 不可写的位置时以 docker exec -u 0 执行，平常的命令不带", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-root-"));
@@ -318,165 +320,178 @@ test("删覆盖人写测试的自动加载辅助文件：按文件系统列（�
 // Windows 上建不了原生符号链接：符号链接的用例只在 Linux 上跑
 const NO_SYMLINKS = process.platform === "win32" ? "Windows 上建不了原生符号链接" : false;
 
-test("删覆盖人写测试的 conftest 时不跟随符号链接：名为 conftest 的链接只删链接；人写测试的上级目录被换成链接的删掉链接本身，链接那边的目录与其中的 conftest 不动；agent 自己目录的链接保留", {
-  skip: NO_SYMLINKS,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-link-"));
-  try {
-    const root = join(base, "ws");
-    git(base, "init", "-q", "ws");
-    mkdirSync(join(root, "tests", "unit"), { recursive: true });
-    writeFileSync(join(root, "tests", "unit", "test_a.sh"), "x\n");
-    // 链接那边：一个会让用例恒过的 conftest，和一份人写测试的副本
-    const outside = join(base, "np");
-    mkdirSync(outside);
-    writeFileSync(join(outside, "conftest.sh"), "sh() { return 0; }\n");
-    writeFileSync(join(outside, "test_b.sh"), "x\n");
-    const outsideFile = join(base, "outside.sh");
-    writeFileSync(outsideFile, "outside\n");
-    // 人写测试的上级目录被换成指向别处的链接
-    execFileSync("ln", ["-s", outside, join(root, "tests", "x")]);
-    // 名为 conftest 的链接（指向一个文件）
-    execFileSync("ln", ["-s", outsideFile, join(root, "tests", "unit", "conftest.sh")]);
-    // agent 自己目录里的链接：不在人写测试的路径上
-    mkdirSync(join(root, "own"));
-    execFileSync("ln", ["-s", outside, join(root, "own", "linked")]);
-    const ws = new StreamWorkspace(localStreamShell(root));
-    const human = ["tests/unit/test_a.sh", "tests/x/test_b.sh"];
-    const removed = await removeCoveringHelpers(ws, "conftest.sh", (p) => human.includes(p), human);
-    assert.deepEqual(removed.sort(), ["tests/unit/conftest.sh", "tests/x"]);
-    assert.equal(existsSync(join(root, "tests", "x")), false, "链接本身删掉");
-    assert.equal(existsSync(join(root, "tests", "unit", "conftest.sh")), false);
-    assert.equal(
-      readFileSync(join(outside, "conftest.sh"), "utf8"),
-      "sh() { return 0; }\n",
-      "链接那边不动"
-    );
-    assert.equal(readFileSync(outsideFile, "utf8"), "outside\n", "链接指向的文件不动");
-    assert.equal(
-      lstatSync(join(root, "own", "linked")).isSymbolicLink(),
-      true,
-      "agent 自己目录的链接保留"
-    );
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("写入人写测试之前，路径上被换成符号链接的目录与文件换成真的：不顺着链接写到工作区之外，按判题的方式加载 conftest 加载不到，错的实现照样失败；写到别的目录时同样", {
-  skip: NO_SYMLINKS,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-human-link-"));
-  try {
-    const root = join(base, "ws");
-    git(base, "init", "-q", "ws");
-    mkdirSync(join(root, "src"), { recursive: true });
-    writeFileSync(join(root, "src", "a.txt"), "wrong\n");
-    // agent 把这一步新增的人写测试目录换成链接，那边放一个让用例恒过的 conftest；另把一个人写测试文件换成链接
-    const outside = join(base, "np");
-    mkdirSync(outside);
-    writeFileSync(join(outside, "conftest.sh"), "sh() { return 0; }\n");
-    writeFileSync(join(base, "evil.sh"), "true\n");
-    mkdirSync(join(root, "tests"));
-    execFileSync("ln", ["-s", outside, join(root, "tests", "x")]);
-    execFileSync("ln", ["-s", join(base, "evil.sh"), join(root, "tests", "y.test.sh")]);
-    const ws = new StreamWorkspace(localStreamShell(root));
-    const content = Buffer.from("grep -q alpha src/a.txt\n");
-    const ops = [
-      { path: "tests/x/a.test.sh", op: "write" as const, kind: "test" as const },
-      { path: "tests/y.test.sh", op: "write" as const, kind: "test" as const },
-    ];
-    await ws.applyHumanFiles(ops, () => content);
-    assert.equal(lstatSync(join(root, "tests", "x")).isSymbolicLink(), false, "换成真目录");
-    assert.equal(lstatSync(join(root, "tests", "y.test.sh")).isSymbolicLink(), false, "换成真文件");
-    assert.equal(readFileSync(join(root, "tests", "x", "a.test.sh"), "utf8"), content.toString());
-    assert.deepEqual(readdirSync(outside), ["conftest.sh"], "没有写到链接那边");
-    assert.equal(readFileSync(join(base, "evil.sh"), "utf8"), "true\n", "链接指向的文件没被改写");
-    // 判题：先加载覆盖这些测试的 conftest，再跑用例
-    const judge = () =>
-      execFileSync(
-        "sh",
-        [
-          "-c",
-          'for c in tests/x/conftest.sh; do [ -f "$c" ] && . "./$c"; done; sh tests/x/a.test.sh && sh tests/y.test.sh',
-        ],
-        { cwd: root, stdio: "ignore" }
-      );
-    assert.throws(judge, "错的实现照样失败");
-    // 写到别的目录：同样不顺着链接写
-    const copy = join(base, "copy");
-    mkdirSync(join(copy, "tests"), { recursive: true });
-    execFileSync("ln", ["-s", outside, join(copy, "tests", "x")]);
-    await ws.applyHumanFilesAt(copy, ops.slice(0, 1), () => content);
-    assert.equal(lstatSync(join(copy, "tests", "x")).isSymbolicLink(), false);
-    assert.deepEqual(readdirSync(outside), ["conftest.sh"]);
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("删 conftest 之前先放回属主权限：agent 把目录设成能进不能列（0311），里面可读的子目录放一个覆盖人写测试的 conftest，照样找到并删掉", {
-  skip: NO_SYMLINKS,
-}, async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-perm-"));
-  const hidden = join(base, "ws", "tests", "x");
-  try {
-    const root = join(base, "ws");
-    git(base, "init", "-q", "ws");
-    mkdirSync(join(hidden, "y"), { recursive: true });
-    writeFileSync(join(hidden, "y", "test_a.sh"), "x\n");
-    writeFileSync(join(hidden, "y", "conftest.sh"), "sh() { return 0; }\n");
-    execFileSync("chmod", ["0311", hidden]);
-    // 先确认目录确实列不出来（root 下 chmod 不生效，用例会空转）
-    let listable = true;
+test.skipIf(NO_SYMLINKS)(
+  "删覆盖人写测试的 conftest 时不跟随符号链接：名为 conftest 的链接只删链接；人写测试的上级目录被换成链接的删掉链接本身，链接那边的目录与其中的 conftest 不动；agent 自己目录的链接保留",
+  async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-link-"));
     try {
-      readdirSync(hidden);
-    } catch {
-      listable = false;
+      const root = join(base, "ws");
+      git(base, "init", "-q", "ws");
+      mkdirSync(join(root, "tests", "unit"), { recursive: true });
+      writeFileSync(join(root, "tests", "unit", "test_a.sh"), "x\n");
+      // 链接那边：一个会让用例恒过的 conftest，和一份人写测试的副本
+      const outside = join(base, "np");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "conftest.sh"), "sh() { return 0; }\n");
+      writeFileSync(join(outside, "test_b.sh"), "x\n");
+      const outsideFile = join(base, "outside.sh");
+      writeFileSync(outsideFile, "outside\n");
+      // 人写测试的上级目录被换成指向别处的链接
+      execFileSync("ln", ["-s", outside, join(root, "tests", "x")]);
+      // 名为 conftest 的链接（指向一个文件）
+      execFileSync("ln", ["-s", outsideFile, join(root, "tests", "unit", "conftest.sh")]);
+      // agent 自己目录里的链接：不在人写测试的路径上
+      mkdirSync(join(root, "own"));
+      execFileSync("ln", ["-s", outside, join(root, "own", "linked")]);
+      const ws = new StreamWorkspace(localStreamShell(root));
+      const human = ["tests/unit/test_a.sh", "tests/x/test_b.sh"];
+      const removed = await removeCoveringHelpers(
+        ws,
+        "conftest.sh",
+        (p) => human.includes(p),
+        human
+      );
+      assert.deepEqual(removed.sort(), ["tests/unit/conftest.sh", "tests/x"]);
+      assert.equal(existsSync(join(root, "tests", "x")), false, "链接本身删掉");
+      assert.equal(existsSync(join(root, "tests", "unit", "conftest.sh")), false);
+      assert.equal(
+        readFileSync(join(outside, "conftest.sh"), "utf8"),
+        "sh() { return 0; }\n",
+        "链接那边不动"
+      );
+      assert.equal(readFileSync(outsideFile, "utf8"), "outside\n", "链接指向的文件不动");
+      assert.equal(
+        lstatSync(join(root, "own", "linked")).isSymbolicLink(),
+        true,
+        "agent 自己目录的链接保留"
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
-    // root 下 chmod 不生效：前提不成立，跳过而不是空转
-    if (listable) {
-      t.skip("以 root 运行，0311 挡不住读目录");
-      return;
-    }
-    const ws = new StreamWorkspace(localStreamShell(root));
-    const removed = await removeCoveringHelpers(ws, "conftest.sh", () => false, [
-      "tests/x/y/test_a.sh",
-    ]);
-    assert.deepEqual(removed, ["tests/x/y/conftest.sh"]);
-  } finally {
-    execFileSync("chmod", ["-R", "u+rwX", join(base, "ws")]);
-    rmSync(base, { recursive: true, force: true });
   }
-});
+);
 
-test("写人的文件时路径上的链接删不掉：报访问错误（调用方把这一步作废），不顺着链接写到工作区之外", {
-  skip: NO_SYMLINKS || (process.getuid?.() === 0 ? "以 root 运行，0555 挡不住删链接" : false),
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-unlink-"));
-  const tests = join(base, "ws", "tests");
-  try {
-    const root = join(base, "ws");
-    git(base, "init", "-q", "ws");
-    mkdirSync(tests);
-    const outside = join(base, "np");
-    mkdirSync(outside);
-    execFileSync("ln", ["-s", outside, join(tests, "x")]);
-    // 上级目录不可写：链接删不掉
-    execFileSync("chmod", ["0555", tests]);
-    const ws = new StreamWorkspace(localStreamShell(root));
-    await assert.rejects(
-      ws.applyHumanFiles([{ path: "tests/x/a.test.sh", op: "write", kind: "test" }], () =>
-        Buffer.from("x\n")
-      ),
-      StreamWorkspaceAccessError
-    );
-    assert.deepEqual(readdirSync(outside), [], "没有写到链接那边");
-  } finally {
-    execFileSync("chmod", ["-R", "u+rwX", join(base, "ws")]);
-    rmSync(base, { recursive: true, force: true });
+test.skipIf(NO_SYMLINKS)(
+  "写入人写测试之前，路径上被换成符号链接的目录与文件换成真的：不顺着链接写到工作区之外，按判题的方式加载 conftest 加载不到，错的实现照样失败；写到别的目录时同样",
+  async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-human-link-"));
+    try {
+      const root = join(base, "ws");
+      git(base, "init", "-q", "ws");
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "a.txt"), "wrong\n");
+      // agent 把这一步新增的人写测试目录换成链接，那边放一个让用例恒过的 conftest；另把一个人写测试文件换成链接
+      const outside = join(base, "np");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "conftest.sh"), "sh() { return 0; }\n");
+      writeFileSync(join(base, "evil.sh"), "true\n");
+      mkdirSync(join(root, "tests"));
+      execFileSync("ln", ["-s", outside, join(root, "tests", "x")]);
+      execFileSync("ln", ["-s", join(base, "evil.sh"), join(root, "tests", "y.test.sh")]);
+      const ws = new StreamWorkspace(localStreamShell(root));
+      const content = Buffer.from("grep -q alpha src/a.txt\n");
+      const ops = [
+        { path: "tests/x/a.test.sh", op: "write" as const, kind: "test" as const },
+        { path: "tests/y.test.sh", op: "write" as const, kind: "test" as const },
+      ];
+      await ws.applyHumanFiles(ops, () => content);
+      assert.equal(lstatSync(join(root, "tests", "x")).isSymbolicLink(), false, "换成真目录");
+      assert.equal(
+        lstatSync(join(root, "tests", "y.test.sh")).isSymbolicLink(),
+        false,
+        "换成真文件"
+      );
+      assert.equal(readFileSync(join(root, "tests", "x", "a.test.sh"), "utf8"), content.toString());
+      assert.deepEqual(readdirSync(outside), ["conftest.sh"], "没有写到链接那边");
+      assert.equal(readFileSync(join(base, "evil.sh"), "utf8"), "true\n", "链接指向的文件没被改写");
+      // 判题：先加载覆盖这些测试的 conftest，再跑用例
+      const judge = () =>
+        execFileSync(
+          "sh",
+          [
+            "-c",
+            'for c in tests/x/conftest.sh; do [ -f "$c" ] && . "./$c"; done; sh tests/x/a.test.sh && sh tests/y.test.sh',
+          ],
+          { cwd: root, stdio: "ignore" }
+        );
+      assert.throws(judge, "错的实现照样失败");
+      // 写到别的目录：同样不顺着链接写
+      const copy = join(base, "copy");
+      mkdirSync(join(copy, "tests"), { recursive: true });
+      execFileSync("ln", ["-s", outside, join(copy, "tests", "x")]);
+      await ws.applyHumanFilesAt(copy, ops.slice(0, 1), () => content);
+      assert.equal(lstatSync(join(copy, "tests", "x")).isSymbolicLink(), false);
+      assert.deepEqual(readdirSync(outside), ["conftest.sh"]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   }
-});
+);
+
+test.skipIf(NO_SYMLINKS)(
+  "删 conftest 之前先放回属主权限：agent 把目录设成能进不能列（0311），里面可读的子目录放一个覆盖人写测试的 conftest，照样找到并删掉",
+  async (t) => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-helpers-perm-"));
+    const hidden = join(base, "ws", "tests", "x");
+    try {
+      const root = join(base, "ws");
+      git(base, "init", "-q", "ws");
+      mkdirSync(join(hidden, "y"), { recursive: true });
+      writeFileSync(join(hidden, "y", "test_a.sh"), "x\n");
+      writeFileSync(join(hidden, "y", "conftest.sh"), "sh() { return 0; }\n");
+      execFileSync("chmod", ["0311", hidden]);
+      // 先确认目录确实列不出来（root 下 chmod 不生效，用例会空转）
+      let listable = true;
+      try {
+        readdirSync(hidden);
+      } catch {
+        listable = false;
+      }
+      // root 下 chmod 不生效：前提不成立，跳过而不是空转
+      if (listable) {
+        t.skip("以 root 运行，0311 挡不住读目录");
+        return;
+      }
+      const ws = new StreamWorkspace(localStreamShell(root));
+      const removed = await removeCoveringHelpers(ws, "conftest.sh", () => false, [
+        "tests/x/y/test_a.sh",
+      ]);
+      assert.deepEqual(removed, ["tests/x/y/conftest.sh"]);
+    } finally {
+      execFileSync("chmod", ["-R", "u+rwX", join(base, "ws")]);
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+);
+
+test.skipIf(NO_SYMLINKS || (process.getuid?.() === 0 ? "以 root 运行，0555 挡不住删链接" : false))(
+  "写人的文件时路径上的链接删不掉：报访问错误（调用方把这一步作废），不顺着链接写到工作区之外",
+  async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-unlink-"));
+    const tests = join(base, "ws", "tests");
+    try {
+      const root = join(base, "ws");
+      git(base, "init", "-q", "ws");
+      mkdirSync(tests);
+      const outside = join(base, "np");
+      mkdirSync(outside);
+      execFileSync("ln", ["-s", outside, join(tests, "x")]);
+      // 上级目录不可写：链接删不掉
+      execFileSync("chmod", ["0555", tests]);
+      const ws = new StreamWorkspace(localStreamShell(root));
+      await assert.rejects(
+        ws.applyHumanFiles([{ path: "tests/x/a.test.sh", op: "write", kind: "test" }], () =>
+          Buffer.from("x\n")
+        ),
+        StreamWorkspaceAccessError
+      );
+      assert.deepEqual(readdirSync(outside), [], "没有写到链接那边");
+    } finally {
+      execFileSync("chmod", ["-R", "u+rwX", join(base, "ws")]);
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+);
 
 test("写人的文件时路径上某一级是普通文件（人的树规定那里是目录）：删掉它、建目录再写", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-stream-filedir-"));
@@ -495,58 +510,59 @@ test("写人的文件时路径上某一级是普通文件（人的树规定那�
   }
 });
 
-test("残留的 git 锁文件：只在工作区下没有 git 进程在跑时删（index.lock、HEAD.lock、packed-refs.lock、refs 下的 *.lock）；别处的 git 进程不相干", {
-  skip: NO_SYMLINKS,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-locks-"));
-  const running: ReturnType<typeof spawn>[] = [];
-  // 一个一直在跑的 git 进程（等标准输入），工作目录在 cwd
-  const gitRunningIn = (cwd: string) => {
-    const child = spawn("git", ["cat-file", "--batch"], {
-      cwd,
-      stdio: ["pipe", "ignore", "ignore"],
-    });
-    running.push(child);
-    return new Promise((r) => setTimeout(r, 300));
-  };
-  try {
-    const root = join(base, "ws");
-    git(base, "init", "-q", "ws");
-    git(base, "init", "-q", "elsewhere");
-    const locks = [
-      ".git/index.lock",
-      ".git/HEAD.lock",
-      ".git/packed-refs.lock",
-      ".git/refs/heads/x.lock",
-    ];
-    const plant = () => {
-      for (const l of locks) writeFileSync(join(root, l), "");
+test.skipIf(NO_SYMLINKS)(
+  "残留的 git 锁文件：只在工作区下没有 git 进程在跑时删（index.lock、HEAD.lock、packed-refs.lock、refs 下的 *.lock）；别处的 git 进程不相干",
+  async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-locks-"));
+    const running: ReturnType<typeof spawn>[] = [];
+    // 一个一直在跑的 git 进程（等标准输入），工作目录在 cwd
+    const gitRunningIn = (cwd: string) => {
+      const child = spawn("git", ["cat-file", "--batch"], {
+        cwd,
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      running.push(child);
+      return new Promise((r) => setTimeout(r, 300));
     };
-    const clearLocks = async () => {
-      const r = await localStreamShell(root).sh(STALE_GIT_LOCKS, { args: [root] });
-      assert.equal(r.exitCode, 0, r.stderr);
-    };
-    await gitRunningIn(join(base, "elsewhere"));
-    plant();
-    await clearLocks();
-    assert.deepEqual(
-      locks.filter((l) => existsSync(join(root, l))),
-      [],
-      "别处的 git 进程不相干"
-    );
-    await gitRunningIn(root);
-    plant();
-    await clearLocks();
-    assert.deepEqual(
-      locks.filter((l) => existsSync(join(root, l))),
-      locks,
-      "工作区下有 git 在跑即保留"
-    );
-  } finally {
-    for (const child of running) child.kill();
-    rmSync(base, { recursive: true, force: true });
+    try {
+      const root = join(base, "ws");
+      git(base, "init", "-q", "ws");
+      git(base, "init", "-q", "elsewhere");
+      const locks = [
+        ".git/index.lock",
+        ".git/HEAD.lock",
+        ".git/packed-refs.lock",
+        ".git/refs/heads/x.lock",
+      ];
+      const plant = () => {
+        for (const l of locks) writeFileSync(join(root, l), "");
+      };
+      const clearLocks = async () => {
+        const r = await localStreamShell(root).sh(STALE_GIT_LOCKS, { args: [root] });
+        assert.equal(r.exitCode, 0, r.stderr);
+      };
+      await gitRunningIn(join(base, "elsewhere"));
+      plant();
+      await clearLocks();
+      assert.deepEqual(
+        locks.filter((l) => existsSync(join(root, l))),
+        [],
+        "别处的 git 进程不相干"
+      );
+      await gitRunningIn(root);
+      plant();
+      await clearLocks();
+      assert.deepEqual(
+        locks.filter((l) => existsSync(join(root, l))),
+        locks,
+        "工作区下有 git 在跑即保留"
+      );
+    } finally {
+      for (const child of running) child.kill();
+      rmSync(base, { recursive: true, force: true });
+    }
   }
-});
+);
 
 // 闸门（IN_STREAM_CONTAINER）的两个条件：本机有没有 /.dockerenv
 const HAS_DOCKERENV = existsSync("/.dockerenv");

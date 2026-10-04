@@ -1,7 +1,7 @@
 // 联网工具的装配（决策 288、289）：缺省后端 DeepSeek 用现有的 key（环境变量）；智谱与 Tavily 的 key 只取环境变量（决策 325）；
 // 缺 key 不在装配时报错，工具调用时按说明回话；key 不出现在配置对象里；抓取上限取配置或缺省。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   DEFAULT_DISTILL_MAX_TOKENS,
   DEFAULT_FETCH_MAX_BYTES,

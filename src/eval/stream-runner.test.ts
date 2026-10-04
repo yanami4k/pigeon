@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { after, describe, test } from "node:test";
+import { afterAll, describe, test } from "vitest";
 import { runHeadless } from "../application/headless-core.ts";
 import { createSessionSearch } from "../memory/session-search.ts";
 import { listSessionFiles, sessionFileName } from "../persistence/session-reader.ts";
@@ -152,7 +152,7 @@ async function buildToy(
 // 头一次用到时现算、落盘，之后读回）。每个测试另开自己的目录放输出与环境
 const sharedRoots: string[] = [];
 const built = new Map<string, Promise<Omit<Toy, "base">>>();
-after(() => {
+afterAll(() => {
   for (const root of sharedRoots) rmSync(root, { recursive: true, force: true });
 });
 
@@ -222,7 +222,7 @@ function options(t: Toy, overrides: Partial<Parameters<typeof runStreams>[0]>) {
 // 判题跑人在该步的全部测试（含 keep）一次：据此认出判题的调用
 const isFullRun = (tests: readonly string[]) => tests.includes("src/keep.test.sh");
 
-describe("固定起点跑批（假 agent、本地假容器）", { concurrency: true }, () => {
+describe.concurrent("固定起点跑批（假 agent、本地假容器）", () => {
   test("固定起点：只跑题（维护步、套用步、跳过步不跑），每步从人在该步之前的代码新开干净环境，agent 上一步的改动不带进下一步；题面为提交信息加应通过的测试文件路径、不附内容；人在该步新写或改过的测试开工时不在、判题时放入；每步存下 agent 的改动；结果行记起点与开容器耗时", async () => {
     const t = await toy();
     try {
@@ -2364,7 +2364,7 @@ function sharedOkRepo() {
   return okRepo;
 }
 
-describe("人的基准与缓存（参考工作区）", { concurrency: true }, () => {
+describe.concurrent("人的基准与缓存（参考工作区）", () => {
   test("人的基准在报告写出前被杀、拿不全用例：报错停下，不以缺了用例的基准缩小分母", async () => {
     const base = mkdtempSync(join(tmpdir(), "pigeon-stream-baseline-"));
     try {
@@ -2754,39 +2754,48 @@ test("放行之后、agent 开始之前出错（例如读网关计量失败）�
   if (next !== "stuck") next();
 });
 
-test("依赖环境的链接或中间链接被换成真目录（切换脚本的替换会失败）：切换之前先核对、失败时以 root 删掉链接与 .next 再切，链接恢复、作业不停；重切之后仍不在 root 所有的目录下即报访问错误", {
-  skip: process.platform === "win32" ? "Windows 上建不了原生符号链接" : false,
-}, async () => {
-  const base = mkdtempSync(join(tmpdir(), "pigeon-stream-envlink-"));
-  try {
-    const root = join(base, "ws");
-    mkdirSync(root);
-    const venv = join(base, "venv");
-    const ws = new StreamWorkspace(localStreamShell(root));
-    // 与镜像里的切换脚本同一手法：先建 <链接>.next，再改名替换；链接或 .next 是目录时改名失败、以 1 退出
-    const runtimeLinking = (target: string): typeof toyRuntime => ({
-      ...toyRuntime,
-      envSyncCommand: ["sh", "-c", `ln -sfn ${target} ${venv}.next && mv -T ${venv}.next ${venv}`],
-      envLinks: [{ link: venv, under: "/usr/share/" }],
-    });
-    const human = {} as HumanRepo;
-    // 链接被换成了真目录（里面有东西）
-    mkdirSync(join(venv, "bin"), { recursive: true });
-    await syncEnv({ runtime: runtimeLinking("/usr/share"), human }, ws, "c");
-    assert.equal(lstatSync(venv).isSymbolicLink(), true, "链接被换成真目录：删掉重切，恢复成链接");
-    // 中间链接 .next 是一个目录：切换先失败，删掉重试
-    mkdirSync(join(`${venv}.next`, "x"), { recursive: true });
-    await syncEnv({ runtime: runtimeLinking("/usr/share"), human }, ws, "c");
-    assert.equal(lstatSync(venv).isSymbolicLink(), true, ".next 是目录：删掉重试，恢复成链接");
-    assert.equal(existsSync(`${venv}.next`), false);
-    // 切换命令本身指向 agent 的目录（不归 root）：重切之后仍不对
-    const agentDir = join(base, "agent");
-    mkdirSync(agentDir);
-    await assert.rejects(
-      syncEnv({ runtime: runtimeLinking(agentDir), human }, ws, "c"),
-      StreamWorkspaceAccessError
-    );
-  } finally {
-    rmSync(base, { recursive: true, force: true });
+test.skipIf(process.platform === "win32" ? "Windows 上建不了原生符号链接" : false)(
+  "依赖环境的链接或中间链接被换成真目录（切换脚本的替换会失败）：切换之前先核对、失败时以 root 删掉链接与 .next 再切，链接恢复、作业不停；重切之后仍不在 root 所有的目录下即报访问错误",
+  async () => {
+    const base = mkdtempSync(join(tmpdir(), "pigeon-stream-envlink-"));
+    try {
+      const root = join(base, "ws");
+      mkdirSync(root);
+      const venv = join(base, "venv");
+      const ws = new StreamWorkspace(localStreamShell(root));
+      // 与镜像里的切换脚本同一手法：先建 <链接>.next，再改名替换；链接或 .next 是目录时改名失败、以 1 退出
+      const runtimeLinking = (target: string): typeof toyRuntime => ({
+        ...toyRuntime,
+        envSyncCommand: [
+          "sh",
+          "-c",
+          `ln -sfn ${target} ${venv}.next && mv -T ${venv}.next ${venv}`,
+        ],
+        envLinks: [{ link: venv, under: "/usr/share/" }],
+      });
+      const human = {} as HumanRepo;
+      // 链接被换成了真目录（里面有东西）
+      mkdirSync(join(venv, "bin"), { recursive: true });
+      await syncEnv({ runtime: runtimeLinking("/usr/share"), human }, ws, "c");
+      assert.equal(
+        lstatSync(venv).isSymbolicLink(),
+        true,
+        "链接被换成真目录：删掉重切，恢复成链接"
+      );
+      // 中间链接 .next 是一个目录：切换先失败，删掉重试
+      mkdirSync(join(`${venv}.next`, "x"), { recursive: true });
+      await syncEnv({ runtime: runtimeLinking("/usr/share"), human }, ws, "c");
+      assert.equal(lstatSync(venv).isSymbolicLink(), true, ".next 是目录：删掉重试，恢复成链接");
+      assert.equal(existsSync(`${venv}.next`), false);
+      // 切换命令本身指向 agent 的目录（不归 root）：重切之后仍不对
+      const agentDir = join(base, "agent");
+      mkdirSync(agentDir);
+      await assert.rejects(
+        syncEnv({ runtime: runtimeLinking(agentDir), human }, ws, "c"),
+        StreamWorkspaceAccessError
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   }
-});
+);

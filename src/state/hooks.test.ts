@@ -1,8 +1,8 @@
 // 钩子一节（决策 323 / 324）：schema 校验（未知事件名、非法 matcher、非正超时）、三层并列与同命令去重、
 // matcher 匹配（正则、非锚定、*与缺省）、各事件的缺省超时（UserPromptSubmit 30 秒、SessionEnd 1.5 秒且单个最长 60 秒）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   HooksSectionSchema,

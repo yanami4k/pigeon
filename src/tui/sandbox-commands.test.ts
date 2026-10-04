@@ -1,6 +1,6 @@
 // 终端界面在沙箱会话里的斜杠命令（决策 237、245）：/export 手动交回；/fork、worker 命令与 /resume 换绑给出不支持的原因。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   SANDBOX_FORK_UNSUPPORTED,
   SANDBOX_RESUME_UNSUPPORTED,

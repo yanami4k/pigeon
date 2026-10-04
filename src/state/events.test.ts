@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import { EVENT_ENVELOPE_VERSION, type EventEnvelope, EventEnvelopeSchema } from "./events.ts";
 import { newEntryId, newRunId, newSessionId } from "./ids.ts";
 

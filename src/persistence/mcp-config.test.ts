@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { resolveMcpToolTier } from "../state/mcp-config.ts";
 import { dotMcpJsonPathOf, projectSettingsPath } from "../state/paths.ts";
 import { mcpConfigOf } from "../state/settings.ts";

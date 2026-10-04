@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { LayeredHook } from "../state/hooks.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
@@ -15,7 +15,7 @@ import { emptySettingsSnapshot, type SettingsSnapshot } from "../state/settings.
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

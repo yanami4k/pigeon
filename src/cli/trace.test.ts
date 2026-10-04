@@ -5,8 +5,8 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
 import { Type } from "typebox";
+import { test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import {
   appendRawLine,

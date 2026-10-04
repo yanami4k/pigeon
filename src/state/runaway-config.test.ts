@@ -1,7 +1,7 @@
 // 撞上限续跑与流式重复检测的设置（决策 367）：不给即缺省（续跑开 2/5，检测开、omp 档、掐断）；档位打底、单项覆盖；
 // 窗口容不下最长单元重复到门槛遍数即报问题，合并后的校验照报
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   DEFAULT_REPETITION_GUARD,
   DEFAULT_TRUNCATION_CONTINUATION,

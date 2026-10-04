@@ -6,7 +6,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import {
   hookShellPlan,
   runHookCommandLocal,
@@ -15,7 +15,7 @@ import {
 import type { HostExecResult, WorkspaceHost } from "../tools/workspace-host.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -311,41 +311,42 @@ test("经执行端执行：客户端兜底在容器内 KILL 之后另留余量�
 });
 
 // 包裹脚本在真 shell 里跑（本机 /bin/sh 代替容器）：PATH 前置一个假 timeout，模拟不认 -k 的旧 busybox 与没有 timeout 的镜像
-test("包裹脚本：timeout 不认 -k 时退回不带 -k 的写法，没有 timeout 时直接执行——钩子都照常跑", {
-  skip: process.platform === "win32" ? "Windows 上没有 /bin/sh" : false,
-}, async () => {
-  const run = async (fakeTimeout: string): Promise<string> => {
-    const dir = scriptDir();
-    writeFileSync(join(dir, "timeout"), fakeTimeout, { mode: 0o755 });
-    const host = stubHost(async (plan) => {
-      const result = spawnSync(plan.program, plan.args, {
-        env: { PATH: `${dir}:${process.env.PATH ?? ""}` },
-        input: "{}\n",
-        encoding: "utf8",
+test.skipIf(process.platform === "win32" ? "Windows 上没有 /bin/sh" : false)(
+  "包裹脚本：timeout 不认 -k 时退回不带 -k 的写法，没有 timeout 时直接执行——钩子都照常跑",
+  async () => {
+    const run = async (fakeTimeout: string): Promise<string> => {
+      const dir = scriptDir();
+      writeFileSync(join(dir, "timeout"), fakeTimeout, { mode: 0o755 });
+      const host = stubHost(async (plan) => {
+        const result = spawnSync(plan.program, plan.args, {
+          env: { PATH: `${dir}:${process.env.PATH ?? ""}` },
+          input: "{}\n",
+          encoding: "utf8",
+        });
+        return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
       });
-      return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr };
-    });
-    const outcome = await runHookCommandViaHost(host, {
-      command: "printf 'ran:%s' \"$(cat)\"",
-      cwd: "/testbed",
-      platform: "linux",
-      stdin: "{}\n",
-      timeoutMs: 1000,
-    });
-    assert.equal(outcome.exitCode, 0, outcome.stderr);
-    return outcome.stdout;
-  };
-  // 旧 busybox：见到 -k 即报用法错误；不带 -k 时丢掉限时参数照常执行
-  const noKill = [
-    "#!/bin/sh",
-    'if [ "$1" = "-k" ]; then echo "timeout: unrecognized option -k" >&2; exit 1; fi',
-    "shift",
-    'exec "$@"',
-  ].join("\n");
-  assert.equal(await run(noKill), "ran:{}");
-  // 没有 timeout：两种写法都起不来
-  assert.equal(await run("#!/bin/sh\nexit 127\n"), "ran:{}");
-});
+      const outcome = await runHookCommandViaHost(host, {
+        command: "printf 'ran:%s' \"$(cat)\"",
+        cwd: "/testbed",
+        platform: "linux",
+        stdin: "{}\n",
+        timeoutMs: 1000,
+      });
+      assert.equal(outcome.exitCode, 0, outcome.stderr);
+      return outcome.stdout;
+    };
+    // 旧 busybox：见到 -k 即报用法错误；不带 -k 时丢掉限时参数照常执行
+    const noKill = [
+      "#!/bin/sh",
+      'if [ "$1" = "-k" ]; then echo "timeout: unrecognized option -k" >&2; exit 1; fi',
+      "shift",
+      'exec "$@"',
+    ].join("\n");
+    assert.equal(await run(noKill), "ran:{}");
+    // 没有 timeout：两种写法都起不来
+    assert.equal(await run("#!/bin/sh\nexit 127\n"), "ran:{}");
+  }
+);
 
 // ---- 真容器（决策 324：沙箱会话的钩子在容器里执行；没有 Docker 或镜像时跳过，与沙箱用例同一约定）----
 
@@ -397,97 +398,99 @@ function makeRepo(): string {
   return repo;
 }
 
-test("真容器：钩子在容器内执行（容器内写标记、宿主侧没有；两路输出分开取回）", {
-  skip: dockerImage === undefined ? "没有 Docker 或带 git 的镜像" : false,
-  timeout: 600_000,
-}, async () => {
-  const repo = makeRepo();
-  const id = `sess_HOOKR${process.pid}`;
-  const volume = `pigeon-hook-cache-test-${process.pid}`;
-  const { openSandbox } = await import("./sandbox.ts");
-  const sandbox = await openSandbox({
-    repoRoot: repo,
-    sessionId: id,
-    network: "on",
-    image: { kind: "image", image: dockerImage as string },
-    cacheVolume: volume,
-  });
-  try {
-    const outcome = await runHookCommandViaHost(sandbox.host, {
-      // stdin 落进容器文件、PIGEON_PROJECT_DIR 回显、两路输出分开取回
-      command:
-        'mkdir -p .hook-mark && cat > .hook-mark/stdin.json && printf inside > .hook-mark/x && printf %s "$PIGEON_PROJECT_DIR" && printf err >&2',
-      cwd: sandbox.host.root,
-      platform: sandbox.host.platform,
-      stdin: '{"hook_event_name":"Stop"}\n',
-      timeoutMs: 60_000,
-      env: process.env,
+test.skipIf(dockerImage === undefined ? "没有 Docker 或带 git 的镜像" : false)(
+  "真容器：钩子在容器内执行（容器内写标记、宿主侧没有；两路输出分开取回）",
+  { timeout: 600_000 },
+  async () => {
+    const repo = makeRepo();
+    const id = `sess_HOOKR${process.pid}`;
+    const volume = `pigeon-hook-cache-test-${process.pid}`;
+    const { openSandbox } = await import("./sandbox.ts");
+    const sandbox = await openSandbox({
+      repoRoot: repo,
+      sessionId: id,
+      network: "on",
+      image: { kind: "image", image: dockerImage as string },
+      cacheVolume: volume,
     });
-    assert.equal(outcome.exitCode, 0);
-    assert.equal(outcome.stdout, sandbox.host.root, "PIGEON_PROJECT_DIR 为容器内的工作区根");
-    assert.equal(outcome.stderr, "err");
-    const marker = await sandbox.host.resolveExisting(".hook-mark/x");
-    assert.equal(await sandbox.host.readText(marker), "inside");
-    const stdinMarker = await sandbox.host.resolveExisting(".hook-mark/stdin.json");
-    assert.equal(
-      await sandbox.host.readText(stdinMarker),
-      '{"hook_event_name":"Stop"}\n',
-      "事件 JSON 经标准输入进容器"
-    );
-    assert.equal(existsSync(join(repo, ".hook-mark")), false, "标记只落在容器内，宿主侧没有");
-  } finally {
-    await sandbox.discard();
     try {
-      execFileSync("docker", ["volume", "rm", "-f", volume], { timeout: 60_000 });
-    } catch {
-      // 卷不存在即忽略
+      const outcome = await runHookCommandViaHost(sandbox.host, {
+        // stdin 落进容器文件、PIGEON_PROJECT_DIR 回显、两路输出分开取回
+        command:
+          'mkdir -p .hook-mark && cat > .hook-mark/stdin.json && printf inside > .hook-mark/x && printf %s "$PIGEON_PROJECT_DIR" && printf err >&2',
+        cwd: sandbox.host.root,
+        platform: sandbox.host.platform,
+        stdin: '{"hook_event_name":"Stop"}\n',
+        timeoutMs: 60_000,
+        env: process.env,
+      });
+      assert.equal(outcome.exitCode, 0);
+      assert.equal(outcome.stdout, sandbox.host.root, "PIGEON_PROJECT_DIR 为容器内的工作区根");
+      assert.equal(outcome.stderr, "err");
+      const marker = await sandbox.host.resolveExisting(".hook-mark/x");
+      assert.equal(await sandbox.host.readText(marker), "inside");
+      const stdinMarker = await sandbox.host.resolveExisting(".hook-mark/stdin.json");
+      assert.equal(
+        await sandbox.host.readText(stdinMarker),
+        '{"hook_event_name":"Stop"}\n',
+        "事件 JSON 经标准输入进容器"
+      );
+      assert.equal(existsSync(join(repo, ".hook-mark")), false, "标记只落在容器内，宿主侧没有");
+    } finally {
+      await sandbox.discard();
+      try {
+        execFileSync("docker", ["volume", "rm", "-f", volume], { timeout: 60_000 });
+      } catch {
+        // 卷不存在即忽略
+      }
     }
   }
-});
+);
 
-test("真容器：钩子超时被容器内 timeout 终止（只杀钩子进程，不重启容器——之后的钩子照常跑）", {
-  skip: dockerImage === undefined ? "没有 Docker 或带 git 的镜像" : false,
-  timeout: 600_000,
-}, async () => {
-  const repo = makeRepo();
-  const id = `sess_HOOKT${process.pid}`;
-  const volume = `pigeon-hook-timeout-test-${process.pid}`;
-  const { openSandbox } = await import("./sandbox.ts");
-  const sandbox = await openSandbox({
-    repoRoot: repo,
-    sessionId: id,
-    network: "on",
-    image: { kind: "image", image: dockerImage as string },
-    cacheVolume: volume,
-  });
-  try {
-    const slow = await runHookCommandViaHost(sandbox.host, {
-      command: "sleep 60",
-      cwd: sandbox.host.root,
-      platform: sandbox.host.platform,
-      stdin: "{}\n",
-      timeoutMs: 2_000,
-      env: {},
+test.skipIf(dockerImage === undefined ? "没有 Docker 或带 git 的镜像" : false)(
+  "真容器：钩子超时被容器内 timeout 终止（只杀钩子进程，不重启容器——之后的钩子照常跑）",
+  { timeout: 600_000 },
+  async () => {
+    const repo = makeRepo();
+    const id = `sess_HOOKT${process.pid}`;
+    const volume = `pigeon-hook-timeout-test-${process.pid}`;
+    const { openSandbox } = await import("./sandbox.ts");
+    const sandbox = await openSandbox({
+      repoRoot: repo,
+      sessionId: id,
+      network: "on",
+      image: { kind: "image", image: dockerImage as string },
+      cacheVolume: volume,
     });
-    assert.equal(slow.timedOut, true, "容器内 timeout 到期记为超时");
-    assert.ok(slow.durationMs < 12_000, `客户端兜底没兜上：${slow.durationMs}ms`);
-    // 容器没有重启也没有留下卡住的东西：随后的钩子照常执行
-    const after = await runHookCommandViaHost(sandbox.host, {
-      command: "printf alive",
-      cwd: sandbox.host.root,
-      platform: sandbox.host.platform,
-      stdin: "{}\n",
-      timeoutMs: 10_000,
-      env: {},
-    });
-    assert.equal(after.exitCode, 0);
-    assert.equal(after.stdout, "alive");
-  } finally {
-    await sandbox.discard();
     try {
-      execFileSync("docker", ["volume", "rm", "-f", volume], { timeout: 60_000 });
-    } catch {
-      // 卷不存在即忽略
+      const slow = await runHookCommandViaHost(sandbox.host, {
+        command: "sleep 60",
+        cwd: sandbox.host.root,
+        platform: sandbox.host.platform,
+        stdin: "{}\n",
+        timeoutMs: 2_000,
+        env: {},
+      });
+      assert.equal(slow.timedOut, true, "容器内 timeout 到期记为超时");
+      assert.ok(slow.durationMs < 12_000, `客户端兜底没兜上：${slow.durationMs}ms`);
+      // 容器没有重启也没有留下卡住的东西：随后的钩子照常执行
+      const after = await runHookCommandViaHost(sandbox.host, {
+        command: "printf alive",
+        cwd: sandbox.host.root,
+        platform: sandbox.host.platform,
+        stdin: "{}\n",
+        timeoutMs: 10_000,
+        env: {},
+      });
+      assert.equal(after.exitCode, 0);
+      assert.equal(after.stdout, "alive");
+    } finally {
+      await sandbox.discard();
+      try {
+        execFileSync("docker", ["volume", "rm", "-f", volume], { timeout: 60_000 });
+      } catch {
+        // 卷不存在即忽略
+      }
     }
   }
-});
+);

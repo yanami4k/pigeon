@@ -1,6 +1,6 @@
 // TUI 审批面板对网络档请求（决策 290）：审批块显示网站行与“以后都允许访问 <网站>”键，不提供 [d]；[a] 建按网站的放权。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { asRunId } from "../state/ids.ts";

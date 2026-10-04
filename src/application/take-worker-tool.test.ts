@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import { WorkerOrchestrator, type WorkerStatus } from "../orchestration/workers.ts";

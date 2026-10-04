@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { CALIBRATION_SEED, PythonRandom } from "./stream-sample.ts";
 
 const range = (from: number, to: number) =>

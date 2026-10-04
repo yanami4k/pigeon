@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { snapshotWorkdir } from "../execution/workdir-snapshot.ts";
 import { findLegacyLayout } from "../persistence/legacy-layout.ts";
 import { migrationBackupLocation } from "../persistence/migration-backup.ts";
@@ -32,7 +32,7 @@ import { commandsConfigOf, configGrantRulesOf, webSectionOf } from "../state/set
 import { MigrationError, runMigrateConfig } from "./migrate-config.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

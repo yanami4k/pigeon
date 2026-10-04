@@ -2,8 +2,8 @@
 // git-worktree 成员逐字不动；收尾结果的分支与改动文件对无工作区的 worker 缺省。
 // 只读、无工作区的 Reviewer 已退役（决策 137），"无工作区"成员保留在联合里使形状不变。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import {
   ChildResultSchema,
   isGitWorktreeWorkspace,

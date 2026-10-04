@@ -20,7 +20,7 @@ import {
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mock, test } from "node:test";
+import { test, vi } from "vitest";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { CommandOutputStore, OutputPathError } from "./command-output.ts";
 import { createHeadCollector } from "./local-host.ts";
@@ -210,7 +210,7 @@ test("读取只认 Pigeon 写下的那份：原地改了内容、换成同内容
   }
 });
 
-test("读取只认 Pigeon 写下的那份：换成符号链接拒绝", { skip: NO_SYMLINKS }, async () => {
+test.skipIf(NO_SYMLINKS)("读取只认 Pigeon 写下的那份：换成符号链接拒绝", async () => {
   const { root, store, cleanup } = workspace();
   try {
     await runLong(root, store);
@@ -229,34 +229,38 @@ test("读取只认 Pigeon 写下的那份：换成符号链接拒绝", { skip: N
   }
 });
 
-test("落盘目录被换成链接：读取拒绝，下一次长输出不落盘并注明原因，链接目标不被写", {
-  skip: NO_SYMLINKS,
-}, async () => {
-  const { root, outputsRoot, store, cleanup } = workspace();
-  try {
-    const outside = mkdtempSync(join(tmpdir(), "pigeon-outputs-outside-"));
-    writeFileSync(join(outside, "1.log"), "host secret\n");
-    mkdirSync(outputsRoot, { recursive: true });
-    symlinkSync(outside, join(outputsRoot, "s1"));
-    const read = createReadFileTool(root, { outputs: store });
-    await assert.rejects(() => read.execute("r", { path: "pigeon://outputs/s1/1" }), /链接/);
-    const text = await runLong(root, store);
-    assert.match(text, /全文未能保存（[^）]*链接/);
-    assert.deepEqual(readdirSync(outside), ["1.log"]);
-    assert.equal(readFileSync(join(outside, "1.log"), "utf8"), "host secret\n");
-    unlinkSync(join(outputsRoot, "s1"));
-    rmSync(outside, { recursive: true, force: true });
-  } finally {
-    cleanup();
+test.skipIf(NO_SYMLINKS)(
+  "落盘目录被换成链接：读取拒绝，下一次长输出不落盘并注明原因，链接目标不被写",
+  async () => {
+    const { root, outputsRoot, store, cleanup } = workspace();
+    try {
+      const outside = mkdtempSync(join(tmpdir(), "pigeon-outputs-outside-"));
+      writeFileSync(join(outside, "1.log"), "host secret\n");
+      mkdirSync(outputsRoot, { recursive: true });
+      symlinkSync(outside, join(outputsRoot, "s1"));
+      const read = createReadFileTool(root, { outputs: store });
+      await assert.rejects(() => read.execute("r", { path: "pigeon://outputs/s1/1" }), /链接/);
+      const text = await runLong(root, store);
+      assert.match(text, /全文未能保存（[^）]*链接/);
+      assert.deepEqual(readdirSync(outside), ["1.log"]);
+      assert.equal(readFileSync(join(outside, "1.log"), "utf8"), "host secret\n");
+      unlinkSync(join(outputsRoot, "s1"));
+      rmSync(outside, { recursive: true, force: true });
+    } finally {
+      cleanup();
+    }
   }
-});
+);
 
 test("写到一半出错：照常给出头尾并注明原因，不留半截文件，编号照常前进，下一次照常落盘", async () => {
   const { root, store, cleanup } = workspace();
   const original = fs.writeSync;
   let calls = 0;
   // 落盘的第二次写入起报磁盘满（标准输出、标准错误照常）
-  const failing = mock.method(fs, "writeSync", ((fd: number, ...rest: unknown[]) => {
+  const failing = vi.spyOn(fs, "writeSync").mockImplementation(((
+    fd: number,
+    ...rest: unknown[]
+  ) => {
     if (fd > 2 && ++calls > 1) {
       throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
     }
@@ -265,7 +269,7 @@ test("写到一半出错：照常给出头尾并注明原因，不留半截文�
   syncBuiltinESMExports();
   try {
     const failed = await runLong(root, store);
-    failing.mock.restore();
+    failing.mockRestore();
     syncBuiltinESMExports();
     assert.match(failed, /全文未能保存（[^）]*ENOSPC/);
     assert.match(failed, /line 3000\n/);
@@ -281,7 +285,7 @@ test("写到一半出错：照常给出头尾并注明原因，不留半截文�
     );
     assert.match(back, new RegExp(`^${LINES}\\| line ${LINES}$`, "m"));
   } finally {
-    failing.mock.restore();
+    failing.mockRestore();
     syncBuiltinESMExports();
     cleanup();
   }
@@ -385,7 +389,7 @@ test("收集器：落盘文件独占新建，已在的文件不覆盖", () => {
   }
 });
 
-test("收集器：落盘路径是符号链接时不跟随，链接指向的文件不变", { skip: NO_SYMLINKS }, () => {
+test.skipIf(NO_SYMLINKS)("收集器：落盘路径是符号链接时不跟随，链接指向的文件不变", () => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-collector-"));
   try {
     writeFileSync(join(dir, "target.txt"), "keep\n");

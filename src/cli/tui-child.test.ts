@@ -2,8 +2,8 @@
 // 变量分派到终端界面。另：pigeon --version 走版本分支。
 import assert from "node:assert/strict";
 import { join, resolve } from "node:path";
-import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { test } from "vitest";
 import { BUNDLE_ROLE_ENV } from "../state/package-paths.ts";
 import { routeTopLevel, tuiChildCommand } from "./index.ts";
 

@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { effectivePigeonSettings } from "./stream-experiment.ts";
 import { currentHarnessRef } from "./stream-harness.ts";
 import {

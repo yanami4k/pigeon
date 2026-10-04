@@ -4,7 +4,7 @@
 //   - 撤销后再问；固化规则带 host 命中记 policy:config；yolo 全放行不问。
 // 网页抓取走注入的传输层与解析（不连外网），提炼走假提炼器。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";

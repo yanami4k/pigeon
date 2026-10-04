@@ -2,7 +2,7 @@
 // 失败交回（中止原因为打转，Run 收尾据此记结束方式），通知文字写明重复的调用、分支上可能有部分改动；不自动重试。
 // 运行面与工作区用内存替身。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   WorkerOrchestrator,
   type WorkerRuntimeHandle,

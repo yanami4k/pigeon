@@ -1,6 +1,6 @@
 // worker 命令层（M5.5 S4，决策 040）：/spawn 解析、收尾摘要、/cancel 定位（/workers 的排版随编排面板移到终端界面，决策 301）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newSessionId } from "../state/ids.ts";
 import {
   parseSpawnCommand,

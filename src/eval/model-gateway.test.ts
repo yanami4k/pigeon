@@ -5,7 +5,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { gatewayStreamFn } from "../pi-runtime/index.ts";
 import { requestCostCny } from "../state/model-pricing.ts";
 import {

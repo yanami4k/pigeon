@@ -6,8 +6,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterAll, test } from "vitest";
 import { orchestrationSettingsOf, parseLaunchFlags } from "../application/launch-flags.ts";
 import { SPAWN_WORKER_TEXTS } from "../application/spawn-worker-tool.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
@@ -16,13 +16,13 @@ import { routeTopLevel, TOP_LEVEL_HELP, TUI_ENTRY } from "./index.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));
 const CLI_HOME = mkdtempSync(join(tmpdir(), "pigeon-cli-home-"));
-after(() => rmSync(CLI_HOME, { recursive: true, force: true }));
+afterAll(() => rmSync(CLI_HOME, { recursive: true, force: true }));
 const FIXTURES = pathToFileURL(
   fileURLToPath(new URL("../pi-runtime/fixtures.ts", import.meta.url))
 ).href;
 
 const roots: string[] = [];
-after(() => {
+afterAll(() => {
   for (const root of roots) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -100,63 +100,67 @@ export default async function (model, context, options) {
   return file;
 }
 
-test("pigeon run：主 agent 同一次回复派两个 worker（派出即返回），wait_workers 等二者并行完成、交回结果，再用 run_command 合并其中一个分支", {
-  skip: process.platform === "win32" ? "合并命令用 sh 的通配与串联" : false,
-}, () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-spawn-cli-"));
-  roots.push(root);
-  git(root, ["init", "-q"]);
-  git(root, ["config", "user.email", "t@example.com"]);
-  git(root, ["config", "user.name", "t"]);
-  writeFileSync(join(root, ".gitignore"), ".pigeon/\nfake-stream-fn.mjs\n");
-  writeFileSync(join(root, "a.txt"), "a\n");
-  writeFileSync(join(root, "b.txt"), "b\n");
-  git(root, ["add", "-A"]);
-  git(root, ["commit", "-qm", "init"]);
-  const streamFn = writeStreamFnModule(root);
-  const child = runCli([
-    "run",
-    "MAIN 并行改 a 与 b，再合并 a",
-    "--root",
-    root,
-    "--stream-fn",
-    streamFn,
-    "--yolo",
-    "--json",
-    "--no-pushed-memory",
-  ]);
-  assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
-  const lines = child.stdout.trim().split(/\r?\n/);
-  const result = JSON.parse(lines[lines.length - 1] ?? "") as { status: string; sessionId: string };
-  assert.equal(result.status, "completed");
-  const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
-  assert.ok(view !== undefined);
-  const calls = view.runs.flatMap((run) => run.toolCalls);
-  const textOf = (call: (typeof calls)[number]) =>
-    ((call.result?.raw as { content?: Array<{ text?: string }> } | undefined)?.content ?? [])
-      .map((block) => block.text ?? "")
-      .join("");
-  assert.deepEqual(
-    calls.filter((call) => call.toolName === "spawn_worker").map((call) => textOf(call)),
-    ["fix-a", "fix-b"].map((name) =>
-      SPAWN_WORKER_TEXTS.spawned({ name, role: "implementer", branch: `pigeon/${name}` })
-    )
-  );
-  const waited = calls.find((call) => call.toolName === "wait_workers");
-  assert.ok(waited !== undefined);
-  const waitedText = textOf(waited);
-  assert.ok(waitedText.includes("worker fix-a（implementer）：状态 完成。"), waitedText);
-  assert.ok(waitedText.includes("最后一段输出：A 改好了（并行）"), waitedText);
-  assert.ok(waitedText.includes("worker fix-b（implementer）：状态 完成。"), waitedText);
-  assert.ok(waitedText.includes("改动的文件（1）：b.txt。"), waitedText);
-  const merge = calls.find((call) => call.toolName === "run_command");
-  assert.ok(merge !== undefined);
-  assert.notEqual(merge.result?.isError, true, textOf(merge));
-  // 合并了 A，没有合并 B
-  assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "A\n");
-  assert.equal(readFileSync(join(root, "b.txt"), "utf8"), "b\n");
-  assert.match(git(root, ["log", "--format=%s"]), /^fix-a$/m);
-});
+test.skipIf(process.platform === "win32" ? "合并命令用 sh 的通配与串联" : false)(
+  "pigeon run：主 agent 同一次回复派两个 worker（派出即返回），wait_workers 等二者并行完成、交回结果，再用 run_command 合并其中一个分支",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "pigeon-spawn-cli-"));
+    roots.push(root);
+    git(root, ["init", "-q"]);
+    git(root, ["config", "user.email", "t@example.com"]);
+    git(root, ["config", "user.name", "t"]);
+    writeFileSync(join(root, ".gitignore"), ".pigeon/\nfake-stream-fn.mjs\n");
+    writeFileSync(join(root, "a.txt"), "a\n");
+    writeFileSync(join(root, "b.txt"), "b\n");
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-qm", "init"]);
+    const streamFn = writeStreamFnModule(root);
+    const child = runCli([
+      "run",
+      "MAIN 并行改 a 与 b，再合并 a",
+      "--root",
+      root,
+      "--stream-fn",
+      streamFn,
+      "--yolo",
+      "--json",
+      "--no-pushed-memory",
+    ]);
+    assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+    const lines = child.stdout.trim().split(/\r?\n/);
+    const result = JSON.parse(lines[lines.length - 1] ?? "") as {
+      status: string;
+      sessionId: string;
+    };
+    assert.equal(result.status, "completed");
+    const view = loadSessionView(join(root, ".pigeon", "state", "sessions"), result.sessionId);
+    assert.ok(view !== undefined);
+    const calls = view.runs.flatMap((run) => run.toolCalls);
+    const textOf = (call: (typeof calls)[number]) =>
+      ((call.result?.raw as { content?: Array<{ text?: string }> } | undefined)?.content ?? [])
+        .map((block) => block.text ?? "")
+        .join("");
+    assert.deepEqual(
+      calls.filter((call) => call.toolName === "spawn_worker").map((call) => textOf(call)),
+      ["fix-a", "fix-b"].map((name) =>
+        SPAWN_WORKER_TEXTS.spawned({ name, role: "implementer", branch: `pigeon/${name}` })
+      )
+    );
+    const waited = calls.find((call) => call.toolName === "wait_workers");
+    assert.ok(waited !== undefined);
+    const waitedText = textOf(waited);
+    assert.ok(waitedText.includes("worker fix-a（implementer）：状态 完成。"), waitedText);
+    assert.ok(waitedText.includes("最后一段输出：A 改好了（并行）"), waitedText);
+    assert.ok(waitedText.includes("worker fix-b（implementer）：状态 完成。"), waitedText);
+    assert.ok(waitedText.includes("改动的文件（1）：b.txt。"), waitedText);
+    const merge = calls.find((call) => call.toolName === "run_command");
+    assert.ok(merge !== undefined);
+    assert.notEqual(merge.result?.isError, true, textOf(merge));
+    // 合并了 A，没有合并 B
+    assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "A\n");
+    assert.equal(readFileSync(join(root, "b.txt"), "utf8"), "b\n");
+    assert.match(git(root, ["log", "--format=%s"]), /^fix-a$/m);
+  }
+);
 
 test("缺省入口：pigeon 不带子命令进终端界面，--line 进命令行对话，子命令照旧", () => {
   assert.deepEqual(routeTopLevel([]), { kind: "tui", argv: [] });

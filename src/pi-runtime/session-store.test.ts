@@ -5,9 +5,9 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, it, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { createSessionBackendConformance } from "@earendil-works/pi-agent-core/session/testing";
+import { describe, it, test } from "vitest";
 import {
   acquireSessionFileLock,
   SessionLockedError,

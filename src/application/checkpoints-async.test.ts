@@ -21,8 +21,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { test } from "vitest";
 import {
   type Checkpointer,
   type CheckpointResult,
@@ -398,36 +398,37 @@ const MISSED_BY_LISTING: Array<{
 ];
 
 for (const item of MISSED_BY_LISTING) {
-  test(`run_command 之后照拍，文件变化报告为空也拍到：${item.name}`, {
-    skip: item.posixOnly === true && process.platform === "win32",
-  }, async () => {
-    const root = makeRepo(".pigeon/state/\n.pigeon/settings.local.json\n");
-    try {
-      item.setup?.(root);
-      const fake = fakeHost();
-      const attached = attachCheckpoints({
-        bundle: fake.host,
-        workspaceRoot: root,
-        checkpointer: createCheckpointer({
+  test.skipIf(item.posixOnly === true && process.platform === "win32")(
+    `run_command 之后照拍，文件变化报告为空也拍到：${item.name}`,
+    async () => {
+      const root = makeRepo(".pigeon/state/\n.pigeon/settings.local.json\n");
+      try {
+        item.setup?.(root);
+        const fake = fakeHost();
+        const attached = attachCheckpoints({
+          bundle: fake.host,
           workspaceRoot: root,
-          sessionId: fake.host.adapter.sessionId,
-        }),
-      });
-      assert.ok(attached !== undefined);
-      fake.propose("run_command");
-      await fake.gate();
-      item.change(root);
-      fake.result("run_command", "c1", false, noChanges);
-      await fake.gate();
-      const last = fake.entries.at(-1);
-      assert.ok(last?.customType === SessionEntryType.Checkpoint, JSON.stringify(fake.rows()));
-      item.check(root, (last.data as CheckpointData).commit);
-      assert.deepEqual(attached.errors(), []);
-      await attached.close();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
+          checkpointer: createCheckpointer({
+            workspaceRoot: root,
+            sessionId: fake.host.adapter.sessionId,
+          }),
+        });
+        assert.ok(attached !== undefined);
+        fake.propose("run_command");
+        await fake.gate();
+        item.change(root);
+        fake.result("run_command", "c1", false, noChanges);
+        await fake.gate();
+        const last = fake.entries.at(-1);
+        assert.ok(last?.customType === SessionEntryType.Checkpoint, JSON.stringify(fake.rows()));
+        item.check(root, (last.data as CheckpointData).commit);
+        assert.deepEqual(attached.errors(), []);
+        await attached.close();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     }
-  });
+  );
 }
 
 // ---- 真实运行面 ----

@@ -1,8 +1,8 @@
 // PiRuntimeAdapter 跨真实 pi-agent-core Agent seam 的测试（ROADMAP M1 完成证据）。
 // 六个场景：正常完成 / 流式中途 abort / 模型报错 / 快照可重建 / listener 韧性 / dispose 空跑与幂等。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import { EventEnvelopeSchema } from "../state/events.ts";
 import type { TurnCompletedPayload } from "../state/runtime-events.ts";

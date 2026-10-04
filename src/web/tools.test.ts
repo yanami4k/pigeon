@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { TOOL_RESULT_USAGE_KEY } from "../state/tool-usage.ts";
 import { type DistillInput, distillUserText } from "./distill.ts";
 import type { Transport } from "./network.ts";
@@ -20,7 +20,7 @@ const RAW = "RAWPAGEMARKER不应出现在主对话";
 let server: Server;
 let port: number;
 
-before(async () => {
+beforeAll(async () => {
   server = createServer((req, res) => {
     if (req.url === "/doc") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -46,7 +46,7 @@ before(async () => {
   port = (server.address() as AddressInfo).port;
 });
 
-after(async () => {
+afterAll(async () => {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });

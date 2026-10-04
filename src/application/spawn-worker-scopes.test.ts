@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import {
   LIST_SESSIONS_TOOL,
   READ_SESSION_ENTRY_TOOL,
@@ -24,7 +24,7 @@ import {
 
 const root = mkdtempSync(join(tmpdir(), "pigeon-spawn-scopes-"));
 execFileSync("git", ["init", "-q"], { cwd: root });
-after(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 function setup() {
   const requests: WorkerRuntimeRequest[] = [];

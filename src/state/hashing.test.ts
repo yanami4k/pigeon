@@ -1,8 +1,8 @@
 // 哈希与文本小工具：规范序列化与字段顺序无关、sha256 十六进制串、UTF-8 字节上限截断不劈字符。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import { canonicalJson, Sha256HexSchema, sha256Hex, truncateUtf8 } from "./hashing.ts";
 
 test("规范序列化：键序无关、数组保序、undefined 属性省略；sha256Hex 是 64 位小写十六进制", () => {

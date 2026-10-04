@@ -1,8 +1,8 @@
 // 随包文件的位置与打包产物入口的分派（决策 351）。
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { test } from "vitest";
 import {
   BUNDLE_ROLE_ENV,
   FROM_BUNDLE,

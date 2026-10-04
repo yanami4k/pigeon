@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ActiveGrant } from "../state/grants.ts";
 import { newGrantId } from "../state/ids.ts";
 import { SessionGrantStore } from "./grant-store.ts";

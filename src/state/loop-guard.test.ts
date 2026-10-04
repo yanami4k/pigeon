@@ -1,6 +1,6 @@
 // 打转判定（决策 305、306）：指纹口径、两种计数、清零与豁免、三个阈值的触发
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { canonicalJson, LoopDetector, type LoopRound, type LoopVerdict } from "./loop-guard.ts";
 import {
   DEFAULT_LOOP_GUARD_EXEMPT_TOOLS,

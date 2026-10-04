@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { statusTextOf } from "../application/status-fixtures.ts";
 import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
@@ -759,47 +759,54 @@ function realDockerSkip(): string | false {
   }
 }
 
-test("作业容器里清 agent 进程不看标记：用 env -u 起的后台进程照样清掉，init 与容器主命令不动、容器照常运行", {
-  skip: realDockerSkip(),
-}, async () => {
-  const name = `pigeon-kill-test-${process.pid}`;
-  const docker = (...a: string[]) => execFileSync("docker", a, { encoding: "utf8" }).trim();
-  try {
-    docker(
-      "run",
-      "-d",
-      "--init",
-      "--network",
-      "none",
-      "-e",
-      "PIGEON_STREAM_CONTAINER=1",
-      "--name",
-      name,
-      "--entrypoint",
-      "tail",
-      REAL_IMAGE,
-      "-f",
-      "/dev/null"
-    );
-    // 不带本步标记的后台进程
-    docker("exec", "-d", name, "sh", "-c", "env -u PIGEON_STEP_MARKER sleep 1000");
-    await new Promise((r) => setTimeout(r, 500));
-    const sleeping = () =>
-      docker("exec", name, "sh", "-c", 'for p in /proc/[0-9]*; do cat "$p/comm" 2>/dev/null; done')
-        .split("\n")
-        .filter((c) => c === "sleep").length;
-    assert.equal(sleeping(), 1, "后台进程在跑");
-    assert.equal(await clearMarkedProcesses(["docker"], name, "pigeon-step-x", "/testbed"), true);
-    assert.equal(sleeping(), 0, "不带标记也清掉");
-    assert.equal(docker("inspect", "-f", "{{.State.Running}}", name), "true", "容器照常运行");
-  } finally {
+test.skipIf(realDockerSkip())(
+  "作业容器里清 agent 进程不看标记：用 env -u 起的后台进程照样清掉，init 与容器主命令不动、容器照常运行",
+  async () => {
+    const name = `pigeon-kill-test-${process.pid}`;
+    const docker = (...a: string[]) => execFileSync("docker", a, { encoding: "utf8" }).trim();
     try {
-      docker("rm", "-f", name);
-    } catch {
-      // 容器没起来
+      docker(
+        "run",
+        "-d",
+        "--init",
+        "--network",
+        "none",
+        "-e",
+        "PIGEON_STREAM_CONTAINER=1",
+        "--name",
+        name,
+        "--entrypoint",
+        "tail",
+        REAL_IMAGE,
+        "-f",
+        "/dev/null"
+      );
+      // 不带本步标记的后台进程
+      docker("exec", "-d", name, "sh", "-c", "env -u PIGEON_STEP_MARKER sleep 1000");
+      await new Promise((r) => setTimeout(r, 500));
+      const sleeping = () =>
+        docker(
+          "exec",
+          name,
+          "sh",
+          "-c",
+          'for p in /proc/[0-9]*; do cat "$p/comm" 2>/dev/null; done'
+        )
+          .split("\n")
+          .filter((c) => c === "sleep").length;
+      assert.equal(sleeping(), 1, "后台进程在跑");
+      assert.equal(await clearMarkedProcesses(["docker"], name, "pigeon-step-x", "/testbed"), true);
+      assert.equal(sleeping(), 0, "不带标记也清掉");
+      assert.equal(docker("inspect", "-f", "{{.State.Running}}", name), "true", "容器照常运行");
+    } finally {
+      try {
+        docker("rm", "-f", name);
+      } catch {
+        // 容器没起来
+      }
     }
   }
-});
+);
 
 test("闸门：本机假 docker 下（不在作业容器里）清 agent 进程只清带本步标记的，不带标记的进程不动", async () => {
   if (process.env.PIGEON_STREAM_CONTAINER !== undefined) return;
@@ -822,68 +829,75 @@ test("闸门：本机假 docker 下（不在作业容器里）清 agent 进程�
   }
 });
 
-test("作业容器里（真容器）：判题前删掉家目录下的用户级 site-packages 与静态检查配置；清 agent 进程时被 init 收养的孤儿进程照样清掉，主命令不动", {
-  skip: realDockerSkip(),
-}, async () => {
-  const name = `pigeon-tmp-test-${process.pid}`;
-  const docker = (...a: string[]) => execFileSync("docker", a, { encoding: "utf8" }).trim();
-  try {
-    docker(
-      "run",
-      "-d",
-      "--init",
-      "--network",
-      "none",
-      "-e",
-      "PIGEON_STREAM_CONTAINER=1",
-      "--name",
-      name,
-      "--entrypoint",
-      "tail",
-      REAL_IMAGE,
-      "-f",
-      "/dev/null"
-    );
-    // 家目录下 agent 放的用户级 site-packages（其中的 usercustomize 会在 Python 启动时被加载）与 mypy 用户级配置
-    docker(
-      "exec",
-      name,
-      "sh",
-      "-c",
-      'mkdir -p "$HOME/.local/lib/python3/site-packages" && echo x > "$HOME/.local/lib/python3/site-packages/usercustomize.py" && echo y > "$HOME/.mypy.ini"'
-    );
-    const ws = new StreamWorkspace(dockerStreamShell({ container: name, root: "/" }));
-    await ws.clearHomePaths(STRANDS_JUDGE_HYGIENE.homePaths);
-    assert.equal(
+test.skipIf(realDockerSkip())(
+  "作业容器里（真容器）：判题前删掉家目录下的用户级 site-packages 与静态检查配置；清 agent 进程时被 init 收养的孤儿进程照样清掉，主命令不动",
+  async () => {
+    const name = `pigeon-tmp-test-${process.pid}`;
+    const docker = (...a: string[]) => execFileSync("docker", a, { encoding: "utf8" }).trim();
+    try {
+      docker(
+        "run",
+        "-d",
+        "--init",
+        "--network",
+        "none",
+        "-e",
+        "PIGEON_STREAM_CONTAINER=1",
+        "--name",
+        name,
+        "--entrypoint",
+        "tail",
+        REAL_IMAGE,
+        "-f",
+        "/dev/null"
+      );
+      // 家目录下 agent 放的用户级 site-packages（其中的 usercustomize 会在 Python 启动时被加载）与 mypy 用户级配置
       docker(
         "exec",
         name,
         "sh",
         "-c",
-        'if [ -e "$HOME/.local/lib" ] || [ -e "$HOME/.mypy.ini" ]; then echo left; else echo gone; fi'
-      ),
-      "gone",
-      "家目录下 agent 放的用户级文件清掉"
-    );
-    // 孤儿进程：起它的 sh 退出后由 init 收养（父进程为 1）
-    docker("exec", name, "sh", "-c", "sleep 1000 > /dev/null 2>&1 & exit 0");
-    await new Promise((r) => setTimeout(r, 500));
-    const sleeping = () =>
-      docker("exec", name, "sh", "-c", 'for p in /proc/[0-9]*; do cat "$p/comm" 2>/dev/null; done')
-        .split("\n")
-        .filter((c) => c === "sleep").length;
-    assert.equal(sleeping(), 1, "孤儿进程在跑");
-    assert.equal(await clearMarkedProcesses(["docker"], name, "pigeon-step-x", "/"), true);
-    assert.equal(sleeping(), 0, "孤儿进程清掉");
-    assert.equal(docker("inspect", "-f", "{{.State.Running}}", name), "true", "主命令不动");
-  } finally {
-    try {
-      docker("rm", "-f", name);
-    } catch {
-      // 容器没起来
+        'mkdir -p "$HOME/.local/lib/python3/site-packages" && echo x > "$HOME/.local/lib/python3/site-packages/usercustomize.py" && echo y > "$HOME/.mypy.ini"'
+      );
+      const ws = new StreamWorkspace(dockerStreamShell({ container: name, root: "/" }));
+      await ws.clearHomePaths(STRANDS_JUDGE_HYGIENE.homePaths);
+      assert.equal(
+        docker(
+          "exec",
+          name,
+          "sh",
+          "-c",
+          'if [ -e "$HOME/.local/lib" ] || [ -e "$HOME/.mypy.ini" ]; then echo left; else echo gone; fi'
+        ),
+        "gone",
+        "家目录下 agent 放的用户级文件清掉"
+      );
+      // 孤儿进程：起它的 sh 退出后由 init 收养（父进程为 1）
+      docker("exec", name, "sh", "-c", "sleep 1000 > /dev/null 2>&1 & exit 0");
+      await new Promise((r) => setTimeout(r, 500));
+      const sleeping = () =>
+        docker(
+          "exec",
+          name,
+          "sh",
+          "-c",
+          'for p in /proc/[0-9]*; do cat "$p/comm" 2>/dev/null; done'
+        )
+          .split("\n")
+          .filter((c) => c === "sleep").length;
+      assert.equal(sleeping(), 1, "孤儿进程在跑");
+      assert.equal(await clearMarkedProcesses(["docker"], name, "pigeon-step-x", "/"), true);
+      assert.equal(sleeping(), 0, "孤儿进程清掉");
+      assert.equal(docker("inspect", "-f", "{{.State.Running}}", name), "true", "主命令不动");
+    } finally {
+      try {
+        docker("rm", "-f", name);
+      } catch {
+        // 容器没起来
+      }
     }
   }
-});
+);
 
 test("Pigeon 条件的采样温度缺省固定为 0；显式给出的值原样沿用", () => {
   assert.equal(streamTemperature(undefined), 0);

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { noMcpSession } from "../application/mcp.ts";
 import { disposeRuntime } from "../application/runtime.ts";
 import { openSessionRuntime } from "../application/session-runtime.ts";

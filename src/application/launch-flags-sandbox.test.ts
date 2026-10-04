@@ -1,7 +1,7 @@
 // 日常沙箱的启动参数（决策 237、246、248）：--sandbox 缺省联网、审批全部放行；--sandbox-network off 断网；
 // --sandbox-approval prompt 改回逐条询问；沙箱参数只配合 --sandbox 用，不接受沙箱的入口当未知参数。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { parseLaunchFlags, VALUELESS_FLAGS } from "./launch-flags.ts";
 
 const parse = (argv: string[]) => parseLaunchFlags(argv, { usage: "u", sandbox: true, env: {} });

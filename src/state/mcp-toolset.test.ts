@@ -2,8 +2,8 @@
 // 声明只读但配置 write / exec 按配置并标冲突；声明 destructive 但配置 read 按 write 并标冲突；
 // 摘要字段加法式进 run.started（不升版本，旧记录无此字段仍合法）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import { effectiveMcpTier, McpServerStatusSchema, McpToolsetEntrySchema } from "./mcp-toolset.ts";
 import { RunStartedPayloadSchema } from "./runtime-events.ts";
 

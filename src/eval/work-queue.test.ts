@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { runWorkQueue } from "./work-queue.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

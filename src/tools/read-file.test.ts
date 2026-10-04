@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { lineTag, snapshotTag } from "./hashline.ts";
 import { WorkspacePathError } from "./paths.ts";
 import { createReadFileTool, type ReadFileDetails } from "./read-file.ts";

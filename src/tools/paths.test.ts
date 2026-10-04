@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { isPathInsideDir } from "./paths.ts";
 
 function makeWorkspace(files: Record<string, string>): { root: string; cleanup: () => void } {

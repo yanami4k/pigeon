@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ToolScope } from "../state/session-payloads.ts";
 import { assertPolicySubset, deriveWorkerPolicy, WorkerPolicyError } from "./roles.ts";
 

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { MEMORY_FILE_HEADERS, type MemoryLayer } from "../memory/learned.ts";
 import { memoryLocation } from "../memory/learned-store.ts";
 import {

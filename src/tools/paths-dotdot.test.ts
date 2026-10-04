@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { isPathInsideDir, resolveWorkspacePath, WorkspacePathError } from "./paths.ts";
 
 function makeFixture(): { base: string; root: string; cleanup: () => void } {

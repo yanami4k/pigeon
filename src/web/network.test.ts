@@ -1,7 +1,7 @@
 // 内网防护与安全抓取（决策 289）：非公网地址一律拒绝（含域名解析到内网）；跨主机跳转不跟随；同主机跳转逐跳重校验；
 // 正文按上限截断。传输层与 DNS 解析都注入，不真的连外网。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   isPublicIp,
   readBodyCapped,

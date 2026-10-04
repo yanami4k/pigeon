@@ -2,8 +2,8 @@
 // 运行面在同一个 Run 里重试一次——从 Agent 状态里去掉这条空消息再接着运行，重试那一轮照常计轮；仍空即以空回复异常结束，
 // 收尾条目的结束方式记 empty-reply，失败分类为业务失败。一个 Run 只发一次 run.ended。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Type } from "typebox";
+import { test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import {

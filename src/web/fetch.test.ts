@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { type FetchLimits, fetchPage } from "./fetch.ts";
 import type { Transport, UnsafeUrlError } from "./network.ts";
 
@@ -17,7 +17,7 @@ const PAGE_HTML = `<!doctype html>
 let server: Server;
 let port: number;
 
-before(async () => {
+beforeAll(async () => {
   server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://local");
     switch (url.pathname) {
@@ -61,7 +61,7 @@ before(async () => {
   port = (server.address() as AddressInfo).port;
 });
 
-after(async () => {
+afterAll(async () => {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });

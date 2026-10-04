@@ -1,7 +1,7 @@
 // worker 委派策略（M5.5 S2，决策 040）：allow 只缩、deny 只增、审批模式不升级；子集校验拒绝扩权。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import {
   LIST_SESSIONS_TOOL,
   READ_SESSION_ENTRY_TOOL,

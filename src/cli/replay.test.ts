@@ -6,9 +6,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
+import { test } from "vitest";
 import { shortId } from "../application/format.ts";
 import { createToolGovernance } from "../application/governance.ts";
 import {

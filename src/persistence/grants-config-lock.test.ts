@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import { acquireExclusiveLock, ExclusiveLockError } from "./exclusive-lock.ts";

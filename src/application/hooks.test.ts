@@ -2,7 +2,7 @@
 // （拒绝 > 要人确认 > 放行、continue:false、上下文收集）、运行记录（pigeon.hook）、提示、执行位置选择
 // （沙箱经执行端、host:true 在宿主）、并行与 matcher 过滤、disableAllHooks。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { HookCommandInput, HookCommandOutcome } from "../execution/hook-runner.ts";
 import type { LayeredHook } from "../state/hooks.ts";
 import { type SessionCustomEntry, SessionEntryType } from "../state/session-entries.ts";

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newSessionId } from "../state/ids.ts";
 import { lookupSlashCommand, rejectWhileRunning, SLASH_COMMANDS } from "./command-table.ts";
 import { InputQueue } from "./input-queue.ts";

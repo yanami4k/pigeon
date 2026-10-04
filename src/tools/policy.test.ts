@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Type } from "typebox";
+import { test } from "vitest";
 import { evaluateToolPolicy, type ToolPolicyLike } from "./policy.ts";
 import { ToolRegistry, type ToolRiskTier } from "./registry.ts";
 

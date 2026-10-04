@@ -4,8 +4,8 @@
 // 先补落盘（空输出不落盘），截断而全文没落盘的、补落盘失败的不裁，带文件变化的保留清单；先写进会话记录再生效；免费时机
 // （模型或工具集变化、空闲超时、压缩前）一次裁光；同一请求前裁两次不重复扣减；续跑照记录重放，逐字节一致，总开关关掉也照放。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
+import { test } from "vitest";
 import { type ContextPruneSettings, contextPruneSettings } from "../state/prune-config.ts";
 import { SESSION_ENTRY_VERSION, SessionEntryType } from "../state/session-entries.ts";
 import { STATUS_MARKER } from "../state/status-text.ts";

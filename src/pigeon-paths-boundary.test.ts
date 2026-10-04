@@ -6,9 +6,9 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { test } from "vitest";
 
 const SRC = path.dirname(fileURLToPath(import.meta.url));
 const PATHS_MODULE = path.join("state", "paths.ts");
@@ -16,7 +16,7 @@ const PATHS_MODULE = path.join("state", "paths.ts");
 const SEGMENT = /(^|[/\\"'`\s(（：:])\.pigeon(?=$|[/\\"'`\s)）。，、；])/;
 
 // 源码里含目录名 .pigeon 的字面量（行号从 1 起）：按语法树取字符串与模板的各段
-export function pigeonLiterals(source: string): Array<{ line: number; text: string }> {
+function pigeonLiterals(source: string): Array<{ line: number; text: string }> {
   const file = ts.createSourceFile("probe.ts", source, ts.ScriptTarget.Latest, true);
   const found: Array<{ line: number; text: string }> = [];
   const visit = (node: ts.Node): void => {

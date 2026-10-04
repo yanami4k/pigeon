@@ -1,7 +1,7 @@
 // 上游版本探测（M7，ROADMAP §M7"启动时探测上游版本，与已验证版本不匹配时明确告警，不静默继续"）：
 // 会话树契约测试针对的是 core 0.84.4 的 v4 JSONL 格式；实际安装的上游包版本与已验证版本不一致时给出告警文本。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { probeUpstreamVersions, VERIFIED_UPSTREAM_VERSION } from "./upstream-version.ts";
 
 test("已验证版本为 0.84.4；本仓库实际安装的三个上游包与之一致，没有告警", () => {

@@ -2,8 +2,8 @@
 // （大于 0）时取两者中更小的那个；调用方已传的其他选项原样保留。看得到真实模型的接入共用 modelOutputLimit：模型没有上限时按
 // 32,000 计，配置了取较小者，未配置不传。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { test } from "vitest";
 import { createFakeStreamFn } from "./fixtures.ts";
 import type { StreamFn } from "./index.ts";
 import {

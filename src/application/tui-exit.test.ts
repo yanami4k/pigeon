@@ -1,7 +1,7 @@
 // 终端界面退出（决策 283、331）：退出立即收尾、不调用模型；不再拍工作目录快照、不再写退出条目；沙箱会话交回并打出提示；
 // 旧会话里已有的退出条目照常可读，会话照常可续。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { listSessionFiles } from "../persistence/session-reader.ts";
 import { newSessionId } from "../state/ids.ts";
 import { SESSION_ENTRY_VERSION, SessionEntryType } from "../state/session-entries.ts";

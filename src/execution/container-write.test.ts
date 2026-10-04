@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { WorkspacePathError, WorkspaceWriteRefusedError } from "../tools/paths.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { FileReadTracker } from "../tools/read-tracker.ts";
@@ -36,7 +36,7 @@ async function withContainer(
   }
 }
 
-test("容器：write_file 新建含中间目录，读过后可整体覆盖", { skip: !POSIX }, () =>
+test.skipIf(!POSIX)("容器：write_file 新建含中间目录，读过后可整体覆盖", () =>
   withContainer(async (root, docker) => {
     const reads = new FileReadTracker();
     const write = createWriteFileTool(docker.host, reads);
@@ -50,7 +50,7 @@ test("容器：write_file 新建含中间目录，读过后可整体覆盖", { s
   })
 );
 
-test("容器：链接加 .. 按内核顺序解析，落点与受保护路径判定一致", { skip: !POSIX }, () =>
+test.skipIf(!POSIX)("容器：链接加 .. 按内核顺序解析，落点与受保护路径判定一致", () =>
   withContainer(async (root, docker) => {
     mkdirSync(join(root, "a", "b"), { recursive: true });
     mkdirSync(join(root, ".pigeon"));
@@ -67,7 +67,7 @@ test("容器：链接加 .. 按内核顺序解析，落点与受保护路径判�
   })
 );
 
-test("容器：路径里的换行不被吃掉，解析结果含控制字符即拒绝，什么也不建", { skip: !POSIX }, () =>
+test.skipIf(!POSIX)("容器：路径里的换行不被吃掉，解析结果含控制字符即拒绝，什么也不建", () =>
   withContainer(async (root, docker) => {
     mkdirSync(join(root, ".pigeon"));
     await assert.rejects(
@@ -78,7 +78,7 @@ test("容器：路径里的换行不被吃掉，解析结果含控制字符即�
   })
 );
 
-test("容器：检查之后被别人建了不覆盖；路径上的目录被换成链接拒写", { skip: !POSIX }, () =>
+test.skipIf(!POSIX)("容器：检查之后被别人建了不覆盖；路径上的目录被换成链接拒写", () =>
   withContainer(async (root, docker) => {
     const raced = await docker.host.resolveForCreate?.("raced.txt");
     assert.equal(raced?.exists, false);

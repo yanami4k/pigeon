@@ -3,7 +3,7 @@
 // 接入点、嵌套缺省拦住与放开后共用额度（等待中借出空位）、审批超时与无人值守即以可恢复错误交回、补批后能续做。
 // 运行面与工作区用内存替身。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ApprovalDecision } from "../approvals/handler.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type SessionId } from "../state/ids.ts";

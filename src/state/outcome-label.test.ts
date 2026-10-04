@@ -3,7 +3,7 @@
 // 缺运行结束或有悬账一律未知。旧会话的验证记录照常参与现算（verdict 分支只为旧会话保留）。
 // 纯函数，不落盘。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { type AttemptOutcomeFacts, labelAttempt } from "./outcome-label.ts";
 
 const NORMAL: AttemptOutcomeFacts = {

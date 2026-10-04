@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtures.ts";
@@ -33,7 +33,7 @@ import type { WorkerNotices } from "./worker-notices.ts";
 import { createSessionWorkers } from "./workers.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

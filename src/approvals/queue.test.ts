@@ -1,6 +1,6 @@
 // 审批排队（M5.5 S3，决策 040）：并发请求一次一个、先到先问；前一个抛错不堵后面。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ApprovalDecision, ApprovalRequest } from "./handler.ts";
 import { createApprovalQueue } from "./queue.ts";
 

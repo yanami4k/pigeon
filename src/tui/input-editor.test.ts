@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { promptHistoryStore } from "../application/prompt-history.ts";
 import { newSessionId } from "../state/ids.ts";
 import { ScriptedRuntime } from "./runtime-fixtures.ts";

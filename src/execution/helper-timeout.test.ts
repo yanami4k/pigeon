@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, test } from "node:test";
+import { describe, test } from "vitest";
 import {
   ContainerHostError,
   containerExec,
@@ -123,7 +123,7 @@ function readersOf(fifo: string): string {
   }).stdout;
 }
 
-describe("容器辅助命令的超时（本机执行的假 docker）", { skip: SKIP }, () => {
+describe.skipIf(SKIP)("容器辅助命令的超时（本机执行的假 docker）", () => {
   test("有 timeout：卡住的辅助命令在容器内被终止，不重启容器；agent 在后台起的进程仍在", async () => {
     const f = setup();
     let background: number | undefined;

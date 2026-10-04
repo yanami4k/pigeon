@@ -1,7 +1,7 @@
 // 域错误标记（M5.5 S5，决策 050）：memory / skills 工具的错误对象自带归类标记，判据先读标记；
 // 标记值不合法时不采信，回落原有判据。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { SessionToolError } from "../memory/search-tools.ts";
 import { LoadSkillError } from "../skills/load-skill-tool.ts";
 import { classifyToolError, TOOL_ERROR_KIND_MARK } from "./error-kind.ts";

@@ -1,7 +1,7 @@
 // MCP 工具映射进注册表（M5.7 S2）：工具名加 server 前缀并归一为注册表形态；风险档取配置（未列出落
 // defaultTier）；inputSchema 原样透传；注解摘要与配置档位留给 S3 的冲突判定；执行转发并映射内容块。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { McpServerConfig } from "../state/mcp-config.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import { ToolRegistry } from "../tools/registry.ts";

@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { createApprovalQueue } from "../approvals/queue.ts";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";

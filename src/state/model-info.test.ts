@@ -1,7 +1,7 @@
 // 模型信息的逐项取值（决策 362）：设置 > 接入模块声明 > pi-ai 目录 > 未知，每项单独取；价格整体取自同一来源；
 // 价格全为 0 的一层当作没给；缓存规则按实际服务方查（设置 > 声明 > 接口主机名 > provider 标签）；查询给出三价（带币种）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { type CatalogLookup, modelProfile, resolveModelInfo } from "./model-info.ts";
 import { validateSettingsLayer } from "./settings.ts";
 

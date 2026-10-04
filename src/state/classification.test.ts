@@ -1,7 +1,7 @@
 // 失败四分类的 Run 级判据表（M4 S2，D7）逐行单测；工具级判据的测试在 session-judge 与会话读者一侧。
 // 默认桶是「未知」而非「业务失败」：宁可标「不知道」不贴错标签——标签要喂 M6+ 蒸馏，贴错 = 毒信号。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { classifyRunOutcome } from "./classification.ts";
 
 // ---------- Run 级判据（D7 表左列） ----------

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createRunCommandTool, RunCommandError } from "./run-command.ts";
 
 const NODE = `"${process.execPath}"`;
@@ -25,41 +25,43 @@ function envWithPath(root: string): NodeJS.ProcessEnv {
   return env;
 }
 
-test("Windows .cmd：参数全在保守字符集内经 cmd.exe 启动器运行（显式路径与 PATH 解析）", {
-  skip: !onWindows,
-}, async () => {
-  await withRoot(async (root) => {
-    writeFileSync(path.join(root, "ok.cmd"), "@echo off\r\necho cmd-ok %*\r\n");
-    const tool = createRunCommandTool({ workspaceRoot: root, env: envWithPath(root) });
-    assert.equal(tool.inspectCommand({ command: "ok hello" }).mode, "launcher");
+test.skipIf(!onWindows)(
+  "Windows .cmd：参数全在保守字符集内经 cmd.exe 启动器运行（显式路径与 PATH 解析）",
+  async () => {
+    await withRoot(async (root) => {
+      writeFileSync(path.join(root, "ok.cmd"), "@echo off\r\necho cmd-ok %*\r\n");
+      const tool = createRunCommandTool({ workspaceRoot: root, env: envWithPath(root) });
+      assert.equal(tool.inspectCommand({ command: "ok hello" }).mode, "launcher");
 
-    const explicit = (await tool.execute("tc-1", { command: "ok.cmd hello-1 k=v a/b" })).details;
-    assert.equal(explicit.launcher, true);
-    assert.equal(explicit.shell, false);
-    assert.equal(explicit.output.trim(), "cmd-ok hello-1 k=v a/b");
+      const explicit = (await tool.execute("tc-1", { command: "ok.cmd hello-1 k=v a/b" })).details;
+      assert.equal(explicit.launcher, true);
+      assert.equal(explicit.shell, false);
+      assert.equal(explicit.output.trim(), "cmd-ok hello-1 k=v a/b");
 
-    const viaPath = (await tool.execute("tc-2", { command: "ok x@y:z_1.2" })).details;
-    assert.equal(viaPath.launcher, true);
-    assert.equal(viaPath.output.trim(), "cmd-ok x@y:z_1.2");
-  });
-});
+      const viaPath = (await tool.execute("tc-2", { command: "ok x@y:z_1.2" })).details;
+      assert.equal(viaPath.launcher, true);
+      assert.equal(viaPath.output.trim(), "cmd-ok x@y:z_1.2");
+    });
+  }
+);
 
-test("Windows .cmd：白名单外参数未经 shell 确认即拒绝并指出参数，不启动进程", {
-  skip: !onWindows,
-}, async () => {
-  await withRoot(async (root) => {
-    writeFileSync(path.join(root, "ok.cmd"), "@echo off\r\necho cmd-ok %*\r\n");
-    const tool = createRunCommandTool({ workspaceRoot: root, env: envWithPath(root) });
-    const command = 'ok.cmd "a b"';
-    const inspection = tool.inspectCommand({ command });
-    assert.equal(inspection.mode, "shell");
-    assert.equal(inspection.needsShell, true);
-    await assert.rejects(
-      tool.execute("tc-3", { command }),
-      (error: unknown) => error instanceof RunCommandError && error.message.includes("「a b」")
-    );
-  });
-});
+test.skipIf(!onWindows)(
+  "Windows .cmd：白名单外参数未经 shell 确认即拒绝并指出参数，不启动进程",
+  async () => {
+    await withRoot(async (root) => {
+      writeFileSync(path.join(root, "ok.cmd"), "@echo off\r\necho cmd-ok %*\r\n");
+      const tool = createRunCommandTool({ workspaceRoot: root, env: envWithPath(root) });
+      const command = 'ok.cmd "a b"';
+      const inspection = tool.inspectCommand({ command });
+      assert.equal(inspection.mode, "shell");
+      assert.equal(inspection.needsShell, true);
+      await assert.rejects(
+        tool.execute("tc-3", { command }),
+        (error: unknown) => error instanceof RunCommandError && error.message.includes("「a b」")
+      );
+    });
+  }
+);
 
 test("shell 语法判定需 shell：未确认拒绝，确认后以 shell 运行，执行证据标明经 shell 且命令串原样", async () => {
   await withRoot(async (root) => {

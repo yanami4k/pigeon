@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { streamSimple as realStreamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { test } from "vitest";
 import { loadStreamFn } from "../application/runtime.ts";
 import { streamGatewayStreamFn } from "../eval/stream-experiment.ts";
 import { DEEPSEEK_ANTHROPIC_BASE_URL, deepseekModel } from "./deepseek-model.ts";

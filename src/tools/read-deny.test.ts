@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createGrepTool } from "./grep.ts";
 import { createLocalWorkspaceHost, resolveHelperProgram } from "./local-host.ts";
 import {
@@ -149,29 +149,30 @@ test("UNC 判定口径：真实路径为 UNC 且落在工作区以外的拒；�
   assert.equal(classifyRealPath("C:\\ws", "\\\\localhost\\C$\\ws\\a.ts", [], rules), "outside");
 });
 
-test("Windows：工作区在网络共享上（以本机管理共享 \\\\localhost\\X$ 模拟）时，其内照常读，指向工作区以外的 UNC 拒读", {
-  skip: windowsOnly,
-}, async (t) => {
-  const { base, ws, home, cleanup } = layout();
-  try {
-    const toUnc = (local: string) => `\\\\localhost\\${local[0]}$${local.slice(2)}`;
-    if (!existsSync(toUnc(ws))) {
-      t.skip("本机管理共享不可用");
-      return;
+test.skipIf(windowsOnly)(
+  "Windows：工作区在网络共享上（以本机管理共享 \\\\localhost\\X$ 模拟）时，其内照常读，指向工作区以外的 UNC 拒读",
+  async (t) => {
+    const { base, ws, home, cleanup } = layout();
+    try {
+      const toUnc = (local: string) => `\\\\localhost\\${local[0]}$${local.slice(2)}`;
+      if (!existsSync(toUnc(ws))) {
+        t.skip("本机管理共享不可用");
+        return;
+      }
+      const host = createLocalWorkspaceHost(toUnc(ws), { homeDir: home });
+      const deny = readDenyList();
+      assert.equal((await host.resolveForRead?.("a.txt", deny))?.outside, false);
+      await assert.rejects(
+        host.resolveForRead?.(toUnc(join(base, "lib", "dep.js")), deny) ?? Promise.resolve(),
+        UnsupportedPathFormError
+      );
+      // 本机路径写法的工作区外文件照常按工作区外处理（读取须经批准，见 read_file）
+      assert.equal((await host.resolveForRead?.(join(base, "lib", "dep.js"), deny))?.outside, true);
+    } finally {
+      cleanup();
     }
-    const host = createLocalWorkspaceHost(toUnc(ws), { homeDir: home });
-    const deny = readDenyList();
-    assert.equal((await host.resolveForRead?.("a.txt", deny))?.outside, false);
-    await assert.rejects(
-      host.resolveForRead?.(toUnc(join(base, "lib", "dep.js")), deny) ?? Promise.resolve(),
-      UnsupportedPathFormError
-    );
-    // 本机路径写法的工作区外文件照常按工作区外处理（读取须经批准，见 read_file）
-    assert.equal((await host.resolveForRead?.(join(base, "lib", "dep.js"), deny))?.outside, true);
-  } finally {
-    cleanup();
   }
-});
+);
 
 test("不分大小写的平台：包含关系与禁读判定按不分大小写比较", () => {
   const rules = { p: path.posix, insensitive: true };
@@ -187,80 +188,82 @@ test("不分大小写的平台：包含关系与禁读判定按不分大小写�
 
 // Windows 上的路径别名：大小写、8.3 短名、\\?\ 与 \\.\ 前缀、数据流；grep 的 path 与结果同样按真实路径判
 
-test("Windows：大小写、8.3 短名、设备前缀与数据流的写法都绕不过禁读名单；grep 的 path 与结果同样", {
-  skip: windowsOnly,
-}, async (t) => {
-  const { home, cleanup } = layout();
-  try {
-    writeFileSync(join(home, "notes.txt"), "key here\n");
-    const host = createLocalWorkspaceHost(home, { homeDir: home });
-    const deny = readDenyList();
-    const key = join(home, ".ssh", "id_rsa");
-    const rejects = (input: string, kind: typeof ReadDeniedError) =>
-      assert.rejects(host.resolveForRead?.(input, deny) ?? Promise.resolve(), kind, input);
-    await rejects(join(home, ".SSH", "ID_RSA"), ReadDeniedError);
-    await rejects(`\\\\?\\${key}`, UnsupportedPathFormError);
-    await rejects(`\\\\.\\${key}`, UnsupportedPathFormError);
-    await rejects(`//?/${key}`, UnsupportedPathFormError);
-    await rejects(`${key}::$DATA`, UnsupportedPathFormError);
-    await rejects(`${join(home, "notes.txt")}:hidden`, UnsupportedPathFormError);
-    // UNC 写法（含指向本机盘符共享的）：解析后为工作区以外的 UNC 路径，拒收；管理共享不可用时不测
-    const unc = key.replace(/^([A-Za-z]):/, "$1$");
-    if (existsSync(`\\\\localhost\\${unc}`)) {
-      await rejects(`\\\\localhost\\${unc}`, UnsupportedPathFormError);
-      await rejects(`\\\\127.0.0.1\\${unc}`, UnsupportedPathFormError);
-      await rejects(`//localhost/${unc.replace(/\\/g, "/")}`, UnsupportedPathFormError);
-    } else {
-      t.diagnostic("本机管理共享不可用，UNC 三项未测");
-    }
-    // 8.3 短名：卷上开着短名时才有
-    const short = spawnSync(
-      "cmd",
-      ["/d", "/c", `for %I in ("${join(home, ".ssh")}") do @echo %~sI`],
-      {
-        encoding: "utf8",
-        windowsVerbatimArguments: true,
+test.skipIf(windowsOnly)(
+  "Windows：大小写、8.3 短名、设备前缀与数据流的写法都绕不过禁读名单；grep 的 path 与结果同样",
+  async (t) => {
+    const { home, cleanup } = layout();
+    try {
+      writeFileSync(join(home, "notes.txt"), "key here\n");
+      const host = createLocalWorkspaceHost(home, { homeDir: home });
+      const deny = readDenyList();
+      const key = join(home, ".ssh", "id_rsa");
+      const rejects = (input: string, kind: typeof ReadDeniedError) =>
+        assert.rejects(host.resolveForRead?.(input, deny) ?? Promise.resolve(), kind, input);
+      await rejects(join(home, ".SSH", "ID_RSA"), ReadDeniedError);
+      await rejects(`\\\\?\\${key}`, UnsupportedPathFormError);
+      await rejects(`\\\\.\\${key}`, UnsupportedPathFormError);
+      await rejects(`//?/${key}`, UnsupportedPathFormError);
+      await rejects(`${key}::$DATA`, UnsupportedPathFormError);
+      await rejects(`${join(home, "notes.txt")}:hidden`, UnsupportedPathFormError);
+      // UNC 写法（含指向本机盘符共享的）：解析后为工作区以外的 UNC 路径，拒收；管理共享不可用时不测
+      const unc = key.replace(/^([A-Za-z]):/, "$1$");
+      if (existsSync(`\\\\localhost\\${unc}`)) {
+        await rejects(`\\\\localhost\\${unc}`, UnsupportedPathFormError);
+        await rejects(`\\\\127.0.0.1\\${unc}`, UnsupportedPathFormError);
+        await rejects(`//localhost/${unc.replace(/\\/g, "/")}`, UnsupportedPathFormError);
+      } else {
+        await t.annotate("本机管理共享不可用，UNC 三项未测");
       }
-    ).stdout.trim();
-    if (short !== "" && short.toLowerCase() !== join(home, ".ssh").toLowerCase()) {
-      await rejects(join(short, "id_rsa"), ReadDeniedError);
-    } else {
-      t.diagnostic("本卷没有 8.3 短名，短名一项未测");
+      // 8.3 短名：卷上开着短名时才有
+      const short = spawnSync(
+        "cmd",
+        ["/d", "/c", `for %I in ("${join(home, ".ssh")}") do @echo %~sI`],
+        {
+          encoding: "utf8",
+          windowsVerbatimArguments: true,
+        }
+      ).stdout.trim();
+      if (short !== "" && short.toLowerCase() !== join(home, ".ssh").toLowerCase()) {
+        await rejects(join(short, "id_rsa"), ReadDeniedError);
+      } else {
+        await t.annotate("本卷没有 8.3 短名，短名一项未测");
+      }
+      // grep：path 写成大小写别名即拒；搜整个家目录时 .ssh 下的结果逐条滤掉并计数
+      const grep = createGrepTool(host, { maxResults: 50, bundledRipgrep: true });
+      await assert.rejects(grep.execute("tc", { pattern: "key", path: ".SSH" }), ReadDeniedError);
+      const all = await grep.execute("tc", { pattern: "key" });
+      assert.equal(all.details.total, 1);
+      assert.ok(all.details.deniedOmitted >= 1);
+    } finally {
+      cleanup();
     }
-    // grep：path 写成大小写别名即拒；搜整个家目录时 .ssh 下的结果逐条滤掉并计数
-    const grep = createGrepTool(host, { maxResults: 50, bundledRipgrep: true });
-    await assert.rejects(grep.execute("tc", { pattern: "key", path: ".SSH" }), ReadDeniedError);
-    const all = await grep.execute("tc", { pattern: "key" });
-    assert.equal(all.details.total, 1);
-    assert.ok(all.details.deniedOmitted >= 1);
-  } finally {
-    cleanup();
   }
-});
+);
 
-test("Windows：辅助程序按 PATH 解析成绝对路径，跳过相对目录与工作区之内的目录——工作区里放的同名 git.exe 不被执行", {
-  skip: windowsOnly,
-}, async (t) => {
-  const { ws, home, cleanup } = layout();
-  const originalPath = process.env.PATH;
-  try {
-    if (resolveHelperProgram("git", { PATH: originalPath ?? "" }, ws) === undefined) {
-      t.skip("PATH 里没有 git");
-      return;
+test.skipIf(windowsOnly)(
+  "Windows：辅助程序按 PATH 解析成绝对路径，跳过相对目录与工作区之内的目录——工作区里放的同名 git.exe 不被执行",
+  async (t) => {
+    const { ws, home, cleanup } = layout();
+    const originalPath = process.env.PATH;
+    try {
+      if (resolveHelperProgram("git", { PATH: originalPath ?? "" }, ws) === undefined) {
+        t.skip("PATH 里没有 git");
+        return;
+      }
+      spawnSync("git", ["init", "-q", ws], { windowsHide: true });
+      // 工作区里放一个"git.exe"（系统的 where.exe 的副本：被误执行时认不出仓库），并把相对目录与工作区放到 PATH 最前
+      copyFileSync(
+        join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe"),
+        join(ws, "git.exe")
+      );
+      process.env.PATH = `.;${ws};${originalPath ?? ""}`;
+      const resolved = resolveHelperProgram("git", { PATH: process.env.PATH }, ws) ?? "";
+      assert.ok(!containedIn(ws, resolved, { p: path.win32, insensitive: true }), resolved);
+      const host = createLocalWorkspaceHost(ws, { homeDir: home });
+      assert.equal((await detectSearchBackend(host, { only: "git" }))?.kind, "git");
+    } finally {
+      process.env.PATH = originalPath;
+      cleanup();
     }
-    spawnSync("git", ["init", "-q", ws], { windowsHide: true });
-    // 工作区里放一个"git.exe"（系统的 where.exe 的副本：被误执行时认不出仓库），并把相对目录与工作区放到 PATH 最前
-    copyFileSync(
-      join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe"),
-      join(ws, "git.exe")
-    );
-    process.env.PATH = `.;${ws};${originalPath ?? ""}`;
-    const resolved = resolveHelperProgram("git", { PATH: process.env.PATH }, ws) ?? "";
-    assert.ok(!containedIn(ws, resolved, { p: path.win32, insensitive: true }), resolved);
-    const host = createLocalWorkspaceHost(ws, { homeDir: home });
-    assert.equal((await detectSearchBackend(host, { only: "git" }))?.kind, "git");
-  } finally {
-    process.env.PATH = originalPath;
-    cleanup();
   }
-});
+);

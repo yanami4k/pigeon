@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { sampleLine } from "./stream-result-fixtures.ts";
 import {
   LEGACY_STREAM_RESULT_FIELDS,

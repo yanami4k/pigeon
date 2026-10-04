@@ -1,7 +1,7 @@
 // 按编号找快照（决策 350）：快照在后台拍，条目落在文件里的位置不说明它对应哪一条——分叉点之前最近的快照按记录写明的条目号找；
 // 最近的那一次没拍成（只有"拍摄中"标记即进程中断，或标了失败）时给出它的拍摄标记，不退回更早的快照；文件没有改变的不算。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newRunId, newSessionId, type RunId } from "./ids.ts";
 import { SESSION_ENTRY_VERSION, SessionEntryType } from "./session-entries.ts";
 import { type StoreEntry, storeCheckpointBefore, storeSessionView } from "./session-judge.ts";
