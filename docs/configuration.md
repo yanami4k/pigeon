@@ -29,7 +29,7 @@
 | `loopGuard` | 打转检测的开关、轮数与豁免工具 | `.pigeon/loop-guard.json` |
 | `hooks` | 钩子：事件 → matcher 组 → 命令（决策 323 / 324，见下文"钩子"一节） | 新节 |
 | `memory` | 学到的记忆的两层上限：`projectLimitChars`、`userLimitChars`，缺省各 4,000 字符 | — |
-| `tools` | 工具的上限类设置，按工具分子键：`runCommand`（输出的头尾保留与落盘总量），见下文"工具的上限" | 新节 |
+| `tools` | 工具的上限类设置，按工具分子键：`readFile`（单次字节与单行字符上限）、`runCommand`（输出的头尾保留与落盘总量），见下文"工具的上限" | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -80,10 +80,12 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 
 ## 工具的上限
 
-`tools` 一节按工具分子键（小驼峰），不写的项取缺省（决策 356）：
+`tools` 一节按工具分子键（小驼峰），不写的项取缺省（决策 356、357）：
 
 | 键 | 含义 | 缺省 |
 | --- | --- | --- |
+| `tools.readFile.maxBytes` | read_file 单次返回的正文至多这么多字节，到了即停并给出续读的 offset | 51200（50 KiB） |
+| `tools.readFile.maxLineChars` | 单行超过这么多字符即截断显示并注明原长 | 2000 |
 | `tools.runCommand.outputHeadBytes` | run_command 输出超长时保留的开头 | 8192（8 KiB） |
 | `tools.runCommand.outputTailBytes` | 输出超长时保留的末尾 | 24576（24 KiB） |
 | `tools.runCommand.savedOutputsMaxBytes` | 每个会话落盘的完整输出总量上限，满了删最旧的 | 209715200（200 MiB） |
@@ -91,7 +93,7 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 run_command 的输出超过开头加末尾两段时，结果里留开头与末尾、中间注明省略的行数；完整输出存进会话自己的落盘目录 `.pigeon/state/outputs/<会话号>/`，结果给出虚拟路径 `pigeon://outputs/<编号>` 与总行数。read_file 认得这个前缀，直接从落盘目录读，不经执行端（沙箱会话同样如此）；虚拟路径只能是 `pigeon://outputs/` 加编号，指不到落盘目录以外。落盘文件随会话保存。
 
 ```json
-{ "tools": { "runCommand": { "outputTailBytes": 32768 } } }
+{ "tools": { "readFile": { "maxBytes": 102400 }, "runCommand": { "outputTailBytes": 32768 } } }
 ```
 
 ## key 走环境变量

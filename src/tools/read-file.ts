@@ -2,10 +2,17 @@
 // 输出与 edit_file 协同（M3 切片 2）：头部带全文件快照标签 [PATH#TAG]，每行带 hashline 锚点
 // N#TAG——edit_file 的快照预检与锚点寻址完全消费这里给出的标签。
 // 行为参考 harness/tools/read 笔记：offset 1-based；窗口截断时给出下一窗口提示。
+// 决策 357：单次正文至多 maxBytes 字节（缺省 50 KiB），单行超过 maxLineChars 字符（缺省 2000）截断并注明；按字节上限停下时
+// 照翻页提示给出续读的 offset。
 // 决策 356：pigeon://outputs/<编号> 是本会话落盘的命令输出，在路径判定之前识别，直接从会话落盘目录读，不经执行端。
 import { readFile } from "node:fs/promises";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import {
+  DEFAULT_READ_FILE_MAX_BYTES,
+  DEFAULT_READ_FILE_MAX_LINE_CHARS,
+  type ReadFileLimits,
+} from "../state/tools-config.ts";
 import { type CommandOutputStore, isOutputsUri, OutputPathError } from "./command-output.ts";
 import type { EditMode } from "./edit-mode.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
@@ -37,11 +44,16 @@ export interface ReadFileDetails {
   offset: number;
   limit: number;
   returnedLines: number;
+  // 决策 357：本次截断显示的超长行数；按字节上限提前停下
+  truncatedLines?: number;
+  byteLimited?: boolean;
 }
 
 export interface ReadFileToolOptions {
   // 决策 061：replace 编辑模式下输出不带行标签与快照标签，每行 `行号| 内容`；缺省 hashline 输出不变
   editMode?: EditMode;
+  // 决策 357：单次字节与单行字符上限；缺省 50 KiB 与 2000
+  limits?: ReadFileLimits;
   // 决策 356：本会话的落盘目录（不给即不认虚拟路径）
   outputs?: CommandOutputStore;
 }
@@ -53,6 +65,8 @@ export function createReadFileTool(
 ): PigeonAgentTool<typeof ReadFileParamsSchema, ReadFileDetails> {
   const host = asWorkspaceHost(workspace);
   const replaceMode = options.editMode === "replace";
+  const maxBytes = options.limits?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES;
+  const maxLineChars = options.limits?.maxLineChars ?? DEFAULT_READ_FILE_MAX_LINE_CHARS;
   // 取内容：虚拟路径先于路径判定，直接读会话落盘目录；其余经执行端围栏后读取
   const load = async (inputPath: string): Promise<{ resolvedPath: string; raw: string }> => {
     if (isOutputsUri(inputPath)) {
@@ -111,21 +125,36 @@ export function createReadFileTool(
         );
       }
       const limit = args.limit ?? DEFAULT_READ_LIMIT;
-      const end = Math.min(offset + limit - 1, totalLines);
-      const window = lines.slice(offset - 1, end);
-      const body = window
-        .map((line, index) =>
-          replaceMode ? `${offset + index}| ${line}` : `${offset + index}#${lineTag(line)}| ${line}`
-        )
-        .join("\n");
+      const last = Math.min(offset + limit - 1, totalLines);
+      // 逐行排版：超长行截断并注明；累计字节超过上限即停（至少给一行）
+      const rendered: string[] = [];
+      let bytes = 0;
+      let truncatedLines = 0;
+      let byteLimited = false;
+      for (let number = offset; number <= last; number += 1) {
+        const line = lines[number - 1] ?? "";
+        const shown = line.length > maxLineChars ? clipLine(line, maxLineChars) : line;
+        const text = replaceMode ? `${number}| ${shown}` : `${number}#${lineTag(line)}| ${shown}`;
+        const size = Buffer.byteLength(text, "utf8") + 1;
+        if (rendered.length > 0 && bytes + size > maxBytes) {
+          byteLimited = true;
+          break;
+        }
+        if (shown !== line) truncatedLines += 1;
+        rendered.push(text);
+        bytes += size;
+      }
+      const end = offset + rendered.length - 1;
       const remaining = totalLines - end;
       const hint =
-        remaining > 0 ? `\n还有 ${remaining} 行未读，下一窗口参数 offset=${end + 1}` : "";
+        remaining > 0
+          ? `\n${byteLimited ? `本次输出已达 ${maxBytes} 字节上限；` : ""}还有 ${remaining} 行未读，下一窗口参数 offset=${end + 1}`
+          : "";
       return {
         content: [
           {
             type: "text",
-            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${body}${hint}`,
+            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${rendered.join("\n")}${hint}`,
           },
         ],
         details: {
@@ -134,9 +163,19 @@ export function createReadFileTool(
           totalLines,
           offset,
           limit,
-          returnedLines: window.length,
+          returnedLines: rendered.length,
+          ...(truncatedLines > 0 ? { truncatedLines } : {}),
+          ...(byteLimited ? { byteLimited } : {}),
         },
       };
     },
   };
+}
+
+// 超长行只显示前 maxChars 个字符（不切断代理对）并注明原长
+function clipLine(line: string, maxChars: number): string {
+  let cut = maxChars;
+  const code = line.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  return `${line.slice(0, cut)}…（本行共 ${line.length} 字符，超过 ${maxChars} 已截断）`;
 }

@@ -1,7 +1,7 @@
 // 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
-//   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）与工具的上限类设置 tools（决策 356）；
+//   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）与工具的上限类设置 tools（决策 356、357）；
 //   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
@@ -44,7 +44,9 @@ import {
 } from "./sandbox-config.ts";
 import { WorkerRoleSchema } from "./session-payloads.ts";
 import {
+  type ReadFileLimits,
   type RunCommandOutputLimits,
+  readFileLimits,
   runCommandOutputLimits,
   ToolsSectionSchema,
 } from "./tools-config.ts";
@@ -416,6 +418,11 @@ export function orchestrationSettingsOf(snapshot: SettingsSnapshot): Orchestrati
 // 学到的记忆的两层上限（决策 332）：合并后的 memory 一节，不给的取缺省
 export function memoryLimitsOf(snapshot: SettingsSnapshot): MemoryLimits {
   return memoryLimits(snapshot.merged.memory);
+}
+
+// 决策 357：read_file 的单次字节与单行字符上限（tools 一节，不给的取缺省）
+export function readFileLimitsOf(snapshot: SettingsSnapshot): ReadFileLimits {
+  return readFileLimits(snapshot.merged.tools);
 }
 
 // 决策 356：run_command 输出的头尾保留与落盘总量（tools 一节，不给的取缺省）

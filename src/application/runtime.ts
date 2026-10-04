@@ -71,6 +71,7 @@ import {
   configGrantRulesOf,
   emptySettingsSnapshot,
   memoryLimitsOf,
+  readFileLimitsOf,
   runCommandOutputLimitsOf,
   type SettingsSnapshot,
 } from "../state/settings.ts";
@@ -359,13 +360,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const sessionsDir = sessionsDirOf(governanceRoot);
   // 决策 325：设置快照（会话开始时已读好、校验过）；放权规则取三层并集
   const settings = deps.settings ?? emptySettingsSnapshot(governanceRoot);
-  // 决策 356：本会话的命令输出落盘目录，输出上限取设置的 tools 一节
+  // 决策 356、357：本会话的命令输出落盘目录，两个工具的上限取设置的 tools 一节
   const outputLimits = runCommandOutputLimitsOf(settings);
   const outputStore = new CommandOutputStore(
     sessionOutputsDirOf(governanceRoot, deps.sessionId),
     outputLimits.savedOutputsMaxBytes
   );
-  const readOptions = { outputs: outputStore };
+  const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
