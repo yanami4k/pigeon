@@ -21,6 +21,7 @@ import {
   webToolsOptionOf,
 } from "./launch-flags.ts";
 import { buildRuntime, WEB_TOOLS_SENTENCE } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 const parse = (argv: string[]) => parseLaunchFlags(argv, { usage: "u", sandbox: true, env: {} });
 
@@ -111,8 +112,9 @@ test("三种关法下两件工具与联网那句提示都不出现；缺省照�
     for (const { label, argv, web, on } of cases) {
       const option = webToolsOptionOf(parse(argv), snapshotWithWeb(web), {});
       assert.equal(option.webTools !== undefined, on, label);
+      const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
       const bundle = buildRuntime({
-        streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+        streamFn,
         workspaceRoot: root,
         homeDir: root,
         sessionId: newSessionId(),
@@ -124,9 +126,13 @@ test("三种关法下两件工具与联网那句提示都不出现；缺省照�
       });
       try {
         const snapshot = bundle.adapter.snapshot();
+        // 决策 363：联网那句提示在开工状态块（联网一节），不在系统提示
+        await bundle.adapter.run("你好");
+        const status = statusTextOf(streamFn.calls[0]);
+        assert.ok(!snapshot.context.systemPrompt.includes(WEB_TOOLS_SENTENCE));
         assert.equal(snapshot.tools.advertised.includes(WEB_SEARCH_TOOL), on, label);
         assert.equal(snapshot.tools.advertised.includes(WEB_FETCH_TOOL), on, label);
-        assert.equal(snapshot.context.systemPrompt.includes(WEB_TOOLS_SENTENCE), on, label);
+        assert.equal(status.includes(WEB_TOOLS_SENTENCE), on, label);
       } finally {
         await bundle.adapter.dispose();
         await bundle.sessionStore.close();

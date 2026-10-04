@@ -24,6 +24,7 @@ import { parseLaunchFlags } from "./launch-flags.ts";
 import type { McpSession } from "./mcp.ts";
 import { buildRuntime, disposeRuntime, type RuntimeDeps } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 import { createSessionWorkers } from "./workers.ts";
 
 const PROJECT_ENTRY = "- [P1] 提交信息用英文祈使句 〔2026-09-30 · 终端界面 · 会话 sess_A〕\n";
@@ -96,18 +97,21 @@ function withRoot(prefix: string, body: (root: string) => Promise<void>): Promis
   return body(root).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("只推送：推送段在人写的说明之后、Skill 目录之前，两层都推；不注册 update_memory、不带写入说明；Run 开始条目记两层身份与文字版本", () =>
+test("只推送：推送段在开工状态块里、排在人写的说明与 Skill 目录之后，两层都推；不注册 update_memory、不带写入说明；Run 开始条目记两层身份与文字版本", () =>
   withRoot("pigeon-pushed-only-", async (root) => {
     seed(root);
-    const bundle = buildRuntime(deps(root, { learnedMemory: {} }));
+    const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
+    const bundle = buildRuntime(deps(root, { learnedMemory: {}, streamFn }));
     try {
       await bundle.adapter.run("你好");
       const snapshot = bundle.adapter.snapshot();
-      const prompt = snapshot.context.systemPrompt;
+      // 决策 363：推送段在开工状态块里，稳定的在前——人写的说明、Skill 目录之后才是记忆
+      const prompt = statusTextOf(streamFn.calls[0]);
       const resident = prompt.indexOf("## 人写的说明（AGENTS.md）");
-      const pushed = prompt.indexOf("## 学到的记忆");
       const skills = prompt.indexOf("- deploy：部署步骤");
-      assert.ok(resident >= 0 && pushed > resident && skills > pushed, prompt);
+      const pushed = prompt.indexOf("## 学到的记忆");
+      assert.ok(resident >= 0 && skills > resident && pushed > skills, prompt);
+      assert.ok(!snapshot.context.systemPrompt.includes("## 学到的记忆"));
       assert.ok(prompt.includes(PROJECT_ENTRY.trimEnd()));
       assert.ok(prompt.includes(USER_ENTRY.trimEnd()));
       assert.ok(prompt.includes(MEMORY_CONFLICT_TEXTS.unattended));
@@ -117,7 +121,7 @@ test("只推送：推送段在人写的说明之后、Skill 目录之前，两�
       const [start] = runStarts(root, bundle.adapter.sessionId);
       const hash = (text: string) => createHash("sha256").update(text).digest("hex");
       assert.deepEqual(start?.pushedMemory, {
-        textVersion: "v2",
+        textVersion: "v3",
         layers: [
           {
             layer: "project",
@@ -146,11 +150,12 @@ test("只推送：推送段在人写的说明之后、Skill 目录之前，两�
 test("关着（缺省）：没有推送段、不注册 update_memory、Run 开始条目不带推送的记忆", () =>
   withRoot("pigeon-pushed-off-", async (root) => {
     seed(root);
-    const bundle = buildRuntime(deps(root));
+    const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
+    const bundle = buildRuntime(deps(root, { streamFn }));
     try {
       await bundle.adapter.run("你好");
       const snapshot = bundle.adapter.snapshot();
-      assert.ok(!snapshot.context.systemPrompt.includes("## 学到的记忆"));
+      assert.ok(!statusTextOf(streamFn.calls[0]).includes("## 学到的记忆"));
       assert.ok(!snapshot.tools.advertised.includes("update_memory"));
       await bundle.sessionStore.flush();
       assert.equal(runStarts(root, bundle.adapter.sessionId)[0]?.pushedMemory, undefined);
@@ -159,37 +164,41 @@ test("关着（缺省）：没有推送段、不注册 update_memory、Run 开�
     }
   }));
 
-test("带写入配置：注册 update_memory、推送段带写入说明与交互版的冲突处理；免审批（无审批通道的非 yolo 会话照样执行）；写入后交出提示", () =>
+test("带写入配置：注册 update_memory、推送段带写入说明与交互版的冲突处理；免审批（无审批通道的非 yolo 会话照样执行）；写入后交出提示；自己写的不回显", () =>
   withRoot("pigeon-pushed-write-", async (root) => {
     const notices: MemoryWriteNotice[] = [];
+    const writer = createFakeStreamFn({
+      replies: [
+        {
+          text: "记一条",
+          toolCalls: [
+            {
+              name: "update_memory",
+              args: { action: "add", layer: "user", content: "回复先给结论" },
+            },
+          ],
+        },
+        { text: "记好了" },
+      ],
+    });
     const bundle = buildRuntime(
       deps(root, {
         yolo: false,
-        streamFn: createFakeStreamFn({
-          replies: [
-            {
-              text: "记一条",
-              toolCalls: [
-                {
-                  name: "update_memory",
-                  args: { action: "add", layer: "user", content: "回复先给结论" },
-                },
-              ],
-            },
-            { text: "记好了" },
-          ],
-        }),
+        streamFn: writer,
         learnedMemory: {
           write: { source: "line", onWritten: (notice) => notices.push(notice), now: () => TODAY },
         },
       })
     );
     try {
-      const prompt = bundle.adapter.snapshot().context.systemPrompt;
-      assert.ok(prompt.includes(MEMORY_WRITE_GUIDANCE));
-      assert.ok(prompt.includes(MEMORY_CONFLICT_TEXTS.interactive));
       assert.ok(bundle.adapter.snapshot().tools.advertised.includes("update_memory"));
       await bundle.adapter.run("记下来");
+      const prompt = statusTextOf(writer.calls[0]);
+      assert.ok(prompt.includes(MEMORY_WRITE_GUIDANCE));
+      assert.ok(prompt.includes(MEMORY_CONFLICT_TEXTS.interactive));
+      // 决策 363：模型自己用 update_memory 写的记忆不回显
+      assert.equal(writer.calls.length, 2);
+      assert.doesNotMatch(statusTextOf(writer.calls[1]), /「记忆」/);
     } finally {
       await disposeRuntime(bundle);
     }
@@ -230,10 +239,10 @@ test("两层上限取设置的 memory 一节：推送段与记忆工具都按它
       })
     );
     try {
-      const prompt = bundle.adapter.snapshot().context.systemPrompt;
+      await bundle.adapter.run("记");
+      const prompt = statusTextOf(streamFn.calls[0]);
       assert.ok(prompt.includes("/1234 字符"), prompt);
       assert.ok(prompt.includes("/567 字符"), prompt);
-      await bundle.adapter.run("记");
     } finally {
       await disposeRuntime(bundle);
     }
@@ -256,10 +265,11 @@ test("入口：终端界面与 --line（openSessionRuntime 给写入配置）有
       pushedMemory: true,
     };
     for (const source of ["tui", "line"] as const) {
+      const entryStream = createFakeStreamFn({ replies: [{ text: "好" }] });
       const opened = await openSessionRuntime({
         governanceRoot: root,
         sessionId: newSessionId(),
-        streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+        streamFn: entryStream,
         flags,
         homeDir: homeOf(root),
         memoryWrite: { source },
@@ -268,7 +278,8 @@ test("入口：终端界面与 --line（openSessionRuntime 给写入配置）有
       try {
         const snapshot = opened.bundle.adapter.snapshot();
         assert.ok(snapshot.tools.advertised.includes("update_memory"), source);
-        assert.ok(snapshot.context.systemPrompt.includes(MEMORY_WRITE_GUIDANCE), source);
+        await opened.bundle.adapter.run("你好");
+        assert.ok(statusTextOf(entryStream.calls[0]).includes(MEMORY_WRITE_GUIDANCE), source);
       } finally {
         await disposeRuntime(opened.bundle);
       }
@@ -285,8 +296,8 @@ test("入口：终端界面与 --line（openSessionRuntime 给写入配置）有
     });
     assert.equal(run.status, "completed");
     const first = streamFn.calls[0];
-    assert.ok(first?.context.systemPrompt?.includes(PROJECT_ENTRY.trimEnd()));
-    assert.ok(!first?.context.systemPrompt?.includes(MEMORY_WRITE_GUIDANCE));
+    assert.ok(statusTextOf(first).includes(PROJECT_ENTRY.trimEnd()));
+    assert.ok(!statusTextOf(first).includes(MEMORY_WRITE_GUIDANCE));
     assert.ok(!(first?.context.tools ?? []).some((tool) => tool.name === "update_memory"));
   }));
 
@@ -306,7 +317,7 @@ test("日常入口：推送缺省开着，--no-pushed-memory 关掉；--memory-l
 
 // 决策 331：worker 只推送记忆、不带记忆工具；父会话带写入配置也一样
 for (const role of ["explorer", "implementer", "tester"] as const) {
-  test(`worker（${role}）：父会话推送且可写入时，系统提示带推送段，但不带写入说明、不广告 update_memory`, async () => {
+  test(`worker（${role}）：父会话推送且可写入时，开工状态块带推送段，但不带写入说明、不广告 update_memory`, async () => {
     const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-pushed-worker-")));
     try {
       const git = (args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
@@ -323,11 +334,12 @@ for (const role of ["explorer", "implementer", "tester"] as const) {
       });
       try {
         assert.ok(parent.adapter.snapshot().tools.advertised.includes("update_memory"));
+        const workerStream = createFakeStreamFn({ replies: [{ text: "做完了" }] });
         const orchestrator = createSessionWorkers({
           governanceRoot: repo,
           bundle: parent,
           approvals: async () => ({ approved: true }),
-          streamFn: createFakeStreamFn({ replies: [{ text: "做完了" }] }),
+          streamFn: workerStream,
           provider: "fake-provider",
           modelId: "fake-model",
           homeDir: homeOf(repo),
@@ -336,9 +348,10 @@ for (const role of ["explorer", "implementer", "tester"] as const) {
         const outcome = await orchestrator.awaitResult(workerId);
         assert.equal(outcome.status, "completed", JSON.stringify(outcome));
         const [start] = runStarts(repo, workerId);
-        assert.ok(start?.systemPrompt.includes(PROJECT_ENTRY.trimEnd()));
-        assert.ok(start?.systemPrompt.includes(MEMORY_CONFLICT_TEXTS.unattended));
-        assert.ok(!start?.systemPrompt.includes(MEMORY_WRITE_GUIDANCE));
+        const workerStatus = statusTextOf(workerStream.calls[0]);
+        assert.ok(workerStatus.includes(PROJECT_ENTRY.trimEnd()));
+        assert.ok(workerStatus.includes(MEMORY_CONFLICT_TEXTS.unattended));
+        assert.ok(!workerStatus.includes(MEMORY_WRITE_GUIDANCE));
         assert.ok(!start?.advertisedTools.includes("update_memory"));
         assert.ok(!start?.policy.allow.includes("update_memory"));
         assert.equal(start?.pushedMemory?.layers.length, 2);
@@ -351,7 +364,7 @@ for (const role of ["explorer", "implementer", "tester"] as const) {
   });
 }
 
-test("功能：记下纠正、下次照做——第一会话经 update_memory 记下，第二会话的系统提示带这一条（层级、来源、日期、会话编号正确）", () =>
+test("功能：记下纠正、下次照做——第一会话经 update_memory 记下，第二会话的开工状态块带这一条（层级、来源、日期、会话编号正确）", () =>
   withRoot("pigeon-pushed-correction-", async (root) => {
     seed(root);
     const flags = {
@@ -392,19 +405,23 @@ test("功能：记下纠正、下次照做——第一会话经 update_memory �
     }
     const expected = `- [U2] 回复先给结论 〔2026-10-01 · 命令行对话 · 会话 ${firstSessionId}〕`;
     assert.ok(readMemory(root, "user").includes(expected), "落盘到用户级");
-    // 第二会话：系统提示里出现这一条
+    // 第二会话：开工状态块里出现这一条
+    const secondStream = createFakeStreamFn({ replies: [{ text: "好" }] });
     const second = await openSessionRuntime({
       governanceRoot: root,
       sessionId: newSessionId(),
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      streamFn: secondStream,
       flags,
       homeDir: homeOf(root),
       memoryWrite: { source: "line", now: () => TODAY },
       startMcp: async () => fakeMcp(),
     });
     try {
-      const prompt = second.bundle.adapter.snapshot().context.systemPrompt;
-      assert.ok(prompt.includes(expected), "第二会话的系统提示带上一会话记下的纠正");
+      await second.bundle.adapter.run("你好");
+      assert.ok(
+        statusTextOf(secondStream.calls[0]).includes(expected),
+        "第二会话的开工状态块带上一会话记下的纠正"
+      );
     } finally {
       await disposeRuntime(second.bundle);
     }

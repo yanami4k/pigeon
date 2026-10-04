@@ -158,8 +158,10 @@ export type RunCommandApproval = "yolo" | "prompt" | "none";
 export interface RunCommandTexts {
   // 工具登记里的描述
   registry: string;
-  // 系统提示里介绍 run_command 的一句
+  // 系统提示里介绍 run_command 的一句（决策 363：与审批无关，续跑与 /reload 后不变）
   prompt: string;
+  // 开工状态块「审批」一节里命令的说法（随本会话的审批状态）
+  approval: string;
   // 发给模型的工具说明
   tool: string;
 }
@@ -193,7 +195,8 @@ export function runCommandTexts(input: {
   }[input.approval];
   return {
     registry: `在工作区根运行一条命令（普通命令直接执行，需要 shell 语义的经 ${shell} 执行）`,
-    prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令${promptShell}；${promptApproval}。`,
+    prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令经 ${shell} 执行。`,
+    approval: `run_command：${promptApproval}；含管道、重定向或 && 串联的命令${promptShell}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
       `可用设置 commands 一节登记的短名。结果带退出码、输出（超长截断）与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。`,

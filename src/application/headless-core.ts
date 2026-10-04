@@ -54,6 +54,7 @@ import {
   SpawnWorkerSlot,
   spawnWorkerSettingsOf,
 } from "./spawn-worker-tool.ts";
+import type { StatusFacts } from "./status-sources.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { drainWorkers, type WorkerNotices } from "./worker-notices.ts";
@@ -100,6 +101,8 @@ export interface HeadlessRunOptions {
   workspaceRoot: string;
   // 决策 098：执行端；缺省为 workspaceRoot 上的本地实现（容器工作区由调用方注入，workspaceRoot 为宿主侧占位目录）
   workspaceHost?: WorkspaceHost;
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
+  statusFacts?: StatusFacts;
   streamFn: StreamFn;
   yolo: boolean;
   provider?: string;
@@ -247,6 +250,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(options.settings !== undefined ? { settings: options.settings } : {}),
     workspaceRoot: options.workspaceRoot,
     ...(options.workspaceHost !== undefined ? { workspaceHost: options.workspaceHost } : {}),
+    ...(options.statusFacts !== undefined ? { statusFacts: options.statusFacts } : {}),
     streamFn: options.streamFn,
     // 决策 067：三个入口的模型占位缺省统一为同一常量（真实模型元数据由 streamFn 插件提供）
     provider: options.provider ?? DEFAULT_MODEL_PLACEHOLDER.provider,

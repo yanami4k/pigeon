@@ -8,7 +8,7 @@
 // 决策 286：运行期告警（会话存储、工作区快照）的出口可由调用方给出——终端界面运行期间落消息区；
 // 不给即照旧写标准错误输出（逐行对话与其余调用方不变）。
 
-import { loadStoreSessionFile } from "../persistence/session-view.ts";
+import { loadStoreSession, loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
@@ -29,10 +29,11 @@ import {
 } from "./runtime.ts";
 import type { ScriptSlot } from "./script-tool.ts";
 import type { SpawnWorkerSlot } from "./spawn-worker-tool.ts";
+import type { StatusFacts } from "./status-sources.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { type SessionRuntimeScope, sessionRuntimeScope } from "./worker-scope.ts";
-import { restoreGrantSeed } from "./workspace.ts";
+import { restoreGrantSeed, sessionsDirOf } from "./workspace.ts";
 
 // 装配需要的运行参数（launch-flags.ts 的子集：解析出来直接传进来）
 export interface SessionRuntimeFlags {
@@ -91,6 +92,8 @@ export interface OpenSessionRuntimeRequest {
   // 决策 237：日常沙箱的执行端——工具经它在容器里读写与执行；不在宿主上打快照。
   // 会话文件、放权与记忆仍在宿主的治理根
   workspaceHost?: WorkspaceHost;
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
+  statusFacts?: StatusFacts;
   // 决策 264–267：派 worker 的工具槽（终端界面给；命令行对话不给）。只给主会话注册：worker 会话（深度 1）与沙箱会话不注册
   spawnWorker?: SpawnWorkerSlot;
   // 决策 309：提交编排脚本的工具槽（终端界面随派 worker 一并给）；只给主会话注册，worker 会话与沙箱会话不注册
@@ -139,6 +142,8 @@ async function restoreContext(bundle: RuntimeBundle): Promise<{
   }
   await bundle.sessionStore.flush();
   bundle.adapter.restoreMessages([...messages, ...interrupted]);
+  // 决策 363：状态变化通道以对话里最后一份为起点，续跑后第一次只追加变了的节
+  bundle.status.restoreFrom([...messages, ...interrupted]);
   // 决策 294 B1：任务清单从会话里最后一次更新还原
   bundle.taskList?.restore([...messages, ...interrupted]);
   return { messages: messages.length, interrupted: interrupted.length };
@@ -172,6 +177,14 @@ export async function openSessionRuntime(
     ...(reuseMcp !== undefined ? { reuse: reuseMcp } : {}),
   });
   const frozenPrompt = request.reloadFrom?.frozenPrompt;
+  // 决策 363：/reload 接着旧运行面最后发出的那份状态比对；续跑沿用会话记录里最后一个 Run 开始条目记下的系统提示
+  //（旧会话的系统提示里带人写的说明等，照旧沿用，状态块照新规则追加）
+  const statusSent = request.reloadFrom?.status.sent();
+  const recordedSystemPrompt =
+    request.resume === true
+      ? loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId)?.view.runs.at(-1)
+          ?.start.systemPrompt
+      : undefined;
   const learnedMemory = interactiveLearnedMemory(request.flags, request.memoryWrite);
   const spawnWorker =
     scope.parentSessionId === undefined && request.workspaceHost === undefined
@@ -217,6 +230,9 @@ export async function openSessionRuntime(
       ...(request.warn !== undefined ? { storeWarn: request.warn } : {}),
       ...(request.hooksNotice !== undefined ? { hooksNotice: request.hooksNotice } : {}),
       ...(frozenPrompt !== undefined ? { frozenPrompt } : {}),
+      ...(recordedSystemPrompt !== undefined ? { systemPrompt: recordedSystemPrompt } : {}),
+      ...(statusSent !== undefined ? { statusSent } : {}),
+      ...(request.statusFacts !== undefined ? { statusFacts: request.statusFacts } : {}),
       mcp,
     });
     let restored: OpenedSessionRuntime["restored"];

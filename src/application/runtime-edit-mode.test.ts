@@ -10,6 +10,7 @@ import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { REPLACE_EDIT_DESCRIPTION } from "../tools/replace-edit.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
 import { runHeadless } from "./headless-core.ts";
+import { STATUS_AUTHORITY_SENTENCE } from "./status-block.ts";
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加
 const TRUNCATION_GUIDANCE =
@@ -20,11 +21,12 @@ const HASHLINE_PROMPT =
   "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
   "用 edit_file 按锚点编辑。" +
   TRUNCATION_GUIDANCE +
-  // 审批与 run_command 的说法按执行端与审批状态生成（170 ④）；本文件的运行一律 yolo、本地执行端
-  "写操作自动批准。" +
+  // run_command 的说法按执行端生成（170 ④）；决策 363：审批的说法在开工状态块，系统提示末尾是权威层级说明
   runCommandTexts({ platform: process.platform, approval: "yolo" }).prompt +
   "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
-  "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
+  "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。" +
+  "\n\n" +
+  STATUS_AUTHORITY_SENTENCE;
 
 const HASHLINE_EDIT_DESCRIPTION =
   "编辑工作区内已存在的文本文件。必须先用 read_file 读取：edits 按 N#TAG 锚点寻址" +

@@ -143,7 +143,7 @@ export function loadAgentsInstructions(options: AgentsMdOptions): AgentsMdInstru
       : undefined;
   const blocks = [
     "## 人写的说明（AGENTS.md）",
-    "以下内容在会话开始时读取并冻结；会话中修改这些文件要到下个会话才生效。",
+    "以下内容在会话开始时读取；会话中这些文件被改动时，改后的内容会整段追加。",
     ...parts,
     ...(overflow !== undefined ? [`（人写的说明${overflow}；需要时用 read_file 读取全文。）`] : []),
   ];

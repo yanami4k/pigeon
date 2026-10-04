@@ -13,6 +13,7 @@ import { newGrantId, newSessionId } from "../state/ids.ts";
 import type { EditFileParams } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { buildRuntime } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读写治理根，工具只动工作区", async () => {
   const governanceRoot = mkdtempSync(join(tmpdir(), "pigeon-gov-root-"));
@@ -41,13 +42,14 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
     };
     const sessionId = newSessionId();
     let handlerCalls = 0;
+    const streamFn = createFakeStreamFn({
+      replies: [
+        { text: "改", toolCalls: [{ name: "edit_file", args: editArgs }] },
+        { text: "完成" },
+      ],
+    });
     const bundle = buildRuntime({
-      streamFn: createFakeStreamFn({
-        replies: [
-          { text: "改", toolCalls: [{ name: "edit_file", args: editArgs }] },
-          { text: "完成" },
-        ],
-      }),
+      streamFn,
       workspaceRoot,
       governanceRoot,
       // 决策 325：放权规则取自设置快照（由入口在会话开始时读治理根的设置）
@@ -74,8 +76,10 @@ test("装配根：governanceRoot 与 workspaceRoot 分离——治理文件读�
       assert.equal(readFileSync(join(workspaceRoot, "a.ts"), "utf8"), "alpha\nBETA\n");
       // 人写的说明来自工作区根
       assert.equal(bundle.adapter.snapshot().memory[0]?.path, "AGENTS.md");
-      assert.ok(bundle.adapter.snapshot().context.systemPrompt.includes("暗号：工作区"));
-      assert.ok(!bundle.adapter.snapshot().context.systemPrompt.includes("暗号：治理根"));
+      // 决策 363：人写的说明在开工状态块
+      const status = statusTextOf(streamFn.calls[0]);
+      assert.ok(status.includes("暗号：工作区"));
+      assert.ok(!status.includes("暗号：治理根"));
     } finally {
       await bundle.adapter.dispose();
       await bundle.sessionStore.close();

@@ -48,7 +48,7 @@ test("逐层拼接：用户级在前，项目级自仓库根往下到工作目�
       loaded.section,
       [
         "## 人写的说明（AGENTS.md）",
-        "以下内容在会话开始时读取并冻结；会话中修改这些文件要到下个会话才生效。",
+        "以下内容在会话开始时读取；会话中这些文件被改动时，改后的内容会整段追加。",
         "### ~/.pigeon/AGENTS.md\n用户",
         "### AGENTS.md\n根",
         "### packages/CLAUDE.md\npackages 的 CLAUDE",

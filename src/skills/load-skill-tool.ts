@@ -51,7 +51,7 @@ export function createLoadSkillTool(
     name: LOAD_SKILL_TOOL,
     label: LOAD_SKILL_TOOL,
     description:
-      "按名读取会话开始时登记的 Skill：不给 resource 时读 SKILL.md，给 resource 时读该 Skill 目录下的" +
+      "按名读取 Skill 目录里登记的 Skill：不给 resource 时读 SKILL.md，给 resource 时读该 Skill 目录下的" +
       "资源文件（如 references/x.md）。只能读登记过的 Skill 目录内的文件；scripts 只读不执行。" +
       "MCP server 的 prompt 只有正文，不给 resource。",
     parameters: LoadSkillParamsSchema,
@@ -62,7 +62,7 @@ export function createLoadSkillTool(
       if (skill === undefined) {
         const available = options.catalog.skills.map((entry) => entry.name).join("、");
         throw new LoadSkillError(
-          `未登记的 Skill：${args.name}（只认会话开始时登记的 Skill；可用：${available || "无"}）`
+          `未登记的 Skill：${args.name}（只认 Skill 目录里登记的 Skill；可用：${available || "无"}）`
         );
       }
       if (skill.prompt !== undefined) {
@@ -73,7 +73,9 @@ export function createLoadSkillTool(
       try {
         realDir = realpathSync(skill.dir);
       } catch {
-        throw new LoadSkillError(`Skill 目录已不可读：${skill.displayPath}（下个会话重新登记）`);
+        throw new LoadSkillError(
+          `Skill 目录已不可读：${skill.displayPath}（目录更新后会如实登记）`
+        );
       }
       let realTarget: string;
       try {
@@ -98,7 +100,7 @@ export function createLoadSkillTool(
       if (frozen === undefined || frozen.hash !== hash) {
         throw new LoadSkillError(
           `该 Skill 已变更：${skill.name}/${resourcePath} ` +
-            `${frozen === undefined ? "是会话开始后新增的文件" : "与会话开始时的哈希清单不符"}，下个会话生效`
+            `${frozen === undefined ? "是登记之后新增的文件" : "与登记时的哈希清单不符"}，下一次请求之前会重新登记，届时再读`
         );
       }
       const cut = truncateUtf8(raw.toString("utf8"), maxBytes);
@@ -170,7 +172,7 @@ async function loadPromptSkill(
 export function loadSkillRegistration(catalog: SkillCatalog): ToolRegistration {
   return {
     name: LOAD_SKILL_TOOL,
-    description: "按名读取会话开始时登记的 Skill 及其资源文件",
+    description: "按名读取 Skill 目录里登记的 Skill 及其资源文件",
     parameters: LoadSkillParamsSchema,
     tier: "read",
     pathConfinement: { kind: "roots", roots: catalog.roots },

@@ -9,10 +9,12 @@ import { test } from "node:test";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { buildRuntime } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 async function build(root: string, home: string) {
+  const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
   const bundle = buildRuntime({
-    streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+    streamFn,
     workspaceRoot: root,
     sessionId: newSessionId(),
     yolo: false,
@@ -22,12 +24,15 @@ async function build(root: string, home: string) {
     homeDir: home,
   });
   const snapshot = bundle.adapter.snapshot();
+  // 决策 363：Skill 目录在开工状态块
+  await bundle.adapter.run("你好");
+  const status = statusTextOf(streamFn.calls[0]);
   await bundle.adapter.dispose();
   await bundle.sessionStore.close();
-  return snapshot;
+  return { ...snapshot, status };
 }
 
-test("有 Skill：目录行进 system prompt、清单进快照、load_skill 被广告；无 Skill：不广告", async () => {
+test("有 Skill：目录行进开工状态块、清单进快照、load_skill 被广告；无 Skill：不广告", async () => {
   const base = mkdtempSync(join(tmpdir(), "pigeon-runtime-skills-"));
   const home = join(base, "home");
   mkdirSync(home, { recursive: true });
@@ -39,10 +44,9 @@ test("有 Skill：目录行进 system prompt、清单进快照、load_skill 被�
       "---\nname: deploy\ndescription: 部署步骤\n---\n# 部署正文\n"
     );
     const snapshot = await build(withSkills, home);
-    assert.ok(
-      snapshot.context.systemPrompt.includes("- deploy：部署步骤（.pigeon/skills/deploy）")
-    );
-    assert.ok(!snapshot.context.systemPrompt.includes("部署正文"));
+    assert.ok(snapshot.status.includes("- deploy：部署步骤（.pigeon/skills/deploy）"));
+    assert.ok(!snapshot.status.includes("部署正文"));
+    assert.ok(!snapshot.context.systemPrompt.includes("deploy"));
     assert.equal(snapshot.skills.length, 1);
     assert.equal(snapshot.skills[0]?.name, "deploy");
     assert.deepEqual(

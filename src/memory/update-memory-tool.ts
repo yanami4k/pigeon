@@ -46,7 +46,7 @@ export const MEMORY_SOURCE_LABELS: Readonly<Record<MemorySource, string>> = {
 
 // 工具说明（记忆文字 v2）
 export const UPDATE_MEMORY_DESCRIPTION = [
-  `新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（${MEMORY_DISPLAY_PATHS.project}），user 对所有项目（${MEMORY_DISPLAY_PATHS.user}）。只写不读：两层记忆已在会话开始时放进系统提示。`,
+  `新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（${MEMORY_DISPLAY_PATHS.project}），user 对所有项目（${MEMORY_DISPLAY_PATHS.user}）。只写不读：两层记忆已在开工状态里。`,
   "记用户的偏好、用户对你做法的纠正，以及从代码和 git 历史看不出的项目信息（外部资料在哪里、约定、背景）；不记能从代码或 git 历史看出的内容（代码结构、文件位置、实现细节、改过什么），不记任务经过，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找）。",
   "每条一句话，只写内容；编号、日期、来源与会话编号由工具补上。只对本项目成立的记在 project，对所有项目都成立的记在 user；拿不准记在哪一层时，先问用户。",
   "每层有字符上限，写满时新增或改长都会被拒绝，须先合并相近条目或删除过时条目。",

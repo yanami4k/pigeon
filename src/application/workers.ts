@@ -64,6 +64,7 @@ import type { ScriptSlot } from "./script-tool.ts";
 import { childFamilySink } from "./session-store.ts";
 import { bindSpawnWorkers } from "./spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
+import type { StatusFacts } from "./status-sources.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { drainWorkers } from "./worker-notices.ts";
@@ -232,6 +233,8 @@ export function sessionWorkerRuntimeFactory(
 
 // 装配内核的输入：worker 与 headless 共用
 interface RuntimeSurface {
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用）
+  statusFacts?: StatusFacts;
   sessionId: SessionId;
   governanceRoot: string;
   workspaceRoot: string;
@@ -552,6 +555,8 @@ export interface DetachedRuntimeRequest {
   storeWarn?: WarnSink;
   // 决策 325：本会话的设置快照（pigeon run 由入口读好给出；缺省为空快照）
   settings?: SettingsSnapshot;
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
+  statusFacts?: StatusFacts;
 }
 
 // M6.5 S1（决策 056）：无父会话的运行面——与 worker 同一装配内核，普通会话、无角色、无审批通道
@@ -608,6 +613,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
     ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
     ...(surface.settings !== undefined ? { settings: surface.settings } : {}),
+    ...(surface.statusFacts !== undefined ? { statusFacts: surface.statusFacts } : {}),
   };
   // MCP 配置取自设置快照（会话开始时已校验；不重读文件）
   const mcpConfig =

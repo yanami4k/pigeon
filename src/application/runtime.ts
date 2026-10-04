@@ -36,7 +36,7 @@ import {
   UPDATE_MEMORY_TOOL,
   updateMemoryRegistration,
 } from "../memory/update-memory-tool.ts";
-import { PiRuntimeAdapter } from "../pi-runtime/adapter.ts";
+import { PiRuntimeAdapter, type StatusChannel } from "../pi-runtime/adapter.ts";
 import {
   type BeforeCompaction,
   type CompactionConfigInput,
@@ -50,6 +50,7 @@ import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snaps
 import {
   type LocalSkillScan,
   loadSkillCatalog,
+  NO_LOAD_SKILL_SENTENCE,
   type SkillRoot,
   scanLocalSkills,
 } from "../skills/catalog.ts";
@@ -126,6 +127,20 @@ import {
   type SpawnWorkerSlot,
   spawnWorkerRegistration,
 } from "./spawn-worker-tool.ts";
+import {
+  STATUS_AUTHORITY_SENTENCE,
+  type StatusSectionName,
+  type StatusState,
+  StatusTracker,
+} from "./status-block.ts";
+import {
+  dateText,
+  environmentText,
+  gitText,
+  hostStatusProbe,
+  localStatusProbe,
+  type StatusFacts,
+} from "./status-sources.ts";
 import {
   createTakeWorkerTool,
   TAKE_WORKER_TOOL,
@@ -220,7 +235,14 @@ export interface RuntimeDeps {
   // （装配层缺省；日常入口由启动参数缺省打开，跑批器按条件明确指定）
   learnedMemory?: LearnedMemoryConfig;
   // 决策 340：/reload 重建时沿用旧运行面开局读到的人写说明（AGENTS.md）、推送的记忆与本地 Skill 扫描结果（不重读文件）
+  // 与系统提示（决策 363：/reload 后系统提示逐字节不变）
   frozenPrompt?: FrozenSessionPrompt;
+  // 决策 363：续跑沿用会话记录里最后一个 Run 开始条目记下的系统提示（不重新生成）；缺省按本会话现拼
+  systemPrompt?: string;
+  // 决策 363：状态变化通道的起点——/reload 交来旧运行面最后发出的一份；缺省没有（首次给完整块；分叉续跑从初始消息还原）
+  statusSent?: StatusState;
+  // 决策 354：入口给出的确知事实（沙箱档位、网络能否用），写进开工状态块的环境一节
+  statusFacts?: StatusFacts;
   // 决策 264–267：派 worker 的开关。在场即给主 agent 注册 spawn_worker（编排器建好后由装配方绑定到这个槽上）；缺省关着
   // （装配层缺省；终端界面与 pigeon run 由启动参数缺省打开，跑批器各条件明确关掉）。委派策略在场（worker 自己，深度 1）或
   // 注入了执行端（沙箱）时一律不注册
@@ -284,6 +306,8 @@ export const WEB_TOOLS_SENTENCE =
 // 系统提示里会话开始时读取并冻结的部分（决策 191、330、332）：人写的说明（AGENTS.md）、
 // 推送的记忆、本地 Skill 的扫描结果。/reload 重建运行面时沿用（决策 340），不重读文件
 export interface FrozenSessionPrompt {
+  // 决策 363：本运行面的系统提示（续跑与 /reload 后逐字节不变）
+  systemPrompt: string;
   instructions: AgentsMdInstructions;
   pushedMemory?: PushedMemory;
   localSkills: LocalSkillScan;
@@ -314,6 +338,8 @@ export interface RuntimeBundle {
   taskList?: TaskList;
   // 决策 340：本运行面装配时用的开局冻结内容（/reload 重建时交给新运行面）
   frozenPrompt: FrozenSessionPrompt;
+  // 决策 363：状态变化通道（续跑时从会话记录还原，/reload 时把最后发出的一份交给新运行面）
+  status: StatusTracker;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -524,10 +550,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     registry.register(webSearchRegistration());
     registry.register(webFetchRegistration());
   }
-  // 决策 330：会话开始读人写的说明（AGENTS.md），拼进 system prompt 一次即冻结（不走 transformContext）；清单进注入快照，
-  // 会话中途改文件下个会话才生效。本地工作区从工作区根往上读（worker 即它自己的工作树）；沙箱读宿主上的工作区（治理根），
-  // 与本机会话内容一致
-  // 决策 340：/reload 重建运行面时沿用开局冻结的内容（不重读文件）
+  // 决策 330：会话开始读人写的说明（AGENTS.md），清单进注入快照（开局的身份）。本地工作区从工作区根往上读（worker 即它自己的
+  // 工作树）；沙箱读宿主上的工作区（治理根），与本机会话内容一致。决策 363 起说明本身进开工状态块，会话中改动时整段追加
+  // （见下方状态变化通道）；这里开局读的一份只用于清单与超长提示。/reload 重建运行面时沿用开局读的这份
   const frozen = deps.frozenPrompt;
   const instructions =
     deps.agentsMd === false
@@ -537,7 +562,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           workspaceRoot: deps.workspaceHost === undefined ? deps.workspaceRoot : governanceRoot,
           ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
         }));
-  // 决策 191、332：会话开始读两层学到的记忆，整份推入、即冻结；清单进 Run 开始条目
+  // 决策 191、332：会话开始读两层学到的记忆，清单进 Run 开始条目；决策 363 起推送段进开工状态块，会话中被改动时整段追加
   const pushedMemory =
     learned !== undefined
       ? (frozen?.pushedMemory ??
@@ -554,17 +579,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       "用 edit_file 按原文替换编辑（old_string 须与文件原文逐字一致且在文件里恰好出现一次，不要带行号前缀）。"
     : "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
       "用 edit_file 按锚点编辑。";
+  // 决策 363：系统提示只留固定底座——审批与联网的说法随 /reload 会变，搬进开工状态块
   const basePrompt =
     editSentence +
     TRUNCATION_GUIDANCE +
-    WRITE_APPROVAL_SENTENCES[approval] +
     commandTexts.prompt +
     (sessionSearch
       ? "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
         "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
-      : "") +
-    (webTools !== undefined ? WEB_TOOLS_SENTENCE : "");
-  // M5 S4（决策 043）：会话开始登记 Skill Catalog——目录段与 Memory 同段冻结进 system prompt，
+      : "");
+  // M5 S4（决策 043）：会话开始登记 Skill Catalog——决策 363 起目录段进开工状态块（会话中增删改时重新登记、整段追加），
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
   // 本地 Skill 开局扫描一次（/reload 沿用）；MCP server 的 prompts 随本运行面的 MCP 会话
   const localSkills =
@@ -617,16 +641,122 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
         "server 不可用时这些工具会报错，改用内置工具继续。"
       : "";
-  const systemPrompt = [
-    basePrompt,
-    instructions.section,
-    pushedMemory?.section ?? "",
-    skillCatalog.section,
-    mcpSection,
-    deps.taskDirective ?? "",
-  ]
-    .filter((section) => section !== "")
-    .join("\n\n");
+  // 决策 363：系统提示 = 固定底座 + 任务指令 + 权威层级说明；续跑沿用会话记录里的、/reload 沿用旧运行面的，逐字节不变。
+  // 人写的说明、推送的记忆、Skill 目录与外部工具的说明进开工状态块（见下方状态变化通道）
+  const systemPrompt =
+    deps.systemPrompt ??
+    frozen?.systemPrompt ??
+    [basePrompt, deps.taskDirective ?? "", STATUS_AUTHORITY_SENTENCE]
+      .filter((section) => section !== "")
+      .join("\n\n");
+  // 决策 363、354：开工状态块的各节。文件类各节（项目说明、Skill 目录、记忆）、环境与 git 状态在 Run 开始与写档、命令档工具之后
+  // 重取，其余（外部工具、审批、联网在本运行面内不变；日期）每次都看
+  const statusProbe =
+    deps.workspaceHost !== undefined
+      ? hostStatusProbe(deps.workspaceHost)
+      : localStatusProbe(deps.workspaceRoot);
+  const approvalSection = `${WRITE_APPROVAL_SENTENCES[approval]}\n${commandTexts.approval}`;
+  const readSlowSections = async (): Promise<Map<StatusSectionName, string>> => {
+    const [git, entries] = await Promise.all([statusProbe.gitState(), statusProbe.rootEntries()]);
+    const agents =
+      deps.agentsMd === false
+        ? ""
+        : loadAgentsInstructions({
+            workspaceRoot: deps.workspaceHost === undefined ? deps.workspaceRoot : governanceRoot,
+            ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+          }).section;
+    // Skill 增删改：重新登记；开局注册了 load_skill 时它随即按新目录读取（解除改动前的哈希拒绝）
+    const rescanned = loadSkillCatalog({
+      workspaceRoot: governanceRoot,
+      local: scanLocalSkills({
+        workspaceRoot: governanceRoot,
+        ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+        ...(deps.skillRoots !== undefined ? { roots: deps.skillRoots } : {}),
+      }),
+      ...(deps.mcp !== undefined && deps.mcp.prompts.length > 0
+        ? { prompts: deps.mcp.prompts }
+        : {}),
+    });
+    if (hasSkills) {
+      skillCatalog.skills = rescanned.skills;
+    }
+    const skills =
+      rescanned.section === "" || hasSkills
+        ? rescanned.section
+        : `${rescanned.section}\n${NO_LOAD_SKILL_SENTENCE}`;
+    const memory =
+      learned !== undefined
+        ? loadPushedMemory({
+            governanceRoot,
+            ...(deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}),
+            limits: memoryLimits,
+            writable: memoryWrite !== undefined,
+            ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
+          }).section
+        : "";
+    return new Map<StatusSectionName, string>([
+      ["项目说明", agents],
+      ["Skill 目录", skills],
+      [
+        "环境",
+        environmentText({
+          root: deps.workspaceHost?.root ?? deps.workspaceRoot,
+          platform: workspaceHost.platform,
+          remote: deps.workspaceHost !== undefined,
+          entries,
+          ...(deps.statusFacts !== undefined ? { facts: deps.statusFacts } : {}),
+        }),
+      ],
+      ["记忆", memory],
+      ["git 状态", gitText(git)],
+    ]);
+  };
+  let slowSections: Map<StatusSectionName, string> | undefined;
+  const currentStatus = async (refresh: boolean): Promise<StatusState> => {
+    if (refresh || slowSections === undefined) {
+      slowSections = await readSlowSections();
+    }
+    const state = new Map<StatusSectionName, string>([
+      ...slowSections,
+      ["外部工具", mcpSection],
+      ["审批", approvalSection],
+      ["联网", webTools !== undefined ? WEB_TOOLS_SENTENCE : ""],
+      ["日期", dateText(new Date())],
+    ]);
+    for (const [name, text] of state) {
+      if (text === "") {
+        state.delete(name);
+      }
+    }
+    return state;
+  };
+  // 状态变化通道：首次与压缩之后给完整块，其余只给变了的节；续跑与分叉以对话里最后一份为起点，/reload 接着旧运行面发出的
+  const statusTracker = new StatusTracker(deps.statusSent);
+  if (deps.statusSent === undefined && deps.initialMessages !== undefined) {
+    statusTracker.restoreFrom(deps.initialMessages);
+  }
+  let statusTouched = false;
+  let memoryWrittenByModel = false;
+  const nextStatus = async (refresh: boolean, compacted: boolean) => {
+    const current = await currentStatus(refresh);
+    // 模型自己用 update_memory 写的记忆不回显：记成已发
+    if (memoryWrittenByModel) {
+      memoryWrittenByModel = false;
+      statusTracker.absorb("记忆", current.get("记忆"));
+    }
+    return statusTracker.next(current, compacted);
+  };
+  const statusChannel: StatusChannel = {
+    beforeRun: ({ compacted }) => {
+      statusTouched = false;
+      return nextStatus(true, compacted);
+    },
+    betweenTurns: ({ compacted }) => {
+      const refresh = statusTouched;
+      statusTouched = false;
+      return nextStatus(refresh, compacted);
+    },
+  };
   const delegated = deps.toolPolicy;
   const policy: ToolPolicy =
     delegated !== undefined
@@ -846,6 +976,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     sessionId: deps.sessionId,
     sessionStore,
     compaction: compactor,
+    // 决策 363：开工状态块与状态变化通道
+    status: statusChannel,
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 Run 开始条目；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
@@ -913,6 +1045,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       }
     });
   }
+  // 决策 363：写档与命令档工具之后重取文件类各节与 git 状态；模型自己用 update_memory 写成的记忆不回显
+  adapter.subscribeToolResults((notice) => {
+    const tier = registry.get(notice.toolName)?.tier;
+    if (tier === "write" || tier === "exec") {
+      statusTouched = true;
+    }
+    if (notice.toolName === UPDATE_MEMORY_TOOL && !notice.isError) {
+      memoryWrittenByModel = true;
+    }
+  });
   const toolTiers = new Map(
     registry.list().map((registration) => [registration.name, registration.tier])
   );
@@ -924,7 +1066,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     settings,
     hooks: sessionHooks,
     toolTiers,
+    status: statusTracker,
     frozenPrompt: {
+      systemPrompt,
       instructions,
       ...(pushedMemory !== undefined ? { pushedMemory } : {}),
       localSkills,

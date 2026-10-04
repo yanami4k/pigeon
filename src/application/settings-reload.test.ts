@@ -33,6 +33,7 @@ import { disposeRuntime, type RuntimeBundle } from "./runtime.ts";
 import { openSessionRuntime } from "./session-runtime.ts";
 import { openSessionSettings, pendingTrustEntries } from "./session-settings.ts";
 import { createSettingsReloader, planSettingsReload } from "./settings-reload.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 const made: string[] = [];
 after(() => {
@@ -285,7 +286,7 @@ test("MCP 定义变化后 /reload：只重启内容有变的服务——未变�
   }
 });
 
-test("系统提示里开局冻结的部分不随 /reload 变：中途改 AGENTS.md、两层记忆与 Skill 后重读，那几段不变；由设置决定的部分按新快照变", async () => {
+test("/reload 后系统提示逐字节不变；中途改的 AGENTS.md、两层记忆、Skill 与 /reload 带来的外部工具，下一次请求以状态追加整段取代（决策 363）", async () => {
   const root = temp("pigeon-reload-frozen-");
   const home = temp("pigeon-reload-home-");
   writeFileSync(join(root, "AGENTS.md"), "开局写下的约定\n");
@@ -298,21 +299,17 @@ test("系统提示里开局冻结的部分不随 /reload 变：中途改 AGENTS.
   writeFileSync(join(projectMemoryPathOf(root)), "- [P1] 开局学到的一条\n");
   mkdirSync(join(home, ".pigeon", "state"), { recursive: true });
   writeFileSync(userMemoryPathOf(home), "- [U1] 用户级开局的一条\n");
-  const s = await session(
-    root,
-    home,
-    createFakeStreamFn({ replies: [{ text: "好" }] }),
-    fixtureMcp([]),
-    true
-  );
+  const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
+  const s = await session(root, home, streamFn, fixtureMcp([]), true);
   try {
-    const prompt = () => s.bundle().adapter.snapshot().context.systemPrompt;
-    const before = prompt();
-    assert.match(before, /开局写下的约定/);
-    assert.match(before, /alpha：开局的技能/);
-    assert.match(before, /开局学到的一条/);
-    assert.match(before, /用户级开局的一条/);
-    assert.ok(!before.includes("## 外部工具"));
+    await s.bundle().adapter.run("开始");
+    const first = statusTextOf(streamFn.calls[0]);
+    assert.match(first, /开局写下的约定/);
+    assert.match(first, /alpha：开局的技能/);
+    assert.match(first, /开局学到的一条/);
+    assert.match(first, /用户级开局的一条/);
+    assert.doesNotMatch(first, /name="外部工具"/);
+    const promptBefore = streamFn.calls[0]?.context.systemPrompt;
     writeFileSync(join(root, "AGENTS.md"), "中途改过的约定\n");
     writeFileSync(projectMemoryPathOf(root), "- [P1] 中途学到的一条\n");
     writeFileSync(userMemoryPathOf(home), "- [U1] 用户级中途的一条\n");
@@ -324,18 +321,22 @@ test("系统提示里开局冻结的部分不随 /reload 变：中途改 AGENTS.
     write(join(root, ".mcp.json"), { mcpServers: { fx: { command: "node", args: ["a.js"] } } });
     await s.reload([]);
     await s.reload(["confirm"]);
-    const after = prompt();
-    assert.match(after, /## 外部工具/, "由设置决定的部分（MCP 一段）按新快照变");
     assert.ok(s.bundle().adapter.snapshot().tools.advertised.includes("mcp__fx__echo"));
-    assert.match(after, /开局写下的约定/);
-    assert.ok(!after.includes("中途改过的约定"), "人写的说明不重读");
-    assert.match(after, /alpha：开局的技能/);
-    assert.ok(!after.includes("beta"), "Skill 目录不变");
-    assert.match(after, /开局学到的一条/);
-    assert.match(after, /用户级开局的一条/);
-    assert.ok(
-      !after.includes("中途学到的一条") && !after.includes("用户级中途的一条"),
-      "两层推送的记忆不变"
+    await s.bundle().adapter.run("继续");
+    const call = streamFn.calls.at(-1);
+    assert.equal(call?.context.systemPrompt, promptBefore, "系统提示逐字节不变");
+    const update = statusTextOf(call).split("<pigeon-status-update>").at(-1) ?? "";
+    assert.match(update, /以下整段取代此前的「项目说明」：[\s\S]*中途改过的约定/);
+    assert.match(update, /以下整段取代此前的「Skill 目录」：[\s\S]*beta：中途的技能/);
+    assert.match(
+      update,
+      /以下整段取代此前的「记忆」：[\s\S]*中途学到的一条[\s\S]*用户级中途的一条/
+    );
+    assert.match(update, /以下整段取代此前的「外部工具」：/);
+    assert.equal(
+      statusTextOf(call).split("<pigeon-status>").length - 1,
+      1,
+      "只追加变了的节，不重发完整块"
     );
   } finally {
     await s.dispose();

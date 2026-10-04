@@ -11,6 +11,7 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import { buildRuntime, WEB_TOOLS_SENTENCE } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { createWorkerRuntimeFactory } from "./workers.ts";
 
@@ -24,8 +25,9 @@ test("给了 webTools 才注册两件工具并追加系统提示句；web_fetch 
   const root = mkdtempSync(join(tmpdir(), "pigeon-web-runtime-"));
   try {
     for (const on of [true, false]) {
+      const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
       const bundle = buildRuntime({
-        streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+        streamFn,
         workspaceRoot: root,
         homeDir: root,
         sessionId: newSessionId(),
@@ -37,10 +39,14 @@ test("给了 webTools 才注册两件工具并追加系统提示句；web_fetch 
       });
       try {
         const snapshot = bundle.adapter.snapshot();
+        // 决策 363：联网那句提示在开工状态块（联网一节），不在系统提示
+        await bundle.adapter.run("你好");
+        const status = statusTextOf(streamFn.calls[0]);
+        assert.ok(!snapshot.context.systemPrompt.includes(WEB_TOOLS_SENTENCE));
         const advertised = snapshot.tools.advertised;
         assert.equal(advertised.includes(WEB_SEARCH_TOOL), on);
         assert.equal(advertised.includes(WEB_FETCH_TOOL), on);
-        assert.equal(snapshot.context.systemPrompt.includes(WEB_TOOLS_SENTENCE), on);
+        assert.equal(status.includes(WEB_TOOLS_SENTENCE), on);
         assert.equal(bundle.toolTiers.get(WEB_FETCH_TOOL), on ? "network" : undefined);
         assert.equal(bundle.toolTiers.get(WEB_SEARCH_TOOL), on ? "read" : undefined);
       } finally {

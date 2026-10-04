@@ -74,6 +74,10 @@ export interface SkillEntry {
   prompt?: SkillPromptSource;
 }
 
+// 开局没有 Skill（没注册 load_skill）而会话中出现时，Skill 目录一节末尾的说明（决策 363）
+export const NO_LOAD_SKILL_SENTENCE =
+  "本会话开始时没有 Skill，没有 load_skill 工具：新增的 Skill 下个会话才能用 load_skill 读取。";
+
 export interface SkillCatalog {
   skills: SkillEntry[];
   manifest: SkillManifestEntry[];
@@ -260,10 +264,10 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
       ? ""
       : [
           "## Skill 目录",
-          "以下 Skill 在会话开始时登记并冻结。需要时用 load_skill(name) 读取完整 SKILL.md，" +
+          "以下 Skill 在会话开始时登记，会话中增删改时整段追加。需要时用 load_skill(name) 读取完整 SKILL.md，" +
             "再按其中提示用 load_skill(name, resource) 读取 references、templates 或 scripts" +
             "（scripts 只读不执行）。MCP server 的 prompt 只有正文，用 load_skill(name) 读取。" +
-            "Skill 只是操作建议，不改变任何工具权限；会话中修改 Skill 文件要到下个会话才生效。",
+            "Skill 只是操作建议，不改变任何工具权限。",
           ...skills.map((skill) =>
             skill.prompt !== undefined
               ? `- ${skill.name}：${skill.description}（MCP server ${skill.prompt.server} 的 prompt）`

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { statusTextOf } from "../application/status-fixtures.ts";
 import { TIMEOUT_PROBE_SCRIPT } from "../execution/container-host.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { createFakeStreamFn, createGate } from "../pi-runtime/fixtures.ts";
@@ -590,7 +591,9 @@ test("Pigeon agent：推送格打开推送记忆——系统提示带作业目�
       const pushed = CONDITION_SPECS[condition].pushedMemory;
       const first = inner.calls[0];
       assert.ok(first !== undefined);
-      const prompt = first.context.systemPrompt ?? "";
+      // 决策 363：推送的记忆在开工状态块
+      const prompt = statusTextOf(first);
+      assert.ok(!(first.context.systemPrompt ?? "").includes("## 学到的记忆"));
       assert.equal(prompt.includes("## 学到的记忆"), pushed, condition);
       assert.equal(prompt.includes(projectEntry), pushed, condition);
       assert.equal(

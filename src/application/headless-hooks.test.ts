@@ -11,6 +11,7 @@ import { runTraceCommand } from "../cli/trace.ts";
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { LayeredHook } from "../state/hooks.ts";
 import { emptySettingsSnapshot, type SettingsSnapshot } from "../state/settings.ts";
+import { isStatusText } from "../state/status-text.ts";
 import { runHeadless } from "./headless-core.ts";
 
 const made: string[] = [];
@@ -82,7 +83,9 @@ function userTexts(call: FakeStreamFn["calls"][number] | undefined): string[] {
   const texts: string[] = [];
   for (const message of call?.context.messages ?? []) {
     if (message.role !== "user") continue;
-    texts.push(blockText(message.content));
+    const text = blockText(message.content);
+    // 决策 363：开工状态块不是输入
+    if (!isStatusText(text)) texts.push(text);
   }
   return texts;
 }

@@ -41,6 +41,7 @@ import {
   runSandboxCommand,
   SANDBOX_FORK_UNSUPPORTED,
   type Sandbox,
+  sandboxStatusFacts,
   startSandbox,
 } from "../application/sandbox-session.ts";
 import { runSessionListCommand } from "../application/session-list.ts";
@@ -326,7 +327,9 @@ async function resumeMain(argv: string[]): Promise<void> {
           streamFn,
           flags,
           resume: true,
-          ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+          ...(sandbox !== undefined
+            ? { workspaceHost: sandbox.host, statusFacts: sandboxStatusFacts(sandbox) }
+            : {}),
           ...webToolsOptionOf(flags, settings),
           // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
           memoryWrite: lineMemoryWrite(write),
@@ -1167,7 +1170,9 @@ async function lineMain(argv: string[]): Promise<void> {
       sessionId,
       streamFn,
       flags,
-      ...(sandbox !== undefined ? { workspaceHost: sandbox.host } : {}),
+      ...(sandbox !== undefined
+        ? { workspaceHost: sandbox.host, statusFacts: sandboxStatusFacts(sandbox) }
+        : {}),
       ...webToolsOptionOf(flags, settings),
       // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
       memoryWrite: lineMemoryWrite(write),

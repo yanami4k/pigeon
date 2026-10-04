@@ -1,5 +1,5 @@
-// 人写的说明的装配（决策 330）：会话开始把 AGENTS.md 一段拼进 system prompt 即冻结，清单进注入快照的 memory 字段；会话中途改
-// 文件，当前会话发给模型的 system prompt 与清单都不变（下个会话生效）。本地会话从工作区根往上读；沙箱会话（注入执行端）读宿主
+// 人写的说明的装配（决策 330、363）：AGENTS.md 一段随开工状态块发出（不在系统提示里），清单进注入快照的 memory 字段；会话中途改
+// 文件，下一次请求前以状态追加整段取代，系统提示与清单不变。本地会话从工作区根往上读；沙箱会话（注入执行端）读宿主
 // 上的工作区（治理根），与本机会话内容一致。超出上限的提示经运行面交给入口；不再读 .pigeon/memory/*.md 与 ~/.pigeon/preferences.md。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -11,13 +11,14 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
+import { statusTextOf } from "./status-fixtures.ts";
 
 function withBase(body: (base: string) => Promise<void>): Promise<void> {
   const base = mkdtempSync(join(tmpdir(), "pigeon-runtime-agents-"));
   return body(base).finally(() => rmSync(base, { recursive: true, force: true }));
 }
 
-test("AGENTS.md 一段会话开始拼进 system prompt 即冻结：中途改文件不影响当前 prompt 与清单；旧的常驻 Memory 位置不再读", () =>
+test("AGENTS.md 一段随开工状态块发出、不在系统提示里；中途改文件以状态追加整段取代，系统提示与清单不变；旧的常驻 Memory 位置不再读", () =>
   withBase(async (base) => {
     const root = join(base, "workspace");
     const home = join(base, "home");
@@ -40,10 +41,7 @@ test("AGENTS.md 一段会话开始拼进 system prompt 即冻结：中途改文�
     });
     try {
       const snapshot = bundle.adapter.snapshot();
-      assert.ok(snapshot.context.systemPrompt.includes(`### AGENTS.md\n${original}`));
-      assert.ok(!snapshot.context.systemPrompt.includes("旧的项目级 Memory"));
-      assert.ok(!snapshot.context.systemPrompt.includes("旧的用户偏好"));
-      assert.ok(!snapshot.context.systemPrompt.includes("常驻 Memory"));
+      assert.ok(!snapshot.context.systemPrompt.includes(original), "系统提示里没有人写的说明");
       assert.deepEqual(snapshot.memory, [
         {
           path: "AGENTS.md",
@@ -54,13 +52,20 @@ test("AGENTS.md 一段会话开始拼进 system prompt 即冻结：中途改文�
         },
       ]);
       assert.equal(bundle.instructionsNotice, undefined);
-      // 会话中途改文件：当前会话不热替换
-      writeFileSync(join(root, "AGENTS.md"), "项目约定：改用 npm");
       const result = await bundle.adapter.run("开始吧");
       assert.equal(result.status, "completed");
-      const sent = streamFn.calls[0]?.context.systemPrompt ?? "";
-      assert.ok(sent.includes(original), "发给模型的 system prompt 仍是会话开始时的冻结版本");
-      assert.ok(!sent.includes("改用 npm"));
+      const first = statusTextOf(streamFn.calls[0]);
+      assert.ok(first.includes(`### AGENTS.md\n${original}`), "开工状态块带人写的说明");
+      assert.ok(!first.includes("旧的项目级 Memory"));
+      assert.ok(!first.includes("旧的用户偏好"));
+      // 会话中途改文件：下一次请求前整段追加
+      writeFileSync(join(root, "AGENTS.md"), "项目约定：改用 npm");
+      await bundle.adapter.run("再来");
+      const second = streamFn.calls[1];
+      const update = statusTextOf(second).split("<pigeon-status-update>").at(-1) ?? "";
+      assert.match(update, /以下整段取代此前的「项目说明」/);
+      assert.ok(update.includes("改用 npm"));
+      assert.equal(second?.context.systemPrompt, streamFn.calls[0]?.context.systemPrompt);
       assert.deepEqual(bundle.adapter.snapshot().memory, snapshot.memory);
     } finally {
       await disposeRuntime(bundle);
@@ -75,8 +80,9 @@ test("沙箱会话（注入执行端）读宿主上的工作区（治理根）�
     mkdirSync(placeholder, { recursive: true });
     writeFileSync(join(host, "AGENTS.md"), "宿主工作区的说明");
     writeFileSync(join(placeholder, "AGENTS.md"), "占位目录里的（不读）");
+    const sandboxed = createFakeStreamFn({ replies: [{ text: "好" }] });
     const bundle = buildRuntime({
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      streamFn: sandboxed,
       workspaceRoot: placeholder,
       governanceRoot: host,
       workspaceHost: createLocalWorkspaceHost(placeholder),
@@ -87,9 +93,10 @@ test("沙箱会话（注入执行端）读宿主上的工作区（治理根）�
       homeDir: join(base, "home"),
     });
     try {
-      const prompt = bundle.adapter.snapshot().context.systemPrompt;
-      assert.ok(prompt.includes("宿主工作区的说明"));
-      assert.ok(!prompt.includes("占位目录里的"));
+      await bundle.adapter.run("开始吧");
+      const sent = statusTextOf(sandboxed.calls[0]);
+      assert.ok(sent.includes("宿主工作区的说明"));
+      assert.ok(!sent.includes("占位目录里的"));
     } finally {
       await disposeRuntime(bundle);
     }
@@ -117,8 +124,9 @@ test("agentsMd 关掉（跑批器与只测装配的用例）：不读任何说�
   withBase(async (base) => {
     mkdirSync(join(base, ".git"));
     writeFileSync(join(base, "AGENTS.md"), "说明");
+    const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
     const bundle = buildRuntime({
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+      streamFn,
       workspaceRoot: base,
       sessionId: newSessionId(),
       yolo: true,
@@ -128,7 +136,8 @@ test("agentsMd 关掉（跑批器与只测装配的用例）：不读任何说�
       agentsMd: false,
     });
     try {
-      assert.ok(!bundle.adapter.snapshot().context.systemPrompt.includes("说明"));
+      await bundle.adapter.run("开始吧");
+      assert.doesNotMatch(statusTextOf(streamFn.calls[0]), /name="项目说明"/);
       assert.deepEqual(bundle.adapter.snapshot().memory, []);
     } finally {
       await disposeRuntime(bundle);

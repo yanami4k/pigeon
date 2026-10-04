@@ -12,6 +12,7 @@ import {
   openSessionRuntime,
 } from "../application/session-runtime.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "../application/spawn-worker-tool.ts";
+import type { StatusFacts } from "../application/status-sources.ts";
 import type { WebToolsConfig } from "../application/web-tools.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import type { SessionId } from "../state/ids.ts";
@@ -41,6 +42,8 @@ export interface MainReloadContext {
   streamFn: StreamFn;
   flags: LaunchFlags;
   workspaceHost?: WorkspaceHost;
+  // 决策 354：沙箱会话的确知事实（开工状态块环境一节）
+  statusFacts?: StatusFacts;
   warn: (line: string) => void;
   createApprovalHandler: NonNullable<OpenSessionRuntimeRequest["createApprovalHandler"]>;
   // 决策 331：有人对话的入口带记忆写入
@@ -79,6 +82,7 @@ export async function reopenMainSessionForReload(
     streamFn: context.streamFn,
     flags: context.flags,
     ...(context.workspaceHost !== undefined ? { workspaceHost: context.workspaceHost } : {}),
+    ...(context.statusFacts !== undefined ? { statusFacts: context.statusFacts } : {}),
     ...spawnWorkerOption(context.flags, orchestration),
     taskList: orchestration.taskList,
     ...webTools,
