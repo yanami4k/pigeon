@@ -31,21 +31,25 @@
 测试分两档，划分写在 `scripts/test-tiers.mjs` 的清单里（用清单而不是命名约定：每一项旁边写得下理由，文件不必改名；
 清单里某一项匹配不到文件时，跑测试的脚本直接报错，免得清单悄悄失效）。
 
-- **慢档**：`src/eval` 下的全部测试（跑批器与实验装置，只在 eval 有改动时与合并前跑），加上清单里列出的、
-  单独跑超过 10 秒的其他测试文件。
+- **慢档**：`src/eval` 下的全部测试（跑批器与实验装置），加上清单里列出的、单独跑超过 10 秒的其他测试文件
+  （它们测的是 `src/execution`、`src/cli` 等处的代码；慢档的 eval 测试也会跑到 application 层的代码）。
 - **快档**：其余全部。
 
 | 命令 | 跑什么 |
 |---|---|
 | `npm run test` | 快档 |
 | `npm run test:slow` | 慢档 |
-| `npm run verify` | lint + check + 快档 + deps（日常施工用） |
-| `npm run verify:full` | lint + check + 快档与慢档 + deps |
+| `npm run verify` | lint + check + 快档 + deps（开发中的快速检查） |
+| `npm run verify:full` | lint + check + 快档与慢档 + deps（交付与合并前必跑） |
 
-- CI（`.github/workflows/ci.yml`）在推送 main 与每个 PR 时跑 `npm run verify:full`，合并前仍然全量把关。
-- 改了 `src/eval` 下的代码，提交前自己跑一遍 `npm run test:slow`（或 `verify:full`）。
-- 测试步的并发数用环境变量 `TEST_CONCURRENCY` 给，例如 `TEST_CONCURRENCY=6 npm run verify`；
-  也可以在 `npm run test -- <node --test 的参数>` 后面直接带 node --test 的参数。
+- **交付与合并前必须跑 `npm run verify:full`**，不论改了哪个目录：慢档里的文件覆盖的不只是 `src/eval`。
+  `npm run verify` 只用于开发中的快速检查，不能代替交付前的全量验证。
+- CI（`.github/workflows/ci.yml`）在推送 main 与每个 PR 时跑 `npm run verify:full`。本地合并后直推 main 时，
+  CI 在推送之后才跑，因此合并前的全量验证由交付者自己跑 `verify:full`。
+- 测试步的并发数用环境变量 `TEST_CONCURRENCY` 给，例如 `TEST_CONCURRENCY=6 npm run verify:full`。
+- 只跑某几个测试文件：`npm run test -- <文件或 glob…>`（给了文件就只跑这些，不分档；例如
+  `npm run test -- src/tui/script-ui.test.ts`），也可以直接 `node --test <文件>`。其余以 `-` 开头的参数原样交给
+  node --test，例如 `npm run test -- --test-name-pattern=审批`。
 - 真容器用例与全量验收在验证服务器上跑；本机只跑改动涉及的单个文件。
 
 ## 量具
