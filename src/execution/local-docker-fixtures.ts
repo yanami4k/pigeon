@@ -1,5 +1,5 @@
-// 测试夹具：在本机执行命令的假 docker CLI——exec 在 -w 给出的目录里直接运行（该目录即"容器内"工作区），其余子命令
-// 直接成功。容器执行端经它驱动，记起点、还原受保护文件、验证等跨边界的逻辑因而能对着真实的 git 与 shell 验证。只供测试使用。
+// 测试夹具：在本机执行命令的假 docker CLI——exec 在 -w 给出的目录里直接运行（该目录即"容器内"工作区），-e 给的变量
+// 并进环境，其余子命令直接成功。容器执行端经它驱动，记起点、还原受保护文件、验证等跨边界的逻辑因而能对着真实的 git 与 shell 验证。只供测试使用。
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ if (args[0] !== "exec") process.exit(0);
 let i = 1;
 let cwd = process.cwd();
 let interactive = false;
+const extraEnv = {};
 for (;;) {
   if (args[i] === "-i") { interactive = true; i++; continue; }
   if (args[i] === "-w") {
@@ -25,7 +26,7 @@ for (;;) {
     i += 2;
     continue;
   }
-  if (args[i] === "-e") { i += 2; continue; }
+  if (args[i] === "-e") { const at = args[i + 1].indexOf("="); extraEnv[args[i + 1].slice(0, at)] = args[i + 1].slice(at + 1); i += 2; continue; }
   // 以哪个用户执行：本机照常以当前用户执行
   if (args[i] === "-u") { i += 2; continue; }
   break;
@@ -38,7 +39,7 @@ if (program === "/bin/sh" && process.platform === "win32") program = "sh";
 if (process.platform === "win32" && (program === "sh" || program === "/bin/sh") && rest[0] === "-c") {
   rest[1] = 'export PATH="/usr/bin:$PATH"\\n' + rest[1];
 }
-const r = spawnSync(program, rest, { cwd, stdio: [interactive ? "inherit" : "ignore", "inherit", "inherit"] });
+const r = spawnSync(program, rest, { cwd, env: { ...process.env, ...extraEnv }, stdio: [interactive ? "inherit" : "ignore", "inherit", "inherit"] });
 if (r.error) { process.stderr.write("OCI runtime exec failed: exec failed: " + r.error.message + ": no such file or directory\\n"); process.exit(127); }
 process.exit(r.status ?? 1);
 `;

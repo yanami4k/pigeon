@@ -13,6 +13,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { handbackJobsNotice } from "../application/background-jobs.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import { failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
@@ -365,9 +366,10 @@ async function resumeMain(argv: string[]): Promise<void> {
               sandbox !== undefined
                 ? async () => SANDBOX_FORK_UNSUPPORTED
                 : forkHandlerOf(opened, workspaceRoot, flags, streamFn),
-            ...sandboxReplOptions(sandbox),
+            ...sandboxReplOptions(sandbox, bundle),
           });
         } finally {
+          warnSandboxJobs(sandbox, bundle, write);
           await disposeRuntime(bundle);
           await finishSandbox(sandbox, write);
         }
@@ -766,6 +768,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
     "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
+    "[--background-closeout-seconds <n，缺省 600>] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
     '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
@@ -796,6 +799,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--repetition-guard",
     "--repetition-mode",
     "--repetition-preset",
+    "--background-closeout-seconds",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -865,6 +869,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     }
     return raw as T;
   };
+  // 决策 365：无人值守收尾等后台作业的总时限（只对 Pigeon 条件生效；缺省同产品缺省，生效值记进身份头）
+  const backgroundCloseoutSeconds = positive("--background-closeout-seconds");
   // 决策 367：撞上限续跑与流式重复检测（只对 Pigeon 条件生效；没给的项取产品缺省）
   const continuationSwitch = oneOf("--continuation", ["on", "off"] as const);
   const maxConsecutive = positive("--continuation-max-consecutive");
@@ -900,6 +906,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
         ...(memoryLimitChars !== undefined ? { memoryLimitChars } : {}),
         truncationContinuation,
         repetitionGuard: repetition.settings,
+        ...(backgroundCloseoutSeconds !== undefined ? { backgroundCloseoutSeconds } : {}),
       }
     : undefined;
   const promptFormat = values.get("--prompt-format");
@@ -1276,10 +1283,11 @@ async function lineMain(argv: string[]): Promise<void> {
         sandbox !== undefined
           ? async () => SANDBOX_FORK_UNSUPPORTED
           : forkHandlerOf(opened, workspaceRoot, flags, streamFn),
-      ...sandboxReplOptions(sandbox),
+      ...sandboxReplOptions(sandbox, bundle),
     });
   } finally {
     close();
+    warnSandboxJobs(sandbox, bundle, write);
     await disposeRuntime(bundle);
     await finishSandbox(sandbox, write);
   }
@@ -1340,11 +1348,24 @@ function sandboxLog(write: (text: string) => void): (line: string) => void {
   return (line) => write(`[沙箱] ${line}\n`);
 }
 
-// 决策 245：沙箱里提供 /export 手动交回
-function sandboxReplOptions(sandbox: Sandbox | undefined): {
+// 决策 245：沙箱里提供 /export 手动交回（决策 365：有后台作业在跑时先提示）
+function sandboxReplOptions(
+  sandbox: Sandbox | undefined,
+  bundle: RuntimeBundle
+): {
   exportChanges?: () => Promise<string>;
 } {
-  return sandbox !== undefined ? { exportChanges: () => exportSandbox(sandbox) } : {};
+  return sandbox !== undefined ? { exportChanges: () => exportSandbox(sandbox, bundle.jobs) } : {};
+}
+
+// 决策 365：收尾交回沙箱前有后台作业在跑先提示（随后随运行面释放停掉）
+function warnSandboxJobs(
+  sandbox: Sandbox | undefined,
+  bundle: RuntimeBundle,
+  write: (text: string) => void
+): void {
+  const warning = sandbox !== undefined ? handbackJobsNotice(bundle.jobs, "close") : undefined;
+  if (warning !== undefined) write(`[沙箱] ${warning}\n`);
 }
 
 // 决策 245：会话结束时自动交回一次，交回后删除容器；写明分支名与查看命令

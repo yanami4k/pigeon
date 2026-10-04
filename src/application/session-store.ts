@@ -135,6 +135,8 @@ export function checkpointEntry(
     baseCommit?: string;
     toolCallId: string;
     runSeq?: number;
+    // 决策 365：拍摄时在跑的后台作业
+    backgroundJobs?: string[];
   }
 ): SessionCustomEntry {
   return {
@@ -148,6 +150,7 @@ export function checkpointEntry(
       commit: payload.commit,
       tree: payload.tree,
       ...(payload.baseCommit !== undefined ? { baseCommit: payload.baseCommit } : {}),
+      ...(payload.backgroundJobs !== undefined ? { backgroundJobs: payload.backgroundJobs } : {}),
     },
   };
 }

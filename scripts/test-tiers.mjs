@@ -17,7 +17,8 @@ export const SLOW_TESTS = [
   },
   {
     pattern: "src/execution/container-host.test.ts",
-    reason: "含真容器层：对着真容器验超时杀干净、退出码、输出截断与路径映射，起停与重启容器占大头",
+    reason:
+      "含真容器层：对着真容器验超时杀干净、退出码、输出截断与路径映射，起停容器与等超时占大头",
   },
   {
     pattern: "src/execution/hook-runner.test.ts",

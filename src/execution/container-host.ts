@@ -1,7 +1,9 @@
 // 执行端接口的容器实现（决策 098）：工作区是一个运行中容器里的目录，读写与执行都经 docker CLI 的 exec 进入容器。
 // 跨边界的四件事各自在这里保证：
-//   ① 超时与中止：只杀 docker exec 客户端会把容器内的进程留成孤儿，故一律"杀客户端 + 重启整个容器"——
-//      重启终结容器的 PID namespace，该命令起的所有进程随之消失；容器的可写层在重启前后保留，工作区内容不丢；
+//   ① 超时与中止（决策 365）：只杀 docker exec 客户端会把容器内的进程留成孤儿。命令进程带一个每次随机的标记环境变量
+//      （RUN_MARKER_VAR，子孙进程随之继承），经观测脚本跑的命令另以 setsid 起独立进程组；到时宿主另发一次辅助调用，
+//      按标记在容器里找进程——组长带标记的整组杀，再逐个杀带标记的进程（KILL_MARKED_SCRIPT）。观测脚本照常收尾、
+//      命令后的取证照取；客户端在宽限内没有结束才强行断开。不再重启容器；
 //   ② 退出码保真：docker exec 原样带回命令退出码（被信号终止为 128+N）；程序不存在（OCI 运行时报 126/127）
 //      还原为 ENOENT，与本地实现同一口径；守护进程层面的失败（容器不在、守护进程不可达）按环境错误上抛，
 //      不冒充命令的退出码；
@@ -50,6 +52,9 @@ import {
   type HostExecResult,
   type HostFileSnapshot,
   type HostFileState,
+  type HostJob,
+  type HostJobExit,
+  type HostJobOptions,
   LISTING_SKIPPED_DIRS,
   LISTING_SKIPPED_ROOT_DIRS,
   type MemoryLimitExceeded,
@@ -57,6 +62,7 @@ import {
   memoryLimitText,
   type ObservedExec,
   parseGitStatus,
+  RUN_MARKER_VAR,
   SYSTEM_PATH,
   type WorkspaceHost,
 } from "../tools/workspace-host.ts";
@@ -92,6 +98,8 @@ export interface ContainerHostOptions {
   env?: Readonly<Record<string, string>>;
   // 辅助调用（解析路径、读写文件、列清单、重启容器）的超时，缺省 60 秒
   helperTimeoutMs?: number;
+  // 决策 365：直接执行的命令超时或中止、按标记杀过之后等客户端自己结束的宽限（缺省 5 秒；测试注入）
+  killGraceMs?: number;
   // 决策 333：容器设了内存上限时在场——每条命令前后读容器 cgroup 的 oom_kill 计数，计数增加即判超出上限；
   // 读不到计数时，退出码 137 判"可能超出"。label 为上限的可读写法；counterFiles 为计数所在文件（缺省 cgroup v2 的
   // memory.events 与 v1 的 memory.oom_control，依次取第一个读得到的；测试注入）
@@ -101,6 +109,34 @@ export interface ContainerHostOptions {
 }
 
 const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
+// 按标记杀（经 trustedShell 执行）：$1 为标记值。逐个看 /proc 下的进程，环境里带这个标记的，若是进程组组长（setsid 起的
+// 命令）即杀整组，再杀它本身；扫两遍（第一遍杀的过程中新起的进程）。脚本自己的进程不带标记
+export const KILL_MARKED_SCRIPT = [
+  `m="${RUN_MARKER_VAR}=$1"`,
+  "for pass in 1 2; do",
+  "  for p in /proc/[0-9]*; do",
+  '    tr "\\0" "\\n" < "$p/environ" 2>/dev/null | grep -qxF -- "$m" || continue',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  '    pid="${p#/proc/}"',
+  '    g="$(sed "s/.*) //" "$p/stat" 2>/dev/null | cut -d " " -f 3)"',
+  '    [ "$g" = "$pid" ] && kill -s KILL -- "-$pid" 2>/dev/null',
+  '    kill -s KILL "$pid" 2>/dev/null',
+  "  done",
+  "done",
+  "exit 0",
+].join("\n");
+// 决策 365：后台作业的包装（agent 命令的执行通道，不经 trustedShell）：$1 为标记，其后为程序与参数。setsid 与 env 从系统
+// 目录解析，命令以原来的 PATH、空标准输入、带标记的环境另起进程组（没有 setsid 时不另起组，仍按标记查杀），等它结束、
+// 以它的退出码结束
+const JOB_SCRIPT = [
+  'R="$1"; shift',
+  `S="$(PATH="${SYSTEM_PATH}:$PATH"; command -v setsid 2>/dev/null)"`,
+  `E="$(PATH="${SYSTEM_PATH}:$PATH"; command -v env 2>/dev/null)" || E=env`,
+  `if [ -n "$S" ]; then "$S" "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & else "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & fi`,
+  'wait "$!"',
+].join("\n");
+// 决策 365：超时或中止按标记杀过之后，等客户端自己结束的宽限（观测脚本还要做命令后的取证，另按辅助调用的限时）
+const KILL_GRACE_MS = 5000;
 // 路径不存在时辅助脚本用的退出码
 const EXIT_MISSING = 3;
 // 决策 334：要写的文件是符号链接（标准输出为其指向）、写入前重新解析得到别的路径（标准输出为新的解析结果）
@@ -322,7 +358,8 @@ const NESTED_REPO_DEPTH = 3;
 // 原始输出）、scanned（整棵扫描的子树）、truncated（候选超过上限）、stat（候选的签名）、oom、cmd（其后是命令输出）、end
 // （退出码；程序不存在为 missing、不可执行为 denied）、done。工作区根被外层仓库忽略时按非 git 工作区扫描；status 报出的
 // 目录里有 .git 的（嵌套仓库、子模块）逐个取它们自己的 status，取不到或过深的整棵扫描。命令以原来的 PATH、空标准输入、
-// 经 env 执行（只执行外部程序：内建命令与本脚本的函数一律按程序不存在处理）；脚本自己用的工具从系统目录解析，git 经
+// 经 env 执行（只执行外部程序：内建命令与本脚本的函数一律按程序不存在处理），以 setsid 另起进程组、环境里带 run 模式的
+// 第二个参数作标记（决策 365：超时与中止按组与标记杀，见 KILL_MARKED_SCRIPT）；脚本自己用的工具从系统目录解析，git 经
 // git-hardening.ts 同一张表加固，这些都不进命令的环境
 function observeScript(limit: number, oomFiles: readonly string[] | undefined): string {
   const pruned = [
@@ -346,9 +383,12 @@ function observeScript(limit: number, oomFiles: readonly string[] | undefined): 
   return [
     "IFS= read -r M || exit 90",
     'mode="$1"; shift',
+    'R=""; if [ "$mode" = run ]; then R="$1"; shift; fi',
     'P0="$PATH"',
     `H="${SYSTEM_PATH}:$P0"`,
     'PATH="$H"',
+    // setsid 与 env 从系统目录解析；没有 setsid 时命令不另起组（仍按标记查杀）
+    'S="$(command -v setsid 2>/dev/null)"; E="$(command -v env 2>/dev/null)" || E=env',
     'A=""',
     // 以空树作属性来源（git-hardening.ts 同一做法）：空树的编号按当前目录所在仓库的对象格式算，git 不认 --attr-source 时不加
     "ga() {",
@@ -421,7 +461,10 @@ function observeScript(limit: number, oomFiles: readonly string[] | undefined): 
     '    */*) if [ ! -e "$1" ]; then rc=missing; elif [ -d "$1" ] || [ ! -x "$1" ]; then rc=denied; fi ;;',
     '    *) onpath "$1" || rc=missing ;;',
     "  esac",
-    '  if [ -z "$rc" ]; then env -- "$@" </dev/null; rc=$?; fi',
+    '  if [ -z "$rc" ]; then',
+    `    if [ -n "$S" ]; then "$S" "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & else "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & fi`,
+    '    wait "$!"; rc=$?',
+    "  fi",
     '  PATH="$H"',
     '  printf \'\\n%s end %s\\n\' "$M" "$rc"',
     "  state",
@@ -616,17 +659,24 @@ export interface HelperResult {
 export function createContainerWorkspaceHost(options: ContainerHostOptions): WorkspaceHost {
   const [dockerProgram = "docker", ...dockerPrefix] = options.docker ?? ["docker"];
   const helperTimeoutMs = options.helperTimeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS;
+  const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
   const root = path.posix.normalize(options.root);
   const envArgs = Object.entries(options.env ?? {}).flatMap(([key, value]) => [
     "-e",
     `${key}=${value}`,
   ]);
   const docker = [dockerProgram, ...dockerPrefix];
-  const execFlags = (interactive: boolean, extraEnv?: NodeJS.ProcessEnv): string[] => [
+  const execFlags = (
+    interactive: boolean,
+    extraEnv?: NodeJS.ProcessEnv,
+    marker?: string
+  ): string[] => [
     ...(interactive ? ["-i"] : []),
     "-w",
     root,
     ...envArgs,
+    // 决策 365：直接执行的命令（钩子等）经 docker exec 带上标记，超时与中止按标记查杀
+    ...(marker !== undefined ? ["-e", `${RUN_MARKER_VAR}=${marker}`] : []),
     // 单次调用只放行 PIGEON_* 协议变量（钩子的 PIGEON_PROJECT_DIR）：宿主环境的其余变量不渗进容器
     ...Object.entries(extraEnv ?? {})
       .filter(([key]) => key.startsWith("PIGEON_"))
@@ -635,11 +685,12 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   const execArgs = (
     interactive: boolean,
     command: readonly string[],
-    extraEnv?: NodeJS.ProcessEnv
+    extraEnv?: NodeJS.ProcessEnv,
+    marker?: string
   ): string[] => [
     ...dockerPrefix,
     "exec",
-    ...execFlags(interactive, extraEnv),
+    ...execFlags(interactive, extraEnv, marker),
     options.container,
     ...command,
   ];
@@ -692,7 +743,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       return { entry, paths: [...new Set([literal, real].filter((value) => value !== ""))] };
     });
 
-  const restart = (): Promise<void> => restartContainer(docker, options.container, helperTimeoutMs);
+  // 决策 365：按标记杀容器里的进程（超时、中止、后台作业的停止）；容器不可用等失败不抛，调用方另有兜底
+  const killMarked = async (marker: string): Promise<void> => {
+    try {
+      await helper(false, trustedShell(KILL_MARKED_SCRIPT, marker));
+    } catch {
+      // 交给调用方的兜底（强行断开客户端）
+    }
+  };
 
   // 最近一次检视（决策 349）：exec、改写与新建时作废；写工具的解析在同一路径、其间没有 exec 与写入时直接取用。
   // 读档解析（决策 355）通过禁读判定的检视同样留作最近一次检视
@@ -799,9 +857,11 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     const { observe, streamCap = HOST_SEPARATE_STREAM_CAP } = more;
     const observed = observe !== undefined ? new ObservedOutput(observe.nonce) : undefined;
     const stdin = observe !== undefined ? `${observe.nonce}\n` : execOptions.stdin;
+    // 决策 365：本次命令的标记（经观测脚本时交给脚本、只进命令的环境；直接执行时经 docker exec 带上）
+    const marker = randomBytes(12).toString("hex");
     const command =
       observe !== undefined
-        ? ["/bin/sh", "-c", observe.script, "sh", "run", plan.program, ...plan.args]
+        ? ["/bin/sh", "-c", observe.script, "sh", "run", marker, plan.program, ...plan.args]
         : [plan.program, ...plan.args];
     // 头尾保留与全文落盘（决策 356）照常作用于收集器：观测时标准输出里只有命令段进收集器，取证段另行交回
     const collected = createHeadCollector(execOptions.maxOutputBytes, collectorExtras(execOptions));
@@ -813,13 +873,25 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     let stdoutHead = "";
     return new Promise((resolve, reject) => {
       let timedOut = false;
+      // 决策 365：按标记杀（进行中或已完成）；forced 为宽限过后强行断开了客户端
       let terminating: Promise<void> | undefined;
+      let forced = false;
+      let grace: ReturnType<typeof setTimeout> | undefined;
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn(dockerProgram, execArgs(stdin !== undefined, command, execOptions.env), {
-          stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-          windowsHide: true,
-        });
+        child = spawn(
+          dockerProgram,
+          execArgs(
+            stdin !== undefined,
+            command,
+            execOptions.env,
+            observe !== undefined ? undefined : marker
+          ),
+          {
+            stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
+            windowsHide: true,
+          }
+        );
         // 标准输入（钩子事件 JSON，或观测脚本的随机串）：写完即收尾，容器内命令读完自行结束
         child.stdin?.on("error", () => {});
         if (stdin !== undefined) child.stdin?.end(stdin, "utf8");
@@ -852,12 +924,25 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           stderrHead += chunk.toString("utf8");
         }
       });
-      // 终止：杀客户端只断开连接，容器内进程仍在跑；重启容器才杀得干净（见文件头 ①）
-      const terminate = (): void => {
-        if (terminating === undefined) {
+      // 终止（见文件头 ①）：先按标记杀容器里的命令，客户端随命令结束（观测脚本先做完命令后的取证）；宽限内没结束，
+      // 或命令前后的取证本身卡住（标记杀不到），强行断开客户端。再次到时即强行断开
+      const forceClose = (): void => {
+        if (!forced) {
+          forced = true;
           child.kill("SIGKILL");
-          terminating = restart();
         }
+      };
+      const terminate = (): void => {
+        if (terminating !== undefined) {
+          forceClose();
+          return;
+        }
+        terminating = killMarked(marker);
+        if (observed !== undefined && observed.phase !== "cmd") {
+          forceClose();
+          return;
+        }
+        grace = setTimeout(forceClose, observed !== undefined ? helperTimeoutMs : killGraceMs);
       };
       const expire = (): void => {
         if (observed?.phase !== "post") {
@@ -886,6 +971,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       const cleanup = (): void => {
         clearTimeout(timer);
+        clearTimeout(grace);
         execOptions.signal?.removeEventListener("abort", onAbort);
       };
       child.on("error", (error) => {
@@ -903,7 +989,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
             ...(sections?.pre !== undefined ? { pre: sections.pre } : {}),
             ...(sections?.post !== undefined ? { post: sections.post } : {}),
           };
-          if (terminating !== undefined) {
+          if (forced) {
             resolve({ spawned: true, exitCode: null, timedOut, ...output });
             return;
           }
@@ -938,7 +1024,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           });
         };
         if (terminating !== undefined) {
-          // 等容器重启完成再交还结果：下一条命令不会撞上正在重启的容器
+          // 等按标记杀的辅助调用结束再交还结果：残留的进程不会和下一条命令重叠
           terminating.then(settle, reject);
         } else {
           settle();
@@ -967,8 +1053,8 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   ): Promise<HostExecResult> => {
     const before = await readOomKills();
     const result = await runExec(plan, execOptions);
-    // 超时与中止会重启容器（计数随之归零），程序没起来也无从谈起
-    if (!result.spawned || result.exitCode === null) {
+    // 超时与中止按标记杀（137 不是内存所致），客户端被强行断开时没有退出码，程序没起来也无从谈起
+    if (!result.spawned || result.exitCode === null || result.timedOut) {
       return result;
     }
     const after = before === undefined ? undefined : await readOomKills();
@@ -987,9 +1073,51 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     return { ...result, memoryLimitExceeded: exceeded };
   };
 
+  // 决策 365：后台作业——docker exec 客户端一直连着、把输出交回宿主；停止时按标记杀容器里的进程组与子孙，客户端在宽限内
+  // 没结束再断开
+  const startJob = (plan: HostExecPlan, jobOptions: HostJobOptions): HostJob => {
+    lastInspection = undefined;
+    const marker = jobOptions.marker;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(
+        dockerProgram,
+        execArgs(false, ["/bin/sh", "-c", JOB_SCRIPT, "sh", marker, plan.program, ...plan.args]),
+        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+      );
+    } catch (error) {
+      const exit: HostJobExit = { exitCode: null, spawnError: error as NodeJS.ErrnoException };
+      return { done: Promise.resolve(exit), kill: async () => {}, record: async () => undefined };
+    }
+    child.stdout?.on("data", (chunk: Buffer) => jobOptions.onOutput(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => jobOptions.onOutput(chunk));
+    const done = new Promise<HostJobExit>((resolve) => {
+      child.on("error", (error: NodeJS.ErrnoException) =>
+        resolve({ exitCode: null, spawnError: error })
+      );
+      child.on("close", (code, signal) =>
+        resolve({ exitCode: code, ...(signal !== null ? { signal } : {}) })
+      );
+    });
+    return {
+      done,
+      async kill() {
+        await killMarked(marker);
+        const closed = await Promise.race([
+          done.then(() => true),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), killGraceMs)),
+        ]);
+        if (!closed) child.kill("SIGKILL");
+        await done;
+      },
+      record: async () => ({ kind: "container", container: options.container, marker }),
+    };
+  };
+
   return {
     platform: "linux",
     root,
+    startJob,
     // 每次现做一次检视（读文件、受保护路径判定都经这里）
     async resolveExisting(inputPath) {
       const base = await resolveRoot();
@@ -1255,7 +1383,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         throw new ContainerHostError(`容器内的取证脚本没有运行：${rest.stderr.trim()}`);
       }
       if (post === undefined) {
-        // 超时或中止：容器已重启，命令后的取证由调用方另取
+        // 客户端被强行断开（命令或取证卡住）：命令后的取证由调用方另取
         return { result: rest, before };
       }
       const newline = post.indexOf(10);
@@ -1271,7 +1399,12 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       } else if (/^\d+$/.test(ended)) {
         result = { ...rest, exitCode: Number(ended) };
       }
-      if (memoryLimit !== undefined && result.spawned && result.exitCode !== null) {
+      if (
+        memoryLimit !== undefined &&
+        result.spawned &&
+        result.exitCode !== null &&
+        !result.timedOut
+      ) {
         const count = (sections: typeof afterSections) => {
           const text = sections.find((section) => section.words[0] === "oom")?.words[1];
           return text !== undefined && /^\d+$/.test(text) ? Number(text) : undefined;
@@ -1631,4 +1764,23 @@ export async function containerExec(input: {
     stderr: result.stderr,
     timedOut: result.timedOut === true,
   };
+}
+
+// 决策 365：崩溃后清理容器里的后台作业——按标记查杀（标记每次随机，不会碰到别的程序）；容器已不在即无事可做。
+// 返回是否执行成功（容器不可用为 false）
+export async function killMarkedInContainer(input: {
+  docker: readonly string[];
+  container: string;
+  marker: string;
+}): Promise<boolean> {
+  try {
+    const result = await containerExec({
+      docker: input.docker,
+      container: input.container,
+      command: trustedShell(KILL_MARKED_SCRIPT, input.marker),
+    });
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
 }

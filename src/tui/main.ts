@@ -422,7 +422,9 @@ export async function main(argv: string[]): Promise<void> {
     // M5.5 S4：/spawn /cancel /workers（沙箱里不提供）
     ...(slot.workers !== undefined ? { workers: slot.workers } : {}),
     // 决策 245：沙箱会话的 /export 手动交回
-    ...(sandbox !== undefined ? { sandbox: { exportChanges: () => exportSandbox(sandbox) } } : {}),
+    ...(sandbox !== undefined
+      ? { sandbox: { exportChanges: () => exportSandbox(sandbox, slot.bundle.jobs) } }
+      : {}),
     // S4：/resume <sessionId> 的换绑工厂——与 cli resume 的 enterRepl 同一配方：
     // restoredGrants 种子（决策 3b，还原目标会话的生效 grant，静默继续有效）+
     // buildRuntime + 旧运行面释放。先建后换：装配失败（如 grants.json 畸形）时
@@ -507,7 +509,8 @@ export async function main(argv: string[]): Promise<void> {
     //（dispose 对称、挂起审批 fail-closed），此处只释放当前运行面并退进程
     onExit: release,
   });
-  // 决策 305–307：主 agent 的打转检测（见 loop-guard-view.ts）。换绑后的会话同样挂上；运行面释放时一并摘掉
+  // 决策 305–307：主 agent 的打转检测（见 loop-guard-view.ts）。换绑后的会话同样挂上；运行面释放时一并摘掉。
+  // 后台作业的结束通知同在这里接到壳上
   function guardMainAgent(bundle: RuntimeBundle): void {
     const detach = guardTuiAgent({
       runtime: bundle.adapter,
@@ -515,6 +518,14 @@ export async function main(argv: string[]): Promise<void> {
       shell: () => shellHolder.current,
     });
     bundle.disposers = [...(bundle.disposers ?? []), async () => detach()];
+    // 决策 365：后台作业结束的通知显示在消息区，主 agent 空闲时叫醒它（同 worker 完成通知）
+    bundle.jobNotices?.bind({
+      wake: () => shellHolder.current?.runNotices(),
+      onNotice: (text) => {
+        shellHolder.current?.addSystem(text);
+        shellHolder.current?.render();
+      },
+    });
   }
   function resumeOptions(): NonNullable<TuiShellOptions["resume"]> {
     return {

@@ -43,6 +43,7 @@ import type { BranchHeaderInput } from "../state/session-payloads.ts";
 import type { SettingsSnapshot } from "../state/settings.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
+import { settleBackgroundJobs } from "./background-jobs.ts";
 import { attachCheckpoints } from "./checkpoints.ts";
 import { compactionWarner } from "./compaction-text.ts";
 import { DEFAULT_MODEL_PLACEHOLDER } from "./launch-flags.ts";
@@ -133,6 +134,8 @@ export interface HeadlessRunOptions {
   // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照；跑批器显式给出）
   truncationContinuation?: TruncationContinuationSettings;
   repetitionGuard?: RepetitionGuardSettings;
+  // 决策 365：收尾等后台作业的总时限（秒；缺省取设置快照；跑批器显式给出）
+  backgroundCloseoutSeconds?: number;
   // M9：采样温度（缺省不设）；冻结进注入快照并随 Run 开始条目 落盘
   temperature?: number;
   // M9：任务源给的系统指令——追加进 system prompt 并随之冻结；任务说明（task）不受影响
@@ -280,6 +283,9 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ? { truncationContinuation: options.truncationContinuation }
       : {}),
     ...(options.repetitionGuard !== undefined ? { repetitionGuard: options.repetitionGuard } : {}),
+    ...(options.backgroundCloseoutSeconds !== undefined
+      ? { jobCloseoutMs: options.backgroundCloseoutSeconds * 1000 }
+      : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.taskDirective !== undefined ? { taskDirective: options.taskDirective } : {}),
     ...(options.sessionSearch !== undefined ? { sessionSearch: options.sessionSearch } : {}),
@@ -444,25 +450,60 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
   // 决策 297：一次运行结束后，等本次派出的 worker 全部结束、把通知处理完（撞上限或外部中止即不再等）。
   // 等的途中撞上限或被外部中止：这一步按中止收尾（终态随后按撞上限的原因或外部中止记）
   let drainInterrupted = false;
+  // 决策 365：同样等本会话的后台作业（收尾总时限、计入墙钟），两者交替直到都没有可做的
   const settleWorkers = async <R>(run: R): Promise<R> => {
     const bundle = liveBundle;
-    if (workers === undefined || notices === undefined || bundle === undefined) {
+    if (bundle === undefined) {
       return run;
     }
-    const { last, interrupted } = await drainWorkers({
-      orchestrator: workers,
-      parentSessionId: sessionId,
-      notices,
-      target: {
-        pendingNotices: () => bundle.adapter.pendingNotices(),
-        runNotices: () => bundle.adapter.runNotices() as Promise<unknown> as Promise<R>,
-      },
-      stopped: () => limitHit !== undefined || externallyAborted,
-    });
-    if (interrupted) {
-      drainInterrupted = true;
+    const stopped = () => limitHit !== undefined || externallyAborted;
+    const target = {
+      pendingNotices: () => bundle.adapter.pendingNotices(),
+      runNotices: () => bundle.adapter.runNotices() as Promise<unknown> as Promise<R>,
+      notify: (text: string) => bundle.adapter.notify(text),
+    };
+    let latest = run;
+    for (;;) {
+      let progressed = false;
+      if (workers !== undefined && notices !== undefined) {
+        const { last, interrupted } = await drainWorkers({
+          orchestrator: workers,
+          parentSessionId: sessionId,
+          notices,
+          target,
+          stopped,
+        });
+        if (interrupted) {
+          drainInterrupted = true;
+        }
+        if (last !== undefined) {
+          latest = last;
+          progressed = true;
+        }
+      }
+      const jobs = bundle.jobs;
+      if (stopped() && (jobs?.running().length ?? 0) > 0) {
+        drainInterrupted = true;
+      }
+      if (jobs !== undefined && jobs.list().length > 0 && !stopped()) {
+        const { last } = await settleBackgroundJobs({
+          jobs,
+          target,
+          stopped,
+          closeoutMs: bundle.jobCloseoutMs,
+        });
+        if (stopped() && jobs.running().length > 0) {
+          drainInterrupted = true;
+        }
+        if (last !== undefined) {
+          latest = last;
+          progressed = true;
+        }
+      }
+      if (!progressed || stopped()) {
+        return latest;
+      }
     }
-    return last ?? run;
   };
   try {
     // 决策 323 / 324：会话级钩子——运行面可能异步就绪（MCP 启动）：ready() 等它；装配失败与 run 同一出口（failed）。

@@ -57,10 +57,14 @@ import {
 } from "./sandbox-config.ts";
 import { WorkerRoleSchema } from "./session-payloads.ts";
 import {
+  type BackgroundJobLimits,
+  backgroundJobLimits,
   type ReadFileLimits,
   type RunCommandOutputLimits,
+  type RunCommandTimeouts,
   readFileLimits,
   runCommandOutputLimits,
+  runCommandTimeouts,
   type SearchLimits,
   searchLimits,
   ToolsSectionSchema,
@@ -476,6 +480,15 @@ export function readFileLimitsOf(snapshot: SettingsSnapshot): ReadFileLimits {
 // 决策 356：run_command 输出的头尾保留与落盘总量（tools 一节，不给的取缺省）
 export function runCommandOutputLimitsOf(snapshot: SettingsSnapshot): RunCommandOutputLimits {
   return runCommandOutputLimits(snapshot.merged.tools);
+}
+
+// 决策 365：run_command 的单次超时（缺省与上限）与后台作业的上限（tools 一节，不给的取缺省）
+export function runCommandTimeoutsOf(snapshot: SettingsSnapshot): RunCommandTimeouts {
+  return runCommandTimeouts(snapshot.merged.tools);
+}
+
+export function backgroundJobLimitsOf(snapshot: SettingsSnapshot): BackgroundJobLimits {
+  return backgroundJobLimits(snapshot.merged.tools);
 }
 
 export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettings {

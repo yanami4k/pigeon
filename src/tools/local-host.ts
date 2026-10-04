@@ -26,6 +26,7 @@ import {
   resolveWorkspacePath,
   resolveWorkspaceWritePath,
 } from "./paths.ts";
+import { localProcessRecord } from "./process-identity.ts";
 import {
   killProcessTree,
   processGroupSpawnOptions,
@@ -46,11 +47,15 @@ import {
   type HostExecResult,
   type HostFileSnapshot,
   type HostFileState,
+  type HostJob,
+  type HostJobExit,
+  type HostJobOptions,
   helperEnv,
   LISTING_SKIPPED_DIRS,
   LISTING_SKIPPED_ROOT_DIRS,
   MISSING_SIGNATURE,
   parseGitStatus,
+  RUN_MARKER_VAR,
   type WorkspaceHost,
 } from "./workspace-host.ts";
 
@@ -139,6 +144,7 @@ export function createLocalWorkspaceHost(
       createWorkspaceFile(resolvedPath, content);
     },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
+    startJob: (plan, jobOptions) => startLocalJob(plan, workspaceRoot, jobOptions, platform),
     async listFiles(limit) {
       return scanLocalFiles(workspaceRoot, limit);
     },
@@ -565,6 +571,72 @@ function runLocalProcess(
       );
     });
   });
+}
+
+// 决策 365：本机后台作业。Linux/macOS 以独立进程组拉起、停止时对整组发 SIGKILL；Windows 停止时杀进程树。环境里带标记
+// （崩溃后清理时核对）。进程退出后孙进程仍占着输出管道时，宽限过后销毁管道、按退出码结束。Pigeon 正常退出时与其他
+// 子进程一同终止（process-tree.ts 的兜底）
+function startLocalJob(
+  plan: HostExecPlan,
+  cwd: string,
+  options: HostJobOptions,
+  platform: NodeJS.Platform
+): HostJob {
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(plan.program, plan.args, {
+      cwd,
+      env: { ...options.env, [RUN_MARKER_VAR]: options.marker },
+      shell: false,
+      windowsHide: true,
+      windowsVerbatimArguments: plan.verbatim,
+      ...processGroupSpawnOptions(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const exit: HostJobExit = { exitCode: null, spawnError: error as NodeJS.ErrnoException };
+    return {
+      done: Promise.resolve(exit),
+      kill: async () => {},
+      record: async () => undefined,
+    };
+  }
+  trackChild(child);
+  child.stdout?.on("data", (chunk: Buffer) => options.onOutput(chunk));
+  child.stderr?.on("data", (chunk: Buffer) => options.onOutput(chunk));
+  const done = new Promise<HostJobExit>((resolve) => {
+    let settled = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const settle = (exit: HostJobExit): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(grace);
+      untrackChild(child);
+      resolve(exit);
+    };
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      if (child.pid === undefined) settle({ exitCode: null, spawnError: error });
+    });
+    child.on("exit", (code, signal) => {
+      grace = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle({ exitCode: code, ...(signal !== null ? { signal } : {}) });
+      }, KILL_GRACE_MS);
+    });
+    child.on("close", (code, signal) => {
+      settle({ exitCode: code, ...(signal !== null ? { signal } : {}) });
+    });
+  });
+  return {
+    done,
+    async kill() {
+      killProcessTree(child, "SIGKILL");
+      await done;
+    },
+    record: async () =>
+      child.pid === undefined ? undefined : localProcessRecord(child.pid, options.marker, platform),
+  };
 }
 
 function pathValueOf(env: NodeJS.ProcessEnv): string {

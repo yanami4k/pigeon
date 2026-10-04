@@ -10,6 +10,7 @@ import {
   repetitionGuardSettings,
   WIDE_REPETITION_PARAMS,
 } from "../state/runaway-config.ts";
+import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import {
   effectivePigeonSettings,
   imageIdentityOf,
@@ -66,6 +67,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     scriptOrchestration: false,
     truncationContinuation: DEFAULT_TRUNCATION_CONTINUATION,
     repetitionGuard: DEFAULT_REPETITION_GUARD,
+    backgroundCloseoutSeconds: DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
   });
   assert.deepEqual(
     effectivePigeonSettings(
@@ -103,6 +105,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       scriptOrchestration: false,
       truncationContinuation: DEFAULT_TRUNCATION_CONTINUATION,
       repetitionGuard: DEFAULT_REPETITION_GUARD,
+      backgroundCloseoutSeconds: DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
     }
   );
 });
@@ -112,10 +115,16 @@ test("身份头记撞上限续跑与流式重复检测的实际生效值（367�
   assert.ok("settings" in wideLog);
   const continuationOff = { ...DEFAULT_TRUNCATION_CONTINUATION, enabled: false };
   const recorded = effectivePigeonSettings(
-    { truncationContinuation: continuationOff, repetitionGuard: wideLog.settings },
+    {
+      truncationContinuation: continuationOff,
+      repetitionGuard: wideLog.settings,
+      backgroundCloseoutSeconds: 60,
+    },
     "deepseek-flash"
   );
   assert.deepEqual(recorded.truncationContinuation, continuationOff);
+  // 决策 365：收尾等后台作业的总时限同样记实际生效值
+  assert.equal(recorded.backgroundCloseoutSeconds, 60);
   assert.deepEqual(recorded.repetitionGuard, {
     enabled: true,
     mode: "log",

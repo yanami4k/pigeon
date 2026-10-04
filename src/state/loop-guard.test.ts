@@ -2,7 +2,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { canonicalJson, LoopDetector, type LoopRound, type LoopVerdict } from "./loop-guard.ts";
-import { DEFAULT_LOOP_GUARD_SETTINGS, loopGuardSettings } from "./loop-guard-config.ts";
+import {
+  DEFAULT_LOOP_GUARD_EXEMPT_TOOLS,
+  DEFAULT_LOOP_GUARD_SETTINGS,
+  loopGuardSettings,
+} from "./loop-guard-config.ts";
 
 let seq = 0;
 // 一轮：[工具名, 参数, 结果正文, 是否报错?]
@@ -213,7 +217,10 @@ test("改过的轮数照改后的触发", () => {
 test("追加的豁免与缺省豁免合并", () => {
   const resolved = loopGuardSettings({ exemptTools: ["mcp__ci__poll"] });
   assert.ok("settings" in resolved);
-  assert.deepEqual(resolved.settings.exemptTools, ["wait_workers", "mcp__ci__poll"]);
+  assert.deepEqual(resolved.settings.exemptTools, [
+    ...DEFAULT_LOOP_GUARD_EXEMPT_TOOLS,
+    "mcp__ci__poll",
+  ]);
   const verdicts = feed(
     new LoopDetector(resolved.settings),
     repeat(8, () => round(["mcp__ci__poll", { id: 1 }, "pending"]))
@@ -221,7 +228,7 @@ test("追加的豁免与缺省豁免合并", () => {
   assert.ok(verdicts.every((v) => v.count === 0));
 });
 
-test("配置缺省：开着、5/10/20、只豁免 wait_workers；轮数不递增报出问题", () => {
+test("配置缺省：开着、5/10/20、豁免等 worker 与读后台作业的工具；轮数不递增报出问题", () => {
   const resolved = loopGuardSettings(undefined);
   assert.ok("settings" in resolved);
   assert.deepEqual(resolved.settings, {
@@ -229,7 +236,7 @@ test("配置缺省：开着、5/10/20、只豁免 wait_workers；轮数不递增
     remindAt: 5,
     warnAt: 10,
     stopAt: 20,
-    exemptTools: ["wait_workers"],
+    exemptTools: ["wait_workers", "job_output"],
   });
   const bad = loopGuardSettings({ warnAt: 5 });
   assert.ok("problem" in bad);

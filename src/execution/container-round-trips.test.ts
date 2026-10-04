@@ -1,7 +1,8 @@
 // 容器执行端每次工具调用的进容器次数（决策 349）：读文件 1 次；改文件 2 次（受保护路径判定与审批预览共用一次检视，写入
 // 1 次）；跑命令 1 次（命令前后的取证与内存计数合在一起）。审批之后原文被改动的，按新原文重算后写入，不把审批前的内容写回；
 // 检视时是符号链接的照样拒写；写工具不写 .git；命令拿不到当次的随机串、仿造不出分隔标记，直连执行只跑外部程序；命令删了
-// .git 时改用全量扫描并注明，嵌套仓库里的改动照常报出，SHA-256 仓库照常取证。用计数版的假 docker（在本机执行）数次数
+// .git 时改用全量扫描并注明，嵌套仓库里的改动照常报出，SHA-256 仓库照常取证。决策 365：超时与后台作业的停止按组与标记杀、
+// 不重启容器。用计数版的假 docker（在本机执行）数次数
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -19,10 +20,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createHostProtectedPathResolver } from "../application/protected-paths.ts";
+import { JobPool, SessionJobs } from "../tools/background-jobs.ts";
+import { CommandOutputStore } from "../tools/command-output.ts";
+import { createJobKillTool } from "../tools/job-tools.ts";
 import { WorkspaceWriteRefusedError } from "../tools/paths.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { createReplaceEditTool } from "../tools/replace-edit.ts";
-import { createRunCommandTool } from "../tools/run-command.ts";
+import { createRunCommandTool, RunCommandTimeoutError } from "../tools/run-command.ts";
 import { createContainerWorkspaceHost } from "./container-host.ts";
 import { localDockerHost } from "./local-docker-fixtures.ts";
 
@@ -30,7 +34,7 @@ const COUNTING_DOCKER = `
 import { appendFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const [log, program, ...rest] = process.argv.slice(2);
-if (rest[1] === "exec") appendFileSync(log, "exec\\n");
+if (rest[1] === "exec" || rest[1] === "restart") appendFileSync(log, rest[1] + "\\n");
 const r = spawnSync(program, rest, { stdio: "inherit" });
 process.exit(r.status ?? 1);
 `;
@@ -52,10 +56,13 @@ function counted(memoryCounter?: string) {
       ? { memoryLimit: { label: "1 GiB", counterFiles: [memoryCounter] } }
       : {}),
   });
-  const execs = () => readFileSync(log, "utf8").split("\n").length - 1;
+  const lines = () => readFileSync(log, "utf8").split("\n");
+  const execs = () => lines().filter((line) => line === "exec").length;
   return {
     root,
     host,
+    // 决策 365：有没有重启过容器
+    restarted: () => lines().includes("restart"),
     // fn 期间发出的 docker exec 次数
     count: async (fn: () => Promise<unknown>) => {
       const before = execs();
@@ -290,5 +297,83 @@ test("容器：SHA-256 仓库按它的对象格式算空树，文件变化照常
     });
   } finally {
     h.cleanup();
+  }
+});
+
+// 决策 365：按标记查杀在本机经假 docker 扫的是本机的 /proc
+const LINUX = process.platform === "linux";
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function until(check: () => boolean, ms = 15_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("等待超时");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+const SPAWN_CHILD = (pidFile: string) => `sleep 300 &\necho $! > '${pidFile}'\nwait\n`;
+
+test("容器超时：按组与标记杀掉命令连同孙进程，不重启容器，命令后的取证照取", {
+  skip: LINUX ? false : "按 /proc 查杀",
+}, async () => {
+  const h = counted();
+  try {
+    const pidFile = join(h.root, "child.pid");
+    writeFileSync(join(h.root, "spawn.sh"), SPAWN_CHILD(pidFile));
+    const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host });
+    await assert.rejects(
+      tool.execute("t", { command: "sh spawn.sh", timeout_seconds: 1 }, undefined),
+      (error: unknown) =>
+        error instanceof RunCommandTimeoutError && /新增 1 \/ 删除 0/.test(error.message)
+    );
+    await until(() => !alive(Number(readFileSync(pidFile, "utf8"))));
+    assert.equal(h.restarted(), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("容器里的后台作业：job_kill 按组与标记停掉，孙进程一并结束", {
+  skip: LINUX ? false : "按 /proc 查杀",
+}, async () => {
+  const h = counted();
+  const state = mkdtempSync(join(tmpdir(), "pigeon-round-trips-jobs-"));
+  const jobs = new SessionJobs({
+    sessionId: "s1",
+    host: h.host,
+    store: new CommandOutputStore({
+      base: state,
+      outputsRoot: join(state, "outputs"),
+      sessionId: "s1",
+      maxBytes: 1024 * 1024,
+    }),
+    pool: new JobPool({ total: 2 }),
+    perSession: 2,
+    outputMaxBytes: 1024 * 1024,
+  });
+  try {
+    const pidFile = join(h.root, "child.pid");
+    writeFileSync(join(h.root, "spawn.sh"), SPAWN_CHILD(pidFile));
+    const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host, jobs });
+    await tool.execute("b", { command: "sh spawn.sh", background: true }, undefined);
+    await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
+    const child = Number(readFileSync(pidFile, "utf8"));
+    const killed = await createJobKillTool(jobs).execute("k", { job_id: "j1" }, undefined);
+    assert.equal(killed.details.jobs[0]?.state, "killed");
+    await until(() => !alive(child));
+    assert.equal(h.restarted(), false);
+  } finally {
+    await jobs.killAll("aborted");
+    h.cleanup();
+    rmSync(state, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,6 @@
 // 执行端接口的容器实现（决策 098）——跨边界四件事逐个验：超时杀干净、退出码保真、输出截断、路径映射；另验读写往返。
 // 两层：
-//   ① 替身层（任何机器都跑）：用一个假的 docker CLI 脚本记录调用，验证"超时与中止一律重启整个容器"这条策略、
+//   ① 替身层（任何机器都跑）：用一个假的 docker CLI 脚本记录调用，验证"超时与中止按标记查杀、不重启容器"这条策略、
 //      OCI "程序不存在" 到 ENOENT 的还原、守护进程失败按环境错误上抛、宿主环境变量不进容器；
 //   ② 真容器层（本机有可用的 docker 守护进程与测试镜像才跑，否则跳过并说明）：对着真容器验证四件事的实际效果。
 //      测试镜像缺省 busybox:latest，可用 PIGEON_TEST_CONTAINER_IMAGE 指定；测试不主动拉镜像。
@@ -13,6 +13,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
+import { JobPool, SessionJobs } from "../tools/background-jobs.ts";
+import { CommandOutputStore } from "../tools/command-output.ts";
 import {
   CHURN_FILE_CHANGES,
   CHURN_LISTED_BEFORE,
@@ -50,7 +52,7 @@ if (args[0] === "restart") {
   process.exit(mode === "restart-fails" ? 1 : 0);
 }
 if (args[0] === "exec") {
-  if (mode === "hang") {
+  if (mode === "hang" && args.includes("sleep")) {
     setInterval(() => {}, 1000);
   } else if (mode === "missing-program") {
     process.stderr.write('OCI runtime exec failed: exec failed: unable to start container process: exec: "nope": executable file not found in $PATH: unknown\\n');
@@ -83,6 +85,7 @@ function fakeDocker(mode: string) {
       root: "/testbed",
       docker: [process.execPath, script],
       env: { PATH: "/opt/env/bin:/usr/bin" },
+      killGraceMs: 500,
     }),
     calls: (): string[][] =>
       readFileSync(log, "utf8")
@@ -105,24 +108,38 @@ function fakeDocker(mode: string) {
   };
 }
 
-test("容器执行端（替身）：超时后不只杀客户端——必定重启整个容器，结果标超时且等重启完成才交还", async () => {
+// 决策 365：超时与中止——按本次命令的标记在容器里查杀（一次辅助调用），不重启容器；客户端在宽限内不结束即强行断开
+function killCallOf(calls: string[][], marker: string): string[] | undefined {
+  return calls.find(
+    (call) =>
+      call[0] === "exec" && call.some((arg) => arg.includes("/proc/")) && call.at(-1) === marker
+  );
+}
+
+test("容器执行端（替身）：超时按标记查杀、不重启容器；客户端不结束即强行断开，结果标超时", async () => {
   const fake = fakeDocker("hang");
   try {
-    const startedAt = Date.now();
-    // 超时给足假 docker 进程的启动时间：机器繁忙时它可能要一两秒才记下自己的调用
     const result = await fake.host.exec(
       { program: "sleep", args: ["300"], verbatim: false },
-      execOptions({ timeoutMs: 4000 })
+      execOptions({ timeoutMs: 2000 })
     );
     assert.equal(result.timedOut, true);
     assert.equal(result.exitCode, null);
-    assert.ok(Date.now() - startedAt < 30_000, "超时后应及时收尾");
     const calls = fake.calls();
-    assert.deepEqual(calls.at(-1), ["restart", "-t", "0", "box"]);
-    // exec 的形态：工作目录为容器内工作区根；只带配置的环境变量，宿主环境变量不进容器
-    assert.deepEqual(
-      calls.find((call) => call[0] === "exec"),
-      ["exec", "-w", "/testbed", "-e", "PATH=/opt/env/bin:/usr/bin", "box", "sleep", "300"]
+    // exec 的形态：工作目录为容器内工作区根；只带配置的环境变量与本次的标记，宿主环境变量不进容器
+    const run = calls.find((call) => call[0] === "exec" && call.includes("sleep"));
+    assert.deepEqual(run?.slice(0, 5), [
+      "exec",
+      "-w",
+      "/testbed",
+      "-e",
+      "PATH=/opt/env/bin:/usr/bin",
+    ]);
+    const marker = /^PIGEON_RUN=([0-9a-f]+)$/.exec(run?.[6] ?? "")?.[1] ?? "";
+    assert.ok(marker !== "" && killCallOf(calls, marker) !== undefined, JSON.stringify(calls));
+    assert.equal(
+      calls.some((call) => call[0] === "restart"),
+      false
     );
     assert.equal(JSON.stringify(calls).includes("must-not-leak"), false);
   } finally {
@@ -130,7 +147,7 @@ test("容器执行端（替身）：超时后不只杀客户端——必定重�
   }
 });
 
-test("容器执行端（替身）：中止信号与超时同一条路——重启容器；重启失败按环境错误上抛", async () => {
+test("容器执行端（替身）：中止信号与超时同一条路——按标记查杀、不重启容器，不标超时", async () => {
   const fake = fakeDocker("hang");
   try {
     const controller = new AbortController();
@@ -138,32 +155,19 @@ test("容器执行端（替身）：中止信号与超时同一条路——重�
       { program: "sleep", args: ["300"], verbatim: false },
       execOptions({ signal: controller.signal })
     );
-    setTimeout(() => controller.abort(), 200);
+    setTimeout(() => controller.abort(), 500);
     const result = await pending;
     assert.equal(result.timedOut, false);
-    assert.equal(result.exitCode, null);
-    assert.deepEqual(fake.calls().at(-1), ["restart", "-t", "0", "box"]);
+    const calls = fake.calls();
+    const run = calls.find((call) => call[0] === "exec" && call.includes("sleep"));
+    const marker = /^PIGEON_RUN=([0-9a-f]+)$/.exec(run?.[6] ?? "")?.[1] ?? "";
+    assert.ok(killCallOf(calls, marker) !== undefined, JSON.stringify(calls));
+    assert.equal(
+      calls.some((call) => call[0] === "restart"),
+      false
+    );
   } finally {
     fake.cleanup();
-  }
-  const failing = fakeDocker("restart-fails");
-  try {
-    process.env.FAKE_MODE = "hang";
-    const pending = failing.host.exec(
-      { program: "sleep", args: ["300"], verbatim: false },
-      execOptions({ timeoutMs: 200 })
-    );
-    // 重启那一次调用读到的是失败模式
-    setTimeout(() => {
-      process.env.FAKE_MODE = "restart-fails";
-    }, 50);
-    await assert.rejects(pending, (error: unknown) => {
-      assert.ok(error instanceof ContainerHostError);
-      assert.match(error.message, /容器重启失败/);
-      return true;
-    });
-  } finally {
-    failing.cleanup();
   }
 });
 
@@ -364,13 +368,14 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
       execOptions({ timeoutMs: 1500 })
     );
     assert.equal(result.timedOut, true);
-    assert.equal(result.exitCode, null);
+    // 按标记杀掉（SIGKILL），容器没有重启
+    assert.equal(result.exitCode, 137);
     assert.match(result.output, /started/);
     assert.ok(Date.now() - startedAt < 60_000);
     const processes = await sh("ps");
     assert.equal(processes.exitCode, 0, processes.stderr);
     assert.doesNotMatch(processes.stdout, /sleep 600/, `残留进程：\n${processes.stdout}`);
-    // 容器重启不丢工作区内容，执行端照常可用
+    // 工作区内容保留，执行端照常可用
     assert.equal(await host.readText(target), "before timeout\n");
     const next = await host.exec(
       { program: "echo", args: ["alive"], verbatim: false },
@@ -439,6 +444,50 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
       tool.execute("c3", { command: "no-such-program-here" }, undefined),
       /命令不存在/
     );
+  });
+
+  // 决策 365：镜像里的工具（setsid、tr、grep、sed）够按组与标记查杀；超时与停止作业都不重启容器（PID 1 的启动时间不变）
+  test("真容器：超时与后台作业的停止按组与标记杀干净，不重启容器", async () => {
+    const pid1 = async () => (await sh("cut -d ' ' -f 22 /proc/1/stat")).stdout.trim();
+    const sleeping = async (seconds: number) =>
+      Number((await sh(`ps | grep -c '[s]leep ${seconds}'`)).stdout.trim());
+    const bootedAt = await pid1();
+    const made = await sh(`printf 'sleep 777 &\\nwait\\n' > ${root}/spawn.sh`);
+    assert.equal(made.exitCode, 0, made.stderr);
+    const state = mkdtempSync(join(tmpdir(), "pigeon-host-jobs-"));
+    const jobs = new SessionJobs({
+      sessionId: "s1",
+      host,
+      store: new CommandOutputStore({
+        base: state,
+        outputsRoot: join(state, "outputs"),
+        sessionId: "s1",
+        maxBytes: 1024 * 1024,
+      }),
+      pool: new JobPool({ total: 2 }),
+      perSession: 2,
+      outputMaxBytes: 1024 * 1024,
+    });
+    try {
+      const tool = createRunCommandTool({ workspaceRoot: root, host, jobs });
+      await assert.rejects(
+        tool.execute("t", { command: "sh spawn.sh", timeout_seconds: 1 }, undefined),
+        RunCommandTimeoutError
+      );
+      assert.equal(await sleeping(777), 0);
+      await tool.execute("b", { command: "sh spawn.sh", background: true }, undefined);
+      const deadline = Date.now() + 15_000;
+      while ((await sleeping(777)) === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.equal(await sleeping(777), 1);
+      await jobs.kill(jobs.get("j1"), "job_kill");
+      assert.equal(await sleeping(777), 0);
+      assert.equal(await pid1(), bootedAt);
+    } finally {
+      await jobs.killAll("aborted");
+      rmSync(state, { recursive: true, force: true });
+    }
   });
 
   test("文件清单跳过工作区根下的 .pigeon：治理目录里的新增与修改不进文件变化，子目录里同名的普通文件夹照常报出", async () => {

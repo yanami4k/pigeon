@@ -27,6 +27,8 @@ import {
   type SettingsSnapshot,
   sandboxConfigOf,
 } from "../state/settings.ts";
+import type { SessionJobs } from "../tools/background-jobs.ts";
+import { handbackJobsNotice } from "./background-jobs.ts";
 import { type HeadlessRunOptions, type HeadlessRunResult, runHeadless } from "./headless-core.ts";
 import type { LaunchFlags } from "./launch-flags.ts";
 import { noMcpSession } from "./mcp.ts";
@@ -131,12 +133,17 @@ export async function closeSandbox(
   }
 }
 
-// /export：会话中手动交回
-export async function exportSandbox(sandbox: Sandbox): Promise<string> {
+// /export：会话中手动交回；决策 365：有后台作业在跑时先提示一句
+export async function exportSandbox(
+  sandbox: Sandbox,
+  jobs?: Pick<SessionJobs, "running">
+): Promise<string> {
+  const warning = handbackJobsNotice(jobs, "export");
+  const prefix = warning !== undefined ? `${warning}\n` : "";
   try {
-    return exportNotice(await sandbox.exportChanges());
+    return `${prefix}${exportNotice(await sandbox.exportChanges())}`;
   } catch (error) {
-    return `交回失败：${error instanceof Error ? error.message : String(error)}`;
+    return `${prefix}交回失败：${error instanceof Error ? error.message : String(error)}`;
   }
 }
 

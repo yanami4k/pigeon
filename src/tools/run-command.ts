@@ -19,6 +19,7 @@ import {
   DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES,
   DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES,
 } from "../state/tools-config.ts";
+import { type BackgroundJob, jobOutputText, type SessionJobs } from "./background-jobs.ts";
 import {
   type CommandOutputStore,
   composeOutput,
@@ -27,6 +28,7 @@ import {
 } from "./command-output.ts";
 import { createLocalWorkspaceHost, windowsPathProgram, windowsScript } from "./local-host.ts";
 import {
+  type FileChanges,
   type HostExecOptions,
   type HostExecPlan,
   type HostExecResult,
@@ -41,6 +43,8 @@ import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.
 
 export const RUN_COMMAND_TOOL = "run_command";
 export const DEFAULT_RUN_COMMAND_TIMEOUT_MS = 120_000;
+// 决策 365：timeout_seconds 参数的上限（设置可改）
+export const DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS = 600_000;
 export const DEFAULT_RUN_COMMAND_OUTPUT_BYTES = 32 * 1024;
 // 决策 358：命令串长度。参数 schema 的字符上限只防误传巨大参数；能否交给进程按执行端与平台另判（commandTooLong）
 export const RUN_COMMAND_MAX_CHARS = 65_536;
@@ -109,6 +113,10 @@ const SHELL_CHARS = new Set(["|", ";", "&", "<", ">", "`"]);
 export const RunCommandParamsSchema = Type.Object({
   // 完整命令串，或设置的 commands 一节登记的短名
   command: Type.String({ minLength: 1, maxLength: RUN_COMMAND_MAX_CHARS }),
+  // 决策 365：单次超时（秒）；缺省与上限见工具说明
+  timeout_seconds: Type.Optional(Type.Integer({ minimum: 1 })),
+  // 决策 365：在后台运行，立即返回作业号
+  background: Type.Optional(Type.Boolean()),
 });
 export type RunCommandParams = Static<typeof RunCommandParamsSchema>;
 
@@ -125,15 +133,8 @@ export class RunCommandTimeoutError extends Error {
   readonly pigeonToolErrorKind = "environment";
 }
 
-export interface FileChanges {
-  added: string[];
-  removed: string[];
-  modified: string[];
-  // 清单超过上限，差异不完整（这时只报命令前后都在、签名变了的文件）
-  truncated: boolean;
-  // 取证方式上的说明（git status 失败、改用全量扫描等）；没有为缺省
-  note?: string;
-}
+// 文件变化报告（定义在执行端接口旁，后台作业的期间变化同用；这里照旧导出）
+export type { FileChanges } from "./workspace-host.ts";
 
 export interface ExecEvidence {
   command: string;
@@ -166,6 +167,10 @@ export interface ExecEvidence {
   fileChanges: FileChanges;
   // 决策 333：超出沙箱内存上限
   memoryLimitExceeded?: MemoryLimitExceeded;
+  // 决策 365：命令执行期间在跑的后台作业（作业号与命令）
+  backgroundJobs?: Array<{ id: string; command: string }>;
+  // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）
+  background?: { jobId: string; output: string };
 }
 
 // 只读检查结果：实际执行的命令串与执行路径
@@ -201,7 +206,9 @@ export interface RunCommandOptions {
   commands?: Readonly<Record<string, string>>;
   // 在场 = 只允许清单内的短名或其展开命令（tester 等角色）
   allowlist?: readonly string[];
+  // 不给 timeout_seconds 时的超时（缺省 120 秒）与 timeout_seconds 的上限（缺省 600 秒）
   timeoutMs?: number;
+  maxTimeoutMs?: number;
   // 旧口径：只留开头这么多字节、不留末尾（给了它且没给 output 即按旧口径）
   maxOutputBytes?: number;
   // 决策 356：输出超长时保留的开头与末尾（缺省 8 KiB 与 24 KiB），与存完整输出的会话落盘目录（不给即不落盘）
@@ -214,6 +221,8 @@ export interface RunCommandOptions {
   approval?: RunCommandApproval;
   // 决策 360：带命令前缀范围的 worker——Windows 上程序只按 PATH 解析（不查工作树根与当前目录），显式写出路径的照旧
   pathOnly?: boolean;
+  // 决策 365：本会话的后台作业（不给即不能用 background）
+  jobs?: SessionJobs;
 }
 
 // 审批状态（170 ④）：yolo 为命令自动批准；prompt 为有人工审批通道；none 为没有审批通道（无人值守又未放权），
@@ -236,7 +245,27 @@ export interface RunCommandTexts {
 export function runCommandTexts(input: {
   platform: NodeJS.Platform;
   approval: RunCommandApproval;
+  // 决策 365：单次超时的缺省与上限（毫秒，缺省 120 秒与 600 秒）
+  timeoutMs?: number;
+  maxTimeoutMs?: number;
+  // 决策 365：能开后台作业时为每会话同时在跑的上限
+  backgroundJobs?: number;
 }): RunCommandTexts {
+  const timeoutSeconds = Math.floor((input.timeoutMs ?? DEFAULT_RUN_COMMAND_TIMEOUT_MS) / 1000);
+  const maxTimeoutSeconds = Math.floor(
+    (input.maxTimeoutMs ?? DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS) / 1000
+  );
+  const timeoutText =
+    `单次超时缺省 ${timeoutSeconds} 秒，可用 timeout_seconds 另设，至多 ${maxTimeoutSeconds} 秒；` +
+    "到时整个进程组（命令和它起的子进程）都被终止。";
+  const backgroundText =
+    input.backgroundJobs === undefined
+      ? ""
+      : "开发服务器、watch、长构建这类长时间运行的命令可带 background: true 在后台运行：立即交回作业号，输出持续落盘，" +
+        "结束时会通知你；用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉。" +
+        `后台作业不受单次超时约束；本会话同时在跑的至多 ${input.backgroundJobs} 个，超出即拒绝。` +
+        "后台作业与之后的命令同时运行，可能互相干扰（改同一批文件、占同一个端口），这期间的文件变化报告也会因此不精确。" +
+        "人按 Esc 中断当前一轮时后台作业照跑，会话结束时全部停止。";
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
   const toolShell = {
     yolo: `管道、重定向、&& 串联等需要 shell 的命令经 ${shell} 运行。`,
@@ -266,7 +295,7 @@ export function runCommandTexts(input: {
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
       `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
       `输出过长时自动保留开头与结尾，中间注明省略的行数，并把全文存为 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>，可用 read_file 按需读取，` +
-      "不必自己用 tail、head 截取。",
+      `不必自己用 tail、head 截取。${timeoutText}${backgroundText}`,
   };
 }
 
@@ -345,7 +374,11 @@ export function createRunCommandTool(
     );
   const root = host.root;
   const platform = host.platform;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_RUN_COMMAND_TIMEOUT_MS;
+  const maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS;
+  const defaultTimeoutMs = Math.min(
+    options.timeoutMs ?? DEFAULT_RUN_COMMAND_TIMEOUT_MS,
+    maxTimeoutMs
+  );
   // 决策 356：缺省保留开头与末尾；只给了旧口径的 maxOutputBytes 时只留开头
   const legacyHeadOnly = options.output === undefined && options.maxOutputBytes !== undefined;
   const headBytes = legacyHeadOnly
@@ -451,10 +484,66 @@ export function createRunCommandTool(
   const inspectParams = (params: unknown): CommandInspection =>
     inspect(Value.Parse(RunCommandParamsSchema, params).command);
 
+  // 决策 365：以后台作业启动——开始前取一次证（结束时比出期间变化），交回作业号；审批与钩子同前台命令（已在治理层过完）
+  const startBackground = async (
+    toolCallId: string,
+    timeoutSeconds: number | undefined,
+    inspection: CommandInspection,
+    plan: HostExecPlan
+  ): Promise<PigeonToolResult<ExecEvidence>> => {
+    const { command, alias } = inspection;
+    const jobs = options.jobs;
+    if (jobs === undefined || !jobs.available) {
+      throw new RunCommandError("本会话不能开后台作业：去掉 background 在前台运行");
+    }
+    if (timeoutSeconds !== undefined) {
+      throw new RunCommandError(
+        "后台作业不受单次超时约束，不要同时给 timeout_seconds 与 background；要停掉作业用 job_kill"
+      );
+    }
+    const periodChanges = await periodObserver(host);
+    const job = await jobs.start({ command, plan, env, toolCallId, periodChanges });
+    const evidence: ExecEvidence = {
+      command,
+      ...(alias !== undefined ? { alias } : {}),
+      argv: [plan.program, ...plan.args],
+      launcher: inspection.mode === "launcher",
+      shell: inspection.mode === "shell",
+      spawned: true,
+      exitCode: null,
+      timedOut: false,
+      outputBytes: 0,
+      outputHash: "",
+      output: "",
+      truncated: false,
+      fileChanges: { added: [], removed: [], modified: [], truncated: false },
+      background: { jobId: job.id, output: job.outputUri },
+    };
+    return {
+      content: [
+        {
+          type: "text",
+          text: [
+            `已在后台启动作业 ${job.id}：$ ${command}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
+            jobOutputText(job),
+            "用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉；作业结束时会通知你。",
+          ].join("\n"),
+        },
+      ],
+      details: evidence,
+    };
+  };
+
   return {
     name: RUN_COMMAND_TOOL,
     label: RUN_COMMAND_TOOL,
-    description: runCommandTexts({ platform, approval: options.approval ?? "prompt" }).tool,
+    description: runCommandTexts({
+      platform,
+      approval: options.approval ?? "prompt",
+      timeoutMs: defaultTimeoutMs,
+      maxTimeoutMs,
+      ...(options.jobs?.available === true ? { backgroundJobs: options.jobs.perSession } : {}),
+    }).tool,
     parameters: RunCommandParamsSchema,
     executionMode: "sequential",
     inspectCommand: inspectParams,
@@ -483,9 +572,11 @@ export function createRunCommandTool(
       return lines.join("\n");
     },
     async execute(toolCallId, params, signal): Promise<PigeonToolResult<ExecEvidence>> {
-      const inspection = inspectParams(params);
+      const parsed = Value.Parse(RunCommandParamsSchema, params);
+      const inspection = inspect(parsed.command);
       const { command, alias } = inspection;
       const authorized = shellAuthorized.delete(toolCallId);
+      const timeoutMs = commandTimeoutMs(parsed.timeout_seconds, defaultTimeoutMs, maxTimeoutMs);
       if (!permitted(inspection.input, command)) {
         const names = options.allowlist?.join("、") ?? "";
         throw new RunCommandError(
@@ -505,6 +596,9 @@ export function createRunCommandTool(
         throw new RunCommandError(tooLong);
       }
       const plan = spawnPlan(inspection, env, platform);
+      if (parsed.background === true) {
+        return startBackground(toolCallId, parsed.timeout_seconds, inspection, plan);
+      }
       // 决策 356：截断时完整输出写进本会话落盘目录的下一个编号（没截断不建文件）；落盘目录不可用时照常执行、只是不落盘
       let slot: OutputSlot | undefined;
       let slotError: string | undefined;
@@ -515,8 +609,12 @@ export function createRunCommandTool(
           slotError = error instanceof Error ? error.message : String(error);
         }
       }
+      // 决策 365：命令执行期间在跑的后台作业（开始时与结束时在跑的都算）
+      const jobsDuring = new Map<string, BackgroundJob>(
+        (options.jobs?.running() ?? []).map((job) => [job.id, job])
+      );
       // 决策 348、349：命令与命令前后的文件变化取证经 observedRun（执行端能合成一次的合成一次）
-      const { run, fileChanges } = await observedRun(host, plan, {
+      const { run, fileChanges: observedChanges } = await observedRun(host, plan, {
         env,
         timeoutMs,
         maxOutputBytes: headBytes,
@@ -526,6 +624,29 @@ export function createRunCommandTool(
           : {}),
         signal,
       });
+      for (const job of options.jobs?.running() ?? []) jobsDuring.set(job.id, job);
+      // 决策 365：前台命令的改动记给在跑的作业（结束时从期间变化里扣除）；有作业在跑时变化报告加提示
+      options.jobs?.noteForegroundChanges([
+        ...observedChanges.added,
+        ...observedChanges.removed,
+        ...observedChanges.modified,
+      ]);
+      const backgroundJobs = [...jobsDuring.values()].map((job) => ({
+        id: job.id,
+        command: job.command,
+      }));
+      const fileChanges: FileChanges =
+        backgroundJobs.length > 0
+          ? {
+              ...observedChanges,
+              note: [
+                observedChanges.note,
+                `有后台作业在跑（${backgroundJobs.map((job) => job.id).join("、")}），这里的变化可能含作业所做的`,
+              ]
+                .filter((part) => part !== undefined)
+                .join("；"),
+            }
+          : observedChanges;
       // 写成即改名并记进索引；写到一半出错的删掉临时文件、编号照常前进
       let saved: ExecEvidence["savedOutput"];
       let saveError = slotError ?? run.fullOutputError;
@@ -567,6 +688,7 @@ export function createRunCommandTool(
         ...(run.memoryLimitExceeded !== undefined
           ? { memoryLimitExceeded: run.memoryLimitExceeded }
           : {}),
+        ...(backgroundJobs.length > 0 ? { backgroundJobs } : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
@@ -577,7 +699,7 @@ export function createRunCommandTool(
       }
       if (run.timedOut) {
         throw new RunCommandTimeoutError(
-          `命令超时（${timeoutMs} 毫秒）已终止：${command}\n${resultText(evidence, headBytes)}`
+          `命令超时（${durationText(timeoutMs)}）已终止整个进程组：${command}\n${resultText(evidence, headBytes)}`
         );
       }
       if (signal?.aborted === true) {
@@ -592,6 +714,22 @@ export function createRunCommandTool(
 }
 
 type SpawnPlan = HostExecPlan;
+
+// 毫秒 → 说法：整秒说秒，否则说毫秒
+export function durationText(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000} 秒` : `${ms} 毫秒`;
+}
+
+// 本次命令的超时：给了 timeout_seconds 用它（超过上限即拒绝，免得模型以为设上了），否则用缺省
+function commandTimeoutMs(seconds: number | undefined, defaultMs: number, maxMs: number): number {
+  if (seconds === undefined) return defaultMs;
+  if (seconds * 1000 > maxMs) {
+    throw new RunCommandError(
+      `timeout_seconds 至多 ${Math.floor(maxMs / 1000)}（给的是 ${seconds}）；更久的命令请用 background 在后台运行`
+    );
+  }
+  return seconds * 1000;
+}
 
 function comspecOf(env: NodeJS.ProcessEnv): string {
   return Object.entries(env).find(([key]) => key.toUpperCase() === "COMSPEC")?.[1] ?? "cmd.exe";
@@ -690,6 +828,12 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
     ...(evidence.memoryLimitExceeded !== undefined
       ? [memoryLimitText(evidence.memoryLimitExceeded)]
       : []),
+    // 决策 365：内存超限时注明期间在跑的后台作业（内存可能是它们占的）
+    ...(evidence.memoryLimitExceeded !== undefined && evidence.backgroundJobs !== undefined
+      ? [
+          `期间在跑的后台作业：${evidence.backgroundJobs.map((job) => `${job.id}（${job.command}）`).join("、")}，内存也可能是它们占用的`,
+        ]
+      : []),
   ];
   if (evidence.outputTail !== undefined) {
     // 决策 356：开头、省略标注、末尾；存下了全文即给出虚拟路径与总行数
@@ -779,6 +923,20 @@ async function observedRun(
   const run = await host.exec(plan, options);
   const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
   return { run, fileChanges: diffFiles(before, after) };
+}
+
+// 决策 365：后台作业的期间变化——现在取一次证，返回结束时再取一次、比出变化的函数（同 observedRun 的取法）
+async function periodObserver(host: WorkspaceHost): Promise<() => Promise<FileChanges>> {
+  if (host.fileState !== undefined) {
+    const before = await host.fileState(FILE_SNAPSHOT_LIMIT);
+    return async () =>
+      diffStates(
+        before,
+        await (host.fileState as NonNullable<typeof host.fileState>)(FILE_SNAPSHOT_LIMIT, before)
+      );
+  }
+  const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+  return async () => diffFiles(before, await host.listFiles(FILE_SNAPSHOT_LIMIT));
 }
 
 const SCAN_FALLBACK_NOTE = "git status 失败，改用全量扫描";

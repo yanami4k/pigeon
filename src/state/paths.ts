@@ -69,6 +69,11 @@ export function sessionOutputsDirOf(root: string, sessionId: string): string {
   return path.join(outputsRootOf(root), sessionId);
 }
 
+// 决策 365：在跑的后台作业的记录（每个作业一个文件，作业结束即删；崩溃后下次启动据此清理）
+export function jobsDirOf(root: string): string {
+  return path.join(projectStateDir(root), "jobs");
+}
+
 // 学到的记忆，项目级（决策 332）与它的写入锁
 export function projectMemoryPathOf(root: string): string {
   return path.join(projectStateDir(root), "memory.md");

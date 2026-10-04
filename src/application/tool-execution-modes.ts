@@ -7,6 +7,7 @@ import {
   READ_SESSION_ENTRY_TOOL,
   SEARCH_SESSIONS_TOOL,
 } from "../memory/search-tools.ts";
+import { JOB_OUTPUT_TOOL } from "../tools/background-jobs.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import { READ_ONLY_SEARCH_TOOLS } from "../tools/search-tools.ts";
 
@@ -18,6 +19,8 @@ export const PARALLEL_TOOLS: ReadonlySet<string> = new Set([
   WEB_SEARCH_TOOL,
   WEB_FETCH_TOOL,
   ...READ_ONLY_SEARCH_TOOLS,
+  // 决策 365：读后台作业的状态与输出（job_kill 不登记，缺省串行）
+  JOB_OUTPUT_TOOL,
 ]);
 
 export function toolExecutionModeOf(name: string): "parallel" | "sequential" {

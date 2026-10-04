@@ -148,6 +148,59 @@ export interface GitFileEntry {
 
 export const MISSING_SIGNATURE = "-";
 
+// 一次命令（或一个后台作业期间）的文件变化报告
+export interface FileChanges {
+  added: string[];
+  removed: string[];
+  modified: string[];
+  // 清单超过上限，差异不完整（这时只报命令前后都在、签名变了的文件）
+  truncated: boolean;
+  // 取证方式上的说明（git status 失败、改用全量扫描等）；没有为缺省
+  note?: string;
+}
+
+// 决策 365：命令进程带的标记环境变量（值每次随机，子孙进程随之继承）；容器里的超时与中止、后台作业的停止与崩溃后的
+// 清理按它认进程
+export const RUN_MARKER_VAR = "PIGEON_RUN";
+
+// 决策 365：后台作业的启动选项。输出两路按到达顺序交给 onOutput；标准输入为空
+export interface HostJobOptions {
+  // 已过白名单的环境变量（容器实现不采用）
+  env: NodeJS.ProcessEnv;
+  // 本作业的标记（RUN_MARKER_VAR 的值）
+  marker: string;
+  onOutput(chunk: Buffer): void;
+}
+
+export interface HostJobExit {
+  exitCode: number | null;
+  signal?: string;
+  // 拉不起来：code 为 ENOENT 表示程序不存在
+  spawnError?: NodeJS.ErrnoException;
+}
+
+// 崩溃后清理时认进程用的记录（决策 365）：本机为进程号与启动时间（Windows 另有命令行），容器为容器与标记
+export type JobProcessRecord =
+  | {
+      kind: "local";
+      platform: NodeJS.Platform;
+      pid: number;
+      // 进程的启动时间（Linux 为 /proc/<pid>/stat 的 starttime，macOS 为 ps 的 lstart，Windows 为 CreationDate）
+      startTime: string;
+      // Windows：进程的命令行（那里读不到别的进程的环境变量，以它代替标记）
+      commandLine?: string;
+      marker: string;
+    }
+  | { kind: "container"; container: string; marker: string };
+
+// 一个在跑的后台作业：done 在进程结束（输出收完）时决议；kill 停掉整个进程组或进程树（容器里按组与标记），
+// 返回时进程已结束或已尽力；record 为认进程的记录（取不到为 undefined）
+export interface HostJob {
+  done: Promise<HostJobExit>;
+  kill(): Promise<void>;
+  record(): Promise<JobProcessRecord | undefined>;
+}
+
 // 一次被观测的执行：命令的结果与命令前后的取证；超时、中止等拿不到命令后取证时 after 缺省（调用方另取）
 export interface ObservedExec {
   result: HostExecResult;
@@ -214,6 +267,9 @@ export interface WorkspaceHost {
   fileState?(limit: number, before?: HostFileState): Promise<HostFileState>;
   // 决策 349：命令与命令前后的取证合成一次执行（容器实现）；缺省时调用方分三步做
   execObserved?(plan: HostExecPlan, options: HostExecOptions, limit: number): Promise<ObservedExec>;
+  // 决策 365：在工作区根启动一个后台作业（本机 Linux/macOS 以独立进程组、Windows 按进程树，容器里以 setsid 起组并带标记）。
+  // 没有实现的执行端不能开后台作业
+  startJob?(plan: HostExecPlan, options: HostJobOptions): HostJob;
   // Windows 本地实现：程序解析到的 .cmd / .bat 路径；其余实现恒为 undefined
   findLauncherScript(program: string, env: NodeJS.ProcessEnv): string | undefined;
   // 决策 352：命令报"程序不存在"时作废该程序的查找缓存（会话中途装上的程序）；没有缓存的实现不提供
