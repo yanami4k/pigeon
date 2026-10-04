@@ -2,7 +2,8 @@
 // 正文与思考各用一个检测器，判据两种（参数见 state/runaway-config.ts，缺省照 omp）：
 // - 逐字周期：每隔 checkIntervalChars 个新字符，看最近 windowChars 个字符的末尾能否由同一单元首尾相接重复构成
 //   （单元须含文字，纯标点、数字、空白的分隔线不算）；对反转的尾部求 Z 数组，一次线性扫描得到每个周期长度的重复跨度
-// - 段落相似度：按空行切段，段与最近若干段比较词三元组的 Jaccard 相似度，攒够段数后近似段达门槛即命中。
+// - 段落相似度：按空行切段（段长按不含空白的字符计），段与最近若干段比较词三元组的 Jaccard 相似度，攒够段数后近似段
+//   达门槛、且最近连续若干段每段都与前一段近似才命中（防只差编号、人名的模板段误判）。
 //   切词与 omp 不同：omp 只留 ASCII 字母数字，中文段落会被整段忽略；这里中日韩文字逐字成词，其余按字母数字连写成词
 // 命中时：掐断模式中止内层请求，以截至命中处的内容、停止原因 length 收尾本条回复（运行面按撞上限交给续跑）；
 // 只记录模式照常转发，本条回复里每个通道的每种判据只报第一次。每次报告经 onHit 交给运行面写会话记录
@@ -44,6 +45,7 @@ const BOLD_TITLE_LINE = /^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm;
 
 export class RepetitionDetector {
   readonly #params: RepetitionGuardParams;
+  // 尾部缓冲：攒到两个窗口长才截回一个窗口，不在每个增量上整窗拷贝
   #tail = "";
   #received = 0;
   #sinceScan = 0;
@@ -51,44 +53,54 @@ export class RepetitionDetector {
   #pendingStart = 0;
   readonly #segments: Array<{ shingles: Set<string>; start: number }> = [];
   #segmentCount = 0;
+  // 最近连续近似的段数：每段与前一段近似即加一，否则从 1 起
+  #run = 0;
 
   constructor(params: RepetitionGuardParams) {
     this.#params = params;
   }
 
-  // 收一段增量；命中返回命中信息
-  push(delta: string): DetectorHit | undefined {
+  // 收一段增量：两种判据都看到全部增量，命中的都交回
+  push(delta: string): DetectorHit[] {
     if (delta === "") {
-      return undefined;
+      return [];
     }
     this.#received += delta.length;
-    this.#tail = (this.#tail + delta).slice(-this.#params.windowChars);
+    this.#tail += delta;
+    if (this.#tail.length > 2 * this.#params.windowChars) {
+      this.#tail = this.#tail.slice(-this.#params.windowChars);
+    }
     this.#sinceScan += delta.length;
+    const hits: DetectorHit[] = [];
     if (this.#sinceScan >= this.#params.checkIntervalChars) {
       this.#sinceScan = 0;
       const cycle = this.#scanCycle();
       if (cycle !== undefined) {
-        return cycle;
+        hits.push(cycle);
       }
     }
-    return this.#feedSegments(delta, false);
+    const paragraph = this.#feedSegments(delta, false);
+    return paragraph !== undefined ? [...hits, paragraph] : hits;
   }
 
   // 一个内容块结束：不足一个检查间隔的尾巴补查一次，未切出的段一并比较
-  flush(): DetectorHit | undefined {
+  flush(): DetectorHit[] {
+    const hits: DetectorHit[] = [];
     if (this.#sinceScan > 0) {
       this.#sinceScan = 0;
       const cycle = this.#scanCycle();
       if (cycle !== undefined) {
-        return cycle;
+        hits.push(cycle);
       }
     }
-    return this.#feedSegments("", true);
+    const paragraph = this.#feedSegments("", true);
+    return paragraph !== undefined ? [...hits, paragraph] : hits;
   }
 
   #scanCycle(): DetectorHit | undefined {
     const params = this.#params;
-    const text = this.#tail;
+    const text =
+      this.#tail.length > params.windowChars ? this.#tail.slice(-params.windowChars) : this.#tail;
     const reach = suffixMatchLengths(text);
     const maxPeriod = Math.min(params.maxPeriodChars, Math.floor(text.length / 2));
     for (let period = 1; period <= maxPeriod; period += 1) {
@@ -114,9 +126,11 @@ export class RepetitionDetector {
     return undefined;
   }
 
+  // 切出这次能切出的全部段并逐段比较（不在命中处提前停下，免得后面的段与位置错位）；交回第一次命中
   #feedSegments(delta: string, final: boolean): DetectorHit | undefined {
     const params = this.#params;
     this.#pending += delta;
+    let first: DetectorHit | undefined;
     for (;;) {
       const boundary = SEGMENT_BOUNDARY.exec(this.#pending);
       let raw: string;
@@ -131,7 +145,7 @@ export class RepetitionDetector {
         raw = this.#pending;
         consumed = raw.length;
       } else {
-        return undefined;
+        return first;
       }
       const start = this.#pendingStart;
       this.#pending = this.#pending.slice(consumed);
@@ -141,34 +155,40 @@ export class RepetitionDetector {
           raw.slice(offset, offset + params.segmentMaxChars),
           start + offset
         );
-        if (hit !== undefined) {
-          return hit;
-        }
+        first ??= hit;
       }
     }
   }
 
   #consumeSegment(raw: string, start: number): DetectorHit | undefined {
     const params = this.#params;
-    const words = segmentWords(raw.replace(HEADING_LINE, "").replace(BOLD_TITLE_LINE, ""));
-    if (words.join(" ").length < params.segmentMinChars) {
+    const body = raw.replace(HEADING_LINE, "").replace(BOLD_TITLE_LINE, "");
+    // 段长按字符计（不含空白）：中文逐字成词，按规范化后的长度算会让三十来个字的短段也参与比较
+    if (body.replace(/\s/gu, "").length < params.segmentMinChars) {
       return undefined;
     }
-    const shingles = trigrams(words);
+    const shingles = trigrams(segmentWords(body));
+    const near = (other: ReadonlySet<string>) => jaccard(shingles, other) >= params.similarity;
     let cluster = 1;
     let earliest = start;
     for (const previous of this.#segments) {
-      if (jaccard(shingles, previous.shingles) >= params.similarity) {
+      if (near(previous.shingles)) {
         cluster += 1;
         earliest = Math.min(earliest, previous.start);
       }
     }
+    const last = this.#segments.at(-1);
+    this.#run = last !== undefined && near(last.shingles) ? this.#run + 1 : 1;
     this.#segments.push({ shingles, start });
     if (this.#segments.length > params.segmentWindow) {
       this.#segments.shift();
     }
     this.#segmentCount += 1;
-    if (this.#segmentCount < params.minSegments || cluster < params.minCluster) {
+    if (
+      this.#segmentCount < params.minSegments ||
+      cluster < params.minCluster ||
+      this.#run < params.minConsecutive
+    ) {
       return undefined;
     }
     return {
@@ -282,29 +302,33 @@ async function relay(
         streamed.set(event.contentIndex, (streamed.get(event.contentIndex) ?? "") + event.delta);
       }
       const found = inspect(event, detectors);
-      if (found === undefined) {
-        continue;
-      }
       if (options.mode === "log") {
-        const key = `${found.channel}:${found.criterion}`;
-        if (!reported.has(key)) {
-          reported.add(key);
-          report(options, found);
+        for (const hit of found) {
+          const key = `${hit.channel}:${hit.criterion}`;
+          if (!reported.has(key)) {
+            reported.add(key);
+            report(options, hit);
+          }
         }
         continue;
       }
-      report(options, found);
+      const hit = found[0];
+      if (hit === undefined) {
+        continue;
+      }
+      report(options, hit);
       cutter.abort();
       outer.push({
         type: "done",
         reason: "length",
-        message: cutMessage(event.partial, found.contentIndex, streamed.get(found.contentIndex)),
+        message: cutMessage(event.partial, hit.contentIndex, streamed.get(hit.contentIndex)),
       });
       return;
     }
     outer.end(await inner.result());
   } catch (error) {
-    // 转发或检测自身出错：以出错收尾本条回复（不留悬挂的流）
+    // 转发或检测自身出错：中止内层请求，以出错收尾本条回复（不留悬挂的流）
+    cutter.abort();
     outer.push({
       type: "error",
       reason: "error",
@@ -319,28 +343,28 @@ async function relay(
   }
 }
 
-// 只看正文与思考：增量喂给对应通道，块结束时补查；命中时带上命中的内容块下标
+// 只看正文与思考：增量喂给对应通道，块结束时补查；命中的带上通道与内容块下标
 function inspect(
   event: AssistantMessageEvent,
   detectors: Record<RepetitionChannel, RepetitionDetector>
-): (RepetitionHit & { contentIndex: number }) | undefined {
+): Array<RepetitionHit & { contentIndex: number }> {
   let channel: RepetitionChannel;
-  let hit: DetectorHit | undefined;
+  let hits: DetectorHit[];
   switch (event.type) {
     case "text_delta":
     case "thinking_delta":
       channel = event.type === "text_delta" ? "text" : "thinking";
-      hit = detectors[channel].push(event.delta);
+      hits = detectors[channel].push(event.delta);
       break;
     case "text_end":
     case "thinking_end":
       channel = event.type === "text_end" ? "text" : "thinking";
-      hit = detectors[channel].flush();
+      hits = detectors[channel].flush();
       break;
     default:
-      return undefined;
+      return [];
   }
-  return hit !== undefined ? { ...hit, channel, contentIndex: event.contentIndex } : undefined;
+  return hits.map((hit) => ({ ...hit, channel, contentIndex: event.contentIndex }));
 }
 
 function report(options: RepetitionGuardOptions, found: RepetitionHit & { contentIndex: number }) {

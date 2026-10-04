@@ -5,6 +5,10 @@
 //   只记录（log）不掐断。参数先取档位（omp 为缺省，wide 为试跑用的宽参数），节里单独给的项覆盖档位
 import { type Static, Type } from "typebox";
 
+// 续跑时追加给模型的提示（运行面发出；回看历史时据此认出它不是人输入的话）
+export const TRUNCATION_CONTINUE_PROMPT =
+  "上条回复被截断，未执行任何工具；不要重复前文，简短说明下一步并直接发出一个工具调用";
+
 export const TruncationContinuationSectionSchema = Type.Object(
   {
     enabled: Type.Optional(Type.Boolean()),
@@ -56,15 +60,16 @@ export interface RepetitionGuardParams {
   shortPeriodChars: number;
   shortMinRepeats: number;
   shortMinRepeatedChars: number;
-  // 段落相似度：按空行切段（无空行时到 segmentMaxChars 强制切），规范化后短于 segmentMinChars 的段不计；
-  // 与最近 segmentWindow 段比较词三元组相似度，达 similarity 的算近似；攒满 minSegments 段之后，
-  // 近似段（含本段）达 minCluster 即命中
+  // 段落相似度：按空行切段（无空行时到 segmentMaxChars 强制切），去掉标题行后不含空白不足 segmentMinChars 个字符的段不计；
+  // 与最近 segmentWindow 段比较词三元组相似度，达 similarity 的算近似；攒满 minSegments 段之后，近似段（含本段）达
+  // minCluster、且最近连续 minConsecutive 段每段都与前一段近似，才命中（防只差编号、人名的模板段误判）
   similarity: number;
   segmentMaxChars: number;
   segmentMinChars: number;
   segmentWindow: number;
   minSegments: number;
   minCluster: number;
+  minConsecutive: number;
 }
 
 // 缺省档：照 omp（oh-my-pi 的 thinking-loop 检测）的常量
@@ -83,6 +88,7 @@ export const OMP_REPETITION_PARAMS: Readonly<RepetitionGuardParams> = {
   segmentWindow: 16,
   minSegments: 8,
   minCluster: 4,
+  minConsecutive: 3,
 };
 
 // 试跑用的宽档：单元最长 16,384 字符、至少重复 3 遍、重复段至少 2,000 字符，不分短周期；窗口放到恰好容得下
@@ -124,6 +130,7 @@ export const RepetitionGuardSectionSchema = Type.Object(
     segmentWindow: positive,
     minSegments: positive,
     minCluster: Type.Optional(Type.Integer({ minimum: 2 })),
+    minConsecutive: positive,
   },
   { additionalProperties: false }
 );
