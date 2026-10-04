@@ -30,6 +30,9 @@
 //    （界面展开工具输出与 diff 用；同 subscribeStream 不落盘、不进 events()、不改事件载荷与会话记录），contextUsage
 //    读当前上下文的 token 数与模型窗口（状态栏用）。没有订阅者时行为与此前逐字节一致，eval stream、pigeon run 与
 //    逐行对话不订阅，实验路径不受影响。
+// 13. 一轮之内的失控（决策 367）：撞上限续跑——末条回复因输出上限截断且没有工具调用时暂扣收尾（同空回复重试），从 Agent 的消息
+//    去掉它、会话存储里把它移出主分支并写一条续跑记录，再以一条提示接着跑；连续与每次 Run 合计各有上限，用尽照原样收尾。
+//    流式重复检测包在 streamFn 外层（repetition-guard.ts），每次命中写一条记录，掐断的回复以 length 收尾、交给续跑。
 import {
   type AfterToolCallContext,
   type AfterToolCallResult,
@@ -59,6 +62,11 @@ import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids
 import type { LoopRound } from "../state/loop-guard.ts";
 import type { RunModelInfo } from "../state/model-info.ts";
 import {
+  type RepetitionGuardMode,
+  type RepetitionGuardParams,
+  TRUNCATION_CONTINUE_PROMPT,
+} from "../state/runaway-config.ts";
+import {
   type RunStartedPayload,
   RuntimeEventKind,
   type ToolSettledPayload,
@@ -81,6 +89,7 @@ import type {
 } from "./compaction.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import type { ToolGovernance, ToolGovernanceFactory, ToolHookPort } from "./governance.ts";
+import { guardRepetition, type RepetitionHit } from "./repetition-guard.ts";
 import type { SessionStoreSink } from "./session-store.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
@@ -114,6 +123,13 @@ export interface RunResult {
 
 // 空回复重试仍空时的错误文本（Run 结果与收尾条目共用）
 export const EMPTY_REPLY_ERROR = "模型返回空回复（既无文字也无工具调用），重试一次仍为空回复";
+
+// 撞上限续跑的对象（决策 367）：因输出上限截断（含被流式重复检测掐断）且没有工具调用的回复
+export function isTruncatedWithoutTools(message: AssistantMessage): boolean {
+  return (
+    message.stopReason === "length" && !message.content.some((block) => block.type === "toolCall")
+  );
+}
 
 // 空回复（决策 170 ②）：以正常停止收尾，既无非空文字、也无工具调用；思考块不算内容，只有空白的文字算空
 export function isEmptyReply(message: AssistantMessage): boolean {
@@ -167,6 +183,8 @@ export interface ToolResultNotice {
 // 派生显示态，不落盘、不锚身份；参数与结果为深拷贝
 export interface TurnRoundNotice extends LoopRound {
   runId: RunId;
+  // 这一轮的回复因输出上限截断且没有工具调用（决策 367：续跑时从上下文去掉，打转检测不把它算作一轮）
+  truncated?: true;
 }
 
 // 手动压缩的结果：运行面没有配置压缩时为 disabled
@@ -205,6 +223,10 @@ export interface PiRuntimeAdapterOptions {
   // 决策 324：工具事件钩子——PreToolUse 交治理实例（在审批之前），PostToolUse / PostToolUseFailure
   // 在此接 afterToolCall（工具执行之后）：替换结果文本、把理由与上下文补进结果。缺省不挂
   toolHooks?: ToolHookPort;
+  // 决策 367：撞上限续跑的连续与每次 Run 合计上限；缺省不续跑
+  truncationContinuation?: { maxConsecutive: number; maxPerRun: number };
+  // 决策 367：流式重复检测的模式与参数，包在 streamFn 外层；缺省不检测
+  repetitionGuard?: { mode: RepetitionGuardMode; params: RepetitionGuardParams };
 }
 
 export class PiRuntimeAdapter {
@@ -262,6 +284,12 @@ export class PiRuntimeAdapter {
   // 空回复重试（决策 170 ②）：本 Run 是否已重试过；等待重试时暂扣的那次 agent_end（重试那次的 agent_end 才是本 Run 的收尾）
   #emptyReplyRetried = false;
   #deferredRunEnd: AgentEvent | undefined;
+  // 撞上限续跑（决策 367）：配置；本 Run 已续跑次数与连续次数（一条回复没触发续跑即清零）；
+  // 被重复检测掐断的回复将占的条目序号（续跑记录据此区分截断的来由）
+  readonly #continuation: PiRuntimeAdapterOptions["truncationContinuation"];
+  #continuations = 0;
+  #consecutiveContinuations = 0;
+  #repetitionCutSeq = 0;
 
   constructor(options: PiRuntimeAdapterOptions) {
     // 运行期兜底（JS 调用方可绕过类型门）：options.model 不得携带模型身份字段，
@@ -280,6 +308,8 @@ export class PiRuntimeAdapter {
     this.#modelInfo = options.modelInfo;
     this.#sessionStore = options.sessionStore;
     this.#compactor = options.compaction;
+    this.#continuation = options.truncationContinuation;
+    const repetition = options.repetitionGuard;
     // 广告集 = 执行体 ∩ 快照 allow。deny 不在此过滤：deny 是逐调用绝对拒绝（决策 4），
     // 必须在审批闸执行并留 policy:deny 账本——若在广告层过滤，模型请求会被上游以
     // "Tool not found" 拦截，hook 不可见、无账本、hook 级熔断也失效（agent-loop.js:393-399）。
@@ -307,7 +337,14 @@ export class PiRuntimeAdapter {
     });
 
     this.#agent = new Agent({
-      streamFn: options.streamFn,
+      // 决策 367：流式重复检测包在模型调用外层
+      streamFn:
+        repetition !== undefined
+          ? guardRepetition(options.streamFn, {
+              ...repetition,
+              onHit: (hit) => this.#recordRepetition(repetition.mode, hit),
+            })
+          : options.streamFn,
       // 决策 2：缺省 sequential——审批瓶颈是人，parallel 的交错观感错乱且写审批有顺序依赖。
       // 依据：agent.js:134 构造选项读取、agent.js:299 传入 loop config、
       // agent-loop.js:288 sequential 走逐 call 的 start→hook→execute→end 执行器。
@@ -438,6 +475,9 @@ export class PiRuntimeAdapter {
     this.#hookStopReason = undefined;
     this.#emptyReplyRetried = false;
     this.#deferredRunEnd = undefined;
+    this.#continuations = 0;
+    this.#consecutiveContinuations = 0;
+    this.#repetitionCutSeq = 0;
     // 实际广告名单以 Run 启动时 Agent 持有的工具为准（上游对此拍快照，运行中改不动）
     const advertisedTools = this.#agent.state.tools.map((tool) => tool.name);
     // 附加摘要每个 Run 取一次；取失败只进 listenerErrors，Run 开始条目缺 MCP 字段，不挡 Run 启动
@@ -462,7 +502,7 @@ export class PiRuntimeAdapter {
       }
       await started;
       await this.#agent.waitForIdle();
-      await this.#retryEmptyReply();
+      await this.#resumeDeferredRunEnd();
       const result = this.#judgeTerminal(runId, advertisedTools);
       this.#recordRunEnded(result);
       await this.#restoreAfterTurnCompaction();
@@ -487,23 +527,133 @@ export class PiRuntimeAdapter {
     return this.#currentRunId ?? undefined;
   }
 
-  // 空回复重试（决策 170 ②）：上游一次运行以空回复收尾时，其 agent_end 已被暂扣（见 #recordAndForward）。
-  // 在同一个 Run 里从 Agent 状态去掉这条空消息（会话文件照实留着它）再接着运行一次；重试那一轮照常发事件、计轮与计预算。
-  // 暂扣之后来了中止请求即不重试，补发暂扣的 agent_end。continue 同步建立上游的活动运行，其间中止请求插不进空档
+  // 上游一次运行以空回复或撞上限且没有工具调用的回复收尾时，其 agent_end 已被暂扣（见 #recordAndForward），在同一个 Run 里
+  // 接着运行：重试或续跑那一轮照常发事件、计轮与计预算，又以同样的方式收尾时再次暂扣，直到不再暂扣。
+  // 暂扣之后来了中止请求即不再接着跑，补发暂扣的 agent_end。continue 与 prompt 同步建立上游的活动运行，其间中止请求插不进空档
+  async #resumeDeferredRunEnd(): Promise<void> {
+    for (;;) {
+      const deferred = this.#deferredRunEnd;
+      if (deferred === undefined) {
+        return;
+      }
+      this.#deferredRunEnd = undefined;
+      if (this.#interruptRequested) {
+        this.#recordAndForward(deferred);
+        return;
+      }
+      const last = this.#agent.state.messages.at(-1);
+      if (last?.role === "assistant" && isEmptyReply(last)) {
+        await this.#retryEmptyReply();
+      } else {
+        await this.#continueTruncated();
+      }
+      await this.#agent.waitForIdle();
+    }
+  }
+
+  // 空回复重试（决策 170 ②）：从 Agent 状态去掉这条空消息（会话文件照实留着它）再接着运行一次
   async #retryEmptyReply(): Promise<void> {
-    const deferred = this.#deferredRunEnd;
-    if (deferred === undefined) {
-      return;
-    }
-    this.#deferredRunEnd = undefined;
-    if (this.#interruptRequested) {
-      this.#recordAndForward(deferred);
-      return;
-    }
     this.#emptyReplyRetried = true;
     this.#agent.state.messages = this.#agent.state.messages.slice(0, -1);
     await this.#agent.continue();
-    await this.#agent.waitForIdle();
+  }
+
+  // 撞上限续跑（决策 367）：从 Agent 状态去掉截断的回复，会话存储里把它移出主分支（文件里照留）并记一条续跑记录；
+  // 本 Run 内轮间压缩过时先按会话树还原成压缩后的上下文（Agent 的消息累积着全量），再追加提示接着跑
+  async #continueTruncated(): Promise<void> {
+    this.#continuations += 1;
+    this.#consecutiveContinuations += 1;
+    const dropped = this.#agent.state.messages.at(-1);
+    const usage = dropped?.role === "assistant" ? dropped.usage : undefined;
+    this.#agent.state.messages = this.#agent.state.messages.slice(0, -1);
+    const runId = this.#currentRunId;
+    if (this.#sessionStore !== undefined && runId !== null) {
+      try {
+        this.#sessionStore.dropTruncatedReply?.();
+        this.#sessionStore.append({
+          customType: SessionEntryType.Continuation,
+          data: {
+            version: SESSION_ENTRY_VERSION,
+            runId,
+            cause: this.#repetitionCutSeq === this.#runEntrySeq ? "repetition" : "output-limit",
+            attempt: this.#continuations,
+            consecutive: this.#consecutiveContinuations,
+            continuedAt: Date.now(),
+            // 截断的回复移出主分支后，轮数与用量的统计按这里加回
+            ...(usage !== undefined
+              ? {
+                  droppedUsage: {
+                    input: usage.input,
+                    output: usage.output,
+                    cacheRead: usage.cacheRead,
+                    cacheWrite: usage.cacheWrite,
+                    totalTokens: usage.totalTokens,
+                    cost: {
+                      input: usage.cost.input,
+                      output: usage.cost.output,
+                      cacheRead: usage.cost.cacheRead,
+                      cacheWrite: usage.cost.cacheWrite,
+                      total: usage.cost.total,
+                    },
+                  },
+                }
+              : {}),
+          },
+        });
+      } catch (error) {
+        this.#listenerErrors.push(error);
+      }
+    }
+    await this.#restoreAfterTurnCompaction();
+    // 还原要等会话树的读取：其间来的中止请求或释放落空（上游没有活动运行），故照常发起再立即中止，以中止收尾（同 #runWith）
+    const started = this.#agent.prompt({
+      role: "user",
+      content: [{ type: "text", text: TRUNCATION_CONTINUE_PROMPT }],
+      timestamp: Date.now(),
+    });
+    if (this.#interruptRequested || this.#disposed) {
+      this.#agent.abort();
+    }
+    await started;
+  }
+
+  // 这次 agent_end 要不要暂扣、等撞上限续跑：配置了续跑、两个上限都没到、没来过中止请求、钩子没要求停止，
+  // 且对话以撞上限且没有工具调用的回复收尾
+  #shouldContinueTruncated(): boolean {
+    const limits = this.#continuation;
+    if (
+      limits === undefined ||
+      this.#interruptRequested ||
+      this.#hookStopReason !== undefined ||
+      this.#continuations >= limits.maxPerRun ||
+      this.#consecutiveContinuations >= limits.maxConsecutive
+    ) {
+      return false;
+    }
+    const last = this.#agent.state.messages.at(-1);
+    return last !== undefined && last.role === "assistant" && isTruncatedWithoutTools(last);
+  }
+
+  // 流式重复检测的一次命中（决策 367）：写一条会话记录；掐断模式下记下被掐断的回复将占的条目序号
+  #recordRepetition(mode: RepetitionGuardMode, hit: RepetitionHit): void {
+    const runId = this.#currentRunId;
+    if (runId === null) {
+      return;
+    }
+    if (mode === "abort") {
+      this.#repetitionCutSeq = this.#runEntrySeq + 1;
+    }
+    if (this.#sessionStore === undefined) {
+      return;
+    }
+    try {
+      this.#sessionStore.append({
+        customType: SessionEntryType.Repetition,
+        data: { version: SESSION_ENTRY_VERSION, runId, mode, ...hit, detectedAt: Date.now() },
+      });
+    } catch (error) {
+      this.#listenerErrors.push(error);
+    }
   }
 
   // 这次 agent_end 要不要暂扣、等空回复重试：本 Run 还没重试过、没来过中止请求，且对话以空回复收尾
@@ -782,6 +932,9 @@ export class PiRuntimeAdapter {
             .filter((text) => text !== "")
             .join("\n"),
         })),
+        ...(message.role === "assistant" && isTruncatedWithoutTools(message)
+          ? { truncated: true as const }
+          : {}),
       });
     } catch (error) {
       this.#listenerErrors.push(error);
@@ -1061,8 +1214,11 @@ export class PiRuntimeAdapter {
           this.#agent.steer(message);
         }
       }
-      // 空回复要重试时暂扣这次 agent_end：一个 Run 只发一次 run.ended（订阅方据它验证、收会话树），由重试那次的发出
-      if (event.type === "agent_end" && this.#shouldRetryEmptyReply()) {
+      // 空回复要重试或撞上限要续跑时暂扣这次 agent_end：一个 Run 只发一次 run.ended（订阅方据它验证、收会话树），由最后那次的发出
+      if (
+        event.type === "agent_end" &&
+        (this.#shouldRetryEmptyReply() || this.#shouldContinueTruncated())
+      ) {
         this.#deferredRunEnd = event;
         return;
       }
@@ -1073,6 +1229,10 @@ export class PiRuntimeAdapter {
       // 序号推进无条件、写入隔离 try/catch（同本函数不变式：记录逻辑自身绝不抛）。
       if (event.type === "message_end") {
         this.#runEntrySeq += 1;
+        // 决策 367：一条助手回复没触发续跑（不是撞上限且没有工具调用），连续续跑次数清零
+        if (event.message.role === "assistant" && !isTruncatedWithoutTools(event.message)) {
+          this.#consecutiveContinuations = 0;
+        }
         if (event.message.role === "toolResult") {
           this.#markToolResult(event.message);
         }

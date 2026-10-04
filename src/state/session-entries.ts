@@ -1,7 +1,7 @@
 // 新会话存储的自定义条目（决策 176 / 182 / 184）：会话文件是 pi 的 v4 JSONL 会话树，消息以 pi 消息条目完整存储（179），
 // Pigeon 自有的事实只以 custom 条目挂进树里（上游 entry 与 record 类型封闭，写入未知类型"写时不报、读时整个文件打不开"）。
-// 除消息外只写九种：Run 开始、Run 收尾、验证记录（旧会话只读）、代码快照、worker 派出与收尾、分叉、授权建立与撤销、
-// 终端界面退出（283）、钩子运行（323）。
+// 除消息外只写十一种：Run 开始、Run 收尾、验证记录（旧会话只读）、代码快照、worker 派出与收尾、分叉、授权建立与撤销、
+// 终端界面退出（283）、钩子运行（323）、撞上限续跑与流式重复检测命中（367）。
 // 条目数据的形状与版本由 Pigeon 自己负责（上游读盘只要求 customType 是字符串）：每种数据都带 version，读者按它分派。
 // worker 与分支会话的来历不写成条目，放进会话文件头的 metadata（只在创建与分叉时写一次，177）。
 // 本文件只定义形状与写入接口，纯类型、无 IO；写者在 pi-runtime/session-store.ts，只读读取器在 persistence/session-reader.ts。
@@ -15,7 +15,12 @@ import {
   PushedMemoryManifestSchema,
 } from "./learned-memory.ts";
 import { RunModelInfoSchema } from "./model-info.ts";
-import { EvalVerdictSchema, GitObjectIdSchema, RunStartedPayloadSchema } from "./runtime-events.ts";
+import {
+  EvalVerdictSchema,
+  GitObjectIdSchema,
+  RunStartedPayloadSchema,
+  TurnUsageSchema,
+} from "./runtime-events.ts";
 import {
   CheckpointRefSchema,
   ChildSettledStatusSchema,
@@ -31,7 +36,7 @@ import {
   WorkerWorkspaceSchema,
 } from "./session-payloads.ts";
 
-// 八种自定义条目的 customType（加 pigeon. 前缀，与上游或其他应用写的 custom 条目区分）
+// 自定义条目的 customType（加 pigeon. 前缀，与上游或其他应用写的 custom 条目区分）
 export const SessionEntryType = {
   RunStart: "pigeon.run-start",
   RunEnd: "pigeon.run-end",
@@ -42,6 +47,8 @@ export const SessionEntryType = {
   Grant: "pigeon.grant",
   Exit: "pigeon.exit",
   Hook: "pigeon.hook",
+  Continuation: "pigeon.continuation",
+  Repetition: "pigeon.repetition",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -312,6 +319,39 @@ export const HookRunDataSchema = Type.Object({
 });
 export type HookRunData = Static<typeof HookRunDataSchema>;
 
+// 撞上限续跑（决策 367）：末条回复因输出上限截断（或被流式重复检测掐断）且没有工具调用，运行面不收尾、接着跑。
+// 被截断的回复留在会话文件里，但移出主分支（主分支的叶子退回它之前），模型上下文与续跑还原都不再含它；
+// 本条目挂在主分支上被截断回复的位置，其后是给模型的提示消息。被截断的回复是一次真实的模型请求：轮数与用量的统计
+// 按本条目把它加回（一条续跑条目算一轮，用量取 droppedUsage；截断的回复没有用量时缺省）
+export const ContinuationDataSchema = Type.Object({
+  version: VERSION,
+  runId: RunIdSchema,
+  // 截断的来由：撞输出上限 / 流式重复检测掐断
+  cause: Type.Union([Type.Literal("output-limit"), Type.Literal("repetition")]),
+  // 本 Run 第几次续跑、连续第几次
+  attempt: Type.Integer({ minimum: 1 }),
+  consecutive: Type.Integer({ minimum: 1 }),
+  continuedAt: Type.Integer({ minimum: 0 }),
+  droppedUsage: Type.Optional(TurnUsageSchema),
+});
+export type ContinuationData = Static<typeof ContinuationDataSchema>;
+
+// 流式重复检测的一次命中（决策 367）：判据（逐字周期 / 段落相似度）、通道（正文 / 思考）、周期长度、重复次数、
+// 起点与触发位置（本条回复里该通道的字符偏移，见 pi-runtime/repetition-guard.ts）与当时的模式（掐断 / 只记录）
+export const RepetitionDataSchema = Type.Object({
+  version: VERSION,
+  runId: RunIdSchema,
+  mode: Type.Union([Type.Literal("abort"), Type.Literal("log")]),
+  criterion: Type.Union([Type.Literal("cycle"), Type.Literal("paragraph")]),
+  channel: Type.Union([Type.Literal("text"), Type.Literal("thinking")]),
+  periodChars: Type.Integer({ minimum: 1 }),
+  repeats: Type.Integer({ minimum: 1 }),
+  startChar: Type.Integer({ minimum: 0 }),
+  atChar: Type.Integer({ minimum: 0 }),
+  detectedAt: Type.Integer({ minimum: 0 }),
+});
+export type RepetitionData = Static<typeof RepetitionDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -322,7 +362,9 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Fork; data: ForkData }
   | { customType: typeof SessionEntryType.Grant; data: GrantData }
   | { customType: typeof SessionEntryType.Exit; data: ExitData }
-  | { customType: typeof SessionEntryType.Hook; data: HookRunData };
+  | { customType: typeof SessionEntryType.Hook; data: HookRunData }
+  | { customType: typeof SessionEntryType.Continuation; data: ContinuationData }
+  | { customType: typeof SessionEntryType.Repetition; data: RepetitionData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -335,6 +377,8 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Grant]: GrantDataSchema,
   [SessionEntryType.Exit]: ExitDataSchema,
   [SessionEntryType.Hook]: HookRunDataSchema,
+  [SessionEntryType.Continuation]: ContinuationDataSchema,
+  [SessionEntryType.Repetition]: RepetitionDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。

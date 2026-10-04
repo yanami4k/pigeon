@@ -6,6 +6,8 @@
 // - 写者从不抛：打开、加锁、每一条写入的失败都交给 onFault，由调用方按内部故障告警；打开失败后这个写者不再写任何东西。
 // - 写入经内部队列串行、按调用顺序落盘；调用方不等待（不拖慢运行），需要落盘确认时 flush。
 // - 上下文压缩（188）：读主分支与写压缩条目同样排进队列（排在此前的写入之后）；压缩条目是 pi 原生条目，原始消息不动（179）。
+// - 撞上限续跑（367）：被截断的回复移出主分支——用 pi 的 moveLane 把主分支的叶子退回它之前，消息留在文件里成为一条
+//   废弃的分支；之后的写入接在它之前，按主分支还原的上下文（续跑、压缩、分叉）都不再含它。同样排进队列。
 // - 同进程对同一会话只有一个 pi 会话实例：再开写者时共用，最后一个关闭才释放锁（同一文件两个实例会各自持有 seq，交错写坏文件）。
 // 读非本进程所写的会话一律用 persistence/session-reader.ts 的只读读取器，不用这里。
 import path from "node:path";
@@ -14,9 +16,11 @@ import {
   buildSessionContext,
   type CompactionEntry,
   type CompactResult,
+  type CustomEntry,
   type Entry,
   type JsonlSessionMetadata,
   JsonlSessionRepo,
+  type MessageEntry,
   type Session,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
@@ -101,6 +105,9 @@ export interface SessionStoreSink extends SessionEntrySink {
   branch?(): Promise<Entry[] | undefined>;
   // 写一条压缩条目（排在此前的写入之后），返回写入后的主分支；失败时为 undefined
   appendCompaction?(result: CompactResult): Promise<Entry[] | undefined>;
+  // 把主分支上最后一条消息（须是撞输出上限的助手回复）移出主分支（排在此前的写入之后）：叶子退回它之前，
+  // 它之后挂的自定义条目重写到退回后的叶子上。主分支末条消息不是撞上限的回复时不动，按写入失败报告
+  dropTruncatedReply?(): void;
 }
 
 export interface SessionStoreWriter extends SessionStoreSink {
@@ -261,6 +268,9 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
       enqueue(action, (session) => session.appendCustomEntry(entry.customType, data));
     },
     branch: () => request("读主分支", readBranch),
+    dropTruncatedReply: () => {
+      enqueue("移出截断的回复", (session) => dropTruncatedReply(session));
+    },
     appendCompaction: (result) => {
       let entry: Omit<CompactionEntry, "id" | "parentId" | "seq" | "timestamp">;
       try {
@@ -308,6 +318,29 @@ export function openSessionStoreWriter(options: SessionStoreWriterOptions): Sess
       }
     },
   };
+}
+
+async function dropTruncatedReply(session: Session): Promise<void> {
+  const trailing: CustomEntry[] = [];
+  let reply: MessageEntry | undefined;
+  for (const entry of await session.findEntriesOnBranch({ order: "newestFirst" })) {
+    if (entry.type === "message") {
+      reply = entry;
+      break;
+    }
+    if (entry.type !== "custom") {
+      throw new Error(`主分支末条消息之后有 ${entry.type} 条目`);
+    }
+    trailing.push(entry);
+  }
+  const message = reply?.message;
+  if (reply === undefined || message?.role !== "assistant" || message.stopReason !== "length") {
+    throw new Error("主分支末条消息不是撞输出上限的助手回复");
+  }
+  await session.moveLane("main", reply.parentId);
+  for (const entry of trailing.reverse()) {
+    await session.appendCustomEntry(entry.customType, entry.data);
+  }
 }
 
 // 分叉（177 / 210）：用 pi 的 fork 把来源会话里从根到 entryId（含，须是消息条目）的历史复制进分支会话的新文件，

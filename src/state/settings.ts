@@ -1,7 +1,8 @@
 // 三层设置（决策 325）：用户级 ~/.pigeon/settings.json、项目共享 .pigeon/settings.json、项目个人 .pigeon/settings.local.json；
 // 项目个人 > 项目共享 > 用户级。纯 schema、校验与合并，无 IO；文件读取与会话快照在 persistence/settings.ts。
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
-//   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）与模型信息的覆盖值 modelInfo（决策 362）；
+//   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）、模型信息的覆盖值 modelInfo（决策 362）与撞上限续跑
+//   truncationContinuation、流式重复检测 repetitionGuard（决策 367）；
 //   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
@@ -39,6 +40,16 @@ import {
   orchestrationSettings,
 } from "./orchestration-config.ts";
 import {
+  type RepetitionGuardSection,
+  RepetitionGuardSectionSchema,
+  type RepetitionGuardSettings,
+  repetitionGuardSettings,
+  type TruncationContinuationSection,
+  TruncationContinuationSectionSchema,
+  type TruncationContinuationSettings,
+  truncationContinuationSettings,
+} from "./runaway-config.ts";
+import {
   type SandboxConfig,
   SandboxSectionSchema,
   sandboxConfigProblems,
@@ -68,6 +79,8 @@ export const SETTINGS_SECTIONS = {
   loopGuard: LoopGuardSectionSchema,
   memory: MemorySectionSchema,
   modelInfo: ModelInfoSectionSchema,
+  truncationContinuation: TruncationContinuationSectionSchema,
+  repetitionGuard: RepetitionGuardSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -90,6 +103,8 @@ export const SettingsFileSchema = Type.Object(
     hooks: Type.Optional(HooksSectionSchema),
     memory: Type.Optional(MemorySectionSchema),
     modelInfo: Type.Optional(ModelInfoSectionSchema),
+    truncationContinuation: Type.Optional(TruncationContinuationSectionSchema),
+    repetitionGuard: Type.Optional(RepetitionGuardSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -242,6 +257,8 @@ export interface MergedSettings {
   loopGuard?: Static<typeof LoopGuardSectionSchema>;
   memory?: Static<typeof MemorySectionSchema>;
   modelInfo?: ModelInfoSection;
+  truncationContinuation?: TruncationContinuationSection;
+  repetitionGuard?: RepetitionGuardSection;
   trustedDirectories: string[];
   // 停用全部钩子（324）：三层按标量覆盖（高优先层说了算），缺省 false
   disableAllHooks: boolean;
@@ -339,6 +356,10 @@ export function mergedSettingsProblems(merged: MergedSettings, dotMcp?: DotMcpJs
   if ("problem" in loop) {
     problems.push(`loopGuard：${loop.problem}`);
   }
+  const repetition = repetitionGuardSettings(merged.repetitionGuard);
+  if ("problem" in repetition) {
+    problems.push(`repetitionGuard：${repetition.problem}`);
+  }
   for (const problem of sandboxConfigProblems(merged.sandbox ?? {})) {
     problems.push(`sandbox：${problem}`);
   }
@@ -424,6 +445,22 @@ export function loopGuardSettingsOf(snapshot: SettingsSnapshot): LoopGuardSettin
   if ("problem" in resolved) {
     // 读取快照时已校验，到这里说明快照是手工拼的
     throw new Error(`打转检测设置不对：${resolved.problem}`);
+  }
+  return resolved.settings;
+}
+
+// 撞上限续跑与流式重复检测（决策 367）：合并后的两节，不给的取缺省
+export function truncationContinuationOf(
+  snapshot: SettingsSnapshot
+): TruncationContinuationSettings {
+  return truncationContinuationSettings(snapshot.merged.truncationContinuation);
+}
+
+export function repetitionGuardOf(snapshot: SettingsSnapshot): RepetitionGuardSettings {
+  const resolved = repetitionGuardSettings(snapshot.merged.repetitionGuard);
+  if ("problem" in resolved) {
+    // 读取快照时已校验，到这里说明快照是手工拼的
+    throw new Error(`流式重复检测设置不对：${resolved.problem}`);
   }
   return resolved.settings;
 }

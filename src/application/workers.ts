@@ -38,6 +38,10 @@ import type { SessionId } from "../state/ids.ts";
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import type { OrchestrationSettings } from "../state/orchestration-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import type {
+  RepetitionGuardSettings,
+  TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type {
   BranchHeaderInput,
@@ -87,6 +91,9 @@ export interface WorkerRuntimeDeps {
   maxOutputTokens?: number;
   // 决策 188、218：上下文压缩的配置——worker 按主会话同一配置跑（缺省为产品缺省）
   compaction?: CompactionConfigInput;
+  // 决策 367：撞上限续跑与流式重复检测——worker 按主会话实际生效的设定跑（缺省取设置快照）
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   // M9：采样温度与工作方式指令——回放的验证器运行面沿用原尝试的值（087 修订、110）；其余 worker 缺省不设
   temperature?: number;
   taskDirective?: string;
@@ -203,6 +210,9 @@ export function sessionWorkerRuntimeFactory(
   const compaction = deps.compaction ?? deps.bundle.adapter.compactionConfig();
   // 决策 191、217：worker 继承父运行面的推送记忆（开着才带）
   const learnedMemory = deps.learnedMemory ?? deps.bundle.learnedMemory;
+  // 决策 367：worker 继承父运行面实际生效的续跑与重复检测设定（父运行面的设定可能是显式给出的，不只来自设置快照）
+  const truncationContinuation = deps.truncationContinuation ?? deps.bundle.truncationContinuation;
+  const repetitionGuard = deps.repetitionGuard ?? deps.bundle.repetitionGuard;
   return createWorkerRuntimeFactory({
     streamFnFor: () => deps.streamFn,
     provider: deps.provider,
@@ -218,6 +228,8 @@ export function sessionWorkerRuntimeFactory(
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     ...(compaction !== undefined ? { compaction } : {}),
     ...(learnedMemory !== undefined ? { learnedMemory } : {}),
+    truncationContinuation,
+    repetitionGuard,
     ...(deps.roleModelOverrides !== undefined
       ? { roleModelOverrides: deps.roleModelOverrides }
       : {}),
@@ -258,6 +270,9 @@ interface RuntimeSurface {
   editMode?: EditMode;
   // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照；worker 用主会话的快照）——目前只有跑批器显式给出
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   // M9：采样温度（缺省不设）——目前只有无父会话的运行面（headless 与 Eval）会给；worker 不继承
   temperature?: number;
   // M9：任务源给的系统指令（追加进 system prompt 并随之冻结）；同上，只有无父会话的运行面会给
@@ -363,6 +378,10 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.editMode !== undefined ? { editMode: deps.editMode } : {}),
       ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
       ...(deps.compaction !== undefined ? { compaction: deps.compaction } : {}),
+      ...(deps.truncationContinuation !== undefined
+        ? { truncationContinuation: deps.truncationContinuation }
+        : {}),
+      ...(deps.repetitionGuard !== undefined ? { repetitionGuard: deps.repetitionGuard } : {}),
       ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
       ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       ...(deps.learnedMemory !== undefined ? { learnedMemory: deps.learnedMemory } : {}),
@@ -525,6 +544,9 @@ export interface DetachedRuntimeRequest {
   agentsMd?: boolean;
   editMode?: EditMode;
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测（缺省取设置快照）
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   temperature?: number;
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）
@@ -588,6 +610,10 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.agentsMd !== undefined ? { agentsMd: surface.agentsMd } : {}),
     ...(surface.editMode !== undefined ? { editMode: surface.editMode } : {}),
     ...(surface.maxOutputTokens !== undefined ? { maxOutputTokens: surface.maxOutputTokens } : {}),
+    ...(surface.truncationContinuation !== undefined
+      ? { truncationContinuation: surface.truncationContinuation }
+      : {}),
+    ...(surface.repetitionGuard !== undefined ? { repetitionGuard: surface.repetitionGuard } : {}),
     ...(surface.temperature !== undefined ? { temperature: surface.temperature } : {}),
     ...(surface.taskDirective !== undefined ? { taskDirective: surface.taskDirective } : {}),
     ...(surface.sessionSearch !== undefined ? { sessionSearch: surface.sessionSearch } : {}),

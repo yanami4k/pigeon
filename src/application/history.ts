@@ -9,6 +9,7 @@ import {
   loadSessionView,
 } from "../persistence/session-catalog.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import { TRUNCATION_CONTINUE_PROMPT } from "../state/runaway-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
 import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
@@ -94,6 +95,11 @@ export function messageLines(
       // 进模型上下文的程序通知（打转提醒、worker 通知、脚本通知）虽以用户消息存下，回看时同实时一样显示成系统行，不像人输入的话
       if (message.role === "user" && isProgramNotice(block.text)) {
         lines.push({ kind: "notice", text: clip(block.text, entryChars) });
+        continue;
+      }
+      // 撞上限续跑（决策 367）时运行面追加的提示：同样不是人输入的话
+      if (message.role === "user" && block.text === TRUNCATION_CONTINUE_PROMPT) {
+        lines.push({ kind: "notice", text: `续跑提示：${block.text}` });
         continue;
       }
       lines.push({ kind: textKind, text: `${prefix}${clip(block.text, entryChars)}` });

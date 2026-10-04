@@ -80,6 +80,10 @@ import {
   runModelInfoRecord,
 } from "../state/model-info.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
+import type {
+  RepetitionGuardSettings,
+  TruncationContinuationSettings,
+} from "../state/runaway-config.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import {
@@ -88,7 +92,9 @@ import {
   emptySettingsSnapshot,
   memoryLimitsOf,
   modelInfoSectionOf,
+  repetitionGuardOf,
   type SettingsSnapshot,
+  truncationContinuationOf,
 } from "../state/settings.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
@@ -212,6 +218,9 @@ export interface RuntimeDeps {
   // 决策 063、347：单轮输出上限——配置了才在装配层包装 streamFn 传入 maxTokens，并写进注入快照 model 段；未配置不包装、
   // 不写（表示跟模型：按模型定义的上限发，由 provider 按剩余上下文收窄）
   maxOutputTokens?: number;
+  // 决策 367：撞上限续跑与流式重复检测的生效设定——缺省取设置快照（不给的项取缺省：都开、omp 档、掐断）；跑批器显式给出
+  truncationContinuation?: TruncationContinuationSettings;
+  repetitionGuard?: RepetitionGuardSettings;
   // M9：任务源给的系统指令（如外部基准的工作方式指令）——原样追加为 system prompt 的一段，随整段 system prompt
   // 冻结进注入快照（Run 开始条目记系统提示全文）。只说工作方式，不含任务内容；缺省不加
   taskDirective?: string;
@@ -357,6 +366,9 @@ export interface RuntimeBundle {
   frozenPrompt: FrozenSessionPrompt;
   // 决策 362：本运行面所用的模型信息（逐项带来源）与缓存规则
   modelInfo: ResolvedModelInfo;
+  // 决策 367：本运行面实际生效的撞上限续跑与流式重复检测设定（worker 按它继承）
+  truncationContinuation: TruncationContinuationSettings;
+  repetitionGuard: RepetitionGuardSettings;
 }
 
 // start/resume 共用的运行时装配：注册内置工具 + 构造适配器与会话存储写者
@@ -409,6 +421,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(access?.catalog !== undefined ? { catalog: access.catalog } : {}),
     ...(modelSection !== undefined ? { section: modelSection } : {}),
   });
+  const continuation = deps.truncationContinuation ?? truncationContinuationOf(settings);
+  const repetition = deps.repetitionGuard ?? repetitionGuardOf(settings);
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);
   if (deps.workspaceHost !== undefined) {
     const scoped = configGrants.filter((rule) => rule.pathPrefix !== undefined);
@@ -911,6 +925,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
     // 决策 264：注册了派 worker 工具时，同一次回复里的多个派出并行执行
     ...(spawnSlot !== undefined ? { parallelTools: true } : {}),
+    // 决策 367：撞上限续跑与流式重复检测（关掉的不传）
+    ...(continuation.enabled ? { truncationContinuation: continuation } : {}),
+    ...(repetition.enabled ? { repetitionGuard: repetition } : {}),
     // 决策 324：工具结束后的钩子（PostToolUse / PostToolUseFailure）——替换结果文本或把理由与上下文补进结果
     toolHooks: {
       toolFinished: async (input) => {
@@ -985,6 +1002,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     hooks: sessionHooks,
     toolTiers,
     modelInfo,
+    truncationContinuation: continuation,
+    repetitionGuard: repetition,
     frozenPrompt: {
       instructions,
       ...(pushedMemory !== undefined ? { pushedMemory } : {}),

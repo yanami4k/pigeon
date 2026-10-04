@@ -126,6 +126,10 @@ export function attachLoopGuard(
       runId = round.runId;
       detector = new LoopDetector(settings);
     }
+    // 决策 367：截断且没有工具调用的回复（续跑时从上下文去掉）不算一轮，不清零计数
+    if (round.truncated === true) {
+      return;
+    }
     const verdict: LoopVerdict = detector.observe(round);
     const stop: LoopStop = {
       count: verdict.count,

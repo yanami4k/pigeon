@@ -6,8 +6,10 @@
 import { createHash } from "node:crypto";
 import {
   approvalVerdict,
+  continuationLine,
   evalVerdictLabel,
   failureBadge,
+  repetitionLine,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
@@ -216,6 +218,10 @@ function renderRun(
       );
     } else if (item.kind === "hook") {
       lines.push(`  ${hookLine(item.data)}`);
+    } else if (item.kind === "continuation") {
+      lines.push(`  ${continuationLine(item.data)}`);
+    } else if (item.kind === "repetition") {
+      lines.push(`  ${repetitionLine(item.data)}`);
     }
   }
   for (const turn of run.turns) {

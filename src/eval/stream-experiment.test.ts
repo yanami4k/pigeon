@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  DEFAULT_REPETITION_GUARD,
+  DEFAULT_TRUNCATION_CONTINUATION,
+  repetitionGuardSettings,
+  WIDE_REPETITION_PARAMS,
+} from "../state/runaway-config.ts";
+import {
   effectivePigeonSettings,
   imageIdentityOf,
   installTerminationHandler,
@@ -57,6 +63,8 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     taskList: false,
     loopGuard: false,
     scriptOrchestration: false,
+    truncationContinuation: DEFAULT_TRUNCATION_CONTINUATION,
+    repetitionGuard: DEFAULT_REPETITION_GUARD,
   });
   assert.deepEqual(
     effectivePigeonSettings(
@@ -91,8 +99,27 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       taskList: false,
       loopGuard: false,
       scriptOrchestration: false,
+      truncationContinuation: DEFAULT_TRUNCATION_CONTINUATION,
+      repetitionGuard: DEFAULT_REPETITION_GUARD,
     }
   );
+});
+
+test("身份头记撞上限续跑与流式重复检测的实际生效值（367）：给了非缺省的（续跑关、wide 档只记录）即原样记下", () => {
+  const wideLog = repetitionGuardSettings({ mode: "log", preset: "wide" });
+  assert.ok("settings" in wideLog);
+  const continuationOff = { ...DEFAULT_TRUNCATION_CONTINUATION, enabled: false };
+  const recorded = effectivePigeonSettings(
+    { truncationContinuation: continuationOff, repetitionGuard: wideLog.settings },
+    "deepseek-flash"
+  );
+  assert.deepEqual(recorded.truncationContinuation, continuationOff);
+  assert.deepEqual(recorded.repetitionGuard, {
+    enabled: true,
+    mode: "log",
+    preset: "wide",
+    params: WIDE_REPETITION_PARAMS,
+  });
 });
 
 test("镜像身份（⑥）：按内容层（RootFS 各层摘要的有序列表）取摘要，不看本地镜像 ID——经典存储与 containerd 存储下同一镜像判为同一个；层的顺序或内容不同即不同；取不到层即报错", () => {
