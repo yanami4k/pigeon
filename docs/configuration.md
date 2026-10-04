@@ -59,7 +59,7 @@
 
 ## 按环境注册的工具
 
-会话开始时按当前环境决定注册哪些工具，只做本地检查（不连 docker、不发请求）：PATH 里找不到 docker 可执行文件不注册 `orchestrate`；工作区不是 git 仓库不注册 `spawn_worker` 那一组（`wait_workers`、`worker_status`、`message_worker`、`stop_worker`、`take_worker`）与 `orchestrate`；没有可用的搜索后端（缺 key）不注册 `web_search`；本会话所在的会话树（沿派出与分叉关系上溯到最上层，连同它派出的各级 worker 与分叉）以外没有会话时不注册会话检索三件——与检索的排除口径一致，没有合法文件头的空会话文件不算。检查在会话开局做一次，工具清单在一次会话内固定：终端界面里 `/reload` 不改变工具注册，改了搜索后端只提示一行"重启后生效"。新开会话时重查 git 仓库与历史会话；key 与 PATH 取自 Pigeon 进程的环境变量，改了要重启 Pigeon 才生效。开局没注册 `web_search` 时在终端提示一行原因。每次运行开始的记录里写明实际注册的工具，以及没注册的工具与原因，`pigeon trace` 也显示。
+会话开始时按当前环境决定注册哪些工具，只做本地检查（不连 docker、不发请求）：PATH 里找不到 docker 可执行文件不注册 `orchestrate`；工作区不是 git 仓库不注册 `spawn_worker` 那一组（`wait_workers`、`worker_status`、`message_worker`、`stop_worker`、`take_worker`）与 `orchestrate`；没有可用的搜索后端（缺 key）不注册 `web_search`；本会话所在的会话树（沿派出与分叉关系上溯到最上层，连同它派出的各级 worker 与分叉）以外没有会话时不注册会话检索三件——与检索的排除口径一致，没有合法文件头的空会话文件不算。检查在会话开局做一次，工具清单在一次会话内固定：终端界面里 `/reload` 不改变按环境判断的结果，改了搜索后端只提示一行"重启后生效"。这只针对按环境的自动判断；设置里的联网总开关 `web.enabled` 是使用者主动的开关（例如出于隐私临时关掉联网），`/reload` 之后照旧按新设置增删 `web_search` 与 `web_fetch`（见下文"联网工具的开关"）。新开会话时重查 git 仓库与历史会话；key 与 PATH 取自 Pigeon 进程的环境变量，改了要重启 Pigeon 才生效。开局没注册 `web_search` 时在终端提示一行原因。每次运行开始的记录里写明实际注册的工具，以及没注册的工具与原因，`pigeon trace` 也显示。
 
 ## 联网工具的开关
 
