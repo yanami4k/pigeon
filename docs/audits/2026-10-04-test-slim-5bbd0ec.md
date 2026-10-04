@@ -320,3 +320,24 @@
 | 28 | src/tui/session-view.test.ts | 3.2 | 7 |
 | 29 | src/tui/approval.test.ts | 3.1 | 10 |
 | 30 | src/application/protected-paths.test.ts | 3.1 | 10 |
+
+## 十、验收后的修复（015c142、ae6702e）
+
+1. 慢档的把关：
+   - `docs/testing.md` 改为交付与合并前必须跑 `npm run verify:full`，`npm run verify` 只用于开发中的快速检查。慢档里除 `src/eval` 外还有测 `src/execution`、`src/cli` 的文件，慢档的 eval 测试也会跑到 application 层的代码。
+   - `ci.yml` 的注释照实写：推送 main 与每个 PR 时跑 `verify:full`；本地合并后直推 main 时，CI 在推送之后才跑，合并前的全量验证由交付者自己跑。
+   - 慢档清单里 eval 一项的理由去掉"只在 eval 有改动时与合并前跑"。
+   - 快档补回 `runtime-web-tools`「跑批器各条件不注册联网工具，也不派 worker」（`STREAM_WEB_TOOLS`、`STREAM_SPAWN_WORKERS` 为 false）。第四节删掉同名测试后，这一行为只剩慢档的 `stream-experiment` 在测。
+2. 用产品函数生成期望值、等于拿函数和自己比的断言，改为字面片段：
+   - `orchestration-ui`「补批续做…」：发给 worker 的话以"人已批准你之前等待审批的调用（跑命令 npm test）。"开头，含"请重新发起这个调用"，人另附的话另起一行在后。
+   - `take-worker-tool`「已叠入…」：叠入的文件与个数、冲突为 0 时不给查看命令、删除个数非零时写"worker 删除的文件（1，未删）：d.txt。"。模板原文在冲突那条逐字检查，那条删除个数为 0。
+   - `workers`「之前运行的 worker…」：哪个 worker、中断还是已收尾，以及"无需取消""收不到消息"。
+   - 同类的 `runtime-edit-mode` 截断引导补一处字面片段："输出上限未执行……拆成几次较小的调用重发，不要原样重发"。
+3. 题面说明句按定稿处理（决策 239：题面是实验输入，措辞冻结）：`stream-manifest.test.ts` 新增「题面说明句逐字冻结（239）…」，两种格式、两段名单的说明句各逐字检查一处。
+4. 补回两处直接断言：
+   - `stream-runner`「固定起点…」：agent 第 1 步写一个被 `.gitignore` 忽略的 `build/out.txt`，断言第 5 步开工时它不在。
+   - `stream-runner`「lint 环境按该步人的提交切换…」：恢复跑两步，核对两步取到的提交不同、且各等于该步的提交。
+   - `adapter-grants` 不变式⑦（授权生效期间熔断照样触发）不补：熔断由上游的拦截计数触发，放权不在这条路径上；熔断触发与 hook 从未运行由 `adapter-tools`「幽灵工具名熔断…」断言，熔断分类由 `classification`「aborted 有熔断记录…」断言。
+5. `scripts/run-tests.mjs`：给了文件或 glob（不以 `-` 开头、以 `.ts` 结尾或含通配符的参数）就只跑这些文件、不分档，匹配不到即报错；其余参数原样交给 node --test。`docs/testing.md` 写明用 `npm run test -- <文件或 glob…>` 只跑某几个文件。
+
+验证：验证服务器上 `npm run verify:full` 全过，测试项 1580（通过 1578，跳过 2）。当时服务器上另有测试在跑，并发取 3，用时不作计时数字。
