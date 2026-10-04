@@ -46,6 +46,12 @@ export interface HostExecOptions {
   stdin?: string;
 }
 
+export interface OutputFileIdentity {
+  dev: string;
+  ino: string;
+  sha256: string;
+}
+
 export interface HostExecResult {
   // 进程是否已启动（启动后出错或超时，副作用都可能已经发生）
   spawned: boolean;
@@ -65,6 +71,9 @@ export interface HostExecResult {
   outputLines?: number;
   // 决策 356：全量输出已写进 fullOutput.path；partial 为超过写入上限，只写了前面部分
   fullOutputSaved?: { bytes: number; partial: boolean };
+  // 写下的落盘文件的身份：打开后 fstat 得到的设备号与 inode（十进制字符串），与实际写入字节的 sha256；
+  // 落盘存储据此只认 Pigeon 自己写下的内容
+  fullOutputFile?: OutputFileIdentity;
   // 决策 356：给了 fullOutput 但未能保存（磁盘满、文件已在或被换成链接等）的原因；此时照常给出头尾
   fullOutputError?: string;
   // 分开的两路输出开头（各自截到实现上限：本机与容器都是 64 KiB）；需要区分 stdout 与 stderr 的调用方用（钩子协议），

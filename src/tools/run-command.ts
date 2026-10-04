@@ -519,18 +519,28 @@ export function createRunCommandTool(
         maxOutputBytes: headBytes,
         ...(tailBytes > 0 ? { tailBytes } : {}),
         ...(slot !== undefined && store !== undefined
-          ? { fullOutput: { path: slot.file, maxBytes: store.maxBytes } }
+          ? { fullOutput: { path: slot.temp, maxBytes: store.maxBytes } }
           : {}),
         signal,
       });
-      const saved =
-        slot !== undefined && run.fullOutputSaved !== undefined
-          ? { uri: slot.uri, ...run.fullOutputSaved }
-          : undefined;
-      if (slot !== undefined && saved !== undefined) store?.commit(slot);
+      // 写成即改名并记进索引；写到一半出错的删掉临时文件、编号照常前进
+      let saved: ExecEvidence["savedOutput"];
+      let saveError = slotError ?? run.fullOutputError;
+      if (slot !== undefined && store !== undefined) {
+        if (run.fullOutputSaved !== undefined && run.fullOutputFile !== undefined) {
+          try {
+            store.commit(slot, { bytes: run.fullOutputSaved.bytes, ...run.fullOutputFile });
+            saved = { uri: slot.uri, ...run.fullOutputSaved };
+          } catch (error) {
+            saveError = error instanceof Error ? error.message : String(error);
+          }
+        } else if (run.fullOutputError !== undefined) {
+          store.discard(slot);
+        }
+      }
       const savedOutputError =
         run.tail !== undefined && saved === undefined && store !== undefined
-          ? (slotError ?? run.fullOutputError)
+          ? saveError
           : undefined;
       const evidence: ExecEvidence = {
         command,
