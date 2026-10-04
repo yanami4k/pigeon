@@ -200,3 +200,89 @@ adapter（`src/pi-runtime/adapter.ts`）新增可选的 `status` 选项（`Statu
 ## 含本审计的提交上的 verify
 
 - 提交 d0ca59f（在 24bf492 之上只加本审计文件），同一台服务器：`npm run lint`、`npm run check`、`npm run deps`（578 个模块，无违规）通过；测试分两批前台运行：application、tui、cli 580 项全过（并发 3）；其余目录 1,056 项，通过 1,054，跳过 2（并发 6）。合计 1,636 项，通过 1,634，失败 0，跳过 2。
+
+## 后续修正（e9b4a20 之后）
+
+在 e9b4a20 之上的新提交：98f416d、7f5b5ef、dd59680（格式）、6678a80、31774f4（测试）。已有提交不改写。
+
+### 一、轮间压缩之后一定重发完整块（`src/pi-runtime/adapter.ts`）
+
+原来只在有工具结果的那一轮把状态留到轮间交。没有工具结果的一轮如果因为通知或排队的输入接着跑，在这时触发的压缩之后，上游已经有待交的消息，不会再取 steer 队列，所以下一次请求不带状态块。现在只要轮间压缩完成（且没有被中断、钩子也没有要求停止），就把完整块直接放进压缩后上下文的末尾（排在待交的通知与输入之前），同时记进会话记录、占本 Run 一个条目序号，并补进压缩后的消息（Run 结束后按会话树还原；读不到会话树时退回的那一份也带着它）。压缩前后都有工具结果时，这一轮不再另外 steer 状态，通知照旧 steer。
+
+### 二、已发的状态记进会话记录（`status-block.ts`、`session-entries.ts`、`runtime.ts`、`session-runtime.ts`、`workers.ts`、`fork.ts`、`headless-core.ts`）
+
+- 状态消息带结构化标记：消息对象上的 `pigeonStatus: true` 随消息原样存进会话记录，在 convertToLlm 包一层，交给模型之前去掉（交给 provider 的请求不带这个字段）。
+- 已发的状态由各节正文换成各节**原文（转义前）的 sha256**。通道给出一份之后先挂着，等那条消息真正进了会话记录（adapter 在 message_end 认出标记，或者第一项直接写入时）才算发出。每次发出都写一条自定义条目 `pigeon.status`（`{version, sections: 节名 → 哈希}`，schema 已登记进 `SESSION_ENTRY_SCHEMAS`；session-view 的时间线不显示它）。挂着的追加没进记录就被中止时，下一次照旧和上一份发出的比对；挂着的是完整块时，下一次仍给完整块。
+- 起点：/reload 接着旧运行面最后发出的那一份（不再被还原覆盖，原先 `restoreFrom` 这一步已删除）；续跑、worker 续做、分叉续跑取会话记录主分支上最后一条 `pigeon.status`；都没有时首次给完整块。
+- 模型自己用 update_memory 写成记忆时，当场按写后的「记忆」一节记成已发，并写一条 `pigeon.status`。所以 /reload 之后、续跑之后都不会回显。
+- 从消息正文反推状态的 `statusFromMessages` 与反转义已删除。
+
+### 三、Skill 变动在每次请求之前比一次（`src/skills/catalog.ts`、`runtime.ts`）
+
+新增 `skillTreeFingerprint(roots)`：对各 Skill 根下目录与文件的相对路径、大小、修改时间做 stat，不读正文；符号链接不跟随，与登记时一致。每次登记时记一份；轮间每次请求之前比一次，变了才重取文件类各节、重新登记。load_skill 拒绝时说的「下一次请求之前会重新登记」因此不依赖写档、命令档工具。
+
+### 四、防注入转义加固，比对改用原文哈希（`status-block.ts`、`worker-notices.ts`）
+
+`escapeStatusText` 先做检测视图：去掉 Cf 类字符（U+200B、U+2060、U+00AD 等），逐字 NFKC 归一（全角＜、小号﹤等），解开 `<` 的实体（`&lt;`、`&#60;`、`&#x3c;`，不分大小写，前导零与缺分号都认）。视图里出现 `<pigeon-` 或 `</pigeon-`（允许空白）时，转义原文里对应的开头：尖括号转成 `&lt;`，实体形态的把 `&` 转成 `&amp;`。其余原样保留。比对用原文哈希，不再反转义，所以正文里本来就有 `&lt;pigeon-` 的，每次续跑、分叉都不会多追加一节。worker 通知整段走同一转义（摘要来自 worker 的输出，同样进用户消息的正文）。
+
+### 五、读会话的地方按标记认，旧会话续跑加一句（`state/status-text.ts`、`history.ts`、`recent-sessions.ts`、`session-search-text.ts`、`fork-command.ts`）
+
+- 会话列表的第一句、会话检索、回看、缺省分叉点改为按消息上的标记认状态消息（`isStatusMessage`），不看正文开头。人输入的话即使以 `<pigeon-status>` 开头也算人说的。按正文开头辨认的 `isStatusText` 移进测试设施 `status-fixtures.ts`，只用来从交给模型的请求里辨认（请求里没有标记）。
+- 沿用的系统提示里没有权威层级说明（旧会话：带人写的说明，还带「开局冻结」的旧说法）时，本运行面首次给出的完整块在开头说明之后另加一句（见下方文字）。从会话记录接着比对的不加。
+
+### 六、worker 续做、git 状态、身份头（`workers.ts`、`status-sources.ts`、`eval/stream-*.ts`）
+
+- worker 续做沿用会话记录里最后一个 Run 开始条目记下的系统提示，状态起点取记录里最后一条 `pigeon.status`。分叉续跑的起点同样取分支会话记录。
+- git status 加 `--no-optional-locks`（与 exec-speed 同一口径，合并时接到其 git 子过程参数上），在 C 语言环境下运行（报错按英文原文归类）。取不到时如实写原因：没装 git、超时、仓库属主不符（dubious ownership）、其余取报错的第一行（截到 200 字）。只有 git 说不是仓库时才写「不是 git 仓库。」。执行端（容器）一侧同样处理。
+- 跑批身份头 `agents.pigeon` 加 `statusBlockVersion`（取 `STATUS_BLOCK_VERSION`，现为 v1）。看板或状态块的文字一改即升版本，续跑判为不同。加这一项之前写下的身份头没有它，续跑即判为不同。
+
+### 七、注释
+
+`memory/pushed.ts`、`memory/update-memory-tool.ts` 文件头改为记忆文字 v3、记忆在开工状态块的「记忆」一节。同样仍写着「推入系统提示」的 `runtime.ts`、`headless-core.ts`、`memory/agents-md.ts`、`memory/learned.ts` 的注释一并改正。
+
+### 模型可见文字（新增）
+
+- 旧会话续跑时完整块开头另加的一句：「以本状态块为准：此前系统提示里「会话开始时读取并冻结」「下个会话才生效」一类的说法已不适用。」
+- 「git 状态」一节取不到时：「取不到 git 状态：没有装 git（找不到 git 程序）」「取不到 git 状态：git status 超过 10 秒没有结束」「取不到 git 状态：仓库属主与当前用户不同，git 拒绝读取（dubious ownership；需把该目录加进 safe.directory）」「取不到 git 状态：git 报错：<报错第一行>」「取不到 git 状态：git status 没有成功，也没有报错输出」「取不到 git 状态：执行端出错：<原因>」。
+- worker 通知里构成 pigeon 标签的开头被转义（其余文字不变）。
+
+### 已知边界（后续修正）
+
+- Skill 指纹只看大小与修改时间：改动之后大小与修改时间都不变的（例如手工把修改时间改回去），要等写档、命令档工具之后或下一个 Run 才重新登记。
+- 转义结果里的 `&lt;pigeon-` 本身也是实体形态：若对同一段文字再转义一次，会变成 `&amp;lt;pigeon-`。各处都只转义一次。
+
+### 测试
+
+现有测试的改动：
+
+- `status-block.test.ts` 改写：按新接口（哈希、`delivered`、`statusFromEntries`）重写原有三项。防注入一项改为核对模型可见的尖括号标签（开头一句说明里提到的追加标签算在内），不再核对反推出的状态。
+- `status-channel.test.ts`：原来手工拼的「读会话的地方跳过状态块」一项改为端到端（见下）；旧会话续跑一项加断言：完整块第三行是那一句。
+- `fork.test.ts`、`headless-hooks.test.ts`、`previous-workers.test.ts`、`resume.test.ts`、`script-wiring.test.ts`、`session-store.test.ts`、`spawn-worker-headless.test.ts`、`cli/run-cli.test.ts`、`cli/trace-workers.test.ts`：`isStatusText` 改从 `status-fixtures.ts` 引入，判定不变。
+- `eval/stream-experiment.test.ts`：身份头的期望值加 `statusBlockVersion: "v1"`。
+
+新增测试：
+
+- `status-block.test.ts`：零宽字符、软连字符、全角与小号尖括号、`&lt;` / `&LT;` / `&#60;` / `&#x3C;` / `&#0060;` 逐例转义且只动对应的开头；worker 通知与状态块同一转义；正文含 `&lt;pigeon-` 时经会话记录条目往返三次只在首次给完整块；发出以进了会话记录为准（追加、完整块各一种中止情形）；模型写的记忆记成已发；旧会话的那一句只在首次完整块出现；从会话记录还原取最后一条、丢掉不认识的节名。
+- `status-channel.test.ts`：/reload 之后不重发完整块、不回显模型自己写的记忆，再续跑同样不回显；没有工具结果、因通知接着跑的一轮触发的压缩之后，下一次请求的末尾是完整块加通知；Skill 在两次请求之间被改（只经只读工具），load_skill 读到新内容；端到端的读会话一项：人输入的以 `<pigeon-status>` 开头的话是会话列表的第一句、进检索、是缺省分叉点、回看显示成人说的，状态消息带标记存进记录，交给模型的请求里没有标记。
+- `status-sources.test.ts`（新文件）：git 失败按情形写原因；不在仓库里的目录认作不是仓库，不认作取不到；git status 参数以 `--no-optional-locks status` 开头。
+
+### 变异（后续修正）
+
+在服务器上逐个改坏判定，跑 status-block、status-channel、runtime-pushed-memory、settings-reload 四个测试文件；每个变异做完都还原，还原后工作区干净。
+
+| 变异 | 变红的测试文件 |
+|---|---|
+| 1 轮间压缩之后不直接放进完整块 | status-channel |
+| 2a /reload 不接旧运行面发出的一份 | status-channel、settings-reload |
+| 2b 续跑不从会话记录取 | status-channel |
+| 2c 模型写的记忆记成已发，但不写进会话记录 | status-channel |
+| 2d 发出时不写进会话记录 | status-channel |
+| 4a 不去掉 Cf 类字符 | status-block |
+| 4b 不做 NFKC 归一 | status-block |
+| 4c 不解开实体 | status-block |
+| 4d 比对用转义后的正文的哈希 | status-block |
+| 4e worker 通知不转义 | status-block |
+
+### verify（后续修正）
+
+- 提交 31774f4，同一台服务器：`npm run lint`（550 个文件，无问题）、`npm run check`、`npm run deps`（579 个模块，无违规）通过。测试分两批前台运行（并发 6）：application、tui、cli 591 项全过；其余目录 1,056 项，通过 1,054，跳过 2。合计 1,647 项，通过 1,645，失败 0，跳过 2。
