@@ -182,7 +182,7 @@ test("现状快照：分叉时没有任何快照也能给出当前文件状态�
   }
 });
 
-test("同一秒内的改动、长度不变也打出快照：临时索引沿用真索引的修改时间，git 照常对这类条目重新比内容", () => {
+test("同一秒内的改动、长度不变也打出快照：临时索引沿用真索引的修改时间，git 照常对这类条目重新比内容", async () => {
   const { dir, cleanup } = repo();
   try {
     // 用固定的时间戳造出"改动与上次入索引同在一秒"，不靠卡真实的秒边界：关掉 ctime 比对后，git 判断文件改没改
@@ -194,10 +194,10 @@ test("同一秒内的改动、长度不变也打出快照：临时索引沿用�
     git(dir, ["update-index", "-q", "--refresh"]);
     utimesSync(index, second, second);
     const checkpointer = createCheckpointer({ workspaceRoot: dir, sessionId: newSessionId() });
-    checkpointer.beforeChange();
+    await checkpointer.beforeChange();
     writeFileSync(join(dir, "a.txt"), "two\n");
     utimesSync(join(dir, "a.txt"), second, second);
-    const snapshot = checkpointer.afterChange();
+    const snapshot = await checkpointer.afterChange();
     assert.ok(snapshot !== undefined, "改动被看见");
     assert.equal(git(dir, ["show", `${snapshot.commit}:a.txt`]), "two\n");
   } finally {

@@ -18,8 +18,8 @@ import { UPDATE_MEMORY_TOOL } from "../memory/update-memory-tool.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import type { DelegatedPolicy, ToolScope, WorkerRole } from "../state/session-payloads.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
-import { READ_ONLY_SEARCH_TOOLS } from "../tools/search-tools.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
+import { READ_ONLY_SEARCH_TOOLS } from "../tools/search-tools.ts";
 import {
   commandPrefixWords,
   normalizeScopePath,
