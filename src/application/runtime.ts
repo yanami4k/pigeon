@@ -578,7 +578,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       ...(deps.previousJobs !== undefined ? { firstId: deps.previousJobs.lastId } : {}),
     });
   // 崩溃后下次启动：按记录清理上一进程留下的作业（后台进行，每个进程一次）
-  void cleanupOrphanedJobsOnce(governanceRoot, deps.storeWarn);
+  void cleanupOrphanedJobsOnce(governanceRoot, deps.storeWarn, workspaceHost.dockerPrefix);
   const reads = new FileReadTracker();
   const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
   const configGrants = deps.configGrants ?? configGrantRulesOf(settings);

@@ -30,6 +30,7 @@ import { localProcessRecord } from "./process-identity.ts";
 import {
   killProcessTree,
   processGroupSpawnOptions,
+  sweepProcessGroup,
   trackChild,
   untrackChild,
 } from "./process-tree.ts";
@@ -144,7 +145,7 @@ export function createLocalWorkspaceHost(
       createWorkspaceFile(resolvedPath, content);
     },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
-    startJob: (plan, jobOptions) => startLocalJob(plan, workspaceRoot, jobOptions, platform),
+    startJob: (plan, jobOptions) => startLocalJob(plan, workspaceRoot, jobOptions),
     async listFiles(limit) {
       return scanLocalFiles(workspaceRoot, limit);
     },
@@ -574,14 +575,10 @@ function runLocalProcess(
 }
 
 // 决策 365：本机后台作业。Linux/macOS 以独立进程组拉起、停止时对整组发 SIGKILL；Windows 停止时杀进程树。环境里带标记
-// （崩溃后清理时核对）。进程退出后孙进程仍占着输出管道时，宽限过后销毁管道、按退出码结束。Pigeon 正常退出时与其他
-// 子进程一同终止（process-tree.ts 的兜底）
-function startLocalJob(
-  plan: HostExecPlan,
-  cwd: string,
-  options: HostJobOptions,
-  platform: NodeJS.Platform
-): HostJob {
+// （崩溃后清理时核对）。组长退出后，组里（Windows 为进程树里）还有它放到后台的子孙（x &、nohup）的照样杀掉，确认清空
+// 之后作业才算结束（记录随之删掉，这些子孙不会逃过停止与崩溃清理）；仍占着输出管道的，宽限过后销毁管道。Pigeon 正常
+// 退出时与其他子进程一同终止（process-tree.ts 的兜底）
+function startLocalJob(plan: HostExecPlan, cwd: string, options: HostJobOptions): HostJob {
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(plan.program, plan.args, {
@@ -606,6 +603,9 @@ function startLocalJob(
   child.stderr?.on("data", (chunk: Buffer) => options.onOutput(chunk));
   const done = new Promise<HostJobExit>((resolve) => {
     let settled = false;
+    let exited: HostJobExit | undefined;
+    let swept = false;
+    let closed = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
     const settle = (exit: HostJobExit): void => {
       if (settled) return;
@@ -614,18 +614,31 @@ function startLocalJob(
       untrackChild(child);
       resolve(exit);
     };
+    // 组长已退出、组里已清空、输出已收完（或宽限已过）才结束
+    const ready = (): void => {
+      if (exited !== undefined && swept && closed) settle(exited);
+    };
     child.on("error", (error: NodeJS.ErrnoException) => {
       if (child.pid === undefined) settle({ exitCode: null, spawnError: error });
     });
     child.on("exit", (code, signal) => {
-      grace = setTimeout(() => {
-        child.stdout?.destroy();
-        child.stderr?.destroy();
-        settle({ exitCode: code, ...(signal !== null ? { signal } : {}) });
-      }, KILL_GRACE_MS);
+      exited = { exitCode: code, ...(signal !== null ? { signal } : {}) };
+      const pid = child.pid;
+      void (pid !== undefined ? sweepProcessGroup(pid) : Promise.resolve()).then(() => {
+        swept = true;
+        grace = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          closed = true;
+          ready();
+        }, KILL_GRACE_MS);
+        ready();
+      });
     });
     child.on("close", (code, signal) => {
-      settle({ exitCode: code, ...(signal !== null ? { signal } : {}) });
+      exited ??= { exitCode: code, ...(signal !== null ? { signal } : {}) };
+      closed = true;
+      ready();
     });
   });
   return {
@@ -635,7 +648,7 @@ function startLocalJob(
       await done;
     },
     record: async () =>
-      child.pid === undefined ? undefined : localProcessRecord(child.pid, options.marker, platform),
+      child.pid === undefined ? undefined : localProcessRecord(child.pid, options.marker),
   };
 }
 

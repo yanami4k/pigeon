@@ -4,7 +4,7 @@
 // .git 时改用全量扫描并注明，嵌套仓库里的改动照常报出，SHA-256 仓库照常取证。决策 365：超时与后台作业的停止按组与标记杀、
 // 不重启容器。用计数版的假 docker（在本机执行）数次数
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -27,7 +27,7 @@ import { WorkspaceWriteRefusedError } from "../tools/paths.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { createReplaceEditTool } from "../tools/replace-edit.ts";
 import { createRunCommandTool, RunCommandTimeoutError } from "../tools/run-command.ts";
-import { createContainerWorkspaceHost } from "./container-host.ts";
+import { createContainerWorkspaceHost, KILL_MARKED_SCRIPT } from "./container-host.ts";
 import { localDockerHost } from "./local-docker-fixtures.ts";
 
 const COUNTING_DOCKER = `
@@ -332,8 +332,9 @@ test("容器超时：按组与标记杀掉命令连同孙进程，不重启容�
     const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host });
     await assert.rejects(
       tool.execute("t", { command: "sh spawn.sh", timeout_seconds: 1 }, undefined),
+      // 命令后的取证照取：命令写下的 child.pid 出现在新增里
       (error: unknown) =>
-        error instanceof RunCommandTimeoutError && /新增 1 \/ 删除 0/.test(error.message)
+        error instanceof RunCommandTimeoutError && error.message.includes("child.pid")
     );
     await until(() => !alive(Number(readFileSync(pidFile, "utf8"))));
     assert.equal(h.restarted(), false);
@@ -375,5 +376,72 @@ test("容器里的后台作业：job_kill 按组与标记停掉，孙进程一�
     await jobs.killAll("aborted");
     h.cleanup();
     rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test("容器里的后台作业：组长退出后，它放到后台的子孙随作业结束一并清掉", {
+  skip: LINUX ? false : "按 /proc 查杀",
+}, async () => {
+  const h = counted();
+  const state = mkdtempSync(join(tmpdir(), "pigeon-round-trips-jobs-"));
+  const jobs = new SessionJobs({
+    sessionId: "s1",
+    host: h.host,
+    store: new CommandOutputStore({
+      base: state,
+      outputsRoot: join(state, "outputs"),
+      sessionId: "s1",
+      maxBytes: 1024 * 1024,
+    }),
+    pool: new JobPool({ total: 2 }),
+    perSession: 2,
+    outputMaxBytes: 1024 * 1024,
+  });
+  try {
+    const pidFile = join(h.root, "child.pid");
+    writeFileSync(join(h.root, "spawn-exit.sh"), `sleep 300 &\necho $! > '${pidFile}'\n`);
+    const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host, jobs });
+    await tool.execute("b", { command: "sh spawn-exit.sh", background: true }, undefined);
+    assert.equal(await jobs.wait(jobs.get("j1"), 30_000), true);
+    await until(() => !alive(Number(readFileSync(pidFile, "utf8"))));
+  } finally {
+    await jobs.killAll("aborted");
+    h.cleanup();
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test("按标记查杀：带 script 时另杀命令行里 run 之后紧跟标记的观测脚本，不带时不动它；别的写法与脚本自己都不杀", {
+  skip: LINUX ? false : "按 /proc 查杀",
+}, async () => {
+  const marker = "12".repeat(12);
+  const started: number[] = [];
+  const decoy = (word: string): number => {
+    const child = spawn("sh", ["-c", "sleep 300", "sh", word, marker], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    started.push(child.pid as number);
+    return child.pid as number;
+  };
+  try {
+    const observer = decoy("run");
+    const other = decoy("other");
+    const kill = (flag: string) =>
+      execFileSync("sh", ["-c", KILL_MARKED_SCRIPT, "sh", marker, flag], { encoding: "utf8" });
+    kill("");
+    assert.ok(alive(observer) && alive(other));
+    kill("script");
+    await until(() => !alive(observer));
+    assert.ok(alive(other));
+  } finally {
+    for (const pid of started) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // 已结束
+      }
+    }
   }
 });

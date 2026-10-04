@@ -112,7 +112,7 @@ function fakeDocker(mode: string) {
 function killCallOf(calls: string[][], marker: string): string[] | undefined {
   return calls.find(
     (call) =>
-      call[0] === "exec" && call.some((arg) => arg.includes("/proc/")) && call.at(-1) === marker
+      call[0] === "exec" && call.some((arg) => arg.includes("/proc/")) && call.at(-2) === marker
   );
 }
 
@@ -166,6 +166,33 @@ test("容器执行端（替身）：中止信号与超时同一条路——按�
       calls.some((call) => call[0] === "restart"),
       false
     );
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test("容器执行端（替身）：中止落在命令开始之前，连观测脚本一起按标记查杀（命令不会再被起来）", async () => {
+  const fake = fakeDocker("hang");
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    const observed = fake.host.execObserved;
+    assert.ok(observed !== undefined);
+    await assert.rejects(
+      observed(
+        { program: "sleep", args: ["300"], verbatim: false },
+        execOptions({ signal: controller.signal }),
+        100
+      ),
+      ContainerHostError
+    );
+    // 客户端当即断开，观测那次调用可能来不及记下：看按标记查杀的那次——带上了标记与 script
+    const calls = fake.calls();
+    const kill = calls.find(
+      (call) => call[0] === "exec" && call.some((arg) => arg.includes("/proc/"))
+    );
+    assert.equal(kill?.at(-1), "script", JSON.stringify(calls));
+    assert.ok(/^[0-9a-f]{24}$/.test(kill?.at(-2) ?? ""), JSON.stringify(calls));
   } finally {
     fake.cleanup();
   }

@@ -761,6 +761,7 @@ function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {
   return {
     run: (task) => {
       halted = false;
+      bundle.jobs?.beginRun();
       return runSettlingJobs(
         bundle,
         () => adapter.run(task),
@@ -831,6 +832,7 @@ function pendingHandle(ready: Promise<RuntimeBundle>): WorkerRuntimeHandle {
         return { status: "aborted" };
       }
       halted = false;
+      current.jobs?.beginRun();
       return runSettlingJobs(
         current,
         () => current.adapter.run(task),

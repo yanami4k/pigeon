@@ -481,7 +481,9 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       if (stopped() && (jobs?.running().length ?? 0) > 0) {
         drainInterrupted = true;
       }
-      if (jobs !== undefined && jobs.list().length > 0 && !stopped()) {
+      // 运行没有正常结束（出错、中止）：不进收尾轮，作业随运行面释放停掉并记下，终态保持原样
+      const completed = (latest as { status?: unknown } | undefined)?.status === "completed";
+      if (jobs !== undefined && completed && jobs.list().length > 0 && !stopped()) {
         const { last } = await settleBackgroundJobs({
           jobs,
           target,

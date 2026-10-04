@@ -109,31 +109,42 @@ export interface ContainerHostOptions {
 }
 
 const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
-// 按标记杀（经 trustedShell 执行）：$1 为标记值。逐个看 /proc 下的进程，环境里带这个标记的，若是进程组组长（setsid 起的
-// 命令）即杀整组，再杀它本身；扫两遍（第一遍杀的过程中新起的进程）。脚本自己的进程不带标记
-export const KILL_MARKED_SCRIPT = [
-  `m="${RUN_MARKER_VAR}=$1"`,
-  "for pass in 1 2; do",
-  "  for p in /proc/[0-9]*; do",
-  '    tr "\\0" "\\n" < "$p/environ" 2>/dev/null | grep -qxF -- "$m" || continue',
+// 按标记杀的函数 km：$1 为标记值。逐个看 /proc 下的进程，环境里带这个标记的，若是进程组组长（setsid 起的命令）即杀整组，
+// 再杀它本身；$2 非空时另杀命令行里"run"之后紧跟这个标记的进程（观测脚本本身：中止落在命令开始之前时，杀掉它，命令就
+// 不会再被起来）。扫两遍（第一遍杀的过程中新起的进程）；跳过本脚本自己，它的命令行里标记前面不是"run"
+const KILL_MARKED_FUNCTION = [
+  "km() {",
+  `  m="${RUN_MARKER_VAR}=$1"`,
+  "  for pass in 1 2; do",
+  "    for p in /proc/[0-9]*; do",
   // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
-  '    pid="${p#/proc/}"',
-  '    g="$(sed "s/.*) //" "$p/stat" 2>/dev/null | cut -d " " -f 3)"',
-  '    [ "$g" = "$pid" ] && kill -s KILL -- "-$pid" 2>/dev/null',
-  '    kill -s KILL "$pid" 2>/dev/null',
+  '      pid="${p#/proc/}"',
+  '      [ "$pid" = "$$" ] && continue',
+  '      if tr "\\0" "\\n" < "$p/environ" 2>/dev/null | grep -qxF -- "$m"; then :',
+  `      elif [ -n "$2" ] && tr "\\0" "\\n" < "$p/cmdline" 2>/dev/null | awk -v m="$1" 'q == "run" && $0 == m { f = 1 } { q = $0 } END { exit !f }'; then :`,
+  "      else continue; fi",
+  '      g="$(sed "s/.*) //" "$p/stat" 2>/dev/null | cut -d " " -f 3)"',
+  '      [ "$g" = "$pid" ] && kill -s KILL -- "-$pid" 2>/dev/null',
+  '      kill -s KILL "$pid" 2>/dev/null',
+  "    done",
   "  done",
-  "done",
-  "exit 0",
+  "}",
 ].join("\n");
+// 按标记杀（经 trustedShell 执行）：$1 为标记值，$2 非空时连观测脚本一起杀
+export const KILL_MARKED_SCRIPT = [KILL_MARKED_FUNCTION, 'km "$1" "$2"', "exit 0"].join("\n");
 // 决策 365：后台作业的包装（agent 命令的执行通道，不经 trustedShell）：$1 为标记，其后为程序与参数。setsid 与 env 从系统
-// 目录解析，命令以原来的 PATH、空标准输入、带标记的环境另起进程组（没有 setsid 时不另起组，仍按标记查杀），等它结束、
-// 以它的退出码结束
+// 目录解析，命令以原来的 PATH、空标准输入、带标记的环境另起进程组（没有 setsid 时不另起组，仍按标记查杀），等它结束；
+// 它放到后台还占着输出的子孙（x &、nohup）随即按组与标记杀掉，作业结束时不留进程。以它的退出码结束
 const JOB_SCRIPT = [
+  KILL_MARKED_FUNCTION,
   'R="$1"; shift',
   `S="$(PATH="${SYSTEM_PATH}:$PATH"; command -v setsid 2>/dev/null)"`,
   `E="$(PATH="${SYSTEM_PATH}:$PATH"; command -v env 2>/dev/null)" || E=env`,
   `if [ -n "$S" ]; then "$S" "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & else "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & fi`,
-  'wait "$!"',
+  'c=$!; wait "$c"; rc=$?',
+  'kill -s KILL -- "-$c" 2>/dev/null',
+  `( PATH="${SYSTEM_PATH}:$PATH"; km "$R" )`,
+  'exit "$rc"',
 ].join("\n");
 // 决策 365：超时或中止按标记杀过之后，等客户端自己结束的宽限（观测脚本还要做命令后的取证，另按辅助调用的限时）
 const KILL_GRACE_MS = 5000;
@@ -744,9 +755,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     });
 
   // 决策 365：按标记杀容器里的进程（超时、中止、后台作业的停止）；容器不可用等失败不抛，调用方另有兜底
-  const killMarked = async (marker: string): Promise<void> => {
+  const killMarked = async (marker: string, withScript = false): Promise<void> => {
     try {
-      await helper(false, trustedShell(KILL_MARKED_SCRIPT, marker));
+      await helper(false, trustedShell(KILL_MARKED_SCRIPT, marker, withScript ? "script" : ""));
     } catch {
       // 交给调用方的兜底（强行断开客户端）
     }
@@ -937,7 +948,8 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           forceClose();
           return;
         }
-        terminating = killMarked(marker);
+        // 命令开始之前（观测脚本还在取证）：连观测脚本一起按标记杀，命令就不会再被起来；命令之后的取证卡住只断开客户端
+        terminating = killMarked(marker, observed?.phase === "pre");
         if (observed !== undefined && observed.phase !== "cmd") {
           forceClose();
           return;
@@ -1117,6 +1129,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   return {
     platform: "linux",
     root,
+    dockerPrefix: docker,
     startJob,
     // 每次现做一次检视（读文件、受保护路径判定都经这里）
     async resolveExisting(inputPath) {

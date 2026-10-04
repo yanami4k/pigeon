@@ -41,6 +41,50 @@ export function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): vo
   }
 }
 
+// 决策 365：组长退出之后的清扫——它放到后台的子孙（x &、nohup）还在的，照样杀掉，等组里（Windows 为进程树里）没有进程了
+// 才返回（至多等 5 秒）。Linux/macOS 按进程组：组里还有进程即对整组发 SIGKILL；Windows 组长退出后子进程的父进程号仍指向它，
+// 按父进程号逐层找出子孙，逐个终止
+export async function sweepProcessGroup(pid: number): Promise<void> {
+  if (process.platform === "win32") {
+    await killWindowsDescendants(pid);
+    return;
+  }
+  const alive = (): boolean => {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  };
+  if (!alive()) return;
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // 组已不在
+  }
+  for (let round = 0; round < 100 && alive(); round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function killWindowsDescendants(pid: number): Promise<void> {
+  const script =
+    "$all = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId; " +
+    `$set = @(${pid}); $grew = $true; ` +
+    "while ($grew) { $grew = $false; foreach ($p in $all) { " +
+    "if (($set -contains $p.ParentProcessId) -and -not ($set -contains $p.ProcessId)) { $set += $p.ProcessId; $grew = $true } } }; " +
+    `$set | Where-Object { $_ -ne ${pid} } | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`;
+  return new Promise((resolve) => {
+    execFile(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 15_000 },
+      () => resolve()
+    );
+  });
+}
+
 function tryKill(child: ChildProcess, signal: NodeJS.Signals): void {
   try {
     child.kill(signal);
