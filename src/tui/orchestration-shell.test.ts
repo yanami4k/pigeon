@@ -2,10 +2,10 @@
 // worker 不刷新状态行"；决策 301 起显示在编排面板）；完成通知到来时主 agent 空闲即叫醒跑一轮、在跑时等这一轮结束再接着跑；/tasks 查看任务清单；
 // worker 的请示等满时限被撤回时审批面板撤下。
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterAll, test } from "vitest";
 import type { SpawnRequest, WorkerOutcome, WorkerStatus } from "../application/workers-commands.ts";
 import type { RunResult, StreamTextDelta } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
@@ -13,6 +13,17 @@ import { newRunId, newSessionId, type SessionId } from "../state/ids.ts";
 import { APPROVAL_WITHDRAWN } from "./approval.ts";
 import { PigeonTuiShell, type TuiRuntimeFace, type TuiWorkersFace } from "./shell.ts";
 import { MockTerminal, screenFlat, settle } from "./testing.ts";
+
+// 本文件建的临时目录在全部测试之后删掉（不靠进程退出时的清理）
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 function runResult(): RunResult {
   return {
@@ -121,7 +132,7 @@ function shellWith(options: {
     terminal: term,
     runtime: options.runtime,
     sessionId: newSessionId(),
-    logDir: mkdtempSync(join(tmpdir(), "pigeon-tui-orch-")),
+    logDir: tempDir("pigeon-tui-orch-"),
     ...(options.workers !== undefined ? { workers: options.workers } : {}),
     ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
     workerRefreshMs: 20,

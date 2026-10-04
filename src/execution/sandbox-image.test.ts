@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { loadSettings } from "../persistence/settings.ts";
 import { sandboxConfigOf } from "../state/settings.ts";
 import { fakeSandboxDocker } from "./sandbox-docker-fixtures.ts";
@@ -12,6 +12,8 @@ import { ensureSandboxImage, GENERIC_DOCKERFILE, resolveSandboxImage } from "./s
 // 决策 325：沙箱配置是项目共享设置的 sandbox 一节（字符串原样写成设置文件，用来造不是合法 JSON 的情形）
 function project(config?: unknown): string {
   const root = mkdtempSync(join(tmpdir(), "pigeon-sandbox-image-"));
+  // 在测试里调用：这个测试结束后删掉
+  onTestFinished(() => rmSync(root, { recursive: true, force: true }));
   if (config !== undefined) {
     mkdirSync(join(root, ".pigeon"));
     writeFileSync(

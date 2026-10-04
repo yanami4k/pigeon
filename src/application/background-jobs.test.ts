@@ -262,6 +262,8 @@ async function inWorkspace(run: (root: string, home: string) => Promise<void>): 
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+    // backgroundRun 把作业脚本写在工作区旁边（不在工作区里），一并删掉
+    rmSync(`${root}-job.mjs`, { force: true });
   }
 }
 

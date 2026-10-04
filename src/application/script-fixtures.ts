@@ -2,9 +2,10 @@
 // （写文件、交回正文、按轮报用量、可挂起到被停）、本机进程版执行器，以及派出与收尾记录（可冻结，模拟进程中途死掉）。
 // 重启后的找回走 restoreScriptRun，会话视图由记录拼出。
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { onTestFinished } from "vitest";
 import type { ApprovalDecision, ApprovalRequest } from "../approvals/handler.ts";
 import { localScriptLauncher, type ScriptLauncher } from "../execution/script-sandbox.ts";
 import {
@@ -30,8 +31,10 @@ export function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+// 在测试里调用：这个测试结束后删掉仓库目录（不靠进程退出时的清理；收尾时可能还有子进程在写，删除带重试）
 export function tempRepo(): string {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pigeon-script-")));
+  onTestFinished(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
   git(root, "init", "-q", "-b", "main");
   git(root, "config", "user.email", "pigeon@example.invalid");
   git(root, "config", "user.name", "pigeon-test");

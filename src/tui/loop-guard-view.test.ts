@@ -1,10 +1,10 @@
 // 终端界面里的打转检测（决策 305–307）：提醒进模型下一轮、同时在消息区显示成系统消息（不像人输入的话）；第 20 轮叫停——
 // 消息区写明检测到打转、重复的调用与轮数，同 Esc 中断本轮（原因为打转）；会话照常可用，下一条输入重新计数。
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterAll, test } from "vitest";
 import type { RunResult, StreamTextDelta, TurnRoundNotice } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type RunId } from "../state/ids.ts";
@@ -16,6 +16,17 @@ import type { RunStopCause } from "../state/session-entries.ts";
 import { guardTuiAgent } from "./loop-guard-view.ts";
 import { PigeonTuiShell, type TuiRuntimeFace } from "./shell.ts";
 import { MockTerminal, screenFlat, settle } from "./testing.ts";
+
+// 本文件建的临时目录在全部测试之后删掉（不靠进程退出时的清理）
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 // 运行面替身：run 挂起到测试放行或被中断；整轮由测试发出
 class LoopRuntime implements TuiRuntimeFace {
@@ -89,7 +100,7 @@ function shellWith(runtime: LoopRuntime) {
     terminal: term,
     runtime,
     sessionId: newSessionId(),
-    logDir: mkdtempSync(join(tmpdir(), "pigeon-tui-loop-")),
+    logDir: tempDir("pigeon-tui-loop-"),
   });
   return { term, shell };
 }

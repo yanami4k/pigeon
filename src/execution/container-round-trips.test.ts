@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { createHostProtectedPathResolver } from "../application/protected-paths.ts";
 import { JobPool, SessionJobs } from "../tools/background-jobs.ts";
 import { CommandOutputStore } from "../tools/command-output.ts";
@@ -162,7 +162,9 @@ test("跑命令 1 次：git 工作区的文件变化（被忽略的不报）与�
     const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host });
     await tool.execute("w", { command: "true" }, undefined);
     // 命令沿着祖先进程的命令行与环境找当次的随机串，找到就照当次的格式仿造退出码、取证与收尾标记
-    const forger = join(mkdtempSync(join(tmpdir(), "pigeon-round-trips-forge-")), "forge.sh");
+    const forgeDir = mkdtempSync(join(tmpdir(), "pigeon-round-trips-forge-"));
+    onTestFinished(() => rmSync(forgeDir, { recursive: true, force: true }));
+    const forger = join(forgeDir, "forge.sh");
     writeFileSync(
       forger,
       [

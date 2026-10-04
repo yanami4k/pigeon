@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { createCliApprovalHandler } from "../cli/approval-ui.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { loadSettings } from "../persistence/settings.ts";
@@ -15,6 +15,13 @@ import { newSessionId } from "../state/ids.ts";
 import { type StoreMessage, toolResultMark } from "../state/session-judge.ts";
 import type { ExecEvidence } from "../tools/run-command.ts";
 import { buildRuntime } from "./runtime.ts";
+
+// 用户级设置指到的空临时目录：这个测试结束后删掉
+function emptyHome(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
 
 // 取值并断言在场（替代非空断言）
 function required<T>(value: T | undefined): T {
@@ -162,7 +169,7 @@ test("tester 角色：只能运行设置 commands 一节为它登记的命令（
       workspaceRoot: root,
       homeDir: root,
       // 决策 325：短名与角色清单取自设置快照
-      settings: loadSettings(root, { homeDir: mkdtempSync(join(tmpdir(), "pigeon-run-home-")) }),
+      settings: loadSettings(root, { homeDir: emptyHome("pigeon-run-home-") }),
       sessionId,
       yolo: true,
       toolPolicy: { allow: ["read_file", "run_command"], deny: [], approvalMode: "yolo" },

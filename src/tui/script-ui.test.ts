@@ -3,10 +3,10 @@
 // 关键词（点名与额度生效）；审批面板的"本次脚本内同类都允许"只对本脚本内同类生效，高危命令不提供。
 // 真编排器与真 git 工作树、本机进程版执行器、虚拟屏。
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { afterAll, test } from "vitest";
 import { wrapScriptApprovals } from "../application/script-approvals.ts";
 import { scriptCommands } from "../application/script-commands.ts";
 import { type PlanInput, scriptHarness, type WorkerPlan } from "../application/script-fixtures.ts";
@@ -22,6 +22,17 @@ import { ScriptedRuntime } from "./runtime-fixtures.ts";
 import { PigeonTuiShell } from "./shell.ts";
 import { MockTerminal, screenFlat, screenText, settle } from "./testing.ts";
 import type { TuiWorkersFace } from "./workers-view.ts";
+
+// 本文件建的临时目录在全部测试之后删掉（不靠进程退出时的清理）
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 const CTRL_X = "\x18";
 
@@ -119,7 +130,7 @@ function scriptShell(planner: (input: PlanInput) => WorkerPlan | Promise<WorkerP
     terminal: term,
     runtime,
     sessionId,
-    logDir: mkdtempSync(join(tmpdir(), "pigeon-tui-o3-")),
+    logDir: tempDir("pigeon-tui-o3-"),
     workerRefreshMs: 20,
     workers: face,
     scripts: () => harness.runs.nodes(),
