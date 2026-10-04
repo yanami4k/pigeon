@@ -1,7 +1,7 @@
 // 工作区快照（M7 S5，决策 078）：只在写操作或命令确实改变文件后，用 git 底层命令在临时索引上生成快照提交——
 // 临时 GIT_INDEX_FILE（首次以用户索引为起点复制一份，只为复用文件状态缓存）→ add -A → write-tree → commit-tree → update-ref，
 // 挂到 refs/pigeon/checkpoints/<会话>/<序号>。用户的工作区、暂存区、当前分支与 HEAD 一律不碰；
-// 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 不进快照（会话文件在变不算文件改变；决策 325 起
+// 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 不进快照，add 时就排除、git 不进这两处（会话文件在变不算文件改变；决策 325 起
 // 仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容，照常进快照）。快照成链：首个快照的父提交是改前基线（首次改动之前的
 // 工作区状态），之后每个快照的父提交是上一个快照。分叉时从分叉点之前最近的快照开独立工作树（见 S6）。
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
@@ -90,7 +90,12 @@ function gitSync(cwd: string, args: string[]): string {
 function git(
   cwd: string,
   args: string[],
-  options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal | undefined } = {}
+  options: {
+    env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal | undefined;
+    // 非零退出码也算成功的情形（看标准错误输出判定）
+    tolerate?: (code: number | null, stderr: string) => boolean;
+  } = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const { signal } = options;
@@ -143,13 +148,29 @@ function git(
       const errorText = Buffer.concat(stderr).toString("utf8");
       if (killedFor !== undefined) {
         reject(failure(args, new Error(killedFor), undefined));
-      } else if (code !== 0) {
+      } else if (code !== 0 && options.tolerate?.(code, errorText) !== true) {
         reject(failure(args, new Error(`退出码 ${code}`), errorText));
       } else {
         resolve(Buffer.concat(stdout).toString("utf8"));
       }
     });
   });
+}
+
+const IGNORED_PATHS_NOTICE = "The following paths are ignored by one of your .gitignore files:";
+
+// git add 的"路径被忽略"提示里列出的都是被排除的程序状态路径或它们的上级目录
+export function onlyIgnoredOwnedPaths(stderr: string): boolean {
+  const lines = stderr.split(/\r?\n/).filter((line) => line.trim() !== "");
+  return (
+    lines[0] === IGNORED_PATHS_NOTICE &&
+    lines.length > 1 &&
+    lines
+      .slice(1)
+      .every((line) =>
+        PROGRAM_OWNED_PATHS.some((owned) => owned === line || owned.startsWith(`${line}/`))
+      )
+  );
 }
 
 export function isGitWorkspace(workspaceRoot: string): boolean {
@@ -274,9 +295,8 @@ export function createCheckpointer(input: {
     }
     const env = { GIT_INDEX_FILE: indexFile };
     try {
-      await run(["add", "-A", "--", "."], env, signal);
-      // 治理目录不进快照：不能用排除路径写法（.pigeon 已被 .gitignore 忽略时 git add 会因路径命中忽略项报错），
-      // 改为加完再从临时索引里摘掉
+      await addAll(env, signal);
+      // 仓库里已跟踪的程序状态（排除路径不动已在索引里的条目）从临时索引里摘掉
       await run(
         ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ...PROGRAM_OWNED_PATHS],
         env,
@@ -288,6 +308,29 @@ export function createCheckpointer(input: {
       throw error;
     }
   };
+
+  // add -A 带排除路径，git 不进 Pigeon 自己的程序状态（会话存储在同一工作区的 .pigeon/state 下不断建删临时锁文件，
+  // 后台拍时 git 扫到一闪而过的文件会整次失败）。这些路径已被 .gitignore 忽略时 git 照样加完其余文件，但以退出码 1
+  // 报"路径被忽略"：标准错误输出只有这句提示、列出的都是被排除的路径（或忽略了它们的上级目录，如整个 .pigeon）时算成功。
+  // 提示文字按英文判定：固定 LC_ALL=C，关掉附带的 hint
+  const addAll = (env: NodeJS.ProcessEnv, signal?: AbortSignal) =>
+    git(
+      workspaceRoot,
+      [
+        "-c",
+        "advice.addIgnoredFile=false",
+        "add",
+        "-A",
+        "--",
+        ".",
+        ...PROGRAM_OWNED_PATHS.map((owned) => `:(exclude)${owned}`),
+      ],
+      {
+        env: { ...env, LC_ALL: "C", LANGUAGE: "" },
+        signal,
+        tolerate: (code, stderr) => code === 1 && onlyIgnoredOwnedPaths(stderr),
+      }
+    );
 
   const headCommit = async (signal?: AbortSignal): Promise<string | undefined> => {
     try {
