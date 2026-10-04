@@ -19,6 +19,8 @@ const TRUNCATION_GUIDANCE =
 const HASHLINE_PROMPT =
   "你是 Pigeon 编程助手。用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照），" +
   "用 edit_file 按锚点编辑。" +
+  // 决策 353：引导把互不依赖的读取放进同一次回复
+  "互不依赖的读取与搜索放在同一次回复里一起发。" +
   TRUNCATION_GUIDANCE +
   // 审批与 run_command 的说法按执行端与审批状态生成（170 ④）；本文件的运行一律 yolo、本地执行端
   "写操作自动批准。" +

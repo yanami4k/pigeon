@@ -138,6 +138,7 @@ import {
   taskListRegistrations,
   UPDATE_TASKS_TOOL,
 } from "./task-list-tool.ts";
+import { toolExecutionModeOf } from "./tool-execution-modes.ts";
 import type { WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
@@ -257,6 +258,9 @@ export interface MemoryWriteConfig {
   // 记日期用的时钟（测试注入）
   now?: () => Date;
 }
+
+// 决策 353：引导模型把互不依赖的读取放进同一次回复（纯读的一批会同时执行）
+export const PARALLEL_READS_SENTENCE = "互不依赖的读取与搜索放在同一次回复里一起发。";
 
 // 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
 export const TRUNCATION_GUIDANCE =
@@ -556,6 +560,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       "用 edit_file 按锚点编辑。";
   const basePrompt =
     editSentence +
+    PARALLEL_READS_SENTENCE +
     TRUNCATION_GUIDANCE +
     WRITE_APPROVAL_SENTENCES[approval] +
     commandTexts.prompt +
@@ -849,8 +854,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // M5.7 S3（决策 052）：每个 Run 开始时把 MCP 工具集摘要与 server 当前状态写进 Run 开始条目；无 server 时不带字段
     ...(runStartedExtras !== undefined ? { runStartedExtras } : {}),
     ...(deps.initialMessages !== undefined ? { initialMessages: deps.initialMessages } : {}),
-    // 决策 264：注册了派 worker 工具时，同一次回复里的多个派出并行执行
-    ...(spawnSlot !== undefined ? { parallelTools: true } : {}),
+    // 决策 353：读类工具并行、其余串行（登记在 tool-execution-modes.ts），各环境同一规则
+    executionModeOf: toolExecutionModeOf,
     // 决策 324：工具结束后的钩子（PostToolUse / PostToolUseFailure）——替换结果文本或把理由与上下文补进结果
     toolHooks: {
       toolFinished: async (input) => {

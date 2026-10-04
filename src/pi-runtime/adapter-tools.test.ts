@@ -846,7 +846,7 @@ test("toolHooks.toolFinished：一个调用要求停止后，同批稍后收尾�
       streamFn,
       governance: createToolGovernance({ registry: makeRegistry() }),
       tools: [slowRead],
-      parallelTools: true,
+      executionModeOf: () => "parallel",
       toolHooks: {
         toolFinished: async (input) => {
           const path = (input.args as { path: string }).path;
