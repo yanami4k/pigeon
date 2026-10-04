@@ -31,3 +31,7 @@ jobs:
 
       - name: Verify
         run: npm run verify
+
+      # 决策 351：打包产物的冒烟测试（版本输出；用仓库假模型跑一次 pigeon run，确认发出第一个请求并正常结束）
+      - name: Bundle smoke test
+        run: npm run bundle && node scripts/bundle-smoke.mjs

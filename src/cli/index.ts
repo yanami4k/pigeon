@@ -69,6 +69,7 @@ import {
   STREAM_RUNTIMES,
   summarizeManifest,
 } from "../eval/stream-generate.ts";
+import { currentHarnessRef, describeHarness } from "../eval/stream-harness.ts";
 import {
   markHumanGateFailures,
   type StreamManifest,
@@ -87,6 +88,7 @@ import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
+import { BUNDLE_ROLE_ENV, FROM_BUNDLE, packageFileUrl } from "../state/package-paths.ts";
 import { pigeonRel } from "../state/paths.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { loopGuardSettingsOf, withHooksDisabled } from "../state/settings.ts";
@@ -890,7 +892,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   }
   const minimalCommand =
     miniPython !== undefined
-      ? [miniPython, fileURLToPath(new URL("../../eval/stream/mini/run_mini.py", import.meta.url))]
+      ? [miniPython, fileURLToPath(packageFileUrl("eval/stream/mini/run_mini.py"))]
       : undefined;
   // SIGTERM（systemd 停服、整机关机）：在途的步作废、不再取新步，硬时限内自行退出
   const shutdown = new AbortController();
@@ -987,7 +989,7 @@ function parseEditMode(value: string | undefined, usage: string): EditMode {
   return value;
 }
 
-async function main(argv: string[]): Promise<void> {
+export async function main(argv: string[]): Promise<void> {
   // M7（ROADMAP §M7）：启动时探测上游版本，与已验证版本不一致时明确告警
   for (const warning of probeUpstreamVersions().warnings) {
     process.stderr.write(`${warning}\n`);
@@ -995,6 +997,10 @@ async function main(argv: string[]): Promise<void> {
   const route = routeTopLevel(argv);
   if (route.kind === "help") {
     writeOut(`${TOP_LEVEL_HELP}\n`);
+    return;
+  }
+  if (route.kind === "version") {
+    writeOut(`pigeon ${pigeonVersion()}（${describeHarness(currentHarnessRef())}）\n`);
     return;
   }
   if (route.kind === "tui") {
@@ -1086,6 +1092,7 @@ function migrateConfigMain(argv: string[]): void {
 
 export type TopLevelRoute =
   | { kind: "help" }
+  | { kind: "version" }
   | { kind: "tui"; argv: string[] }
   | { kind: "line"; argv: string[] }
   | { kind: "subcommand" };
@@ -1095,6 +1102,9 @@ export function routeTopLevel(argv: readonly string[]): TopLevelRoute {
   const first = argv[0];
   if (first === "--help" || first === "-h" || first === "help") {
     return { kind: "help" };
+  }
+  if (first === "--version") {
+    return { kind: "version" };
   }
   if (first !== undefined && SUBCOMMANDS.has(first)) {
     return { kind: "subcommand" };
@@ -1108,14 +1118,33 @@ export function routeTopLevel(argv: readonly string[]): TopLevelRoute {
 // 终端界面入口（tui/main.ts）：与本文件同在 src 下
 export const TUI_ENTRY = fileURLToPath(new URL("../tui/main.ts", import.meta.url));
 
+// 终端界面子进程的参数（node 之后的部分）与附加环境变量（决策 351）：由入口决定。从源码启动的，子进程跑源码的 tui 入口；
+// 从打包产物启动的，子进程跑同一个产物（moduleUrl 即产物地址），开 source map，经环境变量由产物入口分派到终端界面
+export function tuiChildCommand(
+  fromBundle: boolean,
+  moduleUrl: string,
+  execArgv: readonly string[],
+  argv: readonly string[]
+): { args: string[]; env?: Record<string, string> } {
+  if (!fromBundle) {
+    return { args: [...execArgv, fileURLToPath(new URL("../tui/main.ts", moduleUrl)), ...argv] };
+  }
+  return {
+    args: [...execArgv, "--enable-source-maps", fileURLToPath(moduleUrl), ...argv],
+    env: { [BUNDLE_ROLE_ENV]: "tui" },
+  };
+}
+
 // 以子进程启动终端界面：继承终端，退出码原样带回。Ctrl+C 由界面自己处理（双击退出），本进程在其运行期间不响应
 async function launchTui(argv: readonly string[]): Promise<void> {
   const ignore = (): void => {};
   process.on("SIGINT", ignore);
+  const command = tuiChildCommand(FROM_BUNDLE, import.meta.url, process.execArgv, argv);
   try {
     const code = await new Promise<number>((resolve, reject) => {
-      const child = spawn(process.execPath, [...process.execArgv, TUI_ENTRY, ...argv], {
+      const child = spawn(process.execPath, command.args, {
         stdio: "inherit",
+        ...(command.env !== undefined ? { env: { ...process.env, ...command.env } } : {}),
       });
       child.on("error", reject);
       child.on("exit", (exitCode, signal) => {
@@ -1207,6 +1236,18 @@ async function lineMain(argv: string[]): Promise<void> {
   }
 }
 
+// pigeon --version：包根下 package.json 的版本（源码与打包产物运行时都在包根下）；读不出时如实写 unknown
+export function pigeonVersion(): string {
+  try {
+    const parsed = JSON.parse(readFileSync(packageFileUrl("package.json"), "utf8")) as {
+      version?: unknown;
+    };
+    return typeof parsed.version === "string" ? parsed.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 // 顶层帮助（pigeon --help）与未知子命令提示
 export const TOP_LEVEL_HELP = [
   "用法：",
@@ -1267,8 +1308,12 @@ async function finishSandbox(
   }
 }
 
-// 仅作为入口直接运行时执行；被 import 时不启动 REPL
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// 仅作为入口直接运行时执行；被 import 时不启动 REPL。打包产物里由产物入口（src/bundle-entry.ts）分派，这里不判断
+if (
+  !FROM_BUNDLE &&
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
