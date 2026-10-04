@@ -1,12 +1,12 @@
 // 工作区快照（M7 S5，决策 078）：只在写操作或命令确实改变文件后，用 git 底层命令在临时索引上生成快照提交——
 // 临时 GIT_INDEX_FILE（首次以用户索引为起点复制一份，只为复用文件状态缓存）→ add -A → write-tree → commit-tree → update-ref，
 // 挂到 refs/pigeon/checkpoints/<会话>/<序号>。用户的工作区、暂存区、当前分支与 HEAD 一律不碰；
-// 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 不进快照，add 时就排除、git 不进这两处（会话文件在变不算文件改变；决策 325 起
+// 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 不进快照，add 时经临时忽略文件把它们算作被忽略、git 不进这两处（会话文件在变不算文件改变；决策 325 起
 // 仓库已跟踪的 .pigeon/settings.json 与 .pigeon/skills 是项目内容，照常进快照）。快照成链：首个快照的父提交是改前基线（首次改动之前的
 // 工作区状态），之后每个快照的父提交是上一个快照。分叉时从分叉点之前最近的快照开独立工作树（见 S6）。
 // 非 git 工作区不打快照；构造快照器即明确报错，不降级。git 经参数数组直接调用，不经 shell。
 // 决策 350：git 一律异步执行（快照在后台拍，不占事件循环），同一实例的操作经串行队列逐个执行；单条命令有上限，
-// 调用方可传中止信号提前杀掉。会话内复用同一个临时索引（add -A 只处理增量），索引路径与已有快照编号只在首次操作时取一次；
+// 调用方可传中止信号提前杀掉。会话内复用同一个临时索引（add -A 只处理增量），索引路径、已有快照编号、工作区前缀与用户的全局忽略文件只在首次操作时取一次；
 // 某条命令失败或被中止时丢弃临时索引（可能留下半截内容或锁文件），下次从用户索引重新复制。
 // racy-git 保护：git 只在条目的文件修改时间不早于索引文件的修改时间时才比内容，所以索引文件的修改时间不能晚于其中条目
 // 最后一次入索引的时间。复制出的副本修改时间是"现在"，必须设回用户索引的修改时间；此后临时索引只由 git 自己写：
@@ -14,8 +14,16 @@
 // 修改时间必然变化，复用不破坏这一保护。
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
 import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
@@ -90,12 +98,7 @@ function gitSync(cwd: string, args: string[]): string {
 function git(
   cwd: string,
   args: string[],
-  options: {
-    env?: NodeJS.ProcessEnv;
-    signal?: AbortSignal | undefined;
-    // 非零退出码也算成功的情形（看标准错误输出判定）
-    tolerate?: (code: number | null, stderr: string) => boolean;
-  } = {}
+  options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal | undefined } = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const { signal } = options;
@@ -148,7 +151,7 @@ function git(
       const errorText = Buffer.concat(stderr).toString("utf8");
       if (killedFor !== undefined) {
         reject(failure(args, new Error(killedFor), undefined));
-      } else if (code !== 0 && options.tolerate?.(code, errorText) !== true) {
+      } else if (code !== 0) {
         reject(failure(args, new Error(`退出码 ${code}`), errorText));
       } else {
         resolve(Buffer.concat(stdout).toString("utf8"));
@@ -157,20 +160,26 @@ function git(
   });
 }
 
-const IGNORED_PATHS_NOTICE = "The following paths are ignored by one of your .gitignore files:";
+// 快照的 add 用的忽略文件：临时 core.excludesFile，内容为用户原有的全局忽略文件加上本工作区前缀下的程序状态两条
+// （.pigeon/state/ 与 .pigeon/settings.local.json）。这两处因此在任何仓库里都算被忽略：git add -A 不进 .pigeon/state
+// （会话存储在那里不断建删临时锁文件，后台拍时 git 扫到一闪而过的文件会整次失败），也不收个人设置；不用排除路径，
+// 就不会触发 git 对"显式点名被忽略路径"报的退出码 1，成败只看退出码。仓库自己的 .gitignore 与 .git/info/exclude
+// 照常生效（优先级高于全局忽略文件）。读不到用户原有的全局忽略文件时只含这两条
+export function snapshotExcludes(original: string, workspacePrefix: string): string {
+  // 前缀里的通配字符按字面匹配
+  const literal = workspacePrefix.replace(/[\\*?[]/g, (char) => `\\${char}`);
+  // 开头的 / 锚在仓库根；不带结尾的 /，目录与文件都认
+  const owned = PROGRAM_OWNED_PATHS.map((path) => `/${literal}${path}`);
+  const head = original === "" || original.endsWith("\n") ? original : `${original}\n`;
+  return `${head}${owned.join("\n")}\n`;
+}
 
-// git add 的"路径被忽略"提示里列出的都是被排除的程序状态路径或它们的上级目录
-export function onlyIgnoredOwnedPaths(stderr: string): boolean {
-  const lines = stderr.split(/\r?\n/).filter((line) => line.trim() !== "");
-  return (
-    lines[0] === IGNORED_PATHS_NOTICE &&
-    lines.length > 1 &&
-    lines
-      .slice(1)
-      .every((line) =>
-        PROGRAM_OWNED_PATHS.some((owned) => owned === line || owned.startsWith(`${line}/`))
-      )
-  );
+// git 缺省的全局忽略文件（没配 core.excludesFile 时）
+function defaultGlobalExcludes(): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  return xdg !== undefined && xdg !== ""
+    ? join(xdg, "git", "ignore")
+    : join(process.env.HOME ?? homedir(), ".config", "git", "ignore");
 }
 
 export function isGitWorkspace(workspaceRoot: string): boolean {
@@ -185,21 +194,21 @@ export function checkpointRefPrefix(sessionId: SessionId): string {
   return `${CHECKPOINT_REF_PREFIX}${sessionId}/`;
 }
 
-// 进程退出时清掉还在用的临时索引（会话没走到 close 的情况）
-const liveIndexFiles = new Set<string>();
+// 进程退出时清掉还在用的临时文件（临时索引与忽略文件；会话没走到 close 的情况）
+const liveTempFiles = new Set<string>();
 let exitHookInstalled = false;
-function removeIndexFile(file: string): void {
+function removeTempFile(file: string): void {
   rmSync(file, { force: true });
   rmSync(`${file}.lock`, { force: true });
-  liveIndexFiles.delete(file);
+  liveTempFiles.delete(file);
 }
-function trackIndexFile(file: string): void {
-  liveIndexFiles.add(file);
+function trackTempFile(file: string): void {
+  liveTempFiles.add(file);
   if (!exitHookInstalled) {
     exitHookInstalled = true;
     process.once("exit", () => {
-      for (const live of [...liveIndexFiles]) {
-        removeIndexFile(live);
+      for (const live of [...liveTempFiles]) {
+        removeTempFile(live);
       }
     });
   }
@@ -235,6 +244,9 @@ export function createCheckpointer(input: {
   // 读改前基线的地方因此得到"没有起点"，而不是一个改到一半的状态
   let baseLost = false;
   let indexFile: string | undefined;
+  // 快照的 add 用的临时忽略文件：内容在首次操作时定，文件用时建、close 时删
+  let excludesContent = "";
+  let excludesFile: string | undefined;
 
   // 恢复的会话接着已有快照编号与快照链；用户索引的位置会话内不变
   const init = async (signal?: AbortSignal): Promise<void> => {
@@ -257,9 +269,33 @@ export function createCheckpointer(input: {
       last !== undefined
         ? (await run(["rev-parse", `${last.commit}^{tree}`], undefined, signal)).trim()
         : undefined;
-    realIndex = (
-      await run(["rev-parse", "--path-format=absolute", "--git-path", "index"], undefined, signal)
-    ).trim();
+    // 工作区在仓库里的前缀（忽略文件里的路径锚在仓库根）与用户索引的位置，一次取
+    const [workspacePrefix = "", indexPath = ""] = (
+      await run(
+        ["rev-parse", "--show-prefix", "--path-format=absolute", "--git-path", "index"],
+        undefined,
+        signal
+      )
+    ).split(/\r?\n/);
+    realIndex = indexPath.trim();
+    // 用户原有的全局忽略文件：配了 core.excludesFile 用它（git config 没配时以退出码 1 结束），没配用 git 的缺省位置
+    let globalExcludes = defaultGlobalExcludes();
+    try {
+      globalExcludes =
+        (await run(["config", "--path", "--get", "core.excludesFile"], undefined, signal)).trim() ||
+        globalExcludes;
+    } catch (error) {
+      if (signal?.aborted === true) {
+        throw error;
+      }
+    }
+    let original = "";
+    try {
+      original = readFileSync(globalExcludes, "utf8");
+    } catch {
+      // 读不到即只含程序状态两条
+    }
+    excludesContent = snapshotExcludes(original, workspacePrefix.trim());
     counter = last?.n ?? 0;
     previous = last?.commit;
     lastTree = tree;
@@ -272,7 +308,7 @@ export function createCheckpointer(input: {
     indexFile = undefined;
     if (file !== undefined) {
       try {
-        removeIndexFile(file);
+        removeTempFile(file);
       } catch {
         // 留下的文件由进程退出时的清理再试一次
       }
@@ -283,7 +319,7 @@ export function createCheckpointer(input: {
   const currentTree = async (signal?: AbortSignal): Promise<string> => {
     if (indexFile === undefined) {
       const file = join(tmpdir(), `pigeon-index-${randomBytes(8).toString("hex")}`);
-      trackIndexFile(file);
+      trackTempFile(file);
       if (existsSync(realIndex)) {
         // 先取修改时间再复制：其间用户索引若被改写，副本只会比取到的时间新，设回的时间只会偏早（偏早只多比内容）。
         // Date 只到毫秒、向下取整，同样不会晚于原值
@@ -309,28 +345,20 @@ export function createCheckpointer(input: {
     }
   };
 
-  // add -A 带排除路径，git 不进 Pigeon 自己的程序状态（会话存储在同一工作区的 .pigeon/state 下不断建删临时锁文件，
-  // 后台拍时 git 扫到一闪而过的文件会整次失败）。这些路径已被 .gitignore 忽略时 git 照样加完其余文件，但以退出码 1
-  // 报"路径被忽略"：标准错误输出只有这句提示、列出的都是被排除的路径（或忽略了它们的上级目录，如整个 .pigeon）时算成功。
-  // 提示文字按英文判定：固定 LC_ALL=C，关掉附带的 hint
-  const addAll = (env: NodeJS.ProcessEnv, signal?: AbortSignal) =>
-    git(
-      workspaceRoot,
-      [
-        "-c",
-        "advice.addIgnoredFile=false",
-        "add",
-        "-A",
-        "--",
-        ".",
-        ...PROGRAM_OWNED_PATHS.map((owned) => `:(exclude)${owned}`),
-      ],
-      {
-        env: { ...env, LC_ALL: "C", LANGUAGE: "" },
-        signal,
-        tolerate: (code, stderr) => code === 1 && onlyIgnoredOwnedPaths(stderr),
-      }
+  // add -A 带上临时忽略文件（见 snapshotExcludes），git 不进 Pigeon 自己的程序状态；成败只看退出码
+  const addAll = (env: NodeJS.ProcessEnv, signal?: AbortSignal) => {
+    if (excludesFile === undefined) {
+      const file = join(tmpdir(), `pigeon-excludes-${randomBytes(8).toString("hex")}`);
+      trackTempFile(file);
+      writeFileSync(file, excludesContent);
+      excludesFile = file;
+    }
+    return run(
+      ["-c", `core.excludesFile=${excludesFile.split("\\").join("/")}`, "add", "-A", "--", "."],
+      env,
+      signal
     );
+  };
 
   const headCommit = async (signal?: AbortSignal): Promise<string | undefined> => {
     try {
@@ -471,6 +499,10 @@ export function createCheckpointer(input: {
     close: () =>
       serial(async () => {
         dropIndex();
+        if (excludesFile !== undefined) {
+          removeTempFile(excludesFile);
+          excludesFile = undefined;
+        }
       }),
   };
 }

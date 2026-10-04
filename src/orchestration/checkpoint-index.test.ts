@@ -2,7 +2,7 @@
 // - racy-git 保护：复制出的临时索引的修改时间设回用户索引的修改时间。用户索引里某条目与索引文件处在同一秒（条目"临界干净"），
 //   文件又在这一秒里被改成同样长度：git 只在索引文件不比该条目新时才比内容，副本的修改时间若是"现在"，git 只比 stat 就把
 //   旧内容当成现状，基线与快照都错。ctime 关掉（core.trustctime=false），比对只剩修改时间与长度；时间一律显式设定，不靠墙钟卡秒；
-// - 临时索引出错（这里直接弄坏它）后丢弃，下次从用户索引重新复制，快照照常；关闭后临时索引删掉。
+// - 临时索引出错（这里直接弄坏它）后丢弃，下次从用户索引重新复制，快照照常；关闭后临时索引与临时忽略文件都删掉。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -75,8 +75,17 @@ test("临时索引出错后丢弃并从用户索引重新复制，快照照常�
     assert.ok(snapshot !== undefined, "重新复制后照常认出改动");
     assert.equal(git(dir, ["show", `${snapshot.commit}:a.txt`]), "two\n");
     assert.equal(git(dir, ["show", `${snapshot.baseCommit}:a.txt`]), "one\n", "改前基线不受影响");
+    assert.equal(
+      readdirSync(own).filter((name) => name.startsWith("pigeon-excludes-")).length,
+      1,
+      "快照的 add 用的临时忽略文件在专用目录里"
+    );
     await checkpointer.close();
-    assert.deepEqual(indexes(), [], "关闭后临时索引删掉");
+    assert.deepEqual(
+      readdirSync(own).filter((name) => name.startsWith("pigeon-")),
+      [],
+      "关闭后临时索引与临时忽略文件都删掉"
+    );
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
