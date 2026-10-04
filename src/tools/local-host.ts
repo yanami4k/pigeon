@@ -1,9 +1,10 @@
 // 执行端接口的本地实现（决策 098）：工作区是宿主上的一个目录，读写走 node:fs，命令作为宿主子进程在工作区根执行。
 // 路径围栏沿用 paths.ts 的 realpath 口径；进程执行、文件清单与 .cmd / .bat 解析从 run-command.ts 原样平移，行为不变。
-import { spawn } from "node:child_process";
+// 文件变化的取证（决策 348）：git 工作区按 git status 找候选；非 git 工作区异步全量扫描（扫描期间不卡住进程）。
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { type Dirent, existsSync } from "node:fs";
+import { lstat, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertWritePathUnchanged,
@@ -17,12 +18,17 @@ import {
   untrackChild,
 } from "./process-tree.ts";
 import {
+  GIT_STATUS_ARGS,
+  gitFileState,
   type HostExecOptions,
   type HostExecPlan,
   type HostExecResult,
   type HostFileSnapshot,
+  type HostFileState,
   LISTING_SKIPPED_DIRS,
   LISTING_SKIPPED_ROOT_DIRS,
+  MISSING_SIGNATURE,
+  parseGitStatus,
   type WorkspaceHost,
 } from "./workspace-host.ts";
 
@@ -36,6 +42,8 @@ export function createLocalWorkspaceHost(
   options: LocalHostOptions = {}
 ): WorkspaceHost {
   const platform = options.platform ?? process.platform;
+  // 工作区在 git 仓库里的前缀（会话内取一次）；不是 git 工作区为 undefined
+  let gitPrefix: Promise<string | undefined> | undefined;
   return {
     platform,
     root: workspaceRoot,
@@ -55,7 +63,20 @@ export function createLocalWorkspaceHost(
     },
     exec: (plan, execOptions) => runLocalProcess(plan, workspaceRoot, execOptions),
     async listFiles(limit) {
-      return snapshotLocalFiles(workspaceRoot, limit);
+      return scanLocalFiles(workspaceRoot, limit);
+    },
+    async fileState(limit, before) {
+      gitPrefix ??= runGit(workspaceRoot, ["rev-parse", "--show-prefix"]).then((out) =>
+        out?.replace(/\r?\n$/, "")
+      );
+      const prefix = await gitPrefix;
+      if (prefix !== undefined && before?.kind !== "scan") {
+        const state = await localGitState(workspaceRoot, prefix, limit, before);
+        if (state !== undefined) {
+          return state;
+        }
+      }
+      return { kind: "scan", ...(await scanLocalFiles(workspaceRoot, limit)) };
     },
     findLauncherScript: (program, env) => windowsScript(program, workspaceRoot, env, platform),
   };
@@ -254,21 +275,23 @@ export function windowsScript(
   return undefined;
 }
 
-// 工作树文件清单：相对路径 → 大小与修改时间签名；跳过符号链接、目录联接与 workspace-host.ts 两份名单里的目录
-function snapshotLocalFiles(root: string, limit: number): HostFileSnapshot {
+// 工作树文件清单：相对路径 → 大小与修改时间签名；跳过符号链接、目录联接与 workspace-host.ts 两份名单里的目录。
+// 异步遍历（决策 348）：同时读至多 SCAN_CONCURRENCY 个目录，一个目录里的文件并发取 stat；遍历期间不卡住进程
+const SCAN_CONCURRENCY = 8;
+
+async function scanLocalFiles(root: string, limit: number): Promise<HostFileSnapshot> {
   const files = new Map<string, string>();
+  let counted = 0;
   let truncated = false;
-  const walk = (dir: string): void => {
+  const visit = async (dir: string, pending: string[]): Promise<void> => {
     let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
+    const found: string[] = [];
     for (const entry of entries) {
-      if (truncated) {
-        return;
-      }
       const full = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) {
         continue;
@@ -278,28 +301,96 @@ function snapshotLocalFiles(root: string, limit: number): HostFileSnapshot {
           LISTING_SKIPPED_DIRS.includes(entry.name) ||
           (dir === root && LISTING_SKIPPED_ROOT_DIRS.includes(entry.name));
         if (!skipped) {
-          walk(full);
+          pending.push(full);
         }
         continue;
       }
       if (!entry.isFile()) {
         continue;
       }
-      if (files.size >= limit) {
+      if (counted >= limit) {
         truncated = true;
-        return;
+        break;
       }
-      try {
-        const fileStat = statSync(full);
-        files.set(
-          path.relative(root, full).split(path.sep).join("/"),
-          `${fileStat.size}:${fileStat.mtimeMs}`
-        );
-      } catch {
-        // 执行期间被删除的文件：按不存在处理
-      }
+      counted += 1;
+      found.push(full);
     }
+    await Promise.all(
+      found.map(async (full) => {
+        try {
+          const fileStat = await stat(full);
+          files.set(
+            path.relative(root, full).split(path.sep).join("/"),
+            `${fileStat.size}:${fileStat.mtimeMs}`
+          );
+        } catch {
+          // 执行期间被删除的文件：按不存在处理
+        }
+      })
+    );
   };
-  walk(root);
+  // 并发池：有空位就从待读目录里取一个；读到的子目录补进待读，全部读完（没有在读的）即收工
+  const pending = [root];
+  let busy = 0;
+  await new Promise<void>((resolve) => {
+    const pump = (): void => {
+      while (busy < SCAN_CONCURRENCY && pending.length > 0 && !truncated) {
+        const dir = pending.shift() as string;
+        busy += 1;
+        void visit(dir, pending).finally(() => {
+          busy -= 1;
+          pump();
+        });
+      }
+      if (busy === 0) {
+        resolve();
+      }
+    };
+    pump();
+  });
   return { files, truncated };
+}
+
+// 在工作区根跑一条 git；失败（不是 git 工作区、没有 git、超时）为 undefined
+function runGit(cwd: string, args: readonly string[]): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      [...args],
+      { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 60_000, windowsHide: true },
+      (error, stdout) => resolve(error === null ? stdout : undefined)
+    );
+  });
+}
+
+// git 工作区的取证：git status 报出的路径（与命令前报出的路径）逐个取 lstat 签名；git 失败时 undefined（退回扫描）
+async function localGitState(
+  root: string,
+  prefix: string,
+  limit: number,
+  before: HostFileState | undefined
+): Promise<HostFileState | undefined> {
+  const output = await runGit(root, GIT_STATUS_ARGS);
+  if (output === undefined) {
+    return undefined;
+  }
+  const statuses = parseGitStatus(output, prefix);
+  const wanted = new Set([...statuses.keys()].slice(0, limit));
+  if (before?.kind === "git") {
+    for (const file of before.entries.keys()) {
+      wanted.add(file);
+    }
+  }
+  const signatures = new Map<string, string>();
+  await Promise.all(
+    [...wanted].map(async (file) => {
+      try {
+        const fileStat = await lstat(path.join(root, file));
+        signatures.set(file, `${fileStat.size}:${fileStat.mtimeMs}`);
+      } catch {
+        signatures.set(file, MISSING_SIGNATURE);
+      }
+    })
+  );
+  return gitFileState(statuses, (file) => signatures.get(file) ?? MISSING_SIGNATURE, limit, before);
 }

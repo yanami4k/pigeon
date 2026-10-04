@@ -60,8 +60,29 @@ export function memoryLimitText(exceeded: MemoryLimitExceeded): string {
 }
 
 // 文件清单不跟进的目录，本地与容器实现共用这一份口径。
-// 任意层级：版本库元数据与依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接）
-export const LISTING_SKIPPED_DIRS: readonly string[] = [".git", "node_modules"];
+// 任意层级：版本库元数据、依赖目录（工作树里的 node_modules 可能是指向主仓库的目录联接），以及常见的虚拟环境、
+// 构建产物与缓存目录（决策 348；git 工作区按 git status 找候选，不经这份名单）
+export const LISTING_SKIPPED_DIRS: readonly string[] = [
+  ".git",
+  "node_modules",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  "target",
+  ".tox",
+  ".nox",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  "__pycache__",
+  ".gradle",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".parcel-cache",
+  "coverage",
+];
 // 只在工作区根：Pigeon 自己的治理目录（会话记录、记忆、放权与各项配置在运行中持续写入，与 agent 所做无关）；
 // 子目录里同名的普通文件夹照常列出
 export const LISTING_SKIPPED_ROOT_DIRS: readonly string[] = [PIGEON_DIR];
@@ -71,6 +92,27 @@ export interface HostFileSnapshot {
   files: Map<string, string>;
   // 清单超过上限，不完整
   truncated: boolean;
+}
+
+// 文件变化的取证（决策 348）。git 工作区：git status 报出的路径（含未跟踪、不含被忽略；工作区根下的治理目录除外）及其
+// 签名；命令后的那次另把命令前报出、命令后不再报出的路径补查签名，状态记 clean。非 git 工作区：全量清单
+export type HostFileState =
+  | { kind: "git"; entries: Map<string, GitFileEntry>; truncated: boolean }
+  | ({ kind: "scan" } & HostFileSnapshot);
+
+export interface GitFileEntry {
+  status: "tracked" | "untracked" | "clean";
+  // 大小与修改时间（同 HostFileSnapshot 的口径）；文件不存在为 MISSING_SIGNATURE
+  signature: string;
+}
+
+export const MISSING_SIGNATURE = "-";
+
+// 一次被观测的执行：命令的结果与命令前后的取证；超时、中止等拿不到命令后取证时 after 缺省（调用方另取）
+export interface ObservedExec {
+  result: HostExecResult;
+  before: HostFileState;
+  after?: HostFileState;
 }
 
 // 快照引用（占位）：实现自定的不透明标识（宿主为独立 GIT_DIR 里的提交，容器为容器内同构提交加镜像提交）
@@ -96,10 +138,82 @@ export interface WorkspaceHost {
   // 在工作区根执行；超时或中止后必须保证该命令起的进程不残留
   exec(plan: HostExecPlan, options: HostExecOptions): Promise<HostExecResult>;
   listFiles(limit: number): Promise<HostFileSnapshot>;
+  // 决策 348：文件变化的取证；命令后的那次传入命令前的结果（沿用同一种取法）。缺省时调用方按 listFiles 比对
+  fileState?(limit: number, before?: HostFileState): Promise<HostFileState>;
+  // 决策 349：命令与命令前后的取证合成一次执行（容器实现）；缺省时调用方分三步做
+  execObserved?(plan: HostExecPlan, options: HostExecOptions, limit: number): Promise<ObservedExec>;
   // Windows 本地实现：程序解析到的 .cmd / .bat 路径；其余实现恒为 undefined
   findLauncherScript(program: string, env: NodeJS.ProcessEnv): string | undefined;
   // 占位（098：快照与分叉挂同一层）。现状：宿主侧的快照与分叉仍由 orchestration/checkpoint.ts 直接调宿主 git，
   // 尚未迁到本接口；容器实现未提供。迁移时两个实现各自落在这两个方法上，调用方不得判断工作区形状
   snapshot?(): Promise<WorkspaceSnapshotRef>;
   fork?(ref: WorkspaceSnapshotRef): Promise<WorkspaceHost>;
+}
+
+// git status 取候选的参数（决策 348）：含未跟踪文件、逐个列出未跟踪目录里的文件、不含被忽略的、不合并改名；只看工作区
+// 所在的子树；关掉 fsmonitor 钩子。不加 --no-optional-locks：git 可顺带刷新索引里的文件状态（与人在终端里跑 git status
+// 相同；索引被别的进程锁着时只是不刷新），否则修改时间晚于索引的文件每次都要重算内容哈希
+export const GIT_STATUS_ARGS: readonly string[] = [
+  "-c",
+  "core.fsmonitor=",
+  "status",
+  "--porcelain=v1",
+  "-z",
+  "--untracked-files=all",
+  "--no-renames",
+  "--",
+  ".",
+];
+
+// git status --porcelain=v1 -z 的输出 → 相对工作区根的路径与状态。路径在输出里相对仓库根，去掉工作区在仓库里的前缀；
+// 不在工作区内的与工作区根下治理目录里的不要。同一路径既有跟踪状态又有未跟踪（git rm --cached）时记跟踪
+export function parseGitStatus(
+  output: string,
+  prefix: string
+): Map<string, "tracked" | "untracked"> {
+  const statuses = new Map<string, "tracked" | "untracked">();
+  for (const record of output.split("\0")) {
+    if (record.length < 4 || !record.slice(3).startsWith(prefix)) {
+      continue;
+    }
+    const file = record.slice(3 + prefix.length);
+    if (
+      file === "" ||
+      LISTING_SKIPPED_ROOT_DIRS.some((dir) => file === dir || file.startsWith(`${dir}/`))
+    ) {
+      continue;
+    }
+    const status = record.startsWith("??") ? "untracked" : "tracked";
+    if (statuses.get(file) !== "tracked") {
+      statuses.set(file, status);
+    }
+  }
+  return statuses;
+}
+
+// 组装 git 取证：超过上限的只留前 limit 个并标不完整；命令后的那次（给了 before）把命令前报出、这次没报出的路径补上，记 clean
+export function gitFileState(
+  statuses: ReadonlyMap<string, "tracked" | "untracked">,
+  signatureOf: (file: string) => string,
+  limit: number,
+  before?: HostFileState
+): HostFileState {
+  const entries = new Map<string, GitFileEntry>();
+  let truncated = false;
+  for (const [file, status] of statuses) {
+    if (entries.size >= limit) {
+      truncated = true;
+      break;
+    }
+    entries.set(file, { status, signature: signatureOf(file) });
+  }
+  if (before?.kind === "git") {
+    for (const file of before.entries.keys()) {
+      if (!entries.has(file)) {
+        entries.set(file, { status: "clean", signature: signatureOf(file) });
+      }
+    }
+    truncated ||= before.truncated;
+  }
+  return { kind: "git", entries, truncated };
 }

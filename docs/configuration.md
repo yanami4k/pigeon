@@ -91,7 +91,7 @@ worker 照派出它的运行面：父运行面没有联网工具，worker 也没
 
 Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时，若 `.pigeon/.gitignore` 不存在，写入一份，内容为 `state/` 与 `settings.local.json` 两行；已存在则不改，缺这两行时在终端提示一行。
 
-快照、checkpoint 与 worker 改动叠加只排除 `.pigeon/state` 与 `.pigeon/settings.local.json`；仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills` 是项目内容，照常进快照与叠加。列目录与命令的文件变化报告仍不列整个 `.pigeon`。
+快照、checkpoint 与 worker 改动叠加只排除 `.pigeon/state` 与 `.pigeon/settings.local.json`；仓库已跟踪的 `.pigeon/settings.json` 与 `.pigeon/skills` 是项目内容，照常进快照与叠加。列目录与命令的文件变化报告仍不列整个 `.pigeon`。命令的文件变化在 git 工作区里按命令前后两次 git status 找候选，被 `.gitignore` 忽略的文件不报；非 git 工作区比全量清单，跳过依赖、虚拟环境、构建产物与缓存目录（`node_modules`、`.venv`、`venv`、`dist`、`build`、`target`、`__pycache__`、`.next`、`coverage` 等）。
 
 ## worker 与续接
 

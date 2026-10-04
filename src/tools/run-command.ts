@@ -9,16 +9,21 @@
 // 以 shell 运行的命令串与审批面板显示的字节一致，不做改写。工作目录固定为工作区根（worker 即其工作树）；环境变量只透传
 // 白名单；墙钟超时终止；输出按字节截断并标记。审批语义不在本工具：exec 档永不自动放行、[a] 收窄为精确命令串，均由
 // 治理层判定。执行证据（命令、实际进程参数、是否经启动器、是否经 shell、退出码、输出哈希与截断输出、执行前后工作树
-// 文件清单差异）作为成功结果的 details 随工具结果消息记进会话存储。
+// 文件清单差异）作为成功结果的 details 随工具结果消息记进会话存储。文件变化（决策 348）：git 工作区按命令前后两次
+// git status 找候选、比大小与修改时间（被忽略的不报）；非 git 工作区比全量清单；报告格式不变，空报告即命令没改动工作区。
 // 设置的 commands 一节的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { PIGEON_DIR } from "../state/paths.ts";
 import { createLocalWorkspaceHost, windowsScript } from "./local-host.ts";
 import {
+  type HostExecOptions,
   type HostExecPlan,
+  type HostExecResult,
   type HostFileSnapshot,
+  type HostFileState,
   type MemoryLimitExceeded,
+  MISSING_SIGNATURE,
   memoryLimitText,
   type WorkspaceHost,
 } from "./workspace-host.ts";
@@ -397,9 +402,12 @@ export function createRunCommandTool(
         );
       }
       const plan = spawnPlan(inspection, env, platform);
-      const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
-      const run = await host.exec(plan, { env, timeoutMs, maxOutputBytes, signal });
-      const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+      const { run, fileChanges } = await observedRun(host, plan, {
+        env,
+        timeoutMs,
+        maxOutputBytes,
+        signal,
+      });
       const evidence: ExecEvidence = {
         command,
         ...(alias !== undefined ? { alias } : {}),
@@ -414,7 +422,7 @@ export function createRunCommandTool(
         outputHash: run.outputHash,
         output: run.output,
         truncated: run.outputBytes > maxOutputBytes,
-        fileChanges: diffFiles(before, after),
+        fileChanges,
         ...(run.memoryLimitExceeded !== undefined
           ? { memoryLimitExceeded: run.memoryLimitExceeded }
           : {}),
@@ -573,6 +581,74 @@ export function allowedEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     }
   }
   return env;
+}
+
+// 执行并取命令前后的文件变化：执行端能合成一次的合成一次（容器），否则前后各取一次证；
+// 只有文件清单的执行端（测试替身）按清单比对
+async function observedRun(
+  host: WorkspaceHost,
+  plan: HostExecPlan,
+  options: HostExecOptions
+): Promise<{ run: HostExecResult; fileChanges: FileChanges }> {
+  if (host.execObserved !== undefined) {
+    const observed = await host.execObserved(plan, options, FILE_SNAPSHOT_LIMIT);
+    // 超时、中止重启了容器，命令后的取证另取一次
+    const after = observed.after ?? (await host.fileState?.(FILE_SNAPSHOT_LIMIT, observed.before));
+    return {
+      run: observed.result,
+      fileChanges: after !== undefined ? diffStates(observed.before, after) : incompleteChanges(),
+    };
+  }
+  if (host.fileState !== undefined) {
+    const before = await host.fileState(FILE_SNAPSHOT_LIMIT);
+    const run = await host.exec(plan, options);
+    const after = await host.fileState(FILE_SNAPSHOT_LIMIT, before);
+    return { run, fileChanges: diffStates(before, after) };
+  }
+  const before = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+  const run = await host.exec(plan, options);
+  const after = await host.listFiles(FILE_SNAPSHOT_LIMIT);
+  return { run, fileChanges: diffFiles(before, after) };
+}
+
+function incompleteChanges(): FileChanges {
+  return { added: [], removed: [], modified: [], truncated: true };
+}
+
+// 两次取证 → 文件变化。git 取证：签名变了即有变化；命令前没报出的路径在命令前是干净的——未跟踪即原本不存在，
+// 跟踪的原本存在；命令后不再报出的路径按补查的签名判断。取法前后不一（命令中途建了或删了版本库）时报不完整
+export function diffStates(before: HostFileState, after: HostFileState): FileChanges {
+  if (before.kind === "scan" && after.kind === "scan") {
+    return diffFiles(before, after);
+  }
+  if (before.kind !== "git" || after.kind !== "git") {
+    return incompleteChanges();
+  }
+  const added: string[] = [];
+  const removed: string[] = [];
+  const modified: string[] = [];
+  for (const [file, now] of after.entries) {
+    const was = before.entries.get(file);
+    if (was !== undefined && was.signature === now.signature) {
+      continue;
+    }
+    const existedBefore =
+      was !== undefined ? was.signature !== MISSING_SIGNATURE : now.status !== "untracked";
+    const existsAfter = now.signature !== MISSING_SIGNATURE;
+    if (existedBefore && existsAfter) {
+      modified.push(file);
+    } else if (existsAfter) {
+      added.push(file);
+    } else if (existedBefore) {
+      removed.push(file);
+    }
+  }
+  return {
+    added: added.sort(),
+    removed: removed.sort(),
+    modified: modified.sort(),
+    truncated: before.truncated || after.truncated,
+  };
 }
 
 function diffFiles(before: HostFileSnapshot, after: HostFileSnapshot): FileChanges {
