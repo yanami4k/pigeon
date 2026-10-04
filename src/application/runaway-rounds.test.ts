@@ -1,6 +1,6 @@
 // 撞上限续跑（决策 367）的截断轮与续跑提示：打转检测不把截断轮算作一轮（不清零计数）；回看历史时续跑提示不显示成人输入的话
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { TurnRoundNotice } from "../pi-runtime/adapter.ts";
 import type { RunId } from "../state/ids.ts";
 import { TRUNCATION_CONTINUE_PROMPT } from "../state/runaway-config.ts";

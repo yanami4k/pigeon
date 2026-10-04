@@ -1,7 +1,7 @@
 // 不带工具的单次补全（决策 289 的提炼请求）：请求里没有工具、温度与输出上限按给定值下发；取回文本、用量与停止原因；
 // 流以错误收尾即报错。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { CompletionError, completeWithoutTools } from "./complete.ts";
 import { createFakeStreamFn } from "./fixtures.ts";
 

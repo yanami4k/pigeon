@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { applyHashlineEdits, buildEditDiff, lineTag } from "./hashline.ts";
 
 const SIX = ["l1", "l2", "l3", "l4", "l5", "l6"];

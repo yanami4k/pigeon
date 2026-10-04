@@ -2,7 +2,7 @@
 // 由字符串生成代码与借积木的构造器逃出上下文同样不成；积木只收发字符串。容器参数钉住：不挂目录、断网、限资源、只读根、去能力。
 // 本文件用本机进程版驱动同一个执行器；真容器的端到端用例在 script-docker.test.ts（服务器上跑）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   localScriptLauncher,
   SCRIPT_CONTAINER_LIMITS,

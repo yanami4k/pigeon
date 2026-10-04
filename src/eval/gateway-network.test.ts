@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { test } from "node:test";
 import { promisify } from "node:util";
+import { test } from "vitest";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import {
   createGatewayNetwork,
@@ -66,108 +66,110 @@ const tcp = (host, port, ms) => new Promise((resolve) => {
 })();
 `;
 
-test("只通网关的网络（真容器）：容器能连到网关、连不上公网与公网 DNS；宿主在这张网络上能连的端口如实列出；跑批结束删网络", {
-  skip: realDockerSkip(),
-  timeout: 900_000,
-}, async (t) => {
-  const prefix = `pigeon-gwnet-test-${process.pid}`;
-  const container = `${prefix}-job`;
-  const seen: string[] = [];
-  const upstream = http.createServer((req, res) => {
-    seen.push(req.url ?? "");
-    req.resume();
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end('{"usage":{"input_tokens":1,"output_tokens":1}}');
-  });
-  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
-  const limits = new LimitController({
-    probe: async () => true,
-    slots: 2,
-    sleep: () => new Promise(() => {}),
-    warn: () => {},
-  });
-  const gateway = await startModelGateway({
-    upstreamBaseUrl: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
-    accounts: [{ key: "key-one", concurrency: 2 }],
-    limits,
-    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
-    warn: () => {},
-  });
-  let networkName: string | undefined;
-  try {
-    const network = await createGatewayNetwork(prefix);
-    networkName = network.name;
-    assert.equal(network.name, gatewayNetworkName(prefix));
-    assert.match(network.hostAddress, /^\d+\.\d+\.\d+\.\d+$/);
-    const internalBase = await gateway.listenInternal(network.hostAddress);
-    const gatewayPort = Number(new URL(internalBase).port);
-    await startWorkspaceContainer({
-      image: REAL_IMAGE,
-      name: container,
-      runArgs: ["--network", network.name, "--label", `pigeon.stream=${prefix}`],
+test.skipIf(realDockerSkip())(
+  "只通网关的网络（真容器）：容器能连到网关、连不上公网与公网 DNS；宿主在这张网络上能连的端口如实列出；跑批结束删网络",
+  { timeout: 900_000 },
+  async (t) => {
+    const prefix = `pigeon-gwnet-test-${process.pid}`;
+    const container = `${prefix}-job`;
+    const seen: string[] = [];
+    const upstream = http.createServer((req, res) => {
+      seen.push(req.url ?? "");
+      req.resume();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"usage":{"input_tokens":1,"output_tokens":1}}');
     });
-    const ports =
-      process.env.PIGEON_GATEWAY_NET_SCAN === "1"
-        ? "all"
-        : [22, 53, 80, 111, 443, 2375, 2376, 3000, 5000, 8080, gatewayPort].join(",");
-    const result = await probeInContainer(
-      container,
-      probeScript([
-        gateway.jobBaseUrl("s|ext-x|1", { on: "internal" }),
-        // 文档保留地址（TEST-NET-3）作公网目标：内部网络上不论哪个公网地址都应不可达
-        "203.0.113.10",
-        network.hostAddress,
-        ports,
-      ])
-    );
-    t.diagnostic(
-      `宿主一侧地址上能连的端口：${JSON.stringify(result.openHostPorts)}（扫了 ${result.scanned} 个；网关端口 ${gatewayPort}）`
-    );
-    t.diagnostic(`公网 TCP：${result.publicTcp}；公网 DNS：${result.dns}`);
-    assert.equal(result.gateway, 200, "经网关的作业地址连得通");
-    assert.equal(seen.length, 1, "请求到了假上游");
-    assert.notEqual(result.publicTcp, "open", "连不上公网 IP 的 443 端口");
-    assert.ok(!String(result.dns).startsWith("resolved"), `解析不了公网域名：${result.dns}`);
-    assert.ok((result.openHostPorts as number[]).includes(gatewayPort), "网关端口在能连的端口里");
-  } finally {
-    await removeWorkspaceContainer(container).catch(() => {});
-    if (networkName !== undefined) {
-      await removeGatewayNetwork(networkName);
-      assert.equal(await gatewayNetworkExists(networkName), false, "网络已删除");
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const limits = new LimitController({
+      probe: async () => true,
+      slots: 2,
+      sleep: () => new Promise(() => {}),
+      warn: () => {},
+    });
+    const gateway = await startModelGateway({
+      upstreamBaseUrl: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+      accounts: [{ key: "key-one", concurrency: 2 }],
+      limits,
+      probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+      warn: () => {},
+    });
+    let networkName: string | undefined;
+    try {
+      const network = await createGatewayNetwork(prefix);
+      networkName = network.name;
+      assert.equal(network.name, gatewayNetworkName(prefix));
+      assert.match(network.hostAddress, /^\d+\.\d+\.\d+\.\d+$/);
+      const internalBase = await gateway.listenInternal(network.hostAddress);
+      const gatewayPort = Number(new URL(internalBase).port);
+      await startWorkspaceContainer({
+        image: REAL_IMAGE,
+        name: container,
+        runArgs: ["--network", network.name, "--label", `pigeon.stream=${prefix}`],
+      });
+      const ports =
+        process.env.PIGEON_GATEWAY_NET_SCAN === "1"
+          ? "all"
+          : [22, 53, 80, 111, 443, 2375, 2376, 3000, 5000, 8080, gatewayPort].join(",");
+      const result = await probeInContainer(
+        container,
+        probeScript([
+          gateway.jobBaseUrl("s|ext-x|1", { on: "internal" }),
+          // 文档保留地址（TEST-NET-3）作公网目标：内部网络上不论哪个公网地址都应不可达
+          "203.0.113.10",
+          network.hostAddress,
+          ports,
+        ])
+      );
+      await t.annotate(
+        `宿主一侧地址上能连的端口：${JSON.stringify(result.openHostPorts)}（扫了 ${result.scanned} 个；网关端口 ${gatewayPort}）`
+      );
+      await t.annotate(`公网 TCP：${result.publicTcp}；公网 DNS：${result.dns}`);
+      assert.equal(result.gateway, 200, "经网关的作业地址连得通");
+      assert.equal(seen.length, 1, "请求到了假上游");
+      assert.notEqual(result.publicTcp, "open", "连不上公网 IP 的 443 端口");
+      assert.ok(!String(result.dns).startsWith("resolved"), `解析不了公网域名：${result.dns}`);
+      assert.ok((result.openHostPorts as number[]).includes(gatewayPort), "网关端口在能连的端口里");
+    } finally {
+      await removeWorkspaceContainer(container).catch(() => {});
+      if (networkName !== undefined) {
+        await removeGatewayNetwork(networkName);
+        assert.equal(await gatewayNetworkExists(networkName), false, "网络已删除");
+      }
+      await gateway.close();
+      limits.close();
+      await new Promise<void>((r) => upstream.close(() => r()));
     }
-    await gateway.close();
-    limits.close();
-    await new Promise<void>((r) => upstream.close(() => r()));
   }
-});
+);
 
-test("删网络：接在上面的残留容器一并移除；网络本就不存在视为已删", {
-  skip: realDockerSkip(),
-  timeout: 300_000,
-}, async () => {
-  const prefix = `pigeon-gwnet-residue-${process.pid}`;
-  const network = await createGatewayNetwork(prefix);
-  const container = `${prefix}-left`;
-  try {
-    await startWorkspaceContainer({
-      image: REAL_IMAGE,
-      name: container,
-      runArgs: ["--network", network.name],
-    });
-    // 同名网络再建一次（开跑前的残留清理）：旧网络连同接在上面的容器一并清掉
-    const again = await createGatewayNetwork(prefix);
-    assert.equal(again.name, network.name);
-    const left = execFileSync("docker", ["ps", "-aq", "--filter", `name=^${container}$`], {
-      encoding: "utf8",
-    }).trim();
-    assert.equal(left, "", "残留容器已移除");
-  } finally {
-    await removeWorkspaceContainer(container).catch(() => {});
-    await removeGatewayNetwork(network.name);
-    await removeGatewayNetwork(network.name);
-    assert.equal(await gatewayNetworkExists(network.name), false);
+test.skipIf(realDockerSkip())(
+  "删网络：接在上面的残留容器一并移除；网络本就不存在视为已删",
+  { timeout: 300_000 },
+  async () => {
+    const prefix = `pigeon-gwnet-residue-${process.pid}`;
+    const network = await createGatewayNetwork(prefix);
+    const container = `${prefix}-left`;
+    try {
+      await startWorkspaceContainer({
+        image: REAL_IMAGE,
+        name: container,
+        runArgs: ["--network", network.name],
+      });
+      // 同名网络再建一次（开跑前的残留清理）：旧网络连同接在上面的容器一并清掉
+      const again = await createGatewayNetwork(prefix);
+      assert.equal(again.name, network.name);
+      const left = execFileSync("docker", ["ps", "-aq", "--filter", `name=^${container}$`], {
+        encoding: "utf8",
+      }).trim();
+      assert.equal(left, "", "残留容器已移除");
+    } finally {
+      await removeWorkspaceContainer(container).catch(() => {});
+      await removeGatewayNetwork(network.name);
+      await removeGatewayNetwork(network.name);
+      assert.equal(await gatewayNetworkExists(network.name), false);
+    }
   }
-});
+);
 
 // 容器里探一个 TCP 端口（open / timeout / 错误码）与经网关的作业地址发一次 POST（HTTP 状态）
 const reachScript = (target: { host: string; port: number }, gatewayUrl: string) => `
@@ -189,90 +191,91 @@ const tcp = (host, port, ms) => new Promise((resolve) => {
 })();
 `;
 
-test("只通网关的网络（真容器）：同一网络上的两个外部条件容器互相连不通（关掉了容器互连），都能连到网关", {
-  skip: realDockerSkip(),
-  timeout: 600_000,
-}, async () => {
-  const prefix = `pigeon-gwnet-icc-${process.pid}`;
-  const [a, b] = [`${prefix}-a`, `${prefix}-b`];
-  const upstream = http.createServer((req, res) => {
-    req.resume();
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end('{"usage":{"input_tokens":1,"output_tokens":1}}');
-  });
-  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
-  const limits = new LimitController({
-    probe: async () => true,
-    slots: 2,
-    sleep: () => new Promise(() => {}),
-    warn: () => {},
-  });
-  const gateway = await startModelGateway({
-    upstreamBaseUrl: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
-    accounts: [{ key: "key-one", concurrency: 2 }],
-    limits,
-    probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
-    warn: () => {},
-  });
-  let networkName: string | undefined;
-  try {
-    const network = await createGatewayNetwork(prefix);
-    networkName = network.name;
-    const opts = await execFileAsync("docker", [
-      "network",
-      "inspect",
-      "--format",
-      '{{index .Options "com.docker.network.bridge.enable_icc"}}',
-      network.name,
-    ]);
-    assert.equal(opts.stdout.trim(), "false", "网络关掉了容器互连");
-    await gateway.listenInternal(network.hostAddress);
-    for (const name of [a, b]) {
-      await startWorkspaceContainer({
-        image: REAL_IMAGE,
-        name,
-        runArgs: ["--network", network.name, "--label", `pigeon.stream=${prefix}`],
-      });
-    }
-    // 两个容器里各起一个监听 8080 的进程
-    for (const name of [a, b]) {
-      await execFileAsync("docker", [
-        "exec",
-        "-d",
-        name,
-        "node",
-        "-e",
-        'require("node:net").createServer((s) => s.end("hi")).listen(8080, "0.0.0.0")',
+test.skipIf(realDockerSkip())(
+  "只通网关的网络（真容器）：同一网络上的两个外部条件容器互相连不通（关掉了容器互连），都能连到网关",
+  { timeout: 600_000 },
+  async () => {
+    const prefix = `pigeon-gwnet-icc-${process.pid}`;
+    const [a, b] = [`${prefix}-a`, `${prefix}-b`];
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"usage":{"input_tokens":1,"output_tokens":1}}');
+    });
+    await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+    const limits = new LimitController({
+      probe: async () => true,
+      slots: 2,
+      sleep: () => new Promise(() => {}),
+      warn: () => {},
+    });
+    const gateway = await startModelGateway({
+      upstreamBaseUrl: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+      accounts: [{ key: "key-one", concurrency: 2 }],
+      limits,
+      probeRequest: { path: "/v1/messages", body: { max_tokens: 1 } },
+      warn: () => {},
+    });
+    let networkName: string | undefined;
+    try {
+      const network = await createGatewayNetwork(prefix);
+      networkName = network.name;
+      const opts = await execFileAsync("docker", [
+        "network",
+        "inspect",
+        "--format",
+        '{{index .Options "com.docker.network.bridge.enable_icc"}}',
+        network.name,
       ]);
-    }
-    await new Promise((r) => setTimeout(r, 1500));
-    const ipOf = async (name: string) =>
-      (
-        await execFileAsync("docker", [
-          "inspect",
-          "-f",
-          "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+      assert.equal(opts.stdout.trim(), "false", "网络关掉了容器互连");
+      await gateway.listenInternal(network.hostAddress);
+      for (const name of [a, b]) {
+        await startWorkspaceContainer({
+          image: REAL_IMAGE,
           name,
-        ])
-      ).stdout.trim();
-    const [ipA, ipB] = [await ipOf(a), await ipOf(b)];
-    const run = async (name: string, target: { host: string; port: number }, job: string) =>
-      probeInContainer(name, reachScript(target, gateway.jobBaseUrl(job, { on: "internal" })));
-    for (const name of [a, b]) {
-      const self = await run(name, { host: "127.0.0.1", port: 8080 }, `s|ext-${name}|0`);
-      assert.equal(self.peer, "open", `${name} 里的监听在`);
+          runArgs: ["--network", network.name, "--label", `pigeon.stream=${prefix}`],
+        });
+      }
+      // 两个容器里各起一个监听 8080 的进程
+      for (const name of [a, b]) {
+        await execFileAsync("docker", [
+          "exec",
+          "-d",
+          name,
+          "node",
+          "-e",
+          'require("node:net").createServer((s) => s.end("hi")).listen(8080, "0.0.0.0")',
+        ]);
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+      const ipOf = async (name: string) =>
+        (
+          await execFileAsync("docker", [
+            "inspect",
+            "-f",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            name,
+          ])
+        ).stdout.trim();
+      const [ipA, ipB] = [await ipOf(a), await ipOf(b)];
+      const run = async (name: string, target: { host: string; port: number }, job: string) =>
+        probeInContainer(name, reachScript(target, gateway.jobBaseUrl(job, { on: "internal" })));
+      for (const name of [a, b]) {
+        const self = await run(name, { host: "127.0.0.1", port: 8080 }, `s|ext-${name}|0`);
+        assert.equal(self.peer, "open", `${name} 里的监听在`);
+      }
+      const aToB = await run(a, { host: ipB, port: 8080 }, "s|ext-a|1");
+      const bToA = await run(b, { host: ipA, port: 8080 }, "s|ext-b|2");
+      assert.notEqual(aToB.peer, "open", `a 连不到 b：${aToB.peer}`);
+      assert.notEqual(bToA.peer, "open", `b 连不到 a：${bToA.peer}`);
+      assert.equal(aToB.gateway, 200, "a 能连到网关");
+      assert.equal(bToA.gateway, 200, "b 能连到网关");
+    } finally {
+      for (const name of [a, b]) await removeWorkspaceContainer(name).catch(() => {});
+      if (networkName !== undefined) await removeGatewayNetwork(networkName);
+      await gateway.close();
+      limits.close();
+      await new Promise<void>((r) => upstream.close(() => r()));
     }
-    const aToB = await run(a, { host: ipB, port: 8080 }, "s|ext-a|1");
-    const bToA = await run(b, { host: ipA, port: 8080 }, "s|ext-b|2");
-    assert.notEqual(aToB.peer, "open", `a 连不到 b：${aToB.peer}`);
-    assert.notEqual(bToA.peer, "open", `b 连不到 a：${bToA.peer}`);
-    assert.equal(aToB.gateway, 200, "a 能连到网关");
-    assert.equal(bToA.gateway, 200, "b 能连到网关");
-  } finally {
-    for (const name of [a, b]) await removeWorkspaceContainer(name).catch(() => {});
-    if (networkName !== undefined) await removeGatewayNetwork(networkName);
-    await gateway.close();
-    limits.close();
-    await new Promise<void>((r) => upstream.close(() => r()));
   }
-});
+);

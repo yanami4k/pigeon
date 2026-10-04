@@ -3,7 +3,7 @@
 // C0 → 控制图形），绝不静默丢弃、绝不原样直通（M2 审计 P2-1：OSC 52 剪贴板劫持 /
 // OSC 8 伪装链接 / CSI 光标与擦除可伪造审批屏）。保留 \n \t；不做 SGR 白名单。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { sanitizeTerminalText } from "./format.ts";
 
 // ESC 引导字节惰性化后，序列其余可打印字节保留在屏上作审计痕迹

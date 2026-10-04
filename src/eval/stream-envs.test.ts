@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { gitHumanRepo } from "./stream-facts.ts";
 import { dockerStreamEnvs } from "./stream-runner.ts";
 import { toyRepo } from "./stream-toy-fixtures.ts";

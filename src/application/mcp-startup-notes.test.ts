@@ -1,7 +1,7 @@
 // MCP 启动提示（M5.7，决策 052）：注解与配置冲突除记进 run.started 外，启动时进程内同时警告；启动问题（server 起不来、
 // 映射跳过、prompt 不登记）一并给出。Actor 只负责把这些行打出去。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { describeMcpStartup } from "./mcp.ts";
 
 test("MCP 启动提示：启动问题原样列出，注解与配置冲突逐项警告，无冲突无问题时为空", () => {

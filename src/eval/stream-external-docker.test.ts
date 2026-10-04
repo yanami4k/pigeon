@@ -9,8 +9,8 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { test } from "vitest";
 import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
 import { startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
@@ -165,115 +165,124 @@ async function runOneStep(mode: string, wallClockMs: number, graceMs: number) {
   }
 }
 
-test("外部 agent 条件（真容器）：完整一步——经网关发请求、写结果与产物并拷出、report 进结果行、排除路径不进 diff、照常判题", {
-  skip: realDockerSkip(),
-  timeout: 900_000,
-}, async () => {
-  const { base, outDir, rows, upstreamBodies } = await runOneStep("work", 120_000, 30_000);
-  try {
-    assert.equal(rows.length, 1, JSON.stringify(rows));
-    const row = rows[0];
-    assert.ok(row !== undefined);
-    assert.equal(row.condition, "ext-fake");
-    assert.equal(row.status, "completed");
-    // 轮数取网关请求数（启动器自报的 turns 不用）
-    assert.equal(row.turns, 1);
-    assert.equal(row.usage.input, 5);
-    assert.equal(row.agentReport?.fake, true);
-    assert.equal(row.agentReport?.httpStatus, 200);
-    assert.equal(row.agentReport?.cwd, "/testbed");
-    // 外部条件的作业地址上请求体逐字到达上游（带 custom 工具、未知字段 output_config 与非规整空白，一字不改）
-    assert.equal(upstreamBodies.length, 1);
-    const sent = readFileSync(
-      join(
+test.skipIf(realDockerSkip())(
+  "外部 agent 条件（真容器）：完整一步——经网关发请求、写结果与产物并拷出、report 进结果行、排除路径不进 diff、照常判题",
+  { timeout: 900_000 },
+  async () => {
+    const { base, outDir, rows, upstreamBodies } = await runOneStep("work", 120_000, 30_000);
+    try {
+      assert.equal(rows.length, 1, JSON.stringify(rows));
+      const row = rows[0];
+      assert.ok(row !== undefined);
+      assert.equal(row.condition, "ext-fake");
+      assert.equal(row.status, "completed");
+      // 轮数取网关请求数（启动器自报的 turns 不用）
+      assert.equal(row.turns, 1);
+      assert.equal(row.usage.input, 5);
+      assert.equal(row.agentReport?.fake, true);
+      assert.equal(row.agentReport?.httpStatus, 200);
+      assert.equal(row.agentReport?.cwd, "/testbed");
+      // 外部条件的作业地址上请求体逐字到达上游（带 custom 工具、未知字段 output_config 与非规整空白，一字不改）
+      assert.equal(upstreamBodies.length, 1);
+      const sent = readFileSync(
+        join(
+          outDir,
+          "streams",
+          "tasks-ext-fake-1",
+          "external",
+          `step-${row.seq}`,
+          "try-1",
+          "io",
+          "artifacts",
+          "sent-body.json"
+        ),
+        "utf8"
+      );
+      assert.match(sent, /"type":"custom"/);
+      assert.equal(upstreamBodies[0], sent);
+      // 别处的改动照常进 diff、照常判题；排除路径（含其中的嵌套 git 工作树）不进 diff
+      assert.equal(row.outcome, "passed");
+      const diff = readFileSync(join(outDir, row.diff ?? ""), "utf8");
+      assert.match(diff, /src\/a\.txt/);
+      assert.doesNotMatch(diff, /\.agent-state/);
+      // 产物按步与尝试拷出
+      const tryDir = join(
         outDir,
         "streams",
         "tasks-ext-fake-1",
         "external",
         `step-${row.seq}`,
-        "try-1",
-        "io",
-        "artifacts",
-        "sent-body.json"
-      ),
-      "utf8"
-    );
-    assert.match(sent, /"type":"custom"/);
-    assert.equal(upstreamBodies[0], sent);
-    // 别处的改动照常进 diff、照常判题；排除路径（含其中的嵌套 git 工作树）不进 diff
-    assert.equal(row.outcome, "passed");
-    const diff = readFileSync(join(outDir, row.diff ?? ""), "utf8");
-    assert.match(diff, /src\/a\.txt/);
-    assert.doesNotMatch(diff, /\.agent-state/);
-    // 产物按步与尝试拷出
-    const tryDir = join(
-      outDir,
-      "streams",
-      "tasks-ext-fake-1",
-      "external",
-      `step-${row.seq}`,
-      "try-1"
-    );
-    // 容器里的请求目录拷到 io/ 下（不可信）；请求文件另由宿主写一份可信副本在 try 目录
-    assert.ok(existsSync(join(tryDir, "io", "result.json")), "结果文件拷出");
-    assert.ok(existsSync(join(tryDir, "io", "request.json")), "容器里的请求文件拷出");
-    assert.match(
-      readFileSync(join(tryDir, "io", "artifacts", "trace.txt"), "utf8"),
-      /cwd=\/testbed marker=pigeon-step-/
-    );
-    const request = JSON.parse(readFileSync(join(tryDir, "request.json"), "utf8"));
-    assert.deepEqual(request, JSON.parse(readFileSync(join(tryDir, "io", "request.json"), "utf8")));
-    assert.deepEqual(Object.keys(request).sort(), [
-      "directive",
-      "maxTurns",
-      "model",
-      "modelBaseUrl",
-      "prompt",
-      "root",
-      "stepMarker",
-      "wallClockMs",
-    ]);
-    assert.match(request.modelBaseUrl, /^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/j\/[^/]+\/[0-9a-f]{32}$/);
-  } finally {
-    rmSync(base, { recursive: true, force: true });
+        "try-1"
+      );
+      // 容器里的请求目录拷到 io/ 下（不可信）；请求文件另由宿主写一份可信副本在 try 目录
+      assert.ok(existsSync(join(tryDir, "io", "result.json")), "结果文件拷出");
+      assert.ok(existsSync(join(tryDir, "io", "request.json")), "容器里的请求文件拷出");
+      assert.match(
+        readFileSync(join(tryDir, "io", "artifacts", "trace.txt"), "utf8"),
+        /cwd=\/testbed marker=pigeon-step-/
+      );
+      const request = JSON.parse(readFileSync(join(tryDir, "request.json"), "utf8"));
+      assert.deepEqual(
+        request,
+        JSON.parse(readFileSync(join(tryDir, "io", "request.json"), "utf8"))
+      );
+      assert.deepEqual(Object.keys(request).sort(), [
+        "directive",
+        "maxTurns",
+        "model",
+        "modelBaseUrl",
+        "prompt",
+        "root",
+        "stepMarker",
+        "wallClockMs",
+      ]);
+      assert.match(
+        request.modelBaseUrl,
+        /^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/j\/[^/]+\/[0-9a-f]{32}$/
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   }
-});
+);
 
-test("外部 agent 条件（真容器）：墙钟到点即杀掉 docker exec 与容器里的进程，按超时记", {
-  skip: realDockerSkip(),
-  timeout: 900_000,
-}, async () => {
-  const { base, outDir, rows } = await runOneStep("hang", 2_000, 2_000);
-  try {
-    assert.equal(rows.length, 1, JSON.stringify(rows));
-    const row = rows[0];
-    assert.equal(row?.status, "wall-clock-limit");
-    assert.equal(row?.hitStepBudget, true);
-    assert.ok((row?.agentWallMs ?? 0) >= 4_000 && (row?.agentWallMs ?? 0) < 60_000);
-    const tryDir = join(
-      outDir,
-      "streams",
-      "tasks-ext-fake-1",
-      "external",
-      `step-${row?.seq}`,
-      "try-1"
-    );
-    assert.ok(
-      existsSync(join(tryDir, "io", "artifacts", "started.txt")),
-      "被杀之前写的产物照样拷出"
-    );
-  } finally {
-    rmSync(base, { recursive: true, force: true });
+test.skipIf(realDockerSkip())(
+  "外部 agent 条件（真容器）：墙钟到点即杀掉 docker exec 与容器里的进程，按超时记",
+  { timeout: 900_000 },
+  async () => {
+    const { base, outDir, rows } = await runOneStep("hang", 2_000, 2_000);
+    try {
+      assert.equal(rows.length, 1, JSON.stringify(rows));
+      const row = rows[0];
+      assert.equal(row?.status, "wall-clock-limit");
+      assert.equal(row?.hitStepBudget, true);
+      assert.ok((row?.agentWallMs ?? 0) >= 4_000 && (row?.agentWallMs ?? 0) < 60_000);
+      const tryDir = join(
+        outDir,
+        "streams",
+        "tasks-ext-fake-1",
+        "external",
+        `step-${row?.seq}`,
+        "try-1"
+      );
+      assert.ok(
+        existsSync(join(tryDir, "io", "artifacts", "started.txt")),
+        "被杀之前写的产物照样拷出"
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   }
-});
+);
 
-test("外部 agent 条件（真容器）：启动命令 --identity 自报的版本", {
-  skip: realDockerSkip(),
-  timeout: 300_000,
-}, async () => {
-  const reported = await selfReportOf(fakeConfig("work"), {
-    image: REAL_IMAGE,
-    container: `pigeon-ext-identity-test-${process.pid}`,
-  });
-  assert.deepEqual(reported, { name: "fake-external-agent", version: "1.0.0" });
-});
+test.skipIf(realDockerSkip())(
+  "外部 agent 条件（真容器）：启动命令 --identity 自报的版本",
+  { timeout: 300_000 },
+  async () => {
+    const reported = await selfReportOf(fakeConfig("work"), {
+      image: REAL_IMAGE,
+      container: `pigeon-ext-identity-test-${process.pid}`,
+    });
+    assert.deepEqual(reported, { name: "fake-external-agent", version: "1.0.0" });
+  }
+);

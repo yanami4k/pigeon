@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createEditFileTool } from "./edit-file.ts";
 import {
   createWorkspaceFile,
@@ -74,7 +74,7 @@ test("覆盖已存在的文件：没读过拒写；读过（分段读也算）�
     assert.equal(readFileSync(file, "utf8"), "x\n");
   }));
 
-test("目标是符号链接即拒写，链接与它指向的文件都不变", { skip: process.platform === "win32" }, () =>
+test.skipIf(process.platform === "win32")("目标是符号链接即拒写，链接与它指向的文件都不变", () =>
   withRoot(async (root) => {
     writeFileSync(join(root, "real.txt"), "real\n");
     symlinkSync(join(root, "real.txt"), join(root, "link.txt"));
@@ -139,9 +139,8 @@ test("edit_file 两种模式：路径含控制字符一律拒写，同名文件�
     if (named) assert.equal(readFileSync(join(root, "a\tb.txt"), "utf8"), "old\n");
   }));
 
-test(
+test.skipIf(process.platform === "win32")(
   "新建：越出工作区根拒写；检查之后被别人建了不覆盖；检查之后路径上的目录被换成链接拒写",
-  { skip: process.platform === "win32" },
   () =>
     withRoot(async (root) => {
       assert.throws(() => resolveWorkspaceCreatePath(root, "../outside.txt"), WorkspacePathError);

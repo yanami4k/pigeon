@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, test } from "node:test";
+import { afterAll, beforeAll, describe, test } from "vitest";
 import { JobPool, SessionJobs } from "../tools/background-jobs.ts";
 import { CommandOutputStore } from "../tools/command-output.ts";
 import {
@@ -279,14 +279,14 @@ function dockerSkipReason(): string | undefined {
 
 const skip = dockerSkipReason();
 
-describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
+describe.skipIf(skip ?? false)("容器执行端（真容器）", () => {
   const name = `pigeon-host-test-${process.pid}`;
   const root = "/work";
   const host = createContainerWorkspaceHost({ container: name, root });
   const sh = (script: string) =>
     containerExec({ container: name, command: ["sh", "-c", script], workdir: "/" });
 
-  before(async () => {
+  beforeAll(async () => {
     await removeWorkspaceContainer(name);
     await startWorkspaceContainer({ image: IMAGE, name });
     const made = await sh(
@@ -297,7 +297,7 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
     assert.equal(made.exitCode, 0, made.stderr);
   });
 
-  after(async () => {
+  afterAll(async () => {
     await removeWorkspaceContainer(name);
   });
 
@@ -552,5 +552,5 @@ describe("容器执行端（真容器）", { skip: skip ?? false }, () => {
 });
 
 if (skip !== undefined) {
-  test(`容器执行端（真容器）已跳过：${skip}`, { skip: true }, () => {});
+  test.skipIf(true)(`容器执行端（真容器）已跳过：${skip}`, () => {});
 }

@@ -1,8 +1,8 @@
-// 逐文件覆盖率：每个测试文件单独跑一遍 node 自带的覆盖率（lcov），算出每个文件独有覆盖的产品代码行（别的测试文件都没覆盖到），
-// 以及全部文件合起来对指定模块的行覆盖率。独有行为 0 的文件只是"删了也不影响覆盖"的候选，删不删要逐个看它断言的行为。
+// 逐文件覆盖率：每个测试文件单独跑一遍 Vitest 的 v8 覆盖率（lcov），算出每个文件独有覆盖的产品代码行（别的测试文件都没
+// 覆盖到），以及全部文件合起来对指定模块的行覆盖率。独有行为 0 的文件只是"删了也不影响覆盖"的候选，删不删要逐个看它断言的行为。
 // 用法：node scripts/test-coverage.mjs [--concurrency N] [--dir 输出目录] [--module 路径前缀 ...] [文件或 glob ...]
 import { spawn } from "node:child_process";
-import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { globSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, relative } from "node:path";
 
@@ -26,22 +26,30 @@ mkdirSync(join(dir, "lcov"), { recursive: true });
 
 const lcovOf = (file) => join(dir, "lcov", `${file.replaceAll("/", "__")}.lcov`);
 
+// 单个文件跑一次（一个 worker），lcov 写进该文件自己的报告目录，跑完挪到 lcov/ 下
 function runFile(file) {
   return new Promise((resolve) => {
+    const reports = join(dir, "runs", file.replaceAll("/", "__"));
     const child = spawn(
       process.execPath,
       [
-        "--test",
-        "--experimental-test-coverage",
-        "--test-reporter=dot",
-        "--test-reporter-destination=stdout",
-        "--test-reporter=lcov",
-        `--test-reporter-destination=${lcovOf(file)}`,
+        "scripts/run-tests.mjs",
+        "all",
+        "--maxWorkers=1",
+        "--coverage.enabled",
+        "--coverage.reporter=lcovonly",
+        `--coverage.reportsDirectory=${reports}`,
         file,
       ],
-      { stdio: "ignore" }
+      { stdio: "ignore", env: { ...process.env, TEST_CONCURRENCY: "" } }
     );
-    child.on("close", (code) => resolve({ file, exitCode: code }));
+    child.on("close", (code) => {
+      try {
+        renameSync(join(reports, "lcov.info"), lcovOf(file));
+      } catch {}
+      rmSync(reports, { recursive: true, force: true });
+      resolve({ file, exitCode: code });
+    });
   });
 }
 

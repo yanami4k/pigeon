@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { PathScopedGrantUnsupportedError } from "../approvals/grant-store.ts";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
 import { fakeSandboxDocker } from "../execution/sandbox-docker-fixtures.ts";

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { loadSkillCatalog, MCP_PROMPT_RESOURCE } from "./catalog.ts";
 
 const sha256 = (data: string): string => createHash("sha256").update(data).digest("hex");

@@ -1,9 +1,9 @@
 // 工具结果观察口（决策 286）的故障隔离：构造通知出错（结果 details 不可克隆，如带函数）只进 listenerErrors，
 // 不打断运行、不妨碍后续工具结果的转发；listener 自己抛异常同样只进 listenerErrors。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { PiRuntimeAdapter, type ToolResultNotice } from "./adapter.ts";

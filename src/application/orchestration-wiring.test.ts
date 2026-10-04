@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import { STREAM_SPAWN_WORKERS, STREAM_TASK_LIST } from "../eval/stream-agents.ts";
 import { effectivePigeonSettings } from "../eval/stream-experiment.ts";
@@ -41,7 +41,7 @@ const ORCHESTRATION_TOOLS = [
 const NEW_TOOLS = [...ORCHESTRATION_TOOLS, "take_worker", "update_tasks", "list_tasks"];
 
 const roots: string[] = [];
-after(() => {
+afterAll(() => {
   for (const root of roots) {
     rmSync(root, { recursive: true, force: true });
   }

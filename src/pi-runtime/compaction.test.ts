@@ -1,7 +1,6 @@
 // 压缩服务（决策 188、189、218、192、207）：配置缺省与校验、阈值判定、上下文 token 估算（压缩后的旧 usage 不算）、
 // 摘要请求经给定的模型接入、待摘要段为空不调模型、压缩前回调先于摘要请求且失败不阻断。
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
 import {
   type AgentMessage,
   type CompactResult,
@@ -9,6 +8,7 @@ import {
   type Entry,
 } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { describe, test } from "vitest";
 import {
   type CompactionStore,
   ContextCompactor,

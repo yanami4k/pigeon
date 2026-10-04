@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { asGrantId, newSessionId } from "../state/ids.ts";

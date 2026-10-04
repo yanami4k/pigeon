@@ -1,7 +1,7 @@
 // 缓存规则表（决策 362）：按实际服务方查、精确型号优先、其次最长前缀；没有兜底行的服务方下匹配不到的型号为未知；
 // 表的每行有出处，各档的数彼此自洽。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   CACHE_RULES,
   type CacheRuleRow,

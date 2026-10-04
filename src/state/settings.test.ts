@@ -2,7 +2,7 @@
 // permissions 三层并集、未知键报错（顶层与节内，指出文件、键与层）、$schema 不算未知、设置里写 key 报错并给出环境变量、
 // trustedDirectories 只许写在用户级。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   configGrantRulesOf,
   emptySettingsSnapshot,

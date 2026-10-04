@@ -1,7 +1,7 @@
 // Adapter 的通知队列（决策 297）：Run 进行中递来的通知在这一轮结束时进下一轮（同一个 Run 内，本轮没有工具调用时同样接着跑一轮）；
 // 递出之前可撤回；空闲时 runNotices 只带通知开一个 Run；下一次 run 连同输入带上待递的通知（通知在前）。真实 pi-agent-core Agent、假模型。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import { PiRuntimeAdapter } from "./adapter.ts";
 import { createFakeStreamFn } from "./fixtures.ts";

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   CN_ADJUSTED_WORKDAYS,
   CN_PUBLIC_HOLIDAYS,

@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { cleanupOrphanedJobs, JobPool, SessionJobs } from "./background-jobs.ts";
 import { CommandOutputStore } from "./command-output.ts";
 import { createJobKillTool, createJobOutputTool, JOB_IDLE_QUERY_LIMIT } from "./job-tools.ts";
@@ -152,47 +152,49 @@ test("同时在跑的上限：本会话超出即拒绝并列出在跑的作业�
   }
 });
 
-test("job_kill 停掉整个进程组：作业起的孙进程一并结束", {
-  skip: POSIX ? false : "进程组只在 POSIX 上",
-}, async () => {
-  const h = setup();
-  try {
-    const pidFile = join(h.root, "child.pid");
-    writeFileSync(join(h.root, "spawn.sh"), `sleep 300 &\necho $! > '${pidFile}'\nwait\n`);
-    await h.background("sh spawn.sh");
-    await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
-    const child = Number(readFileSync(pidFile, "utf8"));
-    assert.ok(alive(child));
-    const killed = await h.kill("j1");
-    assert.equal(killed.details.jobs[0]?.state, "killed");
-    await until(() => !alive(child));
-  } finally {
-    await h.cleanup();
+test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
+  "job_kill 停掉整个进程组：作业起的孙进程一并结束",
+  async () => {
+    const h = setup();
+    try {
+      const pidFile = join(h.root, "child.pid");
+      writeFileSync(join(h.root, "spawn.sh"), `sleep 300 &\necho $! > '${pidFile}'\nwait\n`);
+      await h.background("sh spawn.sh");
+      await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "");
+      const child = Number(readFileSync(pidFile, "utf8"));
+      assert.ok(alive(child));
+      const killed = await h.kill("j1");
+      assert.equal(killed.details.jobs[0]?.state, "killed");
+      await until(() => !alive(child));
+    } finally {
+      await h.cleanup();
+    }
   }
-});
+);
 
-test("单次超时：timeout_seconds 超过上限即拒绝、不与 background 同用；到时杀整个进程组", {
-  skip: POSIX ? false : "进程组只在 POSIX 上",
-}, async () => {
-  const h = setup();
-  try {
-    await assert.rejects(h.run("echo hi", { timeout_seconds: 601 }), (error: Error) =>
-      ["timeout_seconds", "600"].every((part) => error.message.includes(part))
-    );
-    await assert.rejects(
-      h.run("echo hi", { timeout_seconds: 5, background: true }),
-      (error: Error) =>
-        ["timeout_seconds", "background"].every((part) => error.message.includes(part))
-    );
-    const pidFile = join(h.root, "child.pid");
-    writeFileSync(join(h.root, "spawn.sh"), `sleep 300 &\necho $! > '${pidFile}'\nwait\n`);
-    await assert.rejects(h.run("sh spawn.sh", { timeout_seconds: 1 }), RunCommandTimeoutError);
-    const child = Number(readFileSync(pidFile, "utf8"));
-    await until(() => !alive(child));
-  } finally {
-    await h.cleanup();
+test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
+  "单次超时：timeout_seconds 超过上限即拒绝、不与 background 同用；到时杀整个进程组",
+  async () => {
+    const h = setup();
+    try {
+      await assert.rejects(h.run("echo hi", { timeout_seconds: 601 }), (error: Error) =>
+        ["timeout_seconds", "600"].every((part) => error.message.includes(part))
+      );
+      await assert.rejects(
+        h.run("echo hi", { timeout_seconds: 5, background: true }),
+        (error: Error) =>
+          ["timeout_seconds", "background"].every((part) => error.message.includes(part))
+      );
+      const pidFile = join(h.root, "child.pid");
+      writeFileSync(join(h.root, "spawn.sh"), `sleep 300 &\necho $! > '${pidFile}'\nwait\n`);
+      await assert.rejects(h.run("sh spawn.sh", { timeout_seconds: 1 }), RunCommandTimeoutError);
+      const child = Number(readFileSync(pidFile, "utf8"));
+      await until(() => !alive(child));
+    } finally {
+      await h.cleanup();
+    }
   }
-});
+);
 
 test("单个输出文件超过上限只留末尾，并注明丢弃了前面多少", async () => {
   const h = setup({ outputMaxBytes: 4096 });
@@ -308,109 +310,110 @@ function orphanKit() {
   return { dir, write, start, deadOwner, cleanup };
 }
 
-test("崩溃后清理：组长核对一致即杀整组；标记不符或启动时间不符的不杀组长与组；容器记录只交出容器与标记", {
-  skip: LINUX ? false : "按 /proc 认进程",
-}, async () => {
-  const k = orphanKit();
-  try {
-    const owner = await k.deadOwner();
-    const marker = "ab".repeat(12);
-    // 标记不符：进程不带标记、启动时间对得上
-    const decoy = k.start(["sleep", "300"]);
-    const decoyRecord = await localProcessRecord(decoy, marker);
-    assert.ok(decoyRecord !== undefined);
-    k.write(owner, "decoy", decoyRecord);
-    assert.deepEqual(
-      (await cleanupOrphanedJobs(k.dir)).map((r) => r.result),
-      ["reused"]
-    );
-    assert.ok(alive(decoy));
-    // 启动时间不符：组长带标记（照样按标记杀掉），组里不带标记的成员不动
-    const memberFile = join(k.dir, "member.pid");
-    const leader = k.start(
-      ["sh", "-c", `env -u ${RUN_MARKER_VAR} sleep 300 & echo $! > '${memberFile}'; wait`],
-      marker
-    );
-    await until(() => existsSync(memberFile) && readFileSync(memberFile, "utf8").trim() !== "");
-    const member = Number(readFileSync(memberFile, "utf8"));
-    const leaderRecord = await localProcessRecord(leader, marker);
-    assert.ok(leaderRecord !== undefined);
-    k.write(owner, "reused", { ...leaderRecord, startTime: "1" });
-    assert.deepEqual(
-      (await cleanupOrphanedJobs(k.dir)).map((r) => r.result),
-      ["reused"]
-    );
-    await until(() => !alive(leader));
-    assert.ok(alive(member));
-    // 一致：整组杀掉；容器记录不采用其中的 docker 前缀
-    const orphanMarker = "cd".repeat(12);
-    const orphanFile = join(k.dir, "orphan-member.pid");
-    const orphan = k.start(
-      ["sh", "-c", `env -u ${RUN_MARKER_VAR} sleep 300 & echo $! > '${orphanFile}'; wait`],
-      orphanMarker
-    );
-    await until(() => existsSync(orphanFile) && readFileSync(orphanFile, "utf8").trim() !== "");
-    const orphanMember = Number(readFileSync(orphanFile, "utf8"));
-    k.write(owner, "orphan", await localProcessRecord(orphan, orphanMarker));
-    k.write(owner, "box", { kind: "container", docker: ["/tmp/evil"], container: "box", marker });
-    const seen: unknown[] = [];
-    const reports = await cleanupOrphanedJobs(k.dir, {
-      killContainer: async (target) => {
-        seen.push(target);
-        return true;
-      },
-    });
-    assert.deepEqual(reports.map((r) => r.result).sort(), ["killed", "killed"]);
-    assert.deepEqual(seen, [{ container: "box", marker }]);
-    await until(() => !alive(orphan) && !alive(orphanMember));
-    assert.equal(existsSync(join(k.dir, "orphan.json")), false);
-  } finally {
-    k.cleanup();
+test.skipIf(LINUX ? false : "按 /proc 认进程")(
+  "崩溃后清理：组长核对一致即杀整组；标记不符或启动时间不符的不杀组长与组；容器记录只交出容器与标记",
+  async () => {
+    const k = orphanKit();
+    try {
+      const owner = await k.deadOwner();
+      const marker = "ab".repeat(12);
+      // 标记不符：进程不带标记、启动时间对得上
+      const decoy = k.start(["sleep", "300"]);
+      const decoyRecord = await localProcessRecord(decoy, marker);
+      assert.ok(decoyRecord !== undefined);
+      k.write(owner, "decoy", decoyRecord);
+      assert.deepEqual(
+        (await cleanupOrphanedJobs(k.dir)).map((r) => r.result),
+        ["reused"]
+      );
+      assert.ok(alive(decoy));
+      // 启动时间不符：组长带标记（照样按标记杀掉），组里不带标记的成员不动
+      const memberFile = join(k.dir, "member.pid");
+      const leader = k.start(
+        ["sh", "-c", `env -u ${RUN_MARKER_VAR} sleep 300 & echo $! > '${memberFile}'; wait`],
+        marker
+      );
+      await until(() => existsSync(memberFile) && readFileSync(memberFile, "utf8").trim() !== "");
+      const member = Number(readFileSync(memberFile, "utf8"));
+      const leaderRecord = await localProcessRecord(leader, marker);
+      assert.ok(leaderRecord !== undefined);
+      k.write(owner, "reused", { ...leaderRecord, startTime: "1" });
+      assert.deepEqual(
+        (await cleanupOrphanedJobs(k.dir)).map((r) => r.result),
+        ["reused"]
+      );
+      await until(() => !alive(leader));
+      assert.ok(alive(member));
+      // 一致：整组杀掉；容器记录不采用其中的 docker 前缀
+      const orphanMarker = "cd".repeat(12);
+      const orphanFile = join(k.dir, "orphan-member.pid");
+      const orphan = k.start(
+        ["sh", "-c", `env -u ${RUN_MARKER_VAR} sleep 300 & echo $! > '${orphanFile}'; wait`],
+        orphanMarker
+      );
+      await until(() => existsSync(orphanFile) && readFileSync(orphanFile, "utf8").trim() !== "");
+      const orphanMember = Number(readFileSync(orphanFile, "utf8"));
+      k.write(owner, "orphan", await localProcessRecord(orphan, orphanMarker));
+      k.write(owner, "box", { kind: "container", docker: ["/tmp/evil"], container: "box", marker });
+      const seen: unknown[] = [];
+      const reports = await cleanupOrphanedJobs(k.dir, {
+        killContainer: async (target) => {
+          seen.push(target);
+          return true;
+        },
+      });
+      assert.deepEqual(reports.map((r) => r.result).sort(), ["killed", "killed"]);
+      assert.deepEqual(seen, [{ container: "box", marker }]);
+      await until(() => !alive(orphan) && !alive(orphanMember));
+      assert.equal(existsSync(join(k.dir, "orphan.json")), false);
+    } finally {
+      k.cleanup();
+    }
   }
-});
+);
 
-test("崩溃后清理：组长已不在时照样按标记扫掉脱组的子孙；查不到的记录留着下次再试", {
-  skip: LINUX ? false : "按 /proc 认进程",
-}, async () => {
-  const k = orphanKit();
-  try {
-    const owner = await k.deadOwner();
-    const marker = "ef".repeat(12);
-    const straggler = k.start(["sleep", "300"], marker);
-    k.write(owner, "gone", {
-      kind: "local",
-      platform: "linux",
-      pid: owner,
-      startTime: "1",
-      marker,
-    });
-    assert.deepEqual(
-      (await cleanupOrphanedJobs(k.dir)).map((r) => r.result),
-      ["gone"]
-    );
-    await until(() => !alive(straggler));
-    k.write(owner, "unsure", {
-      kind: "local",
-      platform: "linux",
-      pid: owner,
-      startTime: "1",
-      marker,
-    });
-    const reports = await cleanupOrphanedJobs(k.dir, { killLocal: async () => "unknown" });
-    assert.deepEqual(
-      reports.map((r) => r.result),
-      ["unknown"]
-    );
-    assert.equal(existsSync(join(k.dir, "unsure.json")), true);
-  } finally {
-    k.cleanup();
+test.skipIf(LINUX ? false : "按 /proc 认进程")(
+  "崩溃后清理：组长已不在时照样按标记扫掉脱组的子孙；查不到的记录留着下次再试",
+  async () => {
+    const k = orphanKit();
+    try {
+      const owner = await k.deadOwner();
+      const marker = "ef".repeat(12);
+      const straggler = k.start(["sleep", "300"], marker);
+      k.write(owner, "gone", {
+        kind: "local",
+        platform: "linux",
+        pid: owner,
+        startTime: "1",
+        marker,
+      });
+      assert.deepEqual(
+        (await cleanupOrphanedJobs(k.dir)).map((r) => r.result),
+        ["gone"]
+      );
+      await until(() => !alive(straggler));
+      k.write(owner, "unsure", {
+        kind: "local",
+        platform: "linux",
+        pid: owner,
+        startTime: "1",
+        marker,
+      });
+      const reports = await cleanupOrphanedJobs(k.dir, { killLocal: async () => "unknown" });
+      assert.deepEqual(
+        reports.map((r) => r.result),
+        ["unknown"]
+      );
+      assert.equal(existsSync(join(k.dir, "unsure.json")), true);
+    } finally {
+      k.cleanup();
+    }
   }
-});
+);
 
-test("Windows：认进程按 CreationDate 与命令行，任一不符即判不同", {
-  skip:
-    process.platform === "win32" ? false : "要 Windows 的 CIM（PowerShell），验证服务器是 Linux",
-}, async () => {
+test.skipIf(
+  process.platform === "win32" ? false : "要 Windows 的 CIM（PowerShell），验证服务器是 Linux"
+)("Windows：认进程按 CreationDate 与命令行，任一不符即判不同", async () => {
   const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
   try {
     const record = await localProcessRecord(child.pid as number, "ab".repeat(12));
@@ -423,24 +426,25 @@ test("Windows：认进程按 CreationDate 与命令行，任一不符即判不�
   }
 });
 
-test("macOS：认进程按 ps 的 lstart 与环境里的标记，任一不符即判不同", {
-  skip: process.platform === "darwin" ? false : "要 macOS 的 ps，验证服务器是 Linux",
-}, async () => {
-  const marker = "ab".repeat(12);
-  const child = spawn("sleep", ["60"], {
-    stdio: "ignore",
-    env: { ...process.env, [RUN_MARKER_VAR]: marker },
-  });
-  try {
-    const record = await localProcessRecord(child.pid as number, marker);
-    assert.ok(record !== undefined);
-    assert.equal(await compareLocalProcess(record), "same");
-    assert.equal(await compareLocalProcess({ ...record, startTime: "1" }), "different");
-    assert.equal(await compareLocalProcess({ ...record, marker: "cd".repeat(12) }), "different");
-  } finally {
-    child.kill();
+test.skipIf(process.platform === "darwin" ? false : "要 macOS 的 ps，验证服务器是 Linux")(
+  "macOS：认进程按 ps 的 lstart 与环境里的标记，任一不符即判不同",
+  async () => {
+    const marker = "ab".repeat(12);
+    const child = spawn("sleep", ["60"], {
+      stdio: "ignore",
+      env: { ...process.env, [RUN_MARKER_VAR]: marker },
+    });
+    try {
+      const record = await localProcessRecord(child.pid as number, marker);
+      assert.ok(record !== undefined);
+      assert.equal(await compareLocalProcess(record), "same");
+      assert.equal(await compareLocalProcess({ ...record, startTime: "1" }), "different");
+      assert.equal(await compareLocalProcess({ ...record, marker: "cd".repeat(12) }), "different");
+    } finally {
+      child.kill();
+    }
   }
-});
+);
 
 test("落盘编号取号即占号：两个作业同时在跑、作业在跑时前台输出被截断，各得各的编号与全文", async () => {
   const h = setup({ headTail: 64 });
@@ -466,22 +470,23 @@ test("落盘编号取号即占号：两个作业同时在跑、作业在跑时�
   }
 });
 
-test("组长退出后，它放到后台的子孙随作业结束一并清掉", {
-  skip: POSIX ? false : "进程组只在 POSIX 上",
-}, async () => {
-  const h = setup();
-  try {
-    const pidFile = join(h.root, "child.pid");
-    writeFileSync(join(h.root, "spawn-exit.sh"), `sleep 300 &\necho $! > '${pidFile}'\n`);
-    const result = await h.background("sh spawn-exit.sh");
-    assert.ok(result.details.background !== undefined);
-    const done = await h.output({ job_id: "j1", wait_seconds: 30 });
-    assert.equal(done.details.jobs[0]?.state, "exited");
-    await until(() => !alive(Number(readFileSync(pidFile, "utf8"))));
-  } finally {
-    await h.cleanup();
+test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
+  "组长退出后，它放到后台的子孙随作业结束一并清掉",
+  async () => {
+    const h = setup();
+    try {
+      const pidFile = join(h.root, "child.pid");
+      writeFileSync(join(h.root, "spawn-exit.sh"), `sleep 300 &\necho $! > '${pidFile}'\n`);
+      const result = await h.background("sh spawn-exit.sh");
+      assert.ok(result.details.background !== undefined);
+      const done = await h.output({ job_id: "j1", wait_seconds: 30 });
+      assert.equal(done.details.jobs[0]?.state, "exited");
+      await until(() => !alive(Number(readFileSync(pidFile, "utf8"))));
+    } finally {
+      await h.cleanup();
+    }
   }
-});
+);
 
 test("无人值守收尾期间，job_output 的等待不超过收尾的剩余时限", async () => {
   const h = setup();

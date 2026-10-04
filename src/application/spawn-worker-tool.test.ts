@@ -6,8 +6,8 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
 import { Compile } from "typebox/compile";
+import { afterAll, test } from "vitest";
 import {
   WorkerOrchestrator,
   type WorkerOutcome,
@@ -63,7 +63,7 @@ const FINAL_PARAMS = {
 };
 
 const roots: string[] = [];
-after(() => {
+afterAll(() => {
   for (const root of roots) {
     rmSync(root, { recursive: true, force: true });
   }

@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { test } from "vitest";
 
 const WRITERS = ["appendGrantConfigRule", "removeGrantConfigRule"];
 // 定义处（persistence 层实现）与唯一调用方（application 命令层）

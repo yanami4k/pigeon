@@ -1,7 +1,7 @@
 // 决策 279（271 修订）：worker 收尾文字末尾写明起点快照与只取其自身改动的取用方式——spawn_worker 的返回、/spawn 的收尾摘要
 // 同一口径；快照起点写带入的未提交文件数，HEAD 起点写明派出时没有未提交的文件；agent 的取用入口是 take_worker，人的是 /take。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { WorkerOutcome, WorkerStartPoint } from "../orchestration/workers.ts";
 import { newSessionId } from "../state/ids.ts";
 import { SPAWN_WORKER_TEXTS, workerOutcomeText } from "./spawn-worker-tool.ts";

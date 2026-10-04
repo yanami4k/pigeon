@@ -4,10 +4,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
 import { JsonlSessionRepo } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import { createSessionBackendConformance } from "@earendil-works/pi-agent-core/session/testing";
+import { describe, it } from "vitest";
 
 const cases = createSessionBackendConformance(async () => {
   const dir = await mkdtemp(join(tmpdir(), "pigeon-tree-contract-"));

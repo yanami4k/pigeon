@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createLocalWorkspaceHost } from "./local-host.ts";
 
 test("程序查找缓存：找到的被删即重查；没找到的缓存到作废为止；PATH 不同另查；新执行端不沿用", () => {

@@ -1,7 +1,7 @@
 // normalizePiEvent 纯函数单元测试：不经过真实 Agent，直接构造上游 AgentEvent。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
+import { test } from "vitest";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import { RuntimeEventKind, type ToolProposedPayload } from "../state/runtime-events.ts";
 import { normalizePiEvent } from "./events.ts";

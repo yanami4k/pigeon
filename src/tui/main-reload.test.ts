@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { parseLaunchFlags } from "../application/launch-flags.ts";
 import type { McpSession } from "../application/mcp.ts";
 import { disposeRuntime, type RuntimeBundle } from "../application/runtime.ts";
@@ -18,7 +18,7 @@ import { memoryLimitsOf, type SettingsSnapshot } from "../state/settings.ts";
 import { type MainReloadContext, reopenMainSessionForReload } from "./main-reload.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createReadSessionEntryTool } from "../memory/search-tools.ts";
 import { createSessionSearch, type SessionSearchHit } from "../memory/session-search.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";

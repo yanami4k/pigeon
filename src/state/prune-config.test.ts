@@ -1,7 +1,7 @@
 // 上下文裁剪的价格比（决策 361）：设置覆盖优先；服务方不做缓存按 1；有价格时按 max(未命中价, 写缓存价) / 命中价，
 // 给了写缓存倍率按未命中价乘它；只有缓存规则的倍率时按倍率；都取不到按 50。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { CacheRule } from "./cache-rules.ts";
 import type { CachePrices, ModelProfile } from "./model-info.ts";
 import { contextPruneSettings, priceRatioOf, UNKNOWN_PRICE_RATIO } from "./prune-config.ts";

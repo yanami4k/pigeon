@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { deterministicErrorOf, isContentRefusal } from "./stream-errors.ts";
 
 test("内容审核类拒答：只认审核文案；连接中断、限额与缺省都不算", () => {

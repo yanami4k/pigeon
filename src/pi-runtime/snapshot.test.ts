@@ -2,8 +2,8 @@
 // M5.5 S5 升 v4：model 段增加推理档位，决策 050；升 v5：model 段增加单轮输出上限，决策 063）。
 // 快照只在运行面内存里冻结、不整份落盘，读旧版本快照的迁移链随旧格式读取一并删除（187）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import {
   INJECTION_SNAPSHOT_VERSION,
   type InjectionSnapshot,

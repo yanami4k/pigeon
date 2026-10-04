@@ -2,8 +2,8 @@
 // 放行只免掉人工审批这一步（拒绝名单、受保护路径照常生效）；ask 进人工审批（无通道即 fail-closed）；
 // updatedInput 按改后参数走账本与放行。钩子实现直接注入假函数（不起真进程）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { Type } from "typebox";
+import { test } from "vitest";
 import type { GovernanceHost, ToolGovernance } from "../pi-runtime/governance.ts";
 import type { RunId } from "../state/ids.ts";
 import type { ToolExecution } from "../state/tool-execution.ts";

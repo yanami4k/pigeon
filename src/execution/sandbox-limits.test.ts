@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createRunCommandTool } from "../tools/run-command.ts";
 import { createContainerWorkspaceHost } from "./container-host.ts";
 import { localDockerHost } from "./local-docker-fixtures.ts";

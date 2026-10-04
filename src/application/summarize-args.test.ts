@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { summarizeArgs } from "./format.ts";
 
 const EMOJI = "\u{1F600}";

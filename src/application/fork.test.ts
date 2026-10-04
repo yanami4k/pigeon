@@ -17,8 +17,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { test } from "vitest";
 import { NotGitWorkspaceError } from "../orchestration/checkpoint.ts";
 import { sessionFileLockPath } from "../persistence/session-lock.ts";
 import { listSessionFiles, locateSessionFile } from "../persistence/session-reader.ts";

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import { createAnthropicSearchBackend } from "./anthropic-search.ts";
 import { createTavilySearchBackend } from "./tavily.ts";
 import { createZaiSearchBackend } from "./zai.ts";
@@ -20,7 +20,7 @@ let base: string;
 const seen: Seen[] = [];
 let failNext: number | undefined;
 
-before(async () => {
+beforeAll(async () => {
   server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -93,7 +93,7 @@ before(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
-after(async () => {
+afterAll(async () => {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });

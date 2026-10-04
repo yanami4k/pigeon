@@ -2,7 +2,7 @@
 // 一致；任何一边改了而另一边没跟上即变红
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { test } from "vitest";
 import { DEFAULT_THINKING_LEVEL } from "../pi-runtime/index.ts";
 import { STREAM_DEFAULT_TEMPERATURE, STREAM_MAX_OUTPUT_TOKENS } from "./stream-agents.ts";
 

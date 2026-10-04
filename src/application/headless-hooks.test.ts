@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { runTraceCommand } from "../cli/trace.ts";
 import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { LayeredHook } from "../state/hooks.ts";
@@ -15,7 +15,7 @@ import { runHeadless } from "./headless-core.ts";
 import { isStatusText } from "./status-fixtures.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

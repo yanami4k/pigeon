@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { RunResult, StreamTextDelta, TurnRoundNotice } from "../pi-runtime/adapter.ts";
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type RunId } from "../state/ids.ts";

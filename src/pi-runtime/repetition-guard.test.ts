@@ -1,8 +1,8 @@
 // 流式重复检测（决策 367）：两种判据（逐字周期、段落相似度）在缺省档（omp）参数下的命中与不命中，中文模板段不误判，
 // 两种判据都看到全部增量；包装模型调用时掐断模式以 length 收尾并中止内层请求，只记录模式照常转发；只看正文与思考，不看工具参数
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { test } from "vitest";
 import { OMP_REPETITION_PARAMS } from "../state/runaway-config.ts";
 import { createFakeStreamFn, type FakeReply } from "./fixtures.ts";
 import { guardRepetition, RepetitionDetector, type RepetitionHit } from "./repetition-guard.ts";

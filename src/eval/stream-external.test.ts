@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { externalAgentsFor } from "./stream-experiment.ts";
 import {
   artifactsDirFor,

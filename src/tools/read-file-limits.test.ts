@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createReadFileTool } from "./read-file.ts";
 
 function withFile(content: string, body: (root: string) => Promise<void>): Promise<void> {

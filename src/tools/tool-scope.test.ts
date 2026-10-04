@@ -5,13 +5,13 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { createRunCommandTool } from "./run-command.ts";
 import { pathWithinScope, scopePathLinkProblem, scopeViolation } from "./tool-scope.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pigeon-tool-scope-"));
 const outside = mkdtempSync(join(tmpdir(), "pigeon-tool-scope-outside-"));
-after(() => {
+afterAll(() => {
   rmSync(root, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
 });

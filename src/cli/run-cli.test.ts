@@ -5,8 +5,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterAll, test } from "vitest";
 import { HEADLESS_EXIT_CODES } from "../application/headless-core.ts";
 import { isStatusText } from "../application/status-fixtures.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
@@ -15,7 +15,7 @@ import { lineTag, snapshotTag } from "../tools/hashline.ts";
 
 const CLI = fileURLToPath(new URL("./index.ts", import.meta.url));
 const CLI_HOME = mkdtempSync(join(tmpdir(), "pigeon-cli-home-"));
-after(() => rmSync(CLI_HOME, { recursive: true, force: true }));
+afterAll(() => rmSync(CLI_HOME, { recursive: true, force: true }));
 const FIXTURES = pathToFileURL(
   fileURLToPath(new URL("../pi-runtime/fixtures.ts", import.meta.url))
 ).href;

@@ -2,7 +2,7 @@
 // 旧会话记着的旧工作树位置按旧前缀映射到新前缀。
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   configTrustPathOf,
   isProgramOwnedPath,

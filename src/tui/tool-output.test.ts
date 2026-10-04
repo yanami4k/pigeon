@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newRunId, newSessionId } from "../state/ids.ts";
 import { RuntimeEventKind } from "../state/runtime-events.ts";
 import { ScriptedRuntime } from "./runtime-fixtures.ts";

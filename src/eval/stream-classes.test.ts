@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { classifyCases, judgeStep } from "./stream-classes.ts";
 import type { TestCaseResult } from "./stream-measure.ts";
 import { compareRuns } from "./stream-runner.ts";

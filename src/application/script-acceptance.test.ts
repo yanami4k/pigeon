@@ -2,7 +2,7 @@
 // 收回，汇总列出已做完的 worker 与分支并写明取用与续跑的办法；脚本卡住监控——没有 worker 在跑或排队、脚本又没结束，持续到
 // 判定时长即停掉容器、以"卡住"结束（脚本自身死循环同样停得掉），等 worker 的脚本不被误停。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { orchestrationSettings } from "../state/orchestration-config.ts";
 import { scriptHarness } from "./script-fixtures.ts";
 import { modelPricing } from "./script-host.ts";

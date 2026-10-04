@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, test } from "node:test";
+import { describe, test } from "vitest";
 import { judgeStep, type StepJudging } from "./stream-classes.ts";
 import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest, type StreamManifest } from "./stream-manifest.ts";
@@ -254,7 +254,7 @@ describe("重判：一致性核对", () => {
   });
 });
 
-describe("重判：与正式跑同一判题路径（假 agent、本地假容器）", { concurrency: true }, () => {
+describe.concurrent("重判：与正式跑同一判题路径（假 agent、本地假容器）", () => {
   test("起点加保存的改动加人写测试：每行重判与原结果行逐项一致，逐用例结果完整；原结果文件一字不改；重跑即续做", async () => {
     const t = await toy();
     try {

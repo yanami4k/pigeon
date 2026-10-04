@@ -24,6 +24,8 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/run-tests.mjs fast",
     "test:slow": "node scripts/run-tests.mjs slow",
+    "coverage": "node scripts/run-tests.mjs all --coverage.enabled",
+    "bench": "vitest bench --run --no-file-parallelism",
     "lint": "biome check .",
     "deps": "dependency-cruiser src",
     "verify": "npm run lint && npm run check && npm run test && npm run deps",
@@ -43,9 +45,11 @@
     "@modelcontextprotocol/server-everything": "2026.8.31",
     "@modelcontextprotocol/server-filesystem": "2026.8.31",
     "@types/node": "24.13.3",
+    "@vitest/coverage-v8": "5.0.3",
     "dependency-cruiser": "18.2.0",
     "esbuild": "0.28.2",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "5.0.3"
   },
   "overrides": {
     "@anthropic-ai/sdk": "0.124.0"

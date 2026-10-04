@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, test } from "node:test";
+import { describe, test } from "vitest";
 import { createEditFileTool } from "../tools/edit-file.ts";
 import { lineTag, snapshotTag } from "../tools/hashline.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
@@ -94,7 +94,7 @@ const EDITORS = {
 } as const;
 
 for (const kind of ["local", "container"] as const) {
-  describe(`写入前复核（${kind === "local" ? "本机" : "容器"}）`, { skip: NO_SYMLINKS }, () => {
+  describe.skipIf(NO_SYMLINKS)(`写入前复核（${kind === "local" ? "本机" : "容器"}）`, () => {
     for (const [editor, edit] of Object.entries(EDITORS)) {
       test(`检查后、写入前把某层目录换成指向工作区外的符号链接：拒写并告知路径已变，工作区外的文件不变（${editor}）`, async () => {
         const f = fixture(kind);

@@ -1,8 +1,8 @@
 // MCP 会话沿用连接（决策 340 的 /reload）：启动定义与工作区根都未变、仍连着的 server 沿用旧连接，不再建传输；
 // 连接按持有它的会话数关闭——新会话关闭（装配失败的出口）不断开旧会话还在用的连接，两边都关了才断开。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { test } from "vitest";
 import { createFixtureServer } from "../mcp/fixtures.ts";
 import type { McpServerConfig } from "../state/mcp-config.ts";
 import { type McpSession, startMcpSession } from "./mcp.ts";

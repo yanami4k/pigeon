@@ -3,7 +3,7 @@
 // withoutTrustEntries 按指纹整条去掉本次不用的钩子；revertTrustEntries 对钩子照「变化即不启用」处理
 // （当前快照里没有同一条即不启用）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   hookFingerprintOf,
   revertTrustEntries,

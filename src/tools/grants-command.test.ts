@@ -1,7 +1,7 @@
 // exec 精确命令放权（M5.5 S5，决策 048）：命令串一模一样才命中——前缀、追加参数、改参数、
 // 多空格、非命令调用、别的工具一律不命中；固化规则同一判定。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import { matchConfigGrants, scopeMatches } from "./grants.ts";
 

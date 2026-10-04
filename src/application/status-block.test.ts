@@ -1,7 +1,7 @@
 // 开工状态块（决策 363）的纯函数部分：标签内容转义防注入（含零宽字符、全角、实体等绕法）、完整块与变化追加、
 // 按各节原文的哈希比对、发出以进了会话记录为准、从会话记录还原最后一份。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newSessionId } from "../state/ids.ts";
 import {
   escapeStatusText,

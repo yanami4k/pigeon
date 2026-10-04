@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { loadSettings } from "../persistence/settings.ts";
 import { configTrustPathOf, projectSettingsPath, userSettingsPath } from "../state/paths.ts";
 import { commandsConfigOf, mcpConfigOf, sandboxConfigOf } from "../state/settings.ts";
@@ -20,7 +20,7 @@ import {
 } from "./session-settings.ts";
 
 const made: string[] = [];
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 

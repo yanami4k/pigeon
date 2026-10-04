@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { MEMORY_FILE_HEADERS, type MemoryLayer } from "../memory/learned.ts";
 import { memoryLocation } from "../memory/learned-store.ts";
 import { MEMORY_CONFLICT_TEXTS, MEMORY_WRITE_GUIDANCE } from "../memory/pushed.ts";

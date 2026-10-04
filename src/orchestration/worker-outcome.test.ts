@@ -2,7 +2,7 @@
 // 收尾结果可携带结构化内容；累计 token 达到上限即中止。
 // 只读、无工作区的 Reviewer 已随第一版学习闭环退役（决策 137），git 工作区提供者不再规划无工作区。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId } from "../state/ids.ts";
 import type {

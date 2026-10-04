@@ -1,7 +1,7 @@
 // "本次脚本内同类都允许"的同类口径（决策 303 的脚本部分）：跑命令取程序名加第一个子命令词；高危程序与两词命令不给同类（照常
 // 逐次请示）；经 shell 或带串联、管道、重定向、命令替换的命令不给同类；网络档取网站；其余取工具加目录，无路径取工具。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { ApprovalRequest } from "../approvals/handler.ts";
 import {
   SCRIPT_KIND_DENY_COMMANDS,

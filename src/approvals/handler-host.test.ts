@@ -1,6 +1,6 @@
 // 网络档审批的作用域（决策 290）：请求带主机名时 [a]/[d] 都收窄为该网站；不提供 [d]；提示文案点名网站。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { asRunId } from "../state/ids.ts";
 import {
   type ApprovalRequest,

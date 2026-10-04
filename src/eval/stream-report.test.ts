@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { cellScore, distribution, pairedDiffs, renderStreamReport } from "./stream-report.ts";
 import { sampleLine } from "./stream-result-fixtures.ts";
 import type { StreamResultLine } from "./stream-results.ts";

@@ -1,6 +1,6 @@
 // TUI 审批块的 exec 命令行（048 修订）：原样显示将执行的命令串；需 shell 时文案含"经 shell"，[a] 为经 shell 的精确命令放权。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { approvalBlockText } from "./approval.ts";
 
 const COMMAND = `node -e "console.log('a')" && echo done`;

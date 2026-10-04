@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+import { test } from "vitest";
 import { EditFileError } from "./edit-file.ts";
 import { classifyToolError } from "./error-kind.ts";
 import { HashlineError } from "./hashline.ts";

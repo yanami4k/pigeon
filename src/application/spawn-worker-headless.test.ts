@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtures.ts";
@@ -20,7 +20,7 @@ import { isStatusText } from "./status-fixtures.ts";
 import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
 
 const roots: string[] = [];
-after(() => {
+afterAll(() => {
   for (const root of roots) {
     rmSync(root, { recursive: true, force: true });
   }

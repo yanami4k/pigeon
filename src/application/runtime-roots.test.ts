@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { appendGrantConfigRule } from "../persistence/grants-config.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadSettings } from "../persistence/settings.ts";

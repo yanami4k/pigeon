@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { wrapScriptApprovals } from "../application/script-approvals.ts";
 import { scriptCommands } from "../application/script-commands.ts";
 import { type PlanInput, scriptHarness, type WorkerPlan } from "../application/script-fixtures.ts";

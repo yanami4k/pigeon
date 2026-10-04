@@ -2,7 +2,7 @@
 // 三处模型占位缺省统一为同一常量（provider 与 model 均为 custom）；cli 补 PIGEON_STREAM_FN 回退，
 // 与既有报错文案一致；非法取值一律响亮失败。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   DEFAULT_MODEL_PLACEHOLDER,
   parseLaunchFlags,

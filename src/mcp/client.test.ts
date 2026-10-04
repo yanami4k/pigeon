@@ -2,8 +2,8 @@
 // tools/list_changed 只记录不改清单（快照冻结，§2 规则 4）；掉线按退避重启，超过上限 fail-closed——
 // 该 server 的工具一律报环境错误，不再触达 server。
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { test } from "vitest";
 import type { McpServerConfig } from "../state/mcp-config.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import { McpServerConnection, McpServerUnavailableError } from "./client.ts";

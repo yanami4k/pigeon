@@ -2,7 +2,7 @@
 // pids（非负整数，0 为不限）、cpus（非负数，0 为不限）；不写取缺省（由开沙箱时定）。写法不对、节内未知键一律报错并指出
 // 文件与层；内存低于 Docker 的下限 6 MiB 报错；三层逐键合并（个人层只改其中一项时其余沿用下层）。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { parseMemorySize, sandboxLimitSettingsOf } from "./sandbox-config.ts";
 import {
   mergedSettingsProblems,

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { git, recordingSink, scriptHarness } from "./script-fixtures.ts";
 import type { ScriptSpec } from "./script-runner.ts";
 

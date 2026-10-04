@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test } from "vitest";
 import { createCheckpointer } from "../orchestration/checkpoint.ts";
 import { newSessionId } from "../state/ids.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
@@ -84,9 +84,8 @@ test("写工具不写版本库元数据：.git 下的文件一律拒写", () =>
     );
   }));
 
-test(
+test.skipIf(POSIX ? false : "用 sh 写的过滤命令")(
   "Pigeon 起的 git 不执行 .git/config 里配的过滤与 fsmonitor（重算哈希时也不执行）",
-  { skip: POSIX ? false : "用 sh 写的过滤命令" },
   () =>
     withDirs(2, async (root, out) => {
       seedRepo(root, { "a.txt": "aaaa\n", ".gitattributes": "* filter=evil\n" });

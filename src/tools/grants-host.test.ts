@@ -1,7 +1,7 @@
 // 按网站放权的匹配（决策 290）：带 host 的放权只命中网址主机名一模一样的调用（不区分大小写）；换主机不命中；
 // 调用没有网址或网址不合法不命中；固化规则与会话放权同一判定。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { SessionGrantStore } from "../approvals/grant-store.ts";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import { matchConfigGrants, scopeMatches } from "./grants.ts";

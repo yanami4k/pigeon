@@ -1,7 +1,7 @@
 // worker 生命周期（M5.5 S2，决策 040）：四动作与审批回调的编排语义——证据顺序、结构化结果、
 // 委派子集、深度 1、轮次与墙钟上限、取消、派出失败配对。运行面与工作区用内存替身。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import type { EventEnvelope } from "../state/events.ts";
 import { newRunId, newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type {

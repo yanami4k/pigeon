@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { afterAll, test } from "vitest";
 import {
   MigrationBackupError,
   migrationBackupConflict,
@@ -37,7 +37,7 @@ const NO_SYMLINKS = (() => {
     rmSync(dir, { recursive: true, force: true });
   }
 })();
-after(() => {
+afterAll(() => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -67,7 +67,7 @@ test("旧文件挪进用户级本项目的备份目录：原文不变，仓库�
   assert.equal(readFileSync(target, "utf8"), '{"key":"k-1"}', "已有备份原样");
 });
 
-test("经符号链接打开的同一项目落到同一备份目录", { skip: NO_SYMLINKS }, () => {
+test.skipIf(NO_SYMLINKS)("经符号链接打开的同一项目落到同一备份目录", () => {
   const root = temp("pigeon-backup-real-");
   const home = temp("pigeon-backup-home-");
   const link = join(temp("pigeon-backup-link-"), "via");

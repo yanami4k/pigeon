@@ -1,7 +1,7 @@
 // shell 标记的精确命令放权（048 修订）：只有带 shell 标记的 grant 与固化规则能免审一条需 shell 的命令；
 // 缺省（旧记录）视为 false；匹配仍是精确字符串。
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { newGrantId, newSessionId } from "../state/ids.ts";
 import { matchConfigGrants, scopeMatches } from "./grants.ts";
 

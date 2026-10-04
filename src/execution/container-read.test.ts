@@ -2,7 +2,7 @@
 // 按真实路径拒（含链接）。没有 Docker 或 busybox 镜像时跳过。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { test } from "node:test";
+import { test } from "vitest";
 import { ReadDeniedError, readDenyList } from "../tools/read-deny.ts";
 import { createReadFileTool, OutsideReadNotApprovedError } from "../tools/read-file.ts";
 import {
@@ -20,71 +20,75 @@ const skip =
     ? false
     : "没有 Docker 或 busybox 镜像";
 
-test("容器里读档：工作区外按容器内路径判定；禁读名单按容器内的家目录展开、按真实路径拒（含链接）", {
-  skip,
-}, async () => {
-  const name = `pigeon-read-${process.pid}`;
-  await removeWorkspaceContainer(name);
-  await startWorkspaceContainer({ image: "busybox:latest", name });
-  try {
-    const made = await containerExec({
-      container: name,
-      command: [
-        "sh",
-        "-c",
-        "mkdir -p /work /outside /creds /root/.ssh && printf 'in' > /work/a.txt && printf 'lib' > /outside/lib.txt && " +
-          "printf 'key' > /root/.ssh/id && printf 'aws' > /creds/key && ln -s /root/.ssh /work/keys && ln -s /creds /root/.aws",
-      ],
-      workdir: "/",
-      user: "root",
-    });
-    assert.equal(made.exitCode, 0, made.stderr);
-    const host = createContainerWorkspaceHost({ container: name, root: "/work" });
-    const deny = readDenyList();
-    assert.deepEqual(await host.resolveForRead?.("a.txt", deny), {
-      path: "/work/a.txt",
-      outside: false,
-    });
-    assert.deepEqual(await host.resolveForRead?.("/outside/lib.txt", deny), {
-      path: "/outside/lib.txt",
-      outside: true,
-    });
-    for (const denied of ["/root/.ssh/id", "keys/id", "/root/.aws/key", "/creds/key"]) {
-      await assert.rejects(
-        host.resolveForRead?.(denied, deny) ?? Promise.resolve(),
-        ReadDeniedError,
-        denied
-      );
-    }
-    // grep、glob 的结果逐条分类：经链接指向禁读处的记禁读，取不到真实路径的不在结果里
-    const result = await host.classifyReadPaths?.(["a.txt", "keys/id", "missing"], deny);
-    assert.equal(result?.incomplete, false);
-    assert.deepEqual(Object.fromEntries(result?.classes ?? []), {
-      "a.txt": "ok",
-      "keys/id": "denied",
-    });
-    // 检查超时：未查完的标明不完整（逐个 readlink 两万个路径，上限 1 秒）
-    const slow = createContainerWorkspaceHost({
-      container: name,
-      root: "/work",
-      helperTimeoutMs: 1000,
-    });
-    await slow.resolveForRead?.("a.txt", deny);
-    const partial = await slow.classifyReadPaths?.(
-      Array.from({ length: 20_000 }, () => "a.txt"),
-      deny
-    );
-    assert.equal(partial?.incomplete, true);
-    // 工具：未经授权拒读，授权后读到内容（一次一用）
-    const tool = createReadFileTool(host, { outsideReads: "allowed" });
-    await assert.rejects(
-      tool.execute("tc-1", { path: "/outside/lib.txt" }),
-      OutsideReadNotApprovedError
-    );
-    tool.authorizeOutsideRead("tc-2");
-    const read = await tool.execute("tc-2", { path: "/outside/lib.txt" });
-    assert.match(read.content.map((block) => ("text" in block ? block.text : "")).join(""), /lib/);
-  } finally {
+test.skipIf(skip)(
+  "容器里读档：工作区外按容器内路径判定；禁读名单按容器内的家目录展开、按真实路径拒（含链接）",
+  async () => {
+    const name = `pigeon-read-${process.pid}`;
     await removeWorkspaceContainer(name);
+    await startWorkspaceContainer({ image: "busybox:latest", name });
+    try {
+      const made = await containerExec({
+        container: name,
+        command: [
+          "sh",
+          "-c",
+          "mkdir -p /work /outside /creds /root/.ssh && printf 'in' > /work/a.txt && printf 'lib' > /outside/lib.txt && " +
+            "printf 'key' > /root/.ssh/id && printf 'aws' > /creds/key && ln -s /root/.ssh /work/keys && ln -s /creds /root/.aws",
+        ],
+        workdir: "/",
+        user: "root",
+      });
+      assert.equal(made.exitCode, 0, made.stderr);
+      const host = createContainerWorkspaceHost({ container: name, root: "/work" });
+      const deny = readDenyList();
+      assert.deepEqual(await host.resolveForRead?.("a.txt", deny), {
+        path: "/work/a.txt",
+        outside: false,
+      });
+      assert.deepEqual(await host.resolveForRead?.("/outside/lib.txt", deny), {
+        path: "/outside/lib.txt",
+        outside: true,
+      });
+      for (const denied of ["/root/.ssh/id", "keys/id", "/root/.aws/key", "/creds/key"]) {
+        await assert.rejects(
+          host.resolveForRead?.(denied, deny) ?? Promise.resolve(),
+          ReadDeniedError,
+          denied
+        );
+      }
+      // grep、glob 的结果逐条分类：经链接指向禁读处的记禁读，取不到真实路径的不在结果里
+      const result = await host.classifyReadPaths?.(["a.txt", "keys/id", "missing"], deny);
+      assert.equal(result?.incomplete, false);
+      assert.deepEqual(Object.fromEntries(result?.classes ?? []), {
+        "a.txt": "ok",
+        "keys/id": "denied",
+      });
+      // 检查超时：未查完的标明不完整（逐个 readlink 两万个路径，上限 1 秒）
+      const slow = createContainerWorkspaceHost({
+        container: name,
+        root: "/work",
+        helperTimeoutMs: 1000,
+      });
+      await slow.resolveForRead?.("a.txt", deny);
+      const partial = await slow.classifyReadPaths?.(
+        Array.from({ length: 20_000 }, () => "a.txt"),
+        deny
+      );
+      assert.equal(partial?.incomplete, true);
+      // 工具：未经授权拒读，授权后读到内容（一次一用）
+      const tool = createReadFileTool(host, { outsideReads: "allowed" });
+      await assert.rejects(
+        tool.execute("tc-1", { path: "/outside/lib.txt" }),
+        OutsideReadNotApprovedError
+      );
+      tool.authorizeOutsideRead("tc-2");
+      const read = await tool.execute("tc-2", { path: "/outside/lib.txt" });
+      assert.match(
+        read.content.map((block) => ("text" in block ? block.text : "")).join(""),
+        /lib/
+      );
+    } finally {
+      await removeWorkspaceContainer(name);
+    }
   }
-});
+);
