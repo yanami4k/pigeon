@@ -85,12 +85,13 @@ import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judg
 import { isStatusMessage, STATUS_MARKER, withoutStatusMarker } from "../state/status-text.ts";
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
-import type {
-  CompactionConfig,
-  CompactionOutcome,
-  CompactionStore,
-  CompactionTrigger,
-  ContextCompactor,
+import {
+  type CompactionConfig,
+  type CompactionOutcome,
+  type CompactionStore,
+  type CompactionTrigger,
+  type ContextCompactor,
+  freshUsageTime,
 } from "./compaction.ts";
 import type { ContextPruner, PruneRecord } from "./context-prune.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
@@ -822,8 +823,9 @@ export class PiRuntimeAdapter {
     if (compactor === undefined) {
       return undefined;
     }
+    // 决策 361：按实际发出的上下文（裁剪后）估算，与压缩判定同一口径
     return {
-      tokens: compactor.check(this.#agent.state.messages).tokens,
+      tokens: this.#sentTokens(compactor, this.#agent.state.messages),
       contextWindow: compactor.config.contextWindow,
     };
   }
@@ -1185,16 +1187,28 @@ export class PiRuntimeAdapter {
     if (prune === undefined) {
       return compactor.check(messages);
     }
-    let tokens = Math.max(0, compactor.check(prune.view(messages)).tokens - prune.pendingTokens());
+    const tokens = this.#sentTokens(compactor, messages);
     if (!compactor.exceeds(tokens)) {
       return { tokens, exceeds: false };
     }
     const record = prune.beforeCompaction(messages);
-    if (record !== undefined) {
-      this.#recordPrune(record);
-      tokens = Math.max(0, tokens - record.prunedTokens);
+    if (record === undefined) {
+      return { tokens, exceeds: true };
     }
-    return { tokens, exceeds: compactor.exceeds(tokens) };
+    this.#recordPrune(record);
+    const after = this.#sentTokens(compactor, messages);
+    return { tokens: after, exceeds: compactor.exceeds(after) };
+  }
+
+  // 决策 361：实际发出的上下文（裁剪后）的 token 数：按裁剪后的消息估算，再减去在所用那条 usage 之后裁掉的量
+  // （那份 usage 量的是裁剪之前发出的上下文）
+  #sentTokens(compactor: ContextCompactor, messages: readonly AgentMessage[]): number {
+    const prune = this.#prune;
+    if (prune === undefined) {
+      return compactor.check(messages).tokens;
+    }
+    const view = prune.view(messages);
+    return Math.max(0, compactor.check(view).tokens - prune.unsentTokens(freshUsageTime(view)));
   }
 
   // 决策 361：请求之前的裁剪；出错照原样发出（上游约定这个挂点不抛）

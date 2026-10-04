@@ -65,8 +65,8 @@ export class ContextPruner {
   readonly #placeholders = new Map<string, string>();
   #signature: RunSignature | undefined;
   #changed: PruneTrigger | undefined;
-  // 裁掉了、但还没随请求发出的 token（压缩判定用的上一次用量还含着它们）
-  #pending = 0;
+  // 本进程里各次裁剪的时刻与裁掉量（估算上下文时，在所用 usage 之后裁掉的量要从中减去）
+  readonly #pruned: Array<{ at: number; tokens: number }> = [];
   #lastRequestAt: number | undefined;
 
   constructor(
@@ -117,7 +117,6 @@ export class ContextPruner {
       this.#changed = undefined;
       record = this.#prune(messages, trigger ?? "paid");
     }
-    this.#pending = 0;
     this.#lastRequestAt = this.#now();
     return { messages: this.view(messages), ...(record !== undefined ? { record } : {}) };
   }
@@ -128,9 +127,11 @@ export class ContextPruner {
     return this.#prune(messages, "compaction");
   }
 
-  // 裁掉了、但还没随请求发出的 token：压缩判定从按上一次用量估出的 token 数里减去
-  pendingTokens(): number {
-    return this.#pending;
+  // 在 since 时刻（估算所用那条助手 usage 的时刻）之后裁掉的 token：那份 usage 量的是裁剪之前发出的上下文，
+  // 估算时从中减去；没有可用的 usage（since 为 undefined）时整段按裁剪后的消息估算，不必减
+  unsentTokens(since: number | undefined): number {
+    if (since === undefined) return 0;
+    return this.#pruned.reduce((sum, entry) => (entry.at > since ? sum + entry.tokens : sum), 0);
   }
 
   seed(): PruneSeed {
@@ -169,8 +170,8 @@ export class ContextPruner {
     const first = chosen.reduce((min, candidate) => Math.min(min, candidate.index), view.length);
     const rewriteTokens = Math.max(0, after - prefixTokens(sizes, first));
     const free = trigger !== "paid";
-    const before = Math.max(0, total - this.#pending);
-    this.#pending += prunedTokens;
+    const prunedAt = this.#now();
+    this.#pruned.push({ at: prunedAt, tokens: prunedTokens });
     return {
       trigger,
       items,
@@ -180,9 +181,9 @@ export class ContextPruner {
       rewriteTokens,
       estimatedCost: free ? 0 : (this.settings.priceRatio - 1) * rewriteTokens,
       estimatedSaving: this.settings.horizonTurns * prunedTokens,
-      tokensBefore: before,
-      tokensAfter: Math.max(0, before - prunedTokens),
-      prunedAt: this.#now(),
+      tokensBefore: total,
+      tokensAfter: after,
+      prunedAt,
     };
   }
 
