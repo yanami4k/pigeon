@@ -1,5 +1,5 @@
-// 上下文裁剪的装配（决策 361）：运行面缺省挂上裁剪——请求里旧的工具结果换成占位并写一条裁剪记录，从会话文件取回的
-// 记录重放出同样的内容；压缩之前先裁，降到触发点以下即不再摘要；状态栏的用量按实际发出的上下文估算。
+// 上下文裁剪的装配（决策 361、373）：运行面缺省挂上裁剪——请求里过时的读取换成占位并写一条裁剪记录，从会话文件取回的
+// 记录重放出同样的内容；压缩之前先裁（含较大的旧结果），降到触发点以下即不再摘要；状态栏的用量按实际发出的上下文估算。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,11 +18,19 @@ import { emptySettingsSnapshot } from "../state/settings.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { RuntimeBundle } from "./runtime.ts";
 
-// 读一个大文件（约 2000 token）、再读一个小文件（这时的用量报 6000）、收尾（last 缺省正常回复）
+const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";
+
+// 读一个大文件（约 2000 token）、再读 second（缺省再整读一次大文件，前一次成了过时读取；这时的用量报 6000）、收尾
+// （last 缺省正常回复）
 async function run(
   root: string,
   contextPrune: ContextPruneSection,
-  options: { compaction?: CompactionConfigInput; last?: FakeReply } = {}
+  options: {
+    compaction?: CompactionConfigInput;
+    last?: FakeReply;
+    second?: string;
+    task?: string;
+  } = {}
 ) {
   writeFileSync(join(root, "big.txt"), "大文件的一行内容。\n".repeat(600));
   writeFileSync(join(root, "small.txt"), "小\n");
@@ -30,8 +38,8 @@ async function run(
     replies: [
       { text: "读大文件", toolCalls: [{ name: "read_file", args: { path: "big.txt" } }] },
       {
-        text: "读小文件",
-        toolCalls: [{ name: "read_file", args: { path: "small.txt" } }],
+        text: "再读",
+        toolCalls: [{ name: "read_file", args: { path: options.second ?? "big.txt" } }],
         contextTokens: 6000,
       },
       options.last ?? { text: "完", contextTokens: 100 },
@@ -40,7 +48,7 @@ async function run(
   let bundle: RuntimeBundle | undefined;
   const empty = emptySettingsSnapshot(root);
   const result = await runHeadless({
-    task: "读文件",
+    task: options.task ?? "读文件",
     governanceRoot: root,
     workspaceRoot: root,
     streamFn: fake,
@@ -78,8 +86,8 @@ test("请求里旧的读取换成占位并留记录；从会话文件取回的�
     });
     assert.equal(status, "completed");
     assert.deepEqual(
-      prunes.map((record) => record.trigger),
-      ["paid"]
+      prunes.map((record) => [record.trigger, record.items.map((item) => item.reason)]),
+      [["paid", ["stale"]]]
     );
     const toolCallId = prunes[0]?.items[0]?.toolCallId;
     const sent = fake.calls[2]?.context.messages.find(
@@ -104,20 +112,29 @@ test("请求里旧的读取换成占位并留记录；从会话文件取回的�
     );
   }));
 
-test("压缩之前先裁：裁掉之后降到触发点以下即不再摘要", () =>
-  withRoot(async (root) => {
-    const { fake, prunes } = await run(
-      root,
-      { protectTurns: 1 },
-      { compaction: { thresholdTokens: 5000 } }
-    );
+test("压缩之前先裁（含较大的旧结果）：裁掉之后降到触发点以下即不再摘要", async () => {
+  // 任务够长、保留量小：不裁时这段上下文确有可摘要的部分
+  const options = {
+    compaction: { thresholdTokens: 5000, keepRecentTokens: 20 },
+    second: "small.txt",
+    task: `读文件。${"背景说明。".repeat(60)}`,
+  };
+  const summaries = (fake: { calls: Array<{ context: { systemPrompt?: string } }> }) =>
+    fake.calls.filter((call) => call.context.systemPrompt?.startsWith(SUMMARY_PROMPT_HEAD)).length;
+  await withRoot(async (root) => {
+    const { fake, prunes } = await run(root, { protectTurns: 1 }, options);
     assert.deepEqual(
-      prunes.map((record) => record.trigger),
-      ["compaction"]
+      prunes.map((record) => [record.trigger, record.items.map((item) => item.reason)]),
+      [["compaction", ["large"]]]
     );
-    // 三次请求都是主请求，没有摘要请求
-    assert.equal(fake.calls.length, 3);
-  }));
+    assert.equal(summaries(fake), 0);
+  });
+  // 对照：同样的输入关掉裁剪即摘要（不是因为无可摘要才不摘要）
+  await withRoot(async (root) => {
+    const { fake } = await run(root, { protectTurns: 1, enabled: false }, options);
+    assert.ok(summaries(fake) > 0);
+  });
+});
 
 test("状态栏的用量按实际发出的上下文估算：裁剪之后的那次请求出错、没有新的 usage 时，裁掉的量也已减去", () =>
   withRoot(async (root) => {
@@ -141,7 +158,7 @@ test("新裁出错时只应用已有的裁剪：之前的占位不撤，那次�
       toolCalls: [{ name: "read_file", args: { path } }],
     });
     const fake = createFakeStreamFn({
-      replies: [read("big.txt"), read("small.txt"), read("small.txt"), { text: "完" }],
+      replies: [read("big.txt"), read("big.txt"), read("small.txt"), { text: "完" }],
     });
     const empty = emptySettingsSnapshot(root);
     const contextPrune = { protectTurns: 1, priceRatio: 1, minBatchTokens: 0 };
