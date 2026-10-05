@@ -88,6 +88,7 @@ import {
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
 import {
+  assertNodeRuntimeDir,
   PIGEON_DOCKER_CONDITION,
   pigeonDockerIdentity,
   pigeonDockerJobContainerArgs,
@@ -145,9 +146,10 @@ export interface StreamExperimentOptions {
   minimalCommand?: readonly string[];
   // 外部 agent 条件（实验设施）的配置：条件 ext-<名字> 各需一份；作业容器接只通网关的跑批内部网络
   externalAgents?: readonly ExternalAgentConfig[];
-  // pigeon-docker 条件（对比评测的 Pigeon 组，决策 380、389、390）的打包产物目录（dist/）：只读挂载进题目容器；
-  // 跑了 pigeon-docker 条件必给，给了必跑该条件
+  // pigeon-docker 条件（对比评测的 Pigeon 组，决策 380、389、390）的打包产物目录（dist/）与 Node 运行时目录
+  // （含 bin/node；实验镜像没有 node，运行时只读挂载进容器）：跑了该条件两个都必给，给了必跑该条件
   pigeonBundle?: string;
+  pigeonNodeRuntime?: string;
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
   // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
@@ -404,6 +406,15 @@ async function runStreamExperimentLocked(
       `给了打包产物目录却没跑 ${PIGEON_DOCKER_CONDITION} 条件（在 --conditions 里加上，或去掉 --pigeon-bundle）`
     );
   }
+  if (wantsPigeonDocker && options.pigeonNodeRuntime === undefined) {
+    throw new Error(
+      `条件 ${PIGEON_DOCKER_CONDITION} 需要 Node 运行时目录（用 --pigeon-node-runtime <目录> 给出）`
+    );
+  }
+  if (!wantsPigeonDocker && options.pigeonNodeRuntime !== undefined) {
+    throw new Error("给了 Node 运行时目录却没跑 pigeon-docker 条件（去掉 --pigeon-node-runtime）");
+  }
+  if (options.pigeonNodeRuntime !== undefined) assertNodeRuntimeDir(options.pigeonNodeRuntime);
   if (wantsPigeonDocker && modelId !== DEFAULT_GATEWAY_MODEL_ID) {
     throw new Error(
       `条件 ${PIGEON_DOCKER_CONDITION} 的接入模块固定请求 ${DEFAULT_GATEWAY_MODEL_ID}，与 --model-id ${modelId} 不符`
@@ -417,6 +428,7 @@ async function runStreamExperimentLocked(
           options.pigeonBundle,
           await pigeonDockerSelfReport({
             bundleDir: options.pigeonBundle,
+            nodeRuntimeDir: options.pigeonNodeRuntime as string,
             image: options.image,
             container: `${prefix}-pigeon-docker-identity`,
             docker,
@@ -561,6 +573,7 @@ async function runStreamExperimentLocked(
                     outDir,
                     job,
                     bundleDir: options.pigeonBundle as string,
+                    nodeRuntimeDir: options.pigeonNodeRuntime as string,
                     networkName: network.name,
                   });
                 }
@@ -651,7 +664,8 @@ export async function startGatewayAndLimits(
     capacity: () => gateway?.capacity() ?? Number.POSITIVE_INFINITY,
   });
   gateway = await startModelGateway({
-    upstreamBaseUrl: GATEWAY_UPSTREAM_BASE_URL,
+    // 缺省为 DeepSeek 官方端点；PIGEON_EVAL_GATEWAY_UPSTREAM 只供不调真模型的假上游小试（试跑、冒烟）改指
+    upstreamBaseUrl: process.env.PIGEON_EVAL_GATEWAY_UPSTREAM ?? GATEWAY_UPSTREAM_BASE_URL,
     // 外部 agent 条件的请求逐字转发，网关只读地核对其 model 与本批一致
     model: settings.modelId,
     accounts: settings.accounts,

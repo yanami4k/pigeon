@@ -13,6 +13,7 @@ import {
   PIGEON_BUNDLE_MOUNT,
   PIGEON_DOCKER_CONDITION,
   PIGEON_GOV_ROOT,
+  PIGEON_NODE_MOUNT,
   pigeonDockerContainerArgs,
   pigeonDockerIdentity,
   pigeonDockerJobContainerArgs,
@@ -125,13 +126,14 @@ function fakeBundle(dir: string): string {
 }
 
 test(
-  "作业容器参数：接内部网络、只读挂载打包产物、按作业读写挂载治理目录；治理目录的宿主布局即跑批器的会话布局",
+  "作业容器参数：接内部网络、只读挂载打包产物与 Node 运行时、按作业读写挂载治理目录；治理目录的宿主布局即跑批器的会话布局",
   withTmp((dir) => {
     const job = { stream: "tasks", condition: PIGEON_DOCKER_CONDITION, attempt: 2 } as const;
     const args = pigeonDockerJobContainerArgs({
       outDir: dir,
       job,
       bundleDir: "bundle-src",
+      nodeRuntimeDir: "node-src",
       networkName: "net-x",
     });
     assert.deepEqual(args.slice(0, 2), ["--network", "net-x"]);
@@ -143,6 +145,7 @@ test(
     const mounts = args.filter((a) => a.startsWith("type=bind"));
     assert.deepEqual(mounts, [
       `type=bind,source=${path.resolve("bundle-src")},target=${PIGEON_BUNDLE_MOUNT},readonly`,
+      `type=bind,source=${path.resolve("node-src")},target=${PIGEON_NODE_MOUNT},readonly`,
       `type=bind,source=${governance},target=${PIGEON_GOV_ROOT}/.pigeon`,
     ]);
     // 程序状态落在治理目录（挂载点）而不是工作区：diff 提取无需排除路径
@@ -156,11 +159,23 @@ test(
   withTmp((dir) => {
     for (const bad of [path.join(dir, "a,b"), `${dir}/a"b`, `${dir}/a\nb`]) {
       assert.throws(
-        () => pigeonDockerContainerArgs({ bundleDir: bad, governanceDir: dir, networkName: "n" }),
+        () =>
+          pigeonDockerContainerArgs({
+            bundleDir: bad,
+            nodeRuntimeDir: dir,
+            governanceDir: dir,
+            networkName: "n",
+          }),
         /逗号、引号或换行/
       );
       assert.throws(
-        () => pigeonDockerContainerArgs({ bundleDir: dir, governanceDir: bad, networkName: "n" }),
+        () =>
+          pigeonDockerContainerArgs({
+            bundleDir: dir,
+            nodeRuntimeDir: dir,
+            governanceDir: bad,
+            networkName: "n",
+          }),
         /逗号、引号或换行/
       );
     }

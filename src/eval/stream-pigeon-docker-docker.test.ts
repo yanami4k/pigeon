@@ -43,7 +43,15 @@ import { dockerStreamEnvs, ReferenceCases, runStreams } from "./stream-runner.ts
 import { localStreamShell } from "./stream-shell-fixtures.ts";
 import { toyRepo, toyRuntime } from "./stream-toy-fixtures.ts";
 
-const BUNDLE_FIXTURE = fileURLToPath(new URL("./stream-fixtures/fake-pigeon-bundle", import.meta.url));
+const BUNDLE_FIXTURE = fileURLToPath(
+  new URL("./stream-fixtures/fake-pigeon-bundle", import.meta.url)
+);
+
+// Node 运行时目录（实验镜像没有 node）：由 PIGEON_DOCKER_TEST_NODE_DIR 给出（含 bin/node 的 Linux x64 构建），
+// 没给即跳过——服务器上为对比评测准备的那一份
+const NODE_RUNTIME_DIR = process.env.PIGEON_DOCKER_TEST_NODE_DIR;
+const nodeSkip =
+  NODE_RUNTIME_DIR === undefined ? "没有 PIGEON_DOCKER_TEST_NODE_DIR（Node 运行时目录）" : false;
 
 // 两道题的人的仓库：起点只有 base；题 1 新建 src/a.txt（alpha），题 2 新建 src/b.txt（beta），各带测试
 async function twoTaskToy(base: string) {
@@ -163,6 +171,7 @@ async function runTwoSteps(mode: string | undefined, attempts: number) {
                 outDir,
                 job,
                 bundleDir,
+                nodeRuntimeDir: NODE_RUNTIME_DIR as string,
                 networkName: network.name,
               })
             : undefined,
@@ -193,7 +202,7 @@ async function runTwoSteps(mode: string | undefined, attempts: number) {
   }
 }
 
-test.skipIf(realDockerSkip())(
+test.skipIf(realDockerSkip() || nodeSkip)(
   "pigeon-docker（真容器）：两题两遍——经网关记轮数、判题通过、diff 无程序状态、同作业跨题检索到前题会话、两遍互不相通",
   { timeout: 900_000 },
   async () => {
@@ -239,7 +248,7 @@ test.skipIf(realDockerSkip())(
   }
 );
 
-test.skipIf(realDockerSkip())(
+test.skipIf(realDockerSkip() || nodeSkip)(
   "pigeon-docker（真容器）：作废的题的会话按现有规矩移出——重做后治理目录只剩重做的会话，后面的题检索不到作废那次",
   { timeout: 900_000 },
   async () => {
@@ -267,15 +276,24 @@ test.skipIf(realDockerSkip())(
   }
 );
 
-test.skipIf(realDockerSkip())(
-  "pigeon-docker（真容器）：pigeon --version 的自报（身份段用）",
+test.skipIf(realDockerSkip() || nodeSkip)(
+  "pigeon-docker（真容器）：pigeon 与 Node 运行时 --version 的自报（身份段用）",
   { timeout: 300_000 },
   async () => {
     const reported = await pigeonDockerSelfReport({
       bundleDir: BUNDLE_FIXTURE,
+      nodeRuntimeDir: NODE_RUNTIME_DIR as string,
       image: REAL_IMAGE,
       container: `pigeon-pd-identity-test-${process.pid}`,
     });
-    assert.equal(reported, "9.9.9-fake");
+    assert.ok(
+      typeof reported === "object" &&
+        reported !== null &&
+        "pigeon" in reported &&
+        "node" in reported,
+      JSON.stringify(reported)
+    );
+    assert.equal(reported.pigeon, "9.9.9-fake");
+    assert.match(String(reported.node), /^v\d+\.\d+\.\d+/);
   }
 );

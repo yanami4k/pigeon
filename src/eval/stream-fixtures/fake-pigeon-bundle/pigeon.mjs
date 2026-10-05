@@ -11,12 +11,13 @@ if (args[0] === "--version") {
   console.log("9.9.9-fake");
   process.exit(0);
 }
-const valueOf = (name) => {
+const argValue = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const root = valueOf("--root") ?? process.cwd();
-const gov = valueOf("--governance-root") ?? root;
+
+const root = argValue("--root") ?? process.cwd();
+const gov = argValue("--governance-root") ?? root;
 let task = "";
 for await (const chunk of process.stdin) task += chunk;
 
@@ -31,7 +32,8 @@ if (mode === "hang") {
 const sessionsDir = path.join(gov, ".pigeon", "state", "sessions");
 const sessionsFound = !existsSync(sessionsDir)
   ? 0
-  : readdirSync(sessionsDir, { recursive: true }).filter((f) => String(f).endsWith(".jsonl")).length;
+  : readdirSync(sessionsDir, { recursive: true }).filter((f) => String(f).endsWith(".jsonl"))
+      .length;
 
 // 经网关发一次请求（Anthropic 消息、占位 key）
 let httpStatus = null;

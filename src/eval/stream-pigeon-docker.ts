@@ -2,11 +2,11 @@
 // 挂进题目容器，在容器里跑产品缺省的 pigeon run --yolo --no-web --json，思考档位显式给 high（决策 390：产品缺省改为
 // 开思考的施工另有一段，合并前由启动参数显式给出，合并后两者一致）；模型经只通网关的跑批内部网络（与外部 agent 条件
 // 同一网络档，gateway-network.ts），自带 DeepSeek 接入产物（dist/deepseek-stream-fn.mjs）的端点根由
-// DEEPSEEK_BASE_URL 指到本作业的网关地址。
+// DEEPSEEK_BASE_URL 指到本作业的网关地址。实验镜像没有 node：Node 运行时（官方 Linux x64 构建）同样只读挂载进容器，
+// 不改镜像身份（与人的基准缓存同一道理，工具目录只读挂载的先例）。
 //   治理根与工作区分开：--governance-root 指到容器里的独立挂载点（宿主侧即作业目录下的 .pigeon/，挂载到容器
 //     /pigeon-gov/.pigeon）。设置三层与项目 .mcp.json 锚在治理根——题目仓库自带的 .pigeon/ 设置不生效（隔离），
-//     程序状态（会话、检索缓存等）不落工作区、不进 diff 与判题；工作区对用户级目录的读取由 HOME 指到每步新建的空
-//     目录隔离。
+//     程序状态（会话、检索缓存等）不落工作区、不进 diff 与判题；用户级目录由 HOME 指到每步新建的空目录隔离。
 //   会话跨题保留（决策 389）：治理根的宿主侧就是作业目录下的 .pigeon/，跑批器现成的每步会话清单（sessions-<seq>.json）、
 //     作废移出（quarantineSessions）与续跑恢复原样生效——同一作业（流 × 条件 × 遍次）内后面的题能检索到前面题的
 //     会话，作业之间互不相通，作废的题的会话按现有规矩移出。
@@ -17,8 +17,8 @@
 //     失败）同样作废重做（不计数信号类，连续裸打断到上限即停作业）。
 //   产物：每步把容器里的运行目录（结果 JSON、标准错误、提示文本）拷到作业目录
 //     pigeon-docker/step-<步序>/try-<第几次>/io/，提示文本另由宿主写一份可信副本；重做取下一个没用过的序号。
-// 身份：agents.pigeonDocker 记打包产物摘要、--version 自报与逐项设置（与现有各段同一规则：不进身份摘要，续跑时
-//   两边都记了才比对）。
+// 身份：agents.pigeonDocker 记打包产物摘要、自报的版本（产品与 Node 运行时）与逐项设置（与现有各段同一规则：
+//   不进身份摘要，续跑时两边都记了才比对）。
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -51,6 +51,8 @@ import { jobDirName, type StepAgent, type StepAgentResult } from "./stream-runne
 export const PIGEON_DOCKER_CONDITION = "pigeon-docker";
 // 打包产物（dist/）在容器里的挂载点（只读）
 export const PIGEON_BUNDLE_MOUNT = "/opt/pigeon-bundle";
+// Node 运行时（实验镜像没有 node）在容器里的挂载点（只读）：宿主目录含 bin/node（官方 Linux x64 构建）
+export const PIGEON_NODE_MOUNT = "/opt/pigeon-node";
 // 治理根在容器里的位置：宿主作业目录的 .pigeon/ 挂在它的 .pigeon 上
 export const PIGEON_GOV_ROOT = "/pigeon-gov";
 // 容器里的运行目录：prompt.txt（宿主写入）、result.json、stderr.txt、home/（每步新建的空用户级目录）
@@ -61,22 +63,34 @@ function assertMountable(p: string, what: string): void {
   if (/[,"'\r\n]/.test(p)) throw new Error(`${what}不得含逗号、引号或换行：${p}`);
 }
 
-// 作业容器参数（代替 --network none）：接跑批内部网络、只读挂载打包产物、读写挂载作业的治理目录。
-// 治理目录为宿主作业目录下的 .pigeon/（跑批器的会话清单、作废移出与续跑都按这个布局工作）；调用方保证它已存在
+// Node 运行时目录的校验：须含 bin/node（官方 Linux x64 构建解开后的样子）
+export function assertNodeRuntimeDir(dir: string): void {
+  if (!existsSync(path.join(dir, "bin", "node"))) {
+    throw new Error(`Node 运行时目录 ${dir} 里没有 bin/node（解开官方 Linux x64 构建）`);
+  }
+}
+
+// 作业容器参数（代替 --network none）：接跑批内部网络、只读挂载打包产物与 Node 运行时、读写挂载作业的治理目录。
+// 治理目录为宿主作业目录下的 .pigeon/（跑批器的会话清单、作废移出与续跑都按这个布局工作）；治理目录由调用方建好
 export function pigeonDockerContainerArgs(input: {
   bundleDir: string;
+  nodeRuntimeDir: string;
   governanceDir: string;
   networkName: string;
 }): string[] {
   const bundleDir = path.resolve(input.bundleDir);
+  const nodeRuntimeDir = path.resolve(input.nodeRuntimeDir);
   const governanceDir = path.resolve(input.governanceDir);
   assertMountable(bundleDir, "打包产物目录 ");
+  assertMountable(nodeRuntimeDir, "Node 运行时目录 ");
   assertMountable(governanceDir, "治理目录 ");
   return [
     "--network",
     input.networkName,
     "--mount",
     `type=bind,source=${bundleDir},target=${PIGEON_BUNDLE_MOUNT},readonly`,
+    "--mount",
+    `type=bind,source=${nodeRuntimeDir},target=${PIGEON_NODE_MOUNT},readonly`,
     "--mount",
     `type=bind,source=${governanceDir},target=${PIGEON_GOV_ROOT}/${PIGEON_DIR}`,
   ];
@@ -88,18 +102,20 @@ export function pigeonDockerJobContainerArgs(input: {
   outDir: string;
   job: StreamJobId;
   bundleDir: string;
+  nodeRuntimeDir: string;
   networkName: string;
 }): string[] {
   const governanceDir = projectPigeonDir(path.join(input.outDir, "streams", jobDirName(input.job)));
   mkdirSync(governanceDir, { recursive: true });
   return pigeonDockerContainerArgs({
     bundleDir: input.bundleDir,
+    nodeRuntimeDir: input.nodeRuntimeDir,
     governanceDir,
     networkName: input.networkName,
   });
 }
 
-// 身份段（记在 agents.pigeonDocker）：打包产物摘要（不记宿主路径）、自报的版本、逐项设置
+// 身份段（记在 agents.pigeonDocker）：打包产物摘要（不记宿主路径）、自报的版本（产品与 Node 运行时）、逐项设置
 export function pigeonDockerIdentity(
   bundleDir: string,
   selfReported: unknown
@@ -107,6 +123,8 @@ export function pigeonDockerIdentity(
   return {
     bundleDigest: toolDirDigest(bundleDir),
     bundleMount: PIGEON_BUNDLE_MOUNT,
+    // Node 运行时只记挂载点与自报版本（目录大，不取摘要）
+    nodeMount: PIGEON_NODE_MOUNT,
     network: EXTERNAL_NETWORK_PROFILE,
     selfReported,
     settings: {
@@ -133,9 +151,10 @@ export function pigeonDockerIdentity(
   };
 }
 
-// 在实验镜像的一次性容器里（断网、只读挂载打包产物）取 pigeon --version 的自报
+// 在实验镜像的一次性容器里（断网、只读挂载打包产物与 Node 运行时）取 pigeon --version 与 node --version 的自报
 export async function pigeonDockerSelfReport(input: {
   bundleDir: string;
+  nodeRuntimeDir: string;
   image: string;
   container: string;
   docker?: readonly string[];
@@ -153,16 +172,31 @@ export async function pigeonDockerSelfReport(input: {
         "none",
         "--mount",
         `type=bind,source=${path.resolve(input.bundleDir)},target=${PIGEON_BUNDLE_MOUNT},readonly`,
+        "--mount",
+        `type=bind,source=${path.resolve(input.nodeRuntimeDir)},target=${PIGEON_NODE_MOUNT},readonly`,
         ...(input.runArgs ?? []),
       ],
     });
-    const r = await dockerOnce(
+    const pigeon = await dockerOnce(
       docker,
-      ["exec", input.container, "node", `${PIGEON_BUNDLE_MOUNT}/pigeon.mjs`, "--version"],
+      [
+        "exec",
+        input.container,
+        `${PIGEON_NODE_MOUNT}/bin/node`,
+        `${PIGEON_BUNDLE_MOUNT}/pigeon.mjs`,
+        "--version",
+      ],
       120_000
     );
-    if (r.exitCode !== 0) return null;
-    return parseSelfReport(r.stdout.toString("utf8"));
+    const node = await dockerOnce(
+      docker,
+      ["exec", input.container, `${PIGEON_NODE_MOUNT}/bin/node`, "--version"],
+      60_000
+    );
+    return {
+      pigeon: pigeon.exitCode === 0 ? parseSelfReport(pigeon.stdout.toString("utf8")) : null,
+      node: node.exitCode === 0 ? parseSelfReport(node.stdout.toString("utf8")) : null,
+    };
   } catch {
     return null;
   } finally {
@@ -197,7 +231,7 @@ const PREPARE_IO = [
 // 运行命令：提示从文件读（不经参数，避免长度与转义问题），结果与标准错误落运行目录；$1 工作区根、$2 治理根
 const RUN_PIGEON = [
   `cd -- "$1"`,
-  `node ${PIGEON_BUNDLE_MOUNT}/pigeon.mjs run --yolo --no-web --json --thinking high \\`,
+  `${PIGEON_NODE_MOUNT}/bin/node ${PIGEON_BUNDLE_MOUNT}/pigeon.mjs run --yolo --no-web --json --thinking high \\`,
   `  --root "$1" --governance-root "$2" \\`,
   `  --stream-fn ${PIGEON_BUNDLE_MOUNT}/deepseek-stream-fn.mjs \\`,
   `  < "${PIGEON_RUN_IO_DIR}/prompt.txt" > "${PIGEON_RUN_IO_DIR}/result.json" 2> "${PIGEON_RUN_IO_DIR}/stderr.txt"`,

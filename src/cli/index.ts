@@ -1015,6 +1015,9 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
     ...(externalAgents.length > 0 ? { externalAgents } : {}),
     ...(values.has("--pigeon-bundle") ? { pigeonBundle: required("--pigeon-bundle") } : {}),
+    ...(values.has("--pigeon-node-runtime")
+      ? { pigeonNodeRuntime: required("--pigeon-node-runtime") }
+      : {}),
     ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
     ...(values.has("--task-interfaces")
       ? { taskInterfacesFile: required("--task-interfaces") }
