@@ -356,9 +356,9 @@ agent 可以查本项目以前的会话，共三件工具，都是只读、免�
 pigeon migrate-config [--root <项目根>]
 ```
 
-- 7 个旧配置文件各成一节写入设置：`permissions` 写项目个人 `.pigeon/settings.local.json`，其余写项目共享 `.pigeon/settings.json`；处理过的旧文件一律挪出仓库，原名原文放进用户级 `~/.pigeon/state/migration-backup/<项目目录名>-<哈希>/`（按项目的规范化路径分目录），迁移结束打印这个位置；仓库里不留备份（旧 `web.json` 里可能有 key，留在仓库里会进快照、沙箱容器与 worker 工作树，也可能被提交）。要取回 key 时从备份里找，改设为环境变量。
+- 7 个旧配置文件各成一节写入设置：`permissions` 写项目个人 `.pigeon/settings.local.json`，其余写项目共享 `.pigeon/settings.json`；处理过的旧文件一律挪出仓库，原名放进用户级 `~/.pigeon/state/migration-backup/<项目目录名>-<哈希>/`（按项目的规范化路径分目录），迁移结束打印这个位置；仓库里不留备份（旧 `web.json` 里可能有 key，留在仓库里会进快照、沙箱容器与 worker 工作树，也可能被提交）。除 `web.json` 外备份即原文。
 - 每次迁移都确保 `.pigeon/.gitignore`。
-- `web.json` 里的 key 不写入，打印应设的环境变量名。
+- `web.json` 里的 key 不写入设置，打印应设的环境变量名；备份里字段照留，key 的值换成"已移除，请改设环境变量 …"。key 不出现在任何输出与备份里，`web.json` 不是合法 JSON 时报错也不带解析细节。迁移不保留 key 的原文，请在迁移前把它设为环境变量。更早的迁移留下的备份不改动，其中可能仍有 key。
 - `.pigeon/verify.json` 不并入设置：验证门已随决策 322 退役，迁移把它挪进备份目录，并打印把原验证命令改写为收尾（Stop）钩子的配置示例（分步配置按各步命令以 `&&` 连接）。
 - 旧位置的程序状态移入 `.pigeon/state/`；worker 工作树用 `git worktree move` 移动。
 - 已删除功能的遗留挪出仓库进用户级备份目录：旧学到的记忆（`.pigeon/learned/`、`.pigeon/state/learned/` 与它们的锁）、补做复盘记录（`.pigeon/review-backfill`、`.pigeon/state/review-backfill`）、复盘配置 `.pigeon/memory-review.json`、旧人写说明 `.pigeon/memory/`（另打印提示"把其中内容并入项目的 AGENTS.md"）。

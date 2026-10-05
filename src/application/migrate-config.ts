@@ -3,7 +3,8 @@
 // 六步：
 //   ① 旧配置：7 个旧文件各成一节写入设置（permissions 写项目个人 .pigeon/settings.local.json，其余写项目共享
 //      .pigeon/settings.json），去掉各文件自己的 version；web.json 里的 key 不写入，打印应设的环境变量名；旧文件挪出
-//      仓库，进用户级本项目的备份目录（决策 341，迁移结束打印位置；仓库里不留备份）。目标文件已存在时合并进去：
+//      仓库，进用户级本项目的备份目录（决策 341，迁移结束打印位置；仓库里不留备份）；web.json 的备份里 key 的值换成
+//      "已移除，请改设环境变量 …"，key 不出现在任何输出与备份里。目标文件已存在时合并进去：
 //      同一节两边都有且内容不同即报错停下、不覆盖；
 //   ② 程序状态：会话、输入历史、终端界面日志挪进 .pigeon/state/ 对应位置；
 //   ③ 已删除功能的遗留（记忆一段，决策 330、331）：旧学到的记忆两处与其锁、补做复盘记录两处、复盘配置
@@ -33,6 +34,7 @@ import {
   migrationBackupConflict,
   migrationBackupLocation,
   moveToMigrationBackup,
+  writeRedactedMigrationBackup,
 } from "../persistence/migration-backup.ts";
 import { ensurePigeonGitignore } from "../persistence/settings.ts";
 import { canonicalJson } from "../state/hashing.ts";
@@ -111,6 +113,13 @@ interface ConvertedConfig {
   content: Record<string, unknown>;
   // web.json 里去掉的 key 应设的环境变量
   keyEnvs: string[];
+  // 写进备份的改写稿（web.json 有 key 时：key 的值换成说明）；不在即原文照挪
+  backupText?: string;
+}
+
+// 备份里 key 的值换成的说明
+function removedKeyNote(env: string): string {
+  return `已移除，请改设环境变量 ${env}`;
 }
 
 // 读一个旧文件并转成一节：去掉 version；web 去掉 key
@@ -120,9 +129,12 @@ function convertLegacyConfig(root: string, file: string, section: string): Conve
   try {
     raw = JSON.parse(readFileSync(source, "utf8"));
   } catch (error) {
-    throw new MigrationError(
-      `${pigeonRel(file)} 不是合法 JSON，无法迁移：${error instanceof Error ? error.message : String(error)}`
-    );
+    // web.json 可能含 key，解析报错会摘录原文片段：不打印细节
+    const detail =
+      section === "web"
+        ? "（文件里可能有 key，不打印解析细节）"
+        : `：${error instanceof Error ? error.message : String(error)}`;
+    throw new MigrationError(`${pigeonRel(file)} 不是合法 JSON，无法迁移${detail}`);
   }
   if (!isPlainObject(raw)) {
     throw new MigrationError(`${pigeonRel(file)} 顶层须为对象，无法迁移`);
@@ -134,19 +146,33 @@ function convertLegacyConfig(root: string, file: string, section: string): Conve
     );
   }
   const keyEnvs: string[] = [];
+  let backupText: string | undefined;
   if (section === "web" && isPlainObject(content.search)) {
     const search = { ...content.search };
+    // 备份的改写稿：原文各字段照留，只把 key 的值换成说明
+    const backupSearch = { ...content.search };
     for (const { backend, env } of WEB_KEY_FIELDS) {
       const backendSection = search[backend];
       if (isPlainObject(backendSection) && Object.hasOwn(backendSection, "apiKey")) {
         const { apiKey: _dropped, ...rest } = backendSection;
         search[backend] = rest;
+        backupSearch[backend] = { ...backendSection, apiKey: removedKeyNote(env) };
         keyEnvs.push(env);
       }
     }
     content.search = search;
+    if (keyEnvs.length > 0) {
+      backupText = `${JSON.stringify({ ...raw, search: backupSearch }, null, 2)}\n`;
+    }
   }
-  return { file, section, layer: targetLayerOf(section), content, keyEnvs };
+  return {
+    file,
+    section,
+    layer: targetLayerOf(section),
+    content,
+    keyEnvs,
+    ...(backupText !== undefined ? { backupText } : {}),
+  };
 }
 
 function readTarget(file: string, label: string): Record<string, unknown> {
@@ -247,9 +273,14 @@ export const legacyConfigStep: MigrationStep = {
     }
     for (const item of converted) {
       const source = legacyConfigPath(ctx.root, item.file);
-      ctx.backups.push(moveToMigrationBackup(ctx.root, source, item.file, ctx.homeDir));
+      ctx.backups.push(
+        item.backupText !== undefined
+          ? writeRedactedMigrationBackup(ctx.root, source, item.file, item.backupText, ctx.homeDir)
+          : moveToMigrationBackup(ctx.root, source, item.file, ctx.homeDir)
+      );
       lines.push(
-        `已迁移 ${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节；原文件已挪进备份目录`
+        `已迁移 ${pigeonRel(item.file)} → ${targetLabelOf(item.layer)} 的 ${item.section} 一节；原文件已挪进备份目录` +
+          (item.backupText !== undefined ? "（备份里 key 的值已去掉）" : "")
       );
       for (const env of item.keyEnvs) {
         lines.push(`  ${pigeonRel(item.file)} 里的 key 没有写入设置：请改设环境变量 ${env}`);
@@ -648,7 +679,7 @@ export function runMigrateConfig(
     lines.push(...step.apply(ctx).map((line) => `  ${line}`));
   }
   if (ctx.backups.length > 0) {
-    lines.push(`迁移挪走的旧文件原文备份在 ${migrationBackupLocation(root, ctx.homeDir)}`);
+    lines.push(`迁移挪走的旧文件备份在 ${migrationBackupLocation(root, ctx.homeDir)}`);
   }
   return { changed: true, lines };
 }

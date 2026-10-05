@@ -1,7 +1,8 @@
 // 迁移备份（决策 341）：迁移命令处理过的旧文件一律挪出仓库，放进用户级 ~/.pigeon/state/migration-backup/ 下本项目的目录
-// （项目按规范化路径分目录，见路径模块），原名原文不变；仓库里不留备份，含 key 的旧文件不进快照、沙箱容器、worker 工作树与提交。
+// （项目按规范化路径分目录，见路径模块），原名不变；仓库里不留备份，含 key 的旧文件不进快照、沙箱容器、worker 工作树与提交。
+// 一般原文照挪；含 key 的旧文件（web.json）由调用方给出去掉 key 的内容写进备份，原文件删掉，备份里也不留 key 的值。
 // 迁移的各步共用这一组函数（钩子一段的 verify.json、记忆一段的 memory-review.json 与旧记忆同样经它备份）。
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { migrationBackupDirOf } from "../state/paths.ts";
@@ -48,5 +49,23 @@ export function moveToMigrationBackup(
     cpSync(source, target, { recursive: true, preserveTimestamps: true, errorOnExist: true });
     rmSync(source, { recursive: true });
   }
+  return target;
+}
+
+// 把旧文件按给定内容（已去掉 key 的改写稿）写进备份目录、删掉原文件；返回备份位置。备份已存在即拒绝，不覆盖
+export function writeRedactedMigrationBackup(
+  root: string,
+  source: string,
+  name: string,
+  text: string,
+  homeDir: string = homedir()
+): string {
+  const target = backupPathOf(root, name, homeDir);
+  if (existsSync(target)) {
+    throw new MigrationBackupError(`备份 ${target} 已存在，不覆盖`);
+  }
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  writeFileSync(target, text, { flag: "wx", mode: 0o600 });
+  rmSync(source);
   return target;
 }
