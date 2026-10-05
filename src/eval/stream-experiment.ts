@@ -71,12 +71,14 @@ import {
   readStoredIdentity,
   type TaskSelection,
 } from "./stream-identity.ts";
+import { readTaskInterfaces } from "./stream-interfaces.ts";
 import {
   chainedTasks,
   DEFAULT_TASK_PROMPT_FORMAT,
   type StreamManifest,
   TASK_CHAIN_SCOPE,
   TASK_PROMPT_LAYOUT,
+  TASK_PROMPT_LAYOUT_WITH_INTERFACES,
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
@@ -117,6 +119,9 @@ export interface StreamExperimentOptions {
   budget: StepBudget;
   // 题面格式（198、213）：缺省给测试文件路径；给用例名时名单为这一步要做到的用例
   promptFormat?: TaskPromptFormat;
+  // 题面接口说明的数据文件（374）：给了即在名单之后渲染接口说明，数据文件的摘要与带接口说明的版式进身份头；
+  // 数据文件的清单摘要与本次清单不符即拒绝开跑。缺省则题面与之前逐字相同
+  taskInterfacesFile?: string;
   // 各条件的模型请求都经跑批进程内置的网关（决策 155）：真 key 只在网关里；spendLimitCny 为花费上限（人民币元，
   // 决策 235），缺省不设
   gateway: { accounts: readonly GatewayAccount[]; modelId: string; spendLimitCny?: number };
@@ -313,6 +318,12 @@ async function runStreamExperimentLocked(
 ): Promise<RunStreamsSummary> {
   const promptFormat = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
   const { manifest, runtime } = readManifest(options.manifestFile);
+  const manifestDigest = manifestDigestOf(options.manifestFile);
+  // 接口数据与清单对不上即拒绝：在写身份头、起容器之前
+  const interfaces =
+    options.taskInterfacesFile === undefined
+      ? undefined
+      : readTaskInterfaces(options.taskInterfacesFile, manifestDigest);
   const docker = options.docker ?? ["docker"];
   const human = gitHumanRepo(options.repoDir);
   const prefix = `pigeon-stream-${createHash("sha256").update(outDir).digest("hex").slice(0, 8)}`;
@@ -369,13 +380,15 @@ async function runStreamExperimentLocked(
     {
       core: {
         repo: manifest.repo,
-        manifestDigest: manifestDigestOf(options.manifestFile),
+        manifestDigest,
         image: imageId,
         budget: options.budget,
         conditions: [...options.conditions],
         stepScope: TASK_CHAIN_SCOPE,
         promptFormat,
-        promptLayout: TASK_PROMPT_LAYOUT,
+        promptLayout:
+          interfaces !== undefined ? TASK_PROMPT_LAYOUT_WITH_INTERFACES : TASK_PROMPT_LAYOUT,
+        ...(interfaces !== undefined ? { taskInterfaces: interfaces.digest } : {}),
         taskSelection,
         maxSteps: options.maxSteps ?? null,
         agents: {
@@ -485,6 +498,7 @@ async function runStreamExperimentLocked(
       conditions: options.conditions,
       budget: options.budget,
       promptFormat,
+      ...(interfaces !== undefined ? { taskInterfaces: interfaces.bySeq } : {}),
       harnessRef: harness,
       limits,
       gateway: liveGateway,

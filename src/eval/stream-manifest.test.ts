@@ -9,10 +9,12 @@ import {
   composeStreamManifest,
   countStepKinds,
   DEFAULT_TASK_PROMPT_FORMAT,
+  interfacesSection,
   type RepoProfile,
   stepsOf,
   TASK_CHAIN_ID,
   TASK_PROMPT_FORMATS,
+  type TaskInterfaceModule,
   type TestProbe,
   taskPromptOf,
 } from "./stream-manifest.ts";
@@ -330,8 +332,50 @@ test("跑批器的题面（198、213）：提交信息原文，其后一行说�
   assert.equal(DEFAULT_TASK_PROMPT_FORMAT, "test-files");
 });
 
-// 题面是实验输入，措辞冻结（决策 239）：两种格式、两段名单的说明句全仓只在这里逐字检查，一改即换了实验条件
-test("题面说明句逐字冻结（239）：两种格式下应通过的名单与仓库里本来就有、此刻失败的第二段名单", () => {
+test("题面的接口说明（374）：接在两段名单之后；模块一行（起点没有的标 new module），名字缩进一行：类给构造参数、函数给参数与返回注解、其余只给名字；没有接口说明时题面与不传时逐字相同", () => {
+  const interfaces: TaskInterfaceModule[] = [
+    {
+      module: "strands.audio",
+      newModule: true,
+      names: [
+        { name: "Config", kind: "class", params: "rate: int = 1", returns: null },
+        { name: "Opaque", kind: "class", params: null, returns: null },
+      ],
+    },
+    {
+      module: "strands.agent",
+      newModule: false,
+      names: [
+        { name: "fetch", kind: "async function", params: "url: str", returns: "bytes" },
+        { name: "helper", kind: "function", params: "", returns: null },
+        { name: "LIMIT", kind: "other", params: null, returns: null },
+      ],
+    },
+  ];
+  const base = taskPromptOf("Add a", "test-files", ["a.test.ts"], ["z.test.ts"]);
+  const full = taskPromptOf("Add a", "test-files", ["a.test.ts"], ["z.test.ts"], interfaces);
+  assert.equal(full, `${base}\n${interfacesSection(interfaces)}\n`);
+  assert.deepEqual(interfacesSection(interfaces).split("\n").slice(1), [
+    "strands.audio (new module)",
+    "  class Config(rate: int = 1)",
+    "  class Opaque",
+    "strands.agent",
+    "  async def fetch(url: str) -> bytes",
+    "  def helper()",
+    "  LIMIT",
+  ]);
+  assert.equal(
+    taskPromptOf("Add a", "test-cases", ["src/a.test.ts::t"], [], []),
+    taskPromptOf("Add a", "test-cases", ["src/a.test.ts::t"])
+  );
+});
+
+// 题面是实验输入，措辞冻结（决策 239、374）：两种格式、两段名单与接口说明的说明句全仓只在这里逐字检查，一改即换了实验条件
+test("题面说明句逐字冻结（239、374）：两种格式下应通过的名单、仓库里本来就有且此刻失败的第二段名单、接口说明", () => {
+  assert.equal(
+    interfacesSection([{ module: "m", newModule: false, names: [] }]),
+    "Modules and names used by these tests that are not in the repository yet (listed by signature):\nm"
+  );
   assert.equal(
     taskPromptOf("Add a", "test-files", ["src/a.test.ts"], ["src/z.test.ts"]),
     "Add a\n\nTest files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):\nsrc/a.test.ts\n\nOther test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.ts\n"

@@ -152,19 +152,71 @@ const OTHER_FAILING_HEADINGS: Record<TaskPromptFormat, string> = {
 export const TASK_PROMPT_LAYOUT =
   "commit message; should-pass list; second list of other failing tests already in the repository";
 
-// 跑批器拼的题面：提交信息原文，其后一行说明与应通过的测试名单（每行一个）；第二段只在 otherFailing 不为空时出现。
-// 两段名单都为空时只有提交信息
+// 题面的接口说明（374）：测试要用到、起点里没有的模块与名字及签名，由分析包按规则抽出（eval/analysis 的
+// task_interface.py），跑批器只渲染。kind 为 class、function、async function 或 other；params 为参数表（不带括号），
+// returns 为返回注解，没有即 null
+export interface TaskInterfaceName {
+  name: string;
+  kind: "class" | "function" | "async function" | "other";
+  params: string | null;
+  returns: string | null;
+}
+
+export interface TaskInterfaceModule {
+  module: string;
+  // 起点里没有这个模块
+  newModule: boolean;
+  names: readonly TaskInterfaceName[];
+}
+
+// 接口说明一节的说明行，定稿原文（374；属于被测条件，定稿后不再改）。分析包 task_interface.py 的
+// INTERFACES_HEADING 与它逐字一致
+const INTERFACES_HEADING =
+  "Modules and names used by these tests that are not in the repository yet (listed by signature):";
+
+// 带接口说明时的版式（进身份头比对）；不带时仍是 TASK_PROMPT_LAYOUT
+export const TASK_PROMPT_LAYOUT_WITH_INTERFACES = `${TASK_PROMPT_LAYOUT}; interface section after the lists`;
+
+const DECLARATION_KEYWORDS: Record<TaskInterfaceName["kind"], string> = {
+  class: "class ",
+  function: "def ",
+  "async function": "async def ",
+  other: "",
+};
+
+// 一个名字一行：类给构造参数，函数给参数与返回注解，其余（及构造参数定不下来的类）只给名字
+function interfaceLine(n: TaskInterfaceName): string {
+  const head = `${DECLARATION_KEYWORDS[n.kind]}${n.name}`;
+  if (n.kind === "other" || n.params === null) return head;
+  return `${head}(${n.params})${n.returns !== null ? ` -> ${n.returns}` : ""}`;
+}
+
+// 接口说明一节：说明行，其后每个模块一行（起点没有的标 new module），模块下的名字各缩进两格一行；没有内容为空串
+export function interfacesSection(modules: readonly TaskInterfaceModule[]): string {
+  if (modules.length === 0) return "";
+  const lines = [INTERFACES_HEADING];
+  for (const m of modules) {
+    lines.push(`${m.module}${m.newModule ? " (new module)" : ""}`);
+    for (const n of m.names) lines.push(`  ${interfaceLine(n)}`);
+  }
+  return lines.join("\n");
+}
+
+// 跑批器拼的题面：提交信息原文，其后一行说明与应通过的测试名单（每行一个）；第二段只在 otherFailing 不为空时出现；
+// 接口说明（374）只在 interfaces 不为空时接在名单之后。两段名单都为空时只有提交信息（与接口说明）
 export function taskPromptOf(
   message: string,
   format: TaskPromptFormat,
   shouldPass: readonly string[],
-  otherFailing: readonly string[] = []
+  otherFailing: readonly string[] = [],
+  interfaces: readonly TaskInterfaceModule[] = []
 ): string {
   const parts = [message.trimEnd()];
   if (shouldPass.length > 0)
     parts.push(`${SHOULD_PASS_HEADINGS[format]}\n${shouldPass.join("\n")}`);
   if (otherFailing.length > 0)
     parts.push(`${OTHER_FAILING_HEADINGS[format]}\n${otherFailing.join("\n")}`);
+  if (interfaces.length > 0) parts.push(interfacesSection(interfaces));
   return `${parts.join("\n\n")}\n`;
 }
 

@@ -41,6 +41,7 @@ import {
   type StreamManifest,
   type StreamStep,
   TASK_CHAIN_ID,
+  type TaskInterfaceModule,
   type TaskPromptFormat,
   taskPromptOf,
 } from "./stream-manifest.ts";
@@ -455,6 +456,8 @@ export interface RunStreamsOptions {
   judgeTimeoutMs?: number;
   // 题面格式（198、213）：缺省给测试文件路径；给用例名时名单为这一步要做到的用例（214）
   promptFormat?: TaskPromptFormat;
+  // 题面的接口说明（374）：步号 → 该题的接口说明，接在名单之后；缺省即没有这一节，题面与之前逐字相同
+  taskInterfaces?: ReadonlyMap<number, readonly TaskInterfaceModule[]>;
   // 预先开好下一步的容器（缺省开）：当前步的 agent 开始之前即为下一步新开容器，下一步开工时直接取用
   prefetchEnvs?: boolean;
   harnessRef: HarnessRef;
@@ -1043,24 +1046,28 @@ export async function judgeCases(
 }
 
 // 这一步的题面（198、213）：提交信息加应通过的测试名单——本题新写或改过的测试文件路径，或其中要做到的用例编号；
-// 要做到的用例有落在这些文件之外的，另列第二段：它们所在的测试文件（去重、排序），或这些用例编号
+// 要做到的用例有落在这些文件之外的，另列第二段：它们所在的测试文件（去重、排序），或这些用例编号；给了接口数据的，
+// 该题的接口说明接在名单之后（374）
 function promptFor(options: RunStreamsOptions, step: StreamStep, classes: CaseClasses): string {
   const format = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
   const outside = outsideJudgeCases(step, classes.failToPass);
   const outsideSet = new Set(outside);
+  const interfaces = options.taskInterfaces?.get(step.seq) ?? [];
   if (format === "test-files") {
     return taskPromptOf(
       step.message,
       format,
       step.judgeTests,
-      [...new Set(outside.map(caseFile))].sort()
+      [...new Set(outside.map(caseFile))].sort(),
+      interfaces
     );
   }
   return taskPromptOf(
     step.message,
     format,
     classes.failToPass.filter((id) => !outsideSet.has(id)),
-    outside
+    outside,
+    interfaces
   );
 }
 
