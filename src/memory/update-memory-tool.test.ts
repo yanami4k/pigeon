@@ -1,13 +1,19 @@
 // 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v3；两层各自增、按编号替换与删除；
 // 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
-// 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示。
+// 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示；等锁超时按固定文字回话；两个进程同时写同一层，条目不丢不重。
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
-import { MEMORY_FILE_HEADERS, MEMORY_LAYER_LABELS, type MemoryLayer } from "./learned.ts";
+import {
+  MEMORY_FILE_HEADERS,
+  MEMORY_LAYER_LABELS,
+  type MemoryLayer,
+  parseMemory,
+} from "./learned.ts";
 import { memoryLocation } from "./learned-store.ts";
 import {
   applyMemoryUpdate,
@@ -365,4 +371,61 @@ test("Unicode 行分隔符也折叠：\\u2028 与 \\u2029 当换行并成一个�
   withFixture(async (fx) => {
     await fx.call({ action: "add", content: "第一段\u2028第二段\u2029第三段" });
     assert.match(fx.read("project"), /- \[P1\] 第一段 第二段 第三段 〔/);
+  }));
+
+// 子进程：等开跑文件出现后，向同一项目级记忆连续新增若干条（argv：被测模块、治理根、主目录、标签、条数、开跑文件）
+const CONCURRENT_WRITER = [
+  'import { existsSync } from "node:fs";',
+  "const [moduleUrl, root, home, tag, count, goPath] = process.argv.slice(1);",
+  "const { applyMemoryUpdate } = await import(moduleUrl);",
+  "while (!existsSync(goPath)) await new Promise((resolve) => setTimeout(resolve, 5));",
+  "for (let i = 0; i < Number(count); i += 1) {",
+  "  const result = await applyMemoryUpdate(",
+  '    { governanceRoot: root, homeDir: home, sessionId: "sess_" + tag, source: "tui", limits: { project: 100000, user: 100000 } },',
+  '    { action: "add", layer: "project", content: tag + "-" + i }',
+  "  );",
+  "  if (!result.details.written) { console.error(result.text); process.exit(1); }",
+  "}",
+].join("\n");
+
+test("两个进程同时写同一份记忆：各自的条目一条不丢、不重复，编号各不相同，文件格式完好", () =>
+  withFixture(async (fx) => {
+    const count = 20;
+    const goPath = join(fx.root, "go");
+    const moduleUrl = new URL("./update-memory-tool.ts", import.meta.url).href;
+    const writers = ["A", "B"].map((tag) => {
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          CONCURRENT_WRITER,
+          moduleUrl,
+          fx.root,
+          fx.home,
+          tag,
+          String(count),
+          goPath,
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] }
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      return new Promise<{ code: number | null; stderr: string }>((resolve) =>
+        child.on("exit", (code) => resolve({ code, stderr }))
+      );
+    });
+    writeFileSync(goPath, "");
+    for (const exit of await Promise.all(writers)) {
+      assert.equal(exit.code, 0, exit.stderr);
+    }
+    const parsed = parseMemory(fx.read("project"), "project");
+    assert.ok(parsed.ok);
+    const expected = ["A", "B"].flatMap((tag) =>
+      Array.from({ length: count }, (_, i) => `${tag}-${i}`)
+    );
+    assert.deepEqual(parsed.doc.entries.map((entry) => entry.content).sort(), expected.sort());
+    assert.equal(new Set(parsed.doc.entries.map((entry) => entry.id)).size, 2 * count);
   }));
