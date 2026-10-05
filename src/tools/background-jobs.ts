@@ -26,6 +26,7 @@ import {
   writeSync,
 } from "node:fs";
 import path from "node:path";
+import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import type { CommandOutputStore, OutputSlot } from "./command-output.ts";
 import { killLocalOrphan, type OrphanCleanup } from "./process-identity.ts";
 import type {
@@ -686,10 +687,10 @@ export function jobOutputText(job: BackgroundJob): string {
       ? `；输出超过单个文件的上限，文件里只留了末尾，前面 ${job.outputDropped} 字节已丢弃`
       : "";
   if (job.state === "running") {
-    return `输出共 ${job.outputBytes} 字节，持续写入 ${job.outputUri}（作业结束后可用 read_file 读取；在跑时用 job_output 读新增的）${dropped}`;
+    return `输出共 ${job.outputBytes} 字节，持续写入 ${job.outputUri}（作业结束后可用 read_file 读取；在跑时用 job_output 读新增的）；${VIRTUAL_PATH_HINT}${dropped}`;
   }
   if (job.outputSaved) {
-    return `输出共 ${job.outputBytes} 字节，全文存为 ${job.outputUri}，可用 read_file 按 offset 读取${dropped}`;
+    return `输出共 ${job.outputBytes} 字节，全文存为 ${job.outputUri}，可用 read_file 按 offset 读取；${VIRTUAL_PATH_HINT}${dropped}`;
   }
   return `输出共 ${job.outputBytes} 字节，全文未能保存（${job.outputError ?? "未知原因"}）`;
 }

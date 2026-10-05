@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, vi } from "vitest";
 import { localDockerHost } from "../execution/local-docker-fixtures.ts";
+import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import { CommandOutputStore, OutputPathError } from "./command-output.ts";
 import { createHeadCollector } from "./local-host.ts";
 import { createReadFileTool } from "./read-file.ts";
@@ -103,6 +104,7 @@ test("超长输出：留开头与末尾、注明省略的行数与全文路径�
     const shown = (text.match(/^line \d+$/gm) ?? []).length;
     assert.equal(omitted + shown, LINES);
     assert.match(text, new RegExp(`全文共 ${LINES} 行，已存为 pigeon://outputs/s1/1`));
+    assert.ok(text.includes(VIRTUAL_PATH_HINT));
     assert.match(middle, /^1500\| line 1500$/m);
     assert.match(middle, /共 3000 行/);
     // 没超过的输出原样给出，不落盘、不给路径

@@ -14,7 +14,7 @@
 // 设置的 commands 一节的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { PIGEON_DIR } from "../state/paths.ts";
+import { PIGEON_DIR, VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import {
   DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES,
   DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES,
@@ -851,7 +851,8 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
     if (saved !== undefined) {
       lines.push(
         `全文共 ${evidence.outputLines ?? 0} 行，已存为 ${saved.uri}，可用 read_file 按 offset 读取需要的一段` +
-          (saved.partial ? `（全文超过落盘上限，只存了前 ${saved.bytes} 字节）` : "")
+          (saved.partial ? `（全文超过落盘上限，只存了前 ${saved.bytes} 字节）` : "") +
+          `；${VIRTUAL_PATH_HINT}`
       );
     } else if (evidence.savedOutputError !== undefined) {
       lines.push(`全文未能保存（${evidence.savedOutputError}），只有上面的开头与末尾`);

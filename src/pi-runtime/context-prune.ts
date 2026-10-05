@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import type { ContextPruneSettings } from "../state/prune-config.ts";
 import { type PruneData, SessionEntryType } from "../state/session-entries.ts";
 import { freshUsageMessage } from "./compaction.ts";
@@ -556,7 +557,7 @@ function recoveryOf(
     const saved = output.partial
       ? `已保存的是输出的前 ${output.bytes} 字节（全文超过落盘上限），存为 ${output.uri}`
       : `完整输出存为 ${output.uri}`;
-    return `${saved}，可用 read_file 读取（若已被清理，需要重新运行）。`;
+    return `${saved}，可用 read_file 读取（若已被清理，需要重新运行）；${VIRTUAL_PATH_HINT}。`;
   }
   return SEARCH_TOOLS.has(toolName) ? "需要时重新搜索。" : "需要时重新调用。";
 }

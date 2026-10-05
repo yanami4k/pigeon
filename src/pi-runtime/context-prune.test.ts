@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import { test } from "vitest";
+import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import { type ContextPruneSettings, contextPruneSettings } from "../state/prune-config.ts";
 import { SESSION_ENTRY_VERSION, SessionEntryType } from "../state/session-entries.ts";
 import { STATUS_MARKER } from "../state/status-text.ts";
@@ -278,6 +279,7 @@ test("命令输出：已落盘的用原路径；没截断的整段输出补落�
   assert.deepEqual(saved, [output]);
   assert.match(record?.items[0]?.placeholder ?? "", /pigeon:\/\/outputs\/s1\/7/);
   assert.match(record?.items[1]?.placeholder ?? "", /pigeon:\/\/outputs\/s1\/3/);
+  assert.ok(record?.items[1]?.placeholder.includes(VIRTUAL_PATH_HINT));
 });
 
 test("命令：截断而全文没落盘的、补落盘失败的不裁；部分落盘照实写；带文件变化的保留清单；空输出不落盘", () => {
