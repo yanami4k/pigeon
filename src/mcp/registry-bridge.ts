@@ -11,6 +11,7 @@ import {
   resolveMcpToolTier,
 } from "../state/mcp-config.ts";
 import { effectiveMcpTier, type McpDeclaredHint } from "../state/mcp-toolset.ts";
+import { markExternal } from "../tools/external-content.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import type { McpToolDescriptor } from "./client.ts";
@@ -125,6 +126,14 @@ function mapContentBlock(block: unknown): ModelContent {
   return { type: "text", text: `[未识别的内容块 ${type}]` };
 }
 
+// 决策 379：第一个文字块的开头加外部内容标记；块的个数、顺序与图片不动，没有文字块（纯图片）不加
+function markFirstText(content: ModelContent[]): ModelContent[] {
+  const first = content.findIndex((block) => block.type === "text");
+  return content.map((block, index) =>
+    index === first && block.type === "text" ? { ...block, text: markExternal(block.text) } : block
+  );
+}
+
 function createBridgedTool(
   server: McpServerConfig,
   source: McpToolSource,
@@ -149,12 +158,16 @@ function createBridgedTool(
         const text = content
           .flatMap((block) => (block.type === "text" ? [block.text] : []))
           .join("\n");
+        // 决策 379：服务端给的说明同样是外部内容
         throw new McpToolError(
-          `MCP 工具 ${server.name}/${descriptor.name} 返回错误：${text === "" ? "（无说明）" : text}`
+          `MCP 工具 ${server.name}/${descriptor.name} 返回错误：${text === "" ? "（无说明）" : `\n${markExternal(text)}`}`
         );
       }
       return {
-        content: content.length > 0 ? content : [{ type: "text", text: "（工具没有返回内容）" }],
+        content:
+          content.length > 0
+            ? markFirstText(content)
+            : [{ type: "text", text: "（工具没有返回内容）" }],
         details: {
           server: server.name,
           tool: descriptor.name,

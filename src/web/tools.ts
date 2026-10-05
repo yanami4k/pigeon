@@ -7,6 +7,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { TurnUsage } from "../state/runtime-events.ts";
 import { TOOL_RESULT_USAGE_KEY } from "../state/tool-usage.ts";
+import { markExternal } from "../tools/external-content.ts";
 import {
   type HostScopedTool,
   hostOfUrlArg,
@@ -84,7 +85,8 @@ export function createWebSearchTool(
         signal
       );
       return {
-        content: [{ type: "text", text: formatSearchResponse(response) }],
+        // 决策 379：搜索结果是外部内容，开头加固定标记
+        content: [{ type: "text", text: markExternal(formatSearchResponse(response)) }],
         details: {
           backend: response.backend,
           query: response.query,
@@ -200,7 +202,8 @@ export function createWebFetchTool(
         ...(distilled.outputTruncated === true ? [WEB_FETCH_TEXTS.outputTruncatedNote] : []),
       ];
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
+        // 决策 379：提炼结果来自网页，开头加固定标记（跨站跳转的提示是 Pigeon 自己的文字，不加）
+        content: [{ type: "text", text: markExternal(lines.join("\n")) }],
         details: {
           url: args.url,
           ...(host !== undefined ? { host } : {}),

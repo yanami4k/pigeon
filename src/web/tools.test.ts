@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, test } from "vitest";
 import { TOOL_RESULT_USAGE_KEY } from "../state/tool-usage.ts";
+import { EXTERNAL_CONTENT_MARKER } from "../tools/external-content.ts";
 import { type DistillInput, distillUserText } from "./distill.ts";
 import type { Transport } from "./network.ts";
 import type { SearchBackend, SearchParams } from "./search.ts";
@@ -88,6 +89,8 @@ test("web_fetch：网页原文只交给提炼，工具结果只有提炼结果�
   );
   const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
   assert.doesNotMatch(text, new RegExp(RAW), "网页原文不进主对话");
+  // 决策 379：提炼结果开头带外部内容标记
+  assert.ok(text.startsWith(`${EXTERNAL_CONTENT_MARKER}\n`), text);
   assert.match(text, /网页：文档/);
   assert.match(text, /网址：https:\/\/docs\.example\/doc/);
   assert.match(text, /提炼结果（针对：怎么安装）：\n提炼：安装步骤是 npm install/);
@@ -192,6 +195,7 @@ test("web_search：查询词与条数交给后端（条数缺省取配置），�
   assert.equal(
     text,
     [
+      EXTERNAL_CONTENT_MARKER,
       "搜索：pigeon harness（后端 fake，2 条结果）",
       "答案：",
       "答案在此",

@@ -227,13 +227,13 @@ test("MCP 接线：冲突落 Run 开始条目；声明只读或未配置、声�
       )
       .find((block) => block.type === "toolCall" && block.id === noteResult?.toolCallId);
     assert.deepEqual(noteCall?.arguments, { text: "n1" });
-    // MCP 来源与结构化内容在工具结果 details 里，结果正文即 server 返回的文本
+    // MCP 来源与结构化内容在工具结果 details 里，结果正文为外部内容标记（决策 379，单元层测）加 server 返回的文本
     const details = noteResult?.details as
       | { server?: string; tool?: string; structuredContent?: { evidence?: unknown } }
       | undefined;
     assert.equal(details?.server, "fx");
     assert.equal(details?.tool, "note");
-    assert.equal(textOf(noteResult), "noted");
+    assert.ok(textOf(noteResult).endsWith("\nnoted"), textOf(noteResult));
     assert.deepEqual(details?.structuredContent?.evidence, { path: "notes.txt", sha: "abc" });
   } finally {
     rmSync(root, { recursive: true, force: true });
