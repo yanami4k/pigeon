@@ -12,6 +12,8 @@
 //   跑批器各条件都不注册。审批照现有规矩（266）：本工具只读档、不经审批，worker 各自的调用按 302、303 走。
 // - 决策 360：可给工具清单（只能取主 agent 现有工具的子集，不给即按角色取预设）与各工具的作用范围（只能更窄）；
 //   校验在编排器派出时做（roles.ts），不合要求即不派、退还额度，按专门的文字回话。
+// - 决策 377：只读的 explorer 不建工作树、直接读派出方的工作区，派出与交回文字不提分支与改动文件（定稿原文）。
+// - 决策 381：worker 新建却因过大不会进交回的树的文件，另起一行附在交回文字之后。
 import { type Static, Type } from "typebox";
 import {
   LIST_SESSIONS_TOOL,
@@ -32,6 +34,7 @@ import {
   type OrchestrationSettings,
 } from "../state/orchestration-config.ts";
 import type { ToolScope } from "../state/session-payloads.ts";
+import { type SkippedFile, skippedFilesText } from "../state/snapshot-config.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import { RUN_COMMAND_TOOL } from "../tools/run-command.ts";
@@ -157,8 +160,8 @@ export function spawnWorkerDescription(
 ): string {
   const has: ToolPresence = (tool) => available === undefined || available.includes(tool);
   return [
-    "派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要。",
-    "worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。",
+    "派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要（explorer 只交回摘要）。",
+    "implementer 与 tester 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；explorer 不建工作树，直接只读你当前的工作区，读到的是正在变的内容，可能读到正在修改的文件。worker 都看不到本会话的对话。",
     `要并行，就多次调用本工具，每次派一个（可在同一次回复里连续调用）；同时最多跑 ${settings.maxConcurrent} 个，多的排队。派出后可以接着做自己的事，但不要把派出去的活自己再做一遍。需要结果才能往下做时用 ${WAIT_WORKERS_TOOL} 等；${WORKER_STATUS_TOOL} 查看进度，${MESSAGE_WORKER_TOOL} 给在跑的 worker 补充说明，${STOP_WORKER_TOOL} 停掉不再需要的。` +
       (settings.maxAgentSpawns !== undefined
         ? `一次运行最多派 ${settings.maxAgentSpawns} 个。`
@@ -273,7 +276,45 @@ export const SPAWN_WORKER_TEXTS = {
   // 决策 279（271 修订）：另起一行写明起点快照与只取其自身改动的取用方式
   start: (start: WorkerStartPoint, name: string) =>
     workerStartLine(start, `调用 ${TAKE_WORKER_TOOL}（worker=${name}）`),
+  // 决策 377：只读的 explorer 不建分支、只交回摘要——各情形去掉分支与改动文件的那几句
+  readOnly: {
+    spawned: (w: { name: string; role: string; label?: string }) =>
+      `已派出 worker ${w.name}（${w.role}），只读你的工作区，不建分支${
+        w.label !== undefined ? `，标签 ${w.label}` : ""
+      }。它结束时会有通知；需要结果才能往下做时用 ${WAIT_WORKERS_TOOL} 等。`,
+    completed: (w: ReadOnlyFacts) => `worker ${w.name}（${w.role}）已完成。摘要：${w.summary}`,
+    limitHit: (w: ReadOnlyFacts, limit: "轮数" | "时间") =>
+      `worker ${w.name}（${w.role}）撞上${limit}上限，没有做完。摘要：${w.summary}`,
+    failed: (w: WorkerName, reason: string) => `worker ${w.name}（${w.role}）失败：${reason}。`,
+    cancelled: (w: WorkerName) => `worker ${w.name}（${w.role}）被取消。`,
+    stalled: (w: WorkerName, minutes: number) =>
+      `worker ${w.name}（${w.role}）卡住：${minutes} 分钟没有新的模型回复或工具结果，已中断。`,
+    awaitingApproval: (
+      w: WorkerName,
+      action: string,
+      why: { kind: "timeout"; minutes: number } | { kind: "unattended" }
+    ) =>
+      `worker ${w.name}（${w.role}）停在等审批：要${action}，${
+        why.kind === "timeout" ? `${why.minutes} 分钟内无人批准` : "无人值守运行没有人审批"
+      }。人补批后它可以接着做。`,
+  },
 } as const;
+
+// 决策 381：worker 新建却因过大不会写进交回的树的文件（附在交回文字之后；不属定稿原文）
+export function skippedFilesLine(skipped: readonly SkippedFile[] | undefined): string {
+  return skipped !== undefined && skipped.length > 0
+    ? `\n没收进交回的大文件（${skipped.length}，未跟踪且过大，取用改动时不会叠入，留在工作树里）：${skippedFilesText(skipped)}`
+    : "";
+}
+
+interface WorkerName {
+  name: string;
+  role: string;
+}
+
+interface ReadOnlyFacts extends WorkerName {
+  summary: string;
+}
 
 interface WorkerFacts {
   name: string;
@@ -434,6 +475,9 @@ function workerOutcomeTextBase(
     "approvalTimeoutMs" | "stallMs"
   > = DEFAULT_SPAWN_WORKER_SETTINGS
 ): string {
+  if (outcome.workspace.kind === "shared") {
+    return readOnlyOutcomeText(outcome, budgetExhausted, settings);
+  }
   const branch =
     outcome.result?.branch ??
     (outcome.workspace.kind === "git-worktree" ? outcome.workspace.branch : "");
@@ -448,9 +492,9 @@ function workerOutcomeTextBase(
       ? SPAWN_WORKER_TEXTS.truncated(outcome.sessionId)
       : "";
   const start =
-    outcome.start !== undefined && outcome.workspace.kind === "git-worktree"
+    (outcome.start !== undefined && outcome.workspace.kind === "git-worktree"
       ? `\n${SPAWN_WORKER_TEXTS.start(outcome.start, outcome.name)}`
-      : "";
+      : "") + skippedFilesLine(outcome.result?.skippedFiles);
   if (outcome.blocked !== undefined) {
     return (
       SPAWN_WORKER_TEXTS.awaitingApproval(
@@ -481,6 +525,47 @@ function workerOutcomeTextBase(
       return SPAWN_WORKER_TEXTS.failed(base, "撞上 token 上限") + start;
     default:
       return SPAWN_WORKER_TEXTS.failed(base, outcome.error ?? "运行以未知终态结束") + start;
+  }
+}
+
+// 决策 377：只读 explorer 的交回文字（没有分支与改动文件）
+function readOnlyOutcomeText(
+  outcome: WorkerOutcome,
+  budgetExhausted: boolean,
+  settings: Pick<SpawnWorkerSettings, "approvalTimeoutMs" | "stallMs">
+): string {
+  const texts = SPAWN_WORKER_TEXTS.readOnly;
+  const who = { name: outcome.name, role: outcome.role };
+  const facts = { ...who, summary: outcome.result?.summary ?? "" };
+  const suffix =
+    outcome.result?.summaryTruncated === true
+      ? SPAWN_WORKER_TEXTS.truncated(outcome.sessionId)
+      : "";
+  if (outcome.blocked !== undefined) {
+    return texts.awaitingApproval(
+      who,
+      outcome.blocked.action,
+      outcome.blocked.errorKind === "approval-unattended"
+        ? { kind: "unattended" }
+        : { kind: "timeout", minutes: minutesOf(settings.approvalTimeoutMs) }
+    );
+  }
+  switch (outcome.status) {
+    case "completed":
+      return texts.completed(facts) + suffix;
+    case "turn-limit":
+      return texts.limitHit(facts, "轮数") + suffix;
+    case "wall-clock-limit":
+      return texts.limitHit(facts, "时间") + suffix;
+    case "stalled":
+      return texts.stalled(who, minutesOf(settings.stallMs));
+    case "cancelled":
+    case "aborted":
+      return budgetExhausted ? SPAWN_WORKER_TEXTS.budgetExhausted : texts.cancelled(who);
+    case "token-limit":
+      return texts.failed(who, "撞上 token 上限");
+    default:
+      return texts.failed(who, outcome.error ?? "运行以未知终态结束");
   }
 }
 
@@ -626,13 +711,15 @@ export function createSpawnWorkerTool(
       }
       const status = host.orchestrator.status().find((worker) => worker.sessionId === id);
       const name = status?.name ?? id;
+      const who = { name, role: params.role, ...(label !== undefined ? { label } : {}) };
       return reply(
-        SPAWN_WORKER_TEXTS.spawned({
-          name,
-          role: params.role,
-          branch: status?.branch ?? worktreeBranchFor(name),
-          ...(label !== undefined ? { label } : {}),
-        }),
+        // 决策 377：只读的 explorer 不建分支
+        status?.workspace.kind === "shared"
+          ? SPAWN_WORKER_TEXTS.readOnly.spawned(who)
+          : SPAWN_WORKER_TEXTS.spawned({
+              ...who,
+              branch: status?.branch ?? worktreeBranchFor(name),
+            }),
         { sessionIds: [id] }
       );
     },

@@ -1,6 +1,7 @@
 // worker 命令层（M5.5 S4，决策 040）：/spawn /cancel 的解析与收尾摘要。决策 301：/workers 的清单与原先的状态栏一行
 // 由终端界面的编排面板取代（同一排版在 tui/worker-panel.ts）。纯函数，输出纯字符串（tui 投影到消息区与状态栏）；编排动作本身在 orchestration。
 import type { WorkerOutcome, WorkerStartPoint, WorkerStatus } from "../orchestration/workers.ts";
+import { skippedFilesText } from "../state/snapshot-config.ts";
 
 export type {
   SpawnRequest,
@@ -133,8 +134,17 @@ export function renderWorkerOutcome(outcome: WorkerOutcome): string {
   lines.push(
     outcome.workspace.kind === "git-worktree"
       ? `  工作树 ${outcome.workspace.path}：改动未提交，审阅与合并由人用 git 完成（trace ${outcome.sessionId} 查看证据链）`
-      : `  无工作区：只读审阅不产生文件改动（trace ${outcome.sessionId} 查看证据链）`
+      : outcome.workspace.kind === "shared"
+        ? // 决策 377：只读的 explorer 不建工作树
+          `  不建工作树：只读了 ${outcome.workspace.path}，不产生文件改动（trace ${outcome.sessionId} 查看证据链）`
+        : `  无工作区：只读审阅不产生文件改动（trace ${outcome.sessionId} 查看证据链）`
   );
+  // 决策 381：worker 新建却因过大不会进交回的树的文件
+  if (result?.skippedFiles !== undefined && result.skippedFiles.length > 0) {
+    lines.push(
+      `  没收进交回的大文件（${result.skippedFiles.length}，/take 不会叠入）：${skippedFilesText(result.skippedFiles)}`
+    );
+  }
   // 决策 279：起点快照与只取其自身改动的取用方式（与 spawn_worker 返回的那一行同一口径，取用入口为 /take）
   if (outcome.start !== undefined && outcome.workspace.kind === "git-worktree") {
     lines.push(`  ${workerStartLine(outcome.start, `用 /take ${outcome.name}`)}`);

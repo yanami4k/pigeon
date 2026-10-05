@@ -199,6 +199,12 @@ export const CheckpointDataSchema = Type.Object({
   baseCommit: Type.Optional(GitObjectIdSchema),
   // 决策 365：拍摄时在跑的后台作业（作业号）；这时的快照可能含作业做到一半的改动
   backgroundJobs: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  // 决策 381：过大而没进快照的未跟踪文件（路径相对工作区与字节数）；之前的条目没有
+  untrackedSkipped: Type.Optional(
+    Type.Array(
+      Type.Object({ path: Type.String({ minLength: 1 }), bytes: Type.Integer({ minimum: 0 }) })
+    )
+  ),
 });
 export type CheckpointData = Static<typeof CheckpointDataSchema>;
 

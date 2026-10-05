@@ -9,6 +9,7 @@
 import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import { type SkippedFile, skippedFilesText } from "../state/snapshot-config.ts";
 import { GIT_HARDENING_CONFIG, hardenedGitArgs } from "../tools/git-hardening.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 
@@ -229,6 +230,8 @@ const OS_NAMES: Readonly<Partial<Record<NodeJS.Platform, string>>> = {
 export interface StatusFacts {
   sandbox?: string;
   network?: string;
+  // 决策 381：开工快照因过大没带进来的未跟踪文件（worker 与沙箱开工时）
+  skipped?: readonly SkippedFile[];
 }
 
 export function environmentText(input: {
@@ -247,6 +250,11 @@ export function environmentText(input: {
     `沙箱：${input.facts?.sandbox ?? "不在沙箱里（命令直接在本机执行）"}`,
     languageLine(input.entries),
     ...(input.facts?.network !== undefined ? [`网络：${input.facts.network}`] : []),
+    ...(input.facts?.skipped !== undefined && input.facts.skipped.length > 0
+      ? [
+          `没带进来的文件：${skippedFilesText(input.facts.skipped)}（未跟踪且过大，开工快照没有收；这里没有它们）`,
+        ]
+      : []),
   ].join("\n");
 }
 

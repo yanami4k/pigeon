@@ -108,7 +108,7 @@ function setup(
 
 test("git-worktree 角色行为不变：照常建工作树，结果带分支与改动文件", async () => {
   const { orchestrator, spawned, settled, created } = setup();
-  const id = orchestrator.spawn({ role: "explorer", task: "看看 a.ts", name: "explorer-1" });
+  const id = orchestrator.spawn({ role: "implementer", task: "看看 a.ts", name: "explorer-1" });
   const outcome = await orchestrator.awaitResult(id);
 
   assert.equal(created.length, 1, "git-worktree 角色照常建工作区");

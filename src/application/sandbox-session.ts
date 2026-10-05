@@ -26,6 +26,7 @@ import {
   mcpConfigOf,
   type SettingsSnapshot,
   sandboxConfigOf,
+  untrackedLimitsOfSettings,
 } from "../state/settings.ts";
 import type { SessionJobs } from "../tools/background-jobs.ts";
 import { handbackJobsNotice } from "./background-jobs.ts";
@@ -83,6 +84,8 @@ export async function startSandbox(input: StartSandboxInput): Promise<Sandbox | 
     sandboxConfig: sandboxConfigOf(settings),
     // 决策 333：资源上限取自设置的 sandbox 一节（缺项取缺省）
     limits: sandboxLimitSettingsOf(sandboxConfigOf(settings)),
+    // 决策 381：开工快照里未跟踪文件的上限取自设置的 snapshot 一节
+    untrackedLimits: untrackedLimitsOfSettings(settings),
     ...(input.resume === true ? { resume: true } : {}),
     // 决策 278：--sandbox-from-head 只从最新提交开工
     ...(launch.fromHead === true ? { fromHead: true } : {}),
@@ -102,10 +105,17 @@ export function mcpUnavailableNotice(servers: readonly string[]): string {
 }
 
 // 决策 354：沙箱会话写进开工状态块环境一节的确知事实——沙箱档位；断网档时网络确知不可用（联网档不算确知能用）
-export function sandboxStatusFacts(sandbox: Pick<Sandbox, "network">): StatusFacts {
+// 决策 381：开工快照没带进来的文件一并写进去
+export function sandboxStatusFacts(
+  sandbox: Pick<Sandbox, "network" | "startSkipped">
+): StatusFacts {
+  const skipped =
+    sandbox.startSkipped !== undefined && sandbox.startSkipped.length > 0
+      ? { skipped: sandbox.startSkipped }
+      : {};
   return sandbox.network === "on"
-    ? { sandbox: "容器沙箱（联网档）" }
-    : { sandbox: "容器沙箱（断网档）", network: "不可用（沙箱断网）" };
+    ? { sandbox: "容器沙箱（联网档）", ...skipped }
+    : { sandbox: "容器沙箱（断网档）", network: "不可用（沙箱断网）", ...skipped };
 }
 
 export function sandboxReadyNotice(sandbox: Sandbox): string {

@@ -4,13 +4,20 @@
 // 缓存）→ add -A → 程序状态 .pigeon/state 与个人设置 .pigeon/settings.local.json 还原到 HEAD 的样子（决策 325），仓库没跟踪的 .pigeon/.gitignore 撤出 → write-tree → commit-tree → update-ref；用户的工作目录、
 // 暂存区、当前分支与 HEAD 一律不碰。工作目录与 HEAD 没有差别时直接用 HEAD，不另建提交、不挂引用。
 // 快照引用的清理由调用方在相应生命周期收尾时做（worker 分支删除、沙箱会话收尾）。git 经参数数组直接调用，不经 shell。
+// 决策 381：未跟踪且未被忽略的文件按 snapshot 一节的上限挑出过大的，不暂存、不进树，跳过清单随结果交回（已跟踪的照常收）。
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PIGEON_GITIGNORE_REL, PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import { isProgramOwnedPath, PIGEON_GITIGNORE_REL, PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import {
+  DEFAULT_UNTRACKED_LIMITS,
+  type SkippedFile,
+  type UntrackedLimits,
+} from "../state/snapshot-config.ts";
 import { hardenedGitArgs } from "../tools/git-hardening.ts";
+import { addPathspecFile, oversizedUntracked, pathspecFileArgs } from "../tools/untracked-files.ts";
 
 export class WorkdirSnapshotError extends Error {}
 
@@ -27,6 +34,8 @@ export interface WorkdirSnapshot {
   files: string[];
   // 快照提交挂的引用；没有快照时缺省
   ref?: string;
+  // 决策 381：过大而没进快照的未跟踪文件（路径相对仓库根）
+  skipped: SkippedFile[];
 }
 
 // 快照提交的作者身份固定，不依赖用户的 git 配置
@@ -81,9 +90,13 @@ export function repoToplevel(repoRoot: string): string {
 
 // 工作目录当前的文件树（树对象号）：临时索引上 add -A，再把治理目录 .pigeon 还原到 HEAD 的样子（会话文件在变不算改动；
 // 不能用排除路径写法——.pigeon 被 .gitignore 忽略时 git add 会因路径命中忽略项报错），然后 write-tree。
-// 被 .gitignore 忽略的文件由 add -A 自然排除
-export function workdirTree(top: string): string {
+// 被 .gitignore 忽略的文件由 add -A 自然排除；过大的未跟踪文件（381）经路径规格排除，跳过清单一并交回
+export function workdirTree(
+  top: string,
+  limits: UntrackedLimits = DEFAULT_UNTRACKED_LIMITS
+): { tree: string; skipped: SkippedFile[] } {
   const indexFile = join(tmpdir(), `pigeon-workdir-${randomBytes(8).toString("hex")}`);
+  let specFile: string | undefined;
   try {
     const realIndex = git(top, [
       "rev-parse",
@@ -103,18 +116,38 @@ export function workdirTree(top: string): string {
     // 合并时与主工作目录里同名的未跟踪文件相撞；仓库跟踪着的是项目内容，照常带
     const gitignoreTracked =
       git(top, ["ls-files", "--cached", "--", PIGEON_GITIGNORE_REL], env).trim() !== "";
-    git(top, ["add", "-A", "--", "."], env);
+    // 未跟踪与否按用户的索引判定（不带临时索引）；程序状态本就撤出，不计入
+    let skipped: SkippedFile[];
+    try {
+      skipped = oversizedUntracked(top, limits, { drop: isProgramOwnedPath });
+    } catch (error) {
+      throw new WorkdirSnapshotError(
+        `列出未跟踪文件失败：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    specFile = skipped.length > 0 ? addPathspecFile(skipped) : undefined;
+    git(
+      top,
+      ["add", "-A", ...(specFile !== undefined ? pathspecFileArgs(specFile) : ["--", "."])],
+      env
+    );
     git(top, ["reset", "-q", "--", ...PROGRAM_OWNED_PATHS], env);
     if (!gitignoreTracked) {
       git(top, ["rm", "-q", "--cached", "--ignore-unmatch", "--", PIGEON_GITIGNORE_REL], env);
     }
-    return git(top, ["write-tree"], env).trim();
+    return { tree: git(top, ["write-tree"], env).trim(), skipped };
   } finally {
     rmSync(indexFile, { force: true });
+    if (specFile !== undefined) rmSync(specFile, { force: true });
   }
 }
 
-export function snapshotWorkdir(input: { repoRoot: string; ref: string }): WorkdirSnapshot {
+export function snapshotWorkdir(input: {
+  repoRoot: string;
+  ref: string;
+  // 决策 381：未跟踪文件的上限（缺省取产品缺省）
+  limits?: UntrackedLimits;
+}): WorkdirSnapshot {
   if (!input.ref.startsWith(SNAPSHOT_REF_ROOT) || input.ref.length <= SNAPSHOT_REF_ROOT.length) {
     throw new WorkdirSnapshotError(`快照引用须在 ${SNAPSHOT_REF_ROOT} 下：${input.ref}`);
   }
@@ -128,12 +161,12 @@ export function snapshotWorkdir(input: { repoRoot: string; ref: string }): Workd
   if (head === "") {
     throw new WorkdirSnapshotError("仓库还没有提交，不能生成工作目录快照：请先提交一次");
   }
-  const tree = workdirTree(top);
+  const { tree, skipped } = workdirTree(top, input.limits);
   const headTree = git(top, ["rev-parse", `${head}^{tree}`]).trim();
   if (tree === headTree) {
     // 没有未提交的改动：起点就是 HEAD。同名引用若是上次进程异常退出留下的，已无用，顺手删掉
     deleteSnapshotRef(top, input.ref);
-    return { commit: head, head, snapshot: false, files: [] };
+    return { commit: head, head, snapshot: false, files: [], skipped };
   }
   const files = git(top, ["diff-tree", "-r", "-z", "--name-only", "--no-renames", headTree, tree])
     .split("\0")
@@ -145,7 +178,7 @@ export function snapshotWorkdir(input: { repoRoot: string; ref: string }): Workd
     IDENTITY
   ).trim();
   git(top, ["update-ref", input.ref, commit]);
-  return { commit, head, snapshot: true, files, ref: input.ref };
+  return { commit, head, snapshot: true, files, ref: input.ref, skipped };
 }
 
 // 删除快照引用；引用本就不存在也算删掉

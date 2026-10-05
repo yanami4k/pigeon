@@ -390,6 +390,62 @@ test("起点拍不成（如不是 git 工作区）：不派——没有派出记
   assert.deepEqual(orchestrator.status(), []);
 });
 
+// 决策 377：只读的 explorer 不拍快照、不建工作树，工作区为派出方的工作区；会改文件的照旧
+test("explorer 不拍快照、不建工作树而直接读派出方的工作区；implementer 与另给写工具的 explorer 照拍照建", async () => {
+  const { orchestrator, journal, spawned, requests } = setup({
+    startPoint: ({ name }) => {
+      journal.push(`snapshot ${name}`);
+      return { commit: "b".repeat(40), snapshot: false, files: [] };
+    },
+  });
+  const explorer = orchestrator.spawn({ role: "explorer", task: "查", name: "look" });
+  const outcome = await orchestrator.awaitResult(explorer);
+  assert.deepEqual(journal.slice(0, 2), ["spawned look", "runtime look"], "不拍快照、不建工作区");
+  assert.deepEqual(spawned[0]?.workspace, { kind: "shared", path: "/virtual" });
+  assert.deepEqual(requests[0]?.workspace, { kind: "shared", path: "/virtual" });
+  assert.equal(outcome.result?.branch, undefined);
+  assert.equal(outcome.result?.changedFiles, undefined);
+  journal.length = 0;
+  await orchestrator.awaitResult(
+    orchestrator.spawn({ role: "implementer", task: "改", name: "fix" })
+  );
+  assert.deepEqual(journal.slice(0, 3), ["snapshot fix", "spawned fix", "create pigeon/fix"]);
+  journal.length = 0;
+  const writer = orchestrator.spawn({
+    role: "explorer",
+    task: "查并改",
+    name: "edit",
+    tools: ["read_file", "edit_file"],
+  });
+  await orchestrator.awaitResult(writer);
+  assert.deepEqual(journal.slice(0, 3), ["snapshot edit", "spawned edit", "create pigeon/edit"]);
+});
+
+// 决策 381：起点没带进来的文件交给运行面（写进开工状态块）；交回时 worker 新建却过大的文件进结构化结果
+test("起点跳过的大文件交给 worker 的运行面；交回时没收进来的文件记进结果", async () => {
+  const skipped = [{ path: "data.bin", bytes: 20_000_000 }];
+  const created = [{ path: "dump.bin", bytes: 30_000_000 }];
+  const { orchestrator, requests, settled } = setup({
+    startPoint: () => ({ commit: "c".repeat(40), snapshot: false, files: [], skipped }),
+    workspaces: {
+      plan: ({ name }): WorkerWorkspace => ({
+        kind: "git-worktree",
+        path: `/virtual/${name}`,
+        branch: `pigeon/${name}`,
+      }),
+      create: () => {},
+      changedFiles: () => [],
+      skippedFiles: () => created,
+    },
+  });
+  const outcome = await orchestrator.awaitResult(
+    orchestrator.spawn({ role: "implementer", task: "改", name: "fix" })
+  );
+  assert.deepEqual(requests[0]?.skippedAtStart, skipped);
+  assert.deepEqual(outcome.result?.skippedFiles, created);
+  assert.deepEqual(settled[0]?.result?.skippedFiles, created);
+});
+
 test("没有起点提供者：与从前一样（工作区形状不带 baseCommit，结果不带起点）", async () => {
   const { orchestrator, spawned } = setup();
   const id = orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" });

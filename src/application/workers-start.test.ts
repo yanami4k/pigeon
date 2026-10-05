@@ -99,6 +99,28 @@ test("spawn_worker 的返回：完成、撞上限、取消、失败各情形都�
   );
 });
 
+// 决策 377：只读的 explorer 只交回摘要；决策 381：worker 新建却过大的文件另起一行列出
+test("explorer 的交回不提分支、改动与起点；没收进交回的大文件列在 spawn_worker 与 /spawn 的交回里", () => {
+  const explorer = outcome({
+    role: "explorer",
+    workspace: { kind: "shared", path: "/repo" },
+    result: { summary: "查清了", summaryTruncated: false },
+  });
+  delete explorer.start;
+  assert.equal(workerOutcomeText(explorer), "worker fix-a（explorer）已完成。摘要：查清了");
+  const withSkipped = outcome({
+    result: {
+      branch: "pigeon/fix-a",
+      changedFiles: [],
+      summary: "改好了",
+      summaryTruncated: false,
+      skippedFiles: [{ path: "dump.bin", bytes: 30 * 1024 * 1024 }],
+    },
+  });
+  assert.ok(workerOutcomeText(withSkipped).includes("dump.bin（30.0 MiB）"));
+  assert.ok(renderWorkerOutcome(withSkipped).includes("dump.bin（30.0 MiB）"));
+});
+
 test("/spawn 的收尾摘要：同样加起点一行，取用方式写 /take <名>；没有起点不加", () => {
   const text = renderWorkerOutcome(outcome());
   assert.ok(text.endsWith(`\n  ${workerStartLine(SNAPSHOT_START, "用 /take fix-a")}`), text);

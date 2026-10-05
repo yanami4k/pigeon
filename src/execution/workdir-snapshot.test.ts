@@ -206,7 +206,13 @@ test("没有未提交改动：起点就是 HEAD，不建提交、不留引用（
     git(dir, "update-ref", REF, stale);
     const before = userState(dir);
     const snap = snapshotWorkdir({ repoRoot: dir, ref: REF });
-    assert.deepEqual(snap, { commit: before.head, head: before.head, snapshot: false, files: [] });
+    assert.deepEqual(snap, {
+      commit: before.head,
+      head: before.head,
+      snapshot: false,
+      files: [],
+      skipped: [],
+    });
     assert.equal(readSnapshotRef(dir, REF), undefined, "残留引用已删");
     assert.deepEqual(userState(dir), before);
   } finally {
@@ -255,5 +261,34 @@ test("不是 git 工作区、仓库没有提交、引用不在 refs/pigeon/ 下�
   } finally {
     rmSync(plain, { recursive: true, force: true });
     rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+// 决策 381：未跟踪的大文件按上限跳过并列出；已跟踪的大文件照收；文件名里的通配字符按字面排除
+test("未跟踪文件超过单个上限的跳过、合计超限时从大到小跳过；已跟踪的大文件照进快照", () => {
+  const { dir, cleanup } = repo();
+  try {
+    writeFileSync(join(dir, "b.txt"), "x".repeat(5000));
+    writeFileSync(join(dir, "huge[1].bin"), "h".repeat(3000));
+    writeFileSync(join(dir, "mid.bin"), "m".repeat(800));
+    writeFileSync(join(dir, "small.txt"), "s".repeat(300));
+    writeFileSync(join(dir, "tiny.txt"), "t");
+    const before = userState(dir);
+    const snap = snapshotWorkdir({
+      repoRoot: dir,
+      ref: REF,
+      limits: { fileMaxBytes: 1000, totalMaxBytes: 500 },
+    });
+    assert.deepEqual(snap.skipped, [
+      { path: "huge[1].bin", bytes: 3000 },
+      { path: "mid.bin", bytes: 800 },
+    ]);
+    const tree = git(dir, "ls-tree", "-r", "--name-only", snap.commit).split("\n");
+    assert.ok(tree.includes("small.txt") && tree.includes("tiny.txt"), tree.join(","));
+    assert.ok(!tree.includes("huge[1].bin") && !tree.includes("mid.bin"), tree.join(","));
+    assert.equal(git(dir, "show", `${snap.commit}:b.txt`).length, 5000, "已跟踪的大文件照收");
+    assert.deepEqual(userState(dir), before);
+  } finally {
+    cleanup();
   }
 });

@@ -17,7 +17,7 @@ export const WorkerRoleSchema = Type.Union([
 ]);
 export type WorkerRole = Static<typeof WorkerRoleSchema>;
 
-// 隔离工作区：git 工作树（M5.5；M8 决策 082 加可选起点提交）与"无工作区"（M6，决策 064）。
+// worker 的工作区：git 工作树（M5.5；M8 决策 082 加可选起点提交）、"无工作区"（M6，决策 064）与共用派出方的工作区（决策 377）。
 // 决策 137 之后不再产生无工作区（只读角色已退役），该成员保留在联合里使形状不变
 export const GitWorktreeWorkspaceSchema = Type.Object({
   kind: Type.Literal("git-worktree"),
@@ -26,9 +26,32 @@ export const GitWorktreeWorkspaceSchema = Type.Object({
   branch: Type.String({ minLength: 1 }),
 });
 export const NoWorkspaceSchema = Type.Object({ kind: Type.Literal("none") });
-export const WorkerWorkspaceSchema = Type.Union([GitWorktreeWorkspaceSchema, NoWorkspaceSchema]);
+// 决策 377：只读的 explorer 不建工作树，直接读派出方的工作区（主工作目录或派出方 worker 的工作树）；path 为该目录
+export const SharedWorkspaceSchema = Type.Object({
+  kind: Type.Literal("shared"),
+  path: Type.String({ minLength: 1 }),
+});
+export const WorkerWorkspaceSchema = Type.Union([
+  GitWorktreeWorkspaceSchema,
+  NoWorkspaceSchema,
+  SharedWorkspaceSchema,
+]);
 export type WorkerWorkspace = Static<typeof WorkerWorkspaceSchema>;
 export type GitWorktreeWorkspace = Static<typeof GitWorktreeWorkspaceSchema>;
+
+// 证据链显示（trace、replay）里 worker 工作区的一段
+export function workerWorkspaceLabel(workspace: WorkerWorkspace): string {
+  return workspace.kind === "git-worktree"
+    ? `分支 ${workspace.branch}`
+    : workspace.kind === "shared"
+      ? "只读派出方工作区（不建工作树）"
+      : "无工作区";
+}
+
+// worker 读写所在的目录：工作树或与派出方共用的工作区；无工作区（只剩旧会话）没有
+export function workerWorkspacePath(workspace: WorkerWorkspace): string | undefined {
+  return workspace.kind === "none" ? undefined : workspace.path;
+}
 
 // 类型谓词：只有 git 工作树形状才有路径与分支（无工作区的 worker 两者皆无）
 export function isGitWorktreeWorkspace(
@@ -104,6 +127,12 @@ export const ChildResultSchema = Type.Object({
   summary: Type.String(),
   summaryTruncated: Type.Boolean(),
   structured: Type.Optional(Type.Unknown()),
+  // 决策 381：worker 新建却因过大没写进交回的树的未跟踪文件（路径相对工作树）；没有即缺省
+  skippedFiles: Type.Optional(
+    Type.Array(
+      Type.Object({ path: Type.String({ minLength: 1 }), bytes: Type.Integer({ minimum: 0 }) })
+    )
+  ),
 });
 export type ChildResult = Static<typeof ChildResultSchema>;
 

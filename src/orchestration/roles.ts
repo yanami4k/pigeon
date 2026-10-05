@@ -95,6 +95,20 @@ export const MAIN_ONLY_TOOLS: readonly string[] = [
   ...NESTED_ORCHESTRATION_TOOLS,
 ];
 
+// 决策 377：explorer 的工具全在其预设（加层数给的编排工具）以内时只读，不拍快照、不建工作树，直接读派出方的工作区；
+// 另给了写、跑命令或 MCP 等工具的 explorer 不再只读，照旧建工作树
+export function readsInPlace(
+  role: ActiveWorkerRole,
+  policy: Pick<DelegatedPolicy, "allow">
+): boolean {
+  return (
+    role === "explorer" &&
+    policy.allow.every(
+      (tool) => ROLE_TOOLS.explorer.includes(tool) || NESTED_ORCHESTRATION_TOOLS.includes(tool)
+    )
+  );
+}
+
 // 带作用范围的策略：派出方是 worker 时它自己的范围也在场（主会话没有）
 export type ScopedPolicy = ToolPolicyLike & { readonly scopes?: readonly ToolScope[] };
 

@@ -51,7 +51,13 @@ import type {
   WorkerLimits,
   WorkerRole,
 } from "../state/session-payloads.ts";
-import { mcpConfigOf, type SettingsSnapshot } from "../state/settings.ts";
+import { workerWorkspacePath } from "../state/session-payloads.ts";
+import {
+  mcpConfigOf,
+  type SettingsSnapshot,
+  untrackedLimitsOfSettings,
+} from "../state/settings.ts";
+import type { UntrackedLimits } from "../state/snapshot-config.ts";
 import { structuredResultOf } from "../state/structured-result.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
@@ -167,7 +173,12 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
         : {}),
     }),
     // 决策 279：worker 从主工作目录连同未提交改动拍成的快照开工
-    startPoint: workerStartPoint(deps.governanceRoot),
+    startPoint: workerStartPoint(
+      deps.governanceRoot,
+      untrackedLimitsOfSettings(deps.bundle.settings)
+    ),
+    // 决策 381：worker 交回时也按同一组上限列出它新建却没收进来的文件
+    untrackedLimits: untrackedLimitsOfSettings(deps.bundle.settings),
     ...(settings !== undefined
       ? {
           maxConcurrent: settings.maxConcurrent,
@@ -189,15 +200,24 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
 
 // 决策 279：worker 的起点提供者——拍主工作目录的快照；快照引用只护住"拍好到建好工作树"这一段，工作树建好后由编排器调 release
 // 删掉（worker 分支指向起点提交，提交不会被回收；删分支时的连带删除仍留作兜底）
-export function workerStartPoint(governanceRoot: string): WorkerStartPointProvider {
+// 决策 381：limits 为未跟踪文件的上限，过大而没带进来的文件随起点交回（开工时告诉 worker）
+export function workerStartPoint(
+  governanceRoot: string,
+  limits?: UntrackedLimits
+): WorkerStartPointProvider {
   return ({ name, from }) => {
     const ref = workerStartRefFor(name);
     // 决策 299：派出方是 worker 时拍它的工作树（与主仓库同一个对象库，引用共用）
-    const snap = snapshotWorkdir({ repoRoot: from ?? governanceRoot, ref });
+    const snap = snapshotWorkdir({
+      repoRoot: from ?? governanceRoot,
+      ref,
+      ...(limits !== undefined ? { limits } : {}),
+    });
     return {
       commit: snap.commit,
       snapshot: snap.snapshot,
       files: snap.files,
+      ...(snap.skipped.length > 0 ? { skipped: snap.skipped } : {}),
       release: () => deleteSnapshotRef(governanceRoot, ref),
     };
   };
@@ -338,9 +358,10 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
     const thinkingLevel =
       (deps.roleThinkingLevels ?? ROLE_THINKING_LEVELS)[request.role] ?? deps.thinkingLevel;
     const startMcp = deps.startMcp;
-    // 无工作区形状只属于已退役的只读角色（决策 137）；万一出现即以治理根为工作区根
-    const workspaceRoot =
-      request.workspace.kind === "git-worktree" ? request.workspace.path : request.governanceRoot;
+    // 决策 377：只读的 explorer 以派出方的工作区为工作区根（读的是正在变的内容）；无工作区形状只属于已退役的只读角色
+    // （决策 137），万一出现即以治理根为工作区根
+    const shared = request.workspace.kind === "shared";
+    const workspaceRoot = workerWorkspacePath(request.workspace) ?? request.governanceRoot;
     // M6（决策 064 子裁决 ③）：角色的模型接入覆盖——缺省继承主会话
     const override = (deps.roleModelOverrides ?? ROLE_MODEL_OVERRIDES)[request.role];
     const roleStreamFn = deps.roleStreamFns?.[request.role];
@@ -399,8 +420,12 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       ...(deps.taskDirective !== undefined ? { taskDirective: deps.taskDirective } : {}),
       ...(deps.learnedMemory !== undefined ? { learnedMemory: deps.learnedMemory } : {}),
       ...(request.limits !== undefined ? { budget: budgetOfLimits(request.limits) } : {}),
-      // 决策 302：worker 改自己工作树内的文件默认放行
-      ownWorkspaceWrites: true,
+      // 决策 302：worker 改自己工作树内的文件默认放行；与派出方共用工作区的 explorer 不是自己的工作树，不放行
+      ownWorkspaceWrites: !shared,
+      // 决策 381：起点快照没带进来的文件写进开工状态块
+      ...(request.skippedAtStart !== undefined && request.skippedAtStart.length > 0
+        ? { statusFacts: { skipped: request.skippedAtStart } }
+        : {}),
       // 决策 363：续做沿用会话记录里的系统提示，状态变化通道接着记录里最后发出的一份
       ...(restored !== undefined ? { initialMessages: restored.messages } : {}),
       ...(restored?.systemPrompt !== undefined ? { systemPrompt: restored.systemPrompt } : {}),

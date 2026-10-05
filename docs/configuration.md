@@ -34,6 +34,7 @@
 | `repetitionGuard` | 流式重复检测的开关、模式、档位与各项参数（同上） | 新节 |
 | `tools` | 各工具的上限，按工具分子键：`grep.maxResults`（缺省 200 条）、`glob.maxResults`（缺省 100 个）、`readFile`（单次字节与单行字符上限）、`runCommand`（输出的头尾保留与落盘总量、单次超时、后台作业的上限与收尾时限），见下文"工具的上限" | 新节 |
 | `contextPrune` | 缓存感知的上下文裁剪的开关、保护轮数、N、最小批量与最小大小、价格比与写缓存倍率与保留时长的覆盖、两种免费时机与过时读取清理的开关（见下文"上下文裁剪"） | 新节 |
+| `snapshot` | 工作目录快照里未跟踪文件的单个与合计上限（见下文"快照不收的大文件"） | 新节 |
 
 各节字段与原文件相同，去掉了各文件自己的 `version`。项目根的 `.mcp.json` 留在原处，格式不变。`.pigeon/verify.json` 已随验证门退役（决策 322），`.pigeon/memory-review.json` 属已删除功能的遗留（决策 331）：启动时按旧配置报错，迁移命令把它们挪进备份目录（verify.json 另打印改写为收尾钩子的示例）。
 
@@ -270,6 +271,25 @@ run_command 的命令串按执行端能执行的长度另判：Linux 与容器�
 { "contextPrune": { "protectTurns": 8, "priceRatio": 10 } }
 ```
 
+## 快照不收的大文件
+
+Pigeon 拍的工作目录快照——worker 与沙箱的起点、检查点与退出快照、编排脚本的主目录快照，以及取用 worker 改动时给 worker 工作树写的树——收已跟踪文件的当前内容与未跟踪且未被忽略的文件（决策 381）。其中未跟踪的文件有上限：单个超过 `untrackedFileMaxBytes` 的不收；其余合计超过 `untrackedTotalMaxBytes` 时从大到小继续不收，直到不超过上限。已跟踪的文件不受限，照常收。只算普通文件，符号链接与嵌套仓库不算；未跟踪与否按你的暂存区判定，找文件用 Pigeon 加固过的 git（不跑过滤、钩子与 fsmonitor）。
+
+| 键 | 含义 | 缺省 |
+| --- | --- | --- |
+| `snapshot.untrackedFileMaxBytes` | 单个未跟踪文件超过这么多字节即不收 | 10485760（10 MiB） |
+| `snapshot.untrackedTotalMaxBytes` | 收进快照的未跟踪文件合计至多这么多字节 | 209715200（200 MiB） |
+
+没收的文件列出路径与大小：
+
+- worker 与沙箱开工：写进开工状态块的环境一节，模型知道工作区里少了哪些文件；沙箱开工时另在终端列出。
+- worker 交回：它新建却因超限没收的文件列在交回结果里（`spawn_worker` 的通知与 `/spawn` 的收尾摘要）；`take_worker` 与 `/take` 不叠入这些文件，结果里同样列出，文件留在 worker 的工作树里。
+- 检查点与退出快照：记在代码快照条目里。快照只用于分叉（在独立工作树里续跑）与复盘读取，不回写主工作目录，没收的文件在主工作目录里原样不动；从检查点分叉出的工作树里没有它们。
+
+```json
+{ "snapshot": { "untrackedFileMaxBytes": 52428800 } }
+```
+
 ## key 走环境变量
 
 设置文件里没有任何 key 字段。智谱搜索的 key 从环境变量 `ZAI_API_KEY` 读，Tavily 的从 `TAVILY_API_KEY` 读，DeepSeek 用模型接入同一个环境变量。在 `web` 一节里写了 `apiKey` 即报错，并给出应设的环境变量名。
@@ -289,6 +309,8 @@ Pigeon 第一次在项目里建 `.pigeon/state/` 或 `settings.local.json` 时�
 ## worker 与续接
 
 派 worker 时可以给工具清单（`spawn_worker` 的 `tools`），只能取主 agent 当前有的工具，写记忆、取用 worker 改动、编排脚本与任务清单不能交给 worker；不给即按角色的预设（explorer、implementer、tester）。还可以给某件工具附加作用范围（`scopes`），只能更窄：`read_file`、`edit_file` 限在相对 worker 工作树根的路径之内——范围路径须是不经符号链接的真实路径（自身或上级是符号链接即拒绝派出），调用的目标解析符号链接后须落在其内；`run_command` 只能运行以给定前缀开头、不经 shell 的单条命令，Windows 上程序只按 PATH 解析、不从工作树里找。越出范围的调用一律拒绝，放权、`--yolo` 与钩子放行都不豁免。没给的工具不注册，worker 的系统提示也只介绍它有的工具。worker 跑命令与主会话同一套审批规则；设置里为该角色登记的命令清单作额外限制。
+
+explorer 不拍快照、不建工作树（决策 377）：工具全在 explorer 预设之内（读文件、搜索、检索历史会话、联网的两件，层数放开时另加派出与等待等编排工具）时，它直接只读派出方的工作区——主 agent 派的读主工作目录，worker 派的读该 worker 的工作树。读到的是正在变的内容，可能读到正在修改的文件；它不交分支、只交摘要，`take_worker` 与 `/take` 对它给出说明。作用范围、禁读名单与工作区外读取的审批照常生效，范围路径相对派出方的工作区。另给了写、跑命令或 MCP 工具的 explorer，以及编排脚本派出的 explorer，照旧从快照建工作树。沙箱会话不派 worker。
 
 worker 的派出与收尾成对记在派出它的会话里（缺收尾即进程中途退出）；工作树在 `.pigeon/state/worktrees/` 下，不自动清理。终端界面续接主会话（`pigeon --continue`、`pigeon --resume <id>`、`/resume`，以及 `/reload` 在同一会话上重建运行面）时，从会话记录找回之前运行的 worker：
 

@@ -3,7 +3,7 @@
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
 //   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）、模型信息的覆盖值 modelInfo（决策 362）、撞上限续跑
 //   truncationContinuation、流式重复检测 repetitionGuard（决策 367）、工具的上限类设置 tools（决策 356、357、368）与
-//   上下文裁剪 contextPrune（决策 361）；另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
+//   上下文裁剪 contextPrune（决策 361）与快照的大小上限 snapshot（决策 381）；另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
 //   hooks 各层的条目并列生效（同一事件同一 matcher 下命令完全相同的只留一份）。
@@ -57,6 +57,12 @@ import {
 } from "./sandbox-config.ts";
 import { WorkerRoleSchema } from "./session-payloads.ts";
 import {
+  type SnapshotSection,
+  SnapshotSectionSchema,
+  type UntrackedLimits,
+  untrackedLimitsOf,
+} from "./snapshot-config.ts";
+import {
   type BackgroundJobLimits,
   backgroundJobLimits,
   type ReadFileLimits,
@@ -97,6 +103,7 @@ export const SETTINGS_SECTIONS = {
   repetitionGuard: RepetitionGuardSectionSchema,
   tools: ToolsSectionSchema,
   contextPrune: ContextPruneSectionSchema,
+  snapshot: SnapshotSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -123,6 +130,7 @@ export const SettingsFileSchema = Type.Object(
     repetitionGuard: Type.Optional(RepetitionGuardSectionSchema),
     tools: Type.Optional(ToolsSectionSchema),
     contextPrune: Type.Optional(ContextPruneSectionSchema),
+    snapshot: Type.Optional(SnapshotSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -279,6 +287,7 @@ export interface MergedSettings {
   repetitionGuard?: RepetitionGuardSection;
   tools?: Static<typeof ToolsSectionSchema>;
   contextPrune?: ContextPruneSection;
+  snapshot?: SnapshotSection;
   // 决策 355：读档禁读名单的追加项，三层并集（permissions.readDeny；只能往内置名单上加）
   readDeny?: string[];
   trustedDirectories: string[];
@@ -470,6 +479,11 @@ export function modelInfoSectionOf(snapshot: SettingsSnapshot): ModelInfoSection
 // 决策 361：上下文裁剪一节（缺省值与按模型信息算的价格比由 prune-config.ts 补）
 export function contextPruneSectionOf(snapshot: SettingsSnapshot): ContextPruneSection | undefined {
   return snapshot.merged.contextPrune;
+}
+
+// 决策 381：快照里未跟踪文件的单个与合计上限（snapshot 一节，不给的取缺省）
+export function untrackedLimitsOfSettings(snapshot: SettingsSnapshot): UntrackedLimits {
+  return untrackedLimitsOf(snapshot.merged.snapshot);
 }
 
 // 决策 357：read_file 的单次字节与单行字符上限（tools 一节，不给的取缺省）

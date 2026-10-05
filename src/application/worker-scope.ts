@@ -82,5 +82,12 @@ function scopeOf(
   if (workspace.kind === "none") {
     return { workspaceRoot: governanceRoot, ...delegated };
   }
+  // 决策 377：只读的 explorer 回到它读的派出方工作区（主工作目录或派出方 worker 的工作树）
+  if (workspace.kind === "shared") {
+    if (!existsSync(workspace.path)) {
+      throw new Error(`explorer 读的工作区已不存在：${workspace.path}`);
+    }
+    return { workspaceRoot: workspace.path, ...delegated };
+  }
   return { workspaceRoot: existingWorktree(governanceRoot, "worker ", workspace), ...delegated };
 }

@@ -8,6 +8,7 @@
 // 任何快照故障不影响运行，进内部错误清单，同时向标准错误输出一条说明后果的告警（同一类故障只说一次），不静默。
 // 决策 286：告警出口可由调用方给出（终端界面运行期间落消息区）；不给即照旧写标准错误输出。
 // 非 git 工作区不挂（不打快照、不报错；在非 git 工作区发起分叉时由分叉入口明确报错）。
+// 决策 381：未跟踪文件的上限取运行面的设置快照（snapshot 一节）；过大而没进快照的文件记在代码快照条目里。
 import {
   type Checkpointer,
   createCheckpointer,
@@ -17,6 +18,7 @@ import type { PiRuntimeAdapter, ToolResultNotice } from "../pi-runtime/adapter.t
 import type { RunId } from "../state/ids.ts";
 import type { CheckpointMarkState } from "../state/session-entries.ts";
 import { TOOL_RESULT_MARK_KEY, type ToolResultMark } from "../state/session-judge.ts";
+import { type SettingsSnapshot, untrackedLimitsOfSettings } from "../state/settings.ts";
 import type { ToolRiskTier } from "../tools/registry.ts";
 import type { SessionHooks } from "./hooks.ts";
 import type { RuntimeBundle } from "./runtime.ts";
@@ -51,6 +53,8 @@ export interface CheckpointHost {
   jobs?: Pick<NonNullable<RuntimeBundle["jobs"]>, "running"> | undefined;
   // 会话级钩子：运行任何钩子之前先等快照；配置了失败后的钩子时编辑失败也拍
   hooks?: Pick<SessionHooks, "list" | "addGate">;
+  // 决策 381：设置快照（取未跟踪文件的上限；缺省取产品缺省）
+  settings?: SettingsSnapshot;
 }
 
 // 工具自己的证据确定没有改动（决策 350）：只有 edit_file 失败且确定没写——被审批或钩子拦下，或计划阶段的域错误
@@ -104,7 +108,13 @@ export function attachCheckpoints(options: {
   }
   const checkpointer =
     options.checkpointer ??
-    createCheckpointer({ workspaceRoot, sessionId: bundle.adapter.sessionId });
+    createCheckpointer({
+      workspaceRoot,
+      sessionId: bundle.adapter.sessionId,
+      ...(bundle.settings !== undefined
+        ? { limits: untrackedLimitsOfSettings(bundle.settings) }
+        : {}),
+    });
   const waitMs = options.waitMs ?? CHECKPOINT_WAIT_MS;
   const errors: unknown[] = [];
   const warn = dedupedWarner(options.warn);
@@ -245,6 +255,7 @@ export function attachCheckpoints(options: {
             toolCallId: mark.toolCallId,
             runSeq: mark.runSeq,
             ...(backgroundJobs.length > 0 ? { backgroundJobs } : {}),
+            ...(snapshot.skipped !== undefined ? { untrackedSkipped: snapshot.skipped } : {}),
           })
         );
       },

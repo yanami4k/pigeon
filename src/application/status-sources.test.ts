@@ -5,7 +5,30 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { GIT_STATUS_ARGS, gitFailure, gitText, localStatusProbe } from "./status-sources.ts";
+import { sandboxStatusFacts } from "./sandbox-session.ts";
+import {
+  environmentText,
+  GIT_STATUS_ARGS,
+  gitFailure,
+  gitText,
+  localStatusProbe,
+} from "./status-sources.ts";
+
+// 决策 381：开工快照没带进来的文件写进环境一节（沙箱经 sandboxStatusFacts，worker 经装配层给的确知事实）
+test("环境一节列出开工快照没带进来的文件与大小；没有即不写这一行", () => {
+  const base = { root: "/workspace", platform: "linux" as const, remote: true, entries: [] };
+  const facts = sandboxStatusFacts({
+    network: "on",
+    startSkipped: [{ path: "data/big.bin", bytes: 12 * 1024 * 1024 }],
+  });
+  assert.ok(
+    environmentText({ ...base, facts }).includes("data/big.bin（12.0 MiB）"),
+    environmentText({ ...base, facts })
+  );
+  assert.ok(
+    !environmentText({ ...base, facts: sandboxStatusFacts({ network: "on" }) }).includes("没带进来")
+  );
+});
 
 test("git 没有成功时按情形写原因：不是仓库、没装 git、超时、仓库属主不符、其余取报错第一行", () => {
   assert.equal(
