@@ -20,7 +20,7 @@
 // 身份：agents.pigeonDocker 记打包产物摘要、自报的版本（产品与 Node 运行时）与逐项设置（与现有各段同一规则：
 //   不进身份摘要，续跑时两边都记了才比对）。
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   dockerOnce,
@@ -106,7 +106,10 @@ export function pigeonDockerJobContainerArgs(input: {
   networkName: string;
 }): string[] {
   const governanceDir = projectPigeonDir(path.join(input.outDir, "streams", jobDirName(input.job)));
-  mkdirSync(governanceDir, { recursive: true });
+  // bind 挂载的来源：作业容器以镜像用户（非宿主用户）写它——放开写权限（0777）；
+  // 跑批器在宿主侧的会话清单、作废移出与续跑按这个布局工作（目录在才挂得上）
+  mkdirSync(governanceDir, { recursive: true, mode: 0o777 });
+  chmodSync(governanceDir, 0o777);
   return pigeonDockerContainerArgs({
     bundleDir: input.bundleDir,
     nodeRuntimeDir: input.nodeRuntimeDir,
@@ -231,7 +234,7 @@ const PREPARE_IO = [
 // 运行命令：提示从文件读（不经参数，避免长度与转义问题），结果与标准错误落运行目录；$1 工作区根、$2 治理根
 const RUN_PIGEON = [
   `cd -- "$1"`,
-  `${PIGEON_NODE_MOUNT}/bin/node ${PIGEON_BUNDLE_MOUNT}/pigeon.mjs run --yolo --no-web --json --thinking high \\`,
+  `umask 000 && ${PIGEON_NODE_MOUNT}/bin/node ${PIGEON_BUNDLE_MOUNT}/pigeon.mjs run --yolo --no-web --json --thinking high \\`,
   `  --root "$1" --governance-root "$2" \\`,
   `  --stream-fn ${PIGEON_BUNDLE_MOUNT}/deepseek-stream-fn.mjs \\`,
   `  < "${PIGEON_RUN_IO_DIR}/prompt.txt" > "${PIGEON_RUN_IO_DIR}/result.json" 2> "${PIGEON_RUN_IO_DIR}/stderr.txt"`,
