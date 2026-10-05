@@ -255,6 +255,7 @@ interface RunResultJson {
   usage?: { input?: unknown; output?: unknown; totalTokens?: unknown };
   failure?: { category?: unknown } | null;
   errorMessage?: unknown;
+  report?: unknown;
 }
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
@@ -360,6 +361,10 @@ export function pigeonDockerStepAgent(options: PigeonDockerStepAgentOptions): St
         !refused &&
         deterministic === undefined &&
         (raw.failure?.category === "infrastructure" || status === "failed");
+      const report =
+        typeof raw.report === "object" && raw.report !== null && !Array.isArray(raw.report)
+          ? (raw.report as Record<string, unknown>)
+          : undefined;
       return {
         status,
         turns: num(raw.turns),
@@ -370,6 +375,7 @@ export function pigeonDockerStepAgent(options: PigeonDockerStepAgentOptions): St
           totalTokens: num(raw.usage?.totalTokens),
         },
         wallMs,
+        ...(report !== undefined ? { report } : {}),
         ...(providerFailed
           ? { interrupted: `模型服务故障（终态 ${status}）：${errorMessage ?? ""}` }
           : {}),

@@ -257,12 +257,11 @@ test.skipIf(realDockerSkip() || nodeSkip)(
     try {
       assert.equal(rows.length, 2, JSON.stringify(rows.map((r) => [r.seq, r.status])));
       const jobDir = join(outDir, "streams", "tasks-pigeon-docker-1");
-      // 治理目录只剩重做的那一条会话
+      // 治理目录有重做成功的两题各一条会话；作废那次的不在其中
       const kept = readdirSync(sessionsDirOf(jobDir), { recursive: true }).filter((f) =>
         String(f).endsWith(".jsonl")
       );
-      assert.equal(kept.length, 1, JSON.stringify(kept));
-      // 作废那次的会话移到了 voided/（保留备查、检索不到）
+      assert.equal(kept.length, 2, JSON.stringify(kept));
       const voided = join(outDir, "voided", "tasks-pigeon-docker-1", "step-1-attempt-1");
       const moved = existsSync(voided)
         ? readdirSync(voided, { recursive: true }).filter((f) => String(f).endsWith(".jsonl"))

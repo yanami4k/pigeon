@@ -212,6 +212,7 @@ test(
         status: "completed",
         turns: 7,
         usage: { input: 5, output: 9, totalTokens: 14 },
+        report: { fake: true },
       })
     );
     const agent = pigeonDockerStepAgent({ bundleDir: dir, docker: fake.docker });
@@ -226,6 +227,7 @@ test(
       totalTokens: 14,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     });
+    assert.deepEqual(result.report, { fake: true }, "启动器写的 report 原样进结果");
     const calls = fake.calls();
     const prepare = calls.find((c) => c.args.join("\0").includes("prompt.txt"));
     assert.equal(
