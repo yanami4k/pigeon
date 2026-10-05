@@ -383,20 +383,25 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
 }
 
-// pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] [--provider <p>]
+// pigeon run [任务描述] [--root <dir>] [--governance-root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] [--provider <p>]
 //   [--model <m>] [--max-turns <N>] [--wall-clock <毫秒>] [--json]：headless 运行（M6.5 S1，决策 056）——
 // 进程内 API runHeadless 的薄壳；任务描述缺省从 stdin 读；无审批通道，prompt 档 fail-closed；
 // --json 退出时打印一行结构化结果；退出码按终态映射（HEADLESS_EXIT_CODES，1 为参数与装配错误）
 async function runMain(argv: string[]): Promise<void> {
   const usage =
-    "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
+    "用法：pigeon run [任务描述] [--root <dir>] [--governance-root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
     "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-web] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
-    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置）";
+    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]" +
+    "（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置；" +
+    "--governance-root 把设置与程序状态（.pigeon/）锚到另一个目录，缺省与 --root 相同）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
   let wallClockMs: number | undefined;
   let editMode: EditMode | undefined;
+  // 治理根（设置三层与 .pigeon/state 锚定的目录）：缺省与工作区根相同；对比评测的容器条件把它指到
+  // 题目仓库之外，题目仓库自带的 .pigeon/ 设置不生效、程序状态不落工作区
+  let governanceRootArg: string | undefined;
   // 决策 326 ③、341：只对本次运行放行未确认的会执行命令或放权的配置（不记下）
   let trustConfig = false;
   const modelArgv: string[] = [];
@@ -421,6 +426,12 @@ async function runMain(argv: string[]): Promise<void> {
       } else {
         wallClockMs = value;
       }
+    } else if (arg === "--governance-root") {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error(`--governance-root 需要目录（${usage}）`);
+      }
+      governanceRootArg = value;
     } else if (!arg.startsWith("--") && task === undefined) {
       task = arg;
     } else {
@@ -451,8 +462,15 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const workspaceRoot = prepareWorkspace(flags.root);
-  // 决策 325、326：旧布局检查与设置快照；未确认的会执行命令的配置在开跑前报错退出（--trust-config 只对本次放行）
-  let settings = await openSessionSettings(workspaceRoot, {
+  // 治理根缺省与工作区根相同；沙箱在一次性容器里重建工作区，分开的治理根进不去，同给即拒绝
+  if (governanceRootArg !== undefined && flags.sandbox !== undefined) {
+    throw new Error(`--governance-root 不与 --sandbox 同用（${usage}）`);
+  }
+  const governanceRoot =
+    governanceRootArg !== undefined ? prepareWorkspace(governanceRootArg) : workspaceRoot;
+  // 决策 325、326：旧布局检查与设置快照；未确认的会执行命令的配置在开跑前报错退出（--trust-config 只对本次放行）。
+  // 设置与程序状态锚在治理根：--governance-root 分开时，工作区（题目仓库）自带的 .pigeon/ 与 .mcp.json 不生效
+  let settings = await openSessionSettings(governanceRoot, {
     confirmation: { kind: "unattended", trustConfig },
   });
   // 决策 324：--no-hooks 只对本次运行停用全部钩子
@@ -463,7 +481,7 @@ async function runMain(argv: string[]): Promise<void> {
   const loopGuard = loopGuardSettingsOf(settings);
   const runOptions = {
     task,
-    governanceRoot: workspaceRoot,
+    governanceRoot,
     settings,
     workspaceRoot,
     streamFn,
