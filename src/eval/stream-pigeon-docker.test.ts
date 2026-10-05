@@ -3,22 +3,15 @@
 // 真容器行为（挂载生效、会话跨题保留）在 stream-pigeon-docker-docker.test.ts（服务器上跑）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, test } from "vitest";
 import { projectPigeonDir, sessionsDirOf } from "../state/paths.ts";
 import { STREAM_WORK_DIRECTIVE } from "./stream-agents.ts";
 import {
-  PIGEON_DOCKER_CONDITION,
   PIGEON_BUNDLE_MOUNT,
+  PIGEON_DOCKER_CONDITION,
   PIGEON_GOV_ROOT,
   pigeonDockerContainerArgs,
   pigeonDockerIdentity,
@@ -163,13 +156,11 @@ test(
   withTmp((dir) => {
     for (const bad of [path.join(dir, "a,b"), `${dir}/a"b`, `${dir}/a\nb`]) {
       assert.throws(
-        () =>
-          pigeonDockerContainerArgs({ bundleDir: bad, governanceDir: dir, networkName: "n" }),
+        () => pigeonDockerContainerArgs({ bundleDir: bad, governanceDir: dir, networkName: "n" }),
         /逗号、引号或换行/
       );
       assert.throws(
-        () =>
-          pigeonDockerContainerArgs({ bundleDir: dir, governanceDir: bad, networkName: "n" }),
+        () => pigeonDockerContainerArgs({ bundleDir: dir, governanceDir: bad, networkName: "n" }),
         /逗号、引号或换行/
       );
     }
@@ -202,7 +193,11 @@ test(
     const fake = fakeDocker(dir);
     writeFileSync(
       path.join(dir, "next-result.json"),
-      JSON.stringify({ status: "completed", turns: 7, usage: { input: 5, output: 9, totalTokens: 14 } })
+      JSON.stringify({
+        status: "completed",
+        turns: 7,
+        usage: { input: 5, output: 9, totalTokens: 14 },
+      })
     );
     const agent = pigeonDockerStepAgent({ bundleDir: dir, docker: fake.docker });
     const result = await agent.run(stepInput(dir));

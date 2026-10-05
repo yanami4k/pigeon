@@ -377,10 +377,7 @@ test(
     // 缺省不记（身份段没有 settings 键）
     const plain = parseExternalAgentConfig(valid("tools"), "c.json", dir);
     assert.equal("settings" in plain, false);
-    assert.equal(
-      "settings" in externalAgentIdentity(plain, "sha256:aa", null),
-      false
-    );
+    assert.equal("settings" in externalAgentIdentity(plain, "sha256:aa", null), false);
     // 给了即原样进身份段
     const identity = externalAgentIdentity(withSettings, "sha256:aa", null);
     assert.deepEqual(identity.settings, withSettings.settings);

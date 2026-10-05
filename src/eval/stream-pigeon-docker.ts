@@ -29,7 +29,7 @@ import {
   trustedShell,
 } from "../execution/container-host.ts";
 import { GATEWAY_PLACEHOLDER_KEY } from "../pi-runtime/index.ts";
-import { projectPigeonDir } from "../state/paths.ts";
+import { PIGEON_DIR, projectPigeonDir } from "../state/paths.ts";
 import {
   type CommandStepAgentOptions,
   clearMarkedProcesses,
@@ -78,7 +78,7 @@ export function pigeonDockerContainerArgs(input: {
     "--mount",
     `type=bind,source=${bundleDir},target=${PIGEON_BUNDLE_MOUNT},readonly`,
     "--mount",
-    `type=bind,source=${governanceDir},target=${PIGEON_GOV_ROOT}/.pigeon`,
+    `type=bind,source=${governanceDir},target=${PIGEON_GOV_ROOT}/${PIGEON_DIR}`,
   ];
 }
 

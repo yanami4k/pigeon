@@ -393,7 +393,7 @@ async function runMain(argv: string[]): Promise<void> {
     "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-web] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]" +
     "（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置；" +
-    "--governance-root 把设置与程序状态（.pigeon/）锚到另一个目录，缺省与 --root 相同）";
+    "--governance-root 把设置与程序状态锚到另一个目录，缺省与 --root 相同）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
