@@ -435,8 +435,8 @@ export const WEB_TOOLS_SENTENCE =
   "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
   "web_fetch 只交回按问题提炼的结果，不交回网页原文。";
 
-// 系统提示里会话开始时读取并冻结的部分（决策 191、330、332）：人写的说明（AGENTS.md）、
-// 推送的记忆、本地 Skill 的扫描结果。/reload 重建运行面时沿用（决策 340），不重读文件
+// 本运行面开局定下的部分（决策 340、363）：系统提示，以及开局读到的人写说明（AGENTS.md）、推送的记忆、本地 Skill 扫描结果
+// 与按环境注册工具的检查结果。/reload 重建运行面时沿用，不重读文件；开工状态块里的说明、记忆与 Skill 目录照常每个 Run 重读
 export interface FrozenSessionPrompt {
   // 决策 363：本运行面的系统提示（续跑与 /reload 后逐字节不变）
   systemPrompt: string;

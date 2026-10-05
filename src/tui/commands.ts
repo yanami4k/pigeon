@@ -5,7 +5,7 @@
 // 决策 286：未知命令列出的可用命令从命令表（command-table.ts）按当前会话生成，以后加命令不再漏。
 import { compactFocusOf } from "../application/compaction-text.ts";
 import { runGrantCommand } from "../application/grants.ts";
-import { MEMORY_COMMAND_USAGE } from "../application/memory-command.ts";
+import { MEMORY_COMMAND_USAGE, MEMORY_SAVE_WAITING_TEXT } from "../application/memory-command.ts";
 import {
   SANDBOX_FORK_UNSUPPORTED,
   SANDBOX_RESUME_UNSUPPORTED,
@@ -35,7 +35,11 @@ interface CommandsSandboxFace {
 // 决策 331：/memory 的命令面——查看两层记忆、按层编辑（编辑期间界面暂停，编辑器退出后恢复）
 export interface TuiMemoryFace {
   view(): string;
-  edit(layer: "project" | "user"): Promise<string>;
+  // 保存时排队：signal 取消；排队超过 1 秒仍没轮到时回调 onWaiting
+  edit(
+    layer: "project" | "user",
+    hooks?: { signal?: AbortSignal; onWaiting?: () => void }
+  ): Promise<string>;
 }
 
 // TUI 治理命令上下文（/grants /revoke /grants save；决策 030）
@@ -80,6 +84,8 @@ export interface CommandsHost {
   hooksView?(): TuiHooksFace | undefined;
   // 决策 331：/memory 的命令面（缺省 = /memory 不可用）
   memory?(): TuiMemoryFace | undefined;
+  // 接管 Esc（审批挂起时除外），直到返回的函数被调用；缺省 = 不能接管
+  captureEscape?(onEscape: () => void): () => void;
 }
 
 // 命令表判断可用性用的只读面
@@ -268,16 +274,29 @@ export function handleSlashCommand(host: CommandsHost, value: string): void {
         tokens.length === 3 &&
         (layer === "project" || layer === "user")
       ) {
-        void memory.edit(layer).then(
-          (text) => {
-            host.addSystem(text);
-            host.render();
-          },
-          (error: unknown) => {
-            host.addSystem(`命令失败：${error instanceof Error ? error.message : String(error)}`);
-            host.render();
-          }
-        );
+        // 保存时排队超过 1 秒才提示，提示出现起 Esc 取消；保存结束即交还 Esc
+        const cancel = new AbortController();
+        let releaseEscape: (() => void) | undefined;
+        void memory
+          .edit(layer, {
+            signal: cancel.signal,
+            onWaiting: () => {
+              releaseEscape = host.captureEscape?.(() => cancel.abort());
+              host.addSystem(MEMORY_SAVE_WAITING_TEXT);
+              host.render();
+            },
+          })
+          .then(
+            (text) => {
+              host.addSystem(text);
+              host.render();
+            },
+            (error: unknown) => {
+              host.addSystem(`命令失败：${error instanceof Error ? error.message : String(error)}`);
+              host.render();
+            }
+          )
+          .finally(() => releaseEscape?.());
         return;
       }
       host.addSystem(MEMORY_COMMAND_USAGE);

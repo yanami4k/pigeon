@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import type { TurnRoundNotice } from "../pi-runtime/adapter.ts";
 import type { RunId } from "../state/ids.ts";
-import { TRUNCATION_CONTINUE_PROMPT, TRUNCATION_RESUME_PROMPT } from "../state/runaway-config.ts";
+import {
+  PREVIOUS_TRUNCATION_RESUME_PROMPTS,
+  TRUNCATION_CONTINUE_PROMPT,
+  TRUNCATION_RESUME_PROMPT,
+} from "../state/runaway-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { messageLines } from "./history.ts";
 import { attachLoopGuard } from "./loop-guard.ts";
@@ -39,17 +43,18 @@ test("打转检测：截断且没有工具调用的轮不算一轮，前后相�
   assert.equal(reminders.length, 1);
 });
 
-test.each([TRUNCATION_CONTINUE_PROMPT, TRUNCATION_RESUME_PROMPT])(
-  "回看历史：续跑提示显示成程序提示，不像人输入的话（%s）",
-  (text) => {
-    const lines = messageLines({
-      role: "user",
-      blocks: [{ type: "text", text }],
-    } as unknown as ViewMessage);
-    assert.deepEqual(
-      lines.map((line) => line.kind),
-      ["notice"]
-    );
-    assert.ok(lines[0]?.text.startsWith("续跑提示"));
-  }
-);
+test.each([
+  TRUNCATION_CONTINUE_PROMPT,
+  TRUNCATION_RESUME_PROMPT,
+  ...PREVIOUS_TRUNCATION_RESUME_PROMPTS,
+])("回看历史：续跑提示（含旧会话记录里的旧版）显示成程序提示，不像人输入的话（%s）", (text) => {
+  const lines = messageLines({
+    role: "user",
+    blocks: [{ type: "text", text }],
+  } as unknown as ViewMessage);
+  assert.deepEqual(
+    lines.map((line) => line.kind),
+    ["notice"]
+  );
+  assert.ok(lines[0]?.text.startsWith("续跑提示"));
+});

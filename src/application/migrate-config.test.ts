@@ -111,11 +111,7 @@ test("7 个旧文件迁入设置各节：去掉 version；key 不进设置并给
   const text = result.lines.join("\n");
   assert.match(text, /ZAI_API_KEY/);
   assert.ok(!text.includes("sk-secret-zai"), "不打印 key");
-  assert.equal(
-    result.lines.at(-1),
-    `迁移挪走的旧文件原文备份在 ${backupDir}`,
-    "迁移结束打印备份位置"
-  );
+  assert.ok(result.lines.at(-1)?.endsWith(backupDir), "迁移结束打印备份位置");
   const shared = readFileSync(projectSettingsPath(root), "utf8");
   const local = readFileSync(projectLocalSettingsPath(root), "utf8");
   assert.ok(!shared.includes("sk-secret-zai") && !local.includes("sk-secret-zai"), "key 不进设置");
@@ -128,15 +124,7 @@ test("7 个旧文件迁入设置各节：去掉 version；key 不进设置并给
     "web",
   ]);
   assert.deepEqual(Object.keys(JSON.parse(local)), ["permissions"]);
-  for (const name of [
-    "mcp",
-    "grants",
-    "commands",
-    "orchestration",
-    "web",
-    "sandbox",
-    "loop-guard",
-  ]) {
+  for (const name of ["mcp", "grants", "commands", "orchestration", "sandbox", "loop-guard"]) {
     assert.ok(!existsSync(join(root, ".pigeon", `${name}.json`)), name);
     assert.equal(
       readFileSync(join(backupDir, `${name}.json`), "utf8"),
@@ -144,6 +132,13 @@ test("7 个旧文件迁入设置各节：去掉 version；key 不进设置并给
       `${name} 的原文在备份目录里`
     );
   }
+  // web.json 的备份：字段照留，key 的值换成应设的环境变量
+  assert.ok(!existsSync(join(root, ".pigeon", "web.json")));
+  const webBackup = readFileSync(join(backupDir, "web.json"), "utf8");
+  assert.ok(!webBackup.includes("sk-secret-zai"), "备份里没有 key 的值");
+  const backedUp = JSON.parse(webBackup);
+  assert.equal(backedUp.search.zai.baseUrl, "https://z.example");
+  assert.match(backedUp.search.zai.apiKey, /ZAI_API_KEY/);
   assert.ok(!existsSync(join(root, ".pigeon", "state", "migration-backup")), "仓库里没有备份");
   // 迁移后的设置能照常读出各节
   const snapshot = loadSettings(root, { homeDir });
@@ -237,7 +232,7 @@ test("锁被存活进程占用（有会话或 worker 正在运行）或工作树
   assert.ok(existsSync(legacyTree));
 });
 
-test("迁移备份不在仓库里：git status 与快照提交里都没有备份文件与 key，备份目录里有原文；仍写 .pigeon/.gitignore", () => {
+test("迁移备份不在仓库里：git status 与快照提交里都没有备份文件与 key，备份里也没有 key 的值；仍写 .pigeon/.gitignore", () => {
   const root = repo();
   const homeDir = home();
   const original = JSON.stringify({
@@ -247,7 +242,11 @@ test("迁移备份不在仓库里：git status 与快照提交里都没有备份
   write(join(root, ".pigeon", "web.json"), original);
   const result = migrate(root, homeDir);
   const backupDir = migrationBackupLocation(root, homeDir);
-  assert.equal(readFileSync(join(backupDir, "web.json"), "utf8"), original);
+  const backedUp = JSON.parse(readFileSync(join(backupDir, "web.json"), "utf8"));
+  assert.equal(backedUp.version, 1);
+  assert.equal(backedUp.search.backend, "tavily");
+  assert.match(backedUp.search.tavily.apiKey, /TAVILY_API_KEY/);
+  assert.throws(() => execFileSync("grep", ["-rl", "tvly-secret", homeDir]), "备份目录里没有 key");
   assert.ok(result.lines.join("\n").includes(`备份在 ${backupDir}`), "打印备份位置");
   assert.equal(
     readFileSync(join(root, ".pigeon", ".gitignore"), "utf8"),
@@ -263,6 +262,38 @@ test("迁移备份不在仓库里：git status 与快照提交里都没有备份
   assert.throws(() => git(root, "grep", "-I", "-l", "tvly-secret", snap.commit), "快照里没有 key");
   // 仓库里任何地方都没有原文
   assert.throws(() => execFileSync("grep", ["-rl", "tvly-secret", root]), "仓库目录里没有 key");
+});
+
+test("web.json 的备份位置已有旧备份（更早的迁移留下的原文）：拦住、不覆盖，旧备份与仓库里的 web.json 一字不动；不打印 key", () => {
+  const root = repo();
+  const homeDir = home();
+  const backupDir = migrationBackupLocation(root, homeDir);
+  const older = JSON.stringify({ version: 1, search: { zai: { apiKey: "sk-older" } } });
+  write(join(backupDir, "web.json"), older);
+  const current = JSON.stringify({ version: 1, search: { zai: { apiKey: "sk-current" } } });
+  write(join(root, ".pigeon", "web.json"), current);
+  assert.throws(
+    () => migrate(root, homeDir),
+    (error: unknown) =>
+      error instanceof MigrationError &&
+      /已存在/.test(error.message) &&
+      !/sk-older|sk-current/.test(error.message)
+  );
+  assert.equal(readFileSync(join(backupDir, "web.json"), "utf8"), older);
+  assert.equal(readFileSync(join(root, ".pigeon", "web.json"), "utf8"), current);
+});
+
+test("web.json 不是合法 JSON：报错不带解析细节，不摘录出 key", () => {
+  const root = repo();
+  // key 没加引号：Node 的解析报错会摘录这一段原文
+  write(join(root, ".pigeon", "web.json"), '{"search": {"zai": {"apiKey": sk-broken}}}');
+  assert.throws(
+    () => migrate(root),
+    (error: unknown) =>
+      error instanceof MigrationError &&
+      /web\.json 不是合法 JSON/.test(error.message) &&
+      !error.message.includes("sk-broken")
+  );
 });
 
 test("verify.json（决策 322）：不并入设置——挪进备份目录，打印改写为收尾（Stop）钩子的示例；旧布局检查列为已退役", () => {

@@ -1,5 +1,5 @@
-// /grants save 与 /revoke 落在项目个人设置（决策 325）：升格写 .pigeon/settings.local.json 的 permissions 一节、本会话求值冻结、
-// 下次会话（重新读设置快照）生效；/grants 按层列出三层的放权规则；/revoke config#N 只按项目个人一层的序号移除。
+// /grants save 与 /revoke 落在项目个人设置（决策 325）：升格写 .pigeon/settings.local.json 的 permissions 一节，
+// 下次会话或 /reload（重新读设置快照）生效；/grants 按层列出三层的放权规则；/revoke config#N 只按项目个人一层的序号移除。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

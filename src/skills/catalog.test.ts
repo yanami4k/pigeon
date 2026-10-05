@@ -1,5 +1,5 @@
 // M5 S4（决策 043）：Skill Catalog 扫描——项目级与用户级标准目录、前言 name / description、
-// 开会话给每个 Skill 目录下全部文件算哈希清单；启动只把名称、简介、路径追加进 system prompt，
+// 开会话给每个 Skill 目录下全部文件算哈希清单；只把名称、简介、路径放进 Skill 目录段（开工状态块的一节），
 // 大量 Skill 不线性膨胀初始上下文（完成证据）。
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";

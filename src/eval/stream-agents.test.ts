@@ -599,7 +599,7 @@ test("Pigeon agent：一步期间来了限额信号即中止在途的运行（�
   }
 });
 
-test("Pigeon agent：推送格打开推送记忆——系统提示带作业目录里的项目级记忆（无人值守版），不带 update_memory、不读用户级记忆；不推送的格子都没有", async () => {
+test("Pigeon agent：推送格打开推送记忆——开工状态块带作业目录里的项目级记忆（无人值守版），不带 update_memory、不读用户级记忆；不推送的格子都没有", async () => {
   for (const condition of ["search-push", "push-only", "neither"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-agent-"));
     const ws = containerWorkspace(dir);

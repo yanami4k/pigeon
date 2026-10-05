@@ -200,7 +200,7 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
       ...(pigeon.truncationContinuation ?? DEFAULT_TRUNCATION_CONTINUATION),
     },
     repetitionGuard: structuredClone(pigeon.repetitionGuard ?? DEFAULT_REPETITION_GUARD),
-    // 决策 376：续跑行为的版本（截断续跑按原因分开即换版本）
+    // 决策 376：续跑行为的版本（截断续跑按原因分开、撞上限的提示改写，各换一次版本）
     continuationVersion: TRUNCATION_CONTINUATION_VERSION,
     // 决策 365：无人值守收尾等后台作业的总时限（秒）的实际生效值
     backgroundCloseoutSeconds:

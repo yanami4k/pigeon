@@ -9,7 +9,11 @@ import {
   loadSessionView,
 } from "../persistence/session-catalog.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import { TRUNCATION_CONTINUE_PROMPT, TRUNCATION_RESUME_PROMPT } from "../state/runaway-config.ts";
+import {
+  PREVIOUS_TRUNCATION_RESUME_PROMPTS,
+  TRUNCATION_CONTINUE_PROMPT,
+  TRUNCATION_RESUME_PROMPT,
+} from "../state/runaway-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { isStatusMessage, statusSummary } from "../state/status-text.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
@@ -54,6 +58,13 @@ function isProgramNotice(text: string): boolean {
     text.startsWith(SCRIPT_NOTICE_PREFIX)
   );
 }
+
+// 撞上限续跑时运行面追加过的提示（现行两种加此前各版）
+const CONTINUATION_PROMPTS: ReadonlySet<string> = new Set([
+  TRUNCATION_CONTINUE_PROMPT,
+  TRUNCATION_RESUME_PROMPT,
+  ...PREVIOUS_TRUNCATION_RESUME_PROMPTS,
+]);
 
 // 一条消息的正文渲染行（TUI 历史与 cli --with-content 共用）
 export function messageLines(
@@ -103,11 +114,8 @@ export function messageLines(
         lines.push({ kind: "notice", text: clip(block.text, entryChars) });
         continue;
       }
-      // 撞上限续跑（决策 367）时运行面追加的提示：同样不是人输入的话
-      if (
-        message.role === "user" &&
-        (block.text === TRUNCATION_CONTINUE_PROMPT || block.text === TRUNCATION_RESUME_PROMPT)
-      ) {
+      // 撞上限续跑（决策 367）时运行面追加的提示：同样不是人输入的话；旧会话记录里的旧版提示照样认出
+      if (message.role === "user" && CONTINUATION_PROMPTS.has(block.text)) {
         lines.push({ kind: "notice", text: `续跑提示：${block.text}` });
         continue;
       }

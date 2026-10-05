@@ -8,6 +8,7 @@
 //   一律放行，即使该层已超上限（人手改出来的）。
 // - 人把格式改坏时拒绝写入并指出行号，不覆盖人的修改。
 import { type Static, Type } from "typebox";
+import { ExclusiveLockError } from "../persistence/exclusive-lock.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
@@ -44,7 +45,7 @@ export const MEMORY_SOURCE_LABELS: Readonly<Record<MemorySource, string>> = {
   line: "命令行对话",
 };
 
-// 工具说明（记忆文字 v2）
+// 工具说明（记忆文字 v3）
 export const UPDATE_MEMORY_DESCRIPTION = [
   `新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（${MEMORY_DISPLAY_PATHS.project}），user 对所有项目（${MEMORY_DISPLAY_PATHS.user}）。只写不读：两层记忆已在开工状态里。`,
   "记用户的偏好、用户对你做法的纠正，以及从代码和 git 历史看不出的项目信息（外部资料在哪里、约定、背景）；不记能从代码或 git 历史看出的内容（代码结构、文件位置、实现细节、改过什么），不记任务经过，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找）。",
@@ -53,7 +54,7 @@ export const UPDATE_MEMORY_DESCRIPTION = [
   "用户亲口要求的条目，只有用户改口时才改写或删除。",
 ].join("\n");
 
-// 参数（说明文字为记忆文字 v2）。必填与否随动作而定，由工具自己检查并按固定文字回话，schema 里 id 与 content 可选
+// 参数（说明文字为记忆文字 v3）。必填与否随动作而定，由工具自己检查并按固定文字回话，schema 里 id 与 content 可选
 export const UpdateMemoryParamsSchema = Type.Object({
   action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove")], {
     description: "add 新增一条；replace 用新内容整条替换编号指定的一条；remove 删除编号指定的一条",
@@ -70,7 +71,7 @@ export const UpdateMemoryParamsSchema = Type.Object({
 });
 export type UpdateMemoryParams = Static<typeof UpdateMemoryParamsSchema>;
 
-// 返回给 agent 的文字（记忆文字 v2）
+// 返回给 agent 的文字（记忆文字 v3）
 export const UPDATE_MEMORY_TEXTS = {
   added: (layer: string, id: string, used: number, limit: number) =>
     `已在${layer}新增 ${id}（当前 ${used}/${limit} 字符）。`,
@@ -107,6 +108,9 @@ export const UPDATE_MEMORY_TEXTS = {
   missingLayer: "需要 layer：project（只对本项目）或 user（对所有项目）；拿不准时先问用户。",
   broken: (path: string, line: number, layer: MemoryLayer) =>
     `${path} 第 ${line} 行起格式不对，已拒绝写入，以免覆盖人的修改；请告知用户用 /memory edit ${layer} 修复。`,
+  // 等锁超时：同一层正被别的会话写入，等满仍没拿到锁。这是记忆文字 v3 下新增的一种拒绝情形，不升 MEMORY_TEXT_VERSION：
+  // 跑批不注册 update_memory，不影响实验条件
+  busy: (layer: string) => `${layer}记忆文件正被别的会话写入，这次没有写成；可稍后重试。`,
 } as const;
 
 // 没有条目时的编号列表
@@ -170,7 +174,14 @@ export interface UpdateMemoryDetails {
   usedChars?: number;
   limitChars?: number;
   // 拒绝的原因
-  rejected?: "full" | "duplicate" | "missing-id" | "missing-content" | "missing-layer" | "broken";
+  rejected?:
+    | "full"
+    | "duplicate"
+    | "missing-id"
+    | "missing-content"
+    | "missing-layer"
+    | "broken"
+    | "busy";
 }
 
 export interface UpdateMemoryOptions {
@@ -182,6 +193,8 @@ export interface UpdateMemoryOptions {
   source: MemorySource;
   // 两层上限（字符，按码点计）
   limits: MemoryLimits;
+  // 等锁上限（毫秒；缺省见 withMemoryLock，测试注入）
+  lockWaitMs?: number;
   // 写入后（文件已改动）调用：入口在消息区显示一行
   onWritten?: (notice: MemoryWriteNotice) => void;
   // 记日期用的时钟（测试注入）
@@ -228,102 +241,114 @@ export async function applyMemoryUpdate(
     sessionId: options.sessionId,
   };
   let notice: MemoryWriteNotice | undefined;
-  const result = await withMemoryLock(location.lock, () => {
-    const current = readMemoryFile(location.file);
-    const parsed = parseMemory(current.text, layer);
-    if (!parsed.ok) {
-      return reply(UPDATE_MEMORY_TEXTS.broken(location.display, parsed.line, layer), {
-        written: false,
-        rejected: "broken",
-      });
-    }
-    const doc = current.exists ? parsed.doc : { ...parsed.doc, header: MEMORY_FILE_HEADERS[layer] };
-    const entries = doc.entries;
-    const used = usedChars(entries, layer);
-    const commit = (next: MemoryEntry[]) => {
-      writeMemoryFile(location.file, renderForWrite({ ...doc, entries: next }, layer));
-      return usedChars(next, layer);
-    };
-    if (action === "add") {
-      const duplicate = entries.find((entry) => entry.content === content);
-      if (duplicate !== undefined) {
-        return reply(UPDATE_MEMORY_TEXTS.duplicate(label, entryId(layer, duplicate.id)), {
+  const result = await withMemoryLock(
+    location.lock,
+    () => {
+      const current = readMemoryFile(location.file);
+      const parsed = parseMemory(current.text, layer);
+      if (!parsed.ok) {
+        return reply(UPDATE_MEMORY_TEXTS.broken(location.display, parsed.line, layer), {
           written: false,
-          id: entryId(layer, duplicate.id),
-          usedChars: used,
-          rejected: "duplicate",
+          rejected: "broken",
         });
       }
-      const entry: MemoryEntry = { id: nextId(entries), content, origin };
-      const needed = entryChars(entry, layer);
-      if (used + needed > limit) {
+      const doc = current.exists
+        ? parsed.doc
+        : { ...parsed.doc, header: MEMORY_FILE_HEADERS[layer] };
+      const entries = doc.entries;
+      const used = usedChars(entries, layer);
+      const commit = (next: MemoryEntry[]) => {
+        writeMemoryFile(location.file, renderForWrite({ ...doc, entries: next }, layer));
+        return usedChars(next, layer);
+      };
+      if (action === "add") {
+        const duplicate = entries.find((entry) => entry.content === content);
+        if (duplicate !== undefined) {
+          return reply(UPDATE_MEMORY_TEXTS.duplicate(label, entryId(layer, duplicate.id)), {
+            written: false,
+            id: entryId(layer, duplicate.id),
+            usedChars: used,
+            rejected: "duplicate",
+          });
+        }
+        const entry: MemoryEntry = { id: nextId(entries), content, origin };
+        const needed = entryChars(entry, layer);
+        if (used + needed > limit) {
+          return reply(
+            UPDATE_MEMORY_TEXTS.addFull({
+              layer: label,
+              used,
+              limit,
+              needed,
+              short: used + needed - limit,
+              entries: sizeList(entries, layer),
+            }),
+            { written: false, usedChars: used, rejected: "full" }
+          );
+        }
+        const after = commit([...entries, entry]);
+        const id = entryId(layer, entry.id);
+        notice = { layer, action, id, content };
+        return reply(UPDATE_MEMORY_TEXTS.added(label, id, after, limit), {
+          written: true,
+          id,
+          usedChars: after,
+        });
+      }
+      const idNumber = parseId(params.id, layer);
+      const existing =
+        idNumber === undefined ? undefined : entries.find((entry) => entry.id === idNumber);
+      if (existing === undefined) {
         return reply(
-          UPDATE_MEMORY_TEXTS.addFull({
-            layer: label,
-            used,
-            limit,
-            needed,
-            short: used + needed - limit,
-            entries: sizeList(entries, layer),
-          }),
-          { written: false, usedChars: used, rejected: "full" }
+          UPDATE_MEMORY_TEXTS.missingId(label, (params.id ?? "").trim(), idList(entries, layer)),
+          { written: false, usedChars: used, rejected: "missing-id" }
         );
       }
-      const after = commit([...entries, entry]);
-      const id = entryId(layer, entry.id);
-      notice = { layer, action, id, content };
-      return reply(UPDATE_MEMORY_TEXTS.added(label, id, after, limit), {
-        written: true,
-        id,
-        usedChars: after,
-      });
-    }
-    const idNumber = parseId(params.id, layer);
-    const existing =
-      idNumber === undefined ? undefined : entries.find((entry) => entry.id === idNumber);
-    if (existing === undefined) {
-      return reply(
-        UPDATE_MEMORY_TEXTS.missingId(label, (params.id ?? "").trim(), idList(entries, layer)),
-        { written: false, usedChars: used, rejected: "missing-id" }
-      );
-    }
-    const id = entryId(layer, existing.id);
-    if (action === "remove") {
-      const after = commit(entries.filter((entry) => entry !== existing));
-      notice = { layer, action, id, content: existing.content };
-      return reply(UPDATE_MEMORY_TEXTS.removed(label, id, after, limit), {
-        written: true,
-        id,
-        usedChars: after,
-      });
-    }
-    const replacement: MemoryEntry = { id: existing.id, content, origin };
-    const oldChars = entryChars(existing, layer);
-    const newChars = entryChars(replacement, layer);
-    const afterChars = used - oldChars + newChars;
-    // 写满时只拦改长：替换后不比替换前长即放行
-    if (afterChars > limit && afterChars > used) {
-      return reply(
-        UPDATE_MEMORY_TEXTS.replaceFull({
-          layer: label,
+      const id = entryId(layer, existing.id);
+      if (action === "remove") {
+        const after = commit(entries.filter((entry) => entry !== existing));
+        notice = { layer, action, id, content: existing.content };
+        return reply(UPDATE_MEMORY_TEXTS.removed(label, id, after, limit), {
+          written: true,
           id,
-          oldChars,
-          newChars,
-          after: afterChars,
-          limit,
-          over: afterChars - limit,
-          entries: sizeList(entries, layer),
-        }),
-        { written: false, id, usedChars: used, rejected: "full" }
-      );
+          usedChars: after,
+        });
+      }
+      const replacement: MemoryEntry = { id: existing.id, content, origin };
+      const oldChars = entryChars(existing, layer);
+      const newChars = entryChars(replacement, layer);
+      const afterChars = used - oldChars + newChars;
+      // 写满时只拦改长：替换后不比替换前长即放行
+      if (afterChars > limit && afterChars > used) {
+        return reply(
+          UPDATE_MEMORY_TEXTS.replaceFull({
+            layer: label,
+            id,
+            oldChars,
+            newChars,
+            after: afterChars,
+            limit,
+            over: afterChars - limit,
+            entries: sizeList(entries, layer),
+          }),
+          { written: false, id, usedChars: used, rejected: "full" }
+        );
+      }
+      const after = commit(entries.map((entry) => (entry === existing ? replacement : entry)));
+      notice = { layer, action, id, content };
+      return reply(UPDATE_MEMORY_TEXTS.replaced(label, id, after, limit), {
+        written: true,
+        id,
+        usedChars: after,
+      });
+    },
+    options.lockWaitMs
+  ).catch((error: unknown) => {
+    // 等满仍没拿到锁：按固定文字回话，不写入；其余错误照常抛出
+    if (error instanceof ExclusiveLockError) {
+      return reply(UPDATE_MEMORY_TEXTS.busy(label), { written: false, rejected: "busy" });
     }
-    const after = commit(entries.map((entry) => (entry === existing ? replacement : entry)));
-    notice = { layer, action, id, content };
-    return reply(UPDATE_MEMORY_TEXTS.replaced(label, id, after, limit), {
-      written: true,
-      id,
-      usedChars: after,
-    });
+    throw error;
   });
   if (notice !== undefined) {
     options.onWritten?.(notice);

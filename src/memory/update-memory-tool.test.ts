@@ -1,13 +1,19 @@
-// 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v2；两层各自增、按编号替换与删除；
+// 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v3；两层各自增、按编号替换与删除；
 // 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
-// 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示。
+// 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示；等锁超时按固定文字回话；两个进程同时写同一层，条目不丢不重。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
-import { MEMORY_FILE_HEADERS, type MemoryLayer } from "./learned.ts";
+import {
+  MEMORY_FILE_HEADERS,
+  MEMORY_LAYER_LABELS,
+  type MemoryLayer,
+  parseMemory,
+} from "./learned.ts";
 import { memoryLocation } from "./learned-store.ts";
 import {
   applyMemoryUpdate,
@@ -15,6 +21,7 @@ import {
   type MemoryWriteNotice,
   memoryWriteNoticeLine,
   UPDATE_MEMORY_DESCRIPTION,
+  UPDATE_MEMORY_TEXTS,
   type UpdateMemoryParams,
   UpdateMemoryParamsSchema,
   updateMemoryRegistration,
@@ -31,7 +38,8 @@ interface Fixture {
   notices: MemoryWriteNotice[];
   call(
     params: Omit<UpdateMemoryParams, "layer"> & { layer?: MemoryLayer },
-    limits?: { project?: number; user?: number }
+    limits?: { project?: number; user?: number },
+    lockWaitMs?: number
   ): ReturnType<typeof applyMemoryUpdate>;
   file(layer: MemoryLayer): string;
   read(layer: MemoryLayer): string;
@@ -50,7 +58,7 @@ function withFixture(body: (fx: Fixture) => Promise<void>): Promise<void> {
     root,
     home,
     notices,
-    call: (params, limits = {}) =>
+    call: (params, limits = {}, lockWaitMs) =>
       applyMemoryUpdate(
         {
           governanceRoot: root,
@@ -60,6 +68,7 @@ function withFixture(body: (fx: Fixture) => Promise<void>): Promise<void> {
           limits: { project: limits.project ?? 4000, user: limits.user ?? 4000 },
           onWritten: (notice) => notices.push(notice),
           now: () => TODAY,
+          ...(lockWaitMs !== undefined ? { lockWaitMs } : {}),
         },
         { layer: "project", ...params } as UpdateMemoryParams
       ),
@@ -82,7 +91,7 @@ function assertIncludesAll(text: string, fragments: readonly string[]): void {
 }
 
 // 说明与参数说明全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"（版本号进跑批身份，文字一改即换条件）
-test("工具说明与参数说明为记忆文字 v2：两层、只写内容、取向、写满时新增或改长都会被拒绝", () => {
+test("工具说明与参数说明为记忆文字 v3：两层、只写内容、取向、写满时新增或改长都会被拒绝", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
     "新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（.pigeon/state/memory.md），user 对所有项目（~/.pigeon/state/memory.md）。只写不读：两层记忆已在开工状态里。\n" +
@@ -180,7 +189,7 @@ test("新增被拒（328）：写明当前用量、该条字数与还差多少�
     const used = a + b;
     const needed = lineChars("P3", "丙丙丙丙丙丙丙😀");
     const full = await fx.call({ action: "add", content: "丙丙丙丙丙丙丙😀" }, { project: limit });
-    // 写满被拒的文字属记忆文字 v2，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v3，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       full.text,
       `项目级记忆已满，这条没有新增：当前 ${used}/${limit} 字符，这条需要 ${needed} 字符（含工具补上的编号、日期、来源与会话编号），还差 ${used + needed - limit} 字符。把这条写短，或先用 replace 合并相近条目、用 remove 删除过时条目，再新增。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
@@ -206,7 +215,7 @@ test("替换被拒（328）：写明被替换条目现有字数、新内容字�
       { action: "replace", id: "P1", content: "甲甲甲甲甲甲" },
       { project: limit }
     );
-    // 写满被拒的文字属记忆文字 v2，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v3，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       rejected.text,
       `替换后超出项目级上限，P1 没有替换：P1 现有 ${a} 字符，新内容 ${newChars} 字符（含工具补上的编号、日期、来源与会话编号），替换后共 ${after}/${limit} 字符，超出 ${after - limit} 字符。把新内容至少写短 ${after - limit} 字符，或先用 remove 删除别的过时条目，再替换。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
@@ -324,6 +333,26 @@ test("写满判定在锁内：等锁期间另一处写满了这一层，拿到�
     assert.equal(fx.read("project"), `${MEMORY_FILE_HEADERS.project}${entry}`);
   }));
 
+test("等锁超时：同一层一直被另一处占着，按固定文字回话、不写文件、不交出写入提示；锁放开后照常写入", () =>
+  withFixture(async (fx) => {
+    const location = memoryLocation("project", { governanceRoot: fx.root, homeDir: fx.home });
+    mkdirSync(dirname(location.file), { recursive: true });
+    const release = acquireExclusiveLock(location.lock, "测试持锁");
+    try {
+      const result = await fx.call({ action: "add", content: "一" }, {}, 50);
+      assert.equal(result.text, UPDATE_MEMORY_TEXTS.busy(MEMORY_LAYER_LABELS.project));
+      assert.deepEqual(
+        { written: result.details.written, rejected: result.details.rejected },
+        { written: false, rejected: "busy" }
+      );
+    } finally {
+      release();
+    }
+    assert.equal(existsSync(location.file), false);
+    assert.equal(fx.notices.length, 0);
+    assert.equal((await fx.call({ action: "add", content: "一" })).details.written, true);
+  }));
+
 test("人改坏格式：拒绝写入并指出文件与行号，文件原样不动", () =>
   withFixture(async (fx) => {
     const file = fx.file("project");
@@ -342,4 +371,61 @@ test("Unicode 行分隔符也折叠：\\u2028 与 \\u2029 当换行并成一个�
   withFixture(async (fx) => {
     await fx.call({ action: "add", content: "第一段\u2028第二段\u2029第三段" });
     assert.match(fx.read("project"), /- \[P1\] 第一段 第二段 第三段 〔/);
+  }));
+
+// 子进程：等开跑文件出现后，向同一项目级记忆连续新增若干条（argv：被测模块、治理根、主目录、标签、条数、开跑文件）
+const CONCURRENT_WRITER = [
+  'import { existsSync } from "node:fs";',
+  "const [moduleUrl, root, home, tag, count, goPath] = process.argv.slice(1);",
+  "const { applyMemoryUpdate } = await import(moduleUrl);",
+  "while (!existsSync(goPath)) await new Promise((resolve) => setTimeout(resolve, 5));",
+  "for (let i = 0; i < Number(count); i += 1) {",
+  "  const result = await applyMemoryUpdate(",
+  '    { governanceRoot: root, homeDir: home, sessionId: "sess_" + tag, source: "tui", limits: { project: 100000, user: 100000 } },',
+  '    { action: "add", layer: "project", content: tag + "-" + i }',
+  "  );",
+  "  if (!result.details.written) { console.error(result.text); process.exit(1); }",
+  "}",
+].join("\n");
+
+test("两个进程同时写同一份记忆：各自的条目一条不丢、不重复，编号各不相同，文件格式完好", () =>
+  withFixture(async (fx) => {
+    const count = 20;
+    const goPath = join(fx.root, "go");
+    const moduleUrl = new URL("./update-memory-tool.ts", import.meta.url).href;
+    const writers = ["A", "B"].map((tag) => {
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          CONCURRENT_WRITER,
+          moduleUrl,
+          fx.root,
+          fx.home,
+          tag,
+          String(count),
+          goPath,
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] }
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      return new Promise<{ code: number | null; stderr: string }>((resolve) =>
+        child.on("exit", (code) => resolve({ code, stderr }))
+      );
+    });
+    writeFileSync(goPath, "");
+    for (const exit of await Promise.all(writers)) {
+      assert.equal(exit.code, 0, exit.stderr);
+    }
+    const parsed = parseMemory(fx.read("project"), "project");
+    assert.ok(parsed.ok);
+    const expected = ["A", "B"].flatMap((tag) =>
+      Array.from({ length: count }, (_, i) => `${tag}-${i}`)
+    );
+    assert.deepEqual(parsed.doc.entries.map((entry) => entry.content).sort(), expected.sort());
+    assert.equal(new Set(parsed.doc.entries.map((entry) => entry.id)).size, 2 * count);
   }));

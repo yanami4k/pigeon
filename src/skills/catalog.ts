@@ -2,8 +2,8 @@
 // description）加可选 references / scripts / templates，用户级 `~/.pigeon/skills/` 同构，格式与
 // Claude Code / pi 兼容。加载器自写，不借上游 harness 层（在巡航边界外，格式只有百行）。
 // 会话开始时扫描一次：给每个 Skill 目录下全部文件算哈希清单（冻结版本的证据，写进
-// InjectionSnapshot v3 的 skills 字段，load_skill 读取时比对）；启动只把名称、简介、路径追加进
-// system prompt，与人写的说明（AGENTS.md）同样在会话开始时冻结——大量 Skill 不线性膨胀初始上下文。
+// InjectionSnapshot v3 的 skills 字段，load_skill 读取时比对）；只把名称、简介、路径作开工状态块的「Skill 目录」一节发出，
+// 会话中增删改时重新登记、整节追加（决策 363）——大量 Skill 不线性膨胀初始上下文。
 import { type Dirent, existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -81,7 +81,7 @@ export const NO_LOAD_SKILL_SENTENCE =
 export interface SkillCatalog {
   skills: SkillEntry[];
   manifest: SkillManifestEntry[];
-  // 追加进 system prompt 的冻结目录段；无 Skill 时为空串
+  // 开工状态块「Skill 目录」一节的正文；无 Skill 时为空串
   section: string;
   // 两个扫描根（绝对路径，不论是否存在）：load_skill 注册时的路径活动范围声明
   roots: string[];

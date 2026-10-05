@@ -497,9 +497,11 @@ export async function main(argv: string[]): Promise<void> {
     // 决策 331：/memory 查看与编辑两层记忆（编辑时暂停界面打开 $VISUAL / $EDITOR）
     memory: {
       view: () => memoryViewText(memoryContext),
-      edit: (layer) =>
+      edit: (layer, hooks) =>
         editMemoryLayer(memoryContext, layer, {
           ...editorOption(),
+          ...(hooks?.signal !== undefined ? { signal: hooks.signal } : {}),
+          ...(hooks?.onWaiting !== undefined ? { onWaiting: hooks.onWaiting } : {}),
           // 壳晚于选项构造：经持有格取
           run: (editor, file) =>
             shellHolder.current?.suspendFor(() => spawnEditor(editor, file)) ??

@@ -18,7 +18,7 @@ import {
 } from "./learned.ts";
 import { memoryLocation, readMemoryFile } from "./learned-store.ts";
 
-// 冲突处理的两种填法（记忆文字 v2）：可写入（有人对话）/ 只推送（无人值守）
+// 冲突处理的两种填法（记忆文字 v3）：可写入（有人对话）/ 只推送（无人值守）
 export type MemoryConflictMode = "interactive" | "unattended";
 
 export const MEMORY_CONFLICT_TEXTS: Readonly<Record<MemoryConflictMode, string>> = {

@@ -329,6 +329,8 @@ export class PigeonTuiShell
   // S5 取消键：中断飞行中标记——interrupt 未决议期间重复 Esc 不再触发
   //（不 double-abort、不悬挂）；running 清算在 handleRunEnd，两者生命周期独立
   private interrupting = false;
+  // 接管了 Esc 的一方（见 captureEscape）
+  private escapeCapture: (() => void) | undefined;
   // S5 D2 可见化（同 repl 增量报数口径）：已警告过的落盘失败累计数
   private reportedListenerErrors = 0;
   // S5+ 退出布防（裁决 033）：上一次 Ctrl+C 的墙钟时刻（窗口内再来一次即优雅退出）；
@@ -692,6 +694,15 @@ export class PigeonTuiShell
   // 决策 331：/memory 的命令面（CommandsHost）
   memory(): TuiMemoryFace | undefined {
     return this.options.memory;
+  }
+
+  // 接管 Esc（CommandsHost）：/memory edit 排队保存期间按 Esc 取消；后接管的优先，交还时只撤自己那一份
+  captureEscape(onEscape: () => void): () => void {
+    const handler = () => onEscape();
+    this.escapeCapture = handler;
+    return () => {
+      if (this.escapeCapture === handler) this.escapeCapture = undefined;
+    };
   }
 
   // 决策 331：暂停界面执行一段要独占终端的动作（/memory edit 打开编辑器），结束后恢复界面并整屏重画
@@ -1510,6 +1521,11 @@ export class PigeonTuiShell
   // 编排视图的按键。Ctrl+C 与审批挂起期间放给壳级键控；树形视图打开时按键全归它
   private handleOrchestrationKey(data: string): { consume: true } | undefined {
     if (data === "\x03" || this.pendingApprovalState !== null) return undefined;
+    // 有一方接管了 Esc（/memory edit 排队保存时）：Esc 归它，排在视图与取消键之前
+    if (this.escapeCapture !== undefined && matchesKey(data, "escape")) {
+      this.escapeCapture();
+      return { consume: true };
+    }
     const workers = this.current.workers;
     if (workers === undefined) return undefined;
     if (this.view === "tree" && this.treeMode === "sessions") {
