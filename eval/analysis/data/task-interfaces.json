@@ -3,10 +3,11 @@
   "manifestDigest": "d80b3a59b88cfefe",
   "summary": {
     "tasks": 89,
-    "tasksWithInterfaces": 33,
+    "tasksWithInterfaces": 32,
     "newModules": 34,
-    "names": 122,
-    "signatureMissing": 9,
+    "names": 121,
+    "signatureMissing": 8,
+    "absentInHuman": 1,
     "unresolvedPatchObjects": 214,
     "unparsableFiles": 0
   },
@@ -17,6 +18,7 @@
       "parent": "e09d4d63f3b6a5d484f60680fe284f10e012d27b",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -45,6 +47,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -54,6 +57,7 @@
       "parent": "3547e88842902fbbd53d16cc4abd8e1b3cc89cb1",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -63,6 +67,7 @@
       "parent": "f79ce81011273bc72492562c74241352aac55881",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 2,
       "unparsable": []
     },
@@ -72,6 +77,7 @@
       "parent": "606e1b84dc88fd1af117c4a783e9bd17dc0d5aba",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 11,
       "unparsable": []
     },
@@ -81,6 +87,7 @@
       "parent": "a1e880a2d5ca5942e974e9fe5e6ca19df8480672",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -90,6 +97,7 @@
       "parent": "44c826de90ce61261fc52737777ea74f8bb6de22",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -99,6 +107,7 @@
       "parent": "bdba330e73a64661d3fb5e10d699473236bc6422",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -108,6 +117,7 @@
       "parent": "b6b252f659efad5ed99a51a6897726bdd24b081f",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -117,6 +127,7 @@
       "parent": "7b42cf9df26001e02b683cc7d3becc7646a703eb",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -126,6 +137,7 @@
       "parent": "5204f76407b5de22a3db2813610cc06f56467b87",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -135,6 +147,7 @@
       "parent": "91d527496abafe9816f1bbafc946e4b4357e32d8",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -144,6 +157,7 @@
       "parent": "ae31078252fea8c9a267e9f210a984e49a9560ef",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 6,
       "unparsable": []
     },
@@ -153,6 +167,7 @@
       "parent": "db582b9d572137c1ba162f8c3796340b346c056c",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -162,6 +177,7 @@
       "parent": "832114005a614d8b5c2627de44bfead3456ed944",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -171,6 +187,7 @@
       "parent": "afc5602bbfae6183bb3e3e3ebcc1927f4a5be36f",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -180,6 +197,7 @@
       "parent": "6c01deef06055ef36858a53dacf0bc42fa489ad5",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -226,6 +244,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -235,6 +254,7 @@
       "parent": "ec9c20a68346b047615404bac3b019d805daec77",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -257,6 +277,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -327,6 +348,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -349,6 +371,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 9,
       "unparsable": []
     },
@@ -358,6 +381,7 @@
       "parent": "c0f04560c4442f41339d42ad0fb998eadfe37abe",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -365,25 +389,12 @@
       "seq": 79,
       "commit": "a6c2e5e812ac06a32c779f253372057f501f1839",
       "parent": "f861b3392ce4a131a1e050165948b70850b606ed",
-      "interfaces": [
+      "interfaces": [],
+      "signatureMissing": [],
+      "absentInHuman": [
         {
           "module": "strands.telemetry.metrics",
-          "newModule": false,
-          "names": [
-            {
-              "name": "metrics_sdk",
-              "kind": "other",
-              "params": null,
-              "returns": null
-            }
-          ]
-        }
-      ],
-      "signatureMissing": [
-        {
-          "module": "strands.telemetry.metrics",
-          "name": "metrics_sdk",
-          "reason": "definition not found"
+          "name": "metrics_sdk"
         }
       ],
       "unresolvedPatchObjects": 4,
@@ -395,6 +406,7 @@
       "parent": "a6c2e5e812ac06a32c779f253372057f501f1839",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -453,6 +465,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -462,6 +475,7 @@
       "parent": "e448bea9e42298b31047ac8d2a616b29819563c1",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -471,6 +485,7 @@
       "parent": "c2d2d4f92f075d78a779d50fe5b294280469a3d9",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -529,6 +544,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 18,
       "unparsable": []
     },
@@ -551,6 +567,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -573,6 +590,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 5,
       "unparsable": []
     },
@@ -582,6 +600,7 @@
       "parent": "29dfce6b9c4626f48c9892b92d843044d2db6920",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -628,6 +647,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 2,
       "unparsable": []
     },
@@ -637,6 +657,7 @@
       "parent": "5bf5d6602ae45833aed9de2cecfbd0903b3cde7a",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -677,6 +698,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -686,6 +708,7 @@
       "parent": "187285680c0287ac30ec98bc630fef030c4a25b5",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -708,6 +731,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -730,6 +754,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -739,6 +764,7 @@
       "parent": "1adf5f164eb4936eef66c6a22b69bf245d065e86",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -748,6 +774,7 @@
       "parent": "33f139b704b6459e75b76b5ebee28a71acd9dfdd",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -757,6 +784,7 @@
       "parent": "8e403d7803bae531e411c2c8357ce6477ed6468a",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -779,6 +807,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -807,6 +836,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -829,6 +859,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -857,6 +888,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 10,
       "unparsable": []
     },
@@ -866,6 +898,7 @@
       "parent": "27a30e05af24ef5696cb5b6e5a2edff9c09603c2",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -875,6 +908,7 @@
       "parent": "26ee1a11c8a07303b8461d62f34afaf8d4a4d39c",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -897,6 +931,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 10,
       "unparsable": []
     },
@@ -906,6 +941,7 @@
       "parent": "022e5a51a95fef4571b55ef23b95b88864039696",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 8,
       "unparsable": []
     },
@@ -915,6 +951,7 @@
       "parent": "9be952fde72d8419a1858f6402a418e1b9f83bb9",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 2,
       "unparsable": []
     },
@@ -955,6 +992,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1043,6 +1081,7 @@
           "reason": "constructor not determined"
         }
       ],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1052,6 +1091,7 @@
       "parent": "0918098a0c8e74b0ea94d72da00f7a1ca303b035",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 23,
       "unparsable": []
     },
@@ -1061,6 +1101,7 @@
       "parent": "61deac51e4ca595a5fb3ebaf0b37ab58db53afd2",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1083,6 +1124,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1092,6 +1134,7 @@
       "parent": "24bc5c3d5b6f40002f154d4dedaee04d8f543042",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1174,6 +1217,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 2,
       "unparsable": []
     },
@@ -1183,6 +1227,7 @@
       "parent": "aba32d93837c0edc77d2f3d89c53be75eaae8e36",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1244,6 +1289,7 @@
           "reason": "constructor not determined"
         }
       ],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1272,6 +1318,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1281,6 +1328,7 @@
       "parent": "e1f35db2cadab1305e65190328da5f4a39585c1a",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 4,
       "unparsable": []
     },
@@ -1290,6 +1338,7 @@
       "parent": "55803bc7e534d0b9b656f9399a00426bb2e7e604",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1486,6 +1535,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1495,6 +1545,7 @@
       "parent": "e3f3ee49d4f5e1f94bc489df6f8603ce26442c31",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1504,6 +1555,7 @@
       "parent": "b31169e7c94e215bc5ba90e958898dacb2291557",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1513,6 +1565,7 @@
       "parent": "0bce4ed9371aeab0f16c941a96e092b225d771f2",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 9,
       "unparsable": []
     },
@@ -1522,6 +1575,7 @@
       "parent": "def3be9b4d89b77e348d2d7444e4e19a3a052b50",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1531,6 +1585,7 @@
       "parent": "f86a170632ff64231df9a5761b0b4a7a35cee65b",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1601,6 +1656,7 @@
           "reason": "constructor not determined"
         }
       ],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1610,6 +1666,7 @@
       "parent": "a642b4177ba14dba41ef296d510d68f718f60ebb",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1619,6 +1676,7 @@
       "parent": "5f636bbc2b8c866ca009470a719c3e6c038e950c",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1628,6 +1686,7 @@
       "parent": "bebf3e83c6c8fe43ddc66f7ee2652b68cdf4a198",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1637,6 +1696,7 @@
       "parent": "21b27d404570e466d61157f02006193c5a45ebe1",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 6,
       "unparsable": []
     },
@@ -1646,6 +1706,7 @@
       "parent": "42e5a61bd98c3caf6b21c2f2e69a8bbd58eb7562",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1655,6 +1716,7 @@
       "parent": "6d4f61f2849e7eb401c3f617e620cb7feef6b331",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1664,6 +1726,7 @@
       "parent": "e5ebbd67d0968b6839bac92a15108cb7b6a0b25a",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1703,6 +1766,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1712,6 +1776,7 @@
       "parent": "66101c7d5f810dc744b5be18b933af3441e00210",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1721,6 +1786,7 @@
       "parent": "1efa1eeffa7e3e7c8233c8866724e45a6667a5c9",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1730,6 +1796,7 @@
       "parent": "08cc6e78886ce07fc38971fafc3307ea2d864a08",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1770,6 +1837,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1779,6 +1847,7 @@
       "parent": "1b13f6cdbdfaaaf9b687b102ebb2acdd6e056bc3",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 5,
       "unparsable": []
     },
@@ -1849,6 +1918,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 3,
       "unparsable": []
     },
@@ -1883,6 +1953,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 2,
       "unparsable": []
     },
@@ -1922,6 +1993,7 @@
           "reason": "constructor not determined"
         }
       ],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 2,
       "unparsable": []
     },
@@ -1931,6 +2003,7 @@
       "parent": "7bda6c70e71cd07279470268c3d3b3f4b36adf53",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 0,
       "unparsable": []
     },
@@ -1940,6 +2013,7 @@
       "parent": "9663bcfa538b12599471b8f8ad62cb271311397d",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     },
@@ -1949,6 +2023,7 @@
       "parent": "f8002283c6d7bde8cb1f7862363b70c43466b70f",
       "interfaces": [],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 5,
       "unparsable": []
     },
@@ -1983,6 +2058,7 @@
         }
       ],
       "signatureMissing": [],
+      "absentInHuman": [],
       "unresolvedPatchObjects": 1,
       "unparsable": []
     }
