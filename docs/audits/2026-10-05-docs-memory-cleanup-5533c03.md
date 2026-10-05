@@ -194,3 +194,32 @@
   `src/memory/update-memory-tool.test.ts` 0.4 秒，都不进慢档。
 - 验证服务器上补做"两进程并发写不丢条目"的变异：`withMemoryLock` 不取锁直接执行，连跑三次，每次都是依赖锁的三条变红，
   两进程并发用例败在条目内容的比对上（Linux 上表现为丢条目）；用 git 还原后工作区无改动。
+
+## 十、补充：/memory edit 排队保存与迁移说明
+
+### /memory edit 保存时排队（528ff18）
+
+- 现状：第四节所述，/memory edit 保存时与 update_memory 同用 `withMemoryLock`，等 10 秒仍拿不到锁即报错，界面显示"命令失败"。
+- 改法：
+  - `withMemoryLock` 加第四个参数：取消信号与"第一次没拿到锁"的回调；`waitMs` 可为 Infinity（不设上限）；等待途中被取消抛
+    `MemoryLockAbortedError`，work 不执行。update_memory 的 10 秒上限与回话不变。
+  - `editMemoryLayer` 保存时以不设上限的方式等锁；第一次没拿到锁起计时，满 1 秒仍在等才回调 `onWaiting`（一闪而过的不回调），
+    轮到或取消即撤掉计时。取消时返回"没有保存，你改的内容留在 <编辑稿路径>。"，原文件不动、编辑稿保留。轮到后照原流程保存
+    （含编辑期间原文件被改即不覆盖的检查）；出错时编辑稿保留。
+  - 终端界面：`onWaiting` 时显示"正在保存记忆…（Esc 取消）"，并经壳新增的 `captureEscape` 接管 Esc（排在其余按键处理之前，
+    审批挂起时不接管），按下即取消；保存结束交还 Esc。给使用者的文字不提锁。
+  - docs/configuration.md 的 /memory 一条补上排队、提示与取消的说明。
+- 测试：`src/application/memory-command.test.ts` 新增"排队等到后保存成功、提示只出现一次、编辑稿删掉"与"取消时原文件不变、编辑稿保留改过的内容、
+  回话指出编辑稿位置"两条；`src/tui/memory-command.test.ts` 新增一条界面冒烟：提示出现后按 Esc，取消信号触发、结果落消息区。
+- 变异：取消时删掉编辑稿 → 只有取消那一条变红；还原后文件逐字一致。
+- 测试量：产品代码 +121/−24 行，测试 +94/−2 行。
+
+### 迁移说明（4f40073）
+
+- docs/configuration.md 迁移一节写明：迁移会去掉旧 `web.json` 里 key 的原文、不保留任何副本，也不因环境变量没设而拦住；迁移前先把 key
+  设进对应的环境变量或另行保存。迁移的行为不变。
+
+### verify
+
+- 验证服务器第三轮：提交 4f40073，`TEST_CONCURRENCY=6 npm run verify:full`：lint、check 通过；测试 325 个文件全部通过，1842 项通过、7 项跳过，
+  用时 140.6 秒；deps 无违例；退出码 0。
