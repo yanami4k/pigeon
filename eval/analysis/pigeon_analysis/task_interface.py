@@ -10,7 +10,8 @@
 
 逐个对照该题开工代码（起点提交）判断存在，规则同 316（unguessable.StartCode：模块路径、模块作用域绑定、子模块；
 无法静态判定的模块一律当作存在）；名字后还带一级属性的，再看起点里该类的类体（及能换算出的项目内基类）有没有这个属性，
-不是类或基类换算不出即当作存在。不存在的模块与名字逐个从人在该步的代码里取签名：
+不是类或基类换算不出即当作存在。开工时不存在、人在该步的代码里按同一判定也不存在的（运行时由静态规则认不出的途径解析）不列，只计数。
+其余不存在的模块与名字逐个从人在该步的代码里取签名：
 - 类给构造参数：类体有 __init__ 取其参数（去掉 self）；dataclass、NamedTuple 以字段为位置参数，pydantic BaseModel 与
   TypedDict 以字段为仅限关键字参数（项目内基类的字段排在前面）；没有 __init__ 时沿项目内基类找；基类只有 object、ABC、
   Protocol、Generic 时为空参数；其余（项目外基类、Enum 等）只给名字；
@@ -446,6 +447,7 @@ def task_interfaces(step: dict[str, Any], fail_to_pass: list[str], read: ReadFil
         wanted += [r for r in refs if r not in wanted]
     modules: dict[str, dict[str, Any]] = {}
     missing_sig: list[dict[str, str]] = []
+    absent: list[dict[str, str]] = []
     for module, qualname in wanted:
         head, _, attr = qualname.partition(".")
         if head and human.code.module_exists(f"{module}.{head}") and not start.code.module_exists(
@@ -460,9 +462,16 @@ def task_interfaces(step: dict[str, Any], fail_to_pass: list[str], read: ReadFil
             continue
         elif not start.code.defines(module, head):
             attr = ""
+        name = f"{head}.{attr}" if attr else head
+        # 人的代码里按同一静态判定也没有的不列：运行时由静态规则认不出的途径解析（列出来反成错误提示），只计数
+        if (human.code.first_missing(module) is not None
+                or (head and not human.code.defines(module, head))
+                or (attr and not _start_has_attr(human, module, head, attr))):
+            if {"module": module, "name": name} not in absent:
+                absent.append({"module": module, "name": name})
+            continue
         entry = modules.setdefault(module, {"module": module,
                                             "newModule": start.code.first_missing(module) is not None, "names": []})
-        name = f"{head}.{attr}" if attr else head
         if not name or any(n["name"] == name for n in entry["names"]):
             continue
         sig, reason = signature(human, module, name)
@@ -471,7 +480,8 @@ def task_interfaces(step: dict[str, Any], fail_to_pass: list[str], read: ReadFil
             missing_sig.append({"module": module, "name": name, "reason": reason})
     interfaces = [dict(m, names=sorted(m["names"], key=lambda n: n["name"])) for _, m in sorted(modules.items())]
     return {"seq": step["seq"], "commit": step["commit"], "parent": step["parent"], "interfaces": interfaces,
-            "signatureMissing": missing_sig, "unresolvedPatchObjects": unresolved, "unparsable": unparsable}
+            "signatureMissing": missing_sig, "absentInHuman": absent, "unresolvedPatchObjects": unresolved,
+            "unparsable": unparsable}
 
 
 def render_section(interfaces: list[dict[str, Any]]) -> str:
@@ -518,6 +528,7 @@ def build(steps: list[dict[str, Any]], fail_to_pass: dict[int, list[str]], read:
             "newModules": sum(1 for t in tasks for m in t["interfaces"] if m["newModule"]),
             "names": sum(len(m["names"]) for t in tasks for m in t["interfaces"]),
             "signatureMissing": sum(len(t["signatureMissing"]) for t in tasks),
+            "absentInHuman": sum(len(t["absentInHuman"]) for t in tasks),
             "unresolvedPatchObjects": sum(t["unresolvedPatchObjects"] for t in tasks),
             "unparsableFiles": sum(len(t["unparsable"]) for t in tasks),
         },

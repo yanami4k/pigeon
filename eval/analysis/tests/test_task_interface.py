@@ -104,6 +104,13 @@ class TestExistence:
         assert lines(result) == ["strands.agent.agent", "  def Agent._retry(self, times: int = 3) -> bool",
                                  "  def helper(x: int, *, scale: float = 1.0, cb=...) -> str"]
 
+    def test_absent_in_human_code_too_is_counted_not_listed(self):
+        src = ("from strands.agent.agent import helper, ghost\nimport strands.nowhere\n"
+               "@patch('strands.agent.agent.Agent.nope')\ndef test(): pass\n")
+        result, *_ = run(src)
+        assert {n["name"] for m in result["interfaces"] for n in m["names"]} == {"helper"}
+        assert [a["name"] for a in result["absentInHuman"]] == ["ghost", "", "Agent.nope"]
+
     def test_new_module_is_marked_and_lists_its_names(self):
         # import 新模块本身也列出，只有模块一行
         result, *_ = run("from strands.bidi.audio import Buffer\nimport strands.bidi\n")
