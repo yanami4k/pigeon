@@ -28,6 +28,8 @@ export interface StreamRunIdentity {
     promptFormat: string;
     // 题面的版式（两段名单等）：格式相同而版式不同，结果不能混
     promptLayout: string;
+    // 题面接口说明的数据文件摘要（374）：只在给了接口数据时记；没给时没有这一项，身份与之前相同
+    taskInterfaces?: string;
     // 选了哪些题（202、219）：全部、给定题号，或按种子抽样（选法、种子、样本数与抽出的题号都记下）
     taskSelection: TaskSelection;
     maxSteps: number | null;

@@ -739,6 +739,7 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 //   [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑：只跑前 K 道题）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
 //   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases]
+//   [--task-interfaces <接口数据文件>（题面在名单之后加接口说明，决策 374；清单摘要须与本次清单相符，缺省不加）]
 //   [--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>]（上下文压缩的触发点与保留量，缺省为产品缺省；
 //   集成冒烟调低触发点验证压缩，决策 218）
 //   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]
@@ -764,6 +765,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     `--conditions ${STREAM_CONDITIONS.join(",")}[,ext-<名字>…] [--external-agent <配置文件>]… [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
+    "[--task-interfaces <接口数据文件>] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
@@ -779,6 +781,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--out",
     "--conditions",
     "--prompt-format",
+    "--task-interfaces",
     "--attempts",
     "--concurrency",
     "--max-steps",
@@ -981,6 +984,9 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
     ...(externalAgents.length > 0 ? { externalAgents } : {}),
     ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
+    ...(values.has("--task-interfaces")
+      ? { taskInterfacesFile: required("--task-interfaces") }
+      : {}),
     ...(attempts !== undefined ? { attempts } : {}),
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(maxSteps !== undefined ? { maxSteps } : {}),

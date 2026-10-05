@@ -32,6 +32,7 @@ import { gitHumanRepo, type HumanRepo, ReferenceWorkspace } from "./stream-facts
 import { checkOrWriteIdentity, manifestDigestOf, readStoredIdentity } from "./stream-identity.ts";
 import {
   composeStreamManifest,
+  interfacesSection,
   markHumanGateFailures,
   type StreamManifest,
   TASK_CHAIN_SCOPE,
@@ -1204,6 +1205,22 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
         agent.calls[0]?.prompt ?? "",
         /^Add alpha\n\nCreate src\/a\.txt\n\nTest cases that should pass[^\n]*\nsrc\/a\.test\.sh::case\nsrc\/base\.test\.sh::case\n$/
       );
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
+  test("题面的接口说明（374）：按步号接在名单之后，数据里没有的步不加", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent(solve);
+      const interfaces = [{ module: "src.alpha", newModule: true, names: [] }];
+      await runStreams(
+        options(t, { agents: { pigeon: agent }, taskInterfaces: new Map([[1, interfaces]]) })
+      );
+      const [first, second] = agent.calls.map((c) => c.prompt);
+      assert.ok(first?.endsWith(`\nsrc/base.test.sh\n\n${interfacesSection(interfaces)}\n`), first);
+      assert.ok(second !== undefined && !second.includes(interfacesSection(interfaces)), second);
     } finally {
       rmSync(t.base, { recursive: true, force: true });
     }

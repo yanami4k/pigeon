@@ -249,6 +249,38 @@ test("输出目录的锁在读清单、写身份头、起网关探测之前取�
   }
 });
 
+test("接口数据的清单摘要与本次清单不符（374）：在写身份头、起容器之前拒绝开跑", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-interfaces-"));
+  try {
+    const manifestFile = join(dir, "manifest.json");
+    writeFileSync(manifestFile, JSON.stringify({ ...taskManifest(1), repo: "strands-py" }));
+    const interfacesFile = join(dir, "task-interfaces.json");
+    writeFileSync(
+      interfacesFile,
+      JSON.stringify({ manifestDigest: "0000000000000000", tasks: [] })
+    );
+    const outDir = join(dir, "out");
+    await assert.rejects(
+      runStreamExperiment({
+        manifestFile,
+        taskInterfacesFile: interfacesFile,
+        repoDir: dir,
+        image: "img",
+        outDir,
+        conditions: ["search-only"],
+        gateway: { accounts: [{ key: "k", concurrency: 2 }], modelId: "m" },
+        budget: DEFAULT_STEP_BUDGET,
+        // 摘要检查若排在取镜像身份之后，这里会先报 docker 起不来
+        docker: [join(dir, "no-docker")],
+      }),
+      /清单摘要/
+    );
+    assert.equal(existsSync(join(outDir, "identity.json")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // 一份只有题的清单：第 i 道题的提交为 c<i>、步序为 2i（中间隔着不跑的步）
 function taskManifest(n: number): StreamManifest {
   const steps = Array.from(
