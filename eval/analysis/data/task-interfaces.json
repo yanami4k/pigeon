@@ -1,0 +1,1990 @@
+{
+  "rule": "decisions 374",
+  "manifestDigest": "d80b3a59b88cfefe",
+  "summary": {
+    "tasks": 89,
+    "tasksWithInterfaces": 33,
+    "newModules": 34,
+    "names": 122,
+    "signatureMissing": 9,
+    "unresolvedPatchObjects": 214,
+    "unparsableFiles": 0
+  },
+  "tasks": [
+    {
+      "seq": 3,
+      "commit": "9137149544c906630db0d7a19b1a9f7c4c95b463",
+      "parent": "e09d4d63f3b6a5d484f60680fe284f10e012d27b",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 8,
+      "commit": "3547e88842902fbbd53d16cc4abd8e1b3cc89cb1",
+      "parent": "c186207cf99e735be48de749660a8c3d77f779d0",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.audio",
+          "newModule": true,
+          "names": [
+            {
+              "name": "AudioProcessorConfig",
+              "kind": "class",
+              "params": "echo_cancellation: bool = True, stream_delay_ms: int = 0",
+              "returns": null
+            },
+            {
+              "name": "_AudioProcessor",
+              "kind": "class",
+              "params": "config: AudioProcessorConfig, max_ref_frames: int | None = None",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 9,
+      "commit": "4654a6c0dd5995db700a9a755ab8ebb969eeb304",
+      "parent": "3547e88842902fbbd53d16cc4abd8e1b3cc89cb1",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 17,
+      "commit": "606e1b84dc88fd1af117c4a783e9bd17dc0d5aba",
+      "parent": "f79ce81011273bc72492562c74241352aac55881",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 2,
+      "unparsable": []
+    },
+    {
+      "seq": 18,
+      "commit": "7f9a0b8922938bde3274d047f5dd4fb023d36ee5",
+      "parent": "606e1b84dc88fd1af117c4a783e9bd17dc0d5aba",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 11,
+      "unparsable": []
+    },
+    {
+      "seq": 21,
+      "commit": "697c833dfd8ab51c3ea9b977b4ad024cdbb28bb4",
+      "parent": "a1e880a2d5ca5942e974e9fe5e6ca19df8480672",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 31,
+      "commit": "aac15db5478d61ed33478b90fea59fa888687618",
+      "parent": "44c826de90ce61261fc52737777ea74f8bb6de22",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 39,
+      "commit": "36289b8dbabc0ebd6ed0926bea27dc3397925cf1",
+      "parent": "bdba330e73a64661d3fb5e10d699473236bc6422",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 44,
+      "commit": "cab36d0a5d88c174ed845bbdbca85b919ad221b3",
+      "parent": "b6b252f659efad5ed99a51a6897726bdd24b081f",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 46,
+      "commit": "5204f76407b5de22a3db2813610cc06f56467b87",
+      "parent": "7b42cf9df26001e02b683cc7d3becc7646a703eb",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 47,
+      "commit": "d12b7b8c2da4f0d290dc430753bf8812c78bb670",
+      "parent": "5204f76407b5de22a3db2813610cc06f56467b87",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 49,
+      "commit": "f34de8c0885b43ee5158e6156e913c73c4684ec1",
+      "parent": "91d527496abafe9816f1bbafc946e4b4357e32d8",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 54,
+      "commit": "08d71e5fd9af86b449bfb5900cca2d86bce89ae7",
+      "parent": "ae31078252fea8c9a267e9f210a984e49a9560ef",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 6,
+      "unparsable": []
+    },
+    {
+      "seq": 59,
+      "commit": "832114005a614d8b5c2627de44bfead3456ed944",
+      "parent": "db582b9d572137c1ba162f8c3796340b346c056c",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 60,
+      "commit": "afc5602bbfae6183bb3e3e3ebcc1927f4a5be36f",
+      "parent": "832114005a614d8b5c2627de44bfead3456ed944",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 61,
+      "commit": "6c01deef06055ef36858a53dacf0bc42fa489ad5",
+      "parent": "afc5602bbfae6183bb3e3e3ebcc1927f4a5be36f",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 62,
+      "commit": "5cadef436a26a623bdcf4435bf402b873721d038",
+      "parent": "6c01deef06055ef36858a53dacf0bc42fa489ad5",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 64,
+      "commit": "90e05868eb8cd182245f04316850daf7e2855c43",
+      "parent": "f40adf00c23c3b4118d43686c53c40aba4ff1251",
+      "interfaces": [
+        {
+          "module": "strands.models.routing.classifier_strategy",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_CLASSIFICATION_OMISSION_MARKER",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_DEFAULT_MESSAGE_CHARACTER_LIMIT",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_NO_REQUEST_TEXT",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_build_candidate_profiles",
+              "kind": "function",
+              "params": "candidates: Sequence[RoutingCandidate], character_limit: int",
+              "returns": "tuple[dict[str, Any], ...]"
+            },
+            {
+              "name": "_latest_request_text",
+              "kind": "function",
+              "params": "messages: Messages, character_limit: int = _DEFAULT_MESSAGE_CHARACTER_LIMIT",
+              "returns": "str"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 67,
+      "commit": "4a23c8f17eefa6c1a63bc25754bfc5b08fd4a713",
+      "parent": "ec9c20a68346b047615404bac3b019d805daec77",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 68,
+      "commit": "647128383ea9ba4598d3cf47e376642091d339d9",
+      "parent": "4a23c8f17eefa6c1a63bc25754bfc5b08fd4a713",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.nova_sonic",
+          "newModule": false,
+          "names": [
+            {
+              "name": "AsyncBedrockRuntimeClient",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 69,
+      "commit": "518113356687d39aae83649738f12d578e11d6ca",
+      "parent": "647128383ea9ba4598d3cf47e376642091d339d9",
+      "interfaces": [
+        {
+          "module": "strands.storage.search.keyword",
+          "newModule": true,
+          "names": [
+            {
+              "name": "KeywordSearchStrategy",
+              "kind": "class",
+              "params": "",
+              "returns": null
+            },
+            {
+              "name": "token_overlap_score",
+              "kind": "function",
+              "params": "query_tokens: set[str], content: str",
+              "returns": "int"
+            },
+            {
+              "name": "tokenize",
+              "kind": "function",
+              "params": "text: str",
+              "returns": "set[str]"
+            }
+          ]
+        },
+        {
+          "module": "strands.storage.storage",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_resolve_namespace",
+              "kind": "function",
+              "params": "storage: Storage, prefix: str",
+              "returns": "Storage"
+            }
+          ]
+        },
+        {
+          "module": "strands.vended_memory_stores.file_memory_store",
+          "newModule": true,
+          "names": [
+            {
+              "name": "FileMemoryStore",
+              "kind": "class",
+              "params": "**config: Unpack[FileMemoryStoreConfig]",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.vended_memory_stores.file_memory_store.store",
+          "newModule": true,
+          "names": [
+            {
+              "name": "ModelExtractor",
+              "kind": "class",
+              "params": "model: Model | None = None, system_prompt: str | None = None",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 73,
+      "commit": "726b71a57e2975976499c045c9c01d810955ce48",
+      "parent": "c3c3881c794314e7ba03d400395b5dc709396513",
+      "interfaces": [
+        {
+          "module": "strands.models.bedrock",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_next_stream_event",
+              "kind": "async function",
+              "params": "queue: 'asyncio.Queue[StreamEvent | None]', cancel_poll: 'asyncio.Future[None] | None'",
+              "returns": "'StreamEvent | None'"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 9,
+      "unparsable": []
+    },
+    {
+      "seq": 76,
+      "commit": "1e5ff58667aed26b35aebbdf6da3907a3697872d",
+      "parent": "c0f04560c4442f41339d42ad0fb998eadfe37abe",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 79,
+      "commit": "a6c2e5e812ac06a32c779f253372057f501f1839",
+      "parent": "f861b3392ce4a131a1e050165948b70850b606ed",
+      "interfaces": [
+        {
+          "module": "strands.telemetry.metrics",
+          "newModule": false,
+          "names": [
+            {
+              "name": "metrics_sdk",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [
+        {
+          "module": "strands.telemetry.metrics",
+          "name": "metrics_sdk",
+          "reason": "definition not found"
+        }
+      ],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 80,
+      "commit": "01a5aadb4882bf95297fab6aeb4bf8d1ba365670",
+      "parent": "a6c2e5e812ac06a32c779f253372057f501f1839",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 82,
+      "commit": "23d39acacc884df9df78eaf52278b2fc8db32f1c",
+      "parent": "45bcea8845d79ebc21c98f56f915b42113bff334",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.agent._reconnect_timer",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_BidiReconnectTimer",
+              "kind": "class",
+              "params": "on_warning: Callable[[float], Awaitable[None]], on_deadline: Callable[[], Awaitable[None]], sleep: Callable[[float], Awaitable[None]] | None = None",
+              "returns": null
+            },
+            {
+              "name": "resolve_deadline_s",
+              "kind": "function",
+              "params": "connection_config: BidiConnectionConfig",
+              "returns": "float | None"
+            }
+          ]
+        },
+        {
+          "module": "strands.experimental.bidi.agent.loop",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_ReaderError",
+              "kind": "class",
+              "params": "generation: int, error: Exception",
+              "returns": null
+            },
+            {
+              "name": "_TURN_ALIGN_WAIT_S",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.experimental.bidi.types.events",
+          "newModule": false,
+          "names": [
+            {
+              "name": "BidiConnectionWarningEvent",
+              "kind": "class",
+              "params": "time_left_s: float",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 88,
+      "commit": "eabcb137adbb2478edc9217b2ed42d17db683807",
+      "parent": "e448bea9e42298b31047ac8d2a616b29819563c1",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 90,
+      "commit": "ed05dcff0223fa30593988ebc4eb36d4eb01fb63",
+      "parent": "c2d2d4f92f075d78a779d50fe5b294280469a3d9",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 93,
+      "commit": "534692a8a5a39c2e2d552c06fd220c9d76381123",
+      "parent": "32891487090e9f4531602306843784b367735559",
+      "interfaces": [
+        {
+          "module": "strands.tools.mcp._compat",
+          "newModule": true,
+          "names": [
+            {
+              "name": "MCPError",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "MCP_V2",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "streamable_http_transport",
+              "kind": "function",
+              "params": "url: str, headers: dict[str, str] | None = None, auth: httpx.Auth | None = None",
+              "returns": "AbstractAsyncContextManager[Any]"
+            }
+          ]
+        },
+        {
+          "module": "strands.tools.mcp.mcp_client",
+          "newModule": false,
+          "names": [
+            {
+              "name": "streamable_http_transport",
+              "kind": "function",
+              "params": "url: str, headers: dict[str, str] | None = None, auth: httpx.Auth | None = None",
+              "returns": "AbstractAsyncContextManager[Any]"
+            }
+          ]
+        },
+        {
+          "module": "strands.tools.mcp.mcp_instrumentation",
+          "newModule": false,
+          "names": [
+            {
+              "name": "MCP_V2",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 18,
+      "unparsable": []
+    },
+    {
+      "seq": 94,
+      "commit": "00dd3c560c129f9a780bdefe2b9960d9ac79e362",
+      "parent": "534692a8a5a39c2e2d552c06fd220c9d76381123",
+      "interfaces": [
+        {
+          "module": "strands.tools.mcp._compat",
+          "newModule": false,
+          "names": [
+            {
+              "name": "negotiate_session",
+              "kind": "async function",
+              "params": "session: ClientSession",
+              "returns": "tuple[str | None, ServerCapabilities | None]"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 97,
+      "commit": "29dfce6b9c4626f48c9892b92d843044d2db6920",
+      "parent": "02bbf0a51eb3f52e5ffc426c0225f8ae919e12c9",
+      "interfaces": [
+        {
+          "module": "strands.interrupt",
+          "newModule": false,
+          "names": [
+            {
+              "name": "PendingToolExecution",
+              "kind": "class",
+              "params": "assistant_message: 'Message', completed_tool_results: list['ToolResult']",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 5,
+      "unparsable": []
+    },
+    {
+      "seq": 98,
+      "commit": "7cec80de04812b8350dac486a4e6b82110ee5054",
+      "parent": "29dfce6b9c4626f48c9892b92d843044d2db6920",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 103,
+      "commit": "4705f0c161893a1c408ea7e2ac638343858fd026",
+      "parent": "d8f250dc1e669169ed6bb8024b096a137c51703c",
+      "interfaces": [
+        {
+          "module": "strands.agent._continuation",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_ContinuationInput",
+              "kind": "class",
+              "params": "args: AgentInput, on_appended: Callable[[], Awaitable[None] | None] | None = None, on_abandoned: Callable[[object], Awaitable[None] | None] | None = None",
+              "returns": null
+            },
+            {
+              "name": "_is_complete_message_input",
+              "kind": "function",
+              "params": "messages: Messages",
+              "returns": "bool"
+            },
+            {
+              "name": "abandon",
+              "kind": "async function",
+              "params": "event: _ContinuationEvent | None, reason: object",
+              "returns": "None"
+            },
+            {
+              "name": "add_input",
+              "kind": "function",
+              "params": "event: _ContinuationEvent, input_: _ContinuationInput",
+              "returns": "None"
+            },
+            {
+              "name": "prepare",
+              "kind": "async function",
+              "params": "event: _ContinuationEvent, normalize_input: Callable[[AgentInput], Awaitable[Messages]], stop_reason: str | None = None",
+              "returns": "Messages | None"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 2,
+      "unparsable": []
+    },
+    {
+      "seq": 105,
+      "commit": "36c9e410779324d5feddfb500e0a016c11a9caf3",
+      "parent": "5bf5d6602ae45833aed9de2cecfbd0903b3cde7a",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 109,
+      "commit": "187285680c0287ac30ec98bc630fef030c4a25b5",
+      "parent": "f2f15f46a52f907073598845511ccccdd667ae51",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi._audio",
+          "newModule": true,
+          "names": [
+            {
+              "name": "AudioProcessor",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_BidiAudioProcessor",
+              "kind": "class",
+              "params": "*, echo_cancellation: bool, stream_delay_ms: int, far_buffer_size: int | None",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.experimental.bidi.io.audio",
+          "newModule": false,
+          "names": [
+            {
+              "name": "BidiAudioProcessorConfig",
+              "kind": "class",
+              "params": "*, echo_cancellation: bool, stream_delay_ms: int",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 110,
+      "commit": "7b0f874c8e9abd1e6a845b32025b1936d7a3d4c8",
+      "parent": "187285680c0287ac30ec98bc630fef030c4a25b5",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 111,
+      "commit": "c1a8884ef78bbb30c44461e14d23b95461cdd18a",
+      "parent": "7b0f874c8e9abd1e6a845b32025b1936d7a3d4c8",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.google",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_TurnState",
+              "kind": "class",
+              "params": "response_open: bool = False, response_id: str | None = None",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 112,
+      "commit": "f51718ebb13a79f3153ec1cfe7b4edafaed8f37a",
+      "parent": "c1a8884ef78bbb30c44461e14d23b95461cdd18a",
+      "interfaces": [
+        {
+          "module": "strands.models.sagemaker",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_parse_event_stream",
+              "kind": "function",
+              "params": "body: Iterable[Any]",
+              "returns": "Iterator[dict[str, Any]]"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 115,
+      "commit": "b0ff9008599d89f531a0e5b2010311fb5d9cbc2c",
+      "parent": "1adf5f164eb4936eef66c6a22b69bf245d065e86",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 117,
+      "commit": "8e403d7803bae531e411c2c8357ce6477ed6468a",
+      "parent": "33f139b704b6459e75b76b5ebee28a71acd9dfdd",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 118,
+      "commit": "df837aa80ecbcbd7120d996d1ecb990ab46e8bc0",
+      "parent": "8e403d7803bae531e411c2c8357ce6477ed6468a",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 120,
+      "commit": "577a9d6a1ebbc4cb1edfc794ea4deb039b43f1d6",
+      "parent": "6d325efc5f37ac6697ce7d4d533745e4b9b41005",
+      "interfaces": [
+        {
+          "module": "strands",
+          "newModule": false,
+          "names": [
+            {
+              "name": "LocalAgent",
+              "kind": "class",
+              "params": "",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 121,
+      "commit": "48d360d52728679ea334d15d835fb83871d566ca",
+      "parent": "577a9d6a1ebbc4cb1edfc794ea4deb039b43f1d6",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.openai",
+          "newModule": false,
+          "names": [
+            {
+              "name": "OPENAI_PROACTIVE_RECONNECT_MARGIN_S",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_RECONNECT_INSTRUCTION",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 122,
+      "commit": "47b9dadd4981234be36939c8046fff695b4de618",
+      "parent": "48d360d52728679ea334d15d835fb83871d566ca",
+      "interfaces": [
+        {
+          "module": "strands.tools.mcp.mcp_client",
+          "newModule": false,
+          "names": [
+            {
+              "name": "compat_call_tool",
+              "kind": "async function",
+              "params": "session: ClientSession, name: str, arguments: dict[str, Any] | None, read_timeout_seconds: timedelta | None, progress_callback: Any, meta: Any",
+              "returns": "Any"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 126,
+      "commit": "27a30e05af24ef5696cb5b6e5a2edff9c09603c2",
+      "parent": "f271cabac3a792c3b9f62da63bb651166539d183",
+      "interfaces": [
+        {
+          "module": "strands.tools.mcp.mcp_client",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_TOOLS_CHANGED_DEBOUNCE_SECONDS",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "tools_changed_subscription",
+              "kind": "async function",
+              "params": "session: ClientSession",
+              "returns": "AsyncIterator[Any]"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 10,
+      "unparsable": []
+    },
+    {
+      "seq": 127,
+      "commit": "26ee1a11c8a07303b8461d62f34afaf8d4a4d39c",
+      "parent": "27a30e05af24ef5696cb5b6e5a2edff9c09603c2",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 128,
+      "commit": "d00fed6ae426ef9da85e676661516f33b5ded0da",
+      "parent": "26ee1a11c8a07303b8461d62f34afaf8d4a4d39c",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 129,
+      "commit": "582bb48032da27fb285dfff4c2971e944146193f",
+      "parent": "d00fed6ae426ef9da85e676661516f33b5ded0da",
+      "interfaces": [
+        {
+          "module": "strands.tools.mcp.mcp_client",
+          "newModule": false,
+          "names": [
+            {
+              "name": "MCP_V2",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 10,
+      "unparsable": []
+    },
+    {
+      "seq": 134,
+      "commit": "9be952fde72d8419a1858f6402a418e1b9f83bb9",
+      "parent": "022e5a51a95fef4571b55ef23b95b88864039696",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 8,
+      "unparsable": []
+    },
+    {
+      "seq": 135,
+      "commit": "d1da8a050fca18fec61387c77b519ca3c8ca6f0a",
+      "parent": "9be952fde72d8419a1858f6402a418e1b9f83bb9",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 2,
+      "unparsable": []
+    },
+    {
+      "seq": 136,
+      "commit": "10a9b3773d548573b0303805b99f14497d7d5f71",
+      "parent": "d1da8a050fca18fec61387c77b519ca3c8ca6f0a",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.agent._reconnect_timer",
+          "newModule": false,
+          "names": [
+            {
+              "name": "BidiReconnectTimer",
+              "kind": "class",
+              "params": "on_warning: Callable[[int], Awaitable[None]], on_deadline: Callable[[], Awaitable[None]], sleep: Callable[[int], Awaitable[None]] | None = None",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.experimental.bidi.agent.loop",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_MODEL_RESTART_STOP_TIMEOUT_S",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_MODEL_RESTART_TURN_TIMEOUT_S",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 137,
+      "commit": "8cd82e63ae83377f1bc9399fd7eb2175e8a31591",
+      "parent": "10a9b3773d548573b0303805b99f14497d7d5f71",
+      "interfaces": [
+        {
+          "module": "strands.vended_tools.web_fetch",
+          "newModule": true,
+          "names": [
+            {
+              "name": "WebFetchError",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "make_web_fetch",
+              "kind": "function",
+              "params": "*, name: str = 'web_fetch', description: str | None = None, max_bytes: int = _DEFAULT_MAX_BYTES, max_content_chars: int = _DEFAULT_MAX_CONTENT_CHARS, client: httpx.AsyncClient | None = None, model: Model | None = None, mode: Literal['markdown', 'agentic'] = 'agentic'",
+              "returns": "DecoratedFunctionTool"
+            }
+          ]
+        },
+        {
+          "module": "strands.vended_tools.web_fetch._extract",
+          "newModule": true,
+          "names": [
+            {
+              "name": "BeautifulSoup",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_tag_attribute",
+              "kind": "function",
+              "params": "tag: Tag, name: str",
+              "returns": "str"
+            },
+            {
+              "name": "html_to_markdown",
+              "kind": "function",
+              "params": "html: str",
+              "returns": "str"
+            }
+          ]
+        },
+        {
+          "module": "strands.vended_tools.web_fetch.types",
+          "newModule": true,
+          "names": [
+            {
+              "name": "WEB_FETCH_DESCRIPTION_AGENTIC",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "WEB_FETCH_DESCRIPTION_MARKDOWN",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.vended_tools.web_fetch.web_fetch",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_parse_charset",
+              "kind": "function",
+              "params": "content_type: str",
+              "returns": "str"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [
+        {
+          "module": "strands.vended_tools.web_fetch",
+          "name": "WebFetchError",
+          "reason": "constructor not determined"
+        }
+      ],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 139,
+      "commit": "61deac51e4ca595a5fb3ebaf0b37ab58db53afd2",
+      "parent": "0918098a0c8e74b0ea94d72da00f7a1ca303b035",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 23,
+      "unparsable": []
+    },
+    {
+      "seq": 140,
+      "commit": "4bddde645007bc691d430af038e3fc0dc2267a2f",
+      "parent": "61deac51e4ca595a5fb3ebaf0b37ab58db53afd2",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 141,
+      "commit": "34d0362ef12b5f73e3173c638f07889dd30fc5bd",
+      "parent": "4bddde645007bc691d430af038e3fc0dc2267a2f",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.openai",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_RESTART_INSTRUCTION",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 143,
+      "commit": "2acc97487af03a46353919b12f5d87d8e845f1e9",
+      "parent": "24bc5c3d5b6f40002f154d4dedaee04d8f543042",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 145,
+      "commit": "726478d0f281d55c4c860258f96f17e3de2583c0",
+      "parent": "f4a3191b923d78781aff80a8d649af663fe74979",
+      "interfaces": [
+        {
+          "module": "strands.background_tasks._errors",
+          "newModule": true,
+          "names": [
+            {
+              "name": "BackgroundTaskNotFoundError",
+              "kind": "class",
+              "params": "task_id: str",
+              "returns": null
+            },
+            {
+              "name": "BackgroundTaskTimeoutError",
+              "kind": "class",
+              "params": "timeout: float",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.background_tasks.in_process._engine",
+          "newModule": true,
+          "names": [
+            {
+              "name": "InProcessTaskEngine",
+              "kind": "class",
+              "params": "*, max_concurrency: int, timeout: float, execute: Callable[[InProcessTaskExecutionContext], Awaitable[InProcessTaskExecutionOutcome]], on_task_updated: Callable[[InProcessTaskRecord], None]",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.background_tasks.in_process._manager",
+          "newModule": true,
+          "names": [
+            {
+              "name": "InProcessTaskManager",
+              "kind": "class",
+              "params": "agent: LocalAgent, execute_tool: Callable[[AgentTool, ToolContext[LocalAgent], _MiddlewareInterrupt], Awaitable[ToolResult]], *, max_concurrency: int = 4, timeout: float = math.inf, on_task_updated: Callable[[BackgroundTask], None] | None = None",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.background_tasks.in_process._types",
+          "newModule": true,
+          "names": [
+            {
+              "name": "CancelSignal",
+              "kind": "class",
+              "params": "",
+              "returns": null
+            },
+            {
+              "name": "InProcessTaskExecutionContext",
+              "kind": "class",
+              "params": "task_id: str, tool_use_id: str, tool_name: str, invocation_state_id: str, cancel_signal: CancelSignal, state: InterruptStateData | None = None",
+              "returns": null
+            },
+            {
+              "name": "InProcessTaskExecutionOutcome",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "InProcessTaskRecord",
+              "kind": "class",
+              "params": "*, task_id: str, tool_use_id: str, tool_name: str, invocation_state_id: str, status: BackgroundTaskStatus, created_at: str, last_updated_at: str, state: NotRequired[InterruptStateData], result: NotRequired[ToolResult], failure: NotRequired[BackgroundTaskError]",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 2,
+      "unparsable": []
+    },
+    {
+      "seq": 148,
+      "commit": "562ada431b6200b668fcd15f89f53516cda23db6",
+      "parent": "aba32d93837c0edc77d2f3d89c53be75eaae8e36",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 149,
+      "commit": "83982c2e596db6ef4bf8d2aabc2e8e55a4e43f4c",
+      "parent": "562ada431b6200b668fcd15f89f53516cda23db6",
+      "interfaces": [
+        {
+          "module": "strands.tools.mcp",
+          "newModule": false,
+          "names": [
+            {
+              "name": "MCPCancelTaskResult",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "MCPCreateTaskResult",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "MCPGetTaskResult",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "MCPUpdateTaskResult",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [
+        {
+          "module": "strands.tools.mcp",
+          "name": "MCPCancelTaskResult",
+          "reason": "constructor not determined"
+        },
+        {
+          "module": "strands.tools.mcp",
+          "name": "MCPCreateTaskResult",
+          "reason": "constructor not determined"
+        },
+        {
+          "module": "strands.tools.mcp",
+          "name": "MCPGetTaskResult",
+          "reason": "constructor not determined"
+        },
+        {
+          "module": "strands.tools.mcp",
+          "name": "MCPUpdateTaskResult",
+          "reason": "constructor not determined"
+        }
+      ],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 154,
+      "commit": "d83525171777be497ee19f13e55f4e5b16fe922f",
+      "parent": "24e556b74ca457d9eb65b321bad4ebd13c5a865d",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.model",
+          "newModule": false,
+          "names": [
+            {
+              "name": "AudioCapable",
+              "kind": "class",
+              "params": "",
+              "returns": null
+            },
+            {
+              "name": "AudioConfig",
+              "kind": "class",
+              "params": "*, input_rate: AudioSampleRate, output_rate: AudioSampleRate, channels: AudioChannel, format: AudioFormat, voice: str",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 157,
+      "commit": "55803bc7e534d0b9b656f9399a00426bb2e7e604",
+      "parent": "e1f35db2cadab1305e65190328da5f4a39585c1a",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 4,
+      "unparsable": []
+    },
+    {
+      "seq": 158,
+      "commit": "c9568224780ba115fd8d86be850a832062845a61",
+      "parent": "55803bc7e534d0b9b656f9399a00426bb2e7e604",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 159,
+      "commit": "e3f3ee49d4f5e1f94bc489df6f8603ce26442c31",
+      "parent": "c9568224780ba115fd8d86be850a832062845a61",
+      "interfaces": [
+        {
+          "module": "strands._context_manager.context_manager",
+          "newModule": true,
+          "names": [
+            {
+              "name": "ContextManager",
+              "kind": "class",
+              "params": "*, strategies: list[ContextStrategy] | None = None",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.methods.summarize",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_flatten_messages_to_content",
+              "kind": "function",
+              "params": "messages: Messages",
+              "returns": "list[ContentBlock]"
+            },
+            {
+              "name": "_format_summarized",
+              "kind": "function",
+              "params": "description: str, tokens: int, summary: str | None = None",
+              "returns": "str"
+            },
+            {
+              "name": "_summarize_content",
+              "kind": "async function",
+              "params": "content: list[ContentBlock], model: Model, config: SummarizeConfig | None = None",
+              "returns": "str | None"
+            },
+            {
+              "name": "_tool_result_to_content_blocks",
+              "kind": "function",
+              "params": "content: list[ToolResultContent]",
+              "returns": "list[ContentBlock]"
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.methods.truncate",
+          "newModule": true,
+          "names": [
+            {
+              "name": "CHARS_PER_TOKEN",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "DEFAULT_PREVIEW_TOKENS",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_build_preview",
+              "kind": "function",
+              "params": "full_text: str, block_count: int, config: TruncateConfig | None = None",
+              "returns": "str"
+            },
+            {
+              "name": "_truncate_text_block",
+              "kind": "function",
+              "params": "block: ContentBlock, config: TruncateConfig | None = None",
+              "returns": "ContentBlock"
+            },
+            {
+              "name": "_truncate_tool_result",
+              "kind": "function",
+              "params": "block: ToolResult, config: TruncateConfig | None = None",
+              "returns": "ToolResult"
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.strategies.offload",
+          "newModule": true,
+          "names": [
+            {
+              "name": "Offload",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.strategies.offload.base",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_build_tool_name_map",
+              "kind": "function",
+              "params": "messages: Messages",
+              "returns": "dict[str, str]"
+            },
+            {
+              "name": "_collect_removable_with_pair",
+              "kind": "function",
+              "params": "messages: Messages, index: int",
+              "returns": "list[Message]"
+            },
+            {
+              "name": "_get_oldest_matches",
+              "kind": "function",
+              "params": "messages: Messages, target: OffloadTarget | None, count: int, tool_name_map: dict[str, str], tool_include_filter: set[str] | None, tool_exclude_filter: set[str] | None",
+              "returns": "list[Message]"
+            },
+            {
+              "name": "_message_matches_target",
+              "kind": "function",
+              "params": "message: Message, target: OffloadTarget | None, tool_name_map: dict[str, str], tool_include_filter: set[str] | None, tool_exclude_filter: set[str] | None",
+              "returns": "bool"
+            },
+            {
+              "name": "_repair_alternation",
+              "kind": "function",
+              "params": "messages: Messages",
+              "returns": "None"
+            },
+            {
+              "name": "_resolve_tool_filter",
+              "kind": "function",
+              "params": "target: OffloadTarget | None",
+              "returns": "tuple[set[str] | None, set[str] | None]"
+            },
+            {
+              "name": "_splice_with_pairs",
+              "kind": "function",
+              "params": "messages: Messages, to_remove: list[Message]",
+              "returns": "tuple[int, int]"
+            },
+            {
+              "name": "_target_matches_message",
+              "kind": "function",
+              "params": "target: OffloadTarget | None, message: Message",
+              "returns": "bool"
+            },
+            {
+              "name": "_tool_matches_target",
+              "kind": "function",
+              "params": "block: ContentBlock, target: OffloadTarget, tool_name_map: dict[str, str], tool_include_filter: set[str] | None, tool_exclude_filter: set[str] | None",
+              "returns": "bool"
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.strategies.offload.drop",
+          "newModule": true,
+          "names": [
+            {
+              "name": "DROPPED_MARKER",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.strategies.offload.truncate",
+          "newModule": true,
+          "names": [
+            {
+              "name": "EmergencyTruncateStrategy",
+              "kind": "class",
+              "params": "",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.types",
+          "newModule": true,
+          "names": [
+            {
+              "name": "ContextState",
+              "kind": "class",
+              "params": "messages: Messages, agent: Agent, utilization: float",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 160,
+      "commit": "ca188fefadc500fd4d4cc7f8910ebac08a8ed34c",
+      "parent": "e3f3ee49d4f5e1f94bc489df6f8603ce26442c31",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 163,
+      "commit": "0bce4ed9371aeab0f16c941a96e092b225d771f2",
+      "parent": "b31169e7c94e215bc5ba90e958898dacb2291557",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 164,
+      "commit": "def3be9b4d89b77e348d2d7444e4e19a3a052b50",
+      "parent": "0bce4ed9371aeab0f16c941a96e092b225d771f2",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 9,
+      "unparsable": []
+    },
+    {
+      "seq": 165,
+      "commit": "f86a170632ff64231df9a5761b0b4a7a35cee65b",
+      "parent": "def3be9b4d89b77e348d2d7444e4e19a3a052b50",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 166,
+      "commit": "332a148202f21a0473e2480eb6095944f0ba22b7",
+      "parent": "f86a170632ff64231df9a5761b0b4a7a35cee65b",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 167,
+      "commit": "a642b4177ba14dba41ef296d510d68f718f60ebb",
+      "parent": "332a148202f21a0473e2480eb6095944f0ba22b7",
+      "interfaces": [
+        {
+          "module": "strands._context_manager.retrieval_tool",
+          "newModule": true,
+          "names": [
+            {
+              "name": "RETRIEVAL_TOOL_NAME",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_create_retrieval_tool",
+              "kind": "function",
+              "params": "stash: Stash, max_result_tokens: int | None = None",
+              "returns": "PythonAgentTool"
+            },
+            {
+              "name": "_extract_text",
+              "kind": "function",
+              "params": "data: object",
+              "returns": "str | None"
+            },
+            {
+              "name": "_track_retrieval_tool_use_ids",
+              "kind": "function",
+              "params": "message: Message, skip_set: set[str]",
+              "returns": "None"
+            }
+          ]
+        },
+        {
+          "module": "strands._context_manager.stash",
+          "newModule": true,
+          "names": [
+            {
+              "name": "Stash",
+              "kind": "class",
+              "params": "storage: Storage, session_id: str, agent_id: str",
+              "returns": null
+            },
+            {
+              "name": "_BytesEncoder",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_format_stash_refs",
+              "kind": "function",
+              "params": "refs: list[str]",
+              "returns": "str"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [
+        {
+          "module": "strands._context_manager.stash",
+          "name": "_BytesEncoder",
+          "reason": "constructor not determined"
+        }
+      ],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 168,
+      "commit": "42aedfc034d4bc78f01fedd6dcd9882277da34cd",
+      "parent": "a642b4177ba14dba41ef296d510d68f718f60ebb",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 173,
+      "commit": "bebf3e83c6c8fe43ddc66f7ee2652b68cdf4a198",
+      "parent": "5f636bbc2b8c866ca009470a719c3e6c038e950c",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 174,
+      "commit": "21b27d404570e466d61157f02006193c5a45ebe1",
+      "parent": "bebf3e83c6c8fe43ddc66f7ee2652b68cdf4a198",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 175,
+      "commit": "42e5a61bd98c3caf6b21c2f2e69a8bbd58eb7562",
+      "parent": "21b27d404570e466d61157f02006193c5a45ebe1",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 6,
+      "unparsable": []
+    },
+    {
+      "seq": 176,
+      "commit": "6d4f61f2849e7eb401c3f617e620cb7feef6b331",
+      "parent": "42e5a61bd98c3caf6b21c2f2e69a8bbd58eb7562",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 177,
+      "commit": "e5ebbd67d0968b6839bac92a15108cb7b6a0b25a",
+      "parent": "6d4f61f2849e7eb401c3f617e620cb7feef6b331",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 178,
+      "commit": "6d6c8fceafc28b050738b96032169e8b37a5ae30",
+      "parent": "e5ebbd67d0968b6839bac92a15108cb7b6a0b25a",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 179,
+      "commit": "545d9ed070248d73e3fc50b5d4b51914dd4c5d3d",
+      "parent": "6d6c8fceafc28b050738b96032169e8b37a5ae30",
+      "interfaces": [
+        {
+          "module": "strands.vended_tools.notebook",
+          "newModule": true,
+          "names": []
+        },
+        {
+          "module": "strands.vended_tools.notebook.notebook",
+          "newModule": true,
+          "names": [
+            {
+              "name": "_DEFAULT_MAX_NOTEBOOK_SIZE_BYTES",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.vended_tools.notebook.types",
+          "newModule": true,
+          "names": [
+            {
+              "name": "DEFAULT_NOTEBOOK_DESCRIPTION",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 181,
+      "commit": "1efa1eeffa7e3e7c8233c8866724e45a6667a5c9",
+      "parent": "66101c7d5f810dc744b5be18b933af3441e00210",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 182,
+      "commit": "08cc6e78886ce07fc38971fafc3307ea2d864a08",
+      "parent": "1efa1eeffa7e3e7c8233c8866724e45a6667a5c9",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 183,
+      "commit": "056f325b357ac414d9c94b6843bb0134b9356673",
+      "parent": "08cc6e78886ce07fc38971fafc3307ea2d864a08",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 184,
+      "commit": "0d2beba0d9ec555294169f836ee83138a0045133",
+      "parent": "056f325b357ac414d9c94b6843bb0134b9356673",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.configs",
+          "newModule": true,
+          "names": [
+            {
+              "name": "AudioConfig",
+              "kind": "class",
+              "params": "*, input_rate: AudioSampleRate, output_rate: AudioSampleRate, channels: AudioChannel, format: AudioFormat, voice: str",
+              "returns": null
+            },
+            {
+              "name": "_merge_config",
+              "kind": "function",
+              "params": "config: dict[str, Any], overrides: dict[str, Any]",
+              "returns": "dict[str, Any]"
+            },
+            {
+              "name": "_validate_audio_config",
+              "kind": "function",
+              "params": "config: Mapping[str, Any] | None",
+              "returns": "None"
+            },
+            {
+              "name": "_validate_bidi_config",
+              "kind": "function",
+              "params": "config: Mapping[str, Any]",
+              "returns": "None"
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 186,
+      "commit": "7462908f4311ff249ddc2b3c2de994fe63291921",
+      "parent": "1b13f6cdbdfaaaf9b687b102ebb2acdd6e056bc3",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 5,
+      "unparsable": []
+    },
+    {
+      "seq": 187,
+      "commit": "90a5a02e9761f30624156b07f97c9cd3836a9c55",
+      "parent": "7462908f4311ff249ddc2b3c2de994fe63291921",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.hooks",
+          "newModule": true,
+          "names": [
+            {
+              "name": "BidiAgentStopEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent'",
+              "returns": null
+            },
+            {
+              "name": "BidiInterruptionEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent', reason: Literal['user_speech', 'error'], interrupted_response_id: str | None = None",
+              "returns": null
+            },
+            {
+              "name": "BidiResponseCompleteEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent', response_id: str, stop_reason: 'StopReason'",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.experimental.bidi.hooks.events",
+          "newModule": true,
+          "names": [
+            {
+              "name": "BidiAfterConnectionRestartEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent', reason: Literal['timeout', 'scheduled'], exception: Exception | None = None",
+              "returns": null
+            },
+            {
+              "name": "BidiAgentStopEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent'",
+              "returns": null
+            },
+            {
+              "name": "BidiBeforeConnectionRestartEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent', reason: Literal['timeout', 'scheduled'], timeout_error: 'BidiModelTimeoutError | None' = None",
+              "returns": null
+            },
+            {
+              "name": "BidiInterruptionEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent', reason: Literal['user_speech', 'error'], interrupted_response_id: str | None = None",
+              "returns": null
+            },
+            {
+              "name": "BidiResponseCompleteEvent",
+              "kind": "class",
+              "params": "agent: 'BidiAgent', response_id: str, stop_reason: 'StopReason'",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 3,
+      "unparsable": []
+    },
+    {
+      "seq": 188,
+      "commit": "4ece5b093a771561655d17c3892fd160705bf1f6",
+      "parent": "90a5a02e9761f30624156b07f97c9cd3836a9c55",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.bedrock",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_ResponseState",
+              "kind": "class",
+              "params": "role: str | None = None, generation_stage: str | None = None, transcript: str = ''",
+              "returns": null
+            }
+          ]
+        },
+        {
+          "module": "strands.experimental.bidi.types.events",
+          "newModule": false,
+          "names": [
+            {
+              "name": "BidiTranscriptCompleteEvent",
+              "kind": "class",
+              "params": "transcript: str, role: Role",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 2,
+      "unparsable": []
+    },
+    {
+      "seq": 189,
+      "commit": "7bda6c70e71cd07279470268c3d3b3f4b36adf53",
+      "parent": "4ece5b093a771561655d17c3892fd160705bf1f6",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.models.bedrock",
+          "newModule": false,
+          "names": [
+            {
+              "name": "_BedrockAWSCRTHTTPClient",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_BedrockAWSCRTHTTPResponse",
+              "kind": "class",
+              "params": null,
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [
+        {
+          "module": "strands.experimental.bidi.models.bedrock",
+          "name": "_BedrockAWSCRTHTTPClient",
+          "reason": "constructor not determined"
+        },
+        {
+          "module": "strands.experimental.bidi.models.bedrock",
+          "name": "_BedrockAWSCRTHTTPResponse",
+          "reason": "constructor not determined"
+        }
+      ],
+      "unresolvedPatchObjects": 2,
+      "unparsable": []
+    },
+    {
+      "seq": 190,
+      "commit": "9663bcfa538b12599471b8f8ad62cb271311397d",
+      "parent": "7bda6c70e71cd07279470268c3d3b3f4b36adf53",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 0,
+      "unparsable": []
+    },
+    {
+      "seq": 191,
+      "commit": "bea15fe26e6732934493918591a50b6a075aeebb",
+      "parent": "9663bcfa538b12599471b8f8ad62cb271311397d",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    },
+    {
+      "seq": 193,
+      "commit": "0a26e120a157310c5413920a3fa79cf39e624513",
+      "parent": "f8002283c6d7bde8cb1f7862363b70c43466b70f",
+      "interfaces": [],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 5,
+      "unparsable": []
+    },
+    {
+      "seq": 195,
+      "commit": "381ab48abc2c6e4c62a36c980297ab561fb77837",
+      "parent": "1ede04b3a8d5f1f1ae7ffe1c5f334c34e785ebef",
+      "interfaces": [
+        {
+          "module": "strands.experimental.bidi.io.transcript",
+          "newModule": true,
+          "names": [
+            {
+              "name": "Console",
+              "kind": "other",
+              "params": null,
+              "returns": null
+            },
+            {
+              "name": "_BidiTranscriptOutput",
+              "kind": "class",
+              "params": "",
+              "returns": null
+            },
+            {
+              "name": "_UserText",
+              "kind": "class",
+              "params": "text: str | None = None",
+              "returns": null
+            }
+          ]
+        }
+      ],
+      "signatureMissing": [],
+      "unresolvedPatchObjects": 1,
+      "unparsable": []
+    }
+  ]
+}
