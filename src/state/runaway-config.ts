@@ -11,10 +11,15 @@ import { type Static, Type } from "typebox";
 export const TRUNCATION_CONTINUE_PROMPT =
   "上条回复被截断，未执行任何工具；不要重复前文，简短说明下一步并直接发出一个工具调用";
 export const TRUNCATION_RESUME_PROMPT =
-  "上条回复因长度上限被截断；从断处接着写，不要重复已写的内容";
+  "上条回复因长度上限被截断，最后一行可能没写完；先补完它，再从断处接着写，不要重复已写的内容";
+// 此前各版发出过的撞上限续跑提示：只供回看历史时认出旧会话记录里的续跑提示，不再发出
+export const PREVIOUS_TRUNCATION_RESUME_PROMPTS: readonly string[] = [
+  "上条回复因长度上限被截断；从断处接着写，不要重复已写的内容",
+];
 
-// 续跑行为的版本（跑批身份头照记）：v1 为 367 的一律去掉截断的回复，v2 为 376 的按原因分开。设定不变而行为变了时换版本
-export const TRUNCATION_CONTINUATION_VERSION = "v2";
+// 续跑行为的版本（跑批身份头照记）：v1 为 367 的一律去掉截断的回复，v2 为 376 的按原因分开，v3 为撞上限的提示
+// 加上先补完没写完的最后一行。设定不变而行为变了时换版本
+export const TRUNCATION_CONTINUATION_VERSION = "v3";
 
 export const TruncationContinuationSectionSchema = Type.Object(
   {
