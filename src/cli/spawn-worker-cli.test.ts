@@ -1,6 +1,6 @@
 // 主 agent 派 worker 的端到端（决策 264、267、297）：pigeon run 子进程里，主 agent 同一次回复派出两个 worker（派出即返回），
 // 用 wait_workers 等二者并行完成、交回结果，再用 run_command 合并其中一个分支。另钉住缺省入口：pigeon 不带子命令进终端界面，
-// pigeon --line 进命令行对话，--help 列出入口。
+// pigeon --line 进命令行对话，--help 列出入口；--line 与 pigeon resume 注册任务清单。
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +10,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, test } from "vitest";
 import { orchestrationSettingsOf, parseLaunchFlags } from "../application/launch-flags.ts";
 import { SPAWN_WORKER_TEXTS } from "../application/spawn-worker-tool.ts";
+import {
+  LIST_TASKS_TOOL,
+  type TaskItem,
+  UPDATE_TASKS_TOOL,
+} from "../application/task-list-tool.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
+import { listSessionFiles } from "../persistence/session-reader.ts";
 import { emptySettingsSnapshot } from "../state/settings.ts";
 import { routeTopLevel, TOP_LEVEL_HELP, TUI_ENTRY } from "./index.ts";
 
@@ -206,6 +212,66 @@ test("pigeon --line：进命令行对话（读到输入结束即退出）；它�
   const rejected = runCli(["--line", "--root", root, "--stream-fn", stream, "--no-spawn-workers"]);
   assert.equal(rejected.status, 1);
   assert.match(rejected.stderr, /未知参数：--no-spawn-workers（pigeon --line 支持/);
+});
+
+test("决策 294 B1：pigeon --line 与 pigeon resume 都注册任务清单，续跑从会话记录接上清单", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-line-tasks-"));
+  roots.push(root);
+  const fake = (name: string, replies: string): string => {
+    const file = join(root, name);
+    writeFileSync(
+      file,
+      `import { createFakeStreamFn } from ${JSON.stringify(FIXTURES)};\nexport default createFakeStreamFn({ replies: ${replies} });\n`
+    );
+    return file;
+  };
+  const tasks = JSON.stringify([{ title: "查 a", status: "done" }, { title: "改 b" }]);
+  const first = runCli(
+    [
+      "--line",
+      "--root",
+      root,
+      "--stream-fn",
+      fake(
+        "first.mjs",
+        `[{ text: "记", toolCalls: [{ name: "update_tasks", args: { tasks: ${tasks} } }] }, { text: "好" }]`
+      ),
+    ],
+    "拆一下\n"
+  );
+  assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+  const sessions = join(root, ".pigeon", "state", "sessions");
+  const [ref] = listSessionFiles(sessions);
+  assert.ok(ref !== undefined);
+  const second = runCli(
+    [
+      "resume",
+      ref.sessionId,
+      "--root",
+      root,
+      "--stream-fn",
+      fake(
+        "second.mjs",
+        `[{ text: "看", toolCalls: [{ name: "list_tasks", args: {} }] }, { text: "好" }]`
+      ),
+    ],
+    "接着\n"
+  );
+  assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+  const calls =
+    loadSessionView(sessions, ref.sessionId)?.runs.flatMap((run) => run.toolCalls) ?? [];
+  // 工具结果的 details 带整份清单；未注册时只有"未知工具"的报错结果，没有 details
+  const listed = (name: string) =>
+    calls
+      .filter((call) => call.toolName === name)
+      .map((call) =>
+        (call.result?.raw as { details?: { tasks?: TaskItem[] } } | undefined)?.details?.tasks?.map(
+          (task) => `${task.id} ${task.title} ${task.status}`
+        )
+      );
+  const expected = [["1 查 a done", "2 改 b pending"]];
+  assert.deepEqual(listed(UPDATE_TASKS_TOOL), expected);
+  assert.deepEqual(listed(LIST_TASKS_TOOL), expected);
 });
 
 test("启动参数：--no-spawn-workers 只在能派 worker 的入口接受，缺省开着", () => {

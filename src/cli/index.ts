@@ -337,6 +337,8 @@ async function resumeMain(argv: string[]): Promise<void> {
           ...(sandbox !== undefined
             ? { workspaceHost: sandbox.host, statusFacts: sandboxStatusFacts(sandbox) }
             : {}),
+          // 决策 294 B1：任务清单按编排配置（缺省开），与 pigeon run、终端界面一致；清单从会话记录还原
+          taskList: orchestrationSettingsOf(flags, settings).taskList,
           ...webToolsOptionOf(flags, settings),
           // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
           memoryWrite: lineMemoryWrite(write),
@@ -1265,6 +1267,8 @@ async function lineMain(argv: string[]): Promise<void> {
       ...(sandbox !== undefined
         ? { workspaceHost: sandbox.host, statusFacts: sandboxStatusFacts(sandbox) }
         : {}),
+      // 决策 294 B1：任务清单按编排配置（缺省开），与 pigeon run、终端界面一致
+      taskList: orchestrationSettingsOf(flags, settings).taskList,
       ...webToolsOptionOf(flags, settings),
       // 决策 331：有人对话，带记忆工具；写入后打印一行记下的内容与层级
       memoryWrite: lineMemoryWrite(write),
