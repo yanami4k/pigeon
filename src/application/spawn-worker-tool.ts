@@ -1,6 +1,7 @@
 // 主 agent 派 worker 的工具 spawn_worker（决策 264–268、271；297 起改为后台派出）：派出后立即返回 worker 的名字，不等它做完；
 // worker 结束时一条通知进主 agent 的下一轮（worker-notices.ts），需要结果才能往下做时用 wait_workers 等（orchestration-tools.ts）。
-// 执行模式为可并行，一次回复里多次调用即连续派出。工具说明、参数说明与各情形的返回文字按定稿原文（含 297 起的改写），
+// 执行模式按 tool-execution-modes.ts 的登记为串行（决策 353；运行面以登记为准，覆盖工具自带的标记）：一次回复里多次调用即
+// 按顺序逐个派出，派出的 worker 各自在后台同时跑。工具说明、参数说明与各情形的返回文字按定稿原文（含 297 起的改写），
 // 数值取自配置（取缺省时逐字即定稿原文）。
 // - 底层只用会话编排器现有的派出（workers.ts），不另写一套 worker 生命周期；attempts 走现有的并行同任务派发
 //   （attempt-group.ts），在后台跑，全部结束后发一条交回各份改动与摘要的通知（决策 322：不再贴验证标签，由主 agent 或人比较）。
@@ -573,7 +574,7 @@ export function createSpawnWorkerTool(
     label: SPAWN_WORKER_TOOL,
     description: spawnWorkerDescription(slot.settings, available),
     parameters: spawnWorkerParamsSchema(slot.settings.taskList),
-    executionMode: "parallel",
+    executionMode: "sequential",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SpawnWorkerDetails>> {
       const host = slot.host;
       if (host === undefined) {
@@ -703,7 +704,7 @@ async function spawnAttempts(
   return reply(SPAWN_WORKER_TEXTS.attemptsSpawned(names), { sessionIds: spawnedIds });
 }
 
-// 装配根注册用的元数据：只读档（本身不读写工作区、不经审批；worker 的调用各自按审批走），可并行
+// 装配根注册用的元数据：只读档（本身不读写工作区、不经审批；worker 的调用各自按审批走）；执行模式串行，与登记一致（决策 353）
 export function spawnWorkerRegistration(): ToolRegistration {
   return {
     name: SPAWN_WORKER_TOOL,
@@ -711,6 +712,6 @@ export function spawnWorkerRegistration(): ToolRegistration {
     parameters: SpawnWorkerParamsSchema,
     tier: "read",
     pathConfinement: { kind: "none" },
-    executionMode: "parallel",
+    executionMode: "sequential",
   };
 }

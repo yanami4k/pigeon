@@ -359,13 +359,13 @@ async function until(check: () => boolean): Promise<void> {
 const settled = (h: Harness, name: string) =>
   h.orchestrator.status().find((worker) => worker.name === name)?.outcome !== undefined;
 
-test("spawn_worker 的说明与参数说明逐字为定稿原文；执行模式可并行", () => {
+test("spawn_worker 的说明与参数说明逐字为定稿原文；执行模式串行", () => {
   const tool = createSpawnWorkerTool(new SpawnWorkerSlot());
   assert.equal(tool.name, "spawn_worker");
   assert.equal(spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS), FINAL_DESCRIPTION);
   // 工具上挂的说明即按槽的设置生成的那份（接线）
   assert.equal(tool.description, spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS));
-  assert.equal(tool.executionMode, "parallel");
+  assert.equal(tool.executionMode, "sequential");
   const schema = spawnWorkerParamsSchema(true);
   const properties = schema.properties;
   for (const [key, description] of Object.entries(FINAL_PARAMS)) {
