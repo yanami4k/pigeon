@@ -2,7 +2,7 @@
 // （同目录临时文件加改名）。
 // - 位置：项目级在治理根的 .pigeon/state/memory.md，用户级在 ~/.pigeon/state/memory.md（主目录可注入，测试指到临时目录）。
 // - 锁：同一层的多个写入方（并行的会话、/memory edit）靠一把独占锁串行；写满判定在锁内做，拿到锁后现读现判。
-//   锁被占时等它释放（写一次只需几毫秒），等满仍拿不到即报错。
+//   锁被占时等它释放（写一次只需几毫秒），等满仍拿不到即报错；/memory edit 保存时不设上限，可由人取消。
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -83,20 +83,39 @@ export function writeMemoryFile(file: string, text: string): void {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-// 在一层的记忆锁内执行一次读改写；锁被占时轮询等待，等满仍拿不到即抛错
+// 等锁途中被取消（signal 触发）：没有拿到锁，work 没有执行
+export class MemoryLockAbortedError extends Error {}
+
+// 等锁的附加选项：取消信号；第一次没拿到锁时回调一次（调用方据此决定何时提示在等）
+export interface MemoryLockWait {
+  signal?: AbortSignal;
+  onContended?: () => void;
+}
+
+// 在一层的记忆锁内执行一次读改写；锁被占时轮询等待，等满仍拿不到即抛错（waitMs 为 Infinity 即不设上限），
+// 等待途中被取消即抛 MemoryLockAbortedError
 export async function withMemoryLock<T>(
   lockPath: string,
   work: () => T,
-  waitMs: number = LOCK_WAIT_MS
+  waitMs: number = LOCK_WAIT_MS,
+  wait: MemoryLockWait = {}
 ): Promise<T> {
   const deadline = Date.now() + waitMs;
+  let contended = false;
   for (;;) {
+    if (wait.signal?.aborted === true) {
+      throw new MemoryLockAbortedError("等锁途中已取消");
+    }
     let release: (() => void) | undefined;
     try {
       release = acquireExclusiveLock(lockPath, "学到的记忆正被另一处写入");
     } catch (error) {
       if (!(error instanceof ExclusiveLockError) || Date.now() >= deadline) {
         throw error;
+      }
+      if (!contended) {
+        contended = true;
+        wait.onContended?.();
       }
       await sleep(LOCK_POLL_MS);
       continue;

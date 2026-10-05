@@ -1,5 +1,5 @@
 // /memory 的命令层（决策 331）：查看两层的内容、文件位置与用量；按层编辑——存盘后校验格式与上限，不合格、编辑器出错、
-// 编辑期间原文件被改都保留原内容并报错；没有编辑器时给出文件路径。
+// 编辑期间原文件被改都保留原内容并报错；没有编辑器时给出文件路径；保存时别处在写即排队，可取消，取消时编辑稿保留。
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,10 +7,12 @@ import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { MEMORY_FILE_HEADERS, type MemoryLayer } from "../memory/learned.ts";
 import { memoryLocation } from "../memory/learned-store.ts";
+import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
 import {
   editMemoryLayer,
   type MemoryCommandContext,
   memoryDraftPathOf,
+  memorySaveCancelledText,
   memoryViewText,
   resolveEditor,
 } from "./memory-command.ts";
@@ -163,3 +165,58 @@ test("编辑器：$VISUAL 优先，其次 $EDITOR；都没有或为空即不给"
   assert.equal(resolveEditor({ VISUAL: " ", EDITOR: "vi" }), "vi");
   assert.equal(resolveEditor({}), undefined);
 });
+
+// 别处占着这一层时起一次编辑：排队超过提示时刻即兑现 waiting
+function editWhileHeld(ctx: MemoryCommandContext, edited: string, signal?: AbortSignal) {
+  const lock = memoryLocation("project", ctx).lock;
+  mkdirSync(dirname(lock), { recursive: true });
+  const release = acquireExclusiveLock(lock, "测试持锁");
+  let waits = 0;
+  let onWaiting: () => void = () => {};
+  const waiting = new Promise<void>((resolve) => {
+    onWaiting = resolve;
+  });
+  const result = editMemoryLayer(ctx, "project", {
+    editor: "fake",
+    run: editTo(edited),
+    waitingDelayMs: 20,
+    onWaiting: () => {
+      waits += 1;
+      onWaiting();
+    },
+    ...(signal !== undefined ? { signal } : {}),
+  });
+  return { release, waiting, result, waits: () => waits };
+}
+
+test("保存时排队：别处正在写这一层就等、不设上限，超过提示时刻只提示一次；轮到即照常保存并删掉编辑稿", () =>
+  withCtx(async (ctx, file) => {
+    const edited = MEMORY_FILE_HEADERS.project + PROJECT;
+    const held = editWhileHeld(ctx, edited);
+    try {
+      await held.waiting;
+    } finally {
+      held.release();
+    }
+    assert.match(await held.result, /已保存项目级记忆/);
+    assert.equal(held.waits(), 1);
+    assert.equal(readFileSync(file("project"), "utf8"), edited);
+    assert.equal(existsSync(memoryDraftPathOf(file("project"))), false);
+  }));
+
+test("保存时排队被取消：原文件不动，编辑稿保留改过的内容，回话指出编辑稿位置", () =>
+  withCtx(async (ctx, file) => {
+    write(file("project"), MEMORY_FILE_HEADERS.project);
+    const edited = MEMORY_FILE_HEADERS.project + PROJECT;
+    const cancel = new AbortController();
+    const held = editWhileHeld(ctx, edited, cancel.signal);
+    try {
+      await held.waiting;
+      cancel.abort();
+      assert.equal(await held.result, memorySaveCancelledText(memoryDraftPathOf(file("project"))));
+    } finally {
+      held.release();
+    }
+    assert.equal(readFileSync(file("project"), "utf8"), MEMORY_FILE_HEADERS.project);
+    assert.equal(readFileSync(memoryDraftPathOf(file("project")), "utf8"), edited);
+  }));

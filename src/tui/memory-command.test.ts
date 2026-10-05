@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { MEMORY_COMMAND_USAGE } from "../application/memory-command.ts";
+import { MEMORY_COMMAND_USAGE, MEMORY_SAVE_WAITING_TEXT } from "../application/memory-command.ts";
 import { newSessionId } from "../state/ids.ts";
 import { rejectWhileRunning } from "./command-table.ts";
 import { type CommandsHost, handleSlashCommand, type TuiMemoryFace } from "./commands.ts";
@@ -95,6 +95,41 @@ test("编辑时暂停界面：编辑器跑的时候终端已交还，结束后�
     shell.addSystem("编辑之后的一行");
     await settle();
     assert.ok(screenText(term).includes("编辑之后的一行"));
+  } finally {
+    shell.stop();
+    rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("保存时排队：提示出现后按 Esc 即取消这次保存，结果照常落消息区", async () => {
+  const logDir = mkdtempSync(join(tmpdir(), "pigeon-tui-memory-"));
+  const term = new MockTerminal(80, 24);
+  const sessionId = newSessionId();
+  const shell = new PigeonTuiShell({
+    terminal: term,
+    runtime: new ScriptedRuntime(sessionId),
+    sessionId,
+    logDir,
+    memory: {
+      view: () => "",
+      // 一直排不到：提示在等，直到被取消
+      edit: (_layer, hooks) =>
+        new Promise((resolve) => {
+          hooks?.onWaiting?.();
+          hooks?.signal?.addEventListener("abort", () => resolve("取消了这次保存"));
+        }),
+    },
+  });
+  try {
+    shell.start();
+    await settle();
+    term.input("/memory edit project");
+    term.input("\r");
+    await settle();
+    assert.ok(screenText(term).includes(MEMORY_SAVE_WAITING_TEXT));
+    term.input("\x1b");
+    await settle();
+    assert.ok(screenText(term).includes("取消了这次保存"));
   } finally {
     shell.stop();
     rmSync(logDir, { recursive: true, force: true });

@@ -3,6 +3,7 @@
 // - 编辑（/memory edit project|user）：把这一层复制到同目录的编辑稿，用 $VISUAL（其次 $EDITOR）打开；编辑器退出后校验格式
 //   与上限，合格才在记忆锁内换掉原文件；不合格、编辑器出错或编辑期间原文件被另一处改过，一律报错并保留原内容，改过的
 //   内容留在编辑稿里供人取回。没有设置编辑器时给出文件路径，请人直接编辑。
+// - 保存时别处正在写这一层：排队等，不设上限；等待超过 1 秒才提示，人可取消，取消时原文件不动、编辑稿保留。
 // - 改动从下一条消息起生效：每个 Run 开始时重读，变了即在开工状态块里整节追加（决策 363）。
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -19,6 +20,7 @@ import {
 } from "../memory/learned.ts";
 import {
   type MemoryLocation,
+  MemoryLockAbortedError,
   memoryLocation,
   readMemoryFile,
   withMemoryLock,
@@ -106,10 +108,23 @@ export function memoryDraftPathOf(file: string): string {
   return `${file}.edit.md`;
 }
 
+// 保存时排队等别处写完：等待超过 1 秒才提示（一闪而过的不提示）；人取消时草稿保留
+export const MEMORY_SAVE_WAITING_TEXT = "正在保存记忆…（Esc 取消）";
+export const MEMORY_SAVE_WAITING_DELAY_MS = 1000;
+export function memorySaveCancelledText(draft: string): string {
+  return `没有保存，你改的内容留在 ${draft}。`;
+}
+
 export interface EditMemoryOptions {
   editor?: string;
   // 执行编辑器（终端界面在调用前后暂停与恢复界面；测试注入）
   run?: EditorRunner;
+  // 保存时排队不设上限：取消信号（终端界面接 Esc）
+  signal?: AbortSignal;
+  // 排队超过 waitingDelayMs 仍没轮到时回调一次（终端界面显示 MEMORY_SAVE_WAITING_TEXT）
+  onWaiting?: () => void;
+  // 缺省 MEMORY_SAVE_WAITING_DELAY_MS（测试注入）
+  waitingDelayMs?: number;
 }
 
 export async function editMemoryLayer(
@@ -147,13 +162,39 @@ export async function editMemoryLayer(
   if (used > limit) {
     return `${label}记忆没有保存：条目共 ${used} 字符，超出上限 ${limit} 字符 ${used - limit} 字符；原内容未动，${keep}`;
   }
-  return withMemoryLock(location.lock, () => {
-    // 编辑期间原文件被另一处（另一个会话的 update_memory）改过：不覆盖
-    if (readMemoryFile(location.file).hash !== original.hash) {
-      return `${label}记忆没有保存：编辑期间这一层被另一处改过；原内容未动，${keep}`;
+  // 别处正在写这一层时排队等，不设上限；等满 waitingDelayMs 才提示，轮到或取消即撤掉计时
+  let waitingTimer: NodeJS.Timeout | undefined;
+  try {
+    return await withMemoryLock(
+      location.lock,
+      () => {
+        // 编辑期间原文件被另一处（另一个会话的 update_memory）改过：不覆盖
+        if (readMemoryFile(location.file).hash !== original.hash) {
+          return `${label}记忆没有保存：编辑期间这一层被另一处改过；原内容未动，${keep}`;
+        }
+        writeMemoryFile(location.file, edited);
+        rmSync(draft, { force: true });
+        return `已保存${label}记忆（${location.display}）：共 ${parsed.doc.entries.length} 条，${used}/${limit} 字符，从下一条消息起生效`;
+      },
+      Number.POSITIVE_INFINITY,
+      {
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        onContended: () => {
+          if (options.onWaiting === undefined) return;
+          waitingTimer = setTimeout(
+            options.onWaiting,
+            options.waitingDelayMs ?? MEMORY_SAVE_WAITING_DELAY_MS
+          );
+        },
+      }
+    );
+  } catch (error) {
+    // 人取消：原文件不动，草稿保留
+    if (error instanceof MemoryLockAbortedError) {
+      return memorySaveCancelledText(draft);
     }
-    writeMemoryFile(location.file, edited);
-    rmSync(draft, { force: true });
-    return `已保存${label}记忆（${location.display}）：共 ${parsed.doc.entries.length} 条，${used}/${limit} 字符，从下一条消息起生效`;
-  });
+    throw error;
+  } finally {
+    clearTimeout(waitingTimer);
+  }
 }
