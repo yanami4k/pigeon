@@ -2,12 +2,13 @@
 
 - 基线：bacc407（main，含记录决策 381 的提交）
 - 分支：explorer-and-safety
-- 范围：决策 377、378、379、381，另改正 spawn_worker 执行模式的过时说法（决策 353）。共五个工程提交：
+- 范围：决策 377、378、379、381，另改正 spawn_worker 执行模式的过时说法（决策 353）。五个工程提交，另有审计与测试跟进各一：
   - 52e20c9 spawn_worker 的执行模式改正为串行
   - 4400e1e explorer 就地读派出方的工作区；快照不收过大的未跟踪文件
   - 8f14015 网页与 MCP 工具结果加外部内容标记
   - 61ae65f 本机放手且联网工具开着时启动提示一行风险
   - ce72b58 文档：本机模式的风险与容器沙箱、快照上限、explorer 的读法
+  - c5c5346 按 explorer 就地读更新 worker 相关的旧用例（见第六节）
 
 ## 一、现状（改动前）
 
@@ -161,3 +162,11 @@
 - 因此外部内容标记、explorer 的读法、快照上限、启动提示（只在终端界面与 `pigeon run` 的入口）都不进入实验条件，身份头不变。
 
 ## 六、verify
+
+- 本机：只跑改动涉及的单个测试文件（Vitest，`--maxWorkers=2`），以及 lint、类型检查与依赖检查。
+- 验证服务器（8 vCPU、31 GB 内存，Docker 与实验镜像、沙箱通用镜像在场），`TEST_CONCURRENCY=6 npm run verify:full`：
+  - 1b27fe2：6 项失败，均为拿 explorer 当一般角色、按旧文字断言分支的用例（`src/application/spawn-worker-headless.test.ts` 四项、
+    `src/cli/spawn-worker-cli.test.ts`、`src/cli/trace-workers.test.ts` 各一项）。改法：派出文字按 explorer 的只读文字比对；
+    需要核对起点行的派出上限用例改用 tester；trace 的工作区一段按新显示比对（c5c5346）。
+  - c5c5346：全绿。lint、类型检查通过；测试 325 个文件，1834 项通过、7 项跳过；依赖检查无违规。真容器用例实际运行并通过
+    （容器执行端、作业容器、外部 agent 条件等）。
