@@ -26,6 +26,7 @@ import type { CheckpointAttachment } from "../application/checkpoints.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import {
   type LaunchFlags,
+  localRiskNotice,
   orchestrationSettingsOf,
   parseLaunchFlags,
   resolveStreamFnSpec,
@@ -593,6 +594,9 @@ export async function main(argv: string[]): Promise<void> {
   // 决策 330：人写的说明超出上限被截断时在消息区提示一行
   if (mainBundle.instructionsNotice !== undefined) shell.addSystem(mainBundle.instructionsNotice);
   if (mainBundle.toolsNotice !== undefined) shell.addSystem(mainBundle.toolsNotice);
+  // 决策 379：本机放手且联网工具开着时提示一行风险
+  const riskNotice = localRiskNotice(flags, webToolsOption.webTools !== undefined);
+  if (riskNotice !== undefined) shell.addSystem(riskNotice);
   warnSink.attach((line) => shell.addWarning(line));
   if (target.kind === "resume") {
     shell.announceResumed(workspaceRoot, target.report);

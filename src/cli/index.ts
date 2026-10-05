@@ -20,6 +20,7 @@ import type { GrantsCommandContext } from "../application/grants.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless-core.ts";
 import {
   type LaunchFlags,
+  localRiskNotice,
   orchestrationSettingsOf,
   parseLaunchFlags,
   resolveStreamFnSpec,
@@ -489,6 +490,9 @@ async function runMain(argv: string[]): Promise<void> {
     ...webToolsOptionOf(flags, settings),
     loopGuard,
   };
+  // 决策 379：本机放手且联网工具开着时提示一行风险（写标准错误，不混进 --json 的一行结果）
+  const riskNotice = localRiskNotice(flags, runOptions.webTools !== undefined);
+  if (riskNotice !== undefined) process.stderr.write(`${riskNotice}\n`);
   // 决策 237：--sandbox 在一次性容器里跑，返回前交回成分支并删除容器；提示行写标准错误，不混进 --json 的一行结果
   const result =
     flags.sandbox !== undefined

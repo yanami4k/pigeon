@@ -259,6 +259,17 @@ export function webToolsEnabled(
   return flags.sandbox?.network !== "off";
 }
 
+// 决策 379：本机（不在容器沙箱里）放手且联网工具开着时，启动提示一行风险（定稿原文）。终端界面落消息区，pigeon run 写标准错误输出
+export const LOCAL_RISK_NOTICE =
+  "提示：本机放手模式下命令以你的账户执行、不经审批，能读家目录里的凭据；联网工具开着，网页或外部内容里夹带的指令可能借此把数据发出去。要隔离请用 --sandbox。";
+
+export function localRiskNotice(
+  flags: Pick<LaunchFlags, "sandbox" | "yolo">,
+  webTools: boolean
+): string | undefined {
+  return flags.sandbox === undefined && flags.yolo && webTools ? LOCAL_RISK_NOTICE : undefined;
+}
+
 // 交给装配根的联网工具选项：给就按快照的 web 一节建出配置（配置畸形在此响亮失败），不给就不带 webTools。
 // 各入口启动与终端界面 /reload 后都经这里，按当时的设置快照重算；worker 照父运行面拿同一份
 export function webToolsOptionOf(
