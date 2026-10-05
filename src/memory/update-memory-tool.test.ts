@@ -1,4 +1,4 @@
-// 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v2；两层各自增、按编号替换与删除；
+// 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v3；两层各自增、按编号替换与删除；
 // 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
 // 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示。
 import assert from "node:assert/strict";
@@ -82,7 +82,7 @@ function assertIncludesAll(text: string, fragments: readonly string[]): void {
 }
 
 // 说明与参数说明全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"（版本号进跑批身份，文字一改即换条件）
-test("工具说明与参数说明为记忆文字 v2：两层、只写内容、取向、写满时新增或改长都会被拒绝", () => {
+test("工具说明与参数说明为记忆文字 v3：两层、只写内容、取向、写满时新增或改长都会被拒绝", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
     "新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（.pigeon/state/memory.md），user 对所有项目（~/.pigeon/state/memory.md）。只写不读：两层记忆已在开工状态里。\n" +
@@ -180,7 +180,7 @@ test("新增被拒（328）：写明当前用量、该条字数与还差多少�
     const used = a + b;
     const needed = lineChars("P3", "丙丙丙丙丙丙丙😀");
     const full = await fx.call({ action: "add", content: "丙丙丙丙丙丙丙😀" }, { project: limit });
-    // 写满被拒的文字属记忆文字 v2，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v3，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       full.text,
       `项目级记忆已满，这条没有新增：当前 ${used}/${limit} 字符，这条需要 ${needed} 字符（含工具补上的编号、日期、来源与会话编号），还差 ${used + needed - limit} 字符。把这条写短，或先用 replace 合并相近条目、用 remove 删除过时条目，再新增。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
@@ -206,7 +206,7 @@ test("替换被拒（328）：写明被替换条目现有字数、新内容字�
       { action: "replace", id: "P1", content: "甲甲甲甲甲甲" },
       { project: limit }
     );
-    // 写满被拒的文字属记忆文字 v2，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v3，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       rejected.text,
       `替换后超出项目级上限，P1 没有替换：P1 现有 ${a} 字符，新内容 ${newChars} 字符（含工具补上的编号、日期、来源与会话编号），替换后共 ${after}/${limit} 字符，超出 ${after - limit} 字符。把新内容至少写短 ${after - limit} 字符，或先用 remove 删除别的过时条目，再替换。现有条目（编号：字符数）：P1：${a}、P2：${b}。`

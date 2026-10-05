@@ -1,5 +1,7 @@
 // 独占锁（M8 收口补遗）：一把锁同一时刻只许一个持有者，**不可重入**。现有使用方是固化放权配置的
-// 读改写（persistence/grants-config.ts）与跑批输出目录的独占（eval/stream-runner.ts）。
+// 读改写（persistence/grants-config.ts）、配置确认记录的读改写（persistence/config-trust-store.ts）、
+// 学到的记忆的写入（memory/learned-store.ts，取不到时轮询等待）与跑批输出目录的独占（eval/stream-runner.ts）；
+// 迁移命令（application/migrate-config.ts）只借 lockHeldByLiveProcess 判断锁的持有进程是否仍在。
 //
 // 与会话打开锁（session-lock.ts，决策 040）的区别正在这里：会话锁按进程内计数重入，因为同一个
 // 进程里可以有多处打开同一个会话文件；而这把锁要挡的恰恰是同一个进程里的两件事

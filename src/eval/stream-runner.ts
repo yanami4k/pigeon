@@ -89,7 +89,7 @@ export interface ConditionSpec {
   agent: "pigeon" | "minimal" | ExternalStreamCondition;
   // 能否检索历史会话：关掉时 Pigeon 不注册两件会话检索工具，系统提示不提它们
   sessionSearch: boolean;
-  // 有无推送记忆：透传给 headless（推送记忆另行施工，打开时 headless 暂时报错）
+  // 有无推送记忆：透传给 headless，打开时只推送项目级记忆、不注册 update_memory（决策 331：跑批无人值守，只推送供遵守）
   pushedMemory: boolean;
   // 作业容器的网络档：缺省断网（--network none）；gateway-only 为只通模型网关的跑批内部网络（只给外部 agent 条件）
   network?: "gateway-only";
@@ -1110,12 +1110,12 @@ async function runStep(
     runIdentity: options.runIdentity ?? null,
     agentSettings: options.agentSettings?.[spec.agent] ?? null,
     memoryAtStart,
-    // 复盘（191、192）：推送格在 agent 部分里填；不推送的条件恒为 null
+    // 复盘随决策 331 删除：各条件恒为 null（字段留在结果行里，旧行照常可读）
     review: null,
     hitReviewBudget: null,
   };
   let envPrefetched = false;
-  // agent（与收尾复盘）跑完才有：步末的记忆大小、是否撞了宽上限
+  // agent 跑完才有：步末的记忆大小、是否撞了宽上限
   let memoryAtEnd: MemoryFacts | null = null;
   let hitStepBudget: boolean | null = null;
   // 不判的一行：依赖环境选不出来而作废的步（记下原因，不计 agent 的用量）
