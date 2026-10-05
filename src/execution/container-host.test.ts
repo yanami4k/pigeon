@@ -482,15 +482,16 @@ describe.skipIf(skip ?? false)("容器执行端（真容器）", () => {
     const made = await sh(`printf 'sleep 777 &\\nwait\\n' > ${root}/spawn.sh`);
     assert.equal(made.exitCode, 0, made.stderr);
     const state = mkdtempSync(join(tmpdir(), "pigeon-host-jobs-"));
+    const store = new CommandOutputStore({
+      base: state,
+      outputsRoot: join(state, "outputs"),
+      sessionId: "s1",
+      maxBytes: 1024 * 1024,
+    });
     const jobs = new SessionJobs({
       sessionId: "s1",
       host,
-      store: new CommandOutputStore({
-        base: state,
-        outputsRoot: join(state, "outputs"),
-        sessionId: "s1",
-        maxBytes: 1024 * 1024,
-      }),
+      store,
       pool: new JobPool({ total: 2 }),
       perSession: 2,
       outputMaxBytes: 1024 * 1024,
@@ -508,8 +509,14 @@ describe.skipIf(skip ?? false)("容器执行端（真容器）", () => {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       assert.equal(await sleeping(777), 1);
+      // 别的用户的进程：容器缺省没有 CAP_SYS_PTRACE，按标记查杀时打不开它的 environ——与进程恰好退出同一条报错路径
+      const foreign = spawnSync("docker", ["exec", "-d", "-u", "1234", name, "sleep", "666"]);
+      assert.equal(foreign.status, 0, String(foreign.stderr));
       await jobs.kill(jobs.get("j1"), "job_kill");
       assert.equal(await sleeping(777), 0);
+      // 作业输出里不混进 shell 打开 /proc 文件失败的报错
+      const output = await store.readWindow(jobs.get("j1").outputUri, 1, 100);
+      assert.doesNotMatch(output.lines.join("\n"), /\/proc\//);
       assert.equal(await pid1(), bootedAt);
     } finally {
       await jobs.killAll("aborted");

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "vitest";
 import {
   collectStreamFacts,
@@ -172,5 +174,24 @@ test("取事实与出清单：题、红测试对、只有格式、维护步、�
     assert.deepEqual(again.probes, first.probes);
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("取人的文件：不存在时抛错、原因在错误信息里，git 的报错不打到本进程的标准错误", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-facts-show-"));
+  try {
+    toyRepo(dir)({ "a.txt": "a\n" }, "Start");
+    // 子进程的标准错误默认直通父进程，只能在另起的进程里看
+    const facts = pathToFileURL(fileURLToPath(new URL("./stream-facts.ts", import.meta.url))).href;
+    const script = `import { gitHumanRepo } from ${JSON.stringify(facts)};
+try { gitHumanRepo(${JSON.stringify(dir)}).show("HEAD", "missing.ini"); } catch (error) { process.stdout.write(error.message); }`;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    assert.equal(child.stderr, "");
+    assert.match(child.stdout, /missing\.ini/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -45,8 +45,12 @@ export interface HumanRepo {
 }
 
 export function gitHumanRepo(dir: string): HumanRepo {
+  // git 的标准错误收下不外漏（取人的文件时文件不存在是常态，由调用方处理）；出错时它随在抛出的错误信息里
   const git = (args: readonly string[]) =>
-    execFileSync("git", ["-C", dir, ...args], { maxBuffer: 1 << 30 });
+    execFileSync("git", ["-C", dir, ...args], {
+      maxBuffer: 1 << 30,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   const text = (args: readonly string[]) => git(args).toString("utf8");
   return {
     firstParentLog(rangeStart, rangeEnd) {

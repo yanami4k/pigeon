@@ -24,4 +24,9 @@ export const SLOW_TESTS = [
     pattern: "src/execution/hook-runner.test.ts",
     reason: "含超时杀整棵进程树与经真容器执行钩子的用例：等超时、起停容器占大头",
   },
+  {
+    pattern: "src/execution/sandbox-docker.test.ts",
+    reason:
+      "真容器：日常沙箱起停容器，并在容器里联网装新旧两版 pnpm 核对 store 位置，下载与安装占大头",
+  },
 ];

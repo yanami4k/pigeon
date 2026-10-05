@@ -111,7 +111,9 @@ export interface ContainerHostOptions {
 const DEFAULT_HELPER_TIMEOUT_MS = 60_000;
 // 按标记杀的函数 km：$1 为标记值。逐个看 /proc 下的进程，环境里带这个标记的，若是进程组组长（setsid 起的命令）即杀整组，
 // 再杀它本身；$2 非空时另杀命令行里"run"之后紧跟这个标记的进程（观测脚本本身：中止落在命令开始之前时，杀掉它，命令就
-// 不会再被起来）。扫两遍（第一遍杀的过程中新起的进程）；跳过本脚本自己，它的命令行里标记前面不是"run"
+// 不会再被起来）。扫两遍（第一遍杀的过程中新起的进程）；跳过本脚本自己，它的命令行里标记前面不是"run"。
+// 读 environ 与 cmdline 的输入重定向包在 { …; } 2>/dev/null 里：进程恰好退出或读不了时 shell 自己报的打开失败
+// 先于命令上的 2>/dev/null 生效，不包住就混进作业输出
 const KILL_MARKED_FUNCTION = [
   "km() {",
   `  m="${RUN_MARKER_VAR}=$1"`,
@@ -120,8 +122,8 @@ const KILL_MARKED_FUNCTION = [
   // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
   '      pid="${p#/proc/}"',
   '      [ "$pid" = "$$" ] && continue',
-  '      if tr "\\0" "\\n" < "$p/environ" 2>/dev/null | grep -qxF -- "$m"; then :',
-  `      elif [ -n "$2" ] && tr "\\0" "\\n" < "$p/cmdline" 2>/dev/null | awk -v m="$1" 'q == "run" && $0 == m { f = 1 } { q = $0 } END { exit !f }'; then :`,
+  '      if { tr "\\0" "\\n" < "$p/environ"; } 2>/dev/null | grep -qxF -- "$m"; then :',
+  `      elif [ -n "$2" ] && { tr "\\0" "\\n" < "$p/cmdline"; } 2>/dev/null | awk -v m="$1" 'q == "run" && $0 == m { f = 1 } { q = $0 } END { exit !f }'; then :`,
   "      else continue; fi",
   '      g="$(sed "s/.*) //" "$p/stat" 2>/dev/null | cut -d " " -f 3)"',
   '      [ "$g" = "$pid" ] && kill -s KILL -- "-$pid" 2>/dev/null',

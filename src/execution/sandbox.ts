@@ -62,12 +62,30 @@ export const SANDBOX_CACHE_ROOT = "/pigeon-cache";
 // 卷下各包管理器的子目录
 export const SANDBOX_CACHE_DIRS = ["npm", "pnpm", "yarn", "pip", "uv", "cargo", "go"] as const;
 
+// pnpm 的内容可寻址存储放卷里（与项目不在同一文件系统时 pnpm 自行改为复制）
+function pnpmStoreDir(root: string): string {
+  return `${root}/pnpm/store`;
+}
+
+// 开容器时以运行用户写 pnpm 的全局配置，把 store 指到卷里（$1 为 store 目录）：pnpm 10 及以前读 rc 的 store-dir，
+// 11 起只读 config.yaml 的 storeDir，两个文件都在 ${XDG_CONFIG_HOME:-~/.config}/pnpm 下；npm 不读它们，不会告警。
+// 已有的文件不覆盖（镜像或项目自带的配置为准）
+const PNPM_CONFIG_SCRIPT = [
+  "set -e",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
+  'd="${XDG_CONFIG_HOME:-$HOME/.config}/pnpm"',
+  'mkdir -p "$d"',
+  '[ -e "$d/rc" ] || printf "store-dir=%s\\n" "$1" > "$d/rc"',
+  '[ -e "$d/config.yaml" ] || printf "storeDir: \\"%s\\"\\n" "$1" > "$d/config.yaml"',
+].join("\n");
+
 // 把各包管理器的下载缓存指到卷里各自子目录的环境变量（随 docker run 进容器，之后每次 exec 都带着）
 export function sandboxCacheEnv(root: string = SANDBOX_CACHE_ROOT): Record<string, string> {
   return {
     npm_config_cache: `${root}/npm`,
-    // pnpm 读 npm 风格的环境变量：内容可寻址存储放卷里（与项目不在同一文件系统时 pnpm 自行改为复制）
-    npm_config_store_dir: `${root}/pnpm/store`,
+    // pnpm 的 store 主要靠全局配置文件（PNPM_CONFIG_SCRIPT），环境变量兜底：pnpm 11 起认 pnpm_config_ 前缀、不再读
+    // npm_config_*；npm 不认这个前缀，不会像 npm_config_store_dir 那样每次告警未知配置
+    pnpm_config_store_dir: pnpmStoreDir(root),
     // yarn 1 的缓存目录；yarn 2+ 缺省用全局目录下的 cache
     YARN_CACHE_FOLDER: `${root}/yarn/cache`,
     YARN_GLOBAL_FOLDER: `${root}/yarn/berry`,
@@ -726,6 +744,15 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     });
     if (prepared.exitCode !== 0) {
       throw new Error(`准备工作区与缓存目录失败：${prepared.stderr.trim()}`);
+    }
+    // 写不成只提示：pnpm 照常能用，只是 10 及以前的版本不走共用缓存（11 起另有环境变量兜底）
+    const pnpmConfig = await containerExec({
+      container,
+      docker,
+      command: ["sh", "-c", PNPM_CONFIG_SCRIPT, "sh", pnpmStoreDir(cacheRoot)],
+    });
+    if (pnpmConfig.exitCode !== 0) {
+      log(`没能写 pnpm 的全局配置，pnpm 10 及以前不走共用缓存：${pnpmConfig.stderr.trim()}`);
     }
     const cloned = await containerExec({
       container,
