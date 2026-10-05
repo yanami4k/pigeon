@@ -66,6 +66,8 @@ export interface StreamRunIdentity {
         // 撞上限续跑与流式重复检测（367）：实际生效的值；加这两项之前写下的身份头没有它们，续跑即判为不同
         truncationContinuation?: TruncationContinuationSettings;
         repetitionGuard?: RepetitionGuardSettings;
+        // 续跑行为的版本（376）：设定不变而续跑行为变了即换版本；加这一项之前写下的身份头没有它（即 367 的行为），续跑即判为不同
+        continuationVersion?: string;
         // 无人值守收尾等后台作业的总时限（秒，365）：实际生效的值；加这一项之前写下的身份头没有它，续跑即判为不同
         backgroundCloseoutSeconds?: number;
       };
