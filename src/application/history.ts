@@ -9,7 +9,7 @@ import {
   loadSessionView,
 } from "../persistence/session-catalog.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import { TRUNCATION_CONTINUE_PROMPT } from "../state/runaway-config.ts";
+import { TRUNCATION_CONTINUE_PROMPT, TRUNCATION_RESUME_PROMPT } from "../state/runaway-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { isStatusMessage, statusSummary } from "../state/status-text.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
@@ -104,7 +104,10 @@ export function messageLines(
         continue;
       }
       // 撞上限续跑（决策 367）时运行面追加的提示：同样不是人输入的话
-      if (message.role === "user" && block.text === TRUNCATION_CONTINUE_PROMPT) {
+      if (
+        message.role === "user" &&
+        (block.text === TRUNCATION_CONTINUE_PROMPT || block.text === TRUNCATION_RESUME_PROMPT)
+      ) {
         lines.push({ kind: "notice", text: `续跑提示：${block.text}` });
         continue;
       }

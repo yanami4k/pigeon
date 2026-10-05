@@ -63,6 +63,9 @@ export function sessionsDirOf(root: string): string {
   return path.join(projectStateDir(root), "sessions");
 }
 
+// 落盘输出的虚拟路径附带的一句（run_command、后台作业与裁剪占位共用）：模型曾在 shell 命令里用它，失败后才改用 read_file
+export const VIRTUAL_PATH_HINT = "pigeon:// 路径只能用 read_file 读取，shell 命令里用不了";
+
 // 决策 356：各会话的落盘目录所在（run_command 截断时存下的完整输出；pigeon://outputs/<会话号>/<编号> 指向其下的会话目录）
 export function outputsRootOf(root: string): string {
   return path.join(projectStateDir(root), "outputs");

@@ -20,6 +20,7 @@ import { DEFAULT_MEMORY_LIMITS } from "../state/memory-config.ts";
 import {
   DEFAULT_REPETITION_GUARD,
   DEFAULT_TRUNCATION_CONTINUATION,
+  TRUNCATION_CONTINUATION_VERSION,
 } from "../state/runaway-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
@@ -199,6 +200,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
       ...(pigeon.truncationContinuation ?? DEFAULT_TRUNCATION_CONTINUATION),
     },
     repetitionGuard: structuredClone(pigeon.repetitionGuard ?? DEFAULT_REPETITION_GUARD),
+    // 决策 376：续跑行为的版本（截断续跑按原因分开即换版本）
+    continuationVersion: TRUNCATION_CONTINUATION_VERSION,
     // 决策 365：无人值守收尾等后台作业的总时限（秒）的实际生效值
     backgroundCloseoutSeconds:
       pigeon.backgroundCloseoutSeconds ?? DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,

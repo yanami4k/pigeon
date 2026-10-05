@@ -349,9 +349,11 @@ export const HookRunDataSchema = Type.Object({
 export type HookRunData = Static<typeof HookRunDataSchema>;
 
 // 撞上限续跑（决策 367）：末条回复因输出上限截断（或被流式重复检测掐断）且没有工具调用，运行面不收尾、接着跑。
-// 被截断的回复留在会话文件里，但移出主分支（主分支的叶子退回它之前），模型上下文与续跑还原都不再含它；
+// 重复检测掐断的：被截断的回复留在会话文件里，但移出主分支（主分支的叶子退回它之前），模型上下文与续跑还原都不再含它；
 // 本条目挂在主分支上被截断回复的位置，其后是给模型的提示消息。被截断的回复是一次真实的模型请求：轮数与用量的统计
-// 按本条目把它加回（一条续跑条目算一轮，用量取 droppedUsage；截断的回复没有用量时缺省）
+// 按本条目把它加回（一条续跑条目算一轮，用量取 droppedUsage；截断的回复没有用量时缺省）。
+// 单纯撞上限的（决策 376）：截断的回复留在主分支上、照常计轮与用量，本条目挂在它之后、带 replyKept，不再加回。
+// 376 之前写下的条目没有 replyKept，一律是移出主分支的
 export const ContinuationDataSchema = Type.Object({
   version: VERSION,
   runId: RunIdSchema,
@@ -362,6 +364,8 @@ export const ContinuationDataSchema = Type.Object({
   consecutive: Type.Integer({ minimum: 1 }),
   continuedAt: Type.Integer({ minimum: 0 }),
   droppedUsage: Type.Optional(TurnUsageSchema),
+  // 截断的回复留在主分支上（决策 376：单纯撞上限）；缺省即已移出主分支
+  replyKept: Type.Optional(Type.Literal(true)),
 });
 export type ContinuationData = Static<typeof ContinuationDataSchema>;
 

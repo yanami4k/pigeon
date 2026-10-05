@@ -42,7 +42,7 @@ test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），�
   assert.equal(forced.provider, "kimi-coding");
 });
 
-test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置与项目级记忆上限记运行时缺省（off、16,384、产品缺省的压缩配置、4,000 字符），不记 null；记忆文字版本记 v2；主 agent 派 worker 记关（265）；给了的原样记", () => {
+test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置与项目级记忆上限记运行时缺省（off、16,384、产品缺省的压缩配置、4,000 字符），不记 null；记忆文字版本记 v3、续跑行为版本记 v2；主 agent 派 worker 记关（265）；给了的原样记", () => {
   assert.deepEqual(effectivePigeonSettings({}, "deepseek-flash"), {
     provider: "deepseek",
     modelId: "deepseek-flash",
@@ -67,6 +67,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     scriptOrchestration: false,
     truncationContinuation: DEFAULT_TRUNCATION_CONTINUATION,
     repetitionGuard: DEFAULT_REPETITION_GUARD,
+    continuationVersion: "v2",
     backgroundCloseoutSeconds: DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
   });
   assert.deepEqual(
@@ -105,6 +106,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       scriptOrchestration: false,
       truncationContinuation: DEFAULT_TRUNCATION_CONTINUATION,
       repetitionGuard: DEFAULT_REPETITION_GUARD,
+      continuationVersion: "v2",
       backgroundCloseoutSeconds: DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
     }
   );

@@ -69,6 +69,7 @@ import {
   type RepetitionGuardMode,
   type RepetitionGuardParams,
   TRUNCATION_CONTINUE_PROMPT,
+  TRUNCATION_RESUME_PROMPT,
 } from "../state/runaway-config.ts";
 import {
   type RunStartedPayload,
@@ -190,7 +191,7 @@ export interface ToolResultNotice {
 // 派生显示态，不落盘、不锚身份；参数与结果为深拷贝
 export interface TurnRoundNotice extends LoopRound {
   runId: RunId;
-  // 这一轮的回复因输出上限截断且没有工具调用（决策 367：续跑时从上下文去掉，打转检测不把它算作一轮）
+  // 这一轮的回复因输出上限截断且没有工具调用（决策 367：续跑交给下一轮，打转检测不把它算作一轮）
   truncated?: true;
 }
 
@@ -612,27 +613,35 @@ export class PiRuntimeAdapter {
     await this.#agent.continue();
   }
 
-  // 撞上限续跑（决策 367）：从 Agent 状态去掉截断的回复，会话存储里把它移出主分支（文件里照留）并记一条续跑记录；
-  // 本 Run 内轮间压缩过时先按会话树还原成压缩后的上下文（Agent 的消息累积着全量），再追加提示接着跑
+  // 撞上限续跑（决策 367）：按截断的原因分开（决策 376）。重复检测掐断的从 Agent 状态去掉截断的回复，会话存储里把它移出
+  // 主分支（文件里照留），提示直接发工具调用；单纯撞上限的把截断的回复留在上下文与主分支上，提示从断处接着写。两种都记一条
+  // 续跑记录。本 Run 内轮间压缩过时先按会话树还原成压缩后的上下文（Agent 的消息累积着全量），再追加提示接着跑
   async #continueTruncated(): Promise<void> {
     this.#continuations += 1;
     this.#consecutiveContinuations += 1;
-    const dropped = this.#agent.state.messages.at(-1);
-    const usage = dropped?.role === "assistant" ? dropped.usage : undefined;
-    this.#agent.state.messages = this.#agent.state.messages.slice(0, -1);
+    const cause = this.#repetitionCutSeq === this.#runEntrySeq ? "repetition" : "output-limit";
+    const drop = cause === "repetition";
+    const truncated = this.#agent.state.messages.at(-1);
+    const usage = drop && truncated?.role === "assistant" ? truncated.usage : undefined;
+    if (drop) {
+      this.#agent.state.messages = this.#agent.state.messages.slice(0, -1);
+    }
     const runId = this.#currentRunId;
     if (this.#sessionStore !== undefined && runId !== null) {
       try {
-        this.#sessionStore.dropTruncatedReply?.();
+        if (drop) {
+          this.#sessionStore.dropTruncatedReply?.();
+        }
         this.#sessionStore.append({
           customType: SessionEntryType.Continuation,
           data: {
             version: SESSION_ENTRY_VERSION,
             runId,
-            cause: this.#repetitionCutSeq === this.#runEntrySeq ? "repetition" : "output-limit",
+            cause,
             attempt: this.#continuations,
             consecutive: this.#consecutiveContinuations,
             continuedAt: Date.now(),
+            ...(drop ? {} : { replyKept: true as const }),
             // 截断的回复移出主分支后，轮数与用量的统计按这里加回
             ...(usage !== undefined
               ? {
@@ -662,7 +671,9 @@ export class PiRuntimeAdapter {
     // 还原要等会话树的读取：其间来的中止请求或释放落空（上游没有活动运行），故照常发起再立即中止，以中止收尾（同 #runWith）
     const started = this.#agent.prompt({
       role: "user",
-      content: [{ type: "text", text: TRUNCATION_CONTINUE_PROMPT }],
+      content: [
+        { type: "text", text: drop ? TRUNCATION_CONTINUE_PROMPT : TRUNCATION_RESUME_PROMPT },
+      ],
       timestamp: Date.now(),
     });
     if (this.#interruptRequested || this.#disposed) {

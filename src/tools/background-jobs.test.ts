@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
+import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import { cleanupOrphanedJobs, JobPool, SessionJobs } from "./background-jobs.ts";
 import { CommandOutputStore } from "./command-output.ts";
 import { createJobKillTool, createJobOutputTool, JOB_IDLE_QUERY_LIMIT } from "./job-tools.ts";
@@ -206,6 +207,7 @@ test("单个输出文件超过上限只留末尾，并注明丢弃了前面多�
     const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
     assert.match(text, /line-399-/);
     assert.ok(text.includes("丢弃"), text);
+    assert.ok(text.includes(VIRTUAL_PATH_HINT), text);
     const job = h.jobs.get("j1");
     const window = await h.store.readWindow(job.outputUri, 1, 1000);
     assert.ok(window.lines.length < 400 && window.lines.join("\n").length <= 4096);
