@@ -169,7 +169,7 @@ export interface TaskInterfaceModule {
   names: readonly TaskInterfaceName[];
 }
 
-// 接口说明一节的说明行，定稿原文（374，项目负责人定；属于被测条件，定稿后不再改）。分析包 task_interface.py 的
+// 接口说明一节的说明行，定稿原文（374；属于被测条件，定稿后不再改）。分析包 task_interface.py 的
 // INTERFACES_HEADING 与它逐字一致
 const INTERFACES_HEADING =
   "Modules and names used by these tests that are not in the repository yet (listed by signature):";
