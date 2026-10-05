@@ -18,6 +18,11 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import os from "node:os";
 import path from "node:path";
 import type { SandboxConfig } from "../state/sandbox-config.ts";
+import {
+  type SkippedFile,
+  skippedFilesText,
+  type UntrackedLimits,
+} from "../state/snapshot-config.ts";
 import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import {
@@ -234,6 +239,8 @@ export interface Sandbox {
   readonly startCommit: string;
   // 决策 278：开工时带入的未提交改动的快照；没有未提交改动、fromHead 或续跑时缺省
   readonly startSnapshot?: SandboxStartSnapshot;
+  // 决策 381：开工快照因过大没带进来的未跟踪文件；没有即缺省
+  readonly startSkipped?: readonly SkippedFile[];
   // 决策 280：挂进容器的共用下载缓存卷
   readonly cacheVolume: string;
   // 决策 333：容器的资源上限（0 为不限）
@@ -275,6 +282,8 @@ export interface OpenSandboxOptions {
   limits?: SandboxLimitSettings;
   // 决策 333：容器里 oom_kill 计数所在的文件（缺省按 cgroup v2、v1 的位置；测试改到别处）
   oomCounterFiles?: readonly string[];
+  // 决策 381：开工快照里未跟踪文件的上限（缺省取产品缺省）
+  untrackedLimits?: UntrackedLimits;
 }
 
 interface GitResult {
@@ -599,6 +608,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
   let startRef: string;
   let startCommit: string;
   let startSnapshot: SandboxStartSnapshot | undefined;
+  let startSkipped: SkippedFile[] | undefined;
   if (options.resume === true) {
     // 续跑：从该会话交回过的分支接着干
     const tip = hostGit(repo, ["rev-parse", "--verify", "-q", `refs/heads/${branch}^{commit}`]);
@@ -629,7 +639,11 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     // 决策 278：把工作目录里未提交的改动（含未被忽略的新文件）拍成快照，容器从它起步
     let snap: ReturnType<typeof snapshotWorkdir>;
     try {
-      snap = snapshotWorkdir({ repoRoot: repo, ref: startRefName });
+      snap = snapshotWorkdir({
+        repoRoot: repo,
+        ref: startRefName,
+        ...(options.untrackedLimits !== undefined ? { limits: options.untrackedLimits } : {}),
+      });
     } catch (error) {
       throw new Error(
         `拍工作目录快照失败，沙箱没有开：${error instanceof Error ? error.message : String(error)}`
@@ -643,6 +657,11 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     } else {
       startRef = "HEAD";
       startCommit = head.stdout.trim();
+    }
+    // 决策 381：没带进来的未跟踪大文件（只有它们、没有别的改动时起点仍是 HEAD，清单照样交回）
+    if (snap.skipped.length > 0) {
+      startSkipped = snap.skipped;
+      log(`没带进沙箱的未跟踪大文件（${snap.skipped.length}）：${skippedFilesText(snap.skipped)}`);
     }
   }
   // 开工中途失败时把快照引用删掉（快照提交没有别的引用，留着只是垃圾）
@@ -865,6 +884,7 @@ export async function openSandbox(options: OpenSandboxOptions): Promise<Sandbox>
     startLabel: options.resume === true ? branch : baseLabel,
     startCommit,
     ...(startSnapshot !== undefined ? { startSnapshot } : {}),
+    ...(startSkipped !== undefined ? { startSkipped } : {}),
     cacheVolume,
     limits,
     host,

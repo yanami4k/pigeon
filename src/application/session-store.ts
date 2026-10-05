@@ -137,6 +137,8 @@ export function checkpointEntry(
     runSeq?: number;
     // 决策 365：拍摄时在跑的后台作业
     backgroundJobs?: string[];
+    // 决策 381：过大而没进快照的未跟踪文件
+    untrackedSkipped?: Array<{ path: string; bytes: number }>;
   }
 ): SessionCustomEntry {
   return {
@@ -151,6 +153,9 @@ export function checkpointEntry(
       tree: payload.tree,
       ...(payload.baseCommit !== undefined ? { baseCommit: payload.baseCommit } : {}),
       ...(payload.backgroundJobs !== undefined ? { backgroundJobs: payload.backgroundJobs } : {}),
+      ...(payload.untrackedSkipped !== undefined
+        ? { untrackedSkipped: payload.untrackedSkipped }
+        : {}),
     },
   };
 }

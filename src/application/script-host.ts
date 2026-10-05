@@ -20,6 +20,7 @@ import { sessionsDirOf } from "../state/paths.ts";
 import type { SandboxBuildParams } from "../state/sandbox-config.ts";
 import type { SessionView } from "../state/session-view.ts";
 import type { SettingsSnapshot } from "../state/settings.ts";
+import { untrackedLimitsOf } from "../state/snapshot-config.ts";
 import { matchConfigGrants } from "../tools/grants.ts";
 import type { ScriptBudget } from "./script-naming.ts";
 import {
@@ -214,6 +215,7 @@ export interface SessionScriptsInput {
 export function createSessionScripts(input: SessionScriptsInput): ScriptRuns {
   const root = input.governanceRoot;
   const sessionsDir = sessionsDirOf(root);
+  const limits = untrackedLimitsOf(input.settings?.merged.snapshot);
   return new ScriptRuns({
     orchestrator: input.orchestrator,
     launcher:
@@ -223,11 +225,17 @@ export function createSessionScripts(input: SessionScriptsInput): ScriptRuns {
           ? { build: input.settings.merged.sandbox.build }
           : {}),
       }),
-    snapshot: (runId) => takeScriptSnapshot(root, runId),
+    // 决策 381：主目录快照与收回时写 worker 的树，未跟踪文件的上限取自设置的 snapshot 一节
+    snapshot: (runId) => takeScriptSnapshot(root, runId, limits),
     readSnapshot: (runId) => readScriptSnapshot(root, runId),
     releaseSnapshot: (runId) => releaseScriptSnapshot(root, runId),
     overlay: (target) =>
-      overlayWorkerChanges({ repoRoot: root, base: target.base, worktreePath: target.worktree }),
+      overlayWorkerChanges({
+        repoRoot: root,
+        base: target.base,
+        worktreePath: target.worktree,
+        limits,
+      }),
     approveCollect: collectApprover(root, input.approval),
     restore:
       input.restore ??

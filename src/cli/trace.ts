@@ -30,7 +30,7 @@ import {
   type ToolResultMark,
   toolResultMark,
 } from "../state/session-judge.ts";
-import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
+import { workerWorkspaceLabel } from "../state/session-payloads.ts";
 import type {
   SessionView,
   ViewChild,
@@ -291,7 +291,7 @@ export function renderSessionTrace(
     const worker = view.worker;
     lines.push(
       `worker 会话：${worker.name}（${worker.role}）｜ ` +
-        `${isGitWorktreeWorkspace(worker.workspace) ? `分支 ${worker.workspace.branch}` : "无工作区"} ｜ ` +
+        `${workerWorkspaceLabel(worker.workspace)} ｜ ` +
         `父会话 ${view.parentSessionId}（查看：trace ${view.parentSessionId}）`
     );
   }

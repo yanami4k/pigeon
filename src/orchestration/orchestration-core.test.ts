@@ -217,13 +217,13 @@ async function until(check: () => boolean): Promise<void> {
 test("标签与生命周期事件：派出、开跑、收尾各发一次事件，标签在事件、派出记录与结构化结果里原样带回", async () => {
   const { orchestrator, log, events, rt } = setup({ maxConcurrent: 1 });
   const first = orchestrator.spawn({
-    role: "explorer",
+    role: "tester",
     task: "一",
     name: "one",
     label: "T1",
     origin: "agent",
   });
-  const second = orchestrator.spawn({ role: "explorer", task: "二", name: "two", label: "T2" });
+  const second = orchestrator.spawn({ role: "tester", task: "二", name: "two", label: "T2" });
   assert.deepEqual(
     events.map((event) => [event.kind, event.worker.name, event.worker.label]),
     [
@@ -406,6 +406,12 @@ test("放开嵌套：各层共用同一个编排器与并发额度；等下层�
   );
   assert.equal(requests[1]?.depth, 2);
   assert.ok(!requests[1]?.policy.allow.includes("spawn_worker"));
+  // 决策 377：worker 派的 explorer 读该 worker 的工作树
+  const parentWorkspace = requests[0]?.workspace;
+  assert.deepEqual(requests[1]?.workspace, {
+    kind: "shared",
+    path: parentWorkspace?.kind === "git-worktree" ? parentWorkspace.path : "",
+  });
   const childRef = events.find(
     (event) => event.kind === "worker.spawned" && event.worker.name === "child"
   );

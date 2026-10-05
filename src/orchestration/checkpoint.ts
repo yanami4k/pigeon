@@ -12,6 +12,8 @@
 // 最后一次入索引的时间。复制出的副本修改时间是"现在"，必须设回用户索引的修改时间；此后临时索引只由 git 自己写：
 // 写时按读入时的索引修改时间认出临界条目，其中内容已变的抹掉长度（下次必比内容），内容没变的此刻确实干净、之后再改
 // 修改时间必然变化，复用不破坏这一保护。
+// 决策 381：未跟踪且未被忽略的文件按上限挑出过大的，不暂存、不进树（复用的临时索引里留着的旧内容一并摘掉），跳过清单随结果交回。
+// 快照只用于分叉（在独立工作树里续跑）与复盘读取，不回写主工作目录，跳过的文件因此不会被动到。
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
@@ -27,8 +29,21 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionId } from "../state/ids.ts";
 import { PROGRAM_OWNED_PATHS } from "../state/paths.ts";
+import {
+  DEFAULT_UNTRACKED_LIMITS,
+  pickOversized,
+  type SkippedFile,
+  type UntrackedLimits,
+} from "../state/snapshot-config.ts";
 import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import { killProcessTree, processGroupSpawnOptions } from "../tools/process-tree.ts";
+import {
+  addPathspecFile,
+  pathspecFileArgs,
+  removePathspecFile,
+  UNTRACKED_LIST_ARGS,
+  untrackedSizes,
+} from "../tools/untracked-files.ts";
 
 export const CHECKPOINT_REF_PREFIX = "refs/pigeon/checkpoints/";
 
@@ -41,6 +56,8 @@ export interface CheckpointResult {
   tree: string;
   // 只有会话的首个快照带：首次改动之前的工作区状态
   baseCommit?: string;
+  // 决策 381：过大而没进快照的未跟踪文件（路径相对工作区）；没有即缺省
+  skipped?: SkippedFile[];
 }
 
 export interface Checkpointer {
@@ -220,8 +237,11 @@ function trackTempFile(file: string): void {
 export function createCheckpointer(input: {
   workspaceRoot: string;
   sessionId: SessionId;
+  // 决策 381：未跟踪文件的上限（缺省取产品缺省）
+  limits?: UntrackedLimits;
 }): Checkpointer {
   const { workspaceRoot, sessionId } = input;
+  const limits = input.limits ?? DEFAULT_UNTRACKED_LIMITS;
   if (!isGitWorkspace(workspaceRoot)) {
     throw new NotGitWorkspaceError(`工作区不是 git 工作区，不能生成快照：${workspaceRoot}`);
   }
@@ -318,8 +338,10 @@ export function createCheckpointer(input: {
     }
   };
 
-  // 工作区当前文件树：临时索引上 add -A（排除治理目录）再 write-tree
-  const currentTree = async (signal?: AbortSignal): Promise<string> => {
+  // 工作区当前文件树：临时索引上 add -A（排除治理目录与过大的未跟踪文件）再 write-tree
+  const currentTree = async (
+    signal?: AbortSignal
+  ): Promise<{ tree: string; skipped: SkippedFile[] }> => {
     if (indexFile === undefined) {
       const file = join(tmpdir(), `pigeon-index-${randomBytes(8).toString("hex")}`);
       trackTempFile(file);
@@ -333,34 +355,58 @@ export function createCheckpointer(input: {
       indexFile = file;
     }
     const env = { GIT_INDEX_FILE: indexFile };
+    const specFiles: string[] = [];
     try {
-      await addAll(env, signal);
+      // 决策 381：未跟踪与否按用户的索引判定（不带临时索引），过大的不暂存
+      const listed = await run([...excludesConfig(), ...UNTRACKED_LIST_ARGS], undefined, signal);
+      const skipped = pickOversized(untrackedSizes(workspaceRoot, listed), limits);
+      const addSpec = skipped.length > 0 ? addPathspecFile(skipped) : undefined;
+      if (addSpec !== undefined) specFiles.push(addSpec);
+      await run(
+        [
+          ...excludesConfig(),
+          "add",
+          "-A",
+          ...(addSpec !== undefined ? pathspecFileArgs(addSpec) : ["--", "."]),
+        ],
+        env,
+        signal
+      );
+      if (skipped.length > 0) {
+        // 复用的临时索引里可能还留着它们变大之前的内容
+        const removeSpec = removePathspecFile(skipped);
+        specFiles.push(removeSpec);
+        await run(
+          // -f：留着的是变大之前的内容，与工作区当前内容不同，不加 git 会拒绝摘掉
+          ["rm", "--cached", "-f", "-q", "--ignore-unmatch", ...pathspecFileArgs(removeSpec)],
+          env,
+          signal
+        );
+      }
       // 仓库里已跟踪的程序状态（排除路径不动已在索引里的条目）从临时索引里摘掉
       await run(
         ["rm", "-r", "--cached", "-f", "--ignore-unmatch", "-q", "--", ...PROGRAM_OWNED_PATHS],
         env,
         signal
       );
-      return (await run(["write-tree"], env, signal)).trim();
+      return { tree: (await run(["write-tree"], env, signal)).trim(), skipped };
     } catch (error) {
       dropIndex();
       throw error;
+    } finally {
+      for (const file of specFiles) rmSync(file, { force: true });
     }
   };
 
-  // add -A 带上临时忽略文件（见 snapshotExcludes），git 不进 Pigeon 自己的程序状态；成败只看退出码
-  const addAll = (env: NodeJS.ProcessEnv, signal?: AbortSignal) => {
+  // 列出与暂存都带上临时忽略文件（见 snapshotExcludes），git 不进 Pigeon 自己的程序状态；成败只看退出码
+  const excludesConfig = (): string[] => {
     if (excludesFile === undefined) {
       const file = join(tmpdir(), `pigeon-excludes-${randomBytes(8).toString("hex")}`);
       trackTempFile(file);
       writeFileSync(file, excludesContent);
       excludesFile = file;
     }
-    return run(
-      ["-c", `core.excludesFile=${excludesFile.split("\\").join("/")}`, "add", "-A", "--", "."],
-      env,
-      signal
-    );
+    return ["-c", `core.excludesFile=${excludesFile.split("\\").join("/")}`];
   };
 
   const headCommit = async (signal?: AbortSignal): Promise<string | undefined> => {
@@ -426,7 +472,7 @@ export function createCheckpointer(input: {
         try {
           await init(signal);
           if (lastTree === undefined && baseTree === undefined && !baseLost) {
-            baseTree = await currentTree(signal);
+            baseTree = (await currentTree(signal)).tree;
           }
         } catch (error) {
           // 初始化失败同样算基线丢失：还没记下基线时就不能再记
@@ -439,7 +485,8 @@ export function createCheckpointer(input: {
     afterChange: (signal) =>
       serial(async () => {
         await init(signal);
-        const tree = await currentTree(signal);
+        const { tree, skipped } = await currentTree(signal);
+        const skippedField = skipped.length > 0 ? { skipped } : {};
         const reference = lastTree ?? baseTree;
         if (reference === undefined) {
           if (baseLost) {
@@ -453,7 +500,7 @@ export function createCheckpointer(input: {
             const ref = await nextRef(commit, signal);
             previous = commit;
             lastTree = tree;
-            return { ref, commit, tree };
+            return { ref, commit, tree, ...skippedField };
           }
           // 没有记过基线：把现状当基线，本次不算改变
           baseTree = tree;
@@ -480,19 +527,30 @@ export function createCheckpointer(input: {
         const ref = await nextRef(commit, signal);
         previous = commit;
         lastTree = tree;
-        return { ref, commit, tree, ...(baseCommit !== undefined ? { baseCommit } : {}) };
+        return {
+          ref,
+          commit,
+          tree,
+          ...(baseCommit !== undefined ? { baseCommit } : {}),
+          ...skippedField,
+        };
       }),
     snapshotNow: (signal) =>
       serial(async () => {
         await init(signal);
-        const tree = await currentTree(signal);
+        const { tree, skipped } = await currentTree(signal);
         const commit = await commitTree(
           tree,
           previous ?? (await headCommit(signal)),
           `pigeon checkpoint ${sessionId} now`,
           signal
         );
-        return { ref: await nextRef(commit, signal), commit, tree };
+        return {
+          ref: await nextRef(commit, signal),
+          commit,
+          tree,
+          ...(skipped.length > 0 ? { skipped } : {}),
+        };
       }),
     pin: (commit, signal) =>
       serial(async () => {

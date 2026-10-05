@@ -19,6 +19,7 @@ import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../appr
 import type { EventEnvelope } from "../state/events.ts";
 import { newSessionId, type RunId, type SessionId } from "../state/ids.ts";
 import type { LoopRound } from "../state/loop-guard.ts";
+import { isProgramOwnedPath } from "../state/paths.ts";
 import type { RunStopCause } from "../state/session-entries.ts";
 import type {
   ChildResult,
@@ -33,8 +34,21 @@ import type {
   WorkerRole,
   WorkerWorkspace,
 } from "../state/session-payloads.ts";
+import { workerWorkspacePath } from "../state/session-payloads.ts";
+import {
+  DEFAULT_UNTRACKED_LIMITS,
+  type SkippedFile,
+  type UntrackedLimits,
+} from "../state/snapshot-config.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
-import { assertPolicySubset, deriveWorkerPolicy, isWorkerRole, WORKER_ROLES } from "./roles.ts";
+import { oversizedUntracked } from "../tools/untracked-files.ts";
+import {
+  assertPolicySubset,
+  deriveWorkerPolicy,
+  isWorkerRole,
+  readsInPlace,
+  WORKER_ROLES,
+} from "./roles.ts";
 import {
   addWorktree,
   assertWorkerName,
@@ -161,6 +175,8 @@ export interface WorkerRuntimeRequest {
   depth?: number;
   // 决策 303：补批续做——装配层按已有会话文件还原对话再装运行面（同一个会话号、同一个工作树）
   resume?: boolean;
+  // 决策 381：起点快照因过大没带进工作树的未跟踪文件（装配层写进开工状态块告诉 worker）
+  skippedAtStart?: readonly SkippedFile[];
 }
 
 export type WorkerRuntimeFactory = (request: WorkerRuntimeRequest) => WorkerRuntimeHandle;
@@ -174,6 +190,8 @@ export interface WorkerStartPoint {
   snapshot: boolean;
   // 快照带入的未提交文件（仓库相对路径）；没有快照时为空
   files: string[];
+  // 决策 381：因过大没带进来的未跟踪文件；没有即缺省
+  skipped?: SkippedFile[];
 }
 
 // release：起点的引用只需护住"拍好快照到建好工作树"这一段——worker 分支建好即指向起点提交，提交不会被回收；
@@ -199,6 +217,8 @@ export interface WorkspaceProvider {
   plan(input: WorkspaceProviderInput): WorkerWorkspace;
   create(workspace: WorkerWorkspace, input: WorkspaceProviderInput): void;
   changedFiles(workspace: WorkerWorkspace): string[];
+  // 决策 381：worker 新建却因过大不会写进交回的树的未跟踪文件；不给即不列
+  skippedFiles?(workspace: WorkerWorkspace): SkippedFile[];
 }
 
 // 仓库根与治理根分开传（M6.5 S2）：工作树与分支建在仓库根上，目录放在治理根的 .pigeon/state/worktrees 下。
@@ -206,6 +226,8 @@ export interface WorkspaceProvider {
 export function gitWorktreeWorkspaces(roots: {
   repoRoot: string;
   governanceRoot: string;
+  // 决策 381：未跟踪文件的上限（缺省取产品缺省）
+  limits?: UntrackedLimits;
 }): WorkspaceProvider {
   return {
     // 无工作区形状只属于已退役的只读角色（决策 137），现有角色一律开 git 工作树
@@ -225,6 +247,13 @@ export function gitWorktreeWorkspaces(roots: {
     },
     changedFiles: (workspace) =>
       workspace.kind === "git-worktree" ? changedFiles(workspace.path) : [],
+    // 起点带进来的文件在工作树里都已跟踪，未跟踪的只会是 worker 新建的；挑法与交回写树同一套（workdir-snapshot.ts）
+    skippedFiles: (workspace) =>
+      workspace.kind === "git-worktree"
+        ? oversizedUntracked(workspace.path, roots.limits ?? DEFAULT_UNTRACKED_LIMITS, {
+            drop: isProgramOwnedPath,
+          })
+        : [],
   };
 }
 
@@ -318,6 +347,8 @@ export interface WorkerOrchestratorOptions {
   workspaces?: WorkspaceProvider;
   // 决策 279：worker 的起点（主工作目录的快照）；缺省不给 = 工作区提供者自己的缺省（git 工作树为 HEAD）
   startPoint?: WorkerStartPointProvider;
+  // 决策 381：缺省工作区提供者列出交回时没收进来的文件所用的上限（缺省取产品缺省）
+  untrackedLimits?: UntrackedLimits;
   defaultLimits?: Partial<WorkerLimits>;
   now?: () => number;
 }
@@ -548,6 +579,7 @@ export class WorkerOrchestrator {
       gitWorktreeWorkspaces({
         repoRoot: options.governanceRoot,
         governanceRoot: options.governanceRoot,
+        ...(options.untrackedLimits !== undefined ? { limits: options.untrackedLimits } : {}),
       });
     this.#now = options.now ?? Date.now;
   }
@@ -558,6 +590,11 @@ export class WorkerOrchestrator {
 
   get maxDepth(): number {
     return this.#maxDepth;
+  }
+
+  // 决策 381：未跟踪文件的上限（取用 worker 改动时写树用同一组）
+  get untrackedLimits(): UntrackedLimits {
+    return this.#options.untrackedLimits ?? DEFAULT_UNTRACKED_LIMITS;
   }
 
   // 决策 294 ②：订阅生命周期事件；监听器抛错只进内部故障清单
@@ -612,13 +649,12 @@ export class WorkerOrchestrator {
     }
     const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
     // 决策 360：范围路径在 worker 起点所在的工作目录里查符号链接——接力为上游 worker 的工作树，嵌套为派出方 worker 的
-    // 工作树，其余为主工作目录（治理根）
+    // 工作树，其余为主工作目录（治理根）。决策 377：派出方是只读 explorer 时取它读的那个工作区
+    const fromPath = fromEntry !== undefined ? workerWorkspacePath(fromEntry.workspace) : undefined;
     const scopeRoot =
       request.start !== undefined && "from" in request.start
         ? request.start.from
-        : fromEntry?.workspace.kind === "git-worktree"
-          ? fromEntry.workspace.path
-          : this.#options.governanceRoot;
+        : (fromPath ?? this.#options.governanceRoot);
     const policy = deriveWorkerPolicy(basePolicy, role, {
       orchestration: depth < this.#maxDepth,
       ...(request.tools !== undefined ? { tools: request.tools } : {}),
@@ -640,23 +676,23 @@ export class WorkerOrchestrator {
     const sessionId = newSessionId();
     const label =
       request.label !== undefined && request.label.trim() !== "" ? request.label.trim() : undefined;
+    // 决策 377：只读的 explorer 不拍快照、不建工作树，直接读派出方的工作区（scopeRoot 即它）。
+    // 编排脚本派出的（给了起点）照旧建工作树：脚本的记录、接力与续跑按工作树设计
+    const inPlace = request.start === undefined && readsInPlace(role, policy);
     // 决策 279：先拍工作目录的快照当起点（拍不成即不派：没有派出记录、零工作区零运行面）
     let startPoint: WorkerStartPoint | undefined;
     let releaseStart: (() => void) | undefined;
     const given = request.start;
-    if (given !== undefined && "point" in given) {
+    if (inPlace) {
+      // 不拍快照
+    } else if (given !== undefined && "point" in given) {
       // 决策 311：脚本整次共用的快照，引用由脚本持有到收回或放弃
       startPoint = given.point;
     } else if (given !== undefined && this.#options.startPoint === undefined) {
       throw new WorkerSpawnError(`派出 worker ${name} 失败：没有起点提供者，不能接力开工`);
     } else if (this.#options.startPoint !== undefined) {
       try {
-        const from =
-          given !== undefined
-            ? given.from
-            : fromEntry?.workspace.kind === "git-worktree"
-              ? fromEntry.workspace.path
-              : undefined;
+        const from = given !== undefined ? given.from : fromPath;
         const { release, ...point } = this.#options.startPoint({
           sessionId,
           name,
@@ -672,7 +708,9 @@ export class WorkerOrchestrator {
         });
       }
     }
-    const planned = this.#workspaces.plan({ sessionId, name, role });
+    const planned: WorkerWorkspace = inPlace
+      ? { kind: "shared", path: scopeRoot }
+      : this.#workspaces.plan({ sessionId, name, role });
     const workspace: WorkerWorkspace =
       planned.kind === "git-worktree" && startPoint !== undefined
         ? { ...planned, baseCommit: startPoint.commit }
@@ -696,12 +734,14 @@ export class WorkerOrchestrator {
     });
     let runtime: WorkerRuntimeHandle;
     try {
-      this.#workspaces.create(workspace, {
-        sessionId,
-        name,
-        role,
-        ...(startPoint !== undefined ? { baseRef: startPoint.commit } : {}),
-      });
+      if (workspace.kind !== "shared") {
+        this.#workspaces.create(workspace, {
+          sessionId,
+          name,
+          role,
+          ...(startPoint !== undefined ? { baseRef: startPoint.commit } : {}),
+        });
+      }
       this.#releaseStart(releaseStart);
       releaseStart = undefined;
       runtime = this.#createRuntime({
@@ -717,6 +757,7 @@ export class WorkerOrchestrator {
         depth,
         ...(label !== undefined ? { label } : {}),
         ...(request.script !== undefined ? { script: request.script } : {}),
+        ...(startPoint?.skipped !== undefined ? { skippedAtStart: startPoint.skipped } : {}),
         resume: false,
       });
     } catch (error) {
@@ -966,6 +1007,7 @@ export class WorkerOrchestrator {
       depth: entry.depth,
       ...(entry.label !== undefined ? { label: entry.label } : {}),
       ...(entry.script !== undefined ? { script: entry.script } : {}),
+      ...(entry.start?.skipped !== undefined ? { skippedAtStart: entry.start.skipped } : {}),
       resume: true,
     });
     entry.runtime = runtime;
@@ -1011,6 +1053,7 @@ export class WorkerOrchestrator {
     depth: number;
     label?: string;
     script?: ScriptSpawnTag;
+    skippedAtStart?: readonly SkippedFile[];
     resume: boolean;
   }): WorkerRuntimeHandle {
     const { sessionId, name, role, label, script } = input;
@@ -1037,6 +1080,7 @@ export class WorkerOrchestrator {
       limits: input.limits,
       depth: input.depth,
       ...(input.resume ? { resume: true } : {}),
+      ...(input.skippedAtStart !== undefined ? { skippedAtStart: input.skippedAtStart } : {}),
     });
   }
 
@@ -1399,7 +1443,13 @@ export class WorkerOrchestrator {
       const summary = runtime.summary();
       // M6（决策 064）：无工作区的 worker 没有分支与改动文件；结构化结果在场时随收尾一并回收
       const structured = runtime.structured?.();
+      // 决策 381：worker 新建却因过大不会进交回的树的文件
+      const skippedFiles =
+        entry.workspace.kind === "git-worktree"
+          ? (this.#workspaces.skippedFiles?.(entry.workspace) ?? [])
+          : [];
       result = {
+        ...(skippedFiles.length > 0 ? { skippedFiles } : {}),
         ...(entry.workspace.kind === "git-worktree"
           ? {
               branch: entry.workspace.branch,

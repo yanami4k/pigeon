@@ -194,7 +194,11 @@ test("trace（真实运行）：主 agent 派 worker 的会话——spawn_worker
     const workerId = /进入：trace (\S+)/.exec(parentTrace)?.[1];
     assert.ok(workerId !== undefined, parentTrace);
     const workerTrace = runTraceCommand({ root, sessionId: workerId });
-    assert.match(workerTrace, /^worker 会话：reader（explorer）｜ 分支 \S+ ｜ 父会话 /m);
+    // 决策 377：只读的 explorer 不建工作树
+    assert.match(
+      workerTrace,
+      /^worker 会话：reader（explorer）｜ 只读派出方工作区（不建工作树） ｜ 父会话 /m
+    );
     assert.deepEqual(
       toolCallVerdicts(workerTrace),
       [{ tool: "read_file", lines: ["审批：策略自动放行（policy:auto）", "分类：正常"] }],

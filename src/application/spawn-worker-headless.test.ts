@@ -145,8 +145,11 @@ function childStatuses(root: string, sessionId: string): Record<string, string |
   );
 }
 
+// 决策 377：只读的 explorer 不建分支，派出文字不同
 const spawned = (name: string, role = "explorer") =>
-  SPAWN_WORKER_TEXTS.spawned({ name, role, branch: `pigeon/${name}` });
+  role === "explorer"
+    ? SPAWN_WORKER_TEXTS.readOnly.spawned({ name, role })
+    : SPAWN_WORKER_TEXTS.spawned({ name, role, branch: `pigeon/${name}` });
 
 // 决策 279：每段返回文字末尾另起一行写起点与取用方式（提交号随仓库变）；比对收尾文字时去掉这一行，格式另在一处专门核对
 const START_LINE = /\n起点：[^\n]*/g;
@@ -205,13 +208,7 @@ test("pigeon run 等全部 worker 结束、完成通知作为新的一轮处理�
   assert.equal(
     withoutStart(users[1] ?? ""),
     WORKER_NOTICE_PREFIX +
-      SPAWN_WORKER_TEXTS.completed({
-        name: "slow",
-        role: "explorer",
-        branch: "pigeon/slow",
-        files: [],
-        summary: "看完了",
-      })
+      SPAWN_WORKER_TEXTS.readOnly.completed({ name: "slow", role: "explorer", summary: "看完了" })
   );
   assert.deepEqual(childStatuses(root, result.sessionId), { slow: "completed" });
 });
@@ -424,11 +421,11 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，通知
   const root = repo({ "a.txt": "a\n" });
   const spawnOnce = {
     text: "派",
-    toolCalls: [{ name: "spawn_worker", args: { role: "explorer", task: "WORKER 看看" } }],
+    toolCalls: [{ name: "spawn_worker", args: { role: "tester", task: "WORKER 看看" } }],
   };
   const spawnAgain = {
     text: "再派",
-    toolCalls: [{ name: "spawn_worker", args: { role: "explorer", task: "WORKER 再看看" } }],
+    toolCalls: [{ name: "spawn_worker", args: { role: "tester", task: "WORKER 再看看" } }],
   };
   const result = await runHeadless({
     task: "MAIN 看看",
@@ -445,10 +442,10 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，通知
   });
   assert.equal(result.status, "completed");
   const results = spawnResults(root, result.sessionId);
-  assert.deepEqual(results, [spawned("explorer-1"), SPAWN_WORKER_TEXTS.spawnLimit(1)]);
+  assert.deepEqual(results, [spawned("tester-1", "tester"), SPAWN_WORKER_TEXTS.spawnLimit(1)]);
   // 决策 279：仓库干净时起点就是 HEAD，通知末行写明派出时没有未提交的文件与取用方式
   const notice = userTexts(root, result.sessionId).find((text) =>
-    text.includes("explorer-1（explorer）已完成")
+    text.includes("tester-1（tester）已完成")
   );
   assert.equal(
     withoutMarker(notice ?? "")
@@ -456,7 +453,7 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，通知
       .at(-1),
     SPAWN_WORKER_TEXTS.start(
       { commit: git(root, ["rev-parse", "HEAD"]), snapshot: false, files: [] },
-      "explorer-1"
+      "tester-1"
     )
   );
 });

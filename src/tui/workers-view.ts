@@ -98,7 +98,10 @@ export function handleSpawnCommand(
   const spawned = workers.status().find((worker) => worker.sessionId === sessionId);
   host.addSystem(
     `已派出 worker ${spawned?.name ?? sessionId}（${request.role}）｜ 会话 ${sessionId} ｜ ` +
-      `分支 ${spawned?.branch ?? "未知"}`
+      // 决策 377：只读的 explorer 不建工作树
+      (spawned?.workspace.kind === "shared"
+        ? `只读 ${spawned.workspace.path}，不建分支`
+        : `分支 ${spawned?.branch ?? "未知"}`)
   );
   refreshWorkers(host);
   workers.awaitResult(sessionId).then(
@@ -199,7 +202,7 @@ export function renderWorkersTable(
     `workers (${statuses.length}):`,
     ...statuses.flatMap((status) => [
       `  ${workerRowText(status, tracker, now, columns)}`,
-      `    ${status.role} | ${status.branch !== undefined ? `branch ${status.branch}` : "no workspace"} | session ${status.sessionId}${previousRunNote(status)}`,
+      `    ${status.role} | ${status.branch !== undefined ? `branch ${status.branch}` : status.workspace.kind === "shared" ? "read-only, no worktree" : "no workspace"} | session ${status.sessionId}${previousRunNote(status)}`,
     ]),
   ].join("\n");
 }

@@ -14,6 +14,7 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { isProgramOwnedPath } from "../state/paths.ts";
+import type { SkippedFile, UntrackedLimits } from "../state/snapshot-config.ts";
 import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import { repoToplevel, workdirTree } from "./workdir-snapshot.ts";
 
@@ -29,6 +30,8 @@ export interface OverlayInput {
   base: string;
   // worker 的工作树路径：改动取它的当前内容
   worktreePath: string;
+  // 决策 381：worker 新建的未跟踪文件的上限（缺省取产品缺省），过大的不叠回
+  limits?: UntrackedLimits;
 }
 
 export interface OverlayResult {
@@ -40,6 +43,8 @@ export interface OverlayResult {
   conflicts: string[];
   // worker 删除的文件（主工作目录里未删）
   deletedByWorker: string[];
+  // 决策 381：worker 新建却因过大没写进树、因而没叠回的文件；没有即缺省
+  skipped?: SkippedFile[];
 }
 
 // 列表类命令在大仓库里输出可达数十 MiB
@@ -110,9 +115,10 @@ function workerChanges(input: OverlayInput): {
   base: string;
   workerTree: string;
   changes: Array<{ status: string; path: string }>;
+  skipped: SkippedFile[];
 } {
   const top = repoToplevel(input.repoRoot);
-  const workerTree = workdirTree(repoToplevel(input.worktreePath));
+  const { tree: workerTree, skipped } = workdirTree(repoToplevel(input.worktreePath), input.limits);
   const base = git(top, ["rev-parse", "--verify", "-q", `${input.base}^{commit}`]);
   if (base === "") {
     throw new OverlayError(`起点快照不存在：${input.base}`);
@@ -136,7 +142,7 @@ function workerChanges(input: OverlayInput): {
     }
     changes.push({ status: status.charAt(0), path });
   }
-  return { top, base, workerTree, changes };
+  return { top, base, workerTree, changes, skipped };
 }
 
 // 叠回会写到的路径（相对仓库根，正斜杠；worker 删除的不算——叠加不删文件）
@@ -148,9 +154,15 @@ export function workerOverlayPaths(input: OverlayInput): string[] {
 }
 
 export function overlayWorkerChanges(input: OverlayInput): OverlayResult {
-  const { top, base, workerTree, changes } = workerChanges(input);
+  const { top, base, workerTree, changes, skipped } = workerChanges(input);
   const topResolved = resolve(top);
-  const result: OverlayResult = { applied: [], unchanged: [], conflicts: [], deletedByWorker: [] };
+  const result: OverlayResult = {
+    applied: [],
+    unchanged: [],
+    conflicts: [],
+    deletedByWorker: [],
+    ...(skipped.length > 0 ? { skipped } : {}),
+  };
   const scratch = mkdtempSync(join(tmpdir(), "pigeon-overlay-"));
   try {
     applyChanges(top, topResolved, base, workerTree, changes, scratch, result);
@@ -175,6 +187,7 @@ function sorted(result: OverlayResult): OverlayResult {
     unchanged: [...result.unchanged].sort(),
     conflicts: [...result.conflicts].sort(),
     deletedByWorker: [...result.deletedByWorker].sort(),
+    ...(result.skipped !== undefined ? { skipped: result.skipped } : {}),
   };
 }
 

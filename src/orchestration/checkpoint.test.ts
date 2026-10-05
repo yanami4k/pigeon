@@ -198,3 +198,29 @@ test("非 git 工作区：判定为否，构造快照器明确报错", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// 决策 381：复用的临时索引里已收过的小文件长大超限后，下一次快照不再带它（不留变大之前的旧内容），并列出
+test("未跟踪文件长大超过上限：下一次快照摘掉它并在结果里列出；已跟踪的照收", async () => {
+  const { dir, cleanup } = repo();
+  try {
+    const checkpointer = createCheckpointer({
+      workspaceRoot: dir,
+      sessionId: newSessionId(),
+      limits: { fileMaxBytes: 1000, totalMaxBytes: 10_000 },
+    });
+    await checkpointer.beforeChange();
+    writeFileSync(join(dir, "grow.bin"), "g".repeat(100));
+    const first = await checkpointer.afterChange();
+    assert.ok(git(dir, ["ls-tree", "--name-only", first?.commit ?? ""]).includes("grow.bin"));
+    assert.equal(first?.skipped, undefined);
+    writeFileSync(join(dir, "grow.bin"), "g".repeat(2000));
+    writeFileSync(join(dir, "a.txt"), "a".repeat(2000));
+    const second = await checkpointer.afterChange();
+    assert.deepEqual(second?.skipped, [{ path: "grow.bin", bytes: 2000 }]);
+    const names = git(dir, ["ls-tree", "--name-only", second?.commit ?? ""]);
+    assert.ok(!names.includes("grow.bin"), names);
+    assert.equal(git(dir, ["show", `${second?.commit}:a.txt`]).length, 2000);
+  } finally {
+    cleanup();
+  }
+});

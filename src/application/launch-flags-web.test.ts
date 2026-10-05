@@ -15,6 +15,8 @@ import {
 import type { WebSection } from "../state/web-config.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import {
+  LOCAL_RISK_NOTICE,
+  localRiskNotice,
   parseLaunchFlags,
   VALUELESS_FLAGS,
   webToolsEnabled,
@@ -24,6 +26,14 @@ import { buildRuntime, WEB_TOOLS_SENTENCE } from "./runtime.ts";
 import { statusTextOf } from "./status-fixtures.ts";
 
 const parse = (argv: string[]) => parseLaunchFlags(argv, { usage: "u", sandbox: true, env: {} });
+
+// 决策 379：只在本机（不是容器沙箱档）、放手、联网工具开着三者同在时提示
+test("启动风险提示只在本机加放手加联网工具开着时给出", () => {
+  assert.equal(localRiskNotice(parse(["--yolo"]), true), LOCAL_RISK_NOTICE);
+  assert.equal(localRiskNotice(parse([]), true), undefined, "不放手");
+  assert.equal(localRiskNotice(parse(["--yolo"]), false), undefined, "联网工具没开");
+  assert.equal(localRiskNotice(parse(["--sandbox"]), true), undefined, "容器沙箱档（缺省放手）");
+});
 
 // 只带 web 一节的快照
 function snapshotWithWeb(web: WebSection | undefined): SettingsSnapshot {

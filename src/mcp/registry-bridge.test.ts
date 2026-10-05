@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import type { McpServerConfig } from "../state/mcp-config.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
+import { EXTERNAL_CONTENT_MARKER, markExternal } from "../tools/external-content.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { McpServerUnavailableError, type McpToolDescriptor } from "./client.ts";
 import { bridgeMcpServer, MCP_TOOL_NAME_MAX, mcpToolName } from "./registry-bridge.ts";
@@ -110,8 +111,9 @@ test("MCP 映射：执行转发参数；文本与图片内容块映射；isError
   assert.ok(echo !== undefined && fail !== undefined && gone !== undefined);
   const result = await echo.tool.execute("call-1", { message: "hi" });
   assert.deepEqual(seen[0], { name: "echo", args: { message: "hi" } });
+  // 决策 379：第一个文字块开头加外部内容标记，图片与块的结构不动
   assert.deepEqual(result.content.slice(0, 2), [
-    { type: "text", text: "hi" },
+    { type: "text", text: markExternal("hi") },
     { type: "image", data: "AAAA", mimeType: "image/png" },
   ]);
   assert.equal(result.content[2]?.type, "text");
@@ -125,6 +127,7 @@ test("MCP 映射：执行转发参数；文本与图片内容块映射；isError
   );
   assert.ok(domain instanceof Error);
   assert.match(domain.message, /坏参数/);
+  assert.ok(domain.message.includes(EXTERNAL_CONTENT_MARKER), "服务端给的错误说明同样标为外部内容");
   assert.equal(classifyToolError(domain), "domain");
 
   const environment = await gone.tool.execute("call-3", {}).then(

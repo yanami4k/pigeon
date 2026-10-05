@@ -18,6 +18,7 @@ import {
 } from "../execution/worker-overlay.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { isUnderPigeonDir } from "../state/paths.ts";
+import { skippedFilesText } from "../state/snapshot-config.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import { type SpawnWorkerSlot, TAKE_WORKER_TOOL } from "./spawn-worker-tool.ts";
@@ -65,7 +66,17 @@ export const TAKE_WORKER_TEXTS = {
     `worker ${name} 是之前的运行派出的，随上次进程退出而中断、没有交回结果，改动不可取用；它的分支与工作树留在原处。`,
   failed: (name: string, reason: string, applied: readonly string[]) =>
     `取用 worker ${name} 的改动失败：${reason}。已叠入的文件（${applied.length}）：${fileList(applied)}。`,
+  // 决策 377：只读的 explorer 不建工作树、不交改动
+  readOnly: (name: string) =>
+    `worker ${name} 是只读的 explorer，没有改动可取用；它的结论在交回的摘要里。`,
 } as const;
+
+// 决策 381：worker 新建却因过大没写进树、因而没叠入的文件（附在叠入结果之后；不属定稿原文）
+export function overlaySkippedLine(result: OverlayResult): string {
+  return result.skipped !== undefined && result.skipped.length > 0
+    ? `\n未叠入的大文件（${result.skipped.length}，worker 新建、未跟踪且过大，留在它的工作树里）：${skippedFilesText(result.skipped)}`
+    : "";
+}
 
 export interface TakeWorkerDetails {
   worker: string;
@@ -77,7 +88,8 @@ export interface TakeWorkerDetails {
     | "worktree-gone"
     | "no-start"
     | "unbound"
-    | "failed";
+    | "failed"
+    | "read-only";
 }
 
 // 决策 340：叠回会写到项目 .pigeon 下的文件（受保护路径）。叠回取用与脚本整批收回据此按受保护路径请示（逐次人批、放权不算，
@@ -119,7 +131,12 @@ function overlayTargetOf(
 
 // 取用一个 worker 的改动并给出文字（工具与终端界面的 /take 共用）
 export function takeWorkerChanges(
-  host: { orchestrator: Pick<WorkerOrchestrator, "status">; governanceRoot: string },
+  host: {
+    // 决策 381：编排器在场时按它的未跟踪文件上限写 worker 的树（替身可以不给，取产品缺省）
+    orchestrator: Pick<WorkerOrchestrator, "status"> &
+      Partial<Pick<WorkerOrchestrator, "untrackedLimits">>;
+    governanceRoot: string;
+  },
   worker: string
 ): { text: string; details: TakeWorkerDetails } {
   const name = worker.trim();
@@ -140,6 +157,12 @@ export function takeWorkerChanges(
     return {
       text: TAKE_WORKER_TEXTS.interrupted(name),
       details: { worker: name, rejected: "interrupted" },
+    };
+  }
+  if (status.workspace.kind === "shared") {
+    return {
+      text: TAKE_WORKER_TEXTS.readOnly(name),
+      details: { worker: name, rejected: "read-only" },
     };
   }
   if (status.workspace.kind !== "git-worktree") {
@@ -167,6 +190,9 @@ export function takeWorkerChanges(
       repoRoot: host.governanceRoot,
       base,
       worktreePath: status.workspace.path,
+      ...(host.orchestrator.untrackedLimits !== undefined
+        ? { limits: host.orchestrator.untrackedLimits }
+        : {}),
     });
   } catch (error) {
     const applied = error instanceof OverlayError ? (error.partial?.applied ?? []) : [];
@@ -185,9 +211,11 @@ export function takeWorkerChanges(
     result.conflicts.length === 0 &&
     result.deletedByWorker.length === 0;
   return {
-    text: empty
-      ? TAKE_WORKER_TEXTS.noChanges(name)
-      : TAKE_WORKER_TEXTS.taken(name, result, { worktree: status.workspace.path, base }),
+    text:
+      (empty
+        ? TAKE_WORKER_TEXTS.noChanges(name)
+        : TAKE_WORKER_TEXTS.taken(name, result, { worktree: status.workspace.path, base })) +
+      overlaySkippedLine(result),
     details: { worker: name, result },
   };
 }

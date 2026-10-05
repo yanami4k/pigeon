@@ -2,6 +2,7 @@
 // refs/pigeon/scripts/<运行号> 上保留到本次脚本收回或放弃为止；工作目录没有未提交改动时起点即 HEAD，同样挂上引用
 // （续跑沿用开跑时的起点，HEAD 之后移动也不影响）。续跑时按运行号读回。
 import { execFileSync } from "node:child_process";
+import type { SkippedFile, UntrackedLimits } from "../state/snapshot-config.ts";
 import { hardenedGitArgs } from "../tools/git-hardening.ts";
 import {
   deleteSnapshotRef,
@@ -16,6 +17,8 @@ export interface ScriptSnapshotPoint {
   snapshot: boolean;
   files: string[];
   ref: string;
+  // 决策 381：因过大没进快照的未跟踪文件（开跑时拍才有；续跑读回的没有）
+  skipped?: SkippedFile[];
 }
 
 export function scriptSnapshotRef(runId: string): string {
@@ -25,9 +28,13 @@ export function scriptSnapshotRef(runId: string): string {
   return `${SNAPSHOT_REF_ROOT}scripts/${runId}`;
 }
 
-export function takeScriptSnapshot(repoRoot: string, runId: string): ScriptSnapshotPoint {
+export function takeScriptSnapshot(
+  repoRoot: string,
+  runId: string,
+  limits?: UntrackedLimits
+): ScriptSnapshotPoint {
   const ref = scriptSnapshotRef(runId);
-  const snap = snapshotWorkdir({ repoRoot, ref });
+  const snap = snapshotWorkdir({ repoRoot, ref, ...(limits !== undefined ? { limits } : {}) });
   if (!snap.snapshot) {
     execFileSync("git", [...hardenedGitArgs(repoRoot), "update-ref", ref, snap.commit], {
       cwd: repoRoot,
@@ -35,7 +42,13 @@ export function takeScriptSnapshot(repoRoot: string, runId: string): ScriptSnaps
       windowsHide: true,
     });
   }
-  return { commit: snap.commit, snapshot: snap.snapshot, files: snap.files, ref };
+  return {
+    commit: snap.commit,
+    snapshot: snap.snapshot,
+    files: snap.files,
+    ref,
+    ...(snap.skipped.length > 0 ? { skipped: snap.skipped } : {}),
+  };
 }
 
 export function readScriptSnapshot(

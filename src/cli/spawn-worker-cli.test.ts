@@ -366,7 +366,7 @@ export default (model, context, options) => {
         .join("")
     );
   assert.deepEqual(texts, [
-    SPAWN_WORKER_TEXTS.spawned({ name: "look-a", role: "explorer", branch: "pigeon/look-a" }),
+    SPAWN_WORKER_TEXTS.readOnly.spawned({ name: "look-a", role: "explorer" }),
     SPAWN_WORKER_TEXTS.spawnLimit(1),
   ]);
 });

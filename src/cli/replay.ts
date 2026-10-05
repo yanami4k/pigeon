@@ -21,7 +21,7 @@ import {
   readSessionView,
 } from "../persistence/session-catalog.ts";
 import { sessionsDirOf } from "../state/paths.ts";
-import { isGitWorktreeWorkspace } from "../state/session-payloads.ts";
+import { workerWorkspaceLabel } from "../state/session-payloads.ts";
 import {
   isSyntheticFailure,
   type SessionView,
@@ -121,7 +121,7 @@ function itemDetail(item: ViewItem): string {
         const tools = data.policy.allow.length > 0 ? data.policy.allow.join("、") : "无";
         return (
           `派出 worker ${data.name}（${data.role}）｜ 会话 ${shortId(data.childSessionId)} ｜ ` +
-          `${isGitWorktreeWorkspace(data.workspace) ? `分支 ${data.workspace.branch}` : "无工作区"} ｜ ` +
+          `${workerWorkspaceLabel(data.workspace)} ｜ ` +
           `工具 ${tools} ｜ 审批模式 ${data.policy.approvalMode} ｜ ` +
           `上限 ${data.limits.maxTurns} 轮 / ${Math.round(data.limits.wallClockMs / 1000)} 秒`
         );

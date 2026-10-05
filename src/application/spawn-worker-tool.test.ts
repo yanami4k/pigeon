@@ -45,8 +45,8 @@ import {
 import { type NoticeTarget, WORKER_NOTICE_PREFIX, WorkerNotices } from "./worker-notices.ts";
 
 // 定稿原文（含 297 起的改写）：缺省设定（同时 8 个、不设总数上限、层数 1）
-const FINAL_DESCRIPTION = `派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要。
-worker 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；看不到本会话的对话。
+const FINAL_DESCRIPTION = `派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要（explorer 只交回摘要）。
+implementer 与 tester 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；explorer 不建工作树，直接只读你当前的工作区，读到的是正在变的内容，可能读到正在修改的文件。worker 都看不到本会话的对话。
 要并行，就多次调用本工具，每次派一个（可在同一次回复里连续调用）；同时最多跑 8 个，多的排队。派出后可以接着做自己的事，但不要把派出去的活自己再做一遍。需要结果才能往下做时用 wait_workers 等；worker_status 查看进度，message_worker 给在跑的 worker 补充说明，stop_worker 停掉不再需要的。
 何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。
 任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问，也不能再派 worker。
@@ -359,13 +359,13 @@ async function until(check: () => boolean): Promise<void> {
 const settled = (h: Harness, name: string) =>
   h.orchestrator.status().find((worker) => worker.name === name)?.outcome !== undefined;
 
-test("spawn_worker 的说明与参数说明逐字为定稿原文；执行模式可并行", () => {
+test("spawn_worker 的说明与参数说明逐字为定稿原文；执行模式串行", () => {
   const tool = createSpawnWorkerTool(new SpawnWorkerSlot());
   assert.equal(tool.name, "spawn_worker");
   assert.equal(spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS), FINAL_DESCRIPTION);
   // 工具上挂的说明即按槽的设置生成的那份（接线）
   assert.equal(tool.description, spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS));
-  assert.equal(tool.executionMode, "parallel");
+  assert.equal(tool.executionMode, "sequential");
   const schema = spawnWorkerParamsSchema(true);
   const properties = schema.properties;
   for (const [key, description] of Object.entries(FINAL_PARAMS)) {
@@ -449,6 +449,17 @@ test("固定情形的返回文字逐字为定稿原文", () => {
   assert.equal(
     SPAWN_WORKER_TEXTS.spawned({ name: "w", role: "explorer", branch: "pigeon/w", label: "T1" }),
     "已派出 worker w（explorer），分支 pigeon/w，标签 T1。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。"
+  );
+  // 决策 377：只读的 explorer 不提分支与改动文件
+  assert.equal(
+    SPAWN_WORKER_TEXTS.readOnly.spawned({ name: "w", role: "explorer" }),
+    "已派出 worker w（explorer），只读你的工作区，不建分支。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。"
+  );
+  assert.equal(
+    SPAWN_WORKER_TEXTS.readOnly.awaitingApproval({ name: "w", role: "explorer" }, "读 x", {
+      kind: "unattended",
+    }),
+    "worker w（explorer）停在等审批：要读 x，无人值守运行没有人审批。人补批后它可以接着做。"
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.attemptsSpawned(["a-1", "a-2"]),
@@ -553,10 +564,10 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
     files: ["x.ts"],
     maxTurns: 3,
   });
-  await call(turns, { role: "explorer", task: "查", name: "w" });
+  await call(turns, { role: "tester", task: "查", name: "w" });
   await until(() => turns.target.pendingNotices() === 1);
   const limitHit = SPAWN_WORKER_TEXTS.limitHit(
-    { name: "w", role: "explorer", branch: "pigeon/w", files: ["x.ts"], summary: "做了一半" },
+    { name: "w", role: "tester", branch: "pigeon/w", files: ["x.ts"], summary: "做了一半" },
     "轮数"
   );
   assert.equal(
@@ -602,12 +613,12 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
 
 test("wait_workers：all 等全部、any 等任一、超时交回当时状态且没结束的继续跑", async () => {
   const h = harness({ scriptFor: () => ({ behavior: "hang", summary: "好了" }), files: ["a.ts"] });
-  await call(h, { role: "explorer", task: "一", name: "one", label: "A" });
-  await call(h, { role: "explorer", task: "二", name: "two" });
+  await call(h, { role: "tester", task: "一", name: "one", label: "A" });
+  await call(h, { role: "tester", task: "二", name: "two" });
   // 超时：两个都没结束
   const timedOut = await wait(h, { timeout_seconds: 1 });
   assert.ok(timedOut.startsWith("等了 1 秒，仍有 worker 没结束。"), timedOut);
-  assert.ok(timedOut.includes("worker one（explorer）还没结束（进行中，0 轮，"), timedOut);
+  assert.ok(timedOut.includes("worker one（tester）还没结束（进行中，0 轮，"), timedOut);
   assert.ok(timedOut.includes("继续在跑。"), timedOut);
   assert.equal(h.orchestrator.status().filter((worker) => worker.state === "running").length, 2);
   // any：放行 one 即返回 one 的完整结果
@@ -616,15 +627,15 @@ test("wait_workers：all 等全部、any 等任一、超时交回当时状态且
   const anyText = await anyWait;
   assert.ok(
     anyText.startsWith(
-      "worker one（explorer），标签 A：状态 完成。\n分支：pigeon/one。改动的文件（1）：a.ts。\n最后一段输出：好了"
+      "worker one（tester），标签 A：状态 完成。\n分支：pigeon/one。改动的文件（1）：a.ts。\n最后一段输出：好了"
     ),
     anyText
   );
-  assert.ok(anyText.includes("worker two（explorer）还没结束"), anyText);
+  assert.ok(anyText.includes("worker two（tester）还没结束"), anyText);
   // all：放行 two 后返回
   const allWait = wait(h, { workers: ["two"] });
   h.runtimes.get("two")?.release();
-  assert.ok((await allWait).startsWith("worker two（explorer）：状态 完成。"));
+  assert.ok((await allWait).startsWith("worker two（tester）：状态 完成。"));
   // 没有要等的
   assert.equal(await wait(h, {}), "没有要等的 worker：都已结束或还没派出。");
   assert.equal(
