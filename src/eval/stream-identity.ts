@@ -78,6 +78,9 @@ export interface StreamRunIdentity {
         // 最简 agent 按决策 099 用它自己的公开设定（swebench 配置里的 model_kwargs），这里如实记下
         modelKwargs: Record<string, unknown> | null;
       };
+      // pigeon-docker 条件（对比评测的 Pigeon 组）：打包产物摘要、自报版本与逐项设置（stream-pigeon-docker.ts）；
+      // 与外部 agent 段同一规则：不进身份摘要，续跑时两边都记了才比对
+      pigeonDocker?: Record<string, unknown>;
       // 外部 agent 条件（实验设施）：按条件名记配置、工具目录摘要、网络档与启动命令自报的版本（stream-external.ts）；
       // 与上面两项同一规则：不进身份摘要，续跑时两边都记了才比对
       [external: `ext-${string}`]: Record<string, unknown> | undefined;

@@ -9,6 +9,7 @@ import { STATUS_BLOCK_VERSION } from "../application/status-block.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
 import {
+  DEFAULT_GATEWAY_MODEL_ID,
   DEFAULT_THINKING_LEVEL,
   GATEWAY_PROVIDER,
   GATEWAY_UPSTREAM_BASE_URL,
@@ -24,7 +25,11 @@ import {
 } from "../state/runaway-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
-import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
+import {
+  createGatewayNetwork,
+  type GatewayNetwork,
+  removeGatewayNetwork,
+} from "./gateway-network.ts";
 import {
   assertConcurrencyFits,
   type GatewayAccount,
@@ -82,11 +87,19 @@ import {
   TASK_PROMPT_LAYOUT_WITH_INTERFACES,
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
+import {
+  PIGEON_DOCKER_CONDITION,
+  pigeonDockerIdentity,
+  pigeonDockerJobContainerArgs,
+  pigeonDockerSelfReport,
+  pigeonDockerStepAgent,
+} from "./stream-pigeon-docker.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
-import { isExternalCondition, type StreamCondition } from "./stream-results.ts";
+import { isExternalCondition, type StreamCondition, type StreamJobId } from "./stream-results.ts";
 import {
   type ConditionSpec,
   dockerStreamEnvs,
+  jobDirName,
   lockOutDir,
   ReferenceCases,
   type RunStreamsSummary,
@@ -132,6 +145,9 @@ export interface StreamExperimentOptions {
   minimalCommand?: readonly string[];
   // 外部 agent 条件（实验设施）的配置：条件 ext-<名字> 各需一份；作业容器接只通网关的跑批内部网络
   externalAgents?: readonly ExternalAgentConfig[];
+  // pigeon-docker 条件（对比评测的 Pigeon 组，决策 380、389、390）的打包产物目录（dist/）：只读挂载进题目容器；
+  // 跑了 pigeon-docker 条件必给，给了必跑该条件
+  pigeonBundle?: string;
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
   // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
@@ -375,6 +391,40 @@ async function runStreamExperimentLocked(
       })
     );
   }
+  // pigeon-docker 条件（对比评测的 Pigeon 组）：条件与打包产物目录须同在；接入模块的模型固定为 deepseek-flash，
+  // 与 --model-id 不一致即拒绝（否则会拿另一个模型跑这一组）
+  const wantsPigeonDocker = options.conditions.includes(PIGEON_DOCKER_CONDITION);
+  if (wantsPigeonDocker && options.pigeonBundle === undefined) {
+    throw new Error(
+      `条件 ${PIGEON_DOCKER_CONDITION} 需要打包产物目录（用 --pigeon-bundle <目录> 给出）`
+    );
+  }
+  if (!wantsPigeonDocker && options.pigeonBundle !== undefined) {
+    throw new Error(
+      `给了打包产物目录却没跑 ${PIGEON_DOCKER_CONDITION} 条件（在 --conditions 里加上，或去掉 --pigeon-bundle）`
+    );
+  }
+  if (wantsPigeonDocker && modelId !== DEFAULT_GATEWAY_MODEL_ID) {
+    throw new Error(
+      `条件 ${PIGEON_DOCKER_CONDITION} 的接入模块固定请求 ${DEFAULT_GATEWAY_MODEL_ID}，与 --model-id ${modelId} 不符`
+    );
+  }
+  // 身份段在批次开始时算一次（产物摘要、--version 自报）
+  const pigeonDockerSettings =
+    options.pigeonBundle === undefined
+      ? undefined
+      : pigeonDockerIdentity(
+          options.pigeonBundle,
+          await pigeonDockerSelfReport({
+            bundleDir: options.pigeonBundle,
+            image: options.image,
+            container: `${prefix}-pigeon-docker-identity`,
+            docker,
+            ...(options.containerRunArgs !== undefined
+              ? { runArgs: options.containerRunArgs }
+              : {}),
+          })
+        );
   mkdirSync(outDir, { recursive: true });
   // 代码版本只取一次：身份头比对的与结果行记的是同一个
   const harness = currentHarnessRef();
@@ -397,6 +447,7 @@ async function runStreamExperimentLocked(
         agents: {
           ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
           ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+          ...(pigeonDockerSettings !== undefined ? { pigeonDocker: pigeonDockerSettings } : {}),
           ...externalSettings,
         },
       },
@@ -418,9 +469,9 @@ async function runStreamExperimentLocked(
     options.concurrency ?? 4,
     path.join(outDir, GATEWAY_SPEND_FILE)
   );
-  // 只通网关的跑批内部网络：有外部 agent 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
-  let network: Awaited<ReturnType<typeof createGatewayNetwork>> | undefined;
-  if (externals.length > 0) {
+  // 只通网关的跑批内部网络：有外部 agent 条件或 pigeon-docker 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
+  let network: GatewayNetwork | undefined;
+  if (externals.length > 0 || wantsPigeonDocker) {
     try {
       network = await createGatewayNetwork(prefix, docker);
       await liveGateway.listenInternal(network.hostAddress);
@@ -470,6 +521,14 @@ async function runStreamExperimentLocked(
         limits,
       });
     }
+    // pigeon-docker：打包产物在题目容器里跑；作业容器的网络与挂载在下面的 conditionArgs 里按作业给出
+    if (wantsPigeonDocker) {
+      agents[PIGEON_DOCKER_CONDITION] = pigeonDockerStepAgent({
+        bundleDir: options.pigeonBundle as string,
+        docker,
+        limits,
+      });
+    }
     const externalArgs = new Map<string, string[]>();
     const conditionSpecs: Record<string, ConditionSpec> = {};
     for (const config of externals) {
@@ -492,7 +551,23 @@ async function runStreamExperimentLocked(
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
-        ...(externals.length > 0 ? { conditionArgs: (c) => externalArgs.get(c) } : {}),
+        ...(externals.length > 0 || wantsPigeonDocker
+          ? {
+              conditionArgs: (condition: StreamCondition, job: StreamJobId) => {
+                // pigeon-docker：除网络与只读产物挂载外，按作业读写挂载它的治理目录（宿主作业目录下的
+                // .pigeon/，跑批器的会话清单、作废移出与续跑都按这个布局工作）
+                if (condition === PIGEON_DOCKER_CONDITION && network !== undefined) {
+                  return pigeonDockerJobContainerArgs({
+                    outDir,
+                    job,
+                    bundleDir: options.pigeonBundle as string,
+                    networkName: network.name,
+                  });
+                }
+                return externalArgs.get(condition);
+              },
+            }
+          : {}),
       }),
       agents,
       ...(externals.length > 0 ? { conditionSpecs } : {}),
@@ -511,6 +586,7 @@ async function runStreamExperimentLocked(
       agentSettings: {
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
         ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+        ...(pigeonDockerSettings !== undefined ? { pigeonDocker: pigeonDockerSettings } : {}),
         ...externalSettings,
       },
       ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),

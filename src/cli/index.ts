@@ -775,7 +775,9 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
 // 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
-// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）。
+// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）；
+// pigeon-docker 条件（对比评测的 Pigeon 组）：--pigeon-bundle 给打包产物目录（dist/），只读挂载进题目容器跑产品缺省
+// （--yolo --no-web --json --thinking high），治理根挂到题目仓库之外（见 src/eval/stream-pigeon-docker.ts）。
 // 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
 // Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
 // 撞上限续跑与流式重复检测（决策 367）：--continuation、--continuation-max-consecutive、--continuation-max-per-run、
@@ -791,6 +793,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--task-interfaces <接口数据文件>] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--pigeon-bundle <打包产物目录>（pigeon-docker 条件必给：dist/，只读挂载进题目容器）] " +
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
     "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
@@ -827,6 +830,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--repetition-mode",
     "--repetition-preset",
     "--background-closeout-seconds",
+    "--pigeon-bundle",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -884,7 +888,10 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     }
   }
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
-  const needsPigeon = conditions.some((c) => c !== "minimal" && !isExternalCondition(c));
+  // pigeon-docker 是容器条件（打包产物经 --pigeon-bundle 给），不需要进程内 Pigeon 的参数
+  const needsPigeon = conditions.some(
+    (c) => c !== "minimal" && c !== "pigeon-docker" && !isExternalCondition(c)
+  );
   // 外部 agent 的配置在开跑前解析、校验（与所跑条件的对应在 runStreamExperiment 里查）
   const externalAgents = externalAgentFiles.map((file) => loadExternalAgentConfig(file));
   const memoryLimitChars = positive("--memory-limit");
@@ -1007,6 +1014,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(pigeon !== undefined ? { pigeon } : {}),
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
     ...(externalAgents.length > 0 ? { externalAgents } : {}),
+    ...(values.has("--pigeon-bundle") ? { pigeonBundle: required("--pigeon-bundle") } : {}),
     ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
     ...(values.has("--task-interfaces")
       ? { taskInterfacesFile: required("--task-interfaces") }
