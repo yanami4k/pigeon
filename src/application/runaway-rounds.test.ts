@@ -1,9 +1,9 @@
-// 撞上限续跑（决策 367）的截断轮与续跑提示：打转检测不把截断轮算作一轮（不清零计数）；回看历史时续跑提示不显示成人输入的话
+// 撞上限续跑（决策 367、376）的截断轮与续跑提示：打转检测不把截断轮算作一轮（不清零计数）；回看历史时续跑提示不显示成人输入的话
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import type { TurnRoundNotice } from "../pi-runtime/adapter.ts";
 import type { RunId } from "../state/ids.ts";
-import { TRUNCATION_CONTINUE_PROMPT } from "../state/runaway-config.ts";
+import { TRUNCATION_CONTINUE_PROMPT, TRUNCATION_RESUME_PROMPT } from "../state/runaway-config.ts";
 import type { ViewMessage } from "../state/session-view.ts";
 import { messageLines } from "./history.ts";
 import { attachLoopGuard } from "./loop-guard.ts";
@@ -39,14 +39,17 @@ test("打转检测：截断且没有工具调用的轮不算一轮，前后相�
   assert.equal(reminders.length, 1);
 });
 
-test("回看历史：续跑提示显示成程序提示，不像人输入的话", () => {
-  const lines = messageLines({
-    role: "user",
-    blocks: [{ type: "text", text: TRUNCATION_CONTINUE_PROMPT }],
-  } as unknown as ViewMessage);
-  assert.deepEqual(
-    lines.map((line) => line.kind),
-    ["notice"]
-  );
-  assert.ok(lines[0]?.text.startsWith("续跑提示"));
-});
+test.each([TRUNCATION_CONTINUE_PROMPT, TRUNCATION_RESUME_PROMPT])(
+  "回看历史：续跑提示显示成程序提示，不像人输入的话（%s）",
+  (text) => {
+    const lines = messageLines({
+      role: "user",
+      blocks: [{ type: "text", text }],
+    } as unknown as ViewMessage);
+    assert.deepEqual(
+      lines.map((line) => line.kind),
+      ["notice"]
+    );
+    assert.ok(lines[0]?.text.startsWith("续跑提示"));
+  }
+);

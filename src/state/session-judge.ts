@@ -706,8 +706,11 @@ export function storeRunMetrics(
         usage.cost.total += turn.cost?.total ?? 0;
       }
     }
-    // 移出主分支的截断回复（决策 367）：各算一轮，用量加回
+    // 移出主分支的截断回复（决策 367）：各算一轮，用量加回；留在主分支上的（决策 376）已按消息计过
     for (const continuation of run.continuations) {
+      if (continuation.replyKept === true) {
+        continue;
+      }
       turns += 1;
       if (continuation.droppedUsage !== undefined) {
         addTurnUsage(usage, continuation.droppedUsage);

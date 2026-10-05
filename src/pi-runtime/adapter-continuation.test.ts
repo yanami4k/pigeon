@@ -1,19 +1,23 @@
-// 撞上限续跑（决策 367）：末条回复因输出上限截断且没有工具调用时，同一个 Run 里去掉它、追加提示接着跑；连续与每次 Run 合计
-// 各有上限，用尽照原样收尾。会话文件里截断的回复照留但移出主分支，按主分支还原的上下文（续跑的口径）不含它。
-// 流式重复检测掐断的回复按撞上限交给续跑，命中与续跑各记一条。被截断的回复的轮数与用量按续跑条目加回统计；
-// 本 Run 轮间压缩过时续跑请求用压缩后的上下文；中止请求在任何空档里都让续跑停下
+// 撞上限续跑（决策 367、376）：末条回复因输出上限截断且没有工具调用时，同一个 Run 里追加提示接着跑；连续与每次 Run 合计
+// 各有上限，用尽照原样收尾。按原因分开：单纯撞上限的截断正文留在上下文与主分支上、提示从断处接着写；流式重复检测掐断的
+// 从上下文去掉、会话文件里照留但移出主分支，提示直接发工具调用，其轮数与用量按续跑条目加回统计。两种情况按主分支还原的上下文
+// 都与续跑请求的上下文一致。本 Run 轮间压缩过时续跑请求用压缩后的上下文；中止请求在任何空档里都让续跑停下
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { test } from "vitest";
+import { describe, test } from "vitest";
 import { createToolGovernance } from "../application/governance.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { locateSessionFile, readSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
 import { newSessionId } from "../state/ids.ts";
-import { OMP_REPETITION_PARAMS, TRUNCATION_CONTINUE_PROMPT } from "../state/runaway-config.ts";
+import {
+  OMP_REPETITION_PARAMS,
+  TRUNCATION_CONTINUE_PROMPT,
+  TRUNCATION_RESUME_PROMPT,
+} from "../state/runaway-config.ts";
 import { type SessionCustomEntry, SessionEntryType } from "../state/session-entries.ts";
 import { storeRunMetrics } from "../state/session-judge.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -73,26 +77,6 @@ const TRUNCATED: FakeReply = { text: "写了一半的计划", stopReason: "lengt
 const CALL: FakeReply = { text: "调", toolCalls: [{ name: "echo", args: { text: "x" } }] };
 const textOf = (value: unknown) => JSON.stringify(value) ?? "";
 
-test("截断且没有工具调用即续跑：发给模型的上下文去掉截断的回复、末尾是续跑提示；接着正常收尾即正常完成，只发一次 run.ended", async () => {
-  const { adapter, streamFn } = adapterWith([TRUNCATED, { text: "改好了" }], {
-    truncationContinuation: { maxConsecutive: 2, maxPerRun: 5 },
-  });
-  const result = await adapter.run("做事");
-  assert.equal(result.status, "completed");
-  assert.equal(result.stopReason, "stop");
-  assert.equal(streamFn.calls.length, 2);
-  const sent = streamFn.calls[1]?.context.messages ?? [];
-  assert.deepEqual(
-    sent.map((message) => message.role),
-    ["user", "user"]
-  );
-  assert.ok(textOf(sent[1]).includes(TRUNCATION_CONTINUE_PROMPT));
-  assert.ok(!textOf(sent).includes("写了一半"));
-  assert.ok(!textOf(adapter.transcript()).includes("写了一半"));
-  assert.equal(adapter.events().filter((event) => event.kind === "run.ended").length, 1);
-  await adapter.dispose();
-});
-
 test("连续上限：每条都截断时请求 1 + 连续上限次后照原样收尾（completed、停止原因 length）", async () => {
   const { adapter, streamFn } = adapterWith([TRUNCATED], {
     truncationContinuation: { maxConsecutive: 2, maxPerRun: 5 },
@@ -118,96 +102,115 @@ test("合计上限：中间有正常回复即连续次数清零，但一个 Run 
   await adapter.dispose();
 });
 
-test("会话文件：截断的回复照留但移出主分支，主分支上它的位置是续跑记录与提示；按主分支还原的续跑上下文不含它", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pigeon-continuation-"));
-  const sessionsDir = join(root, "sessions");
-  const sessionId = newSessionId();
-  const store = openSessionStoreWriter({
-    sessionsRoot: sessionsDir,
-    sessionId,
-    cwd: root,
-    lock: acquireSessionFileLock,
+const REPEATING: FakeReply = { text: `开头${"再读一遍文件。".repeat(60)}`, chunkSize: 30 };
+// 逐条消息的角色与内容（续跑请求的上下文与按主分支还原的上下文比对用）
+const shapeOf = (messages: readonly unknown[]) =>
+  messages.map((message) => {
+    const { role, content } = message as { role: string; content: unknown };
+    return [role, textOf(content)];
   });
-  try {
-    const { adapter } = adapterWith([TRUNCATED, { text: "改好了" }], {
+
+describe.each([
+  {
+    cause: "output-limit",
+    first: TRUNCATED,
+    guard: undefined,
+    kept: true,
+    prompt: TRUNCATION_RESUME_PROMPT,
+    main: [SessionEntryType.RunStart, "user", "assistant", SessionEntryType.Continuation],
+  },
+  {
+    cause: "repetition",
+    first: REPEATING,
+    guard: { mode: "abort" as const, params: OMP_REPETITION_PARAMS },
+    kept: false,
+    prompt: TRUNCATION_CONTINUE_PROMPT,
+    main: [
+      SessionEntryType.RunStart,
+      "user",
+      SessionEntryType.Repetition,
+      SessionEntryType.Continuation,
+    ],
+  },
+])("续跑按原因分开：$cause", ({ cause, first, guard, kept, prompt, main }) => {
+  test("截断的正文留不留在续跑请求里、提示各异；主分支还原的上下文与续跑请求一致；轮数与用量与逐轮事件一致", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pigeon-continuation-"));
+    const sessionsDir = join(root, "sessions");
+    const sessionId = newSessionId();
+    const store = openSessionStoreWriter({
+      sessionsRoot: sessionsDir,
       sessionId,
-      sessionStore: store,
-      truncationContinuation: { maxConsecutive: 2, maxPerRun: 5 },
+      cwd: root,
+      lock: acquireSessionFileLock,
     });
-    await adapter.run("做事");
-    await adapter.dispose();
-    await store.close();
-    const file = readSessionFile(locateSessionFile(sessionsDir, sessionId)?.path ?? "");
-    assert.ok(file !== undefined);
-    assert.ok(file.entries.some((entry) => textOf(entry.message).includes("写了一半")));
-    const loaded = loadStoreSession(sessionsDir, sessionId);
-    assert.ok(loaded !== undefined);
-    assert.deepEqual(
-      loaded.main.map((entry) =>
-        entry.type === "custom" ? entry.customType : (entry.message as { role: string }).role
-      ),
-      [
-        SessionEntryType.RunStart,
-        "user",
-        SessionEntryType.Continuation,
-        "user",
-        "assistant",
-        SessionEntryType.RunEnd,
-      ]
-    );
-    const continuation = loaded.main.find(
-      (entry) => entry.customType === SessionEntryType.Continuation
-    );
-    assert.deepEqual(
-      {
-        ...(continuation?.data as object),
-        runId: undefined,
-        continuedAt: undefined,
-        droppedUsage: undefined,
-      },
-      {
-        version: 1,
-        runId: undefined,
-        cause: "output-limit",
-        attempt: 1,
-        consecutive: 1,
-        continuedAt: undefined,
-        droppedUsage: undefined,
-      }
-    );
-    const restored = restoreSessionContext(loaded.main).messages;
-    assert.ok(!textOf(restored).includes("写了一半"));
-    assert.deepEqual(
-      restored.map((message) => message.role),
-      ["user", "user", "assistant"]
-    );
-    // 轮数与用量：截断的回复按续跑条目加回，与运行中逐轮发出的事件一致
-    const completed = adapter.events().filter((event) => event.kind === "turn.completed");
-    const metrics = storeRunMetrics(loaded.view);
-    assert.equal(metrics.turns, completed.length);
-    assert.equal(
-      metrics.usage.totalTokens,
-      completed.reduce(
-        (sum, event) =>
-          sum + ((event.payload as { usage?: { totalTokens: number } }).usage?.totalTokens ?? 0),
-        0
-      )
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+    try {
+      const { adapter, streamFn } = adapterWith([first, { text: "改好了" }], {
+        sessionId,
+        sessionStore: store,
+        truncationContinuation: { maxConsecutive: 2, maxPerRun: 5 },
+        ...(guard !== undefined ? { repetitionGuard: guard } : {}),
+      });
+      const result = await adapter.run("做事");
+      assert.equal(result.status, "completed");
+      assert.equal(result.stopReason, "stop");
+      assert.equal(adapter.events().filter((event) => event.kind === "run.ended").length, 1);
+      assert.equal(streamFn.calls.length, 2);
+      const truncatedText = first.text.slice(0, 4);
+      const sent = streamFn.calls[1]?.context.messages ?? [];
+      assert.equal(textOf(sent).includes(truncatedText), kept);
+      const last = textOf(sent.at(-1));
+      assert.ok(last.includes(prompt));
+      assert.ok(!last.includes(kept ? TRUNCATION_CONTINUE_PROMPT : TRUNCATION_RESUME_PROMPT));
+      await adapter.dispose();
+      await store.close();
+
+      // 会话文件照留截断的回复；主分支上留不留它按原因
+      const file = readSessionFile(locateSessionFile(sessionsDir, sessionId)?.path ?? "");
+      assert.ok(file?.entries.some((entry) => textOf(entry.message).includes(truncatedText)));
+      const loaded = loadStoreSession(sessionsDir, sessionId);
+      assert.ok(loaded !== undefined);
+      assert.deepEqual(
+        loaded.main.map((entry) =>
+          entry.type === "custom" ? entry.customType : (entry.message as { role: string }).role
+        ),
+        [...main, "user", "assistant", SessionEntryType.RunEnd]
+      );
+      const continuation = loaded.main.find(
+        (entry) => entry.customType === SessionEntryType.Continuation
+      )?.data as Record<string, unknown> | undefined;
+      assert.equal(continuation?.cause, cause);
+      assert.equal(continuation?.replyKept, kept ? true : undefined);
+      assert.equal(continuation?.droppedUsage !== undefined, !kept);
+
+      // 续跑重放：按主分支还原的上下文以续跑请求的上下文为前缀
+      const restored = restoreSessionContext(loaded.main).messages;
+      assert.deepEqual(shapeOf(restored.slice(0, sent.length)), shapeOf(sent));
+
+      // 轮数与用量：与运行中逐轮发出的事件一致（移出主分支的按续跑条目加回，留着的不重复计）
+      const completed = adapter.events().filter((event) => event.kind === "turn.completed");
+      const metrics = storeRunMetrics(loaded.view);
+      assert.equal(metrics.turns, completed.length);
+      assert.equal(
+        metrics.usage.totalTokens,
+        completed.reduce(
+          (sum, event) =>
+            sum + ((event.payload as { usage?: { totalTokens: number } }).usage?.totalTokens ?? 0),
+          0
+        )
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
-test("重复检测掐断的回复交给续跑：命中记一条（判据、通道、模式），续跑记录的来由为重复检测", async () => {
+test("重复检测掐断的回复交给续跑：命中记一条（判据、通道、模式），其后是续跑记录", async () => {
   const entries: SessionCustomEntry[] = [];
-  const { adapter, streamFn } = adapterWith(
-    [{ text: `开头${"再读一遍文件。".repeat(60)}`, chunkSize: 30 }, { text: "改好了" }],
-    {
-      sessionStore: { appendMessage: () => {}, append: (entry) => entries.push(entry) },
-      truncationContinuation: { maxConsecutive: 2, maxPerRun: 5 },
-      repetitionGuard: { mode: "abort", params: OMP_REPETITION_PARAMS },
-    }
-  );
+  const { adapter, streamFn } = adapterWith([REPEATING, { text: "改好了" }], {
+    sessionStore: { appendMessage: () => {}, append: (entry) => entries.push(entry) },
+    truncationContinuation: { maxConsecutive: 2, maxPerRun: 5 },
+    repetitionGuard: { mode: "abort", params: OMP_REPETITION_PARAMS },
+  });
   const result = await adapter.run("做事");
   assert.equal(result.stopReason, "stop");
   assert.equal(streamFn.calls.length, 2);
@@ -218,17 +221,13 @@ test("重复检测掐断的回复交给续跑：命中记一条（判据、通�
     SessionEntryType.Continuation,
     SessionEntryType.RunEnd,
   ]);
-  const [, hit, continued] = entries;
+  const [, hit] = entries;
   assert.equal(hit?.customType, SessionEntryType.Repetition);
   assert.deepEqual(
     hit?.customType === SessionEntryType.Repetition
       ? [hit.data.criterion, hit.data.channel, hit.data.mode]
       : [],
     ["cycle", "text", "abort"]
-  );
-  assert.equal(
-    continued?.customType === SessionEntryType.Continuation ? continued.data.cause : undefined,
-    "repetition"
   );
   await adapter.dispose();
 });
@@ -302,7 +301,7 @@ function compacting(
   };
 }
 
-test("本 Run 轮间压缩过：续跑请求用压缩后的上下文（以摘要开头、不再带被摘要的历史），末尾是续跑提示", async () => {
+test("本 Run 轮间压缩过：续跑请求用压缩后的上下文（以摘要开头、不再带被摘要的历史），带着截断的正文，末尾是接续提示", async () => {
   const h = compacting();
   try {
     const result = await h.adapter.run(LONG_TASK);
@@ -311,7 +310,8 @@ test("本 Run 轮间压缩过：续跑请求用压缩后的上下文（以摘要
     const sent: AgentMessage[] = (h.streamFn.calls[3]?.context.messages ?? []) as AgentMessage[];
     assert.ok(textOf(sent[0]).includes("The conversation history before this point was compacted"));
     assert.ok(!textOf(sent).includes("细节说明。细节说明。"));
-    assert.ok(textOf(sent.at(-1)).includes(TRUNCATION_CONTINUE_PROMPT));
+    assert.ok(textOf(sent.at(-2)).includes("写了一半"));
+    assert.ok(textOf(sent.at(-1)).includes(TRUNCATION_RESUME_PROMPT));
   } finally {
     await h.cleanup();
   }
