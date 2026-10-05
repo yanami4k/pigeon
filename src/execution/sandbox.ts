@@ -66,8 +66,9 @@ export const SANDBOX_CACHE_DIRS = ["npm", "pnpm", "yarn", "pip", "uv", "cargo", 
 export function sandboxCacheEnv(root: string = SANDBOX_CACHE_ROOT): Record<string, string> {
   return {
     npm_config_cache: `${root}/npm`,
-    // pnpm 读 npm 风格的环境变量：内容可寻址存储放卷里（与项目不在同一文件系统时 pnpm 自行改为复制）
-    npm_config_store_dir: `${root}/pnpm/store`,
+    // pnpm 的内容可寻址存储放卷里（与项目不在同一文件系统时 pnpm 自行改为复制）。用 pnpm_config_ 前缀：pnpm 11 起只认它、
+    // 不再读 npm_config_*；npm 不认这个前缀，不会像 npm_config_store_dir 那样每次告警未知配置
+    pnpm_config_store_dir: `${root}/pnpm/store`,
     // yarn 1 的缓存目录；yarn 2+ 缺省用全局目录下的 cache
     YARN_CACHE_FOLDER: `${root}/yarn/cache`,
     YARN_GLOBAL_FOLDER: `${root}/yarn/berry`,

@@ -130,6 +130,10 @@ test.skipIf(image === undefined ? "没有 Docker 或带 git 的镜像" : false)(
             ).stdout.trim(),
             "/pigeon-cache/npm:/pigeon-cache/pip"
           );
+          // 给 pnpm 的环境变量 npm 不认，不告警未知配置
+          const npmCache = docker("exec", name, "npm", "config", "get", "cache");
+          assert.equal(npmCache.stdout.trim(), "/pigeon-cache/npm");
+          assert.equal(npmCache.stderr, "");
           const mode = docker(
             "inspect",
             "--format",

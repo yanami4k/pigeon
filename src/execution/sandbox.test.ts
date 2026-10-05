@@ -232,7 +232,7 @@ test("硬性规则：开沙箱挂共用下载缓存卷——run 参数带卷与�
   // 各包管理器指到卷里各自的子目录
   assert.deepEqual(sandboxCacheEnv("/pigeon-cache"), {
     npm_config_cache: "/pigeon-cache/npm",
-    npm_config_store_dir: "/pigeon-cache/pnpm/store",
+    pnpm_config_store_dir: "/pigeon-cache/pnpm/store",
     YARN_CACHE_FOLDER: "/pigeon-cache/yarn/cache",
     YARN_GLOBAL_FOLDER: "/pigeon-cache/yarn/berry",
     PIP_CACHE_DIR: "/pigeon-cache/pip",
