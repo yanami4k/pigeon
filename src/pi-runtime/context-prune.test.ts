@@ -1,8 +1,10 @@
-// 缓存感知的上下文裁剪（决策 361）：付费时机按 裁掉量 × N ≥（价格比 − 1）× 改写点之后的量 且不小于最小批量才裁；
+// 缓存感知的上下文裁剪（决策 361、373）：付费时机只裁过时读取（较大的旧结果只在免费时机裁），按 裁掉量 × N ≥
+// （价格比 − 1）× 改写点之后的量 且不小于最小批量才裁；
 // 受保护的内容（用户的话、模型正文与思考、工具调用参数、状态消息、最近几轮的工具结果）不碰，调用与结果的配对保留；
 // 无事发生的结果只随批顺带；过时读取不论大小都算，裁掉的读取在上下文里再没有同一文件的读写时不再算读过；命令输出没落盘的
 // 先补落盘（空输出不落盘），截断而全文没落盘的、补落盘失败的不裁，带文件变化的保留清单；先写进会话记录再生效；免费时机
-// （模型或工具集变化、空闲超时、压缩前）一次裁光；同一请求前裁两次不重复扣减；续跑照记录重放，逐字节一致，总开关关掉也照放。
+// （模型或工具集变化、空闲超时、压缩前）一次裁光；同一请求前裁两次不重复扣减；续跑照记录重放（含决策 373 之前付费时机裁掉的
+// 较大旧结果），逐字节一致，总开关关掉也照放。
 import assert from "node:assert/strict";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import { test } from "vitest";
@@ -82,6 +84,16 @@ function conversation(old: Call[], recent = 5, recentTokens = 10): AgentMessage[
   ];
 }
 
+// 读取 path 的第 1–100 行（约 tokens 大）；同一文件之后再读一次即成过时读取
+const readAll = (path: string, tokens: number): Call => ({
+  name: "read_file",
+  text: sized(tokens),
+  args: { path },
+  details: { resolvedPath: `/w/${path}`, offset: 1, returnedLines: 100 },
+});
+// 约 tokens 大的过时读取，后面跟着覆盖它的小读取（两轮）
+const stale = (path: string, tokens: number): Call[] => [readAll(path, tokens), readAll(path, 10)];
+
 function settings(overrides: Partial<ContextPruneSettings> = {}): ContextPruneSettings {
   return { ...contextPruneSettings(undefined, undefined), ...overrides };
 }
@@ -92,7 +104,7 @@ const contentOf = (messages: readonly AgentMessage[], id: string) =>
   );
 
 test("付费时机：裁掉量 × N 与（价格比 − 1）× 改写点之后的量比较，恰在分界两侧一裁一不裁；不足最小批量不裁", () => {
-  const messages = conversation([{ name: "read_file", text: sized(12_000) }], 5, 8_000);
+  const messages = conversation(stale("a.txt", 12_000), 5, 8_000);
   // 价格比为 1 时不收改写费，先量出裁掉量与改写点之后的量
   const probe = new ContextPruner(settings({ priceRatio: 1 })).beforeRequest(messages).record;
   assert.ok(probe !== undefined);
@@ -108,7 +120,7 @@ test("付费时机：裁掉量 × N 与（价格比 − 1）× 改写点之后�
   assert.equal(above.record, undefined);
   assert.equal(contentOf(above.messages, "old0"), contentOf(messages, "old0"));
   // 价格比为 1 也不足最小批量（缺省 1 万 token）的不裁
-  const small = conversation([{ name: "read_file", text: sized(9_000) }]);
+  const small = conversation(stale("a.txt", 9_000));
   assert.equal(
     new ContextPruner(settings({ priceRatio: 1 })).beforeRequest(small).record,
     undefined
@@ -168,13 +180,35 @@ test("无事发生的结果只随批顺带：单靠它们不裁；有一批要�
     new ContextPruner(settings({ priceRatio: 1, minBatchTokens: 0 })).beforeRequest(only).record,
     undefined
   );
-  const withBatch = conversation([{ name: "read_file", text: sized(12_000) }, empty]);
+  const withBatch = conversation([...stale("a.txt", 12_000), empty]);
   const record = new ContextPruner(settings({ priceRatio: 1 })).beforeRequest(withBatch).record;
   assert.deepEqual(
     record?.items.map((item) => [item.toolCallId, item.reason]),
     [
+      ["old0", "stale"],
+      ["old2", "empty"],
+    ]
+  );
+});
+
+test("较大的旧结果只在免费时机裁：付费时机不论价格比与下限都不选它，压缩前一次裁光", () => {
+  const messages = conversation([
+    { name: "read_file", text: sized(12_000) },
+    ...stale("a.txt", 200),
+  ]);
+  const paid = new ContextPruner(settings({ priceRatio: 1, minBatchTokens: 0 })).beforeRequest(
+    messages
+  ).record;
+  assert.deepEqual(
+    paid?.items.map((item) => [item.toolCallId, item.reason]),
+    [["old1", "stale"]]
+  );
+  const free = new ContextPruner(settings({ priceRatio: 50 })).beforeCompaction(messages);
+  assert.deepEqual(
+    free?.items.map((item) => [item.toolCallId, item.reason]),
+    [
       ["old0", "large"],
-      ["old1", "empty"],
+      ["old1", "stale"],
     ]
   );
 });
@@ -304,7 +338,7 @@ test("命令：截断而全文没落盘的、补落盘失败的不裁；部分�
 });
 
 test("先写进会话记录再生效：写不成时这次裁剪不生效、错误照抛，之后照常可裁", () => {
-  const messages = conversation([{ name: "read_file", text: sized(12_000) }]);
+  const messages = conversation(stale("a.txt", 12_000));
   const pruner = new ContextPruner(settings({ priceRatio: 1 }));
   assert.throws(
     () =>
@@ -319,13 +353,15 @@ test("先写进会话记录再生效：写不成时这次裁剪不生效、错�
 });
 
 test("同一请求前裁两次：第二次的裁剪前 token 数接着第一次的裁剪后，不重复扣减；还没随请求发出的是两次之和", () => {
-  const big: Call = { name: "read_file", text: sized(2_000) };
   const small: Call = { name: "read_file", text: sized(10) };
+  // a 是较大的旧结果（压缩前裁）；b 被 c 覆盖成过时读取（付费时机裁）
+  const [b, c] = stale("b.txt", 2_000) as [Call, Call];
   const base = [
     user("任务"),
-    ...turn(big, "a"),
-    ...turn(big, "b"),
-    ...["c", "d", "e", "f"].flatMap((id) => turn(small, id)),
+    ...turn({ name: "read_file", text: sized(2_000) }, "a"),
+    ...turn(b, "b"),
+    ...turn(c, "c"),
+    ...["d", "e", "f"].flatMap((id) => turn(small, id)),
   ];
   const pruner = new ContextPruner(
     settings({ priceRatio: 1, minBatchTokens: 0 }),
@@ -362,8 +398,14 @@ test("免费时机：模型或工具集与上一个 Run 不同、空闲超过保
 
 test("续跑照记录重放：从会话记录取回的裁剪应用到同样的消息上逐字节一致，之后追加的消息不改变前缀", () => {
   const messages = conversation([{ name: "read_file", text: sized(12_000) }]);
-  const first = new ContextPruner(settings({ priceRatio: 1 })).beforeRequest(messages);
-  const record = first.record as PruneRecord;
+  const pruner = new ContextPruner(settings());
+  // 决策 373 之前的会话记录：付费时机裁掉了较大的旧结果
+  const record: PruneRecord = {
+    ...(pruner.beforeCompaction(messages) as PruneRecord),
+    trigger: "paid",
+  };
+  assert.equal(record.items[0]?.reason, "large");
+  const first = { messages: pruner.view(messages) };
   const entries = [
     {
       type: "custom",

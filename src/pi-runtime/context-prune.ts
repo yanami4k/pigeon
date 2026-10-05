@@ -1,16 +1,17 @@
-// 缓存感知的上下文裁剪（决策 361）：把最近几轮之外的部分工具结果换成写明原来是什么与怎么找回的固定占位，降低之后每轮的
-// 输入量。只换工具结果的正文，消息本身（工具调用号、工具名）留着，调用与结果的配对不变；用户的话、模型正文、工具调用参数、
-// 思考内容、开工状态块与变化通道的消息（都不是工具结果）一律不碰。
+// 缓存感知的上下文裁剪（决策 361，候选按时机分开见决策 373）：把最近几轮之外的部分工具结果换成写明原来是什么与怎么找回的
+// 固定占位，降低之后每轮的输入量。只换工具结果的正文，消息本身（工具调用号、工具名）留着，调用与结果的配对不变；用户的话、
+// 模型正文、工具调用参数、思考内容、开工状态块与变化通道的消息（都不是工具结果）一律不碰。
 // 候选（保护轮之外、尚未裁过）：被后来的读取覆盖或被整体覆写的过时读取；无事发生的结果（零命中的搜索与检索、没有结果也没有
 // 答案的网页搜索、退出码 0 且没有输出也没有文件变化的命令，只随批顺带：不当改写起点，不计入下限与不等式）；不小于最小大小的
 // 较大旧结果。占位比原文还大的不算。命令输出截断了而全文没落盘的不裁（上下文里的头尾两段是唯一副本，命令可能有副作用，不能
 // 指望重新运行）。
-// 时机：免费时机（压缩前、Run 开始时模型或工具集或系统提示与上一个 Run 不同、空闲超过缓存保留时长）一次裁光候选；其余
-// 每次请求之前按价格比算账——在候选中选改写起点使预计净省最大，满足 裁掉量 × N ≥（价格比 − 1）× 改写点之后的量 且裁掉量
+// 时机：免费时机（压缩前、Run 开始时模型或工具集或系统提示与上一个 Run 不同、空闲超过缓存保留时长）一次裁光全部候选，含较大的
+// 旧结果；其余每次请求之前是付费时机，候选只有过时读取与随批顺带的无事发生结果（较大的旧结果多是仍在用的文件，付费裁掉后常被
+// 读回，读回按未命中价计），按价格比算账——选改写起点使预计净省最大，满足 裁掉量 × N ≥（价格比 − 1）× 改写点之后的量 且裁掉量
 // 不小于最小批量才裁。token 量按上游的 estimateTokens（与压缩判定同一口径）。
 // 每次裁剪产出一条记录（各项换成的占位原文），先写进会话记录再生效，组装请求时按工具调用号应用；续跑从会话记录取回，前缀
-// 逐字节一致。裁掉的命令输出还没落盘的先补落盘（空输出不落盘），补不成的不裁；占位给出虚拟路径，带文件变化的保留文件变化
-// 清单。裁掉的读取在上下文里再没有同一文件的读写结果时不再算读过。
+// 逐字节一致（决策 373 之前付费时机裁掉的较大旧结果照样重放）。裁掉的命令输出还没落盘的先补落盘（空输出不落盘），补不成的不裁；
+// 占位给出虚拟路径，带文件变化的保留文件变化清单。裁掉的读取在上下文里再没有同一文件的读写结果时不再算读过。
 // 打转检测看的是上游 turn_end 事件里的原文，不受裁剪影响。
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
@@ -172,13 +173,21 @@ export class ContextPruner {
     const view = this.view(messages);
     const sizes = view.map((message) => estimateTokens(message));
     const total = sizes.reduce((sum, size) => sum + size, 0);
-    let candidates = findCandidates(messages, view, sizes, this.#placeholders, this.settings);
+    // 决策 373：较大的旧结果只在免费时机裁
+    const paid = trigger === "paid";
+    let candidates = findCandidates(
+      messages,
+      view,
+      sizes,
+      this.#placeholders,
+      this.settings,
+      !paid
+    );
     // 先算定各项的占位：命令输出要补落盘的现在补，补不成的不裁；付费时机去掉它们后重新选起点
     const outputs = new Map<string, SavedOutput | undefined>();
     let chosen: Candidate[] = [];
     for (;;) {
-      chosen =
-        trigger === "paid" ? choosePaid(candidates, sizes, total, this.settings) : candidates;
+      chosen = paid ? choosePaid(candidates, sizes, total, this.settings) : candidates;
       const failed = new Set<string>();
       for (const candidate of chosen) {
         if (outputs.has(candidate.toolCallId)) continue;
@@ -206,7 +215,6 @@ export class ContextPruner {
     const prunedTokens = Math.max(0, total - after);
     const first = chosen.reduce((min, candidate) => Math.min(min, candidate.index), view.length);
     const rewriteTokens = Math.max(0, after - prefixTokens(sizes, first));
-    const free = trigger !== "paid";
     const prunedAt = this.#now();
     const record: PruneRecord = {
       trigger,
@@ -215,7 +223,7 @@ export class ContextPruner {
       horizonTurns: this.settings.horizonTurns,
       prunedTokens,
       rewriteTokens,
-      estimatedCost: free ? 0 : (this.settings.priceRatio - 1) * rewriteTokens,
+      estimatedCost: !paid ? 0 : (this.settings.priceRatio - 1) * rewriteTokens,
       estimatedSaving: this.settings.horizonTurns * prunedTokens,
       tokensBefore: total,
       tokensAfter: after,
@@ -306,13 +314,14 @@ export function pruneSeedFromEntries(entries: readonly object[]): PruneSeed {
   return { placeholders, ...(signature !== undefined ? { signature } : {}) };
 }
 
-// 候选：保护轮之外、没裁过、没被中断、命令输出找得回的工具结果，按位置排序
+// 候选：保护轮之外、没裁过、没被中断、命令输出找得回的工具结果，按位置排序；large 为 false 时不含较大的旧结果
 function findCandidates(
   messages: readonly AgentMessage[],
   view: readonly AgentMessage[],
   sizes: readonly number[],
   pruned: ReadonlyMap<string, string>,
-  settings: ContextPruneSettings
+  settings: ContextPruneSettings,
+  large: boolean
 ): Candidate[] {
   // 工具调用号 → 第几条助手消息与调用参数
   const calls = new Map<string, { turn: number; args: Record<string, unknown> }>();
@@ -335,7 +344,7 @@ function findCandidates(
     if (message.toolName === "run_command" && !outputRecoverable(message)) return;
     const tokens = sizes[index] ?? 0;
     const reason = classify(messages, index, message, tokens, settings);
-    if (reason === undefined) return;
+    if (reason === undefined || (reason === "large" && !large)) return;
     const candidate: Candidate = {
       index,
       toolCallId: message.toolCallId,
@@ -444,7 +453,7 @@ function savedOutputOf(details: Details): SavedOutput | undefined {
     : undefined;
 }
 
-// 付费时机：从新到旧累加非顺带候选的裁掉量，逐个起点检查下限与不等式，取预计净省最大的起点；起点及之后的候选
+// 付费时机（候选里已没有较大的旧结果）：从新到旧累加非顺带候选的裁掉量，逐个起点检查下限与不等式，取预计净省最大的起点；起点及之后的候选
 // （含顺带的无事发生结果）一起裁
 function choosePaid(
   candidates: readonly Candidate[],
