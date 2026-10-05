@@ -188,3 +188,9 @@
 - 本机（Windows）：只跑改动涉及的单个测试文件（Vitest，两个 worker），以及 `npm run check`、`npm run deps`、改动文件的 biome 检查，全部通过。
 - 验证服务器（8 vCPU、31 GB 内存，Linux，Node 24.12.0，有 Docker 与实验镜像）第一轮：提交 5280468（第一、二、三、六节的改动），
   `TEST_CONCURRENCY=6 npm run verify:full`：lint、check 通过；测试 325 个文件全部通过，1837 项通过、7 项跳过，用时 212.6 秒；deps 无违例；退出码 0。
+- 验证服务器第二轮：提交 c76f2e5（含全部代码改动与本审计），`TEST_CONCURRENCY=6 npm run verify:full`：lint、check 通过；测试 325 个文件全部通过，
+  1839 项通过、7 项跳过，用时 93.8 秒；deps 无违例；退出码 0。
+- 验证服务器上单独计时（`node scripts/test-timing.mjs --concurrency 1`）：`src/application/migrate-config.test.ts` 0.6 秒，
+  `src/memory/update-memory-tool.test.ts` 0.4 秒，都不进慢档。
+- 验证服务器上补做"两进程并发写不丢条目"的变异：`withMemoryLock` 不取锁直接执行，连跑三次，每次都是依赖锁的三条变红，
+  两进程并发用例败在条目内容的比对上（Linux 上表现为丢条目）；用 git 还原后工作区无改动。
