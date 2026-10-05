@@ -9,10 +9,12 @@ import {
   composeStreamManifest,
   countStepKinds,
   DEFAULT_TASK_PROMPT_FORMAT,
+  interfacesSection,
   type RepoProfile,
   stepsOf,
   TASK_CHAIN_ID,
   TASK_PROMPT_FORMATS,
+  type TaskInterfaceModule,
   type TestProbe,
   taskPromptOf,
 } from "./stream-manifest.ts";
@@ -328,6 +330,44 @@ test("跑批器的题面（198、213）：提交信息原文，其后一行说�
   assert.equal(taskPromptOf("Add a\n", "test-files", []), "Add a\n");
   assert.deepEqual([...TASK_PROMPT_FORMATS], ["test-files", "test-cases"]);
   assert.equal(DEFAULT_TASK_PROMPT_FORMAT, "test-files");
+});
+
+test("题面的接口说明（374）：接在两段名单之后；模块一行（起点没有的标 new module），名字缩进一行：类给构造参数、函数给参数与返回注解、其余只给名字；没有接口说明时题面与不传时逐字相同", () => {
+  const interfaces: TaskInterfaceModule[] = [
+    {
+      module: "strands.audio",
+      newModule: true,
+      names: [
+        { name: "Config", kind: "class", params: "rate: int = 1", returns: null },
+        { name: "Opaque", kind: "class", params: null, returns: null },
+      ],
+    },
+    {
+      module: "strands.agent",
+      newModule: false,
+      names: [
+        { name: "fetch", kind: "async function", params: "url: str", returns: "bytes" },
+        { name: "helper", kind: "function", params: "", returns: null },
+        { name: "LIMIT", kind: "other", params: null, returns: null },
+      ],
+    },
+  ];
+  const base = taskPromptOf("Add a", "test-files", ["a.test.ts"], ["z.test.ts"]);
+  const full = taskPromptOf("Add a", "test-files", ["a.test.ts"], ["z.test.ts"], interfaces);
+  assert.equal(full, `${base}\n${interfacesSection(interfaces)}\n`);
+  assert.deepEqual(interfacesSection(interfaces).split("\n").slice(1), [
+    "strands.audio (new module)",
+    "  class Config(rate: int = 1)",
+    "  class Opaque",
+    "strands.agent",
+    "  async def fetch(url: str) -> bytes",
+    "  def helper()",
+    "  LIMIT",
+  ]);
+  assert.equal(
+    taskPromptOf("Add a", "test-cases", ["src/a.test.ts::t"], [], []),
+    taskPromptOf("Add a", "test-cases", ["src/a.test.ts::t"])
+  );
 });
 
 // 题面是实验输入，措辞冻结（决策 239）：两种格式、两段名单的说明句全仓只在这里逐字检查，一改即换了实验条件
