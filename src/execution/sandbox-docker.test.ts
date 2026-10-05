@@ -1,5 +1,5 @@
 // 日常沙箱对着真 Docker（决策 245–247）：busybox 没有 git，开工即报错；带 git 的镜像上断网参数生效、缺省联网、
-// 以非 root 用户运行、改动交回成宿主分支。没有 Docker 或没有所需镜像时跳过。带 git 的镜像取环境变量
+// 以非 root 用户运行、改动交回成宿主分支；npm 不告警未知配置，pnpm 新旧版本的 store 都在缓存卷里。没有 Docker 或没有所需镜像时跳过。带 git 的镜像取环境变量
 // PIGEON_SANDBOX_TEST_IMAGE，否则取本地已有的通用镜像（pigeon-sandbox:*）或延续式跑批的 pigeon 镜像。
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -186,6 +186,55 @@ test.skipIf(image === undefined ? "没有 Docker 或带 git 的镜像" : false)(
         docker("volume", "rm", "-f", volume);
         rmSync(repo, { recursive: true, force: true });
       }
+    }
+  }
+);
+
+test.skipIf(image === undefined ? "没有 Docker 或带 git 的镜像" : false)(
+  "真容器：pnpm 旧版（10）与缺省安装的新版都按开容器时写的全局配置把 store 放在共用缓存卷里",
+  { timeout: 600_000 },
+  async (t) => {
+    const repo = makeRepo();
+    const id = sessionId("P");
+    const name = `pigeon-sandbox-${id}`;
+    const volume = `pigeon-sandbox-cache-test-${process.pid}-p`;
+    try {
+      const sandbox = await openSandbox({
+        repoRoot: repo,
+        sessionId: id,
+        network: "on",
+        image: { kind: "image", image: image as string },
+        cacheVolume: volume,
+      });
+      try {
+        for (const spec of ["pnpm@10", "pnpm"]) {
+          // 去掉环境变量兜底，只看配置文件
+          const installed = spawnSync(
+            "docker",
+            [
+              "exec",
+              name,
+              "sh",
+              "-c",
+              'p="$(mktemp -d)" && npm i -g -s --prefix "$p" "$1" >/dev/null && env -u pnpm_config_store_dir "$p/bin/pnpm" store path',
+              "sh",
+              spec,
+            ],
+            { encoding: "utf8", timeout: 300_000 }
+          );
+          if (installed.status !== 0) t.skip(`容器里装不上 ${spec}：${installed.stderr.trim()}`);
+          assert.ok(
+            installed.stdout.trim().startsWith("/pigeon-cache/pnpm/store/"),
+            `${spec}：${installed.stdout}`
+          );
+        }
+      } finally {
+        await sandbox.discard().catch(() => {});
+      }
+    } finally {
+      docker("rm", "-f", name);
+      docker("volume", "rm", "-f", volume);
+      rmSync(repo, { recursive: true, force: true });
     }
   }
 );

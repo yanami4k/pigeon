@@ -122,7 +122,9 @@ if (program === "/bin/sh" && process.platform === "win32") program = "sh";
 if (process.platform === "win32" && (program === "sh" || program === "/bin/sh") && rest[0] === "-c") {
   rest[1] = 'export PATH="/usr/bin:$PATH"\\n' + rest[1];
 }
-const r = spawnSync(program, rest, { cwd, stdio: [interactive ? "inherit" : "ignore", "inherit", "inherit"] });
+// "容器内"用户的配置目录指到假 docker 自己的临时目录（不写跑测试的用户的 ~/.config）
+const env = { ...process.env, XDG_CONFIG_HOME: stateFile.replace(/state\\.json$/, "container-config") };
+const r = spawnSync(program, rest, { cwd, env, stdio: [interactive ? "inherit" : "ignore", "inherit", "inherit"] });
 if (r.error) fail(127, "OCI runtime exec failed: exec failed: " + r.error.message + ": no such file or directory");
 process.exit(r.status ?? 1);
 `;
@@ -162,6 +164,8 @@ export interface FakeSandboxDocker {
   // "容器内"的缓存卷挂载点（本机临时目录，Windows 上取 MSYS 形式）与其本机路径
   cacheRoot: string;
   localCacheRoot: string;
+  // "容器内"的 XDG_CONFIG_HOME（本机路径）
+  localConfigHome: string;
   state(): FakeDockerState;
   update(change: (state: FakeDockerState) => void): void;
   cleanup(): void;
@@ -208,6 +212,7 @@ export function fakeSandboxDocker(initial: Partial<FakeDockerState> = {}): FakeS
     localRoot,
     cacheRoot,
     localCacheRoot,
+    localConfigHome: join(dir, "container-config"),
     state: read,
     update(change) {
       const current = read();

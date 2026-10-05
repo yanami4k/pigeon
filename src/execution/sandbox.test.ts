@@ -202,6 +202,26 @@ test("没有未提交的改动：不拍快照、不提示、不留引用，起�
   }
 });
 
+test("pnpm 的 store 指到卷里：开容器时以运行用户写 rc（pnpm 10 及以前）与 config.yaml（11 起），已有的不覆盖", async () => {
+  const repo = makeRepo();
+  const fake = fakeSandboxDocker();
+  try {
+    const dir = join(fake.localConfigHome, "pnpm");
+    const store = `${fake.cacheRoot}/pnpm/store`;
+    const first = await openSandbox(options(fake, repo, "sess_PNPM1"));
+    await first.discard();
+    assert.equal(readFileSync(join(dir, "rc"), "utf8"), `store-dir=${store}\n`);
+    assert.equal(readFileSync(join(dir, "config.yaml"), "utf8"), `storeDir: "${store}"\n`);
+    writeFileSync(join(dir, "config.yaml"), "storeDir: /mine\n");
+    const second = await openSandbox(options(fake, repo, "sess_PNPM2"));
+    await second.discard();
+    assert.equal(readFileSync(join(dir, "config.yaml"), "utf8"), "storeDir: /mine\n");
+  } finally {
+    fake.cleanup();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // 决策 280：共用下载缓存卷
 test("硬性规则：开沙箱挂共用下载缓存卷——run 参数带卷与各包管理器的环境变量，断网档照样挂；卷下各子目录由 root 建好", async () => {
   for (const network of ["on", "off"] as const) {
