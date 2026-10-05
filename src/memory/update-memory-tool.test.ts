@@ -2,12 +2,12 @@
 // 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
 // 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示。
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
-import { MEMORY_FILE_HEADERS, type MemoryLayer } from "./learned.ts";
+import { MEMORY_FILE_HEADERS, MEMORY_LAYER_LABELS, type MemoryLayer } from "./learned.ts";
 import { memoryLocation } from "./learned-store.ts";
 import {
   applyMemoryUpdate,
@@ -15,6 +15,7 @@ import {
   type MemoryWriteNotice,
   memoryWriteNoticeLine,
   UPDATE_MEMORY_DESCRIPTION,
+  UPDATE_MEMORY_TEXTS,
   type UpdateMemoryParams,
   UpdateMemoryParamsSchema,
   updateMemoryRegistration,
@@ -31,7 +32,8 @@ interface Fixture {
   notices: MemoryWriteNotice[];
   call(
     params: Omit<UpdateMemoryParams, "layer"> & { layer?: MemoryLayer },
-    limits?: { project?: number; user?: number }
+    limits?: { project?: number; user?: number },
+    lockWaitMs?: number
   ): ReturnType<typeof applyMemoryUpdate>;
   file(layer: MemoryLayer): string;
   read(layer: MemoryLayer): string;
@@ -50,7 +52,7 @@ function withFixture(body: (fx: Fixture) => Promise<void>): Promise<void> {
     root,
     home,
     notices,
-    call: (params, limits = {}) =>
+    call: (params, limits = {}, lockWaitMs) =>
       applyMemoryUpdate(
         {
           governanceRoot: root,
@@ -60,6 +62,7 @@ function withFixture(body: (fx: Fixture) => Promise<void>): Promise<void> {
           limits: { project: limits.project ?? 4000, user: limits.user ?? 4000 },
           onWritten: (notice) => notices.push(notice),
           now: () => TODAY,
+          ...(lockWaitMs !== undefined ? { lockWaitMs } : {}),
         },
         { layer: "project", ...params } as UpdateMemoryParams
       ),
@@ -322,6 +325,26 @@ test("写满判定在锁内：等锁期间另一处写满了这一层，拿到�
     const result = await pending;
     assert.equal(result.details.rejected, "full");
     assert.equal(fx.read("project"), `${MEMORY_FILE_HEADERS.project}${entry}`);
+  }));
+
+test("等锁超时：同一层一直被另一处占着，按固定文字回话、不写文件、不交出写入提示；锁放开后照常写入", () =>
+  withFixture(async (fx) => {
+    const location = memoryLocation("project", { governanceRoot: fx.root, homeDir: fx.home });
+    mkdirSync(dirname(location.file), { recursive: true });
+    const release = acquireExclusiveLock(location.lock, "测试持锁");
+    try {
+      const result = await fx.call({ action: "add", content: "一" }, {}, 50);
+      assert.equal(result.text, UPDATE_MEMORY_TEXTS.busy(MEMORY_LAYER_LABELS.project));
+      assert.deepEqual(
+        { written: result.details.written, rejected: result.details.rejected },
+        { written: false, rejected: "busy" }
+      );
+    } finally {
+      release();
+    }
+    assert.equal(existsSync(location.file), false);
+    assert.equal(fx.notices.length, 0);
+    assert.equal((await fx.call({ action: "add", content: "一" })).details.written, true);
   }));
 
 test("人改坏格式：拒绝写入并指出文件与行号，文件原样不动", () =>
