@@ -179,6 +179,26 @@ test("决策 325：受跟踪的 .pigeon/settings.json 是项目内容，改动�
   }
 });
 
+test(".pigeon/.gitignore：仓库没跟踪（程序写出的）不进快照；仓库跟踪着的改动照进快照", () => {
+  const { dir, cleanup } = repo();
+  try {
+    writeFileSync(join(dir, ".gitignore"), "*.log\n");
+    mkdirSync(join(dir, ".pigeon"));
+    writeFileSync(join(dir, ".pigeon", ".gitignore"), "state/\nsettings.local.json\n");
+    writeFileSync(join(dir, "a.txt"), "two\n");
+    const untracked = snapshotWorkdir({ repoRoot: dir, ref: REF });
+    assert.deepEqual(untracked.files, [".gitignore", "a.txt"]);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "track .pigeon/.gitignore");
+    writeFileSync(join(dir, ".pigeon", ".gitignore"), "state/\n");
+    const tracked = snapshotWorkdir({ repoRoot: dir, ref: REF });
+    assert.deepEqual(tracked.files, [".pigeon/.gitignore"]);
+    assert.equal(git(dir, "show", `${tracked.commit}:.pigeon/.gitignore`), "state/");
+  } finally {
+    cleanup();
+  }
+});
+
 test("没有未提交改动：起点就是 HEAD，不建提交、不留引用（上次残留的同名引用被删）", () => {
   const { dir, cleanup } = repo();
   try {

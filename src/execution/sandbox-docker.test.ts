@@ -3,7 +3,7 @@
 // PIGEON_SANDBOX_TEST_IMAGE，否则取本地已有的通用镜像（pigeon-sandbox:*）或延续式跑批的 pigeon 镜像。
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
@@ -79,6 +79,9 @@ test.skipIf(image === undefined ? "没有 Docker 或带 git 的镜像" : false)(
       // 决策 278：带未提交的改动与新建文件开工
       writeFileSync(join(repo, "a.txt"), "dirty\n");
       writeFileSync(join(repo, "n.txt"), "new\n");
+      // 程序写出的 .pigeon/.gitignore（仓库没跟踪）不随交回带进分支
+      mkdirSync(join(repo, ".pigeon"));
+      writeFileSync(join(repo, ".pigeon", ".gitignore"), "state/\n");
       const head = git(repo, "rev-parse", "HEAD");
       const id = sessionId(network.toUpperCase());
       const name = `pigeon-sandbox-${id}`;
@@ -160,6 +163,7 @@ test.skipIf(image === undefined ? "没有 Docker 或带 git 的镜像" : false)(
           const exported = await sandbox.close();
           assert.equal(git(repo, "show", `${exported.branch}:r.txt`), "real");
           assert.equal(git(repo, "show", `${exported.branch}:n.txt`), "new");
+          assert.equal(git(repo, "ls-tree", "-r", "--name-only", exported.branch, ".pigeon"), "");
           // 交回分支 = 快照 + agent 的提交
           assert.equal(exported.snapshotCommit, sandbox.startCommit);
           assert.equal(git(repo, "rev-parse", `${exported.branch}^^`), head);

@@ -49,6 +49,9 @@ export function projectPigeonGitignorePath(root: string): string {
   return path.join(root, PIGEON_DIR, ".gitignore");
 }
 
+// .pigeon/.gitignore 相对仓库根的路径（正斜杠）：仓库没跟踪它时是程序写出的文件，不进工作目录快照（见 workdir-snapshot.ts）
+export const PIGEON_GITIGNORE_REL = pigeonRel(".gitignore");
+
 // .pigeon/.gitignore 应有的两行
 export const PIGEON_GITIGNORE_LINES: readonly string[] = [`${STATE_DIR}/`, LOCAL_SETTINGS_FILE];
 
