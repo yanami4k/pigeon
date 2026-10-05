@@ -48,7 +48,7 @@ from .unguessable import (
 
 # 接口说明一节的说明行（与 src/eval/stream-manifest.ts 的 INTERFACES_HEADING 逐字一致）
 INTERFACES_HEADING = ("Modules and names used by these tests that are not in the repository yet "
-                      "(signatures only):")
+                      "(listed by signature):")
 
 # 没有构造参数的基类：类体又没有 __init__ 时构造参数为空
 _EMPTY_BASES = {"object", "ABC", "Protocol", "Generic"}

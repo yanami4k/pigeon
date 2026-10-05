@@ -370,8 +370,12 @@ test("题面的接口说明（374）：接在两段名单之后；模块一行�
   );
 });
 
-// 题面是实验输入，措辞冻结（决策 239）：两种格式、两段名单的说明句全仓只在这里逐字检查，一改即换了实验条件
-test("题面说明句逐字冻结（239）：两种格式下应通过的名单与仓库里本来就有、此刻失败的第二段名单", () => {
+// 题面是实验输入，措辞冻结（决策 239、374）：两种格式、两段名单与接口说明的说明句全仓只在这里逐字检查，一改即换了实验条件
+test("题面说明句逐字冻结（239、374）：两种格式下应通过的名单、仓库里本来就有且此刻失败的第二段名单、接口说明", () => {
+  assert.equal(
+    interfacesSection([{ module: "m", newModule: false, names: [] }]),
+    "Modules and names used by these tests that are not in the repository yet (listed by signature):\nm"
+  );
   assert.equal(
     taskPromptOf("Add a", "test-files", ["src/a.test.ts"], ["src/z.test.ts"]),
     "Add a\n\nTest files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):\nsrc/a.test.ts\n\nOther test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.ts\n"

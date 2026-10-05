@@ -169,9 +169,10 @@ export interface TaskInterfaceModule {
   names: readonly TaskInterfaceName[];
 }
 
-// 接口说明一节的说明行（分析包 task_interface.py 的 INTERFACES_HEADING 与它逐字一致）
+// 接口说明一节的说明行，定稿原文（374，项目负责人定；属于被测条件，定稿后不再改）。分析包 task_interface.py 的
+// INTERFACES_HEADING 与它逐字一致
 const INTERFACES_HEADING =
-  "Modules and names used by these tests that are not in the repository yet (signatures only):";
+  "Modules and names used by these tests that are not in the repository yet (listed by signature):";
 
 // 带接口说明时的版式（进身份头比对）；不带时仍是 TASK_PROMPT_LAYOUT
 export const TASK_PROMPT_LAYOUT_WITH_INTERFACES = `${TASK_PROMPT_LAYOUT}; interface section after the lists`;
