@@ -39,7 +39,7 @@
 
 ## 措辞与版式（定稿）
 
-- 说明行（项目负责人定稿，属于被测条件，定稿后不再改）：`Modules and names used by these tests that are not in the repository yet (listed by signature):`。
+- 说明行（定稿，属于被测条件，定稿后不再改）：`Modules and names used by these tests that are not in the repository yet (listed by signature):`。
 - 版式：说明行之后每个模块一行（点号路径；开工代码里没有的模块后加 ` (new module)`），模块下每个名字缩进两格一行：类为 `class 名(构造参数)`，函数为 `def 名(参数) -> 返回注解`，异步函数为 `async def`，常量等只给名字，构造参数定不下来的类为 `class 名`，补丁目标指向已有类的新属性时，方法写 `def 类.方法(…)`，其余写 `类.属性`。签名里保留缺省值（常量、名字、属性、负数、空容器原样，其余写 `...`）。
 - 位置：名单两段之后空一行，只在该题有内容时出现。
 - 定稿所据的三个真实例子：第 8 步（新模块 `strands.experimental.bidi.audio` 下的两个类）、第 112 步（只缺一个函数 `_parse_event_stream`）、第 122 步（`compat_call_tool` 只出现在 `mock.patch` 的字符串路径里）。
@@ -115,3 +115,16 @@
 - `TEST_CONCURRENCY=6 npm run verify:full`：lint（biome 637 个文件）、check（tsc）通过；测试 323 个文件全过，1818 条通过、7 条跳过，测试步 56 秒；deps 无违规。开跑前服务器上没有其他测试在跑。
 - 分析包 `python -m pytest`（含慢档模拟检验，Python 3.12.3，依赖照 requirements.txt 装在专属目录的虚拟环境里）：289 条通过。
 - 此前一次 verify:full（提交 c5a7792，整理提交之前的临时提交；与 db1ca06 只差 `stream-manifest.test.ts` 里一条用例的精简）测试步 1 条失败：`src/application/context-prune-wiring.test.ts` 的"状态栏的用量按实际发出的上下文估算：裁剪之后的那次请求出错、没有新的 usage 时，裁掉的量也已减去"（期望 3807、实得 6008）。本段没有改该文件及其所测代码；同一提交上单独跑该文件 3 次均 4/4 通过；ace4713 上的 verify:full 未复现。
+
+## 追加：人的代码里也没有的名字不列
+
+- 规则：开工时不存在、人在该步的代码里按同一静态判定（模块路径、模块作用域绑定或子模块；类属性看类体与能换算出的项目内基类）也不存在的模块、名字或类属性，不列入接口说明，逐题记入数据文件的 `absentInHuman`，汇总为 `summary.absentInHuman`。
+- 理由：这类名字在运行时由静态规则认不出的途径解析，列进"仓库里还没有的名字"会成为错误提示。
+- 例：第 79 题测试里的补丁目标 `strands.telemetry.metrics.metrics_sdk.MeterProvider`，所在用例在人的基准里属于不许挂的一类（开工代码与人的代码上都通过），而 `strands.telemetry.metrics` 在开工代码与人的代码里都没有静态可认的 `metrics_sdk` 绑定。
+- 按这条规则去掉的名字：1 个（即上例）。有接口说明的题由 33 降为 32（第 79 题不再有接口说明），名字由 122 降为 121，取不到签名的名字由 9 降为 8（上表第 79 题一行移出）；新模块 34、换算不出对象的补丁目标 214、解析不了的文件 0 不变。
+- 数据文件重新生成，入库提交 b322630，文件内容摘要 `a229342ed67878f3`，清单摘要 `d80b3a59b88cfefe` 不变。
+- 覆盖检查重做：仍判为接口不可猜的题 0、文件 0、用例 0。渲染一致核对 89/89；不给接口数据时题面与 formal-run-v1 逐字相同 89/89，给了接口数据时题面不同的为有接口说明的 32 题。
+- 测试：`test_task_interface.py` 加 1 条（开工代码与人的代码里都没有的名字、模块与类属性只计数不列），共 8 条。
+- 分支变基到 main 的 5731c49（基线 291f9d1 之后 main 只多了上下文裁剪的改动），无冲突。
+- verify：验证服务器上提交 b322630，`TEST_CONCURRENCY=6 npm run verify:full` 的 lint、check 通过，测试 323 个文件全过，1819 条通过、7 条跳过，测试步 62 秒，deps 无违规；分析包 `python -m pytest`（含慢档）290 条通过。本段之后的提交只加本审计段。
+- 清理了前文的过程用语（"措辞与版式"一节说明行的括注）。
