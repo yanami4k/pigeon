@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { type CompactionConfigInput, contextTokens } from "../pi-runtime/compaction.ts";
@@ -136,17 +136,23 @@ test("压缩之前先裁（含较大的旧结果）：裁掉之后降到触发�
   });
 });
 
+// 时钟固定：裁剪与各条回复落在同一毫秒，先后不能靠时间戳判断
 test("状态栏的用量按实际发出的上下文估算：裁剪之后的那次请求出错、没有新的 usage 时，裁掉的量也已减去", () =>
   withRoot(async (root) => {
-    const { prunes, adapter } = await run(
-      root,
-      { protectTurns: 1, priceRatio: 1, minBatchTokens: 0 },
-      { last: { text: "", streamError: "连接中断" } }
-    );
-    const pruned = prunes[0]?.prunedTokens ?? 0;
-    assert.ok(pruned > 0);
-    // 估算所用的仍是第二次回复的 usage（裁剪之前发出的上下文），裁掉的量要从中减去
-    assert.equal(adapter.contextUsage()?.tokens, contextTokens(adapter.transcript()) - pruned);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    try {
+      const { prunes, adapter } = await run(
+        root,
+        { protectTurns: 1, priceRatio: 1, minBatchTokens: 0 },
+        { last: { text: "", streamError: "连接中断" } }
+      );
+      const pruned = prunes[0]?.prunedTokens ?? 0;
+      assert.ok(pruned > 0);
+      // 估算所用的仍是第二次回复的 usage（裁剪之前发出的上下文），裁掉的量要从中减去
+      assert.equal(adapter.contextUsage()?.tokens, contextTokens(adapter.transcript()) - pruned);
+    } finally {
+      clock.mockRestore();
+    }
   }));
 
 test("新裁出错时只应用已有的裁剪：之前的占位不撤，那次请求的前缀不变", () =>

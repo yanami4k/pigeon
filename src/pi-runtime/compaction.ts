@@ -112,10 +112,10 @@ export function contextTokens(messages: readonly AgentMessage[]): number {
   return usageTokens + trailing;
 }
 
-// 估算所用的那条助手 usage 的时刻（决策 361：在它之后裁掉的量还算在这份 usage 里）；没有可用的 usage 为 undefined
-export function freshUsageTime(messages: readonly AgentMessage[]): number | undefined {
+// 估算所用的那条助手消息（决策 361：在它之后裁掉的量还算在这份 usage 里）；没有可用的 usage 为 undefined
+export function freshUsageMessage(messages: readonly AgentMessage[]): AgentMessage | undefined {
   const { index } = freshUsage(messages);
-  return index >= 0 ? messages[index]?.timestamp : undefined;
+  return index >= 0 ? messages[index] : undefined;
 }
 
 // 最近一次压缩摘要之后最后一条正常助手消息的位置与 usage；没有为 -1

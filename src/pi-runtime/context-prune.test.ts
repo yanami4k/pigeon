@@ -25,7 +25,7 @@ const USAGE = {
   output: 0,
   cacheRead: 0,
   cacheWrite: 0,
-  totalTokens: 0,
+  totalTokens: 100,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
@@ -352,7 +352,7 @@ test("先写进会话记录再生效：写不成时这次裁剪不生效、错�
   assert.notEqual(pruner.beforeRequest(messages).record, undefined);
 });
 
-test("同一请求前裁两次：第二次的裁剪前 token 数接着第一次的裁剪后，不重复扣减；还没随请求发出的是两次之和", () => {
+test("同一请求前裁两次：第二次的裁剪前 token 数接着第一次的裁剪后，不重复扣减；还没随请求发出的按所用 usage 的先后算", () => {
   const small: Call = { name: "read_file", text: sized(10) };
   // a 是较大的旧结果（压缩前裁）；b 被 c 覆盖成过时读取（付费时机裁）
   const [b, c] = stale("b.txt", 2_000) as [Call, Call];
@@ -375,8 +375,12 @@ test("同一请求前裁两次：第二次的裁剪前 token 数接着第一次�
   assert.deepEqual([first?.items[0]?.toolCallId, second?.items[0]?.toolCallId], ["a", "b"]);
   const added = appended.reduce((sum, message) => sum + estimateTokens(message), 0);
   assert.equal(second?.tokensBefore, (first?.tokensAfter ?? 0) + added);
-  assert.equal(pruner.unsentTokens(0), (first?.prunedTokens ?? 0) + (second?.prunedTokens ?? 0));
-  assert.equal(pruner.unsentTokens(100), 0);
+  // f 的 usage 量在两次裁剪之前，g 的在两次之间，之后的新回复在两次之后（先后不看时间戳）
+  const [f, g] = [base.at(-2), appended[0]];
+  assert.equal(pruner.unsentTokens(f), (first?.prunedTokens ?? 0) + (second?.prunedTokens ?? 0));
+  assert.equal(pruner.unsentTokens(g), second?.prunedTokens);
+  assert.equal(pruner.unsentTokens(turn(small, "h")[0]), 0);
+  assert.equal(pruner.unsentTokens(undefined), 0);
 });
 
 test("免费时机：模型或工具集与上一个 Run 不同、空闲超过保留时长，都一次裁光（不论价格比）", () => {
