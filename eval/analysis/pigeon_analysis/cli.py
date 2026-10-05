@@ -23,6 +23,7 @@ from .reader import (
 from .report import calibration_markdown, dumps, formal_markdown, formal_result
 from .secondary import analyze_secondary
 from .sensitivity import third_pass_decision
+from .task_interface import generate as generate_interfaces
 from .unguessable import generate
 
 
@@ -109,7 +110,19 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--classes-dir", required=True, help="两类用例预计算结果目录（<提交>.classes.json）")
     u.add_argument("--out", required=True, help="清单文件（JSON）")
 
+    i = sub.add_parser("task-interfaces", help="题面的接口说明数据（决策 374，静态规则，不读任何结果）")
+    i.add_argument("--manifest", required=True, help="流清单（strands.json）")
+    i.add_argument("--repo", required=True, help="人的仓库（git）")
+    i.add_argument("--classes-dir", required=True, help="两类用例预计算结果目录（<提交>.classes.json）")
+    i.add_argument("--out", required=True, help="接口数据文件（JSON），跑批器的 --task-interfaces 读它")
+    i.add_argument("--coverage", help="覆盖检查的输出（JSON）：用 316 的规则、以带接口说明的题面重判")
+
     args = ap.parse_args(argv)
+    if args.command == "task-interfaces":
+        data = generate_interfaces(Path(args.manifest), Path(args.repo), Path(args.classes_dir), Path(args.out),
+                                   Path(args.coverage) if args.coverage else None)
+        print(json.dumps(data["summary"], ensure_ascii=False))
+        return 0
     if args.command == "unguessable":
         data = generate(Path(args.manifest), Path(args.repo), Path(args.classes_dir), Path(args.out))
         print(json.dumps(data["summary"], ensure_ascii=False))

@@ -32,6 +32,9 @@ python -m pigeon_analysis calibration --results <results.jsonl> [...] --out <输
 # 接口不可猜的测试文件清单（决策 316；静态规则，只读人的仓库、流清单与两类用例预计算结果，不读任何运行结果）
 python -m pigeon_analysis unguessable --manifest <流清单 strands.json> --repo <人的仓库> \
   --classes-dir <两类用例预计算目录> --out data/unguessable-interfaces.json
+
+# 题面的接口说明数据（决策 374；同样只读人的仓库、流清单与两类用例预计算结果）；--coverage 另出覆盖检查
+python -m pigeon_analysis task-interfaces --manifest <流清单 strands.json> --repo <人的仓库>   --classes-dir <两类用例预计算目录> --out data/task-interfaces.json [--coverage <覆盖检查.json>]
 ```
 
 入库的清单为 data/unguessable-interfaces.json，在看到正式结果之前生成；入库前以仓库的 biome 排版（只改空白，内容不变）。formal 给了 --unguessable 即另做剔除这些用例的
@@ -39,6 +42,12 @@ python -m pigeon_analysis unguessable --manifest <流清单 strands.json> --repo
 eval stream-rejudge 按保存的改动重判、与原结果行逐项一致的逐用例结果（--case-results），其次取结果行的失败用例列表；
 都定不了的行从该分析中去掉并在报告里逐行列出原因；去掉的行超过该分析所用行数的 5% 时，报告在结论一节与敏感性
 分析一节醒目注明，并写明对结论的可能影响。
+
+接口说明数据为 data/task-interfaces.json，同样在开跑前生成、以 biome 排版后入库。它记清单摘要（与跑批器身份头的
+manifestDigest 同一算法）与按步序的接口说明：名单两段里的测试文件（人在该步的最终版本）导入的、或以字符串补丁目标
+引用的项目内模块与名字，开工代码里没有的逐个附人的代码里的签名（抽取规则与局限见 pigeon_analysis/task_interface.py
+的模块说明）。跑批器 eval stream 给 --task-interfaces 即在题面名单之后渲染这一节，清单摘要不符即拒绝开跑。
+覆盖检查用 316 的规则、把题面换成带接口说明的新题面重判，列出仍判为接口不可猜的文件与用例。
 
 --tasks 与 --eligible 给的是结果行的步序（seq，即该题在全流中的位置），不是清单里从 1 起的题号；结果行里有步序不在所给列表里即报错。
 
@@ -61,6 +70,7 @@ python -m pytest -m "not slow"   # 跳过模拟检验
 - pigeon_analysis/secondary.py：次要判据
 - pigeon_analysis/sensitivity.py：设计灵敏度与第 3 遍规则
 - pigeon_analysis/unguessable.py：接口不可猜的测试文件清单（316）
+- pigeon_analysis/task_interface.py：题面的接口说明数据与覆盖检查（374）
 - pigeon_analysis/interface.py：剔除接口不可猜用例的敏感性分析（316）
 - pigeon_analysis/calibration.py：校准取值规则与抽题
 - pigeon_analysis/wording.py：报告的固定措辞
