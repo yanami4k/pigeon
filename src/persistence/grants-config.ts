@@ -132,8 +132,8 @@ export function appendGrantConfigRule(
   );
 }
 
-// 配置规则移除（/revoke config#N，序号是项目个人一层里的序号）：整文件原子替换。配置规则在会话启动时载入并冻结——
-// 移除只影响磁盘，当前会话的求值面不变（/grants 输出如实标注「下次会话生效」）。
+// 配置规则移除（/revoke config#N，序号是项目个人一层里的序号）：整文件原子替换。配置规则随设置快照载入（会话开始与
+// /reload 重建时）——移除只影响磁盘，当前求值面到下次会话启动或 /reload 才变（/revoke 输出如实标注）。
 // 返回被移除的规则：调用方据其工具与出处 grant 向人报告移除了哪一条
 export function removeGrantConfigRule(
   governanceRoot: string,

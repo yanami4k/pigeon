@@ -31,7 +31,7 @@ export interface GrantsCommandContext {
   root: string;
   // 会话 grant 运行态（含命中计数）
   store: SessionGrantStore;
-  // 会话启动时装载的固化规则（求值面会话内冻结）
+  // 随设置快照装载的固化规则（会话开始与 /reload 重建时；其间求值面不变）
   configRules: readonly ConfigGrantRule[];
   // 决策 325：同一批规则连同所在层与层内序号（设置快照给出）；缺省按全部在项目个人一层列出
   layeredRules?: readonly LayeredGrantRule[];
@@ -147,8 +147,8 @@ function listGrants(ctx: GrantsCommandContext): void {
 }
 
 // /grants save <id>：升格——会话 grant → 项目配置（D6：promotedFrom 出处结构化留证）。
-// 顺序：查重（同 grantId 已固化则响亮拒绝）→ 写配置。固化规则在下次会话启动时
-// 进求值面（本会话求值冻结），输出如实标注
+// 顺序：查重（同 grantId 已固化则响亮拒绝）→ 写配置。固化规则在下次会话启动或 /reload 之后
+// 进求值面（在此之前本会话按原规则求值），输出如实标注
 function promoteGrant(ctx: GrantsCommandContext, id: string): void {
   let grantId: GrantId;
   try {
@@ -179,12 +179,12 @@ function promoteGrant(ctx: GrantsCommandContext, id: string): void {
     },
   });
   ctx.write(
-    `已升格 ${grant.grantId} → ${pigeonRel(LOCAL_SETTINGS_FILE)} 的 permissions 一节（固化规则下次会话启动时生效；本会话求值冻结）\n`
+    `已升格 ${grant.grantId} → ${pigeonRel(LOCAL_SETTINGS_FILE)} 的 permissions 一节（固化规则在下次会话启动或终端界面 /reload 之后生效，在此之前本会话按原规则求值）\n`
   );
 }
 
 // /revoke <id>：会话 grant 立即停免审（grant.revoked 事件留证）；配置规则从
-// 项目个人设置移除——求值面会话内冻结，本次会话仍按原规则求值，如实标注
+// 项目个人设置移除——下次会话启动或 /reload 之前本会话仍按原规则求值，如实标注
 function revokeGrant(ctx: GrantsCommandContext, id: string): void {
   if (id.startsWith("grant_")) {
     ctx.store.revoke(asGrantId(id));
@@ -197,7 +197,7 @@ function revokeGrant(ctx: GrantsCommandContext, id: string): void {
     const removed = removeGrantConfigRule(ctx.root, index);
     ctx.write(
       `已移除固化规则 config#${match[1]}（${removed.tool}，出处 grant ${shortId(removed.promotedFrom.grantId)}）：` +
-        "求值面会话内冻结，下次会话启动起不再生效\n"
+        "在下次会话启动或终端界面 /reload 之前，本会话仍按原规则求值\n"
     );
     return;
   }

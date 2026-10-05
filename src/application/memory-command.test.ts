@@ -71,7 +71,7 @@ test("查看：两层各列文件位置（展示写法与绝对路径）、条�
     );
   }));
 
-test("编辑：合格即保存（下次会话生效）并删掉编辑稿；没有改动如实说；没有编辑器给出文件路径", () =>
+test("编辑：合格即保存（从下一条消息起生效）并删掉编辑稿；没有改动如实说；没有编辑器给出文件路径", () =>
   withCtx(async (ctx, file) => {
     write(file("project"), MEMORY_FILE_HEADERS.project + PROJECT);
     const edited = `${MEMORY_FILE_HEADERS.project}${PROJECT}- [P2] 人手加的一条\n`;

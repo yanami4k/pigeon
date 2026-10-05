@@ -57,7 +57,7 @@ export interface ToolGovernanceOptions {
   // M4 S6（决策 3）：会话 grant 存储——审批提示 [a]/[d] 键创建的放权由此注入求值；
   // 治理面运行时状态，不进 InjectionSnapshot（约束 4：grant 必须可撤销，与快照冻结矛盾）
   sessionGrants?: SessionGrantMatcher;
-  // M4 S6（D6）：固化配置规则（设置的 permissions 一节，启动时装载、会话内冻结）；
+  // M4 S6（D6）：固化配置规则（设置的 permissions 一节，随设置快照装载：会话开始与 /reload 重建时）；
   // 命中记 approvedBy=policy:config，决定回指规则的 promotedFrom.grantId（收口决策 ①：稳定身份）
   configGrants?: readonly ConfigGrantRule[];
   // 目录限定匹配（pathPrefix）的 realpath 解析根；缺省 = 带 pathPrefix 的规则一律不匹配

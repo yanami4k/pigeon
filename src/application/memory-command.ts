@@ -2,7 +2,8 @@
 // - 查看：两层各列文件位置（展示写法与绝对路径）、条数与用量，后接条目原文；格式不对时照原文列出并指出行号。
 // - 编辑（/memory edit project|user）：把这一层复制到同目录的编辑稿，用 $VISUAL（其次 $EDITOR）打开；编辑器退出后校验格式
 //   与上限，合格才在记忆锁内换掉原文件；不合格、编辑器出错或编辑期间原文件被另一处改过，一律报错并保留原内容，改过的
-//   内容留在编辑稿里供人取回。没有设置编辑器时给出文件路径，请人直接编辑。改动下次会话生效（本会话开局已冻结）。
+//   内容留在编辑稿里供人取回。没有设置编辑器时给出文件路径，请人直接编辑。
+// - 改动从下一条消息起生效：每个 Run 开始时重读，变了即在开工状态块里整节追加（决策 363）。
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -62,7 +63,7 @@ function layerView(ctx: MemoryCommandContext, layer: MemoryLayer): string {
 
 export function memoryViewText(ctx: MemoryCommandContext): string {
   return [
-    "学到的记忆（改动下次会话生效）",
+    "学到的记忆（改动从下一条消息起生效）",
     ...MEMORY_LAYERS.map((layer) => layerView(ctx, layer)),
   ].join("\n\n");
 }
@@ -120,7 +121,7 @@ export async function editMemoryLayer(
   const label = MEMORY_LAYER_LABELS[layer];
   const editor = options.editor;
   if (editor === undefined) {
-    return `没有设置编辑器（$VISUAL 或 $EDITOR）：请直接编辑 ${location.file}（${label}，一行一条，见文件头的说明），改动下次会话生效`;
+    return `没有设置编辑器（$VISUAL 或 $EDITOR）：请直接编辑 ${location.file}（${label}，一行一条，见文件头的说明），改动从下一条消息起生效`;
   }
   const original = readMemoryFile(location.file);
   const draft = memoryDraftPathOf(location.file);
@@ -153,6 +154,6 @@ export async function editMemoryLayer(
     }
     writeMemoryFile(location.file, edited);
     rmSync(draft, { force: true });
-    return `已保存${label}记忆（${location.display}）：共 ${parsed.doc.entries.length} 条，${used}/${limit} 字符，下次会话生效`;
+    return `已保存${label}记忆（${location.display}）：共 ${parsed.doc.entries.length} 条，${used}/${limit} 字符，从下一条消息起生效`;
   });
 }
