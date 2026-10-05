@@ -91,7 +91,7 @@ import {
   type CompactionStore,
   type CompactionTrigger,
   type ContextCompactor,
-  freshUsageTime,
+  freshUsageMessage,
 } from "./compaction.ts";
 import type { ContextPruner, PruneRecord } from "./context-prune.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
@@ -1213,7 +1213,7 @@ export class PiRuntimeAdapter {
       return compactor.check(messages).tokens;
     }
     const view = prune.view(messages);
-    return Math.max(0, compactor.check(view).tokens - prune.unsentTokens(freshUsageTime(view)));
+    return Math.max(0, compactor.check(view).tokens - prune.unsentTokens(freshUsageMessage(view)));
   }
 
   // 决策 361：请求之前的裁剪。新裁出错（含裁剪记录写不成）时只应用已有的裁剪，前缀不变（上游约定这个挂点不抛）

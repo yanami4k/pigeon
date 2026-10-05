@@ -13,11 +13,13 @@
 // 逐字节一致（决策 373 之前付费时机裁掉的较大旧结果照样重放）。裁掉的命令输出还没落盘的先补落盘（空输出不落盘），补不成的不裁；
 // 占位给出虚拟路径，带文件变化的保留文件变化清单。裁掉的读取在上下文里再没有同一文件的读写结果时不再算读过。
 // 打转检测看的是上游 turn_end 事件里的原文，不受裁剪影响。
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ContextPruneSettings } from "../state/prune-config.ts";
 import { type PruneData, SessionEntryType } from "../state/session-entries.ts";
+import { freshUsageMessage } from "./compaction.ts";
 
 export type PruneTrigger = PruneData["trigger"];
 export type PruneItem = PruneData["items"][number];
@@ -78,8 +80,11 @@ export class ContextPruner {
   readonly #placeholders = new Map<string, string>();
   #signature: RunSignature | undefined;
   #changed: PruneTrigger | undefined;
-  // 本进程里各次裁剪的时刻与裁掉量（估算上下文时，在所用 usage 之后裁掉的量要从中减去）
-  readonly #pruned: Array<{ at: number; tokens: number }> = [];
+  // 估算上下文所用的那条助手消息（最新一条带可用 usage 的）按首次见到的先后编号：每次请求之前与压缩之前都登记一次。
+  // 先后不看时间戳——假模型的回复与裁剪常落在同一毫秒；也不看在消息数组里的位置——压缩后与 Run 内的两份上下文位置不同
+  readonly #usageSeq = new Map<string, number>();
+  // 本进程里各次裁剪的裁掉量与裁剪时所用 usage 的编号（没有为 −1）：估算上下文时，所用 usage 不晚于它的，裁掉的量要减去
+  readonly #pruned: Array<{ seq: number; tokens: number }> = [];
   #lastRequestAt: number | undefined;
 
   constructor(
@@ -128,7 +133,7 @@ export class ContextPruner {
     let record: PruneRecord | undefined;
     if (this.settings.enabled) {
       const trigger = this.#changed ?? (this.#idle(messages) ? "idle" : undefined);
-      record = this.#prune(messages, trigger ?? "paid", write);
+      record = this.#prune(messages, trigger ?? "paid", this.#observe(messages), write);
       this.#changed = undefined;
     }
     this.#lastRequestAt = this.#now();
@@ -141,14 +146,16 @@ export class ContextPruner {
     write: (record: PruneRecord) => void = () => {}
   ): PruneRecord | undefined {
     if (!this.settings.enabled || !this.settings.onCompaction) return undefined;
-    return this.#prune(messages, "compaction", write);
+    return this.#prune(messages, "compaction", this.#observe(messages), write);
   }
 
-  // 在 since 时刻（估算所用那条助手 usage 的时刻）之后裁掉的 token：那份 usage 量的是裁剪之前发出的上下文，
-  // 估算时从中减去；没有可用的 usage（since 为 undefined）时整段按裁剪后的消息估算，不必减
-  unsentTokens(since: number | undefined): number {
-    if (since === undefined) return 0;
-    return this.#pruned.reduce((sum, entry) => (entry.at > since ? sum + entry.tokens : sum), 0);
+  // usage（估算所用的那条助手消息）之后裁掉的 token：那份 usage 量的是裁剪之前发出的上下文，估算时从中减去。没有可用的
+  // usage 时整段按裁剪后的消息估算，不必减；裁剪器没见过的 usage 出现在各次裁剪之后，也不必减
+  unsentTokens(usage: AgentMessage | undefined): number {
+    if (usage === undefined || this.#pruned.length === 0) return 0;
+    const seq = this.#usageSeq.get(usageKey(usage));
+    if (seq === undefined) return 0;
+    return this.#pruned.reduce((sum, entry) => (entry.seq >= seq ? sum + entry.tokens : sum), 0);
   }
 
   seed(): PruneSeed {
@@ -156,6 +163,17 @@ export class ContextPruner {
       placeholders: [...this.#placeholders],
       ...(this.#signature !== undefined ? { signature: this.#signature } : {}),
     };
+  }
+
+  // 登记这份上下文估算所用的 usage，返回它的编号（没有可用的 usage 为 −1）
+  #observe(messages: readonly AgentMessage[]): number {
+    const usage = freshUsageMessage(messages);
+    if (usage === undefined) return -1;
+    const key = usageKey(usage);
+    const seen = this.#usageSeq.get(key);
+    if (seen !== undefined) return seen;
+    this.#usageSeq.set(key, this.#usageSeq.size);
+    return this.#usageSeq.size - 1;
   }
 
   #idle(messages: readonly AgentMessage[]): boolean {
@@ -168,6 +186,7 @@ export class ContextPruner {
   #prune(
     messages: readonly AgentMessage[],
     trigger: PruneTrigger,
+    usageSeq: number,
     write: (record: PruneRecord) => void
   ): PruneRecord | undefined {
     const view = this.view(messages);
@@ -233,7 +252,7 @@ export class ContextPruner {
     write(record);
     for (const item of items) this.#placeholders.set(item.toolCallId, item.placeholder);
     this.#forgetReads(messages, chosen);
-    this.#pruned.push({ at: prunedAt, tokens: prunedTokens });
+    this.#pruned.push({ seq: usageSeq, tokens: prunedTokens });
     return record;
   }
 
@@ -273,6 +292,11 @@ export class ContextPruner {
       }
     }
   }
+}
+
+// 助手消息的身份：整条内容的摘要（深拷贝与会话还原后不变；两条回复要时间戳、内容与 usage 全都相同才会混同）
+function usageKey(message: AgentMessage): string {
+  return createHash("sha1").update(JSON.stringify(message)).digest("base64");
 }
 
 // 按工具调用号把工具结果的正文换成占位（返回新数组，不改传入的消息）
