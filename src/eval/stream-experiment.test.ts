@@ -11,12 +11,14 @@ import {
   WIDE_REPETITION_PARAMS,
 } from "../state/runaway-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
+import { GATEWAY_RETENTION_VERSION } from "./gateway-retention.ts";
 import {
   effectivePigeonSettings,
   imageIdentityOf,
   installTerminationHandler,
   layersIdentity,
   resolveTaskSelection,
+  retentionAndPeakInfo,
   runStreamExperiment,
   streamPigeonOptions,
 } from "./stream-experiment.ts";
@@ -30,6 +32,20 @@ import {
   selectSteps,
 } from "./stream-runner.ts";
 import { PythonRandom, SAMPLE_POPULATION } from "./stream-sample.ts";
+
+test("身份头 info 里的网关留存（394）与高峰暂停（393）开了才记；两项都关时不多出任何项，与之前逐字相同", () => {
+  assert.deepEqual(retentionAndPeakInfo({}), {});
+  assert.deepEqual(
+    retentionAndPeakInfo({
+      gatewayRetention: { maxTaskBytes: 1, maxJobBytes: 2 },
+      peakPause: { marginMs: 3 },
+    }),
+    {
+      gatewayRetention: { version: GATEWAY_RETENTION_VERSION, maxTaskBytes: 1, maxJobBytes: 2 },
+      peakPause: { marginMs: 3 },
+    }
+  );
+});
 
 test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数", () => {
   assert.equal(streamPigeonOptions({ provider: "kimi-coding", modelId: "m" }).yolo, true);

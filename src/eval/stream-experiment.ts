@@ -3,7 +3,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { STATUS_BLOCK_VERSION } from "../application/status-block.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
@@ -26,6 +26,11 @@ import {
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
+import {
+  GATEWAY_RETENTION_VERSION,
+  GatewayRetention,
+  type RetentionLimits,
+} from "./gateway-retention.ts";
 import {
   assertConcurrencyFits,
   type GatewayAccount,
@@ -71,6 +76,7 @@ import {
   type HarnessAllowance,
   manifestDigestOf,
   readStoredIdentity,
+  type StreamRunIdentity,
   type TaskSelection,
 } from "./stream-identity.ts";
 import { readTaskInterfaces } from "./stream-interfaces.ts";
@@ -142,6 +148,25 @@ export interface StreamExperimentOptions {
   shutdownSignal?: AbortSignal;
   // 代码版本的显式放行（269）：续跑时代码版本不符的放行原因、首次开跑时放行未提交改动；缺省都不放行
   harnessAllowance?: HarnessAllowance;
+  // 网关逐请求留存（决策 394）：给了即开，按单题与单作业的落盘上限截断；缺省不开（CLI 缺省开）
+  gatewayRetention?: RetentionLimits;
+  // 高峰自动暂停（决策 393）：给了即开，进入高峰前 marginMs 停止放行新的一步；缺省不开（CLI 缺省开）
+  peakPause?: { marginMs: number };
+}
+
+// 高峰暂停的运行记录（输出目录下）：每次暂停与恢复一行
+export const PEAK_PAUSES_FILE = "peak-pauses.jsonl";
+
+// 身份头 info 里的网关留存（394，格式版本与上限）与高峰暂停（393，余量）：开了才记；都没开为空，身份头与之前逐字相同
+export function retentionAndPeakInfo(
+  options: Pick<StreamExperimentOptions, "gatewayRetention" | "peakPause">
+): Pick<StreamRunIdentity["info"], "gatewayRetention" | "peakPause"> {
+  return {
+    ...(options.gatewayRetention !== undefined
+      ? { gatewayRetention: { version: GATEWAY_RETENTION_VERSION, ...options.gatewayRetention } }
+      : {}),
+    ...(options.peakPause !== undefined ? { peakPause: { ...options.peakPause } } : {}),
+  };
 }
 
 export type StreamPigeonOptions = Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor" | "yolo">;
@@ -409,6 +434,7 @@ async function runStreamExperimentLocked(
         accounts: options.gateway.accounts.length,
         accountConcurrency: options.gateway.accounts.map((a) => a.concurrency),
         harness,
+        ...retentionAndPeakInfo(options),
       },
     },
     undefined,
@@ -421,6 +447,25 @@ async function runStreamExperimentLocked(
     options.concurrency ?? 4,
     path.join(outDir, GATEWAY_SPEND_FILE)
   );
+  // 网关留存（394）与高峰暂停（393）：给了才开，没给时跑法与之前逐字相同
+  if (options.gatewayRetention !== undefined) {
+    liveGateway.setRetention(
+      new GatewayRetention({
+        ...options.gatewayRetention,
+        keys: options.gateway.accounts.map((a) => a.key),
+      })
+    );
+  }
+  if (options.peakPause !== undefined) {
+    limits.enablePeakPause({
+      marginMs: options.peakPause.marginMs,
+      onChange: (event, record) =>
+        appendFileSync(
+          path.join(outDir, PEAK_PAUSES_FILE),
+          `${JSON.stringify({ event, ...record })}\n`
+        ),
+    });
+  }
   // 只通网关的跑批内部网络：有外部 agent 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
   let network: Awaited<ReturnType<typeof createGatewayNetwork>> | undefined;
   if (externals.length > 0) {
