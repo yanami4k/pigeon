@@ -438,6 +438,8 @@ async function runStreamExperimentLocked(
           })
         );
   mkdirSync(outDir, { recursive: true });
+  // 假上游小试（PIGEON_EVAL_GATEWAY_UPSTREAM，只许本机地址）记进身份头：与真跑不是同一身份，续跑不互通
+  const upstreamOverride = gatewayUpstreamOverride();
   // 代码版本只取一次：身份头比对的与结果行记的是同一个
   const harness = currentHarnessRef();
   const runIdentity = checkOrWriteIdentity(
@@ -456,6 +458,9 @@ async function runStreamExperimentLocked(
         ...(interfaces !== undefined ? { taskInterfaces: interfaces.digest } : {}),
         taskSelection,
         maxSteps: options.maxSteps ?? null,
+        ...(upstreamOverride !== undefined
+          ? { gatewayUpstreamOverride: upstreamOverride.marker }
+          : {}),
         agents: {
           ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
           ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
@@ -479,7 +484,8 @@ async function runStreamExperimentLocked(
   const { gateway: liveGateway, limits } = await startGatewayAndLimits(
     options.gateway,
     options.concurrency ?? 4,
-    path.join(outDir, GATEWAY_SPEND_FILE)
+    path.join(outDir, GATEWAY_SPEND_FILE),
+    upstreamOverride?.baseUrl
   );
   // 只通网关的跑批内部网络：有外部 agent 条件或 pigeon-docker 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
   let network: GatewayNetwork | undefined;
@@ -650,12 +656,35 @@ export function externalAgentsFor(
 // 网关花费累计的落盘文件（在输出目录下）：续跑时接着累计
 export const GATEWAY_SPEND_FILE = "gateway-spend.json";
 
+// 假上游小试的网关上游覆盖（PIGEON_EVAL_GATEWAY_UPSTREAM）：上游持有真 key 转发，只许本机地址
+// （127.0.0.1、::1、localhost），其余一律拒绝（不 echo 地址，免得带进用户与口令）；未设置即官方端点（undefined）
+export function gatewayUpstreamOverride(
+  env: NodeJS.ProcessEnv = process.env
+): { baseUrl: string; marker: "loopback" } | undefined {
+  const raw = env.PIGEON_EVAL_GATEWAY_UPSTREAM;
+  if (raw === undefined || raw === "") return undefined;
+  let host: string | undefined;
+  try {
+    // URL 的 hostname 对 IPv6 带方括号，剥掉再比
+    host = new URL(raw).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    host = undefined;
+  }
+  if (host === undefined || !["127.0.0.1", "::1", "localhost"].includes(host)) {
+    throw new Error(
+      "PIGEON_EVAL_GATEWAY_UPSTREAM 只许本机地址（127.0.0.1、::1、localhost）：上游持有真 key，指向别处即外泄"
+    );
+  }
+  return { baseUrl: raw, marker: "loopback" };
+}
+
 // 起限额控制器与网关（互相引用：控制器探测经网关的上游，网关把限额信号交给控制器）。控制器按网关报来的可用容量
 // 放行（决策 163），网关的容量一变即通知控制器；开跑前逐账号探测一次，未通过即关掉两者、拒绝开跑
 export async function startGatewayAndLimits(
   settings: { accounts: readonly GatewayAccount[]; modelId: string; spendLimitCny?: number },
   concurrency: number,
-  spendFile?: string
+  spendFile?: string,
+  upstreamOverride?: string
 ): Promise<{ gateway: ModelGateway; limits: LimitController }> {
   let gateway: ModelGateway | undefined;
   const limits = new LimitController({
@@ -664,8 +693,9 @@ export async function startGatewayAndLimits(
     capacity: () => gateway?.capacity() ?? Number.POSITIVE_INFINITY,
   });
   gateway = await startModelGateway({
-    // 缺省为 DeepSeek 官方端点；PIGEON_EVAL_GATEWAY_UPSTREAM 只供不调真模型的假上游小试（试跑、冒烟）改指
-    upstreamBaseUrl: process.env.PIGEON_EVAL_GATEWAY_UPSTREAM ?? GATEWAY_UPSTREAM_BASE_URL,
+    // 缺省为 DeepSeek 官方端点；PIGEON_EVAL_GATEWAY_UPSTREAM 只供不调真模型的假上游小试（试跑、冒烟）改指，
+    // 且只许本机地址（gatewayUpstreamOverride 校验）
+    upstreamBaseUrl: upstreamOverride ?? GATEWAY_UPSTREAM_BASE_URL,
     // 外部 agent 条件的请求逐字转发，网关只读地核对其 model 与本批一致
     model: settings.modelId,
     accounts: settings.accounts,

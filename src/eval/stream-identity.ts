@@ -21,6 +21,8 @@ export interface StreamRunIdentity {
     manifestDigest: string;
     image: string;
     budget: StepBudget;
+    // 网关上游被改指本机地址的假上游（PIGEON_EVAL_GATEWAY_UPSTREAM，只供不调真模型的小试）才记：与真跑不是同一身份
+    gatewayUpstreamOverride?: "loopback";
     conditions: readonly string[];
     // 步的范围与起点的取法：清单相同而题的接法或起点不同，结果不能混
     stepScope: string;
