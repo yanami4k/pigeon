@@ -196,6 +196,8 @@ export interface StreamModelGateway {
   meter(job: string): GatewayMeter;
   resetPeak(job: string): void;
   watchQueue?(job: string, thresholdMs: number, listener: () => void): () => void;
+  // 逐请求留存（决策 394）：这个作业开始做第 seq 步，返回结束函数；网关没开留存时什么也不做
+  retainStep?(job: string, jobDir: string, seq: number): () => void;
 }
 
 // 一步的 agent 在放行机制下运行（决策 144、160、163；正式跑批与预算试跑共用）：
@@ -1175,6 +1177,8 @@ async function runStep(
     }
     const startTree = await ws.worktreeTree(spec.excludePaths);
     const key = streamJobKey(job);
+    // 网关留存（394）：这一步的模型请求与回复记到作业目录的 gateway/step-<步序>/ 下（每次尝试一个 try）
+    const endRetention = options.gateway?.retainStep?.(key, jobDir, step.seq);
     const admitted = await runAdmittedAgent(options, key, (abortSignal) =>
       agent.run({
         job,
@@ -1197,7 +1201,7 @@ async function runStep(
           : {}),
         abortSignal,
       })
-    );
+    ).finally(() => endRetention?.());
     let result = admitted.result;
     if (admitted.voidReasons.length > 0) {
       throw new StepInterruptedError(

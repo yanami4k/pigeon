@@ -3,14 +3,15 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { STATUS_BLOCK_VERSION } from "../application/status-block.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
+import { SESSION_SEARCH_VERSION } from "../memory/session-search.ts";
 import {
   DEFAULT_GATEWAY_MODEL_ID,
-  DEFAULT_THINKING_LEVEL,
+  deepseekModelInfo,
   GATEWAY_PROVIDER,
   GATEWAY_UPSTREAM_BASE_URL,
   gatewayStreamFn,
@@ -23,6 +24,7 @@ import {
   DEFAULT_TRUNCATION_CONTINUATION,
   TRUNCATION_CONTINUATION_VERSION,
 } from "../state/runaway-config.ts";
+import { resolveThinkingLevel } from "../state/thinking-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import {
@@ -30,6 +32,11 @@ import {
   type GatewayNetwork,
   removeGatewayNetwork,
 } from "./gateway-network.ts";
+import {
+  GATEWAY_RETENTION_VERSION,
+  GatewayRetention,
+  type RetentionLimits,
+} from "./gateway-retention.ts";
 import {
   assertConcurrencyFits,
   type GatewayAccount,
@@ -75,6 +82,7 @@ import {
   type HarnessAllowance,
   manifestDigestOf,
   readStoredIdentity,
+  type StreamRunIdentity,
   type TaskSelection,
 } from "./stream-identity.ts";
 import { readTaskInterfaces } from "./stream-interfaces.ts";
@@ -159,6 +167,25 @@ export interface StreamExperimentOptions {
   shutdownSignal?: AbortSignal;
   // 代码版本的显式放行（269）：续跑时代码版本不符的放行原因、首次开跑时放行未提交改动；缺省都不放行
   harnessAllowance?: HarnessAllowance;
+  // 网关逐请求留存（决策 394）：给了即开，按单题与单作业的落盘上限截断；缺省不开（CLI 缺省开）
+  gatewayRetention?: RetentionLimits;
+  // 高峰自动暂停（决策 393）：给了即开，进入高峰前 marginMs 停止放行新的一步；缺省不开（CLI 缺省开）
+  peakPause?: { marginMs: number };
+}
+
+// 高峰暂停的运行记录（输出目录下）：每次暂停与恢复一行
+export const PEAK_PAUSES_FILE = "peak-pauses.jsonl";
+
+// 身份头 info 里的网关留存（394，格式版本与上限）与高峰暂停（393，余量）：开了才记；都没开为空，身份头与之前逐字相同
+export function retentionAndPeakInfo(
+  options: Pick<StreamExperimentOptions, "gatewayRetention" | "peakPause">
+): Pick<StreamRunIdentity["info"], "gatewayRetention" | "peakPause"> {
+  return {
+    ...(options.gatewayRetention !== undefined
+      ? { gatewayRetention: { version: GATEWAY_RETENTION_VERSION, ...options.gatewayRetention } }
+      : {}),
+    ...(options.peakPause !== undefined ? { peakPause: { ...options.peakPause } } : {}),
+  };
 }
 
 export type StreamPigeonOptions = Omit<PigeonStepAgentOptions, "streamFn" | "streamFnFor" | "yolo">;
@@ -184,19 +211,28 @@ export function streamPigeonOptions(
 }
 
 // Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限、压缩配置与记忆上限记运行时的
-// 缺省值（off、跑批器自己的 16,384、产品缺省的压缩配置、项目级记忆上限 4,000 字符），不记 null；温度没给即由服务端决定，记 null。
+// 缺省值（推理档位与产品同一取法，网关接入声明支持推理即 high；跑批器自己的 16,384、产品缺省的压缩配置、项目级记忆上限
+// 4,000 字符），不记 null；温度记实际下发的值：没给或开了思考（服务端不收温度，运行时也不下发）记 null。
 // 复盘随决策 331 删除，身份头不再记复盘模板版本与复盘上限，改记记忆文字的版本（之前写下的身份头与之不同，续跑即判为不同）
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
+  const effectiveModelId = pigeon.modelId ?? modelId;
+  // 决策 380、390：跑批不读设置，档位为显式给的，或按网关接入登记的模型信息（deepseekModelInfo）定缺省
+  const thinking = resolveThinkingLevel({
+    requested: pigeon.thinking,
+    reasoning: deepseekModelInfo(effectiveModelId).reasoning,
+  });
   return {
     provider: pigeon.provider ?? GATEWAY_PROVIDER,
-    modelId: pigeon.modelId ?? modelId,
-    temperature: pigeon.temperature ?? null,
-    thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
+    modelId: effectiveModelId,
+    temperature: thinking === "off" ? (pigeon.temperature ?? null) : null,
+    thinking,
     maxOutputTokens: pigeon.maxOutputTokens ?? STREAM_MAX_OUTPUT_TOKENS,
     compaction: resolveCompactionConfig(pigeon.compaction),
     memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMITS.project,
     // 决策 328、332：推送段的文字版本（文字一改即换条件，续跑判为不同）
     memoryTextVersion: MEMORY_TEXT_VERSION,
+    // 决策 384：会话检索的行为版本（切分、打分、范围、归并或片段一改即换条件；之前写下的身份头没有这一项，续跑判为不同）
+    sessionSearchVersion: SESSION_SEARCH_VERSION,
     // 决策 363：开工状态块的文字版本（看板或状态块的文字一改即换条件）
     statusBlockVersion: STATUS_BLOCK_VERSION,
     // 决策 265：主 agent 派 worker 在各条件里的实际生效值
@@ -474,6 +510,7 @@ async function runStreamExperimentLocked(
         accounts: options.gateway.accounts.length,
         accountConcurrency: options.gateway.accounts.map((a) => a.concurrency),
         harness,
+        ...retentionAndPeakInfo(options),
       },
     },
     undefined,
@@ -487,6 +524,25 @@ async function runStreamExperimentLocked(
     path.join(outDir, GATEWAY_SPEND_FILE),
     upstreamOverride?.baseUrl
   );
+  // 网关留存（394）与高峰暂停（393）：给了才开，没给时跑法与之前逐字相同
+  if (options.gatewayRetention !== undefined) {
+    liveGateway.setRetention(
+      new GatewayRetention({
+        ...options.gatewayRetention,
+        keys: options.gateway.accounts.map((a) => a.key),
+      })
+    );
+  }
+  if (options.peakPause !== undefined) {
+    limits.enablePeakPause({
+      marginMs: options.peakPause.marginMs,
+      onChange: (event, record) =>
+        appendFileSync(
+          path.join(outDir, PEAK_PAUSES_FILE),
+          `${JSON.stringify({ event, ...record })}\n`
+        ),
+    });
+  }
   // 只通网关的跑批内部网络：有外部 agent 条件或 pigeon-docker 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
   let network: GatewayNetwork | undefined;
   if (externals.length > 0 || wantsPigeonDocker) {

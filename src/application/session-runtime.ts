@@ -50,6 +50,8 @@ export interface SessionRuntimeFlags {
   compaction?: CompactionConfigInput;
   // 决策 191、244：推送记忆（日常入口的启动参数缺省开着；这里没给即关着）
   pushedMemory?: boolean;
+  // 决策 382：会话检索（日常入口的启动参数缺省开着；这里没给即开着；false 即不注册检索三件并记原因）
+  sessionSearch?: boolean;
 }
 
 // 交互会话的推送记忆配置（决策 331）：有人对话，给写入配置（注册 update_memory、推送段带写入说明）；两层上限取设置快照
@@ -232,6 +234,12 @@ export async function openSessionRuntime(
         : {}),
       ...(request.flags.compaction !== undefined ? { compaction: request.flags.compaction } : {}),
       ...(learnedMemory !== undefined ? { learnedMemory } : {}),
+      ...(request.flags.sessionSearch === false
+        ? {
+            sessionSearch: false,
+            sessionSearchOffReason: "使用者以 --no-session-search 关掉了会话检索",
+          }
+        : {}),
       ...(request.createApprovalHandler !== undefined
         ? { createApprovalHandler: request.createApprovalHandler }
         : {}),

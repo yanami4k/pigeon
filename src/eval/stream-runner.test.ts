@@ -606,12 +606,18 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
         peakInputTokens: 0,
       };
       const meters = new Map<string, PricedMeter>();
+      const retained: string[] = [];
       const gateway = {
         jobBaseUrl: (job: string) => `http://gateway/j/${job}`,
         meter: (job: string) => ({ ...(meters.get(job) ?? zero) }),
         resetPeak: (job: string) => {
           const m = meters.get(job);
           if (m !== undefined) meters.set(job, { ...m, peakInFlight: 0, peakInputTokens: 0 });
+        },
+        // 网关留存（394）：每次尝试开始与结束都告知网关，带作业目录与步序
+        retainStep: (job: string, jobDir: string, seq: number) => {
+          retained.push(`${job} ${jobDir} ${seq}`);
+          return () => retained.push(`end ${seq}`);
         },
       };
       let hits = 0;
@@ -654,6 +660,11 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
       assert.deepEqual(
         agent.calls.map((c) => c.step.seq),
         [1, 5, 5]
+      );
+      const jobDir = join(t.base, "out", "streams", "tasks-neither-1");
+      assert.deepEqual(
+        retained,
+        [1, 5, 5].flatMap((seq) => [`tasks|neither|1 ${jobDir} ${seq}`, `end ${seq}`])
       );
       // 计量取网关：每次调用记 2 次请求、100 输入、10 输出
       assert.deepEqual([rows[0]?.turns, rows[0]?.usage.totalTokens], [2, 110]);
@@ -1437,7 +1448,8 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
     const t = await toy();
     try {
       const clue = "作废尝试留下的线索甲乙丙";
-      const kept = "前一步留下的线索丁戊己";
+      // 新检索按词匹配（二元组）：两条线索用词不相交，"作废的搜不到"才只由"会话已移走"决定
+      const kept = "前一步的记号丁戊己";
       const sessionIds = { kept: "", voided: "" };
       const seenOnRetry: { voidedHits: number; keptHits: number; sessions: string[] }[] = [];
       const calls: StepAgentInput[] = [];
@@ -1457,7 +1469,7 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
           homeDir: join(t.base, "home"),
         });
       const hitsOf = async (sessionsDir: string, keyword: string) =>
-        (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).total;
+        (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).totalHits;
       const agent: StepAgent = {
         async run(input) {
           calls.push(input);

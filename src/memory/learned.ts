@@ -2,7 +2,8 @@
 // 文件头为标题加一行注释，其后一行一条：`- [P3] 内容 〔2026-10-01 · 终端界面 · 会话 sess_…〕`。agent 只写内容，
 // 编号、日期、来源（哪个入口）与会话编号由工具补上；〔〕一段可缺（人手加的条目），编号不可缺。本模块只做纯函数：解析、
 // 序列化、计字符与写满判定，无 IO。
-// - 编号：项目级以 P 开头、用户级以 U 开头，后接正整数；一层之内不重复。新编号取现有最大编号加一。
+// - 编号：项目级以 P 开头、用户级以 U 开头，后接正整数；一层之内不重复。新编号取现有最大编号加一，且删掉的编号
+//   不再分配（决策 382：已分配过的最大编号另记在 memory.md 旁的 .maxid 小文件里，见 update-memory-tool.ts）。
 // - 逐字往返：解析保留文件头原文与最后一条之后的换行、空行（文件尾），规范写法的文件序列化回去逐字相同。
 // - 条目区从第一个以"- "开头的行起，到文件尾都必须是规范的条目行；不合规即报出第一处不对的行号（人手改坏时工具据此拒绝
 //   写入，推送照原文推入）。文件头只认第一个"- "行之前的内容，原样保留、不校验。
@@ -206,7 +207,8 @@ export function entryChars(entry: MemoryEntry, layer: MemoryLayer): number {
   return countChars(serializeEntry(entry, layer)) + 1;
 }
 
-// 下一个编号：现有最大编号加一
+// 下一个编号：现有最大编号加一。决策 382：删掉的编号不再分配——调用方（update-memory-tool.ts）另取
+// 已分配过的最大编号（.maxid 文件）加一作下界，两者取大
 export function nextId(entries: readonly MemoryEntry[]): number {
   return entries.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
 }

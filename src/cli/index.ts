@@ -56,7 +56,9 @@ import {
   trustPromptText,
 } from "../application/session-settings.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
+import { DEFAULT_RETENTION_LIMITS } from "../eval/gateway-retention.ts";
 import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
+import { DEFAULT_PEAK_MARGIN_MS } from "../eval/model-limits.ts";
 import { streamTemperature } from "../eval/stream-agents.ts";
 import {
   CLASSES_SUMMARY_FILE,
@@ -295,6 +297,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const flags = parseLaunchFlags(modelArgv, {
     usage: modelUsage,
     pushedMemory: true,
+    sessionSearch: true,
     sandbox: true,
   });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
@@ -445,6 +448,7 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const flags = parseLaunchFlags(modelArgv, {
     usage,
+    sessionSearch: true,
     pushedMemory: true,
     sandbox: true,
     spawnWorkers: true,
@@ -497,6 +501,8 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
     // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守
     pushedMemory: flags.pushedMemory,
+    // 决策 382：会话检索缺省开着（--no-session-search 关掉）
+    sessionSearch: flags.sessionSearch,
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
     // 决策 309：脚本编排随派 worker 打开，任务描述算作点名
@@ -782,6 +788,10 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
 // 撞上限续跑与流式重复检测（决策 367）：--continuation、--continuation-max-consecutive、--continuation-max-per-run、
 // --repetition-guard、--repetition-mode、--repetition-preset，只对 Pigeon 条件生效，缺省同产品缺省，生效值记进身份头；
+// 网关逐请求留存（决策 394）：缺省开，各作业的模型请求（增量）与回复记到 streams/<作业>/gateway/，单题与单作业的落盘
+// 上限 --retention-task-mb（缺省 32）、--retention-job-mb（缺省 512），--gateway-retention off 关掉；
+// 高峰自动暂停（决策 393）：缺省开，进入高峰前 --peak-margin-min（缺省 30）分钟停止放行新的一步、在途的照常做完、出高峰
+// 自动放行，每次暂停与恢复记进 peak-pauses.jsonl，--peak-pause off 关掉；两项都关时跑法与之前逐字相同；
 // 同一输出目录重跑即从断点续跑
 const STREAM_CONTAINER_MEMORY = "2g";
 
@@ -798,6 +808,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
     "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
     "[--background-closeout-seconds <n，缺省 600；0 为收尾不等、直接停掉作业>] " +
+    "[--gateway-retention on|off] [--retention-task-mb <n，缺省 32>] [--retention-job-mb <n，缺省 512>] " +
+    "[--peak-pause on|off] [--peak-margin-min <n，缺省 30>] " +
     "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
     '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
   const own = new Set([
@@ -831,6 +843,11 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--repetition-preset",
     "--background-closeout-seconds",
     "--pigeon-bundle",
+    "--gateway-retention",
+    "--retention-task-mb",
+    "--retention-job-mb",
+    "--peak-pause",
+    "--peak-margin-min",
   ]);
   const values = new Map<string, string>();
   const modelArgv: string[] = [];
@@ -979,6 +996,26 @@ async function evalStreamMain(argv: string[]): Promise<void> {
   if (spendLimitCny !== undefined && !(Number.isFinite(spendLimitCny) && spendLimitCny > 0)) {
     throw new Error(`--spend-limit-cny 需要正数（${usage}）`);
   }
+  // 决策 394：网关逐请求留存，缺省开；关掉时不接受上限参数
+  const retentionOff = oneOf("--gateway-retention", ["on", "off"] as const) === "off";
+  const mib = (name: string, fallback: number) => (positive(name) ?? fallback / 2 ** 20) * 2 ** 20;
+  if (retentionOff && (values.has("--retention-task-mb") || values.has("--retention-job-mb"))) {
+    throw new Error(`--gateway-retention off 时不给留存上限（${usage}）`);
+  }
+  const gatewayRetention = retentionOff
+    ? undefined
+    : {
+        maxTaskBytes: mib("--retention-task-mb", DEFAULT_RETENTION_LIMITS.maxTaskBytes),
+        maxJobBytes: mib("--retention-job-mb", DEFAULT_RETENTION_LIMITS.maxJobBytes),
+      };
+  // 决策 393：高峰自动暂停，缺省开；余量为分钟数，可为 0（只在高峰时段内停）
+  const peakOff = oneOf("--peak-pause", ["on", "off"] as const) === "off";
+  const marginRaw = values.get("--peak-margin-min");
+  const marginMin = marginRaw === undefined ? DEFAULT_PEAK_MARGIN_MS / 60_000 : Number(marginRaw);
+  if (!Number.isInteger(marginMin) || marginMin < 0 || (peakOff && marginRaw !== undefined)) {
+    throw new Error(`--peak-margin-min 需要非负整数，且只在高峰暂停开着时给（${usage}）`);
+  }
+  const peakPause = peakOff ? undefined : { marginMs: marginMin * 60_000 };
   // 代码版本的显式放行（269）：原因为空即报错
   const acceptHarnessChange = values.get("--accept-harness-change");
   if (acceptHarnessChange !== undefined && acceptHarnessChange.trim() === "") {
@@ -1031,6 +1068,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
       : {}),
     containerRunArgs: ["--memory", memory],
     ...(baselineDir !== undefined ? { baselineDir } : {}),
+    ...(gatewayRetention !== undefined ? { gatewayRetention } : {}),
+    ...(peakPause !== undefined ? { peakPause } : {}),
     harnessAllowance: {
       ...(acceptHarnessChange !== undefined ? { acceptHarnessChange } : {}),
       ...(allowDirtyHarness ? { allowDirtyHarness } : {}),
@@ -1263,6 +1302,7 @@ async function lineMain(argv: string[]): Promise<void> {
   const startUsage = `pigeon --line 支持 ${SESSION_FLAGS_HINT}`;
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
+    sessionSearch: true,
     pushedMemory: true,
     sandbox: true,
   });

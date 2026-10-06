@@ -111,8 +111,11 @@ import {
   runCommandTimeoutsOf,
   type SettingsSnapshot,
   searchLimitsOf,
+  sessionSearchEnabledOf,
+  thinkingSectionOf,
   truncationContinuationOf,
 } from "../state/settings.ts";
+import { resolveThinkingLevel } from "../state/thinking-config.ts";
 import {
   JOB_KILL_TOOL,
   JOB_OUTPUT_TOOL,
@@ -280,7 +283,8 @@ export interface RuntimeDeps {
   persistThinking?: boolean;
   // 用户级目录（~/.pigeon：AGENTS.md、Skill、学到的记忆的用户级）所在的家目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
-  // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖；缺省 off
+  // M5.5 S5（决策 050）：推理档位——Actor 传启动参数全局值，worker 装配按角色配置覆盖。没给时取设置的 thinking 一节，
+  // 设置也没写即按模型信息：支持推理的模型 high，不支持或不知道的 off（决策 390，见 state/thinking-config.ts）
   thinkingLevel?: ThinkingLevel;
   // M5.5 S5（决策 048）：worker 角色——设置的 commands 一节为该角色登记了命令时，run_command 只接受登记的命令
   // （决策 360：作额外限制；没登记的角色与主会话同一规则）；主会话缺省，不受清单限制
@@ -316,8 +320,10 @@ export interface RuntimeDeps {
   // 决策 324：钩子拦下或出错时的一行提示（终端界面落消息区；缺省静默）
   hooksNotice?: WarnSink;
   // 决策 193：能否检索历史会话。关掉时不注册 search_sessions、read_session_entry 与 list_sessions（339），系统提示去掉提到它们的那一句；
-  // 缺省开着（日常使用与 193 之前逐字一致）
+  // 缺省开着（日常使用与 193 之前逐字一致）。决策 382：使用者另有设置项与启动参数两个开关（都在装配之前并入这一项）
   sessionSearch?: boolean;
+  // 决策 382：使用者开关关掉时的原因（写进开局记录的 skippedTools）；跑批按条件关掉时不给（照旧不记）
+  sessionSearchOffReason?: string;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
   compaction?: CompactionConfigInput;
   // 压缩前回调；缺省不挂
@@ -521,10 +527,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 压缩配置畸形在打开会话文件之前响亮失败
   const compactionConfig = resolveCompactionConfig(deps.compaction);
   const learned = deps.learnedMemory;
-  // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
-  // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（缺省 off）时温度照常下发
-  const reasoningEnabled = deps.thinkingLevel !== undefined && deps.thinkingLevel !== "off";
-  const appliedTemperature = reasoningEnabled ? undefined : deps.temperature;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
   // 本机执行端：禁读名单里的 ~ 按注入的家目录展开（测试指到临时目录）
   const workspaceHost =
@@ -557,6 +559,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(access?.catalog !== undefined ? { catalog: access.catalog } : {}),
     ...(modelSection !== undefined ? { section: modelSection } : {}),
   });
+  // 决策 390：本运行面的推理档位——启动参数 > 设置 > 按模型信息的缺省（支持推理的 high，其余 off）
+  const thinkingLevel = resolveThinkingLevel({
+    requested: deps.thinkingLevel,
+    section: thinkingSectionOf(settings),
+    reasoning: modelInfo.reasoning.source === "unknown" ? undefined : modelInfo.reasoning.value,
+  });
+  // 推理开启时温度不生效：pi-ai 的 anthropic-messages 线路开思考时不发 temperature，DeepSeek 文档也写明思考模式下
+  // 温度设了不报错但不生效。请求值如实记成"未生效"，也不再往下传；关思考（off）时温度照常下发
+  const appliedTemperature = thinkingLevel !== "off" ? undefined : deps.temperature;
   const continuation = deps.truncationContinuation ?? truncationContinuationOf(settings);
   const repetition = deps.repetitionGuard ?? repetitionGuardOf(settings);
   // 决策 356–358：本会话的命令输出落盘目录与读取记录（read_file、编辑与 write_file 共用），两个工具的上限取设置的 tools 一节
@@ -754,14 +765,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     return false;
   };
   // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
-  // 决策 193 的开关关掉时一件都不注册；决策 359：本会话所在的会话树以外没有会话（搜不到东西）时也不注册
+  // 决策 193 的开关关掉时一件都不注册；决策 382：使用者开关（设置 sessionSearch.enabled 或 --no-session-search，
+  // 由入口并入 deps.sessionSearch 并给原因）关掉时同样不注册，原因写进开局记录；
+  // 决策 359：本会话所在的会话树以外没有会话（搜不到东西）时也不注册
+  const sessionSearchTools = [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL];
+  const sessionSearchOffReason =
+    deps.sessionSearch === false
+      ? deps.sessionSearchOffReason
+      : sessionSearchEnabledOf(settings) === false
+        ? "设置 sessionSearch.enabled 为 false（使用者关掉了会话检索）"
+        : undefined;
   const sessionSearch =
-    (deps.sessionSearch ?? true) &&
-    (environment.check("sessionHistory") ||
-      skip(
-        [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL],
-        "本项目没有历史会话"
-      ));
+    sessionSearchOffReason !== undefined
+      ? skip(sessionSearchTools, sessionSearchOffReason)
+      : deps.sessionSearch !== false &&
+        (environment.check("sessionHistory") || skip(sessionSearchTools, "本项目没有历史会话"));
   // 可搜文本缓存在 .pigeon/state/search-cache/
   const sessionToolOptions = {
     sessionsDir,
@@ -1189,7 +1207,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       model: {
         provider: deps.provider,
         id: deps.modelId,
-        ...(deps.thinkingLevel !== undefined ? { thinkingLevel: deps.thinkingLevel } : {}),
+        thinkingLevel,
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         ...(appliedTemperature !== undefined ? { temperature: appliedTemperature } : {}),
         ...(deps.temperature !== undefined && appliedTemperature === undefined

@@ -55,6 +55,7 @@ test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同�
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1_000_000,
     maxTokens: 393_216,
+    compat: { allowEmptySignature: true },
   });
   assert.equal(DEEPSEEK_ANTHROPIC_BASE_URL, "https://api.deepseek.com/anthropic");
   assert.equal(sent?.options.apiKey, "sk-daily");
@@ -233,6 +234,43 @@ test("跑批器进程内条件的网关接入：没配置时以 16,384 作模型
     32_000
   );
   assert.equal((await captureRequest(configured, {})).body.max_tokens, 32_000);
+});
+
+test("签名为空的历史思考：自带接入与网关接入都仍以 thinking 块回传，不改成普通文字", async () => {
+  const history = [
+    { role: "user", content: "做事", timestamp: 0 },
+    {
+      role: "assistant",
+      api: "anthropic-messages",
+      provider: "deepseek",
+      model: "deepseek-flash",
+      stopReason: "toolUse",
+      usage: {},
+      timestamp: 0,
+      content: [
+        { type: "thinking", thinking: "先读文件", thinkingSignature: "" },
+        { type: "toolCall", id: "t1", name: "read_file", arguments: {} },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "t1",
+      toolName: "read_file",
+      content: [{ type: "text", text: "内容" }],
+      isError: false,
+      timestamp: 0,
+    },
+  ];
+  const daily = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-daily" }, realStreamSimple);
+  const gateway = gatewayStreamFn("http://127.0.0.1:9/j/x", "deepseek-flash", 16_384);
+  for (const [what, fn] of [
+    ["自带接入", daily],
+    ["网关接入", gateway],
+  ] as const) {
+    const sent = await captureRequest(fn, { reasoning: "high" }, history);
+    const replayed = (sent.body.messages as Array<{ content: unknown[] }>)[1]?.content[0];
+    assert.deepEqual(replayed, { type: "thinking", thinking: "先读文件", signature: "" }, what);
+  }
 });
 
 test("DEEPSEEK_BASE_URL 非法时的报错：地址里的用户名与密码脱敏，其余照原样", () => {

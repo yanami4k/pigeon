@@ -2,7 +2,7 @@
 // 与会话锁的区别是它不可重入——同一个进程里的两处可能同时改同一份文件，会话锁的同进程重入在这里正好是漏洞。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
@@ -90,18 +90,20 @@ test("独占锁：报错文案带上调用方给的说明与锁文件路径", ()
   }
 });
 
-// 另一个进程紧盯锁文件，数有多少次读到“存在但不是完整的持有者记录”。
-// 停止信号用一个哨兵文件；另设兜底期限，父进程异常退出时子进程不会挂住
+// 另一个进程紧盯锁文件，数有多少次读到“存在但不是完整的持有者记录”。开始读之前写就绪文件，读到的次数够了写够数文件，
+// 父进程据这两个信号对齐（不靠固定次数赌子进程起得够快）。停止信号用一个哨兵文件；另设兜底期限，父进程异常退出时子进程不会挂住
 const POLLER = [
   'const fs = require("node:fs");',
-  "const [lockPath, stopPath, outPath] = process.argv.slice(1);",
+  "const [lockPath, readyPath, enoughPath, stopPath, outPath, target] = process.argv.slice(1);",
   "let torn = 0;",
   "let seen = 0;",
   "const deadline = Date.now() + 30000;",
+  'fs.writeFileSync(readyPath, "", "utf8");',
   "while (!fs.existsSync(stopPath) && Date.now() < deadline) {",
   "  let raw;",
   '  try { raw = fs.readFileSync(lockPath, "utf8"); } catch { continue; }',
   "  seen += 1;",
+  '  if (seen === Number(target)) fs.writeFileSync(enoughPath, "", "utf8");',
   "  try {",
   "    const parsed = JSON.parse(raw);",
   '    if (typeof parsed.pid !== "number") { torn += 1; }',
@@ -110,27 +112,49 @@ const POLLER = [
   'fs.writeFileSync(outPath, JSON.stringify({ torn, seen }), "utf8");',
 ].join("\n");
 
+// 子进程至少要读到这么多次锁，这条用例才算测到了东西
+const SEEN_TARGET = 20;
+// 等信号的上限：只决定真失败时多久报出来
+const SIGNAL_TIMEOUT_MS = 15_000;
+
 test("建锁原子性：锁文件一出现就是完整内容，另一个进程读不到半截锁", async () => {
   const root = dir();
+  const path = join(root, "a.lock");
+  const readyPath = join(root, "ready");
+  const enoughPath = join(root, "enough");
+  const stopPath = join(root, "stop");
+  const outPath = join(root, "seen.json");
+  const poller = spawn(
+    process.execPath,
+    ["-e", POLLER, path, readyPath, enoughPath, stopPath, outPath, String(SEEN_TARGET)],
+    { stdio: "ignore" }
+  );
+  const exited = new Promise<void>((resolve) => poller.on("exit", () => resolve()));
   try {
-    const path = join(root, "a.lock");
-    const stopPath = join(root, "stop");
-    const outPath = join(root, "seen.json");
-    const poller = spawn(process.execPath, ["-e", POLLER, path, stopPath, outPath], {
-      stdio: "ignore",
-    });
-    const exited = new Promise<void>((resolve) => poller.on("exit", () => resolve()));
-    // 反复取放同一把锁：建锁若分“先创建空文件、再写内容”两步，这中间的 0 字节窗口就会被读到，
-    // 而读到的一方会把它判为损坏锁直接接管——于是两个进程同时认为自己持锁
-    for (let i = 0; i < 400; i += 1) {
+    const readyBy = Date.now() + SIGNAL_TIMEOUT_MS;
+    while (!existsSync(readyPath)) {
+      assert.ok(Date.now() < readyBy, "子进程没有开始读锁");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // 反复取放同一把锁，直到子进程报告读到过足够次数：建锁若分“先创建空文件、再写内容”两步，这中间的 0 字节窗口
+    // 就会被读到，而读到的一方会把它判为损坏锁直接接管——于是两个进程同时认为自己持锁
+    const cycleBy = Date.now() + SIGNAL_TIMEOUT_MS;
+    while (!existsSync(enoughPath) && Date.now() < cycleBy) {
       acquireExclusiveLock(path, "夹具")();
     }
     writeFileSync(stopPath, "", "utf8");
     await exited;
     const observed = JSON.parse(readFileSync(outPath, "utf8")) as { torn: number; seen: number };
-    assert.ok(observed.seen > 0, "子进程至少要读到过这把锁，否则这条用例什么都没测");
+    assert.ok(
+      observed.seen >= SEEN_TARGET,
+      `子进程至少要读到过这把锁 ${SEEN_TARGET} 次（实际 ${observed.seen}），否则这条用例什么都没测`
+    );
     assert.equal(observed.torn, 0, "锁文件不该有任何一刻是不完整的");
   } finally {
+    if (poller.exitCode === null && poller.signalCode === null) {
+      poller.kill();
+      await exited;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });

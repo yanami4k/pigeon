@@ -11,6 +11,7 @@ import {
   WIDE_REPETITION_PARAMS,
 } from "../state/runaway-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
+import { GATEWAY_RETENTION_VERSION } from "./gateway-retention.ts";
 import {
   effectivePigeonSettings,
   gatewayUpstreamOverride,
@@ -18,6 +19,7 @@ import {
   installTerminationHandler,
   layersIdentity,
   resolveTaskSelection,
+  retentionAndPeakInfo,
   runStreamExperiment,
   streamPigeonOptions,
 } from "./stream-experiment.ts";
@@ -32,6 +34,20 @@ import {
 } from "./stream-runner.ts";
 import { PythonRandom, SAMPLE_POPULATION } from "./stream-sample.ts";
 
+test("身份头 info 里的网关留存（394）与高峰暂停（393）开了才记；两项都关时不多出任何项，与之前逐字相同", () => {
+  assert.deepEqual(retentionAndPeakInfo({}), {});
+  assert.deepEqual(
+    retentionAndPeakInfo({
+      gatewayRetention: { maxTaskBytes: 1, maxJobBytes: 2 },
+      peakPause: { marginMs: 3 },
+    }),
+    {
+      gatewayRetention: { version: GATEWAY_RETENTION_VERSION, maxTaskBytes: 1, maxJobBytes: 2 },
+      peakPause: { marginMs: 3 },
+    }
+  );
+});
+
 test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），不依赖调用方传；调用方传了 false 也不算数", () => {
   assert.equal(streamPigeonOptions({ provider: "kimi-coding", modelId: "m" }).yolo, true);
   const forced = streamPigeonOptions({
@@ -43,12 +59,12 @@ test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），�
   assert.equal(forced.provider, "kimi-coding");
 });
 
-test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置与项目级记忆上限记运行时缺省（off、16,384、产品缺省的压缩配置、4,000 字符），不记 null；记忆文字版本记 v3、续跑行为版本记 v3；主 agent 派 worker 记关（265）；给了的原样记", () => {
+test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置与项目级记忆上限记运行时缺省（high、16,384、产品缺省的压缩配置、4,000 字符），不记 null；记忆文字版本记 v3、检索行为版本记 v2、续跑行为版本记 v3；主 agent 派 worker 记关（265）；给了的原样记", () => {
   assert.deepEqual(effectivePigeonSettings({}, "deepseek-flash"), {
     provider: "deepseek",
     modelId: "deepseek-flash",
     temperature: null,
-    thinking: "off",
+    thinking: "high",
     maxOutputTokens: 16_384,
     compaction: {
       contextWindow: 1_000_000,
@@ -58,6 +74,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     },
     memoryLimitChars: 4_000,
     memoryTextVersion: "v3",
+    sessionSearchVersion: "v2",
     statusBlockVersion: "v1",
     spawnWorkers: false,
     webTools: false,
@@ -86,7 +103,8 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     {
       provider: "deepseek",
       modelId: "m2",
-      temperature: 0,
+      // 开思考时温度不下发，记 null
+      temperature: null,
       thinking: "high",
       maxOutputTokens: 8_000,
       compaction: {
@@ -97,6 +115,7 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       },
       memoryLimitChars: 2000,
       memoryTextVersion: "v3",
+      sessionSearchVersion: "v2",
       statusBlockVersion: "v1",
       spawnWorkers: false,
       webTools: false,
@@ -111,6 +130,13 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       backgroundCloseoutSeconds: DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
     }
   );
+});
+
+test("身份头的温度按实际是否下发记：关思考时记给的温度，开思考（缺省）时记 null", () => {
+  const off = effectivePigeonSettings({ temperature: 0, thinking: "off" }, "deepseek-flash");
+  assert.deepEqual([off.thinking, off.temperature], ["off", 0]);
+  const byDefault = effectivePigeonSettings({ temperature: 0 }, "deepseek-flash");
+  assert.deepEqual([byDefault.thinking, byDefault.temperature], ["high", null]);
 });
 
 test("身份头记撞上限续跑与流式重复检测的实际生效值（367）：给了非缺省的（续跑关、wide 档只记录）即原样记下", () => {
