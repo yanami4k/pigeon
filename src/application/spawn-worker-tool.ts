@@ -408,8 +408,9 @@ export interface SpawnWorkerHost {
     WorkerOrchestrator,
     "spawn" | "awaitResult" | "cancel" | "status" | "wait" | "send" | "subscribe"
   >;
-  // 治理根（主仓库根）：是不是 git 仓库
-  governanceRoot: string;
+  // 派出方的工作区根（git 仓库）：派出前的 git 检查看它，take_worker 把改动叠进它。主会话为主工作区根——治理根与
+  // 工作区根分开（pigeon run --governance-root）时不是治理根；派出方是 worker 时为它的工作树
+  workspaceRoot: string;
   spawnAttempts(request: SpawnAttemptsRequest): Promise<SpawnAttemptsResult>;
   budget: SpawnWorkerBudget;
   // 完成通知（297）：模型派出的 worker 结束时发；没有即不发（替身）
@@ -634,7 +635,7 @@ function precheck(
   if (params.task.trim() === "") {
     return reply(SPAWN_WORKER_TEXTS.emptyTask, { sessionIds: [], rejected: "empty-task" });
   }
-  if (!isGitWorkspace(host.governanceRoot)) {
+  if (!isGitWorkspace(host.workspaceRoot)) {
     return reply(SPAWN_WORKER_TEXTS.notGit, { sessionIds: [], rejected: "not-git" });
   }
   if (host.budget.exhausted) {

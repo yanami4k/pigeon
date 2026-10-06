@@ -339,6 +339,7 @@ test("worker（implementer）：父会话推送且可写入时，开工状态块
       const workerStream = createFakeStreamFn({ replies: [{ text: "做完了" }] });
       const orchestrator = createSessionWorkers({
         governanceRoot: repo,
+        workspaceRoot: repo,
         bundle: parent,
         approvals: async () => ({ approved: true }),
         streamFn: workerStream,

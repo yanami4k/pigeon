@@ -4,7 +4,7 @@
 // 无人值守时 worker 需请示即停下、以可恢复错误交回，其余 worker 照常；多份尝试全部结束后汇总一条通知，交回各份的改动与摘要。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, test } from "vitest";
@@ -14,6 +14,7 @@ import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtu
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
+import { worktreesDirOf } from "../state/paths.ts";
 import { runHeadless } from "./headless-core.ts";
 import { SPAWN_WORKER_TEXTS } from "./spawn-worker-tool.ts";
 import { isStatusText } from "./status-fixtures.ts";
@@ -589,4 +590,94 @@ test("放开嵌套（2 层）：主会话派的 worker 再派下一层并等它�
   );
   assert.equal(mainNotices.length, 1);
   assert.ok(mainNotices[0]?.includes("worker parent（implementer）已完成。"), mainNotices[0]);
+});
+
+test("治理根与工作区根分开（--governance-root）：implementer 的工作树建在治理根下、从工作区开工，take_worker 叠回工作区；explorer 就地读工作区", async () => {
+  const root = repo({ "a.txt": "alpha\n" });
+  const gov = mkdtempSync(join(tmpdir(), "pigeon-spawn-headless-gov-"));
+  roots.push(gov);
+  const textOf = (message: { content?: unknown }): string =>
+    typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+  // 主 agent 按会话进展回话：先派两个；implementer 的完成通知到了就取用它；其余收工
+  const main = ((model, context, options) => {
+    const messages = context.messages as Array<{ role: string; toolName?: string }>;
+    const fixDone = context.messages.some(
+      (message) =>
+        message.role === "user" && textOf(message).includes("worker fix（implementer）已完成")
+    );
+    const taken = messages.some((message) => message.toolName === "take_worker");
+    const reply = !messages.some((message) => message.role === "toolResult")
+      ? {
+          text: "派",
+          toolCalls: [
+            {
+              name: "spawn_worker",
+              args: { role: "implementer", task: "WORKER-I 改 a", name: "fix" },
+            },
+            {
+              name: "spawn_worker",
+              args: { role: "explorer", task: "WORKER-E 看 a", name: "look" },
+            },
+          ],
+        }
+      : fixDone && !taken
+        ? { text: "取", toolCalls: [{ name: "take_worker", args: { worker: "fix" } }] }
+        : { text: "好" };
+    return createFakeStreamFn({ replies: [reply] })(model, context, options);
+  }) as StreamFn;
+  let explorerSaw = "";
+  const explorer = staged(
+    { replies: [{ text: "读", toolCalls: [{ name: "read_file", args: { path: "a.txt" } }] }] },
+    { replies: [{ text: "看完了" }] }
+  );
+  const result = await runHeadless({
+    task: "MAIN 分开的根",
+    governanceRoot: gov,
+    workspaceRoot: root,
+    yolo: true,
+    spawnWorkers: true,
+    streamFn: routed([
+      ["MAIN", main],
+      [
+        "WORKER-I",
+        staged(
+          {
+            replies: [
+              {
+                text: "改",
+                toolCalls: [
+                  {
+                    name: "edit_file",
+                    args: { path: "a.txt", old_string: "alpha", new_string: "ALPHA" },
+                  },
+                ],
+              },
+            ],
+          },
+          { replies: [{ text: "改好了" }] }
+        ),
+      ],
+      [
+        "WORKER-E",
+        ((model, context, options) => {
+          for (const message of context.messages) {
+            if (message.role === "toolResult") explorerSaw += textOf(message);
+          }
+          return explorer(model, context, options);
+        }) as StreamFn,
+      ],
+    ]),
+  });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(childStatuses(gov, result.sessionId), { fix: "completed", look: "completed" });
+  // 工作树在治理根下；起点快照的引用在建好工作树后从工作区仓库删掉
+  assert.equal(
+    readdirSync(worktreesDirOf(gov)).filter((entry) => entry.endsWith("-fix")).length,
+    1
+  );
+  assert.equal(git(root, ["for-each-ref", "refs/pigeon/worker-start/"]), "");
+  // explorer 读到的是工作区的文件；implementer 的改动经 take_worker 叠回工作区；工作区里没有程序状态
+  assert.ok(explorerSaw.includes("alpha"), explorerSaw);
+  assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "ALPHA\n");
+  assert.equal(existsSync(join(root, ".pigeon")), false);
 });

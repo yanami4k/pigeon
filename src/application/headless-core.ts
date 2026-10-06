@@ -340,10 +340,11 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
           bundle.closers = [...(bundle.closers ?? []), () => checkpoints.close()];
         }
       }
-      // 决策 264–268：派 worker 的编排器（决策 279：worker 从治理根连同未提交改动的快照开工；无人值守，不接审批通道）
+      // 决策 264–268：派 worker 的编排器（决策 279：worker 从工作区根连同未提交改动的快照开工；无人值守，不接审批通道）
       if (spawnSlot !== undefined) {
         workers = createSessionWorkers({
           governanceRoot: options.governanceRoot,
+          workspaceRoot: options.workspaceRoot,
           bundle,
           streamFn: options.streamFn,
           provider: surface.provider,
@@ -362,7 +363,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
         const bound = bindSpawnWorkers({
           slot: spawnSlot,
           orchestrator: workers,
-          governanceRoot: options.governanceRoot,
+          workspaceRoot: options.workspaceRoot,
           hostSessionId: sessionId,
           // 决策 297：完成通知进本会话的下一轮（空闲时由 drainWorkers 接着跑）
           target: bundle.adapter,
@@ -375,6 +376,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
           scripts = createSessionScripts({
             orchestrator,
             governanceRoot: options.governanceRoot,
+            workspaceRoot: options.workspaceRoot,
             settings: bundle.settings,
             sessionId,
             flush: () => bundle.sessionStore.flush(),
@@ -390,7 +392,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
             hostExhausted: () => spawnBudget?.exhausted === true,
             ...(options.scriptLauncher !== undefined ? { launcher: options.scriptLauncher } : {}),
           });
-          scriptSlot.bind({ runs: scripts, governanceRoot: options.governanceRoot });
+          scriptSlot.bind({ runs: scripts, workspaceRoot: options.workspaceRoot });
         }
       }
       options.onBundle?.(bundle);

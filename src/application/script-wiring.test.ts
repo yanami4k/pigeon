@@ -90,7 +90,7 @@ function countingHost(root: string): { started: number; slot: ScriptSlot; gate: 
   const slot = new ScriptSlot(gate);
   const state = { started: 0, slot, gate };
   slot.bind({
-    governanceRoot: root,
+    workspaceRoot: root,
     runs: {
       start: async () => {
         state.started += 1;

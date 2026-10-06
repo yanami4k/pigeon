@@ -44,6 +44,7 @@ async function workerCompaction(parentConfig: CompactionConfigInput | undefined)
     try {
       const orchestrator = createSessionWorkers({
         governanceRoot: repo,
+        workspaceRoot: repo,
         bundle: parent,
         approvals: async () => ({ approved: true }),
         streamFn,

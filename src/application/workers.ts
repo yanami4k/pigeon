@@ -127,8 +127,11 @@ export interface WorkerRuntimeDeps {
 
 export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor"> {
   streamFn: StreamFn;
-  // 治理根（主仓库根）
+  // 治理根：worker 的会话、设置与工作树目录（其 .pigeon/state/worktrees）在它下面
   governanceRoot: string;
+  // 主工作区根（git 仓库）：worker 从它的快照开工、工作树与分支建在它上面、explorer 就地读它。
+  // 日常两者同为主仓库根；pigeon run --governance-root 时分开
+  workspaceRoot: string;
   // 派出 worker 的父运行面：父策略取其冻结快照，父子两族写其会话文件
   bundle: RuntimeBundle;
   // 父运行面本身是 worker 会话时在场（深度 1：拒绝再派）
@@ -157,6 +160,7 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
   const holder: { current?: WorkerOrchestrator } = {};
   const orchestrator = new WorkerOrchestrator({
     governanceRoot: deps.governanceRoot,
+    workspaceRoot: deps.workspaceRoot,
     session: {
       sessionId: deps.bundle.adapter.sessionId,
       ...(deps.parentSessionId !== undefined ? { parentSessionId: deps.parentSessionId } : {}),
@@ -174,7 +178,7 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
     }),
     // 决策 279：worker 从主工作目录连同未提交改动拍成的快照开工
     startPoint: workerStartPoint(
-      deps.governanceRoot,
+      deps.workspaceRoot,
       untrackedLimitsOfSettings(deps.bundle.settings)
     ),
     // 决策 381：worker 交回时也按同一组上限列出它新建却没收进来的文件
@@ -202,14 +206,14 @@ export function createSessionWorkers(deps: SessionWorkersDeps): WorkerOrchestrat
 // 删掉（worker 分支指向起点提交，提交不会被回收；删分支时的连带删除仍留作兜底）
 // 决策 381：limits 为未跟踪文件的上限，过大而没带进来的文件随起点交回（开工时告诉 worker）
 export function workerStartPoint(
-  governanceRoot: string,
+  workspaceRoot: string,
   limits?: UntrackedLimits
 ): WorkerStartPointProvider {
   return ({ name, from }) => {
     const ref = workerStartRefFor(name);
     // 决策 299：派出方是 worker 时拍它的工作树（与主仓库同一个对象库，引用共用）
     const snap = snapshotWorkdir({
-      repoRoot: from ?? governanceRoot,
+      repoRoot: from ?? workspaceRoot,
       ref,
       ...(limits !== undefined ? { limits } : {}),
     });
@@ -218,7 +222,7 @@ export function workerStartPoint(
       snapshot: snap.snapshot,
       files: snap.files,
       ...(snap.skipped.length > 0 ? { skipped: snap.skipped } : {}),
-      release: () => deleteSnapshotRef(governanceRoot, ref),
+      release: () => deleteSnapshotRef(workspaceRoot, ref),
     };
   };
 }
@@ -439,7 +443,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
               nestedNotices = bindSpawnWorkers({
                 slot: nestedSlot,
                 orchestrator: nestedOrchestrator,
-                governanceRoot: request.governanceRoot,
+                workspaceRoot,
                 hostSessionId: request.sessionId,
                 target: bundle.adapter,
                 from: request.sessionId,

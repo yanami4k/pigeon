@@ -31,7 +31,8 @@ export type OrchestrateParams = Static<typeof OrchestrateParamsSchema>;
 
 export interface ScriptHost {
   runs: ScriptRuns;
-  governanceRoot: string;
+  // 主工作区根（git 仓库）：开跑前的 git 检查看它（pigeon run --governance-root 时不是治理根）
+  workspaceRoot: string;
 }
 
 // 注册开关与晚绑定：装配运行面时注册工具，编排器与运行器建好后再 bind
@@ -90,7 +91,7 @@ export function createOrchestrateTool(
       if (host === undefined) {
         return reply(ORCHESTRATE_TEXTS.unbound, { rejected: "unbound" });
       }
-      if (!isGitWorkspace(host.governanceRoot)) {
+      if (!isGitWorkspace(host.workspaceRoot)) {
         return reply(ORCHESTRATE_TEXTS.notGit, { rejected: "not-git" });
       }
       const spec: ScriptSpec = {

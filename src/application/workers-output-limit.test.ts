@@ -52,6 +52,7 @@ for (const [label, parentLimit] of [
       try {
         const orchestrator = createSessionWorkers({
           governanceRoot: repo,
+          workspaceRoot: repo,
           bundle: parent,
           approvals: async () => ({ approved: true }),
           streamFn,

@@ -222,7 +222,7 @@ export interface WorkspaceProvider {
 }
 
 // 仓库根与治理根分开传（M6.5 S2）：工作树与分支建在仓库根上，目录放在治理根的 .pigeon/state/worktrees 下。
-// 主会话派 worker 时两者同为主仓库根；Eval 的治理根是输出目录
+// 主会话派 worker 时两者同为主仓库根（pigeon run --governance-root 时分开）；Eval 的治理根是输出目录
 export function gitWorktreeWorkspaces(roots: {
   repoRoot: string;
   governanceRoot: string;
@@ -320,6 +320,9 @@ export type WorkerWatcherFactory = (
 
 export interface WorkerOrchestratorOptions {
   governanceRoot: string;
+  // 主工作区根（git 仓库）：缺省工作区提供者在它上面建工作树与分支，explorer 就地读它，范围路径在它里面查。
+  // 缺省同治理根；治理根与工作区根分开（pigeon run --governance-root）时两者不同
+  workspaceRoot?: string;
   // 本编排器所在会话；parentSessionId 在场 = 本会话自己是 worker（depth 缺省即 1，否则 0）
   session: { sessionId: SessionId; parentSessionId?: SessionId; depth?: number };
   parentPolicy: ToolPolicyLike;
@@ -577,7 +580,7 @@ export class WorkerOrchestrator {
     this.#workspaces =
       options.workspaces ??
       gitWorktreeWorkspaces({
-        repoRoot: options.governanceRoot,
+        repoRoot: options.workspaceRoot ?? options.governanceRoot,
         governanceRoot: options.governanceRoot,
         ...(options.untrackedLimits !== undefined ? { limits: options.untrackedLimits } : {}),
       });
@@ -649,12 +652,12 @@ export class WorkerOrchestrator {
     }
     const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
     // 决策 360：范围路径在 worker 起点所在的工作目录里查符号链接——接力为上游 worker 的工作树，嵌套为派出方 worker 的
-    // 工作树，其余为主工作目录（治理根）。决策 377：派出方是只读 explorer 时取它读的那个工作区
+    // 工作树，其余为主工作目录（工作区根）。决策 377：派出方是只读 explorer 时取它读的那个工作区
     const fromPath = fromEntry !== undefined ? workerWorkspacePath(fromEntry.workspace) : undefined;
     const scopeRoot =
       request.start !== undefined && "from" in request.start
         ? request.start.from
-        : (fromPath ?? this.#options.governanceRoot);
+        : (fromPath ?? this.#options.workspaceRoot ?? this.#options.governanceRoot);
     const policy = deriveWorkerPolicy(basePolicy, role, {
       orchestration: depth < this.#maxDepth,
       ...(request.tools !== undefined ? { tools: request.tools } : {}),

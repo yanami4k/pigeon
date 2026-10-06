@@ -46,7 +46,7 @@ test("模型没有价格：金额额度开跑即拒绝，token 额度与不设�
 test("工具把拒绝原样交回；计价口径：DeepSeek 按人民币、回复自带价格按美元、价格为 0 即没有价格、还没有回复即看不出来", async () => {
   const slot = new ScriptSlot(new ScriptGate({ modelDecides: true }));
   slot.bind({
-    governanceRoot: process.cwd(),
+    workspaceRoot: process.cwd(),
     runs: {
       start: async () => {
         throw new ScriptBudgetError(SCRIPT_BUDGET_NO_PRICE);

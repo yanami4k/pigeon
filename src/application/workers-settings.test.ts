@@ -59,6 +59,7 @@ test("会话中途改设置文件不影响本会话：worker 按派出它的会�
     try {
       const orchestrator = createSessionWorkers({
         governanceRoot: repo,
+        workspaceRoot: repo,
         bundle: parent,
         approvals: async () => ({ approved: true }),
         streamFn,
