@@ -12,6 +12,7 @@ import {
   type SettingsFile,
   type SettingsLayer,
   type SettingsSnapshot,
+  sessionSearchEnabledOf,
   validateSettingsLayer,
   withHooksDisabled,
 } from "./settings.ts";
@@ -340,4 +341,24 @@ test("memory 一节（决策 332）：两层上限各自可设，未知键与非
   );
   assert.ok(problemsOf("user", { memory: { userLimitChars: 0 } }).length > 0);
   assert.ok(problemsOf("user", { memory: { projectLimitChars: 1.5 } }).length > 0);
+});
+test("sessionSearch 一节（决策 382）：enabled 缺省开，三层按标量覆盖，未知键报错", () => {
+  assert.equal(sessionSearchEnabledOf(emptySettingsSnapshot("/p")), true);
+  assert.equal(
+    sessionSearchEnabledOf(snapshotOf({ user: { sessionSearch: { enabled: false } } })),
+    false
+  );
+  assert.equal(
+    sessionSearchEnabledOf(
+      snapshotOf({
+        user: { sessionSearch: { enabled: false } },
+        project: { sessionSearch: { enabled: true } },
+      })
+    ),
+    true
+  );
+  assert.match(
+    problemsOf("project", { sessionSearch: { off: true } }).join("\n"),
+    /\.pigeon\/settings\.json（项目共享）：sessionSearch 一节里的未知键 off/
+  );
 });

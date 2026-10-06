@@ -131,6 +131,7 @@ export async function main(argv: string[]): Promise<void> {
     usage: USAGE,
     historyLimit: true,
     pushedMemory: true,
+    sessionSearch: true,
     sandbox: true,
     spawnWorkers: true,
   });
