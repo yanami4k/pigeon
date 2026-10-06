@@ -1,6 +1,7 @@
-// 会话检索的缓存（决策 339 ⑥）：每个会话文件抽出的可搜文本与目录信息（state/session-search-text.ts）按文件大小与修改时间
-// 缓存到 .pigeon/state/search-cache/ 下，再次检索只读缓存、不读会话文件。
-// - 每个会话两份缓存文件：<会话号>.json 存目录信息与对话正文，<会话号>.tools.json 存工具输出；检索不搜工具输出时只读前一份。
+// 会话检索的缓存（决策 339 ⑥；决策 384 改进）：每个会话文件抽出的可搜文本、词频表与目录信息
+//（state/session-search-text.ts）按文件大小与修改时间缓存到 .pigeon/state/search-cache/ 下，再次检索只读缓存、
+// 不读会话文件。
+// - 每个会话两份缓存文件：<会话号>.json 存目录信息与对话正文，<会话号>.tools.json 存工具输出；只搜对话正文时只读前一份。
 //   两份各自带格式版本与来源戳（会话文件路径、大小、修改时间），各自校验。
 // - 来源戳在读会话文件之前取：读的过程中文件又被追加，戳就比内容旧，下次比对不符即重抽，不会把新内容当作旧戳缓存住。
 // - 大小或修改时间变了、版本不符、文件损坏（不是 JSON、形状不对）都当作未命中：重抽并覆盖，不报错中断检索。
@@ -30,8 +31,9 @@ import type { SessionView } from "../state/session-view.ts";
 import { readSessionView, sessionRefTime } from "./session-catalog.ts";
 import type { SessionFileRef } from "./session-reader.ts";
 
-// 缓存格式版本：抽取口径或文件形状一变即加一，旧缓存随之整体重建
-export const SESSION_SEARCH_CACHE_VERSION = 2;
+// 缓存格式版本：抽取口径或文件形状一变即加一，旧缓存随之整体重建。v2 = 决策 339 的初版；v3 = 决策 384
+//（每条消息加词频表与工具输出的来历）
+export const SESSION_SEARCH_CACHE_VERSION = 3;
 
 const SourceSchema = Type.Object({
   path: Type.String(),
@@ -47,7 +49,11 @@ const DocSchema = Type.Object({
   role: Type.String(),
   timestamp: Type.Number(),
   text: Type.String(),
+  tokens: Type.Record(Type.String(), Type.Number()),
+  length: Type.Number(),
   toolName: Type.Optional(Type.String()),
+  toolParams: Type.Optional(Type.String()),
+  toolOutcome: Type.Optional(Type.String()),
 });
 
 const MainFileSchema = Type.Object({
@@ -213,6 +219,9 @@ export function createSessionSearchSource(
 ): SessionSearchSource {
   const readView = options.readView ?? ((ref: SessionFileRef) => readSessionView(ref));
   const { cacheDir } = options;
+  // 进程内容忘录：戳（路径、大小、修改时间）相同的会话内容直接复用对象，不再读盘、解析与校验。
+  // 检索与目录都不改这些对象；同一进程的反复检索（决策 339 ⑥ 的磁盘缓存管的是跨进程）因此只花打分的时间
+  const memo = new Map<string, SessionSearchEntry | undefined>();
   return {
     load(ref, parts) {
       let source: Source;
@@ -222,46 +231,61 @@ export function createSessionSearchSource(
       } catch {
         return undefined;
       }
-      const mainName = `${ref.sessionId}${MAIN_SUFFIX}`;
-      const toolsName = `${ref.sessionId}${TOOLS_SUFFIX}`;
-      if (cacheDir !== undefined) {
-        const main = readCacheFile(join(cacheDir, mainName), isMainFile, source);
-        const tools = parts.toolOutput
-          ? readCacheFile(join(cacheDir, toolsName), isToolsFile, source)
-          : undefined;
-        if (main !== undefined && (!parts.toolOutput || tools !== undefined)) {
-          return {
-            info: main.info,
-            conversation: main.conversation,
-            ...(tools !== undefined ? { toolOutput: tools.toolOutput } : {}),
-          };
-        }
+      const memoKey = `${ref.path} ${source.size}:${source.mtimeMs}:${parts.toolOutput ? "tools" : "main"}`;
+      const remembered = memo.get(memoKey);
+      if (remembered !== undefined || memo.has(memoKey)) {
+        return remembered;
       }
-      let view: SessionView | undefined;
-      try {
-        view = readView(ref);
-      } catch {
-        return undefined;
-      }
-      if (view === undefined) {
-        return undefined;
-      }
-      const extract = extractSessionSearch(view, sessionRefTime(ref));
-      if (cacheDir !== undefined) {
-        const version = SESSION_SEARCH_CACHE_VERSION;
-        writeCacheFile(cacheDir, mainName, {
-          version,
-          source,
-          info: extract.info,
-          conversation: extract.conversation,
-        });
-        writeCacheFile(cacheDir, toolsName, { version, source, toolOutput: extract.toolOutput });
-      }
-      return {
-        info: extract.info,
-        conversation: extract.conversation,
-        ...(parts.toolOutput ? { toolOutput: extract.toolOutput } : {}),
-      };
+      const entry = loadUncached(ref, parts, source);
+      memo.set(memoKey, entry);
+      return entry;
     },
   };
+
+  function loadUncached(
+    ref: SessionFileRef,
+    parts: { toolOutput: boolean },
+    source: Source
+  ): SessionSearchEntry | undefined {
+    const mainName = `${ref.sessionId}${MAIN_SUFFIX}`;
+    const toolsName = `${ref.sessionId}${TOOLS_SUFFIX}`;
+    if (cacheDir !== undefined) {
+      const main = readCacheFile(join(cacheDir, mainName), isMainFile, source);
+      const tools = parts.toolOutput
+        ? readCacheFile(join(cacheDir, toolsName), isToolsFile, source)
+        : undefined;
+      if (main !== undefined && (!parts.toolOutput || tools !== undefined)) {
+        return {
+          info: main.info,
+          conversation: main.conversation,
+          ...(tools !== undefined ? { toolOutput: tools.toolOutput } : {}),
+        };
+      }
+    }
+    let view: SessionView | undefined;
+    try {
+      view = readView(ref);
+    } catch {
+      return undefined;
+    }
+    if (view === undefined) {
+      return undefined;
+    }
+    const extract = extractSessionSearch(view, sessionRefTime(ref));
+    if (cacheDir !== undefined) {
+      const version = SESSION_SEARCH_CACHE_VERSION;
+      writeCacheFile(cacheDir, mainName, {
+        version,
+        source,
+        info: extract.info,
+        conversation: extract.conversation,
+      });
+      writeCacheFile(cacheDir, toolsName, { version, source, toolOutput: extract.toolOutput });
+    }
+    return {
+      info: extract.info,
+      conversation: extract.conversation,
+      ...(parts.toolOutput ? { toolOutput: extract.toolOutput } : {}),
+    };
+  }
 }
