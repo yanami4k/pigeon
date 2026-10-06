@@ -14,7 +14,11 @@
 //     单独探测恢复即通知这里立即恢复整批（recovered），不等下一轮探测；全部账号都不会自行恢复（余额不足或认证失败）
 //     则直接停下并告警；
 //   告警写标准错误输出、同类只报一次（去重），文案说明后果。
+//   高峰自动暂停（决策 393，enablePeakPause 开了才有）：按价目的高峰时段（state/model-pricing.ts 的 isPeakAt，含法定节假日与
+//     调休上班日）在进入高峰前留出余量停止放行新的一步，在途的步照常做完（不改 state、不计限额信号，网关照常转发）；出高峰
+//     自动放行。暂停的时间不计入整批暂停的总等待上限（每步墙钟本就从放行之后算）；每次暂停与恢复写告警并交给 onChange。
 // isQuotaError 是外部基准的双 key 探针（spikes/key-failover.mjs）沿用的文案口径，网关的分类不再用它。
+import { isPeakAt } from "../state/model-pricing.ts";
 
 export const BACKOFF_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
 
@@ -135,6 +139,72 @@ export interface LimitControllerOptions {
 
 export type LimitState = "running" | "paused" | "stopped";
 
+// 高峰暂停的缺省余量：一道题从开工到判完的第 90 百分位约 26 分钟，取 30 分钟
+export const DEFAULT_PEAK_MARGIN_MS = 30 * 60_000;
+
+export interface PeakPauseOptions {
+  // 进入高峰前这么久即停止放行新的一步
+  marginMs: number;
+  // 缺省为价目的高峰判定
+  isPeakAt?: (ms: number) => boolean;
+  // 缺省为真实定时
+  setTimer?: (ms: number, fn: () => void) => () => void;
+  // 每次暂停与恢复（运行记录）
+  onChange?: (event: "pause" | "resume", record: PeakPauseRecord) => void;
+}
+
+// 一次高峰暂停：停止放行的时刻、按高峰时段算出的恢复时刻、实际恢复的时刻（还在暂停为 null）
+export interface PeakPauseRecord {
+  startedAt: string;
+  until: string;
+  endedAt: string | null;
+}
+
+const MINUTE_MS = 60_000;
+const nextMinute = (ms: number) => Math.floor(ms / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+// 往后查高峰的范围：从 t 起最早可放行的时刻至多查 31 天；下一次停止放行至多查一天（查不到即一天后再查）
+const PEAK_CLEAR_SCAN_MS = 31 * 24 * 60 * MINUTE_MS;
+const PEAK_NEXT_SCAN_MS = 24 * 60 * MINUTE_MS;
+
+// 从 t 起最早可放行新的一步的时刻：[R, R + margin] 里没有一刻在高峰；t 即可放行时为 t。高峰按分钟判定，逐分钟查
+export function peakClearFrom(
+  t: number,
+  marginMs: number,
+  isPeak: (ms: number) => boolean = isPeakAt
+): number {
+  let clear = t;
+  for (let m = t; m <= clear + marginMs && m - t <= PEAK_CLEAR_SCAN_MS; m = nextMinute(m)) {
+    if (isPeak(m)) clear = nextMinute(m);
+  }
+  return clear;
+}
+
+// t 时可放行：下一次停止放行的时刻（下一个高峰分钟减去余量）；一天内没有高峰即一天后再查
+function nextPeakBlock(t: number, marginMs: number, isPeak: (ms: number) => boolean): number {
+  for (let m = nextMinute(t + marginMs); m <= t + marginMs + PEAK_NEXT_SCAN_MS; m += MINUTE_MS) {
+    if (isPeak(m)) return m - marginMs;
+  }
+  return t + PEAK_NEXT_SCAN_MS;
+}
+
+// 北京时间的月日时分（告警用）
+const beijing = (ms: number) =>
+  `${new Date(ms + 8 * 60 * MINUTE_MS).toISOString().slice(5, 16).replace("T", " ")}（北京时间）`;
+
+interface PeakState {
+  marginMs: number;
+  isPeak: (ms: number) => boolean;
+  setTimer: (ms: number, fn: () => void) => () => void;
+  onChange: PeakPauseOptions["onChange"];
+  current: { record: PeakPauseRecord; started: number } | undefined;
+  count: number;
+  // 已结束的各次暂停合计
+  pausedMs: number;
+  cancel: (() => void) | undefined;
+  // 定时到的时刻：没在暂停时，此前一直可放行
+  armedAt: number | undefined;
+}
+
 // 放行：调用即释放这一路；waitedMs 为这一路在放行前等了多久（含整批暂停）
 export type Admission = (() => void) & { waitedMs: number };
 
@@ -163,6 +233,8 @@ export class LimitController {
   private readonly warned = new Set<string>();
   private readonly listeners = new Set<() => void>();
   private readonly options: LimitControllerOptions;
+  // 高峰暂停（393）：enablePeakPause 开了才有
+  private peak: PeakState | undefined;
 
   constructor(options: LimitControllerOptions) {
     this.options = options;
@@ -275,10 +347,94 @@ export class LimitController {
     this.admit();
   }
 
-  // 收尾：取消探测循环的定时，跑完后进程不因它多挂
+  // 收尾：取消探测循环与高峰暂停的定时，跑完后进程不因它多挂
   close(): void {
     this.closed = true;
     this.cancelWait?.();
+    this.peak?.cancel?.();
+  }
+
+  // 开高峰自动暂停（393）：此后放行新的一步之前先看高峰时段
+  enablePeakPause(options: PeakPauseOptions): void {
+    this.peak = {
+      marginMs: options.marginMs,
+      isPeak: options.isPeakAt ?? isPeakAt,
+      setTimer:
+        options.setTimer ??
+        ((ms, fn) => {
+          const timer = setTimeout(fn, ms);
+          return () => clearTimeout(timer);
+        }),
+      onChange: options.onChange,
+      current: undefined,
+      count: 0,
+      pausedMs: 0,
+      cancel: undefined,
+      armedAt: undefined,
+    };
+    this.peakBlocked();
+  }
+
+  // 高峰暂停累计的毫秒（含正在进行的这一次）
+  private peakPausedMs(): number {
+    const p = this.peak;
+    if (p === undefined) return 0;
+    return p.pausedMs + (p.current !== undefined ? Math.max(0, this.now() - p.current.started) : 0);
+  }
+
+  // 此刻是否因高峰停止放行新的一步：按需重算，进入余量即开一次暂停，出高峰即恢复；维持一个定时在下一次变化时重算并放行
+  private peakBlocked(): boolean {
+    const p = this.peak;
+    if (p === undefined || this.closed) return false;
+    const t = this.now();
+    // 定时未到：状态不会变（暂停中定时在恢复时刻，可放行时定时在下一次停止放行的时刻）
+    if (p.armedAt !== undefined && t < p.armedAt) return p.current !== undefined;
+    const clear = peakClearFrom(t, p.marginMs, p.isPeak);
+    if (clear > t) {
+      if (p.current === undefined) {
+        p.count += 1;
+        const record: PeakPauseRecord = {
+          startedAt: new Date(t).toISOString(),
+          until: new Date(clear).toISOString(),
+          endedAt: null,
+        };
+        p.current = { record, started: t };
+        this.warn(
+          `peak-pause-${p.count}`,
+          `高峰暂停：${beijing(t)}起停止放行新的一步（进入高峰前留 ${Math.round(p.marginMs / MINUTE_MS)} 分钟），在途的步照常做完；预计 ${beijing(clear)}恢复`
+        );
+        p.onChange?.("pause", { ...record });
+      } else {
+        p.current.record.until = new Date(clear).toISOString();
+      }
+      this.armPeak(p, clear);
+      return true;
+    }
+    if (p.current !== undefined) {
+      const { record, started } = p.current;
+      record.endedAt = new Date(t).toISOString();
+      p.pausedMs += t - started;
+      p.current = undefined;
+      this.warn(
+        `peak-resume-${p.count}`,
+        `高峰暂停结束：${beijing(t)}恢复放行（暂停 ${Math.round((t - started) / MINUTE_MS)} 分钟）`
+      );
+      p.onChange?.("resume", { ...record });
+    }
+    this.armPeak(p, nextPeakBlock(t, p.marginMs, p.isPeak));
+    return false;
+  }
+
+  private armPeak(p: PeakState, at: number): void {
+    p.cancel?.();
+    p.armedAt = at;
+    p.cancel = p.setTimer(Math.max(0, at - this.now()), () => {
+      p.cancel = undefined;
+      p.armedAt = undefined;
+      if (this.closed) return;
+      this.peakBlocked();
+      this.admit();
+    });
   }
 
   private wait(ms: number): Promise<void> {
@@ -326,6 +482,8 @@ export class LimitController {
   private async probeLoop(record: PauseRecord): Promise<void> {
     const maxWait = this.options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS;
     const started = this.now();
+    // 高峰暂停的时间不计入总等待（393）
+    const peakBefore = this.peakPausedMs();
     // 只管开它的这一次暂停：网关通知恢复之后又开了新的暂停，旧循环醒来即退出，不替新暂停收尾
     const epoch = this.epoch;
     const mine = () => !this.closed && this.state === "paused" && this.epoch === epoch;
@@ -344,7 +502,7 @@ export class LimitController {
         this.resume();
         return;
       }
-      if (this.now() - started >= maxWait) {
+      if (this.now() - started - (this.peakPausedMs() - peakBefore) >= maxWait) {
         record.endedAt = new Date(this.now()).toISOString();
         this.stop(
           `模型服务额度受限（${record.kind}），等待逾 ${Math.round(maxWait / 60_000)} 分钟仍未恢复：跑批停下`
@@ -371,13 +529,18 @@ export class LimitController {
   }
 
   private admit(): void {
-    while (this.state === "running" && this.waiting.length > 0 && this.active < this.admitLimit()) {
+    while (
+      this.state === "running" &&
+      this.waiting.length > 0 &&
+      this.active < this.admitLimit() &&
+      !this.peakBlocked()
+    ) {
       this.active += 1;
       this.waiting.shift()?.(true);
     }
   }
 
-  // 等放行、占一路在途步骤（每步 agent 开始之前调用）：暂停中等恢复，同时在跑的数已达上限即排在后面等；
+  // 等放行、占一路在途步骤（每步 agent 开始之前调用）：暂停中等恢复，同时在跑的数已达上限或高峰暂停中即排在后面等；
   // 返回释放函数，带这一路等了多久
   async acquire(): Promise<Admission> {
     const from = this.now();
@@ -387,7 +550,7 @@ export class LimitController {
       // 就没人唤醒了，所以先看一次
       if (this.state === "stopped") throw new Error(this.stopReason ?? "跑批已停止");
       let granted: boolean;
-      if (this.waiting.length === 0 && this.active < this.admitLimit()) {
+      if (this.waiting.length === 0 && this.active < this.admitLimit() && !this.peakBlocked()) {
         this.active += 1;
         granted = true;
       } else {
