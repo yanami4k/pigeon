@@ -114,6 +114,7 @@ async function openMain(
   });
   const orchestrator = createSessionWorkers({
     governanceRoot: root,
+    workspaceRoot: root,
     bundle: opened.bundle,
     approvals: async () => ({ approved: true }),
     streamFn,
@@ -125,7 +126,7 @@ async function openMain(
   const bound = bindSpawnWorkers({
     slot: opened.spawnWorker,
     orchestrator,
-    governanceRoot: root,
+    workspaceRoot: root,
     hostSessionId: opened.bundle.adapter.sessionId,
     target: opened.bundle.adapter,
   });
@@ -225,7 +226,7 @@ test("续接：之前的运行收尾未取用的 worker 照常可取，中断的
     );
     // 已收尾的：take_worker 取用成功
     const taken = takeWorkerChanges(
-      { orchestrator: second.orchestrator, governanceRoot: root },
+      { orchestrator: second.orchestrator, workspaceRoot: root },
       "w1"
     );
     assert.ok(
@@ -235,7 +236,7 @@ test("续接：之前的运行收尾未取用的 worker 照常可取，中断的
     assert.equal(readFileSync(join(root, "b.txt"), "utf8"), "worker\n");
     // 中断的：不可取用
     const half = takeWorkerChanges(
-      { orchestrator: second.orchestrator, governanceRoot: root },
+      { orchestrator: second.orchestrator, workspaceRoot: root },
       "half"
     );
     assert.equal(half.text, TAKE_WORKER_TEXTS.interrupted("half"));

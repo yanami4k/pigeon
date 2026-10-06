@@ -88,13 +88,16 @@ export interface ExternalAgentConfig {
   excludePaths: string[];
   // 附加环境变量
   env: Record<string, string>;
+  // 设置的逐项说明（思考档位、输出上限、是否跨题保留会话等）：原样记进身份与结果行的 agentSettings，
+  // 设置不同的跑批判为不同条件；缺省不记
+  settings?: Record<string, unknown>;
 }
 
 export class ExternalAgentConfigError extends Error {
   override name = "ExternalAgentConfigError";
 }
 
-const CONFIG_KEYS = new Set(["name", "toolDir", "command", "excludePaths", "env"]);
+const CONFIG_KEYS = new Set(["name", "toolDir", "command", "excludePaths", "env", "settings"]);
 
 // 解析并校验配置（raw 为 JSON 解析结果；baseDir 为配置文件所在目录，相对的工具目录据此解析）
 export function parseExternalAgentConfig(
@@ -160,7 +163,23 @@ export function parseExternalAgentConfig(
     if (typeof value !== "string" || value.includes("\0")) fail(`env 的 ${key} 须为字符串`);
     env[key] = value as string;
   }
-  return { name: name as string, toolDir, command, excludePaths, env };
+  const settingsRaw = obj.settings;
+  if (
+    settingsRaw !== undefined &&
+    (typeof settingsRaw !== "object" || settingsRaw === null || Array.isArray(settingsRaw))
+  ) {
+    fail("settings 须为对象（设置的逐项说明，原样记进身份）");
+  }
+  return {
+    name: name as string,
+    toolDir,
+    command,
+    excludePaths,
+    env,
+    ...(settingsRaw !== undefined
+      ? { settings: structuredClone(settingsRaw) as Record<string, unknown> }
+      : {}),
+  };
 }
 
 // 排除路径的规整：工作区相对路径、不含 . 与 .. 段、不指向 .git；不合法返回 undefined
@@ -271,6 +290,8 @@ export function externalAgentIdentity(
     toolDirDigest: digest,
     network: EXTERNAL_NETWORK_PROFILE,
     selfReported,
+    // 设置的逐项说明（思考档位、输出上限、是否跨题保留会话等）：配置里给了才记
+    ...(config.settings !== undefined ? { settings: structuredClone(config.settings) } : {}),
   };
 }
 

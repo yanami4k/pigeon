@@ -10,6 +10,7 @@ import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
 import { SESSION_SEARCH_VERSION } from "../memory/session-search.ts";
 import {
+  DEFAULT_GATEWAY_MODEL_ID,
   deepseekModelInfo,
   GATEWAY_PROVIDER,
   GATEWAY_UPSTREAM_BASE_URL,
@@ -26,7 +27,11 @@ import {
 import { resolveThinkingLevel } from "../state/thinking-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
-import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
+import {
+  createGatewayNetwork,
+  type GatewayNetwork,
+  removeGatewayNetwork,
+} from "./gateway-network.ts";
 import {
   GATEWAY_RETENTION_VERSION,
   GatewayRetention,
@@ -90,8 +95,16 @@ import {
   TASK_PROMPT_LAYOUT_WITH_INTERFACES,
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
+import {
+  assertNodeRuntimeDir,
+  PIGEON_DOCKER_CONDITION,
+  pigeonDockerIdentity,
+  pigeonDockerJobContainerArgs,
+  pigeonDockerSelfReport,
+  pigeonDockerStepAgent,
+} from "./stream-pigeon-docker.ts";
 import { gateFromSteps, type StreamRepoRuntime } from "./stream-profiles.ts";
-import { isExternalCondition, type StreamCondition } from "./stream-results.ts";
+import { isExternalCondition, type StreamCondition, type StreamJobId } from "./stream-results.ts";
 import {
   type ConditionSpec,
   dockerStreamEnvs,
@@ -140,6 +153,10 @@ export interface StreamExperimentOptions {
   minimalCommand?: readonly string[];
   // 外部 agent 条件（实验设施）的配置：条件 ext-<名字> 各需一份；作业容器接只通网关的跑批内部网络
   externalAgents?: readonly ExternalAgentConfig[];
+  // pigeon-docker 条件（对比评测的 Pigeon 组，决策 380、389、390）的打包产物目录（dist/）与 Node 运行时目录
+  // （含 bin/node；实验镜像没有 node，运行时只读挂载进容器）：跑了该条件两个都必给，给了必跑该条件
+  pigeonBundle?: string;
+  pigeonNodeRuntime?: string;
   docker?: readonly string[];
   containerRunArgs?: readonly string[];
   // 提前单独算好的人的基准目录（eval stream-baseline 的输出）；缺省在输出目录下现算
@@ -411,7 +428,53 @@ async function runStreamExperimentLocked(
       })
     );
   }
+  // pigeon-docker 条件（对比评测的 Pigeon 组）：条件与打包产物目录须同在；接入模块的模型固定为 deepseek-flash，
+  // 与 --model-id 不一致即拒绝（否则会拿另一个模型跑这一组）
+  const wantsPigeonDocker = options.conditions.includes(PIGEON_DOCKER_CONDITION);
+  if (wantsPigeonDocker && options.pigeonBundle === undefined) {
+    throw new Error(
+      `条件 ${PIGEON_DOCKER_CONDITION} 需要打包产物目录（用 --pigeon-bundle <目录> 给出）`
+    );
+  }
+  if (!wantsPigeonDocker && options.pigeonBundle !== undefined) {
+    throw new Error(
+      `给了打包产物目录却没跑 ${PIGEON_DOCKER_CONDITION} 条件（在 --conditions 里加上，或去掉 --pigeon-bundle）`
+    );
+  }
+  if (wantsPigeonDocker && options.pigeonNodeRuntime === undefined) {
+    throw new Error(
+      `条件 ${PIGEON_DOCKER_CONDITION} 需要 Node 运行时目录（用 --pigeon-node-runtime <目录> 给出）`
+    );
+  }
+  if (!wantsPigeonDocker && options.pigeonNodeRuntime !== undefined) {
+    throw new Error("给了 Node 运行时目录却没跑 pigeon-docker 条件（去掉 --pigeon-node-runtime）");
+  }
+  if (options.pigeonNodeRuntime !== undefined) assertNodeRuntimeDir(options.pigeonNodeRuntime);
+  if (wantsPigeonDocker && modelId !== DEFAULT_GATEWAY_MODEL_ID) {
+    throw new Error(
+      `条件 ${PIGEON_DOCKER_CONDITION} 的接入模块固定请求 ${DEFAULT_GATEWAY_MODEL_ID}，与 --model-id ${modelId} 不符`
+    );
+  }
+  // 身份段在批次开始时算一次（产物摘要、--version 自报）
+  const pigeonDockerSettings =
+    options.pigeonBundle === undefined
+      ? undefined
+      : pigeonDockerIdentity(
+          options.pigeonBundle,
+          await pigeonDockerSelfReport({
+            bundleDir: options.pigeonBundle,
+            nodeRuntimeDir: options.pigeonNodeRuntime as string,
+            image: options.image,
+            container: `${prefix}-pigeon-docker-identity`,
+            docker,
+            ...(options.containerRunArgs !== undefined
+              ? { runArgs: options.containerRunArgs }
+              : {}),
+          })
+        );
   mkdirSync(outDir, { recursive: true });
+  // 假上游小试（PIGEON_EVAL_GATEWAY_UPSTREAM，只许本机地址）记进身份头：与真跑不是同一身份，续跑不互通
+  const upstreamOverride = gatewayUpstreamOverride();
   // 代码版本只取一次：身份头比对的与结果行记的是同一个
   const harness = currentHarnessRef();
   const runIdentity = checkOrWriteIdentity(
@@ -430,9 +493,13 @@ async function runStreamExperimentLocked(
         ...(interfaces !== undefined ? { taskInterfaces: interfaces.digest } : {}),
         taskSelection,
         maxSteps: options.maxSteps ?? null,
+        ...(upstreamOverride !== undefined
+          ? { gatewayUpstreamOverride: upstreamOverride.marker }
+          : {}),
         agents: {
           ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
           ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+          ...(pigeonDockerSettings !== undefined ? { pigeonDocker: pigeonDockerSettings } : {}),
           ...externalSettings,
         },
       },
@@ -453,7 +520,8 @@ async function runStreamExperimentLocked(
   const { gateway: liveGateway, limits } = await startGatewayAndLimits(
     options.gateway,
     options.concurrency ?? 4,
-    path.join(outDir, GATEWAY_SPEND_FILE)
+    path.join(outDir, GATEWAY_SPEND_FILE),
+    upstreamOverride?.baseUrl
   );
   // 网关留存（394）与高峰暂停（393）：给了才开，没给时跑法与之前逐字相同
   if (options.gatewayRetention !== undefined) {
@@ -474,9 +542,9 @@ async function runStreamExperimentLocked(
         ),
     });
   }
-  // 只通网关的跑批内部网络：有外部 agent 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
-  let network: Awaited<ReturnType<typeof createGatewayNetwork>> | undefined;
-  if (externals.length > 0) {
+  // 只通网关的跑批内部网络：有外部 agent 条件或 pigeon-docker 条件才建，网关再听它在宿主一侧的地址；跑批结束删掉
+  let network: GatewayNetwork | undefined;
+  if (externals.length > 0 || wantsPigeonDocker) {
     try {
       network = await createGatewayNetwork(prefix, docker);
       await liveGateway.listenInternal(network.hostAddress);
@@ -526,6 +594,14 @@ async function runStreamExperimentLocked(
         limits,
       });
     }
+    // pigeon-docker：打包产物在题目容器里跑；作业容器的网络与挂载在下面的 conditionArgs 里按作业给出
+    if (wantsPigeonDocker) {
+      agents[PIGEON_DOCKER_CONDITION] = pigeonDockerStepAgent({
+        bundleDir: options.pigeonBundle as string,
+        docker,
+        limits,
+      });
+    }
     const externalArgs = new Map<string, string[]>();
     const conditionSpecs: Record<string, ConditionSpec> = {};
     for (const config of externals) {
@@ -548,7 +624,24 @@ async function runStreamExperimentLocked(
         docker,
         ...(options.containerRunArgs !== undefined ? { runArgs: options.containerRunArgs } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
-        ...(externals.length > 0 ? { conditionArgs: (c) => externalArgs.get(c) } : {}),
+        ...(externals.length > 0 || wantsPigeonDocker
+          ? {
+              conditionArgs: (condition: StreamCondition, job: StreamJobId) => {
+                // pigeon-docker：除网络与只读产物挂载外，按作业读写挂载它的治理目录（宿主作业目录下的
+                // .pigeon/，跑批器的会话清单、作废移出与续跑都按这个布局工作）
+                if (condition === PIGEON_DOCKER_CONDITION && network !== undefined) {
+                  return pigeonDockerJobContainerArgs({
+                    outDir,
+                    job,
+                    bundleDir: options.pigeonBundle as string,
+                    nodeRuntimeDir: options.pigeonNodeRuntime as string,
+                    networkName: network.name,
+                  });
+                }
+                return externalArgs.get(condition);
+              },
+            }
+          : {}),
       }),
       agents,
       ...(externals.length > 0 ? { conditionSpecs } : {}),
@@ -567,6 +660,7 @@ async function runStreamExperimentLocked(
       agentSettings: {
         ...(pigeonSettings !== undefined ? { pigeon: pigeonSettings } : {}),
         ...(miniSettings !== undefined ? { minimal: miniSettings } : {}),
+        ...(pigeonDockerSettings !== undefined ? { pigeonDocker: pigeonDockerSettings } : {}),
         ...externalSettings,
       },
       ...(options.attempts !== undefined ? { attempts: options.attempts } : {}),
@@ -617,12 +711,35 @@ export function externalAgentsFor(
 // 网关花费累计的落盘文件（在输出目录下）：续跑时接着累计
 export const GATEWAY_SPEND_FILE = "gateway-spend.json";
 
+// 假上游小试的网关上游覆盖（PIGEON_EVAL_GATEWAY_UPSTREAM）：上游持有真 key 转发，只许本机地址
+// （127.0.0.1、::1、localhost），其余一律拒绝（不 echo 地址，免得带进用户与口令）；未设置即官方端点（undefined）
+export function gatewayUpstreamOverride(
+  env: NodeJS.ProcessEnv = process.env
+): { baseUrl: string; marker: "loopback" } | undefined {
+  const raw = env.PIGEON_EVAL_GATEWAY_UPSTREAM;
+  if (raw === undefined || raw === "") return undefined;
+  let host: string | undefined;
+  try {
+    // URL 的 hostname 对 IPv6 带方括号，剥掉再比
+    host = new URL(raw).hostname.replace(/^\[|\]$/g, "");
+  } catch {
+    host = undefined;
+  }
+  if (host === undefined || !["127.0.0.1", "::1", "localhost"].includes(host)) {
+    throw new Error(
+      "PIGEON_EVAL_GATEWAY_UPSTREAM 只许本机地址（127.0.0.1、::1、localhost）：上游持有真 key，指向别处即外泄"
+    );
+  }
+  return { baseUrl: raw, marker: "loopback" };
+}
+
 // 起限额控制器与网关（互相引用：控制器探测经网关的上游，网关把限额信号交给控制器）。控制器按网关报来的可用容量
 // 放行（决策 163），网关的容量一变即通知控制器；开跑前逐账号探测一次，未通过即关掉两者、拒绝开跑
 export async function startGatewayAndLimits(
   settings: { accounts: readonly GatewayAccount[]; modelId: string; spendLimitCny?: number },
   concurrency: number,
-  spendFile?: string
+  spendFile?: string,
+  upstreamOverride?: string
 ): Promise<{ gateway: ModelGateway; limits: LimitController }> {
   let gateway: ModelGateway | undefined;
   const limits = new LimitController({
@@ -631,7 +748,9 @@ export async function startGatewayAndLimits(
     capacity: () => gateway?.capacity() ?? Number.POSITIVE_INFINITY,
   });
   gateway = await startModelGateway({
-    upstreamBaseUrl: GATEWAY_UPSTREAM_BASE_URL,
+    // 缺省为 DeepSeek 官方端点；PIGEON_EVAL_GATEWAY_UPSTREAM 只供不调真模型的假上游小试（试跑、冒烟）改指，
+    // 且只许本机地址（gatewayUpstreamOverride 校验）
+    upstreamBaseUrl: upstreamOverride ?? GATEWAY_UPSTREAM_BASE_URL,
     // 外部 agent 条件的请求逐字转发，网关只读地核对其 model 与本批一致
     model: settings.modelId,
     accounts: settings.accounts,

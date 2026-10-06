@@ -5,7 +5,7 @@
 // - 续接后从会话记录找回的之前运行的 worker（previous-workers.ts）：已收尾的照常可取，只有派出没有收尾的不可取用。
 // - 取用依赖 worker 的工作树还在（日常使用里工作树不自动清理，由人用 git worktree remove 处理；跑批器每次运行收尾自行清理）；
 //   工作树已清理即返回明确的一句。
-// - 写工作目录，归写档、按写操作审批；与 spawn_worker 共用同一个工具槽（编排器与治理根），注册范围相同（265–267：只给终端
+// - 写工作目录，归写档、按写操作审批；与 spawn_worker 共用同一个工具槽（编排器与工作区根），注册范围相同（265–267：只给终端
 //   界面与 pigeon run 的主会话；命令行对话、worker 自己、沙箱会话与跑批器各条件都不注册）。
 // - 工具说明、参数说明与各情形的返回文字为定稿原文。
 import { existsSync } from "node:fs";
@@ -135,7 +135,7 @@ export function takeWorkerChanges(
     // 决策 381：编排器在场时按它的未跟踪文件上限写 worker 的树（替身可以不给，取产品缺省）
     orchestrator: Pick<WorkerOrchestrator, "status"> &
       Partial<Pick<WorkerOrchestrator, "untrackedLimits">>;
-    governanceRoot: string;
+    workspaceRoot: string;
   },
   worker: string
 ): { text: string; details: TakeWorkerDetails } {
@@ -187,7 +187,7 @@ export function takeWorkerChanges(
   let result: OverlayResult;
   try {
     result = overlayWorkerChanges({
-      repoRoot: host.governanceRoot,
+      repoRoot: host.workspaceRoot,
       base,
       worktreePath: status.workspace.path,
       ...(host.orchestrator.untrackedLimits !== undefined
@@ -243,7 +243,7 @@ export function createTakeWorkerTool(slot: SpawnWorkerSlot): PigeonAgentTool<
       const worker = (args as { worker?: unknown } | null)?.worker;
       if (host === undefined || typeof worker !== "string") return [];
       const target = overlayTargetOf(host, worker);
-      return target !== undefined ? protectedOverlayPaths(target, host.governanceRoot) : [];
+      return target !== undefined ? protectedOverlayPaths(target, host.workspaceRoot) : [];
     },
     async execute(_toolCallId, params): Promise<PigeonToolResult<TakeWorkerDetails>> {
       const host = slot.host;

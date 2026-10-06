@@ -297,6 +297,7 @@ export function scriptHarness(options: {
   const runs = createSessionScripts({
     orchestrator,
     governanceRoot: repo,
+    workspaceRoot: repo,
     sessionId,
     notices: {
       hold: () => (text: string) => {

@@ -197,6 +197,7 @@ export async function main(argv: string[]): Promise<void> {
     const scriptHolder: { current?: ScriptRuns } = {};
     const deps = {
       governanceRoot: workspaceRoot,
+      workspaceRoot,
       bundle,
       // worker 请求自带其会话的放权落点；此处绑定的父会话存储只是缺省。
       // 决策 303（脚本部分）：脚本派出的 worker 的请求——同类已放行即批准，否则补上脚本名与同类交给人
@@ -227,7 +228,7 @@ export async function main(argv: string[]): Promise<void> {
       const bound = bindSpawnWorkers({
         slot: opened.spawnWorker,
         orchestrator,
-        governanceRoot: workspaceRoot,
+        workspaceRoot,
         hostSessionId: bundle.adapter.sessionId,
         runKey: () => runKey,
         // 决策 297：完成通知进主 agent 的下一轮，空闲时叫醒它；通知同时显示在消息区
@@ -245,6 +246,7 @@ export async function main(argv: string[]): Promise<void> {
         const runs = createSessionScripts({
           orchestrator,
           governanceRoot: workspaceRoot,
+          workspaceRoot,
           sessionId: bundle.adapter.sessionId,
           flush: () => bundle.sessionStore.flush(),
           ...(bound.notices !== undefined ? { notices: bound.notices } : {}),
@@ -266,7 +268,7 @@ export async function main(argv: string[]): Promise<void> {
           onChange: () => shellHolder.current?.render(),
         });
         scriptHolder.current = runs;
-        scriptSlot.bind({ runs, governanceRoot: workspaceRoot });
+        scriptSlot.bind({ runs, workspaceRoot });
         scriptsOf.set(bundle, {
           runs,
           commands: scriptCommands(runs, orchestrator),
@@ -300,7 +302,7 @@ export async function main(argv: string[]): Promise<void> {
         ? {
             // 决策 279：/take 与 take_worker 同一套逻辑与文字
             take: async (name: string) =>
-              takeWorkerChanges({ orchestrator, governanceRoot: workspaceRoot }, name).text,
+              takeWorkerChanges({ orchestrator, workspaceRoot }, name).text,
             spawnAttempts: createSessionAttemptRunner({ orchestrator }),
             // M7（决策 079）：/fork 手动分叉
             fork: (args: string) =>

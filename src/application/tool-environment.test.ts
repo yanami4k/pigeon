@@ -135,3 +135,39 @@ test("一次会话内工具清单固定：/reload 沿用开局的检查结果，
     [["orchestrate", "web_search"], true]
   );
 });
+
+test("治理根与工作区根分开（--governance-root）时，git 工作区探针看工作区根：工作区是 git 仓库、治理根不是，派 worker 一组与 orchestrate 照注册", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "pigeon-tool-env-ws-"));
+  const gov = mkdtempSync(join(tmpdir(), "pigeon-tool-env-gov-"));
+  const bin = mkdtempSync(join(tmpdir(), "pigeon-tool-env-bin-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: workspace });
+    writeFileSync(join(bin, DOCKER), "", { mode: 0o755 });
+    const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
+    const bundle = buildRuntime({
+      streamFn,
+      workspaceRoot: workspace,
+      governanceRoot: gov,
+      homeDir: workspace,
+      sessionId: newSessionId(),
+      yolo: true,
+      provider: "fake-provider",
+      modelId: "fake-model-1",
+      spawnWorker: new SpawnWorkerSlot(),
+      scriptOrchestration: new ScriptSlot(new ScriptGate({ modelDecides: true })),
+      webTools: {
+        search: { backend, defaultMaxResults: 5 },
+        fetch: { timeoutMs: 1000, maxBytes: 1000, maxChars: 1000 },
+        distillMaxTokens: 100,
+      },
+      env: { PATH: bin },
+    });
+    const advertised = bundle.adapter.snapshot().tools.advertised;
+    await bundle.adapter.run("你好").finally(() => disposeRuntime(bundle));
+    for (const tool of [...SPAWN, "orchestrate"]) {
+      assert.ok(advertised.includes(tool), `${tool} 应注册`);
+    }
+  } finally {
+    for (const dir of [workspace, gov, bin]) rmSync(dir, { recursive: true, force: true });
+  }
+});

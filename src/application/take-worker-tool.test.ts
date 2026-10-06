@@ -78,7 +78,7 @@ function fixture() {
     status,
     host: (entries: WorkerStatus[]) => ({
       orchestrator: { status: () => entries },
-      governanceRoot: main,
+      workspaceRoot: main,
     }),
     cleanup: () => rmSync(main, { recursive: true, force: true }),
   };
@@ -237,7 +237,7 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
         send: async () => "delivered" as const,
         subscribe: () => () => {},
       },
-      governanceRoot: f.main,
+      workspaceRoot: f.main,
       budget: new SpawnWorkerBudget({ maxAgentSpawns: 16 }),
       spawnAttempts: () => Promise.reject(new Error("不派")),
     });
@@ -299,7 +299,7 @@ test("派出后 refs/pigeon/ 下不留该 worker 的起点引用；gc 之后 tak
     assert.equal(git(main, "rev-parse", "pigeon/fix-a"), base, "worker 分支指向起点快照提交");
     git(main, "gc", "-q", "--prune=now");
     assert.equal(git(main, "cat-file", "-t", base), "commit", "gc 之后快照提交仍在");
-    const { text, details } = takeWorkerChanges({ orchestrator, governanceRoot: main }, "fix-a");
+    const { text, details } = takeWorkerChanges({ orchestrator, workspaceRoot: main }, "fix-a");
     assert.deepEqual(details.result?.applied, ["a.txt", "n.txt"], text);
     assert.equal(readFileSync(join(main, "a.txt"), "utf8"), "a1 main\na2\na3 worker\n");
     assert.deepEqual(orchestrator.errors(), []);
@@ -359,7 +359,7 @@ function protectedFixture(touchPigeon: boolean) {
       send: async () => "delivered" as const,
       subscribe: () => () => {},
     },
-    governanceRoot: main,
+    workspaceRoot: main,
     budget: new SpawnWorkerBudget({ maxAgentSpawns: 16 }),
     spawnAttempts: () => Promise.reject(new Error("不派")),
   });

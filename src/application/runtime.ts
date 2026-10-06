@@ -752,6 +752,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(deps.frozenPrompt?.toolEnvironment !== undefined
       ? { frozen: deps.frozenPrompt.toolEnvironment }
       : {}),
+    workspaceRoot: deps.workspaceRoot,
     governanceRoot,
     sessionsDir,
     current,

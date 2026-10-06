@@ -85,8 +85,8 @@ import { runWorkQueue } from "./work-queue.ts";
 // 决策 327：验证门与回炉随 322 删除，四格暂不带检查；下次实验接检查的方式随出题规则另行设计
 export interface ConditionSpec {
   name: StreamCondition;
-  // 用哪个 agent：内置条件为 pigeon 或 minimal；外部 agent 条件为条件名本身（ext-<名字>）
-  agent: "pigeon" | "minimal" | ExternalStreamCondition;
+  // 用哪个 agent：内置条件为 pigeon、minimal 或 pigeon-docker；外部 agent 条件为条件名本身（ext-<名字>）
+  agent: "pigeon" | "minimal" | "pigeon-docker" | ExternalStreamCondition;
   // 能否检索历史会话：关掉时 Pigeon 不注册两件会话检索工具，系统提示不提它们
   sessionSearch: boolean;
   // 有无推送记忆：透传给 headless，打开时只推送项目级记忆、不注册 update_memory（决策 331：跑批无人值守，只推送供遵守）
@@ -129,6 +129,15 @@ export const CONDITION_SPECS: Record<BuiltinStreamCondition, ConditionSpec> = {
     agent: "minimal",
     sessionSearch: false,
     pushedMemory: false,
+  },
+  // pigeon-docker（对比评测的 Pigeon 组，决策 380、389、390）：打包产物在题目容器里跑产品缺省，实现与说明见
+  // stream-pigeon-docker.ts
+  "pigeon-docker": {
+    name: "pigeon-docker",
+    agent: "pigeon-docker",
+    sessionSearch: true,
+    pushedMemory: true,
+    network: "gateway-only",
   },
 };
 
@@ -1337,8 +1346,9 @@ export function dockerStreamEnvs(input: {
   log?: (line: string) => void;
   // 闸门不成立时的告警（缺省写标准错误，只报一次）
   warn?: (line: string) => void;
-  // 按条件替换网络参数（外部 agent 条件：接只通网关的跑批内部网络、只读挂载工具目录）；返回 undefined 的条件照旧断网
-  conditionArgs?: (condition: StreamCondition) => readonly string[] | undefined;
+  // 按条件替换网络参数（外部 agent 条件：接只通网关的跑批内部网络、只读挂载工具目录；pigeon-docker 条件再按作业
+  // 读写挂载它的治理目录）；返回 undefined 的条件照旧断网
+  conditionArgs?: (condition: StreamCondition, job: StreamJobId) => readonly string[] | undefined;
 }): StreamEnvFactory {
   const docker = input.docker ?? ["docker"];
   const root = input.root ?? STREAM_CONTAINER_ROOT;
@@ -1361,7 +1371,7 @@ export function dockerStreamEnvs(input: {
         name: container,
         docker,
         runArgs: [
-          ...(input.conditionArgs?.(job.condition) ?? WORKSPACE_NETWORK_ARGS),
+          ...(input.conditionArgs?.(job.condition, job) ?? WORKSPACE_NETWORK_ARGS),
           // 标明这是跑批器起的作业容器：清 agent 进程时据此除 init 与主命令外全清（见 KILL_STEP_PROCESSES）
           "-e",
           "PIGEON_STREAM_CONTAINER=1",

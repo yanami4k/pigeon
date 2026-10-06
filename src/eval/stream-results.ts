@@ -8,13 +8,15 @@ import type { HarnessRef } from "./stream-harness.ts";
 import type { StreamStepKind } from "./stream-manifest.ts";
 import type { CountPassRate } from "./stream-measure.ts";
 
-// 条件（193、194、217）：记忆的 2 × 2——能否检索历史会话 × 有无推送记忆，四格都开验证门与回炉；另加最简 agent 作外部参照
+// 条件（193、194、217）：记忆的 2 × 2——能否检索历史会话 × 有无推送记忆，四格都开验证门与回炉；另加最简 agent 作外部参照。
+// pigeon-docker（决策 380、389、390）：对比评测的 Pigeon 组——打包产物在题目容器里跑产品缺省（见 stream-pigeon-docker.ts）
 export type BuiltinStreamCondition =
   | "search-push"
   | "search-only"
   | "push-only"
   | "neither"
-  | "minimal";
+  | "minimal"
+  | "pigeon-docker";
 // 外部 agent 条件（实验设施）：ext-<名字>，名字取自宿主上的外部 agent 配置文件（见 stream-external.ts）
 export type ExternalStreamCondition = `ext-${string}`;
 export type StreamCondition = BuiltinStreamCondition | ExternalStreamCondition;
@@ -37,6 +39,7 @@ export const STREAM_CONDITIONS: readonly BuiltinStreamCondition[] = [
   "push-only",
   "neither",
   "minimal",
+  "pigeon-docker",
 ];
 
 // 结果：题按判定记 passed / failed；依赖环境选不出而作废的步记 skipped。固定起点（215）下维护步、套用步与跳过步

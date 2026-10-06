@@ -300,7 +300,7 @@ function harness(options: {
   });
   const host: SpawnWorkerHost = {
     orchestrator,
-    governanceRoot: root,
+    workspaceRoot: root,
     budget,
     notices,
     spawnAttempts:

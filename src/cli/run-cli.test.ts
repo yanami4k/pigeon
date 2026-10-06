@@ -255,6 +255,66 @@ test("决策 324：--no-hooks 只对本次运行停用全部钩子——Stop 钩
   }
 });
 
+test("--governance-root：设置与程序状态锚到治理根——工作区自带的 .pigeon/ 设置与 .mcp.json 不生效，会话落在治理根、工作区没有 .pigeon/state；与 --sandbox 同用报错", () => {
+  const root = mkdtempSync(join(tmpdir(), "pigeon-run-gov-ws-"));
+  const gov = mkdtempSync(join(tmpdir(), "pigeon-run-gov-"));
+  try {
+    mkdirSync(join(root, ".pigeon"), { recursive: true });
+    // 工作区自带须确认的配置：治理根分开时不读它（读了就会开跑前退出，见决策 326 ③的用例）
+    writeFileSync(
+      join(root, ".pigeon", "settings.json"),
+      JSON.stringify({ commands: { commands: { test: "npm test" } } })
+    );
+    writeFileSync(
+      join(root, ".mcp.json"),
+      JSON.stringify({ mcpServers: { fx: { command: "node", args: ["fx.js"] } } })
+    );
+    const streamFn = writeStreamFnModule(root, { replies: [{ text: "完成" }] });
+    const child = runCli([
+      "run",
+      "随便",
+      "--root",
+      root,
+      "--governance-root",
+      gov,
+      "--stream-fn",
+      streamFn,
+      "--json",
+    ]);
+    assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+    const result = lastJsonLine(child.stdout);
+    assert.equal(result.status, "completed");
+    // 会话落在治理根；工作区里没有程序状态目录
+    const session = loadSessionView(
+      join(gov, ".pigeon", "state", "sessions"),
+      String(result.sessionId)
+    );
+    assert.ok(session !== undefined, "会话文件在治理根下");
+    assert.equal(existsSync(join(root, ".pigeon", "state")), false, "工作区没有 .pigeon/state");
+    // 缺省不变：不给 --governance-root 时仍须确认工作区自带配置
+    const refused = runCli(["run", "随便", "--root", root, "--stream-fn", streamFn, "--json"]);
+    assert.notEqual(refused.status, 0, "不给 --governance-root 时工作区设置照常生效");
+    // 与 --sandbox 同用报错
+    const sandboxed = runCli([
+      "run",
+      "随便",
+      "--root",
+      root,
+      "--governance-root",
+      gov,
+      "--stream-fn",
+      streamFn,
+      "--json",
+      "--sandbox",
+    ]);
+    assert.notEqual(sandboxed.status, 0);
+    assert.match(sandboxed.stderr, /--governance-root 不与 --sandbox 同用/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(gov, { recursive: true, force: true });
+  }
+});
+
 test("决策 325：启动遇旧配置文件即报错并提示 pigeon migrate-config（不自动迁移）；迁移后照常开跑", () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-run-legacy-"));
   try {

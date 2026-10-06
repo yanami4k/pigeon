@@ -62,7 +62,7 @@ function setup() {
   const slot = new SpawnWorkerSlot({ ...DEFAULT_SPAWN_WORKER_SETTINGS, maxAgentSpawns: 1 });
   slot.bind({
     orchestrator,
-    governanceRoot: root,
+    workspaceRoot: root,
     budget,
     spawnAttempts: async () => {
       throw new Error("本用例不派多份尝试");

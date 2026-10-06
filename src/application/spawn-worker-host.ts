@@ -11,7 +11,8 @@ import { type NoticeTarget, WorkerNotices } from "./worker-notices.ts";
 export interface BindSpawnWorkersInput {
   slot: SpawnWorkerSlot;
   orchestrator: WorkerOrchestrator;
-  governanceRoot: string;
+  // 派出方的工作区根（见 SpawnWorkerHost.workspaceRoot）
+  workspaceRoot: string;
   // 宿主会话：通知的派出方会话（派出方是 worker 时为它自己）
   hostSessionId: SessionId;
   // 一次运行的标识（终端界面里每条输入是一次运行）；缺省整个会话算一次运行
@@ -49,7 +50,7 @@ export function bindSpawnWorkers(input: BindSpawnWorkersInput): BoundSpawnWorker
       : undefined;
   input.slot.bind({
     orchestrator: input.orchestrator,
-    governanceRoot: input.governanceRoot,
+    workspaceRoot: input.workspaceRoot,
     budget,
     ...(notices !== undefined ? { notices } : {}),
     ...(input.from !== undefined ? { from: input.from } : {}),

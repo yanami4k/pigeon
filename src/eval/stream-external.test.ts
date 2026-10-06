@@ -357,6 +357,71 @@ test(
   })
 );
 
+test(
+  "配置的 settings（设置的逐项说明）：解析进配置、原样记进身份段；续跑时设置变了即拒绝；非对象拒绝",
+  withTmp((dir) => {
+    mkdirSync(path.join(dir, "tools"));
+    const withSettings = parseExternalAgentConfig(
+      {
+        ...valid("tools"),
+        settings: { thinking: "high", maxOutputTokens: "256K", sessionRetention: false },
+      },
+      "c.json",
+      dir
+    );
+    assert.deepEqual(withSettings.settings, {
+      thinking: "high",
+      maxOutputTokens: "256K",
+      sessionRetention: false,
+    });
+    // 缺省不记（身份段没有 settings 键）
+    const plain = parseExternalAgentConfig(valid("tools"), "c.json", dir);
+    assert.equal("settings" in plain, false);
+    assert.equal("settings" in externalAgentIdentity(plain, "sha256:aa", null), false);
+    // 给了即原样进身份段
+    const identity = externalAgentIdentity(withSettings, "sha256:aa", null);
+    assert.deepEqual(identity.settings, withSettings.settings);
+    // 不是对象即拒绝
+    for (const bad of [["high"], "high", null] as const) {
+      assert.throws(
+        () =>
+          parseExternalAgentConfig(
+            { ...valid("tools"), settings: bad as unknown as Record<string, unknown> },
+            "c.json",
+            dir
+          ),
+        /settings/
+      );
+    }
+    // 续跑比对：设置不同即拒绝（判为不同条件），并指出哪一项
+    const base = {
+      core: {
+        ...baseCore(),
+        conditions: ["ext-fake-1"],
+        agents: { "ext-fake-1": identity },
+      },
+      info,
+    } as StreamRunIdentity;
+    const digest = checkOrWriteIdentity(dir, base);
+    assert.equal(checkOrWriteIdentity(dir, base), digest, "同样的设置续跑通过");
+    const changed = {
+      core: {
+        ...baseCore(),
+        conditions: ["ext-fake-1"],
+        agents: {
+          "ext-fake-1": externalAgentIdentity(
+            { ...withSettings, settings: { ...withSettings.settings, thinking: "low" } },
+            "sha256:aa",
+            null
+          ),
+        },
+      },
+      info,
+    } as StreamRunIdentity;
+    assert.throws(() => checkOrWriteIdentity(dir, changed), /agents\.ext-fake-1\.settings/);
+  })
+);
+
 // 记下脚本的假工作区 shell：比对改动提取的脚本口径
 function recordingShell() {
   const calls: Array<{ script: string; args: readonly string[] }> = [];

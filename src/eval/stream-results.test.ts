@@ -84,10 +84,10 @@ test("结果行字段清单：要求的字段都在（起点、agent 改动的 d
   }
 });
 
-test("条件表（193、194）：四格为能否检索 × 有无推送，另加最简 agent；旧的 no-gate 与 memory 条件不再有", () => {
+test("条件表（193、194）：四格为能否检索 × 有无推送，另加最简 agent 与对比评测的 pigeon-docker；旧的 no-gate 与 memory 条件不再有", () => {
   assert.deepEqual(
     [...STREAM_CONDITIONS],
-    ["search-push", "search-only", "push-only", "neither", "minimal"]
+    ["search-push", "search-only", "push-only", "neither", "minimal", "pigeon-docker"]
   );
 });
 

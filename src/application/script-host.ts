@@ -88,7 +88,7 @@ export interface CollectApproval {
 }
 
 export function collectApprover(
-  governanceRoot: string,
+  workspaceRoot: string,
   approval: CollectApproval
 ): ScriptRunnerDeps["approveCollect"] {
   return async ({ runId, title, workers, targets }) => {
@@ -96,14 +96,14 @@ export function collectApprover(
     const args = { workers };
     // 决策 340：叠回内容写到 .pigeon 下时按受保护路径请示——放权不算，逐次问人，请示里列出这些路径
     const protectedPaths = (targets ?? []).flatMap((target) =>
-      protectedOverlayPaths(target, governanceRoot)
+      protectedOverlayPaths(target, workspaceRoot)
     );
     if (
       protectedPaths.length === 0 &&
       (approval.grants?.match(TAKE_WORKER_TOOL, args) != null ||
         matchConfigGrants(
           approval.configGrants ?? [],
-          governanceRoot,
+          workspaceRoot,
           TAKE_WORKER_TOOL,
           args,
           false
@@ -189,7 +189,10 @@ export function restoreScriptRun(
 
 export interface SessionScriptsInput {
   orchestrator: ScriptRunnerDeps["orchestrator"] & Pick<WorkerOrchestrator, "status">;
+  // 治理根：会话文件与沙箱配置在它下面
   governanceRoot: string;
+  // 主工作区根（git 仓库）：主目录快照、收回叠加与收回请示看它（pigeon run --governance-root 时不是治理根）
+  workspaceRoot: string;
   // 本会话（主会话）：重启后从它的会话文件找回
   sessionId: SessionId;
   // 读会话文件之前先把写者缓冲落盘
@@ -213,14 +216,14 @@ export interface SessionScriptsInput {
 }
 
 export function createSessionScripts(input: SessionScriptsInput): ScriptRuns {
-  const root = input.governanceRoot;
-  const sessionsDir = sessionsDirOf(root);
+  const root = input.workspaceRoot;
+  const sessionsDir = sessionsDirOf(input.governanceRoot);
   const limits = untrackedLimitsOf(input.settings?.merged.snapshot);
   return new ScriptRuns({
     orchestrator: input.orchestrator,
     launcher:
       input.launcher ??
-      dockerLauncherFor(root, {
+      dockerLauncherFor(input.governanceRoot, {
         ...(input.settings?.merged.sandbox?.build !== undefined
           ? { build: input.settings.merged.sandbox.build }
           : {}),

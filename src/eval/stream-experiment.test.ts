@@ -14,6 +14,7 @@ import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { GATEWAY_RETENTION_VERSION } from "./gateway-retention.ts";
 import {
   effectivePigeonSettings,
+  gatewayUpstreamOverride,
   imageIdentityOf,
   installTerminationHandler,
   layersIdentity,
@@ -403,4 +404,30 @@ test("选题（202、219）：抽样只在要做到的不为零的题里、按 P
   );
   assert.throws(() => selectSteps(manifest, { tasks: [21] }), /题号 21 越界/);
   assert.throws(() => selectSteps(manifest, { tasks: [2, 2] }), /题号 2 重复/);
+});
+
+test("假上游小试的网关上游覆盖：只许本机地址（127.0.0.1、::1、localhost），其余与非法地址拒绝；未设即无覆盖", () => {
+  assert.equal(gatewayUpstreamOverride({}), undefined);
+  assert.equal(gatewayUpstreamOverride({ PIGEON_EVAL_GATEWAY_UPSTREAM: "" }), undefined);
+  for (const ok of [
+    "http://127.0.0.1:8080",
+    "http://localhost:9000/anthropic",
+    "http://[::1]:8080",
+  ]) {
+    const override = gatewayUpstreamOverride({ PIGEON_EVAL_GATEWAY_UPSTREAM: ok });
+    assert.equal(override?.baseUrl, ok);
+    assert.equal(override?.marker, "loopback");
+  }
+  for (const bad of ["http://192.168.1.5:8080", "https://example.com", "不是地址"]) {
+    assert.throws(
+      () => gatewayUpstreamOverride({ PIGEON_EVAL_GATEWAY_UPSTREAM: bad }),
+      /只许本机地址/
+    );
+  }
+  // 报错不 echo 地址（免得带进用户与口令）
+  assert.throws(
+    () =>
+      gatewayUpstreamOverride({ PIGEON_EVAL_GATEWAY_UPSTREAM: "http://user:pw@192.168.1.5:8080" }),
+    (error: Error) => !error.message.includes("user") && !error.message.includes("192.168")
+  );
 });

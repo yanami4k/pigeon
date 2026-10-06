@@ -386,20 +386,25 @@ async function resumeMain(argv: string[]): Promise<void> {
   }
 }
 
-// pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] [--provider <p>]
+// pigeon run [任务描述] [--root <dir>] [--governance-root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] [--provider <p>]
 //   [--model <m>] [--max-turns <N>] [--wall-clock <毫秒>] [--json]：headless 运行（M6.5 S1，决策 056）——
 // 进程内 API runHeadless 的薄壳；任务描述缺省从 stdin 读；无审批通道，prompt 档 fail-closed；
 // --json 退出时打印一行结构化结果；退出码按终态映射（HEADLESS_EXIT_CODES，1 为参数与装配错误）
 async function runMain(argv: string[]): Promise<void> {
   const usage =
-    "用法：pigeon run [任务描述] [--root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
+    "用法：pigeon run [任务描述] [--root <dir>] [--governance-root <dir>] --stream-fn <模块路径> [--yolo] [--thinking <档位>] " +
     "[--max-turns <N>] [--wall-clock <毫秒>] [--no-hooks] [--no-web] [--no-pushed-memory] [--no-spawn-workers] [--worker-concurrency <n>] [--worker-limit <n>] [--max-output-tokens <n>] [--context-window <n>] [--compact-threshold <n>] [--compact-keep <n>] " +
-    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置）";
+    "[--sandbox [--sandbox-network on|off] [--sandbox-approval yolo|prompt] [--sandbox-from-head]] [--trust-config] [--json]" +
+    "（任务描述缺省从 stdin 读；--trust-config 只对本次放行未确认的会执行命令或放权的配置；" +
+    "--governance-root 把设置与程序状态锚到另一个目录，缺省与 --root 相同）";
   let task: string | undefined;
   let json = false;
   let maxTurns: number | undefined;
   let wallClockMs: number | undefined;
   let editMode: EditMode | undefined;
+  // 治理根（设置三层与 .pigeon/state 锚定的目录）：缺省与工作区根相同；对比评测的容器条件把它指到
+  // 题目仓库之外，题目仓库自带的 .pigeon/ 设置不生效、程序状态不落工作区
+  let governanceRootArg: string | undefined;
   // 决策 326 ③、341：只对本次运行放行未确认的会执行命令或放权的配置（不记下）
   let trustConfig = false;
   const modelArgv: string[] = [];
@@ -424,6 +429,12 @@ async function runMain(argv: string[]): Promise<void> {
       } else {
         wallClockMs = value;
       }
+    } else if (arg === "--governance-root") {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error(`--governance-root 需要目录（${usage}）`);
+      }
+      governanceRootArg = value;
     } else if (!arg.startsWith("--") && task === undefined) {
       task = arg;
     } else {
@@ -455,8 +466,15 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const streamFn = await loadStreamFn(resolveStreamFnSpec(flags, usage));
   const workspaceRoot = prepareWorkspace(flags.root);
-  // 决策 325、326：旧布局检查与设置快照；未确认的会执行命令的配置在开跑前报错退出（--trust-config 只对本次放行）
-  let settings = await openSessionSettings(workspaceRoot, {
+  // 治理根缺省与工作区根相同；沙箱在一次性容器里重建工作区，分开的治理根进不去，同给即拒绝
+  if (governanceRootArg !== undefined && flags.sandbox !== undefined) {
+    throw new Error(`--governance-root 不与 --sandbox 同用（${usage}）`);
+  }
+  const governanceRoot =
+    governanceRootArg !== undefined ? prepareWorkspace(governanceRootArg) : workspaceRoot;
+  // 决策 325、326：旧布局检查与设置快照；未确认的会执行命令的配置在开跑前报错退出（--trust-config 只对本次放行）。
+  // 设置与程序状态锚在治理根：--governance-root 分开时，工作区（题目仓库）自带的 .pigeon/ 与 .mcp.json 不生效
+  let settings = await openSessionSettings(governanceRoot, {
     confirmation: { kind: "unattended", trustConfig },
   });
   // 决策 324：--no-hooks 只对本次运行停用全部钩子
@@ -467,7 +485,7 @@ async function runMain(argv: string[]): Promise<void> {
   const loopGuard = loopGuardSettingsOf(settings);
   const runOptions = {
     task,
-    governanceRoot: workspaceRoot,
+    governanceRoot,
     settings,
     workspaceRoot,
     streamFn,
@@ -763,7 +781,10 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
 // 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
-// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）。
+// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）；
+// pigeon-docker 条件（对比评测的 Pigeon 组）：--pigeon-bundle 给打包产物目录（dist/）、--pigeon-node-runtime 给 Node 运行时目录
+// （实验镜像没有 node），都只读挂载进题目容器跑产品缺省
+// （--yolo --no-web --json --thinking high），治理根挂到题目仓库之外（见 src/eval/stream-pigeon-docker.ts）。
 // 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
 // Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
 // 撞上限续跑与流式重复检测（决策 367）：--continuation、--continuation-max-consecutive、--continuation-max-per-run、
@@ -783,6 +804,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
     "[--task-interfaces <接口数据文件>] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
+    "[--pigeon-bundle <打包产物目录>（pigeon-docker 条件必给：dist/，只读挂载进题目容器）] " +
+    "[--pigeon-node-runtime <Node 运行时目录>（pigeon-docker 条件必给：含 bin/node，只读挂载进题目容器）] " +
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
     "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
@@ -821,6 +844,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--repetition-mode",
     "--repetition-preset",
     "--background-closeout-seconds",
+    "--pigeon-bundle",
+    "--pigeon-node-runtime",
     "--gateway-retention",
     "--retention-task-mb",
     "--retention-job-mb",
@@ -883,7 +908,10 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     }
   }
   if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
-  const needsPigeon = conditions.some((c) => c !== "minimal" && !isExternalCondition(c));
+  // pigeon-docker 是容器条件（打包产物经 --pigeon-bundle 给），不需要进程内 Pigeon 的参数
+  const needsPigeon = conditions.some(
+    (c) => c !== "minimal" && c !== "pigeon-docker" && !isExternalCondition(c)
+  );
   // 外部 agent 的配置在开跑前解析、校验（与所跑条件的对应在 runStreamExperiment 里查）
   const externalAgents = externalAgentFiles.map((file) => loadExternalAgentConfig(file));
   const memoryLimitChars = positive("--memory-limit");
@@ -1026,6 +1054,10 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     ...(pigeon !== undefined ? { pigeon } : {}),
     ...(minimalCommand !== undefined ? { minimalCommand } : {}),
     ...(externalAgents.length > 0 ? { externalAgents } : {}),
+    ...(values.has("--pigeon-bundle") ? { pigeonBundle: required("--pigeon-bundle") } : {}),
+    ...(values.has("--pigeon-node-runtime")
+      ? { pigeonNodeRuntime: required("--pigeon-node-runtime") }
+      : {}),
     ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
     ...(values.has("--task-interfaces")
       ? { taskInterfacesFile: required("--task-interfaces") }
