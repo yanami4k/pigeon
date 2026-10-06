@@ -3,7 +3,8 @@
 // - 各节沿用原配置文件的字段（去掉各文件自己的 version）：mcp、permissions、commands、orchestration、web、sandbox、loopGuard、
 //   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）、模型信息的覆盖值 modelInfo（决策 362）、撞上限续跑
 //   truncationContinuation、流式重复检测 repetitionGuard（决策 367）、工具的上限类设置 tools（决策 356、357、368）、
-//   上下文裁剪 contextPrune（决策 361）、快照的大小上限 snapshot（决策 381）与会话检索的开关 sessionSearch（决策 382）；
+//   上下文裁剪 contextPrune（决策 361）、快照的大小上限 snapshot（决策 381）、会话检索的开关 sessionSearch（决策 382）与
+//   推理档位 thinking（决策 390）；
 //   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
@@ -64,6 +65,7 @@ import {
   type UntrackedLimits,
   untrackedLimitsOf,
 } from "./snapshot-config.ts";
+import { type ThinkingSection, ThinkingSectionSchema } from "./thinking-config.ts";
 import {
   type BackgroundJobLimits,
   backgroundJobLimits,
@@ -107,6 +109,7 @@ export const SETTINGS_SECTIONS = {
   contextPrune: ContextPruneSectionSchema,
   snapshot: SnapshotSectionSchema,
   sessionSearch: SessionSearchSectionSchema,
+  thinking: ThinkingSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -135,6 +138,7 @@ export const SettingsFileSchema = Type.Object(
     contextPrune: Type.Optional(ContextPruneSectionSchema),
     snapshot: Type.Optional(SnapshotSectionSchema),
     sessionSearch: Type.Optional(SessionSearchSectionSchema),
+    thinking: Type.Optional(ThinkingSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -293,6 +297,7 @@ export interface MergedSettings {
   contextPrune?: ContextPruneSection;
   snapshot?: SnapshotSection;
   sessionSearch?: Static<typeof SessionSearchSectionSchema>;
+  thinking?: ThinkingSection;
   // 决策 355：读档禁读名单的追加项，三层并集（permissions.readDeny；只能往内置名单上加）
   readDeny?: string[];
   trustedDirectories: string[];
@@ -499,6 +504,11 @@ export function readFileLimitsOf(snapshot: SettingsSnapshot): ReadFileLimits {
 // 会话检索的使用者开关（决策 382）：合并后的 sessionSearch 一节，缺省开
 export function sessionSearchEnabledOf(snapshot: SettingsSnapshot): boolean {
   return sessionSearchEnabled(snapshot.merged.sessionSearch);
+}
+
+// 推理档位（决策 390）：合并后的 thinking 一节（没写为 undefined，按模型信息定缺省档位）
+export function thinkingSectionOf(snapshot: SettingsSnapshot): ThinkingSection | undefined {
+  return snapshot.merged.thinking;
 }
 
 // 决策 356：run_command 输出的头尾保留与落盘总量（tools 一节，不给的取缺省）

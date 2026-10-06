@@ -101,7 +101,8 @@ import { guardRepetition, type RepetitionHit } from "./repetition-guard.ts";
 import type { SessionStoreSink } from "./session-store.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 
-// 推理档位的缺省：快照里没给即 off（不请求推理）
+// 快照里没给推理档位时的兜底：off（不请求推理）。装配层（buildRuntime）总会按启动参数、设置与模型信息定下档位写进快照
+// （决策 390：支持推理的模型缺省 high，见 state/thinking-config.ts），这里只兜直接构造的适配器与旧快照
 export const DEFAULT_THINKING_LEVEL = "off";
 
 // Run 终态：completed / failed / aborted 之外保留 unknown——
@@ -401,7 +402,7 @@ export class PiRuntimeAdapter {
       prepareNextTurnWithContext: (context, signal) => this.#compactBetweenTurns(context, signal),
       initialState: {
         systemPrompt: this.#snapshot.context.systemPrompt,
-        // M5.5 S5（决策 050）：推理档位随快照冻结；缺省 off = 不请求推理
+        // M5.5 S5（决策 050）：推理档位随快照冻结；快照里没给即 off = 不请求推理
         thinkingLevel: this.#snapshot.model.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
         model: {
           id: this.#snapshot.model.id,

@@ -10,7 +10,7 @@ import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
 import { SESSION_SEARCH_VERSION } from "../memory/session-search.ts";
 import {
-  DEFAULT_THINKING_LEVEL,
+  deepseekModelInfo,
   GATEWAY_PROVIDER,
   GATEWAY_UPSTREAM_BASE_URL,
   gatewayStreamFn,
@@ -23,6 +23,7 @@ import {
   DEFAULT_TRUNCATION_CONTINUATION,
   TRUNCATION_CONTINUATION_VERSION,
 } from "../state/runaway-config.ts";
+import { resolveThinkingLevel } from "../state/thinking-config.ts";
 import { DEFAULT_BACKGROUND_CLOSEOUT_SECONDS } from "../state/tools-config.ts";
 import { WORKSPACE_NETWORK_ARGS } from "./container-workspace.ts";
 import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
@@ -192,14 +193,21 @@ export function streamPigeonOptions(
 }
 
 // Pigeon 条件实际生效的参数（身份头与结果行照记）：没给的推理档位、单轮输出上限、压缩配置与记忆上限记运行时的
-// 缺省值（off、跑批器自己的 16,384、产品缺省的压缩配置、项目级记忆上限 4,000 字符），不记 null；温度没给即由服务端决定，记 null。
+// 缺省值（推理档位与产品同一取法，网关接入声明支持推理即 high；跑批器自己的 16,384、产品缺省的压缩配置、项目级记忆上限
+// 4,000 字符），不记 null；温度记实际下发的值：没给或开了思考（服务端不收温度，运行时也不下发）记 null。
 // 复盘随决策 331 删除，身份头不再记复盘模板版本与复盘上限，改记记忆文字的版本（之前写下的身份头与之不同，续跑即判为不同）
 export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: string) {
+  const effectiveModelId = pigeon.modelId ?? modelId;
+  // 决策 380、390：跑批不读设置，档位为显式给的，或按网关接入登记的模型信息（deepseekModelInfo）定缺省
+  const thinking = resolveThinkingLevel({
+    requested: pigeon.thinking,
+    reasoning: deepseekModelInfo(effectiveModelId).reasoning,
+  });
   return {
     provider: pigeon.provider ?? GATEWAY_PROVIDER,
-    modelId: pigeon.modelId ?? modelId,
-    temperature: pigeon.temperature ?? null,
-    thinking: pigeon.thinking ?? DEFAULT_THINKING_LEVEL,
+    modelId: effectiveModelId,
+    temperature: thinking === "off" ? (pigeon.temperature ?? null) : null,
+    thinking,
     maxOutputTokens: pigeon.maxOutputTokens ?? STREAM_MAX_OUTPUT_TOKENS,
     compaction: resolveCompactionConfig(pigeon.compaction),
     memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMITS.project,

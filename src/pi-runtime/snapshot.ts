@@ -53,7 +53,8 @@ export const InjectionSnapshotSchema = Type.Object({
   model: Type.Object({
     provider: Type.String({ minLength: 1 }),
     id: Type.String({ minLength: 1 }),
-    // 推理档位（决策 050）：两级来源——启动参数全局值，worker 角色配置覆盖；缺省 off
+    // 推理档位（决策 050）：启动参数全局值，worker 角色配置覆盖；装配层没给时按设置与模型信息定（决策 390），
+    // 快照里缺这一项按 off
     thinkingLevel: Type.Optional(ThinkingLevelSchema),
     // 单轮输出上限（决策 063、347）：装配层包装 streamFn 传入的 maxTokens 配置值；未配置不写（跟模型）；v4 之前的快照缺省
     maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),

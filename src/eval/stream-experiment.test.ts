@@ -58,12 +58,12 @@ test("延续式跑批的 Pigeon 各条件一律无人值守放权（yolo），�
   assert.equal(forced.provider, "kimi-coding");
 });
 
-test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置与项目级记忆上限记运行时缺省（off、16,384、产品缺省的压缩配置、4,000 字符），不记 null；记忆文字版本记 v3、检索行为版本记 v2、续跑行为版本记 v3；主 agent 派 worker 记关（265）；给了的原样记", () => {
+test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档位、单轮输出上限、压缩配置与项目级记忆上限记运行时缺省（high、16,384、产品缺省的压缩配置、4,000 字符），不记 null；记忆文字版本记 v3、检索行为版本记 v2、续跑行为版本记 v3；主 agent 派 worker 记关（265）；给了的原样记", () => {
   assert.deepEqual(effectivePigeonSettings({}, "deepseek-flash"), {
     provider: "deepseek",
     modelId: "deepseek-flash",
     temperature: null,
-    thinking: "off",
+    thinking: "high",
     maxOutputTokens: 16_384,
     compaction: {
       contextWindow: 1_000_000,
@@ -102,7 +102,8 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
     {
       provider: "deepseek",
       modelId: "m2",
-      temperature: 0,
+      // 开思考时温度不下发，记 null
+      temperature: null,
       thinking: "high",
       maxOutputTokens: 8_000,
       compaction: {
@@ -128,6 +129,13 @@ test("身份头与结果行记 Pigeon 实际生效的参数：没给的推理档
       backgroundCloseoutSeconds: DEFAULT_BACKGROUND_CLOSEOUT_SECONDS,
     }
   );
+});
+
+test("身份头的温度按实际是否下发记：关思考时记给的温度，开思考（缺省）时记 null", () => {
+  const off = effectivePigeonSettings({ temperature: 0, thinking: "off" }, "deepseek-flash");
+  assert.deepEqual([off.thinking, off.temperature], ["off", 0]);
+  const byDefault = effectivePigeonSettings({ temperature: 0 }, "deepseek-flash");
+  assert.deepEqual([byDefault.thinking, byDefault.temperature], ["high", null]);
 });
 
 test("身份头记撞上限续跑与流式重复检测的实际生效值（367）：给了非缺省的（续跑关、wide 档只记录）即原样记下", () => {
