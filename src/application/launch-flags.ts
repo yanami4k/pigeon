@@ -61,7 +61,7 @@ export interface LaunchFlags {
   modelId: string;
   // M5 S1（决策 045）：--no-persist-thinking 关闭 thinking 正文持久化（缺省开）
   persistThinking: boolean;
-  // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（缺省不请求推理）
+  // M5.5 S5（决策 050）：--thinking <档位> 推理档位全局值（不给即取设置，设置也没写按模型信息：支持推理的 high，决策 390）
   thinkingLevel?: ThinkingLevel;
   // 决策 063、347：--max-output-tokens <n> 单轮输出上限（缺省不设：跟模型，按模型定义的上限发、由 provider 按剩余上下文收窄）
   maxOutputTokens?: number;
