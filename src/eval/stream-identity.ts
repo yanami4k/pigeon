@@ -47,6 +47,8 @@ export interface StreamRunIdentity {
         memoryLimitChars?: number;
         // 记忆文字的版本（328、332）：推送段的文字一改即换条件；加这一项之前写下的身份头没有它，续跑即判为不同
         memoryTextVersion?: string;
+        // 会话检索的行为版本（384）：切分、打分、范围、归并或片段一改即换条件；加这一项之前写下的身份头没有它，续跑即判为不同
+        sessionSearchVersion?: string;
         // 开工状态块文字的版本（363）：看板或状态块的文字一改即换条件；加这一项之前写下的身份头没有它，续跑即判为不同
         statusBlockVersion?: string;
         // 主 agent 派 worker（265）：实际生效的值（各条件都关掉）；与压缩配置同一口径，加这一项之前写下的身份头没有它，续跑即判为不同
