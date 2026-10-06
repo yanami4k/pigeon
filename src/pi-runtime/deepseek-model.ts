@@ -5,7 +5,8 @@
 //   即按它发，由 provider 按剩余上下文收窄；
 //   cost 全为 0：花费由跑批网关按官方人民币价目与高峰时段逐请求计（state/model-pricing.ts），不在这里另算一份。
 // 模型信息的声明（决策 362）：deepseekModelInfo 带官方人民币非高峰价（取自 model-pricing.ts；高峰加价由计费另算，不影响命中与
-// 未命中的价格比），与模型对象同一组身份、窗口与输出上限；接入模块经具名导出 modelInfo 交给 Pigeon。
+// 未命中的价格比），与模型对象同一组身份、窗口、输出上限与是否支持推理（决策 390：据此缺省开思考）；接入模块经具名导出
+// modelInfo 交给 Pigeon。
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import type { ModelInfoDeclaration } from "../state/model-info.ts";
 import { PRICE_CNY_PER_MTOK } from "../state/model-pricing.ts";
@@ -58,5 +59,6 @@ export function deepseekModelInfo(
     },
     contextWindow: DEEPSEEK_CONTEXT_WINDOW,
     ...(Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
+    reasoning: true,
   };
 }

@@ -48,12 +48,13 @@ export function parseModelInfoDeclaration(
   throw new Error(`${where} 导出的 modelInfo 不合规：${problems.join("；")}`);
 }
 
-// 声明是否已给全价格、窗口与输出上限（给全了就不必加载目录）
+// 声明是否已给全价格、窗口、输出上限与是否支持推理（给全了就不必加载目录）
 export function declarationComplete(declared: ModelInfoDeclaration | undefined): boolean {
   return (
     declared?.cost !== undefined &&
     declared.contextWindow !== undefined &&
-    declared.maxTokens !== undefined
+    declared.maxTokens !== undefined &&
+    declared.reasoning !== undefined
   );
 }
 
@@ -64,7 +65,7 @@ const positiveInteger = (value: unknown): value is number =>
 // 故不让 tsc 解析其类型，只取运行时的 getBuiltinModel
 const CATALOG_MODULE = "@earendil-works/pi-ai/providers/all";
 
-// pi-ai 自带目录的查询（价格为美元/百万 token；没有缓存保留时长）。目录里窗口或上限不是正整数的项当作没给。
+// pi-ai 自带目录的查询（价格为美元/百万 token；没有缓存保留时长；另取是否支持推理）。目录里窗口或上限不是正整数的项当作没给。
 // 导入失败或没有查询函数时告警一行并返回 undefined（importModule 供测试注入）
 export async function loadCatalogLookup(
   warn: (line: string) => void,
@@ -105,6 +106,7 @@ export async function loadCatalogLookup(
     }
     if (positiveInteger(model.contextWindow)) values.contextWindow = model.contextWindow;
     if (positiveInteger(model.maxTokens)) values.maxTokens = model.maxTokens;
+    if (typeof model.reasoning === "boolean") values.reasoning = model.reasoning;
     return values;
   };
 }

@@ -7,7 +7,12 @@ import { validateSettingsLayer } from "./settings.ts";
 
 const USD = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, currency: "USD" };
 const CNY = { input: 1, output: 4, cacheRead: 0.02, cacheWrite: 1, currency: "CNY" };
-const catalog: CatalogLookup = () => ({ cost: USD, contextWindow: 200_000, maxTokens: 64_000 });
+const catalog: CatalogLookup = () => ({
+  cost: USD,
+  contextWindow: 200_000,
+  maxTokens: 64_000,
+  reasoning: true,
+});
 
 test("逐项取值：设置 > 声明 > 目录 > 未知，每项各自取最高的一层", () => {
   const info = resolveModelInfo({
@@ -19,10 +24,11 @@ test("逐项取值：设置 > 声明 > 目录 > 未知，每项各自取最高�
   assert.deepEqual(info.cost, { source: "declared", value: CNY });
   assert.deepEqual(info.contextWindow, { source: "settings", value: 300_000 });
   assert.deepEqual(info.maxTokens, { source: "catalog", value: 64_000 });
+  assert.deepEqual(info.reasoning, { source: "catalog", value: true });
   const bare = resolveModelInfo({ launch: { provider: "custom", id: "custom" } });
   assert.deepEqual(
-    [bare.cost, bare.contextWindow, bare.maxTokens],
-    [{ source: "unknown" }, { source: "unknown" }, { source: "unknown" }]
+    [bare.cost, bare.contextWindow, bare.maxTokens, bare.reasoning],
+    [{ source: "unknown" }, { source: "unknown" }, { source: "unknown" }, { source: "unknown" }]
   );
 });
 
@@ -33,7 +39,7 @@ test("价格整体取：设置的价格连同币种盖掉声明的；声明不�
     return catalog(...args);
   };
   const { currency: _omit, ...declaredCost } = USD;
-  const declared = { cost: declaredCost, contextWindow: 1, maxTokens: 1 };
+  const declared = { cost: declaredCost, contextWindow: 1, maxTokens: 1, reasoning: false };
   const overridden = resolveModelInfo({
     launch: { provider: "acme", id: "m1" },
     declared,
@@ -47,6 +53,7 @@ test("价格整体取：设置的价格连同币种盖掉声明的；声明不�
     catalog: counting,
   });
   assert.deepEqual(plain.cost, { source: "declared", value: USD });
+  assert.deepEqual(plain.reasoning, { source: "declared", value: false });
   assert.equal(lookups, 0);
 });
 
