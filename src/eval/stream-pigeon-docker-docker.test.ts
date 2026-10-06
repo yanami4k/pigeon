@@ -29,7 +29,7 @@ import { sessionsDirOf } from "../state/paths.ts";
 import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
 import { startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
-import { REAL_IMAGE, realDockerSkip } from "./real-docker-fixtures.ts";
+import { realDockerSkip } from "./real-docker-fixtures.ts";
 import { gitHumanRepo, ReferenceWorkspace } from "./stream-facts.ts";
 import { composeStreamManifest } from "./stream-manifest.ts";
 import {
@@ -47,11 +47,15 @@ const BUNDLE_FIXTURE = fileURLToPath(
   new URL("./stream-fixtures/fake-pigeon-bundle", import.meta.url)
 );
 
+// 本条件面向的实验镜像（strands：没有 node，Node 运行时经挂载进容器——这正是要测的）；可用
+// PIGEON_DOCKER_TEST_IMAGE 覆盖
+const PD_IMAGE = process.env.PIGEON_DOCKER_TEST_IMAGE ?? "pigeon-stream-strands:v6";
 // Node 运行时目录（实验镜像没有 node）：由 PIGEON_DOCKER_TEST_NODE_DIR 给出（含 bin/node 的 Linux x64 构建），
 // 没给即跳过——服务器上为对比评测准备的那一份
 const NODE_RUNTIME_DIR = process.env.PIGEON_DOCKER_TEST_NODE_DIR;
 const nodeSkip =
   NODE_RUNTIME_DIR === undefined ? "没有 PIGEON_DOCKER_TEST_NODE_DIR（Node 运行时目录）" : false;
+const pdSkip = realDockerSkip(PD_IMAGE) || nodeSkip;
 
 // 两道题的人的仓库：起点只有 base；题 1 新建 src/a.txt（alpha），题 2 新建 src/b.txt（beta），各带测试
 async function twoTaskToy(base: string) {
@@ -162,7 +166,7 @@ async function runTwoSteps(mode: string | undefined, attempts: number) {
       runtime: toyRuntime,
       human: toy.human,
       envs: dockerStreamEnvs({
-        image: REAL_IMAGE,
+        image: PD_IMAGE,
         human: toy.human,
         prefix,
         conditionArgs: (condition, job) =>
@@ -202,7 +206,7 @@ async function runTwoSteps(mode: string | undefined, attempts: number) {
   }
 }
 
-test.skipIf(realDockerSkip() || nodeSkip)(
+test.skipIf(pdSkip)(
   "pigeon-docker（真容器）：两题两遍——经网关记轮数、判题通过、diff 无程序状态、同作业跨题检索到前题会话、两遍互不相通",
   { timeout: 900_000 },
   async () => {
@@ -248,7 +252,7 @@ test.skipIf(realDockerSkip() || nodeSkip)(
   }
 );
 
-test.skipIf(realDockerSkip() || nodeSkip)(
+test.skipIf(pdSkip)(
   "pigeon-docker（真容器）：作废的题的会话按现有规矩移出——重做后治理目录只剩重做的会话，后面的题检索不到作废那次",
   { timeout: 900_000 },
   async () => {
@@ -275,14 +279,14 @@ test.skipIf(realDockerSkip() || nodeSkip)(
   }
 );
 
-test.skipIf(realDockerSkip() || nodeSkip)(
+test.skipIf(pdSkip)(
   "pigeon-docker（真容器）：pigeon 与 Node 运行时 --version 的自报（身份段用）",
   { timeout: 300_000 },
   async () => {
     const reported = await pigeonDockerSelfReport({
       bundleDir: BUNDLE_FIXTURE,
       nodeRuntimeDir: NODE_RUNTIME_DIR as string,
-      image: REAL_IMAGE,
+      image: PD_IMAGE,
       container: `pigeon-pd-identity-test-${process.pid}`,
     });
     assert.ok(

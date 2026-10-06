@@ -1,5 +1,6 @@
 // pigeon-docker 条件（单元层，假 docker）：容器参数（网络、只读产物挂载、按作业读写挂载治理目录且与跑批器的会话
 // 布局一致）、身份段逐项设置、一步的运行契约（提示拼装、环境映射、运行命令、终态判定、产物布局、墙钟与清理）。
+// 慢档说明：每个用例要起假 docker 子进程（Node 启动约 1–2 秒 × 7 个用例），单文件超 10 秒；src/eval 全部测试本就在慢档。
 // 真容器行为（挂载生效、会话跨题保留）在 stream-pigeon-docker-docker.test.ts（服务器上跑）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

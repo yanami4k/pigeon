@@ -1159,7 +1159,7 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
     }
   });
 
-  test("条件表（193、194）：四格都是 Pigeon，按能否检索与有无推送各开关；各条件原样交给 agent", async () => {
+  test("条件表（193、194）：四格都是 Pigeon，按能否检索与有无推送各开关；最简 agent 与对比评测的 pigeon-docker（容器条件）；各条件原样交给 agent", async () => {
     assert.deepEqual(
       Object.values(CONDITION_SPECS).map((c) => [c.name, c.agent, c.sessionSearch, c.pushedMemory]),
       [
@@ -1168,6 +1168,7 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
         ["push-only", "pigeon", false, true],
         ["neither", "pigeon", false, false],
         ["minimal", "minimal", false, false],
+        ["pigeon-docker", "pigeon-docker", true, true],
       ]
     );
     const t = await toy();
