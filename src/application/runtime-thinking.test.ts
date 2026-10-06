@@ -18,6 +18,9 @@ import type { ThinkingSection } from "../state/thinking-config.ts";
 import { buildRuntime } from "./runtime.ts";
 import { createWorkerRuntimeFactory } from "./workers.ts";
 
+// Run 开始条目的 model 段里本文件关心的几项：档位、温度或"温度未生效"
+type StartedModel = { thinkingLevel?: string; temperature?: number; temperatureIgnored?: unknown };
+
 // 记录上游每次请求带的推理档位；reasoning 给了即登记模型信息里的"是否支持推理"
 function recordingStreamFn(seen: unknown[], reasoning?: boolean): StreamFn {
   const inner = createFakeStreamFn({ replies: [{ text: "好" }] });
@@ -30,11 +33,12 @@ function recordingStreamFn(seen: unknown[], reasoning?: boolean): StreamFn {
     : registerModelAccess(streamFn, { declared: { reasoning } });
 }
 
+// 装配一次运行面、跑一次，交回 Run 开始条目的 model 段
 async function runOnce(
   root: string,
   streamFn: StreamFn,
   options: { level?: ThinkingLevel; section?: ThinkingSection; temperature?: number } = {}
-): Promise<string | undefined> {
+): Promise<StartedModel | undefined> {
   const sessionId = newSessionId();
   const settings = emptySettingsSnapshot(root);
   const bundle = buildRuntime({
@@ -63,7 +67,7 @@ async function runOnce(
     await bundle.sessionStore.close();
   }
   return loadStoreSession(join(root, ".pigeon", "state", "sessions"), sessionId)?.view.runs[0]
-    ?.start.model.thinkingLevel;
+    ?.start.model;
 }
 
 test("推理档位的取法：支持推理的模型缺省 high，不支持或不知道的不请求；--thinking 与设置都能改成 off 或其他档位，启动参数优先", async () => {
@@ -83,7 +87,7 @@ test("推理档位的取法：支持推理的模型缺省 high，不支持或不
     for (const [what, reasoning, options, expected] of cases) {
       const seen: unknown[] = [];
       const recorded = await runOnce(root, recordingStreamFn(seen, reasoning), options);
-      assert.equal(recorded, expected, what);
+      assert.equal(recorded?.thinkingLevel, expected, what);
       // off 不请求推理：交给上游的选项里没有 reasoning（pi-ai 据此对支持推理的模型发 thinking disabled，其余不发）
       assert.deepEqual(seen, [expected === "off" ? undefined : expected], what);
     }
@@ -92,7 +96,7 @@ test("推理档位的取法：支持推理的模型缺省 high，不支持或不
   }
 });
 
-test("经网关的 DeepSeek 接入（与自带接入同一份模型信息）：缺省请求开思考、不发温度；--thinking off 时发 thinking disabled 与温度", async () => {
+test("经网关的 DeepSeek 接入（与自带接入同一份模型信息）：缺省请求开思考、不发温度并记「未生效」；--thinking off 时发 thinking disabled 与温度", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-thinking-wire-"));
   try {
     const bodies: Array<Record<string, unknown>> = [];
@@ -111,13 +115,18 @@ test("经网关的 DeepSeek 接入（与自带接入同一份模型信息）：�
         gateway(model, context, { ...options, fetch: fakeFetch, maxRetries: 0 } as never),
       access
     );
-    assert.equal(await runOnce(root, streamFn, { temperature: 0 }), "high");
+    const byDefault = await runOnce(root, streamFn, { temperature: 0 });
+    assert.equal(byDefault?.thinkingLevel, "high");
     assert.equal((bodies[0]?.thinking as { type?: string } | undefined)?.type, "enabled");
     assert.equal("temperature" in (bodies[0] ?? {}), false);
+    assert.equal(byDefault?.temperature, undefined);
+    assert.deepEqual(byDefault?.temperatureIgnored, { requested: 0, reason: "reasoning-enabled" });
     bodies.length = 0;
-    assert.equal(await runOnce(root, streamFn, { level: "off", temperature: 0 }), "off");
+    const off = await runOnce(root, streamFn, { level: "off", temperature: 0 });
+    assert.equal(off?.thinkingLevel, "off");
     assert.deepEqual(bodies[0]?.thinking, { type: "disabled" });
     assert.equal(bodies[0]?.temperature, 0);
+    assert.equal(off?.temperature, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
