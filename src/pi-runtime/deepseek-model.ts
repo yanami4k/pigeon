@@ -3,7 +3,8 @@
 //   reasoning 为真：未请求推理时 pi-ai 显式发 thinking disabled（DeepSeek 不发 thinking 即默认开思考）；
 //   contextWindow 为官方 1M；maxTokens 为官方单次输出上限 393,216（决策 347，改决策 203 的 16384）；Pigeon 未配置输出上限时
 //   即按它发，由 provider 按剩余上下文收窄；
-//   cost 全为 0：花费由跑批网关按官方人民币价目与高峰时段逐请求计（state/model-pricing.ts），不在这里另算一份。
+//   cost 全为 0：花费由跑批网关按官方人民币价目与高峰时段逐请求计（state/model-pricing.ts），不在这里另算一份；
+//   compat.allowEmptySignature 为真：签名为空的历史思考仍以 thinking 块回传（pi-ai 缺省会改作普通文字）。
 // 模型信息的声明（决策 362）：deepseekModelInfo 带官方人民币非高峰价（取自 model-pricing.ts；高峰加价由计费另算，不影响命中与
 // 未命中的价格比），与模型对象同一组身份、窗口、输出上限与是否支持推理（决策 390：据此缺省开思考）；接入模块经具名导出
 // modelInfo 交给 Pigeon。
@@ -37,6 +38,8 @@ export function deepseekModel(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: DEEPSEEK_CONTEXT_WINDOW,
     maxTokens: DEEPSEEK_MAX_TOKENS,
+    // 历史回复的思考块签名为空时仍以 thinking 块（signature 为空串）回传，不让 pi-ai 改成普通文字；有签名时不受影响
+    compat: { allowEmptySignature: true },
   };
 }
 
