@@ -108,3 +108,10 @@ DeepSeek 价目：缓存命中 0.02、未命中 1、输出 4 元/百万 token，
 ## 回报
 
 分支 worktree-agent-a5c6a9561acd1881f，代码头 a433dc1，其上为本审计提交；审计 docs/audits/2026-10-06-thinking-default-e072233.md。改法：模型信息加 reasoning；档位按 --thinking＞设置 thinking.level＞模型信息（支持推理即 high）取定；开思考不发温度；跑批身份头记 high、温度 null；锁用例按信号对齐。历史推理：现状全回传（空签名时以文字回传，DeepSeek 给不给签名未核实）；选项全回传／最近一轮／不回传。服务器 verify:full 全绿。待裁：回传方式、签名、跑批 16,384 共用、最简 agent 思考、DeepSeek effort。
+
+## 补充：空签名
+
+- 改法：DeepSeek 的模型对象（`src/pi-runtime/deepseek-model.ts` 的 `deepseekModel`，自带 DeepSeek 接入与跑批网关接入共用）加 `compat: { allowEmptySignature: true }`。签名为空、正文非空的历史思考块由 pi-ai 以 `{"type":"thinking","thinking":…,"signature":""}` 回传，不再改作普通 `text` 块；有签名的思考块不受影响。网关接入替换输出上限时展开同一个模型对象，开关随之生效。`docs/configuration.md` 推理档位一节的"花费"一条补一句。
+- 测试：`deepseek-stream.test.ts` 新增一条，用真 pi-ai 加假 fetch，历史里放一条签名为空的思考块加工具调用，分别经自带接入与网关接入（16,384 上限）发出，断言请求体里该块仍是 thinking 块、signature 为空串；原有的模型对象逐项比对补上 `compat`。
+- 变异：去掉这个开关，新用例（自带接入）与模型对象比对两条变红；还原后通过，工作区干净。
+- verify：本机只跑 `deepseek-stream.test.ts`（`--maxWorkers=2`）通过，`npm run check` 通过。验证服务器（8 vCPU、31 GB 内存、Node 24.12.0），提交 442c722，`TEST_CONCURRENCY=6`（开跑前没有别的测试在跑）：`npm run verify:full` 退出码 0——lint 通过，check 通过，测试 325 个文件、1855 通过、7 跳过，deps 无违规。
