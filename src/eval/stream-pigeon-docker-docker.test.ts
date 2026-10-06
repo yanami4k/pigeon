@@ -5,10 +5,13 @@
 //     作废的题的会话按现有规矩移出（voided/），后面的题检索不到；
 //   - 程序状态（治理根下的会话等）不落工作区、不进 diff；
 //   - 经网关的请求按请求数记轮数；提示文本、结果与标准错误按步拷进产物目录；
-//   - pigeon --version 的自报（身份段用）。
+//   - pigeon --version 的自报（身份段用）；
+//   - worker（用按当前源码现打的真产物与按会话进展回话的假上游）：工作树在挂载的治理目录里以镜像用户建出，
+//     改动经 take_worker 并回工作区，diff 不含程序状态与工作树；只读的 explorer 就地读工作区、不建工作树。
 // 与容器无关的逻辑（终态判定分支、提示拼装、环境映射）在 stream-pigeon-docker.test.ts 单元层。
 // 需要真 docker 与实验镜像（服务器上都有），本机缺一即跳过。
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -17,6 +20,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import http from "node:http";
@@ -25,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vitest";
-import { sessionsDirOf } from "../state/paths.ts";
+import { sessionsDirOf, worktreesDirOf } from "../state/paths.ts";
 import { createGatewayNetwork, removeGatewayNetwork } from "./gateway-network.ts";
 import { startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
@@ -137,10 +141,22 @@ const jobOf = (attempt: number): StreamJobId => ({
   attempt,
 });
 
-async function runTwoSteps(mode: string | undefined, attempts: number) {
+// 一次流（缺省两题、一遍、假产物、回固定 200 的假上游）
+interface StepsRun {
+  // 假产物的模式（写进副本的 fake-mode.txt）
+  mode?: string;
+  // 产物目录：在临时目录里备好；缺省为假产物的副本
+  bundle?: (base: string) => string;
+  upstream?: () => Promise<{ url: string; close: () => Promise<void> }>;
+  attempts?: number;
+  maxSteps?: number;
+  maxTurns?: number;
+}
+
+async function runSteps(run: StepsRun = {}) {
   const base = mkdtempSync(join(tmpdir(), "pigeon-pd-docker-"));
   const prefix = `pigeon-pd-test-${process.pid}`;
-  const up = await fakeUpstream();
+  const up = await (run.upstream ?? fakeUpstream)();
   const limits = new LimitController({
     probe: async () => true,
     slots: 4,
@@ -159,7 +175,7 @@ async function runTwoSteps(mode: string | undefined, attempts: number) {
   try {
     await gateway.listenInternal(network.hostAddress);
     const toy = await twoTaskToy(base);
-    const bundleDir = bundleCopy(base, mode);
+    const bundleDir = run.bundle !== undefined ? run.bundle(base) : bundleCopy(base, run.mode);
     const outDir = join(base, "out");
     await runStreams({
       manifest: toy.manifest,
@@ -185,11 +201,12 @@ async function runTwoSteps(mode: string | undefined, attempts: number) {
       reference: toy.reference,
       outDir,
       conditions: [PIGEON_DOCKER_CONDITION],
-      budget: { maxTurns: 5, wallClockMs: 120_000 },
+      budget: { maxTurns: run.maxTurns ?? 5, wallClockMs: 120_000 },
       harnessRef: { commit: "test", dirty: false },
       gateway,
       limits,
-      attempts,
+      attempts: run.attempts ?? 1,
+      ...(run.maxSteps !== undefined ? { maxSteps: run.maxSteps } : {}),
       prefetchEnvs: false,
       log: () => {},
     });
@@ -210,7 +227,7 @@ test.skipIf(pdSkip)(
   "pigeon-docker（真容器）：两题两遍——经网关记轮数、判题通过、diff 无程序状态、同作业跨题检索到前题会话、两遍互不相通",
   { timeout: 900_000 },
   async () => {
-    const { base, outDir, rows } = await runTwoSteps(undefined, 2);
+    const { base, outDir, rows } = await runSteps({ attempts: 2 });
     try {
       assert.equal(rows.length, 4, JSON.stringify(rows.map((r) => [r.attempt, r.seq, r.status])));
       for (const row of rows) {
@@ -257,7 +274,7 @@ test.skipIf(pdSkip)(
   { timeout: 900_000 },
   async () => {
     // fail-once：第 1 题第一次尝试写完会话记录即退出（无结果 JSON）→ 作废重做
-    const { base, outDir, rows } = await runTwoSteps("fail-once", 1);
+    const { base, outDir, rows } = await runSteps({ mode: "fail-once" });
     try {
       assert.equal(rows.length, 2, JSON.stringify(rows.map((r) => [r.seq, r.status])));
       const jobDir = join(outDir, "streams", "tasks-pigeon-docker-1");
@@ -298,5 +315,185 @@ test.skipIf(pdSkip)(
     );
     assert.equal(reported.pigeon, "9.9.9-fake");
     assert.match(String(reported.node), /^v\d+\.\d+\.\d+/);
+  }
+);
+
+// ---- worker 在作业容器里（真打包产物，按当前源码现打一份）----
+
+// Anthropic 流式回复：依次给出若干块（文字或工具调用），有工具调用即以 tool_use 收尾
+type Block = { text: string } | { tool: string; input: Record<string, unknown> };
+let toolUseSeq = 0;
+function sseTurn(model: string, blocks: Block[]): string {
+  const events: Array<[string, unknown]> = [
+    [
+      "message_start",
+      {
+        type: "message_start",
+        message: {
+          id: "m",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model,
+          stop_reason: null,
+          usage: { input_tokens: 100, output_tokens: 0 },
+        },
+      },
+    ],
+  ];
+  blocks.forEach((block, index) => {
+    const start =
+      "text" in block
+        ? { type: "text", text: "" }
+        : { type: "tool_use", id: `toolu_${++toolUseSeq}`, name: block.tool, input: {} };
+    const delta =
+      "text" in block
+        ? { type: "text_delta", text: block.text }
+        : { type: "input_json_delta", partial_json: JSON.stringify(block.input) };
+    events.push([
+      "content_block_start",
+      { type: "content_block_start", index, content_block: start },
+    ]);
+    events.push(["content_block_delta", { type: "content_block_delta", index, delta }]);
+    events.push(["content_block_stop", { type: "content_block_stop", index }]);
+  });
+  const stop = blocks.some((block) => "tool" in block) ? "tool_use" : "end_turn";
+  events.push([
+    "message_delta",
+    { type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: 10 } },
+  ]);
+  events.push(["message_stop", { type: "message_stop" }]);
+  return events
+    .map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    .join("");
+}
+
+// 请求里各条工具结果的文字
+function toolResultTexts(messages: unknown): string[] {
+  const out: string[] = [];
+  for (const message of (messages ?? []) as Array<{ content?: unknown }>) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content as Array<{ type?: string; content?: unknown }>) {
+      if (block.type === "tool_result") out.push(JSON.stringify(block.content ?? ""));
+    }
+  }
+  return out;
+}
+
+// 假上游按请求带的工具分辨会话：带 run_command 的是主 agent，带 write_file 的是 implementer，其余是只读的 explorer。
+// 主 agent：先派 implementer w1 与 explorer look；w1 的完成通知到了就 take_worker 取用；取到了收尾，否则等。
+// implementer 新建题面要的 src/a.txt；explorer 读工作区里起点就有的 src/base.test.sh
+async function workerUpstream() {
+  const seen = { mainTools: [] as string[][], explorerResults: [] as string[] };
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        model: string;
+        tools?: Array<{ name: string }>;
+        messages?: unknown;
+      };
+      const tools = (body.tools ?? []).map((tool) => tool.name);
+      const text = JSON.stringify(body.messages ?? []);
+      const results = toolResultTexts(body.messages);
+      let blocks: Block[];
+      if (tools.includes("run_command")) {
+        seen.mainTools.push(tools);
+        blocks =
+          results.length === 0
+            ? [
+                {
+                  tool: "spawn_worker",
+                  input: { role: "implementer", name: "w1", task: "新建 src/a.txt，内容为 alpha" },
+                },
+                {
+                  tool: "spawn_worker",
+                  input: { role: "explorer", name: "look", task: "看看 src/base.test.sh" },
+                },
+              ]
+            : text.includes("已把 worker w1 的改动叠进工作目录")
+              ? [{ text: "完成" }]
+              : text.includes("w1（implementer）已完成")
+                ? [{ tool: "take_worker", input: { worker: "w1" } }]
+                : [{ text: "等 worker" }];
+      } else if (tools.includes("write_file")) {
+        blocks =
+          results.length === 0
+            ? [{ tool: "write_file", input: { path: "src/a.txt", content: "alpha\n" } }]
+            : [{ text: "写好了" }];
+      } else {
+        seen.explorerResults.push(...results);
+        blocks =
+          results.length === 0
+            ? [{ tool: "read_file", input: { path: "src/base.test.sh" } }]
+            : [{ text: "看完了" }];
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sseTurn(body.model, blocks));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    seen,
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  };
+}
+
+// 按当前源码打一份真产物（与 npm run bundle 同一脚本）
+function buildBundle(base: string): string {
+  const dir = join(base, "bundle");
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  execFileSync(process.execPath, [join(repoRoot, "scripts", "build-bundle.mjs"), "--out", dir], {
+    cwd: repoRoot,
+    stdio: "ignore",
+  });
+  return dir;
+}
+
+test.skipIf(pdSkip)(
+  "pigeon-docker（真容器，真产物）：主 agent 派的 implementer 在治理目录里以镜像用户建出工作树、改动经 take_worker 并回工作区、diff 不含程序状态与工作树、判题通过；explorer 就地读工作区",
+  { timeout: 900_000 },
+  async () => {
+    const up = await workerUpstream();
+    const { base, outDir, rows } = await runSteps({
+      bundle: buildBundle,
+      upstream: async () => up,
+      maxSteps: 1,
+      maxTurns: 12,
+    });
+    try {
+      assert.equal(rows.length, 1, JSON.stringify(rows.map((r) => [r.seq, r.status])));
+      const row = rows[0];
+      // 治理根与工作区分开时派 worker 的工具照常注册
+      assert.ok(
+        up.seen.mainTools[0]?.includes("spawn_worker") &&
+          up.seen.mainTools[0]?.includes("take_worker"),
+        JSON.stringify(up.seen.mainTools[0])
+      );
+      assert.equal(row?.status, "completed", JSON.stringify(row?.agentReport));
+      assert.equal(row?.outcome, "passed");
+      const diff = readFileSync(join(outDir, row?.diff ?? ""), "utf8");
+      assert.match(diff, /src\/a\.txt/);
+      assert.doesNotMatch(diff, /\.pigeon|worktrees|pigeon-gov/, "diff 不含程序状态与工作树");
+      // 工作树在作业的治理目录下、由镜像用户建出，里面是 worker 自己的改动；explorer 不建工作树
+      const jobDir = join(outDir, "streams", "tasks-pigeon-docker-1");
+      const entries = readdirSync(worktreesDirOf(jobDir));
+      assert.ok(entries.length === 1 && entries[0]?.endsWith("-w1"), JSON.stringify(entries));
+      const worktree = join(worktreesDirOf(jobDir), entries[0] ?? "");
+      const imageUid = execFileSync("docker", ["run", "--rm", "--entrypoint", "id", PD_IMAGE, "-u"])
+        .toString("utf8")
+        .trim();
+      assert.equal(String(statSync(worktree).uid), imageUid);
+      assert.equal(readFileSync(join(worktree, "src", "a.txt"), "utf8"), "alpha\n");
+      // explorer 读到的是工作区里的文件
+      assert.ok(
+        up.seen.explorerResults.some((result) => result.includes("grep -q base")),
+        JSON.stringify(up.seen.explorerResults)
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   }
 );
