@@ -85,12 +85,15 @@ export interface StreamRunIdentity {
       [external: `ext-${string}`]: Record<string, unknown> | undefined;
     };
   };
-  // 只记不比：路数、账号数与各账号并发上限（加账号前写下的身份头没有后两项）
+  // 只记不比：路数、账号数与各账号并发上限（加账号前写下的身份头没有后两项）；网关留存（394，格式版本与上限）与
+  // 高峰暂停（393，余量）开了才有，续跑时开关或取值有变即在 infoLog 追加一条
   info: {
     concurrency: number;
     accounts?: number;
     accountConcurrency?: number[];
     harness: HarnessRef;
+    gatewayRetention?: { version: number; maxTaskBytes: number; maxJobBytes: number };
+    peakPause?: { marginMs: number };
   };
 }
 
