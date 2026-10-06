@@ -26,11 +26,14 @@
 //   花费（决策 235）：每条成功的请求（含网关自己的探测）按请求开始与结束时刻逐条计价（state/model-pricing.ts），记到作业上并
 //   计入全局累计；全局累计落盘，进程重启或续跑时接着累计；累计到上限即交给限额控制器停批。
 //   计时（退避、探测间隔、重试等待、上限回升、计价时刻）都经可注入的时钟；close() 取消全部未到的定时。
+//   逐请求留存（决策 394，gateway-retention.ts）：setRetention 给了才记，跑批器每步经 retainStep 告知作业在做哪一步；
+//   只读请求体与回复正文，转发的字节不变；没给即与之前逐字相同。
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { requestCostCny } from "../state/model-pricing.ts";
+import type { ExchangeOutcome, GatewayRetention } from "./gateway-retention.ts";
 import {
   BACKOFF_DELAYS_MS,
   classifyUpstreamFailure,
@@ -228,6 +231,10 @@ export interface ModelGateway {
   probe(): Promise<boolean>;
   // 全局花费累计（含探测，含续跑前落盘的部分）与上限
   spend(): GatewaySpendRecord & { limitCny: number | null };
+  // 逐请求留存（决策 394）：给了即此后按作业落盘，undefined 即不再记
+  setRetention(retention: GatewayRetention | undefined): void;
+  // 跑批器：这个作业开始做第 seq 步（返回结束函数）；没开留存时什么也不做
+  retainStep(job: string, jobDir: string, seq: number): () => void;
   close(): Promise<void>;
 }
 
@@ -554,6 +561,8 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
   };
   const label = (i: number) => `账号 ${i + 1}`;
   let closed = false;
+  // 逐请求留存（394）：setRetention 给了才记
+  let retention: GatewayRetention | undefined;
   // 关闭时中止探测请求
   const closing = new AbortController();
 
@@ -944,14 +953,19 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
     jobInFlight.set(job, inFlight);
     const meter = meterOf(job);
     meter.peakInFlight = Math.max(meter.peakInFlight, inFlight);
+    // 逐请求留存（394）：只读原始请求体与请求头；结局在下面各条交回的路上记进 outcome，收尾时落盘
+    const exchange = retention?.open(job, raw, req.headers);
+    const outcome: ExchangeOutcome = { status: 0 };
     // 连不上上游或中途断流记为这个作业的上游故障；客户端自己断开（agent 撞上限被中止等）不算
     try {
       await forward();
     } catch (error) {
       if (!abort.signal.aborted) meterOf(job).upstreamFailures += 1;
+      outcome.error = error instanceof Error ? error.message : String(error);
       throw error;
     } finally {
       jobInFlight.set(job, (jobInFlight.get(job) ?? 1) - 1);
+      exchange?.finish(outcome);
     }
 
     async function forward(): Promise<void> {
@@ -963,10 +977,13 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
         const slot = await acquire(job, abort.signal);
         if (slot === "aborted") return;
         if (slot === "none") {
-          if (last === undefined || options.limits.state === "running") paused(res);
-          else {
+          if (last === undefined || options.limits.state === "running") {
+            paused(res);
+            outcome.status = 529;
+          } else {
             res.writeHead(last.status, { "content-type": last.contentType });
             res.end(scrubKeys(last.text, keys));
+            Object.assign(outcome, { status: last.status, text: last.text });
           }
           return;
         }
@@ -1035,6 +1052,7 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
             }
             res.writeHead(upstream.status, { "content-type": contentType });
             res.end(scrubKeys(text, keys));
+            Object.assign(outcome, { status: upstream.status, text });
             return;
           }
           if (slot.round === account.round) account.level = 0;
@@ -1048,14 +1066,19 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
           meter.accountRequests[index] = (meter.accountRequests[index] ?? 0) + 1;
           const decoder = new TextDecoder();
           let text = "";
+          // 正文边收边记在 outcome 上：中途断流时留存记下已收到的部分
+          outcome.status = 200;
           if (upstream.body !== null) {
             for await (const chunk of upstream.body) {
               res.write(chunk);
               text += decoder.decode(chunk as Uint8Array, { stream: true });
+              outcome.text = text;
             }
           }
           res.end();
+          outcome.text = text;
           const usage = usageOf(text);
+          outcome.usage = usage;
           meter.input += usage.input;
           meter.output += usage.output;
           meter.cacheRead += usage.cacheRead;
@@ -1207,6 +1230,10 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
       return outcomes.some(Boolean);
     },
     spend: () => ({ ...spent, limitCny: spendLimit }),
+    setRetention: (r) => {
+      retention = r;
+    },
+    retainStep: (job, jobDir, seq) => retention?.beginStep(job, jobDir, seq) ?? (() => {}),
     close: () =>
       new Promise<void>((resolve) => {
         // 决策 352：还没落盘的花费在关闭时写定
