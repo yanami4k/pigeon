@@ -63,6 +63,9 @@ export function hasSessionHistory(
 // 按需检查：已有结果的（/reload 沿用开局的）不重查
 export function toolEnvironmentProbe(input: {
   frozen?: ToolEnvironment;
+  // 决策 359 的"工作区是 git 仓库"探的是工作区根（worker 的 git 工作树从它分出来）；
+  // 治理根与工作区根分开（--governance-root）时两者不同，探治理根会误判
+  workspaceRoot: string;
   governanceRoot: string;
   sessionsDir: string;
   current: { sessionId: string; parentSessionId?: string };
@@ -72,7 +75,7 @@ export function toolEnvironmentProbe(input: {
   const environment: ToolEnvironment = { ...input.frozen };
   const probes: Record<keyof ToolEnvironment, () => boolean> = {
     dockerOnPath: () => executableOnPath("docker", input.env),
-    gitWorkspace: () => isGitWorkspace(input.governanceRoot),
+    gitWorkspace: () => isGitWorkspace(input.workspaceRoot),
     sessionHistory: () => hasSessionHistory(input.sessionsDir, input.current),
     webSearch: () => input.searchBackend,
   };
