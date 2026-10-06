@@ -1436,7 +1436,8 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
     const t = await toy();
     try {
       const clue = "作废尝试留下的线索甲乙丙";
-      const kept = "前一步留下的线索丁戊己";
+      // 新检索按词匹配（二元组）：两条线索用词不相交，"作废的搜不到"才只由"会话已移走"决定
+      const kept = "前一步的记号丁戊己";
       const sessionIds = { kept: "", voided: "" };
       const seenOnRetry: { voidedHits: number; keptHits: number; sessions: string[] }[] = [];
       const calls: StepAgentInput[] = [];
@@ -1456,7 +1457,7 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
           homeDir: join(t.base, "home"),
         });
       const hitsOf = async (sessionsDir: string, keyword: string) =>
-        (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).total;
+        (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).totalHits;
       const agent: StepAgent = {
         async run(input) {
           calls.push(input);

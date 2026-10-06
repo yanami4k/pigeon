@@ -8,6 +8,7 @@ import path from "node:path";
 import { STATUS_BLOCK_VERSION } from "../application/status-block.ts";
 import { removeWorkspaceContainer, startWorkspaceContainer } from "../execution/container-host.ts";
 import { MEMORY_TEXT_VERSION } from "../memory/learned.ts";
+import { SESSION_SEARCH_VERSION } from "../memory/session-search.ts";
 import {
   DEFAULT_THINKING_LEVEL,
   GATEWAY_PROVIDER,
@@ -179,6 +180,8 @@ export function effectivePigeonSettings(pigeon: StreamPigeonOptions, modelId: st
     memoryLimitChars: pigeon.memoryLimitChars ?? DEFAULT_MEMORY_LIMITS.project,
     // 决策 328、332：推送段的文字版本（文字一改即换条件，续跑判为不同）
     memoryTextVersion: MEMORY_TEXT_VERSION,
+    // 决策 384：会话检索的行为版本（切分、打分、范围、归并或片段一改即换条件；之前写下的身份头没有这一项，续跑判为不同）
+    sessionSearchVersion: SESSION_SEARCH_VERSION,
     // 决策 363：开工状态块的文字版本（看板或状态块的文字一改即换条件）
     statusBlockVersion: STATUS_BLOCK_VERSION,
     // 决策 265：主 agent 派 worker 在各条件里的实际生效值

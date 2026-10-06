@@ -111,6 +111,7 @@ import {
   runCommandTimeoutsOf,
   type SettingsSnapshot,
   searchLimitsOf,
+  sessionSearchEnabledOf,
   truncationContinuationOf,
 } from "../state/settings.ts";
 import {
@@ -316,8 +317,10 @@ export interface RuntimeDeps {
   // 决策 324：钩子拦下或出错时的一行提示（终端界面落消息区；缺省静默）
   hooksNotice?: WarnSink;
   // 决策 193：能否检索历史会话。关掉时不注册 search_sessions、read_session_entry 与 list_sessions（339），系统提示去掉提到它们的那一句；
-  // 缺省开着（日常使用与 193 之前逐字一致）
+  // 缺省开着（日常使用与 193 之前逐字一致）。决策 382：使用者另有设置项与启动参数两个开关（都在装配之前并入这一项）
   sessionSearch?: boolean;
+  // 决策 382：使用者开关关掉时的原因（写进开局记录的 skippedTools）；跑批按条件关掉时不给（照旧不记）
+  sessionSearchOffReason?: string;
   // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
   compaction?: CompactionConfigInput;
   // 压缩前回调；缺省不挂
@@ -753,14 +756,21 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     return false;
   };
   // M5 S2（决策 038）：Session Search 的 read 档工具（决策 339 加会话目录，共三件），范围只限本项目会话目录；
-  // 决策 193 的开关关掉时一件都不注册；决策 359：本会话所在的会话树以外没有会话（搜不到东西）时也不注册
+  // 决策 193 的开关关掉时一件都不注册；决策 382：使用者开关（设置 sessionSearch.enabled 或 --no-session-search，
+  // 由入口并入 deps.sessionSearch 并给原因）关掉时同样不注册，原因写进开局记录；
+  // 决策 359：本会话所在的会话树以外没有会话（搜不到东西）时也不注册
+  const sessionSearchTools = [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL];
+  const sessionSearchOffReason =
+    deps.sessionSearch === false
+      ? deps.sessionSearchOffReason
+      : sessionSearchEnabledOf(settings) === false
+        ? "设置 sessionSearch.enabled 为 false（使用者关掉了会话检索）"
+        : undefined;
   const sessionSearch =
-    (deps.sessionSearch ?? true) &&
-    (environment.check("sessionHistory") ||
-      skip(
-        [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL],
-        "本项目没有历史会话"
-      ));
+    sessionSearchOffReason !== undefined
+      ? skip(sessionSearchTools, sessionSearchOffReason)
+      : deps.sessionSearch !== false &&
+        (environment.check("sessionHistory") || skip(sessionSearchTools, "本项目没有历史会话"));
   // 可搜文本缓存在 .pigeon/state/search-cache/
   const sessionToolOptions = {
     sessionsDir,

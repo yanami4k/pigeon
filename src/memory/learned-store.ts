@@ -81,6 +81,22 @@ export function writeMemoryFile(file: string, text: string): void {
   writeFileAtomic(file, text);
 }
 
+// 已分配过的最大编号（决策 382：删掉的编号不再分配——最大号被删后，新条目从记下的最大号继续，不回头用旧号）。
+// 一层一个小文件（<memory.md>.maxid，在锁内读改写）；文件不在或内容不是正整数按 0 算
+export function readMemoryMaxId(file: string): number {
+  try {
+    const value = Number(readFileSync(`${file}.maxid`, "utf8").trim());
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function writeMemoryMaxId(file: string, id: number): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileAtomic(`${file}.maxid`, `${id}\n`);
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // 等锁途中被取消（signal 触发）：没有拿到锁，work 没有执行

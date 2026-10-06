@@ -49,7 +49,7 @@ async function run(persistThinking: boolean | undefined) {
 }
 
 async function hits(sessionsDir: string, keyword: string): Promise<SessionSearchHit[]> {
-  return (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).hits;
+  return (await createSessionSearch(sessionsDir).search({ keywords: [keyword] })).ranked;
 }
 
 test("选项关闭：历史与读原文提示未持久化与字节数，检索搜不到思考正文", async () => {
@@ -76,10 +76,10 @@ test("选项关闭：历史与读原文提示未持久化与字节数，检索�
     ).content
       .map((block) => ("text" in block ? block.text : ""))
       .join("");
+    const body = `[thinking 未持久化，${bytes} 字节]\n好的`;
     assert.deepEqual(text.split("\n").slice(1), [
-      "--- 正文 ---",
-      `[thinking 未持久化，${bytes} 字节]`,
-      "好的",
+      `--- 正文（共 ${body.length} 字，显示第 0–${body.length} 字）---`,
+      ...body.split("\n"),
     ]);
     assert.equal(text.includes(THINKING), false);
     assert.deepEqual(await hits(t.sessionsDir, THINKING), []);

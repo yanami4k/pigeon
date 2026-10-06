@@ -1,23 +1,23 @@
-// /search 命令层（M5 S2，决策 038）：人的入口，cli REPL 与 tui 共用同一份解析与排版
+// /search 命令层（M5 S2，决策 038；决策 384 改进）：人的入口，cli REPL 与 tui 共用同一份解析与排版
 // （同 030 / 031 方向）；输出是纯字符串，命中片段经 sanitizeTerminalText 净化后才出命令层
 //（036：正文是半信任内容）。检索本身在 memory/session-search.ts，本层不另起扫描。
 // 迁移之前的旧格式会话不检索，末尾给一行计数提示（187 / 211）。
 import {
   createSessionSearch,
   type SessionMessageRole,
-  type SessionSearchHit,
+  type SessionSearchGroup,
 } from "../memory/session-search.ts";
 import { legacySessionsNote } from "../persistence/session-catalog.ts";
 import { sessionSearchCacheDirOf, sessionsDirOf } from "../state/paths.ts";
 import { sanitizeTerminalText } from "./format.ts";
 
-export const DEFAULT_SEARCH_COMMAND_LIMIT = 20;
+export const DEFAULT_SEARCH_COMMAND_LIMIT = 10;
 
 const SEARCHABLE_ROLES: readonly string[] = ["user", "assistant", "toolResult"];
 
 const USAGE =
-  "用法：/search <关键词...> [--tool-output] [--role user|assistant|toolResult] [--limit N]" +
-  "（任一命中即列出，按命中的关键词数排序；大小写不敏感，按字面匹配；缺省只搜对话正文，--tool-output 连同工具输出一起搜）\n";
+  "用法：/search <关键词...> [--conversation-only] [--role user|assistant|toolResult] [--limit N]" +
+  "（任一命中即列出，BM25 打分、同分从新到旧；结果按会话归并；缺省连同工具输出一起搜，--conversation-only 只搜对话正文）\n";
 
 export interface SearchCommandOptions {
   // 工作区根（会话目录在 <root>/.pigeon/state/sessions/，缓存在 <root>/.pigeon/state/search-cache/）
@@ -26,25 +26,32 @@ export interface SearchCommandOptions {
   args: readonly string[];
 }
 
-function formatHit(hit: SessionSearchHit): string {
-  const time = new Date(hit.timestamp).toISOString().slice(0, 16).replace("T", " ");
-  const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
-  return (
-    `${time}  ${hit.sessionId}  第 ${hit.runSeq} 条 ${hit.role}${tool}  ${hit.entryId}  命中：${hit.matchedKeywords.join("、")}\n` +
-    `  ${hit.snippet}`
-  );
+function formatGroup(group: SessionSearchGroup): string {
+  const time = new Date(group.createdAt).toISOString().slice(0, 16).replace("T", " ");
+  const lines = [`${time}  ${group.sessionId}  命中 ${group.hitCount} 条`];
+  for (const hit of group.hits) {
+    const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
+    lines.push(
+      `  第 ${hit.runSeq} 条 ${hit.role}${tool}  ${hit.entryId}  命中：${hit.matchedKeywords.join("、")}`
+    );
+    if (hit.role === "toolResult") {
+      lines.push("  以前的工具输出，可能已过时");
+    }
+    lines.push(`  ${hit.snippet}`);
+  }
+  return lines.join("\n");
 }
 
 export async function runSearchCommand(options: SearchCommandOptions): Promise<string> {
   const keywords: string[] = [];
   let role: SessionMessageRole | undefined;
   let limit = DEFAULT_SEARCH_COMMAND_LIMIT;
-  let includeToolOutput = false;
+  let conversationOnly = false;
   const { args } = options;
   for (let index = 0; index < args.length; index++) {
     const token = args[index];
-    if (token === "--tool-output") {
-      includeToolOutput = true;
+    if (token === "--conversation-only") {
+      conversationOnly = true;
     } else if (token === "--role") {
       const value = args[++index];
       if (value === undefined || !SEARCHABLE_ROLES.includes(value)) {
@@ -60,6 +67,8 @@ export async function runSearchCommand(options: SearchCommandOptions): Promise<s
         throw new Error(`--limit 需要正整数：${raw ?? "（缺取值）"}`);
       }
       limit = value;
+    } else if (token?.startsWith("--")) {
+      throw new Error(`未知选项：${token}\n${USAGE}`);
     } else if (token !== undefined) {
       keywords.push(token);
     }
@@ -68,23 +77,29 @@ export async function runSearchCommand(options: SearchCommandOptions): Promise<s
     return USAGE;
   }
   const sessionsDir = sessionsDirOf(options.root);
-  const { hits, total } = await createSessionSearch(sessionsDir, {
+  const result = await createSessionSearch(sessionsDir, {
     cacheDir: sessionSearchCacheDirOf(options.root),
   }).search(
-    { keywords, includeToolOutput, ...(role !== undefined ? { roles: [role] } : {}) },
-    { limit }
+    {
+      keywords,
+      conversationOnly,
+      ...(role !== undefined ? { roles: [role] } : {}),
+    },
+    { sessionLimit: limit }
   );
   const keywordList = keywords.join("、");
-  const scope = includeToolOutput || role === "toolResult" ? "对话正文与工具输出" : "对话正文";
+  const scope = conversationOnly && role !== "toolResult" ? "仅对话正文" : "对话正文与工具输出";
   const lines: string[] =
-    hits.length === 0
+    result.groups.length === 0
       ? [`没有命中（关键词：${keywordList}；范围：${scope}）`]
       : [
-          `命中 ${hits.length} 条（关键词：${keywordList}；范围：${scope}；按命中的关键词数从多到少，同数从新到旧）`,
-          ...hits.map(formatHit),
+          `命中 ${result.groups.length} 个会话（关键词：${keywordList}；范围：${scope}）`,
+          ...result.groups.map(formatGroup),
         ];
-  if (total > hits.length) {
-    lines.push(`共 ${total} 条命中，只列出前 ${hits.length} 条；换更具体的关键词或 --role 收窄`);
+  if (result.totalSessions > result.groups.length) {
+    lines.push(
+      `共 ${result.totalSessions} 个会话命中，只列出前 ${result.groups.length} 个；换更具体的关键词或 --role 收窄`
+    );
   }
   const legacy = legacySessionsNote(sessionsDir);
   if (legacy !== undefined) {

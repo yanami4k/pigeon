@@ -1,5 +1,6 @@
-// M5 S2（决策 038；决策 339 改进）：三件 read 档工具——search_sessions（默认 20 条 + 总字节上限，超限提示收窄；
-// 任一命中、按命中关键词数排序，缺省只搜对话正文）、read_session_entry（按条目号取一条消息的完整内容块）与
+// M5 S2（决策 038；决策 339、384 改进）：三件 read 档工具——search_sessions（BM25 打分，结果按会话归并，
+// 缺省 5 个会话、最多 10 个 + 总字节上限，超限提示收窄；工具输出缺省在范围内，conversationOnly 只搜对话正文；
+// 不认识的参数报错）、read_session_entry（按条目号读原文：单次上限、给出总长度可按偏移续读、可选前后若干条）与
 // list_sessions（会话目录：开始时间、第一句话、改动过的文件，可按时间与文件筛选、有上限并说明是否截断）；
 // 读新会话存储（决策 185），检索与目录排除当前会话。agent 可见的说明与输出冻结，这里逐字核对；经真实 Adapter
 // 调用时会话存储里只有这一次调用与它的工具结果（read 档自动放行，审批闸标记为策略放行）。
@@ -28,12 +29,14 @@ import {
   createReadSessionEntryTool,
   createSearchSessionsTool,
   DEFAULT_LIST_SESSIONS_LIMIT,
-  DEFAULT_SEARCH_TOOL_LIMIT,
   LIST_SESSIONS_TOOL,
+  MAX_READ_ENTRY_CHARS,
+  READ_ENTRY_CHARS,
   READ_SESSION_ENTRY_TOOL,
   SEARCH_SESSIONS_TOOL,
   sessionToolRegistrations,
 } from "./search-tools.ts";
+import { DEFAULT_SESSION_LIMIT, GROUP_SNIPPET_HITS, MAX_SESSION_LIMIT } from "./session-search.ts";
 
 const SESSION = asSessionId("sess_01JAAAAAA30000000000000000");
 
@@ -63,7 +66,7 @@ const SCOPE =
   "找不到的：当前任务的背景（以当前任务的说明为准）、最新的代码（以前会话里看到的代码可能已经过时）。" +
   "代码现状请直接读代码，代码的来历用 git log 与 git blame。";
 
-test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找不到的、代码现状与来历去哪里看、工具输出缺省不搜及如何打开", () => {
+test("决策 339 ⑦、384：三件工具的说明逐字冻结——能找到的与找不到的、工具输出在范围内且可能过时、关键词写法、按会话归并与读原文分页", () => {
   const search = createSearchSessionsTool({ sessionsDir: "x" });
   const read = createReadSessionEntryTool({ sessionsDir: "x" });
   const list = createListSessionsTool({ sessionsDir: "x" });
@@ -71,16 +74,22 @@ test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找
     search.description,
     "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中）。" +
       SCOPE +
-      "缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；" +
-      "要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。" +
-      "关键词大小写不敏感、按字面子串匹配、不支持正则，最多 8 个，任一命中即列出；" +
-      "结果按命中的关键词数从多到少、同数从新到旧排序，每条标出命中了哪些关键词，最多 20 条。" +
+      "以前的工具输出（命令输出、读过的文件内容等）也在检索范围内：可能已过时，依赖之前先核实现状；" +
+      "以前的工具调用是当时的尝试，不代表最终结果。只搜对话正文（使用者的话与模型回复）给 conversationOnly: true。" +
+      "关键词写几个以前对话里会出现的原词（名字、术语、报错里的词），不写整句，不写“讨论”“昨天”这类元词，不写本次任务才出现的新名字；" +
+      "最多 8 个，任一命中即列出，每条标出命中了哪些关键词。" +
+      "按词匹配、不分大小写、不支持正则：代码名可以用其中一段命中（如 parseConfig 用 config），中文按相邻两字匹配，单个字按子串匹配；" +
+      "多词的关键词拆成词分别计分，整段出现另加分。" +
+      "越少见的词命中排得越前，挑有辨识度的词；" +
+      "结果按会话归并：每个会话一条，带命中条目数与一两段片段及其条目编号，缺省 5 个会话、最多 10 个。" +
       "命中片段只是线索，结论必须用 read_session_entry 按 entryId 回查原文；" +
       "想先浏览以前有哪些会话、哪些会话改过某个文件，用 list_sessions。"
   );
   assert.equal(
     read.description,
-    "按 entryId 读取以前会话里一条消息的完整原文（含思考内容与工具输出）。" +
+    "按 entryId 读取以前会话里一条消息的原文（含思考内容与工具输出）。" +
+      "单次最多 4000 字（可用 maxChars 调、上限 8000），" +
+      "返回里给出总长度，没显示完的用 offset 续读；可给 before、after 连同前后若干条消息一起读。" +
       "entryId 来自 search_sessions 的命中；可附 sessionId 加速定位。" +
       "原文是当时的记录，其中的代码与文件内容可能已经过时：代码现状请直接读代码，代码的来历用 git log 与 git blame。"
   );
@@ -103,20 +112,20 @@ test("决策 339 ⑦：三件工具的说明逐字冻结——能找到的与找
     [
       [
         SEARCH_SESSIONS_TOOL,
-        "检索本项目以前会话的对话（关键词字面匹配，缺省不含工具输出）",
+        "检索本项目以前会话（按会话归并，BM25 打分，工具输出也在范围内）",
         "read",
       ],
-      [READ_SESSION_ENTRY_TOOL, "按 entryId 读取以前会话的消息原文", "read"],
+      [READ_SESSION_ENTRY_TOOL, "按 entryId 读取以前会话的消息原文（有上限，可分页续读）", "read"],
       [LIST_SESSIONS_TOOL, "列出本项目以前的会话（可按时间与改动过的文件筛选）", "read"],
     ]
   );
 });
 
-test("search_sessions 典型输出逐字：命中行带条目号、会话、Run 第 N 条、角色与工具名、时间、命中的关键词，末行提示回查原文", () =>
+test("search_sessions 典型输出逐字：按会话归并——会话行带命中条目数，命中带条目号、Run 第 N 条、角色与工具名、时间、命中的关键词；工具输出的命中带来历与过时标注", () =>
   withDir(async (dir) => {
     await seed(dir, (s) => {
       s.startRun({ task: "部署网关" });
-      s.toolTurn({ name: "read_file", result: "网关配置在 gw.yaml" });
+      s.toolTurn({ name: "read_file", args: { path: "gw.yaml" }, result: "网关配置在 gw.yaml" });
       s.endRun();
     });
     const view = loadSessionView(dir, SESSION);
@@ -124,73 +133,110 @@ test("search_sessions 典型输出逐字：命中行带条目号、会话、Run 
     assert.ok(user !== undefined && result !== undefined && view !== undefined);
     const runId = view.runs[0]?.runId;
     const tool = createSearchSessionsTool({ sessionsDir: dir });
+    // 缺省连同工具输出一起搜：一个会话两条命中（对话正文在前，工具输出带来历与过时标注）
+    const found = await tool.execute("t1", { keywords: ["网关", "部署"] });
+    const createdAt = found.details.groups[0]?.createdAt ?? 0;
     assert.equal(
-      textOf(await tool.execute("t1", { keywords: ["网关", "部署"] })),
+      textOf(found),
       [
-        "命中 1 条（关键词：网关、部署；范围：对话正文；按命中的关键词数从多到少，同数从新到旧）：",
-        `- ${user.entryId}｜会话 ${SESSION}｜${runId} 第 1 条｜user｜${new Date(user.timestamp).toISOString()}｜命中：网关、部署`,
+        "命中 1 个会话（关键词：网关、部署；范围：对话正文与工具输出）：",
+        `- 会话 ${SESSION}｜开始 ${new Date(createdAt).toISOString().slice(0, 16).replace("T", " ")}｜命中 2 条`,
+        `  ${user.entryId}｜${runId} 第 1 条｜user｜${new Date(user.timestamp).toISOString()}｜命中：网关、部署`,
         "  部署网关",
+        `  ${result.entryId}｜${runId} 第 3 条｜toolResult（read_file）｜${new Date(result.timestamp).toISOString()}｜命中：网关`,
+        `  以前的工具输出，可能已过时（read_file｜{"path":"gw.yaml"}｜${new Date(result.timestamp).toISOString()}）：`,
+        "  网关配置在 gw.yaml",
         "片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。",
       ].join("\n")
     );
-    // 连同工具输出：只核对条数与多出的工具结果那条命中（角色带工具名）；版式已由上一次逐字核对
-    const withTools = textOf(
-      await tool.execute("t2", { keywords: ["网关", "部署"], includeToolOutput: true })
+    // 只搜对话正文：工具输出那条不在
+    const conversationOnly = textOf(
+      await tool.execute("t2", { keywords: ["网关", "部署"], conversationOnly: true })
     );
-    assert.match(withTools, /^命中 2 条（/);
-    assert.ok(
-      withTools.includes(
-        [
-          `- ${result.entryId}｜会话 ${SESSION}｜${runId} 第 3 条｜toolResult（read_file）｜${new Date(result.timestamp).toISOString()}｜命中：网关`,
-          "  网关配置在 gw.yaml",
-        ].join("\n")
-      ),
-      withTools
+    assert.match(conversationOnly, /范围：仅对话正文/);
+    assert.ok(!conversationOnly.includes("toolResult"), conversationOnly);
+    assert.equal(
+      textOf(await tool.execute("t3", { keywords: ["gw.yaml"], conversationOnly: true })),
+      "没有命中（关键词：gw.yaml；范围：仅对话正文）。可以换同义词或别的说法再试，或去掉 conversationOnly 连同工具输出一起搜。"
     );
     assert.equal(
-      textOf(await tool.execute("t3", { keywords: ["gw.yaml"] })),
-      "没有命中（关键词：gw.yaml；范围：对话正文）。可以换同义词或别的说法再试，或给 includeToolOutput: true 连同工具输出一起搜。"
-    );
-    assert.equal(
-      textOf(await tool.execute("t4", { keywords: ["无此词"], includeToolOutput: true })),
+      textOf(await tool.execute("t4", { keywords: ["无此词"] })),
       "没有命中（关键词：无此词；范围：对话正文与工具输出）。可以换同义词或别的说法再试。"
     );
   }));
 
-test("search_sessions 默认 20 条上限并提示收窄（去上限变红）", () =>
+test("search_sessions 缺省列 5 个会话、最多 10 个，超出提示收窄（去上限变红）", () =>
   withDir(async (dir) => {
-    await seed(dir, (s) => {
-      s.startRun({ task: "match 第 1 条" });
-      for (let index = 2; index <= 25; index++) {
-        s.user(`match 第 ${index} 条`);
-      }
-      s.endRun();
-    });
+    for (let index = 0; index < 7; index++) {
+      const id = asSessionId(`sess_01JAAAAAA1${index}${"0".repeat(15)}`);
+      await seed(
+        dir,
+        (s) => {
+          s.startRun({ task: `match 第 ${index} 个会话` });
+          s.endRun();
+        },
+        id
+      );
+    }
     const tool = createSearchSessionsTool({ sessionsDir: dir });
     assert.equal(tool.name, SEARCH_SESSIONS_TOOL);
     const result = await tool.execute("t1", { keywords: ["match"] });
-    assert.equal(DEFAULT_SEARCH_TOOL_LIMIT, 20);
-    assert.equal(result.details.hits.length, 20);
-    assert.equal(result.details.total, 25);
+    assert.equal(DEFAULT_SESSION_LIMIT, 5);
+    assert.equal(MAX_SESSION_LIMIT, 10);
+    assert.equal(result.details.groups.length, 5);
+    assert.equal(result.details.totalSessions, 7);
+    assert.equal(result.details.totalHits, 7);
     assert.equal(result.details.limited, true);
-    assert.match(textOf(result), /共 25 条命中，只列出前 20 条；请换更具体的关键词收窄。/);
+    assert.match(textOf(result), /共 7 个会话命中，只列出前 5 个；请换更具体的关键词收窄。/);
     assert.match(textOf(result), /read_session_entry/);
+    const ten = await tool.execute("t2", { keywords: ["match"], limit: 10 });
+    assert.equal(ten.details.groups.length, 7);
+    assert.equal(ten.details.limited, false);
+    // 每个会话至多两段片段
+    assert.ok(GROUP_SNIPPET_HITS === 2);
   }));
 
 test("search_sessions 总字节上限：超出即停并提示收窄", () =>
   withDir(async (dir) => {
-    await seed(dir, (s) => {
-      s.startRun({ task: `match ${"长".repeat(60)} 1` });
-      for (let index = 2; index <= 10; index++) {
-        s.user(`match ${"长".repeat(60)} ${index}`);
-      }
-      s.endRun();
-    });
+    for (let index = 0; index < 10; index++) {
+      const id = asSessionId(`sess_01JAAAAAA2${index}${"0".repeat(15)}`);
+      await seed(
+        dir,
+        (s) => {
+          s.startRun({ task: `match ${"长".repeat(60)} ${index}` });
+          s.endRun();
+        },
+        id
+      );
+    }
     const tool = createSearchSessionsTool({ sessionsDir: dir, maxBytes: 800 });
     const result = await tool.execute("t1", { keywords: ["match"] });
-    assert.ok(result.details.hits.length > 0 && result.details.hits.length < 10);
+    assert.ok(result.details.groups.length > 0 && result.details.groups.length < 10);
     assert.equal(result.details.byteCapped, true);
     assert.match(textOf(result), /字节上限/);
+  }));
+
+test("决策 384：三件工具对不认识的参数报错说明（如 sessionId），不静默丢弃", () =>
+  withDir(async (dir) => {
+    await seed(dir, (s) => {
+      s.startRun({ task: "needle" });
+      s.endRun();
+    });
+    const search = createSearchSessionsTool({ sessionsDir: dir });
+    await assert.rejects(
+      search.execute("t1", { keywords: ["needle"], sessionId: "sess_x" } as never),
+      /search_sessions 不认识的参数：sessionId（可用：keywords、conversationOnly、limit）/
+    );
+    const read = createReadSessionEntryTool({ sessionsDir: dir });
+    await assert.rejects(
+      read.execute("t2", { entryId: "e", keywords: ["x"] } as never),
+      /read_session_entry 不认识的参数：keywords/
+    );
+    const list = createListSessionsTool({ sessionsDir: dir });
+    await assert.rejects(
+      list.execute("t3", { sessionId: "sess_x" } as never),
+      /list_sessions 不认识的参数：sessionId/
+    );
   }));
 
 test("read_session_entry 典型输出逐字：头行、正文分隔、thinking 与工具调用块；不再有正文哈希与治理邻居", () =>
@@ -217,14 +263,13 @@ test("read_session_entry 典型输出逐字：头行、正文分隔、thinking �
     const tool = createReadSessionEntryTool({ sessionsDir: dir });
     assert.equal(tool.name, READ_SESSION_ENTRY_TOOL);
     const read = await tool.execute("t1", { entryId: assistant.entryId });
+    const full = "[thinking] 先读文件\n我来改\n[toolCall] edit_file（tc-1）";
     assert.equal(
       textOf(read),
       [
         `[${assistant.entryId}｜会话 ${SESSION}｜${runId} 第 2 条｜assistant｜${new Date(assistant.timestamp).toISOString()}]`,
-        "--- 正文 ---",
-        "[thinking] 先读文件",
-        "我来改",
-        "[toolCall] edit_file（tc-1）",
+        `--- 正文（共 ${full.length} 字，显示第 0–${full.length} 字）---`,
+        full,
       ].join("\n")
     );
     assert.deepEqual(read.details, {
@@ -233,18 +278,22 @@ test("read_session_entry 典型输出逐字：头行、正文分隔、thinking �
       runId,
       runSeq: 2,
       role: "assistant",
+      totalChars: full.length,
+      offset: 0,
+      truncated: false,
     });
+    const errorText = "失败：锚点不唯一";
     assert.equal(
       textOf(await tool.execute("t2", { entryId: result.entryId, sessionId: SESSION })),
       [
         `[${result.entryId}｜会话 ${SESSION}｜${runId} 第 3 条｜toolResult（edit_file，出错）｜${new Date(result.timestamp).toISOString()}]`,
-        "--- 正文 ---",
-        "失败：锚点不唯一",
+        `--- 正文（共 ${errorText.length} 字，显示第 0–${errorText.length} 字）---`,
+        errorText,
       ].join("\n")
     );
   }));
 
-test("read_session_entry：完整原文不截断；找不到条目响亮报错；给错会话号也找不到", () =>
+test("read_session_entry：单次上限给出总长度、可按偏移续读（去上限或吃掉续读提示变红）；找不到条目响亮报错", () =>
   withDir(async (dir) => {
     const long = "很长的工具输出".repeat(20_000);
     await seed(dir, (s) => {
@@ -256,13 +305,65 @@ test("read_session_entry：完整原文不截断；找不到条目响亮报错�
     await seed(dir, (s) => s.startRun({ task: "另一个会话" }), other);
     const entryId = loadSessionView(dir, SESSION)?.messages[2]?.entryId ?? "";
     const tool = createReadSessionEntryTool({ sessionsDir: dir });
-    const text = textOf(await tool.execute("t1", { entryId }));
-    assert.ok(text.endsWith(long));
+    const first = await tool.execute("t1", { entryId });
+    assert.equal(READ_ENTRY_CHARS, 4_000);
+    assert.equal(MAX_READ_ENTRY_CHARS, 8_000);
+    assert.equal(first.details.totalChars, long.length);
+    assert.equal(first.details.truncated, true);
+    const text = textOf(first);
+    assert.ok(
+      text.includes(`--- 正文（共 ${long.length} 字，显示第 0–${READ_ENTRY_CHARS} 字）---`),
+      text
+    );
+    assert.ok(text.includes(`（未显示完：用 offset: ${READ_ENTRY_CHARS} 续读）`), text);
+    assert.ok(!text.endsWith(long), "单次读出不得超过上限");
+    // 续读：offset 接上，两段拼回原文；maxChars 可调
+    const second = await tool.execute("t2", { entryId, offset: READ_ENTRY_CHARS, maxChars: 8_000 });
+    assert.equal(second.details.offset, READ_ENTRY_CHARS);
+    assert.equal(second.details.truncated, true);
+    const secondSlice = textOf(second);
+    assert.ok(
+      secondSlice.includes(`显示第 ${READ_ENTRY_CHARS}–${READ_ENTRY_CHARS + 8_000} 字`),
+      secondSlice
+    );
+    const tail = await tool.execute("t3", { entryId, offset: long.length - 10 });
+    assert.ok(textOf(tail).endsWith(long.slice(-10)));
     await assert.rejects(
-      tool.execute("t2", { entryId: "no-such-entry" }),
+      tool.execute("t4", { entryId, offset: long.length + 1 }),
+      /超出正文总长度/
+    );
+    await assert.rejects(
+      tool.execute("t5", { entryId: "no-such-entry" }),
       /未找到 entry no-such-entry/
     );
-    await assert.rejects(tool.execute("t3", { entryId, sessionId: other }), /未找到 entry/);
+    await assert.rejects(tool.execute("t6", { entryId, sessionId: other }), /未找到 entry/);
+  }));
+
+test("read_session_entry：可选读前后若干条消息（各自截断，标注读全文的方法）", () =>
+  withDir(async (dir) => {
+    await seed(dir, (s) => {
+      s.startRun({ task: "第一条上下文" });
+      s.assistant({ text: "中间那条 needle" });
+      s.assistant({ text: `后一条 ${"长".repeat(2_000)}` });
+      s.endRun();
+    });
+    const view = loadSessionView(dir, SESSION);
+    const middle = view?.messages[1];
+    assert.ok(middle !== undefined);
+    const tool = createReadSessionEntryTool({ sessionsDir: dir });
+    const result = await tool.execute("t1", { entryId: middle.entryId, before: 1, after: 1 });
+    const text = textOf(result);
+    assert.ok(text.includes("--- 前 1 条 ---"), text);
+    assert.ok(text.includes("第一条上下文"), text);
+    assert.ok(text.includes("--- 后 1 条 ---"), text);
+    assert.ok(text.includes("截断；读全文用 entryId 加 read_session_entry"), text);
+    // 主条不受前后条影响，详情照实
+    assert.equal(result.details.entryId, middle.entryId);
+    assert.equal(result.details.truncated, false);
+    // 超出消息范围时按实际有的给
+    const first = view?.messages[0];
+    const edge = textOf(await tool.execute("t2", { entryId: first?.entryId ?? "", before: 3 }));
+    assert.ok(!edge.includes("--- 前"), edge);
   }));
 
 test("经真实 Adapter 调用 search_sessions：read 档自动放行，会话存储里只有这一次调用与它的工具结果", () =>
@@ -320,7 +421,7 @@ test("经真实 Adapter 调用 search_sessions：read 档自动放行，会话�
     const result = await adapter.run("我们以前部署过什么");
     assert.equal(result.status, "completed");
     await adapter.dispose();
-    assert.match(outputs[0] ?? "", /^命中 1 条/);
+    assert.match(outputs[0] ?? "", /^命中 1 个会话/);
 
     // 工具调用只有一次、工具结果只有一条：都是 search_sessions，结果未出错，审批闸标记为策略自动放行
     const calls = written.flatMap((message) =>
@@ -358,7 +459,7 @@ test("决策 339 ①：search_sessions 与 list_sessions 排除当前会话；re
     const options = { sessionsDir: dir, current: { sessionId: current } };
     const search = await createSearchSessionsTool(options).execute("t1", { keywords: ["needle"] });
     assert.deepEqual(
-      search.details.hits.map((hit) => hit.sessionId),
+      search.details.groups.map((group) => group.sessionId),
       [SESSION]
     );
     const list = await createListSessionsTool(options).execute("t2", {});

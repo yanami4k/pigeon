@@ -295,6 +295,7 @@ async function resumeMain(argv: string[]): Promise<void> {
   const flags = parseLaunchFlags(modelArgv, {
     usage: modelUsage,
     pushedMemory: true,
+    sessionSearch: true,
     sandbox: true,
   });
   const streamFnSpec = resolveStreamFnSpec(flags, modelUsage);
@@ -434,6 +435,7 @@ async function runMain(argv: string[]): Promise<void> {
   }
   const flags = parseLaunchFlags(modelArgv, {
     usage,
+    sessionSearch: true,
     pushedMemory: true,
     sandbox: true,
     spawnWorkers: true,
@@ -479,6 +481,8 @@ async function runMain(argv: string[]): Promise<void> {
     ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
     // 决策 191、244：推送记忆缺省开着（--no-pushed-memory 关掉）；无人值守
     pushedMemory: flags.pushedMemory,
+    // 决策 382：会话检索缺省开着（--no-session-search 关掉）
+    sessionSearch: flags.sessionSearch,
     // 决策 264–267：主 agent 派 worker 缺省开着（--no-spawn-workers 关掉）；--sandbox 时由 headless 略过（沙箱里不派 worker）
     spawnWorkers: flags.spawnWorkers,
     // 决策 309：脚本编排随派 worker 打开，任务描述算作点名
@@ -1234,6 +1238,7 @@ async function lineMain(argv: string[]): Promise<void> {
   const startUsage = `pigeon --line 支持 ${SESSION_FLAGS_HINT}`;
   const flags = parseLaunchFlags(argv, {
     usage: startUsage,
+    sessionSearch: true,
     pushedMemory: true,
     sandbox: true,
   });

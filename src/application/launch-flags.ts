@@ -25,6 +25,7 @@ export const VALUELESS_FLAGS = new Set([
   "--yolo",
   "--no-persist-thinking",
   "--no-pushed-memory",
+  "--no-session-search",
   "--no-spawn-workers",
   "--no-hooks",
   "--no-web",
@@ -68,9 +69,12 @@ export interface LaunchFlags {
   temperature?: number;
   // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（仅 TUI 接受）
   historyLimit?: number;
-  // 决策 191、244：推送记忆——日常入口缺省开着（与会话检索开关的缺省一致），--no-pushed-memory 关掉（关掉即不推送、
-  // 不注册记忆工具）。cli REPL / resume、tui 与 pigeon run 接受。两层上限在设置的 memory 一节（决策 332），不设启动参数
+  // 决策 191、244：推送记忆——日常入口缺省开着，--no-pushed-memory 关掉（关掉即不推送、不注册记忆工具）。
+  // 对称的会话检索开关是 --no-session-search（决策 382，见下）。两层上限在设置的 memory 一节（决策 332），不设启动参数
   pushedMemory: boolean;
+  // 决策 382：会话检索——日常入口缺省开着，--no-session-search 关掉（关掉即不注册检索三件，开局记录写明原因）；
+  // 接受入口同 --no-pushed-memory。设置里另有 sessionSearch.enabled 一项（缺省开）；跑批按条件开关，不接受这个参数
+  sessionSearch: boolean;
   // 决策 188、218：--context-window <n>、--compact-threshold <n>、--compact-keep <n>——上下文压缩的模型窗口、
   // 触发点与保留量（缺省为产品缺省：1M 窗口减预留、保留 20000）；各入口都接受，给了哪项带哪项
   compaction?: CompactionConfigInput;
@@ -105,6 +109,8 @@ export interface ParseLaunchFlagsOptions {
   temperature?: boolean;
   // 是否接受 --no-pushed-memory（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
   pushedMemory?: boolean;
+  // 是否接受 --no-session-search（决策 382；接受入口同 --no-pushed-memory）
+  sessionSearch?: boolean;
   // 是否接受 --sandbox 及其参数（终端界面、命令行对话与续跑、pigeon run）
   sandbox?: boolean;
   // 是否接受 --no-spawn-workers（能派 worker 的入口：终端界面与 pigeon run）
@@ -123,6 +129,7 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
     modelId: DEFAULT_MODEL_PLACEHOLDER.modelId,
     persistThinking: true,
     pushedMemory: true,
+    sessionSearch: true,
     spawnWorkers: true,
   };
   // 环境变量回退：--stream-fn 未给时用 PIGEON_STREAM_FN（决策 067：cli 补齐，与既有报错文案一致）
@@ -178,6 +185,8 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
       }
     } else if (flag === "--no-pushed-memory" && options.pushedMemory === true) {
       flags.pushedMemory = false;
+    } else if (flag === "--no-session-search" && options.sessionSearch === true) {
+      flags.sessionSearch = false;
     } else if (flag === "--thinking") {
       const value = argv[++i];
       if (value === undefined || !isThinkingLevel(value)) {

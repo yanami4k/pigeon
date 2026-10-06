@@ -12,9 +12,11 @@ import {
 } from "../memory/search-tools.ts";
 import { listSessionRefs } from "../persistence/session-catalog.ts";
 import { sessionFileName } from "../persistence/session-reader.ts";
+import { loadStoreSession } from "../persistence/session-view.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import { emptySettingsSnapshot } from "../state/settings.ts";
 import { runHeadless } from "./headless-core.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
 
@@ -72,6 +74,75 @@ test("会话检索开关：关掉时三件工具都不注册、系统提示去�
   assert.doesNotMatch(off.systemPrompt, /search_sessions|read_session_entry|list_sessions/);
 });
 
+test("决策 382：使用者开关关掉即不注册检索三件、开局记录写明原因；跑批条件关掉（无原因）照旧不记", async () => {
+  const searchTools = [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL];
+  const run = async (input: {
+    settingsEnabled?: boolean;
+    sessionSearch?: boolean;
+    offReason?: string;
+  }) => {
+    const root = mkdtempSync(join(tmpdir(), "pigeon-search-user-switch-"));
+    try {
+      // 有历史会话（排除"没有历史会话"那条 skip，只留开关的原因）
+      const earlier = { kind: "header", version: 4, id: newSessionId(), createdAt: 1, cwd: root };
+      mkdirSync(join(sessionsDirOf(root), "earlier"), { recursive: true });
+      writeFileSync(
+        join(sessionsDirOf(root), "earlier", sessionFileName(1, earlier.id)),
+        `${JSON.stringify(earlier)}\n`
+      );
+      const settings = emptySettingsSnapshot(root);
+      if (input.settingsEnabled !== undefined) {
+        settings.merged.sessionSearch = { enabled: input.settingsEnabled };
+      }
+      const streamFn = createFakeStreamFn({ replies: [{ text: "好" }] });
+      const sessionId = newSessionId();
+      const bundle = buildRuntime({
+        streamFn,
+        governanceRoot: root,
+        workspaceRoot: root,
+        homeDir: root,
+        sessionId,
+        yolo: true,
+        provider: "fake-provider",
+        modelId: "fake-model-1",
+        settings,
+        ...(input.sessionSearch !== undefined ? { sessionSearch: input.sessionSearch } : {}),
+        ...(input.offReason !== undefined ? { sessionSearchOffReason: input.offReason } : {}),
+      });
+      const advertised = bundle.adapter.snapshot().tools.advertised;
+      await bundle.adapter.run("你好").finally(() => disposeRuntime(bundle));
+      return {
+        tools: advertised,
+        skipped: loadStoreSession(sessionsDirOf(root), sessionId)?.view.runs[0]?.start.skippedTools,
+      };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  // 设置项关掉：不注册，记原因
+  const bySettings = await run({ settingsEnabled: false });
+  assert.ok(searchTools.every((name) => !bySettings.tools.includes(name)));
+  assert.deepEqual(bySettings.skipped, [
+    { tools: searchTools, reason: "设置 sessionSearch.enabled 为 false（使用者关掉了会话检索）" },
+  ]);
+  // 启动参数关掉（session-runtime 把 flags 译成 deps 与原因）：不注册，记原因
+  const byFlag = await run({
+    sessionSearch: false,
+    offReason: "使用者以 --no-session-search 关掉了会话检索",
+  });
+  assert.ok(searchTools.every((name) => !byFlag.tools.includes(name)));
+  assert.deepEqual(byFlag.skipped, [
+    { tools: searchTools, reason: "使用者以 --no-session-search 关掉了会话检索" },
+  ]);
+  // 跑批按条件关掉：不注册，照旧不记
+  const byCondition = await run({ sessionSearch: false });
+  assert.ok(searchTools.every((name) => !byCondition.tools.includes(name)));
+  assert.deepEqual(byCondition.skipped ?? [], []);
+  // 开着（缺省）：注册，不记
+  const on = await run({});
+  assert.ok(searchTools.every((name) => on.tools.includes(name)));
+});
+
 test("决策 339 ①⑥：装配出的检索工具排除本次运行自己的会话（续接同一会话文件时同样排除），可搜文本缓存在 .pigeon/state/search-cache/", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-self-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-search-self-home-"));
@@ -111,7 +182,7 @@ test("决策 339 ①⑥：装配出的检索工具排除本次运行自己的会
     );
     assert.equal(outputs.length, 2);
     const [searched = "", listed = ""] = outputs;
-    assert.match(searched, /^命中 1 条/);
+    assert.match(searched, /^命中 1 个会话/);
     assert.ok(searched.includes(earlier.result.sessionId) && searched.includes("needle 以前"));
     assert.ok(!searched.includes(current.result.sessionId), searched);
     assert.match(listed, /^以前的会话 1 个/);
@@ -182,7 +253,7 @@ test("决策 339 ①：worker 运行面的检索排除派出它的会话（父�
           : []
       )
       .join("");
-    assert.match(output, /^命中 1 条/);
+    assert.match(output, /^命中 1 个会话/);
     assert.ok(output.includes(earlier.sessionId), output);
     assert.ok(!output.includes(parent.sessionId), output);
   } finally {
