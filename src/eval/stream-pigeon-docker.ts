@@ -1,6 +1,6 @@
 // 对比评测的 Pigeon 容器条件（决策 380、385、389、390；条件名 pigeon-docker）：Pigeon 的打包产物（dist/）以只读方式
-// 挂进题目容器，在容器里跑产品缺省的 pigeon run --yolo --no-web --json，思考档位显式给 high（决策 390：产品缺省改为
-// 开思考的施工另有一段，合并前由启动参数显式给出，合并后两者一致）；模型经只通网关的跑批内部网络（与外部 agent 条件
+// 挂进题目容器，在容器里跑产品缺省的 pigeon run --yolo --no-web --json，思考档位显式给 high（决策 390：产品缺省
+// 也是 high；显式给出使档位不随产品缺省漂移，身份头照记）；模型经只通网关的跑批内部网络（与外部 agent 条件
 // 同一网络档，gateway-network.ts），自带 DeepSeek 接入产物（dist/deepseek-stream-fn.mjs）的端点根由
 // DEEPSEEK_BASE_URL 指到本作业的网关地址。实验镜像没有 node：Node 运行时（官方 Linux x64 构建）同样只读挂载进容器，
 // 不改镜像身份（与人的基准缓存同一道理，工具目录只读挂载的先例）。
@@ -142,7 +142,7 @@ export function pigeonDockerIdentity(
       sessionRetention: "per-job",
       // 产品缺省（无人值守不注册写记忆工具，只推送）
       pushedMemory: true,
-      // 产品缺省：容器里是本机执行端，worker 用容器内仓库的 git 工作树
+      // 产品缺省：容器里是本机执行端，worker 的工作树从容器内仓库分出、建在治理目录下（不进工作区的 diff）
       spawnWorkers: true,
       loopGuard: true,
       taskList: true,

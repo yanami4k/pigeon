@@ -108,7 +108,6 @@ import { isExternalCondition, type StreamCondition, type StreamJobId } from "./s
 import {
   type ConditionSpec,
   dockerStreamEnvs,
-  jobDirName,
   lockOutDir,
   ReferenceCases,
   type RunStreamsSummary,

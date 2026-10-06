@@ -782,7 +782,8 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
 // 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
 // --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）；
-// pigeon-docker 条件（对比评测的 Pigeon 组）：--pigeon-bundle 给打包产物目录（dist/），只读挂载进题目容器跑产品缺省
+// pigeon-docker 条件（对比评测的 Pigeon 组）：--pigeon-bundle 给打包产物目录（dist/）、--pigeon-node-runtime 给 Node 运行时目录
+// （实验镜像没有 node），都只读挂载进题目容器跑产品缺省
 // （--yolo --no-web --json --thinking high），治理根挂到题目仓库之外（见 src/eval/stream-pigeon-docker.ts）。
 // 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
 // Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
@@ -804,6 +805,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "[--task-interfaces <接口数据文件>] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--pigeon-bundle <打包产物目录>（pigeon-docker 条件必给：dist/，只读挂载进题目容器）] " +
+    "[--pigeon-node-runtime <Node 运行时目录>（pigeon-docker 条件必给：含 bin/node，只读挂载进题目容器）] " +
     "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
     "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
     "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
@@ -843,6 +845,7 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "--repetition-preset",
     "--background-closeout-seconds",
     "--pigeon-bundle",
+    "--pigeon-node-runtime",
     "--gateway-retention",
     "--retention-task-mb",
     "--retention-job-mb",
