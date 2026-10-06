@@ -1,9 +1,12 @@
-// Session Search 的三件 read 档工具（M5 S2，决策 038；决策 339 改进）：模型访问以前会话的入口。
-//   - search_sessions：关键词检索（任一命中，按命中关键词数排序），默认上限 20 条并有总字节上限，超限提示收窄，不做分页状态；
-//     缺省只搜对话正文，工具输出以 includeToolOutput 显式打开；
-//   - read_session_entry：按条目号返回一条消息的完整内容块，满足 §3.3 结论回查原文（可读任一会话，含当前会话）；
+// Session Search 的三件 read 档工具（M5 S2，决策 038；决策 339、384 改进）：模型访问以前会话的入口。
+//   - search_sessions：关键词检索（BM25 打分，同分从新到旧；切分与正文同一套），结果按会话归并——每个会话一条，
+//     带命中条目数与一两段片段及其条目编号；缺省列 5 个会话、最多 10 个，并有总字节上限，超限提示收窄，不做分页状态；
+//     工具输出缺省在检索范围内（命中的片段带来历并标"以前的工具输出，可能已过时"），只搜对话正文给 conversationOnly: true；
+//   - read_session_entry：按条目号读回一条消息的原文，单次有上限、给出总长度、可按偏移续读，可选读前后若干条消息
+//     （满足 §3.3 结论回查原文；可读任一会话，含当前会话）；
 //   - list_sessions：会话目录，列出以前的会话及其开始时间、第一句使用者的话与改动过的文件，可按时间与文件筛选。
-// 检索与目录排除当前会话所在的整棵会话树，三件工具自身的输出永不进检索；可搜文本按会话文件缓存（决策 339 ⑥）。
+// 不认识的参数一律报错说明，不静默丢弃（决策 384：诊断里模型传过不存在的 sessionId，被静默丢弃）。
+// 检索与目录排除当前会话所在的整棵会话树，三件工具自身的输出永不进检索；可搜文本与词频表按会话文件缓存（决策 339 ⑥、384）。
 // 三者都是 read 档（§3.9 第 5 档自动放行），调用天然落 tool.proposed / tool.settled——模型翻了
 // 哪些旧账在 trace 可见。范围只限本项目 .pigeon/state/sessions，目录与缓存位置由装配根注入。
 import { type Static, Type } from "typebox";
@@ -18,19 +21,20 @@ import {
   SEARCH_SESSIONS_TOOL,
   type SessionCatalogInfo,
 } from "../state/session-search-text.ts";
-import type { ViewBlock, ViewMessage } from "../state/session-view.ts";
+import type { SessionView, ViewBlock, ViewMessage } from "../state/session-view.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import { listSessionDirectory } from "./session-directory.ts";
 import {
   type CurrentSession,
   createSessionSearch,
-  type SessionSearchHit,
+  DEFAULT_SESSION_LIMIT,
+  MAX_SESSION_LIMIT,
+  type SessionSearchGroup,
 } from "./session-search.ts";
 
 export { LIST_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, SEARCH_SESSIONS_TOOL };
-export const DEFAULT_SEARCH_TOOL_LIMIT = 20;
-// 总字节上限：命中列表进模型上下文前的硬边界（片段约 200 字 × 20 条的量级）
+// 总字节上限：命中列表进模型上下文前的硬边界（决策 384：照旧设一个）
 export const DEFAULT_SEARCH_TOOL_MAX_BYTES = 16 * 1024;
 export const MAX_SEARCH_KEYWORDS = 8;
 // 会话目录的条数上限与第一句话的截断长度（字符）
@@ -38,6 +42,11 @@ export const DEFAULT_LIST_SESSIONS_LIMIT = 20;
 export const FIRST_USER_TEXT_CHARS = 60;
 // 会话目录里每个会话最多列出的改动文件数
 const LISTED_FILES = 10;
+// read_session_entry：单次读取上限（字符，决策 384：约 4,000）、可调到的上限与前后消息的条数与各自截断
+export const READ_ENTRY_CHARS = 4_000;
+export const MAX_READ_ENTRY_CHARS = 8_000;
+export const READ_CONTEXT_MAX = 5;
+export const READ_CONTEXT_CHARS = 1_000;
 
 // 三件工具共同的说明：能找到的、找不到的，以及代码现状与来历去哪里看
 const SCOPE_GUIDANCE =
@@ -51,23 +60,53 @@ export class SessionToolError extends Error {
   readonly pigeonToolErrorKind = "domain";
 }
 
+// 决策 384：不认识的参数报错说明，不静默丢弃
+function rejectUnknownParams(tool: string, params: unknown, known: readonly string[]): void {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) {
+    return;
+  }
+  const unknown = Object.keys(params).filter((key) => !known.includes(key));
+  if (unknown.length > 0) {
+    throw new SessionToolError(
+      `${tool} 不认识的参数：${unknown.join("、")}（可用：${known.join("、")}）`
+    );
+  }
+}
+
+const SEARCH_SESSIONS_PARAM_NAMES = ["keywords", "conversationOnly", "limit"] as const;
 export const SearchSessionsParamsSchema = Type.Object({
   keywords: Type.Array(Type.String({ minLength: 1 }), {
     minItems: 1,
     maxItems: MAX_SEARCH_KEYWORDS,
   }),
-  // 决策 339 ②：工具输出缺省不搜，显式打开
-  includeToolOutput: Type.Optional(Type.Boolean()),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: DEFAULT_SEARCH_TOOL_LIMIT })),
+  // 决策 384：工具输出缺省在检索范围内；打开后只搜对话正文
+  conversationOnly: Type.Optional(Type.Boolean()),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SESSION_LIMIT })),
 });
 export type SearchSessionsParams = Static<typeof SearchSessionsParamsSchema>;
 
+const READ_SESSION_ENTRY_PARAM_NAMES = [
+  "entryId",
+  "sessionId",
+  "offset",
+  "maxChars",
+  "before",
+  "after",
+] as const;
 export const ReadSessionEntryParamsSchema = Type.Object({
   entryId: Type.String({ minLength: 1 }),
   sessionId: Type.Optional(Type.String({ minLength: 1 })),
+  // 正文偏移（字符）：续读上一条没显示完的部分
+  offset: Type.Optional(Type.Integer({ minimum: 0 })),
+  // 单次读取上限（字符），缺省 READ_ENTRY_CHARS
+  maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_READ_ENTRY_CHARS })),
+  // 连同该条之前、之后的若干条消息（各自截断到 READ_CONTEXT_CHARS 字）
+  before: Type.Optional(Type.Integer({ minimum: 0, maximum: READ_CONTEXT_MAX })),
+  after: Type.Optional(Type.Integer({ minimum: 0, maximum: READ_CONTEXT_MAX })),
 });
 export type ReadSessionEntryParams = Static<typeof ReadSessionEntryParamsSchema>;
 
+const LIST_SESSIONS_PARAM_NAMES = ["since", "until", "path", "limit"] as const;
 export const ListSessionsParamsSchema = Type.Object({
   since: Type.Optional(Type.String({ minLength: 1 })),
   until: Type.Optional(Type.String({ minLength: 1 })),
@@ -77,10 +116,11 @@ export const ListSessionsParamsSchema = Type.Object({
 export type ListSessionsParams = Static<typeof ListSessionsParamsSchema>;
 
 export interface SearchSessionsDetails {
-  hits: SessionSearchHit[];
-  // 命中总条数（排序前、不受上限限制）
-  total: number;
-  // 命中数超过上限（只列出了前若干条）
+  groups: SessionSearchGroup[];
+  // 命中条目总数与命中会话总数（归并排序前、不受上限限制）
+  totalHits: number;
+  totalSessions: number;
+  // 命中会话数超过上限（只列出了前若干个）
   limited: boolean;
   // 输出达到总字节上限而提前停止
   byteCapped: boolean;
@@ -92,6 +132,10 @@ export interface ReadSessionEntryDetails {
   runId: string;
   runSeq: number;
   role: string;
+  // 正文总长度（字符）与本次显示的起点；truncated 时可用 offset 续读
+  totalChars: number;
+  offset: number;
+  truncated: boolean;
 }
 
 // 会话目录里的一个会话：与给模型的文本同样截断（details 随工具结果存进会话文件，不带全文与全部文件）
@@ -120,7 +164,7 @@ export interface SessionToolsOptions {
   cacheDir?: string;
   // 决策 339 ①：当前会话（检索与目录排除它所在的整棵会话树；read_session_entry 不受影响）
   current?: CurrentSession;
-  maxHits?: number;
+  maxSessions?: number;
   maxBytes?: number;
 }
 
@@ -132,12 +176,29 @@ function minuteTime(timestamp: number): string {
   return new Date(timestamp).toISOString().slice(0, 16).replace("T", " ");
 }
 
-function formatHit(hit: SessionSearchHit): string {
-  const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
-  return (
-    `- ${hit.entryId}｜会话 ${hit.sessionId}｜${hit.runId} 第 ${hit.runSeq} 条｜${hit.role}${tool}｜${isoTime(hit.timestamp)}｜命中：${hit.matchedKeywords.join("、")}\n` +
-    `  ${hit.snippet}`
-  );
+// 一个会话的归并结果：第一行给会话号、开始时间与命中条目数，其后至多两段命中，各带条目编号与片段；
+// 命中在工具输出上的片段前加一行来历并标"以前的工具输出，可能已过时"（决策 384）
+function formatGroup(group: SessionSearchGroup): string {
+  const lines = [
+    `- 会话 ${group.sessionId}｜开始 ${minuteTime(group.createdAt)}｜命中 ${group.hitCount} 条`,
+  ];
+  for (const hit of group.hits) {
+    const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
+    lines.push(
+      `  ${hit.entryId}｜${hit.runId} 第 ${hit.runSeq} 条｜${hit.role}${tool}｜${isoTime(hit.timestamp)}｜命中：${hit.matchedKeywords.join("、")}`
+    );
+    if (hit.role === "toolResult") {
+      const origin = [
+        hit.toolName ?? "工具",
+        ...(hit.toolParams !== undefined ? [hit.toolParams] : []),
+        ...(hit.toolOutcome !== undefined ? [hit.toolOutcome] : []),
+        isoTime(hit.timestamp),
+      ].join("｜");
+      lines.push(`  以前的工具输出，可能已过时（${origin}）：`);
+    }
+    lines.push(`  ${hit.snippet}`);
+  }
+  return lines.join("\n");
 }
 
 function cacheOf(options: SessionToolsOptions): { cacheDir?: string } {
@@ -147,7 +208,7 @@ function cacheOf(options: SessionToolsOptions): { cacheDir?: string } {
 export function createSearchSessionsTool(
   options: SessionToolsOptions
 ): PigeonAgentTool<typeof SearchSessionsParamsSchema, SearchSessionsDetails> {
-  const maxHits = options.maxHits ?? DEFAULT_SEARCH_TOOL_LIMIT;
+  const maxSessions = options.maxSessions ?? DEFAULT_SESSION_LIMIT;
   const maxBytes = options.maxBytes ?? DEFAULT_SEARCH_TOOL_MAX_BYTES;
   return {
     name: SEARCH_SESSIONS_TOOL,
@@ -155,32 +216,38 @@ export function createSearchSessionsTool(
     description:
       "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中）。" +
       SCOPE_GUIDANCE +
-      "缺省只搜对话正文（使用者的话与模型回复的文字，不含思考内容与工具调用）；" +
-      "要连同以前的工具输出（命令输出、读过的文件内容等）一起搜，给 includeToolOutput: true。" +
-      `关键词大小写不敏感、按字面子串匹配、不支持正则，最多 ${MAX_SEARCH_KEYWORDS} 个，任一命中即列出；` +
-      `结果按命中的关键词数从多到少、同数从新到旧排序，每条标出命中了哪些关键词，最多 ${DEFAULT_SEARCH_TOOL_LIMIT} 条。` +
+      "以前的工具输出（命令输出、读过的文件内容等）也在检索范围内：可能已过时，依赖之前先核实现状；" +
+      "以前的工具调用是当时的尝试，不代表最终结果。只搜对话正文（使用者的话与模型回复）给 conversationOnly: true。" +
+      "关键词写几个以前对话里会出现的原词（名字、术语、报错里的词），不写整句，不写“讨论”“昨天”这类元词，不写本次任务才出现的新名字；" +
+      `最多 ${MAX_SEARCH_KEYWORDS} 个，任一命中即列出，每条标出命中了哪些关键词。` +
+      "按词匹配、不分大小写、不支持正则：代码名可以用其中一段命中（如 parseConfig 用 config），中文按相邻两字匹配，单个字按子串匹配；" +
+      "多词的关键词拆成词分别计分，整段出现另加分。" +
+      "越少见的词命中排得越前，挑有辨识度的词；" +
+      `结果按会话归并：每个会话一条，带命中条目数与一两段片段及其条目编号，缺省 ${DEFAULT_SESSION_LIMIT} 个会话、最多 ${MAX_SESSION_LIMIT} 个。` +
       "命中片段只是线索，结论必须用 read_session_entry 按 entryId 回查原文；" +
       "想先浏览以前有哪些会话、哪些会话改过某个文件，用 list_sessions。",
     parameters: SearchSessionsParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SearchSessionsDetails>> {
+      rejectUnknownParams(SEARCH_SESSIONS_TOOL, params, SEARCH_SESSIONS_PARAM_NAMES);
       const args = Value.Parse(SearchSessionsParamsSchema, params);
-      const limit = Math.min(args.limit ?? maxHits, maxHits);
-      const includeToolOutput = args.includeToolOutput === true;
+      // 模型给的 limit 只受硬上限夹；maxSessions 是模型没给时的缺省
+      const sessionLimit = Math.min(args.limit ?? maxSessions, MAX_SESSION_LIMIT);
+      const conversationOnly = args.conversationOnly === true;
       const result = await createSessionSearch(options.sessionsDir, cacheOf(options)).search(
         {
           keywords: args.keywords,
-          includeToolOutput,
+          conversationOnly,
           ...(options.current !== undefined ? { current: options.current } : {}),
         },
-        { limit }
+        { sessionLimit }
       );
-      const hits: SessionSearchHit[] = [];
+      const groups: SessionSearchGroup[] = [];
       const blocks: string[] = [];
       let bytes = 0;
       let byteCapped = false;
-      for (const hit of result.hits) {
-        const block = formatHit(hit);
+      for (const group of result.groups) {
+        const block = formatGroup(group);
         const size = Buffer.byteLength(block, "utf8") + 1;
         if (bytes + size > maxBytes) {
           byteCapped = true;
@@ -188,37 +255,43 @@ export function createSearchSessionsTool(
         }
         bytes += size;
         blocks.push(block);
-        hits.push(hit);
+        groups.push(group);
       }
-      const limited = result.total > result.hits.length;
+      const limited = result.totalSessions > result.groups.length;
       const keywordList = args.keywords.join("、");
-      const scope = includeToolOutput ? "对话正文与工具输出" : "对话正文";
+      const scope = conversationOnly ? "仅对话正文" : "对话正文与工具输出";
       const lines: string[] = [];
-      if (hits.length === 0 && !byteCapped) {
+      if (groups.length === 0 && !byteCapped) {
         lines.push(
           `没有命中（关键词：${keywordList}；范围：${scope}）。可以换同义词或别的说法再试` +
-            (includeToolOutput ? "。" : "，或给 includeToolOutput: true 连同工具输出一起搜。")
+            (conversationOnly ? "，或去掉 conversationOnly 连同工具输出一起搜。" : "。")
         );
       } else {
         lines.push(
-          `命中 ${hits.length} 条（关键词：${keywordList}；范围：${scope}；按命中的关键词数从多到少，同数从新到旧）：`,
+          `命中 ${groups.length} 个会话（关键词：${keywordList}；范围：${scope}）：`,
           ...blocks
         );
         if (limited) {
           lines.push(
-            `共 ${result.total} 条命中，只列出前 ${result.hits.length} 条；请换更具体的关键词收窄。`
+            `共 ${result.totalSessions} 个会话命中，只列出前 ${result.groups.length} 个；请换更具体的关键词收窄。`
           );
         }
         if (byteCapped) {
           lines.push(
-            `输出已达 ${maxBytes} 字节上限，只列出前 ${hits.length} 条；请换更具体的关键词收窄。`
+            `输出已达 ${maxBytes} 字节上限，只列出前 ${groups.length} 个会话；请换更具体的关键词收窄。`
           );
         }
         lines.push("片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。");
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        details: { hits, total: result.total, limited, byteCapped },
+        details: {
+          groups,
+          totalHits: result.totalHits,
+          totalSessions: result.totalSessions,
+          limited,
+          byteCapped,
+        },
       };
     },
   };
@@ -282,6 +355,7 @@ export function createListSessionsTool(
     parameters: ListSessionsParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ListSessionsDetails>> {
+      rejectUnknownParams(LIST_SESSIONS_TOOL, params, LIST_SESSIONS_PARAM_NAMES);
       const args = Value.Parse(ListSessionsParamsSchema, params);
       if (args.path !== undefined && normalizeChangedPath(args.path) === "") {
         throw new SessionToolError(
@@ -360,18 +434,26 @@ function findMessage(
   sessionsDir: string,
   entryId: string,
   sessionId: string | undefined
-): { sessionId: SessionId; message: ViewMessage } | null {
+): { sessionId: SessionId; view: SessionView; index: number } | null {
   const refs = listSessionRefs(sessionsDir)
     .reverse()
     .filter((ref) => sessionId === undefined || ref.sessionId === sessionId);
   for (const ref of refs) {
     const view = readSessionView(ref);
-    const message = view?.messages.find((item) => item.entryId === entryId);
-    if (view !== undefined && message !== undefined) {
-      return { sessionId: view.sessionId, message };
+    const index = view?.messages.findIndex((item) => item.entryId === entryId) ?? -1;
+    if (view !== undefined && index >= 0) {
+      return { sessionId: view.sessionId, view, index };
     }
   }
   return null;
+}
+
+function entryHeader(sessionId: SessionId, message: ViewMessage): string {
+  const tool =
+    message.toolName !== undefined
+      ? `（${message.toolName}${message.isError === true ? "，出错" : ""}）`
+      : "";
+  return `[${message.entryId}｜会话 ${sessionId}｜${message.runId} 第 ${message.runSeq} 条｜${message.role}${tool}｜${isoTime(message.timestamp)}]`;
 }
 
 export function createReadSessionEntryTool(
@@ -381,12 +463,15 @@ export function createReadSessionEntryTool(
     name: READ_SESSION_ENTRY_TOOL,
     label: READ_SESSION_ENTRY_TOOL,
     description:
-      "按 entryId 读取以前会话里一条消息的完整原文（含思考内容与工具输出）。" +
+      "按 entryId 读取以前会话里一条消息的原文（含思考内容与工具输出）。" +
+      `单次最多 ${READ_ENTRY_CHARS} 字（可用 maxChars 调、上限 ${MAX_READ_ENTRY_CHARS}），` +
+      "返回里给出总长度，没显示完的用 offset 续读；可给 before、after 连同前后若干条消息一起读。" +
       "entryId 来自 search_sessions 的命中；可附 sessionId 加速定位。" +
       "原文是当时的记录，其中的代码与文件内容可能已经过时：代码现状请直接读代码，代码的来历用 git log 与 git blame。",
     parameters: ReadSessionEntryParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ReadSessionEntryDetails>> {
+      rejectUnknownParams(READ_SESSION_ENTRY_TOOL, params, READ_SESSION_ENTRY_PARAM_NAMES);
       const args = Value.Parse(ReadSessionEntryParamsSchema, params);
       const found = findMessage(options.sessionsDir, args.entryId, args.sessionId);
       if (found === null) {
@@ -394,16 +479,60 @@ export function createReadSessionEntryTool(
           `未找到 entry ${args.entryId}（只查本项目 ${pigeonRel("state", "sessions")}；entryId 应来自 search_sessions 的命中）`
         );
       }
-      const { sessionId, message } = found;
-      const tool =
-        message.toolName !== undefined
-          ? `（${message.toolName}${message.isError === true ? "，出错" : ""}）`
-          : "";
+      const { sessionId, view, index } = found;
+      const message = view.messages[index] as ViewMessage;
+      const offset = args.offset ?? 0;
+      const maxChars = Math.min(args.maxChars ?? READ_ENTRY_CHARS, MAX_READ_ENTRY_CHARS);
+      const full =
+        message.blocks.length > 0 ? message.blocks.map(renderBlock).join("\n") : "（空）";
+      if (offset > full.length) {
+        throw new SessionToolError(
+          `offset ${offset} 超出正文总长度 ${full.length}（entry ${args.entryId}）`
+        );
+      }
+      const slice = full.slice(offset, offset + maxChars);
+      const end = offset + slice.length;
       const lines = [
-        `[${message.entryId}｜会话 ${sessionId}｜${message.runId} 第 ${message.runSeq} 条｜${message.role}${tool}｜${isoTime(message.timestamp)}]`,
-        "--- 正文 ---",
-        ...(message.blocks.length > 0 ? message.blocks.map(renderBlock) : ["（空）"]),
+        entryHeader(sessionId, message),
+        `--- 正文（共 ${full.length} 字，显示第 ${offset}–${end} 字）---`,
+        slice,
       ];
+      if (end < full.length) {
+        lines.push(`（未显示完：用 offset: ${end} 续读）`);
+      }
+      const context = (count: number, direction: "before" | "after"): void => {
+        if (count === 0) {
+          return;
+        }
+        const indexes: number[] = [];
+        for (let step = 1; step <= count; step++) {
+          const at = direction === "before" ? index - step : index + step;
+          if (at >= 0 && at < view.messages.length) {
+            indexes.push(at);
+          }
+        }
+        // 该方向上没有消息（已在会话头尾）：不印分隔行
+        if (indexes.length === 0) {
+          return;
+        }
+        if (direction === "before") {
+          indexes.reverse();
+        }
+        lines.push(`--- ${direction === "before" ? "前" : "后"} ${indexes.length} 条 ---`);
+        for (const at of indexes) {
+          const item = view.messages[at] as ViewMessage;
+          const text = item.blocks.length > 0 ? item.blocks.map(renderBlock).join("\n") : "（空）";
+          const flat = text.replace(/\s+/g, " ").trim();
+          lines.push(
+            entryHeader(sessionId, item),
+            flat.length > READ_CONTEXT_CHARS
+              ? `${flat.slice(0, READ_CONTEXT_CHARS)}…（截断；读全文用 entryId 加 read_session_entry）`
+              : flat
+          );
+        }
+      };
+      context(args.before ?? 0, "before");
+      context(args.after ?? 0, "after");
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: {
@@ -412,6 +541,9 @@ export function createReadSessionEntryTool(
           runId: message.runId,
           runSeq: message.runSeq,
           role: message.role,
+          totalChars: full.length,
+          offset,
+          truncated: end < full.length,
         },
       };
     },
@@ -428,13 +560,13 @@ export function sessionToolRegistrations(sessionsDir: string): ToolRegistration[
   return [
     {
       name: SEARCH_SESSIONS_TOOL,
-      description: "检索本项目以前会话的对话（关键词字面匹配，缺省不含工具输出）",
+      description: "检索本项目以前会话（按会话归并，BM25 打分，工具输出也在范围内）",
       parameters: SearchSessionsParamsSchema,
       ...base,
     },
     {
       name: READ_SESSION_ENTRY_TOOL,
-      description: "按 entryId 读取以前会话的消息原文",
+      description: "按 entryId 读取以前会话的消息原文（有上限，可分页续读）",
       parameters: ReadSessionEntryParamsSchema,
       ...base,
     },
