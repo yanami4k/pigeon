@@ -53,6 +53,33 @@ manifestDigest 同一算法）与按步序的接口说明：名单两段里的�
 
 输出目录下为 report.md（报告）与 result.json（机器可读结果）。随机种子写死在 pigeon_analysis/constants.py，同一输入两次运行结果逐字相同。
 
+## 对比评测（两组）
+
+按 docs/roadmap/comparative-eval-analysis-plan.md 计算 Pigeon 组（P）与对照组（D）的比较。两组的条件名由命令行给：
+--group-a 为 Pigeon 组（例如 pigeon-docker），--group-b 为对照组（外部 agent 条件，ext-<名字>）；结果文件里其余条件的行跳过。
+
+```sh
+# 正式结果：主判据（部分得分按题配对差、符号翻转检验、自助法区间、混合模型对照、dz、相对差、最小可分辨差距 M）、
+# 次要判据（做成与否、不许挂一类、随题推进、花费与效率、撞上限与作废、Pigeon 的机制使用）与固定措辞
+python -m pigeon_analysis comparative --results <results.jsonl> [...] --out <输出目录> \
+  --group-a pigeon-docker --group-b ext-<名字> [--tasks 全部题的步序.json] [--classes-summary 两类用例预计算汇总.json]
+
+# 试跑：正式跑预算、撞上限的步、工作树占盘推算、网关留存与思考块签名核对、高峰暂停、作废与缺失；不算两组得分之差
+python -m pigeon_analysis comparative-pilot --results <results.jsonl> [...] --out <输出目录> \
+  --group-a pigeon-docker --group-b ext-<名字> [--tasks 步序.json] [--free-gb 服务器剩余空间] [--eligible 要做到的不为空的题的步序.json]
+```
+
+- 题一律用步序（结果行的 seq）；跑批命令的 --tasks 用的是清单里从 1 起的题号，两者不同。不给 --tasks 即按结果行里出现的步序。
+- 两组都不限轮数（决策 398）：撞每步上限只看墙钟（终态 wall-clock-limit 或 agent 用时达到身份头的墙钟上限）。结果行的
+  hitStepBudget 还把"请求数达到身份头的 maxTurns"算作撞上限，报告里只并列、不用它判。
+- 花费按非高峰价折算：网关逐请求计价、高峰整条翻倍，非高峰价对用量是线性的，每步的折算花费由结果行的用量合计按
+  constants.py 的非高峰价目算出；实付不在折算的 1–2 倍之间的步列为价目对不上。
+- 作业目录里另读的：agent 每次运行的尝试目录（pigeon-docker/ 或 external/ 下的 step-<步序>/try-<n>，尝试数减一即作废重做次数）；
+  Pigeon 组治理根里的会话文件（检索调用与命中会话、派出的 worker 与角色、裁剪、压缩、截断续跑；没有会话根即记为未记录）；
+  试跑另读网关留存 gateway/（每题体积、存全量与截断的请求、回复状态、多轮请求的 400、思考块签名）与输出目录的 peak-pauses.jsonl。
+  只数计数与体积，不把会话或请求的内容写进报告。
+- 主检验与自助法的随机种子另设（COMPARATIVE_PERMUTATION_SEED、COMPARATIVE_BOOTSTRAP_SEED），与上一轮的种子分开。
+
 ## 测试
 
 ```sh
@@ -76,4 +103,8 @@ python -m pytest -m "not slow"   # 跳过模拟检验
 - pigeon_analysis/wording.py：报告的固定措辞
 - pigeon_analysis/reader.py：结果行 → 规整表、身份头 → 设置（跑批器字段变动只改这里）
 - pigeon_analysis/sessions.py：会话文件 → 记忆使用与检索的计数
+- pigeon_analysis/comparative.py：对比评测的读入、主判据与次要判据
+- pigeon_analysis/comparative_sources.py：对比评测从作业目录读的计量（尝试目录、会话文件里的机制计数、网关留存、高峰暂停）
+- pigeon_analysis/comparative_pilot.py：对比评测试跑的取值规则
+- pigeon_analysis/comparative_report.py：对比评测的固定措辞与报告
 - pigeon_analysis/report.py、cli.py：输出与命令行
