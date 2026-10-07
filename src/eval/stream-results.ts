@@ -156,6 +156,8 @@ export interface StreamGatewayFacts {
   peakInputTokens?: number;
   // 本步被网关拒绝转发的请求数（外部 agent 条件的请求 model 与本批不符等）；没有拒绝即不出现
   rejectedRequests?: number;
+  // 本步读回复时中途断开、用量不齐而没能计价的请求数（这几次的 token 与花费不在本行里）；没有即不出现
+  usageMissing?: number;
 }
 
 export interface StepReview {

@@ -1225,6 +1225,7 @@ async function runStep(
         reviewCostCny: null,
         peakInputTokens: delta.peakInputTokens,
         ...((delta.rejectedRequests ?? 0) > 0 ? { rejectedRequests: delta.rejectedRequests } : {}),
+        ...((delta.usageMissing ?? 0) > 0 ? { usageMissing: delta.usageMissing } : {}),
       };
       result = {
         ...result,
