@@ -1,4 +1,4 @@
-"""对比评测的固定措辞与报告（分析计划第 4 节）：按结果自动选用对应句式，不另作解释；花费单独一句，不与得分合并。"""
+"""对比评测的固定措辞与报告（分析计划第 4 节；404）：按结果自动选用对应句式，不另作解释；花费单独成句，不与得分合并，不写"更好"。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,12 @@ from .report import _ci, _v
 from .wording import fmt_p, pp
 
 GROUP_TEXT = {GROUP_P: "Pigeon", GROUP_D: "对照 harness"}
+
+# 主判据指标（404①）：报告里的名称与结论句式里的说法（做成与否时把"要做到的用例通过比例"换成"做成率"）
+METRIC_NAME = {"score": "部分得分", "solved": "做成与否"}
+METRIC_PHRASE = {"score": "要做到的用例通过比例", "solved": "做成率"}
+# 降为次要判据的质量指标（与主判据相对的那个）在次要判据一节的说法
+QUALITY_LABEL = {"solved": "做成与否：做成率", "partialScore": "部分得分：平均"}
 
 # 主结论的四种句式
 P_BETTER = "significant-p-better"
@@ -29,15 +35,18 @@ def passes_text(passes: dict[str, int]) -> str:
     return f"{vals[0]}–{vals[-1]} 遍"
 
 
-def classify(effect: dict[str, Any]) -> str:
-    """显著（双侧 5%）按方向分 P 更好、D 更好；不显著时区间落在 ±M 以内为两组相当，否则为未测出差别。"""
-    if effect["significant"]:
+def classify(effect: dict[str, Any], significant: bool | None = None) -> str:
+    """显著按方向分 P 更好、D 更好；不显著时区间落在 ±M 以内为两组相当，否则为未测出差别。
+    significant 缺省取 effect["significant"]；与每题花费两项按 Holm 两步判定时（404②），先由调用方把判定结果写进该键。"""
+    sig = effect["significant"] if significant is None else significant
+    if sig:
         return P_BETTER if effect["estimate"] > 0 else D_BETTER
     return EQUIVALENT if effect["ciWithinMde"] else NOT_DETECTED
 
 
 def conclusion(primary: dict[str, Any]) -> dict[str, str]:
-    """主结论一句；两组平均部分得分都 ≥ 90% 时加"（两组都接近满分）"，与混合模型方向或显著性不一致时注明对建模敏感。"""
+    """主结论一句（句式里的指标说法按主判据选定换，404①）；两组平均部分得分都 ≥ 90% 时加"（两组都接近满分）"，
+    与混合模型方向或显著性不一致时注明对建模敏感。"""
     e = primary["effect"]
     if e["estimate"] is None:
         return {"kind": "no-data", "text": "没有有效题，无法估计两组之差。"}
@@ -45,11 +54,12 @@ def conclusion(primary: dict[str, Any]) -> dict[str, str]:
     ci = f"95% 置信区间 [{pp(e['ci'][0])}, {pp(e['ci'][1])}]"
     mde = pp(e["mde"]) if e["mde"] is not None else "—"
     kind = classify(e)
+    phrase = METRIC_PHRASE[primary["metric"]]
     if kind == P_BETTER:
-        text = (f"{head}Pigeon 每步要做到的用例通过比例比对照 harness 平均高 {pp(e['estimate'])} 个百分点"
+        text = (f"{head}Pigeon 每步{phrase}比对照 harness 平均高 {pp(e['estimate'])} 个百分点"
                 f"（{ci}；按题配对的符号翻转检验，{fmt_p(e['p'])}）。")
     elif kind == D_BETTER:
-        text = (f"{head}Pigeon 每步要做到的用例通过比例比对照 harness 平均低 {pp(-e['estimate'])} 个百分点"
+        text = (f"{head}Pigeon 每步{phrase}比对照 harness 平均低 {pp(-e['estimate'])} 个百分点"
                 f"（{ci}；按题配对的符号翻转检验，{fmt_p(e['p'])}）。")
     elif kind == EQUIVALENT:
         text = (f"{head}两组相当：估计差 {pp(e['estimate'])} 个百分点（{ci}，落在本设计能分辨的最小差距 ±{mde} 个百分点"
@@ -80,13 +90,37 @@ def mixed_note(primary: dict[str, Any]) -> str | None:
     return None
 
 
-def cost_sentence(eff: dict[str, Any]) -> str:
-    """花费单独一句（第 4 节）：两组每步非高峰折算花费的中位数与 90 分位、按题配对差的中位数。"""
-    by = eff["byGroup"]["cost_offpeak"]
-    parts = [f"{GROUP_TEXT[g]} 每步中位 {_v(by[g]['median'], 3)} 元、90 分位 {_v(by[g]['p90'], 3)} 元" if g in by
-             else f"{GROUP_TEXT[g]} 无花费记录" for g in GROUPS]
-    return (f"花费（网关计价按非高峰价折算）：{'；'.join(parts)}；按题配对差（Pigeon − 对照 harness）的中位数 "
-            f"{_v(eff['pairedMedian']['cost_offpeak'], 3)} 元。")
+# ---------- 每题花费（关键次要判据，404②③） ----------
+
+def _ci_yuan(ci: Any, digits: int = 3) -> str:
+    return f"[{ci[0]:.{digits}f}, {ci[1]:.{digits}f}]" if ci else "—"
+
+
+def _saving_view(cost: dict[str, Any]) -> tuple[float, tuple[float, float] | None]:
+    """省钱一方的口径：配对差 dc = c(P) − c(D) 为负即 Pigeon 省；金额与区间都折成"省多少"的正数。"""
+    est = float(cost["estimate"])
+    ci = cost["ci"]
+    if est < 0:
+        return -est, ((-ci[1], -ci[0]) if ci else None)
+    return est, (tuple(ci) if ci else None)
+
+
+def cost_conclusion(kind: str, cost: dict[str, Any], significant: bool) -> str:
+    """花费结论（404②③）：一律单独成句，不写"更好"。主判据不显著且区间落在 ±M 以内（两组相当）而花费显著时，
+    用定稿句式"质量相当，[某组]每题平均省 X 元（Y%，95% 区间 [a, b]）"；其余情形照实报数值。"""
+    if cost["estimate"] is None:
+        return "每题花费：没有两组都有花费记录的有效题，无法比较。"
+    if not significant:
+        p_text = fmt_p(cost["p"]) if cost["p"] is not None else "p —"
+        return (f"每题花费（非高峰折算）的配对差（Pigeon − 对照 harness）平均 {_v(cost['estimate'], 3)} 元"
+                f"（95% 区间 {_ci_yuan(cost['ci'])}；按题配对的符号翻转检验，{p_text}），按 Holm 两步未达显著。")
+    saver = GROUP_TEXT[GROUP_P] if cost["estimate"] < 0 else GROUP_TEXT[GROUP_D]
+    x, ci = _saving_view(cost)
+    pct = f"{abs(cost['relative']) * 100:.1f}%，" if cost["relative"] is not None else ""
+    saving = f"{saver}每题平均省 {x:.3f} 元（{pct}95% 区间 {_ci_yuan(ci)}）"
+    if kind == EQUIVALENT:
+        return f"质量相当，{saving}。"
+    return f"每题花费差异显著（Holm 两步）：{saving}。"
 
 
 # ---------- 报告 ----------
@@ -160,6 +194,7 @@ def input_lines(info: dict[str, Any]) -> list[str]:
 def primary_lines(p: dict[str, Any]) -> list[str]:
     e = p["effect"]
     lines = ["## 主判据明细", "",
+             f"- 主判据指标：{METRIC_NAME[p['metric']]}（{METRIC_PHRASE[p['metric']]}；404①按试跑选定，--primary 显式给出）",
              f"- 有效题 {p['nValid']} 道：{p['validTasks']}",
              f"- 要做到的为空的步 {len(p['fEmptyTasks'])} 道（照常跑，不进主判据分母）：{p['fEmptyTasks']}",
              f"- 无法建立两类用例基线的步 {len(p['baselineUnavailableTasks'])} 道：{p['baselineUnavailableTasks']}"]
@@ -174,14 +209,16 @@ def primary_lines(p: dict[str, Any]) -> list[str]:
               f"| 估计差 Δ（P − D，百分点） | {_v(e['estimate'], 1, 100)} |",
               f"| 95% 置信区间（按题自助法 {K.BOOTSTRAPS:,} 次） | {_ci(e['ci'])} |",
               f"| 双侧 p（按题配对的符号翻转 {K.PERMUTATIONS:,} 次） | {fmt_p(e['p']) if e['p'] is not None else '—'} |",
-              f"| 显著（双侧 5%） | {'是' if e['significant'] else '否'} |",
+              f"| 显著（Holm 两步判定，见 Holm 一节；原始双侧 5% 为 {'是' if e.get('rawSignificant') else '否'}） | {'是' if e['significant'] else '否'} |",
               f"| dz = mean(d) ÷ sd(d) | {_v(e['dz'], 2)} |",
               f"| 相对差 Δ ÷ ȳ(D) 的平均 | {_v(e['relative'], 1, 100)}% |",
               f"| sd(d)（百分点） | {_v(e['sd'], 1, 100)} |",
               f"| 最小可分辨差距 M = 2.80 × sd(d) ÷ √n（百分点） | {_v(e['mde'], 1, 100)} |",
               f"| 区间落在 ±M 以内 | {'是' if e['ciWithinMde'] else '否'} |", "",
-              f"- 两组平均部分得分（有效题上 ȳ 的平均）：P {_v(p['groupMeans'][GROUP_P], 1, 100)}%、"
-              f"D {_v(p['groupMeans'][GROUP_D], 1, 100)}%；两组都 ≥ 90%：{'是' if p['bothNearCeiling'] else '否'}",
+              f"- 两组平均{METRIC_NAME[p['metric']]}（有效题上 ȳ 的平均）：P {_v(p['groupMeans'][GROUP_P], 1, 100)}%、"
+              f"D {_v(p['groupMeans'][GROUP_D], 1, 100)}%",
+              f"- 两组平均部分得分（“两组都接近满分”的注记按部分得分，第 4 节）：P {_v(p['scoreGroupMeans'][GROUP_P], 1, 100)}%、"
+              f"D {_v(p['scoreGroupMeans'][GROUP_D], 1, 100)}%；两组都 ≥ 90%：{'是' if p['bothNearCeiling'] else '否'}",
               "- 各组各遍平均得分（描述用）：" + "；".join(
                   f"{g}：" + "、".join(f"第 {r} 遍 {_v(v, 1, 100)}" for r, v in sorted(p["groupPassScores"][g].items()))
                   for g in GROUPS),
@@ -205,10 +242,12 @@ def primary_lines(p: dict[str, Any]) -> list[str]:
 
 
 def secondary_lines(s: dict[str, Any]) -> list[str]:
-    sol, kf, lc, eff, cv, mech = (s[k] for k in ("solved", "keepFailures", "learning", "efficiency", "capsAndVoids",
-                                                   "mechanisms"))
+    # 降为次要判据的质量指标：主判据为部分得分时是做成与否（solved），为做成与否时是部分得分（partialScore，404①）
+    quality_key = "solved" if "solved" in s else "partialScore"
+    sol = s[quality_key]
+    kf, lc, eff, cv, mech = (s[k] for k in ("keepFailures", "learning", "efficiency", "capsAndVoids", "mechanisms"))
     lines = ["## 次要判据（探索性，p 值不做校正）", ""]
-    lines.append(f"- 做成与否：做成率 P {_v(sol['rateByGroup'][GROUP_P], 1, 100)}%、D {_v(sol['rateByGroup'][GROUP_D], 1, 100)}%；"
+    lines.append(f"- {QUALITY_LABEL[quality_key]} P {_v(sol['rateByGroup'][GROUP_P], 1, 100)}%、D {_v(sol['rateByGroup'][GROUP_D], 1, 100)}%；"
                  f"配对差 {_v(sol['estimate'], 1, 100)} 个百分点，95% 置信区间 {_ci(sol['ci'])}，"
                  f"{fmt_p(sol['p']) if sol['p'] is not None else 'p —'}（{sol['n']} 道题）")
     kb = kf["byGroup"]
@@ -249,6 +288,49 @@ def secondary_lines(s: dict[str, Any]) -> list[str]:
               "- 检索计数含主会话与 worker 会话；命中会话数取 search_sessions 结果里的会话号去重。", ""]
     return lines
 
+# Holm 两步（404②）各项的说法
+HOLM_ITEM_LABEL = {"primary": "主判据", "cost": "每题花费"}
+
+
+def holm_lines(holm: dict[str, Any]) -> list[str]:
+    """Holm 两步的步骤与判定：列出两项的 p、各自是否显著与每一步的比较。"""
+    p, sig, keys = holm["p"], holm["significant"], holm["items"]
+    lines = [f"## Holm 两步（{HOLM_ITEM_LABEL[keys[0]]}与{HOLM_ITEM_LABEL[keys[1]]}，总误报率 5%）", ""]
+    lines.append("- 两项的 p：" + "；".join(
+        f"{HOLM_ITEM_LABEL[k]} {fmt_p(p[i]) if p[i] is not None else '—（无有效题，按不显著）'}" for i, k in enumerate(keys)))
+    order = sorted((i for i in range(2) if p[i] is not None), key=lambda i: (p[i], i))
+    if not order:
+        lines.append("- 两项都没有可检验的 p，均按不显著。")
+    else:
+        first = order[0]
+        lines.append(f"- 第 1 步：较小的 p（{HOLM_ITEM_LABEL[keys[first]]}）≤ {K.ALPHA / 2}："
+                     + ("是，该项显著，进入第 2 步" if sig[first] else "否，该项不显著；两项均不显著，不进入第 2 步"))
+        if sig[first] and len(order) == 2:
+            second = order[1]
+            lines.append(f"- 第 2 步：较大的 p（{HOLM_ITEM_LABEL[keys[second]]}）≤ {K.ALPHA}："
+                         + ("是，该项也显著" if sig[second] else "否，该项不显著"))
+    lines.append("- 判定：" + "；".join(f"{HOLM_ITEM_LABEL[k]}显著：{'是' if sig[i] else '否'}" for i, k in enumerate(keys)))
+    lines.append("")
+    return lines
+
+
+def cost_lines(cost: dict[str, Any], significant: bool) -> list[str]:
+    """每题花费一节（404②）：c(g, i)、配对差与检验、相对差、缺用量的请求合计（大于 0 注明花费可能偏低）。"""
+    lines = ["## 每题花费（关键次要判据）", "",
+             "- c(g, i) 为该组该题各遍最终有效那次的网关花费（按非高峰价折算）的平均；dc(i) = c(P, i) − c(D, i)；"
+             f"两组都有花费的有效题 {cost['n']} 道", "",
+             "| 项 | 值 |", "|---|---|",
+             f"| 每题平均花费 c(P)（元） | {_v(cost['groupMeans'][GROUP_P], 4)} |",
+             f"| 每题平均花费 c(D)（元） | {_v(cost['groupMeans'][GROUP_D], 4)} |",
+             f"| mean(dc)（元/题） | {_v(cost['estimate'], 4)} |",
+             f"| 95% 置信区间（按题自助法 {K.BOOTSTRAPS:,} 次） | {_ci_yuan(cost['ci'], 4)} |",
+             f"| 双侧 p（按题配对的符号翻转 {K.PERMUTATIONS:,} 次） | {fmt_p(cost['p']) if cost['p'] is not None else '—'} |",
+             f"| 相对差 mean(dc) ÷ mean(c(D)) | {_v(cost['relative'], 1, 100)}% |",
+             f"| 显著（Holm 两步） | {'是' if significant else '否'} |", ""]
+    um = cost["usageMissing"]
+    low = "；这些请求的用量与花费不在结果行里，花费可能偏低" if any(um[g] > 0 for g in GROUPS) else ""
+    lines += [f"- 缺用量的请求（结果行网关一节的 usageMissing）：P 合计 {um[GROUP_P]} 次、D 合计 {um[GROUP_D]} 次{low}", ""]
+    return lines
 
 def comparative_markdown(res: dict[str, Any]) -> str:
     p = res["primary"]
@@ -256,25 +338,35 @@ def comparative_markdown(res: dict[str, Any]) -> str:
     banner = exploratory_banner(p)
     if banner:
         lines += [f"> {banner}", ""]
-    lines += ["## 结论（主判据）", "", f"- {res['conclusion']['text']}"]
+    lines += ["## 结论（主判据）", "",
+              f"- 主判据：{METRIC_NAME[p['metric']]}（{METRIC_PHRASE[p['metric']]}）；依据试跑两组合并的平均部分得分 "
+              f"{res['pilotScore'] * 100:.1f}%（404①：≥ 90% 用做成与否，否则用部分得分）",
+              f"- {res['conclusion']['text']}"]
     note = mixed_note(p)
     if note:
         lines.append(f"- {note}")
     lines += [f"- {res['costSentence']}", ""]
+    lines += holm_lines(res["holm"])
     lines += primary_lines(p)
+    lines += cost_lines(res["costCriterion"], res["holm"]["significant"][1])
     lines += settings_lines(res["input"])
     lines += secondary_lines(res["secondary"])
     lines += input_lines(res["input"])
     return "\n".join(lines)
 
 
-def comparative_result(primary, secondary, info) -> dict[str, Any]:
+def comparative_result(primary: dict[str, Any], secondary: dict[str, Any], info: dict[str, Any],
+                       *, cost: dict[str, Any], holm: dict[str, Any], pilot_score: float) -> dict[str, Any]:
     return {
         "kind": "comparative",
+        "primaryMetric": primary["metric"],
+        "pilotScore": pilot_score,
         "primary": primary,
         "secondary": secondary,
+        "costCriterion": cost,
+        "holm": holm,
         "conclusion": conclusion(primary),
-        "costSentence": cost_sentence(secondary["efficiency"]),
+        "costSentence": cost_conclusion(classify(primary["effect"]), cost, holm["significant"][1]),
         "input": info,
         "seeds": {"permutation": K.COMPARATIVE_PERMUTATION_SEED, "bootstrap": K.COMPARATIVE_BOOTSTRAP_SEED},
     }
@@ -290,6 +382,12 @@ def pilot_markdown(res: dict[str, Any]) -> str:
     pl = res["pilot"]
     lines = ["# 对比评测试跑报告", "", "试跑结果不进正式结论；以下只看花费、上限与机制是否正常，不看两组得分之差。", ""]
     lines += settings_lines(res["input"])
+    sel = pl["primarySelection"]
+    lines += ["## 主判据选定（404①）", "",
+              f"- 两组合并的平均部分得分 {_v(sel['mergedScore'], 1, 100)}%（{sel['steps']} 步；只看合并水平，不看两组之差）",
+              "- 正式跑主判据：" + ("做成与否——comparative 给 --primary solved" if sel["primary"] == "solved"
+                                   else "部分得分——comparative 给 --primary partial")
+              + f"（合并平均 ≥ {_v(sel['ceiling'], 0, 100)}% 用做成与否，否则用部分得分）", ""]
     sc = pl["sampleCheck"]
     lines += ["## 5.1 抽题", "",
               (f"- 按种子 {K.PILOT_SAMPLE_SEED} 从所给的步里抽 {K.PILOT_TASKS} 道应为 {sc['expected']}，结果里的步 {sc['seen']}；"

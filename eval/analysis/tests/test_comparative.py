@@ -1,4 +1,5 @@
-"""对比评测分析（comparative-eval-analysis-plan.md）：主判据与措辞的关键判定、试跑取值规则、读输出目录的端到端。"""
+"""对比评测分析（comparative-eval-analysis-plan.md）：主判据与措辞的关键判定、主判据选定与每题花费（404）、
+试跑取值规则、读输出目录的端到端。"""
 
 import gzip
 import json
@@ -7,9 +8,10 @@ import pytest
 
 from pigeon_analysis import constants as K
 from pigeon_analysis.cli import main
-from pigeon_analysis.comparative import GROUP_D, GROUP_P, comparative_primary
-from pigeon_analysis.comparative_pilot import budget_rule
-from pigeon_analysis.comparative_report import EQUIVALENT, NOT_DETECTED, classify, conclusion, exploratory_banner
+from pigeon_analysis.comparative import GROUP_D, GROUP_P, comparative_primary, holm_primary_cost
+from pigeon_analysis.comparative_pilot import budget_rule, primary_selection
+from pigeon_analysis.comparative_report import (EQUIVALENT, NOT_DETECTED, classify, conclusion, cost_conclusion,
+                                                exploratory_banner)
 from pigeon_analysis.table import make_table
 from runner_fixture import SessionBuilder, identity, runner_row, write_job, write_run
 
@@ -27,6 +29,78 @@ def table(p, d, passes=(1, 2)):
                     out.append({"cell": cell, "task": t, "pass_no": r, "f_total": 10, "f_passed": v * 10})
     return make_table(out)
 
+# ---------- 主判据选定（404①） ----------
+
+def test_primary_selection_threshold():
+    # 两组合并的平均部分得分恰好 90%：主判据为做成与否（端点算 ≥）
+    at = primary_selection(table([0.9], [0.9], passes=(1,)))
+    assert at["primary"] == "solved" and at["mergedScore"] == pytest.approx(0.9) and at["steps"] == 2
+    # 合并平均低于 90%：维持部分得分；只看合并水平，不看两组之差
+    below = primary_selection(table([0.95], [0.84], passes=(1,)))
+    assert below["primary"] == "partial" and below["mergedScore"] == pytest.approx(0.895)
+
+
+def solved_table(p, d):
+    """p、d：{(题, 遍): (做成与否, 得分)}。"""
+    out = []
+    for cell, spec in ((GROUP_P, p), (GROUP_D, d)):
+        for (t, r), (sv, sc) in spec.items():
+            out.append({"cell": cell, "task": t, "pass_no": r, "f_total": 10, "f_passed": sc * 10, "solved": sv})
+    return make_table(out)
+
+
+def test_solved_primary_averages_passes():
+    # 做成与否作主判据：ȳ 取各遍做成与否的平均（0、0.5、1）
+    res = comparative_primary(solved_table({(1, 1): (1, 1.0), (1, 2): (0, 0.5), (2, 1): (1, 1.0), (2, 2): (1, 1.0)},
+                                           {(1, 1): (0, 0.5), (1, 2): (0, 0.5), (2, 1): (1, 1.0), (2, 2): (0, 0.5)}),
+                              metric="solved", **FAST)
+    assert res["perTask"]["d"] == pytest.approx([0.5, 0.5]) and res["effect"]["estimate"] == pytest.approx(0.5)
+    # 显著时措辞把"要做到的用例通过比例"换成"做成率"
+    all_solved = solved_table({(t, r): (1, 1.0) for t in range(1, 7) for r in (1, 2)},
+                              {(t, r): (0, 0.5) for t in range(1, 7) for r in (1, 2)})
+    text = conclusion(comparative_primary(all_solved, metric="solved", **FAST))["text"]
+    assert "做成率" in text and "用例通过比例" not in text
+
+
+# ---------- Holm 两步（404②） ----------
+
+def holm_at(p_primary, p_cost):
+    return holm_primary_cost({"effect": {"p": p_primary}}, {"p": p_cost})
+
+
+def test_holm_two_step_order_and_thresholds():
+    # 较小的 p > 0.025：两项都不显著，不进入第二步
+    h = holm_at(0.04, 0.5)
+    assert h["significant"] == [False, False] and h["thresholds"] == [0.025, None]
+    # 主判据过第一步：花费按第二步 0.05 判，0.04 显著、0.06 不显著
+    assert holm_at(0.01, 0.04)["significant"] == [True, True]
+    assert holm_at(0.01, 0.06)["significant"] == [True, False]
+    # 花费的 p 更小：花费先按 0.025 判，主判据第二步按 0.05 判
+    h = holm_at(0.04, 0.01)
+    assert h["significant"] == [True, True] and h["thresholds"] == [0.05, 0.025]
+
+
+# ---------- 花费结论的措辞（404③） ----------
+
+def cost(estimate, ci, relative, p):
+    return {"n": 10, "groupMeans": {GROUP_P: 0.8, GROUP_D: 1.0}, "estimate": estimate, "ci": ci,
+            "p": p, "relative": relative, "usageMissing": {GROUP_P: 0, GROUP_D: 0}}
+
+
+def test_saving_sentence_only_when_equivalent_and_cost_significant():
+    s = cost_conclusion(EQUIVALENT, cost(-0.2, [-0.3, -0.1], -0.2, 0.01), True)
+    assert s == "质量相当，Pigeon每题平均省 0.200 元（20.0%，95% 区间 [0.100, 0.300]）。"
+    # 花费显著但主判据不是"两组相当"：不出"质量相当"句，照实报省钱
+    s2 = cost_conclusion(NOT_DETECTED, cost(-0.2, [-0.3, -0.1], -0.2, 0.01), True)
+    assert "质量相当" not in s2 and "省 0.200 元" in s2
+    # 花费不显著：不出省钱句
+    s3 = cost_conclusion(EQUIVALENT, cost(-0.2, [-0.3, -0.1], -0.2, 0.4), False)
+    assert "省" not in s3 and "未达显著" in s3
+    # 对照组更省的方向；任何花费句子都不写"更好"
+    s4 = cost_conclusion(EQUIVALENT, cost(0.25, [0.1, 0.4], 0.25, 0.01), True)
+    assert s4.startswith("质量相当，对照 harness每题平均省 0.250 元（25.0%，95% 区间 [0.100, 0.400]）。")
+    for x in (s, s2, s3, s4):
+        assert "更好" not in x
 
 # ---------- 主判据 ----------
 
@@ -158,6 +232,9 @@ def run_dir(tmp_path):
     rows = [row(PIGEON, 1, 8), row(PIGEON, 2, 5, cost=2.0, status="wall-clock-limit", wall=3_600_000),
             row(PIGEON, 3, 0, total=0),
             row(CONTROL, 1, 6), row(CONTROL, 2, 5, flagged=True), row(CONTROL, 3, 0, total=0)]
+    # 缺用量的请求（网关 usageMissing）：P 第 2 步 2 次、D 第 1 步 1 次
+    rows[1]["gateway"]["usageMissing"] = 2
+    rows[3]["gateway"]["usageMissing"] = 1
     ident = identity([PIGEON, CONTROL], pigeon=False, step_budget=(150, 3_600_000))
     ident["core"]["agents"]["pigeonDocker"] = {"bundleDigest": "bundle1", "selfReported": {"pigeon": "0.1"}}
     ident["info"]["peakPause"] = {"marginMs": 1_800_000}
@@ -195,6 +272,8 @@ def run_cli(run_dir, command, *extra):
 def test_pilot_end_to_end(run_dir):
     res, md = run_cli(run_dir, "comparative-pilot", "--free-gb", "11")
     pl = res["pilot"]
+    # 主判据选定（404①）：合并平均 (0.8 + 0.5 + 0.6 + 0.5) / 4 = 0.6 < 90%，维持部分得分（F 为空的步得分记空、不计）
+    assert pl["primarySelection"]["primary"] == "partial" and pl["primarySelection"]["mergedScore"] == pytest.approx(0.6)
     # cP = (1 + 1 + 1) / 3 元（非高峰折算），cD 同
     assert pl["budget"]["budget"] == pytest.approx(79 * 2.0 * 2 * 1.2)
     assert pl["budget"]["peakBilledSteps"] == [{"group": "P", "task": 2, "pass": 1}]
@@ -214,13 +293,14 @@ def test_pilot_end_to_end(run_dir):
     assert rd["stepsWithoutRetention"] == [{"task": 3, "pass": 1}] and rd["checks"]["signaturesNonEmpty"]
     assert pl["voids"] == {"P": 1, "D": 0}
     assert pl["workers"]["roles"] == {"worker": 2, "explorer": 1} and pl["peakPause"]["covered"] is False
-    for text in ("C = 79 × (cP + cD) × 2 × 1.2 = 379.20 元", "未覆盖", "不超过：工作树照产品原样不自动删"):
+    for text in ("C = 79 × (cP + cD) × 2 × 1.2 = 379.20 元", "未覆盖", "不超过：工作树照产品原样不自动删",
+                 "正式跑主判据：部分得分——comparative 给 --primary partial"):
         assert text in md
     assert "两组相当" not in md and "估计差" not in md
 
 
 def test_comparative_end_to_end(run_dir):
-    res, md = run_cli(run_dir, "comparative")
+    res, md = run_cli(run_dir, "comparative", "--primary", "partial", "--pilot-score", "0.6")
     p, s = res["primary"], res["secondary"]
     assert p["validTasks"] == [1, 2] and p["fEmptyTasks"] == [3]
     assert p["effect"]["estimate"] == pytest.approx(((0.8 - 0.6) + (0.5 - 0.5)) / 2)
@@ -231,11 +311,31 @@ def test_comparative_end_to_end(run_dir):
     cv = s["capsAndVoids"]
     assert cv["P"]["wallCapSteps"] == [{"task": 2, "pass": 1}] and cv["D"]["wallCapSteps"] == []
     assert s["efficiency"]["pairedMedian"]["cost_offpeak"] == pytest.approx(0.0)
-    assert res["costSentence"].startswith("花费（网关计价按非高峰价折算）：Pigeon 每步中位 1.000 元")
+    assert res["costSentence"].startswith("每题花费（非高峰折算）的配对差（Pigeon − 对照 harness）平均 0.000 元")
+    assert res["costCriterion"]["usageMissing"] == {"P": 2, "D": 1} and res["holm"]["significant"] == [False, False]
     assert "## 结论（主判据）" in md and res["conclusion"]["text"] in md and "混合模型" in md
+    for text in ("主判据：部分得分（要做到的用例通过比例）；依据试跑两组合并的平均部分得分 60.0%",
+                 "## Holm 两步（主判据与每题花费，总误报率 5%）", "缺用量的请求（结果行网关一节的 usageMissing）："
+                 "P 合计 2 次、D 合计 1 次；这些请求的用量与花费不在结果行里，花费可能偏低"):
+        assert text in md
+    assert "更好" not in res["costSentence"]
+
+
+def test_comparative_solved_end_to_end(run_dir):
+    # --primary solved：主判据为做成与否，部分得分降为次要判据照报（404①）
+    res, md = run_cli(run_dir, "comparative", "--primary", "solved", "--pilot-score", "0.93")
+    assert res["primaryMetric"] == "solved" and "partialScore" in res["secondary"] and "solved" not in res["secondary"]
+    assert "主判据：做成与否（做成率）；依据试跑两组合并的平均部分得分 93.0%" in md
+    assert "- 部分得分：平均" in md
+
+
+def test_comparative_requires_explicit_primary(run_dir):
+    with pytest.raises(SystemExit):
+        main(["comparative", "--results", str(run_dir / "results.jsonl"), "--out", str(run_dir / "np"),
+              "--group-a", PIGEON, "--group-b", CONTROL])
 
 
 def test_group_without_rows_is_an_error(run_dir):
     with pytest.raises(ValueError, match="ext-other"):
         main(["comparative", "--results", str(run_dir / "results.jsonl"), "--out", str(run_dir / "x"),
-              "--group-a", PIGEON, "--group-b", "ext-other"])
+              "--group-a", PIGEON, "--group-b", "ext-other", "--primary", "partial", "--pilot-score", "0.6"])

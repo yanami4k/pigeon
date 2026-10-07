@@ -66,10 +66,12 @@ MEMORY_ROUND = 1000
 MEMORY_MIN_CHARS = 2200
 MEMORY_MAX_CHARS = 12000
 
-# ---------- 对比评测（docs/roadmap/comparative-eval-analysis-plan.md；决策 385、388、391、398–401） ----------
-# 与上面正式跑的常数分开：两组、单一主判据、不做多重校正。同样在看到结果之前写定，随机种子写死。
+# ---------- 对比评测（docs/roadmap/comparative-eval-analysis-plan.md；决策 385、388、391、398–401、404） ----------
+# 与上面正式跑的常数分开：两组、单一主判据。同样在看到结果之前写定，随机种子写死。
 # 显著性水平、翻转与重抽次数沿用 ALPHA、PERMUTATIONS、BOOTSTRAPS、CI_LEVEL；缺失超过有效题 10% 降格（2.2）沿用
-# MISSING_EXPLORATORY_RATIO；两组都接近满分的门槛（第 4 节）沿用 CEILING_SCORE
+# MISSING_EXPLORATORY_RATIO；两组都接近满分的门槛（第 4 节）沿用 CEILING_SCORE。404①的主判据选定门槛同样沿用
+# CEILING_SCORE（重做试跑两组合并的平均部分得分 ≥ 90% 改用做成与否，只看合并水平）；404②的 Holm 两步沿用
+# ALPHA（第一步 ALPHA/2 = 0.025，stats.holm_two_step）
 
 # 主检验与置信区间（2.3）的随机种子
 COMPARATIVE_PERMUTATION_SEED = 202610071

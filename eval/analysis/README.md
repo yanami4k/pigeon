@@ -59,14 +59,17 @@ manifestDigest 同一算法）与按步序的接口说明：名单两段里的�
 --group-a 为 Pigeon 组（例如 pigeon-docker），--group-b 为对照组（外部 agent 条件，ext-<名字>）；结果文件里其余条件的行跳过。
 
 ```sh
-# 正式结果：主判据（部分得分按题配对差、符号翻转检验、自助法区间、混合模型对照、dz、相对差、最小可分辨差距 M）、
-# 次要判据（做成与否、不许挂一类、随题推进、花费与效率、撞上限与作废、Pigeon 的机制使用）与固定措辞
-python -m pigeon_analysis comparative --results <results.jsonl> [...] --out <输出目录> \
-  --group-a pigeon-docker --group-b ext-<名字> [--tasks 全部题的步序.json] [--classes-summary 两类用例预计算汇总.json]
-
-# 试跑：正式跑预算、撞上限的步、工作树占盘推算、网关留存与思考块签名核对、高峰暂停、作废与缺失；不算两组得分之差
+# 试跑：正式跑预算、撞上限的步、工作树占盘推算、网关留存与思考块签名核对、高峰暂停、作废与缺失；
+# 另按 404① 给出主判据选定（两组合并的平均部分得分 ≥ 90% 用做成与否，只看合并水平）；不算两组得分之差
 python -m pigeon_analysis comparative-pilot --results <results.jsonl> [...] --out <输出目录> \
   --group-a pigeon-docker --group-b ext-<名字> [--tasks 步序.json] [--free-gb 服务器剩余空间] [--eligible 要做到的不为空的题的步序.json]
+
+# 正式结果：主判据（--primary 按试跑选定显式给出：solved 做成与否 / partial 部分得分；--pilot-score 为试跑报告的
+# 两组合并平均部分得分，报告写明主判据的依据）、每题花费（关键次要判据，与主判据按 Holm 两步检验）、
+# 次要判据（另一个质量指标、不许挂一类、随题推进、花费与效率、撞上限与作废、Pigeon 的机制使用）与固定措辞
+python -m pigeon_analysis comparative --results <results.jsonl> [...] --out <输出目录> \
+  --group-a pigeon-docker --group-b ext-<名字> --primary solved|partial --pilot-score <试跑合并平均部分得分> \
+  [--tasks 全部题的步序.json] [--classes-summary 两类用例预计算汇总.json]
 ```
 
 - 题一律用步序（结果行的 seq）；跑批命令的 --tasks 用的是清单里从 1 起的题号，两者不同。不给 --tasks 即按结果行里出现的步序。
@@ -74,6 +77,13 @@ python -m pigeon_analysis comparative-pilot --results <results.jsonl> [...] --ou
   hitStepBudget 还把"请求数达到身份头的 maxTurns"算作撞上限，报告里只并列、不用它判。
 - 花费按非高峰价折算：网关逐请求计价、高峰整条翻倍，非高峰价对用量是线性的，每步的折算花费由结果行的用量合计按
   constants.py 的非高峰价目算出；实付不在折算的 1–2 倍之间的步列为价目对不上。
+- 主判据按 404① 选定：试跑报告给出两组合并的平均部分得分与选定结果（≥ 90% 用做成与否，否则用部分得分，只看合并水平）；
+  正式分析用 --primary 显式给出（无缺省），报告写明所用主判据与依据的试跑数值。做成与否作主判据时 ȳ 取各遍做成与否的
+  平均（0、0.5、1），检验、区间、M 与措辞同部分得分，"要做到的用例通过比例"换成"做成率"，部分得分降为次要判据照报。
+- 每题花费为关键次要判据（404②）：c(g, i) 为该组该题各遍最终有效那次的网关花费（非高峰折算）的平均，dc(i) = c(P, i) − c(D, i)，
+  按题配对的符号翻转检验与自助法区间、相对差 mean(dc) ÷ mean(c(D))；与主判据两项按 Holm 两步控制总误报率 5%。花费结论
+  一律单独成句、不写"更好"；主判据不显著且区间落在 ±M 以内而花费显著时写"质量相当，[某组]每题平均省 X 元（Y%，95% 区间 [a, b]）"。
+  结果行网关一节的 usageMissing（缺用量的请求）在花费一节报每组合计，大于 0 时注明花费可能偏低。
 - 作业目录里另读的：agent 每次运行的尝试目录（pigeon-docker/ 或 external/ 下的 step-<步序>/try-<n>，尝试数减一即作废重做次数）；
   Pigeon 组治理根里的会话文件（检索调用与命中会话、派出的 worker 与角色、裁剪、压缩、截断续跑；没有会话根即记为未记录）；
   试跑另读网关留存 gateway/（每题体积、存全量与截断的请求、回复状态、多轮请求的 400、思考块签名）与输出目录的 peak-pauses.jsonl。
