@@ -768,8 +768,9 @@ async function evalStreamManifestMain(argv: string[]): Promise<void> {
 // pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
 //   [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑：只跑前 K 道题）] [--max-turns N（缺省 150）]
 //   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
-//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases]
-//   [--task-interfaces <接口数据文件>（题面在名单之后加接口说明，决策 374；清单摘要须与本次清单相符，缺省不加）]
+//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases|test-text]
+//   [--task-interfaces <接口数据文件>（题面在名单之后加接口说明，决策 374；清单摘要须与本次清单相符，缺省不加；
+//   test-text 题面已附判题测试全文，与 test-text 同给即报错）]
 //   [--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>]（上下文压缩的触发点与保留量，缺省为产品缺省；
 //   集成冒烟调低触发点验证压缩，决策 218）
 //   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]
@@ -801,8 +802,8 @@ async function evalStreamMain(argv: string[]): Promise<void> {
     "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
     `--conditions ${STREAM_CONDITIONS.join(",")}[,ext-<名字>…] [--external-agent <配置文件>]… [--attempts N] [--concurrency N] [--max-steps K] ` +
     "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases] " +
-    "[--task-interfaces <接口数据文件>] " +
+    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases|test-text] " +
+    "[--task-interfaces <接口数据文件>（不与 test-text 同给）] " +
     "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
     "[--pigeon-bundle <打包产物目录>（pigeon-docker 条件必给：dist/，只读挂载进题目容器）] " +
     "[--pigeon-node-runtime <Node 运行时目录>（pigeon-docker 条件必给：含 bin/node，只读挂载进题目容器）] " +

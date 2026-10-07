@@ -89,10 +89,9 @@ import { readTaskInterfaces } from "./stream-interfaces.ts";
 import {
   chainedTasks,
   DEFAULT_TASK_PROMPT_FORMAT,
+  promptLayoutOf,
   type StreamManifest,
   TASK_CHAIN_SCOPE,
-  TASK_PROMPT_LAYOUT,
-  TASK_PROMPT_LAYOUT_WITH_INTERFACES,
   type TaskPromptFormat,
 } from "./stream-manifest.ts";
 import {
@@ -373,6 +372,12 @@ async function runStreamExperimentLocked(
   outDir: string
 ): Promise<RunStreamsSummary> {
   const promptFormat = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
+  // test-text（403）的题面已附判题测试全文，不再加接口说明：两个一起给是配置错误，响亮拒绝，不静默忽略
+  if (promptFormat === "test-text" && options.taskInterfacesFile !== undefined) {
+    throw new Error(
+      "题面格式 test-text 已附判题测试的全文，不再加接口说明（去掉 --task-interfaces）"
+    );
+  }
   const { manifest, runtime } = readManifest(options.manifestFile);
   const manifestDigest = manifestDigestOf(options.manifestFile);
   // 接口数据与清单对不上即拒绝：在写身份头、起容器之前
@@ -488,8 +493,7 @@ async function runStreamExperimentLocked(
         conditions: [...options.conditions],
         stepScope: TASK_CHAIN_SCOPE,
         promptFormat,
-        promptLayout:
-          interfaces !== undefined ? TASK_PROMPT_LAYOUT_WITH_INTERFACES : TASK_PROMPT_LAYOUT,
+        promptLayout: promptLayoutOf(promptFormat, interfaces !== undefined),
         ...(interfaces !== undefined ? { taskInterfaces: interfaces.digest } : {}),
         taskSelection,
         maxSteps: options.maxSteps ?? null,

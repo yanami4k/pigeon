@@ -310,6 +310,37 @@ test("接口数据的清单摘要与本次清单不符（374）：在写身份�
   }
 });
 
+test("题面格式 test-text 与接口数据同给（403）：在读清单、写身份头之前拒绝，不静默忽略接口数据", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pigeon-stream-test-text-"));
+  try {
+    const manifestFile = join(dir, "manifest.json");
+    writeFileSync(manifestFile, JSON.stringify({ ...taskManifest(1), repo: "strands-py" }));
+    const interfacesFile = join(dir, "task-interfaces.json");
+    writeFileSync(
+      interfacesFile,
+      JSON.stringify({ manifestDigest: "0000000000000000", tasks: [] })
+    );
+    const outDir = join(dir, "out");
+    await assert.rejects(
+      runStreamExperiment({
+        manifestFile,
+        taskInterfacesFile: interfacesFile,
+        promptFormat: "test-text",
+        repoDir: dir,
+        image: "img",
+        outDir,
+        conditions: ["search-only"],
+        gateway: { accounts: [{ key: "k", concurrency: 2 }], modelId: "m" },
+        budget: DEFAULT_STEP_BUDGET,
+      }),
+      /不再加接口说明/
+    );
+    assert.equal(existsSync(join(outDir, "identity.json")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // 一份只有题的清单：第 i 道题的提交为 c<i>、步序为 2i（中间隔着不跑的步）
 function taskManifest(n: number): StreamManifest {
   const steps = Array.from(
