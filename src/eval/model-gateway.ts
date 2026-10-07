@@ -21,7 +21,8 @@
 //   全部账号都不可用：交给限额控制器整批暂停（都不会自行恢复则停下），控制器的探测只探没在单独探测的账号；
 //   暂停或停止期间：直接以 529 拒绝，不打上游——在途 agent 的下一次模型调用即失败，这一步作废、恢复后重做；
 //   流式响应：错误在响应头阶段分类；200 之后原样透传，中途断流也原样透传（由 agent 一侧按失败处理），同时从事件流里
-//   读出用量按作业计量（请求数即轮数、输入与输出 token、花费、各账号的请求数、排队时间、在途峰值、单次请求输入 token 峰值）。交回客户端与告警的
+//   读出用量按作业计量（请求数即轮数、输入与输出 token、花费、各账号的请求数、排队时间、在途峰值、单次请求输入 token 峰值）；
+//   读回复时客户端断开或读流出错，已收到的正文里用量已齐（message_delta 到了）即照常计价与计量，不齐即记一次缺用量。交回客户端与告警的
 //   任何文本里都不出现 key（含上游回显的打码末四位），账号只以编号出现。
 //   花费（决策 235）：每条成功的请求（含网关自己的探测）按请求开始与结束时刻逐条计价（state/model-pricing.ts），记到作业上并
 //   计入全局累计；全局累计落盘，进程重启或续跑时接着累计；累计到上限即交给限额控制器停批。
@@ -65,6 +66,8 @@ export interface GatewayMeter {
   accountRequests: number[];
   // 网关拒绝转发的请求数（逐字转发的作业里 model 与本批的模型不符等）；没有拒绝过即不出现
   rejectedRequests?: number;
+  // 200 之后读回复时客户端断开或读流出错、已收到的正文里用量不齐（message_delta 没到）而没能计价的请求数；没有即不出现
+  usageMissing?: number;
 }
 
 export interface GatewayAccount {
@@ -460,6 +463,28 @@ function usageOf(
     }
   }
   return out;
+}
+
+// 回复正文里的用量是否已齐：SSE 收到了带 usage 的 message_delta，非流式正文完整且带 usage。读回复中途断开时据此决定
+// 按已收到的正文计价，还是记一次缺用量
+export function usageArrived(text: string): boolean {
+  const events = text.split("\n").filter((l) => l.startsWith("data:"));
+  if (events.length === 0) {
+    try {
+      return (JSON.parse(text) as { usage?: unknown }).usage instanceof Object;
+    } catch {
+      return false;
+    }
+  }
+  return events.some((line) => {
+    if (!line.includes('"message_delta"') || !line.includes('"usage"')) return false;
+    try {
+      const event = JSON.parse(line.slice(5).trim()) as { type?: string; usage?: unknown };
+      return event.type === "message_delta" && event.usage instanceof Object;
+    } catch {
+      return false;
+    }
+  });
 }
 
 // 花费累计文件的落盘间隔（毫秒）
@@ -1066,28 +1091,42 @@ export async function startModelGateway(options: ModelGatewayOptions): Promise<M
           meter.accountRequests[index] = (meter.accountRequests[index] ?? 0) + 1;
           const decoder = new TextDecoder();
           let text = "";
+          // 记这次请求的用量：计入作业计量与单次输入峰值，按开始与结束时刻计价（作业与全局累计）
+          const settleUsage = (usage: ReturnType<typeof usageOf>) => {
+            outcome.usage = usage;
+            meter.input += usage.input;
+            meter.output += usage.output;
+            meter.cacheRead += usage.cacheRead;
+            meter.cacheWrite += usage.cacheWrite;
+            meter.peakInputTokens = Math.max(
+              meter.peakInputTokens,
+              usage.input + usage.cacheRead + usage.cacheWrite
+            );
+            chargeRequest(job, usage, startMs, now());
+          };
           // 正文边收边记在 outcome 上：中途断流时留存记下已收到的部分
           outcome.status = 200;
-          if (upstream.body !== null) {
-            for await (const chunk of upstream.body) {
-              res.write(chunk);
-              text += decoder.decode(chunk as Uint8Array, { stream: true });
-              outcome.text = text;
+          try {
+            if (upstream.body !== null) {
+              for await (const chunk of upstream.body) {
+                res.write(chunk);
+                text += decoder.decode(chunk as Uint8Array, { stream: true });
+                outcome.text = text;
+              }
             }
+          } catch (error) {
+            // 读回复时客户端断开（外部 agent 收到 message_stop 即断开连接）或读流出错：已收到的正文里用量已齐即照常计价、
+            // 计量；不齐即不计，记一次缺用量。错误照旧往外抛，是否算上游故障由外层按客户端是否断开判
+            if (usageArrived(text)) settleUsage(usageOf(text));
+            else {
+              meter.usageMissing = (meter.usageMissing ?? 0) + 1;
+              outcome.usageMissing = true;
+            }
+            throw error;
           }
           res.end();
           outcome.text = text;
-          const usage = usageOf(text);
-          outcome.usage = usage;
-          meter.input += usage.input;
-          meter.output += usage.output;
-          meter.cacheRead += usage.cacheRead;
-          meter.cacheWrite += usage.cacheWrite;
-          meter.peakInputTokens = Math.max(
-            meter.peakInputTokens,
-            usage.input + usage.cacheRead + usage.cacheWrite
-          );
-          chargeRequest(job, usage, startMs, now());
+          settleUsage(usageOf(text));
           return;
         } finally {
           free();
@@ -1272,6 +1311,9 @@ export function meterDelta(after: GatewayMeter, before: GatewayMeter): GatewayMe
     accountRequests: after.accountRequests.map((n, i) => n - (before.accountRequests[i] ?? 0)),
     ...(after.rejectedRequests !== undefined || before.rejectedRequests !== undefined
       ? { rejectedRequests: (after.rejectedRequests ?? 0) - (before.rejectedRequests ?? 0) }
+      : {}),
+    ...(after.usageMissing !== undefined || before.usageMissing !== undefined
+      ? { usageMissing: (after.usageMissing ?? 0) - (before.usageMissing ?? 0) }
       : {}),
   };
 }

@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { test } from "vitest";
+import { requestCostCny } from "../state/model-pricing.ts";
 import { GatewayRetention, RETENTION_DIR, readRetention } from "./gateway-retention.ts";
 import { type ModelGateway, startModelGateway } from "./model-gateway.ts";
 import { LimitController } from "./model-limits.ts";
@@ -34,19 +35,20 @@ const sse = (text: string) =>
     "",
   ].join("\n");
 
-// 假上游：记下收到的原始请求体；回复正文由 reply 给（缺省一段 SSE）
+// 假上游：记下收到的原始请求体；回复正文由 reply 给（缺省一段 SSE），hold 为真时发完正文不结束连接
 async function withRetention(
   options: { maxTaskBytes?: number; maxJobBytes?: number; retention?: boolean },
   run: (ctx: {
     g: ModelGateway;
     jobDir: string;
     seen: string[];
-    reply: { status: number; body: string };
+    reply: { status: number; body: string; hold?: boolean };
     post: (body: string, headers?: Record<string, string>) => Promise<string>;
   }) => Promise<void>
 ) {
   const seen: string[] = [];
-  const reply = { status: 200, body: sse("hi") };
+  const reply: { status: number; body: string; hold?: boolean } = { status: 200, body: sse("hi") };
+  const held: http.ServerResponse[] = [];
   const up = http.createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -54,7 +56,10 @@ async function withRetention(
     res.writeHead(reply.status, {
       "content-type": reply.status === 200 ? "text/event-stream" : "application/json",
     });
-    res.end(reply.body);
+    if (reply.hold === true) {
+      res.write(reply.body);
+      held.push(res);
+    } else res.end(reply.body);
   });
   await new Promise<void>((r) => up.listen(0, "127.0.0.1", r));
   const dir = mkdtempSync(path.join(tmpdir(), "pigeon-retention-"));
@@ -88,6 +93,7 @@ async function withRetention(
     await run({ g, jobDir: path.join(dir, "job"), seen, reply, post });
   } finally {
     await g.close();
+    for (const res of held) res.destroy();
     await new Promise<void>((r) => up.close(() => r()));
     rmSync(dir, { recursive: true, force: true });
   }
@@ -257,6 +263,72 @@ test("留存：落盘内容里没有鉴权头与 key（含上游回显的 key �
     assert.equal(first?.request.headers?.["x-trace"], "keep-me");
     assert.equal(second?.response?.status, 400);
     assert.match(second?.response?.body ?? "", /bad key \[key\]/);
+  });
+});
+
+// 客户端读回复读到 marker 即断开（外部 agent 收到 message_stop 即断开连接的情形）
+async function readThenAbort(g: ModelGateway, marker: string) {
+  const abort = new AbortController();
+  const r = await fetch(`${g.jobBaseUrl("job")}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "ph-key-AAA" },
+    body: '{"model":"m","stream":true}',
+    signal: abort.signal,
+  });
+  const reader = r.body?.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  while (reader !== undefined && !text.includes(marker)) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  abort.abort();
+}
+
+async function until(cond: () => boolean, what: string) {
+  const deadline = Date.now() + 5000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`等不到${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test("读回复时客户端断开：已收到完整回复（message_stop 后断开）即照常计入用量与花费、全局累计，不算上游故障；message_delta 之前断开即不计价、记一次缺用量，留存标明", async () => {
+  await withRetention({}, async ({ g, jobDir, reply }) => {
+    const responses = () =>
+      (readRetention(jobDir, 1)[0]?.exchanges ?? []).flatMap((e) =>
+        e.response !== undefined ? [e.response] : []
+      );
+    const usage = { input: 10, output: 7, cacheRead: 4, cacheWrite: 0 };
+    const cost = requestCostCny(usage, 0, 0).cny;
+    const end = g.retainStep("job", jobDir, 1);
+    Object.assign(reply, {
+      body: `${sse("hi")}\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`,
+      hold: true,
+    });
+    await readThenAbort(g, "message_stop");
+    await until(() => responses().length === 1, "第一次的回复记录");
+    const m1 = g.meter("job");
+    assert.deepEqual([m1.input, m1.output, m1.cacheRead, m1.upstreamFailures], [10, 7, 4, 0]);
+    assert.equal(m1.usageMissing, undefined);
+    assert.ok(cost > 0);
+    assert.equal(m1.costCny, cost);
+    assert.deepEqual([g.spend().totalCny, g.spend().requests], [cost, 1], "计入全局累计");
+    reply.body = sse("hi").split("event: message_delta")[0] as string;
+    await readThenAbort(g, "content_block_delta");
+    await until(() => responses().length === 2, "第二次的回复记录");
+    end();
+    const m2 = g.meter("job");
+    assert.deepEqual(
+      [m2.output, m2.costCny, m2.usageMissing, m2.upstreamFailures],
+      [7, cost, 1, 0]
+    );
+    assert.deepEqual([g.spend().totalCny, g.spend().requests], [cost, 1]);
+    const [first, second] = responses();
+    assert.deepEqual([first?.status, first?.usage, first?.usageMissing], [200, usage, undefined]);
+    assert.ok(first?.error, "断开记在留存里");
+    assert.deepEqual([second?.usage, second?.usageMissing], [undefined, true]);
   });
 });
 

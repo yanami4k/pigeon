@@ -12,6 +12,7 @@
 //   大字段：messages、system、tools 以外的顶层字段序列化超过 LARGE_FIELD_BYTES 的（例如外部 agent 每次请求附带的增量
 //        会话日志）不进参数，记字段名、大小与 sha256，内容 gzip 后另存；一题里至多用掉单题上限的四分之一，超出只记大小与摘要。
 //   回复：原始正文（SSE 或 JSON）另存；responses.jsonl 记交回的状态码、耗时、用量、停止原因；非 200 记错误正文的前 2000 字。
+//        读回复时客户端断开或读流出错的照记已收到正文里的用量与错误，用量不齐（没能计价）的标 usageMissing。
 //   鉴权：请求头里名字含 auth、key、token、secret、cookie、password 的一律不存；落盘的每段文字先去掉配置的 key 与上游回显的
 //        打码密钥片段（scrubKeys）。
 //   上限：单题（同一步各次尝试合计）与单作业（续跑时接着已落盘的量算）的落盘字节。放不下即截断并标明：这次请求只记一行
@@ -33,8 +34,9 @@ import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { scrubKeys } from "./model-limits.ts";
 
-// 留存格式的版本（身份头记它）：落盘的布局或字段一改即加一。第 2 版：增量去掉 cache_control、另记其位置与顶层字段的先后
-export const GATEWAY_RETENTION_VERSION = 2;
+// 留存格式的版本（身份头记它）：落盘的布局或字段一改即加一。第 2 版：增量去掉 cache_control、另记其位置与顶层字段的先后；
+// 第 3 版：读回复时中途断开的请求照记已收到正文里的用量，用量不齐的标 usageMissing
+export const GATEWAY_RETENTION_VERSION = 3;
 export const RETENTION_DIR = "gateway";
 const MIB = 1024 * 1024;
 // 缺省上限：单题 32 MiB、单作业 512 MiB（估算见审计：一题约 1–2 MiB）
@@ -115,6 +117,8 @@ export interface RetainedResponse {
   // 交回客户端的状态码；客户端中止、没交回为 0
   status: number;
   usage?: RetainedUsage;
+  // 读回复时中途断开、已收到的正文里用量不齐，没能计价（第 3 版起）
+  usageMissing?: true;
   stopReason?: string | null;
   error?: string;
   body?: string;
@@ -127,6 +131,7 @@ export interface ExchangeOutcome {
   // 200 的回复正文（中途断流时为已收到的部分）；非 200 的错误正文
   text?: string;
   usage?: RetainedUsage;
+  usageMissing?: true;
   error?: string;
 }
 
@@ -521,6 +526,7 @@ export class GatewayRetention {
       ms: ended - started,
       status: outcome.status,
       ...(outcome.usage !== undefined ? { usage: outcome.usage } : {}),
+      ...(outcome.usageMissing === true ? { usageMissing: true as const } : {}),
       ...(outcome.error !== undefined ? { error: outcome.error } : {}),
     };
     if (outcome.text !== undefined && outcome.status === 200) {
