@@ -1,8 +1,11 @@
-"""对比评测的主判据与次要判据（docs/roadmap/comparative-eval-analysis-plan.md 第 1–3 节；决策 385、388、391、398–401）。
+"""对比评测的主判据与次要判据（docs/roadmap/comparative-eval-analysis-plan.md 第 1–3 节；决策 385、388、391、398–401、404）。
 
-两组：P 为 Pigeon 组、D 为对照组（外部 agent），条件名由命令行给（--group-a 为 P，--group-b 为 D）。规整表里两组的格子
-记作 P 与 D。主判据只有一个：部分得分的按题配对差 d(i) = ȳ(P, i) − ȳ(D, i)，各组先把各遍等权平均、缺一遍按另一遍计；
-主检验为按题配对的符号翻转置换检验，置信区间为按题自助法，随机种子写死在 constants.py。混合模型只作稳健性对照。
+两组：P 为 Pigeon 组、D 为对照组，条件名由命令行给（--group-a 为 P，--group-b 为 D）。规整表里两组的格子记作 P 与 D。
+主判据只有一个（404）：正式跑的主判据按重做试跑两组合并的平均部分得分选定（≥ 90% 用做成与否，否则用部分得分，只看
+合并水平），由命令行 --primary 显式给定为部分得分（score）或做成与否（solved）；按题配对差 d(i) = ȳ(P, i) − ȳ(D, i)，
+各组先把各遍等权平均、缺一遍按另一遍计（做成与否的各遍平均取值 0、0.5、1）。主检验为按题配对的符号翻转置换检验，
+置信区间为按题自助法，随机种子写死在 constants.py。混合模型只作稳健性对照。每题花费为关键次要判据（404②），与主判据
+两项按 Holm 两步控制总误报率 5%（stats.holm_two_step）。
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from .comparative_sources import (
 from .primary import cell_task_means, select_tasks
 from .reader import ResultFieldError, read_gateway_spend, read_identity, read_jsonl, record_for_cell
 from .secondary import _distribution, _slope, half_difference, time_positions
-from .stats import EPS, above, at_least, bootstrap_ci, bootstrap_stat_ci, paired_dz, sign_flip_pvalue
+from .stats import EPS, above, at_least, bootstrap_ci, bootstrap_stat_ci, holm_two_step, paired_dz, sign_flip_pvalue
 from .table import make_table
 
 GROUP_P = "P"
@@ -50,7 +53,7 @@ def offpeak_cost(usage: dict[str, Any] | None) -> float | None:
 
 
 def _extra(row: dict[str, Any], wall_cap_ms: float) -> dict[str, Any]:
-    """结果行里规整表之外、对比评测要用的几项：非高峰花费、撞墙钟上限、以轮数上限收尾、没判分。
+    """结果行里规整表之外、对比评测要用的几项：非高峰花费、撞墙钟上限、以轮数上限收尾、没判分、缺用量的请求数。
     两组都不限轮数（398），撞每步上限只看墙钟：终态 wall-clock-limit 或 agent 用时达到墙钟上限。结果行的 hitStepBudget
     另把"轮数（网关请求数）达到身份头的 maxTurns"也算作撞上限，这里不用它判上限，只在报告里并列。"""
     status = row.get("status")
@@ -58,6 +61,10 @@ def _extra(row: dict[str, Any], wall_cap_ms: float) -> dict[str, Any]:
     wall = row.get("agentWallMs")
     return {
         "cost_offpeak": offpeak_cost(row.get("usage")) if row.get("gateway") is not None else None,
+        # 结果行网关一节的 usageMissing：读回复中途断开、用量不齐而没能计价的请求数（没有即不出现，按 0 计）；
+        # 这些请求的 token 与花费不在行里，合计大于 0 时花费可能偏低
+        "usage_missing": (int(row["gateway"].get("usageMissing") or 0)
+                          if isinstance(row.get("gateway"), dict) else None),
         "wall_cap_hit": (1.0 if status == "wall-clock-limit" or (wall is not None and wall >= wall_cap_ms) else 0.0)
         if ran else None,
         "turn_limit": (1.0 if status == "turn-limit" else 0.0) if ran else None,
@@ -174,12 +181,13 @@ def _two_group_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["cell"].isin(GROUPS)]
 
 
-def comparative_mixed_model(df: pd.DataFrame, valid: list[int]) -> dict[str, Any]:
-    """稳健性对照（2.3）：y ~ 组 + (1|题) + (1|作业)，作业 = 组 × 遍。组按 P = +0.5、D = −0.5 编码，系数即 P − D。"""
+def comparative_mixed_model(df: pd.DataFrame, valid: list[int], metric: str = "score") -> dict[str, Any]:
+    """稳健性对照（2.3）：y ~ 组 + (1|题) + (1|作业)，作业 = 组 × 遍。组按 P = +0.5、D = −0.5 编码，系数即 P − D。
+    y 取主判据的指标（部分得分或做成与否，404①）。"""
     import statsmodels.api as sm
 
     sub = _two_group_rows(df)
-    sub = sub[sub["task"].isin(valid) & sub["score"].notna()].copy()
+    sub = sub[sub["task"].isin(valid) & sub[metric].notna()].copy()
     if sub.empty or len(valid) < 2:
         return {"error": "not-enough-data"}
     sub["arm"] = np.where(sub["cell"] == GROUP_P, 0.5, -0.5)
@@ -188,7 +196,7 @@ def comparative_mixed_model(df: pd.DataFrame, valid: list[int]) -> dict[str, Any
     try:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            model = sm.MixedLM.from_formula("score ~ arm", groups="one", re_formula="0",
+            model = sm.MixedLM.from_formula(f"{metric} ~ arm", groups="one", re_formula="0",
                                             vc_formula={"task": "0 + C(task)", "job": "0 + C(job)"}, data=sub)
             fit = model.fit(reml=True)
             caught = sorted({type(x.message).__name__ + ": " + str(x.message).splitlines()[0] for x in w})
@@ -220,12 +228,17 @@ def comparative_primary(
     flips: int = K.PERMUTATIONS,
     boots: int = K.BOOTSTRAPS,
     with_mixed: bool = True,
+    metric: str = "score",
 ) -> dict[str, Any]:
-    """主判据（2.1–2.4）：有效题、缺失、Δ 与检验、自助法区间、dz、相对差、本次数据的最小可分辨差距 M、稳健性对照。"""
+    """主判据（2.1–2.4、404①）：有效题、缺失、Δ 与检验、自助法区间、dz、相对差、本次数据的最小可分辨差距 M、稳健性对照。
+    metric 为 score（部分得分）或 solved（做成与否）；做成与否时 ȳ 取各遍做成与否的平均（0、0.5、1），检验、区间与 M 同部分得分。
+    "两组都接近满分"的注记按第 4 节始终看部分得分（两种指标下口径一致）。"""
+    if metric not in ("score", "solved"):
+        raise ValueError(f"主判据的指标只认 score（部分得分）与 solved（做成与否），给了 {metric!r}")
     sel = select_tasks(df, expected_tasks, baseline_unavailable, cells=GROUPS)
     valid = sel["validTasks"]
     rows = _two_group_rows(df)
-    means = cell_task_means(rows, "score", GROUPS).reindex(valid)
+    means = cell_task_means(rows, metric, GROUPS).reindex(valid)
     d = (means[GROUP_P] - means[GROUP_D]).to_numpy(dtype=float)
     n = int(d.size)
     est = float(d.mean()) if n else None
@@ -234,11 +247,14 @@ def comparative_primary(
     sd = float(d.std(ddof=1)) if n >= 2 else None
     mde = K.COMPARATIVE_MDE_Z_SUM * sd / math.sqrt(n) if sd is not None else None
     group_means = {g: (float(means[g].mean()) if n else None) for g in GROUPS}
+    score_means = means if metric == "score" else cell_task_means(rows, "score", GROUPS).reindex(valid)
+    score_group_means = {g: (float(score_means[g].mean()) if n else None) for g in GROUPS}
     significant = p is not None and p <= K.ALPHA
     within = (ci is not None and mde is not None and ci[0] >= -mde - EPS and ci[1] <= mde + EPS)
     n_missing = len(sel["missingTasks"])
     ratio = (n_missing / n) if n else (math.inf if n_missing else 0.0)
     result: dict[str, Any] = {
+        "metric": metric,
         **sel,
         "nValid": n,
         "missingRatio": ratio if math.isfinite(ratio) else None,
@@ -248,7 +264,8 @@ def comparative_primary(
                                 for r, x in rows[(rows["cell"] == g) & rows["task"].isin(valid) & rows["score"].notna()]
                                 .groupby("pass_no")} for g in GROUPS},
         "groupMeans": group_means,
-        "bothNearCeiling": n > 0 and all(at_least(group_means[g], K.CEILING_SCORE) for g in GROUPS),
+        "scoreGroupMeans": score_group_means,
+        "bothNearCeiling": n > 0 and all(at_least(score_group_means[g], K.CEILING_SCORE) for g in GROUPS),
         "effect": {
             "estimate": est,
             "ci": list(ci) if ci else None,
@@ -263,13 +280,49 @@ def comparative_primary(
         "perTask": {"tasks": valid, "d": d.tolist(), GROUP_P: means[GROUP_P].tolist(), GROUP_D: means[GROUP_D].tolist()},
     }
     if with_mixed:
-        mixed = comparative_mixed_model(df, valid)
+        mixed = comparative_mixed_model(df, valid, metric)
         result["mixedModel"] = mixed
         result["modelSensitive"] = model_sensitivity(est, significant, mixed)
     return result
 
 
-# ---------- 次要判据（第 3 节，一律探索性） ----------
+# ---------- 关键次要判据：每题花费（404②） ----------
+
+def cost_criterion(
+    df: pd.DataFrame,
+    tasks: list[int],
+    flips: int = K.PERMUTATIONS,
+    boots: int = K.BOOTSTRAPS,
+) -> dict[str, Any]:
+    """每题花费（404②）：c(g, i) 为该组该题各遍最终有效那次的网关花费（非高峰折算）的平均，dc(i) = c(P, i) − c(D, i)。
+    按题配对的符号翻转置换检验（双侧）与按题自助法 95% 区间，相对差 = mean(dc) ÷ mean(c(D))；显著与否由 Holm 两步判
+    （holm_primary_cost），这里只给 p。另报每组缺用量的请求合计（usageMissing）：大于 0 时花费可能偏低。"""
+    rows = _two_group_rows(df)
+    means = cell_task_means(rows, "cost_offpeak", GROUPS).reindex(tasks).dropna()
+    d = (means[GROUP_P] - means[GROUP_D]).to_numpy(dtype=float)
+    group_means = {g: (float(means[g].mean()) if d.size else None) for g in GROUPS}
+    est = float(d.mean()) if d.size else None
+    ci = bootstrap_ci(d, resamples=boots, seed=K.COMPARATIVE_BOOTSTRAP_SEED)
+    return {
+        "n": int(d.size),
+        "tasks": [int(t) for t in means.index],
+        "groupMeans": group_means,
+        "estimate": est,
+        "ci": list(ci) if ci else None,
+        "p": sign_flip_pvalue(d, flips=flips, seed=K.COMPARATIVE_PERMUTATION_SEED),
+        "relative": (est / group_means[GROUP_D]) if (est is not None and group_means[GROUP_D]) else None,
+        "usageMissing": {g: int(rows.loc[rows["cell"] == g, "usage_missing"].sum()) for g in GROUPS},
+    }
+
+
+def holm_primary_cost(primary: dict[str, Any], cost: dict[str, Any]) -> dict[str, Any]:
+    """主判据与每题花费两项的 Holm 两步（404②）：较小的 p ≤ 0.025 则该项显著并进入第二步，第二步较大的 p ≤ 0.05。
+    返回各项的 p、门槛与显著与否（顺序为主判据、每题花费），供结论措辞与报告使用。"""
+    p = (primary["effect"]["p"], cost["p"])
+    h = holm_two_step(p)
+    return {"items": ["primary", "cost"], "p": list(p),
+            "significant": [bool(h.significant[0]), bool(h.significant[1])],
+            "thresholds": [h.thresholds[0], h.thresholds[1]]}
 
 def _paired(df: pd.DataFrame, metric: str, tasks: list[int], flips: int, boots: int) -> dict[str, Any]:
     """按 2.1 的配对方法：各组各遍等权平均后按题取 P − D，在两组都有该项的题上给平均、区间与 p。"""
@@ -370,6 +423,8 @@ def mechanisms(df: pd.DataFrame, info: dict[str, Any]) -> dict[str, Any]:
 
 def comparative_secondary(df: pd.DataFrame, primary: dict[str, Any], info: dict[str, Any],
                           flips: int = K.PERMUTATIONS, boots: int = K.BOOTSTRAPS) -> dict[str, Any]:
+    """次要判据（第 3 节，一律探索性）。主判据不用的那个质量指标降在这里照报（404①）：
+    主判据为部分得分时报做成与否，主判据为做成与否时报部分得分。"""
     tasks = primary["validTasks"]
     rows = _two_group_rows(df)
     in_valid = rows[rows["task"].isin(tasks)]
@@ -383,8 +438,12 @@ def comparative_secondary(df: pd.DataFrame, primary: dict[str, Any], info: dict[
     for g in GROUPS:
         v = in_valid[in_valid["cell"] == g]["solved"].dropna()
         rate[g] = float(v.mean()) if not v.empty else None
+    # 降为次要判据的质量指标：与主判据相对的那个（404①）
+    quality_key, quality_metric = ("solved", "solved") if primary["metric"] == "score" else ("partialScore", "score")
+    quality_rate = rate if quality_metric == "solved" else {
+        g: (float(v.mean()) if not (v := in_valid[in_valid["cell"] == g]["score"].dropna()).empty else None) for g in GROUPS}
     return {
-        "solved": {"rateByGroup": rate, **_paired(df, "solved", tasks, flips, boots), "exploratory": True},
+        quality_key: {"rateByGroup": quality_rate, **_paired(df, quality_metric, tasks, flips, boots), "exploratory": True},
         "keepFailures": {"byGroup": keep, **_paired(df, "p_failed", tasks, flips, boots), "exploratory": True},
         "learning": {**learning(primary, boots), "exploratory": True},
         "efficiency": {

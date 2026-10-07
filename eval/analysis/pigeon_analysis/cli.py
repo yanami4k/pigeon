@@ -9,8 +9,9 @@ from typing import Any
 
 from . import constants as K
 from .calibration import analyze_calibration
-from .comparative import GROUPS, caps_and_voids, comparative_primary, comparative_secondary, load_comparative, mechanisms
-from .comparative_pilot import analyze_pilot
+from .comparative import (GROUPS, caps_and_voids, comparative_primary, comparative_secondary, cost_criterion,
+                          holm_primary_cost, load_comparative, mechanisms, model_sensitivity)
+from .comparative_pilot import PRIMARY_METRIC_NAMES, analyze_pilot
 from .comparative_report import comparative_markdown, comparative_result, pilot_markdown
 from .primary import analyze_primary, select_tasks
 from .interface import analyze_interface_sensitivity, read_unguessable
@@ -62,7 +63,9 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_comparative(args: argparse.Namespace) -> dict[str, Any]:
-    """对比评测（comparative-eval-analysis-plan.md 第 1–4 节）：两组的主判据、次要判据与固定措辞。"""
+    """对比评测（comparative-eval-analysis-plan.md 第 1–4 节；404）：两组的主判据、每题花费关键次要判据、次要判据与固定措辞。"""
+    if not 0.0 <= args.pilot_score <= 1.0:
+        raise ValueError("--pilot-score 为试跑报告里两组合并的平均部分得分（0 到 1 的小数）")
     df, info = load_comparative(args.results, args.group_a, args.group_b)
     tasks = _read_tasks(args.tasks)
     if tasks is not None:
@@ -70,8 +73,18 @@ def run_comparative(args: argparse.Namespace) -> dict[str, Any]:
     if args.classes_summary and tasks is None:
         raise ValueError("--classes-summary 要与 --tasks 一起给（汇总里的题号按全部题的步序换算）")
     no_baseline = read_baseline_failures(args.classes_summary, tasks) if args.classes_summary else None
-    primary = comparative_primary(df, expected_tasks=tasks, baseline_unavailable=no_baseline)
-    return comparative_result(primary, comparative_secondary(df, primary, info), info)
+    primary = comparative_primary(df, expected_tasks=tasks, baseline_unavailable=no_baseline,
+                                  metric=PRIMARY_METRIC_NAMES[args.primary])
+    cost = cost_criterion(df, primary["validTasks"])
+    holm = holm_primary_cost(primary, cost)
+    # 主判据的显著以 Holm 两步的判定为准；原始双侧 5% 的结果留作对照，结论对建模敏感同样按 Holm 判定比较（404②）
+    primary["effect"]["rawSignificant"] = primary["effect"]["significant"]
+    primary["effect"]["significant"] = holm["significant"][0]
+    if "mixedModel" in primary:
+        primary["modelSensitive"] = model_sensitivity(primary["effect"]["estimate"], holm["significant"][0],
+                                                      primary["mixedModel"])
+    return comparative_result(primary, comparative_secondary(df, primary, info), info,
+                              cost=cost, holm=holm, pilot_score=args.pilot_score)
 
 
 def run_comparative_pilot(args: argparse.Namespace) -> dict[str, Any]:
@@ -143,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
                                        "完全没有结果行的题也列为缺失；不给即按结果行里出现的步序")
         if name == "comparative":
             x.add_argument("--classes-summary", help="两类用例预计算汇总（classes-summary.json），与 --tasks 一起给")
+            x.add_argument("--primary", required=True, choices=sorted(PRIMARY_METRIC_NAMES),
+                           help="正式跑的主判据（404①）：solved = 做成与否（做成率），partial = 部分得分；按试跑报告的"
+                                "主判据选定给，无缺省、必须显式给出")
+            x.add_argument("--pilot-score", required=True, type=float,
+                           help="试跑报告里两组合并的平均部分得分（0 到 1 的小数），报告里写明主判据的依据")
         else:
             x.add_argument("--free-gb", type=float, default=None,
                            help="服务器剩余空间（GB）：与工作树推算占用比较（决策 399）；不给只推算、不判")

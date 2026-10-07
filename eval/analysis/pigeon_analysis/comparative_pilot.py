@@ -1,7 +1,8 @@
-"""对比评测试跑的取值规则（分析计划第 5 节；决策 398、399、400）。
+"""对比评测试跑的取值规则（分析计划第 5 节；决策 398、399、400、404）。
 
 试跑结果不进正式结论：这里只看花费、上限与机制是否正常，不看两组得分之差。能自动算的都算出来；要人判断的（撞上限的步
-是在打转还是确实做不完、留存体积不符的原因、账单核对）列出依据，交人看。
+是在打转还是确实做不完、留存体积不符的原因、账单核对）列出依据，交人看。主判据选定（404①）只看两组合并的平均水平，
+不看两组之差。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import pandas as pd
 from . import constants as K
 from .calibration import sample_tasks
 from .comparative import GROUP_D, GROUP_P, GROUPS
+from .stats import at_least
 
 MIB = 1024 * 1024
 MB = 1_000_000
@@ -21,6 +23,18 @@ GB = 1_000_000_000
 # 实付与非高峰折算比较的相对容差（浮点）
 COST_TOL = 1e-6
 
+
+# 主判据选定（404①）的质量指标取值：部分得分（score）或做成与否（solved）
+PRIMARY_METRIC_NAMES = {"partial": "score", "solved": "solved"}
+
+
+def primary_selection(df: pd.DataFrame) -> dict[str, Any]:
+    """主判据选定（404①）：两组合并的平均部分得分 ≥ 90% 时正式跑主判据为做成与否，否则维持部分得分；只看合并水平。"""
+    x = df[df["cell"].isin(GROUPS)]["score"].dropna()
+    merged = float(x.mean()) if not x.empty else None
+    use_solved = merged is not None and at_least(merged, K.CEILING_SCORE)
+    return {"mergedScore": merged, "steps": int(len(x)), "ceiling": K.CEILING_SCORE,
+            "primary": "solved" if use_solved else "partial"}
 
 def budget_rule(df: pd.DataFrame) -> dict[str, Any]:
     """花费与预算（5.2）：cP、cD 为两组每步平均的非高峰花费（有网关计量的步），C = 79 × (cP + cD) × 2 × 1.2。
@@ -139,6 +153,7 @@ def analyze_pilot(df: pd.DataFrame, info: dict[str, Any], caps: dict[str, Any], 
     n_pauses = sum(p["pauses"] for p in pauses)
     budget = budget_rule(df)
     return {
+        "primarySelection": primary_selection(df),
         "budget": budget,
         "stepCap": cap_rule(df, info["settings"], caps),
         "worktrees": worktree_rule(df, mech, free_gb),
