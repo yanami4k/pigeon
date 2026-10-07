@@ -113,6 +113,12 @@ export interface StreamManifest {
   streams: readonly StreamSegment[];
 }
 
+// 测试全文一节的拼法：以路径为标题、原样附上全文（末尾空白去掉，不与分段空行叠加）。buildTaskPrompt 与
+// taskTextPromptOf 共用这一节
+function testTextSection(t: { path: string; content: string }): string {
+  return `--- ${t.path} ---\n${t.content.trimEnd()}`;
+}
+
 // 题面：开头每行一个本题测试文件的路径（相对仓库根；全文过长被截断时路径仍在），
 // 其后是提交信息原文，再逐个附上该步新增或修改的测试文件全文。与 M9 同一做法，不加任何包装措辞
 export function buildTaskPrompt(
@@ -121,14 +127,19 @@ export function buildTaskPrompt(
 ): string {
   const parts = tests.length > 0 ? [tests.map((t) => t.path).join("\n")] : [];
   parts.push(message.trimEnd());
-  for (const t of tests) parts.push(`--- ${t.path} ---\n${t.content.trimEnd()}`);
+  for (const t of tests) parts.push(testTextSection(t));
   return `${parts.join("\n\n")}\n`;
 }
 
-// 题面格式（198、213）：提交信息加应通过的测试名单，不附测试内容。名单先给测试文件路径（test-files）；给用例名
-// （test-cases）作为校准做成率过低时的备用，要先算出人在该步使其由失败变通过的用例，由跑批器二接上
-export type TaskPromptFormat = "test-files" | "test-cases";
-export const TASK_PROMPT_FORMATS: readonly TaskPromptFormat[] = ["test-files", "test-cases"];
+// 题面格式（198、213、403）：提交信息加应通过的测试名单。名单给测试文件路径（test-files）；给用例名
+// （test-cases）作为校准做成率过低时的备用，要先算出人在该步使其由失败变通过的用例，由跑批器二接上；
+// test-text（403）在名单之后另附人在该步判题测试文件的全文（该步提交时的版本），不再加接口说明
+export type TaskPromptFormat = "test-files" | "test-cases" | "test-text";
+export const TASK_PROMPT_FORMATS: readonly TaskPromptFormat[] = [
+  "test-files",
+  "test-cases",
+  "test-text",
+];
 export const DEFAULT_TASK_PROMPT_FORMAT: TaskPromptFormat = "test-files";
 
 // 名单前的一行说明：名单里的测试（新写的或改过的）此刻不在工作区里或还是旧版本，判题时才放入
@@ -137,6 +148,9 @@ const SHOULD_PASS_HEADINGS: Record<TaskPromptFormat, string> = {
     "Test files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):",
   "test-cases":
     "Test cases that should pass after the change (in new or updated test files; their final versions are not in the repository and are added when the change is checked):",
+  // test-text 的名单是测试文件路径，说明行与 test-files 相同（全文另附在名单之后）
+  "test-text":
+    "Test files that should pass after the change (new or updated; their final versions are not in the repository and are added when the change is checked):",
 };
 
 // 第二段名单前的一行说明：要做到的用例落在本题新写或改过的测试文件之外时，这些用例所在的、仓库里本来就有的测试文件
@@ -146,11 +160,16 @@ const OTHER_FAILING_HEADINGS: Record<TaskPromptFormat, string> = {
     "Other test files already in the repository that currently fail and should pass after the change:",
   "test-cases":
     "Other test cases in test files already in the repository that currently fail and should pass after the change:",
+  "test-text":
+    "Other test files already in the repository that currently fail and should pass after the change:",
 };
 
 // 题面的版式（进身份头比对）：应通过的名单，另有要做到的用例落在本题测试文件之外时再列第二段
 export const TASK_PROMPT_LAYOUT =
   "commit message; should-pass list; second list of other failing tests already in the repository";
+
+// 附测试全文的版式（403，进身份头比对）：名单两段同 test-files，其后逐个附上判题测试文件的全文；不加接口说明
+export const TASK_PROMPT_LAYOUT_TEST_TEXT = `${TASK_PROMPT_LAYOUT}; full text of the judge test files after the lists`;
 
 // 题面的接口说明（374）：测试要用到、起点里没有的模块与名字及签名，由分析包按规则抽出（eval/analysis 的
 // task_interface.py），跑批器只渲染。kind 为 class、function、async function 或 other；params 为参数表（不带括号），
@@ -176,6 +195,12 @@ const INTERFACES_HEADING =
 
 // 带接口说明时的版式（进身份头比对）；不带时仍是 TASK_PROMPT_LAYOUT
 export const TASK_PROMPT_LAYOUT_WITH_INTERFACES = `${TASK_PROMPT_LAYOUT}; interface section after the lists`;
+
+// 身份头记的题面版式：test-text 恒为附全文的版式（它不与接口说明同给）；其余格式给了接口说明为带接口说明的版式
+export function promptLayoutOf(format: TaskPromptFormat, withInterfaces: boolean): string {
+  if (format === "test-text") return TASK_PROMPT_LAYOUT_TEST_TEXT;
+  return withInterfaces ? TASK_PROMPT_LAYOUT_WITH_INTERFACES : TASK_PROMPT_LAYOUT;
+}
 
 const DECLARATION_KEYWORDS: Record<TaskInterfaceName["kind"], string> = {
   class: "class ",
@@ -218,6 +243,19 @@ export function taskPromptOf(
     parts.push(`${OTHER_FAILING_HEADINGS[format]}\n${otherFailing.join("\n")}`);
   if (interfaces.length > 0) parts.push(interfacesSection(interfaces));
   return `${parts.join("\n\n")}\n`;
+}
+
+// 附测试全文的题面（403）：提交信息、应通过的测试名单（两段版式同 test-files，不给接口说明），其后按名单顺序
+// 逐个附上人在该步判题测试文件的全文（人在该步提交时的版本；节的做法同 buildTaskPrompt）
+export function taskTextPromptOf(
+  message: string,
+  shouldPass: readonly string[],
+  otherFailing: readonly string[],
+  tests: readonly { path: string; content: string }[]
+): string {
+  const head = taskPromptOf(message, "test-text", shouldPass, otherFailing);
+  if (tests.length === 0) return head;
+  return `${head.trimEnd()}\n\n${tests.map(testTextSection).join("\n\n")}\n`;
 }
 
 // 固定起点的步（215、216）：清单里的题按时间接成一条流，维护步、套用步与跳过步都不跑，重置点不再切分

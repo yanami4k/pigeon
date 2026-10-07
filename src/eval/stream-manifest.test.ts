@@ -10,13 +10,18 @@ import {
   countStepKinds,
   DEFAULT_TASK_PROMPT_FORMAT,
   interfacesSection,
+  promptLayoutOf,
   type RepoProfile,
   stepsOf,
   TASK_CHAIN_ID,
   TASK_PROMPT_FORMATS,
+  TASK_PROMPT_LAYOUT,
+  TASK_PROMPT_LAYOUT_TEST_TEXT,
+  TASK_PROMPT_LAYOUT_WITH_INTERFACES,
   type TaskInterfaceModule,
   type TestProbe,
   taskPromptOf,
+  taskTextPromptOf,
 } from "./stream-manifest.ts";
 import {
   classifyPigeonFile,
@@ -328,7 +333,7 @@ test("跑批器的题面（198、213）：提交信息原文，其后一行说�
   assert.match(cases, /^Add a\n\nTest cases that should pass after the change \([^\n]*\):\n/);
   assert.match(cases, /\nsrc\/a\.test\.ts::works\n$/);
   assert.equal(taskPromptOf("Add a\n", "test-files", []), "Add a\n");
-  assert.deepEqual([...TASK_PROMPT_FORMATS], ["test-files", "test-cases"]);
+  assert.deepEqual([...TASK_PROMPT_FORMATS], ["test-files", "test-cases", "test-text"]);
   assert.equal(DEFAULT_TASK_PROMPT_FORMAT, "test-files");
 });
 
@@ -384,6 +389,34 @@ test("题面说明句逐字冻结（239、374）：两种格式下应通过的�
     taskPromptOf("Add a", "test-cases", ["src/a.test.ts::works"], ["src/z.test.ts::case"]),
     "Add a\n\nTest cases that should pass after the change (in new or updated test files; their final versions are not in the repository and are added when the change is checked):\nsrc/a.test.ts::works\n\nOther test cases in test files already in the repository that currently fail and should pass after the change:\nsrc/z.test.ts::case\n"
   );
+});
+
+test("附测试全文的题面（403）：名单两段与 test-files 逐字相同，其后按名单顺序以路径为标题附上全文；没有全文时与 test-files 逐字相同；名单与全文都为空时只有提交信息", () => {
+  const head = taskPromptOf("Add a", "test-text", ["src/a.test.ts"], ["src/z.test.ts"]);
+  assert.equal(head, taskPromptOf("Add a", "test-files", ["src/a.test.ts"], ["src/z.test.ts"]));
+  const prompt = taskTextPromptOf(
+    "Add a",
+    ["src/a.test.ts"],
+    ["src/z.test.ts"],
+    [
+      { path: "src/a.test.ts", content: "import a\nassert a()\n\n" },
+      { path: "src/b.test.ts", content: "assert b()\n" },
+    ]
+  );
+  assert.equal(
+    prompt,
+    `${head.trimEnd()}\n\n--- src/a.test.ts ---\nimport a\nassert a()\n\n--- src/b.test.ts ---\nassert b()\n`
+  );
+  assert.equal(taskTextPromptOf("Add a", ["src/a.test.ts"], ["src/z.test.ts"], []), head);
+  assert.equal(taskTextPromptOf("Add a\n", [], [], []), "Add a\n");
+});
+
+test("身份头的题面版式（403）：test-text 恒为附全文的版式（与旧版式不同，旧目录不能续跑）；其余格式给了接口说明为带接口说明的版式，不给为基础版式", () => {
+  assert.notEqual(TASK_PROMPT_LAYOUT_TEST_TEXT, TASK_PROMPT_LAYOUT);
+  assert.equal(promptLayoutOf("test-text", false), TASK_PROMPT_LAYOUT_TEST_TEXT);
+  assert.equal(promptLayoutOf("test-files", true), TASK_PROMPT_LAYOUT_WITH_INTERFACES);
+  assert.equal(promptLayoutOf("test-files", false), TASK_PROMPT_LAYOUT);
+  assert.equal(promptLayoutOf("test-cases", false), TASK_PROMPT_LAYOUT);
 });
 
 test("重置点切流：重置步的提交为下一条流的起点，重置步不属于任何流", () => {
