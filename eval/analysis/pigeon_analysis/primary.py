@@ -55,26 +55,28 @@ def select_tasks(
     df: pd.DataFrame,
     expected_tasks: Iterable[int] | None = None,
     baseline_unavailable: Iterable[int] | None = None,
+    cells: Iterable[str] = K.CELLS,
 ) -> dict[str, Any]:
-    """有效题：能建立两类用例的基线、F 不为空、四格在该题上各至少一遍有效结果（1.4）。
+    """有效题：能建立两类用例的基线、F 不为空、各格（缺省四格；对比评测为两组）在该题上各至少一遍有效结果（1.4）。
     expected_tasks 给出时，完全没有结果行的题也列为缺失（F 未知）。
     无法建立基线的题（结果行标记，或由 baseline_unavailable 给出）排除在主判据之外、单独计数，不算缺失题。"""
-    rows = four_cell_rows(df)
+    cells = list(cells)
+    rows = df[df["cell"].isin(cells)]
     seen = set(int(t) for t in rows["task"].unique())
     all_tasks = sorted(seen | set(int(t) for t in (expected_tasks or ())))
     no_baseline = set(int(t) for t in rows[rows["baseline_unavailable"].eq(1)]["task"].unique())
     no_baseline |= set(int(t) for t in (baseline_unavailable or ()))
     empty = set(f_empty_tasks(rows)) - no_baseline
-    means = cell_task_means(rows, "score")
+    means = cell_task_means(rows, "score", cells)
     valid: list[int] = []
     missing: list[dict[str, Any]] = []
     for t in all_tasks:
         if t in empty or t in no_baseline:
             continue
         if t not in means.index:
-            missing.append({"task": t, "cellsWithoutResult": list(K.CELLS), "reason": "no-rows"})
+            missing.append({"task": t, "cellsWithoutResult": list(cells), "reason": "no-rows"})
             continue
-        lacking = [c for c in K.CELLS if math.isnan(means.at[t, c])]
+        lacking = [c for c in cells if math.isnan(means.at[t, c])]
         if lacking:
             missing.append({"task": t, "cellsWithoutResult": lacking, "reason": "cell-missing"})
         else:
