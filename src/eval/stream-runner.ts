@@ -44,6 +44,7 @@ import {
   type TaskInterfaceModule,
   type TaskPromptFormat,
   taskPromptOf,
+  taskTextPromptOf,
 } from "./stream-manifest.ts";
 import type { TestCaseResult } from "./stream-measure.ts";
 import { memoryFactsOf, snapshotOrRestoreMemory } from "./stream-memory-snapshot.ts";
@@ -1056,14 +1057,25 @@ export async function judgeCases(
   });
 }
 
-// 这一步的题面（198、213）：提交信息加应通过的测试名单——本题新写或改过的测试文件路径，或其中要做到的用例编号；
+// 这一步的题面（198、213、403）：提交信息加应通过的测试名单——本题新写或改过的测试文件路径，或其中要做到的用例编号；
 // 要做到的用例有落在这些文件之外的，另列第二段：它们所在的测试文件（去重、排序），或这些用例编号；给了接口数据的，
-// 该题的接口说明接在名单之后（374）
+// 该题的接口说明接在名单之后（374）。test-text（403）在名单之后另附判题测试文件的全文，取人在该步提交时的版本
 function promptFor(options: RunStreamsOptions, step: StreamStep, classes: CaseClasses): string {
   const format = options.promptFormat ?? DEFAULT_TASK_PROMPT_FORMAT;
   const outside = outsideJudgeCases(step, classes.failToPass);
   const outsideSet = new Set(outside);
   const interfaces = options.taskInterfaces?.get(step.seq) ?? [];
+  if (format === "test-text") {
+    return taskTextPromptOf(
+      step.message,
+      step.judgeTests,
+      [...new Set(outside.map(caseFile))].sort(),
+      step.judgeTests.map((p) => ({
+        path: p,
+        content: options.human.show(step.commit, p).toString("utf8"),
+      }))
+    );
+  }
   if (format === "test-files") {
     return taskPromptOf(
       step.message,

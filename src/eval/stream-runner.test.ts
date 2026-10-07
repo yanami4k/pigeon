@@ -1275,6 +1275,40 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
     }
   });
 
+  test("题面附判题测试全文（403）：名单之后以路径为标题附上人在该步提交时的版本（改过的文件不能是起点的版本）；两个条件收到逐字相同的题面", async () => {
+    const t = await toy();
+    try {
+      const agent = scriptedAgent(solve);
+      await runStreams(
+        options(t, {
+          agents: { pigeon: agent },
+          promptFormat: "test-text",
+          conditions: ["search-only", "neither"],
+          maxSteps: 1,
+          concurrency: 1,
+        })
+      );
+      const prompt = agent.calls[0]?.prompt ?? "";
+      // 名单部分同 test-files，其后按名单顺序附全文
+      assert.match(
+        prompt,
+        /^Add alpha\n\nCreate src\/a\.txt\n\nTest files that should pass[^\n]*\nsrc\/a\.test\.sh\nsrc\/base\.test\.sh\n\n--- src\/a\.test\.sh ---\n/
+      );
+      // base.test.sh 须取人在该步（c1）改过的版本：起点的版本没有这一段
+      assert.ok(prompt.includes("grep -q base src/base.txt && [ -f src/a.txt ]"), prompt);
+      assert.ok(
+        !prompt.includes("--- src/base.test.sh ---\ngrep -q base src/base.txt\n"),
+        `附了起点的版本：${prompt}`
+      );
+      // 两个条件（同一步）收到逐字相同的题面
+      assert.equal(agent.calls.length, 2);
+      assert.equal(agent.calls[1]?.prompt, prompt);
+      assert.notEqual(agent.calls[0]?.job.condition, agent.calls[1]?.job.condition);
+    } finally {
+      rmSync(t.base, { recursive: true, force: true });
+    }
+  });
+
   test("题面第二段与要做到的（274）：人在该步没改的测试文件在叠放运行里整文件收集失败，其中的用例不进要做到的、第二段也不列；同样没改、单条失败的照旧列出", async () => {
     // other.test.sh 在起点上整文件收集失败（缺 a.txt 时以退出码 5 结束），z.test.sh 只是失败；人在第 1 步两者都没改
     for (const format of ["test-files", "test-cases"] as const) {
