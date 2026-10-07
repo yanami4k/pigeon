@@ -5,7 +5,10 @@
 //        gateway/blobs/<sha256>.json 为系统提示与工具定义的整段，同一作业只存一份。重做与续跑另开下一个 try。
 //   请求只存增量：同一次尝试里找此前的请求，其 messages 恰为本次的前缀（取最长的），只存其后新增的消息并记下它的编号；
 //        找不到（第一次、上下文被压缩改写、另一路对话）即存全量并标 full。另记 messages、system、tools 以外的顶层字段
-//        （模型与参数），system 与 tools 只记摘要（整段在作业里第一次出现时存进 blobs）。
+//        （模型与参数），system 与 tools 只记摘要（整段在作业里第一次出现时存进 blobs），以及顶层字段的先后。
+//   cache_control（格式第 2 版）：客户端每次请求把缓存断点挪到最新的消息上，上一次带断点的消息这次不带了。比对前缀与存的
+//        增量一律是去掉 cache_control 的消息；每次请求里 cache_control 所在的位置（消息下标、内容块下标、在对象里是第几个键）
+//        与取值另记，读取时放回原处，增量加位置逐字还原出原请求的消息。第 1 版的记录没有位置与字段先后，照旧读。
 //   大字段：messages、system、tools 以外的顶层字段序列化超过 LARGE_FIELD_BYTES 的（例如外部 agent 每次请求附带的增量
 //        会话日志）不进参数，记字段名、大小与 sha256，内容 gzip 后另存；一题里至多用掉单题上限的四分之一，超出只记大小与摘要。
 //   回复：原始正文（SSE 或 JSON）另存；responses.jsonl 记交回的状态码、耗时、用量、停止原因；非 200 记错误正文的前 2000 字。
@@ -30,8 +33,8 @@ import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { scrubKeys } from "./model-limits.ts";
 
-// 留存格式的版本（身份头记它）：落盘的布局或字段一改即加一
-export const GATEWAY_RETENTION_VERSION = 1;
+// 留存格式的版本（身份头记它）：落盘的布局或字段一改即加一。第 2 版：增量去掉 cache_control、另记其位置与顶层字段的先后
+export const GATEWAY_RETENTION_VERSION = 2;
 export const RETENTION_DIR = "gateway";
 const MIB = 1024 * 1024;
 // 缺省上限：单题 32 MiB、单作业 512 MiB（估算见审计：一题约 1–2 MiB）
@@ -69,17 +72,29 @@ export interface LargeFieldRef {
   slice?: GzSlice;
 }
 
+// 一处 cache_control：第几条消息、其 content 里第几个块（没有即在消息本身上）、在该对象里是第几个键、取值
+export interface CacheControlMark {
+  message: number;
+  block?: number;
+  key: number;
+  value: unknown;
+}
+
 export interface RetainedRequest {
   id: number;
   at: string;
   bodyBytes: number;
   bodySha256: string;
   headers?: Record<string, string>;
+  // 顶层字段的先后（第 2 版起）
+  order?: string[];
   params?: Record<string, unknown>;
   system?: BlobRef;
   tools?: BlobRef & { count: number };
-  // base 为前缀所在的请求编号；full 为存了全量。被截断的只有 count
+  // base 为前缀所在的请求编号；full 为存了全量。delta 为去掉 cache_control 的消息（第 1 版原样）。被截断的只有 count
   messages?: { count: number; base?: number; full?: true; delta?: unknown[] };
+  // 这次请求的消息里 cache_control 的全部位置（第 2 版起，有才记）
+  cacheControl?: CacheControlMark[];
   large?: LargeFieldRef[];
   truncated?: RetentionCut;
   // 请求体不是 JSON 对象：只记大小与摘要
@@ -143,6 +158,58 @@ const sha256 = (data: string | Buffer) => createHash("sha256").update(data).dige
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// 去掉消息本身与其 content 各块上的 cache_control（不改原对象，其余键的先后不变），交回去掉之后的消息与各处位置
+export function stripCacheControl(messages: readonly unknown[]): {
+  stripped: unknown[];
+  marks: CacheControlMark[];
+} {
+  const marks: CacheControlMark[] = [];
+  const without = (obj: Record<string, unknown>, at: { message: number; block?: number }) => {
+    const key = Object.keys(obj).indexOf("cache_control");
+    if (key === -1) return obj;
+    marks.push({ ...at, key, value: obj.cache_control });
+    const { cache_control: _cacheControl, ...rest } = obj;
+    return rest;
+  };
+  const stripped = messages.map((m, message) => {
+    if (!isObject(m)) return m;
+    const msg = without(m, { message });
+    if (!Array.isArray(msg.content)) return msg;
+    const content = msg.content.map((b: unknown, block: number) =>
+      isObject(b) ? without(b, { message, block }) : b
+    );
+    return { ...msg, content };
+  });
+  return { stripped, marks };
+}
+
+// stripCacheControl 的逆：把各处 cache_control 按原来的键位放回（不改传入的消息）
+export function applyCacheControl(
+  messages: readonly unknown[],
+  marks: readonly CacheControlMark[]
+): unknown[] {
+  const out = [...messages];
+  const insert = (obj: Record<string, unknown>, key: number, value: unknown) => {
+    const entries = Object.entries(obj);
+    entries.splice(key, 0, ["cache_control", value]);
+    return Object.fromEntries(entries);
+  };
+  for (const { message, block, key, value } of marks) {
+    const msg = out[message];
+    if (!isObject(msg)) continue;
+    if (block === undefined) {
+      out[message] = insert(msg, key, value);
+    } else if (Array.isArray(msg.content)) {
+      const target: unknown = msg.content[block];
+      if (!isObject(target)) continue;
+      const content = [...msg.content];
+      content[block] = insert(target, key, value);
+      out[message] = { ...msg, content };
+    }
+  }
+  return out;
 }
 
 // 目录下全部文件的字节数；不在为 0
@@ -384,6 +451,7 @@ export class GatewayRetention {
     const record: RetainedRequest = {
       ...head,
       headers: kept,
+      order: Object.keys(body),
       params,
       ...(system !== undefined ? { system: blob(system) } : {}),
       ...(tools !== undefined
@@ -391,12 +459,14 @@ export class GatewayRetention {
         : {}),
       ...(large.length > 0 ? { large } : {}),
     };
-    // 增量：此前某次请求的完整 messages 恰为本次的前缀即只存其后的部分（取最长的前缀）
+    // 增量：此前某次请求的完整 messages 恰为本次的前缀即只存其后的部分（取最长的前缀）。比的与存的都是去掉 cache_control
+    // 的消息，cache_control 的位置另记
     let chain: string | undefined;
     if (Array.isArray(messages)) {
+      const { stripped, marks } = stripCacheControl(messages);
       const chains: string[] = [];
       let h = "";
-      for (const m of messages) {
+      for (const m of stripped) {
         h = sha256(`${h}\n${JSON.stringify(m)}`);
         chains.push(h);
       }
@@ -410,8 +480,9 @@ export class GatewayRetention {
       record.messages = {
         count: messages.length,
         ...(base !== undefined ? { base } : { full: true as const }),
-        delta: messages.slice(baseCount),
+        delta: stripped.slice(baseCount),
       };
+      if (marks.length > 0) record.cacheControl = marks;
     } else if (messages !== undefined) {
       record.params = { ...params, messages };
     }
@@ -468,14 +539,17 @@ export class GatewayRetention {
   }
 }
 
-// 读取（按作业目录，可只取一步）：每次尝试列出各次请求与回复；body 为还原出的完整请求体（各顶层字段，键序不保证与
-// 原文相同），还原不全的部分列在 missing 里；reply() 取原始回复正文
+// 读取（按作业目录，可只取一步）：每次尝试列出各次请求与回复；body 为还原出的完整请求体（沿 base 拼回去掉 cache_control
+// 的消息，再按记下的位置放回 cache_control；第 2 版起顶层字段按原文先后，第 1 版的键序不保证与原文相同），还原不全的部分
+// 列在 missing 里；reply() 取原始回复正文
 export interface RetainedExchangeView {
   id: number;
   request: RetainedRequest;
   response: RetainedResponse | undefined;
   body: Record<string, unknown> | undefined;
   missing: string[];
+  // 还原出的请求体紧凑序列化后与转发的原文逐字相同（按原文的 sha256 核对；原文带空白排版的为 false）
+  exact: boolean;
   reply(): string | undefined;
 }
 
@@ -566,7 +640,14 @@ export function readRetention(jobDir: string, seq?: number): RetainedTry[] {
             if (request.messages !== undefined) {
               const messages = messagesOf(request.id);
               if (messages === undefined) missing.push("messages");
-              else body.messages = messages;
+              else body.messages = applyCacheControl(messages, request.cacheControl ?? []);
+            }
+            // 第 2 版起按原文的先后排顶层字段
+            const order = request.order ?? [];
+            const sorted: Record<string, unknown> = body;
+            body = {};
+            for (const key of [...order, ...Object.keys(sorted)]) {
+              if (key in sorted && !(key in body)) body[key] = sorted[key];
             }
           }
           return {
@@ -575,6 +656,7 @@ export function readRetention(jobDir: string, seq?: number): RetainedTry[] {
             response,
             body,
             missing,
+            exact: body !== undefined && sha256(JSON.stringify(body)) === request.bodySha256,
             reply: () =>
               response?.reply?.slice === undefined
                 ? undefined

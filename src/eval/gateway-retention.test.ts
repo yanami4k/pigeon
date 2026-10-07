@@ -1,7 +1,15 @@
 // 网关逐请求留存（决策 394）：真网关 + 假上游，按作业目录读回
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -86,12 +94,19 @@ async function withRetention(
 }
 
 const msg = (role: string, text: string) => ({ role, content: [{ type: "text", text }] });
+type Msg = ReturnType<typeof msg>;
+// 带缓存断点的消息：cache_control 在块上（mid 为真时排在块的键中间）。客户端每次把断点挪到最新的消息上
+const cc = (m: Msg, mid = false) => {
+  const { type, text } = m.content[0] as { type: string; text: string };
+  const cache_control = { type: "ephemeral" };
+  return { ...m, content: [mid ? { type, cache_control, text } : { type, text, cache_control }] };
+};
 
-test("留存：请求只存增量（对不上即全量并标明）、能还原出完整请求；大字段另存，转发逐字不变；回复与用量照记", async () => {
+test("留存：请求只存增量（cache_control 挪动不算对不上，真对不上才存全量并标明）、增量加 cache_control 的位置逐字还原出完整请求；大字段另存，转发逐字不变；回复与用量照记", async () => {
   await withRetention({}, async ({ g, jobDir, seen, post }) => {
     const [u1, a1, u2, a2, u3] = ["u1", "a1", "u2", "a2", "u3"].map((t, i) =>
       msg(i % 2 === 0 ? "user" : "assistant", t)
-    );
+    ) as [Msg, Msg, Msg, Msg, Msg];
     const base = {
       model: "m",
       max_tokens: 100,
@@ -100,14 +115,17 @@ test("留存：请求只存增量（对不上即全量并标明）、能还原�
       tools: [{ name: "t" }],
     };
     const bodies = [
-      { ...base, messages: [u1] },
-      { ...base, messages: [u1, a1, u2] },
+      { ...base, messages: [cc(u1)] },
+      { ...base, messages: [u1, a1, cc(u2, true)] },
       // 另一路对话（摘要）：对不上前缀，存全量
-      { model: "m", max_tokens: 10, system: "sum", messages: [msg("user", "x")] },
-      // 外部 agent 附带的大字段（会话日志一类）
-      { ...base, messages: [u1, a1, u2, a2, u3], session_log: "e".repeat(40_000) },
-      // 上下文被压缩改写：对不上前缀
-      { ...base, messages: [msg("user", "compacted"), u3] },
+      { model: "m", max_tokens: 10, system: "sum", messages: [cc(msg("user", "x"))] },
+      // 两处断点；外部 agent 附带的大字段（会话日志一类）
+      { ...base, messages: [u1, a1, cc(u2), a2, cc(u3)], session_log: "e".repeat(40_000) },
+      // 上下文被压缩改写：对不上前缀（消息本身上的 cache_control 同样放回原处）
+      {
+        ...base,
+        messages: [{ role: "user", cache_control: { type: "x" }, content: "compacted" }, cc(u3)],
+      },
     ];
     // 第一条用缩进排版：转发若重新序列化即与原文不同
     const sent = bodies.map((b, i) => JSON.stringify(b, null, i === 0 ? 2 : undefined));
@@ -126,7 +144,12 @@ test("留存：请求只存增量（对不上即全量并标明）、能还原�
     const ex = tries[0]?.exchanges ?? [];
     ex.forEach((e, i) => {
       assert.deepEqual(e.missing, []);
-      assert.deepEqual(e.body, JSON.parse(sent[i] as string), `第 ${i + 1} 次请求还原出原文`);
+      assert.equal(
+        JSON.stringify(e.body),
+        JSON.stringify(JSON.parse(sent[i] as string)),
+        `第 ${i + 1} 次请求逐字还原（含 cache_control 的位置与键序）`
+      );
+      assert.equal(e.exact, i > 0, "紧凑排版的原文按 sha256 核对逐字相同");
       assert.equal(e.response?.status, 200);
       assert.equal(e.response?.stopReason, "end_turn");
       assert.deepEqual(e.response?.usage, { input: 10, output: 7, cacheRead: 4, cacheWrite: 0 });
@@ -164,6 +187,40 @@ test("留存：请求只存增量（对不上即全量并标明）、能还原�
       [1, 2]
     );
   });
+});
+
+test("第 1 版的留存照常读：增量里原样带着 cache_control，没有位置与字段先后", () => {
+  const jobDir = mkdtempSync(path.join(tmpdir(), "pigeon-retention-v1-"));
+  try {
+    const dir = path.join(jobDir, RETENTION_DIR, "step-1", "try-1");
+    mkdirSync(dir, { recursive: true });
+    const head = { at: "t", bodyBytes: 0, bodySha256: "" };
+    const lines = [
+      {
+        ...head,
+        id: 1,
+        params: { model: "m" },
+        messages: { count: 1, full: true, delta: [cc(msg("user", "a"))] },
+      },
+      {
+        ...head,
+        id: 2,
+        params: { model: "m" },
+        messages: { count: 2, base: 1, delta: [msg("assistant", "b")] },
+      },
+    ];
+    writeFileSync(
+      path.join(dir, "requests.jsonl"),
+      lines.map((l) => `${JSON.stringify(l)}\n`).join("")
+    );
+    const bodies = readRetention(jobDir)[0]?.exchanges.map((e) => e.body);
+    assert.deepEqual(bodies, [
+      { model: "m", messages: [cc(msg("user", "a"))] },
+      { model: "m", messages: [cc(msg("user", "a")), msg("assistant", "b")] },
+    ]);
+  } finally {
+    rmSync(jobDir, { recursive: true, force: true });
+  }
 });
 
 // 留存目录下全部文件的文字（gzip 的解开）
