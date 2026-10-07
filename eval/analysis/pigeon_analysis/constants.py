@@ -65,3 +65,41 @@ MEMORY_GROWTH_STEPS = 30
 MEMORY_ROUND = 1000
 MEMORY_MIN_CHARS = 2200
 MEMORY_MAX_CHARS = 12000
+
+# ---------- 对比评测（docs/roadmap/comparative-eval-analysis-plan.md；决策 385、388、391、398–401） ----------
+# 与上面正式跑的常数分开：两组、单一主判据、不做多重校正。同样在看到结果之前写定，随机种子写死。
+# 显著性水平、翻转与重抽次数沿用 ALPHA、PERMUTATIONS、BOOTSTRAPS、CI_LEVEL；缺失超过有效题 10% 降格（2.2）沿用
+# MISSING_EXPLORATORY_RATIO；两组都接近满分的门槛（第 4 节）沿用 CEILING_SCORE
+
+# 主检验与置信区间（2.3）的随机种子
+COMPARATIVE_PERMUTATION_SEED = 202610071
+COMPARATIVE_BOOTSTRAP_SEED = 202610072
+
+# 设计灵敏度（2.4）：M = 2.80 × sd(d) ÷ √n，2.80 = 1.96（双侧 5%）+ 0.84（80% 把握）
+COMPARATIVE_MDE_Z_SUM = 2.80
+
+# 试跑（5.1、400）：抽题种子与题数
+PILOT_SAMPLE_SEED = 20261007
+PILOT_TASKS = 8
+
+# 正式跑预算（5.2）：C = 79 × (cP + cD) × 2 遍 × 1.2
+COMPARATIVE_TASKS = 79
+COMPARATIVE_PASSES = 2
+COMPARATIVE_COST_MARGIN = 1.2
+
+# 每步上限（5.3、398）：试跑每步墙钟 60 分钟；撞了且题确实做不完，正式跑上调到 120 分钟（只上调不下调）
+PILOT_STEP_WALL_MIN = 60
+RAISED_STEP_WALL_MIN = 120
+
+# worker 工作树的占盘（5.4、399）：k × 33 MB × 79 × 2 × 1.5 超过剩余空间减 5 GB，即改为判完一题即删该题的工作树
+WORKTREE_MB = 33
+WORKTREE_MARGIN = 1.5
+DISK_RESERVE_GB = 5
+
+# 网关留存每题体积的估算（5.4、394），MiB
+RETENTION_ESTIMATE_MIB = (0.8, 1.6)
+
+# 非高峰价目（元 / 百万 token，5.2 的折算用）：与跑批网关计价的 src/state/model-pricing.ts 的 PRICE_CNY_PER_MTOK 一致。
+# 网关按请求时刻计价、高峰整条翻倍（PEAK_MULTIPLIER）；非高峰价对用量是线性的，每步的非高峰花费可由该步的用量合计算出
+OFFPEAK_PRICE_CNY_PER_MTOK = {"cacheHit": 0.02, "cacheMiss": 1.0, "output": 4.0}
+PEAK_MULTIPLIER = 2

@@ -188,6 +188,11 @@ def row_to_record(row: dict[str, Any], where: str = "结果行") -> dict[str, An
     cell = condition_cell(row.get("condition"))
     if cell is None:
         return None
+    return record_for_cell(row, cell, where)
+
+
+def record_for_cell(row: dict[str, Any], cell: str, where: str = "结果行") -> dict[str, Any]:
+    """一条题步结果行按给定的格子转成规整表的记录（对比评测按命令行给的条件名分组时也用它）；缺字段即报错。"""
     check_row(row, where)
     rec: dict[str, Any] = {"cell": cell}
     for col, path in FIELD_MAP.items():

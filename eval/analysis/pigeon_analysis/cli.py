@@ -1,4 +1,4 @@
-"""命令行入口：分析正式跑、分析校准两种，各输出 report.md 与 result.json。"""
+"""命令行入口：分析正式跑、校准、对比评测与其试跑，各输出 report.md 与 result.json。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ from typing import Any
 
 from . import constants as K
 from .calibration import analyze_calibration
-from .primary import analyze_primary
+from .comparative import GROUPS, caps_and_voids, comparative_primary, comparative_secondary, load_comparative, mechanisms
+from .comparative_pilot import analyze_pilot
+from .comparative_report import comparative_markdown, comparative_result, pilot_markdown
+from .primary import analyze_primary, select_tasks
 from .interface import analyze_interface_sensitivity, read_unguessable
 from .reader import (
     common_settings,
@@ -58,6 +61,31 @@ def run_formal(args: argparse.Namespace) -> dict[str, Any]:
     return formal_result(primary, secondary, third, info, interface)
 
 
+def run_comparative(args: argparse.Namespace) -> dict[str, Any]:
+    """对比评测（comparative-eval-analysis-plan.md 第 1–4 节）：两组的主判据、次要判据与固定措辞。"""
+    df, info = load_comparative(args.results, args.group_a, args.group_b)
+    tasks = _read_tasks(args.tasks)
+    if tasks is not None:
+        require_step_space(tasks, df["task"], "--tasks")
+    if args.classes_summary and tasks is None:
+        raise ValueError("--classes-summary 要与 --tasks 一起给（汇总里的题号按全部题的步序换算）")
+    no_baseline = read_baseline_failures(args.classes_summary, tasks) if args.classes_summary else None
+    primary = comparative_primary(df, expected_tasks=tasks, baseline_unavailable=no_baseline)
+    return comparative_result(primary, comparative_secondary(df, primary, info), info)
+
+
+def run_comparative_pilot(args: argparse.Namespace) -> dict[str, Any]:
+    """对比评测试跑（第 5 节）：花费与预算、每步上限、工作树占盘、网关留存与机制核对；不算两组得分之差。"""
+    df, info = load_comparative(args.results, args.group_a, args.group_b, with_retention=True)
+    tasks = _read_tasks(args.tasks)
+    if tasks is not None:
+        require_step_space(tasks, df["task"], "--tasks")
+    eligible = _read_tasks(args.eligible)
+    caps = caps_and_voids(df, select_tasks(df, tasks, cells=GROUPS), info)
+    pilot = analyze_pilot(df, info, caps, mechanisms(df, info), free_gb=args.free_gb, eligible=eligible)
+    return {"kind": "comparative-pilot", "pilot": pilot, "input": info}
+
+
 def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
     df, info = load_table(args.results)
     eligible = _read_tasks(args.eligible)
@@ -76,7 +104,7 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="pigeon_analysis", description="正式跑与校准的统计分析")
+    ap = argparse.ArgumentParser(prog="pigeon_analysis", description="正式跑、校准与对比评测的统计分析")
     sub = ap.add_subparsers(dest="command", required=True)
 
     f = sub.add_parser("formal", help="分析正式跑")
@@ -103,6 +131,22 @@ def main(argv: list[str] | None = None) -> int:
                    help="正式跑的有效题数（89 道里要做到的不为零的题数，最小可分辨效果的 n）；未给时不算最小可分辨效果")
     c.add_argument("--compaction-trigger", type=float, default=None, help="压缩触发点（token）；未给时取身份头里的压缩触发点")
     c.add_argument("--eligible", help="要做到的不为零的全部题的步序（结果行的 seq，不是从 1 起的题号；JSON 数组），用于核对抽题")
+
+    for name, text in (("comparative", "分析对比评测（两组：主判据、次要判据与固定措辞）"),
+                       ("comparative-pilot", "分析对比评测的试跑（花费、上限、工作树占盘与机制核对，不看得分之差）")):
+        x = sub.add_parser(name, help=text)
+        x.add_argument("--results", nargs="+", required=True, help="results.jsonl（可多个）")
+        x.add_argument("--out", required=True, help="输出目录")
+        x.add_argument("--group-a", required=True, help="Pigeon 组（P）的条件名")
+        x.add_argument("--group-b", required=True, help="对照组（D）的条件名")
+        x.add_argument("--tasks", help="全部题的步序（结果行的 seq，不是跑批命令 --tasks 用的题号）的 JSON 数组：时间位置按它排，"
+                                       "完全没有结果行的题也列为缺失；不给即按结果行里出现的步序")
+        if name == "comparative":
+            x.add_argument("--classes-summary", help="两类用例预计算汇总（classes-summary.json），与 --tasks 一起给")
+        else:
+            x.add_argument("--free-gb", type=float, default=None,
+                           help="服务器剩余空间（GB）：与工作树推算占用比较（决策 399）；不给只推算、不判")
+            x.add_argument("--eligible", help="要做到的不为空的题的步序（JSON 数组）：核对试跑抽题")
 
     u = sub.add_parser("unguessable", help="接口不可猜的测试文件清单（决策 316，静态规则，不读任何结果）")
     u.add_argument("--manifest", required=True, help="流清单（strands.json）")
@@ -132,6 +176,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "formal":
         res = run_formal(args)
         md = formal_markdown(res)
+    elif args.command == "comparative":
+        res = run_comparative(args)
+        md = comparative_markdown(res)
+    elif args.command == "comparative-pilot":
+        res = run_comparative_pilot(args)
+        md = pilot_markdown(res)
     else:
         res = run_calibration(args)
         md = calibration_markdown(res)
