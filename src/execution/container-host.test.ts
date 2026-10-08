@@ -476,8 +476,9 @@ describe.skipIf(skip ?? false)("容器执行端（真容器）", () => {
   // 决策 365：镜像里的工具（setsid、tr、grep、sed）够按组与标记查杀；超时与停止作业都不重启容器（PID 1 的启动时间不变）
   test("真容器：超时与后台作业的停止按组与标记杀干净，不重启容器", async () => {
     const pid1 = async () => (await sh("cut -d ' ' -f 22 /proc/1/stat")).stdout.trim();
+    // plain ps 是否带参数因镜像而异（busybox 带、procps 不带）：统一用 -o args= 取命令行全文
     const sleeping = async (seconds: number) =>
-      Number((await sh(`ps | grep -c '[s]leep ${seconds}'`)).stdout.trim());
+      Number((await sh(`ps -o args= | grep -c '[s]leep ${seconds}'`)).stdout.trim());
     const bootedAt = await pid1();
     const made = await sh(`printf 'sleep 777 &\\nwait\\n' > ${root}/spawn.sh`);
     assert.equal(made.exitCode, 0, made.stderr);
