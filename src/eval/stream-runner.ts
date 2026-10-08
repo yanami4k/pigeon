@@ -38,6 +38,7 @@ import type { HarnessRef } from "./stream-harness.ts";
 import {
   chainedTasks,
   DEFAULT_TASK_PROMPT_FORMAT,
+  type JudgeTestText,
   type StreamManifest,
   type StreamStep,
   TASK_CHAIN_ID,
@@ -1070,10 +1071,20 @@ function promptFor(options: RunStreamsOptions, step: StreamStep, classes: CaseCl
       step.message,
       step.judgeTests,
       [...new Set(outside.map(caseFile))].sort(),
-      step.judgeTests.map((p) => ({
-        path: p,
-        content: options.human.show(step.commit, p).toString("utf8"),
-      }))
+      step.judgeTests.map((p): JudgeTestText => {
+        try {
+          // 开工提交里有旧版本（人改过的）：给相对开工版本的 diff
+          options.human.show(step.parent, p);
+          return { path: p, kind: "diff", body: options.human.diff(step.parent, step.commit, p) };
+        } catch {
+          // 开工提交里没有（人新写的）：给最终版本全文
+          return {
+            path: p,
+            kind: "full",
+            body: options.human.show(step.commit, p).toString("utf8"),
+          };
+        }
+      })
     );
   }
   if (format === "test-files") {

@@ -391,7 +391,7 @@ test("题面说明句逐字冻结（239、374）：两种格式下应通过的�
   );
 });
 
-test("附测试全文的题面（403）：名单两段与 test-files 逐字相同，其后按名单顺序以路径为标题附上全文；没有全文时与 test-files 逐字相同；名单与全文都为空时只有提交信息", () => {
+test("附测试的题面（403 修订）：名单两段与 test-files 逐字相同，其后按名单顺序以路径为标题给 diff（改过）或全文（新写），标题注明给法；不给测试时与 test-files 逐字相同；名单与测试都为空时只有提交信息", () => {
   const head = taskPromptOf("Add a", "test-text", ["src/a.test.ts"], ["src/z.test.ts"]);
   assert.equal(head, taskPromptOf("Add a", "test-files", ["src/a.test.ts"], ["src/z.test.ts"]));
   const prompt = taskTextPromptOf(
@@ -399,14 +399,18 @@ test("附测试全文的题面（403）：名单两段与 test-files 逐字相�
     ["src/a.test.ts"],
     ["src/z.test.ts"],
     [
-      { path: "src/a.test.ts", content: "import a\nassert a()\n\n" },
-      { path: "src/b.test.ts", content: "assert b()\n" },
+      { path: "src/a.test.ts", kind: "full", body: "import a\nassert a()\n\n" },
+      { path: "src/b.test.ts", kind: "diff", body: "@@ -1 +1 @@\n-old\n+new\n" },
     ]
   );
-  assert.equal(
+  // 全文节的标题注明是新文件且给出最终版本全文；diff 节的标题注明相对工作区里的旧版本
+  assert.match(prompt, /--- src\/a\.test\.ts \(full text[^\n]*\) ---\nimport a\nassert a\(\)/);
+  assert.match(
     prompt,
-    `${head.trimEnd()}\n\n--- src/a.test.ts ---\nimport a\nassert a()\n\n--- src/b.test.ts ---\nassert b()\n`
+    /--- src\/b\.test\.ts \(unified diff[^\n]*\) ---\n@@ -1 \+1 @@\n-old\n\+new/
   );
+  assert.ok(prompt.startsWith(`${head.trimEnd()}\n\n`), prompt);
+  assert.ok(prompt.endsWith("\n"), prompt);
   assert.equal(taskTextPromptOf("Add a", ["src/a.test.ts"], ["src/z.test.ts"], []), head);
   assert.equal(taskTextPromptOf("Add a\n", [], [], []), "Add a\n");
 });

@@ -133,7 +133,8 @@ export function buildTaskPrompt(
 
 // 题面格式（198、213、403）：提交信息加应通过的测试名单。名单给测试文件路径（test-files）；给用例名
 // （test-cases）作为校准做成率过低时的备用，要先算出人在该步使其由失败变通过的用例，由跑批器二接上；
-// test-text（403）在名单之后另附人在该步判题测试文件的全文（该步提交时的版本），不再加接口说明
+// test-text（403 及修订）在名单之后另附判题测试文件：改过的给相对开工版本的 diff、新写的给最终版本全文，
+// 不再加接口说明
 export type TaskPromptFormat = "test-files" | "test-cases" | "test-text";
 export const TASK_PROMPT_FORMATS: readonly TaskPromptFormat[] = [
   "test-files",
@@ -168,8 +169,8 @@ const OTHER_FAILING_HEADINGS: Record<TaskPromptFormat, string> = {
 export const TASK_PROMPT_LAYOUT =
   "commit message; should-pass list; second list of other failing tests already in the repository";
 
-// 附测试全文的版式（403，进身份头比对）：名单两段同 test-files，其后逐个附上判题测试文件的全文；不加接口说明
-export const TASK_PROMPT_LAYOUT_TEST_TEXT = `${TASK_PROMPT_LAYOUT}; full text of the judge test files after the lists`;
+// 附测试的版式（403 修订，进身份头比对）：名单两段同 test-files，其后逐个附判题测试文件（工作区里已有的给 diff、新文件给全文）；不加接口说明
+export const TASK_PROMPT_LAYOUT_TEST_TEXT = `${TASK_PROMPT_LAYOUT}; judge test files after the lists: diff for files in the workspace, full text for new files`;
 
 // 题面的接口说明（374）：测试要用到、起点里没有的模块与名字及签名，由分析包按规则抽出（eval/analysis 的
 // task_interface.py），跑批器只渲染。kind 为 class、function、async function 或 other；params 为参数表（不带括号），
@@ -245,17 +246,34 @@ export function taskPromptOf(
   return `${parts.join("\n\n")}\n`;
 }
 
-// 附测试全文的题面（403）：提交信息、应通过的测试名单（两段版式同 test-files，不给接口说明），其后按名单顺序
-// 逐个附上人在该步判题测试文件的全文（人在该步提交时的版本；节的做法同 buildTaskPrompt）
+// test-text 题面里一个判题测试文件的给法（403 修订）：开工时旧版本就在工作区里的（人改过的）给相对开工版本的
+// unified diff；开工时不存在的（人新写的）给最终版本全文。两种给法合起来信息无损：旧版本加 diff 即最终版本
+export interface JudgeTestText {
+  path: string;
+  kind: "diff" | "full";
+  body: string;
+}
+
+// 节标题里的给法注记（定稿原文，属被测条件）：diff 节点明旧版本就在工作区，full 节点明是新文件
+const JUDGE_TEST_KIND_NOTES: Record<JudgeTestText["kind"], string> = {
+  diff: "unified diff from the version in your workspace to the final version used when the change is checked",
+  full: "full text of the final version used when the change is checked (new file, not in your workspace)",
+};
+
+// 附测试的题面（403 及修订）：提交信息、应通过的测试名单（两段版式同 test-files，不给接口说明），其后按名单
+// 顺序逐个附上判题测试文件——改过的给 diff、新写的给全文；节以路径为标题，与 buildTaskPrompt 同一做法
 export function taskTextPromptOf(
   message: string,
   shouldPass: readonly string[],
   otherFailing: readonly string[],
-  tests: readonly { path: string; content: string }[]
+  tests: readonly JudgeTestText[]
 ): string {
   const head = taskPromptOf(message, "test-text", shouldPass, otherFailing);
   if (tests.length === 0) return head;
-  return `${head.trimEnd()}\n\n${tests.map(testTextSection).join("\n\n")}\n`;
+  const sections = tests.map(
+    (t) => `--- ${t.path} (${JUDGE_TEST_KIND_NOTES[t.kind]}) ---\n${t.body.trimEnd()}`
+  );
+  return `${head.trimEnd()}\n\n${sections.join("\n\n")}\n`;
 }
 
 // 固定起点的步（215、216）：清单里的题按时间接成一条流，维护步、套用步与跳过步都不跑，重置点不再切分

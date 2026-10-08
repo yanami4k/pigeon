@@ -42,6 +42,8 @@ export interface HumanRepo {
   tree(sha: string): { path: string; blob: string }[];
   // 父提交到本提交在给定路径里的新增行（不含 diff 头）
   addedLines(parent: string, sha: string, paths: readonly string[]): string[];
+  // 两个提交间单个文件的 unified diff（test-text 题面附测试改法用，403 修订）
+  diff(parent: string, sha: string, path: string): string;
 }
 
 export function gitHumanRepo(dir: string): HumanRepo {
@@ -110,6 +112,9 @@ export function gitHumanRepo(dir: string): HumanRepo {
         .split("\n")
         .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
         .map((l) => l.slice(1));
+    },
+    diff(parent, sha, path) {
+      return text(["diff", "--no-renames", parent, sha, "--", path]);
     },
     resolve: (rev) => text(["rev-parse", "--verify", `${rev}^{commit}`]).trim(),
     commitDate: (rev) =>

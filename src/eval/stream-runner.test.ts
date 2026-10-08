@@ -1275,7 +1275,7 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
     }
   });
 
-  test("题面附判题测试全文（403）：名单之后以路径为标题附上人在该步提交时的版本（改过的文件不能是起点的版本）；两个条件收到逐字相同的题面", async () => {
+  test("题面附判题测试（403 修订）：人新写的测试给最终版本全文，人改过的给相对开工版本的 diff（不是起点的全文、也不是该步的全文）；两个条件收到逐字相同的题面", async () => {
     const t = await toy();
     try {
       const agent = scriptedAgent(solve);
@@ -1289,16 +1289,19 @@ describe.concurrent("固定起点跑批（假 agent、本地假容器）", () =>
         })
       );
       const prompt = agent.calls[0]?.prompt ?? "";
-      // 名单部分同 test-files，其后按名单顺序附全文
+      // 名单部分同 test-files，其后按名单顺序给测试：a.test.sh 是新写的（全文节），base.test.sh 是改过的（diff 节）
       assert.match(
         prompt,
-        /^Add alpha\n\nCreate src\/a\.txt\n\nTest files that should pass[^\n]*\nsrc\/a\.test\.sh\nsrc\/base\.test\.sh\n\n--- src\/a\.test\.sh ---\n/
+        /^Add alpha\n\nCreate src\/a\.txt\n\nTest files that should pass[^\n]*\nsrc\/a\.test\.sh\nsrc\/base\.test\.sh\n\n--- src\/a\.test\.sh \(full text[^\n]*\) ---\n/
       );
-      // base.test.sh 须取人在该步（c1）改过的版本：起点的版本没有这一段
-      assert.ok(prompt.includes("grep -q base src/base.txt && [ -f src/a.txt ]"), prompt);
+      assert.ok(prompt.includes(NEEDS_A), "新写的测试须给全文");
+      assert.match(prompt, /--- src\/base\.test\.sh \(unified diff[^\n]*\) ---\n/);
+      // diff 须相对开工版本、指向该步的最终版本：旧行与新行都在
+      assert.ok(prompt.includes("-grep -q base src/base.txt"), prompt);
+      assert.ok(prompt.includes("+grep -q base src/base.txt && [ -f src/a.txt ]"), prompt);
       assert.ok(
-        !prompt.includes("--- src/base.test.sh ---\ngrep -q base src/base.txt\n"),
-        `附了起点的版本：${prompt}`
+        !prompt.includes("--- src/base.test.sh (full text"),
+        `改过的文件给了全文：${prompt}`
       );
       // 两个条件（同一步）收到逐字相同的题面
       assert.equal(agent.calls.length, 2);
