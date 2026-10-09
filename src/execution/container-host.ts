@@ -72,13 +72,13 @@ export class ContainerHostError extends Error {
   readonly pigeonToolErrorKind = "environment";
 }
 
-// 跑批器与执行端自己在容器里执行的内部命令用的 shell：/bin/sh 取绝对路径（docker exec 按镜像的 PATH 找 sh，而镜像的
+// 执行端自己在容器里执行的内部命令用的 shell：/bin/sh 取绝对路径（docker exec 按镜像的 PATH 找 sh，而镜像的
 // PATH 可能以 agent 能改指的链接开头，例如 /opt/venv/bin），脚本开头把系统目录放到 PATH 最前（sh、find、git、chmod、
 // timeout、rm 等都从 root 所有的系统目录解析）。只放到最前、不整个替换：本机测试的假 docker 在本机执行，本机的 git 在
-// 系统目录之外；跑批器用到的工具在镜像里都位于系统目录，两种做法等效。系统目录 SYSTEM_PATH 见 tools/workspace-host.ts
+// 系统目录之外；执行端用到的工具在镜像里都位于系统目录，两种做法等效。系统目录 SYSTEM_PATH 见 tools/workspace-host.ts
 // 同时屏蔽全局与系统 git 配置（agent 能写 ~/.gitconfig，其中的 filter 驱动会在执行端的 git add 里被执行），并让 python
-// 不加载用户目录下的 site（~/.local 下的 .pth、usercustomize 与同名包；切换依赖环境的脚本以 stream 身份跑 python）
-export function trustedShell(script: string, ...args: readonly string[]): string[] {
+// 不加载用户目录下的 site（~/.local 下的 .pth、usercustomize 与同名包）
+function trustedShell(script: string, ...args: readonly string[]): string[] {
   return [
     "/bin/sh",
     "-c",

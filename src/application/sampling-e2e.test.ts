@@ -10,7 +10,6 @@ import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { runHeadless } from "./headless-core.ts";
-import { parseLaunchFlags } from "./launch-flags.ts";
 
 // 会话存储里本会话第一个 Run 开始条目的模型摘要
 function startedModel(sessionsDir: string, sessionId: string) {
@@ -78,26 +77,6 @@ test("headless：给了温度，调用选项、注入快照摘要（Run 开始�
     rmSync(root, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
-});
-
-test("--temperature：只有用它的入口接受（接受时 0 到 2，非法取值响亮失败；缺省不设）；其余入口当作未知参数拒绝，不静默忽略", () => {
-  const usage = "用法：测试";
-  const accept = { usage, env: {}, temperature: true };
-  assert.equal(parseLaunchFlags(["--temperature", "0"], accept).temperature, 0);
-  assert.equal(parseLaunchFlags(["--temperature", "0.7"], accept).temperature, 0.7);
-  assert.equal(parseLaunchFlags([], accept).temperature, undefined);
-  for (const bad of ["-0.1", "2.5", "hot", ""]) {
-    assert.throws(
-      () => parseLaunchFlags(["--temperature", bad], accept),
-      /--temperature 需要 0 到 2 之间的数/,
-      bad
-    );
-  }
-  // 不用它的入口（cli / tui / run / eval 冒烟）：拒绝，而不是解析了却不生效
-  assert.throws(
-    () => parseLaunchFlags(["--temperature", "0"], { usage, env: {} }),
-    /未知参数：--temperature/
-  );
 });
 
 test("推理开启时温度不生效：调用选项里不带温度，Run 开始条目如实记「未生效」与请求值，不记成温度 0", async () => {

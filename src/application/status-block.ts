@@ -13,9 +13,6 @@ import { STATUS_TAG, STATUS_UPDATE_TAG } from "../state/status-text.ts";
 
 export { STATUS_TAG, STATUS_UPDATE_TAG };
 
-// 状态块文字的版本（跑批身份头记下；改看板或状态块的文字时升）
-export const STATUS_BLOCK_VERSION = "v1";
-
 const SECTION_TAG = "pigeon-section";
 
 // 各节的名字与先后（稳定在前、易变在后）

@@ -7,10 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { loadStoreSession } from "../persistence/session-view.ts";
+import { deepseekModelInfo } from "../pi-runtime/deepseek-model.ts";
+import { createDeepSeekStreamFn } from "../pi-runtime/deepseek-stream.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { gatewayStreamFn } from "../pi-runtime/gateway-stream.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
-import { modelAccessOf, registerModelAccess } from "../pi-runtime/model-access.ts";
+import { registerModelAccess } from "../pi-runtime/model-access.ts";
 import { newSessionId } from "../state/ids.ts";
 import type { ThinkingLevel } from "../state/runtime-events.ts";
 import { emptySettingsSnapshot } from "../state/settings.ts";
@@ -96,7 +97,7 @@ test("推理档位的取法：支持推理的模型缺省 high，不支持或不
   }
 });
 
-test("经网关的 DeepSeek 接入（与自带接入同一份模型信息）：缺省请求开思考、不发温度并记「未生效」；--thinking off 时发 thinking disabled 与温度", async () => {
+test("自带的 DeepSeek 接入（入口模块声明的模型信息）：缺省请求开思考、不发温度并记「未生效」；--thinking off 时发 thinking disabled 与温度", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-thinking-wire-"));
   try {
     const bodies: Array<Record<string, unknown>> = [];
@@ -107,13 +108,12 @@ test("经网关的 DeepSeek 接入（与自带接入同一份模型信息）：�
         { status: 400, headers: { "content-type": "application/json" } }
       );
     }) as typeof fetch;
-    const gateway = gatewayStreamFn("http://127.0.0.1:9/j/x");
-    const access = modelAccessOf(gateway);
-    assert.ok(access !== undefined);
+    // 与 loadStreamFn 加载入口模块 deepseek-stream-fn.ts 时相同：登记它具名导出的 modelInfo
+    const daily = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-test" });
     const streamFn = registerModelAccess(
       (model, context, options) =>
-        gateway(model, context, { ...options, fetch: fakeFetch, maxRetries: 0 } as never),
-      access
+        daily(model, context, { ...options, fetch: fakeFetch, maxRetries: 0 } as never),
+      { declared: deepseekModelInfo() }
     );
     const byDefault = await runOnce(root, streamFn, { temperature: 0 });
     assert.equal(byDefault?.thinkingLevel, "high");
