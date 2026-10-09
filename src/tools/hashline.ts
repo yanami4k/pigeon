@@ -5,8 +5,7 @@
 import { createHash } from "node:crypto";
 import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
 
-// 锚点类报错文案的稳定标记：抛错处模板与 Eval 的编辑报错分类（eval/process.ts）共用，
-// 改文案时两侧一起动，分类不会静默落"其他"
+// 锚点类报错文案的稳定标记（抛错处模板共用）
 export const HASHLINE_ANCHOR_MISS_MARK = "未命中";
 export const HASHLINE_OUT_OF_RANGE_MARK = "越界";
 

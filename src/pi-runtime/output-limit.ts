@@ -1,5 +1,5 @@
 // 单轮输出上限（决策 063 第 1 件；缺省值经决策 347 改为跟模型走）。
-// 配置了上限（--max-output-tokens、跑批器的配置项）时：包装 streamFn，调用时把 maxTokens 传进选项，给无人值守运行的失控
+// 配置了上限（--max-output-tokens）时：包装 streamFn，调用时把 maxTokens 传进选项，给无人值守运行的失控
 // 输出止损；传入的 model 带有效上限（大于 0）时取两者中更小的那个。Adapter 交给上游的 model 是占位身份（maxTokens 为 0），
 // 此时只传配置值，由看得到真实模型对象的接入再与模型上限取较小者（modelOutputLimit）。
 // 未配置时 Pigeon 不另设上限、不包装：按模型定义的上限发，由 provider 按剩余上下文收窄（pi-ai 的 clampMaxTokensToContext）。
@@ -18,7 +18,7 @@ export function limitOutputTokens(streamFn: StreamFn, limit: number): StreamFn {
   };
 }
 
-// 看得到真实模型对象的接入（自带的 DeepSeek、跑批网关）共用的取值：模型上限缺失或不为正时按 32,000 计，
+// 看得到真实模型对象的接入（如自带的 DeepSeek）用的取值：模型上限缺失或不为正时按 32,000 计，
 // 交给 provider 的模型对象带上这个上限；调用方传了 maxTokens（配置了上限）时取它与模型上限的较小者，没传就不传，
 // 由 provider 用模型上限并按剩余上下文收窄。第三方接入模块须自己在模型对象上带 maxTokens（见 docs/configuration.md）
 export function modelOutputLimit<M extends { maxTokens: number }>(

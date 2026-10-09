@@ -23,7 +23,7 @@ import {
 
 const made: string[] = [];
 
-// Windows 上建符号链接要开发者模式或管理员；没有就跳过（与 eval/stream-workspace.test.ts 同一写法）
+// Windows 上建符号链接要开发者模式或管理员；没有就跳过
 // 先试建一次符号链接，只在权限不足（EPERM/EACCES）时跳过——有权限的 Windows 机器照跑
 const NO_SYMLINKS = (() => {
   const dir = mkdtempSync(join(tmpdir(), "pigeon-symlink-probe-"));

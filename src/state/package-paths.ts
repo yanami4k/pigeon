@@ -1,5 +1,5 @@
 // 随包文件的位置（决策 351）：Pigeon 可以从源码运行（node src/...），也可以从打包产物运行（dist/ 下的单文件）。两种情况下
-// docker/、eval/ 与 package.json 等随包文件都在包根下：源码运行时包根是本文件往上两层，打包产物运行时是产物所在目录的上一层。
+// docker/ 与 package.json 等随包文件都在包根下：源码运行时包根是本文件往上两层，打包产物运行时是产物所在目录的上一层。
 // 是否打包产物由构建时的定义 __PIGEON_BUNDLE__ 得知（源码运行时没有这个名字）。只算地址，不读文件。
 declare const __PIGEON_BUNDLE__: boolean | undefined;
 

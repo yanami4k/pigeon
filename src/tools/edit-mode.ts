@@ -10,8 +10,7 @@ export const DEFAULT_EDIT_MODE: EditMode = "replace";
 
 export const LEGACY_RESULT_EDIT_MODE: EditMode = "hashline";
 
-// 两种模式共用的报错文案前缀：编辑没有产生实际变化。Eval 的编辑报错分类（eval/process.ts）按稳定前缀判定，
-// 与抛错处共用同一常量——文案改动不会让分类静默落到"其他"
+// 两种模式共用的报错文案前缀：编辑没有产生实际变化（两处抛错共用同一常量）
 export const EDIT_NO_CHANGE_PREFIX = "编辑没有产生任何实际变化";
 
 export function isEditMode(value: string): value is EditMode {

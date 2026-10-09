@@ -131,7 +131,7 @@ test("DeepSeek 回复自带价格为 0：按官方人民币价目计，高峰翻
   });
   const peak = costTallyOfView(view([deepseekMessage(PEAK_MS, PEAK_MS + 5000, 1_000_000)]));
   assert.equal(peak.cny, 2);
-  // 开始在空闲、结束落进高峰：整条按高峰（与跑批网关同一口径）
+  // 开始在空闲、结束落进高峰：整条按高峰
   const straddle = costTallyOfView(
     view([deepseekMessage(PEAK_MS - 60_000, PEAK_MS + 1000, 1_000_000)])
   );
