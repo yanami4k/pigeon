@@ -3,7 +3,7 @@
 // （决策 1/2/4，spike S2a/S4/S5）；M4 S6 grant 求值排律。账本只在内存里：意图、决定、回执与熔断记录随 184 停写，
 // 审批决定与错误归类由 Adapter 挂在工具结果消息上记进会话存储。
 // 上游拦截（幽灵工具名 not-found / 已广告但参数校验失败）hook 不可见：上游 prepareToolCall
-// 在 hook 前拦截，事件级连续计数熔断兜底（spikes/notfound-spike.mjs 实证 tool_execution_end 照常到达）。
+// 在 hook 前拦截，事件级连续计数熔断兜底（探针实证 tool_execution_end 照常到达）。
 import path from "node:path";
 import { Value } from "typebox/value";
 import type { ApprovalHandler } from "../approvals/handler.ts";
@@ -131,7 +131,7 @@ class GovernedToolCalls implements ToolGovernance {
   //   ① 幽灵工具名（从未广告）：prepareToolCall 以 "Tool not found" 拦截（agent-loop.js:392-399）；
   //   ② 已广告但参数畸形：validateToolArguments 在 hook 前抛错（agent-loop.js:399-448）。
   // 两者审批闸/账本/#blockCounts 全部不可见；但 tool_execution_end 照常发出
-  // （spikes/notfound-spike.mjs 实证：isError=true）。故判据取"settled 且 isError 且
+  // （探针实证：isError=true）。故判据取"settled 且 isError 且
   // 账本无此 toolCallId 记录"——无记录 ⟺ hook 从未运行 ⟺ 被上游拦截，一并兜底。
   readonly #interceptedStreak = new InterceptStreak();
   // 本次 Run 的账本 toolCallId 序列（RunResult.toolExecutions 的选取依据）
@@ -658,7 +658,7 @@ class GovernedToolCalls implements ToolGovernance {
 
   // 上游拦截熔断（事件级）：覆盖两类 beforeToolCall 之前的上游拦截——
   //   ① 幽灵工具名（从未广告）：prepareToolCall 以 "Tool <name> not found" 拦截
-  //      （agent-loop.js:392-399，spikes/notfound-spike.mjs 实证 end 事件照常到达）；
+  //      （agent-loop.js:392-399，探针实证 end 事件照常到达）；
   //   ② 已广告但参数畸形：validateToolArguments 在 hook 前抛错 → immediate error result
   //      （agent-loop.js:399-448，sequential 执行器对 immediate 结果照常发 start/end）。
   // 判据：settled 且 isError 且 账本无此 toolCallId 记录——无记录 ⟺ hook 从未运行 ⟺

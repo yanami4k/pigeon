@@ -5,12 +5,6 @@
 // （node scripts/test-timing.mjs --concurrency 1 <文件>）超过 10 秒的，须先设法减重，减不下来再加进这里并写明理由。
 export const SLOW_TESTS = [
   {
-    pattern: "src/eval/**/*.test.ts",
-    reason:
-      "跑批器与实验装置（出题、人的基准、跑批、模型网关、报告）：多数用例真跑 git 与假容器，" +
-      "部分用实验镜像起真容器",
-  },
-  {
     pattern: "src/cli/spawn-worker-cli.test.ts",
     reason:
       "端到端：在 pigeon run 子进程里派 worker、等并行完成、合并分支，每条用例冷启动一次 CLI 子进程",

@@ -40,13 +40,6 @@ export {
   resolveDeepSeekBaseUrl,
 } from "./deepseek-stream.ts";
 export { isSyntheticFailureMessage, normalizePiEvent, turnUsageOf } from "./events.ts";
-export {
-  DEFAULT_GATEWAY_MODEL_ID,
-  GATEWAY_PLACEHOLDER_KEY,
-  GATEWAY_PROVIDER,
-  GATEWAY_UPSTREAM_BASE_URL,
-  gatewayStreamFn,
-} from "./gateway-stream.ts";
 export type {
   GovernanceHost,
   GovernanceRunOutcome,

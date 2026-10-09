@@ -2,7 +2,7 @@
 
 - 日期：2026-09-10
 - 对象：`@earendil-works/pi-agent-core@0.84.4`（锁定版本，全部结论以 node_modules 内 dist 实际代码 + 实跑输出为准）
-- 复现脚本：`spikes/spike-before-tool-call/spike.mjs`（纯 .mjs，直接 import dist;`node spikes/spike-before-tool-call/spike.mjs`，全部 10 个场景约 3 秒跑完，无悬挂）
+- 复现脚本（已于 2026-10-09 移出仓库）：`spikes/spike-before-tool-call/spike.mjs`（纯 .mjs，直接 import dist;`node spikes/spike-before-tool-call/spike.mjs`，全部 10 个场景约 3 秒跑完，无悬挂）
 - 方法：脚本化假 `streamFn`（可发 toolCall 块、abort 感知、回复队列）驱动真实 `Agent`；全量事件订阅打序时日志；hook 进出日志；execute() 计数与实收参数；终态 state.messages 摘要。每场景 15–20s 超时兜底。
 
 ## S0 API 存在性

@@ -22,9 +22,6 @@ output/
 tmp/
 tmp_extract.txt
 
-# spikes/ 的探针脚本入库；编译产物与运行产出不入库（产出统一写 tmp/）
-spikes/**/*.exe
-
 # Local agent conventions
 AGENTS.md
 # 本地 agent 设置与工作树目录：git 已由全局忽略跳过，biome 只读项目 .gitignore，补上使两者口径一致

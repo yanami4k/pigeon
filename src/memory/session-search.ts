@@ -47,9 +47,6 @@ export const TOOL_OUTPUT_DISCOUNT = 0.5;
 // 缺省做法：三种都实现成内部参数，缺省由离线重放的结果选定（决策 384；重放结果见当次施工审计）
 export const DEFAULT_TOOL_OUTPUT_MODE: ToolOutputMode = "equal";
 
-// 检索行为版本（决策 384）：进跑批身份头，检索行为一变即升，旧身份头缺这一项即判为不同条件
-export const SESSION_SEARCH_VERSION = "v2";
-
 // 归并后缺省列出的会话数与每个会话至多给出的片段条数
 export const DEFAULT_SESSION_LIMIT = 5;
 export const MAX_SESSION_LIMIT = 10;

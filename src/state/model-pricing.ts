@@ -1,11 +1,10 @@
-// 模型花费的计价（决策 235、203）：按 DeepSeek 官方人民币价目逐请求计，经网关的请求一律按此计入花费与上限。
+// 模型花费的计价（决策 235、203）：按 DeepSeek 官方人民币价目逐请求计。
 //   价目（deepseek-flash，每百万 token）：输入缓存命中 ¥0.02、缓存未命中 ¥1、输出 ¥4；高峰时段翻倍。
 //   高峰：北京时间周一至周五 9–12 时、14–18 时；其余时段、周末与法定节假日全天为空闲；调休上班的周末按工作日。
 //   一条请求的开始或结束时刻任一落在高峰，整条按高峰价计（官方未说明按哪一时刻，取宁多勿少）。
 //   计量口径（探针实测）：Anthropic 兼容端点的 input_tokens 只含未命中部分，命中在 cache_read_input_tokens；
 //   cache_creation_input_tokens 实测恒为 0、价目里没有单列，出现时按未命中价计（宁多勿少）。
-// 价目只定义在这一处（决策 286 起由 src/eval 移到 state，数字不变）：跑批网关逐请求计价；终端界面在 DeepSeek 回复自带价格为 0 时
-// 按同一价目与该条回复的开始、结束时刻计会话花费。
+// 价目只定义在这一处：终端界面在 DeepSeek 回复自带价格为 0 时按这份价目与该条回复的开始、结束时刻计会话花费。
 
 export const PRICE_CNY_PER_MTOK = { cacheHit: 0.02, cacheMiss: 1, output: 4 } as const;
 export const PEAK_MULTIPLIER = 2;

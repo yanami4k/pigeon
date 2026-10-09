@@ -3,7 +3,7 @@
 - 日期：2026-09-12
 - 对象：`@earendil-works/pi-tui@0.84.4`（锁定版本，依赖 `get-east-asian-width@1.6.0` + `marked@18.0.5`；全部结论以 node_modules 内 dist 实际代码 + 本机实跑输出为准）
 - 机器：Windows 11 Home China，活动代码页 936（实测 `chcp`），终端 = omp broker 分配的真实 ConPTY（node-pty），Node v24.12.0
-- 复现脚本：`spikes/spike-pi-tui/part-a-mock.mjs`（进程内 Mock Terminal + 虚拟屏幕仿真器，约 28s）、`spikes/spike-pi-tui/part-b-conpty.mjs`（真实 ConPTY 光标实测，需 PTY，约 30s）、`spikes/spike-pi-tui/part-c-real.mjs`（真实 pi-tui 应用链路，需 PTY，约 6s）
+- 复现脚本（已于 2026-10-09 移出仓库）：`spikes/spike-pi-tui/part-a-mock.mjs`（进程内 Mock Terminal + 虚拟屏幕仿真器，约 28s）、`spikes/spike-pi-tui/part-b-conpty.mjs`（真实 ConPTY 光标实测，需 PTY，约 30s）、`spikes/spike-pi-tui/part-c-real.mjs`（真实 pi-tui 应用链路，需 PTY，约 6s）
 - 目的：履行 ROADMAP §M2 的前置合同——pi-tui 最小控件 + 中文长文本流式输出 + 窗口 resize 重绘，在 Windows ConPTY 下验证 CJK 宽度与光标定位；不通过则切 ink。
 
 ## 方法

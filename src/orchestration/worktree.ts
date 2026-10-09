@@ -124,7 +124,7 @@ export function resolveCommit(repoRoot: string, ref: string): string | undefined
   }
 }
 
-// 路径所在仓库的 HEAD 短号与工作区是否有未提交改动（决策 061：Eval 结果行记 harness 版本；忽略文件不计）
+// 路径所在仓库的 HEAD 短号与工作区是否有未提交改动（pigeon --version 与打包产物的构建戳用；忽略文件不计）
 export function describeHead(path: string): { commit: string; dirty: boolean } {
   const commit = runGit(path, ["rev-parse", "--short", "HEAD"]).trim();
   const dirty = runGit(path, ["status", "--porcelain"]).trim() !== "";

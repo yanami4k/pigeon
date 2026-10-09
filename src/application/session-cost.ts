@@ -1,5 +1,5 @@
 // 会话花费（决策 286 第 2 项，终端界面状态栏）：价格来源是会话记录里模型回复自带的用量与价格（usage.cost，显示为 $）。
-// DeepSeek 接入（provider deepseek）的回复自带价格为 0（跑批时由网关按官方价目计价），这类回复按同一份官方人民币价目
+// DeepSeek 接入（provider deepseek）的回复自带价格为 0，这类回复按官方人民币价目
 // （state/model-pricing.ts，含高峰时段）与该条回复的开始、结束时刻计价，单列为人民币（显示为 ¥）。其余价格为零而用了 token 的
 // 记作"无价格的 token"，状态栏据此注明无价格，不当作免费。
 // 本会话花费 = 主会话自己的消息 + 父会话是它的 worker 会话 + 从它分叉出的复盘会话；后台补做的复盘补的是别的会话，
@@ -57,7 +57,7 @@ export function addUsage(tally: CostTally, usage: UsageLike, origin: UsageOrigin
   }
   const at = origin.endMs ?? origin.startMs;
   if (origin.provider === DEEPSEEK_PROVIDER && at !== undefined && usage.totalTokens > 0) {
-    // 与跑批网关同一口径：开始或结束任一落在高峰即按高峰价
+    // 开始或结束任一落在高峰即按高峰价
     tally.cny += requestCostCny(usage, origin.startMs ?? at, at).cny;
     tally.cnyTokens += usage.totalTokens;
     return;

@@ -10,7 +10,6 @@ import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { deepseekModel, deepseekModelInfo } from "../pi-runtime/deepseek-model.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
-import { gatewayStreamFn } from "../pi-runtime/gateway-stream.ts";
 import {
   loadCatalogLookup,
   modelAccessOf,
@@ -126,7 +125,7 @@ test("Run 开始条目记下本次的模型信息与每一项的来源（设置�
     });
   }));
 
-test("自带的 DeepSeek 接入：声明官方人民币非高峰价与服务方，模型对象价格仍为 0；网关接入登记同一份声明，输出上限的替换不是正数时不声明", () => {
+test("自带的 DeepSeek 接入：声明官方人民币非高峰价与服务方，模型对象价格仍为 0", () => {
   const info = deepseekModelInfo();
   assert.deepEqual(info.cost, {
     input: PRICE_CNY_PER_MTOK.cacheMiss,
@@ -139,9 +138,4 @@ test("自带的 DeepSeek 接入：声明官方人民币非高峰价与服务方�
   // 决策 390：声明与模型对象一致地支持推理（缺省档位据此为 high）
   assert.equal(info.reasoning, deepseekModel().reasoning);
   assert.deepEqual(deepseekModel().cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-  const gateway = modelAccessOf(gatewayStreamFn("http://gateway.test/j/1", "deepseek-flash", 4096));
-  assert.deepEqual(gateway?.declared, { ...info, maxTokens: 4096 });
-  const { maxTokens: _omitted, ...withoutLimit } = info;
-  const zero = modelAccessOf(gatewayStreamFn("http://gateway.test/j/1", "deepseek-flash", 0));
-  assert.deepEqual(zero?.declared, withoutLimit);
 });

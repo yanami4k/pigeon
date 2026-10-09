@@ -25,7 +25,7 @@ import { planAndWrite, type WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
 
 // 域错误（模型给的原文不对、不唯一或无变化）；带归类标记，tools/error-kind.ts 读标记归 domain
-// 报错文案的稳定前缀：抛错处与 Eval 的编辑报错分类（eval/process.ts）共用同一常量
+// 报错文案的稳定前缀（抛错处共用同一常量）
 export const REPLACE_NOT_FOUND_PREFIX = "未找到 old_string";
 export const REPLACE_NOT_UNIQUE_PREFIX = "old_string 不唯一";
 

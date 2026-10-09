@@ -17,10 +17,6 @@ export const PREVIOUS_TRUNCATION_RESUME_PROMPTS: readonly string[] = [
   "上条回复因长度上限被截断；从断处接着写，不要重复已写的内容",
 ];
 
-// 续跑行为的版本（跑批身份头照记）：v1 为 367 的一律去掉截断的回复，v2 为 376 的按原因分开，v3 为撞上限的提示
-// 加上先补完没写完的最后一行。设定不变而行为变了时换版本
-export const TRUNCATION_CONTINUATION_VERSION = "v3";
-
 export const TruncationContinuationSectionSchema = Type.Object(
   {
     enabled: Type.Optional(Type.Boolean()),

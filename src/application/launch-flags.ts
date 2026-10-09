@@ -65,8 +65,6 @@ export interface LaunchFlags {
   thinkingLevel?: ThinkingLevel;
   // 决策 063、347：--max-output-tokens <n> 单轮输出上限（缺省不设：跟模型，按模型定义的上限发、由 provider 按剩余上下文收窄）
   maxOutputTokens?: number;
-  // M9：--temperature <n> 采样温度（0 到 2；缺省不设，由 provider 决定）
-  temperature?: number;
   // M5 S2（决策 045）：--history-limit <n> /resume 历史渲染安全上限（仅 TUI 接受）
   historyLimit?: number;
   // 决策 191、244：推送记忆——日常入口缺省开着，--no-pushed-memory 关掉（关掉即不推送、不注册记忆工具）。
@@ -105,8 +103,6 @@ export interface ParseLaunchFlagsOptions {
   cwd?: string;
   // 是否接受 --history-limit（只有 TUI 有历史渲染）
   historyLimit?: boolean;
-  // 是否接受 --temperature（只有把它交给运行面的 Eval 入口；其余入口当作未知参数，不静默忽略）
-  temperature?: boolean;
   // 是否接受 --no-pushed-memory（日常入口：cli / tui 主会话与 pigeon run；跑批器按条件指定，不接受）
   pushedMemory?: boolean;
   // 是否接受 --no-session-search（决策 382；接受入口同 --no-pushed-memory）
@@ -199,19 +195,6 @@ export function parseLaunchFlags(argv: string[], options: ParseLaunchFlagsOption
         throw new Error(`--max-output-tokens 需要正整数（${usage}）`);
       }
       flags.maxOutputTokens = value;
-    } else if (flag === "--temperature" && options.temperature === true) {
-      const raw = argv[++i];
-      const value = Number(raw);
-      if (
-        raw === undefined ||
-        raw.trim() === "" ||
-        !Number.isFinite(value) ||
-        value < 0 ||
-        value > 2
-      ) {
-        throw new Error(`--temperature 需要 0 到 2 之间的数（${usage}）`);
-      }
-      flags.temperature = value;
     } else if (flag === "--history-limit" && options.historyLimit === true) {
       const value = Number(argv[++i]);
       if (!Number.isInteger(value) || value < 1) {

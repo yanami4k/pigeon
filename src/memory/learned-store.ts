@@ -15,7 +15,7 @@ import {
   userMemoryLockPathOf,
   userMemoryPathOf,
 } from "../state/paths.ts";
-import { MEMORY_DISPLAY_PATHS, type MemoryLayer, memoryFactsOfText } from "./learned.ts";
+import { MEMORY_DISPLAY_PATHS, type MemoryLayer } from "./learned.ts";
 
 // 等锁的上限与间隔
 const LOCK_WAIT_MS = 10_000;
@@ -64,16 +64,6 @@ export function readMemoryFile(file: string): MemoryFileRead {
   }
   const raw = readFileSync(file);
   return { exists: true, text: raw.toString("utf8"), bytes: raw.length, hash: sha256Hex(raw) };
-}
-
-// 字节数、条数与条目区字符数（跑批器结果行的 memoryAtStart / memoryAtEnd 口径）；文件不在记 0
-export function memoryFileFacts(file: string): {
-  bytes: number;
-  entries: number;
-  entryChars: number;
-} {
-  const read = readMemoryFile(file);
-  return { bytes: read.bytes, ...memoryFactsOfText(read.text) };
 }
 
 export function writeMemoryFile(file: string, text: string): void {

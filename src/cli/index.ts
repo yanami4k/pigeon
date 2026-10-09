@@ -1,7 +1,7 @@
 // Pigeon M3 极简 CLI 入口（决策 3：REPL 内联审批，单进程最小闭环，不依赖 M2 TUI）。
 // 决策 267：pigeon 不带子命令即启动终端界面（以子进程运行 tui 入口，Actor 之间不互相 import）；命令行对话留作后备，
 // 由 --line 进入，只保证不坏、不再加新功能（不注册 spawn_worker）。决策 286：顶层帮助补上终端界面的 --continue 与
-// --resume（参数由 tui 入口解析）；只改帮助文字，eval stream 与 pigeon run 的行为不变。
+// --resume（参数由 tui 入口解析）；只改帮助文字，pigeon run 的行为不变。
 // M2 S1（决策 025）：装配根（buildRuntime）在 application/runtime.ts，审批 handler 由本入口
 // 注入 REPL 问答版；resume 对账流程在 application/resume.ts，本文件只做参数解析与 IO 接线。
 // 用法：node src/cli/index.ts [--yolo] [--root <工作区根>] --stream-fn <模块路径>
@@ -11,12 +11,13 @@
 //   未配置时清晰报错退出，不静默失败。
 
 import { spawn } from "node:child_process";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { handbackJobsNotice } from "../application/background-jobs.ts";
 import { runForkCommand } from "../application/fork-command.ts";
 import { failureBadge } from "../application/format.ts";
 import type { GrantsCommandContext } from "../application/grants.ts";
+import { currentHarnessRef, describeHarness } from "../application/harness-ref.ts";
 import { HEADLESS_EXIT_CODES, runHeadless } from "../application/headless-core.ts";
 import {
   type LaunchFlags,
@@ -56,49 +57,12 @@ import {
   trustPromptText,
 } from "../application/session-settings.ts";
 import { prepareWorkspace } from "../application/workspace.ts";
-import { DEFAULT_RETENTION_LIMITS } from "../eval/gateway-retention.ts";
-import { gatewayAccountsFromEnv } from "../eval/model-gateway.ts";
-import { DEFAULT_PEAK_MARGIN_MS } from "../eval/model-limits.ts";
-import { streamTemperature } from "../eval/stream-agents.ts";
-import {
-  CLASSES_SUMMARY_FILE,
-  installTerminationHandler,
-  runStreamBaselines,
-  runStreamClasses,
-  runStreamExperiment,
-} from "../eval/stream-experiment.ts";
-import { loadExternalAgentConfig } from "../eval/stream-external.ts";
-import {
-  assembleImageContext,
-  generateStreamManifest,
-  STREAM_RUNTIMES,
-  summarizeManifest,
-} from "../eval/stream-generate.ts";
-import { currentHarnessRef, describeHarness } from "../eval/stream-harness.ts";
-import {
-  markHumanGateFailures,
-  type StreamManifest,
-  TASK_PROMPT_FORMATS,
-  type TaskPromptFormat,
-} from "../eval/stream-manifest.ts";
-import { runStreamRejudge } from "../eval/stream-rejudge.ts";
-import {
-  isExternalCondition,
-  STREAM_CONDITIONS,
-  type StreamCondition,
-} from "../eval/stream-results.ts";
-import { DEFAULT_STEP_BUDGET } from "../eval/stream-runner.ts";
 import { memoryWriteNoticeLine } from "../memory/update-memory-tool.ts";
-import { DEFAULT_GATEWAY_MODEL_ID, GATEWAY_PROVIDER } from "../pi-runtime/index.ts";
 import { probeUpstreamVersions } from "../pi-runtime/upstream-version.ts";
 import type { TrustEntry } from "../state/config-trust.ts";
 import { asSessionId, newSessionId, type SessionId } from "../state/ids.ts";
 import { BUNDLE_ROLE_ENV, FROM_BUNDLE, packageFileUrl } from "../state/package-paths.ts";
 import { pigeonRel } from "../state/paths.ts";
-import {
-  repetitionGuardSettings,
-  truncationContinuationSettings,
-} from "../state/runaway-config.ts";
 import type { SessionListFilters } from "../state/session-summary.ts";
 import { loopGuardSettingsOf, withHooksDisabled } from "../state/settings.ts";
 import { EDIT_MODES, type EditMode, isEditMode } from "../tools/edit-mode.ts";
@@ -402,8 +366,8 @@ async function runMain(argv: string[]): Promise<void> {
   let maxTurns: number | undefined;
   let wallClockMs: number | undefined;
   let editMode: EditMode | undefined;
-  // 治理根（设置三层与 .pigeon/state 锚定的目录）：缺省与工作区根相同；对比评测的容器条件把它指到
-  // 题目仓库之外，题目仓库自带的 .pigeon/ 设置不生效、程序状态不落工作区
+  // 治理根（设置三层与 .pigeon/state 锚定的目录）：缺省与工作区根相同；指到工作区之外时，
+  // 工作区自带的 .pigeon/ 设置不生效、程序状态不落工作区
   let governanceRootArg: string | undefined;
   // 决策 326 ③、341：只对本次运行放行未确认的会执行命令或放权的配置（不记下）
   let trustConfig = false;
@@ -546,586 +510,6 @@ async function runMain(argv: string[]): Promise<void> {
   process.exitCode = HEADLESS_EXIT_CODES[result.status];
 }
 
-// pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> --image <镜像> --out <清单文件>
-//   [--test-timeout-sec N]：延续式实验出题（决策 127、141、153）——在断网的参考容器里逐提交测判题探针与格式化比对，
-// 按写死的规则出流清单；清单与探针原始记录各存一个文件
-// pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录>
-//   [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）] [--streams s1,s2] [--check cases|gate|both|classes]：
-// 提前单独算人的基准——每路一个独立的参考容器，按提交落盘，同一目录重跑即续算；eval stream 以 --baseline 读取。
-// 同时做开跑前置检查：人的代码逐个提交跑验证门，列出没过的提交与步（--check 缺省两者都做）。--check classes 为全部题
-// 预计算两类用例（214，正式跑与校准之前须算好），写汇总文件 classes-summary.json
-async function evalStreamBaselineMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval stream-baseline --manifest <清单> --repo <人的仓库> --image <镜像> --out <基准目录> " +
-    "[--concurrency N] [--container-memory <上限>] [--streams s1,s2] [--check cases|gate|both|classes] " +
-    "[--mark-manifest <写出的清单>]";
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const value = argv[i + 1];
-    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
-      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
-    }
-    values.set(arg, value);
-    i++;
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
-    return value;
-  };
-  const concurrency = Number(values.get("--concurrency") ?? "1");
-  if (!Number.isInteger(concurrency) || concurrency < 1)
-    throw new Error(`--concurrency 需要正整数（${usage}）`);
-  const streams = values
-    .get("--streams")
-    ?.split(",")
-    .filter((x) => x !== "");
-  const check = values.get("--check") ?? "both";
-  if (check !== "cases" && check !== "gate" && check !== "both" && check !== "classes")
-    throw new Error(`--check 只能是 cases、gate、both 或 classes（${usage}）`);
-  const common = {
-    manifestFile: required("--manifest"),
-    repoDir: required("--repo"),
-    image: required("--image"),
-    outDir: required("--out"),
-    concurrency,
-    containerRunArgs: ["--memory", values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY],
-    ...(streams !== undefined ? { streams } : {}),
-    log: (line: string) => process.stderr.write(`[baseline] ${new Date().toISOString()} ${line}\n`),
-  };
-  // 两类用例（214）：全部题逐题在 commit 与叠放到 parent 上各跑两遍，按提交落盘，同一目录重跑即续算
-  if (check === "classes") {
-    const classes = await runStreamClasses(common);
-    const zero = classes.steps.filter((s) => s.failToPass === 0);
-    process.stdout.write(
-      `两类用例：共 ${classes.total} 道题，本次算 ${classes.computed} 道，此前已落盘 ${classes.cached} 道，` +
-        `出错 ${classes.failed.length} 道；要做到的为零的题 ${zero.length} 道` +
-        `${zero.length > 0 ? `（题号 ${zero.map((s) => s.task).join(",")}）` : ""}；汇总写到 ${CLASSES_SUMMARY_FILE}\n`
-    );
-    process.stdout.write(
-      `无法建立基线的题 ${classes.unbuildable.length} 道${
-        classes.unbuildable.length > 0
-          ? `（题号 ${classes.unbuildable.map((u) => u.task).join(",")}，跑批时不判分、不进主判据）`
-          : ""
-      }\n`
-    );
-    for (const f of classes.failed) {
-      process.stdout.write(`  题 ${f.task}（${f.commit}）：${f.error.slice(0, 300)}\n`);
-    }
-    if (classes.failed.length > 0) process.exitCode = 1;
-    return;
-  }
-  const summary = await runStreamBaselines({ ...common, check });
-  process.stdout.write(
-    `人的基准（${check}）：共 ${summary.total} 个提交，本次算 ${summary.computed} 个，` +
-      `此前已落盘 ${summary.cached} 个，出错 ${summary.failed.length} 个\n`
-  );
-  for (const f of summary.failed) process.stdout.write(`  ${f.commit}：${f.error.slice(0, 300)}\n`);
-  if (check !== "cases") {
-    process.stdout.write(
-      `开跑前置检查：人的代码上验证门没过的提交 ${summary.gateFailures.length} 个\n`
-    );
-    for (const g of summary.gateFailures) {
-      process.stdout.write(
-        `  ${g.commit}（步 ${g.seqs.join(",")}）：${g.failedSteps.join("、") || "无法判定"}\n`
-      );
-    }
-  }
-  // 给清单打标记：人的代码没过验证门的步记 humanFailsGate（这些步照常跑，只作标记）
-  const markTo = values.get("--mark-manifest");
-  if (markTo !== undefined && check !== "cases" && summary.failed.length === 0) {
-    const manifest = JSON.parse(readFileSync(required("--manifest"), "utf8")) as StreamManifest;
-    const marked = markHumanGateFailures(
-      manifest,
-      summary.gateFailures.map((g) => g.commit)
-    );
-    writeFileSync(markTo, `${JSON.stringify(marked, null, 2)}\n`);
-    process.stdout.write(
-      `清单已打标记：${marked.steps.filter((s) => s.humanFailsGate === true).length} 步记为人的代码没过验证门，写到 ${markTo}\n`
-    );
-  }
-  if (summary.failed.length > 0 || summary.gateFailures.length > 0) process.exitCode = 1;
-}
-
-// pigeon eval stream-rejudge --manifest <清单> --repo <人的仓库> --image <镜像> --baseline <基准目录> --out <正式跑输出目录>
-//   [--classes-image <镜像>] [--tasks 步序,步序] [--limit N] [--concurrency N（缺省 1）] [--container-memory <上限>（缺省 2g）]：
-// 按保存的改动重判（270 ①、316）：不重跑 agent，照正式跑同一判题路径重判各行，取完整的逐用例结果，与原结果行逐项核对；
-// 结果写到 <输出目录>/rejudge/cases.jsonl，原结果行不改，已有的行跳过
-async function evalStreamRejudgeMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval stream-rejudge --manifest <清单> --repo <人的仓库> --image <镜像> --baseline <基准目录> " +
-    "--out <正式跑输出目录> [--classes-image <镜像>] [--tasks 步序,步序] [--limit N] [--concurrency N] " +
-    "[--container-memory <上限>]";
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const value = argv[i + 1];
-    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
-      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
-    }
-    values.set(arg, value);
-    i++;
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
-    return value;
-  };
-  const positive = (name: string): number | undefined => {
-    const raw = values.get(name);
-    if (raw === undefined) return undefined;
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n < 1) throw new Error(`${name} 需要正整数（${usage}）`);
-    return n;
-  };
-  const tasks = values.get("--tasks");
-  const seqs = tasks
-    ?.split(",")
-    .filter((x) => x !== "")
-    .map((x) => {
-      const n = Number(x);
-      if (!Number.isInteger(n) || n < 1) throw new Error(`--tasks 需要步序列表（${usage}）`);
-      return n;
-    });
-  const limit = positive("--limit");
-  const concurrency = positive("--concurrency");
-  const classesImage = values.get("--classes-image");
-  const summary = await runStreamRejudge({
-    manifestFile: required("--manifest"),
-    repoDir: required("--repo"),
-    image: required("--image"),
-    baselineDir: required("--baseline"),
-    outDir: required("--out"),
-    containerRunArgs: ["--memory", values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY],
-    ...(classesImage !== undefined ? { classesImage } : {}),
-    ...(seqs !== undefined ? { seqs } : {}),
-    ...(limit !== undefined ? { limit } : {}),
-    ...(concurrency !== undefined ? { concurrency } : {}),
-    log: (line) =>
-      process.stderr.write(`[rejudge] ${new Date().toISOString()} ${line}
-`),
-  });
-  process.stdout.write(
-    `重判：选中 ${summary.selected} 行，此前已做 ${summary.skipped} 行；本次一致 ${summary.consistent} 行，` +
-      `不一致 ${summary.inconsistent.length} 行，出错 ${summary.errors.length} 行；结果写到 ${summary.file}
-`
-  );
-  for (const x of summary.inconsistent)
-    process.stdout.write(`  不一致 ${x.key}：${x.mismatches.join("；")}
-`);
-  for (const x of summary.errors)
-    process.stdout.write(`  出错 ${x.key}：${x.error.slice(0, 300)}
-`);
-  if (summary.errors.length > 0) process.exitCode = 1;
-}
-
-async function evalStreamManifestMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval stream-manifest --repo-profile pigeon|strands --repo <人的仓库> --range <起点>..<终点> " +
-    "--image <镜像> --out <清单文件> [--test-timeout-sec N] [--container-memory <上限>] [--concurrency N]";
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    const value = argv[i + 1];
-    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
-      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
-    }
-    values.set(arg, value);
-    i++;
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
-    return value;
-  };
-  const runtime = STREAM_RUNTIMES[required("--repo-profile")];
-  if (runtime === undefined) throw new Error(`--repo-profile 只能是 pigeon 或 strands（${usage}）`);
-  const [rangeStart, rangeEnd] = required("--range").split("..");
-  if (rangeStart === undefined || rangeStart === "" || rangeEnd === undefined || rangeEnd === "") {
-    throw new Error(`--range 形如 <起点>..<终点>（${usage}）`);
-  }
-  const timeoutSec = Number(values.get("--test-timeout-sec") ?? "600");
-  if (!Number.isInteger(timeoutSec) || timeoutSec < 1)
-    throw new Error(`--test-timeout-sec 需要正整数（${usage}）`);
-  const manifest = await generateStreamManifest({
-    repoDir: required("--repo"),
-    runtime,
-    rangeStart,
-    rangeEnd,
-    image: required("--image"),
-    outFile: required("--out"),
-    testTimeoutMs: timeoutSec * 1000,
-    ...(values.has("--container-memory")
-      ? { containerRunArgs: ["--memory", required("--container-memory")] }
-      : {}),
-    ...(values.has("--concurrency") ? { concurrency: Number(required("--concurrency")) } : {}),
-    log: (line) => process.stderr.write(`${line}\n`),
-  });
-  process.stdout.write(`${summarizeManifest(manifest)}\n`);
-}
-
-// pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> --conditions a,b
-//   [--attempts N] [--concurrency N（缺省 4）] [--max-steps K（试跑：只跑前 K 道题）] [--max-turns N（缺省 150）]
-//   [--wall-clock-min N（缺省 30）] [--model-id <模型>（缺省 deepseek-flash）] [--mini-python <解释器>]
-//   [--container-memory <上限>（缺省 2g）] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases|test-text]
-//   [--task-interfaces <接口数据文件>（题面在名单之后加接口说明，决策 374；清单摘要须与本次清单相符，缺省不加；
-//   test-text 题面已附判题测试全文，与 test-text 同给即报错）]
-//   [--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>]（上下文压缩的触发点与保留量，缺省为产品缺省；
-//   集成冒烟调低触发点验证压缩，决策 218）
-//   [--tasks 题号,…（按题号选题）| --sample K [--seed N]（从要做到的不为零的题中按种子抽 K 道，缺省种子 20260927）]
-//   [--accept-harness-change "<原因>"（续跑时代码版本不符的显式放行，记进身份头与报告）]
-//   [--allow-dirty-harness（首次开跑时放行未提交改动或读不到的提交号，开发自测用，记进身份头与报告）]：
-// 提交流实验（第三至六节；193 固定起点）——清单里的题按时间接成一条流，每个条件为一个作业，每一步新开容器（内置条件
-// 断网，外部 agent 条件接只通模型网关的网络）从人在该步之前的代码做、判、全量测量、写结果行；无人值守：Pigeon 各条件一律放权（yolo），不看 --yolo；
-// 各条件的模型请求都经跑批进程内置的网关（决策 155、234），上游为 DeepSeek；一个 key 一个账号：DEEPSEEK_API_KEY 为
-// 账号 1，DEEPSEEK_API_KEY_2、_3… 依次为后续账号，各账号并发上限取 DEEPSEEK_API_KEY_<编号>_CONCURRENCY（缺省 2500）；
-// 花费上限 --spend-limit-cny（人民币元，决策 235）：经网关的全部请求累计到上限即停批，缺省不设；
-// 外部 agent 条件（实验设施）：--external-agent <配置文件> 可重复给，每份配置定义一个条件 ext-<名字>，可与现有条件混写在
-// --conditions 里；其作业容器接只通模型网关的跑批内部网络（宿主上的配置文件见 src/eval/stream-external.ts）；
-// pigeon-docker 条件（对比评测的 Pigeon 组）：--pigeon-bundle 给打包产物目录（dist/）、--pigeon-node-runtime 给 Node 运行时目录
-// （实验镜像没有 node），都只读挂载进题目容器跑产品缺省
-// （--yolo --no-web --json --thinking high），治理根挂到题目仓库之外（见 src/eval/stream-pigeon-docker.ts）。
-// 外部条件的请求体逐字转发，网关不做兼容改写；有的客户端库会给工具定义加 "type": "custom"（例如 litellm 的
-// Anthropic 线路），DeepSeek 的 Anthropic 兼容端点见到它会回 400（unknown variant `custom`），这类 agent 须自己去掉该字段；
-// 撞上限续跑与流式重复检测（决策 367）：--continuation、--continuation-max-consecutive、--continuation-max-per-run、
-// --repetition-guard、--repetition-mode、--repetition-preset，只对 Pigeon 条件生效，缺省同产品缺省，生效值记进身份头；
-// 网关逐请求留存（决策 394）：缺省开，各作业的模型请求（增量）与回复记到 streams/<作业>/gateway/，单题与单作业的落盘
-// 上限 --retention-task-mb（缺省 32）、--retention-job-mb（缺省 512），--gateway-retention off 关掉；
-// 高峰自动暂停（决策 393）：缺省开，进入高峰前 --peak-margin-min（缺省 30）分钟停止放行新的一步、在途的照常做完、出高峰
-// 自动放行，每次暂停与恢复记进 peak-pauses.jsonl，--peak-pause off 关掉；两项都关时跑法与之前逐字相同；
-// 同一输出目录重跑即从断点续跑
-const STREAM_CONTAINER_MEMORY = "2g";
-
-async function evalStreamMain(argv: string[]): Promise<void> {
-  const usage =
-    "用法：pigeon eval stream --manifest <清单> --repo <人的仓库> --image <镜像> --out <输出目录> " +
-    `--conditions ${STREAM_CONDITIONS.join(",")}[,ext-<名字>…] [--external-agent <配置文件>]… [--attempts N] [--concurrency N] [--max-steps K] ` +
-    "[--max-turns N] [--wall-clock-min N] [--model-id <模型>] [--mini-python <装有 mini-swe-agent 的解释器>] " +
-    "[--container-memory <上限，缺省 2g>] [--baseline <人的基准目录>] [--prompt-format test-files|test-cases|test-text] " +
-    "[--task-interfaces <接口数据文件>（不与 test-text 同给）] " +
-    "[--spend-limit-cny <元>] [--compact-threshold <n>] [--compact-keep <n>] " +
-    "[--pigeon-bundle <打包产物目录>（pigeon-docker 条件必给：dist/，只读挂载进题目容器）] " +
-    "[--pigeon-node-runtime <Node 运行时目录>（pigeon-docker 条件必给：含 bin/node，只读挂载进题目容器）] " +
-    "[--memory-limit <项目级记忆的字符数上限，缺省 4000>] " +
-    "[--continuation on|off] [--continuation-max-consecutive <n，缺省 2>] [--continuation-max-per-run <n，缺省 5>] " +
-    "[--repetition-guard on|off] [--repetition-mode abort|log] [--repetition-preset omp|wide] " +
-    "[--background-closeout-seconds <n，缺省 600；0 为收尾不等、直接停掉作业>] " +
-    "[--gateway-retention on|off] [--retention-task-mb <n，缺省 32>] [--retention-job-mb <n，缺省 512>] " +
-    "[--peak-pause on|off] [--peak-margin-min <n，缺省 30>] " +
-    "[--tasks 题号,题号… | --sample K [--seed N（缺省 20260927）]] " +
-    '[--accept-harness-change "<原因>"] [--allow-dirty-harness]';
-  const own = new Set([
-    "--accept-harness-change",
-    "--manifest",
-    "--repo",
-    "--image",
-    "--out",
-    "--conditions",
-    "--prompt-format",
-    "--task-interfaces",
-    "--attempts",
-    "--concurrency",
-    "--max-steps",
-    "--tasks",
-    "--sample",
-    "--seed",
-    "--max-turns",
-    "--wall-clock-min",
-    "--model-id",
-    "--mini-python",
-    "--container-memory",
-    "--baseline",
-    "--spend-limit-cny",
-    "--memory-limit",
-    "--continuation",
-    "--continuation-max-consecutive",
-    "--continuation-max-per-run",
-    "--repetition-guard",
-    "--repetition-mode",
-    "--repetition-preset",
-    "--background-closeout-seconds",
-    "--pigeon-bundle",
-    "--pigeon-node-runtime",
-    "--gateway-retention",
-    "--retention-task-mb",
-    "--retention-job-mb",
-    "--peak-pause",
-    "--peak-margin-min",
-  ]);
-  const values = new Map<string, string>();
-  const modelArgv: string[] = [];
-  // 外部 agent 的配置文件：可重复给
-  const externalAgentFiles: string[] = [];
-  // 不带取值的开关：不交给模型参数的解析
-  let allowDirtyHarness = false;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === undefined) continue;
-    if (arg === "--allow-dirty-harness") {
-      allowDirtyHarness = true;
-    } else if (arg === "--external-agent") {
-      const value = argv[++i];
-      if (value === undefined || value === "")
-        throw new Error(`--external-agent 需要配置文件（${usage}）`);
-      externalAgentFiles.push(value);
-    } else if (own.has(arg)) {
-      const value = argv[++i];
-      if (value === undefined) throw new Error(`${arg} 需要取值（${usage}）`);
-      values.set(arg, value);
-    } else {
-      modelArgv.push(arg);
-      const next = argv[i + 1];
-      if (!VALUELESS_FLAGS.has(arg) && next !== undefined && !next.startsWith("--")) {
-        modelArgv.push(next);
-        i++;
-      }
-    }
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
-    return value;
-  };
-  const positive = (name: string): number | undefined => {
-    const raw = values.get(name);
-    if (raw === undefined) return undefined;
-    const value = Number(raw);
-    if (!Number.isInteger(value) || value < 1) throw new Error(`${name} 需要正整数（${usage}）`);
-    return value;
-  };
-  const list = (name: string) =>
-    values.has(name)
-      ? required(name)
-          .split(",")
-          .filter((x) => x !== "")
-      : undefined;
-  const conditions = list("--conditions") ?? [];
-  for (const c of conditions) {
-    if (!(STREAM_CONDITIONS as readonly string[]).includes(c) && !isExternalCondition(c)) {
-      throw new Error(
-        `未知条件 ${c}（可选 ${STREAM_CONDITIONS.join("、")}，或 ext-<外部 agent 的名字>）`
-      );
-    }
-  }
-  if (conditions.length === 0) throw new Error(`缺 --conditions（${usage}）`);
-  // pigeon-docker 是容器条件（打包产物经 --pigeon-bundle 给），不需要进程内 Pigeon 的参数
-  const needsPigeon = conditions.some(
-    (c) => c !== "minimal" && c !== "pigeon-docker" && !isExternalCondition(c)
-  );
-  // 外部 agent 的配置在开跑前解析、校验（与所跑条件的对应在 runStreamExperiment 里查）
-  const externalAgents = externalAgentFiles.map((file) => loadExternalAgentConfig(file));
-  const memoryLimitChars = positive("--memory-limit");
-  const oneOf = <T extends string>(name: string, choices: readonly T[]): T | undefined => {
-    const raw = values.get(name);
-    if (raw === undefined) return undefined;
-    if (!(choices as readonly string[]).includes(raw)) {
-      throw new Error(`${name} 可选 ${choices.join("、")}（${usage}）`);
-    }
-    return raw as T;
-  };
-  // 决策 365：无人值守收尾等后台作业的总时限（只对 Pigeon 条件生效；缺省同产品缺省，生效值记进身份头）
-  const closeoutRaw = values.get("--background-closeout-seconds");
-  const backgroundCloseoutSeconds = closeoutRaw === undefined ? undefined : Number(closeoutRaw);
-  if (
-    backgroundCloseoutSeconds !== undefined &&
-    (!Number.isInteger(backgroundCloseoutSeconds) || backgroundCloseoutSeconds < 0)
-  ) {
-    throw new Error(`--background-closeout-seconds 需要非负整数（${usage}）`);
-  }
-  // 决策 367：撞上限续跑与流式重复检测（只对 Pigeon 条件生效；没给的项取产品缺省）
-  const continuationSwitch = oneOf("--continuation", ["on", "off"] as const);
-  const maxConsecutive = positive("--continuation-max-consecutive");
-  const maxPerRun = positive("--continuation-max-per-run");
-  const truncationContinuation = truncationContinuationSettings({
-    ...(continuationSwitch !== undefined ? { enabled: continuationSwitch === "on" } : {}),
-    ...(maxConsecutive !== undefined ? { maxConsecutive } : {}),
-    ...(maxPerRun !== undefined ? { maxPerRun } : {}),
-  });
-  const repetitionSwitch = oneOf("--repetition-guard", ["on", "off"] as const);
-  const repetitionMode = oneOf("--repetition-mode", ["abort", "log"] as const);
-  const repetitionPreset = oneOf("--repetition-preset", ["omp", "wide"] as const);
-  const repetition = repetitionGuardSettings({
-    ...(repetitionSwitch !== undefined ? { enabled: repetitionSwitch === "on" } : {}),
-    ...(repetitionMode !== undefined ? { mode: repetitionMode } : {}),
-    ...(repetitionPreset !== undefined ? { preset: repetitionPreset } : {}),
-  });
-  if ("problem" in repetition) throw new Error(`流式重复检测参数不对：${repetition.problem}`);
-  const flags = parseLaunchFlags(modelArgv, { usage, temperature: true });
-  const accounts = gatewayAccountsFromEnv(process.env);
-  const modelId = values.get("--model-id") ?? DEFAULT_GATEWAY_MODEL_ID;
-  const pigeon = needsPigeon
-    ? {
-        provider: GATEWAY_PROVIDER,
-        modelId,
-        // 缺省固定温度 0（110）
-        temperature: streamTemperature(flags.temperature),
-        ...(flags.thinkingLevel !== undefined ? { thinking: flags.thinkingLevel } : {}),
-        ...(flags.maxOutputTokens !== undefined ? { maxOutputTokens: flags.maxOutputTokens } : {}),
-        // 决策 218：压缩阈值用产品缺省；集成冒烟可经参数调低
-        ...(flags.compaction !== undefined ? { compaction: flags.compaction } : {}),
-        // 推送格（191、332）：项目级记忆的上限，没给即缺省
-        ...(memoryLimitChars !== undefined ? { memoryLimitChars } : {}),
-        truncationContinuation,
-        repetitionGuard: repetition.settings,
-        ...(backgroundCloseoutSeconds !== undefined ? { backgroundCloseoutSeconds } : {}),
-      }
-    : undefined;
-  const promptFormat = values.get("--prompt-format");
-  if (
-    promptFormat !== undefined &&
-    !(TASK_PROMPT_FORMATS as readonly string[]).includes(promptFormat)
-  ) {
-    throw new Error(`未知题面格式 ${promptFormat}（可选 ${TASK_PROMPT_FORMATS.join("、")}）`);
-  }
-  const attempts = positive("--attempts");
-  const concurrency = positive("--concurrency");
-  const maxSteps = positive("--max-steps");
-  // 选题（202、219）：题号为清单里的题按时间接成的流中的序号（从 1 起）；抽样只在要做到的用例不为零的题中抽
-  const tasks = list("--tasks")?.map((t) => {
-    const n = Number(t);
-    if (!Number.isInteger(n) || n < 1) throw new Error(`--tasks 需要正整数题号（${usage}）`);
-    return n;
-  });
-  const sampleK = positive("--sample");
-  const seed = positive("--seed");
-  if (seed !== undefined && sampleK === undefined)
-    throw new Error(`--seed 只配合 --sample 用（${usage}）`);
-  // 作业容器与参考容器缺省 2g：人的基准逐遍记录内存峰值，超过上限的 75% 即告警
-  const memory = values.get("--container-memory") ?? STREAM_CONTAINER_MEMORY;
-  const miniPython = values.get("--mini-python");
-  const baselineDir = values.get("--baseline");
-  const spendLimitRaw = values.get("--spend-limit-cny");
-  const spendLimitCny = spendLimitRaw === undefined ? undefined : Number(spendLimitRaw);
-  if (spendLimitCny !== undefined && !(Number.isFinite(spendLimitCny) && spendLimitCny > 0)) {
-    throw new Error(`--spend-limit-cny 需要正数（${usage}）`);
-  }
-  // 决策 394：网关逐请求留存，缺省开；关掉时不接受上限参数
-  const retentionOff = oneOf("--gateway-retention", ["on", "off"] as const) === "off";
-  const mib = (name: string, fallback: number) => (positive(name) ?? fallback / 2 ** 20) * 2 ** 20;
-  if (retentionOff && (values.has("--retention-task-mb") || values.has("--retention-job-mb"))) {
-    throw new Error(`--gateway-retention off 时不给留存上限（${usage}）`);
-  }
-  const gatewayRetention = retentionOff
-    ? undefined
-    : {
-        maxTaskBytes: mib("--retention-task-mb", DEFAULT_RETENTION_LIMITS.maxTaskBytes),
-        maxJobBytes: mib("--retention-job-mb", DEFAULT_RETENTION_LIMITS.maxJobBytes),
-      };
-  // 决策 393：高峰自动暂停，缺省开；余量为分钟数，可为 0（只在高峰时段内停）
-  const peakOff = oneOf("--peak-pause", ["on", "off"] as const) === "off";
-  const marginRaw = values.get("--peak-margin-min");
-  const marginMin = marginRaw === undefined ? DEFAULT_PEAK_MARGIN_MS / 60_000 : Number(marginRaw);
-  if (!Number.isInteger(marginMin) || marginMin < 0 || (peakOff && marginRaw !== undefined)) {
-    throw new Error(`--peak-margin-min 需要非负整数，且只在高峰暂停开着时给（${usage}）`);
-  }
-  const peakPause = peakOff ? undefined : { marginMs: marginMin * 60_000 };
-  // 代码版本的显式放行（269）：原因为空即报错
-  const acceptHarnessChange = values.get("--accept-harness-change");
-  if (acceptHarnessChange !== undefined && acceptHarnessChange.trim() === "") {
-    throw new Error(`--accept-harness-change 的原因不能为空（${usage}）`);
-  }
-  const minimalCommand =
-    miniPython !== undefined
-      ? [miniPython, fileURLToPath(packageFileUrl("eval/stream/mini/run_mini.py"))]
-      : undefined;
-  // SIGTERM（systemd 停服、整机关机）：在途的步作废、不再取新步，硬时限内自行退出
-  const shutdown = new AbortController();
-  const removeTermHandler = installTerminationHandler(
-    process,
-    (reason) => {
-      writeOut(`[stream] ${reason}\n`);
-      shutdown.abort(reason);
-    },
-    (code) => process.exit(code)
-  );
-  const summary = await runStreamExperiment({
-    shutdownSignal: shutdown.signal,
-    gateway: { accounts, modelId, ...(spendLimitCny !== undefined ? { spendLimitCny } : {}) },
-    manifestFile: required("--manifest"),
-    repoDir: required("--repo"),
-    image: required("--image"),
-    outDir: required("--out"),
-    conditions: conditions as StreamCondition[],
-    budget: {
-      maxTurns: positive("--max-turns") ?? DEFAULT_STEP_BUDGET.maxTurns,
-      wallClockMs:
-        (positive("--wall-clock-min") ?? DEFAULT_STEP_BUDGET.wallClockMs / 60_000) * 60_000,
-    },
-    ...(pigeon !== undefined ? { pigeon } : {}),
-    ...(minimalCommand !== undefined ? { minimalCommand } : {}),
-    ...(externalAgents.length > 0 ? { externalAgents } : {}),
-    ...(values.has("--pigeon-bundle") ? { pigeonBundle: required("--pigeon-bundle") } : {}),
-    ...(values.has("--pigeon-node-runtime")
-      ? { pigeonNodeRuntime: required("--pigeon-node-runtime") }
-      : {}),
-    ...(promptFormat !== undefined ? { promptFormat: promptFormat as TaskPromptFormat } : {}),
-    ...(values.has("--task-interfaces")
-      ? { taskInterfacesFile: required("--task-interfaces") }
-      : {}),
-    ...(attempts !== undefined ? { attempts } : {}),
-    ...(concurrency !== undefined ? { concurrency } : {}),
-    ...(maxSteps !== undefined ? { maxSteps } : {}),
-    ...(tasks !== undefined ? { tasks } : {}),
-    ...(sampleK !== undefined
-      ? { sample: { k: sampleK, ...(seed !== undefined ? { seed } : {}) } }
-      : {}),
-    containerRunArgs: ["--memory", memory],
-    ...(baselineDir !== undefined ? { baselineDir } : {}),
-    ...(gatewayRetention !== undefined ? { gatewayRetention } : {}),
-    ...(peakPause !== undefined ? { peakPause } : {}),
-    harnessAllowance: {
-      ...(acceptHarnessChange !== undefined ? { acceptHarnessChange } : {}),
-      ...(allowDirtyHarness ? { allowDirtyHarness } : {}),
-    },
-    // 带时间戳：试跑时据此把每步的耗时与内存采样对上
-    log: (line) => writeOut(`[stream] ${new Date().toISOString()} ${line}\n`),
-  }).finally(removeTermHandler);
-  for (const job of summary.jobs) {
-    writeOut(
-      `[stream] ${job.key}：完成到第 ${job.completedTo ?? "—"} 步${job.stopped !== undefined ? `；停止：${job.stopped}` : ""}\n`
-    );
-  }
-  writeOut(`[stream] 结果 ${summary.resultsFile}；报告 ${summary.reportFile}\n`);
-  if (summary.jobs.some((j) => j.stopped !== undefined)) process.exitCode = 3;
-}
-
-// pigeon eval stream-image-context --repo-profile pigeon|strands|strands-lint --repo <人的仓库> --out <目录>
-//   [--lock-rev <提交>] [--manifest <清单>（strands-lint 必给）]：
-// 组装延续式跑批工作区镜像的构建上下文（决策 148），之后 docker build <目录>；strands-lint 为 strands 基础镜像之上的
-// lint 层（按清单里要测的每个提交解析），docker build -f Dockerfile.lint <目录>
-function evalStreamImageContextMain(argv: string[]): void {
-  const usage =
-    "用法：pigeon eval stream-image-context --repo-profile pigeon|strands|strands-lint --repo <人的仓库> --out <目录> " +
-    "[--lock-rev <提交>] [--manifest <清单>]";
-  const values = new Map<string, string>();
-  for (let i = 0; i < argv.length; i += 2) {
-    const arg = argv[i];
-    const value = argv[i + 1];
-    if (arg === undefined || !arg.startsWith("--") || value === undefined) {
-      throw new Error(`参数不对：${arg ?? ""}（${usage}）`);
-    }
-    values.set(arg, value);
-  }
-  const required = (name: string): string => {
-    const value = values.get(name);
-    if (value === undefined || value === "") throw new Error(`缺 ${name}（${usage}）`);
-    return value;
-  };
-  const lockRev = values.get("--lock-rev");
-  const manifestFile = values.get("--manifest");
-  const written = assembleImageContext({
-    profileName: required("--repo-profile"),
-    repoDir: required("--repo"),
-    outDir: required("--out"),
-    ...(lockRev !== undefined ? { lockRev } : {}),
-    ...(manifestFile !== undefined
-      ? { manifest: JSON.parse(readFileSync(manifestFile, "utf8")) as StreamManifest }
-      : {}),
-  });
-  process.stdout.write(`${written.join("\n")}\n`);
-}
-
 function parseEditMode(value: string | undefined, usage: string): EditMode {
   if (value === undefined || !isEditMode(value)) {
     throw new Error(`--edit-mode 只接受 ${EDIT_MODES.join("/")}（${usage}）`);
@@ -1153,26 +537,6 @@ export async function main(argv: string[]): Promise<void> {
   }
   if (route.kind === "line") {
     await lineMain(route.argv);
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream") {
-    await evalStreamMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream-image-context") {
-    evalStreamImageContextMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream-baseline") {
-    await evalStreamBaselineMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream-manifest") {
-    await evalStreamManifestMain(argv.slice(2));
-    return;
-  }
-  if (argv[0] === "eval" && argv[1] === "stream-rejudge") {
-    await evalStreamRejudgeMain(argv.slice(2));
     return;
   }
   if (argv[0] === "run") {
@@ -1209,7 +573,6 @@ export async function main(argv: string[]): Promise<void> {
 
 // 顶层子命令：不带子命令即终端界面，--line 为命令行对话
 const SUBCOMMANDS = new Set([
-  "eval",
   "run",
   "trace",
   "replay",
@@ -1414,7 +777,6 @@ export const TOP_LEVEL_HELP = [
   "  pigeon sandbox list|clean     查看或清理残留的沙箱容器",
   `  pigeon migrate-config         把旧配置并入三层 settings.json、旧位置的程序状态移入 ${pigeonRel("state")}/`,
   "  pigeon sandbox cache|clear-cache  查看或清空沙箱共用的下载缓存（npm、pnpm、yarn、pip、uv、cargo、go）",
-  "  pigeon eval stream|stream-baseline|stream-manifest|stream-image-context  实验跑批",
 ].join("\n");
 
 // 命令行对话与续跑接受的启动参数

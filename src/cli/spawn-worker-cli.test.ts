@@ -176,7 +176,7 @@ test("缺省入口：pigeon 不带子命令进终端界面，--line 进命令行
   });
   assert.deepEqual(routeTopLevel(["--line", "--yolo"]), { kind: "line", argv: ["--yolo"] });
   assert.deepEqual(routeTopLevel(["--yolo", "--line"]), { kind: "line", argv: ["--yolo"] });
-  for (const sub of ["run", "resume", "trace", "replay", "session", "sandbox", "eval"]) {
+  for (const sub of ["run", "resume", "trace", "replay", "session", "sandbox"]) {
     assert.deepEqual(routeTopLevel([sub, "--line"]), { kind: "subcommand" }, sub);
   }
   assert.deepEqual(routeTopLevel(["--help"]), { kind: "help" });

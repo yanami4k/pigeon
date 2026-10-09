@@ -6,9 +6,9 @@
 // M6.5 S1（决策 056）：装配内核抽出为 openRuntimeSurface，worker 工厂与 headless 运行共用——
 // headless 无父会话、无角色：不写 session.header，run_command 不套角色清单，无审批通道（prompt 档 fail-closed）。
 // 决策 286：会话存储告警的出口可由调用方给出（storeWarn，终端界面运行期间落消息区）；不给即照旧写标准错误输出——
-// pigeon run、eval stream 与逐行对话都不给，实验路径不受影响。
+// pigeon run 与逐行对话都不给。
 // 决策 301：运行面的流式正文与工具结果两个只读观察口一并交给编排器；编排器只在有观察者（终端界面）时订阅，
-// pigeon run、eval stream 与逐行对话不订，实验路径不受影响。
+// pigeon run 与逐行对话不订。
 
 import type { ApprovalHandler } from "../approvals/handler.ts";
 import { deleteSnapshotRef, snapshotWorkdir } from "../execution/workdir-snapshot.ts";

@@ -2,7 +2,7 @@
 
 - 日期：2026-09-12
 - 对象：`@earendil-works/pi-agent-core@0.84.4` + `@earendil-works/pi-ai@0.84.4`（锁定版本，全部结论以 node_modules 内 dist 实际代码 + 实跑输出为准）
-- 复现脚本：`spikes/spike-pi-transcript/spike.mjs`（纯 .mjs，直接 import dist；`node spikes/spike-pi-transcript/spike.mjs`，约 3 秒跑完，无悬挂）
+- 复现脚本（已于 2026-10-09 移出仓库）：`spikes/spike-pi-transcript/spike.mjs`（纯 .mjs，直接 import dist；`node spikes/spike-pi-transcript/spike.mjs`，约 3 秒跑完，无悬挂）
 - 方法：① 静态通读 `dist/agent.js` / `dist/agent-loop.js` / `dist/types.d.ts` 与 pi-ai 消息类型；② 实证：脚本化假 `streamFn`（支持回复队列 + 中途门闩）驱动真实 `Agent`，跑「T1 完整工具调用轮（2 次模型调用）→ T2 流式中途 abort → T3 abort 后再跑一轮」；全程 WeakMap 分配对象身份号（oid），在 append 时刻对每条消息做深快照，终态再比对；记录每次 `message_end` 事件载荷引用与 `state.messages` 条目逐一做 `===` 比较。
 - 目的：为设计决策 D3（Pigeon EntryId ↔ Pi 消息映射粒度）提供事实基础。
 
