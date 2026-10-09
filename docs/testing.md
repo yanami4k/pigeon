@@ -51,8 +51,8 @@
 测试分两档，划分写在 `scripts/test-tiers.mjs` 的清单里（用清单而不是命名约定：每一项旁边写得下理由，文件不必改名；
 清单里某一项匹配不到文件时，跑测试的脚本直接报错，免得清单悄悄失效）。
 
-- **慢档**：`src/eval` 下的全部测试（跑批器与实验装置），加上清单里列出的、单独跑超过 10 秒的其他测试文件
-  （它们测的是 `src/execution`、`src/cli` 等处的代码；慢档的 eval 测试也会跑到 application 层的代码）。
+- **慢档**：清单里列出的、单独跑超过 10 秒的测试文件（测的是 `src/execution`、`src/cli` 等处的代码）。
+  跑批器已移出仓库，慢档不再含跑批器的测试。
 - **快档**：其余全部。
 
 | 命令 | 跑什么 |
@@ -62,7 +62,7 @@
 | `npm run verify` | lint + check + 快档 + deps（开发中的快速检查） |
 | `npm run verify:full` | lint + check + 快档与慢档 + deps（交付与合并前必跑） |
 
-- **交付与合并前必须跑 `npm run verify:full`**，不论改了哪个目录：慢档里的文件覆盖的不只是 `src/eval`。
+- **交付与合并前必须跑 `npm run verify:full`**，不论改了哪个目录：慢档里的文件也会跑到其他目录的代码。
   `npm run verify` 只用于开发中的快速检查，不能代替交付前的全量验证。
 - CI（`.github/workflows/ci.yml`）在推送 main 与每个 PR 时跑 `npm run verify:full`。本地合并后直推 main 时，
   CI 在推送之后才跑，因此合并前的全量验证由交付者自己跑 `verify:full`。

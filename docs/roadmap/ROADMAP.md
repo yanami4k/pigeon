@@ -94,7 +94,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 
 1. "复用思想"的话术必须用实现细节兜底：引用上游机制前（如 reducer/lane 协议）必须先读完其实现，能讲清"上游做到哪、差异在第几层"。
 2. 自有部分的证据在攻击面测试里，不在实现里：未审批写操作到不了执行器、伪造批准无效、崩溃后写操作不盲放——这组测试存在且通过才是差异化证据。
-3. 复用越多版本绑定越深：@earendil-works/pi-agent-core 与 pi-ai 锁定 0.84.4，TypeScript 锁定 6.x（dependency-cruiser 18 不支持 TS7，TS7 下会静默巡航 0 模块导致 deps 假绿）。升级是显式决策；升级后必须重跑 beforeToolCall 与 transcript 两个 spike（spikes/spike-*/spike.mjs，笔记在 docs/spikes/），结论以实跑输出为准，不信声明文件；reuse/own 审计表重跑一遍。
+3. 复用越多版本绑定越深：@earendil-works/pi-agent-core 与 pi-ai 锁定 0.84.4，TypeScript 锁定 6.x（dependency-cruiser 18 不支持 TS7，TS7 下会静默巡航 0 模块导致 deps 假绿）。升级是显式决策；升级后必须重跑 beforeToolCall 与 transcript 两个 spike（spikes/spike-*/spike.mjs〔探针脚本已于 2026-10-09 移出仓库〕，笔记在 docs/spikes/），结论以实跑输出为准，不信声明文件；reuse/own 审计表重跑一遍。
 4. 上游可能长出同类能力吃掉差异化：盯上游 changelog；治理语义设计为跨 harness 可迁移，Adapter 隔离保证上游变更不击穿治理层。
 5. 归属诚实：README 致谢上游并划清边界；"我用了 X 因为 Y"是工程判断力，冒充自研被发现则项目可信度归零。
 6. 自有决策的唯一合法理由是"上游缺这个语义"，不是"显得代码量大"。
@@ -189,7 +189,7 @@ Pigeon 复用 `@earendil-works/pi-tui` 的终端渲染、输入、布局和基�
 
 留证：每次自动放行的账本回指具体出处（approvedBy = human:grant 回指 grantId，policy:config 回指规则的 promotedFrom.grantId，位置序号不作身份）；会话 grant 的创建与撤销、固化规则的升格与移除各落一条 Event Log 记录。可审计的问题是"这次写操作凭什么没问人"，答案在移除规则之后仍然成立。
 
-## 4. 〔部分已改：下方模块图停在 2026-09-14；此后账本改为 pi 会话存储（176–187），replay/ 与 review/ 已删除（137、158、204），新增 web/（287）与编排、脚本沙箱（M11），现状以代码为准〕目标架构
+## 4. 〔部分已改：下方模块图停在 2026-09-14；此后账本改为 pi 会话存储（176–187），replay/ 与 review/ 已删除（137、158、204），新增 web/（287）与编排、脚本沙箱（M11），eval/ 已于 2026-10-09 随跑批器移出仓库，现状以代码为准〕目标架构
 
 ```text
 src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 按路径强制——
@@ -268,7 +268,7 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     查询与排版）、workspace.ts 工作区准备与固化 grant 种子恢复；
 │                     可依赖 state / persistence / tools / approvals / pi-runtime / execution / memory /
 │                     skills / orchestration / mcp，不触达 Actor 层
-├─ eval/              依赖 application 及以下，不触达 Actor 层（M6.5，decisions.md 046 / 057–060）：task.json 任务目录
+├─ eval/              〔已于 2026-10-09 随跑批器移出仓库〕依赖 application 及以下，不触达 Actor 层（M6.5，decisions.md 046 / 057–060）：task.json 任务目录
 │                     加载、从任务 ref 开工作树的快照准备、验证资产回填与退出码三值验证器（eval.verified）、
 │                     三条件 runner（skillRoots 切换）、results.jsonl 与 report.md；由 cli 的 eval 子命令调用；
 │                     M9（102）起 runner 只认任务源接口 task-source.ts——自造冒烟题 local-source.ts 与外部基准
@@ -278,7 +278,7 @@ src/（单 package，目录即模块边界；依赖方向由 dependency-cruiser 
 │                     resume 流程在 application/（M2 S1，025——M4 记账的 cli 直连 execution
 │                     过渡豁免已消除）；cli 不得依赖 execution，只经 application；M5.5 起 trace
 │                     从主会话列出并进入 worker 会话，resume worker 会话回到其工作树；M6.5 起 run（headless）
-│                     与 eval 子命令。除 application 外另有两处直接依赖：repl.ts 取 pi-runtime 的
+│                     与 eval 子命令（已于 2026-10-09 随跑批器移出仓库）。除 application 外另有两处直接依赖：repl.ts 取 pi-runtime 的
 │                     PiRuntimeAdapter 类型，approval-ui.ts 取 approvals 的审批接口与会话 grant 运行态
 └─ tui/               Actor：M2 Pigeon 自有 TUI，唯一允许直连 pi-tui 的目录（tui-pi-tui-only
                       精确豁免，spike 判过 decisions.md 026）；继承 cli 的治理投影，不得触达
@@ -600,7 +600,7 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - trace 跨会话：`cli/trace-workers.test.ts` 父会话列出 worker 与进入命令，worker 会话回指父会话。
 - 权限与深度：`orchestration/roles.test.ts`、`roles-tester.test.ts`、`workers.test.ts`；变异子集扩权与去深度检查均精确变红。
 - 多窗口：`persistence/session-lock.test.ts` 以真实子进程持锁验证拒绝与残留接管，`persistence/grants-config-atomic.test.ts` 写一半即抛原文件不变；两处变异均精确变红。
-- Kimi 真实链路（TUI + ConPTY，`spikes/tui-acc/run-m55.mjs`）：两个 worker 并行写各自工作树、主工作区零改动、审批面板区分来源；run_command 面板显示完整命令，[a] 后同一命令免审、改参数重新问；审批挂起时强杀进程，父会话标注未收尾，新进程恢复 worker 会话显示崩溃残留并续跑，worker 会话里再派被深度 1 拒绝；trace 从主会话进入 worker 会话；第二个窗口恢复同一会话被拒绝。
+- Kimi 真实链路（TUI + ConPTY，`spikes/tui-acc/run-m55.mjs`，探针脚本已于 2026-10-09 移出仓库）：两个 worker 并行写各自工作树、主工作区零改动、审批面板区分来源；run_command 面板显示完整命令，[a] 后同一命令免审、改参数重新问；审批挂起时强杀进程，父会话标注未收尾，新进程恢复 worker 会话显示崩溃残留并续跑，worker 会话里再派被深度 1 拒绝；trace 从主会话进入 worker 会话；第二个窗口恢复同一会话被拒绝。
 - 门禁与变异：`npm run verify` 457 测试全绿；六个切片与 048 修订共 13 处承重变异全部精确变红；证据 docs/audits/2026-09-13-m5-5-8ac7266.md。
 
 已知边界与偏差（如实登记）：
@@ -640,7 +640,7 @@ exec 类工具（decisions.md 048）：一个 exec 档工具 run_command，参�
 - S3 治理接线与证据（052、053）：`state/mcp-toolset.ts` 写死更严规则（声明只读配 write / exec 按配置、声明 destructive 配 read 按 write，均标冲突），按实际档位注册，六档排律、审批、intent 与 receipt 照走；run.started 加法式带 mcpTools（declaredHint / configuredTier / effectiveTier / conflict）与 mcpServers（状态、重启次数、错误、清单变更），trace 的 Run 头列冲突、非连接 server 与清单变更，启动时进程内同时警告；Receipt 升 v5 加 mcp 块（server、tool、argsHash、isError、resultSummary、resultHash、resultBytes、truncated、structuredHash、serverEvidence），server 在 structuredContent 的 evidence 键交的证据原样收入、超 16 KiB 截断标记、哈希按整体；server 给出返回即算已执行；Event Log 升 v8，读路径把内嵌 receipt 升到当前版本；replay 显示 mcp 摘要；冷侧对账对 mcp 块只判回执在不在。
 - S4 prompts 与 roots（043 口径、054）：会话开始时对无必填参数的 prompt 调 getPrompt 取正文进 Skill Catalog（来源标 server，哈希清单按正文算），需要参数或取不到的不登记并记问题；load_skill 重取正文、哈希不符拒绝、大小上限可见截断、留 skill.loaded；client 广告 roots 为工作区根，worker 以其工作树为工作区根启动自己的 MCP 会话（有 MCP 配置时异步就绪，无配置时装配路径与 M5.5 相同）；implementer 继承父策略里的 MCP 工具。
 - 装配与释放：cli 与 tui 在装配前异步启动 MCP 会话，装配失败先关 server；disposeRuntime 依次释放 Adapter、MCP 连接与会话文件；tui 的 /resume 换绑按目标会话工作区根启动 MCP 会话。
-- S5 验收夹具与剧本（055）：devDependencies 锁 server-filesystem 与 server-everything 2026.8.31；`spikes/mcp-acc/.mcp.json` 与 `spikes/mcp-acc/.pigeon/mcp.json` 夹具，`run-everything.mjs` 自动化剧本，`run-filesystem.mjs` Kimi 真实链路剧本。
+- S5 验收夹具与剧本（055）：devDependencies 锁 server-filesystem 与 server-everything 2026.8.31；`spikes/mcp-acc/.mcp.json` 与 `spikes/mcp-acc/.pigeon/mcp.json` 夹具（夹具与剧本已于 2026-10-09 随探针目录移出仓库），`run-everything.mjs` 自动化剧本，`run-filesystem.mjs` Kimi 真实链路剧本。
 
 完成证据（事实）：
 
@@ -828,7 +828,7 @@ Outcome 判断优先级：
 - 环境摘要记全，批准失效只看模型、经验集合内容哈希、预算参数、验证命令四项封闭清单（091）。
 - 激活为复制到正常目录、人仍可编辑，启动时比对哈希标注漂移；撤销不追溯，取代与候选取代同构（093）。
 
-### M9：〔多次改向：以各段中"以本段为准"的最新一段为准〕Eval 与可测量改进
+### M9：〔多次改向：以各段中"以本段为准"的最新一段为准；跑批器（src/eval、eval/ 与 eval 子命令）已于 2026-10-09 移出仓库〕Eval 与可测量改进
 
 目标：证明经验学习带来可重复改善，而不是只增加文字。
 
@@ -945,12 +945,12 @@ Outcome 判断优先级：
 | 记忆改取向与 AGENTS.md | 人写说明改读 AGENTS.md（从仓库根到工作目录逐层、上限 32 KiB、兼容 CLAUDE.md）；学到的记忆分两层；删除收尾复盘、压缩前复盘与启动补做；写记忆只给有人对话的入口，终端界面 `/memory` 查看与编辑 | 329–332 |
 | 沙箱与工程设施加固 | 日常沙箱容器的资源上限；编辑工具写入前复核路径；容器辅助命令在容器内以 `timeout` 限时；CI 跑 `npm run verify`；Claude 工作流加固 | 333–337 |
 | 会话检索改进 | 排除当前会话、缺省只搜对话正文、关键词任一命中并排序、会话目录工具、按文件缓存可搜文本 | 339 |
-| 实验跑批器最小适配 | 去掉对验证门、回炉与验证前恢复人写测试的依赖；结果行与分析代码去掉相应字段（读旧行时忽略）；判题记下全部失败用例 | 327 |
+| 实验跑批器最小适配〔跑批器已于 2026-10-09 移出仓库〕 | 去掉对验证门、回炉与验证前恢复人写测试的依赖；结果行与分析代码去掉相应字段（读旧行时忽略）；判题记下全部失败用例 | 327 |
 
 待做：
 
 - 其余 9 个事件（审批请求、审批被拒、一批工具跑完、任务清单加项与勾掉、建与删工作树、说明文件载入、显示回复）在 Pigeon 已有对应时刻，以后做；另有 11 个待 Pigeon 有对应功能时随之加（323）。
-- 下次实验的条件与出题规则（筛题、题面给出接口或签名〔已定：题面加接口说明，见 374〕、人改过的测试的处理、每题用例数下限、仓库数量）另行设计〔跑批里推送记忆一维已无写入方：跑批不注册写记忆工具、复盘已删，见 329、331，条件里应去掉或写明用意；跑批里的 Pigeon 跟随产品，见 380〕；跑批器接检查的方式随下一并设计。
+- 下次实验的条件与出题规则（筛题、题面给出接口或签名〔已定：题面加接口说明，见 374〕、人改过的测试的处理、每题用例数下限、仓库数量）另行设计〔跑批里推送记忆一维已无写入方：跑批不注册写记忆工具、复盘已删，见 329、331，条件里应去掉或写明用意；跑批里的 Pigeon 跟随产品，见 380〕；跑批器接检查的方式随下一并设计〔跑批器已于 2026-10-09 移出仓库〕。
 - 仓库首页 README，并入沙箱使用说明与各项新功能的用法（254）。
 - 小缺陷：run_command 的文件变化报告应排除治理目录；184 详情与 Run 开始条目实际保留的字段对齐。
 - 需要在 Windows 本机做的：沙箱冒烟、容器开在远程服务器上的实测、终端界面与编排界面的上手试用。
