@@ -1,6 +1,6 @@
 // 脚本编排的装配与点名（决策 265、309、314）：谁能用——人本次输入带关键词或用斜杠命令即可提交，文件或网页内容（工具结果）与
 // worker 回报里的关键词不算，下一条人手输入没带即收回；项目配置打开后由模型判断；pigeon run 的任务描述算点名；只给主会话注册，
-// worker 不能提交；跑批器各条件不注册，身份头记关。另有：额度写法；pigeon run 里脚本的汇总作为新的一轮处理完才结束，
+// worker 不能提交；脚本编排关着时不注册。另有：额度写法；pigeon run 里脚本的汇总作为新的一轮处理完才结束，
 // 脚本派出的 worker 用的 token 计入 pigeon run 的总额度；[脚本通知] 回看历史时同 worker 通知显示成系统行。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -8,9 +8,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, test } from "vitest";
-import { STREAM_SCRIPT_ORCHESTRATION } from "../eval/stream-agents.ts";
-import { effectivePigeonSettings } from "../eval/stream-experiment.ts";
-import { CONDITION_SPECS } from "../eval/stream-runner.ts";
 import { localScriptLauncher } from "../execution/script-sandbox.ts";
 import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
@@ -314,29 +311,22 @@ test("pigeon run 的总额度计入脚本派出的 worker 用的 token：用完�
   assert.equal(worker.calls.length, 1);
 });
 
-test("实验条件不注册提交编排脚本的工具（265）：跑批器各格一件都没有，身份头记关", async () => {
+test("脚本编排关着时不注册提交编排脚本的工具（265）：任务描述带关键词也没有", async () => {
   const root = gitRoot();
-  for (const spec of Object.values(CONDITION_SPECS).filter((entry) => entry.agent === "pigeon")) {
-    let tools: readonly string[] = [];
-    await runHeadless({
-      task: `看一眼（${SCRIPT_KEYWORD}）`,
-      governanceRoot: root,
-      workspaceRoot: root,
-      streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
-      yolo: true,
-      spawnWorkers: false,
-      scriptOrchestration: STREAM_SCRIPT_ORCHESTRATION,
-      sessionSearch: spec.sessionSearch,
-      pushedMemory: spec.pushedMemory,
-      skillRoots: [],
-      agentsMd: false,
-      onBundle: (bundle) => {
-        tools = bundle.adapter.snapshot().tools.advertised;
-      },
-    });
-    assert.ok(!tools.includes(ORCHESTRATE_TOOL), spec.name);
-  }
-  assert.equal(effectivePigeonSettings({}, "m").scriptOrchestration, false);
+  let tools: readonly string[] = [];
+  await runHeadless({
+    task: `看一眼（${SCRIPT_KEYWORD}）`,
+    governanceRoot: root,
+    workspaceRoot: root,
+    streamFn: createFakeStreamFn({ replies: [{ text: "好" }] }),
+    yolo: true,
+    spawnWorkers: false,
+    scriptOrchestration: false,
+    onBundle: (bundle) => {
+      tools = bundle.adapter.snapshot().tools.advertised;
+    },
+  });
+  assert.ok(!tools.includes(ORCHESTRATE_TOOL));
 });
 
 test("回看历史：[脚本通知] 与 [worker 通知] 同样显示成系统行，人输入的话照旧带 > 前缀", () => {

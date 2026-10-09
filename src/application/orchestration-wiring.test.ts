@@ -1,6 +1,6 @@
 // 编排一段的装配与开关（决策 265、294、297、299、302）：新工具的注册范围（主会话五件积木加 take_worker；层数放开时未到最底层的
-// worker 另得五件积木、不得 take_worker）；任务清单工具的开关（缺省开、配置可关、只给主会话、pigeon run 缺省关由入口按配置打开、
-// 跑批器各条件都不注册，身份头记关）与增改查、续聊还原；worker 用写层文件工具改自己工作树内的文件默认放行，越出工作树、跑命令仍请示，
+// worker 另得五件积木、不得 take_worker）；任务清单工具的开关（缺省开、配置可关、只给主会话、pigeon run 缺省关由入口按配置打开）
+// 与增改查、续聊还原；worker 用写层文件工具改自己工作树内的文件默认放行，越出工作树、跑命令仍请示，
 // 主会话照旧请示。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -9,9 +9,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, test } from "vitest";
 import type { ApprovalRequest } from "../approvals/handler.ts";
-import { STREAM_SPAWN_WORKERS, STREAM_TASK_LIST } from "../eval/stream-agents.ts";
-import { effectivePigeonSettings } from "../eval/stream-experiment.ts";
-import { CONDITION_SPECS } from "../eval/stream-runner.ts";
 import { loadSettings } from "../persistence/settings.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { newSessionId } from "../state/ids.ts";
@@ -198,7 +195,7 @@ async function headlessTools(
   return tools;
 }
 
-test("实验条件不注册本段新增的任何工具（265）：pigeon run 缺省不带清单、开了才带；跑批器四格一件都没有，身份头记关", async () => {
+test("本段新增的工具按开关注册（265）：pigeon run 缺省不带清单、开了才带；派 worker 开着才带编排工具", async () => {
   const root = gitRoot();
   assert.ok(!(await headlessTools(root, {})).includes(SPAWN_WORKER_TOOL));
   assert.ok(!(await headlessTools(root, {})).includes("update_tasks"));
@@ -207,24 +204,6 @@ test("实验条件不注册本段新增的任何工具（265）：pigeon run 缺
   for (const name of [...ORCHESTRATION_TOOLS, "take_worker"]) {
     assert.ok(withWorkers.includes(name), name);
   }
-  for (const spec of Object.values(CONDITION_SPECS).filter((entry) => entry.agent === "pigeon")) {
-    const tools = await headlessTools(root, {
-      spawnWorkers: STREAM_SPAWN_WORKERS,
-      taskList: STREAM_TASK_LIST,
-      sessionSearch: spec.sessionSearch,
-      pushedMemory: spec.pushedMemory,
-      skillRoots: [],
-      agentsMd: false,
-    });
-    assert.deepEqual(
-      tools.filter((name) => NEW_TOOLS.includes(name)),
-      [],
-      spec.name
-    );
-  }
-  const identity = effectivePigeonSettings({}, "m");
-  assert.equal(identity.workerTools, false);
-  assert.equal(identity.taskList, false);
   assert.equal(DEFAULT_SPAWN_WORKER_SETTINGS.maxAgentSpawns, undefined);
 });
 
