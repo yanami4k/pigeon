@@ -14,7 +14,7 @@ export default defineConfig({
     // 多种并发与打乱文件顺序下都没有串扰）。怀疑串扰时用 PIGEON_TEST_ISOLATE=1 切回每个文件隔离复查
     pool: "forks",
     isolate: process.env.PIGEON_TEST_ISOLATE === "1",
-    // node:test 不限时；长用例（真容器、跑批）照旧由各自的 timeout 选项或外层把关
+    // node:test 不限时；长用例（真容器）照旧由各自的 timeout 选项或外层把关
     testTimeout: 600_000,
     hookTimeout: 600_000,
     // describe.concurrent 的组内并发上限（node:test 的 concurrency: true 不设上限）

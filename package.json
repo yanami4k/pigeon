@@ -11,8 +11,7 @@
     "dist/pigeon.mjs",
     "dist/pigeon-cli.mjs",
     "dist/pigeon-cli.mjs.map",
-    "docker/",
-    "eval/stream/"
+    "docker/"
   ],
   "engines": {
     "node": ">=22.19.0 <25",

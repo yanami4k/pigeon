@@ -160,19 +160,6 @@ export default {
       to: { path: "^src/", pathNot: "^src/(web|state|tools)/" },
     },
     {
-      name: "eval-below-actors",
-      severity: "error",
-      comment:
-        "eval（延续式跑批：出题、人的基准、跑批器、模型网关与报告）可依赖 state / persistence / " +
-        "tools / orchestration / application 及以下；不触达 Actor 层（cli/tui），由 cli 调用（022 修订）。",
-      from: { path: "^src/eval/", pathNot: "\\.test\\.ts$" },
-      to: {
-        path: "^src/",
-        pathNot:
-          "^src/(eval|application|orchestration|pi-runtime|approvals|execution|memory|skills|mcp|persistence|tools|state)/",
-      },
-    },
-    {
       name: "actors-no-execution",
       severity: "error",
       comment:

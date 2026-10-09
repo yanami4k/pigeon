@@ -46,7 +46,6 @@ test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tool
     mkdirSync(join(fixtureRoot, "src/execution"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/memory"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/tools"), { recursive: true });
-    mkdirSync(join(fixtureRoot, "src/eval"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/application"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/pi-runtime"), { recursive: true });
     mkdirSync(join(fixtureRoot, "src/persistence"), { recursive: true });
@@ -81,11 +80,6 @@ test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tool
     writeFileSync(
       join(fixtureRoot, "src/cli/probe.ts"),
       'import "../execution/index.ts";\nexport {};\n'
-    );
-    // eval 不得触达 Actor 层（M6.5，eval-below-actors，022 修订）
-    writeFileSync(
-      join(fixtureRoot, "src/eval/probe.ts"),
-      'import "../cli/probe.ts";\nexport {};\n'
     );
     writeFileSync(
       join(fixtureRoot, "src/memory/probe.ts"),
@@ -143,12 +137,6 @@ test("违规会被抓住：cli/tui→execution、memory→@earendil-works、tool
     assert.ok(
       actorViolations.some((v) => v.from.includes("src/cli/probe.ts")),
       `应抓到 cli→execution，实际违规：${JSON.stringify(output.summary.violations.map((v) => v.rule.name))}`
-    );
-    assert.ok(
-      output.summary.violations.some(
-        (v) => v.rule.name === "eval-below-actors" && v.from.includes("src/eval/probe.ts")
-      ),
-      `应抓到 eval→cli，实际违规：${JSON.stringify(output.summary.violations.map((v) => `${v.rule.name}: ${v.from}`))}`
     );
     // pi-runtime 允许清单：引用 application 被抓
     assert.ok(
