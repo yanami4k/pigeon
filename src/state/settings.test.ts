@@ -87,9 +87,14 @@ test("合并优先级：项目个人 > 项目共享 > 用户级；对象按键�
   assert.deepEqual(commandSources, { test: "project", lint: "user" });
 });
 
-test("permissions：放权规则三层并集生效（项目个人在前），各带所在层与层内序号", () => {
+test("permissions：放权规则三层并集生效（项目个人在前），各带所在层与层内序号；旧设置里的 readDeny 照常加载（决策 412）", () => {
   const snapshot = snapshotOf({
-    user: { permissions: { grants: [rule("grant_01J5Z7K8W9ABCDEFGHJKMNPQR1")] } },
+    user: {
+      permissions: {
+        grants: [rule("grant_01J5Z7K8W9ABCDEFGHJKMNPQR1")],
+        readDeny: ["~/.config/gh", "/etc/ssl/private"],
+      },
+    },
     project: { permissions: { grants: [rule("grant_01J5Z7K8W9ABCDEFGHJKMNPQR2")] } },
     local: {
       permissions: {

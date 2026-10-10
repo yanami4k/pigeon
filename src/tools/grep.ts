@@ -1,6 +1,6 @@
 // grep（tier: read）：在工作区内按正则搜索文件内容（决策 368）。只读工具：审批属读档（自动放行），可与其他读并行。
 // 后端（rg → git grep → grep -r）经执行端在本机或容器里运行，取结果与按真实路径筛选见 search-backend.ts；
-// 文件名模式、排序与上限在这里做。搜索范围限工作区（path 照读档规则解析，禁读或工作区外即拒）。
+// 文件名模式、排序与上限在这里做。搜索范围限工作区（path 照读档规则解析，落在工作区外即拒）。
 // 决策 408：内容结果按文件分组（每个文件只写一次路径），整次列出的部分设字数预算，超出的全文存进会话落盘目录
 //（与 run_command 截断时同一处，pigeon://outputs/…）；只列文件的输出不变。
 import { type Static, Type } from "typebox";
@@ -8,7 +8,6 @@ import { Value } from "typebox/value";
 import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import type { CommandOutputStore } from "./command-output.ts";
 import { basenamePrefilter, fileFilter } from "./glob-match.ts";
-import { readDenyList } from "./read-deny.ts";
 import {
   detectSearchBackend,
   type GrepRecord,
@@ -54,8 +53,7 @@ export interface GrepDetails {
   overBudget: boolean;
   // 超过预算时全文（条数上限以内）的落盘位置；没有落盘目录或没存成时缺省
   savedOutput?: { uri: string; bytes: number };
-  // 略去的文件数：按禁读名单的、经链接指向工作区以外的、文件名含换行或控制字符的、未及检查的
-  deniedOmitted: number;
+  // 略去的文件数：经链接指向工作区以外的、文件名含换行或控制字符的、未及检查的
   outsideOmitted: number;
   unsafeOmitted: number;
   uncheckedOmitted: number;
@@ -63,8 +61,6 @@ export interface GrepDetails {
 
 export interface SearchToolOptions extends SearchBackendOptions {
   maxResults: number;
-  // 设置追加的禁读项（permissions.readDeny）；内置名单总在
-  readDeny?: readonly string[];
 }
 
 export interface GrepToolOptions extends SearchToolOptions {
@@ -164,7 +160,6 @@ export function backendCache(
 // 略去的文件数写进 details
 export function omittedDetails(omitted: Omitted) {
   return {
-    deniedOmitted: omitted.denied,
     outsideOmitted: omitted.outside,
     unsafeOmitted: omitted.unsafe,
     uncheckedOmitted: omitted.unchecked,
@@ -176,7 +171,6 @@ export function createGrepTool(
   options: GrepToolOptions,
   backendOf: () => Promise<SearchBackend> = backendCache(host, options)
 ): PigeonAgentTool<typeof GrepParamsSchema, GrepDetails> {
-  const deny = readDenyList(options.readDeny);
   return {
     name: GREP_TOOL,
     label: GREP_TOOL,
@@ -188,7 +182,7 @@ export function createGrepTool(
       // 文件名模式先编译：写错即报给模型，不跑搜索
       const matchesGlob = args.glob !== undefined ? fileFilter(args.glob) : () => true;
       const backend = await backendOf();
-      const start = await searchStart(host, args.path ?? ".", deny);
+      const start = await searchStart(host, args.path ?? ".");
       const filesOnly = args.files_only === true;
       const context = args.context ?? 0;
       const prefilter =
@@ -206,7 +200,6 @@ export function createGrepTool(
           keep: (relPath) => !inGitDir(relPath) && matchesGlob(relativeToStart(relPath, start)),
         },
         {
-          deny,
           signal,
           ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
         }

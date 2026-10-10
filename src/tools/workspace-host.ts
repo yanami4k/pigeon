@@ -5,7 +5,7 @@
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
 import { WorkspaceContentChangedError, type WritePathOptions } from "./paths.ts";
-import type { ReadPathClassification, ReadTarget } from "./read-deny.ts";
+import type { ReadPathClassification, ReadTarget } from "./read-paths.ts";
 
 // 系统程序所在的目录（root 所有、agent 改不了）：Pigeon 自己执行的程序按它们优先解析
 export const SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -223,15 +223,13 @@ export interface WorkspaceHost {
   // 写工具用的解析（决策 334）：同 resolveExisting，另在模型给的路径本身是符号链接时拒写（WorkspaceWriteRefusedError），
   // 报出其指向。决策 407：options.outside 为真（放权时）不判工作区边界
   resolveForWrite(inputPath: string, options?: WritePathOptions): Promise<string>;
-  // 决策 355：读档的解析——不限工作区：给出符号链接解析后的真实路径与它是否落在工作区根之外；落在禁读名单 deny
-  //（~ 按本执行端的家目录展开）之内抛 ReadDeniedError，不存在抛 WorkspacePathNotFoundError。
-  // 可选：没有实现的执行端读档只限工作区之内（照 resolveExisting）
-  resolveForRead?(inputPath: string, deny: readonly string[]): Promise<ReadTarget>;
-  // 决策 355 / 368：grep、glob 的结果（相对工作区根的路径）逐条按真实路径分类——可读、落在工作区外、禁读；
+  // 决策 355：读档的解析——不限工作区：给出符号链接解析后的真实路径与它是否落在工作区根之外；不存在抛
+  // WorkspacePathNotFoundError。可选：没有实现的执行端读档只限工作区之内（照 resolveExisting）
+  resolveForRead?(inputPath: string): Promise<ReadTarget>;
+  // 决策 355 / 368：grep、glob 的结果（相对工作区根的路径）逐条按真实路径分类——可读、落在工作区外；
   // 取不到真实路径的不在结果里；检查超时或中止时标明不完整。可选：没有实现的执行端 grep、glob 不可用
   classifyReadPaths?(
     relPaths: readonly string[],
-    deny: readonly string[],
     signal?: AbortSignal
   ): Promise<ReadPathClassification>;
   // 决策 368：Pigeon 自己的只读辅助程序（grep、glob 的搜索后端）的执行，不走 agent 的执行通道——程序解析成系统目录里的

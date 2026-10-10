@@ -6,7 +6,6 @@ import { spawnSync } from "node:child_process";
 import { test } from "vitest";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLocalWorkspaceHost } from "../tools/local-host.ts";
-import { readDenyList } from "../tools/read-deny.ts";
 import { bundledRipgrepPath, type SearchBackendKind } from "../tools/search-backend.ts";
 import {
   CONTAINER_TREE_SCRIPT,
@@ -139,15 +138,12 @@ test.skipIf(skipReason(image))(
       });
       assert.equal(made.exitCode, 0, made.stderr);
       const host = createContainerWorkspaceHost({ container: name, root: "/tmp/w" });
-      const result = await host.classifyReadPaths?.(
-        ["bad", "keys", "a.txt"],
-        readDenyList(["/secret"])
-      );
+      const result = await host.classifyReadPaths?.(["bad", "keys", "a.txt"]);
       assert.equal(result?.incomplete, false);
       // bad 是真实存在的普通文件，替身 realpath 跳过它；退回逐个成对后三项各归其类
       assert.deepEqual(Object.fromEntries(result?.classes ?? []), {
         bad: "ok",
-        keys: "denied",
+        keys: "outside",
         "a.txt": "ok",
       });
     } finally {

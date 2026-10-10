@@ -1,6 +1,6 @@
 // explorer 不建工作树（决策 377）端到端：真实 git 仓库 + 真实 worker 运行面 + 假模型。explorer 直接读派出方的工作区——
-// 读到被忽略、因而任何快照都不会带上的文件即证明读的是工作区本身；不拍快照、不建工作树；禁读名单、作用范围与工作区外读取的
-// 审批照样生效。
+// 读到被忽略、因而任何快照都不会带上的文件即证明读的是工作区本身；不拍快照、不建工作树；作用范围与工作区外读取的审批
+// 照样生效。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -32,8 +32,6 @@ git(["add", "."]);
 git(["commit", "-q", "-m", "init"]);
 mkdirSync(join(repo, "docs"));
 writeFileSync(join(repo, "docs", "notes.txt"), "live notes\n");
-mkdirSync(join(home, ".ssh"));
-writeFileSync(join(home, ".ssh", "id_rsa"), "SECRET\n");
 writeFileSync(join(home, "outside.txt"), "outside\n");
 
 // 工具结果按调用顺序：取最后一次请求里的全部工具结果文字与是否出错
@@ -51,10 +49,10 @@ function toolResults(fake: FakeStreamFn): Array<{ text: string; isError: boolean
   );
 }
 
-test("explorer 不拍快照不建工作树、读到派出方工作区的当前内容；禁读名单、作用范围与工作区外读取的审批照样生效", async () => {
+test("explorer 不拍快照不建工作树、读到派出方工作区的当前内容；作用范围与工作区外读取的审批照样生效", async () => {
   const fakes = new Map<string, FakeStreamFn>();
   const reads: Record<string, string[]> = {
-    look: ["docs/notes.txt", join(home, "outside.txt"), join(home, ".ssh", "id_rsa")],
+    look: ["docs/notes.txt", join(home, "outside.txt")],
     narrow: ["a.ts"],
   };
   const approvals: WorkerApprovalRequest[] = [];
@@ -111,7 +109,7 @@ test("explorer 不拍快照不建工作树、读到派出方工作区的当前�
   assert.equal(existsSync(join(repo, ".pigeon", "state", "worktrees")), false, "没建工作树");
   assert.equal(git(["for-each-ref", "refs/pigeon/"]).trim(), "", "没留快照引用");
 
-  const [notes, outside, secret] = toolResults(fakes.get("look") as FakeStreamFn);
+  const [notes, outside] = toolResults(fakes.get("look") as FakeStreamFn);
   // 被忽略的文件不会进任何快照：读得到即读的是工作区本身
   assert.ok(notes?.text.includes("live notes") && !notes.isError, notes?.text);
   // 工作区外：经审批读到
@@ -120,9 +118,6 @@ test("explorer 不拍快照不建工作树、读到派出方工作区的当前�
     approvals.map((request) => request.worker.name),
     ["look"]
   );
-  // 禁读名单：审批之前即拒
-  assert.equal(secret?.isError, true);
-  assert.ok(!secret?.text.includes("SECRET"), secret?.text);
   // 作用范围：范围外拒读
   const [scoped] = toolResults(fakes.get("narrow") as FakeStreamFn);
   assert.equal(scoped?.isError, true);

@@ -104,7 +104,6 @@ import {
   emptySettingsSnapshot,
   memoryLimitsOf,
   modelInfoSectionOf,
-  readDenyOf,
   readFileLimitsOf,
   repetitionGuardOf,
   runCommandOutputLimitsOf,
@@ -528,13 +527,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const compactionConfig = resolveCompactionConfig(deps.compaction);
   const learned = deps.learnedMemory;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
-  // 本机执行端：禁读名单里的 ~ 按注入的家目录展开（测试指到临时目录）
-  const workspaceHost =
-    deps.workspaceHost ??
-    createLocalWorkspaceHost(
-      deps.workspaceRoot,
-      deps.homeDir !== undefined ? { homeDir: deps.homeDir } : {}
-    );
+  const workspaceHost = deps.workspaceHost ?? createLocalWorkspaceHost(deps.workspaceRoot);
   // 护栏（M9）：按路径限定的放权（会话 grant 的目录限定、固化规则的 pathPrefix）以宿主路径判定，对非本地的工作区
   // 只会静默失配。路径放权在这类工作区下暂不支持：带审批通道的交互场景直接拒绝装配（审批面板的 [d] 就是目录放权）
   if (
@@ -678,12 +671,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const commandTexts = runCommandTexts({ platform: workspaceHost.platform, approval });
   // 决策 407：放权时写工具接受工作区以外的路径（与放权下 shell 的能力一致）；未放权时照旧只写工作区
   const writeOptions = { outsideWrites: approval === "yolo" };
-  // 决策 368：grep、glob 的上限与禁读名单；本机执行端先用随包附带的 ripgrep，容器里用容器自己的
+  // 决策 368：grep、glob 的上限；本机执行端先用随包附带的 ripgrep，容器里用容器自己的
   const searchLimits = searchLimitsOf(settings);
-  const searchOptions = {
-    readDeny: readDenyOf(settings),
-    bundledRipgrep: deps.workspaceHost === undefined,
-  };
+  const searchOptions = { bundledRipgrep: deps.workspaceHost === undefined };
   const registry = new ToolRegistry();
   registry.register({
     name: "read_file",
@@ -1245,7 +1235,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       createReadFileTool(workspaceHost, {
         ...(replaceMode ? { editMode: "replace" as const } : {}),
         outsideReads: OUTSIDE_READ_MODES[approval],
-        readDeny: readDenyOf(settings),
         ...readOptions,
       }),
       replaceMode

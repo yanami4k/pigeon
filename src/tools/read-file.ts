@@ -19,7 +19,7 @@ import type { EditMode } from "./edit-mode.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
 import { WorkspacePathError } from "./paths.ts";
-import { type ReadTarget, readDenyList } from "./read-deny.ts";
+import type { ReadTarget } from "./read-paths.ts";
 import type { FileReadTracker } from "./read-tracker.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
@@ -62,8 +62,6 @@ export interface ReadFileToolOptions {
   // 决策 061：replace 编辑模式下输出不带行标签与快照标签，每行 `行号| 内容`；缺省 hashline 输出不变
   editMode?: EditMode;
   outsideReads?: OutsideReadMode;
-  // 决策 355：设置追加的禁读项（permissions.readDeny）；内置名单总在
-  readDeny?: readonly string[];
   // 决策 357：单次字节与单行字符上限；缺省 50 KiB 与 2000
   limits?: ReadFileLimits;
   // 决策 356：本会话的落盘目录（不给即不认虚拟路径）
@@ -86,16 +84,15 @@ export class OutsideReadNotApprovedError extends WorkspacePathError {}
 
 // 可选能力（治理层使用）：只读检查这次调用是否读工作区以外的文件，并按调用授予，一次一用
 export interface OutsideReadTool {
-  // 解析后落在工作区以外时返回其真实路径；在工作区内、不存在、禁读或解析不了返回 undefined
+  // 解析后落在工作区以外时返回其真实路径；在工作区内、不存在或解析不了返回 undefined
   inspectOutsideRead(params: unknown): Promise<string | undefined>;
   authorizeOutsideRead(toolCallId: string): void;
 }
 
 // 放手模式下写工具也可写工作区以外（决策 407），allowed 的说法因此不说只读
 const OUTSIDE_SENTENCES: Readonly<Record<OutsideReadMode, string>> = {
-  allowed: "工作区以外的文件也可读（用绝对路径）；凭据目录（如 ~/.ssh）不可读。",
-  approval:
-    "工作区以外的文件也可读（用绝对路径），须经人批准（可按目录放权），只读、不能改；凭据目录（如 ~/.ssh）不可读。",
+  allowed: "工作区以外的文件也可读（用绝对路径）。",
+  approval: "工作区以外的文件也可读（用绝对路径），须经人批准（可按目录放权），只读、不能改。",
   refused: "",
 };
 
@@ -107,13 +104,12 @@ export function createReadFileTool(
   const host = asWorkspaceHost(workspace);
   const replaceMode = options.editMode === "replace";
   const outsideReads = options.outsideReads ?? "refused";
-  const deny = readDenyList(options.readDeny);
   // 治理层授予的工作区外读取（toolCallId），执行时取用即删
   const outsideApproved = new Set<string>();
-  // 执行端没有读档解析时只读工作区之内（照 resolveExisting），也不判禁读名单
+  // 执行端没有读档解析时只读工作区之内（照 resolveExisting）
   const resolveTarget = async (inputPath: string): Promise<ReadTarget> =>
     host.resolveForRead !== undefined
-      ? host.resolveForRead(inputPath, deny)
+      ? host.resolveForRead(inputPath)
       : { path: await host.resolveExisting(inputPath), outside: false };
   const lead = outsideReads === "refused" ? "读取工作区内文本文件。" : "读取文本文件。";
   const maxBytes = options.limits?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES;
@@ -139,7 +135,7 @@ export function createReadFileTool(
         done: () => {},
       };
     }
-    // 决策 355：工作区以外的文件须获授权；禁读名单由读档解析判定
+    // 决策 355：工作区以外的文件须获授权
     const target = await resolveTarget(inputPath);
     if (target.outside && !approved) {
       throw new OutsideReadNotApprovedError(
@@ -182,7 +178,7 @@ export function createReadFileTool(
         return undefined;
       }
       try {
-        const resolved = await host.resolveForRead(target, deny);
+        const resolved = await host.resolveForRead(target);
         return resolved.outside ? resolved.path : undefined;
       } catch {
         return undefined;

@@ -5,7 +5,6 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { basenamePrefilter, globToRegExp } from "./glob-match.ts";
 import { backendCache, omittedDetails, type SearchToolOptions } from "./grep.ts";
-import { readDenyList } from "./read-deny.ts";
 import {
   relativeToStart,
   resultNotes,
@@ -33,7 +32,6 @@ export interface GlobDetails {
   shown: number;
   incomplete: boolean;
   // 略去的文件数（同 grep）
-  deniedOmitted: number;
   outsideOmitted: number;
   unsafeOmitted: number;
   uncheckedOmitted: number;
@@ -53,7 +51,6 @@ export function createGlobTool(
   options: SearchToolOptions,
   backendOf: () => Promise<SearchBackend> = backendCache(host, options)
 ): PigeonAgentTool<typeof GlobParamsSchema, GlobDetails> {
-  const deny = readDenyList(options.readDeny);
   return {
     name: GLOB_TOOL,
     label: GLOB_TOOL,
@@ -71,14 +68,13 @@ export function createGlobTool(
           "本机没有 ripgrep 与 git，无法列出文件；可改用 run_command"
         );
       }
-      const start = await searchStart(host, args.path ?? ".", deny);
+      const start = await searchStart(host, args.path ?? ".");
       if (start.isFile) {
         throw new SearchToolError(`path 须是目录：${args.path}`);
       }
       const listing = await runListing(host, backend, start, {
         prefilter: backend.kind === "rg" ? basenamePrefilter(args.pattern) : undefined,
         keep: (file) => matches.test(relativeToStart(file, start)),
-        deny,
         signal,
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       });
