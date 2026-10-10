@@ -1530,13 +1530,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
 // 释放运行面（M5.7 S3）：先停 Adapter，再关 MCP 连接（server 进程随之退出），最后关会话存储写者；
 // 前一步失败不跳过后续
 export async function disposeRuntime(bundle: RuntimeBundle): Promise<void> {
-  // 决策 365：会话或运行结束时停掉本会话全部在跑的后台作业（结束记录落在会话存储关闭之前）；/reload 交出去的不在这里
+  // 决策 365：会话或运行结束时停掉本会话全部在跑的后台作业（结束记录落在会话存储关闭之前）；/reload 交出去的不在这里。
+  // 决策 409：标了会话结束后保留的不等、不停，记一条"保留"、交出跟踪
   bundle.jobNotices?.dispose();
   try {
     await bundle.jobs?.killAll("aborted");
   } catch {
     // 停不掉的由崩溃清理兜底
   }
+  bundle.jobs?.detachKept();
   bundle.jobs?.dispose();
   for (const dispose of bundle.disposers?.splice(0) ?? []) {
     try {

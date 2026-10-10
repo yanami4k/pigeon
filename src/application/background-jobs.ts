@@ -9,6 +9,7 @@
 //   直接停掉在跑的作业。收尾的每一轮照常计入运行的轮数与 token 上限。
 // - 善后：会话或运行结束时停掉全部作业（disposeRuntime）；崩溃后下次启动按记录清理（每个进程每个治理目录一次）；
 //   续跑时提示上一进程的作业已丢失。
+// - 决策 409：会话结束后保留的作业不在收尾里等、会话结束时不停（记一条"保留"）；续跑时不算丢失。
 
 import { Value } from "typebox/value";
 import { killMarkedInContainer } from "../execution/container-host.ts";
@@ -46,6 +47,13 @@ export function backgroundJobEntry(event: BackgroundJobEvent, runId?: RunId): Se
     return {
       customType: SessionEntryType.BackgroundJob,
       data: { version: SESSION_ENTRY_VERSION, event: "started", ...run, ...rest },
+    };
+  }
+  if (event.phase === "kept") {
+    const { phase: _phase, ...rest } = event;
+    return {
+      customType: SessionEntryType.BackgroundJob,
+      data: { version: SESSION_ENTRY_VERSION, event: "kept", ...run, ...rest },
     };
   }
   const { phase: _phase, ...rest } = event;
@@ -154,7 +162,8 @@ export function stillRunningText(jobs: readonly BackgroundJob[], now = Date.now(
 export const CLOSEOUT_CLOSED_REASON = "无人值守收尾的总时限已到";
 
 // 无人值守收尾：等在跑的作业、把通知交给模型跑一轮，直到没有在跑的作业或待递的通知；stopped 为真（墙钟、上限、外部中止）
-// 即不再等。总时限到了停掉余下的作业，此后拒绝新开。返回最后一次运行的结果（没跑即 undefined）
+// 即不再等。总时限到了停掉余下的作业，此后拒绝新开。返回最后一次运行的结果（没跑即 undefined）。
+// 决策 409：会话结束后保留的作业不等、不停（不在"仍在跑"里列出）
 export async function settleBackgroundJobs<R>(input: {
   jobs: SessionJobs;
   target: DrainTarget<R> & { notify(text: string): unknown };
@@ -169,7 +178,7 @@ export async function settleBackgroundJobs<R>(input: {
       last = await target.runNotices();
       continue;
     }
-    const running = jobs.running();
+    const running = jobs.toSettle();
     if (running.length === 0) break;
     const { deadline, started } = jobs.beginCloseout(input.closeoutMs);
     if (started && input.closeoutMs > 0) {
@@ -188,7 +197,7 @@ export async function settleBackgroundJobs<R>(input: {
       if (input.stopped()) controller.abort();
     }, 200);
     try {
-      await jobs.waitAny(remaining, controller.signal);
+      await jobs.waitAny(remaining, controller.signal, running);
     } finally {
       clearInterval(poll);
     }
@@ -196,7 +205,8 @@ export async function settleBackgroundJobs<R>(input: {
   return last !== undefined ? { last } : {};
 }
 
-// 续跑：会话记录里只有启动、没有结束的作业（属于已退出的进程）与用过的最大作业号
+// 续跑：会话记录里只有启动、没有结束的作业（属于已退出的进程）与用过的最大作业号。决策 409：标了保留的作业不算丢失
+//（会话结束时记"保留"，进程异常退出时也不按记录清理它）
 export interface PreviousJobs {
   lost: Array<{ jobId: string; command: string }>;
   lastId: number;
@@ -213,8 +223,9 @@ export function previousJobsOf(
     const data = entry.data;
     const seq = /^j(\d+)$/.exec(data.jobId)?.[1];
     if (seq !== undefined) lastId = Math.max(lastId, Number(seq));
-    if (data.event === "started") started.set(data.jobId, data.command);
-    else started.delete(data.jobId);
+    if (data.event === "started") {
+      if (data.keep !== true) started.set(data.jobId, data.command);
+    } else started.delete(data.jobId);
   }
   return {
     lost: [...started].map(([jobId, command]) => ({ jobId, command })),
@@ -230,17 +241,31 @@ export function lostJobsText(lost: PreviousJobs["lost"]): string {
 }
 
 // 决策 365：沙箱交回时有作业在跑先提示（给人看的一行）。收尾交回之前作业随会话结束停掉，交回的是停下时的工作区；
-// 会话中途 /export 时作业照跑，交回的可能是做到一半的样子。没有在跑的为 undefined
+// 会话中途 /export 时作业照跑，交回的可能是做到一半的样子。决策 409：收尾时保留的作业不停，交回时仍在跑，容器删除时
+// 随之结束。没有在跑的为 undefined
 export function handbackJobsNotice(
   jobs: Pick<SessionJobs, "running"> | undefined,
   when: "close" | "export"
 ): string | undefined {
   const running = jobs?.running() ?? [];
   if (running.length === 0) return undefined;
-  const list = running.map((job) => `${job.id}（${job.command}）`).join("、");
-  return when === "close"
-    ? `交回沙箱前停掉在跑的后台作业：${list}；交回的是它们停下时的工作区`
-    : `交回时后台作业仍在跑：${list}；交回的改动可能是作业做到一半的样子`;
+  const list = (items: readonly BackgroundJob[]) =>
+    items.map((job) => `${job.id}（${job.command}）`).join("、");
+  if (when === "export") {
+    return `交回时后台作业仍在跑：${list(running)}；交回的改动可能是作业做到一半的样子`;
+  }
+  const stopped = running.filter((job) => !job.keep);
+  const kept = running.filter((job) => job.keep);
+  return [
+    ...(stopped.length > 0
+      ? [`交回沙箱前停掉在跑的后台作业：${list(stopped)}；交回的是它们停下时的工作区`]
+      : []),
+    ...(kept.length > 0
+      ? [
+          `标了会话结束后保留的后台作业交回时仍在跑：${list(kept)}；交回的改动可能是作业做到一半的样子，容器删除时随之结束`,
+        ]
+      : []),
+  ].join("\n");
 }
 
 const cleanedDirs = new Set<string>();

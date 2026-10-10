@@ -43,6 +43,8 @@ import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.
 
 export const RUN_COMMAND_TOOL = "run_command";
 export const DEFAULT_RUN_COMMAND_TIMEOUT_MS = 120_000;
+// 决策 409：后台作业"会话结束后保留"的参数名
+export const KEEP_AFTER_SESSION_PARAM = "keep_after_session";
 // 决策 365：timeout_seconds 参数的上限（设置可改）
 export const DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS = 600_000;
 export const DEFAULT_RUN_COMMAND_OUTPUT_BYTES = 32 * 1024;
@@ -117,6 +119,8 @@ export const RunCommandParamsSchema = Type.Object({
   timeout_seconds: Type.Optional(Type.Integer({ minimum: 1 })),
   // 决策 365：在后台运行，立即返回作业号
   background: Type.Optional(Type.Boolean()),
+  // 决策 409：后台作业在会话结束后保留（会话结束时不等、不停）；只与 background 同用
+  keep_after_session: Type.Optional(Type.Boolean()),
 });
 export type RunCommandParams = Static<typeof RunCommandParamsSchema>;
 
@@ -169,8 +173,10 @@ export interface ExecEvidence {
   memoryLimitExceeded?: MemoryLimitExceeded;
   // 决策 365：命令执行期间在跑的后台作业（作业号与命令）
   backgroundJobs?: Array<{ id: string; command: string }>;
-  // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）
-  background?: { jobId: string; output: string };
+  // 决策 411：timeout_seconds 超过上限，按上限执行（秒）
+  timeoutClamped?: { requestedSeconds: number; appliedSeconds: number };
+  // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）；决策 409：keep 为会话结束后保留
+  background?: { jobId: string; output: string; keep?: true };
 }
 
 // 只读检查结果：实际执行的命令串与执行路径
@@ -256,7 +262,7 @@ export function runCommandTexts(input: {
     (input.maxTimeoutMs ?? DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS) / 1000
   );
   const timeoutText =
-    `单次超时缺省 ${timeoutSeconds} 秒，可用 timeout_seconds 另设，至多 ${maxTimeoutSeconds} 秒；` +
+    `单次超时缺省 ${timeoutSeconds} 秒，可用 timeout_seconds 另设，上限 ${maxTimeoutSeconds} 秒（给得更大按上限执行）；` +
     "到时整个进程组（命令和它起的子进程）都被终止。";
   const backgroundText =
     input.backgroundJobs === undefined
@@ -265,7 +271,13 @@ export function runCommandTexts(input: {
         "结束时会通知你；用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉。" +
         `后台作业不受单次超时约束；本会话同时在跑的至多 ${input.backgroundJobs} 个，超出即拒绝。` +
         "后台作业与之后的命令同时运行，可能互相干扰（改同一批文件、占同一个端口），这期间的文件变化报告也会因此不精确。" +
-        "人按 Esc 中断当前一轮时后台作业照跑，会话结束时全部停止。";
+        "人按 Esc 中断当前一轮时后台作业照跑，会话结束时停止。" +
+        `起服务、守护进程，或判分、使用者在会话结束后还要用到的长时间进程，再加 ${KEEP_AFTER_SESSION_PARAM}: true：` +
+        "会话结束时不等它、不停它，进程留着继续跑，输出照样写进那个文件；会话里照常可用 job_output 查看、job_kill 停掉。";
+  // 决策 410：命令以输出全部关闭为结束——放到后台又没把输出重定向走的进程会让命令一直等到超时
+  const heldText =
+    `命令要等输出全部关闭才算结束：命令里${input.platform === "win32" ? "用 start /b" : "用 &"}放到后台、又没把输出重定向走的进程` +
+    `会一直占着输出，命令要等到超时才结束，连同那个进程一起被终止。${heldOutputAdvice(input.platform, input.backgroundJobs !== undefined)}`;
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
   const toolShell = {
     yolo: `管道、重定向、&& 串联等需要 shell 的命令经 ${shell} 运行。`,
@@ -295,8 +307,17 @@ export function runCommandTexts(input: {
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
       `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
       `输出过长时自动保留开头与结尾，中间注明省略的行数，并把全文存为 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>，可用 read_file 按需读取，` +
-      `不必自己用 tail、head 截取。${timeoutText}${backgroundText}`,
+      `不必自己用 tail、head 截取。${timeoutText}${backgroundText}${heldText}`,
   };
+}
+
+// 决策 410：一直运行的进程怎么起——有后台作业时用后台作业（服务标保留）；非放到后台不可时先把输出重定向到文件
+export function heldOutputAdvice(platform: NodeJS.Platform, backgroundJobs: boolean): string {
+  const redirect = platform === "win32" ? "start /b 命令 > 文件 2>&1" : "命令 > 文件 2>&1 &";
+  return backgroundJobs
+    ? `一直运行的进程用 background: true 作为后台作业启动（服务、会话结束后还要用的进程再加 ${KEEP_AFTER_SESSION_PARAM}: true）；` +
+        `非放到后台不可时，先把输出重定向到文件（${redirect}）。`
+    : `一直运行的进程非放到后台不可时，先把输出重定向到文件（${redirect}）。`;
 }
 
 // 命令串 → 参数数组：空白切分；单引号内原样；双引号内只认 \" 与 \\ 两种转义；
@@ -489,7 +510,8 @@ export function createRunCommandTool(
     toolCallId: string,
     timeoutSeconds: number | undefined,
     inspection: CommandInspection,
-    plan: HostExecPlan
+    plan: HostExecPlan,
+    keep: boolean
   ): Promise<PigeonToolResult<ExecEvidence>> => {
     const { command, alias } = inspection;
     const jobs = options.jobs;
@@ -502,7 +524,14 @@ export function createRunCommandTool(
       );
     }
     const periodChanges = await periodObserver(host);
-    const job = await jobs.start({ command, plan, env, toolCallId, periodChanges });
+    const job = await jobs.start({
+      command,
+      plan,
+      env,
+      toolCallId,
+      periodChanges,
+      ...(keep ? { keep: true } : {}),
+    });
     const evidence: ExecEvidence = {
       command,
       ...(alias !== undefined ? { alias } : {}),
@@ -517,14 +546,18 @@ export function createRunCommandTool(
       output: "",
       truncated: false,
       fileChanges: { added: [], removed: [], modified: [], truncated: false },
-      background: { jobId: job.id, output: job.outputUri },
+      background: {
+        jobId: job.id,
+        output: job.outputUri,
+        ...(keep ? { keep: true as const } : {}),
+      },
     };
     return {
       content: [
         {
           type: "text",
           text: [
-            `已在后台启动作业 ${job.id}：$ ${command}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
+            `已在后台启动作业 ${job.id}${keep ? "（会话结束后保留）" : ""}：$ ${command}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
             jobOutputText(job),
             "用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉；作业结束时会通知你。",
           ].join("\n"),
@@ -576,7 +609,11 @@ export function createRunCommandTool(
       const inspection = inspect(parsed.command);
       const { command, alias } = inspection;
       const authorized = shellAuthorized.delete(toolCallId);
-      const timeoutMs = commandTimeoutMs(parsed.timeout_seconds, defaultTimeoutMs, maxTimeoutMs);
+      const { timeoutMs, clamped } = commandTimeout(
+        parsed.timeout_seconds,
+        defaultTimeoutMs,
+        maxTimeoutMs
+      );
       if (!permitted(inspection.input, command)) {
         const names = options.allowlist?.join("、") ?? "";
         throw new RunCommandError(
@@ -596,8 +633,19 @@ export function createRunCommandTool(
         throw new RunCommandError(tooLong);
       }
       const plan = spawnPlan(inspection, env, platform);
+      if (parsed.keep_after_session === true && parsed.background !== true) {
+        throw new RunCommandError(
+          `${KEEP_AFTER_SESSION_PARAM} 只用于后台作业：要同时给 background: true`
+        );
+      }
       if (parsed.background === true) {
-        return startBackground(toolCallId, parsed.timeout_seconds, inspection, plan);
+        return startBackground(
+          toolCallId,
+          parsed.timeout_seconds,
+          inspection,
+          plan,
+          parsed.keep_after_session === true
+        );
       }
       // 决策 356：截断时完整输出写进本会话落盘目录的下一个编号（没截断不建文件）；落盘目录不可用时照常执行、只是不落盘
       let slot: OutputSlot | undefined;
@@ -691,6 +739,7 @@ export function createRunCommandTool(
           ? { memoryLimitExceeded: run.memoryLimitExceeded }
           : {}),
         ...(backgroundJobs.length > 0 ? { backgroundJobs } : {}),
+        ...(clamped !== undefined ? { timeoutClamped: clamped } : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
@@ -700,8 +749,13 @@ export function createRunCommandTool(
         throw run.spawnError;
       }
       if (run.timedOut) {
+        // 决策 410：命令本身已退出、是它放到后台的进程占着输出才没结束的，点明原因并给出两种做法
+        const held =
+          run.outputHeldAfterExit === true
+            ? `命令本身已经退出，是它放到后台的进程仍占着输出，命令才没有结束。${heldOutputAdvice(platform, options.jobs?.available === true)}\n`
+            : "";
         throw new RunCommandTimeoutError(
-          `命令超时（${durationText(timeoutMs)}）已终止整个进程组：${command}\n${resultText(evidence, headBytes)}`
+          `命令超时（${durationText(timeoutMs)}）已终止整个进程组：${command}\n${held}${resultText(evidence, headBytes)}`
         );
       }
       if (signal?.aborted === true) {
@@ -722,15 +776,29 @@ export function durationText(ms: number): string {
   return ms % 1000 === 0 ? `${ms / 1000} 秒` : `${ms} 毫秒`;
 }
 
-// 本次命令的超时：给了 timeout_seconds 用它（超过上限即拒绝，免得模型以为设上了），否则用缺省
-function commandTimeoutMs(seconds: number | undefined, defaultMs: number, maxMs: number): number {
-  if (seconds === undefined) return defaultMs;
+// 本次命令的超时：给了 timeout_seconds 用它，否则用缺省。决策 411：超过上限按上限执行，交回夹取的情形（结果里注明，
+// 免得模型以为设上了）
+function commandTimeout(
+  seconds: number | undefined,
+  defaultMs: number,
+  maxMs: number
+): { timeoutMs: number; clamped?: NonNullable<ExecEvidence["timeoutClamped"]> } {
+  if (seconds === undefined) return { timeoutMs: defaultMs };
   if (seconds * 1000 > maxMs) {
-    throw new RunCommandError(
-      `timeout_seconds 至多 ${Math.floor(maxMs / 1000)}（给的是 ${seconds}）；更久的命令请用 background 在后台运行`
-    );
+    return {
+      timeoutMs: maxMs,
+      clamped: { requestedSeconds: seconds, appliedSeconds: Math.floor(maxMs / 1000) },
+    };
   }
-  return seconds * 1000;
+  return { timeoutMs: seconds * 1000 };
+}
+
+// 决策 411：夹取的说明一句
+function timeoutClampedText(clamped: NonNullable<ExecEvidence["timeoutClamped"]>): string {
+  return (
+    `timeout_seconds 给的是 ${clamped.requestedSeconds}，超过上限，已夹到上限 ${clamped.appliedSeconds} 秒执行；` +
+    "更久的命令请用 background 在后台运行"
+  );
 }
 
 function comspecOf(env: NodeJS.ProcessEnv): string {
@@ -827,6 +895,7 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
   const lines = [
     `$ ${evidence.command}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
     `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
+    ...(evidence.timeoutClamped !== undefined ? [timeoutClampedText(evidence.timeoutClamped)] : []),
     ...(evidence.memoryLimitExceeded !== undefined
       ? [memoryLimitText(evidence.memoryLimitExceeded)]
       : []),

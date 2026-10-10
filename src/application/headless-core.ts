@@ -41,6 +41,7 @@ import type { ThinkingLevel, TurnUsage } from "../state/runtime-events.ts";
 import { storeAttemptLabel, storeRunMetrics } from "../state/session-judge.ts";
 import type { BranchHeaderInput } from "../state/session-payloads.ts";
 import type { SettingsSnapshot } from "../state/settings.ts";
+import type { KeptJob } from "../tools/background-jobs.ts";
 import type { EditMode } from "../tools/edit-mode.ts";
 import type { WorkspaceHost } from "../tools/workspace-host.ts";
 import { settleBackgroundJobs } from "./background-jobs.ts";
@@ -204,6 +205,8 @@ export interface HeadlessRunResult extends HeadlessRunMetrics {
   label: OutcomeLabel;
   // 打转叫停时在场（307）：计数与重复的调用（收尾说明用）
   looping?: LoopStop;
+  // 决策 409：会话结束后保留中的后台作业（本会话与它派出的 worker 的；没有即缺省）。只在机器读的结果里列出
+  keptJobs?: KeptJob[];
 }
 
 export async function runHeadless(options: HeadlessRunOptions): Promise<HeadlessRunResult> {
@@ -484,7 +487,8 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
         }
       }
       const jobs = bundle.jobs;
-      if (stopped() && (jobs?.running().length ?? 0) > 0) {
+      // 决策 409：保留的作业不等，不算没等完
+      if (stopped() && (jobs?.toSettle().length ?? 0) > 0) {
         drainInterrupted = true;
       }
       // 运行没有正常结束（出错、中止）：不进收尾轮，作业随运行面释放停掉并记下，终态保持原样
@@ -496,7 +500,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
           stopped,
           closeoutMs: bundle.jobCloseoutMs,
         });
-        if (stopped() && jobs.running().length > 0) {
+        if (stopped() && jobs.toSettle().length > 0) {
           drainInterrupted = true;
         }
         if (last !== undefined) {
@@ -668,6 +672,13 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
   const sessionsDir = sessionsDirOf(options.governanceRoot);
   const outcome = readRunOutcome(sessionsDir, sessionId, toolTiers);
   const metrics = outcome.metrics;
+  // 决策 409：本次运行（主会话与派出的 worker）结束时保留下来的作业，取自整次运行共用的作业池
+  const runSessions = new Set<string>([
+    sessionId,
+    ...(workers?.status().map((worker) => worker.sessionId) ?? []),
+  ]);
+  const keptJobs =
+    liveBundle?.jobs?.pool.keptJobs().filter((job) => runSessions.has(job.sessionId)) ?? [];
   return {
     sessionId,
     status,
@@ -676,6 +687,7 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
     ...(status === "looping" && looping !== undefined ? { looping } : {}),
     durationMs: Date.now() - startedAt,
     ...(errorMessage !== undefined ? { errorMessage } : {}),
+    ...(keptJobs.length > 0 ? { keptJobs } : {}),
   };
 }
 

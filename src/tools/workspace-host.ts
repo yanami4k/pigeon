@@ -82,6 +82,8 @@ export interface HostExecResult {
   stderr: string;
   // 决策 333：命令因超出沙箱内存上限被杀（容器实现在设了内存上限时判定）
   memoryLimitExceeded?: MemoryLimitExceeded;
+  // 决策 410：超时那一刻命令本身（直接子进程）已经退出、是它的子孙仍占着输出才没结束（本机实现判定）
+  outputHeldAfterExit?: true;
 }
 
 // 超出内存上限：certain 为容器内存事件的 oom_kill 计数在命令前后增加；读不到计数、命令以 137 结束时为 false（可能）
@@ -170,6 +172,9 @@ export interface HostJobOptions {
   // 本作业的标记（RUN_MARKER_VAR 的值）
   marker: string;
   onOutput(chunk: Buffer): void;
+  // 决策 409：会话结束后保留的作业——两路输出直接写进 outputFd（追加打开的输出文件，不经 Pigeon 的管道，Pigeon 退出后
+  // 进程照样写得进去）；各平台都分离启动、不登记进程退出时的兜底终止，组长退出后不清扫组里的子孙（容器里同样不清扫）
+  keep?: { outputFd: number };
 }
 
 export interface HostJobExit {
@@ -199,6 +204,10 @@ export interface HostJob {
   done: Promise<HostJobExit>;
   kill(): Promise<void>;
   record(): Promise<JobProcessRecord | undefined>;
+  // 决策 409：本机作业的进程号（容器里的作业没有）
+  pid?: number;
+  // 决策 409：会话结束时交出保留的作业——不再让它拖住 Pigeon 进程退出（进程照常跑）
+  detach?(): void;
 }
 
 // 一次被观测的执行：命令的结果与命令前后的取证；超时、中止等拿不到命令后取证时 after 缺省（调用方另取）

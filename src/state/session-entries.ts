@@ -448,6 +448,16 @@ export const BackgroundJobStartedDataSchema = Type.Object({
   marker: Type.String({ minLength: 1 }),
   output: Type.String({ minLength: 1 }),
   toolCallId: Type.Optional(Type.String({ minLength: 1 })),
+  // 决策 409：会话结束后保留
+  keep: Type.Optional(Type.Literal(true)),
+});
+// 决策 409：会话结束时作业还在跑、标了保留，没有停（本机作业带进程号）
+export const BackgroundJobKeptDataSchema = Type.Object({
+  version: VERSION,
+  event: Type.Literal("kept"),
+  runId: Type.Optional(RunIdSchema),
+  jobId: JobIdSchema,
+  pid: Type.Optional(Type.Integer({ minimum: 1 })),
 });
 export const BackgroundJobEndedDataSchema = Type.Object({
   version: VERSION,
@@ -466,6 +476,7 @@ export const BackgroundJobEndedDataSchema = Type.Object({
 export const BackgroundJobDataSchema = Type.Union([
   BackgroundJobStartedDataSchema,
   BackgroundJobEndedDataSchema,
+  BackgroundJobKeptDataSchema,
 ]);
 export type BackgroundJobData = Static<typeof BackgroundJobDataSchema>;
 

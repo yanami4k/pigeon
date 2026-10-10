@@ -1,13 +1,13 @@
 // run_command 的说明按实际执行端与审批状态生成（170 ④）：执行端决定需要 shell 的命令经哪个 shell 运行，
 // 审批状态决定命令要不要人工批准；四处文字（登记描述、系统提示里的一句、开工状态块审批一节里命令的说法、工具说明）同出一源。
-// 决策 363：系统提示里的一句与审批无关，审批的说法在开工状态块
+// 决策 363：系统提示里的一句与审批无关，审批的说法在开工状态块。决策 409、410：一直运行的进程怎么起
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { createLocalWorkspaceHost } from "./local-host.ts";
-import { createRunCommandTool, runCommandTexts } from "./run-command.ts";
+import { createRunCommandTool, KEEP_AFTER_SESSION_PARAM, runCommandTexts } from "./run-command.ts";
 
 // 文字含有各区分片段（shell、审批状态等），不逐字比对整段
 function assertIncludesAll(text: string, fragments: readonly string[]): void {
@@ -72,4 +72,13 @@ test("工具说明取执行端的平台与传入的审批状态；不给审批�
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("决策 409、410：说明写明一直运行的进程用后台作业（服务标保留），非放到后台不可时先把输出重定向到文件", () => {
+  const withJobs = runCommandTexts({ platform: "linux", approval: "yolo", backgroundJobs: 2 }).tool;
+  assertIncludesAll(withJobs, [`${KEEP_AFTER_SESSION_PARAM}: true`, "> 文件 2>&1 &"]);
+  const withoutJobs = runCommandTexts({ platform: "linux", approval: "yolo" }).tool;
+  assertIncludesAll(withoutJobs, ["> 文件 2>&1 &"]);
+  assert.ok(!withoutJobs.includes(KEEP_AFTER_SESSION_PARAM), withoutJobs);
+  assertIncludesAll(runCommandTexts({ platform: "win32", approval: "yolo" }).tool, ["start /b"]);
 });

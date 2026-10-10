@@ -384,7 +384,7 @@ test.skipIf(LINUX ? false : "按 /proc 查杀")(
 );
 
 test.skipIf(LINUX ? false : "按 /proc 查杀")(
-  "容器里的后台作业：组长退出后，它放到后台的子孙随作业结束一并清掉",
+  "容器里的后台作业：组长退出后，它放到后台的子孙随作业结束一并清掉；标了会话结束后保留的不清扫",
   async () => {
     const h = counted();
     const state = mkdtempSync(join(tmpdir(), "pigeon-round-trips-jobs-"));
@@ -408,6 +408,17 @@ test.skipIf(LINUX ? false : "按 /proc 查杀")(
       await tool.execute("b", { command: "sh spawn-exit.sh", background: true }, undefined);
       assert.equal(await jobs.wait(jobs.get("j1"), 30_000), true);
       await until(() => !alive(Number(readFileSync(pidFile, "utf8"))));
+      // 决策 409：保留的作业，包装脚本不清扫
+      const keptFile = join(h.root, "kept.pid");
+      writeFileSync(join(h.root, "spawn-kept.sh"), `sleep 300 &\necho $! > '${keptFile}'\n`);
+      const args = { command: "sh spawn-kept.sh", background: true, keep_after_session: true };
+      await tool.execute("c", args, undefined);
+      assert.equal(await jobs.wait(jobs.get("j2"), 30_000), true);
+      const kept = Number(readFileSync(keptFile, "utf8"));
+      onTestFinished(() => {
+        process.kill(kept, "SIGKILL");
+      });
+      assert.ok(alive(kept));
     } finally {
       await jobs.killAll("aborted");
       h.cleanup();

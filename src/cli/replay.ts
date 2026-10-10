@@ -166,10 +166,13 @@ function itemDetail(item: ViewItem): string {
     case "prune":
       return pruneLine(item.data);
     case "background-job": {
-      // 决策 365：后台作业的启动与结束
+      // 决策 365：后台作业的启动与结束；决策 409：会话结束时保留
       const data = item.data;
+      if (data.event === "kept") {
+        return `后台作业保留 ｜ ${data.jobId}${data.pid !== undefined ? ` ｜ 进程号 ${data.pid}` : ""}`;
+      }
       return data.event === "started"
-        ? `后台作业启动 ｜ ${data.jobId} ｜ 命令 ${data.command}`
+        ? `后台作业启动 ｜ ${data.jobId} ｜ 命令 ${data.command}${data.keep === true ? " ｜ 会话结束后保留" : ""}`
         : `后台作业结束 ｜ ${data.jobId} ｜ ${data.state}${data.reason !== undefined ? `（${data.reason}）` : ""} ｜ 退出码 ${data.exitCode ?? "无"} ｜ 输出 ${data.outputBytes} 字节`;
     }
   }

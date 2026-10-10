@@ -479,6 +479,9 @@ function runLocalProcess(
   const stdoutOnly = createHeadCollector(streamCap);
   const stderrOnly = createHeadCollector(streamCap);
   let timedOut = false;
+  // 决策 410：直接子进程已退出（输出管道可能仍被它的子孙占着）；超时那一刻已退出的记下
+  let exited = false;
+  let heldAfterExit = false;
   const finish = (
     partial: Omit<
       HostExecResult,
@@ -487,6 +490,7 @@ function runLocalProcess(
   ): HostExecResult => ({
     ...partial,
     timedOut,
+    ...(heldAfterExit ? { outputHeldAfterExit: true as const } : {}),
     ...collected.finish(),
     stdout: stdoutOnly.finish().output,
     stderr: stderrOnly.finish().output,
@@ -546,6 +550,7 @@ function runLocalProcess(
     };
     const timer = setTimeout(() => {
       timedOut = true;
+      heldAfterExit = exited;
       terminate();
     }, options.timeoutMs);
     const onAbort = () => terminate();
@@ -557,6 +562,9 @@ function runLocalProcess(
     child.on("error", (error: NodeJS.ErrnoException) => {
       cleanup();
       settle(() => finish({ spawned: child.pid !== undefined, spawnError: error, exitCode: null }));
+    });
+    child.on("exit", () => {
+      exited = true;
     });
     child.on("close", (code, signal) => {
       cleanup();
@@ -574,8 +582,12 @@ function runLocalProcess(
 // 决策 365：本机后台作业。Linux/macOS 以独立进程组拉起、停止时对整组发 SIGKILL；Windows 停止时杀进程树。环境里带标记
 // （崩溃后清理时核对）。组长退出后，组里（Windows 为进程树里）还有它放到后台的子孙（x &、nohup）的照样杀掉，确认清空
 // 之后作业才算结束（记录随之删掉，这些子孙不会逃过停止与崩溃清理）；仍占着输出管道的，宽限过后销毁管道。Pigeon 正常
-// 退出时与其他子进程一同终止（process-tree.ts 的兜底）
+// 退出时与其他子进程一同终止（process-tree.ts 的兜底）。
+// 决策 409：会话结束后保留的作业另作三处安排，免得被任何一条清理路径带走：①各平台都分离启动（Linux/macOS 本来就是独立
+// 进程组，Windows 不进 Node 的"父进程退出即终止"作业对象）；②不登记进程退出时的兜底终止（trackChild）；③组长退出后不清扫
+// 组里（进程树里）的子孙。两路输出直接写进输出文件，Pigeon 退出后进程写输出不会碰到断掉的管道。job_kill 照常整组停掉
 function startLocalJob(plan: HostExecPlan, cwd: string, options: HostJobOptions): HostJob {
+  const keep = options.keep;
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(plan.program, plan.args, {
@@ -584,8 +596,9 @@ function startLocalJob(plan: HostExecPlan, cwd: string, options: HostJobOptions)
       shell: false,
       windowsHide: true,
       windowsVerbatimArguments: plan.verbatim,
-      ...processGroupSpawnOptions(),
-      stdio: ["ignore", "pipe", "pipe"],
+      ...(keep !== undefined ? { detached: true } : processGroupSpawnOptions()),
+      stdio:
+        keep !== undefined ? ["ignore", keep.outputFd, keep.outputFd] : ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
     const exit: HostJobExit = { exitCode: null, spawnError: error as NodeJS.ErrnoException };
@@ -595,7 +608,7 @@ function startLocalJob(plan: HostExecPlan, cwd: string, options: HostJobOptions)
       record: async () => undefined,
     };
   }
-  trackChild(child);
+  if (keep === undefined) trackChild(child);
   child.stdout?.on("data", (chunk: Buffer) => options.onOutput(chunk));
   child.stderr?.on("data", (chunk: Buffer) => options.onOutput(chunk));
   const done = new Promise<HostJobExit>((resolve) => {
@@ -620,6 +633,12 @@ function startLocalJob(plan: HostExecPlan, cwd: string, options: HostJobOptions)
     });
     child.on("exit", (code, signal) => {
       exited = { exitCode: code, ...(signal !== null ? { signal } : {}) };
+      if (keep !== undefined) {
+        // 保留的作业：组长退出即结束，它放到后台的子孙留着
+        swept = true;
+        ready();
+        return;
+      }
       const pid = child.pid;
       void (pid !== undefined ? sweepProcessGroup(pid) : Promise.resolve()).then(() => {
         swept = true;
@@ -646,6 +665,8 @@ function startLocalJob(plan: HostExecPlan, cwd: string, options: HostJobOptions)
     },
     record: async () =>
       child.pid === undefined ? undefined : localProcessRecord(child.pid, options.marker),
+    ...(child.pid !== undefined ? { pid: child.pid } : {}),
+    detach: () => child.unref(),
   };
 }
 

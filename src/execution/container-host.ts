@@ -125,16 +125,18 @@ const KILL_MARKED_FUNCTION = [
 ].join("\n");
 // 按标记杀（经 trustedShell 执行）：$1 为标记值，$2 非空时连观测脚本一起杀
 export const KILL_MARKED_SCRIPT = [KILL_MARKED_FUNCTION, 'km "$1" "$2"', "exit 0"].join("\n");
-// 决策 365：后台作业的包装（agent 命令的执行通道，不经 trustedShell）：$1 为标记，其后为程序与参数。setsid 与 env 从系统
-// 目录解析，命令以原来的 PATH、空标准输入、带标记的环境另起进程组（没有 setsid 时不另起组，仍按标记查杀），等它结束；
-// 它放到后台还占着输出的子孙（x &、nohup）随即按组与标记杀掉，作业结束时不留进程。以它的退出码结束
+// 决策 365：后台作业的包装（agent 命令的执行通道，不经 trustedShell）：$1 为标记，$2 非空为会话结束后保留的作业（决策 409），
+// 其后为程序与参数。setsid 与 env 从系统目录解析，命令以原来的 PATH、空标准输入、带标记的环境另起进程组（没有 setsid 时
+// 不另起组，仍按标记查杀），等它结束；它放到后台还占着输出的子孙（x &、nohup）随即按组与标记杀掉，作业结束时不留进程——
+// 保留的作业不清扫，子孙留着。以它的退出码结束
 const JOB_SCRIPT = [
   KILL_MARKED_FUNCTION,
-  'R="$1"; shift',
+  'R="$1"; K="$2"; shift 2',
   `S="$(PATH="${SYSTEM_PATH}:$PATH"; command -v setsid 2>/dev/null)"`,
   `E="$(PATH="${SYSTEM_PATH}:$PATH"; command -v env 2>/dev/null)" || E=env`,
   `if [ -n "$S" ]; then "$S" "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & else "$E" -- "${RUN_MARKER_VAR}=$R" "$@" </dev/null & fi`,
   'c=$!; wait "$c"; rc=$?',
+  '[ -n "$K" ] && exit "$rc"',
   'kill -s KILL -- "-$c" 2>/dev/null',
   `( PATH="${SYSTEM_PATH}:$PATH"; km "$R" )`,
   'exit "$rc"',
@@ -998,16 +1000,28 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
 
   // 决策 365：后台作业——docker exec 客户端一直连着、把输出交回宿主；停止时按标记杀容器里的进程组与子孙，客户端在宽限内
-  // 没结束再断开
+  // 没结束再断开。决策 409：保留的作业——客户端分离启动、两路输出直接写进输出文件，包装脚本不清扫子孙
   const startJob = (plan: HostExecPlan, jobOptions: HostJobOptions): HostJob => {
     lastInspection = undefined;
     const marker = jobOptions.marker;
+    const keep = jobOptions.keep;
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(
         dockerProgram,
-        execArgs(false, ["/bin/sh", "-c", JOB_SCRIPT, "sh", marker, plan.program, ...plan.args]),
-        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+        execArgs(false, [
+          "/bin/sh",
+          "-c",
+          JOB_SCRIPT,
+          "sh",
+          marker,
+          keep !== undefined ? "keep" : "",
+          plan.program,
+          ...plan.args,
+        ]),
+        keep !== undefined
+          ? { stdio: ["ignore", keep.outputFd, keep.outputFd], windowsHide: true, detached: true }
+          : { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
       );
     } catch (error) {
       const exit: HostJobExit = { exitCode: null, spawnError: error as NodeJS.ErrnoException };
@@ -1035,6 +1049,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         await done;
       },
       record: async () => ({ kind: "container", container: options.container, marker }),
+      detach: () => child.unref(),
     };
   };
 
